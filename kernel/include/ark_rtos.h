@@ -8,6 +8,7 @@
 #include <ark_service.h>
 #include <ark_svc.h>
 #include <ark_debug.h>
+#include <ark_types.h>
 
 
 
