@@ -157,6 +157,10 @@
 #define ARKRTOS_DEV_MAX_NUM         (8)
 #endif
 
+#ifndef ARKRTOS_MEMPOOL_NUM
+#define ARKRTOS_MEMPOOL_NUM         (4)
+#endif
+
 #ifndef ARKRTOS_MQ_NUM
 #define ARKRTOS_MQ_NUM              (8)
 #endif

@@ -55,6 +55,9 @@
 #if ARKRTOS_USE_SOFTBUS
 #include "arkrtos_softbus.h"
 #endif
+#if ARKRTOS_USE_MEMPOOL
+#include "arkrtos_mempool.h"
+#endif
 #include "arkrtos_crash.h"
 #include "arkrtos_partition.h"
 #include "arkrtos_version.h"
@@ -1681,6 +1684,166 @@ static int cmd_log(int argc, char *argv[])
 /* ============================================================
  * pool：池内还能装下多少（与 SVC 0x12 子命令 5 同一数据源）
  * ============================================================ */
+#if ARKRTOS_USE_MEMPOOL
+
+#define MPOOL_TEST_BLOCKS      (4u)
+#define MPOOL_TEST_BLOCK_SIZE  (32u)
+
+static int mpool_show_all(void)
+{
+    int32 i;
+    int   n = 0;
+    arkrtos_mempool_stat_t st;
+
+    ark_shell_printf("\r\nmemory pools (fixed-block)\r\n");
+    for(i = 0; i < ARKRTOS_MEMPOOL_NUM; i++)
+    {
+        if(arkrtos_mempool_is_alive(i) == 0)
+        {
+            continue;
+        }
+        if(arkrtos_mempool_query_internal(i, &st) != 0)
+        {
+            continue;
+        }
+        n++;
+        ark_shell_printf("  #%d %-8s block %u B x %u  free %u  used %u (peak %u)"
+                         "  alloc %u  fail %u  bad-free %u\r\n",
+                         (int)i, st.name,
+                         (unsigned)st.block_size, (unsigned)st.block_count,
+                         (unsigned)st.free_count,
+                         (unsigned)(st.block_count - st.free_count),
+                         (unsigned)st.peak_used,
+                         (unsigned)st.alloc_ok, (unsigned)st.alloc_fail,
+                         (unsigned)st.free_bad);
+    }
+    if(n == 0)
+    {
+        ark_shell_printf("  (no pool)\r\n");
+    }
+    return 0;
+}
+
+static int mpool_selftest(void)
+{
+    static uint8 buf[MPOOL_TEST_BLOCKS * MPOOL_TEST_BLOCK_SIZE];
+    void  *blk[MPOOL_TEST_BLOCKS + 1];
+    int32  h = -1;
+    uint32 i;
+    int    checks = 0;
+    int    fails  = 0;
+    arkrtos_mempool_stat_t st;
+
+    ark_shell_printf("\r\nmempool selftest (fixed-block pool)\r\n");
+
+    for(i = 0; i < (MPOOL_TEST_BLOCKS + 1u); i++)
+    {
+        blk[i] = 0;
+    }
+
+    checks++;
+    h = arkrtos_mempool_create_internal("mptest", buf,
+                                        MPOOL_TEST_BLOCK_SIZE, MPOOL_TEST_BLOCKS);
+    if(h < 0) { fails++; ark_shell_printf("  FAIL create\r\n"); }
+    else      { ark_shell_printf("  ok   create\r\n"); }
+
+    if(h < 0)
+    {
+        goto done;
+    }
+
+    for(i = 0; i < MPOOL_TEST_BLOCKS; i++)
+    {
+        blk[i] = arkrtos_mempool_alloc_internal(h);
+    }
+    checks++;
+    for(i = 0; i < MPOOL_TEST_BLOCKS; i++)
+    {
+        if(blk[i] == 0) { break; }
+    }
+    if(i < MPOOL_TEST_BLOCKS)
+    { fails++; ark_shell_printf("  FAIL alloc all (%u/%u)\r\n", (unsigned)i, (unsigned)MPOOL_TEST_BLOCKS); }
+    else
+    { ark_shell_printf("  ok   alloc all %u blocks\r\n", (unsigned)MPOOL_TEST_BLOCKS); }
+
+    checks++;
+    blk[MPOOL_TEST_BLOCKS] = arkrtos_mempool_alloc_internal(h);
+    if(blk[MPOOL_TEST_BLOCKS] != 0)
+    { fails++; ark_shell_printf("  FAIL exhaust (empty pool handed out a block)\r\n"); }
+    else
+    { ark_shell_printf("  ok   exhaust -> 0\r\n"); }
+
+    checks++;
+    if(arkrtos_mempool_query_internal(h, &st) != 0)
+    { fails++; ark_shell_printf("  FAIL query\r\n"); }
+    else if((st.free_count != 0u) || (st.alloc_fail != 1u))
+    { fails++; ark_shell_printf("  FAIL stats free=%u fail=%u\r\n", (unsigned)st.free_count, (unsigned)st.alloc_fail); }
+    else
+    { ark_shell_printf("  ok   stats free=0 fail=1\r\n"); }
+
+    checks++;
+    if(arkrtos_mempool_free_internal(h, blk[0]) != 0)
+    { fails++; ark_shell_printf("  FAIL free\r\n"); }
+    else if(arkrtos_mempool_alloc_internal(h) != blk[0])
+    { fails++; ark_shell_printf("  FAIL reuse (did not hand back the same block)\r\n"); }
+    else
+    { ark_shell_printf("  ok   free + reuse same block\r\n"); }
+
+    checks++;
+    if(arkrtos_mempool_free_internal(h, (void *)(buf + sizeof(buf))) == 0)
+    { fails++; ark_shell_printf("  FAIL reject out-of-range free\r\n"); }
+    else if(arkrtos_mempool_free_internal(h, (void *)(buf + 1u)) == 0)
+    { fails++; ark_shell_printf("  FAIL reject misaligned free\r\n"); }
+    else
+    { ark_shell_printf("  ok   reject bad free\r\n"); }
+
+    checks++;
+    if(arkrtos_mempool_create_internal("mptest", buf,
+                                       MPOOL_TEST_BLOCK_SIZE, MPOOL_TEST_BLOCKS) >= 0)
+    { fails++; ark_shell_printf("  FAIL reject duplicate name\r\n"); }
+    else
+    { ark_shell_printf("  ok   reject duplicate name\r\n"); }
+
+    checks++;
+    if(arkrtos_mempool_create_internal("mpbad", buf, 1u, 4u) >= 0)
+    { fails++; ark_shell_printf("  FAIL reject tiny block\r\n"); }
+    else
+    { ark_shell_printf("  ok   reject tiny block\r\n"); }
+
+done:
+    if(h >= 0)
+    {
+        for(i = 0; i < MPOOL_TEST_BLOCKS; i++)
+        {
+            if(blk[i] != 0) { (void)arkrtos_mempool_free_internal(h, blk[i]); blk[i] = 0; }
+        }
+        checks++;
+        if(arkrtos_mempool_delete_internal(h) != 0)
+        { fails++; ark_shell_printf("  FAIL delete\r\n"); }
+        else if(arkrtos_mempool_is_alive(h) != 0)
+        { fails++; ark_shell_printf("  FAIL alive after delete\r\n"); }
+        else
+        { ark_shell_printf("  ok   delete\r\n"); }
+    }
+
+    ark_shell_printf("\r\nmempool selftest: checks %d, failed %d -- %s\r\n",
+                     checks, fails, (fails == 0) ? "ALL PASS" : "FAIL");
+    return (fails == 0) ? 0 : -1;
+}
+
+static int cmd_mpool(int argc, char *argv[])
+{
+    const char *sub = (argc >= 2) ? argv[1] : "list";
+
+    if(strcmp(sub, "list") == 0) { return mpool_show_all(); }
+    if(strcmp(sub, "test") == 0) { return mpool_selftest(); }
+
+    ark_shell_printf("\r\nusage: mpool [list | test]\r\n");
+    return -1;
+}
+
+#endif /* ARKRTOS_USE_MEMPOOL */
+
 static int cmd_pool(int argc, char *argv[])
 {
     uint32 largest = 0u;
@@ -4810,7 +4973,7 @@ static int register_kernel_commands(void)
     int idx = g_cmd_count;
     /* Upper bound with every optional feature compiled in.  Kept above the
      * real count so a future command cannot silently overflow g_cmd_table. */
-    int need = 46;
+    int need = 47;
 
     if((idx + need) > ARK_SHELL_MAX_COMMANDS)
     {
@@ -4918,6 +5081,11 @@ static int register_kernel_commands(void)
         "Soft bus (ark_softbus): bus [info | selftest | pump [n] | peers | rx |"
         " pub <topic> <text> | rpc <text> | stream <n>]", 4);
 #endif /* ARKRTOS_USE_SOFTBUS */
+
+#if ARKRTOS_USE_MEMPOOL
+    g_cmd_table[idx++] = ARK_SHELL_CMD("mpool", cmd_mpool,
+        "Fixed-block memory pools: mpool [list | test]", 2);
+#endif /* ARKRTOS_USE_MEMPOOL */
 
     g_cmd_table[idx++] = ARK_SHELL_CMD("ps", cmd_ps,
         "List kernel tasks and installed images", 1);

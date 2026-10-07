@@ -974,6 +974,11 @@
               <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_mq.c</FilePath>
             </File>
             <File>
+              <FileName>arkrtos_mempool.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_mempool.c</FilePath>
+            </File>
+            <File>
               <FileName>arkrtos_net.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_net.c</FilePath>

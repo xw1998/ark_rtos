@@ -32,6 +32,7 @@
 #include "arkrtos_dev.h"
 #include "arkrtos_sync.h"
 #include "arkrtos_mq.h"
+#include "arkrtos_mempool.h"
 #include "arkrtos_timer.h"
 #include "arkrtos_fault.h"
 #include "arkrtos_mpu.h"
@@ -44,6 +45,7 @@ void arkrtos_kernel_module_init(void)
     arkrtos_event_module_init();
     arkrtos_sync_module_init();
     arkrtos_mq_module_init();
+    arkrtos_mempool_module_init();
     arkrtos_timer_module_init();
     arkrtos_fault_module_init();
     arkrtos_dev_module_init();

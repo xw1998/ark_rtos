@@ -85,6 +85,13 @@
  *       设备框架、POSIX 层、加载器都建立在它们之上，关掉会连锁。
  * ============================================================ */
 
+/* 固定块内存池（arkrtos_mempool.c）。内核不拥有堆，长时间运行的组件
+ * （将来的 socket 请求、加载器暂存）需要一块"不会碎"的内存时用它。
+ * 池的存储区由调用者提供，模块只维护对象表（ARKRTOS_MEMPOOL_NUM 项）。 */
+#ifndef ARKRTOS_USE_MEMPOOL
+#define ARKRTOS_USE_MEMPOOL             1
+#endif
+
 /* 消息队列（SVC 0x16） */
 #ifndef ARKRTOS_USE_MQ
 #define ARKRTOS_USE_MQ                  1
