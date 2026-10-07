@@ -31,7 +31,7 @@ upgraded on their own, which opens up a capability line nobody else has:
 | Privilege model | All code has the same privilege (MPU usually off) | Tasks run unprivileged and trap into the kernel through SVC; the MPU isolates each task and hardware stops out-of-bounds access on the spot |
 | An application stuck in a fault loop | Watchdog resets the whole device | A crash journal survives resets; three consecutive crashes disable **that slot only**, everything else keeps running |
 | Uninstalling | Not a concept | Invalidate the image, erase the physical unit once it is free, `pool free` goes back from 776244 B to 786432 B |
-| Replacing a version while running | Stop and restart | Two mini apps hand the control loop over; the iteration counter stays continuous, the measured gap is 27-407 ms |
+| Replacing a version while running | Stop and restart | Two mini apps hand the control loop over; the iteration counter stays continuous; handover gaps over four runs: **27 / 31 / 224 / 407 ms** (worst 407 ms, criterion < 1000 ms) |
 | Porting existing C code | Rewrite against the RTOS API | A POSIX / Windows compatibility layer: edit the include list and it builds for the board |
 
 > This table only compares the dynamic-installation storyline. Ecosystem, protocol stacks and
