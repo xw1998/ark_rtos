@@ -1049,6 +1049,11 @@
               <FilePath>..\..\..\..\..\kernelsrc\shell\ark_shell\ark_shell_commands.c</FilePath>
             </File>
             <File>
+              <FileName>ark_shell_eval.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\..\..\kernelsrc\shell\ark_shell\ark_shell_eval.c</FilePath>
+            </File>
+            <File>
               <FileName>ark_shell_history.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\..\..\..\..\kernelsrc\shell\ark_shell\ark_shell_history.c</FilePath>

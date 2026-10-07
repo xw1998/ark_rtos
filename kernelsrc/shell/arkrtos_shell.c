@@ -25,6 +25,7 @@
 
 #include "ark_shell.h"
 #include "ark_shell_commands.h"
+#include "ark_shell_eval.h"
 #include "platform.h"
 
 #include "arkrtos_config.h"
@@ -2983,7 +2984,7 @@ static int vfs_usage(void)
     sh_out("  mount <dev> <off> <size> <target>   mount a window of <dev>\r\n");
     sh_out("  umount <target>           drop a mount point\r\n");
     sh_out("  ls [path]                 list a directory, default /\r\n");
-    sh_out("  cat <path>                print a file\r\n");
+    sh_out("  cat [path]                print a file, or standard input\r\n");
     sh_out("  rm <path>                 remove a file\r\n");
     sh_out("  off/size are decimal; size 0 means to the end of the device\r\n");
     return -1;
@@ -3214,9 +3215,37 @@ static int cmd_vfs_cat(int argc, char *argv[])
     uint32 total = 0u;
     uint32 i;
 
-    if(argc != 2)
+    if(argc > 2)
     {
         return vfs_usage();
+    }
+
+    if(argc == 1)
+    {
+        /* No path: read standard input, the way cat does on a POSIX system.
+         * The stream is a pipe or a '<' redirection; there is no interactive
+         * stdin to wait on, so an empty stream just yields nothing. */
+        int c;
+
+        sh_out("\r\n");
+        while((c = ark_shell_stdin_getc()) >= 0)
+        {
+            if(c == '\n')
+            {
+                sh_out("\r\n");
+            }
+            else if((c >= 0x20) && (c < 0x7F))
+            {
+                ark_shell_printf("%c", (char)c);
+            }
+            else
+            {
+                ark_shell_printf("\\x%02X", (unsigned)c);
+            }
+            total++;
+        }
+        ark_shell_printf("\r\n%u bytes\r\n", (unsigned)total);
+        return 0;
     }
 
     if(shell_vfs_path(argv[1], vpath, sizeof(vpath)) != 0)
@@ -4084,7 +4113,7 @@ static int register_kernel_commands(void)
     g_cmd_table[idx++] = ARK_SHELL_CMD("ls", cmd_vfs_ls,
         "List a directory in the VFS namespace: ls [path]", 2);
     g_cmd_table[idx++] = ARK_SHELL_CMD("cat", cmd_vfs_cat,
-        "Print a file from the VFS namespace: cat <path>", 2);
+        "Print a file, or standard input: cat [path]", 2);
     g_cmd_table[idx++] = ARK_SHELL_CMD("rm", cmd_vfs_rm,
         "Remove a file from the VFS namespace: rm <path>", 2);
 #endif /* ARKRTOS_USE_VFS */

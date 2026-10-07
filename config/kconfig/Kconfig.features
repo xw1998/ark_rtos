@@ -167,6 +167,29 @@ config ARKRTOS_SHELL_PROMPT_LINUX
 	  directory (cd / pwd) with Linux relative-path handling.  Off falls
 	  back to the plain "ark> " prompt with no working directory.
 
+config ARKRTOS_SHELL_REDIRECT
+	bool "Shell operators: quotes, ; && ||, | pipe, > >> < redirect"
+	default y
+	help
+	  Parse the input line the way a POSIX shell does: quotes and
+	  backslash escapes, command sequences (; && ||), pipelines (|)
+	  and file redirection (>, >>, <).  A pipeline runs
+	  store-and-forward through a RAM buffer, so a stage whose output
+	  does not fit the buffer fails loudly instead of being silently
+	  truncated.  Off leaves the plain whitespace split, and the
+	  operators are then ordinary characters.
+
+config ARKRTOS_SHELL_REDIRECT_BUF
+	int "Redirect / pipeline capture buffer (bytes per slot)"
+	depends on ARKRTOS_SHELL_REDIRECT
+	default 1024
+	range 128 8192
+	help
+	  Size of each of the two capture buffers a pipeline alternates
+	  between.  Both live in the kernel RAM window; a board with a
+	  tight budget lowers this, or turns ARKRTOS_SHELL_REDIRECT off
+	  in its project file (-DARKRTOS_SHELL_REDIRECT=0).
+
 endmenu
 
 menu "Reliability and operations"

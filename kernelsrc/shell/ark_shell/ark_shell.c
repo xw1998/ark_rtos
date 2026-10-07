@@ -15,6 +15,7 @@
 #include "ark_shell_history.h"
 #include "ark_shell_commands.h"
 #include "ark_shell_autocomplete.h"
+#include "ark_shell_eval.h"
 #include "ark_shell_config.h"
 #include "platform.h"
 
@@ -138,45 +139,6 @@ static void shell_show_prompt(ark_shell_t *shell)
 }
 
 /* ============================================================
- * shell_tokenize - Tokenize a line string into argv array
- *
- * Parameters:
- *   line  - input string (modified in-place: spaces replaced with '\0')
- *   argv  - output argv array (array of pointers)
- *   max   - argv array capacity
- * Returns: argc (argument count, including command name itself)
- * ============================================================ */
-static int shell_tokenize(char *line, char *argv[], int max)
-{
-    int argc = 0;
-    char *p  = line;
-
-    if (line == NULL || argv == NULL || max <= 0) {
-        return 0;
-    }
-
-    while (*p != '\0' && argc < max) {
-        /* Skip leading spaces/tabs */
-        while (*p == ' ' || *p == '\t') {
-            p++;
-        }
-        if (*p == '\0') {
-            break;
-        }
-        argv[argc++] = p;
-        /* Skip current token */
-        while (*p != '\0' && *p != ' ' && *p != '\t') {
-            p++;
-        }
-        if (*p != '\0') {
-            *p = '\0';  /* Split */
-            p++;
-        }
-    }
-    return argc;
-}
-
-/* ============================================================
  * ark_shell_init - Initialize Shell
  * ============================================================ */
 void ark_shell_init(ark_shell_t *shell, uint32_t baudrate)
@@ -231,15 +193,6 @@ void ark_shell_init(ark_shell_t *shell, uint32_t baudrate)
 void ark_shell_execute_line(ark_shell_t *shell)
 {
     char *line;
-    char *argv[ARK_SHELL_MAX_ARGS];
-    char *xargv[ARK_SHELL_MAX_ARGS];
-    int   argc;
-    int   xargc;
-    int   i;
-    const ark_shell_cmd_t *cmd;
-    const char *alias_target;
-    const char *alias_a1;
-    const char *alias_a2;
 
     if (shell == NULL) {
         return;
@@ -250,83 +203,11 @@ void ark_shell_execute_line(ark_shell_t *shell)
     /* Add to history (empty lines are skipped) */
     history_add(&shell->history, line);
 
-    /* Tokenize */
-    argc = shell_tokenize(line, argv, ARK_SHELL_MAX_ARGS);
-
     shell_send_newline();
 
-    if (argc == 0) {
-        /* Empty line: just show prompt */
-        shell_show_prompt(shell);
-        return;
-    }
-
-    /* Alias expansion: "ll" -> "ls -l", "cls" -> "clear", etc. */
-    alias_target = ark_shell_alias_target(argv[0], &alias_a1, &alias_a2);
-    if (alias_target != NULL) {
-        xargc = 0;
-        xargv[xargc++] = (char *)alias_target;
-        if (alias_a1 != NULL) xargv[xargc++] = (char *)alias_a1;
-        if (alias_a2 != NULL) xargv[xargc++] = (char *)alias_a2;
-        for (i = 1; i < argc && xargc < ARK_SHELL_MAX_ARGS; i++) {
-            xargv[xargc++] = argv[i];
-        }
-    } else {
-        for (i = 0; i < argc && i < ARK_SHELL_MAX_ARGS; i++) {
-            xargv[i] = argv[i];
-        }
-        xargc = argc;
-    }
-
-    /* "$?" expansion: a lone "$?" becomes the previous command's status. */
-    for (i = 0; i < xargc; i++) {
-        if (strcmp(xargv[i], "$?") == 0) {
-            xargv[i] = shell->status_str;
-        }
-    }
-
-    /* Lookup command */
-    cmd = ark_shell_find_command(xargv[0]);
-    if (cmd == NULL) {
-        platform_console_begin();
-#if ARK_SHELL_ENABLE_COLOR
-        platform_uart_send_string(ARK_SHELL_COLOR_ERROR);
-#endif
-        platform_uart_send_string(xargv[0]);
-        platform_uart_send_string(": command not found\r\n");
-#if ARK_SHELL_ENABLE_COLOR
-        platform_uart_send_string(ARK_SHELL_COLOR_RESET);
-#endif
-        platform_console_end();
-        shell_set_status(shell, 127);
-    } else if ((xargc >= 2) &&
-               (strcmp(xargv[1], "-h") == 0 || strcmp(xargv[1], "--help") == 0)) {
-        /* Linux habit: "<cmd> --help" prints that command's help. */
-        platform_console_begin();
-        platform_uart_send_string(xargv[0]);
-        platform_uart_send_string(" - ");
-        platform_uart_send_string(cmd->help);
-        platform_uart_send_string("\r\n");
-        platform_console_end();
-        shell_set_status(shell, 0);
-    } else if (cmd->max_args > 0 && xargc > cmd->max_args) {
-        char msg[96];
-        (void)snprintf(msg, sizeof(msg), "%s: too many arguments (max %d)\r\n",
-                       xargv[0], cmd->max_args);
-        platform_console_begin();
-#if ARK_SHELL_ENABLE_COLOR
-        platform_uart_send_string(ARK_SHELL_COLOR_ERROR);
-#endif
-        platform_uart_send_string(msg);
-#if ARK_SHELL_ENABLE_COLOR
-        platform_uart_send_string(ARK_SHELL_COLOR_RESET);
-#endif
-        platform_console_end();
-        shell_set_status(shell, 1);
-    } else {
-        /* Execute command */
-        shell_set_status(shell, cmd->func(xargc, xargv));
-    }
+    /* ark_shell_eval_line() takes over from here: quoting, command
+     * sequences, pipelines and redirection all live in ark_shell_eval.c. */
+    (void)ark_shell_eval_line(shell, line);
 
     /* Clear editor, prepare for next line */
     line_editor_clear(&shell->editor);

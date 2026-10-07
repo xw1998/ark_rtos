@@ -34,6 +34,18 @@ extern "C" {
 #define ARKRTOS_SHELL_PROMPT_LINUX    1
 #endif
 
+/* Shell operators: quotes and escapes, command sequences (; && ||),
+ * pipelines (|) and file redirection (> >> <).  Defaulted on here so
+ * the framework still builds when no Kconfig header is generated. */
+#ifndef ARKRTOS_SHELL_REDIRECT
+#define ARKRTOS_SHELL_REDIRECT        1
+#endif
+
+/* Bytes per capture slot; a pipeline alternates two of them. */
+#ifndef ARKRTOS_SHELL_REDIRECT_BUF
+#define ARKRTOS_SHELL_REDIRECT_BUF    1024
+#endif
+
 /* Identity shown in the Linux-style prompt, and the working-directory limits. */
 #define ARK_SHELL_USER                "ark"
 #define ARK_SHELL_HOSTNAME            "arkrtos"

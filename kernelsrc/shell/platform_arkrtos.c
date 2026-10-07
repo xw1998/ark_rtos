@@ -19,6 +19,9 @@
 */
 
 #include "platform.h"
+#include "ark_shell/ark_shell_eval.h"
+
+#include <string.h>
 
 #include "arkrtos_config.h"
 #include "arkrtos_dev.h"
@@ -42,6 +45,20 @@ static uart_mode_t g_uart_mode  = UART_MODE_IRQ;
  * nested with the per call locking done by the send helpers. */
 static uint32 g_console_hold_ok    = 0u;
 static uint32 g_console_hold_depth = 0u;
+
+/* While a shell pipeline stage or a '>' redirection is running, the
+ * port diverts its console writes into the shell's capture buffer.
+ * Kernel log output never passes through this file, so it is never
+ * captured: the log keeps reaching the console inside a pipeline. */
+static int shell_out_capture(const unsigned char *p, uint32 n)
+{
+    if(ark_shell_capture_active() == 0)
+    {
+        return 0;
+    }
+
+    return ark_shell_capture_put(p, n);
+}
 
 void platform_uart_init(uint32_t baudrate)
 {
@@ -98,6 +115,11 @@ void platform_uart_send(unsigned char byte)
         return;
     }
 
+    if(shell_out_capture(&byte, 1u) != 0)
+    {
+        return;
+    }
+
     /* Single byte echo: only one byte can appear, but it still must
      * not land inside somebody else's line. */
     if(console_needs_lock() != 0u)
@@ -122,6 +144,11 @@ void platform_uart_send_string(const char *str)
     int32 held = 0;
 
     if((str == 0) || (g_shell_uart < 0))
+    {
+        return;
+    }
+
+    if(shell_out_capture((const unsigned char *)str, (uint32)strlen(str)) != 0)
     {
         return;
     }
@@ -158,6 +185,11 @@ void platform_uart_send_buf(const unsigned char *buf, uint16_t len)
     int32    held = 0;
 
     if((buf == 0) || (g_shell_uart < 0))
+    {
+        return;
+    }
+
+    if(shell_out_capture(buf, (uint32)len) != 0)
     {
         return;
     }
