@@ -7,6 +7,7 @@
 *   1. a backend - ark_vfs_backend_t over arkrtos_blk_dev_t
 *   2. hooks     - a lock and a millisecond clock out of the kernel
 *   3. devfs     - optional, but it is what makes the namespace Linux-like
+*   4. procfs    - read-only kernel state at /proc, also mounted by port_init
 *
 * Everything below is written so that the same source also compiles against
 * the mock headers in ports/arkrtos/tests/, which is how the offset
@@ -370,6 +371,21 @@ int32_t ark_vfs_port_init(void)
      * device holds a filesystem, and guessing would produce a mount that
      * looks fine and fails on the first read. */
     rc = ark_vfs_mount("devfs", "/dev", &ark_vfs_arkrtos_devfs, NULL, 0u, NULL);
+    if (rc != ARK_VFS_OK)
+    {
+        return rc;
+    }
+
+#if (ARKRTOS_USE_PROCFS == 1)
+    /* /proc is generated from the kernel, so like /dev it needs nothing from
+     * the caller.  Mounted ARK_MNT_RO: every file is produced on read and
+     * nothing under it can be created or written, and saying so at the core
+     * means a stray open-for-write is refused there rather than deep in a
+     * driver that has no write callback. */
+    rc = ark_vfs_mount("procfs", "/proc", &ark_vfs_arkrtos_procfs, NULL,
+                       ARK_MNT_RO, NULL);
+#endif
+
     return rc;
 }
 

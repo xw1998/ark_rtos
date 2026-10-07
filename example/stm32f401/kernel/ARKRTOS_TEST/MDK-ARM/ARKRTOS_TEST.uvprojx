@@ -449,6 +449,11 @@
                 <FileType>1</FileType>
                 <FilePath>..\..\..\..\..\kernelsrc\components\ark_vfs\port\ark_vfs_devfs.c</FilePath>
               </File>
+              <File>
+                <FileName>ark_vfs_procfs.c</FileName>
+                <FileType>1</FileType>
+                <FilePath>..\..\..\..\..\kernelsrc\components\ark_vfs\port\ark_vfs_procfs.c</FilePath>
+              </File>
             </Files>
           </Group>
         <Group>

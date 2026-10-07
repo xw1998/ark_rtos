@@ -136,6 +136,14 @@
 #define ARKRTOS_USE_VFS_LFS             1
 #endif
 
+/* 内核状态虚拟文件系统 /proc（components/ark_vfs 的 procfs 端口驱动）：
+ * 只读、扁平，把 version/uptime/meminfo/cpuinfo/tasks 暴露成 /proc/<name>。
+ * 内容每次读取时现从内核生成，不占存储、不持缓冲；由 ark_vfs_port_init()
+ * 以 ARK_MNT_RO 挂到 /proc。依赖 ARKRTOS_USE_VFS：它是命名空间里的一个挂载点。 */
+#ifndef ARKRTOS_USE_PROCFS
+#define ARKRTOS_USE_PROCFS              1
+#endif
+
 /* 内核 Shell 控制台（SVC 0x1A）的开关不在这里，而是沿用既有的
  * SHELL_ENABLE（config/arkrtos_partition.h）；arkrtos_shell.c 的整文件门控
  * 与关闭时的空实现早已就位。不要在此再定义第二个 shell 开关：两个名字
@@ -262,6 +270,10 @@
 
 #if ARKRTOS_USE_VFS_LFS && !ARKRTOS_USE_FS
 #error "ARKRTOS_USE_VFS_LFS=1 requires ARKRTOS_USE_FS=1 (the bridge drives the arkrtos_fs volume)"
+#endif
+
+#if ARKRTOS_USE_PROCFS && !ARKRTOS_USE_VFS
+#error "ARKRTOS_USE_PROCFS=1 requires ARKRTOS_USE_VFS=1 (/proc is a mount inside the VFS namespace)"
 #endif
 
 /* lwIP 端口层建在消息队列上（sys_arch.c 的邮箱就是 arkrtos_mq），

@@ -84,6 +84,11 @@ typedef struct {
 
 #if (ARKRTOS_USE_CPU_LOAD == 1)
 extern uint16 arkrtos_cpu_busy_ticks;
+/* Cumulative ticks the idle task (task id 0) was on the CPU since boot.
+ * Added for /proc/uptime's idle field, which must report a real measurement
+ * rather than a fabricated zero.  Gated with CPU_LOAD: idle time is the
+ * complement of the busy sample this feature already takes. */
+extern uint32 arkrtos_idle_ticks;
 #endif
 
 extern volatile uint32 arkrtos_interrupt_nest;

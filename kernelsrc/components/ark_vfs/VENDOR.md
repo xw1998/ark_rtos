@@ -6,10 +6,10 @@
 | 项 | 值 |
 |---|---|
 | 来源 | `D:/工作/git_project/ark_vfs` |
-| 源 commit | `05235146ead8d473af46ed8c402c226ab5979eaf` |
+| 源 commit | `11a143fc9a9f1123f20763e45e8332fe64fa15fd` |
 | 工作区 | 干净 |
 | 同步日期 | 2026-10-07 |
-| 文件数 | 10 |
+| 文件数 | 11 |
 
 复制范围：`include/` → `include/`、`src/` → `src/`、
 `ports/arkrtos/` → `port/`。

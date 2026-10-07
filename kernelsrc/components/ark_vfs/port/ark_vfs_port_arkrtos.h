@@ -93,6 +93,12 @@ int32_t ark_vfs_port_init(void);
 /** @brief The Ark RTOS device registry as a flat /dev: /dev/<name>. */
 extern const ark_vfs_fsdrv_t ark_vfs_arkrtos_devfs;
 
+/** @brief Kernel state as a flat read-only /proc: /proc/<name>.
+ *  Content is generated from the live kernel on every read; see
+ *  ark_vfs_procfs.c for the file list.  Mounted read-only by
+ *  ark_vfs_port_init() so a stray write is refused at the core. */
+extern const ark_vfs_fsdrv_t ark_vfs_arkrtos_procfs;
+
 #ifdef __cplusplus
 }
 #endif

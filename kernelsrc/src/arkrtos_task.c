@@ -345,6 +345,7 @@ volatile uint32 arkrtos_sched_lock_nest = 0;
 #if (ARKRTOS_USE_CPU_LOAD == 1)
 uint16 arkrtos_cpu_load_counter = 0;
 uint16 arkrtos_cpu_busy_ticks = 0;   /* busy ticks of the last 1024-tick window */
+uint32 arkrtos_idle_ticks = 0;       /* cumulative ticks the idle task was on the CPU */
 #endif
 
 static uint32 arkrtos_idle_stack_ptr = 0;
@@ -383,6 +384,10 @@ void arkrtos_kernel_tick_handler(void)
     if(arkrtos_current_task_id > 0)
     {
         arkrtos_cpu_load_counter++;
+    }
+    else
+    {
+        arkrtos_idle_ticks++;
     }
     #endif
     #if (ARKRTOS_USE_TIMER == 1)
