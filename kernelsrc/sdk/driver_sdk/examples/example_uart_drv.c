@@ -1,0 +1,127 @@
+/* Ark RTOS Driver SDK - UART example driver.
+ *
+ * Skeleton driver that shows how a device object is laid out and how the
+ * arkrtos_dev_drv_t entry table is filled in. The interrupt-handling part is
+ * chip-specific: the RX ring buffer is filled by the UART RX interrupt, and
+ * every TODO marks the place where the chip-specific code belongs.
+ *
+ * UART_DRV_MAX_INST instances are supported, 2 by default.
+ */
+
+#include "arkrtos_driver_sdk.h"
+
+#define UART_DRV_MAX_INST   2
+#define UART_RX_BUF_SIZE    64
+
+typedef struct {
+    arkrtos_dev_hdr_t hdr;
+    uint32  uart_id;                    /* instance id */
+    uint32  baudrate;                   /* baud rate in bps */
+    uint8   opened;                     /* nonzero once opened */
+    uint8   rx_buf[UART_RX_BUF_SIZE];   /* RX ring buffer, filled by the ISR */
+    uint16  rx_head;
+    uint16  rx_tail;
+} uart_dev_obj_t;
+
+static uart_dev_obj_t uart_objs[UART_DRV_MAX_INST];
+
+static arkrtos_dev_hdr_t *uart_drv_open(uint32 dev_id, uint32 param)
+{
+    uart_dev_obj_t *p;
+    if(dev_id >= UART_DRV_MAX_INST)
+        return 0;
+
+    p = &uart_objs[dev_id];
+    p->uart_id        = dev_id;
+    p->baudrate       = param ? param : 115200;
+    p->hdr.block_size = 1;
+    p->rx_head        = 0;
+    p->rx_tail        = 0;
+    p->opened         = 1;
+
+    /* TODO(chip): bring up the UART:
+     * - configure the TX/RX pins
+     * - program the baud rate from p->baudrate
+     * - enable the RX interrupt and connect it to the ring buffer above */
+
+    return (arkrtos_dev_hdr_t *)p;
+}
+
+static int32 uart_drv_close(arkrtos_dev_hdr_t *obj)
+{
+    uart_dev_obj_t *p = (uart_dev_obj_t *)obj;
+    p->opened = 0;
+    /* TODO(chip): release the UART and disable its RX interrupt */
+    return ARKRTOS_DRV_OK;
+}
+
+static int32 uart_drv_read(arkrtos_dev_hdr_t *obj, uint8 *pdata, int32 len)
+{
+    uart_dev_obj_t *p = (uart_dev_obj_t *)obj;
+    int32 cnt = 0;
+
+    if(pdata == 0 || len <= 0)
+        return ARKRTOS_DRV_INVALID_PARAM;
+    if(!p->opened)
+        return ARKRTOS_DRV_ERROR;
+
+    /* drain the ring buffer; the producer is the UART RX interrupt */
+    while(cnt < len && p->rx_head != p->rx_tail)
+    {
+        pdata[cnt++] = p->rx_buf[p->rx_tail];
+        p->rx_tail = (p->rx_tail + 1) % UART_RX_BUF_SIZE;
+    }
+    return cnt;
+}
+
+static int32 uart_drv_write(arkrtos_dev_hdr_t *obj, uint8 *pdata, int32 len)
+{
+    uart_dev_obj_t *p = (uart_dev_obj_t *)obj;
+    int32 cnt;
+
+    if(pdata == 0 || len <= 0)
+        return ARKRTOS_DRV_INVALID_PARAM;
+    if(!p->opened)
+        return ARKRTOS_DRV_ERROR;
+
+    for(cnt = 0; cnt < len; cnt++)
+    {
+        /* TODO(chip): wait for room in the TX FIFO, then write pdata[cnt]:
+         * while(!(UARTx->SR & TXE)); UARTx->DR = pdata[cnt]; */
+        (void)pdata;
+    }
+    return len;
+}
+
+static int32 uart_drv_ctrl(arkrtos_dev_hdr_t *obj, uint32 code, uint32 value)
+{
+    uart_dev_obj_t *p = (uart_dev_obj_t *)obj;
+    switch(code)
+    {
+    case ARKRTOS_DEV_CTRL_SET_BAUD:
+        p->baudrate = value;
+        /* TODO(chip): reprogram the baud rate divider */
+        return ARKRTOS_DRV_OK;
+    case ARKRTOS_DEV_CTRL_GET_STATUS:
+        return (int32)p->baudrate;
+    case ARKRTOS_DEV_CTRL_RESET:
+        p->rx_head = 0;
+        p->rx_tail = 0;
+        return ARKRTOS_DRV_OK;
+    default:
+        return ARKRTOS_DRV_ERROR;
+    }
+}
+
+static arkrtos_dev_drv_t uart_drv = {
+    uart_drv_open,
+    uart_drv_close,
+    uart_drv_read,
+    uart_drv_write,
+    uart_drv_ctrl
+};
+
+int32 uart_drv_install(void)
+{
+    return arkrtos_drv_register("COM1", &uart_drv, 0);
+}

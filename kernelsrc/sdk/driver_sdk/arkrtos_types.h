@@ -1,0 +1,27 @@
+/**
+* @brief Ark RTOS Driver SDK 基础类型定义
+* @details 为 Driver SDK 提供与内核一致的基础整型别名，
+*          不含任何 MCU 头文件与 OS 依赖，驱动可独立编译。
+*          定义与 kernelsrc/include/arkrtos_types.h 保持一致。
+*/
+
+#ifndef __ARKRTOS_TYPES_H__
+#define __ARKRTOS_TYPES_H__
+
+typedef unsigned long  uint32;
+typedef signed   long  int32;
+typedef unsigned short uint16;
+typedef signed   short int16;
+typedef unsigned char  uint8;
+typedef signed   char  int8;
+
+
+
+/* Toolchain-independent weak-symbol attribute (AC5 vs AC6/GCC/Clang). */
+#if defined(__CC_ARM)
+#define ARKRTOS_WEAK __weak
+#else
+#define ARKRTOS_WEAK __attribute__((weak))
+#endif
+
+#endif

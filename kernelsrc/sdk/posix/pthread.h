@@ -1,0 +1,161 @@
+/**
+* @file pthread.h
+* @brief POSIX threads for Ark RTOS Apps.
+* @details Ark RTOS has threads, a scheduler and synchronization, but no user
+*          mode way to create a thread: a thread needs a TCB and a scheduler
+*          slot, and only the kernel owns those. pthread_create therefore goes
+*          through the thread service (SVC 0x1B) added for this purpose.
+*
+*          Two things a POSIX program may expect are absent on purpose,
+*          because the kernel cannot honour them and pretending would be a
+*          silent lie:
+*            - no priority inheritance on mutexes (the kernel mutex does
+*              inherit, but a POSIX program cannot observe or set it),
+*            - no condition variables (they need a kernel wait queue with a
+*              signal/broadcast primitive that does not exist yet).
+*
+* @author xw
+*/
+#ifndef __ARKRTOS_PTHREAD_H__
+#define __ARKRTOS_PTHREAD_H__
+
+#include "arkrtos_posix_types.h"
+
+/* Thread-specific data (pthread_key_*) and pthread_once.  Kept behind a
+ * switch because a program that never uses them should not pay for the
+ * static pointer table arkrtos_posix.c keeps for them. */
+#ifndef ARKRTOS_POSIX_PTHREAD_KEY
+#define ARKRTOS_POSIX_PTHREAD_KEY  1
+#endif
+
+typedef uint32 arkrtos_pthread_t;
+#define ARKRTOS_PTHREAD_NULL  ((arkrtos_pthread_t)0)
+
+/** Thread attributes. Anything left at 0 takes the built-in default, so a
+ *  plain pthread_create(t, NULL, fn, arg) call needs no attributes at all. */
+typedef struct
+{
+    void  *stackaddr;   /* 0 = take a stack from the SDK pool            */
+    uint32 stacksize;   /* bytes, 0 = ARKRTOS_POSIX_STACK_WORDS * 4        */
+    uint32 priority;    /* kernel priority, 0 = ARKRTOS_POSIX_DEFAULT_PRIO */
+    uint32 period_ms;   /* 0 = event driven (blocks until it waits)      */
+} arkrtos_pthread_attr_t;
+
+typedef arkrtos_pthread_attr_t pthread_attr_t;
+typedef arkrtos_pthread_t      pthread_t;
+
+typedef struct
+{
+    int32 handle;       /* kernel mutex handle, -1 = not created yet */
+} arkrtos_pthread_mutex_t;
+
+typedef arkrtos_pthread_mutex_t pthread_mutex_t;
+
+#define PTHREAD_MUTEX_INITIALIZER  { -1 }
+
+int  arkrtos_posix_pthread_attr_init(arkrtos_pthread_attr_t *attr);
+int  arkrtos_posix_pthread_create(arkrtos_pthread_t *thread,
+                                const arkrtos_pthread_attr_t *attr,
+                                void *(*start_routine)(void *), void *arg);
+int  arkrtos_posix_pthread_join(arkrtos_pthread_t thread, void **retval);
+void arkrtos_posix_pthread_exit(void *retval);
+arkrtos_pthread_t arkrtos_posix_pthread_self(void);
+
+int  arkrtos_posix_mutex_init(arkrtos_pthread_mutex_t *m);
+int  arkrtos_posix_mutex_destroy(arkrtos_pthread_mutex_t *m);
+int  arkrtos_posix_mutex_lock(arkrtos_pthread_mutex_t *m);
+int  arkrtos_posix_mutex_trylock(arkrtos_pthread_mutex_t *m);
+int  arkrtos_posix_mutex_unlock(arkrtos_pthread_mutex_t *m);
+
+#define pthread_attr_init(a)        arkrtos_posix_pthread_attr_init(a)
+#define pthread_create(t, a, f, g)  arkrtos_posix_pthread_create((t), (a), (f), (g))
+#define pthread_join(t, r)          arkrtos_posix_pthread_join((t), (r))
+#define pthread_exit(r)             arkrtos_posix_pthread_exit(r)
+#define pthread_self()              arkrtos_posix_pthread_self()
+#define pthread_mutex_init(m, a)    arkrtos_posix_mutex_init(m)
+#define pthread_mutex_destroy(m)    arkrtos_posix_mutex_destroy(m)
+#define pthread_mutex_lock(m)       arkrtos_posix_mutex_lock(m)
+#define pthread_mutex_trylock(m)    arkrtos_posix_mutex_trylock(m)
+#define pthread_mutex_unlock(m)     arkrtos_posix_mutex_unlock(m)
+
+#define pthread_cond_init(c, a)         arkrtos_posix_cond_init(c)
+#define pthread_cond_destroy(c)         arkrtos_posix_cond_destroy(c)
+#define pthread_cond_wait(c, m)         arkrtos_posix_cond_wait((c), (m))
+#define pthread_cond_timedwait(c, m, t) arkrtos_posix_cond_timedwait((c), (m), (t))
+#define pthread_cond_signal(c)          arkrtos_posix_cond_signal(c)
+#define pthread_cond_broadcast(c)       arkrtos_posix_cond_broadcast(c)
+
+/* Condition variable: a kernel object bound on first use, so
+ * PTHREAD_COND_INITIALIZER works exactly like the mutex one. */
+typedef struct
+{
+    int32 handle;       /* kernel cond handle, -1 = not created yet */
+} arkrtos_pthread_cond_t;
+
+typedef arkrtos_pthread_cond_t pthread_cond_t;
+
+#define PTHREAD_COND_INITIALIZER  { -1 }
+
+int  arkrtos_posix_cond_init(arkrtos_pthread_cond_t *c);
+int  arkrtos_posix_cond_destroy(arkrtos_pthread_cond_t *c);
+int  arkrtos_posix_cond_wait(arkrtos_pthread_cond_t *c, arkrtos_pthread_mutex_t *m);
+int  arkrtos_posix_cond_timedwait(arkrtos_pthread_cond_t *c, arkrtos_pthread_mutex_t *m,
+                                const struct timespec *abstime);
+int  arkrtos_posix_cond_signal(arkrtos_pthread_cond_t *c);
+int  arkrtos_posix_cond_broadcast(arkrtos_pthread_cond_t *c);
+
+/* One row per POSIX thread slot, for the App side shell dump.  Plain data,
+ * no printing: the App decides how to show it. */
+typedef struct
+{
+    uint32 in_use;
+    int32  task_id;          /* kernel task id, -1 once the thread left */
+    int32  gate;             /* start gate handle                        */
+    int32  done;             /* completion handle                        */
+} arkrtos_pth_dbg_t;
+
+/* Copies ARKRTOS_POSIX_THREAD_MAX rows into out.  Returns 0 on success. */
+int32 arkrtos_posix_pth_dbg_slots(arkrtos_pth_dbg_t *out);
+
+extern volatile int32 arkrtos_posix_pth_dbg_claim;   /* slot claimed by task id */
+extern volatile int32 arkrtos_posix_pth_dbg_boot;    /* claimed via boot_slot   */
+extern volatile int32 arkrtos_posix_pth_dbg_lost;    /* gave up: no slot to be  */
+extern volatile int32 arkrtos_posix_pth_dbg_post;    /* trampoline posted done  */
+extern volatile int32 arkrtos_posix_pth_dbg_exit;    /* pthread_exit() posted   */
+
+
+#if (ARKRTOS_POSIX_PTHREAD_KEY == 1)
+
+/* ---- thread-specific data (TLS) -----------------------------------------
+ * pthread_key_* maps onto a static per-App table, keyed by the thread slot
+ * this layer hands out (pthread_self() returns slot + 1; 0 is the App main
+ * task).  No kernel object is involved, so no new SVC either.
+ */
+typedef uint32 arkrtos_pthread_key_t;
+typedef arkrtos_pthread_key_t pthread_key_t;
+#define ARKRTOS_POSIX_KEY_MAX   (8u)
+
+int  arkrtos_posix_key_create(pthread_key_t *key, void (*destructor)(void *));
+int  arkrtos_posix_key_delete(pthread_key_t key);
+int  arkrtos_posix_setspecific(pthread_key_t key, const void *value);
+void *arkrtos_posix_getspecific(pthread_key_t key);
+
+#define pthread_key_create(k, d)   arkrtos_posix_key_create((k), (d))
+#define pthread_key_delete(k)      arkrtos_posix_key_delete(k)
+#define pthread_setspecific(k, v)  arkrtos_posix_setspecific((k), (v))
+#define pthread_getspecific(k)     arkrtos_posix_getspecific(k)
+
+/* pthread_once: runs init_routine exactly once, on the first caller.  The
+ * body runs with the scheduler lock held, so on a single core a second
+ * caller cannot observe "started but not finished".  init_routine must not
+ * block (it may neither sleep nor wait on a kernel object). */
+typedef uint32 arkrtos_pthread_once_t;
+typedef arkrtos_pthread_once_t pthread_once_t;
+#define PTHREAD_ONCE_INIT  0u
+
+int  arkrtos_posix_once(pthread_once_t *once_control, void (*init_routine)(void));
+#define pthread_once(o, f)  arkrtos_posix_once((o), (f))
+
+#endif /* ARKRTOS_POSIX_PTHREAD_KEY */
+
+#endif /* __ARKRTOS_PTHREAD_H__ */

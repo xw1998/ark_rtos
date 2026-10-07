@@ -1,0 +1,300 @@
+/**
+* @brief Ark RTOS 设备驱动框架实现
+* @details 提供统一的设备驱动接口和动态驱动注册机制
+*          内置驱动和可安装驱动共用同一套设备表
+* @author xw
+* @date 2026.05.03
+*/
+
+#include "arkrtos_dev.h"
+
+static arkrtos_dev_desc_t arkrtos_dev_list[ARKRTOS_DEV_MAX_NUM];
+static arkrtos_dev_hdr_t *arkrtos_dev_handles[ARKRTOS_DEV_MAX_NUM];
+static uint8 arkrtos_dev_refs[ARKRTOS_DEV_MAX_NUM];
+static int32 arkrtos_dev_count = 0;
+
+void arkrtos_dev_module_init(void)
+{
+    int32 i;
+    for(i = 0; i < ARKRTOS_DEV_MAX_NUM; i++)
+    {
+        arkrtos_dev_list[i].dev_name[0] = 0;
+        arkrtos_dev_list[i].drv = 0;
+        arkrtos_dev_list[i].dev_num = 0;
+        arkrtos_dev_handles[i] = 0;
+        arkrtos_dev_refs[i]    = 0;
+    }
+    arkrtos_dev_count = 0;
+}
+
+int32 arkrtos_dev_register(const char *name, arkrtos_dev_drv_t *drv, uint32 dev_num)
+{
+    int32 i;
+    int32 slot = -1;
+
+    if(name == 0 || drv == 0)
+        return -2;
+
+    /* 空槽位以 dev_name[0]==0 标记。注销设备时只清空槽位、不移动数组元素：
+     * 设备句柄就是槽位下标（i | ARKRTOS_DEV_HANDLE_FLAG），一旦移动，
+     * 已发放的句柄就会指向另一个设备。 */
+    for(i = 0; i < ARKRTOS_DEV_MAX_NUM; i++)
+    {
+        int32 j;
+        uint8 match = 1;
+
+        if(arkrtos_dev_list[i].dev_name[0] == 0)
+        {
+            if(slot < 0 && arkrtos_dev_handles[i] == 0)
+            {
+                slot = i;
+            }
+            continue;
+        }
+
+        for(j = 0; j < 8; j++)
+        {
+            if(arkrtos_dev_list[i].dev_name[j] != name[j])
+            {
+                match = 0;
+                break;
+            }
+            if(name[j] == 0)
+                break;
+        }
+        if(match)
+            return -2;
+    }
+
+    if(slot < 0)
+        return -1;
+
+    for(i = 0; i < 7; i++)
+    {
+        arkrtos_dev_list[slot].dev_name[i] = name[i];
+        if(name[i] == 0)
+            break;
+    }
+    arkrtos_dev_list[slot].dev_name[7] = 0;
+    arkrtos_dev_list[slot].drv = drv;
+    arkrtos_dev_list[slot].dev_num = dev_num;
+    arkrtos_dev_count++;
+    return 0;
+}
+
+int32 arkrtos_dev_unregister(const char *name)
+{
+    int32 i, j;
+    if(name == 0)
+        return -1;
+
+    for(i = 0; i < ARKRTOS_DEV_MAX_NUM; i++)
+    {
+        uint8 match = 1;
+
+        if(arkrtos_dev_list[i].dev_name[0] == 0)
+        {
+            continue;                       /* 空槽位 */
+        }
+
+        for(j = 0; j < 8; j++)
+        {
+            if(arkrtos_dev_list[i].dev_name[j] != name[j])
+            {
+                match = 0;
+                break;
+            }
+            if(name[j] == 0)
+                break;
+        }
+        if(match)
+        {
+            /* 墓碑式清空：保持槽位下标不变，已发放的句柄仍指向原槽位，
+             * 此时该槽位 drv==0 / handles==0，后续读写会安全地返回 -1，
+             * 而不是（像整体前移那样）指向另一个设备。 */
+            arkrtos_dev_list[i].dev_name[0] = 0;
+            arkrtos_dev_list[i].drv         = 0;
+            arkrtos_dev_list[i].dev_num     = 0;
+            arkrtos_dev_handles[i]          = 0;
+            arkrtos_dev_refs[i]             = 0;
+            if(arkrtos_dev_count > 0)
+            {
+                arkrtos_dev_count--;
+            }
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int32 arkrtos_dev_get_count(void)
+{
+    return arkrtos_dev_count;
+}
+
+int32 arkrtos_dev_name_at(uint32 idx, char *out, uint32 max)
+{
+    uint32 i;
+    if(out == 0 || max == 0u)
+    {
+        return -1;
+    }
+    out[0] = 0;
+    if(idx >= (uint32)ARKRTOS_DEV_MAX_NUM)
+    {
+        return -1;
+    }
+    if(arkrtos_dev_list[idx].dev_name[0] == 0)
+    {
+        return -1;
+    }
+    for(i = 0; i + 1u < max; i++)
+    {
+        out[i] = arkrtos_dev_list[idx].dev_name[i];
+        if(out[i] == 0)
+        {
+            break;
+        }
+    }
+    out[max - 1u] = 0;
+    return 0;
+}
+
+int32 arkrtos_dev_open_internal(char *name, uint32 param)
+{
+    int32 i;
+    /* 槽位可能不连续（注销留下的空槽位），必须遍历整个表 */
+    for(i = 0; i < ARKRTOS_DEV_MAX_NUM; i++)
+    {
+        int32 j;
+        uint8 match = 1;
+        if(arkrtos_dev_list[i].dev_name[0] == 0)
+        {
+            continue;
+        }
+        for(j = 0; j < 8; j++)
+        {
+            if(arkrtos_dev_list[i].dev_name[j] != name[j])
+            {
+                match = 0;
+                break;
+            }
+            if(name[j] == 0)
+                break;
+        }
+        /* Already open: hand back the same instance and only count the
+         * new opener. Calling drv_open a second time re-initialises the
+         * hardware and installs a fresh instance, which silently orphans
+         * the handle the first opener still holds - an App opening the
+         * console UART used to leave the kernel shell unable to receive
+         * input for good. */
+        if(match && (arkrtos_dev_handles[i] != 0))
+        {
+            if(arkrtos_dev_refs[i] < 255)
+            {
+                arkrtos_dev_refs[i]++;
+            }
+            return (i | ARKRTOS_DEV_HANDLE_FLAG);
+        }
+
+        if(match && arkrtos_dev_list[i].drv != 0 && arkrtos_dev_list[i].drv->drv_open != 0)
+        {
+            arkrtos_dev_hdr_t *p = arkrtos_dev_list[i].drv->drv_open(arkrtos_dev_list[i].dev_num, param);
+            if(p != 0)
+            {
+                arkrtos_dev_handles[i] = p;
+                arkrtos_dev_refs[i]    = 1;
+                return (i | ARKRTOS_DEV_HANDLE_FLAG);
+            }
+        }
+    }
+    return -1;
+}
+
+int32 arkrtos_dev_close_internal(int32 handle)
+{
+    int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
+
+    if(ARKRTOS_DEV_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+        return -1;
+    /* 句柄是槽位下标：合法范围是整个设备表，而不是当前在用数量 */
+    if(idx < 0 || idx >= ARKRTOS_DEV_MAX_NUM)
+        return -1;
+
+    /* One instance can have several openers: only the last close may
+     * touch the hardware. Otherwise an App closing the console it shares
+     * with the shell would take the shell's console away. */
+    if(arkrtos_dev_refs[idx] > 1)
+    {
+        arkrtos_dev_refs[idx]--;
+        return 0;
+    }
+    arkrtos_dev_refs[idx] = 0;
+
+    if(arkrtos_dev_list[idx].drv != 0 && arkrtos_dev_list[idx].drv->drv_close != 0)
+    {
+        int32 ret = arkrtos_dev_list[idx].drv->drv_close(arkrtos_dev_handles[idx]);
+        arkrtos_dev_handles[idx] = 0;
+        return ret;
+    }
+
+    arkrtos_dev_handles[idx] = 0;
+    return 0;
+}
+
+int32 arkrtos_dev_read_internal(int32 handle, uint8 *pdata, int32 len)
+{
+    int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
+
+    if(ARKRTOS_DEV_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+        return -1;
+    /* 句柄是槽位下标：合法范围是整个设备表，而不是当前在用数量 */
+    if(idx < 0 || idx >= ARKRTOS_DEV_MAX_NUM)
+        return -1;
+    if(arkrtos_dev_handles[idx] == 0)
+        return -1;
+
+    if(arkrtos_dev_list[idx].drv != 0 && arkrtos_dev_list[idx].drv->drv_read != 0)
+    {
+        return arkrtos_dev_list[idx].drv->drv_read(arkrtos_dev_handles[idx], pdata, len);
+    }
+    return -1;
+}
+
+int32 arkrtos_dev_write_internal(int32 handle, uint8 *pdata, int32 len)
+{
+    int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
+
+    if(ARKRTOS_DEV_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+        return -1;
+    /* 句柄是槽位下标：合法范围是整个设备表，而不是当前在用数量 */
+    if(idx < 0 || idx >= ARKRTOS_DEV_MAX_NUM)
+        return -1;
+    if(arkrtos_dev_handles[idx] == 0)
+        return -1;
+
+    if(arkrtos_dev_list[idx].drv != 0 && arkrtos_dev_list[idx].drv->drv_write != 0)
+    {
+        return arkrtos_dev_list[idx].drv->drv_write(arkrtos_dev_handles[idx], pdata, len);
+    }
+    return -1;
+}
+
+int32 arkrtos_dev_ctrl_internal(int32 handle, uint32 code, uint32 value)
+{
+    int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
+
+    if(ARKRTOS_DEV_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+        return -1;
+    /* 句柄是槽位下标：合法范围是整个设备表，而不是当前在用数量 */
+    if(idx < 0 || idx >= ARKRTOS_DEV_MAX_NUM)
+        return -1;
+    if(arkrtos_dev_handles[idx] == 0)
+        return -1;
+
+    if(arkrtos_dev_list[idx].drv != 0 && arkrtos_dev_list[idx].drv->drv_ctrl != 0)
+    {
+        return arkrtos_dev_list[idx].drv->drv_ctrl(arkrtos_dev_handles[idx], code, value);
+    }
+    return -1;
+}

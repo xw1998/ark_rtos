@@ -1,0 +1,36 @@
+/**
+* @file mqueue.h
+* @brief POSIX message queues for Ark RTOS Apps.
+* @details Backed by the kernel message queue service (SVC 0x16). Queues are
+*          named and shared, so mq_open of an existing name simply returns the
+*          handle; there is no filesystem to hang the name off.
+*          Message length is in WORDS, matching the kernel contract, because
+*          a word is the unit the kernel copies - saying "bytes" here would
+*          be a quieter, and wrong, promise.
+* @author xw
+*/
+#ifndef __ARKRTOS_MQUEUE_H__
+#define __ARKRTOS_MQUEUE_H__
+
+#include "arkrtos_posix_types.h"
+
+#define MQ_FAILED  (-1)
+
+typedef int32 arkrtos_mqd_t;
+
+/* The POSIX spelling of the descriptor type. */
+typedef arkrtos_mqd_t mqd_t;
+
+arkrtos_mqd_t arkrtos_posix_mq_open(const char *name, int oflag);
+int  arkrtos_posix_mq_close(arkrtos_mqd_t mqdes);
+int  arkrtos_posix_mq_unlink(const char *name);
+int  arkrtos_posix_mq_send(arkrtos_mqd_t mqdes, const void *msg, uint32 len_words);
+int  arkrtos_posix_mq_receive(arkrtos_mqd_t mqdes, void *msg, uint32 len_words, uint32 timeout_ms);
+
+#define mq_open(n, f)              arkrtos_posix_mq_open((n), (f))
+#define mq_close(q)                arkrtos_posix_mq_close(q)
+#define mq_unlink(n)               arkrtos_posix_mq_unlink(n)
+#define mq_send(q, m, l)           arkrtos_posix_mq_send((q), (m), (l))
+#define mq_receive(q, m, l, t)     arkrtos_posix_mq_receive((q), (m), (l), (t))
+
+#endif /* __ARKRTOS_MQUEUE_H__ */

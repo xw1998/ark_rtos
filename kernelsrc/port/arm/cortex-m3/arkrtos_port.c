@@ -1,0 +1,506 @@
+/**
+* @brief Ark RTOS Cortex-M3 架构适配层
+* @details 实现 arkrtos_hal.h 中声明的所有架构相关函数。
+*          Cortex-M3 无FPU、MPU可选。
+*          此文件仅依赖CMSIS核心头文件，不依赖任何厂商HAL库。
+* @author xw
+* @date 2026.05.03
+*/
+
+#include "arkrtos_hal.h"
+#include "arkrtos_task.h"
+#include "arkrtos_config.h"
+
+#ifdef ARKRTOS_BOARD_CONFIG
+#include ARKRTOS_BOARD_CONFIG
+#endif
+
+/* ============================================================
+ * CPU指令层
+ * ============================================================ */
+void arkrtos_port_wfi(void)  { __WFI(); }
+void arkrtos_port_wfe(void)  { __WFE(); }
+void arkrtos_port_nop(void)  { __NOP(); }
+void arkrtos_port_isb(void)  { __ISB(); }
+void arkrtos_port_dsb(void)  { __DSB(); }
+void arkrtos_port_dmb(void)  { __DMB(); }
+
+/* ============================================================
+ * 原子操作与多核支持（自旋锁底层原语）
+ * @brief Cortex-M3/M4 使用 LDREX/STREX 独占访问实现原子 CAS。
+ *        单核系统 CPU ID 恒为 0；自旋提示用 NOP 降低总线压力。
+ *        移植到 RISC-V / LoongArch 时，请用 AMO / LR-SC / LL-SC
+ *        指令重写本组接口，内核与自旋锁实现无需任何改动。
+ * ============================================================ */
+
+/**
+* @brief 比较并交换（原子操作）
+* @param p_addr    目标地址（4 字节对齐）
+* @param expect    期望值
+* @param new_value 期望成立时写入的新值
+* @return 1=成功，0=当前值不是 expect（未修改）
+*/
+uint32 arkrtos_port_atomic_cas(volatile uint32 *p_addr, uint32 expect, uint32 new_value)
+{
+    uint32 old;
+
+    do
+    {
+        old = __LDREXW((volatile uint32 *)p_addr);
+        if(old != expect)
+        {
+            __CLREX();
+            return 0u;
+        }
+    } while(__STREXW(new_value, (volatile uint32 *)p_addr) != 0u);
+
+    return 1u;
+}
+
+/**
+* @brief 获取当前 CPU 编号
+* @return 单核 MCU 固定返回 0，多核移植时返回硬件核号
+*/
+uint32 arkrtos_port_cpu_id(void)
+{
+    return 0u;
+}
+
+/**
+* @brief 自旋等待提示
+* @note 单核无总线争用，用 NOP 即可；多核可改为 __WFE() 降低功耗与争用。
+*/
+void arkrtos_port_spin_hint(void)
+{
+    __NOP();
+}
+
+
+/* ============================================================
+ * 中断控制层
+ * ============================================================ */
+uint8 arkrtos_port_in_isr(void)
+{
+    return (__get_IPSR() != 0) ? 1 : 0;
+}
+
+uint32 arkrtos_port_syscall_num(void *p_exc_ctx)
+{
+    /* Cortex-M: SVC 指令带 8 位立即数作为系统调用号，
+     * 位于硬件压栈的栈帧返回地址 PC 之前 1 字节。
+     * 对应 ARKRTOS_ARCH_SVC_NUM_BITS = 8。 */
+    uint32 *p_frame = (uint32 *)p_exc_ctx;
+    /* 栈帧中 PC 位于索引 6（R0,R1,R2,R3,R12,LR,PC,xPSR），
+     * SVC 指令的低 8 位立即数位于 PC 之前 1 字节。 */
+    return (uint32)((char *)p_frame[6])[-2];
+}
+
+void arkrtos_port_disable_irq(void)
+{
+    __disable_irq();
+}
+
+void arkrtos_port_enable_irq(void)
+{
+    __enable_irq();
+}
+
+/**
+* @brief 进入临界区，保存 PRIMASK 并关中断
+* @return 进入前的中断状态
+*/
+uint32 arkrtos_port_enter_critical(void)
+{
+    uint32 primask = __get_PRIMASK();
+    __disable_irq();
+    return primask;
+}
+
+/**
+* @brief 退出临界区，恢复进入前的中断状态
+*/
+void arkrtos_port_exit_critical(uint32 state)
+{
+    __set_PRIMASK(state);
+}
+
+/**
+* @brief 读取系统调用参数（0~3，对应 R0~R3）
+* @details Cortex-M 硬件压栈顺序为 R0,R1,R2,R3,R12,LR,PC,xPSR，
+*          使用栈帧指针直接索引即可。
+*/
+uint32 arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx)
+{
+    return ((uint32 *)p_exc_ctx)[idx];
+}
+
+/**
+* @brief 写回系统调用返回值（R0）
+*/
+void arkrtos_port_svc_set_ret(void *p_exc_ctx, uint32 value)
+{
+    ((uint32 *)p_exc_ctx)[0] = value;
+}
+
+void arkrtos_port_switch_task(void)
+{
+    SCB->ICSR = SCB_ICSR_PENDSVSET_Msk;
+}
+
+/* ============================================================
+ * 上下文层
+ * ============================================================ */
+void arkrtos_port_set_psp(uint32 val)
+{
+    __set_PSP(val);
+}
+
+uint32 arkrtos_port_get_control(void)
+{
+    return __get_CONTROL();
+}
+
+void arkrtos_port_set_control(uint32 val)
+{
+    __set_CONTROL(val);
+}
+
+uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void))
+{
+    uint32 *p_sp;
+
+    p_sp = (uint32 *)stack_top;
+    *(--p_sp) = 0x01000000;
+    *(--p_sp) = (uint32)entry;
+    *(--p_sp) = 0;
+    *(--p_sp) = 0;
+    *(--p_sp) = 0;
+    *(--p_sp) = 0;
+    *(--p_sp) = 0;
+    *(--p_sp) = 0;
+
+    *(--p_sp) = 0;
+    *(--p_sp) = 0;
+    *(--p_sp) = 0;
+    *(--p_sp) = 0;
+    *(--p_sp) = 0;
+    *(--p_sp) = 0;
+    *(--p_sp) = 0;
+    *(--p_sp) = 0;
+
+    return (uint32)p_sp;
+}
+
+/* Move the CPU to the idle PSP context and pick the Thread-mode privilege.
+ * CONTROL = 0x2 | CONTROL keeps MSP/PSP selection on the process stack
+ * and clears nPRIV (privileged); 0x3 | CONTROL additionally sets nPRIV.
+ * The per-task privilege of every later switch comes from
+ * arkrtos_port_set_thread_priv(), so this is only the privilege of the
+ * idle context itself - kernel code, therefore privileged. */
+void arkrtos_port_enter_idle(uint32 stack_ptr, uint32 use_priv)
+{
+    arkrtos_port_set_psp(stack_ptr);
+
+    if(use_priv)
+    {
+        arkrtos_port_set_control(0x2 | arkrtos_port_get_control());
+    }
+    else
+    {
+        arkrtos_port_set_control(0x3 | arkrtos_port_get_control());
+    }
+    arkrtos_port_isb();
+}
+
+/* Per-task privilege, applied on every switch: an unprivileged task must
+ * become privileged again before the kernel task that follows it resumes.
+ * Running in Handler mode is what makes both directions possible - the
+ * write itself is always privileged there, so unprivileged code cannot
+ * raise its own level. Only bit0 is touched and only when it differs. */
+void arkrtos_port_set_thread_priv(uint32 is_priv)
+{
+    uint32 ctrl = arkrtos_port_get_control();
+    uint32 want = (is_priv != 0u) ? (ctrl & ~1u) : (ctrl | 1u);
+
+    if(want != ctrl)
+    {
+        arkrtos_port_set_control(want);
+        arkrtos_port_isb();
+    }
+}
+
+/* ============================================================
+ * 定时器层
+ * ============================================================ */
+uint32 arkrtos_port_get_system_clock(void)
+{
+    return (uint32)SystemCoreClock;
+}
+
+uint32 arkrtos_port_get_timer_counter(void)
+{
+    return SysTick->VAL;
+}
+
+uint32 arkrtos_port_get_timer_reload(void)
+{
+    return SysTick->LOAD;
+}
+
+void arkrtos_port_start_timer(uint32 tick_period_us)
+{
+    uint32 ticks = (uint32)(((unsigned long long)SystemCoreClock * tick_period_us) / 1000000u);
+
+    if(ticks == 0u)
+    {
+        ticks = 1u;
+    }
+
+    /* 不能使用 SysTick_Config()：它会把 SysTick 优先级写成最低值，
+     * 覆盖本移植层 arkrtos_port_irq_init() 设定的“SysTick 最高、PendSV 最低”
+     * 策略。优先级一旦被压低，tick 就可能被其它中断长时间压制，
+     * 任务节拍与所有超时全部失真。这里只配置计数与使能，
+     * 优先级统一由 arkrtos_port_irq_init() 设定。 */
+    SysTick->LOAD = ticks - 1u;
+    SysTick->VAL  = 0u;
+    SysTick->CTRL = SysTick_CTRL_CLKSOURCE_Msk |
+                    SysTick_CTRL_TICKINT_Msk   |
+                    SysTick_CTRL_ENABLE_Msk;
+}
+
+void arkrtos_port_delay_us(uint32 us)
+{
+    int32 tm_start = (int32)arkrtos_port_get_timer_counter();
+    int32 wait_clk = (int32)(us * (SystemCoreClock / 1000000));
+    int32 tm_end;
+    int32 tm_diff;
+
+    while(wait_clk > 0)
+    {
+        tm_end = (int32)arkrtos_port_get_timer_counter();
+        tm_diff = tm_start - tm_end;
+        if(tm_diff < 0)
+            tm_diff += (int32)arkrtos_port_get_timer_reload();
+        tm_start = tm_end;
+
+        wait_clk -= tm_diff;
+    }
+}
+
+/* ============================================================
+ * 板级层（弱定义，由board层覆盖）
+ * ============================================================ */
+__weak void arkrtos_port_board_init(void)
+{
+}
+
+__weak void arkrtos_port_irq_init(void)
+{
+    NVIC_SetPriorityGrouping(0);
+    NVIC_SetPriority(PendSV_IRQn,  0xFF);
+    NVIC_SetPriority(SysTick_IRQn, 0x00);
+    NVIC_SetPriority(SVCall_IRQn,  0x01);
+}
+
+
+__weak void arkrtos_port_set_idle_mpu(uint32 task_func, uint32 stack_addr, uint32 stack_size)
+{
+    (void)task_func;
+    (void)stack_addr;
+    (void)stack_size;
+}
+
+/* ============================================================
+ * MPU接口层（M3通常无MPU或MPU为可选项）
+ * ============================================================ */
+#if (ARKRTOS_USE_MPU == 1)
+
+/* Idle-task MPU context, captured by arkrtos_port_mpu_set_region() at startup.
+ * A task switch rewrites every region register, so the kernel re-applies this
+ * context on each switch back to the idle task (arkrtos_mpu_set_idle()). */
+static arkrtos_arch_mpu_t arkrtos_mpu_idle_ctx;
+
+void arkrtos_port_mpu_init(void)
+{
+    int32 i;
+
+    if(MPU->TYPE == 0)
+    {
+        return;
+    }
+
+    ARKRTOS_DMB();
+    MPU->CTRL = 0;
+
+    for(i = 0; i < 8; i++)
+    {
+        MPU->RNR = i;
+        MPU->RBAR = 0;
+        MPU->RASR = 0;
+    }
+
+    MPU->CTRL = MPU_CTRL_ENABLE_Msk | MPU_CTRL_PRIVDEFENA_Msk;
+    ARKRTOS_DSB();
+    ARKRTOS_ISB();
+}
+
+/* Smallest MPU SIZE field (RASR bits[5:1]) that covers `size` bytes.
+ * An MPU region is a power of two and at least 32 bytes, so SIZE = log2(size) - 1.
+ * The previous version searched with
+ *     for(reg_idx = 4; reg_idx < 32; reg_idx++)
+ *         if((1 << (reg_idx + 1)) >= size)
+ * which reaches reg_idx == 31 when size > 2^31 and evaluates `1 << 32`, i.e.
+ * undefined behaviour on a 32-bit int. This version clamps the input to 2GB,
+ * uses unsigned shifts only, and keeps the shift count <= 31. */
+static uint32 arkrtos_mpu_size_field(uint32 size)
+{
+    uint32 field = 4u;                  /* smallest region: 32 bytes */
+
+    if(size > 0x80000000u)
+    {
+        size = 0x80000000u;
+    }
+
+    while((field < 30u) && ((1u << (field + 1u)) < size))
+    {
+        field++;
+    }
+
+    return field;
+}
+
+/* Encode one region into the architecture independent context.
+ * Returns 0 on success, -1 on a bad index or unknown attribute kind. */
+int32 arkrtos_port_mpu_encode(arkrtos_arch_mpu_t *p_mpu, uint32 idx, uint32 base, uint32 size,
+                            arkrtos_mpu_mem_t mem)
+{
+    uint32 attr;
+    uint32 region;
+
+    if((p_mpu == 0) || (idx >= ARKRTOS_MPU_REGION_MAX) || (size == 0u))
+    {
+        return -1;
+    }
+
+    region = arkrtos_mpu_size_field(size);
+
+    /* A region base must be aligned to the region size: round down. */
+    base = base & ~((1u << (1u + region)) - 1u);
+
+    switch(mem)
+    {
+        case ARKRTOS_MPU_MEM_ROM:
+            attr = 0x06020001u;     /* AP=0b110: read-only for both, XN=0 */
+            break;
+
+        case ARKRTOS_MPU_MEM_RAM:
+            attr = 0x13060001u;     /* AP=0b011: read-write, XN=1 */
+            break;
+
+        case ARKRTOS_MPU_MEM_RAMX:
+            /* Same attributes as MEM_RAM but with XN cleared: the MiniApp
+             * block is the only place in this kernel where code lives in
+             * RAM, so that one region has to be executable.
+             * W^X does not hold inside it - accepted, documented tradeoff:
+             * splitting it into an RO+X code region and an RW+XN data region
+             * would need two power-of-two aligned MPU regions and waste up
+             * to half of the block, which is exactly what a load-to-RAM
+             * MiniApp cannot afford. The block is private to the MiniApp and
+             * released when it exits (see docs/小程序设计.md). */
+            attr = 0x03060001u;     /* AP=0b011: read-write, XN=0 */
+            break;
+
+        case ARKRTOS_MPU_MEM_PERIPH_RO:
+            attr = 0x12060001u;     /* AP=0b010: unprivileged read-only, XN=1 */
+            break;
+
+        case ARKRTOS_MPU_MEM_PERIPH_RW:
+            attr = 0x13060001u;     /* AP=0b011: unprivileged read-write, XN=1 */
+            break;
+
+        default:
+            return -1;
+    }
+
+    p_mpu->region_base[idx] = base;
+    p_mpu->region_attr[idx] = attr | (region << 1);
+    return 0;
+}
+
+/* Startup path, called by the board through arkrtos_port_set_idle_mpu():
+ * capture the idle task windows (code + stack) and apply them. */
+void arkrtos_port_mpu_set_region(uint32 rom_addr, uint32 rom_size, uint32 ram_addr, uint32 ram_size)
+{
+    /* AP encoding on ARMv7-M (see CMSIS ARM_MPU_AP_FULL=3, ARM_MPU_AP_URO=2):
+     * 0b011 = privileged and unprivileged read-write,
+     * 0b010 = privileged read-write, unprivileged read-only,
+     * 0b110 = read-only for both.
+     * The data window must be writable by the task, so AP=0b011 with XN=1.
+     * An earlier change had flipped it to 0b010 thinking 0b011 was read-only;
+     * that would fault on an unprivileged task's first store to its own RAM. */
+    if(MPU->TYPE == 0)
+    {
+        return;
+    }
+
+    (void)arkrtos_port_mpu_encode(&arkrtos_mpu_idle_ctx, 0u, rom_addr, rom_size, ARKRTOS_MPU_MEM_ROM);
+    (void)arkrtos_port_mpu_encode(&arkrtos_mpu_idle_ctx, 1u, ram_addr, ram_size, ARKRTOS_MPU_MEM_RAM);
+    arkrtos_port_mpu_set_app(&arkrtos_mpu_idle_ctx);
+}
+
+/* Re-apply the captured idle context (called on every switch to idle). */
+void arkrtos_port_mpu_set_idle(void)
+{
+    arkrtos_port_mpu_set_app(&arkrtos_mpu_idle_ctx);
+}
+
+void arkrtos_port_mpu_set_app(const arkrtos_arch_mpu_t *p_mpu)
+{
+    int32 rnr = 0;
+
+    ARKRTOS_DMB();
+    MPU->CTRL = 0;
+
+    /* arkrtos_port_mpu_init()/reset() clear regions 0~7, so writing only the
+     * first few would leave stale windows from the previous task in 4~7.
+     * Clear them here as well. */
+    for(rnr = 0; rnr < 8; rnr++)
+    {
+        MPU->RNR = rnr;
+
+        if(rnr < (int32)ARKRTOS_MPU_REGION_MAX)
+        {
+            MPU->RBAR = p_mpu->region_base[rnr];
+            MPU->RASR = p_mpu->region_attr[rnr];
+        }
+        else
+        {
+            MPU->RBAR = 0;
+            MPU->RASR = 0;
+        }
+    }
+
+    MPU->CTRL = MPU_CTRL_ENABLE_Msk | MPU_CTRL_PRIVDEFENA_Msk;
+    ARKRTOS_DSB();
+    ARKRTOS_ISB();
+}
+
+void arkrtos_port_mpu_reset(void)
+{
+    int32 rnr = 0;
+
+    ARKRTOS_DMB();
+    MPU->CTRL = 0;
+
+    for(rnr = 0; rnr < 8; rnr++)
+    {
+        MPU->RNR  = rnr;
+        MPU->RASR = 0;
+    }
+
+    MPU->CTRL = MPU_CTRL_ENABLE_Msk | MPU_CTRL_PRIVDEFENA_Msk;
+    ARKRTOS_DSB();
+    ARKRTOS_ISB();
+}
+
+#endif

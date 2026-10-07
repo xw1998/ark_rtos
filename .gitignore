@@ -1,0 +1,70 @@
+# ============================================================
+# Ark RTOS 仓库忽略规则
+# 原则：只忽略「可再生成的产物」与「本机私有文件」，
+#       任何源码、配置源头（config/、tools/、docs/*.md）都必须入库。
+# ============================================================
+
+# ---- Python 缓存 ----
+__pycache__/
+*.py[cod]
+
+# ---- Doxygen 临时树（由 tools/gen_api_doc.py 在生成文档前重建） ----
+docs/.gen_utf8/
+docs/html/
+docs/latex/
+docs/xml/
+doxygen_warnings.log
+
+# ---- 构建中间产物（Keil MDK / armclang / armcc） ----
+*.o
+*.d
+*.crf
+*.dep
+*.lnp
+*.iex
+*.lst
+*.map
+*.htm
+*.build_log.htm
+*.axf
+*.elf
+*.hex
+*.bin
+*.sct.bak
+Objects/
+Listings/
+DebugConfig/
+RTE/
+
+# ---- Keil 本机私有文件 ----
+# 注：*.uvoptx（Options for Target）是团队共享的工程配置，必须入库，不忽略；
+#     *.uvguix.* 只是本机窗口布局，属于个人私有文件。
+*.uvguix.*
+*.scvd
+*.dbgconf
+
+# ---- 编辑器 / 系统 ----
+*.bak
+*~
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---- 构建输出目录（scatter/.sct 由 tools/gen_scatter.py 在 Before Build 钩子里重新生成）----
+build/
+
+# ---- 一次性开发辅助物（字节级补丁脚本、UV4 build/flash 日志等），属内部工具，不入库 ----
+patch/
+*_kernel.log
+
+# ---- 本机一次性开发辅助物 ----
+_nova/
+_nova_*.log
+_build_*.log
+_flash_*.log
+_b_*.log
+*.bak_*
+*.pre_*
+
+# ---- 第三方资料与其抽取产物（开发板原理图 PDF 的文本抽取），不入库 ----
+_sch_text.txt

@@ -1,0 +1,27 @@
+/**
+* @brief Ark RTOS 应用层基础类型定义
+* @details 此文件属于App SDK，仅包含基础类型定义，
+*          不依赖任何MCU头文件或内核内部头文件。
+*          应用程序只需包含 arkrtos.h 即可使用所有OS接口。
+*/
+
+#ifndef __ARKRTOS_TYPES_H__
+#define __ARKRTOS_TYPES_H__
+
+typedef unsigned long  uint32;
+typedef signed   long  int32;
+typedef unsigned short uint16;
+typedef signed   short int16;
+typedef unsigned char  uint8;
+typedef signed   char  int8;
+
+
+
+/* Toolchain-independent weak-symbol attribute (AC5 vs AC6/GCC/Clang). */
+#if defined(__CC_ARM)
+#define ARKRTOS_WEAK __weak
+#else
+#define ARKRTOS_WEAK __attribute__((weak))
+#endif
+
+#endif
