@@ -33,6 +33,12 @@ static hwsafe_own_t g_hwsafe_own[ARKRTOS_HWSAFE_MAX_OWN];
 static int32        g_hwsafe_own_n;
 static uint32       g_hwsafe_neutralized;
 static int32        g_hwsafe_last_owner;
+/* Neutralization is observable per path, so a test can tell "the will ran"
+ * from "the device callback ran" from "nothing was known to be safe" without
+ * reading the source. Counters only: no console I/O on the fault path. */
+static uint32       g_hwsafe_will_ran;
+static uint32       g_hwsafe_cb_ran;
+static uint32       g_hwsafe_none_ran;
 
 /* 设备名按 8 字节含结尾 0 比较（与 arkrtos_dev_desc_t.dev_name 同宽） */
 static int32 hwsafe_name_eq(const char *a, const char *b)
@@ -366,12 +372,18 @@ int32 arkrtos_hwsafe_run_pending(void)
                 (void)arkrtos_dev_ctrl_obj(obj,
                                            (uint32)g_hwsafe_own[i].will_cmd,
                                            (uint32)g_hwsafe_own[i].will_val);
+                g_hwsafe_will_ran++;
                 ran++;
             }
             else if(fn != 0 && obj != 0)
             {
                 (void)fn(obj, (uint32)owner);
+                g_hwsafe_cb_ran++;
                 ran++;
+            }
+            else
+            {
+                g_hwsafe_none_ran++;
             }
             g_hwsafe_neutralized++;
             g_hwsafe_last_owner = owner;
@@ -489,6 +501,22 @@ uint32 arkrtos_hwsafe_neutralized_count(void)
 int32 arkrtos_hwsafe_last_owner(void)
 {
     return g_hwsafe_last_owner;
+}
+
+void arkrtos_hwsafe_path_counts(uint32 *will_out, uint32 *cb_out, uint32 *none_out)
+{
+    if(will_out != 0)
+    {
+        *will_out = g_hwsafe_will_ran;
+    }
+    if(cb_out != 0)
+    {
+        *cb_out = g_hwsafe_cb_ran;
+    }
+    if(none_out != 0)
+    {
+        *none_out = g_hwsafe_none_ran;
+    }
 }
 
 #else  /* ARKRTOS_HW_SAFE == 0 */

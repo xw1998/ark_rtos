@@ -21,6 +21,11 @@ typedef struct {
     uint16 gpio_pin;
 } led_dev_t;
 
+/* ctrl codes accepted by led_drv_ctrl (and by the "will" the kernel runs) */
+#define ARKRTOS_LED_CTRL_OFF     (0u)
+#define ARKRTOS_LED_CTRL_ON      (1u)
+#define ARKRTOS_LED_CTRL_TOGGLE  (2u)
+
 extern arkrtos_dev_drv_t led_drv;
 
 #if ARKRTOS_HW_SAFE

@@ -117,12 +117,17 @@ int32  arkrtos_hwsafe_registered(const char *dev_name);   /* 1=有回调；0=无
 /* 枚举第 idx 个已登记回调的设备名（供 shell 列表）。
  * 返回 0 = 成功；-1 = idx 越界。 */
 int32  arkrtos_hwsafe_dev_at(int32 idx, char *name_out, uint32 max);
-/* 读第 idx 条台账上的遗言：*has_will 置 1/0，有则写 *cmd_out/*val_out。
+/* 读第 idx 条台账上的遗言：*has_will 置 1/0，有则写 *cmd_out, *val_out。
  * 返回 0 = 成功；-1 = idx 越界。idx 口径与 arkrtos_hwsafe_info 一致。 */
 int32  arkrtos_hwsafe_will(int32 idx, int32 *has_will,
                            int32 *cmd_out, int32 *val_out);
 
 uint32 arkrtos_hwsafe_neutralized_count(void);            /* 累计中和次数 */
 int32  arkrtos_hwsafe_last_owner(void);                   /* 最近被中和的任务号，0=无 */
+/*
+ * 枚举中和次数按通道拆分：will=执行了遗言，cb=走了设备注册的安全态回调，
+ * none=设备没有安全态只删了台账。任意项可为 0。
+ */
+void   arkrtos_hwsafe_path_counts(uint32 *will_out, uint32 *cb_out, uint32 *none_out);
 
 #endif /* __ARKRTOS_HWSAFE_H__ */

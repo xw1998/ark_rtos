@@ -122,6 +122,39 @@ int32 led_drv_close(arkrtos_dev_hdr_t *p)
 
 int32 led_drv_ctrl(arkrtos_dev_hdr_t *p, uint32 c, uint32 v)
 {
+    led_dev_t *p_dev = (led_dev_t *)p;
+
+    (void)v;                        /* 只有命令码参与；参数保留给将来 */
+    if((p == 0) || (sizeof(led_dev_t) != p->block_size))
+    {
+        return -1;
+    }
+    if(p_dev->opened == 0)
+    {
+        return -1;
+    }
+
+    switch(c)
+    {
+        case ARKRTOS_LED_CTRL_OFF:                  /* 0 */
+            p_dev->led_on = 0;
+            HAL_GPIO_WritePin(GPIOC, p_dev->gpio_pin, GPIO_PIN_SET);
+            break;
+        case ARKRTOS_LED_CTRL_ON:                   /* 1 */
+            p_dev->led_on = 1;
+            HAL_GPIO_WritePin(GPIOC, p_dev->gpio_pin, GPIO_PIN_RESET);
+            break;
+        case ARKRTOS_LED_CTRL_TOGGLE:               /* 2 */
+            p_dev->led_on = (p_dev->led_on == 0) ? 1 : 0;
+            HAL_GPIO_WritePin(GPIOC, p_dev->gpio_pin,
+                              (p_dev->led_on == 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+            break;
+        default:
+            /* 未知命令码：明确拒绝，而不是回一个看着像成功的 0
+             * （本驱动的 ctrl 会被"遗言"路径调用，静默成功会让 App 以为
+             *  硬件已经带回安全态，实际什么都没做）。 */
+            return -1;
+    }
     return 0;
 }
 

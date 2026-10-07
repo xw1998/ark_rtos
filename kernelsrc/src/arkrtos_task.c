@@ -651,24 +651,28 @@ void SVC_Server(void *p_svc_ctx)
             case 5:
                 ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_dev_close_internal(p[1]));
                 break;
-#if ARKRTOS_HW_SAFE
             case 6:
                 /* Declare the CURRENT task's "will" for a device it already
                  * owns: on this task's death the kernel runs
                  * drv_ctrl(obj, cmd, val) on it. The kernel refuses a will for
                  * a device the caller does not hold - no ordering another
-                 * owner's hardware around. */
+                 * owner's hardware around. Kept OUTSIDE the #if on purpose:
+                 * with the feature not built it must answer "refused", never
+                 * fall through to the generic 0 (which reads as "accepted"). */
                 if(arkrtos_kernel_user_name_ok((const void *)p[1], 8u) == 0u)
                 {
                     ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
                     break;
                 }
+#if ARKRTOS_HW_SAFE
                 ARKRTOS_SVC_RET(p_svc_ctx,
                     (uint32)arkrtos_hwsafe_set_will((const char *)p[1],
                                                     arkrtos_current_task_id,
                                                     (int32)p[2], (int32)p[3]));
+#else
+                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+#endif
                 break;
-#endif /* ARKRTOS_HW_SAFE */
             default:
                 ARKRTOS_SVC_RET(p_svc_ctx, 0);
                 break;
