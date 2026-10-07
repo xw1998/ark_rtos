@@ -33,6 +33,7 @@
 #include "ark_bus_port_arkrtos.h"
 #include "ark_bus_rpc.h"
 #include "ark_shell.h"
+#include "arkrtos_softbus_sync.h"
 
 /* ------------------------------------------------------------------ */
 /* 常驻节点与对端                                                       */
@@ -262,7 +263,11 @@ int32 arkrtos_softbus_info(void)
     st = ark_bus_get_stats(&g_node);
     peer = ark_bus_device_find(&g_node, SB_PEER_ID);
 
-    ark_shell_printf("\r\nsoftbus (ark_softbus %s)\r\n", "915c4ac");
+    /* commit 由 tools/sync_ark_softbus.py 写进 arkrtos_softbus_sync.h：
+     * 手工写死会在下次同步后变成假的「权威版本号」。 */
+    ark_shell_printf("\r\nsoftbus (ark_softbus %s%s)\r\n",
+                     ARKRTOS_SOFTBUS_COMMIT,
+                     ARKRTOS_SOFTBUS_DIRTY ? "+dirty" : "");
     ark_shell_printf("  node id   : 0x%08X type %u cap 0x%08X\r\n",
                      (unsigned)g_node.self_id, (unsigned)g_node.device_type,
                      (unsigned)g_node.capabilities);

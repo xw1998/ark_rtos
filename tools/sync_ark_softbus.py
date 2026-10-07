@@ -97,6 +97,44 @@ def sha(path):
     return h.hexdigest()
 
 
+GEN_HEADER = os.path.join(REPO, "kernelsrc", "include",
+                            "arkrtos_softbus_sync.h")
+
+
+def render_header(head, dirty):
+    """把「来源 commit」写成内核可直接引用的宏。
+
+    为什么要有这个文件：内核控制台 `bus info` 会打一行 `softbus (ark_softbus
+    <commit>)`。如果那串 commit 手工写在 arkrtos_softbus.c 里，同步完就没人
+    改它——显示出来的「权威版本号」会是假的（2026-10-07 就是这样：组件已到
+    18c6ccf，控制台还报 915c4ac）。改成由同步工具写、内核只读，commit 就只
+    有一个来源。
+    """
+    return (
+        "/* 由 tools/sync_ark_softbus.py 生成，勿手改；随组件一起提交。 */\n"
+        "#ifndef __ARKRTOS_SOFTBUS_SYNC_H__\n"
+        "#define __ARKRTOS_SOFTBUS_SYNC_H__\n"
+        "\n"
+        "#define ARKRTOS_SOFTBUS_COMMIT      \"%s\"\n"
+        "#define ARKRTOS_SOFTBUS_COMMIT_FULL \"%s\"\n"
+        "#define ARKRTOS_SOFTBUS_DIRTY       %d\n"
+        "\n"
+        "#endif /* __ARKRTOS_SOFTBUS_SYNC_H__ */\n"
+        % (head[:7], head, 1 if dirty else 0))
+
+
+def header_commit():
+    """读回生成头里的完整 commit；文件不存在返回 None。"""
+    try:
+        with open(GEN_HEADER, encoding="utf-8") as f:
+            for ln in f:
+                if "ARKRTOS_SOFTBUS_COMMIT_FULL" in ln:
+                    return ln.split('"')[1]
+    except OSError:
+        pass
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", default=default_src())
@@ -150,7 +188,14 @@ def main():
           % (len(same), len(added), len(changed), len(removed)))
 
     if args.check:
-        if added or changed or removed:
+        bad = bool(added or changed or removed)
+        head = git_head(src)
+        hc = header_commit()
+        if hc != head:
+            print("生成头与源 commit 不一致：头=%s 源=%s（跑 --apply 同步）"
+                  % (hc, head[:12]))
+            bad = True
+        if bad:
             print("组件与源仓库不一致：跑 --apply 同步")
             return 2
         print("一致")
@@ -201,6 +246,10 @@ def main():
     with open(os.path.join(DST_ROOT, "VENDOR.md"), "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(lines))
     print("已同步，VENDOR.md 已更新（源 commit %s）" % head[:12])
+    with open(GEN_HEADER, "w", encoding="utf-8", newline="\n") as f:
+        f.write(render_header(head, dirty))
+    print("已写 %s（ARKRTOS_SOFTBUS_COMMIT %s）"
+          % (os.path.relpath(GEN_HEADER, REPO).replace(os.sep, "/"), head[:7]))
     return 0
 
 

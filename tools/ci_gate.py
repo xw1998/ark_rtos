@@ -557,6 +557,35 @@ def check_features_switches():
     else:
         ok("features-switches", "%d gate(s) all declared in Kconfig" % len(gates))
 
+def check_softbus_sync_header():
+    """arkrtos_softbus_sync.h must name the same commit as VENDOR.md.
+
+    The kernel prints that commit on the console (`bus info`); VENDOR.md records
+    where the copy came from.  Both are in-tree and written by
+    tools/sync_ark_softbus.py, so if they disagree the copy was updated without
+    regenerating the header -- and the console would report a stale, still
+    authoritative-looking version.  That is exactly what happened on
+    2026-10-07: the component was at 18c6ccf while the console said 915c4ac.
+    """
+    vpath = os.path.join(ROOT, "kernelsrc/components/ark_softbus/VENDOR.md")
+    hpath = os.path.join(ROOT, "kernelsrc/include/arkrtos_softbus_sync.h")
+    if not (os.path.isfile(vpath) and os.path.isfile(hpath)):
+        fail("softbus-sync", "VENDOR.md or arkrtos_softbus_sync.h missing")
+        return
+    vend = read(vpath).decode("utf-8", "replace")
+    hdr = read(hpath).decode("utf-8", "replace")
+    m = re.search(r"源 commit \|\s*`([0-9a-fA-F]{7,40})`", vend)
+    h = re.search(r'ARKRTOS_SOFTBUS_COMMIT_FULL\s+"([0-9a-fA-F]+)"', hdr)
+    if not m or not h:
+        fail("softbus-sync", "cannot parse commit from VENDOR.md or header")
+        return
+    if m.group(1) != h.group(1):
+        fail("softbus-sync", "header=%s VENDOR.md=%s"
+             % (h.group(1)[:12], m.group(1)[:12]))
+    else:
+        ok("softbus-sync", "header commit matches VENDOR.md (%s)"
+           % h.group(1)[:12])
+
 def main(argv):
     do_build = "--build" in argv
     uv4 = None
@@ -575,6 +604,7 @@ def main(argv):
     check_no_partition_include_in_app()
     check_config_generated()
     check_features_switches()
+    check_softbus_sync_header()
     check_devicetree_generated()
     check_utest_host()
     if do_build:
