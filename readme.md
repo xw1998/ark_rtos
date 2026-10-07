@@ -49,6 +49,7 @@ Ark RTOS 把固件拆成**内核 / 驱动 / 应用**三块可以各自独立升�
 | 节拍计数器 32 位回绕 | 注入使 `arkrtos_kernel_tick` 跨过回绕，两侧 `APP_ALIVE` 间隔精确 5.000 s | [调度器说明](docs/调度器说明.md) §2.3 |
 | 设备树 | F427 板上 `dt` 命令打印 20 个节点（model / compatible / reg / enabled/disabled），与 `dts/stm32f427.dts` 一致 | [设备树](docs/设备树.md) |
 | 双板同源 | F427 与 F401 同一份内核源码均编译通过（F401 `Code=46526`） | 本文 §验证状态 |
+| 板端单元测试 | F427 上 `utest run` → **9 matched / 9 passed / 0 failed**，73 条断言；`utest-host` 门禁验框架记账 | [单元测试框架](docs/单元测试框架.md) |
 
 ## 核心特性
 
