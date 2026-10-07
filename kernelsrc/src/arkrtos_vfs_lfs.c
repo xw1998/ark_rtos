@@ -288,15 +288,15 @@ static int32_t lfs_stat(struct ark_vfs_mnt *mnt, const char *rel,
 static int32_t lfs_unlink(struct ark_vfs_mnt *mnt, const char *rel)
 {
     char abs[LFS_PATH_MAX];
-    uint32 size = 0u;
-    uint32 is_dir = 0u;
-    int32_t  rc;
+    int32_t rc;
 
     (void)mnt;
     rc = p_abs(rel, abs, (uint32_t)sizeof(abs));
     if (rc != ARK_VFS_OK) { return rc; }
-    if (arkrtos_fs_stat_path(abs, &size, &is_dir) != 0) { return ARK_E_NOENT; }
-    if (is_dir != 0u) { return ARK_E_ISDIR; }
+    /* lfs_remove deletes a file or an empty directory; a non-empty
+     * directory is refused by littlefs itself.  rm vs rmdir is decided by
+     * the shell, so this callback does not need to tell the two apart. */
+    if (arkrtos_fs_stat_path(abs, NULL, NULL) != 0) { return ARK_E_NOENT; }
     if (arkrtos_fs_remove(abs) != 0) { return p_io("remove", abs); }
     return ARK_VFS_OK;
 }
@@ -316,6 +316,19 @@ static int32_t lfs_rename(struct ark_vfs_mnt *mnt, const char *old_rel,
     if (arkrtos_fs_stat_path(a, NULL, NULL) != 0) { return ARK_E_NOENT; }
     if (arkrtos_fs_stat_path(b, NULL, NULL) == 0) { return ARK_E_EXIST; }
     if (arkrtos_fs_rename(a, b) != 0) { return p_io("rename", a); }
+    return ARK_VFS_OK;
+}
+
+static int32_t lfs_mkdir(struct ark_vfs_mnt *mnt, const char *rel)
+{
+    char abs[LFS_PATH_MAX];
+    int32_t rc;
+
+    (void)mnt;
+    rc = p_abs(rel, abs, (uint32_t)sizeof(abs));
+    if (rc != ARK_VFS_OK) { return rc; }
+    if (arkrtos_fs_stat_path(abs, NULL, NULL) == 0) { return ARK_E_EXIST; }
+    if (arkrtos_fs_mkdir(abs) != 0) { return p_io("mkdir", abs); }
     return ARK_VFS_OK;
 }
 
@@ -411,7 +424,8 @@ static int32_t lfs_closedir(struct ark_vfs_mnt *mnt, struct ark_vfs_file *d)
 const ark_vfs_fsdrv_t arkrtos_vfs_lfs_fsdrv = {
     "lfs",
     ARK_FS_CAP_READ | ARK_FS_CAP_WRITE | ARK_FS_CAP_CREATE | ARK_FS_CAP_UNLINK |
-    ARK_FS_CAP_RENAME | ARK_FS_CAP_DIR | ARK_FS_CAP_STAT | ARK_FS_CAP_TRUNC,
+    ARK_FS_CAP_RENAME | ARK_FS_CAP_MKDIR | ARK_FS_CAP_DIR | ARK_FS_CAP_STAT |
+    ARK_FS_CAP_TRUNC,
     lfs_mount,
     lfs_umount,
     lfs_open,
@@ -421,7 +435,7 @@ const ark_vfs_fsdrv_t arkrtos_vfs_lfs_fsdrv = {
     lfs_seek,
     lfs_stat,
     lfs_unlink,
-    NULL,                   /* mkdir：littlefs 的目录是隐式的，门面没有入口 */
+    lfs_mkdir,
     lfs_rename,
     lfs_opendir,
     lfs_readdir,

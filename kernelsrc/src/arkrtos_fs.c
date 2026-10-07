@@ -819,6 +819,26 @@ int32 arkrtos_fs_remove(const char *path)
     return 0;
 }
 
+int32 arkrtos_fs_mkdir(const char *path)
+{
+    int err;
+
+    if((g_fs.mounted == 0u) || (fs_check_path(path) != 0))
+    {
+        return -1;
+    }
+
+    err = lfs_mkdir(&g_fs.lfs, path);
+
+    if(err != 0)
+    {
+        g_fs.last_error = err;
+        return -1;
+    }
+
+    return 0;
+}
+
 /* ============================================================
  * Random access, rename, name listing
  *

@@ -46,6 +46,7 @@
 #include "arkrtos_blk.h"
 #include "arkrtos_fs.h"
 #include "arkrtos_vfs.h"
+#include "ark_vfs.h"
 #include "arkrtos_audit.h"
 #include "arkrtos_guard.h"
 #include "arkrtos_crash.h"
@@ -2986,6 +2987,12 @@ static int vfs_usage(void)
     sh_out("  ls [path]                 list a directory, default /\r\n");
     sh_out("  cat [path]                print a file, or standard input\r\n");
     sh_out("  rm <path>                 remove a file\r\n");
+    sh_out("  mkdir <path>              create a directory\r\n");
+    sh_out("  rmdir <path>              remove an empty directory\r\n");
+    sh_out("  mv <src> <dst>            rename or move\r\n");
+    sh_out("  cp <src> <dst>            copy a file\r\n");
+    sh_out("  touch <path>              create an empty file\r\n");
+    sh_out("  stat <path>               show type, size and time\r\n");
     sh_out("  off/size are decimal; size 0 means to the end of the device\r\n");
     return -1;
 }
@@ -3314,6 +3321,17 @@ static int cmd_vfs_rm(int argc, char *argv[])
         return 1;
     }
 
+    {
+        /* rm removes files, not directories - that is rmdir's job. */
+        struct ark_vfs_stat st;
+
+        if((ark_vfs_stat(vpath, &st) == 0) && ((st.mode & ARK_S_IFDIR) != 0u))
+        {
+            sh_out("rm: Is a directory\r\n");
+            return 1;
+        }
+    }
+
     rc = arkrtos_vfs_remove(vpath);
     if(rc != 0)
     {
@@ -3321,6 +3339,271 @@ static int cmd_vfs_rm(int argc, char *argv[])
     }
 
     ark_shell_printf("\r\n%s removed\r\n", argv[1]);
+    return 0;
+}
+
+/* ------------------------------------------------------------
+ * mkdir / rmdir / mv / cp / touch / stat
+ *
+ * The rest of the Linux file-command set.  Each one prints the
+ * filesystem's own error code; nothing here invents a reason.
+ * ------------------------------------------------------------ */
+
+static const char *path_basename(const char *p)
+{
+    const char *s = strrchr(p, '/');
+
+    return (s != 0) ? (s + 1) : p;
+}
+
+static int cmd_vfs_mkdir(int argc, char *argv[])
+{
+    char  vpath[ARKRTOS_VFS_PATH_MAX];
+    int32 rc;
+
+    if(argc != 2)
+    {
+        return vfs_usage();
+    }
+    if(shell_vfs_path(argv[1], vpath, sizeof(vpath)) != 0)
+    {
+        sh_out("mkdir: path too long\r\n");
+        return 1;
+    }
+    rc = ark_vfs_mkdir(vpath);
+    if(rc != 0)
+    {
+        return vfs_fail("mkdir", rc);
+    }
+    ark_shell_printf("\r\n%s created\r\n", argv[1]);
+    return 0;
+}
+
+static int cmd_vfs_rmdir(int argc, char *argv[])
+{
+    char vpath[ARKRTOS_VFS_PATH_MAX];
+    struct ark_vfs_stat st;
+    int32 rc;
+
+    if(argc != 2)
+    {
+        return vfs_usage();
+    }
+    if(shell_vfs_path(argv[1], vpath, sizeof(vpath)) != 0)
+    {
+        sh_out("rmdir: path too long\r\n");
+        return 1;
+    }
+    rc = ark_vfs_stat(vpath, &st);
+    if(rc != 0)
+    {
+        return vfs_fail("rmdir", rc);
+    }
+    if((st.mode & ARK_S_IFDIR) == 0u)
+    {
+        /* rmdir is for directories; refusing a file is not a guess. */
+        sh_out("rmdir: Not a directory\r\n");
+        return 1;
+    }
+    rc = ark_vfs_unlink(vpath);
+    if(rc != 0)
+    {
+        return vfs_fail("rmdir", rc);
+    }
+    ark_shell_printf("\r\n%s removed\r\n", argv[1]);
+    return 0;
+}
+
+static int cmd_vfs_mv(int argc, char *argv[])
+{
+    char vsrc[ARKRTOS_VFS_PATH_MAX];
+    char vdst[ARKRTOS_VFS_PATH_MAX];
+    int32 rc;
+
+    if(argc != 3)
+    {
+        return vfs_usage();
+    }
+    if((shell_vfs_path(argv[1], vsrc, sizeof(vsrc)) != 0) ||
+       (shell_vfs_path(argv[2], vdst, sizeof(vdst)) != 0))
+    {
+        sh_out("mv: path too long\r\n");
+        return 1;
+    }
+    rc = ark_vfs_rename(vsrc, vdst);
+    if(rc != 0)
+    {
+        return vfs_fail("mv", rc);
+    }
+    ark_shell_printf("\r\n%s -> %s\r\n", argv[1], argv[2]);
+    return 0;
+}
+
+static int cmd_vfs_cp(int argc, char *argv[])
+{
+    static uint8 buf[256];
+    char vsrc[ARKRTOS_VFS_PATH_MAX];
+    char vdst[ARKRTOS_VFS_PATH_MAX];
+    struct ark_vfs_stat st;
+    int32 fd;
+    int32 h;
+    int32 n;
+    uint32 total = 0u;
+
+    if(argc != 3)
+    {
+        return vfs_usage();
+    }
+    if((shell_vfs_path(argv[1], vsrc, sizeof(vsrc)) != 0) ||
+       (shell_vfs_path(argv[2], vdst, sizeof(vdst)) != 0))
+    {
+        sh_out("cp: path too long\r\n");
+        return 1;
+    }
+
+    /* cp file dir/ : when the destination is an existing directory the copy
+     * lands inside it under the source basename, as on Linux.  Any other
+     * shape is used verbatim - a missing destination is a new file name,
+     * never a guess about which directory was meant. */
+    if((ark_vfs_stat(vdst, &st) == 0) && ((st.mode & ARK_S_IFDIR) != 0u))
+    {
+        const char *base = path_basename(vsrc);
+        uint32 len  = (uint32)strlen(vdst);
+        uint32 blen = (uint32)strlen(base);
+
+        if((len + 1u + blen + 1u) > sizeof(vdst))
+        {
+            sh_out("cp: path too long\r\n");
+            return 1;
+        }
+        if((len > 0u) && (vdst[len - 1u] != '/'))
+        {
+            vdst[len++] = '/';
+        }
+        (void)memcpy(&vdst[len], base, blen + 1u);
+    }
+
+    fd = arkrtos_vfs_open_read(vsrc);
+    if(fd < 0)
+    {
+        return vfs_fail("cp", fd);
+    }
+    h = arkrtos_vfs_app_open(vdst, ARKRTOS_VFS_O_WRONLY |
+                                  ARKRTOS_VFS_O_CREAT | ARKRTOS_VFS_O_TRUNC);
+    if(h < 0)
+    {
+        (void)arkrtos_vfs_close(fd);
+        return vfs_fail("cp", h);
+    }
+    sh_out("\r\n");
+    while((n = arkrtos_vfs_read(fd, buf, (uint32)sizeof(buf))) > 0)
+    {
+        int32 w = arkrtos_vfs_app_write(h, buf, (uint32)n);
+
+        if(w != n)
+        {
+            (void)arkrtos_vfs_app_close(h);
+            (void)arkrtos_vfs_close(fd);
+            return vfs_fail("cp", (w < 0) ? w : -1);
+        }
+        total += (uint32)n;
+    }
+    if(n < 0)
+    {
+        (void)arkrtos_vfs_app_close(h);
+        (void)arkrtos_vfs_close(fd);
+        return vfs_fail("cp", n);
+    }
+    (void)arkrtos_vfs_app_close(h);
+    (void)arkrtos_vfs_close(fd);
+    ark_shell_printf("%u bytes copied\r\n", (unsigned)total);
+    return 0;
+}
+
+static int cmd_vfs_touch(int argc, char *argv[])
+{
+    char vpath[ARKRTOS_VFS_PATH_MAX];
+    struct ark_vfs_stat st;
+    int32 h;
+
+    if(argc != 2)
+    {
+        return vfs_usage();
+    }
+    if(shell_vfs_path(argv[1], vpath, sizeof(vpath)) != 0)
+    {
+        sh_out("touch: path too long\r\n");
+        return 1;
+    }
+    /* Existing file: the VFS keeps no settable timestamp, so touching it has
+     * nothing to change - say so by doing nothing rather than claiming to
+     * have updated a time that does not exist. */
+    if(ark_vfs_stat(vpath, &st) == 0)
+    {
+        return 0;
+    }
+    /* O_CREAT without O_TRUNC: creates an empty file, or leaves an existing
+     * one untouched (the create already happened if needed). */
+    h = arkrtos_vfs_app_open(vpath, ARKRTOS_VFS_O_WRONLY | ARKRTOS_VFS_O_CREAT);
+    if(h < 0)
+    {
+        return vfs_fail("touch", h);
+    }
+    (void)arkrtos_vfs_app_close(h);
+    return 0;
+}
+
+static int cmd_vfs_stat(int argc, char *argv[])
+{
+    char vpath[ARKRTOS_VFS_PATH_MAX];
+    struct ark_vfs_stat st;
+    const char *type;
+    int32 rc;
+
+    if(argc != 2)
+    {
+        return vfs_usage();
+    }
+    if(shell_vfs_path(argv[1], vpath, sizeof(vpath)) != 0)
+    {
+        sh_out("stat: path too long\r\n");
+        return 1;
+    }
+    rc = ark_vfs_stat(vpath, &st);
+    if(rc != 0)
+    {
+        return vfs_fail("stat", rc);
+    }
+    if((st.mode & ARK_S_IFDIR) != 0u)
+    {
+        type = "directory";
+    }
+    else if((st.mode & ARK_S_IFCHR) != 0u)
+    {
+        type = "character device";
+    }
+    else if((st.mode & ARK_S_IFREG) != 0u)
+    {
+        type = "regular file";
+    }
+    else
+    {
+        type = "unknown";
+    }
+    ark_shell_printf("\r\n  File: %s\r\n", vpath);
+    ark_shell_printf("  Type: %s\r\n", type);
+    if((st.mode & ARK_S_IFDIR) == 0u)
+    {
+        ark_shell_printf("  Size: %u bytes\r\n", (unsigned)st.size);
+    }
+    if(st.mtime == 0u)
+    {
+        sh_out("  Time: none (this filesystem keeps no timestamps)\r\n");
+    }
+    else
+    {
+        ark_shell_printf("  Time: %u\r\n", (unsigned)st.mtime);
+    }
     return 0;
 }
 #endif /* ARKRTOS_USE_VFS */
@@ -4058,7 +4341,7 @@ static int register_kernel_commands(void)
     int idx = g_cmd_count;
     /* Upper bound with every optional feature compiled in.  Kept above the
      * real count so a future command cannot silently overflow g_cmd_table. */
-    int need = 36;
+    int need = 42;
 
     if((idx + need) > ARK_SHELL_MAX_COMMANDS)
     {
@@ -4116,6 +4399,18 @@ static int register_kernel_commands(void)
         "Print a file, or standard input: cat [path]", 2);
     g_cmd_table[idx++] = ARK_SHELL_CMD("rm", cmd_vfs_rm,
         "Remove a file from the VFS namespace: rm <path>", 2);
+    g_cmd_table[idx++] = ARK_SHELL_CMD("mkdir", cmd_vfs_mkdir,
+        "Create a directory: mkdir <path>", 2);
+    g_cmd_table[idx++] = ARK_SHELL_CMD("rmdir", cmd_vfs_rmdir,
+        "Remove an empty directory: rmdir <path>", 2);
+    g_cmd_table[idx++] = ARK_SHELL_CMD("mv", cmd_vfs_mv,
+        "Rename or move: mv <src> <dst>", 3);
+    g_cmd_table[idx++] = ARK_SHELL_CMD("cp", cmd_vfs_cp,
+        "Copy a file: cp <src> <dst>", 3);
+    g_cmd_table[idx++] = ARK_SHELL_CMD("touch", cmd_vfs_touch,
+        "Create an empty file: touch <path>", 2);
+    g_cmd_table[idx++] = ARK_SHELL_CMD("stat", cmd_vfs_stat,
+        "Show file type, size and time: stat <path>", 2);
 #endif /* ARKRTOS_USE_VFS */
 
 #if ARKRTOS_USE_MINIAPP

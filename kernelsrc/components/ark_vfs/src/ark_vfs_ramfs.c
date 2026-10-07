@@ -25,7 +25,7 @@
 #define ARK_RAMFS_MAX_FILES     8
 #endif
 #ifndef ARK_RAMFS_MAX_DIRS
-#define ARK_RAMFS_MAX_DIRS      4
+#define ARK_RAMFS_MAX_DIRS      8
 #endif
 /* Follows the core's fd table by default: if this were smaller, running out
  * of core fds would be masked by running out of filesystem handles first,

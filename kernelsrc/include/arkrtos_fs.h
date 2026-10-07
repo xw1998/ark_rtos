@@ -134,6 +134,9 @@ int32 arkrtos_fs_close_write(void);
 /** @brief Remove a file. @return 0 on success, -1 (not found / is a dir) */
 int32 arkrtos_fs_remove(const char *path);
 
+/** @brief Create a directory. @return 0 on success, -1 (exists / bad path) */
+int32 arkrtos_fs_mkdir(const char *path);
+
 /** @brief Callback for arkrtos_fs_list(); returns 0 to continue, -1 to stop */
 typedef int (*arkrtos_fs_list_cb_t)(const char *name, uint32 size, uint8 is_dir, void *arg);
 
