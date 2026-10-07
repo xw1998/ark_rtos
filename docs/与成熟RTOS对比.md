@@ -50,9 +50,9 @@
 | 20 | **运行期安装 / 卸载应用与驱动** | ✗ | △（`dlmodule` 动态模块） | ✗ | **✓（主线能力）**（镜像池 + 安装器 + 版本把关 + 无缝升级） |
 | 21 | 文件系统里跑小程序 | ✗ | ✗ | ✗ | **✓（独有）**（`arkrtos_mini`，不装槽位、多实例） |
 | 22 | 设备间互发现 / RPC / 流（软总线） | ✗（+TCP 另说） | △（软件包） | △（网络子系统） | **✓**（ark_softbus 组件，MCU 档已上板） |
-| 23 | 单元测试框架 | ✗ | ✓（utest + CI） | ✓（ztest + Twister） | **✗ 欠账**（见 §三-④；已有 `tools/ci_gate.py` 门禁，但不是用例框架） |
+| 23 | 单元测试框架 | ✗ | ✓（utest + CI） | ✓（ztest + Twister） | **✓**（板端 `utest`：用例自动注册 + 断言记账，`utest run` 上板 9/9；`utest-host` 门禁验框架本身的记账） |
 | 24 | 支持的架构 | 极广（40+） | 广 | ARM/RISC-V/x86/ARC/… | Cortex-M3/M4/M7（RISC-V / LoongArch 抽象层已就绪，移植实现待补） |
-| 25 | 主构建工具链 | 任意（Keil/GCC/IAR） | SCons / MDK | CMake + west | **Keil MDK（AC5/AC6）；GCC/Make 工程待补（见 §三-⑤）** |
+| 25 | 主构建工具链 | 任意（Keil/GCC/IAR） | SCons / MDK | CMake + west | **Keil MDK（AC5/AC6）+ GNU Make / arm-none-eabi-gcc（F427 例程，见 §三-⑤ 与 [GCC构建指南](GCC构建指南.md)）** |
 
 ---
 
@@ -63,8 +63,8 @@
 | ① | 流缓冲 / 消息缓冲 | **欠账** | 计划补：一个单读单写的字节流缓冲（带阻塞/超时与触发水位），面向 ISR→任务场景 |
 | ② | 固定块内存池 | **已补（内核侧）** | `arkrtos_mempool`：固定块、零碎片、不依赖堆；错误口径为非法释放拒绝且不动池状态；shell `mpool` 自检 9/9 上板通过。App/驱动经 SVC 使用的通道尚未开放 |
 | ③ | 低功耗 / tickless | **欠账** | 计划补：idle 时若下一次唤醒 > 1 tick，则推迟 SysTick 并进入低功耗，唤醒后补偿 |
-| ④ | 单元测试框架 | **欠账** | 归入"按软件标准测试"专项：在门禁之外加一套板端用例框架（对标 utest 的形态） |
-| ⑤ | GCC / Make 样例工程 | **欠账** | 独立专项：F427 的 GCC+Make 工程（内核 + App + 驱动 + 小程序） |
+| ④ | 单元测试框架 | **已补** | 板端 `utest` 框架：用例自动注册、统一断言宏、上板 `utest run` 汇总（9 用例，F427 上板 9/9）；另有 `utest-host` 门禁用宿主 gcc 验框架记账。见 [单元测试框架](单元测试框架.md) |
+| ⑤ | GCC / Make 样例工程 | **已补** | F427 的内核工程已带 GNU Make 构建（`example/stm32f427/kernel/ARKRTOS_TEST/GCC`），`sources.mk` 由 `tools/gen_gcc_sources.py` 从 uvprojx 生成；工具链、用法与三个坑见 [GCC构建指南](GCC构建指南.md) |
 | ⑥ | 任务通知 | **定位差** | 不做：事件 + 信号量的组合已能覆盖，且新增一套 IPC 会稀释"装应用"这条主线 |
 | ⑦ | SMP / 多核 | **定位差** | 不做：目标是单核 MCU 上的应用安装模型 |
 | ⑧ | 蓝牙 / 完整网络栈 | **定位差** | 不做第一方实现；已有 lwIP 接入点与 socket/select 兼容层，需要时外挂 |
