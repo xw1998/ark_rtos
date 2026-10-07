@@ -37,6 +37,22 @@
 #define ARK_VFS_STRICT_ARGS     0
 #endif
 
+/** @brief Merge child mount points into their parent directory listing.
+ *
+ *  With this on, "ls /" lists the mounts whose target is a direct child of
+ *  "/" (e.g. "/dev", "/proc") even though the root filesystem was never told
+ *  they were mounted over it.  It costs two bytes per open directory
+ *  (ARK_VFS_MAX_FDS * 2 in total) and nothing at all for directories that
+ *  have no child mounts.  Set to 0 to compile the merging out completely: the
+ *  library then behaves exactly as it did before this option existed. */
+#ifndef ARK_VFS_MERGE_MOUNTS
+#define ARK_VFS_MERGE_MOUNTS    1
+#endif
+
+#if ARK_VFS_MERGE_MOUNTS && (ARK_VFS_MAX_MOUNTS > 8)
+#error "ARK_VFS_MERGE_MOUNTS packs the child-mount set into a uint8_t; widen the mask or lower ARK_VFS_MAX_MOUNTS."
+#endif
+
 #define ARK_VFS_VERSION_MAJOR   0
 #define ARK_VFS_VERSION_MINOR   1
 #define ARK_VFS_VERSION_PATCH   0

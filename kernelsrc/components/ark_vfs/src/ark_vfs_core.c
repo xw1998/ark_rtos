@@ -34,6 +34,15 @@ struct ark_vfs_fd_slot {
 static struct ark_vfs_mnt    g_mounts[ARK_VFS_MAX_MOUNTS];
 static uint8_t               g_mount_used[ARK_VFS_MAX_MOUNTS];
 static struct ark_vfs_fd_slot g_fds[ARK_VFS_MAX_FDS];
+
+#if ARK_VFS_MERGE_MOUNTS
+/* Per-directory merge state, indexed by fd.  A bitmask of the child mounts
+ * (bit i = g_mounts[i]) and the cursor used to walk them.  Kept out of
+ * struct ark_vfs_fd_slot on purpose: that layout is pointer-aligned, and two
+ * extra bytes inside it would grow every slot by a full word. */
+static uint8_t               g_dir_mask[ARK_VFS_MAX_FDS];
+static uint8_t               g_dir_idx[ARK_VFS_MAX_FDS];
+#endif
 static ark_vfs_hooks_t       g_hooks;
 static ark_size_t            g_open_count;
 static uint8_t               g_inited;
@@ -95,6 +104,10 @@ void ark_vfs_init(const ark_vfs_hooks_t *hooks)
         g_fds[i].flags = 0u;
         g_fds[i].mnt = NULL;
         g_fds[i].file = NULL;
+#if ARK_VFS_MERGE_MOUNTS
+        g_dir_mask[i] = 0u;
+        g_dir_idx[i] = 0u;
+#endif
     }
     g_open_count = 0u;
 
@@ -526,6 +539,122 @@ struct ark_vfs_mnt *ark_vfs_next_mount(struct ark_vfs_mnt *prev)
     return NULL;
 }
 
+#if ARK_VFS_MERGE_MOUNTS
+/* ------------------------------------------------------------
+ * Mount-point merging.
+ *
+ * A mount whose target is a direct child of a directory has to appear as an
+ * entry of that directory, the way "/dev" shows up in "ls /" on Linux.  The
+ * parent filesystem does not know it was mounted over, so the core
+ * synthesises the entry here rather than asking the parent for an empty
+ * placeholder directory: the parent may be read-only, and a placeholder would
+ * outlive an unmount as a stray empty directory.
+ * ------------------------------------------------------------ */
+
+/* True when "target" is a direct child of the normalised directory "dir":
+ * dir "/" and target "/x", or target == dir + "/x" - always exactly one
+ * component deeper, never more. */
+static int ark_p_child_of_dir(const char *target, const char *dir)
+{
+    ark_size_t dlen = ark_p_strlen(dir);
+    const char *rest;
+
+    if (dlen == 0u)
+    {
+        return 0;
+    }
+    if ((dlen == 1u) && (dir[0] == '/'))
+    {
+        if (target[0] != '/')
+        {
+            return 0;
+        }
+        rest = target + 1;
+    }
+    else
+    {
+        if (ark_p_strncmp(target, dir, dlen) != 0)
+        {
+            return 0;
+        }
+        if (target[dlen] != '/')
+        {
+            return 0;
+        }
+        rest = target + dlen + 1;
+    }
+    if (*rest == '\0')
+    {
+        return 0;
+    }
+    while (*rest != '\0')
+    {
+        if (*rest == '/')
+        {
+            return 0;       /* deeper than one component */
+        }
+        rest++;
+    }
+    return 1;
+}
+
+/* Last component of a normalised target: "/dev" -> "dev", "/a/b" -> "b".
+ * The root mount "/" yields an empty name and is never anybody's child. */
+static const char *ark_p_mount_base(const char *target)
+{
+    const char *p = target;
+    const char *last = target;
+
+    while (*p != '\0')
+    {
+        if (*p == '/')
+        {
+            last = p;
+        }
+        p++;
+    }
+    return last + 1;
+}
+
+/* Bitmask of the mounts whose target is a direct child of "dir". */
+static uint8_t ark_p_dir_mask(const char *dir)
+{
+    uint8_t mask = 0u;
+    int i;
+
+    for (i = 0; i < ARK_VFS_MAX_MOUNTS; i++)
+    {
+        if ((g_mount_used[i] != 0u) &&
+            (ark_p_child_of_dir(g_mounts[i].target, dir) != 0))
+        {
+            mask |= (uint8_t)(1u << i);
+        }
+    }
+    return mask;
+}
+
+/* True when a name read from the parent filesystem is shadowed by a child
+ * mount of the same name.  The mount wins, as it does on Linux, so the name
+ * is listed once - by the merge phase - not twice. */
+static int ark_p_shadowed(const char *name, uint8_t mask)
+{
+    int i;
+
+    for (i = 0; i < ARK_VFS_MAX_MOUNTS; i++)
+    {
+        if ((mask & (uint8_t)(1u << i)) == 0u)
+        {
+            continue;
+        }
+        if (ark_p_strcmp(name, ark_p_mount_base(g_mounts[i].target)) == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+#endif /* ARK_VFS_MERGE_MOUNTS */
+
 /* ------------------------------------------------------------
  * fd table
  * ------------------------------------------------------------ */
@@ -544,6 +673,10 @@ static int32_t ark_p_fd_alloc(struct ark_vfs_mnt *mnt, struct ark_vfs_file *file
             g_fds[i].flags = (uint8_t)flags;
             g_fds[i].mnt = mnt;
             g_fds[i].file = file;
+#if ARK_VFS_MERGE_MOUNTS
+            g_dir_mask[i] = 0u;
+            g_dir_idx[i] = 0u;
+#endif
             g_open_count++;
             return i;
         }
@@ -648,6 +781,19 @@ int32_t ark_vfs_open(const char *path, int flags)
         ark_p_exit(token);
         return fd;
     }
+
+#if ARK_VFS_MERGE_MOUNTS
+    if (is_dir != 0)
+    {
+        char dirnorm[ARK_VFS_PATH_MAX];
+
+        if (ark_vfs_normalize(path, dirnorm, (ark_size_t)sizeof(dirnorm)) == ARK_VFS_OK)
+        {
+            g_dir_mask[fd] = ark_p_dir_mask(dirnorm);
+            g_dir_idx[fd] = 0u;
+        }
+    }
+#endif
 
     ark_p_exit(token);
     return fd;
@@ -1028,6 +1174,9 @@ int32_t ark_vfs_readdir(int fd, struct ark_vfs_dirent *ent)
     struct ark_vfs_fd_slot *slot;
     int32_t r;
     void *token;
+#if ARK_VFS_MERGE_MOUNTS
+    uint8_t mask;
+#endif
 
     if (ent == NULL)
     {
@@ -1050,9 +1199,64 @@ int32_t ark_vfs_readdir(int fd, struct ark_vfs_dirent *ent)
         ark_p_exit(token);
         return ARK_E_NOSYS;
     }
+
     r = slot->mnt->fs->readdir(slot->file, ent);
+#if ARK_VFS_MERGE_MOUNTS
+    mask = g_dir_mask[fd];
+    /* Drop parent entries that a child mount shadows, so a name is listed
+     * once (from the mount) rather than twice.  A directory with no child
+     * mounts keeps mask == 0 and takes the plain path below. */
+    while ((r == ARK_VFS_OK) && (mask != 0u) &&
+           (ark_p_shadowed(ent->name, mask) != 0))
+    {
+        r = slot->mnt->fs->readdir(slot->file, ent);
+    }
+#endif
+    if (r == ARK_VFS_OK)
+    {
+        ark_p_exit(token);
+        return ARK_VFS_OK;
+    }
+    if (r != ARK_E_NOENT)
+    {
+        ark_p_exit(token);
+        return r;               /* a real read error, not the end of listing */
+    }
+#if ARK_VFS_MERGE_MOUNTS
+    if (mask != 0u)
+    {
+        /* Parent filesystem exhausted: emit the mounted children, one per
+         * call, in mount-table order.  A mount unmounted mid-walk simply
+         * disappears from the rest of the listing. */
+        while ((int)g_dir_idx[fd] < ARK_VFS_MAX_MOUNTS)
+        {
+            int i = (int)g_dir_idx[fd];
+            const char *base;
+            ark_size_t nlen;
+
+            g_dir_idx[fd] = (uint8_t)(i + 1);
+            if (((mask & (uint8_t)(1u << i)) == 0u) || (g_mount_used[i] == 0u))
+            {
+                continue;
+            }
+            base = ark_p_mount_base(g_mounts[i].target);
+            nlen = ark_p_strlen(base);
+            if ((nlen == 0u) || ((nlen + 1u) > (ark_size_t)ARK_VFS_NAME_MAX))
+            {
+                continue;       /* cannot be represented; skip, do not fake */
+            }
+            ark_p_memcpy(ent->name, base, nlen + 1u);
+            ent->mode = (uint32_t)(ARK_S_IFDIR | ARK_S_DEFAULT_DIR);
+            ent->size = 0;
+            ent->uid  = 0u;
+            ent->gid  = 0u;
+            ark_p_exit(token);
+            return ARK_VFS_OK;
+        }
+    }
+#endif
     ark_p_exit(token);
-    return r;
+    return ARK_E_NOENT;
 }
 
 int32_t ark_vfs_closedir(int fd)
