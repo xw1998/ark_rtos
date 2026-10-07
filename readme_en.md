@@ -58,6 +58,9 @@ per item.
 | 32-bit tick wraparound | Injected so that `arkrtos_kernel_tick` wraps; the two `APP_ALIVE` lines around it are exactly 5.000 s apart | [Scheduler notes](docs/调度器说明.md) section 2.3 |
 | Device tree | On the F427 board the `dt` command prints 20 nodes (model / compatible / reg / enabled flag) exactly as written in `dts/stm32f427.dts` | [Device tree](docs/设备树.md) |
 | Two boards, one source | F427 and F401 both build from the same kernel sources (F401 `Code=46526`) | This file, "Verification status" |
+| On-board unit tests | `utest run` on F427 -> **9 matched / 9 passed / 0 failed**, 73 assertions; the `utest-host` gate checks the framework's bookkeeping | [Unit test framework](docs/单元测试框架.md) |
+| Hardware safe state on app crash (the "last will") | On F427, after an app crashes on a deliberate violation the kernel runs its will while reaping the task: `hwsafe` reports `neutralized=6 last_owner=12` and the LED visibly goes off | [Hardware safe state](docs/App崩溃硬件安全与遗言机制.md) |
+| Cross-device soft bus | Two nodes in one F427 firmware, `bus selftest` **all 10 stages PASS** (`checks 56, failed 0`), `bus info` reports `ark_softbus 18c6ccf` | [Soft bus](docs/软总线接入.md) |
 
 ## Highlights
 
@@ -104,6 +107,14 @@ per item.
 - **Upgrade while running**: two mini apps can hand a control loop over (one state record plus one
   request record, governed by three hard rules) - the old version releases, the new one takes over,
   with no downtime and no reset of the controlled variable
+- **Hardware safe state on app crash (the "last will")**: when an app controlling hardware (a motor,
+  a relay, ...) crashes, the **kernel** - not the dead app - runs either a safety callback the driver
+  registered or a will the app declared, driving the device back to a safe state; the "planned
+  handover" path of a seamless upgrade only unregisters the entry and does not twitch the hardware.
+  Off by default
+- **Cross-device soft bus**: events, remote calls and a data plane (a synced copy of
+  `ark_softbus`), wired up through three board hooks plus the `bus` shell command, trimmed by an MCU
+  profile. Off by default
 - **Kernel decoupled from silicon**: an RT-Thread-style layering where the kernel has zero chip
   dependencies, so a port touches only `board/`
 
@@ -834,6 +845,8 @@ Closed on hardware:
 | Concurrent VFS ports | Two writers plus a read-only third reader hammering one path: the reader must see both **complete** payloads (`vfs.conc_saw_both`); two clean boot self-tests at `pass=128 fail=0`, `sched` consistent, `fault` empty (see [docs/VFS路径命名空间.md](docs/VFS路径命名空间.md)) |
 | Fixed-slot overwrite install by the resident installer (`SHELL_ENABLE=0`) | On an `INSTALLER_FIXED_SLOT=0` variant: at boot `fixed slot 0 holds a running image (slot 0): stopping it first`, then `fixed slot 0 cleared, send the file now`; overwriting no longer produces `err -4` and the image autostarts normally; a second frame in the same power cycle is cleanly refused (`one image already installed this boot: reboot before sending another one` plus `drained 1932 B of the rejected frame`) |
 | Seamless upgrade while running | Two mini apps (`SEAMLESS_V1` / `SEAMLESS_V2`) hand the control loop over: V1 alone runs at 10.7 ms per iteration, V2 at 5.9 ms after taking over; handover gaps of 27/31/224/407 ms; the iteration counter stays continuous (`it=994` -> `994`); the controlled variable `pv` never resets; `guard starves=0`; the number of `fault` lines is unchanged across the handover. Counter-examples: the old version cannot take control back, a version that times out releases nothing within 5000 ms, and a residual request is withdrawn (see [docs/无缝升级例程.md](docs/无缝升级例程.md)) |
+| Hardware safe state on app crash (last will) | `HWSAFE_DEMO`: the app opens `led0`, lights it and declares a will (turn it off), then deliberately violates its region -> stopped by the MPU -> fault recovery kills the task; the kernel runs the will while reaping it, `hwsafe` reports `neutralized=6 last_owner=12`, `fault` goes `MEMFAULT` -> `RECOVER` x3 -> `TASKKILL` -> `APPDISABLED`, and the LED visibly goes off (two independent fresh installs, commit `c021168`) |
+| Soft bus (two nodes in one firmware) | `bus selftest` on F427 passes all 10 stages (`checks 56, failed 0`); `bus info` reports `ark_softbus 18c6ccf`, matching the synced copy |
 
 Still not verified on hardware, or not closed:
 
@@ -844,6 +857,14 @@ Still not verified on hardware, or not closed:
   verification
 - **A real `install <slot>` placement check in fixed-slot mode** (the slot table takes effect and is
   listed by `pool`, but the step "the image lands exactly at the configured address" has not been run)
+- **Per-channel evidence for the last-will mechanism**: on the Ark RTOS side only the will path
+  (channel B) of `HWSAFE_DEMO` has been exercised; separate evidence for the driver callback
+  (channel A), the `will`/`cb`/`none` split counts and "a mini app exiting normally takes the
+  planned-handover path" were **not obtained on Ark RTOS** (all three have been verified on hardware
+  on the svcrtos_nano side, see that repo's same-named document)
+- **A two-node soft bus over a physical wire**: the board has only one USART1 and the kernel console
+  owns it, so there is no spare UART; only the in-firmware loopback has been verified. Two nodes over a
+  real serial line (two boards, or board + host) is **not verified** (see [docs/软总线接入.md](docs/软总线接入.md) section 7)
 
 The documentation index is [docs/README.md](docs/README.md).
 
@@ -864,6 +885,9 @@ The documentation index is [docs/README.md](docs/README.md).
 | Write socket / select code | [socket与select兼容层](docs/socket与select兼容层.md) |
 | Add a mini app that lives in the file system and runs on demand | [小程序设计](docs/小程序设计.md) |
 | Build an upgrade that happens while running | [无缝升级例程](docs/无缝升级例程.md) |
+| Keep hardware out of a dangerous state when an app crashes | [App崩溃硬件安全与遗言机制](docs/App崩溃硬件安全与遗言机制.md) |
+| Let devices discover each other, publish events, call remotely and stream data (soft bus) | [软总线接入](docs/软总线接入.md) |
+| Run unit tests on the board and add your own | [单元测试框架](docs/单元测试框架.md) |
 | Port to another chip | [Ark RTOS移植手册](Ark RTOS移植手册.md) |
 | Look up API signatures and parameters | [api/Ark RTOS_API参考.md](docs/api/Ark RTOS_API参考.md) |
 | Drive the board from an automated workflow (including AI agent workflows) | [skills/arkrtos/SKILL.md](skills/arkrtos/SKILL.md) |

@@ -50,6 +50,8 @@ Ark RTOS 把固件拆成**内核 / 驱动 / 应用**三块可以各自独立升�
 | 设备树 | F427 板上 `dt` 命令打印 20 个节点（model / compatible / reg / enabled/disabled），与 `dts/stm32f427.dts` 一致 | [设备树](docs/设备树.md) |
 | 双板同源 | F427 与 F401 同一份内核源码均编译通过（F401 `Code=46526`） | 本文 §验证状态 |
 | 板端单元测试 | F427 上 `utest run` → **9 matched / 9 passed / 0 failed**，73 条断言；`utest-host` 门禁验框架记账 | [单元测试框架](docs/单元测试框架.md) |
+| App 崩溃的硬件安全态（"遗言"） | F427 上 App 越权崩溃后内核在收尸时执行遗言，`hwsafe` 报 `neutralized=6 last_owner=12`，LED 目视由亮转灭 | [App崩溃硬件安全与遗言机制](docs/App崩溃硬件安全与遗言机制.md) |
+| 跨设备软总线 | F427 板内两节点 `bus selftest` **10 项全 PASS**（`checks 56, failed 0`），`bus info` 报 `ark_softbus 18c6ccf` | [软总线接入](docs/软总线接入.md) |
 
 ## 核心特性
 
@@ -74,6 +76,8 @@ Ark RTOS 把固件拆成**内核 / 驱动 / 应用**三块可以各自独立升�
 - **文件系统与 VFS**：内置 littlefs + NOR 块设备，`arkrtos_fs` 门面之上是 ark_vfs 的路径命名空间；文件类 POSIX（`open` / `read` / `write` / `stat` / `dirent`）直接打到 VFS
 - **小程序**：文件系统里的第三种用户态应用——不安装、不占槽位，从卷里读进 RAM 就执行，退出即把两块内存（代码块 + RAM 块）还给内核；支持多实例、崩溃禁用与开机自启
 - **运行中升级**：两个小程序之间可以交接控制权（状态记录 + 请求记录两个文件，三条硬规则），旧版让出、新版接手，期间不停机、受控量不回零
+- **App 崩溃的硬件安全态（"遗言"）**：App 控制硬件（电机 / 继电器……）时崩溃，由**内核**在任务收尸时执行驱动注册的"中和"回调或 App 声明过的遗言，把设备带回安全态；无缝升级的"计划内交接"只摘台账、不抖动硬件。默认关
+- **跨设备软总线**：事件 / 远程调用 / 数据平面三层（`ark_softbus` 同步副本），板级三钩子 + `bus` 命令，MCU 档按需裁剪。默认关
 - **内核与芯片解耦**：采用 RT-Thread 类似的分层架构，内核零芯片依赖，移植只需修改 board/ 目录
 
 ## 例程一览
@@ -724,12 +728,16 @@ STM32F427VGTx @96 MHz，DAPLink（SWD 两线，无 SWO）经 mdkdebug 的 SWD tr
 | VFS 端口并发锁 | 两个写者 + 一个只读的第三方读者同时压同一条路径：读者必须看到两种**完整**载荷（`vfs.conc_saw_both`），两次干净开机自检 `pass=128 fail=0`，`sched` 一致、`fault` 无记录（见 [docs/VFS路径命名空间.md](docs/VFS路径命名空间.md)） |
 | 常驻安装器的固定槽覆盖安装（`SHELL_ENABLE=0`） | `INSTALLER_FIXED_SLOT=0` 变体上板：上电先 `fixed slot 0 holds a running image (slot 0): stopping it first` → `fixed slot 0 cleared, send the file now`；覆盖安装不再出现 `err -4`，镜像装入后正常自启；同一上电周期内第二帧被干净拒绝（`one image already installed this boot: reboot before sending another one` + `drained 1932 B of the rejected frame`） |
 | 运行中无缝升级 | 两个小程序（`SEAMLESS_V1` / `SEAMLESS_V2`）交接控制权：V1 独占 10.7 ms/轮、V2 接管后 5.9 ms/轮；交接空洞 27/31/224/407 ms；迭代计数逐字连续（`it=994` → `994`）；受控量 `pv` 未回零；`guard starves=0`；交接前后 `fault` 行数不变。反例侧：旧版抢不回控制权、新版超时后 5000 ms 内无人释放、残留请求已撤回（见 [docs/无缝升级例程.md](docs/无缝升级例程.md)） |
+| App 崩溃的硬件安全态（遗言） | `HWSAFE_DEMO`：App 打开 `led0` 点亮并声明遗言（关灯）后故意越权 → 被 MPU 拦下 → 故障恢复杀任务；内核收尸时执行遗言，`hwsafe` 报 `neutralized=6 last_owner=12`，`fault` 走 `MEMFAULT` → `RECOVER`×3 → `TASKKILL` → `APPDISABLED`，LED 目视由亮转灭（两次独立新装复现，提交 `c021168`） |
+| 软总线（板内两节点） | F427 上 `bus selftest` 10 项全 PASS（`checks 56, failed 0`），`bus info` 报 `ark_softbus 18c6ccf` 与同步副本一致 |
 
 仍未上板验证或未闭环的项：
 
 - **真实以太网收发**：板级无可用 PHY（`board/stm32f427/` 下没有 PHY 驱动、MDIO 读写、`eth_` 接口与 RMII 引脚分配），网络路径跑的是回环网卡，未做真实链路收发验证（见 [docs/lwIP协议栈接入.md](docs/lwIP协议栈接入.md) §1）
 - **故障恢复的「连续重启 3 次禁用」**策略未做专项真机验证
 - **固定槽位模式下一次真实 `install <slot>` 的落点复验**（槽表已生效并被 `pool` 列出，但「装进去正好落在配置地址」这一环还没跑）
+- **遗言机制的通道拆分取证**：Ark 侧只走过 `HWSAFE_DEMO` 的遗言（通道 B）路径，驱动回调（通道 A）单独取证、`will`/`cb`/`none` 拆分计数与「小程序正常退出走计划内交接」均**未在 Ark 侧取到**（该三者已在 svcrtos_nano 侧落地上板，见 nano 同名文档）
+- **软总线的物理线两节点**：板上只有一路 USART1 且被内核控制台独占，无空闲 UART，故只验证了板内 loopback；真实串口线上两节点（两块板 / 板 + PC）**未验证**（见 [docs/软总线接入.md](docs/软总线接入.md) §7）
 
 文档索引见 [docs/README.md](docs/README.md)。
 
@@ -751,6 +759,9 @@ STM32F427VGTx @96 MHz，DAPLink（SWD 两线，无 SWO）经 mdkdebug 的 SWD tr
 | 写 socket / select 程序 | [socket与select兼容层](docs/socket与select兼容层.md) |
 | 加一个「放在文件系统里、想跑就跑」的小程序 | [小程序设计](docs/小程序设计.md) |
 | 做运行中升级 | [无缝升级例程](docs/无缝升级例程.md) |
+| App 崩溃后硬件怎么被带离危险态 | [App崩溃硬件安全与遗言机制](docs/App崩溃硬件安全与遗言机制.md) |
+| 让设备之间互相发现、发事件、远程调用、传数据（软总线） | [软总线接入](docs/软总线接入.md) |
+| 在板上跑单元测试、加自己的用例 | [单元测试框架](docs/单元测试框架.md) |
 | 换一颗芯片 | [Ark RTOS移植手册](Ark RTOS移植手册.md) |
 | 查 API 签名与参数 | [api/Ark RTOS_API参考.md](docs/api/Ark RTOS_API参考.md) |
 | 让自动化流程（含 AI agent 工作流）驱动这块板子 | [skills/arkrtos/SKILL.md](skills/arkrtos/SKILL.md) |
