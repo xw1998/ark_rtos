@@ -477,6 +477,55 @@ def check_devicetree_generated():
         ok("devicetree-generated", "%d board(s) match their DTS" % len(boards))
 
 
+# ---------------------------------------------------------------- check 8
+HOST_CC_CANDIDATES = (
+    "D:/mingw/MinGW/bin/gcc.exe",
+    "C:/mingw/MinGW/bin/gcc.exe",
+)
+
+def _find_host_cc():
+    import shutil
+    env = os.environ.get("ARKRTOS_HOST_CC")
+    if env and os.path.exists(env):
+        return env
+    for cand in HOST_CC_CANDIDATES:
+        if os.path.exists(cand):
+            return cand
+    return shutil.which("gcc")
+
+def check_utest_host():
+    """The utest framework's own accounting must be provably correct on the host.
+
+    tools/utest_host_selftest.c drives the real kernelsrc/src/arkrtos_utest.c
+    with a known number of passes / failures / skips / assertions and checks the
+    report, so a framework regression is caught without a board in the loop.
+    A missing host compiler is a FAIL, not a skip: an unrun check is not a pass.
+    """
+    import tempfile
+    cc = _find_host_cc()
+    if not cc:
+        fail("utest-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        exe = os.path.join(td, "utest_host_selftest.exe" if os.name == "nt"
+                               else "utest_host_selftest")
+        cmd = [cc]
+        if "mingw" in cc.replace("\\", "/").lower():
+            cmd.append("-B" + os.path.dirname(cc))
+        cmd += ["-std=gnu11", "-Ikernelsrc/include", "-o", exe,
+                "tools/utest_host_selftest.c", "kernelsrc/src/arkrtos_utest.c"]
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            fail("utest-host", "selftest did not build: %s"
+                 % (r.stderr or "").strip().splitlines()[-1:])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode == 0 and "HOST-SELFTEST OK" in txt:
+            ok("utest-host", "framework accounting verified on host")
+        else:
+            fail("utest-host", "selftest failed: %s" % txt.strip()[:160])
+
 def main(argv):
     do_build = "--build" in argv
     uv4 = None
@@ -495,6 +544,7 @@ def main(argv):
     check_no_partition_include_in_app()
     check_config_generated()
     check_devicetree_generated()
+    check_utest_host()
     if do_build:
         check_builds(uv4)
 
