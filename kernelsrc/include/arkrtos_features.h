@@ -172,6 +172,16 @@
 #define ARKRTOS_MINI_MAX                2u
 #endif
 
+/* 小程序装载时，每读 ARKRTOS_MINI_YIELD_CHUNKS 个分块就放开一次调度器锁、
+ * 再重新拿回，让更高优先级的任务（例如正在跑的控制回路）在两次分块读之间
+ * 拿到 CPU。单次分块读（open/read/close 一整段）本身在锁内是原子的，所以
+ * 放开锁不会让两个装载者交错读镜像；两次读之间也没有需要保护的中间状态。
+ * 0 = 关闭：整段装载期间一直持锁，体积与行为与本开关引入之前完全一致。
+ * 默认 1：每个分块让出一次——这是 mini run 期间控制回路不再被整段冻结的原因。*/
+#ifndef ARKRTOS_MINI_YIELD_CHUNKS
+#define ARKRTOS_MINI_YIELD_CHUNKS       1u
+#endif
+
 /* POSIX / Windows 兼容层（kernelsrc/sdk/posix）。关掉后 App 只能用
  * 原生 oslib，不能 include <pthread.h> 那一套 */
 #ifndef ARKRTOS_USE_POSIX

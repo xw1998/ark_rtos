@@ -15,9 +15,12 @@
 *
 *          **同一时刻可以有多个**（数量编译期 ARKRTOS_MINI_MAX，运行期只能收紧）：
 *          实例表 g_mini[] 一项一个小程序，每项自己一组块（借还都带 ptable 下标，
-*          互不共用）。但**装载是串行的**——装载期间持调度器锁（文件系统只有一份
-*          缓存，两个任务交错读镜像会把彼此的窗口顶偏），所以「多个」是同时**运行**
-*          多个，不是同时装载多个；串行由 g_mini_busy 这道全局闸门保证。
+*          互不共用）。但**装载是串行的**——由 g_mini_busy 这道全局闸门保证同一时刻
+*          只有一次装载/拆除在跑，所以「多个」是同时**运行**多个，不是同时装载多个。
+*          文件系统只有一份缓存，所以**单次读**（arkrtos_fs_read_at）必须在调度器锁内
+*          完成、不能被打断；但两次读之间没有需要保护的中间状态，故装载循环每读满
+*          ARKRTOS_MINI_YIELD_CHUNKS 个分块就解锁一次再重新加锁，让控制回路等更高优先级
+*          的任务在装载途中也能拿到 CPU（详见该开关的注释）。
 *
 *          崩溃禁用：与带槽位的 App 用**同一套**阈值（分区表 cfg_restart_max），
 *          不新造数字。小程序没有槽位，身份改用**镜像路径的 FNV-1a 哈希**，
@@ -52,6 +55,14 @@
 /* 负载一次读进来的字节数：与文件系统的单文件读缓存（ARKRTOS_FS_CACHE_SIZE）
  * 同宽，每段恰好喂满一次小缓存，不制造第二个中转缓冲。 */
 #define ARKRTOS_MINI_CHUNK        (ARKRTOS_FS_CACHE_SIZE)
+
+/* 装载循环每读多少个分块让出一次调度器（解锁→重新加锁）：默认值与完整缘由
+ * 见 arkrtos_features.h 的 ARKRTOS_MINI_YIELD_CHUNKS（0 = 关闭）。这里只做一次
+ * 存在性检查——若哪天包含顺序变了，宁可编不过，也不要让未定义悄悄等于 0
+ * 把让出静默关掉。 */
+#ifndef ARKRTOS_MINI_YIELD_CHUNKS
+#error "ARKRTOS_MINI_YIELD_CHUNKS must be defined by arkrtos_features.h"
+#endif
 
 /* 实例状态。LOAD 有两层含义，都归在「已占项但不在跑」里：
  *   - 正在装载（已占项，尚未起任务）；
@@ -222,6 +233,9 @@ int32 arkrtos_mini_run(const char *path)
     uint32 delta_rom;
     uint32 delta_ram;
     uint32 i;
+#if (ARKRTOS_MINI_YIELD_CHUNKS > 0)
+    uint32 yield_credits = 0u;      /* 装载循环里的分块计数 */
+#endif
     int32  free_i = -1;
     int32  ret;
     int32  task_id;
@@ -436,6 +450,21 @@ int32 arkrtos_mini_run(const char *path)
          * 让它在这一轮里完整地被打上补丁。块里尾部那几个字节此刻还是标称形态，
          * 重读覆盖它没有副作用。 */
         cur = next;
+
+#if (ARKRTOS_MINI_YIELD_CHUNKS > 0)
+        /* 分块之间没有要保护的中间状态：单次 read_at 已经原子完成，补丁只写
+         * 自己借来的代码块。所以可以安全地放开调度器一小会儿：解锁会立即触发
+         * 一次任务切换（arkrtos_sched_unlock_internal），让控制回路这类更高
+         * 优先级的任务跑一轮，装载停顿因此被切成分块大小的小片。下一次 read_at
+         * 的原子性由本轮末尾的重新加锁保证。 */
+        yield_credits++;
+        if(yield_credits >= (uint32)ARKRTOS_MINI_YIELD_CHUNKS)
+        {
+            yield_credits = 0u;
+            (void)arkrtos_sched_unlock_internal();
+            arkrtos_sched_lock_internal();
+        }
+#endif
     }
 
     if(crc != p_hdr->crc32)
