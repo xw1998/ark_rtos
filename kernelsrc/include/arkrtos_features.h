@@ -289,6 +289,13 @@
 #define ARKRTOS_USE_AUDIT               1
 #endif
 
+/* 板端单元测试框架（arkrtos_utest.c）：用例自动注册 + 断言记账 + 汇总，
+ * 对齐 RT-Thread utest / Zephyr ztest 的形态。关掉后框架与 shell 的 utest 命令都不参与编译，
+ * 体积与行为零变化。自动注册需要构造函数支持（armclang/GCC）。 */
+#ifndef ARKRTOS_USE_UTEST
+#define ARKRTOS_USE_UTEST               1
+#endif
+
 /* ============================================================
  * 五、依赖校验
  * @brief 关错了开关要在这里报出来，而不是等到链接期一个 undefined symbol

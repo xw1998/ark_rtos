@@ -88,6 +88,8 @@ SRCS := \
   kernelsrc/src/arkrtos_mini.c \
   kernelsrc/src/arkrtos_installer.c \
   kernelsrc/src/arkrtos_log.c \
+  kernelsrc/src/arkrtos_utest.c \
+  kernelsrc/src/arkrtos_utest_cases.c \
   kernelsrc/src/arkrtos_softbus.c \
   board/stm32f427/arkrtos_bus_port.c \
   kernelsrc/components/ark_softbus/src/ark_bus_util.c \

@@ -57,6 +57,7 @@
 #endif
 #if ARKRTOS_USE_MEMPOOL
 #include "arkrtos_mempool.h"
+#include "arkrtos_utest.h"
 #endif
 #include "arkrtos_crash.h"
 #include "arkrtos_partition.h"
@@ -1843,6 +1844,41 @@ static int cmd_mpool(int argc, char *argv[])
 }
 
 #endif /* ARKRTOS_USE_MEMPOOL */
+
+/* ============================================================
+ * utest：板端单元测试
+ * ============================================================ */
+#if ARKRTOS_USE_UTEST
+static void utest_out(const char *s)
+{
+    sh_out(s);
+    sh_out("\r\n");
+}
+
+static int cmd_utest(int argc, char *argv[])
+{
+    const char *sub = (argc >= 2) ? argv[1] : "run";
+
+    /* 框架不依赖 printf：把每一行交给 shell 的控制台汇 */
+    ark_utest_set_output(utest_out);
+
+    if(strcmp(sub, "list") == 0)
+    {
+        (void)ark_utest_list();
+        return 0;
+    }
+    if(strcmp(sub, "run") == 0)
+    {
+        ark_utest_summary_t s;
+        uint32 failed = ark_utest_run((argc >= 3) ? argv[2] : (const char *)0, &s);
+        /* 返回失败用例数，让脚本能靠返回值判定红绿 */
+        return (failed == 0u) ? 0 : (int)failed;
+    }
+
+    ark_shell_printf("\r\nusage: utest [list | run [pattern]]\r\n");
+    return -1;
+}
+#endif /* ARKRTOS_USE_UTEST */
 
 static int cmd_pool(int argc, char *argv[])
 {
@@ -4973,7 +5009,7 @@ static int register_kernel_commands(void)
     int idx = g_cmd_count;
     /* Upper bound with every optional feature compiled in.  Kept above the
      * real count so a future command cannot silently overflow g_cmd_table. */
-    int need = 47;
+    int need = 48;
 
     if((idx + need) > ARK_SHELL_MAX_COMMANDS)
     {
@@ -5086,6 +5122,10 @@ static int register_kernel_commands(void)
     g_cmd_table[idx++] = ARK_SHELL_CMD("mpool", cmd_mpool,
         "Fixed-block memory pools: mpool [list | test]", 2);
 #endif /* ARKRTOS_USE_MEMPOOL */
+#if ARKRTOS_USE_UTEST
+    g_cmd_table[idx++] = ARK_SHELL_CMD("utest", cmd_utest,
+        "On-board unit tests: utest [list | run [pattern]]", 3);
+#endif /* ARKRTOS_USE_UTEST */
 
     g_cmd_table[idx++] = ARK_SHELL_CMD("ps", cmd_ps,
         "List kernel tasks and installed images", 1);
