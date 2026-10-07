@@ -22,6 +22,7 @@
 | 决定编什么功能、把上限改大改小 | [Kconfig配置系统.md](Kconfig配置系统.md)（符号名=宏名、依赖约束、零行为变化迁移） |
 | 说清板子上有什么硬件、驱动按 compatible 找设备 | [设备树.md](设备树.md)（DTS 子集、dtc_lite、arkrtos_dt API、`dt` 命令） |
 | 查 API 签名与参数 | [api/Ark RTOS_API参考.md](api/Ark RTOS_API参考.md) |
+| 想知道它和 Linux 比还差什么、哪些是欠账哪些是定位差 | [与Linux差距盘点.md](与Linux差距盘点.md) |
 
 ## 目录结构
 
@@ -39,6 +40,7 @@ docs/
 ├── Kconfig配置系统.md                       # 【设计说明】Kconfig 菜单、纯 Python 工具链、符号=宏名、注入点、依赖关系、数量限制迁移
 ├── 设备树.md                                # 【设计说明】DTS 子集与 dtc_lite、arkrtos_dt 查询 API、生成与校验、`dt` 命令、验证状态
 ├── 内核Shell控制台使用说明.md               # 【操作手册】console 命令（info/app/drv/task/sched/fault/install/log/pool/trace/cfg）
+├── 与Linux差距盘点.md                      # 【设计说明】与 Linux 逐维度差距表 + 欠账排序 + 明确不做的取舍
 ├── img/                                   # 【实测图】根 README §调度表现 引用（必须入库，勿被忽略规则吞掉）
 │   ├── sched-overview.png                 # 整体调度时间线 + 切换间隔（4.97 s 窗口）
 │   ├── sched-switch-detail.png            # 单次切换细节 + App 任务被调度进来跑 72.7 µs

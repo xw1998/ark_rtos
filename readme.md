@@ -746,6 +746,7 @@ STM32F427VGTx @96 MHz，DAPLink（SWD 两线，无 SWO）经 mdkdebug 的 SWD tr
 | 看调度器怎么实现、实测代价账怎么算 | [调度器说明](docs/调度器说明.md) |
 | 看内存保护怎么起效、App 越权会怎样 | [内存保护与App越权验证](docs/内存保护与App越权验证.md) |
 | 把 Linux / Windows 上的 C 程序搬过来 | [POSIX与Windows兼容层说明](docs/POSIX与Windows兼容层说明.md) |
+| 想知道它和 Linux 比还差什么 | [与Linux差距盘点](docs/与Linux差距盘点.md) |
 | 写 socket / select 程序 | [socket与select兼容层](docs/socket与select兼容层.md) |
 | 加一个「放在文件系统里、想跑就跑」的小程序 | [小程序设计](docs/小程序设计.md) |
 | 做运行中升级 | [无缝升级例程](docs/无缝升级例程.md) |
