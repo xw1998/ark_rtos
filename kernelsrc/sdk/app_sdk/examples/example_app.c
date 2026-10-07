@@ -6,8 +6,8 @@
 
 void AppMain(void)
 {
-    int32 com1 = arkrtos_dev_open("COM1", 0);
-    int32 led  = arkrtos_dev_open("LED", 0);
+    int32 com1 = arkrtos_dev_open("ttyS0", 0);
+    int32 led  = arkrtos_dev_open("led0", 0);
     int32 evt  = arkrtos_event_create("my_event");
     uint8 buf[64];
     uint32 tick = 0;

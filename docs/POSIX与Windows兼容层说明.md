@@ -420,7 +420,7 @@ id  type  state    auto  task  crash  held  base        size     ram         ent
 `<fcntl.h>` / `<unistd.h>` / `<sys/stat.h>` / `<dirent.h>`，跑到 `/`（ramfs）上做一遍自检。
 
 它盖的事（详见该目录 `README.md`）：建/写/读回、`lseek(SEEK_SET/SEEK_END)`、`stat`/`fstat` 的类型位与长度、
-`opendir("/")` + `readdir` 找到同一个名字、把 `/dev/COM1` 当路径打开、写一行字并靠 `fstat` 的
+`opendir("/")` + `readdir` 找到同一个名字、把 `/dev/ttyS0` 当路径打开、写一行字并靠 `fstat` 的
 `S_ISCHR` 把它与普通文件区分开、不存在的路径必须 `-1`/`NULL` 且 `errno==ENOENT`、`unlink` 后同一路径必须失败。
 
 ### 11.1 一个只有工具链才会暴露的 include 坑
@@ -440,7 +440,7 @@ id  type  state    auto  task  crash  held  base        size     ram         ent
 **上板验证过**（F427，`UV4 -f` 写开发槽 3，复位后抓串口）：
 
 ```
-  ok   open /dev/COM1 as path      
+  ok   open /dev/ttyS0 as path      
   ok   fstat is char device        
   ok   single write is not an error
 [fs_demo] device opened as a path
@@ -448,8 +448,8 @@ id  type  state    auto  task  crash  held  base        size     ram         ent
 fs_demo: pass=32 fail=0
 ```
 
-设备名是 `/dev/COM1`，不是想当然的 `/dev/uart0`：`/dev` 列出的名字直接来自内核设备注册表
-（本板是 `LED` / `LED2` / `LED3` / `COM1` / `BLED`），"编译通过"证明不了名字存在——第一版上板就是
+设备名是 `/dev/ttyS0`，不是想当然的 `/dev/uart0`：`/dev` 列出的名字直接来自内核设备注册表
+（本板是 `led0` / `led1` / `led2` / `ttyS0` / `BLED`），"编译通过"证明不了名字存在——第一版上板就是
 `FAIL open /dev/uart0 as path (saw -1)`。改成先 `opendir("/dev")` 枚举、再按注册名打开。
 
 烧录方式与 `POSIX_DEMO` 同：`UV4 -f example/stm32f427/app_sdk/FS_DEMO/MDK-ARM/fs_demo.uvprojx`，
@@ -458,7 +458,7 @@ fs_demo: pass=32 fail=0
 ### 11.3 上板暴露的两个真问题
 
 **① 按路径打开的字符设备，`fstat` 回 -1。** 第一版 `FAIL fstat is char device (saw -1)`。
-按路径打开的 `/dev/COM1` 是 VFS 句柄，而 `fstat` 对 VFS 句柄一律 `lseek(SEEK_END)` 求大小——字符设备
+按路径打开的 `/dev/ttyS0` 是 VFS 句柄，而 `fstat` 对 VFS 句柄一律 `lseek(SEEK_END)` 求大小——字符设备
 没有位置可 seek，于是 -1，正好与 `sys/stat.h` 里"设备报 `S_IFCHR`、size 0"的说法自相矛盾。
 修法：`open` 时先 `arkrtos_path_stat` 把 `S_IFMT` 类型位缓存进 fd 槽，`fstat` 按缓存回答，
 只有普通文件才去 seek 求长度。

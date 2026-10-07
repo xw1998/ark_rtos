@@ -43,7 +43,7 @@
 
 /* Which device the C library's output goes to, and with what parameter. */
 #ifndef ARKRTOS_GLUE_CONSOLE_DEV
-#define ARKRTOS_GLUE_CONSOLE_DEV     "COM1"
+#define ARKRTOS_GLUE_CONSOLE_DEV     "ttyS0"
 #endif
 #ifndef ARKRTOS_GLUE_CONSOLE_PARAM
 #define ARKRTOS_GLUE_CONSOLE_PARAM   (115200u)

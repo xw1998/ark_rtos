@@ -535,7 +535,7 @@ typedef char arkrtos_pool_unit_check[
  *          使闭环从“烧录器刷固件”变为“设备自己安装”。
  * ============================================================ */
 #define INSTALLER_ENABLE         1               /* 1=启用内核内安装任务 */
-#define INSTALLER_DEV_NAME       "COM1"          /* 镜像接收设备名 */
+#define INSTALLER_DEV_NAME       "ttyS0"          /* 镜像接收设备名 */
 #define INSTALLER_DEV_ARG        115200          /* 设备打开参数（波特率） */
 #define INSTALLER_TASK_PRIORITY  12              /* 安装任务优先级（低于 App，不抢 CPU） */
 #define INSTALLER_TASK_STACK_SIZE (1024 * 2)     /* 安装任务栈大小（字节，取自内核 RAM） */
@@ -564,7 +564,7 @@ typedef char arkrtos_pool_unit_check[
 #ifndef SHELL_ENABLE
 #define SHELL_ENABLE             1               /* 1=启用内核 shell 控制台任务 */
 #endif
-#define SHELL_DEV_NAME           "COM1"          /* 控制台串口设备名 */
+#define SHELL_DEV_NAME           "ttyS0"          /* 控制台串口设备名 */
 #define SHELL_DEV_ARG            115200          /* 设备打开参数（波特率） */
 #define SHELL_TASK_PRIORITY      14              /* 控制台优先级（最低：人机交互，不抢业务 CPU） */
 #define SHELL_TASK_STACK_SIZE    (1024 * 3)      /* 控制台任务栈（字节，取自内核 RAM） */

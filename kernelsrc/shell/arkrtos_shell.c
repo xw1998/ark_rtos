@@ -2989,13 +2989,44 @@ static int vfs_usage(void)
     return -1;
 }
 
+/* Resolve an input path against the shell cwd into a VFS path.  Returns -1
+ * (leaving out untouched) when the result cannot fit, rather than letting a
+ * silent truncation point at a different file. */
+static int shell_vfs_path(const char *in, char *out, uint32 cap)
+{
+    char rpath[ARK_SHELL_PATH_SIZE];
+
+    ark_shell_resolve(&g_shell, in, rpath, sizeof(rpath));
+    if(strlen(rpath) >= (size_t)cap)
+    {
+        return -1;
+    }
+    (void)strcpy(out, rpath);
+    return 0;
+}
+
+typedef struct {
+    uint32 count;
+    uint32 longfmt;
+} vfs_ls_ctx_t;
+
 static int vfs_ls_cb(const char *name, uint32 is_dir, uint32 size, void *arg)
 {
-    uint32 *count = (uint32 *)arg;
+    vfs_ls_ctx_t *c = (vfs_ls_ctx_t *)arg;
 
-    ark_shell_printf("  %-20s %8u%s\r\n", name, (unsigned)size,
-                     (is_dir != 0u) ? "  <dir>" : "");
-    (*count)++;
+    if(c->longfmt != 0u)
+    {
+        /* Long format: type char, size, name.  The VFS keeps no owner or
+         * timestamp, so those columns are not printed at all. */
+        ark_shell_printf("  %c  %8u  %s\r\n", (is_dir != 0u) ? 'd' : '-',
+                         (unsigned)size, name);
+    }
+    else
+    {
+        ark_shell_printf("  %-20s %8u%s\r\n", name, (unsigned)size,
+                         (is_dir != 0u) ? "  <dir>" : "");
+    }
+    c->count++;
     return 0;
 }
 
@@ -3092,29 +3123,91 @@ static int cmd_vfs_umount(int argc, char *argv[])
 
 static int cmd_vfs_ls(int argc, char *argv[])
 {
-    uint32 count = 0u;
-    const char *dir = (argc >= 2) ? argv[1] : "/";
-    int32 rc;
+    vfs_ls_ctx_t ctx;
+    const char *dir = 0;
+    char   vpath[ARKRTOS_VFS_PATH_MAX];
+    uint32 show_all = 0u;
+    uint32 shown;
+    int32  rc;
+    int    i;
 
-    if(argc > 2)
+    ctx.count   = 0u;
+    ctx.longfmt = 0u;
+
+    /* Linux habit: options may be grouped ("-la") and may precede or follow
+     * the path.  Anything else is a usage error rather than a guess. */
+    for(i = 1; i < argc; i++)
     {
-        return vfs_usage();
+        const char *a = argv[i];
+
+        if((a[0] == '-') && (a[1] != '\0'))
+        {
+            const char *p;
+
+            for(p = a + 1; *p != '\0'; p++)
+            {
+                if(*p == 'l')
+                {
+                    ctx.longfmt = 1u;
+                }
+                else if(*p == 'a')
+                {
+                    show_all = 1u;
+                }
+                else
+                {
+                    return vfs_usage();
+                }
+            }
+        }
+        else if(dir == 0)
+        {
+            dir = a;
+        }
+        else
+        {
+            return vfs_usage();
+        }
     }
 
-    rc = arkrtos_vfs_list(dir, vfs_ls_cb, &count);
+    if(shell_vfs_path(dir, vpath, sizeof(vpath)) != 0)
+    {
+        sh_out("ls: path too long\r\n");
+        return 1;
+    }
+
+    if(show_all != 0u)
+    {
+        /* ls -a also lists the POSIX pseudo-entries; their sizes are not
+         * invented, so the size column carries "-". */
+        if(ctx.longfmt != 0u)
+        {
+            ark_shell_printf("  %c  %8s  %s\r\n", 'd', "-", ".");
+            ark_shell_printf("  %c  %8s  %s\r\n", 'd', "-", "..");
+        }
+        else
+        {
+            ark_shell_printf("  %-20s %8s%s\r\n", ".", "-", "  <dir>");
+            ark_shell_printf("  %-20s %8s%s\r\n", "..", "-", "  <dir>");
+        }
+    }
+
+    rc = arkrtos_vfs_list(vpath, vfs_ls_cb, &ctx);
     if(rc != 0)
     {
         return vfs_fail("ls", rc);
     }
 
-    ark_shell_printf("  %u entr%s\r\n", (unsigned)count,
-                     (count == 1u) ? "y" : "ies");
+    shown = ctx.count + ((show_all != 0u) ? 2u : 0u);
+    ark_shell_printf("  %u entr%s\r\n", (unsigned)shown,
+                     (shown == 1u) ? "y" : "ies");
     return 0;
 }
 
 static int cmd_vfs_cat(int argc, char *argv[])
 {
     static uint8 buf[256];      /* 静态：不再向 shell 任务的栈要一段 */
+    char   vpath[ARKRTOS_VFS_PATH_MAX];
     int32 fd;
     int32 n;
     int32 crc;
@@ -3126,7 +3219,13 @@ static int cmd_vfs_cat(int argc, char *argv[])
         return vfs_usage();
     }
 
-    fd = arkrtos_vfs_open_read(argv[1]);
+    if(shell_vfs_path(argv[1], vpath, sizeof(vpath)) != 0)
+    {
+        sh_out("cat: path too long\r\n");
+        return 1;
+    }
+
+    fd = arkrtos_vfs_open_read(vpath);
     if(fd < 0)
     {
         return vfs_fail("cat", fd);
@@ -3172,14 +3271,21 @@ static int cmd_vfs_cat(int argc, char *argv[])
 
 static int cmd_vfs_rm(int argc, char *argv[])
 {
-    int32 rc;
+    char   vpath[ARKRTOS_VFS_PATH_MAX];
+    int32  rc;
 
     if(argc != 2)
     {
         return vfs_usage();
     }
 
-    rc = arkrtos_vfs_remove(argv[1]);
+    if(shell_vfs_path(argv[1], vpath, sizeof(vpath)) != 0)
+    {
+        sh_out("rm: path too long\r\n");
+        return 1;
+    }
+
+    rc = arkrtos_vfs_remove(vpath);
     if(rc != 0)
     {
         return vfs_fail("rm", rc);
@@ -3558,13 +3664,372 @@ static int cmd_mini(int argc, char *argv[])
 }
 #endif /* ARKRTOS_USE_MINIAPP */
 
+/* ============================================================
+ * pwd：打印当前工作目录
+ * ============================================================ */
+static int cmd_pwd(int argc, char *argv[])
+{
+    char cwd[ARK_SHELL_PATH_SIZE];
+
+    (void)argc;
+    (void)argv;
+
+    ark_shell_get_cwd(&g_shell, cwd, sizeof(cwd));
+    ark_shell_printf("%s\r\n", cwd);
+    return 0;
+}
+
+#if ARKRTOS_USE_VFS
+/* ============================================================
+ * cd：切换工作目录
+ *
+ * 解析相对路径 / ~ / .. 之后经 VFS 校验目标确实是目录才改，
+ * 否则保持原目录不变并给出 Linux 习惯的错误文案。
+ * ============================================================ */
+static int cmd_cd(int argc, char *argv[])
+{
+    char   path[ARK_SHELL_PATH_SIZE];
+    char   vpath[ARKRTOS_VFS_PATH_MAX];
+    uint32 mode = 0u;
+    uint32 size = 0u;
+
+    if(argc > 2)
+    {
+        sh_out("cd: too many arguments\r\n");
+        return 1;
+    }
+
+    ark_shell_resolve(&g_shell, (argc >= 2) ? argv[1] : "", path, sizeof(path));
+    (void)strncpy(vpath, path, sizeof(vpath) - 1u);
+    vpath[sizeof(vpath) - 1u] = '\0';
+
+    if(arkrtos_vfs_app_stat(vpath, &size, &mode) != 0)
+    {
+        ark_shell_printf("cd: %s: No such file or directory\r\n", path);
+        return 1;
+    }
+
+    if((mode & ARKRTOS_VFS_S_IFMT) != ARKRTOS_VFS_S_IFDIR)
+    {
+        ark_shell_printf("cd: %s: Not a directory\r\n", path);
+        return 1;
+    }
+
+    ark_shell_set_cwd(&g_shell, path);
+    return 0;
+}
+#endif /* ARKRTOS_USE_VFS */
+
+/* ============================================================
+ * history：打印命令历史（最旧 → 最新）
+ * ============================================================ */
+static int cmd_history(int argc, char *argv[])
+{
+    int i;
+
+    (void)argc;
+    (void)argv;
+
+    for(i = 0; i < g_shell.history.count; i++)
+    {
+        ark_shell_printf("%5d  %s\r\n", i + 1, g_shell.history.buf[i]);
+    }
+    return 0;
+}
+
+/* ============================================================
+ * uname：系统与构建信息
+ * ============================================================ */
+static int cmd_uname(int argc, char *argv[])
+{
+    int all = ((argc >= 2) && (strcmp(argv[1], "-a") == 0));
+
+    if(all != 0)
+    {
+        ark_shell_printf("Ark RTOS arkrtos " ARKRTOS_VERSION_STRING
+                         " %s %s %s\r\n",
+                         ARKRTOS_ARCH_NAME, __DATE__, __TIME__);
+    }
+    else
+    {
+        ark_shell_printf("Ark RTOS " ARKRTOS_VERSION_STRING " %s %s %s\r\n",
+                         ARKRTOS_ARCH_NAME, __DATE__, __TIME__);
+    }
+    return 0;
+}
+
+/* ============================================================
+ * free：内存概览
+ *
+ * 内核不拥有堆，所以这里没有 Linux 的 Mem/Swap 可比。给出的只是这台
+ * 设备真实持有的账：镜像池的分区口径统计，以及内核 RAM 段的容量。
+ * 内核 RAM 的 used/free 内核不记录，一律打 "n/a"，绝不编一个数字。
+ * ============================================================ */
+static int cmd_free(int argc, char *argv[])
+{
+    const arkrtos_partition_table_t *pt = arkrtos_ptable_get();
+    uint32 used = 0u;
+    uint32 total = 0u;
+    uint32 frag = 0u;
+
+    (void)argc;
+    (void)argv;
+
+    (void)arkrtos_ptable_stats(&used, &total, &frag);
+
+    sh_out("\r\n              total     used     free\r\n");
+    ark_shell_printf("pool(image)   %-8u  %-8u %-8u  (%u%% used, %u fragments)\r\n",
+                     (unsigned)total, (unsigned)used,
+                     (unsigned)((total >= used) ? (total - used) : 0u),
+                     (unsigned)((total != 0u) ? ((used * 100u) / total) : 0u),
+                     (unsigned)frag);
+    ark_shell_printf("kernel RAM    %-8u  %-8s %-8s  (partition window)\r\n",
+                     (unsigned)pt->kernel_ram_size, "n/a", "n/a");
+    return 0;
+}
+
+/* ============================================================
+ * ps：内核任务与已装镜像一览
+ *
+ * 内核任务没有名字、没有控制终端、也没有累计 CPU 时间，所以只列内核
+ * 确实知道的列；缺的列不编（不是完整 ps）。
+ * ============================================================ */
+static int cmd_ps(int argc, char *argv[])
+{
+    const arkrtos_partition_table_t *pt = arkrtos_ptable_get();
+    int32 i;
+
+    (void)argc;
+    (void)argv;
+
+    ark_shell_printf("\r\n  PID  PRIO  STATE     ENTRY\r\n");
+    for(i = 0; i < arkrtos_task_count; i++)
+    {
+        ark_shell_printf("  %-4d %-5u %-8s  0x%08X\r\n",
+                         (int)(i + 1),
+                         (unsigned)arkrtos_task_table[i].priority,
+                         task_state_name((uint32)arkrtos_task_table[i].status),
+                         (unsigned)arkrtos_task_table[i].entry);
+    }
+
+    ark_shell_printf("\r\n  SLOT TYPE  STATE     TASK  ENTRY\r\n");
+    for(i = 0; (i < (int32)pt->slot_max) && (i < (int32)ARKRTOS_SLOT_ARRAY_MAX); i++)
+    {
+        if(pt->slot_type[i] == ARKRTOS_SLOT_FREE)
+        {
+            continue;
+        }
+        ark_shell_printf("  %-4d %-4s  %-8s  %-4u  0x%08X\r\n",
+                         (int)i, slot_type_name(pt->slot_type[i]),
+                         slot_state_name(pt->slot_state[i]),
+                         (unsigned)pt->slot_task_id[i],
+                         (unsigned)pt->slot_entry[i]);
+    }
+    return 0;
+}
+
+#if ARKRTOS_USE_VFS
+/* 只在真的有一卷挂载时才去问用量；关掉 FS 时这段整个编掉。 */
+static int df_volume_stat(uint32 *total, uint32 *used)
+{
+#if ARKRTOS_USE_FS
+    if((arkrtos_fs_mounted() != 0u) && (arkrtos_fs_stat(total, used) == 0))
+    {
+        return 1;
+    }
+#else
+    (void)total;
+    (void)used;
+#endif
+    return 0;
+}
+
+/* ============================================================
+ * df：挂载点与卷用量
+ * ============================================================ */
+static int cmd_df(int argc, char *argv[])
+{
+    int32  n = arkrtos_vfs_mount_count();
+    int32  i;
+    uint32 total = 0u;
+    uint32 used = 0u;
+    int    have_fs;
+
+    (void)argc;
+    (void)argv;
+
+    if(n <= 0)
+    {
+        sh_out("\r\nno mount points\r\n");
+        return 0;
+    }
+
+    have_fs = df_volume_stat(&total, &used);
+
+    sh_out("\r\nFilesystem  Size      Used      Free      Mounted on\r\n");
+    for(i = 0; i < n; i++)
+    {
+        arkrtos_vfs_mount_info_t mi;
+
+        if(arkrtos_vfs_mount_info((uint32)i, &mi) != 0)
+        {
+            continue;
+        }
+
+        if((have_fs != 0) && (mi.fs != 0) && (strcmp(mi.fs, "littlefs") == 0))
+        {
+            ark_shell_printf("%-11s %-9u %-9u %-9u %s\r\n", mi.fs,
+                             (unsigned)total, (unsigned)used,
+                             (unsigned)((total >= used) ? (total - used) : 0u),
+                             mi.target);
+        }
+        else
+        {
+            /* No usage figure is known for this mount; "-" is honest. */
+            ark_shell_printf("%-11s %-9s %-9s %-9s %s\r\n",
+                             (mi.fs != 0) ? mi.fs : "?", "-", "-", "-",
+                             mi.target);
+        }
+    }
+    return 0;
+}
+#endif /* ARKRTOS_USE_VFS */
+
+/* ============================================================
+ * which：把别名解析成真实命令
+ * ============================================================ */
+static int cmd_which(int argc, char *argv[])
+{
+    const ark_shell_cmd_t *c;
+    const char *a1 = 0;
+    const char *a2 = 0;
+    const char *target;
+
+    if(argc < 2)
+    {
+        sh_out("usage: which <command>\r\n");
+        return 1;
+    }
+
+    target = ark_shell_alias_target(argv[1], &a1, &a2);
+    if(target != 0)
+    {
+        ark_shell_printf("%s: aliased to %s", argv[1], target);
+        if(a1 != 0) { ark_shell_printf(" %s", a1); }
+        if(a2 != 0) { ark_shell_printf(" %s", a2); }
+        sh_out("\r\n");
+        return 0;
+    }
+
+    c = ark_shell_find_command(argv[1]);
+    if(c != 0)
+    {
+        ark_shell_printf("%s\r\n", c->name);
+        return 0;
+    }
+
+    /* Like which(1): print nothing and fail. */
+    return 1;
+}
+
+/* ============================================================
+ * man：打印命令帮助
+ * ============================================================ */
+static int cmd_man(int argc, char *argv[])
+{
+    const ark_shell_cmd_t *c;
+    const char *a1 = 0;
+    const char *a2 = 0;
+    const char *target;
+
+    if(argc < 2)
+    {
+        sh_out("What manual page do you want?\r\n");
+        return 1;
+    }
+
+    target = ark_shell_alias_target(argv[1], &a1, &a2);
+    if(target != 0)
+    {
+        c = ark_shell_find_command(target);
+        ark_shell_printf("%s: aliased to %s", argv[1], target);
+        if(a1 != 0) { ark_shell_printf(" %s", a1); }
+        if(a2 != 0) { ark_shell_printf(" %s", a2); }
+        sh_out("\r\n");
+        if(c != 0) { ark_shell_printf("  %s - %s\r\n", c->name, c->help); }
+        return 0;
+    }
+
+    c = ark_shell_find_command(argv[1]);
+    if(c == 0)
+    {
+        ark_shell_printf("No manual entry for %s\r\n", argv[1]);
+        return 1;
+    }
+
+    ark_shell_printf("%s - %s\r\n", c->name, c->help);
+    return 0;
+}
+
+#if ARKRTOS_USE_LOG
+/* ============================================================
+ * dmesg：打印内核日志环
+ * ============================================================ */
+static void dmesg_put(const char *data, uint32 len, void *arg)
+{
+    (void)arg;
+    platform_uart_send_buf((const unsigned char *)data, (uint16_t)len);
+}
+
+static int cmd_dmesg(int argc, char *argv[])
+{
+    int clear = 0;
+
+    if(argc >= 2)
+    {
+        if(strcmp(argv[1], "-c") == 0)
+        {
+            clear = 1;
+        }
+        else
+        {
+            sh_out("usage: dmesg [-c]\r\n");
+            return 1;
+        }
+    }
+
+    if(arkrtos_log_ring_capacity() == 0u)
+    {
+        sh_out("\r\nlog ring unavailable (ARKRTOS_USE_LOG_RING is off)\r\n");
+        return 1;
+    }
+
+    if(arkrtos_log_ring_used() == 0u)
+    {
+        sh_out("\r\nlog ring is empty\r\n");
+        return 0;
+    }
+
+    /* The ring is written under the console lock in arkrtos_log_emit(); take
+     * the same lock so a line cannot be spliced mid-dump. */
+    platform_console_begin();
+    (void)arkrtos_log_ring_dump(dmesg_put, 0);
+    platform_console_end();
+
+    if(clear != 0)
+    {
+        arkrtos_log_ring_clear();
+    }
+    return 0;
+}
+#endif /* ARKRTOS_USE_LOG */
+
 static int register_kernel_commands(void)
 {
     int idx = g_cmd_count;
-    int need = 17;
-#if ARKRTOS_USE_VFS
-    need += 5;                  /* mount / umount / ls / cat / rm */
-#endif
+    /* Upper bound with every optional feature compiled in.  Kept above the
+     * real count so a future command cannot silently overflow g_cmd_table. */
+    int need = 36;
 
     if((idx + need) > ARK_SHELL_MAX_COMMANDS)
     {
@@ -3645,6 +4110,31 @@ static int register_kernel_commands(void)
         "Cross-reset crash journal: boots, per-slot fault counts, held slots and"
         " disabled MiniApps", 1);
 #endif /* ARKRTOS_USE_CRASH_LOG */
+
+    g_cmd_table[idx++] = ARK_SHELL_CMD("ps", cmd_ps,
+        "List kernel tasks and installed images", 1);
+    g_cmd_table[idx++] = ARK_SHELL_CMD("pwd", cmd_pwd,
+        "Print the working directory", 1);
+#if ARKRTOS_USE_VFS
+    g_cmd_table[idx++] = ARK_SHELL_CMD("cd", cmd_cd,
+        "Change the working directory: cd [dir]", 2);
+    g_cmd_table[idx++] = ARK_SHELL_CMD("df", cmd_df,
+        "Show mount points and volume usage", 1);
+#endif /* ARKRTOS_USE_VFS */
+    g_cmd_table[idx++] = ARK_SHELL_CMD("history", cmd_history,
+        "Show the command history", 1);
+    g_cmd_table[idx++] = ARK_SHELL_CMD("uname", cmd_uname,
+        "System and build information: uname [-a]", 2);
+    g_cmd_table[idx++] = ARK_SHELL_CMD("free", cmd_free,
+        "Memory summary (kernel image pool + kernel RAM window)", 1);
+    g_cmd_table[idx++] = ARK_SHELL_CMD("which", cmd_which,
+        "Resolve an alias to the real command: which <command>", 2);
+    g_cmd_table[idx++] = ARK_SHELL_CMD("man", cmd_man,
+        "Show a command's help text: man <command>", 2);
+#if ARKRTOS_USE_LOG
+    g_cmd_table[idx++] = ARK_SHELL_CMD("dmesg", cmd_dmesg,
+        "Print the kernel log ring: dmesg [-c]", 2);
+#endif /* ARKRTOS_USE_LOG */
 
     g_cmd_table[idx].name = NULL;
     g_cmd_table[idx].func = NULL;

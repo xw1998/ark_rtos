@@ -1,8 +1,8 @@
 /**
 * @brief Ark RTOS App SDK example - full RTOS feature self test
 * @details A user-mode App that walks through the RTOS services exposed by the
-*          App SDK and reports the result of every step on COM1:
-*            device IO   : three on-board LEDs (LED / LED2 / LED3) + UART
+*          App SDK and reports the result of every step on ttyS0:
+*            device IO   : three on-board LEDs (led0 / led1 / led2) + UART
 *            task        : wait, wait_period, delay
 *            sync        : semaphore, mutex, event
 *            ipc         : message queue
@@ -837,10 +837,10 @@ void AppMain(void)
     /* ---------------------------------------------------------------
      * 1) device IO: three LEDs and the console UART
      * --------------------------------------------------------------- */
-    g_led_r = arkrtos_dev_open("LED", 0);
-    g_led_g = arkrtos_dev_open("LED2", 0);
-    g_led_b = arkrtos_dev_open("LED3", 0);
-    g_con   = arkrtos_dev_open("COM1", 115200);
+    g_led_r = arkrtos_dev_open("led0", 0);
+    g_led_g = arkrtos_dev_open("led1", 0);
+    g_led_b = arkrtos_dev_open("led2", 0);
+    g_con   = arkrtos_dev_open("ttyS0", 115200);
 
     app_puts("\r\n=== Ark RTOS APP_DEMO self test ===\r\n");
 
@@ -863,7 +863,7 @@ void AppMain(void)
      * here - any read on this FIFO competes with the shell's reader and can
      * swallow a command meant for it. */
     {
-        int32 shared = arkrtos_dev_open("COM1", 115200);
+        int32 shared = arkrtos_dev_open("ttyS0", 115200);
         report("dev.open.com1_shared", (shared == g_con), shared);
     }
 
@@ -1827,7 +1827,7 @@ void AppMain(void)
     /* ---------------------------------------------------------------
      * 12) heartbeat: visible activity + periodic status line
      * --------------------------------------------------------------- */
-    app_puts("APP_TEST heartbeat: LED3 toggles 4x/s, line every 5s\r\n");
+    app_puts("APP_TEST heartbeat: led2 toggles 4x/s, line every 5s\r\n");
 
     {
         uint32 beat = 0u;

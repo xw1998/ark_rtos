@@ -21,6 +21,7 @@
 #include "arkrtos_log.h"
 #include "arkrtos_dev.h"
 #include "arkrtos_hal.h"
+#include "arkrtos_task.h"       /* arkrtos_kernel_get_time(): 日志时间戳 */
 #if ARKRTOS_USE_LOG
 
 /* Per-byte budget while the transmit pipe is full. */
@@ -218,15 +219,17 @@ static void arkrtos_log_puts_raw(const char *s)
  * 级别辅助
  * ============================================================ */
 
-static const char *arkrtos_log_level_name(uint32 level)
+/* syslog 优先级：把本模块的级别数值映射到 Linux dmesg 的 <n>。
+ * 3=err 4=warning 6=info 7=debug，与 Linux 内核日志取值一致。 */
+static uint32 arkrtos_log_pri(uint32 level)
 {
     switch(level)
     {
-        case ARKRTOS_LOG_ERROR:   return "E";
-        case ARKRTOS_LOG_WARNING: return "W";
-        case ARKRTOS_LOG_INFO:    return "I";
-        case ARKRTOS_LOG_DEBUG:   return "D";
-        default:                return "?";
+        case ARKRTOS_LOG_ERROR:   return 3u;
+        case ARKRTOS_LOG_WARNING: return 4u;
+        case ARKRTOS_LOG_INFO:    return 6u;
+        case ARKRTOS_LOG_DEBUG:   return 7u;
+        default:                  return 7u;
     }
 }
 
@@ -241,6 +244,92 @@ static const char *arkrtos_log_level_color(uint32 level)
         default:                return ARKRTOS_LOG_COLOR_RESET;
     }
 }
+
+/* ============================================================
+ * dmesg 日志环（ARKRTOS_USE_LOG_RING）
+ *
+ * 存整行格式化日志（含前缀与行尾），满时覆盖最旧。写侧在 emit 里与
+ * 控制台输出共用同一把 console 锁，读侧（shell dmesg）在主循环上下文，
+ * 单核下读写不交错。
+ * ============================================================ */
+#if ARKRTOS_USE_LOG_RING
+static char   g_ring[ARKRTOS_LOG_RING_SIZE];
+static uint32 g_ring_head = 0u;                 /* 下一个写入位置 */
+static uint32 g_ring_used = 0u;                 /* 有效字节数 */
+
+static void arkrtos_log_ring_put(const char *s)
+{
+    uint32 i;
+
+    for(i = 0u; s[i] != '\0'; i++)
+    {
+        g_ring[g_ring_head] = s[i];
+        g_ring_head++;
+        if(g_ring_head >= (uint32)sizeof(g_ring))
+        {
+            g_ring_head = 0u;
+        }
+        if(g_ring_used < (uint32)sizeof(g_ring))
+        {
+            g_ring_used++;
+        }
+    }
+}
+
+uint32 arkrtos_log_ring_capacity(void)
+{
+    return (uint32)sizeof(g_ring);
+}
+
+uint32 arkrtos_log_ring_used(void)
+{
+    return g_ring_used;
+}
+
+void arkrtos_log_ring_clear(void)
+{
+    g_ring_head = 0u;
+    g_ring_used = 0u;
+}
+
+uint32 arkrtos_log_ring_dump(void (*put)(const char *data, uint32 len, void *arg), void *arg)
+{
+    uint32 start;
+    uint32 first;
+
+    if((put == 0) || (g_ring_used == 0u))
+    {
+        return 0u;
+    }
+
+    if(g_ring_used < (uint32)sizeof(g_ring))
+    {
+        /* 未回卷：从 0 开始的连续一段 */
+        put(&g_ring[0], g_ring_used, arg);
+    }
+    else
+    {
+        /* 已回卷：最旧 = head，先到环尾，再从 0 到 head */
+        start = g_ring_head;
+        first = (uint32)sizeof(g_ring) - start;
+        put(&g_ring[start], first, arg);
+        if(start != 0u)
+        {
+            put(&g_ring[0], start, arg);
+        }
+    }
+
+    return g_ring_used;
+}
+#else
+uint32 arkrtos_log_ring_capacity(void) { return 0u; }
+uint32 arkrtos_log_ring_used(void)     { return 0u; }
+void   arkrtos_log_ring_clear(void)    { }
+uint32 arkrtos_log_ring_dump(void (*put)(const char *data, uint32 len, void *arg), void *arg)
+{
+    (void)put; (void)arg; return 0u;
+}
+#endif /* ARKRTOS_USE_LOG_RING */
 
 /* ============================================================
  * 对外接口
@@ -270,7 +359,11 @@ uint32 arkrtos_log_get_level(void)
 
 void arkrtos_log_emit(uint32 level, const char *tag, uint32 line, const char *msg)
 {
-    char head[ARKRTOS_LOG_HEAD_SIZE];
+    char   head[ARKRTOS_LOG_HEAD_SIZE];
+    uint32 ms;
+    uint32 sec;
+    uint32 frac;
+    uint32 pri;
     int32  held;
 
     if(msg == 0)
@@ -290,29 +383,43 @@ void arkrtos_log_emit(uint32 level, const char *tag, uint32 line, const char *ms
         tag = "?";
     }
 
+    /* 时间戳取系统运行时间（ms），形如 [    1.234]，与 Linux dmesg 对齐 */
+    ms   = arkrtos_kernel_get_time();
+    sec  = ms / 1000u;
+    frac = ms % 1000u;
+    pri  = arkrtos_log_pri(level);
+
+    /* dmesg 风格：<颜色>[运行时间] <syslog 优先级><复位>tag:行号 正文
+     * 颜色只覆盖时间戳+优先级这段前缀，正文与 tag:行号 不着色。 */
     if(line != 0u)
     {
-        (void)snprintf(head, sizeof(head), "%s[%s]%s[%s:%u] ",
+        (void)snprintf(head, sizeof(head), "%s[%5u.%03u] <%u>%s%s:%u ",
                        arkrtos_log_level_color(level),
-                       arkrtos_log_level_name(level),
+                       (unsigned)sec, (unsigned)frac, (unsigned)pri,
                        ARKRTOS_LOG_COLOR_RESET,
                        tag, (unsigned)line);
     }
     else
     {
-        (void)snprintf(head, sizeof(head), "%s[%s]%s[%s] ",
+        (void)snprintf(head, sizeof(head), "%s[%5u.%03u] <%u>%s%s ",
                        arkrtos_log_level_color(level),
-                       arkrtos_log_level_name(level),
+                       (unsigned)sec, (unsigned)frac, (unsigned)pri,
                        ARKRTOS_LOG_COLOR_RESET,
                        tag);
     }
 
     /* One output unit = one lock.  Nothing can be spliced into the
-     * middle of a log line. */
+     * middle of a log line.  The dmesg ring is written under the same
+     * lock so a reader never sees a half line. */
     held = arkrtos_console_lock();
     arkrtos_log_puts_raw(head);
     arkrtos_log_puts_raw(msg);
     arkrtos_log_puts_raw("\r\n");
+#if ARKRTOS_USE_LOG_RING
+    arkrtos_log_ring_put(head);
+    arkrtos_log_ring_put(msg);
+    arkrtos_log_ring_put("\r\n");
+#endif
     if(held != 0)
     {
         arkrtos_console_unlock();
@@ -412,5 +519,15 @@ void arkrtos_console_unlock(void)
 uint32 arkrtos_console_busy_count(void)
 {
     return 0u;
+}
+
+/* dmesg ring compiled out with the log.  capacity() answers 0 so the shell
+ * `dmesg` command can say the ring is unavailable rather than print nothing. */
+uint32 arkrtos_log_ring_capacity(void) { return 0u; }
+uint32 arkrtos_log_ring_used(void)     { return 0u; }
+void   arkrtos_log_ring_clear(void)    { }
+uint32 arkrtos_log_ring_dump(void (*put)(const char *data, uint32 len, void *arg), void *arg)
+{
+    (void)put; (void)arg; return 0u;
 }
 #endif /* ARKRTOS_USE_LOG */

@@ -51,6 +51,10 @@ typedef struct ark_shell_s {
     ark_shell_state_t state;                               /* State machine current state */
     int               ctrl_c_flag;                         /* Ctrl+C interrupt flag */
     uart_mode_t       uart_mode;                           /* Current UART working mode */
+    char              cwd[ARK_SHELL_PATH_SIZE];            /* Working directory (Linux prompt) */
+    char              prompt_buf[ARK_SHELL_PROMPT_SIZE];   /* Runtime prompt (editor.prompt points here) */
+    char              status_str[12];                      /* Text of "$?" for expansion */
+    int               last_status;                         /* Last command return value ($?) */
     char              esc_buf[ARK_SHELL_ESC_BUF_SIZE];     /* ESC sequence buffer */
     int               esc_len;                             /* ESC sequence received length */
     uint32_t          esc_start_time;                      /* Timestamp when entering ESC state */
@@ -113,6 +117,36 @@ void ark_shell_set_uart_mode(ark_shell_t *shell, uart_mode_t mode);
  * Can be disabled if platform lacks snprintf
  * ============================================================ */
 void ark_shell_printf(const char *fmt, ...);
+
+/* ============================================================
+ * Working directory / Linux path helpers
+ *
+ * These let kernel command handlers (which only receive argc/argv) work with
+ * the shell working directory: resolve a relative or ~ path to an absolute
+ * normalised path, read/set the cwd, and query aliases and the last status.
+ * ============================================================ */
+
+/* Home directory ("/"). */
+const char *ark_shell_home(void);
+
+/* Copy the working directory into out (always NUL terminated). */
+void        ark_shell_get_cwd(const ark_shell_t *shell, char *out, uint32_t cap);
+
+/* Set the working directory (no file-system check; the caller validates). */
+void        ark_shell_set_cwd(ark_shell_t *shell, const char *path);
+
+/* Resolve "in" against the cwd into an absolute, normalised path.
+ * Handles "", ".", "..", "~", "~/x" and absolute inputs.  No fs check. */
+void        ark_shell_resolve(const ark_shell_t *shell, const char *in,
+                              char *out, uint32_t cap);
+
+/* If name is an alias, return its target command and optional fixed args
+ * (arg1/arg2 may be NULL), else return NULL. */
+const char *ark_shell_alias_target(const char *name,
+                                   const char **arg1, const char **arg2);
+
+/* Last command return value, for "$?". */
+int         ark_shell_last_status(const ark_shell_t *shell);
 
 #ifdef __cplusplus
 }

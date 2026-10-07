@@ -88,8 +88,23 @@ void ark_shell_commands_init(void)
 int cmd_help(int argc, char *argv[])
 {
     int i;
-    (void)argc;
-    (void)argv;
+
+    /* Linux habit: "help <cmd>" prints that one command, not the full list. */
+    if (argc >= 2) {
+        const ark_shell_cmd_t *c = ark_shell_find_command(argv[1]);
+        if (c == NULL) {
+            platform_uart_send_string("\r\n");
+            platform_uart_send_string(argv[1]);
+            platform_uart_send_string(": no such command\r\n");
+            return 127;
+        }
+        platform_uart_send_string("\r\n");
+        platform_uart_send_string(c->name);
+        platform_uart_send_string(" - ");
+        platform_uart_send_string(c->help);
+        platform_uart_send_string("\r\n");
+        return 0;
+    }
 
     platform_uart_send_string("\r\nAvailable commands:\r\n");
     for (i = 0; i < g_cmd_count; i++) {

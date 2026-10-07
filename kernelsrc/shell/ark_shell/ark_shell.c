@@ -31,18 +31,108 @@ static void shell_send_newline(void)
 }
 
 /* ============================================================
+ * Helper: case-insensitive string equality
+ * ============================================================ */
+static int shell_streqci(const char *a, const char *b)
+{
+    while (*a != '\0' && *b != '\0') {
+        char ca = *a;
+        char cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca + 32);
+        if (cb >= 'A' && cb <= 'Z') cb = (char)(cb + 32);
+        if (ca != cb) {
+            return 0;
+        }
+        a++;
+        b++;
+    }
+    return (*a == *b);
+}
+
+/* ============================================================
+ * Command aliases (Linux habits)
+ *
+ * Each alias expands to a target command plus up to two fixed leading
+ * arguments, so "ll" runs "ls -l" and "cls" runs "clear".
+ * ============================================================ */
+typedef struct {
+    const char *name;
+    const char *target;
+    const char *arg1;
+    const char *arg2;
+} ark_shell_alias_t;
+
+static const ark_shell_alias_t g_aliases[] = {
+    { "ll",       "ls",     "-l", 0 },
+    { "la",       "ls",     "-a", 0 },
+    { "dir",      "ls",      0,   0 },
+    { "cls",      "clear",   0,   0 },
+    { "halt",     "reboot",  0,   0 },
+    { "poweroff", "reboot",  0,   0 },
+    { 0, 0, 0, 0 }
+};
+
+const char *ark_shell_alias_target(const char *name,
+                                   const char **arg1, const char **arg2)
+{
+    int i;
+
+    if (arg1 != 0) *arg1 = 0;
+    if (arg2 != 0) *arg2 = 0;
+    if (name == 0) {
+        return 0;
+    }
+    for (i = 0; g_aliases[i].name != 0; i++) {
+        if (shell_streqci(g_aliases[i].name, name)) {
+            if (arg1 != 0) *arg1 = g_aliases[i].arg1;
+            if (arg2 != 0) *arg2 = g_aliases[i].arg2;
+            return g_aliases[i].target;
+        }
+    }
+    return 0;
+}
+
+/* ============================================================
+ * Helper: build the prompt into shell->prompt_buf
+ *
+ * Linux-style: "user@host:cwd$ ", where cwd shows "~" at HOME and the
+ * absolute path elsewhere.  With ARKRTOS_SHELL_PROMPT_LINUX off it is the
+ * plain ARK_SHELL_PROMPT.
+ * ============================================================ */
+static void shell_build_prompt(ark_shell_t *shell)
+{
+#if ARKRTOS_SHELL_PROMPT_LINUX
+    const char *disp = (strcmp(shell->cwd, ARK_SHELL_HOME) == 0) ? "~" : shell->cwd;
+    (void)snprintf(shell->prompt_buf, sizeof(shell->prompt_buf), "%s@%s:%s$ ",
+                   ARK_SHELL_USER, ARK_SHELL_HOSTNAME, disp);
+#else
+    (void)snprintf(shell->prompt_buf, sizeof(shell->prompt_buf), "%s",
+                   ARK_SHELL_PROMPT);
+#endif
+}
+
+/* ============================================================
+ * Helper: set the last command status ("$?")
+ * ============================================================ */
+static void shell_set_status(ark_shell_t *shell, int status)
+{
+    shell->last_status = status;
+    (void)snprintf(shell->status_str, sizeof(shell->status_str), "%d", status);
+}
+
+/* ============================================================
  * Helper: show prompt
  * ============================================================ */
-static void shell_show_prompt(const ark_shell_t *shell)
+static void shell_show_prompt(ark_shell_t *shell)
 {
-    (void)shell;
+    shell_build_prompt(shell);
     platform_console_begin();
 #if ARK_SHELL_ENABLE_COLOR
     platform_uart_send_string(ARK_SHELL_COLOR_PROMPT);
-    platform_uart_send_string(ARK_SHELL_PROMPT);
+    platform_uart_send_string(shell->prompt_buf);
     platform_uart_send_string(ARK_SHELL_COLOR_RESET);
 #else
-    platform_uart_send_string(ARK_SHELL_PROMPT);
+    platform_uart_send_string(shell->prompt_buf);
 #endif
     platform_console_end();
 }
@@ -98,8 +188,14 @@ void ark_shell_init(ark_shell_t *shell, uint32_t baudrate)
     /* Initialize platform UART */
     platform_uart_init(baudrate);
 
-    /* Initialize subsystems */
-    line_editor_init(&shell->editor, ARK_SHELL_PROMPT);
+    /* Initialize subsystems.  The editor points at the runtime prompt
+     * buffer; its contents are rebuilt by shell_build_prompt() whenever the
+     * working directory changes. */
+    (void)strncpy(shell->cwd, ARK_SHELL_HOME, sizeof(shell->cwd) - 1u);
+    shell->cwd[sizeof(shell->cwd) - 1u] = '\0';
+    shell_set_status(shell, 0);
+    shell_build_prompt(shell);
+    line_editor_init(&shell->editor, shell->prompt_buf);
     history_init(&shell->history);
 
     /* Initialize state machine */
@@ -136,8 +232,14 @@ void ark_shell_execute_line(ark_shell_t *shell)
 {
     char *line;
     char *argv[ARK_SHELL_MAX_ARGS];
+    char *xargv[ARK_SHELL_MAX_ARGS];
     int   argc;
+    int   xargc;
+    int   i;
     const ark_shell_cmd_t *cmd;
+    const char *alias_target;
+    const char *alias_a1;
+    const char *alias_a2;
 
     if (shell == NULL) {
         return;
@@ -159,57 +261,71 @@ void ark_shell_execute_line(ark_shell_t *shell)
         return;
     }
 
+    /* Alias expansion: "ll" -> "ls -l", "cls" -> "clear", etc. */
+    alias_target = ark_shell_alias_target(argv[0], &alias_a1, &alias_a2);
+    if (alias_target != NULL) {
+        xargc = 0;
+        xargv[xargc++] = (char *)alias_target;
+        if (alias_a1 != NULL) xargv[xargc++] = (char *)alias_a1;
+        if (alias_a2 != NULL) xargv[xargc++] = (char *)alias_a2;
+        for (i = 1; i < argc && xargc < ARK_SHELL_MAX_ARGS; i++) {
+            xargv[xargc++] = argv[i];
+        }
+    } else {
+        for (i = 0; i < argc && i < ARK_SHELL_MAX_ARGS; i++) {
+            xargv[i] = argv[i];
+        }
+        xargc = argc;
+    }
+
+    /* "$?" expansion: a lone "$?" becomes the previous command's status. */
+    for (i = 0; i < xargc; i++) {
+        if (strcmp(xargv[i], "$?") == 0) {
+            xargv[i] = shell->status_str;
+        }
+    }
+
     /* Lookup command */
-    cmd = ark_shell_find_command(argv[0]);
+    cmd = ark_shell_find_command(xargv[0]);
     if (cmd == NULL) {
         platform_console_begin();
 #if ARK_SHELL_ENABLE_COLOR
         platform_uart_send_string(ARK_SHELL_COLOR_ERROR);
-        platform_uart_send_string("Command not found: ");
-        platform_uart_send_string(argv[0]);
-        platform_uart_send_string(ARK_SHELL_COLOR_RESET);
-        platform_uart_send_string("\r\n");
-#else
-        platform_uart_send_string("Command not found: ");
-        platform_uart_send_string(argv[0]);
-        platform_uart_send_string("\r\n");
 #endif
-        platform_uart_send_string("Type 'help' for available commands.\r\n");
-        platform_console_end();
-    } else {
-        int ret;
-        /* Check argument count */
-        if (cmd->max_args > 0 && argc > cmd->max_args) {
-            platform_console_begin();
+        platform_uart_send_string(xargv[0]);
+        platform_uart_send_string(": command not found\r\n");
 #if ARK_SHELL_ENABLE_COLOR
-            platform_uart_send_string(ARK_SHELL_COLOR_ERROR);
-            platform_uart_send_string("Too many arguments (max ");
-            {
-                char num[12];
-                int  n = 0;
-                int  v = cmd->max_args;
-                int  j;
-                if (v == 0) num[n++] = '0';
-                while (v > 0) { num[n++] = (char)('0' + v % 10); v /= 10; }
-                for (j = n - 1; j >= 0; j--) {
-                    char s[2];
-                    s[0] = num[j];
-                    s[1] = '\0';
-                    platform_uart_send_string(s);
-                }
-            }
-            platform_uart_send_string(")");
-            platform_uart_send_string(ARK_SHELL_COLOR_RESET);
-            platform_uart_send_string("\r\n");
-#else
-            platform_uart_send_string("Too many arguments\r\n");
+        platform_uart_send_string(ARK_SHELL_COLOR_RESET);
 #endif
-            platform_console_end();
-        } else {
-            /* Execute command */
-            ret = cmd->func(argc, argv);
-            (void)ret;
-        }
+        platform_console_end();
+        shell_set_status(shell, 127);
+    } else if ((xargc >= 2) &&
+               (strcmp(xargv[1], "-h") == 0 || strcmp(xargv[1], "--help") == 0)) {
+        /* Linux habit: "<cmd> --help" prints that command's help. */
+        platform_console_begin();
+        platform_uart_send_string(xargv[0]);
+        platform_uart_send_string(" - ");
+        platform_uart_send_string(cmd->help);
+        platform_uart_send_string("\r\n");
+        platform_console_end();
+        shell_set_status(shell, 0);
+    } else if (cmd->max_args > 0 && xargc > cmd->max_args) {
+        char msg[96];
+        (void)snprintf(msg, sizeof(msg), "%s: too many arguments (max %d)\r\n",
+                       xargv[0], cmd->max_args);
+        platform_console_begin();
+#if ARK_SHELL_ENABLE_COLOR
+        platform_uart_send_string(ARK_SHELL_COLOR_ERROR);
+#endif
+        platform_uart_send_string(msg);
+#if ARK_SHELL_ENABLE_COLOR
+        platform_uart_send_string(ARK_SHELL_COLOR_RESET);
+#endif
+        platform_console_end();
+        shell_set_status(shell, 1);
+    } else {
+        /* Execute command */
+        shell_set_status(shell, cmd->func(xargc, xargv));
     }
 
     /* Clear editor, prepare for next line */
@@ -587,4 +703,125 @@ void ark_shell_printf(const char *fmt, ...)
         }
         platform_uart_send_buf((const unsigned char *)buf, (uint16_t)len);
     }
+}
+
+
+/* ============================================================
+ * Working directory / path helpers (see ark_shell.h)
+ * ============================================================ */
+const char *ark_shell_home(void)
+{
+    return ARK_SHELL_HOME;
+}
+
+void ark_shell_get_cwd(const ark_shell_t *shell, char *out, uint32_t cap)
+{
+    if (out == 0 || cap == 0u) {
+        return;
+    }
+    if (shell == 0) {
+        (void)strncpy(out, ARK_SHELL_HOME, cap - 1u);
+        out[cap - 1u] = '\0';
+        return;
+    }
+    (void)strncpy(out, shell->cwd, cap - 1u);
+    out[cap - 1u] = '\0';
+}
+
+void ark_shell_set_cwd(ark_shell_t *shell, const char *path)
+{
+    if (shell == 0 || path == 0) {
+        return;
+    }
+    (void)strncpy(shell->cwd, path, sizeof(shell->cwd) - 1u);
+    shell->cwd[sizeof(shell->cwd) - 1u] = '\0';
+    shell_build_prompt(shell);
+}
+
+int ark_shell_last_status(const ark_shell_t *shell)
+{
+    return (shell != 0) ? shell->last_status : 0;
+}
+
+void ark_shell_resolve(const ark_shell_t *shell, const char *in,
+                       char *out, uint32_t cap)
+{
+    char        tmp[ARK_SHELL_PATH_SIZE * 2];
+    const char *base;
+    const char *rel;
+    const char *p;
+    uint32_t    oi;
+
+    if (out == 0 || cap < 2u) {
+        return;
+    }
+    out[0] = '\0';
+
+    if (in == 0 || in[0] == '\0') {
+        base = (shell != 0) ? shell->cwd : ARK_SHELL_HOME;
+        rel  = "";
+    } else if (in[0] == '~' && (in[1] == '\0' || in[1] == '/')) {
+        base = ARK_SHELL_HOME;
+        rel  = (in[1] == '/') ? (in + 2) : "";
+    } else if (in[0] == '/') {
+        base = "";
+        rel  = in;
+    } else {
+        base = (shell != 0) ? shell->cwd : ARK_SHELL_HOME;
+        rel  = in;
+    }
+
+    if (rel[0] == '\0') {
+        (void)snprintf(tmp, sizeof(tmp), "%s", (base[0] != '\0') ? base : "/");
+    } else if (base[0] == '\0') {
+        (void)snprintf(tmp, sizeof(tmp), "/%s", rel);
+    } else {
+        (void)snprintf(tmp, sizeof(tmp), "%s/%s", base, rel);
+    }
+
+    /* Normalise: keep a leading '/', drop empty and '.', pop on '..'. */
+    oi = 1u;
+    out[0] = '/';
+    p = tmp;
+    while (*p != '\0') {
+        const char *seg;
+        uint32_t    seglen;
+
+        while (*p == '/') {
+            p++;
+        }
+        if (*p == '\0') {
+            break;
+        }
+        seg = p;
+        while (*p != '\0' && *p != '/') {
+            p++;
+        }
+        seglen = (uint32_t)(p - seg);
+
+        if (seglen == 1u && seg[0] == '.') {
+            continue;
+        }
+        if (seglen == 2u && seg[0] == '.' && seg[1] == '.') {
+            while (oi > 1u && out[oi - 1u] != '/') {
+                oi--;
+            }
+            if (oi > 1u) {
+                oi--;
+            }
+            continue;
+        }
+        if (oi > 1u) {
+            if (oi + 1u >= cap) {
+                break;
+            }
+            out[oi++] = '/';
+        }
+        if (oi + seglen >= cap) {
+            break;
+        }
+        memcpy(&out[oi], seg, seglen);
+        oi += seglen;
+    }
+    out[oi] = '\0';
 }

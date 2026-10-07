@@ -337,7 +337,7 @@
             <v6WtE>0</v6WtE>
             <v6Rtti>0</v6Rtti>
             <VariousControls>
-              <MiscControls>-DMDK_TRACE_SWD_EXTERNAL_PLATFORM -DMDK_TRACE_USE_CONFIG_FILE -DLFS_NO_MALLOC -DLFS_NO_ASSERT -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR</MiscControls>
+              <MiscControls>-DMDK_TRACE_SWD_EXTERNAL_PLATFORM -DMDK_TRACE_USE_CONFIG_FILE -DLFS_NO_MALLOC -DLFS_NO_ASSERT -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR -DARKRTOS_LOG_RING_SIZE=512</MiscControls>
               <Define>USE_HAL_DRIVER,STM32F401xx,ARKRTOS_USE_FPU=1,ARKRTOS_BOARD_CONFIG=\"arkrtos_board_config.h\"</Define>
               <Undefine></Undefine>
               <IncludePath>../../../../../kernelsrc/components/mdk_trace;../Core/Inc;../../../../stm32f427/kernel/ARKRTOS_TEST/Drivers/STM32F4xx_HAL_Driver/Inc;../../../../stm32f427/kernel/ARKRTOS_TEST/Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../../../../stm32f427/kernel/ARKRTOS_TEST/Drivers/CMSIS/Device/ST/STM32F4xx/Include;../../../../stm32f427/kernel/ARKRTOS_TEST/Drivers/CMSIS/Include;../../../../../kernelsrc/include;../../../../../kernelsrc/fs;../../../../../kernelsrc/fs/littlefs;../../../../../board/stm32f401;../../../../../config/stm32f401;../../../../../kernelsrc/shell;../../../../../kernelsrc/shell/ark_shell;../../../../../kernelsrc/components/ark_vfs/include;../../../../../kernelsrc/components/ark_vfs/src;../../../../../kernelsrc/components/ark_vfs/port</IncludePath>

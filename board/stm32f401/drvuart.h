@@ -1,5 +1,5 @@
 /**
-* @brief 设备串口驱动模块（STM32F401 板：COM1 = USART2，PA2=TX / PA3=RX）
+* @brief 设备串口驱动模块（STM32F401 板：ttyS0 = USART2，PA2=TX / PA3=RX）
 * @author xw
 * @date 2026.05.03
 */
@@ -13,7 +13,7 @@
 #include "stm32f4xx.h"
 
 typedef enum {
-    UART_DEV_COM1,
+    UART_DEV_TTYS0,
     UART_DEV_NUM
 } uart_object_t;
 

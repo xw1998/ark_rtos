@@ -1,7 +1,7 @@
 /**
 * @file arkrtos_installer.h
 * @brief Ark RTOS 内核内安装任务（方案A）
-* @details 常驻任务从设备（默认 COM1）接收 Ark RTOS 镜像流并安装到空闲槽位，
+* @details 常驻任务从设备（默认 ttyS0）接收 Ark RTOS 镜像流并安装到空闲槽位，
 *          使 App 的落位方式从「烧录器刷固件」变为「设备自己安装」。
 *
 *          接收协议（与 tools/pack_app.py 的输出直接对接）：

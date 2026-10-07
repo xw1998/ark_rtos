@@ -7,6 +7,10 @@
 #ifndef ARK_SHELL_CONFIG_H
 #define ARK_SHELL_CONFIG_H
 
+/* Pull the generated Kconfig header so a Kconfig override reaches this file.
+ * Every default below is #ifndef-guarded, so an absent header changes nothing. */
+#include "arkrtos_autoconf.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -20,10 +24,22 @@ extern "C" {
 #define ARK_SHELL_MAX_ARGS            16
 
 /* Maximum capacity of command registry */
-#define ARK_SHELL_MAX_COMMANDS        32
+#define ARK_SHELL_MAX_COMMANDS        48
 
-/* Prompt string */
+/* Prompt string (fallback when ARKRTOS_SHELL_PROMPT_LINUX is 0) */
 #define ARK_SHELL_PROMPT              "ark> "
+
+/* Linux-style prompt: user@host:cwd$ with a working directory. */
+#ifndef ARKRTOS_SHELL_PROMPT_LINUX
+#define ARKRTOS_SHELL_PROMPT_LINUX    1
+#endif
+
+/* Identity shown in the Linux-style prompt, and the working-directory limits. */
+#define ARK_SHELL_USER                "ark"
+#define ARK_SHELL_HOSTNAME            "arkrtos"
+#define ARK_SHELL_HOME                "/"
+#define ARK_SHELL_PATH_SIZE           96
+#define ARK_SHELL_PROMPT_SIZE         96
 
 /* Welcome message ----------------------------------------------------
  * Ark RTOS: the product banner goes here, not in arkrtos_shell.c, because

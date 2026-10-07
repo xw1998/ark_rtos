@@ -9,8 +9,12 @@
 *              空语句，格式化代码根本不进二进制（省 Flash 也省栈）。
 *            - 运行期过滤：arkrtos_log_set_level() 可随时收紧/放宽，配合 shell 的
 *              `log <level>` 命令，现场不用重新烧写就能看细节。
-*            - 输出格式：[级别字母][tag:行号] 正文，级别字母带 ANSI 颜色，
-*              与终端里的其它彩色输出（shell 提示符、错误信息）风格一致。
+*            - 输出格式（dmesg 风格）：[运行时间] <syslog 优先级>tag:行号 正文，
+*              形如 "[    1.234] <6>VFS:347 mounted /mnt/data"。优先级按 syslog
+*              取值：err=3 / warning=4 / info=6 / debug=7，与 Linux 的 `dmesg`
+*              输出习惯一致；颜色只加在时间戳与优先级这段前缀上。
+*            - 日志环（ARKRTOS_USE_LOG_RING，默认开）：保留最近若干字节的完整
+*              日志行，供 shell 的 `dmesg` 命令事后回看。
 *
 *          与用户态（App / 驱动）的关系：
 *            内核侧用本文件的 ARKRTOS_LOGE/W/I/D 宏，直接写串口，不做 SVC 切换；
@@ -37,6 +41,12 @@ extern "C" {
 /* 单条日志正文缓冲（栈上分配，函数返回即释放，无动态内存） */
 #ifndef ARKRTOS_LOG_BUF_SIZE
 #define ARKRTOS_LOG_BUF_SIZE  (128)
+#endif
+
+/* dmesg 日志环容量（字节，见 ARKRTOS_USE_LOG_RING）。存整行格式化日志，
+ * 满时覆盖最旧。 */
+#ifndef ARKRTOS_LOG_RING_SIZE
+#define ARKRTOS_LOG_RING_SIZE  (4096)
 #endif
 
 /* ============================================================
@@ -156,6 +166,37 @@ void   arkrtos_console_unlock(void);
 *          diagnostic counter, not an error path.
 */
 uint32 arkrtos_console_busy_count(void);
+
+/* ============================================================
+ * dmesg 日志环（ARKRTOS_USE_LOG_RING）
+ *
+ * 保留最近 ARKRTOS_LOG_RING_SIZE 字节的完整日志行（含时间戳/优先级前缀与
+ * 行尾），满时覆盖最旧。整块可编译期关闭：关掉后 ring 相关调用仍在，
+ * capacity() 返回 0，shell 的 dmesg 命令据此回一条明确提示而不是空白。
+ * ============================================================ */
+
+/**
+* @brief 日志环容量（字节）；0 表示环被编译期关闭
+*/
+uint32 arkrtos_log_ring_capacity(void);
+
+/**
+* @brief 环内当前有效的字节数
+*/
+uint32 arkrtos_log_ring_used(void);
+
+/**
+* @brief 把环内容按「最旧→最新」顺序交给回调（可能分两段调用，跨越环尾）
+* @param put 回调：data/len 为一段连续字节（不保证 NUL 结尾）
+* @param arg 透传给回调
+* @return 交给回调的总字节数（= arkrtos_log_ring_used()）
+*/
+uint32 arkrtos_log_ring_dump(void (*put)(const char *data, uint32 len, void *arg), void *arg);
+
+/**
+* @brief 清空日志环
+*/
+void   arkrtos_log_ring_clear(void);
 
 #ifdef __cplusplus
 }

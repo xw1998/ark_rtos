@@ -3,7 +3,7 @@
 * @details 实现 port 层要求板级提供的基础配置：
 *          - FPU 使能（CPACR + FPCCR）
 *          - NVIC 优先级分组与内核异常优先级
-*          - 板载设备注册（COM1 / LED / LED2）
+*          - 板载设备注册（ttyS0 / led0 / led1）
 *          - CPU 异常向量与系统节拍入口
 *          其余 CPU 相关实现全部在 port/arm/cortex-m4/，
 *          board/ 只承担芯片相关的差异。
@@ -83,13 +83,13 @@ extern arkrtos_dev_drv_t led_drv;
 
 void arkrtos_dev_board_init(void)
 {
-    /* Three on-board LEDs are all registered: "LED" = red, "LED2" = green,
-     * "LED3" = blue. Each name maps to one logical LED id, so an App can
+    /* Three on-board LEDs are all registered: "led0" = red, "led1" = green,
+     * "led2" = blue. Each name maps to one logical LED id, so an App can
      * open several of them at once and tell them apart by name. */
-    arkrtos_dev_register("LED",  &led_drv, LED_ID_RED);
-    arkrtos_dev_register("LED2", &led_drv, LED_ID_GREEN);
-    arkrtos_dev_register("LED3", &led_drv, LED_ID_BLUE);
-    arkrtos_dev_register("COM1", &usart_drv, 0);
+    arkrtos_dev_register("led0",  &led_drv, LED_ID_RED);
+    arkrtos_dev_register("led1", &led_drv, LED_ID_GREEN);
+    arkrtos_dev_register("led2", &led_drv, LED_ID_BLUE);
+    arkrtos_dev_register("ttyS0", &usart_drv, 0);
 
     /* Block devices are registered here, but not brought up: the descriptors
      * are static and arkrtos_blk_init() runs on first use. main() has HAL and

@@ -5,7 +5,7 @@
 * @details Everything here is standard POSIX: the includes are <stdio.h>,
 *          <string.h>, <errno.h>, <fcntl.h>, <unistd.h>, <sys/stat.h> and
 *          <dirent.h>. There is no arkrtos.h, no device name hard coded beyond
-*          the path string "/dev/COM1" (the name this board registers its
+*          the path string "/dev/ttyS0" (the name this board registers its
 *          console UART under), no address and no partition id.
 *
 *          Two things this file is meant to show:
@@ -44,7 +44,7 @@
 
 #define FILE_PATH   "/fsdemo.txt"
 #define DEV_DIR     "/dev"
-#define DEV_PATH    "/dev/COM1"    /* the console UART as this board registers it */
+#define DEV_PATH    "/dev/ttyS0"    /* the console UART as this board registers it */
 #define BAD_PATH    "/no/such/file"
 
 static const char g_payload[] = "hello arkrtos vfs\n";   /* 18 bytes */
@@ -196,7 +196,7 @@ static void t_readdir(void)
 * @brief A device and a file open through the same call and are told apart by
 *        fstat, which is the whole point of the "path is a name" design.
 *        The device is enumerated first and then opened by its registered
-*        name - on this board the console is "COM1", not "uart0".
+*        name - on this board the console is "ttyS0", not "uart0".
 */
 static void t_device(void)
 {
@@ -222,7 +222,7 @@ static void t_device(void)
             {
                 chars++;
             }
-            if(strcmp(e->d_name, "COM1") == 0)
+            if(strcmp(e->d_name, "ttyS0") == 0)
             {
                 named = 1;
             }
@@ -230,10 +230,10 @@ static void t_device(void)
         closedir(d);
     }
     check("/dev has char devices", chars > 0, chars);
-    check("/dev lists COM1", named, named);
+    check("/dev lists ttyS0", named, named);
 
     fd = open(DEV_PATH, O_WRONLY);
-    check("open /dev/COM1 as path", fd >= 0, fd);
+    check("open /dev/ttyS0 as path", fd >= 0, fd);
     if(fd < 0)
     {
         return;

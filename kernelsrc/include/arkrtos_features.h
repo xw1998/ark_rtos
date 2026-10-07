@@ -104,6 +104,12 @@
 #define ARKRTOS_USE_LOG                 1
 #endif
 
+/* 内核日志环（dmesg）：保留最近若干字节的格式化日志行，供 shell 的 dmesg
+ * 命令事后回看。关掉整块不进二进制。容量见 ARKRTOS_LOG_RING_SIZE。 */
+#ifndef ARKRTOS_USE_LOG_RING
+#define ARKRTOS_USE_LOG_RING            1
+#endif
+
 /* 块设备层（arkrtos_blk.c）：设备注册表与文件系统之间的薄层 */
 #ifndef ARKRTOS_USE_BLK
 #define ARKRTOS_USE_BLK                 1

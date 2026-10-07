@@ -148,3 +148,23 @@ config ARKRTOS_MINI_MAX
 	  may only tighten this, never exceed it.
 
 endmenu
+
+menu "Log ring"
+
+config ARKRTOS_LOG_RING_SIZE
+	int "Log ring size (bytes)"
+	default 4096
+	range 512 65536
+	depends on ARKRTOS_USE_LOG_RING
+	help
+	  Bytes kept in the dmesg ring.  Holds whole formatted lines; the
+	  oldest line is overwritten when full.
+
+	  Bounds by how much spare RAM the board has.  The build sets the
+	  default here; a RAM-tight project can override it on that
+	  project's own command line (the generated header guards the
+	  symbol with #ifndef).  Example: the F401 kernel carries
+	  -DARKRTOS_LOG_RING_SIZE=512 in its Misc Controls because its
+	  kernel RAM window has under 1 KB of slack.
+
+endmenu

@@ -13,7 +13,7 @@
 #include "stm32f4xx.h"
 
 typedef enum {
-    UART_DEV_COM1,
+    UART_DEV_TTYS0,
     UART_DEV_NUM
 } uart_object_t;
 

@@ -99,8 +99,8 @@ App / 驱动侧只需要实现 `AppMain()` / `DrvMain()`，其余交给 SDK 与�
 ```c
 void arkrtos_dev_board_init(void)
 {
-    arkrtos_dev_register("COM1", &usart_drv, 0);
-    arkrtos_dev_register("LED",  &led_drv,  0);
+    arkrtos_dev_register("ttyS0", &usart_drv, 0);
+    arkrtos_dev_register("led0",  &led_drv,  0);
 }
 ```
 
@@ -176,7 +176,7 @@ void arkrtos_dev_board_init(void)
 ### 4.2 使用示例
 
 ```c
-int32 com1 = arkrtos_dev_open("COM1", 115200);
+int32 com1 = arkrtos_dev_open("ttyS0", 115200);
 if(com1 >= 0)
 {
     uint8 buf[64];
@@ -317,8 +317,8 @@ CPU负载统计通过 `ARKRTOS_USE_CPU_LOAD` 配置开关控制。开启后，�
 
 void AppMain(void)
 {
-    int32 com1 = arkrtos_dev_open("COM1", 115200);
-    int32 led  = arkrtos_dev_open("LED", 0);
+    int32 com1 = arkrtos_dev_open("ttyS0", 115200);
+    int32 led  = arkrtos_dev_open("led0", 0);
     int32 evt  = arkrtos_event_create("sync");
 
     while(1)

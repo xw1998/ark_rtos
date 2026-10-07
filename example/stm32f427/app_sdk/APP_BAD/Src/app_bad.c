@@ -49,7 +49,7 @@ void AppMain(void)
     int32 con;
     int32 n;
 
-    con = arkrtos_dev_open("COM1", 0);
+    con = arkrtos_dev_open("ttyS0", 0);
 
     /* 分阶段探，用内核的故障累计数当「走到哪一步了」的标记：越权会杀掉本任务，
      * 重启后这个计数是跨重启保留的，而 App 自己没有任何可持久化的地方。

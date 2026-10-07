@@ -26,7 +26,7 @@
 
    void MiniMain(void)
    {
-       int32 con = arkrtos_dev_open("COM1", 0);
+       int32 con = arkrtos_dev_open("ttyS0", 0);
        arkrtos_dev_write(con, (void *)"hello from mini\r\n", 17);
        /* 返回即退出，内存归还 */
    }

@@ -171,8 +171,8 @@ extern arkrtos_dev_drv_t led_drv;
 
 void arkrtos_dev_board_init(void)
 {
-    arkrtos_dev_register("COM1", &usart_drv, 0);
-    arkrtos_dev_register("LED",  &led_drv,  0);
+    arkrtos_dev_register("ttyS0", &usart_drv, 0);
+    arkrtos_dev_register("led0",  &led_drv,  0);
 }
 
 /* 中断服务程序入口 */

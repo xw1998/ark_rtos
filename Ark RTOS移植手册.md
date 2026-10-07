@@ -438,7 +438,7 @@ main()
   ├── arkrtos_kernel_init()           # 内核子系统初始化
   │   ├── arkrtos_event_module_init() # 事件模块
   │   ├── arkrtos_dev_module_init()   # 设备框架
-  │   ├── arkrtos_dev_board_init()    # 注册板级驱动（COM1, LED）
+  │   ├── arkrtos_dev_board_init()    # 注册板级驱动（ttyS0, led0）
   │   └── arkrtos_mpu_module_init()   # MPU 初始化
   │
   ├── arkrtos_port_start_timer()      # 启动 SysTick 定时器

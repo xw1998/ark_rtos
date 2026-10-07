@@ -2,7 +2,7 @@
 * @file arkrtos_installer.c
 * @brief Ark RTOS 内核内安装模块实现（常驻任务 + 命令触发一次性窗口）
 * @details 安装流程：
-*          1) 打开镜像接收设备（默认 COM1）；
+*          1) 打开镜像接收设备（默认 ttyS0）；
 *          2) 在字节流中搜索镜像头魔数 "SVCA" 完成逐字节同步；
 *          3) 收满 256 字节镜像头；
 *          4) 交给 arkrtos_loader_load_dev_hdr() / arkrtos_loader_load_driver_dev()

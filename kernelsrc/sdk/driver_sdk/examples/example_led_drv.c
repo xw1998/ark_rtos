@@ -71,5 +71,5 @@ static arkrtos_dev_drv_t led_drv = {
 
 int32 led_drv_install(void)
 {
-    return arkrtos_drv_register("LED", &led_drv, 0);
+    return arkrtos_drv_register("led0", &led_drv, 0);
 }

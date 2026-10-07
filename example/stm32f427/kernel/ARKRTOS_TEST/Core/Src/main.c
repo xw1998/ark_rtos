@@ -209,7 +209,7 @@ void SystemClock_Config(void)
 
 static void led_blink_task(void)
 {
-    int32 led = arkrtos_dev_open_internal("LED", 0);
+    int32 led = arkrtos_dev_open_internal("led0", 0);
     uint8 on  = 1;
 
     while(1)
@@ -229,7 +229,7 @@ static void led_blink_task(void)
 
 static void led2_blink_task(void)
 {
-    int32 led = arkrtos_dev_open_internal("LED2", 0);
+    int32 led = arkrtos_dev_open_internal("led1", 0);
     uint8 on  = 1;
 
     while(1)

@@ -9,7 +9,7 @@
 
 | 名字 | 入口 | 能做什么 |
 |---|---|---|
-| 设备名 | `arkrtos_dev_open("uart0")` | 开设备 |
+| 设备名 | `arkrtos_dev_open("ttyS0")` | 开设备 |
 | 卷内路径 | `arkrtos_fs_open_write("/a.txt")` | 读写 littlefs 里的文件 |
 
 两者互不相通：设备不是路径，路径也到不了设备。App 想「打开这个路径」时，
@@ -18,9 +18,13 @@
 这一版把 [ark_vfs](../../../ark_vfs) 挂到内核上，所有资源落进同一棵树：
 
 ```
-/            易失便签区（ramfs，掉电即失，放临时数据）
-/dev         设备注册表的镜像；/dev/uart0 可以直接按路径打开
+/            易失根（ramfs，掉电即失，放临时数据，下含 /tmp /etc /home /mnt /media）
+/dev         设备注册表的镜像；/dev/ttyS0 可以直接按路径打开
+/tmp         临时数据（根 ramfs 上的普通目录，不是独立挂载点）
+/etc         配置（hostname 等）
+/home        用户目录
 /mnt/<名字>  持久卷（littlefs），由上层显式挂
+/media       可移除介质挂载点（预留）
 ```
 
 路径语义按 Linux 来：`//` 合并、`.` 去掉、`..` 按前面的段消化，越过根的 `..`
@@ -68,7 +72,7 @@ const char *arkrtos_vfs_error_name(rc);
 内核知道**设备注册表**（所以 `/dev` 归它），不知道**哪块设备上的哪个偏移
 放着文件系统**——那是板级布局知识。所以：
 
-- `/` 给一块不依赖硬件的易失区（ramfs）；
+- `/` 给一块不依赖硬件的易失根（ramfs，临时数据放 `/tmp`）；
 - 持久卷留一个显式入口 `arkrtos_vfs_mount_volume()`，由板级或 shell 下令。
 
 挂载**不格式化**。卷没格式化就返回 `ARK_E_IO`，不会顺手擦掉别人的数据——
@@ -169,7 +173,7 @@ mount: FAILED (-7: already exists)
 | 验的东西 | 设备原样回显 |
 |---|---|
 | 命名空间 | `mount` → `/dev`(devfs) + `/`(ramfs) + `/mnt/nor`(lfs, rw) |
-| `/dev` 枚举 | `ls /dev` → LED / LED2 / LED3 / COM1 / BLED |
+| `/dev` 枚举 | `ls /dev` → led0 / led1 / led2 / ttyS0 / BLED |
 | 持久卷挂载 | `mount /mnt/nor` → `[I][vfs:291] volume nor0 mounted at /mnt/nor` |
 | 卷内列目录 | `ls /mnt/nor` → 9 entries（含 `keep.txt` 15 B） |
 | 卷内读文件 | `cat /mnt/nor/keep.txt` → `persistent-data` / `15 bytes` |

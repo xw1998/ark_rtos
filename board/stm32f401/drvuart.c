@@ -1,6 +1,6 @@
 /**
 * @brief 设备串口驱动模块（HAL库版本，STM32F401 板）
-* @details 本板把 COM1 映射到 USART2：TX = PA2、RX = PA3，均走 AF7。
+* @details 本板把 ttyS0 映射到 USART2：TX = PA2、RX = PA3，均走 AF7。
 * @details 使用 HAL 库初始化 UART，中断收发使用寄存器直操作
 * @author xw
 * @date 2026.05.03
@@ -42,7 +42,7 @@ arkrtos_dev_hdr_t *uart_drv_open(uint32 name, uint32 baudrate)
 
     switch(name)
     {
-        case UART_DEV_COM1:
+        case UART_DEV_TTYS0:
             p_dev->usart_addr = USART2;
 
             __HAL_RCC_GPIOA_CLK_ENABLE();
@@ -205,7 +205,7 @@ static void handle_usart_service(uart_dev_t *p_dev)
 
 void USART2_IRQHandler(void)
 {
-    handle_usart_service(&uart_dev_list[UART_DEV_COM1]);
+    handle_usart_service(&uart_dev_list[UART_DEV_TTYS0]);
 }
 
 arkrtos_dev_drv_t usart_drv =

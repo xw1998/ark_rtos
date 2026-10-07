@@ -123,5 +123,5 @@ static arkrtos_dev_drv_t uart_drv = {
 
 int32 uart_drv_install(void)
 {
-    return arkrtos_drv_register("COM1", &uart_drv, 0);
+    return arkrtos_drv_register("ttyS0", &uart_drv, 0);
 }

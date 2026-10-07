@@ -78,7 +78,7 @@ void AppMain(void)
 ```c
 void AppMain(void)
 {
-    int32 led = arkrtos_dev_open("LED", 0);
+    int32 led = arkrtos_dev_open("led0", 0);
 
     while(1)
     {
@@ -124,7 +124,7 @@ int32 arkrtos_dev_open(char* name, uint32 param);
 
 | 参数 | 说明 |
 |------|------|
-| `name` | 设备名称字符串，如 `"COM1"`, `"LED"`, `"SPI1"` |
+| `name` | 设备名称字符串，如 `"ttyS0"`, `"led0"`, `"SPI1"` |
 | `param` | 打开参数，具体含义由驱动定义（如波特率） |
 
 | 返回值 | 说明 |
@@ -134,8 +134,8 @@ int32 arkrtos_dev_open(char* name, uint32 param);
 
 **示例：**
 ```c
-int32 com1 = arkrtos_dev_open("COM1", 115200);  // 以115200波特率打开串口1
-int32 led  = arkrtos_dev_open("LED", 0);         // 打开LED设备
+int32 com1 = arkrtos_dev_open("ttyS0", 115200);  // 以115200波特率打开串口1
+int32 led  = arkrtos_dev_open("led0", 0);         // 打开LED设备
 int32 spi  = arkrtos_dev_open("SPI1", 0);        // 打开SPI1
 
 if(com1 < 0) {
@@ -160,7 +160,7 @@ int32 arkrtos_dev_close(int32 handle);
 
 **示例：**
 ```c
-int32 com1 = arkrtos_dev_open("COM1", 115200);
+int32 com1 = arkrtos_dev_open("ttyS0", 115200);
 // ... 使用设备 ...
 arkrtos_dev_close(com1);  // 关闭设备，释放句柄
 ```
@@ -422,7 +422,7 @@ void AppMain(void)
 
 void AppMain(void)
 {
-    int32 com1 = arkrtos_dev_open("COM1", 115200);
+    int32 com1 = arkrtos_dev_open("ttyS0", 115200);
     uint8 buf[64];
 
     while(1)
@@ -458,7 +458,7 @@ void AppMain(void)
 /* LED 任务：收到事件后闪烁 3 次 */
 void AppMain(void)
 {
-    int32 led = arkrtos_dev_open("LED", 0);
+    int32 led = arkrtos_dev_open("led0", 0);
     int32 evt = arkrtos_event_create("blink");
     int32 i;
     uint8 v;
@@ -480,9 +480,9 @@ void AppMain(void)
 ```c
 void AppMain(void)
 {
-    int32 com1 = arkrtos_dev_open("COM1", 115200);
+    int32 com1 = arkrtos_dev_open("ttyS0", 115200);
     int32 spi  = arkrtos_dev_open("SPI1", 0);
-    int32 led  = arkrtos_dev_open("LED", 0);
+    int32 led  = arkrtos_dev_open("led0", 0);
     uint8 cmd_buf[32];
     uint8 spi_buf[64];
     uint8 on = 1, off = 0;
@@ -981,9 +981,9 @@ static arkrtos_dev_drv_t uart_drv = { uart_open, /* ... */ };
 
 int32 uart_drv_install(void)
 {
-    arkrtos_drv_register("COM1", &uart_drv, 0);
-    arkrtos_drv_register("COM2", &uart_drv, 1);
-    arkrtos_drv_register("COM3", &uart_drv, 2);
+    arkrtos_drv_register("ttyS0", &uart_drv, 0);
+    arkrtos_drv_register("ttyS1", &uart_drv, 1);
+    arkrtos_drv_register("ttyS2", &uart_drv, 2);
     return ARKRTOS_DRV_OK;
 }
 ```

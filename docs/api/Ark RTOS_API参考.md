@@ -1191,7 +1191,7 @@ void arkrtos_kernel_module_init(void);
 ## kernelsrc/include/arkrtos_installer.h
 
 **Ark RTOS 内核内安装任务（方案A）**
-常驻任务从设备（默认 COM1）接收 Ark RTOS 镜像流并安装到空闲槽位，
+常驻任务从设备（默认 ttyS0）接收 Ark RTOS 镜像流并安装到空闲槽位，
 使 App 的落位方式从「烧录器刷固件」变为「设备自己安装」。
 接收协议（与 tools/pack_app.py 的输出直接对接）：
 
@@ -2728,7 +2728,7 @@ void arkrtos_task_stack_fill(uint32 *stack_bottom, uint32 stack_size)
 
 **Ark RTOS 内核内安装模块实现（常驻任务 + 命令触发一次性窗口）**
 安装流程：
-1) 打开镜像接收设备（默认 COM1）；
+1) 打开镜像接收设备（默认 ttyS0）；
 2) 在字节流中搜索镜像头魔数 "SVCA" 完成逐字节同步；
 
 ### `static int32 arkrtos_installer_pump(int32 dev) {`

@@ -2,7 +2,7 @@
 * @file arkrtos_vfs.c
 * @brief Ark RTOS 的 Linux 风格路径命名空间（ark_vfs 门面）
 * @details 这里做三件事，每件都只有一处：
-*            1) 挂载点：/ 用 ramfs（易失便签区），/dev 用 devfs（设备镜像），
+*            1) 挂载点：/ 用 ramfs（易失根，下含 /tmp /etc /home /mnt /media），/dev 用 devfs（设备镜像），
 *               /mnt/<名字> 用 littlefs（持久卷，显式挂）；
 *            2) 门面：shell 与 App 只需要 arkrtos_vfs.h，不直接碰 ark_vfs，
 *               组件换版本时改的是这一层；
@@ -12,7 +12,7 @@
 *          【为什么 / 用 ramfs 而不是把 NOR 直接挂在 /】
 *          挂载点是「谁知道」的问题：内核知道设备注册表（所以 /dev 归它），
 *          不知道哪块设备上的哪个偏移放着文件系统（那是板级布局知识）。
-*          所以 / 给一块不依赖硬件的易失区，持久卷留一个显式的入口。
+*          所以 / 给一块不依赖硬件的易失根（临时数据放 /tmp），持久卷留一个显式的入口。
 *
 * @author xw
 * @date 2026.09.22
@@ -265,7 +265,7 @@ int32 arkrtos_vfs_init(void)
         return rc;
     }
 
-    /* / 是易失便签区；/dev 已在上面挂好，最长前缀匹配保证各走各的 */
+    /* / 是易失根；/dev 已在上面挂好，最长前缀匹配保证各走各的 */
     rc = ark_vfs_mount("ram", "/", ark_ramfs_fs(), NULL, 0u, NULL);
     if (rc != 0)
     {
@@ -275,9 +275,25 @@ int32 arkrtos_vfs_init(void)
         return rc;
     }
 
+    /* Lay down the usual Linux top-level directories.  They are ordinary
+     * directories on the root ramfs, not separate mounts - so mount/df see
+     * them as part of "/", exactly as on a system without a dedicated
+     * /tmp mount.  Re-creating one returns "exists"; harmless here. */
+    {
+        static const char *const std_dirs[] = {
+            "/tmp", "/etc", "/home", "/mnt", "/media"
+        };
+        uint32 i;
+
+        for(i = 0u; i < (uint32)(sizeof(std_dirs) / sizeof(std_dirs[0])); i++)
+        {
+            (void)ark_vfs_mkdir(std_dirs[i]);
+        }
+    }
+
     g_vol_target[0] = '\0';
     g_vfs_ready = 1u;
-    ARKRTOS_LOGI("vfs", "namespace up: / (ramfs), /dev (devfs)");
+    ARKRTOS_LOGI("vfs", "namespace up: / (ramfs) with /tmp /etc /home /mnt /media, /dev (devfs)");
     return 0;
 }
 

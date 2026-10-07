@@ -53,7 +53,7 @@ void MiniMain(void)
 {
     uint32 i;
 
-    g_con = arkrtos_dev_open("COM1", 115200);
+    g_con = arkrtos_dev_open("ttyS0", 115200);
 
     put("\r\n[mini] hello from a program that lives in the filesystem\r\n");
     put("[mini] loaded at run time, tick = ");

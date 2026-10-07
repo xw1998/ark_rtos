@@ -90,6 +90,15 @@ config ARKRTOS_USE_LOG
 	help
 	  The shell `log` command depends on this; it disappears with the log.
 
+config ARKRTOS_USE_LOG_RING
+	bool "Kernel log ring (dmesg)"
+	default y
+	depends on ARKRTOS_USE_LOG
+	help
+	  Keep the most recent ARKRTOS_LOG_RING_SIZE bytes of formatted log
+	  lines in a ring so the `dmesg` command can print them after the
+	  fact.  Off compiles the ring out entirely (no RAM, no code).
+
 config ARKRTOS_USE_BLK
 	bool "Block layer"
 	default y
@@ -145,6 +154,18 @@ config ARKRTOS_USE_CM_BACKTRACE
 	default y
 	help
 	  components/cm_backtrace; needs DWT/NVIC.
+
+endmenu
+
+menu "Shell"
+
+config ARKRTOS_SHELL_PROMPT_LINUX
+	bool "Linux-style prompt (user@host:cwd$)"
+	default y
+	help
+	  Draw the prompt as ark@arkrtos:<cwd>$ and give the shell a working
+	  directory (cd / pwd) with Linux relative-path handling.  Off falls
+	  back to the plain "ark> " prompt with no working directory.
 
 endmenu
 

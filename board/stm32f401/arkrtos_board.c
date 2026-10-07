@@ -3,7 +3,7 @@
 * @details 实现 port 层要求板级提供的基础配置：
 *          - FPU 使能（CPACR + FPCCR）
 *          - NVIC 优先级分组与内核异常优先级
-*          - 板载设备注册（COM1 = USART2 / LED = PC13）
+*          - 板载设备注册（ttyS0 = USART2 / led0 = PC13）
 *          - CPU 异常向量与系统节拍入口
 *          其余 CPU 相关实现全部在 port/arm/cortex-m4/，
 *          board/ 只承担芯片相关的差异。
@@ -80,10 +80,10 @@ extern arkrtos_dev_drv_t led_drv;
 
 void arkrtos_dev_board_init(void)
 {
-    /* F401 板上只有一颗 LED（PC13），因此只登记 "LED" 一个名字；
+    /* F401 板上只有一颗 LED（PC13），因此只登记 "led0" 一个名字；
      * 设备接口的形状与 F427 板一致，App 侧代码不用改。 */
-    arkrtos_dev_register("LED",  &led_drv, LED_ID_BOARD);
-    arkrtos_dev_register("COM1", &usart_drv, 0);
+    arkrtos_dev_register("led0",  &led_drv, LED_ID_BOARD);
+    arkrtos_dev_register("ttyS0", &usart_drv, 0);
 }
 
 /* ============================================================

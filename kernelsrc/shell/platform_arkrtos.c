@@ -2,7 +2,7 @@
 * @file platform_arkrtos.c
 * @brief ark-shell 平台适配层：Ark RTOS 内核侧实现
 * @details 实现 kernelsrc/shell/platform.h 声明的 9 个平台函数：
-*          - 串口收发接到内核设备框架的 SHELL_DEV_NAME（默认 COM1，板级
+*          - 串口收发接到内核设备框架的 SHELL_DEV_NAME（默认 ttyS0，板级
 *            注册见 board/stm32f427/arkrtos_board.c 的 usart_drv）；
 *          - 毫秒时基接到内核 tick（arkrtos_kernel_get_time）；
 *          - 复位走 Cortex-M 的 AIRCR.SYSRESETREQ，不依赖板级头文件，

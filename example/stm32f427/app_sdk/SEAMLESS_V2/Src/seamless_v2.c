@@ -447,7 +447,7 @@ void MiniMain(void)
     sxp_state_t prev;
     int32 n;
 
-    g_con = arkrtos_dev_open("COM1", 115200);
+    g_con = arkrtos_dev_open("ttyS0", 115200);
 
     /* Do not lean on .bss being zeroed on our behalf. */
     sxp_zero((uint8 *)&g_st, (uint32)sizeof(g_st));

@@ -41,7 +41,7 @@ arkrtos_dev_hdr_t *uart_drv_open(uint32 name, uint32 baudrate)
 
     switch(name)
     {
-        case UART_DEV_COM1:
+        case UART_DEV_TTYS0:
             p_dev->usart_addr = USART1;
 
             __HAL_RCC_GPIOA_CLK_ENABLE();
@@ -204,7 +204,7 @@ static void handle_usart_service(uart_dev_t *p_dev)
 
 void USART1_IRQHandler(void)
 {
-    handle_usart_service(&uart_dev_list[UART_DEV_COM1]);
+    handle_usart_service(&uart_dev_list[UART_DEV_TTYS0]);
 }
 
 arkrtos_dev_drv_t usart_drv =

@@ -17,7 +17,7 @@
 | 读回 | 重新 `open(O_RDONLY)`，逐字节与写入内容比对 |
 | 定位与元数据 | `lseek(SEEK_SET/SEEK_END)`、`fstat`、`stat`，类型位与长度 |
 | 目录流 | `opendir("/")` + `readdir` 找到同一个名字；流结束时 `errno==0` |
-| 设备走同一入口 | `opendir("/dev")` 看到字符设备与 `COM1`，`open("/dev/COM1")` 成功且 `fstat` 报 `S_ISCHR` —— 设备和文件用同一个 `open()`，靠类型位区分；往它写一行字（字符设备允许短写，客户端要按字节重试） |
+| 设备走同一入口 | `opendir("/dev")` 看到字符设备与 `ttyS0`，`open("/dev/ttyS0")` 成功且 `fstat` 报 `S_ISCHR` —— 设备和文件用同一个 `open()`，靠类型位区分；往它写一行字（字符设备允许短写，客户端要按字节重试） |
 | 错误面 | 不存在的路径 `stat`/`opendir` 必须 `-1`/`NULL` 且 `errno==ENOENT`，不许编一个像样的结果 |
 | 删除 | `unlink` 后同一路径 `stat` 必须失败 |
 
@@ -53,7 +53,7 @@ env -u PYTHONHOME -u PYTHONPATH "D:/Keil_v5/UV4/UV4.exe" -f \
 **上板验证过**（F427，AC5，写开发槽 3 后复位抓串口）：
 
 ```
-  ok   open /dev/COM1 as path      
+  ok   open /dev/ttyS0 as path      
   ok   fstat is char device        
   ok   single write is not an error
 [fs_demo] device opened as a path

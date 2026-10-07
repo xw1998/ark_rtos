@@ -20,7 +20,7 @@
 | 宏 | 默认 | 说明 |
 |----|------|------|
 | `SHELL_ENABLE` | 1 | 0 = 不编译控制台任务（省下 ~4KB 内核 RAM + 任务槽） |
-| `SHELL_DEV_NAME` | `"COM1"` | 控制台串口设备名（板级注册名） |
+| `SHELL_DEV_NAME` | `"ttyS0"` | 控制台串口设备名（板级注册名） |
 | `SHELL_DEV_ARG` | 115200 | 打开设备时的参数（波特率） |
 | `SHELL_TASK_PRIORITY` | 14 | 控制台优先级，取最低，交互不抢业务 CPU |
 | `SHELL_TASK_STACK_SIZE` | 3072 | 控制台任务栈（字节，含 ark-shell 行编辑缓冲） |
@@ -44,14 +44,14 @@
 
 Ark RTOS kernel shell - type 'help' for commands.
 
-ark> 
+ark@arkrtos:~$ 
 ```
 
 - 文案在 `kernelsrc/shell/ark_shell/ark_shell_config.h` 的 `ARK_SHELL_WELCOME`。**不放在
   `arkrtos_shell.c`**：`ark_shell_init()` 先打印欢迎语、再画提示符，内核任务在 init 之后打印的
   任何文字都会落到提示符**下面**，看起来像「横幅卡在命令行里」。把 `ARK_SHELL_WELCOME_ART`
   置 0 就回到通用文案（`Ark Shell v1.0` + `Type 'help' for commands.`）。
-- 横幅**只在启动时出现一次**；每条命令执行完只重画 `ark> ` 提示符。等设备就绪请等提示符或
+- 横幅**只在启动时出现一次**；每条命令执行完只重画 `ark@arkrtos:~$ ` 提示符。等设备就绪请等提示符或
   等静默，不要等横幅。
 
 ## 3. 命令一览
@@ -66,7 +66,7 @@ ark>
 | `sched` | `sched` | 调度器自检：就绪集（256 位两级位图 + 每优先级链）与任务表**逐条**比对。一致时回 `sched: consistent (bitmap/links == task table)` 与 `ready=<就绪数> top=<最高优先级任务>`；不一致时逐条打印 `#idx prio= status= on_ready= next= prev=`，便于直接定位哪个任务漏挂链 |
 | `fault` | `fault` | 故障环形记录：类型 + 任务号 + 时刻（含 `INSTALLFAIL`） |
 | `install` | `install` | 打开一次性安装窗口，等待一个 `.svcapp` 镜像（主控先敲命令，再发文件） |
-| `log` | `log [0..4]` | 不带参数读当前运行日志级别，带参数改（0=off…4=debug） |
+| `log` | `log [0..4]` | 不带参数读当前运行日志级别，带参数改（0=off…4=debug）。日志环的历史内容用 `dmesg` 看 |
 | `pool` | `pool` | 镜像池空闲：`free` / `largest`，以及池内固定槽位类型占用 |
 | `trace` | `trace [start \| stop \| reset \| dump \| mark <n>]` | 内核事件 trace 的开关、复位、导出与打标记 |
 | `cfg` | `cfg [show \| load \| clear]` | 设备端布局配置：查看当前生效值 / 从配置区重新加载 / 清空配置区并回到编译期默认 |
@@ -77,22 +77,57 @@ ark>
 | `blk` | `blk [list \| probe \| rd \| wr \| erase \| test]` | 块设备（NOR / 内部 Flash）：枚举、探测、读写、擦除、自测 |
 | `fs` | `fs [mount \| unmount \| format \| info \| ls \| wr \| rd \| put \| rm \| test \| err]` | littlefs 卷：挂载 / 卸载 / 格式化 / 容量 / 列目录 / 写 / 读 / 收文件 / 删 / 自测 / 错误名。挂载点形如 `mounted nor0 at 0x0, 4194304 bytes` |
 | `mini` | `mini [list \| run <path> \| stop [n] \| count [n] \| limit [bytes] \| forget <path> \| autostart [list \| add <path> \| del <path> \| now]]` | 小程序（放在文件系统里、`run` 时 load 进内存执行的第三种用户态应用）：列实例 / 跑一个路径 / 停一个 / 查改并发上限 / 清某路径的崩溃计数 / 维护开机自启清单 `/mini.autostart` |
+| `pwd` | `pwd` | 打印当前工作目录（`/` 显示为 `~`） |
+| `cd` | `cd [dir]` | 切换工作目录：绝对路径、相对路径、`.` / `..` / `~`；目标不存在或不是目录时报错，且**不改变**当前目录 |
+| `ls` | `ls [-l] [-a] [path]` | 列目录（按当前目录解析）。`-l` 附加类型字符与大小；`-a` 追加 `.` 与 `..`。**无 owner / 时间戳字段**（VFS 不提供，不编造） |
+| `cat` | `cat <path>` | 打印一个文件 |
+| `rm` | `rm <path>` | 删除一个文件 |
+| `mount` | `mount [<target> \| <dev> <off> <size> <target>]` | 列出挂载点，或不带参数时查看 / 建立一个卷 |
+| `umount` | `umount <target>` | 卸载一个挂载点 |
+| `df` | `df` | 列出挂载点与卷用量；未知容量打 `-`，不编造 |
+| `ps` | `ps` | 内核任务与已安装镜像的概览（**无 TTY / CPU 时间字段**：内核不记这笔账） |
+| `free` | `free` | 内存概览：内核 RAM 窗口与镜像池（内核无堆，`used` / `free` 打 `n/a`） |
+| `uname` | `uname [-a]` | 系统与构建信息（架构 / 版本 / 构建时间） |
+| `history` | `history` | 打印历史命令（含编号） |
+| `which` | `which <command>` | 解析别名到真实命令 |
+| `man` | `man <command>` | 等价 `help <command>`，打印某命令的用法 |
+| `dmesg` | `dmesg [-c]` | 打印内核日志环（最旧→最新）；`-c` 打印后清空 |
 | 内置 | `version` / `clear` / `echo` / `reboot` | `reboot` 走平台钩子，直接写 `AIRCR.SYSRESETREQ` 复位整机 |
+
+### 3.1 Linux 习惯速查
+
+提示符是完整的 bash 形态 `ark@arkrtos:<cwd>$`，`cwd` 为 `/` 时显示 `~`：
+
+```
+ark@arkrtos:~$ pwd
+/
+ark@arkrtos:~$ cd /dev
+ark@arkrtos:/dev$ ls
+BLED  led0  led1  led2  ttyS0
+ark@arkrtos:/dev$ cd ..
+ark@arkrtos:~$ 
+```
+
+- **相对路径**：`ls` / `cat` / `rm` / `cd` 的路径都按当前目录解析；`.` / `..` / `~` / `~/x` 与绝对路径都支持，规范化后越根报错（**不折回根**）。
+- **退出码**：`$?` 打印上一条命令的返回码（Linux 口径：0 = 成功，非 0 = 失败；未知命令为 127）。
+- **单项帮助**：`cmd -h` 或 `cmd --help` 打印该命令用法，等价 `help <cmd>` / `man <cmd>`。
+- **别名**：`ll`→`ls -l`、`la`→`ls -a`、`dir`→`ls`、`cls`→`clear`、`halt`/`poweroff`→`reboot`；`which <别名>` 显示真实命令。
+- **错误文案**：`<name>: command not found`、`<cmd>: too many arguments`、`<path>: No such file or directory` 等按 Linux 措辞。
 
 ## 4. 典型操作
 
 ### 4.1 控制一个 App（不自启 + 随时退出）
 
 ```
-ark> app list
+ark@arkrtos:~$ app list
 id  type  state     auto  task  crash  base        size    ram         entry
  0   app   RUNNING   yes   4     0      0x08060000  131072  0x20014000  0x08060001
-ark> app stop 0
+ark@arkrtos:~$ app stop 0
 app: stopped (image kept in flash)
-ark> app list
+ark@arkrtos:~$ app list
 id  type  state     auto  task  crash  base        size    ram         entry
  0   app   RAW       yes   0     0      0x08060000  131072  0x20014000  0x08060001
-ark> app start 0
+ark@arkrtos:~$ app start 0
 app: started
 ```
 
@@ -124,7 +159,7 @@ flags : 0x00000001（开机自启）
 
 ### 4.3 串口安装（控制台窗口）
 
-1. 串口终端连 `COM1`（115200，本板 PA9/PA10），回车看到 `ark> `；
+1. 串口终端连 `ttyS0`（115200，本板 PA9/PA10），回车看到 `ark@arkrtos:~$ `；
 2. 敲 `install`，控制台提示 `install: send the file now`；
 3. 主控把 `.svcapp` 原样发出去（`tools/send_image.py` 等）；
 4. 控制台打印 `install: ok, slot 0`；失败或超时会打印提示并在 `fault` 里留一条 `INSTALLFAIL`。
@@ -134,10 +169,10 @@ flags : 0x00000001（开机自启）
 ### 4.4 设备端布局配置（`cfg`）
 
 ```
-ark> cfg show
+ark@arkrtos:~$ cfg show
 ... 当前生效的策略、槽位表、运行期参数 ...
-ark> cfg load        # 进入接收状态，等上位机把 512 字节记录发下来
-ark> cfg clear       # 擦掉配置区，回到编译期默认
+ark@arkrtos:~$ cfg load        # 进入接收状态，等上位机把 512 字节记录发下来
+ark@arkrtos:~$ cfg clear       # 擦掉配置区，回到编译期默认
 ```
 
 能改什么、格式是什么、上位机怎么写这份配置，见
@@ -154,7 +189,7 @@ ark> cfg clear       # 擦掉配置区，回到编译期默认
 ### 4.5 镜像池空闲（`pool`）
 
 ```
-ark> pool
+ark@arkrtos:~$ pool
 pool: free 641592 B (largest run 510504 B), tasks 5/48
 ```
 
@@ -167,14 +202,14 @@ pool: free 641592 B (largest run 510504 B), tasks 5/48
 退出后代码块与 RAM 块立刻还回池子。完整模型见 [小程序设计.md](小程序设计.md)。
 
 ```
-ark> mini autostart add /mini_demo.app     # 登记开机自启（写清单 /mini.autostart）
+ark@arkrtos:~$ mini autostart add /mini_demo.app     # 登记开机自启（写清单 /mini.autostart）
 will start at boot
-ark> mini autostart                        # 查清单：列出的同时报“卷里找不到”与“已禁用”
+ark@arkrtos:~$ mini autostart                        # 查清单：列出的同时报“卷里找不到”与“已禁用”
 [1] /mini_demo.app  1308 bytes
 1 listed, 0 missing in the volume, 0 disabled
-ark> mini run /mini_demo.app               # 立即跑一个
-ark> mini list                             # 在跑 / 在册实例
-ark> mini autostart del /mini_demo.app     # 取消自启（删到空时清单文件也删掉）
+ark@arkrtos:~$ mini run /mini_demo.app               # 立即跑一个
+ark@arkrtos:~$ mini list                             # 在跑 / 在册实例
+ark@arkrtos:~$ mini autostart del /mini_demo.app     # 取消自启（删到空时清单文件也删掉）
 will not start at boot
 ```
 
@@ -199,11 +234,25 @@ will not start at boot
 
 ## 6. 已知边界
 
-1. **PC2 复用**：内核 `"LED3"`（蓝灯）与用户态驱动 `BLED_DRV` 注册的 `"BLED"` 是同一个物理灯，
+1. **PC2 复用**：内核 `"led2"`（蓝灯）与用户态驱动 `BLED_DRV` 注册的 `"BLED"` 是同一个物理灯，
    两者同时跑会互相覆盖显示，演示时只启用其中一个。
 2. `reboot` 是整机复位（`AIRCR.SYSRESETREQ`），不是软重启任务。
 3. 历史命令缓冲已从上游的 32 条降为 8 条（`ark_shell_config.h`），为内核 RAM 让路。
 4. 未知字符/多字节输入按字节透传，中文输入不会被正确回显。
+
+## 日志格式（dmesg 风格）
+
+内核日志每行形如：
+
+```
+[    1.234] <6>VFS:347 namespace up: / (ramfs) with /tmp /etc /home /mnt /media, /dev (devfs)
+```
+
+- `[  秒.毫秒]`：自启动以来的时刻；
+- `<n>`：syslog 优先级（`<3>` err、`<4>` warn、`<6>` info、`<7>` debug）；
+- `标签:行号 消息`：`标签` 是模块名，`行号` 是**产生该日志的源码行**，便于直接定位。
+
+运行期级别仍用 `log [0..4]` 调；**历史日志**用 `dmesg` 打印（日志环，默认开、容量可调），`dmesg -c` 打印后清空。
 
 ## 日志输出的时延约束（SVC 0x19）
 
