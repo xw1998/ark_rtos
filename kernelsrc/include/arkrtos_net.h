@@ -27,7 +27,9 @@
  *         服务任务要低一些，让 tcpip 能先跑完它投递的消息。 */
 #define ARKRTOS_NET_TASK_PRIO        (14u)
 /** @brief 服务任务栈（字）。只跑 lwIP 调用与一次 4 KB 以内的小拷贝。 */
+#ifndef ARKRTOS_NET_TASK_STACK_WORDS
 #define ARKRTOS_NET_TASK_STACK_WORDS (384u)
+#endif
 
 /**
 * @brief 起网络服务任务（幂等）。由 lwIP 任务在 tcpip_init() 之后调用，

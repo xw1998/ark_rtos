@@ -1,0 +1,29 @@
+/*
+ * Ark RTOS board: STM32F401 (smaller sister board).
+ *
+ * Hardware as wired on the board:
+ *   USART1 PA9/PA10 - kernel console, 115200 8N1
+ *   No NOR and no file system volume.
+ */
+
+/dts-v1/;
+
+/include/ "stm32f4.dtsi"
+
+/ {
+	model = "Ark RTOS STM32F401";
+	compatible = "ark,stm32f401";
+
+	chosen {
+		stdout-path = &usart1;
+	};
+};
+
+&usart1 {
+	status = "okay";
+	current-speed = <115200>;
+};
+
+&gpioa {
+	status = "okay";
+};

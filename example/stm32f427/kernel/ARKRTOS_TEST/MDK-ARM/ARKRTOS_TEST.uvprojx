@@ -1074,6 +1074,11 @@
               <FilePath>..\..\..\..\..\board\stm32f427\arkrtos_board.c</FilePath>
             </File>
             <File>
+              <FileName>arkrtos_dt.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\..\..\board\stm32f427\arkrtos_dt.c</FilePath>
+            </File>
+            <File>
               <FileName>drvuart.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\..\..\..\..\board\stm32f427\drvuart.c</FilePath>

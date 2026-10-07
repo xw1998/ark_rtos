@@ -426,6 +426,57 @@ def check_builds(uv4):
             fail("build:%s" % name, "exit=%d errors=%s" % (r.returncode, errs))
 
 
+# ---------------------------------------------------------------- check 7
+def _run_check(cmd):
+    env = dict(os.environ)
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    return subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True,
+                          encoding="utf-8", errors="replace")
+
+
+def check_config_generated():
+    """The generated headers / tables must match their sources.
+
+    Two build products are committed on purpose (autoconf.h and each board's
+    arkrtos_dt.c) so a clone can build without running the generators.  That
+    only holds if they are regenerated whenever their input changes, so this
+    check regenerates in memory and compares.  A hand-edited product, or a
+    source change that forgot to regenerate, fails here instead of showing up
+    as a mystery on the board.
+    """
+    r = _run_check([sys.executable, "tools/kconfig/genconfig.py",
+                    "--defconfig", "config/arkrtos_defconfig",
+                    "--out", "kernelsrc/include/arkrtos_autoconf.h",
+                    "--check"])
+    if r.returncode == 0:
+        ok("config-generated", "autoconf.h matches Kconfig + defconfig")
+    else:
+        fail("config-generated", ((r.stdout or "") + (r.stderr or "")).strip()[:300])
+
+
+def check_devicetree_generated():
+    """Every committed board/*/arkrtos_dt.c must be the dtc_lite output."""
+    boards = []
+    for dts in sorted(os.listdir(os.path.join(ROOT, "dts"))):
+        if dts.endswith(".dts"):
+            boards.append(os.path.splitext(dts)[0])
+    if not boards:
+        fail("devicetree-generated", "no dts/*.dts found")
+        return
+    bad = []
+    for b in boards:
+        r = _run_check([sys.executable, "tools/dts/dtc_lite.py",
+                        "--dts", "dts/%s.dts" % b,
+                        "--out", "board/%s/arkrtos_dt.c" % b, "--check"])
+        if r.returncode != 0:
+            bad.append(b)
+    if bad:
+        fail("devicetree-generated", "stale board data for: %s" % ", ".join(bad))
+    else:
+        ok("devicetree-generated", "%d board(s) match their DTS" % len(boards))
+
+
 def main(argv):
     do_build = "--build" in argv
     uv4 = None
@@ -442,6 +493,8 @@ def main(argv):
     check_encoding_eol()
     check_layout_and_scatter()
     check_no_partition_include_in_app()
+    check_config_generated()
+    check_devicetree_generated()
     if do_build:
         check_builds(uv4)
 

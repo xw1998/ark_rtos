@@ -1,0 +1,179 @@
+# Feature gates.  Defaults mirror arkrtos_features.h exactly; a disabled
+# feature still lets kernelsrc compile (CI builds a trimmed kernel).
+
+menu "Kernel core"
+
+config ARKRTOS_USE_SPINLOCK
+	bool "Spinlock"
+	default y
+	help
+	  Kernel spinlock (arkrtos_spin).  Off does not remove locking: it
+	  swaps in a plain interrupt-disable implementation, which is enough
+	  on a single core.  The object and device tables still rely on the
+	  lock semantics, so "off" means "cheaper", not "unlocked".
+
+config ARKRTOS_USE_SCHED_LOCK
+	bool
+	default y
+	help
+	  Scheduler lock (SVC 0x1B lock/unlock).  Mandatory: the lock has no
+	  honest fallback, so arkrtos_features.h rejects anything but 1.
+
+config ARKRTOS_USE_STACK_USAGE
+	bool "Task stack usage statistics"
+	default y
+	help
+	  Fill pattern plus lowest-stack-pointer watermark, giving each task's
+	  peak stack use.
+
+config ARKRTOS_USE_STACK_CHECK
+	bool "Stack overflow detection"
+	default y
+	help
+	  Detect a stack overflow by the end-of-stack flag being overwritten.
+
+config ARKRTOS_USE_SCHED_STAT
+	bool "Scheduler statistics"
+	default y
+	help
+	  Per-task switch count and time.
+
+config ARKRTOS_USE_CPU_LOAD
+	bool "CPU load statistics"
+	default y
+	help
+	  Real-time idle ratio.
+
+config ARKRTOS_USE_FAST_TICK_SWITCH
+	bool "On-demand PendSV on tick"
+	default y
+	help
+	  Skip the context-switch interrupt on a tick when no higher-priority
+	  task became ready.  Measured at roughly half the tick overhead.
+
+config ARKRTOS_USE_FAULT_RECOVER
+	bool "Faulting task recovery"
+	default y
+	help
+	  Reclaim a task slot and its resources when its exception handler runs.
+
+config ARKRTOS_USE_MPU_APPLY_CACHE
+	bool "MPU context apply cache"
+	default y
+	help
+	  Skip rewriting the MPU registers when a task re-enters unchanged.
+
+endmenu
+
+menu "Synchronisation and IPC"
+
+config ARKRTOS_USE_MQ
+	bool "Message queues (SVC 0x16)"
+	default y
+	help
+	  Semaphores, mutexes, condition variables and event groups are kernel
+	  core and have no off switch here: the device framework, the POSIX
+	  layer and the loader are built on them, so turning them off would
+	  cascade.  Message queues are the optional one.
+
+config ARKRTOS_USE_TIMER
+	bool "Software timers (SVC 0x17)"
+	default y
+
+endmenu
+
+menu "Services and components"
+
+config ARKRTOS_USE_LOG
+	bool "Kernel log"
+	default y
+	help
+	  The shell `log` command depends on this; it disappears with the log.
+
+config ARKRTOS_USE_BLK
+	bool "Block layer"
+	default y
+	help
+	  Device registry and the thin layer between it and the file system.
+
+config ARKRTOS_USE_FS
+	bool "File system facade + littlefs (SVC 0x1C)"
+	default y
+	depends on ARKRTOS_USE_BLK
+
+config ARKRTOS_USE_VFS
+	bool "Linux-style path namespace"
+	default y
+	depends on ARKRTOS_USE_BLK
+	help
+	  / is ramfs, /dev mirrors the device registry, /mnt/<name> is a
+	  persistent volume.  With this off the facade still exists (it
+	  returns NOSYS) but no kernel resource is reachable by path.
+
+config ARKRTOS_USE_VFS_LFS
+	bool "littlefs backend for /mnt"
+	default y
+	depends on ARKRTOS_USE_VFS && ARKRTOS_USE_FS
+
+config ARKRTOS_USE_MINIAPP
+	bool "MiniApps"
+	default y
+	depends on ARKRTOS_USE_FS
+	help
+	  Load a payload from the file system into RAM on demand and run it,
+	  returning the RAM when it stops.  Reuses the App image container and
+	  App SDK but does not enter the image pool or take a slot.
+
+config ARKRTOS_USE_POSIX
+	bool "POSIX / Windows compatibility layer"
+	default y
+	help
+	  pthread / dirent / file POSIX names on top of the native oslib.
+
+config ARKRTOS_POSIX_WRAP_STDLIB
+	bool "POSIX layer wraps malloc/free"
+	default n
+
+config ARKRTOS_USE_MDK_TRACE
+	bool "MDK trace capture"
+	default y
+	help
+	  components/mdk_trace; needs DWT/ITM hardware.
+
+config ARKRTOS_USE_CM_BACKTRACE
+	bool "cm_backtrace fault traceback"
+	default y
+	help
+	  components/cm_backtrace; needs DWT/NVIC.
+
+endmenu
+
+menu "Reliability and operations"
+
+config ARKRTOS_USE_IMAGE_SIGN
+	bool "Image digital signature (HMAC-SHA256)"
+	default n
+	help
+	  Verify the image signature at install time.  Requires a 32-byte
+	  pre-shared key ARKRTOS_IMAGE_SIGN_KEY, supplied by the project (-D).
+	  Symmetric by design: this is tamper detection plus provenance, not a
+	  full trust chain.
+
+config ARKRTOS_USE_CRASH_LOG
+	bool "Cross-reset crash journal"
+	default y
+
+config ARKRTOS_USE_KERNEL_GUARD
+	bool "Heartbeat contract and watchdog guard"
+	default y
+	help
+	  Really bites only when the board sets ARKRTOS_WDG_ENABLE.
+
+config ARKRTOS_USE_AUDIT
+	bool "Structural self-check"
+	default y
+	help
+	  Partition table / slot / image header consistency checks and an
+	  audit record.  Off keeps the loader's minimal legality checks only.
+
+endmenu

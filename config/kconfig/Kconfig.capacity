@@ -1,0 +1,150 @@
+# Capacity and tuning numbers.
+#
+# These were the "hardcoded limits" scattered through arkrtos_config.h and a
+# few headers.  They first appear here so the build has one readable place to
+# tune them; the C side keeps the same value behind #ifndef, so a build that
+# does not use Kconfig is unchanged.  Every default below equals the current
+# C default - if one drifts, the generated header would silently change
+# behaviour, which is why genconfig.py has a --check mode the CI gate runs.
+#
+# These are *table sizes*, not layout: they do not move any address.  Where a
+# pool lives stays in config/arkrtos_partition.h.
+
+menu "Time base"
+
+config ARKRTOS_TICK_PERIOD_US
+	int "Tick period (microseconds)"
+	default 500
+	range 50 100000
+	help
+	  Kernel tick in microseconds.  500 us is the board default.
+
+config ARKRTOS_TIME_SLICE_TICKS
+	int "Round-robin time slice (ticks)"
+	default 10
+	range 0 10000
+	help
+	  Ticks a task may run before an equal-priority peer is rotated in.
+	  0 disables round robin.
+
+endmenu
+
+menu "Synchronisation tables"
+
+config ARKRTOS_EVENT_NUM
+	int "Event groups"
+	default 10
+	range 1 256
+
+config ARKRTOS_MAX_EVENT_WAITERS
+	int "Max waiters per event group"
+	default 4
+	range 1 64
+
+config ARKRTOS_SEM_NUM
+	int "Semaphores"
+	default 24
+	range 1 256
+	help
+	  Kernel-wide table.  The POSIX layer alone takes 2 per live pthread
+	  (start gate + done) plus 1 per sem_t, so two Apps with 2 threads
+	  already need 10-12.  8 was the original number and it made
+	  pthread_create fail with ENOMEM as soon as a second App ran.
+
+config ARKRTOS_MTX_NUM
+	int "Mutexes"
+	default 8
+	range 1 256
+
+config ARKRTOS_MAX_SYNC_WAITERS
+	int "Max waiters per synchronisation object"
+	default 4
+	range 1 64
+
+config ARKRTOS_COND_NUM
+	int "Condition variables"
+	default 8
+	range 1 256
+
+endmenu
+
+menu "Message queues"
+
+config ARKRTOS_MQ_NUM
+	int "Message queues"
+	default 8
+	range 1 256
+
+config ARKRTOS_MQ_DEPTH
+	int "Messages per queue"
+	default 8
+	range 1 256
+
+config ARKRTOS_MQ_MSG_WORDS
+	int "Words per message"
+	default 4
+	range 1 64
+
+endmenu
+
+menu "Timers and faults"
+
+config ARKRTOS_TIMER_NUM
+	int "Software timers"
+	default 8
+	range 1 256
+
+config ARKRTOS_TIMER_TASK_PRI
+	int "Timer service task priority"
+	default 200
+	range 1 255
+
+config ARKRTOS_TIMER_TASK_STACK_WORDS
+	int "Timer service task stack (words)"
+	default 96
+	range 32 1024
+
+config ARKRTOS_FAULT_RECORD_NUM
+	int "Fault records kept"
+	default 8
+	range 1 64
+
+endmenu
+
+menu "Devices"
+
+config ARKRTOS_DEV_MAX_NUM
+	int "Registered devices"
+	default 8
+	range 1 64
+	help
+	  Device registry capacity (arkrtos_dev_register).  A device the
+	  board registers at run time must fit here.
+
+endmenu
+
+menu "Stack instrumentation"
+
+config ARKRTOS_STACK_END_FLAG
+	hex "Stack end sentinel"
+	default 0xed01
+
+config ARKRTOS_STACK_FILL_PATTERN
+	hex "Stack fill pattern"
+	default 0xcdcdcdcd
+
+endmenu
+
+menu "MiniApps"
+
+config ARKRTOS_MINI_MAX
+	int "Concurrent MiniApps"
+	default 2
+	range 1 4
+	depends on ARKRTOS_USE_MINIAPP
+	help
+	  Bounded above by ARKRTOS_MINI_ARRAY_MAX (the shared table array
+	  length, an ABI shape constant).  The run-time `mini count` command
+	  may only tighten this, never exceed it.
+
+endmenu

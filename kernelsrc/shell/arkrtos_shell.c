@@ -50,6 +50,7 @@
 #include "arkrtos_crash.h"
 #include "arkrtos_partition.h"
 #include "arkrtos_version.h"
+#include "arkrtos_dt.h"
 
 #include <string.h>
 
@@ -1039,6 +1040,39 @@ static int cmd_sched(int argc, char *argv[])
     }
 
     sh_out("sched: consistent (bitmap/links == task table)\r\n");
+    return 0;
+}
+
+/* dt: dump the compiled device tree (generated from dts/<board>.dts). */
+static int cmd_dt(int argc, char *argv[])
+{
+    uint32 i;
+    uint32 total;
+
+    (void)argc;
+    (void)argv;
+
+    total = arkrtos_dt_count();
+    ark_shell_printf("\r\nmodel=%s nodes=%u\r\n",
+                     arkrtos_dt_model(), (uint32)total);
+    for(i = 0u; i < total; i++)
+    {
+        const arkrtos_dt_node_t *n = arkrtos_dt_node(i);
+
+        if(n == 0)
+        {
+            continue;
+        }
+        if(n->is_device == 0u)
+        {
+            continue;
+        }
+        ark_shell_printf("  %s compat=%s reg=0x%x/0x%x %s\r\n",
+                         n->name,
+                         (n->compatible != 0) ? n->compatible : "-",
+                         (uint32)n->reg_base, (uint32)n->reg_size,
+                         (n->status_okay != 0u) ? "okay" : "disabled");
+    }
     return 0;
 }
 
@@ -3543,6 +3577,8 @@ static int register_kernel_commands(void)
         "App slots: app [list | install <path> [slot] | start <slot> | stop <slot> | uninstall <slot>]", 4);
     g_cmd_table[idx++] = ARK_SHELL_CMD("drv", cmd_drv,
         "Driver slots: drv [list | start <slot> | stop <slot> | uninstall <slot>]", 4);
+    g_cmd_table[idx++] = ARK_SHELL_CMD("dt", cmd_dt,
+        "Dump the compiled device tree (model, nodes, compatible, reg)", 1);
     g_cmd_table[idx++] = ARK_SHELL_CMD("task", cmd_task,
         "List kernel tasks, or dump one task frame: task <id> (ids start at 1)", 3);
     g_cmd_table[idx++] = ARK_SHELL_CMD("sched", cmd_sched,

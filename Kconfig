@@ -1,0 +1,31 @@
+# Ark RTOS top-level Kconfig.
+#
+# This file describes *what the build should contain*.  It is deliberately
+# separate from, and orthogonal to, three other layers:
+#
+#   board/<chip>/arkrtos_board_config.h   what this board/chip HAS
+#                                         (FPU / MPU / privilege / clock / watchdog)
+#   kernelsrc/include/arkrtos_hal.h       what the kernel REQUIRES of the hardware
+#   config/arkrtos_partition.h            WHERE things live (addresses, slots)
+#
+# Two rules keep this honest:
+#   1. Anything not every user wants must be a symbol here.
+#   2. Every symbol's default must equal the #ifndef default in
+#      arkrtos_features.h / arkrtos_config.h, so not using Kconfig changes
+#      nothing (tools/kconfig/genconfig.py --check enforces the generated file).
+#
+# A symbol is named exactly like the macro it defines; there is no CONFIG_
+# prefix.  Generate the header with:
+#   py -3 tools/kconfig/genconfig.py --defconfig config/arkrtos_defconfig \
+#       --out kernelsrc/include/arkrtos_autoconf.h
+
+mainmenu "Ark RTOS Configuration"
+
+comment "Ark RTOS kernel configuration"
+comment "Board capability (FPU/MPU/privilege/clock/watchdog) is NOT here - it"
+comment "describes the hardware and lives in board/<chip>/arkrtos_board_config.h."
+
+source "config/kconfig/Kconfig.features"
+source "config/kconfig/Kconfig.capacity"
+source "config/kconfig/Kconfig.posix"
+source "config/kconfig/Kconfig.net"

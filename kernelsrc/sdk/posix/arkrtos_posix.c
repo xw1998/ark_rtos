@@ -1317,7 +1317,9 @@ int arkrtos_posix_mq_receive(arkrtos_mqd_t mqdes, void *msg, uint32 len_words,
  * the App should hand around, and close() has to know whether to go to the
  * path close or the device close.
  */
+#ifndef ARKRTOS_POSIX_FD_MAX
 #define ARKRTOS_POSIX_FD_MAX   (8)
+#endif
 #define ARKRTOS_POSIX_FD_BASE  (3)
 
 #define ARKRTOS_POSIX_FD_FREE  (0u)

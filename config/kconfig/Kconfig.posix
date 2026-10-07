@@ -1,0 +1,40 @@
+# POSIX / Windows compatibility layer capacities (kernelsrc/sdk/posix).
+
+menu "POSIX layer"
+
+config ARKRTOS_POSIX_THREAD_MAX
+	int "Threads per process"
+	default 2
+	range 1 32
+
+config ARKRTOS_POSIX_STACK_WORDS
+	int "Default thread stack (words)"
+	default 256
+	range 64 4096
+
+config ARKRTOS_POSIX_HEAP_SIZE
+	int "POSIX heap (bytes)"
+	default 1024
+	range 128 1048576
+
+config ARKRTOS_POSIX_KEY_MAX
+	int "Thread-specific data keys"
+	default 8
+	range 1 256
+
+config ARKRTOS_POSIX_NAME_MAX
+	int "File name length"
+	default 32
+	range 8 255
+
+config ARKRTOS_POSIX_DIR_MAX
+	int "Open directory streams"
+	default 2
+	range 1 32
+
+config ARKRTOS_POSIX_FD_MAX
+	int "File descriptors"
+	default 8
+	range 1 64
+
+endmenu

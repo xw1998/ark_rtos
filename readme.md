@@ -47,6 +47,7 @@ Ark RTOS 把固件拆成**内核 / 驱动 / 应用**三块可以各自独立升�
 | socket / select | F427 + `SOCKET_DEMO`，`pass=36 fail=0`（TCP 回显、UDP、IPv6 报错三组） | [socket与select兼容层](docs/socket与select兼容层.md) |
 | 运行中升级 | 交接空洞 **27 / 31 / 224 / 407 ms**，`it=994 → resumed at it=994`，受控量不回零 | [无缝升级例程](docs/无缝升级例程.md) |
 | 节拍计数器 32 位回绕 | 注入使 `arkrtos_kernel_tick` 跨过回绕，两侧 `APP_ALIVE` 间隔精确 5.000 s | [调度器说明](docs/调度器说明.md) §2.3 |
+| 设备树 | F427 板上 `dt` 命令打印 20 个节点（model / compatible / reg / enabled/disabled），与 `dts/stm32f427.dts` 一致 | [设备树](docs/设备树.md) |
 | 双板同源 | F427 与 F401 同一份内核源码均编译通过（F401 `Code=46526`） | 本文 §验证状态 |
 
 ## 核心特性
@@ -740,6 +741,8 @@ STM32F427VGTx @96 MHz，DAPLink（SWD 两线，无 SWO）经 mdkdebug 的 SWD tr
 | 把 App / 驱动调试起来、装到板子上、处理崩溃 | [Ark RTOS应用安装与调试指南](docs/Ark RTOS应用安装与调试指南.md)（操作手册，先读这份） |
 | 搞懂安装策略、设备端配置区、槽位与 RAM 窗口 | [配置区与安装策略](docs/配置区与安装策略.md) |
 | 查所有文档的索引 | [docs/README.md](docs/README.md) |
+| 决定编哪些功能、把各类上限改大改小 | [Kconfig配置系统](docs/Kconfig配置系统.md) |
+| 说清板子上有什么硬件、驱动怎么按 compatible 找设备 | [设备树](docs/设备树.md) |
 | 看调度器怎么实现、实测代价账怎么算 | [调度器说明](docs/调度器说明.md) |
 | 看内存保护怎么起效、App 越权会怎样 | [内存保护与App越权验证](docs/内存保护与App越权验证.md) |
 | 把 Linux / Windows 上的 C 程序搬过来 | [POSIX与Windows兼容层说明](docs/POSIX与Windows兼容层说明.md) |

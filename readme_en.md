@@ -56,6 +56,7 @@ per item.
 | socket / select | F427 with `SOCKET_DEMO`, `pass=36 fail=0` (TCP echo, UDP, IPv6 rejection) | [socket layer](docs/socket与select兼容层.md) |
 | Upgrade while running | Handover gaps of **27 / 31 / 224 / 407 ms**, `it=994 -> resumed at it=994`, controlled variable never resets | [Seamless upgrade](docs/无缝升级例程.md) |
 | 32-bit tick wraparound | Injected so that `arkrtos_kernel_tick` wraps; the two `APP_ALIVE` lines around it are exactly 5.000 s apart | [Scheduler notes](docs/调度器说明.md) section 2.3 |
+| Device tree | On the F427 board the `dt` command prints 20 nodes (model / compatible / reg / enabled flag) exactly as written in `dts/stm32f427.dts` | [Device tree](docs/设备树.md) |
 | Two boards, one source | F427 and F401 both build from the same kernel sources (F401 `Code=46526`) | This file, "Verification status" |
 
 ## Highlights
@@ -855,6 +856,8 @@ The documentation index is [docs/README.md](docs/README.md).
 | Get apps and drivers debugged, installed and crash-handled | [Ark RTOS应用安装与调试指南](docs/Ark RTOS应用安装与调试指南.md) (operations manual, start here) |
 | Understand installation strategies, the on-device configuration region, slots and RAM windows | [配置区与安装策略](docs/配置区与安装策略.md) |
 | See the index of every document | [docs/README.md](docs/README.md) |
+| Decide which features to build and resize the static limits | [Kconfig system](docs/Kconfig配置系统.md) |
+| Describe what hardware the board has and let drivers bind by compatible | [Device tree](docs/设备树.md) |
 | Understand the scheduler and how its cost was measured | [调度器说明](docs/调度器说明.md) |
 | See how memory protection works and what an app violation does | [内存保护与App越权验证](docs/内存保护与App越权验证.md) |
 | Move a C program written for Linux or Windows onto this kernel | [POSIX与Windows兼容层说明](docs/POSIX与Windows兼容层说明.md) |

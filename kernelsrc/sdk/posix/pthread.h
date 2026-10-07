@@ -133,7 +133,9 @@ extern volatile int32 arkrtos_posix_pth_dbg_exit;    /* pthread_exit() posted   
  */
 typedef uint32 arkrtos_pthread_key_t;
 typedef arkrtos_pthread_key_t pthread_key_t;
+#ifndef ARKRTOS_POSIX_KEY_MAX
 #define ARKRTOS_POSIX_KEY_MAX   (8u)
+#endif
 
 int  arkrtos_posix_key_create(pthread_key_t *key, void (*destructor)(void *));
 int  arkrtos_posix_key_delete(pthread_key_t key);

@@ -1,0 +1,74 @@
+/*
+ * Ark RTOS board: STM32F427 (the primary board).
+ *
+ * Hardware as wired on the board:
+ *   USART1 PA9/PA10  - kernel console, 115200 8N1
+ *   SPI2  PB13/PB14/PB15 + PE15 chip select - W25Q128 NOR (16 MiB)
+ *   GPIOC PC0/PC1/PC2 - status LEDs
+ *   IWDG             - owned by the kernel guard
+ */
+
+/dts-v1/;
+
+/include/ "stm32f4.dtsi"
+
+/ {
+	model = "Ark RTOS STM32F427";
+	compatible = "ark,stm32f427";
+
+	chosen {
+		stdout-path = &usart1;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led0 {
+			label = "status0";
+			gpios = <&gpioc 0 0>;
+		};
+		led1 {
+			label = "status1";
+			gpios = <&gpioc 1 0>;
+		};
+		led2 {
+			label = "status2";
+			gpios = <&gpioc 2 0>;
+		};
+	};
+};
+
+&usart1 {
+	status = "okay";
+	current-speed = <115200>;
+	/* PA9 TX, PA10 RX as AF7 */
+	pinctrl-0 = <9 10>;
+};
+
+&gpioa {
+	status = "okay";
+};
+
+&gpioc {
+	status = "okay";
+};
+
+&gpioe {
+	status = "okay";
+};
+
+&spi2 {
+	status = "okay";
+	spi-max-frequency = <20000000>;
+
+	nor: flash@0 {
+		compatible = "winbond,w25q128";
+		reg = <0 0x1000000>;
+		spi-max-frequency = <20000000>;
+	};
+};
+
+&iwdg {
+	status = "okay";
+	timeout-ms = <4000>;
+};

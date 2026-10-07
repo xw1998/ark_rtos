@@ -117,7 +117,9 @@
 
 /* System wide socket ceiling: memory bounded by MEMP_NUM_NETCONN in
  * lwipopts.h, not by this number. */
+#ifndef ARKRTOS_NET_MAX_SOCKETS
 #define ARKRTOS_NET_MAX_SOCKETS      (4)
+#endif
 
 /* Host order IPv4 address from four octets, e.g. ARKRTOS_NET_IP(127,0,0,1). */
 #define ARKRTOS_NET_IP(a, b, c, d)   ((((unsigned long)(a)) << 24) | \

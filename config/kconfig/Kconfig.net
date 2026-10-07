@@ -1,0 +1,18 @@
+# lwIP port capacities (kernelsrc/include/arkrtos_net*.h).
+#
+# The lwIP sources themselves are conditional-compiled by the port layer only;
+# ARKRTOS_USE_LWIP gates that port.  These numbers size the Ark RTOS side.
+
+menu "Network"
+
+config ARKRTOS_NET_MAX_SOCKETS
+	int "Simultaneous sockets"
+	default 4
+	range 1 64
+
+config ARKRTOS_NET_TASK_STACK_WORDS
+	int "Network service task stack (words)"
+	default 384
+	range 128 4096
+
+endmenu

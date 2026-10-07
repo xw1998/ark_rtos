@@ -24,7 +24,9 @@
 
 /** Longest entry name a dirent can carry, NUL included. One path component,
  *  not a path. */
+#ifndef ARKRTOS_POSIX_NAME_MAX
 #define ARKRTOS_POSIX_NAME_MAX  (32u)
+#endif
 
 struct dirent
 {
