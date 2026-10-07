@@ -159,6 +159,16 @@ endmenu
 
 menu "Shell"
 
+config ARKRTOS_SHELL_GLOB
+	bool "Shell glob expansion (unquoted * and ?)"
+	default y
+	help
+	  Expand an unquoted word that contains '*' or '?' against the VFS
+	  namespace, the way a POSIX shell does.  A quoted pattern is left
+	  alone, a pattern that matches nothing stays literal, and a match
+	  set that does not fit is reported instead of truncated.  Off makes
+	  '*' and '?' ordinary characters again.
+
 config ARKRTOS_SHELL_PROMPT_LINUX
 	bool "Linux-style prompt (user@host:cwd$)"
 	default y

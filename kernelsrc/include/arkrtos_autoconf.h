@@ -91,6 +91,9 @@
 #ifndef ARKRTOS_SEM_NUM
 #define ARKRTOS_SEM_NUM (24)
 #endif
+#ifndef ARKRTOS_SHELL_GLOB
+#define ARKRTOS_SHELL_GLOB 1
+#endif
 #ifndef ARKRTOS_SHELL_PROMPT_LINUX
 #define ARKRTOS_SHELL_PROMPT_LINUX 1
 #endif

@@ -23,7 +23,7 @@
 #include <string.h>
 #include <stdio.h>
 
-#if ARKRTOS_SHELL_REDIRECT
+#if ARKRTOS_SHELL_REDIRECT || ARKRTOS_SHELL_GLOB
 #include "arkrtos_vfs.h"
 #endif
 
@@ -47,6 +47,7 @@ enum {
 typedef struct {
     char         *text;
     unsigned char op;
+    unsigned char quoted;
 } eval_tok_t;
 
 /* ============================================================
@@ -234,6 +235,7 @@ static int eval_tokenize(char *line, eval_tok_t *toks, int max)
             }
             toks[n].text = 0;
             toks[n].op = eval_op_kind(*r, r[1]);
+            toks[n].quoted = 0u;
             n++;
             r += span;
             continue;
@@ -242,21 +244,25 @@ static int eval_tokenize(char *line, eval_tok_t *toks, int max)
         /* A word: decode until whitespace or an unquoted metacharacter. */
         {
             char *start = w;
+            unsigned char q = 0u;
 
             toks[n].text = start;
             toks[n].op = EVAL_WORD;
+            toks[n].quoted = 0u;
             n++;
 
             while ((*r != '\0') && !eval_is_blank(*r) && !eval_is_meta(*r)) {
                 char c = *r;
 
                 if (c == '\\') {
+                    q = 1u;
                     r++;
                     if (*r == '\0') {
                         break;
                     }
                     *w++ = *r++;
                 } else if (c == '\'') {
+                    q = 1u;
                     r++;
                     while ((*r != '\0') && (*r != '\'')) {
                         *w++ = *r++;
@@ -265,6 +271,7 @@ static int eval_tokenize(char *line, eval_tok_t *toks, int max)
                         r++;
                     }
                 } else if (c == '"') {
+                    q = 1u;
                     r++;
                     while ((*r != '\0') && (*r != '"')) {
                         if ((*r == '\\') &&
@@ -282,6 +289,7 @@ static int eval_tokenize(char *line, eval_tok_t *toks, int max)
                     *w++ = *r++;
                 }
             }
+            toks[n - 1].quoted = q;
             {
                 char delim = *r;
 
@@ -305,6 +313,7 @@ static int eval_tokenize(char *line, eval_tok_t *toks, int max)
                     }
                     toks[n].text = 0;
                     toks[n].op = eval_op_kind(delim, r[1]);
+                    toks[n].quoted = 0u;
                     n++;
                     r += span;
                 }
@@ -316,6 +325,160 @@ static int eval_tokenize(char *line, eval_tok_t *toks, int max)
     }
     return n;
 }
+
+#if ARKRTOS_SHELL_GLOB
+/* ============================================================
+ * glob - expand unquoted '*', '?' against the VFS namespace
+ *
+ * Expansion runs after quoting was decoded, and only for words that were
+ * not quoted: "a*" stays literal, a* is a pattern.  A pattern that matches
+ * nothing is left as the literal word (the POSIX convention); a match set
+ * that does not fit in argv or in the pool is a reported error, never a
+ * silent truncation.
+ * ============================================================ */
+#define ARK_GLOB_MAX 16
+
+static char s_glob[ARK_GLOB_MAX][ARK_SHELL_PATH_SIZE];
+static int  s_glob_used;
+
+static int glob_match(const char *p, const char *s)
+{
+    while (*p != '\0') {
+        if (*p == '*') {
+            p++;
+            if (*p == '\0') {
+                return 1;
+            }
+            while (*s != '\0') {
+                if (glob_match(p, s) != 0) {
+                    return 1;
+                }
+                s++;
+            }
+            return 0;
+        }
+        if (*p == '?') {
+            if (*s == '\0') {
+                return 0;
+            }
+            p++;
+            s++;
+            continue;
+        }
+        if (*p != *s) {
+            return 0;
+        }
+        p++;
+        s++;
+    }
+    return (*s == '\0');
+}
+
+typedef struct {
+    const char *pat;
+    const char *dir;
+    char      **argv;
+    int        *argc;
+    int         max;
+    int         overflow;
+} glob_ctx_t;
+
+static int glob_cb(const char *name, uint32 is_dir, uint32 size, void *arg)
+{
+    glob_ctx_t *c = (glob_ctx_t *)arg;
+    uint32      dlen;
+    uint32      nlen;
+    char       *dst;
+    uint32      k;
+
+    (void)is_dir;
+    (void)size;
+    if (glob_match(c->pat, name) == 0) {
+        return 0;
+    }
+    if ((s_glob_used >= ARK_GLOB_MAX) || (*c->argc >= c->max)) {
+        c->overflow = 1;
+        return -1;
+    }
+    dlen = (uint32)strlen(c->dir);
+    nlen = (uint32)strlen(name);
+    if ((dlen + nlen + 2u) > (uint32)ARK_SHELL_PATH_SIZE) {
+        c->overflow = 1;
+        return -1;
+    }
+    dst = s_glob[s_glob_used];
+    (void)memcpy(dst, c->dir, dlen);
+    k = dlen;
+    if ((dlen == 0u) || (c->dir[dlen - 1u] != '/')) {
+        dst[k++] = '/';
+    }
+    (void)memcpy(&dst[k], name, nlen + 1u);
+    c->argv[(*c->argc)++] = dst;
+    s_glob_used++;
+    return 0;
+}
+
+static int glob_expand(ark_shell_t *shell, const char *pat, char **argv,
+                       int *argc, int max)
+{
+    char        rdir[ARK_SHELL_PATH_SIZE];
+    char        dirin[ARK_SHELL_PATH_SIZE];
+    const char *slash = strrchr(pat, '/');
+    const char *namepat;
+    glob_ctx_t  ctx;
+    int         before = *argc;
+    int32       rc;
+
+    if (slash != 0) {
+        uint32 dl = (uint32)(slash - pat);
+
+        if (dl >= (uint32)sizeof(dirin)) {
+            return -1;
+        }
+        if (dl == 0u) {
+            dirin[0] = '/';
+            dirin[1] = '\0';
+        } else {
+            (void)memcpy(dirin, pat, dl);
+            dirin[dl] = '\0';
+        }
+        namepat = slash + 1;
+    } else {
+        dirin[0] = '.';
+        dirin[1] = '\0';
+        namepat = pat;
+    }
+
+    if (*namepat != '\0') {
+        ark_shell_resolve(shell, dirin, rdir, sizeof(rdir));
+        ctx.pat = namepat;
+        ctx.dir = rdir;
+        ctx.argv = argv;
+        ctx.argc = argc;
+        ctx.max = max;
+        ctx.overflow = 0;
+        rc = arkrtos_vfs_list(rdir, glob_cb, &ctx);
+        if (ctx.overflow != 0) {
+            return -1;
+        }
+        if ((rc == 0) && (*argc > before)) {
+            return 0;
+        }
+    }
+
+    /* No match: keep the literal word, the way a POSIX shell does. */
+    if (*argc >= max) {
+        return -1;
+    }
+    argv[(*argc)++] = (char *)pat;
+    return 0;
+}
+
+static int glob_can(const char *s, unsigned char quoted)
+{
+    return ((quoted == 0u) && (strpbrk(s, "*?") != 0)) ? 1 : 0;
+}
+#endif /* ARKRTOS_SHELL_GLOB */
 
 /* ============================================================
  * run_stage - Run one simple command (alias, $?, help, limits, handler)
@@ -344,6 +507,18 @@ static int run_stage(ark_shell_t *shell, eval_tok_t *toks, int a, int b,
         if ((skip != 0) && (skip[i] != 0u)) {
             continue;
         }
+#if ARKRTOS_SHELL_GLOB
+        if (glob_can(toks[i].text, toks[i].quoted) != 0) {
+            if (glob_expand(shell, toks[i].text, argv, &argc,
+                            ARK_SHELL_MAX_ARGS) != 0) {
+                ark_shell_printf("ark: too many matches for %s\r\n",
+                                 toks[i].text);
+                eval_set_status(shell, 1);
+                return 1;
+            }
+            continue;
+        }
+#endif
         if (argc >= ARK_SHELL_MAX_ARGS) {
             ark_shell_printf("ark: too many arguments (max %d)\r\n",
                              ARK_SHELL_MAX_ARGS - 1);
@@ -685,6 +860,10 @@ int ark_shell_eval_line(ark_shell_t *shell, char *line)
     int        cmd_start = 0;
     int        run = 1;
     int        status = 0;
+
+#if ARKRTOS_SHELL_GLOB
+    s_glob_used = 0;
+#endif
 
     if ((shell == 0) || (line == 0)) {
         return 0;
