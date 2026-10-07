@@ -157,6 +157,10 @@ def main():
     ap.add_argument("--unit", type=auto_int, default=0, help="起始分配单元号")
     ap.add_argument("--units", type=auto_int, default=1, help="占用单元数（2 的幂）")
     ap.add_argument("--type", choices=["app", "driver", "miniapp"], default="app")
+    ap.add_argument("--dev-slot", type=int, default=None,
+                    help="按开发槽位表条目号取 单元/单元数/类型（0 ~ ARKRTOS_DEV_SLOT_MAX-1）")
+    ap.add_argument("--stack-size", type=auto_int, default=None,
+                    help="镜像 RAM 窗口内给内核栈保留的字节数（默认按镜像类型推导）")
     ap.add_argument("--dump", action="store_true", help="仅打印关键地址用于交叉核对")
     args = ap.parse_args()
 
@@ -168,6 +172,17 @@ def main():
 
     layout = Layout(MacroEval(parse_defines(header)))
     v = layout.v
+
+    # --dev-slot 是 --unit/--units/--type 的快捷方式（取自配置头里的开发槽位表），
+    # 与 gen_scatter.py 的 --dev-slot 语义一致，保证两侧取到同一块区间与同一栈大小。
+    if args.dev_slot is not None:
+        entries = layout.dev_slots()
+        if args.dev_slot < 0 or args.dev_slot >= len(entries):
+            raise SystemExit("--dev-slot 超出范围（0 ~ %d）" % (len(entries) - 1))
+        _idx, args.unit, args.units, _stype = entries[args.dev_slot]
+        if _stype == 0:
+            raise SystemExit("开发槽位 %d 未使用（类型为 0）" % _idx)
+        args.type = "driver" if _stype == 2 else "app"
 
     if args.dump:
         print("[gen_ld] KERNEL_BASE=0x%08X KERNEL_SIZE=0x%08X" % (v("KERNEL_BASE"), v("KERNEL_SIZE")))
@@ -203,11 +218,23 @@ def main():
             hdr = v("APP_IMAGE_HEADER_SIZE")
             flash_base, flash_size = base + hdr, size - hdr
         ram_base = layout.dev_ram_base(args.unit)
-        ram_size = v("ARKRTOS_DEV_RAM_WINDOW")
+        window = v("ARKRTOS_DEV_RAM_WINDOW")
+        # 镜像 RAM 窗口内最高一段留给内核设置的栈：RW/ZI 区只到「栈底」，
+        # 与 Keil 侧 scatter（RW_IMG 上限已扣栈 + ARM_LIB_STACK）同一口径，
+        # 编译期就撞不到栈；栈顶由内核在 loader 里设置，见 gen_scatter.py。
+        if args.stack_size is not None:
+            stack_size = args.stack_size
+        else:
+            stack_size = v("DRIVER_TASK_STACK_SIZE") if args.type == "driver" \
+                else v("APP_TASK_STACK_SIZE")
+        if stack_size >= window:
+            raise SystemExit("栈 %d 字节 >= RAM 窗口 %d 字节" % (stack_size, window))
+        ram_size = window - stack_size
         noinit = None
         # 镜像由内核设置栈，链接脚本不再定义 _estack
         want_stack = False
-        entry = "APPSTART"
+        entry = {"app": "APPSTART", "driver": "DRVSTART",
+                 "miniapp": "MINISTART"}[args.type]
 
     buf = []
     import io
@@ -217,7 +244,8 @@ def main():
 
     sink = io.StringIO()
     emit_ld("_", flash_base, flash_size, ram_base, ram_size, sink,
-            ccm=ccm, noinit=noinit, want_stack=want_stack, entry=entry,
+            ccm=(ccm if args.target == "kernel" else None),
+            noinit=noinit, want_stack=want_stack, entry=entry,
             bss_spill_ccm=(args.target == "kernel"))
     text = sink.getvalue()
 

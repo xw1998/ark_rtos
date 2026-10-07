@@ -722,7 +722,7 @@ static void *cv_waiter(void *arg)
  * 期望和 = seed + (seed+0x100) + (seed+0x200) + (seed+0x300) = 4*seed + 0x600
  */
 
-#if defined(__ARMCC_VERSION) && (__ARMCC_VERSION >= 6000000)
+#if (defined(__ARMCC_VERSION) && (__ARMCC_VERSION >= 6000000)) || defined(__GNUC__)
 
 /* Arm Compiler 6（armclang）：用 GCC 风格内联汇编。
  * s16-s19 故意不写进 clobber 列表 —— 一来 AA 里也放不进 VFP 寄存器，

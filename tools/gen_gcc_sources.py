@@ -47,6 +47,13 @@ REPLACE = {
         "kernelsrc/port/arm/cortex-m4/arkrtos_context_gcc.s",
     "kernelsrc/port/arm/cortex-m3/arkrtos_context.S":
         "kernelsrc/port/arm/cortex-m3/arkrtos_context_gcc.s",
+    # 镜像（App / 驱动 / 小程序）armasm 入口 → GNU as 版入口
+    "kernelsrc/sdk/app_sdk/arkrtos_app_start.s":
+        "kernelsrc/sdk/app_sdk/arkrtos_app_start_gcc.s",
+    "kernelsrc/sdk/driver_sdk/arkrtos_drv_start.s":
+        "kernelsrc/sdk/driver_sdk/arkrtos_drv_start_gcc.s",
+    "kernelsrc/sdk/mini_sdk/arkrtos_mini_start.s":
+        "kernelsrc/sdk/mini_sdk/arkrtos_mini_start_gcc.s",
 }
 
 

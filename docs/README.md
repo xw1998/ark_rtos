@@ -25,6 +25,7 @@
 | 想知道它和 Linux 比还差什么、哪些是欠账哪些是定位差 | [与Linux差距盘点.md](与Linux差距盘点.md) |
 | 想知道它和 FreeRTOS / RT-Thread / Zephyr 比还缺什么 | [与成熟RTOS对比.md](与成熟RTOS对比.md)（逐维度矩阵 + 缺口分档 + 明确不做的） |
 | 让设备之间互相发现、发事件、远程调用、传数据（软总线） | [软总线接入.md](软总线接入.md)（ark_softbus 同步副本、三钩子端口、MCU 档与 RAM 实测、`bus` 命令与上板自检） |
+| 不用 Keil，想用 GNU Make + arm-none-eabi-gcc 编 F427 例程 | [GCC构建指南.md](GCC构建指南.md)（工程位置、工具链、make 用法、与 Keil 的对应、GCC 侧三个坑、验证状态） |
 
 ## 目录结构
 
@@ -45,6 +46,7 @@ docs/
 ├── 与Linux差距盘点.md                      # 【设计说明】与 Linux 逐维度差距表 + 欠账排序 + 明确不做的取舍
 ├── 与成熟RTOS对比.md                       # 【设计说明】对 FreeRTOS/RT-Thread/Zephyr 的逐维度矩阵 + 缺口分档
 ├── 软总线接入.md                            # 【设计说明】ark_softbus 组件同步副本、板级三钩子、MCU 档位与 RAM 实测、`bus` 命令与上板自检
+├── GCC构建指南.md                           # 【操作手册】GNU Make + arm-none-eabi-gcc 的 F427 例程：工具链、用法、与 Keil 的对应、GCC 侧三个坑、验证状态
 ├── img/                                   # 【实测图】根 README §调度表现 引用（必须入库，勿被忽略规则吞掉）
 │   ├── sched-overview.png                 # 整体调度时间线 + 切换间隔（4.97 s 窗口）
 │   ├── sched-switch-detail.png            # 单次切换细节 + App 任务被调度进来跑 72.7 µs
