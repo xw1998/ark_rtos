@@ -279,9 +279,15 @@ static int32_t lfs_stat(struct ark_vfs_mnt *mnt, const char *rel,
     rc = p_abs(rel, abs, (uint32_t)sizeof(abs));
     if (rc != ARK_VFS_OK) { return rc; }
     if (arkrtos_fs_stat_path(abs, &size, &is_dir) != 0) { return ARK_E_NOENT; }
-    st->mode  = (is_dir != 0u) ? ARK_S_IFDIR : ARK_S_IFREG;
+    /* littlefs 不存访问位，也不存属主。这里报告的是本挂载点生效的默认值
+     * （目录 0755 / 文件 0644、属主 0:0），不是「量到的」值；改不了它们，
+     * 所以本驱动没有 chmod/chown 回调，调用方会拿到 NOSYS 而不是假成功。 */
+    st->mode  = (uint32_t)((is_dir != 0u) ? (ARK_S_IFDIR | ARK_S_DEFAULT_DIR)
+                                          : (ARK_S_IFREG | ARK_S_DEFAULT_FILE));
     st->size  = (ark_off_t)size;
     st->mtime = 0u;                     /* 卷里不存时间 */
+    st->uid   = 0u;
+    st->gid   = 0u;
     return ARK_VFS_OK;
 }
 
@@ -388,8 +394,11 @@ static int p_list_cb(const char *name, uint32 size, uint8 is_dir, void *arg)
         return -1;
     }
     ark_p_memcpy(c->ent->name, name, nlen + 1u);
-    c->ent->mode = (is_dir != 0u) ? ARK_S_IFDIR : ARK_S_IFREG;
+    c->ent->mode = (uint32_t)((is_dir != 0u) ? (ARK_S_IFDIR | ARK_S_DEFAULT_DIR)
+                                             : (ARK_S_IFREG | ARK_S_DEFAULT_FILE));
     c->ent->size = (ark_off_t)size;
+    c->ent->uid  = 0u;
+    c->ent->gid  = 0u;
     c->found = 1;
     return -1;
 }
@@ -439,7 +448,9 @@ const ark_vfs_fsdrv_t arkrtos_vfs_lfs_fsdrv = {
     lfs_rename,
     lfs_opendir,
     lfs_readdir,
-    lfs_closedir
+    lfs_closedir,
+    NULL,               /* chmod: littlefs 没有访问位可改           */
+    NULL                /* chown: 也没有属主可改                    */
 };
 
 #else   /* VFS / VFS_LFS / FS 三者不全开 */

@@ -93,6 +93,40 @@ enum {
     ARK_S_IFCHR = 0x2000     /* a device node - what /dev entries are */
 };
 
+/** @brief Access bits in ark_vfs_stat_t.mode, laid out like the POSIX rwx
+ *  triples: owner/group/other, read/write/execute, low bits first.
+ *
+ *  A filesystem that keeps no per-file permissions (littlefs, FAT) still
+ *  reports the *effective* mode its mount policy applies - it simply cannot
+ *  change it, so chmod on it returns ARK_E_NOSYS rather than a lie.
+ *  ARK_S_IFMT masks the type bits back out of a full mode. */
+enum {
+    ARK_S_IRUSR  = 0x0100,
+    ARK_S_IWUSR  = 0x0080,
+    ARK_S_IXUSR  = 0x0040,
+    ARK_S_IRGRP  = 0x0020,
+    ARK_S_IWGRP  = 0x0010,
+    ARK_S_IXGRP  = 0x0008,
+    ARK_S_IROTH  = 0x0004,
+    ARK_S_IWOTH  = 0x0002,
+    ARK_S_IXOTH  = 0x0001,
+    ARK_S_IRWXU  = 0x01C0,
+    ARK_S_IRWXG  = 0x0038,
+    ARK_S_IRWXO  = 0x0007,
+    ARK_S_PERM   = 0x0FFF,   /* every bit the access field may occupy */
+    ARK_S_IFMT   = 0xF000    /* the file-type mask, kept above ARK_S_PERM */
+};
+
+/** @brief The access bits a fresh node gets, matching the usual Unix umask
+ *  result: 0644 for a file, 0755 for a directory, 0666 for a device node.
+ *  Filesystems that hand these out on create should use the same numbers so
+ *  a listing reads the same whatever mount it came from. */
+#define ARK_S_DEFAULT_FILE  (ARK_S_IRUSR | ARK_S_IWUSR | ARK_S_IRGRP | ARK_S_IROTH)
+#define ARK_S_DEFAULT_DIR   (ARK_S_IRWXU | ARK_S_IRGRP | ARK_S_IXGRP | \
+                             ARK_S_IROTH | ARK_S_IXOTH)
+#define ARK_S_DEFAULT_CHR   (ARK_S_IRUSR | ARK_S_IWUSR | ARK_S_IRGRP | \
+                             ARK_S_IWGRP | ARK_S_IROTH | ARK_S_IWOTH)
+
 /** @brief Filesystem capability bits an fsdrv declares. */
 enum {
     ARK_FS_CAP_READ    = 0x0001,   /* read() works              */
@@ -107,15 +141,19 @@ enum {
 };
 
 struct ark_vfs_stat {
-    uint32_t mode;          /* ARK_S_IFxxx */
+    uint32_t mode;          /* ARK_S_IFxxx | ARK_S_I* access bits */
     ark_off_t size;
     uint32_t mtime;         /* seconds, 0 if the fs keeps no time */
+    uint32_t uid;           /* numeric owner; 0 when ownership is not modelled */
+    uint32_t gid;
 };
 
 struct ark_vfs_dirent {
     char     name[ARK_VFS_NAME_MAX];
-    uint32_t mode;
+    uint32_t mode;          /* ARK_S_IFxxx | ARK_S_I* access bits */
     ark_off_t size;
+    uint32_t uid;
+    uint32_t gid;
 };
 
 struct ark_vfs_mnt;         /* mount point, private to the core */
@@ -185,6 +223,14 @@ typedef struct ark_vfs_fsdrv {
                         struct ark_vfs_file **out);
     int32_t  (*readdir)(struct ark_vfs_file *d, struct ark_vfs_dirent *ent);
     int32_t  (*closedir)(struct ark_vfs_mnt *mnt, struct ark_vfs_file *d);
+
+    /** @brief Replace the access bits (ARK_S_I*).  NULL -> ARK_E_NOSYS.
+     *  The type bits of @p mode are the caller's noise; a filesystem keeps
+     *  only what it models.  Optional. */
+    int32_t  (*chmod)(struct ark_vfs_mnt *mnt, const char *rel, uint32_t mode);
+    /** @brief Replace the owner.  NULL -> ARK_E_NOSYS.  Optional. */
+    int32_t  (*chown)(struct ark_vfs_mnt *mnt, const char *rel,
+                      uint32_t uid, uint32_t gid);
 } ark_vfs_fsdrv_t;
 
 /** @brief A mount point (also the handle a filesystem gets back). */
@@ -288,6 +334,12 @@ ark_ssize_t ark_vfs_write(int fd, const void *buf, ark_size_t n);
 int32_t ark_vfs_lseek(int fd, ark_off_t off, int whence);
 
 int32_t ark_vfs_stat(const char *path, struct ark_vfs_stat *st);
+/** @brief Change access bits.  @p mode is masked to ARK_S_PERM by the core,
+ *  then handed to the filesystem.  ARK_E_NOSYS if it has no chmod. */
+int32_t ark_vfs_chmod(const char *path, uint32_t mode);
+/** @brief Change owner (numeric ids; there is no user database here).
+ *  ARK_E_NOSYS if the filesystem has no chown. */
+int32_t ark_vfs_chown(const char *path, uint32_t uid, uint32_t gid);
 int32_t ark_vfs_mkdir(const char *path);
 int32_t ark_vfs_unlink(const char *path);
 int32_t ark_vfs_rename(const char *old_path, const char *new_path);

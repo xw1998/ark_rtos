@@ -25,7 +25,11 @@
 #define ARK_RAMFS_MAX_FILES     8
 #endif
 #ifndef ARK_RAMFS_MAX_DIRS
-#define ARK_RAMFS_MAX_DIRS      8
+/* The standard namespace alone (/, /tmp, /etc, /home, /mnt, /media) needs five
+ * directory entries - the mount root does not occupy a slot.  A limit of four
+ * therefore made every user mkdir fail with "no space" and silently dropped
+ * /media.  Keep room for a handful of user directories on top. */
+#define ARK_RAMFS_MAX_DIRS      16
 #endif
 /* Follows the core's fd table by default: if this were smaller, running out
  * of core fds would be masked by running out of filesystem handles first,
@@ -35,6 +39,15 @@
 #endif
 #ifndef ARK_RAMFS_FILE_CAP
 #define ARK_RAMFS_FILE_CAP      512
+#endif
+/* Access bits a freshly created file/directory gets.  Octal, spelled out:
+ * 0644 = rw-r--r-- and 0755 = rwxr-xr-x, the same defaults a Unix fs uses.
+ * Override on the command line to shrink nothing - these are just numbers. */
+#ifndef ARK_RAMFS_PERM_FILE
+#define ARK_RAMFS_PERM_FILE     ARK_S_DEFAULT_FILE
+#endif
+#ifndef ARK_RAMFS_PERM_DIR
+#define ARK_RAMFS_PERM_DIR      ARK_S_DEFAULT_DIR
 #endif
 
 /* Open handle.  The core treats this as an opaque struct, so the shape is
@@ -51,12 +64,18 @@ struct ark_vfs_file {
 struct ark_ramfs_node {
     uint8_t  used;
     uint16_t size;
+    uint16_t perm;                     /* ARK_S_I* access bits only */
     char     name[ARK_VFS_PATH_MAX];   /* path relative to the mount root */
     uint8_t  data[ARK_RAMFS_FILE_CAP];
+    uint8_t  uid;
+    uint8_t  gid;
 };
 
 struct ark_ramfs_dir {
     uint8_t  used;
+    uint16_t perm;                     /* ARK_S_I* access bits only */
+    uint8_t  uid;
+    uint8_t  gid;
     char     name[ARK_VFS_PATH_MAX];
 };
 
@@ -200,6 +219,9 @@ static int32_t p_ensure_parents(const char *rel)
                         {
                             return ARK_E_NAMETOOLONG;
                         }
+                        g_dirs[j].perm = (uint16_t)ARK_RAMFS_PERM_DIR;
+                        g_dirs[j].uid = 0u;
+                        g_dirs[j].gid = 0u;
                         g_dirs[j].used = 1u;
                         break;
                     }
@@ -307,6 +329,9 @@ static int32_t ramfs_open(struct ark_vfs_mnt *mnt, const char *rel, int flags,
         node = &g_nodes[i];
         node->used = 1u;
         node->size = 0u;
+        node->perm = (uint16_t)ARK_RAMFS_PERM_FILE;
+        node->uid = 0u;
+        node->gid = 0u;
         if (ark_p_strcpy(node->name, ARK_VFS_PATH_MAX, rel) < 0)
         {
             node->used = 0u;
@@ -451,25 +476,31 @@ static int32_t ramfs_stat(struct ark_vfs_mnt *mnt, const char *rel,
 
     if (rel[0] == '\0')
     {
-        st->mode = ARK_S_IFDIR;
+        st->mode = (uint32_t)(ARK_S_IFDIR | ARK_RAMFS_PERM_DIR);
         st->size = 0;
         st->mtime = 0u;
+        st->uid = 0u;
+        st->gid = 0u;
         return ARK_VFS_OK;
     }
     node = p_find_file(rel);
     if (node != NULL)
     {
-        st->mode = ARK_S_IFREG;
+        st->mode = (uint32_t)(ARK_S_IFREG | node->perm);
         st->size = (ark_off_t)node->size;
         st->mtime = 0u;
+        st->uid = (uint32_t)node->uid;
+        st->gid = (uint32_t)node->gid;
         return ARK_VFS_OK;
     }
     dir = p_find_dir(rel);
     if (dir != NULL)
     {
-        st->mode = ARK_S_IFDIR;
+        st->mode = (uint32_t)(ARK_S_IFDIR | dir->perm);
         st->size = 0;
         st->mtime = 0u;
+        st->uid = (uint32_t)dir->uid;
+        st->gid = (uint32_t)dir->gid;
         return ARK_VFS_OK;
     }
     return ARK_E_NOENT;
@@ -528,6 +559,9 @@ static int32_t ramfs_mkdir(struct ark_vfs_mnt *mnt, const char *rel)
             {
                 return ARK_E_NAMETOOLONG;
             }
+            g_dirs[i].perm = (uint16_t)ARK_RAMFS_PERM_DIR;
+            g_dirs[i].uid = 0u;
+            g_dirs[i].gid = 0u;
             g_dirs[i].used = 1u;
             return ARK_VFS_OK;
         }
@@ -663,8 +697,10 @@ static int32_t ramfs_readdir(struct ark_vfs_file *d, struct ark_vfs_dirent *ent)
                 continue;
             }
             ark_p_memcpy(ent->name, base, nlen + 1u);
-            ent->mode = ARK_S_IFREG;
+            ent->mode = (uint32_t)(ARK_S_IFREG | g_nodes[i].perm);
             ent->size = (ark_off_t)g_nodes[i].size;
+            ent->uid = (uint32_t)g_nodes[i].uid;
+            ent->gid = (uint32_t)g_nodes[i].gid;
             return ARK_VFS_OK;
         }
         else
@@ -683,8 +719,10 @@ static int32_t ramfs_readdir(struct ark_vfs_file *d, struct ark_vfs_dirent *ent)
                 continue;
             }
             ark_p_memcpy(ent->name, base, nlen + 1u);
-            ent->mode = ARK_S_IFDIR;
+            ent->mode = (uint32_t)(ARK_S_IFDIR | g_dirs[j].perm);
             ent->size = 0;
+            ent->uid = (uint32_t)g_dirs[j].uid;
+            ent->gid = (uint32_t)g_dirs[j].gid;
             return ARK_VFS_OK;
         }
     }
@@ -703,6 +741,61 @@ static int32_t ramfs_closedir(struct ark_vfs_mnt *mnt, struct ark_vfs_file *d)
         d->used = 0u;
     }
     return ARK_VFS_OK;
+}
+
+static int32_t ramfs_chmod(struct ark_vfs_mnt *mnt, const char *rel,
+                           uint32_t mode)
+{
+    struct ark_ramfs_node *node;
+    struct ark_ramfs_dir *dir;
+
+    (void)mnt;
+
+    node = p_find_file(rel);
+    if (node != NULL)
+    {
+        node->perm = (uint16_t)(mode & (uint32_t)ARK_S_PERM);
+        return ARK_VFS_OK;
+    }
+    dir = p_find_dir(rel);
+    if (dir != NULL)
+    {
+        dir->perm = (uint16_t)(mode & (uint32_t)ARK_S_PERM);
+        return ARK_VFS_OK;
+    }
+    return ARK_E_NOENT;
+}
+
+static int32_t ramfs_chown(struct ark_vfs_mnt *mnt, const char *rel,
+                           uint32_t uid, uint32_t gid)
+{
+    struct ark_ramfs_node *node;
+    struct ark_ramfs_dir *dir;
+
+    (void)mnt;
+
+    /* IDs are stored in a byte here: there is no user database to hand out
+     * a 32-bit number, and a value that does not fit is refused rather than
+     * silently wrapped to something else. */
+    if ((uid > 255u) || (gid > 255u))
+    {
+        return ARK_E_INVAL;
+    }
+    node = p_find_file(rel);
+    if (node != NULL)
+    {
+        node->uid = (uint8_t)uid;
+        node->gid = (uint8_t)gid;
+        return ARK_VFS_OK;
+    }
+    dir = p_find_dir(rel);
+    if (dir != NULL)
+    {
+        dir->uid = (uint8_t)uid;
+        dir->gid = (uint8_t)gid;
+        return ARK_VFS_OK;
+    }
+    return ARK_E_NOENT;
 }
 
 /* ------------------------------------------------------------
@@ -727,7 +820,9 @@ static const ark_vfs_fsdrv_t g_ramfs = {
     ramfs_rename,
     ramfs_opendir,
     ramfs_readdir,
-    ramfs_closedir
+    ramfs_closedir,
+    ramfs_chmod,
+    ramfs_chown
 };
 
 const ark_vfs_fsdrv_t *ark_ramfs_fs(void)
@@ -743,11 +838,17 @@ void ark_ramfs_reset(void)
     {
         g_nodes[i].used = 0u;
         g_nodes[i].size = 0u;
+        g_nodes[i].perm = 0u;
+        g_nodes[i].uid = 0u;
+        g_nodes[i].gid = 0u;
         g_nodes[i].name[0] = '\0';
     }
     for (i = 0; i < ARK_RAMFS_MAX_DIRS; i++)
     {
         g_dirs[i].used = 0u;
+        g_dirs[i].perm = 0u;
+        g_dirs[i].uid = 0u;
+        g_dirs[i].gid = 0u;
         g_dirs[i].name[0] = '\0';
     }
     for (i = 0; i < ARK_RAMFS_MAX_OPEN; i++)

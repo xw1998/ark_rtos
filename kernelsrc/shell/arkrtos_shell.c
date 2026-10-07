@@ -2977,6 +2977,15 @@ static int vfs_fail(const char *what, int32 rc)
     return -1;
 }
 
+/* Same as vfs_fail() but names the operand, so a failure in a multi-operand
+ * command points at the path that failed instead of the command as a whole. */
+static int vfs_fail_at(const char *what, const char *path, int32 rc)
+{
+    ark_shell_printf("\r\n%s: %s: FAILED (%d: %s)\r\n", what, path, (int)rc,
+                     arkrtos_vfs_error_name(rc));
+    return -1;
+}
+
 static int vfs_usage(void)
 {
     sh_out("\r\nusage:\r\n");
@@ -2986,13 +2995,15 @@ static int vfs_usage(void)
     sh_out("  umount <target>           drop a mount point\r\n");
     sh_out("  ls [path]                 list a directory, default /\r\n");
     sh_out("  cat [path]                print a file, or standard input\r\n");
-    sh_out("  rm <path>                 remove a file\r\n");
-    sh_out("  mkdir <path>              create a directory\r\n");
-    sh_out("  rmdir <path>              remove an empty directory\r\n");
+    sh_out("  rm <path>...              remove files\r\n");
+    sh_out("  mkdir <path>...           create directories\r\n");
+    sh_out("  rmdir <path>...           remove empty directories\r\n");
     sh_out("  mv <src> <dst>            rename or move\r\n");
     sh_out("  cp <src> <dst>            copy a file\r\n");
-    sh_out("  touch <path>              create an empty file\r\n");
-    sh_out("  stat <path>               show type, size and time\r\n");
+    sh_out("  touch <path>...           create empty files\r\n");
+    sh_out("  stat <path>               show type, mode, owner and size\r\n");
+    sh_out("  chmod <mode> <path>       change access bits (octal, e.g. 644)\r\n");
+    sh_out("  chown <uid>[:<gid>] <path>  change numeric owner\r\n");
     sh_out("  off/size are decimal; size 0 means to the end of the device\r\n");
     return -1;
 }
@@ -3018,24 +3029,100 @@ typedef struct {
     uint32 longfmt;
 } vfs_ls_ctx_t;
 
-static int vfs_ls_cb(const char *name, uint32 is_dir, uint32 size, void *arg)
+/* Render mode into the ls -l mode string ("-rw-r--r--").  The type comes from
+ * the same bits ls uses; an unknown type is '?', never a dash that would read
+ * as "regular file".  out[] holds 11 bytes including the terminator. */
+static const char *perm_string(uint32 mode, char *out)
+{
+    static const char rwx[3] = { 'r', 'w', 'x' };
+    uint32 i;
+
+    if((mode & ARKRTOS_VFS_S_IFDIR) != 0u)      { out[0] = 'd'; }
+    else if((mode & ARKRTOS_VFS_S_IFCHR) != 0u) { out[0] = 'c'; }
+    else if((mode & ARKRTOS_VFS_S_IFREG) != 0u) { out[0] = '-'; }
+    else                                        { out[0] = '?'; }
+
+    for(i = 0u; i < 9u; i++)
+    {
+        out[1u + i] = ((mode & (1u << (8u - i))) != 0u) ? rwx[i % 3u] : '-';
+    }
+    out[10] = '\0';
+    return out;
+}
+
+/* One row of ls -l: mode, link count, owner, group, size, name.  There are no
+ * hard links in this VFS, so the link count is always 1 - printed rather than
+ * omitted so the columns line up the way a reader of ls -l expects.  The time
+ * column is left out: the VFS keeps no timestamp, and inventing one is worse
+ * than a shorter line. */
+static void ls_long_row(const char *name, uint32 mode, uint32 size,
+                        uint32 uid, uint32 gid)
+{
+    char perm[11];
+
+    ark_shell_printf("  %s %3u %-5u %-5u %8u  %s\r\n", perm_string(mode, perm),
+                     1u, (unsigned)uid, (unsigned)gid, (unsigned)size, name);
+}
+
+static int vfs_ls_cb(const char *name, const arkrtos_vfs_stat_t *st, void *arg)
 {
     vfs_ls_ctx_t *c = (vfs_ls_ctx_t *)arg;
 
     if(c->longfmt != 0u)
     {
-        /* Long format: type char, size, name.  The VFS keeps no owner or
-         * timestamp, so those columns are not printed at all. */
-        ark_shell_printf("  %c  %8u  %s\r\n", (is_dir != 0u) ? 'd' : '-',
-                         (unsigned)size, name);
+        ls_long_row(name, st->mode, st->size, st->uid, st->gid);
     }
     else
     {
-        ark_shell_printf("  %-20s %8u%s\r\n", name, (unsigned)size,
-                         (is_dir != 0u) ? "  <dir>" : "");
+        ark_shell_printf("  %-20s %8u%s\r\n", name, (unsigned)st->size,
+                         ((st->mode & ARKRTOS_VFS_S_IFDIR) != 0u) ? "  <dir>" : "");
     }
     c->count++;
     return 0;
+}
+
+/* ls -a's pseudo-entries.  Their metadata is the real stat of "." and "..",
+ * so the columns are not guessed; when a stat fails the row shows '?' and the
+ * columns are dashes instead of a mode nobody measured. */
+static void ls_pseudo(const char *vpath, uint32 longfmt)
+{
+    struct ark_vfs_stat st;
+    char   dotdot[ARKRTOS_VFS_PATH_MAX];
+    size_t vlen = strlen(vpath);
+
+    if(longfmt == 0u)
+    {
+        ark_shell_printf("  %-20s %8s%s\r\n", ".", "-", "  <dir>");
+        ark_shell_printf("  %-20s %8s%s\r\n", "..", "-", "  <dir>");
+        return;
+    }
+
+    if(ark_vfs_stat(vpath, &st) == 0)
+    {
+        ls_long_row(".", st.mode, st.size, st.uid, st.gid);
+    }
+    else
+    {
+        ls_long_row(".", 0u, 0u, 0u, 0u);
+    }
+
+    if((strcmp(vpath, "/") == 0) || ((vlen + 3u) >= sizeof(dotdot)))
+    {
+        (void)strcpy(dotdot, vpath);
+    }
+    else
+    {
+        (void)strcpy(dotdot, vpath);
+        (void)memcpy(&dotdot[vlen], "/..", 4u);
+    }
+    if(ark_vfs_stat(dotdot, &st) == 0)
+    {
+        ls_long_row("..", st.mode, st.size, st.uid, st.gid);
+    }
+    else
+    {
+        ls_long_row("..", 0u, 0u, 0u, 0u);
+    }
 }
 
 static int cmd_vfs_mount(int argc, char *argv[])
@@ -3129,6 +3216,8 @@ static int cmd_vfs_umount(int argc, char *argv[])
     return 0;
 }
 
+static const char *path_basename(const char *p);
+
 static int cmd_vfs_ls(int argc, char *argv[])
 {
     vfs_ls_ctx_t ctx;
@@ -3184,20 +3273,30 @@ static int cmd_vfs_ls(int argc, char *argv[])
         return 1;
     }
 
+    /* Linux `ls <file>`: a non-directory argument lists that entry
+     * itself instead of failing with "not a directory".  The mode comes
+     * from a real stat, nothing is guessed. */
+    {
+        struct ark_vfs_stat fst;
+
+        if((ark_vfs_stat(vpath, &fst) == 0) && ((fst.mode & ARK_S_IFDIR) == 0u))
+        {
+            if(ctx.longfmt != 0u)
+            {
+                ls_long_row(path_basename(vpath), fst.mode, fst.size,
+                            fst.uid, fst.gid);
+            }
+            else
+            {
+                ark_shell_printf("  %s\r\n", path_basename(vpath));
+            }
+            return 0;
+        }
+    }
+
     if(show_all != 0u)
     {
-        /* ls -a also lists the POSIX pseudo-entries; their sizes are not
-         * invented, so the size column carries "-". */
-        if(ctx.longfmt != 0u)
-        {
-            ark_shell_printf("  %c  %8s  %s\r\n", 'd', "-", ".");
-            ark_shell_printf("  %c  %8s  %s\r\n", 'd', "-", "..");
-        }
-        else
-        {
-            ark_shell_printf("  %-20s %8s%s\r\n", ".", "-", "  <dir>");
-            ark_shell_printf("  %-20s %8s%s\r\n", "..", "-", "  <dir>");
-        }
+        ls_pseudo(vpath, ctx.longfmt);
     }
 
     rc = arkrtos_vfs_list(vpath, vfs_ls_cb, &ctx);
@@ -3307,39 +3406,42 @@ static int cmd_vfs_cat(int argc, char *argv[])
 
 static int cmd_vfs_rm(int argc, char *argv[])
 {
-    char   vpath[ARKRTOS_VFS_PATH_MAX];
-    int32  rc;
+    int i;
+    int failed = 0;
 
-    if(argc != 2)
+    if(argc < 2)
     {
         return vfs_usage();
     }
-
-    if(shell_vfs_path(argv[1], vpath, sizeof(vpath)) != 0)
+    for(i = 1; i < argc; i++)
     {
-        sh_out("rm: path too long\r\n");
-        return 1;
-    }
-
-    {
-        /* rm removes files, not directories - that is rmdir's job. */
+        char   vpath[ARKRTOS_VFS_PATH_MAX];
         struct ark_vfs_stat st;
+        int32  rc;
 
+        if(shell_vfs_path(argv[i], vpath, sizeof(vpath)) != 0)
+        {
+            sh_out("rm: path too long\r\n");
+            failed = 1;
+            continue;
+        }
+        /* rm removes files, not directories - that is rmdir's job. */
         if((ark_vfs_stat(vpath, &st) == 0) && ((st.mode & ARK_S_IFDIR) != 0u))
         {
-            sh_out("rm: Is a directory\r\n");
-            return 1;
+            ark_shell_printf("\r\nrm: %s: Is a directory\r\n", argv[i]);
+            failed = 1;
+            continue;
         }
+        rc = arkrtos_vfs_remove(vpath);
+        if(rc != 0)
+        {
+            (void)vfs_fail_at("rm", argv[i], rc);
+            failed = 1;
+            continue;
+        }
+        ark_shell_printf("\r\n%s removed\r\n", argv[i]);
     }
-
-    rc = arkrtos_vfs_remove(vpath);
-    if(rc != 0)
-    {
-        return vfs_fail("rm", rc);
-    }
-
-    ark_shell_printf("\r\n%s removed\r\n", argv[1]);
-    return 0;
+    return failed;
 }
 
 /* ------------------------------------------------------------
@@ -3358,60 +3460,83 @@ static const char *path_basename(const char *p)
 
 static int cmd_vfs_mkdir(int argc, char *argv[])
 {
-    char  vpath[ARKRTOS_VFS_PATH_MAX];
-    int32 rc;
+    int i;
+    int failed = 0;
 
-    if(argc != 2)
+    if(argc < 2)
     {
         return vfs_usage();
     }
-    if(shell_vfs_path(argv[1], vpath, sizeof(vpath)) != 0)
+    /* Like Linux: any number of operands; each keeps its own result so one
+     * failure does not hide the entries that were created. */
+    for(i = 1; i < argc; i++)
     {
-        sh_out("mkdir: path too long\r\n");
-        return 1;
+        char  vpath[ARKRTOS_VFS_PATH_MAX];
+        int32 rc;
+
+        if(shell_vfs_path(argv[i], vpath, sizeof(vpath)) != 0)
+        {
+            sh_out("mkdir: path too long\r\n");
+            failed = 1;
+            continue;
+        }
+        rc = ark_vfs_mkdir(vpath);
+        if(rc != 0)
+        {
+            (void)vfs_fail_at("mkdir", argv[i], rc);
+            failed = 1;
+            continue;
+        }
+        ark_shell_printf("\r\n%s created\r\n", argv[i]);
     }
-    rc = ark_vfs_mkdir(vpath);
-    if(rc != 0)
-    {
-        return vfs_fail("mkdir", rc);
-    }
-    ark_shell_printf("\r\n%s created\r\n", argv[1]);
-    return 0;
+    return failed;
 }
 
 static int cmd_vfs_rmdir(int argc, char *argv[])
 {
-    char vpath[ARKRTOS_VFS_PATH_MAX];
-    struct ark_vfs_stat st;
-    int32 rc;
+    int i;
+    int failed = 0;
 
-    if(argc != 2)
+    if(argc < 2)
     {
         return vfs_usage();
     }
-    if(shell_vfs_path(argv[1], vpath, sizeof(vpath)) != 0)
+    for(i = 1; i < argc; i++)
     {
-        sh_out("rmdir: path too long\r\n");
-        return 1;
+        char vpath[ARKRTOS_VFS_PATH_MAX];
+        struct ark_vfs_stat st;
+        int32 rc;
+
+        if(shell_vfs_path(argv[i], vpath, sizeof(vpath)) != 0)
+        {
+            sh_out("rmdir: path too long\r\n");
+            failed = 1;
+            continue;
+        }
+        rc = ark_vfs_stat(vpath, &st);
+        if(rc != 0)
+        {
+            (void)vfs_fail_at("rmdir", argv[i], rc);
+            failed = 1;
+            continue;
+        }
+        if((st.mode & ARK_S_IFDIR) == 0u)
+        {
+            /* rmdir is for directories; refusing a file is not a guess. */
+            ark_shell_printf("\r\nrmdir: %s: Not a directory\r\n", argv[i]);
+            failed = 1;
+            continue;
+        }
+        rc = ark_vfs_unlink(vpath);
+        if(rc != 0)
+        {
+            (void)vfs_fail_at("rmdir", argv[i], rc);
+            failed = 1;
+            continue;
+        }
+        ark_shell_printf("\r\n%s removed\r\n", argv[i]);
     }
-    rc = ark_vfs_stat(vpath, &st);
-    if(rc != 0)
-    {
-        return vfs_fail("rmdir", rc);
-    }
-    if((st.mode & ARK_S_IFDIR) == 0u)
-    {
-        /* rmdir is for directories; refusing a file is not a guess. */
-        sh_out("rmdir: Not a directory\r\n");
-        return 1;
-    }
-    rc = ark_vfs_unlink(vpath);
-    if(rc != 0)
-    {
-        return vfs_fail("rmdir", rc);
-    }
-    ark_shell_printf("\r\n%s removed\r\n", argv[1]);
-    return 0;
+    return failed;
 }
 
 static int cmd_vfs_mv(int argc, char *argv[])
@@ -3522,34 +3647,205 @@ static int cmd_vfs_cp(int argc, char *argv[])
 
 static int cmd_vfs_touch(int argc, char *argv[])
 {
-    char vpath[ARKRTOS_VFS_PATH_MAX];
-    struct ark_vfs_stat st;
-    int32 h;
+    int i;
+    int failed = 0;
 
-    if(argc != 2)
+    if(argc < 2)
     {
         return vfs_usage();
     }
-    if(shell_vfs_path(argv[1], vpath, sizeof(vpath)) != 0)
+    for(i = 1; i < argc; i++)
     {
-        sh_out("touch: path too long\r\n");
+        char vpath[ARKRTOS_VFS_PATH_MAX];
+        struct ark_vfs_stat st;
+        int32 h;
+
+        if(shell_vfs_path(argv[i], vpath, sizeof(vpath)) != 0)
+        {
+            sh_out("touch: path too long\r\n");
+            failed = 1;
+            continue;
+        }
+        /* Existing file: the VFS keeps no settable timestamp, so touching it
+         * has nothing to change - say so by doing nothing rather than
+         * claiming to have updated a time that does not exist. */
+        if(ark_vfs_stat(vpath, &st) == 0)
+        {
+            continue;
+        }
+        /* O_CREAT without O_TRUNC: creates an empty file, or leaves an
+         * existing one untouched (the create already happened if needed). */
+        h = arkrtos_vfs_app_open(vpath, ARKRTOS_VFS_O_WRONLY | ARKRTOS_VFS_O_CREAT);
+        if(h < 0)
+        {
+            (void)vfs_fail_at("touch", argv[i], h);
+            failed = 1;
+            continue;
+        }
+        (void)arkrtos_vfs_app_close(h);
+    }
+    return failed;
+}
+
+/* Parse 3 or 4 octal digits into permission bits.  Anything shorter, longer or
+ * non-octal is refused: a mode like "64" is ambiguous, and symbolic forms
+ * (u+x) are not implemented, so neither is guessed at. */
+static int parse_octal_mode(const char *s, uint32 *out)
+{
+    uint32 v = 0u;
+    int    n = 0;
+
+    if((s == 0) || (*s == '\0'))
+    {
+        return -1;
+    }
+    while(*s != '\0')
+    {
+        if((*s < '0') || (*s > '7') || (n >= 4))
+        {
+            return -1;
+        }
+        v = (v << 3) + (uint32)(*s - '0');
+        s++;
+        n++;
+    }
+    if(n < 3)
+    {
+        return -1;
+    }
+    *out = v & ARKRTOS_VFS_S_PERM;
+    return 0;
+}
+
+static int cmd_vfs_chmod(int argc, char *argv[])
+{
+    char   vpath[ARKRTOS_VFS_PATH_MAX];
+    uint32 mode = 0u;
+    int32  rc;
+
+    if(argc != 3)
+    {
+        return vfs_usage();
+    }
+    if(parse_octal_mode(argv[1], &mode) != 0)
+    {
+        sh_out("chmod: mode must be 3 or 4 octal digits, e.g. 644 or 0755\r\n");
         return 1;
     }
-    /* Existing file: the VFS keeps no settable timestamp, so touching it has
-     * nothing to change - say so by doing nothing rather than claiming to
-     * have updated a time that does not exist. */
-    if(ark_vfs_stat(vpath, &st) == 0)
+    if(shell_vfs_path(argv[2], vpath, sizeof(vpath)) != 0)
     {
-        return 0;
+        sh_out("chmod: path too long\r\n");
+        return 1;
     }
-    /* O_CREAT without O_TRUNC: creates an empty file, or leaves an existing
-     * one untouched (the create already happened if needed). */
-    h = arkrtos_vfs_app_open(vpath, ARKRTOS_VFS_O_WRONLY | ARKRTOS_VFS_O_CREAT);
-    if(h < 0)
+    rc = arkrtos_vfs_chmod(vpath, mode);
+    if(rc != 0)
     {
-        return vfs_fail("touch", h);
+        return vfs_fail("chmod", rc);
     }
-    (void)arkrtos_vfs_app_close(h);
+    {
+        /* Report the mode the file now has, read back - not the number we
+         * asked for, which is not the same thing on a mount that clamps. */
+        struct ark_vfs_stat st;
+        char perm[11];
+
+        if(ark_vfs_stat(vpath, &st) == 0)
+        {
+            ark_shell_printf("\r\n%s: %s\r\n", argv[2], perm_string(st.mode, perm));
+        }
+        else
+        {
+            ark_shell_printf("\r\n%s: mode changed\r\n", argv[2]);
+        }
+    }
+    return 0;
+}
+
+static int cmd_vfs_chown(int argc, char *argv[])
+{
+    char   vpath[ARKRTOS_VFS_PATH_MAX];
+    struct ark_vfs_stat st;
+    const char *spec;
+    const char *colon;
+    char   part[16];
+    uint32 uid = 0u;
+    uint32 gid = 0u;
+    int    set_uid = 0;
+    int    set_gid = 0;
+    int32  rc;
+
+    if(argc != 3)
+    {
+        return vfs_usage();
+    }
+    spec  = argv[1];
+    colon = strchr(spec, ':');
+    if(colon == 0)
+    {
+        if(parse_u32(spec, &uid) != 0)
+        {
+            sh_out("chown: owner must be a decimal id\r\n");
+            return 1;
+        }
+        set_uid = 1;
+    }
+    else
+    {
+        size_t n = (size_t)(colon - spec);
+
+        if(n > 0u)
+        {
+            if(n >= sizeof(part))
+            {
+                sh_out("chown: owner id too long\r\n");
+                return 1;
+            }
+            (void)memcpy(part, spec, n);
+            part[n] = '\0';
+            if(parse_u32(part, &uid) != 0)
+            {
+                sh_out("chown: owner must be a decimal id\r\n");
+                return 1;
+            }
+            set_uid = 1;
+        }
+        if(colon[1] != '\0')
+        {
+            if(parse_u32(colon + 1, &gid) != 0)
+            {
+                sh_out("chown: group must be a decimal id\r\n");
+                return 1;
+            }
+            set_gid = 1;
+        }
+    }
+    if((set_uid == 0) && (set_gid == 0))
+    {
+        sh_out("chown: nothing to change\r\n");
+        return 1;
+    }
+    if(shell_vfs_path(argv[2], vpath, sizeof(vpath)) != 0)
+    {
+        sh_out("chown: path too long\r\n");
+        return 1;
+    }
+
+    /* Whichever half was left out keeps its current value - read it, do not
+     * assume 0. */
+    rc = ark_vfs_stat(vpath, &st);
+    if(rc != 0)
+    {
+        return vfs_fail("chown", rc);
+    }
+    if(set_uid == 0) { uid = st.uid; }
+    if(set_gid == 0) { gid = st.gid; }
+
+    rc = arkrtos_vfs_chown(vpath, uid, gid);
+    if(rc != 0)
+    {
+        return vfs_fail("chown", rc);
+    }
+    ark_shell_printf("\r\n%s: owner %u:%u\r\n", argv[2],
+                     (unsigned)uid, (unsigned)gid);
     return 0;
 }
 
@@ -3590,8 +3886,16 @@ static int cmd_vfs_stat(int argc, char *argv[])
     {
         type = "unknown";
     }
-    ark_shell_printf("\r\n  File: %s\r\n", vpath);
-    ark_shell_printf("  Type: %s\r\n", type);
+    {
+        char perm[11];
+        ark_shell_printf("\r\n  File: %s\r\n", vpath);
+        ark_shell_printf("  Type: %s\r\n", type);
+        ark_shell_printf("  Mode: %s\r\n", perm_string(st.mode, perm));
+        /* Numeric ids on purpose: there is no user database here, so a name
+         * would be a made-up answer. */
+        ark_shell_printf("  Owner: uid=%u gid=%u\r\n",
+                         (unsigned)st.uid, (unsigned)st.gid);
+    }
     if((st.mode & ARK_S_IFDIR) == 0u)
     {
         ark_shell_printf("  Size: %u bytes\r\n", (unsigned)st.size);
@@ -4341,7 +4645,7 @@ static int register_kernel_commands(void)
     int idx = g_cmd_count;
     /* Upper bound with every optional feature compiled in.  Kept above the
      * real count so a future command cannot silently overflow g_cmd_table. */
-    int need = 42;
+    int need = 44;
 
     if((idx + need) > ARK_SHELL_MAX_COMMANDS)
     {
@@ -4394,23 +4698,27 @@ static int register_kernel_commands(void)
     g_cmd_table[idx++] = ARK_SHELL_CMD("umount", cmd_vfs_umount,
         "Drop a mount point: umount <target>", 2);
     g_cmd_table[idx++] = ARK_SHELL_CMD("ls", cmd_vfs_ls,
-        "List a directory in the VFS namespace: ls [path]", 2);
+        "List a directory: ls [-l] [-a] [path]", 4);
     g_cmd_table[idx++] = ARK_SHELL_CMD("cat", cmd_vfs_cat,
         "Print a file, or standard input: cat [path]", 2);
     g_cmd_table[idx++] = ARK_SHELL_CMD("rm", cmd_vfs_rm,
-        "Remove a file from the VFS namespace: rm <path>", 2);
+        "Remove files: rm <path>...", 8);
     g_cmd_table[idx++] = ARK_SHELL_CMD("mkdir", cmd_vfs_mkdir,
-        "Create a directory: mkdir <path>", 2);
+        "Create directories: mkdir <path>...", 8);
     g_cmd_table[idx++] = ARK_SHELL_CMD("rmdir", cmd_vfs_rmdir,
-        "Remove an empty directory: rmdir <path>", 2);
+        "Remove empty directories: rmdir <path>...", 8);
     g_cmd_table[idx++] = ARK_SHELL_CMD("mv", cmd_vfs_mv,
         "Rename or move: mv <src> <dst>", 3);
     g_cmd_table[idx++] = ARK_SHELL_CMD("cp", cmd_vfs_cp,
         "Copy a file: cp <src> <dst>", 3);
     g_cmd_table[idx++] = ARK_SHELL_CMD("touch", cmd_vfs_touch,
-        "Create an empty file: touch <path>", 2);
+        "Create empty files: touch <path>...", 8);
     g_cmd_table[idx++] = ARK_SHELL_CMD("stat", cmd_vfs_stat,
-        "Show file type, size and time: stat <path>", 2);
+        "Show file type, mode, owner and size: stat <path>", 2);
+    g_cmd_table[idx++] = ARK_SHELL_CMD("chmod", cmd_vfs_chmod,
+        "Change access bits: chmod <mode> <path>  (mode is octal, e.g. 644)", 3);
+    g_cmd_table[idx++] = ARK_SHELL_CMD("chown", cmd_vfs_chown,
+        "Change numeric owner: chown <uid>[:<gid>] <path>", 3);
 #endif /* ARKRTOS_USE_VFS */
 
 #if ARKRTOS_USE_MINIAPP

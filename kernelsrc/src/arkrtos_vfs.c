@@ -101,6 +101,18 @@ int32 arkrtos_vfs_remove(const char *path)
     return ARKRTOS_VFS_ENOSYS;
 }
 
+int32 arkrtos_vfs_chmod(const char *path, uint32 mode)
+{
+    (void)path; (void)mode;
+    return ARKRTOS_VFS_ENOSYS;
+}
+
+int32 arkrtos_vfs_chown(const char *path, uint32 uid, uint32 gid)
+{
+    (void)path; (void)uid; (void)gid;
+    return ARKRTOS_VFS_ENOSYS;
+}
+
 int32 arkrtos_vfs_list(const char *dir, arkrtos_vfs_list_cb_t cb, void *arg)
 {
     (void)dir; (void)cb; (void)arg;
@@ -199,6 +211,18 @@ typedef char arkrtos_vfs_sif_check[((ARKRTOS_VFS_S_IFDIR == ARK_S_IFDIR) &&
                                   (ARKRTOS_VFS_S_IFREG == ARK_S_IFREG) &&
                                   (ARKRTOS_VFS_S_IFCHR == ARK_S_IFCHR)) ? 1 : -1];
 
+/* 权限位同样是透传的：两边不同值，App 读到的 rwx 就会与内核理解的不是一回事。 */
+typedef char arkrtos_vfs_sperm_check[((ARKRTOS_VFS_S_IRUSR == ARK_S_IRUSR) &&
+                                    (ARKRTOS_VFS_S_IWUSR == ARK_S_IWUSR) &&
+                                    (ARKRTOS_VFS_S_IXUSR == ARK_S_IXUSR) &&
+                                    (ARKRTOS_VFS_S_IRGRP == ARK_S_IRGRP) &&
+                                    (ARKRTOS_VFS_S_IWGRP == ARK_S_IWGRP) &&
+                                    (ARKRTOS_VFS_S_IXGRP == ARK_S_IXGRP) &&
+                                    (ARKRTOS_VFS_S_IROTH == ARK_S_IROTH) &&
+                                    (ARKRTOS_VFS_S_IWOTH == ARK_S_IWOTH) &&
+                                    (ARKRTOS_VFS_S_IXOTH == ARK_S_IXOTH) &&
+                                    (ARKRTOS_VFS_S_PERM  == ARK_S_PERM)) ? 1 : -1];
+
 /* 打开标志与 seek 起点是跨 SVC 的 ABI，App 那边（arkrtos.h 的 ARKRTOS_PATH_*、
  * POSIX 层的 O_* / SEEK_*）就是把这些数字原样传下来。它们声称自己就是
  * POSIX 的值，所以在这里对着 POSIX 的字面值钉死：两边谁漂了都会先在这里
@@ -287,7 +311,17 @@ int32 arkrtos_vfs_init(void)
 
         for(i = 0u; i < (uint32)(sizeof(std_dirs) / sizeof(std_dirs[0])); i++)
         {
-            (void)ark_vfs_mkdir(std_dirs[i]);
+            int32_t mrc = ark_vfs_mkdir(std_dirs[i]);
+
+            /* "exists" is harmless (the tree may already be there), but
+             * anything else means the namespace is incomplete - e.g. the
+             * ramfs directory table is too small.  Say so instead of
+             * leaving the operator to wonder why /media is missing. */
+            if((mrc != ARK_VFS_OK) && (mrc != ARK_E_EXIST))
+            {
+                ARKRTOS_LOGW("vfs", "namespace dir %s not created: %d (%s)",
+                           std_dirs[i], (int)mrc, ark_vfs_error_name(mrc));
+            }
         }
     }
 
@@ -500,6 +534,7 @@ int32 arkrtos_vfs_remove(const char *path)
 int32 arkrtos_vfs_list(const char *dir, arkrtos_vfs_list_cb_t cb, void *arg)
 {
     struct ark_vfs_dirent ent;
+    arkrtos_vfs_stat_t    st;
     int32 fd;
     int32 rc;
 
@@ -508,9 +543,14 @@ int32 arkrtos_vfs_list(const char *dir, arkrtos_vfs_list_cb_t cb, void *arg)
     if (fd < 0) { return fd; }
     while ((rc = ark_vfs_readdir(fd, &ent)) == ARK_VFS_OK)
     {
-        uint32 size = (ent.size > 0) ? (uint32)ent.size : 0u;
-        if (cb(ent.name, (uint32)((ent.mode & ARK_S_IFDIR) != 0u ? 1u : 0u),
-               size, arg) != 0)
+        /* 目录项本身不存时间，所以 mtime 照实填 0（=「不存时间」），
+         * 不编一个看着像样的时间戳。 */
+        st.mode  = (uint32)ent.mode;
+        st.size  = (ent.size > 0) ? (uint32)ent.size : 0u;
+        st.mtime = 0u;
+        st.uid   = (uint32)ent.uid;
+        st.gid   = (uint32)ent.gid;
+        if (cb(ent.name, &st, arg) != 0)
         {
             break;
         }
@@ -523,6 +563,18 @@ int32 arkrtos_vfs_list(const char *dir, arkrtos_vfs_list_cb_t cb, void *arg)
 const char *arkrtos_vfs_error_name(int32 rc)
 {
     return ark_vfs_error_name(rc);
+}
+
+int32 arkrtos_vfs_chmod(const char *path, uint32 mode)
+{
+    if (path == NULL) { return ARK_E_INVAL; }
+    return ark_vfs_chmod(path, mode);
+}
+
+int32 arkrtos_vfs_chown(const char *path, uint32 uid, uint32 gid)
+{
+    if (path == NULL) { return ARK_E_INVAL; }
+    return ark_vfs_chown(path, uid, gid);
 }
 
 /* ============================================================

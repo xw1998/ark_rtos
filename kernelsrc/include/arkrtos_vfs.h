@@ -72,9 +72,23 @@ typedef struct
     uint8       ro;                           /**< 1=只读                    */
 } arkrtos_vfs_mount_info_t;
 
+/** @brief 一个目录项／一个节点的元数据，字段含义与 POSIX struct stat 对齐。
+* @note  uid/gid 是数字。这里没有用户数据库，所以不去把 0 翻译成 "root"——
+*        那会是一个看着权威、却查无此人的答案。mtime 为 0 表示该文件系统
+*        不存时间，不是「1970-01-01」。
+*/
+typedef struct
+{
+    uint32 mode;    /**< ARKRTOS_VFS_S_IF* 类型位 | ARKRTOS_VFS_S_I* 权限位 */
+    uint32 size;    /**< 字节数；目录为 0                              */
+    uint32 mtime;   /**< 秒；0 = 不存时间                              */
+    uint32 uid;
+    uint32 gid;
+} arkrtos_vfs_stat_t;
+
 /** @brief 目录列举回调，返回 0 继续、-1 停止 */
-typedef int (*arkrtos_vfs_list_cb_t)(const char *name, uint32 is_dir,
-                                   uint32 size, void *arg);
+typedef int (*arkrtos_vfs_list_cb_t)(const char *name,
+                                   const arkrtos_vfs_stat_t *st, void *arg);
 
 /**
 * @brief 启用 VFS：装钩子、挂 / 与 /dev。
@@ -144,6 +158,20 @@ int32 arkrtos_vfs_write_file(const char *path, const uint8 *buf, uint32 len);
 /** @brief 删除一个文件 */
 int32 arkrtos_vfs_remove(const char *path);
 
+/**
+* @brief 改访问权限位（只用 mode 的 ARKRTOS_VFS_S_PERM 部分）。
+* @return 0=成功；负值为 ark_vfs 错误码。文件系统没有 chmod 回调时回
+*         ARK_E_NOSYS（-12）——「这个卷不支持」而不是「改好了」。
+*/
+int32 arkrtos_vfs_chmod(const char *path, uint32 mode);
+
+/**
+* @brief 改属主（数字 uid/gid，这里没有用户数据库）。
+* @return 0=成功；负值为 ark_vfs 错误码。文件系统没有 chown 回调时回
+*         ARK_E_NOSYS（-12）。
+*/
+int32 arkrtos_vfs_chown(const char *path, uint32 uid, uint32 gid);
+
 /** @brief 列一层目录 */
 int32 arkrtos_vfs_list(const char *dir, arkrtos_vfs_list_cb_t cb, void *arg);
 
@@ -187,6 +215,24 @@ const char *arkrtos_vfs_error_name(int32 rc);
 #define ARKRTOS_VFS_S_IFDIR      (0x4000u)
 #define ARKRTOS_VFS_S_IFREG      (0x8000u)
 #define ARKRTOS_VFS_S_IFMT       (0xF000u)
+
+/** @brief 权限位，布局与 POSIX 的 rwx 三元组一致，数值与 ark_vfs 的
+ *         ARK_S_I* 相同（arkrtos_vfs.c 里有静态断言盯着这个等式）。
+ *         类型位在 ARKRTOS_VFS_S_PERM 之上，两者可分别用 S_IFMT / S_PERM
+ *         取出。设备节点（/dev 下）按惯例是 0666，普通文件 0644、目录 0755。 */
+#define ARKRTOS_VFS_S_IRUSR      (0x0100u)
+#define ARKRTOS_VFS_S_IWUSR      (0x0080u)
+#define ARKRTOS_VFS_S_IXUSR      (0x0040u)
+#define ARKRTOS_VFS_S_IRGRP      (0x0020u)
+#define ARKRTOS_VFS_S_IWGRP      (0x0010u)
+#define ARKRTOS_VFS_S_IXGRP      (0x0008u)
+#define ARKRTOS_VFS_S_IROTH      (0x0004u)
+#define ARKRTOS_VFS_S_IWOTH      (0x0002u)
+#define ARKRTOS_VFS_S_IXOTH      (0x0001u)
+#define ARKRTOS_VFS_S_IRWXU      (0x01C0u)
+#define ARKRTOS_VFS_S_IRWXG      (0x0038u)
+#define ARKRTOS_VFS_S_IRWXO      (0x0007u)
+#define ARKRTOS_VFS_S_PERM       (0x0FFFu)
 
 /** @brief seek 起点，与 POSIX 的 SEEK_* 同值 */
 #define ARKRTOS_VFS_SEEK_SET     (0u)

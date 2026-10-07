@@ -251,9 +251,11 @@ static int32_t devfs_stat(struct ark_vfs_mnt *mnt, const char *rel,
     }
     if (rel[0] == '\0')
     {
-        st->mode  = ARK_S_IFDIR;
+        st->mode  = (uint32_t)(ARK_S_IFDIR | ARK_S_DEFAULT_DIR);
         st->size  = 0;
         st->mtime = 0u;
+        st->uid   = 0u;
+        st->gid   = 0u;
         return ARK_VFS_OK;
     }
     for (i = 0u; rel[i] != '\0'; i++)
@@ -278,9 +280,11 @@ static int32_t devfs_stat(struct ark_vfs_mnt *mnt, const char *rel,
         }
         if (ark_p_strcmp(probe, name) == 0)
         {
-            st->mode  = ARK_S_IFCHR;
+            st->mode  = (uint32_t)(ARK_S_IFCHR | ARK_S_DEFAULT_CHR);
             st->size  = 0;
             st->mtime = 0u;
+            st->uid   = 0u;
+            st->gid   = 0u;
             return ARK_VFS_OK;
         }
     }
@@ -336,8 +340,10 @@ static int32_t devfs_readdir(struct ark_vfs_file *d, struct ark_vfs_dirent *ent)
             continue;
         }
         ark_p_memcpy(ent->name, name, nlen + 1u);
-        ent->mode = ARK_S_IFCHR;
+        ent->mode = (uint32_t)(ARK_S_IFCHR | ARK_S_DEFAULT_CHR);
         ent->size = 0;
+        ent->uid  = 0u;
+        ent->gid  = 0u;
         return ARK_VFS_OK;
     }
     /* End of listing: same code as a missing name, by the core's design -
@@ -371,7 +377,9 @@ const ark_vfs_fsdrv_t ark_vfs_arkrtos_devfs = {
     NULL,               /* rename: a name IS the device                  */
     devfs_opendir,
     devfs_readdir,
-    devfs_closedir
+    devfs_closedir,
+    NULL,               /* chmod: a device node has no access bits      */
+    NULL                /* chown: and no owner to change                */
 };
 
 #endif  /* ARKRTOS_USE_VFS */

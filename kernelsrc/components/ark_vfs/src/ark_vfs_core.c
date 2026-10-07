@@ -813,9 +813,11 @@ int32_t ark_vfs_stat(const char *path, struct ark_vfs_stat *st)
     {
         /* The mount root always exists and is always a directory, even if
          * the filesystem has no stat callback to say so. */
-        st->mode = ARK_S_IFDIR;
+        st->mode = (uint32_t)(ARK_S_IFDIR | ARK_S_DEFAULT_DIR);
         st->size = 0;
         st->mtime = 0u;
+        st->uid = 0u;
+        st->gid = 0u;
         ark_p_exit(token);
         return ARK_VFS_OK;
     }
@@ -947,6 +949,74 @@ int32_t ark_vfs_rename(const char *old_path, const char *new_path)
 /* ------------------------------------------------------------
  * Directories
  * ------------------------------------------------------------ */
+
+int32_t ark_vfs_chmod(const char *path, uint32_t mode)
+{
+    char rel[ARK_VFS_PATH_MAX];
+    struct ark_vfs_mnt *mnt = NULL;
+    int32_t r;
+    void *token;
+
+    token = ark_p_enter();
+    r = ark_vfs_resolve(path, &mnt, rel);
+    if (r != ARK_VFS_OK)
+    {
+        ark_p_exit(token);
+        return r;
+    }
+    if ((mnt->flags & ARK_MNT_RO) != 0u)
+    {
+        ark_p_exit(token);
+        return ARK_E_ROFS;
+    }
+    if (rel[0] == '\0')
+    {
+        ark_p_exit(token);
+        return ARK_E_INVAL;     /* the mount root is not a changeable node */
+    }
+    if (mnt->fs->chmod == NULL)
+    {
+        ark_p_exit(token);
+        return ARK_E_NOSYS;
+    }
+    r = mnt->fs->chmod(mnt, rel, mode & (uint32_t)ARK_S_PERM);
+    ark_p_exit(token);
+    return r;
+}
+
+int32_t ark_vfs_chown(const char *path, uint32_t uid, uint32_t gid)
+{
+    char rel[ARK_VFS_PATH_MAX];
+    struct ark_vfs_mnt *mnt = NULL;
+    int32_t r;
+    void *token;
+
+    token = ark_p_enter();
+    r = ark_vfs_resolve(path, &mnt, rel);
+    if (r != ARK_VFS_OK)
+    {
+        ark_p_exit(token);
+        return r;
+    }
+    if ((mnt->flags & ARK_MNT_RO) != 0u)
+    {
+        ark_p_exit(token);
+        return ARK_E_ROFS;
+    }
+    if (rel[0] == '\0')
+    {
+        ark_p_exit(token);
+        return ARK_E_INVAL;
+    }
+    if (mnt->fs->chown == NULL)
+    {
+        ark_p_exit(token);
+        return ARK_E_NOSYS;
+    }
+    r = mnt->fs->chown(mnt, rel, uid, gid);
+    ark_p_exit(token);
+    return r;
+}
 
 int32_t ark_vfs_opendir(const char *path)
 {

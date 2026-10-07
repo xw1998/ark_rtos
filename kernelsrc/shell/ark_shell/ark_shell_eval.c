@@ -383,7 +383,7 @@ typedef struct {
     int         overflow;
 } glob_ctx_t;
 
-static int glob_cb(const char *name, uint32 is_dir, uint32 size, void *arg)
+static int glob_cb(const char *name, const arkrtos_vfs_stat_t *st, void *arg)
 {
     glob_ctx_t *c = (glob_ctx_t *)arg;
     uint32      dlen;
@@ -391,8 +391,7 @@ static int glob_cb(const char *name, uint32 is_dir, uint32 size, void *arg)
     char       *dst;
     uint32      k;
 
-    (void)is_dir;
-    (void)size;
+    (void)st;   /* a glob only needs the names */
     if (glob_match(c->pat, name) == 0) {
         return 0;
     }
