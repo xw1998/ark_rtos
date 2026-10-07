@@ -55,6 +55,15 @@
 #define ARK_BUS_COLL_PH_STAR    4u  /* gather-to-root (store)        */
 #define ARK_BUS_COLL_PH_SYNC    5u  /* roll call before the data phase */
 
+/* Re-announce the roll call this often until every peer answers.  The stream
+ * layer already retransmits, but it gives up after ARK_BUS_STREAM_RETRY_MAX
+ * tries; on a lossy link an announcement that runs out of retries would
+ * otherwise stall the whole operation, so the roll call retries on its own
+ * clock and is only bounded by ARK_BUS_COLL_TIMEOUT_MS. */
+#ifndef ARK_BUS_COLL_SYNC_RETRY_MS
+#define ARK_BUS_COLL_SYNC_RETRY_MS  300u
+#endif
+
 /* ------------------------------------------------------------------ */
 /* Ring index helpers                                                  */
 /* ------------------------------------------------------------------ */
@@ -180,6 +189,7 @@ static void coll_end(ark_bus_t *bus, int status)
 /* ------------------------------------------------------------------ */
 
 static void coll_pump(ark_bus_t *bus);
+static void coll_sync_begin(ark_bus_t *bus, uint8_t round);
 
 static void coll_send_done(int status, uint16_t xid, void *user)
 {
@@ -246,6 +256,11 @@ static void coll_phase_done(ark_bus_t *bus);
 static void coll_ring_pump(ark_bus_t *bus)
 {
     ark_bus_coll_op_t *op = &bus->coll.op;
+    /* Reduce-scatter arrivals live in recv_mask; the gathering phase has its
+     * own index space and its own mask, because all-gather objects may arrive
+     * (and are stored) while this rank is still finishing the barrier. */
+    const uint32_t *mask = (op->phase == ARK_BUS_COLL_PH_AG) ? &op->gmask
+                                                             : &op->recv_mask;
 
     while (op->step < (uint8_t)(op->nranks - 1u)) {
         uint8_t  out;
@@ -259,7 +274,7 @@ static void coll_ring_pump(ark_bus_t *bus)
          * previous step and accumulated into; wait for it before sending. */
         if (op->step > 0u) {
             uint8_t need = ring_out(op, op->step);   /* == ring_in(step-1) */
-            if ((op->recv_mask & (1u << need)) == 0u) {
+            if ((*mask & (1u << need)) == 0u) {
                 return;
             }
         }
@@ -288,7 +303,7 @@ static void coll_ring_pump(ark_bus_t *bus)
     }
     {
         uint8_t last = ring_in(op, (uint8_t)(op->nranks - 2u));
-        if ((op->recv_mask & (1u << last)) == 0u) {
+        if ((*mask & (1u << last)) == 0u) {
             return;
         }
     }
@@ -389,26 +404,18 @@ static void coll_phase_done(ark_bus_t *bus)
 
     switch (op->kind) {
     case ARK_BUS_COLL_ALLREDUCE:
-        if (op->phase == ARK_BUS_COLL_PH_RS) {
-            op->phase     = ARK_BUS_COLL_PH_AG;
-            op->step      = 0u;
-            op->send_busy = 0u;
-            op->recv_mask = 0u;
-            op->rshift    = 1u;   /* reduced block sits at (r+1) mod P */
-            coll_pump(bus);
-        } else {
-            coll_end(bus, ARK_BUS_OK);
-        }
-        break;
-
     case ARK_BUS_COLL_REDUCE:
         if (op->phase == ARK_BUS_COLL_PH_RS) {
-            op->phase      = ARK_BUS_COLL_PH_STAR;
-            op->send_busy  = 0u;
-            op->sent       = 0u;
-            op->recv_count = 0u;
-            op->recv_mask  = 0u;
-            coll_pump(bus);
+            /* The ring is only pipeline-synchronised, not phase-synchronised:
+             * a rank that drains its reduce-scatter sends early enters the
+             * next phase and ships objects to a neighbour still reducing.
+             * Those objects are already ACKed at the stream layer, so they
+             * cannot be refused -- and the neighbour's ongoing reduce-scatter
+             * would both clobber the arriving block in the shared result
+             * buffer and have its arrival bit wiped by the phase change.  A
+             * second roll call fences the phases: nobody stores gather data
+             * until everyone has finished reducing.  See coll_sync_begin(). */
+            coll_sync_begin(bus, 1u);
         } else {
             coll_end(bus, ARK_BUS_OK);
         }
@@ -435,6 +442,9 @@ static int coll_sync_ready(const ark_bus_t *bus)
 
     if (!cs->sync_used || cs->sync_opid != op->op_id) {
         return 0;
+    }
+    if (cs->sync_round != op->sync_round) {
+        return 0;              /* peers are on a different roll-call round */
     }
     for (r = 0; r < op->nranks; r++) {
         if (r != op->rank) {
@@ -473,6 +483,55 @@ static void coll_enter_data(ark_bus_t *bus)
     coll_pump(bus);
 }
 
+/* The second data phase of all-reduce and reduce, entered only after the
+ * mid-operation roll call.  gmask is deliberately left alone: gathering-phase
+ * objects that arrived while this rank was still in the barrier are already
+ * stored in the result buffer and must not be forgotten.  recv_count likewise
+ * keeps any star blocks counted before the barrier. */
+static void coll_enter_after_rs(ark_bus_t *bus)
+{
+    ark_bus_coll_op_t *op = &bus->coll.op;
+
+    op->send_busy = 0u;
+    op->step      = 0u;
+    if (op->kind == (uint8_t)ARK_BUS_COLL_ALLREDUCE) {
+        op->phase  = ARK_BUS_COLL_PH_AG;
+        op->rshift = 1u;       /* reduced block sits at (r+1) mod P */
+    } else {
+        op->phase  = ARK_BUS_COLL_PH_STAR;
+        op->rshift = 0u;
+        op->sent   = 0u;
+    }
+    coll_pump(bus);
+}
+
+/*
+ * Raise a roll call for `round` and start running it.  Round 0 opens the
+ * operation (so peers agree it has begun); round 1 is the fence between
+ * reduce-scatter and the gathering phase of all-reduce / reduce.  The round is
+ * carried in the announcement so a stale round-0 bit can never satisfy the
+ * round-1 barrier.  If a peer's announcement for this round arrived first we
+ * keep the bits it already filed; otherwise the mask restarts empty.
+ */
+static void coll_sync_begin(ark_bus_t *bus, uint8_t round)
+{
+    ark_bus_coll_state_t *cs = &bus->coll;
+    ark_bus_coll_op_t    *op = &cs->op;
+
+    if (!(cs->sync_used && cs->sync_opid == op->op_id &&
+          cs->sync_round == round)) {
+        cs->sync_opid  = op->op_id;
+        cs->sync_round = round;
+        cs->sync_mask  = 0u;
+        cs->sync_used  = 1u;
+    }
+    op->sync_round = round;
+    op->sync_next  = 0u;
+    op->sync_ms    = ark_bus_tick_ms();
+    op->phase      = ARK_BUS_COLL_PH_SYNC;
+    coll_pump(bus);
+}
+
 static void coll_sync_pump(ark_bus_t *bus)
 {
     ark_bus_coll_op_t *op = &bus->coll.op;
@@ -489,17 +548,37 @@ static void coll_sync_pump(ark_bus_t *bus)
             continue;              /* no need to announce to ourselves */
         }
         dst = op->group.ids[peer];
-        if (coll_send_object(bus, dst, op->rank, NULL, 0u) != ARK_BUS_OK) {
+        if (coll_send_object(bus, dst, op->rank, &op->sync_round, 1u) !=
+            ARK_BUS_OK) {
             coll_end(bus, ARK_BUS_E_NOMEM);
             return;
         }
         return;                    /* resumed from coll_send_done() */
     }
 
+    /* The last announcement must be acknowledged before the data phase
+     * starts: every object is assembled in the one shared `stage` buffer, so
+     * starting to build a data object while an announcement is still in
+     * flight (or being retransmitted) would deliver the data object's bytes
+     * under the announcement's transfer id. */
+    if (op->send_busy) {
+        return;
+    }
     if (!coll_sync_ready(bus)) {
+        uint32_t now = ark_bus_tick_ms();
+        if (!op->send_busy &&
+            (uint32_t)(now - op->sync_ms) >= (uint32_t)ARK_BUS_COLL_SYNC_RETRY_MS) {
+            op->sync_ms   = now;
+            op->sync_next = 0u;    /* announce the round again */
+            coll_pump(bus);
+        }
         return;                    /* wait for the peers to check in */
     }
-    coll_enter_data(bus);
+    if (op->sync_round == 0u) {
+        coll_enter_data(bus);
+    } else {
+        coll_enter_after_rs(bus);
+    }
 }
 
 static void coll_pump(ark_bus_t *bus)
@@ -556,14 +635,23 @@ static void coll_dispatch(ark_bus_t *bus, uint32_t from, const uint8_t *data,
          * announce the operation we have not started yet (or must be able to
          * ignore one that belongs to an operation already over). */
         if (phase == ARK_BUS_COLL_PH_SYNC) {
+            uint8_t round = (plen >= 1u) ? p[0] : 0u;
+
             if (!cs->sync_used || cs->sync_opid != op_id) {
                 if (cs->sync_used &&
                     (int16_t)(op_id - cs->sync_opid) < 0) {
                     return;        /* an earlier operation's roll call */
                 }
-                cs->sync_opid = op_id;
-                cs->sync_mask = 0u;
-                cs->sync_used = 1u;
+                cs->sync_opid  = op_id;
+                cs->sync_round = round;
+                cs->sync_mask  = 0u;
+                cs->sync_used  = 1u;
+            } else if ((int8_t)(round - cs->sync_round) != 0) {
+                if ((int8_t)(round - cs->sync_round) < 0) {
+                    return;        /* a stale round of the current op */
+                }
+                cs->sync_round = round;   /* newer round: restart the mask */
+                cs->sync_mask  = 0u;
             }
             if (index < 32u) {
                 cs->sync_mask |= (uint32_t)1u << index;
@@ -595,12 +683,12 @@ static void coll_dispatch(ark_bus_t *bus, uint32_t from, const uint8_t *data,
                 coll_end(bus, ARK_BUS_E_FORMAT);
                 return;
             }
-            if ((op->recv_mask & (1u << index)) != 0u) {
+            if ((op->gmask & (1u << index)) != 0u) {
                 return;
             }
             ark_memcpy((uint8_t *)op->rbuf + (uint32_t)index * op->blk,
                        p, op->blk);
-            op->recv_mask |= (1u << index);
+            op->gmask |= (1u << index);
             break;
 
         case ARK_BUS_COLL_PH_BCAST:
@@ -620,12 +708,19 @@ static void coll_dispatch(ark_bus_t *bus, uint32_t from, const uint8_t *data,
                 coll_end(bus, ARK_BUS_E_FORMAT);
                 return;
             }
-            if ((op->recv_mask & (1u << index)) != 0u) {
-                return;
+            /* A reduce's star finishes the operation after reduce-scatter, so
+             * it uses the gather space; a plain gather is its own one-shot
+             * phase and uses recv_mask. */
+            {
+                uint32_t *m = (op->kind == (uint8_t)ARK_BUS_COLL_REDUCE)
+                                  ? &op->gmask : &op->recv_mask;
+                if ((*m & (1u << index)) != 0u) {
+                    return;
+                }
+                ark_memcpy((uint8_t *)op->rbuf + (uint32_t)index * op->blk,
+                           p, op->blk);
+                *m |= (1u << index);
             }
-            ark_memcpy((uint8_t *)op->rbuf + (uint32_t)index * op->blk,
-                       p, op->blk);
-            op->recv_mask |= (1u << index);
             op->recv_count++;
             break;
 
@@ -781,9 +876,10 @@ static int coll_begin(ark_bus_t *bus, uint8_t kind,
     /* Keep a roll call already filed for this id; only discard one that
      * belongs to an earlier operation. */
     if (!cs->sync_used || cs->sync_opid != st->op_id) {
-        cs->sync_opid = st->op_id;
-        cs->sync_mask = 0u;
-        cs->sync_used = 1u;
+        cs->sync_opid  = st->op_id;
+        cs->sync_round = 0u;
+        cs->sync_mask  = 0u;
+        cs->sync_used  = 1u;
     }
     return ARK_BUS_OK;
 }
@@ -791,11 +887,7 @@ static int coll_begin(ark_bus_t *bus, uint8_t kind,
 /* Arm the roll call and let it run.  The public calls below all end here. */
 static void coll_start(ark_bus_t *bus)
 {
-    ark_bus_coll_op_t *op = &bus->coll.op;
-
-    op->sync_next = 0u;
-    op->phase     = ARK_BUS_COLL_PH_SYNC;
-    coll_pump(bus);
+    coll_sync_begin(bus, 0u);
 }
 
 int ark_bus_coll_allreduce(ark_bus_t *bus, const ark_bus_coll_group_t *grp,
@@ -925,7 +1017,7 @@ int ark_bus_coll_allgather(ark_bus_t *bus, const ark_bus_coll_group_t *grp,
     if (rc != ARK_BUS_OK) {
         return rc;
     }
-    bus->coll.op.recv_mask = (uint32_t)1u << rank;
+    bus->coll.op.gmask = (uint32_t)1u << rank;
     coll_start(bus);
     return ARK_BUS_OK;
 }

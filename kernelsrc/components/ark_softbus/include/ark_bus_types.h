@@ -27,6 +27,9 @@
 #define ARK_BUS_E_STATE     (-9)   /* wrong state for this call        */
 #define ARK_BUS_E_TIMEOUT   (-10)  /* an RPC or task reply never came  */
 #define ARK_BUS_E_BUSY      (-11)  /* a worker refused the work        */
+#define ARK_BUS_E_DENIED    (-12)  /* the tool policy refused this call */
+#define ARK_BUS_E_APPROVAL  (-13)  /* held: a human must release it    */
+#define ARK_BUS_E_AUTH      (-14)  /* frame authentication failed      */
 
 /*
  * Subscriber callback.  `topic` is the registered name, `payload` points into
@@ -63,6 +66,51 @@ typedef struct {
     uint16_t missed_heartbeats;  /* consecutive intervals missed   */
 } ark_bus_device_t;
 
+struct ark_bus;
+
+#if ARK_BUS_HANDSHAKE_ENABLED
+/* One negotiated session with a peer (see ark_bus_session.h).  `state` is
+ * 0 free, 1 an initiator waiting for the reply, 2 ready (keys usable), 3
+ * revoked (non-handshake frames from the peer are refused).  `mac_key`/`enc_key` are the
+ * current subkeys; `pmac_key`/`penc_key` are the previous pair, kept only for
+ * the handover window so a frame sealed just before a rotation still opens.
+ * `eph_sk`/`eph_pk` hold the in-flight ephemeral material until the exchange
+ * finishes, then they are wiped. */
+typedef struct {
+    uint32_t peer;            /* remote node id (ids are checked against this) */
+    uint16_t epoch;           /* handshake generation, echoed by the responder */
+    uint8_t  state;
+    uint8_t  role;            /* 1 initiator, 2 responder                 */
+    uint8_t  have_prev;       /* pmac_key/penc_key hold real previous keys */
+    uint8_t  retries;
+    uint32_t retry_at_ms;
+    uint8_t  mac_key[32];
+    uint8_t  enc_key[32];
+    uint8_t  pmac_key[32];
+    uint8_t  penc_key[32];
+    uint8_t  eph_sk[32];
+    uint8_t  eph_pk[32];
+    /* The initiator finishes asynchronously (on the reply), so its completion
+     * callback is kept here until then; the responder leaves both NULL. */
+    void   (*done)(struct ark_bus *bus, uint32_t peer, int status, void *ctx);
+    void    *done_ctx;
+} ark_bus_session_t;
+#endif
+
+#if ARK_BUS_REPLAY_ENABLED
+/* Sliding window of accepted sequence numbers for one peer (see
+ * ark_bus_replay.c).  `last` is the highest sequence number accepted so far,
+ * read as a 16-bit modular counter; bit i of `seen` records that sequence
+ * (last - i) has been accepted.  `id` == 0 marks a free slot (an id of 0 is
+ * never a valid peer). */
+typedef struct {
+    uint32_t id;
+    uint16_t last;
+    uint8_t  used;
+    uint64_t seen;
+} ark_bus_replay_entry_t;
+#endif
+
 /* Counters, all monotonic, useful for a status line or a scope view. */
 typedef struct {
     uint32_t tx_frames;
@@ -75,6 +123,23 @@ typedef struct {
     uint32_t qos_retransmits;
     uint32_t qos_timeouts;
     uint32_t dispatch_errors;    /* frames with no subscriber      */
+#if ARK_BUS_REMOTE_SUB_ENABLED
+    uint32_t rsub_dropped;       /* SUBSCRIBE not recorded (topic 0
+                                  * or the registry was full)      */
+#endif
+#if ARK_BUS_CRYPTO_ENABLED
+    uint32_t rx_auth_fail;       /* frames dropped for a missing or
+                                  * bad authentication tag          */
+#endif
+#if ARK_BUS_REPLAY_ENABLED
+    uint32_t rx_replay;          /* authenticated frames dropped by the
+                                  * replay window (duplicate or too old) */
+#endif
+#if ARK_BUS_HANDSHAKE_ENABLED
+    uint32_t hs_ok;              /* handshakes completed (a session key exists) */
+    uint32_t hs_fail;            /* handshake frames that failed to authenticate */
+    uint32_t rx_denied;          /* frames dropped because the peer was revoked */
+#endif
 } ark_bus_stats_t;
 
 #if ARK_BUS_RPC_ENABLED

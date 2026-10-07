@@ -23,6 +23,17 @@ typedef struct {
      */
     void (*lock)(void);
     void (*unlock)(void);
+
+    /*
+     * Optional random source for the handshake.  Fills `out` with `len`
+     * random bytes and returns 0, or returns non-zero when it cannot.  A
+     * board with a hardware RNG supplies it; a board without one leaves it
+     * NULL, and the handshake then refuses to run rather than mint session
+     * keys from a weak source -- unless ARK_BUS_CRYPTO_ALLOW_WEAK_RNG is set
+     * on purpose (see ark_bus_config.h).  A node that never negotiates a
+     * session needs no random source at all.
+     */
+    int (*rng)(uint8_t *out, uint32_t len);
 } ark_bus_hal_t;
 
 /*
@@ -39,5 +50,9 @@ const ark_bus_hal_t *ark_bus_hal_get(void);
 uint32_t ark_bus_tick_ms(void);
 void     ark_bus_lock(void);
 void     ark_bus_unlock(void);
+
+/* Fill `out` with `len` random bytes from the installed HAL.  Returns 0 on
+ * success or -1 when no source is installed.  Only used by the handshake. */
+int      ark_bus_rng_bytes(uint8_t *out, uint32_t len);
 
 #endif /* ARK_BUS_HAL_H */

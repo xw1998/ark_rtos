@@ -105,6 +105,25 @@ SRCS := \
   kernelsrc/components/ark_softbus/src/ark_bus_coll.c \
   kernelsrc/components/ark_softbus/src/ark_bus_infer.c \
   kernelsrc/components/ark_softbus/src/ark_bus_infer_ref.c \
+  kernelsrc/components/ark_softbus/src/ark_bus_chacha20.c \
+  kernelsrc/components/ark_softbus/src/ark_bus_checkpoint.c \
+  kernelsrc/components/ark_softbus/src/ark_bus_compress.c \
+  kernelsrc/components/ark_softbus/src/ark_bus_crypto.c \
+  kernelsrc/components/ark_softbus/src/ark_bus_flow.c \
+  kernelsrc/components/ark_softbus/src/ark_bus_fwu.c \
+  kernelsrc/components/ark_softbus/src/ark_bus_hkdf.c \
+  kernelsrc/components/ark_softbus/src/ark_bus_infer_kv.c \
+  kernelsrc/components/ark_softbus/src/ark_bus_infer_quant.c \
+  kernelsrc/components/ark_softbus/src/ark_bus_infer_remote.c \
+  kernelsrc/components/ark_softbus/src/ark_bus_infer_sampling.c \
+  kernelsrc/components/ark_softbus/src/ark_bus_raft.c \
+  kernelsrc/components/ark_softbus/src/ark_bus_replay.c \
+  kernelsrc/components/ark_softbus/src/ark_bus_route.c \
+  kernelsrc/components/ark_softbus/src/ark_bus_session.c \
+  kernelsrc/components/ark_softbus/src/ark_bus_subreg.c \
+  kernelsrc/components/ark_softbus/src/ark_bus_tokenizer.c \
+  kernelsrc/components/ark_softbus/src/ark_bus_tool.c \
+  kernelsrc/components/ark_softbus/src/ark_bus_x25519.c \
   kernelsrc/components/ark_softbus/src/transport/transport_loopback.c \
   kernelsrc/components/ark_softbus/src/transport/transport_uart.c \
   kernelsrc/components/ark_softbus/port/ark_bus_hal_arkrtos.c \

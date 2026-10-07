@@ -106,6 +106,13 @@ typedef struct {
     int      is_listen;  /* 1 when accept() must run before recv  */
     uint16_t rx_len;
     uint8_t  rx[ARK_BUS_SOCK_RXBUF];
+    /* UDP only.  `peer` holds the opaque sockaddr_in of the peer: set at
+     * init when host != NULL (the socket is connect()ed), or re-learned from
+     * the last datagram when host == NULL ("reply to last sender").  Kept as
+     * raw bytes so this header stays free of socket headers. */
+    uint8_t  peer[16];
+    uint8_t  peer_len;
+    uint8_t  connected;  /* UDP: 1 => the datagram socket was connect()ed */
 } ark_bus_transport_sock_t;
 
 /* Client: connect to host:port. */
@@ -118,7 +125,10 @@ int ark_bus_transport_tcp_listen(ark_bus_transport_sock_t *s,
                                  transport_adapter_t *tp,
                                  const char *bind_ip, uint16_t port);
 
-/* UDP: send to host:port (host NULL => reply to last sender) and receive. */
+/* UDP: a datagram socket.  host != NULL connects to host:port (one fixed
+ * peer); host == NULL binds to `port` and learns the peer from the sender of
+ * the last datagram ("reply to last sender").  One datagram carries one
+ * frame.  Defined only where sockets exist, like TCP. */
 int ark_bus_transport_udp_init(ark_bus_transport_sock_t *s,
                                transport_adapter_t *tp,
                                const char *host, uint16_t port);

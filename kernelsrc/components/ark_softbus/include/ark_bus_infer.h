@@ -25,12 +25,12 @@
  *
  * What it deliberately does NOT do: no weights live in the layer (the caller
  * owns every buffer; a step borrows pointers and the plan is immutable while
- * it runs), no multi-layer assembly or token embedding yet and no sampling /
- * logits path (a miniature *block* forward is here; the embedding-to-logits
- * spine is M3.2b), no quantisation (the reference backend is float32; an
- * integer backend plugs in behind the same vtable), no automatic device
- * placement, no graph optimisation, and no fault recovery past the collective
- * layer's single-op timeout.  Floating-point addition is not associative, so a distributed
+ * it runs), no quantisation (the reference backend is float32; an integer
+ * backend plugs in behind the same vtable), no sampling beyond a greedy global
+ * argmax (a stochastic sampler is a CALL step), no KV cache (every call
+ * recomputes the full causal window), no automatic device placement, no graph
+ * optimisation, and no fault recovery past the collective layer's single-op
+ * timeout.  Floating-point addition is not associative, so a distributed
  * result is compared to a serial reference with a tolerance, never bit-exact
  * (see ARK_BUS_INFER_TOL_* and the note on ark_bus_infer_mlp).
  *
@@ -50,6 +50,12 @@
 #include "ark_bus_coll.h"
 
 #if ARK_BUS_INFER_ENABLED
+
+/* The optional M3 modules.  Only the quantised operand type is needed here (the
+ * GEMM slot names it); the rest of each module is declared in its own header. */
+#if ARK_BUS_INFER_QUANT_ENABLED
+#include "ark_bus_infer_quant.h"
+#endif
 
 struct ark_bus;
 
@@ -102,6 +108,52 @@ typedef struct {
     int (*attn)(void *ctx, const float *qkv, float *out,
                 int tokens, int heads, int head_dim, int causal);
 
+#if ARK_BUS_INFER_KV_ENABLED
+    /*
+     * Decode-step attention with a caller-owned KV cache (M3 completion).
+     *
+     * `qkv` is the NEW tokens only, [nnew, 3*heads*head_dim], token-major
+     * Q|K|V.  The kernel appends the new K and V rows to `k_cache`/`v_cache`
+     * (each [max_len, heads*head_dim], row t = absolute position t), advances
+     * `*plen` by `nnew`, and writes `out` [nnew, heads*head_dim] where new
+     * token i (absolute position old_len+i) attends to every cached position
+     * j <= old_len+i when `causal` is non-zero, or to every j in
+     * [0, old_len+nnew) otherwise.  Refuses old_len+nnew > max_len with
+     * E_INVAL.  A NULL pointer means the backend has no cache and a
+     * KV-cache step fails with E_NOSYS, exactly like any other missing kernel.
+     */
+    int (*attn_cache)(void *ctx, const float *qkv,
+                      float *k_cache, float *v_cache, int *plen, int max_len,
+                      float *out, int nnew, int heads, int head_dim,
+                      int causal);
+#endif
+
+#if ARK_BUS_INFER_QUANT_ENABLED
+    /*
+     * Integer-weight GEMM: c[m*n] = a[m*k] * dequant(b[k*n]).  The weight
+     * operand is a descriptor, not a `const float *`, so the signature says
+     * what is actually there.  A NULL pointer means a QGEMM step fails with
+     * E_NOSYS.
+     */
+    int (*qgemm)(void *ctx, int m, int n, int k,
+                 const float *a, const ark_bus_infer_q8_t *b, float *c);
+#endif
+
+    /*
+     * Vocab-parallel token-embedding lookup.  `tokens` holds `ntokens` ids;
+     * `w` is THIS rank's [vocab_local, dim] slice starting at row `vocab_lo`.
+     * For each row r,
+     *   out[r*dim + i] = scale * w[(tokens[r]-vocab_lo)*dim + i]
+     * when vocab_lo <= tokens[r] < vocab_lo+vocab_local, and 0 otherwise.
+     * A following all-reduce sum then reconstructs the full embedding exactly
+     * once per token -- only the rank that owns a row fills it, the rest
+     * contribute zero, so the sum is the lookup, not a multiple of it.  A NULL
+     * pointer means the backend cannot embed and the step fails with E_NOSYS.
+     */
+    int (*embed)(void *ctx, const int32_t *tokens, int ntokens, int dim,
+                 const float *w, int vocab_lo, int vocab_local,
+                 float scale, float *out);
+
     void *ctx;
 } ark_bus_infer_backend_t;
 
@@ -129,7 +181,20 @@ typedef enum {
     ARK_BUS_INFER_OP_SOFTMAX           = 6,
     ARK_BUS_INFER_OP_ARGMAX            = 7,
     ARK_BUS_INFER_OP_CALL               = 8,
-    ARK_BUS_INFER_OP_ATTN               = 9
+    ARK_BUS_INFER_OP_ATTN               = 9,
+    ARK_BUS_INFER_OP_EMBED              = 10,  /* vocab-parallel lookup   */
+    ARK_BUS_INFER_OP_TOPK1              = 11,  /* per-row local (v,i) max */
+    ARK_BUS_INFER_OP_ALLGATHER          = 12,  /* async: gather blocks    */
+    ARK_BUS_INFER_OP_ARGMAX_MERGE       = 13,  /* global argmax over ranks*/
+    /*
+     * M3 completion.  The two values are fixed for the same reason as the ones
+     * above - they are what a remote backend would serialise - and are
+     * reserved whether or not the matching feature is compiled in.  A build
+     * without the feature cannot build such a step (its builder is not
+     * declared) and refuses a hand-built one at pre-flight.
+     */
+    ARK_BUS_INFER_OP_ATTN_CACHE         = 14,  /* decode attn w/ KV cache */
+    ARK_BUS_INFER_OP_QGEMM              = 15   /* integer-weight GEMM      */
 } ark_bus_infer_op_t;
 
 /*
@@ -156,6 +221,17 @@ typedef struct {
     float       f0;
 } ark_bus_infer_step_t;
 
+/*
+ * One top-1 candidate: a value and where it sat.  A vocab-parallel argmax
+ * produces one per rank per row and the merge picks across ranks, so the
+ * index is meaningful relative to the rank that owns the row range
+ * (see ark_bus_infer_plan_argmax_merge).  8 bytes, so it travels as raw bytes.
+ */
+typedef struct {
+    float   value;
+    int32_t index;
+} ark_bus_infer_candidate_t;
+
 /* A plan is caller-owned and immutable while it runs.  Size it for the job:
  * ARK_BUS_INFER_MAX_STEPS is a static ceiling, not a requirement. */
 typedef struct {
@@ -169,9 +245,17 @@ typedef struct {
 /* Finish callback: `status` is ARK_BUS_OK or a negative ARK_BUS_E_* code. */
 typedef void (*ark_bus_infer_done_cb_t)(int status, void *user);
 
-/* Per-bus executor state (guarded by ARK_BUS_INFER_ENABLED in ark_bus_t). */
+/* Per-bus executor state (guarded by ARK_BUS_INFER_ENABLED in ark_bus_t).
+ *
+ * The executor keeps a *view* of the running plan - its step list, its length
+ * and the group for any collective step - rather than the plan object itself.
+ * The record is plain data, so a receiver of a bounded sub-plan can pass a
+ * step array sized for what it actually got instead of the full static
+ * ceiling (see ark_bus_infer_run_steps). */
 typedef struct {
-    const ark_bus_infer_plan_t     *plan;
+    const ark_bus_infer_step_t     *steps;   /* the running plan's step list    */
+    uint8_t                         nsteps;  /* number of steps in that list    */
+    const ark_bus_coll_group_t     *group;   /* group for the collective steps   */
     const ark_bus_infer_backend_t  *be;
     ark_bus_infer_done_cb_t         cb;
     void                           *user;
@@ -236,6 +320,70 @@ int ark_bus_infer_plan_allreduce_sum_f32(ark_bus_infer_plan_t *plan,
 /* Invoke fn(bus, user) in sequence. */
 int ark_bus_infer_plan_call(ark_bus_infer_plan_t *plan,
                             ark_bus_infer_call_fn fn, void *user);
+
+#if ARK_BUS_INFER_QUANT_ENABLED
+/*
+ * Append a weight-only int8 GEMM step: c[m*n] = a[m*k] * dequant(b[k*n]).
+ * `b->rows` must equal `k` and `b->cols` must equal `n` (E_INVAL otherwise);
+ * the step needs a backend whose `qgemm` slot is set.  `b` and its code array
+ * are borrowed and must outlive the job.
+ */
+int ark_bus_infer_plan_qgemm(ark_bus_infer_plan_t *plan,
+                             const float *a, const ark_bus_infer_q8_t *b,
+                             float *c, int m, int n, int k);
+
+/*
+ * Fill `out` with a backend that is the portable float reference plus the
+ * integer-weight GEMM: every kernel the reference backend has, and a `qgemm`
+ * for the steps that carry a quantised weight.  `out` is caller-owned (a plain
+ * struct, no allocation); its `ctx` is copied from the reference backend.
+ */
+void ark_bus_infer_quant_backend_init(ark_bus_infer_backend_t *out);
+#endif
+
+/*
+ * Vocab-parallel embedding: out[ntokens, dim] gets this rank's rows scaled by
+ * `scale`, zeros elsewhere (the backend's embed op).  Follow it with an
+ * all-reduce over the same [ntokens, dim] buffer to turn the shard into the
+ * replicated embedding.  `w` is [vocab_local, dim] starting at row `vocab_lo`.
+ */
+int ark_bus_infer_plan_embed(ark_bus_infer_plan_t *plan,
+                             const int32_t *tokens, int ntokens, int dim,
+                             const float *w, int vocab_lo, int vocab_local,
+                             float scale, float *out);
+
+/*
+ * A local top-1 for a vocab-parallel argmax.  For each of `rows` rows of
+ * `x[rows, dim]`, write the row's largest value and its index to cand[row].
+ * `cand` must hold `rows` candidates; follow this with an all-gather of every
+ * rank's candidate block and ark_bus_infer_plan_argmax_merge to get the
+ * global index.  Uses the backend's argmax kernel.
+ */
+int ark_bus_infer_plan_topk1(ark_bus_infer_plan_t *plan,
+                             const float *x, int rows, int dim,
+                             ark_bus_infer_candidate_t *cand);
+
+/*
+ * Gather every rank's `blk`-byte block into `rbuf` (nranks*blk bytes), block r
+ * at offset r*blk -- the collective layer's all-gather as an async plan step.
+ * `sbuf` may alias `rbuf + rank*blk`.  Needs the plan's group.  This is the
+ * second asynchronous step kind (the first is the all-reduce).
+ */
+int ark_bus_infer_plan_allgather(ark_bus_infer_plan_t *plan,
+                                 const void *sbuf, void *rbuf, uint32_t blk);
+
+/*
+ * Reduce the `nranks * rows` candidates an all-gather produced to a global
+ * argmax per row.  Candidates are laid out block-per-rank: rank r's row t is
+ * cand[r*rows + t].  The winner is the largest value, ties going to the
+ * lowest rank; the index written to out[row] is the local index plus
+ * r*vocab_local, i.e. the position in the full vocabulary (pass 0 to keep the
+ * raw index).  Symbol-free: it reads what the gather wrote, no kernel needed.
+ */
+int ark_bus_infer_plan_argmax_merge(ark_bus_infer_plan_t *plan,
+                                    const ark_bus_infer_candidate_t *cand,
+                                    int nranks, int rows, int vocab_local,
+                                    int *out);
 
 /* ------------------------------------------------------------------ */
 /* The MLP block as a ready-made plan (Megatron tensor-parallel shape). */
@@ -376,6 +524,83 @@ int ark_bus_infer_plan_decoder_block(ark_bus_infer_plan_t *plan,
                                      const ark_bus_infer_decoder_t *dc);
 
 /* ------------------------------------------------------------------ */
+/* A whole decoder-only transformer: embedding to logits (M3.2b).      */
+/* ------------------------------------------------------------------ */
+
+/* One layer's shards, in the same layout the block builders use. */
+typedef struct {
+    const float *w_norm1;    /* [d_model]                                  */
+    const float *w_qkv;      /* [d_model, 3*(heads/nranks)*head_dim]       */
+    const float *w_o;        /* [(heads/nranks)*head_dim, d_model]         */
+    const float *w_norm2;    /* [d_model]                                  */
+    const float *w_up;       /* [d_model, d_ff/nranks]                     */
+    const float *w_dn;       /* [d_ff/nranks, d_model]                     */
+} ark_bus_infer_layer_weights_t;
+
+/*
+ * A full decoder-only model, tensor- and vocab-parallel across `nranks` ranks:
+ *
+ *   x = embed(token_ids) * scale            vocab-parallel, one all-reduce
+ *   for each layer:                         12 steps, two all-reduces
+ *       x += attn( rmsnorm(x, w_norm1) )     heads split across ranks
+ *       x += mlp ( rmsnorm(x, w_norm2) )     channels split across ranks
+ *   h = rmsnorm(x, w_final_norm)
+ *   logits = h * w_vocab                     vocab-parallel, this rank's cols
+ *   tok    = global argmax over the vocabulary
+ *
+ * Every weight is THIS rank's shard; the residual stream `x`, the normed
+ * buffer and the block work buffers are replicated scratch owned by the
+ * caller.  `vocab_local` must be vocab/nranks; the embedding table is split by
+ * vocabulary row (w_embed is [vocab_local, d_model], rows [vocab_lo,...)) and
+ * the output projection by vocabulary column (w_vocab is [d_model,
+ * vocab_local], columns [vocab_lo,...)) -- the Megatron convention, so the two
+ * ends of the model agree on who owns which token.  The plan is a long flat
+ * list (7 + 12*nlayers steps), so ARK_BUS_INFER_MAX_STEPS must be large enough;
+ * a shape that does not fit is refused with E_FULL rather than quietly
+ * truncated.
+ */
+typedef struct {
+    int          tokens;        /* sequence length T                        */
+    int          d_model;
+    int          d_ff;
+    int          heads;         /* total heads, divisible by nranks         */
+    int          head_dim;
+    int          nranks;
+    int          rank;
+    int          causal;
+    float        eps;
+    const int32_t *token_ids;   /* [tokens]                                 */
+    int          vocab;
+    int          vocab_local;   /* == vocab / nranks, THIS rank's shard      */
+    float        embed_scale;   /* e.g. sqrt(d_model); 1.0 for none          */
+    const float *w_embed;       /* [vocab_local, d_model], this rank's rows  */
+    const ark_bus_infer_layer_weights_t *layers;   /* [nlayers]             */
+    int          nlayers;
+    const float *w_final_norm;  /* [d_model]                                */
+    const float *w_vocab;       /* [d_model, vocab_local], this rank's cols  */
+
+    /* Scratch, all caller-owned and replicated where noted. */
+    float       *x;             /* [tokens, d_model] residual stream         */
+    float       *normed;        /* [tokens, d_model]                         */
+    float       *attn_scratch;  /* [tokens, 4*(heads/nranks)*head_dim]       */
+    float       *attn_out;      /* [tokens, d_model]                         */
+    float       *mlp_scratch;   /* [tokens, d_ff/nranks]                     */
+    float       *mlp_out;       /* [tokens, d_model]                         */
+    float       *hidden;        /* [tokens, d_model] final-norm output       */
+    float       *logits;        /* [tokens, vocab_local] this rank's cols    */
+    ark_bus_infer_candidate_t *cand;  /* [nranks * tokens] gathered top-1s  */
+    int         *tok_out;       /* [tokens] global argmax                    */
+} ark_bus_infer_model_t;
+
+/* Fill `plan` with the whole model described by `m`.  Needs the group in the
+ * plan (set at reset).  Returns ARK_BUS_OK, E_INVAL on a bad shape or a NULL
+ * buffer, or E_FULL when the model needs more steps than the plan can hold.
+ * The plan keeps pointers into `m`'s buffers and weight arrays, so all of them
+ * must outlive the job. */
+int ark_bus_infer_plan_model(ark_bus_infer_plan_t *plan,
+                             const ark_bus_infer_model_t *m);
+
+/* ------------------------------------------------------------------ */
 /* Driving a plan.                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -389,6 +614,21 @@ int ark_bus_infer_plan_decoder_block(ark_bus_infer_plan_t *plan,
 int ark_bus_infer_run(struct ark_bus *bus, const ark_bus_infer_backend_t *be,
                       const ark_bus_infer_plan_t *plan,
                       ark_bus_infer_done_cb_t cb, void *user);
+
+/*
+ * Same as ark_bus_infer_run() but takes the plan as a bare step list, so the
+ * caller need not own an ark_bus_infer_plan_t.  This is how a node that is
+ * handed a bounded sub-plan over the wire keeps its scratch at the sub-plan's
+ * length: a plan object carries the full ARK_BUS_INFER_MAX_STEPS ceiling, but
+ * the executor only ever reads the first `nsteps` entries of `steps`.  `group`
+ * is required only if the list has a collective step.  `steps` must stay alive
+ * until the done callback fires.
+ */
+int ark_bus_infer_run_steps(struct ark_bus *bus,
+                            const ark_bus_infer_backend_t *be,
+                            const ark_bus_infer_step_t *steps, uint8_t nsteps,
+                            const ark_bus_coll_group_t *group,
+                            ark_bus_infer_done_cb_t cb, void *user);
 
 /* Advance the running job.  Called from ark_bus_poll(); safe to call when idle
  * (it does nothing). */

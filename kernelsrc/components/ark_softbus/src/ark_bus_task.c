@@ -472,6 +472,31 @@ void ark_bus_task_worker_offline(ark_bus_t *bus, uint32_t worker_id)
     }
 }
 
+/*
+ * Discovery is about to swap device slots `from` and `to` (a swap-remove of a
+ * peer).  tried_mask indexes the device table, so swap the same two bits in
+ * every task; otherwise a retry would avoid a worker it never tried and might
+ * reuse one it already had.  When from == to the peer simply goes away, so the
+ * bit is just cleared.
+ */
+void ark_bus_task_note_device_swap(ark_bus_t *bus, uint8_t from, uint8_t to)
+{
+    uint8_t i;
+
+    if (!bus || from >= 32u || to >= 32u) {
+        return;
+    }
+    for (i = 0; i < ARK_BUS_TASK_MAX; i++) {
+        uint32_t m  = bus->tasks.entries[i].tried_mask;
+        uint32_t bf = (m >> from) & 1u;
+        uint32_t bt = (m >> to) & 1u;
+
+        m &= ~((1u << from) | (1u << to));
+        m |= (bt << from) | (bf << to);
+        bus->tasks.entries[i].tried_mask = m;
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Worker side: serve TASK_RUN with an idempotence cache               */
 /* ------------------------------------------------------------------ */

@@ -75,6 +75,13 @@ static int ark_sock_inet_pton(const char *src, struct in_addr *dst)
 }
 #endif
 
+/* recvfrom() takes int* on Winsock and socklen_t* on POSIX. */
+#if defined(_WIN32)
+typedef int ark_socklen_t;
+#else
+typedef socklen_t ark_socklen_t;
+#endif
+
 #define SOCK_CTX(tp)  ((ark_bus_transport_sock_t *)(tp)->ctx)
 
 /* Try to lift one complete frame out of s->rx.  Returns the frame length, 0
@@ -261,13 +268,126 @@ int ark_bus_transport_tcp_listen(ark_bus_transport_sock_t *s,
     return ARK_BUS_OK;
 }
 
+static int sock_send_udp(void *ctx, const uint8_t *data, uint16_t len)
+{
+    ark_bus_transport_sock_t *s = (ark_bus_transport_sock_t *)ctx;
+    int n;
+    if (!s || s->fd < 0) {
+        return ARK_BUS_E_STATE;
+    }
+    if (s->connected) {
+        n = (int)send(s->fd, (const char *)data, len, 0);
+    } else if (s->peer_len > 0) {
+        n = (int)sendto(s->fd, (const char *)data, len, 0,
+                        (const struct sockaddr *)s->peer, (int)s->peer_len);
+    } else {
+        return ARK_BUS_E_STATE;   /* no peer learned yet (host == NULL) */
+    }
+    return n > 0 ? n : ARK_BUS_E_AGAIN;
+}
+
+/* One datagram == one frame.  Read one datagram, then validate it; a datagram
+ * that is not a whole frame is discarded, never left half-parsed (a UDP peer
+ * cannot send a continuation of it). */
+static int sock_recv_udp(void *ctx, uint8_t *buf, uint16_t max_len)
+{
+    ark_bus_transport_sock_t *s = (ark_bus_transport_sock_t *)ctx;
+    int rc;
+
+    if (!s || s->fd < 0) {
+        return 0;
+    }
+
+    if (s->rx_len == 0) {
+        int n;
+        if (s->connected) {
+            n = (int)recv(s->fd, (char *)s->rx, (int)sizeof(s->rx), 0);
+        } else {
+            ark_socklen_t plen = (ark_socklen_t)sizeof(s->peer);
+            n = (int)recvfrom(s->fd, (char *)s->rx, (int)sizeof(s->rx), 0,
+                              (struct sockaddr *)s->peer, &plen);
+            if (n > 0) {
+                s->peer_len = (uint8_t)plen;
+            }
+        }
+        if (n > 0) {
+            s->rx_len = (uint16_t)n;
+        } else if (n == 0) {
+            return 0;              /* empty datagram */
+        } else if (ark_sock_would_block()) {
+            return 0;
+        } else {
+            return ARK_BUS_E_AGAIN;
+        }
+    }
+
+    rc = sock_extract(s, buf, max_len);
+    if (rc == 0) {
+        s->rx_len = 0;             /* malformed / oversized datagram: drop it */
+        return 0;
+    }
+    return rc;
+}
+
 int ark_bus_transport_udp_init(ark_bus_transport_sock_t *s,
                                transport_adapter_t *tp,
                                const char *host, uint16_t port)
 {
-    (void)s; (void)tp; (void)host; (void)port;
-    /* UDP is the next increment; the honest answer today is "not supported". */
-    return ARK_BUS_E_NOSYS;
+    struct sockaddr_in addr;
+
+    if (!s || !tp) {
+        return ARK_BUS_E_INVAL;
+    }
+    ark_sock_startup();
+    memset(s, 0, sizeof(*s));
+    s->fd = -1;
+    s->listen_fd = -1;
+
+    s->fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s->fd < 0) {
+        return ARK_BUS_E_AGAIN;
+    }
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(port);
+
+    if (host && host[0]) {
+        /* Client: fix the peer by connect()ing the datagram socket. */
+        if (!ark_sock_inet_pton(host, &addr.sin_addr)) {
+            ARK_SOCK_CLOSE(s->fd);
+            s->fd = -1;
+            return ARK_BUS_E_INVAL;
+        }
+        if (connect(s->fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+            ARK_SOCK_CLOSE(s->fd);
+            s->fd = -1;
+            return ARK_BUS_E_AGAIN;
+        }
+        memcpy(s->peer, &addr, sizeof(addr));
+        s->peer_len  = (uint8_t)sizeof(addr);
+        s->connected = 1;
+    } else {
+        /* Server / peer-less: bind and learn the peer from the first datagram. */
+        int on = 1;
+        setsockopt(s->fd, SOL_SOCKET, SO_REUSEADDR,
+                   (const char *)&on, (int)sizeof(on));
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        if (bind(s->fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+            ARK_SOCK_CLOSE(s->fd);
+            s->fd = -1;
+            return ARK_BUS_E_AGAIN;
+        }
+        s->connected = 0;
+        s->peer_len  = 0;
+    }
+
+    ark_sock_set_nonblock(s->fd);
+    tp->send = sock_send_udp;
+    tp->recv = sock_recv_udp;
+    tp->name = "UDP";
+    tp->ctx  = s;
+    return ARK_BUS_OK;
 }
 
 void ark_bus_transport_sock_close(ark_bus_transport_sock_t *s)

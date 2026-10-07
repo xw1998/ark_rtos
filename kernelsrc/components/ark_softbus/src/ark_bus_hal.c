@@ -15,6 +15,7 @@ static uint32_t fallback_tick(void)
 static const ark_bus_hal_t g_fallback = {
     fallback_tick,
     0,
+    0,
     0
 };
 
@@ -47,4 +48,12 @@ void ark_bus_unlock(void)
     if (g_hal->unlock) {
         g_hal->unlock();
     }
+}
+
+int ark_bus_rng_bytes(uint8_t *out, uint32_t len)
+{
+    if (!g_hal->rng || !out) {
+        return -1;
+    }
+    return g_hal->rng(out, len) == 0 ? 0 : -1;
 }

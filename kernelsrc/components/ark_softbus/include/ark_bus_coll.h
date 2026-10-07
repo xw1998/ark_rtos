@@ -115,6 +115,8 @@ typedef struct {
 
     uint8_t  step;        /* ring step, 0 .. nranks-2                */
     uint8_t  sync_next;   /* roll call: next peer rank to announce    */
+    uint8_t  sync_round;  /* roll call round: 0 before data, 1 mid    */
+    uint32_t sync_ms;     /* roll call: when we last announced        */
     uint8_t  rshift;      /* ring index offset: 0, or 1 for allreduce */
     uint8_t  send_busy;   /* an outgoing object is still in flight   */
     uint8_t  sent;        /* star/broadcast: our one send is done     */
@@ -124,7 +126,12 @@ typedef struct {
 
     uint32_t total;       /* bytes in the whole buffer               */
     uint32_t blk;         /* bytes per rank block                    */
-    uint32_t recv_mask;   /* ring: bit i set = block i has arrived   */
+    uint32_t recv_mask;   /* reduce/one-shot: bit i = block i arrived */
+    uint32_t gmask;       /* gather phase arrivals (all-gather / the
+                           * star finish of reduce); kept apart from
+                           * recv_mask so a block arriving before the
+                           * mid-operation barrier is not lost when the
+                           * phase's index space changes             */
 
     uint32_t started_ms;
     ark_bus_coll_group_t group;
@@ -146,6 +153,7 @@ typedef struct {
     uint32_t sync_mask;
     uint16_t sync_opid;
     uint8_t  sync_used;
+    uint8_t  sync_round;  /* which roll-call round sync_mask holds      */
     uint8_t  owns_recv;   /* we hold the stream receive path for good   */
 
     /* The stream callback that was installed when the operation began, so an

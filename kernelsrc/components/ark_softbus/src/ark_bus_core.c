@@ -4,6 +4,7 @@
  * transport adapter and the HAL.
  */
 #include "ark_bus_priv.h"
+#include "ark_bus_compress.h"
 
 /* ------------------------------------------------------------------ */
 /* Critical section                                                    */
@@ -115,6 +116,7 @@ void ark_bus_init(ark_bus_t *bus, transport_adapter_t *tport)
     ark_memset(bus, 0, sizeof(*bus));
     bus->transport = tport;
     bus->next_seq  = 1;
+    bus->member_reap_ms = (uint32_t)ARK_BUS_MEMBER_REAP_MS;
 #if ARK_BUS_TASK_ENABLED
     ark_bus_task_init(bus);
 #endif
@@ -126,6 +128,22 @@ void ark_bus_init(ark_bus_t *bus, transport_adapter_t *tport)
 #endif
 #if ARK_BUS_INFER_ENABLED
     ark_bus_infer_init(bus);
+#endif
+#if ARK_BUS_TOOL_ENABLED
+    ark_bus_tool_init(bus);
+#endif
+#if ARK_BUS_FLOW_ENABLED
+    ark_bus_flow_init(bus);
+#endif
+#if ARK_BUS_ROUTE_ENABLED
+    ark_bus_route_init(bus);
+#endif
+#if ARK_BUS_RAFT_ENABLED
+    ark_bus_raft_init(bus);
+#endif
+#if ARK_BUS_FWU_ENABLED
+    /* After stream_init: FWU takes over the data plane's inbound callback. */
+    ark_bus_fwu_init(bus);
 #endif
 }
 
@@ -166,22 +184,30 @@ void ark_bus_stop(ark_bus_t *bus)
 /* Frame building / sending                                            */
 /* ------------------------------------------------------------------ */
 
+uint16_t ark_bus_next_seq(ark_bus_t *bus)
+{
+    uint16_t seq;
+
+    if (!bus) {
+        return 0u;
+    }
+    seq = bus->next_seq++;
+    if (bus->next_seq == 0) {
+        bus->next_seq = 1;   /* keep 0 unused as a sequence value */
+    }
+    return seq;
+}
+
 int ark_bus_build_frame(ark_bus_t *bus, uint32_t dst, uint8_t msg_type,
                         uint16_t topic_id, const void *payload, uint16_t len,
-                        uint8_t flags, uint8_t *out, uint16_t cap,
-                        uint16_t *seq_out)
+                        uint8_t flags, uint16_t seq, uint8_t *out,
+                        uint16_t cap)
 {
     ark_bus_frame_t f;
-    uint16_t        seq;
     int             total;
 
     if (!bus || !out) {
         return ARK_BUS_E_INVAL;
-    }
-
-    seq = bus->next_seq++;
-    if (bus->next_seq == 0) {
-        bus->next_seq = 1;   /* keep 0 unused as a sequence value */
     }
 
     ark_memset(&f, 0, sizeof(f));
@@ -196,9 +222,6 @@ int ark_bus_build_frame(ark_bus_t *bus, uint32_t dst, uint8_t msg_type,
     f.payload_len = len;
 
     total = ark_bus_frame_encode(&f, out, cap);
-    if (total >= 0 && seq_out) {
-        *seq_out = seq;
-    }
     return total;
 }
 
@@ -216,7 +239,19 @@ int ark_bus_emit(ark_bus_t *bus, uint32_t dst, uint8_t msg_type,
                  uint8_t flags)
 {
     uint8_t  tx[ARK_BUS_FRAME_MAX_SIZE];
-    uint16_t seq = 0;
+#if ARK_BUS_COMPRESS_ENABLED
+    /* Held for the whole call: build_frame() below reads through `payload`,
+     * which may point at this buffer, so it must outlive the compression
+     * branch.  Only touched when the caller asks for compression. */
+    uint8_t  comp[ARK_BUS_MSG_MAX_SIZE];
+#endif
+#if ARK_BUS_CRYPTO_ENABLED
+    /* Holds [nonce ||] ciphertext || tag while the frame is built; lives only
+     * when a key is installed, but is declared unconditionally so the seal
+     * branch below needs no nested scope. */
+    uint8_t  sec[ARK_BUS_WIRE_PAYLOAD_MAX];
+#endif
+    uint16_t seq;
     int      total;
     int      n;
 
@@ -226,8 +261,54 @@ int ark_bus_emit(ark_bus_t *bus, uint32_t dst, uint8_t msg_type,
 
     bus_lock(bus);
 
+    /* Reserve the sequence number before sealing: when the replay window is
+     * enabled the tag covers it, so it has to exist first.  With the window off
+     * the tag ignores it, and this is the same counter the old code bumped
+     * inside build_frame. */
+    seq = ark_bus_next_seq(bus);
+
+#if ARK_BUS_COMPRESS_ENABLED
+    /* If the caller asked for compression, try it here so every send path
+     * benefits; "not worth it" or "no room" simply clears the flag and sends
+     * the bytes as they are -- never a frame that claims to be smaller. */
+    if ((flags & ARK_BUS_FLAG_COMPRESSED) != 0u && len > 0u) {
+        int clen = ark_bus_compress((const uint8_t *)payload, len, comp,
+                                    (uint16_t)sizeof(comp));
+        if (clen > 0) {
+            payload = comp;
+            len     = (uint16_t)clen;
+        } else {
+            flags &= (uint8_t)~ARK_BUS_FLAG_COMPRESSED;
+        }
+    }
+#endif
+
+#if ARK_BUS_CRYPTO_ENABLED
+    /* Authenticate last, on the bytes that actually go out (so a compressed
+     * payload is tagged as compressed), and before build_frame() assigns `seq`
+     * -- the tag covers the header fields an attacker would rewrite, not the
+     * sequence number.  A bus with no key skips this entirely and behaves as
+     * before.  With a key the send is fail-closed: if the tagged payload cannot
+     * be assembled we return the error rather than emit it unauthenticated. */
+    if (bus->crypto_key_set) {
+        uint16_t seal_len = 0;
+        int      src;
+
+        flags |= ARK_BUS_FLAG_AUTHENTICATED;
+        src = ark_bus_crypto_seal(bus, msg_type, flags, topic_id, bus->self_id,
+                                  dst, seq, (const uint8_t *)payload, len,
+                                  sec, (uint16_t)sizeof(sec), &seal_len);
+        if (src != ARK_BUS_OK) {
+            bus_unlock(bus);
+            return src;
+        }
+        payload = sec;
+        len     = seal_len;
+    }
+#endif
+
     total = ark_bus_build_frame(bus, dst, msg_type, topic_id, payload, len,
-                                flags, tx, (uint16_t)sizeof(tx), &seq);
+                                flags, seq, tx, (uint16_t)sizeof(tx));
     if (total < 0) {
         bus_unlock(bus);
         return total;
@@ -243,8 +324,15 @@ int ark_bus_emit(ark_bus_t *bus, uint32_t dst, uint8_t msg_type,
     }
 #endif
 
+#if ARK_BUS_FLOW_ENABLED
+    /* Flow control owns the plain (non-QoS1) send path: it either hands the
+     * frame to the link whole or queues it, and pushes back with E_AGAIN when
+     * even the queue is full.  With depth 0 it is a straight passthrough. */
+    n = ark_bus_flow_emit(bus, tx, (uint16_t)total, dst);
+#else
     n = bus->transport->send(bus->transport->ctx, tx, (uint16_t)total);
     ark_bus_stats_tx(bus, n);
+#endif
     bus_unlock(bus);
     return n;
 }
@@ -276,6 +364,18 @@ int ark_bus_publish_to(ark_bus_t *bus, uint32_t target_id, const char *topic,
 #if ARK_BUS_QOS_ENABLED
     flags = ARK_BUS_FLAG_QOS1;
 #endif
+    return ark_bus_emit(bus, target_id, ARK_BUS_MSG_DIRECT,
+                        (uint16_t)id, payload, len, flags);
+}
+
+int ark_bus_publish_directed(ark_bus_t *bus, uint32_t target_id,
+                             const char *topic, const void *payload,
+                             uint16_t len, uint8_t flags)
+{
+    int id = ark_bus_topic_register(bus, topic);
+    if (id < 0) {
+        return id;
+    }
     return ark_bus_emit(bus, target_id, ARK_BUS_MSG_DIRECT,
                         (uint16_t)id, payload, len, flags);
 }
@@ -402,8 +502,16 @@ int ark_bus_dispatch(ark_bus_t *bus, const ark_bus_frame_t *f)
     case ARK_BUS_MSG_DISCOVER:
     case ARK_BUS_MSG_DISCOVER_REPLY:
     case ARK_BUS_MSG_HEARTBEAT:
+    case ARK_BUS_MSG_LEAVE:
         ark_bus_discovery_handle(bus, f);
         break;
+
+#if ARK_BUS_FLOW_ENABLED
+    case ARK_BUS_MSG_FLOW_BUSY:
+    case ARK_BUS_MSG_FLOW_READY:
+        ark_bus_flow_handle(bus, f);
+        break;
+#endif
 
     case ARK_BUS_MSG_ACK:
         /* An ACK is directed back at whoever sent the QoS1 frame; a bystander
@@ -412,6 +520,31 @@ int ark_bus_dispatch(ark_bus_t *bus, const ark_bus_frame_t *f)
             ark_bus_qos_handle_ack(bus, f);
         }
         break;
+
+#if ARK_BUS_ROUTE_ENABLED
+    case ARK_BUS_MSG_ROUTE:
+    case ARK_BUS_MSG_ROUTE_ADV:
+        /* Forwarding is not point-to-point: a ROUTE envelope is addressed to
+         * its next hop but must also be acted on by that hop, and a ROUTE_ADV
+         * is a broadcast anyone may learn from. */
+        ark_bus_route_handle(bus, f);
+        break;
+#endif
+
+#if ARK_BUS_RAFT_ENABLED
+    case ARK_BUS_MSG_RAFT_VOTE_REQ:
+    case ARK_BUS_MSG_RAFT_VOTE_REP:
+    case ARK_BUS_MSG_RAFT_APPEND:
+    case ARK_BUS_MSG_RAFT_APPEND_REP:
+        /* Raft traffic is always directed at one peer (never broadcast), so a
+         * node only acts on a message addressed to it.  The same gate the RPC
+         * layer uses keeps a bystander on a shared medium from counting a vote
+         * or appending an entry that was never sent to it. */
+        if (f->dst_id == bus->self_id) {
+            ark_bus_raft_handle(bus, f);
+        }
+        break;
+#endif
 
 #if ARK_BUS_STREAM_ENABLED
     case ARK_BUS_MSG_STREAM:
@@ -425,10 +558,27 @@ int ark_bus_dispatch(ark_bus_t *bus, const ark_bus_frame_t *f)
         break;
 #endif
 
+#if ARK_BUS_HANDSHAKE_ENABLED
+    case ARK_BUS_MSG_HANDSHAKE_REQ:
+    case ARK_BUS_MSG_HANDSHAKE_REP:
+        /* Handshakes are point-to-point; a node only answers one addressed to
+         * it (or broadcast).  The frame has already been authenticated with
+         * the pre-shared key by the crypto layer above. */
+        if (f->dst_id == bus->self_id ||
+            f->dst_id == ARK_BUS_ID_BROADCAST) {
+            ark_bus_session_handle(bus, f);
+        }
+        break;
+#endif
+
     case ARK_BUS_MSG_SUBSCRIBE:
     case ARK_BUS_MSG_UNSUBSCRIBE:
-        /* Remote subscription intent is host policy; the local registry is
-         * driven by ark_bus_subscribe().  Acknowledge silently. */
+        /* Without the feature these frames are accepted and ignored (the local
+         * subscription table is driven by ark_bus_subscribe()).  With it, a
+         * node records which peer wants which topic for a hub/bridge to use. */
+#if ARK_BUS_REMOTE_SUB_ENABLED
+        ark_bus_subreg_handle(bus, f);
+#endif
         break;
 
 #if ARK_BUS_RPC_ENABLED
@@ -458,6 +608,11 @@ int ark_bus_feed(ark_bus_t *bus, const uint8_t *data, uint16_t len)
 {
     ark_bus_frame_t f;
     int             rc;
+#if ARK_BUS_ENCRYPT_ENABLED
+    /* Plaintext lands here when the frame is encrypted; open() repoints
+     * f.payload at it, so it must outlive the dispatch below. */
+    uint8_t         dec[ARK_BUS_MSG_MAX_SIZE];
+#endif
 
     if (!bus || !data) {
         return ARK_BUS_E_INVAL;
@@ -478,6 +633,75 @@ int ark_bus_feed(ark_bus_t *bus, const uint8_t *data, uint16_t len)
     }
 
     bus->stats.rx_frames++;
+
+#if ARK_BUS_CRYPTO_ENABLED
+#if ARK_BUS_HANDSHAKE_ENABLED
+    /* A revoked peer is refused outright until it handshakes again; the
+     * handshake frame is the one exception, so that it can.  This runs before
+     * the tag check on purpose: revoke() wipes the peer's session keys, so a
+     * frame it sealed with them could never open anyway, and refusing it here
+     * turns an indistinguishable E_AUTH into a diagnosable denial.  The src_id
+     * is not yet authenticated at this point, but a forged one only earns the
+     * same refusal, so no trust is placed in it. */
+    if (ARK_BUS_IS_HANDSHAKE_TYPE(f.msg_type) == 0 &&
+        ark_bus_session_denied(bus, f.src_id)) {
+        bus->stats.rx_denied++;
+        bus_unlock(bus);
+        return ARK_BUS_E_DENIED;
+    }
+#endif
+    /* Verify before anything downstream trusts the frame.  A keyed node refuses
+     * frames with a bad tag and frames with no tag at all; an unkeyed node
+     * refuses tagged frames it cannot verify.  Either way the frame is dropped
+     * here, never decompressed and never dispatched. */
+#if ARK_BUS_ENCRYPT_ENABLED
+    rc = ark_bus_crypto_open(bus, &f, dec, (uint16_t)sizeof(dec));
+#else
+    rc = ark_bus_crypto_open(bus, &f, (uint8_t *)0, 0u);
+#endif
+    if (rc != ARK_BUS_OK) {
+        bus->stats.rx_auth_fail++;
+        bus_unlock(bus);
+        return rc;
+    }
+
+#if ARK_BUS_REPLAY_ENABLED
+    /* Only now, once the tag has vouched for the sequence number, is a
+     * duplicate meaningful -- and only on a keyed bus: with no key the frames
+     * are unauthenticated, so remembering their numbers would protect against
+     * an attacker who can forge anything anyway.  QoS1 is exempt: a
+     * retransmission reuses its sequence number by design, so the window would
+     * flag every honest retry (see ark_bus_config.h). */
+    if (bus->crypto_key_set && (f.flags & ARK_BUS_FLAG_QOS1) == 0u) {
+        rc = ark_bus_replay_check(bus, &f);
+        if (rc != ARK_BUS_OK) {
+            bus->stats.rx_replay++;
+            bus_unlock(bus);
+            return rc;
+        }
+    }
+#endif
+#endif
+
+#if ARK_BUS_COMPRESS_ENABLED
+    /* Inflate before dispatch so subscribers, RPC handlers and the tool layer
+     * all see plaintext; a stream we cannot decode stops here instead of being
+     * handed on as if it were valid. */
+    if ((f.flags & ARK_BUS_FLAG_COMPRESSED) != 0u) {
+        uint8_t plain[ARK_BUS_MSG_MAX_SIZE];
+        int     plen = ark_bus_decompress(f.payload, f.payload_len, plain,
+                                          (uint16_t)sizeof(plain));
+        if (plen < 0) {
+            bus->stats.rx_bad_frames++;
+            bus_unlock(bus);
+            return ARK_BUS_E_FORMAT;
+        }
+        f.payload     = plain;
+        f.payload_len = (uint16_t)plen;
+        f.flags      &= (uint8_t)~ARK_BUS_FLAG_COMPRESSED;
+    }
+#endif
+
     rc = ark_bus_dispatch(bus, &f);
     bus_unlock(bus);
     return rc;
@@ -510,7 +734,20 @@ void ark_bus_poll(ark_bus_t *bus)
     }
 
     ark_bus_qos_tick(bus);
+#if ARK_BUS_FLOW_ENABLED
+    ark_bus_flow_tick(bus);
+#endif
+#if ARK_BUS_HANDSHAKE_ENABLED
+    ark_bus_session_tick(bus);
+#endif
     ark_bus_discovery_tick(bus);
+#if ARK_BUS_ROUTE_ENABLED
+    /* After discovery: it reads the device table discovery just refreshed. */
+    ark_bus_route_tick(bus);
+#endif
+#if ARK_BUS_RAFT_ENABLED
+    ark_bus_raft_tick(bus);
+#endif
 #if ARK_BUS_RPC_ENABLED
     ark_bus_rpc_tick(bus);
 #endif

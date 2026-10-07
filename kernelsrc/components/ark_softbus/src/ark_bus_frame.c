@@ -39,7 +39,7 @@ int ark_bus_frame_encode(const ark_bus_frame_t *f, uint8_t *out, uint16_t cap)
     if (!f || !out) {
         return ARK_BUS_E_INVAL;
     }
-    if (f->payload_len > ARK_BUS_MSG_MAX_SIZE) {
+    if (f->payload_len > ARK_BUS_WIRE_PAYLOAD_MAX) {
         return ARK_BUS_E_INVAL;
     }
     if (f->payload_len != 0 && f->payload == NULL) {
@@ -93,7 +93,7 @@ int ark_bus_frame_decode(const uint8_t *in, uint16_t len, ark_bus_frame_t *f)
     }
 
     plen = ark_rd16(in + 9);
-    if (plen > ARK_BUS_MSG_MAX_SIZE) {
+    if (plen > ARK_BUS_WIRE_PAYLOAD_MAX) {
         return ARK_BUS_E_FORMAT;
     }
 

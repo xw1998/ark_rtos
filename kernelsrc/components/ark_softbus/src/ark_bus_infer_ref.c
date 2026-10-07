@@ -281,12 +281,51 @@ static int ref_attn(void *ctx, const float *qkv, float *out,
     return ARK_BUS_OK;
 }
 
+/*
+ * Vocab-parallel embedding: copy this rank's owned rows, scale, and zero the
+ * rest.  The caller all-reduces afterwards, and a token owned by exactly one
+ * rank is why the sum is the lookup and not a multiple of it.
+ */
+static int ref_embed(void *ctx, const int32_t *tokens, int ntokens, int dim,
+                     const float *w, int vocab_lo, int vocab_local,
+                     float scale, float *out)
+{
+    int t, i;
+
+    (void)ctx;
+    if (ntokens <= 0 || dim <= 0 || !tokens || !w || !out) {
+        return ARK_BUS_E_INVAL;
+    }
+    for (t = 0; t < ntokens; t++) {
+        float  *o  = out + (size_t)t * (size_t)dim;
+        int32_t id = tokens[t];
+        if (id >= vocab_lo && id < vocab_lo + vocab_local) {
+            const float *row = w + (size_t)(id - vocab_lo) * (size_t)dim;
+            for (i = 0; i < dim; i++) {
+                o[i] = row[i] * scale;
+            }
+        } else {
+            for (i = 0; i < dim; i++) {
+                o[i] = 0.0f;
+            }
+        }
+    }
+    return ARK_BUS_OK;
+}
+
 const ark_bus_infer_backend_t *ark_bus_infer_ref_backend(void)
 {
     static const ark_bus_infer_backend_t be = {
         "ref-f32",
         ref_gemm, ref_silu, ref_rmsnorm, ref_add, ref_softmax, ref_argmax,
         ref_attn,
+#if ARK_BUS_INFER_KV_ENABLED
+        (void *)0,   /* attn_cache: the float reference keeps no cache      */
+#endif
+#if ARK_BUS_INFER_QUANT_ENABLED
+        (void *)0,   /* qgemm: see ark_bus_infer_quant_backend_init()      */
+#endif
+        ref_embed,
         (void *)0
     };
     return &be;

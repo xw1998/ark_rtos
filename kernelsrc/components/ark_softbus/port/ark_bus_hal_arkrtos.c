@@ -12,7 +12,8 @@
 static const ark_bus_hal_t g_arkrtos_hal = {
     ark_bus_port_tick_ms,
     ark_bus_port_lock,
-    ark_bus_port_unlock
+    ark_bus_port_unlock,
+    0
 };
 
 void ark_bus_port_arkrtos_install(void)

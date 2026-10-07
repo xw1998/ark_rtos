@@ -51,11 +51,22 @@
 #define ARK_BUS_MSG_DISCOVER        0x10u  /* "who is out there?"        */
 #define ARK_BUS_MSG_DISCOVER_REPLY  0x11u  /* answer to a DISCOVER       */
 #define ARK_BUS_MSG_HEARTBEAT       0x12u  /* liveness beacon            */
+#define ARK_BUS_MSG_LEAVE           0x13u  /* graceful departure (M4)    */
+#define ARK_BUS_MSG_FLOW_BUSY       0x50u  /* "stop sending, I am full" (M4) */
+#define ARK_BUS_MSG_FLOW_READY      0x51u  /* "carry on" (M4)            */
 #define ARK_BUS_MSG_ACK             0x20u  /* QoS1 acknowledgement       */
+#define ARK_BUS_MSG_HANDSHAKE_REQ   0x21u  /* session handshake, initiator (M5 security) */
+#define ARK_BUS_MSG_HANDSHAKE_REP   0x22u  /* session handshake, responder (M5 security) */
 #define ARK_BUS_MSG_RPC_REQ         0x30u  /* request, expects an RPC_REP */
 #define ARK_BUS_MSG_RPC_REP         0x31u  /* reply to an RPC_REQ        */
 #define ARK_BUS_MSG_STREAM          0x40u  /* one chunk of a bulk object */
 #define ARK_BUS_MSG_STREAM_ACK      0x41u  /* cumulative ack of a chunk  */
+#define ARK_BUS_MSG_ROUTE           0x60u  /* a frame forwarded toward a far dst (mesh) */
+#define ARK_BUS_MSG_ROUTE_ADV       0x61u  /* distance-vector route advertisement (mesh) */
+#define ARK_BUS_MSG_RAFT_VOTE_REQ   0x70u  /* Raft: request a vote (candidate -> peers)  */
+#define ARK_BUS_MSG_RAFT_VOTE_REP   0x71u  /* Raft: vote response (peer -> candidate)    */
+#define ARK_BUS_MSG_RAFT_APPEND     0x72u  /* Raft: append entries / heartbeat (leader)  */
+#define ARK_BUS_MSG_RAFT_APPEND_REP 0x73u  /* Raft: append response (follower -> leader) */
 
 /*
  * RPC method ids.  A method id is a u16 carried at the front of the payload;
@@ -67,6 +78,12 @@
 #define ARK_BUS_M_DESCRIBE      0x0002u  /* structured self-description */
 #define ARK_BUS_M_TASK_RUN      0x0010u  /* run a named task            */
 #define ARK_BUS_M_TASK_CANCEL   0x0011u  /* cancel a running task       */
+#define ARK_BUS_M_TOOL_LIST     0x0020u  /* enumerate the node's tools  */
+#define ARK_BUS_M_TOOL_CALL     0x0021u  /* invoke a tool               */
+#define ARK_BUS_M_TOOL_APPROVE  0x0022u  /* release a held tool call    */
+#define ARK_BUS_M_TOOL_AUDIT    0x0023u  /* read the tool audit ring    */
+#define ARK_BUS_M_TOOL_RESULT   0x0024u  /* pull a staged tool result   */
+#define ARK_BUS_M_INFER_FETCH   0x0025u  /* pull a staged inference reply */
 #define ARK_BUS_M_USER_BASE     0x8000u  /* first user-registered id    */
 
 /*
@@ -136,6 +153,7 @@
 #define ARK_BUS_FLAG_QOS1       0x01u  /* sender expects an ACK           */
 #define ARK_BUS_FLAG_RETRY      0x02u  /* this frame is a retransmission  */
 #define ARK_BUS_FLAG_COMPRESSED 0x04u  /* payload is compressed           */
+#define ARK_BUS_FLAG_AUTHENTICATED 0x08u /* payload ends in an auth tag (M5+) */
 
 /* Parsed view of one frame.  `payload` points into the caller's buffer. */
 typedef struct {

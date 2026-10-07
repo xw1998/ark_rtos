@@ -6,10 +6,10 @@
 | 项 | 值 |
 |---|---|
 | 来源 | `D:/工作/git_project/ark_softbus` |
-| 源 commit | `915c4ac1a184c99144866fa29914f307f71005df` |
-| 工作区 | 有未提交改动 |
+| 源 commit | `18c6ccf9213549d9f82c8845c916d13376f38fad` |
+| 工作区 | 干净 |
 | 同步日期 | 2026-10-07 |
-| 文件数 | 32 |
+| 文件数 | 70 |
 
 复制范围：`include/` → `include/`、`src/` → `src/`、
 `ports/arkrtos/` → `port/`。

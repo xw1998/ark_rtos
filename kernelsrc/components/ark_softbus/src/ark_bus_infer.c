@@ -16,6 +16,10 @@
  */
 #include "ark_bus_priv.h"
 #include "ark_bus_infer.h"
+#include "ark_bus_infer_priv.h"
+#if ARK_BUS_INFER_KV_ENABLED
+#include "ark_bus_infer_kv.h"
+#endif
 
 #if ARK_BUS_INFER_ENABLED
 
@@ -33,25 +37,6 @@ void ark_bus_infer_plan_reset(ark_bus_infer_plan_t *plan,
     plan->rsv8   = 0u;
     plan->rsv16  = 0u;
     plan->group  = grp;
-}
-
-static ark_bus_infer_step_t *plan_push(ark_bus_infer_plan_t *plan, uint8_t op)
-{
-    ark_bus_infer_step_t *s;
-
-    if (!plan || plan->nsteps >= (uint8_t)ARK_BUS_INFER_MAX_STEPS) {
-        return (ark_bus_infer_step_t *)0;
-    }
-    s = &plan->steps[plan->nsteps++];
-    s->op    = op;
-    s->rsv8  = 0u;
-    s->rsv16 = 0u;
-    s->a = (const void *)0;
-    s->b = (const void *)0;
-    s->c = (void *)0;
-    s->p0 = s->p1 = s->p2 = s->p3 = 0;
-    s->f0 = 0.0f;
-    return s;
 }
 
 int ark_bus_infer_plan_gemm(ark_bus_infer_plan_t *plan,
@@ -162,6 +147,92 @@ int ark_bus_infer_plan_call(ark_bus_infer_plan_t *plan,
     }
     s->a = (const void *)fn;
     s->b = (const void *)user;
+    return ARK_BUS_OK;
+}
+
+int ark_bus_infer_plan_embed(ark_bus_infer_plan_t *plan,
+                             const int32_t *tokens, int ntokens, int dim,
+                             const float *w, int vocab_lo, int vocab_local,
+                             float scale, float *out)
+{
+    ark_bus_infer_step_t *s;
+
+    if (!plan || !tokens || !w || !out || ntokens <= 0 || dim <= 0 ||
+        vocab_lo < 0 || vocab_local < 0) {
+        return ARK_BUS_E_INVAL;
+    }
+    s = plan_push(plan, ARK_BUS_INFER_OP_EMBED);
+    if (!s) {
+        return ARK_BUS_E_FULL;
+    }
+    s->a  = tokens;
+    s->b  = w;
+    s->c  = out;
+    s->p0 = ntokens;
+    s->p1 = dim;
+    s->p2 = vocab_lo;
+    s->p3 = vocab_local;
+    s->f0 = scale;
+    return ARK_BUS_OK;
+}
+
+int ark_bus_infer_plan_topk1(ark_bus_infer_plan_t *plan,
+                             const float *x, int rows, int dim,
+                             ark_bus_infer_candidate_t *cand)
+{
+    ark_bus_infer_step_t *s;
+
+    if (!plan || !x || !cand || rows <= 0 || dim <= 0) {
+        return ARK_BUS_E_INVAL;
+    }
+    s = plan_push(plan, ARK_BUS_INFER_OP_TOPK1);
+    if (!s) {
+        return ARK_BUS_E_FULL;
+    }
+    s->a  = x;
+    s->c  = cand;
+    s->p0 = dim;
+    s->p1 = rows;
+    return ARK_BUS_OK;
+}
+
+int ark_bus_infer_plan_allgather(ark_bus_infer_plan_t *plan,
+                                 const void *sbuf, void *rbuf, uint32_t blk)
+{
+    ark_bus_infer_step_t *s;
+
+    if (!plan || !sbuf || !rbuf || blk == 0u || blk > 0x7fffffffu) {
+        return ARK_BUS_E_INVAL;
+    }
+    s = plan_push(plan, ARK_BUS_INFER_OP_ALLGATHER);
+    if (!s) {
+        return ARK_BUS_E_FULL;
+    }
+    s->a  = sbuf;
+    s->c  = rbuf;
+    s->p0 = (int32_t)blk;
+    return ARK_BUS_OK;
+}
+
+int ark_bus_infer_plan_argmax_merge(ark_bus_infer_plan_t *plan,
+                                    const ark_bus_infer_candidate_t *cand,
+                                    int nranks, int rows, int vocab_local,
+                                    int *out)
+{
+    ark_bus_infer_step_t *s;
+
+    if (!plan || !cand || !out || nranks <= 0 || rows <= 0 || vocab_local < 0) {
+        return ARK_BUS_E_INVAL;
+    }
+    s = plan_push(plan, ARK_BUS_INFER_OP_ARGMAX_MERGE);
+    if (!s) {
+        return ARK_BUS_E_FULL;
+    }
+    s->a  = cand;
+    s->c  = out;
+    s->p0 = nranks;
+    s->p1 = rows;
+    s->p2 = vocab_local;
     return ARK_BUS_OK;
 }
 
@@ -290,8 +361,10 @@ int ark_bus_infer_plan_attention(ark_bus_infer_plan_t *plan,
     return ARK_BUS_OK;
 }
 
-int ark_bus_infer_plan_decoder_block(ark_bus_infer_plan_t *plan,
-                                     const ark_bus_infer_decoder_t *dc)
+/* Validate a decoder shape and append its twelve steps, without resetting the
+ * plan -- the model builder stacks many of these into one plan. */
+static int append_decoder_block(ark_bus_infer_plan_t *plan,
+                                const ark_bus_infer_decoder_t *dc)
 {
     int   hl, cdim, cqkv, flocal, rc;
     float *qkv, *a;
@@ -325,8 +398,6 @@ int ark_bus_infer_plan_decoder_block(ark_bus_infer_plan_t *plan,
     }
     qkv = dc->attn_scratch;
     a   = dc->attn_scratch + (size_t)dc->tokens * (size_t)cqkv;
-
-    ark_bus_infer_plan_reset(plan, plan->group);
 
     /* attention half: x += attn( rmsnorm(x) ) */
     rc = ark_bus_infer_plan_rmsnorm(plan, dc->x, dc->w_norm1, dc->normed,
@@ -370,6 +441,117 @@ int ark_bus_infer_plan_decoder_block(ark_bus_infer_plan_t *plan,
     return ARK_BUS_OK;
 }
 
+int ark_bus_infer_plan_decoder_block(ark_bus_infer_plan_t *plan,
+                                     const ark_bus_infer_decoder_t *dc)
+{
+    if (!plan || !dc) {
+        return ARK_BUS_E_INVAL;
+    }
+    ark_bus_infer_plan_reset(plan, plan->group);
+    return append_decoder_block(plan, dc);
+}
+
+int ark_bus_infer_plan_model(ark_bus_infer_plan_t *plan,
+                             const ark_bus_infer_model_t *m)
+{
+    ark_bus_infer_decoder_t dc;
+    int i, rc;
+
+    if (!plan || !m) {
+        return ARK_BUS_E_INVAL;
+    }
+    if (m->nranks <= 0 || m->rank < 0 || m->rank >= m->nranks ||
+        m->tokens <= 0 || m->d_model <= 0 || m->d_ff <= 0 ||
+        m->heads <= 0 || m->head_dim <= 0 || m->vocab <= 0 ||
+        m->vocab_local <= 0 || m->nlayers < 0) {
+        return ARK_BUS_E_INVAL;
+    }
+    if ((m->heads % m->nranks) != 0 || (m->d_ff % m->nranks) != 0 ||
+        (m->vocab % m->nranks) != 0 ||
+        m->vocab_local != m->vocab / m->nranks ||
+        (long)m->heads * (long)m->head_dim != (long)m->d_model) {
+        return ARK_BUS_E_INVAL;
+    }
+    if (((long)m->tokens * (long)m->d_model) % m->nranks != 0) {
+        return ARK_BUS_E_INVAL;
+    }
+    if (!m->token_ids || !m->w_embed || !m->w_final_norm || !m->w_vocab ||
+        !m->x || !m->normed || !m->attn_scratch || !m->attn_out ||
+        !m->mlp_scratch || !m->mlp_out || !m->hidden || !m->logits ||
+        !m->cand || !m->tok_out) {
+        return ARK_BUS_E_INVAL;
+    }
+    if (m->nlayers > 0 && !m->layers) {
+        return ARK_BUS_E_INVAL;
+    }
+    for (i = 0; i < m->nlayers; i++) {
+        if (!m->layers[i].w_norm1 || !m->layers[i].w_qkv ||
+            !m->layers[i].w_o || !m->layers[i].w_norm2 ||
+            !m->layers[i].w_up || !m->layers[i].w_dn) {
+            return ARK_BUS_E_INVAL;
+        }
+    }
+
+    ark_bus_infer_plan_reset(plan, plan->group);
+
+    /* x = embed(token_ids) * scale, summed across the vocabulary shards. */
+    rc = ark_bus_infer_plan_embed(plan, m->token_ids, m->tokens, m->d_model,
+                                  m->w_embed, m->rank * m->vocab_local,
+                                  m->vocab_local, m->embed_scale, m->x);
+    if (rc != ARK_BUS_OK) return rc;
+    rc = ark_bus_infer_plan_allreduce_sum_f32(plan, m->x,
+                                              m->tokens * m->d_model);
+    if (rc != ARK_BUS_OK) return rc;
+
+    /* The stacked blocks, each twelve steps with two all-reduces. */
+    for (i = 0; i < m->nlayers; i++) {
+        dc.tokens       = m->tokens;
+        dc.d_model      = m->d_model;
+        dc.d_ff         = m->d_ff;
+        dc.heads        = m->heads;
+        dc.head_dim     = m->head_dim;
+        dc.nranks       = m->nranks;
+        dc.rank         = m->rank;
+        dc.causal       = m->causal;
+        dc.eps          = m->eps;
+        dc.x            = m->x;
+        dc.w_norm1      = m->layers[i].w_norm1;
+        dc.w_qkv        = m->layers[i].w_qkv;
+        dc.w_o          = m->layers[i].w_o;
+        dc.w_norm2      = m->layers[i].w_norm2;
+        dc.w_up         = m->layers[i].w_up;
+        dc.w_dn         = m->layers[i].w_dn;
+        dc.normed       = m->normed;
+        dc.attn_scratch = m->attn_scratch;
+        dc.attn_out     = m->attn_out;
+        dc.mlp_scratch  = m->mlp_scratch;
+        dc.mlp_out      = m->mlp_out;
+        rc = append_decoder_block(plan, &dc);
+        if (rc != ARK_BUS_OK) return rc;
+    }
+
+    /* Final norm, the vocab-parallel projection, and the global argmax. */
+    rc = ark_bus_infer_plan_rmsnorm(plan, m->x, m->w_final_norm, m->hidden,
+                                    m->tokens, m->d_model, m->eps);
+    if (rc != ARK_BUS_OK) return rc;
+    rc = ark_bus_infer_plan_gemm(plan, m->hidden, m->w_vocab, m->logits,
+                                 m->tokens, m->vocab_local, m->d_model);
+    if (rc != ARK_BUS_OK) return rc;
+    rc = ark_bus_infer_plan_topk1(plan, m->logits, m->tokens, m->vocab_local,
+                                  m->cand + (size_t)m->rank * (size_t)m->tokens);
+    if (rc != ARK_BUS_OK) return rc;
+    rc = ark_bus_infer_plan_allgather(plan,
+                                      m->cand + (size_t)m->rank * (size_t)m->tokens,
+                                      m->cand,
+                                      (uint32_t)((size_t)m->tokens * sizeof(ark_bus_infer_candidate_t)));
+    if (rc != ARK_BUS_OK) return rc;
+    rc = ark_bus_infer_plan_argmax_merge(plan, m->cand, m->nranks, m->tokens,
+                                         m->vocab_local, m->tok_out);
+    if (rc != ARK_BUS_OK) return rc;
+
+    return ARK_BUS_OK;
+}
+
 /* ------------------------------------------------------------------ */
 /* Execution                                                           */
 /* ------------------------------------------------------------------ */
@@ -407,10 +589,70 @@ static int infer_run_step(ark_bus_t *bus, const ark_bus_infer_backend_t *be,
         if (!be->attn) return ARK_BUS_E_NOSYS;
         return be->attn(be->ctx, (const float *)s->a, (float *)s->c,
                         s->p0, s->p1, s->p2, s->p3);
+#if ARK_BUS_INFER_KV_ENABLED
+    case ARK_BUS_INFER_OP_ATTN_CACHE: {
+        const ark_bus_infer_kv_step_t *kv =
+            (const ark_bus_infer_kv_step_t *)s->a;
+        if (!be->attn_cache) return ARK_BUS_E_NOSYS;
+        if (!kv) return ARK_BUS_E_INVAL;
+        return be->attn_cache(be->ctx, kv->qkv, kv->k_cache, kv->v_cache,
+                              kv->len, kv->max_len, kv->out,
+                              kv->nnew, kv->heads, kv->head_dim, kv->causal);
+    }
+#endif
+#if ARK_BUS_INFER_QUANT_ENABLED
+    case ARK_BUS_INFER_OP_QGEMM:
+        if (!be->qgemm) return ARK_BUS_E_NOSYS;
+        return be->qgemm(be->ctx, s->p0, s->p1, s->p2,
+                         (const float *)s->a,
+                         (const ark_bus_infer_q8_t *)s->b, (float *)s->c);
+#endif
     case ARK_BUS_INFER_OP_CALL: {
         ark_bus_infer_call_fn fn = (ark_bus_infer_call_fn)s->a;
         if (!fn) return ARK_BUS_E_INVAL;
         return fn(bus, (void *)s->b);
+    }
+    case ARK_BUS_INFER_OP_EMBED:
+        if (!be->embed) return ARK_BUS_E_NOSYS;
+        return be->embed(be->ctx, (const int32_t *)s->a, s->p0, s->p1,
+                         (const float *)s->b, s->p2, s->p3, s->f0,
+                         (float *)s->c);
+    case ARK_BUS_INFER_OP_TOPK1: {
+        const float *x = (const float *)s->a;
+        ark_bus_infer_candidate_t *cand = (ark_bus_infer_candidate_t *)s->c;
+        int rows = s->p1;
+        int dim  = s->p0;
+        int t;
+        if (!be->argmax) return ARK_BUS_E_NOSYS;
+        for (t = 0; t < rows; t++) {
+            const float *row = x + (size_t)t * (size_t)dim;
+            int idx = be->argmax(be->ctx, row, dim);
+            if (idx < 0) return idx;
+            cand[t].index = idx;
+            cand[t].value = row[idx];
+        }
+        return ARK_BUS_OK;
+    }
+    case ARK_BUS_INFER_OP_ARGMAX_MERGE: {
+        const ark_bus_infer_candidate_t *cand =
+            (const ark_bus_infer_candidate_t *)s->a;
+        int *out = (int *)s->c;
+        int nranks = s->p0;
+        int rows    = s->p1;
+        int vloc    = s->p2;
+        int t, r;
+        for (t = 0; t < rows; t++) {
+            int best = 0;
+            for (r = 1; r < nranks; r++) {
+                if (cand[(size_t)r * (size_t)rows + (size_t)t].value >
+                    cand[(size_t)best * (size_t)rows + (size_t)t].value) {
+                    best = r;
+                }
+            }
+            out[t] = cand[(size_t)best * (size_t)rows + (size_t)t].index +
+                     best * vloc;
+        }
+        return ARK_BUS_OK;
     }
     default:
         return ARK_BUS_E_INVAL;
@@ -426,7 +668,9 @@ static void infer_finish(ark_bus_t *bus, int status)
     st->active  = 0u;
     st->waiting = 0u;
     st->resume  = 0u;
-    st->plan    = (const ark_bus_infer_plan_t *)0;
+    st->steps   = (const ark_bus_infer_step_t *)0;
+    st->nsteps  = 0u;
+    st->group   = (const ark_bus_coll_group_t *)0;
     st->cb      = (ark_bus_infer_done_cb_t)0;
     st->user    = (void *)0;
     st->status  = status;
@@ -456,27 +700,37 @@ static void infer_coll_done(int status, uint8_t op, void *user)
 static void infer_advance(ark_bus_t *bus)
 {
     ark_bus_infer_state_t *st = &bus->infer;
-    const ark_bus_infer_plan_t *plan = st->plan;
+    const ark_bus_infer_step_t *steps = st->steps;
 
-    if (!plan) {
+    if (!steps) {
         return;
     }
-    while (st->cursor < plan->nsteps) {
-        const ark_bus_infer_step_t *s = &plan->steps[st->cursor];
+    while (st->cursor < st->nsteps) {
+        const ark_bus_infer_step_t *s = &steps[st->cursor];
         int rc;
 
-        if (s->op == ARK_BUS_INFER_OP_ALLREDUCE_SUM_F32) {
+        if (s->op == ARK_BUS_INFER_OP_ALLREDUCE_SUM_F32 ||
+            s->op == ARK_BUS_INFER_OP_ALLGATHER) {
             if (st->waiting) {
                 return;                     /* still in flight */
             }
-            if (!plan->group) {
+            if (!st->group) {
                 infer_finish(bus, ARK_BUS_E_INVAL);
                 return;
             }
-            rc = ark_bus_coll_allreduce(bus, plan->group, ARK_BUS_COLL_SUM_F32,
-                                        (uint8_t)sizeof(float), s->c, s->c,
-                                        (uint32_t)s->p0 * (uint32_t)sizeof(float),
-                                        infer_coll_done, bus);
+            if (s->op == ARK_BUS_INFER_OP_ALLREDUCE_SUM_F32) {
+                rc = ark_bus_coll_allreduce(bus, st->group,
+                                            ARK_BUS_COLL_SUM_F32,
+                                            (uint8_t)sizeof(float), s->c, s->c,
+                                            (uint32_t)s->p0 *
+                                                (uint32_t)sizeof(float),
+                                            infer_coll_done, bus);
+            } else {
+                /* All-gather: each rank contributes its p0-byte block, every
+                 * rank keeps the concatenation (block r at r*p0). */
+                rc = ark_bus_coll_allgather(bus, st->group, (uint32_t)s->p0,
+                                            s->a, s->c, infer_coll_done, bus);
+            }
             if (rc != ARK_BUS_OK) {
                 infer_finish(bus, rc);
                 return;
@@ -497,13 +751,14 @@ static void infer_advance(ark_bus_t *bus)
 
 /* Pre-flight: a backend that lacks a needed kernel, or a collective step with
  * no group, fails the call rather than a job that only dies mid-flight. */
-static int infer_validate(const ark_bus_infer_plan_t *plan,
+static int infer_validate(const ark_bus_infer_step_t *steps, uint8_t nsteps,
+                          const ark_bus_coll_group_t *group,
                           const ark_bus_infer_backend_t *be)
 {
     uint8_t i;
 
-    for (i = 0; i < plan->nsteps; i++) {
-        const ark_bus_infer_step_t *s = &plan->steps[i];
+    for (i = 0; i < nsteps; i++) {
+        const ark_bus_infer_step_t *s = &steps[i];
         switch (s->op) {
         case ARK_BUS_INFER_OP_GEMM:    if (!be->gemm)    return ARK_BUS_E_NOSYS; break;
         case ARK_BUS_INFER_OP_SILU:    if (!be->silu)    return ARK_BUS_E_NOSYS; break;
@@ -512,8 +767,25 @@ static int infer_validate(const ark_bus_infer_plan_t *plan,
         case ARK_BUS_INFER_OP_SOFTMAX: if (!be->softmax) return ARK_BUS_E_NOSYS; break;
         case ARK_BUS_INFER_OP_ARGMAX:  if (!be->argmax)  return ARK_BUS_E_NOSYS; break;
         case ARK_BUS_INFER_OP_ATTN:    if (!be->attn)    return ARK_BUS_E_NOSYS; break;
+#if ARK_BUS_INFER_KV_ENABLED
+        case ARK_BUS_INFER_OP_ATTN_CACHE:
+            if (!be->attn_cache) return ARK_BUS_E_NOSYS;
+            if (!s->a) return ARK_BUS_E_INVAL;
+            break;
+#endif
+#if ARK_BUS_INFER_QUANT_ENABLED
+        case ARK_BUS_INFER_OP_QGEMM:
+            if (!be->qgemm) return ARK_BUS_E_NOSYS;
+            if (!s->a || !s->b) return ARK_BUS_E_INVAL;
+            break;
+#endif
+        case ARK_BUS_INFER_OP_EMBED:   if (!be->embed)   return ARK_BUS_E_NOSYS; break;
+        case ARK_BUS_INFER_OP_TOPK1:   if (!be->argmax)  return ARK_BUS_E_NOSYS; break;
+        case ARK_BUS_INFER_OP_ARGMAX_MERGE:
+            break;
         case ARK_BUS_INFER_OP_ALLREDUCE_SUM_F32:
-            if (!plan->group) {
+        case ARK_BUS_INFER_OP_ALLGATHER:
+            if (!group) {
                 return ARK_BUS_E_INVAL;
             }
             break;
@@ -531,16 +803,28 @@ int ark_bus_infer_run(ark_bus_t *bus, const ark_bus_infer_backend_t *be,
                       const ark_bus_infer_plan_t *plan,
                       ark_bus_infer_done_cb_t cb, void *user)
 {
+    if (!plan) {
+        return ARK_BUS_E_INVAL;
+    }
+    return ark_bus_infer_run_steps(bus, be, plan->steps, plan->nsteps,
+                                   plan->group, cb, user);
+}
+
+int ark_bus_infer_run_steps(ark_bus_t *bus, const ark_bus_infer_backend_t *be,
+                            const ark_bus_infer_step_t *steps, uint8_t nsteps,
+                            const ark_bus_coll_group_t *group,
+                            ark_bus_infer_done_cb_t cb, void *user)
+{
     ark_bus_infer_state_t *st;
     int rc;
 
-    if (!bus || !be || !plan) {
+    if (!bus || !be || !steps) {
         return ARK_BUS_E_INVAL;
     }
-    if (plan->nsteps == 0u) {
+    if (nsteps == 0u) {
         return ARK_BUS_E_INVAL;
     }
-    rc = infer_validate(plan, be);
+    rc = infer_validate(steps, nsteps, group, be);
     if (rc != ARK_BUS_OK) {
         return rc;
     }
@@ -548,7 +832,9 @@ int ark_bus_infer_run(ark_bus_t *bus, const ark_bus_infer_backend_t *be,
     if (st->active) {
         return ARK_BUS_E_BUSY;
     }
-    st->plan    = plan;
+    st->steps   = steps;
+    st->nsteps  = nsteps;
+    st->group   = group;
     st->be      = be;
     st->cb      = cb;
     st->user    = user;
@@ -634,7 +920,9 @@ void ark_bus_infer_init(ark_bus_t *bus)
         return;
     }
     st = &bus->infer;
-    st->plan    = (const ark_bus_infer_plan_t *)0;
+    st->steps   = (const ark_bus_infer_step_t *)0;
+    st->nsteps  = 0u;
+    st->group   = (const ark_bus_coll_group_t *)0;
     st->be      = (const ark_bus_infer_backend_t *)0;
     st->cb      = (ark_bus_infer_done_cb_t)0;
     st->user    = (void *)0;
