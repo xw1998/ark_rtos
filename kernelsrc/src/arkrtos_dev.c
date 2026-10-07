@@ -7,6 +7,10 @@
 */
 
 #include "arkrtos_dev.h"
+#if ARKRTOS_HW_SAFE
+#include "arkrtos_task.h"      /* arkrtos_current_task_id: ownership ledger key */
+#include "arkrtos_hwsafe.h"    /* App-crash hardware safe-state (will) mechanism */
+#endif
 
 static arkrtos_dev_desc_t arkrtos_dev_list[ARKRTOS_DEV_MAX_NUM];
 static arkrtos_dev_hdr_t *arkrtos_dev_handles[ARKRTOS_DEV_MAX_NUM];
@@ -25,6 +29,9 @@ void arkrtos_dev_module_init(void)
         arkrtos_dev_refs[i]    = 0;
     }
     arkrtos_dev_count = 0;
+#if ARKRTOS_HW_SAFE
+    arkrtos_hwsafe_reset();
+#endif
 }
 
 int32 arkrtos_dev_register(const char *name, arkrtos_dev_drv_t *drv, uint32 dev_num)
@@ -121,6 +128,11 @@ int32 arkrtos_dev_unregister(const char *name)
             {
                 arkrtos_dev_count--;
             }
+#if ARKRTOS_HW_SAFE
+            /* Drop the safe-state callback as well: keeping it would leave a
+             * pointer into an image that is about to be replaced. */
+            (void)arkrtos_hwsafe_unregister(name);
+#endif
             return 0;
         }
     }
@@ -194,6 +206,11 @@ int32 arkrtos_dev_open_internal(char *name, uint32 param)
             {
                 arkrtos_dev_refs[i]++;
             }
+#if ARKRTOS_HW_SAFE
+            arkrtos_hwsafe_claim(arkrtos_dev_list[i].dev_name,
+                                 arkrtos_current_task_id,
+                                 arkrtos_dev_handles[i]);
+#endif
             return (i | ARKRTOS_DEV_HANDLE_FLAG);
         }
 
@@ -204,6 +221,10 @@ int32 arkrtos_dev_open_internal(char *name, uint32 param)
             {
                 arkrtos_dev_handles[i] = p;
                 arkrtos_dev_refs[i]    = 1;
+#if ARKRTOS_HW_SAFE
+                arkrtos_hwsafe_claim(arkrtos_dev_list[i].dev_name,
+                                     arkrtos_current_task_id, p);
+#endif
                 return (i | ARKRTOS_DEV_HANDLE_FLAG);
             }
         }
@@ -220,6 +241,12 @@ int32 arkrtos_dev_close_internal(int32 handle)
     /* 句柄是槽位下标：合法范围是整个设备表，而不是当前在用数量 */
     if(idx < 0 || idx >= ARKRTOS_DEV_MAX_NUM)
         return -1;
+
+#if ARKRTOS_HW_SAFE
+    /* Owner closing normally: withdraw its claim before the refcount logic -
+     * the ledger is per owner, independent of how many share the instance. */
+    arkrtos_hwsafe_release(arkrtos_dev_list[idx].dev_name, arkrtos_current_task_id);
+#endif
 
     /* One instance can have several openers: only the last close may
      * touch the hardware. Otherwise an App closing the console it shares
@@ -298,3 +325,31 @@ int32 arkrtos_dev_ctrl_internal(int32 handle, uint32 code, uint32 value)
     }
     return -1;
 }
+
+#if ARKRTOS_HW_SAFE
+/* Same as arkrtos_dev_ctrl_internal(), but keyed on the instance pointer
+ * instead of a handle. The App-crash "will" path has no handle to give (it
+ * belonged to the dead task) but does have the instance from the ledger. */
+int32 arkrtos_dev_ctrl_obj(arkrtos_dev_hdr_t *obj, uint32 code, uint32 value)
+{
+    int32 i;
+
+    if(obj == 0)
+    {
+        return -1;
+    }
+    for(i = 0; i < ARKRTOS_DEV_MAX_NUM; i++)
+    {
+        if(arkrtos_dev_handles[i] == obj)
+        {
+            if((arkrtos_dev_list[i].drv != 0) &&
+               (arkrtos_dev_list[i].drv->drv_ctrl != 0))
+            {
+                return arkrtos_dev_list[i].drv->drv_ctrl(obj, code, value);
+            }
+            return -1;                  /* device has no ctrl: say so, do not fake */
+        }
+    }
+    return -1;                          /* instance not in the table any more */
+}
+#endif

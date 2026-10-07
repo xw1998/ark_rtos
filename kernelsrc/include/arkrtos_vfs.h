@@ -298,6 +298,24 @@ int32 arkrtos_vfs_app_stat(const char *path, uint32 *size, uint32 *mode);
 int32 arkrtos_vfs_app_unlink(const char *path);
 
 /**
+* @brief 在命名空间里建一个目录（只一层，父目录必须已存在）
+* @return 0=成功；负值为 ark_vfs 错误码
+*/
+int32 arkrtos_vfs_app_mkdir(const char *path);
+
+/**
+* @brief 删除一个空目录（非空时报 ARK_E_NOTEMPTY）
+* @note  不能删文件：那是 arkrtos_vfs_app_unlink 的事。
+*/
+int32 arkrtos_vfs_app_rmdir(const char *path);
+
+/**
+* @brief 重命名/移动（同一挂载点内）
+* @return 跨挂载点的重命名会被拒绝（ARK_E_NOSYS），不会悄悄做成一次拷贝
+*/
+int32 arkrtos_vfs_app_rename(const char *old_path, const char *new_path);
+
+/**
 * @brief 关掉 task_id 名下全部句柄。任务退出/崩溃路径调用。
 * @note  必须在任务还被标记为有效时调用（表里靠任务号比对），且对没有
 *        句柄的任务是无副作用的空操作。

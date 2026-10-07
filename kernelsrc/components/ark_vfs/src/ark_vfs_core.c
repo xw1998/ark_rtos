@@ -1045,6 +1045,62 @@ int32_t ark_vfs_unlink(const char *path)
     return r;
 }
 
+int32_t ark_vfs_rmdir(const char *path)
+{
+    char rel[ARK_VFS_PATH_MAX];
+    struct ark_vfs_mnt *mnt = NULL;
+    struct ark_vfs_stat st;
+    int32_t r;
+    void *token;
+
+    token = ark_p_enter();
+    r = ark_vfs_resolve(path, &mnt, rel);
+    if (r != ARK_VFS_OK)
+    {
+        ark_p_exit(token);
+        return r;
+    }
+    if ((mnt->flags & ARK_MNT_RO) != 0u)
+    {
+        ark_p_exit(token);
+        return ARK_E_ROFS;
+    }
+    if (rel[0] == '\0')
+    {
+        ark_p_exit(token);
+        return ARK_E_INVAL;     /* cannot remove a mount point this way */
+    }
+    if (mnt->fs->stat == NULL)
+    {
+        ark_p_exit(token);
+        return ARK_E_NOSYS;
+    }
+    /* POSIX rmdir removes a directory and nothing else.  The filesystem
+     * unlink already refuses a non-empty directory, but it would happily
+     * take a plain file; removing a file here would be exactly the
+     * plausible-but-wrong answer this tree is meant to avoid.  So ask what
+     * the entry is first. */
+    r = mnt->fs->stat(mnt, rel, &st);
+    if (r != ARK_VFS_OK)
+    {
+        ark_p_exit(token);
+        return r;
+    }
+    if ((st.mode & (uint32_t)ARK_S_IFMT) != (uint32_t)ARK_S_IFDIR)
+    {
+        ark_p_exit(token);
+        return ARK_E_NOTDIR;
+    }
+    if (mnt->fs->unlink == NULL)
+    {
+        ark_p_exit(token);
+        return ARK_E_NOSYS;
+    }
+    r = mnt->fs->unlink(mnt, rel);
+    ark_p_exit(token);
+    return r;
+}
+
 int32_t ark_vfs_rename(const char *old_path, const char *new_path)
 {
     char old_rel[ARK_VFS_PATH_MAX];

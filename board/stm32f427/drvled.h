@@ -23,4 +23,10 @@ typedef struct {
 
 extern arkrtos_dev_drv_t led_drv;
 
+#if ARKRTOS_HW_SAFE
+/* Hardware-safe ("will") callback: force this LED back off. Registered per
+ * device name in arkrtos_board.c; see arkrtos_hwsafe.h for the contract. */
+int32 led_drv_safe(arkrtos_dev_hdr_t *p, uint32 owner);
+#endif
+
 #endif

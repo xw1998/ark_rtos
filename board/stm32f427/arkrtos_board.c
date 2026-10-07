@@ -23,6 +23,9 @@
 #include "arkrtos_log.h"
 #include "arkrtos_fault.h"
 #include "arkrtos_trace.h"
+#if ARKRTOS_HW_SAFE
+#include "arkrtos_hwsafe.h"
+#endif
 
 /* ============================================================
  * 板级初始化 - 实现 port 层板级接口
@@ -90,6 +93,14 @@ void arkrtos_dev_board_init(void)
     arkrtos_dev_register("led1", &led_drv, LED_ID_GREEN);
     arkrtos_dev_register("led2", &led_drv, LED_ID_BLUE);
     arkrtos_dev_register("ttyS0", &usart_drv, 0);
+
+#if ARKRTOS_HW_SAFE
+    /* Declare the safe state of each LED-backed device: when an owner dies,
+     * force it off. Same callback for all three - they share led_drv. */
+    (void)arkrtos_hwsafe_register("led0", led_drv_safe);
+    (void)arkrtos_hwsafe_register("led1", led_drv_safe);
+    (void)arkrtos_hwsafe_register("led2", led_drv_safe);
+#endif
 
     /* Block devices are registered here, but not brought up: the descriptors
      * are static and arkrtos_blk_init() runs on first use. main() has HAL and

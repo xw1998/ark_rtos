@@ -831,6 +831,12 @@ SVC 0x14 的子功能编码：
 | 1 | 注册驱动 | p[1]=name, p[2]=drv指针, p[3]=dev_num |
 | 2 | 注销驱动 | p[1]=name |
 | 3 | 获取设备数 | 无 |
+| 4 | 登记设备安全态回调 | p[1]=name, p[2]=fn指针（须落在调用者自己的镜像窗口） |
+| 5 | 查询是否已登记回调 | p[1]=name -> 1/0 |
+| 6 | 注销设备安全态回调 | p[1]=name |
+
+> 子功能 4~6 只在 `ARKRTOS_HW_SAFE=1` 时可用。App 侧的"遗言"走 SVC 0x10 的子功能 6
+> （`arkrtos_dev_set_will`），见 [App崩溃硬件安全与遗言机制](../../../docs/App崩溃硬件安全与遗言机制.md)。
 
 **依赖链：**
 
@@ -865,6 +871,8 @@ arkrtos_drv_start.s      →  无依赖
 | `arkrtos_event_create(name)` | 创建事件 |
 | `arkrtos_event_wait(handle, timeout)` | 等待事件 |
 | `arkrtos_event_set(handle)` | 触发事件 |
+| `arkrtos_drv_hwsafe_register(name, fn)` | 登记设备安全态回调（崩溃时把设备带回安全态） |
+| `arkrtos_drv_hwsafe_unregister(name)` | 注销设备安全态回调 |
 
 **优势：**
 - 完全独立编译，不依赖内核源码

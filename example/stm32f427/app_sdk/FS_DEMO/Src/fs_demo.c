@@ -43,6 +43,9 @@
 #include <dirent.h>
 
 #define FILE_PATH   "/fsdemo.txt"
+#define DIR_PATH    "/fsdemo_dir"
+#define REN_SRC     "/fsdemo_a"
+#define REN_DST     "/fsdemo_b"
 #define DEV_DIR     "/dev"
 #define DEV_PATH    "/dev/ttyS0"    /* the console UART as this board registers it */
 #define BAD_PATH    "/no/such/file"
@@ -295,6 +298,56 @@ static void t_errors(void)
 }
 
 /**
+* @brief mkdir / rmdir / rename, the second half of the POSIX file set.
+* @details rmdir must take a directory and nothing else, rename must move a
+*          name inside one mount, and neither may answer "ok" for something
+*          it did not do: rmdir on a file is ENOTDIR, and the old name is
+*          gone after rename rather than shadowed.
+*/
+static void t_mkdir_rmdir_rename(void)
+{
+    struct stat st;
+    int         fd;
+
+    /* A directory, and stat has to call it one. */
+    check("mkdir", mkdir(DIR_PATH, 0755) == 0, -1);
+    errno = 0;
+    check("stat dir -> S_ISDIR",
+          (stat(DIR_PATH, &st) == 0) && S_ISDIR(st.st_mode), -1);
+
+    /* The second mkdir is EEXIST, not a silent success. */
+    errno = 0;
+    check("mkdir again -> EEXIST",
+          (mkdir(DIR_PATH, 0755) == -1) && (errno == EEXIST), errno);
+
+    /* rmdir is not unlink: a plain file comes back ENOTDIR. */
+    fd = open(REN_SRC, O_CREAT | O_WRONLY | O_TRUNC);
+    check("create rename source", fd >= 0, fd);
+    if(fd >= 0)
+    {
+        (void)write(fd, "x", 1u);
+        (void)close(fd);
+    }
+    errno = 0;
+    check("rmdir on a file -> ENOTDIR",
+          (rmdir(REN_SRC) == -1) && (errno == ENOTDIR), errno);
+
+    /* rename moves the name; the old one is gone, the new one is there. */
+    check("rename", rename(REN_SRC, REN_DST) == 0, -1);
+    errno = 0;
+    check("old name gone -> ENOENT",
+          (stat(REN_SRC, &st) == -1) && (errno == ENOENT), errno);
+    check("new name present", stat(REN_DST, &st) == 0, -1);
+    check("unlink renamed", unlink(REN_DST) == 0, -1);
+
+    /* An empty directory goes away; the path is then ENOENT. */
+    check("rmdir empty dir", rmdir(DIR_PATH) == 0, -1);
+    errno = 0;
+    check("dir gone -> ENOENT",
+          (stat(DIR_PATH, &st) == -1) && (errno == ENOENT), errno);
+}
+
+/**
 * @brief Remove the file and confirm it is gone.
 */
 static void t_unlink(void)
@@ -318,6 +371,7 @@ int main(void)
     t_readdir();
     t_device();
     t_errors();
+    t_mkdir_rmdir_rename();
     t_unlink();
 
     printf("fs_demo: pass=%u fail=%u\n", g_pass, g_fail);

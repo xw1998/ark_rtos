@@ -39,6 +39,24 @@ int32 arkrtos_drv_get_count(void)
     return arkrtos_call_drv_mgr(p);
 }
 
+int32 arkrtos_drv_hwsafe_register(const char *dev_name, arkrtos_hwsafe_fn fn)
+{
+    uint32 p[4];
+    p[0] = 4;
+    p[1] = (uint32)dev_name;
+    p[2] = (uint32)fn;
+    p[3] = 0;
+    return arkrtos_call_drv_mgr(p);
+}
+
+int32 arkrtos_drv_hwsafe_unregister(const char *dev_name)
+{
+    uint32 p[4];
+    p[0] = 6;
+    p[1] = (uint32)dev_name;
+    return arkrtos_call_drv_mgr(p);
+}
+
 #else
 
 int32 arkrtos_drv_register(const char *name, arkrtos_dev_drv_t *drv, uint32 dev_num)

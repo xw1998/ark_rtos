@@ -177,6 +177,24 @@ int32 arkrtos_vfs_app_unlink(const char *path)
     return ARKRTOS_VFS_ENOSYS;
 }
 
+int32 arkrtos_vfs_app_mkdir(const char *path)
+{
+    (void)path;
+    return ARKRTOS_VFS_ENOSYS;
+}
+
+int32 arkrtos_vfs_app_rmdir(const char *path)
+{
+    (void)path;
+    return ARKRTOS_VFS_ENOSYS;
+}
+
+int32 arkrtos_vfs_app_rename(const char *old_path, const char *new_path)
+{
+    (void)old_path; (void)new_path;
+    return ARKRTOS_VFS_ENOSYS;
+}
+
 void arkrtos_vfs_app_task_exit(uint32 task_id)
 {
     (void)task_id;
@@ -928,6 +946,34 @@ int32 arkrtos_vfs_app_unlink(const char *path)
         return ARK_E_INVAL;
     }
     return ark_vfs_unlink(path);
+}
+
+int32 arkrtos_vfs_app_mkdir(const char *path)
+{
+    if ((g_vfs_ready == 0u) || (path == NULL) || (path[0] == '\0'))
+    {
+        return ARK_E_INVAL;
+    }
+    return ark_vfs_mkdir(path);
+}
+
+int32 arkrtos_vfs_app_rmdir(const char *path)
+{
+    if ((g_vfs_ready == 0u) || (path == NULL) || (path[0] == '\0'))
+    {
+        return ARK_E_INVAL;
+    }
+    return ark_vfs_rmdir(path);
+}
+
+int32 arkrtos_vfs_app_rename(const char *old_path, const char *new_path)
+{
+    if ((g_vfs_ready == 0u) || (old_path == NULL) || (new_path == NULL) ||
+        (old_path[0] == '\0') || (new_path[0] == '\0'))
+    {
+        return ARK_E_INVAL;
+    }
+    return ark_vfs_rename(old_path, new_path);
 }
 
 void arkrtos_vfs_app_task_exit(uint32 task_id)

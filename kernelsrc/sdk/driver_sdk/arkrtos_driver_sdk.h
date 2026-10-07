@@ -51,6 +51,22 @@ int32 arkrtos_drv_register(const char *name, arkrtos_dev_drv_t *drv, uint32 dev_
 int32 arkrtos_drv_unregister(const char *name);
 int32 arkrtos_drv_get_count(void);
 
+/**
+* @brief Hardware safe-state ("will") callback a driver declares for a device
+* @param obj   the device instance that was opened (driver private struct; hdr first)
+* @param owner the (already dead) task that owned it; for logging only
+* @return 0 = brought to its safe state; non-zero = the driver reports failure
+*
+* @warning Runs from the task-exit / fault-recovery path, possibly with
+*          interrupts masked. Must be non-blocking (bounded register / GPIO
+*          writes only - no wait, no delay, no SVC, no filesystem or Flash)
+*          and idempotent. See docs/App崩溃硬件安全与遗言机制.md.
+*/
+typedef int32 (*arkrtos_hwsafe_fn)(void *obj, uint32 owner);
+
+int32 arkrtos_drv_hwsafe_register(const char *dev_name, arkrtos_hwsafe_fn fn);
+int32 arkrtos_drv_hwsafe_unregister(const char *dev_name);
+
 #ifdef ARKRTOS_DRV_USER_MODE
 
 #define ARKRTOS_SVC_DRV_MGR           (0x14)
@@ -84,6 +100,18 @@ void   arkrtos_event_set(int32 handle);
 extern int32 arkrtos_dev_register(const char *name, arkrtos_dev_drv_t *drv, uint32 dev_num);
 extern int32 arkrtos_dev_unregister(const char *name);
 extern int32 arkrtos_dev_get_count(void);
+extern int32 arkrtos_hwsafe_register(const char *dev_name, arkrtos_hwsafe_fn fn);
+extern int32 arkrtos_hwsafe_unregister(const char *dev_name);
+
+int32 arkrtos_drv_hwsafe_register(const char *dev_name, arkrtos_hwsafe_fn fn)
+{
+    return arkrtos_hwsafe_register(dev_name, fn);
+}
+
+int32 arkrtos_drv_hwsafe_unregister(const char *dev_name)
+{
+    return arkrtos_hwsafe_unregister(dev_name);
+}
 
 #endif
 

@@ -62,6 +62,16 @@ int32 arkrtos_dev_close(int32 handle)
     return arkrtos_call_dev_io(parameters);
 }
 
+int32 arkrtos_dev_set_will(const char *dev_name, int32 cmd, int32 val)
+{
+    uint32 parameters[4];
+    parameters[0] = 6;                 /* DEV_IO sub 6: declare this task's will */
+    parameters[1] = (uint32)dev_name;
+    parameters[2] = (uint32)cmd;
+    parameters[3] = (uint32)val;
+    return arkrtos_call_dev_io(parameters);
+}
+
 void arkrtos_task_wait(uint32 ms)
 {
     arkrtos_call_task_ctrl(1, ms);
@@ -896,5 +906,33 @@ int32 arkrtos_path_unlink(const char *path)
 
     parameters[0] = 18;
     parameters[1] = (uint32)path;
+    return arkrtos_call_file_svc(parameters);
+}
+
+int32 arkrtos_path_mkdir(const char *path)
+{
+    uint32 parameters[2];
+
+    parameters[0] = 19;
+    parameters[1] = (uint32)path;
+    return arkrtos_call_file_svc(parameters);
+}
+
+int32 arkrtos_path_rmdir(const char *path)
+{
+    uint32 parameters[2];
+
+    parameters[0] = 20;
+    parameters[1] = (uint32)path;
+    return arkrtos_call_file_svc(parameters);
+}
+
+int32 arkrtos_path_rename(const char *old_path, const char *new_path)
+{
+    uint32 parameters[3];
+
+    parameters[0] = 21;
+    parameters[1] = (uint32)old_path;
+    parameters[2] = (uint32)new_path;
     return arkrtos_call_file_svc(parameters);
 }

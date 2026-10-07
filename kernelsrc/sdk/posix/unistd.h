@@ -30,8 +30,12 @@ int           arkrtos_posix_close(int fd);
 /** Move the offset of an open path. Returns the new absolute offset, or -1
  *  with errno set; ESPIPE when the descriptor is a device (no offset). */
 arkrtos_off_t   arkrtos_posix_lseek(int fd, arkrtos_off_t off, int whence);
-/** Remove a file by path (directories need rmdir, which is not provided). */
+/** Remove a file by path. A directory needs rmdir, never unlink. */
 int           arkrtos_posix_unlink(const char *path);
+/** Remove an empty directory. A file is refused, not silently taken. */
+int           arkrtos_posix_rmdir(const char *path);
+/** Rename or move a path inside one mount. Returns 0, or -1 with errno set. */
+int           arkrtos_posix_rename(const char *old_path, const char *new_path);
 
 /** Suspend the calling thread for whole seconds (scheduler based). */
 uint32 arkrtos_posix_sleep(uint32 seconds);
@@ -50,6 +54,8 @@ int    arkrtos_posix_clock_gettime(arkrtos_clockid_t clk, struct timespec *ts);
 #define close(fd)               arkrtos_posix_close(fd)
 #define lseek(fd, off, whence)  arkrtos_posix_lseek((fd), (off), (whence))
 #define unlink(path)            arkrtos_posix_unlink(path)
+#define rmdir(path)             arkrtos_posix_rmdir(path)
+#define rename(oldp, newp)      arkrtos_posix_rename((oldp), (newp))
 #define sleep(s)                arkrtos_posix_sleep(s)
 #define usleep(us)              arkrtos_posix_usleep(us)
 #define nanosleep(req, rem)     arkrtos_posix_nanosleep((req), (rem))

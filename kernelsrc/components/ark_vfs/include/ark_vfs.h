@@ -342,6 +342,11 @@ int32_t ark_vfs_chmod(const char *path, uint32_t mode);
 int32_t ark_vfs_chown(const char *path, uint32_t uid, uint32_t gid);
 int32_t ark_vfs_mkdir(const char *path);
 int32_t ark_vfs_unlink(const char *path);
+/** @brief Remove an empty directory.  ARK_E_NOTDIR if the path is not a
+ *  directory, ARK_E_NOTEMPTY if it still has entries.  The core asks the
+ *  filesystem what the entry is before removing it, so a file is never
+ *  taken by rmdir. */
+int32_t ark_vfs_rmdir(const char *path);
 int32_t ark_vfs_rename(const char *old_path, const char *new_path);
 
 int32_t ark_vfs_opendir(const char *path);

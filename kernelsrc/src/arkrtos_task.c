@@ -30,6 +30,9 @@
 #include "arkrtos_net.h"            /* SVC 0x1E network service */
 #include "arkrtos_fs.h"    /* SVC 0x1C user file service */
 #include "arkrtos_vfs.h"   /* SVC 0x1C sub 11..17: the VFS namespace face */
+#if ARKRTOS_HW_SAFE
+#include "arkrtos_hwsafe.h"   /* App-crash hardware safe-state ("will") mechanism */
+#endif
 #include "arkrtos_mini.h"   /* SVC 0x18 子命令：小程序装载/停止 */
 #include "arkrtos_partition.h"    /* 用户可见内存窗口（共享区/App RAM/驱动 RAM/固件区） */
 
@@ -648,6 +651,24 @@ void SVC_Server(void *p_svc_ctx)
             case 5:
                 ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_dev_close_internal(p[1]));
                 break;
+#if ARKRTOS_HW_SAFE
+            case 6:
+                /* Declare the CURRENT task's "will" for a device it already
+                 * owns: on this task's death the kernel runs
+                 * drv_ctrl(obj, cmd, val) on it. The kernel refuses a will for
+                 * a device the caller does not hold - no ordering another
+                 * owner's hardware around. */
+                if(arkrtos_kernel_user_name_ok((const void *)p[1], 8u) == 0u)
+                {
+                    ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+                    break;
+                }
+                ARKRTOS_SVC_RET(p_svc_ctx,
+                    (uint32)arkrtos_hwsafe_set_will((const char *)p[1],
+                                                    arkrtos_current_task_id,
+                                                    (int32)p[2], (int32)p[3]));
+                break;
+#endif /* ARKRTOS_HW_SAFE */
             default:
                 ARKRTOS_SVC_RET(p_svc_ctx, 0);
                 break;
@@ -684,6 +705,41 @@ void SVC_Server(void *p_svc_ctx)
             case 3:
                 ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_dev_get_count());
                 break;
+#if ARKRTOS_HW_SAFE
+            case 4:
+                /* Register a driver's hardware safe-state callback for a device
+                 * name. The pointer must land in the CALLER'S OWN image window:
+                 * a loaded image may only ask the kernel to run its own code,
+                 * never somebody else's. */
+                if((arkrtos_kernel_user_name_ok((const void *)p[1], 8u) == 0u) ||
+                   (arkrtos_kernel_cb_own_region_ok((const void *)p[2]) == 0u))
+                {
+                    ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+                    break;
+                }
+                ARKRTOS_SVC_RET(p_svc_ctx,
+                    (uint32)arkrtos_hwsafe_register((const char *)p[1],
+                                                    (arkrtos_hwsafe_fn)p[2]));
+                break;
+            case 5:
+                if(arkrtos_kernel_user_name_ok((const void *)p[1], 8u) == 0u)
+                {
+                    ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+                    break;
+                }
+                ARKRTOS_SVC_RET(p_svc_ctx,
+                    (uint32)arkrtos_hwsafe_registered((const char *)p[1]));
+                break;
+            case 6:
+                if(arkrtos_kernel_user_name_ok((const void *)p[1], 8u) == 0u)
+                {
+                    ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+                    break;
+                }
+                ARKRTOS_SVC_RET(p_svc_ctx,
+                    (uint32)arkrtos_hwsafe_unregister((const char *)p[1]));
+                break;
+#endif /* ARKRTOS_HW_SAFE */
             default:
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
                 break;
@@ -1034,7 +1090,7 @@ void SVC_Server(void *p_svc_ctx)
          *   p[0] = 3 remove (p[1] = path)
          *   p[0] = 4 stat   (p[1] = path, p[2] = size out, p[3] = is_dir out)
          *   p[0] = 5 info   (p[1] = total out, p[2] = used out)
-         *   p[0] = 11..18 the VFS namespace (POSIX style open/read/write):
+         *   p[0] = 11..21 the VFS namespace (POSIX style open/read/write):
          *                  11 open    (p[1]=path, p[2]=flags)      -> handle
          *                  12 read    (p[1]=handle, p[2]=buf, p[3]=len)
          *                  13 write   (p[1]=handle, p[2]=buf, p[3]=len)
@@ -1044,8 +1100,11 @@ void SVC_Server(void *p_svc_ctx)
          *                  17 readdir (p[1]=handle, p[2]=name, p[3]=cap,
          *                              p[4]=mode out, p[5]=size out)
          *                  18 unlink  (p[1]=path)
+         *                  19 mkdir   (p[1]=path)
+         *                  20 rmdir   (p[1]=path)
+         *                  21 rename  (p[1]=old, p[2]=new)
          *   The two groups keep different path models on purpose: 1..10 are
-         *   volume relative (arkrtos_fs), 11..17 are namespace absolute
+         *   volume relative (arkrtos_fs), 11..21 are namespace absolute
          *   ("/mnt/nor/a.txt", "/dev/uart0"). A handle from 11 is only valid
          *   for the task that opened it; see arkrtos_vfs.h.
          * One global mount with one set of static caches means two callers
@@ -1390,6 +1449,57 @@ void SVC_Server(void *p_svc_ctx)
                 }
                 ARKRTOS_SVC_RET(p_svc_ctx,
                               (uint32)arkrtos_vfs_app_unlink((const char *)p[1]));
+                break;
+
+            case 19:                /* mkdir path */
+                if(arkrtos_kernel_svc_args_ok(p, 8u) == 0u)
+                {
+                    ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+                    break;
+                }
+                if(arkrtos_kernel_user_name_ok((const void *)p[1],
+                                             ARKRTOS_VFS_PATH_MAX) == 0u)
+                {
+                    ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+                    break;
+                }
+                ARKRTOS_SVC_RET(p_svc_ctx,
+                              (uint32)arkrtos_vfs_app_mkdir((const char *)p[1]));
+                break;
+
+            case 20:                /* rmdir path */
+                if(arkrtos_kernel_svc_args_ok(p, 8u) == 0u)
+                {
+                    ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+                    break;
+                }
+                if(arkrtos_kernel_user_name_ok((const void *)p[1],
+                                             ARKRTOS_VFS_PATH_MAX) == 0u)
+                {
+                    ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+                    break;
+                }
+                ARKRTOS_SVC_RET(p_svc_ctx,
+                              (uint32)arkrtos_vfs_app_rmdir((const char *)p[1]));
+                break;
+
+            case 21:                /* rename old, new */
+                if(arkrtos_kernel_svc_args_ok(p, 12u) == 0u)
+                {
+                    ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+                    break;
+                }
+                if((arkrtos_kernel_user_name_ok((const void *)p[1],
+                                              ARKRTOS_VFS_PATH_MAX) == 0u) ||
+                   (arkrtos_kernel_user_name_ok((const void *)p[2],
+                                              ARKRTOS_VFS_PATH_MAX) == 0u))
+                {
+                    ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+                    break;
+                }
+                ARKRTOS_SVC_RET(p_svc_ctx,
+                              (uint32)arkrtos_vfs_app_rename((const char *)p[1],
+                                                           (const char *)p[2]));
                 break;
 
             default:
@@ -2414,7 +2524,22 @@ void arkrtos_task_release_resources(int32 task_id)
      * still that command. Hand the names back here, before the next image can
      * be placed over the same range. */
     (void)arkrtos_shell_release_task((uint32)task_id);
+#if ARKRTOS_HW_SAFE
+    /* Phase 1 (cheap, critical-safe): flag every device this dying task
+     * owned. Executing the driver callbacks must NOT happen here - this
+     * function is also reached from the fault handler with interrupts
+     * masked; it happens right below, once the critical section is left. */
+    arkrtos_hwsafe_on_death(task_id);
+#endif
     ARKRTOS_EXIT_CRITICAL(state);
+
+#if ARKRTOS_HW_SAFE
+    /* Phase 2: run the registered safe-state callbacks for the devices the
+     * dead task owned, so a crashed App cannot leave a motor / relay /
+     * machine tool running. A device with no registered callback is only
+     * dropped from the ledger - the kernel does not pretend it is safe. */
+    (void)arkrtos_hwsafe_run_pending();
+#endif
 }
 
 void arkrtos_task_kill_internal(void)

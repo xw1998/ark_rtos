@@ -1691,6 +1691,62 @@ int arkrtos_posix_unlink(const char *path)
     return 0;
 }
 
+int arkrtos_posix_mkdir(const char *path, arkrtos_mode_t mode)
+{
+    int32 r;
+
+    (void)mode;   /* the namespace carries no per-file mode; accepted for source compat */
+    if((path == 0) || (path[0] != '/'))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    r = arkrtos_path_mkdir(path);
+    if(r < 0)
+    {
+        errno = arkrtos_posix_errno_from_vfs(r);
+        return -1;
+    }
+    return 0;
+}
+
+int arkrtos_posix_rmdir(const char *path)
+{
+    int32 r;
+
+    if((path == 0) || (path[0] != '/'))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    r = arkrtos_path_rmdir(path);
+    if(r < 0)
+    {
+        errno = arkrtos_posix_errno_from_vfs(r);
+        return -1;
+    }
+    return 0;
+}
+
+int arkrtos_posix_rename(const char *old_path, const char *new_path)
+{
+    int32 r;
+
+    if((old_path == 0) || (new_path == 0) ||
+       (old_path[0] != '/') || (new_path[0] != '/'))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    r = arkrtos_path_rename(old_path, new_path);
+    if(r < 0)
+    {
+        errno = arkrtos_posix_errno_from_vfs(r);
+        return -1;
+    }
+    return 0;
+}
+
 static int arkrtos_posix_stat_fill(struct stat *st, uint32 mode, uint32 size)
 {
     st->st_mode  = (arkrtos_mode_t)mode;

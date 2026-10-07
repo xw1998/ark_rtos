@@ -239,6 +239,16 @@
 #define ARKRTOS_USE_CRASH_LOG           1
 #endif
 
+/* App 崩溃时的硬件安全态（"遗言"）机制（arkrtos_hwsafe.c）。
+ * 驱动可为某个设备注册一个"中和"回调，声明"它的所有者死掉时把它带回安全态"
+ * （例如把电机 PWM 停掉、把继电器断开）；内核在设备被打开时按任务记一条所有权
+ * 台账，任务死亡（自退、被杀、故障恢复）时由内核——而不是崩溃的 App——执行该回调。
+ * 默认关：关掉时设备 open/close 与任务终止的路径与本机制引入前完全一致，
+ * 体积与行为零变化。见 docs/App崩溃硬件安全与遗言机制.md。 */
+#ifndef ARKRTOS_HW_SAFE
+#define ARKRTOS_HW_SAFE                 0
+#endif
+
 /* 心跳合同与看门狗监督（arkrtos_guard.c）。需要板级 ARKRTOS_WDG_ENABLE 才真咬人 */
 #ifndef ARKRTOS_USE_KERNEL_GUARD
 #define ARKRTOS_USE_KERNEL_GUARD        1

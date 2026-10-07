@@ -269,6 +269,18 @@ int32  arkrtos_dev_write(int32 handle, void *pdata, int32 len);
 * @return 0 或正值=成功，负值=失败
 */
 int32  arkrtos_dev_ctrl(int32 handle, uint32 code, uint32 value);
+
+/**
+* @brief 声明本任务对某设备的崩溃"遗言"（硬件安全态）
+* @param dev_name 设备名（本任务必须先 open 过它，否则内核拒绝）
+* @param cmd      传给设备驱动的控制命令码
+* @param val      命令参数
+* @return 0=成功；-1=本任务并未持有该设备；-2=参数非法
+* @note 本任务死亡（自退/被杀/故障恢复）时，由内核（不是本 App）对该设备执行
+*       drv_ctrl(cmd,val)，防止 App 崩溃后电机/机床/机械臂等硬件失控。
+*       需内核 ARKRTOS_HW_SAFE=1，否则返回 -1。
+*/
+int32  arkrtos_dev_set_will(const char *dev_name, int32 cmd, int32 val);
 /** @} */
 
 /** @defgroup mq 消息队列
@@ -771,6 +783,26 @@ int32  arkrtos_path_stat(const char *path, uint32 *size, uint32 *mode);
 * @note Files only: this is not the way to remove a directory.
 */
 int32  arkrtos_path_unlink(const char *path);
+
+/**
+* @brief Create a directory, one level deep; the parent must exist.
+* @return 0 on success, a negative error code on failure
+*/
+int32  arkrtos_path_mkdir(const char *path);
+
+/**
+* @brief Remove an empty directory. A file needs arkrtos_path_unlink, and
+*        a non-empty directory is refused, so nothing is lost silently.
+* @return 0 on success, a negative error code on failure
+*/
+int32  arkrtos_path_rmdir(const char *path);
+
+/**
+* @brief Rename or move a path inside one mount.
+* @return 0 on success, a negative error code on failure. A rename across
+*         two mount points is refused (-12) rather than done as a copy.
+*/
+int32  arkrtos_path_rename(const char *old_path, const char *new_path);
 
 /** @} */
 

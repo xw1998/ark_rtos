@@ -125,6 +125,29 @@ int32 led_drv_ctrl(arkrtos_dev_hdr_t *p, uint32 c, uint32 v)
     return 0;
 }
 
+#if ARKRTOS_HW_SAFE
+/* Safe-state callback for the hardware-safe ("will") mechanism: if a task
+ * that owned this LED dies (exit / kill / fault recovery), the kernel calls
+ * this to force it off - a crashed App must not leave an indicator (or, on a
+ * real board, an actuator) stuck in its last commanded state. Non-blocking
+ * and interrupt-safe by construction: one RAM write plus one GPIO write. */
+int32 led_drv_safe(arkrtos_dev_hdr_t *p, uint32 owner)
+{
+    led_dev_t *p_dev = (led_dev_t *)p;
+    (void)owner;
+    if((p == 0) || (sizeof(led_dev_t) != p->block_size))
+    {
+        return -1;
+    }
+    if(p_dev->opened)
+    {
+        p_dev->led_on = 0;
+        HAL_GPIO_WritePin(GPIOC, p_dev->gpio_pin, GPIO_PIN_SET);
+    }
+    return 0;
+}
+#endif
+
 arkrtos_dev_drv_t led_drv =
 {
     led_drv_open,

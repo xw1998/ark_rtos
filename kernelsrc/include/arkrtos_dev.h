@@ -50,6 +50,15 @@ int32  arkrtos_dev_read_internal(int32 handle, uint8 *pdata, int32 len);
 int32  arkrtos_dev_write_internal(int32 handle, uint8 *pdata, int32 len);
 int32  arkrtos_dev_ctrl_internal(int32 handle, uint32 code, uint32 value);
 
+#if ARKRTOS_HW_SAFE
+/* Locate the device instance and run its drv_ctrl. Used by the App-crash
+ * hardware-safe ("will") path: the kernel only holds the instance pointer,
+ * never the handle (the handle belongs to a task that is already dead).
+ * Returns the driver's own return value; -1 when the instance is unknown or
+ * the driver has no ctrl entry. */
+int32  arkrtos_dev_ctrl_obj(arkrtos_dev_hdr_t *obj, uint32 code, uint32 value);
+#endif
+
 void   arkrtos_dev_board_init(void);
 
 #endif

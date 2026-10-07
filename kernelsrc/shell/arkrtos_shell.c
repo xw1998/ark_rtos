@@ -49,6 +49,9 @@
 #include "ark_vfs.h"
 #include "arkrtos_audit.h"
 #include "arkrtos_guard.h"
+#if ARKRTOS_HW_SAFE
+#include "arkrtos_hwsafe.h"
+#endif
 #include "arkrtos_crash.h"
 #include "arkrtos_partition.h"
 #include "arkrtos_version.h"
@@ -3598,7 +3601,6 @@ static int cmd_vfs_rmdir(int argc, char *argv[])
     for(i = 1; i < argc; i++)
     {
         char vpath[ARKRTOS_VFS_PATH_MAX];
-        struct ark_vfs_stat st;
         int32 rc;
 
         if(shell_vfs_path(argv[i], vpath, sizeof(vpath)) != 0)
@@ -3607,24 +3609,22 @@ static int cmd_vfs_rmdir(int argc, char *argv[])
             failed = 1;
             continue;
         }
-        rc = ark_vfs_stat(vpath, &st);
+        /* The core does the work: it asks the filesystem what the entry
+         * is, so a file is never taken by rmdir, and an empty directory
+         * only is removed.  Kept in one place so the shell and an App
+         * cannot drift apart on what rmdir means. */
+        rc = ark_vfs_rmdir(vpath);
         if(rc != 0)
         {
-            (void)vfs_fail_at("rmdir", argv[i], rc);
-            failed = 1;
-            continue;
-        }
-        if((st.mode & ARK_S_IFDIR) == 0u)
-        {
-            /* rmdir is for directories; refusing a file is not a guess. */
-            ark_shell_printf("\r\nrmdir: %s: Not a directory\r\n", argv[i]);
-            failed = 1;
-            continue;
-        }
-        rc = ark_vfs_unlink(vpath);
-        if(rc != 0)
-        {
-            (void)vfs_fail_at("rmdir", argv[i], rc);
+            if(rc == ARK_E_NOTDIR)
+            {
+                /* rmdir is for directories; refusing a file is not a guess. */
+                ark_shell_printf("\r\nrmdir: %s: Not a directory\r\n", argv[i]);
+            }
+            else
+            {
+                (void)vfs_fail_at("rmdir", argv[i], rc);
+            }
             failed = 1;
             continue;
         }
@@ -4734,12 +4734,68 @@ static int cmd_dmesg(int argc, char *argv[])
 }
 #endif /* ARKRTOS_USE_LOG */
 
+#if ARKRTOS_HW_SAFE
+/* Hardware safe-state ("will") ledger: which task owns which device, which
+ * devices declared a safe state, and what the kernel has neutralized so far.
+ * Read-only view; see docs/App崩溃硬件安全与遗言机制.md. */
+static int cmd_hwsafe(int argc, char *argv[])
+{
+    char  name[16];
+    int32 i, n;
+    int32 owner, dead, has_will, wcmd, wval;
+    int32 devs   = arkrtos_hwsafe_dev_count();
+    int32 owners = arkrtos_hwsafe_owner_count();
+
+    (void)argc;
+    (void)argv;
+
+    ark_shell_printf("hwsafe: enabled, devs=%d owners=%d neutralized=%u last_owner=%d\r\n",
+                     (int)devs, (int)owners,
+                     (unsigned)arkrtos_hwsafe_neutralized_count(),
+                     (int)arkrtos_hwsafe_last_owner());
+
+    for(i = 0; i < devs; i++)
+    {
+        if(arkrtos_hwsafe_dev_at(i, name, sizeof(name)) != 0)
+        {
+            break;
+        }
+        ark_shell_printf("  dev%d: %s  (safe-state callback registered)\r\n",
+                         (int)i, name);
+    }
+
+    for(n = 0; n < owners; n++)
+    {
+        if(arkrtos_hwsafe_info(n, name, sizeof(name), &owner, &dead) != 0)
+        {
+            break;
+        }
+        ark_shell_printf("  own%d: dev=%s owner=%d dead=%d will=",
+                         (int)n, name, (int)owner, (int)dead);
+        if((arkrtos_hwsafe_will(n, &has_will, &wcmd, &wval) == 0) && (has_will != 0))
+        {
+            ark_shell_printf("%d:%d\r\n", (int)wcmd, (int)wval);
+        }
+        else
+        {
+            sh_out("none\r\n");
+        }
+    }
+
+    if(owners == 0)
+    {
+        sh_out("  (no device ownership recorded)\r\n");
+    }
+    return 0;
+}
+#endif /* ARKRTOS_HW_SAFE */
+
 static int register_kernel_commands(void)
 {
     int idx = g_cmd_count;
     /* Upper bound with every optional feature compiled in.  Kept above the
      * real count so a future command cannot silently overflow g_cmd_table. */
-    int need = 44;
+    int need = 45;
 
     if((idx + need) > ARK_SHELL_MAX_COMMANDS)
     {
@@ -4830,6 +4886,11 @@ static int register_kernel_commands(void)
     g_cmd_table[idx++] = ARK_SHELL_CMD("guard", cmd_guard,
         "Watchdog state and per-slot heartbeat contracts", 1);
 #endif /* ARKRTOS_USE_KERNEL_GUARD */
+
+#if ARKRTOS_HW_SAFE
+    g_cmd_table[idx++] = ARK_SHELL_CMD("hwsafe", cmd_hwsafe,
+        "Hardware safe-state (will) ledger: owners, registered devices, neutralized count", 1);
+#endif /* ARKRTOS_HW_SAFE */
 
 #if ARKRTOS_USE_CRASH_LOG
     g_cmd_table[idx++] = ARK_SHELL_CMD("crash", cmd_crash,

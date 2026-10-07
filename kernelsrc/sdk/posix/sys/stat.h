@@ -50,4 +50,11 @@ int arkrtos_posix_fstat(int fd, struct stat *st);
 #define stat(path, st)   arkrtos_posix_stat((path), (st))
 #define fstat(fd, st)    arkrtos_posix_fstat((fd), (st))
 
+/** Create a directory (one level; the parent must exist). Returns 0, or -1
+ *  with errno set. The mode argument is accepted so plain POSIX source
+ *  compiles unchanged, but it is not applied: this namespace has no
+ *  per-file permission model, and pretending otherwise would be a lie. */
+int arkrtos_posix_mkdir(const char *path, arkrtos_mode_t mode);
+#define mkdir(path, mode)  arkrtos_posix_mkdir((path), (mode))
+
 #endif /* __ARKRTOS_SYS_STAT_H__ */
