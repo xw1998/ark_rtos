@@ -30,12 +30,35 @@ upgraded on their own, which opens up a capability line nobody else has:
 | Driver deployment | Compiled with the kernel | Compiled as a standalone firmware for its own ROM partition, flashed and upgraded independently; apps only know the device name, never the address |
 | Privilege model | All code has the same privilege (MPU usually off) | Tasks run unprivileged and trap into the kernel through SVC; the MPU isolates each task and hardware stops out-of-bounds access on the spot |
 | An application stuck in a fault loop | Watchdog resets the whole device | A crash journal survives resets; three consecutive crashes disable **that slot only**, everything else keeps running |
+| **An application controlling hardware crashes** | The hardware stays at its last setting; a watchdog can only reset the whole device | The **kernel** runs a safety callback the driver registered, or a **last will** the app declared while alive, while reaping the task - driving the motor / relay back to a safe state; the "planned handover" of a seamless upgrade only unregisters the entry and never twitches the hardware |
 | Uninstalling | Not a concept | Invalidate the image, erase the physical unit once it is free, `pool free` goes back from 776244 B to 786432 B |
-| Replacing a version while running | Stop and restart | Two mini apps hand the control loop over; the iteration counter stays continuous; handover gaps over four runs: **27 / 31 / 224 / 407 ms** (worst 407 ms, criterion < 1000 ms) |
+| Replacing a version while running | Stop and restart | Two mini apps hand the control loop over; the iteration counter stays continuous; the gap **at the instant of handover** over four runs: **27 / 31 / 224 / 407 ms** (worst 407 ms, criterion < 1000 ms). The separate **loading stall** while the new image is read into RAM is already cut to **45 / 64 / 72 ms** (from 242 / 381 ms) |
 | Porting existing C code | Rewrite against the RTOS API | A POSIX / Windows compatibility layer: edit the include list and it builds for the board |
 
-> This table only compares the dynamic-installation storyline. Ecosystem, protocol stacks and
-> functional certification are different axes, and this project does not claim to be better there.
+> This table compares one storyline only: dynamic installation plus crash containment. Ecosystem,
+> protocol stacks and functional certification are different axes, and this project does not claim to
+> be better there.
+
+## It does not lose control when it crashes: reliability
+
+"It installs and it runs" is only the pass mark. The hard part is that **the system still holds when
+an app crashes**. Ark RTOS splits this into five layers, each stopping a different failure, and each
+reporting its own "nothing happened" honestly:
+
+| Layer | Failure it stops | Evidence |
+|---|---|---|
+| Per-task MPU isolation | An app touching another's memory - refused by hardware on the spot | `pass=78 fail=0` on F427 |
+| Watchdog heartbeat contract (`guard`) | A task that stops feeding the watchdog (device-wide) | `guard` reports `starves=0` |
+| Reset-surviving crash journal + disable after 3 | One image crashing repeatedly - **only that slot** is disabled, everything else keeps running | After a power loss the kernel still tells valid / invalidated / raw images apart |
+| **Hardware safe state (the "last will")** | **The owning task is gone but the motor / relay it controlled is still stuck at its last command** | `hwsafe`: after an app crashes on a violation, `neutralized=6 last_owner=12`, and the LED visibly goes off |
+| Planned handover | A seamless upgrade **must not** drive hardware to the safe state (the taker will reopen the same device at once) | Handover only unregisters the entry and is counted separately as `handover`, never in `neutralized` |
+
+**That last layer is unique to Ark RTOS**: on Linux a dead process leaves the hardware at its last
+setting; a general-purpose RTOS can only reset the whole device, which stops **every** application
+including the healthy ones. Here the **kernel** does it while reaping the task - the crashed app can
+no longer run a single instruction, so the "neutralisation" can only come from a driver callback in
+resident firmware, or from the will the app declared while it was still alive.
+See [Hardware safe state](docs/App崩溃硬件安全与遗言机制.md).
 
 ## Measured numbers at a glance
 
@@ -54,7 +77,7 @@ per item.
 | Concurrent VFS ports | Two writers plus one read-only reader on the same path; the reader only ever sees complete payloads, `pass=128 fail=0` | [VFS namespaces](docs/VFS路径命名空间.md) |
 | File POSIX | `FS_DEMO` board self-test passes end to end (`open/read/write/stat/dirent` routed into the VFS) | [POSIX layer](docs/POSIX与Windows兼容层说明.md) |
 | socket / select | F427 with `SOCKET_DEMO`, `pass=36 fail=0` (TCP echo, UDP, IPv6 rejection) | [socket layer](docs/socket与select兼容层.md) |
-| Upgrade while running | Handover gaps of **27 / 31 / 224 / 407 ms**, `it=994 -> resumed at it=994`, controlled variable never resets | [Seamless upgrade](docs/无缝升级例程.md) |
+| Upgrade while running | Two numbers, not one: the **loading stall** (image read into RAM) is cut to **45 / 64 / 72 ms** (from 242 / 381 ms); the gap **at the instant of handover** is **27 / 31 / 224 / 407 ms** (neither is downtime). The iteration counter stays continuous (`it=994 -> resumed at it=994`) and the controlled variable never resets | [Seamless upgrade](docs/无缝升级例程.md) |
 | 32-bit tick wraparound | Injected so that `arkrtos_kernel_tick` wraps; the two `APP_ALIVE` lines around it are exactly 5.000 s apart | [Scheduler notes](docs/调度器说明.md) section 2.3 |
 | Device tree | On the F427 board the `dt` command prints 20 nodes (model / compatible / reg / enabled flag) exactly as written in `dts/stm32f427.dts` | [Device tree](docs/设备树.md) |
 | Two boards, one source | F427 and F401 both build from the same kernel sources (F401 `Code=46526`) | This file, "Verification status" |
@@ -844,7 +867,7 @@ Closed on hardware:
 | 32-bit tick counter wraparound | Deliberate injection made `arkrtos_kernel_tick` start at `0xFFFFC000` and wrap: `t=` jumped from `2147478038 ms` back to a small value, the two `APP_ALIVE` lines around it are exactly 5.000 s apart, `fault` is empty and `sched` is consistent. That run exposed and fixed an inconsistency between the insertion sort on the delay list and the expiry test at the wrap point (see [docs/调度器说明.md](docs/调度器说明.md) section 2.3) |
 | Concurrent VFS ports | Two writers plus a read-only third reader hammering one path: the reader must see both **complete** payloads (`vfs.conc_saw_both`); two clean boot self-tests at `pass=128 fail=0`, `sched` consistent, `fault` empty (see [docs/VFS路径命名空间.md](docs/VFS路径命名空间.md)) |
 | Fixed-slot overwrite install by the resident installer (`SHELL_ENABLE=0`) | On an `INSTALLER_FIXED_SLOT=0` variant: at boot `fixed slot 0 holds a running image (slot 0): stopping it first`, then `fixed slot 0 cleared, send the file now`; overwriting no longer produces `err -4` and the image autostarts normally; a second frame in the same power cycle is cleanly refused (`one image already installed this boot: reboot before sending another one` plus `drained 1932 B of the rejected frame`) |
-| Seamless upgrade while running | Two mini apps (`SEAMLESS_V1` / `SEAMLESS_V2`) hand the control loop over: V1 alone runs at 10.7 ms per iteration, V2 at 5.9 ms after taking over; handover gaps of 27/31/224/407 ms; the iteration counter stays continuous (`it=994` -> `994`); the controlled variable `pv` never resets; `guard starves=0`; the number of `fault` lines is unchanged across the handover. Counter-examples: the old version cannot take control back, a version that times out releases nothing within 5000 ms, and a residual request is withdrawn (see [docs/无缝升级例程.md](docs/无缝升级例程.md)) |
+| Seamless upgrade while running | Two mini apps (`SEAMLESS_V1` / `SEAMLESS_V2`) hand the control loop over: V1 alone runs at 10.7 ms per iteration, V2 at 5.9 ms after taking over; handover gaps at the instant of handover of 27/31/224/407 ms (measured separately from the loading stall, already 45/64/72 ms, down from 242/381 ms); the iteration counter stays continuous (`it=994` -> `994`); the controlled variable `pv` never resets; `guard starves=0`; the number of `fault` lines is unchanged across the handover. Counter-examples: the old version cannot take control back, a version that times out releases nothing within 5000 ms, and a residual request is withdrawn (see [docs/无缝升级例程.md](docs/无缝升级例程.md)) |
 | Hardware safe state on app crash (last will) | `HWSAFE_DEMO`: the app opens `led0`, lights it and declares a will (turn it off), then deliberately violates its region -> stopped by the MPU -> fault recovery kills the task; the kernel runs the will while reaping it, `hwsafe` reports `neutralized=6 last_owner=12`, `fault` goes `MEMFAULT` -> `RECOVER` x3 -> `TASKKILL` -> `APPDISABLED`, and the LED visibly goes off (two independent fresh installs, commit `c021168`) |
 | Soft bus (two nodes in one firmware) | `bus selftest` on F427 passes all 10 stages (`checks 56, failed 0`); `bus info` reports `ark_softbus 18c6ccf`, matching the synced copy |
 
