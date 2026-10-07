@@ -102,7 +102,11 @@ extern "C" {
 
 /* ---- Feature Switches (1=enable, 0=disable) ---- */
 #define ARK_SHELL_ENABLE_HISTORY      1      /* Command history */
-#define ARK_SHELL_ENABLE_AUTOCOMPLETE 1      /* Tab autocomplete */
+#ifndef ARK_SHELL_ENABLE_AUTOCOMPLETE
+#define ARK_SHELL_ENABLE_AUTOCOMPLETE 1  /* Tab autocomplete.  #ifndef-guarded so a
+                                          * build may override it (a completer keeps
+                                          * a candidate table in RAM). */
+#endif
 #define ARK_SHELL_ENABLE_HISTORY_SEARCH 0    /* Ctrl+R history search */
 #define ARK_SHELL_ENABLE_COLOR        1      /* ANSI color output */
 

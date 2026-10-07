@@ -45,6 +45,20 @@ typedef enum {
  *
  * The entire Shell needs only this one global instance variable.
  * ============================================================ */
+/* Maximum candidates a completer may return in one Tab press. */
+#define ARK_SHELL_COMPLETE_MAX        32
+
+/* External completion provider.  Given the word under the cursor and whether
+ * it is the first word on the line, fill cand[] with up to max NUL-terminated
+ * candidates and return how many were written.  The core only knows command
+ * names; a provider (e.g. the VFS path completer) covers the rest.  A
+ * directory candidate must end with '/' so Tab does not stop at it. */
+struct ark_shell_s;
+typedef int (*ark_shell_complete_fn)(struct ark_shell_s *shell,
+                                     const char *word, int is_first,
+                                     char cand[][ARK_SHELL_LINE_SIZE],
+                                     int max);
+
 typedef struct ark_shell_s {
     line_editor_t     editor;                              /* Line editor */
     history_t         history;                             /* Command history */
@@ -63,7 +77,16 @@ typedef struct ark_shell_s {
     int               search_len;                          /* Search keyword length */
     const char       *search_match;                        /* Search match result */
 #endif
+    ark_shell_complete_fn complete_fn;                     /* External completer, or NULL */
 } ark_shell_t;
+
+/* ============================================================
+ * ark_shell_set_completer - Install an external completion provider
+ *
+ * Passing NULL removes it.  Used by the kernel to add VFS path completion
+ * without the shell core needing to know about the filesystem.
+ * ============================================================ */
+void ark_shell_set_completer(ark_shell_t *shell, ark_shell_complete_fn fn);
 
 /* ============================================================
  * ark_shell_init - Shell initialization

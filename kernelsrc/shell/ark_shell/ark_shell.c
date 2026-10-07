@@ -141,6 +141,13 @@ static void shell_show_prompt(ark_shell_t *shell)
 /* ============================================================
  * ark_shell_init - Initialize Shell
  * ============================================================ */
+void ark_shell_set_completer(ark_shell_t *shell, ark_shell_complete_fn fn)
+{
+    if (shell != NULL) {
+        shell->complete_fn = fn;
+    }
+}
+
 void ark_shell_init(ark_shell_t *shell, uint32_t baudrate)
 {
     if (shell == NULL) {
@@ -166,6 +173,7 @@ void ark_shell_init(ark_shell_t *shell, uint32_t baudrate)
     shell->uart_mode      = platform_uart_get_mode();
     shell->esc_len        = 0;
     shell->esc_start_time = 0;
+    shell->complete_fn    = NULL;
 
 #if ARK_SHELL_ENABLE_HISTORY_SEARCH
     shell->search_buf[0] = '\0';
@@ -235,7 +243,12 @@ static int shell_handle_ctrl(ark_shell_t *shell, char ch)
         line_editor_clear(&shell->editor);
         shell_show_prompt(shell);
         return 0;
-    case 'd':  /* Ctrl+D: delete char at cursor (bash default) */
+    case 'd':  /* Ctrl+D: delete char at cursor (bash default).  On an empty
+                * line it means EOF; there is no process to end here, so it is
+                * a no-op rather than an error or a spurious logout. */
+        if (shell->editor.len == 0) {
+            return 0;
+        }
         line_editor_delete(&shell->editor);
         return 0;
     case 'e':  /* Ctrl+E: end */
@@ -295,10 +308,12 @@ static void shell_handle_esc_sequence(ark_shell_t *shell)
         return;
     }
 
-    /* ESC [ ... sequence */
-    if (seq[0] == '[') {
-        if (len == 3) {
-            switch (seq[2]) {
+    /* esc_buf holds the sequence *without* the leading ESC, e.g. "[D" for the
+     * Left arrow, so the final byte lives at seq[len - 1]. */
+    if (seq[0] == '[' || seq[0] == 'O') {
+        char fin = seq[len - 1];
+        if (len == 2) {
+            switch (fin) {
             case 'A':  /* Up arrow */
                 history_up(&shell->history, &shell->editor);
                 break;
@@ -320,22 +335,9 @@ static void shell_handle_esc_sequence(ark_shell_t *shell)
             default:
                 break;
             }
-        } else if (len == 4 && seq[2] == '3' && seq[3] == '~') {
-            /* Delete */
+        } else if (len == 3 && seq[1] == '3' && seq[2] == '~') {
+            /* Delete key */
             line_editor_delete(&shell->editor);
-        }
-    }
-    /* ESC O ... sequence (xterm style) */
-    else if (seq[0] == 'O' && len == 3) {
-        switch (seq[2]) {
-        case 'H':
-            line_editor_move_home(&shell->editor);
-            break;
-        case 'F':
-            line_editor_move_end(&shell->editor);
-            break;
-        default:
-            break;
         }
     }
 }

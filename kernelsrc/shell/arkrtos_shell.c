@@ -2986,6 +2986,100 @@ static int vfs_fail_at(const char *what, const char *path, int32 rc)
     return -1;
 }
 
+/* ---- Tab completion for VFS paths ----
+ *
+ * The shell core only knows command names; this provider adds path completion
+ * for arguments.  It completes one directory level at a time and offers only
+ * names it could actually list, so Tab never invents a path. */
+typedef struct {
+    const char *prefix;      /* text before the basename, trailing '/' kept */
+    uint32      prefix_len;
+    const char *base;        /* typed basename fragment to match */
+    uint32      base_len;
+    char      (*cand)[ARK_SHELL_LINE_SIZE];
+    int         max;
+    int         n;
+} vfs_comp_ctx_t;
+
+static int vfs_comp_cb(const char *name, const arkrtos_vfs_stat_t *st, void *arg)
+{
+    vfs_comp_ctx_t *c = (vfs_comp_ctx_t *)arg;
+    int is_dir;
+    uint32 i, o;
+    char *dst;
+
+    if (c->n >= c->max) {
+        return 1;   /* enough candidates; stop the walk */
+    }
+    if (strncmp(name, c->base, (size_t)c->base_len) != 0) {
+        return 0;
+    }
+    is_dir = ((st->mode & ARKRTOS_VFS_S_IFDIR) != 0u);
+    if ((c->prefix_len + strlen(name) + (is_dir ? 2u : 1u)) > ARK_SHELL_LINE_SIZE) {
+        return 0;   /* would not fit; skip rather than truncate into a wrong path */
+    }
+    dst = c->cand[c->n];
+    o = 0u;
+    for (i = 0u; i < c->prefix_len; i++) {
+        dst[o++] = c->prefix[i];
+    }
+    for (i = 0u; name[i] != '\0'; i++) {
+        dst[o++] = name[i];
+    }
+    if (is_dir) {
+        dst[o++] = '/';
+    }
+    dst[o] = '\0';
+    c->n++;
+    return 0;
+}
+
+/* Complete a path argument by listing the directory part of the word. */
+static int vfs_complete(struct ark_shell_s *shell, const char *word, int is_first,
+                        char cand[][ARK_SHELL_LINE_SIZE], int max)
+{
+    char   dirin[ARKRTOS_VFS_PATH_MAX];
+    char   vdir[ARKRTOS_VFS_PATH_MAX];
+    const char   *slash;
+    vfs_comp_ctx_t ctx;
+    uint32 i;
+
+    (void)is_first;
+
+    slash = strrchr(word, '/');
+    if (slash != NULL) {
+        ctx.prefix     = word;
+        ctx.prefix_len = (uint32)(slash - word) + 1u;   /* keep trailing '/' */
+        ctx.base       = slash + 1;
+    } else {
+        ctx.prefix     = word;
+        ctx.prefix_len = 0u;
+        ctx.base       = word;
+    }
+    ctx.base_len = (uint32)strlen(ctx.base);
+    ctx.cand = cand;
+    ctx.max  = max;
+    ctx.n    = 0;
+
+    /* The directory to list: the typed prefix, or the cwd when no '/' was
+     * typed.  resolve() normalises it the same way the commands do. */
+    if (ctx.prefix_len == 0u) {
+        dirin[0] = '.';
+        dirin[1] = '\0';
+    } else if (ctx.prefix_len < sizeof(dirin)) {
+        for (i = 0u; i < ctx.prefix_len; i++) {
+            dirin[i] = ctx.prefix[i];
+        }
+        dirin[ctx.prefix_len] = '\0';
+    } else {
+        return 0;
+    }
+
+    ark_shell_resolve(shell, dirin, vdir, sizeof(vdir));
+    (void)arkrtos_vfs_list(vdir, vfs_comp_cb, &ctx);
+    return ctx.n;
+}
+
 static int vfs_usage(void)
 {
     sh_out("\r\nusage:\r\n");
@@ -4788,6 +4882,12 @@ static void arkrtos_shell_task(void)
     {
         sh_out("shell: command table full, kernel commands unavailable\r\n");
     }
+
+#if ARKRTOS_USE_VFS
+    /* Arguments complete against the VFS; the shell core stays filesystem-
+     * agnostic and only calls back here for non-first words. */
+    ark_shell_set_completer(&g_shell, vfs_complete);
+#endif
 
     /* No separate "console ready" line: the shell prints its own
      * welcome banner (see ark_shell_config.h) before the first prompt,
