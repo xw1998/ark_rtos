@@ -2506,9 +2506,12 @@ void arkrtos_task_delay_internal(uint32 us)
 
 /* 任务下线收尸：清理该任务在同步对象/消息队列中的等待登记与锁持有关系。
  * 自带保存-恢复语义的临界区，因此可以在已有临界区内调用。 */
-void arkrtos_task_release_resources(int32 task_id)
+static void arkrtos_task_release_resources_core(int32 task_id, int32 handover)
 {
     uint32 state;
+
+    /* Only consumed when the hardware-safe module is built in. */
+    (void)handover;
 
     if(task_id <= 0 || task_id > arkrtos_task_count)
     {
@@ -2533,7 +2536,7 @@ void arkrtos_task_release_resources(int32 task_id)
      * owned. Executing the driver callbacks must NOT happen here - this
      * function is also reached from the fault handler with interrupts
      * masked; it happens right below, once the critical section is left. */
-    arkrtos_hwsafe_on_death(task_id);
+    arkrtos_hwsafe_on_death_reason(task_id, handover);
 #endif
     ARKRTOS_EXIT_CRITICAL(state);
 
@@ -2546,6 +2549,33 @@ void arkrtos_task_release_resources(int32 task_id)
 #endif
 }
 
+void arkrtos_task_release_resources(int32 task_id)
+{
+    arkrtos_task_release_resources_core(task_id, 0);
+}
+
+/* Planned hand-over: a MiniApp main task returning normally after handing the
+ * control loop over to the next version (see docs: seamless upgrade). Same
+ * reap path, but the device ledger is only dropped - no will, no callback.
+ * Every OTHER death (fault / forced kill / fault-recover) still neutralizes
+ * exactly as before. */
+void arkrtos_task_release_resources_handover(int32 task_id)
+{
+    arkrtos_task_release_resources_core(task_id, 1);
+}
+
+/* Is THIS task's graceful exit a planned hand-over? Only a MiniApp main task
+ * returning normally qualifies; gated by ARKRTOS_MINI_EXIT_IS_HANDOVER. */
+static int32 arkrtos_task_exit_is_handover(int32 task_id)
+{
+#if ARKRTOS_USE_MINIAPP && ARKRTOS_MINI_EXIT_IS_HANDOVER
+    return arkrtos_mini_task_is_main((uint32)task_id);
+#else
+    (void)task_id;
+    return 0;
+#endif
+}
+
 void arkrtos_task_kill_internal(void)
 {
     if(arkrtos_current_task_id > 0)
@@ -2554,7 +2584,14 @@ void arkrtos_task_kill_internal(void)
                    (int)arkrtos_current_task_id);
         /* 收尸：不清理的话，post/unlock 会把一个已经不在等待的任务置为
          * READY（相当于从旧栈“复活”它），而它持有的互斥锁会永久锁死。 */
-        arkrtos_task_release_resources(arkrtos_current_task_id);
+        if(arkrtos_task_exit_is_handover(arkrtos_current_task_id) != 0)
+        {
+            arkrtos_task_release_resources_handover(arkrtos_current_task_id);
+        }
+        else
+        {
+            arkrtos_task_release_resources(arkrtos_current_task_id);
+        }
 
         ARKRTOS_DISABLE_IRQ();
         arkrtos_ready_del(arkrtos_current_task_id - 1);

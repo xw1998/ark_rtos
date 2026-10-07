@@ -87,6 +87,29 @@ arkrtos_dev_set_will("motor0", MOTOR_CTRL_STOP, 0);   /* 我死了把电机停�
 理由：遗言是**这台设备这一次的具体收尾动作**，比"设备默认安全态"更精确；而驱动回调是
 设备出厂就定好的兜底。两者都是**内核可校验的常驻代码**。
 
+### 死亡原因：中性化 vs 计划内交接
+
+同一个收尸路径会被两类死亡走到：**非计划死亡**（崩溃、被强杀、故障恢复）与
+**计划内交接**（无缝升级时旧小程序把控制环交给下一版，自己正常 `return`）。
+前者必须把硬件带回安全态；后者正好相反——**有人马上接手**，此刻把设备打到安全态是**抖动**，
+不是安全。
+
+因此收尸入口带上了死亡原因：
+
+| 入口 | 死亡原因 | 行为 |
+|------|---------|------|
+| `arkrtos_task_release_resources(tid)` | 非计划（reason=0） | 与引入本机制前**完全一致**：遗言 / 回调 / 只计数 |
+| `arkrtos_task_release_resources_handover(tid)` | 计划内交接（reason=1） | **只摘台账**，既不执行遗言也不执行回调，并单独计数 |
+
+交接路径**不计入 `neutralized`**（它没有中和任何东西），而是计入独立的 `handover` 计数。
+
+**谁算计划内交接**：只有「**小程序主任务正常退出**」这一条路径（`ARKRTOS_MINI_EXIT_IS_HANDOVER`，
+默认 1）——这正是无缝升级的契约（旧版本写完现场主动 return）。崩溃走的是 loader 的
+`halt_image` 路径，被强杀走 `arkrtos_task_kill_internal` 的非小程序分支，两者都**不**走交接，
+一律完整中和。
+
+> 把开关置 0 则小程序正常退出也回安全态；代价是无缝升级时会出现一次硬件抖动。
+
 ---
 
 ## 三、实现（内核侧）
@@ -95,7 +118,8 @@ arkrtos_dev_set_will("motor0", MOTOR_CTRL_STOP, 0);   /* 我死了把电机停�
 |------|------|
 | `kernelsrc/include/arkrtos_hwsafe.h` / `src/arkrtos_hwsafe.c` | 回调表 + 所有权台账 + 两阶段中和 |
 | `kernelsrc/src/arkrtos_dev.c` | 设备 `open` 成功后 `arkrtos_hwsafe_claim()`；`close` 时 `release()`；`unregister` 时注销该设备回调；提供 `arkrtos_dev_ctrl_obj()` 供遗言执行 |
-| `kernelsrc/src/arkrtos_task.c` | `arkrtos_task_release_resources()` 里两阶段执行：临界区内 `arkrtos_hwsafe_on_death()`（只打标记），临界区外 `arkrtos_hwsafe_run_pending()`（真正回调） |
+| `kernelsrc/src/arkrtos_task.c` | `arkrtos_task_release_resources{,_handover}()` 两个包装共用一个 core，把死亡原因带进 `arkrtos_hwsafe_on_death_reason()`；两阶段执行：临界区内只打标记，临界区外 `arkrtos_hwsafe_run_pending()` 真正回调 |
+| `kernelsrc/include/arkrtos_mini.h` / `src/arkrtos_mini.c` | `arkrtos_mini_task_is_main()`：判定某任务是否是「正在跑的小程序主任务」，供退出路径选择是否按交接处理 |
 | `board/stm32f427/` | `drvled.c` 提供 `led_drv_safe()` 示例；`arkrtos_board.c` 为 led0/led1/led2 登记 |
 | `kernelsrc/shell/arkrtos_shell.c` | `hwsafe` 命令：台账、已登记设备、累计中和次数、最近中和的任务号 |
 
@@ -119,7 +143,9 @@ arkrtos_dev_set_will("motor0", MOTOR_CTRL_STOP, 0);   /* 我死了把电机停�
 | `arkrtos_hwsafe_unregister(name)` | 注销回调 |
 | `arkrtos_hwsafe_claim/release(name, owner, obj)` | 台账增删（由设备框架调用） |
 | `arkrtos_hwsafe_set_will/clear_will(name, owner, cmd, val)` | 所有者遗言 |
-| `arkrtos_hwsafe_on_death(task_id)` / `run_pending()` | 两阶段中和 |
+| `arkrtos_hwsafe_on_death(task_id)` | 两阶段中和的**第一阶段**（非计划死亡，等价 `reason(tid, 0)`） |
+| `arkrtos_hwsafe_on_death_reason(task_id, handover)` | 两阶段中和的第一阶段，带死亡原因（`handover!=0` → 计划内交接） |
+| `arkrtos_hwsafe_run_pending()` | 两阶段中和的**第二阶段**（临界区外执行；交接条目只摘台账） |
 | `arkrtos_hwsafe_owner_count/dev_count/neutralized_count/last_owner/registered/info/will` | 观测 |
 
 ### 驱动 SDK（`arkrtos_driver_sdk.h`）
@@ -154,15 +180,23 @@ int32 arkrtos_dev_set_will(const char *dev_name, int32 cmd, int32 val);
 
 ```
 ark> hwsafe
-hwsafe: enabled, devs=3 owners=1 neutralized=0 last_owner=0
+hwsafe: enabled, devs=3 owners=6 neutralized=6 (will=3 cb=0 none=3 fail=0 handover=0) last_owner=12
   dev0: led0  (callback registered)
   dev1: led1  (callback registered)
   dev2: led2  (callback registered)
   own0: dev=led0 owner=5 dead=0 will=none
 ```
 
-`neutralized` 会在某个所有者死亡后 +1（无论是否执行了回调，因为"条目被收走"这件事发生了）；
-**是否真的带了回调**要看设备行是否显示 `callback registered`，两者分开，避免把"没回调"读成"已中和"。
+- `neutralized` 在某个**非交接**的所有者死亡后 +1（`will` / `cb` / `none` 三条通道都会 +1）；
+  交接走的条目**不计入**这里。
+- `(will= cb= none= fail= handover=)` 是各通道计数：
+  - `will`=执行了遗言、`cb`=执行了驱动回调、`none`=两者都没有（只删了台账）；
+  - **`fail`=执行了、但驱动返回了非 0**——即"尝试过，但设备**没有**被带回安全态"；
+  - `handover`=计划内交接被跳过（只摘台账、没动硬件）。
+- **计数跟驱动的返回值走**：只有驱动返回 0 才记 `will`/`cb`，否则记 `fail`。
+  绝不把"尝试过"写成"已中和"。
+- **是否真的带了回调**还要看设备行是否显示 `callback registered`，两者分开看，
+  避免把"没回调"读成"已中和"。
 
 ---
 
@@ -175,5 +209,16 @@ hwsafe: enabled, devs=3 owners=1 neutralized=0 last_owner=0
 3. 内核在收尸时执行遗言 → 点亮状态被强制关掉；
 4. shell 里 `hwsafe` 显示 `neutralized=1`、`last_owner=<该 App 的任务号>`，`ls /dev` 与 LED 目视确认已灭。
 
+**验收实测**（提交 `c021168`，两次独立新装复现）：`hwsafe` 报 `neutralized=6 last_owner=12`，
+`fault` 为 `MEMFAULT` → `RECOVER`×3 → `TASKKILL` → `APPDISABLED`，LED 目视由亮转灭。
+
 **结论分级**：本页只记录"编译通过 / 上板验证过 / 未验证"三档，不做修饰。
-见提交记录与 `hwsafe` 实测输出。
+
+| 项 | 状态 |
+|----|------|
+| 内核编译（F427，`ARKRTOS_HW_SAFE=1`） | **0 Error(s)** |
+| 门禁 `tools/ci_gate.py` | **全过** |
+| 上板验证：收尸—中和路径（App 崩溃后硬件被带离） | **通过**（`c021168`，`neutralized=6 last_owner=12`，两次独立新装） |
+| 上板验证：**通道拆分计数**（`will` / `cb` / `none` 各几次） | **未取到**（当时安装报 `-14 NOSPACE`、槽位碎片化，`out6` 那一轮没拿到） |
+| 上板验证：驱动回调通道单独取证 | **未做**（同上：只有 `HWSAFE_DEMO` 的遗言路径走过上板） |
+| 上板验证：计划内交接（小程序正常退出） | **未做**（交接语义本轮才引入；同一套改动已在 svcrtos_nano 侧落地上板验证，见 nano 的 `docs/App崩溃硬件安全与遗言机制.md`） |

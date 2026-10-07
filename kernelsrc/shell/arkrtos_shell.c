@@ -4751,15 +4751,18 @@ static int cmd_hwsafe(int argc, char *argv[])
 
     {
         uint32 nw = 0u;
+        uint32 nf = 0u;
         uint32 nc = 0u;
         uint32 nn = 0u;
+        uint32 nh = 0u;
 
-        arkrtos_hwsafe_path_counts(&nw, &nc, &nn);
+        arkrtos_hwsafe_path_counts(&nw, &nf, &nc, &nn, &nh);
         ark_shell_printf("hwsafe: enabled, devs=%d owners=%d neutralized=%u"
-                         " (will=%u cb=%u none=%u) last_owner=%d\r\n",
+                         " (will=%u cb=%u none=%u fail=%u handover=%u) last_owner=%d\r\n",
                          (int)devs, (int)owners,
                          (unsigned)arkrtos_hwsafe_neutralized_count(),
                          (unsigned)nw, (unsigned)nc, (unsigned)nn,
+                         (unsigned)nf, (unsigned)nh,
                          (int)arkrtos_hwsafe_last_owner());
     }
 

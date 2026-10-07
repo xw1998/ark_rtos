@@ -23,6 +23,7 @@ typedef struct {
     arkrtos_dev_hdr_t *obj;
     uint8              dead;
     uint8              has_will;   /* owner declared a ctrl() to run on death */
+    uint8              handover;   /* this death is a planned hand-over */
     int32              will_cmd;
     int32              will_val;
 } hwsafe_own_t;
@@ -39,6 +40,11 @@ static int32        g_hwsafe_last_owner;
 static uint32       g_hwsafe_will_ran;
 static uint32       g_hwsafe_cb_ran;
 static uint32       g_hwsafe_none_ran;
+/* Invoked but the driver said no: the hardware did NOT reach its safe state.
+ * Kept as its own counter so it can never be read as a success. */
+static uint32       g_hwsafe_failed;
+/* Planned hand-over: ledger dropped on purpose, nothing was driven. */
+static uint32       g_hwsafe_handover_skipped;
 
 /* 设备名按 8 字节含结尾 0 比较（与 arkrtos_dev_desc_t.dev_name 同宽） */
 static int32 hwsafe_name_eq(const char *a, const char *b)
@@ -81,6 +87,7 @@ static void hwsafe_own_clear(hwsafe_own_t *e)
     e->obj      = 0;
     e->dead     = 0;
     e->has_will = 0;
+    e->handover = 0;
     e->will_cmd = 0;
     e->will_val = 0;
 }
@@ -224,6 +231,7 @@ void arkrtos_hwsafe_claim(const char *dev_name, int32 owner, arkrtos_dev_hdr_t *
         g_hwsafe_own[g_hwsafe_own_n].obj      = obj;
         g_hwsafe_own[g_hwsafe_own_n].dead     = 0;
         g_hwsafe_own[g_hwsafe_own_n].has_will = 0;
+        g_hwsafe_own[g_hwsafe_own_n].handover = 0;
         g_hwsafe_own[g_hwsafe_own_n].will_cmd = 0;
         g_hwsafe_own[g_hwsafe_own_n].will_val = 0;
         g_hwsafe_own_n++;
@@ -327,7 +335,7 @@ int32 arkrtos_hwsafe_clear_will(const char *dev_name, int32 owner)
 
 /* ---------------------------------------------------------------- 两阶段中和 */
 
-void arkrtos_hwsafe_on_death(int32 task_id)
+void arkrtos_hwsafe_on_death_reason(int32 task_id, int32 handover)
 {
     int32 i;
     uint32 state;
@@ -342,10 +350,16 @@ void arkrtos_hwsafe_on_death(int32 task_id)
     {
         if(g_hwsafe_own[i].owner == task_id)
         {
-            g_hwsafe_own[i].dead = 1;
+            g_hwsafe_own[i].dead     = 1;
+            g_hwsafe_own[i].handover = (handover != 0) ? 1u : 0u;
         }
     }
     ARKRTOS_EXIT_CRITICAL(state);
+}
+
+void arkrtos_hwsafe_on_death(int32 task_id)
+{
+    arkrtos_hwsafe_on_death_reason(task_id, 0);
 }
 
 int32 arkrtos_hwsafe_run_pending(void)
@@ -367,18 +381,44 @@ int32 arkrtos_hwsafe_run_pending(void)
              * through its resident driver. */
             /* 没有登记安全态的设备：只能移除条目。这不是"已经安全"，
              * 而是"驱动没告诉内核怎么让它安全"——由 docs 明说，不在这里假装成功。 */
+            if(g_hwsafe_own[i].handover != 0u)
+            {
+                /* Planned hand-over: the successor is taking over, so
+                 * driving the hardware to its safe state here would be a
+                 * glitch, not safety. Drop the entry, drive nothing, and
+                 * keep it OUT of the neutralized count. */
+                g_hwsafe_handover_skipped++;
+                hwsafe_own_remove(i);
+                continue;
+            }
             if((g_hwsafe_own[i].has_will != 0u) && (obj != 0))
             {
-                (void)arkrtos_dev_ctrl_obj(obj,
-                                           (uint32)g_hwsafe_own[i].will_cmd,
-                                           (uint32)g_hwsafe_own[i].will_val);
-                g_hwsafe_will_ran++;
+                /* The counter follows the DRIVER's answer. A will the
+                 * driver refused did not bring the hardware to its safe
+                 * state, and counting it as "will ran" would be exactly
+                 * the confident-but-wrong answer this kernel refuses. */
+                if(arkrtos_dev_ctrl_obj(obj,
+                                        (uint32)g_hwsafe_own[i].will_cmd,
+                                        (uint32)g_hwsafe_own[i].will_val) == 0)
+                {
+                    g_hwsafe_will_ran++;
+                }
+                else
+                {
+                    g_hwsafe_failed++;
+                }
                 ran++;
             }
             else if(fn != 0 && obj != 0)
             {
-                (void)fn(obj, (uint32)owner);
-                g_hwsafe_cb_ran++;
+                if(fn(obj, (uint32)owner) == 0)
+                {
+                    g_hwsafe_cb_ran++;
+                }
+                else
+                {
+                    g_hwsafe_failed++;
+                }
                 ran++;
             }
             else
@@ -503,11 +543,16 @@ int32 arkrtos_hwsafe_last_owner(void)
     return g_hwsafe_last_owner;
 }
 
-void arkrtos_hwsafe_path_counts(uint32 *will_out, uint32 *cb_out, uint32 *none_out)
+void arkrtos_hwsafe_path_counts(uint32 *will_out, uint32 *fail_out, uint32 *cb_out,
+                                  uint32 *none_out, uint32 *handover_out)
 {
     if(will_out != 0)
     {
         *will_out = g_hwsafe_will_ran;
+    }
+    if(fail_out != 0)
+    {
+        *fail_out = g_hwsafe_failed;
     }
     if(cb_out != 0)
     {
@@ -516,6 +561,10 @@ void arkrtos_hwsafe_path_counts(uint32 *will_out, uint32 *cb_out, uint32 *none_o
     if(none_out != 0)
     {
         *none_out = g_hwsafe_none_ran;
+    }
+    if(handover_out != 0)
+    {
+        *handover_out = g_hwsafe_handover_skipped;
     }
 }
 

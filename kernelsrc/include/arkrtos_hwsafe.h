@@ -103,6 +103,12 @@ int32  arkrtos_hwsafe_clear_will(const char *dev_name, int32 owner);
  * 只做标记，可安全地在临界区内（中断屏蔽）调用；真正执行在阶段二。 */
 void   arkrtos_hwsafe_on_death(int32 task_id);
 
+/* 阶段一（带死亡原因版）：handover != 0 表示这是**计划内交接**（小程序把控制权
+ * 交给下一个版本 / 宿主主动让位）。这类死亡会跳过遗言与回调——接手方马上重新
+ * open 同一台设备，此刻把硬件打到安全态是抖动而不是安全。非计划死亡(崩/强杀)
+ * 一律走完整中和。 */
+void   arkrtos_hwsafe_on_death_reason(int32 task_id, int32 handover);
+
 /* 阶段二：对所有"待中和"条目执行驱动的安全态回调，随后移除条目。
  * 在任务退出 / 故障恢复路径、临界区之外调用（可带中断）。返回实际执行的回调数。 */
 int32  arkrtos_hwsafe_run_pending(void);
@@ -126,8 +132,10 @@ uint32 arkrtos_hwsafe_neutralized_count(void);            /* 累计中和次数 
 int32  arkrtos_hwsafe_last_owner(void);                   /* 最近被中和的任务号，0=无 */
 /*
  * 枚举中和次数按通道拆分：will=执行了遗言，cb=走了设备注册的安全态回调，
- * none=设备没有安全态只删了台账。任意项可为 0。
+ * none=设备没有安全态只删了台账，fail=执行了但驱动返回非 0（尝试过、没成功），
+ * handover=计划内交接被跳过（只摘台账、没驱动硬件）。任意项可为 0。
  */
-void   arkrtos_hwsafe_path_counts(uint32 *will_out, uint32 *cb_out, uint32 *none_out);
+void   arkrtos_hwsafe_path_counts(uint32 *will_out, uint32 *fail_out, uint32 *cb_out,
+                                  uint32 *none_out, uint32 *handover_out);
 
 #endif /* __ARKRTOS_HWSAFE_H__ */

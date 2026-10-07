@@ -173,6 +173,11 @@ int32 arkrtos_task_block_in_critical(uint32 timeout_ms);
 *          本函数自带保存-恢复语义的临界区，可在已有临界区内安全调用。
 */
 void arkrtos_task_release_resources(int32 task_id);
+/* Planned hand-over variant: the device ledger is dropped, but no will and
+ * no safe-state callback is run - the successor re-opens the same devices
+ * right after, so driving them to safe state here would be a glitch.
+ * Used by the MiniApp graceful-exit path (ARKRTOS_MINI_EXIT_IS_HANDOVER). */
+void arkrtos_task_release_resources_handover(int32 task_id);
 void arkrtos_task_delay_internal(uint32 us);
 void arkrtos_task_kill_internal(void);
 int32  arkrtos_task_status_get_internal(int32 task_id);

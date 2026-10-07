@@ -179,6 +179,16 @@ int32 arkrtos_mini_set_max_bytes(uint32 bytes);
 * @details 主任务退出 = 整个小程序结束。子线程退出不动块：小程序可能只是
 *          收掉了一个 worker，主任务还要继续跑。
 */
+/**
+* @brief 判断 task_id 是否某个『正在跑』小程序的主任务（只读）
+* @param task_id 任务号
+* @return 1=是某个 RUN 状态小程序的主任务；0=不是
+* @details 给硬件安全态机制用：小程序主任务「正常退出」是无缝升级的交接，
+*          此刻只摘设备台账、不驱动硬件（见 ARKRTOS_MINI_EXIT_IS_HANDOVER）。
+*          必须在 arkrtos_mini_on_task_exit 之前调用——后者会把状态改成 LOAD。
+*/
+int32 arkrtos_mini_task_is_main(uint32 task_id);
+
 int32 arkrtos_mini_on_task_exit(uint32 task_id);
 
 /**

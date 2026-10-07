@@ -748,6 +748,32 @@ int32 arkrtos_mini_forget(const char *path)
     return 0;
 }
 
+int32 arkrtos_mini_task_is_main(uint32 task_id)
+{
+    uint32 irq;
+    uint32 i;
+    int32  found = 0;
+
+    if(task_id == 0u)
+    {
+        return 0;
+    }
+
+    arkrtos_spin_lock_irqsave(&g_mini_lock, &irq);
+    for(i = 0u; i < (uint32)ARKRTOS_MINI_MAX; i++)
+    {
+        if((g_mini[i].state == ARKRTOS_MINI_ST_RUN) &&
+           (g_mini[i].info.task_id == task_id))
+        {
+            found = 1;
+            break;
+        }
+    }
+    arkrtos_spin_unlock_irqrestore(&g_mini_lock, irq);
+
+    return found;
+}
+
 int32 arkrtos_mini_on_task_exit(uint32 task_id)
 {
     uint32 irq;

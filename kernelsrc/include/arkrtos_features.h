@@ -249,6 +249,16 @@
 #define ARKRTOS_HW_SAFE                 0
 #endif
 
+/* 小程序「优雅退出」是否算计划内交接（无缝升级）。
+ * 1（默认）= 小程序主任务正常 return 时，硬件安全态机制只摘台账、不驱动硬件——
+ *            接手的新版本马上会重新 open 同一台设备，此刻把它打到安全态是抖动而非安全。
+ * 0        = 与非小程序一致，正常退出也执行遗言/回调（硬件立刻回安全态）。
+ * 只作用于『小程序主任务正常退出』这一条路径；崩溃 / 被强杀 / 故障恢复一律走完整中和。
+ * 仅在 ARKRTOS_USE_MINIAPP=1 时有意义。见 docs/App崩溃硬件安全与遗言机制.md。 */
+#ifndef ARKRTOS_MINI_EXIT_IS_HANDOVER
+#define ARKRTOS_MINI_EXIT_IS_HANDOVER   1
+#endif
+
 /* 心跳合同与看门狗监督（arkrtos_guard.c）。需要板级 ARKRTOS_WDG_ENABLE 才真咬人 */
 #ifndef ARKRTOS_USE_KERNEL_GUARD
 #define ARKRTOS_USE_KERNEL_GUARD        1
