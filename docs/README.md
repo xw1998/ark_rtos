@@ -23,6 +23,7 @@
 | 说清板子上有什么硬件、驱动按 compatible 找设备 | [设备树.md](设备树.md)（DTS 子集、dtc_lite、arkrtos_dt API、`dt` 命令） |
 | 查 API 签名与参数 | [api/Ark RTOS_API参考.md](api/Ark RTOS_API参考.md) |
 | 想知道它和 Linux 比还差什么、哪些是欠账哪些是定位差 | [与Linux差距盘点.md](与Linux差距盘点.md) |
+| 让设备之间互相发现、发事件、远程调用、传数据（软总线） | [软总线接入.md](软总线接入.md)（ark_softbus 同步副本、三钩子端口、MCU 档与 RAM 实测、`bus` 命令与上板自检） |
 
 ## 目录结构
 
@@ -41,6 +42,7 @@ docs/
 ├── 设备树.md                                # 【设计说明】DTS 子集与 dtc_lite、arkrtos_dt 查询 API、生成与校验、`dt` 命令、验证状态
 ├── 内核Shell控制台使用说明.md               # 【操作手册】console 命令（info/app/drv/task/sched/fault/install/log/pool/trace/cfg）
 ├── 与Linux差距盘点.md                      # 【设计说明】与 Linux 逐维度差距表 + 欠账排序 + 明确不做的取舍
+├── 软总线接入.md                            # 【设计说明】ark_softbus 组件同步副本、板级三钩子、MCU 档位与 RAM 实测、`bus` 命令与上板自检
 ├── img/                                   # 【实测图】根 README §调度表现 引用（必须入库，勿被忽略规则吞掉）
 │   ├── sched-overview.png                 # 整体调度时间线 + 切换间隔（4.97 s 窗口）
 │   ├── sched-switch-detail.png            # 单次切换细节 + App 任务被调度进来跑 72.7 µs

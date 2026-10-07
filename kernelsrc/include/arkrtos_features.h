@@ -259,6 +259,18 @@
 #define ARKRTOS_MINI_EXIT_IS_HANDOVER   1
 #endif
 
+/* 软总线（components/ark_softbus）：跨设备的事件/远程调用/数据平面总线。
+ * 组件本体是 ark_softbus 源仓库的同步副本（tools/sync_ark_softbus.py），
+ * 内核这一层只接板级三钩子 + 一条板内 loopback 链路 + 控制台命令 `bus`，
+ * 见 kernelsrc/src/arkrtos_softbus.c 与 docs/软总线接入.md。
+ * 默认关：关掉时不含任何总线代码，体积与行为零变化。
+ * 打开时必须同时在工程侧给出 MCU 档 -DARK_BUS_* （清单与闸门见
+ * kernelsrc/include/arkrtos_softbus.h 顶部），否则编译期 #error 而不是
+ * 悄悄按默认档多占几 KB RAM。 */
+#ifndef ARKRTOS_USE_SOFTBUS
+#define ARKRTOS_USE_SOFTBUS             0
+#endif
+
 /* 心跳合同与看门狗监督（arkrtos_guard.c）。需要板级 ARKRTOS_WDG_ENABLE 才真咬人 */
 #ifndef ARKRTOS_USE_KERNEL_GUARD
 #define ARKRTOS_USE_KERNEL_GUARD        1

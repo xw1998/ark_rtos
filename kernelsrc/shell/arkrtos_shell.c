@@ -52,6 +52,9 @@
 #if ARKRTOS_HW_SAFE
 #include "arkrtos_hwsafe.h"
 #endif
+#if ARKRTOS_USE_SOFTBUS
+#include "arkrtos_softbus.h"
+#endif
 #include "arkrtos_crash.h"
 #include "arkrtos_partition.h"
 #include "arkrtos_version.h"
@@ -4807,7 +4810,7 @@ static int register_kernel_commands(void)
     int idx = g_cmd_count;
     /* Upper bound with every optional feature compiled in.  Kept above the
      * real count so a future command cannot silently overflow g_cmd_table. */
-    int need = 45;
+    int need = 46;
 
     if((idx + need) > ARK_SHELL_MAX_COMMANDS)
     {
@@ -4909,6 +4912,12 @@ static int register_kernel_commands(void)
         "Cross-reset crash journal: boots, per-slot fault counts, held slots and"
         " disabled MiniApps", 1);
 #endif /* ARKRTOS_USE_CRASH_LOG */
+
+#if ARKRTOS_USE_SOFTBUS
+    g_cmd_table[idx++] = ARK_SHELL_CMD("bus", arkrtos_softbus_shell_cmd,
+        "Soft bus (ark_softbus): bus [info | selftest | pump [n] | peers | rx |"
+        " pub <topic> <text> | rpc <text> | stream <n>]", 4);
+#endif /* ARKRTOS_USE_SOFTBUS */
 
     g_cmd_table[idx++] = ARK_SHELL_CMD("ps", cmd_ps,
         "List kernel tasks and installed images", 1);
