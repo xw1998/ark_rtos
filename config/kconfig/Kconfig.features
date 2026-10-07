@@ -76,6 +76,14 @@ config ARKRTOS_USE_MQ
 	  layer and the loader are built on them, so turning them off would
 	  cascade.  Message queues are the optional one.
 
+config ARKRTOS_USE_MEMPOOL
+	bool "Fixed-block memory pool"
+	default y
+	help
+	  arkrtos_mempool: a non-fragmenting pool whose backing store the
+	  caller supplies.  Long-running components that must not depend on a
+	  heap (loader staging, future socket requests) use it.
+
 config ARKRTOS_USE_TIMER
 	bool "Software timers (SVC 0x17)"
 	default y
@@ -119,6 +127,15 @@ config ARKRTOS_USE_VFS
 	  persistent volume.  With this off the facade still exists (it
 	  returns NOSYS) but no kernel resource is reachable by path.
 
+config ARKRTOS_USE_PROCFS
+	bool "Kernel state filesystem /proc"
+	default y
+	depends on ARKRTOS_USE_VFS
+	help
+	  Read-only, flat: version / uptime / meminfo / cpuinfo / tasks are
+	  rendered from the kernel on each read and mounted at /proc.  It is a
+	  mount point in the VFS namespace, so it needs ARKRTOS_USE_VFS.
+
 config ARKRTOS_USE_VFS_LFS
 	bool "littlefs backend for /mnt"
 	default y
@@ -132,6 +149,31 @@ config ARKRTOS_USE_MINIAPP
 	  Load a payload from the file system into RAM on demand and run it,
 	  returning the RAM when it stops.  Reuses the App image container and
 	  App SDK but does not enter the image pool or take a slot.
+
+config ARKRTOS_MINI_EXIT_IS_HANDOVER
+	bool "MiniApp clean exit counts as handover"
+	default y
+	depends on ARKRTOS_USE_MINIAPP
+	help
+	  A MiniApp main task returning normally is a planned handover, so the
+	  hardware-safe-state mechanism only drops the bookkeeping and does not
+	  drive the hardware (the soon-to-open replacement would be jittered).
+	  Off makes a clean exit behave like every other task: the device is
+	  driven to its safe state.  Only the clean-exit path is affected;
+	  crashes, kills and fault recovery always neutralise fully.
+	  Only meaningful with ARKRTOS_USE_MINIAPP.
+
+config ARKRTOS_MINI_YIELD_CHUNKS
+	int "MiniApp load: yield every N chunks (0 = never)"
+	default 1
+	range 0 1024
+	depends on ARKRTOS_USE_MINIAPP
+	help
+	  While a MiniApp is loading, release and retake the scheduler lock
+	  every N chunks so a higher-priority task (a control loop) gets the
+	  CPU between reads.  A single chunk read is atomic under the lock, so
+	  releasing it cannot let two loaders interleave.  0 keeps the lock
+	  for the whole load, exactly as before this option existed.
 
 config ARKRTOS_USE_POSIX
 	bool "POSIX / Windows compatibility layer"
@@ -150,6 +192,23 @@ config ARKRTOS_USE_MDK_TRACE
 	  components/mdk_trace; needs DWT/ITM hardware.
 
 config ARKRTOS_USE_CM_BACKTRACE
+	bool "cm_backtrace fault traceback"
+	default y
+	help
+	  components/cm_backtrace; needs DWT/NVIC.
+
+config ARKRTOS_USE_SOFTBUS
+	bool "Software bus (components/ark_softbus)"
+	default n
+	help
+	  Cross-device event / remote-call / data-plane bus.  The component is
+	  a synced copy of the ark_softbus repository; the kernel side wires
+	  the board hooks, an in-board loopback link and the `bus` console
+	  command.  Off compiles no bus code at all.  Enabling it also needs
+	  the per-MCU -DARK_BUS_* set in the project, or arkrtos_softbus.h
+	  fails the build with #error instead of quietly taking defaults.
+
+endmenuconfig ARKRTOS_USE_CM_BACKTRACE
 	bool "cm_backtrace fault traceback"
 	default y
 	help
@@ -224,6 +283,33 @@ config ARKRTOS_USE_KERNEL_GUARD
 	  Really bites only when the board sets ARKRTOS_WDG_ENABLE.
 
 config ARKRTOS_USE_AUDIT
+	bool "Structural self-check"
+	default y
+	help
+	  Partition table / slot / image header consistency checks and an
+	  audit record.  Off keeps the loader's minimal legality checks only.
+
+config ARKRTOS_HW_SAFE
+	bool "Hardware safe state on task death (last words)"
+	default n
+	help
+	  A driver may register a neutralise callback declaring "when my owner
+	  dies, bring this device back to a safe state" (stop a motor PWM, drop
+	  a relay).  The kernel keeps a per-task ownership ledger and runs the
+	  callback from the kernel - not from the crashing App - when the task
+	  dies, is killed or is fault-recovered.  Off leaves the device
+	  open/close and task-death paths exactly as before.
+
+config ARKRTOS_USE_UTEST
+	bool "On-board unit test framework"
+	default y
+	help
+	  arkrtos_utest: cases self-register (constructor) and assertions are
+	  accounted, not aborted; the shell gains the `utest` command.  Off
+	  compiles the framework and the command out entirely.  Auto
+	  registration needs constructor support (armclang / GCC).
+
+endmenuconfig ARKRTOS_USE_AUDIT
 	bool "Structural self-check"
 	default y
 	help

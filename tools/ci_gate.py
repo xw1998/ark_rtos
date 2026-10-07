@@ -526,6 +526,37 @@ def check_utest_host():
         else:
             fail("utest-host", "selftest failed: %s" % txt.strip()[:160])
 
+def check_features_switches():
+    """Every gate in arkrtos_features.h must be declared in Kconfig.
+
+    features.h is the #if landing point; Kconfig is what *decides* the value
+    (docs/Kconfig配置系统.md section 7).  A gate that lives only in features.h
+    is invisible to menuconfig and cannot be set from a defconfig, so it
+    silently stays at its #ifndef default.  That is exactly how
+    ARKRTOS_USE_UTEST / _SOFTBUS / _PROCFS / _MEMPOOL / _LWIP / HW_SAFE and the
+    two MiniApp knobs slipped through, so it is a gate failure now rather than
+    a surprise later.
+    """
+    src = read(os.path.join(ROOT, "kernelsrc/include/arkrtos_features.h"))
+    gates = set(re.findall(r"^#ifndef[ \t]+(ARKRTOS_[A-Z0-9_]+)",
+                           src.decode("utf-8", "replace"), re.M))
+    syms = set()
+    kfiles = [os.path.join(ROOT, "Kconfig")]
+    kdir = os.path.join(ROOT, "config/kconfig")
+    if os.path.isdir(kdir):
+        kfiles += [os.path.join(kdir, n) for n in sorted(os.listdir(kdir))]
+    pat = re.compile(r"^\s*config\s+(ARKRTOS_[A-Z0-9_]+)", re.M)
+    for f in kfiles:
+        if os.path.isfile(f):
+            with open(f, encoding="utf-8", errors="replace") as fh:
+                syms.update(pat.findall(fh.read()))
+    missing = sorted(gates - syms)
+    if missing:
+        fail("features-switches", "gate(s) absent from Kconfig: %s"
+             % ", ".join(missing))
+    else:
+        ok("features-switches", "%d gate(s) all declared in Kconfig" % len(gates))
+
 def main(argv):
     do_build = "--build" in argv
     uv4 = None
@@ -543,6 +574,7 @@ def main(argv):
     check_layout_and_scatter()
     check_no_partition_include_in_app()
     check_config_generated()
+    check_features_switches()
     check_devicetree_generated()
     check_utest_host()
     if do_build:

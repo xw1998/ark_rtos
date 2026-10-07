@@ -5,6 +5,18 @@
 
 menu "Network"
 
+config ARKRTOS_USE_LWIP
+	bool "lwIP TCP/IP stack + Ark RTOS port"
+	default n
+	depends on ARKRTOS_USE_MQ
+	help
+	  The lwIP sources are not conditional-compiled; this gate only
+	  controls the port layer, so off means no port is built and the
+	  socket SVCs return NOSYS.  No real Ethernet MAC is wired yet - this
+	  verifies the stack and socket semantics only, not traffic.  It is
+	  large (about 2.5 MB of sources, tens of KB of static RAM), so it
+	  defaults off and is turned on per project with -D.
+
 config ARKRTOS_NET_MAX_SOCKETS
 	int "Simultaneous sockets"
 	default 4

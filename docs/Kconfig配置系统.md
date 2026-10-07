@@ -106,3 +106,13 @@ F427 内核在接入前后 `Code=172734` 一模一样，就是这个原则的实
 
 `arkrtos_features.h` 仍是代码里 `#if ARKRTOS_USE_XXX` 的落脚点；Kconfig 负责
 **决定**这些宏取什么值，并保证取值之间处于合法组合。两者职责不重叠。
+
+这条分工要求「features.h 里的每个开关都必须在 Kconfig 里有一条 `config`」——否则
+它在 `menuconfig` 里看不到、也没法从 defconfig 改。早期有几个开关漏在 features.h
+单独存在（`ARKRTOS_USE_LWIP / _MEMPOOL / _PROCFS / _SOFTBUS / _UTEST`、
+`ARKRTOS_HW_SAFE` 与两个 MiniApp 旋钮），现已全部补入 Kconfig，与 features.h 的
+`#ifndef` 默认值逐一对齐；`tools/ci_gate.py` 的 `features-switches` 检查会盯住这条
+约束，漏一个就红。
+
+补齐后 F427 内核重新编译，`Code=211002 RO-data=17378 RW-data=888 ZI-data=116316`
+与补齐前逐字节相同——宏值本来就一样，Kconfig 只是让它们**可被菜单配置**。
