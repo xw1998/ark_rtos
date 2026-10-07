@@ -32,6 +32,11 @@
 .global  g_pfnVectors
 .global  Default_Handler
 
+/* Ark RTOS: 内核 .bss 会溢写到 CCM（见 tools/gen_ld.py 的 .bss.ccm）。
+   声明为 weak：CCM 段不存在时（如无 CCM 的芯片）解析为 0，清零循环自动空转。 */
+.weak    _sbss_ccm
+.weak    _ebss_ccm
+
 /* start address for the initialization values of the .data section. 
 defined in linker script */
 .word  _sidata
@@ -94,6 +99,20 @@ LoopFillZerobss:
   cmp r2, r4
   bcc FillZerobss
   
+/* Zero fill the CCM bss segment (Ark RTOS: 内核 .bss 溢写段，见 gen_ld.py)。 */
+  ldr r2, =_sbss_ccm
+  ldr r4, =_ebss_ccm
+  movs r3, #0
+  b LoopFillZerobssCcm
+
+FillZerobssCcm:
+  str  r3, [r2]
+  adds r2, r2, #4
+
+LoopFillZerobssCcm:
+  cmp r2, r4
+  bcc FillZerobssCcm
+
 /* Call static constructors */
     bl __libc_init_array
 /* Call the application's entry point.*/
