@@ -242,8 +242,10 @@ make -j8 USE_QSPI=1 USE_MINI_VFS=1 USE_APPPACK=1 USE_ARKMAKE=1
 # 2. 烧录后挂载 NOR（t≈3 s 后 mount 才稳定）
 mount /mnt/nor
 
-# 3. 上传工程描述（fs put 走 littlefs 绝对路径，不是挂载点路径）
-fs put /makefile <字节数>     # 宿主机侧用 tools/../arkw/fsput.py
+# 3. 上传工程描述。fs put 的路径是 littlefs 里的绝对路径（/makefile），
+#    不是挂载点路径（/mnt/nor/makefile）——它直接调 arkrtos_fs_open_write，
+#    不做 VFS 前缀解析，写挂载点路径会拿到 LFS_ERR_NOENT
+fs put /makefile <字节数>
 
 # 4. 构建并运行
 cd /mnt/nor
