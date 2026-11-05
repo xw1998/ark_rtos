@@ -351,6 +351,16 @@
 #define ARKRTOS_SHELL_BOARD_CMDS        0
 #endif
 
+/* 外置 QSPI NOR（W25Q64，8 MiB）：编入 board/<芯片>/drvqspi.c，注册块设备
+ * `nor0`（bring-up 读 JEDEC ID，读到 0xEF4017 才算设备在），并带 `nor` 取证命令。
+ * 默认 0：本文件不进编译、不碰 QUADSPI 时钟与引脚、不注册 nor0、命令表逐字节不变。
+ * 读/写/擦走位敲（见该文件顶部：QUADSPI 的带地址命令在这块板上会时好时坏，
+ * 失败后还会把外设留在 FIFO 有残留的状态）；QUADSPI 只留作取证入口。
+ * 文件系统不是它的职责：卷由上层 arkrtos_fs 挂到 nor0 上（分区头 ARKRTOS_FS_*）。 */
+#ifndef ARKRTOS_USE_QSPI
+#define ARKRTOS_USE_QSPI                0
+#endif
+
 /* On-board app runner: `app run <path>` takes a bare arkc-produced executable
  * out of the file system, drops it into the fixed window declared by the board
  * partition header (ARKRTOS_APPRUN_*) and starts it as an unprivileged task.

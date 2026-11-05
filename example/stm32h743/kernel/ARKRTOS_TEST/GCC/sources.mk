@@ -84,6 +84,15 @@ SRCS := \
   example/stm32h743/kernel/ARKRTOS_TEST/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_uart.c \
   example/stm32h743/kernel/ARKRTOS_TEST/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_exti.c \
 
+# QSPI NOR (W25Q64) bring-up probe.  Off = the board file is not compiled at all:
+# no QUADSPI clock, no pins, same image bytes.  The driver talks to the QUADSPI
+# registers directly (H7's HAL_QSPI pulls in MDMA for indirect mode, which a
+# probe that only reads 3 + 32 bytes does not need).
+ifeq ($(USE_QSPI),1)
+SRCS += \
+  board/stm32h743/drvqspi.c
+endif
+
 # Relocatable image packer (L2).  Pure computation: no I/O, no allocation,
 # no dependency on arkc - it only looks at how the same bytes differ between
 # two nominal bases.  Kept out of SRCS when USE_APPPACK=0 so "off means no

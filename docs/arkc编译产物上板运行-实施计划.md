@@ -200,7 +200,7 @@ void MINISTART(void)
 | 子步 | 内容 | 判据 |
 |------|------|------|
 | M3-a **（已完成）** | `mini` 读取后端可切换：新增 `arkrtos_mini_read_exact` 的 VFS 分支（开关 `ARKRTOS_MINI_READ_VFS`，默认 **0** 保持走 `arkrtos_fs`）；VFS 侧补一个门面 `arkrtos_vfs_read_at(path, buf, len, off, &got)` = `open_read` + `ark_vfs_lseek` + `read` + `close` | 默认关时 mini 行为与现在逐字节相同；开启后能从 ramfs 读 `.svcm` 并 `mini run` 成功。**注意 ramfs 掉电即失，此步只解决「能不能读」，不解决持久化** |
-| M3-b | QSPI W25Q64 + littlefs：dts 里 `&qspi` 现为 `status="disabled"`（`NCS=PG6`/`CLK=PF10`/`IO0..3=PF8/PF9/PF7/PF6`）；挂成 `/mnt/nor` | 断电重启后 `.svcm` 仍在；`mini autostart` 能起来 |
+| M3-b **（已打通；两条判据达成一条）** | QSPI W25Q64 + littlefs：dts 里 `&qspi` 现为 `status="disabled"`（`NCS=PG6`/`CLK=PF10`/`IO0..3=PF8/PF9/PF7/PF6`）；挂成 `/mnt/nor` | 断电重启后 `.svcm` 仍在（**已达成**）；`mini autostart` 能起来（**未达成**：清单在 ramfs 根、复位即失，见 M3-b 记录 §10） |
 | M3-c | `arkrtos_vfs_mount_volume()` 的格式化路径要显式（不自动格盘） | 首次挂载未格式化卷要**明确报错**，不能静默格盘 |
 
 M3-b 的风险最高（NOR 驱动 + 文件系统 + 未验证的引脚），所以排在最后，且 M1/M2 的结论不依赖它。
@@ -273,7 +273,8 @@ M0 ──→ M1 ──→ M2 ──→ M4
 2. 上一轮 arkc 上板编译那批成果**不单独提交**，与本计划的成果合并提交（push 仍需单独获同意）。
 3. **M2 已按「四遍差分 + 既有 `mini` 装载」实施并实机通过**（2026-11-05）；M3-a（`ARKRTOS_MINI_READ_VFS`）同批完成，默认 **0** 保持原后端。M2 的判据 B 已补测通过（同镜像两落点），「跨文件调用」一项缺口如实记账，**不写成判据全绿**。
 4. 板/宿产物 108 B 差异登记为**未查明**，不作为编译器等价性的证据，也不据此推定任一侧有缺陷。
-5. **M4 已完成**：错误码表、尺寸账本、`tools/final_app.py` 板级回归（四条用例，实测 4/4 PASS）与 wiki 记忆均已落地；
+5. **M3-b 已打通（2026-11-05 实机）**：JEDEC `0xEF4017`（W25Q64 / 8 MiB）、`nor verify` 四步 PASS、`fs test` PASS、`cc --pack` 产物落 NOR、**复位后 `.svcm` 仍在并可用 `mini run` 跑出源码独有的两行**；代价是慢（打包 24.8 s、装载 33.7 s），原因与提速方向见 [arkc板上直跑-M3b-QSPI持久化.md](arkc板上直跑-M3b-QSPI持久化.md) §8。同轮修掉一处内核缺陷：littlefs 卷上**新建**文件被 VFS 桥判成 I/O 错误（ramfs 上永远看不见）。**跨复位的 `mini autostart` 未达成**，如实记账，不写成判据全绿。
+6. **M4 已完成**：错误码表、尺寸账本、`tools/final_app.py` 板级回归（四条用例，实测 4/4 PASS）与 wiki 记忆均已落地；
    M2 判据 C 的「跨文件调用」仍缺（`-link` 需要六份文件，ramfs 只有 3 槽），随 M3-b 之后再补。
 
 **M0 之后仍待用户决定**

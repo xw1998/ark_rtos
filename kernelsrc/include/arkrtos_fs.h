@@ -177,6 +177,18 @@ int32 arkrtos_fs_volume(const char **dev, uint32 *offset, uint32 *size);
 int32 arkrtos_fs_last_error(void);
 
 /**
+ * @brief 1 = the last call failed only because the entry does not exist
+ * @details "No such entry" is a normal answer, not a fault: a caller that has
+ *          to choose between opening and creating (the VFS bridge does) must
+ *          be able to tell it apart from a real I/O failure.  It is a separate
+ *          predicate instead of "stat failures leave last_error alone",
+ *          because clearing the recorded cause would erase the one number an
+ *          operator is told to look at.
+ * @return 1 when arkrtos_fs_last_error() is LFS_ERR_NOENT, 0 otherwise.
+ */
+uint8 arkrtos_fs_last_is_noent(void);
+
+/**
  * @brief Human readable name of an error code, for reports.
  * @details Callers must print the number the file system returned, not a
  *          guessed cause; this only adds the short symbol on top of it.

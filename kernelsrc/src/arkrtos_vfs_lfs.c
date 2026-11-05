@@ -160,10 +160,15 @@ static int32_t lfs_open(struct ark_vfs_mnt *mnt, const char *rel, int flags,
         {
             return ARK_E_NOENT;                 /* 只读打开且不存在 */
         }
-        if (arkrtos_fs_last_error() != 0)
+        if (arkrtos_fs_last_is_noent() == 0u)
         {
-            /* stat 真的报错了，而不是「没有这个条目」；具体是什么错门面
-             * 没有给出可判别的信息，于是按 IO 报，并留下原始数字。 */
+            /* 门面说这**不是**「没有这个条目」，那就是真错。具体是什么错
+             * 门面没有给出可判别的信息，于是按 IO 报，并留下原始数字。
+             *
+             * 反过来，NOENT 就是「没有」，只有它才允许往下走成新建。这一条
+             * 曾经写成 last_error != 0，于是 littlefs 卷上**新建**文件必然
+             * 报 I/O error：ramfs 上永远看不见，/mnt/nor 上一试就现形。
+             * 现场读数见 docs/arkc板上直跑-M3b-QSPI持久化.md。 */
             return p_io("open/stat", abs);
         }
         is_dir = 0u;

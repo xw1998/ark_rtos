@@ -706,11 +706,12 @@ typedef char arkrtos_pool_unit_check[
 #define SHELL_INSTALL_TIMEOUT_MS 120000          /* install 窗口最长等待（ms），超时回命令提示符 */
 
 /* ============================================================
- * 十二、外部 SPI NOR 与文件系统卷（板载器件，不是片内 Flash）
- * @details 这一节描述挂在 SPI 上的那颗 NOR（F427 板 = U4 W25Q128，16 MB），
+ * 十二、外部 QSPI NOR 与文件系统卷（板载器件，不是片内 Flash）
+ * @details 这一节描述挂在 QUADSPI 上的那颗 NOR（H743 板 = W25Q64，8 MB，
+ *          引脚 NCS=PG6 / CLK=PF10 / IO0..3=PF8/PF9/PF7/PF6），
  *          不参与上面「一~十一」那套 BOOT/KERNEL/CONFIG/POOL 推导。
  *          这里只回答「哪段地址范围归谁用」（地址只在此处定义一次）；
- *          器件操作在 board/<芯片>/drvnor.c，经 arkrtos_blk 注册成块设备。
+ *          器件操作在 board/<芯片>/drvqspi.c，经 arkrtos_blk 注册成块设备 nor0。
  *
  *            - 文件系统卷：littlefs 用，从 0 起 (4 * 1024 * 1024)；
  *            - 镜像区    ：预留给「把 App 装到外部 Flash」，尚未启用。
@@ -719,7 +720,7 @@ typedef char arkrtos_pool_unit_check[
  *          实际容量为准（arkrtos_nor_capacity）；换一颗小容量料时，下面这条
  *          编译期自检先拦住，而不是让装载器写到芯片外面。
  * ============================================================ */
-#define ARKRTOS_NOR_CHIP_SIZE      (16 * 1024 * 1024)  /* 板载 NOR 容量；无 NOR 的板卡填 0 */
+#define ARKRTOS_NOR_CHIP_SIZE      (8 * 1024 * 1024)   /* 板载 QSPI NOR（W25Q64）容量；无 NOR 的板卡填 0 */
 #define ARKRTOS_FS_DEV_NAME        "nor0"              /* 文件系统所在的块设备名 */
 #define ARKRTOS_FS_BASE            (0)                 /* 卷在设备内的偏移 */
 #define ARKRTOS_FS_SIZE            (4 * 1024 * 1024)  /* 卷大小；填 0 = 本板不使用文件系统 */

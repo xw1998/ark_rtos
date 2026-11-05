@@ -12,7 +12,7 @@
 *            1. 头文件换成 stm32h7xx.h / stm32h7xx_hal.h；
 *            2. 灯只剩一颗（PC13，低电平点亮），注册名仍是 "led0"；
 *            3. 不再注册 led1/led2；
-*            4. 块设备只有内部的 int0（QSPI NOR 驱动是 M2 的事）。
+*            4. 块设备只有内部的 int0（QSPI NOR 见 drvqspi.c：默认关，只做取证）。
 *          CPACR/FPCCR 的位、NVIC 优先级数值、SysTick 补 HAL 时基的算法
 *          与 F427 完全一致：这些是 ARMv7-M 架构与内核节拍约定，
 *          不是芯片差异，改了就是引入新的行为。
@@ -30,7 +30,10 @@
 #include "drvuart.h"
 #include "drvblk.h"
 #include "drvfmc.h"
-#if (ARKRTOS_USE_SDRAM == 1)
+#if (ARKRTOS_USE_QSPI == 1)
+#include "drvqspi.h"
+#endif
+#if ((ARKRTOS_USE_SDRAM == 1) || (ARKRTOS_USE_QSPI == 1))
 #include "arkrtos_shell.h"        /* arkrtos_board_shell_register 的返回约定 */
 #include "ark_shell_commands.h"   /* g_cmd_table / ARK_SHELL_CMD / 容量上限 */
 #endif
@@ -123,6 +126,21 @@ void arkrtos_dev_board_init(void)
     (void)arkrtos_hwsafe_register("led0", led_drv_safe);
 #endif
 
+#if (ARKRTOS_USE_QSPI == 1)
+    /* QSPI NOR：只做取证（读 JEDEC ID）。失败不终止启动——串口与内核都还能用，
+     * 把"这颗芯片是否应答"如实说清楚，比带着一个假定存在的块设备继续跑更接近
+     * 事实。nor 命令可以随时重试并打印 CR/SR。 */
+    {
+        int32 nor_rc = arkrtos_board_nor_init();
+
+        if(nor_rc != 0)
+        {
+            ARKRTOS_LOGE("NOR", "probe failed (%d); \'nor id\' retries and prints CR/SR",
+                         (int)nor_rc);
+        }
+    }
+#endif
+
     /* 块设备在这里登记但不在这里上电：描述符是静态的，
      * arkrtos_blk_init() 在首次使用时才做 bring-up。 */
     if(arkrtos_board_blk_init() != 0)
@@ -131,7 +149,7 @@ void arkrtos_dev_board_init(void)
     }
 }
 
-#if (ARKRTOS_USE_SDRAM == 1)
+#if ((ARKRTOS_USE_SDRAM == 1) || (ARKRTOS_USE_QSPI == 1))
 /* ============================================================
  * 板级 Shell 命令登记 - 内核扩展点实现
  * @brief 把 "sdram" 追加进 ark_shell 的命令表
@@ -161,12 +179,30 @@ int32 arkrtos_board_shell_register(int32 idx)
         return idx;
     }
 
+#if (ARKRTOS_USE_SDRAM == 1)
     g_cmd_table[idx] = ARK_SHELL_CMD("sdram", arkrtos_sdram_shell_cmd,
         "External SDRAM: sdram [info | init | verify | probe | test | fsm | pins | clk <n> | regs]",
         3);
-    return idx + 1;
+    idx++;
+#endif
+
+#if (ARKRTOS_USE_QSPI == 1)
+    /* 每登记一条都要重新查一次上限：少一条诊断命令可以接受，写坏命令表不行。 */
+    if((idx + 1) > ARK_SHELL_MAX_COMMANDS)
+    {
+        ARKRTOS_LOGE("NOR", "shell command table full (%d), \'nor\' not registered",
+                     (int)ARK_SHELL_MAX_COMMANDS);
+        return idx;
+    }
+    g_cmd_table[idx] = ARK_SHELL_CMD("nor", arkrtos_board_nor_shell_cmd,
+        "QSPI NOR (W25Q64): nor [info | init | id | sr | read <hexaddr> [len] | mm <hexaddr> [len] | regs | pins | bb | drive | bench | af <n> [pg] | raw <instr> [len] [addr] | clk <n>]",
+        6);
+    idx++;
+#endif
+
+    return idx;
 }
-#endif /* ARKRTOS_USE_SDRAM */
+#endif /* ARKRTOS_USE_SDRAM || ARKRTOS_USE_QSPI */
 
 /* ============================================================
  * 内核异常与节拍向量

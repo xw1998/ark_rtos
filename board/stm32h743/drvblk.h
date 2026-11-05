@@ -7,12 +7,13 @@
 *                   config/stm32h743/arkrtos_partition.h). Memory mapped,
 *                   erased in 128 KiB sectors.
 *
-*          The external QSPI NOR (U?, W25Q64, 8 MiB) is described in
-*          dts/stm32h743.dts but not registered yet: the QUADSPI driver is
-*          the first item of M2. Registering a device with no driver behind
-*          it would answer "the board has 8 MiB" and then fail every access,
-*          which is exactly the kind of wrong answer this project does not
-*          give - absent is reported as absent.
+*          The external QSPI NOR (U?, W25Q64, 8 MiB) is registered as `nor0`
+*          when USE_QSPI=1, and only then: the descriptor's bring-up reads the
+*          JEDEC ID, so "the board has 8 MiB" is never claimed before the chip
+*          itself has answered. An unanswered chip is reported as absent, not
+*          as a device that fails every access. Read/write/erase go through
+*          drvqspi.c (bit-banged, see the note at the top of that file); its
+*          sector size is the chip's 4 KiB, not the internal flash's 128 KiB.
 *
 *          The descriptor does not touch hardware at registration time:
 *          bring-up is deferred to the first arkrtos_blk_init() call.

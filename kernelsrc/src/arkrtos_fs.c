@@ -104,6 +104,11 @@ int32 arkrtos_fs_last_error(void)
     return g_fs.last_error;
 }
 
+uint8 arkrtos_fs_last_is_noent(void)
+{
+    return (g_fs.last_error == LFS_ERR_NOENT) ? 1u : 0u;
+}
+
 const char *arkrtos_fs_error_name(int32 e)
 {
     /* Names come from the enum in lfs.h, never from a numbering of our own:
@@ -1249,6 +1254,11 @@ int32 arkrtos_fs_list_names(const char *dir, char *out, uint32 out_size,
 int32 arkrtos_fs_last_error(void)
 {
     return ARKRTOS_FS_ERR_NOT_MOUNTED;
+}
+
+uint8 arkrtos_fs_last_is_noent(void)
+{
+    return 0u;   /* no volume, so nothing is ever merely "absent" */
 }
 
 const char *arkrtos_fs_error_name(int32 lfs_err)

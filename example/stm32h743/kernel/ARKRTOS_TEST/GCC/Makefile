@@ -63,6 +63,10 @@ USE_MINI_VFS ?= 0
 # 可重定位镜像打包（M2）：1 = 编入四遍差分打包器，给 arkc 的 `cc --pack` 用。
 # 默认 0：关掉时 arkrtos_apppack.c 不进 SRCS，镜像与命令表逐字节不变。
 USE_APPPACK ?= 0
+# QSPI NOR（W25Q64）取证探针：1 = 编入 drvqspi.c（寄存器级，不走 HAL：H7 的
+# HAL_QSPI 会拖进 MDMA）、注册 `nor` 命令。
+# 默认 0：不碰 QUADSPI 的时钟/引脚，镜像与命令表逐字节不变。
+USE_QSPI ?= 0
 # 小程序任务优先级：空 = 沿用 APP_TASK_PRIORITY（与现在逐字节相同）。
 # 小程序死循环时会把控制台饿死，要边跑边停就把它调到控制台之下（shell=14）。
 MINI_PRIORITY ?=
@@ -78,6 +82,16 @@ PY    := env -u PYTHONHOME -u PYTHONPATH py -3
 # 目标核：Cortex-M7，硬浮点，双精度单元（H743 的 FPU 是 fpv5-d16）
 CPU := -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard
 
+# 板级 Shell 命令总开关：只要有一条板级诊断命令编进来，命令表就要为它留位置。
+# 以前这里直接写 $(USE_SDRAM)：QSPI 进来之后那个式子会静默漏掉 nor 命令。
+BOARD_CMDS := 0
+ifeq ($(USE_SDRAM),1)
+BOARD_CMDS := 1
+endif
+ifeq ($(USE_QSPI),1)
+BOARD_CMDS := 1
+endif
+
 # 宏：内核开关全部显式写出，读 Makefile 就能看到这一版到底编进了什么
 DEFS := \
   -DUSE_HAL_DRIVER -DSTM32H743xx \
@@ -87,7 +101,8 @@ DEFS := \
   -DMDK_TRACE_SWD_EXTERNAL_PLATFORM -DMDK_TRACE_USE_CONFIG_FILE \
   -DLFS_NO_MALLOC -DLFS_NO_ASSERT -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR \
   -DARKRTOS_USE_ARKVIM=$(USE_ARKVIM) -DARKRTOS_USE_ARKC=$(USE_ARKC) \
-  -DARKRTOS_USE_SDRAM=$(USE_SDRAM) -DARKRTOS_SHELL_BOARD_CMDS=$(USE_SDRAM) \
+  -DARKRTOS_USE_SDRAM=$(USE_SDRAM) -DARKRTOS_USE_QSPI=$(USE_QSPI) \
+  -DARKRTOS_SHELL_BOARD_CMDS=$(BOARD_CMDS) \
   -DARKRTOS_USE_APPRUN=$(USE_APPRUN) \
   -DARKRTOS_MINI_READ_VFS=$(USE_MINI_VFS) \
   -DARKRTOS_USE_APPPACK=$(USE_APPPACK)
