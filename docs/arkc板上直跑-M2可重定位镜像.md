@@ -185,6 +185,66 @@ mini: none running (usage: mini run <path>)
 `cc_reset_state()`（`config_init` + `g_config.enable_fpu_hw=1` + `arkc_port_zero_arena()` +
 `diag_init`）**每一遍都调**，所以四遍各有干净 arena——这是「同一进程里链四遍」能成立的前提。
 
+### 5.2 判据 B：同一镜像两个落点（`r2.c`，3144 B 负载）
+
+程序自己算出「字符串字面量的绝对地址 − `0x24070000`」再右移 12 位，就是这个落点落在第几个
+4 KB 块里；它把这个块号打成 `'0'+n` 一个字打出来。所以串口上的 `0` / `1` 不是人读日志读出来的，
+是**程序自己量出来的**：
+
+```
+mini run /tmp/r2.svcm
+MINI:579 /tmp/r2.svcm: 3144 B payload -> code 0x24070000 (4096 B block), RW/stack 0x24072000 (8192 B), task 4
+R2 alive
+0
+mini run /tmp/r2.svcm            # 同一份文件，不重新打包
+MINI:579 /tmp/r2.svcm: 3144 B payload -> code 0x24071000 (4096 B block), RW/stack 0x24074000 (8192 B), task 5
+R2 alive
+1
+mini
+mini: 2 running of 2 allowed
+  [0] task 4 entry 0x24070419
+      code 3144 B in 4096 B block @ 0x24070000
+      RW/ZI+stack 8192 B block @ 0x24072000, crc 0x444C3FCF
+  [1] task 5 entry 0x24071419
+      code 3144 B in 4096 B block @ 0x24071000
+      RW/ZI+stack 8192 B block @ 0x24074000, crc 0x444C3FCF
+  block entries: 2 of 4 in use
+mini stop
+mini stopped: all blocks returned to the pool
+```
+
+三条读数各管一件事：
+
+- **`crc` 相同（`0x444C3FCF`）** ⇒ 真的是同一份镜像，不是重新打的第二份；
+- **入口偏移相同（两次都是块内 `+0x419`）** ⇒ 代码没有因为落点变化而错位；
+- **ROM 文字与 RAM 全局同时正确**（`R2 alive` 来自代码块里的字面量，`g_anchor == 0xA5A5A5A5u`
+  的判定没打 `!`）⇒ ROM 类与 RAM 类重定位都被这一次落点变化覆盖到了。
+
+### 5.3 为什么这次能跑第二次：`MINI_PRIORITY`
+
+第一次尝试（默认固件）就撞上了 M1 那条教训的另一半：小程序任务用 `APP_TASK_PRIORITY`（10），
+**在控制台（14）之上**。一个 `for (;;) { }` 的小程序把控制台饿死——第一次 `mini run` 打印正常，
+之后敲 `mini` 连回显都没有，只能复位（本记录 §5.2 的前身就是这么失败的）。
+
+所以给 `mini` 加了一个覆盖口，**默认不定义宏时行为与体积逐字节不变**（0 档仍 381808 B、
+开档仍 388704 B）：
+
+```makefile
+# example/stm32h743/kernel/ARKRTOS_TEST/GCC/Makefile
+MINI_PRIORITY ?=          # 空 = 沿用 APP_TASK_PRIORITY
+```
+
+```c
+/* kernelsrc/src/arkrtos_mini.c */
+#ifndef ARKRTOS_MINI_TASK_PRIORITY
+#define ARKRTOS_MINI_TASK_PRIORITY   APP_TASK_PRIORITY
+#endif
+```
+
+判据 B 那次固件用 `make USE_APPPACK=1 USE_MINI_VFS=1 MINI_PRIORITY=22` 构建。
+这个口子不是只为测试：小程序是「现读现跑、最容易死循环」的形态，一旦死循环就再也停不下来，
+把优先级放到控制台之下是唯一能「边跑边救」的办法。
+
 ---
 
 ## 6. 体积账
@@ -207,15 +267,16 @@ mini: none running (usage: mini run <path>)
 | 判据 | 状态 |
 |------|------|
 | A `cc --pack` → `mini run` 出字、退出、块归还 | **通过**（§5） |
-| B 同一镜像在两个不同落点各跑一次 | **未做**：`mini` 的 code 块是首适配，需要先占住 4 KB 块才能逼它换落点；本轮先用「表项四类非零 + D 遍逐字节相等」作为可重定位性的证据，落点切换登记为下一步 |
+| B 同一镜像在两个不同落点各跑一次 | **通过**（§5.2）:同一份 `/tmp/r2.svcm` 连跑两次，落点分别 `0x24070000` 与 `0x24071000`，RW 块 `0x24072000` 与 `0x24074000`，程序自己打印的落点号分别是 `0` 与 `1`，两次都打出源码里的 `R2 alive`；`mini stop` 后块全部归还。**前提**：这次固件把小程序任务优先级调到控制台之下（`MINI_PRIORITY=22`），否则死循环的小程序会把控制台饿死、第二次 `mini run` 根本发不出去 —— 见 §5.3 |
 | C 程序含带初值全局 / 字符串字面量 / 函数指针 / 跨文件调用 | **部分**：`p.c` 覆盖了字符串字面量与函数指针（MOVW 对 ×4），**跨文件调用未覆盖**——ramfs 只有 3 个槽，`-link` 多输入要 4 份以上文件 |
 | 反假绿 ① 删表项必须出问题 | **通过**（宿主 6/6，§4.1 第 ⑤ 条） |
 | 反假绿 ② 打印四类分布 | **通过**（1 / 1 / 2 / 2） |
 | 反假绿 ③ `verify` 的 D 遍必须真跑且不匹配就拒绝 | **通过**（注入 D 错 ⇒ `-32`；表应用回 A 后与 D 逐字节比） |
 
-**弱项如实记账**：判据 B 与 C 的「跨文件调用」没有做完，原因分别是「需要先占块」与
-「ramfs 槽位不够」。它们不改变「板上编出的可重定位镜像能在板上跑起来」这条结论，
-但**也不能说 M2 的判据全绿**。
+**弱项如实记账**：只剩判据 C 的「跨文件调用」没做完，原因是 ramfs 只有 3 个槽，
+`-link` 多输入要「两份源 + 两份目标 + 散列文件 + 产物」六份，装不下。它不改变
+「板上编出的可重定位镜像能在板上跑起来」这条结论，但**也不能说 M2 的判据全绿**。
+判据 B 原先也缺，本轮补上了（§5.2）：同镜像两落点、块号由程序自己量、`crc` 与入口偏移相同。
 
 ---
 
@@ -226,7 +287,8 @@ mini: none running (usage: mini run <path>)
 | 单文件源码 | `cc` 一次编一个 `.c`；`-link` 已接线但 ramfs 槽位不够 | M2 之后（槽位或持久化） |
 | 镜像在 VFS 的 ramfs 上 | 掉电即失 | M3-b（QSPI W25Q64 + littlefs） |
 | 板上产物比宿主小 **108 B**（3006 vs 3114） | 同一份 `p.c`、同 `-O1`，板上 3006 B、宿主 3114 B；两边都在各自基址上自洽（向量表、入口、表项差分都成立），**成因未查明** | 登记为未查明，不猜。若继续推进，下一步应先比对两边 `.s` 的段落尺寸 |
-| 池 80 KB | 长源码 `-O1` 完整流水线会耗尽池 ⇒ 测试源必须短 | 已知，不修 |
+| 池 80 KB | 长源码 `-O1` 完整流水线会耗尽池 ⇒ 测试源必须短。实测 809 B 的源在 pass A 就 `[arkc] FATAL: memory pool exhausted`（pool 71304/81920 B），压到 569 B 后四遍全过 | 已知，不修（报错是明确的那一条，不是静默出坏镜像） |
+| 小程序默认优先级在控制台之上 | 死循环的小程序会让控制台失去响应，只能复位；`MINI_PRIORITY` 可下调（§5.3），默认值保持不变 | 设计现状 + 已给出口 |
 
 ---
 
@@ -241,4 +303,5 @@ mini: none running (usage: mini run <path>)
 | `kernelsrc/components/arkc/arkc_port_arkrtos.c` | 四遍各自的 arena 重置与捕获钩子 |
 | `kernelsrc/src/arkrtos_mini.c` | `ARKRTOS_MINI_READ_VFS=1` 时从 ramfs 读镜像（M3-a） |
 | `kernelsrc/src/arkrtos_vfs.c` | `arkrtos_vfs_read_at(path, buf, len, off, &got)` |
-| `example/stm32h743/kernel/ARKRTOS_TEST/GCC/Makefile` | `USE_APPPACK ?= 0` |
+| `example/stm32h743/kernel/ARKRTOS_TEST/GCC/Makefile` | `USE_APPPACK ?= 0`、`MINI_PRIORITY ?=`（空 = 沿用 `APP_TASK_PRIORITY`） |
+| `kernelsrc/src/arkrtos_mini.c` | `ARKRTOS_MINI_TASK_PRIORITY` 覆盖口（默认 = `APP_TASK_PRIORITY`） |

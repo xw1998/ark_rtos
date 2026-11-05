@@ -67,6 +67,17 @@
 #error "ARKRTOS_MINI_YIELD_CHUNKS must be defined by arkrtos_features.h"
 #endif
 
+/* 小程序任务的优先级：默认沿用 App 的那一个（APP_TASK_PRIORITY），因此不定义
+ * 这个宏时行为与体积逐字节不变。留一个覆盖口的理由是实测教训，与 M1 的
+ * apprun 同一条：小程序是「现读现跑、最容易死循环」的形态，一旦它死循环且
+ * 优先级在控制台之上，控制台会被永久饿死——实测第二次 `mini run` 连回显都
+ * 没有，只能复位。把优先级降到控制台之下，就能在「它占着块不放」的同时继续
+ * 用控制台（判据 B「同一镜像两个落点」正是靠这个跑出来的）。
+ * 取值与出处见 docs/arkc板上直跑-M2可重定位镜像.md §5.3。 */
+#ifndef ARKRTOS_MINI_TASK_PRIORITY
+#define ARKRTOS_MINI_TASK_PRIORITY   APP_TASK_PRIORITY
+#endif
+
 /* 实例状态。LOAD 有两层含义，都归在「已占项但不在跑」里：
  *   - 正在装载（已占项，尚未起任务）；
  *   - 正在拆除（停止/回收中，任务已被摘除、块待归还）。
@@ -529,7 +540,7 @@ int32 arkrtos_mini_run(const char *path)
     task_id = arkrtos_task_register((void (*)(void))entry,
                                   (uint32 *)(void *)(ram_base + ram_block - APP_TASK_STACK_SIZE),
                                   (uint32)APP_TASK_STACK_SIZE,
-                                  (uint8)APP_TASK_PRIORITY,
+                                  (uint8)ARKRTOS_MINI_TASK_PRIORITY,
                                   (uint32)APP_TASK_PERIOD_MS);
     if(task_id <= 0)
     {
@@ -569,7 +580,7 @@ int32 arkrtos_mini_run(const char *path)
                path, (unsigned)code_size, (unsigned)code_base, (unsigned)code_block,
                (unsigned)ram_base, (unsigned)ram_size_hdr, (int)task_id);
 
-    arkrtos_sched_activate_higher((uint8)APP_TASK_PRIORITY);
+    arkrtos_sched_activate_higher((uint8)ARKRTOS_MINI_TASK_PRIORITY);
     return 0;
 
 free_out:

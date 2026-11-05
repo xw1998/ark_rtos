@@ -63,6 +63,9 @@ USE_MINI_VFS ?= 0
 # 可重定位镜像打包（M2）：1 = 编入四遍差分打包器，给 arkc 的 `cc --pack` 用。
 # 默认 0：关掉时 arkrtos_apppack.c 不进 SRCS，镜像与命令表逐字节不变。
 USE_APPPACK ?= 0
+# 小程序任务优先级：空 = 沿用 APP_TASK_PRIORITY（与现在逐字节相同）。
+# 小程序死循环时会把控制台饿死，要边跑边停就把它调到控制台之下（shell=14）。
+MINI_PRIORITY ?=
 
 
 # 交叉工具链前缀；默认取 PATH 上的 arm-none-eabi-
@@ -88,6 +91,10 @@ DEFS := \
   -DARKRTOS_USE_APPRUN=$(USE_APPRUN) \
   -DARKRTOS_MINI_READ_VFS=$(USE_MINI_VFS) \
   -DARKRTOS_USE_APPPACK=$(USE_APPPACK)
+
+ifneq ($(MINI_PRIORITY),)
+DEFS += -DARKRTOS_MINI_TASK_PRIORITY=$(MINI_PRIORITY)
+endif
 
 # Editor (arkvim) sizing. Every limit upstream is an #ifndef, so the sizes are
 # decided here and not by editing upstream: the editor struct is 31KB (16K text
