@@ -129,6 +129,15 @@ def emit_ld(region, flash_base, flash_size, ram_base, ram_size, out,
                   "    _sccmram = .;\n    *(.ccmram)\n    *(.ccmram*)\n"
                   "    . = ALIGN(4);\n    _eccmram = .;\n  } >CCMRAM\n\n")
 
+    out.write("  /* arkc 的编译期工作区（池 + 源码/汇编/代码/对象缓冲）。这些\n"
+              "     缓冲由 arkc 自己在每次编译入口重置，不依赖上电初值，所以放\n"
+              "     NOLOAD：既不占镜像体积，也不花上电清零时间。每次编译前\n"
+              "     由 arkc_port_zero_arena() 按这两个符号把整段清零；没有\n"
+              "     编译器的构建里这段长度为零，其他段位置不变。 */\n")
+    out.write("  .ark_buf (NOLOAD) :\n  {\n    . = ALIGN(32);\n"
+              "    _sark_buf = .;\n    *(.ark_buf)\n    *(.ark_buf*)\n"
+              "    . = ALIGN(32);\n    _eark_buf = .;\n  } >RAM\n\n")
+
     out.write("  .bss :\n  {\n    . = ALIGN(4);\n    _sbss = .;\n"
               "    __bss_start__ = _sbss;\n    *(.bss)\n    *(.bss*)\n"
               "    *(COMMON)\n    . = ALIGN(4);\n    _ebss = .;\n"

@@ -76,6 +76,21 @@ int32 arkrtos_shell_release_task(uint32 task_id);
 */
 int32 arkrtos_shell_print_n(const char *msg, uint32 len);
 
+/**
+* @brief 把一个用户输入的路径解析成命名空间绝对路径
+* @param in  用户输入的路径（绝对、相对、~/ 都接受）
+* @param out 输出缓冲；解析失败时内容不动
+* @param cap 输出缓冲长度
+* @return 0=成功；-1=参数非法或解析结果装不下
+* @details 相对路径按 shell 当前目录解析，"." 与 ".." 按 Linux 语义消化。
+*          存在的理由是「一个 shell 只该有一个 cwd 语义」：组件（如 vim
+*          命令）要接受用户给的路径时，必须和提示符下敲同一个路径得到同
+*          一个文件，而不是各写一份略有差别的拼接规则。
+*          装不下时返回 -1 而不是悄悄截断——截断后的路径会指向另一个文件。
+* @note 只在 ARKRTOS_USE_VFS=1 的构建里存在（分辨率依赖 VFS 路径语义）。
+*/
+int32 arkrtos_shell_resolve_path(const char *in, char *out, uint32 cap);
+
 
 #if (defined(__cplusplus))
 }

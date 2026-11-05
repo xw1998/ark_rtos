@@ -64,6 +64,14 @@
 #include "arkrtos_version.h"
 #include "arkrtos_dt.h"
 
+#if (ARKRTOS_USE_ARKVIM == 1)
+#include "arkvim_shell_cmd.h"
+#endif
+
+#if (ARKRTOS_USE_ARKC == 1)
+#include "arkc_shell_cmd.h"
+#endif
+
 #include <string.h>
 
 #if (SHELL_ENABLE == 1)
@@ -3323,6 +3331,15 @@ static int shell_vfs_path(const char *in, char *out, uint32 cap)
     return 0;
 }
 
+int32 arkrtos_shell_resolve_path(const char *in, char *out, uint32 cap)
+{
+    if((in == 0) || (out == 0) || (cap == 0u))
+    {
+        return -1;
+    }
+    return (shell_vfs_path(in, out, cap) == 0) ? 0 : -1;
+}
+
 typedef struct {
     uint32 count;
     uint32 longfmt;
@@ -5009,7 +5026,9 @@ static int register_kernel_commands(void)
     int idx = g_cmd_count;
     /* Upper bound with every optional feature compiled in.  Kept above the
      * real count so a future command cannot silently overflow g_cmd_table. */
-    int need = 48;
+    int need = 48
+             + (ARKRTOS_USE_ARKVIM ? 1 : 0)
+             + (ARKRTOS_USE_ARKC ? 1 : 0);
 
     if((idx + need) > ARK_SHELL_MAX_COMMANDS)
     {
@@ -5151,6 +5170,19 @@ static int register_kernel_commands(void)
     g_cmd_table[idx++] = ARK_SHELL_CMD("dmesg", cmd_dmesg,
         "Print the kernel log ring: dmesg [-c]", 2);
 #endif /* ARKRTOS_USE_LOG */
+
+#if (ARKRTOS_USE_ARKVIM == 1)
+    /* The editor owns its own port and file backend; all it needs from the
+     * kernel is one slot in this table.  It returns idx unchanged when the
+     * table is full, and the sentinel below then lands on the right slot. */
+    idx = arkvim_shell_register(idx);
+#endif
+
+#if (ARKRTOS_USE_ARKC == 1)
+    /* Same contract: the compiler brings its own port and file hooks and
+     * only asks for one command table slot. */
+    idx = arkc_shell_register(idx);
+#endif
 
     g_cmd_table[idx].name = NULL;
     g_cmd_table[idx].func = NULL;

@@ -1,0 +1,67 @@
+/*
+ * Ark RTOS board: STM32H743XI (FK743M5-XIH6, 2 MiB flash / 512 KiB AXI SRAM
+ * / 128 KiB DTCM).
+ *
+ * Hardware as wired on the board:
+ *   USART1 PA9/PA10  - kernel console, 115200 8N1
+ *   GPIOC PC13       - single status LED, active low
+ *   QSPI  PF10 CLK / PF8-PF9 IO0-IO1 / PF7 PF6 IO2-IO3 / PG6 NCS
+ *                    - W25Q64 NOR (8 MiB). The driver lands in M2, so the
+ *                      node stays disabled here; describing it now keeps the
+ *                      pin choice and part number in one place.
+ *   IWDG1            - owned by the kernel guard (board config disables it
+ *                      during bring-up)
+ */
+
+/dts-v1/;
+
+/include/ "stm32h7.dtsi"
+
+/ {
+	model = "Ark RTOS STM32H743";
+	compatible = "ark,stm32h743";
+
+	chosen {
+		stdout-path = &usart1;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led0 {
+			label = "status0";
+			gpios = <&gpioc 13 1>;
+		};
+	};
+};
+
+&usart1 {
+	status = "okay";
+	current-speed = <115200>;
+	/* PA9 TX, PA10 RX as AF7 */
+	pinctrl-0 = <9 10>;
+};
+
+&gpioa {
+	status = "okay";
+};
+
+&gpioc {
+	status = "okay";
+};
+
+&qspi {
+	status = "disabled";
+
+	nor: flash@0 {
+		compatible = "winbond,w25q64";
+		reg = <0 0x800000>;
+		/* NCS=PG6, CLK=PF10, IO0..3 = PF8/PF9/PF7/PF6 */
+		pinctrl-0 = <6 10 8 9 7 6>;
+	};
+};
+
+&iwdg {
+	status = "okay";
+	timeout-ms = <4000>;
+};

@@ -152,7 +152,11 @@ int32 arkrtos_vfs_read(int32 fd, uint8 *buf, uint32 len);
 /** @brief 归还句柄；负值为 ark_vfs 错误码 */
 int32 arkrtos_vfs_close(int32 fd);
 
-/** @brief 写整个文件（创建或截断） */
+/** @brief 写整个文件（创建或截断）
+ * @return 0=成功；负值为 ark_vfs 错误码。**成功时不返回字节数**：
+ *         实现走 ark_vfs_write_all()，它的返回值是 ARK_VFS_OK(0)，
+ *         不是长度；拿 rc 跟 len 比会把写成功的文件判成失败。
+ *         容量不够这类短写由底层返回负码，不会给你“写了一半=成功”。 */
 int32 arkrtos_vfs_write_file(const char *path, const uint8 *buf, uint32 len);
 
 /** @brief 删除一个文件 */

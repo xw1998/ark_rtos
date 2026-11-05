@@ -296,6 +296,25 @@
 #define ARKRTOS_USE_UTEST               1
 #endif
 
+/* Text editor component (kernelsrc/components/arkvim): the upstream arkvim
+ * modal editor wired to the kernel VFS, plus the shell "vim" command.  Off by
+ * default, and while it is 0 the sources are not compiled at all and the
+ * command table is byte-for-byte what it was: the component cannot change
+ * size or behaviour until somebody asks for it. */
+#ifndef ARKRTOS_USE_ARKVIM
+#define ARKRTOS_USE_ARKVIM              0
+#endif
+
+/* C compiler component (kernelsrc/components/arkc): arkc self-hosted on the
+ * target, wired to the kernel VFS, plus the shell "cc" command.  Off by
+ * default for the same reason as the editor: at 0 the sources are not
+ * compiled and the command table does not change by a byte.  arkc needs
+ * about 210 KB of RAM for its static arena/buffers, which the linker
+ * script places in the NOLOAD .ark_buf section. */
+#ifndef ARKRTOS_USE_ARKC
+#define ARKRTOS_USE_ARKC                0
+#endif
+
 /* ============================================================
  * 五、依赖校验
  * @brief 关错了开关要在这里报出来，而不是等到链接期一个 undefined symbol
@@ -330,6 +349,14 @@
 
 #if ARKRTOS_USE_PROCFS && !ARKRTOS_USE_VFS
 #error "ARKRTOS_USE_PROCFS=1 requires ARKRTOS_USE_VFS=1 (/proc is a mount inside the VFS namespace)"
+#endif
+
+#if ARKRTOS_USE_ARKVIM && !ARKRTOS_USE_VFS
+#error "ARKRTOS_USE_ARKVIM=1 requires ARKRTOS_USE_VFS=1 (the editor opens files through the VFS namespace)"
+#endif
+
+#if ARKRTOS_USE_ARKC && !ARKRTOS_USE_VFS
+#error "ARKRTOS_USE_ARKC=1 requires ARKRTOS_USE_VFS=1 (the compiler reads sources and writes output through the VFS namespace)"
 #endif
 
 /* lwIP 端口层建在消息队列上（sys_arch.c 的邮箱就是 arkrtos_mq），
