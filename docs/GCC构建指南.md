@@ -56,6 +56,33 @@ make clean
 pyocd flash -t stm32f427vgtx --format hex build/ARKRTOS_TEST.hex
 ```
 
+### 什么时候必须 `make clean`
+
+头文件依赖已由 `-MMD -MP` 自动跟踪（对象同目录下的 `.d`）：改一个头，
+所有 `#include` 到它的译都会重编，不用手工 clean。
+
+**编译选项不在依赖里。** 改 `USE_*` 开关、`-D...` 宏、`sources.mk` 里的源集合之后
+必须 `make clean`，否则只有命令行变了的那几个对象会重编，其余仍是旧值编出来的。
+
+### 结构体改动没 clean 会是什么样子（2026-11-05 实例）
+
+给 `ark_shell_t` 加一个字段后只改了 `.c` 就直接 `make`：加字段的那个译重编了，
+而持有该结构体实例的 `arkrtos_shell.o` 还是旧布局。链接照过、体积照报，运行期
+两边对同一个对象的字段偏移差 4 字节，`help` 先打出满屏乱码，随即：
+
+```
+*** PANIC BUS ***   CFSR=0x00008200 (PRECISERR|BFARVALID)  BFAR=0x06020017
+```
+
+判据：`PANIC` 的地址是一串不像任何合法段的野值（这里是 `0x0602xxxx`），
+且出问题的命令只读数据、不写外设。这时先查对象时间戳对不对得上头文件：
+
+```bash
+find build/obj -name '*.o' ! -newer ../../../../../kernelsrc/shell/ark_shell/ark_shell.h
+```
+
+有输出就是布局不一致，`make clean` 重来。加了 `.d` 之后这条命令应当恒为空。
+
 ## 4. 与 Keil 工程的对应关系
 
 | 关注点 | Keil 侧 | GCC 侧 |

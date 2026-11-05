@@ -244,7 +244,14 @@ INCS := \
 OPTFLAGS := -O2 -g3 -Wall -std=gnu11 \
             -ffunction-sections -fdata-sections -fno-common -Wno-unused-parameter
 
-CFLAGS := $(CPU) $(DEFS) $(INCS) $(OPTFLAGS)
+# 头文件依赖自动跟踪。没有它，改一个结构体会只重编直接改过的 .c，
+# 其它译以旧布局访问同一个对象——链接照过，运行期越界写，表现是乱码后
+# BusFault（2026-11-05 踩过一次：ark_shell_t 加一个字段，arkrtos_shell.o
+# 还是旧布局，help 打出乱码随即 PANIC BUS）。
+# 注意它只管头文件；改 -D/开关仍然必须 make clean，因为编译选项不在依赖里。
+DEPFLAGS := -MMD -MP
+
+CFLAGS := $(CPU) $(DEFS) $(INCS) $(OPTFLAGS) $(DEPFLAGS)
 
 # arkc 的 20 个上游源用这套头文件，和内核那套**完全不重叠**，原因只有一条：
 # arkc 自带一个 include/platform.h，shell 也有一个 shell/platform.h。把两者放进
@@ -253,7 +260,7 @@ CFLAGS := $(CPU) $(DEFS) $(INCS) $(OPTFLAGS)
 # 相对路径引 arkc 的头（"include/platform.h" / "../../shell/platform.h"），
 # 靠 "" 的“先找本文件目录”规则把两份分清。
 ARKC_INCS := -I$(ROOT)/kernelsrc/components/arkc/include
-CFLAGS_ARKC := $(CPU) $(ARKC_DEFS) $(ARKC_INCS) $(OPTFLAGS)
+CFLAGS_ARKC := $(CPU) $(ARKC_DEFS) $(ARKC_INCS) $(OPTFLAGS) $(DEPFLAGS)
 
 LDFLAGS := $(CPU) -T$(LDSCRIPT) -Wl,-Map=$(MAP) -Wl,--gc-sections \
            -Wl,--enable-non-contiguous-regions \
@@ -318,6 +325,9 @@ hex: $(ELF)
 
 size: $(ELF)
 	@$(SZ) $(ELF)
+
+# 各目标文件的 .d 由 -MMD 生成，随对象一起放在 $(OBJDIR)。
+-include $(OBJS:.o=.d) $(ARKC_OBJS:.o=.d)
 
 clean:
 	rm -rf $(BUILD)
