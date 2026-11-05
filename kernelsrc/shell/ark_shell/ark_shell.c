@@ -173,6 +173,7 @@ void ark_shell_init(ark_shell_t *shell, uint32_t baudrate)
     shell->uart_mode      = platform_uart_get_mode();
     shell->esc_len        = 0;
     shell->esc_start_time = 0;
+    shell->last_was_cr    = 0;
     shell->complete_fn    = NULL;
 
 #if ARK_SHELL_ENABLE_HISTORY_SEARCH
@@ -382,6 +383,15 @@ void ark_shell_process_byte(ark_shell_t *shell, unsigned char byte)
     switch (shell->state) {
     /* -------------------- NORMAL state -------------------- */
     case STATE_NORMAL:
+        /* A terminal often sends CR LF for a single Enter.  The CR executes
+         * the line; the LF right after it must not execute it again (that
+         * ran an empty command and printed a second prompt). */
+        if (byte == '\n' && shell->last_was_cr) {
+            shell->last_was_cr = 0;
+            return;
+        }
+        shell->last_was_cr = (byte == '\r') ? 1u : 0u;
+
         if (byte == 0x1B) {
             /* Enter ESC state */
             shell->state = STATE_ESC;

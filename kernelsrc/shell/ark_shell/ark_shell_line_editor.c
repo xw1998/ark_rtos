@@ -96,11 +96,12 @@ void line_editor_init(line_editor_t *le, const char *prompt)
 /* ============================================================
  * line_editor_insert_char - Insert a character at cursor position
  *
- * Redraw strategy:
- *   1. Move cursor left 1 (back to insert position)
- *   2. Clear to end of line
- *   3. Print from insert position to buffer end
- *   4. Move cursor left back to logical cursor position
+ * Redraw strategy (nothing has been echoed for the new character yet,
+ * so the cursor already sits on the slot it belongs to):
+ *   1. Appending at end of line: just print the character.
+ *   2. Inserting in the middle: clear to end of line, repaint the new
+ *      character plus the tail, then move the cursor back to sit just
+ *      after the new character.
  * ============================================================ */
 void line_editor_insert_char(line_editor_t *le, char ch)
 {
@@ -124,18 +125,25 @@ void line_editor_insert_char(line_editor_t *le, char ch)
     le->buf[le->len] = '\0';
 
     /* ---- Terminal redraw ---- */
-    /* Step 1: move cursor left 1 to insert position */
-    platform_uart_send_string("\x1b[D");
+    /* Nothing has been echoed for this character yet, so the cursor is
+     * already on the slot it belongs to; only what sits at and after
+     * that slot has to be repainted. */
+    move_back = le->len - le->pos;   /* characters after the new one */
 
-    /* Step 2: clear from current position to end of line */
+    if (move_back == 0) {
+        /* Appending at end of line: the character goes exactly where
+         * the cursor is.  Moving left here would land on the character
+         * typed just before and erase it ("type one, lose one"). */
+        platform_uart_send(ch);
+        return;
+    }
+
+    /* Insertion in the middle: clear the old tail, repaint the new
+     * character plus the tail, then put the cursor back just after the
+     * new character. */
     platform_uart_send_string("\x1b[K");
-
-    /* Step 3: print from insert position to end */
     platform_uart_send_buf((const unsigned char *)&le->buf[le->pos - 1],
-                           (uint16_t)(le->len - (le->pos - 1)));
-
-    /* Step 4: move cursor back to logical position */
-    move_back = le->len - le->pos;
+                           (uint16_t)(move_back + 1));
     send_cursor_left(move_back);
 }
 

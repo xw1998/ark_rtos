@@ -72,6 +72,7 @@ typedef struct ark_shell_s {
     char              esc_buf[ARK_SHELL_ESC_BUF_SIZE];     /* ESC sequence buffer */
     int               esc_len;                             /* ESC sequence received length */
     uint32_t          esc_start_time;                      /* Timestamp when entering ESC state */
+    uint8_t           last_was_cr;                         /* Previous NORMAL byte was CR (swallow the LF of CRLF) */
 #if ARK_SHELL_ENABLE_HISTORY_SEARCH
     char              search_buf[ARK_SHELL_LINE_SIZE];     /* Search keyword */
     int               search_len;                          /* Search keyword length */
