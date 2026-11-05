@@ -161,7 +161,7 @@ kernelsrc/components/arkmake/
 └── VENDOR.md                  <- 同步来源与边界
 ```
 
-上游树（gitee `xw19981010/arkmake`）由 `tools/sync_arkmake.py` 同步；
+上游树（gitee `xw19981010/ark_make`）由 `tools/sync_arkmake.py` 同步；
 组件根目录的四个接线文件属于 Ark RTOS 侧，同步不碰。**同步不删任何文件**：
 目标目录里多出来的只报告——一次同步顺手删掉一个还用着的文件，是这套复制式
 同步最容易犯的错。
