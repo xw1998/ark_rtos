@@ -5184,6 +5184,14 @@ static int register_kernel_commands(void)
     idx = arkc_shell_register(idx);
 #endif
 
+#if (ARKRTOS_SHELL_BOARD_CMDS == 1)
+    /* Board-owned commands.  This is the only place where g_cmd_table is
+     * final: ark_shell_init() has already rebuilt it from the builtin list,
+     * so an entry appended here survives -- unlike one written during board
+     * init, which the rebuild silently overwrites. */
+    idx = arkrtos_board_shell_register(idx);
+#endif
+
     g_cmd_table[idx].name = NULL;
     g_cmd_table[idx].func = NULL;
     g_cmd_table[idx].help = NULL;

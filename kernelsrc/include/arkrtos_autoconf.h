@@ -100,6 +100,9 @@
 #ifndef ARKRTOS_SEM_NUM
 #define ARKRTOS_SEM_NUM (24)
 #endif
+#ifndef ARKRTOS_SHELL_BOARD_CMDS
+#define ARKRTOS_SHELL_BOARD_CMDS 0
+#endif
 #ifndef ARKRTOS_SHELL_GLOB
 #define ARKRTOS_SHELL_GLOB 1
 #endif
@@ -132,6 +135,12 @@
 #endif
 #ifndef ARKRTOS_TIME_SLICE_TICKS
 #define ARKRTOS_TIME_SLICE_TICKS (10)
+#endif
+#ifndef ARKRTOS_USE_ARKC
+#define ARKRTOS_USE_ARKC 0
+#endif
+#ifndef ARKRTOS_USE_ARKVIM
+#define ARKRTOS_USE_ARKVIM 0
 #endif
 #ifndef ARKRTOS_USE_AUDIT
 #define ARKRTOS_USE_AUDIT 1
@@ -198,6 +207,9 @@
 #endif
 #ifndef ARKRTOS_USE_SCHED_STAT
 #define ARKRTOS_USE_SCHED_STAT 1
+#endif
+#ifndef ARKRTOS_USE_SDRAM
+#define ARKRTOS_USE_SDRAM 0
 #endif
 #ifndef ARKRTOS_USE_SOFTBUS
 #define ARKRTOS_USE_SOFTBUS 0

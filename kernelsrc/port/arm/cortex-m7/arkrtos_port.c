@@ -359,6 +359,11 @@ static uint8 arkrtos_mpu_applied_ok = 0u;
  * context on each switch back to the idle task (arkrtos_mpu_set_idle()). */
 static arkrtos_arch_mpu_t arkrtos_mpu_idle_ctx;
 
+/* Defined further down; arkrtos_port_mpu_init() needs both to publish the
+ * external-RAM window before the first task context exists. */
+static uint32 arkrtos_mpu_size_field(uint32 size);
+static uint32 arkrtos_port_mpu_extram_attr(void);
+
 void arkrtos_port_mpu_init(void)
 {
     int32 i;
@@ -382,9 +387,30 @@ void arkrtos_port_mpu_init(void)
         MPU->RASR = 0;
     }
 
+    /* External RAM must be mapped here, not only from the first task
+     * context: everything above cleared regions 0~7, and the board mounts
+     * the VFS (whose nodes now live in SDRAM) before the idle MPU context
+     * is built. Until this window exists 0xC0000000 keeps the reset default
+     * of Device memory, where one unaligned store - GCC merges the 16 bit
+     * fields of a ramfs node into a word access - is a BusFault. */
+    #if (ARKRTOS_MPU_EXTRAM_SIZE != 0)
+    MPU->RNR  = ARKRTOS_MPU_RGN_EXTRAM;
+    MPU->RBAR = (uint32)ARKRTOS_MPU_EXTRAM_BASE;
+    MPU->RASR = (arkrtos_mpu_size_field((uint32)ARKRTOS_MPU_EXTRAM_SIZE) << 1) |
+                arkrtos_port_mpu_extram_attr();
+    #endif
+
     MPU->CTRL = MPU_CTRL_ENABLE_Msk | MPU_CTRL_PRIVDEFENA_Msk;
     ARKRTOS_DSB();
     ARKRTOS_ISB();
+}
+
+/* Attribute word for the external-RAM window. Defined once: the power-on
+ * path (arkrtos_port_mpu_init) and the task path
+ * (arkrtos_port_mpu_encode) must not carry two copies of it. */
+static uint32 arkrtos_port_mpu_extram_attr(void)
+{
+    return 0x13020001u;     /* AP=0b011: read-write, XN=1, S=0, Normal NC */
 }
 
 /* Smallest MPU SIZE field (RASR bits[5:1]) that covers `size` bytes.
@@ -483,6 +509,19 @@ int32 arkrtos_port_mpu_encode(arkrtos_arch_mpu_t *p_mpu, uint32 idx, uint32 base
             attr = 0x03020001u;     /* AP=0b011: read-write, XN=0, S=0, Normal NC */
             break;
 
+        case ARKRTOS_MPU_MEM_EXTRAM:
+            /* External SDRAM: same Normal non-cacheable encoding as MEM_RAM
+             * (S=0 so LDREX/STREX work, C=1/B=0 so nothing needs maintaining).
+             * It needs a region of its own for two reasons that both showed up
+             * on hardware: (1) the default map puts 0xA0000000-0xDFFFFFFF in
+             * Device space, where an unaligned LDR/STR is a fault - and a
+             * struct with a 16-bit field (ramfs nodes) makes GCC emit exactly
+             * that; (2) a task without the region cannot reach 0xC0000000 at
+             * all.  Enabling D-cache later flips this to TEX=001,C=1,B=1 in
+             * one place, together with the DMA maintenance that goes with it. */
+            attr = arkrtos_port_mpu_extram_attr();
+            break;
+
         case ARKRTOS_MPU_MEM_PERIPH_RO:
             attr = 0x12050001u;     /* AP=0b010: unpriv read-only, XN=1, S=1, Device */
             break;
@@ -518,6 +557,14 @@ void arkrtos_port_mpu_set_region(uint32 rom_addr, uint32 rom_size, uint32 ram_ad
 
     (void)arkrtos_port_mpu_encode(&arkrtos_mpu_idle_ctx, 0u, rom_addr, rom_size, ARKRTOS_MPU_MEM_ROM);
     (void)arkrtos_port_mpu_encode(&arkrtos_mpu_idle_ctx, 1u, ram_addr, ram_size, ARKRTOS_MPU_MEM_RAM);
+    /* 外置 RAM 是内核态也要用的内存（编译器的 .ark_buf、ramfs 的 .extram），
+     * 而且每次切回空闲任务都会重写全部区域寄存器：不给它一条区域，
+     * 切回空闲之后这块内存就变成了「未映射」。 */
+    #if (ARKRTOS_MPU_EXTRAM_SIZE != 0)
+    (void)arkrtos_port_mpu_encode(&arkrtos_mpu_idle_ctx, ARKRTOS_MPU_RGN_EXTRAM,
+                                  ARKRTOS_MPU_EXTRAM_BASE, ARKRTOS_MPU_EXTRAM_SIZE,
+                                  ARKRTOS_MPU_MEM_EXTRAM);
+    #endif
     arkrtos_port_mpu_set_app(&arkrtos_mpu_idle_ctx);
 }
 

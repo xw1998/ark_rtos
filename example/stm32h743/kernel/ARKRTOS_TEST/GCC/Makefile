@@ -41,6 +41,15 @@ BOARD_DIR := $(ROOT)/board/stm32h743
 # byte-for-byte what they were without the component.
 USE_ARKVIM ?= 1
 USE_ARKC   ?= 1
+# 外置 SDRAM（FMC Bank1，32MB）：1 = 起来并让编译器和 ramfs 把大块工作区
+# 放到片外。这一项不只影响一个 -D：它同时决定 DEFS 里的开关、编译器的
+# 缓冲预算、ramfs 的槽数与段归属，三者必须一起动，所以放在同一个开关下。
+#
+# 默认 0 是实测结论，不是保守：本板 FMC 的存储窗口对任何访问都应不上（细节见
+# docs/stm32h743-external-memory.md）。置 1 后 .ark_buf 与 ramfs 文件缓冲会落到
+# 0xC0000000 起的分区里，而那个窗口不应答，于是编译器一开池就取总线故障、
+# VFS 也不会挂载。要看现场证据就 make USE_SDRAM=1，再用 sdram info/verify/fsm/pins。
+USE_SDRAM  ?= 0
 
 # 交叉工具链前缀；默认取 PATH 上的 arm-none-eabi-
 CROSS ?= arm-none-eabi-
@@ -60,7 +69,8 @@ DEFS := \
   -DARKRTOS_BOARD_CONFIG=\"arkrtos_board_config.h\" \
   -DMDK_TRACE_SWD_EXTERNAL_PLATFORM -DMDK_TRACE_USE_CONFIG_FILE \
   -DLFS_NO_MALLOC -DLFS_NO_ASSERT -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR \
-  -DARKRTOS_USE_ARKVIM=$(USE_ARKVIM) -DARKRTOS_USE_ARKC=$(USE_ARKC)
+  -DARKRTOS_USE_ARKVIM=$(USE_ARKVIM) -DARKRTOS_USE_ARKC=$(USE_ARKC) \
+  -DARKRTOS_USE_SDRAM=$(USE_SDRAM) -DARKRTOS_SHELL_BOARD_CMDS=$(USE_SDRAM)
 
 # Editor (arkvim) sizing. Every limit upstream is an #ifndef, so the sizes are
 # decided here and not by editing upstream: the editor struct is 31KB (16K text
@@ -87,6 +97,29 @@ endif
 # 65 K 池下把 fib+sum+switch+float 的七行 demo 编译时报 exhausted（最后一次
 # 成功分配停在 54880 B）—— 所以池取 80 KB，并让 ramfs 从 4 槽回到 3 槽把
 # 这 16 KB 换回来，整块工作区仍是 128 KB，RAM 占用不变。
+ifeq ($(USE_SDRAM),1)
+# 外置 SDRAM 上线后，编译器的预算不再和内核抢片内 RAM：工作区（.ark_buf）
+# 整体落在 0xC0000000 起的 12MB 分区里（见 config/stm32h743/arkrtos_partition.h），
+# 所以这里可以给到「池 4MB / 源码 512KB / 汇编 2MB / 代码 1MB」这一档，
+# 也就是宿主侧默认档的同一量级，而不是为了塞进 440KB 而反复裁剪的那一套。
+ARKC_DEFS := \
+  -DARKCC_PROFILE=ARKCC_PROFILE_STM32_MIN \
+  -DARK_POOL_SIZE=4194304 \
+  -DARK_SRC_BUF_SIZE=524288 \
+  -DARK_ASM_BUF_SIZE=2097152 \
+  -DARK_CODE_BUF_SIZE=1048576 \
+  -DARK_LINK_BUF_SIZE=262144 \
+  -DARK_OBJ_BUF_SIZE=262144 \
+  -DPP_BUF_SIZE=1048576 \
+  -DPP_MAX_INC_DEPTH=16 \
+  -DPP_INC_BUF=65536 \
+  -DARM_MAX_SYMBOLS=8192 \
+  -DARM_MAX_RELOCS=8192 \
+  -DARK_LINK_MAX_SYMS=512 \
+  -DARK_LINK_MAX_RELOCS=512
+else
+# 片内 RAM 档（SDRAM 不可用时）：池 80KB、工作区 178KB，
+# 实测标尺写在 docs/arkc编译产物上板运行-实施计划.md 里。
 ARKC_DEFS := \
   -DARKCC_PROFILE=ARKCC_PROFILE_STM32_MIN \
   -DARK_POOL_SIZE=81920 \
@@ -100,6 +133,7 @@ ARKC_DEFS := \
   -DPP_INC_BUF=4096 \
   -DARK_LINK_MAX_SYMS=64 \
   -DARK_LINK_MAX_RELOCS=64
+endif
 
 # ramfs 单文件容量与槽数。内核的 ramfs 是“每个文件一段定长缓冲”，两个
 # 上限都是 #ifndef，所以属于板级决定：编译器的产物必须落得下。
@@ -109,7 +143,14 @@ ARKC_DEFS := \
 # 取 16 KB/槽：13727 B 有 1.19x 余量，再大的源码靠 -S -o - 直接看屏幕。
 # 槽数 3（源码 + 一份中间产物 + 最终产物）。代价 RAM 3 x 16384 = 48 KB；
 # 这 16 KB 是从第 4 个槽里省出来补给编译池的，总预算不变。
+ifeq ($(USE_SDRAM),1)
+# 文件缓冲放在外置 SDRAM 的 .extram 段（6MB 分区）：8 槽 × 512KB。
+# 板上 cc 现在能把 1MB 级的源码和它的 .s 一起落下，不必只走控制台。
+RAMFS_DEFS := -DARK_RAMFS_FILE_CAP=524288 -DARK_RAMFS_MAX_FILES=8 \
+              -DARK_RAMFS_IN_EXTRAM=1
+else
 RAMFS_DEFS := -DARK_RAMFS_FILE_CAP=16384 -DARK_RAMFS_MAX_FILES=3
+endif
 DEFS += $(RAMFS_DEFS)
 
 # 头文件搜索路径。
@@ -189,7 +230,8 @@ all: $(ELF) bin hex size
 # --- 生成物：链接脚本来自分区头（H743 那份，不是 config/ 下的默认） ---
 $(LDSCRIPT): $(PART_HDR) $(ROOT)/tools/gen_ld.py
 	@mkdir -p $(BUILD)
-	$(PY) $(ROOT)/tools/gen_ld.py --target kernel --header $(PART_HDR_REL) --output $@
+	$(PY) $(ROOT)/tools/gen_ld.py --target kernel --header $(PART_HDR_REL) \
+		--ext-ram $(USE_SDRAM) --output $@
 
 # --- 编译 ---
 $(OBJDIR)/%.o: %.c

@@ -42,6 +42,7 @@
 #include "arkrtos_audit.h"
 #include "arkrtos_guard.h"
 #include "arkrtos_crash.h"
+#include "drvfmc.h"          /* board SDRAM state: the VFS file buffers live there */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -319,12 +320,44 @@ static void arkrtos_kernel_init(void)
     /* Linux-style path namespace: / is a volatile scratch area, /dev mirrors
      * the device registry, and volumes live under /mnt/<name>. */
     {
-        int32 vfs_rc = arkrtos_vfs_init();
+        int32 vfs_rc;
+        int    skip_vfs = 0;
 
-        if(vfs_rc != 0)
+#if (ARKRTOS_USE_SDRAM == 1)
+        /* The ramfs nodes live in the external RAM window, so VFS may only come
+         * up once the window is proven.  "Proven" is an explicit step: bring-up
+         * in board init programs the controller but never touches the window,
+         * because a bus error there happens before the fault handler and the
+         * console exist and the board would simply go silent.
+         *
+         * ARKRTOS_SDRAM_VERIFY_AT_BOOT=1 asks for the proof here, where a
+         * failure is at least reported (PANIC BUS with the address) instead of
+         * swallowed.  Leave it at 0 on hardware whose memory path is not yet
+         * known good, so the board still reaches a prompt and "sdram info /
+         * regs / fsm" can be asked what is wrong. */
+#ifndef ARKRTOS_SDRAM_VERIFY_AT_BOOT
+#define ARKRTOS_SDRAM_VERIFY_AT_BOOT 0
+#endif
+#if (ARKRTOS_SDRAM_VERIFY_AT_BOOT == 1)
+        (void)arkrtos_sdram_verify();
+#endif
+        if(arkrtos_sdram_ready() != 1)
         {
-            ARKRTOS_LOGE("BOOT", "arkrtos_vfs_init failed: %d (%s)", (int)vfs_rc,
-                       arkrtos_vfs_error_name(vfs_rc));
+            ARKRTOS_LOGE("BOOT", "SDRAM configured=%d verified=0, skipping VFS: "
+                       "its file buffers live there (run 'sdram verify')",
+                       (int)arkrtos_sdram_configured());
+            skip_vfs = 1;
+        }
+#endif
+
+        if(skip_vfs == 0)
+        {
+            vfs_rc = arkrtos_vfs_init();
+            if(vfs_rc != 0)
+            {
+                ARKRTOS_LOGE("BOOT", "arkrtos_vfs_init failed: %d (%s)", (int)vfs_rc,
+                           arkrtos_vfs_error_name(vfs_rc));
+            }
         }
     }
 #endif /* ARKRTOS_USE_VFS */

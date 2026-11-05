@@ -49,7 +49,7 @@ def _memory(name, attr, base, size):
 
 def emit_ld(region, flash_base, flash_size, ram_base, ram_size, out,
             ccm=None, noinit=None, entry="Reset_Handler", want_stack=True,
-            load_base=None, bss_spill_ccm=False):
+            load_base=None, bss_spill_ccm=False, sdram_buf=None, sdram_fs=None):
     """输出一个映像的 GNU ld 脚本。
 
     flash_base/flash_size  负载的 FLASH 窗口（可执行段）
@@ -76,6 +76,10 @@ def emit_ld(region, flash_base, flash_size, ram_base, ram_size, out,
         out.write(_memory("CCMRAM", "rw", ccm[0], ccm[1]))
     if noinit and noinit[1] > 0:
         out.write(_memory("NOINIT", "rw", noinit[0], noinit[1]))
+    if sdram_buf and sdram_buf[1] > 0:
+        out.write(_memory("SDRAMBUF", "rwx", sdram_buf[0], sdram_buf[1]))
+    if sdram_fs and sdram_fs[1] > 0:
+        out.write(_memory("SDRAMFS", "rwx", sdram_fs[0], sdram_fs[1]))
     out.write("}\n\n")
 
     if want_stack:
@@ -129,14 +133,25 @@ def emit_ld(region, flash_base, flash_size, ram_base, ram_size, out,
                   "    _sccmram = .;\n    *(.ccmram)\n    *(.ccmram*)\n"
                   "    . = ALIGN(4);\n    _eccmram = .;\n  } >CCMRAM\n\n")
 
+    ark_region = "SDRAMBUF" if (sdram_buf and sdram_buf[1] > 0) else "RAM"
     out.write("  /* arkc 的编译期工作区（池 + 源码/汇编/代码/对象缓冲）。这些\n"
               "     缓冲由 arkc 自己在每次编译入口重置，不依赖上电初值，所以放\n"
               "     NOLOAD：既不占镜像体积，也不花上电清零时间。每次编译前\n"
               "     由 arkc_port_zero_arena() 按这两个符号把整段清零；没有\n"
-              "     编译器的构建里这段长度为零，其他段位置不变。 */\n")
+              "     编译器的构建里这段长度为零，其他段位置不变。\n"
+              "     归属由板级分区头的 ARKRTOS_ARK_BUF_SDRAM_SIZE 决定：\n"
+              "     0 = 片内 RAM，非 0 = 外置 SDRAM（SDRAMBUF 区）。 */\n")
     out.write("  .ark_buf (NOLOAD) :\n  {\n    . = ALIGN(32);\n"
               "    _sark_buf = .;\n    *(.ark_buf)\n    *(.ark_buf*)\n"
-              "    . = ALIGN(32);\n    _eark_buf = .;\n  } >RAM\n\n")
+              "    . = ALIGN(32);\n    _eark_buf = .;\n  } >%s\n\n" % ark_region)
+
+    if sdram_fs and sdram_fs[1] > 0:
+        out.write("  /* 外置 RAM 的数据段（ramfs 文件缓冲等）。上电无确定内容，\n"
+                  "     清零与「哪些槽已用」的记账由使用者自己做（ramfs 在 mount\n"
+                  "     时调 ark_ramfs_reset），因此这里也是 NOLOAD。 */\n")
+        out.write("  .extram (NOLOAD) :\n  {\n    . = ALIGN(32);\n"
+                  "    _sextram = .;\n    *(.extram)\n    *(.extram*)\n"
+                  "    . = ALIGN(32);\n    _eextram = .;\n  } >SDRAMFS\n\n")
 
     out.write("  .bss :\n  {\n    . = ALIGN(4);\n    _sbss = .;\n"
               "    __bss_start__ = _sbss;\n    *(.bss)\n    *(.bss*)\n"
@@ -171,6 +186,11 @@ def main():
     ap.add_argument("--stack-size", type=auto_int, default=None,
                     help="镜像 RAM 窗口内给内核栈保留的字节数（默认按镜像类型推导）")
     ap.add_argument("--dump", action="store_true", help="仅打印关键地址用于交叉核对")
+    ap.add_argument("--ext-ram", choices=["auto", "0", "1"], default="auto",
+                    help="外置 RAM 分区：auto=照分区头里的宏（有就用），"
+                         "0=当作没有（.ark_buf/.extram 回片内 RAM），"
+                         "1=强制按宏。板级开关 ARKRTOS_USE_SDRAM=0 时必须传 0，"
+                         "否则大块工作区仍会被放进那块外置地址")
     args = ap.parse_args()
 
     header = args.header
@@ -199,10 +219,30 @@ def main():
               % (v("KERNEL_RAM_BASE"), v("KERNEL_RAM_SIZE")))
         print("[gen_ld] CHIP_CCM=0x%08X+0x%08X" % (v("CHIP_CCM_BASE"), v("CHIP_CCM_SIZE")))
         print("[gen_ld] CRASH_LOG=0x%08X+0x%08X" % (v("CRASH_LOG_BASE"), v("CRASH_LOG_SIZE")))
+        if sdram_buf[1] or sdram_fs[1]:
+            print("[gen_ld] SDRAMBUF=0x%08X+0x%08X SDRAMFS=0x%08X+0x%08X"
+                  % (sdram_buf[0], sdram_buf[1], sdram_fs[0], sdram_fs[1]))
         if not args.output:
             return 0
 
     ccm = (v("CHIP_CCM_BASE"), v("CHIP_CCM_SIZE"))
+
+    # 外置 RAM 的两个分区：板级分区头里有就取，没有（F401/F427 那两份）就是 0,
+    # 此时链接脚本与改动前逐字节相同 —— 这是「新功能默认关时零变化」的落点。
+    def _opt_pair(base_name, size_name):
+        try:
+            return (v(base_name), v(size_name))
+        except (KeyError, RuntimeError):
+            return (0, 0)
+
+    sdram_buf = _opt_pair("ARKRTOS_ARK_BUF_SDRAM_BASE", "ARKRTOS_ARK_BUF_SDRAM_SIZE")
+    sdram_fs  = _opt_pair("ARKRTOS_RAMFS_SDRAM_BASE", "ARKRTOS_RAMFS_SDRAM_SIZE")
+    if args.ext_ram == "0":
+        # 分区头描述的是板上事实（两片器件都焊着），用不用是板级决定：
+        # 这一档把两个分区归零，.ark_buf 与 .extram 于是回到片内 RAM，
+        # 链接脚本与「没有外置 RAM 的板」完全一致。
+        sdram_buf = (0, 0)
+        sdram_fs  = (0, 0)
 
     if args.target == "kernel":
         flash_base, flash_size = v("KERNEL_BASE"), v("KERNEL_SIZE")
@@ -255,7 +295,9 @@ def main():
     emit_ld("_", flash_base, flash_size, ram_base, ram_size, sink,
             ccm=(ccm if args.target == "kernel" else None),
             noinit=noinit, want_stack=want_stack, entry=entry,
-            bss_spill_ccm=(args.target == "kernel"))
+            bss_spill_ccm=(args.target == "kernel"),
+            sdram_buf=(sdram_buf if args.target == "kernel" else None),
+            sdram_fs=(sdram_fs if args.target == "kernel" else None))
     text = sink.getvalue()
 
     if args.output:

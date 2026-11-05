@@ -315,6 +315,18 @@
 #define ARKRTOS_USE_ARKC                0
 #endif
 
+/* External SDRAM on FMC SDRAM Bank1.  Off by default: at 0 no FMC register is
+ * touched, nothing maps 0xC0000000 and the image is what it was.  The H743
+ * board sets it to 1; the geometry and the two SDRAM partitions (.ark_buf for
+ * the compiler arena, .extram for the ramfs file buffers) live in that board's
+ * partition header, not here. */
+#ifndef ARKRTOS_USE_SDRAM
+#define ARKRTOS_USE_SDRAM               0
+#endif
+#ifndef ARKRTOS_SHELL_BOARD_CMDS
+#define ARKRTOS_SHELL_BOARD_CMDS        0
+#endif
+
 /* ============================================================
  * 五、依赖校验
  * @brief 关错了开关要在这里报出来，而不是等到链接期一个 undefined symbol

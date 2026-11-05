@@ -29,6 +29,11 @@
 #include "drvled.h"
 #include "drvuart.h"
 #include "drvblk.h"
+#include "drvfmc.h"
+#if (ARKRTOS_USE_SDRAM == 1)
+#include "arkrtos_shell.h"        /* arkrtos_board_shell_register 的返回约定 */
+#include "ark_shell_commands.h"   /* g_cmd_table / ARK_SHELL_CMD / 容量上限 */
+#endif
 #include "arkrtos_log.h"
 #include "arkrtos_fault.h"
 #include "arkrtos_trace.h"
@@ -41,6 +46,22 @@
  * ============================================================ */
 void arkrtos_port_board_init(void)
 {
+#if (ARKRTOS_USE_SDRAM == 1)
+    /* 外置 SDRAM 必须在任何人访问 0xC0000000 之前起来：arkc 的 .ark_buf
+     * 与 ramfs 的文件缓冲都落在那里。失败只报错不终止 —— 板子还能起来、
+     * 串口还能用，只有编译器与文件缓冲不可用；把错误说清楚，比带着一块
+     * 没上电的内存继续跑更接近事实。 */
+    {
+        int32 sdram_rc = arkrtos_sdram_init();
+
+        if(sdram_rc != 0)
+        {
+            ARKRTOS_LOGE("SDRAM", "init failed (%d): 0x%08X is unusable (arkc arena and ramfs buffers live there)",
+                         (int)sdram_rc, (unsigned)CHIP_SDRAM_BASE);
+        }
+    }
+#endif
+
     /* CP10/CP11 全权限，否则任务里的浮点指令会升级成 UsageFault（NOCP）。 */
     SCB->CPACR |= (3UL << 20) | (3UL << 22);
     FPU->FPCCR = FPU_FPCCR_ASPEN_Msk;
@@ -109,6 +130,43 @@ void arkrtos_dev_board_init(void)
         ARKRTOS_LOGE("BOARD", "block device registration failed");
     }
 }
+
+#if (ARKRTOS_USE_SDRAM == 1)
+/* ============================================================
+ * 板级 Shell 命令登记 - 内核扩展点实现
+ * @brief 把 "sdram" 追加进 ark_shell 的命令表
+ * @param idx 内核给的第一个空闲槽位
+ * @return 追加后的表长（没有追加就原样返回 idx）
+ * @details 这个函数只有内核在 register_kernel_commands() 末尾才会调用，
+ *          也就是说命令表已经被 ark_shell_init() 重建过、内容已定型。
+ *          以前在 arkrtos_dev_board_init() 里用 arkrtos_shell_ext_register()
+ *          登记，写的还是 g_cmd_table[0] —— 随后 ark_shell_commands_init()
+ *          从内置表重建前 5 槽，"sdram" 被 "help" 顶掉，板上表现就是
+ *          `sdram: command not found`（驱动本身没问题）。
+ *          返回表长的约定与 arkvim_shell_register()/arkc_shell_register() 相同。
+ * ============================================================ */
+int32 arkrtos_board_shell_register(int32 idx)
+{
+    if(idx < 0)
+    {
+        return idx;
+    }
+
+    /* 表满时保持原样返回：内核接着把哨兵写到 idx，命令表依然自洽。
+     * 少一条板级诊断命令可以接受，写坏命令表不行。 */
+    if((idx + 1) > ARK_SHELL_MAX_COMMANDS)
+    {
+        ARKRTOS_LOGE("SDRAM", "shell command table full (%d), \'sdram\' not registered",
+                     (int)ARK_SHELL_MAX_COMMANDS);
+        return idx;
+    }
+
+    g_cmd_table[idx] = ARK_SHELL_CMD("sdram", arkrtos_sdram_shell_cmd,
+        "External SDRAM: sdram [info | init | verify | probe | test | fsm | pins | clk <n> | regs]",
+        3);
+    return idx + 1;
+}
+#endif /* ARKRTOS_USE_SDRAM */
 
 /* ============================================================
  * 内核异常与节拍向量

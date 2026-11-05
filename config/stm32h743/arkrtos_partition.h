@@ -35,6 +35,53 @@
 #define CHIP_CCM_BASE        0x20000000
 #define CHIP_CCM_SIZE        (128 * 1024)
 
+/* ---- 外置存储器（按 FK743M5-XIH6 原理图核实，两片都焊在板上）----
+ * 这几行不是「规划」，是板上事实。用不用由 ARKRTOS_USE_SDRAM 与下面两个
+ * 分区大小决定；容量、几何、基址只在这里出现一次。
+ *
+ * SDRAM：Winbond W9825G6KH-6，32MB = 4 bank × 8M × 16bit，
+ *        接 FMC SDRAM Bank1（SDNE0 / SDCKE0）⇒ 映射基址 0xC0000000，
+ *        行地址 13 位（A0..A12）、列地址 9 位（A0..A8）、16 位总线。
+ *        同封装兼容 W9812G6KH（16MB，12 位行地址）与 ISSI IS42S16xxx，
+ *        换片只改本节这两行几何宏。
+ * QSPI NOR：Winbond W25Q64，8MB，QSPI 映射基址 0x90000000。
+ *        驱动排在 M2；这里只登记器件事实，不放任何驱动代码。
+ *
+ * 分工（2026-11-05 起）：SDRAM 放「大块工作区」——arkc 的编译期缓冲
+ * （.ark_buf）与 ramfs 的文件缓冲（.extram）；片内 AXI SRAM 只留内核、
+ * 任务与栈。这样内核 RAM 占用不再随编译器的预算上涨。 */
+#define CHIP_SDRAM_BASE      0xC0000000
+#define CHIP_SDRAM_SIZE      (32 * 1024 * 1024)
+#define CHIP_SDRAM_ROW_BITS  13              /* W9825G6KH：13 位行地址 */
+#define CHIP_SDRAM_COL_BITS  9               /* W9825G6KH： 9 位列地址 */
+#define CHIP_SDRAM_BUS_BITS  16
+#define CHIP_QSPI_BASE       0x90000000
+#define CHIP_QSPI_SIZE       (8 * 1024 * 1024)
+
+/* SDRAM 的 MPU 窗口：与 CHIP_SDRAM_* 同源。32MB 且在 0xC0000000 上按自身
+ * 大小对齐，正好是一条 Cortex-M7 区域（区域必须 2 的幂且按大小对齐）。
+ * 必须有这一条，不能靠默认内存映射：Cortex-M7 把 0xA0000000~0xDFFFFFFF
+ * 定成 Device，那里不允许非对齐访问，而 ramfs 节点这类含 16 位字段的结构
+ * 会让编译器发出 4 字节非对齐访问（板上实测 UNALIGNED UsageFault）。 */
+#ifndef ARKRTOS_MPU_EXTRAM_BASE
+#define ARKRTOS_MPU_EXTRAM_BASE  (CHIP_SDRAM_BASE)
+#endif
+#ifndef ARKRTOS_MPU_EXTRAM_SIZE
+#define ARKRTOS_MPU_EXTRAM_SIZE  (CHIP_SDRAM_SIZE)
+#endif
+
+/* ---- 外置 RAM 的两个分区（大小 0 = 不启用，对应段留在片内 RAM）----
+ * gen_ld.py 按这两个大小生成 SDRAMBUF / SDRAMFS 两个 MEMORY 区；
+ * 段归属与地址全部由本文件派生，脚本里不再出现任何地址。 */
+#define ARKRTOS_ARK_BUF_SDRAM_BASE   (CHIP_SDRAM_BASE)
+#define ARKRTOS_ARK_BUF_SDRAM_SIZE   (12 * 1024 * 1024)
+#define ARKRTOS_RAMFS_SDRAM_BASE     (ARKRTOS_ARK_BUF_SDRAM_BASE + ARKRTOS_ARK_BUF_SDRAM_SIZE)
+#define ARKRTOS_RAMFS_SDRAM_SIZE     (6 * 1024 * 1024)
+
+#if ((ARKRTOS_ARK_BUF_SDRAM_SIZE + ARKRTOS_RAMFS_SDRAM_SIZE) > CHIP_SDRAM_SIZE)
+#error "SDRAM partitions exceed CHIP_SDRAM_SIZE"
+#endif
+
 /* ============================================================
  * 二、分区大小策略（按项目需求调整）
  * ============================================================ */

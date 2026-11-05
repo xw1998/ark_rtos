@@ -162,6 +162,16 @@ typedef struct {
     uint32 region_attr[ARKRTOS_MPU_REGION_MAX];
 } arkrtos_arch_mpu_t;
 
+/* Region index layout shared by the kernel (arkrtos_mpu.c) and every
+ * port (arkrtos_port_mpu_*): one context slot per role, so a port can
+ * name the region it needs without knowing which task it belongs to. */
+#define ARKRTOS_MPU_RGN_CODE       (0u)   /* task code window (RO, executable) */
+#define ARKRTOS_MPU_RGN_DATA       (1u)   /* task data/stack window (RW, XN) */
+#define ARKRTOS_MPU_RGN_SHARE      (2u)   /* kernel shared RAM (partition table) */
+#define ARKRTOS_MPU_RGN_PERIPH1    (3u)   /* peripheral window 1 (board configured) */
+#define ARKRTOS_MPU_RGN_PERIPH2    (4u)   /* peripheral window 2 (board configured) */
+#define ARKRTOS_MPU_RGN_EXTRAM     (5u)   /* external RAM (board configured, 0 = none) */
+
 /* Memory attribute kind of one region (architecture independent).
  * arkrtos_mpu.c passes one of these to arkrtos_port_mpu_encode(), which maps it
  * to the local encoding. */
@@ -171,7 +181,8 @@ typedef enum {
     ARKRTOS_MPU_MEM_RAM,          /* read/write, non-executable (data / stack) */
     ARKRTOS_MPU_MEM_RAMX,         /* read/write AND executable (MiniApp block only) */
     ARKRTOS_MPU_MEM_PERIPH_RO,    /* peripheral, unprivileged read-only */
-    ARKRTOS_MPU_MEM_PERIPH_RW     /* peripheral, unprivileged read/write */
+    ARKRTOS_MPU_MEM_PERIPH_RW,    /* peripheral, unprivileged read/write */
+    ARKRTOS_MPU_MEM_EXTRAM        /* external RAM: read/write, XN, Normal NC */
 } arkrtos_mpu_mem_t;
 
 #endif

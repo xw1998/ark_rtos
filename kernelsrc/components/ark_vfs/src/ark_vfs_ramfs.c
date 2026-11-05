@@ -79,7 +79,20 @@ struct ark_ramfs_dir {
     char     name[ARK_VFS_PATH_MAX];
 };
 
-static struct ark_ramfs_node   g_nodes[ARK_RAMFS_MAX_FILES];
+#ifndef ARK_RAMFS_IN_EXTRAM
+#define ARK_RAMFS_IN_EXTRAM     0
+#endif
+
+#if ARK_RAMFS_IN_EXTRAM
+/* 文件缓冲落在外置 SDRAM（.extram 段，见板级分区头与链接脚本）。
+ * 外置 RAM 上电后内容不确定，所以 mount 时必须自己清一遍 used 标记 ——
+ * 片内 .bss 靠启动文件清零，这条路径没有那个保障。 */
+#define ARK_RAMFS_SECTION       __attribute__((section(".extram")))
+#else
+#define ARK_RAMFS_SECTION
+#endif
+
+static struct ark_ramfs_node   g_nodes[ARK_RAMFS_MAX_FILES] ARK_RAMFS_SECTION;
 static struct ark_ramfs_dir    g_dirs[ARK_RAMFS_MAX_DIRS];
 static struct ark_vfs_file     g_handles[ARK_RAMFS_MAX_OPEN];
 
@@ -273,7 +286,14 @@ static int p_node_index(struct ark_ramfs_node *node)
 static int32_t ramfs_mount(struct ark_vfs_mnt *mnt)
 {
     /* Contents survive a mount/umount cycle on purpose: remounting a scratch
-     * area should not silently erase it.  Use ark_ramfs_reset() to clear. */
+     * area should not silently erase it.  Use ark_ramfs_reset() to clear.
+     *
+     * The one exception is an external-RAM backend: that memory has no
+     * power-on value the C runtime guarantees, so the "used" flags would be
+     * random bytes and the first ls would show files nobody created. */
+#if ARK_RAMFS_IN_EXTRAM
+    ark_ramfs_reset();
+#endif
     (void)mnt;
     return ARK_VFS_OK;
 }

@@ -112,6 +112,17 @@
 #define ARKRTOS_MPU_PERIPH_RW       (0)
 #endif
 
+/* External RAM window (SDRAM on FMC).  A board that has it declares base and
+ * size in its partition header (H743: CHIP_SDRAM_*), so the address still comes
+ * from exactly one place.  Size 0 = no external RAM = the region is skipped and
+ * the task contexts are exactly what they were. */
+#ifndef ARKRTOS_MPU_EXTRAM_BASE
+#define ARKRTOS_MPU_EXTRAM_BASE     (0u)
+#endif
+#ifndef ARKRTOS_MPU_EXTRAM_SIZE
+#define ARKRTOS_MPU_EXTRAM_SIZE     (0u)
+#endif
+
 /* ============================================================
  * 任务与调度相关参数
  * ============================================================ */

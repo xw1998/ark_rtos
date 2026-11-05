@@ -300,6 +300,47 @@ config ARKRTOS_HW_SAFE
 	  dies, is killed or is fault-recovered.  Off leaves the device
 	  open/close and task-death paths exactly as before.
 
+config ARKRTOS_USE_ARKVIM
+	bool "Text editor (arkvim)"
+	default n
+	help
+	  The upstream arkvim modal editor wired to the kernel VFS, plus the
+	  `vim` shell command.  Requires ARKRTOS_USE_VFS.  Off compiles the
+	  component out entirely and leaves the command table unchanged.
+
+config ARKRTOS_USE_ARKC
+	bool "Self-hosted C compiler (arkc)"
+	default n
+	help
+	  arkc compiled into the kernel, wired to the VFS, plus the `cc` shell
+	  command.  Requires ARKRTOS_USE_VFS.  Its static arena and buffers
+	  (about 210 KB with the STM32_MIN profile) live in the NOLOAD
+	  .ark_buf section, which the board may place in external SDRAM.  Off
+	  compiles the component out and leaves the command table unchanged.
+
+config ARKRTOS_USE_SDRAM
+	bool "External SDRAM (FMC SDRAM Bank1)"
+	default n
+	help
+	  Bring the FMC SDRAM controller up during board init and run the
+	  JEDEC power-up sequence.  The geometry and the two external
+	  partitions (.ark_buf for the compiler arena, .extram for the ramfs
+	  file buffers) come from the board's partition header.  Off touches
+	  no FMC register and nothing is mapped at 0xC0000000.  When on, the
+	  board also registers the `sdram` shell command (info / full-chip
+	  self test).
+
+config ARKRTOS_SHELL_BOARD_CMDS
+	bool "Board-owned shell commands"
+	default n
+	depends on SHELL_ENABLE
+	help
+	  Add one call inside register_kernel_commands() so the board can append
+	  its own commands after ark_shell_init() has rebuilt g_cmd_table.  Before
+	  that point the table is overwritten by the builtin list, so a command
+	  registered during board init silently disappears ("sdram: command not
+	  found").  Off: no call is compiled, the command table is unchanged.
+
 config ARKRTOS_USE_UTEST
 	bool "On-board unit test framework"
 	default y

@@ -68,6 +68,7 @@ SRCS := \
   board/stm32h743/drvflash.c \
   board/stm32h743/drvwdg.c \
   board/stm32h743/drvblk.c \
+  board/stm32h743/drvfmc.c \
   example/stm32h743/kernel/ARKRTOS_TEST/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal.c \
   example/stm32h743/kernel/ARKRTOS_TEST/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_cortex.c \
   example/stm32h743/kernel/ARKRTOS_TEST/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_rcc.c \

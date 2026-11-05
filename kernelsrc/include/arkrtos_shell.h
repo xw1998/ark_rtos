@@ -66,6 +66,19 @@ int32 arkrtos_shell_ext_unregister(const char *name);
 */
 int32 arkrtos_shell_release_task(uint32 task_id);
 
+#if (ARKRTOS_SHELL_BOARD_CMDS == 1)
+/**
+* @brief 板级命令扩展点（板级实现，内核在命令表建好后调用一次）
+* @param idx 命令表里第一个空闲槽位
+* @return 追加完成后新的表长；没有追加就原样返回 idx
+* @details 调用点在 register_kernel_commands() 末尾，也就是 ark_shell_init()
+*          重建命令表之后。板级命令只能在这里登记：在那之前写 g_cmd_table
+*          会被整表覆盖，现场表现是命令凭空消失（"sdram: command not found"）。
+*          返回表长的约定与 arkvim_shell_register()/arkc_shell_register() 一致。
+*/
+int32 arkrtos_board_shell_register(int32 idx);
+#endif
+
 /**
 * @brief 向控制台输出一段有界长度的文本（不追加换行）
 * @param msg 文本首地址

@@ -276,6 +276,15 @@ void arkrtos_mpu_build_task(arkrtos_task_t *p_task)
                          (ARKRTOS_MPU_PERIPH_RW == 1) ? ARKRTOS_MPU_MEM_PERIPH_RW
                                                     : ARKRTOS_MPU_MEM_PERIPH_RO);
     #endif
+
+    /* Region 5: external RAM (SDRAM on FMC), when the board declares one.
+     * Without it a task cannot reach 0xC0000000 at all, and even the default
+     * map would give it Device attributes, i.e. no unaligned accesses. */
+    #if (ARKRTOS_MPU_EXTRAM_SIZE != 0)
+    arkrtos_mpu_add_region(p_mpu, ARKRTOS_MPU_RGN_EXTRAM,
+                         ARKRTOS_MPU_EXTRAM_BASE, ARKRTOS_MPU_EXTRAM_SIZE,
+                         ARKRTOS_MPU_MEM_EXTRAM);
+    #endif
 }
 
 void arkrtos_mpu_set_app(arkrtos_task_t *p_app)

@@ -60,6 +60,16 @@ THIRD_PARTY_MARKERS = ("/Drivers/", "/Middlewares/", "/RTE/", "/DebugConfig/",
 # policed by nothing here on purpose (see check_single_address_source).
 TARGET_CODE_ROOTS = ("kernelsrc/", "board/", "config/", "example/")
 
+# Vendored components are kept byte-compatible with their own repositories
+# (tools/sync_arkc.py --check fails the moment one of their files differs).
+# arkc's default load addresses are the compiler's notion of "where a bare
+# binary runs", not a copy of this board's partition table, so a layout change
+# here must not edit them: patching upstream would also make every future sync
+# conflict.  They are therefore out of scope for the single-address-source
+# check, exactly like the generated .sct files.
+VENDOR_MARKERS = ("/components/arkc/src/", "/components/arkc/include/",
+                  "/components/arkvim/src/")
+
 # Images that are linked separately from the kernel and therefore must stay
 # layout-agnostic.  The kernel's own loader (kernelsrc/src/arkrtos_loader.c) is
 # part of the kernel image and *must* see the partition header, so kernelsrc/src
@@ -275,6 +285,8 @@ def check_single_address_source():
         if not rel.startswith(TARGET_CODE_ROOTS):
             continue
         if rel.endswith((".sct", "arkrtos_partition.h")):
+            continue
+        if any(m in rel for m in VENDOR_MARKERS):
             continue
         for i, line in code_lines(stored_bytes(rel, path)):
             if b"0x080" not in line and b"0x200" not in line:

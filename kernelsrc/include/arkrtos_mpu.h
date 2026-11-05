@@ -14,12 +14,6 @@
 #include "arkrtos_task.h"
 #include "arkrtos_config.h"
 
-/* Region index layout used by every task context built in arkrtos_mpu.c. */
-#define ARKRTOS_MPU_RGN_CODE       (0u)   /* task code window (read-only, executable) */
-#define ARKRTOS_MPU_RGN_DATA       (1u)   /* task data/stack window (read/write, XN) */
-#define ARKRTOS_MPU_RGN_SHARE      (2u)   /* kernel shared RAM (partition table) */
-#define ARKRTOS_MPU_RGN_PERIPH1    (3u)   /* peripheral window 1 (board configured) */
-#define ARKRTOS_MPU_RGN_PERIPH2    (4u)   /* peripheral window 2 (board configured) */
 
 #if (ARKRTOS_USE_MPU == 1)
 
