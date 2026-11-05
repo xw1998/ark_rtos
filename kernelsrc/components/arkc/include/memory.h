@@ -25,5 +25,10 @@ char *mem_strdup(const char *s);
 char *mem_strndup(const char *s, int n);
 void *mem_realloc(void *old_ptr, int old_size, int new_size);
 int   mem_pool_used(void);
+/* Peak of the bump pointer since the last mem_pool_reset(): how much arena the
+ * translation unit actually needed.  Lets the RAM budget be set from data
+ * instead of from the number in a failed build's error message. */
+int   mem_pool_high(void);
+int   mem_pool_capacity(void);
 
 #endif /* ARK_MEMORY_H */

@@ -90,24 +90,29 @@ static void cc_usage(void)
         "  -o - : prints to the console (text as-is, binary as hex)\r\n"
 #if (CC_LAYOUT_OPTS == 1)
         "  --scatter: link for that memory layout (needed for 'app run')\r\n"
-        "  --vector-table: reserve 0x400 at the front of the image and put a\r\n"
-        "         Cortex-M vector table there.  Use it whenever Reset_Handler is\r\n"
-        "         defined: without it arkc prepends the table and shifts the image,\r\n"
-        "         which leaves string-literal addresses 0x400 too low\r\n"
+        "  --vector-table: reserve 0x400 at the front of the image for the\r\n"
+        "         Cortex-M vector table.  Compile with it the object that is\r\n"
+        "         linked FIRST; -link fills the table into that hole.  Nothing\r\n"
+        "         is ever shifted: arkc bakes absolute addresses, so a shifted\r\n"
+        "         image would keep every string-literal pointer 0x400 too low\r\n"
         "  -link: link .obj files into one image; every argument up to the next\r\n"
         "         option is an input.  Add --scatter so the image carries a vector\r\n"
         "         table for that window ('app run' reads SP/entry from it)\r\n"
 #endif
 #if (ARKRTOS_USE_APPPACK == 1)
-        "          [--pack -o <f.svcm>]\r\n"
+        "          [--pack [-o <f.svcm>]] <file.c> [<file2.c> ...]\r\n"
 #endif
         );
 #if (ARKRTOS_USE_APPPACK == 1)
     ark_shell_printf(
-        "  --pack: link the file four times (nominal / ROM+d / RAM+d /\r\n"
+        "  --pack: link the file(s) four times (nominal / ROM+d / RAM+d /\r\n"
         "         ROM+2d and RAM+d), diff the four into a relocation table\r\n"
         "         and write one loadable image.  Needs -o.  Install it with\r\n"
-        "         'mini run', not 'app run'\r\n");
+        "         'mini run', not 'app run'\r\n"
+        "         Several sources: each is compiled to an in-memory object and the\r\n"
+        "         objects are linked per pass (up to 4 sources).  arkc's objects\r\n"
+        "         bake their bases at codegen time, so the four passes have to\r\n"
+        "         recompile the source; -c objects cannot be reused here\r\n");
 #endif
 }
 
@@ -147,8 +152,16 @@ static int cc_bad_option(const char *what, const char *arg)
  * (tools/pack_app.py) stays as the byte-for-byte referee -- same algorithm in
  * two places, so a disagreement means one of them is wrong.
  *
- * Memory: 4 x 8 KB payloads + 16 KB output, borrowed from the pool and
- * returned on every path.  Static RAM has ~11 KB left, and ramfs has 3 slots.
+ * Several sources: the differential needs the *source* recompiled per pass,
+ * because arkc's object files bake the .text/.data bases at codegen time --
+ * relinking one object set at four different bases changes nothing but the
+ * vector table, so no relocation table could be derived from it.  Each pass
+ * therefore recompiles every source into an object and links them, and the
+ * objects live in RAM through the port's in-memory file registry (see
+ * arkc_port.h): ramfs has 3 slots and one littlefs write costs ~10 s).
+ *
+ * Memory: 4 x 8 KB payloads + 4 x 4 KB object slots + 16 KB output, borrowed
+ * from the pool and returned on every path.
  * ============================================================ */
 
 /* One payload may not exceed the app-run code window; four of them are one
@@ -156,6 +169,21 @@ static int cc_bad_option(const char *what, const char *arg)
 #define CC_PACK_WIN_SIZE     8192u
 /* 256 header + 1024 x 4 table + 8192 payload = 12544 -> one 16 KB block. */
 #define CC_PACK_OUT_CAP      16384u
+/* Objects of one pass, one slot per source.  The cap equals ARK_OBJ_BUF_SIZE:
+ * arkc refuses to emit an object bigger than that buffer, so a larger slot
+ * would only hide the real limit. */
+#define CC_PACK_MAX_SRCS     4
+#define CC_PACK_OBJ_CAP      4096u
+#define CC_PACK_OBJ_ARENA    (CC_PACK_MAX_SRCS * CC_PACK_OBJ_CAP)
+/* 池一次借出的上限是 SLOT_RAM_MAX_BLOCK（32 KB），而且两块各自都要落进
+ * [MIN, MAX]，所以 "32 KB 负载窗口 + 16 KB 对象槽" 不能合成一次借出
+ * （48 KB 上取整成 64 KB，直接被拒）。
+ * 对象槽因此和镜像缓冲共用那 16 KB：镜像只在**四遍都跑完之后**才写进去，
+ * 而对象在最后一遍链接完成后就不再被读，用途在时间上不重叠。这条依赖写成
+ * 下面的 #error 而不是注释——顺序一旦被改动，这里先失败。 */
+#if (CC_PACK_OBJ_ARENA > CC_PACK_OUT_CAP)
+#error "object slots share the image buffer; they must fit inside it"
+#endif
 #define CC_PACK_ARENA        (4u * CC_PACK_WIN_SIZE)
 /* The nominal bases only end up in the image header (nominal_base /
  * nominal_ram_base); the loader adds (landing point - nominal) at run time, so
@@ -203,66 +231,159 @@ static int cc_str(char *p, const char *s)
     return n;
 }
 
-/* Write pass idx's layout.  The body is character-identical to the .sct that
- * M1 verified on the board, including the CRLF line ends (that file came from
- * `echo ... >>` on the shell, which is the only form ever proven to parse). */
-static int cc_pack_write_sct(int idx)
+/* Which pass moves which window, spelled out per window so that "what this
+ * pass differs in" is readable without indexing arithmetic. */
+static const uint32_t s_cc_pack_rom_add[4] = { 0u, CC_PACK_DELTA, 0u, 2u * CC_PACK_DELTA };
+static const uint32_t s_cc_pack_ram_add[4] = { 0u, 0u, CC_PACK_DELTA, CC_PACK_DELTA };
+
+/* Write one .sct.  The body is character-identical to the .sct that M1 verified
+ * on the board, including the CRLF line ends (that file came from
+ * `echo ... >>` on the shell, which is the only form ever proven to parse).
+ *
+ * rom/rom_len are not the pass constant any more: every object of a pass is
+ * compiled against the base it will really be loaded at, because arkc bakes
+ * absolute addresses into the code and the linker therefore cannot place an
+ * object after the fact (see cc_pack). */
+static int cc_pack_write_sct(uint32_t rom, uint32_t rom_len, uint32_t ram)
 {
-    /* Which pass moves which window, spelled out per window so that "what this
-     * pass differs in" is readable without indexing arithmetic. */
-    static const uint32_t rom_add[4] = { 0u, CC_PACK_DELTA, 0u, 2u * CC_PACK_DELTA };
-    static const uint32_t ram_add[4] = { 0u, 0u, CC_PACK_DELTA, CC_PACK_DELTA };
     char txt[256];
-    uint32_t rom = CC_PACK_ROM_BASE + rom_add[idx];
-    uint32_t ram = CC_PACK_RAM_BASE + ram_add[idx];
     int  n = 0;
 
     n += cc_str(txt + n, "LR_IROM1 ");
     n += cc_hex32(txt + n, rom);
-    n += cc_str(txt + n, " 0x00002000\r\n{\r\nER_IROM1 ");
+    n += cc_str(txt + n, " ");
+    n += cc_hex32(txt + n, rom_len);
+    n += cc_str(txt + n, "\r\n{\r\nER_IROM1 ");
     n += cc_hex32(txt + n, rom);
-    n += cc_str(txt + n, " 0x00002000 { .ANY (+RO) }\r\nER_IRAM1 ");
+    n += cc_str(txt + n, " ");
+    n += cc_hex32(txt + n, rom_len);
+    n += cc_str(txt + n, " { .ANY (+RO) }\r\nER_IRAM1 ");
     n += cc_hex32(txt + n, ram);
     n += cc_str(txt + n, " 0x00002000 { .ANY (+RW +ZI) }\r\n}\r\n");
 
     return (fs_write_file(CC_PACK_SCT, (const unsigned char *)txt, n) == n) ? 0 : -1;
 }
 
-/* One pass.  Returns the number of bytes captured (>= 0) or a negative code:
- *   -1 compile failed, -2 capture already armed, -3 aborted (arena ran out).
- * The abort pad lives in this frame: arkc calls ark_abort() when the pool runs
- * out, and longjmp back into a frame that has already been left would corrupt
- * the task, so each pass gets a fresh pad of its own. */
-static int cc_pack_pass(const char *src, const char *target, int opt_level,
+/* 内存对象槽的名字。注册进端口后由 fs_write_file / fs_read_file 直接服务，
+ * 既不占 ramfs 槽也不碰 NOR。前缀 "/v/" 不是任何真实挂载点。 */
+static const char *const s_cc_pack_obj[CC_PACK_MAX_SRCS] = {
+    "/v/obj0", "/v/obj1", "/v/obj2", "/v/obj3"
+};
+
+/* 把这次 pass 的对象槽登记进端口。每遍都重登记：上一遍的对象长度必须归零，
+ * 否则"没写成功"会读到上一遍的字节，而那就是一个错误答案。 */
+static int cc_pack_vfiles(uint8_t *obj_arena)
+{
+    int i;
+
+    arkc_port_vfile_clear();
+    for (i = 0; i < CC_PACK_MAX_SRCS; i++) {
+        if (arkc_port_vfile_register(s_cc_pack_obj[i],
+                                     obj_arena + ((uint32_t)i * CC_PACK_OBJ_CAP),
+                                     CC_PACK_OBJ_CAP) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* 一遍里的编译器选项：所有 pass 只有散布文件（CC_PACK_SCT）不同，其余一致，
+ * 所以填一次字段列表只写一处，免得两头漂。 */
+static void cc_pack_fill(ArkOptions *o, const char *src, const char *out,
+                         const char *target, int opt_level, int verbose,
+                         const char *const *includes, int n_includes,
+                         const char *const *defines, int n_defines,
+                         int vector_table)
+{
+    int i;
+
+    memset(o, 0, sizeof(*o));
+    o->input_path   = src;
+    o->output_path  = out;
+    o->verbose      = verbose;
+    o->target       = target;
+    o->opt_level    = opt_level;
+    /* 四遍的差别就在这份 .sct 上：编译期就按它把 .text/.data 基址烤进代码，
+     * 所以对象也只能在这一遍的 .sct 下编译（这正是不能复用 -c 产物的原因）。 */
+    o->scatter_file = CC_PACK_SCT;
+    /* 向量表属于**镜像**，不属于某个编译单元：每个对象都带 --vector-table 会
+     * 让对象在代码最前面各留 0x400 的空洞（实测 a.obj 2516 -> 3540 B），链接
+     * 出来的负载里就有两三段全零，入口落进洞里。
+     *
+     * 但也不是"谁都不带"：arkc 把绝对地址烤进指令，链接器不能再搬动对象，所以
+     * 对象必须按真实落点编基址，而**排在第一个**的那个对象要带 --vector-table，
+     * 由它腾出 0x400 的空洞，-link 再把表填进去（compiler.c 里的 gen-or-verify）。
+     * 洞是 0x400 还是 0 由调用方按"是不是第一个对象"决定。 */
+    o->vector_table = vector_table;
+    for (i = 0; (i < n_includes) && (i < CC_MAX_INCLUDE_DIRS); i++) {
+        o->include_dirs[i] = includes[i];
+    }
+    o->include_dir_count = n_includes;
+    for (i = 0; (i < n_defines) && (i < CC_MAX_DEFINES); i++) {
+        o->pre_defines[i] = defines[i];
+    }
+    o->pre_define_count = n_defines;
+}
+
+/* 编译一份源码到它的内存对象。捕获不参与：写入按注册表落进对象槽。
+ * 返回 0 成功，-1 编译失败，-3 被 abort（池耗尽）。 */
+static int cc_pack_obj(const char *src, const char *obj_name, const char *target,
+                       int opt_level, int verbose,
+                       const char *const *includes, int n_includes,
+                       const char *const *defines, int n_defines,
+                       int vector_table)
+{
+    ArkOptions popts;
+    jmp_buf    pad;
+    int        rc;
+
+    cc_pack_fill(&popts, src, obj_name, target, opt_level, verbose,
+                 includes, n_includes, defines, n_defines, vector_table);
+    popts.compile_only = 1;
+
+    cc_reset_state(src, opt_level);
+
+    arkc_port_set_abort_target(&pad);
+    if (setjmp(pad) != 0) {
+        arkc_port_set_abort_target(NULL);
+        return -3;
+    }
+    rc = ark_compile(&popts);
+    arkc_port_set_abort_target(NULL);
+
+    if (rc != ARK_OK) {
+        return -1;
+    }
+    if (arkc_port_vfile_size(obj_name) == 0u) {
+        /* 编译成功却什么都没写：对象模式或注册表没接上。拿一个空对象去链接，
+         * 得到的是少了这个编译单元的镜像——而且看不出来。 */
+        return -4;
+    }
+    return 0;
+}
+
+/* 把这一遍的对象链接成负载，写进 win（捕获）。
+ * 返回负载字节数（>0）或负码：-1 链接失败，-2 捕获已被占用，-3 被 abort。 */
+static int cc_pack_link(const char *out_name, const char *target, int opt_level,
                         int verbose, const char *const *includes, int n_includes,
                         const char *const *defines, int n_defines,
-                        const char *out_name, uint8_t *win)
+                        const char *const *objs, int n_objs, uint8_t *win)
 {
     ArkOptions popts;
     jmp_buf    pad;
     int        rc;
     int        i;
 
-    memset(&popts, 0, sizeof(popts));
-    popts.input_path     = src;
-    popts.output_path    = out_name;
-    popts.verbose        = verbose;
-    popts.target         = target;
-    popts.opt_level      = opt_level;
-    popts.scatter_file   = CC_PACK_SCT;
-    popts.vector_table   = 1;
-    for (i = 0; (i < n_includes) && (i < CC_MAX_INCLUDE_DIRS); i++) {
-        popts.include_dirs[i] = includes[i];
+    cc_pack_fill(&popts, NULL, out_name, target, opt_level, verbose,
+                 includes, n_includes, defines, n_defines, 1);
+    popts.vector_table     = 1;      /* 镜像前 0x400 的向量表由这次链接生成 */
+    popts.link_mode        = 1;
+    popts.link_input_count = n_objs;
+    for (i = 0; (i < n_objs) && (i < 32); i++) {
+        popts.link_inputs[i] = objs[i];
     }
-    popts.include_dir_count = n_includes;
-    for (i = 0; (i < n_defines) && (i < CC_MAX_DEFINES); i++) {
-        popts.pre_defines[i] = defines[i];
-    }
-    popts.pre_define_count = n_defines;
 
-    /* Every pass starts from the same state; skipping this once is enough to
-     * make pass two emit different bytes than pass one at the same layout. */
-    cc_reset_state(src, opt_level);
+    cc_reset_state("link", opt_level);
 
     if (arkc_port_capture_begin(win, CC_PACK_WIN_SIZE) != 0) {
         return -2;
@@ -271,7 +392,7 @@ static int cc_pack_pass(const char *src, const char *target, int opt_level,
     arkc_port_set_abort_target(&pad);
     if (setjmp(pad) != 0) {
         arkc_port_set_abort_target(NULL);
-        (void)arkc_port_capture_end();   /* must disarm, or the next pass is refused */
+        (void)arkc_port_capture_end();   /* 必须收手，否则下一遍拒绝开始 */
         return -3;
     }
     rc = ark_compile(&popts);
@@ -284,12 +405,23 @@ static int cc_pack_pass(const char *src, const char *target, int opt_level,
     return (int)arkc_port_capture_end();
 }
 
-static int cc_pack(const char *src, const char *out, const char *target,
+/* 负载头两个字的读数（+0 初始 SP、+4 入口）。打包失败时，报错里说"没有可用
+ * 的向量表"，而这两个数正是判断"是表没生成、还是基址不是这一遍的 .sct"的
+ * 唯一证据，所以照原样打出来，不做解释也不做修正。 */
+static uint32_t cc_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static int cc_pack(const char *const *srcs, int n_srcs,
+                   const char *out, const char *target,
                    int opt_level, int verbose,
                    const char *const *includes, int n_includes,
                    const char *const *defines, int n_defines)
 {
     uint8_t *img[4];
+    uint8_t *obj_arena;
     uint8_t *outbuf;
     uint32_t idx = 0u;
     uint32_t code_base = 0u;
@@ -303,6 +435,7 @@ static int cc_pack(const char *src, const char *out, const char *target,
     uint32_t t0;
     int32_t  rc;
     int      i;
+    int      k;
     int      got;
     int      ret = 1;
     arkrtos_apppack_win_t   win;
@@ -315,13 +448,15 @@ static int cc_pack(const char *src, const char *out, const char *target,
     memset(&st, 0, sizeof(st));
 
     /* One 32 KB code block holds the four payloads, one 16 KB RAM block holds
-     * the image.  The two blocks are lent and returned together (that is the
-     * only atomic lend the pool has), so there is one borrow and one return. */
+     * the object slots and then the image.  The two blocks are lent and
+     * returned together (that is the only atomic lend the pool has). */
     rc = arkrtos_ptable_mini_alloc(CC_PACK_ARENA, CC_PACK_OUT_CAP, &idx,
                                    &code_base, &code_size, &ram_base, &ram_size);
     if (rc != 0) {
-        ark_shell_printf("cc: --pack needs 32 KB + 16 KB from the RAM pool; "
-                         "nothing free (the lend is refused, not shrunk)\r\n");
+        ark_shell_printf("cc: --pack needs %u KB + %u KB from the RAM pool; "
+                         "nothing free (the lend is refused, not shrunk)\r\n",
+                         (unsigned)(CC_PACK_ARENA / 1024u),
+                         (unsigned)(CC_PACK_OUT_CAP / 1024u));
         return 1;
     }
     if ((code_size < CC_PACK_ARENA) || (ram_size < CC_PACK_OUT_CAP)) {
@@ -336,18 +471,101 @@ static int cc_pack(const char *src, const char *out, const char *target,
     for (i = 0; i < 4; i++) {
         img[i] = (uint8_t *)(void *)(code_base + ((uint32_t)i * CC_PACK_WIN_SIZE));
     }
+    /* Same 16 KB, two uses in sequence: objects during the passes, image
+     * after them (see the #error above CC_PACK_ARENA). */
+    obj_arena = (uint8_t *)(void *)(ram_base);
     outbuf = (uint8_t *)(void *)(ram_base);
 
     t0 = platform_tick_ms();
-    ark_shell_printf("cc: pack %s -> %s (4 passes, -O%d)\r\n", src, out, opt_level);
+    if (n_srcs == 1) {
+        ark_shell_printf("cc: pack %s -> %s (4 passes, -O%d)\r\n",
+                         srcs[0], out, opt_level);
+    } else {
+        ark_shell_printf("cc: pack %d sources -> %s (4 passes, -O%d)\r\n",
+                         n_srcs, out, opt_level);
+    }
 
     for (i = 0; i < 4; i++) {
-        if (cc_pack_write_sct(i) != 0) {
+        /* 这一遍的基址，以及"下一个对象从哪开始"。offset 只能在这个循环里累加：
+         * 每个对象都必须按它最终的落点编基址（见下），所以顺序是硬约束。 */
+        uint32_t rom = CC_PACK_ROM_BASE + s_cc_pack_rom_add[i];
+        uint32_t ram = CC_PACK_RAM_BASE + s_cc_pack_ram_add[i];
+        uint32_t off = 0u;
+
+        if (cc_pack_vfiles(obj_arena) != 0) {
+            ark_shell_printf("cc: cannot register the in-memory object files "
+                             "(the registry refused)\r\n");
+            goto done;
+        }
+        /* Objects first: every source of this pass, then one link.
+         *
+         * Each object is compiled against the base it will really be loaded at.
+         * arkc bakes absolute addresses into the code (movw/movt, literal
+         * slots) and only external symbols become relocations, so the linker
+         * cannot move an object afterwards -- a concatenation would leave one
+         * TU's string literals pointing into another TU's bytes.  实测过：不按
+         * 落点编基址时，b.c 的两条字符串指针落在 0x08000000/0x08000014，
+         * 程序装载、打印不出任何东西、立刻退出。
+         *
+         * 第一个对象带 --vector-table：它腾出 0x400 的空洞，-link 把向量表填
+         * 进去（不位移镜像，位移会让烤死的地址全部偏 0x400）。 */
+        for (k = 0; k < n_srcs; k++) {
+            if (cc_pack_write_sct(rom + off, CC_PACK_WIN_SIZE - off, ram) != 0) {
+                ark_shell_printf("cc: cannot write %s: %s\r\n",
+                                 CC_PACK_SCT, fs_last_error());
+                goto done;
+            }
+            got = cc_pack_obj(srcs[k], s_cc_pack_obj[k], target, opt_level, verbose,
+                              includes, n_includes, defines, n_defines,
+                              (k == 0) ? 1 : 0);
+            if (got < 0) {
+                if (got == -3) {
+                    ark_shell_printf("cc: pass %c: compiling %s aborted: %s\r\n",
+                                     s_cc_pack_tag[i], srcs[k],
+                                     arkc_port_abort_message());
+                } else if (got == -4) {
+                    ark_shell_printf("cc: pass %c: compiling %s produced no object\r\n",
+                                     s_cc_pack_tag[i], srcs[k]);
+                } else {
+                    ark_shell_printf("cc: pass %c: compiling %s failed\r\n",
+                                     s_cc_pack_tag[i], srcs[k]);
+                }
+                cc_report_pool();
+                goto done;
+            }
+            {
+                /* 对象的**长度**要用它自己头里的 code_size，不是文件长度：
+                 * ARKOBJ2 还带着符号表和重定位表（实测 a.obj 文件 3540 B，
+                 * 其中的代码只有 2590 B），链接器排布用的是代码长度。拿文件
+                 * 长度累加会让下一个对象被编到 950 B 之外的基址上——那是
+                 * "对象被搬了位置"，正是这一段要防的事。 */
+                uint32_t sz = cc_le32(obj_arena + ((uint32_t)k * CC_PACK_OBJ_CAP) + 8u);
+                uint32_t file_sz = (uint32_t)arkc_port_vfile_size(s_cc_pack_obj[k]);
+
+                if (verbose != 0) {
+                    ark_shell_printf("cc:   %c obj%d %u B code (%u B file) at +0x%X <- %s\r\n",
+                                     s_cc_pack_tag[i], k, (unsigned)sz,
+                                     (unsigned)file_sz, (unsigned)off, srcs[k]);
+                }
+                if ((sz == 0u) || (sz > (CC_PACK_WIN_SIZE - off))) {
+                    ark_shell_printf("cc: pass %c: %s produced %u B at +0x%X, "
+                                     "which does not fit the %u B window\r\n",
+                                     s_cc_pack_tag[i], srcs[k], (unsigned)sz,
+                                     (unsigned)off, (unsigned)CC_PACK_WIN_SIZE);
+                    goto done;
+                }
+                off += sz;
+            }
+        }
+        /* 链接用这一遍的**基址**布局：-link 只按它算 flash_base/SP，并把向量表
+         * 填进第一个对象腾出的洞里。 */
+        if (cc_pack_write_sct(rom, CC_PACK_WIN_SIZE, ram) != 0) {
             ark_shell_printf("cc: cannot write %s: %s\r\n", CC_PACK_SCT, fs_last_error());
             goto done;
         }
-        got = cc_pack_pass(src, target, opt_level, verbose, includes, n_includes,
-                           defines, n_defines, s_cc_pack_out[i], img[i]);
+        got = cc_pack_link(s_cc_pack_out[i], target, opt_level, verbose,
+                           includes, n_includes, defines, n_defines,
+                           s_cc_pack_obj, n_srcs, img[i]);
         if (got < 0) {
             if (got == -2) {
                 ark_shell_printf("cc: pass %c: a capture is already armed\r\n",
@@ -363,10 +581,21 @@ static int cc_pack(const char *src, const char *out, const char *target,
             goto done;
         }
         if (got == 0) {
-            /* Compiling succeeded but wrote nothing: either -o was dropped or
+            /* Linking succeeded but wrote nothing: either -o was dropped or
              * the capture is not wired to the write.  Neither can be packed. */
             ark_shell_printf("cc: pass %c produced no output bytes\r\n",
                              s_cc_pack_tag[i]);
+            goto done;
+        }
+        if (((uint32_t)got < off) || (((uint32_t)got - off) > 16u)) {
+            /* 链接产物的长度必须等于各对象长度之和：不相等说明有对象被链接器
+             * 搬了位置，而它的代码里烤死的是原来的基址——这种镜像能装载、能跑，
+             * 但每一处地址都是错的。宁可在打包时停下。 */
+            ark_shell_printf("cc: pass %c: linked %u B but the objects total %u B: "
+                             "an object was placed at a base its code cannot follow "
+                             "(the only legal tail is the 2..16 B __arkcc_init_globals "
+                             "stub/trampoline)\r\n",
+                             s_cc_pack_tag[i], (unsigned)got, (unsigned)off);
             goto done;
         }
         len[i] = (uint32_t)got;
@@ -399,12 +628,20 @@ static int cc_pack(const char *src, const char *out, const char *target,
             img[i][q] = 0u;
         }
     }
+    ark_shell_printf("cc:   A vector: SP 0x%X entry 0x%X (rom base 0x%X, "
+                     "window %u B)\r\n",
+                     (unsigned)cc_le32(img[0]),
+                     (unsigned)(cc_le32(img[0] + 4u) & ~1u),
+                     (unsigned)CC_PACK_ROM_BASE, (unsigned)CC_PACK_WIN_SIZE);
 
     win.rom_base = CC_PACK_ROM_BASE;
     win.rom_size = CC_PACK_WIN_SIZE;
     win.ram_base = CC_PACK_RAM_BASE;
     win.ram_size = CC_PACK_WIN_SIZE;
 
+    /* The passes are over: the object registry is no longer read, so the
+     * image may take over the block the objects lived in. */
+    arkc_port_vfile_clear();
     rc = arkrtos_apppack_build(img[0], img[1], img[2], img[3], len4,
                                CC_PACK_DELTA, &win, ARKRTOS_APP_TYPE_MINIAPP, 1u,
                                outbuf, CC_PACK_OUT_CAP, &out_len, &st);
@@ -437,12 +674,29 @@ static int cc_pack(const char *src, const char *out, const char *target,
 done:
     /* Return before anything else: an unreturned lend makes the next pack or
      * mini run fail.  The temporary .sct goes too, or it, the source and the
-     * image together take all three ramfs slots. */
+     * image together take all three ramfs slots.  The registry is cleared so
+     * the next run cannot read this run's objects. */
+    arkc_port_vfile_clear();
     (void)arkrtos_ptable_mini_free(idx);
     (void)arkrtos_vfs_remove(CC_PACK_SCT);
     return ret;
 }
 #endif /* ARKRTOS_USE_APPPACK */
+
+#if (ARKRTOS_USE_APPPACK == 1)
+/* 给 ark make 的入口：同一份 cc_pack，只是把宏与头文件目录显式传进来。 */
+int arkc_cc_pack(const char *const *srcs, int n_srcs, const char *out,
+                 const char *const *defs, int n_defs,
+                 const char *const *incs, int n_incs,
+                 int opt_level, int verbose)
+{
+    if ((srcs == NULL) || (n_srcs <= 0) || (out == NULL)) {
+        return 1;
+    }
+    return cc_pack(srcs, n_srcs, out, "arm", opt_level, verbose,
+                   incs, n_incs, defs, n_defs);
+}
+#endif
 
 static int cmd_cc(int argc, char *argv[])
 {
@@ -452,6 +706,14 @@ static int cmd_cc(int argc, char *argv[])
     int        rc;
     uint8_t    verbose = 0u;
     const char *src = NULL;
+#if (ARKRTOS_USE_APPPACK == 1)
+    /* --pack compiles several translation units; everything else is still a
+     * single-input command.  Keeping the list here (not in the packer) is what
+     * lets the parser stay one loop.  Guarded so a build without --pack does
+     * not even carry these two locals. */
+    const char *srcs[CC_PACK_MAX_SRCS];
+    int        n_srcs = 0;
+#endif
     const char *out = NULL;
     const char *target = "arm";
 #if (CC_LAYOUT_OPTS == 1)
@@ -507,11 +769,23 @@ static int cmd_cc(int argc, char *argv[])
         }
 #endif
         if (a[0] != '-') {
+#if (ARKRTOS_USE_APPPACK == 1)
+            /* Collected unconditionally: whether a second file is legal is
+             * decided after the whole line is parsed (only --pack accepts
+             * more than one), instead of depending on the option order. */
+            if (n_srcs >= CC_PACK_MAX_SRCS) {
+                ark_shell_printf("cc: more than %d input files\r\n",
+                                 CC_PACK_MAX_SRCS);
+                return 1;
+            }
+            srcs[n_srcs++] = a;
+#else
             if (src != NULL) {
                 ark_shell_printf("cc: more than one input file ('%s' after '%s')\r\n",
                                  a, src);
                 return 1;
             }
+#endif
             src = a;
         } else if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
             cc_usage();
@@ -612,6 +886,14 @@ static int cmd_cc(int argc, char *argv[])
         cc_usage();
         return 1;
     }
+#if (ARKRTOS_USE_APPPACK == 1)
+    if ((pack_mode == 0) && (n_srcs > 1)) {
+        ark_shell_printf("cc: more than one input file ('%s' after '%s'); "
+                         "only --pack links several sources\r\n",
+                         srcs[n_srcs - 1], srcs[0]);
+        return 1;
+    }
+#endif
 
 #if (ARKRTOS_USE_APPPACK == 1)
     if (pack_mode != 0) {
@@ -636,7 +918,7 @@ static int cmd_cc(int argc, char *argv[])
             ark_shell_printf("cc: --pack needs -o <file.svcm> (no default name)\r\n");
             return 1;
         }
-        return cc_pack(src, out, target, opt_level, (int)verbose,
+        return cc_pack(srcs, n_srcs, out, target, opt_level, (int)verbose,
                        includes, n_includes, defines, n_defines);
     }
 #endif

@@ -157,15 +157,29 @@ ARKC_DEFS := \
   -DARK_LINK_MAX_SYMS=512 \
   -DARK_LINK_MAX_RELOCS=512
 else
-# 片内 RAM 档（SDRAM 不可用时）：池 80KB、工作区 178KB，
+# 片内 RAM 档（SDRAM 不可用时）：池 80KB、工作区 164KB，
 # 实测标尺写在 docs/arkc编译产物上板运行-实施计划.md 里。
+#
+# 预算怎么定的（2026-11-05 实测，不再靠猜）：
+#  - link 缓冲 4KB -> 8KB：M2 多文件链接里单个对象已经 2.6~3.0KB，加 1KB
+#    向量表就超 4KB。链接期有两个这样的缓冲（输入 buf + 输出 out_buf），
+#    所以这条要 8KB。
+#  - 池 72KB -> 80KB：板上实测 `cc --pack k.c` 在 72KB 上报
+#    `memory pool exhausted`（用掉 72928/73728 B 还差一次分配），而同一份
+#    源码在宿主 64 位版只要 62520 B——32 位下结构体变小反而让 mem_realloc 的
+#    「是否为最后一次分配」判定更容易失败，多出来的就是这些不可回收的旧块。
+#    所以池的标尺只能从板上读，不能从宿主读。
+#  - 代码缓冲 16KB -> 8KB：这块只放**一个编译单元**的机器码（实测最小的 .bin
+#    1552 B，k.c 编出 1916 B），8KB 已有 4 倍余量；放不下时汇编器会返回负码、
+#    走上层 "assembly failed"，不会静默截断。
+# 两项相加为零，工作区（.ark_buf）总量与上一版完全相同。
 ARKC_DEFS := \
   -DARKCC_PROFILE=ARKCC_PROFILE_STM32_MIN \
   -DARK_POOL_SIZE=81920 \
   -DARK_SRC_BUF_SIZE=8192 \
   -DARK_ASM_BUF_SIZE=24576 \
-  -DARK_CODE_BUF_SIZE=16384 \
-  -DARK_LINK_BUF_SIZE=4096 \
+  -DARK_CODE_BUF_SIZE=8192 \
+  -DARK_LINK_BUF_SIZE=8192 \
   -DARK_OBJ_BUF_SIZE=4096 \
   -DPP_BUF_SIZE=24576 \
   -DPP_MAX_INC_DEPTH=4 \

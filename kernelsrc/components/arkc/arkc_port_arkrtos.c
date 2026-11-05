@@ -137,6 +137,98 @@ uint32_t arkc_port_capture_end(void)
     s_cap_len    = 0u;
     return len;
 }
+/* ------------------------------------------------------------
+ * In-memory files (source of the registry below)
+ *
+ * `cc --pack` links several translation units into one relocatable image:
+ * every pass compiles each .c into an object and then links the objects.
+ * Those objects must not go through the filesystem: ramfs has three slots
+ * (the source, the .sct and the output already need them) and one littlefs
+ * write on NOR costs ~10 s because of the sector erase, four passes times N
+ * objects later.  They live in RAM the packer already borrowed from the
+ * image pool, and the three file hooks below look them up by name first.
+ *
+ * Names are whatever the caller registers ("/v/obj0"); they are matched
+ * literally and never resolved, so they cannot collide with a real volume
+ * path by accident.
+ * ------------------------------------------------------------ */
+#define ARKC_VFILE_MAX   4
+#define ARKC_VFILE_NAMELEN 16
+
+typedef struct {
+    char     name[ARKC_VFILE_NAMELEN];
+    uint8_t *buf;
+    uint32_t cap;
+    uint32_t len;
+    int      used;
+} arkc_vfile_t;
+
+static arkc_vfile_t s_vfile[ARKC_VFILE_MAX];
+
+static arkc_vfile_t *vfile_find(const char *path)
+{
+    uint32_t i;
+
+    if (path == NULL) {
+        return 0;
+    }
+    for (i = 0; i < ARKC_VFILE_MAX; i++) {
+        if ((s_vfile[i].used != 0) && (strcmp(s_vfile[i].name, path) == 0)) {
+            return &s_vfile[i];
+        }
+    }
+    return 0;
+}
+
+void arkc_port_vfile_clear(void)
+{
+    uint32_t i;
+
+    for (i = 0; i < ARKC_VFILE_MAX; i++) {
+        s_vfile[i].used    = 0;
+        s_vfile[i].len     = 0u;
+        s_vfile[i].buf     = 0;
+        s_vfile[i].cap     = 0u;
+        s_vfile[i].name[0] = '\0';
+    }
+}
+
+int arkc_port_vfile_register(const char *name, uint8_t *buf, uint32_t cap)
+{
+    uint32_t i;
+    uint32_t n;
+
+    if ((name == NULL) || (buf == NULL) || (cap == 0u)) {
+        return -1;
+    }
+    n = (uint32_t)strlen(name);
+    if ((n == 0u) || (n >= ARKC_VFILE_NAMELEN)) {
+        return -1;                     /* too long to be matched literally */
+    }
+    if (vfile_find(name) != 0) {
+        return -1;                     /* registered twice: refuse, do not alias */
+    }
+    for (i = 0; i < ARKC_VFILE_MAX; i++) {
+        if (s_vfile[i].used != 0) {
+            continue;
+        }
+        memcpy(s_vfile[i].name, name, (size_t)n + 1u);
+        s_vfile[i].buf  = buf;
+        s_vfile[i].cap  = cap;
+        s_vfile[i].len  = 0u;
+        s_vfile[i].used = 1;
+        return 0;
+    }
+    return -1;                         /* table full */
+}
+
+uint32_t arkc_port_vfile_size(const char *name)
+{
+    arkc_vfile_t *vf = vfile_find(name);
+
+    return (vf != 0) ? vf->len : 0u;
+}
+
 #endif /* ARKRTOS_USE_APPPACK */
 
 /* ------------------------------------------------------------
@@ -312,6 +404,23 @@ int fs_read_file(const char *path, char *buf, int max_len)
         s_last_error = "Invalid argument";
         return -1;
     }
+#if (ARKRTOS_USE_APPPACK == 1)
+    {
+        /* In-memory file: same refuse-instead-of-truncate rule as below. */
+        arkc_vfile_t *vf = vfile_find(path);
+        if (vf != 0) {
+            if (vf->len > (uint32_t)(max_len - 1)) {
+                s_last_error = "File too large";
+                return -1;
+            }
+            if (vf->len > 0u) {
+                memcpy(buf, vf->buf, (size_t)vf->len);
+            }
+            buf[vf->len] = '\0';
+            return (int)vf->len;
+        }
+    }
+#endif
     if (resolve(path, full, sizeof(full)) != 0) {
         return -1;
     }
@@ -362,6 +471,14 @@ int fs_file_size(const char *path)
     uint32_t fmode = 0u;
     int32_t  rc;
 
+#if (ARKRTOS_USE_APPPACK == 1)
+    {
+        arkc_vfile_t *vf = vfile_find(path);
+        if (vf != 0) {
+            return (int)vf->len;
+        }
+    }
+#endif
     if (resolve(path, full, sizeof(full)) != 0) {
         return -1;
     }
@@ -421,10 +538,25 @@ int fs_write_file(const char *path, const unsigned char *data, int len)
         s_last_error = "Invalid argument";
         return -1;
     }
-    if ((path == NULL) || (data == NULL) || (len < 0)) {
-        s_last_error = "Invalid argument";
-        return -1;
+#if (ARKRTOS_USE_APPPACK == 1)
+    {
+        /* Registered before the capture check on purpose: an object write is
+         * an explicit "this buffer", and the capture hook is a catch-all for
+         * "whatever this pass writes".  A registered name therefore wins. */
+        arkc_vfile_t *vf = vfile_find(path);
+        if (vf != 0) {
+            if ((uint32_t)len > vf->cap) {
+                s_last_error = "File too large";
+                return -1;             /* never truncate */
+            }
+            if (len > 0) {
+                memcpy(vf->buf, data, (size_t)len);
+            }
+            vf->len = (uint32_t)len;
+            return len;
+        }
     }
+#endif
 #if (ARKRTOS_USE_APPPACK == 1)
     /* 捕获优先于 "-" 与 "nul"：打包时四遍的输出都必须是字节，打印到控制台
      * 或丢掉都会让下一段拿到空缓冲。这条判断放在路径解析之前，所以捕获期间

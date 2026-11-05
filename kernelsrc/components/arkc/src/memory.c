@@ -9,13 +9,27 @@
  * in AXI SRAM (0x24000000) on STM32H743. On host builds this is a no-op. */
 static unsigned char g_pool[ARK_POOL_SIZE] __attribute__((section(".ark_buf")));
 static int           g_offset = 0;
+/* High-water mark of the bump pointer.  The board budget is set from this
+ * number (see the in-chip ARKC_DEFS in the ARKRTOS_TEST Makefile): "the pool
+ * ran out at N bytes" is what a failed build tells you, but a successful one
+ * only tells you it was under the limit.  Reported by -v. */
+static int           g_high = 0;
 
 void mem_pool_reset(void) {
     g_offset = 0;
+    g_high = 0;
 }
 
 int mem_pool_used(void) {
     return g_offset;
+}
+
+int mem_pool_high(void) {
+    return g_high;
+}
+
+int mem_pool_capacity(void) {
+    return ARK_POOL_SIZE;
 }
 
 void *mem_pool_alloc(int size) {
@@ -27,6 +41,7 @@ void *mem_pool_alloc(int size) {
     }
     void *p = &g_pool[g_offset];
     g_offset += size;
+    if (g_offset > g_high) g_high = g_offset;
     /* Zero fill */
     {
         unsigned char *q = (unsigned char *)p;

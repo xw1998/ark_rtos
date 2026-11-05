@@ -630,6 +630,23 @@ int ark_compile(const ArkOptions *opts) {
     if (!opts) return ARK_ERR_ARG;
     if (opts->list_backends) { ark_backend_list(); return ARK_OK; }
 
+#if ARKCC_FEATURE_SCATTER
+    /* --scatter: the ARM backend and the linker both read the layout from
+     * g_config alone, so an embedding that fills only ArkOptions::scatter_file
+     * gets the built-in addresses (0x08000000 / 0x20020000) and emits an image
+     * that cannot run where it is loaded -- silently, which is the worst kind.
+     * The bridge therefore sits at the very top of ark_compile(), before the
+     * -link branch returns: with it placed next to the compile-stage handling
+     * the linker never saw it, and `cc -link ... --scatter x.sct` on the H743
+     * produced a vector table saying SP=0x20020000 / entry=0x08001250 while
+     * the shell had printed the scatter name. */
+    if ((opts->scatter_file != 0) && (opts->scatter_file[0] != 0)) {
+        if ((g_config.scatter_file == 0) || (g_config.scatter_file[0] == 0)) {
+            g_config.scatter_file = opts->scatter_file;
+        }
+    }
+#endif
+
     /* -link mode: merge multiple .ark_obj files.
      * ARKOBJ2 binary objects are linked via the binary ARM linker (code merge +
      * symbol resolution with weak-symbol precedence + relocation patching).
@@ -648,18 +665,26 @@ int ark_compile(const ArkOptions *opts) {
         int li;
 
         /* Detect ARKOBJ2 binary format from the first input.
-         * NOTE: fs_read_file() reads at most max_len-1 bytes (it reserves one
-         * byte for the NUL terminator), so asking for an 8-byte header with an
-         * 8-byte limit returned 7 bytes and the magic never matched. Every
-         * -link therefore silently fell back to raw text concatenation and
-         * reported success. Use a wider buffer than the header we compare. */
+         * The probe reads through `buf` -- the same buffer the linker uses for
+         * every object -- instead of a small header buffer. fs_read_file() is
+         * documented as truncating, but a port is allowed to refuse instead
+         * (the Ark RTOS port returns -1 with "File too large"), and a small
+         * probe buffer therefore failed on every real object: a 2.5 KB .obj
+         * does not fit in 16 bytes, is_binary stayed 0, and -link silently
+         * concatenated objects as text until "link output too large". A failed
+         * probe is a read error with a reason, never "not an object". */
         {
-            char hdr[16];
-            int pn = fs_read_file(opts->link_inputs[0], hdr, (int)sizeof(hdr));
-            if (pn >= 8 && hdr[0]=='A' && hdr[1]=='R' &&
-                hdr[2]=='K' && hdr[3]=='O' &&
-                hdr[4]=='B' && hdr[5]=='J' &&
-                hdr[6]=='2' && hdr[7]=='\n')
+            int pn = fs_read_file(opts->link_inputs[0], buf, (int)sizeof(buf));
+            if (pn < 0) {
+                diag_tool(DIAG_SEV_ERROR, opts->link_inputs[0],
+                          "cannot read link input: %s", fs_last_error(),
+                          0,0,0,0,0);
+                return ARK_ERR_IO;
+            }
+            if (pn >= 8 && buf[0]=='A' && buf[1]=='R' &&
+                buf[2]=='K' && buf[3]=='O' &&
+                buf[4]=='B' && buf[5]=='J' &&
+                buf[6]=='2' && buf[7]=='\n')
                 is_binary = 1;
         }
         out_path = opts->output_path ? opts->output_path :
@@ -704,7 +729,12 @@ int ark_compile(const ArkOptions *opts) {
                 /* Code size (4 bytes LE) + code body */
                 code_sz = rd_le32(up + pos); pos += 4;
                 if (out_len + code_sz > (int)sizeof(out_buf)) {
-                    diag_tool(DIAG_SEV_ERROR, g_ld_image, "link output too large", 0,0,0,0,0,0);
+                    char b1[12], b2[12], b3[12];
+                    diag_tool(DIAG_SEV_ERROR, g_ld_image,
+                              "link output too large: %s bytes placed + %s from the object "
+                              "does not fit the %s-byte ARK_LINK_BUF_SIZE",
+                              diag_num(b1, out_len), diag_num(b2, code_sz),
+                              diag_num(b3, (int)sizeof(out_buf)), 0,0,0);
                     return ARK_ERR_IO;
                 }
                 { int k; for (k = 0; k < code_sz; k++) out_buf[out_len++] = up[pos + k]; }
@@ -804,15 +834,35 @@ int ark_compile(const ArkOptions *opts) {
                     }
                 }
             }
-            /* === Scatter-aware linking: generate vector table ===
+            /* === Scatter-aware linking: fill the hole, never shift ===
              * If a scatter file (.sct or .ld) is provided, parse it to derive
-             * flash_base and initial_sp. If Reset_Handler is found in the symbol
-             * table, generate a Cortex-M vector table at the start of the binary,
- * shift code right by vt_size, and adjust all symbol/reloc offsets. */
+             * flash_base, the RW window and initial_sp.
+             *
+             * arkc bakes absolute addresses into the instruction stream
+             * (movw/movt pairs and literal slots); only external symbols become
+             * relocations.  Prepending a 0x400-byte table and shifting the
+             * image therefore moved the code but not the constants baked into
+             * it: every string literal stayed 0x400 too low.  Measured, not
+             * guessed -- "ARKMAKE: link ok" sat at payload +0xA1E while the
+             * code held 0x08000000, and the app loaded, printed nothing and
+             * exited.
+             *
+             * The fix is to stop moving anything: the object linked first is
+             * compiled with --vector-table, so it reserves a 0x400-byte hole at
+             * the front and bases its own addresses at base+0x400.  The linker
+             * writes the table INTO that hole.  Code does not move, so every
+             * baked address stays correct.
+             *
+             * That is also why every object of a multi-object link is compiled
+             * against its own base (see cc_pack in the Ark RTOS port): with
+             * baked addresses, an object's base is not something the linker can
+             * choose afterwards. */
             {
                 unsigned flash_base = 0x08000000u;
                 unsigned initial_sp = 0x20020000u;
-                int vt_size = 0;
+                unsigned ram_lo = 0x20000000u;
+                unsigned ram_hi = 0u;
+                int have_ram_win = 0;
 #if ARKCC_FEATURE_SCATTER
                 {
                     ScatterDesc ld_scatter;
@@ -822,47 +872,225 @@ int ark_compile(const ArkOptions *opts) {
                         scatter_parse_file(g_config.scatter_file, &ld_scatter) == 0) {
                         flash_base = scatter_get_flash_base(&ld_scatter);
                         {   ScatterExecRegion *er_rw = scatter_find_er_by_attr(&ld_scatter, SCATTER_ATTR_RW);
-                            if (er_rw && er_rw->size > 0)
+                            if (er_rw && er_rw->size > 0) {
                                 initial_sp = er_rw->load_addr + er_rw->size;
+                                ram_lo = er_rw->load_addr;
+                                ram_hi = initial_sp;
+                                have_ram_win = 1;
+                            }
                         }
                         scatter_free(&ld_scatter);
                     } else if (g_config.linker_script && g_config.linker_script[0] &&
                                linker_script_parse_file(g_config.linker_script, &ld_scatter) == 0) {
                         flash_base = scatter_get_flash_base(&ld_scatter);
                         {   ScatterExecRegion *er_rw = scatter_find_er_by_attr(&ld_scatter, SCATTER_ATTR_RW);
-                            if (er_rw && er_rw->size > 0)
+                            if (er_rw && er_rw->size > 0) {
                                 initial_sp = er_rw->load_addr + er_rw->size;
+                                ram_lo = er_rw->load_addr;
+                                ram_hi = initial_sp;
+                                have_ram_win = 1;
+                            }
                         }
                         scatter_free(&ld_scatter);
                     }
                 }
 #endif
-                /* Generate vector table if Reset_Handler symbol exists */
-                if (ld_find_global("Reset_Handler") >= 0) {
-                    vt_size = LD_VECTOR_TABLE_ENTRIES * 4;
-                    if (out_len + vt_size > (int)sizeof(out_buf)) {
-                        diag_tool(DIAG_SEV_ERROR, g_ld_image,
-                                  "vector table exceeds output buffer", 0,0,0,0,0,0);
-                        return ARK_ERR_IO;
+                /* --vector-table: the first object reserved 0x400 for us, so
+                 * write the table there.  0x400 is the size codegen reserves,
+                 * and the hole must still be untouched: if anything but zero
+                 * sits there, the first object was built without the flag and
+                 * the table would land on top of somebody's code. */
+                if ((ld_find_global("Reset_Handler") >= 0) && (opts->vector_table)) {
+                    int vt_size = LD_VECTOR_TABLE_ENTRIES * 4;
+                    int hole_ok = (out_len >= vt_size);
+                    int hk;
+                    for (hk = 0; hole_ok && (hk < vt_size); hk++) {
+                        if (out_buf[hk] != 0) hole_ok = 0;
                     }
-                    /* Move existing code right by vt_size bytes */
-                    { int k; for (k = out_len - 1; k >= 0; k--) out_buf[k + vt_size] = out_buf[k]; }
-                    /* Adjust all symbol offsets by vt_size */
-                    for (li = 0; li < g_ld_sym_count; li++)
-                        g_ld_syms[li].offset += vt_size;
-                    /* Adjust all relocation offsets by vt_size */
-                    for (li = 0; li < g_ld_reloc_count; li++)
-                        g_ld_relocs[li].offset += vt_size;
-                    /* Generate vector table at the beginning */
+                    if (!hole_ok) {
+                        char b1[12], b2[12];
+                        diag_tool(DIAG_SEV_ERROR, g_ld_image,
+                                  "the first %s bytes of the linked image are not a "
+                                  "free vector-table hole (image is %s bytes): link "
+                                  "an object built with --vector-table first, or "
+                                  "drop --vector-table",
+                                  diag_num(b1, vt_size), diag_num(b2, out_len), 0,0,0,0);
+                        return ARK_ERR_LINK;
+                    }
                     ld_build_vector_table(out_buf, flash_base, initial_sp);
-                    out_len += vt_size;
+                    if (opts->verbose) {
+                        ark_log("[link] vector table written into the %d-byte hole "
+                                "the first object reserved (SP=0x%08X, entry=0x%08X)\n",
+                                vt_size,
+                                (unsigned)rd_le32((const unsigned char *)out_buf),
+                                (unsigned)(rd_le32((const unsigned char *)out_buf + 4) & ~1u));
+                    }
+                }
+                /* No --vector-table: the image must already carry a usable table
+                 * (that is what a single object built with the flag does).  Check
+                 * it instead of trusting it. */
+                if ((ld_find_global("Reset_Handler") >= 0) && (!opts->vector_table)) {
+                    unsigned sp_w = (out_len >= 4) ?
+                        (unsigned)rd_le32((const unsigned char *)out_buf) : 0u;
+                    unsigned en_w = (out_len >= 8) ?
+                        (unsigned)rd_le32((const unsigned char *)out_buf + 4) : 0u;
+                    unsigned en_a = en_w & ~1u;
+                    int why = 0;
+                    if (!have_ram_win) {
+                        /* No scatter: the only bound left is the default initial
+                         * SP the encoder assumes, so check 0x20000000..that
+                         * instead of inventing a window. */
+                        ram_lo = 0x20000000u;
+                        ram_hi = initial_sp;
+                    }
+                    if ((out_len < 8) || ((en_w & 1u) == 0u)) {
+                        why = 1;    /* no Thumb entry word at all */
+                    } else if ((en_a < flash_base) ||
+                               ((en_a - flash_base) >= (unsigned)out_len)) {
+                        why = 2;    /* entry outside the image */
+                    } else if ((sp_w < ram_lo) || (sp_w > ram_hi)) {
+                        why = 3;    /* stack pointer outside the RW window */
+                    }
+                    if (why != 0) {
+                        char b1[12], b2[12], b3[12], b4[12], b5[12];
+                        diag_tool(DIAG_SEV_ERROR, g_ld_image,
+                                  "the linked image carries no usable vector table "
+                                  "(SP=%s entry=%s; flash %s+%s, RAM from %s): "
+                                  "compile the object that defines Reset_Handler "
+                                  "with --vector-table, then relink",
+                                  ld_hex(b1, sp_w), ld_hex(b2, en_w),
+                                  ld_hex(b3, flash_base), diag_num(b4, out_len),
+                                  ld_hex(b5, ram_lo), 0);
+                        return ARK_ERR_LINK;
+                    }
+                    if (opts->verbose) {
+                        ark_log("[link] objects carry the vector table: SP=0x%08X, "
+                                "entry=0x%08X (flash base 0x%08X)\n",
+                                sp_w, en_a, flash_base);
+                    }
+                    /* The backend emits `BL __arkcc_init_globals` at the top of
+                     * Reset_Handler only when *that* translation unit owns
+                     * .data/.bss (the call is written next to the init body it
+                     * generates). With -link the globals may live in another
+                     * object: the init body is then linked but never runs, and
+                     * the app reads zeroed/garbage globals while the link still
+                     * succeeds -- a silently wrong image. Point the reset vector
+                     * at a two-instruction trampoline in that case:
+                     *     BL   __arkcc_init_globals
+                     *     B.W  Reset_Handler
+                     * Both instructions are filled in by ld_patch_ref, the same
+                     * patcher the object relocations use, so there is exactly
+                     * one place that knows the ARM encodings. */
+                    {
+                        int init_idx  = ld_find_global("__arkcc_init_globals");
+                        int reset_idx = ld_find_global("Reset_Handler");
+                        int calls_init = 0;
+                        int k;
+                        for (k = 0; k < g_ld_reloc_count; k++) {
+                            if (ark_streq(g_ld_relocs[k].name, "__arkcc_init_globals")) {
+                                calls_init = 1;
+                                break;
+                            }
+                        }
+                        if (init_idx >= 0 && reset_idx >= 0 && !calls_init) {
+                            int t0;
+                            if ((out_len & 3) != 0) {
+                                if (out_len + 2 > (int)sizeof(out_buf)) {
+                                    diag_tool(DIAG_SEV_ERROR, g_ld_image,
+                                              "no room for the __arkcc_init_globals "
+                                              "trampoline; raise ARK_LINK_BUF_SIZE",
+                                              0,0,0,0,0,0);
+                                    return ARK_ERR_IO;
+                                }
+                                out_buf[out_len++] = 0xBF;  /* NOP (align to 4) */
+                                out_buf[out_len++] = 0x00;
+                            }
+                            if (out_len + 8 > (int)sizeof(out_buf)) {
+                                diag_tool(DIAG_SEV_ERROR, g_ld_image,
+                                          "no room for the __arkcc_init_globals "
+                                          "trampoline; raise ARK_LINK_BUF_SIZE",
+                                          0,0,0,0,0,0);
+                                return ARK_ERR_IO;
+                            }
+                            if (g_ld_reloc_count + 2 > LD_MAX_RELOCS) {
+                                char b1[12], b2[12];
+                                diag_tool(DIAG_SEV_ERROR, g_ld_image,
+                                          "relocation table is full (%s of %s); the "
+                                          "startup trampoline cannot be resolved - "
+                                          "raise ARK_LINK_MAX_RELOCS and relink",
+                                          diag_num(b1, g_ld_reloc_count),
+                                          diag_num(b2, LD_MAX_RELOCS), 0,0,0,0);
+                                return ARK_ERR_LINK;
+                            }
+                            t0 = out_len;
+                            /* Placeholders: BL T1 = F000 D000, B.W T4 = F000 9000.
+                             * Only their low halves carry the branch shape; both
+                             * are overwritten by ld_patch_ref below. */
+                            out_buf[t0 + 0] = 0xF0; out_buf[t0 + 1] = 0x00;
+                            out_buf[t0 + 2] = 0xD0; out_buf[t0 + 3] = 0x00;
+                            out_buf[t0 + 4] = 0xF0; out_buf[t0 + 5] = 0x00;
+                            out_buf[t0 + 6] = 0x90; out_buf[t0 + 7] = 0x00;
+                            ld_add_reloc("__arkcc_init_globals", t0, 1);
+                            ld_add_reloc("Reset_Handler", t0 + 4, 2);
+                            out_len += 8;
+                            ld_write_word(out_buf, 4,
+                                          (flash_base + (unsigned)t0) | 1u);
+                            if (opts->verbose)
+                                ark_log("[link] note: Reset_Handler does not call "
+                                        "__arkcc_init_globals (globals live in "
+                                        "another object); reset vector points at "
+                                        "a trampoline at 0x%08X\n",
+                                        flash_base + (unsigned)t0);
+                        }
+                    }
                     if (opts->verbose) {
                         int ri = ld_find_global("Reset_Handler");
-                        ark_log("[arkcc] link: vector table %d bytes, SP=0x%08X, Flash=0x%08X\n",
-                                vt_size, initial_sp, flash_base);
                         if (ri >= 0)
-                            ark_log("  Reset     = 0x%08X\n", flash_base + (unsigned)g_ld_syms[ri].offset);
+                            ark_log("  Reset     = 0x%08X\n",
+                                    flash_base + (unsigned)g_ld_syms[ri].offset);
                     }
+                }
+            }
+            /* Startup convention: a hand-written or generated Reset_Handler
+             * calls __arkcc_init_globals unconditionally. The body, however,
+             * is only emitted by a translation unit that owns .data/.bss, so a
+             * link whose objects have no RAM at all would stop on an unresolved
+             * symbol that means "nothing to initialise". Define it as a
+             * one-instruction stub in that case. An object that *does* declare
+             * RAM but comes without an init body is a compiler inconsistency:
+             * refuse instead of skipping its initialisation. */
+            if (ld_find_global("__arkcc_init_globals") < 0) {
+                int referenced = 0;
+                int k;
+                for (k = 0; k < g_ld_reloc_count; k++) {
+                    if (ark_streq(g_ld_relocs[k].name, "__arkcc_init_globals")) {
+                        referenced = 1;
+                        break;
+                    }
+                }
+                if (referenced) {
+                    for (k = 0; k < LD_MAX_OBJS; k++) {
+                        if (g_ld_ram[k].have_start && g_ld_ram[k].have_end &&
+                            g_ld_ram[k].start < g_ld_ram[k].end) {
+                            char b1[12];
+                            diag_tool(DIAG_SEV_ERROR, g_ld_image,
+                                      "object #%s declares .data/.bss but carries "
+                                      "no __arkcc_init_globals body; its globals "
+                                      "would never be initialised - recompile it "
+                                      "with the same arkc that built the link",
+                                      diag_num(b1, k), 0,0,0,0,0);
+                            return ARK_ERR_LINK;
+                        }
+                    }
+                    if (out_len + 2 > (int)sizeof(out_buf)) {
+                        diag_tool(DIAG_SEV_ERROR, g_ld_image,
+                                  "no room for the __arkcc_init_globals stub; "
+                                  "raise ARK_LINK_BUF_SIZE", 0,0,0,0,0,0);
+                        return ARK_ERR_IO;
+                    }
+                    out_buf[out_len++] = 0x70;   /* BX lr - nothing to initialise */
+                    out_buf[out_len++] = 0x47;
+                    ld_add_sym("__arkcc_init_globals", out_len - 2, 0);
                 }
             }
             /* Resolve cross-object relocations via find_global (strong > weak) */
@@ -894,8 +1122,10 @@ int ark_compile(const ArkOptions *opts) {
                 diag_tool(DIAG_SEV_ERROR, out_path, "cannot write link output file", 0,0,0,0,0,0);
                 return ARK_ERR_IO;
             }
-            if (opts->verbose) ark_log("[arkcc] linked %d objects -> %s (%d bytes, %d syms)\n",
-                                       opts->link_input_count, out_path, out_len, g_ld_sym_count);
+            if (opts->verbose) ark_log("[arkcc] linked %d objects -> %s (%d bytes, %d syms, "
+                                       "%d relocs)\n",
+                                       opts->link_input_count, out_path, out_len,
+                                       g_ld_sym_count, g_ld_reloc_count);
             return ARK_OK;
         } else {
             /* Text concatenation (C backend) */
@@ -931,7 +1161,12 @@ int ark_compile(const ArkOptions *opts) {
                     while (rem > 0 && (*p == '\n' || *p == '\r')) { p++; rem--; }
                 }
                 if (out_len + rem + 1 > (int)sizeof(out_buf)) {
-                    diag_tool(DIAG_SEV_ERROR, g_ld_image, "link output too large", 0,0,0,0,0,0);
+                    char b1[12], b2[12], b3[12];
+                    diag_tool(DIAG_SEV_ERROR, g_ld_image,
+                              "link output too large: %s bytes already concatenated + "
+                              "%s more does not fit the %s-byte ARK_LINK_BUF_SIZE",
+                              diag_num(b1, out_len), diag_num(b2, rem + 1),
+                              diag_num(b3, (int)sizeof(out_buf)), 0,0,0);
                     return ARK_ERR_IO;
                 }
                 { int k; for (k = 0; k < rem; k++) out_buf[out_len++] = (unsigned char)p[k]; }
@@ -1106,22 +1341,6 @@ int ark_compile(const ArkOptions *opts) {
      * the backend) because it is an option, and the backend sees only opts-free
      * state.  Zero by default: every existing command line is unchanged. */
     g_arm_vt_reserve = (opts->vector_table != 0) ? 1 : 0;
-
-#if ARKCC_FEATURE_SCATTER
-    /* --scatter: the ARM backend reads the layout from g_config alone, so an
-     * embedding that fills only ArkOptions::scatter_file gets the built-in
-     * addresses (0x08000000 / 0x20020000) and emits an image that cannot run
-     * where it is loaded -- silently, which is the worst kind.  Bridge the
-     * option into g_config here, and when the file cannot be parsed fail
-     * loudly instead of falling back.  (Seen on the H743 board: the shell
-     * command set opts.scatter_file, the linker stage stayed on the defaults,
-     * and the resulting vector table said SP=0x20020000 / entry=0x08000429.) */
-    if ((opts->scatter_file != 0) && (opts->scatter_file[0] != 0)) {
-        if ((g_config.scatter_file == 0) || (g_config.scatter_file[0] == 0)) {
-            g_config.scatter_file = opts->scatter_file;
-        }
-    }
-#endif
 
     {
         /* fs_read_file() truncates at ARK_SRC_BUF_SIZE-1 without saying so,

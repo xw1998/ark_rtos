@@ -55,6 +55,24 @@ void        arkc_port_zero_arena(void);
  * 捕获（0 表示这一遍什么都没写，调用方应当当成失败）。 */
 int      arkc_port_capture_begin(uint8_t *buf, uint32_t cap);
 uint32_t arkc_port_capture_end(void);
+
+/* 内存文件（"--pack 多份源码" 与 ark make 用）。
+ *
+ * 一次 pass 里要先把 N 份源码各编成一个对象、再把它们链接成负载。对象既
+ * 不该落盘（ramfs 只有 3 槽；littlefs 每次写要擦扇区，实测 ~10 s 一份），
+ * 也不可能落盘（四遍 × N 份），因此给端口一张表：注册过的名字由
+ * fs_read_file / fs_file_size / fs_write_file 直接从内存服务。
+ *
+ * 语义与真实文件一致，包括那条"宁可报错"的规矩：
+ *   - 写入超过 cap 报错（"File too large"），不截断；
+ *   - 读出时文件大于调用方缓冲也报错，不截断；
+ *   - 同名重复注册拒绝（不静默覆盖），表满拒绝；
+ *   - 名字按字面匹配，不做路径解析。
+ * 用 arkc_port_vfile_clear() 在一轮结束（成功或失败）时清表，避免下一次
+ * 打包拿到上一轮的对象。 */
+int      arkc_port_vfile_register(const char *name, uint8_t *buf, uint32_t cap);
+void     arkc_port_vfile_clear(void);
+uint32_t arkc_port_vfile_size(const char *name);
 #endif
 
 #endif /* ARKC_PORT_H */
