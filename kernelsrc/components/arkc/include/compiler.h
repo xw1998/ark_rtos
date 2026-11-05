@@ -17,6 +17,9 @@ typedef struct {
     int         compile_only;     /* -c: generate object file only */
     int         preprocess_only;  /* -E: output preprocessor result only */
     int         link_mode;        /* -link: link multiple objects */
+    int         vector_table;     /* --vector-table: reserve ARM_VT_SIZE at the
+                                   * front of the image and emit a Cortex-M
+                                   * vector table there (no image shift) */
     const char *link_inputs[32];  /* -link inputs */
     int         link_input_count;
     int         opt_level;        /* -O0/-O1/-O2: applied by src/opt.c (range-fold + constant fold) */

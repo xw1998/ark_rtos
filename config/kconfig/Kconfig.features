@@ -330,6 +330,19 @@ config ARKRTOS_USE_SDRAM
 	  board also registers the `sdram` shell command (info / full-chip
 	  self test).
 
+config ARKRTOS_USE_APPRUN
+	bool "On-board app runner (app run)"
+	default n
+	depends on ARKRTOS_USE_VFS
+	help
+	  `app run <path>` loads a bare arkc-produced executable from the file
+	  system into the fixed RAM window declared by the board partition header
+	  (ARKRTOS_APPRUN_*), verifies the arkc prologue, and starts it as an
+	  unprivileged task with its own MPU code/data windows.  No image header
+	  and no relocation: the program is linked for exactly that window.  One
+	  instance at a time.  Off compiles the source out entirely and leaves the
+	  command table unchanged.
+
 config ARKRTOS_SHELL_BOARD_CMDS
 	bool "Board-owned shell commands"
 	default n

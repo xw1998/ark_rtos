@@ -136,6 +136,9 @@
 #ifndef ARKRTOS_TIME_SLICE_TICKS
 #define ARKRTOS_TIME_SLICE_TICKS (10)
 #endif
+#ifndef ARKRTOS_USE_APPRUN
+#define ARKRTOS_USE_APPRUN 0
+#endif
 #ifndef ARKRTOS_USE_ARKC
 #define ARKRTOS_USE_ARKC 0
 #endif

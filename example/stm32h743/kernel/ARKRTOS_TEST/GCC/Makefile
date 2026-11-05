@@ -50,6 +50,12 @@ USE_ARKC   ?= 1
 # 0xC0000000 起的分区里，而那个窗口不应答，于是编译器一开池就取总线故障、
 # VFS 也不会挂载。要看现场证据就 make USE_SDRAM=1，再用 sdram info/verify/fsm/pins。
 USE_SDRAM  ?= 0
+# 板上直跑（app run）：1 = 编进的裸文件可以丢进固定窗口直接执行。
+# 关窗地址与大小在分区头 ARKRTOS_APPRUN_*，
+# 不在这里。默认 0：关掉时那个源文件编出为空目标，
+# 镜像与命令表逐字节不变。
+USE_APPRUN ?= 0
+
 
 # 交叉工具链前缀；默认取 PATH 上的 arm-none-eabi-
 CROSS ?= arm-none-eabi-
@@ -70,7 +76,8 @@ DEFS := \
   -DMDK_TRACE_SWD_EXTERNAL_PLATFORM -DMDK_TRACE_USE_CONFIG_FILE \
   -DLFS_NO_MALLOC -DLFS_NO_ASSERT -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR \
   -DARKRTOS_USE_ARKVIM=$(USE_ARKVIM) -DARKRTOS_USE_ARKC=$(USE_ARKC) \
-  -DARKRTOS_USE_SDRAM=$(USE_SDRAM) -DARKRTOS_SHELL_BOARD_CMDS=$(USE_SDRAM)
+  -DARKRTOS_USE_SDRAM=$(USE_SDRAM) -DARKRTOS_SHELL_BOARD_CMDS=$(USE_SDRAM) \
+  -DARKRTOS_USE_APPRUN=$(USE_APPRUN)
 
 # Editor (arkvim) sizing. Every limit upstream is an #ifndef, so the sizes are
 # decided here and not by editing upstream: the editor struct is 31KB (16K text

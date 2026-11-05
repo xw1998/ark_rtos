@@ -58,6 +58,19 @@ const ArkBackend *ark_backend_c(void);
  * arm_dump_syms_init(); on STM32 getenv() is unavailable under semihosting,
  * so the flag is set via a UART "debug syms" command instead. */
 extern int g_arm_dump_syms;
+
+/* ARM backend: reserve the Cortex-M vector-table area at the front of the code
+ * image (--vector-table).  When set, the assembler starts emitting at
+ * ARM_VT_SIZE instead of 0 and the linker writes the table into the reserved
+ * gap, so code keeps the addresses the assembler gave it.
+ *
+ * Why this exists: arm_link used to *prepend* the table and shift the whole
+ * image right by 0x400 at link time.  Thumb-2 branches survive a uniform shift
+ * (they are PC-relative), but absolute addresses baked in by the assembler do
+ * not: a string literal linked at 0x24070000 stays encoded as 0x24070000 while
+ * its bytes move to 0x24070400.  Reserving up front removes the shift, so both
+ * kinds of reference stay correct. */
+extern int g_arm_vt_reserve;
 void arm_dump_syms_init(void);
 
 #endif /* ARK_BACKEND_H */

@@ -293,6 +293,35 @@
  * 与动态装载路径互不相干：只有 APP_ALLOW_RAW_IMAGE=1 时才生效。 */
 
 /* ============================================================
+ * 十二、板上直跑窗口（app run，L1 固定窗口执行）
+ * @details 板上 arkc（cc）编出的裸可执行文件直接落到固定窗口里跑：
+ *          不解析镜像头、不做重定位，代码块与数据块各占一段连续 RAM，
+ *          由 app run 独占使用（同一时刻只允许一个实例）。
+ *          窗口必须落在 SLOT_RAM 池的起始处且按块大小对齐，这样
+ *          app run 用伙伴分配器真正占住这块内存时拿到的正是这两个基址；
+ *          拿不到就报错，不猜。
+ *          ARKRTOS_APPRUN_PROLOGUE 是 arkc 生成的函数序言首半字
+ *          （PUSH {r5,r6,r7,lr}，小端 = 0xB5E0），用来确认落进来的确实是
+ *          一份 arkc 产物，而不是随手一个文件。
+ * @note 本组宏只被内核与板级工具链共享；App 工程不得包含本头文件。 */
+#define ARKRTOS_APPRUN_BASE          (SLOT_RAM_BASE)
+#define ARKRTOS_APPRUN_CODE_SIZE     (8 * 1024)     /* 代码窗口（可执行 RAM） */
+#define ARKRTOS_APPRUN_RAM_BASE      (ARKRTOS_APPRUN_BASE + ARKRTOS_APPRUN_CODE_SIZE)
+#define ARKRTOS_APPRUN_RAM_SIZE      (8 * 1024)     /* 数据/栈窗口（RW） */
+#define ARKRTOS_APPRUN_TOTAL_SIZE    (ARKRTOS_APPRUN_CODE_SIZE + ARKRTOS_APPRUN_RAM_SIZE)
+#define ARKRTOS_APPRUN_STACK_SIZE    (4 * 1024)     /* 取自数据窗口末尾 */
+/* 优先级放在**控制台之下**（数值比 SHELL_TASK_PRIORITY 大）、idle(200) 之上：
+ * 直跑的程序是人从 shell 手敲起来的，一个 for(;;){} 的程序若跑在控制台之上，
+ * 就会把 shell 永久饿死，控制台再也回不来（实测：用 APP_TASK_PRIORITY=10 时
+ * app 一起来就没有提示符了，连 task/fault 都查不了）。放在 20 则是：shell
+ * 空闲（等串口）时 app 独占 CPU，人一敲键盘 shell 立刻拿到自己的那一段。
+ * 周期填 0：直跑程序没有周期契约，表里显示成 1000 会让人以为它是个周期任务。 */
+#define ARKRTOS_APPRUN_PRIORITY      (SHELL_TASK_PRIORITY + 6)
+#define ARKRTOS_APPRUN_PERIOD_MS     (0u)
+#define ARKRTOS_APPRUN_MAX_IMAGE     (ARKRTOS_APPRUN_CODE_SIZE)  /* 单文件上限 */
+#define ARKRTOS_APPRUN_PROLOGUE      (0xB5E0u)      /* PUSH {r5,r6,r7,lr} */
+
+/* ============================================================
  * 十一、安装策略与编译期默认布局（配置区无效时的回退默认）
  * @details 布局的第一来源是设备端配置区（CONFIG_BASE 起一个扇区，
  *          见 tools/arkrtos_cfg.py 写入的记录格式）；配置区没有有效记录时，
@@ -565,6 +594,22 @@ typedef char arkrtos_mpu_window_check[
     * (((SLOT_RAM_BASE    % SLOT_RAM_TOTAL)       == 0) ? 1 : -1)
     * (((SHARE_RAM_BASE   % SHARE_RAM_SIZE)       == 0) ? 1 : -1)
     * (((SLOT_RAM_MAX_BLOCK % SLOT_RAM_MIN_BLOCK) == 0) ? 1 : -1)
+    * 1];
+
+/* Board-level app-run window self-check: the code/data windows must be
+ * power-of-two blocks the buddy allocator can hand out verbatim, and the pair
+ * must fit inside the SLOT_RAM pool.  These hold whether or not
+ * ARKRTOS_USE_APPRUN is enabled - the macros are pure address declarations. */
+typedef char arkrtos_apprun_window_check[
+      (ARKRTOS_IS_POW2(ARKRTOS_APPRUN_CODE_SIZE)            ? 1 : -1)
+    * (ARKRTOS_IS_POW2(ARKRTOS_APPRUN_RAM_SIZE)             ? 1 : -1)
+    * ((ARKRTOS_APPRUN_CODE_SIZE >= SLOT_RAM_MIN_BLOCK)     ? 1 : -1)
+    * ((ARKRTOS_APPRUN_RAM_SIZE  >= SLOT_RAM_MIN_BLOCK)     ? 1 : -1)
+    * ((ARKRTOS_APPRUN_CODE_SIZE <= SLOT_RAM_MAX_BLOCK)     ? 1 : -1)
+    * ((ARKRTOS_APPRUN_RAM_SIZE  <= SLOT_RAM_MAX_BLOCK)     ? 1 : -1)
+    * ((ARKRTOS_APPRUN_TOTAL_SIZE <= SLOT_RAM_TOTAL)        ? 1 : -1)
+    * (((ARKRTOS_APPRUN_BASE     % ARKRTOS_APPRUN_CODE_SIZE) == 0) ? 1 : -1)
+    * (((ARKRTOS_APPRUN_RAM_BASE % ARKRTOS_APPRUN_RAM_SIZE)  == 0) ? 1 : -1)
     * 1];
 
 /* 池一定是整数个扇区，且必须留出至少一个扇区的压实余量。

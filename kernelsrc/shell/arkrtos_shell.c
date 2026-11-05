@@ -34,6 +34,7 @@
 #include "arkrtos_installer.h"
 #include "arkrtos_loader.h"
 #include "arkrtos_mini.h"
+#include "arkrtos_apprun.h"
 #include "arkrtos_dev.h"
 #include "arkrtos_layout.h"
 #include "arkrtos_ptable.h"
@@ -359,6 +360,81 @@ static int cmd_app(int argc, char *argv[])
     uint32 i;
     uint32 slot;
 
+#if (ARKRTOS_USE_APPRUN == 1)
+    /* 板上直跑：app run <path> 把 arkc 编出的裸文件装进固定窗口执行。
+     * 与 install 无关（不占槽位、不写 Flash），所以单独一条子命令而不是
+     * install 的选项：两者的失败后果完全不同。 */
+    if((argc == 3) && (strcmp(argv[1], "run") == 0))
+    {
+        uint32 app_task = 0u;
+        int32 rc = arkrtos_apprun_run_ex(argv[2], &app_task);
+
+        if(rc != 0)
+        {
+            const char *name = arkrtos_apprun_error_name(rc);
+
+            ark_shell_printf("\r\napp run: %s failed, rc=%d%s%s\r\n",
+                             argv[2], (int)rc,
+                             (name != 0) ? " - " : "", (name != 0) ? name : "");
+            if(rc == ARKRTOS_LOADER_ERR_SIZE)
+            {
+                /* 上限是窗口决定的，不是文件系统的：把它报出来，否则用户只能猜。 */
+                ark_shell_printf("  image limit: %u B (code window at 0x%08X)\r\n",
+                                 (unsigned)ARKRTOS_APPRUN_MAX_IMAGE,
+                                 (unsigned)ARKRTOS_APPRUN_BASE);
+            }
+            if(rc == ARKRTOS_APPRUN_ERR_LAYOUT)
+            {
+                /* 说清是哪一条不满足：这份镜像可能是给别人链的，改一下
+                 * scatter 就行，不是程序写错了。 */
+                ark_shell_printf("  vector table: +0 must be 0x%08X (window top), "
+                                 "+4 must be inside 0x%08X..0x%08X, file >= 8 B\r\n",
+                                 (unsigned)(ARKRTOS_APPRUN_RAM_BASE + ARKRTOS_APPRUN_RAM_SIZE),
+                                 (unsigned)ARKRTOS_APPRUN_BASE,
+                                 (unsigned)(ARKRTOS_APPRUN_BASE + ARKRTOS_APPRUN_CODE_SIZE));
+            }
+            if(rc == ARKRTOS_APPRUN_ERR_WINDOW)
+            {
+                /* 池里没能按窗口大小拿到那一块：通常是上一次的 app 还没退出，
+                 * 或者池表满了（'free' 看 fragment、'task' 看还在跑的程序）。 */
+                ark_shell_printf("  the %u-byte window at 0x%08X is not available "
+                                 "(see 'free' and 'task')\r\n",
+                                 (unsigned)ARKRTOS_APPRUN_TOTAL_SIZE,
+                                 (unsigned)ARKRTOS_APPRUN_BASE);
+            }
+            if(rc == ARKRTOS_APPRUN_ERR_PROLOGUE)
+            {
+                ark_shell_printf("  entry from vector table +4 does not start with 0x%04X\r\n",
+                                 (unsigned)ARKRTOS_APPRUN_PROLOGUE);
+            }
+            if(rc == ARKRTOS_APPRUN_ERR_BUSY)
+            {
+                sh_out("  a previous 'app run' is still alive (see 'task')\r\n");
+            }
+            if(rc == ARKRTOS_LOADER_ERR_STATE)
+            {
+                /* 前置条件是 VFS 起来，不是 littlefs 卷挂上：镜像从 /tmp 读，
+                 * 那是 VFS 的 ramfs。所以这里不能再说「去 fs mount」。 */
+                sh_out("  the VFS is not up (see the boot log; 'ls /' proves it)\r\n");
+            }
+            if(rc == ARKRTOS_MINI_ERR_FS)
+            {
+                /* 读文件失败的原因不在 arkrtos_fs 那一层，别把它的错误码搬来
+                 * 冒充：这里只能说清是哪一步、该去查什么。 */
+                sh_out("  cannot read the image (check 'ls' and the image limit)\r\n");
+            }
+            return 1;
+        }
+
+        /* app_task 是起跑那一刻的任务号（app 可能已经跑完退出了，所以不能
+         * 在这里回读 arkrtos_apprun_task_id）。 */
+        ark_shell_printf("\r\napp run: %s started (task %u)\r\n", argv[2],
+                         (unsigned)app_task);
+        return 0;
+    }
+#endif /* ARKRTOS_USE_APPRUN */
+
+
     if((argc >= 2) && (strcmp(argv[1], "start") == 0))
     {
         if((argc < 3) || (parse_u32(argv[2], &slot) != 0) ||
@@ -500,7 +576,12 @@ static int cmd_app(int argc, char *argv[])
 
     if((argc >= 2) && (strcmp(argv[1], "list") != 0))
     {
+#if (ARKRTOS_USE_APPRUN == 1)
+        sh_out("usage: app [list | install <path> [slot] | start <slot> | stop <slot> |"
+               " uninstall <slot> | run <path>]\r\n");
+#else
         sh_out("usage: app [list | install <path> [slot] | start <slot> | stop <slot> | uninstall <slot>]\r\n");
+#endif
         return -1;
     }
 

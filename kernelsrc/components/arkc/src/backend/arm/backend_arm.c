@@ -318,6 +318,19 @@ static unsigned     g_bss_base   = 0x20000000u;  /* default SRAM base (.bss foll
  * command. Defined here (early) so arm_scatter_load() can read it. */
 int g_arm_dump_syms = 0;
 
+/* --vector-table: reserve ARM_VT_SIZE bytes at the front of the image for the
+ * Cortex-M vector table, so the table can be written *into* the reserved gap
+ * instead of being prepended at link time.  Prepending shifts every byte by
+ * 0x400; PC-relative Thumb-2 branches survive that, absolute addresses baked
+ * by the assembler do not.  0 = old behaviour, byte for byte. */
+int g_arm_vt_reserve = 0;
+
+/* Cortex-M vector table: 256 entries, 1 KB.  Declared here (not next to
+ * arm_link) because both the assembler -- which reserves this many bytes at the
+ * front of the image -- and the linker need it. */
+#define ARM_VT_ENTRIES 256
+#define ARM_VT_SIZE   (ARM_VT_ENTRIES * 4)
+
 /* Parse g_config.scatter_file (if set) into g_scatter and derive the Flash /
  * data / bss base addresses from the described execution regions. Called once
  * per compilation so the backend places sections per the scatter layout. */
@@ -4072,7 +4085,10 @@ static int parse_reglist_a(const char **p, int *has_lr, int *has_pc);
 
 static void pass1_a(ArmAsm *a) {
     const char *p = a->src;
-    int pc = 0;
+    /* The reserved vector-table area counts as part of the section, so labels
+     * inside it (there are none) and after it keep the addresses the final
+     * image will really have. */
+    int pc = g_arm_vt_reserve ? ARM_VT_SIZE : 0;
     a->label_count = 0;
     a->set_count = 0;
     a->literal_count = 0;
@@ -4487,7 +4503,7 @@ static int thumb_imm12_a(unsigned val, unsigned *out_i, unsigned *out_imm3,
 
 static void pass2_a(ArmAsm *a) {
     const char *p = a->src;
-    a->pc = 0;
+    a->pc = g_arm_vt_reserve ? ARM_VT_SIZE : 0;
     a->ref_count = 0;
     while (*p) {
         char first[64];
@@ -5984,8 +6000,15 @@ static int arm_assemble(const char *asm_text, unsigned char *out, int cap) {
     a.literal_pool_start = -1;
     a.pending_weak = 0;
     a.cur_section = 0;
+    /* --vector-table: hand the emitter a buffer whose first ARM_VT_SIZE bytes
+     * are already claimed, zeroed.  The linker only fills the table in. */
+    if (g_arm_vt_reserve) {
+        int k;
+        if (ARM_VT_SIZE > cap) return -1;
+        for (k = 0; k < ARM_VT_SIZE; k++) out[k] = 0;
+    }
     pass1_a(&a);
-    a.pc = 0;
+    a.pc = g_arm_vt_reserve ? ARM_VT_SIZE : 0;
     pass2_a(&a);
     resolve_refs_a(&a);
     /* Save symbol table for linker */
@@ -6154,8 +6177,6 @@ int arm_get_reloc_type(int idx) { return g_arm_relocs[idx].type; }
  * loads EPSR.T from that bit, so an even address makes a Cortex-M core take
  * an INVSTATE UsageFault instead of running the handler. Real STM32 vector
  * tables are odd for the same reason. */
-#define ARM_VT_ENTRIES 256
-#define ARM_VT_SIZE   (ARM_VT_ENTRIES * 4)
 static const char *g_arm_vector_names[] = {
     NULL, "Reset_Handler", "NMI_Handler", "HardFault_Handler",
     "MemManage_Handler", "BusFault_Handler", "UsageFault_Handler",
@@ -6193,15 +6214,23 @@ static int arm_link(unsigned char *code, int size, struct LinkContext *lc) {
     }
 #endif
 
-    new_size = size + ARM_VT_SIZE;
-    if (new_size > ARK_CODE_BUF_SIZE) return -1;
+    if (g_arm_vt_reserve) {
+        /* --vector-table: the emitter started at ARM_VT_SIZE, so the table
+         * area is already in place and every address is already correct.
+         * Moving anything here would shift the image away from the addresses
+         * the assembler encoded (that was the bug this option exists to fix). */
+        new_size = size;
+    } else {
+        new_size = size + ARM_VT_SIZE;
+        if (new_size > ARK_CODE_BUF_SIZE) return -1;
 
-    /* Move existing code right by ARM_VT_SIZE bytes */
-    for (i = size - 1; i >= 0; i--) code[i + ARM_VT_SIZE] = code[i];
+        /* Move existing code right by ARM_VT_SIZE bytes */
+        for (i = size - 1; i >= 0; i--) code[i + ARM_VT_SIZE] = code[i];
 
-    /* Adjust all symbol offsets by ARM_VT_SIZE */
-    for (i = 0; i < g_arm_sym_count; i++)
-        g_arm_syms[i].offset += ARM_VT_SIZE;
+        /* Adjust all symbol offsets by ARM_VT_SIZE */
+        for (i = 0; i < g_arm_sym_count; i++)
+            g_arm_syms[i].offset += ARM_VT_SIZE;
+    }
 
     /* Generate vector table at code[0] */
     {

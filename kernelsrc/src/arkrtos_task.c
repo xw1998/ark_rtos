@@ -34,6 +34,7 @@
 #include "arkrtos_hwsafe.h"   /* App-crash hardware safe-state ("will") mechanism */
 #endif
 #include "arkrtos_mini.h"   /* SVC 0x18 子命令：小程序装载/停止 */
+#include "arkrtos_apprun.h"  /* 板上直跑：任务退出时还窗 */
 #include "arkrtos_partition.h"    /* 用户可见内存窗口（共享区/App RAM/驱动 RAM/固件区） */
 
 /* ------------------------------------------------------------------
@@ -2617,6 +2618,11 @@ void arkrtos_task_kill_internal(void)
      * 与切换之间没有任何分配者能跑（分配只在别的任务上下文里发生）。 */
     (void)arkrtos_mini_on_task_exit((uint32)arkrtos_current_task_id);
 #endif /* ARKRTOS_USE_MINIAPP */
+#if (ARKRTOS_USE_APPRUN == 1)
+    /* 直跑回收：主任务退出就意味着这一次跑完，借来的窗必须还回池。
+     * 与小程序同位：在切走之前，且此刻自身已被置为 INVALID。 */
+    (void)arkrtos_apprun_on_task_exit((uint32)arkrtos_current_task_id);
+#endif /* ARKRTOS_USE_APPRUN */
 
     {
         ARKRTOS_SWITCH_TASK();

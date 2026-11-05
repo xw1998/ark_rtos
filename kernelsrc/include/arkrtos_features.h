@@ -327,6 +327,16 @@
 #define ARKRTOS_SHELL_BOARD_CMDS        0
 #endif
 
+/* On-board app runner: `app run <path>` takes a bare arkc-produced executable
+ * out of the file system, drops it into the fixed window declared by the board
+ * partition header (ARKRTOS_APPRUN_*) and starts it as an unprivileged task.
+ * No image header, no relocation - the program is linked for that window.
+ * Off by default: at 0 the source file compiles to nothing and the command
+ * table is byte-for-byte what it was.  Needs the VFS to read the file. */
+#ifndef ARKRTOS_USE_APPRUN
+#define ARKRTOS_USE_APPRUN              0
+#endif
+
 /* ============================================================
  * 五、依赖校验
  * @brief 关错了开关要在这里报出来，而不是等到链接期一个 undefined symbol
@@ -338,6 +348,10 @@
 
 #if ARKRTOS_USE_MINIAPP && !ARKRTOS_USE_FS
 #error "ARKRTOS_USE_MINIAPP=1 requires ARKRTOS_USE_FS=1 (a MiniApp is loaded from the file system)"
+#endif
+
+#if ARKRTOS_USE_APPRUN && !ARKRTOS_USE_VFS
+#error "ARKRTOS_USE_APPRUN=1 requires ARKRTOS_USE_VFS=1 (the program is read from the file system)"
 #endif
 
 /* 并发数要么是 1（退化成原来的单实例），要么必须落在共享表数组的容量内：

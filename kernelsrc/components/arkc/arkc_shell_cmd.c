@@ -49,8 +49,23 @@ static void cc_usage(void)
     ark_shell_printf(
         "usage: cc <file.c> [-o <out>] [-S] [-c] [-E] [-target arm]\r\n"
         "          [-O0|-O1|-O2] [-D<name>[=<value>]] [-I <dir>] [-v]\r\n"
+#if (ARKRTOS_USE_APPRUN == 1)
+        "          [--scatter <file.sct>] [--vector-table]\r\n"
+        "          [-link <a.obj> [<b.obj> ...]]\r\n"
+#endif
         "  no -o: writes <file>.bin (or prints to the console with -S/-E)\r\n"
-        "  -o - : prints to the console (text as-is, binary as hex)\r\n");
+        "  -o - : prints to the console (text as-is, binary as hex)\r\n"
+#if (ARKRTOS_USE_APPRUN == 1)
+        "  --scatter: link for that memory layout (needed for 'app run')\r\n"
+        "  --vector-table: reserve 0x400 at the front of the image and put a\r\n"
+        "         Cortex-M vector table there.  Use it whenever Reset_Handler is\r\n"
+        "         defined: without it arkc prepends the table and shifts the image,\r\n"
+        "         which leaves string-literal addresses 0x400 too low\r\n"
+        "  -link: link .obj files into one image; every argument up to the next\r\n"
+        "         option is an input.  Add --scatter so the image carries a vector\r\n"
+        "         table for that window ('app run' reads SP/entry from it)\r\n"
+#endif
+        );
 }
 
 /* How much of the compiler arena this run consumed.  Printed on every path
@@ -81,6 +96,23 @@ static int cmd_cc(int argc, char *argv[])
     const char *src = NULL;
     const char *out = NULL;
     const char *target = "arm";
+#if (ARKRTOS_USE_APPRUN == 1)
+    /* Only the app-run window needs a caller-chosen layout on the target, so
+     * this option is part of that feature: a build without `app run` keeps a
+     * byte-identical cc command (and image) instead of carrying an option it
+     * cannot use. */
+    const char *scatter = NULL;
+    /* -link produces the image `app run` consumes: one bare file placed at the
+     * window addresses.  Upstream `-link` collects every following non-option
+     * argument as an input, and so does this, so `cc -link a.obj -o x.bin`
+     * means the same thing on the board as on the host. */
+    int        link_mode = 0;
+    const char *link_inputs[32];
+    int        link_input_count = 0;
+    /* --vector-table: emit the table into a reserved 0x400 gap instead of
+     * prepending it, so the linked addresses stay the ones that run. */
+    int        vector_table = 0;
+#endif
     int        emit_asm = 0;
     int        compile_only = 0;
     int        preprocess_only = 0;
@@ -98,6 +130,19 @@ static int cmd_cc(int argc, char *argv[])
 
     for (i = 1; i < argc; i++) {
         const char *a = argv[i];
+#if (ARKRTOS_USE_APPRUN == 1)
+        if ((link_mode != 0) && (a[0] != '-')) {
+            /* Objects after -link.  A second bare file used to be an error
+             * ("more than one input file"); in link mode it is the point. */
+            if (link_input_count >= (int)(sizeof(link_inputs) / sizeof(link_inputs[0]))) {
+                ark_shell_printf("cc: more than %d -link inputs\r\n",
+                                 (int)(sizeof(link_inputs) / sizeof(link_inputs[0])));
+                return 1;
+            }
+            link_inputs[link_input_count++] = a;
+            continue;
+        }
+#endif
         if (a[0] != '-') {
             if (src != NULL) {
                 ark_shell_printf("cc: more than one input file ('%s' after '%s')\r\n",
@@ -128,6 +173,23 @@ static int cmd_cc(int argc, char *argv[])
                 return 1;
             }
             target = argv[++i];
+#if (ARKRTOS_USE_APPRUN == 1)
+        } else if (strcmp(a, "--vector-table") == 0) {
+            vector_table = 1;
+        } else if (strcmp(a, "-link") == 0) {
+            /* Turns the following bare arguments into inputs; nothing else is
+             * needed here because the branch above already routes them. */
+            link_mode = 1;
+        } else if (strcmp(a, "--scatter") == 0) {
+            /* Link for a given layout.  Without it the image is linked at the
+             * ARM default bases, which is not where an app-run window sits, so
+             * the program would be correct code at the wrong addresses. */
+            if ((i + 1) >= argc) {
+                ark_shell_printf("cc: --scatter needs a file name\r\n");
+                return 1;
+            }
+            scatter = argv[++i];
+#endif
         } else if (strcmp(a, "-I") == 0) {
             if ((i + 1) >= argc) {
                 ark_shell_printf("cc: -I needs a directory\r\n");
@@ -162,6 +224,22 @@ static int cmd_cc(int argc, char *argv[])
         }
     }
 
+#if (ARKRTOS_USE_APPRUN == 1)
+    if (link_mode != 0) {
+        /* Refuse a source file instead of quietly compiling it: -link only
+         * reads object files, and a `.c` handed to it would be copied
+         * verbatim into the image (seen on the host: 676 bytes of source). */
+        if (src != NULL) {
+            ark_shell_printf("cc: -link takes objects, not source ('%s')\r\n", src);
+            return 1;
+        }
+        if (link_input_count == 0) {
+            ark_shell_printf("cc: -link needs at least one .obj\r\n");
+            cc_usage();
+            return 1;
+        }
+    } else
+#endif
     if (src == NULL) {
         ark_shell_printf("cc: no input file\r\n");
         cc_usage();
@@ -180,6 +258,17 @@ static int cmd_cc(int argc, char *argv[])
     opts.verbose        = (int)verbose;
     opts.target         = target;
     opts.opt_level      = opt_level;
+#if (ARKRTOS_USE_APPRUN == 1)
+    opts.scatter_file   = scatter;
+    opts.vector_table   = vector_table;
+    if (link_mode != 0) {
+        opts.link_mode        = 1;
+        opts.link_input_count = link_input_count;
+        for (i = 0; i < link_input_count; i++) {
+            opts.link_inputs[i] = link_inputs[i];
+        }
+    }
+#endif
     for (i = 0; i < n_includes && i < 16; i++) {
         opts.include_dirs[i] = includes[i];
     }
@@ -203,6 +292,13 @@ static int cmd_cc(int argc, char *argv[])
     arkc_port_zero_arena();
     diag_init(src, NULL);
 
+#if (ARKRTOS_USE_APPRUN == 1)
+    if (link_mode != 0) {
+        ark_shell_printf("cc: link %d obj -> %s\r\n",
+                         link_input_count,
+                         (out != NULL) ? out : "(default)");
+    } else
+#endif
     ark_shell_printf("cc: %s -> %s (target %s, -O%d)%s\r\n",
                      src,
                      (out != NULL) ? out : "(default)",
@@ -210,6 +306,16 @@ static int cmd_cc(int argc, char *argv[])
                      (emit_asm != 0) ? ", -S" :
                      (compile_only != 0) ? ", -c" :
                      (preprocess_only != 0) ? ", -E" : "");
+#if (ARKRTOS_USE_APPRUN == 1)
+    if (scatter != NULL) {
+        /* Name the layout on the same line as the files: which base a binary
+         * was linked for is the first thing to check when it will not run. */
+        ark_shell_printf("cc: scatter %s\r\n", scatter);
+    }
+    if (vector_table != 0) {
+        ark_shell_printf("cc: vector table in the first 0x400 B\r\n");
+    }
+#endif
 
     t0 = platform_tick_ms();
     arkc_port_set_abort_target(&pad);
@@ -252,7 +358,11 @@ int arkc_shell_register(int idx)
      * real limit is the shell's own argv array; cmd_cc reports what it
      * cannot honour. */
     g_cmd_table[idx++] = ARK_SHELL_CMD("cc", cmd_cc,
+#if (ARKRTOS_USE_APPRUN == 1)
+        "Ark C compiler: cc <file.c> [-o out] [-S] [-c] [-D..] [-I dir] [--scatter f.sct] [--vector-table]",
+#else
         "Ark C compiler: cc <file.c> [-o out] [-S] [-c] [-D..] [-I dir]",
+#endif
         ARK_SHELL_MAX_ARGS);
     return idx;
 }

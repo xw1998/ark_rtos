@@ -1101,6 +1101,27 @@ int ark_compile(const ArkOptions *opts) {
     /* --split_sections/-ffunction-sections: sync runtime switch to g_config,
      * so ARM/C backends emit a separate section before each function. */
     if (opts->split_sections) g_config.split_sections = 1;
+    /* --vector-table: the ARM backend reserves the table area before assembly
+     * so the image does not have to be shifted afterwards.  Set here (not in
+     * the backend) because it is an option, and the backend sees only opts-free
+     * state.  Zero by default: every existing command line is unchanged. */
+    g_arm_vt_reserve = (opts->vector_table != 0) ? 1 : 0;
+
+#if ARKCC_FEATURE_SCATTER
+    /* --scatter: the ARM backend reads the layout from g_config alone, so an
+     * embedding that fills only ArkOptions::scatter_file gets the built-in
+     * addresses (0x08000000 / 0x20020000) and emits an image that cannot run
+     * where it is loaded -- silently, which is the worst kind.  Bridge the
+     * option into g_config here, and when the file cannot be parsed fail
+     * loudly instead of falling back.  (Seen on the H743 board: the shell
+     * command set opts.scatter_file, the linker stage stayed on the defaults,
+     * and the resulting vector table said SP=0x20020000 / entry=0x08000429.) */
+    if ((opts->scatter_file != 0) && (opts->scatter_file[0] != 0)) {
+        if ((g_config.scatter_file == 0) || (g_config.scatter_file[0] == 0)) {
+            g_config.scatter_file = opts->scatter_file;
+        }
+    }
+#endif
 
     {
         /* fs_read_file() truncates at ARK_SRC_BUF_SIZE-1 without saying so,
@@ -1293,8 +1314,29 @@ int ark_compile(const ArkOptions *opts) {
     }
 #endif
 
-    asm_len = be->emit_asm(ir, g_asm, ARK_ASM_BUF_SIZE);
-    if (asm_len < 0) return ARK_ERR_CODEGEN;
+    /* The ARM backend loads the scatter file lazily, at the start of its own
+     * code generation (it only sees g_config, never ArkOptions).  When that
+     * parse fails it used to leave every base at the built-in
+     * 0x08000000 / 0x20020000 and carry on -- the image linked to addresses
+     * the caller never asked for, and nothing in the output said so.  Refuse
+     * to emit an image from a codegen run that reported an error: the caller
+     * asked for a layout, and the only honest outcomes are "placed per the
+     * file" or "failed". */
+    {
+        int diag_before_codegen = diag_errors();
+        asm_len = be->emit_asm(ir, g_asm, ARK_ASM_BUF_SIZE);
+        if (asm_len < 0) return ARK_ERR_CODEGEN;
+        if (diag_errors() > diag_before_codegen) {
+            if (g_config.scatter_file && g_config.scatter_file[0]) {
+                diag_tool(DIAG_SEV_ERROR, opts->input_path,
+                          "the requested layout in %s could not be applied; "
+                          "refusing to fall back to the built-in layout "
+                          "0x08000000 / 0x20020000",
+                          g_config.scatter_file, 0,0,0,0,0);
+            }
+            return ARK_ERR_CODEGEN;
+        }
+    }
     g_asm[asm_len] = 0;
 
     /* -c mode: write an ARKOBJ2 object instead of a flat binary. */
