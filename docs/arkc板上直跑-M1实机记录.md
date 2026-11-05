@@ -1,5 +1,8 @@
 # arkc 板上直跑 — M1 实机记录（固定窗口）
 
+> 判据的自动复跑见 [arkc产物上板-错误码表与回归账本.md](arkc产物上板-错误码表与回归账本.md) §5
+> （`py -3 tools/final_app.py`，其中 `m1-fixed-window` / `m1-wrong-window` 两条就是本文 §6 的正反用例）。
+
 本文是 [arkc编译产物上板运行-实施计划.md](arkc编译产物上板运行-实施计划.md) 里 **M1（L1 固定窗口执行）** 的落地记录：
 在 STM32H743 板上，用板上跑的 arkc（shell 里的 `cc`）编出裸镜像，再由内核的 `app run` 装进固定 RAM 窗口、以非特权任务执行。
 
