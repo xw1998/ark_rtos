@@ -45,16 +45,24 @@ USE_ARKC   ?= 1
 # 放到片外。这一项不只影响一个 -D：它同时决定 DEFS 里的开关、编译器的
 # 缓冲预算、ramfs 的槽数与段归属，三者必须一起动，所以放在同一个开关下。
 #
-# 默认 0 是实测结论，不是保守：本板 FMC 的存储窗口对任何访问都应不上（细节见
-# docs/stm32h743-external-memory.md）。置 1 后 .ark_buf 与 ramfs 文件缓冲会落到
-# 0xC0000000 起的分区里，而那个窗口不应答，于是编译器一开池就取总线故障、
-# VFS 也不会挂载。要看现场证据就 make USE_SDRAM=1，再用 sdram info/verify/fsm/pins。
+# 默认 0，因为这一侧的接入还没调通，不是因为这块板不行：按用户口径，FMC 外部
+# 存储窗是**通的**（厂商例程在本板可跑），本侧没调通属配置问题，**不作硬件层
+# 结论**（细节与现场读数见 docs/stm32h743-external-memory.md）。按用户指示
+# 「先不管」冻结；置 1 后 .ark_buf 与 ramfs 文件缓冲会落到 0xC0000000 起的分区里。
+# 要重开这扇门就先 make USE_SDRAM=1，再用 sdram info/verify/fsm/pins 出读数。
 USE_SDRAM  ?= 0
 # 板上直跑（app run）：1 = 编进的裸文件可以丢进固定窗口直接执行。
 # 关窗地址与大小在分区头 ARKRTOS_APPRUN_*，
 # 不在这里。默认 0：关掉时那个源文件编出为空目标，
 # 镜像与命令表逐字节不变。
 USE_APPRUN ?= 0
+# 小程序读镜像的后端：0 = arkrtos_fs（littlefs 卷，与引入开关前逐字节一致）；
+# 1 = VFS 命名空间（含板上编译器写产物的 /tmp ramfs）。判据在
+# docs/arkc编译产物上板运行-实施计划.md 的 M3-a：默认关时行为不变。
+USE_MINI_VFS ?= 0
+# 可重定位镜像打包（M2）：1 = 编入四遍差分打包器，给 arkc 的 `cc --pack` 用。
+# 默认 0：关掉时 arkrtos_apppack.c 不进 SRCS，镜像与命令表逐字节不变。
+USE_APPPACK ?= 0
 
 
 # 交叉工具链前缀；默认取 PATH 上的 arm-none-eabi-
@@ -77,7 +85,9 @@ DEFS := \
   -DLFS_NO_MALLOC -DLFS_NO_ASSERT -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR \
   -DARKRTOS_USE_ARKVIM=$(USE_ARKVIM) -DARKRTOS_USE_ARKC=$(USE_ARKC) \
   -DARKRTOS_USE_SDRAM=$(USE_SDRAM) -DARKRTOS_SHELL_BOARD_CMDS=$(USE_SDRAM) \
-  -DARKRTOS_USE_APPRUN=$(USE_APPRUN)
+  -DARKRTOS_USE_APPRUN=$(USE_APPRUN) \
+  -DARKRTOS_MINI_READ_VFS=$(USE_MINI_VFS) \
+  -DARKRTOS_USE_APPPACK=$(USE_APPPACK)
 
 # Editor (arkvim) sizing. Every limit upstream is an #ifndef, so the sizes are
 # decided here and not by editing upstream: the editor struct is 31KB (16K text

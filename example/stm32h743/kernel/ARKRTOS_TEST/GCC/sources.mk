@@ -84,6 +84,15 @@ SRCS := \
   example/stm32h743/kernel/ARKRTOS_TEST/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_uart.c \
   example/stm32h743/kernel/ARKRTOS_TEST/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_exti.c \
 
+# Relocatable image packer (L2).  Pure computation: no I/O, no allocation,
+# no dependency on arkc - it only looks at how the same bytes differ between
+# two nominal bases.  Kept out of SRCS when USE_APPPACK=0 so "off means no
+# change" is enforced by the build, not by an #if inside the source.
+ifeq ($(USE_APPPACK),1)
+SRCS += \
+  kernelsrc/src/arkrtos_apppack.c
+endif
+
 # Text editor component.  Upstream arkvim (gitee xw19981010/arkvim) is copied
 # into kernelsrc/components/arkvim/src unchanged; this repository only adds the
 # three wiring files: arkvim_port_arkrtos.c (transport), arkvim_fileio_vfs.c

@@ -429,22 +429,54 @@ def diff_reloc(img_a, img_b, img_c, delta, payload_prefix):
     n = len(img_a)
     pos = 0
     while pos < n:
-        # ---- 1) 先按 4 字节纯数据字判（literal pool 里的指针、常量表）----
+        # ---- 0) 先判 MOVW/MOVT 立即数对（32 位 Thumb 指令，跨两个半字）----
+        # 必须排在整字判之前：MOVT 的高 16 位里只有 imm8 会随基址变，站在 4
+        # 字节整字的视角看恰好等于「+delta」，会被误当成一条 ROM 数据字表项；
+        # 而 MOVT 的起点常常落在 2 mod 4 上，装载器按对齐规则本来就会拒收。
+        # 只有三份里真的变了才按指令处理：三份一致的 MOVW/MOVT 对是普通常量，
+        # 让它落到下面按指令长度正常跳过，免得把数据字误读成指令。
+        if pos + RELOC_MOV_SIZE <= n:
+            va = _read_mov_pair(img_a, pos)
+            vb = _read_mov_pair(img_b, pos)
+            vc = _read_mov_pair(img_c, pos)
+            if (va is not None) and (vb is not None) and (vc is not None):
+                db = (vb - va) & 0xFFFFFFFF
+                dc = (vc - va) & 0xFFFFFFFF
+                if db or dc:
+                    if db == delta and dc == 0:
+                        kind = RELOC_KIND_ROM_MOVW
+                    elif dc == delta and db == 0:
+                        kind = RELOC_KIND_RAM_MOVW
+                    else:
+                        raise PackError(
+                            "负载偏移 0x%X 处的 MOVW/MOVT 立即数对在三份链接里不是简单的基址平移："
+                            "A=0x%08X B=0x%08X C=0x%08X（delta=0x%X）。"
+                            % (pos, va, vb, vc, delta))
+                    off = payload_prefix + pos
+                    out.append((reloc_entry(off, kind), kind, off))
+                    pos += RELOC_MOV_SIZE
+                    continue
+
+        # ---- 1) 再按 4 字节纯数据字判（literal pool 里的指针、常量表）----
         if pos + 4 <= n:
             wa, wb, wc = _u32(img_a, pos), _u32(img_b, pos), _u32(img_c, pos)
             db = (wb - wa) & 0xFFFFFFFF
             dc = (wc - wa) & 0xFFFFFFFF
             if db or dc:
                 if db == delta and dc == 0:
-                    off = payload_prefix + pos
-                    out.append((reloc_entry(off, RELOC_KIND_ROM), RELOC_KIND_ROM, off))
-                    pos += 4
-                    continue
-                if dc == delta and db == 0:
-                    off = payload_prefix + pos
-                    out.append((reloc_entry(off, RELOC_KIND_RAM), RELOC_KIND_RAM, off))
-                    pos += 4
-                    continue
+                    kind = RELOC_KIND_ROM
+                elif dc == delta and db == 0:
+                    kind = RELOC_KIND_RAM
+                else:
+                    kind = None
+                if kind is not None:
+                    # 整字表项必须 4 字节对齐：装载器会拒收非对齐项。对齐不了
+                    # 说明这个字不是一段独立的地址槽，交给下面按指令解释。
+                    if pos % RELOC_SIZE == 0:
+                        off = payload_prefix + pos
+                        out.append((reloc_entry(off, kind), kind, off))
+                        pos += 4
+                        continue
 
         # ---- 2) 按 Thumb 指令长度走到下一条 ----
         ha, hb, hc = _u16(img_a, pos), _u16(img_b, pos), _u16(img_c, pos)

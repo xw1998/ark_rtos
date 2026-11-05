@@ -71,6 +71,14 @@ int32 arkrtos_vfs_read_file(const char *path, uint8 *buf, uint32 max,
     return ARKRTOS_VFS_ENOSYS;
 }
 
+int32 arkrtos_vfs_read_at(const char *path, uint8 *buf, uint32 len, uint32 off,
+                        uint32 *out_len)
+{
+    (void)path; (void)buf; (void)len; (void)off;
+    if (out_len != NULL) { *out_len = 0u; }
+    return ARKRTOS_VFS_ENOSYS;
+}
+
 int32 arkrtos_vfs_write_file(const char *path, const uint8 *buf, uint32 len)
 {
     (void)path; (void)buf; (void)len;
@@ -514,6 +522,52 @@ int32 arkrtos_vfs_read_file(const char *path, uint8 *buf, uint32 max,
     rc = ark_vfs_read_all(path, buf, max, &got);
     if (out_len != NULL) { *out_len = got; }
     return rc;
+}
+
+int32 arkrtos_vfs_read_at(const char *path, uint8 *buf, uint32 len, uint32 off,
+                        uint32 *out_len)
+{
+    int32 fd;
+    int32 n;
+    int32 pos;
+    uint32 total = 0u;
+
+    if (out_len != NULL) { *out_len = 0u; }
+    if ((path == NULL) || ((buf == NULL) && (len != 0u))) { return ARK_E_INVAL; }
+
+    fd = ark_vfs_open(path, (int)ARK_O_RDONLY);
+    if (fd < 0) { return fd; }
+
+    if (off != 0u)
+    {
+        /* 只看「是否失败」：各后端对成功的返回值约定不同（ramfs 回新偏移、
+         * littlefs 桥回 0），把它当新偏移用会在某个卷上静默偏掉。 */
+        pos = (int32)ark_vfs_lseek(fd, (ark_off_t)off, ARK_SEEK_SET);
+        if (pos < 0)
+        {
+            (void)ark_vfs_close(fd);
+            return pos;
+        }
+    }
+
+    while (total < len)
+    {
+        n = ark_vfs_read(fd, buf + total, len - total);
+        if (n < 0)
+        {
+            (void)ark_vfs_close(fd);
+            return n;
+        }
+        if (n == 0)
+        {
+            break;      /* 文件尾：短读，不是错误 */
+        }
+        total += (uint32)n;
+    }
+
+    (void)ark_vfs_close(fd);
+    if (out_len != NULL) { *out_len = total; }
+    return ARK_VFS_OK;
 }
 
 int32 arkrtos_vfs_open_read(const char *path)

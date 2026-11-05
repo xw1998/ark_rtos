@@ -135,6 +135,22 @@ int32 arkrtos_vfs_read_file(const char *path, uint8 *buf, uint32 max,
                           uint32 *out_len);
 
 /**
+* @brief 从指定偏移读一段字节（一次性开、读、关，不把句柄交给调用方）。
+* @param path 路径；buf 目标缓冲；len 想读的字节数；off 文件内起始偏移
+* @param out_len 收实际读到的字节数（== len 表示读满；< len 表示到文件尾）
+* @return 0=成功（含「文件短于 off+len」这种正常情况）；负值为 ark_vfs 错误码
+* @note  为什么需要它、而不是让调用方 open+seek+read：装载路径（mini）读的是
+*        「镜像头 / 重定位表 / 负载分块」三段定长片段，用 read_file 读整个文件
+*        会把一份大镜像整份塞进 RAM；自己拼 open+seek+read 又要在三个地方各自
+*        记一遍「lseek 的返回值不能当新偏移用」（ramfs 回新偏移、littlefs 桥回 0）。
+*        门面只回「读到多少字节」，短读是读数而不是错误。
+* @note  线程/中断约束与 open_read 相同：同一时刻只能有一个读者拿着这份文件缓存，
+*        调用方负责串行化（mini 在调度器锁内调用）。
+*/
+int32 arkrtos_vfs_read_at(const char *path, uint8 *buf, uint32 len, uint32 off,
+                        uint32 *out_len);
+
+/**
 * @brief 按路径只读打开一个文件。
 * @return >=0 文件句柄；负值为 ark_vfs 错误码
 * @note  只放出只读打开这一种：写清一色走 arkrtos_vfs_write_file()，

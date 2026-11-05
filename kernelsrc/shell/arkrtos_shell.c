@@ -4392,9 +4392,25 @@ static int cmd_mini(int argc, char *argv[])
             }
             if(rc == ARKRTOS_MINI_ERR_FS)
             {
+#if (ARKRTOS_MINI_READ_VFS == 1)
+                /* 报真正读失败那一层的原因：走 VFS 时 arkrtos_fs_last_error()
+                 * 恒为 0（ok），照旧打印就是「失败 + ok」这种错答案。 */
+                int32 e = arkrtos_mini_last_read_error();
+
+                if(e == ARKRTOS_MINI_ERR_SHORT_READ)
+                {
+                    ark_shell_printf("  the image file ends early (short read)\r\n");
+                }
+                else
+                {
+                    ark_shell_printf("  read: %d (%s)\r\n",
+                                     (int)e, arkrtos_vfs_error_name(e));
+                }
+#else
                 int32 e = arkrtos_fs_last_error();
                 ark_shell_printf("  file system: %d (%s)\r\n",
                                  (int)e, arkrtos_fs_error_name(e));
+#endif
             }
             return 1;
         }

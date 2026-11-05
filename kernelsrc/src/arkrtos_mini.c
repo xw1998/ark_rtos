@@ -43,6 +43,9 @@
 #include "arkrtos_loader.h"
 #include "arkrtos_ptable.h"
 #include "arkrtos_fs.h"
+#if (ARKRTOS_MINI_READ_VFS == 1)
+#include "arkrtos_vfs.h"
+#endif
 #include "arkrtos_task.h"
 #include "arkrtos_cfg.h"
 #include "arkrtos_mpu.h"
@@ -189,21 +192,54 @@ static arkrtos_mini_slot_t *arkrtos_mini_nth_running(uint32 index)
 
 /* 从镜像文件里精确读 len 字节。少读一个字节就算失败：短文件就是短文件，
  * 不能靠块里的残留内容把一次装载"补全"。 */
+#if (ARKRTOS_MINI_READ_VFS == 1)
+/* 最近一次读镜像的失败原因；0 表示没失败。见 arkrtos_mini.h。
+ * 只在走 VFS 那条路上有意义：那条路的 arkrtos_fs_last_error() 恒为 0，
+ * 照它报错就是「失败 + ok」这种错答案。默认关，默认构建逐字节不变。 */
+static int32 g_mini_read_err = 0;
+
+int32 arkrtos_mini_last_read_error(void)
+{
+    return g_mini_read_err;
+}
+#endif
+
 static int32 arkrtos_mini_read_exact(const char *path, uint8 *buf, uint32 len, uint32 off)
 {
     uint32 got = 0u;
+    int32  rc;
 
+#if (ARKRTOS_MINI_READ_VFS == 1)
+    g_mini_read_err = 0;
+#endif
     if(len == 0u)
     {
         return 0;
     }
 
-    if(arkrtos_fs_read_at(path, buf, len, off, &got) != 0)
+#if (ARKRTOS_MINI_READ_VFS == 1)
+    rc = arkrtos_vfs_read_at(path, buf, len, off, &got);
+#else
+    rc = arkrtos_fs_read_at(path, buf, len, off, &got);
+#endif
+    if(rc != 0)
     {
+#if (ARKRTOS_MINI_READ_VFS == 1)
+        g_mini_read_err = rc;
+#endif
+        return -1;
+    }
+    if(got != len)
+    {
+        /* 文件比声明的短：不是读错误，但半份镜像同样不能跑，单独记一个码，
+         * 免得 shell 把它报成「底层读失败」而把人引去查文件系统。 */
+#if (ARKRTOS_MINI_READ_VFS == 1)
+        g_mini_read_err = ARKRTOS_MINI_ERR_SHORT_READ;
+#endif
         return -1;
     }
 
-    return (got == len) ? 0 : -1;
+    return 0;
 }
 
 int32 arkrtos_mini_run(const char *path)
@@ -302,11 +338,19 @@ int32 arkrtos_mini_run(const char *path)
 
     arkrtos_spin_unlock_irqrestore(&g_mini_lock, irq);
 
+#if (ARKRTOS_MINI_READ_VFS == 1)
+    if(arkrtos_vfs_ready() == 0u)
+    {
+        ret = ARKRTOS_MINI_ERR_FS;
+        goto out;
+    }
+#else
     if(arkrtos_fs_mounted() == 0u)
     {
         ret = ARKRTOS_MINI_ERR_FS;
         goto out;
     }
+#endif
 
     /* 文件系统只有一份缓存，读镜像的整个过程不能与别的任务的读写交错：
      * 与 SVC 层访问文件系统用同一套约定（调度器锁）。 */

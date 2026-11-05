@@ -104,6 +104,44 @@ void arkc_port_zero_arena(void)
 }
 
 /* ------------------------------------------------------------
+ * Output capture (see arkc_port.h)
+ *
+ * 捕获缓冲属于调用方（板上是 RAM 池借来的块，PC 上是 malloc），本文件
+ * 只管三层状态，不申请任何内存。
+ * ------------------------------------------------------------ */
+#if (ARKRTOS_USE_APPPACK == 1)
+static uint8_t *s_cap_buf;
+static uint32_t s_cap_cap;
+static uint32_t s_cap_len;
+static int      s_cap_active;
+
+int arkc_port_capture_begin(uint8_t *buf, uint32_t cap)
+{
+    if ((buf == 0) || (cap == 0u) || (s_cap_active != 0)) {
+        return -1;
+    }
+    s_cap_buf    = buf;
+    s_cap_cap    = cap;
+    s_cap_len    = 0u;
+    s_cap_active = 1;
+    return 0;
+}
+
+uint32_t arkc_port_capture_end(void)
+{
+    uint32_t len = s_cap_len;
+
+    s_cap_active = 0;
+    s_cap_buf    = 0;
+    s_cap_cap    = 0u;
+    s_cap_len    = 0u;
+    return len;
+}
+#endif /* ARKRTOS_USE_APPPACK */
+
+/* ------------------------------------------------------------
+ * Console output
+ * ------------------------------------------------------------ *//* ------------------------------------------------------------
  * Console output
  * ------------------------------------------------------------ */
 static void con_puts(const char *s)
@@ -383,6 +421,24 @@ int fs_write_file(const char *path, const unsigned char *data, int len)
         s_last_error = "Invalid argument";
         return -1;
     }
+    if ((path == NULL) || (data == NULL) || (len < 0)) {
+        s_last_error = "Invalid argument";
+        return -1;
+    }
+#if (ARKRTOS_USE_APPPACK == 1)
+    /* 捕获优先于 "-" 与 "nul"：打包时四遍的输出都必须是字节，打印到控制台
+     * 或丢掉都会让下一段拿到空缓冲。这条判断放在路径解析之前，所以捕获期间
+     * 连"这个路径存不存在"都不再问——这是有意的，捕获本来就不碰文件系统。 */
+    if (s_cap_active != 0) {
+        if ((uint32_t)len > (s_cap_cap - s_cap_len)) {
+            s_last_error = "Output larger than the capture buffer";
+            return -1;                 /* 不截断 */
+        }
+        memcpy(s_cap_buf + s_cap_len, data, (size_t)len);
+        s_cap_len += (uint32_t)len;
+        return len;
+    }
+#endif
     if ((strcmp(path, "-") == 0) || (path[0] == '\0')) {
         if (looks_like_text(data, len)) {
             con_write((const char *)data, (uint32_t)len);

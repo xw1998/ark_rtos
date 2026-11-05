@@ -42,6 +42,20 @@
  * 同一套（分区表里的 cfg_restart_max），不是小程序专用的另一个数字。 */
 #define ARKRTOS_MINI_ERR_DISABLED (-19)
 
+/* 读镜像时底层错误码的第二个出口：MINI_ERR_FS 只说「读不了」，说不出为什么。
+ * 走 VFS 时 arkrtos_fs_last_error() 恒为 0（ok），拿它报错就是「失败 + ok」
+ * 这种错答案，所以把真正那一层（ark_vfs 或 arkrtos_fs）的回码记下来。
+ * 另外单独一个短读码：读到文件尾不等于读错误，但半份镜像同样不能跑。 */
+#define ARKRTOS_MINI_ERR_SHORT_READ (-20)
+
+/**
+* @brief 最近一次读镜像时底层给出的错误码（0 = 无错误）
+* @details 取值是读失败那一层（由 ARKRTOS_MINI_READ_VFS 决定是 ark_vfs 还是
+*          arkrtos_fs）的错误码，或 ARKRTOS_MINI_ERR_SHORT_READ。只在
+*          arkrtos_mini_run() 返回 ARKRTOS_MINI_ERR_FS 时有意义。
+*/
+int32 arkrtos_mini_last_read_error(void);
+
 /* 镜像路径的最大字节数（含结尾 0）。这是「身份」的长度上限：小程序没有槽位，
  * 崩溃记账按路径的哈希归属，路径必须能被完整存进实例表里（否则两次不同的
  * 路径会截断成同一个身份，把 A 的崩溃算到 B 头上）。 */

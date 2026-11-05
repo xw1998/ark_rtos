@@ -179,6 +179,30 @@
 #define ARKRTOS_MINI_MAX                2u
 #endif
 
+/* 小程序从哪个命名空间读镜像。
+ *   0（默认）= arkrtos_fs（littlefs 卷）——与本开关引入之前逐字节一致。
+ *   1        = VFS（任意已挂载命名空间，含板上编译器写产物的 /tmp ramfs）。
+ * 为什么是一个开关而不是「两个都试」：两条读路径的前置条件不同（前者要卷已挂、
+ * 后者要 VFS 就绪），失败原因也不同；「先试 A 失败再试 B」会把「A 上明明有文件
+ * 但读坏了」变成「悄悄按 B 解释路径」，那是一种看不出来的错答案。
+ * 打开前必须 ARKRTOS_USE_VFS=1（下面的依赖校验挡住了关错）。*/
+#ifndef ARKRTOS_MINI_READ_VFS
+#define ARKRTOS_MINI_READ_VFS           0
+#endif
+
+/* 可重定位镜像打包（L2）。
+ *   0（默认）= kernelsrc/src/arkrtos_apppack.c 根本不进编译，体积与行为逐字节不变。
+ *   1        = 编入「四遍差分」打包器：同一份 C 程序在四个标称基址上各编一遍
+ *              （A 标称 / B 代码+Δ / C 数据+Δ / D 代码+2Δ、数据+Δ），由差分出
+ *              重定位表，产出带表、可直接被 loader 装载的 .svcm 容器。
+ * 为什么放在内核侧而不是编译器侧：差分只认「同一段字节在两个基址上的差别」，
+ * 与 arkc 的 IR、后端、优化档全部无关；放在这里，PC 上的 tools/pack_app.py
+ * 才有可能与板上跑的是同一份算法、逐字节对拍。当前唯一调用方是 arkc 组件的
+ * `cc --pack`。本模块不读文件、不分配内存（缓冲由调用方给），因此不强制依赖 VFS。*/
+#ifndef ARKRTOS_USE_APPPACK
+#define ARKRTOS_USE_APPPACK             0
+#endif
+
 /* 小程序装载时，每读 ARKRTOS_MINI_YIELD_CHUNKS 个分块就放开一次调度器锁、
  * 再重新拿回，让更高优先级的任务（例如正在跑的控制回路）在两次分块读之间
  * 拿到 CPU。单次分块读（open/read/close 一整段）本身在锁内是原子的，所以
@@ -348,6 +372,10 @@
 
 #if ARKRTOS_USE_MINIAPP && !ARKRTOS_USE_FS
 #error "ARKRTOS_USE_MINIAPP=1 requires ARKRTOS_USE_FS=1 (a MiniApp is loaded from the file system)"
+#endif
+
+#if ARKRTOS_MINI_READ_VFS && !ARKRTOS_USE_VFS
+#error "ARKRTOS_MINI_READ_VFS=1 requires ARKRTOS_USE_VFS=1 (the image is read through the VFS namespace)"
 #endif
 
 #if ARKRTOS_USE_APPRUN && !ARKRTOS_USE_VFS

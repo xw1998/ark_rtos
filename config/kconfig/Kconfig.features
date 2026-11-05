@@ -163,6 +163,37 @@ config ARKRTOS_MINI_EXIT_IS_HANDOVER
 	  crashes, kills and fault recovery always neutralise fully.
 	  Only meaningful with ARKRTOS_USE_MINIAPP.
 
+config ARKRTOS_USE_APPPACK
+	bool "Relocatable image packer (four-pass diff)"
+	default n
+	help
+	  Build kernelsrc/src/arkrtos_apppack.c: turn four compilations of the
+	  same program at four nominal bases into one .svcm container carrying
+	  a relocation table.  Off (default) does not compile the file at all,
+	  so the image is byte-for-byte what it was before this option existed.
+
+	  The diff only looks at how the same bytes differ between two bases,
+	  so it is independent of the compiler's IR, backend and optimisation
+	  level - which is what lets the PC tool (tools/pack_app.py) be checked
+	  byte-for-byte against the copy running on the board.  Currently the
+	  only caller is the arkc component's "cc --pack".  The packer does no
+	  file I/O and allocates nothing (buffers come from the caller), so it
+	  does not force the VFS in.
+
+config ARKRTOS_MINI_READ_VFS
+	bool "MiniApp: read images through the VFS namespace"
+	default n
+	depends on ARKRTOS_USE_MINIAPP && ARKRTOS_USE_VFS
+	help
+	  Where a MiniApp image is read from.  Off (default) reads through
+	  arkrtos_fs (a mounted littlefs volume), byte-for-byte what the loader
+	  did before this option existed.  On reads through the VFS namespace,
+	  which also covers the volatile ramfs where the on-board compiler drops
+	  its output - the only place a just-built image can be at that moment.
+	  Not "try one then the other": the two backends have different
+	  preconditions, so silently falling back would explain a broken read on
+	  one namespace as a path in the other.
+
 config ARKRTOS_MINI_YIELD_CHUNKS
 	int "MiniApp load: yield every N chunks (0 = never)"
 	default 1
