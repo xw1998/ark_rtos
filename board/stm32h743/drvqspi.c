@@ -1208,6 +1208,10 @@ static int32 nor_mm_read_mode(uint32 addr, uint8 *buf, uint32 len, int32 mode)
         return ARKRTOS_NOR_ERR_HAL;
     }
 
+    /* 读窗口。本板不开 D-Cache（全仓库没有 SCB_EnableDCache），所以这里不需要
+     * 任何 cache 维护动作。**将来若开 D-Cache，必须先把 0x90000000 起这段窗口
+     * 配成 non-cacheable（MPU）**，否则 MM 读会命中 CPU 里的旧行——那是"读到的
+     * 数据本身是对的、只是不是最新的"这类最难查的错，而且只在高负载下偶发。 */
     for(i = 0u; i < len; i++)
     {
         buf[i] = *(volatile uint8 *)(NOR_MM_BASE + addr + i);

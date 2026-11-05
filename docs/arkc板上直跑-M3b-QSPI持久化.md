@@ -332,7 +332,11 @@ make USE_QSPI=1 USE_APPPACK=1 USE_MINI_VFS=1
    只占 0.4 s 量级，未做。
 5. **QUADSPI 的写路径没修**：`nor_write_enable/nor_page_program/nor_sector_erase`
    的 QUADSPI 版本留在代码里但没有进数据通路，`SR` 完成位语义也没定论。
-6. **4 线读（`0xEB`）不可用，且原因已定位**：PF6/PF7 被钉成 GPIO 输出高（单线
+6. **内存映射窗口与 D-Cache 的耦合**：本板不开 D-Cache（全仓库没有
+   `SCB_EnableDCache`），所以 MM 读不需要缓存维护。**将来若开 D-Cache，必须先把
+   `0x90000000` 起这段窗口配成 non-cacheable（MPU）**，否则会读到 CPU 里的旧行
+   ——"数据是对的、只是不是最新的"这类错只在高负载下偶发，比读失败更难查。
+7. **4 线读（`0xEB`）不可用，且原因已定位**：PF6/PF7 被钉成 GPIO 输出高（单线
    `/WP`、`/HOLD`），从未接到 QUADSPI 的 IO2/IO3。见 §3.2；要用必须解角色冲突，
    当前收益为零，不做。
 
