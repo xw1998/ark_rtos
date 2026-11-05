@@ -41,6 +41,10 @@ BOARD_DIR := $(ROOT)/board/stm32h743
 # byte-for-byte what they were without the component.
 USE_ARKVIM ?= 1
 USE_ARKC   ?= 1
+# ark make：工程描述 -> 一次构建，打包走 arkc 的 cc_pack。默认关，因为它是
+# 一个**在有编译器之后才有意义**的组件：开着却没有 USE_ARKC/USE_APPPACK 会
+# 在 arkrtos_features.h 里被 #error 挡下来，而不是在板上报一句"失败了"。
+USE_ARKMAKE ?= 0
 # 外置 SDRAM（FMC Bank1，32MB）：1 = 起来并让编译器和 ramfs 把大块工作区
 # 放到片外。这一项不只影响一个 -D：它同时决定 DEFS 里的开关、编译器的
 # 缓冲预算、ramfs 的槽数与段归属，三者必须一起动，所以放在同一个开关下。
@@ -101,6 +105,7 @@ DEFS := \
   -DMDK_TRACE_SWD_EXTERNAL_PLATFORM -DMDK_TRACE_USE_CONFIG_FILE \
   -DLFS_NO_MALLOC -DLFS_NO_ASSERT -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR \
   -DARKRTOS_USE_ARKVIM=$(USE_ARKVIM) -DARKRTOS_USE_ARKC=$(USE_ARKC) \
+  -DARKRTOS_USE_ARKMAKE=$(USE_ARKMAKE) \
   -DARKRTOS_USE_SDRAM=$(USE_SDRAM) -DARKRTOS_USE_QSPI=$(USE_QSPI) \
   -DARKRTOS_SHELL_BOARD_CMDS=$(BOARD_CMDS) \
   -DARKRTOS_USE_APPRUN=$(USE_APPRUN) \
@@ -209,6 +214,9 @@ DEFS += $(RAMFS_DEFS)
 # 头文件搜索路径。
 # 注意 -Iconfig/stm32h743 必须排在 -Iconfig 之前：两者都能提供
 # arkrtos_partition.h，H743 的那份才是这块板的地址源头。
+# ark make 要两个 -I：上游的 arkmake.h 在 include/ 下，接线文件
+# （arkmake_port.h / arkmake_shell_cmd.h）在组件根目录。与 arkc
+# 同一种分工，只是 arkc 的上游头用 CFLAGS_ARKC 单独给。
 INCS := \
   -I../Core/Inc \
   -I../Drivers/STM32H7xx_HAL_Driver/Inc \
@@ -229,7 +237,9 @@ INCS := \
   -I$(ROOT)/kernelsrc/components/mdk_trace \
   -I$(ROOT)/kernelsrc/components/arkvim \
   -I$(ROOT)/kernelsrc/components/arkvim/src \
-  -I$(ROOT)/kernelsrc/components/arkc
+  -I$(ROOT)/kernelsrc/components/arkc \
+  -I$(ROOT)/kernelsrc/components/arkmake \
+  -I$(ROOT)/kernelsrc/components/arkmake/include
 
 OPTFLAGS := -O2 -g3 -Wall -std=gnu11 \
             -ffunction-sections -fdata-sections -fno-common -Wno-unused-parameter

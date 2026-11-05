@@ -1,0 +1,252 @@
+# ark make：板上的构建工具
+
+## 一句话
+
+板子上已经有 `cc`、`vim`、`shell`、`vfs`，把**几份 `.c` 打成一个能跑的镜像**却
+仍然要人手敲一条长命令行：`cc --pack a.c b.c c.c -o app.svcm`。少写一份源码是
+看不见的错——镜像照样链接成功，只是少了那个编译单元。`ark make` 把这件事固化
+成一份工程描述文件 + 一条命令：
+
+```
+ark@arkrtos:/mnt/nor$ make
+make: /mnt/nor/app.svcm <- /mnt/nor/a.c (+more)
+make:   src /mnt/nor/b.c
+cc: pack 2 sources -> /mnt/nor/app.svcm (4 passes, -O1)
+...
+cc: /mnt/nor/app.svcm: payload 4504 + table 4 x 4 = 4776 B
+cc: packed in 38011 ms
+make: ok
+ark@arkrtos:/mnt/nor$ mini run /mnt/nor/app.svcm
+ARKMAKE: link ok
+ARKMAKE: cross-file add3=6
+```
+
+## 用法
+
+```
+make [<makefile>] [-f <makefile>] [-o <out>] [-v]
+```
+
+| 参数 | 含义 |
+|---|---|
+| `<makefile>` / `-f <f>` | 工程描述文件，缺省 `makefile`（相对当前目录解析） |
+| `-o <out>` | 覆盖工程里的 `OUT` |
+| `-v` | 把 `cc --pack` 的逐对象读数打出来（每一遍、每一份源的 code 长度与落点） |
+
+选项写错会**立刻**报出来，不会先跑三十秒再失败：一次构建是几十秒的操作，
+把参数错拖到最后发现是最浪费时间的一种失败。
+
+## 为什么它刻意不是 GNU make
+
+三条都不是"没做完"，而是板上不成立：
+
+| GNU make 的东西 | 板上为什么不成立 |
+|---|---|
+| 时间戳依赖（`mtime`） | littlefs / ramfs 不保证可靠的 `mtime`。用"比较时间"决定要不要重编，得到的结论是随机的——而且错了以后镜像看起来完全正常 |
+| 隐含规则 / 后缀规则 | 需要一套模式匹配与搜索路径语义；它的失败方式是"没有规则可用"和"用了你没想过的规则"两种，很难在板上解释清楚 |
+| recipe（每行一个 shell） | 板上没有 shell 子进程，也没有 `sh -c`。留一个假 recipe 只会让人以为能写 `mkdir -p` |
+
+**其余任何写法一律报错，不静默忽略**。读不懂却照样构建出一份东西，是这个工具
+最该避免的失败方式。实测：
+
+```
+ark@arkrtos:/mnt/nor$ make -f bad.mk
+make: bad.mk: line 4:  expected `=` after the variable name (rules and recipes are not supported)
+ark@arkrtos:/mnt/nor$ make -f nope.mk
+make: /mnt/nor/nope.mk: line 0:  cannot read the makefile
+```
+
+## 语法
+
+只有三样：
+
+1. `NAME = value` —— 覆盖赋值
+2. `NAME += value` —— 追加（未定义过的变量追加报错，不隐式创建）
+3. `#` 到行尾 —— 注释
+
+值里的 `$(NAME)` 递归展开（深度上限 8，自引用报错）。工程字段只有五个：
+
+| 键 | 必填 | 含义 |
+|---|---|---|
+| `TARGET` | 是 | 产物名，缺省产物名 `<TARGET>.svcm` |
+| `OUT` | 否 | 完整产物路径；空则用 `TARGET` 推 |
+| `SRCS` | 是 | 源文件列表，空格分隔，**上限 4**（与 `CC_PACK_MAX_SRCS` 对齐） |
+| `DEFS` | 否 | 宏，空格分隔，上限 16，形如 `LOG_LEVEL=2` |
+| `INCS` | 否 | 头文件目录，空格分隔，上限 8 |
+
+最小可用：
+
+```
+TARGET = app
+OUT    = /mnt/nor/app.svcm
+SRCS   = /mnt/nor/a.c /mnt/nor/b.c
+```
+
+`SRCS` 里写绝对路径最稳：路径按**当前工作目录**解析，而 `make` 是在哪个目录下
+敲的就取决于你。
+
+## 板上实测（2026-11-05，STM32H743）
+
+| 用例 | 源 | 产物 | 耗时 |
+|---|---|---|---|
+| `make`（a.c 52 B + b.c 452 B） | 2 份，跨 TU 调用 `add3` | `app.svcm` 4776 B（payload 4504 + 16 B 表） | 38.0 s / 45.2 s（`-v`） |
+| `make -f mk2`（DEFS/INCS 探针） | p.c 134 B + q.c 482 B | `probe.svcm` 4800 B | 19.5 s |
+| `make -f mk3b`（缺源文件） | 1 份不存在的 | —— | 立即失败 |
+
+跑起来：
+
+```
+mini run /mnt/nor/app.svcm   ->  ARKMAKE: link ok
+                                 ARKMAKE: cross-file add3=6
+mini run /mnt/nor/probe.svcm ->  ARKMAKE: defs+incs ok, probe=42
+```
+
+第二条探针是**反假绿**用的：`probe()` 只有在 `DEFS=ARKMAKE_DEFS_PROBE` 真的
+传给了编译器、且 `#include "probe.h"` 真的通过 `INCS=/mnt/nor` 找到了，才返回
+42。那次运行的工作目录是 `/`，所以头文件除了 `-I` 没有第二条路。
+
+## 三条硬约束
+
+**一、对象必须按真实落点编基址，所以对象不能跨遍复用。**
+arkc 在 codegen 期就把绝对地址烤进指令（`movw/movt` 成对、literal slot），
+对象里只有外部符号是重定位。四遍打包的差别就在每遍的 `.sct` 上，因此
+`-c` 产物只在**同一份 `.sct`** 下有意义的。`make` 因此永远全量重编，
+不复用任何中间产物——这不是懒，而是不复用才不会有"搬过位置的对象"。
+
+**二、`make` 只是驱动，不是第二条打包路。**
+`ops->pack` 直接调 `arkc_cc_pack()`，也就是 `cc --pack` 的本体。两条独立的
+打包实现迟早在板上打出不一样的镜像，而只有一条被跑过。代价写在编译期：
+
+```
+#if ARKRTOS_USE_ARKMAKE && !ARKRTOS_USE_APPPACK
+#error "ARKRTOS_USE_ARKMAKE=1 requires ARKRTOS_USE_APPPACK=1 ..."
+#endif
+```
+
+**三、错误码按"失败发生在哪一段"翻译，不合并成一句"失败了"。**
+一次 `--pack` 分五段（编译 / 链接 / 布局校验 / 差分打包 / 写盘），同一句
+"失败了"落在不同段上意味着完全不同的下一步。所以 `arkc_cc_pack()` 多带一个
+出参阶段码，`ark make` 把它翻成自己的错误词汇：
+
+| arkc 阶段 | arkmake 错误码 | 屏幕上的字样 |
+|---|---|---|
+| `SETUP`（借工作区/注册对象槽/写 .sct） | `ARKMAKE_ERR_SETUP` | `cannot start the build` |
+| `COMPILE`（含池耗尽） | `ARKMAKE_ERR_COMPILE` | `compile failed` |
+| `LINK` | `ARKMAKE_ERR_LINK` | `link failed` |
+| `LAYOUT`（四遍尺寸不一致 / 装不进窗口） | `ARKMAKE_ERR_SIZE` | `image too large` |
+| `PACK`（差分不出表、没有向量表） | `ARKMAKE_ERR_PACK` | `cannot pack the image` |
+| `WRITE` | `ARKMAKE_ERR_WRITE` | `cannot write the image` |
+
+实测（缺源文件）：
+
+```
+cc: pass A: compiling /mnt/nor/nosuch.c failed
+make: compile failed (-11)
+```
+
+在加阶段码之前这里是 `make: link failed (-12)`——一个错答案：它把人送去查
+链接器，而真正的原因在编译段。
+
+## 工程接线
+
+```
+kernelsrc/components/arkmake/
+├── include/arkmake.h          <- 上游（工具头文件）
+├── src/arkmake_parse.c        <- 上游（文本 -> 工程描述，纯函数）
+├── src/arkmake_build.c        <- 上游（工程描述 -> 一次构建）
+├── arkmake_port.h             <- 本仓库：ctx 与两个入口
+├── arkmake_port_arkrtos.c     <- 本仓库：读 / 日志 / 打包三个回调
+├── arkmake_shell_cmd.c        <- 本仓库：make 命令
+├── arkmake_shell_cmd.h        <- 本仓库：注册钩子
+└── VENDOR.md                  <- 同步来源与边界
+```
+
+上游树（gitee `xw19981010/arkmake`）由 `tools/sync_arkmake.py` 同步；
+组件根目录的四个接线文件属于 Ark RTOS 侧，同步不碰。**同步不删任何文件**：
+目标目录里多出来的只报告——一次同步顺手删掉一个还用着的文件，是这套复制式
+同步最容易犯的错。
+
+构建接线（`example/stm32h743/kernel/ARKRTOS_TEST/GCC/`）：
+
+```
+USE_ARKMAKE ?= 0                       # Makefile 顶部
+-DARKRTOS_USE_ARKMAKE=$(USE_ARKMAKE)   # DEFS
+-I$(ROOT)/kernelsrc/components/arkmake           # 接线头
+-I$(ROOT)/kernelsrc/components/arkmake/include   # 上游头
+ifeq ($(USE_ARKMAKE),1)                # sources.mk
+SRCS += src/arkmake_parse.c src/arkmake_build.c ...
+endif
+```
+
+内核开关在 `kernelsrc/include/arkrtos_features.h`（`ARKRTOS_USE_ARKMAKE`，
+默认 0），依赖写成两条 `#error`：缺 `ARKRTOS_USE_APPPACK` 或
+`ARKRTOS_USE_ARKC` 都编不过。
+
+## 关掉时零变化（实测对照）
+
+同一份工作树，只改 `USE_ARKMAKE`：
+
+| 构建 | text | data | bss | 符号 | `"project file"` 字符串 |
+|---|---|---|---|---|---|
+| `USE_ARKMAKE=0` | 407484 | 2248 | 437756 | 无 `arkmake_*` / `cmd_make` | 0 处 |
+| `USE_ARKMAKE=1` | 414516 | 2248 | 441976 | 9 个 | 2 处 |
+
+关掉那一版的三围与引入本组件之前的固件**逐字节一致**（407484 / 2248 /
+437756）；打开那版多 7032 B 代码与 4220 B 静态（一份 2 KB 的 makefile 文本
+缓冲 + 一份 2 KB 的 `arkmake_project_t`，都放 `.bss` 而不是任务栈）。
+
+## 这一轮抓到的两个真缺陷
+
+**1. `arkmake_build()` 的总述行漏打第一份源码。**
+原实现 `const char *parts[] = { "make: ", out, " <- ", NULL, NULL }` 再用
+`while (parts[k] != NULL)` 拼接，第三项永远是 `NULL`，于是循环在补第一份源码
+之前就停了，屏幕上打出 `make: out <-  (+more)`。而这一行正是唯一能看出
+"少了一份源码"的地方。已在源仓库修正，并在 `tests/test_build.c` 加断言
+（总述行必须含 `a.c`），宿主 `make test` 全绿。
+
+**2. `arkc` 的 `-link` 分支没有重置包池（宿主看不见）。**
+`ark_compile()` 的 C 路径与汇编路径都在入口 `mem_pool_reset()`，但 `-link`
+分支在那一行之前 `return`。宿主机上每次运行都是新进程，池天然从零开始，
+所以这条缺陷在宿主复现不了；板上 `cc --pack` 是**一个进程里连做 4 遍**，
+链接期继承了上一次编译的峰值（`q.c` 峰值 64720 B，链接本身只要 8488 B），
+于是 80 KB 池在链接段被用穿：
+
+```
+cc: pool 77400/81920 B
+cc: pass A aborted: memory pool exhausted
+make: link failed (-12)          <- 这条又被阶段码问题掩盖了一层
+```
+
+修法是在 `-link` 分支入口 `mem_pool_reset()`（链接器要的东西它自己从对象文件
+重读，编译期的分配一件也不需要）。修完同一份工程从"第 A 遍就 abort"变成
+四遍跑完 19.5 s。
+
+## 代价与欠账
+
+- **永远全量构建**：两份源码 19–45 s（四遍 × 每份源码 + 四遍链接）。没有增量，
+  也不打算有——见上文"没有时间戳"。
+- **单份源码的池上限**：80 KB 池、-O1 下，实测 482 B 的 `q.c` 峰值 64720 B，
+  两份 ~450 B 的源码就能把池贴到 77 KB。更大的源码要在
+  `ARKC_DEFS` 里调 `ARK_POOL_SIZE`（当前 RAM 只剩约 6.8 KB 余量，调大要先在
+  别处腾出来）。
+- **SRCS 上限 4**：与 `cc --pack` 的对象槽一致；超了在解析层就报
+  `too many entries`，不是等四遍跑完。
+- **没有 `clean` / 没有 `-j`**：板上没有中间产物可清，也没有第二个核。
+
+## 复跑步骤
+
+```bash
+# 1. 编固件（make 不跟踪 -D，换开关先 make clean）
+make -j8 USE_QSPI=1 USE_MINI_VFS=1 USE_APPPACK=1 USE_ARKMAKE=1
+
+# 2. 烧录后挂载 NOR（t≈3 s 后 mount 才稳定）
+mount /mnt/nor
+
+# 3. 上传工程描述（fs put 走 littlefs 绝对路径，不是挂载点路径）
+fs put /makefile <字节数>     # 宿主机侧用 tools/../arkw/fsput.py
+
+# 4. 构建并运行
+cd /mnt/nor
+make -v
+mini run /mnt/nor/app.svcm    # mini run 要绝对路径
+```

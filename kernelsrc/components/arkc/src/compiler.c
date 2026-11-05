@@ -664,6 +664,21 @@ int ark_compile(const ArkOptions *opts) {
         const char *out_path;
         int li;
 
+        /* The link phase allocates its symbol table, relocation table and
+         * image buffer from the same bump pool the compiler uses, and this
+         * branch returns before the mem_pool_reset() further down.  On the
+         * host that was invisible: every run is a fresh process, so the pool
+         * always started at zero.  On the board `cc --pack` runs several
+         * compiles and links in one process, so the link inherited the peak
+         * of the compile that preceded it and the 80 KB arena ran out at
+         * link time (measured: 2 x ~450 B sources -> 'pass A aborted: memory
+         * pool exhausted', pool 77400/81920 B, while the same link alone
+         * needs 8.5 KB).  Nothing from the compile phase survives into the
+         * linker -- it re-reads the objects -- so reset here is the fix.
+         * Host reproductions cannot see this; the criterion has to come
+         * from the board. */
+        mem_pool_reset();
+
         /* Detect ARKOBJ2 binary format from the first input.
          * The probe reads through `buf` -- the same buffer the linker uses for
          * every object -- instead of a small header buffer. fs_read_file() is

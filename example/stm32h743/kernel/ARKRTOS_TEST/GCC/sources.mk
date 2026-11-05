@@ -162,3 +162,16 @@ SRCS += \
   kernelsrc/components/arkc/arkc_port_arkrtos.c \
   kernelsrc/components/arkc/arkc_shell_cmd.c
 endif
+
+# ark make 组件。上游（gitee xw19981010/arkmake）的 src/ + include/ 由
+# tools/sync_arkmake.py 同步进来，本仓库只加两个接线文件：
+# arkmake_port_arkrtos.c（文件读/日志/打包）与 arkmake_shell_cmd.c（make 命令）。
+# 它自己不带打包器——pack 回调就是 arkc 的 cc_pack，所以这两个开关必须同时为 1
+# （见 arkrtos_features.h 的 #error）。USE_ARKMAKE=0 时一份源都不编。
+ifeq ($(USE_ARKMAKE),1)
+SRCS += \
+  kernelsrc/components/arkmake/src/arkmake_parse.c \
+  kernelsrc/components/arkmake/src/arkmake_build.c \
+  kernelsrc/components/arkmake/arkmake_port_arkrtos.c \
+  kernelsrc/components/arkmake/arkmake_shell_cmd.c
+endif

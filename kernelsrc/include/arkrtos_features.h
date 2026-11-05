@@ -339,6 +339,15 @@
 #define ARKRTOS_USE_ARKC                0
 #endif
 
+/* ark make component (kernelsrc/components/arkmake): a small project-file
+ * builder that turns several .c files into one runnable image through the
+ * same four-pass packer as "cc --pack".  Off by default like every other
+ * component: at 0 the sources are not compiled and the command table is
+ * byte-for-byte what it was. */
+#ifndef ARKRTOS_USE_ARKMAKE
+#define ARKRTOS_USE_ARKMAKE            0
+#endif
+
 /* External SDRAM on FMC SDRAM Bank1.  Off by default: at 0 no FMC register is
  * touched, nothing maps 0xC0000000 and the image is what it was.  The H743
  * board sets it to 1; the geometry and the two SDRAM partitions (.ark_buf for
@@ -421,6 +430,17 @@
 
 #if ARKRTOS_USE_ARKC && !ARKRTOS_USE_VFS
 #error "ARKRTOS_USE_ARKC=1 requires ARKRTOS_USE_VFS=1 (the compiler reads sources and writes output through the VFS namespace)"
+#endif
+
+/* ark make 没有自己的打包器：它调的是 arkc 的 cc_pack。两条分开的打包路
+ * 迟早在板上打出不一样的镜像，而且只有一条被跑过，所以这里把依赖写成
+ * 编译期错误，而不是运行期的一句"失败了"。 */
+#if ARKRTOS_USE_ARKMAKE && !ARKRTOS_USE_APPPACK
+#error "ARKRTOS_USE_ARKMAKE=1 requires ARKRTOS_USE_APPPACK=1 (make builds through the same four-pass packer as cc --pack)"
+#endif
+
+#if ARKRTOS_USE_ARKMAKE && !ARKRTOS_USE_ARKC
+#error "ARKRTOS_USE_ARKMAKE=1 requires ARKRTOS_USE_ARKC=1 (the pack entry point lives in the compiler component)"
 #endif
 
 /* lwIP 端口层建在消息队列上（sys_arch.c 的邮箱就是 arkrtos_mq），

@@ -418,7 +418,8 @@ static int cc_pack(const char *const *srcs, int n_srcs,
                    const char *out, const char *target,
                    int opt_level, int verbose,
                    const char *const *includes, int n_includes,
-                   const char *const *defines, int n_defines)
+                   const char *const *defines, int n_defines,
+                   int *fail_phase)
 {
     uint8_t *img[4];
     uint8_t *obj_arena;
@@ -438,6 +439,9 @@ static int cc_pack(const char *const *srcs, int n_srcs,
     int      k;
     int      got;
     int      ret = 1;
+    /* 失败落在哪一段。只在这里记，最后一次性交给调用方：调用方（ark make）
+     * 有它自己的错误词汇，把"编译时池耗尽"翻成"link failed"就是错答案。 */
+    int      phase = ARKC_PACK_PHASE_SETUP;
     arkrtos_apppack_win_t   win;
     arkrtos_apppack_stats_t st;
 
@@ -491,6 +495,7 @@ static int cc_pack(const char *const *srcs, int n_srcs,
         uint32_t rom = CC_PACK_ROM_BASE + s_cc_pack_rom_add[i];
         uint32_t ram = CC_PACK_RAM_BASE + s_cc_pack_ram_add[i];
         uint32_t off = 0u;
+        phase = ARKC_PACK_PHASE_COMPILE;
 
         if (cc_pack_vfiles(obj_arena) != 0) {
             ark_shell_printf("cc: cannot register the in-memory object files "
@@ -557,6 +562,7 @@ static int cc_pack(const char *const *srcs, int n_srcs,
                 off += sz;
             }
         }
+        phase = ARKC_PACK_PHASE_LINK;
         /* 链接用这一遍的**基址**布局：-link 只按它算 flash_base/SP，并把向量表
          * 填进第一个对象腾出的洞里。 */
         if (cc_pack_write_sct(rom, CC_PACK_WIN_SIZE, ram) != 0) {
@@ -603,6 +609,7 @@ static int cc_pack(const char *const *srcs, int n_srcs,
         ark_shell_printf("cc:   %c %u B\r\n", s_cc_pack_tag[i], (unsigned)len[i]);
     }
 
+    phase = ARKC_PACK_PHASE_LAYOUT;
     if ((len[0] != len[1]) || (len[0] != len[2]) || (len[0] != len[3])) {
         /* A size that depends on the base means the link result depends on the
          * base, and a table derived from that is meaningless. */
@@ -642,6 +649,7 @@ static int cc_pack(const char *const *srcs, int n_srcs,
     /* The passes are over: the object registry is no longer read, so the
      * image may take over the block the objects lived in. */
     arkc_port_vfile_clear();
+    phase = ARKC_PACK_PHASE_PACK;
     rc = arkrtos_apppack_build(img[0], img[1], img[2], img[3], len4,
                                CC_PACK_DELTA, &win, ARKRTOS_APP_TYPE_MINIAPP, 1u,
                                outbuf, CC_PACK_OUT_CAP, &out_len, &st);
@@ -650,6 +658,7 @@ static int cc_pack(const char *const *srcs, int n_srcs,
                          arkrtos_apppack_error_name(rc), (int)rc);
         goto done;
     }
+    phase = ARKC_PACK_PHASE_WRITE;
     if (fs_write_file(out, outbuf, (int)out_len) != (int)out_len) {
         ark_shell_printf("cc: cannot write %s: %s\r\n", out, fs_last_error());
         goto done;
@@ -679,6 +688,9 @@ done:
     arkc_port_vfile_clear();
     (void)arkrtos_ptable_mini_free(idx);
     (void)arkrtos_vfs_remove(CC_PACK_SCT);
+    if (fail_phase != NULL) {
+        *fail_phase = (ret == 0) ? ARKC_PACK_PHASE_NONE : phase;
+    }
     return ret;
 }
 #endif /* ARKRTOS_USE_APPPACK */
@@ -688,13 +700,20 @@ done:
 int arkc_cc_pack(const char *const *srcs, int n_srcs, const char *out,
                  const char *const *defs, int n_defs,
                  const char *const *incs, int n_incs,
-                 int opt_level, int verbose)
+                 int opt_level, int verbose, int *fail_phase)
 {
+    if (fail_phase != NULL) {
+        *fail_phase = ARKC_PACK_PHASE_NONE;
+    }
     if ((srcs == NULL) || (n_srcs <= 0) || (out == NULL)) {
+        /* 参数就不成立：还没进任何一段。 */
+        if (fail_phase != NULL) {
+            *fail_phase = ARKC_PACK_PHASE_SETUP;
+        }
         return 1;
     }
     return cc_pack(srcs, n_srcs, out, "arm", opt_level, verbose,
-                   incs, n_incs, defs, n_defs);
+                   incs, n_incs, defs, n_defs, fail_phase);
 }
 #endif
 
@@ -918,8 +937,10 @@ static int cmd_cc(int argc, char *argv[])
             ark_shell_printf("cc: --pack needs -o <file.svcm> (no default name)\r\n");
             return 1;
         }
+        /* cc 命令自己不看阶段：它把 cc: 那几行原样打给用户，阶段只对
+         * ark make 那种要翻成自己错误码的调用方有用。 */
         return cc_pack(srcs, n_srcs, out, target, opt_level, (int)verbose,
-                       includes, n_includes, defines, n_defines);
+                       includes, n_includes, defines, n_defines, NULL);
     }
 #endif
     /* The upstream STM32 entry point zeros this struct by hand because a

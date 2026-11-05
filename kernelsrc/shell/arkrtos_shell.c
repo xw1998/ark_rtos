@@ -72,6 +72,9 @@
 #if (ARKRTOS_USE_ARKC == 1)
 #include "arkc_shell_cmd.h"
 #endif
+#if (ARKRTOS_USE_ARKMAKE == 1)
+#include "arkmake_shell_cmd.h"
+#endif
 
 #include <string.h>
 
@@ -5279,6 +5282,12 @@ static int register_kernel_commands(void)
     /* Same contract: the compiler brings its own port and file hooks and
      * only asks for one command table slot. */
     idx = arkc_shell_register(idx);
+#endif
+
+#if (ARKRTOS_USE_ARKMAKE == 1)
+    /* ark make 只在编译器已经在场时才有意义（它调的就是 cc --pack），
+     * 所以注册点紧跟在 cc 后面：读命令表的人能直接看出这个先后关系。 */
+    idx = arkmake_shell_register(idx);
 #endif
 
 #if (ARKRTOS_SHELL_BOARD_CMDS == 1)
