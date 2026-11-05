@@ -15,6 +15,10 @@
 *          开关：ARKRTOS_USE_QSPI（默认 0）。关着时本文件不进编译（sources.mk
 *          按 USE_QSPI 过滤），FLASH/RAM 与命令表逐字节不变。
 *
+*          读通道开关：ARKRTOS_NOR_MM_READ（默认 1）/ ARKRTOS_NOR_MM_QUAD
+*          （默认 0）。前者=0 时读路径与历史版本完全相同（位敲）；后者控制
+*          要不要在 QE 已置位时用 4 线 0xEB。两者都不改变写/擦语义。
+*
 * @author xw
 * @date 2026.11.05
 */
@@ -23,6 +27,36 @@
 #define __DRVQSPI_H__
 
 #include "arkrtos_types.h"
+
+/* ============================================================
+ * 读通道开关
+ * ------------------------------------------------------------
+ * 位敲读的单价是"每个半时钟 1 us"⇒ 约 62 KB/s；littlefs 每次 open 都要重读
+ * 元数据，于是 ls 一条要一秒、mount 要几十秒。内存映射读把数据面交给
+ * QUADSPI + AXI，同一条 0x03 指令能到 MB/s 量级。
+ *
+ * ARKRTOS_NOR_MM_READ = 0 时读路径与历史版本完全相同（位敲），只是少一条
+ * 通路；=1 时也不等于"一定走 MM"——启用前必须自证（同一段地址两条通路各读
+ * 32 字节，逐字节相同且内容非同值），自证不过自动退回位敲。所以这个开关
+ * 开了不会读错数据，只可能"开了但没用上"，那会在启动日志里说清楚。
+ *
+ * 默认 1：读慢是缺陷，不是可选优化。=0 保留下来当回归对照臂。
+ * ============================================================ */
+#ifndef ARKRTOS_NOR_MM_READ
+#define ARKRTOS_NOR_MM_READ      (1u)
+#endif
+
+/**
+* @brief 读通道用不用 4 线（0xEB）：1 = SR2 的 QE 已置位时优先 4 线
+* @details 4 线带宽是 1 线的 4 倍，但它依赖芯片 SR2 的 QE 位（非易失，
+*          W25Q64 出厂值不定）。本驱动**只读 QE、从不写 SR2**：为了跑快
+*          去改芯片的写保护配置，等于拿"写不进去"换"读得快"。
+*          默认 0：先用 1 线把"内存映射这条路本身"立住，4 线是它之上的
+*          第二次提速，单独一个开关便于 A/B。
+*/
+#ifndef ARKRTOS_NOR_MM_QUAD
+#define ARKRTOS_NOR_MM_QUAD      (0u)
+#endif
 
 /** @brief 参数非法（空指针 / 长度 0 / 越过 8 MB） */
 #define ARKRTOS_NOR_ERR_PARAM   (-1)
@@ -68,8 +102,16 @@ int32 arkrtos_board_nor_read(uint32 addr, uint8 *buf, uint32 len);
 /**
 * @brief 内存映射读（进 MM 模式读一段再 abort），用于区分"芯片能应答"与
 *        "0x90000000 这个窗口能不能用"
+* @note 这是诊断入口：不管读通道当前选了哪条，它都能单独试一次内存映射。
 */
 int32 arkrtos_board_nor_mm_read(uint32 addr, uint8 *buf, uint32 len);
+
+/**
+* @brief 当前读通道：0 = 位敲，1 = 内存映射 1 线（0x03），2 = 内存映射 4 线（0xEB）
+* @note 具体选到哪一档由启动时的自证结果决定（见 drvqspi.c 的
+*       nor_select_read_channel）；运行中可以用 shell "nor mmode <0|1|2>" 改。
+*/
+int32 arkrtos_board_nor_read_mode(void);
 
 /**
 * @brief 写（页编程 0x02）：自动按 256 字节页切分，调用者负责目标已擦
@@ -100,8 +142,9 @@ uint32 arkrtos_board_nor_last_id(void);
 
 /**
 * @brief Shell 命令 "nor"
-* @details nor [info | init | id | sr | read <hexaddr> [len] | mm <hexaddr> [len] |
-*               regs | pins | abort | verify | er <addr> | wr <addr> [len]]
+* @details nor [info | init | id | sr | sr2 | mmode [0|1|2] | speed [KiB] |
+*               read <hexaddr> [len] | mm <hexaddr> [len] | regs | pins | abort |
+*               verify | er <addr> | wr <addr> [len]]
 */
 int arkrtos_board_nor_shell_cmd(int argc, char *argv[]);
 

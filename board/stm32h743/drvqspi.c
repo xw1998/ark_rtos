@@ -32,6 +32,8 @@
 #include "arkrtos_log.h"
 #include "ark_shell.h"              /* ark_shell_printf for the nor command */
 
+#include <string.h>                 /* memcmp：两条读通路的逐字节对照 */
+
 #ifdef ARKRTOS_BOARD_CONFIG
 #include ARKRTOS_BOARD_CONFIG          /* stm32h7xx.h via the board config */
 #endif
@@ -91,11 +93,15 @@
 
 #define NOR_CMD_WRITE_ENABLE   (0x06u)
 #define NOR_CMD_READ_STATUS1   (0x05u)
+#define NOR_CMD_READ_STATUS2   (0x35u)      /* SR2：bit1 = QE（quad enable）      */
 #define NOR_CMD_PAGE_PROGRAM   (0x02u)
 #define NOR_CMD_SECTOR_ERASE   (0x20u)      /* 4 KiB，W25Q64 的最小擦除单位 */
+#define NOR_CMD_FAST_READ_QUAD (0xEBu)      /* 1-4-4 快速读，要求 SR2.QE=1  */
 
 #define NOR_STATUS_WIP         (0x01u)      /* write in progress   */
 #define NOR_STATUS_WEL         (0x02u)      /* write enable latch  */
+
+#define NOR_SR2_QE             (0x02u)      /* SR2 bit1：/WP、/HOLD 当 IO2、IO3 用 */
 
 #define NOR_PAGE_SIZE          (256u)
 #define NOR_SECTOR_SIZE        (4096u)
@@ -127,6 +133,9 @@ static uint32 g_nor_ready;          /* 1 = ID 读到且等于 W25Q64            
 static uint32 g_nor_id;             /* 最近一次读到的 JEDEC ID              */
 static uint32 g_nor_sr1;            /* 最近一次读到的状态寄存器 1           */
 static int32  g_nor_last_err;       /* 0 = 无                               */
+static int32  g_nor_mm_mode;        /* 读通道：0=位敲 1=MM 0x03 2=MM 0xEB   */
+static uint32 g_nor_sr2;            /* 最近一次读到的状态寄存器 2           */
+static uint32 g_nor_dummy = 6u;     /* 4 线读的空周期数（0xEB），可用命令改 */
 
 /* ============================================================
  * 引脚与时钟
@@ -1079,7 +1088,247 @@ int32 arkrtos_board_nor_status(uint8 *sr1)
 }
 
 /* ============================================================
- * 两种读：间接（0x03）与内存映射
+ * 读通道：位敲（慢、已验证）与内存映射（快、必须自证）
+ * ------------------------------------------------------------
+ * 位敲的单价是"每个半时钟 1 us"≈ 500 kHz ⇒ 62 KB/s；littlefs 每次 open 都会
+ * 重读元数据，于是 ls 一条要一秒、mount 要几十秒。内存映射把数据面交给
+ * QUADSPI + AXI，同一颗芯片、同一条 0x03 指令能到 MB/s 量级。
+ *
+ * 但"快"不是理由，"对"才是前提。这条通路的历史故障恰好是**读回全 0xFF 却看
+ * 不出来**（写路径失败后外设被留在 FIFO 有残留的状态，此后所有读都返回 0xFF，
+ * 只有整块复位才能恢复）。所以本驱动给 MM 读设了两道闸门：
+ *
+ *   ① 启用前自证（nor_mm_selftest）：同一段地址，MM 与位敲各读 32 字节逐字节
+ *      比对，并且要求这段内容本身"不是一片同值"——否则 0xFF/0x00 这种"总线
+ *      根本没动"的故障也能对上，自证就成了假绿；
+ *   ② 运行期退路：任何一次 MM 读失败就永久退回位敲并打日志。宁可慢，不给错数。
+ * ============================================================ */
+
+/** @brief 读状态寄存器 2（0x35）：bit1 = QE，只有它置位才允许发 0xEB */
+static int32 nor_read_sr2(uint8 *sr2)
+{
+    if(sr2 == 0)
+    {
+        return ARKRTOS_NOR_ERR_PARAM;
+    }
+    if(g_nor_inited == 0u)
+    {
+        return ARKRTOS_NOR_ERR_STATE;
+    }
+    if(nor_indirect_read(NOR_CMD_READ_STATUS2, 0u, 0u, sr2, 1u) != 0)
+    {
+        return ARKRTOS_NOR_ERR_HAL;
+    }
+    g_nor_sr2 = *sr2;
+    return 0;
+}
+
+/** @brief 位敲读一笔：两条读通路里的"参照臂"，只在自证/回落/对照时用 */
+static int32 nor_bitbang_read(uint32 addr, uint8 *buf, uint32 len)
+{
+    nor_bb_begin();
+    nor_bb_read_stream(addr, buf, len);
+    nor_bb_end();
+    return 0;
+}
+
+/**
+* @brief 内存映射读一笔：进 MM -> 逐字节拷 -> abort 退出
+* @param mode 1 = 0x03（指令/地址/数据各 1 线）；2 = 0xEB（地址与数据 4 线 + 6 空周期）
+* @return 0 = 拷贝完成且已退出 MM；负值 = 外设状态不对
+* @note 每次读都进出一次 MM。留在 MM 里能省掉几微秒的进门开销，但写/擦要抢
+*       引脚，一旦忘了退出就是"写进不去、读全 0xFF"——为 256 字节的读去赌这
+*       件事不值得：进出一次的代价是十几微秒，读一笔的收益是三个数量级。
+*/
+static int32 nor_mm_read_mode(uint32 addr, uint8 *buf, uint32 len, int32 mode)
+{
+    uint32 ccr;
+    uint32 i;
+    int32 rc;
+
+    if(g_nor_inited == 0u)
+    {
+        return ARKRTOS_NOR_ERR_STATE;
+    }
+    rc = nor_wait_idle();
+    if(rc != 0)
+    {
+        return rc;
+    }
+    nor_drain_fifo();
+    nor_clear_flags();
+
+    /* MM 模式下 DLR 被忽略；AR 只是归档，真正的地址由 AXI 总线给出
+     * （这就是下面用 NOR_MM_BASE + addr 读的原因）。 */
+    QUADSPI->DLR = 0u;
+    QUADSPI->AR  = addr;
+    QUADSPI->ABR = 0u;
+
+    if(mode == 2)
+    {
+        /* 0xEB 1-4-4：参数取自 ST 官方例程（同一块 H743 板、同一颗 W25Q64）：
+         * 空周期数 6（可用 "nor dummy <n>" 改）、SIOO=INST_EVERY_CMD（=0，每条
+         * 命令都发指令）、超时关闭（退出 MM 靠 nor_abort，不靠超时）。
+         *
+         * **实测：本板这条路走不通，而且不是空周期数的问题。** 板上把 dummy
+         * 从 0 扫到 9，每一档的自证都不过。原因是更基本的一层：nor_pins_init()
+         * 为了单线模式的 /WP、/HOLD，把 PF6/PF7 钉成了 GPIO 推挽输出高电平，
+         * 这两根脚**从来没有接到 QUADSPI 的 IO2/IO3**（1 线读不看这两根，
+         * 所以一直没暴露）。要用 4 线，必须先解决"读时要当数据线、写/擦时要
+         * 钉高"这个角色冲突；在当前负载下（读 1 线已 3.1 MB/s，make 的耗时
+         * 已经全是编译器 CPU），收益是零，所以不做。这条留在这里，是为了让
+         * 下一个想开 4 线的人不用再重新踩一遍。 */
+        ccr = ((uint32)NOR_CMD_FAST_READ_QUAD << QUADSPI_CCR_INSTRUCTION_Pos) |
+              (1u << QUADSPI_CCR_IMODE_Pos) |
+              (3u << QUADSPI_CCR_ADMODE_Pos) |
+              ((uint32)NOR_ADSIZE_24BITS << QUADSPI_CCR_ADSIZE_Pos) |
+              (g_nor_dummy << QUADSPI_CCR_DCYC_Pos) |
+              (3u << QUADSPI_CCR_DMODE_Pos) |
+              (3u << QUADSPI_CCR_FMODE_Pos);
+    }
+    else
+    {
+        /* 0x03：与位敲读用的是同一条指令、同一套线序。两条通路读同一段数据本
+         * 就该逐字节相同 ⇒ 自证失败只可能是"MM 这条路本身没配对"。 */
+        ccr = (0x03u << QUADSPI_CCR_INSTRUCTION_Pos) |
+              (1u << QUADSPI_CCR_IMODE_Pos) |
+              (1u << QUADSPI_CCR_ADMODE_Pos) |
+              ((uint32)NOR_ADSIZE_24BITS << QUADSPI_CCR_ADSIZE_Pos) |
+              (1u << QUADSPI_CCR_DMODE_Pos) |
+              (3u << QUADSPI_CCR_FMODE_Pos);
+    }
+    QUADSPI->CCR = ccr;                 /* 写 CCR = 进入内存映射 */
+
+    /* 回读闸门：CCR 没被接受时"MM 没成立"，但 AXI 侧不知道这件事——此时读
+     * 0x90000000 拿到的是总线错误（HardFault），不是错误码。整块复位后第一条
+     * 带地址命令会被吞，正是这个形状，所以这道检查不是形式主义。 */
+    if((QUADSPI->CCR & (3u << QUADSPI_CCR_FMODE_Pos)) != (3u << QUADSPI_CCR_FMODE_Pos))
+    {
+        (void)nor_abort();
+        return ARKRTOS_NOR_ERR_HAL;
+    }
+
+    for(i = 0u; i < len; i++)
+    {
+        buf[i] = *(volatile uint8 *)(NOR_MM_BASE + addr + i);
+    }
+
+    /* 一定要退出：留在 MM 里时下一条普通命令拿不到总线。 */
+    rc = nor_abort();
+    if(rc != 0)
+    {
+        return rc;
+    }
+    return 0;
+}
+
+/**
+* @brief 用「同一段地址、两条通路各读 32 字节」自证指定模式的内存映射读
+* @param mode 1 或 2，含义同 nor_mm_read_mode()
+* @return 1 = 通过（可以启用）；0 = 不通过（不得启用）
+* @details 两条判据缺一不可：① MM 与位敲逐字节相同；② 内容本身不是一片同值。
+*          候选窗口两处：卷首（0，littlefs 超级块/元数据所在地）与最后一个
+*          4 KiB 扇区的首 32 字节（不在文件系统卷内）。两处都拿不到"非同值"
+*          就判不通过——此时位敲是唯一有证据的通路，宁可慢。
+*/
+static uint32 nor_mm_selftest(int32 mode)
+{
+    static const uint32 cand[2] = {0u, (uint32)NOR_SCRATCH_SECTOR};
+    uint8 mm[32];
+    uint8 bb[32];
+    uint32 t;
+
+    for(t = 0u; t < 2u; t++)
+    {
+        uint32 i;
+        uint32 uniform = 1u;
+
+        if((nor_mm_read_mode(cand[t], mm, sizeof(mm), mode) != 0) ||
+           (nor_bitbang_read(cand[t], bb, sizeof(bb)) != 0))
+        {
+            continue;
+        }
+        if(memcmp(mm, bb, sizeof(bb)) != 0)
+        {
+            continue;
+        }
+        for(i = 1u; i < sizeof(mm); i++)
+        {
+            if(mm[i] != mm[0])
+            {
+                uniform = 0u;
+                break;
+            }
+        }
+        if(uniform == 0u)
+        {
+            return 1u;
+        }
+    }
+    return 0u;
+}
+
+/** @brief 读通道的可读名字（只用于日志/命令回显） */
+static const char *nor_mm_mode_name(int32 mode)
+{
+    if(mode == 1)
+    {
+        return "mm 0x03 1-1-1";
+    }
+    if(mode == 2)
+    {
+        return "mm 0xEB 1-4-4";
+    }
+    return "bit-bang";
+}
+
+/**
+* @brief 启动时选定读通道：位敲 -> MM 1 线 ->（可选）MM 4 线，逐级自证
+* @details 每一级都要"上一级已通过"才试：4 线是 1 线之上的提速，1 线没立住
+*          时试 4 线只会把两种故障混成一个现象。
+*          从不写 SR2：为了跑快而改芯片的 QE/写保护配置，是拿"写不进去"换
+*          "读得快"，这笔账在这个项目里不划算。
+*/
+static void nor_select_read_channel(void)
+{
+    g_nor_mm_mode = 0;
+
+#if (ARKRTOS_NOR_MM_READ == 1)
+    if(nor_mm_selftest(1) == 0u)
+    {
+        /* 自证不过就不启用：位敲是唯一有证据的通路。 */
+        ARKRTOS_LOGE("NOR", "mm read self-test failed (mm vs bit-bang mismatch or "
+                     "no non-uniform window), read stays %s",
+                     nor_mm_mode_name(0));
+        return;
+    }
+    g_nor_mm_mode = 1;
+    ARKRTOS_LOGI("NOR", "read channel = %s (self-tested)", nor_mm_mode_name(1));
+
+#if (ARKRTOS_NOR_MM_QUAD == 1)
+    {
+        uint8 sr2 = 0u;
+
+        if((nor_read_sr2(&sr2) == 0) && ((sr2 & NOR_SR2_QE) != 0u) &&
+           (nor_mm_selftest(2) != 0u))
+        {
+            g_nor_mm_mode = 2;
+            ARKRTOS_LOGI("NOR", "read channel upgraded to %s (SR2=0x%02X QE=1)",
+                         nor_mm_mode_name(2), (unsigned)sr2);
+        }
+        else
+        {
+            ARKRTOS_LOGI("NOR", "quad read not used: SR2=0x%02X QE=%u, keep %s",
+                         (unsigned)sr2, (unsigned)((sr2 & NOR_SR2_QE) != 0u),
+                         nor_mm_mode_name(g_nor_mm_mode));
+        }
+    }
+#endif
+#endif
+}
+
+/* ============================================================
+ * 两种读：位敲与内存映射（对外入口）
  * ============================================================ */
 
 int32 arkrtos_board_nor_read(uint32 addr, uint8 *buf, uint32 len)
@@ -1093,7 +1342,22 @@ int32 arkrtos_board_nor_read(uint32 addr, uint8 *buf, uint32 len)
     {
         return ARKRTOS_NOR_ERR_STATE;
     }
-    /* 数据通路统一走位敲，理由见文件头"为什么读也不走 QUADSPI"。 */
+
+    /* 快路径：内存映射（启动时自证过才启用）。慢路径：位敲。 */
+    if(g_nor_mm_mode != 0)
+    {
+        if(nor_mm_read_mode(addr, buf, len, g_nor_mm_mode) == 0)
+        {
+            return 0;
+        }
+        /* MM 这条路一旦失败就永久退回位敲：继续用它只会把同一个错误重复很多
+         * 遍，而且每次都要多付一次 abort。重新启用由 "nor mmode 1|2" 显式做，
+         * 不做"自动重试"——那会把偶发故障伪装成正常。 */
+        ARKRTOS_LOGE("NOR", "mm read failed at 0x%06X len=%u, read falls back to %s",
+                     (unsigned)addr, (unsigned)len, nor_mm_mode_name(0));
+        g_nor_mm_mode = 0;
+    }
+
     nor_bb_begin();
     nor_bb_read_stream(addr, buf, len);
     nor_bb_end();
@@ -1102,10 +1366,6 @@ int32 arkrtos_board_nor_read(uint32 addr, uint8 *buf, uint32 len)
 
 int32 arkrtos_board_nor_mm_read(uint32 addr, uint8 *buf, uint32 len)
 {
-    uint32 ccr;
-    uint32 i;
-    int32 rc;
-
     if((buf == 0) || (len == 0u) || (addr >= ARKRTOS_NOR_SIZE) ||
        ((addr + len) > ARKRTOS_NOR_SIZE))
     {
@@ -1115,39 +1375,11 @@ int32 arkrtos_board_nor_mm_read(uint32 addr, uint8 *buf, uint32 len)
     {
         return ARKRTOS_NOR_ERR_STATE;
     }
-    rc = nor_wait_idle();
-    if(rc != 0)
-    {
-        return rc;
-    }
-    nor_clear_flags();
 
-    /* 内存映射模式：FMODE=11，DLR 被忽略。AR 在这里只是"起始地址"的存档，
-     * 真正的地址由 AXI 总线给出（这就是下面用 NOR_MM_BASE + addr 读的原因，
-     * 与 ST 的 HAL_QSPI_MemoryMapped 用法一致）。 */
-    QUADSPI->DLR = 0u;
-    QUADSPI->AR  = addr;
-    QUADSPI->ABR = 0u;
-    ccr = (0x03u << QUADSPI_CCR_INSTRUCTION_Pos) |
-          (1u << QUADSPI_CCR_IMODE_Pos) |
-          (1u << QUADSPI_CCR_ADMODE_Pos) |
-          ((uint32)NOR_ADSIZE_24BITS << QUADSPI_CCR_ADSIZE_Pos) |
-          (1u << QUADSPI_CCR_DMODE_Pos) |
-          (3u << QUADSPI_CCR_FMODE_Pos);
-    QUADSPI->CCR = ccr;
-
-    for(i = 0u; i < len; i++)
-    {
-        buf[i] = *(volatile uint8 *)(NOR_MM_BASE + addr + i);
-    }
-
-    /* 一定要退出 MM 模式：留在里面时下一次普通命令会拿不到总线。 */
-    rc = nor_abort();
-    if(rc != 0)
-    {
-        return rc;
-    }
-    return 0;
+    /* 诊断入口：不管读通道当前选了哪条，它都要能单独试一次内存映射——它是
+     * "芯片能应答 / 0x90000000 这个窗口能不能用"这条判据的执行者。 */
+    return nor_mm_read_mode(addr, buf, len,
+                            (g_nor_mm_mode != 0) ? g_nor_mm_mode : 1);
 }
 
 /**
@@ -1402,13 +1634,17 @@ static int32 nor_sector_erase(uint32 addr)
  * 而位敲路径在同一颗芯片上每一步都成立（ID、SR1、WREN 全部有独立证据），
  * 擦除只花 32 个时钟、页编程 2 K 个时钟，代价可以接受。
  *
- * 取舍写在明处：读走 QUADSPI（要带宽），写/擦走位敲（要确定性）。
- * 两条通道共用同一组引脚，切换由 nor_bb_begin()/nor_bb_end() 独占完成。
+ * 取舍写在明处：读走内存映射（要带宽，且必须自证过才启用），写/擦走位敲
+ * （要确定性）。两条通道共用同一组引脚，切换由 nor_mm_read_mode() 里的
+ * abort 与 nor_bb_begin()/nor_bb_end() 各自收尾完成。
  * ============================================================ */
 
 /** @brief 接管引脚：关 QUADSPI、把 6 根脚变成 GPIO */
 static void nor_bb_begin(void)
 {
+    /* 先收尾：上一次如果走的是内存映射读，外设可能还停在 MM 里/带 BUSY，
+     * 此时直接清 EN 会把它留在"半截传输"上（后续命令全被吞）。 */
+    (void)nor_abort();
     QUADSPI->CR &= ~QUADSPI_CR_EN;      /* EN=0 后外设放开引脚 */
     nor_delay_us(2);
     nor_bb_enter();                     /* 复用同一套引脚切换（含空闲电平） */
@@ -1880,11 +2116,16 @@ int32 arkrtos_board_nor_init(void)
     }
 
     (void)arkrtos_board_nor_status(&sr1);
+
+    /* 读通道在这里定档：芯片已应答，才有资格谈"哪条读通路快"。
+     * 自证不过就留在位敲——读慢是性能问题，读错是正确性问题。 */
+    nor_select_read_channel();
+
     g_nor_ready = 1u;
     g_nor_last_err = 0;
-    ARKRTOS_LOGI("NOR", "W25Q64 answered: JEDEC 0x%06X, SR1 0x%02X, %u MiB at 0x%08X (mm)",
+    ARKRTOS_LOGI("NOR", "W25Q64 answered: JEDEC 0x%06X, SR1 0x%02X, %u MiB at 0x%08X (mm), read=%s",
                  (unsigned)id, (unsigned)sr1, (unsigned)(ARKRTOS_NOR_SIZE >> 20),
-                 (unsigned)NOR_MM_BASE);
+                 (unsigned)NOR_MM_BASE, nor_mm_mode_name(g_nor_mm_mode));
     return 0;
 }
 
@@ -1896,6 +2137,11 @@ int32 arkrtos_board_nor_last_error(void)
 uint32 arkrtos_board_nor_last_id(void)
 {
     return g_nor_id;
+}
+
+int32 arkrtos_board_nor_read_mode(void)
+{
+    return g_nor_mm_mode;
 }
 
 /* ============================================================
@@ -2036,6 +2282,133 @@ static int nor_parse_rd_args(int argc, char *argv[], const char *usage,
             ark_shell_printf("nor: bad length '%s' (1..32)\r\n", argv[3]);
             return -1;
         }
+    }
+    return 0;
+}
+
+/** @brief 读吞吐对照用的两段缓冲（各 512 B，只在 "nor speed" 时用） */
+static uint8 g_nor_bench_bb[512];
+static uint8 g_nor_bench_mm[512];
+
+/** @brief 0.1 KB/s 单位的吞吐 = 字节数 x 4687500 / CPU 周期（480 MHz 计数） */
+static uint32 nor_kbps10(uint32 bytes, uint32 cyc)
+{
+    if(cyc == 0u)
+    {
+        return 0u;
+    }
+    /* KB/s = bytes / (秒 x 1024)，秒 = cyc / 480 MHz
+     *      => bytes x 480000000 / (cyc x 1024) = bytes x 468750 / cyc
+     * 这里第一版写成 bytes x 480000 / (cyc x 1024)，少乘了 1000，于是 3.1 MB/s
+     * 被打成 "3 KB/s"。量错的读数比没有读数更糟——所以这个式子单独写一行注释，
+     * 下次改它之前先对一遍量纲。 */
+    return (uint32)(((unsigned long long)bytes * 4687500ull) /
+                    (unsigned long long)cyc);
+}
+
+/**
+* @brief 量两条读通道的吞吐，并把同一段数据逐字节对照
+* @param kb 每个通道读多少 KiB（1..64）
+* @return 0 = 量完（结论在打印里）
+* @details 三个数一起看才有意义：位敲耗时、MM 耗时、memcmp 结果。判据：
+*          ① 两条通路内容相同，否则提速免谈（先把数据对上）；
+*          ② 位敲读数应落在历史量级（约 62 KB/s）——若它自己变了，说明量的
+*             不是原来那条路（时钟被 "nor clk" 改过、引脚被别的驱动抢走），
+*             这时两边的数都不能当"提速收益"；
+*          ③ MM 明显更快。三条都成立才叫"读通道换了"。
+*/
+static int nor_read_bench(uint32 kb)
+{
+    uint32 total = kb * 1024u;
+    uint32 chunk = (uint32)sizeof(g_nor_bench_bb);
+    uint32 cyc_bb;
+    uint32 cyc_mm;
+    uint32 off;
+    uint32 diffs = 0u;
+    uint32 first = 0u;
+    uint32 bb10;
+    uint32 mm10;
+    int32 mode = (g_nor_mm_mode != 0) ? g_nor_mm_mode : 1;
+    int32 rc;
+
+    if((kb == 0u) || (kb > 64u))
+    {
+        ark_shell_printf("usage: nor speed [KiB 1..64]\r\n");
+        return -1;
+    }
+    if(g_nor_inited == 0u)
+    {
+        ark_shell_printf("nor: not inited\r\n");
+        return -1;
+    }
+
+    /* ① 位敲 */
+    nor_cyc_start();
+    for(off = 0u; off < total; off += chunk)
+    {
+        (void)nor_bitbang_read(off, g_nor_bench_bb, chunk);
+    }
+    cyc_bb = nor_cyc_now();
+
+    /* ② 内存映射 */
+    nor_cyc_start();
+    for(off = 0u; off < total; off += chunk)
+    {
+        rc = nor_mm_read_mode(off, g_nor_bench_mm, chunk, mode);
+        if(rc != 0)
+        {
+            cyc_mm = nor_cyc_now();
+            ark_shell_printf("nor: mm read failed at 0x%06X rc=%d (SR=0x%08X)\r\n",
+                             (unsigned)off, (int)rc, (unsigned)QUADSPI->SR);
+            return -1;
+        }
+    }
+    cyc_mm = nor_cyc_now();
+
+    /* ③ 逐字节对照：同一段地址两条通路各读一遍 */
+    for(off = 0u; off < total; off += chunk)
+    {
+        uint32 i;
+
+        (void)nor_bitbang_read(off, g_nor_bench_bb, chunk);
+        if(nor_mm_read_mode(off, g_nor_bench_mm, chunk, mode) != 0)
+        {
+            ark_shell_printf("nor: mm read failed at 0x%06X during compare\r\n",
+                             (unsigned)off);
+            return -1;
+        }
+        for(i = 0u; i < chunk; i++)
+        {
+            if(g_nor_bench_bb[i] != g_nor_bench_mm[i])
+            {
+                if(diffs == 0u)
+                {
+                    first = off + i;
+                }
+                diffs++;
+            }
+        }
+    }
+
+    bb10 = nor_kbps10(total, cyc_bb);
+    mm10 = nor_kbps10(total, cyc_mm);
+    ark_shell_printf("nor: bit-bang %u B in %u us = %u.%u KB/s\r\n",
+                     (unsigned)total, (unsigned)(cyc_bb / 480u),
+                     (unsigned)(bb10 / 10u), (unsigned)(bb10 % 10u));
+    ark_shell_printf("nor: %s  %u B in %u us = %u.%u KB/s\r\n",
+                     nor_mm_mode_name(mode), (unsigned)total,
+                     (unsigned)(cyc_mm / 480u), (unsigned)(mm10 / 10u),
+                     (unsigned)(mm10 % 10u));
+    if(diffs == 0u)
+    {
+        ark_shell_printf("nor: compare %u B: identical (two paths agree)\r\n",
+                         (unsigned)total);
+    }
+    else
+    {
+        ark_shell_printf("nor: compare %u B: %u bytes DIFFER (first at 0x%06X) "
+                         "- do not trust the fast path\r\n",
+                         (unsigned)total, (unsigned)diffs, (unsigned)first);
     }
     return 0;
 }
@@ -2550,6 +2923,83 @@ int arkrtos_board_nor_shell_cmd(int argc, char *argv[])
         return (rc == 0) ? 0 : -1;
     }
 
+    if(nor_streq(sub, "sr2"))
+    {
+        uint8 sr2 = 0u;
+        int32 rc = nor_read_sr2(&sr2);
+
+        if(rc != 0)
+        {
+            ark_shell_printf("nor: SR2 read failed rc=%d\r\n", (int)rc);
+            return -1;
+        }
+        ark_shell_printf("nor: SR2=0x%02X QE=%u (QE=1 allows 4-line 0xEB; SR2 is never written)\r\n",
+                         (unsigned)sr2, (unsigned)((sr2 & NOR_SR2_QE) != 0u));
+        return 0;
+    }
+
+    if(nor_streq(sub, "mmode"))
+    {
+        uint32 want = (uint32)g_nor_mm_mode;
+
+        if(argc >= 3)
+        {
+            if((nor_parse_dec(argv[2], &want) != 0) || (want > 2u))
+            {
+                ark_shell_printf("usage: nor mmode [0|1|2]  (0=bit-bang, 1=mm 0x03, 2=mm 0xEB)\r\n");
+                return -1;
+            }
+            /* 换到没自证过的档位 = 拿数据去赌。要开就当场自证一次，不过就拒绝。 */
+            if((want != 0u) && (nor_mm_selftest((int32)want) == 0u))
+            {
+                ark_shell_printf("nor: mode %u self-test failed (mm != bit-bang, or no "
+                                 "non-uniform window), refused (SR2=0x%02X)\r\n",
+                                 (unsigned)want, (unsigned)g_nor_sr2);
+                return -1;
+            }
+            g_nor_mm_mode = (int32)want;
+        }
+        ark_shell_printf("nor: read channel = %u (%s), tested=%s\r\n",
+                         (unsigned)g_nor_mm_mode, nor_mm_mode_name(g_nor_mm_mode),
+                         (g_nor_mm_mode != 0) ? "yes" : "n/a");
+        return 0;
+    }
+
+    if(nor_streq(sub, "dummy"))
+    {
+        uint32 n = g_nor_dummy;
+
+        if(argc >= 3)
+        {
+            if((nor_parse_dec(argv[2], &n) != 0) || (n > 31u))
+            {
+                ark_shell_printf("usage: nor dummy [0..31]  (dummy cycles for 0xEB)\r\n");
+                return -1;
+            }
+            g_nor_dummy = n;
+        }
+        /* 空周期数错一个，数据就整段错位：所以改完要立刻用 "nor mmode 2" 让
+         * 自证跑一遍，别等到真读文件时才发现。 */
+        ark_shell_printf("nor: dummy=%u (now run 'nor mmode 2' to self-test)\r\n",
+                         (unsigned)g_nor_dummy);
+        return 0;
+    }
+
+    if(nor_streq(sub, "speed"))
+    {
+        uint32 kb = 4u;
+
+        if(argc >= 3)
+        {
+            if((nor_parse_dec(argv[2], &kb) != 0) || (kb == 0u) || (kb > 64u))
+            {
+                ark_shell_printf("usage: nor speed [KiB 1..64]\r\n");
+                return -1;
+            }
+        }
+        return (nor_read_bench(kb) == 0) ? 0 : -1;
+    }
+
     if(!nor_streq(sub, "info"))
     {
         ark_shell_printf("nor: unknown subcommand '%s'\r\n", sub);
@@ -2563,11 +3013,17 @@ int arkrtos_board_nor_shell_cmd(int argc, char *argv[])
                      (unsigned)g_nor_id, (unsigned)ARKRTOS_NOR_JEDEC_W25Q64);
     ark_shell_printf("sr1  : 0x%02X\r\n", (unsigned)g_nor_sr1);
     ark_shell_printf("size : %u MiB\r\n", (unsigned)(ARKRTOS_NOR_SIZE >> 20));
+    ark_shell_printf("read : %u = %s (dummy %u)\r\n", (unsigned)g_nor_mm_mode,
+                     nor_mm_mode_name(g_nor_mm_mode), (unsigned)g_nor_dummy);
     ark_shell_printf("mm   : 0x%08X\r\n", (unsigned)NOR_MM_BASE);
     ark_shell_printf("pins : NCS=PG6(AF10) CLK=PF10(AF9) IO0=PF8(AF10) IO1=PF9(AF10) IO2/3=PF7/PF6(AF9)\r\n");
     ark_shell_printf("last : err=%d\r\n", (int)g_nor_last_err);
-    ark_shell_printf("usage: nor [info | init | id | sr | read <hexaddr> [len] | "
-                     "mm <hexaddr> [len] | regs | pins | bb | drive | bench | edg | wel | dr32 | af <n> [pg] | raw <instr> [len] [addr] | clk <n> | abort | bbwr | wren | er2 <addr> | rst | verify | er <addr> | wr <addr> [len]]\r\n");
+    ark_shell_printf("usage: nor [info | init | id | sr | sr2 | mmode [0|1|2] | "
+                     "dummy [0..31] | "
+                     "speed [KiB] | read <hexaddr> [len] | mm <hexaddr> [len] | "
+                     "regs | pins | bb | drive | bench | edg | wel | dr32 | af <n> [pg] | "
+                     "raw <instr> [len] [addr] | clk <n> | abort | bbwr | wren | "
+                     "er2 <addr> | rst | verify | er <addr> | wr <addr> [len]]\r\n");
     return 0;
 }
 
