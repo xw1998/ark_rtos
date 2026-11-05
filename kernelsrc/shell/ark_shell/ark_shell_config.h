@@ -60,18 +60,20 @@ extern "C" {
  * Ark RTOS: the product banner goes here, not in arkrtos_shell.c, because
  * ark_shell_init() prints this string and only then draws the prompt -
  * anything the kernel task prints after init would land below an
- * already-drawn prompt.  The art is plain ASCII (figlet "standard",
- * 40 columns max); set ARK_SHELL_WELCOME_ART to 0 for the plain line.
+ * already-drawn prompt.  The art is plain ASCII: figlet "standard" rendering
+ * of "ARK RTOS" (44 columns, 5 rows); set ARK_SHELL_WELCOME_ART to 0 for the
+ * plain line.  Regenerate it whenever the product name changes - this art
+ * still spelled the pre-rename "SVCRTOS" until 2026-11-05.
  * ------------------------------------------------------------------- */
 #define ARK_SHELL_WELCOME_ART         1
 #if (ARK_SHELL_WELCOME_ART == 1)
 #define ARK_SHELL_WELCOME             \
     "\r\n"                        \
-    " ______     ______      _    ___  ____\r\n"  \
-    "/ ___\\ \\   / / ___|_ __| |_ / _ \\/ ___|\r\n"  \
-    "\\___ \\\\ \\ / / |   | '__| __| | | \\___ \\\r\n"  \
-    " ___) |\\ V /| |___| |  | |_| |_| |___) |\r\n"  \
-    "|____/  \\_/  \\____|_|   \\__|\\___/|____/\r\n"  \
+    "    _    ____  _  __  ____ _____ ___  ____\r\n"  \
+    "   / \\  |  _ \\| |/ / |  _ \\_   _/ _ \\/ ___|\r\n"  \
+    "  / _ \\ | |_) | ' /  | |_) || || | | \\___ \\\r\n"  \
+    " / ___ \\|  _ <| . \\  |  _ < | || |_| |___) |\r\n"  \
+    "/_/   \\_\\_| \\_\\_|\\_\\ |_| \\_\\|_| \\___/|____/\r\n"  \
     "\r\n"                        \
     "Ark RTOS kernel shell - type 'help' for commands.\r\n\r\n"
 #else
