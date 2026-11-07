@@ -190,6 +190,11 @@ FAIL BOOT: cannot mount nor0 at /mnt/nor: -5 (...); the console still comes up, 
    打二进制不在此列（`unistd.h` 里写明了）。
 6. **`printf` 不可用**：arkc 没有 varargs，SDK 的格式化器
    （`arkrtos_ulog.h`）在 `__ARK_CC__` 下整段排除。要输出就用 `write()`。
+7. **工程必须自己定义 `MiniMain()`**：SDK 里那个空实现只在非 arkc 档编进去
+   （`#if !defined(__ARK_CC__)`）。arkc 是单对象模型，同一个 TU 里 "main()
+   调 MiniMain()" 在汇编期就绑死了，链接期再来一个强定义也覆盖不到——
+   留着空实现的结果是「镜像能跑、什么都不打印」，比链接失败难查得多。
+   所以漏定义就必须链接失败：`unresolved symbol "MiniMain"`。
 
 ## 6. 这条演示的回归用例
 
