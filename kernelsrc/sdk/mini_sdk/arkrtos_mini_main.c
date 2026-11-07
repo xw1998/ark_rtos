@@ -9,6 +9,18 @@
 *          把自己交给内核回收，之后再被调度到也不会继续跑。
 */
 
+#if defined(__ARK_CC__)
+/* arkc 档不要把这个文件放进工程。
+ *
+ * 小程序在 arkc 上按标准 C 写 `int main(void)`：入口由启动桩
+ * （arkrtos_mini_start_arkc.c）直接调用，程序 return 之后由桩调
+ * arkrtos_thread_exit() 收尾。这里那份「main() 调 MiniMain()」的骨架是
+ * Keil / GCC 档的写法（那两个工具链没有本文件同翻译单元弱符号的问题）。
+ *
+ * 两个档混用的结果不是报错而是**两套入口都在**：多一个 main 只会让链接器
+ * 挑一个，另一个静默失效。所以这里直接 #error。 */
+#error "arkc: do not add mini_main.c; write int main(void) in your own source instead"
+#else
 #include "arkrtos.h"
 
 /* 【arkc 为什么没有这一份默认实现】
@@ -45,3 +57,4 @@ int main(void)
     {
     }
 }
+#endif /* __ARK_CC__ */

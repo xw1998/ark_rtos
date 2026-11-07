@@ -10,10 +10,12 @@
 *
 *          所以 arkc 的小程序工程把 `-I` 指到本目录，`"arkrtos.h"` 就落在
 *          这里。里面只有 miniapp 真正需要的东西：
-*            - `MiniMain()` 的声明：**必须由工程自己定义**。SDK 的
-*              `arkrtos_mini_main.c` 在 arkc 档不给默认空实现（原因写在那个文件
-*              里：同 TU 内的弱符号在 arkc 的单对象模型下会被本地绑定，强定义
-*              覆盖不进来），所以漏定义会得到一个诚实的 `undefined symbol`。
+*            - 入口约定：**工程自己写 `int main(void)`**，与 Linux 上一模一样。
+*              SDK 的启动桩（`arkrtos_mini_start_arkc.c`）调它，它 return
+*              之后由桩调 `arkrtos_thread_exit()` 收尾。SDK 不提供 main()，
+*              漏定义就是链接期 `undefined symbol "main"`。
+*              （Keil / GCC 档仍是用 SDK 的 `main()` + 工程写 `MiniMain()`，
+*               那是那两个工具链的历史写法，与 arkc 不通用。）
 *            - `ARKRTOS_WEAK`：弱符号属性。arkc 档自己也用不到它，留着是因为
 *              工程可能想给自己的回调加弱定义。
 *            - `arkrtos_thread_exit()`：结束小程序、交还两块 RAM。
@@ -32,14 +34,10 @@
 #define ARKRTOS_WEAK                    __attribute__((weak))
 #endif
 
-/**
-* @brief 小程序主体：由工程实现，SDK 的 main() 调用它
-* @note 必须定义。返回即视为程序结束（`arkrtos_thread_exit()` 交还两块 RAM）。
-* @note 这里只有声明，没有弱定义的默认实现——arkc 的同一个翻译单元内的调用在
-*       汇编期就绑死，弱符号覆盖不到，带一个空默认实现只会让"程序什么都没做
-*       就退出"变成最难查的一种静默错误。详见 `arkrtos_mini_main.c`。
-*/
-void MiniMain(void);
+/* 入口不在这个头里：arkc 档的入口就是标准 C 的 `int main(void)`，由工程
+ * 自己定义，不需要声明（启动桩里有 `extern int main(void);`）。
+ * 旧写法 `void MiniMain(void)` 只在 Keil / GCC 档有效，arkc 档不要用：
+ * 那套骨架（arkrtos_mini_main.c）在 arkc 下会直接 #error。 */
 
 /**
 * @brief 结束当前小程序，把代码块与 RAM 块交还给内核

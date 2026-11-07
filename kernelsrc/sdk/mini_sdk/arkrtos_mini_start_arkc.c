@@ -35,17 +35,21 @@
 /* 由 arkc 生成（见上）；没有 .data/.bss 时不存在，届时本文件链接失败即为预期。 */
 extern void __arkcc_init_globals(void);
 
-/* Mini SDK 的 C 入口（arkrtos_mini_main.c）：调 MiniMain()，返回后
- * arkrtos_thread_exit()。 */
+/* 工程自己定义的标准 C 入口（与 Linux 上一模一样）。arkc 档不提供 main()：
+ * 没定义就在链接期报 `undefined symbol "main"`，不给"空程序也能跑"的假象。 */
+extern void arkrtos_thread_exit(void);
 extern int main(void);
 
 void MINISTART(void)
 {
     __arkcc_init_globals();
-    (void)main();
 
-    /* main() 正常不会返回（它自己 thread_exit）。真回来了就只能停在这里：
-     * 从这里 return 会回到内核给的栈顶，那是未定义行为。 */
+    /* main() 是标准入口：它 return 就是程序结束，由这里收尾。 */
+    (void)main();
+    arkrtos_thread_exit();
+
+    /* thread_exit() 不会返回；真回来了就停在这里：从这里 return 会回到
+     * 内核给的栈顶，那是未定义行为。 */
     for (;;)
     {
     }

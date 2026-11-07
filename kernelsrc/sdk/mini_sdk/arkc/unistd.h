@@ -14,10 +14,12 @@
 *          本目录（`mini_sdk/arkc`，这里放同名头）只给 arkc 小程序工程用。
 *
 *          没有的东西也列清楚，免得调用方以为「编过了就是支持」：
-*            - 没有 stdio（printf/fopen）：arkc 没有 va_list，也没有 C 库；
-*              要输出就用 write()。
-*            - 没有 read/open/close：小程序目前拿不到 stdin，也没有文件描述符表。
+*            - 没有文件 I/O（fopen/fread/文件描述符表）：只有控制台。
+*            - 没有 read/open/close：小程序目前拿不到 stdin。
 *            - 没有 fork/exec：小程序自己就是一个任务。
+*
+*          printf / puts / putchar 在另一个头里：`stdio.h`（同目录）。它靠一条
+*          `__asm` 取参桩绕开了「arkc 没有 va_list」这件事，细节见那里的说明。
 */
 
 #ifndef __ARKRTOS_MINI_UNISTD_H__
