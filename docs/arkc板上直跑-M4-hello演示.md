@@ -1,240 +1,208 @@
-# arkc 板上直跑 M4：用真正的 `cc` 和 `make` 编一个 POSIX hello world
+# arkc 板上直跑 M4：工程文件在 NOR 上，`cd /mnt/nor && make`，然后 `mini run`
 
-**这份文档记录演示路径本身**，对象是工具链，不是某个便捷命令：
+**这份文档记录演示路径本身**：一个标准 POSIX 的 hello world 工程，源码常驻在
+外置 NOR flash 上，板上敲一条 `make` 编出小程序镜像，`mini run` 装进去跑，
+打印 `hello, world` 后自己退出、把两块 RAM 还回池里。
 
-- **A 段（arkcc）**：在串口上手敲 `cc` —— 两个翻译单元各编一个对象，`-link`
-  把两个对象接成一个镜像，`app run` 把它装进运行窗口跑起来。
-- **B 段（make）**：`cd /demo` + `make` —— 板上构建工具读工程文件，驱动同一个
-  编译器做四遍基址差分，打出一份可重定位镜像，`mini run` 装进去跑。
+```
+ark@arkrtos:~$ cd /mnt/nor
+ark@arkrtos:/mnt/nor$ make
+make: hello.svcm <- start.c (+more)
+...
+cc: hello.svcm: payload 7688 + table 6 x 4 = 7968 B
+make: ok
+ark@arkrtos:/mnt/nor$ mini run hello.svcm
+MINI:579 /mnt/nor/hello.svcm: 7688 B payload -> code 0x24070000 (8192 B block), RW/stack 0x24074000 (16384 B), task 4
+hello, world
+MINI:873 task 4 returned: MiniApp finished, code and RAM blocks back in the pool
+```
 
-两段用的是**同一份源码**，输出必须是同样两行。`hello` 命令在这条流程里的角色
-只是**备料**：把四个文件铺到 `/demo` 并打印上面这些真实命令行——它不编译、
-不链接、不装载。这一点是刻意的：一条命令跑完的东西证明不了工具链，而演示要
-展示的正是"编译器是怎么被用起来的"。
+## 0. 为什么不再有一条 `hello` 命令
 
----
+2026-11-07 之前板上有一个 `hello` 命令：它把演示源铺到 `/demo` 再打印一串
+命令行让人照着敲。那不是 Linux 的体验——工程文件本该和程序一起待在盘上，
+构建本该是 `make`。那条命令已经**整段删除**（命令、源码、`USE_HELLO` 开关、
+Makefile 宏、开关指纹），回归用例 `mini-sdk-nor-make` 里有一条
+`hello → command not found` 的反假绿断言，防止有人把它加回来。
+
+现在演示用的四个源文件常驻 NOR 卷（断电不丢），上电就挂好在 `/mnt/nor`。
 
 ## 1. 一次性准备
 
-固件要打开四个开关（`arkrtos_features.h` 里有 `#error` 兜底，关错了编不过，
-而不是静默少功能）：
+### 1.1 固件
 
 ```sh
 cd example/stm32h743/kernel/ARKRTOS_TEST/GCC
 make -j8 CROSS="<arm-none-eabi->" \
-     USE_SDRAM=1 USE_APPRUN=1 USE_HELLO=1 USE_APPPACK=1 USE_ARKMAKE=1 USE_MINI_VFS=1
+     USE_SDRAM=1 USE_APPRUN=1 USE_APPPACK=1 USE_ARKMAKE=1 USE_MINI_VFS=1 USE_QSPI=1
 ```
 
-实测体积（2026-11-07）：FLASH 446944 B (85.25%)、RAM 284560 B (63.16%)、
-SDRAMBUF 10744 KB / 12 MB、SDRAMFS 5767968 B / 6 MB。
+`USE_SDRAM=1` 在这里不只是"多给点内存"：它把 arkc 的编译池（4 MB）、ramfs
+文件缓冲、以及 `cc --pack` 的四份 16 KB 负载 + 16 KB 对象/镜像缓冲全部搬到
+外置 SDRAM（`ARKRTOS_PACK_IN_EXTRAM` 跟着 `USE_SDRAM` 走）。片内 AXI SRAM
+只留内核与栈。
 
-烧进去，串口 USART1 / COM3 / 115200 8N1：
+实测体积（2026-11-07）：FLASH 460848 B (87.90%)、RAM 285628 B (63.39%)、
+SDRAMBUF 10744 KB / 12 MB、SDRAMFS 5849888 B / 6 MB (92.98%)。
 
-```
-ark@arkrtos:~$ hello
-```
-
-`hello` 把 `/demo/hello.c`、`/demo/util.c`、`/demo/hello.sct`、`/demo/makefile`
-写好（覆盖写，先删再写，不会追加），再把 A/B 两段的命令原样打在屏幕上。
-
-## 2. A 段实录：`cc` 手敲（2026-11-07，FK743M5-XIH6）
-
-```
-$ cc /demo/hello.c -c -o /demo/hello.obj --scatter /demo/hello.sct --vector-table
-cc: /demo/hello.c -> /demo/hello.obj (target arm, -O1), -c
-cc: scatter /demo/hello.sct
-cc: vector table in the first 0x400 B
-[scatter] parsed /demo/hello.sct
-cc: pool 617152/4194304 B
-cc: done in 93 ms
-
-$ cc /demo/util.c -c -o /demo/util.obj --scatter /demo/hello.sct
-cc: /demo/util.c -> /demo/util.obj (target arm, -O1), -c
-cc: scatter /demo/hello.sct
-[scatter] parsed /demo/hello.sct
-cc: pool 559616/4194304 B
-cc: done in 66 ms
-
-$ cc -link /demo/hello.obj /demo/util.obj --scatter /demo/hello.sct --vector-table -o /demo/hello.bin
-cc: link 2 obj -> /demo/hello.bin
-cc: scatter /demo/hello.sct
-cc: vector table in the first 0x400 B
-cc: reloc-text on
-[link] note: 41 duplicate compiler-runtime symbols merged (first definition kept)
-[scatter] parsed /demo/hello.sct
-cc: pool 524568/4194304 B
-cc: done in 11 ms
-
-$ app run /demo/hello.bin
-[   43.839] <6>APPRUN:305 /demo/hello.bin: 5452 B -> code 0x24070000 (8192 B),
-                                data/stack 0x24072000 (8192 B), task 4
-app run: /demo/hello.bin started (task 4)
-ark@arkrtos:~$ hello, world
-built by arkc on the STM32H743, linked from two objects
-[   43.840] <6>TASK:2584 task 4 exits (self kill)
-[   43.840] <6>APPRUN:361 task 4 exited, window returned to the pool
-```
-
-三件事同时被证明：**分离编译**真的产出了两个对象（93 / 66 ms）、**链接器**真的
-把第二个对象搬进了第一个对象的基址（`reloc-text on`，41 个运行时符号去重）、
-`app run` 的窗口校验（SP=窗口顶、entry 在代码窗内、entry 处是序言）全部通过。
-
-「两行都对」才是 `util.c` 真被执行了的证据：`write()` 按 `my_strlen()` 返回的
-长度打字节，长度错一个字节就看得到。两行文字本身是 `hello.c` 里的字面量，
-所以光看文字证明不了第二个翻译单元参与了。
-
-## 3. B 段实录：`make`
-
-```
-$ cd /demo
-ark@arkrtos:/demo$ make
-make: /demo/hello.svcm <- /demo/hello.c (+more)
-make:   src /demo/util.c
-cc: pack 2 sources -> /demo/hello.svcm (4 passes, -O1)
-cc:   A 5452 B
-cc:   B 5452 B
-cc:   C 5452 B
-cc:   D 5452 B
-cc:   A vector: SP 0x20002000 entry 0x800070E (rom base 0x8000000, window 8192 B)
-cc: /demo/hello.svcm: payload 5452 + table 11 x 4 = 5752 B
-cc:   reloc rom 1 / ram 1 / rom_movw 4 / ram_movw 5, entry +0x70E
-cc: packed in 1522 ms
-make: ok
-
-$ mini run hello.svcm
-[   99.991] <6>MINI:579 /demo/hello.svcm: 5452 B payload -> code 0x24070000 (8192 B block),
-                                    RW/stack 0x24072000 (8192 B), task 4
-mini running: task 4, code 5452 B in 8192 B @ 0x24070000, RW/stack 8192 B @ 0x24072000
-  running 1 of 2 allowed
-ark@arkrtos:/demo$ hello, world
-built by arkc on the STM32H743, linked from two objects
-[   99.992] <6>MINI:873 task 4 returned: MiniApp finished, code and RAM blocks back in the pool
-```
-
-`make` 只做三件事：读工程文件、把 `arkmake_project_t` 摊成 `arkc_cc_pack()` 的
-参数、把失败阶段翻成自己的错误码。**它没有第二条编译路径**——四遍差分打包的
-本体就是 `cc --pack`，所以 `make` 与 A 段走的是同一个编译器、同一批源。
-
-`makefile` 全文如下（`ark make` 只认这几个键）：
-
-```
-# /demo/makefile -- everything 'ark make' reads, nothing else.
-# The build is 'cc --pack': four passes over these sources with four
-# different link bases, diffed into one relocatable image.
-TARGET = hello
-OUT    = /demo/hello.svcm
-SRCS   = /demo/hello.c /demo/util.c
-```
-
-**计时口径**：`packed in 1522 ms` 是两源 × 四遍的真空闲读数。此前同一操作实测过
-`11124 ms`，那不是打包慢——当时有一个 `for(;;)` 的小程序以 `APP_TASK_PRIORITY`
-（10，在控制台 14 之上）在跑，控制台只抢到零碎 CPU。修掉优先级之后同一命令是
-1.5 s。凡是 `make` 的耗时读数，都要先确认没有更高的任务在占 CPU。
-
-## 4. 为什么 `--scatter` 必须出现在 `-c` 上
-
-这是本演示最容易被跳过、也最容易错得安静的一步。
-
-`arkc` 在 **codegen 阶段**就把 `.text` / `.data` / `.bss` 的绝对地址烤进指令
-（MOVW/MOVT 对），链接器不能像 ELF 工具链那样事后搬动。所以布局必须在**编译**
-那一刻就知道，`-link` 只负责把"它搬动了哪个对象"造成的位移补回去（`reloc-text`
-默认对 `-link` 打开）。
-
-不带 `--scatter` 时：两个对象都按默认基址编（`0x08000000` / `0x20000000`），
-链接**照样成功**，镜像也装得进去，然后第一次写全局变量就死在板子上：
-
-```
-*** PANIC MEM ***
-R0=0x20000000 R1=0x20000040
-CFSR=0x00000082 MMFAR=0x20000000 BFAR=0x20000000
-```
-
-`MMFAR=0x20000000` 就是"这块内存不在我这个 app 的窗口里"的直白读数。
-判据因此写死：**两个 `-c` 都必须带 `--scatter <同一个 .sct>`**，
-`final_app.py` 的 `hello-demo` 用例里三条命令逐字与屏幕上打印的一致。
-
-## 5. 三个硬约束（每一个都踩过）
-
-### 5.1 分散文件必须有 `*.o (RESET, +First)`
-
-`arkc` 0.8.0 的散射校验（`ARKCC_FEATURE_SCATTER_CHECK`）在给了 `--vector-table`
-时要求布局里存在装载 RESET 的执行区，且它落在镜像基址上。缺了直接拒绝出图：
-
-```
-arkcc: Error: the layout in use defines no RESET section, but --vector-table was
-given: the vector table would not be the first object in the image
-```
-
-**这条不只影响演示**：`tools/final_app.py` 的 `SCT_OK`/`SCT_BAD` 与 `cc --pack`
-自己写的 `/tmp/pp.sct` 也都要带这一行，否则 M1/M2 的板级用例第一步就失败。
-三处已同步。
-
-### 5.2 单执行区，不要 `ER_IROM` + `ER_IRAM` 两个段
-
-`app run` 的装载器**只拷文件字节**，所以每一个"有初值"的字节都必须落在 8 KB
-装载区里。写成两个执行区时 RW 段落在装载区外，镜像里根本没有那部分数据：链接
-成功、装载成功、数据是零。演示版 `.sct` 因此是一个执行区、装载区 `0x4000`
-（把初始 SP 顶到 `0x24074000`，正好是 `app run` 要求的窗口顶）。
-
-### 5.3 ARM 后端目前不产全局/静态变量的初始化数据
-
-`static const char msg[] = "..."` 里的字节在 ARM 目标上**不会**进镜像（对象里连
-`ABC` 都搜不到），同样源在 `-target x86` 下有 `.data`。所以两份源码都用**内联
-字面量**（`write(1, "hello, world\r\n", my_strlen("hello, world\r\n"))`），实测
-落在镜像 `+0x400` 之后。这是编译器的真缺陷，不是写法偏好，记录在案待修。
-
-## 6. 池与槽位预算（SDRAM 档）
-
-| 读数 | 出处 |
-|---|---|
-| 编译 hello.c：`pool 617152/4194304 B`，93 ms | A 段实录 |
-| 编译 util.c：`pool 559616/4194304 B`，66 ms | A 段实录 |
-| 链接两对象：`pool 524568/4194304 B`，11 ms | A 段实录 |
-| 片上 RAM 档（`USE_SDRAM=0`）池只有 80 KB，这套源报 `memory pool exhausted`，`pool 77704/81920 B` | 上一版实录 |
-| 宿主用同一份预算复现同一失败：`[POOL] FAIL req=32768 used=77696 cap=81920` | `arkcc_min.exe` |
-
-"池不够"不是猜的：宿主能逐字复现板上的失败点。改 `USE_SDRAM=1` 之后池从 80 KB
-变成 4 MB，同一份源一次编过。SDRAM 的通路问题见
-`docs/stm32h743-external-memory.md` 顶部的订正段（缺的是 `FMC_BCR1.FMCEN`）。
-
-**ramfs 槽位**：`/demo` 一次要同时站着 4 个源/脚本 + 2 个对象 + 1 个 `.bin`
-（A 段），再跑一次 `make` 再加 1 个 `.svcm`（B 段），正好 8 个。零余量的上限在
-演示现场等于"随便多一个文件就全挂"，所以 SDRAM 档的槽数从 8 提到 11
-（11 × 512 KB = 5.5 MB + 节点开销 < 6 MB 的 `SDRAMFS` 分区；12 槽正好 6 MB，
-装不下结构体开销）。数字的由来写在 `GCC/Makefile` 的 `RAMFS_DEFS` 注释里。
-
-## 7. 本轮修掉的四个真缺陷
-
-| 缺陷 | 症状 | 修法 |
-|---|---|---|
-| `rd_le32` 在 16 位总线的 SDRAM 上被 gcc 合成非对齐宽读，返回 0 | `cc --pack` 卡在 `no usable vector table (-34)`：符号表读成 0 条 ⇒ `ld_find_global("Reset_Handler") < 0` ⇒ 向量表整段不写。更早一次直接 BUS FAULT（`BFAR=0x21744c9a`，PC 落在 `rd_le32`） | `src/compiler.c` 里改成 `const volatile unsigned char *` 逐字节读，禁止合成宽读 |
-| 小程序任务优先级在控制台之上 | `mini run` 一个 `for(;;)` 的程序之后提示符再也不回来，只能复位；连带把 `make` 的耗时读数抬到 11 s | 演示工程默认 `MINI_PRIORITY=20`（= `ARKRTOS_APPRUN_PRIORITY`，分区头里有同一条实测注释）。内核默认不变，`make MINI_PRIORITY=` 复现旧行为 |
-| `mini run` / `mini forget` 不认相对路径 | `cd /demo` 之后 `make` 能读到相对名 `makefile`，`mini run hello.svcm` 却报 `rc=-18`（`no such file or mount`） | `cmd_mini` 里先按 shell 的 cwd 解开路径（`shell_vfs_path`），绝对路径解出来仍是原样；故障计数也改用解开后的路径取键 |
-| `-D` 变化不触发重编 | 改 `RAMFS_DEFS` 里的槽数后旧 `.o` 被当成最新，新上限编不进去 | ramfs 的两个数字进 `build/.ldcfg` 指纹（`ramfs=$(ARK_RAMFS_SIG)`），与 `USE_*` 同等对待 |
-
-前两条是"读数会骗人"的典型：一条让编译器把自己的符号表读丢了，一条让**计时**
-变成别的任务 CPU 占比的函数。
-
-## 8. 门禁
-
-`tools/final_app.py` 两条用例，走的都是上面这两段用户路径本身（不是测试专用
-入口），逐条匹配进度行、两行输出、块回收，并禁止
-`FATAL / app run failed / *FAULT`：
+烧写（OpenOCD + DAPLink，本仓库的 `tools/final_app.py` 里有现成封装）：
 
 ```sh
-python tools/final_app.py --noflash --port COM3 --only hello-demo   # A 段
-python tools/final_app.py --noflash --port COM3 --only make-demo    # B 段
-python tools/final_app.py --noflash --port COM3                     # 全部 6 条
+py -3 tools/final_app.py            # 默认会先烧再跑 6 条用例
+py -3 tools/final_app.py --noflash  # 已烧过，只跑用例
 ```
 
-`hello-demo` 里屏幕打印的三条命令与三个 `Step` 逐字同形——否则"照屏幕敲"和
-"这里跑的"就不是同一条命令，闸门证明的东西也就变了。
+### 1.2 工程文件进 NOR（只在换工程时做一次）
 
-## 9. 还没解决的
+NOR 上的东西掉电不丢，所以这一步**不是每次演示都要做**：
 
-- **ARM 后端不产全局/静态初始化数据**（§5.3）。演示源已经绕开（内联字面量），
-  真实工程想要 `static const char *name = "x";` 就会拿到全零。修在编译器仓库，
-  需要单独一轮。
-- **`cc --pack` 的对象槽只有 16 KB**（与镜像缓冲共用）。当前两源 × 5452 B 的
-  负载够用；再大的源要在 `SLOT_RAM_TOTAL=64 KB` 与 `app run` 常占的 16 KB 之间
-  重新分配，不能简单调大。
+```sh
+py -3 tools/mini_deploy.py --port COM3
+```
+
+它把小程序 SDK 的 5 个文件（`start.c`/`mini_main.c`/`rt.c`/`arkrtos.h`/
+`unistd.h`）和工程目录（`example/mini_hello/` 的 `hello.c` + `makefile`）
+一起推进卷根，共 7 个文件、约 17 KB。卷内用短名不是偷懒：`ark make` 的一行
+值上限是 96 字节，四条长路径拼进 `SRCS` 直接超限（板上实测
+`value is longer than the field that holds it`）。
+
+## 2. 板上：`cd` + `make` + `mini run`
+
+上电后 `/mnt/nor` 已经挂好（`ARKRTOS_AUTOMOUNT_NOR`，见 §4），不需要先敲
+`fs mount` / `mount`：
+
+```
+ark@arkrtos:~$ ls /mnt/nor
+  hello.c                  1732
+  makefile                  921
+  start.c                  2763
+  mini_main.c              2197
+  rt.c                     4131
+  arkrtos.h                2827
+  unistd.h                 2331
+ark@arkrtos:~$ cd /mnt/nor
+ark@arkrtos:/mnt/nor$ make
+make: hello.svcm <- start.c (+more)
+make:   src mini_main.c
+make:   src rt.c
+make:   src hello.c
+make:   -I/mnt/nor
+cc: pack 4 sources -> hello.svcm (4 passes, -O1)
+cc:   A 7686 B
+cc:   B 7686 B
+cc:   C 7686 B
+cc:   D 7686 B
+cc:   A +0 is 0xB5E0 (flat image, no vector table; rom base 0x8000000, window 16384 B)
+cc:   entry mode: flat miniapp, entry at +0 (no Reset_Handler)
+cc: hello.svcm: payload 7688 + table 6 x 4 = 7968 B
+cc:   reloc rom 0 / ram 0 / rom_movw 1 / ram_movw 5, entry +0x0
+cc: packed in 8404 ms
+make: ok
+ark@arkrtos:/mnt/nor$ mini run hello.svcm
+MINI:579 /mnt/nor/hello.svcm: 7688 B payload -> code 0x24070000 (8192 B block), RW/stack 0x24074000 (16384 B), task 4
+
+mini running: task 4, code 7688 B in 8192 B @ 0x24070000, RW/stack 16384 B @ 0x24074000
+  running 1 of 2 allowed
+ark@arkrtos:/mnt/nor$ hello, world
+TASK:2584 task 4 exits (self kill)
+MINI:873 task 4 returned: MiniApp finished, code and RAM blocks back in the pool
+ark@arkrtos:/mnt/nor$ mini
+mini: none running (usage: mini run <path>)
+```
+
+四遍差分的每一次耗时约 2.1 s，整条 `make` 8.4 s（四遍 × 4 份源码编译 + 4 次
+链接）。`mini run` 用的是**相对名**：它与 `make` 读 makefile 走同一套路径
+解析（按 shell 的 cwd），cwd 在 `/mnt/nor` 就都能用。
+
+## 3. 这个工程里有什么
+
+### 3.1 `hello.c` —— 标准 POSIX，一句 Ark RTOS 的话都没有
+
+```c
+#include <unistd.h>
+
+#define GREETING "hello, world\n"
+
+void MiniMain(void)
+{
+    (void)write(STDOUT_FILENO, GREETING, sizeof(GREETING) - 1);
+}
+```
+
+它在 Linux 上就是 `cc hello.c && ./hello`。入口叫 `MiniMain()` 而不是
+`main()`：SDK 的 `main()` 调 `MiniMain()`，返回后 `arkrtos_thread_exit()`
+把两块 RAM 交还内核——"进程收尾"由 SDK 负责，和桌面上由 C 运行时 `exit()`
+是一回事。
+
+### 3.2 SDK 的两个源文件 + 一个运行时
+
+| 文件 | 作用 |
+|------|------|
+| `start.c`（源 `arkrtos_mini_start_arkc.c`） | `MINISTART`：调 `__arkcc_init_globals()`（arkc 把全局初值编成一个函数），再调 `main()`，**必须排在 `SRCS` 第一位** |
+| `mini_main.c`（源 `arkrtos_mini_main.c`） | `main()`：`MiniMain()` → `arkrtos_thread_exit()` |
+| `rt.c`（源 `sdk/mini_sdk/arkc/arkrtos_mini_rt_arkc.c`） | POSIX 控制台子集：`write()` / `_exit()`，两条 SVC（`0x1A` 子命令 3 打印、`0x1B` 子命令 3 退出），SVC 号与 `app_sdk/arkrtos_oslib.c` 逐位相同 |
+| `arkrtos.h` / `unistd.h` | arkc 版最小头：`MiniMain()` 声明、`arkrtos_thread_exit()`、`STDOUT_FILENO`、`write`/`_exit` |
+
+**为什么不用完整的 `arkrtos_posix.c`**：那份 3600 行，需要 `stdarg`（arkc 没有
+varargs），还拖着 socket / VFS 两条链，而小程序的**整份负载要搬进 RAM 执行**，
+8 KB 代码块装不下。所以这里只提供 POSIX 的控制台子集，并把没有的东西如实
+写在 `unistd.h` 里（没有 stdio、没有 open/read、没有 fork）。
+
+### 3.3 `makefile`（921 B，就在 NOR 卷根）
+
+```
+TARGET = hello
+OUT    = hello.svcm
+SRCS   = start.c mini_main.c rt.c hello.c
+INCS   = /mnt/nor
+```
+
+`ark make` 只认 `NAME = value` / `NAME += value` / `#` 三种行，参数上限是
+`ARKMAKE_MAX_SRCS=4`、`ARKMAKE_MAX_INCS=8`、一行值 96 字节。
+
+## 4. 上电就挂好 `/mnt/nor`（`ARKRTOS_AUTOMOUNT_NOR`）
+
+板上的 "fstab"：boot 时 VFS 起来之后挂 NOR 卷到 `/mnt/nor`，控制台一起就能
+`cd` 过去。开关默认 **0**（不挂、不打印、不碰 littlefs 与 VFS 的挂载路径，
+控制台第一屏与命令表逐字节不变），板级构建把它绑在 `USE_QSPI` 上——有 NOR
+才有卷。挂不上不拦启动（空片、没焊芯片都要能进控制台自己问），只打一行：
+
+```
+FAIL BOOT: cannot mount nor0 at /mnt/nor: -5 (...); the console still comes up, run 'fs mount' / 'nor info'
+```
+
+## 5. 已知限制（都不是"再调调就好"）
+
+1. **一个 `make` 最多 4 个源文件**（`ARKMAKE_MAX_SRCS`）。要更多得改 `cc_pack`
+   的对象槽分配——那 16 KB 对象区要按源数均分。
+2. **`SRCS` 的第一个必须是启动桩**：小程序没有复位向量（被内核当任务起来，
+   栈由 `mini run` 从 RAM 块给），入口就是负载 `+0`。打包时会校验 `+0` 是
+   THUMB `PUSH`（`0xB5Ex`），不是就拒绝出镜像——不猜入口。
+3. **多个对象里只能有一个拥有 `.data/.bss`**：`-link` 不搬数据段，
+   两个对象都放 RW 会撞同一个地址并**报错**（实测）：`SRAM overlap between
+   objects #2 and #3`。所以 `write()` 的 96 字节缓冲放在 `rt.c` 里，工程自己
+   别再声明带初值的全局。
+4. **平铺镜像没有向量表**：入口偏移恒为 0，`mini run` 的栈来自 RAM 块，
+   镜像头里的 SP/入口字段与它无关。`cc --pack` 对**定义了 `Reset_Handler`**
+   的镜像仍走"留 0x400 洞 + `-link` 填表"那条老路（M2 用例就是它），两条
+   路由对象自己的符号表判定，不靠声明。
+5. **控制台输出是 NUL 结尾字符串**：`write()` 分块拷贝补 `\0`，所以往控制台
+   打二进制不在此列（`unistd.h` 里写明了）。
+6. **`printf` 不可用**：arkc 没有 varargs，SDK 的格式化器
+   （`arkrtos_ulog.h`）在 `__ARK_CC__` 下整段排除。要输出就用 `write()`。
+
+## 6. 这条演示的回归用例
+
+`tools/final_app.py` 里两条：
+
+| 用例 | 判什么 |
+|------|--------|
+| `mini-sdk-nor-make` | `ls /mnt/nor` 能看到工程文件（证明上电自动挂载）→ `hello` **command not found**（反假绿）→ `cd /mnt/nor && make`（四遍、`entry mode: flat miniapp`、`payload + table`）→ `mini run hello.svcm` 打出 `hello, world` 且两块 RAM 归还 |
+| `mini-sdk-missing-minimain` | 工程没定义 `MiniMain` 时必须 `unresolved symbol "MiniMain"` + `cc: pass A failed`；**不许**"报错但照样出文件"（链接器以前只报诊断、仍写出镜像，四遍照做，最后在打包阶段报一个不相干的 -33） |
+
+## 7. 其它相关文档
+
+- M1/M2（固定窗口直跑、四遍差分打包原理）：[arkc板上直跑-M2可重定位镜像.md](arkc板上直跑-M2可重定位镜像.md)
+- QSPI NOR 与 littlefs 卷：[arkc板上直跑-M3b-QSPI持久化.md](arkc板上直跑-M3b-QSPI持久化.md)
+- `ark make` 本身：[ark make-板上构建工具.md](ark make-板上构建工具.md)
+- 开关总表：[功能开关.md](功能开关.md)

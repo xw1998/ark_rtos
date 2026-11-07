@@ -407,7 +407,8 @@ const char *arkrtos_apppack_error_name(int32 code)
         case ARKRTOS_APPPACK_ERR_DIFF:   return "a payload offset cannot be explained by one base delta (not relocatable)";
         case ARKRTOS_APPPACK_ERR_VERIFY: return "relocating A with the built table does not reproduce D";
         case ARKRTOS_APPPACK_ERR_SIZE:   return "relocation table or output buffer too small";
-        case ARKRTOS_APPPACK_ERR_ENTRY:  return "no usable vector table at payload +0/+4 (compile with --vector-table)";
+        case ARKRTOS_APPPACK_ERR_ENTRY:  return "no usable entry: +0/+4 is not a vector table and "
+                                                "+0 is not a mini start-stub prologue (0xB5E0)";
         default:                         return "unknown";
     }
 }
@@ -462,23 +463,43 @@ int32 arkrtos_apppack_build(const uint8 *a, const uint8 *b, const uint8 *c,
         return ARKRTOS_APPPACK_ERR_SIZE;
     }
 
-    /* 向量表契约：+0 = 初始 SP（应落在 RAM 窗口内）、+4 = 入口（应落在载荷内）。
-     * 这两条同时不成立，说明这份负载不是用 --vector-table 产的，入口无从确定。 */
+    /* 入口有两种合法形态，只能靠负载自己的字节分辨——不能用「调用方说是
+     * 小程序所以肯定没有向量表」这种声明：`cc --pack` 的同一条路径既打过
+     * 带 Reset_Handler 的镜像（有表），也打小程序（没有表），源码里没有
+     * 额外的入口标志位，多造一个参数就等于让调用方去猜。
+     *
+     *   (1) 带向量表：+0 = 初始 SP（落在 RAM 窗口内）、+4 = 入口（Thumb 位为 1、
+     *       落在载荷内、且不落在表自己那 8 个字节上）。
+     *
+     *   (2) 平铺的小程序：没有复位向量——它是被内核当任务起来的（栈由 mini run
+     *       从 RAM 块里给，见 arkrtos_mini.c），负载 +0 就是 MINISTART 的第一条
+     *       指令，入口偏移恒为 0。这一种必须**正面认出**启动桩的序言
+     *       （THUMB PUSH：0xB4xx / 0xB5xx，SDK 里实测 0xB5E0），认不出就报错：
+     *       那说明 SRCS 的第一个不是启动桩，入口是错的，而错入口要到板上跑起来才炸。
+     *
+     * 顺序不能倒，也不能只留 (2)：先判 (1)，三个条件同时成立时把一份带表的
+     * 镜像误判成平铺镜像是不可能的（RAM 窗口在 0x24xxxxxx，而 PUSH 的机器码
+     * 是 0x0000B5E0 这一档）。
+     */
     sp = apppack_rd32(a);
-    entry_value = apppack_rd32(a + 4u) & ~1u;
+    entry_value = apppack_rd32(a + 4u);
 
-    if((sp < win->ram_base) || (sp > (win->ram_base + win->ram_size)))
+    if((sp >= win->ram_base) && (sp <= (win->ram_base + win->ram_size)) &&
+       ((entry_value & 1u) != 0u) &&
+       ((entry_value & ~1u) >= win->rom_base) &&
+       (((entry_value & ~1u) - win->rom_base) >= 8u) &&
+       (((entry_value & ~1u) - win->rom_base) < len))
+    {
+        entry_off = (entry_value & ~1u) - win->rom_base;
+    }
+    else if((apppack_rd32(a) & 0xFE00u) == 0xB400u)
+    {
+        entry_off = 0u;
+    }
+    else
     {
         return ARKRTOS_APPPACK_ERR_ENTRY;
     }
-
-    if((entry_value < win->rom_base) ||
-       ((entry_value - win->rom_base) >= len))
-    {
-        return ARKRTOS_APPPACK_ERR_ENTRY;
-    }
-
-    entry_off = entry_value - win->rom_base;
 
     /* 第一遍只数：表有多大决定负载起点，也决定输出缓冲够不够。 */
     count.n_rom      = 0u;

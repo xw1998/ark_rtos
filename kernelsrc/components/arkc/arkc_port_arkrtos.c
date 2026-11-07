@@ -160,6 +160,12 @@ typedef struct {
     uint8_t *buf;
     uint32_t cap;
     uint32_t len;
+    /* ARKOBJ2 头里那个"代码长度"，在**写的那一刻**从写进来的字节里记下。
+     * 不在读完后再回读地算：板上实测过回读拿到空槽（-pp 三源时第三槽读成 0，
+     * 而编译器明明写了 2560 字节的对象，两行日志之间地内容又对得上）。
+     * 长度是"写进去的那份字节自己说的"，记账就该记在它身上，不该依赖
+     * "写完立刻能读回来"这个假设。 */
+    uint32_t code_size;
     int      used;
 } arkc_vfile_t;
 
@@ -190,6 +196,7 @@ void arkc_port_vfile_clear(void)
         s_vfile[i].buf     = 0;
         s_vfile[i].cap     = 0u;
         s_vfile[i].name[0] = '\0';
+        s_vfile[i].code_size = 0u;
     }
 }
 
@@ -213,10 +220,11 @@ int arkc_port_vfile_register(const char *name, uint8_t *buf, uint32_t cap)
             continue;
         }
         memcpy(s_vfile[i].name, name, (size_t)n + 1u);
-        s_vfile[i].buf  = buf;
-        s_vfile[i].cap  = cap;
-        s_vfile[i].len  = 0u;
-        s_vfile[i].used = 1;
+        s_vfile[i].buf       = buf;
+        s_vfile[i].cap       = cap;
+        s_vfile[i].len       = 0u;
+        s_vfile[i].code_size = 0u;   /* 还没写过，读长度必须先报"读不出" */
+        s_vfile[i].used      = 1;
         return 0;
     }
     return -1;                         /* table full */
@@ -227,6 +235,15 @@ uint32_t arkc_port_vfile_size(const char *name)
     arkc_vfile_t *vf = vfile_find(name);
 
     return (vf != 0) ? vf->len : 0u;
+}
+
+uint32_t arkc_port_vfile_code_size(const char *name)
+{
+    arkc_vfile_t *vf = vfile_find(name);
+
+    /* 0 = 读不出（名字没注册 / 还没写过 / 写进来的不是 ARKOBJ2）。
+     * 三个都返回同一个 0，因为调用方对它们的处置完全相同：停下，不猜长度。 */
+    return (vf != 0) ? vf->code_size : 0u;
 }
 
 #endif /* ARKRTOS_USE_APPPACK */
@@ -553,6 +570,16 @@ int fs_write_file(const char *path, const unsigned char *data, int len)
                 memcpy(vf->buf, data, (size_t)len);
             }
             vf->len = (uint32_t)len;
+            /* 代码长度从**写进来的字节**里取（见 arkc_vfile_t 的说明）。 */
+            vf->code_size = 0u;
+            if ((len >= 12) && (data[0] == 'A') && (data[1] == 'R') &&
+                (data[2] == 'K') && (data[3] == 'O') && (data[4] == 'B') &&
+                (data[5] == 'J') && (data[6] == '2') && (data[7] == '\n')) {
+                vf->code_size = (uint32_t)data[8] |
+                                ((uint32_t)data[9] << 8) |
+                                ((uint32_t)data[10] << 16) |
+                                ((uint32_t)data[11] << 24);
+            }
             return len;
         }
     }
@@ -633,6 +660,41 @@ static int list_cb(const char *name, const arkrtos_vfs_stat_t *st, void *arg)
         ark_log("  %s\n", name);
     }
     ctx->count++;
+    return 0;
+}
+
+/* ------------------------------------------------------------
+ * 上一次编译的符号表（只给 "cc --pack" 的入口判定用）
+ *
+ * arkc 的 ARM 后端在每次组装结束时把本单元的标签表留在 g_arm_syms 里，
+ * 直到下一次编译开头才清（cc_reset_state）。这两个 getter 是它公开的读口
+ * （backend_arm.c 里非 static），write_ark_obj() 写对象时用的就是它们——
+ * 所以这里读的不是替身，而是同一份事实。
+ * ------------------------------------------------------------ */
+extern int         arm_get_symbol_count(void);
+extern const char *arm_get_symbol_name(int idx);
+
+int arkc_port_last_object_has_symbol(const char *name)
+{
+    int i;
+    int n;
+
+    if ((name == NULL) || (name[0] == '\0'))
+    {
+        return 0;
+    }
+
+    n = arm_get_symbol_count();
+    for (i = 0; i < n; i++)
+    {
+        const char *s = arm_get_symbol_name(i);
+
+        if ((s != NULL) && (strcmp(s, name) == 0))
+        {
+            return 1;
+        }
+    }
+
     return 0;
 }
 

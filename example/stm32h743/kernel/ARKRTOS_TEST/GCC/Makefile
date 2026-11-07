@@ -60,10 +60,6 @@ USE_SDRAM  ?= 0
 # 不在这里。默认 0：关掉时那个源文件编出为空目标，
 # 镜像与命令表逐字节不变。
 USE_APPRUN ?= 0
-# 一条命令的 POSIX hello world 演示（`hello`）：把源码写进 /tmp、用板上 cc
-# 编+链、再交给 app run。默认 0：关掉时命令表与镜像逐字节不变；开它必须同时
-# 开 USE_APPRUN=1 与 USE_ARKC=1（否则 arkrtos_features.h 里 #error）。
-USE_HELLO ?= 0
 # 小程序读镜像的后端：0 = arkrtos_fs（littlefs 卷，与引入开关前逐字节一致）；
 # 1 = VFS 命名空间（含板上编译器写产物的 /tmp ramfs）。判据在
 # docs/arkc编译产物上板运行-实施计划.md 的 M3-a：默认关时行为不变。
@@ -117,9 +113,10 @@ DEFS := \
   -DARKRTOS_USE_SDRAM=$(USE_SDRAM) -DARKRTOS_USE_QSPI=$(USE_QSPI) \
   -DARKRTOS_SHELL_BOARD_CMDS=$(BOARD_CMDS) \
   -DARKRTOS_USE_APPRUN=$(USE_APPRUN) \
-  -DARKRTOS_USE_HELLO=$(USE_HELLO) \
   -DARKRTOS_MINI_READ_VFS=$(USE_MINI_VFS) \
-  -DARKRTOS_USE_APPPACK=$(USE_APPPACK)
+  -DARKRTOS_USE_APPPACK=$(USE_APPPACK) \
+  -DARKRTOS_PACK_IN_EXTRAM=$(USE_SDRAM) \
+  -DARKRTOS_AUTOMOUNT_NOR=$(USE_QSPI)
 
 ifneq ($(MINI_PRIORITY),)
 DEFS += -DARKRTOS_MINI_TASK_PRIORITY=$(MINI_PRIORITY)
@@ -328,7 +325,7 @@ else
 ARK_RAMFS_SIG = 16k-3
 endif
 
-SWITCH_SIG = ark=$(USE_ARKC) vim=$(USE_ARKVIM) make=$(USE_ARKMAKE) sdram=$(USE_SDRAM) apprun=$(USE_APPRUN) hello=$(USE_HELLO) apppack=$(USE_APPPACK) qspi=$(USE_QSPI) ramfs=$(ARK_RAMFS_SIG) mini=$(MINI_PRIORITY)
+SWITCH_SIG = ark=$(USE_ARKC) vim=$(USE_ARKVIM) make=$(USE_ARKMAKE) sdram=$(USE_SDRAM) apprun=$(USE_APPRUN) apppack=$(USE_APPPACK) qspi=$(USE_QSPI) automount=$(USE_QSPI) ramfs=$(ARK_RAMFS_SIG) mini=$(MINI_PRIORITY)
 
 $(BUILD)/.ldcfg: FORCE
 	@mkdir -p $(BUILD)

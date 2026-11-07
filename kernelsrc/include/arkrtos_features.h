@@ -370,6 +370,24 @@
 #define ARKRTOS_USE_QSPI                0
 #endif
 
+/* 开机就把 NOR 卷挂到 /mnt/nor（相当于板上的 fstab）。
+ *
+ * 为什么要它：工程文件放在 NOR 上，`cd /mnt/nor && make` 才是「Linux 体验」；
+ * 每次上电先敲 `fs mount` + `mount /mnt/nor` 两条命令不是。
+ *
+ * 默认 0：不挂载、不打印、不碰 littlefs 与 VFS 的挂载路径——控制台的第一屏
+ * 与命令表逐字节不变。板级构建把它跟 USE_QSPI 绑在一起（有 NOR 才有卷）。
+ * 依赖：USE_QSPI=1（块设备 nor0）、USE_FS=1、USE_VFS=1、USE_VFS_LFS=1。 */
+#ifndef ARKRTOS_AUTOMOUNT_NOR
+#define ARKRTOS_AUTOMOUNT_NOR           0
+#endif
+
+/* 挂到哪里。写成一个宏是因为「板上有几个卷、各挂在哪」是布局问题，
+ * 不该埋在代码里；改挂载点只改这里。 */
+#ifndef ARKRTOS_AUTOMOUNT_NOR_POINT
+#define ARKRTOS_AUTOMOUNT_NOR_POINT     "/mnt/nor"
+#endif
+
 /* On-board app runner: `app run <path>` takes a bare arkc-produced executable
  * out of the file system, drops it into the fixed window declared by the board
  * partition header (ARKRTOS_APPRUN_*) and starts it as an unprivileged task.
@@ -380,13 +398,6 @@
 #define ARKRTOS_USE_APPRUN              0
 #endif
 
-/* One-command POSIX hello world demo (`hello`): drops hello.c/hello.sct into
- * the VFS /tmp, compiles and links it with the on-board `cc`, then hands the
- * image to `app run`.  Off by default: at 0 the command does not exist and
- * neither the sources nor the command table entry are compiled in. */
-#ifndef ARKRTOS_USE_HELLO
-#define ARKRTOS_USE_HELLO               0
-#endif
 
 /* ============================================================
  * 五、依赖校验
@@ -401,20 +412,20 @@
 #error "ARKRTOS_USE_MINIAPP=1 requires ARKRTOS_USE_FS=1 (a MiniApp is loaded from the file system)"
 #endif
 
+#if ARKRTOS_AUTOMOUNT_NOR && (!ARKRTOS_USE_QSPI || !ARKRTOS_USE_FS || !ARKRTOS_USE_VFS)
+#error "ARKRTOS_AUTOMOUNT_NOR=1 requires ARKRTOS_USE_QSPI=1 (blk dev nor0), ARKRTOS_USE_FS=1 and ARKRTOS_USE_VFS=1"
+#endif
+
+#if ARKRTOS_AUTOMOUNT_NOR && !ARKRTOS_USE_VFS_LFS
+#error "ARKRTOS_AUTOMOUNT_NOR=1 requires ARKRTOS_USE_VFS_LFS=1 (the littlefs -> ark_vfs bridge is what mounts a volume)"
+#endif
+
 #if ARKRTOS_MINI_READ_VFS && !ARKRTOS_USE_VFS
 #error "ARKRTOS_MINI_READ_VFS=1 requires ARKRTOS_USE_VFS=1 (the image is read through the VFS namespace)"
 #endif
 
 #if ARKRTOS_USE_APPRUN && !ARKRTOS_USE_VFS
 #error "ARKRTOS_USE_APPRUN=1 requires ARKRTOS_USE_VFS=1 (the program is read from the file system)"
-#endif
-
-#if ARKRTOS_USE_HELLO && !ARKRTOS_USE_APPRUN
-#error "ARKRTOS_USE_HELLO=1 requires ARKRTOS_USE_APPRUN=1 (the demo ends in 'app run')"
-#endif
-
-#if ARKRTOS_USE_HELLO && !ARKRTOS_USE_ARKC
-#error "ARKRTOS_USE_HELLO=1 requires ARKRTOS_USE_ARKC=1 (the demo compiles on the board)"
 #endif
 
 /* 并发数要么是 1（退化成原来的单实例），要么必须落在共享表数组的容量内：

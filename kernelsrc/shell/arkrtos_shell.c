@@ -4366,7 +4366,7 @@ static int cmd_mini(int argc, char *argv[])
     {
         /* 相对路径先按 shell 的当前目录解开，和 ls/cat/rm/cc 一致。
          * 之前这里把 argv[2] 原样交给装载器，而装载器只认文件系统里的路径：
-         * 于是 `cd /demo` 之后 `make` 能从相对名读到 makefile、`mini run
+         * 于是 `cd /mnt/nor` 之后 `make` 能从相对名读到 makefile、`mini run
          * hello.svcm` 同一目录下却报 rc=-18「no such file or mount」——
          * 两条路对同一个字符串给出相反答案，是最难查的一类不一致。
          * 绝对路径解出来仍是原样，行为逐字节不变。

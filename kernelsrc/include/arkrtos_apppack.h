@@ -94,6 +94,14 @@ typedef struct {
 * @note delta 要求 >= 两个窗口：delta 小于窗口时 B/C 的地址段会与 A 重叠，
 *       「该位置的值恰好差 delta」就不再是「它是个绝对地址」的证据——重叠段里
 *       一个普通常量也可能满足。这不是保守，是判据成立的前提。
+* @note 入口有两种合法形态，由负载自己的字节判定（不接受「调用方声明」，因为
+*       `cc --pack` 的同一条路径既打应用镜像也打小程序）：
+*       ① 带向量表：+0 = 初始 SP（落在 RAM 窗口内）、+4 = 入口（Thumb 位为 1、
+*          落在载荷内、且不落在表本身那 8 字节上）⇒ entry_offset 取 +4 的值；
+*       ② 平铺小程序：没有复位向量（栈由 mini run 给），+0 就是启动桩的第一条
+*          指令 ⇒ 只有在 +0 认出 THUMB PUSH（0xB4xx/0xB5xx，SDK 实测 0xB5E0）
+*          时才接受，entry_offset = 0。
+*       两条都不成立报 ARKRTOS_APPPACK_ERR_ENTRY，不猜入口。
 * @note 本函数不校验 D 的来源：D 必须由同一个 delta 与同一份源码链接得到，
 *       否则 verify 会失败并报 ARKRTOS_APPPACK_ERR_VERIFY（这已经足够，
 *       不需要额外声明一个「你是不是真的这么链的」参数）。

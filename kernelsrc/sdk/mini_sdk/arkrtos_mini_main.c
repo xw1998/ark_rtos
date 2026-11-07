@@ -11,9 +11,25 @@
 
 #include "arkrtos.h"
 
+/* 【arkc 为什么没有这一份默认实现】
+ * 这里本来是一个 `ARKRTOS_WEAK void MiniMain(void) {}`，让没定义 MiniMain 的
+ * 小程序也能链接。在 Keil / GCC 下它是对的：那个空实现与 main() 不在同一个
+ * 翻译单元，链接器按"强符号覆盖弱符号"把 main() 的调用改到工程给的那份。
+ *
+ * arkc 不是这样工作的：它把每个 .c 编成一个自包含对象（代码 + 符号表），
+ * **同一个翻译单元内**对已定义符号的调用在汇编期就绑死了，链接期不再改。
+ * 于是空实现与 main() 同处一文件时，main() 调的就是这个空函数——工程自己
+ * 那份强 MiniMain 永远进不来。板上实测：不打印、创建当拍就退出（不报错，
+ * 也没有任何诊断），比链接失败难查得多。
+ *
+ * 所以 arkc 档**不提供默认实现**：小程序必须自己定义 MiniMain()，没定义就
+ * 在链接期报 `undefined symbol MiniMain`——这正是想要的答案。
+ * 用别的工具链（Keil / GCC）时这个宏不成立，行为与本文件旧版逐字节相同。 */
+#if !defined(__ARK_CC__)
 ARKRTOS_WEAK void MiniMain(void)
 {
 }
+#endif
 
 int main(void)
 {

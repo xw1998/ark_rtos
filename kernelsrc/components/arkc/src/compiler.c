@@ -1533,6 +1533,8 @@ int ark_compile(const ArkOptions *opts) {
             /* Resolve cross-object relocations via find_global (strong > weak) */
             {
                 int ri;
+                int unresolved = 0;
+
                 for (ri = 0; ri < g_ld_reloc_count; ri++) {
                     int idx;
                     if (g_ld_relocs[ri].type == 6 || g_ld_relocs[ri].type == 12)
@@ -1544,10 +1546,22 @@ int ark_compile(const ArkOptions *opts) {
                     if (idx >= 0)
                         ld_patch_ref(out_buf, out_len, g_ld_relocs[ri].offset,
                                      g_ld_syms[idx].offset, g_ld_relocs[ri].type);
-                    else
+                    else {
                         diag_tool(DIAG_SEV_ERROR, g_ld_image,
                                   "unresolved symbol %sq", g_ld_relocs[ri].name,
                                   0,0,0,0,0);
+                        unresolved++;
+                    }
+                }
+
+                /* 有未解析符号就**不能**写出镜像。以前这里只报诊断、照样写文件：
+                 * 产出的镜像每一处未解析引用都是错地址，但它能装载、能跑，只是
+                 * 调用跳到别处 —— 那是最坏的一种「看起来成功」。板上实测过的
+                 * 后果：小程序漏定义 MiniMain 时，链接"成功"、四遍差分照做，
+                 * 最后在打包阶段报一个不相干的 -33，看输出的人根本看不出根因
+                 * 是"少了一个符号"。宁可在这里失败。 */
+                if (unresolved > 0) {
+                    return ARK_ERR_LINK;
                 }
             }
             if (ld_table_overflow > 0) {

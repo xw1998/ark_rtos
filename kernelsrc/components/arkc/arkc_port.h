@@ -73,6 +73,31 @@ uint32_t arkc_port_capture_end(void);
 int      arkc_port_vfile_register(const char *name, uint8_t *buf, uint32_t cap);
 void     arkc_port_vfile_clear(void);
 uint32_t arkc_port_vfile_size(const char *name);
+
+/* 上一次编译（-c）产出的对象里有没有叫 name 的符号。
+ *
+ * 存在的原因具体且只有一条：“cc --pack” 的第一个对象要不要预留
+ * 0x400 的向量表洞，取决于**它自己定没定义 Reset_Handler**——定义了就必须
+ * 留洞给 -link 填表，没定义说明这是平铺的小程序（没有复位向量），留洞只是
+ * 白长 0x400 而且没人填。这个事实只有刚编完的符号表能回答，去搜源码文本
+ * 或者去猜都是在赌。
+ *
+ * 返回 1 = 有，0 = 没有（名字空/参数非法也算没有）。
+ * 只在“刚编完、还没开始下一份”的窗口里有效：arkc 在下一次编译的 cc_reset_state
+ * 里清表（那是它自己的约定，不是本端口造成的）。 */
+int      arkc_port_last_object_has_symbol(const char *name);
+
+/* 内存对象里代码段的长度（ARKOBJ2 头 +8 的那个 u32）。
+ *
+ * 为什么要这个入口，而不是让调用方自己去算「对象槽在哪儿」：那个槽位偏移在
+ * 两边各算一遍（注册时一次、读长度时一次），只要有一处算法漂了，读到的就是
+ * 别的槽的字节——板上实测过：三个源时第三槽被读成 0，报"对象 0 字节"，
+ * 而编译器明明写了 2560 字节。槽的地址只有注册它的那个端口知道，长度就该从
+ * 那条路读。（顺带也把「对象头格式」这件事收在一个文件里。）
+ *
+ * 返回 0 表示"读不出"：名字没注册、长度不足一个头、或头不是 ARKOBJ2。
+ * 这三种都得由调用方当失败，不能当成"0 字节的对象"。 */
+uint32_t arkc_port_vfile_code_size(const char *name);
 #endif
 
 #endif /* ARKC_PORT_H */

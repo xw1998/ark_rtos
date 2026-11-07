@@ -37,7 +37,14 @@
 #include "arkrtos_types.h"
 #include "arkrtos_log_defs.h"
 #include "arkrtos_ushell.h"        /* 描述符与接口（与内核分发层共用同一份定义） */
+/* arkc（板上编译器）没有 varargs：__builtin_va_list / va_start 都还没有实现，
+ * 所以这一整段「在用户侧格式化」的内联实现它编不过去。它也不需要——板上小程序
+ * 打印走 POSIX 的 write()，不走来这里的 log/shell 格式化。
+ * 判据用 arkc 自己预定义的 __ARK_CC__（src/preproc.c 的内置宏表），
+ * 其它工具链看到的仍然是同一份头、同一个字节序列。 */
+#if !defined(__ARK_CC__)
 #include <stdarg.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,6 +58,12 @@ extern "C" {
 
 /* 内联限定：AC5 只认 __inline；两者都接受 unused 属性，避免未使用告警 */
 #define ARKRTOS_UFMT_INLINE  static __inline __attribute__((unused))
+
+#if defined(__ARK_CC__)
+/* arkc 没有 va_list，格式化器整段不参与编译（见上面 include 处的说明）。
+ * 剩下的接口声明仍然给出来，调用方编译期就能看到名字；真调用会在链接期
+ * 报 undefined symbol —— 那比"编过了但运行期什么都不打"要诚实。 */
+#else
 
 /* ============================================================
  * 迷你格式化器（常用子集）
@@ -365,6 +378,8 @@ ARKRTOS_UFMT_INLINE int32 arkrtos_shell_printf(const char *fmt, ...)
         (void)arkrtos_ufmt(arkrtos_ulog_buf_, sizeof(arkrtos_ulog_buf_), __VA_ARGS__); \
         (void)arkrtos_shell_print(arkrtos_ulog_buf_);                              \
     } while(0)
+
+#endif /* defined(__ARK_CC__) */
 
 #ifdef __cplusplus
 }

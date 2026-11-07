@@ -338,7 +338,7 @@ static void arkrtos_kernel_init(void)
          *
          * 默认改 1（2026-11-07）：这块 FK743M5-XIH6 的内存通路已经过验证
          * （缺的是 FMC_BCR1.FMCEN，见 drvfmc.c），而 "跳过 VFS" 的代价比
-         * 想象的大得多——没有 VFS 就没有 /tmp，`hello` 连源文件都写不进去，
+         * 想象的大得多——没有 VFS 就没有 /tmp，`mini run` 连源文件都读不到，
          * 而控制台上只看到 `ls: no mount`，看不出根因在 SDRAM。 换一块未验证
          * 的板时把它设回 0 再看 "sdram regs/fsm"。 */
 #ifndef ARKRTOS_SDRAM_VERIFY_AT_BOOT
@@ -365,6 +365,38 @@ static void arkrtos_kernel_init(void)
                            arkrtos_vfs_error_name(vfs_rc));
             }
         }
+
+#if (ARKRTOS_AUTOMOUNT_NOR == 1)
+        /* 板上的 fstab：NOR 卷挂到 /mnt/nor，控制台一起来就能
+         * "cd /mnt/nor && make"，不用先敲 fs mount + mount。
+         *
+         * 挂不上不拦启动：卷可能是空片（没 format），也可能这块板根本没焊
+         * NOR。那两种都要能进控制台自己去问（`nor info` / `mount`），所以这里
+         * 只报一行、把个子命令级的失败留给现场，不在这里假装成功。
+         *
+         * 顺序：vfs_init 之后（先有 /mnt 这层命名空间），且只在 VFS 没被跳过
+         * 时才有意义——SDRAM 没验过时 VFS 起不来，挂载点也就不存在。 */
+        if((skip_vfs == 0) && (vfs_rc == 0))
+        {
+            int32 mrc = arkrtos_vfs_mount_volume(ARKRTOS_FS_DEV_NAME,
+                                                 (uint32)ARKRTOS_FS_BASE,
+                                                 (uint32)ARKRTOS_FS_SIZE,
+                                                 ARKRTOS_AUTOMOUNT_NOR_POINT);
+
+            if(mrc == 0)
+            {
+                ARKRTOS_LOGI("BOOT", "%s mounted at %s",
+                           ARKRTOS_FS_DEV_NAME, ARKRTOS_AUTOMOUNT_NOR_POINT);
+            }
+            else
+            {
+                ARKRTOS_LOGE("BOOT", "cannot mount %s at %s: %d (%s); "
+                           "the console still comes up, run 'fs mount' / 'nor info'",
+                           ARKRTOS_FS_DEV_NAME, ARKRTOS_AUTOMOUNT_NOR_POINT,
+                           (int)mrc, arkrtos_vfs_error_name(mrc));
+            }
+        }
+#endif /* ARKRTOS_AUTOMOUNT_NOR */
     }
 #endif /* ARKRTOS_USE_VFS */
 

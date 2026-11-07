@@ -40,16 +40,13 @@
 #include <stdint.h>
 #include <string.h>
 
-#if (ARKRTOS_USE_APPPACK == 1) || (ARKRTOS_USE_HELLO == 1)
+#if (ARKRTOS_USE_APPPACK == 1)
 #include "arkrtos_vfs.h"           /* removes the temporary .sct again */
 #endif
 #if (ARKRTOS_USE_APPPACK == 1)
 #include "include/flash_fs.h"      /* fs_write_file / fs_last_error */
 #include "arkrtos_apppack.h"       /* the four-pass diff itself (pure) */
 #include "arkrtos_ptable.h"        /* four payloads + the image come from the pool */
-#endif
-#if (ARKRTOS_USE_HELLO == 1)
-#include "arkrtos_apprun.h"        /* the demo hands its image to 'app run' */
 #endif
 
 /* --scatter / --vector-table / -link are the "layout" options and have two
@@ -171,14 +168,50 @@ static int cc_bad_option(const char *what, const char *arg)
  * arkc_port.h): ramfs has 3 slots and one littlefs write costs ~10 s).
  *
  * Memory: 4 x 8 KB payloads + 16 KB of object slots/output, borrowed from the
- * pool and returned on every path.
+ * pool and returned on every path -- unless ARKRTOS_PACK_IN_EXTRAM is on, in
+ * which case the same buffers live in the external SDRAM (see below).
  * ============================================================ */
 
-/* One payload may not exceed the app-run code window; four of them are one
- * 32 KB block of the pool. */
+/* --pack 的缓冲放在哪：片内 RAM 池（默认）还是外置 SDRAM。
+ *
+ * 为什么要第二条路：池是 SLOT_RAM（64 KB 伙伴分配），一次借出受
+ * SLOT_RAM_MAX_BLOCK=32 KB 限制，而 app run 的 16 KB 窗口平时就占着，于是
+ * 只剩「4 x 8 KB 负载窗 + 16 KB 对象/镜像」这一种拼法。**负载一旦超过
+ * 8 KB 就编不出来**——实测四个源（小程序 SDK 的启动桩 + main + 运行时 +
+ * 一个 hello）合计 9.0 KB，报
+ *   "hello.c produced 1728 B at +0x1B52, which does not fit the 8192 B window"
+ * 而同一块板子上有 32 MB 外置 SDRAM，编译器自己的 arena（.ark_buf, 4 MB）
+ * 就在里面。把打包的四份负载与对象/镜像缓冲一起挪进 SDRAM 之后，窗口可以
+ * 开到 16 KB，池则完全不被占用（小程序装载要的 16 KB 不再和打包抢）。
+ *
+ * 默认 0：与引入这个开关之前逐字节相同。板级构建用 USE_SDRAM=1 打开它，
+ * 因为 .extram 段只在 SDRAM 档的链接脚本里存在。 */
+#ifndef ARKRTOS_PACK_IN_EXTRAM
+#define ARKRTOS_PACK_IN_EXTRAM  0
+#endif
+
+/* 缓冲的落点：.extram（NOLOAD，SDRAMFS 分区）还是片内池。两种档的窗口大小
+ * 也不同 —— SDRAM 有地方，就按小程序装载上限（SLOT_RAM_MAX_BLOCK = 32 KB，
+ * 取 2 的幂）给到 16 KB。 */
+#if (ARKRTOS_PACK_IN_EXTRAM == 1)
+#define CC_PACK_EXTRAM_ATTR  __attribute__((section(".extram")))
+#define CC_PACK_WIN_SIZE     16384u
+#else
+#define CC_PACK_EXTRAM_ATTR
 #define CC_PACK_WIN_SIZE     8192u
+#endif
+
 /* 256 header + 1024 x 4 table + 8192 payload = 12544 -> one 16 KB block. */
 #define CC_PACK_OUT_CAP      16384u
+
+#if (ARKRTOS_PACK_IN_EXTRAM == 1)
+/* 四份负载 + 对象/镜像缓冲，全部在 SDRAM 里静态常驻：一次打包用一块固定的
+ * 86 KB，不向池借，也就不存在"借了没还"（下一次打包失败的那种最坏形态）。
+ * 代价是这 86 KB 一直占着 .extram —— 那块是 6 MB 的 SDRAMFS 分区，ramfs 用掉
+ * 5.5 MB 之后仍装得下（实测 93%）。 */
+#define CC_PACK_EXTRAM_SIZE  (4u * CC_PACK_WIN_SIZE + CC_PACK_OUT_CAP)
+static uint8_t s_cc_pack_extram[CC_PACK_EXTRAM_SIZE] CC_PACK_EXTRAM_ATTR;
+#endif
 /* Objects of one pass, one slot per source. */
 #define CC_PACK_MAX_SRCS     4
 /* 对象槽不是每槽固定 4 KB：一个 3 函数的对象带上 0x400 的向量表洞实测 4247 B
@@ -306,6 +339,22 @@ static int cc_pack_vfiles(uint8_t *obj_arena, int n_srcs)
         }
     }
     return 0;
+}
+
+/* 一份对象编失败 → 一行能定位的说明。单独成函数只为一件事：第一个对象可能
+ * 编两遍（先平铺、再带洞），失败分支不能因此抄成两份、更不能只改一份。 */
+static void cc_pack_obj_fail(char tag, const char *src, int got)
+{
+    if (got == -3) {
+        ark_shell_printf("cc: pass %c: compiling %s aborted: %s\r\n",
+                         tag, src, arkc_port_abort_message());
+    } else if (got == -4) {
+        ark_shell_printf("cc: pass %c: compiling %s produced no object\r\n",
+                         tag, src);
+    } else {
+        ark_shell_printf("cc: pass %c: compiling %s failed\r\n", tag, src);
+    }
+    cc_report_pool();
 }
 
 /* 一遍里的编译器选项：所有 pass 只有散布文件（CC_PACK_SCT）不同，其余一致，
@@ -463,6 +512,11 @@ static int cc_pack(const char *const *srcs, int n_srcs,
     int      i;
     int      k;
     int      got;
+    /* 第一个对象要不要留 0x400 的向量表洞（见下面 want_vt）。vt_known 是
+     * 「已经问过第一个对象了」：四遍里只问一次，四遍都用同一个答案，
+     * 否则同一份源码在四遍里落进不同的布局，差分就不再是同一个程序的差分。 */
+    int      vt_first = 0;
+    int      vt_known = 0;
     int      ret = 1;
     /* 失败落在哪一段。只在这里记，最后一次性交给调用方：调用方（ark make）
      * 有它自己的错误词汇，把"编译时池耗尽"翻成"link failed"就是错答案。 */
@@ -476,6 +530,19 @@ static int cc_pack(const char *const *srcs, int n_srcs,
     }
     memset(&st, 0, sizeof(st));
 
+#if (ARKRTOS_PACK_IN_EXTRAM == 1)
+    /* SDRAM 档：缓冲是静态的，不借、也不还。idx 保持 -1，归还路径据此跳过。 */
+    idx = -1;
+    code_base = 0u;
+    code_size = 0u;
+    ram_base  = (uint32_t)(uintptr_t)s_cc_pack_extram;
+    ram_size  = CC_PACK_EXTRAM_SIZE;
+    for (i = 0; i < 4; i++) {
+        img[i] = &s_cc_pack_extram[(uint32_t)i * CC_PACK_WIN_SIZE];
+    }
+    obj_arena = &s_cc_pack_extram[CC_PACK_ARENA];
+    outbuf    = obj_arena;
+#else
     /* One 32 KB code block holds the four payloads, one 16 KB RAM block holds
      * the object slots and then the image.  The two blocks are lent and
      * returned together (that is the only atomic lend the pool has). */
@@ -504,6 +571,7 @@ static int cc_pack(const char *const *srcs, int n_srcs,
      * after them (see the #error above CC_PACK_ARENA). */
     obj_arena = (uint8_t *)(void *)(ram_base);
     outbuf = (uint8_t *)(void *)(ram_base);
+#endif
 
     t0 = platform_tick_ms();
     if (n_srcs == 1) {
@@ -537,30 +605,48 @@ static int cc_pack(const char *const *srcs, int n_srcs,
          * 落点编基址时，b.c 的两条字符串指针落在 0x08000000/0x08000014，
          * 程序装载、打印不出任何东西、立刻退出。
          *
-         * 第一个对象带 --vector-table：它腾出 0x400 的空洞，-link 把向量表填
-         * 进去（不位移镜像，位移会让烤死的地址全部偏 0x400）。 */
+         * 第一个对象带不带 --vector-table 不是一个常量，取决于**它自己**：
+         *
+         *   定义了 Reset_Handler ⇒ 这是应用镜像，Cortex-M 从 +0 取 SP、+4 取
+         *   入口，所以它要腾出 0x400 的空洞，-link 再把表填进去（不位移镜像，
+         *   位移会让烤死的地址全部偏 0x400）。
+         *
+         *   没定义 ⇒ 这是平铺的小程序：它没有复位向量（被内核当任务起来，栈由
+         *   mini run 从 RAM 块给，见 arkrtos_mini.c），入口就是负载 +0 的启动桩。
+         *   给它留洞的结果是负载白长 0x400、洞没人填，打包时还得靠「+0 是不是
+         *   启动桩的序言」去认入口——那不是判定，那是猜。
+         *
+         * 判断依据只能是刚编完那份对象的符号表（arkc 的标签表），所以第一遍的
+         * 第一个对象先按平铺编一次、问一句、需要洞再重编一次。只有应用型打包
+         * 会付这一遍，小程序不多编。 */
         for (k = 0; k < n_srcs; k++) {
+            int want_vt = 0;
+
             if (cc_pack_write_sct(rom + off, CC_PACK_WIN_SIZE - off, ram) != 0) {
                 ark_shell_printf("cc: cannot write %s: %s\r\n",
                                  CC_PACK_SCT, fs_last_error());
                 goto done;
             }
+            if ((k == 0) && (vt_known != 0)) {
+                want_vt = vt_first;
+            }
             got = cc_pack_obj(srcs[k], s_cc_pack_obj[k], target, opt_level, verbose,
-                              includes, n_includes, defines, n_defines,
-                              (k == 0) ? 1 : 0);
-            if (got < 0) {
-                if (got == -3) {
-                    ark_shell_printf("cc: pass %c: compiling %s aborted: %s\r\n",
-                                     s_cc_pack_tag[i], srcs[k],
-                                     arkc_port_abort_message());
-                } else if (got == -4) {
-                    ark_shell_printf("cc: pass %c: compiling %s produced no object\r\n",
-                                     s_cc_pack_tag[i], srcs[k]);
-                } else {
-                    ark_shell_printf("cc: pass %c: compiling %s failed\r\n",
-                                     s_cc_pack_tag[i], srcs[k]);
+                              includes, n_includes, defines, n_defines, want_vt);
+            if ((got >= 0) && (k == 0) && (vt_known == 0)) {
+                vt_first = (arkc_port_last_object_has_symbol("Reset_Handler") != 0) ? 1 : 0;
+                vt_known = 1;
+                if (vt_first != 0) {
+                    /* 应用镜像：按带洞的布局重编这一个对象。它变长 0x400，而
+                     * 下一个对象的基址正是按它的 code_size 累加的，所以后面的
+                     * 对象会自动落到洞之后——顺序不能调。 */
+                    want_vt = 1;
+                    got = cc_pack_obj(srcs[0], s_cc_pack_obj[0], target, opt_level,
+                                      verbose, includes, n_includes, defines,
+                                      n_defines, want_vt);
                 }
-                cc_report_pool();
+            }
+            if (got < 0) {
+                cc_pack_obj_fail(s_cc_pack_tag[i], srcs[k], got);
                 goto done;
             }
             {
@@ -568,9 +654,12 @@ static int cc_pack(const char *const *srcs, int n_srcs,
                  * ARKOBJ2 还带着符号表和重定位表（实测 a.obj 文件 3540 B，
                  * 其中的代码只有 2590 B），链接器排布用的是代码长度。拿文件
                  * 长度累加会让下一个对象被编到 950 B 之外的基址上——那是
-                 * "对象被搬了位置"，正是这一段要防的事。 */
-                uint32_t sz = cc_le32(obj_arena +
-                                      ((CC_PACK_OBJ_ARENA / (uint32_t)n_srcs) * (uint32_t)k) + 8u);
+                 * "对象被搬了位置"，正是这一段要防的事。
+                 *
+                 * 长度由端口从**注册时那个指针**读（arkc_port_vfile_code_size），
+                 * 不在这里按槽位偏移自己再算一遍：板上实测过两处算法一漂，
+                 * 读到的就是隔壁槽的字节，第三槽读成 0、报"对象 0 字节"。 */
+                uint32_t sz = arkc_port_vfile_code_size(s_cc_pack_obj[k]);
                 uint32_t file_sz = (uint32_t)arkc_port_vfile_size(s_cc_pack_obj[k]);
 
                 if (verbose != 0) {
@@ -579,10 +668,19 @@ static int cc_pack(const char *const *srcs, int n_srcs,
                                      (unsigned)file_sz, (unsigned)off, srcs[k]);
                 }
                 if ((sz == 0u) || (sz > (CC_PACK_WIN_SIZE - off))) {
-                    ark_shell_printf("cc: pass %c: %s produced %u B at +0x%X, "
-                                     "which does not fit the %u B window\r\n",
-                                     s_cc_pack_tag[i], srcs[k], (unsigned)sz,
-                                     (unsigned)off, (unsigned)CC_PACK_WIN_SIZE);
+                    /* 两种原因分开说：头读不出来（0）和对象比窗口还大是两件事，
+                     * 混成一句"does not fit"会把人指向错误的方向。 */
+                    if (sz == 0u) {
+                        ark_shell_printf("cc: pass %c: %s produced no readable "
+                                         "ARKOBJ2 object (%u B file): the object "
+                                         "header is missing or was overwritten\r\n",
+                                         s_cc_pack_tag[i], srcs[k], (unsigned)file_sz);
+                    } else {
+                        ark_shell_printf("cc: pass %c: %s produced %u B at +0x%X, "
+                                         "which does not fit the %u B window\r\n",
+                                         s_cc_pack_tag[i], srcs[k], (unsigned)sz,
+                                         (unsigned)off, (unsigned)CC_PACK_WIN_SIZE);
+                    }
                     goto done;
                 }
                 off += sz;
@@ -661,11 +759,27 @@ static int cc_pack(const char *const *srcs, int n_srcs,
             img[i][q] = 0u;
         }
     }
-    ark_shell_printf("cc:   A vector: SP 0x%X entry 0x%X (rom base 0x%X, "
-                     "window %u B)\r\n",
-                     (unsigned)cc_le32(img[0]),
-                     (unsigned)(cc_le32(img[0] + 4u) & ~1u),
-                     (unsigned)CC_PACK_ROM_BASE, (unsigned)CC_PACK_WIN_SIZE);
+    if (vt_first != 0) {
+        ark_shell_printf("cc:   A vector: SP 0x%X entry 0x%X (rom base 0x%X, "
+                         "window %u B)\r\n",
+                         (unsigned)cc_le32(img[0]),
+                         (unsigned)(cc_le32(img[0] + 4u) & ~1u),
+                         (unsigned)CC_PACK_ROM_BASE, (unsigned)CC_PACK_WIN_SIZE);
+    } else {
+        /* 平铺镜像的头两个字是代码，不是 SP/入口：照原来的话打出来会写成
+         * "SP 0x0 entry 0x0"，看实录的人会以为入口丢了。这里打真实的第一条
+         * 指令，入口位置由上一行的 entry mode 说明。 */
+        ark_shell_printf("cc:   A +0 is 0x%04X (flat image, no vector table; "
+                         "rom base 0x%X, window %u B)\r\n",
+                         (unsigned)(cc_le32(img[0]) & 0xFFFFu),
+                         (unsigned)CC_PACK_ROM_BASE, (unsigned)CC_PACK_WIN_SIZE);
+    }
+
+    /* 把入口形态打出来：这一段决定 -link 填不填表、apppack 从哪读入口，
+     * 成败之后回看实录时要能一眼看出走的是哪一条。 */
+    ark_shell_printf("cc:   entry mode: %s\r\n",
+                     (vt_first != 0) ? "vector table at +0 (Reset_Handler found)"
+                                     : "flat miniapp, entry at +0 (no Reset_Handler)");
 
     win.rom_base = CC_PACK_ROM_BASE;
     win.rom_size = CC_PACK_WIN_SIZE;
@@ -712,7 +826,11 @@ done:
      * image together take all three ramfs slots.  The registry is cleared so
      * the next run cannot read this run's objects. */
     arkc_port_vfile_clear();
+#if (ARKRTOS_PACK_IN_EXTRAM == 1)
+    /* 静态缓冲，没有借出可还。 */
+#else
     (void)arkrtos_ptable_mini_free(idx);
+#endif
     (void)arkrtos_vfs_remove(CC_PACK_SCT);
     if (fail_phase != NULL) {
         *fail_phase = (ret == 0) ? ARKC_PACK_PHASE_NONE : phase;
@@ -1080,332 +1198,6 @@ static int cmd_cc(int argc, char *argv[])
 }
 
 
-#if (ARKRTOS_USE_HELLO == 1)
-/* ============================================================
- * `hello` - the material for a real build, not a wrapper around one
- *
- * What has to be demonstrated is the toolchain: `cc` compiling two
- * translation units and linking them into a runnable image, and `make`
- * driving that same compiler from a project file.  So this command only
- * *provisions* /demo (four small files) and prints the exact command lines;
- * the demo then types them.  `hello run` walks the same steps through
- * cmd_cc() itself, so the printed lines and the one-word fallback cannot
- * drift apart.
- *
- * Two sources instead of one because a single file links without a single
- * cross-object relocation -- it would prove nothing about the linker.  main()
- * is in hello.c and calls my_strlen(), which lives in util.c.
- *
- * The program is ordinary C: write(1, ...) reaches this chip's console,
- * main() returns to Reset_Handler, and the entry follows the vector-table
- * contract 'app run' checks.
- *
- * Where the files go: /demo is absolute on purpose.  'cd /demo' plus a
- * relative path also works (the shell resolves relative paths against its
- * cwd before the filesystem sees them), but a fixed absolute path cannot be
- * the reason a demo fails.
- * ============================================================ */
-#define HELLO_C        "/demo/hello.c"
-#define HELLO_UTIL     "/demo/util.c"
-#define HELLO_SCT      "/demo/hello.sct"
-#define HELLO_MK       "/demo/makefile"
-#define HELLO_OBJ_C    "/demo/hello.obj"
-#define HELLO_OBJ_U    "/demo/util.obj"
-#define HELLO_BIN      "/demo/hello.bin"
-
-static const char SRC_HELLO[] =
-    "/* hello.c -- POSIX hello world.  main() is here; my_strlen() is in util.c.\r\n"
-    " *\r\n"
-    " * Two translation units on purpose: a single file would compile and link\r\n"
-    " * without one cross-object relocation, and would therefore prove nothing\r\n"
-    " * about the linker.  Build it by hand with 'cc' twice plus '-link', or let\r\n"
-    " * 'make' drive the same compiler from /demo/makefile.\r\n"
-    " */\r\n"
-    "typedef unsigned int u32;\r\n"
-    "\r\n"
-    "extern void __arkcc_init_globals(void);\r\n"
-    "int __svc(0x1A) svc_shell(u32 *p);\r\n"
-    "int __svc(0x1B) svc_thread(u32 *p);\r\n"
-    "\r\n"
-    "int write(int fd, const void *buf, unsigned int len);\r\n"
-    "int main(void);\r\n"
-    "\r\n"
-    "/* Defined in util.c -- this is the cross-object reference. */\r\n"
-    "unsigned int my_strlen(const char *s);\r\n"
-    "\r\n"
-    "/* fd 1 is this chip's console.  The SVC prints a NUL-terminated string, so\r\n"
-    " * write() copies the caller's bytes into a small buffer and terminates it --\r\n"
-    " * that keeps the POSIX contract (any buffer, any length) instead of quietly\r\n"
-    " * requiring a string literal.\r\n"
-    " *\r\n"
-    " * The messages below are inline literals, not const arrays: the ARM backend\r\n"
-    " * emits no initialised data section yet, so a global \"static const char\r\n"
-    " * msg[] = ...\" would be linked as zeros. */\r\n"
-    "int write(int fd, const void *buf, unsigned int len)\r\n"
-    "{\r\n"
-    "    static char chunk[64];\r\n"
-    "    const char *p = (const char *)buf;\r\n"
-    "    u32 q[3];\r\n"
-    "    unsigned int done = 0u;\r\n"
-    "\r\n"
-    "    (void)fd;\r\n"
-    "    while (done < len) {\r\n"
-    "        unsigned int n = len - done;\r\n"
-    "        unsigned int i;\r\n"
-    "        if (n > 63u) {\r\n"
-    "            n = 63u;\r\n"
-    "        }\r\n"
-    "        for (i = 0u; i < n; i++) {\r\n"
-    "            chunk[i] = p[done + i];\r\n"
-    "        }\r\n"
-    "        chunk[n] = 0;\r\n"
-    "        q[0] = 3u; q[1] = (u32)chunk; q[2] = 0u;\r\n"
-    "        svc_shell(q);\r\n"
-    "        done += n;\r\n"
-    "    }\r\n"
-    "    return (int)len;\r\n"
-    "}\r\n"
-    "\r\n"
-    "int main(void)\r\n"
-    "{\r\n"
-    "    write(1, \"hello, world\\r\\n\", my_strlen(\"hello, world\\r\\n\"));\r\n"
-    "    write(1, \"built by arkc on the STM32H743, linked from two objects\\r\\n\",\r\n"
-    "          my_strlen(\"built by arkc on the STM32H743, linked from two objects\\r\\n\"));\r\n"
-    "    return 0;\r\n"
-    "}\r\n"
-    "\r\n"
-    "void Reset_Handler(void)\r\n"
-    "{\r\n"
-    "    u32 q[3];\r\n"
-    "\r\n"
-    "    __arkcc_init_globals();\r\n"
-    "    (void)main();\r\n"
-    "    q[0] = 3u; q[1] = 0u; q[2] = 0u;      /* 3 = exit this task */\r\n"
-    "    svc_thread(q);\r\n"
-    "    for (;;) {\r\n"
-    "    }\r\n"
-    "}\r\n";
-
-static const char SRC_UTIL[] =
-    "/* util.c -- the second translation unit.  One function, and that is the\r\n"
-    " * point: the image is only correct after the linker has resolved the call\r\n"
-    " * from hello.c into this object. */\r\n"
-    "unsigned int my_strlen(const char *s)\r\n"
-    "{\r\n"
-    "    unsigned int n = 0u;\r\n"
-    "\r\n"
-    "    while (s[n] != 0) {\r\n"
-    "        n++;\r\n"
-    "    }\r\n"
-    "    return n;\r\n"
-    "}\r\n";
-
-static const char SRC_HELLO_SCT[] =
-    "; hello.sct -- the app-run window (ARKRTOS_APPRUN_*, see\r\n"
-    "; arkrtos_partition.h).  The load-region size sets the initial SP and\r\n"
-    "; 'app run' requires SP to be the window top 0x24074000.\r\n"
-    "; One exec region on purpose: the loader copies exactly the file bytes, so\r\n"
-    "; every initialised byte must sit inside the 8 KB code window.  (A .sct with\r\n"
-    "; a separate RAM region still compiles, but the RW data falls outside the\r\n"
-    "; load region and never reaches the board.)\r\n"
-    "; --vector-table also requires the RESET selector to come first.\r\n"
-    "LR_IROM1 0x24070000 0x00004000\r\n"
-    "{\r\n"
-    "  ER_IROM1 0x24070000 0x00004000 {\r\n"
-    "   *.o (RESET, +First)\r\n"
-    "   .ANY (+RO)\r\n"
-    "   .ANY (+RW +ZI)\r\n"
-    "  }\r\n"
-    "}\r\n";
-
-static const char SRC_MAKEFILE[] =
-    "# /demo/makefile -- everything 'ark make' reads, nothing else.\r\n"
-    "# The build is 'cc --pack': four passes over these sources with four\r\n"
-    "# different link bases, diffed into one relocatable image.\r\n"
-    "TARGET = hello\r\n"
-    "OUT    = /demo/hello.svcm\r\n"
-    "SRCS   = /demo/hello.c /demo/util.c\r\n";
-
-/* Write (or overwrite) one demo file.  A leftover file from the last run
- * would otherwise be appended to, not replaced, so remove it first. */
-static int hello_put(const char *path, const char *text)
-{
-    int32 rc;
-
-    (void)arkrtos_vfs_remove(path);
-    rc = arkrtos_vfs_write_file(path, (const uint8 *)text, (uint32)strlen(text));
-    if (rc != 0)
-    {
-        /* write_file returns 0 on success and never a length: comparing it
-         * with strlen() would report a written file as failed. */
-        ark_shell_printf("hello: cannot write %s (rc=%d)\r\n", path, (int)rc);
-        return -1;
-    }
-    return 0;
-}
-
-/* Echo one cc command line before running it.  The fallback has to look
- * exactly like the typed version, otherwise it is a different demo: this is
- * the same argv the playbook prints, handed to the same cmd_cc(). */
-static int hello_cc(int n, char *const *v)
-{
-    int i;
-
-    ark_shell_printf("[hello] >");
-    for (i = 0; i < n; i++) {
-        ark_shell_printf(" %s", v[i]);
-    }
-    ark_shell_printf("\r\n");
-    return cmd_cc(n, (char **)v);
-}
-
-static const char *const HELLO_PLAYBOOK[] = {
-    "",
-    "[hello] A) the compiler, by hand -- two objects, then one link:",
-    "[hello]   cc /demo/hello.c -c -o /demo/hello.obj --scatter /demo/hello.sct --vector-table",
-    "[hello]   cc /demo/util.c -c -o /demo/util.obj --scatter /demo/hello.sct",
-    "[hello]   cc -link /demo/hello.obj /demo/util.obj --scatter /demo/hello.sct --vector-table -o /demo/hello.bin",
-    "[hello]   app run /demo/hello.bin",
-    "[hello]",
-    "[hello] --scatter is on the compile lines as well, not only on -link.",
-    "[hello] arkc bakes absolute addresses into the instructions at codegen, so",
-    "[hello] the layout has to be known there; -link then only rewrites the",
-    "[hello] addresses of the objects it moves (reloc-text, on by default).",
-    "[hello] Drop it and the link still succeeds -- the image then points its",
-    "[hello] globals at 0x20000000 and faulting on the first write is how you",
-    "[hello] find out.  Measured: MMFAR=0x20000000.",
-    "",
-    "[hello] B) the build tool -- 'make' drives exactly this compiler:",
-    "[hello]   cd /demo",
-    "[hello]   make",
-    "[hello]   mini run hello.svcm",
-    "",
-    "[hello] 'hello run' does A end to end in one command.",
-};
-
-static int hello_provision(void)
-{
-    int32 rc;
-
-    rc = arkrtos_vfs_app_mkdir("/demo");
-    if (rc != 0)
-    {
-        /* Already a directory is the normal case on a second run, so the
-         * failure is decided by what /demo *is*, not by the error code:
-         * ark_vfs spells "exists" one way here and another way there, and
-         * the compiler command has no business including the filesystem's
-         * private error enum to compare against it. */
-        uint32 size = 0u;
-        uint32 mode = 0u;
-
-        if ((arkrtos_vfs_app_stat("/demo", &size, &mode) != 0) ||
-            ((mode & ARKRTOS_VFS_S_IFMT) != ARKRTOS_VFS_S_IFDIR))
-        {
-            ark_shell_printf("hello: cannot create /demo (rc=%d)\r\n", (int)rc);
-            return -1;
-        }
-    }
-    if (hello_put(HELLO_C, SRC_HELLO) != 0) {
-        return -1;
-    }
-    if (hello_put(HELLO_UTIL, SRC_UTIL) != 0) {
-        return -1;
-    }
-    if (hello_put(HELLO_SCT, SRC_HELLO_SCT) != 0) {
-        return -1;
-    }
-    if (hello_put(HELLO_MK, SRC_MAKEFILE) != 0) {
-        return -1;
-    }
-    return 0;
-}
-
-static int cmd_hello(int argc, char *argv[])
-{
-    char  *v[10];
-    int    n;
-    int    rc;
-    uint32 task = 0u;
-    int    do_run = 0;
-    unsigned int i;
-
-    if (argc > 2) {
-        ark_shell_printf("hello: too many arguments (hello [setup|run])\r\n");
-        return 1;
-    }
-    if (argc == 2) {
-        if (strcmp(argv[1], "run") == 0) {
-            do_run = 1;
-        } else if (strcmp(argv[1], "setup") != 0) {
-            ark_shell_printf("hello: unknown sub-command '%s' (setup | run)\r\n",
-                             argv[1]);
-            return 1;
-        }
-    }
-
-    if (hello_provision() != 0) {
-        ark_shell_printf("[hello] nothing was built\r\n");
-        return 1;
-    }
-
-    ark_shell_printf("\r\n[hello] /demo ready: hello.c util.c hello.sct makefile\r\n");
-    for (i = 0u; i < (unsigned int)(sizeof(HELLO_PLAYBOOK) / sizeof(HELLO_PLAYBOOK[0])); i++) {
-        ark_shell_printf("%s\r\n", HELLO_PLAYBOOK[i]);
-    }
-
-    if (do_run == 0) {
-        return 0;
-    }
-
-    /* The same four steps, through the same entry point the typed commands
-     * reach.  Each one stops the demo at its own number so a failure names
-     * the step instead of leaving the reader to guess which of four went
-     * wrong. */
-    ark_shell_printf("\r\n[hello] run: 1/4 compile hello.c -> %s\r\n", HELLO_OBJ_C);
-    n = 0;
-    v[n++] = "cc"; v[n++] = HELLO_C; v[n++] = "-c"; v[n++] = "-o";
-    v[n++] = HELLO_OBJ_C; v[n++] = "--scatter"; v[n++] = HELLO_SCT;
-    v[n++] = "--vector-table";
-    if (hello_cc(n, v) != 0) {
-        ark_shell_printf("[hello] step 1 failed, nothing was run\r\n");
-        return 1;
-    }
-
-    ark_shell_printf("[hello] run: 2/4 compile util.c -> %s\r\n", HELLO_OBJ_U);
-    n = 0;
-    v[n++] = "cc"; v[n++] = HELLO_UTIL; v[n++] = "-c"; v[n++] = "-o";
-    v[n++] = HELLO_OBJ_U; v[n++] = "--scatter"; v[n++] = HELLO_SCT;
-    if (hello_cc(n, v) != 0) {
-        ark_shell_printf("[hello] step 2 failed, nothing was run\r\n");
-        return 1;
-    }
-
-    (void)arkrtos_vfs_remove(HELLO_BIN);
-    ark_shell_printf("[hello] run: 3/4 link 2 objects -> %s\r\n", HELLO_BIN);
-    n = 0;
-    v[n++] = "cc"; v[n++] = "-link"; v[n++] = HELLO_OBJ_C; v[n++] = HELLO_OBJ_U;
-    v[n++] = "--scatter"; v[n++] = HELLO_SCT; v[n++] = "--vector-table";
-    v[n++] = "-o"; v[n++] = HELLO_BIN;
-    if (hello_cc(n, v) != 0) {
-        ark_shell_printf("[hello] step 3 failed, nothing was run\r\n");
-        return 1;
-    }
-
-    ark_shell_printf("[hello] run: 4/4 app run %s\r\n", HELLO_BIN);
-    rc = arkrtos_apprun_run_ex(HELLO_BIN, &task);
-    if (rc != 0) {
-        const char *name = arkrtos_apprun_error_name(rc);
-        ark_shell_printf("[hello] app run failed, rc=%d%s%s\r\n",
-                         (int)rc, (name != 0) ? " - " : "",
-                         (name != 0) ? name : "");
-        return 1;
-    }
-    ark_shell_printf("[hello] started as task %u; the program prints and exits on its own\r\n",
-                     (unsigned)task);
-    return 0;
-}
-#endif /* ARKRTOS_USE_HELLO */
-
 int arkc_shell_register(int idx)
 {
     if ((idx < 0) || ((idx + 1) > ARK_SHELL_MAX_COMMANDS)) {
@@ -1416,12 +1208,6 @@ int arkc_shell_register(int idx)
      * "cc file.c" and reject every option as "too many arguments".  The
      * real limit is the shell's own argv array; cmd_cc reports what it
      * cannot honour. */
-#if (ARKRTOS_USE_HELLO == 1)
-    if ((idx + 1) > ARK_SHELL_MAX_COMMANDS) {
-        platform_uart_send_string("shell: no room for the hello command\r\n");
-        return idx;
-    }
-#endif
     g_cmd_table[idx++] = ARK_SHELL_CMD("cc", cmd_cc,
 #if (CC_LAYOUT_OPTS == 1) && (ARKRTOS_USE_APPPACK == 1)
         "Ark C compiler: cc <file.c> [-o out] [-S] [-c] [-D..] [-I dir]"
@@ -1436,10 +1222,5 @@ int arkc_shell_register(int idx)
         "Ark C compiler: cc <file.c> [-o out] [-S] [-c] [-D..] [-I dir]",
 #endif
         ARK_SHELL_MAX_ARGS);
-#if (ARKRTOS_USE_HELLO == 1)
-    g_cmd_table[idx++] = ARK_SHELL_CMD("hello", cmd_hello,
-        "hello: put the demo sources in /demo and print the real cc/make commands",
-        ARK_SHELL_MAX_ARGS);
-#endif
     return idx;
 }
