@@ -442,12 +442,35 @@ static int cc_pack_obj(const char *src, const char *obj_name, const char *target
     if (rc != ARK_OK) {
         /* 只说 "failed" 会把 -6（布局没应用）与 -1（I/O）混成一件事，而这两种
          * 的下一步完全不同；ark_compile 的返回码是唯一能分开它们的读数。 */
-        ark_shell_printf("cc:   %s: compile rc=%d (%s)\r\n", src, rc,
-                         fs_last_error());
+        /* 不要一律印 fs_last_error()：它只对 I/O 失败有意义，
+         * 而对 codegen/link 这些错误它还是上一次的残留文本
+         * ——实测过 "compile rc=-6 (No such file or directory)"，把人往
+         * "文件不存在" 上引。所以先把错误码翻成阶段名，
+         * 只有 -1（I/O）和 -10（参数）才转 fs_last_error()。 */
+        {
+            const char *why;
+            const char *fse;
+
+            switch (rc) {
+            case ARK_ERR_LEX:     why = "lex"; break;
+            case ARK_ERR_PARSE:   why = "parse"; break;
+            case ARK_ERR_SEMA:    why = "semantic analysis"; break;
+            case ARK_ERR_IRGEN:   why = "IR generation"; break;
+            case ARK_ERR_CODEGEN: why = "codegen, see the diagnostic above"; break;
+            case ARK_ERR_ASM:     why = "assembler"; break;
+            case ARK_ERR_LINK:    why = "link, see the diagnostic above"; break;
+            case ARK_ERR_OOM:     why = "out of memory"; break;
+            default:
+                fse = fs_last_error();
+                why = (fse != 0) ? fse : "I/O";
+                break;
+            }
+            ark_shell_printf("cc:   %s: compile rc=%d: %s\r\n", src, rc, why);
+        }
         /* "File too large" 在打包路径上几乎总是对象没塞进它的槽：
          * 写那一步失败只会得到 -1，看上去像“编译失败”
          * ——这一轮就是这么被误导的。所以把槽大小与它怎么算出来一起打出来。 */
-        if ((fs_last_error() != 0) &&
+        if ((rc == ARK_ERR_IO) && (fs_last_error() != 0) &&
             (strcmp(fs_last_error(), "File too large") == 0)) {
             ark_shell_printf("cc:   the object does not fit its %u B slot "
                              "(CC_PACK_OBJ_ARENA is split by the source count)\r\n",

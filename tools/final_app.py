@@ -252,7 +252,11 @@ CASES = [
                          r"^cc:   reloc rom [1-9]\d* / ram [1-9]\d* / "
                          r"rom_movw [1-9]\d* / ram_movw [1-9]\d*",
                          r"^cc: +packed in \d+ ms$"],
-                 wait=8.0),
+                 # 窗口必须比实测耗时留足余量：这条四遍差分打包实测 8350 ms
+                 # （1 份源），原来的 8.0 s 正好压在边界上——同一份固件、同一条
+                 # 命令，跑快跑慢决定 PASS/FAIL。判据是"输出里有没有那几行"，
+                 # 窗口太紧等于把判据换成了"这台板子今天多快"。
+                 wait=25.0),
             Step("rm /tmp/m2.c"),
             Step("mini run /tmp/m2.svcm",
                  expect=[r"MINI:\d+ /tmp/m2\.svcm: \d+ B payload -> code 0x2407[0-9A-F]{4}",
@@ -272,7 +276,7 @@ CASES = [
         + [
             Step("mini stop", wait=2.0),      # 上一用例若半路 FAIL 会留下在跑的实例
             Step("cc /tmp/m2.c --pack -o /tmp/m2.svcm",
-                 expect=[r"^cc: +packed in \d+ ms$"], wait=8.0),
+                 expect=[r"^cc: +packed in \d+ ms$"], wait=25.0),   # 同上：实测 8.35 s
             Step("rm /tmp/m2.c"),
             Step("mini run /tmp/m2.svcm",
                  expect=[r"M2 alive$", r"0$"], wait=3.0),

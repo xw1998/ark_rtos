@@ -156,10 +156,28 @@ int main(void) {
 而小程序的**整份负载要搬进 RAM 执行**（16 KB 代码块），装不下。所以这里只提供
 控制台子集，并把没有的东西如实写在头文件里。
 
-### 3.3 `printf` 怎么在"没有 va_list 的编译器"上变成真变参
+### 3.3 `printf` 怎么在"ARM 后端没有 va 区"的编译器上变成真变参
 
-arkc 没有 `va_list`：源码里写不出 `va_start`/`va_arg`，所以这里不假装有，也不
-用宏按参数个数分派（那样 `printf` 就不是函数了）。做法是一条 `__asm` **取参桩**：
+`arkc` 的 `stdlib/include/stdarg.h` 是给 **C 后端**写的：`va_start` 展开成读一个
+叫 `_ark_va_ptr` 的 extern，而只有 C 后端与 x86_64 后端会把它定义成指向 va 区的
+局部变量（`irgen` 为每个变参函数请求把 a0..a7 镜像到 `frame+8000..8063`）。
+
+**ARM 后端从没实现这块**。在补上之前，一个 C 变参函数在 ARM 上曾被翻成
+
+```
+        MOV r0, #0
+        LDR r0, [r0]        ; 从地址 0 读 va 指针
+```
+
+——不报错，然后 `va_arg` 顺着地址 0 上的向量表（也就是一个栈地址）往下走：错答案，
+无诊断（`examples/va_test.c` 实测）。现在 ARM / RV32I 后端**明确拒绝** C 变参函数
+定义（`variadic function 'x' is not supported by the ARM backend: ...`），并把
+`examples/run_tests.ps1` 的 `$expectArmFail` 表当成闸门：哪天有人实现了 va 区，
+那几条用例会转红。细节见 arkc 仓库 README 的「后端」一节。
+
+所以这里不假装有 `va_list`，也不用宏按参数个数分派（那样 `printf` 就不是函数了）。
+做法是一条 `__asm` **取参桩**（`__asm` 整函数体没有 C 体，不引用 `_ark_va_ptr`，
+不受上面那条拒绝影响）：
 
 ```c
 __asm int printf(const char *fmt, ...)
@@ -239,7 +257,11 @@ FAIL BOOT: cannot mount nor0 at /mnt/nor: -5 (...); the console still comes up, 
 6. **`printf` 一次调用最多 12 个参数（格式串 + 11 个）**：取参桩只搬 12 个字，
    第 13 个起取不到（读到 0）。编译器本身允许更多参数，所以这条上限是 SDK 的，
    写在 `stdio.h` 与这里，不是"编译器不行"。
-7. **工程必须自己定义 `int main(void)`**：SDK 在 arkc 档不提供任何默认 `main`，
+7. **工程里不能自己写 C 变参函数**：ARM 后端没有实现 va 区，这类定义会被明确
+   拒绝（不是静默出错）。要写就得用 `__asm` 自己取参，或者先把编译器那块补上
+   ——补法不是"加个后端分支"，ARM 的 `va_list` 必须按 AAPCS 的寄存器/栈混合
+   布局重新设计，现有 `stdarg.h`（8 字节槽位 + `long long *`）是 C 后端的约定。
+8. **工程必须自己定义 `int main(void)`**：SDK 在 arkc 档不提供任何默认 `main`，
    漏定义就是链接期 `unresolved symbol "main"`，不会给你一个"能跑但什么都不
    打印"的空程序。历史原因值得记一笔：以前的骨架是 SDK 提供 `main()` + 工程
    写 `MiniMain()`，而 SDK 同时提供一个弱定义的空 `MiniMain`——arkc 在同一个

@@ -181,6 +181,10 @@ def main():
         dst = os.path.join(DST_ROOT, rel.replace("/", os.sep))
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copy2(want[rel], dst)
+        # copy2 连 mtime 一起搬过来，而 mtime 正是 make 判断要不要重编的依据：
+        # 源文件最后一次改动可能比目标 .o 还早，make 于是判定"不用重编"，产物
+        # 一个字节都没变，看着像"同步生效了"（sync_arkvim.py 上踩过同一个坑）。
+        os.utime(dst, None)
 
     head = git_head(src)
     dirty = git_dirty(src)

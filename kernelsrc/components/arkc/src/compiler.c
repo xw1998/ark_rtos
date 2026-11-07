@@ -185,13 +185,17 @@ static LdReloc  g_ld_relocs[LD_MAX_RELOCS];
 static int      g_ld_reloc_count = 0;
 
 static int rd_le32(const unsigned char *p) {
-    /* 逐字节 + volatile，不许编译器把它合成一次宽读。这个函数读的是
-     * **对象文件的字节流**：字段常常落在非 4 字节对齐的偏移上（每个
-     * 名字长度任意，后面紧跟名字，再后面才是下一个 4 字节字段）。
-     * 在片内 RAM（32 位总线）上合成一次 ldr 是免费的，但 .ark_buf 搬到
-     * 16 位总线的 SDRAM 之后，本板对这种非对齐字读返回 0：实测同一地址
-     * 逐字节读得 45（符号数），rd_le32 得 0，于是整张符号表被当成 0 条、
-     * ld_find_global("Reset_Handler") 找不到、向量表整段不写。 */
+    /* Byte-wise through a volatile pointer on purpose: do not let the
+     * compiler fold this into one wide load. These reads walk the *byte
+     * stream of an object file*, where 4-byte fields frequently land on
+     * offsets that are not 4-byte aligned (a name of arbitrary length is
+     * followed by the next field). On-chip RAM tolerates that; the 16-bit
+     * SDRAM bus on the STM32H743 target does not - measured on the board:
+     * the same address read byte-wise gave 45 (the symbol count) while a
+     * folded word read gave 0, so the whole symbol table collapsed to zero
+     * entries, ld_find_global("Reset_Handler") failed, and the vector
+     * table was never written. A wide load here is an optimisation that
+     * changes behaviour, so it is opted out explicitly. */
     const volatile unsigned char *v = p;
     return (int)((unsigned)v[0] | ((unsigned)v[1] << 8) |
                  ((unsigned)v[2] << 16) | ((unsigned)v[3] << 24));
@@ -1530,11 +1534,17 @@ int ark_compile(const ArkOptions *opts) {
                                 "(chain at +0x%X)\n", nb, nb, chain);
                 }
             }
-            /* Resolve cross-object relocations via find_global (strong > weak) */
+            /* Resolve cross-object relocations via find_global (strong > weak).
+             * Any reference left unresolved aborts the link below: an image
+             * whose references point at the wrong address still loads and still
+             * runs, it just jumps somewhere else - the worst shape of "it
+             * worked". Measured on the board: a mini app that forgot to define
+             * its entry symbol used to link "successfully", run all four pack
+             * passes, and then fail in the packing stage with an unrelated -33,
+             * so the output never named the actual cause (a missing symbol). */
             {
                 int ri;
                 int unresolved = 0;
-
                 for (ri = 0; ri < g_ld_reloc_count; ri++) {
                     int idx;
                     if (g_ld_relocs[ri].type == 6 || g_ld_relocs[ri].type == 12)
@@ -1553,16 +1563,8 @@ int ark_compile(const ArkOptions *opts) {
                         unresolved++;
                     }
                 }
-
-                /* 有未解析符号就**不能**写出镜像。以前这里只报诊断、照样写文件：
-                 * 产出的镜像每一处未解析引用都是错地址，但它能装载、能跑，只是
-                 * 调用跳到别处 —— 那是最坏的一种「看起来成功」。板上实测过的
-                 * 后果：小程序漏定义 MiniMain 时，链接"成功"、四遍差分照做，
-                 * 最后在打包阶段报一个不相干的 -33，看输出的人根本看不出根因
-                 * 是"少了一个符号"。宁可在这里失败。 */
-                if (unresolved > 0) {
+                if (unresolved > 0)
                     return ARK_ERR_LINK;
-                }
             }
             if (ld_table_overflow > 0) {
                 char b1[12], b2[12];
@@ -2056,10 +2058,17 @@ int ark_compile(const ArkOptions *opts) {
         if (asm_len < 0) return ARK_ERR_CODEGEN;
         if (diag_errors() > diag_before_codegen) {
             if (g_config.scatter_file && g_config.scatter_file[0]) {
+                /* Factual, no blame: this branch runs on ANY codegen error, and
+                 * the old wording ("the requested layout ... could not be
+                 * applied") pointed at the layout even when the layout was
+                 * fine. Measured: a variadic definition refused by the ARM
+                 * backend produced this line right after the real diagnostic,
+                 * which sends the reader after a non-existent .sct problem. */
                 diag_tool(DIAG_SEV_ERROR, opts->input_path,
-                          "the requested layout in %s could not be applied; "
-                          "refusing to fall back to the built-in layout "
-                          "0x08000000 / 0x20020000",
+                          "nothing was written: codegen stopped on an error "
+                          "above, so the layout in %s was never applied "
+                          "(there is no fallback to the built-in "
+                          "0x08000000 / 0x20020000)",
                           g_config.scatter_file, 0,0,0,0,0);
             }
             return ARK_ERR_CODEGEN;

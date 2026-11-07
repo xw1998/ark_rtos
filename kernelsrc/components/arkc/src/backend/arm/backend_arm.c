@@ -1665,6 +1665,34 @@ static char *codegen_arm(IrProgram *prog) {
 
     for (fi = 0; fi < prog->func_count; fi++) {
         IrFunc *f = prog->funcs[fi];
+
+        /* Variadic functions are NOT implemented by the ARM backend.
+         *
+         * irgen asks for a0..a7 to be mirrored into frame+8000..8063
+         * (IR_GETARG with dst_off >= 8000) for every variadic definition, and
+         * stdlib/include/stdarg.h resolves va_start() to the extern
+         * `_ark_va_ptr`. The C backend and the x86_64 backend both implement
+         * that (they define _ark_va_ptr as a local pointing at the va area);
+         * this backend has always done `if (dst_off >= 8000) break;` and never
+         * defines _ark_va_ptr, so a C variadic function used to compile into
+         *     MOV r0, #0
+         *     LDR r0, [r0]        ; read the va pointer from address 0
+         * (measured on examples/va_test.c) -- no diagnostic, and va_arg then
+         * walks whatever happens to sit at address 0: the vector table, i.e.
+         * a stack address. Wrong answer, no error, the worst shape.
+         *
+         * Until the region is implemented here, refuse the definition. Calls to
+         * a variadic function are unaffected (they only need the caller side):
+         * __asm bodies such as the mini SDK's printf shim declare `...` with
+         * no C body and never touch _ark_va_ptr, so is_asm_func skips this. */
+        if (f->is_variadic && !f->is_asm_func) {
+            diag_tool(DIAG_SEV_ERROR, "arkcc",
+                      "variadic function '%s' is not supported by the ARM "
+                      "backend: va_start/va_arg would read the va pointer from "
+                      "address 0 (the va region is implemented only by the C "
+                      "and x86_64 backends)",
+                      f->name, 0,0,0,0,0);
+        }
         int local_size = f->local_size;
         int i;
         int is_sret = 0;
