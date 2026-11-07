@@ -174,6 +174,55 @@ mini: none running (usage: mini run <path>)
 - 四类表项计数非零，且与宿主对拍的同名计数**同值**（1 / 1 / 2 / 2）。
 - 跑完 code 块与 RAM 块**都归还**；`mini: none running` 是正常收尾（程序已经自己退出）。
 
+### 5.1 2026-11-07：`--pack` 恢复可用，根因是 `rd_le32`（compiler.c）
+
+arkc 0.8.0 同步之后，`cc --pack` 一直卡在最后一步：
+
+```
+cc:   A vector: SP 0x0 entry 0x0 (rom base 0x8000000, window 8192 B)
+cc: pack failed: no usable vector table at payload +0/+4 (compile with --vector-table) (-34)
+```
+
+四个 pass 都编出来了，坏在"读负载头"。当时的判据是 `cc -link -v` 对同一个对象报
+**0 syms**，而宿主对同一份源报 43 syms ⇒ 链接期没读到对象符号表 ⇒
+`ld_find_global("Reset_Handler") < 0` ⇒ 向量表整段跳过。
+
+根因不在链接器，在读字节的函数：
+
+```c
+/* 修前：gcc 会把这四次读合成一次 32 位非对齐加载 */
+static uint32_t rd_le32(const unsigned char *p) { ... }
+```
+
+`.ark_buf` 从片内 RAM（32 位总线）搬进外置 SDRAM（16 位总线）之后，**非对齐的
+32 位读在这块板上返回 0**。对象字段（`name_len` 后紧跟名字）天然非对齐，于是
+符号数读成 0。实测证据：同一地址逐字节读得 `45,0,0,0`（45 个符号），`rd_le32`
+得 0；更早一次同一处直接 BUS FAULT（`BFAR=0x21744c9a`，`PC=0x0803b158` 落在
+`rd_le32`，`LR` 是 `ld_find_global`）。
+
+修法是把四次读固定成逐字节、并禁止编译器合成宽读：
+
+```c
+static uint32_t rd_le32(const unsigned char *p)
+{
+    const volatile unsigned char *v = p;   /* volatile：逐字节，不许合成宽读 */
+    return (uint32_t)v[0] | ((uint32_t)v[1] << 8) |
+           ((uint32_t)v[2] << 16) | ((uint32_t)v[3] << 24);
+}
+```
+
+修后板上：
+
+```
+cc:   A vector: SP 0x20002000 entry 0x8000418 (rom base 0x8000000, window 8192 B)
+cc: /tmp/m2.svcm: payload 3292 + table 6 x 4 = 3572 B
+cc: packed in 916 ms
+```
+
+这条缺陷的形态值得记下来：**它只在"变宽的总线 + 非对齐字段"同时成立时出现**，
+所以片内 RAM 档、宿主 x86、以及所有逐字节读的路径都看不见它；而在板上的表现
+（`0 syms`、`(-34)`、BUS FAULT）全都指向链接器，指错了方向。
+
 ### 5.1 `cc --pack` 的常量（板上）
 
 | 常量 | 值 |
@@ -292,7 +341,7 @@ MINI_PRIORITY ?=          # 空 = 沿用 APP_TASK_PRIORITY
 | 镜像在 VFS 的 ramfs 上 | 掉电即失 | M3-b（QSPI W25Q64 + littlefs） |
 | 板上产物比宿主小 **108 B**（3006 vs 3114） | 同一份 `p.c`、同 `-O1`，板上 3006 B、宿主 3114 B；两边都在各自基址上自洽（向量表、入口、表项差分都成立），**成因未查明** | 登记为未查明，不猜。若继续推进，下一步应先比对两边 `.s` 的段落尺寸 |
 | 池 80 KB | 长源码 `-O1` 完整流水线会耗尽池 ⇒ 测试源必须短。实测 809 B 的源在 pass A 就 `[arkc] FATAL: memory pool exhausted`（pool 71304/81920 B），压到 569 B 后四遍全过 | 已知，不修（报错是明确的那一条，不是静默出坏镜像） |
-| 小程序默认优先级在控制台之上 | 死循环的小程序会让控制台失去响应，只能复位；`MINI_PRIORITY` 可下调（§5.3），默认值保持不变 | 设计现状 + 已给出口 |
+| 小程序默认优先级在控制台之上 | 死循环的小程序会让控制台失去响应，只能复位；`MINI_PRIORITY` 可下调（§5.3），内核默认值保持不变。**2026-11-07 起演示/回归工程默认 `MINI_PRIORITY=20`**（在控制台 14 之下），`make MINI_PRIORITY=` 可复现内核默认 | 设计现状 + 已给出口 |
 
 ---
 

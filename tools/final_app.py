@@ -176,11 +176,18 @@ def _steps_emit(path, lines, wait=DEFAULT_WAIT):
 # （片内 RAM 档 3 槽，SDRAM 档 8 槽），残留一份就可能让被测操作撞上「槽用完」
 # 并报 I/O error——那个失败与被测对象无关，却会让人去查打包器（本轮实测踩过）。
 CLEAN = [
+    # 每个用例都从根目录开工：`make-demo` 会 cd /demo，它半路 FAIL 时后面的
+    # 用例不该继承那个 cwd——相对路径的成败取决于它，而这跟被测对象无关。
+    Step("cd /", wait=0.5),
     Step("rm /tmp/m1.c", wait=0.25), Step("rm /tmp/m1.sct", wait=0.25),
     Step("rm /tmp/m1.bin", wait=0.25), Step("rm /tmp/m2.c", wait=0.25),
     Step("rm /tmp/m2.svcm", wait=0.25), Step("rm /tmp/pp.sct", wait=0.25),
-    Step("rm /tmp/hello.c", wait=0.25), Step("rm /tmp/hello.sct", wait=0.25),
-    Step("rm /tmp/hello.bin", wait=0.25),
+    # 演示工程现在落在 /demo（hello 铺的 4 个源/脚本 + 编出来的 4 个产物）。
+    # 不清理的话 ramfs 的槽位会被上一轮的产物占着，而 SDRAM 档只有 11 槽。
+    Step("rm /demo/hello.c", wait=0.25), Step("rm /demo/util.c", wait=0.25),
+    Step("rm /demo/hello.sct", wait=0.25), Step("rm /demo/makefile", wait=0.25),
+    Step("rm /demo/hello.obj", wait=0.25), Step("rm /demo/util.obj", wait=0.25),
+    Step("rm /demo/hello.bin", wait=0.25), Step("rm /demo/hello.svcm", wait=0.25),
 ]
 
 
@@ -286,29 +293,96 @@ CASES = [
     ),
     Case(
         "hello-demo",
-        "演示路径：一条 `hello` 把源写进 /tmp、板上编链、app run 跑出两行 POSIX 输出",
+        "演示 A（arkcc）：hello 铺好 /demo，然后逐条手敲 cc -c ×2 + -link，app run 跑出两行",
         CLEAN
         + [
-            # 这一条走的就是用户要演示的那条路径本身（不是 test 专用入口），
-            # 所以它同时是「hello 能用」与「cc + app run 在 SDRAM 档下能用」的闸门。
-            # 进度行逐条对上：漏掉一步而后面又成功了，说明那一步被隐式跳过
-            # （例如源文件已存在所以没重写）。
+            # 这一条走的就是现场要演示的那条路径本身（不是 test 专用入口）：
+            # hello 只备料并打印真实命令行，汇编/链接/装载全部由手敲的 cc 完成。
+            # 打印出来的三行必须与下面三条 Step 逐字同形——否则「照屏幕敲」和
+            # 「这里跑的」就不是同一条命令，闸门证明的东西也就变了。
             Step("hello",
-                 expect=[r"\[hello\] 1/3 sources -> /tmp/hello\.c, /tmp/hello\.sct$",
-                         r"\[hello\] 2/3 cc: compile \+ link for the app-run window$",
-                         r"cc: /tmp/hello\.c -> /tmp/hello\.bin \(target arm, -O1\)$",
-                         r"^cc: done in \d+ ms$",
-                         r"\[hello\] 3/3 app run /tmp/hello\.bin$",
-                         r"APPRUN:\d+ /tmp/hello\.bin: \d+ B -> code 0x24070000",
+                 expect=[r"\[hello\] /demo ready: hello\.c util\.c hello\.sct makefile$",
+                         r"\[hello\]   cc /demo/hello\.c -c -o /demo/hello\.obj"
+                         r" --scatter /demo/hello\.sct --vector-table$",
+                         r"\[hello\]   cc /demo/util\.c -c -o /demo/util\.obj"
+                         r" --scatter /demo/hello\.sct$",
+                         r"\[hello\]   cc -link /demo/hello\.obj /demo/util\.obj"
+                         r" --scatter /demo/hello\.sct --vector-table -o /demo/hello\.bin$",
+                         r"\[hello\]   app run /demo/hello\.bin$",
+                         r"\[hello\] B\) the build tool"],
+                 wait=6.0),
+            # 两个 -c 都必须带 --scatter：arkc 在 codegen 阶段就把绝对地址烤进
+            # 指令，不带它，链接照样成功、但 .bss 还指向 0x20000000，第一次写就
+            # MEMFAULT（MMFAR=0x20000000，实测）。带上才是对的。
+            Step("cc /demo/hello.c -c -o /demo/hello.obj"
+                 " --scatter /demo/hello.sct --vector-table",
+                 expect=[r"^cc: /demo/hello\.c -> /demo/hello\.obj \(target arm, -O1\), -c$",
+                         r"^cc: vector table in the first 0x400 B$",
+                         r"^cc: done in \d+ ms$"],
+                 wait=6.0),
+            Step("cc /demo/util.c -c -o /demo/util.obj --scatter /demo/hello.sct",
+                 expect=[r"^cc: /demo/util\.c -> /demo/util\.obj \(target arm, -O1\), -c$",
+                         r"^cc: done in \d+ ms$"],
+                 wait=6.0),
+            Step("cc -link /demo/hello.obj /demo/util.obj"
+                 " --scatter /demo/hello.sct --vector-table -o /demo/hello.bin",
+                 expect=[r"^cc: link 2 obj -> /demo/hello\.bin$",
+                         # 两个对象是分别按同一个基址编的，-link 必须搬第二个：
+                         # reloc-text off 时这里会打 off，而那种镜像的字符串
+                         # 指针会指回 0x08000000。
+                         r"^cc: reloc-text on$",
+                         r"^cc: done in \d+ ms$"],
+                 wait=6.0),
+            # 「两行都对」才是 util.c 真的被执行了的证据：write() 按 my_strlen()
+            # 返回的长度打字节，长度错一个字节就看得到。字符串字面量在 hello.c
+            # 里，所以光看文字本身证明不了第二个翻译单元参与了。
+            Step("app run /demo/hello.bin",
+                 # 程序的两行输出接在提示符后面（app 跑在控制台之下，先返回
+                 # 提示符再轮到它），所以这两条不能带 ^。
+                 expect=[r"APPRUN:\d+ /demo/hello\.bin: \d+ B -> code 0x24070000",
                          r"hello, world$",
-                         r"written by arkc running on the STM32H743 itself$",
+                         r"built by arkc on the STM32H743, linked from two objects$",
                          r"task \d+ exited, window returned to the pool$"],
-                 forbid=[r"\[arkc\] FATAL", r"compile/link failed",
-                         r"app run failed", r"(HARD|MEM|BUS|USG)FAULT"],
-                 wait=12.0),
+                 forbid=[r"\[arkc\] FATAL", r"app run failed",
+                         r"(HARD|MEM|BUS|USG)FAULT"],
+                 wait=4.0),
         ],
     ),
-]
+    Case(
+        "make-demo",
+        "演示 B（make）：cd /demo + make（arkmake 驱动 cc --pack 四遍）→ mini run 相对名装载，两行一样",
+        CLEAN
+        + [
+            # A 段与 B 段共用同一份源：make 若把 /demo 的源换掉，那这条用例就
+            # 不再证明「同一份代码两条路都对」。
+            Step("hello", expect=[r"\[hello\] B\) the build tool"], wait=6.0),
+            Step("cd /demo", wait=1.0),
+            # 相对路径的 makefile 名是默认值（"makefile"），能读到就是 cwd 生效；
+            # 下面 mini run 用同一个相对名，两条路必须一致（本轮修的就是这里）。
+            Step("make",
+                 expect=[r"^make: /demo/hello\.svcm <- /demo/hello\.c \(\+more\)$",
+                         r"^make:   src /demo/util\.c$",
+                         r"^cc: pack 2 sources -> /demo/hello\.svcm \(4 passes, -O1\)$",
+                         r"^cc:   A \d+ B$", r"^cc:   B \d+ B$",
+                         r"^cc:   C \d+ B$", r"^cc:   D \d+ B$",
+                         r"^cc: .*: payload \d+ \+ table \d+ x 4 = \d+ B$",
+                         r"^cc: +packed in \d+ ms$",
+                         r"^make: ok$"],
+                 # 两源 × 四遍实测 11.1 s；给到 40 s 是留余量，不是估计值。
+                 wait=40.0),
+            Step("mini run hello.svcm",
+                 expect=[r"MINI:\d+ /demo/hello\.svcm: \d+ B payload -> code 0x2407",
+                         r"hello, world$",
+                         r"built by arkc on the STM32H743, linked from two objects$"],
+                 forbid=[r"mini run: hello\.svcm failed", r"(HARD|MEM|BUS|USG)FAULT"],
+                 wait=4.0),
+            # 这个程序自己退，所以这里不能断言 "mini stop: all blocks returned"
+            # （它会回 nothing to stop）。判的是块真的还回去了：池里没有在跑的
+            # 实例，也没有被占着的项。
+            Step("mini", expect=[r"^mini: none running"], wait=2.0),
+            Step("cd /", wait=0.6),
+        ],
+    ),]
 
 
 # ---------------------------------------------------------------- 串口驱动

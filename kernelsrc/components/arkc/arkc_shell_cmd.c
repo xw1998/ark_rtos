@@ -1082,21 +1082,45 @@ static int cmd_cc(int argc, char *argv[])
 
 #if (ARKRTOS_USE_HELLO == 1)
 /* ============================================================
- * `hello` - one-command POSIX hello world demo
+ * `hello` - the material for a real build, not a wrapper around one
  *
- * Three steps behind one word: the sources land in the VFS /tmp, the
- * on-board arkc compiles and links them, and `app run` executes the
- * image in the fixed window.  It is one command instead of three
- * because on a serial console "forgot the second line" and "typed it
- * wrong" look exactly alike; every step reports its own failure with
- * the step number and the demo stops there.
+ * What has to be demonstrated is the toolchain: `cc` compiling two
+ * translation units and linking them into a runnable image, and `make`
+ * driving that same compiler from a project file.  So this command only
+ * *provisions* /demo (four small files) and prints the exact command lines;
+ * the demo then types them.  `hello run` walks the same steps through
+ * cmd_cc() itself, so the printed lines and the one-word fallback cannot
+ * drift apart.
+ *
+ * Two sources instead of one because a single file links without a single
+ * cross-object relocation -- it would prove nothing about the linker.  main()
+ * is in hello.c and calls my_strlen(), which lives in util.c.
  *
  * The program is ordinary C: write(1, ...) reaches this chip's console,
- * sizeof("literal") is the character count (C11 6.5.3.4), and the entry
- * follows the vector-table contract app run checks.
+ * main() returns to Reset_Handler, and the entry follows the vector-table
+ * contract 'app run' checks.
+ *
+ * Where the files go: /demo is absolute on purpose.  'cd /demo' plus a
+ * relative path also works (the shell resolves relative paths against its
+ * cwd before the filesystem sees them), but a fixed absolute path cannot be
+ * the reason a demo fails.
  * ============================================================ */
+#define HELLO_C        "/demo/hello.c"
+#define HELLO_UTIL     "/demo/util.c"
+#define HELLO_SCT      "/demo/hello.sct"
+#define HELLO_MK       "/demo/makefile"
+#define HELLO_OBJ_C    "/demo/hello.obj"
+#define HELLO_OBJ_U    "/demo/util.obj"
+#define HELLO_BIN      "/demo/hello.bin"
+
 static const char SRC_HELLO[] =
-    "/* hello.c -- POSIX hello world, compiled and run by arkc on this chip. */\r\n"
+    "/* hello.c -- POSIX hello world.  main() is here; my_strlen() is in util.c.\r\n"
+    " *\r\n"
+    " * Two translation units on purpose: a single file would compile and link\r\n"
+    " * without one cross-object relocation, and would therefore prove nothing\r\n"
+    " * about the linker.  Build it by hand with 'cc' twice plus '-link', or let\r\n"
+    " * 'make' drive the same compiler from /demo/makefile.\r\n"
+    " */\r\n"
     "typedef unsigned int u32;\r\n"
     "\r\n"
     "extern void __arkcc_init_globals(void);\r\n"
@@ -1106,15 +1130,17 @@ static const char SRC_HELLO[] =
     "int write(int fd, const void *buf, unsigned int len);\r\n"
     "int main(void);\r\n"
     "\r\n"
-    "/* The two messages are written as literals, not as const arrays: the ARM\r\n"
-    " * backend currently emits no initialised data section, so a global\r\n"
-    " * \"static const char msg[] = ...\" would be linked as zeros.  Inline\r\n"
-    " * literals do land in the image (measured: at +0x400 of this one). */\r\n"
+    "/* Defined in util.c -- this is the cross-object reference. */\r\n"
+    "unsigned int my_strlen(const char *s);\r\n"
     "\r\n"
-    "/* fd 1 is this chip's console.  The SVC below prints a NUL-terminated\r\n"
-    " * string, so write() copies the caller's bytes into a small buffer and\r\n"
-    " * terminates it -- that keeps the POSIX contract (any buffer, any length)\r\n"
-    " * instead of quietly requiring a string literal. */\r\n"
+    "/* fd 1 is this chip's console.  The SVC prints a NUL-terminated string, so\r\n"
+    " * write() copies the caller's bytes into a small buffer and terminates it --\r\n"
+    " * that keeps the POSIX contract (any buffer, any length) instead of quietly\r\n"
+    " * requiring a string literal.\r\n"
+    " *\r\n"
+    " * The messages below are inline literals, not const arrays: the ARM backend\r\n"
+    " * emits no initialised data section yet, so a global \"static const char\r\n"
+    " * msg[] = ...\" would be linked as zeros. */\r\n"
     "int write(int fd, const void *buf, unsigned int len)\r\n"
     "{\r\n"
     "    static char chunk[64];\r\n"
@@ -1142,10 +1168,9 @@ static const char SRC_HELLO[] =
     "\r\n"
     "int main(void)\r\n"
     "{\r\n"
-    "    write(1, \"hello, world\\r\\n\",\r\n"
-    "          sizeof(\"hello, world\\r\\n\") - 1);\r\n"
-    "    write(1, \"written by arkc running on the STM32H743 itself\\r\\n\",\r\n"
-    "          sizeof(\"written by arkc running on the STM32H743 itself\\r\\n\") - 1);\r\n"
+    "    write(1, \"hello, world\\r\\n\", my_strlen(\"hello, world\\r\\n\"));\r\n"
+    "    write(1, \"built by arkc on the STM32H743, linked from two objects\\r\\n\",\r\n"
+    "          my_strlen(\"built by arkc on the STM32H743, linked from two objects\\r\\n\"));\r\n"
     "    return 0;\r\n"
     "}\r\n"
     "\r\n"
@@ -1161,13 +1186,28 @@ static const char SRC_HELLO[] =
     "    }\r\n"
     "}\r\n";
 
+static const char SRC_UTIL[] =
+    "/* util.c -- the second translation unit.  One function, and that is the\r\n"
+    " * point: the image is only correct after the linker has resolved the call\r\n"
+    " * from hello.c into this object. */\r\n"
+    "unsigned int my_strlen(const char *s)\r\n"
+    "{\r\n"
+    "    unsigned int n = 0u;\r\n"
+    "\r\n"
+    "    while (s[n] != 0) {\r\n"
+    "        n++;\r\n"
+    "    }\r\n"
+    "    return n;\r\n"
+    "}\r\n";
+
 static const char SRC_HELLO_SCT[] =
-    "; hello.sct -- the app-run window (ARKRTOS_APPRUN_*, see arkrtos_partition.h)\r\n"
-    "; The load-region size sets the initial SP, and app run requires SP to be the\r\n"
-    "; window top (0x24074000).  One exec region on purpose: the loader copies\r\n"
-    "; exactly the file bytes, so every initialised byte must sit inside the 8 KB\r\n"
-    "; code window.  (A .sct with a separate RAM region still compiles, but the RW\r\n"
-    "; data falls outside the load region and never reaches the board.)\r\n"
+    "; hello.sct -- the app-run window (ARKRTOS_APPRUN_*, see\r\n"
+    "; arkrtos_partition.h).  The load-region size sets the initial SP and\r\n"
+    "; 'app run' requires SP to be the window top 0x24074000.\r\n"
+    "; One exec region on purpose: the loader copies exactly the file bytes, so\r\n"
+    "; every initialised byte must sit inside the 8 KB code window.  (A .sct with\r\n"
+    "; a separate RAM region still compiles, but the RW data falls outside the\r\n"
+    "; load region and never reaches the board.)\r\n"
     "; --vector-table also requires the RESET selector to come first.\r\n"
     "LR_IROM1 0x24070000 0x00004000\r\n"
     "{\r\n"
@@ -1177,6 +1217,14 @@ static const char SRC_HELLO_SCT[] =
     "   .ANY (+RW +ZI)\r\n"
     "  }\r\n"
     "}\r\n";
+
+static const char SRC_MAKEFILE[] =
+    "# /demo/makefile -- everything 'ark make' reads, nothing else.\r\n"
+    "# The build is 'cc --pack': four passes over these sources with four\r\n"
+    "# different link bases, diffed into one relocatable image.\r\n"
+    "TARGET = hello\r\n"
+    "OUT    = /demo/hello.svcm\r\n"
+    "SRCS   = /demo/hello.c /demo/util.c\r\n";
 
 /* Write (or overwrite) one demo file.  A leftover file from the last run
  * would otherwise be appended to, not replaced, so remove it first. */
@@ -1196,40 +1244,155 @@ static int hello_put(const char *path, const char *text)
     return 0;
 }
 
+/* Echo one cc command line before running it.  The fallback has to look
+ * exactly like the typed version, otherwise it is a different demo: this is
+ * the same argv the playbook prints, handed to the same cmd_cc(). */
+static int hello_cc(int n, char *const *v)
+{
+    int i;
+
+    ark_shell_printf("[hello] >");
+    for (i = 0; i < n; i++) {
+        ark_shell_printf(" %s", v[i]);
+    }
+    ark_shell_printf("\r\n");
+    return cmd_cc(n, (char **)v);
+}
+
+static const char *const HELLO_PLAYBOOK[] = {
+    "",
+    "[hello] A) the compiler, by hand -- two objects, then one link:",
+    "[hello]   cc /demo/hello.c -c -o /demo/hello.obj --scatter /demo/hello.sct --vector-table",
+    "[hello]   cc /demo/util.c -c -o /demo/util.obj --scatter /demo/hello.sct",
+    "[hello]   cc -link /demo/hello.obj /demo/util.obj --scatter /demo/hello.sct --vector-table -o /demo/hello.bin",
+    "[hello]   app run /demo/hello.bin",
+    "[hello]",
+    "[hello] --scatter is on the compile lines as well, not only on -link.",
+    "[hello] arkc bakes absolute addresses into the instructions at codegen, so",
+    "[hello] the layout has to be known there; -link then only rewrites the",
+    "[hello] addresses of the objects it moves (reloc-text, on by default).",
+    "[hello] Drop it and the link still succeeds -- the image then points its",
+    "[hello] globals at 0x20000000 and faulting on the first write is how you",
+    "[hello] find out.  Measured: MMFAR=0x20000000.",
+    "",
+    "[hello] B) the build tool -- 'make' drives exactly this compiler:",
+    "[hello]   cd /demo",
+    "[hello]   make",
+    "[hello]   mini run hello.svcm",
+    "",
+    "[hello] 'hello run' does A end to end in one command.",
+};
+
+static int hello_provision(void)
+{
+    int32 rc;
+
+    rc = arkrtos_vfs_app_mkdir("/demo");
+    if (rc != 0)
+    {
+        /* Already a directory is the normal case on a second run, so the
+         * failure is decided by what /demo *is*, not by the error code:
+         * ark_vfs spells "exists" one way here and another way there, and
+         * the compiler command has no business including the filesystem's
+         * private error enum to compare against it. */
+        uint32 size = 0u;
+        uint32 mode = 0u;
+
+        if ((arkrtos_vfs_app_stat("/demo", &size, &mode) != 0) ||
+            ((mode & ARKRTOS_VFS_S_IFMT) != ARKRTOS_VFS_S_IFDIR))
+        {
+            ark_shell_printf("hello: cannot create /demo (rc=%d)\r\n", (int)rc);
+            return -1;
+        }
+    }
+    if (hello_put(HELLO_C, SRC_HELLO) != 0) {
+        return -1;
+    }
+    if (hello_put(HELLO_UTIL, SRC_UTIL) != 0) {
+        return -1;
+    }
+    if (hello_put(HELLO_SCT, SRC_HELLO_SCT) != 0) {
+        return -1;
+    }
+    if (hello_put(HELLO_MK, SRC_MAKEFILE) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
 static int cmd_hello(int argc, char *argv[])
 {
-    char  *cc_argv[8];
-    int    cc_argc = 0;
+    char  *v[10];
+    int    n;
     int    rc;
     uint32 task = 0u;
+    int    do_run = 0;
+    unsigned int i;
 
-    (void)argc;
-    (void)argv;
-
-    ark_shell_printf("\r\n[hello] 1/3 sources -> /tmp/hello.c, /tmp/hello.sct\r\n");
-    if (hello_put("/tmp/hello.c", SRC_HELLO) != 0) {
+    if (argc > 2) {
+        ark_shell_printf("hello: too many arguments (hello [setup|run])\r\n");
         return 1;
     }
-    if (hello_put("/tmp/hello.sct", SRC_HELLO_SCT) != 0) {
-        return 1;
+    if (argc == 2) {
+        if (strcmp(argv[1], "run") == 0) {
+            do_run = 1;
+        } else if (strcmp(argv[1], "setup") != 0) {
+            ark_shell_printf("hello: unknown sub-command '%s' (setup | run)\r\n",
+                             argv[1]);
+            return 1;
+        }
     }
-    (void)arkrtos_vfs_remove("/tmp/hello.bin");
 
-    ark_shell_printf("[hello] 2/3 cc: compile + link for the app-run window\r\n");
-    cc_argv[cc_argc++] = "cc";
-    cc_argv[cc_argc++] = "/tmp/hello.c";
-    cc_argv[cc_argc++] = "--scatter";
-    cc_argv[cc_argc++] = "/tmp/hello.sct";
-    cc_argv[cc_argc++] = "--vector-table";
-    cc_argv[cc_argc++] = "-o";
-    cc_argv[cc_argc++] = "/tmp/hello.bin";
-    if (cmd_cc(cc_argc, cc_argv) != 0) {
-        ark_shell_printf("[hello] compile/link failed, nothing was run\r\n");
+    if (hello_provision() != 0) {
+        ark_shell_printf("[hello] nothing was built\r\n");
         return 1;
     }
 
-    ark_shell_printf("[hello] 3/3 app run /tmp/hello.bin\r\n");
-    rc = arkrtos_apprun_run_ex("/tmp/hello.bin", &task);
+    ark_shell_printf("\r\n[hello] /demo ready: hello.c util.c hello.sct makefile\r\n");
+    for (i = 0u; i < (unsigned int)(sizeof(HELLO_PLAYBOOK) / sizeof(HELLO_PLAYBOOK[0])); i++) {
+        ark_shell_printf("%s\r\n", HELLO_PLAYBOOK[i]);
+    }
+
+    if (do_run == 0) {
+        return 0;
+    }
+
+    /* The same four steps, through the same entry point the typed commands
+     * reach.  Each one stops the demo at its own number so a failure names
+     * the step instead of leaving the reader to guess which of four went
+     * wrong. */
+    ark_shell_printf("\r\n[hello] run: 1/4 compile hello.c -> %s\r\n", HELLO_OBJ_C);
+    n = 0;
+    v[n++] = "cc"; v[n++] = HELLO_C; v[n++] = "-c"; v[n++] = "-o";
+    v[n++] = HELLO_OBJ_C; v[n++] = "--scatter"; v[n++] = HELLO_SCT;
+    v[n++] = "--vector-table";
+    if (hello_cc(n, v) != 0) {
+        ark_shell_printf("[hello] step 1 failed, nothing was run\r\n");
+        return 1;
+    }
+
+    ark_shell_printf("[hello] run: 2/4 compile util.c -> %s\r\n", HELLO_OBJ_U);
+    n = 0;
+    v[n++] = "cc"; v[n++] = HELLO_UTIL; v[n++] = "-c"; v[n++] = "-o";
+    v[n++] = HELLO_OBJ_U; v[n++] = "--scatter"; v[n++] = HELLO_SCT;
+    if (hello_cc(n, v) != 0) {
+        ark_shell_printf("[hello] step 2 failed, nothing was run\r\n");
+        return 1;
+    }
+
+    (void)arkrtos_vfs_remove(HELLO_BIN);
+    ark_shell_printf("[hello] run: 3/4 link 2 objects -> %s\r\n", HELLO_BIN);
+    n = 0;
+    v[n++] = "cc"; v[n++] = "-link"; v[n++] = HELLO_OBJ_C; v[n++] = HELLO_OBJ_U;
+    v[n++] = "--scatter"; v[n++] = HELLO_SCT; v[n++] = "--vector-table";
+    v[n++] = "-o"; v[n++] = HELLO_BIN;
+    if (hello_cc(n, v) != 0) {
+        ark_shell_printf("[hello] step 3 failed, nothing was run\r\n");
+        return 1;
+    }
+
+    ark_shell_printf("[hello] run: 4/4 app run %s\r\n", HELLO_BIN);
+    rc = arkrtos_apprun_run_ex(HELLO_BIN, &task);
     if (rc != 0) {
         const char *name = arkrtos_apprun_error_name(rc);
         ark_shell_printf("[hello] app run failed, rc=%d%s%s\r\n",
@@ -1275,7 +1438,7 @@ int arkc_shell_register(int idx)
         ARK_SHELL_MAX_ARGS);
 #if (ARKRTOS_USE_HELLO == 1)
     g_cmd_table[idx++] = ARK_SHELL_CMD("hello", cmd_hello,
-        "hello: compile+link+run the POSIX hello world on this chip",
+        "hello: put the demo sources in /demo and print the real cc/make commands",
         ARK_SHELL_MAX_ARGS);
 #endif
     return idx;

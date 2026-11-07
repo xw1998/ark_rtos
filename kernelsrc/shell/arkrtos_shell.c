@@ -4364,7 +4364,29 @@ static int cmd_mini(int argc, char *argv[])
 
     if((argc == 3) && (strcmp(argv[1], "run") == 0))
     {
-        rc = arkrtos_mini_run(argv[2]);
+        /* 相对路径先按 shell 的当前目录解开，和 ls/cat/rm/cc 一致。
+         * 之前这里把 argv[2] 原样交给装载器，而装载器只认文件系统里的路径：
+         * 于是 `cd /demo` 之后 `make` 能从相对名读到 makefile、`mini run
+         * hello.svcm` 同一目录下却报 rc=-18「no such file or mount」——
+         * 两条路对同一个字符串给出相反答案，是最难查的一类不一致。
+         * 绝对路径解出来仍是原样，行为逐字节不变。
+         * 只在 VFS 构建里解开：没有 VFS 时 mini 读的是另一条后端，路径本来就
+         * 是根相对，那条构建保持逐字节不变。 */
+        static char  img[ARK_SHELL_PATH_SIZE];
+        const char  *target = argv[2];
+
+#if ARKRTOS_USE_VFS
+        if(shell_vfs_path(argv[2], img, sizeof(img)) != 0)
+        {
+            ark_shell_printf("\r\nmini run: %s: path too long\r\n", argv[2]);
+            return 1;
+        }
+        /* 报错里仍显示用户打的那个名字（argv[2]），动作和计数用解开后的
+         * 路径：现场找的是自己刚敲的那一行，而同一个文件不该有两个键。 */
+        target = img;
+#endif
+
+        rc = arkrtos_mini_run(target);
 
         if(rc != 0)
         {
@@ -4386,11 +4408,14 @@ static int cmd_mini(int argc, char *argv[])
             if(rc == ARKRTOS_MINI_ERR_DISABLED)
             {
                 /* 到连续故障上限：说清是几次、怎么放行。上限与带槽位的 App
-                 * 是同一个数字（分区表 cfg_restart_max），不是小程序专用值。 */
+                 * 是同一个数字（分区表 cfg_restart_max），不是小程序专用值。
+                 * 计数按解开后的路径取键：同一个镜像用相对名和绝对名跑的是
+                 * 同一份文件，故障次数必须累到同一个计数器上，否则连续故障
+                 * 上限可以被两种写法轮流绕开。显示仍是用户敲的那个名字。 */
                 ark_shell_printf("  disabled after %u consecutive faults"
                                  " (mini forget %s)\r\n",
                                  (unsigned)arkrtos_crash_mini_count(
-                                     arkrtos_crash_hash_path(argv[2])),
+                                     arkrtos_crash_hash_path(target)),
                                  argv[2]);
             }
             if(rc == ARKRTOS_MINI_ERR_FS)
@@ -4420,11 +4445,18 @@ static int cmd_mini(int argc, char *argv[])
         if(arkrtos_mini_info(&mi) != 0)
         {
             /* 装载成功，但此刻已没有可报的实例：镜像可能刚跑起来就连续故障、
-             * 并已被禁用（阈值与带槽位 App 相同）。此时 mi 根本没被写入，
-             * 打印它等于打印栈上垃圾——宁可报错，也不给看似权威的错答案。 */
+             * 并已被禁用（阈值与带槽位 App 相同），也可能自己跑完退出了。
+             * 此时 mi 根本没被写入，打印它等于打印栈上垃圾——宁可报错，也不给
+             * 看似权威的错答案。措辞把两种可能都点出来，再按故障账本补一句：
+             * 有记录才说"曾经故障过"，没记录就不替读者判断是哪一种。 */
             ark_shell_printf("\r\nmini run: %s loaded but no longer running"
-                             " (see 'mini', or 'mini forget %s' if disabled)\r\n",
-                             argv[2], argv[2]);
+                             " (a program that exits on its own looks the same;"
+                             " 'dmesg' shows which)\r\n", argv[2]);
+            if(arkrtos_crash_mini_count(arkrtos_crash_hash_path(target)) != 0u)
+            {
+                ark_shell_printf("  it has faulted before: 'mini forget %s'"
+                                 " clears that memory\r\n", argv[2]);
+            }
             return 1;
         }
         ark_shell_printf("\r\nmini running: task %u, code %u B in %u B @ 0x%08X, RW/stack %u B @ 0x%08X\r\n",
@@ -4512,7 +4544,20 @@ static int cmd_mini(int argc, char *argv[])
     /* mini forget <path>：清除某路径的崩溃记忆，让被禁用的小程序重新可跑 */
     if((argc == 3) && (strcmp(argv[1], "forget") == 0))
     {
-        if(arkrtos_mini_forget(argv[2]) != 0)
+        /* 与 mini run 同一套路径规则：否则 'run hello.svcm' 被禁用后，
+         * 'forget hello.svcm' 清的是另一个键，怎么敲都放行不了。 */
+        static char fimg[ARK_SHELL_PATH_SIZE];
+        const char *ftarget = argv[2];
+
+#if ARKRTOS_USE_VFS
+        if(shell_vfs_path(argv[2], fimg, sizeof(fimg)) != 0)
+        {
+            ark_shell_printf("\r\nmini forget: %s: path too long\r\n", argv[2]);
+            return 1;
+        }
+        ftarget = fimg;
+#endif
+        if(arkrtos_mini_forget(ftarget) != 0)
         {
             ark_shell_printf("\r\nmini forget: empty path\r\n");
             return 1;

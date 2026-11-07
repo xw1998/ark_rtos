@@ -185,8 +185,16 @@ static LdReloc  g_ld_relocs[LD_MAX_RELOCS];
 static int      g_ld_reloc_count = 0;
 
 static int rd_le32(const unsigned char *p) {
-    return (int)((unsigned)p[0] | ((unsigned)p[1] << 8) |
-                 ((unsigned)p[2] << 16) | ((unsigned)p[3] << 24));
+    /* 逐字节 + volatile，不许编译器把它合成一次宽读。这个函数读的是
+     * **对象文件的字节流**：字段常常落在非 4 字节对齐的偏移上（每个
+     * 名字长度任意，后面紧跟名字，再后面才是下一个 4 字节字段）。
+     * 在片内 RAM（32 位总线）上合成一次 ldr 是免费的，但 .ark_buf 搬到
+     * 16 位总线的 SDRAM 之后，本板对这种非对齐字读返回 0：实测同一地址
+     * 逐字节读得 45（符号数），rd_le32 得 0，于是整张符号表被当成 0 条、
+     * ld_find_global("Reset_Handler") 找不到、向量表整段不写。 */
+    const volatile unsigned char *v = p;
+    return (int)((unsigned)v[0] | ((unsigned)v[1] << 8) |
+                 ((unsigned)v[2] << 16) | ((unsigned)v[3] << 24));
 }
 
 /* find_global: prefer strong over weak; first weak if no strong.

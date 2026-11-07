@@ -75,9 +75,13 @@ USE_APPPACK ?= 0
 # HAL_QSPI 会拖进 MDMA）、注册 `nor` 命令。
 # 默认 0：不碰 QUADSPI 的时钟/引脚，镜像与命令表逐字节不变。
 USE_QSPI ?= 0
-# 小程序任务优先级：空 = 沿用 APP_TASK_PRIORITY（与现在逐字节相同）。
-# 小程序死循环时会把控制台饿死，要边跑边停就把它调到控制台之下（shell=14）。
-MINI_PRIORITY ?=
+# 小程序任务优先级。内核默认沿用 APP_TASK_PRIORITY(=10)，那在控制台(shell=14)
+# 之上：小程序一旦死循环，控制台就被永久饿死，连 `mini` 都查不了——本轮实测
+# 就是 `mini run /tmp/m2.svcm` 之后提示符再也不回来，只能复位。
+# 本工程是演示/回归工程，默认就放到控制台之下，与 apprun 用同一条规则
+# （ARKRTOS_APPRUN_PRIORITY = SHELL_TASK_PRIORITY + 6，见分区头里的实测注释）。
+# 要复现内核默认行为：make MINI_PRIORITY=
+MINI_PRIORITY ?= 20
 
 
 # 交叉工具链前缀；默认取 PATH 上的 arm-none-eabi-
@@ -207,9 +211,13 @@ endif
 # 槽数 3（源码 + 一份中间产物 + 最终产物）。代价 RAM 3 x 16384 = 48 KB；
 # 这 16 KB 是从第 4 个槽里省出来补给编译池的，总预算不变。
 ifeq ($(USE_SDRAM),1)
-# 文件缓冲放在外置 SDRAM 的 .extram 段（6MB 分区）：8 槽 × 512KB。
-# 板上 cc 现在能把 1MB 级的源码和它的 .s 一起落下，不必只走控制台。
-RAMFS_DEFS := -DARK_RAMFS_FILE_CAP=524288 -DARK_RAMFS_MAX_FILES=8 \
+# 文件缓冲放在外置 SDRAM 的 .extram 段（SDRAMFS 分区，6MB）。
+# 槽数不是随手取的：演示工程 /demo 一次要同时站着 4 个源/脚本 + 2 个对象
+# + 1 个 .bin（cc -c 两遍 + -link），再跑一次 make 再加 1 个 .svcm，正好 8
+# 个——零余量的上限在演示现场等于「随便多一个文件就全挂」，所以给到 11。
+# 11 x 512KB = 5.5MB，加节点开销仍在 6MB 分区内；12 槽 = 6MB 正好顶满，
+# 装不下结构体开销，所以是 11 而不是整档。
+RAMFS_DEFS := -DARK_RAMFS_FILE_CAP=524288 -DARK_RAMFS_MAX_FILES=11 \
               -DARK_RAMFS_IN_EXTRAM=1
 else
 RAMFS_DEFS := -DARK_RAMFS_FILE_CAP=16384 -DARK_RAMFS_MAX_FILES=3
@@ -311,7 +319,16 @@ all: $(ELF) bin hex size
 # 文件参与依赖，切换开关才会真的重编）。只改 USE_SDRAM 而旧 .o 被当成最新
 # 的，实测过两次：一次是 .ark_buf 含在片内 RAM（池只有 80 KB），一次是
 # USE_APPPACK=1 但 `cc --pack` 报「not supported by this build」。
-SWITCH_SIG = ark=$(USE_ARKC) vim=$(USE_ARKVIM) make=$(USE_ARKMAKE) sdram=$(USE_SDRAM) apprun=$(USE_APPRUN) hello=$(USE_HELLO) apppack=$(USE_APPPACK) qspi=$(USE_QSPI)
+# ramfs 的两个数字同样是 -D。它们不进指纹时，改了 Makefile 里的槽数而
+# 旧 .o 被当成最新的，板上仍是旧上限——本轮就踩过一次（改成 11 后
+# 只有边缘文件的体积变了，说明只有那一个 .o 被重编）。
+ifeq ($(USE_SDRAM),1)
+ARK_RAMFS_SIG = 512k-11
+else
+ARK_RAMFS_SIG = 16k-3
+endif
+
+SWITCH_SIG = ark=$(USE_ARKC) vim=$(USE_ARKVIM) make=$(USE_ARKMAKE) sdram=$(USE_SDRAM) apprun=$(USE_APPRUN) hello=$(USE_HELLO) apppack=$(USE_APPPACK) qspi=$(USE_QSPI) ramfs=$(ARK_RAMFS_SIG) mini=$(MINI_PRIORITY)
 
 $(BUILD)/.ldcfg: FORCE
 	@mkdir -p $(BUILD)
