@@ -206,20 +206,36 @@ static int cc_bad_option(const char *what, const char *arg)
 
 #if (ARKRTOS_PACK_IN_EXTRAM == 1)
 /* 四份负载 + 对象/镜像缓冲，全部在 SDRAM 里静态常驻：一次打包用一块固定的
- * 86 KB，不向池借，也就不存在"借了没还"（下一次打包失败的那种最坏形态）。
- * 代价是这 86 KB 一直占着 .extram —— 那块是 6 MB 的 SDRAMFS 分区，ramfs 用掉
+ * 112 KB（4 x 16 KB 负载窗 + 48 KB 对象/镜像区，见下面的 CC_PACK_OBJ_ARENA），
+ * 不向池借，也就不存在"借了没还"（下一次打包失败的那种最坏形态）。
+ * 代价是这 112 KB 一直占着 .extram —— 那块是 6 MB 的 SDRAMFS 分区，ramfs 用掉
  * 5.5 MB 之后仍装得下（实测 93%）。 */
-#define CC_PACK_EXTRAM_SIZE  (4u * CC_PACK_WIN_SIZE + CC_PACK_OUT_CAP)
-static uint8_t s_cc_pack_extram[CC_PACK_EXTRAM_SIZE] CC_PACK_EXTRAM_ATTR;
+#define CC_PACK_EXTRAM_SIZE  (4u * CC_PACK_WIN_SIZE + CC_PACK_OBJ_ARENA)
 #endif
 /* Objects of one pass, one slot per source. */
 #define CC_PACK_MAX_SRCS     4
-/* 对象槽不是每槽固定 4 KB：一个 3 函数的对象带上 0x400 的向量表洞实测 4247 B
- * （arkc 0.8.0 十项限制同步之后涨到这里，之前约 3.2 KB），固定 4 KB 会在**写
- * 对象**这一步失败，而写失败只报 -1，看上去像「编译失败」。整块只有 16 KB
- * （它和镜像缓冲共用，见下），所以容量按这次真正编译的源数均分：1 个源时一槽
- * 16 KB，4 个源时每槽 4 KB。超出就照实报 File too large，不截断。 */
+/* 对象槽的容量按这次真正编译的源数均分（cc_pack_vfiles 里算）。
+ *
+ * 槽太小会在**写对象**那一步失败，而写失败只报 -1，看上去像「编译失败」
+ * ——这一轮就是这么撞上的：rt.c 编出 8660 B 的对象，3 个源均分 16 KB 只有
+ * 5461 B 一槽，报的是 `compile rc=-1 (File too large)`。所以下面这两档
+ * 的容量都是按**对象文件**的大小定的，不是按代码长度：一个 3 函数的对象
+ * 带上 0x400 的向量表洞实测 4247 B，一个 1 函数的 hello.c 是 2753 B。
+ * 超出就照实报 File too large，不截断。 */
+#if (ARKRTOS_PACK_IN_EXTRAM == 1)
+/* SDRAM 档：这块不再是从池里借来的 16 KB，而是 .extram 里实打实的 48 KB，
+ * 所以可以按"每个源一个够用的槽"来定，不必四个源挤 16 KB。
+ *
+ * 48 KB 的来历是实测，不是估的：arkc 的对象文件不是代码长度——ARKOBJ2 还
+ * 带符号表与重定位表，一个只有 1 个函数的 hello.c 就有 2753 B，而带
+ * printf 的小程序运行时（rt.c，10 个函数）是 8660 B。四个源均分时槽是
+ * 12288 B（3 个源时 16384 B），够 8660 再留 40% 余量。**别看代码长度
+ * 定这个数**：代码 2.5 KB 的对象文件是 8.6 KB，按代码算会差三倍。 */
+#define CC_PACK_OBJ_ARENA    49152u
+static uint8_t s_cc_pack_extram[CC_PACK_EXTRAM_SIZE] CC_PACK_EXTRAM_ATTR;
+#else
 #define CC_PACK_OBJ_ARENA    CC_PACK_OUT_CAP            /* 与镜像缓冲共用 */
+#endif
 /* 池一次借出的两块各自都要落进 [MIN, MAX]（MAX = SLOT_RAM_MAX_BLOCK = 32 KB），
  * 所以「32 KB 负载窗口 + 16 KB 对象槽」不能合成一次借出（48 KB 上取整成 64 KB，
  * 直接被拒）；而 SLOT_RAM_TOTAL 只有 64 KB，app run 的 16 KB 窗口平时就占着，
@@ -227,8 +243,10 @@ static uint8_t s_cc_pack_extram[CC_PACK_EXTRAM_SIZE] CC_PACK_EXTRAM_ATTR;
  * 对象槽因此和镜像缓冲共用那 16 KB：镜像只在**四遍都跑完之后**才写进去，
  * 而对象在最后一遍链接完成后就不再被读，用途在时间上不重叠。这条依赖写成
  * 下面的 #error 而不是注释——顺序一旦被改动，这里先失败。 */
+#if (ARKRTOS_PACK_IN_EXTRAM == 0)
 #if (CC_PACK_OBJ_ARENA > CC_PACK_OUT_CAP)
 #error "object slots share the image buffer; they must fit inside it"
+#endif
 #endif
 #define CC_PACK_ARENA        (4u * CC_PACK_WIN_SIZE)
 /* The nominal bases only end up in the image header (nominal_base /
@@ -401,7 +419,7 @@ static int cc_pack_obj(const char *src, const char *obj_name, const char *target
                        int opt_level, int verbose,
                        const char *const *includes, int n_includes,
                        const char *const *defines, int n_defines,
-                       int vector_table)
+                       int vector_table, uint32_t obj_cap)
 {
     ArkOptions popts;
     jmp_buf    pad;
@@ -426,6 +444,15 @@ static int cc_pack_obj(const char *src, const char *obj_name, const char *target
          * 的下一步完全不同；ark_compile 的返回码是唯一能分开它们的读数。 */
         ark_shell_printf("cc:   %s: compile rc=%d (%s)\r\n", src, rc,
                          fs_last_error());
+        /* "File too large" 在打包路径上几乎总是对象没塞进它的槽：
+         * 写那一步失败只会得到 -1，看上去像“编译失败”
+         * ——这一轮就是这么被误导的。所以把槽大小与它怎么算出来一起打出来。 */
+        if ((fs_last_error() != 0) &&
+            (strcmp(fs_last_error(), "File too large") == 0)) {
+            ark_shell_printf("cc:   the object does not fit its %u B slot "
+                             "(CC_PACK_OBJ_ARENA is split by the source count)\r\n",
+                             (unsigned)obj_cap);
+        }
         return -1;
     }
     if (arkc_port_vfile_size(obj_name) == 0u) {
@@ -631,7 +658,8 @@ static int cc_pack(const char *const *srcs, int n_srcs,
                 want_vt = vt_first;
             }
             got = cc_pack_obj(srcs[k], s_cc_pack_obj[k], target, opt_level, verbose,
-                              includes, n_includes, defines, n_defines, want_vt);
+                              includes, n_includes, defines, n_defines, want_vt,
+                              (uint32_t)(CC_PACK_OBJ_ARENA / (uint32_t)n_srcs));
             if ((got >= 0) && (k == 0) && (vt_known == 0)) {
                 vt_first = (arkc_port_last_object_has_symbol("Reset_Handler") != 0) ? 1 : 0;
                 vt_known = 1;
@@ -642,7 +670,8 @@ static int cc_pack(const char *const *srcs, int n_srcs,
                     want_vt = 1;
                     got = cc_pack_obj(srcs[0], s_cc_pack_obj[0], target, opt_level,
                                       verbose, includes, n_includes, defines,
-                                      n_defines, want_vt);
+                                      n_defines, want_vt,
+                                      (uint32_t)(CC_PACK_OBJ_ARENA / (uint32_t)n_srcs));
                 }
             }
             if (got < 0) {
