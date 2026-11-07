@@ -1,20 +1,30 @@
-# /mnt/nor/makefile -- Ark RTOS 小程序 hello world
+# /mnt/nor/hello/makefile -- 标准 C 的 hello world，作为 Ark RTOS 小程序编译
 #
-# 板上用法（与 Linux 一样：进目录、make、跑）：
-#   cd /mnt/nor
+# 这个工程里只有 hello.c 一行 #include <stdio.h> 和一句 printf——没有一句
+# Ark RTOS 的东西，在 Linux 上就是 `cc hello.c && ./a.out`。在这里是：
+#
+#   cd /mnt/nor/hello
 #   make
 #   mini run hello.svcm
 #
-# 这份文件只认 ark make 的四类键：TARGET / OUT / SRCS / INCS（还有 DEFS）。
-# 没有规则、没有依赖、没有时间戳——板上没有增量构建，每次都是全量四遍差分。
+# ---- 这份文件只认 ark make 的四个键 ----
+# TARGET / OUT / SRCS / INCS（还有 DEFS）。没有规则、没有依赖、没有时间戳：
+# 板上没有增量构建，每次都是全量四遍差分打包。
 #
-# SRCS 的第一个必须是启动桩：镜像的 entry_offset 是相对负载起点算的，
-# MINISTART 必须落在偏移 0。四个源正好是这个文件系统的对象槽上限。
+# ---- SRCS 的第一份必须是启动桩 ----
+# 镜像的入口偏移是相对负载起点算的，启动桩的 MINISTART 必须落在偏移 0。
+# 打包时会校验负载前两条指令是启动桩固定的序言（0xB5E0），不是就拒绝出镜像。
 #
-# 路径写相对名：ark make 的一行值只有 96 字节，四条绝对路径放不下（实测报
-# "value is longer than the field that holds it"）；相对名按 shell 的当前
-# 目录解析，`cd /mnt/nor && make` 与 Linux 上的习惯一致。
+# ---- 为什么写绝对路径 ----
+# 当前目录是 /mnt/nor/hello，而 SDK 的三份源在 /mnt/nor 下（上一级）。
+# ark make 的一行值只有 96 字节，所以能用绝对路径就直接写绝对路径，避免
+# ".." 这种要靠路径解析去猜的写法；三份源加起来 44 字节，够。
+#
+# ---- 为什么没有 mini_main.c ----
+# arkc 档的入口是标准 C 的 int main(void)：启动桩（start.c）直接调它，它
+# return 之后由桩调 arkrtos_thread_exit() 收尾。SDK 里那份「main() 调
+# MiniMain()」的骨架是 Keil / GCC 档的写法，arkc 档塞进来会直接 #error。
 TARGET = hello
 OUT    = hello.svcm
-SRCS   = start.c mini_main.c rt.c hello.c
+SRCS   = /mnt/nor/start.c /mnt/nor/rt.c hello.c
 INCS   = /mnt/nor

@@ -290,29 +290,39 @@ CASES = [
         ],
     ),
     Case(
-        "mini-sdk-nor-make",
-        "演示（main）：工程文件在 NOR 上，cd /mnt/nor + make + mini run，跑出 hello, world",
+        "mini-sdk-std-hello",
+        "演示（主线）：NOR 上的 hello 工程是标准 C（<stdio.h> + printf + int main），cd 进目录 make，mini run 打出 Hello, World!",
         CLEAN
         + [
-            # 开机就挂好 /mnt/nor（ARKRTOS_AUTOMOUNT_NOR，见 main.c）。这一条
+            # 上电就挂好 /mnt/nor（ARKRTOS_AUTOMOUNT_NOR，见 main.c）。这一条
             # 就是那句"完全 Linux 的体验"的闸门：不敲 fs mount / mount 也能 ls。
-            Step("ls /mnt/nor",
-                 expect=[r"hello\.c\s+\d+$", r"makefile\s+\d+$",
-                         r"start\.c\s+\d+$", r"mini_main\.c\s+\d+$",
-                         r"rt\.c\s+\d+$", r"unistd\.h\s+\d+$"],
+            #
+            # 布局是 SDK 在根、工程在 hello/ 子目录：SDK 是"这套编译器运行时"，
+            # 一份；工程是要编的东西，可以有好几份并排放在同一块卷上。
+            Step("ls -l /mnt/nor",
+                 # ls -l 的列是"... size name"，数字在名字**前面**，所以只锚名字。
+                 expect=[r"\d  start\.c$", r"\d  rt\.c$", r"\d  arkrtos\.h$",
+                         r"\d  unistd\.h$", r"\d  stdio\.h$", r"\d  hello$"],
                  forbid=[r"ls: no such file or directory", r"ls: no mount"],
                  wait=2.0),
-            # 反假绿：`hello` 这个"罐装演示"已经被删掉了。它若又冒出来（有人把
-            # 备料器加回去），演示的形态就退回"敲一条魔法命令"，这条会炸。
+            # 反假绿：`hello` 这个"罐装演示"命令已经被删掉了。它若又冒出来（有人
+            # 把备料器加回去），演示的形态就退回"敲一条魔法命令"，这条会炸。
             Step("hello", expect=[r"hello: command not found"], wait=1.2),
-            Step("cd /mnt/nor"),
-            # 四遍差分，实测 8.4~9 s；给 40 s 是余量。
+            Step("cd /mnt/nor/hello"),
+            Step("ls -l",
+                 expect=[r"\d  hello\.c$", r"\d  makefile$"],
+                 wait=1.5),
+            # 这条用例最要紧的一行：工程里就是**标准 C**，没有一句 Ark RTOS
+            # 的东西。下面 make 出来的 hello.svcm 是这句话的产物，不是另一份源码。
+            Step("cat hello.c",
+                 expect=[r"#include <stdio\.h>$",
+                         r'printf\("Hello, World!\\n"\);$'],
+                 wait=1.5),
             Step("make",
-                 expect=[r"^make: hello\.svcm <- start\.c \(\+more\)$",
-                         r"^make:   src mini_main\.c$",
-                         r"^make:   src rt\.c$",
+                 expect=[r"^make: hello\.svcm <- /mnt/nor/start\.c \(\+more\)$",
+                         r"^make:   src /mnt/nor/rt\.c$",
                          r"^make:   src hello\.c$",
-                         r"^cc: pack 4 sources -> hello\.svcm \(4 passes, -O1\)$",
+                         r"^cc: pack 3 sources -> hello\.svcm \(4 passes, -O1\)$",
                          r"^cc:   A \d+ B$", r"^cc:   B \d+ B$",
                          r"^cc:   C \d+ B$", r"^cc:   D \d+ B$",
                          # 平铺小程序：没有 Reset_Handler，就不该留那 0x400 的
@@ -323,50 +333,53 @@ CASES = [
                          r"^cc: hello\.svcm: payload \d+ \+ table \d+ x 4 = \d+ B$",
                          r"^cc:   reloc rom \d+ / ram \d+ / rom_movw [1-9]\d* / "
                          r"ram_movw [1-9]\d*, entry \+0x0$",
-                         r"^cc: +packed in \d+ ms$",
+                         r"^cc: packed in \d+ ms$",
                          r"^make: ok$"],
-                 forbid=[r"unresolved symbol", r"pack failed"],
-                 wait=40.0),
-            # 相对名：cwd 在 /mnt/nor，mini run 必须按 shell 的 cwd 解析
-            # （这条路径与 make 读 makefile 用的是同一套解析）。
+                 forbid=[r"unresolved symbol", r"pack failed",
+                         r"does not fit its"],
+                 wait=60.0),
+            # 相对名：cwd 在 /mnt/nor/hello，mini run 必须按 shell 的 cwd 解析。
             Step("mini run hello.svcm",
-                 expect=[r"MINI:\d+ /mnt/nor/hello\.svcm: \d+ B payload -> code 0x2407",
-                         # 程序的两行输出接在提示符后面（小程序在控制台之下，
+                 expect=[r"MINI:\d+ /mnt/nor/hello/hello\.svcm: \d+ B payload -> code 0x2407",
+                         # printf 的输出接在提示符后面（小程序在控制台之下，
                          # 先返回提示符再轮到它），所以不能带 ^。
-                         r"hello, world$",
+                         r"Hello, World!$",
                          r"task \d+ returned: MiniApp finished, "
                          r"code and RAM blocks back in the pool$"],
                  forbid=[r"mini run: hello\.svcm failed", r"(HARD|MEM|BUS|USG)FAULT"],
-                 wait=4.0),
+                 wait=5.0),
             # 程序自己退出，所以判"池里没有在跑的实例"（不是 mini stop 的措辞）。
             Step("mini", expect=[r"^mini: none running"], wait=2.0),
             Step("cd /"),
         ],
     ),
     Case(
-        "mini-sdk-missing-minimain",
-        "反假绿：工程没定义 MiniMain 时链接必须报 unresolved symbol，不许出一个空程序",
+        "mini-sdk-missing-main",
+        "反假绿：工程没有 int main(void) 时链接必须报 unresolved symbol main，不许出一个空程序",
         CLEAN
-        # 这条用例守的是一处**静默**错误：SDK 的 main() 调 MiniMain()。
-        # 如果 SDK 同时提供一个弱定义的空 MiniMain（旧版就是这样），arkc 会
-        # 在同一个翻译单元内把它绑死，工程自己那份强定义永远进不来——表现是
-        # "程序创建当拍就退出、什么都不打印"，既不报错也没有诊断。
-        # 现在 SDK 在 arkc 档不提供默认实现，所以这里必须是链接失败。
+        # 这条守的是一处**静默**错误。历史：SDK 的启动骨架曾经是「main() 调
+        # MiniMain()」，而 SDK 同时提供一个弱定义的空 MiniMain——arkc 在同一个
+        # 翻译单元内把它绑死，工程自己那份强定义永远进不来，表现是「程序创建
+        # 当拍就退出、什么都不打印」，既不报错也没有诊断。
+        #
+        # 现在 arkc 档的入口就是工程自己写的 int main(void)，SDK 不提供任何默认
+        # main；所以这里必须是链接失败。工程只给启动桩与运行时（两份 SDK 文件），
+        # 一个 main 都没有。
         + _steps_emit("/tmp/nmk", [
             "TARGET = nom",
             "OUT = nom.svcm",
-            "SRCS = /mnt/nor/start.c /mnt/nor/mini_main.c /mnt/nor/rt.c",
+            "SRCS = /mnt/nor/start.c /mnt/nor/rt.c",
             "INCS = /mnt/nor",
         ])
         + [
             Step("make -f /tmp/nmk",
-                 expect=[r'^/tmp/ppA\.bin: Error: unresolved symbol "MiniMain"$',
+                 expect=[r'^/tmp/ppA\.bin: Error: unresolved symbol "main"$',
                          r"^cc: pass A failed$"],
                  # 关键否定：不许"报错但照样出文件"。以前链接器只报诊断、
                  # 仍然写出镜像，四遍差分照做，最后在打包阶段报一个不相干的
                  # -33（实测）。
                  forbid=[r"^make: ok$", r"pack failed"],
-                 wait=40.0),
+                 wait=60.0),
             Step("rm /tmp/nmk"),
         ],
     ),]
