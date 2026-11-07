@@ -64,19 +64,26 @@ void arkvim_term_clear_to_eol(void)
     arkvim_port_send_string("\x1b[0K");
 }
 
-void arkvim_term_move_cursor(int row, int col)
+int arkvim_term_fmt_move_cursor(int row, int col, char *out)
 {
-    /* ESC [ row ; col H, 1-based. Cap to avoid huge buffers. */
-    char buf[24];
+    /* ESC [ row ; col H, 1-based. Cap to avoid huge buffers.
+     * `out` must hold at least 24 bytes. */
     int r = row < 1 ? 1 : row;
     int c = col < 1 ? 1 : col;
     int n = 0;
-    buf[n++] = '\x1b';
-    buf[n++] = '[';
-    n += int_to_dec(r, &buf[n]);
-    buf[n++] = ';';
-    n += int_to_dec(c, &buf[n]);
-    buf[n++] = 'H';
+    out[n++] = '\x1b';
+    out[n++] = '[';
+    n += int_to_dec(r, &out[n]);
+    out[n++] = ';';
+    n += int_to_dec(c, &out[n]);
+    out[n++] = 'H';
+    return n;
+}
+
+void arkvim_term_move_cursor(int row, int col)
+{
+    char buf[24];
+    int  n = arkvim_term_fmt_move_cursor(row, col, buf);
     arkvim_port_send_buf((const uint8_t *)buf, (uint16_t)n);
 }
 

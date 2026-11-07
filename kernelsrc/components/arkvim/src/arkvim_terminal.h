@@ -59,6 +59,11 @@ void    arkvim_term_clear_screen(void);
 void    arkvim_term_clear_line(void);
 void    arkvim_term_clear_to_eol(void);
 void    arkvim_term_move_cursor(int row, int col);   /* 1-based */
+/* Format the same sequence into `out` without emitting it.
+ * Returns the length written; `out` must hold >= 24 bytes.
+ * Lets a caller that batches output avoid one transport write
+ * per cursor move. */
+int     arkvim_term_fmt_move_cursor(int row, int col, char *out);
 void    arkvim_term_hide_cursor(void);
 void    arkvim_term_show_cursor(void);
 void    arkvim_term_reset_attr(void);

@@ -89,7 +89,10 @@ extern "C" {
 #define ARKVIM_ENABLE_UNDO           1   /* Undo/redo stacks */
 #endif
 #ifndef ARKVIM_ENABLE_LINE_NUMBERS
-#define ARKVIM_ENABLE_LINE_NUMBERS   0   /* :set nu default */
+/* Line numbers on by default: the gutter costs three columns plus one
+ * space and makes line-addressed commands (:42, dd, yank) much easier
+ * to aim at. ":set nonu" turns it off at runtime. */
+#define ARKVIM_ENABLE_LINE_NUMBERS   1
 #endif
 
 /* ---- Screen layout helpers (derived, do not edit) ---- */

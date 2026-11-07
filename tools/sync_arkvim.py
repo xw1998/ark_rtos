@@ -177,6 +177,11 @@ def main():
         dst = os.path.join(DST_ROOT, rel.replace("/", os.sep))
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copy2(want[rel], dst)
+        # copy2 连 mtime 一起搬过来，而那正是 make 判断"要不要重编"的依据：
+        # 源仓库某个文件最后一次改动可能比目标 .o 还早（这次就是这样——同步了
+        # 三个修复，make 一个都没重编，产物的 text/bss 一个字节都没变，看着
+        # 像"同步生效了"）。所以复制完把 mtime 设成现在，让构建系统一定看见。
+        os.utime(dst, None)
 
     head = git_head(src)
     dirty = git_dirty(src)

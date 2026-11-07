@@ -45,12 +45,33 @@ static void statusf(arkvim_editor_t *e, const char *fmt, ...)
 /* ============================================================
  * Geometry helpers
  * ============================================================ */
-static int gutter_width(const arkvim_editor_t *e)
+/* Width of the line-number gutter in columns: the digits of the
+ * largest line number plus one separating space. Small buffers keep a
+ * 3-digit column so the text does not shift when the file grows, and
+ * the column widens by one at 1000 / 10000 lines. */
+static int gutter_width(arkvim_editor_t *e)
 {
-    return e->show_numbers ? 4 : 0;
+    int digits = 1;
+    int t;
+
+    if (!e->show_numbers) {
+        return 0;
+    }
+    t = (int)lt_line_count(&e->lt, &e->gb);
+    while (t >= 10) {
+        t /= 10;
+        digits++;
+    }
+    if (digits < 3) {
+        digits = 3;
+    }
+    if (digits > 5) {          /* ARKVIM_LT_MAX_LINES is far below this */
+        digits = 5;
+    }
+    return digits + 1;
 }
 
-static int text_cols(const arkvim_editor_t *e)
+static int text_cols(arkvim_editor_t *e)
 {
     return ARKVIM_SCREEN_COLS - gutter_width(e);
 }
@@ -390,7 +411,7 @@ static void draw_rows(arkvim_editor_t *e)
         if (gw > 0) {
             char num[8];
             int i;
-            int n = snprintf(num, sizeof(num), "%3d ", filerow + 1);
+            int n = snprintf(num, sizeof(num), "%*d ", gw - 1, filerow + 1);
             for (i = 0; i < gw; i++) {
                 char c = (i < n) ? num[i] : ' ';
                 ren_set_cell(y, i, c, ARKVIM_ATTR_NORMAL);
@@ -430,7 +451,25 @@ static void draw_rows(arkvim_editor_t *e)
             }
 #endif
             for (vis_col = 0; vis_col < (int)copy; vis_col++) {
-                ren_set_cell(y, gw + vis_col, line_buf[vis_col], attr_buf[vis_col]);
+                char ch = line_buf[vis_col];
+
+                /* Never hand a control byte to the terminal as a glyph.
+                 * Files written on this board by the shell's `echo` carry
+                 * CRLF line ends, so a CR is an ordinary byte inside the
+                 * gap buffer; painting it raw sends 0x0D down the wire,
+                 * and the terminal answers by jumping to column 1 -- the
+                 * row then shows a hole and the rest of the line lands
+                 * on top of the gutter. One placeholder cell keeps the
+                 * screen truthful and the terminal state intact. */
+                if (((unsigned char)ch < 0x20) || (ch == 0x7F)) {
+                    /* TAB is included on purpose: the terminal would expand
+                     * it to its own tab stops and every later column in this
+                     * row (and the cursor we put there) would be off by a
+                     * few cells. Expanding tabs properly is a separate
+                     * change; until then they show up as '?'. */
+                    ch = '?';
+                }
+                ren_set_cell(y, gw + vis_col, ch, attr_buf[vis_col]);
             }
             for (; gw + vis_col < ARKVIM_SCREEN_COLS; vis_col++) {
                 ren_set_cell(y, gw + vis_col, ' ', ARKVIM_ATTR_NORMAL);
@@ -495,9 +534,17 @@ static void draw_cmd_line(arkvim_editor_t *e)
     }
 
     if (e->mode == ARKVIM_MODE_COMMAND) {
-        ren_set_cell(row, 0, (e->cmd_buf[0] == '/' ? '/' : ':'), ARKVIM_ATTR_NORMAL);
-        ren_set_text(row, 1, e->cmd_buf + (e->cmd_buf[0] == '/' ? 1 : 0),
-                     e->cmd_len, ARKVIM_ATTR_NORMAL);
+        /* cmd_buf holds the whole line *including* its ':' or '/'
+         * prefix and cmd_len counts that prefix, so paint it as-is.
+         * (Painting the prefix by hand and then copying cmd_len
+         * characters from cmd_buf[1] showed ":q" as "::q", dropped
+         * the last character of a long command, and pushed the
+         * string's terminating NUL out to the terminal for "/".) */
+        int n = e->cmd_len;
+        if (n > ARKVIM_SCREEN_COLS) {
+            n = ARKVIM_SCREEN_COLS;
+        }
+        ren_set_text(row, 0, e->cmd_buf, n, ARKVIM_ATTR_NORMAL);
     } else if (e->status_msg[0] != '\0') {
         int n = (int)strlen(e->status_msg);
         if (n > ARKVIM_SCREEN_COLS) {
