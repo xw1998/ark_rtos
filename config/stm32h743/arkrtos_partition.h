@@ -695,7 +695,13 @@ typedef char arkrtos_pool_unit_check[
  * footprint - the switch stays a switch, not a permanent tax. */
 #define SHELL_TASK_STACK_SIZE    (1024 * 3)
 #else
-#define SHELL_TASK_STACK_SIZE    (1024 * 28)
+/* 40 KB, not 28: measured with the on-target compiler running *through ark
+ * make*.  A direct `cc` command keeps the same work in a shallower call chain;
+ * adding arkmake's frames (make handler -> arkmake_build -> make_pack ->
+ * arkc_cc_pack) was enough to push a variadic source (example/mini_va) over
+ * 28 KB and take the console down with a stack fault.  The old 28 KB figure
+ * came from measuring cc alone at 22 000 B, i.e. without that extra depth. */
+#define SHELL_TASK_STACK_SIZE    (1024 * 40)
 #endif
 #define SHELL_TASK_PERIOD_MS     2               /* 无按键时的轮询间隔（ms） */
 /* Max RX bytes consumed per console round.  The host pushes a whole

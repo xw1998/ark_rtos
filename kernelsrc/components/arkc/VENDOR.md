@@ -7,7 +7,7 @@
 | 项 | 值 |
 |---|---|
 | 来源 | `D:/工作/git_project/ark c compiler` |
-| 源 commit | `f4366c654f2eaef5efcebbd3c3ef98de8306ef38` |
+| 源 commit | `2b500a6851902aa1d1e077bbb88a0ce121fb8ea2` |
 | 工作区 | 有未提交改动 |
 | 同步日期 | 2026-11-07 |
 | 文件数 | 43 |
@@ -17,6 +17,8 @@
 **不含** `src/main.c`：主机驱动器自己带 `main()`，板上入口是 shell 的 `cc` 命令。
 **不含** `src/backend/{c,x86_64,riscv32}`：本板只有 arm 后端（`src/backend/arm` + `src/backend/registry.c`）。
 **不含** `port/`：`port/stm32/platform_stm32.c` 自带 `malloc/free/putchar/__user_initial_stackheap`，与 newlib 撞符号；`port/host` 是主机端。两者的职责由组件根目录的接线文件接过来。
+
+另外同步一份 `stdlib/include/stdarg.h` → `kernelsrc/sdk/mini_sdk/arkc/stdarg.h`：板上市小程序的头文件集里有它（变参规则只能有一份实现，手抄一定漂）。
 
 ## 四个接线文件（Ark RTOS 侧，不在同步范围）
 

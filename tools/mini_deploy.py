@@ -20,6 +20,7 @@
         arkrtos.h                   arkc 版最小内核声明
         unistd.h                    POSIX 控制台子集（write / _exit）
         stdio.h                     printf / puts / putchar
+        stdarg.h                    va_list / va_start / va_arg / va_end
 
     工程（--project，默认 example/mini_hello）
         目录里的全部文件，落到 **/mnt/nor/hello/** 子目录，原名不变
@@ -55,6 +56,7 @@ SDK_FILES = [
     ("kernelsrc/sdk/mini_sdk/arkc/arkrtos.h",           "/arkrtos.h"),
     ("kernelsrc/sdk/mini_sdk/arkc/unistd.h",            "/unistd.h"),
     ("kernelsrc/sdk/mini_sdk/arkc/stdio.h",             "/stdio.h"),
+    ("kernelsrc/sdk/mini_sdk/arkc/stdarg.h",            "/stdarg.h"),
 ]
 
 # 老的部署形态留下的文件：SDK 不再需要它（arkc 档的入口就是工程的 main）。

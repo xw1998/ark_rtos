@@ -20,6 +20,12 @@
 /* Note: <stdio.h> intentionally NOT included to avoid pulling in semihosting-
  * dependent snprintf on STM32. sb_putf below uses a custom dtoa instead. */
 
+/* 1 (default): a variadic function reserves the C backend's 8 x 8-byte
+ * argument slot region at frame+8000.  The driver clears this for ARM Thumb-2
+ * and RV32I, whose regions are built from the caller's own argument words
+ * (see include/ir.h and <stdarg.h>). */
+int g_ir_va_slot_region = 1;
+
 /* Internal buffer used to serialize an AST initializer list into a C source
  * snippet. 64 KB is enough for ordinary examples. */
 typedef struct StrBuf {
@@ -914,7 +920,7 @@ IrProgram *irgen_program(AstNode *prog) {
                 /* For variadic functions, also store all 8 args (a0..a7) at a
                  * fixed frame region (ARK_VA_ARG_BASE..+64) so va_start/va_arg
                  * can access the variadic tail. */
-                if (d->u.func.is_variadic) {
+                if (d->u.func.is_variadic && g_ir_va_slot_region) {
                     int k;
                     for (k = 0; k < 8; k++) {
                         ir_emit(g.fn, IR_GETARG, 8000 + k * 8, 0, k);
@@ -928,8 +934,15 @@ IrProgram *irgen_program(AstNode *prog) {
             /* Bug-X4: For variadic functions, the 8000 frame region (used by
              * va_start/va_arg to access the variadic tail) must be included
              * in local_size so the backend prologue allocates enough stack.
-             * The region spans offsets 8000..8063 (8 args * 8 bytes). */
-            if (d->u.func.is_variadic) {
+             * The region spans offsets 8000..8063 (8 args * 8 bytes).
+             *
+             * Only for the 8-byte-slot backends (C, x86_64).  ARM and RV32I
+             * build their argument image out of the caller's own registers and
+             * stack words, so 8 KB of frame would be pure waste -- and on the
+             * board it is fatal: a mini-app task gets APP_TASK_STACK_SIZE
+             * = 4 KB, so a variadic function could never be called at all.
+             * The driver clears the switch for those two targets. */
+            if (d->u.func.is_variadic && g_ir_va_slot_region) {
                 if (g.max_size < 8064)
                     g.max_size = 8064;
             }
@@ -3204,6 +3217,17 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                          * internal word order to cdecl order. */
                         ir_emit(g->fn, IR_CDECL64, 0, 0, 0);
                     }
+                    /* C99 6.5.2.2p6: default argument promotion turns a float
+                     * variadic argument into a double.  Without it the caller
+                     * handed over a 4-byte float while va_arg(ap, double) read
+                     * 8 bytes, so `printf("%f", 1.5f)`-shaped calls read the
+                     * next argument word as the high half (measured on ARM
+                     * against gcc: the promoted value must be 8 bytes wide).
+                     * The matching 8-byte-width flag is set on argmask below. */
+                    if (s && s->kind == SYM_FUNC && s->is_variadic &&
+                        i >= s->param_count && at && at->kind == TYPE_FLOAT) {
+                        ir_emit(g->fn, IR_F2F, 0, 0, 0x100);
+                    }
                 }
             }
             /* Indirect call: push the function pointer (callee) last so it
@@ -3259,6 +3283,13 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                     Type *use_t = pt ? pt : (arg ? arg->type : 0);
                     if (use_t) {
                         int k = use_t->kind;
+                        /* A float variadic argument has been promoted to double
+                         * (see the IR_F2F above), so it occupies 8 bytes on the
+                         * wire as well; the width bit is what the ARM/RV32I
+                         * backends place the argument by. */
+                        if (s && s->kind == SYM_FUNC && s->is_variadic &&
+                            i >= s->param_count && k == TYPE_FLOAT)
+                            argmask |= (1 << (2 * i + 1));
                         /* bit(2*i)   = 1 => float/double (promoted to double)
                          * bit(2*i+1) = 1 => 8-byte type (long long OR double)
                          * Double sets BOTH bits: bit(2*i) for float/double cast
@@ -3290,9 +3321,26 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                  * to push r1 (high word) alongside r0 after an indirect call. */
                 {
                     long long call_val = n;
-                    if (is_indirect && node->type &&
+                    /* Result shape, taken from the *call expression's* type --
+                     * which is the same thing irgen_discard_result uses to decide
+                     * how many words to pop, so the two sides cannot disagree:
+                     *   bit 32: the result is two words (long long / double)
+                     *   bit 33: the result is void (caller pushes nothing)
+                     * The backends previously looked this up in prog->funcs, i.e.
+                     * only in functions *defined by this translation unit*.  A
+                     * declared-only callee therefore got "returns one word":
+                     * `extern void h(void); h();` pushed r0 that nobody popped
+                     * (4 bytes of stack leaked per call -- on the board this left
+                     * the MiniApp frame 4 bytes off and broke va_arg's 8-byte
+                     * alignment), and `extern long long e(void); return e();`
+                     * silently dropped the high word.
+                     * Both bits are above the argument count, which every backend
+                     * truncates to int. */
+                    if (node->type &&
                         (node->type->kind == TYPE_LLONG || node->type->kind == TYPE_DOUBLE))
                         call_val |= 0x100000000LL;
+                    if (node->type && node->type->kind == TYPE_VOID)
+                        call_val |= 0x200000000LL;
                     ir_emit(g->fn, IR_CALL, call_val, node->u.call.name, argmask);
                 }
             }

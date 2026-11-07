@@ -1784,6 +1784,9 @@ int ark_compile(const ArkOptions *opts) {
             return ARK_ERR_ARG;
         }
         cpu_apply_predefines(cpu);
+        /* Which FPU the ARM backend may use for double <-> float conversion:
+         * only the DP variants (Cortex-M7 DP) can encode VCVT.F64.*. */
+        g_arm_fpu_dp = cpu->has_fpu_dp ? 1 : 0;
         /* CPUs without FPU support automatically disable hardware FPU codegen */
         if (!cpu->has_fpu) g_config.enable_fpu_hw = 0;
         if (opts->verbose) {
@@ -1814,6 +1817,39 @@ int ark_compile(const ArkOptions *opts) {
         }
     }
 
+    /* Variadic functions: which va-region convention the target uses.
+     * <stdarg.h> has two ways to walk an argument list and they are not
+     * interchangeable:
+     *   * the C and x86_64 backends keep ONE 8-byte slot per argument
+     *     (ordinal-indexed: irgen asks for frame+8000+8k);
+     *   * the ARM and RV32I backends keep one 4-byte word per AAPCS slot,
+     *     which is the caller's real layout, so a 64-bit argument is just
+     *     two adjacent words (irgen's 8-byte stride is remapped there).
+     * The header cannot see which backend is compiling it, so the driver
+     * says so here and stdarg.h picks one walk.  Deliberately left
+     * undefined for the 8-byte-slot targets: their preprocessed text stays
+     * byte-identical, which is what the C-side tests compare against. */
+    {
+        const ArkBackend *vbe = opts->target ? ark_backend_find(opts->target)
+                                             : ark_backend_default();
+        if (vbe && vbe->name &&
+            (ark_streq(vbe->name, "arm") || ark_streq(vbe->name, "riscv32"))) {
+            preproc_define("__ARK_VA_WORD_SLOTS", "1");
+            /* ...and irgen must not reserve the C backend's 8 KB slot area:
+             * these two backends build the region out of the caller's own
+             * words, so reserving it would only cost stack (8 KB against a
+             * 4 KB mini-app task stack on the board). */
+            g_ir_va_slot_region = 0;
+        }
+        /* ...and whether those word slots carry the AAPCS32 alignment holes
+         * (ARM: a 64-bit argument starts on an even register / an 8-byte
+         * aligned stack slot) or are packed (RV32I: this backend numbers
+         * argument words 0,1,2,.. with no gaps).  <stdarg.h> needs to know,
+         * because "align ap to 8" is only correct where the holes exist. */
+        if (vbe && vbe->name && ark_streq(vbe->name, "riscv32"))
+            preproc_define("__ARK_VA_PACKED_WORDS", "1");
+    }
+
     /* --split_sections/-ffunction-sections: sync runtime switch to g_config,
      * so ARM/C backends emit a separate section before each function. */
     if (opts->split_sections) g_config.split_sections = 1;
@@ -1822,6 +1858,9 @@ int ark_compile(const ArkOptions *opts) {
      * the backend) because it is an option, and the backend sees only opts-free
      * state.  Zero by default: every existing command line is unchanged. */
     g_arm_vt_reserve = (opts->vector_table != 0) ? 1 : 0;
+    /* No -cpu: the conservative value (software double<->float conversion).
+     * Set before the -cpu block below can raise it. */
+    g_arm_fpu_dp = 0;
 
     {
         /* fs_read_file() truncates at ARK_SRC_BUF_SIZE-1 without saying so,

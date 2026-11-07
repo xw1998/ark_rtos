@@ -66,8 +66,8 @@ py -3 tools/mini_deploy.py --port COM3
 
 1. 在卷上建出 **`/mnt/nor/hello/`** 目录（走 littlefs 的 `mkdir`），把工程目录
    （`example/mini_hello/` 的 `hello.c` + `makefile`）放进去；
-2. 把小程序 SDK 的 5 个文件放到**卷根**（`start.c` / `rt.c` / `arkrtos.h` /
-   `unistd.h` / `stdio.h`），并清掉老形态留下的 `/mini_main.c`。
+2. 把小程序 SDK 的 6 个文件放到**卷根**（`start.c` / `rt.c` / `arkrtos.h` /
+   `unistd.h` / `stdio.h` / `stdarg.h`），并清掉老形态留下的 `/mini_main.c`。
 
 为什么这么分：SDK 是"这套编译器运行时"，一份；工程是"你要编的东西"，可以有
 很多份并排放在同一块卷上（`hello/`、`blink/`…），各自的 makefile 用绝对路径
@@ -142,7 +142,7 @@ int main(void) {
 `arkrtos_thread_exit()` 把两块 RAM 交还内核——"进程收尾"由运行时负责，和桌面
 上由 C 库替你 `exit()` 是一回事。
 
-### 3.2 SDK 的两个源 + 三个头
+### 3.2 SDK 的两个源 + 四个头
 
 | 文件 | 作用 |
 |------|------|
@@ -151,18 +151,19 @@ int main(void) {
 | `arkrtos.h` | `arkrtos_thread_exit()`、`ARKRTOS_WEAK`，以及入口约定（工程写 `int main(void)`） |
 | `unistd.h` | `STDOUT_FILENO`/`STDERR_FILENO`、`write`/`_exit` |
 | `stdio.h` | `printf`/`puts`/`putchar`，以及**支持的转换与硬上限** |
+| `stdarg.h` | `va_list`/`va_start`/`va_arg`/`va_end`（源 `ark c compiler/stdlib/include/stdarg.h`，由 `sync_arkc.py` 一并搬过来） |
 
 **为什么不用完整的 `arkrtos_posix.c`**：那份 3600 行，拖着 socket / VFS 两条链，
 而小程序的**整份负载要搬进 RAM 执行**（16 KB 代码块），装不下。所以这里只提供
 控制台子集，并把没有的东西如实写在头文件里。
 
-### 3.3 `printf` 怎么在"ARM 后端没有 va 区"的编译器上变成真变参
+### 3.3 `printf` 为什么不是用 `va_list` 写的（而 arkc 现在其实有 `va_list`）
 
-`arkc` 的 `stdlib/include/stdarg.h` 是给 **C 后端**写的：`va_start` 展开成读一个
-叫 `_ark_va_ptr` 的 extern，而只有 C 后端与 x86_64 后端会把它定义成指向 va 区的
-局部变量（`irgen` 为每个变参函数请求把 a0..a7 镜像到 `frame+8000..8063`）。
+先把历史说清楚，因为这一节的标题以前是「ARM 后端没有 va 区」：
 
-**ARM 后端从没实现这块**。在补上之前，一个 C 变参函数在 ARM 上曾被翻成
+**那曾经是真的**。`irgen` 为每个变参函数请求把 a0..a7 镜像到 `frame+8000` 起，
+但只有 C 与 x86_64 后端把 `_ark_va_ptr` 定义成指向这块区域的局部变量；ARM 后端
+从没实现，一个 C 变参函数在 ARM 上被翻成
 
 ```
         MOV r0, #0
@@ -170,14 +171,65 @@ int main(void) {
 ```
 
 ——不报错，然后 `va_arg` 顺着地址 0 上的向量表（也就是一个栈地址）往下走：错答案，
-无诊断（`examples/va_test.c` 实测）。现在 ARM / RV32I 后端**明确拒绝** C 变参函数
-定义（`variadic function 'x' is not supported by the ARM backend: ...`），并把
-`examples/run_tests.ps1` 的 `$expectArmFail` 表当成闸门：哪天有人实现了 va 区，
-那几条用例会转红。细节见 arkc 仓库 README 的「后端」一节。
+无诊断（`examples/va_test.c` 实测）。之后一度改成「明确拒绝」，那只是不再给出错
+答案，功能仍然没有。
 
-所以这里不假装有 `va_list`，也不用宏按参数个数分派（那样 `printf` 就不是函数了）。
-做法是一条 `__asm` **取参桩**（`__asm` 整函数体没有 C 体，不引用 `_ark_va_ptr`，
-不受上面那条拒绝影响）：
+**现在两个后端都实现了**（arkc `e75c2ca`）。两种形状：
+
+| 后端 | 区域 | 代价 |
+|------|------|------|
+| ARM Thumb-2 | 序言 `PUSH {r0-r3}`，这四个字正好落在调用方栈参数块下方：word 0..3 = r0..r3，word 4+k = 栈参数第 k 字，连续、不拷贝 | 每次调用 16 字节栈 + 返回前一条 `ADD sp, sp, #16`；栈参数**没有条数上限** |
+| RV32I | 帧底那 32 字节（`s0 - sp_size + 4*k`），用 `sp_size` 本来就留的余量 | 不额外占栈；只有 a0-a7 八个字，没有栈参数 |
+| C / x86_64 | `frame+8000+8k`，每个实参一个 8 字节槽 | 老走法，一字未改 |
+
+`stdarg.h` 靠 `compiler.c` 注入的 `__ARK_VA_WORD_SLOTS` / `__ARK_VA_PACKED_WORDS`
+选走法。执行语义由 `examples/run_va_gate.py` 钉住：同一份源码分别交给 gcc 和
+arkcc→as→unicorn，比的是**运行结果**，27 项（其中两组不需要外部工具链），并且**每个用例都断言帧 ≤ 1024 字节**
+——这条不是装饰：第一版实现是 8 KB 的镜像区，宿主上全绿，而板上的小程序任务栈只有
+4 KB（`APP_TASK_STACK_SIZE`），到板上必然溢出。
+
+**板上才暴露的两处静默错答案**（arkc `2b500a6`，宿主门禁当时全绿）：
+
+1. **arkc 自己的 Thumb 汇编器把 `POP {.., lr}` 里的 `lr` 丢了。** 16 位 POP 在
+   第 8 位只有一个比特，而在 POP 里那一位是 **PC**（LR 只有 PUSH 能压）。变参尾声
+   必须是 `POP {r5,r6,r7,lr}` + `ADD sp, sp, #16` + `BX lr`（先跳过 r0-r3 镜像
+   再返回），结果汇编成 `bce0` = `POP {r5,r6,r7}`：每次从变参函数返回 SP 少 4 字节、
+   `lr` 没恢复。寄存器分配后处理还会把这一行改写成 `POP {..,pc}`，那更糟——镜像
+   还在栈上就跳回去了。现在按 T2 `ldmia.w sp!, {..,lr}` 编码；`POP` 同时点 lr 与
+   pc、`PUSH` 点 pc 都直接报错，不再悄悄丢一个寄存器。
+2. **只声明不定义的被调函数一律被当成"返回一个字"。** 三个后端都去 `prog->funcs`
+   （本翻译单元里**定义**的函数）查返回形状，而 `irgen` 是按调用表达式的类型决定
+   弹几个字的。于是 `extern void h(void); h();` 每次调用在栈上留 4 字节，
+   `extern long long e(void); return e();` 高字根本没压。现在 `irgen` 把返回形状
+   编进 `IR_CALL` 的 `val`（bit32 = 两个字，bit33 = void），后端查不到名字时用它。
+
+**这两条与变参的关系**：第 2 条正是板上 `va_arg(ap, long long)` 读错的根因。
+`MINISTART` 里的 `__arkcc_init_globals()` 就是这样一条"只声明不定义"的 void 调用，
+它把 `main` 的帧顶低了 4 字节，于是 ARM 的参数镜像不再 8 字节对齐——
+`stdarg.h` 的"向上取整到 8"成了一个空操作，64 位实参整字读早了，读到的低字
+`0x55` 被当成高字（实测 85，正确是 17）。修好后板上六行读数全对：
+
+```
+va sum6      = 21 (want 21)
+va sum20     = 210 (want 210)
+va ll_hi     = 17 (want 17)
+va tail      = 21 (want 21)
+va dbl_tag   = 255 (want 255)
+```
+
+这两类错误宿主上抓不到：门禁走的是 GNU as（编码器不同），而被调函数又都在同一个
+翻译单元里（`prog->funcs` 查得到）。所以门禁里补了两组**不需要外部工具链**的断言：
+返回序列的字节级编码，以及上面两种"只声明"调用的结果形状。
+
+**那 `printf` 为什么还是取参桩？** 两条理由：
+
+1. 这条桩已经在板上验过（`mini-sdk-std-hello` 与 `printf` 宿主门禁），没有理由
+   为了好看去换掉一个验证过的实现。
+2. 它是 SDK 的一部分、不依赖编译器的变参实现：编译器以后换 va 区实现，`printf`
+   不受影响。真要自己写，`#include <stdarg.h>` 直接用就行（见下面第 7 条限制）。
+
+所以这里不用宏按参数个数分派（那样 `printf` 就不是函数了），仍是一条 `__asm`
+**取参桩**：
 
 ```c
 __asm int printf(const char *fmt, ...)
@@ -257,10 +309,10 @@ FAIL BOOT: cannot mount nor0 at /mnt/nor: -5 (...); the console still comes up, 
 6. **`printf` 一次调用最多 12 个参数（格式串 + 11 个）**：取参桩只搬 12 个字，
    第 13 个起取不到（读到 0）。编译器本身允许更多参数，所以这条上限是 SDK 的，
    写在 `stdio.h` 与这里，不是"编译器不行"。
-7. **工程里不能自己写 C 变参函数**：ARM 后端没有实现 va 区，这类定义会被明确
-   拒绝（不是静默出错）。要写就得用 `__asm` 自己取参，或者先把编译器那块补上
-   ——补法不是"加个后端分支"，ARM 的 `va_list` 必须按 AAPCS 的寄存器/栈混合
-   布局重新设计，现有 `stdarg.h`（8 字节槽位 + `long long *`）是 C 后端的约定。
+7. **工程里可以自己写 C 变参函数，代价只有 16 字节栈**：`#include <stdarg.h>` 后
+   `va_start`/`va_arg`/`va_end` 都能用（ARM 后端在序言里 `PUSH {r0-r3}`，栈参数
+   就留在调用方压的位置，`va_arg` 顺着往上走）。栈参数没有条数上限；小程序栈
+   4 KB 里也放得下——这条限制以前写的是"帧会涨到 8 KB、基本别用"，现在不成立了。
 8. **工程必须自己定义 `int main(void)`**：SDK 在 arkc 档不提供任何默认 `main`，
    漏定义就是链接期 `unresolved symbol "main"`，不会给你一个"能跑但什么都不
    打印"的空程序。历史原因值得记一笔：以前的骨架是 SDK 提供 `main()` + 工程
@@ -274,7 +326,7 @@ FAIL BOOT: cannot mount nor0 at /mnt/nor: -5 (...); the console still comes up, 
 
 | 用例 | 判什么 |
 |------|--------|
-| `mini-sdk-std-hello` | `ls -l /mnt/nor` 能看到 SDK 五件 + `hello` 目录（证明上电自动挂载）→ `hello` **command not found**（反假绿）→ `cd /mnt/nor/hello` → `cat hello.c` 里就是 `#include <stdio.h>` 与 `printf("Hello, World!\n");` → `make`（3 份源、四遍、`entry mode: flat miniapp`、`payload + table`）→ `mini run hello.svcm` 打出 `Hello, World!` 且两块 RAM 归还 |
+| `mini-sdk-std-hello` | `ls -l /mnt/nor` 能看到 SDK 六件 + `hello` 目录（证明上电自动挂载）→ `hello` **command not found**（反假绿）→ `cd /mnt/nor/hello` → `cat hello.c` 里就是 `#include <stdio.h>` 与 `printf("Hello, World!\n");` → `make`（3 份源、四遍、`entry mode: flat miniapp`、`payload + table`）→ `mini run hello.svcm` 打出 `Hello, World!` 且两块 RAM 归还 |
 | `mini-sdk-missing-main` | 工程没定义 `main` 时必须 `unresolved symbol "main"` + `cc: pass A failed`；**不许**"报错但照样出文件"（链接器以前只报诊断、仍写出镜像，四遍照做，最后在打包阶段报一个不相干的 -33） |
 
 ## 7. `printf` 的宿主门禁

@@ -7,6 +7,10 @@
  *   - r6 = local variable base (fp, pointing to the low address of the local var area).
  *   - Prologue:  PUSH {r5,r6,r7,lr}; SUB sp,sp,#N; MOV r6, sp
  *   - Epilogue:  POP {r0}; MOV sp,r6; ADD sp,sp,#N; POP {r5,r6,r7,pc}
+ *   - Variadic functions push r0..r3 *before* the saved registers, so the four
+ *     register argument words land directly below the caller's stack argument
+ *     block and the va region becomes one contiguous image; the epilogue then
+ *     has to add those 16 bytes back as well.
  */
 #include "backend.h"
 #include "codegen.h"
@@ -612,12 +616,18 @@ static void ark_regalloc_function(AsmBuffer *b, int from, IrFunc *f) {
         }
         if (line[0] == ' ' && line[1] == ' ' && line[2] == ' ' && line[3] == ' ' &&
             ra_pre8(line + 4, "POP {r5,")) {
+            /* A variadic function returns through POP {r5,r6,r7,lr} and then
+             * ADD sp,#16 / BX lr (it has to drop the r0-r3 mirror first), so
+             * rewriting that line to POP {..,pc} would jump out 16 bytes early
+             * with the pad still on the stack.  Keep lr; the rest of the list
+             * is widened exactly like the non-variadic case. */
+            int keeps_lr = (strstr(line, ", lr}") != 0);
             asmbuf_puts(&out, "    POP {r5, r6, r7");
             for (k = 0; k < nregs; k++) {
                 asmbuf_puts(&out, ", r");
                 asmbuf_int(&out, made[k]);
             }
-            asmbuf_puts(&out, ", pc}\n");
+            asmbuf_puts(&out, keeps_lr ? ", lr}\n" : ", pc}\n");
             pos += len + 1;
             continue;
         }
@@ -637,6 +647,11 @@ static void ark_regalloc_function(AsmBuffer *b, int from, IrFunc *f) {
 }
 #endif /* ARKCC_FEATURE_OPT_REGALLOC */
 
+/* 16 for a variadic function: the prologue pushed r0-r3 in front of the saved
+ * registers, so every epilogue of that function has 16 extra bytes to drop.
+ * Zero for everything else, which keeps the non-variadic output byte-identical. */
+static int g_va_epilogue_pad;
+
 /* Frame adjustment that does not fit one encoding.  SUBW/ADDW take 0..4095 and
  * the 16-bit forms at most 508, but a function's frame can be larger than that:
  * preproc.c's process() reserves 17208 bytes.  That used to be emitted as a
@@ -655,7 +670,7 @@ static void emit_sp_adjust(AsmBuffer *b, int amount, int is_sub) {
 }
 
 static void emit_prologue(AsmBuffer *b, const char *fn_name, int local_size,
-                          int is_irq, int is_naked, int dbg) {
+                          int va_regs, int is_irq, int is_naked, int dbg) {
     asmbuf_puts(b, fn_name);
     asmbuf_puts(b, ":\n");
     if (dbg) emit_line(b, ".cfi_startproc");
@@ -663,6 +678,11 @@ static void emit_prologue(AsmBuffer *b, const char *fn_name, int local_size,
         /* __naked: emit no prologue; the function body is entirely the user's responsibility */
         return;
     }
+    /* Variadic: save the four register argument words first.  They then sit at
+     * [sp_entry-16, sp_entry) -- directly below the caller's stack argument
+     * block -- so the va region is the caller's argument image verbatim, and
+     * the epilogue has 16 extra bytes to drop (see emit_epilogue_return). */
+    if (va_regs) emit_line(b, "PUSH {r0, r1, r2, r3}");
     if (is_irq) {
         /* __irq: Cortex-M hardware auto-saves r0-r3, r12, lr, pc, xpsr on
          * exception entry. We only need to save r5, r6, r7 (arkcc's
@@ -689,7 +709,19 @@ static void emit_epilogue_return(AsmBuffer *b, int local_size,
     if (!value_in_r0) emit_pop_r0(b);
     emit_line(b, "MOV sp, r6");
     if (local_size > 0) emit_sp_adjust(b, local_size, 0);
-    if (is_irq) {
+    if (g_va_epilogue_pad) {
+        /* Variadic: the prologue pushed r0-r3 *below* the saved registers (so
+         * that the four register argument words stay contiguous with the
+         * caller's stack arguments), so after restoring the saved registers
+         * another 16 bytes have to be dropped before returning.  POP into lr,
+         * drop the words, then branch -- POP {.., pc} cannot be followed by a
+         * stack adjustment.  For an __irq handler lr holds EXC_RETURN, and
+         * BX lr performs the exception return on M-profile, so this shape is
+         * correct there too. */
+        emit_line(b, "POP {r5, r6, r7, lr}");
+        emit_line(b, "ADD sp, sp, #16");
+        emit_line(b, "BX lr");
+    } else if (is_irq) {
         emit_line(b, "POP {r5, r6, r7, pc}");
     } else {
         emit_line(b, "POP {r5, r6, r7, pc}");
@@ -823,6 +855,15 @@ int g_arm_dump_syms = 0;
  * by the assembler do not.  0 = old behaviour, byte for byte. */
 int g_arm_vt_reserve = 0;
 
+/* 1 when the selected CPU has a *double-precision* FPU (Cortex-M7 DP).
+ * Double <-> float conversion is the one place where single-precision
+ * hardware cannot stand in: VCVT.F64.F32 does not exist on the M4F's
+ * fpv4-sp-d16, so emitting it there produces an instruction the assembler
+ * rejects (and the core would fault on).  The software helper __aeabi_f2d /
+ * __aeabi_d2f is used unless this is set.  Default 0: no -cpu means the
+ * conservative path. */
+int g_arm_fpu_dp = 0;
+
 /* Cortex-M vector table: 256 entries, 1 KB.  Declared here (not next to
  * arm_link) because both the assembler -- which reserves this many bytes at the
  * front of the image -- and the linker need it. */
@@ -925,6 +966,36 @@ static int ark_top_enabled(void) {
     return g_config.enable_reg_top ? 1 : 0;
 }
 
+/* va region helpers (defined further down, next to aapcs_assign because they
+ * explain the same word indexing). ark_top_try() runs before them, so their
+ * prototypes live here. */
+#define ARK_VA_BASE 8000
+static void emit_va_ptr(AsmBuffer *b, int reg);
+static int  is_va_ptr_sym(const char *name);
+
+/* 1 while the function being emitted is variadic (set by codegen_arm before
+ * the spill, cleared for every function, so it never leaks across). */
+static int g_va_active;
+
+/* Name of the function whose code is being emitted right now.  Only the
+ * diagnostics that fire inside the instruction switch need it, but they fire
+ * from two different places (the --reg-top peephole and the main switch), so
+ * it is set once per function instead of threaded through both. */
+static const char *g_cur_fn_name;
+
+/* _ark_va_ptr outside a variadic function: <stdarg.h> was used where there is
+ * no argument block to point at (va_start in a function that is not declared
+ * with "...").  The honest answer is an error -- the behaviour this replaces
+ * emitted `MOV r0,#0 / LDR r0,[r0]`, i.e. it read word 0 of the vector table
+ * (the initial SP) and handed it back as an argument pointer. */
+static void va_ptr_needs_variadic(void) {
+    diag_tool(DIAG_SEV_ERROR, "arkcc",
+              "'_ark_va_ptr' is read in '%s', which is not variadic: "
+              "va_start/va_arg only mean something inside a function declared "
+              "with '...'",
+              g_cur_fn_name ? g_cur_fn_name : "?", 0, 0, 0, 0, 0);
+}
+
 static void ark_top_drain(AsmBuffer *b, int *top) {
     if (*top) {
         emit_push_r0(b);
@@ -990,7 +1061,15 @@ static int ark_top_try(AsmBuffer *b, IrInst *I, int *top, int *ret_in_r0) {
         *top = 1;
         return 1;
     case IR_PUSH_GLOBAL: {
-        unsigned addr = gvar_find(I->name);
+        unsigned addr;
+        if (is_va_ptr_sym(I->name)) {
+            if (!g_va_active) va_ptr_needs_variadic();
+            ark_top_drain(b, top);
+            emit_va_ptr(b, 0);
+            *top = 1;
+            return 1;
+        }
+        addr = gvar_find(I->name);
         if (gvar_find_size(I->name) >= 8) {           /* two words: fall back */
             ark_top_drain(b, top);
             return 0;
@@ -1440,6 +1519,71 @@ static int ret_is_two_words(Type *t) {
     return 0;
 }
 
+/* ---- va region ----------------------------------------------------------
+ * One word per argument slot at frame + ARK_VA_BASE + 4*k, contiguous.
+ *
+ * irgen asks for the same region with a *stride of 8* (frame+8000+8k), which
+ * is the C backend's convention: there one slot holds a whole `long long`
+ * per argument (ordinal-indexed), so 8 bytes per slot is what stdarg.h walks.
+ * This backend instead uses word-indexed contiguous slots, because AAPCS
+ * already numbers arguments in 4-byte words (a 64-bit argument takes two
+ * adjacent words) -- so a plain 32-bit walk reproduces the caller's layout
+ * exactly, and a 64-bit read is just `*(long long*)ap` over two adjacent
+ * words.  <stdarg.h> picks the matching convention through
+ * __ARK_VA_WORD_SLOTS, which the driver defines for this target.
+ *
+ * The IR keeps the C-backend stride; the mapping to 4-byte stride happens in
+ * codegen_arm(), in one place (the IR_GETARG case ignores these requests
+ * entirely: see the "variadic region" branch there). */
+/* Variadic region (ARM Thumb-2).
+ *
+ * The region is *the caller's own argument image*, not a copy of it: the four
+ * register words are pushed at function entry (PUSH {r0-r3}) and the stack
+ * words are already where the caller put them, immediately above.  So the
+ * region is the 16 bytes at frame + local_size + 16, and word 4+k is the
+ * k-th stack argument -- contiguous, nothing is copied, and there is no bound
+ * on how many stack arguments a call may pass.
+ *
+ * The cost is 16 bytes of stack per variadic invocation, not 8 KB: the first
+ * version of this mirrored 32 words into the frame, which put an 8 KB frame in
+ * front of a printf-like function -- larger than the whole mini-app task stack
+ * on the board (4 KB, APP_TASK_STACK_SIZE).  Measured: it could not run there.
+ *
+ * ARK_VA_BASE stays as the marker irgen uses for the C backend's 8-byte-slot
+ * region requests (IR_GETARG with dst_off >= 8000); this backend ignores them
+ * because it builds its own region. */
+
+/* Set once per function (the spill runs in the prologue). */
+static int g_va_named_words; /* words used by the named parameters     */
+static int g_va_nsaa;        /* size of the named stack block, bytes   */
+static int g_va_ncrn;        /* next core register after the named args */
+static int g_va_ptr_off;     /* r6 + this = first variadic word        */
+
+/* Materialise `frame + g_va_ptr_off` in `reg`. The offset is past 4095, so it
+ * cannot be an ADD immediate; MOVW+ADD is two instructions and needs no
+ * literal pool. Used for _ark_va_ptr, which stdarg.h reads as a variable. */
+static void emit_va_ptr(AsmBuffer *b, int reg) {
+    asmbuf_puts(b, "    MOVW r");
+    asmbuf_int(b, reg);
+    asmbuf_puts(b, ", #");
+    asmbuf_int(b, g_va_ptr_off);
+    asmbuf_puts(b, "\n    ADD r");
+    asmbuf_int(b, reg);
+    asmbuf_puts(b, ", r6, r");
+    asmbuf_int(b, reg);
+    asmbuf_putc(b, '\n');
+}
+
+/* _ark_va_ptr is how stdarg.h reaches the va region: it is declared extern
+ * there and this backend answers it with a frame address instead of a real
+ * global (the region lives in the caller's frame, one per invocation).
+ * Same shape as the x86 backend's special case; must be handled in BOTH
+ * codegen paths (--reg-top peephole and the main switch), otherwise the
+ * output would differ depending on the optimisation level. */
+static int is_va_ptr_sym(const char *name) {
+    return (name && ark_streq(name, "_ark_va_ptr"));
+}
+
 /* AAPCS32 parameter assignment (base standard: core registers then stack).
  *
  * sizes[i] is how many bytes argument i occupies on the wire: 8 for a
@@ -1665,39 +1809,25 @@ static char *codegen_arm(IrProgram *prog) {
 
     for (fi = 0; fi < prog->func_count; fi++) {
         IrFunc *f = prog->funcs[fi];
+        /* Names the function whose code is being emitted, for the diagnostics
+         * that are raised deep inside the instruction switch (a reference to
+         * _ark_va_ptr outside a variadic function, for instance). */
+        g_cur_fn_name = f->name;
 
-        /* Variadic functions are NOT implemented by the ARM backend.
-         *
-         * irgen asks for a0..a7 to be mirrored into frame+8000..8063
-         * (IR_GETARG with dst_off >= 8000) for every variadic definition, and
-         * stdlib/include/stdarg.h resolves va_start() to the extern
-         * `_ark_va_ptr`. The C backend and the x86_64 backend both implement
-         * that (they define _ark_va_ptr as a local pointing at the va area);
-         * this backend has always done `if (dst_off >= 8000) break;` and never
-         * defines _ark_va_ptr, so a C variadic function used to compile into
-         *     MOV r0, #0
-         *     LDR r0, [r0]        ; read the va pointer from address 0
-         * (measured on examples/va_test.c) -- no diagnostic, and va_arg then
-         * walks whatever happens to sit at address 0: the vector table, i.e.
-         * a stack address. Wrong answer, no error, the worst shape.
-         *
-         * Until the region is implemented here, refuse the definition. Calls to
-         * a variadic function are unaffected (they only need the caller side):
-         * __asm bodies such as the mini SDK's printf shim declare `...` with
-         * no C body and never touch _ark_va_ptr, so is_asm_func skips this. */
-        if (f->is_variadic && !f->is_asm_func) {
-            diag_tool(DIAG_SEV_ERROR, "arkcc",
-                      "variadic function '%s' is not supported by the ARM "
-                      "backend: va_start/va_arg would read the va pointer from "
-                      "address 0 (the va region is implemented only by the C "
-                      "and x86_64 backends)",
-                      f->name, 0,0,0,0,0);
-        }
+        /* Variadic functions: the va region is spilled below, once per
+         * function, right after the prologue (see "va region" further down).
+         * Nothing to do here. */
         int local_size = f->local_size;
         int i;
+        /* Variadic functions need no frame space for the va region: the four
+         * register words are pushed in the prologue and the stack words stay
+         * where the caller put them (see emit_prologue).  irgen does not
+         * reserve the C backend's 8 KB slot area for this target either
+         * (g_ir_va_slot_region), so a variadic frame is just its locals. */
         int is_sret = 0;
         int fstart = 0;              /* where this function's text begins */
         int sret_off = 0;
+        int va_start_slot = 0;       /* first variadic word, in region words */
         /* P1 FIX (sret caller side): pre-allocate sret buffers in this
          * function's frame so the sret space doesn't occupy SP+0 (where
          * the callee expects to read stack args). Each sret call site gets
@@ -1827,7 +1957,9 @@ static char *codegen_arm(IrProgram *prog) {
          * stack-arg offset computation both use this padded value. */
         local_size = (local_size + 7) & ~7;
         fstart = buf.len;
-        emit_prologue(&buf, f->name, local_size, f->is_irq, f->is_naked, dbg);
+        g_va_epilogue_pad = (f->is_variadic && !f->is_naked) ? 16 : 0;
+        emit_prologue(&buf, f->name, local_size, g_va_epilogue_pad ? 1 : 0,
+                      f->is_irq, f->is_naked, dbg);
         /* #2 FIX: Auto-call __arkcc_init_globals at the start of Reset_Handler
          * to initialize .data and zero .bss before main() runs. */
         if (ark_streq(f->name, "Reset_Handler") &&
@@ -1874,9 +2006,61 @@ static char *codegen_arm(IrProgram *prog) {
                     sz = 4;
                 psz[pj] = sz;
             }
-            aapcs_assign(psz, (f->param_count < 64) ? f->param_count : 64,
-                         is_sret ? 1 : 0, aapcs_map, aapcs_soff);
+            g_va_nsaa = aapcs_assign(psz, (f->param_count < 64) ? f->param_count : 64,
+                                    is_sret ? 1 : 0, aapcs_map, aapcs_soff);
+            /* Words used by the named parameters, and where the variadic
+             * words start.
+             *
+             * The start is NOT "the number of named words": AAPCS continues
+             * the argument numbering in the next core register, and any named
+             * argument on the stack forces NCRN to 4 (everything after it is
+             * stacked too). f(int a, long long b, ...) is the case that
+             * separates the two: b needs an even register pair, r1 stays
+             * unused, NCRN is 4, and a "named words" pointer would hand the
+             * first va_arg r3 -- a named argument. Both numbers come out of
+             * aapcs_assign(): register -1 marks a stacked named word, and the
+             * highest register used plus one is NCRN.
+             *
+             * The variadic stack words begin at 4 + nsaa/4 in the flattened
+             * region (see the spill below). */
+            {
+                int nw = 0, pj2, any_stack = 0, maxreg = -1;
+                for (pj2 = 0; pj2 < f->param_count && pj2 < 64; pj2++)
+                    nw += (psz[pj2] == 8) ? 2 : 1;
+                for (pj2 = 0; pj2 < nw && pj2 < 64; pj2++) {
+                    if (aapcs_map[pj2] < 0) any_stack = 1;
+                    else if (aapcs_map[pj2] > maxreg) maxreg = aapcs_map[pj2];
+                }
+                g_va_named_words = nw;
+                g_va_ncrn = any_stack ? 4 : maxreg + 1;
+                if (is_sret && g_va_ncrn < 1) g_va_ncrn = 1;  /* r0 = sret */
+                va_start_slot = (g_va_ncrn < 4) ? g_va_ncrn : 4 + g_va_nsaa / 4;
+            }
         }
+
+        /* ---- va region (variadic functions only) ------------------------
+         * The region IS the caller's argument image: the prologue pushed
+         * r0-r3 at [frame + local_size + 16 .. +31] (r0 lowest), and the
+         * caller's stack argument block starts at frame + local_size + 32.
+         * So region word k is:
+         *   k = 0..3   r0..r3
+         *   k = 4+j    stack argument word j
+         * which is exactly AAPCS's own numbering.  Nothing is copied here and
+         * there is no size limit: <stdarg.h> walks 4-byte words and rounds a
+         * 64-bit read up to an 8-byte boundary, which is the same rule AAPCS
+         * uses for an even register pair and an 8-byte-aligned stack slot.
+         * The base is 8-byte aligned because sp is (AAPCS: 8-byte aligned at
+         * BL) and the prologue subtracted 16 and a multiple of 8.
+         *
+         * `_ark_va_ptr` therefore points at frame + local_size + 16 + 4*slot,
+         * where slot counts AAPCS argument words (see va_start_slot). */
+        g_va_active = 0;
+        g_va_ptr_off = 0;
+        if (f->is_variadic && !f->is_naked) {
+            g_va_active = 1;
+            g_va_ptr_off = local_size + 16 + 4 * va_start_slot;
+        }
+
         /* --reg-top state: whether the IR stack top is in r0, and whether the
          * IR_RETURN being emitted can skip its pop.  Both stay 0 when the
          * option is off, so the generated code is byte-identical. */
@@ -1910,7 +2094,10 @@ static char *codegen_arm(IrProgram *prog) {
                      * Stack layout (upward from r6 = frame pointer):
                      *   [r6 + 0 .. local_size-1]            this frame's local vars
                      *   [r6 + local_size + 0..15]           saved r5/r6/r7/lr
+                     *   [r6 + local_size + 16 .. +31]       variadic only: r0..r3
                      *   [r6 + local_size + 16 + k*4]        the (5+k)th stack arg
+                     *                                       (+32, not +16, in a
+                     *                                       variadic function)
                      *
                      * aux encoding: low 8 bits = slot index, high 24 bits = type size.
                      *   st_sz > 8  => struct-by-value: reg/stack holds a *pointer*
@@ -1922,7 +2109,17 @@ static char *codegen_arm(IrProgram *prog) {
                     int st_sz   = (I->aux >> 8) & 0xFFFFFF;
                     int dst_off = I->val;
                     int reg     = (arg_idx < 64) ? aapcs_map[arg_idx] : -1;
-                    if (dst_off >= 8000) break;  /* variadic region: C-backend only */
+                    /* A variadic prologue pushed r0-r3 into the frame, so the
+                     * caller's stack argument block sits 16 bytes higher. */
+                    int argbase = local_size + (f->is_variadic ? 32 : 16);
+                    /* The variadic region is spilled once in the prologue
+                     * (contiguous words, see "va region spill" above), so
+                     * these IR requests -- one per argument word, stamped
+                     * with the C backend's 8-byte stride -- need nothing
+                     * here. Cheap on purpose: a variadic function gets eight
+                     * of them, and none of them must reach the r3 scratch
+                     * path below (r0-r3 are gone by this point). */
+                    if (dst_off >= ARK_VA_BASE) break;
                     if (st_sz > 8) {
                         /* Struct-by-value (> 8 bytes): register/stack holds a
                          * *pointer* to the source struct. memcpy into frame[dst_off]. */
@@ -1931,7 +2128,7 @@ static char *codegen_arm(IrProgram *prog) {
                             asmbuf_int(&buf, reg);
                             asmbuf_puts(&buf, "\n");
                         } else {
-                            int stack_off = local_size + 16 + aapcs_soff[arg_idx];
+                            int stack_off = argbase + aapcs_soff[arg_idx];
                             asmbuf_puts(&buf, "    LDR r3, [r6, #");
                             asmbuf_int(&buf, stack_off);
                             asmbuf_puts(&buf, "]\n");
@@ -1965,7 +2162,7 @@ static char *codegen_arm(IrProgram *prog) {
                             asmbuf_int(&buf, dst_off);
                             asmbuf_puts(&buf, "]\n");
                         } else {
-                            int soff = local_size + 16 + aapcs_soff[arg_idx];
+                            int soff = argbase + aapcs_soff[arg_idx];
                             asmbuf_puts(&buf, "    LDR r0, [r6, #");
                             asmbuf_int(&buf, soff);
                             asmbuf_puts(&buf, "]\n    STR r0, [r6, #");
@@ -1980,7 +2177,7 @@ static char *codegen_arm(IrProgram *prog) {
                             asmbuf_int(&buf, dst_off + 4);
                             asmbuf_puts(&buf, "]\n");
                         } else {
-                            int soff = local_size + 16 + aapcs_soff[arg_idx + 1];
+                            int soff = argbase + aapcs_soff[arg_idx + 1];
                             asmbuf_puts(&buf, "    LDR r0, [r6, #");
                             asmbuf_int(&buf, soff);
                             asmbuf_puts(&buf, "]\n    STR r0, [r6, #");
@@ -1996,7 +2193,7 @@ static char *codegen_arm(IrProgram *prog) {
                             asmbuf_int(&buf, dst_off);
                             asmbuf_puts(&buf, "]\n");
                         } else {
-                            int soff = local_size + 16 + aapcs_soff[arg_idx];
+                            int soff = argbase + aapcs_soff[arg_idx];
                             asmbuf_puts(&buf, "    LDR r0, [r6, #");
                             asmbuf_int(&buf, soff);
                             asmbuf_puts(&buf, "]\n    STR r0, [r6, #");
@@ -2071,8 +2268,16 @@ static char *codegen_arm(IrProgram *prog) {
                     emit_push_r0(&buf);
                     break;
                 case IR_PUSH_GLOBAL: {
-                    unsigned addr = gvar_find(I->name);
-                    int gsz = gvar_find_size(I->name);
+                    unsigned addr;
+                    int gsz;
+                    if (is_va_ptr_sym(I->name)) {
+                        if (!g_va_active) va_ptr_needs_variadic();
+                        emit_va_ptr(&buf, 0);
+                        emit_push_r0(&buf);
+                        break;
+                    }
+                    addr = gvar_find(I->name);
+                    gsz = gvar_find_size(I->name);
                     if (gsz >= 8) {
                         /* #6 FIX: 64-bit global read - load low and high words */
                         emit_mov_addr32(&buf, 1, addr, addr_in_own_data(addr));
@@ -2656,12 +2861,20 @@ static char *codegen_arm(IrProgram *prog) {
                      *   float  = [r0]              (1 slot)
                      *   aux 0x200 = double->float (narrow): -1 slot
                      *   aux 0x100 = float->double (widen):  +1 slot
-                     * AAPCS helpers: __aeabi_d2f (r0/r1 -> r0),
-                     *                __aeabi_f2d (r0 -> r0/r1). */
+                     * The helpers are this compiler's own (the same ones the
+                     * double<->single paths of the arithmetic helpers use),
+                     * because __aeabi_f2d / __aeabi_d2f are only defined when
+                     * the image is linked against libgcc: __arkcc_f2d_ext
+                     * (r0 -> r0/r1) and __arkcc_d2f_trunc (r0/r1 -> r0) are
+                     * emitted into every image that needs them. */
                     int src_dbl = (I->aux & 0x200) != 0;
                     int dst_dbl = (I->aux & 0x100) != 0;
 #if ARKCC_FEATURE_FPU_HW
-                    if (g_config.enable_fpu_hw) {
+                    /* A single-precision FPU cannot convert to or from double
+                     * (VCVT.F64.* is ARMv8-M / M7 DP only), so those two
+                     * directions stay on the software helpers even when
+                     * hardware FP is enabled. */
+                    if (g_config.enable_fpu_hw && g_arm_fpu_dp) {
                         if (src_dbl && !dst_dbl) {
                             /* double -> float */
                             emit_pop_r1(&buf);
@@ -2688,12 +2901,12 @@ static char *codegen_arm(IrProgram *prog) {
                         /* double -> float */
                         emit_pop_r1(&buf);
                         emit_pop_r0(&buf);
-                        emit_line(&buf, "BL __aeabi_d2f");
+                        emit_line(&buf, "BL __arkcc_d2f_trunc");
                         emit_push_r0(&buf);
                     } else if (!src_dbl && dst_dbl) {
                         /* float -> double */
                         emit_pop_r0(&buf);
-                        emit_line(&buf, "BL __aeabi_f2d");
+                        emit_line(&buf, "BL __arkcc_f2d_ext");
                         emit_push_r0(&buf);
                         asmbuf_puts(&buf, "    PUSH {r1}\n");
                     }
@@ -3129,9 +3342,11 @@ static char *codegen_arm(IrProgram *prog) {
                         int is_void_ret = 0;
                         if (!is_indirect) {
                             int fi2;
+                            int found = 0;
                             for (fi2 = 0; fi2 < prog->func_count; fi2++) {
                                 if (ark_streq(prog->funcs[fi2]->name, I->name)) {
                                     Type *rt = prog->funcs[fi2]->ret_type;
+                                    found = 1;
                                     if (ret_is_two_words(rt)) {
                                         ret64 = 1;
                                     } else if (rt && rt->kind == TYPE_VOID) {
@@ -3139,6 +3354,15 @@ static char *codegen_arm(IrProgram *prog) {
                                     }
                                     break;
                                 }
+                            }
+                            /* Not defined in this translation unit: the return
+                             * shape is whatever irgen saw in the prototype.  Use
+                             * it instead of assuming one word -- that assumption
+                             * unbalanced the stack for every void callee and
+                             * dropped the high word of every long long callee. */
+                            if (!found) {
+                                ret64 = (int)((I->val >> 32) & 1);
+                                is_void_ret = (int)((I->val >> 33) & 1);
                             }
                         } else {
                             ret64 = (int)((I->val >> 32) & 1);
@@ -3378,7 +3602,14 @@ static char *codegen_arm(IrProgram *prog) {
                          * src/lexer.c (frame 4256) then failed to assemble with
                          * "ADD immediate is out of range". */
                         if (local_size > 0) emit_sp_adjust(&buf, local_size, 0);
-                        if (f->is_irq) {
+                        if (g_va_epilogue_pad) {
+                            /* Variadic: drop the four pushed argument words
+                             * after the saved registers (same shape as the
+                             * shared epilogue). */
+                            emit_line(&buf, "POP {r5, r6, r7, lr}");
+                            emit_line(&buf, "ADD sp, sp, #16");
+                            emit_line(&buf, "BX lr");
+                        } else if (f->is_irq) {
                             emit_line(&buf, "POP {r5, r6, r7, pc}");
                         } else {
                             emit_line(&buf, "POP {r5, r6, r7, pc}");
@@ -6008,9 +6239,18 @@ static void pass1_a(ArmAsm *a) {
                  * (includes r8-r12); size determined by the register list to keep pass1 offsets correct. */
                 int has_lr = 0, has_pc = 0;
                 int list = parse_reglist_a(&p, &has_lr, &has_pc);
-                (void)has_lr; (void)has_pc;
-                if (list & 0x1F00) pc += 4;  /* T2: includes r8-r12 */
-                else               pc += 2;  /* T1 */
+                /* The 16-bit form has one bit that is LR in PUSH and PC in POP,
+                 * so PUSH{..,pc} and POP{..,lr} only exist as T2 and are twice
+                 * as wide.  Pass 2 makes the same decision; if the two ever
+                 * disagree every label after this line moves. */
+                if (strieq_a(first, "PUSH")) {
+                    if (has_pc)                    pc += 0;   /* not encodable */
+                    else if (list & 0x1F00)        pc += 4;   /* T2 */
+                    else                           pc += 2;   /* T1 */
+                } else {
+                    if ((list & 0x1F00) || has_lr) pc += 4;   /* T2 */
+                    else                           pc += 2;   /* T1 */
+                }
             } else if (strieq_a(first, "ADD") || strieq_a(first, "SUB") ||
                        strieq_a(first, "ADDS") || strieq_a(first, "SUBS")) {
                 /* ADD/SUB rd, rn, #imm: T1 (2 bytes) if imm<=7 and low regs,
@@ -6738,8 +6978,14 @@ static void pass2_a(ArmAsm *a) {
         if (strieq_a(first, "PUSH")) {
             int has_lr=0, has_pc=0;
             int list = parse_reglist_a(&p, &has_lr, &has_pc);
-            (void)has_pc;
-            if (list & 0x1F00) {
+            if (has_pc) {
+                /* STM never stores pc, and the 16-bit PUSH bit at 8 means LR.
+                 * Dropping it would leave the reader believing pc was saved. */
+                diag_tool(DIAG_SEV_ERROR, "arkcc",
+                          "PUSH cannot store pc (only lr has a bit in this form)",
+                          0,0,0,0,0,0);
+                a->hard_errors++;
+            } else if (list & 0x1F00) {
                 /* A single high register cannot use the block form: QEMU (and
                  * whatever rules its Thumb-2 decoder follows) rejects
                  * "stmdb sp!, {r8}" = e92d 0100 outright, and GNU as itself
@@ -6763,20 +7009,33 @@ static void pass2_a(ArmAsm *a) {
         else if (strieq_a(first, "POP")) {
             int has_lr=0, has_pc=0;
             int list = parse_reglist_a(&p, &has_lr, &has_pc);
-            (void)has_lr;
-            if (list & 0x1F00) {
+            /* The 16-bit POP has one bit at 8 and it means PC, not LR: the two
+             * cannot be expressed in T1 at all.  This used to drop the register
+             * on the floor (POP {r5,r6,r7,lr} assembled to bce0, i.e.
+             * POP {r5,r6,r7}), which is a silently wrong return sequence -- the
+             * variadic epilogue is exactly that shape and lost 4 bytes of stack
+             * plus the restored lr on every return.  Refuse the impossible
+             * combination instead of picking one. */
+            if (has_lr && has_pc) {
+                diag_tool(DIAG_SEV_ERROR, "arkcc",
+                          "POP cannot load both lr and pc", 0,0,0,0,0,0);
+                a->hard_errors++;
+            }
+            if ((list & 0x1F00) || has_lr) {
                 /* Single high register: see the note on PUSH above.  "POP {ip}"
                  * is emitted by the indirect-call path, and e8bd 1000 does not
                  * execute (measured: UC_ERR_INSN_INVALID), so use
                  * "ldr.w Rt, [sp], #4" = f85d t004. */
-                if ((list & (list - 1)) == 0 && !has_pc) {
+                if ((list & (list - 1)) == 0 && !has_pc && !has_lr) {
                     int rt = 0;
                     while (rt < 16 && !(list & (1 << rt))) rt++;
                     out16(a, 0xF85D);
                     out16(a, ((unsigned)(rt & 0xF) << 12) | 0x0B00u | 4u);
                 } else {
-                    /* T2 LDMIA SP!: can encode r0-r12 + pc */
-                    unsigned w2 = (unsigned)(has_pc ? 0x8000 : 0) | (unsigned)(list & 0x1FFF);
+                    /* T2 LDMIA SP!: can encode r0-r12 + lr or pc */
+                    unsigned w2 = (unsigned)(has_pc ? 0x8000 : 0) |
+                                  (unsigned)(has_lr ? 0x4000 : 0) |
+                                  (unsigned)(list & 0x1FFF);
                     out16(a, 0xE8BD); out16(a, w2);
                 }
             } else {

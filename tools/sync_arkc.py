@@ -12,6 +12,9 @@ src/main.c 与 src/port/ 是主机/裸机驱动，src/backend/ 下还有三个�
   - port/ 整体不复制：Ark RTOS 侧的三个接线文件取代了它
   - **不碰组件根目录的接线文件**（arkc_port_arkrtos.c、arkc_port.h、
     arkc_shell_cmd.c/.h）：它们属于 Ark RTOS，同步只允许改上面两个目录
+  - stdlib/include/stdarg.h -> kernelsrc/sdk/mini_sdk/arkc/stdarg.h：板载
+    SDK 是手抄进 NOR 卷的头文件集，不属于组件目录，但变参规则只能有一份
+    实现，所以一并同步（见下方 SDK_MAP）
 
 用法：
   py -3 tools/sync_arkc.py                 # 看差异
@@ -39,6 +42,13 @@ COPY_MAP = [
 EXCLUDE_NAMES = {"main.c"}
 # 不复制：本板不用的后端（C / x86_64 / riscv32 三种）
 EXCLUDE_DIRS = {"c", "x86_64", "riscv32"}
+
+# 板载 mini SDK 需要的那几个标准头：落点在组件目录之外（sdk/ 下），但同样
+# 是 arkc 的产物。第二份实现一定会漂，所以由这里统一搬。
+# (源仓库相对路径, 本仓库相对路径)
+SDK_MAP = [
+    ("stdlib/include/stdarg.h", "kernelsrc/sdk/mini_sdk/arkc/stdarg.h"),
+]
 
 # 组件根目录里 Ark RTOS 侧的接线文件（同步不许动，只做存在性自检）
 WIRING = [
@@ -97,6 +107,17 @@ def collect(src):
     return files
 
 
+def collect_sdk(src):
+    """返回 {本仓库相对路径: 源绝对路径}，用于 SDK_MAP 里的板载头。"""
+    out = {}
+    for rel_src, rel_dst in SDK_MAP:
+        full = os.path.join(src, rel_src.replace("/", os.sep))
+        if not os.path.isfile(full):
+            print("缺少源文件：%s" % full)
+            return None
+        out[rel_dst] = full
+    return out
+
 def sha(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -122,6 +143,9 @@ def main():
 
     want = collect(src)
     if want is None:
+        return 2
+    want_sdk = collect_sdk(src)
+    if want_sdk is None:
         return 2
 
     have = set()
@@ -154,18 +178,30 @@ def main():
     missing_wiring = [w for w in WIRING
                       if not os.path.isfile(os.path.join(DST_ROOT, w))]
 
+    sdk_added, sdk_changed, sdk_same = [], [], []
+    for rel in sorted(want_sdk):
+        dst = os.path.join(REPO, rel.replace("/", os.sep))
+        if not os.path.isfile(dst):
+            sdk_added.append(rel)
+        elif sha(dst) != sha(want_sdk[rel]):
+            sdk_changed.append(rel)
+        else:
+            sdk_same.append(rel)
+
     print("源：%s" % src)
     print("目标：%s" % DST_ROOT)
-    for tag, items in (("新增", added), ("更新", changed), ("删除", removed)):
+    for tag, items in (("新增", added), ("更新", changed), ("删除", removed),
+                       ("新增(SDK)", sdk_added), ("更新(SDK)", sdk_changed)):
         for it in items:
             print("  %s  %s" % (tag, it))
-    print("未变 %d 个 / 新增 %d / 更新 %d / 删除 %d"
-          % (len(same), len(added), len(changed), len(removed)))
+    print("未变 %d 个 / 新增 %d / 更新 %d / 删除 %d（SDK 头 未变 %d / 新增 %d / 更新 %d）"
+          % (len(same), len(added), len(changed), len(removed),
+             len(sdk_same), len(sdk_added), len(sdk_changed)))
     if missing_wiring:
         print("警告：组件根目录缺少接线文件：%s" % ", ".join(missing_wiring))
 
     if args.check:
-        if added or changed or removed:
+        if added or changed or removed or sdk_added or sdk_changed:
             print("组件与源仓库不一致：跑 --apply 同步")
             return 2
         print("一致")
@@ -177,6 +213,11 @@ def main():
 
     for rel in removed:
         os.remove(os.path.join(DST_ROOT, rel.replace("/", os.sep)))
+    for rel in sdk_added + sdk_changed:
+        dst = os.path.join(REPO, rel.replace("/", os.sep))
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(want_sdk[rel], dst)
+        os.utime(dst, None)
     for rel in added + changed:
         dst = os.path.join(DST_ROOT, rel.replace("/", os.sep))
         os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -212,6 +253,11 @@ def main():
         "**不含** `port/`：`port/stm32/platform_stm32.c` 自带 "
         "`malloc/free/putchar/__user_initial_stackheap`，与 newlib 撞符号；"
         "`port/host` 是主机端。两者的职责由组件根目录的接线文件接过来。",
+        "",
+        "另外同步一份 `stdlib/include/stdarg.h` → "
+        "`kernelsrc/sdk/mini_sdk/arkc/stdarg.h`：板上市小程序的头文件集里有它"
+        "（变参规则只能有一份实现，手抄一定漂）。",
+        ""
         "",
         "## 四个接线文件（Ark RTOS 侧，不在同步范围）",
         "",

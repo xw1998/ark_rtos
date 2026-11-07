@@ -71,6 +71,8 @@ extern int g_arm_dump_syms;
  * its bytes move to 0x24070400.  Reserving up front removes the shift, so both
  * kinds of reference stay correct. */
 extern int g_arm_vt_reserve;
+/* 1 = the selected CPU has a double-precision FPU (see backend_arm.c). */
+extern int g_arm_fpu_dp;
 void arm_dump_syms_init(void);
 
 #endif /* ARK_BACKEND_H */

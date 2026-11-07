@@ -306,7 +306,8 @@ CASES = [
             Step("ls -l /mnt/nor",
                  # ls -l 的列是"... size name"，数字在名字**前面**，所以只锚名字。
                  expect=[r"\d  start\.c$", r"\d  rt\.c$", r"\d  arkrtos\.h$",
-                         r"\d  unistd\.h$", r"\d  stdio\.h$", r"\d  hello$"],
+                         r"\d  unistd\.h$", r"\d  stdio\.h$", r"\d  stdarg\.h$",
+                         r"\d  hello$"],
                  forbid=[r"ls: no such file or directory", r"ls: no mount"],
                  wait=2.0),
             # 反假绿：`hello` 这个"罐装演示"命令已经被删掉了。它若又冒出来（有人
@@ -353,6 +354,54 @@ CASES = [
                  forbid=[r"mini run: hello\.svcm failed", r"(HARD|MEM|BUS|USG)FAULT"],
                  wait=5.0),
             # 程序自己退出，所以判"池里没有在跑的实例"（不是 mini stop 的措辞）。
+            Step("mini", expect=[r"^mini: none running"], wait=2.0),
+            Step("cd /"),
+        ],
+    ),
+    Case(
+        "mini-sdk-va",
+        "变参（真机）：工程里是标准 C 的 va_start/va_arg（<stdarg.h>），板上 cc 编出来 mini run 打出正确数值",
+        CLEAN
+        + [
+            # 这条用例存在的原因：宿主门禁（arkc 的 examples/run_va_gate.py）
+            # 走的是主机侧 GNU as；板上的 `cc --pack` 走 arkc 自己的内部汇编器。
+            # 变参的寄存器压栈、栈参数寻址、64 位取整、float 提升，只有真跑过
+            # 才算数。工程本身部署在 /mnt/nor/va（tools/mini_deploy.py
+            # --project example/mini_va --remote-dir /va）。
+            Step("ls -l /mnt/nor",
+                 expect=[r"\d  stdarg\.h$", r"\d  va$"],
+                 forbid=[r"ls: no such file or directory"],
+                 wait=2.0),
+            Step("cd /mnt/nor/va"),
+            Step("cat va.c",
+                 expect=[r"#include <stdarg\.h>$", r"va_start\(ap, n\);"],
+                 wait=1.5),
+            Step("make",
+                 expect=[r"^make: va\.svcm <- /mnt/nor/start\.c \(\+more\)$",
+                         r"^cc: pack 3 sources -> va\.svcm \(4 passes, -O1\)$",
+                         r"^cc:   entry mode: flat miniapp, entry at \+0 "
+                         r"\(no Reset_Handler\)$",
+                         r"^make: ok$"],
+                 forbid=[r"unresolved symbol", r"pack failed",
+                         r"does not fit its", r"is not supported by the ARM"],
+                 wait=60.0),
+            Step("mini run va.svcm",
+                 # 第一行不锚行首：shell 先回显提示符、小程序随后接管输出，两者
+                 # 之间没有同步点，实测会出现 "ark@arkrtos:/mnt/nor/va$ va: ..."
+                 # 挤在同一行（日志里就是这么出现的）。其余各行都是程序独占的
+                 # 完整行，仍然锚定，读数一个字节都不放宽。
+                 expect=[r"va: companion built with the SDK's stdarg\.h$",
+                         r"^va sum6      = 21 \(want 21\)$",
+                         # 21 个参数字：4 个在 r0-r3，17 个在栈上。这一行是
+                         # 「栈参数没有上限」在真机上的读数。
+                         r"^va sum20     = 210 \(want 210\)$",
+                         r"^va ll_hi     = 17 \(want 17\)$",
+                         r"^va tail      = 21 \(want 21\)$",
+                         r"^va dbl_tag   = 255 \(want 255\)$",
+                         r"^va: done$",
+                         r"task \d+ returned: MiniApp finished"],
+                 forbid=[r"(HARD|MEM|BUS|USG)FAULT", r"mini run: va\.svcm failed"],
+                 wait=8.0),
             Step("mini", expect=[r"^mini: none running"], wait=2.0),
             Step("cd /"),
         ],

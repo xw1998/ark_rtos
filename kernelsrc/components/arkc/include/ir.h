@@ -128,6 +128,13 @@ typedef struct IrProgram {
 
 IrFunc    *ir_func_new(const char *name);
 void       ir_emit(IrFunc *f, IrOp op, long long val, const char *name, int aux);
+
+/* 1 (default): a variadic function gets the C backend's 8 x 8-byte argument
+ * slot region at frame+8000, which the prologue must reserve.  Set to 0 by the
+ * driver for the backends that build the argument image from the caller's own
+ * words (ARM Thumb-2, RV32I) -- see <stdarg.h> and g_ir_va_slot_region in
+ * irgen.c. */
+extern int g_ir_va_slot_region;
 IrProgram *ir_program_new(void);
 void       ir_program_add(IrProgram *prog, IrFunc *func);
 int        ir_program_add_string(IrProgram *prog, const char *data, int len);
