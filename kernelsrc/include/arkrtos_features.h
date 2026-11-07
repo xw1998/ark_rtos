@@ -380,6 +380,14 @@
 #define ARKRTOS_USE_APPRUN              0
 #endif
 
+/* One-command POSIX hello world demo (`hello`): drops hello.c/hello.sct into
+ * the VFS /tmp, compiles and links it with the on-board `cc`, then hands the
+ * image to `app run`.  Off by default: at 0 the command does not exist and
+ * neither the sources nor the command table entry are compiled in. */
+#ifndef ARKRTOS_USE_HELLO
+#define ARKRTOS_USE_HELLO               0
+#endif
+
 /* ============================================================
  * 五、依赖校验
  * @brief 关错了开关要在这里报出来，而不是等到链接期一个 undefined symbol
@@ -399,6 +407,14 @@
 
 #if ARKRTOS_USE_APPRUN && !ARKRTOS_USE_VFS
 #error "ARKRTOS_USE_APPRUN=1 requires ARKRTOS_USE_VFS=1 (the program is read from the file system)"
+#endif
+
+#if ARKRTOS_USE_HELLO && !ARKRTOS_USE_APPRUN
+#error "ARKRTOS_USE_HELLO=1 requires ARKRTOS_USE_APPRUN=1 (the demo ends in 'app run')"
+#endif
+
+#if ARKRTOS_USE_HELLO && !ARKRTOS_USE_ARKC
+#error "ARKRTOS_USE_HELLO=1 requires ARKRTOS_USE_ARKC=1 (the demo compiles on the board)"
 #endif
 
 /* 并发数要么是 1（退化成原来的单实例），要么必须落在共享表数组的容量内：

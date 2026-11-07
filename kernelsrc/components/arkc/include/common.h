@@ -13,7 +13,7 @@
 
 /* Keep in sync with README.md / docs/MANUAL.md, which advertise this
  * version to users; the release notes are organised by this number. */
-#define ARK_VERSION "0.7.0"
+#define ARK_VERSION "0.8.0"
 
 /* Error codes */
 #define ARK_OK              0

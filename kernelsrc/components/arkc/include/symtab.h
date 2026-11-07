@@ -33,7 +33,7 @@ typedef struct Symbol {
     int            is_extern;
     int            enum_value;
     int            svc_num;      /* __svc(n) number; 0 means non-SVC function */
-    int            smc_num;      /* __smc(n) number; 0 means non-SMC function */
+    int            smc_num;      /* __smc(n) number; -1 means non-SMC function */
     int            is_irq;       /* __irq interrupt function */
     int            is_weak;      /* __weak weak symbol */
     int            is_naked;     /* __naked naked function */

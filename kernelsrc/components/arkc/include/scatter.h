@@ -110,4 +110,12 @@ int scatter_to_ld_script(const ScatterDesc *desc, char *buf, int cap);
 /* Convert a ScatterDesc into an ARM scatter .sct string. */
 int scatter_to_sct_file(const ScatterDesc *desc, char *buf, int cap);
 
+#if ARKCC_FEATURE_SCATTER_CHECK
+/* 校验分散布局与 --vector-table 的相容性，以及各执行区是否互相重叠。
+ * 返回 0 表示布局可用，非 0 表示发现了致命问题（已通过诊断层报告）。
+ * 只在用户要求了向量表（--vector-table）时才检查向量表位置：没要求向量表时，
+ * RESET 段放在哪里都不影响启动，报错反而会挡住合法的镜像。 */
+int scatter_validate(const ScatterDesc *desc, unsigned flash_base, int want_vector_table);
+#endif
+
 #endif /* ARK_SCATTER_H */

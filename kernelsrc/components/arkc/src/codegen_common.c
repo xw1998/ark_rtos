@@ -23,6 +23,19 @@ static void asmbuf_grow(AsmBuffer *b, int extra) {
     }
 }
 
+/* Make room for `total` bytes in the buffer.  Text passes that rewrite a slice
+ * in place need this: they build the replacement in their own buffer and then
+ * splice it back, and the slice may grow (a rewritten instruction can be a few
+ * lines longer than the original). */
+void asmbuf_reserve(AsmBuffer *b, int total) {
+    if (total + 1 > b->cap) {
+        int nc = b->cap;
+        while (total + 1 > nc) nc *= 2;
+        b->buf = (char *)mem_realloc(b->buf, b->cap, nc);
+        b->cap = nc;
+    }
+}
+
 void asmbuf_putc(AsmBuffer *b, char c) {
     asmbuf_grow(b, 1);
     b->buf[b->len++] = c;

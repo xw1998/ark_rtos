@@ -20,4 +20,9 @@ int eval_const_expr(AstNode *node, long long *out_value);
  * (ARM and Windows LLP64); the result follows signedness then rank. */
 Type *usual_arith_conv(Type *lt, Type *rt);
 
+/* 浮点常量表达式求值（C99 6.6）。eval_const_expr 的值域是 long long，装不下
+ * double，因此浮点初始化器一直求不出值。返回 1 表示 node 是可在编译期算出的
+ * 浮点（或整数）常量表达式，值写入 *out。除零不折叠（UB，不得发明结果）。 */
+int eval_const_fexpr(AstNode *node, double *out);
+
 #endif /* ARK_SEMA_H */

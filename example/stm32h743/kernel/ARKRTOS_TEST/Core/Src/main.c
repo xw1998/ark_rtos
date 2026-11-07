@@ -334,9 +334,15 @@ static void arkrtos_kernel_init(void)
          * failure is at least reported (PANIC BUS with the address) instead of
          * swallowed.  Leave it at 0 on hardware whose memory path is not yet
          * known good, so the board still reaches a prompt and "sdram info /
-         * regs / fsm" can be asked what is wrong. */
+         * regs / fsm" can be asked what is wrong.
+         *
+         * 默认改 1（2026-11-07）：这块 FK743M5-XIH6 的内存通路已经过验证
+         * （缺的是 FMC_BCR1.FMCEN，见 drvfmc.c），而 "跳过 VFS" 的代价比
+         * 想象的大得多——没有 VFS 就没有 /tmp，`hello` 连源文件都写不进去，
+         * 而控制台上只看到 `ls: no mount`，看不出根因在 SDRAM。 换一块未验证
+         * 的板时把它设回 0 再看 "sdram regs/fsm"。 */
 #ifndef ARKRTOS_SDRAM_VERIFY_AT_BOOT
-#define ARKRTOS_SDRAM_VERIFY_AT_BOOT 0
+#define ARKRTOS_SDRAM_VERIFY_AT_BOOT 1
 #endif
 #if (ARKRTOS_SDRAM_VERIFY_AT_BOOT == 1)
         (void)arkrtos_sdram_verify();

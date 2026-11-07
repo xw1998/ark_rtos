@@ -60,6 +60,10 @@ USE_SDRAM  ?= 0
 # 不在这里。默认 0：关掉时那个源文件编出为空目标，
 # 镜像与命令表逐字节不变。
 USE_APPRUN ?= 0
+# 一条命令的 POSIX hello world 演示（`hello`）：把源码写进 /tmp、用板上 cc
+# 编+链、再交给 app run。默认 0：关掉时命令表与镜像逐字节不变；开它必须同时
+# 开 USE_APPRUN=1 与 USE_ARKC=1（否则 arkrtos_features.h 里 #error）。
+USE_HELLO ?= 0
 # 小程序读镜像的后端：0 = arkrtos_fs（littlefs 卷，与引入开关前逐字节一致）；
 # 1 = VFS 命名空间（含板上编译器写产物的 /tmp ramfs）。判据在
 # docs/arkc编译产物上板运行-实施计划.md 的 M3-a：默认关时行为不变。
@@ -109,6 +113,7 @@ DEFS := \
   -DARKRTOS_USE_SDRAM=$(USE_SDRAM) -DARKRTOS_USE_QSPI=$(USE_QSPI) \
   -DARKRTOS_SHELL_BOARD_CMDS=$(BOARD_CMDS) \
   -DARKRTOS_USE_APPRUN=$(USE_APPRUN) \
+  -DARKRTOS_USE_HELLO=$(USE_HELLO) \
   -DARKRTOS_MINI_READ_VFS=$(USE_MINI_VFS) \
   -DARKRTOS_USE_APPPACK=$(USE_APPPACK)
 
@@ -293,18 +298,35 @@ $(ARKC_OBJS): CFLAGS := $(CFLAGS_ARKC)
 ARKC_WIRE_OBJS := $(OBJDIR)/arkc_port_arkrtos.o $(OBJDIR)/arkc_shell_cmd.o
 $(ARKC_WIRE_OBJS): CFLAGS += $(ARKC_DEFS)
 
-.PHONY: all size clean bin hex
+.PHONY: all size clean bin hex FORCE
 
 all: $(ELF) bin hex size
 
 # --- 生成物：链接脚本来自分区头（H743 那份，不是 config/ 下的默认） ---
-$(LDSCRIPT): $(PART_HDR) $(ROOT)/tools/gen_ld.py
+# --ext-ram 也是输入：只改 USE_SDRAM 而 kernel.ld 比分区头新时，make 原来不会
+# 重新生成，于是 .ark_buf 仍落在片内 RAM——链接照样成功、镜像照样跑，只是
+# 编译器的池还留在 80KB 那一档（实测：USE_SDRAM=1 的内存报表与 =0 逐字节同）。
+# 把开关值存成 stamp 参与依赖，切换开关就一定会重生成。
+# 开关指纹：内容覆盖所有会改变镜像的 -D（make 不跟踪 -D，只有把值写成
+# 文件参与依赖，切换开关才会真的重编）。只改 USE_SDRAM 而旧 .o 被当成最新
+# 的，实测过两次：一次是 .ark_buf 含在片内 RAM（池只有 80 KB），一次是
+# USE_APPPACK=1 但 `cc --pack` 报「not supported by this build」。
+SWITCH_SIG = ark=$(USE_ARKC) vim=$(USE_ARKVIM) make=$(USE_ARKMAKE) sdram=$(USE_SDRAM) apprun=$(USE_APPRUN) hello=$(USE_HELLO) apppack=$(USE_APPPACK) qspi=$(USE_QSPI)
+
+$(BUILD)/.ldcfg: FORCE
+	@mkdir -p $(BUILD)
+	@echo "$(SWITCH_SIG)" | cmp -s - $@ || echo "$(SWITCH_SIG)" > $@
+
+$(LDSCRIPT): $(PART_HDR) $(ROOT)/tools/gen_ld.py $(BUILD)/.ldcfg
 	@mkdir -p $(BUILD)
 	$(PY) $(ROOT)/tools/gen_ld.py --target kernel --header $(PART_HDR_REL) \
 		--ext-ram $(USE_SDRAM) --output $@
 
 # --- 编译 ---
-$(OBJDIR)/%.o: %.c
+# .ldcfg 也作为依赖：USE_SDRAM 同时改 ARKC_DEFS 与 ARK_RAMFS_*，而 make
+# 不跟踪 -D（注释在文件头写过这条限制），所以切换开关时旧 .o 会被当成最新
+# 的——实测过：USE_SDRAM=1 但 arkc 仍按 80KB 池编译，编译器一跑就 exhausted。
+$(OBJDIR)/%.o: %.c $(BUILD)/.ldcfg
 	@mkdir -p $(OBJDIR)
 	$(CC) -c $(CFLAGS) $< -o $@
 
@@ -328,6 +350,10 @@ size: $(ELF)
 
 # 各目标文件的 .d 由 -MMD 生成，随对象一起放在 $(OBJDIR)。
 -include $(OBJS:.o=.d) $(ARKC_OBJS:.o=.d)
+
+# 空规则：让 .ldcfg 的配方每次都跑（内容不变时 cmp 保证 mtime 不动，
+# 于是依赖它的东西不会无故重建）。
+FORCE:
 
 clean:
 	rm -rf $(BUILD)

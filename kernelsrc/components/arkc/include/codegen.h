@@ -14,6 +14,7 @@ typedef struct {
 } AsmBuffer;
 
 void asmbuf_init(AsmBuffer *b);
+void asmbuf_reserve(AsmBuffer *b, int total);
 void asmbuf_putc(AsmBuffer *b, char c);
 void asmbuf_puts(AsmBuffer *b, const char *s);
 void asmbuf_int(AsmBuffer *b, long long v);

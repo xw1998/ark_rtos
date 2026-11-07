@@ -8,7 +8,9 @@
 #include "symtab.h"
 #include "memory.h"
 
-#define SYM_HASH_SIZE 128
+/* Bucket count for the per-scope symbol chain. Only affects lookup speed;
+ * 128 buckets degrade to list scans on a few thousand symbols. */
+#define SYM_HASH_SIZE ARK_SYM_HASH_SIZE
 
 static Symbol *g_table[SYM_HASH_SIZE];
 static int     g_current_scope;
@@ -82,7 +84,12 @@ Symbol *sym_add(SymKind kind, const char *name, Type *type, int offset) {
     s->is_extern = 0;
     s->enum_value = 0;
     s->svc_num = 0;
-    s->smc_num = 0;
+    /* -1, not 0: ast.h defines smc_num == -1 as "this is a plain function",
+     * and irgen's call lowering accepts any smc_num >= 0 as a real
+     * __smc(n) function.  A zeroed field therefore made every symbol that
+     * never had smc_num copied onto it (block-scope prototypes, see
+     * irgen_stmt AST_FUNC_DECL) lower its calls to "SMC #0". */
+    s->smc_num = -1;
     s->is_irq = 0;
     s->is_weak = 0;
     s->is_naked = 0;

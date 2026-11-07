@@ -36,3 +36,15 @@ const char *fs_last_error(void);
 int fs_list_files(void);
 
 #endif /* ARK_FLASH_FS_H */
+
+/* --- RAM-resident files (STM32 port) ----------------------------------
+ * The board has to compile sources it produced itself (and feed the
+ * resulting objects back into -link) without a flash filesystem, so the
+ * port keeps a few flat-name slots in RAM.  Lookups try RAM first, then
+ * the flash table, which keeps the flash path working unchanged.
+ * fs_ram_put("name", data, -1) stores data as a NUL-terminated string. */
+int  fs_ram_put(const char *name, const char *data, int len);
+int  fs_ram_count(void);
+const char *fs_ram_name_at(int i);
+int  fs_ram_size_at(int i);
+void fs_ram_clear(void);

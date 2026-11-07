@@ -127,8 +127,14 @@
 # endif
 #endif
 #ifndef ARKCC_FEATURE_OPT_REGALLOC
-# define ARKCC_FEATURE_OPT_REGALLOC  0   /* Register allocation: experimental, default off */
+# if ARKCC_PROFILE == ARKCC_PROFILE_STM32_MIN
+#   define ARKCC_FEATURE_OPT_REGALLOC   0   /* 板上裁掉：省 Flash，板端本来也跑不到这条路径 */
+# else
+#   define ARKCC_FEATURE_OPT_REGALLOC   1   /* 宿主/交叉编译：-fopt-regalloc 才有得开 */
+# endif
 #endif
+/* 运行期默认值仍然是 0（config.c: enable_opt_regalloc = ARKCC_FEATURE_...，
+ * 但 --regalloc/-fopt-regalloc 才置 1）——见 config.c 的默认值设定 */
 #ifndef ARKCC_FEATURE_OPT_INLINE
 # if ARKCC_PROFILE == ARKCC_PROFILE_STM32_MIN
 #   define ARKCC_FEATURE_OPT_INLINE    0   /* Trim auto-inline on STM32 (costs Flash) */
@@ -176,6 +182,128 @@
  *
  * Default 1. The switch exists so the layer can be measured and removed; it is
  * not a runtime option (a runtime flag would have to keep all the code). */
+/* ---------------------------------------------------------------------------
+ * 0.8.0 预处理器的三处可配置点
+ *
+ * 三项都遵守同一条纪律：默认关闭时编译产物与旧行为逐字节相同；打开后必须
+ * 有真正走到该分支的用例（见 tests/features/）。
+ *
+ *  ARKCC_FEATURE_MACRO_REDEF_CHECK  C99 6.10.3p2：同名宏的重定义只有在「形式、
+ *                                   形参、替换列表全部相同」时才合法，否则要
+ *                                   告警。arkc 之前一律静默覆盖。
+ *  ARKCC_FEATURE_MACRO_BODY_DYN     替换文本超过栈缓冲时改为从内存池翻倍扩容，
+ *                                   不再截断。硬上限由 ARKCC_MACRO_BODY_MAX 定。
+ *  ARKCC_MAX_INC_FILES              -MMD 依赖文件能记录的 #include 个数。之前固定
+ *                                   64 且超出后静默丢弃。
+ *  ARKCC_FEATURE_CAST_F64F32        float<->double 之间插入 IR_F2F。关掉时恢复
+ *                                   旧行为（不插转换节点，两种精度被当成同一表示）。
+ *  ARKCC_FEATURE_FCONST_FOLD        浮点常量表达式折叠。关掉时全局浮点初值回到
+ *                                   "求不出值就写 0"的旧路径。
+ * ------------------------------------------------------------------------- */
+/* 0.8.0 的新开关（默认值就是“新行为是否默认生效”的答案）：
+ *   ARKCC_FEATURE_OPT_DCE_CFG    基本块级可达性 DCE。默认 0：线性 DCE 已足够，
+ *                                CFG 版要用户显式 --dce-cfg 打开。
+ *   ARKCC_FEATURE_ARM_RELOC_DATA 多目标文件的数据段可搬迁。默认 0：需要
+ *                                --reloc-data，老的单对象流程逐字节不变。
+ *   ARKCC_FEATURE_OPT_REG_TOP    栈顶值常驻 r0。默认 0：--reg-top 打开。
+ *   ARKCC_FEATURE_RT_LAZY        运行库按需发射。默认 0：--rt-lazy 打开。
+ *   ARKCC_FEATURE_ASM_EXTRA      汇编器扩展指令集。默认 0：--asm-extra 打开。 */
+/* 编译期：这几段代码是否进入产物。板上（STM32_MIN）默认裁掉以省 Flash；
+ * 宿主/交叉编译保留，于是运行时开关 --xxx 才有的可开。
+ * 运行时的默认值一律是 0（见 config.c），所以默认行为与旧版本逐字节相同。 */
+#ifndef ARKCC_FEATURE_OPT_DCE_CFG
+#   if ARKCC_PROFILE == ARKCC_PROFILE_STM32_MIN
+#       define ARKCC_FEATURE_OPT_DCE_CFG      0
+#   else
+#       define ARKCC_FEATURE_OPT_DCE_CFG      1
+#   endif
+#endif
+#ifndef ARKCC_FEATURE_ARM_RELOC_DATA
+#   if ARKCC_PROFILE == ARKCC_PROFILE_STM32_MIN
+#       define ARKCC_FEATURE_ARM_RELOC_DATA   0
+#   else
+#       define ARKCC_FEATURE_ARM_RELOC_DATA   1
+#   endif
+#endif
+/* 0.8.0: 段内绝对地址也能交给链接器修正（--reloc-text）。
+ *
+ * 后端把 g_flash_base + offset 直接编进 MOVW/MOVT，于是"这个对象会被链接到
+ * 哪里"在编译期就被写死在指令里。单对象、且基址恰好等于 LR 基址时没问题；
+ * 多对象拼接、或镜像被装到别处时那些地址全部偏掉——字符串字面量（.rodata）
+ * 最明显，因为它既不是全局变量、也没有跨对象符号可用来解析。
+ *
+ * 打开后：本地 label 的 LDR rd, =label 记一条 type 12 重定位，对象尾部附一个
+ * __arkcc_text_base 符号告诉链接器"我是按哪个基址编的"，链接器再用
+ * (它给这个对象的基址 - 那个基址) 去 patch 那对 MOVW/MOVT。
+ *
+ * 与 ARKCC_FEATURE_ARM_RELOC_DATA 不同，这一项要编进板端产物：板上 build
+ * 命令正是靠它把两个对象里的字面量地址纠正过来。代码量很小（一个分支 +
+ * 一次 patch 循环），所以 STM32_MIN 也保留；真正的开关是运行时的
+ * --reloc-text，默认 0，关掉时一个字节都不变。 */
+#ifndef ARKCC_FEATURE_ARM_RELOC_TEXT
+#   define ARKCC_FEATURE_ARM_RELOC_TEXT       1
+#endif
+#ifndef ARKCC_FEATURE_OPT_REG_TOP
+#   define ARKCC_FEATURE_OPT_REG_TOP          1
+#endif
+#ifndef ARKCC_FEATURE_RT_LAZY
+#   define ARKCC_FEATURE_RT_LAZY              1
+#endif
+/* 手写汇编才用得到的形态（VLDM/VSTM/VPUSH/VPOP 多寄存器存取）。后端自己
+ * 从来不发射它们，所以板端裁掉只损失"能汇编手写的 .s"，不损失"能编译 .c"；
+ * 裁掉时这几条助记符会明确报"not compiled into this build"，而不是变成
+ * unknown mnemonic 让人以为拼错了。 */
+#ifndef ARKCC_FEATURE_ASM_VFP_LDSTM
+# if ARKCC_PROFILE == ARKCC_PROFILE_STM32_MIN
+#   define ARKCC_FEATURE_ASM_VFP_LDSTM   0
+# else
+#   define ARKCC_FEATURE_ASM_VFP_LDSTM   1
+# endif
+#endif
+
+#ifndef ARKCC_FEATURE_ASM_EXTRA
+#   define ARKCC_FEATURE_ASM_EXTRA            1
+#endif
+
+#ifndef ARKCC_FEATURE_SCATTER_CHECK
+#   define ARKCC_FEATURE_SCATTER_CHECK    1   /* 分散文件布局校验 */
+#endif
+#ifndef ARKCC_FEATURE_BUILD_TIME
+#   define ARKCC_FEATURE_BUILD_TIME       1   /* --build-date/--build-time/--source-date-epoch */
+#endif
+
+#ifndef ARKCC_FEATURE_CAST_F64F32
+#   define ARKCC_FEATURE_CAST_F64F32      1   /* float<->double 插 IR_F2F */
+#endif
+
+#ifndef ARKCC_FEATURE_FCONST_FOLD
+#   define ARKCC_FEATURE_FCONST_FOLD      1   /* 浮点常量表达式折叠 */
+#endif
+
+#ifndef ARKCC_FEATURE_MACRO_REDEF_CHECK
+#   define ARKCC_FEATURE_MACRO_REDEF_CHECK 1
+#endif
+
+#ifndef ARKCC_FEATURE_MACRO_BODY_DYN
+#   define ARKCC_FEATURE_MACRO_BODY_DYN    1
+#endif
+
+#ifndef ARKCC_MACRO_BODY_MAX
+#   if ARKCC_PROFILE == ARKCC_PROFILE_HOST_FULL || ARKCC_PROFILE == ARKCC_PROFILE_CROSS_COMPILE
+#       define ARKCC_MACRO_BODY_MAX (1024 * 1024)   /* 1 MiB：池是 64 MB，够大 */
+#   else
+#       define ARKCC_MACRO_BODY_MAX 16383           /* 板端池只有 80 KB，守住 16 KB */
+#   endif
+#endif
+
+#ifndef ARKCC_MAX_INC_FILES
+#   if ARKCC_PROFILE == ARKCC_PROFILE_HOST_FULL
+#       define ARKCC_MAX_INC_FILES 1024
+#   else
+#       define ARKCC_MAX_INC_FILES 64
+#   endif
+#endif
+
 #ifndef ARKCC_FEATURE_DIAG
 #   define ARKCC_FEATURE_DIAG 1
 #endif
@@ -229,14 +357,20 @@
 #endif
 #ifndef ARK_LINK_BUF_SIZE
 # if ARKCC_PROFILE == ARKCC_PROFILE_STM32_MIN
-#   define ARK_LINK_BUF_SIZE     (4 * 1024)       /* 4 KB (link mode unused on STM32) */
+#   define ARK_LINK_BUF_SIZE     (16 * 1024)      /* 16 KB: holds the largest object read
+                                                   * and the linked image on the board */
 # else
-#   define ARK_LINK_BUF_SIZE     (256 * 1024)     /* 256 KB */
+#   define ARK_LINK_BUF_SIZE     (8 * 1024 * 1024) /* 8 MB: a real STM32H743
+#                                        * image is 1-2 MB, and this buffer
+#                                        * holds both the largest object and
+#                                        * the linked image (host only) */
 # endif
 #endif
 #ifndef ARK_OBJ_BUF_SIZE
 # if ARKCC_PROFILE == ARKCC_PROFILE_STM32_MIN
-#   define ARK_OBJ_BUF_SIZE      (4 * 1024)       /* 4 KB (object mode unused on STM32) */
+#   define ARK_OBJ_BUF_SIZE      (16 * 1024)      /* 16 KB: a hello-world object is 4.2 KB;
+                                                   * at 4 KB the symbol table silently wrote
+                                                   * 66 bytes past the end of obj_buf */
 # else
 #   define ARK_OBJ_BUF_SIZE      (ARK_ASM_BUF_SIZE + 16)
 # endif
@@ -311,6 +445,96 @@
  * label (e.g. a codegen bug that loses a label). */
 #ifndef ARK_DIAG_UNRESOLVED_LOCAL
 # define ARK_DIAG_UNRESOLVED_LOCAL 0
+#endif
+
+/* ===========================================================================
+ * 9. 容量上限 -- host is complete, the board trims by configuration
+ *
+ * 原则：**宿主/交叉编译不许有会挡住真实工程的人为上限**；板端的每一处上限都是
+ * 一个可 -D 覆盖的宏，裁剪掉的是"这张板子放不下的量"，不是"语言能力"。
+ *
+ * 每一项都在越界时**报错并拒绝产出**（不是静默丢弃），所以把数字调小只是
+ * 更早失败，不会生成一个看起来成功的错镜像。
+ *
+ * 覆盖方法（板端裁剪的正式入口）：
+ *     make CFLAGS+="-DARK_LINK_MAX_OBJS=32 -DARK_PP_MAX_INC_DIRS=8"
+ * ========================================================================= */
+/* -link 一次能合并的目标文件个数。宿主 1024（真实 STM32 工程常见 100~300 个），
+ * 板端 64。超过就报错，而不是静默跳过按对象的 RAM 处理。 */
+#ifndef ARK_LINK_MAX_OBJS
+# if ARKCC_PROFILE == ARKCC_PROFILE_STM32_MIN
+#   define ARK_LINK_MAX_OBJS     64
+# else
+#   define ARK_LINK_MAX_OBJS     1024
+# endif
+#endif
+/* -I 搜索路径条数。旧实现满 16 条后**静默丢弃**，症状是
+ * "cannot open source input file"；宿主给 128。 */
+#ifndef ARK_PP_MAX_INC_DIRS
+# if ARKCC_PROFILE == ARKCC_PROFILE_STM32_MIN
+#   define ARK_PP_MAX_INC_DIRS   16
+# else
+#   define ARK_PP_MAX_INC_DIRS   128
+# endif
+#endif
+/* -D 预定义宏条数。宿主 512（Makefile 驱动的工程常常一次给几十上百个），
+ * 板端 64，可 -D 覆盖。 */
+#ifndef ARK_MAX_PRE_DEFINES
+# if ARKCC_PROFILE == ARKCC_PROFILE_STM32_MIN
+#   define ARK_MAX_PRE_DEFINES   64
+# else
+#   define ARK_MAX_PRE_DEFINES   512
+# endif
+#endif
+/* 一个声明里最多的数组维数（C 标准只要求支持实现定义的上限）。宿主 16 / 板端 8。 */
+#ifndef ARK_MAX_ARRAY_DIMS
+# if ARKCC_PROFILE == ARKCC_PROFILE_STM32_MIN
+#   define ARK_MAX_ARRAY_DIMS    8
+# else
+#   define ARK_MAX_ARRAY_DIMS    16
+# endif
+#endif
+/* 一个文件里按值返回大结构体的函数个数上限（这些函数走 AAPCS 的隐藏指针）。
+ * 宿主 1024 / 板端 256。 */
+#ifndef ARK_MAX_SRET_FUNCS
+# if ARKCC_PROFILE == ARKCC_PROFILE_STM32_MIN
+#   define ARK_MAX_SRET_FUNCS    256
+# else
+#   define ARK_MAX_SRET_FUNCS    1024
+# endif
+#endif
+/* --scatter 里能跟踪的命名段个数（#pragma arm section / __attribute__((section)) 的落点）。 */
+#ifndef ARK_MAX_CUSTOM_SECTIONS
+# if ARKCC_PROFILE == ARKCC_PROFILE_STM32_MIN
+#   define ARK_MAX_CUSTOM_SECTIONS 16
+# else
+#   define ARK_MAX_CUSTOM_SECTIONS 128
+# endif
+#endif
+/* -target c 后端：函数内标签数上限（只影响宿主上的可读性调试输出）。 */
+#ifndef ARK_C_MAX_LABELS
+# if ARKCC_PROFILE == ARKCC_PROFILE_STM32_MIN
+#   define ARK_C_MAX_LABELS      4096
+# else
+#   define ARK_C_MAX_LABELS      16384
+# endif
+#endif
+/* 符号表哈希桶数。只影响查找速度：128 桶在几千个符号时退化成链表扫描。 */
+#ifndef ARK_SYM_HASH_SIZE
+# if ARKCC_PROFILE == ARKCC_PROFILE_STM32_MIN
+#   define ARK_SYM_HASH_SIZE     128
+# else
+#   define ARK_SYM_HASH_SIZE     4096
+# endif
+#endif
+/* -MMD 依赖表的文件名数组：宿主按需翻倍扩容（没有人为条数上限），板端用
+ * ARKCC_MAX_INC_FILES 的定长表并在越界时告警一次。 */
+#ifndef ARKCC_FEATURE_DEP_FILES_DYN
+# if ARKCC_PROFILE == ARKCC_PROFILE_STM32_MIN
+#   define ARKCC_FEATURE_DEP_FILES_DYN 0
+# else
+#   define ARKCC_FEATURE_DEP_FILES_DYN 1
+# endif
 #endif
 
 #endif /* ARKCC_CONFIG_H */

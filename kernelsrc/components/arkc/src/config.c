@@ -56,9 +56,21 @@ void config_init(void) {
     g_config.enable_dwarf         = ARKCC_FEATURE_DWARF;
     g_config.enable_opt_constfold = ARKCC_FEATURE_OPT_CONSTFOLD;
     g_config.enable_opt_dce       = ARKCC_FEATURE_OPT_DCE;
-    g_config.enable_opt_regalloc  = ARKCC_FEATURE_OPT_REGALLOC;
+    /* 寄存器分配：代码按 profile 编进来（宿主 1 / 板端 0），但默认一律关——
+     * 默认产物必须与旧版本逐字节相同，只有 -fopt-regalloc/--regalloc 才开。 */
+    g_config.enable_opt_regalloc  = 0;
+    g_config.enable_opt_regalloc_near = 0;
     g_config.enable_opt_inline    = ARKCC_FEATURE_OPT_INLINE;
     g_config.enable_opt_vectorize = ARKCC_FEATURE_OPT_VECTORIZE;
+    /* 0.8.0 的五个实验性开关：代码按 profile 编进来（见 arkcc_config.h），
+     * 但默认一律关闭——默认行为与 0.7.0 逐字节相同，打开才会变。
+     * 这样做是为了满足“开关关掉时零变化”，而不是因为新行为不值得默认开。 */
+    g_config.enable_dce_cfg       = 0;
+    g_config.enable_reloc_data    = 0;
+    g_config.enable_reloc_text    = 0;
+    g_config.enable_reg_top       = 0;
+    g_config.enable_rt_lazy       = 0;
+    g_config.enable_asm_extra     = 0;
     g_config.opt_level            = 0;
     g_config.debug_info           = 0;
     g_config.split_sections       = 0;
@@ -91,6 +103,12 @@ static void apply_kv(const char *section, const char *key, const char *val) {
         else if (ark_streq(key, "opt_regalloc")) g_config.enable_opt_regalloc = parse_bool(val);
         else if (ark_streq(key, "opt_inline"))    g_config.enable_opt_inline    = parse_bool(val);
         else if (ark_streq(key, "opt_vectorize")) g_config.enable_opt_vectorize = parse_bool(val);
+        else if (ark_streq(key, "dce_cfg"))       g_config.enable_dce_cfg = parse_bool(val);
+        else if (ark_streq(key, "reloc_data"))    g_config.enable_reloc_data = parse_bool(val);
+        else if (ark_streq(key, "reloc_text"))    g_config.enable_reloc_text = parse_bool(val);
+        else if (ark_streq(key, "reg_top"))       g_config.enable_reg_top = parse_bool(val);
+        else if (ark_streq(key, "rt_lazy"))       g_config.enable_rt_lazy = parse_bool(val);
+        else if (ark_streq(key, "asm_extra"))     g_config.enable_asm_extra = parse_bool(val);
     } else if (ark_streq(section, "general")) {
         if (ark_streq(key, "opt_level")) {
             int v = 0;
@@ -356,6 +374,16 @@ void config_apply_args(int argc, char **argv) {
                 g_config.enable_opt_dce                 = enable;
             else if (ark_streq(name, "opt-regalloc") || ark_streq(name, "regalloc"))
                 g_config.enable_opt_regalloc            = enable;
+            else if (ark_streq(name, "opt-regalloc-near") || ark_streq(name, "regalloc-near")) {
+                g_config.enable_opt_regalloc_near       = enable;
+                /* The near tier only changes how the pass above selects slots;
+                 * on its own it did nothing at all, so "-fopt-regalloc-near"
+                 * was a silent no-op that still looked like it had taken
+                 * effect.  Asking for it now implies the pass.  Only on the
+                 * enabling side, so "-fopt-regalloc -fno-opt-regalloc-near"
+                 * keeps the pass on in the default tier. */
+                if (enable) g_config.enable_opt_regalloc = 1;
+            }
             else if (ark_streq(name, "opt-inline") || ark_streq(name, "autoinline"))
                 g_config.enable_opt_inline              = enable;
             else if (ark_streq(name, "opt-vectorize") || ark_streq(name, "vectorize"))
@@ -376,11 +404,16 @@ void config_print(void) {
             g_config.enable_wchar, g_config.enable_trigraph);
     ark_log("  fpu_hw=%d dwarf=%d\n",
             g_config.enable_fpu_hw, g_config.enable_dwarf);
-    ark_log("  opt_constfold=%d opt_dce=%d opt_regalloc=%d\n",
+    ark_log("  opt_constfold=%d opt_dce=%d opt_regalloc=%d opt_regalloc_near=%d\n",
             g_config.enable_opt_constfold, g_config.enable_opt_dce,
-            g_config.enable_opt_regalloc);
+            g_config.enable_opt_regalloc, g_config.enable_opt_regalloc_near);
     ark_log("  opt_inline=%d opt_vectorize=%d\n",
             g_config.enable_opt_inline, g_config.enable_opt_vectorize);
+    ark_log("  dce_cfg=%d reloc_data=%d reg_top=%d rt_lazy=%d asm_extra=%d\n",
+            g_config.enable_dce_cfg, g_config.enable_reloc_data,
+            g_config.enable_reg_top, g_config.enable_rt_lazy,
+            g_config.enable_asm_extra);
+    ark_log("  reloc_text=%d\n", g_config.enable_reloc_text);
     ark_log("  opt_level=%d debug_info=%d split_sections=%d\n",
             g_config.opt_level, g_config.debug_info, g_config.split_sections);
     ark_log("  config_file=%s\n",

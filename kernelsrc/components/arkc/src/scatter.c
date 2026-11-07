@@ -244,6 +244,110 @@ static void parse_selectors(const char *sel, ScatterExecRegion *er) {
     }
 }
 
+#if ARKCC_FEATURE_SCATTER_CHECK
+/* 判断一个执行区是否装载 RESET（向量表）选择器。
+ * 判定依据是选择器摘要里记下的 section_name；此外 +First/+Last 位也在这里读到。 */
+static int er_holds_reset(ScatterExecRegion *er) {
+    if (!er) return 0;
+    if (er->section_name && ark_streq(er->section_name, "RESET")) return 1;
+    if (er->selectors && strstr(er->selectors, "RESET")) return 1;
+    return 0;
+}
+
+/* 分散布局校验。
+ *
+ * 存在的意义：Cortex-M 与 armlink 都把向量表当成镜像的第一个对象，而 arkc 在
+ * --vector-table 模式下会在镜像最前面预留 ARM_VT_SIZE 字节并把表写进去。
+ * 如果分散文件把 RESET 放到别处（典型是 +Last），产出的镜像照样生成、不报错，
+ * 烧进板子却启动不了 —— 这是“静默产出错镜像”。
+ *
+ * 检查项：
+ *   1. 要求了向量表时，必须存在装载 RESET 的执行区；
+ *   2. 该执行区不能带 +Last（那会把表放到区域末尾）；
+ *   3. 该执行区必须从 flash 基址开始（表必须是镜像的第一段）；
+ *   4. 任意两个给出了 size 的执行区不得重叠。
+ * 只在 want_vector_table 为真时检查 1–3：没有向量表就没有这条约束。
+ */
+int scatter_validate(const ScatterDesc *desc, unsigned flash_base, int want_vector_table) {
+    ScatterLoadRegion *lr;
+    ScatterExecRegion *er;
+    ScatterExecRegion *reset_er = 0;
+    int errors = 0;
+
+    if (!desc) return 0;
+
+    /* 1–3：向量表位置 */
+    if (want_vector_table) {
+        for (lr = desc->load_regions; lr; lr = lr->next) {
+            for (er = lr->exec_regions; er; er = er->next) {
+                if (er_holds_reset(er) && !reset_er) reset_er = er;
+            }
+        }
+        if (!reset_er) {
+            diag_tool(DIAG_SEV_ERROR, "arkcc",
+                      "the layout in use defines no RESET section, but --vector-table was given: "
+                      "the vector table would not be the first object in the image",
+                      0,0,0,0,0,0);
+            errors++;
+        } else {
+            if (reset_er->attr_flags & SCATTER_ATTR_LAST) {
+                diag_tool(DIAG_SEV_ERROR, "arkcc",
+                          "the RESET section is placed with +Last, but --vector-table requires it at the "
+                          "start of the image (Cortex-M reads SP and the reset vector from offset 0)",
+                          0,0,0,0,0,0);
+                errors++;
+            }
+            if ((reset_er->attr_flags & SCATTER_ATTR_FIRST) == 0) {
+                diag_tool(DIAG_SEV_WARNING, "arkcc",
+                          "the RESET section is not marked +First; the vector table may not end up at "
+                          "offset 0 of the image",
+                          0,0,0,0,0,0);
+            }
+            if (reset_er->load_addr != flash_base) {
+                diag_tool(DIAG_SEV_ERROR, "arkcc",
+                          "the RESET section starts at an address other than the image base, but "
+                          "--vector-table requires it at the base",
+                          0,0,0,0,0,0);
+                errors++;
+            }
+        }
+    }
+
+    /* 4：执行区重叠 */
+    {
+        ScatterLoadRegion *la;
+        for (la = desc->load_regions; la; la = la->next) {
+            ScatterExecRegion *a;
+            for (a = la->exec_regions; a; a = a->next) {
+                ScatterLoadRegion *lb;
+                if (!a->size) continue;
+                for (lb = desc->load_regions; lb; lb = lb->next) {
+                    ScatterExecRegion *b;
+                    for (b = lb->exec_regions; b; b = b->next) {
+                        unsigned a0, a1, b0, b1;
+                        if (!b->size) continue;
+                        if (a == b) continue;
+                        a0 = a->load_addr; a1 = a0 + a->size;
+                        b0 = b->load_addr; b1 = b0 + b->size;
+                        /* 只报一次：用地址序把对称对去掉 */
+                        if (a0 > b0 || (a0 == b0 && a > b)) continue;
+                        if (a0 < b1 && b0 < a1) {
+                            diag_tool(DIAG_SEV_ERROR, "arkcc",
+                                      "execution regions overlap in the scatter layout (%s and %s)",
+                                      a->name ? a->name : "?", b->name ? b->name : "?",
+                                      0,0,0,0);
+                            errors++;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return errors;
+}
+#endif /* ARKCC_FEATURE_SCATTER_CHECK */
+
 int scatter_parse_file(const char *path, ScatterDesc *out) {
     char *src;
     const char *p;

@@ -114,7 +114,7 @@ SRC_M1 = [
 SCT_OK = [
     "LR_IROM1 0x24070000 0x00002000",
     "{",
-    "ER_IROM1 0x24070000 0x00002000 { .ANY (+RO) }",
+    "ER_IROM1 0x24070000 0x00002000 { *.o (RESET, +First) .ANY (+RO) }",
     "ER_IRAM1 0x24072000 0x00002000 { .ANY (+RW +ZI) }",
     "}",
 ]
@@ -123,7 +123,7 @@ SCT_OK = [
 SCT_BAD = [
     "LR_IROM1 0x24040000 0x00002000",
     "{",
-    "ER_IROM1 0x24040000 0x00002000 { .ANY (+RO) }",
+    "ER_IROM1 0x24040000 0x00002000 { *.o (RESET, +First) .ANY (+RO) }",
     "ER_IRAM1 0x24043000 0x00002000 { .ANY (+RW +ZI) }",
     "}",
 ]
@@ -172,13 +172,15 @@ def _steps_emit(path, lines, wait=DEFAULT_WAIT):
 
 # ---------------------------------------------------------------- 用例定义
 
-# 每个用例开工前统一清场。ramfs 只有 ARK_RAMFS_MAX_FILES=3 个文件槽，
-# 残留一份就会让被测操作撞上「第四份文件」并报 I/O error——那个失败与被测
-# 对象无关，却会让人去查打包器（本轮实测踩过）。
+# 每个用例开工前统一清场。ramfs 的文件槽数由 ARK_RAMFS_MAX_FILES 决定
+# （片内 RAM 档 3 槽，SDRAM 档 8 槽），残留一份就可能让被测操作撞上「槽用完」
+# 并报 I/O error——那个失败与被测对象无关，却会让人去查打包器（本轮实测踩过）。
 CLEAN = [
     Step("rm /tmp/m1.c", wait=0.25), Step("rm /tmp/m1.sct", wait=0.25),
     Step("rm /tmp/m1.bin", wait=0.25), Step("rm /tmp/m2.c", wait=0.25),
     Step("rm /tmp/m2.svcm", wait=0.25), Step("rm /tmp/pp.sct", wait=0.25),
+    Step("rm /tmp/hello.c", wait=0.25), Step("rm /tmp/hello.sct", wait=0.25),
+    Step("rm /tmp/hello.bin", wait=0.25),
 ]
 
 
@@ -280,6 +282,30 @@ CASES = [
                  wait=2.0),
             Step("mini stop", expect=[r"^mini stopped: all blocks returned to the pool$"],
                  wait=2.0),
+        ],
+    ),
+    Case(
+        "hello-demo",
+        "演示路径：一条 `hello` 把源写进 /tmp、板上编链、app run 跑出两行 POSIX 输出",
+        CLEAN
+        + [
+            # 这一条走的就是用户要演示的那条路径本身（不是 test 专用入口），
+            # 所以它同时是「hello 能用」与「cc + app run 在 SDRAM 档下能用」的闸门。
+            # 进度行逐条对上：漏掉一步而后面又成功了，说明那一步被隐式跳过
+            # （例如源文件已存在所以没重写）。
+            Step("hello",
+                 expect=[r"\[hello\] 1/3 sources -> /tmp/hello\.c, /tmp/hello\.sct$",
+                         r"\[hello\] 2/3 cc: compile \+ link for the app-run window$",
+                         r"cc: /tmp/hello\.c -> /tmp/hello\.bin \(target arm, -O1\)$",
+                         r"^cc: done in \d+ ms$",
+                         r"\[hello\] 3/3 app run /tmp/hello\.bin$",
+                         r"APPRUN:\d+ /tmp/hello\.bin: \d+ B -> code 0x24070000",
+                         r"hello, world$",
+                         r"written by arkc running on the STM32H743 itself$",
+                         r"task \d+ exited, window returned to the pool$"],
+                 forbid=[r"\[arkc\] FATAL", r"compile/link failed",
+                         r"app run failed", r"(HARD|MEM|BUS|USG)FAULT"],
+                 wait=12.0),
         ],
     ),
 ]

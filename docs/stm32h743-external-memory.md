@@ -1,3 +1,30 @@
+
+> **2026-11-07 订正（本文下半部分的"硬件层面负读数"结论作废）**
+>
+> 那段时间量到的"FMC 窗口对任何访问都不应答、而寄存器/命令引擎/引脚全部正常"，
+> 真因是**没有打开 FMC 的总闸门**：`FMC_BCR1.FMCEN`（bit 31）。它复位值没有文档
+> 保证，而 FMC 关闭时：`SDCR/SDTR` 的写入照样落地、`SDSR` 也不报错，只有命令
+> 发生器不跑、刷新计数器不计数、窗口访问以 AXI 错误返回（表现为 `IMPRECISERR`，
+> 地址还会丢）。这正是"寄存器都对、窗口不应答"的样子。
+>
+> 补上之后（`board/stm32h743/drvfmc.c`，同时显式写 `D1CCIPR.FMCSEL = D1HCLK`），
+> 板上实测：
+>
+> ```
+> sdram info   -> 32 MB @0xC0000000, HCLK3 240 MHz, SDCLK 80 MHz
+> sdram verify -> verified - a word went out and came back
+> sdram test   -> testing 32 MB (bus, address uniqueness, full sweep)...
+>                 PASS - every word of 32 MB read back as written
+> ```
+>
+> 同一次改动之后 `USE_SDRAM=1` 首次真正可用：`.ark_buf` 落在 SDRAM 的 12 MB 分区、
+> ramfs 落在 6 MB 分区，片内 RAM 占用从 **98.37% 降到 62.14%**，编译器的池从
+> 80 KB 变成 4 MB。MPU 的 EXTRAM 区域（`ARKRTOS_MPU_RGN_EXTRAM`，0xC0000000，
+> Normal non-cacheable）本来就已经接好，缺的只是上面这一个使能位。
+>
+> 下面第 4/6/7 节里"硬件层面的负读数""软件无法绕过""在换板或换片复测之前本板的
+> 正确配置是 USE_SDRAM=0"这几句**保留原文作为当时的证据链**，但结论以本条为准。
+> 演示路径与实测见 `docs/arkc板上直跑-M4-hello演示.md`。
 # STM32H743 板上外置存储器（SDRAM / QSPI NOR）：接起来了，但这块板子的窗口不应答
 
 **这份文档回答一个问题：板子上明明焊着 32MB 的 SDRAM 和 8MB 的 NOR Flash，

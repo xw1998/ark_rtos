@@ -268,6 +268,24 @@ static int32 sdram_bring_up(void)
     RCC->AHB3ENR |= RCC_AHB3ENR_FMCEN;
     (void)RCC->AHB3ENR;
 
+    /* FMC 的内核时钟来源：D1CCIPR.FMCSEL = 00 => D1HCLK。复位值就是 00，但
+     * 上面那行 hclk/sdclk 的推导是按 D1HCLK 算的，所以这里显式写一次——
+     * 万一有人把 FMCSEL 改成 PLL2R，推导出的 SDCLK 就与实际不符，而 SDTR
+     * 的每一个字段都是按 SDCLK 算出来的。 */
+    RCC->D1CCIPR &= ~RCC_D1CCIPR_FMCSEL;
+    (void)RCC->D1CCIPR;
+
+    /* FMC_BCR1.FMCEN（bit31）是整块 FMC 的总闸门。它的复位值没有文档保证，
+     * 而 FMC 关闭时对 0xC0000000 的访问会以 AXI 错误返回（表现为
+     * IMPRECISERR，地址丢失）。更隐蔽的是：FMCEN=0 时下面 SDCR/SDTR 的写入
+     * 照样落地、SDSR 也不会报错，只有命令发生器不跑、刷新计数器不计数——
+     * 于是「寄存器都对」而「窗口不应答」。裸机侧实测过这条：补上 FMCEN 之后
+     * 同一份 SDCR/SDTR 立刻能读写 32 MB，之前则全是 AXI 错误。 */
+    /* 本工程的 CMSIS 把 FMC_Bank1_TypeDef 声明成 BTCR[8]（BCR1 = BTCR[0]），
+     * 没有 BCR1 这个名字，所以按偏移写。 */
+    FMC_Bank1_R->BTCR[0] |= FMC_BCR1_FMCEN;
+    (void)FMC_Bank1_R->BTCR[0];
+
     /* ---- SDCR: geometry, CAS latency, clock divider, read pipeline -- */
     /* NC  : 9 column bits  = 01b   (00=8, 01=9, 10=10, 11=11)
      * NR  : 13 row bits    = 10b   (00=11, 01=12, 10=13, 11=14)

@@ -22,6 +22,8 @@ void opt_constfold_func(IrFunc *f);
 /* Per-function dead code elimination: removes unreachable instructions
  * after RETURN/JMP up to the next label. */
 void opt_dce_func(IrFunc *f);
+/* 基本块级可达性 DCE（--dce-cfg）。语义与 opt_dce_func 相同：只删不可达指令。 */
+void opt_dce_cfg_func(IrFunc *f);
 
 /* Auto inlining: inlines small function bodies into call sites.
  * Threshold: IR instruction count <= ARK_INLINE_THRESHOLD (default 12).

@@ -169,6 +169,107 @@ void opt_dce_func(IrFunc *f) {
     compact_func(f);
 }
 
+#if ARKCC_FEATURE_OPT_DCE_CFG
+/* 基本块级可达性删除（CFG DCE）。
+ *
+ * 为什么线性 DCE 不够：opt_dce_func 只删「RETURN/JMP 之后、下一个标签之前」
+ * 的指令，一遇到标签就停止。于是下面这种代码一块都删不掉：
+ *
+ *     if (x) return 1;
+ *     ...                 <- 只有 x 为真才会跳过，仍然可达
+ *     L_never:            <- 没有任何跳转指向它
+ *         do_something(); <- 永远执行不到，却留在产物里
+ *
+ * 这里先按「跳转终止指令 / 标签」切基本块，再从函数第一条指令做可达性传播，
+ * 把「没有任何路径能到达」的块整块标成 NOP。
+ *
+ * 保守条款（宁可少删，不可删错）：
+ *   1. IR_FUNC_BEGIN / FUNC_END 不动；
+ *   2. 标签指令本身保留（它不产生字节，删了反而可能让别的引用落空）；
+ *   3. 带 IR_AUX_VOLATILE 的访存一律保留；
+ *   4. 不认识的指令按「顺序执行」处理，只把它当作块内普通指令。
+ */
+static int cfg_label_index(IrFunc *f, IrInst *jump) {
+    int i;
+    int is_named = (jump->op == IR_JMP_NAMED);
+    for (i = 0; i < f->code_count; i++) {
+        IrInst *L = &f->code[i];
+        if (is_named) {
+            if (L->op == IR_LABEL_NAMED && L->name && jump->name &&
+                ark_streq(L->name, jump->name)) return i;
+        } else {
+            if (L->op == IR_LABEL && L->val == jump->val) return i;
+        }
+    }
+    return -1;
+}
+
+void opt_dce_cfg_func(IrFunc *f) {
+    int n, i;
+    unsigned char *reach;
+    unsigned char *queued;
+    int *queue;
+    int qh = 0, qt = 0;
+
+    if (!f || f->code_count <= 0) return;
+    n = f->code_count;
+    reach  = (unsigned char *)mem_pool_alloc(n);
+    queued = (unsigned char *)mem_pool_alloc(n);
+    queue  = (int *)mem_pool_alloc(n * (int)sizeof(int));
+
+    /* 入口 */
+    queue[qt++] = 0;
+    queued[0] = 1;
+
+    while (qh < qt) {
+        int start = queue[qh++];
+        i = start;
+        while (i >= 0 && i < n) {
+            IrInst *I = &f->code[i];
+            if (reach[i]) break;          /* 接到已访问过的块：停止 */
+            reach[i] = 1;
+
+            if (I->op == IR_RETURN || I->op == IR_FUNC_END) break;
+
+            if (I->op == IR_JMP || I->op == IR_JMP_NAMED) {
+                int t = cfg_label_index(f, I);
+                if (t >= 0 && !queued[t]) { queued[t] = 1; queue[qt++] = t; }
+                break;
+            }
+            if (I->op == IR_JZ || I->op == IR_JNZ) {
+                int t = cfg_label_index(f, I);
+                if (t >= 0 && !queued[t]) { queued[t] = 1; queue[qt++] = t; }
+                i++;                      /* 条件跳转：落空路径继续顺序执行 */
+                continue;
+            }
+            if (I->op == IR_CMP_JMP_EQ) {
+                /* switch 的比较跳转：目标标签存在 aux 里 */
+                IrInst probe;
+                int t;
+                probe.op  = IR_JMP;
+                probe.val = I->aux;
+                probe.name = 0;
+                t = cfg_label_index(f, &probe);
+                if (t >= 0 && !queued[t]) { queued[t] = 1; queue[qt++] = t; }
+                i++;
+                continue;
+            }
+            i++;
+        }
+    }
+
+    for (i = 0; i < n; i++) {
+        IrInst *I = &f->code[i];
+        if (reach[i]) continue;
+        if (I->op == IR_FUNC_BEGIN || I->op == IR_FUNC_END) continue;
+        if (I->op == IR_LABEL || I->op == IR_LABEL_NAMED) continue;
+        if (I->aux & IR_AUX_VOLATILE) continue;
+        I->op = IR_NOP;
+    }
+    compact_func(f);
+}
+#endif /* ARKCC_FEATURE_OPT_DCE_CFG */
+
 void opt_run(IrProgram *prog, int level) {
     int i;
     if (!prog) return;
@@ -196,6 +297,15 @@ void opt_run(IrProgram *prog, int level) {
     if (level >= 1) {
         for (i = 0; i < prog->func_count; i++) {
             opt_dce_func(prog->funcs[i]);
+        }
+    }
+#endif
+#if ARKCC_FEATURE_OPT_DCE_CFG
+    /* 基本块级 DCE：只在用户显式 --dce-cfg 且优化级别 >= 1 时运行。
+     * 放在线性 DCE 之后，先由简单规则清一遍，再由可达性分析处理带标签的死块。 */
+    if (g_config.enable_dce_cfg && level >= 1) {
+        for (i = 0; i < prog->func_count; i++) {
+            opt_dce_cfg_func(prog->funcs[i]);
         }
     }
 #endif

@@ -40,11 +40,16 @@
 #include <stdint.h>
 #include <string.h>
 
+#if (ARKRTOS_USE_APPPACK == 1) || (ARKRTOS_USE_HELLO == 1)
+#include "arkrtos_vfs.h"           /* removes the temporary .sct again */
+#endif
 #if (ARKRTOS_USE_APPPACK == 1)
 #include "include/flash_fs.h"      /* fs_write_file / fs_last_error */
 #include "arkrtos_apppack.h"       /* the four-pass diff itself (pure) */
 #include "arkrtos_ptable.h"        /* four payloads + the image come from the pool */
-#include "arkrtos_vfs.h"           /* removes the temporary .sct again */
+#endif
+#if (ARKRTOS_USE_HELLO == 1)
+#include "arkrtos_apprun.h"        /* the demo hands its image to 'app run' */
 #endif
 
 /* --scatter / --vector-table / -link are the "layout" options and have two
@@ -84,6 +89,7 @@ static void cc_usage(void)
         "          [-O0|-O1|-O2] [-D<name>[=<value>]] [-I <dir>] [-v]\r\n"
 #if (CC_LAYOUT_OPTS == 1)
         "          [--scatter <file.sct>] [--vector-table]\r\n"
+        "          [--reloc-text|--no-reloc-text]\r\n"
         "          [-link <a.obj> [<b.obj> ...]]\r\n"
 #endif
         "  no -o: writes <file>.bin (or prints to the console with -S/-E)\r\n"
@@ -98,6 +104,10 @@ static void cc_usage(void)
         "  -link: link .obj files into one image; every argument up to the next\r\n"
         "         option is an input.  Add --scatter so the image carries a vector\r\n"
         "         table for that window ('app run' reads SP/entry from it)\r\n"
+        "  --reloc-text: let the linker fix in-section absolute addresses (string\r\n"
+        "         literals) per object.  ON by default for -link: every object was\r\n"
+        "         compiled against another base, so leaving it off points those\r\n"
+        "         addresses at 0x08000000.  --no-reloc-text keeps the old output\r\n"
 #endif
 #if (ARKRTOS_USE_APPPACK == 1)
         "          [--pack [-o <f.svcm>]] <file.c> [<file2.c> ...]\r\n"
@@ -160,8 +170,8 @@ static int cc_bad_option(const char *what, const char *arg)
  * objects live in RAM through the port's in-memory file registry (see
  * arkc_port.h): ramfs has 3 slots and one littlefs write costs ~10 s).
  *
- * Memory: 4 x 8 KB payloads + 4 x 4 KB object slots + 16 KB output, borrowed
- * from the pool and returned on every path.
+ * Memory: 4 x 8 KB payloads + 16 KB of object slots/output, borrowed from the
+ * pool and returned on every path.
  * ============================================================ */
 
 /* One payload may not exceed the app-run code window; four of them are one
@@ -169,15 +179,18 @@ static int cc_bad_option(const char *what, const char *arg)
 #define CC_PACK_WIN_SIZE     8192u
 /* 256 header + 1024 x 4 table + 8192 payload = 12544 -> one 16 KB block. */
 #define CC_PACK_OUT_CAP      16384u
-/* Objects of one pass, one slot per source.  The cap equals ARK_OBJ_BUF_SIZE:
- * arkc refuses to emit an object bigger than that buffer, so a larger slot
- * would only hide the real limit. */
+/* Objects of one pass, one slot per source. */
 #define CC_PACK_MAX_SRCS     4
-#define CC_PACK_OBJ_CAP      4096u
-#define CC_PACK_OBJ_ARENA    (CC_PACK_MAX_SRCS * CC_PACK_OBJ_CAP)
-/* 池一次借出的上限是 SLOT_RAM_MAX_BLOCK（32 KB），而且两块各自都要落进
- * [MIN, MAX]，所以 "32 KB 负载窗口 + 16 KB 对象槽" 不能合成一次借出
- * （48 KB 上取整成 64 KB，直接被拒）。
+/* 对象槽不是每槽固定 4 KB：一个 3 函数的对象带上 0x400 的向量表洞实测 4247 B
+ * （arkc 0.8.0 十项限制同步之后涨到这里，之前约 3.2 KB），固定 4 KB 会在**写
+ * 对象**这一步失败，而写失败只报 -1，看上去像「编译失败」。整块只有 16 KB
+ * （它和镜像缓冲共用，见下），所以容量按这次真正编译的源数均分：1 个源时一槽
+ * 16 KB，4 个源时每槽 4 KB。超出就照实报 File too large，不截断。 */
+#define CC_PACK_OBJ_ARENA    CC_PACK_OUT_CAP            /* 与镜像缓冲共用 */
+/* 池一次借出的两块各自都要落进 [MIN, MAX]（MAX = SLOT_RAM_MAX_BLOCK = 32 KB），
+ * 所以「32 KB 负载窗口 + 16 KB 对象槽」不能合成一次借出（48 KB 上取整成 64 KB，
+ * 直接被拒）；而 SLOT_RAM_TOTAL 只有 64 KB，app run 的 16 KB 窗口平时就占着，
+ * 于是借出总量只能是 32 + 16 = 48 KB，两块都不能再涨。
  * 对象槽因此和镜像缓冲共用那 16 KB：镜像只在**四遍都跑完之后**才写进去，
  * 而对象在最后一遍链接完成后就不再被读，用途在时间上不重叠。这条依赖写成
  * 下面的 #error 而不是注释——顺序一旦被改动，这里先失败。 */
@@ -257,7 +270,11 @@ static int cc_pack_write_sct(uint32_t rom, uint32_t rom_len, uint32_t ram)
     n += cc_hex32(txt + n, rom);
     n += cc_str(txt + n, " ");
     n += cc_hex32(txt + n, rom_len);
-    n += cc_str(txt + n, " { .ANY (+RO) }\r\nER_IRAM1 ");
+    /* `*.o (RESET, +First)` 不能省：arkc 的散射校验要求 --vector-table 时布局里
+     * 必须有一个装载 RESET 的执行区且它就在镜像基址上，否则直接报
+     * "defines no RESET section" 并拒绝出图。打包路径的 sct 是程序自己写的，
+     * 曾经漏过这一行：M2 的四个 pass 全部在 pass A 就停住（板上实测）。 */
+    n += cc_str(txt + n, " { *.o (RESET, +First) .ANY (+RO) }\r\nER_IRAM1 ");
     n += cc_hex32(txt + n, ram);
     n += cc_str(txt + n, " 0x00002000 { .ANY (+RW +ZI) }\r\n}\r\n");
 
@@ -272,15 +289,19 @@ static const char *const s_cc_pack_obj[CC_PACK_MAX_SRCS] = {
 
 /* 把这次 pass 的对象槽登记进端口。每遍都重登记：上一遍的对象长度必须归零，
  * 否则"没写成功"会读到上一遍的字节，而那就是一个错误答案。 */
-static int cc_pack_vfiles(uint8_t *obj_arena)
+static int cc_pack_vfiles(uint8_t *obj_arena, int n_srcs)
 {
-    int i;
+    int      i;
+    uint32_t cap = (uint32_t)(CC_PACK_OBJ_ARENA / (uint32_t)((n_srcs > 0) ? n_srcs : 1));
 
+    if (n_srcs > CC_PACK_MAX_SRCS) {
+        return -1;
+    }
     arkc_port_vfile_clear();
-    for (i = 0; i < CC_PACK_MAX_SRCS; i++) {
+    for (i = 0; i < n_srcs; i++) {
         if (arkc_port_vfile_register(s_cc_pack_obj[i],
-                                     obj_arena + ((uint32_t)i * CC_PACK_OBJ_CAP),
-                                     CC_PACK_OBJ_CAP) != 0) {
+                                     obj_arena + (cap * (uint32_t)i),
+                                     cap) != 0) {
             return -1;
         }
     }
@@ -352,6 +373,10 @@ static int cc_pack_obj(const char *src, const char *obj_name, const char *target
     arkc_port_set_abort_target(NULL);
 
     if (rc != ARK_OK) {
+        /* 只说 "failed" 会把 -6（布局没应用）与 -1（I/O）混成一件事，而这两种
+         * 的下一步完全不同；ark_compile 的返回码是唯一能分开它们的读数。 */
+        ark_shell_printf("cc:   %s: compile rc=%d (%s)\r\n", src, rc,
+                         fs_last_error());
         return -1;
     }
     if (arkc_port_vfile_size(obj_name) == 0u) {
@@ -497,7 +522,7 @@ static int cc_pack(const char *const *srcs, int n_srcs,
         uint32_t off = 0u;
         phase = ARKC_PACK_PHASE_COMPILE;
 
-        if (cc_pack_vfiles(obj_arena) != 0) {
+        if (cc_pack_vfiles(obj_arena, n_srcs) != 0) {
             ark_shell_printf("cc: cannot register the in-memory object files "
                              "(the registry refused)\r\n");
             goto done;
@@ -544,7 +569,8 @@ static int cc_pack(const char *const *srcs, int n_srcs,
                  * 其中的代码只有 2590 B），链接器排布用的是代码长度。拿文件
                  * 长度累加会让下一个对象被编到 950 B 之外的基址上——那是
                  * "对象被搬了位置"，正是这一段要防的事。 */
-                uint32_t sz = cc_le32(obj_arena + ((uint32_t)k * CC_PACK_OBJ_CAP) + 8u);
+                uint32_t sz = cc_le32(obj_arena +
+                                      ((CC_PACK_OBJ_ARENA / (uint32_t)n_srcs) * (uint32_t)k) + 8u);
                 uint32_t file_sz = (uint32_t)arkc_port_vfile_size(s_cc_pack_obj[k]);
 
                 if (verbose != 0) {
@@ -751,6 +777,9 @@ static int cmd_cc(int argc, char *argv[])
     /* --vector-table: emit the table into a reserved 0x400 gap instead of
      * prepending it, so the linked addresses stay the ones that run. */
     int        vector_table = 0;
+    /* --reloc-text: -1 = not on the command line (decided after parsing:
+     * on for -link, off otherwise).  0/1 = what the caller asked for. */
+    int        reloc_text = -1;
 #endif
 #if (ARKRTOS_USE_APPPACK == 1)
     /* --pack: same source, four layouts, one relocatable image.  Left at 0
@@ -832,6 +861,10 @@ static int cmd_cc(int argc, char *argv[])
 #if (CC_LAYOUT_OPTS == 1)
         } else if (strcmp(a, "--vector-table") == 0) {
             vector_table = 1;
+        } else if (strcmp(a, "--reloc-text") == 0) {
+            reloc_text = 1;
+        } else if (strcmp(a, "--no-reloc-text") == 0) {
+            reloc_text = 0;
         } else if (strcmp(a, "-link") == 0) {
             /* Turns the following bare arguments into inputs; nothing else is
              * needed here because the branch above already routes them. */
@@ -976,6 +1009,17 @@ static int cmd_cc(int argc, char *argv[])
     opts.pre_define_count = n_defines;
 
     cc_reset_state(src, opt_level);
+#if (CC_LAYOUT_OPTS == 1)
+    /* After cc_reset_state(): config_init() rebuilds g_config, so a value set
+     * before it is thrown away.  On board, -link always joins objects that
+     * were compiled against another base, so correcting the in-section
+     * absolute addresses is the only honest default; --no-reloc-text opts out
+     * and reproduces the pre-0.8.0 output. */
+    if (reloc_text < 0) {
+        reloc_text = (link_mode != 0) ? 1 : 0;
+    }
+    g_config.enable_reloc_text = reloc_text;
+#endif
 
 #if (CC_LAYOUT_OPTS == 1)
     if (link_mode != 0) {
@@ -999,6 +1043,9 @@ static int cmd_cc(int argc, char *argv[])
     }
     if (vector_table != 0) {
         ark_shell_printf("cc: vector table in the first 0x400 B\r\n");
+    }
+    if (link_mode != 0) {
+        ark_shell_printf("cc: reloc-text %s\r\n", (reloc_text != 0) ? "on" : "off");
     }
 #endif
 
@@ -1032,6 +1079,170 @@ static int cmd_cc(int argc, char *argv[])
     return 1;
 }
 
+
+#if (ARKRTOS_USE_HELLO == 1)
+/* ============================================================
+ * `hello` - one-command POSIX hello world demo
+ *
+ * Three steps behind one word: the sources land in the VFS /tmp, the
+ * on-board arkc compiles and links them, and `app run` executes the
+ * image in the fixed window.  It is one command instead of three
+ * because on a serial console "forgot the second line" and "typed it
+ * wrong" look exactly alike; every step reports its own failure with
+ * the step number and the demo stops there.
+ *
+ * The program is ordinary C: write(1, ...) reaches this chip's console,
+ * sizeof("literal") is the character count (C11 6.5.3.4), and the entry
+ * follows the vector-table contract app run checks.
+ * ============================================================ */
+static const char SRC_HELLO[] =
+    "/* hello.c -- POSIX hello world, compiled and run by arkc on this chip. */\r\n"
+    "typedef unsigned int u32;\r\n"
+    "\r\n"
+    "extern void __arkcc_init_globals(void);\r\n"
+    "int __svc(0x1A) svc_shell(u32 *p);\r\n"
+    "int __svc(0x1B) svc_thread(u32 *p);\r\n"
+    "\r\n"
+    "int write(int fd, const void *buf, unsigned int len);\r\n"
+    "int main(void);\r\n"
+    "\r\n"
+    "/* The two messages are written as literals, not as const arrays: the ARM\r\n"
+    " * backend currently emits no initialised data section, so a global\r\n"
+    " * \"static const char msg[] = ...\" would be linked as zeros.  Inline\r\n"
+    " * literals do land in the image (measured: at +0x400 of this one). */\r\n"
+    "\r\n"
+    "/* fd 1 is this chip's console.  The SVC below prints a NUL-terminated\r\n"
+    " * string, so write() copies the caller's bytes into a small buffer and\r\n"
+    " * terminates it -- that keeps the POSIX contract (any buffer, any length)\r\n"
+    " * instead of quietly requiring a string literal. */\r\n"
+    "int write(int fd, const void *buf, unsigned int len)\r\n"
+    "{\r\n"
+    "    static char chunk[64];\r\n"
+    "    const char *p = (const char *)buf;\r\n"
+    "    u32 q[3];\r\n"
+    "    unsigned int done = 0u;\r\n"
+    "\r\n"
+    "    (void)fd;\r\n"
+    "    while (done < len) {\r\n"
+    "        unsigned int n = len - done;\r\n"
+    "        unsigned int i;\r\n"
+    "        if (n > 63u) {\r\n"
+    "            n = 63u;\r\n"
+    "        }\r\n"
+    "        for (i = 0u; i < n; i++) {\r\n"
+    "            chunk[i] = p[done + i];\r\n"
+    "        }\r\n"
+    "        chunk[n] = 0;\r\n"
+    "        q[0] = 3u; q[1] = (u32)chunk; q[2] = 0u;\r\n"
+    "        svc_shell(q);\r\n"
+    "        done += n;\r\n"
+    "    }\r\n"
+    "    return (int)len;\r\n"
+    "}\r\n"
+    "\r\n"
+    "int main(void)\r\n"
+    "{\r\n"
+    "    write(1, \"hello, world\\r\\n\",\r\n"
+    "          sizeof(\"hello, world\\r\\n\") - 1);\r\n"
+    "    write(1, \"written by arkc running on the STM32H743 itself\\r\\n\",\r\n"
+    "          sizeof(\"written by arkc running on the STM32H743 itself\\r\\n\") - 1);\r\n"
+    "    return 0;\r\n"
+    "}\r\n"
+    "\r\n"
+    "void Reset_Handler(void)\r\n"
+    "{\r\n"
+    "    u32 q[3];\r\n"
+    "\r\n"
+    "    __arkcc_init_globals();\r\n"
+    "    (void)main();\r\n"
+    "    q[0] = 3u; q[1] = 0u; q[2] = 0u;      /* 3 = exit this task */\r\n"
+    "    svc_thread(q);\r\n"
+    "    for (;;) {\r\n"
+    "    }\r\n"
+    "}\r\n";
+
+static const char SRC_HELLO_SCT[] =
+    "; hello.sct -- the app-run window (ARKRTOS_APPRUN_*, see arkrtos_partition.h)\r\n"
+    "; The load-region size sets the initial SP, and app run requires SP to be the\r\n"
+    "; window top (0x24074000).  One exec region on purpose: the loader copies\r\n"
+    "; exactly the file bytes, so every initialised byte must sit inside the 8 KB\r\n"
+    "; code window.  (A .sct with a separate RAM region still compiles, but the RW\r\n"
+    "; data falls outside the load region and never reaches the board.)\r\n"
+    "; --vector-table also requires the RESET selector to come first.\r\n"
+    "LR_IROM1 0x24070000 0x00004000\r\n"
+    "{\r\n"
+    "  ER_IROM1 0x24070000 0x00004000 {\r\n"
+    "   *.o (RESET, +First)\r\n"
+    "   .ANY (+RO)\r\n"
+    "   .ANY (+RW +ZI)\r\n"
+    "  }\r\n"
+    "}\r\n";
+
+/* Write (or overwrite) one demo file.  A leftover file from the last run
+ * would otherwise be appended to, not replaced, so remove it first. */
+static int hello_put(const char *path, const char *text)
+{
+    int32 rc;
+
+    (void)arkrtos_vfs_remove(path);
+    rc = arkrtos_vfs_write_file(path, (const uint8 *)text, (uint32)strlen(text));
+    if (rc != 0)
+    {
+        /* write_file returns 0 on success and never a length: comparing it
+         * with strlen() would report a written file as failed. */
+        ark_shell_printf("hello: cannot write %s (rc=%d)\r\n", path, (int)rc);
+        return -1;
+    }
+    return 0;
+}
+
+static int cmd_hello(int argc, char *argv[])
+{
+    char  *cc_argv[8];
+    int    cc_argc = 0;
+    int    rc;
+    uint32 task = 0u;
+
+    (void)argc;
+    (void)argv;
+
+    ark_shell_printf("\r\n[hello] 1/3 sources -> /tmp/hello.c, /tmp/hello.sct\r\n");
+    if (hello_put("/tmp/hello.c", SRC_HELLO) != 0) {
+        return 1;
+    }
+    if (hello_put("/tmp/hello.sct", SRC_HELLO_SCT) != 0) {
+        return 1;
+    }
+    (void)arkrtos_vfs_remove("/tmp/hello.bin");
+
+    ark_shell_printf("[hello] 2/3 cc: compile + link for the app-run window\r\n");
+    cc_argv[cc_argc++] = "cc";
+    cc_argv[cc_argc++] = "/tmp/hello.c";
+    cc_argv[cc_argc++] = "--scatter";
+    cc_argv[cc_argc++] = "/tmp/hello.sct";
+    cc_argv[cc_argc++] = "--vector-table";
+    cc_argv[cc_argc++] = "-o";
+    cc_argv[cc_argc++] = "/tmp/hello.bin";
+    if (cmd_cc(cc_argc, cc_argv) != 0) {
+        ark_shell_printf("[hello] compile/link failed, nothing was run\r\n");
+        return 1;
+    }
+
+    ark_shell_printf("[hello] 3/3 app run /tmp/hello.bin\r\n");
+    rc = arkrtos_apprun_run_ex("/tmp/hello.bin", &task);
+    if (rc != 0) {
+        const char *name = arkrtos_apprun_error_name(rc);
+        ark_shell_printf("[hello] app run failed, rc=%d%s%s\r\n",
+                         (int)rc, (name != 0) ? " - " : "",
+                         (name != 0) ? name : "");
+        return 1;
+    }
+    ark_shell_printf("[hello] started as task %u; the program prints and exits on its own\r\n",
+                     (unsigned)task);
+    return 0;
+}
+#endif /* ARKRTOS_USE_HELLO */
+
 int arkc_shell_register(int idx)
 {
     if ((idx < 0) || ((idx + 1) > ARK_SHELL_MAX_COMMANDS)) {
@@ -1042,6 +1253,12 @@ int arkc_shell_register(int idx)
      * "cc file.c" and reject every option as "too many arguments".  The
      * real limit is the shell's own argv array; cmd_cc reports what it
      * cannot honour. */
+#if (ARKRTOS_USE_HELLO == 1)
+    if ((idx + 1) > ARK_SHELL_MAX_COMMANDS) {
+        platform_uart_send_string("shell: no room for the hello command\r\n");
+        return idx;
+    }
+#endif
     g_cmd_table[idx++] = ARK_SHELL_CMD("cc", cmd_cc,
 #if (CC_LAYOUT_OPTS == 1) && (ARKRTOS_USE_APPPACK == 1)
         "Ark C compiler: cc <file.c> [-o out] [-S] [-c] [-D..] [-I dir]"
@@ -1056,5 +1273,10 @@ int arkc_shell_register(int idx)
         "Ark C compiler: cc <file.c> [-o out] [-S] [-c] [-D..] [-I dir]",
 #endif
         ARK_SHELL_MAX_ARGS);
+#if (ARKRTOS_USE_HELLO == 1)
+    g_cmd_table[idx++] = ARK_SHELL_CMD("hello", cmd_hello,
+        "hello: compile+link+run the POSIX hello world on this chip",
+        ARK_SHELL_MAX_ARGS);
+#endif
     return idx;
 }

@@ -96,6 +96,69 @@ static int type_rank(Type *t) {
  *      - if the higher-rank type can represent every value of the lower one
  *        (higher unsigned, or higher signed but strictly wider), take it;
  *      - otherwise take the unsigned version of the higher-rank type. */
+#if ARKCC_FEATURE_FCONST_FOLD
+/* 浮点常量表达式求值。
+ *
+ * 为什么单独一个函数：eval_const_expr 的出口是 long long，float/double 常量
+ * 放不进去，于是 `double g = 1.0/3.0*3.0;` 求值失败，全局变量被留成 0——
+ * 编译不报错，运行结果恒为 0。这不是优化问题，而是 C99 6.6「初始化器必须是
+ * 常量表达式」这条要求没有做到。
+ *
+ * 规则：
+ *   - 常量（含整型常量）一律按 double 参与运算，等价于常用算术转换的结果；
+ *   - 结果类型是 float 时按 float 精度舍入一次（与目标机单精度运算一致）；
+ *   - 除零不折叠：那是 UB，折叠等于凭空发明一个值。
+ */
+int eval_const_fexpr(AstNode *node, double *out) {
+    double a = 0.0, b = 0.0, r = 0.0;
+    if (!node || !out) return 0;
+    switch (node->kind) {
+    case AST_NUM:
+        if (node->type && (node->type->kind == TYPE_FLOAT || node->type->kind == TYPE_DOUBLE)) {
+            *out = node->fval;
+        } else {
+            *out = (double)node->u.num_val;
+        }
+        return 1;
+    case AST_CAST:
+        if (!node->type) return 0;
+        if (!eval_const_fexpr(node->u.unary.operand, &a)) return 0;
+        if (node->type->kind == TYPE_FLOAT)  { *out = (double)(float)a; return 1; }
+        if (node->type->kind == TYPE_DOUBLE) { *out = a; return 1; }
+        if (type_is_integer(node->type)) {
+            /* (int)2.9 = 2；先截断再转回 double，保持与有符号整型一致 */
+            *out = (double)(long long)a;
+            return 1;
+        }
+        return 0;
+    case AST_UNARY:
+        if (!eval_const_fexpr(node->u.unary.operand, &a)) return 0;
+        if (node->u.unary.op == TOK_MINUS) { *out = -a; return 1; }
+        if (node->u.unary.op == TOK_PLUS)  { *out =  a; return 1; }
+        return 0;
+    case AST_BINARY:
+        if (!eval_const_fexpr(node->u.binary.left, &a)) return 0;
+        if (!eval_const_fexpr(node->u.binary.right, &b)) return 0;
+        switch (node->u.binary.op) {
+        case TOK_PLUS:  r = a + b; break;
+        case TOK_MINUS: r = a - b; break;
+        case TOK_MUL:   r = a * b; break;
+        case TOK_DIV:
+            if (b == 0.0) return 0;   /* 除零是 UB，不折叠 */
+            r = a / b;
+            break;
+        default:
+            return 0;
+        }
+        if (node->type && node->type->kind == TYPE_FLOAT) r = (double)(float)r;
+        *out = r;
+        return 1;
+    default:
+        return 0;
+    }
+}
+#endif /* ARKCC_FEATURE_FCONST_FOLD */
+
 Type *usual_arith_conv(Type *lt, Type *rt) {
     /* complex wins over every real type; _Complex maps to _Complex double */
     if (lt && lt->kind == TYPE_COMPLEX) return type_complex(type_double());
@@ -172,8 +235,10 @@ Type *usual_arith_conv(Type *lt, Type *rt) {
  * - float <-> int:   always needs a cast (IR_I2F / IR_F2I)
  * - int(32b) <-> ll(64b): needs a cast (widen / narrow stack slots)
  * - same-size int <-> int: no-op (signedness change is represented in type only)
- * - float <-> double:  not handled yet (irgen lacks float<->double promotion);
- *   skip cast so current float arithmetic keeps working.
+ * - float <-> double:  needs one conversion instruction (VCVT or __aeabi_f2d/
+ *   d2f). Before ARKCC_FEATURE_CAST_F64F32 both precisions were treated as the
+ *   same representation, so `double d = f;` kept a 4-byte value on the stack
+ *   where 8 bytes were expected.
  * - non-arithmetic types: no-op (pointer/struct/etc. casts are address passes) */
 static int cast_changes_repr(Type *src, Type *dst) {
     int src_float, dst_float;
@@ -183,7 +248,13 @@ static int cast_changes_repr(Type *src, Type *dst) {
     dst_float = (dst->kind == TYPE_FLOAT || dst->kind == TYPE_DOUBLE);
     if (src_float && !dst_float) return 1;        /* float -> int */
     if (!src_float && dst_float) return 1;        /* int -> float */
+#if ARKCC_FEATURE_CAST_F64F32
+    /* float 与 double 的机器表示不同（4 字节 vs 8 字节），必须插一条转换。
+     * 同类型同精度仍然是空操作。 */
+    if (src_float && dst_float) return (src->kind != dst->kind);
+#else
     if (src_float && dst_float) return 0;          /* float <-> double: skip */
+#endif
     /* both are integer types: cast only if size differs */
     return (type_size(src) != type_size(dst));
 }
@@ -465,6 +536,13 @@ static void sema_decl(AstNode *node) {
 static void sema_stmt(AstNode *node) {
     if (!node) return;
     switch (node->kind) {
+        case AST_FUNC_DECL:
+            /* Block-scope prototype (C99 6.2.2p5).  It registers the return
+             * type and the parameter types and emits nothing, so the
+             * statements after it type-check exactly as if the prototype had
+             * been written at file scope. */
+            sema_func(node);
+            break;
         case AST_BLOCK: {
             int i;
             /* Declarations inside the block live in their own scope. */

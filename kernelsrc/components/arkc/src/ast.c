@@ -115,6 +115,14 @@ AstNode *ast_func_def(char *name, Type *ret_type, AstNode **params, int param_co
     n->u.func.is_external = 0;
     n->u.func.is_static = 0;
     n->u.func.is_variadic = 0;
+    /* Negative sentinels per include/ast.h.  The pool is zero-filled, and 0
+     * is a *valid* __smc/__global_reg number: a constructor that leaves these
+     * alone silently claims "this is SMC #0" / "lives in r0".  Every caller in
+     * parser.c overwrites them, but the block-scope prototype added for
+     * C99 6.2.2p5 did not, and src/compiler.c's "extern int f(void);"
+     * consequently compiled into SMC #0. */
+    n->u.func.smc_num = -1;
+    n->u.func.global_reg = -1;
     return n;
 }
 
