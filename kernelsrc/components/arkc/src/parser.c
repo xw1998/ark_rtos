@@ -2029,7 +2029,6 @@ static AstNode *parse_top_decl(Parser *p) {
         if (lexer_peek(p->lex).kind == TOK_LPAREN) {
             AstNode **params = 0;
             int param_count = 0;
-            int param_capacity = 0;
             int is_variadic = 0;
             Type *ret_type = t;
             AstNode *body = 0;
