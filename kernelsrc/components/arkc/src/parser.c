@@ -1351,9 +1351,16 @@ static int expr_mentions_float(AstNode *n) {
 
 /* declarator: handle * modifier, array dimensions, function params; return final type, write name to out_name.
  *
- * Simplified: does not support parenthesized declarators like (*fn_ptr)(int), only linear "**name[...][...]".
- * But recognize parenthesized function pointer syntax to skip it.
+ * Parenthesized declarators are supported for the one shape that matters in
+ * practice: `( * name ) ( params )`, i.e. a pointer to function.  Its parameter
+ * list is parsed for real and kept on the pointer type (Type::params), because
+ * a call through the pointer needs the parameter widths to materialise an
+ * argument that is wider than one IR word.  Nested/returning-function-pointer
+ * shapes such as `int (*pick(int))(int)` are still not parsed.
  */
+static void parse_param_list(Parser *p, AstNode ***out_params, int *out_count,
+                             int *out_variadic, int line);
+
 static Type *parse_declarator(Parser *p, Type *base, char **out_name) {
     Type *t = base;
     p->name_line = 0;
@@ -1386,23 +1393,35 @@ static Type *parse_declarator(Parser *p, Type *base, char **out_name) {
             lexer_advance(p->lex);
         }
         lexer_expect(p->lex, TOK_RPAREN);
-        /* Parameter list (content ignored) */
+        /* Parameter list.  It used to be skipped as balanced tokens, which threw
+         * the prototypes away: every function-pointer call then had unknown
+         * parameter widths, so a 16-byte _Complex (or a >8-byte struct)
+         * argument could not be materialised and was refused instead.  The type
+         * itself stays "pointer whose base is the return type" -- that is what
+         * `*fp` and the call lowering expect -- so the parameter types are kept
+         * on the pointer type, where irgen looks for them. */
+        t = type_pointer(t);
+        t->is_func_ptr = 1;
         if (lexer_peek(p->lex).kind == TOK_LPAREN) {
-            int depth = 0;
+            AstNode **fparams = 0;
+            int fpc = 0, fva = 0, fi;
             lexer_advance(p->lex);
-            depth = 1;
-            while (depth > 0 && lexer_peek(p->lex).kind != TOK_EOF) {
-                if (lexer_peek(p->lex).kind == TOK_LPAREN) depth++;
-                else if (lexer_peek(p->lex).kind == TOK_RPAREN) depth--;
-                if (depth > 0) lexer_advance(p->lex);
+            parse_param_list(p, &fparams, &fpc, &fva, p->name_line);
+            lexer_expect(p->lex, TOK_RPAREN);
+            t->is_variadic = fva;
+            if (fpc > 0 && fparams) {
+                Type **ftypes = (Type **)mem_pool_alloc(fpc * (int)sizeof(Type *));
+                for (fi = 0; fi < fpc; fi++)
+                    ftypes[fi] = !fparams[fi] ? 0
+                                 : (fparams[fi]->type ? fparams[fi]->type
+                                                       : fparams[fi]->u.var.var_type);
+                t->params = ftypes;
+                t->param_count = fpc;
             }
-            if (lexer_peek(p->lex).kind == TOK_RPAREN) lexer_advance(p->lex);
         }
         /* Treat as function pointer. The pointee is a function, not a data
          * object: mark it so `*fp` dereferences to the designator itself
          * instead of loading the function's first bytes as a value. */
-        t = type_pointer(t);
-        t->is_func_ptr = 1;
         return t;
     }
     if (lexer_peek(p->lex).kind == TOK_IDENT) {

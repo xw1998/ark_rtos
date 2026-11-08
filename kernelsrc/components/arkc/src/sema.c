@@ -157,6 +157,81 @@ int eval_const_fexpr(AstNode *node, double *out) {
         return 0;
     }
 }
+/* _Complex 常量表达式（C99 6.6）：编译期算出实部与虚部。
+ *
+ * 只为文件作用域的 _Complex 初始化器服务。没有它，`double _Complex g =
+ * 3.0 + 4.0i;` 走的是"把表达式序列化成文本"的分支，ARM 后端解析不了就报错
+ * （尚可接受）；而 `double _Complex g = 3.0;` 会被当成 float 只写一个 32 位
+ * 字，g 的实部是 3.0f 的位型被当成 double 的高半部分，虚部是隔壁对象 —— 静默
+ * 错值。这里把两边都折叠出来。
+ *
+ * 复数乘除用教科书公式；除零不折叠（UB，不发明结果）。 */
+int eval_const_cexpr(AstNode *node, double *re, double *im) {
+    double ar = 0.0, ai = 0.0, br = 0.0, bi = 0.0;
+    double ab;
+    if (!node || !re || !im) return 0;
+    switch (node->kind) {
+    case AST_NUM:
+        if (node->type && node->type->kind == TYPE_COMPLEX) {
+            /* 虚数字面量（4.0i / 1.0fi）：fval 是虚部 */
+            *re = 0.0;
+            *im = node->fval;
+            return 1;
+        }
+        if (!eval_const_fexpr(node, re)) return 0;
+        *im = 0.0;
+        return 1;
+    case AST_CAST:
+        if (!node->type) return 0;
+        if (node->type->kind == TYPE_COMPLEX) {
+            if (!eval_const_cexpr(node->u.unary.operand, &ar, &ai)) return 0;
+            if (node->type->base && node->type->base->kind == TYPE_FLOAT) {
+                ar = (double)(float)ar;
+                ai = (double)(float)ai;
+            }
+            *re = ar; *im = ai;
+            return 1;
+        }
+        if (!eval_const_fexpr(node, &ar)) return 0;
+        *re = ar; *im = 0.0;
+        return 1;
+    case AST_UNARY:
+        if (!eval_const_cexpr(node->u.unary.operand, &ar, &ai)) return 0;
+        if (node->u.unary.op == TOK_MINUS) { *re = -ar; *im = -ai; return 1; }
+        if (node->u.unary.op == TOK_PLUS)  { *re =  ar; *im =  ai; return 1; }
+        return 0;
+    case AST_BINARY:
+        if (!eval_const_cexpr(node->u.binary.left,  &ar, &ai)) return 0;
+        if (!eval_const_cexpr(node->u.binary.right, &br, &bi)) return 0;
+        switch (node->u.binary.op) {
+        case TOK_PLUS:
+            *re = ar + br; *im = ai + bi; break;
+        case TOK_MINUS:
+            *re = ar - br; *im = ai - bi; break;
+        case TOK_MUL:
+            *re = ar * br - ai * bi;
+            *im = ar * bi + ai * br;
+            break;
+        case TOK_DIV:
+            ab = br * br + bi * bi;
+            if (ab == 0.0) return 0;          /* 除零是 UB，不折叠 */
+            *re = (ar * br + ai * bi) / ab;
+            *im = (ai * br - ar * bi) / ab;
+            break;
+        default:
+            return 0;
+        }
+        if (node->type && node->type->kind == TYPE_COMPLEX &&
+            node->type->base && node->type->base->kind == TYPE_FLOAT) {
+            *re = (double)(float)*re;
+            *im = (double)(float)*im;
+        }
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 
 /* 浮点常量 -> 整数类型，按 C99 6.3.1.4p1 向零截断。
  *

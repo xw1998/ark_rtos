@@ -13,6 +13,36 @@
  * not eliminate, fold, or combine these accesses. */
 #define IR_AUX_VOLATILE 0x10000
 
+/* Bit 0x800 in aux marks C99 _Complex ("this operand is a complex value").
+ * It is set on IR_PUSH_FLOAT, IR_F2I, IR_I2F, IR_UNARY, IR_FADD/IR_FSUB/
+ * IR_FMUL/IR_FDIV and IR_FCMP.  It used to be spelled with 0x400, which those
+ * very instructions already use for "unsigned operand": `(double)(unsigned)v`
+ * and `creal(z)` were literally the same instruction, so the C backend answered
+ * every unsigned<->float conversion with creal() and the x86 backend narrowed
+ * the imaginary part instead of converting -- silent wrong answers in both.
+ * The complex bits are now disjoint from the arithmetic ones.  The operator
+ * itself stays in the low bits (every TokenKind is < 0x100), and 0x100 is the
+ * second flag, so the encoding is:
+ *
+ *   IR_PUSH_FLOAT  aux = 0x800 | 0x200               val = complex pool index
+ *   IR_F2I         aux = 0x800                       creal  (complex -> double)
+ *                  aux = 0x800 | 0x100               cimag  (complex -> double)
+ *                  aux = 0x800 | 0x200               cabs   (needs libm)
+ *                  aux = 0x800 | 0x300               carg   (needs libm)
+ *   IR_I2F         aux = 0x800                       float  -> complex
+ *                  aux = 0x800 | 0x200               double -> complex
+ *                  aux = 0x800 | 0x100               int    -> complex
+ *                        (| 0x400 when the int is unsigned)
+ *   IR_UNARY       aux = TOK_BNOT | 0x800            conj
+ *   IR_FADD        aux = TOK_PLUS | 0x900            cexp   (needs libm)
+ *   IR_FADD/FSUB/FMUL/FDIV  aux = TOK_xxx | 0x800    complex arithmetic
+ *   IR_FCMP        aux = TOK_EQ|0x800 or TOK_NE|0x800
+ *
+ * A complex value is four stack words on the machine backends (re_lo, re_hi,
+ * im_lo, im_hi) and one 8-byte slot in the C backend.
+ */
+#define IR_AUX_COMPLEX 0x800
+
 typedef struct IrInst {
     IrOp  op;
     long long val;   /* immediate / offset / label id */
@@ -95,6 +125,13 @@ typedef struct IrGlobal {
     /* Floating point initializer */
     double  init_float;
     int     is_float;
+    /* _Complex initialiser: init_float carries the real part and
+     * init_float_im the imaginary part; is_float is set as well, so every
+     * backend that only understands a real scalar must test init_is_complex
+     * first or it will store half a value with the wrong width (that is how
+     * `double _Complex g = 3.0;` used to come out as (float)3.0 in one word). */
+    int     init_is_complex;
+    double  init_float_im;
     /* Target section name from __attribute__((section(...))) */
     char   *section;
     /* Declared const: placed in .rodata */

@@ -207,3 +207,39 @@ for '<sym>' cannot be applied; no image was written
 | `kernelsrc/include/arkrtos_loader.h` | `ARKRTOS_LOADER_ERR_x` 的唯一定义处 |
 | `kernelsrc/include/arkrtos_apprun.h` / `arkrtos_mini.h` / `arkrtos_apppack.h` | 三条路径各自的独有码 |
 | `example/stm32h743/kernel/ARKRTOS_TEST/GCC/Makefile` | 全部开关（`USE_ARKC` / `USE_APPRUN` / `USE_APPPACK` / `USE_MINI_VFS` / `MINI_PRIORITY`） |
+
+**2026-11-08 追加（上游 `d412208` + `2f3da38`：ARM 的 16 字节 `_Complex` 返回值改走 `r0-r3`、
+RV32I 的 `_Complex float` 返回丢值修复、`(*fp)(params)` 保留参数表）**：这一轮的板端体积
+**真的变了**，不是上一轮那种"编边界外、一位没动"：
+
+| 项 | 旧 | 新 | 差 |
+|---|---|---|---|
+| `text` | 412 972 | 428 532 | **+15 560** |
+| `data` | 2 256 | 2 260 | +4 |
+| `bss` | 463 532 | 463 528 | −4 |
+| FLASH 占用 | 79.20% | **82.17%** | +2.97 pp |
+| RAM / CCMRAM / NOINIT | 98.22% / 17.33% / 97.66% | 同左 | 0 |
+
+逐目标文件（同一套 `CFLAGS_ARKC`，`arm-none-eabi-size` 的 `text` 列）：
+
+| 目标文件 | 旧 | 新 | 差 |
+|---|---|---|---|
+| `backend_arm.o` | 78 572 | 90 110 | +11 538 |
+| `irgen.o` | 24 386 | 27 797 | +3 411 |
+| `sema.o` | 5 495 | 6 063 | +568 |
+| `parser.o` | 22 051 | 22 075 | +24 |
+| `ir.o` | 1 706 | 1 710 | +4 |
+| `compiler.o` | 18 826 | 18 834 | +8 |
+
+原因：`ARKCC_FEATURE_COMPLEX` 目前只闸住 parser 的两处语法，机器后端的复数四字值通路
+（16 字节 `IR_STORE`/`IR_LOAD`、取实部/虚部、`float ↔ double` 加宽、返回值寄存器展开）
+**无条件编入**；RV32I 后端整体不在 STM32 profile 里，因此 RV 侧的新代码一行都没进固件。
+`bss` 少 4 字节是符号布局变化，不是删了对象；`data` 多的 4 字节是新增的复数初值常量。
+
+判定：FLASH 82.17%、RAM/CCMRAM 未变，仍在预算内，**接受**；按档裁剪（让板端 profile
+关掉复数支持以回收这 15.5 KB）需要给 irgen 与四个后端补闸门，登记为欠账而不是在这里
+声称"可关"。
+
+可复现判据：`git stash push -- kernelsrc/components/arkc` → 重建得 `text 412972`；
+`git stash pop` → 重建得 `text 428532`。两次构建除 arkc 源码外的一切（CFLAGS、链接脚本、
+其余目标文件）完全相同。

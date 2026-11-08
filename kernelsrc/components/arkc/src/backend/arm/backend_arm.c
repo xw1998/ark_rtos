@@ -12,6 +12,9 @@
  *     block and the va region becomes one contiguous image; the epilogue then
  *     has to add those 16 bytes back as well.
  */
+#include <stdio.h>   /* snprintf: building "LDR r0, [sp, #N]" style lines */
+#include <string.h>
+
 #include "backend.h"
 #include "codegen.h"
 #include "memory.h"
@@ -71,6 +74,170 @@ static void emit_mov_imm(AsmBuffer *b, int rd, int imm) {
 static void emit_push_r0(AsmBuffer *b) { emit_line(b, "PUSH {r0}"); }
 static void emit_pop_r0(AsmBuffer *b)  { emit_line(b, "POP {r0}");  }
 static void emit_pop_r1(AsmBuffer *b)  { emit_line(b, "POP {r1}");  }
+
+/* --- C99 _Complex double on the expression stack ---------------------------
+ * A complex value occupies four stack words, laid out exactly like the
+ * 16-byte IR_STORE case writes the object: for a value X
+ *     X_real_low = sp+4    X_real_high = sp+0    (real part on top)
+ *     X_imag_low = sp+12   X_imag_high = sp+8
+ * which is what pushing imag-low, imag-high, real-low, real-high produces.
+ * Two operands therefore stack as B at sp+0..12 above A at sp+16..28.
+ *
+ * Every routine below only touches r0-r3 and sp, so nothing has to be saved
+ * and the emitted sequence is the same with and without --reg-top.
+ */
+static void arm_push_reg(AsmBuffer *b, int reg) {
+    char s[16];
+    snprintf(s, sizeof s, "PUSH {r%d}", reg);
+    emit_line(b, s);
+}
+static void arm_ldr_sp(AsmBuffer *b, int reg, int off) {
+    char s[40];
+    if (off) snprintf(s, sizeof s, "LDR r%d, [sp, #%d]", reg, off);
+    else     snprintf(s, sizeof s, "LDR r%d, [sp]", reg);
+    emit_line(b, s);
+}
+static void arm_str_sp(AsmBuffer *b, int reg, int off) {
+    char s[40];
+    if (off) snprintf(s, sizeof s, "STR r%d, [sp, #%d]", reg, off);
+    else     snprintf(s, sizeof s, "STR r%d, [sp]", reg);
+    emit_line(b, s);
+}
+static void arm_word_hex(AsmBuffer *b, unsigned int w) {
+    char s[32];
+    snprintf(s, sizeof s, "    .word 0x%08x", w);
+    emit_line(b, s);
+}
+/* r0:r1 = double at [sp+alo]/[sp+ahi], r2:r3 = double at [sp+blo]/[sp+bhi],
+ * then call helper (AAPCS soft-float: first double in r0:r1, second in r2:r3,
+ * low word first). */
+static void arm_dcall(AsmBuffer *b, const char *helper,
+                      int alo, int ahi, int blo, int bhi) {
+    char s[32];
+    arm_ldr_sp(b, 0, alo);
+    arm_ldr_sp(b, 1, ahi);
+    arm_ldr_sp(b, 2, blo);
+    arm_ldr_sp(b, 3, bhi);
+    snprintf(s, sizeof s, "BL %s", helper);
+    emit_line(b, s);
+}
+static void arm_call1(AsmBuffer *b, const char *helper) {
+    char s[32];
+    snprintf(s, sizeof s, "BL %s", helper);
+    emit_line(b, s);
+}
+/* r0:r1 = real part, r2:r3 = imaginary part -> push as a complex value. */
+static void arm_cplx_push4(AsmBuffer *b) {
+    arm_push_reg(b, 2);
+    arm_push_reg(b, 3);
+    arm_push_reg(b, 0);
+    arm_push_reg(b, 1);
+}
+/* complex + and -: componentwise, no interaction between the parts. */
+static void arm_cplx_addsub(AsmBuffer *b, const char *helper) {
+    /* Imaginary part first; its result is parked in an 8-byte scratch slot
+     * because the real part's loads and the helper's own use of r0-r3 would
+     * otherwise destroy it. After SUB sp,#8 the input block (and therefore
+     * every offset below) has moved up by exactly 8 bytes. */
+    arm_dcall(b, helper, 28, 24, 12, 8);          /* A_im / B_im */
+    emit_line(b, "SUB sp, sp, #8");
+    arm_str_sp(b, 0, 0);
+    arm_str_sp(b, 1, 4);
+    arm_dcall(b, helper, 28, 24, 12, 8);          /* A_re / B_re */
+    arm_ldr_sp(b, 2, 0);
+    arm_ldr_sp(b, 3, 4);
+    emit_add_sp(b, 40);                            /* scratch + both operands */
+    arm_cplx_push4(b);
+}
+/* (a+bi)(c+di) = (ac-bd) + (ad+bc)i */
+static void arm_cplx_mul(AsmBuffer *b) {
+    emit_line(b, "SUB sp, sp, #32");               /* operands now at sp+32 */
+    arm_dcall(b, "__aeabi_dmul", 52, 48, 36, 32);   /* ac */
+    arm_str_sp(b, 0, 0);
+    arm_str_sp(b, 1, 4);
+    arm_dcall(b, "__aeabi_dmul", 60, 56, 44, 40);   /* bd */
+    emit_line(b, "MOV r2, r0");
+    emit_line(b, "MOV r3, r1");
+    arm_ldr_sp(b, 0, 0);
+    arm_ldr_sp(b, 1, 4);
+    arm_call1(b, "__aeabi_dsub");                   /* ac - bd = real */
+    arm_str_sp(b, 0, 16);
+    arm_str_sp(b, 1, 20);
+    arm_dcall(b, "__aeabi_dmul", 52, 48, 44, 40);   /* ad */
+    arm_str_sp(b, 0, 0);
+    arm_str_sp(b, 1, 4);
+    arm_dcall(b, "__aeabi_dmul", 60, 56, 36, 32);   /* bc */
+    emit_line(b, "MOV r2, r0");
+    emit_line(b, "MOV r3, r1");
+    arm_ldr_sp(b, 0, 0);
+    arm_ldr_sp(b, 1, 4);
+    arm_call1(b, "__aeabi_dadd");                   /* ad + bc = imag */
+    emit_line(b, "MOV r2, r0");
+    emit_line(b, "MOV r3, r1");
+    arm_ldr_sp(b, 0, 16);
+    arm_ldr_sp(b, 1, 20);
+    emit_add_sp(b, 64);                             /* scratch + both operands */
+    arm_cplx_push4(b);
+}
+/* (a+bi)/(c+di) = ((ac+bd) + (bc-ad)i) / (c*c + d*d) */
+static void arm_cplx_div(AsmBuffer *b) {
+    emit_line(b, "SUB sp, sp, #40");               /* operands now at sp+40 */
+    arm_dcall(b, "__aeabi_dmul", 44, 40, 44, 40);   /* c*c        -> S0 */
+    arm_str_sp(b, 0, 0);
+    arm_str_sp(b, 1, 4);
+    arm_dcall(b, "__aeabi_dmul", 52, 48, 52, 48);   /* d*d        -> S1 */
+    arm_str_sp(b, 0, 8);
+    arm_str_sp(b, 1, 12);
+    arm_dcall(b, "__aeabi_dadd", 0, 4, 8, 12);      /* den        -> S2 */
+    arm_str_sp(b, 0, 16);
+    arm_str_sp(b, 1, 20);
+    arm_dcall(b, "__aeabi_dmul", 60, 56, 44, 40);   /* ac         -> S0 */
+    arm_str_sp(b, 0, 0);
+    arm_str_sp(b, 1, 4);
+    arm_dcall(b, "__aeabi_dmul", 68, 64, 52, 48);   /* bd         -> S1 */
+    arm_str_sp(b, 0, 8);
+    arm_str_sp(b, 1, 12);
+    arm_dcall(b, "__aeabi_dadd", 0, 4, 8, 12);      /* ac+bd      -> S3 */
+    arm_str_sp(b, 0, 24);
+    arm_str_sp(b, 1, 28);
+    arm_dcall(b, "__aeabi_dmul", 68, 64, 44, 40);   /* bc         -> S1 */
+    arm_str_sp(b, 0, 8);
+    arm_str_sp(b, 1, 12);
+    arm_dcall(b, "__aeabi_dmul", 60, 56, 52, 48);   /* ad         -> S0 */
+    arm_str_sp(b, 0, 0);
+    arm_str_sp(b, 1, 4);
+    arm_dcall(b, "__aeabi_dsub", 8, 12, 0, 4);      /* bc-ad      -> S4 */
+    arm_str_sp(b, 0, 32);
+    arm_str_sp(b, 1, 36);
+    arm_dcall(b, "__aeabi_ddiv", 24, 28, 16, 20);   /* real */
+    arm_str_sp(b, 0, 24);
+    arm_str_sp(b, 1, 28);
+    arm_dcall(b, "__aeabi_ddiv", 32, 36, 16, 20);   /* imag */
+    emit_line(b, "MOV r2, r0");
+    emit_line(b, "MOV r3, r1");
+    arm_ldr_sp(b, 0, 24);
+    arm_ldr_sp(b, 1, 28);
+    emit_add_sp(b, 72);                             /* scratch + both operands */
+    arm_cplx_push4(b);
+}
+/* == / != on two complex operands (C99 6.5.9: nothing else is defined). */
+static void arm_cplx_cmp(AsmBuffer *b, int want_ne) {
+    /* Two complex values are equal when both parts are equal.  libgcc has no
+     * __aeabi_dcmpne (checked with nm on the no-FPU v7-m libgcc.a: only
+     * dcmpeq/dcmplt/dcmple/dcmpgt/dcmpge/dcmpun exist), so `!=` is built as
+     * the negation of `==` instead of naming a helper that does not link.
+     * It is also the NaN-correct form: dcmpeq answers 0 for an unordered
+     * pair, so `z != z` is 1 for a complex NaN, as IEEE requires. */
+    emit_line(b, "SUB sp, sp, #8");                /* operands now at sp+8 */
+    arm_dcall(b, "__aeabi_dcmpeq", 12, 8, 28, 24);
+    arm_str_sp(b, 0, 0);
+    arm_dcall(b, "__aeabi_dcmpeq", 20, 16, 36, 32);
+    arm_ldr_sp(b, 1, 0);
+    emit_line(b, "ANDS r0, r0, r1");
+    if (want_ne) emit_line(b, "EORS r0, r0, #1");
+    emit_add_sp(b, 40);                             /* scratch + both operands */
+    arm_push_reg(b, 0);
+}
 
 /* sret support: check if a function name is in the sret set */
 static int sret_lookup(char **names, int *sizes, int count, const char *name) {
@@ -1049,6 +1216,41 @@ int g_arm_vt_reserve = 0;
  * conservative path. */
 int g_arm_fpu_dp = 0;
 
+/* _Complex float object access: the expression stack carries complex values
+ * as two doubles (four words), while a _Complex float object is 8 bytes of two
+ * floats.  These two helpers convert one half in place, and deliberately use
+ * the same instruction sequence (and the same hardware-FPU condition) as
+ * IR_F2F, so a build with a single-precision FPU still gets the software
+ * __aeabi_* helper instead of a VCVT the core would fault on. */
+static void arm_cvt_f2d(AsmBuffer *buf) {
+    /* in: r0 = float bits;  out: r0 = low word, r1 = high word */
+#if ARKCC_FEATURE_FPU_HW
+    if (g_config.enable_fpu_hw && g_arm_fpu_dp) {
+        emit_line(buf, "VMOV s0, r0");
+        emit_line(buf, "VCVT.F64.F32 d0, s0");
+        emit_line(buf, "VMOV r0, s0");
+        emit_line(buf, "VMOV r1, s1");
+        return;
+    }
+#endif
+    emit_line(buf, "BL __aeabi_f2d");
+}
+
+static void arm_cvt_d2f(AsmBuffer *buf) {
+    /* in: r0 = low word, r1 = high word;  out: r0 = float bits */
+#if ARKCC_FEATURE_FPU_HW
+    if (g_config.enable_fpu_hw && g_arm_fpu_dp) {
+        emit_line(buf, "VMOV s0, r0");
+        emit_line(buf, "VMOV s1, r1");
+        emit_line(buf, "VCVT.F32.F64 s0, d0");
+        emit_line(buf, "VMOV r0, s0");
+        return;
+    }
+#endif
+    emit_line(buf, "BL __aeabi_d2f");
+}
+
+
 /* Cortex-M vector table: 256 entries, 1 KB.  Declared here (not next to
  * arm_link) because both the assembler -- which reserves this many bytes at the
  * front of the image -- and the linker need it. */
@@ -1222,7 +1424,7 @@ static int ark_top_try(AsmBuffer *b, IrInst *I, int *top, int *ret_in_r0) {
          * the drain left the word in r0 and every later pop read one slot too
          * high (measured: `long long b = 200;` under --reg-top stored the stale
          * r0 as the low half and 200 as the high half). */
-        if (width == 8) { ark_top_drain(b, top); return 0; }
+        if (width >= 8) { ark_top_drain(b, top); return 0; }
         if (I->aux & IR_AUX_VOLATILE) { ark_top_drain(b, top); return 0; }
         ark_top_drain(b, top);
         if (width == 1)
@@ -1289,6 +1491,7 @@ static int ark_top_try(AsmBuffer *b, IrInst *I, int *top, int *ret_in_r0) {
          * float/double form is not a one-word integer either, so the one-word
          * model does not apply to either: fall back with the stack drained. */
         if (I->val == 1 || I->val == 2) { ark_top_drain(b, top); return 0; }
+        if (I->aux & IR_AUX_COMPLEX) { ark_top_drain(b, top); return 0; }
         if (!*top) emit_pop_r0(b);
         emit_unary(b, I->aux);
         *top = 1;
@@ -2043,6 +2246,26 @@ static char *codegen_arm(IrProgram *prog) {
         asmbuf_puts(&buf, ".text\n\n");
     }
 
+    /* Complex constant pool: real low, real high, imag low, imag high --
+     * the same 16-byte layout IR_STORE writes to a frame slot. */
+    if (prog->complex_count > 0) {
+        int i;
+        asmbuf_puts(&buf, ".section .rodata\n");
+        for (i = 0; i < prog->complex_count; i++) {
+            union { double d; unsigned int u[2]; } ru, iu;
+            ru.d = prog->complexes[i].re;
+            iu.d = prog->complexes[i].im;
+            asmbuf_puts(&buf, ".L_cplx_");
+            asmbuf_int(&buf, i);
+            asmbuf_puts(&buf, ":\n");
+            arm_word_hex(&buf, ru.u[0]);
+            arm_word_hex(&buf, ru.u[1]);
+            arm_word_hex(&buf, iu.u[0]);
+            arm_word_hex(&buf, iu.u[1]);
+        }
+        asmbuf_puts(&buf, ".text\n\n");
+    }
+
     /* Build sret function name/size set: struct/union returns > 8 bytes
      * use AAPCS sret convention (hidden pointer in r0). */
     char *sret_names[ARK_MAX_SRET_FUNCS];
@@ -2054,6 +2277,12 @@ static char *codegen_arm(IrProgram *prog) {
         for (sfi = 0; sfi < prog->func_count; sfi++) {
             IrFunc *sf = prog->funcs[sfi];
             Type *srt = sf->ret_type;
+            /* Only structs and unions use the hidden pointer here.  A
+             * _Complex object never does: 8 bytes go in r0:r1 and 16 bytes go
+             * in r0-r3, which is what the soft-float AAPCS says for a
+             * composite of two doubles and what GCC emits.  It also means a
+             * complex result needs no caller-owned buffer, so a call through a
+             * declaration or through a function pointer works. */
             if (srt && (srt->kind == TYPE_STRUCT || srt->kind == TYPE_UNION)) {
                 int sz = type_size(srt);
                 if (sz > 8) {
@@ -2248,8 +2477,13 @@ static char *codegen_arm(IrProgram *prog) {
                            ? f->param_types[pj] : 0;
                 int sz = pt ? type_size(pt) : 4;
                 if (sz <= 0) sz = 4;
-                /* A struct passed by value travels as a pointer word. */
+                /* A struct passed by value travels as a pointer word, and so
+                 * does a four-word _Complex value (irgen materialises it in a
+                 * temporary and passes its address, matching IR_GETARG's
+                 * >8-byte memcpy path). */
                 if (pt && (pt->kind == TYPE_STRUCT || pt->kind == TYPE_UNION) && sz > 8)
+                    sz = 4;
+                if (pt && pt->kind == TYPE_COMPLEX && sz > 8)
                     sz = 4;
                 psz[pj] = sz;
             }
@@ -2536,7 +2770,22 @@ static char *codegen_arm(IrProgram *prog) {
                     int is_volatile = (I->aux & IR_AUX_VOLATILE) != 0;
                     if (is_volatile)
                         emit_line(&buf, "DMB SY");  /* volatile: order prior memory ops */
-                    if (width == 1) {
+                    if (width == 8 && (I->aux & IR_AUX_COMPLEX)) {
+                        /* _Complex float: widen each float half into a double
+                         * pair, imaginary first so the real high word ends on top. */
+                        asmbuf_puts(&buf, "    LDR r0, [r6, #");
+                        asmbuf_int(&buf, I->val + 4);
+                        asmbuf_puts(&buf, "]\n");
+                        arm_cvt_f2d(&buf);
+                        emit_push_r0(&buf);
+                        asmbuf_puts(&buf, "    PUSH {r1}\n");
+                        asmbuf_puts(&buf, "    LDR r0, [r6, #");
+                        asmbuf_int(&buf, I->val);
+                        asmbuf_puts(&buf, "]\n");
+                        arm_cvt_f2d(&buf);
+                        emit_push_r0(&buf);
+                        asmbuf_puts(&buf, "    PUSH {r1}\n");
+                    } else if (width == 1) {
                         asmbuf_puts(&buf, is_unsigned
                             ? "    LDRB r0, [r6, #"
                             : "    LDRSB r0, [r6, #");
@@ -2550,6 +2799,21 @@ static char *codegen_arm(IrProgram *prog) {
                         asmbuf_int(&buf, I->val);
                         asmbuf_puts(&buf, "]\n");
                         emit_push_r0(&buf);
+                    } else if (width >= 16) {
+                        /* _Complex double: four words, same order IR_STORE's
+                         * 16-byte case reads them back. */
+                        asmbuf_puts(&buf, "    LDR r0, [r6, #");
+                        asmbuf_int(&buf, I->val + 8);
+                        asmbuf_puts(&buf, "]\n    PUSH {r0}\n");   /* imag low  */
+                        asmbuf_puts(&buf, "    LDR r0, [r6, #");
+                        asmbuf_int(&buf, I->val + 12);
+                        asmbuf_puts(&buf, "]\n    PUSH {r0}\n");   /* imag high */
+                        asmbuf_puts(&buf, "    LDR r0, [r6, #");
+                        asmbuf_int(&buf, I->val);
+                        asmbuf_puts(&buf, "]\n    PUSH {r0}\n");   /* real low  */
+                        asmbuf_puts(&buf, "    LDR r0, [r6, #");
+                        asmbuf_int(&buf, I->val + 4);
+                        asmbuf_puts(&buf, "]\n    PUSH {r0}\n");   /* real high */
                     } else if (width == 8) {
                         /* #5 FIX: 64-bit local variable read - load low and high words.
                          * Stack model: push low word first (bottom), then high word (top). */
@@ -2587,7 +2851,27 @@ static char *codegen_arm(IrProgram *prog) {
                     }
                     addr = gvar_find(I->name);
                     gsz = gvar_find_size(I->name);
-                    if (gsz >= 8) {
+                    if (gsz == 8 && (I->aux & IR_AUX_COMPLEX)) {
+                        /* _Complex float global: widen both halves.  The address is
+                         * rebuilt after the call because r0/r1 hold the result. */
+                        emit_mov_addr32(&buf, 1, addr, addr_in_own_data(addr));
+                        emit_line(&buf, "LDR r0, [r1, #4]");
+                        arm_cvt_f2d(&buf);
+                        emit_push_r0(&buf);
+                        asmbuf_puts(&buf, "    PUSH {r1}\n");
+                        emit_mov_addr32(&buf, 1, addr, addr_in_own_data(addr));
+                        emit_line(&buf, "LDR r0, [r1, #0]");
+                        arm_cvt_f2d(&buf);
+                        emit_push_r0(&buf);
+                        asmbuf_puts(&buf, "    PUSH {r1}\n");
+                    } else if (gsz >= 16) {
+                        /* _Complex double global: four words, imag first. */
+                        emit_mov_addr32(&buf, 1, addr, addr_in_own_data(addr));
+                        asmbuf_puts(&buf, "    LDR r0, [r1, #8]\n    PUSH {r0}\n");
+                        asmbuf_puts(&buf, "    LDR r0, [r1, #12]\n    PUSH {r0}\n");
+                        asmbuf_puts(&buf, "    LDR r0, [r1, #0]\n    PUSH {r0}\n");
+                        asmbuf_puts(&buf, "    LDR r0, [r1, #4]\n    PUSH {r0}\n");
+                    } else if (gsz >= 8) {
                         /* #6 FIX: 64-bit global read - load low and high words */
                         emit_mov_addr32(&buf, 1, addr, addr_in_own_data(addr));
                         asmbuf_puts(&buf, "    LDR r0, [r1, #0]\n");
@@ -2639,7 +2923,37 @@ static char *codegen_arm(IrProgram *prog) {
                 case IR_STORE_GLOBAL: {
                     unsigned addr = gvar_find(I->name);
                     int gsz = gvar_find_size(I->name);
-                    if (gsz >= 8) {
+                    if (gsz == 8 && (I->aux & IR_AUX_COMPLEX)) {
+                        /* _Complex float global: narrow each double pair back to a float. */
+                        asmbuf_puts(&buf, "    POP {r1}\n");
+                        emit_pop_r0(&buf);
+                        arm_cvt_d2f(&buf);
+                        emit_mov_addr32(&buf, 2, addr, addr_in_own_data(addr));
+                        emit_line(&buf, "STR r0, [r2, #0]");
+                        asmbuf_puts(&buf, "    POP {r1}\n");
+                        emit_pop_r0(&buf);
+                        arm_cvt_d2f(&buf);
+                        emit_mov_addr32(&buf, 2, addr, addr_in_own_data(addr));
+                        emit_line(&buf, "STR r0, [r2, #4]");
+                    } else if (gsz >= 16) {
+                        /* _Complex double global: the value is a dup'd copy of
+                         * four stack words with the real high word on top; the
+                         * object image is re_lo, re_hi, im_lo, im_hi.  The old
+                         * `gsz >= 8` branch popped two of the four words and
+                         * stored them as a single double, so `gz = 1+2i` wrote
+                         * 1 and left the imaginary part at whatever the BSS
+                         * held (measured: (int)(creal*10+cimag) answered 10,
+                         * want 12). */
+                        asmbuf_puts(&buf, "    POP {r1}\n");   /* re_hi */
+                        emit_pop_r0(&buf);                      /* re_lo */
+                        asmbuf_puts(&buf, "    POP {r3}\n");   /* im_hi */
+                        asmbuf_puts(&buf, "    POP {r2}\n");   /* im_lo */
+                        emit_mov_addr32(&buf, 12, addr, addr_in_own_data(addr));
+                        asmbuf_puts(&buf, "    STR r0, [r12, #0]\n");
+                        asmbuf_puts(&buf, "    STR r1, [r12, #4]\n");
+                        asmbuf_puts(&buf, "    STR r2, [r12, #8]\n");
+                        asmbuf_puts(&buf, "    STR r3, [r12, #12]\n");
+                    } else if (gsz >= 8) {
                         /* #6 FIX: 64-bit global store - pop high then low, store both */
                         asmbuf_puts(&buf, "    POP {r1}\n");  /* high word */
                         emit_pop_r0(&buf);                     /* low word */
@@ -2726,12 +3040,29 @@ static char *codegen_arm(IrProgram *prog) {
                      * saved registers on the stack.
                      * N5 FIX: volatile stores emit DMB SY before (release) and
                      * after (full barrier) to enforce memory ordering. */
-                    int sw = I->aux & ~IR_AUX_VOLATILE;
+                    int sw = I->aux & ~(IR_AUX_VOLATILE | IR_AUX_COMPLEX);
+                    /* An 8-byte _Complex float store still has to narrow the
+                     * four double words down to two floats, so the flag is masked
+                     * out of `sw` above and tested separately here. */
+                    int cplx8 = (I->aux & IR_AUX_COMPLEX) && sw == 8;
                     int is_volatile = (I->aux & IR_AUX_VOLATILE) != 0;
                     if (sw == 0) sw = 4;
                     if (is_volatile)
                         emit_line(&buf, "DMB SY");  /* volatile: release barrier */
-                    if (sw == 1) {
+                        if (cplx8) {
+                            asmbuf_puts(&buf, "    POP {r1}\n");
+                            emit_pop_r0(&buf);
+                            arm_cvt_d2f(&buf);
+                            asmbuf_puts(&buf, "    STR r0, [r6, #");
+                            asmbuf_int(&buf, I->val);
+                            asmbuf_puts(&buf, "]\n");
+                            asmbuf_puts(&buf, "    POP {r1}\n");
+                            emit_pop_r0(&buf);
+                            arm_cvt_d2f(&buf);
+                            asmbuf_puts(&buf, "    STR r0, [r6, #");
+                            asmbuf_int(&buf, I->val + 4);
+                            asmbuf_puts(&buf, "]\n");
+                        } else if (sw == 1) {
                         emit_pop_r0(&buf);
                         asmbuf_puts(&buf, "    STRB r0, [r6, #");
                         asmbuf_int(&buf, I->val);
@@ -2785,6 +3116,22 @@ static char *codegen_arm(IrProgram *prog) {
                         emit_line(&buf, "MUL r1, r2");
                     }
                     emit_line(&buf, "ADD r0, r0, r1");
+                    if (es == 8 && (I->aux & IR_AUX_COMPLEX)) {
+                        /* _Complex float element: r0 is the element address.  Keep it
+                         * on the stack across the first conversion and in r2 across the
+                         * second one (r2 is caller-saved but nothing else needs it here). */
+                        asmbuf_puts(&buf, "    PUSH {r0}\n");
+                        emit_line(&buf, "LDR r0, [r0, #4]");
+                        arm_cvt_f2d(&buf);
+                        asmbuf_puts(&buf, "    POP {r2}\n");
+                        emit_push_r0(&buf);
+                        asmbuf_puts(&buf, "    PUSH {r1}\n");
+                        emit_line(&buf, "LDR r0, [r2, #0]");
+                        arm_cvt_f2d(&buf);
+                        emit_push_r0(&buf);
+                        asmbuf_puts(&buf, "    PUSH {r1}\n");
+                        break;
+                    }
                     if (es == 1) {
                         emit_line(&buf, "LDRB r0, [r0, #0]");
                     } else if (es == 2 && !packed) {
@@ -2841,6 +3188,22 @@ static char *codegen_arm(IrProgram *prog) {
                             emit_line(&buf, "PUSH {r2}");
                             break;
                         }
+                    } else if (es == 16) {
+                        /* _Complex double element: four words.  Object layout in
+                         * memory is the standard C one -- [0]=re_lo [4]=re_hi
+                         * [8]=im_lo [12]=im_hi -- while the expression stack
+                         * wants real on top, i.e. sp+0=re_hi sp+4=re_lo
+                         * sp+8=im_hi sp+12=im_lo.  Push in the order that
+                         * produces that: im_lo, im_hi, re_lo, re_hi. */
+                        emit_line(&buf, "LDR r2, [r0, #8]");
+                        emit_line(&buf, "PUSH {r2}");
+                        emit_line(&buf, "LDR r2, [r0, #12]");
+                        emit_line(&buf, "PUSH {r2}");
+                        emit_line(&buf, "LDR r2, [r0, #0]");
+                        emit_line(&buf, "PUSH {r2}");
+                        emit_line(&buf, "LDR r2, [r0, #4]");
+                        emit_line(&buf, "PUSH {r2}");
+                        break;
                     } else if (es == 8) {
                         /* #A4 FIX: 8-byte element (long long/double): load low and high words.
                          * Stack convention (from IR_STORE): high word on top, low below.
@@ -2886,6 +3249,60 @@ static char *codegen_arm(IrProgram *prog) {
                         emit_line(&buf, "STRB r3, [r2, #6]");
                         emit_line(&buf, "LSR r3, r1, #24");
                         emit_line(&buf, "STRB r3, [r2, #7]");
+                        emit_line(&buf, "PUSH {r0}");
+                        emit_line(&buf, "PUSH {r1}");
+                        break;
+                    }
+                    if (es == 8 && (I->aux & IR_AUX_COMPLEX)) {
+                        /* _Complex float store.  Stack from sp:
+                         *   [re_hi, re_lo, im_hi, im_lo, addr]
+                         * The four words are read by offset, never popped before
+                         * the narrowings: emitting the narrowing is a libgcc call
+                         * (BL clobbers r0-r3) and the old code parked the real
+                         * half with PUSH on top of the words it still had to read,
+                         * so the imaginary half was served the parked word and
+                         * `farr[1] = 2-3i` stored (0, re) instead of (re, im). */
+                        emit_line(&buf, "LDR r1, [sp, #0]");     /* re_hi */
+                        emit_line(&buf, "LDR r0, [sp, #4]");     /* re_lo */
+                        arm_cvt_d2f(&buf);                       /* r0 = re32 */
+                        emit_line(&buf, "LDR r2, [sp, #16]");    /* addr */
+                        emit_line(&buf, "STR r0, [r2, #0]");
+                        emit_line(&buf, "LDR r1, [sp, #8]");     /* im_hi */
+                        emit_line(&buf, "LDR r0, [sp, #12]");    /* im_lo */
+                        arm_cvt_d2f(&buf);                       /* r0 = im32 */
+                        emit_line(&buf, "LDR r2, [sp, #16]");    /* addr (r2 was clobbered) */
+                        emit_line(&buf, "STR r0, [r2, #4]");
+                        emit_line(&buf, "ADD sp, sp, #20");      /* drop value + addr */
+                        asmbuf_puts(&buf, "    PUSH {r2}\n");        /* park addr */
+                        emit_line(&buf, "LDR r0, [r2, #4]");
+                        arm_cvt_f2d(&buf);
+                        asmbuf_puts(&buf, "    POP {r2}\n");
+                        emit_push_r0(&buf);
+                        asmbuf_puts(&buf, "    PUSH {r1}\n");
+                        emit_line(&buf, "LDR r0, [r2, #0]");
+                        arm_cvt_f2d(&buf);
+                        emit_push_r0(&buf);
+                        asmbuf_puts(&buf, "    PUSH {r1}\n");
+                        break;
+                    }
+                    if (es == 16) {
+                        /* _Complex double store.  Stack from sp is
+                         * [re_hi, re_lo, im_hi, im_lo, addr]; the object is
+                         * written in the standard C layout so the generic
+                         * LOAD_IDX / IR_STORE / libgcc helpers all agree. */
+                        emit_line(&buf, "POP {r1}");            /* r1 = re_hi */
+                        emit_pop_r0(&buf);                       /* r0 = re_lo */
+                        emit_line(&buf, "POP {r3}");            /* r3 = im_hi */
+                        emit_line(&buf, "POP {r2}");            /* r2 = im_lo */
+                        emit_line(&buf, "POP {r12}");            /* r12 = addr */
+                        emit_line(&buf, "STR r0, [r12, #0]");
+                        emit_line(&buf, "STR r1, [r12, #4]");
+                        emit_line(&buf, "STR r2, [r12, #8]");
+                        emit_line(&buf, "STR r3, [r12, #12]");
+                        /* Push the value back in the same order the expression
+                         * stack uses, so the store still yields the value. */
+                        emit_line(&buf, "PUSH {r2}");
+                        emit_line(&buf, "PUSH {r3}");
                         emit_line(&buf, "PUSH {r0}");
                         emit_line(&buf, "PUSH {r1}");
                         break;
@@ -2939,6 +3356,14 @@ static char *codegen_arm(IrProgram *prog) {
                     emit_push_r0(&buf);
                     break;
                 case IR_UNARY:
+                    if (I->aux & IR_AUX_COMPLEX) {
+                        /* conj: flip the sign bit of the imaginary part, which
+                         * is its high word at sp+8. */
+                        arm_ldr_sp(&buf, 0, 8);
+                        emit_line(&buf, "EOR r0, r0, #0x80000000");
+                        arm_str_sp(&buf, 0, 8);
+                        break;
+                    }
                     if (I->val == 2 &&
                         (I->aux == (int)TOK_MINUS || I->aux == (int)TOK_BNOT)) {
                         /* 64-bit negate / complement (irgen marks the width in
@@ -3049,6 +3474,23 @@ static char *codegen_arm(IrProgram *prog) {
                  * lr is already saved by the prologue; BL inside the body may freely clobber lr. */
                 case IR_PUSH_FLOAT: {
                     int is_dbl = (I->aux & 0x200) != 0;
+                    if (I->aux & IR_AUX_COMPLEX) {
+                        /* 16-byte complex constant. val indexes the complex
+                         * pool, not the float pool -- the two used to share
+                         * aux 0x200, which loaded a double as a complex. */
+                        asmbuf_puts(&buf, "    LDR r0, =.L_cplx_");
+                        asmbuf_int(&buf, I->val);
+                        asmbuf_putc(&buf, '\n');
+                        asmbuf_puts(&buf, "    LDR r1, [r0, #8]\n");
+                        asmbuf_puts(&buf, "    PUSH {r1}\n");   /* imag low  */
+                        asmbuf_puts(&buf, "    LDR r1, [r0, #12]\n");
+                        asmbuf_puts(&buf, "    PUSH {r1}\n");   /* imag high */
+                        asmbuf_puts(&buf, "    LDR r1, [r0, #0]\n");
+                        asmbuf_puts(&buf, "    PUSH {r1}\n");   /* real low  */
+                        asmbuf_puts(&buf, "    LDR r1, [r0, #4]\n");
+                        asmbuf_puts(&buf, "    PUSH {r1}\n");   /* real high */
+                        break;
+                    }
                     if (is_dbl) {
                         /* Double-precision: load 8 bytes, push 2 slots (low word pushed first) */
                         asmbuf_puts(&buf, "    LDR r0, =.L_dbl_");
@@ -3070,6 +3512,45 @@ static char *codegen_arm(IrProgram *prog) {
                 }
                 case IR_FADD: {
                     int is_dbl = (I->aux & 0x200) != 0;
+                    if ((I->aux & 0xF00) == 0x900) {
+                        /* cexp: aux = TOK_PLUS | 0x900 (complex bit plus the
+                         * 0x100 sub-op selector). exp(x)*(cos y + i sin y);
+                         * the three libm calls are linked in, not inlined. */
+                        emit_line(&buf, "SUB sp, sp, #24");   /* operands at sp+24 */
+                        arm_ldr_sp(&buf, 0, 28);              /* z.re low  */
+                        arm_ldr_sp(&buf, 1, 24);              /* z.re high */
+                        arm_call1(&buf, "exp");
+                        arm_str_sp(&buf, 0, 0);
+                        arm_str_sp(&buf, 1, 4);
+                        arm_ldr_sp(&buf, 0, 36);              /* z.im low  */
+                        arm_ldr_sp(&buf, 1, 32);              /* z.im high */
+                        arm_call1(&buf, "cos");
+                        arm_str_sp(&buf, 0, 8);
+                        arm_str_sp(&buf, 1, 12);
+                        arm_dcall(&buf, "__aeabi_dmul", 0, 4, 8, 12);
+                        arm_str_sp(&buf, 0, 16);
+                        arm_str_sp(&buf, 1, 20);
+                        arm_ldr_sp(&buf, 0, 36);
+                        arm_ldr_sp(&buf, 1, 32);
+                        arm_call1(&buf, "sin");
+                        emit_line(&buf, "MOV r2, r0");
+                        emit_line(&buf, "MOV r3, r1");
+                        arm_ldr_sp(&buf, 0, 0);
+                        arm_ldr_sp(&buf, 1, 4);
+                        arm_call1(&buf, "__aeabi_dmul");
+                        emit_line(&buf, "MOV r2, r0");
+                        emit_line(&buf, "MOV r3, r1");
+                        arm_ldr_sp(&buf, 0, 16);
+                        arm_ldr_sp(&buf, 1, 20);
+                        emit_add_sp(&buf, 24);
+                        emit_add_sp(&buf, 16);
+                        arm_cplx_push4(&buf);
+                        break;
+                    }
+                    if (I->aux & IR_AUX_COMPLEX) {
+                        arm_cplx_addsub(&buf, "__aeabi_dadd");
+                        break;
+                    }
 #if ARKCC_FEATURE_FPU_HW
                     if (g_config.enable_fpu_hw) {
                         if (is_dbl) emit_vfp_f64_binop(&buf, "VADD");
@@ -3094,6 +3575,10 @@ static char *codegen_arm(IrProgram *prog) {
                 }
                 case IR_FSUB: {
                     int is_dbl = (I->aux & 0x200) != 0;
+                    if (I->aux & IR_AUX_COMPLEX) {
+                        arm_cplx_addsub(&buf, "__aeabi_dsub");
+                        break;
+                    }
 #if ARKCC_FEATURE_FPU_HW
                     if (g_config.enable_fpu_hw) {
                         if (is_dbl) emit_vfp_f64_binop(&buf, "VSUB");
@@ -3118,6 +3603,10 @@ static char *codegen_arm(IrProgram *prog) {
                 }
                 case IR_FMUL: {
                     int is_dbl = (I->aux & 0x200) != 0;
+                    if (I->aux & IR_AUX_COMPLEX) {
+                        arm_cplx_mul(&buf);
+                        break;
+                    }
 #if ARKCC_FEATURE_FPU_HW
                     if (g_config.enable_fpu_hw) {
                         if (is_dbl) emit_vfp_f64_binop(&buf, "VMUL");
@@ -3142,6 +3631,10 @@ static char *codegen_arm(IrProgram *prog) {
                 }
                 case IR_FDIV: {
                     int is_dbl = (I->aux & 0x200) != 0;
+                    if (I->aux & IR_AUX_COMPLEX) {
+                        arm_cplx_div(&buf);
+                        break;
+                    }
 #if ARKCC_FEATURE_FPU_HW
                     if (g_config.enable_fpu_hw) {
                         if (is_dbl) emit_vfp_f64_binop(&buf, "VDIV");
@@ -3165,6 +3658,54 @@ static char *codegen_arm(IrProgram *prog) {
                     break;
                 }
                 case IR_F2I: {
+                    if (I->aux & IR_AUX_COMPLEX) {
+                        /* Extraction from a four-word complex value. aux & 0x300:
+                         *   0x000 creal   0x100 cimag
+                         *   0x200 cabs    0x300 carg
+                         * cabs/carg need libm (sqrt / atan2); they are emitted
+                         * as calls so an arm target without libm fails to link
+                         * instead of quietly producing a different number. */
+                        int k = I->aux & 0x300;
+                        if (k == 0x200) {
+                            arm_dcall(&buf, "__aeabi_dmul", 4, 0, 4, 0);
+                            emit_line(&buf, "SUB sp, sp, #8");
+                            arm_str_sp(&buf, 0, 0);
+                            arm_str_sp(&buf, 1, 4);
+                            arm_dcall(&buf, "__aeabi_dmul", 20, 16, 20, 16);
+                            emit_line(&buf, "MOV r2, r0");
+                            emit_line(&buf, "MOV r3, r1");
+                            arm_ldr_sp(&buf, 0, 0);
+                            arm_ldr_sp(&buf, 1, 4);
+                            arm_call1(&buf, "__aeabi_dadd");
+                            emit_add_sp(&buf, 8);
+                            emit_add_sp(&buf, 16);
+                            arm_call1(&buf, "sqrt");
+                            arm_push_reg(&buf, 0);
+                            arm_push_reg(&buf, 1);
+                        } else if (k == 0x300) {
+                            arm_ldr_sp(&buf, 0, 12);   /* imag low  */
+                            arm_ldr_sp(&buf, 1, 8);    /* imag high */
+                            arm_ldr_sp(&buf, 2, 4);    /* real low  */
+                            arm_ldr_sp(&buf, 3, 0);    /* real high */
+                            emit_add_sp(&buf, 16);
+                            arm_call1(&buf, "atan2");
+                            arm_push_reg(&buf, 0);
+                            arm_push_reg(&buf, 1);
+                        } else if (k == 0x100) {
+                            arm_ldr_sp(&buf, 0, 12);   /* imag low  */
+                            arm_ldr_sp(&buf, 1, 8);    /* imag high */
+                            emit_add_sp(&buf, 16);
+                            arm_push_reg(&buf, 0);
+                            arm_push_reg(&buf, 1);
+                        } else {
+                            arm_ldr_sp(&buf, 0, 4);    /* real low  */
+                            arm_ldr_sp(&buf, 1, 0);    /* real high */
+                            emit_add_sp(&buf, 16);
+                            arm_push_reg(&buf, 0);
+                            arm_push_reg(&buf, 1);
+                        }
+                        break;
+                    }
                     /* float/double -> int (truncation toward zero) */
                     int is_dbl = (I->aux & 0x200) != 0;
                     /* F2I unsigned fix: 0x400 = unsigned destination; select
@@ -3214,6 +3755,30 @@ static char *codegen_arm(IrProgram *prog) {
                     break;
                 }
                 case IR_I2F: {
+                    if (I->aux & IR_AUX_COMPLEX) {
+                        /* real -> complex widening, imaginary part 0.
+                         * aux & 0x700: 0x000 float, 0x200 double,
+                         * 0x100 int (0x400 more if unsigned). */
+                        int k = I->aux & 0x700;
+                        if (k == 0x100 || k == 0x500) {
+                            emit_pop_r0(&buf);
+                            arm_call1(&buf, k == 0x500 ? "__aeabi_ui2d" : "__aeabi_i2d");
+                        } else if (k == 0x200) {
+                            emit_line(&buf, "POP {r1}");
+                            emit_pop_r0(&buf);
+                        } else {
+                            emit_pop_r0(&buf);
+                            arm_call1(&buf, "__aeabi_f2d");
+                        }
+                        emit_line(&buf, "MOV r2, r0");
+                        emit_line(&buf, "MOV r3, r1");
+                        emit_line(&buf, "MOV r0, #0");
+                        arm_push_reg(&buf, 0);
+                        arm_push_reg(&buf, 0);
+                        arm_push_reg(&buf, 2);
+                        arm_push_reg(&buf, 3);
+                        break;
+                    }
                     /* int -> float/double */
                     int is_dbl = (I->aux & 0x200) != 0;
                     /* Bug-P1-7: 0x400 = unsigned source; select __aeabi_ui2d /
@@ -3355,9 +3920,16 @@ static char *codegen_arm(IrProgram *prog) {
                 }
                 case IR_FCMP: {
                     /* aux encodes the comparison kind (low 8 bits) + precision flag (0x200);
-                     * __aeabi_fcmpeq and __aeabi_dcmpeq family return 0/1 */
-                    int op = I->aux & ~0x200;
+                     * __aeabi_fcmpeq and __aeabi_dcmpeq family return 0/1.
+                     * IR_AUX_COMPLEX marks a _Complex comparison: it compares the
+                     * real parts and the imaginary parts and combines the two
+                     * results (EQ => both equal, NE => either differs). */
                     int is_dbl = (I->aux & 0x200) != 0;
+                    int op = I->aux & ~(0x200 | IR_AUX_COMPLEX);
+                    if (I->aux & IR_AUX_COMPLEX) {
+                        arm_cplx_cmp(&buf, op == (int)TOK_NE);
+                        break;
+                    }
 #if ARKCC_FEATURE_FPU_HW
                     if (g_config.enable_fpu_hw) {
                         const char *cond = "EQ";
@@ -3480,6 +4052,15 @@ static char *codegen_arm(IrProgram *prog) {
                     int is_indirect = (I->name && I->name[0] == '?');
                     int real_args = is_indirect ? n - 1 : n;
                     int is_sret_call = (!is_indirect && sret_lookup(sret_names, sret_sizes, sret_count, I->name));
+                    /* bits 34..35 of val (stamped by irgen from the call
+                     * expression's type): 1 = _Complex float result in r0:r1,
+                     * 2 = _Complex double result through the sret buffer.
+                     * A 16-byte complex result needs a buffer the caller owns,
+                     * and the caller only knows where for a function it can see
+                     * the definition of; anything else is refused rather than
+                     * read as if r0 were the real half. */
+                    int cplx_ret = (int)((I->val >> 34) & 3);
+                    int sret_buf_off = 0;
 
                     /* armcc intrinsic functions: emit inline instruction instead of BL.
                      * Arguments (if any) are already on the stack; pop and discard them. */
@@ -3544,73 +4125,21 @@ static char *codegen_arm(IrProgram *prog) {
                      * AAPCS: r0 = sret pointer, real args start at r1.
                      * 64-bit args align to even register pairs (r2/r3 only option). */
                     if (is_sret_call) {
-                        int argmask = I->aux;
-                        int aapcs_reg = 1;  /* r0 = sret, args start at r1 */
-                        int total_slots = 0;
-                        int reg_slots = 0;
-                        int stack_args;
-                        int need_align;
-                        int buf_off = (sret_call_idx < sret_call_n)
-                                      ? sret_call_buf_off[sret_call_idx++] : 0;
-                        int kk;
-                        for (kk = 0; kk < real_args; kk++) {
-                            int is_64 = (argmask >> (2 * kk + 1)) & 1;
-                            total_slots += is_64 ? 2 : 1;
-                        }
-                        /* Pop each arg from the IR stack into the correct AAPCS
-                         * register. IR stack: arg0 on top. For 64-bit args, high
-                         * word is on top, low word below (pushed first). */
-                        for (kk = 0; kk < real_args; kk++) {
-                            int is_64 = (argmask >> (2 * kk + 1)) & 1;
-                            if (is_64) {
-                                if (aapcs_reg & 1) aapcs_reg++;  /* even-pair align */
-                                if (aapcs_reg + 1 <= 3) {
-                                    asmbuf_puts(&buf, "    POP {r");
-                                    asmbuf_int(&buf, aapcs_reg + 1);
-                                    asmbuf_puts(&buf, "}\n");
-                                    asmbuf_puts(&buf, "    POP {r");
-                                    asmbuf_int(&buf, aapcs_reg);
-                                    asmbuf_puts(&buf, "}\n");
-                                    reg_slots += 2;
-                                    aapcs_reg += 2;
-                                } else {
-                                    break;  /* both words stay on stack */
-                                }
-                            } else {
-                                if (aapcs_reg <= 3) {
-                                    asmbuf_puts(&buf, "    POP {r");
-                                    asmbuf_int(&buf, aapcs_reg);
-                                    asmbuf_puts(&buf, "}\n");
-                                    reg_slots += 1;
-                                    aapcs_reg += 1;
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                        stack_args = total_slots - reg_slots;
-                        if (stack_args < 0) stack_args = 0;
-                        need_align = (stack_args & 1) != 0;
-                        /* r0 = sret buffer address (pre-allocated in caller's frame) */
-                        asmbuf_puts(&buf, "    ADD r0, r6, #");
-                        asmbuf_int(&buf, buf_off);
-                        asmbuf_putc(&buf, '\n');
-                        if (need_align) {
-                            asmbuf_puts(&buf, "    SUB sp, sp, #4\n");
-                        }
-                        asmbuf_puts(&buf, "    BL ");
-                        asmbuf_puts(&buf, I->name);
-                        asmbuf_putc(&buf, '\n');
-                        if (need_align) {
-                            asmbuf_puts(&buf, "    ADD sp, sp, #4\n");
-                        }
-                        if (stack_args > 0) {
-                            asmbuf_puts(&buf, "    ADD sp, sp, #");
-                            asmbuf_int(&buf, stack_args * 4);
-                            asmbuf_putc(&buf, '\n');
-                        }
-                        emit_push_r0(&buf);
-                        break;
+                        /* An sret call goes through the *same* argument path as
+                         * a regular call; only two things differ, and both are
+                         * applied below at their own point in that path:
+                         *   - r0 carries the result buffer, so argument
+                         *     placement starts at r1 (the same ncrn_start the
+                         *     callee's aapcs_assign uses);
+                         *   - a 16-byte _Complex result is read back out of the
+                         *     buffer instead of the address being pushed.
+                         * It used to have a private pop loop that ignored
+                         * aapcs_soff and left stack arguments in IR order, so a
+                         * 64-bit argument that missed the registers arrived with
+                         * its halves swapped (`return rr + ii * I;` with two
+                         * doubles read the imaginary part as 0). */
+                        sret_buf_off = (sret_call_idx < sret_call_n)
+                                       ? sret_call_buf_off[sret_call_idx++] : 0;
                     }
 
                     /* Regular (non-sret) call.
@@ -3687,7 +4216,8 @@ static char *codegen_arm(IrProgram *prog) {
                                       I->name, diag_num(b1, sl), 0,0,0,0);
                         }
                         nsaa = aapcs_assign(asz, (real_args < 64) ? real_args : 64,
-                                            0, aslot_reg, aslot_soff);
+                                            is_sret_call ? 1 : 0,
+                                            aslot_reg, aslot_soff);
                         /* Pop the register arguments.  They are always the
                          * leading ones: once an argument is placed on the stack
                          * NCRN is 4, so every later argument is stacked too.
@@ -3797,6 +4327,14 @@ static char *codegen_arm(IrProgram *prog) {
                             }
                         }
                     }
+                    if (is_sret_call) {
+                        /* r0 is free: the argument pops above only touched
+                         * r1..r3 (ncrn_start == 1) and the stack block is
+                         * addressed through r6. */
+                        asmbuf_puts(&buf, "    ADD r0, r6, #");
+                        asmbuf_int(&buf, sret_buf_off);
+                        asmbuf_putc(&buf, '\n');
+                    }
                     if (is_indirect) {
                         asmbuf_puts(&buf, "    BLX ip\n");
                     } else {
@@ -3837,7 +4375,33 @@ static char *codegen_arm(IrProgram *prog) {
                     {
                         int ret64 = 0;
                         int is_void_ret = 0;
-                        if (!is_indirect) {
+                        if (is_sret_call) {
+                            /* the shape is decided by cplx_ret below */
+                        } else if (cplx_ret == 1) {
+                            /* _Complex float result: r0 = real half, r1 =
+                             * imaginary half, each an f32 in the low word --
+                             * the same wire shape the parameter side uses for
+                             * an 8-byte complex object.  The IR stack carries
+                             * four words (re_hi, re_lo, im_hi, im_lo from the
+                             * top), so each half is widened to a double and the
+                             * two 8-byte results are written into one 16-byte
+                             * scratch block inside the frame the pushes create.
+                             * Parking a half above the pushes cannot work: ADDs
+                             * to sp can only walk past the *lowest* words, so
+                             * the parked word stayed in the value and the real
+                             * half came out as 0 (measured, cplx_ret_f). */
+                            asmbuf_puts(&buf, "    SUB sp, sp, #16\n"
+                                              "    STR r0, [sp, #0]\n"    /* re32 */
+                                              "    STR r1, [sp, #8]\n");  /* im32 */
+                            asmbuf_puts(&buf, "    LDR r0, [sp, #0]\n");
+                            emit_line(&buf, "BL __aeabi_f2d");   /* r0=re_lo */
+                            asmbuf_puts(&buf, "    STR r1, [sp, #0]\n"
+                                              "    STR r0, [sp, #4]\n");
+                            asmbuf_puts(&buf, "    LDR r0, [sp, #8]\n");
+                            emit_line(&buf, "BL __aeabi_f2d");   /* r0=im_lo */
+                            asmbuf_puts(&buf, "    STR r1, [sp, #8]\n"
+                                              "    STR r0, [sp, #12]\n");
+                        } else if (!is_indirect) {
                             int fi2;
                             int found = 0;
                             for (fi2 = 0; fi2 < prog->func_count; fi2++) {
@@ -3864,7 +4428,24 @@ static char *codegen_arm(IrProgram *prog) {
                         } else {
                             ret64 = (int)((I->val >> 32) & 1);
                         }
-                        if (ret64) {
+                        if (cplx_ret == 2) {
+                            /* _Complex double: a 16-byte composite comes back in
+                             * r0-r3 (soft-float AAPCS), r0:r1 = real part,
+                             * r2:r3 = imaginary part, low word first.  The IR
+                             * stack wants the real high word on top, so push
+                             * im_lo, im_hi, re_lo, re_hi.  No buffer is
+                             * involved, so a declaration, an indirect call and
+                             * a call into another translation unit all behave
+                             * the same way. */
+                            arm_push_reg(&buf, 2);
+                            arm_push_reg(&buf, 3);
+                            arm_push_reg(&buf, 0);
+                            arm_push_reg(&buf, 1);
+                        } else if (is_sret_call) {
+                            emit_push_r0(&buf);   /* struct: the address */
+                        } else if (cplx_ret == 1) {
+                            /* the four words went on above */
+                        } else if (ret64) {
                             emit_push_r0(&buf);              /* push low word */
                             asmbuf_puts(&buf, "    PUSH {r1}\n");  /* push high word */
                         } else if (!is_void_ret) {
@@ -4089,6 +4670,47 @@ static char *codegen_arm(IrProgram *prog) {
                     break;
                 }
                 case IR_RETURN:
+                    if (f->ret_type && f->ret_type->kind == TYPE_COMPLEX &&
+                        !is_sret && type_size(f->ret_type) == 8) {
+                        /* _Complex float: narrow the four-word value into the
+                         * r0:r1 pair AAPCS uses for an 8-byte composite (real
+                         * half in the low word) -- exactly the conversion the
+                         * caller side of IR_CALL reverses.  Both halves are
+                         * d2f calls, so the order matters: the imaginary word
+                         * is parked on the stack across the real conversion
+                         * because BL clobbers r0-r3. */
+                        if (rtop_ret) { emit_push_r0(&buf); rtop_ret = 0; }
+                        asmbuf_puts(&buf, "    LDR r1, [sp, #8]\n"
+                                          "    LDR r0, [sp, #12]\n");
+                        emit_line(&buf, "BL __aeabi_d2f");   /* r0 = im32 */
+                        emit_push_r0(&buf);
+                        asmbuf_puts(&buf, "    LDR r1, [sp, #4]\n"
+                                          "    LDR r0, [sp, #8]\n");
+                        emit_line(&buf, "BL __aeabi_d2f");   /* r0 = re32 */
+                        asmbuf_puts(&buf, "    POP {r1}\n");      /* r1 = im32 */
+                        emit_epilogue_return(&buf, local_size, f->is_irq,
+                                             f->is_naked, 1);
+                        break;
+                    }
+                    if (f->ret_type && f->ret_type->kind == TYPE_COMPLEX &&
+                        type_size(f->ret_type) > 8) {
+                        /* _Complex double: a 16-byte composite goes back in
+                         * r0-r3 (soft-float AAPCS, same as GCC), r0:r1 = real
+                         * part and r2:r3 = imaginary part, low word first.
+                         * The four words on the IR stack are
+                         * re_hi, re_lo, im_hi, im_lo from the top, which is
+                         * not that order, so each one is loaded explicitly.
+                         * The epilogue only restores r5-r7/pc, so r0-r3
+                         * survive it. */
+                        if (rtop_ret) { emit_push_r0(&buf); rtop_ret = 0; }
+                        asmbuf_puts(&buf, "    LDR r1, [sp, #0]\n"
+                                          "    LDR r0, [sp, #4]\n"
+                                          "    LDR r3, [sp, #8]\n"
+                                          "    LDR r2, [sp, #12]\n");
+                        emit_epilogue_return(&buf, local_size, f->is_irq,
+                                             f->is_naked, 1);
+                        break;
+                    }
                     if (is_sret && rtop_ret) {
                         /* The sret path pops the source address itself, so the
                          * register copy has to go back on the stack first, and
@@ -4275,10 +4897,23 @@ static char *codegen_arm(IrProgram *prog) {
             if (sz <= 0) sz = 4;
 
             if (g->is_float) {
-                /* Float/double initialization: convert to bit pattern */
+                /* Float/double initialization: convert to bit pattern.
+                 *
+                 * A _Complex object holds TWO scalars: the real part at offset 0
+                 * and the imaginary part right after it.  The old code looked
+                 * only at `kind == TYPE_DOUBLE`, so a _Complex type fell into
+                 * the float branch and stored (float)3.0 as one 32-bit word --
+                 * `double _Complex g = 3.0;` then read back a denormal real
+                 * part and a neighbouring object as its imaginary part.  The
+                 * base type decides the width now, init_is_complex decides that
+                 * a second scalar has to be written, and the imaginary part is
+                 * a plain +0.0 when only a real initialiser was given. */
                 union { float f; unsigned int u; } fu;
                 union { double d; unsigned int u[2]; } du;
-                int is_double = (g->type && g->type->kind == TYPE_DOUBLE);
+                int cplx = (g->type && g->type->kind == TYPE_COMPLEX);
+                Type *bt = cplx ? (g->type ? g->type->base : 0) : g->type;
+                int is_double = (bt && bt->kind == TYPE_DOUBLE);
+                double imv = (cplx && g->init_is_complex) ? g->init_float_im : 0.0;
                 if (is_double) {
                     du.d = g->init_float;
                     emit_mov_imm(&buf, 0, (int)du.u[0]);
@@ -4286,11 +4921,23 @@ static char *codegen_arm(IrProgram *prog) {
                     asmbuf_puts(&buf, "    STR r0, [r1]\n");
                     emit_mov_imm(&buf, 0, (int)du.u[1]);
                     asmbuf_puts(&buf, "    STR r0, [r1, #4]\n");
+                    if (cplx) {
+                        du.d = imv;
+                        emit_mov_imm(&buf, 0, (int)du.u[0]);
+                        asmbuf_puts(&buf, "    STR r0, [r1, #8]\n");
+                        emit_mov_imm(&buf, 0, (int)du.u[1]);
+                        asmbuf_puts(&buf, "    STR r0, [r1, #12]\n");
+                    }
                 } else {
                     fu.f = (float)g->init_float;
                     emit_mov_imm(&buf, 0, (int)fu.u);
                     emit_mov_addr32(&buf, 1, addr, addr_in_own_data(addr));
                     asmbuf_puts(&buf, "    STR r0, [r1]\n");
+                    if (cplx) {
+                        fu.f = (float)imv;
+                        emit_mov_imm(&buf, 0, (int)fu.u);
+                        asmbuf_puts(&buf, "    STR r0, [r1, #4]\n");
+                    }
                 }
             } else if (g->init_aggregate) {
                 /* Aggregate initialiser: turn the text into bytes with the

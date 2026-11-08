@@ -25,6 +25,11 @@ Type *usual_arith_conv(Type *lt, Type *rt);
  * 浮点（或整数）常量表达式，值写入 *out。除零不折叠（UB，不得发明结果）。 */
 int eval_const_fexpr(AstNode *node, double *out);
 
+/* _Complex 常量表达式求值（C99 6.6）：实部写 *re、虚部写 *im。返回 1 表示
+ * node 可在编译期算出。整数/浮点/虚数字面量、+ - * /、一元正负、以及到
+ * _Complex float / _Complex double 的显式转换都在范围内；除零不折叠。 */
+int eval_const_cexpr(AstNode *node, double *re, double *im);
+
 /* 浮点常量 -> 整数类型，按 C99 6.3.1.4p1 向零截断；越界/NaN/Inf 返回 0
  * （UB 不折叠，不发明值）。只在 ARKCC_FEATURE_FCONST_FOLD 打开时才有定义，
  * 调用点同样在 #if 里。 */

@@ -20,4 +20,12 @@ extern int g_irgen_errors;
  * 因为 8 字节 long long 槽无需符号扩展或高低字合并。 */
 void irgen_set_64bit_slots(int enabled);
 
+/* Number of stack words a _Complex double occupies on the selected backend.
+ * The C backend keeps a complex value in one 8-byte union slot (1); the
+ * machine backends (ARM / RISC-V / x86-64) carry four 32-bit words (4).
+ * Set before irgen_program(). Used to size discard/reload/dup of complex
+ * values and to reject complex arguments/returns where the calling
+ * convention cannot carry them. */
+void irgen_set_complex_words(int words);
+
 #endif /* ARK_IRGEN_H */

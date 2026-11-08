@@ -2186,6 +2186,9 @@ int ark_compile(const ArkOptions *opts) {
     /* C 后端使用 8 字节 long long 虚拟栈槽，irgen 无需生成 32→64 位
      * widen/narrow 序列（DUP+PUSH+LT+NEG）或 64 位条件 BOR 合并。 */
     irgen_set_64bit_slots(ark_streq(be->name, "c"));
+    /* The C backend stores a complex value in one 8-byte slot; the machine
+     * backends carry four 32-bit words on the expression stack. */
+    irgen_set_complex_words(ark_streq(be->name, "c") ? 1 : 4);
     lexer_init(&lex, preprocessed);
     ast = parse_program(&lex);
     if (!ast) return ARK_ERR_PARSE;      /* diagnostics were already printed */

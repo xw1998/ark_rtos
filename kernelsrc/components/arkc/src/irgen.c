@@ -300,6 +300,12 @@ typedef struct {
 } IrGen;
 
 static void irgen_stmt(IrGen *g, AstNode *node);
+
+/* Forward declarations: these two helpers live further down (they need the
+ * globals that describe the target value model) but are already used by the
+ * object-access paths above. */
+static int irgen_is_cplx_float(Type *t);
+static int irgen_complex_aux(Type *t, int width);
 static void irgen_expr(IrGen *g, AstNode *node);
 static void irgen_lvalue_addr(IrGen *g, AstNode *node);
 static void irgen_cond_to_bool(IrGen *g, AstNode *cond);
@@ -326,6 +332,34 @@ void irgen_set_64bit_slots(int enabled) {
     g_irgen_64bit_slots = enabled;
 }
 
+/* How many 32-bit IR stack words one `_Complex double` value occupies.
+ *   C backend  : 1 (an 8-byte slot whose union has a `double _Complex` member)
+ *   ARM / RV32I: 4 (re_lo, re_hi, im_lo, im_hi -- the machine stack words, and
+ *                exactly what IR_STORE with aux=16 pops)
+ * Everything that pushes or pops a complex value has to agree with this, or the
+ * IR stack drifts, so it is one process-wide number set by the driver right
+ * next to irgen_set_64bit_slots(). */
+static int g_irgen_complex_words = 4;
+
+void irgen_set_complex_words(int words) {
+    g_irgen_complex_words = (words > 0) ? words : 1;
+}
+
+/* Widen a real operand of a complex expression to a complex double: the
+ * imaginary part is +0.0.  aux: 0x800 = source is a float, 0x800|0x200 =
+ * source is already a double, 0x800|0x100 = source is an integer. */
+static void irgen_widen_real_to_complex(IrGen *g, Type *t) {
+    int aux;
+    if (!t) aux = IR_AUX_COMPLEX | 0x100;
+    else if (t->kind == TYPE_FLOAT)  aux = IR_AUX_COMPLEX;
+    else if (t->kind == TYPE_DOUBLE) aux = IR_AUX_COMPLEX | 0x200;
+    else {
+        aux = IR_AUX_COMPLEX | 0x100;
+        if (t->is_unsigned) aux |= 0x400;
+    }
+    ir_emit(g->fn, IR_I2F, 0, 0, aux);
+}
+
 #if ARKCC_FEATURE_FCONST_FOLD
 /* 目标类型是 float/double 时，把常量表达式初值在编译期算出来写进 init_float。
  *
@@ -349,6 +383,38 @@ static int irgen_try_float_init(IrGlobal *gv, AstNode *iv) {
     gv->init_int   = 0;
     return 1;
 }
+/* _Complex 全局变量的常量初始化。
+ *
+ * 用在 irgen_try_float_init 之前：后者只看 target 是 float/double，碰到
+ * _Complex 就直接返回 0，于是 `double _Complex g = 3.0;` 落回"按 AST_NUM
+ * 把 iv->fval 存成 is_float"的旧路径，后端又只写 4 字节。
+ * 这里把实部/虚部都折叠好，并用 init_is_complex 告诉后端两个字都要写。
+ *
+ * 返回 1 表示已处理（has_init/is_float/init_float/init_float_im/init_is_complex）。 */
+static int irgen_try_complex_init(IrGlobal *gv, AstNode *iv) {
+    double re = 0.0, im = 0.0;
+    Type *dt, *bt;
+    if (!gv || !iv) return 0;
+    dt = gv->type;
+    if (!dt || dt->kind != TYPE_COMPLEX) return 0;
+    if (!eval_const_cexpr(iv, &re, &im)) {
+        /* 折不出来就不装作折出来：留给后续分支（报错）。 */
+        return 0;
+    }
+    bt = dt->base;
+    if (bt && bt->kind == TYPE_FLOAT) {
+        re = (double)(float)re;
+        im = (double)(float)im;
+    }
+    gv->has_init = 1;
+    gv->is_float = 1;
+    gv->init_is_complex = 1;
+    gv->init_float = re;
+    gv->init_float_im = im;
+    gv->init_int = 0;
+    return 1;
+}
+
 /* 整型全局变量用**浮点**常量表达式初始化（隐式转换，C99 6.6）：
  *     int g = 2.5 * 4.0;      -> 10
  * 显式写转换的 `(int)(2.5 * 4.0)` 由 eval_const_expr 处理；这里补的是没有写
@@ -541,7 +607,9 @@ IrProgram *irgen_program(AstNode *prog) {
                 if (d->u.var.init) {
                     AstNode *iv = d->u.var.init;
 #if ARKCC_FEATURE_FCONST_FOLD
-                    if (irgen_try_float_init(gv, iv)) {
+                    if (irgen_try_complex_init(gv, iv)) {
+                        /* _Complex 常量初始化：实部/虚部已折叠 */
+                    } else if (irgen_try_float_init(gv, iv)) {
                         /* 浮点常量表达式初值已在编译期算出 */
                     } else
 #endif
@@ -608,7 +676,9 @@ IrProgram *irgen_program(AstNode *prog) {
                     if (d->u.var.init && !eg->has_init) {
                         AstNode *iv = d->u.var.init;
 #if ARKCC_FEATURE_FCONST_FOLD
-                        if (irgen_try_float_init(eg, iv)) {
+                        if (irgen_try_complex_init(eg, iv)) {
+                            /* _Complex 常量初始化：实部/虚部已折叠 */
+                        } else if (irgen_try_float_init(eg, iv)) {
                             /* 同上：浮点常量表达式 */
                         } else
 #endif
@@ -681,7 +751,9 @@ IrProgram *irgen_program(AstNode *prog) {
                         if (c->u.var.init) {
                             AstNode *iv = c->u.var.init;
 #if ARKCC_FEATURE_FCONST_FOLD
-                            if (irgen_try_float_init(gc, iv)) {
+                            if (irgen_try_complex_init(gc, iv)) {
+                                /* _Complex 常量初始化：实部/虚部已折叠 */
+                            } else if (irgen_try_float_init(gc, iv)) {
                                 /* 同上：浮点常量表达式 */
                             } else
 #endif
@@ -734,7 +806,9 @@ IrProgram *irgen_program(AstNode *prog) {
                             if (c->u.var.init && !eg->has_init) {
                                 AstNode *iv = c->u.var.init;
 #if ARKCC_FEATURE_FCONST_FOLD
-                                if (irgen_try_float_init(eg, iv)) {
+                                if (irgen_try_complex_init(eg, iv)) {
+                                    /* _Complex 常量初始化：实部/虚部已折叠 */
+                                } else if (irgen_try_float_init(eg, iv)) {
                                     /* 同上：浮点常量表达式 */
                                 } else
 #endif
@@ -864,6 +938,20 @@ IrProgram *irgen_program(AstNode *prog) {
             g.fn = ir_func_new(d->u.func.name);
             g.fn->ret_type = d->u.func.ret_type;
             g.fn->param_count = d->u.func.param_count;
+            /* A _Complex *parameter* travels as one address word (the callee
+             * copies the payload into its frame, the same shape a >8-byte
+             * struct uses) or, when the object is 8 bytes wide, as two raw
+             * words -- see the argument loop and the slot accounting below.
+             * A _Complex *return value* keeps the four-word value on the IR
+             * stack and is narrowed by the backend in IR_RETURN:
+             *   _Complex float  (8 bytes)  -> r0:r1 / a0:a1, the real half in
+             *                                 the low word (AAPCS composite of
+             *                                 two words, same wire shape the
+             *                                 parameter uses);
+             *   _Complex double (16 bytes) -> sret: the caller passes the
+             *                                 address of a result buffer in r0
+             *                                 and reads the payload from there.
+             * The C backend needs none of this (g_irgen_complex_words == 1). */
             /* Populate param_types so backends can compute AAPCS register
              * assignment (64-bit even-pair alignment) for IR_GETARG.
              * Without this, aapcs_map falls back to 4-byte slots for all
@@ -968,6 +1056,9 @@ IrProgram *irgen_program(AstNode *prog) {
                             pwords = (sz > 4) ? 2 : 1;                 /* by value in words */
                         else if (ptype && ptype->kind == TYPE_ARRAY)
                             pwords = 1;                                /* decays to a pointer */
+                        else if (g_irgen_complex_words > 1 && ptype &&
+                                 ptype->kind == TYPE_COMPLEX && sz > 8)
+                            pwords = 1;   /* four-word value, passed as one address word */
                         else
                             pwords = (sz >= 8) ? 2 : 1;   /* long long / double */
                         slot += pwords;
@@ -1217,10 +1308,16 @@ static void irgen_discard_result(IrGen *g, AstNode *node) {
          * pair up to 8 bytes; wider composites are passed by address,
          * which is one word.  Match that or the IR stack drifts. */
         words = (sz > 4 && sz <= 8) ? 2 : 1;
+    } else if (et && et->kind == TYPE_COMPLEX && g_irgen_complex_words > 1) {
+        /* The machine backends carry a complex value as four stack words
+         * (imaginary low/high below, real low/high on top); dropping one or
+         * two would leave the rest of the value on the IR stack and drift the
+         * frame by four or eight bytes per statement. */
+        words = g_irgen_complex_words;
     }
-    if (words == 2) {
-        ir_emit(g->fn, IR_POP, 0, 0, 0);
-        ir_emit(g->fn, IR_POP, 0, 0, 0);
+    if (words > 1) {
+        int k;
+        for (k = 0; k < words; k++) ir_emit(g->fn, IR_POP, 0, 0, 0);
     } else if (et && et->kind == TYPE_VOID &&
                node->kind == AST_FUNC_CALL &&
                !(node->u.call.name && node->u.call.name[0] == '?')) {
@@ -1285,6 +1382,10 @@ static void irgen_stmt(IrGen *g, AstNode *node) {
                 break;
             }
             if (!node->u.var.name) break;
+            /* _Complex float is a real 8-byte object: the operator set keeps
+             * it in double precision on the expression stack, and every access
+             * to the object carries IR_AUX_COMPLEX so the backends widen on the
+             * way in and narrow on the way out (see irgen_is_cplx_float). */
             if (node->u.var.is_static) {
                 /* static local: promoted to a function-level global whose mangled name is
                  * ark_sl_<func>_<var>, so the value persists across calls. The symbol is
@@ -1304,7 +1405,9 @@ static void irgen_stmt(IrGen *g, AstNode *node) {
                 if (node->u.var.init) {
                     AstNode *iv = node->u.var.init;
 #if ARKCC_FEATURE_FCONST_FOLD
-                    if (irgen_try_float_init(gv, iv)) {
+                    if (irgen_try_complex_init(gv, iv)) {
+                        /* _Complex 常量初始化：实部/虚部已折叠 */
+                    } else if (irgen_try_float_init(gv, iv)) {
                         /* 同上：函数内 static 的浮点常量表达式 */
                     } else
 #endif
@@ -1497,6 +1600,16 @@ static void irgen_stmt(IrGen *g, AstNode *node) {
                         if (si && di) {
                             irgen_widen_to_64(g, st, dt);
                         }
+                        /* real -> _Complex initialiser (C99 6.7.9 + 6.5.16.1):
+                         * the destination object holds four stack words on the
+                         * machine backends, so a real source is widened here.
+                         * Measured before the fix: `float _Complex z = 3.0f;`
+                         * pushed one word, the store popped four, and reading z
+                         * gave 0 -- a silent wrong answer, not a crash. */
+                        if (dt && dt->kind == TYPE_COMPLEX &&
+                            (!st || st->kind != TYPE_COMPLEX)) {
+                            irgen_widen_real_to_complex(g, st);
+                        }
                     }
                     {
                         /* Bug-N3 FIX: add TYPE_LLONG(8) and TYPE_DOUBLE(8) so
@@ -1514,7 +1627,11 @@ static void irgen_stmt(IrGen *g, AstNode *node) {
                                 case TYPE_ENUM:  store_aux = 4; break;
                                 case TYPE_LLONG:  store_aux = 8; break;
                                 case TYPE_DOUBLE: store_aux = 8; break;
-                                case TYPE_COMPLEX: store_aux = 16; break;
+                                /* _Complex double is 16 bytes, _Complex float
+                                 * is 8. Storing a hard-coded 16 for both wrote
+                                 * past the 8-byte float complex object and
+                                 * clobbered the neighbouring local. */
+                                case TYPE_COMPLEX: store_aux = irgen_complex_aux(node->u.var.var_type, type_size(node->u.var.var_type)); break;
                                 default:         store_aux = 0; break;
                             }
                             if (node->u.var.var_type->is_volatile)
@@ -1566,6 +1683,17 @@ static void irgen_stmt(IrGen *g, AstNode *node) {
                     }
                 } else {
                     irgen_expr(g, node->u.unary.operand);
+                    /* real -> _Complex return (C99 6.8.6.4): the same
+                     * conversion an assignment does.  Without it
+                     * `double _Complex f(void) { return 3.0; }` left two words
+                     * on the stack where the backends read four. */
+                    {
+                        Type *ot = node->u.unary.operand->type;
+                        Type *ft = g->fn->ret_type;
+                        if (ft && ft->kind == TYPE_COMPLEX &&
+                            (!ot || ot->kind != TYPE_COMPLEX))
+                            irgen_widen_real_to_complex(g, ot);
+                    }
                 }
             } else {
                 ir_emit(g->fn, IR_PUSH_INT, 0, 0, 0);
@@ -1976,6 +2104,43 @@ static void irgen_dup_words(IrGen *g, int nw) {
     ir_emit(g->fn, IR_DUP, nw, 0, 0);
 }
 
+/* How many stack words IR_DUP must copy before a store of type t so that the
+ * store sees the whole object: a complex value is four words on the machine
+ * backends and one slot in the C backend, aggregates and 64-bit scalars are
+ * two words, everything else one. */
+static int irgen_store_dup_words(Type *t) {
+    if (!t) return 1;
+    if (t->kind == TYPE_COMPLEX) return g_irgen_complex_words;
+    if (type_size(t) >= 8) return 2;
+    return 1;
+}
+
+/* Is this an 8-byte _Complex float *object* on a machine backend?
+ *
+ * C99 6.2.5p13: sizeof(_Complex float) == sizeof(float) * 2 == 8.  The
+ * expression stack of the register-pair backends, however, carries every
+ * complex value as four 32-bit words of *double* precision (imaginary low,
+ * imaginary high, real low, real high), because that is what the complex
+ * arithmetic helpers (__aeabi_*, __muldc3 ...) consume.  So reading such an
+ * object has to widen both halves, and storing has to narrow them back.
+ *
+ * The conversion lives in the backends, keyed off IR_AUX_COMPLEX together
+ * with the 8-byte width, so every place that names a complex object keeps
+ * emitting the same IR ops it always did.  The C backend keeps one complex
+ * value in a single 8-byte slot, so the flag is never set there. */
+static int irgen_is_cplx_float(Type *t) {
+    if (!t || t->kind != TYPE_COMPLEX) return 0;
+    if (g_irgen_64bit_slots) return 0;
+    if (g_irgen_complex_words <= 1) return 0;
+    return type_size(t) == 8;
+}
+
+/* Object-access aux for type t: the storage width, plus IR_AUX_COMPLEX when
+ * the object is an 8-byte _Complex float (see irgen_is_cplx_float). */
+static int irgen_complex_aux(Type *t, int width) {
+    return irgen_is_cplx_float(t) ? (width | IR_AUX_COMPLEX) : width;
+}
+
 /* C99 6.3.1.3: convert the top-of-stack integer to dst_t's representation,
  * i.e. keep the low `bits` bits and re-extend them (sign for signed types,
  * zero for unsigned types). Without this a cast like (char)300 leaves 300 on
@@ -2002,6 +2167,10 @@ static void irgen_truncate_int(IrGen *g, Type *dst_t) {
  * 32767 comes out negative.  Both non-C backends implement IR_TRUNC, so
  * re-using it keeps the two of them identical here. */
 static void irgen_load_idx(IrGen *g, Type *elem, int es, int aux) {
+    /* An 8-byte _Complex float element has to be widened on the way in;
+     * this is the single funnel for array subscripts, `*p` and struct
+     * members, so marking it here covers all of them. */
+    if (irgen_is_cplx_float(elem)) aux |= IR_AUX_COMPLEX;
     ir_emit(g->fn, IR_LOAD_IDX, es, 0, aux);
     if (!elem) return;
     if (elem->kind == TYPE_CHAR)
@@ -2044,6 +2213,41 @@ static void irgen_emit_binary_op(IrGen *g, int op, Type *lt, Type *rt) {
     int is_float = 0, is_llong = 0, is_unsigned = 0, is_double = 0;
     int aux_op = op;
     int ptr_div = 0;
+
+    /* C99 6.5.18 compound assignment on a _Complex operand (z += w).  The
+     * plain-expression path in AST_BINARY has handled complex for a while, but
+     * this helper -- which is what `z op= rhs` goes through -- only looked at
+     * TYPE_FLOAT/TYPE_DOUBLE, so `double _Complex z; z += w;` was emitted as a
+     * 32-bit integer add: the real half of w landed in z's real word and the
+     * imaginary half was thrown away (measured: `(1+2i) += (3-1i)` answered
+     * 4 while the correct value is 4+1i).  An integer op on a 16-byte value
+     * cannot be "mostly right", so anything that is not one of the seven
+     * defined complex operators is refused instead of being emitted. */
+    if ((lt && lt->kind == TYPE_COMPLEX) || (rt && rt->kind == TYPE_COMPLEX)) {
+        IrOp fop = 0;
+        /* rhs is on top of the stack; a real operand has to become a complex
+         * with a zero imaginary part before the pair-wise op. */
+        if (rt && rt->kind != TYPE_COMPLEX && rt->kind != TYPE_VOID)
+            irgen_widen_real_to_complex(g, rt);
+        switch (op) {
+            case (int)TOK_PLUS:  fop = IR_FADD; break;
+            case (int)TOK_MINUS: fop = IR_FSUB; break;
+            case (int)TOK_MUL:   fop = IR_FMUL; break;
+            case (int)TOK_DIV:   fop = IR_FDIV; break;
+            case (int)TOK_EQ: case (int)TOK_NE:
+                fop = IR_FCMP; break;
+            default: break;
+        }
+        if (fop) {
+            ir_emit(g->fn, fop, 0, 0, op | IR_AUX_COMPLEX);
+            return;
+        }
+        diag_tool(DIAG_SEV_ERROR, "arkcc",
+                  "operator '%s' is not defined for _Complex values (function '%s')",
+                  "<complex>", g->fn->name, 0, 0, 0, 0);
+        g_irgen_errors++;
+        return;
+    }
     /* C99 6.5.6 pointer arithmetic. Both operands are already on the stack
      * with rhs on top, so `ptr +/- int` can scale rhs by sizeof(*ptr) right
      * here, and `ptr - ptr` can divide the byte difference after the sub. */
@@ -2167,7 +2371,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                 else { re = node->fval; im = 0.0; }
                 {
                     int cid = ir_program_add_complex(g->prog, re, im);
-                    ir_emit(g->fn, IR_PUSH_FLOAT, cid, 0, 0x600);
+                    ir_emit(g->fn, IR_PUSH_FLOAT, cid, 0, IR_AUX_COMPLEX | 0x200);
                 }
                 break;
             }
@@ -2278,7 +2482,8 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                                 s->type->kind == TYPE_UNION)) {
                     ir_emit(g->fn, IR_PUSH_GLOBAL_ADDR, 0, gname, 0);
                 } else {
-                    ir_emit(g->fn, IR_PUSH_GLOBAL, 0, gname, 0);
+                    ir_emit(g->fn, IR_PUSH_GLOBAL, 0, gname,
+                            irgen_is_cplx_float(s->type) ? IR_AUX_COMPLEX : 0);
                 }
             } else if (s->kind == SYM_ENUM_CONST) {
                 ir_emit(g->fn, IR_PUSH_INT, s->enum_value, 0, 0);
@@ -2301,7 +2506,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                         case TYPE_ENUM:  aux = 4 | uns; break;
                         case TYPE_LLONG: aux = 8 | uns; break;  /* #5 FIX: 64-bit local */
                         case TYPE_DOUBLE: aux = 8; break;       /* #5 FIX: double local */
-                        case TYPE_COMPLEX: aux = 16; break;
+                        case TYPE_COMPLEX: aux = irgen_complex_aux(s->type, type_size(s->type)); break;
                         default:         aux = 0; break;
                     }
                     /* #11 FIX: Mark volatile variable reads */
@@ -2396,7 +2601,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                  * creal() in the C backend), so no extra conversion is required. */
                 if (src_t && src_t->kind == TYPE_COMPLEX &&
                     dst_t && (dst_t->kind == TYPE_FLOAT || dst_t->kind == TYPE_DOUBLE || type_is_integer(dst_t))) {
-                    ir_emit(g->fn, IR_F2I, 0, 0, 0x400);  /* 0x400 = complex->real */
+                    ir_emit(g->fn, IR_F2I, 0, 0, IR_AUX_COMPLEX);  /* creal */
                 }
                 /* Everything else (int->int, float->float, pointer->pointer) is a no-op. */
             }
@@ -2501,11 +2706,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                         irgen_widen_to_64(g, lt, is_unsigned ? type_ullong() : type_llong());
                     }
                     if (is_complex && lt && lt->kind != TYPE_COMPLEX) {
-                        /* Widen the real operand to complex: 0x600 = float->complex, 0x700 = int->complex */
-                        if (lt->kind == TYPE_FLOAT || lt->kind == TYPE_DOUBLE)
-                            ir_emit(g->fn, IR_I2F, 0, 0, 0x600);
-                        else
-                            ir_emit(g->fn, IR_I2F, 0, 0, 0x700);
+                        irgen_widen_real_to_complex(g, lt);
                     }
                     irgen_expr(g, node->u.binary.right);
                     if (is_llong && !is_complex) {
@@ -2523,10 +2724,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                         }
                     }
                     if (is_complex && rt && rt->kind != TYPE_COMPLEX) {
-                        if (rt->kind == TYPE_FLOAT || rt->kind == TYPE_DOUBLE)
-                            ir_emit(g->fn, IR_I2F, 0, 0, 0x600);
-                        else
-                            ir_emit(g->fn, IR_I2F, 0, 0, 0x700);
+                        irgen_widen_real_to_complex(g, rt);
                     }
                     if (is_complex && (op == (int)TOK_PLUS || op == (int)TOK_MINUS ||
                                        op == (int)TOK_MUL || op == (int)TOK_DIV)) {
@@ -2537,11 +2735,11 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                             case (int)TOK_MUL:   fop = IR_FMUL; break;
                             case (int)TOK_DIV:   fop = IR_FDIV; break;
                         }
-                        ir_emit(g->fn, fop, 0, 0, op | 0x600);
+                        ir_emit(g->fn, fop, 0, 0, op | IR_AUX_COMPLEX);
                         break;  /* exit the AST_BINARY case */
                     }
                     if (is_complex && (op == (int)TOK_EQ || op == (int)TOK_NE)) {
-                        ir_emit(g->fn, IR_FCMP, 0, 0, op | 0x600);
+                        ir_emit(g->fn, IR_FCMP, 0, 0, op | IR_AUX_COMPLEX);
                         break;
                     }
                 }
@@ -2861,14 +3059,28 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                         if (si && di) {
                             irgen_widen_to_64(g, st, dt);
                         }
+                        /* real -> _Complex assignment (C99 6.5.16.1): the
+                         * destination object is four stack words on the machine
+                         * backends, so a real source has to be widened here.
+                         * Without it `float _Complex z = 3.0f;` pushed one word
+                         * and the store popped four -- the frame walked and the
+                         * object read back as 0 (measured).  A _Complex source
+                         * needs nothing: it is already four words, and the
+                         * narrower destination widths are handled by the store
+                         * itself. */
+                        if (dt && dt->kind == TYPE_COMPLEX &&
+                            (!st || st->kind != TYPE_COMPLEX)) {
+                            irgen_widen_real_to_complex(g, st);
+                        }
                     }
                     if (s && s->kind == SYM_GLOBAL) {
                         const char *gname = L->u.name;
                         if (s->is_static) gname = static_local_name(g->fn->name, L->u.name);
                         /* The store below writes the full object width, so the
                          * duplicated copy must cover every stack word. */
-                        irgen_dup_words(g, (s->type && type_size(s->type) >= 8) ? 2 : 1);
-                        ir_emit(g->fn, IR_STORE_GLOBAL, 0, gname, 0);
+                        irgen_dup_words(g, irgen_store_dup_words(s->type));
+                        ir_emit(g->fn, IR_STORE_GLOBAL, 0, gname,
+                                irgen_is_cplx_float(s->type) ? IR_AUX_COMPLEX : 0);
                     } else if (s) {
                         int store_aux = 0;
                         if (s && s->type) {
@@ -2879,7 +3091,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                                 case TYPE_ENUM:  store_aux = 4; break;
                                 case TYPE_LLONG:  store_aux = 8; break;  /* 64-bit local */
                                 case TYPE_DOUBLE: store_aux = 8; break;
-                                case TYPE_COMPLEX: store_aux = 16; break;
+                                case TYPE_COMPLEX: store_aux = irgen_complex_aux(s->type, type_size(s->type)); break;
                                 default:         store_aux = 0; break;
                             }
                             /* #11 FIX: Mark volatile variable writes */
@@ -2903,7 +3115,17 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                          * more than one word here. */
                         {
                             int push_aux = store_aux & 0xFF;
-                            if (push_aux == 16) push_aux = 0;
+                            /* A complex object occupies four stack words on
+                             * the machine backends, so the reload has to push
+                             * all four; the C backend keeps a complex value in
+                             * one slot and its reload has always been a single
+                             * word (aux 0). */
+                            if (push_aux == 16 && g_irgen_complex_words <= 1)
+                                push_aux = 0;
+                            /* An 8-byte _Complex float reloads as the same four
+                             * double words the store consumed. */
+                            if (irgen_is_cplx_float(s->type))
+                                push_aux = 8 | IR_AUX_COMPLEX;
                             if (s && s->type && s->type->is_unsigned) push_aux |= 0x100;
                             if (s && s->type && s->type->is_volatile) push_aux |= IR_AUX_VOLATILE;
                             ir_emit(g->fn, IR_PUSH_VAR, s->offset, L->u.name, push_aux);
@@ -2950,7 +3172,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                             irgen_widen_to_64(g, st, dt);
                         }
                     }
-                    ir_emit(g->fn, IR_STORE_IDX, elem_sz, 0, packed_aux);
+                    ir_emit(g->fn, IR_STORE_IDX, elem_sz, 0, irgen_complex_aux(L->type, packed_aux));
                 } else if (L->kind == AST_UNARY && L->u.unary.op == (int)TOK_MUL) {
                     int elem_sz = type_size(L->type ? L->type : type_int());
                     int packed_aux = 0;
@@ -2991,7 +3213,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                             irgen_widen_to_64(g, st, dt);
                         }
                     }
-                    ir_emit(g->fn, IR_STORE_IDX, elem_sz, 0, packed_aux);
+                    ir_emit(g->fn, IR_STORE_IDX, elem_sz, 0, irgen_complex_aux(L->type, packed_aux));
                 } else if (L->kind == AST_MEMBER) {
                     int bo, bw;
                     if (member_bitfield_info(L, &bo, &bw)) {
@@ -3044,7 +3266,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                                 irgen_widen_to_64(g, st, dt);
                             }
                         }
-                        ir_emit(g->fn, IR_STORE_IDX, elem_sz, 0, 0);
+                        ir_emit(g->fn, IR_STORE_IDX, elem_sz, 0, irgen_complex_aux(L->type, 0));
                     }
                 } else {
                     {
@@ -3078,12 +3300,14 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                     if (s && s->kind == SYM_GLOBAL) {
                         const char *gname = L->u.name;
                         if (s->is_static) gname = static_local_name(g->fn->name, L->u.name);
-                        ir_emit(g->fn, IR_PUSH_GLOBAL, 0, gname, 0);
+                        ir_emit(g->fn, IR_PUSH_GLOBAL, 0, gname,
+                                irgen_is_cplx_float(s->type) ? IR_AUX_COMPLEX : 0);
                         irgen_expr(g, node->u.binary.right);
                         irgen_maybe_widen_for_binary(g, s->type, node->u.binary.right ? node->u.binary.right->type : 0);
                         irgen_emit_binary_op(g, bop, s->type, node->u.binary.right ? node->u.binary.right->type : 0);
-                        irgen_dup_words(g, (s->type && type_size(s->type) >= 8) ? 2 : 1);
-                        ir_emit(g->fn, IR_STORE_GLOBAL, 0, gname, 0);
+                        irgen_dup_words(g, irgen_store_dup_words(s->type));
+                        ir_emit(g->fn, IR_STORE_GLOBAL, 0, gname,
+                                irgen_is_cplx_float(s->type) ? IR_AUX_COMPLEX : 0);
                     } else if (s) {
                         int store_aux = 0;
                         int push_aux = 0;
@@ -3096,7 +3320,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                                 case TYPE_ENUM:  store_aux = 4; break;
                                 case TYPE_LLONG:  store_aux = 8; break;
                                 case TYPE_DOUBLE: store_aux = 8; break;
-                                case TYPE_COMPLEX: store_aux = 16; break;
+                                case TYPE_COMPLEX: store_aux = irgen_complex_aux(s->type, type_size(s->type)); break;
                                 default:         store_aux = 0; break;
                             }
                             /* push_aux must carry the storage width and unsigned
@@ -3149,7 +3373,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                     irgen_expr(g, node->u.binary.right);            /* [addr, old_val, rhs] */
                     irgen_maybe_widen_for_binary(g, L->type, node->u.binary.right ? node->u.binary.right->type : 0);
                     irgen_emit_binary_op(g, bop, L->type, node->u.binary.right ? node->u.binary.right->type : 0); /* [addr, new_val] */
-                    ir_emit(g->fn, IR_STORE_IDX, elem_sz, 0, packed_aux); /* [new_val] */
+                    ir_emit(g->fn, IR_STORE_IDX, elem_sz, 0, irgen_complex_aux(L->type, packed_aux)); /* [new_val] */
                 } else if (L->kind == AST_ARRAY_ACCESS) {
                     /* arr[i] OP= val
                      * Bug-I4 FIX: Evaluate the lvalue address ONCE and duplicate
@@ -3175,7 +3399,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                     irgen_expr(g, node->u.binary.right);            /* [addr, old_val, rhs] */
                     irgen_maybe_widen_for_binary(g, L->type, node->u.binary.right ? node->u.binary.right->type : 0);
                     irgen_emit_binary_op(g, bop, L->type, node->u.binary.right ? node->u.binary.right->type : 0); /* [addr, new_val] */
-                    ir_emit(g->fn, IR_STORE_IDX, elem_sz, 0, packed_aux); /* [new_val] */
+                    ir_emit(g->fn, IR_STORE_IDX, elem_sz, 0, irgen_complex_aux(L->type, packed_aux)); /* [new_val] */
                 } else if (L->kind == AST_MEMBER) {
                     int bo, bw;
                     if (member_bitfield_info(L, &bo, &bw)) {
@@ -3216,7 +3440,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                         irgen_expr(g, node->u.binary.right);            /* [addr, old_val, rhs] */
                         irgen_maybe_widen_for_binary(g, L->type, node->u.binary.right ? node->u.binary.right->type : 0);
                         irgen_emit_binary_op(g, bop, L->type, node->u.binary.right ? node->u.binary.right->type : 0); /* [addr, new_val] */
-                        ir_emit(g->fn, IR_STORE_IDX, elem_sz, 0, vol_aux); /* [new_val] */
+                        ir_emit(g->fn, IR_STORE_IDX, elem_sz, 0, irgen_complex_aux(L->type, vol_aux)); /* [new_val] */
                     }
                 } else {
                     {
@@ -3259,36 +3483,68 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                 const char *fn = node->u.call.name;
                 if (ark_streq(fn, "creal") || ark_streq(fn, "crealf") || ark_streq(fn, "creall")) {
                     irgen_expr(g, node->u.call.args[0]);
-                    ir_emit(g->fn, IR_F2I, 0, 0, 0x400);  /* 0x400 = complex->real */
+                    ir_emit(g->fn, IR_F2I, 0, 0, IR_AUX_COMPLEX);  /* creal */
                     break;
                 }
                 if (ark_streq(fn, "cimag") || ark_streq(fn, "cimagf") || ark_streq(fn, "cimagl")) {
                     irgen_expr(g, node->u.call.args[0]);
-                    ir_emit(g->fn, IR_I2F, 0, 0, 0x400);  /* 0x400 = complex->real (imag part) */
+                    ir_emit(g->fn, IR_F2I, 0, 0, IR_AUX_COMPLEX | 0x100);  /* cimag */
                     break;
                 }
                 if (ark_streq(fn, "conj") || ark_streq(fn, "conjf") || ark_streq(fn, "conjl")) {
                     irgen_expr(g, node->u.call.args[0]);
-                    ir_emit(g->fn, IR_UNARY, 0, 0, (int)TOK_BNOT | 0x400); /* 0x400 = complex conjugate */
+                    ir_emit(g->fn, IR_UNARY, 0, 0, (int)TOK_BNOT | IR_AUX_COMPLEX);  /* conj */
                     break;
                 }
                 if (ark_streq(fn, "cabs") || ark_streq(fn, "cabsf") || ark_streq(fn, "cabsl")) {
                     irgen_expr(g, node->u.call.args[0]);
-                    ir_emit(g->fn, IR_F2I, 0, 0, 0x500);  /* 0x500 = complex cabs */
+                    ir_emit(g->fn, IR_F2I, 0, 0, IR_AUX_COMPLEX | 0x200);  /* cabs */
                     break;
                 }
                 if (ark_streq(fn, "carg") || ark_streq(fn, "cargf") || ark_streq(fn, "cargl")) {
                     irgen_expr(g, node->u.call.args[0]);
-                    ir_emit(g->fn, IR_I2F, 0, 0, 0x500);  /* 0x500 = complex carg */
+                    ir_emit(g->fn, IR_F2I, 0, 0, IR_AUX_COMPLEX | 0x300);  /* carg */
                     break;
                 }
                 if (ark_streq(fn, "cexp") || ark_streq(fn, "cexpf") || ark_streq(fn, "cexpl")) {
                     irgen_expr(g, node->u.call.args[0]);
-                    ir_emit(g->fn, IR_FADD, 0, 0, 0x500);  /* 0x500 = complex cexp */
+                    ir_emit(g->fn, IR_FADD, 0, 0, (int)TOK_PLUS | IR_AUX_COMPLEX | 0x100);  /* cexp */
                     break;
                 }
             }
 
+            /* An indirect call has no Symbol, but its callee expression still
+             * carries the prototype.  Two shapes reach here:
+             *   TYPE_FUNC behind the pointer -- a typedef'd function type, with
+             *     the parameter list on the FUNC node;
+             *   a `(*fp)(args)` declarator -- the pointer's base is only the
+             *     return type and the parameter list is stored on the pointer
+             *     type itself (see parse_declarator).
+             * Without this the parameter widths were unknown for every
+             * function-pointer call, so a 16-byte _Complex argument was
+             * refused ("the callee cannot tell a four-word value from one
+             * address word") instead of being materialised and passed by
+             * address the way a named parameter already was. */
+            Type **callee_params = 0;
+            int callee_param_count = 0;
+            int callee_is_variadic = 0;
+            if (!s && node->u.call.callee) {
+                Type *ct = node->u.call.callee->type;
+                while (ct && ct->kind == TYPE_PTR) {
+                    if (ct->is_func_ptr && ct->params) {
+                        callee_params = ct->params;
+                        callee_param_count = ct->param_count;
+                        callee_is_variadic = ct->is_variadic;
+                        break;
+                    }
+                    ct = ct->base;
+                }
+                if (ct && ct->kind == TYPE_FUNC && ct->params) {
+                    callee_params = ct->params;
+                    callee_param_count = ct->param_count;
+                    callee_is_variadic = ct->is_variadic;
+                }
+            }
             for (i = n - 1; i >= 0; i--) {
                 AstNode *arg = node->u.call.args[i];
                 Type *at = arg ? arg->type : 0;
@@ -3298,7 +3554,111 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                  * variadic args beyond the named parameter list. */
                 Type *pt = (s && s->kind == SYM_FUNC &&
                             s->param_types && i < s->param_count)
-                           ? s->param_types[i] : 0;
+                           ? s->param_types[i]
+                           : (callee_params && i < callee_param_count)
+                             ? callee_params[i] : 0;
+                /* A complex value is four stack words on the machine
+                 * backends, which is more than IR_CALL's one-word-per-argument
+                 * transfer can carry.  A *named* parameter of the same kind
+                 * already travels as one address word (IR_GETARG with a size
+                 * above 8 memcpys the payload into the callee's frame), so the
+                 * value is materialised in a temporary and its address is
+                 * passed.  Both sides then agree on the wire shape: one word.
+                 * Through `...` there is no such agreement -- <stdarg.h> walks
+                 * consecutive words -- so that shape stays refused instead of
+                 * being passed half-materialised. */
+                /* A real argument for a _Complex parameter goes through the
+                 * same path: C99 6.5.2.2 converts it first, so the value has to
+                 * become four words before it is materialised. */
+                int arg_cplx = g_irgen_complex_words > 1 &&
+                               ((at && at->kind == TYPE_COMPLEX) ||
+                                (pt && pt->kind == TYPE_COMPLEX));
+                if (arg_cplx && at && at->kind == TYPE_COMPLEX) {
+                    int in_va_tail =
+                        (s && s->kind == SYM_FUNC && s->is_variadic &&
+                         i >= s->param_count) ||
+                        (callee_params && callee_is_variadic &&
+                         i >= callee_param_count);
+                    if (!pt || in_va_tail) {
+                        diag_tool(DIAG_SEV_ERROR, "arkcc",
+                                  "passing a _Complex value without a _Complex "
+                                  "parameter type is not implemented for this "
+                                  "target: the callee cannot tell a four-word "
+                                  "value from one address word (function '%s')",
+                                  g->fn->name, 0, 0, 0, 0, 0);
+                        g_irgen_errors++;
+                        ir_emit(g->fn, IR_PUSH_INT, 0, 0, 0);
+                        continue;
+                    }
+                    if (type_size(pt) == 8) {
+                        /* _Complex float: the callee's IR_GETARG sees an 8-byte
+                         * object and reads two words from the register pair / the
+                         * caller's stack, exactly like a long long, so narrow the
+                         * four-word value into an 8-byte temporary and push those
+                         * two raw words -- no address.
+                         * The decision keys off the PARAMETER's width, not the
+                         * expression's: `twice(1.5f + 2.5f * I)` has a
+                         * _Complex double expression (the pair arithmetic is
+                         * done in double) while the parameter is a 8-byte
+                         * _Complex float, and choosing by `at` handed the
+                         * callee an address where it expected two f32 words
+                         * (measured: cplx_ret_fparam answered 0 instead of 35).
+                         * The narrowing store converts each half by itself, so
+                         * the four-word value is unchanged. */
+                        int ctmp = alloc_local(g, 8);
+                        irgen_expr(g, arg);
+                        if (!at || at->kind != TYPE_COMPLEX)
+                            irgen_widen_real_to_complex(g, at);
+                        ir_emit(g->fn, IR_STORE, ctmp, 0, 8 | IR_AUX_COMPLEX);
+                        ir_emit(g->fn, IR_PUSH_VAR, ctmp, 0, 8);
+                        continue;
+                    }
+                    {
+                        int ctmp = alloc_local(g, 16);
+                        irgen_expr(g, arg);
+                        if (!at || at->kind != TYPE_COMPLEX)
+                            irgen_widen_real_to_complex(g, at);
+                        ir_emit(g->fn, IR_STORE, ctmp, 0, 16);
+                        ir_emit(g->fn, IR_PUSH_ADDR, ctmp, 0, 0);
+                    }
+                    continue;
+                }
+                if (arg_cplx) {
+                    /* _Complex parameter, real argument: the widening above is
+                     * not reached by the block that only fires for a _Complex
+                     * *expression*, so do it here and reuse the wire shape. */
+                    int in_va_tail2 =
+                        (s && s->kind == SYM_FUNC && s->is_variadic &&
+                         i >= s->param_count) ||
+                        (callee_params && callee_is_variadic &&
+                         i >= callee_param_count);
+                    if (!pt || in_va_tail2) {
+                        diag_tool(DIAG_SEV_ERROR, "arkcc",
+                                  "passing a real value to a _Complex parameter "
+                                  "through '...' is not implemented for this "
+                                  "target (function '%s')",
+                                  g->fn->name, 0, 0, 0, 0, 0);
+                        g_irgen_errors++;
+                        ir_emit(g->fn, IR_PUSH_INT, 0, 0, 0);
+                        continue;
+                    }
+                    if (type_size(pt) == 8) {
+                        int ctmp2 = alloc_local(g, 8);
+                        irgen_expr(g, arg);
+                        irgen_widen_real_to_complex(g, at);
+                        ir_emit(g->fn, IR_STORE, ctmp2, 0, 8 | IR_AUX_COMPLEX);
+                        ir_emit(g->fn, IR_PUSH_VAR, ctmp2, 0, 8);
+                        continue;
+                    }
+                    {
+                        int ctmp2 = alloc_local(g, 16);
+                        irgen_expr(g, arg);
+                        irgen_widen_real_to_complex(g, at);
+                        ir_emit(g->fn, IR_STORE, ctmp2, 0, 16);
+                        ir_emit(g->fn, IR_PUSH_ADDR, ctmp2, 0, 0);
+                    }
+                    continue;
+                }
                 /* struct-by-value comes in three shapes, and the callee --
                  * IR_GETARG, which keys off the size in aux -- decides by size:
                  *   > 8 bytes : the caller passes the *address* and the callee
@@ -3334,8 +3694,10 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                      * exactly once, and dropped at the end. */
                     int vsz = type_size(at);
                     int vw = (vsz + 3) / 4;
-                    if (s && s->kind == SYM_FUNC && s->is_variadic &&
-                        i >= s->param_count) {
+                    if ((s && s->kind == SYM_FUNC && s->is_variadic &&
+                         i >= s->param_count) ||
+                        (callee_params && callee_is_variadic &&
+                         i >= callee_param_count)) {
                         if (!g_ir_vararg_words) {
                             char b1[12];
                             diag_tool(DIAG_SEV_ERROR, "arkcc",
@@ -3411,8 +3773,11 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                      * next argument word as the high half (measured on ARM
                      * against gcc: the promoted value must be 8 bytes wide).
                      * The matching 8-byte-width flag is set on argmask below. */
-                    if (s && s->kind == SYM_FUNC && s->is_variadic &&
-                        i >= s->param_count && at && at->kind == TYPE_FLOAT) {
+                    if (((s && s->kind == SYM_FUNC && s->is_variadic &&
+                          i >= s->param_count) ||
+                         (callee_params && callee_is_variadic &&
+                          i >= callee_param_count)) &&
+                        at && at->kind == TYPE_FLOAT) {
                         ir_emit(g->fn, IR_F2F, 0, 0, 0x100);
                     }
                 }
@@ -3474,7 +3839,9 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                      * be 8. Fall back to arg type for variadic/unprototyped. */
                     Type *pt = (s && s->kind == SYM_FUNC &&
                                 s->param_types && i < s->param_count)
-                               ? s->param_types[i] : 0;
+                               ? s->param_types[i]
+                               : (callee_params && i < callee_param_count)
+                                 ? callee_params[i] : 0;
                     Type *use_t = pt ? pt : (arg ? arg->type : 0);
                     wires[i] = 4;      /* one word unless a wider shape says otherwise */
                     if (use_t) {
@@ -3483,8 +3850,11 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                          * (see the IR_F2F above), so it occupies 8 bytes on the
                          * wire as well; the width bit is what the ARM/RV32I
                          * backends place the argument by. */
-                        if (s && s->kind == SYM_FUNC && s->is_variadic &&
-                            i >= s->param_count && k == TYPE_FLOAT) {
+                        if (((s && s->kind == SYM_FUNC && s->is_variadic &&
+                              i >= s->param_count) ||
+                             (callee_params && callee_is_variadic &&
+                              i >= callee_param_count)) &&
+                            k == TYPE_FLOAT) {
                             if (i < 16) argmask |= (1 << (2 * i + 1));
                             wires[i] = 8;
                         }
@@ -3501,6 +3871,14 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                             argmask |= (1 << (2 * i + 1));
                         }
                         if (k == TYPE_LLONG || k == TYPE_DOUBLE) wires[i] = 8;
+                        /* _Complex float: an 8-byte object passed as two
+                         * words.  Without the 8-byte wire width the ARM
+                         * backend popped only r0 and left the imaginary
+                         * word stranded on the stack. */
+                        if (k == TYPE_COMPLEX && type_size(use_t) == 8) {
+                            if (i < 16) argmask |= (1 << (2 * i + 1));
+                            wires[i] = 8;
+                        }
                         /* A struct/union of 5..8 bytes travels as an 8-byte
                          * value (two words), so it needs the same even-register
                          * pair / 8-byte stack slot treatment as long long.
@@ -3520,8 +3898,10 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                                  * size travels as one pointer word, which is
                                  * what wires[] keeps (4) -- it is not this
                                  * branch because pt != 0. */
-                                if (s && s->kind == SYM_FUNC && s->is_variadic &&
-                                    i >= s->param_count) {
+                                if ((s && s->kind == SYM_FUNC &&
+                                     s->is_variadic && i >= s->param_count) ||
+                                    (callee_params && callee_is_variadic &&
+                                     i >= callee_param_count)) {
                                     wires[i] = (ssz + 3) & ~3;
                                     if (wires[i] != 8) wire_extra = 1;
                                 }
@@ -3559,6 +3939,18 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                         call_val |= 0x100000000LL;
                     if (node->type && node->type->kind == TYPE_VOID)
                         call_val |= 0x200000000LL;
+                    /* bits 34..35: the result is a _Complex value on the
+                     * machine backends, which carry it as four stack words that
+                     * no register pair can hold.  The backend turns it into
+                     * 1 = _Complex float (8-byte object, r0:r1 / a0:a1) or
+                     * 2 = _Complex double (16-byte object, sret pointer).
+                     * Without the flag an *indirect* call (a function pointer,
+                     * whose type is not in prog->funcs) would leave a single
+                     * word on the stack and every later complex operation would
+                     * read three words of garbage. */
+                    if (node->type && node->type->kind == TYPE_COMPLEX &&
+                        g_irgen_complex_words > 1)
+                        call_val |= (type_size(node->type) > 8 ? 2LL : 1LL) << 34;
                     ir_emit(g->fn, IR_CALL, call_val, node->u.call.name, argmask);
                     /* ir_emit() has no aux2 parameter on purpose: it is used in
                      * hundreds of places and all but this one leave it 0. */
