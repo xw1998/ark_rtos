@@ -130,6 +130,15 @@ AstNode *parse_program(Lexer *lex) {
     prog->u.program.decl_capacity = 0;
 
     while (lexer_peek(lex).kind != TOK_EOF) {
+        /* Enough.  armcc stops *reporting* at 30 errors (diag_at_limit), but
+         * this loop used to keep parsing -- and allocating an AST for every
+         * statement of a file it no longer understood -- until the 4 MB pool
+         * ran out.  The loudest line was then "memory pool exhausted", which
+         * hid the actual cause (measured on the board: `cc -S va.c` without
+         * -I printed #5 "cannot open ... stdarg.h", then #65 cascades, then
+         * died in the allocator).  Stop parsing instead; the errors already
+         * reported decide the exit code. */
+        if (diag_at_limit()) break;
         /* C11 6.8.2 allows a lone ';' as an empty declaration, and both
          * armcc and GCC accept it at file scope.  Real headers rely on
          * it: a declaration macro that already ends with ';' is often
@@ -1875,10 +1884,23 @@ static AstNode *parse_block(Parser *p) {
     blk = ast_block(line);
     while (lexer_peek(p->lex).kind != TOK_RBRACE &&
            lexer_peek(p->lex).kind != TOK_EOF) {
-        AstNode *s = parse_statement(p);
+        AstNode *s;
+        const char *before;
+        /* Same stop as parse_program: no point building an AST for statements
+         * of a function we already failed to understand. */
+        if (diag_at_limit()) break;
+        before = p->lex->p;
+        s = parse_statement(p);
         if (s) {
             block_add_stmt(blk, s);
         }
+        /* Recovery has to consume something.  A statement the parser cannot
+         * even start used to be retried at the same token forever: measured on
+         * the board with `u.v = va_arg(ap, long long);` and no <stdarg.h>,
+         * #65/#29 repeated on line 36 until the 4 MB pool was gone (595 ms),
+         * and the last thing printed was "memory pool exhausted" instead of
+         * the missing include. */
+        if (p->lex->p == before) lexer_advance(p->lex);
     }
     sym_leave_scope();
     lexer_expect(p->lex, TOK_RBRACE);
