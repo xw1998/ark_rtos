@@ -1159,7 +1159,21 @@ static int irgen_compound_literal(IrGen *g, AstNode *node) {
  * returns occupy 2 stack slots and need 2 POPs. */
 static void irgen_discard_result(IrGen *g, AstNode *node) {
     Type *et = node ? node->type : 0;
+    int words = 1;
     if (et && (et->kind == TYPE_LLONG || et->kind == TYPE_DOUBLE)) {
+        words = 2;
+    } else if (et && (et->kind == TYPE_STRUCT || et->kind == TYPE_UNION)) {
+        /* An aggregate expression is passed as a low/high word pair
+         * (backends refuse anything wider than 8 bytes by value), so
+         * discarding it has to drop both words.  Popping one left four
+         * bytes on the IR stack and the next `ret` jumped to 0. */
+        int sz = type_size(et);
+        /* Both backends push an aggregate result as a low/high word
+         * pair up to 8 bytes; wider composites are passed by address,
+         * which is one word.  Match that or the IR stack drifts. */
+        words = (sz > 4 && sz <= 8) ? 2 : 1;
+    }
+    if (words == 2) {
         ir_emit(g->fn, IR_POP, 0, 0, 0);
         ir_emit(g->fn, IR_POP, 0, 0, 0);
     } else if (et && et->kind == TYPE_VOID &&
@@ -1914,6 +1928,21 @@ static void irgen_truncate_int(IrGen *g, Type *dst_t) {
     ir_emit(g->fn, IR_TRUNC, bits, 0, dst_t->is_unsigned ? 1 : 0);
 }
 
+/* Narrow loads land in a 32-bit stack slot, and IR_LOAD_IDX carries the
+ * element size but not its signedness: a 1- or 2-byte load has to be
+ * re-extended from the element type, otherwise `unsigned char c = 200;
+ * c > 100` answers false (the byte was sign-extended) and a `short` above
+ * 32767 comes out negative.  Both non-C backends implement IR_TRUNC, so
+ * re-using it keeps the two of them identical here. */
+static void irgen_load_idx(IrGen *g, Type *elem, int es, int aux) {
+    ir_emit(g->fn, IR_LOAD_IDX, es, 0, aux);
+    if (!elem) return;
+    if (elem->kind == TYPE_CHAR)
+        ir_emit(g->fn, IR_TRUNC, 8, 0, elem->is_unsigned ? 1 : 0);
+    else if (elem->kind == TYPE_SHORT)
+        ir_emit(g->fn, IR_TRUNC, 16, 0, elem->is_unsigned ? 1 : 0);
+}
+
 /* After evaluating a condition expression, if its type is 64-bit (8 bytes),
  * collapse the two stack words [lo, hi] into a single 4-byte value
  * (lo | hi) so that IR_JZ/IR_JNZ can correctly test truthiness.
@@ -2526,7 +2555,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                     node->u.unary.operand->type->is_packed) {
                     packed_aux = 0x400;
                 }
-                ir_emit(g->fn, IR_LOAD_IDX, type_size(node->type ? node->type : type_int()), 0, packed_aux);
+                irgen_load_idx(g, node->type, type_size(node->type ? node->type : type_int()), packed_aux);
             } else if (op == (int)TOK_INC || op == (int)TOK_DEC) {
                 int delta = (op == (int)TOK_INC) ? 1 : -1;
                 AstNode *operand = node->u.unary.operand;
@@ -2633,11 +2662,11 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                         irgen_lvalue_addr(g, operand);
                         ir_emit(g->fn, IR_DUP, 0, 0, 0);
                         ir_emit(g->fn, IR_PUSH_INT, 0, 0, 0);
-                        ir_emit(g->fn, IR_LOAD_IDX, elem_sz, 0, packed_aux);
+                        irgen_load_idx(g, operand->type, elem_sz, packed_aux);
                         ir_emit(g->fn, IR_SWAP, 0, 0, 0);
                         ir_emit(g->fn, IR_DUP, 0, 0, 0);
                         ir_emit(g->fn, IR_PUSH_INT, 0, 0, 0);
-                        ir_emit(g->fn, IR_LOAD_IDX, elem_sz, 0, packed_aux);
+                        irgen_load_idx(g, operand->type, elem_sz, packed_aux);
                         ir_emit(g->fn, IR_PUSH_INT, delta, 0, 0);
                         ir_emit(g->fn, IR_BINARY, 0, 0, (int)TOK_PLUS);
                         ir_emit(g->fn, IR_STORE_IDX, elem_sz, 0, packed_aux);
@@ -2649,7 +2678,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                         irgen_lvalue_addr(g, operand);
                         ir_emit(g->fn, IR_DUP, 0, 0, 0);
                         ir_emit(g->fn, IR_PUSH_INT, 0, 0, 0);
-                        ir_emit(g->fn, IR_LOAD_IDX, elem_sz, 0, packed_aux);
+                        irgen_load_idx(g, operand->type, elem_sz, packed_aux);
                         ir_emit(g->fn, IR_PUSH_INT, delta, 0, 0);
                         ir_emit(g->fn, IR_BINARY, 0, 0, (int)TOK_PLUS);
                         ir_emit(g->fn, IR_STORE_IDX, elem_sz, 0, packed_aux);
@@ -3033,7 +3062,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                     irgen_lvalue_addr(g, L);                       /* [addr] */
                     ir_emit(g->fn, IR_DUP, 0, 0, 0);               /* [addr, addr] */
                     ir_emit(g->fn, IR_PUSH_INT, 0, 0, 0);           /* [addr, addr, 0] */
-                    ir_emit(g->fn, IR_LOAD_IDX, elem_sz, 0, packed_aux); /* [addr, old_val] */
+                    irgen_load_idx(g, L->type, elem_sz, packed_aux); /* [addr, old_val] */
                     irgen_expr(g, node->u.binary.right);            /* [addr, old_val, rhs] */
                     irgen_maybe_widen_for_binary(g, L->type, node->u.binary.right ? node->u.binary.right->type : 0);
                     irgen_emit_binary_op(g, bop, L->type, node->u.binary.right ? node->u.binary.right->type : 0); /* [addr, new_val] */
@@ -3059,7 +3088,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                     irgen_lvalue_addr(g, L);                       /* [addr] */
                     ir_emit(g->fn, IR_DUP, 0, 0, 0);               /* [addr, addr] */
                     ir_emit(g->fn, IR_PUSH_INT, 0, 0, 0);           /* [addr, addr, 0] */
-                    ir_emit(g->fn, IR_LOAD_IDX, elem_sz, 0, packed_aux); /* [addr, old_val] */
+                    irgen_load_idx(g, L->type, elem_sz, packed_aux); /* [addr, old_val] */
                     irgen_expr(g, node->u.binary.right);            /* [addr, old_val, rhs] */
                     irgen_maybe_widen_for_binary(g, L->type, node->u.binary.right ? node->u.binary.right->type : 0);
                     irgen_emit_binary_op(g, bop, L->type, node->u.binary.right ? node->u.binary.right->type : 0); /* [addr, new_val] */
@@ -3100,7 +3129,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                         irgen_lvalue_addr(g, L);                       /* [addr] */
                         ir_emit(g->fn, IR_DUP, 0, 0, 0);               /* [addr, addr] */
                         ir_emit(g->fn, IR_PUSH_INT, 0, 0, 0);           /* [addr, addr, 0] */
-                        ir_emit(g->fn, IR_LOAD_IDX, elem_sz, 0, vol_aux); /* [addr, old_val] */
+                        irgen_load_idx(g, L->type, elem_sz, vol_aux); /* [addr, old_val] */
                         irgen_expr(g, node->u.binary.right);            /* [addr, old_val, rhs] */
                         irgen_maybe_widen_for_binary(g, L->type, node->u.binary.right ? node->u.binary.right->type : 0);
                         irgen_emit_binary_op(g, bop, L->type, node->u.binary.right ? node->u.binary.right->type : 0); /* [addr, new_val] */
@@ -3483,7 +3512,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
             }
             irgen_lvalue_addr(g, node);
             ir_emit(g->fn, IR_PUSH_INT, 0, 0, 0);
-            ir_emit(g->fn, IR_LOAD_IDX, elem_sz, 0, packed_aux);
+            irgen_load_idx(g, node->type, elem_sz, packed_aux);
             break;
         }
         case AST_MEMBER: {
@@ -3507,7 +3536,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                 if (elem_sz <= 0) elem_sz = 4;
                 irgen_lvalue_addr(g, node);
                 ir_emit(g->fn, IR_PUSH_INT, 0, 0, 0);
-                ir_emit(g->fn, IR_LOAD_IDX, elem_sz, 0, 0);
+                irgen_load_idx(g, node->type, elem_sz, 0);
             }
             break;
         }

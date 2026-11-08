@@ -139,6 +139,7 @@ endif
 # arkc ships include/platform.h, and the shell ships shell/platform.h.
 ifeq ($(USE_ARKC),1)
 SRCS += \
+  kernelsrc/components/arkc/src/agginit.c \
   kernelsrc/components/arkc/src/ast.c \
   kernelsrc/components/arkc/src/backend/arm/backend_arm.c \
   kernelsrc/components/arkc/src/backend/registry.c \

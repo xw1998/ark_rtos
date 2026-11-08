@@ -20,6 +20,7 @@
 #include "config.h"
 #include "diag.h"
 #include "scatter.h"
+#include "agginit.h"
 #include "arkcc_config.h"
 /* --rt-lazy 的文本压实用 memmove/memcmp（标准 C 库，宿主与板上都有实现）。 */
 #include <string.h>
@@ -1856,6 +1857,27 @@ static int aapcs_assign(const int *sizes, int n, int ncrn_start,
     return nsaa;
 }
 
+/* One place for "a C string as .asciz text": the string pool and the
+ * pointer-global initialiser both need it. */
+static void arm_put_escaped_str(AsmBuffer *b, const char *s) {
+    int k;
+    for (k = 0; s[k]; k++) {
+        unsigned char c = (unsigned char)s[k];
+        if (c == '\n') asmbuf_puts(b, "\\n");
+        else if (c == '\t') asmbuf_puts(b, "\\t");
+        else if (c == '\r') asmbuf_puts(b, "\\r");
+        else if (c == '\\') asmbuf_puts(b, "\\\\");
+        else if (c == '"')  asmbuf_puts(b, "\\\"");
+        else if (c < 0x20 || c >= 0x7F) {
+            char hb[8];
+            const char *hh = "0123456789abcdef";
+            hb[0] = '\\'; hb[1] = 'x';
+            hb[2] = hh[(c >> 4) & 0xF]; hb[3] = hh[c & 0xF]; hb[4] = 0;
+            asmbuf_puts(b, hb);
+        } else asmbuf_putc(b, (char)c);
+    }
+}
+
 static char *codegen_arm(IrProgram *prog) {
     AsmBuffer buf;
     int fi;
@@ -1927,6 +1949,29 @@ static char *codegen_arm(IrProgram *prog) {
             asmbuf_puts(&buf, "\"\n");
         }
         asmbuf_puts(&buf, ".text\n\n");
+    }
+
+    /* A pointer global can be initialised from a string literal
+     * (`char *p = "hi";`).  That string is not in the pool -- the pool
+     * is filled while emitting expressions -- and it is not a character
+     * array either, so nothing used to emit it: the runtime initialiser
+     * then wrote the bytes 'h','i' *into the pointer object* and left
+     * the pointer itself uninitialised, i.e. `p` was a wild pointer.
+     * Give each one a flash label and store its address instead. */
+    {
+        int gi, any = 0;
+        for (gi = 0; gi < prog->global_count; gi++) {
+            IrGlobal *g = prog->globals[gi];
+            if (g->is_extern || !g->has_init || !g->init_str) continue;
+            if (!g->type || g->type->kind != TYPE_PTR) continue;
+            if (!any) { asmbuf_puts(&buf, ".section .rodata\n"); any = 1; }
+            asmbuf_puts(&buf, ".L_gstr_");
+            asmbuf_int(&buf, gi);
+            asmbuf_puts(&buf, ":\n    .asciz \"");
+            arm_put_escaped_str(&buf, g->init_str);
+            asmbuf_puts(&buf, "\"\n");
+        }
+        if (any) asmbuf_puts(&buf, ".text\n\n");
     }
 
     /* Floating-point constant section: emit both single-precision (.L_flt_<i>) and double-precision (.L_dbl_<i>) bit patterns.
@@ -4025,8 +4070,7 @@ static char *codegen_arm(IrProgram *prog) {
         for (gi = 0; gi < prog->global_count; gi++) {
             IrGlobal *g = prog->globals[gi];
             unsigned addr;
-            int sz, elem_sz, elem_count, ei;
-            const char *agg;
+            int sz;
             if (g->is_extern || g->has_at) continue;
             if (!g->has_init) continue;
             /* Skip zero-initialized scalars (they're in .bss, already zeroed) */
@@ -4055,127 +4099,66 @@ static char *codegen_arm(IrProgram *prog) {
                     asmbuf_puts(&buf, "    STR r0, [r1]\n");
                 }
             } else if (g->init_aggregate) {
-                /* Aggregate initializer: parse "{v1, v2, v3, ...}" and emit element-by-element.
-                 * #4 FIX: Improved parser now handles:
-                 *   - Nested {} (flattened for multi-dim arrays / struct fields)
-                 *   - Negative numbers
-                 *   - Designated initializers (.field=value — field name skipped)
-                 *   - String elements (skipped, emit 0)
-                 *   - Float elements (skipped, emit 0)
-                 *   - Hex and decimal integers */
-                agg = g->init_aggregate;
-                /* For arrays, element size = size of base type; for structs, use 4 (word) */
-                if (g->type && g->type->kind == TYPE_ARRAY && g->type->base) {
-                    elem_sz = type_size(g->type->base);
-                    if (elem_sz <= 0) elem_sz = 4;
-                    elem_count = g->type->size;
-                } else {
-                    elem_sz = 4;
-                    elem_count = sz / 4;
+                /* Aggregate initialiser: turn the text into bytes with the
+                 * shared type-driven filler (src/agginit.c), then store them
+                 * into the object.  The old code walked the text by counting
+                 * commas and skipped string elements as zero, so a char array
+                 * member came out full of NULs; anything else it could not
+                 * resolve it also wrote as zero without a word of warning. */
+                unsigned char *bytes = (unsigned char *)mem_pool_alloc(sz);
+                int bad = 0, k;
+                if (!bytes) bad = 1;
+                else {
+                    for (k = 0; k < sz; k++) bytes[k] = 0;
+                    if (ark_agg_fill(g->type, g->init_aggregate, bytes, sz) != 0)
+                        bad = 1;
                 }
-                if (elem_count <= 0) elem_count = sz;  /* fallback: byte-by-byte */
-                /* Skip opening '{' */
-                if (*agg == '{') agg++;
-                for (ei = 0; ei < elem_count; ei++) {
-                    int val = 0;
-                    int neg = 0;
-                    int got_val = 0;
-                    /* Skip whitespace and nested opening braces */
-                    while (*agg == ' ' || *agg == '\t' || *agg == '\n' || *agg == '{') agg++;
-                    /* Handle designated initializer: .field=value or [idx]=value */
-                    if (*agg == '.') {
-                        /* Skip field name until '=' */
-                        while (*agg && *agg != '=') agg++;
-                        if (*agg == '=') agg++;
-                        while (*agg == ' ' || *agg == '\t') agg++;
-                    }
-                    if (*agg == '[') {
-                        /* Skip array index designation [idx]= */
-                        while (*agg && *agg != ']') agg++;
-                        if (*agg == ']') agg++;
-                        if (*agg == '=') agg++;
-                        while (*agg == ' ' || *agg == '\t') agg++;
-                    }
-                    /* Handle string elements (skip) */
-                    if (*agg == '"') {
-                        agg++;
-                        while (*agg && *agg != '"') agg++;
-                        if (*agg == '"') agg++;
-                        val = 0; got_val = 1;
-                    }
-                    /* Handle negative sign */
-                    else if (*agg == '-') { neg = 1; agg++; }
-                    /* Parse hex or decimal */
-                    if (!got_val) {
-                        if (*agg == '0' && (agg[1] == 'x' || agg[1] == 'X')) {
-                            agg += 2;
-                            while ((*agg >= '0' && *agg <= '9') || (*agg >= 'a' && *agg <= 'f') || (*agg >= 'A' && *agg <= 'F')) {
-                                char c = *agg;
-                                int v = (c >= '0' && c <= '9') ? c - '0' :
-                                        (c >= 'a' && c <= 'f') ? c - 'a' + 10 : c - 'A' + 10;
-                                val = val * 16 + v;
-                                agg++;
-                            }
-                            got_val = 1;
-                        } else if (*agg >= '0' && *agg <= '9') {
-                            while (*agg >= '0' && *agg <= '9') { val = val * 10 + (*agg - '0'); agg++; }
-                            got_val = 1;
-                        } else if (*agg == '\'') {
-                            /* Character literal */
-                            agg++;
-                            if (*agg == '\\') {
-                                agg++;
-                                switch (*agg) {
-                                    case 'n': val = '\n'; break;
-                                    case 't': val = '\t'; break;
-                                    case 'r': val = '\r'; break;
-                                    case '0': val = '\0'; break;
-                                    case '\\': val = '\\'; break;
-                                    case '\'': val = '\''; break;
-                                    case '"': val = '"'; break;
-                                    default: val = *agg; break;
-                                }
-                                agg++;
-                            } else {
-                                val = (unsigned char)*agg;
-                                agg++;
-                            }
-                            if (*agg == '\'') agg++;
-                            got_val = 1;
+                if (bad) {
+                    diag_tool(DIAG_SEV_ERROR, "arkcc",
+                              "the arm backend cannot turn the initialiser of "
+                              "the global '%s' into data; only integer "
+                              "constants in arrays and structures, string "
+                              "literals for char arrays, and a string literal "
+                              "for a pointer are implemented",
+                              g->name, 0,0,0,0,0);
+                    continue;
+                }
+                /* Word stores on word-aligned runs, byte stores elsewhere.
+                 * Every word is written, zeros included: the .data area in
+                 * SRAM is not zeroed for us (only .bss is). */
+                emit_mov_addr32(&buf, 1, addr, addr_in_own_data(addr));
+                for (k = 0; k < sz; ) {
+                    if (((k & 3) == 0) && k + 4 <= sz) {
+                        int w = (int)((unsigned)bytes[k]
+                                    | ((unsigned)bytes[k + 1] << 8)
+                                    | ((unsigned)bytes[k + 2] << 16)
+                                    | ((unsigned)bytes[k + 3] << 24));
+                        emit_mov_imm(&buf, 0, w);
+                        asmbuf_puts(&buf, "    STR r0, [r1");
+                        if (k != 0) {
+                            asmbuf_puts(&buf, ", #");
+                            asmbuf_int(&buf, k);
                         }
-                        /* Skip float values (contains '.' or 'e') */
-                        if (!got_val && ((*agg >= 'a' && *agg <= 'z') || (*agg >= 'A' && *agg <= 'Z'))) {
-                            /* Skip identifier/float */
-                            while ((*agg >= '0' && *agg <= '9') || (*agg >= 'a' && *agg <= 'z') || (*agg >= 'A' && *agg <= 'Z') || *agg == '.' || *agg == '+' || *agg == '-') agg++;
-                            val = 0; got_val = 1;
-                        }
-                    }
-                    if (neg) val = -val;
-                    /* Skip to next comma or closing brace, handling nested braces */
-                    {
-                        int depth = 0;
-                        while (*agg && !(*agg == ',' && depth == 0) && !(*agg == '}' && depth == 0)) {
-                            if (*agg == '{') depth++;
-                            else if (*agg == '}') depth--;
-                            agg++;
-                        }
-                    }
-                    if (*agg == ',') agg++;
-                    /* Skip nested closing braces */
-                    while (*agg == '}') agg++;
-
-                    /* Emit store for this element */
-                    emit_mov_imm(&buf, 0, val);
-                    emit_mov_addr32(&buf, 1, addr + (unsigned)(ei * elem_sz),
-                                    addr_in_own_data(addr));
-                    if (elem_sz == 1) {
-                        asmbuf_puts(&buf, "    STRB r0, [r1]\n");
-                    } else if (elem_sz == 2) {
-                        asmbuf_puts(&buf, "    STRH r0, [r1]\n");
+                        asmbuf_puts(&buf, "]\n");
+                        k += 4;
                     } else {
-                        asmbuf_puts(&buf, "    STR r0, [r1]\n");
+                        emit_mov_imm(&buf, 0, (int)bytes[k]);
+                        asmbuf_puts(&buf, "    STRB r0, [r1, #");
+                        asmbuf_int(&buf, k);
+                        asmbuf_puts(&buf, "]\n");
+                        k += 1;
                     }
                 }
+            } else if (g->init_str && g->type && g->type->kind == TYPE_PTR) {
+                /* Pointer initialised from a string literal: the bytes live
+                 * in flash (see the .L_gstr_ block above), the object holds
+                 * their address.  Writing the characters into the pointer
+                 * was a silent wild pointer. */
+                asmbuf_puts(&buf, "    LDR r0, =.L_gstr_");
+                asmbuf_int(&buf, gi);
+                asmbuf_putc(&buf, '\n');
+                emit_mov_addr32(&buf, 1, addr, addr_in_own_data(addr));
+                asmbuf_puts(&buf, "    STR r0, [r1]\n");
             } else if (g->init_str) {
                 /* String initializer for char array: emit byte-by-byte */
                 int si;
