@@ -91,6 +91,18 @@ struct AstNode {
         struct { char *field; int index; int has_field; int has_index; AstNode *value; } init_field; /* AST_INIT_FIELD */
         struct { char *text; char *outputs; char *inputs; char *clobbers; int is_volatile; } asm_stmt;
         struct { Type *lit_type; AstNode *init; } compound_lit;      /* AST_COMPOUND_LITERAL */
+        /* AST_GENERIC (C11 6.5.1.1).  The controlling expression is kept as an
+         * expression because its type is unknown until sema runs; sema picks the
+         * matching association and replaces this node with it, so nothing
+         * downstream ever sees the construct. */
+        struct {
+            AstNode  *ctrl;           /* controlling expression */
+            AstNode  *default_expr;   /* default association, or 0 */
+            Type    **types;          /* association type-names */
+            AstNode **exprs;          /* association expressions */
+            int       count;
+            int       cap;
+        } generic;
     } u;
 };
 

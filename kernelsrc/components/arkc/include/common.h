@@ -126,6 +126,12 @@ typedef enum {
     TOK_MAY_ALIAS,        /* __may_alias */
     TOK_DECLSPEC,         /* __declspec (MSVC-style attribute) */
 
+    /* === C11 keyword additions (appended, never inserted) === */
+    TOK_ALIGNOF,          /* _Alignof */
+    TOK_ALIGNAS,          /* _Alignas */
+    TOK_STATIC_ASSERT,    /* _Static_assert */
+    TOK_GENERIC,          /* _Generic */
+
     TOK__SENTINEL
 } TokenKind;
 
@@ -173,7 +179,10 @@ typedef enum {
     AST_COMPOUND_LITERAL, /* (T){...} */
 
     /* === 0.4.0 additions === */
-    AST_ASM_FUNC       /* __asm void fn(...) { ... } whole-function-body assembly */
+    AST_ASM_FUNC,      /* __asm void fn(...) { ... } whole-function-body assembly */
+
+    /* === C11 additions === */
+    AST_GENERIC        /* _Generic; resolved (squashed) by sema, never reaches irgen */
 } AstNodeKind;
 
 /* IR operations */

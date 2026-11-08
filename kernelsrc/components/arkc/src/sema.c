@@ -634,7 +634,94 @@ static void sema_stmt(AstNode *node) {
     }
 }
 
+/* Matching rule for _Generic associations.
+ *
+ * type_equal() is deliberately loose (it compares pointer *kinds* and skips
+ * the pointee for TYPE_FUNC), which is what the rest of the compiler wants.
+ * For _Generic it is too loose in one direction that matters: the parser
+ * records `int (*)(int)` as "pointer to the return type" plus is_func_ptr,
+ * so a plain `int *` association would otherwise be compatible with a
+ * function designator -- exactly the kind of silently wrong branch that
+ * _Generic must never take.  Compare the flag too, but only here. */
+static int generic_type_match(Type *a, Type *b) {
+    if (!a || !b) return 0;
+    if (!type_equal(a, b)) return 0;
+    if (a->kind == TYPE_PTR && b->kind == TYPE_PTR &&
+        a->is_func_ptr != b->is_func_ptr)
+        return 0;
+    return 1;
+}
+
 static Type *sema_expr(AstNode *node) {
+    if (node && node->kind == AST_GENERIC) {
+        /* C11 6.5.1.1p2: the controlling expression undergoes lvalue
+         * conversion, array-to-pointer and function-to-pointer conversion;
+         * the result is matched against the associations.  There is no
+         * promotion (char stays char, and there is no default promotion to
+         * int) -- _Generic is about the declared type, not about arithmetic. */
+        AstNode *node_ctrl = node->u.generic.ctrl;
+        AstNode *sel = node->u.generic.default_expr;
+        Type *ct = node_ctrl ? sema_expr(node_ctrl) : 0;
+        AstNode *ctrl_var = node_ctrl;
+        int i;
+        if (ct && ct->kind == TYPE_ARRAY) ct = type_pointer(ct->base);
+        else if (ct && ct->kind == TYPE_FUNC) ct = type_pointer(ct);
+        /* Function-to-pointer conversion (C11 6.5.1.1p2).  The symbol table
+         * keeps a function's *return* type, so sema_expr() answers `int` for
+         * a function designator; rebuild the pointer type here instead of
+         * letting the association list pick a data branch.  `*f` on a
+         * function designator yields a designator again (6.5.3.2p4), so the
+         * leading dereferences are peeled first. */
+        while (ctrl_var && ctrl_var->kind == AST_UNARY &&
+               ctrl_var->u.unary.op == (int)TOK_MUL && ctrl_var->u.unary.operand)
+            ctrl_var = ctrl_var->u.unary.operand;
+        if (ctrl_var && ctrl_var->kind == AST_UNARY &&
+            ctrl_var->u.unary.op == (int)TOK_BAND && ctrl_var->u.unary.operand &&
+            ctrl_var->u.unary.operand->kind == AST_VAR) {
+            /* `&f` on a function designator already has pointer-to-function
+             * type (6.5.3.2p3); sema_expr() only sees the return type. */
+            Symbol *fs = sym_find(ctrl_var->u.unary.operand->u.name);
+            if (fs && fs->kind == SYM_FUNC) {
+                ct = type_pointer(fs->type);
+                ct->is_func_ptr = 1;
+            }
+        } else if (ctrl_var && ctrl_var->kind == AST_VAR) {
+            Symbol *fs = sym_find(ctrl_var->u.name);
+            if (fs && fs->kind == SYM_FUNC) {
+                ct = type_pointer(fs->type);
+                ct->is_func_ptr = 1;
+            }
+        }
+        for (i = 0; i < node->u.generic.count; i++) {
+            if (generic_type_match(ct, node->u.generic.types[i])) {
+                sel = node->u.generic.exprs[i];
+                break;
+            }
+        }
+        if (!sel) {
+            /* C11 requires a diagnostic when no association is compatible and
+             * there is no default association.  Emitting a 0 would be a
+             * fabricated answer to "which branch". */
+            DiagLoc loc;
+            loc.file = 0;
+            loc.line = node->line;
+            loc.col  = node->col;
+            diag_report_msg(DIAG_SEV_ERROR, &loc,
+                            "no type in the _Generic association list matches "
+                            "the controlling expression, and there is no default",
+                            0, 0, 0);
+            node->kind = AST_NUM;
+            node->u.num_val = 0;
+            node->type = type_int();
+            return node->type;
+        }
+        /* Squash: the selected association becomes this node.  Everything
+         * downstream (irgen, agginit, backends) then sees an ordinary
+         * expression, so no stage needs to know _Generic exists. */
+        *node = *sel;
+        return sema_expr(node);
+    }
+
     if (!node) return type_int();
     switch (node->kind) {
         case AST_NUM:

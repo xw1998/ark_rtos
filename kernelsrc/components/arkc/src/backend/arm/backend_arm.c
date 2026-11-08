@@ -1478,7 +1478,14 @@ static void gvar_assign(IrProgram *prog) {
             }
             /* section not found in scatter: fall through to .data allocation */
         }
-        data_sram = (data_sram + 3) & ~3u;
+        /* Honour __align(n) / _Alignas(n) / __attribute__((aligned(n))):
+         * an over-aligned object placed at 4 bytes would silently break
+         * every DMA / cache-line assumption the program makes. */
+        {
+            unsigned req = (g->align_bytes > 4) ? (unsigned)g->align_bytes : 4u;
+            unsigned rem = data_sram % req;
+            if (rem) data_sram += req - rem;
+        }
         g_gvar_names[g_gvar_count] = g->name;
         g_gvar_addrs[g_gvar_count] = data_sram;
         g_gvar_sizes[g_gvar_count] = sz;  /* #6 FIX */
@@ -1535,7 +1542,11 @@ static void gvar_assign(IrProgram *prog) {
             }
             /* section not found in scatter: fall through to .bss allocation */
         }
-        bss_sram = (bss_sram + 3) & ~3u;
+        {
+            unsigned req = (g->align_bytes > 4) ? (unsigned)g->align_bytes : 4u;
+            unsigned rem = bss_sram % req;
+            if (rem) bss_sram += req - rem;
+        }
         g_gvar_names[g_gvar_count] = g->name;
         g_gvar_addrs[g_gvar_count] = bss_sram;
         g_gvar_sizes[g_gvar_count] = sz;  /* #6 FIX */
@@ -2952,7 +2963,14 @@ static char *codegen_arm(IrProgram *prog) {
                              * an extra 1 and -7LL came out as -8).  The 16-bit form
                              * sets the flags correctly on both hardware and the harness
                              * and is one instruction shorter. */
-                            emit_line(&buf, "ADDS r0, #1");
+                            emit_line(&buf, "ADDS r0, #1");   /* ADDS, not ADD: GNU as encodes
+                             * "add r0, r0, #imm"/"add r0, #imm" without
+                             * the S as the 32-bit ADD.W, which leaves the
+                             * flags alone (verified with objdump: `adds
+                             * r0, #1` -> 3001, `add r0, #1` -> f100 0001),
+                             * and the carry into the ADC below depends on
+                             * them.  The built-in assembler accepts
+                             * ADDS/SUBS unconditionally for this reason. */
                             emit_line(&buf, "MOV r2, #0");
                             emit_line(&buf, "ADC r1, r2");
                         }
@@ -3710,7 +3728,22 @@ static char *codegen_arm(IrProgram *prog) {
                              * arguments and r6 is the frame pointer, so none of
                              * those may be touched here. */
                             int si = 0;
+                            /* r4 is the new sp of the block below and r4
+                             * is callee-saved, so it has to be preserved
+                             * across the call.  It used to be used raw: the
+                             * callee clobbered the caller's r4 and nothing at
+                             * the call site could see it (measured:
+                             * __ark_ldiv64 read a dead r4 for its remainder and
+                             * returned 0x2001febd where 100 % 3 == 1).  Saving
+                             * it inside the call sequence instead of in the
+                             * prologue means a function pays the 8 bytes only
+                             * if it really passes more than 16 bytes. */
+                            asmbuf_puts(&buf, "    PUSH {r4}\n");
                             asmbuf_puts(&buf, "    MOV r5, sp\n");
+                            /* r5 must still point at the word image that
+                             * the pops left behind; the saved r4 is the
+                             * word just below it. */
+                            asmbuf_puts(&buf, "    ADD r5, r5, #4\n");
                             asmbuf_puts(&buf, "    SUB r4, sp, #");
                             asmbuf_int(&buf, (nsaa > 0) ? nsaa : 4);
                             asmbuf_puts(&buf, "\n");
@@ -3772,14 +3805,18 @@ static char *codegen_arm(IrProgram *prog) {
                         asmbuf_putc(&buf, '\n');
                     }
                     if (stack_args > 0) {
-                        /* r5 still holds the sp from before the argument block
-                         * (r4-r11 are callee-saved).  The words that stayed on
+                        /* r5 holds the sp from before the argument block, and
+                         * the saved r4 is the single word just below it, so
+                         * the restore steps over that word first.  The words
+                         * that stayed on
                          * the stack are still there, above sp, so they have to
                          * be dropped as well -- forgetting that left `extra`
                          * under the result and the next IR_STORE_IDX read it as
                          * a destination address (measured: a store to 0x63). */
                         int drop = stack_args * 4;
                         asmbuf_puts(&buf, "    MOV sp, r5\n");
+                        asmbuf_puts(&buf, "    SUB sp, sp, #4\n");
+                        asmbuf_puts(&buf, "    POP {r4}\n");
                         if (drop <= 252) {
                             asmbuf_puts(&buf, "    ADD sp, sp, #");
                             asmbuf_int(&buf, drop);
@@ -3933,7 +3970,12 @@ static char *codegen_arm(IrProgram *prog) {
                      * two/three-operand forms on purpose: a Thumb-2 wide
                      * `ADD.W r0, r0, #imm` does not update APSR under
                      * unicorn 2.1.4, which would silently corrupt the carry
-                     * into ADC (measured: -7LL + -1LL came out as -8LL). */
+                     * into ADC (measured: -7LL + -1LL came out as -8LL).  The S is
+                     * mandatory here: without it GNU as picks the 32-bit
+                     * ADD.W/SUB.W (verified with objdump: `add r0, r0, r2` ->
+                     * eb00 0002, `adds ...` -> 1880), which leaves the flags
+                     * alone and breaks the carry chain.  The built-in assembler
+                     * therefore accepts ADDS/SUBS without --asm-extra. */
                     if (is_add) {
                         emit_line(&buf, "ADDS r0, r0, r2");
                         emit_line(&buf, "ADC r1, r1, r3");
@@ -4740,6 +4782,10 @@ typedef struct {
     int            pending_weak;
     /* Current section: 0=.text, 1=.data, 2=.bss, 3=.init_array, 4=.fini_array */
     int            cur_section;
+    /* 1 while pass2_a runs.  Register-list diagnostics are reported
+     * there only: pass 1 just measures instruction sizes, and reporting
+     * from both passes would print every error twice. */
+    int            pass2;
 } ArmAsm;
 
 static int is_alpha_a(char c) {
@@ -5080,7 +5126,11 @@ static int ark_asm_extra_on(void) {
 
 static int ark_asm_extra_name(const char *op) {
     static const char *names[] = {
-        "ADDS", "SUBS", "ANDS", "ORRS", "EORS", "BICS", "MVNS", "MULS",
+        /* ADDS/SUBS are deliberately NOT gated: the ARM backend emits them
+         * for the 64-bit add/sub carry chain, so they have to assemble
+         * without --asm-extra (otherwise the compiler cannot assemble its
+         * own output for `long long` arithmetic). */
+        "ANDS", "ORRS", "EORS", "BICS", "MVNS", "MULS",
         "LSLS", "LSRS", "ASRS", "ADR", "CBZ", "CBNZ",
         "LDM", "LDMIA", "LDMDB", "STM", "STMIA", "STMDB",
         "TBB", "TBH", "LDRD", "STRD",
@@ -5560,9 +5610,10 @@ static void emit_ldr_str_a(ArmAsm *a, int kind, int is_load, int rt,
 }
 
 /* Forward declaration: needed in pass1 to decide whether PUSH/POP is T1 or T2 encoded */
-static int parse_reglist_a(const char **p, int *has_lr, int *has_pc);
+static int parse_reglist_a(ArmAsm *a, const char **p, int *has_lr, int *has_pc);
 
 static void pass1_a(ArmAsm *a) {
+    a->pass2 = 0;
     const char *p = a->src;
     /* The reserved vector-table area counts as part of the section, so labels
      * inside it (there are none) and after it keep the addresses the final
@@ -5760,7 +5811,7 @@ static void pass1_a(ArmAsm *a) {
                 /* PUSH/POP may be 16-bit T1 (r0-r7 + lr/pc only) or 32-bit T2
                  * (includes r8-r12); size determined by the register list to keep pass1 offsets correct. */
                 int has_lr = 0, has_pc = 0;
-                int list = parse_reglist_a(&p, &has_lr, &has_pc);
+                int list = parse_reglist_a(a, &p, &has_lr, &has_pc);
                 /* The 16-bit form has one bit that is LR in PUSH and PC in POP,
                  * so PUSH{..,pc} and POP{..,lr} only exist as T2 and are twice
                  * as wide.  Pass 2 makes the same decision; if the two ever
@@ -5907,7 +5958,7 @@ static void pass1_a(ArmAsm *a) {
                  * CMP instead of the store, once a call through a function
                  * pointer added a "POP {ip}"). */
                 int has_lr1 = 0, has_pc1 = 0, list1;
-                list1 = parse_reglist_a(&p, &has_lr1, &has_pc1);
+                list1 = parse_reglist_a(a, &p, &has_lr1, &has_pc1);
                 if ((list1 & ~0xFF) == 0) pc += 2;
                 else                      pc += 4;
             } else if (strieq_a(first, "LDMIA") || strieq_a(first, "LDM") ||
@@ -5924,7 +5975,7 @@ static void pass1_a(ArmAsm *a) {
                 skip_space_a(&p);
                 if (*p == '!') { has_wb = 1; p++; }
                 eat_comma_a(&p);
-                list1 = parse_reglist_a(&p, &has_lr1, &has_pc1);
+                list1 = parse_reglist_a(a, &p, &has_lr1, &has_pc1);
                 if (has_wb && !is_db1 && !has_lr1 && !has_pc1 &&
                     rn >= 0 && rn <= 7 && list1 != 0 && (list1 & ~0xFF) == 0)
                     pc += 2;
@@ -5941,29 +5992,59 @@ static void pass1_a(ArmAsm *a) {
     a->literal_pool_start = -1;
 }
 
-static int parse_reglist_a(const char **p, int *has_lr, int *has_pc) {
+static int parse_reglist_a(ArmAsm *a, const char **p, int *has_lr, int *has_pc) {
     int list = 0;
     *has_lr = 0; *has_pc = 0;
     skip_space_a(p);
     if (**p != '{') return 0;
     (*p)++;
     while (**p && **p != '}') {
+        int lo, hi, r;
         skip_space_a(p);
-        if (**p == 'l' || **p == 'L') {
-            if (((*p)[1] == 'r' || (*p)[1] == 'R')) { *has_lr = 1; (*p) += 2; }
-            else (*p)++;  /* advance on unknown 'l?' to avoid infinite loop */
-        } else if (**p == 'p' || **p == 'P') {
-            if (((*p)[1] == 'c' || (*p)[1] == 'C')) { *has_pc = 1; (*p) += 2; }
-            else (*p)++;  /* advance on unknown 'p?' to avoid infinite loop */
-        } else {
-            int r = parse_reg_a(p);
-            if (r >= 0) list |= (1 << r);
-            else if (**p && **p != '}' && **p != ',' && **p != '\n') (*p)++;  /* skip unknown char */
+        if (**p == 0 || **p == '}') break;
+        lo = parse_reg_a(p);
+        if (lo < 0 || lo > 15) {
+            /* Refuse rather than guess: a wrong register list is a wrong
+             * prologue, i.e. a corrupted stack, and nothing downstream -- not
+             * the assembler, not the linker, not the CPU -- would notice. */
+            if (a && a->pass2) {
+                diag_tool(DIAG_SEV_ERROR, "arkcc",
+                          "register list: expected r0-r15, lr, pc, sp, ip or fp", 0,0,0,0,0,0);
+                a->hard_errors++;
+            }
+            if (**p && **p != '}' && **p != ',' && **p != '\n') (*p)++;  /* skip unknown char */
+            skip_space_a(p);
+            if (**p == ',') (*p)++;
+            continue;
         }
+        hi = lo;
+        skip_space_a(p);
+        if (**p == '-') {
+            /* rN-rM ranges are the ordinary way to name a callee-saved set.
+             * This parser used to skip the '-' as an unknown character and
+             * keep only the two endpoints: "PUSH {r4-r7, lr}" was encoded as
+             * {r4, r7, lr} (b590), so r5/r6 were never saved and were restored
+             * from whatever the frame happened to hold.  A silent wrong
+             * answer in the prologue is the worst place for one. */
+            (*p)++;
+            skip_space_a(p);
+            hi = parse_reg_a(p);
+            if (hi < lo || hi > 15) {
+                if (a && a->pass2) {
+                    diag_tool(DIAG_SEV_ERROR, "arkcc",
+                              "register list: descending or out-of-range register range", 0,0,0,0,0,0);
+                    a->hard_errors++;
+                }
+                hi = lo;          /* keep the list well formed; the error stands */
+            }
+        }
+        for (r = lo; r <= hi; r++) list |= (1 << r);
         skip_space_a(p);
         if (**p == ',') (*p)++;
     }
     if (**p == '}') (*p)++;
+    if (list & (1 << 14)) *has_lr = 1;   /* lr / pc are also reachable as r14 / r15 */
+    if (list & (1 << 15)) *has_pc = 1;
     return list;
 }
 
@@ -6284,6 +6365,7 @@ static void emit_vfp_ldstm_a(ArmAsm *a, int is_load, int is_db, int wb, int rn,
 #endif /* ARKCC_FEATURE_ASM_VFP_LDSTM */
 
 static void pass2_a(ArmAsm *a) {
+    a->pass2 = 1;
     const char *p = a->src;
     a->pc = g_arm_vt_reserve ? ARM_VT_SIZE : 0;
     a->ref_count = 0;
@@ -6499,7 +6581,7 @@ static void pass2_a(ArmAsm *a) {
 
         if (strieq_a(first, "PUSH")) {
             int has_lr=0, has_pc=0;
-            int list = parse_reglist_a(&p, &has_lr, &has_pc);
+            int list = parse_reglist_a(a, &p, &has_lr, &has_pc);
             if (has_pc) {
                 /* STM never stores pc, and the 16-bit PUSH bit at 8 means LR.
                  * Dropping it would leave the reader believing pc was saved. */
@@ -6530,7 +6612,7 @@ static void pass2_a(ArmAsm *a) {
         }
         else if (strieq_a(first, "POP")) {
             int has_lr=0, has_pc=0;
-            int list = parse_reglist_a(&p, &has_lr, &has_pc);
+            int list = parse_reglist_a(a, &p, &has_lr, &has_pc);
             /* The 16-bit POP has one bit at 8 and it means PC, not LR: the two
              * cannot be expressed in T1 at all.  This used to drop the register
              * on the floor (POP {r5,r6,r7,lr} assembled to bce0, i.e.
@@ -6842,17 +6924,59 @@ static void pass2_a(ArmAsm *a) {
             }
             out16(a, 0x4340 | ((rm & 7) << 3) | (rd & 7));
         }
-        else if (strieq_a(first, "ADC")) {
-            /* ADC T1 (16-bit): ADCS Rd, Rn (always sets flags in 16-bit Thumb) */
-            int rd = parse_reg_a(&p); int rm;
-            eat_comma_a(&p); rm = parse_reg_a(&p);
-            out16(a, 0x4140 | ((rm & 7) << 3) | (rd & 7));
-        }
-        else if (strieq_a(first, "SBC")) {
-            /* SBC T1 (16-bit): SBCS Rd, Rn (always sets flags in 16-bit Thumb) */
-            int rd = parse_reg_a(&p); int rm;
-            eat_comma_a(&p); rm = parse_reg_a(&p);
-            out16(a, 0x4180 | ((rm & 7) << 3) | (rd & 7));
+        else if (strieq_a(first, "ADC") || strieq_a(first, "SBC")) {
+            /* Carry-propagating add/subtract.  16-bit Thumb only has the
+             * two-operand shape and always sets the flags:
+             *   ADCS Rd, Rm   ==  Rd = Rd + Rm + C
+             *   SBCS Rd, Rm   ==  Rd = Rd - Rm - !C
+             * so the three-operand spelling "ADC Rd, Rn, Rm" is only
+             * representable when Rd == Rn (the 32-bit form is not
+             * emitted).  This branch used to read only two operands: the
+             * third was dropped and the second encoded as the addend, so
+             * "ADC r1, r1, r3" (what the 64-bit add tail emits) became
+             * "ADCS r1, r1" -- the high word of every 64-bit add/sub was
+             * silently off by one (measured: -100LL + 3LL carried
+             * 0xFFFFFFFE into the high word and __aeabi_lcmp then said the
+             * halves differed). */
+            int is_sbc = strieq_a(first, "SBC");
+            int rd = parse_reg_a(&p);
+            int rn, rm, second;
+            eat_comma_a(&p);
+            second = parse_reg_a(&p);
+            skip_space_a(&p);
+            if (*p == ',') {
+                rn = second;              /* three operands: Rd, Rn, Rm */
+                eat_comma_a(&p);
+                rm = parse_reg_a(&p);
+            } else {
+                rn = rd;                  /* two operands: Rd = Rd +/- Rm */
+                rm = second;
+            }
+            if (rd >= 0 && rm >= 0 && rd != rn) {
+                if (a->pass2) {
+                    char b1[12], b2[12];
+                    diag_tool(DIAG_SEV_ERROR, "arkcc",
+                              "ADC/SBC with three distinct registers "
+                              "(Rd=r%s, Rn=r%s) needs the 32-bit form, "
+                              "not supported",
+                              diag_num(b1, rd), diag_num(b2, rn), 0,0,0,0);
+                    a->hard_errors++;
+                }
+                rm = rn;                  /* keep the encoding meaningful */
+            }
+            if (rd >= 0 && rm >= 0) {
+                out16(a, (is_sbc ? 0x4180 : 0x4140) | ((rm & 7) << 3) | (rd & 7));
+            } else {
+                if (a->pass2) {
+                    char b1[12];
+                    diag_tool(DIAG_SEV_ERROR, "arkcc",
+                              "ADC/SBC needs two register operands at "
+                              "code offset %s",
+                              diag_num(b1, a->pc), 0,0,0,0,0);
+                    a->hard_errors++;
+                }
+                out16(a, 0xBF00);
+            }
         }
         else if (strieq_a(first, "UMULL")) {
             /* UMULL T1 (32-bit): UMULL RdLo, RdHi, Rn, Rm
@@ -7154,7 +7278,7 @@ static void pass2_a(ArmAsm *a) {
             skip_space_a(&p);
             if (*p == '!') { has_bang = 1; p++; }
             eat_comma_a(&p);          /* "r0!, {..}" - the comma is optional */
-            list = parse_reglist_a(&p, &has_lr, &has_pc);
+            list = parse_reglist_a(a, &p, &has_lr, &has_pc);
             if (rn < 0 || rn > 14) {
                 diag_tool(DIAG_SEV_ERROR, "arkcc",
                           "LDM/STM needs a base register of r0-r14", 0,0,0,0,0,0);

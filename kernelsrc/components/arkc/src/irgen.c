@@ -2091,6 +2091,20 @@ static void irgen_expr(IrGen *g, AstNode *node) {
     }
     g_ir_cur_line = node->line;  /* used for DWARF .loc */
     switch (node->kind) {
+        case AST_GENERIC: {
+            /* sema replaces a _Generic node with the selected association, so
+             * this can only be reached when the semantic pass was skipped.  A
+             * silent 0 here would be a wrong answer with no diagnostic. */
+            DiagLoc loc;
+            loc.file = 0;
+            loc.line = node->line;
+            loc.col  = node->col;
+            diag_report_msg(DIAG_SEV_ERROR, &loc,
+                            "_Generic reached code generation unresolved "
+                            "(semantic analysis skipped)", 0, 0, 0);
+            ir_emit(g->fn, IR_PUSH_INT, 0, 0, 0);
+            break;
+        }
         case AST_NUM:
             if (node->type && node->type->kind == TYPE_COMPLEX) {
                 /* C99 complex constant: num_val == -1 selects the imaginary part

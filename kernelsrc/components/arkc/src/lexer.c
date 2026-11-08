@@ -220,6 +220,11 @@ static Keyword g_keywords[] = {
     {"enum",     TOK_ENUM},
     {"typedef",  TOK_TYPEDEF},
     {"sizeof",   TOK_SIZEOF},
+    /* C11 keywords */
+    {"_Alignof",       TOK_ALIGNOF},
+    {"_Alignas",       TOK_ALIGNAS},
+    {"_Static_assert", TOK_STATIC_ASSERT},
+    {"_Generic",       TOK_GENERIC},
     {"switch",   TOK_SWITCH},
     {"case",     TOK_CASE},
     {"default",  TOK_DEFAULT},

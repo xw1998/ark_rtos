@@ -114,6 +114,62 @@ static void perror_at(Parser *p, const char *msg) {
     p->error_count++;
 }
 
+/* C11 6.7.10: _Static_assert ( constant-expression , string-literal ) ;
+ * The condition is folded here because the parser already needs constant
+ * folding for array bounds and enum values (eval_const_expr).  A condition
+ * that does not fold is reported instead of being ignored: a static
+ * assertion whose truth we cannot decide would let a broken build through,
+ * which is the one thing a static assertion exists to prevent. */
+static void parse_static_assert(Parser *p) {
+    Token kw = lexer_peek(p->lex);
+    DiagLoc loc;
+    AstNode *ce;
+    long long v = 0;
+    const char *msg = 0;
+    int have_msg = 0;
+    loc.file = 0;
+    loc.line = kw.line;
+    loc.col  = kw.col;
+    lexer_advance(p->lex);                 /* _Static_assert */
+    if (lexer_peek(p->lex).kind != TOK_LPAREN) {
+        perror_at(p, "expected '(' after _Static_assert");
+        return;
+    }
+    lexer_advance(p->lex);                 /* '(' */
+    ce = parse_cond_expr(p);
+    if (lexer_peek(p->lex).kind == TOK_COMMA) {
+        lexer_advance(p->lex);
+        if (lexer_peek(p->lex).kind == TOK_STR) {
+            msg = lexer_peek(p->lex).str;
+            have_msg = 1;
+            lexer_advance(p->lex);
+        } else {
+            perror_at(p, "expected a string literal in _Static_assert");
+        }
+    }
+    if (lexer_peek(p->lex).kind == TOK_RPAREN) lexer_advance(p->lex);
+    else perror_at(p, "expected ')' to close _Static_assert");
+    if (lexer_peek(p->lex).kind == TOK_SEMICOLON) lexer_advance(p->lex);
+    else perror_at(p, "expected ';' after _Static_assert");
+
+    if (!ce || !eval_const_expr(ce, &v)) {
+        diag_report_msg(DIAG_SEV_ERROR, &loc,
+                        "_Static_assert condition is not an integer constant expression",
+                        0, 0, 0);
+        p->error_count++;
+        return;
+    }
+    if (v == 0) {
+        if (have_msg)
+            diag_report_msg(DIAG_SEV_ERROR, &loc, "static assertion failed: %s",
+                            msg ? msg : "", 0, 0);
+        else
+            diag_report_msg(DIAG_SEV_ERROR, &loc, "static assertion failed",
+                            0, 0, 0);
+        p->error_count++;
+    }
+}
+
 AstNode *parse_program(Lexer *lex) {
     Parser p;
     AstNode *prog;
@@ -145,6 +201,9 @@ AstNode *parse_program(Lexer *lex) {
          * used at a point that supplies another one.  Skip it instead
          * of reporting "expected declaration at top level". */
         if (lexer_peek(lex).kind == TOK_SEMICOLON) { lexer_advance(lex); continue; }
+        /* C11 6.7.10: a static assertion is a declaration that produces no
+         * object, so it is handled here and contributes nothing to the AST. */
+        if (lexer_peek(lex).kind == TOK_STATIC_ASSERT) { parse_static_assert(&p); continue; }
         AstNode *decl = parse_top_decl(&p);
         if (decl) {
             int count = prog->u.program.decl_count;
@@ -221,6 +280,12 @@ static int   g_attr_is_used;
 static int   g_attr_is_unused;
 static char *g_attr_alias_target;
 static int   g_attr_align_bytes;
+/* C11 _Alignas request for the declaration currently being parsed.  Kept
+ * separate from g_attr_align_bytes so that __align(n) keeps its exact old
+ * behaviour (an explicit __align(1) is still honoured verbatim), while a
+ * _Alignas request is clamped up to the natural alignment at the point where
+ * the declared type is known (C11 6.7.5p6: _Alignas may not weaken). */
+static int   g_alignas_bytes;
 static int   g_decl_align_bytes;
 /* __packed applies to pointer types (e.g. `__packed int *p`): marked for parse_declarator,
  * sets is_packed=1 when constructing TYPE_PTR; irgen/ARM backend uses byte-wise access accordingly.
@@ -758,6 +823,55 @@ static AstNode *parse_asm_statement(Parser *p) {
 }
 
 /* Parse declspec: return base type; also return storage class and is_typedef via pointers */
+/* C11 6.7.5: _Alignas ( type-name ) or _Alignas ( constant-expression ).
+ * The result is the requested alignment in bytes (0 = none/invalid).  It is
+ * parsed here, in the declaration-specifier position, and merged into the
+ * declaration by the caller. */
+static int parse_alignas(Parser *p) {
+    Token kw = lexer_peek(p->lex);
+    long long v = 0;
+    int al = 0;
+    DiagLoc loc;
+    loc.file = 0;
+    loc.line = kw.line;
+    loc.col  = kw.col;
+    lexer_advance(p->lex);              /* _Alignas */
+    if (lexer_peek(p->lex).kind != TOK_LPAREN) {
+        perror_at(p, "expected '(' after _Alignas");
+        return 0;
+    }
+    lexer_advance(p->lex);              /* '(' */
+    if (is_basic_type_token(lexer_peek(p->lex).kind) ||
+        (lexer_peek(p->lex).kind == TOK_IDENT && sym_is_typedef(lexer_peek(p->lex).str))) {
+        int sto = 0, td = 0;
+        char *nm = 0;
+        Type *base = parse_declspec(p, &sto, &td);
+        Type *t = base ? parse_declarator(p, base, &nm) : 0;
+        (void)nm;
+        al = type_align(t);
+        if (al <= 0) al = 1;
+    } else {
+        AstNode *ce = parse_cond_expr(p);
+        if (!ce || !eval_const_expr(ce, &v)) {
+            diag_report_msg(DIAG_SEV_ERROR, &loc,
+                            "_Alignas requires an integer constant expression or a type name",
+                            0, 0, 0);
+            p->error_count++;
+            al = 0;
+        } else if (v <= 0 || (v & (v - 1)) != 0) {
+            diag_report_msg(DIAG_SEV_ERROR, &loc,
+                            "_Alignas requires a power-of-two alignment",
+                            0, 0, 0);
+            p->error_count++;
+            al = 0;
+        } else {
+            al = (int)v;
+        }
+    }
+    lexer_expect(p->lex, TOK_RPAREN);
+    return al;
+}
+
 static Type *parse_declspec(Parser *p, int *p_storage, int *p_is_typedef) {
     int sto = 0;
     int is_td = 0;
@@ -809,6 +923,13 @@ static Type *parse_declspec(Parser *p, int *p_storage, int *p_is_typedef) {
                     }
                     goto done;
                 }
+            case TOK_ALIGNAS: {
+                /* C11 _Alignas in the declaration-specifier position. */
+                int al = parse_alignas(p);
+                if (al > 0) g_alignas_bytes = al;
+                saw_kw = 1;
+                continue;
+            }
             case TOK_PACKED_KW:
                 /* ARM Compiler 5 style: __packed appears in declspec.
                  * For struct/union types, equivalent to __attribute__((packed));
@@ -1054,12 +1175,28 @@ static AstNode *parse_struct_or_union(Parser *p, int is_union) {
         while (lexer_peek(p->lex).kind != TOK_RBRACE &&
                lexer_peek(p->lex).kind != TOK_EOF) {
             int sto = 0; int td = 0;
-            Type *ft_base = parse_declspec(p, &sto, &td);
+            Type *ft_base;
+            /* C11 6.7.10 allows a static assertion among the members. */
+            if (lexer_peek(p->lex).kind == TOK_STATIC_ASSERT) {
+                parse_static_assert(p);
+                continue;
+            }
+            g_alignas_bytes = 0;
+            ft_base = parse_declspec(p, &sto, &td);
             if (!ft_base) { perror_at(p, "expected field type"); lexer_advance(p->lex); continue; }
             for (;;) {
                 char *fname = 0;
                 Type *ft = parse_declarator(p, ft_base, &fname);
                 int bit_w = -1;
+                /* C11 6.7.5: _Alignas on a member raises the field type's
+                 * alignment, and type_struct_add_field lays the struct out
+                 * with type_align(field type), so this is the whole change.
+                 * A request weaker than the natural alignment is ignored
+                 * (6.7.5p6), never applied as a reduction. */
+                if (g_alignas_bytes > 0 && ft) {
+                    int nat = type_align(ft);
+                    if (g_alignas_bytes > nat) ft->align_override = g_alignas_bytes;
+                }
                 if (lexer_peek(p->lex).kind == TOK_COLON) {
                     /* Bit-field: may have no field name */
                     lexer_advance(p->lex);
@@ -1539,6 +1676,16 @@ static AstNode *parse_top_decl(Parser *p) {
     is_asm_fn |= g_decl_is_asm_fn;
     decl_is_const = g_decl_is_const;
     decl_section = g_attr_section;
+    /* A _Alignas request wins only if it is at least the natural alignment;
+     * base's alignment is the conservative bound available before the
+     * declarator is parsed, and the assignment below clamps again per
+     * declared object. */
+    if (g_alignas_bytes > 0) {
+        int nat = type_align(base);
+        int want = g_alignas_bytes > nat ? g_alignas_bytes : nat;
+        if (want > g_attr_align_bytes) g_attr_align_bytes = want;
+        g_alignas_bytes = 0;
+    }
     if (g_attr_align_bytes && !decl_align) decl_align = g_attr_align_bytes;
 #if ARKCC_FEATURE_ARMCC_KEYWORDS
     /* __thread sets storage 0x10000 bit in parse_declspec */
@@ -2049,7 +2196,13 @@ static AstNode *parse_statement(Parser *p) {
         return n;
     }
 
-    if (is_decl_start(p) || lexer_peek(p->lex).kind == TOK_ALIGN_KW) {
+    if (t.kind == TOK_STATIC_ASSERT) {
+        parse_static_assert(p);
+        return ast_new(AST_BLOCK, line);
+    }
+
+    if (is_decl_start(p) || lexer_peek(p->lex).kind == TOK_ALIGN_KW ||
+        lexer_peek(p->lex).kind == TOK_ALIGNAS) {
         int sto = 0, td = 0;
         Type *base;
         int local_align = 0;
@@ -2072,6 +2225,29 @@ static AstNode *parse_statement(Parser *p) {
         }
         base = parse_declspec(p, &sto, &td);
         if (local_align && !g_attr_align_bytes) g_attr_align_bytes = local_align;
+        if (g_alignas_bytes > 0) {
+            if (g_alignas_bytes > 8) {
+                /* The ARM/RISC-V backends build the frame as
+                 * "sp -= frame; frame base = sp", with sp only guaranteed
+                 * 8-byte aligned by AAPCS and every slot rounded to 8.  A
+                 * block-scope request above 8 therefore cannot be honoured;
+                 * saying so beats placing the object at 8 and letting the
+                 * program assume 16/32/64 (DMA, cache-line, NEON). */
+                Token lt = lexer_peek(p->lex);
+                DiagLoc loc;
+                loc.file = 0; loc.line = lt.line; loc.col = lt.col;
+                diag_report_msg(DIAG_SEV_ERROR, &loc,
+                    "block-scope _Alignas above 8 bytes is not supported"
+                    " (the frame is 8-byte aligned)", 0, 0, 0);
+                p->error_count++;
+                g_alignas_bytes = 0;
+            } else {
+                int nat = type_align(base);
+                int want = g_alignas_bytes > nat ? g_alignas_bytes : nat;
+                if (want > g_attr_align_bytes) g_attr_align_bytes = want;
+                g_alignas_bytes = 0;
+            }
+        }
         if (lexer_peek(p->lex).kind == TOK_SEMICOLON) {
             /* struct A {...}; empty declaration like this */
             lexer_advance(p->lex);
@@ -2480,6 +2656,39 @@ static AstNode *parse_unary_expr(Parser *p) {
                 return ast_sizeof_val(s, line);
             }
         }
+        case TOK_ALIGNOF: {
+            /* C11 6.5.3.4: _Alignof ( type-name ).  The operand is a type
+             * name and never an expression; guessing an expression's type at
+             * parse time would be a fabricated answer, so anything that is
+             * not a type name is reported. */
+            int al;
+            lexer_advance(p->lex);          /* _Alignof */
+            if (lexer_peek(p->lex).kind != TOK_LPAREN) {
+                perror_at(p, "expected '(' after _Alignof");
+                return ast_sizeof_val(4, line);
+            }
+            {
+                Token t2 = lexer_peek2(p->lex);
+                if (!(is_basic_type_token(t2.kind) ||
+                      (t2.kind == TOK_IDENT && sym_is_typedef(t2.str)))) {
+                    perror_at(p, "_Alignof requires a type name");
+                    lexer_advance(p->lex);  /* '(' */
+                    return ast_sizeof_val(4, line);
+                }
+            }
+            lexer_advance(p->lex);          /* '(' */
+            {
+                int sto = 0, td = 0;
+                char *nm = 0;
+                Type *base = parse_declspec(p, &sto, &td);
+                Type *t = base ? parse_declarator(p, base, &nm) : 0;
+                (void)nm;
+                al = type_align(t);
+            }
+            lexer_expect(p->lex, TOK_RPAREN);
+            if (al <= 0) al = 1;
+            return ast_sizeof_val(al, line);
+        }
         default:
             return parse_postfix_expr(p);
     }
@@ -2567,6 +2776,73 @@ static AstNode *parse_postfix_expr(Parser *p) {
 static AstNode *parse_primary_expr(Parser *p) {
     Token t = lexer_peek(p->lex);
     int line = t.line;
+    if (t.kind == TOK_GENERIC) {
+        /* C11 6.5.1.1:
+         *   _Generic ( assignment-expression , generic-association-list )
+         * The controlling expression's type is not known until it has been
+         * typed, and typing happens in sema, so the node is built here and
+         * resolved there.  Guessing a type at parse time would be a fabricated
+         * answer -- the exact failure mode this project forbids. */
+        AstNode *n = anchor(ast_new(AST_GENERIC, line), t.col);
+        n->u.generic.ctrl = 0;
+        n->u.generic.default_expr = 0;
+        n->u.generic.types = 0;
+        n->u.generic.exprs = 0;
+        n->u.generic.count = 0;
+        n->u.generic.cap = 0;
+        lexer_advance(p->lex);              /* _Generic */
+        if (lexer_peek(p->lex).kind != TOK_LPAREN) {
+            perror_at(p, "expected '(' after _Generic");
+            return n;
+        }
+        lexer_advance(p->lex);              /* '(' */
+        n->u.generic.ctrl = parse_assign_expr(p);
+        while (lexer_peek(p->lex).kind == TOK_COMMA) {
+            AstNode *e;
+            lexer_advance(p->lex);          /* ',' */
+            if (lexer_peek(p->lex).kind == TOK_DEFAULT) {
+                lexer_advance(p->lex);      /* default */
+                lexer_expect(p->lex, TOK_COLON);
+                e = parse_assign_expr(p);
+                if (n->u.generic.default_expr)
+                    perror_at(p, "more than one default association in _Generic");
+                n->u.generic.default_expr = e;
+                continue;
+            }
+            {
+                int sto = 0, td = 0;
+                char *nm = 0;
+                Type *base = parse_declspec(p, &sto, &td);
+                Type *at = base ? parse_declarator(p, base, &nm) : 0;
+                (void)nm;
+                if (!at) {
+                    perror_at(p, "expected a type name in _Generic association");
+                    return n;
+                }
+                lexer_expect(p->lex, TOK_COLON);
+                e = parse_assign_expr(p);
+                if (n->u.generic.count >= n->u.generic.cap) {
+                    int nc = n->u.generic.cap ? n->u.generic.cap * 2 : 4;
+                    n->u.generic.types = (Type **)mem_realloc(
+                        n->u.generic.types,
+                        n->u.generic.cap * (int)sizeof(Type *),
+                        nc * (int)sizeof(Type *));
+                    n->u.generic.exprs = (AstNode **)mem_realloc(
+                        n->u.generic.exprs,
+                        n->u.generic.cap * (int)sizeof(AstNode *),
+                        nc * (int)sizeof(AstNode *));
+                    n->u.generic.cap = nc;
+                }
+                n->u.generic.types[n->u.generic.count] = at;
+                n->u.generic.exprs[n->u.generic.count] = e;
+                n->u.generic.count++;
+            }
+        }
+        lexer_expect(p->lex, TOK_RPAREN);
+        if (!n->u.generic.default_expr && n->u.generic.count == 0)
+            perror_at(p, "_Generic requires at least one association");
+        return n;
+    }
     if (t.kind == TOK_FCONST) {
         /* Floating-point literal: reuse AST_NUM node, with new field fval and type=double */
         AstNode *node;
