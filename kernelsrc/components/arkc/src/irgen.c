@@ -472,7 +472,8 @@ static int irgen_try_addr_init(IrGlobal *gv, AstNode *iv) {
  * ark_agg_fill(), which refuses an address element rather than writing zeroes.
  */
 
-static void irgen_add_ref(IrGlobal *g, int off, const char *sym, long long add, int isf) {
+static void irgen_add_ref_ex(IrGlobal *g, int off, const char *sym, long long add,
+                             int isf, const char *str) {
     IrSymRef *nr = (IrSymRef *)mem_pool_alloc((int)sizeof(IrSymRef) * (g->init_ref_count + 1));
     int i;
     for (i = 0; i < g->init_ref_count; i++) nr[i] = g->init_refs[i];
@@ -480,8 +481,13 @@ static void irgen_add_ref(IrGlobal *g, int off, const char *sym, long long add, 
     nr[g->init_ref_count].sym = (char *)sym;
     nr[g->init_ref_count].add = add;
     nr[g->init_ref_count].is_func = isf;
+    nr[g->init_ref_count].str = (char *)str;
     g->init_refs = nr;
     g->init_ref_count++;
+}
+
+static void irgen_add_ref(IrGlobal *g, int off, const char *sym, long long add, int isf) {
+    irgen_add_ref_ex(g, off, sym, add, isf, 0);
 }
 
 static int irgen_agg_addr_walk(Type *t, AstNode *init, int base, IrGlobal *g, int *found);
@@ -493,6 +499,27 @@ static int irgen_agg_addr_scalar(AstNode *init, int off, IrGlobal *g, int *found
     Type *lt = 0;
     int isf = 0;
     if (init && init->kind == AST_INIT_LIST) return 0;   /* brace elision */
+    if (init && init->kind == AST_STR) {
+        /* `char *cs[2] = { "ab", "cd" };` -- the element is the address of a
+         * string literal (C11 6.7.9p14: a static pointer may hold one).  The
+         * literal has no name yet, so record its text and let the backend pool
+         * it next to the other string labels.  A wide literal would need each
+         * byte widened, which the initialiser text does not carry. */
+        if (init->type && init->type->kind == TYPE_PTR && init->type->base &&
+            init->type->base->kind == TYPE_WCHAR) {
+            diag_tool(DIAG_SEV_ERROR, "arkcc",
+                      "an element of the initialiser of the global '%s' is a wide "
+                      "string literal; only narrow string literals can be pooled "
+                      "as address constants here",
+                      g->name, 0,0,0,0,0);
+            g_irgen_errors++;
+            *found = 1;
+            return 1;
+        }
+        irgen_add_ref_ex(g, off, 0, 0, 0, init->u.name ? init->u.name : "");
+        *found = 1;
+        return 1;
+    }
     if (addr_value(init, &sym, &add, &lt, &isf)) {
         Symbol *s = sym_find(sym);
         if (s && s->kind == SYM_FUNC) isf = 1;
@@ -602,6 +629,39 @@ static int irgen_init_has_addr(AstNode *n) {
     return looks_like_address(n);
 }
 
+/* Does this initialiser hold a string literal where a *pointer* is expected?
+ * Only that combination is an address constant; `char m[2][6] = {"ab"}` puts a
+ * string literal in an array slot and must NOT be reported (that form is owned
+ * by ark_agg_fill).  Asked only after the walk bailed, so an over-report can
+ * only add a more precise message to an initialiser that is being rejected
+ * anyway -- but the "expected type is not a pointer" test keeps the working
+ * brace-elided char-array form out of it. */
+static int irgen_init_has_str_addr(Type *t, AstNode *n) {
+    int i;
+    if (!t || !n) return 0;
+    if (n->kind == AST_INIT_LIST) {
+        for (i = 0; i < n->u.init_list.item_count; i++) {
+            AstNode *it = n->u.init_list.items[i];
+            AstNode *v;
+            if (!it) continue;
+            v = (it->kind == AST_INIT_LIST) ? it : it->u.init_field.value;
+            if (!v) continue;
+            if (t->kind == TYPE_ARRAY && t->base) {
+                if (irgen_init_has_str_addr(t->base, v)) return 1;
+            } else if (t->kind == TYPE_STRUCT) {
+                StructField *f;
+                for (f = t->fields; f; f = f->next)
+                    if (irgen_init_has_str_addr(f->type, v)) return 1;
+            } else if (irgen_init_has_str_addr(t, v)) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    if (t->kind == TYPE_PTR && n->kind == AST_STR) return 1;
+    return 0;
+}
+
 /* Record the address elements of an aggregate initialiser.  Silent when there
  * are none (the common case).  When the initialiser has one but the walk
  * cannot place it, say so here rather than letting the backend report "cannot
@@ -612,7 +672,8 @@ static void irgen_try_agg_addr_init(IrGlobal *g, AstNode *init) {
     g->init_refs = 0;
     g->init_ref_count = 0;
     if (!irgen_agg_addr_walk(g->type, init, 0, g, &found)) {
-        if (found || irgen_init_has_addr(init)) {
+        if (found || irgen_init_has_addr(init) ||
+            irgen_init_has_str_addr(g->type, init)) {
             diag_tool(DIAG_SEV_ERROR, "arkcc",
                       "the initialiser of the global '%s' contains an address "
                       "element, but its braces are not spelled out level by level "

@@ -2189,6 +2189,28 @@ static char *codegen_arm(IrProgram *prog) {
             arm_put_escaped_str(&buf, g->init_str);
             asmbuf_puts(&buf, "\"\n");
         }
+        /* Aggregate initialisers may also carry string literal elements
+         * (`char *cs[2] = {"a", "b"};`).  Each needs its own flash label
+         * keyed by the element byte offset in the object: the runtime
+         * initialiser has to store a distinct pointer per element. */
+        for (gi = 0; gi < prog->global_count; gi++) {
+            IrGlobal *g2 = prog->globals[gi];
+            int ri;
+            if (g2->init_ref_count <= 0 || !g2->init_refs) continue;
+            for (ri = 0; ri < g2->init_ref_count; ri++) {
+                IrSymRef *r = &g2->init_refs[ri];
+                if (!r->str) continue;
+                if (!any) { asmbuf_puts(&buf, ".section .rodata\n"); any = 1; }
+                asmbuf_puts(&buf, ".L_gstr_");
+                asmbuf_int(&buf, gi);
+                asmbuf_putc(&buf, '_');
+                asmbuf_int(&buf, r->offset);
+                asmbuf_puts(&buf, ":\n    .asciz \"");
+                arm_put_escaped_str(&buf, r->str);
+                asmbuf_puts(&buf, "\"\n");
+            }
+        }
+
         if (any) asmbuf_puts(&buf, ".text\n\n");
     }
 
@@ -5053,7 +5075,15 @@ static char *codegen_arm(IrProgram *prog) {
                     int ri;
                     for (ri = 0; ri < g->init_ref_count; ri++) {
                         IrSymRef *r = &g->init_refs[ri];
-                        if (r->is_func) {
+                        if (r->str) {
+                            /* A string literal element: the bytes live in the
+                             * pooled .rodata block emitted above. */
+                            asmbuf_puts(&buf, "    LDR r0, =.L_gstr_");
+                            asmbuf_int(&buf, gi);
+                            asmbuf_putc(&buf, '_');
+                            asmbuf_int(&buf, r->offset);
+                            asmbuf_putc(&buf, '\n');
+                        } else if (r->is_func) {
                             if (r->add != 0) {
                                 diag_tool(DIAG_SEV_ERROR, "arkcc",
                                           "the initialiser of the global '%s' takes "

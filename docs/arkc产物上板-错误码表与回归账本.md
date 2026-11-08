@@ -389,3 +389,40 @@ ELF `text` +2 384 比逐目标合计 +2 396 少 12 字节，是段对齐/填充�
 `text 432628 / data 2260 / bss 463532`（FLASH 82.95%）；`git stash pop` → 重建得
 `text 435012 / data 2260 / bss 463532`（FLASH 83.41%）。两次构建除 arkc 源码外的一切
 （CFLAGS、链接脚本、其余目标文件）完全相同。
+
+**2026-11-08 追加（上游 `b8378f4`：聚合初始化器里的字符串字面量元素）**：
+
+板端（STM32H743，`USE_ARKC=1`，同一套 CFLAGS / 链接脚本）：
+
+| 项 | 旧 | 新 | 差 |
+|---|---|---|---|
+| `text` | 435 012 | 435 652 | **+640** |
+| `data` | 2 260 | 2 260 | 0 |
+| `bss` | 463 532 | 463 532 | 0 |
+| FLASH 占用 | 83.41% | 83.53% | +0.12 pp |
+| RAM / CCMRAM / NOINIT | 98.22% / 17.33% / 97.66% | 同左 | 0 |
+
+逐目标文件（只有 arkc 侧的 2 个目标变化，其余逐列相同）：
+
+| 目标文件 | text 旧 -> 新 | 差 |
+|---|---|---|
+| `irgen.o` | 31 242 -> 31 700 | +458 |
+| `backend_arm.o` | 91 242 -> 91 423 | +181 |
+| `parser.o` / `agginit.o` / `ir.o` | 23 802 / 2 868 / 1 722 | 0 |
+| 二者合计 | — | +639 |
+
+ELF `text` +640 比逐目标合计 +639 多 1 字节，是段对齐填充，不是另有代码变动。
+
+落点：`irgen.o` 是 `irgen_add_ref_ex()`（末位 `str` 参数）、`irgen_agg_addr_scalar()` 的
+`AST_STR` 分支（含宽字面量报错）与新增的类型感知扫描 `irgen_init_has_str_addr()`；
+`backend_arm.o` 是 `.rodata` 里按元素偏移发 `.L_gstr_<gi>_<off>` 标签的循环，加 refs 写入
+循环里的 `if (r->str)` 分派。`bss` 未变——本轮没有新增文件作用域变量。
+**RV32I 后端仍不在 STM32 profile 里**，它的 `.Lgstr_<name>_<off>` 与 `.word` 分支一行都没进固件
+（这也是"改的是新路径、没动既有代码生成"的正面证据）。
+
+判定：FLASH 83.53%、RAM/CCMRAM/NOINIT 未变，仍在 512 KB 预算内（余 84.34 KB），**接受**。
+
+可复现判据：`git stash push -- kernelsrc/components/arkc` → 重建得
+`text 435012 / data 2260 / bss 463532`（FLASH 83.41%）；`git stash pop` → 重建得
+`text 435652 / data 2260 / bss 463532`（FLASH 83.53%）。两次构建除 arkc 源码外的一切
+（CFLAGS、链接脚本、其余目标文件）完全相同。

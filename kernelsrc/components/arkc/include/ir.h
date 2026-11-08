@@ -116,9 +116,14 @@ typedef struct IrString {
  * symbol reference instead of a baked number. */
 typedef struct IrSymRef {
     int       offset;   /* byte offset inside the object */
-    char     *sym;      /* symbol named by the initialiser */
+    char     *sym;      /* symbol named by the initialiser (0 for a string) */
     long long add;      /* byte offset inside that symbol */
     int       is_func;  /* 1 when sym is a function */
+    /* `char *cs[2] = { "ab", "cd" };` -- the element is the address of a string
+     * literal, which has no name yet: each backend pools it in its own read-only
+     * section and labels it, so the address is `sym` when `str` is 0 and the
+     * pool label when `str` is not. */
+    char     *str;
 } IrSymRef;
 
 typedef struct IrGlobal {
