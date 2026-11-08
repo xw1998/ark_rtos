@@ -1053,6 +1053,15 @@ static Type *parse_declspec(Parser *p, int *p_storage, int *p_is_typedef) {
                 continue;
             }
             case TOK_IDENT: {
+                /* A type has already been parsed, so an identifier that
+                 * happens to name a typedef is the *declarator* name, not a
+                 * second type specifier (C11 6.7p2 allows at most one, and
+                 * the standard explicitly permits redefining a typedef to
+                 * the same type).  Without this, `typedef int F(int);
+                 * typedef int F(int);` parsed the second `F` as the base
+                 * type and then had no name left -- "expected identifier in
+                 * declaration". */
+                if (base) goto done;
                 if (sym_is_typedef(tok.str)) {
                     Symbol *s = sym_find_typedef(tok.str);
                     lexer_advance(p->lex);
@@ -1648,6 +1657,50 @@ static void parse_param_list(Parser *p, AstNode ***out_params, int *out_count,
     *out_variadic = is_variadic;
 }
 
+/* Consume a `( params )` tail and build the function type `ret(params)`.
+ * Used for typedefs that name a function type (`typedef int binop(int,int);`).
+ * parse_declarator stops in front of the parameter list for that spelling --
+ * it only knows the `(*name)(params)` pointer form -- so the caller has to
+ * finish the type.  Returns 0 (consuming nothing) when the next token is not
+ * '('. */
+static int parse_func_type_tail(Parser *p, Type *ret, Type **out_ft, int line) {
+    AstNode **params = 0;
+    int param_count = 0;
+    int is_variadic = 0;
+    Type **ptypes = 0;
+    int i;
+    if (lexer_peek(p->lex).kind != TOK_LPAREN) return 0;
+    lexer_advance(p->lex);              /* '(' */
+    parse_param_list(p, &params, &param_count, &is_variadic, line);
+    lexer_expect(p->lex, TOK_RPAREN);
+    while (lexer_peek(p->lex).kind == TOK_ATTRIBUTE) parse_attribute(p, ret);
+    if (param_count > 0 && params) {
+        ptypes = (Type **)mem_pool_alloc(param_count * (int)sizeof(Type *));
+        for (i = 0; i < param_count; i++)
+            ptypes[i] = !params[i] ? 0
+                        : (params[i]->type ? params[i]->type
+                                           : params[i]->u.var.var_type);
+    }
+    if (out_ft) *out_ft = type_func(ret, ptypes, param_count, is_variadic);
+    return 1;
+}
+
+/* The AST prototype node wants AstNode parameters; a function *type* only
+ * carries Type pointers.  Wrap each one in a plain AST_VAR -- for a
+ * declaration only the types matter, argument conversion reads them. */
+static AstNode **params_from_func_type(Type *ft, int *out_count, int line) {
+    AstNode **ps = 0;
+    int n = (ft && ft->params && ft->param_count > 0) ? ft->param_count : 0;
+    int i;
+    if (n > 0) {
+        ps = (AstNode **)mem_pool_alloc(n * (int)sizeof(AstNode *));
+        for (i = 0; i < n; i++)
+            ps[i] = ast_var_decl(mem_strdup("_anon"), ft->params[i], 0, line);
+    }
+    if (out_count) *out_count = n;
+    return ps;
+}
+
 static AstNode *parse_top_decl(Parser *p) {
     int storage = 0;
     int is_td = 0;
@@ -1789,6 +1842,39 @@ static AstNode *parse_top_decl(Parser *p) {
         /* Where the name itself was: declaration-level diagnostics are anchored
          * to the identifier, so the node has to remember the column. */
         decl_name_col = p->name_col;
+
+        /* `typedef Ret F(params);` -- a typedef that names a function type.
+         * parse_declarator returns before the parameter list for this
+         * spelling, so the '(' used to be taken by the function-declaration
+         * branch below and the typedef was dropped on the floor: the name
+         * was registered as SYM_FUNC, `sizeof(binop)` folded to the generic
+         * 4, and `binop *p;` was rejected as a data declaration.  Record a
+         * real function type instead (C99 6.7.1 + 6.7.5: the declared type
+         * is "function returning Ret"), so the name behaves exactly like any
+         * other type name afterwards. */
+        if (is_td) {
+            Type *ft = 0;
+            if (parse_func_type_tail(p, t, &ft, line)) {
+                Type *first_ft = ft;
+                sym_add(SYM_TYPEDEF, name, ft, 0);
+                while (lexer_peek(p->lex).kind == TOK_COMMA) {
+                    char *nm2 = 0;
+                    Type *t2, *ft2 = 0;
+                    lexer_advance(p->lex);
+                    t2 = parse_declarator(p, base, &nm2);
+                    if (!nm2) break;
+                    if (parse_func_type_tail(p, t2, &ft2, line)) t2 = ft2;
+                    sym_add(SYM_TYPEDEF, nm2, t2, 0);
+                }
+                lexer_expect(p->lex, TOK_SEMICOLON);
+                {
+                    AstNode *n = ast_new(AST_TYPEDEF, line);
+                    n->u.var.name = name;
+                    n->u.var.var_type = first_ft;
+                    return n;
+                }
+            }
+        }
 
         /* Function definition */
         if (lexer_peek(p->lex).kind == TOK_LPAREN) {
@@ -1985,6 +2071,45 @@ static AstNode *parse_top_decl(Parser *p) {
                 return n;
             }
         }
+        /* A declaration whose type is a function type, spelled through a
+         * typedef: `binop add;`.  Without this the name became a 4-byte data
+         * object, so every call to it stayed unresolved and the argument
+         * conversions never ran.  Build the same AST_FUNC_DECL that
+         * `int add(int, int);` produces.  A function *definition* cannot be
+         * written through a typedef (C99 6.9.1 requires the identifier in the
+         * declarator), so anything else here is reported instead of guessed
+         * at. */
+        if (t && t->kind == TYPE_FUNC) {
+            if (lexer_peek(p->lex).kind != TOK_SEMICOLON) {
+                perror_at(p, "a declaration with a function type must end with ';' "
+                             "(a function definition cannot use a typedef'd type)");
+                return 0;
+            }
+            {
+                AstNode **fparams = 0;
+                int fpc = 0;
+                AstNode *fn;
+                fparams = params_from_func_type(t, &fpc, line);
+                if (name) {
+                    Symbol *fsym = sym_find_current(name);
+                    if (!fsym || fsym->kind != SYM_FUNC) {
+                        sym_add(SYM_FUNC, name, t->base, 0);
+                    } else if (!fsym->type || fsym->type->kind == TYPE_VOID) {
+                        fsym->type = t->base;
+                    }
+                }
+                lexer_advance(p->lex);      /* ';' */
+                fn = ast_func_def(name, t->base, fparams, fpc, 0, line);
+                if (fn) fn->col = decl_name_col;
+                fn->kind = AST_FUNC_DECL;
+                fn->u.func.is_variadic = t->is_variadic;
+                fn->u.func.is_static = (storage & STO_STATIC) ? 1 : 0;
+                fn->u.func.svc_num = 0;
+                fn->u.func.smc_num = -1;
+                return fn;
+            }
+        }
+
         /* Global variable */
         {
             AstNode *init = 0;
@@ -2137,6 +2262,33 @@ static AstNode *parse_local_var_decl(Parser *p, Type *base, int storage, int is_
          * declaration.  Using the real AST also keeps the symbol alive for
          * the statements that follow inside the same block, which is what
          * lets `p = arm_get_symbol_count;` resolve. */
+        /* Block-scope typedef of a function type: `typedef int binop(int,int);`
+         * inside a function body.  Same bug and same fix as at file scope --
+         * the prototype branch below would otherwise swallow the '(' and
+         * register the name as a function. */
+        if (is_typedef) {
+            Type *ft = 0;
+            if (parse_func_type_tail(p, t, &ft, line)) {
+                sym_add(SYM_TYPEDEF, name, ft, 0);
+                while (lexer_peek(p->lex).kind == TOK_COMMA) {
+                    char *nm2 = 0;
+                    Type *t2, *ft2 = 0;
+                    lexer_advance(p->lex);
+                    t2 = parse_declarator(p, base, &nm2);
+                    if (!nm2) break;
+                    if (parse_func_type_tail(p, t2, &ft2, line)) t2 = ft2;
+                    sym_add(SYM_TYPEDEF, nm2, t2, 0);
+                }
+                lexer_expect(p->lex, TOK_SEMICOLON);
+                {
+                    AstNode *n = ast_new(AST_TYPEDEF, line);
+                    n->u.var.name = name;
+                    n->u.var.var_type = ft;
+                    if (!blk) blk = n;
+                    return blk;
+                }
+            }
+        }
         if (name && lexer_peek(p->lex).kind == TOK_LPAREN) {
             AstNode **params = 0;
             int param_count = 0;
@@ -2170,6 +2322,40 @@ static AstNode *parse_local_var_decl(Parser *p, Type *base, int storage, int is_
             if (!blk) {
                 blk = fn ? fn : ast_new(AST_BLOCK, line);
             } else if (fn) {
+                AstNode *b = ast_block(line);
+                b->u.block.is_decl_list = 1;
+                block_add_stmt(b, blk);
+                block_add_stmt(b, fn);
+                blk = b;
+            }
+            return blk;
+        }
+        /* Block-scope prototype written through a function-type typedef:
+         * `binop add;` (C99 6.2.2p5: still external).  Same node as the
+         * `int add(int,int);` spelling, so call sites convert arguments
+         * identically. */
+        if (!is_typedef && t && t->kind == TYPE_FUNC) {
+            AstNode *fn;
+            if (lexer_peek(p->lex).kind != TOK_SEMICOLON) {
+                perror_at(p, "a declaration with a function type must end with ';'");
+                break;
+            }
+            {
+                AstNode **fparams = 0;
+                int fpc = 0;
+                fparams = params_from_func_type(t, &fpc, line);
+                fn = ast_func_def(name, t->base, fparams, fpc, 0, line);
+                if (fn) fn->col = decl_name_col;
+                fn->kind = AST_FUNC_DECL;
+                fn->u.func.is_variadic = t->is_variadic;
+                fn->u.func.is_static = (storage & STO_STATIC) ? 1 : 0;
+                fn->u.func.svc_num = 0;
+                fn->u.func.smc_num = -1;
+            }
+            lexer_advance(p->lex);          /* ';' */
+            if (!blk) {
+                blk = fn;
+            } else {
                 AstNode *b = ast_block(line);
                 b->u.block.is_decl_list = 1;
                 block_add_stmt(b, blk);
@@ -2570,15 +2756,17 @@ DEFINE_BINOP_LAYER(parse_shift_expr,  parse_add_expr,    (k == TOK_SHL || k == T
 DEFINE_BINOP_LAYER(parse_add_expr,    parse_mul_expr,    (k == TOK_PLUS || k == TOK_MINUS))
 DEFINE_BINOP_LAYER(parse_mul_expr,    parse_cast_expr,   (k == TOK_MUL || k == TOK_DIV || k == TOK_MOD))
 
-static int type_size_of_token(Parser *p) {
+/* Parse a type name (declspec + declarator) and hand back the type.
+ * Callers decide what to do with it: `sizeof` needs the size, but a
+ * function type has no size at all (C99 6.5.3.4p1 makes sizeof on a
+ * function type a constraint violation), and the old helper returned the
+ * generic 4 for TYPE_FUNC -- a silently wrong answer. */
+static Type *type_name_of_token(Parser *p) {
     int sto = 0, td = 0;
     Type *base = parse_declspec(p, &sto, &td);
-    Type *t;
     char *nm = 0;
-    if (!base) return 4;
-    t = parse_declarator(p, base, &nm);
-    (void)nm;
-    return type_size(t);
+    if (!base) return 0;
+    return parse_declarator(p, base, &nm);
 }
 
 static AstNode *parse_cast_expr(Parser *p) {
@@ -2643,7 +2831,20 @@ static AstNode *parse_unary_expr(Parser *p) {
                 if (is_basic_type_token(t2.kind) ||
                     (t2.kind == TOK_IDENT && sym_is_typedef(t2.str))) {
                     lexer_advance(p->lex); /* '(' */
-                    sz = type_size_of_token(p);
+                    {
+                        Type *st = type_name_of_token(p);
+                        if (st && st->kind == TYPE_FUNC) {
+                            /* C99 6.5.3.4p1: sizeof shall not be applied to
+                             * a function type.  Reporting beats folding to
+                             * the generic 4 (which is what `sizeof(binop)`
+                             * silently returned for a -function-type
+                             * typedef). */
+                            perror_at(p, "invalid application of 'sizeof' to a function type");
+                            sz = 4;
+                        } else {
+                            sz = st ? type_size(st) : 4;
+                        }
+                    }
                     lexer_expect(p->lex, TOK_RPAREN);
                     return ast_sizeof_val(sz, line);
                 }
@@ -2735,7 +2936,15 @@ static AstNode *parse_unary_expr(Parser *p) {
                 Type *base = parse_declspec(p, &sto, &td);
                 Type *t = base ? parse_declarator(p, base, &nm) : 0;
                 (void)nm;
-                al = type_align(t);
+                /* C11 6.5.3.4p1: _Alignof shall not be applied to a function
+                 * type.  A function-type typedef (`typedef int binop(int);`)
+                 * would otherwise answer the generic 4. */
+                if (t && t->kind == TYPE_FUNC) {
+                    perror_at(p, "invalid application of '_Alignof' to a function type");
+                    al = 1;
+                } else {
+                    al = type_align(t);
+                }
             }
             lexer_expect(p->lex, TOK_RPAREN);
             if (al <= 0) al = 1;

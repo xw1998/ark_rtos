@@ -274,3 +274,37 @@ RV32I 的 `_Complex float` 返回丢值修复、`(*fp)(params)` 保留参数表�
 可复现判据：`git stash push -- kernelsrc/components/arkc` → 重建得 `text 428532`；
 `git stash pop` → 重建得 `text 428740`。两次构建除 arkc 源码外的一切（CFLAGS、链接脚本、
 其余目标文件）完全相同。
+
+**2026-11-08 追加（上游 `80f98b4`：支持函数类型 typedef `typedef Ret F(args);`）**：
+
+板端（STM32H743，`USE_ARKC=1`，同一套 CFLAGS / 链接脚本）：
+
+| 项 | 旧 | 新 | 差 |
+|---|---|---|---|
+| `text` | 428 740 | 430 188 | **+1 448** |
+| `data` | 2 260 | 2 260 | 0 |
+| `bss` | 463 528 | 463 528 | 0 |
+| FLASH 占用 | 82.21% | 82.49% | +0.28 pp |
+| RAM / CCMRAM / NOINIT | 98.22% / 17.33% / 97.66% | 同左 | 0 |
+
+逐目标文件（`arm-none-eabi-size` 的 `text` 列，122 个目标文件全表比对）：
+
+| 目标文件 | 旧 | 新 | 差 |
+|---|---|---|---|
+| `parser.o` | 22 075 | 23 482 | +1 407 |
+| 其余 121 个 | — | — | 0 |
+
+输出 ELF 的段级差：`.text` 357 620 → 358 796（+1 176）、`.rodata` 70 232 → 70 504（+272），
+合计 +1 448；`parser.o` 自身 text 列 +1 407，两者相差 41 字节来自段对齐填充（`.rodata` 扩容
+后对齐边界移动），不是另有代码变动。
+
+原因：RV32I 后端整体不在 STM32 profile 里，`rv_*` 测试一行都没进固件；ARM 侧新增的是纯前端
+（`parse_func_type_tail` / `params_from_func_type` / 两处 typedef 注册 / `sizeof`、`_Alignof`
+的函数类型拒绝 / `parse_declspec` 的 `if (base) goto done;`），`irgen.o`、`backend_arm.o` 逐字节
+不变即可佐证 —— 这是"只动解析层、不动代码生成"的正面证据。
+
+判定：FLASH 82.49%、RAM/CCMRAM/NOINIT 未变，仍在预算内，**接受**。
+
+可复现判据：`git stash push -- kernelsrc/components/arkc` → 重建得 `text 428740`；
+`git stash pop` → 重建得 `text 430188`。两次构建除 arkc 源码外的一切（CFLAGS、链接脚本、
+其余目标文件）完全相同。
