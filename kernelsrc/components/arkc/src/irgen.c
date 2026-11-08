@@ -540,66 +540,72 @@ static int irgen_agg_addr_scalar(AstNode *init, int off, IrGlobal *g, int *found
     return 1;
 }
 
+/* One initialiser value of type `t` at byte offset `off`.  A nested brace level
+ * recurses; a scalar element is handed to irgen_agg_addr_scalar.  An aggregate
+ * slot holding a non-brace value is brace elision, whose flattened layout this
+ * walk does not re-derive -- refusing beats guessing an offset. */
+static int irgen_agg_addr_place(Type *t, AstNode *value, int off, IrGlobal *g, int *found) {
+    if (!t || !value) return 1;
+    if (value->kind == AST_INIT_LIST)
+        return irgen_agg_addr_walk(t, value, off, g, found);
+    if (t->kind == TYPE_ARRAY || t->kind == TYPE_STRUCT || t->kind == TYPE_UNION)
+        return 0;
+    return irgen_agg_addr_scalar(value, off, g, found);
+}
+
 static int irgen_agg_addr_walk(Type *t, AstNode *init, int base, IrGlobal *g, int *found) {
     int i, n;
     if (!t || !init) return 1;
     if (init->kind != AST_INIT_LIST) return 0;
     n = init->u.init_list.item_count;
     if (t->kind == TYPE_ARRAY && t->base) {
+        /* `cur` mirrors ark_agg_fill()'s cursor: it advances one per value and
+         * jumps on a designator, so `{[1] = &gv, [3] = &gv}` lands at the
+         * declared indices instead of at 0 and 1.  The two cursors are what the
+         * hook's offset lookup cross-checks. */
         int stride = type_size(t->base);
-        if (stride <= 0) return 0;
+        int len = t->size;
+        int cur = 0;
+        if (stride <= 0 || len <= 0) return 0;
         for (i = 0; i < n; i++) {
             AstNode *it = init->u.init_list.items[i];
             if (!it) continue;
-            if (it->u.init_field.has_field || it->u.init_field.has_index) return 0;
-            if (it->u.init_field.value &&
-                it->u.init_field.value->kind == AST_INIT_LIST) {
-                /* A nested brace level: an array of arrays or of structs. */
-                if (!irgen_agg_addr_walk(t->base, it->u.init_field.value,
-                                         base + i * stride, g, found))
-                    return 0;
-            } else if (t->base->kind == TYPE_ARRAY ||
-                       t->base->kind == TYPE_STRUCT ||
-                       t->base->kind == TYPE_UNION) {
-                /* Brace elision into an aggregate element: where the value
-                 * lands depends on the flattened layout, which this walk does
-                 * not re-derive (guessing is how a wrong offset gets stored). */
-                return 0;
-            } else if (!irgen_agg_addr_scalar(it->u.init_field.value,
-                                              base + i * stride, g, found)) {
-                return 0;
+            if (it->u.init_field.has_field) return 0;
+            if (it->u.init_field.has_index) {
+                cur = it->u.init_field.index;
+                if (cur < 0 || cur >= len) return 0;
             }
+            if (cur >= len) return 0;
+            if (!irgen_agg_addr_place(t->base, it->u.init_field.value,
+                                      base + cur * stride, g, found))
+                return 0;
+            cur++;
         }
         return 1;
     }
-    if (t->kind == TYPE_STRUCT) {
+    if (t->kind == TYPE_STRUCT || t->kind == TYPE_UNION) {
+        /* Same shape as the array branch: `f` walks the members in order and a
+         * `.name =` designator moves it.  A union has one live member, so the
+         * initialiser may only have one element (C99 6.7.8p10). */
         StructField *f = t->fields;
+        if (t->kind == TYPE_UNION && n > 1) return 0;
         for (i = 0; i < n; i++) {
             AstNode *it = init->u.init_list.items[i];
             if (!it) continue;
-            if (it->u.init_field.has_field || it->u.init_field.has_index) return 0;
+            if (it->u.init_field.has_index) return 0;
+            if (it->u.init_field.has_field) {
+                f = type_find_field(t, it->u.init_field.field);
+                if (!f) return 0;
+            }
             if (!f) return 0;
             if (f->bit_width > 0) { f = f->next; continue; }
-            if (it->u.init_field.value &&
-                it->u.init_field.value->kind == AST_INIT_LIST) {
-                if (!irgen_agg_addr_walk(f->type, it->u.init_field.value,
-                                         base + f->offset, g, found))
-                    return 0;
-            } else if (f->type && (f->type->kind == TYPE_ARRAY ||
-                                   f->type->kind == TYPE_STRUCT ||
-                                   f->type->kind == TYPE_UNION)) {
-                /* Brace elision into an aggregate field: bail for the same
-                 * reason as in the array branch. */
+            if (!irgen_agg_addr_place(f->type, it->u.init_field.value,
+                                      base + f->offset, g, found))
                 return 0;
-            } else if (!irgen_agg_addr_scalar(it->u.init_field.value,
-                                              base + f->offset, g, found)) {
-                return 0;
-            }
             f = f->next;
         }
         return 1;
     }
-    if (t->kind == TYPE_UNION) return 0;   /* one live member; ark_agg_fill owns it */
     return irgen_agg_addr_scalar(init, base, g, found);
 }
 
@@ -676,9 +682,10 @@ static void irgen_try_agg_addr_init(IrGlobal *g, AstNode *init) {
             irgen_init_has_str_addr(g->type, init)) {
             diag_tool(DIAG_SEV_ERROR, "arkcc",
                       "the initialiser of the global '%s' contains an address "
-                      "element, but its braces are not spelled out level by level "
-                      "(or it uses a designator), so the offset of that element "
-                      "cannot be placed; write the braces out",
+                      "element that cannot be placed here: either its braces are "
+                      "not spelled out level by level, or the designator does not "
+                      "fit the type (out of range, or a union with more than one "
+                      "initialised member); write one value per brace level",
                       g->name, 0,0,0,0,0);
             g_irgen_errors++;
         }

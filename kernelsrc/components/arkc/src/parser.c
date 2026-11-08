@@ -497,6 +497,50 @@ static void parse_attribute(Parser *p, Type *attach_type) {
     if (lexer_peek(p->lex).kind == TOK_RPAREN) lexer_advance(p->lex);
 }
 
+/* A C99 designator index ("[k]" inside an initialiser) is an integer constant
+ * expression (6.6p6), not necessarily a bare literal.  Fold it exactly the way
+ * array dimensions and enum values are folded.  On failure one clear diagnostic
+ * is emitted and the tokens are skipped up to (and including) the ']' so the
+ * enclosing initialiser keeps parsing in step; the caller then leaves
+ * has_index == 0 and the build fails on error_count, which is the intended
+ * "report, never guess" behaviour (a non-constant designator used to end in
+ * an error storm followed by "memory pool exhausted"). */
+static int parse_designator_index(Parser *p, int *out) {
+    AstNode *ce;
+    long long cv = 0;
+    int ok = 0;
+    if (lexer_peek(p->lex).kind == TOK_RBRACKET) {
+        perror_at(p, "a designator index must be an integer constant expression");
+    } else {
+        ce = parse_cond_expr(p);
+        if (ce && eval_const_expr(ce, &cv)) {
+            if (cv < 0) {
+                perror_at(p, "a designator index must not be negative");
+                cv = 0;
+            }
+            if (lexer_peek(p->lex).kind == TOK_RBRACKET) {
+                *out = (int)cv;
+                ok = 1;
+            } else {
+                perror_at(p, "expected ']' after the designator index");
+            }
+        } else {
+            perror_at(p, "a designator index must be an integer constant expression");
+        }
+    }
+    if (ok) {
+        lexer_advance(p->lex);   /* ']' */
+        return 1;
+    }
+    while (lexer_peek(p->lex).kind != TOK_RBRACKET &&
+           lexer_peek(p->lex).kind != TOK_COMMA &&
+           lexer_peek(p->lex).kind != TOK_RBRACE &&
+           lexer_peek(p->lex).kind != TOK_EOF)
+        lexer_advance(p->lex);
+    if (lexer_peek(p->lex).kind == TOK_RBRACKET) lexer_advance(p->lex);
+    return 0;
+}
+
 /* Parse initializer: { ... } or plain expression */
 static AstNode *parse_init_list(Parser *p) {
     int line = lexer_peek(p->lex).line;
@@ -540,12 +584,7 @@ static AstNode *parse_init_list(Parser *p) {
                 } else {
                     /* [index] */
                     lexer_advance(p->lex);
-                    if (lexer_peek(p->lex).kind == TOK_NUM) {
-                        sub_idx = lexer_peek(p->lex).value;
-                        has_sub_index = 1;
-                        lexer_advance(p->lex);
-                    }
-                    lexer_expect(p->lex, TOK_RBRACKET);
+                    if (parse_designator_index(p, &sub_idx)) has_sub_index = 1;
                 }
                 if (lexer_peek(p->lex).kind == TOK_ASSIGN) lexer_advance(p->lex);
                 {
@@ -586,14 +625,10 @@ static AstNode *parse_init_list(Parser *p) {
             if (lexer_peek(p->lex).kind == TOK_ASSIGN) lexer_advance(p->lex);
         } else if (lexer_peek(p->lex).kind == TOK_LBRACKET) {
             lexer_advance(p->lex);
-            if (lexer_peek(p->lex).kind == TOK_NUM) {
-                idx_val = lexer_peek(p->lex).value;
-                has_index = 1;
-                lexer_advance(p->lex);
-            }
+            if (parse_designator_index(p, &idx_val)) has_index = 1;
             /* A missing "]" used to be skipped silently, so `int a[2;`
-             * compiled with no diagnostic at all. Report it (armcc #17). */
-            lexer_expect(p->lex, TOK_RBRACKET);
+             * compiled with no diagnostic at all. Report it (armcc #17);
+             * parse_designator_index now does that reporting as well. */
             if (lexer_peek(p->lex).kind == TOK_ASSIGN) lexer_advance(p->lex);
         }
         value = parse_initializer(p);

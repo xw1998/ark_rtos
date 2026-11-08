@@ -426,3 +426,39 @@ ELF `text` +640 比逐目标合计 +639 多 1 字节，是段对齐填充，不�
 `text 435012 / data 2260 / bss 463532`（FLASH 83.41%）；`git stash pop` → 重建得
 `text 435652 / data 2260 / bss 463532`（FLASH 83.53%）。两次构建除 arkc 源码外的一切
 （CFLAGS、链接脚本、其余目标文件）完全相同。
+
+**2026-11-08 追加（上游 `6fce783`：聚合初始化器里的指派器与 union 地址元素 + 设计器下标折常量）**：
+
+板端（STM32H743，`USE_ARKC=1`，同一套 CFLAGS / 链接脚本）：
+
+| 项 | 旧 | 新 | 差 |
+|---|---|---|---|
+| `text` | 435 652 | 436 108 | **+456** |
+| `data` | 2 260 | 2 260 | 0 |
+| `bss` | 463 532 | 463 532 | 0 |
+| FLASH 占用 | 83.53% | 83.61% | +0.08 pp |
+| RAM / CCMRAM / NOINIT | 98.22% / 17.33% / 97.66% | 同左 | 0 |
+
+逐目标文件（只有 arkc 侧的 2 个目标变化，其余逐列相同）：
+
+| 目标文件 | text 旧 -> 新 | 差 |
+|---|---|---|
+| `irgen.o` | 31 700 -> 31 833 | +133 |
+| `parser.o` | 23 802 -> 24 126 | +324 |
+| `backend_arm.o` / `agginit.o` / `ir.o` / `lexer.o` | 91 423 / 2 868 / 1 722 / 7 945 | 0 |
+| 三者合计 | — | +457 |
+
+ELF `text` +456 比逐目标合计 +457 少 1 字节，是段对齐填充，不是另有代码变动。
+
+落点：`irgen.o` 是走查改写（新增 `irgen_agg_addr_place()`、数组分支的 `cur` 游标、
+结构/`union` 分支的 `f` 游标与 `.name=` 重定位、`union` 单活跃成员限制）；`parser.o` 是新增
+`parse_designator_index()`（`parse_cond_expr` + `eval_const_expr` 折常量，失败报到 `]` 为止）。
+`backend_arm.o` 为 0 —— 本轮没有改任何代码生成路径，只改了"前端怎么定地址元素的偏移"和
+"解析器怎么读设计器下标"，与上一轮 `.rodata` 标签那条通路无关。
+
+判定：FLASH 83.61%、RAM/CCMRAM/NOINIT 未变，仍在 512 KB 预算内（余 83.86 KB），**接受**。
+
+可复现判据：`git stash push -- kernelsrc/components/arkc` → 重建得
+`text 435652 / data 2260 / bss 463532`（FLASH 83.53%）；`git stash pop` → 重建得
+`text 436108 / data 2260 / bss 463532`（FLASH 83.61%）。两次构建除 arkc 源码外的一切
+（CFLAGS、链接脚本、其余目标文件）完全相同。
