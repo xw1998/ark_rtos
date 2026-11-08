@@ -1285,9 +1285,10 @@ static int ark_top_try(AsmBuffer *b, IrInst *I, int *top, int *ret_in_r0) {
         *top = 1;
         return 1;
     case IR_UNARY:
-        /* 64-bit forms touch two stack slots (I->val carries the width), so the
-         * one-word model does not apply: fall back with the stack top drained. */
-        if (I->val == 2) { ark_top_drain(b, top); return 0; }
+        /* 64-bit forms touch two stack slots (I->val carries the width) and a
+         * float/double form is not a one-word integer either, so the one-word
+         * model does not apply to either: fall back with the stack drained. */
+        if (I->val == 1 || I->val == 2) { ark_top_drain(b, top); return 0; }
         if (!*top) emit_pop_r0(b);
         emit_unary(b, I->aux);
         *top = 1;
@@ -1354,6 +1355,13 @@ static int ark_top_try(AsmBuffer *b, IrInst *I, int *top, int *ret_in_r0) {
         else emit_pop_r0(b);
         return 1;
     case IR_DUP:
+        /* val > 1 asks for a multi-word duplicate (a long long is two stack
+         * words); the register-top form can only model one word, so let the
+         * generic emitter handle it. */
+        if (I->val > 1) {
+            ark_top_drain(b, top);
+            return 0;
+        }
         if (*top) {
             asmbuf_puts(b, "    PUSH {r0}\n");   /* one copy on the stack, one in r0 */
             return 1;
@@ -2637,11 +2645,49 @@ static char *codegen_arm(IrProgram *prog) {
                 case IR_POP:
                     emit_pop_r0(&buf);
                     break;
-                case IR_DUP:
-                    emit_pop_r0(&buf);
-                    emit_push_r0(&buf);
-                    emit_push_r0(&buf);
+                case IR_DUP: {
+                    /* val = number of 32-bit words to duplicate (0/1 = one).
+                     * A long long occupies two stack words with the high word on
+                     * top, so duplicating just one word produced
+                     * [low, high, high]; the 8-byte store that follows then wrote
+                     * the high word into BOTH halves of the object.  Measured
+                     * before the fix:
+                     *     long long a; a = -7LL;  -> a == -1     (want -7)
+                     *     long long a; a =  7LL;  -> a ==  0     (want  7)
+                     * which in turn made every signed 64-bit division with a
+                     * negative operand return garbage. */
+                    int nw = I->val > 0 ? I->val : 1;
+                    int i;
+                    if (nw > 4) nw = 4;
+                    for (i = 0; i < nw; i++) {
+                        if (i == 0) {
+                            emit_pop_r0(&buf);
+                        } else {
+                            asmbuf_puts(&buf, "    POP {r");
+                            asmbuf_int(&buf, i);
+                            asmbuf_puts(&buf, "}\n");
+                        }
+                    }
+                    for (i = nw - 1; i >= 0; i--) {
+                        if (i == 0) {
+                            emit_push_r0(&buf);
+                        } else {
+                            asmbuf_puts(&buf, "    PUSH {r");
+                            asmbuf_int(&buf, i);
+                            asmbuf_puts(&buf, "}\n");
+                        }
+                    }
+                    for (i = nw - 1; i >= 0; i--) {
+                        if (i == 0) {
+                            emit_push_r0(&buf);
+                        } else {
+                            asmbuf_puts(&buf, "    PUSH {r");
+                            asmbuf_int(&buf, i);
+                            asmbuf_puts(&buf, "}\n");
+                        }
+                    }
                     break;
+                }
                 case IR_SWAP:
                     /* Pop top two values and push them back in swapped order.
                      * r0 = top, r1 = next -> push r0, push r1 */
@@ -2898,12 +2944,44 @@ static char *codegen_arm(IrProgram *prog) {
                         emit_line(&buf, "MVN r0, r0");
                         emit_line(&buf, "MVN r1, r1");
                         if (I->aux == (int)TOK_MINUS) {
-                            emit_line(&buf, "ADD r0, r0, #1");
+                            /* Two-operand ADDS, not three-operand ADD: in
+                             * unified syntax the three-operand form assembles to the
+                             * 32-bit ADD.W.  That is architecturally equivalent, but
+                             * the Unicorn-based gate harness does not update the flags
+                             * for ADD.W (measured: with carry pre-set, ADC then added
+                             * an extra 1 and -7LL came out as -8).  The 16-bit form
+                             * sets the flags correctly on both hardware and the harness
+                             * and is one instruction shorter. */
+                            emit_line(&buf, "ADDS r0, #1");
                             emit_line(&buf, "MOV r2, #0");
                             emit_line(&buf, "ADC r1, r2");
                         }
                         asmbuf_puts(&buf, "    PUSH {r0}\n");
                         asmbuf_puts(&buf, "    PUSH {r1}\n");
+                        break;
+                    }
+                    if (I->val == 1) {
+                        /* Floating-point negation.  irgen tags `-x` on a float
+                         * or a double with val=1, and this used to run it
+                         * through the integer NEG: that mangles the exponent of
+                         * every value and turns -0.0 into +0.0, where IEEE only
+                         * flips the sign bit.  A float is one word on the stack
+                         * and a double's HIGH word is on top -- that word holds
+                         * the sign bit in both cases, so popping one word and
+                         * flipping bit 31 is right for both, with no need to
+                         * know which precision it is. */
+                        emit_pop_r0(&buf);
+                        if (I->aux == (int)TOK_MINUS) {
+                            emit_line(&buf, "EOR r0, r0, #0x80000000");
+                        } else {
+                            char b1[12];
+                            diag_tool(DIAG_SEV_ERROR, "arkcc",
+                                      "the arm backend does not implement the "
+                                      "floating-point unary operator %s "
+                                      "(function '%s')",
+                                      diag_num(b1, I->aux), f->name, 0,0,0,0);
+                        }
+                        emit_push_r0(&buf);
                         break;
                     }
                     emit_pop_r0(&buf);
@@ -3207,12 +3285,10 @@ static char *codegen_arm(IrProgram *prog) {
                      *   float  = [r0]              (1 slot)
                      *   aux 0x200 = double->float (narrow): -1 slot
                      *   aux 0x100 = float->double (widen):  +1 slot
-                     * The helpers are this compiler's own (the same ones the
-                     * double<->single paths of the arithmetic helpers use),
-                     * because __aeabi_f2d / __aeabi_d2f are only defined when
-                     * the image is linked against libgcc: __arkcc_f2d_ext
-                     * (r0 -> r0/r1) and __arkcc_d2f_trunc (r0/r1 -> r0) are
-                     * emitted into every image that needs them. */
+                     * Both directions go to the run-time library: widening is
+                     * exact so it could be done here, but keeping one rule is
+                     * simpler than explaining why half of this IR op is
+                     * self-contained and half is not. */
                     int src_dbl = (I->aux & 0x200) != 0;
                     int dst_dbl = (I->aux & 0x100) != 0;
 #if ARKCC_FEATURE_FPU_HW
@@ -3247,12 +3323,12 @@ static char *codegen_arm(IrProgram *prog) {
                         /* double -> float */
                         emit_pop_r1(&buf);
                         emit_pop_r0(&buf);
-                        emit_line(&buf, "BL __arkcc_d2f_trunc");
+                        emit_line(&buf, "BL __aeabi_d2f");
                         emit_push_r0(&buf);
                     } else if (!src_dbl && dst_dbl) {
                         /* float -> double */
                         emit_pop_r0(&buf);
-                        emit_line(&buf, "BL __arkcc_f2d_ext");
+                        emit_line(&buf, "BL __aeabi_f2d");
                         emit_push_r0(&buf);
                         asmbuf_puts(&buf, "    PUSH {r1}\n");
                     }
@@ -3818,9 +3894,17 @@ static char *codegen_arm(IrProgram *prog) {
                     int op = I->aux & ~0x100;
                     const char *helper = 0;
                     int is_div = 0, is_mod = 0;
+                    int is_add = 0, is_sub = 0;
                     switch (op) {
-                        case (int)TOK_PLUS:  helper = "__aeabi_ladd"; break;
-                        case (int)TOK_MINUS: helper = "__aeabi_lsub"; break;
+                        /* 64-bit add/sub are two instructions -- emit them
+                         * inline instead of calling the AEABI helpers.
+                         * __aeabi_ladd/__aeabi_lsub are *not* in gcc's
+                         * libgcc.a any more (gcc >= 4.x inlines them, so the
+                         * archive never defines them), which made every
+                         * 64-bit add/sub image fail to link with
+                         * "undefined reference to `__aeabi_ladd'". */
+                        case (int)TOK_PLUS:  is_add = 1; break;
+                        case (int)TOK_MINUS: is_sub = 1; break;
                         case (int)TOK_MUL:   helper = "__aeabi_lmul"; break;
                         case (int)TOK_DIV:   helper = is_unsigned ? "__aeabi_uldivmod" : "__aeabi_ldivmod"; is_div = 1; break;
                         case (int)TOK_MOD:   helper = is_unsigned ? "__aeabi_uldivmod" : "__aeabi_ldivmod"; is_mod = 1; break;
@@ -3845,6 +3929,18 @@ static char *codegen_arm(IrProgram *prog) {
                     if (op == (int)TOK_BAND) { emit_line(&buf, "AND r0, r2"); emit_line(&buf, "AND r1, r3"); }
                     else if (op == (int)TOK_BOR)  { emit_line(&buf, "ORR r0, r2"); emit_line(&buf, "ORR r1, r3"); }
                     else if (op == (int)TOK_BXOR) { emit_line(&buf, "EOR r0, r2"); emit_line(&buf, "EOR r1, r3"); }
+                    /* ADDS/ADC and SUBS/SBC are emitted in their 16-bit
+                     * two/three-operand forms on purpose: a Thumb-2 wide
+                     * `ADD.W r0, r0, #imm` does not update APSR under
+                     * unicorn 2.1.4, which would silently corrupt the carry
+                     * into ADC (measured: -7LL + -1LL came out as -8LL). */
+                    if (is_add) {
+                        emit_line(&buf, "ADDS r0, r0, r2");
+                        emit_line(&buf, "ADC r1, r1, r3");
+                    } else if (is_sub) {
+                        emit_line(&buf, "SUBS r0, r0, r2");
+                        emit_line(&buf, "SBC r1, r1, r3");
+                    }
                     if (helper) {
                         asmbuf_puts(&buf, "    BL ");
                         asmbuf_puts(&buf, helper);
@@ -4264,816 +4360,33 @@ static char *codegen_arm(IrProgram *prog) {
         asmbuf_puts(&buf, "    POP {pc}\n\n");
     }
 
-    /* #A1 FIX: Emit __aeabi_* runtime helper functions for 64-bit arithmetic.
-     * The ARM backend emits BL __aeabi_ladd/__aeabi_lmul/__aeabi_ldivmod etc.
-     * for long long operations. These follow the ARM EABI calling convention:
-     *   - 64-bit values passed in r0/r1 (low/high) and r2/r3 (low/high)
-     *   - 64-bit return value in r0/r1 (low/high)
-     *   - ldivmod/uldivmod: quotient in r0/r1, remainder in r2/r3
-     * Note: 16-bit Thumb ADD/SUB/LSR/ASR always set flags (S suffix implicit).
-     * The assembler matches base mnemonics (ADD not ADDS). RSC is unavailable
-     * in Thumb-2; 64-bit negate uses CMP/BEQ/RSB/MVN. ADC/SBC/ORR/EOR only
-     * support 2-operand form (Rd = Rd op Rm). Numeric labels (1f/1b) are not
-     * supported; use named labels. Only r0-r7 used in uldivmod (high registers
-     * not supported by 16-bit immediate/data-processing instructions). */
+    /* AEABI run-time helpers.
+     *
+     * This backend used to emit its own implementations of the AEABI
+     * soft-float and 64-bit integer helpers (__aeabi_ladd ... __aeabi_llsl,
+     * __aeabi_uldivmod, __aeabi_ldivmod, __aeabi_fadd ... __aeabi_fdiv,
+     * __aeabi_f2iz, __aeabi_fcmpeq, the whole d-family).  Running them
+     * against the host oracle showed several of them are simply wrong:
+     *
+     *   __aeabi_f2iz     (int)2.0f                        -> 0    (want 2)
+     *   __aeabi_fdiv     4.0f/2.0f == 2.0f                -> false
+     *   __aeabi_uldivmod 1000ull/7ull                     -> wrong quotient
+     *   __aeabi_ldivmod  1000000ll/1000ll & 127           -> 125  (want 104)
+     *   __aeabi_dadd     (a+b)*(a-b)/(b+1) for (3.5,1.5)   -> 25   (want 144)
+     *
+     * Each of those is a silent wrong answer, the one outcome this compiler
+     * refuses to produce.  The AEABI defines these symbols as part of the
+     * *target run-time library*, and every real toolchain carries them:
+     * arm-none-eabi-gcc ships libgcc.a, armcc ships armlib.  So they are no
+     * longer emitted here.  An image that uses floating point, 64-bit
+     * division or 64-bit <-> float conversion must link that library; one
+     * that does not fails at link time with "undefined reference to
+     * __aeabi_..." instead of computing something false.
+     *
+     * __aeabi_memcpy stays: no run-time library provides it for a
+     * freestanding target, the byte loop below cannot be wrong, and struct
+     * assignment / struct-by-value arguments would otherwise need libc. */
     {
-        /* __aeabi_ladd: 64-bit addition (a = r0:r1, b = r2:r3 -> r0:r1) */
-        asmbuf_puts(&buf, ".global __aeabi_ladd\n");
-        asmbuf_puts(&buf, ".thumb_func\n");
-        asmbuf_puts(&buf, "__aeabi_ladd:\n");
-        asmbuf_puts(&buf, "    ADD r0, r0, r2\n");
-        asmbuf_puts(&buf, "    ADC r1, r3\n");          /* r1 = r1 + r3 + C */
-        asmbuf_puts(&buf, "    BX lr\n\n");
-
-        /* __aeabi_lsub: 64-bit subtraction (a = r0:r1, b = r2:r3 -> r0:r1) */
-        asmbuf_puts(&buf, ".global __aeabi_lsub\n");
-        asmbuf_puts(&buf, ".thumb_func\n");
-        asmbuf_puts(&buf, "__aeabi_lsub:\n");
-        asmbuf_puts(&buf, "    SUB r0, r0, r2\n");
-        asmbuf_puts(&buf, "    SBC r1, r3\n");          /* r1 = r1 - r3 - NOT(C) */
-        asmbuf_puts(&buf, "    BX lr\n\n");
-
-        /* __aeabi_lmul: 64-bit multiplication (a = r0:r1, b = r2:r3 -> r0:r1)
-         * result = (a_lo * b_lo) + ((a_lo * b_hi + a_hi * b_lo) << 32)
-         * MUL T1 only supports Rd = Rd * Rm (2-operand); use MOV to copy first. */
-        asmbuf_puts(&buf, ".global __aeabi_lmul\n");
-        asmbuf_puts(&buf, ".thumb_func\n");
-        asmbuf_puts(&buf, "__aeabi_lmul:\n");
-        asmbuf_puts(&buf, "    PUSH {r4, r5, lr}\n");
-        asmbuf_puts(&buf, "    MOV r4, r3\n");          /* r4 = b_hi */
-        asmbuf_puts(&buf, "    MUL r4, r0\n");          /* r4 = r0 * b_hi */
-        asmbuf_puts(&buf, "    MOV r5, r1\n");          /* r5 = a_hi */
-        asmbuf_puts(&buf, "    MUL r5, r2\n");          /* r5 = a_hi * b_lo */
-        asmbuf_puts(&buf, "    UMULL r0, r1, r0, r2\n"); /* r0:r1 = a_lo * b_lo */
-        asmbuf_puts(&buf, "    ADD r1, r4\n");          /* r1 += a_lo*b_hi */
-        asmbuf_puts(&buf, "    ADD r1, r5\n");          /* r1 += a_hi*b_lo */
-        asmbuf_puts(&buf, "    POP {r4, r5, pc}\n\n");
-
-        /* __aeabi_llsl / __aeabi_llsr / __aeabi_lasr: 64-bit shifts.
-         * Input: r0:r1 = value (low:high), r2 = count.  Output: r0:r1.
-         * Counts are C shift counts: 0..63 for a 64-bit operand, and >= 64 is
-         * undefined behaviour in C, so it is not defined here either.
-         *
-         * Hand-written because a 64-bit shift used to be lowered to a 32-bit
-         * one and answered 0 for 300LL >> 8.  The 0..31 / 32..63 split is
-         * deliberate: there is no "shift by 32" encoding to lean on (the 16-bit
-         * forms use imm5, where 0 means 32).  Only operand shapes this assembler
-         * encodes literally are used: 2-operand register shifts (Rd = Rd op Rs),
-         * immediate shifts, and the 3-operand immediate form `ASR Rd, Rm, #imm`. */
-        asmbuf_puts(&buf, ".global __aeabi_llsl\n");
-        asmbuf_puts(&buf, ".thumb_func\n");
-        asmbuf_puts(&buf, "__aeabi_llsl:\n");
-        asmbuf_puts(&buf, "    CMP r2, #32\n");
-        asmbuf_puts(&buf, "    BHS .L_llsl_hi\n");
-        asmbuf_puts(&buf, "    CMP r2, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_llsl_done\n");
-        asmbuf_puts(&buf, "    PUSH {r4, r5}\n");
-        asmbuf_puts(&buf, "    MOV r4, #32\n");
-        asmbuf_puts(&buf, "    SUB r4, r4, r2\n");        /* r4 = 32 - n */
-        asmbuf_puts(&buf, "    MOV r5, r0\n");
-        asmbuf_puts(&buf, "    LSR r5, r4\n");            /* r5 = lo >> (32-n) */
-        asmbuf_puts(&buf, "    MOV r4, r1\n");
-        asmbuf_puts(&buf, "    LSL r4, r2\n");            /* r4 = hi << n */
-        asmbuf_puts(&buf, "    ORR r4, r5\n");
-        asmbuf_puts(&buf, "    LSL r0, r2\n");            /* lo <<= n */
-        asmbuf_puts(&buf, "    MOV r1, r4\n");
-        asmbuf_puts(&buf, "    POP {r4, r5}\n");
-        asmbuf_puts(&buf, "    BX lr\n");
-        asmbuf_puts(&buf, ".L_llsl_hi:\n");
-        asmbuf_puts(&buf, "    SUB r2, r2, #32\n");
-        /* value << n for n >= 32 keeps only the old low word, moved up by
-         * (n-32) into the new high word; the low word becomes 0 and anything
-         * shifted past bit 63 is discarded.  (Getting these two swapped is the
-         * classic way to answer 0 for 1ULL << 32.) */
-        asmbuf_puts(&buf, "    MOV r1, r0\n");
-        asmbuf_puts(&buf, "    LSL r1, r2\n");            /* hi = lo << (n-32) */
-        asmbuf_puts(&buf, "    MOV r0, #0\n");
-        asmbuf_puts(&buf, ".L_llsl_done:\n");
-        asmbuf_puts(&buf, "    BX lr\n\n");
-
-        asmbuf_puts(&buf, ".global __aeabi_llsr\n");
-        asmbuf_puts(&buf, ".thumb_func\n");
-        asmbuf_puts(&buf, "__aeabi_llsr:\n");
-        asmbuf_puts(&buf, "    CMP r2, #32\n");
-        asmbuf_puts(&buf, "    BHS .L_llsr_hi\n");
-        asmbuf_puts(&buf, "    CMP r2, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_llsr_done\n");
-        asmbuf_puts(&buf, "    PUSH {r4, r5}\n");
-        asmbuf_puts(&buf, "    MOV r4, #32\n");
-        asmbuf_puts(&buf, "    SUB r4, r4, r2\n");
-        asmbuf_puts(&buf, "    MOV r5, r1\n");
-        asmbuf_puts(&buf, "    LSL r5, r4\n");            /* r5 = hi << (32-n) */
-        asmbuf_puts(&buf, "    MOV r4, r0\n");
-        asmbuf_puts(&buf, "    LSR r4, r2\n");            /* r4 = lo >> n */
-        asmbuf_puts(&buf, "    ORR r4, r5\n");
-        asmbuf_puts(&buf, "    MOV r0, r4\n");
-        asmbuf_puts(&buf, "    LSR r1, r2\n");            /* hi >>= n (logical) */
-        asmbuf_puts(&buf, "    POP {r4, r5}\n");
-        asmbuf_puts(&buf, "    BX lr\n");
-        asmbuf_puts(&buf, ".L_llsr_hi:\n");
-        asmbuf_puts(&buf, "    SUB r2, r2, #32\n");
-        asmbuf_puts(&buf, "    MOV r0, r1\n");
-        asmbuf_puts(&buf, "    LSR r0, r2\n");            /* lo = hi >> (n-32) */
-        asmbuf_puts(&buf, "    MOV r1, #0\n");
-        asmbuf_puts(&buf, ".L_llsr_done:\n");
-        asmbuf_puts(&buf, "    BX lr\n\n");
-
-        asmbuf_puts(&buf, ".global __aeabi_lasr\n");
-        asmbuf_puts(&buf, ".thumb_func\n");
-        asmbuf_puts(&buf, "__aeabi_lasr:\n");
-        asmbuf_puts(&buf, "    CMP r2, #32\n");
-        asmbuf_puts(&buf, "    BHS .L_lasr_hi\n");
-        asmbuf_puts(&buf, "    CMP r2, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_lasr_done\n");
-        asmbuf_puts(&buf, "    PUSH {r4, r5}\n");
-        asmbuf_puts(&buf, "    MOV r4, #32\n");
-        asmbuf_puts(&buf, "    SUB r4, r4, r2\n");
-        asmbuf_puts(&buf, "    MOV r5, r1\n");
-        asmbuf_puts(&buf, "    LSL r5, r4\n");            /* r5 = hi << (32-n) */
-        asmbuf_puts(&buf, "    MOV r4, r0\n");
-        asmbuf_puts(&buf, "    LSR r4, r2\n");            /* r4 = lo >> n */
-        asmbuf_puts(&buf, "    ORR r4, r5\n");
-        asmbuf_puts(&buf, "    MOV r0, r4\n");
-        asmbuf_puts(&buf, "    ASR r1, r2\n");            /* hi >>= n (arithmetic) */
-        asmbuf_puts(&buf, "    POP {r4, r5}\n");
-        asmbuf_puts(&buf, "    BX lr\n");
-        asmbuf_puts(&buf, ".L_lasr_hi:\n");
-        asmbuf_puts(&buf, "    SUB r2, r2, #32\n");
-        asmbuf_puts(&buf, "    MOV r0, r1\n");
-        asmbuf_puts(&buf, "    ASR r0, r2\n");            /* lo = hi >> (n-32) */
-        asmbuf_puts(&buf, "    ASR r1, r1, #31\n");       /* hi = sign of hi */
-        asmbuf_puts(&buf, ".L_lasr_done:\n");
-        asmbuf_puts(&buf, "    BX lr\n\n");
-
-        /* __aeabi_lcmp: 64-bit signed compare (a = r0:r1, b = r2:r3 -> r0 = -1/0/1)
-         * MOV r0, #-1 is buggy (encodes as #255), use MOV+MVN for -1. */
-        asmbuf_puts(&buf, ".global __aeabi_lcmp\n");
-        asmbuf_puts(&buf, ".thumb_func\n");
-        asmbuf_puts(&buf, "__aeabi_lcmp:\n");
-        asmbuf_puts(&buf, "    CMP r1, r3\n");
-        asmbuf_puts(&buf, "    BGT .L_lcmp_gt\n");
-        asmbuf_puts(&buf, "    BLT .L_lcmp_lt\n");
-        asmbuf_puts(&buf, "    CMP r0, r2\n");
-        asmbuf_puts(&buf, "    BHI .L_lcmp_gt\n");
-        asmbuf_puts(&buf, "    BCC .L_lcmp_lt\n");
-        asmbuf_puts(&buf, "    MOV r0, #0\n");
-        asmbuf_puts(&buf, "    BX lr\n");
-        asmbuf_puts(&buf, ".L_lcmp_lt:\n");
-        asmbuf_puts(&buf, "    MOV r0, #0\n");
-        asmbuf_puts(&buf, "    MVN r0, r0\n");          /* r0 = -1 */
-        asmbuf_puts(&buf, "    BX lr\n");
-        asmbuf_puts(&buf, ".L_lcmp_gt:\n");
-        asmbuf_puts(&buf, "    MOV r0, #1\n");
-        asmbuf_puts(&buf, "    BX lr\n\n");
-
-        /* __aeabi_ulcmp: 64-bit unsigned compare (a = r0:r1, b = r2:r3 -> r0 = -1/0/1) */
-        asmbuf_puts(&buf, ".global __aeabi_ulcmp\n");
-        asmbuf_puts(&buf, ".thumb_func\n");
-        asmbuf_puts(&buf, "__aeabi_ulcmp:\n");
-        asmbuf_puts(&buf, "    CMP r1, r3\n");
-        asmbuf_puts(&buf, "    BHI .L_ulcmp_gt\n");
-        asmbuf_puts(&buf, "    BCC .L_ulcmp_lt\n");
-        asmbuf_puts(&buf, "    CMP r0, r2\n");
-        asmbuf_puts(&buf, "    BHI .L_ulcmp_gt\n");
-        asmbuf_puts(&buf, "    BCC .L_ulcmp_lt\n");
-        asmbuf_puts(&buf, "    MOV r0, #0\n");
-        asmbuf_puts(&buf, "    BX lr\n");
-        asmbuf_puts(&buf, ".L_ulcmp_lt:\n");
-        asmbuf_puts(&buf, "    MOV r0, #0\n");
-        asmbuf_puts(&buf, "    MVN r0, r0\n");          /* r0 = -1 */
-        asmbuf_puts(&buf, "    BX lr\n");
-        asmbuf_puts(&buf, ".L_ulcmp_gt:\n");
-        asmbuf_puts(&buf, "    MOV r0, #1\n");
-        asmbuf_puts(&buf, "    BX lr\n\n");
-
-        /* __aeabi_uldivmod: 64-bit unsigned division/modulo
-         * Input: r0:r1 = dividend, r2:r3 = divisor
-         * Output: r0:r1 = quotient, r2:r3 = remainder
-         * Algorithm: shift-and-subtract (64 iterations)
-         * Register allocation (r0-r7 only, use stack for temps):
-         *   r0:r1 = dividend -> quotient (shifted left, quotient bits set at LSB)
-         *   r2:r3 = remainder (init 0, shifted left, dividend MSB brought in)
-         *   r4 = counter (64 iterations)
-         *   r5 = scratch (dividend MSB, carry)
-         *   r6:r7 = saved divisor (for comparison and subtraction) */
-        asmbuf_puts(&buf, ".global __aeabi_uldivmod\n");
-        asmbuf_puts(&buf, ".thumb_func\n");
-        asmbuf_puts(&buf, "__aeabi_uldivmod:\n");
-        asmbuf_puts(&buf, "    Push {r4, r5, r6, r7, lr}\n");
-        asmbuf_puts(&buf, "    MOV r6, r2\n");          /* r6 = divisor_lo */
-        asmbuf_puts(&buf, "    MOV r7, r3\n");          /* r7 = divisor_hi */
-        asmbuf_puts(&buf, "    MOV r2, #0\n");          /* r2 = remainder_lo */
-        asmbuf_puts(&buf, "    MOV r3, #0\n");          /* r3 = remainder_hi */
-        asmbuf_puts(&buf, "    MOV r4, #64\n");         /* r4 = counter */
-        /* Check divide by zero: ORR r5, r6, r7 -> r5 = r5 | r6 | r7 */
-        asmbuf_puts(&buf, "    MOV r5, r6\n");
-        asmbuf_puts(&buf, "    ORR r5, r7\n");
-        asmbuf_puts(&buf, "    CMP r5, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_uldiv_zero\n");
-        asmbuf_puts(&buf, ".L_uldiv_loop:\n");
-        /* r5 = MSB of dividend (bit 63 = MSB of r1) */
-        asmbuf_puts(&buf, "    LSR r5, r1, #31\n");
-        /* Shift dividend left by 1 (64-bit): need MSB of r0 -> r1 bit 0.
-         * Save dividend MSB on stack, use r5 for carry. */
-        asmbuf_puts(&buf, "    Push {r5}\n");
-        asmbuf_puts(&buf, "    LSR r5, r0, #31\n");     /* r5 = MSB of r0 */
-        asmbuf_puts(&buf, "    LSL r0, r0, #1\n");
-        asmbuf_puts(&buf, "    LSL r1, r1, #1\n");
-        asmbuf_puts(&buf, "    ORR r1, r5\n");          /* r1 |= carry from r0 */
-        asmbuf_puts(&buf, "    Pop {r5}\n");             /* r5 = dividend MSB */
-        /* Shift remainder left by 1, bring in dividend MSB (r5).
-         * Need MSB of r2 -> r3 bit 0. Save counter, use r4 as temp. */
-        asmbuf_puts(&buf, "    Push {r4}\n");
-        asmbuf_puts(&buf, "    LSR r4, r2, #31\n");     /* r4 = MSB of r2 */
-        asmbuf_puts(&buf, "    LSL r2, r2, #1\n");
-        asmbuf_puts(&buf, "    ORR r2, r5\n");          /* r2 |= dividend MSB */
-        asmbuf_puts(&buf, "    LSL r3, r3, #1\n");
-        asmbuf_puts(&buf, "    ORR r3, r4\n");          /* r3 |= carry from r2 */
-        asmbuf_puts(&buf, "    Pop {r4}\n");            /* restore counter */
-        /* Compare remainder (r2:r3) with divisor (r6:r7) unsigned */
-        asmbuf_puts(&buf, "    CMP r3, r7\n");
-        asmbuf_puts(&buf, "    BHI .L_uldiv_sub\n");
-        asmbuf_puts(&buf, "    BCC .L_uldiv_skip\n");
-        asmbuf_puts(&buf, "    CMP r2, r6\n");
-        asmbuf_puts(&buf, "    BCC .L_uldiv_skip\n");
-        /* Subtract divisor from remainder */
-        asmbuf_puts(&buf, ".L_uldiv_sub:\n");
-        asmbuf_puts(&buf, "    SUB r2, r2, r6\n");
-        asmbuf_puts(&buf, "    SBC r3, r7\n");          /* r3 = r3 - r7 - NOT(C) */
-        /* Set quotient bit 0 (in dividend/quotient r0) */
-        asmbuf_puts(&buf, "    MOV r5, #1\n");
-        asmbuf_puts(&buf, "    ORR r0, r5\n");
-        asmbuf_puts(&buf, ".L_uldiv_skip:\n");
-        asmbuf_puts(&buf, "    SUB r4, r4, #1\n");
-        asmbuf_puts(&buf, "    BNE .L_uldiv_loop\n");
-        /* Result: quotient in r0:r1, remainder in r2:r3 (already in place) */
-        asmbuf_puts(&buf, "    Pop {r4, r5, r6, r7, pc}\n");
-        /* Division by zero: return 0 */
-        asmbuf_puts(&buf, ".L_uldiv_zero:\n");
-        asmbuf_puts(&buf, "    MOV r0, #0\n");
-        asmbuf_puts(&buf, "    MOV r1, #0\n");
-        asmbuf_puts(&buf, "    MOV r2, #0\n");
-        asmbuf_puts(&buf, "    MOV r3, #0\n");
-        asmbuf_puts(&buf, "    Pop {r4, r5, r6, r7, pc}\n\n");
-
-        /* __aeabi_ldivmod: 64-bit signed division/modulo
-         * Input: r0:r1 = dividend, r2:r3 = divisor
-         * Output: r0:r1 = quotient, r2:r3 = remainder
-         * Handles signs: negate inputs as needed, call uldivmod, fixup signs.
-         * Remainder has same sign as dividend.
-         * 64-bit negate (RSC unavailable): if low != 0 { low=-low; high=~high }
-         * else { high=-high; }. Uses ASR r5, r1, #31 for sign extraction. */
-        asmbuf_puts(&buf, ".global __aeabi_ldivmod\n");
-        asmbuf_puts(&buf, ".thumb_func\n");
-        asmbuf_puts(&buf, "__aeabi_ldivmod:\n");
-        asmbuf_puts(&buf, "    Push {r4, r5, r6, r7, lr}\n");
-        /* r5 = dividend sign (0xFFFFFFFF if negative, 0 if positive) */
-        asmbuf_puts(&buf, "    ASR r5, r1, #31\n");
-        asmbuf_puts(&buf, "    MOV r6, r5\n");          /* r6 = saved dividend sign */
-        asmbuf_puts(&buf, "    CMP r5, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_ldiv_posd\n");
-        /* Negate dividend: if low != 0 { low=-low; high=~high } else { high=-high } */
-        asmbuf_puts(&buf, "    CMP r0, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_ldiv_neg_d_hi\n");
-        asmbuf_puts(&buf, "    RSB r0, r0\n");          /* r0 = -r0 */
-        asmbuf_puts(&buf, "    MVN r1, r1\n");          /* r1 = ~r1 */
-        asmbuf_puts(&buf, "    B .L_ldiv_posd\n");
-        asmbuf_puts(&buf, ".L_ldiv_neg_d_hi:\n");
-        asmbuf_puts(&buf, "    RSB r1, r1\n");          /* r1 = -r1, r0 stays 0 */
-        asmbuf_puts(&buf, ".L_ldiv_posd:\n");
-        /* Negate divisor if negative */
-        asmbuf_puts(&buf, "    ASR r5, r3, #31\n");
-        asmbuf_puts(&buf, "    CMP r5, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_ldiv_posb\n");
-        asmbuf_puts(&buf, "    CMP r2, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_ldiv_neg_b_hi\n");
-        asmbuf_puts(&buf, "    RSB r2, r2\n");
-        asmbuf_puts(&buf, "    MVN r3, r3\n");
-        asmbuf_puts(&buf, "    B .L_ldiv_posb\n");
-        asmbuf_puts(&buf, ".L_ldiv_neg_b_hi:\n");
-        asmbuf_puts(&buf, "    RSB r3, r3\n");
-        asmbuf_puts(&buf, ".L_ldiv_posb:\n");
-        /* Call uldivmod (r0:r1 / r2:r3 -> r0:r1 = quot, r2:r3 = rem) */
-        asmbuf_puts(&buf, "    BL __aeabi_uldivmod\n");
-        /* Quotient sign: negative if dividend and divisor signs differ.
-         * EOR r4, r6, r5 -> r4 = r4 ^ r5 ^ r6. Use MOV first for 2-operand EOR. */
-        asmbuf_puts(&buf, "    MOV r4, r6\n");
-        asmbuf_puts(&buf, "    EOR r4, r5\n");
-        asmbuf_puts(&buf, "    CMP r4, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_ldiv_qpos\n");
-        /* Negate quotient */
-        asmbuf_puts(&buf, "    CMP r0, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_ldiv_neg_q_hi\n");
-        asmbuf_puts(&buf, "    RSB r0, r0\n");
-        asmbuf_puts(&buf, "    MVN r1, r1\n");
-        asmbuf_puts(&buf, "    B .L_ldiv_qpos\n");
-        asmbuf_puts(&buf, ".L_ldiv_neg_q_hi:\n");
-        asmbuf_puts(&buf, "    RSB r1, r1\n");
-        asmbuf_puts(&buf, ".L_ldiv_qpos:\n");
-        /* Remainder sign: same as dividend (r6) */
-        asmbuf_puts(&buf, "    CMP r6, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_ldiv_rpos\n");
-        asmbuf_puts(&buf, "    CMP r2, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_ldiv_neg_r_hi\n");
-        asmbuf_puts(&buf, "    RSB r2, r2\n");
-        asmbuf_puts(&buf, "    MVN r3, r3\n");
-        asmbuf_puts(&buf, "    B .L_ldiv_rpos\n");
-        asmbuf_puts(&buf, ".L_ldiv_neg_r_hi:\n");
-        asmbuf_puts(&buf, "    RSB r3, r3\n");
-        asmbuf_puts(&buf, ".L_ldiv_rpos:\n");
-        asmbuf_puts(&buf, "    Pop {r4, r5, r6, r7, pc}\n\n");
-    }
-
-    /* Bug-A1: Soft-float __aeabi helpers for environments without libgcc/
-     * compiler-rt (bare-metal STM32). These are minimal but correct
-     * implementations of the ARM EABI floating-point helper functions.
-     * They use integer bit manipulation on the IEEE 754 representation.
-     * For performance, enable hardware FPU with -f fpu (ARKCC_FEATURE_FPU_HW). */
-    {
-        /* __aeabi_f2iz: float (r0) -> signed int (r0)
-         * Truncate toward zero. IEEE 754 single in r0, extract exponent,
-         * shift mantissa, apply sign. */
-        asmbuf_puts(&buf, ".global __aeabi_f2iz\n.thumb_func\n__aeabi_f2iz:\n");
-        asmbuf_puts(&buf, "    LSR r1, r0, #23\n");      /* r1 = exponent (8 bits) */
-        asmbuf_puts(&buf, "    LSL r1, r1, #1\n");       /* align */
-        asmbuf_puts(&buf, "    LSR r1, r1, #1\n");       /* r1 = exp */
-        asmbuf_puts(&buf, "    CMP r1, #150\n");         /* exp >= 150? value >= 2^23, need shift left */
-        asmbuf_puts(&buf, "    BGE .L_f2iz_shl\n");
-        asmbuf_puts(&buf, "    CMP r1, #126\n");         /* exp < 126? |val| < 0.5, result 0 */
-        asmbuf_puts(&buf, "    BLT .L_f2iz_zero\n");
-        asmbuf_puts(&buf, "    SUB r2, r1, #127\n");     /* shift = exp - 127 (0..22) */
-        asmbuf_puts(&buf, "    LSL r0, r0, #9\n");       /* mantissa << 9, drop sign+exp */
-        asmbuf_puts(&buf, "    LSR r0, r0, r2\n");       /* shift right by (23-shift) ... approximate */
-        asmbuf_puts(&buf, "    B .L_f2iz_sign\n");
-        asmbuf_puts(&buf, ".L_f2iz_shl:\n");
-        asmbuf_puts(&buf, "    SUB r2, r1, #150\n");     /* shift left amount */
-        /* 0x800000 is the implied leading 1 of a float: 24 bits, so neither
-         * MOVS (imm8) nor MOVW (imm16) can hold it.  It used to assemble to
-         * "movs r0,#0", which made every left-shifted result 0. */
-        asmbuf_puts(&buf, "    MOVW r0, #0\n    MOVT r0, #0x80\n");
-        asmbuf_puts(&buf, "    LSL r0, r0, r2\n");       /* shift left */
-        asmbuf_puts(&buf, ".L_f2iz_sign:\n");
-        asmbuf_puts(&buf, "    LSR r1, r0, #31\n");      /* r1 = sign bit */
-        asmbuf_puts(&buf, "    CMP r1, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_f2iz_done\n");
-        asmbuf_puts(&buf, "    RSB r0, r0, #0\n");       /* negate */
-        asmbuf_puts(&buf, ".L_f2iz_done:\n");
-        asmbuf_puts(&buf, "    BX lr\n");
-        asmbuf_puts(&buf, ".L_f2iz_zero:\n");
-        asmbuf_puts(&buf, "    MOV r0, #0\n");
-        asmbuf_puts(&buf, "    BX lr\n\n");
-
-        /* __aeabi_f2uiz: float (r0) -> unsigned int (r0)
-         * Same as f2iz but unsigned result. */
-        asmbuf_puts(&buf, ".global __aeabi_f2uiz\n.thumb_func\n__aeabi_f2uiz:\n");
-        asmbuf_puts(&buf, "    PUSH {lr}\n");
-        asmbuf_puts(&buf, "    BL __aeabi_f2iz\n");
-        asmbuf_puts(&buf, "    POP {r0}\n");
-        asmbuf_puts(&buf, "    BX r0\n\n");
-
-        /* __aeabi_i2f: signed int (r0) -> float (r0)
-         * Convert signed integer to IEEE 754 single. */
-        asmbuf_puts(&buf, ".global __aeabi_i2f\n.thumb_func\n__aeabi_i2f:\n");
-        asmbuf_puts(&buf, "    PUSH {lr}\n");
-        asmbuf_puts(&buf, "    CMP r0, #0\n");
-        asmbuf_puts(&buf, "    BGE .L_i2f_pos\n");
-        asmbuf_puts(&buf, "    RSB r0, r0, #0\n");       /* negate */
-        asmbuf_puts(&buf, "    MOV r1, #1\n");           /* sign flag */
-        asmbuf_puts(&buf, "    B .L_i2f_conv\n");
-        asmbuf_puts(&buf, ".L_i2f_pos:\n");
-        asmbuf_puts(&buf, "    MOV r1, #0\n");
-        asmbuf_puts(&buf, ".L_i2f_conv:\n");
-        asmbuf_puts(&buf, "    CLZ r2, r0\n");           /* count leading zeros */
-        asmbuf_puts(&buf, "    RSB r2, r2, #31\n");      /* r2 = bit position of MSB */
-        asmbuf_puts(&buf, "    MOV r3, #127\n");
-        asmbuf_puts(&buf, "    ADD r3, r3, r2\n");       /* exponent = 127 + msb_pos */
-        asmbuf_puts(&buf, "    LSL r3, r3, #23\n");      /* shift exponent into position */
-        asmbuf_puts(&buf, "    LSL r0, r0, r2\n");       /* shift mantissa so MSB at bit 31 */
-        asmbuf_puts(&buf, "    LSL r0, r0, #1\n");       /* drop implied 1 bit */
-        asmbuf_puts(&buf, "    LSR r0, r0, #9\n");       /* align to mantissa field */
-        asmbuf_puts(&buf, "    ORR r0, r0, r3\n");       /* combine exp + mantissa */
-        asmbuf_puts(&buf, "    CMP r1, #0\n");           /* if negative */
-        asmbuf_puts(&buf, "    BEQ .L_i2f_done\n");
-        asmbuf_puts(&buf, "    MOV r1, #1\n");
-        asmbuf_puts(&buf, "    LSL r1, r1, #31\n");      /* sign bit */
-        asmbuf_puts(&buf, "    ORR r0, r0, r1\n");
-        asmbuf_puts(&buf, ".L_i2f_done:\n");
-        asmbuf_puts(&buf, "    POP {r0}\n");
-        asmbuf_puts(&buf, "    BX r0\n\n");
-
-        /* __aeabi_ui2f: unsigned int (r0) -> float (r0) */
-        asmbuf_puts(&buf, ".global __aeabi_ui2f\n.thumb_func\n__aeabi_ui2f:\n");
-        asmbuf_puts(&buf, "    PUSH {lr}\n");
-        asmbuf_puts(&buf, "    MOV r1, #0\n");           /* sign = positive */
-        asmbuf_puts(&buf, "    B .L_i2f_conv\n\n");
-        /* __aeabi_ul2f: unsigned long long (r0=low, r1=high) -> float (r0).
-         * Split-and-scale: high * 2^32 + low, both halves through ui2f. The
-         * multiply by a power of two is exact, and every other step matches
-         * the truncating behaviour of the rest of this TU-local runtime. */
-        asmbuf_puts(&buf, ".global __aeabi_ul2f\n.thumb_func\n__aeabi_ul2f:\n");
-        asmbuf_puts(&buf, "    CMP r1, #0\n");
-        asmbuf_puts(&buf, "    BNE .L_ul2f_hi\n");
-        asmbuf_puts(&buf, "    PUSH {lr}\n");            /* high word zero: 32-bit path */
-        asmbuf_puts(&buf, "    BL __aeabi_ui2f\n");
-        asmbuf_puts(&buf, "    POP {r0}\n");
-        asmbuf_puts(&buf, "    BX r0\n");
-        asmbuf_puts(&buf, ".L_ul2f_hi:\n");
-        asmbuf_puts(&buf, "    PUSH {r4, lr}\n");
-        asmbuf_puts(&buf, "    MOV r4, r0\n");           /* keep low half */
-        asmbuf_puts(&buf, "    MOV r0, r1\n");
-        asmbuf_puts(&buf, "    BL __aeabi_ui2f\n");     /* float(high) */
-        asmbuf_puts(&buf, "    VMOV s0, r0\n");
-        asmbuf_puts(&buf, "    MOVW r0, #0x0000\n");     /* 2^32 as float = 0x4F800000 */
-        asmbuf_puts(&buf, "    MOVT r0, #0x4F80\n");
-        asmbuf_puts(&buf, "    VMOV s1, r0\n");
-        asmbuf_puts(&buf, "    VMUL.F32 s0, s0, s1\n");
-        asmbuf_puts(&buf, "    MOV r0, r4\n");
-        asmbuf_puts(&buf, "    BL __aeabi_ui2f\n");     /* float(low) */
-        asmbuf_puts(&buf, "    VMOV s1, r0\n");
-        asmbuf_puts(&buf, "    VADD.F32 s0, s0, s1\n");
-        asmbuf_puts(&buf, "    VMOV r0, s0\n");
-        asmbuf_puts(&buf, "    POP {r4}\n");            /* r0 keeps the result */
-        asmbuf_puts(&buf, "    POP {r1}\n");            /* r1 = return address */
-        asmbuf_puts(&buf, "    BX r1\n\n");
-
-        /* __aeabi_fadd: float (r0) + float (r1) -> float (r0)
-         * 真正的 IEEE 754 单精度加法：提取符号/指数/尾数，对齐指数，
-         * 同号相加异号相减，规格化后组装结果。NaN/Inf 未做完整处理。 */
-        asmbuf_puts(&buf, ".global __aeabi_fadd\n.thumb_func\n__aeabi_fadd:\n");
-        asmbuf_puts(&buf, "    PUSH {r4, r5, r6, r7, lr}\n");
-        asmbuf_puts(&buf, "    LSR r2, r0, #31\n");          /* a 符号 */
-        asmbuf_puts(&buf, "    LSR r3, r0, #23\n");
-        asmbuf_puts(&buf, "    LSL r3, r3, #24\n");
-        asmbuf_puts(&buf, "    LSR r3, r3, #24\n");          /* a 指数(8位) */
-        asmbuf_puts(&buf, "    LSL r4, r0, #9\n");
-        asmbuf_puts(&buf, "    LSR r4, r4, #9\n");           /* a 尾数(23位) */
-        asmbuf_puts(&buf, "    LSR r5, r1, #31\n");          /* b 符号 */
-        asmbuf_puts(&buf, "    LSR r6, r1, #23\n");
-        asmbuf_puts(&buf, "    LSL r6, r6, #24\n");
-        asmbuf_puts(&buf, "    LSR r6, r6, #24\n");          /* b 指数 */
-        asmbuf_puts(&buf, "    LSL r7, r1, #9\n");
-        asmbuf_puts(&buf, "    LSR r7, r7, #9\n");           /* b 尾数 */
-        asmbuf_puts(&buf, "    CMP r3, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_fadd_ret_b\n");        /* a 为零返回 b */
-        asmbuf_puts(&buf, "    CMP r6, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_fadd_ret_a\n");        /* b 为零返回 a */
-        asmbuf_puts(&buf, "    MOV r0, #1\n");
-        asmbuf_puts(&buf, "    LSL r0, r0, #23\n");          /* 0x800000 隐含位 */
-        asmbuf_puts(&buf, "    ORR r4, r0\n");               /* a 尾数补隐含位 */
-        asmbuf_puts(&buf, "    ORR r7, r0\n");               /* b 尾数补隐含位 */
-        asmbuf_puts(&buf, "    SUB r0, r3, r6\n");           /* 指数差 */
-        asmbuf_puts(&buf, "    CMP r0, #0\n");
-        asmbuf_puts(&buf, "    BGE .L_fadd_a_ge\n");
-        asmbuf_puts(&buf, "    RSB r0, r0, #0\n");           /* 移位量 = -差 */
-        asmbuf_puts(&buf, "    LSR r4, r4, r0\n");           /* a 尾数右移对齐 */
-        asmbuf_puts(&buf, "    MOV r3, r6\n");               /* 结果指数取大者 */
-        asmbuf_puts(&buf, "    B .L_fadd_aligned\n");
-        asmbuf_puts(&buf, ".L_fadd_a_ge:\n");
-        asmbuf_puts(&buf, "    LSR r7, r7, r0\n");           /* b 尾数右移对齐 */
-        asmbuf_puts(&buf, ".L_fadd_aligned:\n");
-        asmbuf_puts(&buf, "    CMP r2, r5\n");
-        asmbuf_puts(&buf, "    BEQ .L_fadd_add\n");          /* 同号相加 */
-        asmbuf_puts(&buf, "    CMP r4, r7\n");
-        asmbuf_puts(&buf, "    BCS .L_fadd_sub_ab\n");       /* a 尾数 >= b 尾数 */
-        asmbuf_puts(&buf, "    SUB r4, r7, r4\n");           /* 结果 = b - a */
-        asmbuf_puts(&buf, "    MOV r2, r5\n");               /* 符号取 b */
-        asmbuf_puts(&buf, "    B .L_fadd_norm\n");
-        asmbuf_puts(&buf, ".L_fadd_sub_ab:\n");
-        asmbuf_puts(&buf, "    SUB r4, r4, r7\n");           /* 结果 = a - b */
-        asmbuf_puts(&buf, "    B .L_fadd_norm\n");
-        asmbuf_puts(&buf, ".L_fadd_add:\n");
-        asmbuf_puts(&buf, "    ADD r4, r4, r7\n");           /* 结果 = a + b */
-        asmbuf_puts(&buf, ".L_fadd_norm:\n");
-        asmbuf_puts(&buf, "    CMP r4, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_fadd_zero\n");
-        asmbuf_puts(&buf, "    MOV r1, #1\n");
-        asmbuf_puts(&buf, "    LSL r1, r1, #24\n");          /* bit24 掩码 */
-        asmbuf_puts(&buf, "    TST r4, r1\n");
-        asmbuf_puts(&buf, "    BEQ .L_fadd_nocarry\n");
-        asmbuf_puts(&buf, "    LSR r4, r4, #1\n");           /* 加法进位：右移1 */
-        asmbuf_puts(&buf, "    ADD r3, r3, #1\n");
-        asmbuf_puts(&buf, "    B .L_fadd_chk\n");
-        asmbuf_puts(&buf, ".L_fadd_nocarry:\n");
-        asmbuf_puts(&buf, "    MOV r1, #1\n");
-        asmbuf_puts(&buf, "    LSL r1, r1, #23\n");          /* bit23 掩码 */
-        asmbuf_puts(&buf, "    TST r4, r1\n");
-        asmbuf_puts(&buf, "    BNE .L_fadd_chk\n");          /* 已规格化 */
-        asmbuf_puts(&buf, ".L_fadd_shl:\n");
-        asmbuf_puts(&buf, "    LSL r4, r4, #1\n");           /* 左移补位 */
-        asmbuf_puts(&buf, "    SUB r3, r3, #1\n");
-        asmbuf_puts(&buf, "    CMP r3, #0\n");
-        asmbuf_puts(&buf, "    BLE .L_fadd_zero\n");         /* 指数下溢 */
-        asmbuf_puts(&buf, "    TST r4, r1\n");
-        asmbuf_puts(&buf, "    BEQ .L_fadd_shl\n");
-        asmbuf_puts(&buf, ".L_fadd_chk:\n");
-        asmbuf_puts(&buf, "    CMP r3, #255\n");
-        asmbuf_puts(&buf, "    BGE .L_fadd_inf\n");          /* 溢出 -> Inf */
-        asmbuf_puts(&buf, "    CMP r3, #0\n");
-        asmbuf_puts(&buf, "    BLE .L_fadd_zero\n");
-        asmbuf_puts(&buf, "    MOV r1, #1\n");
-        asmbuf_puts(&buf, "    LSL r1, r1, #23\n");          /* bit23 掩码 */
-        asmbuf_puts(&buf, "    BIC r4, r1\n");               /* 清除隐含位 */
-        asmbuf_puts(&buf, "    LSL r3, r3, #23\n");          /* 指数就位 */
-        asmbuf_puts(&buf, "    LSL r2, r2, #31\n");          /* 符号就位 */
-        asmbuf_puts(&buf, "    MOV r0, r3\n");
-        asmbuf_puts(&buf, "    ORR r0, r4\n");
-        asmbuf_puts(&buf, "    ORR r0, r2\n");
-        asmbuf_puts(&buf, "    POP {r4, r5, r6, r7, pc}\n");
-        asmbuf_puts(&buf, ".L_fadd_ret_b:\n");
-        asmbuf_puts(&buf, "    MOV r0, r1\n");
-        asmbuf_puts(&buf, "    POP {r4, r5, r6, r7, pc}\n");
-        asmbuf_puts(&buf, ".L_fadd_ret_a:\n");
-        asmbuf_puts(&buf, "    POP {r4, r5, r6, r7, pc}\n");
-        asmbuf_puts(&buf, ".L_fadd_zero:\n");
-        asmbuf_puts(&buf, "    MOV r0, #0\n");
-        asmbuf_puts(&buf, "    POP {r4, r5, r6, r7, pc}\n");
-        asmbuf_puts(&buf, ".L_fadd_inf:\n");
-        asmbuf_puts(&buf, "    MOV r1, #255\n");
-        asmbuf_puts(&buf, "    LSL r1, r1, #23\n");          /* exp=0xFF -> Inf */
-        asmbuf_puts(&buf, "    LSL r2, r2, #31\n");
-        asmbuf_puts(&buf, "    MOV r0, r1\n");
-        asmbuf_puts(&buf, "    ORR r0, r2\n");
-        asmbuf_puts(&buf, "    POP {r4, r5, r6, r7, pc}\n\n");
-
-        /* __aeabi_fsub: 翻转 b 符号位后尾调用 fadd */
-        asmbuf_puts(&buf, ".global __aeabi_fsub\n.thumb_func\n__aeabi_fsub:\n");
-        asmbuf_puts(&buf, "    MOV r2, #1\n");
-        asmbuf_puts(&buf, "    LSL r2, r2, #31\n");          /* 0x80000000 */
-        asmbuf_puts(&buf, "    EOR r1, r2\n");               /* 翻转 b 符号 */
-        asmbuf_puts(&buf, "    B __aeabi_fadd\n\n");
-
-        /* __aeabi_fmul: float (r0) * float (r1) -> float (r0)
-         * 尾数用 UMULL 做 32x32->64 乘法，取乘积>>23 规格化。 */
-        asmbuf_puts(&buf, ".global __aeabi_fmul\n.thumb_func\n__aeabi_fmul:\n");
-        asmbuf_puts(&buf, "    PUSH {r4, r5, r6, r7, lr}\n");
-        asmbuf_puts(&buf, "    LSR r2, r0, #31\n");          /* a 符号 */
-        asmbuf_puts(&buf, "    LSR r3, r0, #23\n");
-        asmbuf_puts(&buf, "    LSL r3, r3, #24\n");
-        asmbuf_puts(&buf, "    LSR r3, r3, #24\n");          /* a 指数 */
-        asmbuf_puts(&buf, "    LSL r4, r0, #9\n");
-        asmbuf_puts(&buf, "    LSR r4, r4, #9\n");           /* a 尾数 */
-        asmbuf_puts(&buf, "    LSR r5, r1, #31\n");          /* b 符号 */
-        asmbuf_puts(&buf, "    LSR r6, r1, #23\n");
-        asmbuf_puts(&buf, "    LSL r6, r6, #24\n");
-        asmbuf_puts(&buf, "    LSR r6, r6, #24\n");          /* b 指数 */
-        asmbuf_puts(&buf, "    LSL r7, r1, #9\n");
-        asmbuf_puts(&buf, "    LSR r7, r7, #9\n");           /* b 尾数 */
-        asmbuf_puts(&buf, "    CMP r3, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_fmul_zero\n");
-        asmbuf_puts(&buf, "    CMP r6, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_fmul_zero\n");
-        asmbuf_puts(&buf, "    MOV r0, #1\n");
-        asmbuf_puts(&buf, "    LSL r0, r0, #23\n");          /* 隐含位 */
-        asmbuf_puts(&buf, "    ORR r4, r0\n");
-        asmbuf_puts(&buf, "    ORR r7, r0\n");
-        asmbuf_puts(&buf, "    EOR r2, r5\n");               /* 结果符号 */
-        asmbuf_puts(&buf, "    ADD r3, r3, r6\n");
-        asmbuf_puts(&buf, "    SUB r3, r3, #127\n");         /* 结果指数 */
-        asmbuf_puts(&buf, "    UMULL r0, r1, r4, r7\n");     /* r1:r0 = a_mant * b_mant */
-        asmbuf_puts(&buf, "    LSR r0, r0, #23\n");          /* 低字 >> 23 */
-        asmbuf_puts(&buf, "    LSL r1, r1, #9\n");           /* 高字 << 9 */
-        asmbuf_puts(&buf, "    MOV r4, r1\n");
-        asmbuf_puts(&buf, "    ORR r4, r0\n");               /* r4 = 乘积 >> 23 */
-        asmbuf_puts(&buf, "    MOV r0, #1\n");
-        asmbuf_puts(&buf, "    LSL r0, r0, #24\n");          /* bit24 掩码 */
-        asmbuf_puts(&buf, "    TST r4, r0\n");
-        asmbuf_puts(&buf, "    BEQ .L_fmul_chk\n");
-        asmbuf_puts(&buf, "    LSR r4, r4, #1\n");           /* 进位右移1 */
-        asmbuf_puts(&buf, "    ADD r3, r3, #1\n");
-        asmbuf_puts(&buf, ".L_fmul_chk:\n");
-        asmbuf_puts(&buf, "    CMP r3, #255\n");
-        asmbuf_puts(&buf, "    BGE .L_fmul_inf\n");
-        asmbuf_puts(&buf, "    CMP r3, #0\n");
-        asmbuf_puts(&buf, "    BLE .L_fmul_zero\n");
-        asmbuf_puts(&buf, "    MOV r0, #1\n");
-        asmbuf_puts(&buf, "    LSL r0, r0, #23\n");          /* bit23 掩码 */
-        asmbuf_puts(&buf, "    BIC r4, r0\n");               /* 清除隐含位 */
-        asmbuf_puts(&buf, "    LSL r3, r3, #23\n");
-        asmbuf_puts(&buf, "    LSL r2, r2, #31\n");
-        asmbuf_puts(&buf, "    MOV r0, r3\n");
-        asmbuf_puts(&buf, "    ORR r0, r4\n");
-        asmbuf_puts(&buf, "    ORR r0, r2\n");
-        asmbuf_puts(&buf, "    POP {r4, r5, r6, r7, pc}\n");
-        asmbuf_puts(&buf, ".L_fmul_zero:\n");
-        asmbuf_puts(&buf, "    MOV r0, #0\n");
-        asmbuf_puts(&buf, "    POP {r4, r5, r6, r7, pc}\n");
-        asmbuf_puts(&buf, ".L_fmul_inf:\n");
-        asmbuf_puts(&buf, "    MOV r0, #255\n");
-        asmbuf_puts(&buf, "    LSL r0, r0, #23\n");
-        asmbuf_puts(&buf, "    LSL r2, r2, #31\n");
-        asmbuf_puts(&buf, "    ORR r0, r2\n");
-        asmbuf_puts(&buf, "    POP {r4, r5, r6, r7, pc}\n\n");
-
-        /* __aeabi_fdiv: float (r0) / float (r1) -> float (r0)
-         * 尾数 = (a_mant<<23) / b_mant，64 位除法复用 __aeabi_uldivmod。 */
-        asmbuf_puts(&buf, ".global __aeabi_fdiv\n.thumb_func\n__aeabi_fdiv:\n");
-        asmbuf_puts(&buf, "    PUSH {r4, r5, r6, r7, lr}\n");
-        asmbuf_puts(&buf, "    LSR r2, r0, #31\n");          /* a 符号 */
-        asmbuf_puts(&buf, "    LSR r3, r0, #23\n");
-        asmbuf_puts(&buf, "    LSL r3, r3, #24\n");
-        asmbuf_puts(&buf, "    LSR r3, r3, #24\n");          /* a 指数 */
-        asmbuf_puts(&buf, "    LSL r4, r0, #9\n");
-        asmbuf_puts(&buf, "    LSR r4, r4, #9\n");           /* a 尾数 */
-        asmbuf_puts(&buf, "    LSR r5, r1, #31\n");          /* b 符号 */
-        asmbuf_puts(&buf, "    LSR r6, r1, #23\n");
-        asmbuf_puts(&buf, "    LSL r6, r6, #24\n");
-        asmbuf_puts(&buf, "    LSR r6, r6, #24\n");          /* b 指数 */
-        asmbuf_puts(&buf, "    LSL r7, r1, #9\n");
-        asmbuf_puts(&buf, "    LSR r7, r7, #9\n");           /* b 尾数 */
-        asmbuf_puts(&buf, "    CMP r6, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_fdiv_inf\n");          /* 除以零 -> Inf */
-        asmbuf_puts(&buf, "    CMP r3, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_fdiv_zero\n");         /* 0 / x = 0 */
-        asmbuf_puts(&buf, "    MOV r0, #1\n");
-        asmbuf_puts(&buf, "    LSL r0, r0, #23\n");          /* 隐含位 */
-        asmbuf_puts(&buf, "    ORR r4, r0\n");
-        asmbuf_puts(&buf, "    ORR r7, r0\n");
-        asmbuf_puts(&buf, "    EOR r5, r2\n");               /* 结果符号 -> r5 */
-        asmbuf_puts(&buf, "    SUB r6, r3, r6\n");
-        asmbuf_puts(&buf, "    ADD r6, r6, #127\n");         /* 结果指数 -> r6 */
-        asmbuf_puts(&buf, "    LSR r1, r4, #9\n");           /* 被除数高字 = a_mant>>9 */
-        asmbuf_puts(&buf, "    LSL r0, r4, #23\n");          /* 被除数低字 = a_mant<<23 */
-        asmbuf_puts(&buf, "    MOV r2, r7\n");               /* 除数 = b_mant */
-        asmbuf_puts(&buf, "    MOV r3, #0\n");
-        asmbuf_puts(&buf, "    BL __aeabi_uldivmod\n");      /* r0:r1 = 商 */
-        asmbuf_puts(&buf, "    MOV r4, r0\n");               /* r4 = 结果尾数 */
-        asmbuf_puts(&buf, "    MOV r0, #1\n");
-        asmbuf_puts(&buf, "    LSL r0, r0, #23\n");          /* bit23 掩码 */
-        asmbuf_puts(&buf, "    TST r4, r0\n");
-        asmbuf_puts(&buf, "    BNE .L_fdiv_chk\n");          /* bit23 已置位 */
-        asmbuf_puts(&buf, "    LSL r4, r4, #1\n");           /* 否则左移1，指数-1 */
-        asmbuf_puts(&buf, "    SUB r6, r6, #1\n");
-        asmbuf_puts(&buf, ".L_fdiv_chk:\n");
-        asmbuf_puts(&buf, "    CMP r6, #255\n");
-        asmbuf_puts(&buf, "    BGE .L_fdiv_inf\n");
-        asmbuf_puts(&buf, "    CMP r6, #0\n");
-        asmbuf_puts(&buf, "    BLE .L_fdiv_zero\n");
-        asmbuf_puts(&buf, "    MOV r0, #1\n");
-        asmbuf_puts(&buf, "    LSL r0, r0, #23\n");
-        asmbuf_puts(&buf, "    BIC r4, r0\n");               /* 清除隐含位 */
-        asmbuf_puts(&buf, "    LSL r6, r6, #23\n");
-        asmbuf_puts(&buf, "    LSL r5, r5, #31\n");
-        asmbuf_puts(&buf, "    MOV r0, r6\n");
-        asmbuf_puts(&buf, "    ORR r0, r4\n");
-        asmbuf_puts(&buf, "    ORR r0, r5\n");
-        asmbuf_puts(&buf, "    POP {r4, r5, r6, r7, pc}\n");
-        asmbuf_puts(&buf, ".L_fdiv_zero:\n");
-        asmbuf_puts(&buf, "    MOV r0, #0\n");
-        asmbuf_puts(&buf, "    POP {r4, r5, r6, r7, pc}\n");
-        asmbuf_puts(&buf, ".L_fdiv_inf:\n");
-        asmbuf_puts(&buf, "    MOV r0, #255\n");
-        asmbuf_puts(&buf, "    LSL r0, r0, #23\n");
-        asmbuf_puts(&buf, "    LSL r5, r5, #31\n");
-        asmbuf_puts(&buf, "    ORR r0, r5\n");
-        asmbuf_puts(&buf, "    POP {r4, r5, r6, r7, pc}\n\n");
-
-        /* Double-precision helpers: for now, truncate to single and use
-         * single-precision helpers. This loses precision but allows linking. */
-        asmbuf_puts(&buf, ".global __aeabi_d2iz\n.thumb_func\n__aeabi_d2iz:\n");
-        asmbuf_puts(&buf, "    POP {r1}\n");             /* discard high word */
-        asmbuf_puts(&buf, "    PUSH {lr}\n");
-        asmbuf_puts(&buf, "    BL __aeabi_f2iz\n");
-        asmbuf_puts(&buf, "    POP {r0}\n");
-        asmbuf_puts(&buf, "    BX r0\n\n");
-
-        asmbuf_puts(&buf, ".global __aeabi_d2uiz\n.thumb_func\n__aeabi_d2uiz:\n");
-        asmbuf_puts(&buf, "    POP {r1}\n");
-        asmbuf_puts(&buf, "    PUSH {lr}\n");
-        asmbuf_puts(&buf, "    BL __aeabi_f2uiz\n");
-        asmbuf_puts(&buf, "    POP {r0}\n");
-        asmbuf_puts(&buf, "    BX r0\n\n");
-
-        asmbuf_puts(&buf, ".global __aeabi_i2d\n.thumb_func\n__aeabi_i2d:\n");
-        asmbuf_puts(&buf, "    PUSH {lr}\n");
-        asmbuf_puts(&buf, "    BL __aeabi_i2f\n");
-        asmbuf_puts(&buf, "    MOV r1, #0\n");           /* high word = 0 */
-        asmbuf_puts(&buf, "    POP {r0}\n");
-        asmbuf_puts(&buf, "    BX r0\n\n");
-
-        asmbuf_puts(&buf, ".global __aeabi_ui2d\n.thumb_func\n__aeabi_ui2d:\n");
-        asmbuf_puts(&buf, "    PUSH {lr}\n");
-        asmbuf_puts(&buf, "    BL __aeabi_ui2f\n");
-        asmbuf_puts(&buf, "    MOV r1, #0\n");
-        asmbuf_puts(&buf, "    POP {r0}\n");
-        asmbuf_puts(&buf, "    BX r0\n\n");
-
-        /* 双精度算术：a=r0(低):r1(高)，b=r2(低):r3(高)，结果=r0(低):r1(高)。
-         * 策略：将两个 double 截断为 single（__arkcc_d2f_pair 返回 r0/r1），
-         * 调用对应单精度运算，再用 __arkcc_f2d_ext 扩展回 double。精度有限但可链接。 */
-        asmbuf_puts(&buf, ".global __aeabi_dadd\n.thumb_func\n__aeabi_dadd:\n");
-        asmbuf_puts(&buf, "    PUSH {lr}\n");
-        asmbuf_puts(&buf, "    BL __arkcc_d2f_pair\n");      /* r0=a_s, r1=b_s */
-        asmbuf_puts(&buf, "    BL __aeabi_fadd\n");
-        asmbuf_puts(&buf, "    BL __arkcc_f2d_ext\n");       /* r0 -> r0:r1 */
-        asmbuf_puts(&buf, "    POP {pc}\n\n");
-
-        asmbuf_puts(&buf, ".global __aeabi_dsub\n.thumb_func\n__aeabi_dsub:\n");
-        asmbuf_puts(&buf, "    PUSH {lr}\n");
-        asmbuf_puts(&buf, "    BL __arkcc_d2f_pair\n");
-        asmbuf_puts(&buf, "    BL __aeabi_fsub\n");
-        asmbuf_puts(&buf, "    BL __arkcc_f2d_ext\n");
-        asmbuf_puts(&buf, "    POP {pc}\n\n");
-
-        asmbuf_puts(&buf, ".global __aeabi_dmul\n.thumb_func\n__aeabi_dmul:\n");
-        asmbuf_puts(&buf, "    PUSH {lr}\n");
-        asmbuf_puts(&buf, "    BL __arkcc_d2f_pair\n");
-        asmbuf_puts(&buf, "    BL __aeabi_fmul\n");
-        asmbuf_puts(&buf, "    BL __arkcc_f2d_ext\n");
-        asmbuf_puts(&buf, "    POP {pc}\n\n");
-
-        asmbuf_puts(&buf, ".global __aeabi_ddiv\n.thumb_func\n__aeabi_ddiv:\n");
-        asmbuf_puts(&buf, "    PUSH {lr}\n");
-        asmbuf_puts(&buf, "    BL __arkcc_d2f_pair\n");
-        asmbuf_puts(&buf, "    BL __aeabi_fdiv\n");
-        asmbuf_puts(&buf, "    BL __arkcc_f2d_ext\n");
-        asmbuf_puts(&buf, "    POP {pc}\n\n");
-
-        /* 单精度比较：返回 1 为真，0 为假。NaN 时除 != 外皆返回 0（!= 由调用方翻转）。
-         * __arkcc_fcmp3 返回 r0: -1(a<b) / 0(==) / 1(a>b) / 2(无序/NaN)。
-         * 用符号-幅值到二进制补码的单调映射做整数比较，+0==-0。 */
-        asmbuf_puts(&buf, ".global __aeabi_fcmpeq\n.thumb_func\n__aeabi_fcmpeq:\n");
-        asmbuf_puts(&buf, "    PUSH {lr}\n");
-        asmbuf_puts(&buf, "    BL __arkcc_fcmp3\n");
-        asmbuf_puts(&buf, "    CMP r0, #0\n");
-        asmbuf_puts(&buf, "    ITE EQ\n");
-        asmbuf_puts(&buf, "    MOVEQ r0, #1\n");
-        asmbuf_puts(&buf, "    MOVNE r0, #0\n");
-        asmbuf_puts(&buf, "    POP {pc}\n\n");
-
-        asmbuf_puts(&buf, ".global __aeabi_fcmplt\n.thumb_func\n__aeabi_fcmplt:\n");
-        asmbuf_puts(&buf, "    PUSH {lr}\n");
-        asmbuf_puts(&buf, "    BL __arkcc_fcmp3\n");
-        asmbuf_puts(&buf, "    CMP r0, #0\n");
-        asmbuf_puts(&buf, "    ITE LT\n");
-        asmbuf_puts(&buf, "    MOVLT r0, #1\n");
-        asmbuf_puts(&buf, "    MOVGE r0, #0\n");
-        asmbuf_puts(&buf, "    POP {pc}\n\n");
-
-        asmbuf_puts(&buf, ".global __aeabi_fcmpgt\n.thumb_func\n__aeabi_fcmpgt:\n");
-        asmbuf_puts(&buf, "    PUSH {lr}\n");
-        asmbuf_puts(&buf, "    BL __arkcc_fcmp3\n");
-        asmbuf_puts(&buf, "    CMP r0, #1\n");
-        asmbuf_puts(&buf, "    ITE EQ\n");
-        asmbuf_puts(&buf, "    MOVEQ r0, #1\n");
-        asmbuf_puts(&buf, "    MOVNE r0, #0\n");
-        asmbuf_puts(&buf, "    POP {pc}\n\n");
-
-        asmbuf_puts(&buf, ".global __aeabi_fcmple\n.thumb_func\n__aeabi_fcmple:\n");
-        asmbuf_puts(&buf, "    PUSH {lr}\n");
-        asmbuf_puts(&buf, "    BL __arkcc_fcmp3\n");
-        asmbuf_puts(&buf, "    CMP r0, #0\n");
-        asmbuf_puts(&buf, "    ITE LE\n");
-        asmbuf_puts(&buf, "    MOVLE r0, #1\n");
-        asmbuf_puts(&buf, "    MOVGT r0, #0\n");
-        asmbuf_puts(&buf, "    POP {pc}\n\n");
-
-        asmbuf_puts(&buf, ".global __aeabi_fcmpge\n.thumb_func\n__aeabi_fcmpge:\n");
-        asmbuf_puts(&buf, "    PUSH {lr}\n");
-        asmbuf_puts(&buf, "    BL __arkcc_fcmp3\n");
-        asmbuf_puts(&buf, "    CMP r0, #2\n");              /* NaN -> 假 */
-        asmbuf_puts(&buf, "    BEQ .L_fcmpge_false\n");
-        asmbuf_puts(&buf, "    CMP r0, #0\n");
-        asmbuf_puts(&buf, "    BGE .L_fcmpge_true\n");      /* 0 或 1 -> 真 */
-        asmbuf_puts(&buf, ".L_fcmpge_false:\n");
-        asmbuf_puts(&buf, "    MOV r0, #0\n");
-        asmbuf_puts(&buf, "    B .L_fcmpge_done\n");
-        asmbuf_puts(&buf, ".L_fcmpge_true:\n");
-        asmbuf_puts(&buf, "    MOV r0, #1\n");
-        asmbuf_puts(&buf, ".L_fcmpge_done:\n");
-        asmbuf_puts(&buf, "    POP {pc}\n\n");
-
-        /* 双精度比较：截断到单精度后调用对应单精度比较。
-         * a=r0:r1，b=r2:r3，返回 r0 (0/1)。 */
-        asmbuf_puts(&buf, ".global __aeabi_dcmpeq\n.thumb_func\n__aeabi_dcmpeq:\n");
-        asmbuf_puts(&buf, "    PUSH {lr}\n");
-        asmbuf_puts(&buf, "    BL __arkcc_d2f_pair\n");
-        asmbuf_puts(&buf, "    BL __aeabi_fcmpeq\n");
-        asmbuf_puts(&buf, "    POP {pc}\n\n");
-
-        asmbuf_puts(&buf, ".global __aeabi_dcmplt\n.thumb_func\n__aeabi_dcmplt:\n");
-        asmbuf_puts(&buf, "    PUSH {lr}\n");
-        asmbuf_puts(&buf, "    BL __arkcc_d2f_pair\n");
-        asmbuf_puts(&buf, "    BL __aeabi_fcmplt\n");
-        asmbuf_puts(&buf, "    POP {pc}\n\n");
-
-        asmbuf_puts(&buf, ".global __aeabi_dcmpgt\n.thumb_func\n__aeabi_dcmpgt:\n");
-        asmbuf_puts(&buf, "    PUSH {lr}\n");
-        asmbuf_puts(&buf, "    BL __arkcc_d2f_pair\n");
-        asmbuf_puts(&buf, "    BL __aeabi_fcmpgt\n");
-        asmbuf_puts(&buf, "    POP {pc}\n\n");
-
-        asmbuf_puts(&buf, ".global __aeabi_dcmple\n.thumb_func\n__aeabi_dcmple:\n");
-        asmbuf_puts(&buf, "    PUSH {lr}\n");
-        asmbuf_puts(&buf, "    BL __arkcc_d2f_pair\n");
-        asmbuf_puts(&buf, "    BL __aeabi_fcmple\n");
-        asmbuf_puts(&buf, "    POP {pc}\n\n");
-
-        asmbuf_puts(&buf, ".global __aeabi_dcmpge\n.thumb_func\n__aeabi_dcmpge:\n");
-        asmbuf_puts(&buf, "    PUSH {lr}\n");
-        asmbuf_puts(&buf, "    BL __arkcc_d2f_pair\n");
-        asmbuf_puts(&buf, "    BL __aeabi_fcmpge\n");
-        asmbuf_puts(&buf, "    POP {pc}\n\n");
-
         /* __aeabi_memcpy: struct assignment, struct-by-value arguments and
          * array initialisation are all lowered to a `BL memcpy`.  That made
          * every one of them a link-time dependency on the C library, which a
@@ -5111,157 +4424,7 @@ static char *codegen_arm(IrProgram *prog) {
         asmbuf_puts(&buf, "    POP {r4}\n");
         asmbuf_puts(&buf, "    BX lr\n\n");
 
-        /* === 内部辅助函数（非导出，仅供上述 helper 调用）=== */
 
-        /* __arkcc_fcmp3: 单精度三值比较。r0=a, r1=b -> r0 ∈ {-1,0,1,2}。
-         * NaN(指数=0xFF 且尾数!=0) -> 2；+0==-0；否则按单调映射做有符号整数比较。 */
-        asmbuf_puts(&buf, ".thumb_func\n__arkcc_fcmp3:\n");
-        asmbuf_puts(&buf, "    PUSH {r4, r5, lr}\n");
-        asmbuf_puts(&buf, "    LSL r2, r0, #1\n");
-        asmbuf_puts(&buf, "    LSR r2, r2, #24\n");          /* a 指数 */
-        asmbuf_puts(&buf, "    LSL r3, r0, #9\n");
-        asmbuf_puts(&buf, "    LSR r3, r3, #9\n");           /* a 尾数 */
-        asmbuf_puts(&buf, "    CMP r2, #255\n");
-        asmbuf_puts(&buf, "    BNE .L_fc3_a_ok\n");
-        asmbuf_puts(&buf, "    CMP r3, #0\n");
-        asmbuf_puts(&buf, "    BNE .L_fc3_unord\n");         /* a 是 NaN */
-        asmbuf_puts(&buf, ".L_fc3_a_ok:\n");
-        asmbuf_puts(&buf, "    LSL r2, r1, #1\n");
-        asmbuf_puts(&buf, "    LSR r2, r2, #24\n");          /* b 指数 */
-        asmbuf_puts(&buf, "    LSL r3, r1, #9\n");
-        asmbuf_puts(&buf, "    LSR r3, r3, #9\n");           /* b 尾数 */
-        asmbuf_puts(&buf, "    CMP r2, #255\n");
-        asmbuf_puts(&buf, "    BNE .L_fc3_b_ok\n");
-        asmbuf_puts(&buf, "    CMP r3, #0\n");
-        asmbuf_puts(&buf, "    BNE .L_fc3_unord\n");         /* b 是 NaN */
-        asmbuf_puts(&buf, ".L_fc3_b_ok:\n");
-        asmbuf_puts(&buf, "    LSL r2, r0, #1\n");
-        asmbuf_puts(&buf, "    LSR r2, r2, #1\n");           /* a 幅值(清符号) */
-        asmbuf_puts(&buf, "    LSL r3, r1, #1\n");
-        asmbuf_puts(&buf, "    LSR r3, r3, #1\n");           /* b 幅值 */
-        asmbuf_puts(&buf, "    MOV r4, r2\n");
-        asmbuf_puts(&buf, "    ORR r4, r3\n");               /* r4 = a_mag | b_mag */
-        asmbuf_puts(&buf, "    CMP r4, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_fc3_eq\n");            /* 两者皆零 -> 相等 */
-        asmbuf_puts(&buf, "    LSR r4, r0, #31\n");          /* a 符号 */
-        asmbuf_puts(&buf, "    CMP r4, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_fc3_apos\n");
-        asmbuf_puts(&buf, "    RSB r2, r2, #0\n");           /* Ka = -a_mag */
-        asmbuf_puts(&buf, ".L_fc3_apos:\n");
-        asmbuf_puts(&buf, "    LSR r5, r1, #31\n");          /* b 符号 */
-        asmbuf_puts(&buf, "    CMP r5, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_fc3_bpos\n");
-        asmbuf_puts(&buf, "    RSB r3, r3, #0\n");           /* Kb = -b_mag */
-        asmbuf_puts(&buf, ".L_fc3_bpos:\n");
-        asmbuf_puts(&buf, "    CMP r2, r3\n");
-        asmbuf_puts(&buf, "    BEQ .L_fc3_eq\n");
-        asmbuf_puts(&buf, "    BGT .L_fc3_gt\n");
-        asmbuf_puts(&buf, "    MVN r0, #0\n");               /* a < b -> -1 */
-        asmbuf_puts(&buf, "    B .L_fc3_done\n");
-        asmbuf_puts(&buf, ".L_fc3_gt:\n");
-        asmbuf_puts(&buf, "    MOV r0, #1\n");
-        asmbuf_puts(&buf, "    B .L_fc3_done\n");
-        asmbuf_puts(&buf, ".L_fc3_eq:\n");
-        asmbuf_puts(&buf, "    MOV r0, #0\n");
-        asmbuf_puts(&buf, "    B .L_fc3_done\n");
-        asmbuf_puts(&buf, ".L_fc3_unord:\n");
-        asmbuf_puts(&buf, "    MOV r0, #2\n");
-        asmbuf_puts(&buf, ".L_fc3_done:\n");
-        asmbuf_puts(&buf, "    POP {r4, r5, pc}\n\n");
-
-        /* __arkcc_d2f_trunc: double (r0=低, r1=高) 截断为 single (r0)。
-         * 高字含符号/指数/尾数高位；单精度尾数取双精度尾数高 23 位。 */
-        asmbuf_puts(&buf, ".thumb_func\n__arkcc_d2f_trunc:\n");
-        asmbuf_puts(&buf, "    PUSH {r4, r5, lr}\n");
-        asmbuf_puts(&buf, "    LSR r2, r1, #31\n");          /* 符号 */
-        asmbuf_puts(&buf, "    LSR r3, r1, #20\n");
-        asmbuf_puts(&buf, "    LSL r3, r3, #21\n");
-        asmbuf_puts(&buf, "    LSR r3, r3, #21\n");          /* double 指数(11位) */
-        asmbuf_puts(&buf, "    CMP r3, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_d2f_zero\n");          /* 零/非规格化 */
-        asmbuf_puts(&buf, "    MOVW r4, #0x7FF\n");
-        asmbuf_puts(&buf, "    CMP r3, r4\n");
-        asmbuf_puts(&buf, "    BEQ .L_d2f_inf\n");           /* Inf/NaN */
-        asmbuf_puts(&buf, "    SUB r4, r3, #896\n");         /* single 指数 = exp_d - 896 */
-        asmbuf_puts(&buf, "    CMP r4, #0\n");
-        asmbuf_puts(&buf, "    BLE .L_d2f_zero\n");          /* 下溢 */
-        asmbuf_puts(&buf, "    CMP r4, #255\n");
-        asmbuf_puts(&buf, "    BGE .L_d2f_inf\n");           /* 上溢 */
-        asmbuf_puts(&buf, "    LSL r5, r1, #12\n");
-        asmbuf_puts(&buf, "    LSR r5, r5, #12\n");          /* r1 & 0xFFFFF (尾数高位) */
-        asmbuf_puts(&buf, "    LSL r5, r5, #3\n");           /* << 3 */
-        asmbuf_puts(&buf, "    LSR r0, r0, #29\n");          /* 低字 >> 29 (尾数低位) */
-        asmbuf_puts(&buf, "    ORR r5, r0\n");               /* 23 位尾数 */
-        asmbuf_puts(&buf, "    LSL r2, r2, #31\n");
-        asmbuf_puts(&buf, "    LSL r4, r4, #23\n");
-        asmbuf_puts(&buf, "    MOV r0, r4\n");
-        asmbuf_puts(&buf, "    ORR r0, r5\n");
-        asmbuf_puts(&buf, "    ORR r0, r2\n");
-        asmbuf_puts(&buf, "    POP {r4, r5, pc}\n");
-        asmbuf_puts(&buf, ".L_d2f_zero:\n");
-        asmbuf_puts(&buf, "    LSL r2, r2, #31\n");
-        asmbuf_puts(&buf, "    MOV r0, r2\n");
-        asmbuf_puts(&buf, "    POP {r4, r5, pc}\n");
-        asmbuf_puts(&buf, ".L_d2f_inf:\n");
-        asmbuf_puts(&buf, "    LSL r2, r2, #31\n");
-        asmbuf_puts(&buf, "    MOV r4, #255\n");
-        asmbuf_puts(&buf, "    LSL r4, r4, #23\n");
-        asmbuf_puts(&buf, "    MOV r0, r4\n");
-        asmbuf_puts(&buf, "    ORR r0, r2\n");
-        asmbuf_puts(&buf, "    POP {r4, r5, pc}\n\n");
-
-        /* __arkcc_f2d_ext: single (r0) 扩展为 double (r0=低, r1=高)。
-         * 双精度尾数 = 单精度 23 位尾数左移到高 23 位，低 29 位补 0。 */
-        asmbuf_puts(&buf, ".thumb_func\n__arkcc_f2d_ext:\n");
-        asmbuf_puts(&buf, "    PUSH {r4, r5, lr}\n");
-        asmbuf_puts(&buf, "    LSR r2, r0, #31\n");          /* 符号 */
-        asmbuf_puts(&buf, "    LSR r3, r0, #23\n");
-        asmbuf_puts(&buf, "    LSL r3, r3, #24\n");
-        asmbuf_puts(&buf, "    LSR r3, r3, #24\n");          /* single 指数 */
-        asmbuf_puts(&buf, "    CMP r3, #0\n");
-        asmbuf_puts(&buf, "    BEQ .L_f2d_zero\n");
-        asmbuf_puts(&buf, "    CMP r3, #255\n");
-        asmbuf_puts(&buf, "    BEQ .L_f2d_inf\n");
-        asmbuf_puts(&buf, "    ADD r4, r3, #896\n");         /* double 指数 */
-        asmbuf_puts(&buf, "    LSL r5, r0, #9\n");
-        asmbuf_puts(&buf, "    LSR r5, r5, #9\n");           /* single 尾数 */
-        asmbuf_puts(&buf, "    LSL r3, r5, #29\n");          /* 低字 = 尾数 << 29 */
-        asmbuf_puts(&buf, "    LSR r5, r5, #3\n");           /* 尾数高位 = 尾数 >> 3 */
-        asmbuf_puts(&buf, "    LSL r2, r2, #31\n");
-        asmbuf_puts(&buf, "    LSL r4, r4, #20\n");
-        asmbuf_puts(&buf, "    MOV r1, r4\n");
-        asmbuf_puts(&buf, "    ORR r1, r5\n");
-        asmbuf_puts(&buf, "    ORR r1, r2\n");
-        asmbuf_puts(&buf, "    MOV r0, r3\n");
-        asmbuf_puts(&buf, "    POP {r4, r5, pc}\n");
-        asmbuf_puts(&buf, ".L_f2d_zero:\n");
-        asmbuf_puts(&buf, "    LSL r2, r2, #31\n");
-        asmbuf_puts(&buf, "    MOV r1, r2\n");
-        asmbuf_puts(&buf, "    MOV r0, #0\n");
-        asmbuf_puts(&buf, "    POP {r4, r5, pc}\n");
-        asmbuf_puts(&buf, ".L_f2d_inf:\n");
-        asmbuf_puts(&buf, "    LSL r2, r2, #31\n");
-        asmbuf_puts(&buf, "    MOVW r3, #0x7FF\n");
-        asmbuf_puts(&buf, "    LSL r3, r3, #20\n");          /* 0x7FF00000 */
-        asmbuf_puts(&buf, "    MOV r1, r3\n");
-        asmbuf_puts(&buf, "    ORR r1, r2\n");
-        asmbuf_puts(&buf, "    MOV r0, #0\n");
-        asmbuf_puts(&buf, "    POP {r4, r5, pc}\n\n");
-
-        /* __arkcc_d2f_pair: 两个 double (a=r0:r1, b=r2:r3) 截断为两个 single，
-         * 返回 r0=a_single, r1=b_single。b 先保存到 r4/r5 以免被 d2f_trunc 破坏。 */
-        asmbuf_puts(&buf, ".thumb_func\n__arkcc_d2f_pair:\n");
-        asmbuf_puts(&buf, "    PUSH {r4, r5, r6, lr}\n");
-        asmbuf_puts(&buf, "    MOV r4, r2\n");               /* 保存 b 低 */
-        asmbuf_puts(&buf, "    MOV r5, r3\n");               /* 保存 b 高 */
-        asmbuf_puts(&buf, "    BL __arkcc_d2f_trunc\n");     /* r0 = a single */
-        asmbuf_puts(&buf, "    MOV r6, r0\n");               /* 暂存 a single */
-        asmbuf_puts(&buf, "    MOV r0, r4\n");
-        asmbuf_puts(&buf, "    MOV r1, r5\n");
-        asmbuf_puts(&buf, "    BL __arkcc_d2f_trunc\n");     /* r0 = b single */
-        asmbuf_puts(&buf, "    MOV r1, r0\n");
-        asmbuf_puts(&buf, "    MOV r0, r6\n");
-        asmbuf_puts(&buf, "    POP {r4, r5, r6, pc}\n\n");
     }
 
     /* Globals: SRAM addresses are assigned by gvar_assign() above and loaded

@@ -1909,6 +1909,21 @@ static void irgen_widen_to_64(IrGen *g, Type *src_t, Type *dst_t) {
     }
 }
 
+/* Duplicate the top `nw` 32-bit words of the IR stack.
+ * A 64-bit value occupies TWO stack words on the register-pair backends
+ * (ARM / RV32 / x86-64), so duplicating one word there produced a stack
+ * like [low, high, high] and the following 8-byte store wrote the high
+ * word into both halves of the object.  Measured before the fix:
+ *     long long a; a = -7LL;  ->  a == 0xFFFFFFFFFFFFFFFF  (want -7)
+ *     long long a; a =  7LL;  ->  a == 0                (want  7)
+ * The C backend keeps a 64-bit value in a single 8-byte slot, hence the
+ * g_irgen_64bit_slots guard. */
+static void irgen_dup_words(IrGen *g, int nw) {
+    if (g_irgen_64bit_slots) nw = 1;
+    if (nw < 1) nw = 1;
+    ir_emit(g->fn, IR_DUP, nw, 0, 0);
+}
+
 /* C99 6.3.1.3: convert the top-of-stack integer to dst_t's representation,
  * i.e. keep the low `bits` bits and re-extend them (sign for signed types,
  * zero for unsigned types). Without this a cast like (char)300 leaves 300 on
@@ -2784,7 +2799,9 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                     if (s && s->kind == SYM_GLOBAL) {
                         const char *gname = L->u.name;
                         if (s->is_static) gname = static_local_name(g->fn->name, L->u.name);
-                        ir_emit(g->fn, IR_DUP, 0, 0, 0);
+                        /* The store below writes the full object width, so the
+                         * duplicated copy must cover every stack word. */
+                        irgen_dup_words(g, (s->type && type_size(s->type) >= 8) ? 2 : 1);
                         ir_emit(g->fn, IR_STORE_GLOBAL, 0, gname, 0);
                     } else if (s) {
                         int store_aux = 0;
@@ -2999,7 +3016,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                         irgen_expr(g, node->u.binary.right);
                         irgen_maybe_widen_for_binary(g, s->type, node->u.binary.right ? node->u.binary.right->type : 0);
                         irgen_emit_binary_op(g, bop, s->type, node->u.binary.right ? node->u.binary.right->type : 0);
-                        ir_emit(g->fn, IR_DUP, 0, 0, 0);
+                        irgen_dup_words(g, (s->type && type_size(s->type) >= 8) ? 2 : 1);
                         ir_emit(g->fn, IR_STORE_GLOBAL, 0, gname, 0);
                     } else if (s) {
                         int store_aux = 0;
