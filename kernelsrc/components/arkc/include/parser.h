@@ -19,4 +19,11 @@ typedef struct {
 
 AstNode *parse_program(Lexer *lex);
 
+/* Deduce the outermost dimension of a `T a[] = {...}` array from its
+ * initialiser (C99 6.7.9p22).  The parser calls it while reading a
+ * declaration; irgen calls it for a compound literal, whose type the parser
+ * never completes.  Sharing it keeps the two callers from counting values
+ * differently -- a wrong count is a wrong sizeof, i.e. a wrong answer. */
+void ark_infer_array_size_from_init(Type *t, AstNode *init);
+
 #endif /* ARK_PARSER_H */

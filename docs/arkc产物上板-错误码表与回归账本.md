@@ -462,3 +462,70 @@ ELF `text` +456 比逐目标合计 +457 少 1 字节，是段对齐填充，不�
 `text 435652 / data 2260 / bss 463532`（FLASH 83.53%）；`git stash pop` → 重建得
 `text 436108 / data 2260 / bss 463532`（FLASH 83.61%）。两次构建除 arkc 源码外的一切
 （CFLAGS、链接脚本、其余目标文件）完全相同。
+
+**2026-11-08 追加（上游 `c6ebdc6`：花括号省略 brace elision —— 全局数据 / 地址元素 / 块作用域三路 + 维度推导 + 标量花括号）**：
+
+板端（STM32H743，`USE_ARKC=1`，同一套 CFLAGS / 链接脚本）：
+
+| 项 | 旧（`6fce783`） | 新（`c6ebdc6`） | 差 |
+|---|---|---|---|
+| `text` | 436 108 | 438 724 | **+2 616** |
+| `data` | 2 260 | 2 260 | 0 |
+| `bss` | 463 532 | 463 532 | 0 |
+| FLASH 占用 | 83.61% | 84.11% | +0.50 pp |
+| RAM / CCMRAM / NOINIT | 98.22% / 17.33% / 97.66% | 同左 | 0 |
+
+逐目标文件（只有 arkc 侧的 3 个目标变化，其余逐列相同）：
+
+| 目标文件 | text 旧 -> 新 | 差 |
+|---|---|---|
+| `irgen.o` | 31 833 -> 33 436 | +1 603 |
+| `parser.o` | 24 126 -> 24 430 | +304 |
+| `agginit.o` | 2 868 -> 3 588 | +720 |
+| `backend_arm.o` / `ir.o` / `lexer.o` | 91 423 / 1 722 / 7 945 | 0 |
+| 三者合计 | — | +2 627 |
+
+段级拆分（`arm-none-eabi-size -A`，与 ELF 总数吻合）：`.text` 362 972 -> 365 076（**+2 104**）、
+`.rodata` 72 248 -> 72 760（**+512**），合计正好 +2 616。逐目标合计 +2 627 与 ELF +2 616 差 11 字节，
+差在链接期的段合并 / 对齐，不是另有一处代码变动（段级两栏相加与 ELF 完全相等）。
+
+落点：`irgen.o` 是三条路径里的两条 AST 走查（`AaggWalk` 的 `aw_item_value/aw_object/aw_fill/aw_braced`
+与 `LocalAggWalk` 的 `lw_value/lw_designator/lw_object/lw_field/lw_fill`）整体重写 + 新增
+`irgen_unwrap_scalar_braces()`（标量花括号解包）与 `_Complex` 边界诊断；`agginit.o` 是全局序列化文本
+填充 `ark_agg_flat()` / `ark_agg_object()` 的游标化（数组分支判满 `return off`、逗号跳过挪到判满之后、
+字符串短路只在 `TYPE_ARRAY` 生效）；`parser.o` 是导出 `ark_infer_array_size_from_init()` 与
+`infer_leaf_slots()`（按「每元素值数 cap」推维度）。`backend_arm.o` 为 0 —— 两后端代码生成一行未改，
+花括号省略全部收在前端「把初值摊平成 (偏移, 值) 序列」，与上一轮的 `.rodata` 标签通路无关。
+
+判定：FLASH 84.11%、RAM/CCMRAM/NOINIT 未变，仍在 512 KB 预算内（余 81.24 KB），**接受**。
+（block 作用域字符串初始化会展开成 `memcpy` 调用，所以本轮的块作用域用例真的会进固件链 `memcpy`；
+上板体积已含它。）
+
+可复现判据：`git stash push -- kernelsrc/components/arkc` → `make clean` 后重建得
+`text 436 108 / data 2 260 / bss 463 532`（FLASH 83.61%），逐目标 `irgen.o` 31 833 / `parser.o` 24 126 /
+`agginit.o` 2 868；`git stash pop` → 重建得 `text 438 724 / data 2 260 / bss 463 532`（FLASH 84.11%），
+逐目标 33 436 / 24 430 / 3 588。两次都是 `make clean` 全量重建（不是增量链接），除 arkc 源码外的一切
+（CFLAGS、链接脚本、其余目标文件）完全相同。
+
+回归账（本轮全量重跑，宿主侧，`c6ebdc6`）：
+
+| 门禁 | 结果 |
+|---|---|
+| `tests/run_agg_addr_tests.py --arm-as --arm-libgcc --rv-as` | **83 passed / 0 failed**（CASES 32 × 2 后端 + MUST_FAIL 8 × 2 + RV asm 3；其中 9 例是花括号省略） |
+| `tests/run_func_ptr_global_tests.py` | 39 / 0 |
+| `tests/run_complex_tests.py` | 76 / 0 |
+| `tests/run_arm_int64_tests.py`（不吃 `--rv-as`） | 12 / 0 |
+| `tests/run_c11_keywords_tests.py`（不吃 `--arm-libgcc`） | 30 / 0 |
+| `examples/run_va_gate.py --arm-as --arm-libgcc --rv-as` | 59 / 0 / 2 targets，`--opt-suite` 5/5 green |
+| `run_rv_image` / `alloca` / `sret` / `misc_ir` / `float` / `packed`（`--rv-as`） | 20 / 5 / 13 / 12 / 11 / 7，全 0 failed |
+| `tests/run_rv_link_tests.py` | 10 / 0 |
+| `tests/run_func_typedef_tests.py` | 24 / 0 |
+| `run_capacity_tests.py` / `run_diag_tests.py` / `run_diag_boundary.py` / `run_regalloc_tests.py` | 4 / 0；0 failure；all boundary held；all claims hold |
+| `tests/run_reloc_text_tests.py ./arkcc.exe` | all checks passed |
+| `/tmp/runps2.py` | done rc=0 |
+
+口径两条（本轮踩到，写死在这里）：
+1. `run_agg_addr_tests.py` 的 `--arm-as` / `--rv-as` 收的是**目录**（内部按 `arm-none-eabi-` /
+   `riscv64-unknown-elf-` 前缀找工具），传可执行文件路径会 `TypeError: 'NoneType' object is not callable`。
+2. 门禁 runner 取的是**进程退出码**，即程序 `main` 的返回值 **mod 256**；写用例期望值时
+   必须保证值 < 256，否则"oracle 不符"全部是模运算造成的假 FAIL。

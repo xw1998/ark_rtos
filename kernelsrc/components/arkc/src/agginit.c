@@ -113,6 +113,10 @@ static int aga_string(ArkAgg *c, unsigned char *buf, int gsz, int off, int n) {
 
 static int ark_agg_value(ArkAgg *c, Type *t, unsigned char *buf, int gsz,
                          int off);
+static int ark_agg_object(ArkAgg *c, Type *t, unsigned char *buf, int gsz,
+                          int off);
+static int ark_agg_flat(ArkAgg *c, Type *t, unsigned char *buf, int gsz,
+                        int off);
 
 /* Set `width` bits of a storage unit, little-endian, starting at `bit_off`:
  * the unit is what a bitfield store writes, so the initialiser has to land in
@@ -145,7 +149,89 @@ static int ark_agg_field(ArkAgg *c, StructField *f, unsigned char *buf,
                      (unsigned long long)v);
         return off + f->offset + usz;
     }
-    return ark_agg_value(c, f->type, buf, gsz, off + f->offset) < 0 ? -1 : 0;
+    return ark_agg_object(c, f->type, buf, gsz, off + f->offset) < 0 ? -1 : 0;
+}
+
+/* C99 6.7.8p20 brace elision: `int a[2][2] = {1,2,3,4}` and
+ * `struct T{int *p,*q;} t[1] = {&gv,&gv}` spell the sub-objects out without
+ * their own braces, so the values of a sub-aggregate are taken from the
+ * *enclosing* brace level, in declaration order, until that level ends.
+ *
+ * `ark_agg_flat()` is one such run.  It never consumes the closing '}' (the
+ * level that owns it does), never starts a designator (a designator can only
+ * name a member of the brace level it appears in, so `{[0]=1,2}` -- a
+ * designator applied to a sub-object -- stays refused), and stops when the
+ * value stream is used up, which is exactly how a short initialiser leaves the
+ * tail zero-filled. */
+static int ark_agg_flat(ArkAgg *c, Type *t, unsigned char *buf, int gsz, int off) {
+    aga_ws(c);
+    if (!t) t = type_int();
+    switch (t->kind) {
+    case TYPE_ARRAY: {
+        int es = t->base ? type_size(t->base) : 4;
+        int n = t->size;
+        int cur = 0;
+        if (es <= 0 || n <= 0) return -1;
+        if (*c->s == '"') return ark_agg_value(c, t, buf, gsz, off);
+        for (;;) {
+            aga_ws(c);
+            if (!*c->s || *c->s == '}') return off;      /* the run ended */
+            if (*c->s == '[' || *c->s == '.') return -1; /* designator + elision */
+            if (cur >= n) return off;   /* this sub-object is full: the caller
+                                         * owns what follows (its comma, or the
+                                         * value that overflows its own level) */
+            if (*c->s == ',') { c->s++; continue; }
+            if (ark_agg_object(c, t->base, buf, gsz, off + cur * es) < 0)
+                return -1;
+            cur++;
+        }
+    }
+    case TYPE_STRUCT: {
+        StructField *f = t->fields;
+        for (;;) {
+            aga_ws(c);
+            if (!*c->s || *c->s == '}') return off;   /* the run ended */
+            if (f && (*c->s == '.' || *c->s == '[')) return -1; /* designator */
+            if (!f) return off;   /* every member is filled: the caller owns
+                                   * the rest of the stream */
+            if (*c->s == ',') { c->s++; continue; }
+            if (ark_agg_field(c, f, buf, gsz, off) < 0) return -1;
+            f = f->next;
+        }
+    }
+    case TYPE_UNION: {
+        /* One live member, so an elided union takes exactly one value for its
+         * first member (which may itself be an aggregate and expand again). */
+        StructField *f = t->fields;
+        if (!f) return -1;
+        aga_ws(c);
+        if (!*c->s || *c->s == '}' || *c->s == ',') return -1;
+        if (*c->s == '.' || *c->s == '[') return -1;
+        if (ark_agg_field(c, f, buf, gsz, off) < 0) return -1;
+        return off;
+    }
+    default:
+        return ark_agg_value(c, t, buf, gsz, off);
+    }
+}
+
+/* One object of type `t` at `off`, where braces around it are optional: a '{'
+ * (or a string standing for a char array) starts its own brace level, anything
+ * else continues the enclosing level. */
+static int ark_agg_object(ArkAgg *c, Type *t, unsigned char *buf, int gsz, int off) {
+    aga_ws(c);
+    if (!t) t = type_int();
+    if (*c->s == '{') return ark_agg_value(c, t, buf, gsz, off);
+    /* A string is its own brace level only where it stands for the object: a
+     * char array (`char n[4]` <- "ab").  For a pointer it is an address element
+     * and ark_agg_value()'s default branch hands it to the hook; for a struct
+     * or union it is the first member's value, i.e. brace elision -- and
+     * sending it to ark_agg_value() required a '{' there and failed. */
+    if (*c->s == '"' && t->kind == TYPE_ARRAY)
+        return ark_agg_value(c, t, buf, gsz, off);
+    if (t->kind == TYPE_ARRAY || t->kind == TYPE_STRUCT || t->kind == TYPE_UNION)
+        return ark_agg_flat(c, t, buf, gsz, off);
+    return ark_agg_value(c, t, buf, gsz, off);
 }
 
 /* One initialiser value of type `t` at byte offset `off`; returns the offset
@@ -191,7 +277,7 @@ static int ark_agg_value(ArkAgg *c, Type *t, unsigned char *buf, int gsz, int of
                 cur = (int)idx;
             }
             if (cur >= n) return -1;         /* more initialisers than storage */
-            if (ark_agg_value(c, t->base, buf, gsz, off + cur * es) < 0)
+            if (ark_agg_object(c, t->base, buf, gsz, off + cur * es) < 0)
                 return -1;
             cur++;
         }
@@ -267,6 +353,14 @@ static int ark_agg_value(ArkAgg *c, Type *t, unsigned char *buf, int gsz, int of
     default: {
         long long v;
         int sz;
+        if (*c->s == '{') {            /* braces around a scalar: `int x = {5};` */
+            c->s++;
+            if (ark_agg_object(c, t, buf, gsz, off) < 0) return -1;
+            aga_ws(c);
+            if (*c->s != '}') return -1;
+            c->s++;
+            return off + type_size(t);
+        }
         if (!aga_num(c, &v)) {
             /* Not an integer constant: an address element of an aggregate
              * initialiser (`int (*tab[2])(int,int) = { add, sub };`, a struct
@@ -318,7 +412,7 @@ int ark_agg_fill_ex(Type *t, const char *text, unsigned char *buf, int bufsz,
     c.addr_ud = ud;
     if (ark_agg_value(&c, t, buf, bufsz, 0) < 0) return -1;
     aga_ws(&c);
-    if (*c.s != 0) return -1;             /* trailing text: gave up halfway */
+    if (*c.s != 0) return -1;             /* trailing text: gave up halfway */             /* trailing text: gave up halfway */
     return 0;
 }
 

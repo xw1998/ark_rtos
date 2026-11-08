@@ -7,7 +7,7 @@
 | 项 | 值 |
 |---|---|
 | 来源 | `D:/工作/git_project/ark c compiler` |
-| 源 commit | `6fce783c00745cb0cbce068edf9fd88aa73cc9a9` |
+| 源 commit | `c6ebdc67c3b878d04a825013819ef36cec8e340e` |
 | 工作区 | 有未提交改动 |
 | 同步日期 | 2026-11-08 |
 | 文件数 | 45 |

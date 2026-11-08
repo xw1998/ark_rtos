@@ -9,6 +9,7 @@
  *   - Globals are referenced through IR_PUSH_GLOBAL / IR_STORE_GLOBAL.
  */
 #include "irgen.h"
+#include "parser.h"
 #include "symtab.h"
 #include "memory.h"
 #include "platform.h"
@@ -490,7 +491,15 @@ static void irgen_add_ref(IrGlobal *g, int off, const char *sym, long long add, 
     irgen_add_ref_ex(g, off, sym, add, isf, 0);
 }
 
-static int irgen_agg_addr_walk(Type *t, AstNode *init, int base, IrGlobal *g, int *found);
+typedef struct {
+    AstNode *list;   /* the brace level being consumed */
+    int n, i;
+    IrGlobal *g;
+    int *found;
+} AaggWalk;
+
+static int aw_fill(AaggWalk *w, Type *t, int off, int braced);
+static int aw_braced(AaggWalk *w, Type *t, AstNode *init, int off);
 
 /* One scalar element at `off`.  Returns 1 when the walk may continue. */
 static int irgen_agg_addr_scalar(AstNode *init, int off, IrGlobal *g, int *found) {
@@ -540,24 +549,53 @@ static int irgen_agg_addr_scalar(AstNode *init, int off, IrGlobal *g, int *found
     return 1;
 }
 
-/* One initialiser value of type `t` at byte offset `off`.  A nested brace level
- * recurses; a scalar element is handed to irgen_agg_addr_scalar.  An aggregate
- * slot holding a non-brace value is brace elision, whose flattened layout this
- * walk does not re-derive -- refusing beats guessing an offset. */
-static int irgen_agg_addr_place(Type *t, AstNode *value, int off, IrGlobal *g, int *found) {
-    if (!t || !value) return 1;
-    if (value->kind == AST_INIT_LIST)
-        return irgen_agg_addr_walk(t, value, off, g, found);
-    if (t->kind == TYPE_ARRAY || t->kind == TYPE_STRUCT || t->kind == TYPE_UNION)
-        return 0;
-    return irgen_agg_addr_scalar(value, off, g, found);
+/* The value an initialiser item carries: `{ .f = v }` keeps v inside the item. */
+static AstNode *aw_item_value(AstNode *it) {
+    if (it && it->kind == AST_INIT_FIELD) return it->u.init_field.value;
+    return it;
 }
 
-static int irgen_agg_addr_walk(Type *t, AstNode *init, int base, IrGlobal *g, int *found) {
-    int i, n;
-    if (!t || !init) return 1;
-    if (init->kind != AST_INIT_LIST) return 0;
-    n = init->u.init_list.item_count;
+/* Consume the next value of the current brace level as one object of type `t`
+ * at byte offset `off`.  A value that carries braces of its own starts its own
+ * level; otherwise an aggregate opens a brace-elided run (C11 6.7.9p20) that
+ * keeps taking values from this level, and a scalar is one address element.
+ *
+ * A string literal standing for a char array is *skipped* here on purpose: its
+ * bytes belong to ark_agg_fill(), which knows how to lay a string into a row.
+ * Doing it this way (instead of bailing on the whole walk) is what lets
+ * `struct S { char n[4]; int *p; } s = { "ab", &gv };` record the address. */
+static int aw_object(AaggWalk *w, Type *t, int off) {
+    AstNode *it, *v;
+    if (!t) return 0;
+    if (w->i >= w->n) return 1;
+    it = w->list->u.init_list.items[w->i];
+    if (!it) { w->i++; return 1; }
+    v = aw_item_value(it);
+    if (v && v->kind == AST_INIT_LIST) {
+        w->i++;
+        return aw_braced(w, t, v, off);
+    }
+    if (t->kind != TYPE_ARRAY && t->kind != TYPE_STRUCT && t->kind != TYPE_UNION) {
+        w->i++;
+        return irgen_agg_addr_scalar(v, off, w->g, w->found);
+    }
+    if (t->kind == TYPE_ARRAY && v && v->kind == AST_STR) {
+        w->i++;                 /* the string fills the row; ark_agg_fill() does it */
+        return 1;
+    }
+    return aw_fill(w, t, off, 0);
+}
+
+/* One brace-elided run of type `t` at `off`: it stops as soon as the object is
+ * full and leaves the rest of the level to its caller, which is exactly how a
+ * short initialiser zero-fills the tail and how an over-long one is caught by
+ * the level that owns the closing brace.
+ *
+ * `braced` says whether this level owns the braces (designators allowed, every
+ * value must be consumed) or is a run inside an enclosing level (no designator
+ * can name a member of a level it does not appear in). */
+static int aw_fill(AaggWalk *w, Type *t, int off, int braced) {
+    if (!t) return 0;
     if (t->kind == TYPE_ARRAY && t->base) {
         /* `cur` mirrors ark_agg_fill()'s cursor: it advances one per value and
          * jumps on a designator, so `{[1] = &gv, [3] = &gv}` lands at the
@@ -567,46 +605,91 @@ static int irgen_agg_addr_walk(Type *t, AstNode *init, int base, IrGlobal *g, in
         int len = t->size;
         int cur = 0;
         if (stride <= 0 || len <= 0) return 0;
-        for (i = 0; i < n; i++) {
-            AstNode *it = init->u.init_list.items[i];
-            if (!it) continue;
-            if (it->u.init_field.has_field) return 0;
-            if (it->u.init_field.has_index) {
-                cur = it->u.init_field.index;
-                if (cur < 0 || cur >= len) return 0;
-            }
-            if (cur >= len) return 0;
-            if (!irgen_agg_addr_place(t->base, it->u.init_field.value,
-                                      base + cur * stride, g, found))
+        for (;;) {
+            AstNode *it;
+            if (w->i >= w->n) return 1;
+            it = w->list->u.init_list.items[w->i];
+            if (!it) { w->i++; continue; }
+            if (braced) {
+                if (it->kind == AST_INIT_FIELD) {
+                    if (it->u.init_field.has_field) return 0;
+                    if (it->u.init_field.has_index) {
+                        cur = it->u.init_field.index;
+                        if (cur < 0 || cur >= len) return 0;
+                    }
+                }
+            } else if (it->kind == AST_INIT_FIELD &&
+                       (it->u.init_field.has_index || it->u.init_field.has_field)) {
                 return 0;
+            }
+            if (cur >= len) return braced ? 0 : 1;
+            if (!aw_object(w, t->base, off + cur * stride)) return 0;
             cur++;
         }
-        return 1;
     }
     if (t->kind == TYPE_STRUCT || t->kind == TYPE_UNION) {
-        /* Same shape as the array branch: `f` walks the members in order and a
-         * `.name =` designator moves it.  A union has one live member, so the
-         * initialiser may only have one element (C99 6.7.8p10). */
+        /* `f` walks the members in order and a `.name =` designator moves it.
+         * A union has one live member (C99 6.7.9p10), so only its first member
+         * is fed and the level then has to end. */
         StructField *f = t->fields;
-        if (t->kind == TYPE_UNION && n > 1) return 0;
-        for (i = 0; i < n; i++) {
-            AstNode *it = init->u.init_list.items[i];
-            if (!it) continue;
-            if (it->u.init_field.has_index) return 0;
-            if (it->u.init_field.has_field) {
-                f = type_find_field(t, it->u.init_field.field);
-                if (!f) return 0;
-            }
-            if (!f) return 0;
-            if (f->bit_width > 0) { f = f->next; continue; }
-            if (!irgen_agg_addr_place(f->type, it->u.init_field.value,
-                                      base + f->offset, g, found))
+        int uni = (t->kind == TYPE_UNION);
+        if (!f) return 0;
+        for (;;) {
+            AstNode *it;
+            if (w->i >= w->n) return 1;
+            it = w->list->u.init_list.items[w->i];
+            if (!it) { w->i++; continue; }
+            if (braced) {
+                if (it->kind == AST_INIT_FIELD) {
+                    if (it->u.init_field.has_index) return 0;
+                    if (it->u.init_field.has_field) {
+                        f = type_find_field(t, it->u.init_field.field);
+                        if (!f) return 0;
+                    }
+                }
+            } else if (it->kind == AST_INIT_FIELD &&
+                       (it->u.init_field.has_index || it->u.init_field.has_field)) {
                 return 0;
+            }
+            if (!f) return braced ? 0 : 1;
+            if (f->bit_width > 0) {   /* ark_agg_fill() writes the bit range */
+                w->i++;
+                f = f->next;
+                continue;
+            }
+            if (!aw_object(w, f->type, off + f->offset)) return 0;
             f = f->next;
+            if (uni) return 1;        /* only one member of a union */
         }
-        return 1;
     }
-    return irgen_agg_addr_scalar(init, base, g, found);
+    return aw_object(w, t, off);
+}
+
+/* A value with braces of its own: a fresh level over its own item list, whose
+ * every value must be consumed. */
+static int aw_braced(AaggWalk *w, Type *t, AstNode *init, int off) {
+    AaggWalk sub;
+    if (!init || init->kind != AST_INIT_LIST) return 0;
+    sub.list = init;
+    sub.n = init->u.init_list.item_count;
+    sub.i = 0;
+    sub.g = w->g;
+    sub.found = w->found;
+    if (!aw_fill(&sub, t, off, 1)) return 0;
+    return sub.i == sub.n ? 1 : 0;
+}
+
+static int irgen_agg_addr_walk(Type *t, AstNode *init, int base, IrGlobal *g, int *found) {
+    AaggWalk w;
+    if (!t || !init) return 1;
+    if (init->kind != AST_INIT_LIST) return 0;
+    w.list = init;
+    w.n = init->u.init_list.item_count;
+    w.i = 0;
+    w.g = g;
+    w.found = found;
+    if (!aw_fill(&w, t, base, 1)) return 0;
+    return w.i == w.n ? 1 : 0;
 }
 
 /* Does this initialiser contain an address element anywhere?  Asked only when
@@ -682,10 +765,11 @@ static void irgen_try_agg_addr_init(IrGlobal *g, AstNode *init) {
             irgen_init_has_str_addr(g->type, init)) {
             diag_tool(DIAG_SEV_ERROR, "arkcc",
                       "the initialiser of the global '%s' contains an address "
-                      "element that cannot be placed here: either its braces are "
-                      "not spelled out level by level, or the designator does not "
+                      "element that cannot be placed here: the designator does not "
                       "fit the type (out of range, or a union with more than one "
-                      "initialised member); write one value per brace level",
+                      "initialised member), or a brace-elided element mixes a "
+                      "string literal with other values; write one value per "
+                      "brace level",
                       g->name, 0,0,0,0,0);
             g_irgen_errors++;
         }
@@ -919,7 +1003,36 @@ static int irgen_try_complex_init(IrGlobal *gv, AstNode *iv) {
     if (!gv || !iv) return 0;
     dt = gv->type;
     if (!dt || dt->kind != TYPE_COMPLEX) return 0;
-    if (!eval_const_cexpr(iv, &re, &im)) {
+    if (iv->kind == AST_INIT_LIST) {
+        /* C99 6.7.9p11: a scalar initialiser is a *single* expression,
+         * optionally enclosed in braces, so `{3.0}` means 3.0 + 0i and is
+         * legal.  `{3.0, 4.0}` is not that form: GCC only warns and drops the
+         * imaginary part, and copying that would be a wrong answer.  Say what
+         * to write instead. */
+        AstNode *v0;
+        int n = iv->u.init_list.item_count;
+        if (n != 1) {
+            diag_tool(DIAG_SEV_ERROR, "arkcc",
+                      "the initialiser of the global '%s' is a scalar; `{re, im}` "
+                      "is not a brace-elided form -- write `re + im * I`",
+                      gv->name, 0,0,0,0,0);
+            g_irgen_errors++;
+            /* Claim the initialiser so the backend does not add a second,
+             * misleading "cannot turn this into data" for a shape that has
+             * already been diagnosed.  The build is failing anyway. */
+            gv->has_init = 1;
+            gv->is_float = 1;
+            gv->init_is_complex = 1;
+            gv->init_float = 0.0;
+            gv->init_float_im = 0.0;
+            return 1;
+        }
+        v0 = iv->u.init_list.items[0];
+        if (v0 && v0->kind == AST_INIT_FIELD) v0 = v0->u.init_field.value;
+        if (!v0 || v0->kind == AST_INIT_LIST) return 0;
+        if (!eval_const_fexpr(v0, &re)) return 0;
+        im = 0.0;
+    } else if (!eval_const_cexpr(iv, &re, &im)) {
         /* 折不出来就不装作折出来：留给后续分支（报错）。 */
         return 0;
     }
@@ -1056,6 +1169,44 @@ static void collect_cases(IrGen *g, AstNode *node, CaseList *cl) {
 /* See include/irgen.h. Counted, never cleared implicitly except at entry. */
 int g_irgen_errors = 0;
 
+/* C99 6.7.8p11: a scalar may be initialised with a brace-enclosed list of
+ * exactly one expression -- `int x = {5};`.  Both data emitters turn an
+ * init-list into *aggregate* bytes; handing one a scalar leaves the riscv32
+ * backend refusing with "not a plain constant" while the arm backend tries to
+ * fold a brace-shaped text form.  Unwrap it here so the ordinary scalar paths
+ * run, and report the shapes that cannot be represented -- storing the object
+ * without its initialiser would invent a zero. */
+static AstNode *irgen_unwrap_scalar_braces(AstNode *iv, Type *t, const char *name) {
+    AstNode *v0;
+    int n;
+    if (!iv || iv->kind != AST_INIT_LIST) return iv;
+    if (t && (t->kind == TYPE_ARRAY || t->kind == TYPE_STRUCT ||
+              t->kind == TYPE_UNION))
+        return iv;
+    /* `double _Complex z = {re, im};` is two scalars in one brace pair, not a
+     * scalar with one value: it belongs to the _Complex folding path. */
+    if (t && t->kind == TYPE_COMPLEX) return iv;
+    n = iv->u.init_list.item_count;
+    if (n <= 0) return iv;      /* `{}` is not C99; keep the old path */
+    v0 = iv->u.init_list.items[0];
+    if (v0 && v0->kind == AST_INIT_FIELD) v0 = v0->u.init_field.value;
+    if (v0 && v0->kind == AST_INIT_LIST) {
+        diag_tool(DIAG_SEV_ERROR, "arkcc",
+                  "the initialiser of the global '%s' has more braces than the "
+                  "type needs", name, 0,0,0,0,0);
+        g_irgen_errors++;
+        return iv;
+    }
+    if (n > 1) {
+        diag_tool(DIAG_SEV_ERROR, "arkcc",
+                  "the initialiser of the global '%s' has too many values: a "
+                  "scalar takes exactly one", name, 0,0,0,0,0);
+        g_irgen_errors++;
+        return iv;
+    }
+    return v0 ? v0 : iv;
+}
+
 IrProgram *irgen_program(AstNode *prog) {
     IrProgram *out = ir_program_new();
     int i;
@@ -1127,7 +1278,9 @@ IrProgram *irgen_program(AstNode *prog) {
                 gv->global_reg = d->u.var.global_reg;
 #endif
                 if (d->u.var.init) {
-                    AstNode *iv = d->u.var.init;
+                    AstNode *iv = irgen_unwrap_scalar_braces(d->u.var.init,
+                                                            d->u.var.var_type,
+                                                            d->u.var.name);
 #if ARKCC_FEATURE_FCONST_FOLD
                     if (irgen_try_complex_init(gv, iv)) {
                         /* _Complex 常量初始化：实部/虚部已折叠 */
@@ -1211,7 +1364,9 @@ IrProgram *irgen_program(AstNode *prog) {
                      * all .data globals preceded by extern declarations to
                      * have init_int=0 (e.g. SystemCoreClock=16000000 became 0). */
                     if (d->u.var.init && !eg->has_init) {
-                        AstNode *iv = d->u.var.init;
+                        AstNode *iv = irgen_unwrap_scalar_braces(d->u.var.init,
+                                                                d->u.var.var_type,
+                                                                d->u.var.name);
 #if ARKCC_FEATURE_FCONST_FOLD
                         if (irgen_try_complex_init(eg, iv)) {
                             /* _Complex 常量初始化：实部/虚部已折叠 */
@@ -1713,71 +1868,172 @@ static void irgen_local_store_str_lit(IrGen *g, int off, Type *arr_t, AstNode *v
     ir_emit(g->fn, IR_POP, 0, 0, 0);
 }
 
-static void irgen_local_aggregate_init(IrGen *g, int off, Type *t, AstNode *init_list) {
-    int i;
-    if (!init_list || init_list->kind != AST_INIT_LIST || !t) return;
-    if (t->kind == TYPE_ARRAY) {
-        Type *elem_t = t->base;
-        int elem_sz = type_size(elem_t);
-        int cur_idx = 0;
-        if (elem_sz <= 0) elem_sz = 4;
-        for (i = 0; i < init_list->u.init_list.item_count; i++) {
-            AstNode *it = init_list->u.init_list.items[i];
-            int idx;
-            AstNode *val;
-            if (!it) continue;
-            idx = it->u.init_field.has_index ? it->u.init_field.index : cur_idx;
-            cur_idx = idx + 1;
-            val = it->u.init_field.value;
-            if (!val) continue;
-            if (val->kind == AST_INIT_LIST) {
-                irgen_local_aggregate_init(g, off + idx * elem_sz, elem_t, val);
-            } else if (val->kind == AST_STR && elem_t->kind == TYPE_ARRAY &&
-                       elem_t->base && elem_t->base->kind == TYPE_CHAR) {
-                /* char m[2][6] = {"ab", "cd"}: element is itself an array. */
-                irgen_local_store_str_lit(g, off + idx * elem_sz, elem_t, val);
-            } else {
-                irgen_expr(g, val);
-                ir_emit(g->fn, IR_STORE, off + idx * elem_sz, 0, elem_sz);
-            }
+/* Block-scope aggregate initialiser.
+ *
+ * The walk mirrors ark_agg_fill()'s (src/agginit.c), which does the same job
+ * for .data: a cursor over the initialiser values of one brace level plus the
+ * declared type decides where each value lands.  Two things the old
+ * item-counting loop could not do:
+ *
+ *  - brace elision (C99 6.7.9p20).  `int a[2][2] = {1,2,3,4}` gives two
+ *    values per element and no braces, so counting items made the second row
+ *    start at a[1] before the first row was full -- the old code then stored a
+ *    whole row's worth of bytes from a single int, which is how `lc1` corrupted
+ *    the frame.
+ *  - bit-fields.  A member with a width is not a byte range: it is stored with
+ *    IR_STORE_FLD at its bit offset, exactly like `x.f = 1`.  The old code
+ *    stored sizeof(int) bytes at the field offset, so `struct B {int a:3; int
+ *    b:5;} x = {1,2}` came out as a==2, b==0.
+ *
+ * An over-long level drops the surplus instead of writing past the object: the
+ * object occupies a frame slot whose neighbours are other locals, so an
+ * out-of-range index would be a silent write into them.
+ */
+typedef struct {
+    AstNode **items;
+    int n, i;
+    IrGen *g;
+} LocalAggWalk;
+
+static void lw_object(LocalAggWalk *w, int off, Type *t);
+static void lw_fill(LocalAggWalk *w, int off, Type *t, int braced);
+
+static AstNode *lw_value(AstNode *it) {
+    if (it && it->kind == AST_INIT_FIELD) return it->u.init_field.value;
+    return it;
+}
+
+/* 0 = `.field`, 1 = `[index]`, -1 = none. */
+static int lw_designator(AstNode *it) {
+    if (it && it->kind == AST_INIT_FIELD) {
+        if (it->u.init_field.has_field) return 0;
+        if (it->u.init_field.has_index) return 1;
+    }
+    return -1;
+}
+
+/* Consume the next value of the current level as one object of type `t` at
+ * frame offset `off`. */
+static void lw_object(LocalAggWalk *w, int off, Type *t) {
+    AstNode *it, *val;
+    int es;
+    if (!t || w->i >= w->n) return;
+    it = w->items[w->i];
+    if (!it) { w->i++; return; }
+    val = lw_value(it);
+    if (val && val->kind == AST_INIT_LIST) {
+        LocalAggWalk sub;
+        w->i++;
+        sub.items = val->u.init_list.items;
+        sub.n = val->u.init_list.item_count;
+        sub.i = 0;
+        sub.g = w->g;
+        lw_fill(&sub, off, t, 1);
+        return;
+    }
+    if (t->kind == TYPE_ARRAY || t->kind == TYPE_STRUCT || t->kind == TYPE_UNION) {
+        if (t->kind == TYPE_ARRAY && val && val->kind == AST_STR && t->base &&
+            t->base->kind == TYPE_CHAR) {
+            /* `char m[2][6] = {"ab", "cd"}`: one string fills one row. */
+            w->i++;
+            irgen_local_store_str_lit(w->g, off, t, val);
+            return;
         }
-    } else if (t->kind == TYPE_STRUCT || t->kind == TYPE_UNION) {
-        StructField *f = t->fields;
-        for (i = 0; i < init_list->u.init_list.item_count; i++) {
-            AstNode *it = init_list->u.init_list.items[i];
-            StructField *target = 0;
-            AstNode *val;
-            if (!it) continue;
-            if (it->u.init_field.has_field) {
-                target = type_find_field(t, it->u.init_field.field);
-                /* after a designated item the positional cursor moves past target */
-                if (target) {
-                    StructField *p = t->fields;
-                    while (p && p != target) p = p->next;
-                    f = p ? p->next : 0;
-                }
-            } else {
-                target = f;
-                if (f) f = f->next;
+        lw_fill(w, off, t, 0);
+        return;
+    }
+    w->i++;
+    if (!val) return;
+    es = type_size(t);
+    if (es <= 0) es = 4;
+    irgen_expr(w->g, val);
+    ir_emit(w->g->fn, IR_STORE, off, 0, es);
+}
+
+/* A member of a struct/union at `off`: bit-fields go through IR_STORE_FLD so
+ * they keep their neighbours, everything else is an object of its own type. */
+static void lw_field(LocalAggWalk *w, int off, StructField *f) {
+    AstNode *val;
+    if (w->i >= w->n) return;
+    val = lw_value(w->items[w->i]);
+    if (f->bit_width > 0 && (!val || val->kind != AST_INIT_LIST)) {
+        w->i++;
+        if (!val) return;
+        ir_emit(w->g->fn, IR_PUSH_ADDR, off + f->offset, 0, 0);
+        irgen_expr(w->g, val);
+        ir_emit(w->g->fn, IR_STORE_FLD, f->bit_offset, 0, f->bit_width);
+        return;
+    }
+    lw_object(w, off + f->offset, f->type);
+}
+
+static void lw_fill(LocalAggWalk *w, int off, Type *t, int braced) {
+    if (!t) return;
+    if (t->kind == TYPE_ARRAY) {
+        int es = type_size(t->base);
+        int len = t->size;
+        int cur = 0;
+        if (es <= 0) es = 4;
+        for (;;) {
+            AstNode *it;
+            int d;
+            if (w->i >= w->n) return;
+            it = w->items[w->i];
+            if (!it) { w->i++; continue; }
+            d = lw_designator(it);
+            if (braced) {
+                if (d == 0) { w->i++; continue; }   /* `.f` cannot name an element */
+                if (d == 1) cur = it->u.init_field.index;
+            } else if (d >= 0) {
+                return;                            /* a designator ends the run */
             }
-            val = it->u.init_field.value;
-            if (!target || !val) continue;
-            if (val->kind == AST_INIT_LIST) {
-                irgen_local_aggregate_init(g, off + target->offset, target->type, val);
-            } else if (val->kind == AST_STR && target->type &&
-                       target->type->kind == TYPE_ARRAY && target->type->base &&
-                       target->type->base->kind == TYPE_CHAR) {
-                /* char s[6] member initialized from a string literal. */
-                irgen_local_store_str_lit(g, off + target->offset, target->type, val);
-            } else {
-                int fsz = type_size(target->type);
-                if (fsz <= 0) fsz = 4;
-                irgen_expr(g, val);
-                ir_emit(g->fn, IR_STORE, off + target->offset, 0, fsz);
-            }
+            if (cur < 0) cur = 0;
+            if (cur >= len) { if (!braced) return; w->i++; continue; }
+            lw_object(w, off + cur * es, t->base);
+            cur++;
         }
     }
-    /* Only arrays and structs/unions are initialized here; other types are ignored. */
+    if (t->kind == TYPE_STRUCT || t->kind == TYPE_UNION) {
+        StructField *f = t->fields;
+        int uni = (t->kind == TYPE_UNION);
+        if (!f) return;
+        for (;;) {
+            AstNode *it;
+            int d;
+            if (w->i >= w->n) return;
+            it = w->items[w->i];
+            if (!it) { w->i++; continue; }
+            d = lw_designator(it);
+            if (braced) {
+                if (d == 1) { w->i++; continue; }   /* `[i]` cannot name a member */
+                if (d == 0) {
+                    StructField *t2 = type_find_field(t, it->u.init_field.field);
+                    if (t2) f = t2;
+                }
+            } else if (d >= 0) {
+                return;
+            }
+            if (!f) {                       /* every member is filled */
+                if (!braced) return;        /* the run ends: the caller goes on */
+                w->i++;                     /* braced and over-long: drop the surplus */
+                continue;
+            }
+            lw_field(w, off, f);
+            f = f->next;
+            if (uni) return;                        /* one live member */
+        }
+    }
+    lw_object(w, off, t);
+}
+
+static void irgen_local_aggregate_init(IrGen *g, int off, Type *t, AstNode *init_list) {
+    LocalAggWalk w;
+    if (!init_list || init_list->kind != AST_INIT_LIST || !t) return;
+    w.items = init_list->u.init_list.items;
+    w.n = init_list->u.init_list.item_count;
+    w.i = 0;
+    w.g = g;
+    lw_fill(&w, off, t, 1);
 }
 
 /* C99 compound literal (type){...} -- Bug-I7 FIX.
@@ -1806,27 +2062,10 @@ static int irgen_compound_literal(IrGen *g, AstNode *node) {
      * the first initialized element). */
     if (t && t->kind == TYPE_ARRAY && t->size == 0 && init &&
         init->kind == AST_INIT_LIST) {
-        int count = 0;
-        int pos = 0;
-        int i;
-        for (i = 0; i < init->u.init_list.item_count; i++) {
-            AstNode *item = init->u.init_list.items[i];
-            if (item && item->kind == AST_INIT_FIELD) {
-                if (item->u.init_field.has_index) {
-                    if (item->u.init_field.index + 1 > count)
-                        count = item->u.init_field.index + 1;
-                } else {
-                    pos++;
-                }
-            } else {
-                pos++;
-            }
-        }
-        if (pos > count) count = pos;
-        if (count > 0) {
-            t->size = count;
-            sz = type_size(t);
-        }
+        /* Same deduction as a declared array (brace elision included), so
+         * `(int[][2]){1,2,3,4}` reserves two rows rather than four. */
+        ark_infer_array_size_from_init(t, init);
+        if (t->size > 0) sz = type_size(t);
     }
     if (sz <= 0) sz = 4;
     off = alloc_local(g, sz);
@@ -2072,9 +2311,71 @@ static void irgen_stmt(IrGen *g, AstNode *node) {
                 AstNode *iv = node->u.var.init;
                 if (iv->kind == AST_INIT_LIST) {
                     /* Local aggregate initialization: zero the whole region first, then write the
-                     * explicitly initialized elements (C99 nested lists, designated initializers). */
+                     * explicitly initialized elements (C99 nested lists, designated initializers,
+                     * brace elision).  A scalar may carry braces too -- `int x = {5};` is C99
+                     * 6.7.9p11 -- and used to fall through to the aggregate walk, which ignores
+                     * non-aggregate types, leaving x == 0. */
                     int total = sz;
                     int k;
+                    /* C99 6.7.9p11: a scalar initialiser is a single
+                     * expression, optionally in braces -- `double _Complex z =
+                     * {3.0};` is 3.0 + 0i.  A brace *list* of two values is a
+                     * different thing: GCC warns "excess elements" and keeps
+                     * only the real part, which is a wrong answer we do not
+                     * copy (write `re + im * I`).  The scalar path below would
+                     * leave the imaginary half of a multi-value list at zero
+                     * without a word, so it is refused here. */
+                    if (node->u.var.var_type &&
+                        node->u.var.var_type->kind == TYPE_COMPLEX) {
+                        int n = iv->u.init_list.item_count;
+                        int store_aux = irgen_complex_aux(node->u.var.var_type,
+                                                          type_size(node->u.var.var_type));
+                        AstNode *c0 = (n >= 1) ? lw_value(iv->u.init_list.items[0]) : 0;
+                        if (n != 1 || (c0 && c0->kind == AST_INIT_LIST)) {
+                            diag_tool(DIAG_SEV_ERROR, "arkcc",
+                                      "the initialiser of '%s' is a scalar; `{re, im}` "
+                                      "is not a brace-elided form -- write `re + im * I`",
+                                      node->u.var.name, 0,0,0,0,0);
+                            g_irgen_errors++;
+                        } else {
+                            irgen_expr(g, c0);
+                            if (!c0->type || c0->type->kind != TYPE_COMPLEX)
+                                irgen_widen_real_to_complex(g, c0->type);
+                            if (node->u.var.var_type->is_volatile)
+                                store_aux |= IR_AUX_VOLATILE;
+                            ir_emit(g->fn, IR_STORE, off, node->u.var.name, store_aux);
+                        }
+                        break;
+                    }
+                    if (!(node->u.var.var_type &&
+                          (node->u.var.var_type->kind == TYPE_ARRAY ||
+                           node->u.var.var_type->kind == TYPE_STRUCT ||
+                           node->u.var.var_type->kind == TYPE_UNION))) {
+                        AstNode *v0 = 0;
+                        if (iv->u.init_list.item_count > 0)
+                            v0 = lw_value(iv->u.init_list.items[0]);
+                        if (v0 && v0->kind == AST_INIT_LIST) {
+                            /* `int x = {{5}}` is invalid; report rather than store none. */
+                            diag_tool(DIAG_SEV_ERROR, "arkcc",
+                                      "the initialiser of '%s' has more braces than the "
+                                      "type needs", node->u.var.name, 0,0,0,0,0);
+                            g_irgen_errors++;
+                        } else if (v0 && iv->u.init_list.item_count > 1) {
+                            /* `int x = {5,6};` -- a scalar takes one value. */
+                            diag_tool(DIAG_SEV_ERROR, "arkcc",
+                                      "the initialiser of '%s' has too many values: a "
+                                      "scalar takes exactly one", node->u.var.name, 0,0,0,0,0);
+                            g_irgen_errors++;
+                        } else if (v0) {
+                            for (k = 0; k < total; k += 4) {
+                                ir_emit(g->fn, IR_PUSH_INT, 0, 0, 0);
+                                ir_emit(g->fn, IR_STORE, off + k, 0, 4);
+                            }
+                            irgen_expr(g, v0);
+                            ir_emit(g->fn, IR_STORE, off, 0, sz);
+                        }
+                        break;
+                    }
                     for (k = 0; k < total; k += 4) {
                         ir_emit(g->fn, IR_PUSH_INT, 0, 0, 0);
                         ir_emit(g->fn, IR_STORE, off + k, 0, 4);

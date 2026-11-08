@@ -662,12 +662,50 @@ static AstNode *parse_initializer(Parser *p) {
     return parse_assign_expr(p);
 }
 
+/* How many initialiser *values* one elided element of type `t` takes when its
+ * sub-objects are spelled out without their own braces: one per scalar leaf
+ * (`int[2][2]` takes 2, a two-int struct takes 2).  A bitfield is one value.
+ * Returns 0 when the layout is not known (`int[]`), and the caller then falls
+ * back to counting one value per element. */
+static int infer_leaf_slots(Type *t) {
+    if (!t) return 1;
+    if (t->kind == TYPE_ARRAY) {
+        int sub;
+        if (t->size <= 0 || !t->base) return 0;
+        sub = infer_leaf_slots(t->base);
+        return sub > 0 ? sub * t->size : 0;
+    }
+    if (t->kind == TYPE_STRUCT) {
+        StructField *f;
+        int sum = 0;
+        for (f = t->fields; f; f = f->next) {
+            int sub = (f->bit_width > 0) ? 1 : infer_leaf_slots(f->type);
+            if (sub <= 0) return 0;
+            sum += sub;
+        }
+        return sum;
+    }
+    if (t->kind == TYPE_UNION) {
+        StructField *f = t->fields;
+        if (!f) return 0;
+        return (f->bit_width > 0) ? 1 : infer_leaf_slots(f->type);
+    }
+    return 1;
+}
+
 /* Deduce unspecified outermost array dimension:
- *   char s[] = "abc"  -> size = strlen+1
- *   int  a[] = {1,2,3} -> size = 3
- *   int  a[] = {[2]=5} -> size = 3
- * Only handle outermost size==0 arrays; multi-layer unspecified dimensions need more complex deduction, not handled here. */
-static void infer_array_size_from_init(Type *t, AstNode *init) {
+ *   char s[] = "abc"        -> 4        (the terminator is part of the array)
+ *   int  a[] = {1,2,3}      -> 3
+ *   int  a[] = {[2]=5}      -> 3
+ *   int  a[][2] = {1,2,3,4} -> 2        (brace elision: 2 values per element)
+ *   char s[][4] = {"ab"}    -> 1        (one string fills one element)
+ *
+ * Brace elision is why counting top-level items is not enough: a flat stream of
+ * values is cut into elements by the element type's leaf count, and a braced or
+ * string value closes the element it fills.  A designator names the element
+ * directly.  Only the outermost size==0 array is handled; an inner `int[][2]`
+ * inside a struct still needs its own dimension written out. */
+void ark_infer_array_size_from_init(Type *t, AstNode *init) {
     if (!t || t->kind != TYPE_ARRAY || t->size != 0) return;
     if (!init) return;
     if (init->kind == AST_STR) {
@@ -678,25 +716,55 @@ static void infer_array_size_from_init(Type *t, AstNode *init) {
         return;
     }
     if (init->kind == AST_INIT_LIST) {
-        int i;
-        int sz = 0;
-        int pos = 0;
-        for (i = 0; i < init->u.init_list.item_count; i++) {
+        int i, n, cap;
+        int next = 0;      /* index of the element being filled */
+        int leaf = 0;      /* values already given to the current element */
+        int strings = 0, plain = 0;
+        n = init->u.init_list.item_count;
+        cap = t->base ? infer_leaf_slots(t->base) : 0;
+        for (i = 0; i < n; i++) {
             AstNode *item = init->u.init_list.items[i];
-            if (item && item->kind == AST_INIT_FIELD) {
+            AstNode *val;
+            if (!item) continue;
+            if (item->kind == AST_INIT_FIELD) {
                 if (item->u.init_field.has_index) {
-                    if (item->u.init_field.index + 1 > sz) sz = item->u.init_field.index + 1;
-                } else {
-                    pos++;
+                    if (leaf > 0) { next++; leaf = 0; }
+                    if (item->u.init_field.index + 1 > next)
+                        next = item->u.init_field.index + 1;
+                    continue;
                 }
+                val = item->u.init_field.value;
             } else {
-                /* Non-field item: plain value or nested init list (e.g.
-                 * struct array {{...},{...}}). Each item counts as one element. */
-                pos++;
+                val = item;
             }
+            if (val && val->kind == AST_INIT_LIST) {
+                if (leaf > 0) { next++; leaf = 0; }
+                next++;
+                continue;
+            }
+            if (val && val->kind == AST_STR) {
+                /* A string fills one object (a char array row, or a pointer). */
+                if (leaf > 0) { next++; leaf = 0; }
+                strings = 1;
+                next++;
+                continue;
+            }
+            plain = 1;
+            if (cap <= 1) { next++; continue; }
+            leaf++;
+            if (leaf >= cap) { leaf = 0; next++; }
         }
-        if (pos > sz) sz = pos;
-        if (sz > 0) t->size = sz;
+        if (leaf > 0) next++;
+        if (strings && plain && t->base &&
+            (t->base->kind == TYPE_STRUCT || t->base->kind == TYPE_UNION)) {
+            /* `struct S { char n[4]; int *p; } s[] = { "ab", &gv }` -- a string
+             * takes one value, but how many values the rest of the element
+             * takes depends on where the string landed.  Leave the size
+             * unspecified (the declaration is then rejected) rather than guess
+             * a count and compile a wrong sizeof. */
+            return;
+        }
+        if (next > 0) t->size = next;
         return;
     }
     if (init->kind == AST_COMPOUND_LITERAL &&
@@ -2205,7 +2273,7 @@ static AstNode *parse_top_decl(Parser *p) {
                 init = parse_initializer(p);
             }
             /* Deduce unspecified array dimension */
-            infer_array_size_from_init(t, init);
+            ark_infer_array_size_from_init(t, init);
             /* Register global var in parser symtab so that sizeof(var) and
              * sizeof(var[i]) can be resolved at parse time (e.g. the
              * sizeof(g_cpu_table)/sizeof(g_cpu_table[0]) array-count idiom
@@ -2245,7 +2313,7 @@ static AstNode *parse_top_decl(Parser *p) {
                         lexer_advance(p->lex);
                         init2 = parse_initializer(p);
                     }
-                    infer_array_size_from_init(t2, init2);
+                    ark_infer_array_size_from_init(t2, init2);
                     /* Register subsequent same-line global vars too, for sizeof lookup. */
                     if (nm2) sym_add(SYM_VAR, nm2, t2, 0);
                     if (nm2) {
@@ -2450,7 +2518,7 @@ static AstNode *parse_local_var_decl(Parser *p, Type *base, int storage, int is_
             lexer_advance(p->lex);
             init = parse_initializer(p);
         }
-        infer_array_size_from_init(t, init);
+        ark_infer_array_size_from_init(t, init);
         {
             AstNode *n = ast_var_decl(name, t, init, line);
             n->col = decl_name_col;
