@@ -350,3 +350,42 @@ RV32I 的 `_Complex float` 返回丢值修复、`(*fp)(params)` 保留参数表�
 `text 430188 / data 2260 / bss 463528`；`git stash pop` → 重建得
 `text 432628 / data 2260 / bss 463532`。两次构建除 arkc 源码外的一切（CFLAGS、链接脚本、
 其余目标文件）完全相同。
+
+**2026-11-08 追加（上游 `ce98151`：聚合初始化器里的地址元素 + 函数指针数组声明符）**：
+
+板端（STM32H743，`USE_ARKC=1`，同一套 CFLAGS / 链接脚本）：
+
+| 项 | 旧 | 新 | 差 |
+|---|---|---|---|
+| `text` | 432 628 | 435 012 | **+2 384** |
+| `data` | 2 260 | 2 260 | 0 |
+| `bss` | 463 532 | 463 532 | 0 |
+| FLASH 占用 | 82.95% | 83.41% | +0.46 pp |
+| RAM / CCMRAM / NOINIT | 98.22% / 17.33% / 97.66% | 同左 | 0 |
+
+逐目标文件（只有 arkc 侧的 5 个目标变化）：
+
+| 目标文件 | text 旧 -> 新 | 差 |
+|---|---|---|
+| `irgen.o` | 29 810 -> 31 242 | +1 432 |
+| `backend_arm.o` | 90 742 -> 91 242 | +500 |
+| `parser.o` | 23 482 -> 23 802 | +320 |
+| `agginit.o` | 2 728 -> 2 868 | +140 |
+| `ir.o` | 1 718 -> 1 722 | +4 |
+| 五者合计 | — | +2 396 |
+
+ELF `text` +2 384 比逐目标合计 +2 396 少 12 字节，是段对齐/填充差，不是另有代码变动。
+
+落点：`irgen.o` 是新增的第二次 AST 走查（`irgen_add_ref` / `irgen_agg_addr_scalar` /
+`irgen_agg_addr_walk` / `irgen_init_has_addr` / `irgen_try_agg_addr_init`）+ 9 处调用点；
+`parser.o` 是 `(*name)` 分支支持括号内数组维度；`agginit.o` 是 `ark_agg_fill_ex()` 的
+`addr_hook` 与"命中后推进文本游标"；`backend_arm.o` 是 `arm_agg_addr_hook()` 与聚合初始化
+后按 `init_refs` 覆盖写地址的循环。`bss` 未变——本轮没有新增文件作用域变量。
+**RV32I 后端仍不在 STM32 profile 里**，它的 `.word sym` 分支一行都没进固件。
+
+判定：FLASH 83.41%、RAM/CCMRAM/NOINIT 未变，仍在 512 KB 预算内（余 84.59 KB），**接受**。
+
+可复现判据：`git stash push -- kernelsrc/components/arkc` → 重建得
+`text 432628 / data 2260 / bss 463532`（FLASH 82.95%）；`git stash pop` → 重建得
+`text 435012 / data 2260 / bss 463532`（FLASH 83.41%）。两次构建除 arkc 源码外的一切
+（CFLAGS、链接脚本、其余目标文件）完全相同。

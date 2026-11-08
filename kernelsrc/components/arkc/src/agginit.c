@@ -9,6 +9,10 @@
 typedef struct {
     const char *s;      /* cursor into the initialiser text */
     int         ok;
+    /* Asked about an element that is not an integer constant (see
+     * ark_agg_fill_ex): 1 means the caller places that address itself. */
+    int       (*addr_hook)(void *ud, int off, Type *t);
+    void       *addr_ud;
 } ArkAgg;
 
 static void aga_ws(ArkAgg *c) {
@@ -263,7 +267,35 @@ static int ark_agg_value(ArkAgg *c, Type *t, unsigned char *buf, int gsz, int of
     default: {
         long long v;
         int sz;
-        if (!aga_num(c, &v)) return -1;
+        if (!aga_num(c, &v)) {
+            /* Not an integer constant: an address element of an aggregate
+             * initialiser (`int (*tab[2])(int,int) = { add, sub };`, a struct
+             * field holding a callback) reaches the caller's hook.  Only a
+             * pointer can hold one; asking about anything else would let a
+             * float or a bitfield slip through as "handled". */
+            if (c->addr_hook && t && (t->kind == TYPE_PTR || t->kind == TYPE_FUNC)) {
+                if (c->addr_hook(c->addr_ud, off, t)) {
+                    /* The caller placed this address itself.  Its text was not
+                     * parsed here, so step over it: advance to the next ',' or
+                     * closing brace at this level, honouring nested () [] {}.
+                     * Without this the cursor still sat on '&g0' and the next
+                     * element looked like one initialiser too many. */
+                    int depth = 0;
+                    while (*c->s) {
+                        char ch = *c->s;
+                        if (ch == '(' || ch == '[' || ch == '{') depth++;
+                        else if (ch == ')' || ch == ']') { if (depth == 0) break; depth--; }
+                        else if (ch == '}') { if (depth == 0) break; depth--; }
+                        else if (ch == ',' && depth == 0) break;
+                        c->s++;
+                    }
+                    c->ok = 1;
+                    sz = type_size(t);
+                    return sz > 0 ? off + sz : off;
+                }
+            }
+            return -1;
+        }
         sz = type_size(t);
         if (sz <= 0 || off + sz > gsz) return -1;
         aga_store(buf, off, sz, v);
@@ -273,10 +305,17 @@ static int ark_agg_value(ArkAgg *c, Type *t, unsigned char *buf, int gsz, int of
 }
 
 int ark_agg_fill(Type *t, const char *text, unsigned char *buf, int bufsz) {
+    return ark_agg_fill_ex(t, text, buf, bufsz, 0, 0);
+}
+
+int ark_agg_fill_ex(Type *t, const char *text, unsigned char *buf, int bufsz,
+                    int (*addr_hook)(void *ud, int off, Type *t), void *ud) {
     ArkAgg c;
     if (!text || !buf || bufsz <= 0) return -1;
     c.s = text;
     c.ok = 1;
+    c.addr_hook = addr_hook;
+    c.addr_ud = ud;
     if (ark_agg_value(&c, t, buf, bufsz, 0) < 0) return -1;
     aga_ws(&c);
     if (*c.s != 0) return -1;             /* trailing text: gave up halfway */

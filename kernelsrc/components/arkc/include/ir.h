@@ -107,6 +107,20 @@ typedef struct IrString {
     int    is_wide;  /* B2: wide string literal L"..." */
 } IrString;
 
+/* One address element inside an aggregate initialiser:
+ *   int (*tab[2])(int,int) = { add, sub };
+ *   struct S s = { 1, &gv };
+ * The bytes of the object still come from init_aggregate (ark_agg_fill keeps
+ * zeros where an address sits); each entry here says "the 4 bytes at `offset`
+ * are the address of `sym` + `add`", which a machine backend turns into a
+ * symbol reference instead of a baked number. */
+typedef struct IrSymRef {
+    int       offset;   /* byte offset inside the object */
+    char     *sym;      /* symbol named by the initialiser */
+    long long add;      /* byte offset inside that symbol */
+    int       is_func;  /* 1 when sym is a function */
+} IrSymRef;
+
 typedef struct IrGlobal {
     char  *name;
     Type  *type;
@@ -139,6 +153,13 @@ typedef struct IrGlobal {
      * distinction matters to a backend that cannot name another unit's data
      * but can name its code. */
     int     init_sym_is_func;
+    /* Address elements inside an aggregate initialiser (see IrSymRef).  Only
+     * an initialiser that spells out every brace level is walked, because a
+     * brace-elided initialiser cannot say where an element starts without
+     * re-deriving the layout -- and a wrong offset here stores an address at
+     * the wrong field instead of failing. */
+    IrSymRef *init_refs;
+    int     init_ref_count;
     /* Floating point initializer */
     double  init_float;
     int     is_float;

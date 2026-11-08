@@ -453,6 +453,179 @@ static int irgen_try_addr_init(IrGlobal *gv, AstNode *iv) {
     return 1;
 }
 
+/* ---- address elements inside an aggregate initialiser ----------------
+ *
+ * `int (*tab[2])(int,int) = { add, sub };` is ordinary C: the object holds two
+ * addresses.  The bytes of an aggregate every backend gets from
+ * ark_agg_fill(), which works from the initialiser *text* and therefore cannot
+ * see that `add` is a symbol reference rather than a number.  So the front end
+ * walks the same initialiser against the same type here and records every
+ * address element as (byte offset, symbol, offset in symbol, is-function);
+ * each backend then puts a symbol reference at that offset while
+ * ark_agg_fill() keeps zeros there.
+ *
+ * The walk only accepts an initialiser that spells out every brace level.  A
+ * brace-elided one (`int a[2][2] = {1,2,3,4}` or `struct S a[2] = {...}` with
+ * flat elements) cannot say where an element lands without re-deriving the
+ * layout from the text, and re-deriving it twice is exactly how a wrong offset
+ * gets stored instead of an error.  Such an initialiser is left to
+ * ark_agg_fill(), which refuses an address element rather than writing zeroes.
+ */
+
+static void irgen_add_ref(IrGlobal *g, int off, const char *sym, long long add, int isf) {
+    IrSymRef *nr = (IrSymRef *)mem_pool_alloc((int)sizeof(IrSymRef) * (g->init_ref_count + 1));
+    int i;
+    for (i = 0; i < g->init_ref_count; i++) nr[i] = g->init_refs[i];
+    nr[g->init_ref_count].offset = off;
+    nr[g->init_ref_count].sym = (char *)sym;
+    nr[g->init_ref_count].add = add;
+    nr[g->init_ref_count].is_func = isf;
+    g->init_refs = nr;
+    g->init_ref_count++;
+}
+
+static int irgen_agg_addr_walk(Type *t, AstNode *init, int base, IrGlobal *g, int *found);
+
+/* One scalar element at `off`.  Returns 1 when the walk may continue. */
+static int irgen_agg_addr_scalar(AstNode *init, int off, IrGlobal *g, int *found) {
+    char *sym = 0;
+    long long add = 0;
+    Type *lt = 0;
+    int isf = 0;
+    if (init && init->kind == AST_INIT_LIST) return 0;   /* brace elision */
+    if (addr_value(init, &sym, &add, &lt, &isf)) {
+        Symbol *s = sym_find(sym);
+        if (s && s->kind == SYM_FUNC) isf = 1;
+        else if (lt && (lt->kind == TYPE_FUNC || lt->is_func_ptr)) isf = 1;
+        irgen_add_ref(g, off, sym, add, isf);
+        *found = 1;
+        return 1;
+    }
+    if (looks_like_address(init)) {
+        diag_tool(DIAG_SEV_ERROR, "arkcc",
+                  "an element of the initialiser of the global '%s' is an address "
+                  "that is not a constant expression (C11 6.6p9); a static object "
+                  "can only be initialised with the address of an object with "
+                  "static storage duration, plus or minus an integer constant",
+                  g->name, 0,0,0,0,0);
+        g_irgen_errors++;
+    }
+    return 1;
+}
+
+static int irgen_agg_addr_walk(Type *t, AstNode *init, int base, IrGlobal *g, int *found) {
+    int i, n;
+    if (!t || !init) return 1;
+    if (init->kind != AST_INIT_LIST) return 0;
+    n = init->u.init_list.item_count;
+    if (t->kind == TYPE_ARRAY && t->base) {
+        int stride = type_size(t->base);
+        if (stride <= 0) return 0;
+        for (i = 0; i < n; i++) {
+            AstNode *it = init->u.init_list.items[i];
+            if (!it) continue;
+            if (it->u.init_field.has_field || it->u.init_field.has_index) return 0;
+            if (it->u.init_field.value &&
+                it->u.init_field.value->kind == AST_INIT_LIST) {
+                /* A nested brace level: an array of arrays or of structs. */
+                if (!irgen_agg_addr_walk(t->base, it->u.init_field.value,
+                                         base + i * stride, g, found))
+                    return 0;
+            } else if (t->base->kind == TYPE_ARRAY ||
+                       t->base->kind == TYPE_STRUCT ||
+                       t->base->kind == TYPE_UNION) {
+                /* Brace elision into an aggregate element: where the value
+                 * lands depends on the flattened layout, which this walk does
+                 * not re-derive (guessing is how a wrong offset gets stored). */
+                return 0;
+            } else if (!irgen_agg_addr_scalar(it->u.init_field.value,
+                                              base + i * stride, g, found)) {
+                return 0;
+            }
+        }
+        return 1;
+    }
+    if (t->kind == TYPE_STRUCT) {
+        StructField *f = t->fields;
+        for (i = 0; i < n; i++) {
+            AstNode *it = init->u.init_list.items[i];
+            if (!it) continue;
+            if (it->u.init_field.has_field || it->u.init_field.has_index) return 0;
+            if (!f) return 0;
+            if (f->bit_width > 0) { f = f->next; continue; }
+            if (it->u.init_field.value &&
+                it->u.init_field.value->kind == AST_INIT_LIST) {
+                if (!irgen_agg_addr_walk(f->type, it->u.init_field.value,
+                                         base + f->offset, g, found))
+                    return 0;
+            } else if (f->type && (f->type->kind == TYPE_ARRAY ||
+                                   f->type->kind == TYPE_STRUCT ||
+                                   f->type->kind == TYPE_UNION)) {
+                /* Brace elision into an aggregate field: bail for the same
+                 * reason as in the array branch. */
+                return 0;
+            } else if (!irgen_agg_addr_scalar(it->u.init_field.value,
+                                              base + f->offset, g, found)) {
+                return 0;
+            }
+            f = f->next;
+        }
+        return 1;
+    }
+    if (t->kind == TYPE_UNION) return 0;   /* one live member; ark_agg_fill owns it */
+    return irgen_agg_addr_scalar(init, base, g, found);
+}
+
+/* Does this initialiser contain an address element anywhere?  Asked only when
+ * the walk bailed, to choose between two very different reports: "you gave a
+ * form that cannot be placed" versus the backend's generic "cannot turn the
+ * initialiser into data". */
+static int irgen_init_has_addr(AstNode *n) {
+    char *sym;
+    long long add;
+    Type *lt;
+    int isf, i;
+    if (!n) return 0;
+    if (n->kind == AST_INIT_LIST) {
+        for (i = 0; i < n->u.init_list.item_count; i++) {
+            AstNode *it = n->u.init_list.items[i];
+            if (!it) continue;
+            if (it->kind != AST_INIT_LIST && it->u.init_field.value &&
+                irgen_init_has_addr(it->u.init_field.value))
+                return 1;
+            if (it->kind == AST_INIT_LIST && irgen_init_has_addr(it))
+                return 1;
+        }
+        return 0;
+    }
+    if (addr_value(n, &sym, &add, &lt, &isf)) return 1;
+    return looks_like_address(n);
+}
+
+/* Record the address elements of an aggregate initialiser.  Silent when there
+ * are none (the common case).  When the initialiser has one but the walk
+ * cannot place it, say so here rather than letting the backend report "cannot
+ * turn the initialiser into data", which does not say what to fix. */
+static void irgen_try_agg_addr_init(IrGlobal *g, AstNode *init) {
+    int found = 0;
+    if (!g || !g->type || !init) return;
+    g->init_refs = 0;
+    g->init_ref_count = 0;
+    if (!irgen_agg_addr_walk(g->type, init, 0, g, &found)) {
+        if (found || irgen_init_has_addr(init)) {
+            diag_tool(DIAG_SEV_ERROR, "arkcc",
+                      "the initialiser of the global '%s' contains an address "
+                      "element, but its braces are not spelled out level by level "
+                      "(or it uses a designator), so the offset of that element "
+                      "cannot be placed; write the braces out",
+                      g->name, 0,0,0,0,0);
+            g_irgen_errors++;
+        }
+        g->init_refs = 0;
+        g->init_ref_count = 0;
+    }
+}
+
 /* Append an AST expression to sb as C source; only constant expressions and simple operators are supported. */
 static void serialize_const_expr(StrBuf *b, AstNode *n) {
     if (!n) { sb_puts(b, "0"); return; }
@@ -912,12 +1085,14 @@ IrProgram *irgen_program(AstNode *prog) {
                         serialize_init(&sb, iv);
                         gv->has_init = 1;
                         gv->init_aggregate = sb.data;
+                        irgen_try_agg_addr_init(gv, iv);
                     } else if (iv->kind == AST_COMPOUND_LITERAL) {
                         /* Compound literal initialising a global: expand its init list. */
                         StrBuf sb; sb_init(&sb);
                         serialize_init(&sb, iv->u.compound_lit.init);
                         gv->has_init = 1;
                         gv->init_aggregate = sb.data;
+                        irgen_try_agg_addr_init(gv, iv->u.compound_lit.init);
                     } else {
                         /* Non-literal initialiser: try constant evaluation first
                          * (sizeof, 1+2, arithmetic on literals, ...).
@@ -993,11 +1168,13 @@ IrProgram *irgen_program(AstNode *prog) {
                             serialize_init(&sb, iv);
                             eg->has_init = 1;
                             eg->init_aggregate = sb.data;
+                            irgen_try_agg_addr_init(eg, iv);
                         } else if (iv->kind == AST_COMPOUND_LITERAL) {
                             StrBuf sb; sb_init(&sb);
                             serialize_init(&sb, iv->u.compound_lit.init);
                             eg->has_init = 1;
                             eg->init_aggregate = sb.data;
+                            irgen_try_agg_addr_init(eg, iv->u.compound_lit.init);
                         } else {
                             long long cv = 0;
                             eg->has_init = 1;
@@ -1081,11 +1258,13 @@ IrProgram *irgen_program(AstNode *prog) {
                                 serialize_init(&sb, iv);
                                 gc->has_init = 1;
                                 gc->init_aggregate = sb.data;
+                                irgen_try_agg_addr_init(gc, iv);
                             } else if (iv->kind == AST_COMPOUND_LITERAL) {
                                 StrBuf sb; sb_init(&sb);
                                 serialize_init(&sb, iv->u.compound_lit.init);
                                 gc->has_init = 1;
                                 gc->init_aggregate = sb.data;
+                                irgen_try_agg_addr_init(gc, iv->u.compound_lit.init);
                             } else {
                                 long long cv = 0;
                                 gc->has_init = 1;
@@ -1149,11 +1328,13 @@ IrProgram *irgen_program(AstNode *prog) {
                                     serialize_init(&sb, iv);
                                     eg->has_init = 1;
                                     eg->init_aggregate = sb.data;
+                                    irgen_try_agg_addr_init(eg, iv);
                                 } else if (iv->kind == AST_COMPOUND_LITERAL) {
                                     StrBuf sb; sb_init(&sb);
                                     serialize_init(&sb, iv->u.compound_lit.init);
                                     eg->has_init = 1;
                                     eg->init_aggregate = sb.data;
+                                    irgen_try_agg_addr_init(eg, iv->u.compound_lit.init);
                                 } else {
                                     long long cv = 0;
                                     eg->has_init = 1;
@@ -1761,6 +1942,7 @@ static void irgen_stmt(IrGen *g, AstNode *node) {
                         serialize_init(&sb, iv);
                         gv->has_init = 1;
                         gv->init_aggregate = sb.data;
+                        irgen_try_agg_addr_init(gv, iv);
                     } else {
                         long long cv = 0;
                         gv->has_init = 1;

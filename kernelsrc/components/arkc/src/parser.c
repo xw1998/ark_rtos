@@ -1401,31 +1401,70 @@ static Type *parse_declarator(Parser *p, Type *base, char **out_name) {
             p->name_col  = lexer_peek(p->lex).col;
             lexer_advance(p->lex);
         }
-        lexer_expect(p->lex, TOK_RPAREN);
-        /* Parameter list.  It used to be skipped as balanced tokens, which threw
-         * the prototypes away: every function-pointer call then had unknown
-         * parameter widths, so a 16-byte _Complex (or a >8-byte struct)
-         * argument could not be materialised and was refused instead.  The type
-         * itself stays "pointer whose base is the return type" -- that is what
-         * `*fp` and the call lowering expect -- so the parameter types are kept
-         * on the pointer type, where irgen looks for them. */
+        /* Pointer-to-function type.  Everything below -- the optional array
+         * suffix inside the parentheses and the parameter list outside them --
+         * is a suffix on *this* node, so keep a separate handle: for
+         * `int (*arr[2])(int,int)` the final type is array(pointer(func)) and
+         * the prototypes belong to the inner pointer, not to the array. */
         t = type_pointer(t);
         t->is_func_ptr = 1;
-        if (lexer_peek(p->lex).kind == TOK_LPAREN) {
-            AstNode **fparams = 0;
-            int fpc = 0, fva = 0, fi;
-            lexer_advance(p->lex);
-            parse_param_list(p, &fparams, &fpc, &fva, p->name_line);
+        {
+            Type *fp = t;
+            /* Array suffix inside the parentheses: `int (*arr[2])(int,int)` is
+             * "array of 2 pointers to function returning int".  Only integer
+             * constant dimensions are accepted here -- an alloca'd array of
+             * function pointers would need run-time element strides for every
+             * later index, which is not worth guessing at. */
+            if (lexer_peek(p->lex).kind == TOK_LBRACKET) {
+                int fdims[ARK_MAX_ARRAY_DIMS];
+                int fdn = 0, fdi;
+                while (lexer_peek(p->lex).kind == TOK_LBRACKET) {
+                    int v = 0;
+                    lexer_advance(p->lex);  /* '[' */
+                    if (lexer_peek(p->lex).kind == TOK_RBRACKET) {
+                        v = 0;  /* deduced from an initialiser */
+                    } else {
+                        AstNode *dim_expr = parse_cond_expr(p);
+                        long long folded = 0;
+                        if (dim_expr && eval_const_expr(dim_expr, &folded) && folded > 0) {
+                            v = (int)folded;
+                        } else {
+                            perror_at(p, "the dimension of an array of function pointers "
+                                         "must be an integer constant expression");
+                            v = 1;
+                        }
+                    }
+                    lexer_expect(p->lex, TOK_RBRACKET);
+                    if (fdn < ARK_MAX_ARRAY_DIMS) fdims[fdn++] = v;
+                    else perror_at(p, "too many array dimensions");
+                }
+                for (fdi = fdn - 1; fdi >= 0; fdi--)
+                    t = type_array(t, fdims[fdi]);
+            }
             lexer_expect(p->lex, TOK_RPAREN);
-            t->is_variadic = fva;
-            if (fpc > 0 && fparams) {
-                Type **ftypes = (Type **)mem_pool_alloc(fpc * (int)sizeof(Type *));
-                for (fi = 0; fi < fpc; fi++)
-                    ftypes[fi] = !fparams[fi] ? 0
-                                 : (fparams[fi]->type ? fparams[fi]->type
-                                                       : fparams[fi]->u.var.var_type);
-                t->params = ftypes;
-                t->param_count = fpc;
+            /* Parameter list.  It used to be skipped as balanced tokens, which threw
+             * the prototypes away: every function-pointer call then had unknown
+             * parameter widths, so a 16-byte _Complex (or a >8-byte struct)
+             * argument could not be materialised and was refused instead.  The type
+             * itself stays "pointer whose base is the return type" -- that is what
+             * `*fp` and the call lowering expect -- so the parameter types are kept
+             * on the pointer type, where irgen looks for them. */
+            if (lexer_peek(p->lex).kind == TOK_LPAREN) {
+                AstNode **fparams = 0;
+                int fpc = 0, fva = 0, fi;
+                lexer_advance(p->lex);
+                parse_param_list(p, &fparams, &fpc, &fva, p->name_line);
+                lexer_expect(p->lex, TOK_RPAREN);
+                fp->is_variadic = fva;
+                if (fpc > 0 && fparams) {
+                    Type **ftypes = (Type **)mem_pool_alloc(fpc * (int)sizeof(Type *));
+                    for (fi = 0; fi < fpc; fi++)
+                        ftypes[fi] = !fparams[fi] ? 0
+                                     : (fparams[fi]->type ? fparams[fi]->type
+                                                           : fparams[fi]->u.var.var_type);
+                    fp->params = ftypes;
+                    fp->param_count = fpc;
+                }
             }
         }
         /* Treat as function pointer. The pointee is a function, not a data

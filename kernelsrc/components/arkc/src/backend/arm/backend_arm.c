@@ -1303,6 +1303,20 @@ static unsigned gvar_find(const char *name) {
     return 0;
 }
 
+/* Ask the aggregate filler to keep the four bytes at `off` for us.  irgen
+ * walked the same initialiser against the same type and recorded that offset;
+ * an offset it did not record means the two walks disagree, and the filler
+ * then fails rather than letting an address land in the wrong field. */
+static int arm_agg_addr_hook(void *ud, int off, Type *t) {
+    IrGlobal *g = (IrGlobal *)ud;
+    int i;
+    (void)t;
+    if (!g) return 0;
+    for (i = 0; i < g->init_ref_count; i++)
+        if (g->init_refs[i].offset == off) return 1;
+    return 0;
+}
+
 /* #6 FIX: Find global variable size by name */
 static int gvar_find_size(const char *name) {
     int i;
@@ -4989,7 +5003,8 @@ static char *codegen_arm(IrProgram *prog) {
                 if (!bytes) bad = 1;
                 else {
                     for (k = 0; k < sz; k++) bytes[k] = 0;
-                    if (ark_agg_fill(g->type, g->init_aggregate, bytes, sz) != 0)
+                    if (ark_agg_fill_ex(g->type, g->init_aggregate, bytes, sz,
+                                        arm_agg_addr_hook, (void *)g) != 0)
                         bad = 1;
                 }
                 if (bad) {
@@ -5026,6 +5041,52 @@ static char *codegen_arm(IrProgram *prog) {
                         asmbuf_int(&buf, k);
                         asmbuf_puts(&buf, "]\n");
                         k += 1;
+                    }
+                }
+                /* Address elements: the byte loop above wrote zeros there, so
+                 * store the symbol reference over them.  A function address is
+                 * a code label (`LDR r0,=name`, a relocation in object mode);
+                 * this unit's object address is an absolute number; another
+                 * unit's object cannot be named here (same rule as a scalar
+                 * address initialiser). */
+                {
+                    int ri;
+                    for (ri = 0; ri < g->init_ref_count; ri++) {
+                        IrSymRef *r = &g->init_refs[ri];
+                        if (r->is_func) {
+                            if (r->add != 0) {
+                                diag_tool(DIAG_SEV_ERROR, "arkcc",
+                                          "the initialiser of the global '%s' takes "
+                                          "the address of the function '%s' plus a byte "
+                                          "offset; a function type has no size, so that "
+                                          "is not a constant expression (C11 6.5.6p2)",
+                                          g->name, r->sym, 0,0,0,0);
+                                continue;
+                            }
+                            asmbuf_puts(&buf, "    LDR r0, =");
+                            asmbuf_puts(&buf, r->sym);
+                            asmbuf_putc(&buf, '\n');
+                        } else {
+                            unsigned oaddr = gvar_find(r->sym);
+                            unsigned taddr;
+                            if (oaddr == 0) {
+                                diag_tool(DIAG_SEV_ERROR, "arkcc",
+                                          "the initialiser of the global '%s' takes the "
+                                          "address of '%s', which this translation unit "
+                                          "does not define; the arm backend gives every "
+                                          "unit's data one fixed base address, so another "
+                                          "unit's object cannot be named here",
+                                          g->name, r->sym, 0,0,0,0);
+                                continue;
+                            }
+                            taddr = oaddr + (unsigned)r->add;
+                            emit_mov_addr32(&buf, 0, taddr, addr_in_own_data(taddr));
+                        }
+                        {
+                            unsigned a2 = addr + (unsigned)r->offset;
+                            emit_mov_addr32(&buf, 1, a2, addr_in_own_data(a2));
+                        }
+                        asmbuf_puts(&buf, "    STR r0, [r1]\n");
                     }
                 }
             } else if (g->init_str && g->type && g->type->kind == TYPE_PTR) {
