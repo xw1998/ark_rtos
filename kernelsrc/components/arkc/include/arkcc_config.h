@@ -494,13 +494,15 @@
 #   define ARK_MAX_ARRAY_DIMS    16
 # endif
 #endif
-/* 一个文件里按值返回大结构体的函数个数上限（这些函数走 AAPCS 的隐藏指针）。
- * 宿主 1024 / 板端 256。 */
+/* 一个函数里“按值返回大结构体（struct/union，size > 8）的调用站点”个数上限。
+ * 每个站点在后端要给调用者帧里开一块结果缓冲，所以这是**调用点**计数，
+ * 不是函数个数、也不是嵌套深度；超了报错而不是少开一块缓冲。
+ * 宿主 256 / 板端 64。 */
 #ifndef ARK_MAX_SRET_FUNCS
 # if ARKCC_PROFILE == ARKCC_PROFILE_STM32_MIN
-#   define ARK_MAX_SRET_FUNCS    256
+#   define ARK_MAX_SRET_FUNCS    64
 # else
-#   define ARK_MAX_SRET_FUNCS    1024
+#   define ARK_MAX_SRET_FUNCS    256
 # endif
 #endif
 /* --scatter 里能跟踪的命名段个数（#pragma arm section / __attribute__((section)) 的落点）。 */

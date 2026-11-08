@@ -243,3 +243,34 @@ RV32I 的 `_Complex float` 返回丢值修复、`(*fp)(params)` 保留参数表�
 可复现判据：`git stash push -- kernelsrc/components/arkc` → 重建得 `text 412972`；
 `git stash pop` → 重建得 `text 428532`。两次构建除 arkc 源码外的一切（CFLAGS、链接脚本、
 其余目标文件）完全相同。
+
+**2026-11-08 追加（上游 `060b008`：RV32I 的大结构体返回值按 psABI 实现 sret、ARM 的 sret 判定
+改由 IR 位承载、`ARK_MAX_SRET_FUNCS` 语义改为"每个函数的大结构体返回调用站点上限"）**：
+
+板端（STM32H743，`USE_ARKC=1`，同一套 CFLAGS / 链接脚本）：
+
+| 项 | 旧 | 新 | 差 |
+|---|---|---|---|
+| `text` | 428 532 | 428 740 | **+208** |
+| `data` | 2 260 | 2 260 | 0 |
+| `bss` | 463 528 | 463 528 | 0 |
+| FLASH 占用 | 82.17% | 82.21% | +0.04 pp |
+
+逐目标文件（`arm-none-eabi-size` 的 `text` 列）：
+
+| 目标文件 | 旧 | 新 | 差 |
+|---|---|---|---|
+| `irgen.o` | 27 797 | 28 013 | +216 |
+| `backend_arm.o` | 90 110 | 90 110 | 0 |
+
+**为什么只有 irgen 变**：RV32I 后端整体不在 STM32 profile 里，psABI 的 sret 实现一行都没进
+固件；ARM 侧是"删掉按名字查表的 `sret_lookup`/`sret_get_size` + 删掉每个翻译单元建表的那段"
+换"读 `IR_CALL` 的 bit36/载荷字段 + 每块缓冲按 8 字节对齐 + 超限报错"，两边体量正好抵平
+（编译产物逐字节不同，但 `.text` 大小相同）。`bss` 不变是因为 `sret_call_buf_off` 是栈上数组，
+且板端档位本来就是 64 项。
+
+判定：FLASH 82.21%、RAM/CCMRAM/NOINIT 未变，仍在预算内，**接受**。
+
+可复现判据：`git stash push -- kernelsrc/components/arkc` → 重建得 `text 428532`；
+`git stash pop` → 重建得 `text 428740`。两次构建除 arkc 源码外的一切（CFLAGS、链接脚本、
+其余目标文件）完全相同。

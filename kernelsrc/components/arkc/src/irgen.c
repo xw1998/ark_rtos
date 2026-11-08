@@ -3951,6 +3951,37 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                     if (node->type && node->type->kind == TYPE_COMPLEX &&
                         g_irgen_complex_words > 1)
                         call_val |= (type_size(node->type) > 8 ? 2LL : 1LL) << 34;
+                    /* bits 36..52: the call returns a struct/union wider than
+                     * two words, so the payload comes back through a buffer the
+                     * *caller* owns (AAPCS sret on ARM, the hidden first
+                     * argument of the RISC-V psABI).  bit 36 marks the call,
+                     * bits 37..52 carry the payload size in bytes.  Stamping it
+                     * here -- from the call expression's own type -- is what
+                     * lets a callee that is only *declared*, or one reached
+                     * through a function pointer, be handled like a callee
+                     * defined in this file; the name tables the arm backend used
+                     * to consult could not see either.  Backends that return
+                     * such a composite by address (arm, riscv32) read both
+                     * fields; the slot-image backends never look above bit 34,
+                     * so their behaviour is unchanged. */
+                    if (node->type &&
+                        (node->type->kind == TYPE_STRUCT || node->type->kind == TYPE_UNION)) {
+                        int rsz = type_size(node->type);
+                        if (rsz > 8) {
+                            char b1[12];
+                            if (rsz > 0xFFFF) {
+                                diag_tool(DIAG_SEV_ERROR, "arkcc",
+                                          "a call returns a %s-byte composite by "
+                                          "value; a call records at most 65535 "
+                                          "bytes of result buffer",
+                                          diag_num(b1, rsz), 0, 0, 0, 0, 0);
+                                g_irgen_errors++;
+                            } else {
+                                call_val |= 0x1000000000LL;          /* bit 36 */
+                                call_val |= ((long long)rsz) << 37;  /* size */
+                            }
+                        }
+                    }
                     ir_emit(g->fn, IR_CALL, call_val, node->u.call.name, argmask);
                     /* ir_emit() has no aux2 parameter on purpose: it is used in
                      * hundreds of places and all but this one leave it 0. */

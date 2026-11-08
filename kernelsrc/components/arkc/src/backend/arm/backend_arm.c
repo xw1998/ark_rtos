@@ -239,24 +239,6 @@ static void arm_cplx_cmp(AsmBuffer *b, int want_ne) {
     arm_push_reg(b, 0);
 }
 
-/* sret support: check if a function name is in the sret set */
-static int sret_lookup(char **names, int *sizes, int count, const char *name) {
-    int i;
-    for (i = 0; i < count; i++) {
-        if (ark_streq(names[i], name)) return 1;
-    }
-    return 0;
-}
-
-/* sret support: get struct return size for a function name */
-static int sret_get_size(char **names, int *sizes, int count, const char *name) {
-    int i;
-    for (i = 0; i < count; i++) {
-        if (ark_streq(names[i], name)) return sizes[i];
-    }
-    return 0;
-}
-
 #if ARKCC_FEATURE_FPU_HW
 /* Hardware VFP floating-point path helpers.
  * Convention: floating-point values are stored on the stack as integer bit patterns (single=1 slot, double=2 slots low/high).
@@ -2266,45 +2248,18 @@ static char *codegen_arm(IrProgram *prog) {
         asmbuf_puts(&buf, ".text\n\n");
     }
 
-    /* Build sret function name/size set: struct/union returns > 8 bytes
-     * use AAPCS sret convention (hidden pointer in r0). */
-    char *sret_names[ARK_MAX_SRET_FUNCS];
-    int   sret_sizes[ARK_MAX_SRET_FUNCS];
-    int   sret_count = 0;
-    int   sret_dropped = 0;
-    {
-        int sfi;
-        for (sfi = 0; sfi < prog->func_count; sfi++) {
-            IrFunc *sf = prog->funcs[sfi];
-            Type *srt = sf->ret_type;
-            /* Only structs and unions use the hidden pointer here.  A
-             * _Complex object never does: 8 bytes go in r0:r1 and 16 bytes go
-             * in r0-r3, which is what the soft-float AAPCS says for a
-             * composite of two doubles and what GCC emits.  It also means a
-             * complex result needs no caller-owned buffer, so a call through a
-             * declaration or through a function pointer works. */
-            if (srt && (srt->kind == TYPE_STRUCT || srt->kind == TYPE_UNION)) {
-                int sz = type_size(srt);
-                if (sz > 8) {
-                    /* A function missing from this set is called with the
-                     * AAPCS default (no hidden pointer) while its body expects
-                     * one: r0 then carries the first argument instead. */
-                    if (sret_count >= ARK_MAX_SRET_FUNCS) { sret_dropped++; continue; }
-                    sret_names[sret_count] = sf->name;
-                    sret_sizes[sret_count] = (sz + 3) & ~3; /* 4-byte aligned */
-                    sret_count++;
-                }
-            }
-        }
-    }
-    if (sret_dropped) {
-        char b1[12], b2[12];
-        diag_tool(DIAG_SEV_ERROR, "arkcc",
-                  "%s functions return a structure larger than 8 bytes but the "
-                  "sret table holds %s; raise ARK_MAX_SRET_FUNCS and rebuild arkcc",
-                  diag_num(b1, sret_dropped), diag_num(b2, ARK_MAX_SRET_FUNCS),
-                  0,0,0,0);
-    }
+    /* sret (struct/union result > 8 bytes) is no longer discovered by
+     * scanning the program for definitions.  irgen stamps the call site
+     * itself -- bit 36 of IR_CALL's val says the callee returns a
+     * struct/union larger than 8 bytes, bits 37..52 carry the payload size --
+     * from the type of the call *expression*.  That is the only source that
+     * also covers a call to a function that is declared here but defined in
+     * another translation unit, and a call through a function pointer, both of
+     * which used to be emitted with the AAPCS default (no hidden pointer) and
+     * silently wrote the result over r0.  A _Complex object never uses the
+     * hidden pointer: 8 bytes go in r0:r1 and 16 bytes in r0-r3, which is what
+     * the soft-float AAPCS says for a composite of two doubles and what GCC
+     * emits. */
 
     for (fi = 0; fi < prog->func_count; fi++) {
         IrFunc *f = prog->funcs[fi];
@@ -2332,7 +2287,7 @@ static char *codegen_arm(IrProgram *prog) {
          * function's frame so the sret space doesn't occupy SP+0 (where
          * the callee expects to read stack args). Each sret call site gets
          * its own buffer at a known r6-relative offset. */
-        int sret_call_buf_off[64];
+        int sret_call_buf_off[ARK_MAX_SRET_FUNCS];
         int sret_call_n = 0;
 
         /* Detect sret: struct/union return > 8 bytes */
@@ -2432,18 +2387,45 @@ static char *codegen_arm(IrProgram *prog) {
 #endif
         /* Pre-scan IR for sret calls: reserve a buffer in the frame for each.
          * The buffer is addressed via r6 (frame pointer) at the call site,
-         * so SP stays at the stack args (callee reads them at SP+0). */
+         * so SP stays at the stack args (callee reads them at SP+0).
+         *
+         * One buffer per *call site*, not one per function and not one shared
+         * scratch area: `struct S a = f(), b = g();` and `h(g(), k())` both
+         * need two live results at once.  The size comes from the IR (bits
+         * 37..52 of IR_CALL's val), i.e. from the static type of the call
+         * expression; a size that does not fit is a hard error rather than a
+         * silent truncation.  Each buffer is 8-byte aligned because the
+         * callee may store a double/long long member with STRD, which faults
+         * on an unaligned address. */
         {
             int sci;
-            for (sci = 0; sci < f->code_count && sret_call_n < 64; sci++) {
+            for (sci = 0; sci < f->code_count; sci++) {
                 IrInst *sci_I = &f->code[sci];
-                if (sci_I->op == IR_CALL && sci_I->name && sci_I->name[0] != '?') {
-                    if (sret_lookup(sret_names, sret_sizes, sret_count, sci_I->name)) {
-                        int sz = sret_get_size(sret_names, sret_sizes, sret_count, sci_I->name);
-                        local_size += sz;
-                        sret_call_buf_off[sret_call_n] = local_size - sz;
-                        sret_call_n++;
+                if (sci_I->op == IR_CALL && ((sci_I->val >> 36) & 1)) {
+                    int sz = (int)((sci_I->val >> 37) & 0xFFFF);
+                    if (sz <= 0 || sz > 0xFFFF) {
+                        char b1[12];
+                        diag_tool(DIAG_SEV_ERROR, "arkcc",
+                                  "call site in '%s' returns a structure of %s "
+                                  "bytes; the arm backend needs 1..65535",
+                                  f->name, diag_num(b1, sz), 0,0,0,0);
+                        sz = 0;
                     }
+                    sz = (sz + 7) & ~7;
+                    if (sret_call_n >= ARK_MAX_SRET_FUNCS) {
+                        char b1[12], b2[12];
+                        diag_tool(DIAG_SEV_ERROR, "arkcc",
+                                  "function '%s' has %s call sites returning a "
+                                  "structure larger than 8 bytes; at most %s are "
+                                  "supported; raise ARK_MAX_SRET_FUNCS and "
+                                  "rebuild arkcc",
+                                  f->name, diag_num(b1, sret_call_n + 1),
+                                  diag_num(b2, ARK_MAX_SRET_FUNCS), 0,0,0);
+                        break;
+                    }
+                    local_size += sz;
+                    sret_call_buf_off[sret_call_n] = local_size - sz;
+                    sret_call_n++;
                 }
             }
         }
@@ -4051,7 +4033,13 @@ static char *codegen_arm(IrProgram *prog) {
                      * first, then pop real args into r0-r3, then BLX ip. */
                     int is_indirect = (I->name && I->name[0] == '?');
                     int real_args = is_indirect ? n - 1 : n;
-                    int is_sret_call = (!is_indirect && sret_lookup(sret_names, sret_sizes, sret_count, I->name));
+                    /* bit 36 of val: irgen saw a struct/union call result
+                     * larger than 8 bytes, so the callee takes a hidden
+                     * result pointer in r0 (AAPCS sret).  Taken from the IR
+                     * rather than from a name table so that a declaration-only
+                     * callee, a crossing-TU callee and a call through a
+                     * function pointer are all covered. */
+                    int is_sret_call = (int)((I->val >> 36) & 1);
                     /* bits 34..35 of val (stamped by irgen from the call
                      * expression's type): 1 = _Complex float result in r0:r1,
                      * 2 = _Complex double result through the sret buffer.
