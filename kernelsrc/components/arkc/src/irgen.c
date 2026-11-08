@@ -1907,10 +1907,28 @@ typedef struct {
     AstNode **items;
     int n, i;
     IrGen *g;
+    /* Shared by every nested walk of the same initialiser: an over-long level
+     * drops the surplus, and the diagnostic must fire once, not once per row. */
+    int *excess;
 } LocalAggWalk;
 
 static void lw_object(LocalAggWalk *w, int off, Type *t);
 static void lw_fill(LocalAggWalk *w, int off, Type *t, int braced);
+
+/* C99 6.7.9p2: giving more values than the object has elements is a
+ * constraint violation and must be diagnosed.  GCC/Clang warn and ignore the
+ * surplus; arkcc does the same, but it used to drop the surplus *silently* in
+ * block scope, which is the kind of quiet answer this project refuses.  The
+ * bytes written are unchanged -- only the missing diagnostic is added. */
+static void lw_warn_excess(LocalAggWalk *w, int cap, int is_array) {
+    char nb[12];
+    if (!w->excess || *w->excess) return;
+    *w->excess = 1;
+    diag_tool(DIAG_SEV_WARNING, "arkcc",
+              "excess elements in the initialiser are ignored: the %s "
+              "holds only %d", is_array ? "array" : "object",
+              diag_num(nb, cap), 0, 0, 0, 0);
+}
 
 static AstNode *lw_value(AstNode *it) {
     if (it && it->kind == AST_INIT_FIELD) return it->u.init_field.value;
@@ -1942,6 +1960,7 @@ static void lw_object(LocalAggWalk *w, int off, Type *t) {
         sub.n = val->u.init_list.item_count;
         sub.i = 0;
         sub.g = w->g;
+        sub.excess = w->excess;
         lw_fill(&sub, off, t, 1);
         return;
     }
@@ -2002,7 +2021,12 @@ static void lw_fill(LocalAggWalk *w, int off, Type *t, int braced) {
                 return;                            /* a designator ends the run */
             }
             if (cur < 0) cur = 0;
-            if (cur >= len) { if (!braced) return; w->i++; continue; }
+            if (cur >= len) {
+                if (!braced) return;
+                lw_warn_excess(w, len, 1);
+                w->i++;
+                continue;
+            }
             lw_object(w, off + cur * es, t->base);
             cur++;
         }
@@ -2028,7 +2052,11 @@ static void lw_fill(LocalAggWalk *w, int off, Type *t, int braced) {
                 return;
             }
             if (!f) {                       /* every member is filled */
+                StructField *n2;
+                int nf = 0;
                 if (!braced) return;        /* the run ends: the caller goes on */
+                for (n2 = t->fields; n2; n2 = n2->next) nf++;
+                lw_warn_excess(w, nf, 0);
                 w->i++;                     /* braced and over-long: drop the surplus */
                 continue;
             }
@@ -2042,11 +2070,14 @@ static void lw_fill(LocalAggWalk *w, int off, Type *t, int braced) {
 
 static void irgen_local_aggregate_init(IrGen *g, int off, Type *t, AstNode *init_list) {
     LocalAggWalk w;
+    int excess;
     if (!init_list || init_list->kind != AST_INIT_LIST || !t) return;
     w.items = init_list->u.init_list.items;
     w.n = init_list->u.init_list.item_count;
     w.i = 0;
     w.g = g;
+    excess = 0;
+    w.excess = &excess;
     lw_fill(&w, off, t, 1);
 }
 

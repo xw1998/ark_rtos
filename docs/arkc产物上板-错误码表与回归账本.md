@@ -614,3 +614,47 @@ ARM 目标集（与固件同一套 `STM32_CFLAGS`，逐文件 `-c` 后 `size -t`
 | `run_capacity_tests.py` / `run_diag_tests.py` / `run_diag_boundary.py` / `run_regalloc_tests.py` | 4 / 0；0 failure；all boundary held；all claims hold |
 | `tests/run_reloc_text_tests.py ./arkcc.exe` | all checks passed |
 | `tests/run_complex_gate.py`（新） | 9 / 9 |
+
+---
+
+## 2026-11-09：块作用域的多余初值从「静默丢弃」改成 GCC 风格警告
+
+**背景（这是清单里的一条已知项，不是新功能）**：`int b[2] = {1, 2, 3};` 写在函数里时，
+C99 6.7.9p2 说这是约束违反、必须给诊断。arkcc 以前在**块作用域**把多余元素直接丢掉、
+一句提示都没有——结论本身不假，但用户以为自己写了三个元素。这正是「宁可报错也不给错
+答案」不能容忍的形态（静默吞掉用户写的东西）。文件作用域一直有诊断（`cannot turn the
+initialiser of the global 'a' into data`），文案不贴切但至少不静默，**本轮不动**。
+
+**做法**（`src/irgen.c`，只加诊断，写入的字节不变）：
+
+- `LocalAggWalk` 加 `int *excess` 共享标志；`lw_object` 为子 aggregate 新建的 `sub`
+  把指针复制下去 ⇒ `int b[2][2] = {1,2,3,4,5}` 这种「里层越界」也只警告一次，不是每行一次。
+- 数组分支在 `cur >= len`、结构分支在「所有成员都填满」处调用
+  `lw_warn_excess(w, cap, is_array)`。结构分支要先数一遍成员链表拿到成员总数
+  （那里的 `f` 只是「还有没有成员可填」的游标）。
+- 花括号省略（`int b[2][2] = {1,2,3,4}`）走 `!braced` 早退分支，**不误报**。
+- `diag_tool` 签名是 `(sev, object, msg, a0..a5)`——六个字符串；数字必须先用
+  `diag_num(buf, v)` 渲染，直接传 `int` 会段错误（本轮踩过，`rc=139`）。
+
+**实测（板端 `make clean` 全量重建，默认档，唯一差别是源码同步）**：
+
+| 口径 | 改前 | 改后 | 差 |
+|---|---|---|---|
+| `text` | 438 812 | 439 060 | +248 B |
+| FLASH 占用 | 84.13% | 84.18% | +0.05 pp |
+| `data` / `bss` | 2 260 / 463 532 | 2 260 / 463 532 | 不变 |
+
+宿主 x86-64（四后端全编）：`text 556 740 → 557 100`（+360 B）。
+差额全部是新增诊断文本本身，**不改变任何初始化写入**（`-S` 产物除诊断外的路径不变）。
+
+行为实测：
+- `int b[2]={1,2,3};` → `arkcc: Warning: excess elements in the initialiser are ignored: the array holds only 2`，`rc=0`（与 GCC 一致：警告而非错误）。
+- `struct S s={1,2,3};`（两个成员）→ `... the object holds only 2`。
+- `int b[2][2]={1,2,3,4};` → **无输出**（花括号省略，合法）。
+
+**回归**：闸门开档全量重跑与上一轮逐项相同，无新增失败——
+`agg 83/0`、`func_ptr_global 39/0`、`complex 76/0`、`arm_int64 12/0`、`c11 30/0`、
+`va_gate 59/0/2 targets + opt 5/5`、`run_rv_{image,alloca,sret,misc_ir,float,packed}`
+20/5/13/12/11/7、`rv_link 10/0`、`func_typedef 24/0`、`capacity 4/0`、`diag 0 failure`、
+`diag_boundary all held`、`regalloc all claims hold`、`reloc_text all passed`、
+`complex_gate 9/9`。
