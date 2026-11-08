@@ -308,3 +308,45 @@ RV32I 的 `_Complex float` 返回丢值修复、`(*fp)(params)` 保留参数表�
 可复现判据：`git stash push -- kernelsrc/components/arkc` → 重建得 `text 428740`；
 `git stash pop` → 重建得 `text 430188`。两次构建除 arkc 源码外的一切（CFLAGS、链接脚本、
 其余目标文件）完全相同。
+
+**2026-11-08 追加（上游 `30502d0`：支持全局地址常量初值，C11 6.6p9）**：
+
+板端（STM32H743，`USE_ARKC=1`，同一套 CFLAGS / 链接脚本）：
+
+| 项 | 旧 | 新 | 差 |
+|---|---|---|---|
+| `text` | 430 188 | 432 628 | **+2 440** |
+| `data` | 2 260 | 2 260 | 0 |
+| `bss` | 463 528 | 463 532 | **+4** |
+| FLASH 占用 | 82.49% | 82.95% | +0.46 pp |
+| RAM / CCMRAM / NOINIT | 98.22% / 17.33% / 97.66% | 同左 | 0 |
+
+逐目标文件（`arm-none-eabi-size` 的 `text`/`data`/`bss` 三列，122 个目标文件全表比对，
+只有 3 个变化，其余 119 个逐列相同）：
+
+| 目标文件 | text 旧 -> 新 | 差 | bss 旧 -> 新 |
+|---|---|---|---|
+| `irgen.o` | 28 013 -> 29 810 | +1 797 | 12 -> 16 |
+| `backend_arm.o` | 90 110 -> 90 742 | +632 | 9 428 -> 9 428 |
+| `ir.o` | 1 710 -> 1 718 | +8 | 4 -> 4 |
+| 其余 119 个 | — | 0 | — |
+| 合计（122 个 .o 的 text 列） | 492 081 -> 494 518 | +2 437 | — |
+
+输出 ELF 的段级差：ELF `text` +2 440 比 `.o` 合计 +2 437 多 3 字节，来自段对齐填充，不是
+另有代码变动。
+
+原因与逐文件落点：`irgen.o` 是主体——新增地址常量走查器（`addr_elem_size` / `addr_value` /
+`addr_lvalue` / `looks_like_address` / `irgen_try_addr_init`）+ `serialize_const_expr` 的
+`AST_ARRAY_ACCESS`/`AST_MEMBER`/`TOK_BAND` 三个分支 + 5 处调用点与 5 处 `g_ser_unknown` 收尾；
+`bss +4` 就是新增的 `static int g_ser_unknown`。`backend_arm.o` +632 是 `init_sym` 的生成分支
+（`LDR r0,=name` 转发 / `emit_mov_addr32(基址+偏移)`）与 3 处零标量守卫。`ir.o` +8 是
+`IrGlobal` 三字段的初始化语句。**RV32I 后端整个不在 STM32 profile 里**，因此它的 `.word sym`
+分支一行都没进固件——这也是"改的是新路径、没动既有代码生成"的正面证据（其余 119 个目标
+文件逐列相同）。
+
+判定：FLASH 82.95%、RAM/CCMRAM/NOINIT 未变，仍在 512 KB 预算内（余 89.05 KB），**接受**。
+
+可复现判据：`git stash push -- kernelsrc/components/arkc` → 重建得
+`text 430188 / data 2260 / bss 463528`；`git stash pop` → 重建得
+`text 432628 / data 2260 / bss 463532`。两次构建除 arkc 源码外的一切（CFLAGS、链接脚本、
+其余目标文件）完全相同。

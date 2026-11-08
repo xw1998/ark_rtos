@@ -189,6 +189,270 @@ static void sb_putstr_lit(StrBuf *b, const char *s) {
     sb_putc(b, '"');
 }
 
+static void serialize_const_expr(StrBuf *b, AstNode *n);
+
+/* Set when serialize_const_expr meets a node it cannot write as C source.
+ * The callers that would otherwise hand "0" to a backend as an initialiser
+ * check it and report an error: an initialiser that is not a constant
+ * expression must not be invented as zero. */
+static int g_ser_unknown = 0;
+
+/* ---- address constants (C11 6.6p9) --------------------------------------
+ *
+ * `int (*gp)(int,int) = add;`, `int *pg = &gv;` and `int *pe = &arr[2];` are
+ * initialisers whose value is an *address*, not a byte pattern.  A machine
+ * backend cannot bake one: the address of a function is only known after the
+ * linker has placed it.  So the IR carries (symbol, byte offset) and each
+ * backend emits a symbol reference instead of a number.
+ *
+ * The two walkers below decode an expression into that triple.  They accept
+ * exactly the forms the standard allows for a static initialiser and return 0
+ * for everything else, so the caller keeps its "not a constant" path.  Both
+ * used to be missing entirely: the old code dropped the '&' on the way to the
+ * C-source serialiser and wrote the operand as data, so `int *pe = &arr[2];`
+ * became a null pointer with no diagnostic at all.
+ *
+ * `isf` says whether the expression denotes a *function*: arithmetic on a
+ * function designator is a constraint violation (C11 6.5.6p2), and a function
+ * has no stride, so the walkers have to be able to tell `add` from a pointer
+ * variable holding add.
+ */
+
+/* Stride of pointer arithmetic on an address constant: an array strides by its
+ * element, anything else by its own size.  `t` is the type of the *object* the
+ * address points at, not the type of the address: `&gv` yields int, so
+ * `&gv + 1` moves by sizeof(int). */
+static long long addr_elem_size(Type *t) {
+    long long n;
+    if (!t) return 1;
+    if (t->kind == TYPE_FUNC) return 0;
+    if (t->kind == TYPE_ARRAY) t = t->base ? t->base : t;
+    n = type_size(t);
+    return n > 0 ? n : 1;
+}
+
+static int addr_value(AstNode *n, char **name, long long *off, Type **lty,
+                      int *isf);
+
+/* Address of an lvalue designator: `x`, `a[i]`, `s.k`, `(*p)`. */
+static int addr_lvalue(AstNode *n, char **name, long long *off, Type **lty,
+                       int *isf) {
+    if (!n) return 0;
+    switch (n->kind) {
+    case AST_VAR: {
+        Symbol *s = sym_find(n->u.name);
+        if (!s) return 0;
+        /* A function name is its own address; a local object has no static
+         * address at all, and is refused rather than guessed. */
+        if (s->kind != SYM_GLOBAL && s->kind != SYM_FUNC) return 0;
+        *name = n->u.name;
+        *off = 0;
+        *lty = s->type ? s->type : n->type;
+        *isf = (s->kind == SYM_FUNC);
+        return 1;
+    }
+    case AST_ARRAY_ACCESS: {
+        char *bn;
+        long long boff, idx;
+        Type *bt;
+        int bif, es;
+        if (!addr_lvalue(n->u.array_access.array, &bn, &boff, &bt, &bif)) return 0;
+        if (!eval_const_expr(n->u.array_access.index, &idx)) return 0;
+        if (!bt || bt->kind != TYPE_ARRAY || !bt->base) return 0;
+        es = type_size(bt->base);
+        if (es <= 0) return 0;
+        *name = bn;
+        *off = boff + idx * es;
+        *lty = bt->base;
+        *isf = 0;              /* an element is an object, never a function */
+        return 1;
+    }
+    case AST_MEMBER: {
+        char *bn;
+        long long boff;
+        Type *bt;
+        int bif;
+        /* `s.k` continues from the address of s; `p->k` needs p itself to be
+         * an address constant, otherwise the address depends on a load. */
+        if (n->u.member.is_arrow) {
+            if (!addr_value(n->u.member.obj, &bn, &boff, &bt, &bif)) return 0;
+        } else {
+            if (!addr_lvalue(n->u.member.obj, &bn, &boff, &bt, &bif)) return 0;
+        }
+        *name = bn;
+        *off = boff + n->u.member.offset;
+        *lty = n->type;
+        *isf = 0;
+        return 1;
+    }
+    case AST_UNARY:
+        if (n->u.unary.op == (int)TOK_MUL)
+            return addr_value(n->u.unary.operand, name, off, lty, isf);
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+/* Value of an expression that is an address constant. */
+static int addr_value(AstNode *n, char **name, long long *off, Type **lty,
+                      int *isf) {
+    if (!n) return 0;
+    switch (n->kind) {
+    case AST_UNARY:
+        if (n->u.unary.op == (int)TOK_BAND)
+            return addr_lvalue(n->u.unary.operand, name, off, lty, isf);
+        return 0;
+    case AST_CAST:
+        return addr_value(n->u.unary.operand, name, off, lty, isf);
+    case AST_VAR: {
+        Symbol *s = sym_find(n->u.name);
+        if (!s) return 0;
+        /* Function designator and array decay (C11 6.3.2.1p4, 6.3.2.1p3). */
+        if (s->kind == SYM_FUNC) {
+            *name = n->u.name;
+            *off = 0;
+            *lty = s->type ? s->type : n->type;
+            *isf = 1;
+            return 1;
+        }
+        if (s->kind == SYM_GLOBAL && s->type && s->type->kind == TYPE_ARRAY) {
+            *name = n->u.name;
+            *off = 0;
+            *lty = s->type;
+            *isf = 0;
+            return 1;
+        }
+        return 0;
+    }
+    case AST_BINARY: {
+        char *bn;
+        long long boff, k, scale;
+        Type *bt;
+        int bif;
+        int op = n->u.binary.op;
+        if (op != (int)TOK_PLUS && op != (int)TOK_MINUS) return 0;
+        if (addr_value(n->u.binary.left, &bn, &boff, &bt, &bif)) {
+            /* `add + 1` is not a constant expression: a function has no
+             * stride (C11 6.5.6p2 requires a pointer to complete object type),
+             * and the old stride rule happily multiplied by 4. */
+            if (bif) return 0;
+            if (!eval_const_expr(n->u.binary.right, &k)) return 0;
+            scale = addr_elem_size(bt);
+            if (scale <= 0) return 0;
+            *name = bn;
+            *off = boff + (op == (int)TOK_PLUS ? k * scale : -k * scale);
+            *lty = bt;
+            *isf = 0;
+            return 1;
+        }
+        if (op == (int)TOK_PLUS &&
+            addr_value(n->u.binary.right, &bn, &boff, &bt, &bif)) {
+            if (bif) return 0;
+            if (!eval_const_expr(n->u.binary.left, &k)) return 0;
+            scale = addr_elem_size(bt);
+            if (scale <= 0) return 0;
+            *name = bn;
+            *off = boff + k * scale;
+            *lty = bt;
+            *isf = 0;
+            return 1;
+        }
+        return 0;
+    }
+    default:
+        return 0;
+    }
+}
+
+/* Does this expression *look* like it is meant to be an address?  Used only to
+ * choose the diagnostic: an initialiser in this shape that the walker refuses
+ * is a non-constant address (`add + 1`, `&x` of a local object), and saying so
+ * is more useful than "this build cannot turn it into data". */
+static int looks_like_address(AstNode *n) {
+    if (!n) return 0;
+    switch (n->kind) {
+    case AST_UNARY:
+        return n->u.unary.op == (int)TOK_BAND;
+    case AST_CAST:
+        return looks_like_address(n->u.unary.operand);
+    case AST_BINARY:
+        if (n->u.binary.op != (int)TOK_PLUS && n->u.binary.op != (int)TOK_MINUS)
+            return 0;
+        if (looks_like_address(n->u.binary.left)) return 1;
+        if (n->u.binary.op == (int)TOK_PLUS)
+            return looks_like_address(n->u.binary.right);
+        return 0;
+    case AST_VAR: {
+        Symbol *s = sym_find(n->u.name);
+        if (!s) return 0;
+        if (s->kind == SYM_FUNC) return 1;
+        if (s->kind == SYM_GLOBAL && s->type && s->type->kind == TYPE_ARRAY)
+            return 1;
+        return 0;
+    }
+    default:
+        return 0;
+    }
+}
+
+/* Fill in the address-constant form of a global initialiser.  Returns 1 when
+ * `iv` is one (or when it was meant to be one and was refused); the caller then
+ * skips every value-shaped branch. */
+static int irgen_try_addr_init(IrGlobal *gv, AstNode *iv) {
+    char *name = 0;
+    long long off = 0;
+    Type *lt = 0;
+    int isf = 0;
+    StrBuf sb;
+    if (!gv || !iv) return 0;
+    /* Only a pointer can hold an address; an aggregate initialiser goes
+     * through ark_agg_fill (which refuses an address element rather than
+     * writing zero for it). */
+    if (!gv->type || gv->type->kind != TYPE_PTR) return 0;
+    if (!addr_value(iv, &name, &off, &lt, &isf)) {
+        /* Refuse out loud.  This used to fall through to the C-source
+         * serialiser, which happily wrote text like "add+1", and the backend
+         * then stored it as data -- a wrong pointer with a message about
+         * aggregates.  An initialiser that cannot be evaluated must not be
+         * invented. */
+        if (looks_like_address(iv)) {
+            diag_tool(DIAG_SEV_ERROR, "arkcc",
+                      "the initialiser of the global '%s' is an address that is "
+                      "not a constant expression (C11 6.6p9); a static object can "
+                      "only be initialised with the address of an object with "
+                      "static storage duration, plus or minus an integer constant",
+                      gv->name, 0,0,0,0,0);
+            g_irgen_errors++;
+            gv->init_aggregate = 0;
+            return 1;
+        }
+        return 0;
+    }
+    gv->has_init = 1;
+    gv->init_sym = name;
+    gv->init_sym_off = off;
+    /* A function type has two spellings in this compiler -- a real TYPE_FUNC
+     * node (from `typedef int binop(int,int)`) and a pointer type carrying
+     * is_func_ptr (from `int (*p)(int,int)`) -- so the walker's answer, the
+     * type it came back with and the symbol table all get a say.  A backend
+     * that cannot name another unit's data can still name its code, so this
+     * has to be right. */
+    {
+        Symbol *s = sym_find(name);
+        if (s && s->kind == SYM_FUNC) isf = 1;
+        else if (lt && (lt->kind == TYPE_FUNC || lt->is_func_ptr)) isf = 1;
+        gv->init_sym_is_func = isf;
+    }
+    /* Keep the source text too: the C backend re-emits declarations, and a
+     * NULL init_aggregate would drop the initialiser from its output. */
+    sb_init(&sb);
+    g_ser_unknown = 0;
+    serialize_const_expr(&sb, iv);
+    if (!g_ser_unknown) gv->init_aggregate = sb.data;
+    return 1;
+}
+
 /* Append an AST expression to sb as C source; only constant expressions and simple operators are supported. */
 static void serialize_const_expr(StrBuf *b, AstNode *n) {
     if (!n) { sb_puts(b, "0"); return; }
@@ -206,7 +470,21 @@ static void serialize_const_expr(StrBuf *b, AstNode *n) {
         case AST_UNARY:
             if (n->u.unary.op == (int)TOK_MINUS) { sb_putc(b, '-'); serialize_const_expr(b, n->u.unary.operand); }
             else if (n->u.unary.op == (int)TOK_BNOT) { sb_putc(b, '~'); serialize_const_expr(b, n->u.unary.operand); }
+            /* '&' must survive: dropping it turned `&arr[2]` into `arr[2]`,
+             * and an array access then serialised as 0. */
+            else if (n->u.unary.op == (int)TOK_BAND) { sb_putc(b, '&'); serialize_const_expr(b, n->u.unary.operand); }
             else serialize_const_expr(b, n->u.unary.operand);
+            break;
+        case AST_ARRAY_ACCESS:
+            serialize_const_expr(b, n->u.array_access.array);
+            sb_putc(b, '[');
+            serialize_const_expr(b, n->u.array_access.index);
+            sb_putc(b, ']');
+            break;
+        case AST_MEMBER:
+            serialize_const_expr(b, n->u.member.obj);
+            sb_puts(b, n->u.member.is_arrow ? "->" : ".");
+            sb_puts(b, n->u.member.member);
             break;
         case AST_BINARY: {
             const char *op = "+";
@@ -249,6 +527,9 @@ static void serialize_const_expr(StrBuf *b, AstNode *n) {
             } else sb_putd(b, 0);
             break;
         default:
+            /* Keep the text syntactically valid for the C backend, but say so:
+             * the callers report the error instead of writing zero as data. */
+            g_ser_unknown = 1;
             sb_putd(b, 0);
             break;
     }
@@ -613,7 +894,9 @@ IrProgram *irgen_program(AstNode *prog) {
                         /* 浮点常量表达式初值已在编译期算出 */
                     } else
 #endif
-                    if (iv->kind == AST_NUM) {
+                                        if (irgen_try_addr_init(gv, iv)) {
+                        /* 静态地址常量初值：符号 + 字节偏移 */
+                    } else if (iv->kind == AST_NUM) {
                         gv->has_init = 1;
                         gv->init_int = iv->u.num_val;
                         if (iv->type && (iv->type->kind == TYPE_FLOAT || iv->type->kind == TYPE_DOUBLE)) {
@@ -654,8 +937,19 @@ IrProgram *irgen_program(AstNode *prog) {
 #endif
                         {
                             StrBuf sb; sb_init(&sb);
+                            g_ser_unknown = 0;
                             serialize_const_expr(&sb, iv);
+                            /* A shape this build cannot place in data must be refused;
+                             * writing the object without its initialiser invents zeroes. */
+                            if (g_ser_unknown) {
+                            diag_tool(DIAG_SEV_ERROR, "arkcc",
+                                      "the initialiser of the global '%s' is not a constant "
+                                      "expression this build can place in data",
+                                      gv->name, 0,0,0,0,0);
+                            g_irgen_errors++;
+                            } else {
                             gv->init_aggregate = sb.data;
+                            }
                         }
                     }
                 }
@@ -682,7 +976,9 @@ IrProgram *irgen_program(AstNode *prog) {
                             /* 同上：浮点常量表达式 */
                         } else
 #endif
-                        if (iv->kind == AST_NUM) {
+                                                if (irgen_try_addr_init(eg, iv)) {
+                            /* 静态地址常量初值：符号 + 字节偏移 */
+                        } else if (iv->kind == AST_NUM) {
                             eg->has_init = 1;
                             eg->init_int = iv->u.num_val;
                             if (iv->type && (iv->type->kind == TYPE_FLOAT || iv->type->kind == TYPE_DOUBLE)) {
@@ -716,8 +1012,19 @@ IrProgram *irgen_program(AstNode *prog) {
 #endif
                             {
                                 StrBuf sb; sb_init(&sb);
+                                g_ser_unknown = 0;
                                 serialize_const_expr(&sb, iv);
+                                /* A shape this build cannot place in data must be refused;
+                                 * writing the object without its initialiser invents zeroes. */
+                                if (g_ser_unknown) {
+                                diag_tool(DIAG_SEV_ERROR, "arkcc",
+                                          "the initialiser of the global '%s' is not a constant "
+                                          "expression this build can place in data",
+                                          eg->name, 0,0,0,0,0);
+                                g_irgen_errors++;
+                                } else {
                                 eg->init_aggregate = sb.data;
+                                }
                             }
                         }
                     }
@@ -757,7 +1064,9 @@ IrProgram *irgen_program(AstNode *prog) {
                                 /* 同上：浮点常量表达式 */
                             } else
 #endif
-                            if (iv->kind == AST_NUM) {
+                                                        if (irgen_try_addr_init(gc, iv)) {
+                                /* 静态地址常量初值：符号 + 字节偏移 */
+                            } else if (iv->kind == AST_NUM) {
                                 gc->has_init = 1;
                                 gc->init_int = iv->u.num_val;
                                 if (iv->type && (iv->type->kind == TYPE_FLOAT || iv->type->kind == TYPE_DOUBLE)) {
@@ -791,8 +1100,19 @@ IrProgram *irgen_program(AstNode *prog) {
 #endif
                                 {
                                     StrBuf sb; sb_init(&sb);
+                                    g_ser_unknown = 0;
                                     serialize_const_expr(&sb, iv);
+                                    /* A shape this build cannot place in data must be refused;
+                                     * writing the object without its initialiser invents zeroes. */
+                                    if (g_ser_unknown) {
+                                    diag_tool(DIAG_SEV_ERROR, "arkcc",
+                                              "the initialiser of the global '%s' is not a constant "
+                                              "expression this build can place in data",
+                                              gc->name, 0,0,0,0,0);
+                                    g_irgen_errors++;
+                                    } else {
                                     gc->init_aggregate = sb.data;
+                                    }
                                 }
                             }
                         }
@@ -812,7 +1132,9 @@ IrProgram *irgen_program(AstNode *prog) {
                                     /* 同上：浮点常量表达式 */
                                 } else
 #endif
-                                if (iv->kind == AST_NUM) {
+                                                                if (irgen_try_addr_init(eg, iv)) {
+                                    /* 静态地址常量初值：符号 + 字节偏移 */
+                                } else if (iv->kind == AST_NUM) {
                                     eg->has_init = 1;
                                     eg->init_int = iv->u.num_val;
                                     if (iv->type && (iv->type->kind == TYPE_FLOAT || iv->type->kind == TYPE_DOUBLE)) {
@@ -846,8 +1168,19 @@ IrProgram *irgen_program(AstNode *prog) {
 #endif
                                     {
                                         StrBuf sb; sb_init(&sb);
+                                        g_ser_unknown = 0;
                                         serialize_const_expr(&sb, iv);
+                                        /* A shape this build cannot place in data must be refused;
+                                         * writing the object without its initialiser invents zeroes. */
+                                        if (g_ser_unknown) {
+                                        diag_tool(DIAG_SEV_ERROR, "arkcc",
+                                                  "the initialiser of the global '%s' is not a constant "
+                                                  "expression this build can place in data",
+                                                  eg->name, 0,0,0,0,0);
+                                        g_irgen_errors++;
+                                        } else {
                                         eg->init_aggregate = sb.data;
+                                        }
                                     }
                                 }
                             }
@@ -1411,7 +1744,9 @@ static void irgen_stmt(IrGen *g, AstNode *node) {
                         /* 同上：函数内 static 的浮点常量表达式 */
                     } else
 #endif
-                    if (iv->kind == AST_NUM) {
+                                        if (irgen_try_addr_init(gv, iv)) {
+                        /* 静态地址常量初值：符号 + 字节偏移 */
+                    } else if (iv->kind == AST_NUM) {
                         gv->has_init = 1;
                         gv->init_int = iv->u.num_val;
                         if (iv->type && (iv->type->kind == TYPE_FLOAT || iv->type->kind == TYPE_DOUBLE)) {
@@ -1440,8 +1775,19 @@ static void irgen_stmt(IrGen *g, AstNode *node) {
 #endif
                         {
                             StrBuf sb; sb_init(&sb);
+                            g_ser_unknown = 0;
                             serialize_const_expr(&sb, iv);
+                            /* A shape this build cannot place in data must be refused;
+                             * writing the object without its initialiser invents zeroes. */
+                            if (g_ser_unknown) {
+                            diag_tool(DIAG_SEV_ERROR, "arkcc",
+                                      "the initialiser of the global '%s' is not a constant "
+                                      "expression this build can place in data",
+                                      gv->name, 0,0,0,0,0);
+                            g_irgen_errors++;
+                            } else {
                             gv->init_aggregate = sb.data;
+                            }
                         }
                     }
                 }

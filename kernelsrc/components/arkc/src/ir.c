@@ -191,6 +191,9 @@ IrGlobal *ir_program_add_global(IrProgram *prog, const char *name, Type *t) {
     g->init_int = 0;
     g->init_str = 0;
     g->init_aggregate = 0;
+    g->init_sym = 0;
+    g->init_sym_off = 0;
+    g->init_sym_is_func = 0;
     g->init_float = 0;
     g->init_is_complex = 0;
     g->init_float_im = 0.0;

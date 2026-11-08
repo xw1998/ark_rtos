@@ -1647,7 +1647,7 @@ static void gvar_assign(IrProgram *prog) {
         if (g->has_at) continue;  /* __at variables keep their absolute address */
         if (!g->has_init) continue;  /* skip .bss for now */
         /* Zero-initialized scalars go to .bss */
-        if (!g->init_aggregate && !g->init_str && !g->is_float && g->init_int == 0) continue;
+        if (!g->init_aggregate && !g->init_str && !g->init_sym && !g->is_float && g->init_int == 0) continue;
         sz = g->type ? type_size(g->type) : 4;
         if (sz <= 0) sz = 4;
         /* SCT-1/SCT-3: custom section globals get their address from the
@@ -1706,7 +1706,7 @@ static void gvar_assign(IrProgram *prog) {
             /* Non-zero initialized globals were assigned in .data pass above.
              * Zero-initialized scalars (init_int==0, no aggregate/str/float) were
              * skipped in .data and should be assigned here in .bss. */
-            if (!(g->init_aggregate || g->init_str || g->is_float) && g->init_int == 0) {
+            if (!(g->init_aggregate || g->init_str || g->init_sym || g->is_float) && g->init_int == 0) {
                 /* zero-initialized scalar: assign in .bss */
             } else {
                 continue;  /* already assigned in .data */
@@ -4878,7 +4878,7 @@ static char *codegen_arm(IrProgram *prog) {
             if (g->is_extern || g->has_at) continue;
             if (!g->has_init) continue;
             /* Skip zero-initialized scalars (they're in .bss, already zeroed) */
-            if (!g->init_aggregate && !g->init_str && !g->is_float && g->init_int == 0) continue;
+            if (!g->init_aggregate && !g->init_str && !g->init_sym && !g->is_float && g->init_int == 0) continue;
             addr = gvar_find(g->name);
             if (addr == 0) continue;
             sz = g->type ? type_size(g->type) : 4;
@@ -4926,6 +4926,56 @@ static char *codegen_arm(IrProgram *prog) {
                         emit_mov_imm(&buf, 0, (int)fu.u);
                         asmbuf_puts(&buf, "    STR r0, [r1, #4]\n");
                     }
+                }
+            } else if (g->init_sym) {
+                /* Address constant (C11 6.6p9): `int (*gp)(int,int) = add;`,
+                 * `int *pg = &gv;`, `int *pe = &arr[2];`.
+                 *
+                 * The value is not a byte pattern -- the address of a function
+                 * does not exist until the linker has placed it -- so the store
+                 * carries a symbol reference instead of a number.  An object of
+                 * this unit takes the same path as IR_PUSH_GLOBAL_ADDR (a
+                 * relocatable MOVW/MOVT pair); a function takes the literal-pool
+                 * load IR_PUSH_FUNC uses, and the call site sets bit0 itself,
+                 * exactly as it does there.  Before this branch existed the
+                 * initialiser fell through to the aggregate path, which could
+                 * not parse it, so the object kept whatever the .data area
+                 * already held. */
+                if (g->init_sym_is_func) {
+                    if (g->init_sym_off != 0) {
+                        diag_tool(DIAG_SEV_ERROR, "arkcc",
+                                  "the initialiser of the global '%s' adds a byte "
+                                  "offset to the address of a function, which is "
+                                  "not a constant expression",
+                                  g->name, 0,0,0,0,0);
+                        continue;
+                    }
+                    asmbuf_puts(&buf, "    LDR r0, =");
+                    asmbuf_puts(&buf, g->init_sym);
+                    asmbuf_putc(&buf, '\n');
+                    emit_mov_addr32(&buf, 1, addr, addr_in_own_data(addr));
+                    asmbuf_puts(&buf, "    STR r0, [r1]\n");
+                } else {
+                    unsigned oaddr = gvar_find(g->init_sym);
+                    unsigned taddr;
+                    if (oaddr == 0) {
+                        /* This backend places every unit's .data at one fixed
+                         * base and emits no relocation for its own objects, so
+                         * another unit's object has no address it could name.
+                         * Report it rather than store a wrong one. */
+                        diag_tool(DIAG_SEV_ERROR, "arkcc",
+                                  "the initialiser of the global '%s' takes the "
+                                  "address of '%s', which this translation unit "
+                                  "does not define; the arm backend gives every "
+                                  "unit's data one fixed base address, so another "
+                                  "unit's object cannot be named here",
+                                  g->name, g->init_sym, 0,0,0,0);
+                        continue;
+                    }
+                    taddr = oaddr + (unsigned)g->init_sym_off;
+                    emit_mov_addr32(&buf, 0, taddr, addr_in_own_data(taddr));
+                    emit_mov_addr32(&buf, 1, addr, addr_in_own_data(addr));
+                    asmbuf_puts(&buf, "    STR r0, [r1]\n");
                 }
             } else if (g->init_aggregate) {
                 /* Aggregate initialiser: turn the text into bytes with the

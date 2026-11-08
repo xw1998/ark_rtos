@@ -122,6 +122,23 @@ typedef struct IrGlobal {
     char   *init_str;
     /* Aggregate initializer as C source text: "..." including the braces */
     char   *init_aggregate;
+    /* Address constant initialiser (C11 6.6p9): the address of a symbol plus a
+     * byte offset.  init_sym names the symbol -- a function, or an object with
+     * static storage duration -- and init_sym_off is added to that address.
+     *
+     * It is kept apart from init_int/init_aggregate because a machine backend
+     * cannot bake it as a byte pattern: the address of a function is not known
+     * until the linker has placed it, so the store has to carry a symbol
+     * reference (a label plus a relocation).  init_aggregate is still filled
+     * with the source text so the C backend round-trips the declaration.
+     */
+    char   *init_sym;
+    long long init_sym_off;
+    /* 1 when init_sym names a function (its address is a code label, which an
+     * object can carry as a relocation), 0 when it names an object.  The
+     * distinction matters to a backend that cannot name another unit's data
+     * but can name its code. */
+    int     init_sym_is_func;
     /* Floating point initializer */
     double  init_float;
     int     is_float;
