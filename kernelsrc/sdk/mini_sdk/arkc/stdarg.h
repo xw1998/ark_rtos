@@ -6,8 +6,11 @@
  *      One 4-byte word per AAPCS argument word, contiguous: word 0..3 are
  *      r0..r3, word 4+k is word k of the caller's stack argument block.  That
  *      is the caller's real layout, so a 64-bit argument is just two adjacent
- *      words and `va_arg(ap, long long)` is a plain 8-byte read.  The driver
- *      defines this macro for those two targets (src/compiler.c).
+ *      words and `va_arg(ap, long long)` is a plain 8-byte read.  A structure
+ *      passed through `...` is the same walk: the caller puts the payload
+ *      inline, one word per four bytes (`ceil(sizeof/4)` words) -- see the
+ *      ARM backend's aapcs_assign(), and note that only that target does it.
+ *      The driver defines this macro for those two targets (src/compiler.c).
  *
  *   default               (C and x86_64 backends)
  *      One 8-byte slot per argument, ordinal-indexed: the backend stores all

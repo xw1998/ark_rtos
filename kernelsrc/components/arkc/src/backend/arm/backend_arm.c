@@ -36,6 +36,11 @@ static void emit_line(AsmBuffer *b, const char *s) {
     asmbuf_puts(b, s);
     asmbuf_putc(b, '\n');
 }
+static void emit_add_sp(AsmBuffer *b, int amount) {
+    asmbuf_puts(b, "    ADD sp, sp, #");
+    asmbuf_int(b, amount);
+    asmbuf_putc(b, '\n');
+}
 
 static void emit_mov_imm(AsmBuffer *b, int rd, int imm) {
     if (imm >= 0 && imm <= 255) {
@@ -670,7 +675,7 @@ static void emit_sp_adjust(AsmBuffer *b, int amount, int is_sub) {
 }
 
 static void emit_prologue(AsmBuffer *b, const char *fn_name, int local_size,
-                          int va_regs, int is_irq, int is_naked, int dbg) {
+                          int va_lo, int va_pad, int is_irq, int is_naked, int dbg) {
     asmbuf_puts(b, fn_name);
     asmbuf_puts(b, ":\n");
     if (dbg) emit_line(b, ".cfi_startproc");
@@ -678,11 +683,24 @@ static void emit_prologue(AsmBuffer *b, const char *fn_name, int local_size,
         /* __naked: emit no prologue; the function body is entirely the user's responsibility */
         return;
     }
-    /* Variadic: save the four register argument words first.  They then sit at
-     * [sp_entry-16, sp_entry) -- directly below the caller's stack argument
-     * block -- so the va region is the caller's argument image verbatim, and
-     * the epilogue has 16 extra bytes to drop (see emit_epilogue_return). */
-    if (va_regs) emit_line(b, "PUSH {r0, r1, r2, r3}");
+    /* Variadic: save the register argument words that can still hold a
+     * variadic argument -- r_va_lo .. r3, where va_lo is NCRN rounded down to
+     * an even number.  They then sit at [sp_entry-va_pad, sp_entry) -- directly
+     * below the caller's stack argument block -- so the va region is the
+     * caller's argument image verbatim, and the epilogue has va_pad extra bytes
+     * to drop (see emit_epilogue_return).  va_pad is a multiple of 8, so the
+     * frame keeps the 8-byte alignment AAPCS requires; va_pad == 0 means the
+     * caller already spends r0-r3 on named arguments and nothing is pushed. */
+    if (va_pad > 0) {
+        int r;
+        asmbuf_puts(b, "    PUSH {");
+        for (r = va_lo; r < 4; r++) {
+            if (r != va_lo) asmbuf_puts(b, ", ");
+            asmbuf_puts(b, "r");
+            asmbuf_int(b, r);
+        }
+        asmbuf_puts(b, "}\n");
+    }
     if (is_irq) {
         /* __irq: Cortex-M hardware auto-saves r0-r3, r12, lr, pc, xpsr on
          * exception entry. We only need to save r5, r6, r7 (arkcc's
@@ -710,16 +728,18 @@ static void emit_epilogue_return(AsmBuffer *b, int local_size,
     emit_line(b, "MOV sp, r6");
     if (local_size > 0) emit_sp_adjust(b, local_size, 0);
     if (g_va_epilogue_pad) {
-        /* Variadic: the prologue pushed r0-r3 *below* the saved registers (so
-         * that the four register argument words stay contiguous with the
+        /* Variadic: the prologue pushed r_va_lo..r3 *below* the saved registers
+         * (so that the register argument words stay contiguous with the
          * caller's stack arguments), so after restoring the saved registers
-         * another 16 bytes have to be dropped before returning.  POP into lr,
-         * drop the words, then branch -- POP {.., pc} cannot be followed by a
-         * stack adjustment.  For an __irq handler lr holds EXC_RETURN, and
-         * BX lr performs the exception return on M-profile, so this shape is
-         * correct there too. */
+         * another g_va_epilogue_pad bytes have to be dropped before returning.
+         * POP into lr, drop the words, then branch -- POP {.., pc} cannot be
+         * followed by a stack adjustment.  For an __irq handler lr holds
+         * EXC_RETURN, and BX lr performs the exception return on M-profile, so
+         * this shape is correct there too.  When nothing was pushed (all four
+         * register words are named arguments) this branch is not taken and the
+         * plain POP {.., pc} below is used. */
         emit_line(b, "POP {r5, r6, r7, lr}");
-        emit_line(b, "ADD sp, sp, #16");
+        emit_add_sp(b, g_va_epilogue_pad);
         emit_line(b, "BX lr");
     } else if (is_irq) {
         emit_line(b, "POP {r5, r6, r7, pc}");
@@ -1586,10 +1606,11 @@ static int is_va_ptr_sym(const char *name) {
 
 /* AAPCS32 parameter assignment (base standard: core registers then stack).
  *
- * sizes[i] is how many bytes argument i occupies on the wire: 8 for a
- * double-word scalar (long long / double), anything else for one word (a
- * struct passed by value is a pointer word here, which is this compiler's own
- * convention).  Outputs are indexed by cumulative *slot* (one slot = one word),
+ * sizes[i] is how many bytes argument i occupies on the wire: 4 for one word,
+ * 8 for a double-word scalar or composite (long long / double / a 5..8-byte
+ * struct), and anything above 8 for a composite that travels inline through a
+ * variadic call (see irgen: named parameters of that size go as one pointer
+ * word instead).  Outputs are indexed by cumulative *slot* (one slot = one word),
  * which is what irgen stamps into IR_GETARG:
  *   reg[slot]  = r0..r3 for the word held in a register, -1 if it is on the stack
  *   soff[slot] = byte offset inside the caller's stack argument block for a
@@ -1616,7 +1637,28 @@ static int aapcs_assign(const int *sizes, int n, int ncrn_start,
     int slot = 0;
     int i;
     for (i = 0; i < n; i++) {
-        if (sizes[i] == 8) {
+        if (sizes[i] > 8) {
+            /* More than two words: no all-or-nothing rule applies, the words
+             * fill the remaining core register(s) and then the stack in order.
+             * Measured against arm-none-eabi-gcc 12.3 -- `f(1, s12)` with three
+             * named words ahead of it puts word 0 in r3 and words 1,2 on the
+             * stack.  No alignment hole is inserted: nothing here can make
+             * <stdarg.h> round up (it decides by sizeof, and a hole would only
+             * be visible to a reader that knows the type's alignment). */
+            int w = (sizes[i] + 3) / 4;
+            int j;
+            for (j = 0; j < w; j++) {
+                if (ncrn < 4) {
+                    reg[slot] = ncrn++;
+                    soff[slot] = -1;
+                } else {
+                    reg[slot] = -1;
+                    soff[slot] = nsaa;
+                    nsaa += 4;
+                }
+                slot += 1;
+            }
+        } else if (sizes[i] == 8) {
             int r = ncrn;
             if (r & 1) r++;                     /* start on an even register */
             if (r <= 2) {
@@ -1828,6 +1870,7 @@ static char *codegen_arm(IrProgram *prog) {
         int fstart = 0;              /* where this function's text begins */
         int sret_off = 0;
         int va_start_slot = 0;       /* first variadic word, in region words */
+        int va_lo = 0;               /* first saved argument register (even)   */
         /* P1 FIX (sret caller side): pre-allocate sret buffers in this
          * function's frame so the sret space doesn't occupy SP+0 (where
          * the callee expects to read stack args). Each sret call site gets
@@ -1956,36 +1999,12 @@ static char *codegen_arm(IrProgram *prog) {
          * r6-relative offsets remain valid because the prologue SUB and the
          * stack-arg offset computation both use this padded value. */
         local_size = (local_size + 7) & ~7;
-        fstart = buf.len;
-        g_va_epilogue_pad = (f->is_variadic && !f->is_naked) ? 16 : 0;
-        emit_prologue(&buf, f->name, local_size, g_va_epilogue_pad ? 1 : 0,
-                      f->is_irq, f->is_naked, dbg);
-        /* #2 FIX: Auto-call __arkcc_init_globals at the start of Reset_Handler
-         * to initialize .data and zero .bss before main() runs. */
-        if (ark_streq(f->name, "Reset_Handler") &&
-            (g_data_sram_start != g_data_sram_end ||
-             g_bss_sram_start != g_bss_sram_end)) {
-            asmbuf_puts(&buf, "    BL __arkcc_init_globals\n");
-        }
-        /* Save sret pointer (r0) to frame slot for struct-returning functions */
-        if (is_sret) {
-            asmbuf_puts(&buf, "    STR r0, [r6, #");
-            asmbuf_int(&buf, sret_off);
-            asmbuf_puts(&buf, "]\n");
-        }
-
-        {
-        int cur_line = 0;
-        int sret_call_idx = 0;
-        /* Precompute AAPCS register assignment for each param slot.
-         * Maps slot index (cumulative 4-byte slot count) to AAPCS register
-         * number (r0-r3), accounting for 64-bit even-pair alignment.
-         * -1 = slot not used (gap in struct-by-value slot space). */
-        /* static: this compiler also runs on the target board, where the
-         * code generator's stack is a tight budget.  codegen_arm() is not
-         * recursive and is re-entered only once per function, and both tables
-         * are re-initialised at the top of the loop, so a file-scope lifetime
-         * changes nothing except the stack cost. */
+        /* NCRN / nsaa have to be known before the prologue, because the
+         * prologue decides how many argument words to save.  This block used to
+         * sit in the body loop; nothing in it emits code, so it simply moved
+         * up. */
+        g_va_epilogue_pad = 0;
+        va_lo = 0;
         static int aapcs_map[64];
         static int aapcs_soff[64];
         {
@@ -2034,9 +2053,69 @@ static char *codegen_arm(IrProgram *prog) {
                 g_va_named_words = nw;
                 g_va_ncrn = any_stack ? 4 : maxreg + 1;
                 if (is_sret && g_va_ncrn < 1) g_va_ncrn = 1;  /* r0 = sret */
-                va_start_slot = (g_va_ncrn < 4) ? g_va_ncrn : 4 + g_va_nsaa / 4;
+                /* Only the register words that can still hold a variadic
+                 * argument are saved: r_k .. r3 with k = NCRN rounded DOWN to
+                 * an even number.  Four things ride on choosing k that way:
+                 *
+                 *   - the region stays the caller's argument image verbatim:
+                 *     its base is always frame + local_size + 16, whatever k
+                 *     is, because sp_entry = base + pushed bytes.  Zero copy,
+                 *     and the caller's stack arguments stay contiguous with
+                 *     the last pushed word, so there is still no limit on how
+                 *     many arguments a variadic call may pass on the stack;
+                 *   - "round ap up to 8" stays equivalent to "even AAPCS
+                 *     argument word" for any k: word j sits at base + 4j, and
+                 *     that is 8-aligned iff (j-k) is even, which is exactly
+                 *     "k+j, the AAPCS word number, is even";
+                 *   - k even makes the pushed byte count a multiple of 8, so
+                 *     sp keeps the 8-byte alignment AAPCS requires.  An odd k
+                 *     would still walk the region correctly but would leave
+                 *     the frame at 4 mod 8, where an 8-byte local (or a
+                 *     GCC-compiled callee) can fault;
+                 *   - k == 4 pushes nothing: the epilogue goes back to a plain
+                 *     POP {r5, r6, r7, pc} and the stack-argument base back to
+                 *     local_size + 16.
+                 *
+                 * Measured cost per signature: int f(int a, ...) 16 B,
+                 * int f(int a, int b, ...) 8 B, four named words 0 B. */
+                if (f->is_variadic && !f->is_naked) {
+                    va_lo = g_va_ncrn & ~1;
+                    if (va_lo > 4) va_lo = 4;
+                    g_va_epilogue_pad = 4 * (4 - va_lo);
+                    va_start_slot = (g_va_ncrn >= 4) ? (g_va_nsaa / 4)
+                                                     : (g_va_ncrn - va_lo);
+                }
             }
         }
+        fstart = buf.len;
+        emit_prologue(&buf, f->name, local_size, va_lo, g_va_epilogue_pad,
+                      f->is_irq, f->is_naked, dbg);
+        /* #2 FIX: Auto-call __arkcc_init_globals at the start of Reset_Handler
+         * to initialize .data and zero .bss before main() runs. */
+        if (ark_streq(f->name, "Reset_Handler") &&
+            (g_data_sram_start != g_data_sram_end ||
+             g_bss_sram_start != g_bss_sram_end)) {
+            asmbuf_puts(&buf, "    BL __arkcc_init_globals\n");
+        }
+        /* Save sret pointer (r0) to frame slot for struct-returning functions */
+        if (is_sret) {
+            asmbuf_puts(&buf, "    STR r0, [r6, #");
+            asmbuf_int(&buf, sret_off);
+            asmbuf_puts(&buf, "]\n");
+        }
+
+        {
+        int cur_line = 0;
+        int sret_call_idx = 0;
+        /* Precompute AAPCS register assignment for each param slot.
+         * Maps slot index (cumulative 4-byte slot count) to AAPCS register
+         * number (r0-r3), accounting for 64-bit even-pair alignment.
+         * -1 = slot not used (gap in struct-by-value slot space). */
+        /* static: this compiler also runs on the target board, where the
+         * code generator's stack is a tight budget.  codegen_arm() is not
+         * recursive and is re-entered only once per function, and both tables
+         * are re-initialised at the top of the loop, so a file-scope lifetime
+         * changes nothing except the stack cost. */
 
         /* ---- va region (variadic functions only) ------------------------
          * The region IS the caller's argument image: the prologue pushed
@@ -2111,7 +2190,9 @@ static char *codegen_arm(IrProgram *prog) {
                     int reg     = (arg_idx < 64) ? aapcs_map[arg_idx] : -1;
                     /* A variadic prologue pushed r0-r3 into the frame, so the
                      * caller's stack argument block sits 16 bytes higher. */
-                    int argbase = local_size + (f->is_variadic ? 32 : 16);
+                    /* Stack arguments start above the saved registers and
+                     * above whatever the prologue pushed for the va region. */
+                    int argbase = local_size + 16 + g_va_epilogue_pad;
                     /* The variadic region is spilled once in the prologue
                      * (contiguous words, see "va region spill" above), so
                      * these IR requests -- one per argument word, stamped
@@ -2148,7 +2229,7 @@ static char *codegen_arm(IrProgram *prog) {
                             asmbuf_int(&buf, dst_off);
                             asmbuf_puts(&buf, "\n    MOV r1, r3\n");
                             emit_mov_imm(&buf, 2, st_sz);
-                            asmbuf_puts(&buf, "    PUSH {lr}\n    BL memcpy\n    POP {r0}\n");
+                            asmbuf_puts(&buf, "    PUSH {lr}\n    BL __aeabi_memcpy\n    POP {r0}\n");
                         }
                     } else if (st_sz == 8) {
                         /* 64-bit scalar (long long / double): read two words from
@@ -3211,43 +3292,71 @@ static char *codegen_arm(IrProgram *prog) {
                          * (aapcs_assign fills the slots it uses and the loops
                          * below only read those). */
                         static int asz[64];
-                        static int aslot_reg[128];
-                        static int aslot_soff[128];
+                        static int aslot_reg[192];
+                        static int aslot_soff[192];
                         static int areg[64];
-                        static int asoff[64];
+                        static int abase[64];
+                        static int awords[64];
                         int sl = 0;
                         int nsaa;
                         int i;
-                        for (i = 0; i < 128; i++) { aslot_reg[i] = -1; aslot_soff[i] = -1; }
+                        /* Per-argument wire size: from irgen's side table when
+                         * the call has an argument the 2-bit argmask cannot
+                         * describe (a >8-byte composite through `...`), from
+                         * the argmask otherwise -- in which case the numbers,
+                         * and therefore the code, are exactly what they were. */
+                        const int *wires = (I->aux2 > 0)
+                                           ? &prog->argbytes[I->aux2 - 1] : 0;
+                        for (i = 0; i < 192; i++) { aslot_reg[i] = -1; aslot_soff[i] = -1; }
                         for (kk = 0; kk < real_args && kk < 64; kk++) {
-                            asz[kk] = ((argmask >> (2 * kk + 1)) & 1) ? 8 : 4;
-                            total_slots += (asz[kk] == 8) ? 2 : 1;
+                            int b = wires ? wires[kk]
+                                          : (((argmask >> (2 * kk + 1)) & 1) ? 8 : 4);
+                            int w;
+                            if (b < 4) b = 4;
+                            w = (b + 3) / 4;
+                            asz[kk] = b;
+                            abase[kk] = sl;
+                            awords[kk] = w;
+                            sl += w;
+                            total_slots += w;
+                        }
+                        if (sl > 192) {
+                            char b1[12];
+                            diag_tool(DIAG_SEV_ERROR, "arkcc",
+                                      "call to '%s' passes %s argument words; "
+                                      "the arm backend handles at most 192",
+                                      I->name, diag_num(b1, sl), 0,0,0,0);
                         }
                         nsaa = aapcs_assign(asz, (real_args < 64) ? real_args : 64,
                                             0, aslot_reg, aslot_soff);
-                        for (kk = 0; kk < real_args && kk < 64; kk++) {
-                            areg[kk] = (sl < 128) ? aslot_reg[sl] : -1;
-                            asoff[kk] = (sl < 128) ? aslot_soff[sl] : -1;
-                            sl += (asz[kk] == 8) ? 2 : 1;
-                        }
                         /* Pop the register arguments.  They are always the
                          * leading ones: once an argument is placed on the stack
-                         * NCRN is 4, so every later argument is stacked too. */
+                         * NCRN is 4, so every later argument is stacked too.
+                         * A word argument (and any inline composite) has word 0
+                         * on top, so the pops run in ascending word order; the
+                         * two-word argument keeps its older convention, high
+                         * word on top (irgen pushes it low word first). */
                         for (kk = 0; kk < real_args && kk < 64; kk++) {
-                            if (areg[kk] < 0) break;
-                            if (asz[kk] == 8) {
+                            int base = abase[kk], w = awords[kk], j;
+                            if (w == 2) {
+                                if (aslot_reg[base] < 0) break;
                                 asmbuf_puts(&buf, "    POP {r");
-                                asmbuf_int(&buf, areg[kk] + 1);   /* high word */
+                                asmbuf_int(&buf, aslot_reg[base] + 1);  /* high word */
                                 asmbuf_puts(&buf, "}\n");
                                 asmbuf_puts(&buf, "    POP {r");
-                                asmbuf_int(&buf, areg[kk]);       /* low word */
+                                asmbuf_int(&buf, aslot_reg[base]);      /* low word */
                                 asmbuf_puts(&buf, "}\n");
                                 reg_slots += 2;
                             } else {
-                                asmbuf_puts(&buf, "    POP {r");
-                                asmbuf_int(&buf, areg[kk]);
-                                asmbuf_puts(&buf, "}\n");
-                                reg_slots += 1;
+                                int stacked = 0;
+                                for (j = 0; j < w; j++) {
+                                    if (aslot_reg[base + j] < 0) { stacked = 1; break; }
+                                    asmbuf_puts(&buf, "    POP {r");
+                                    asmbuf_int(&buf, aslot_reg[base + j]);
+                                    asmbuf_puts(&buf, "}\n");
+                                    reg_slots += 1;
+                                }
+                                if (stacked) break;
                             }
                         }
                         stack_args = total_slots - reg_slots;
@@ -3274,11 +3383,12 @@ static char *codegen_arm(IrProgram *prog) {
                             asmbuf_puts(&buf, "    AND r4, r7\n");
                             asmbuf_puts(&buf, "    MOV sp, r4\n");
                             for (kk = 0; kk < real_args && kk < 64; kk++) {
-                                int s_off, d_off;
-                                if (areg[kk] >= 0) continue;
-                                s_off = 4 * si;
-                                d_off = asoff[kk];
-                                if (asz[kk] == 8) {
+                                int base = abase[kk], w = awords[kk], j;
+                                if (w == 2) {
+                                    int s_off, d_off;
+                                    if (aslot_reg[base] >= 0) continue;
+                                    s_off = 4 * si;
+                                    d_off = aslot_soff[base];
                                     asmbuf_puts(&buf, "    LDR r7, [r5, #");
                                     asmbuf_int(&buf, s_off + 4);  /* low word (pushed second) */
                                     asmbuf_puts(&buf, "]\n");
@@ -3293,13 +3403,22 @@ static char *codegen_arm(IrProgram *prog) {
                                     asmbuf_puts(&buf, "]\n");
                                     si += 2;
                                 } else {
-                                    asmbuf_puts(&buf, "    LDR r7, [r5, #");
-                                    asmbuf_int(&buf, s_off);
-                                    asmbuf_puts(&buf, "]\n");
-                                    asmbuf_puts(&buf, "    STR r7, [r4, #");
-                                    asmbuf_int(&buf, d_off);
-                                    asmbuf_puts(&buf, "]\n");
-                                    si += 1;
+                                    /* Word arguments and inline composites: the
+                                     * words still on the image are, in
+                                     * ascending address order, exactly the ones
+                                     * that did not fit in a register (popping
+                                     * the rest moved r5 up). */
+                                    for (j = 0; j < w; j++) {
+                                        int d_off = aslot_soff[base + j];
+                                        if (aslot_reg[base + j] >= 0) continue;
+                                        asmbuf_puts(&buf, "    LDR r7, [r5, #");
+                                        asmbuf_int(&buf, 4 * si);
+                                        asmbuf_puts(&buf, "]\n");
+                                        asmbuf_puts(&buf, "    STR r7, [r4, #");
+                                        asmbuf_int(&buf, d_off);
+                                        asmbuf_puts(&buf, "]\n");
+                                        si += 1;
+                                    }
                                 }
                             }
                         }
@@ -3510,7 +3629,7 @@ static char *codegen_arm(IrProgram *prog) {
                     emit_pop_r0(&buf);                 /* dst */
                     emit_pop_r1(&buf);                 /* src */
                     emit_mov_imm(&buf, 2, I->val);     /* n bytes */
-                    emit_line(&buf, "BL memcpy");
+                    emit_line(&buf, "BL __aeabi_memcpy");
                     break;
                 /* === Bitfield store/load ===
                  * val=bit offset, aux=bit width. mask = (1<<bw)-1. */
@@ -3603,11 +3722,11 @@ static char *codegen_arm(IrProgram *prog) {
                          * "ADD immediate is out of range". */
                         if (local_size > 0) emit_sp_adjust(&buf, local_size, 0);
                         if (g_va_epilogue_pad) {
-                            /* Variadic: drop the four pushed argument words
-                             * after the saved registers (same shape as the
-                             * shared epilogue). */
+                            /* Variadic: drop the pushed argument words after
+                             * the saved registers (same shape as the shared
+                             * epilogue, same count). */
                             emit_line(&buf, "POP {r5, r6, r7, lr}");
-                            emit_line(&buf, "ADD sp, sp, #16");
+                            emit_add_sp(&buf, g_va_epilogue_pad);
                             emit_line(&buf, "BX lr");
                         } else if (f->is_irq) {
                             emit_line(&buf, "POP {r5, r6, r7, pc}");
@@ -4751,6 +4870,43 @@ static char *codegen_arm(IrProgram *prog) {
         asmbuf_puts(&buf, "    BL __arkcc_d2f_pair\n");
         asmbuf_puts(&buf, "    BL __aeabi_fcmpge\n");
         asmbuf_puts(&buf, "    POP {pc}\n\n");
+
+        /* __aeabi_memcpy: struct assignment, struct-by-value arguments and
+         * array initialisation are all lowered to a `BL memcpy`.  That made
+         * every one of them a link-time dependency on the C library, which a
+         * freestanding target does not have -- the MiniApp SDK on the board
+         * defines no memcpy, so `s = va_arg(ap, struct S)` (and any plain
+         * `a = b` for structs) failed to link with "undefined reference to
+         * memcpy".  Emitting the routine under the AEABI name it belongs to
+         * (r0=dst, r1=src, r2=n, same convention as the real one) removes the
+         * dependency and still satisfies a translation unit that only ever
+         * sees `BL __aeabi_memcpy`.
+         *
+         * Byte-at-a-time on purpose: no alignment requirement, no tail, and
+         * the assembler only has to encode 16-bit forms.  Structs in this
+         * language are small; a word loop would be faster but would need the
+         * unaligned-tail path proven first. */
+        asmbuf_puts(&buf, ".global __aeabi_memcpy\n.thumb_func\n__aeabi_memcpy:\n");
+        asmbuf_puts(&buf, "    PUSH {r4}\n");
+        asmbuf_puts(&buf, "    MOV r4, r0\n");
+        asmbuf_puts(&buf, "    CMP r2, #0\n");
+        asmbuf_puts(&buf, "    BEQ .L_arkcc_mcpy_done\n");
+        asmbuf_puts(&buf, ".L_arkcc_mcpy_loop:\n");
+        asmbuf_puts(&buf, "    LDRB r3, [r1]\n");
+        asmbuf_puts(&buf, "    STRB r3, [r4]\n");
+        asmbuf_puts(&buf, "    ADD r4, r4, #1\n");
+        asmbuf_puts(&buf, "    ADD r1, r1, #1\n");
+        /* SUB + CMP, not `SUBS`: the internal assembler takes SUBS only with
+         * --asm-extra, and this routine is emitted for every target build.
+         * Measured on the board: `cc --pack` refused the whole unit with
+         * "unknown mnemonic \"SUBS\"" -- the host gate assembles with GNU as,
+         * which takes it, so this only showed up on the target. */
+        asmbuf_puts(&buf, "    SUB r2, r2, #1\n");
+        asmbuf_puts(&buf, "    CMP r2, #0\n");
+        asmbuf_puts(&buf, "    BNE .L_arkcc_mcpy_loop\n");
+        asmbuf_puts(&buf, ".L_arkcc_mcpy_done:\n");
+        asmbuf_puts(&buf, "    POP {r4}\n");
+        asmbuf_puts(&buf, "    BX lr\n\n");
 
         /* === 内部辅助函数（非导出，仅供上述 helper 调用）=== */
 

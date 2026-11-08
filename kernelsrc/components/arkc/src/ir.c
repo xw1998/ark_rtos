@@ -64,6 +64,7 @@ void ir_emit(IrFunc *f, IrOp op, long long val, const char *name, int aux) {
         I->name = name;
         I->aux = aux;
         I->line = g_ir_cur_line;
+        I->aux2 = 0;   /* IR_CALL's side-table index; see include/ir.h */
     }
 }
 
@@ -85,7 +86,32 @@ IrProgram *ir_program_new(void) {
     p->complex_count = 0;
     p->complex_capacity = 0;
     p->source_file = 0;
+    p->argbytes = 0;
+    p->argbytes_count = 0;
+    p->argbytes_cap = 0;
     return p;
+}
+
+/* Append one call's argument sizes; the caller stamps 1 + the returned index
+ * into IrInst.aux2 (0 means "no table": every argument is 4 or 8 bytes).
+ * Returns the start index, and 0 for an empty run -- a 0 index and a 0 aux2
+ * would otherwise be the same thing. */
+int ir_program_add_argbytes(IrProgram *prog, const int *vals, int n) {
+    int start;
+    int i;
+    if (!prog || !vals || n <= 0) return -1;
+    start = prog->argbytes_count;
+    if (prog->argbytes_count + n > prog->argbytes_cap) {
+        int nc = prog->argbytes_cap ? prog->argbytes_cap : 64;
+        while (nc < prog->argbytes_count + n) nc *= 2;
+        prog->argbytes = (int *)mem_realloc(prog->argbytes,
+                                            prog->argbytes_cap * (int)sizeof(int),
+                                            nc * (int)sizeof(int));
+        prog->argbytes_cap = nc;
+    }
+    for (i = 0; i < n; i++) prog->argbytes[start + i] = vals[i];
+    prog->argbytes_count += n;
+    return start;
 }
 
 int ir_program_add_float(IrProgram *prog, double v) {

@@ -53,6 +53,31 @@ static int tail(int a, ...)
     return s;
 }
 
+/* 瘦身后的区形状：两个命名参数让 k=2，序言只压 {r2,r3}（8 字节），
+ * 区的第一字就是 r2。0x1122334455667788 落在 r2:r3，读高字最高字节 = 0x11 = 17。
+ * 这条能过，说明"区基址仍然是 8 字节对齐"在压一半寄存器之后依然成立。 */
+static int two_ll(int a, int b, ...)
+{
+    union { long long v; int w[2]; } u;
+    va_list ap;
+    va_start(ap, b);
+    u.v = va_arg(ap, long long);
+    va_end(ap);
+    return a + b + ((u.w[1] >> 24) & 0xFF);
+}
+
+/* 四个命名参数把 r0-r3 全用掉，序言**一个字节都不压**（k=4，代价 0），
+ * 区直接就是调用方的栈参数块，1+2+3+4+5 = 15。 */
+static int four_int(int a, int b, int c, int d, ...)
+{
+    va_list ap;
+    int x;
+    va_start(ap, d);
+    x = va_arg(ap, int);
+    va_end(ap);
+    return a + b + c + d + x;
+}
+
 /* float 实参按 C99 6.5.2.2p6 提升成 double：1.5 的位模式高字是 0x3FF80000，
  * 取 0x3FF 的低 8 位 = 255。这条能过，说明提升 + 64 位读都对。 */
 static int dbl_tag(int n, ...)
@@ -65,6 +90,32 @@ static int dbl_tag(int n, ...)
     return (u.w[1] >> 20) & 0xFF;
 }
 
+/* 穿过 `...` 的结构体：载荷按字内联，不是压一个地址字。变参的被调方看不到
+ * 类型，<stdarg.h> 只按连续参数字走，所以 12 字节（3 个字）必须在线上；
+ * 1 个命名参数之后它们正好落在 r1,r2,r3。若还压地址字，这里读到的是地址
+ * 的字节，与 6 无关。 */
+struct s3 { int a, b, c; };
+
+static struct s3 mk_s3(void)
+{
+    struct s3 t;
+    t.a = 1;
+    t.b = 2;
+    t.c = 3;
+    return t;
+}
+
+static int struct_va(int n, ...)
+{
+    va_list ap;
+    struct s3 s;
+    va_start(ap, n);
+    s = va_arg(ap, struct s3);
+    va_end(ap);
+    (void)n;
+    return s.a + s.b + s.c;
+}
+
 int main(void)
 {
     printf("va: companion built with the SDK's stdarg.h\r\n");
@@ -73,7 +124,10 @@ int main(void)
                                                     11, 12, 13, 14, 15, 16, 17, 18, 19, 20));
     printf("va ll_hi     = %d (want 17)\r\n", ll_hi(1, 0x1122334455667788LL));
     printf("va tail      = %d (want 21)\r\n", tail(1, 2, 3, 4, 5, 6));
+    printf("va two_ll    = %d (want 20)\r\n", two_ll(1, 2, 0x1122334455667788LL));
+    printf("va four_int  = %d (want 15)\r\n", four_int(1, 2, 3, 4, 5));
     printf("va dbl_tag   = %d (want 255)\r\n", dbl_tag(1, 1.5f));
+    printf("va struct_s3 = %d (want 6)\r\n", struct_va(1, mk_s3()));
     printf("va: done\r\n");
     return 0;
 }

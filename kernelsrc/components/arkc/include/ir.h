@@ -19,6 +19,16 @@ typedef struct IrInst {
     const char *name;  /* label name / function name / string ref */
     int   aux;   /* aux value: BINARY operator / flags */
     int   line;  /* source line (for .loc debug info; 0 = unknown) */
+    /* IR_CALL only: 1 + the index into g_ir_argbytes[] of this call's
+     * per-argument wire sizes in bytes, or 0 when every argument is 4 or 8
+     * bytes -- the only two sizes the 2-bit-per-argument argmask can state.
+     * A variadic function's caller cannot hand a >8-byte composite over as a
+     * pointer the way a *named* parameter does: the callee has no type for it
+     * and <stdarg.h> walks consecutive words, so the word count has to travel
+     * outside argmask.  Everything else about the instruction is unchanged,
+     * and backends that do not read it are unaffected (they refuse the case
+     * before code generation, see g_ir_vararg_words). */
+    int   aux2;
 } IrInst;
 
 /* irgen sets this to the current source line; ir_emit stamps it onto IrInst.line,
@@ -124,6 +134,12 @@ typedef struct IrProgram {
     int        complex_capacity;
     /* Current source file for DWARF .file/.loc; NULL = unknown */
     const char *source_file;
+    /* Per-call argument sizes for IrInst.aux2 (see ir_program_add_argbytes).
+     * Owned by the program so it is released by the same pool reset as the IR
+     * that indexes it. */
+    int *argbytes;
+    int  argbytes_count;
+    int  argbytes_cap;
 } IrProgram;
 
 IrFunc    *ir_func_new(const char *name);
@@ -135,6 +151,30 @@ void       ir_emit(IrFunc *f, IrOp op, long long val, const char *name, int aux)
  * words (ARM Thumb-2, RV32I) -- see <stdarg.h> and g_ir_va_slot_region in
  * irgen.c. */
 extern int g_ir_va_slot_region;
+
+/* IR_CALL argument sizes, in bytes, for the calls that need a size the
+ * argmask cannot express.  irgen appends one run per call to the *program's*
+ * table (IrProgram.argbytes) and stamps the run's index (1-based) into
+ * IrInst.aux2; the run is exactly as long as the call's argument count
+ * (IrInst.val & 0xFFFFFFFF).  Entries are the *wire* sizes: 4 for a word, 8 for
+ * a double word (even register pair / 8-byte stack slot), and for a composite
+ * passed through `...` the struct's size rounded up to a multiple of 4 -- one
+ * argument word per 4 bytes, laid out consecutively.
+ *
+ * The table lives in the program, not in a module global, because the driver
+ * resets the memory pool between translation units (compiler.c calls
+ * mem_pool_reset() per compile).  A global pointer into that pool went stale on
+ * the board's `cc --pack` -- three sources compiled in one process -- and the
+ * backend then read garbage argument sizes ("passes 900035835 argument
+ * words"). */
+int ir_program_add_argbytes(IrProgram *prog, const int *vals, int n);
+
+/* 1: this target can pass a composite larger than two words through `...`
+ * (ARM Thumb-2 only, whose va region is the caller's own argument words).
+ * 0 (default): irgen rejects the construct with an error instead of emitting
+ * code that would read the wrong words. */
+extern int g_ir_vararg_words;
+
 IrProgram *ir_program_new(void);
 void       ir_program_add(IrProgram *prog, IrFunc *func);
 int        ir_program_add_string(IrProgram *prog, const char *data, int len);

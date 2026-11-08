@@ -26,6 +26,17 @@
  * (see include/ir.h and <stdarg.h>). */
 int g_ir_va_slot_region = 1;
 
+/* See include/ir.h.  0 by default, so every target except ARM Thumb-2 rejects
+ * a >8-byte composite through `...` instead of emitting code that reads the
+ * wrong words; the driver raises it for ARM (src/compiler.c). */
+int g_ir_vararg_words = 0;
+
+/* IR_CALL argument sizes that the argmask cannot express live in the IR
+ * program's own table (ir_program_add_argbytes) -- not in a module global: the
+ * driver resets the memory pool between translation units, which on the board
+ * left a global pointer reading another unit's AST ("passes 900035835 argument
+ * words" from `cc --pack`, three sources in one process). */
+
 /* Internal buffer used to serialize an AST initializer list into a C source
  * snippet. 64 KB is enough for ordinary examples. */
 typedef struct StrBuf {
@@ -3116,6 +3127,19 @@ static void irgen_expr(IrGen *g, AstNode *node) {
             int is_indirect = (node->u.call.name && node->u.call.name[0] == '?');
             Symbol *s = is_indirect ? 0 : sym_find(node->u.call.name);
 
+            /* Every backend's argument tables stop at 64 entries and used to
+             * just stop counting there, i.e. the 65th and later arguments were
+             * never pushed to the right place -- a wrong answer with no
+             * diagnostic.  Refuse the call instead of miscompiling it. */
+            if (n > 64) {
+                char b1[12];
+                diag_tool(DIAG_SEV_ERROR, "arkcc",
+                          "a call passes %s arguments; the backends handle at "
+                          "most 64 (the rest would be dropped silently)",
+                          diag_num(b1, n), 0, 0, 0, 0, 0);
+                g_irgen_errors++;
+            }
+
             /* C99 complex builtins: lower the common ones to plain IR here. The
              * complex layout is 16 bytes (double re + double im) while IR_CALL passes
              * one long long (8 bytes) per argument, so special-case them up front. */
@@ -3177,7 +3201,58 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                  * 10 on ARM while the C backend answered 10. */
                 if (at && (at->kind == TYPE_STRUCT || at->kind == TYPE_UNION) &&
                     type_size(at) > 8) {
-                    if (arg->kind == AST_FUNC_CALL)
+                    /* A composite bigger than two words travels two different
+                     * ways, and which one is correct depends on whether the
+                     * *callee* can see the type:
+                     *   named parameter -- this compiler's own convention: one
+                     *     address word, and the callee's IR_GETARG memcpys the
+                     *     payload into its frame;
+                     *   `...` (unnamed) -- the callee has no type for it and
+                     *     <stdarg.h> walks consecutive argument words, so the
+                     *     payload itself must be on the wire.  Passing the
+                     *     address here (what this code used to do for both)
+                     *     made va_arg read the address word plus two garbage
+                     *     words: measured as 227 instead of 6 in the va gate.
+                     *     AAPCS has no indirection for this case either:
+                     *     arm-none-eabi-gcc 12.3 passes `f(1, s12)` in
+                     *     r1,r2,r3 with the three words by value.
+                     * The words go highest-first so that word 0 ends up on
+                     * top, mirroring "arg0 is on top of arg1"; the address is
+                     * kept on top with DUP/SWAP so a call result is evaluated
+                     * exactly once, and dropped at the end. */
+                    int vsz = type_size(at);
+                    int vw = (vsz + 3) / 4;
+                    if (s && s->kind == SYM_FUNC && s->is_variadic &&
+                        i >= s->param_count) {
+                        if (!g_ir_vararg_words) {
+                            char b1[12];
+                            diag_tool(DIAG_SEV_ERROR, "arkcc",
+                                      "passing a %s-byte structure through '...' "
+                                      "is implemented for the arm target only; "
+                                      "the callee would read the pointer word as "
+                                      "data (function '%s')",
+                                      diag_num(b1, vsz), g->fn->name, 0,0,0,0);
+                            g_irgen_errors++;
+                            ir_emit(g->fn, IR_PUSH_INT, 0, 0, 0);
+                        } else {
+                            int packed_aux = (type_align(at) < 4) ? 0x400 : 0;
+                            int j;
+                            if (arg->kind == AST_FUNC_CALL)
+                                irgen_expr(g, arg);   /* result buffer address */
+                            else
+                                irgen_lvalue_addr(g, arg);
+                            for (j = vw - 1; j >= 0; j--) {
+                                ir_emit(g->fn, IR_DUP, 0, 0, 0);
+                                /* IR_LOAD_IDX scales its offset by the element
+                                 * size, so this is a word *index*, not a byte
+                                 * offset (passing 4*j read word 4j). */
+                                ir_emit(g->fn, IR_PUSH_INT, (long long)j, 0, 0);
+                                ir_emit(g->fn, IR_LOAD_IDX, 4, 0, packed_aux);
+                                ir_emit(g->fn, IR_SWAP, 0, 0, 0);
+                            }
+                            ir_emit(g->fn, IR_POP, 0, 0, 0);   /* drop the address */
+                        }
+                    } else if (arg->kind == AST_FUNC_CALL)
                         irgen_expr(g, arg);          /* already the result buffer address */
                     else
                         irgen_lvalue_addr(g, arg);
@@ -3268,8 +3343,16 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                  * NOT in the args[] array. Using n here would read past args[] end
                  * (or dereference NULL when arg_count==0), causing a crash. */
                 int argmask = 0;
+                /* Wire size of each argument in bytes, and whether any of them
+                 * is a size the 2-bit-per-argument argmask cannot state (a
+                 * >8-byte composite through `...`).  Collected for every
+                 * argument, not just the first 16, because the table has to
+                 * describe the whole call. */
+                int wires[64];
+                int wire_extra = 0;
+                int wire_idx = 0;   /* 1 + the run's index in g_ir_argbytes[] */
                 int max_args = node->u.call.arg_count;
-                if (max_args > 16) max_args = 16;
+                if (max_args > 64) max_args = 64;
                 for (i = 0; i < max_args; i++) {
                     AstNode *arg = node->u.call.args[i];
                     /* Prefer PARAMETER type for argmask: the x86 backend uses
@@ -3281,6 +3364,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                                 s->param_types && i < s->param_count)
                                ? s->param_types[i] : 0;
                     Type *use_t = pt ? pt : (arg ? arg->type : 0);
+                    wires[i] = 4;      /* one word unless a wider shape says otherwise */
                     if (use_t) {
                         int k = use_t->kind;
                         /* A float variadic argument has been promoted to double
@@ -3288,20 +3372,23 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                          * wire as well; the width bit is what the ARM/RV32I
                          * backends place the argument by. */
                         if (s && s->kind == SYM_FUNC && s->is_variadic &&
-                            i >= s->param_count && k == TYPE_FLOAT)
-                            argmask |= (1 << (2 * i + 1));
+                            i >= s->param_count && k == TYPE_FLOAT) {
+                            if (i < 16) argmask |= (1 << (2 * i + 1));
+                            wires[i] = 8;
+                        }
                         /* bit(2*i)   = 1 => float/double (promoted to double)
                          * bit(2*i+1) = 1 => 8-byte type (long long OR double)
                          * Double sets BOTH bits: bit(2*i) for float/double cast
                          * (C backend checks this first), bit(2*i+1) for 8-byte
                          * AAPCS alignment (ARM even-register-pair). Float sets
                          * only bit(2*i) since it is 4 bytes on ARM. */
-                        if (k == TYPE_FLOAT || k == TYPE_DOUBLE) {
+                        if (i < 16 && (k == TYPE_FLOAT || k == TYPE_DOUBLE)) {
                             argmask |= (1 << (2 * i));
                         }
-                        if (k == TYPE_LLONG || k == TYPE_DOUBLE) {
+                        if (i < 16 && (k == TYPE_LLONG || k == TYPE_DOUBLE)) {
                             argmask |= (1 << (2 * i + 1));
                         }
+                        if (k == TYPE_LLONG || k == TYPE_DOUBLE) wires[i] = 8;
                         /* A struct/union of 5..8 bytes travels as an 8-byte
                          * value (two words), so it needs the same even-register
                          * pair / 8-byte stack slot treatment as long long.
@@ -3311,9 +3398,28 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                         if ((k == TYPE_STRUCT || k == TYPE_UNION) &&
                             use_t->kind != TYPE_PTR) {
                             int ssz = type_size(use_t);
-                            if (ssz > 4 && ssz <= 8) argmask |= (1 << (2 * i + 1));
+                            if (ssz > 4 && ssz <= 8) {
+                                if (i < 16) argmask |= (1 << (2 * i + 1));
+                                wires[i] = 8;
+                            } else if (ssz > 8 && pt == 0) {
+                                /* Variadic composite: the payload travels
+                                 * inline (see the push above), one word per
+                                 * four bytes.  A *named* parameter of the same
+                                 * size travels as one pointer word, which is
+                                 * what wires[] keeps (4) -- it is not this
+                                 * branch because pt != 0. */
+                                if (s && s->kind == SYM_FUNC && s->is_variadic &&
+                                    i >= s->param_count) {
+                                    wires[i] = (ssz + 3) & ~3;
+                                    if (wires[i] != 8) wire_extra = 1;
+                                }
+                            }
                         }
                     }
+                }
+                if (wire_extra) {
+                    int start = ir_program_add_argbytes(g->prog, wires, max_args);
+                    if (start >= 0) wire_idx = start + 1;
                 }
                 /* Encode indirect-call 64-bit return flag in bit 32 of val.
                  * All backends truncate val to int for the arg count, so the
@@ -3342,6 +3448,10 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                     if (node->type && node->type->kind == TYPE_VOID)
                         call_val |= 0x200000000LL;
                     ir_emit(g->fn, IR_CALL, call_val, node->u.call.name, argmask);
+                    /* ir_emit() has no aux2 parameter on purpose: it is used in
+                     * hundreds of places and all but this one leave it 0. */
+                    if (wire_idx)
+                        g->fn->code[g->fn->code_count - 1].aux2 = wire_idx;
                 }
             }
             break;

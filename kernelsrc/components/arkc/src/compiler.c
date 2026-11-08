@@ -1840,6 +1840,13 @@ int ark_compile(const ArkOptions *opts) {
              * words, so reserving it would only cost stack (8 KB against a
              * 4 KB mini-app task stack on the board). */
             g_ir_va_slot_region = 0;
+            /* Only ARM can put a >8-byte composite through `...`: its va
+             * region is the caller's own argument words, so the payload is
+             * just a few more words.  RV32I refuses it (no stack arguments,
+             * no 8-byte values) and the C/x86_64 backends keep the 8-byte
+             * slot image, where irgen's inline words would be misread -- they
+             * fail the build with a diagnostic instead. */
+            g_ir_vararg_words = ark_streq(vbe->name, "arm") ? 1 : 0;
         }
         /* ...and whether those word slots carry the AAPCS32 alignment holes
          * (ARM: a 64-bit argument starts on an even register / an 8-byte
