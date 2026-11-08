@@ -679,6 +679,13 @@ static int match_vectorize_body(IrFunc *f, int body_start, int body_end,
     for (i = body_start; i < body_end; i++) {
         IrInst *I = &f->code[i];
         if (I->op == IR_LOAD_IDX) {
+            /* aux 0x200 = volatile, 0x400 = __packed: neither survives the
+             * rewrite.  A volatile access may not become one wide access, and a
+             * packed one is assembled byte by byte by both backends precisely
+             * because the address does not suit the width -- widening it to
+             * es*W would put the misaligned trap back (and, on ARM, silently
+             * read the wrong bytes).  Leave those loops alone. */
+            if (I->aux & (0x200 | 0x400)) return 0;
             if (count_load == 0) {
                 li1 = i;
                 es = I->val;
@@ -690,6 +697,7 @@ static int match_vectorize_body(IrFunc *f, int body_start, int body_end,
             }
             count_load++;
         } else if (I->op == IR_STORE_IDX) {
+            if (I->aux & (0x200 | 0x400)) return 0;  /* see the load case above */
             if (count_store > 0) return 0;  /* only one STORE_IDX */
             si = i;
             if (es != 0 && I->val != es) return 0;
@@ -850,6 +858,19 @@ void opt_vectorize(IrProgram *prog) {
              *   - STORE_IDX es -> STORE_IDX (es * W)
              *   - element BINARY op -> simd_op
              */
+            /* The element narrowing has to go with the width.  irgen puts an
+             * IR_TRUNC right after every narrow load (a char/short load lands
+             * in a 32-bit slot and is re-extended to its type) and right before
+             * the store.  Now that one load covers W elements, narrowing that
+             * word back to a single element keeps lane 0 and throws the rest
+             * away: measured on a char loop, c came back as {2,0,0,0} instead
+             * of {2,4,6,8} -- a wrong answer in both backends, not a slow one.
+             * IR_TRUNC with 32 bits is a no-op in both backends, so raising the
+             * width is the whole fix and the ops keep their indices. */
+            if (f->code[li1 + 1].op == IR_TRUNC) f->code[li1 + 1].val = 32;
+            if (f->code[li2 + 1].op == IR_TRUNC) f->code[li2 + 1].val = 32;
+            if (f->code[bi + 1].op == IR_TRUNC)  f->code[bi + 1].val = 32;
+
             f->code[li1].val = es * W;
             f->code[li2].val = es * W;
             f->code[si].val = es * W;

@@ -182,6 +182,21 @@ for '<sym>' cannot be applied; no image was written
 79.20%。板端能编出的目标只是 ARM，这些字节属于"永远走不到但必须存在的守卫"，不做
 进一步裁剪（裁到只剩 `#error` 会让板端拿到 RV 对象时的行为与宿主不一致）。
 
+**2026-11-08 追加（上游 `f1995fa`：RV 后端补齐内联汇编 / `__svc` / `__smc` / 打包车道运算，
+并修掉 `opt_vectorize` 的静默错答案）**：本轮的板端体积**一位没变**——
+`text 412972 / data 2256 / bss 463532`，这不是"没编进去"，是三条代码各自正好落在编译
+边界外面，逐条核过：
+
+| 上游改动 | 板端为什么不变 |
+|---------|--------------|
+| `backend_riscv32.c` 的五个新 case 与 `ecall`/`ebreak` | 整个文件不在 STM32 profile 里（`ARKCC_BACKEND_RISCV32=0`），一行都不编 |
+| `opt.c` 的向量化窄化修复与 `volatile`/`__packed` 拒绝 | `opt_vectorize` 的唯一调用点在 `#if ARKCC_FEATURE_OPT_VECTORIZE` 里，板端该宏为 0 ⇒ 函数无引用，被 `--gc-sections` 整段丢弃（map 里 `.text.opt_vectorize 0x0 0x3c4`） |
+| `compiler.c` 的 RV getter 裁剪 | 与 0.9 那一轮完全相同，本轮未改 |
+
+留一条可复现的判据：单独拿同一套 `CFLAGS_ARKC` 编 `opt.c`，新旧目标文件差 **+96 B**
+（3116 → 3212），但链接后差值归零——**目标文件涨了、固件没涨**，原因就是上面第二行。
+把这条记下来是因为"体积不变"很容易被读成"改动没生效"，而这次两者恰好都对。
+
 ## 7. 相关文件
 
 | 文件 | 内容 |
