@@ -349,6 +349,23 @@ static int irgen_try_float_init(IrGlobal *gv, AstNode *iv) {
     gv->init_int   = 0;
     return 1;
 }
+/* 整型全局变量用**浮点**常量表达式初始化（隐式转换，C99 6.6）：
+ *     int g = 2.5 * 4.0;      -> 10
+ * 显式写转换的 `(int)(2.5 * 4.0)` 由 eval_const_expr 处理；这里补的是没有写
+ * 转换、但初值表达式本身是浮点类型的那一半。越界仍然拒绝：那是 UB，
+ * 折叠出一个整数等于凭空发明答案。
+ * 返回 1 表示已处理（*out 已写好）。 */
+static int irgen_try_implicit_int_init(IrGlobal *gv, AstNode *iv, long long *out) {
+    double dv = 0.0;
+    Type *dt;
+    if (!gv || !iv || !out) return 0;
+    dt = gv->type;
+    if (!dt || !type_is_integer(dt)) return 0;
+    if (!iv->type) return 0;
+    if (iv->type->kind != TYPE_FLOAT && iv->type->kind != TYPE_DOUBLE) return 0;
+    if (!eval_const_fexpr(iv, &dv)) return 0;
+    return fconst_to_int(dv, dt, out);
+}
 #endif
 
 static int alloc_label(IrGen *g) {
@@ -560,7 +577,14 @@ IrProgram *irgen_program(AstNode *prog) {
                         gv->has_init = 1;
                         if (eval_const_expr(iv, &cv)) {
                             gv->init_int = cv;
-                        } else {
+                        } else
+#if ARKCC_FEATURE_FCONST_FOLD
+                        if (irgen_try_implicit_int_init(gv, iv, &cv)) {
+                            /* init is a float constant expression: implicit conversion */
+                            gv->init_int = cv;
+                        } else
+#endif
+                        {
                             StrBuf sb; sb_init(&sb);
                             serialize_const_expr(&sb, iv);
                             gv->init_aggregate = sb.data;
@@ -613,7 +637,14 @@ IrProgram *irgen_program(AstNode *prog) {
                             eg->has_init = 1;
                             if (eval_const_expr(iv, &cv)) {
                                 eg->init_int = cv;
-                            } else {
+                            } else
+#if ARKCC_FEATURE_FCONST_FOLD
+                            if (irgen_try_implicit_int_init(eg, iv, &cv)) {
+                                /* init is a float constant expression: implicit conversion */
+                                eg->init_int = cv;
+                            } else
+#endif
+                            {
                                 StrBuf sb; sb_init(&sb);
                                 serialize_const_expr(&sb, iv);
                                 eg->init_aggregate = sb.data;
@@ -679,7 +710,14 @@ IrProgram *irgen_program(AstNode *prog) {
                                 gc->has_init = 1;
                                 if (eval_const_expr(iv, &cv)) {
                                     gc->init_int = cv;
-                                } else {
+                                } else
+#if ARKCC_FEATURE_FCONST_FOLD
+                                if (irgen_try_implicit_int_init(gc, iv, &cv)) {
+                                    /* init is a float constant expression: implicit conversion */
+                                    gc->init_int = cv;
+                                } else
+#endif
+                                {
                                     StrBuf sb; sb_init(&sb);
                                     serialize_const_expr(&sb, iv);
                                     gc->init_aggregate = sb.data;
@@ -725,7 +763,14 @@ IrProgram *irgen_program(AstNode *prog) {
                                     eg->has_init = 1;
                                     if (eval_const_expr(iv, &cv)) {
                                         eg->init_int = cv;
-                                    } else {
+                                    } else
+#if ARKCC_FEATURE_FCONST_FOLD
+                                    if (irgen_try_implicit_int_init(eg, iv, &cv)) {
+                                        /* init is a float constant expression: implicit conversion */
+                                        eg->init_int = cv;
+                                    } else
+#endif
+                                    {
                                         StrBuf sb; sb_init(&sb);
                                         serialize_const_expr(&sb, iv);
                                         eg->init_aggregate = sb.data;
@@ -1283,7 +1328,14 @@ static void irgen_stmt(IrGen *g, AstNode *node) {
                         gv->has_init = 1;
                         if (eval_const_expr(iv, &cv)) {
                             gv->init_int = cv;
-                        } else {
+                        } else
+#if ARKCC_FEATURE_FCONST_FOLD
+                        if (irgen_try_implicit_int_init(gv, iv, &cv)) {
+                            /* init is a float constant expression: implicit conversion */
+                            gv->init_int = cv;
+                        } else
+#endif
+                        {
                             StrBuf sb; sb_init(&sb);
                             serialize_const_expr(&sb, iv);
                             gv->init_aggregate = sb.data;

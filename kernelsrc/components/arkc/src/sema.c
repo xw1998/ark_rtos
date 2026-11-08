@@ -157,6 +157,32 @@ int eval_const_fexpr(AstNode *node, double *out) {
         return 0;
     }
 }
+
+/* 浮点常量 -> 整数类型，按 C99 6.3.1.4p1 向零截断。
+ *
+ * 越界（含 NaN/Inf）是 UB，这里**不发明一个值**：返回 0，让调用方报错。
+ * 这样 `int a[(int)1e30];` 停在"不是常量表达式"上，而不是悄悄变成某个整数。
+ * 无符号 64 位超过 LLONG_MAX 的情形同样拒绝（long long 装不下，硬转会得到
+ * 实现定义的值）。 */
+int fconst_to_int(double d, Type *t, long long *out) {
+    double lo = -9223372036854775808.0, hi = 9223372036854775807.0;
+    if (!(d == d)) return 0;                       /* NaN */
+    if (t && t->size > 0 && t->size < 8) {
+        switch (t->size) {
+        case 1: lo = t->is_unsigned ? 0.0 : -128.0;
+                hi = t->is_unsigned ? 255.0 : 127.0; break;
+        case 2: lo = t->is_unsigned ? 0.0 : -32768.0;
+                hi = t->is_unsigned ? 65535.0 : 32767.0; break;
+        default: lo = t->is_unsigned ? 0.0 : -2147483648.0;
+                 hi = t->is_unsigned ? 4294967295.0 : 2147483647.0; break;
+        }
+    } else if (t && t->is_unsigned) {
+        lo = 0.0;
+    }
+    if (!(d >= lo && d <= hi)) return 0;
+    *out = (long long)d;
+    return 1;
+}
 #endif /* ARKCC_FEATURE_FCONST_FOLD */
 
 Type *usual_arith_conv(Type *lt, Type *rt) {
@@ -285,7 +311,23 @@ int eval_const_expr(AstNode *node, long long *out_value) {
             return 1;
         case AST_CAST:
             /* cast: the value is passed through (no truncation here) */
-            return eval_const_expr(node->u.unary.operand, out_value);
+            if (eval_const_expr(node->u.unary.operand, out_value)) return 1;
+#if ARKCC_FEATURE_FCONST_FOLD
+            /* 显式转换到整型时，源可以是一个**浮点**常量表达式：C99 6.6p6 的
+             * 整数常量表达式允许"算术常量表达式 -> 整型"的转换，所以
+             * `(int)(2.5 * 4.0)` 就是 10。以前整棵浮点子树只是"不是常量"，
+             * 于是 `enum { E = (int)(1.5 + 1.5) }` 和 `int n = (int)(2.5*4);`
+             * 都编译不过，且报的是 "expected enum value (constant expression)"，
+             * 看不出真正原因。 */
+            {
+                double d;
+                if (node->type && type_is_integer(node->type) &&
+                    eval_const_fexpr(node->u.unary.operand, &d) &&
+                    fconst_to_int(d, node->type, out_value))
+                    return 1;
+            }
+#endif
+            return 0;
         case AST_VAR: {
             Symbol *s = sym_find(node->u.name);
             if (s && s->kind == SYM_ENUM_CONST) {

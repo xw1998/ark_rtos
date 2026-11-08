@@ -1326,6 +1326,29 @@ static AstNode *parse_enum(Parser *p) {
     }
 }
 
+/* True when a constant expression mentions a float/double operand.  Used to
+ * reject array dimensions such as `2.5` or `(int)(1.0/0.0)` instead of
+ * silently substituting the placeholder dimension 1. */
+static int expr_mentions_float(AstNode *n) {
+    if (!n) return 0;
+    switch (n->kind) {
+    case AST_NUM:
+        return n->type && (n->type->kind == TYPE_FLOAT || n->type->kind == TYPE_DOUBLE);
+    case AST_CAST:
+    case AST_UNARY:
+        return expr_mentions_float(n->u.unary.operand);
+    case AST_BINARY:
+        return expr_mentions_float(n->u.binary.left) ||
+               expr_mentions_float(n->u.binary.right);
+    case AST_TERNARY:
+        return expr_mentions_float(n->u.ternary.cond) ||
+               expr_mentions_float(n->u.ternary.true_expr) ||
+               expr_mentions_float(n->u.ternary.false_expr);
+    default:
+        return 0;
+    }
+}
+
 /* declarator: handle * modifier, array dimensions, function params; return final type, write name to out_name.
  *
  * Simplified: does not support parenthesized declarators like (*fn_ptr)(int), only linear "**name[...][...]".
@@ -1434,6 +1457,16 @@ static Type *parse_declarator(Parser *p, Type *base, char **out_name) {
                 if (dim_expr && eval_const_expr(dim_expr, &folded) && folded > 0) {
                     v = folded;
                 } else {
+                    /* `int a[2.5]` and `int a[(int)(1.0/0.0)]` are not
+                     * integer constant expressions (the first has a float
+                     * type, the second is UB and is deliberately not
+                     * folded).  Both used to fall through to the placeholder
+                     * dimension 1 below, i.e. a one-element array with no
+                     * diagnostic at all.  A dimension that merely is not
+                     * constant (a VLA, `int a[n]`) does not mention a float,
+                     * so the VLA path below is untouched. */
+                    if (dim_expr && expr_mentions_float(dim_expr))
+                        perror_at(p, "array dimension is not an integer constant expression");
 #if ARKCC_FEATURE_VLA
                     /* B3: non-constant dimension -> VLA. Only record first VLA dimension expression,
                      * consumed by parse_local_var_decl / parse_top_decl.
