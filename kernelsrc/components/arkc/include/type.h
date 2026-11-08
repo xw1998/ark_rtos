@@ -5,6 +5,7 @@
 #define ARK_TYPE_H
 
 #include "common.h"
+#include "arkcc_config.h"
 
 typedef enum {
     TYPE_VOID = 0,
@@ -54,6 +55,19 @@ typedef struct Type {
                                    * the pointee is a function, not a data object. */
     int          bf_break;        /* C99 6.7.2.1: width=0 bitfield forces next bitfield to a new storage unit */
 } Type;
+
+/* ARK_IS_CX(t): does `t` name a _Complex type?  Spelled as a literal 0 in a
+ * build without the feature (ARKCC_FEATURE_COMPLEX=0), so `if (ARK_IS_CX(t))`
+ * folds to `if (0)` and the optimiser drops the block -- plus, once nothing
+ * calls them any more, the four-word value helpers.  That is what makes the
+ * gate a real one instead of a #if spread over forty interleaved paths.
+ * `_Complex` is refused by the parser in such a build, so the dropped blocks
+ * were unreachable; nothing else in arkcc produces a TYPE_COMPLEX type. */
+#if ARKCC_FEATURE_COMPLEX
+#  define ARK_IS_CX(t) ((t)->kind == TYPE_COMPLEX)
+#else
+#  define ARK_IS_CX(t) 0
+#endif
 
 Type *type_void(void);
 Type *type_char(void);

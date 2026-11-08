@@ -529,3 +529,84 @@ ELF `text` +456 比逐目标合计 +457 少 1 字节，是段对齐填充，不�
    `riscv64-unknown-elf-` 前缀找工具），传可执行文件路径会 `TypeError: 'NoneType' object is not callable`。
 2. 门禁 runner 取的是**进程退出码**，即程序 `main` 的返回值 **mod 256**；写用例期望值时
    必须保证值 < 256，否则"oracle 不符"全部是模运算造成的假 FAIL。
+
+---
+
+## 欠账 ④：`ARKCC_FEATURE_COMPLEX` 变成真的可裁开关（arkc 本轮）
+
+背景：`ARKCC_FEATURE_COMPLEX` 过去只闸住 parser 的两处语法，机器后端的四字值通路
+（物化/取实虚部/加宽/返回寄存器展开）**无条件编入**，所以板端固件为复数特性长了
+15.5 KB，而翻开关一点用没有。本轮把它做成真开关。
+
+做法（三件常量折叠 + 四处手写 `#if`）：
+
+- `include/ir.h`：`IR_AUX_COMPLEX` 双档定义 —— 闸门开 `0x800`，闸门关 **`0`**。
+  `arkcc_config.h` 则由无条件 `#define` 改成 `#ifndef`，否则 `-D` 会被头文件覆盖
+  （本轮踩到过：两档体积逐字节相同，就是这条）。
+- `include/type.h`：新增 `ARK_IS_CX(t)` —— 闸门开 `((t)->kind == TYPE_COMPLEX)`，
+  闸门关 **`0`**。`irgen.c` / `sema.c` / 三个机器后端里 47 处 `kind == TYPE_COMPLEX`
+  比较全部改用它。
+- `src/parser.c`：`case TOK_COMPLEX:` 双档报错。**顺带修掉一个静默错答案** ——
+  运行期 `-fno-complex` 以前是*忽略*关键字，`double _Complex z` 静默变成 `double z`；
+  现在报 `` `_Complex` is switched off by the run-time configuration (complex=0) ``。
+- 值驱动、折不掉的部分手写 `#if`：`sema.c` 的 `eval_const_cexpr`、
+  `irgen.c` 的 `irgen_try_complex_init`（五个调用点改成
+  `#if ARKCC_FEATURE_FCONST_FOLD && ARKCC_FEATURE_COMPLEX` 只包那一句 `if`，
+  `else` 留在外面保住 `else if` 链）、ARM 与 RV32I 后端的 `cplx_ret`
+  （关档改成 `const int cplx_ret = 0`，下面两个分支自己折掉）。
+
+体积（H743 固件 `example/stm32h743/kernel/ARKRTOS_TEST/GCC`，两档都是
+`make clean` 全量重建，唯一差别是 `OPTFLAGS` 末尾多一个 `-DARKCC_FEATURE_COMPLEX=0`）：
+
+| 口径 | 闸门开 | 闸门关 | 差 |
+|---|---|---|---|
+| `text` | 438 812 | 424 988 | **−13 824 B** |
+| FLASH 占用 | 84.13% | 81.49% | −2.64 pp |
+| `data` / `bss` | 2 260 / 463 532 | 2 260 / 463 532 | 不变 |
+
+宿主 x86-64（四后端全编）：`text 556 740 → 535 484`（−21 256 B）。
+
+ARM 目标集（与固件同一套 `STM32_CFLAGS`，逐文件 `-c` 后 `size -t` 求和，**不是**固件链接值）：
+`246 554 → 232 926`（−13 628 B）；逐目标 `backend_arm.o −8 664`、`irgen.o −4 264`、
+`sema.o −608`、`parser.o −92`。
+
+口径两条（必须一起读）：
+1. 闸门开时的固件比上一轮账本（`text 438 724`）多 **88 B**，那是上面那条新诊断
+   （parser 的运行期拒绝分支）。闸门开时其余输出逐字节不变，host 侧 `text` 仍是 556 740
+   （与改动前一致）。
+2. 与历史 `+15 560 B` 差约 **1.7 KB 不追**：那份增量按"整个复数特性的增长"算，
+   其中有一部分是**双精度通路与常量序列化**，它们同时服务 `double`，闸门关不掉；
+   外加 `init_is_complex` 字段接线与那 88 B。报 −13 824（可复算），不把未回收写成已收回。
+
+新增门禁 `tests/run_complex_gate.py`（宿主，需两个二进制同时在场，**不自己构建**）：
+
+| 检查 | 判据 |
+|---|---|
+| `full/accepts-complex` | 全量档编 `_Complex` 必须成功（正控制） |
+| `trimmed/rejects-complex` | 裁剪档必须失败 |
+| `trimmed/reason-is-configured-out` | 失败原因必须是 `is not available in this build` |
+| `trimmed/not-a-crash` | 不得是信号/段错误 |
+| `trimmed/accepts-plain-C` | 裁剪档必须照收普通 C |
+| `both/plain-asm-identical` | 不含 `_Complex` 的源在两档下汇编文本**逐字节相同** |
+| `full/-fno-complex-is-an-error` | 运行期开关必须报错而非静默忽略 |
+| `selfcheck/plain-build-has-no-config-msg` | 自检的自检：普通源不得出现裁剪档那句文案 |
+
+实测（`--arkcc ./arkcc.exe --arkcc-off ./arkcc_off.exe --arm-as … --arm-libgcc … --rv-as …`）：
+**9 checks, all green**（含 `full/complex-semantic-suite` 76 passed / 0 failed）。
+
+回归账（闸门开档全量重跑，见下表；与上一轮逐项相同，无新增失败）：
+
+| 门禁 | 结果 |
+|---|---|
+| `tests/run_agg_addr_tests.py --arm-as --arm-libgcc --rv-as` | 83 / 0 |
+| `tests/run_func_ptr_global_tests.py` | 39 / 0 |
+| `tests/run_complex_tests.py` | 76 / 0 |
+| `tests/run_arm_int64_tests.py`（不吃 `--rv-as`） | 12 / 0 |
+| `tests/run_c11_keywords_tests.py`（不吃 `--arm-libgcc`） | 30 / 0 |
+| `examples/run_va_gate.py --arm-as --arm-libgcc --rv-as` | 59 / 0 / 2 targets，`--opt-suite` 5/5 green |
+| `run_rv_image` / `alloca` / `sret` / `misc_ir` / `float` / `packed`（`--rv-as`） | 20 / 5 / 13 / 12 / 11 / 7，全 0 failed |
+| `tests/run_rv_link_tests.py` | 10 / 0 |
+| `tests/run_func_typedef_tests.py` | 24 / 0 |
+| `run_capacity_tests.py` / `run_diag_tests.py` / `run_diag_boundary.py` / `run_regalloc_tests.py` | 4 / 0；0 failure；all boundary held；all claims hold |
+| `tests/run_reloc_text_tests.py ./arkcc.exe` | all checks passed |
+| `tests/run_complex_gate.py`（新） | 9 / 9 |

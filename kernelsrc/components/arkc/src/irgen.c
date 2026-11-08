@@ -989,6 +989,7 @@ static int irgen_try_float_init(IrGlobal *gv, AstNode *iv) {
     gv->init_int   = 0;
     return 1;
 }
+#if ARKCC_FEATURE_COMPLEX
 /* _Complex 全局变量的常量初始化。
  *
  * 用在 irgen_try_float_init 之前：后者只看 target 是 float/double，碰到
@@ -1002,7 +1003,7 @@ static int irgen_try_complex_init(IrGlobal *gv, AstNode *iv) {
     Type *dt, *bt;
     if (!gv || !iv) return 0;
     dt = gv->type;
-    if (!dt || dt->kind != TYPE_COMPLEX) return 0;
+    if (!dt || !ARK_IS_CX(dt)) return 0;
     if (iv->kind == AST_INIT_LIST) {
         /* C99 6.7.9p11: a scalar initialiser is a *single* expression,
          * optionally enclosed in braces, so `{3.0}` means 3.0 + 0i and is
@@ -1049,6 +1050,7 @@ static int irgen_try_complex_init(IrGlobal *gv, AstNode *iv) {
     gv->init_int = 0;
     return 1;
 }
+#endif /* ARKCC_FEATURE_COMPLEX */
 
 /* 整型全局变量用**浮点**常量表达式初始化（隐式转换，C99 6.6）：
  *     int g = 2.5 * 4.0;      -> 10
@@ -1185,7 +1187,7 @@ static AstNode *irgen_unwrap_scalar_braces(AstNode *iv, Type *t, const char *nam
         return iv;
     /* `double _Complex z = {re, im};` is two scalars in one brace pair, not a
      * scalar with one value: it belongs to the _Complex folding path. */
-    if (t && t->kind == TYPE_COMPLEX) return iv;
+    if (t && ARK_IS_CX(t)) return iv;
     n = iv->u.init_list.item_count;
     if (n <= 0) return iv;      /* `{}` is not C99; keep the old path */
     v0 = iv->u.init_list.items[0];
@@ -1281,10 +1283,13 @@ IrProgram *irgen_program(AstNode *prog) {
                     AstNode *iv = irgen_unwrap_scalar_braces(d->u.var.init,
                                                             d->u.var.var_type,
                                                             d->u.var.name);
-#if ARKCC_FEATURE_FCONST_FOLD
+#if ARKCC_FEATURE_FCONST_FOLD && ARKCC_FEATURE_COMPLEX
                     if (irgen_try_complex_init(gv, iv)) {
                         /* _Complex 常量初始化：实部/虚部已折叠 */
-                    } else if (irgen_try_float_init(gv, iv)) {
+                    } else
+#endif /* ARKCC_FEATURE_COMPLEX */
+#if ARKCC_FEATURE_FCONST_FOLD
+                    if (irgen_try_float_init(gv, iv)) {
                         /* 浮点常量表达式初值已在编译期算出 */
                     } else
 #endif
@@ -1367,10 +1372,13 @@ IrProgram *irgen_program(AstNode *prog) {
                         AstNode *iv = irgen_unwrap_scalar_braces(d->u.var.init,
                                                                 d->u.var.var_type,
                                                                 d->u.var.name);
-#if ARKCC_FEATURE_FCONST_FOLD
+#if ARKCC_FEATURE_FCONST_FOLD && ARKCC_FEATURE_COMPLEX
                         if (irgen_try_complex_init(eg, iv)) {
                             /* _Complex 常量初始化：实部/虚部已折叠 */
-                        } else if (irgen_try_float_init(eg, iv)) {
+                        } else
+#endif /* ARKCC_FEATURE_COMPLEX */
+#if ARKCC_FEATURE_FCONST_FOLD
+                        if (irgen_try_float_init(eg, iv)) {
                             /* 同上：浮点常量表达式 */
                         } else
 #endif
@@ -1457,10 +1465,13 @@ IrProgram *irgen_program(AstNode *prog) {
 #endif
                         if (c->u.var.init) {
                             AstNode *iv = c->u.var.init;
-#if ARKCC_FEATURE_FCONST_FOLD
+#if ARKCC_FEATURE_FCONST_FOLD && ARKCC_FEATURE_COMPLEX
                             if (irgen_try_complex_init(gc, iv)) {
                                 /* _Complex 常量初始化：实部/虚部已折叠 */
-                            } else if (irgen_try_float_init(gc, iv)) {
+                            } else
+#endif /* ARKCC_FEATURE_COMPLEX */
+#if ARKCC_FEATURE_FCONST_FOLD
+                            if (irgen_try_float_init(gc, iv)) {
                                 /* 同上：浮点常量表达式 */
                             } else
 #endif
@@ -1527,10 +1538,13 @@ IrProgram *irgen_program(AstNode *prog) {
                             /* #3 FIX: Process initializer for block-level globals too */
                             if (c->u.var.init && !eg->has_init) {
                                 AstNode *iv = c->u.var.init;
-#if ARKCC_FEATURE_FCONST_FOLD
+#if ARKCC_FEATURE_FCONST_FOLD && ARKCC_FEATURE_COMPLEX
                                 if (irgen_try_complex_init(eg, iv)) {
                                     /* _Complex 常量初始化：实部/虚部已折叠 */
-                                } else if (irgen_try_float_init(eg, iv)) {
+                                } else
+#endif /* ARKCC_FEATURE_COMPLEX */
+#if ARKCC_FEATURE_FCONST_FOLD
+                                if (irgen_try_float_init(eg, iv)) {
                                     /* 同上：浮点常量表达式 */
                                 } else
 #endif
@@ -1794,7 +1808,7 @@ IrProgram *irgen_program(AstNode *prog) {
                         else if (ptype && ptype->kind == TYPE_ARRAY)
                             pwords = 1;                                /* decays to a pointer */
                         else if (g_irgen_complex_words > 1 && ptype &&
-                                 ptype->kind == TYPE_COMPLEX && sz > 8)
+                                 ARK_IS_CX(ptype) && sz > 8)
                             pwords = 1;   /* four-word value, passed as one address word */
                         else
                             pwords = (sz >= 8) ? 2 : 1;   /* long long / double */
@@ -2129,7 +2143,7 @@ static void irgen_discard_result(IrGen *g, AstNode *node) {
          * pair up to 8 bytes; wider composites are passed by address,
          * which is one word.  Match that or the IR stack drifts. */
         words = (sz > 4 && sz <= 8) ? 2 : 1;
-    } else if (et && et->kind == TYPE_COMPLEX && g_irgen_complex_words > 1) {
+    } else if (et && ARK_IS_CX(et) && g_irgen_complex_words > 1) {
         /* The machine backends carry a complex value as four stack words
          * (imaginary low/high below, real low/high on top); dropping one or
          * two would leave the rest of the value on the IR stack and drift the
@@ -2225,10 +2239,13 @@ static void irgen_stmt(IrGen *g, AstNode *node) {
                 }
                 if (node->u.var.init) {
                     AstNode *iv = node->u.var.init;
-#if ARKCC_FEATURE_FCONST_FOLD
+#if ARKCC_FEATURE_FCONST_FOLD && ARKCC_FEATURE_COMPLEX
                     if (irgen_try_complex_init(gv, iv)) {
                         /* _Complex 常量初始化：实部/虚部已折叠 */
-                    } else if (irgen_try_float_init(gv, iv)) {
+                    } else
+#endif /* ARKCC_FEATURE_COMPLEX */
+#if ARKCC_FEATURE_FCONST_FOLD
+                    if (irgen_try_float_init(gv, iv)) {
                         /* 同上：函数内 static 的浮点常量表达式 */
                     } else
 #endif
@@ -2326,7 +2343,7 @@ static void irgen_stmt(IrGen *g, AstNode *node) {
                      * leave the imaginary half of a multi-value list at zero
                      * without a word, so it is refused here. */
                     if (node->u.var.var_type &&
-                        node->u.var.var_type->kind == TYPE_COMPLEX) {
+                        ARK_IS_CX(node->u.var.var_type)) {
                         int n = iv->u.init_list.item_count;
                         int store_aux = irgen_complex_aux(node->u.var.var_type,
                                                           type_size(node->u.var.var_type));
@@ -2339,7 +2356,7 @@ static void irgen_stmt(IrGen *g, AstNode *node) {
                             g_irgen_errors++;
                         } else {
                             irgen_expr(g, c0);
-                            if (!c0->type || c0->type->kind != TYPE_COMPLEX)
+                            if (!c0->type || !ARK_IS_CX(c0->type))
                                 irgen_widen_real_to_complex(g, c0->type);
                             if (node->u.var.var_type->is_volatile)
                                 store_aux |= IR_AUX_VOLATILE;
@@ -2503,8 +2520,8 @@ static void irgen_stmt(IrGen *g, AstNode *node) {
                          * Measured before the fix: `float _Complex z = 3.0f;`
                          * pushed one word, the store popped four, and reading z
                          * gave 0 -- a silent wrong answer, not a crash. */
-                        if (dt && dt->kind == TYPE_COMPLEX &&
-                            (!st || st->kind != TYPE_COMPLEX)) {
+                        if (dt && ARK_IS_CX(dt) &&
+                            (!st || !ARK_IS_CX(st))) {
                             irgen_widen_real_to_complex(g, st);
                         }
                     }
@@ -2587,8 +2604,8 @@ static void irgen_stmt(IrGen *g, AstNode *node) {
                     {
                         Type *ot = node->u.unary.operand->type;
                         Type *ft = g->fn->ret_type;
-                        if (ft && ft->kind == TYPE_COMPLEX &&
-                            (!ot || ot->kind != TYPE_COMPLEX))
+                        if (ft && ARK_IS_CX(ft) &&
+                            (!ot || !ARK_IS_CX(ot)))
                             irgen_widen_real_to_complex(g, ot);
                     }
                 }
@@ -3007,7 +3024,7 @@ static void irgen_dup_words(IrGen *g, int nw) {
  * two words, everything else one. */
 static int irgen_store_dup_words(Type *t) {
     if (!t) return 1;
-    if (t->kind == TYPE_COMPLEX) return g_irgen_complex_words;
+    if (ARK_IS_CX(t)) return g_irgen_complex_words;
     if (type_size(t) >= 8) return 2;
     return 1;
 }
@@ -3026,7 +3043,7 @@ static int irgen_store_dup_words(Type *t) {
  * emitting the same IR ops it always did.  The C backend keeps one complex
  * value in a single 8-byte slot, so the flag is never set there. */
 static int irgen_is_cplx_float(Type *t) {
-    if (!t || t->kind != TYPE_COMPLEX) return 0;
+    if (!t || !ARK_IS_CX(t)) return 0;
     if (g_irgen_64bit_slots) return 0;
     if (g_irgen_complex_words <= 1) return 0;
     return type_size(t) == 8;
@@ -3120,11 +3137,11 @@ static void irgen_emit_binary_op(IrGen *g, int op, Type *lt, Type *rt) {
      * 4 while the correct value is 4+1i).  An integer op on a 16-byte value
      * cannot be "mostly right", so anything that is not one of the seven
      * defined complex operators is refused instead of being emitted. */
-    if ((lt && lt->kind == TYPE_COMPLEX) || (rt && rt->kind == TYPE_COMPLEX)) {
+    if ((lt && ARK_IS_CX(lt)) || (rt && ARK_IS_CX(rt))) {
         IrOp fop = 0;
         /* rhs is on top of the stack; a real operand has to become a complex
          * with a zero imaginary part before the pair-wise op. */
-        if (rt && rt->kind != TYPE_COMPLEX && rt->kind != TYPE_VOID)
+        if (rt && !ARK_IS_CX(rt) && rt->kind != TYPE_VOID)
             irgen_widen_real_to_complex(g, rt);
         switch (op) {
             case (int)TOK_PLUS:  fop = IR_FADD; break;
@@ -3259,7 +3276,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
             break;
         }
         case AST_NUM:
-            if (node->type && node->type->kind == TYPE_COMPLEX) {
+            if (node->type && ARK_IS_CX(node->type)) {
                 /* C99 complex constant: num_val == -1 selects the imaginary part
                  * (0, fval); otherwise the real part (fval, 0) is used.
                  * Emitted as IR_PUSH_FLOAT with aux 0x600 (double + complex). */
@@ -3496,7 +3513,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                 }
                 /* complex -> real: use IR_F2I with aux 0x400 (the same encoding as
                  * creal() in the C backend), so no extra conversion is required. */
-                if (src_t && src_t->kind == TYPE_COMPLEX &&
+                if (src_t && ARK_IS_CX(src_t) &&
                     dst_t && (dst_t->kind == TYPE_FLOAT || dst_t->kind == TYPE_DOUBLE || type_is_integer(dst_t))) {
                     ir_emit(g->fn, IR_F2I, 0, 0, IR_AUX_COMPLEX);  /* creal */
                 }
@@ -3596,13 +3613,13 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                  * aux 0x600 = double (0x200) + complex (0x400), used by IR_FADD/FSUB/FMUL/FDIV. */
                 {
                     int is_complex = 0;
-                    if (lt && lt->kind == TYPE_COMPLEX) is_complex = 1;
-                    if (rt && rt->kind == TYPE_COMPLEX) is_complex = 1;
+                    if (lt && ARK_IS_CX(lt)) is_complex = 1;
+                    if (rt && ARK_IS_CX(rt)) is_complex = 1;
                     irgen_expr(g, node->u.binary.left);
                     if (is_llong && !is_complex) {
                         irgen_widen_to_64(g, lt, is_unsigned ? type_ullong() : type_llong());
                     }
-                    if (is_complex && lt && lt->kind != TYPE_COMPLEX) {
+                    if (is_complex && lt && !ARK_IS_CX(lt)) {
                         irgen_widen_real_to_complex(g, lt);
                     }
                     irgen_expr(g, node->u.binary.right);
@@ -3620,7 +3637,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                             ptr_diff_div = ptr_elem_size(lt);
                         }
                     }
-                    if (is_complex && rt && rt->kind != TYPE_COMPLEX) {
+                    if (is_complex && rt && !ARK_IS_CX(rt)) {
                         irgen_widen_real_to_complex(g, rt);
                     }
                     if (is_complex && (op == (int)TOK_PLUS || op == (int)TOK_MINUS ||
@@ -3965,8 +3982,8 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                          * needs nothing: it is already four words, and the
                          * narrower destination widths are handled by the store
                          * itself. */
-                        if (dt && dt->kind == TYPE_COMPLEX &&
-                            (!st || st->kind != TYPE_COMPLEX)) {
+                        if (dt && ARK_IS_CX(dt) &&
+                            (!st || !ARK_IS_CX(st))) {
                             irgen_widen_real_to_complex(g, st);
                         }
                     }
@@ -4468,9 +4485,9 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                  * same path: C99 6.5.2.2 converts it first, so the value has to
                  * become four words before it is materialised. */
                 int arg_cplx = g_irgen_complex_words > 1 &&
-                               ((at && at->kind == TYPE_COMPLEX) ||
-                                (pt && pt->kind == TYPE_COMPLEX));
-                if (arg_cplx && at && at->kind == TYPE_COMPLEX) {
+                               ((at && ARK_IS_CX(at)) ||
+                                (pt && ARK_IS_CX(pt)));
+                if (arg_cplx && at && ARK_IS_CX(at)) {
                     int in_va_tail =
                         (s && s->kind == SYM_FUNC && s->is_variadic &&
                          i >= s->param_count) ||
@@ -4504,7 +4521,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                          * the four-word value is unchanged. */
                         int ctmp = alloc_local(g, 8);
                         irgen_expr(g, arg);
-                        if (!at || at->kind != TYPE_COMPLEX)
+                        if (!at || !ARK_IS_CX(at))
                             irgen_widen_real_to_complex(g, at);
                         ir_emit(g->fn, IR_STORE, ctmp, 0, 8 | IR_AUX_COMPLEX);
                         ir_emit(g->fn, IR_PUSH_VAR, ctmp, 0, 8);
@@ -4513,7 +4530,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                     {
                         int ctmp = alloc_local(g, 16);
                         irgen_expr(g, arg);
-                        if (!at || at->kind != TYPE_COMPLEX)
+                        if (!at || !ARK_IS_CX(at))
                             irgen_widen_real_to_complex(g, at);
                         ir_emit(g->fn, IR_STORE, ctmp, 0, 16);
                         ir_emit(g->fn, IR_PUSH_ADDR, ctmp, 0, 0);
@@ -4845,7 +4862,7 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                      * whose type is not in prog->funcs) would leave a single
                      * word on the stack and every later complex operation would
                      * read three words of garbage. */
-                    if (node->type && node->type->kind == TYPE_COMPLEX &&
+                    if (node->type && ARK_IS_CX(node->type) &&
                         g_irgen_complex_words > 1)
                         call_val |= (type_size(node->type) > 8 ? 2LL : 1LL) << 34;
                     /* bits 36..52: the call returns a struct/union wider than

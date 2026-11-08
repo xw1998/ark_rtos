@@ -2501,7 +2501,7 @@ static char *codegen_arm(IrProgram *prog) {
                  * >8-byte memcpy path). */
                 if (pt && (pt->kind == TYPE_STRUCT || pt->kind == TYPE_UNION) && sz > 8)
                     sz = 4;
-                if (pt && pt->kind == TYPE_COMPLEX && sz > 8)
+                if (pt && ARK_IS_CX(pt) && sz > 8)
                     sz = 4;
                 psz[pj] = sz;
             }
@@ -4083,7 +4083,14 @@ static char *codegen_arm(IrProgram *prog) {
                      * and the caller only knows where for a function it can see
                      * the definition of; anything else is refused rather than
                      * read as if r0 were the real half. */
+#if ARKCC_FEATURE_COMPLEX
                     int cplx_ret = (int)((I->val >> 34) & 3);
+#else
+                    /* ARKCC_FEATURE_COMPLEX=0: irgen never stamps a complex
+                     * return shape, so both `cplx_ret == n` branches below are dead
+                     * and fold away. */
+                    const int cplx_ret = 0;
+#endif /* ARKCC_FEATURE_COMPLEX */
                     int sret_buf_off = 0;
 
                     /* armcc intrinsic functions: emit inline instruction instead of BL.
@@ -4694,7 +4701,7 @@ static char *codegen_arm(IrProgram *prog) {
                     break;
                 }
                 case IR_RETURN:
-                    if (f->ret_type && f->ret_type->kind == TYPE_COMPLEX &&
+                    if (f->ret_type && ARK_IS_CX(f->ret_type) &&
                         !is_sret && type_size(f->ret_type) == 8) {
                         /* _Complex float: narrow the four-word value into the
                          * r0:r1 pair AAPCS uses for an 8-byte composite (real
@@ -4716,7 +4723,7 @@ static char *codegen_arm(IrProgram *prog) {
                                              f->is_naked, 1);
                         break;
                     }
-                    if (f->ret_type && f->ret_type->kind == TYPE_COMPLEX &&
+                    if (f->ret_type && ARK_IS_CX(f->ret_type) &&
                         type_size(f->ret_type) > 8) {
                         /* _Complex double: a 16-byte composite goes back in
                          * r0-r3 (soft-float AAPCS, same as GCC), r0:r1 = real
@@ -4934,7 +4941,7 @@ static char *codegen_arm(IrProgram *prog) {
                  * a plain +0.0 when only a real initialiser was given. */
                 union { float f; unsigned int u; } fu;
                 union { double d; unsigned int u[2]; } du;
-                int cplx = (g->type && g->type->kind == TYPE_COMPLEX);
+                int cplx = (g->type && ARK_IS_CX(g->type));
                 Type *bt = cplx ? (g->type ? g->type->base : 0) : g->type;
                 int is_double = (bt && bt->kind == TYPE_DOUBLE);
                 double imv = (cplx && g->init_is_complex) ? g->init_float_im : 0.0;

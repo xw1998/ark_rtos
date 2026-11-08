@@ -6,6 +6,7 @@
 
 #include "common.h"
 #include "type.h"
+#include "arkcc_config.h"
 
 /* #11 FIX: Volatile qualifier support.
  * Bit 0x10000 in aux marks volatile memory accesses (IR_PUSH_VAR,
@@ -41,7 +42,17 @@
  * A complex value is four stack words on the machine backends (re_lo, re_hi,
  * im_lo, im_hi) and one 8-byte slot in the C backend.
  */
+#if ARKCC_FEATURE_COMPLEX
 #define IR_AUX_COMPLEX 0x800
+#else
+/* ARKCC_FEATURE_COMPLEX=0: the bit does not exist.  Spelling it 0 makes every
+ * `aux & IR_AUX_COMPLEX` test a constant 0, so the optimiser folds the whole
+ * complex-only block away and the static helpers it called become
+ * unreferenced -- that is where the 15.5 KB of a four-word value path goes.
+ * Nothing can set the bit in that build because `_Complex` is refused by the
+ * parser, so the folded-away blocks were unreachable to begin with. */
+#define IR_AUX_COMPLEX 0
+#endif
 
 typedef struct IrInst {
     IrOp  op;

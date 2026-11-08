@@ -80,9 +80,30 @@
  * Trimming them would break arkcc's ability to compile STM32 programs.
  * ========================================================================= */
 #define ARKCC_FEATURE_VLA          1   /* variable-length array int a[n] */
-#define ARKCC_FEATURE_COMPLEX      1   /* _Complex */
 #define ARKCC_FEATURE_WCHAR        1   /* wide character wchar_t / L"..." */
 #define ARKCC_FEATURE_TRIGRAPH     1   /* trigraph ??= etc. */
+
+/* ARKCC_FEATURE_COMPLEX: C99 _Complex.  Overridable with -D because it really
+ * is removable: the bit that marks a complex operand is spelled 0 in a
+ * no-complex build, every `aux & IR_AUX_COMPLEX` test then folds to a
+ * constant, and the four-word value paths (materialise / creal / cimag /
+ * widen / return register pair) fall out with it.  `_Complex` is refused by
+ * the parser in that build, so the folded blocks were unreachable.
+ *
+ *   Default 1 everywhere, including STM32_MIN.  Measured on the H743
+ *   firmware (example/stm32h743/kernel/ARKRTOS_TEST, -DARKCC_FEATURE_COMPLEX=0
+ *   on the compile line, everything else unchanged): text 438812 -> 424988,
+ *   i.e. -13824 B and FLASH 84.13% -> 81.49%; data/bss unchanged.
+ *   tests/run_complex_gate.py proves both directions (full build accepts,
+ *   trimmed build refuses with a reason, and code without _Complex is
+ *   byte-identical in the two builds).
+ *
+ *   The default stays 1 on purpose: flipping a default is a behaviour change,
+ *   so it has to be a deliberate decision, not a side effect of adding the
+ *   switch.  A board build that wants the 13.8 KB passes the -D itself. */
+#ifndef ARKCC_FEATURE_COMPLEX
+#   define ARKCC_FEATURE_COMPLEX   1
+#endif
 
 /* ===========================================================================
  * 4. Backend code generation features

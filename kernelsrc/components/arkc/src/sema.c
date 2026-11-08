@@ -157,6 +157,7 @@ int eval_const_fexpr(AstNode *node, double *out) {
         return 0;
     }
 }
+#if ARKCC_FEATURE_COMPLEX
 /* _Complex 常量表达式（C99 6.6）：编译期算出实部与虚部。
  *
  * 只为文件作用域的 _Complex 初始化器服务。没有它，`double _Complex g =
@@ -172,7 +173,7 @@ int eval_const_cexpr(AstNode *node, double *re, double *im) {
     if (!node || !re || !im) return 0;
     switch (node->kind) {
     case AST_NUM:
-        if (node->type && node->type->kind == TYPE_COMPLEX) {
+        if (node->type && ARK_IS_CX(node->type)) {
             /* 虚数字面量（4.0i / 1.0fi）：fval 是虚部 */
             *re = 0.0;
             *im = node->fval;
@@ -183,7 +184,7 @@ int eval_const_cexpr(AstNode *node, double *re, double *im) {
         return 1;
     case AST_CAST:
         if (!node->type) return 0;
-        if (node->type->kind == TYPE_COMPLEX) {
+        if (ARK_IS_CX(node->type)) {
             if (!eval_const_cexpr(node->u.unary.operand, &ar, &ai)) return 0;
             if (node->type->base && node->type->base->kind == TYPE_FLOAT) {
                 ar = (double)(float)ar;
@@ -221,7 +222,7 @@ int eval_const_cexpr(AstNode *node, double *re, double *im) {
         default:
             return 0;
         }
-        if (node->type && node->type->kind == TYPE_COMPLEX &&
+        if (node->type && ARK_IS_CX(node->type) &&
             node->type->base && node->type->base->kind == TYPE_FLOAT) {
             *re = (double)(float)*re;
             *im = (double)(float)*im;
@@ -231,6 +232,7 @@ int eval_const_cexpr(AstNode *node, double *re, double *im) {
         return 0;
     }
 }
+#endif /* ARKCC_FEATURE_COMPLEX */
 
 
 /* 浮点常量 -> 整数类型，按 C99 6.3.1.4p1 向零截断。
@@ -262,8 +264,8 @@ int fconst_to_int(double d, Type *t, long long *out) {
 
 Type *usual_arith_conv(Type *lt, Type *rt) {
     /* complex wins over every real type; _Complex maps to _Complex double */
-    if (lt && lt->kind == TYPE_COMPLEX) return type_complex(type_double());
-    if (rt && rt->kind == TYPE_COMPLEX) return type_complex(type_double());
+    if (lt && ARK_IS_CX(lt)) return type_complex(type_double());
+    if (rt && ARK_IS_CX(rt)) return type_complex(type_double());
     /* Step 1: floating point first */
     if (lt && lt->kind == TYPE_DOUBLE) return type_double();
     if (rt && rt->kind == TYPE_DOUBLE) return type_double();

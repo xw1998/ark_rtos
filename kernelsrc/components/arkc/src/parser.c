@@ -1129,8 +1129,15 @@ static Type *parse_declspec(Parser *p, int *p_storage, int *p_is_typedef) {
             case TOK_COMPLEX:
 #if ARKCC_FEATURE_COMPLEX
                 /* B4: _Complex modifier; applies to subsequent float/double (default double).
-                 * Compile-time + run-time dual guard. */
+                 * Compile-time + run-time dual guard.  The run-time half used to
+                 * silently *ignore* the keyword when it was off, which turns
+                 * `double _Complex z` into a plain `double z` -- a wrong answer,
+                 * not a refusal.  Both halves now refuse. */
                 if (g_config.enable_complex) complex_pending = 1;
+                else perror_at(p, "`_Complex` is switched off by the run-time configuration (complex=0)");
+#else
+                perror_at(p, "`_Complex` is not available in this build: it was configured out "
+                             "(ARKCC_FEATURE_COMPLEX=0)");
 #endif
                 lexer_advance(p->lex);
                 saw_kw = 1; continue;
