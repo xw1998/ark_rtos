@@ -396,7 +396,18 @@ static void ark_fix_far_offset(AsmBuffer *b, int from) {
  *   default              take a slot only when its byte savings pay for the
  *                        4-byte PUSH/POP widening -> the function never grows;
  *   -fopt-regalloc-near  also take near slots (>= 3 accesses): fewer memory
- *                        accesses in the hot path, at ~4 bytes per function. */
+ *                        accesses in the hot path, at ~4 bytes per function.
+ *
+ * Two frame rules, both found by running the varargs gate with the pass on:
+ *
+ *   - the saved block anchors everything above the locals.  The prologue pushes
+ *     r0-r3 (variadic) and {r5,r6,r7,lr} between sp_entry and the frame, so
+ *     every offset above local_size names the saved block or the caller's
+ *     argument image, and widening the saved PUSH moves all of them.  They are
+ *     shifted, not left stale (ra_shift_line);
+ *   - the saved block stays a multiple of 8 bytes.  An odd count of saved words
+ *     leaves sp at 4 mod 8, which breaks AAPCS at every call and would unalign
+ *     the va region too, so an odd count takes one spare register. */
 #define RA_MAX_SLOTS 96
 #define RA_MAX_REGS  4
 #define RA_MIN_USES  3      /* 2 bytes saved per use, 4 bytes of PUSH/POP to pay */
@@ -474,18 +485,103 @@ static int ra_slot(RaSlot *slots, int *n, int off) {
     return (*n)++;
 }
 
+/* Write a non-negative decimal, return the new output index. */
+static int ra_num_out(char *dst, int o, int v) {
+    char num[12];
+    int n = 0, t;
+    if (v == 0) num[n++] = '0';
+    while (v > 0) { num[n++] = (char)('0' + v % 10); v /= 10; }
+    for (t = n - 1; t >= 0; t--) dst[o++] = num[t];
+    return o;
+}
+
+/* Is this line "    ADD rX, r6, rX"?  emit_va_ptr() is the only emitter of
+ * that shape: it materialises frame + offset in a register. */
+static int ra_adds_r6(const char *ln, int reg) {
+    int i = 0, r = 0;
+    while (ln[i] == ' ') i++;
+    if (!(ln[i] == 'A' && ln[i+1] == 'D' && ln[i+2] == 'D' && ln[i+3] == ' ')) return 0;
+    i += 4;
+    if (ln[i] != 'r') return 0;
+    for (i++; ln[i] >= '0' && ln[i] <= '9'; i++) r = r * 10 + (ln[i] - '0');
+    if (r != reg) return 0;
+    if (!(ln[i] == ',' && ln[i+1] == ' ' && ln[i+2] == 'r' && ln[i+3] == '6' &&
+          ln[i+4] == ',' && ln[i+5] == ' ')) return 0;
+    i += 6;
+    if (ln[i] != 'r') return 0;
+    r = 0;
+    for (i++; ln[i] >= '0' && ln[i] <= '9'; i++) r = r * 10 + (ln[i] - '0');
+    return r == reg;
+}
+
+/* Rewrite the frame offsets of one rebuilt line.  Only two shapes can carry an
+ * offset that sits above the locals:
+ *
+ *     [r6, #N]                          a caller stack argument, or the va region
+ *     MOVW rX, #N  +  ADD rX, r6, rX    emit_va_ptr(): frame + va offset
+ *
+ * `next` is the following line ("" at the end of the function) -- the MOVW is
+ * rewritten only when that pair is really an address computation.  `dst` must
+ * hold 4*len bytes: a line is at most 255 characters and each rewrite adds at
+ * most two digits.  Returns the new length. */
+static int ra_shift_line(const char *ln, int len, const char *next,
+                         int base, int delta, char *dst) {
+    int i = 0, o = 0;
+
+    if (len > 12 && ln[4] == 'M' && ln[5] == 'O' && ln[6] == 'V' && ln[7] == 'W' &&
+        ln[8] == ' ' && ln[9] == 'r') {
+        int k = 10, reg = 0, n = 0;
+        while (k < len && ln[k] >= '0' && ln[k] <= '9') { reg = reg * 10 + (ln[k] - '0'); k++; }
+        if (k + 2 < len && ln[k] == ',' && ln[k+1] == ' ' && ln[k+2] == '#') {
+            int st = k + 3;
+            k = st;
+            while (k < len && ln[k] >= '0' && ln[k] <= '9') { n = n * 10 + (ln[k] - '0'); k++; }
+            if (k > st && k == len && n >= base && ra_adds_r6(next, reg)) {
+                for (i = 0; i < st; i++) dst[o++] = ln[i];
+                o = ra_num_out(dst, o, n + delta);
+                dst[o] = 0;
+                return o;
+            }
+        }
+    }
+
+    while (i < len) {
+        if (ln[i] == '[' && i + 6 <= len && ln[i+1] == 'r' && ln[i+2] == '6' &&
+            ln[i+3] == ',' && ln[i+4] == ' ' && ln[i+5] == '#') {
+            int k = i + 6, n = 0;
+            while (k < len && ln[k] >= '0' && ln[k] <= '9') { n = n * 10 + (ln[k] - '0'); k++; }
+            if (k > i + 6 && k < len && ln[k] == ']' && n >= base) {
+                int t;
+                for (t = i; t < i + 6; t++) dst[o++] = ln[t];   /* "[r6, #" */
+                o = ra_num_out(dst, o, n + delta);
+                i = k;
+                continue;
+            }
+        }
+        dst[o++] = ln[i++];
+    }
+    dst[o] = 0;
+    return o;
+}
+
 /* Rewrite b->buf[from..b->len) in place.  Called once per emitted function, at
  * the moment its text is complete, so "the last slice of the buffer" really is
  * that function and nothing else. */
-static void ark_regalloc_function(AsmBuffer *b, int from, IrFunc *f) {
+static void ark_regalloc_function(AsmBuffer *b, int from, IrFunc *f, int local_eff) {
     static RaSlot slots[RA_MAX_SLOTS];
     int nslots = 0;
     int pos, i, k;
+    /* First frame byte above this frame's locals: the saved-register block
+     * starts there, and the caller's argument image right after it.  Every
+     * local lives below it, so an offset >= base is never a local. */
+    int base = local_eff + 16;
+    int extra;
     int made[RA_MAX_REGS];
     int nregs = 0;
     int have_prologue = 0;
     AsmBuffer out;
     char line[256];
+    char nline[256];
 
     if (!ra_enabled()) return;
 
@@ -503,7 +599,11 @@ static void ark_regalloc_function(AsmBuffer *b, int from, IrFunc *f) {
         if (kind >= 0) {
             int s = ra_slot(slots, &nslots, off);
             if (s < 0) { pos += len + 1; continue; }
-            if (kind == 2) {
+            if (kind == 2 || off >= base) {
+                /* Outside this frame's locals -- a caller stack argument, or an
+                 * address that escaped -- so it stays in memory.  Caching an
+                 * incoming argument would also change what the function sees
+                 * when the slot is written through a pointer. */
                 slots[s].taint = 1;
             } else {
                 slots[s].uses++;
@@ -579,6 +679,25 @@ static void ark_regalloc_function(AsmBuffer *b, int from, IrFunc *f) {
     }
     if (nregs == 0) return;
 
+    /* An odd number of saved words would leave sp at 4 mod 8 once the prologue
+     * has run: AAPCS wants 8 at every BL, and the va region the prologue builds
+     * is 8-aligned only because the saved block is.  Take one spare register
+     * instead of giving up a useful one -- a PUSH that names any high register
+     * is 32-bit whatever the length of its list, so the spare costs nothing. */
+    if (nregs & 1) {
+        int r;
+        for (r = 8; r <= 11; r++) {
+            int j, used = 0;
+            for (j = 0; j < nregs; j++)
+                if (made[j] == r) used = 1;
+            if (!used) { made[nregs++] = r; break; }
+        }
+    }
+    /* Bytes the widened PUSH adds above the frame pointer, and therefore the
+     * amount every offset that names the saved block or the caller's argument
+     * image has to grow (stage 3 below). */
+    extra = 4 * nregs;
+
     /* Pass 2: rebuild the text of this function. */
     asmbuf_init(&out);
     for (pos = from; pos < b->len; ) {
@@ -641,9 +760,54 @@ static void ark_regalloc_function(AsmBuffer *b, int from, IrFunc *f) {
         pos += len + 1;
     }
 
+    /* Stage 3: the saved block grew by `extra` bytes, so every frame offset at
+     * or above `base` is that much too small -- the caller's stack arguments
+     * and the va region <stdarg.h> walks.  Left alone, a variadic function or
+     * one with more than four parameters reads the wrong words; both run in the
+     * varargs gate with the pass on.  Locals are all below `base`, so no local
+     * slot can be touched. */
+    if (extra > 0) {
+        AsmBuffer shf;
+        int opos;
+        asmbuf_init(&shf);
+        for (opos = 0; opos < out.len; ) {
+            int len = 0, nlen = 0, olen = 0;
+            char shl[1024];
+            const char *np;
+            while (opos + len < out.len && out.buf[opos + len] != '\n') len++;
+            if (len >= (int)sizeof(line)) {
+                /* Unreachable: pass 2 slices by the same limit and never emits
+                 * a longer line.  Copy verbatim rather than guess. */
+                for (i = 0; i < len; i++) asmbuf_putc(&shf, out.buf[opos + i]);
+                asmbuf_putc(&shf, '\n');
+                opos += len + 1;
+                continue;
+            }
+            for (i = 0; i < len; i++) line[i] = out.buf[opos + i];
+            line[len] = 0;
+            np = out.buf + opos + len;
+            if (*np == '\n') np++;
+            while (np[nlen] && np[nlen] != '\n' && nlen < (int)sizeof(nline) - 1) {
+                nline[nlen] = np[nlen];
+                nlen++;
+            }
+            nline[nlen] = 0;
+            olen = ra_shift_line(line, len, nline, base, extra, shl);
+            for (i = 0; i < olen; i++) asmbuf_putc(&shf, shl[i]);
+            asmbuf_putc(&shf, '\n');
+            opos += len + 1;
+        }
+        asmbuf_reserve(&out, shf.len + 1);
+        for (i = 0; i < shf.len; i++) out.buf[i] = shf.buf[i];
+        out.buf[shf.len] = 0;
+        out.len = shf.len;
+    }
+
     /* Splice back.  In the default mode the selected slots pay for the wider
      * PUSH/POP, so the result is never longer; the guard is here so a future
-     * change cannot silently overflow the buffer. */
+     * change cannot silently overflow the buffer.  The reserve is not optional
+     * now: stage 3 can lengthen a line by a digit or two. */
+    asmbuf_reserve(b, from + out.len + 1);
     if (from + out.len + 1 <= b->cap) {
         for (i = 0; i < out.len; i++) b->buf[from + i] = out.buf[i];
         b->buf[from + out.len] = 0;
@@ -3820,7 +3984,7 @@ static char *codegen_arm(IrProgram *prog) {
 #if ARKCC_FEATURE_OPT_REGALLOC
         /* The text of this function is complete: it is the last slice of the
          * buffer, so the rewrite sees exactly this function and nothing else. */
-        ark_regalloc_function(&buf, fstart, f);
+        ark_regalloc_function(&buf, fstart, f, local_size);
 #endif
         /* Correctness, not an option: a frame slot beyond 4095 bytes cannot be
          * reached by "[r6, #off]" at all. */
