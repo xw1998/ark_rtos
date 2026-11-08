@@ -107,6 +107,43 @@ static int aga_string(ArkAgg *c, unsigned char *buf, int gsz, int off, int n) {
     return off + ((i < n) ? i : n);
 }
 
+static int ark_agg_value(ArkAgg *c, Type *t, unsigned char *buf, int gsz,
+                         int off);
+
+/* Set `width` bits of a storage unit, little-endian, starting at `bit_off`:
+ * the unit is what a bitfield store writes, so the initialiser has to land in
+ * exactly the same place.  The rest of the unit keeps whatever the earlier
+ * fields put there. */
+static void aga_set_bits(unsigned char *buf, int off, int unit_sz, int bit_off,
+                         int width, unsigned long long v) {
+    unsigned long long unit = 0, mask;
+    int i;
+    if (unit_sz <= 0 || unit_sz > 8 || width <= 0 || bit_off < 0) return;
+    for (i = 0; i < unit_sz; i++)
+        unit |= (unsigned long long)buf[off + i] << (8 * i);
+    mask = (width >= 64) ? ~0ULL : ((1ULL << width) - 1ULL);
+    unit = (unit & ~(mask << bit_off)) | ((v & mask) << bit_off);
+    for (i = 0; i < unit_sz; i++)
+        buf[off + i] = (unsigned char)((unit >> (8 * i)) & 0xFF);
+}
+
+/* One struct/union member at byte offset `off`: a bitfield is a bit range
+ * inside its storage unit, everything else is a byte range. */
+static int ark_agg_field(ArkAgg *c, StructField *f, unsigned char *buf,
+                         int gsz, int off) {
+    if (!f) return -1;
+    if (f->bit_width > 0) {
+        long long v;
+        int usz = f->type ? type_size(f->type) : 4;
+        if (usz <= 0 || off + f->offset + usz > gsz) return -1;
+        if (!aga_num(c, &v)) return -1;
+        aga_set_bits(buf, off + f->offset, usz, f->bit_offset, f->bit_width,
+                     (unsigned long long)v);
+        return off + f->offset + usz;
+    }
+    return ark_agg_value(c, f->type, buf, gsz, off + f->offset) < 0 ? -1 : 0;
+}
+
 /* One initialiser value of type `t` at byte offset `off`; returns the offset
  * just past it, or -1 when the text is not something this build emits. */
 static int ark_agg_value(ArkAgg *c, Type *t, unsigned char *buf, int gsz, int off) {
@@ -183,13 +220,46 @@ static int ark_agg_value(ArkAgg *c, Type *t, unsigned char *buf, int gsz, int of
                 if (!f) return -1;
             }
             if (!f) return -1;
-            if (f->bit_width > 0) return -1;  /* bitfield storage is not bytes */
-            if (ark_agg_value(c, f->type, buf, gsz, f->offset) < 0) return -1;
+            if (ark_agg_field(c, f, buf, gsz, off) < 0) return -1;
             f = f->next;
         }
     }
-    case TYPE_UNION:
-        return -1;                        /* overlapping storage: no guess */
+    case TYPE_UNION: {
+        /* C99 6.7.8p10: an undesignated initialiser initialises the *first*
+         * member, and a designator picks another.  Only one member is ever
+         * live, so `{.i = 0x41424344}` is well defined -- refusing it used to
+         * leave the whole union zero without a word. */
+        StructField *f = t->fields;
+        int cap = type_size(t);
+        aga_ws(c);
+        if (*c->s != '{') return -1;
+        c->s++;
+        aga_ws(c);
+        if (*c->s == '}') { c->s++; return off + (cap > 0 ? cap : 0); }
+        if (*c->s == '.') {
+            char nm[64];
+            int k = 0;
+            c->s++;
+            aga_ws(c);
+            while (*c->s && *c->s != '=' && *c->s != ' ' && *c->s != '\t'
+                   && k < 63)
+                nm[k++] = *c->s++;
+            nm[k] = 0;
+            while (*c->s && *c->s != '=') c->s++;
+            if (*c->s != '=') return -1;
+            c->s++;
+            f = type_find_field(t, nm);
+            if (!f) return -1;
+        }
+        if (!f) return -1;
+        if (ark_agg_field(c, f, buf, gsz, off) < 0) return -1;
+        aga_ws(c);
+        if (*c->s == ',') c->s++;
+        aga_ws(c);
+        if (*c->s != '}') return -1;      /* only one member of a union */
+        c->s++;
+        return off + (cap > 0 ? cap : 0);
+    }
     default: {
         long long v;
         int sz;

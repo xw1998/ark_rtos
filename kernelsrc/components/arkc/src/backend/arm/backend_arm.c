@@ -2742,8 +2742,7 @@ static char *codegen_arm(IrProgram *prog) {
                             emit_line(&buf, "LDRB r3, [r0, #1]");
                             emit_line(&buf, "LSL r3, r3, #8");
                             emit_line(&buf, "ORR r0, r2, r3");
-                        } else {
-                            /* Default to 4-byte handling (es>=4 takes the low 4 bytes) */
+                        } else if (es == 4) {
                             emit_line(&buf, "LDRB r2, [r0, #0]");
                             emit_line(&buf, "LDRB r3, [r0, #1]");
                             emit_line(&buf, "LSL r3, r3, #8");
@@ -2754,6 +2753,36 @@ static char *codegen_arm(IrProgram *prog) {
                             emit_line(&buf, "LDRB r3, [r0, #3]");
                             emit_line(&buf, "LSL r3, r3, #24");
                             emit_line(&buf, "ORR r0, r2, r3");
+                        } else {
+                            /* es == 8: assemble the low word, push it, then the
+                             * high word and push that -- the same "low first,
+                             * high on top" order the aligned path uses, so the
+                             * consumer cannot tell the two apart.  This used to
+                             * fall into the 4-byte branch above and hand back a
+                             * silently short long long; it is now real. */
+                            emit_line(&buf, "LDRB r2, [r0, #0]");
+                            emit_line(&buf, "LDRB r3, [r0, #1]");
+                            emit_line(&buf, "LSL r3, r3, #8");
+                            emit_line(&buf, "ORR r2, r2, r3");
+                            emit_line(&buf, "LDRB r3, [r0, #2]");
+                            emit_line(&buf, "LSL r3, r3, #16");
+                            emit_line(&buf, "ORR r2, r2, r3");
+                            emit_line(&buf, "LDRB r3, [r0, #3]");
+                            emit_line(&buf, "LSL r3, r3, #24");
+                            emit_line(&buf, "ORR r2, r2, r3");
+                            emit_line(&buf, "PUSH {r2}");
+                            emit_line(&buf, "LDRB r2, [r0, #4]");
+                            emit_line(&buf, "LDRB r3, [r0, #5]");
+                            emit_line(&buf, "LSL r3, r3, #8");
+                            emit_line(&buf, "ORR r2, r2, r3");
+                            emit_line(&buf, "LDRB r3, [r0, #6]");
+                            emit_line(&buf, "LSL r3, r3, #16");
+                            emit_line(&buf, "ORR r2, r2, r3");
+                            emit_line(&buf, "LDRB r3, [r0, #7]");
+                            emit_line(&buf, "LSL r3, r3, #24");
+                            emit_line(&buf, "ORR r2, r2, r3");
+                            emit_line(&buf, "PUSH {r2}");
+                            break;
                         }
                     } else if (es == 8) {
                         /* #A4 FIX: 8-byte element (long long/double): load low and high words.
@@ -2777,6 +2806,33 @@ static char *codegen_arm(IrProgram *prog) {
                      * optimizer/host-compiler correctness and does not affect
                      * the ARM store encoding. */
                     int packed = (I->aux & 0x400) ? 1 : 0;
+                    if (es == 8 && packed) {
+                        /* 8-byte __packed store: the same three stack slots as
+                         * the aligned path, but written one byte at a time --
+                         * an aligned STR to an odd address faults.  r3 is the
+                         * shift scratch; the value is pushed back so the store
+                         * expression still has a value. */
+                        emit_line(&buf, "POP {r1}");          /* r1 = high word (top) */
+                        emit_pop_r0(&buf);                     /* r0 = low word */
+                        emit_line(&buf, "POP {r2}");          /* r2 = addr */
+                        emit_line(&buf, "STRB r0, [r2, #0]");
+                        emit_line(&buf, "LSR r3, r0, #8");
+                        emit_line(&buf, "STRB r3, [r2, #1]");
+                        emit_line(&buf, "LSR r3, r0, #16");
+                        emit_line(&buf, "STRB r3, [r2, #2]");
+                        emit_line(&buf, "LSR r3, r0, #24");
+                        emit_line(&buf, "STRB r3, [r2, #3]");
+                        emit_line(&buf, "STRB r1, [r2, #4]");
+                        emit_line(&buf, "LSR r3, r1, #8");
+                        emit_line(&buf, "STRB r3, [r2, #5]");
+                        emit_line(&buf, "LSR r3, r1, #16");
+                        emit_line(&buf, "STRB r3, [r2, #6]");
+                        emit_line(&buf, "LSR r3, r1, #24");
+                        emit_line(&buf, "STRB r3, [r2, #7]");
+                        emit_line(&buf, "PUSH {r0}");
+                        emit_line(&buf, "PUSH {r1}");
+                        break;
+                    }
                     if (es == 8) {
                         /* #A4 FIX: 8-byte element (long long/double): stack has
                          * [addr, value_low, value_high] (high on top, per IR_STORE
