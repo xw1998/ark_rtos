@@ -73,6 +73,25 @@ extern int g_arm_dump_syms;
 extern int g_arm_vt_reserve;
 /* 1 = the selected CPU has a double-precision FPU (see backend_arm.c). */
 extern int g_arm_fpu_dp;
+
+/* riscv32 object mode: 1 when the driver is producing an ARKOBJ2 object (-c)
+ * rather than a flat image.  It changes exactly one thing -- a reference to a
+ * symbol this translation unit does not define becomes a relocation instead of
+ * a hard error.  Zero by default, so every flat-image path is byte-identical. */
+extern int g_rv_obj_mode;
+
+/* riscv32 cross-object relocation, applied by the -link driver after the
+ * objects have been placed.  `off` is the site and `target` the symbol, both as
+ * offsets inside the merged image (the flash base cancels in the PC-relative
+ * form and is added back for an absolute .word).  Returns 0 on success, -1 when
+ * the site does not hold the instruction pair the relocation describes or the
+ * displacement does not fit -- the caller must then refuse to write the image.
+ * The type numbers live here because both the assembler (which records them)
+ * and the driver (which applies them) have to agree on them. */
+#define RV_RELOC_AUIPC  13
+#define RV_RELOC_ABS32  14
+int rv_patch_reloc(unsigned char *code, int code_size, int off, int target,
+                   int type, unsigned image_base);
 void arm_dump_syms_init(void);
 
 #endif /* ARK_BACKEND_H */

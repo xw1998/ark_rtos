@@ -606,6 +606,15 @@ static int obj_put_sym(unsigned char *buf, int ol, const char *nm,
  * an object built without the feature is byte-identical to a 0.7.x object. */
 #define OBJ_TEXT_BASE_SYM "__arkcc_text_base"
 #define OBJ_SYM_TYPE_TEXT 3
+/* riscv32: an object set identity tag.  The ARM and RV relocations share one
+ * table, but their type numbers mean different things (13/14 are RV auipc /
+ * abs32; ARM's 4/5/10/11 are MOVW/MOVT and Thumb branches), so linking a
+ * riscv32 object through the ARM path used to "succeed" by reading the RV
+ * relocations as Thumb branches -- a corrupt image with exit code 0.  The
+ * driver now demands the tag on every riscv32 object and rejects it on an ARM
+ * link.  The offset field is unused (0). */
+#define OBJ_ISA_RV32_SYM "__arkcc_isa_riscv32"
+#define OBJ_SYM_TYPE_ISA 5
 
 /* Write an ARKOBJ2 object file: "ARKOBJ2\n" + u32 code size + code body +
  * u32 symbol count + symbols + u32 reloc count + relocs (readers live in the
@@ -613,9 +622,11 @@ static int obj_put_sym(unsigned char *buf, int ol, const char *nm,
  * assembly input (.s/.S/.asm with -c), so that the two paths cannot drift.
  *
  * asm_len is the length of the assembly text in g_asm; bin_len is the length
- * of the assembled machine code in g_code. Text backends (c/riscv32) have no
- * assembly step and store the text itself, so bin_len is unused there.
- * The caller must have run be->assemble() for arm/x86 before calling this.
+ * of the assembled machine code in g_code. The "c" backend has no assembly
+ * step and stores the text itself, so bin_len is unused there.
+ * The caller must have run be->assemble() for arm/x86/riscv32 before calling
+ * this: riscv32 grows a real assembler in 0.8.x, so its object body is machine
+ * code at the image layout its own -link path expects.
  */
 static int write_ark_obj(const ArkBackend *be, const ArkOptions *opts,
                          int asm_len, int bin_len) {
@@ -623,8 +634,10 @@ static int write_ark_obj(const ArkBackend *be, const ArkOptions *opts,
     const char *target;
     static unsigned char obj_buf[ARK_OBJ_BUF_SIZE] __attribute__((section(".ark_buf")));
     int ol = 0;
-    int is_obj_backend = ark_streq(be->name, "arm") || ark_streq(be->name, "x86");
+    int is_obj_backend = ark_streq(be->name, "arm") || ark_streq(be->name, "x86") ||
+                         ark_streq(be->name, "riscv32");
     int code_len = is_obj_backend ? bin_len : asm_len;
+    int isa_extra = ark_streq(be->name, "riscv32") ? 1 : 0;
     /* SRAM window of this unit, only meaningful for the ARM backend. */
     unsigned ram_start = 0, ram_end = 0;
     int ram_extra = 0;
@@ -726,6 +739,31 @@ static int write_ark_obj(const ArkBackend *be, const ArkOptions *opts,
         p_reloc_type  = x86_get_reloc_type;
 #endif
     }
+#if ARKCC_BACKEND_RISCV32
+    else if (ark_streq(be->name, "riscv32")) {
+        /* This backend implements the getters in backend_riscv32.c rather than
+         * declaring prototypes in backend.h -- they exist only for this one
+         * caller, and only the object path asks for them. */
+        extern int   rv_get_symbol_count(void);
+        extern const char *rv_get_symbol_name(int idx);
+        extern int   rv_get_symbol_offset(int idx);
+        extern int   rv_get_symbol_type(int idx);
+        extern int   rv_get_symbol_weak(int idx);
+        extern int   rv_get_reloc_count(void);
+        extern const char *rv_get_reloc_name(int idx);
+        extern int   rv_get_reloc_offset(int idx);
+        extern int   rv_get_reloc_type(int idx);
+        p_sym_count   = rv_get_symbol_count;
+        p_sym_name    = rv_get_symbol_name;
+        p_sym_offset  = rv_get_symbol_offset;
+        p_sym_type    = rv_get_symbol_type;
+        p_sym_weak    = rv_get_symbol_weak;
+        p_reloc_count = rv_get_reloc_count;
+        p_reloc_name  = rv_get_reloc_name;
+        p_reloc_offset= rv_get_reloc_offset;
+        p_reloc_type  = rv_get_reloc_type;
+    }
+#endif /* ARKCC_BACKEND_RISCV32 */
 
     /* --reloc-text: one extra descriptor telling the linker which base every
      * absolute address in this object was computed against.  It has to be
@@ -745,7 +783,7 @@ static int write_ark_obj(const ArkBackend *be, const ArkOptions *opts,
         int si;
         /* The RAM-footprint descriptor is appended after the real symbols so
          * that older readers that ignore trailing symbols still work. */
-        int sc_total = sc + ram_extra + text_extra;
+        int sc_total = sc + ram_extra + text_extra + isa_extra;
         /* symbol count (4 bytes LE) */
         obj_buf[ol++] = (unsigned char)(sc_total & 0xFF);
         obj_buf[ol++] = (unsigned char)((sc_total >> 8) & 0xFF);
@@ -786,6 +824,10 @@ static int write_ark_obj(const ArkBackend *be, const ArkOptions *opts,
         if (text_extra) {
             ol = obj_put_sym(obj_buf, ol, OBJ_TEXT_BASE_SYM, (int)text_base,
                              OBJ_SYM_TYPE_TEXT, 0);
+        }
+        if (isa_extra) {
+            ol = obj_put_sym(obj_buf, ol, OBJ_ISA_RV32_SYM, 0,
+                             OBJ_SYM_TYPE_ISA, 0);
         }
     } else {
         /* Non-object backend: write 0 symbol count */
@@ -965,6 +1007,14 @@ int ark_compile(const ArkOptions *opts) {
         int is_binary = 0;
         const char *out_path;
         int li;
+        /* Which relocations the object set speaks.  Resolved through the
+         * backend table so an alias (-target rv32) counts as riscv32 too.  The
+         * object files themselves carry the answer as a descriptor symbol; the
+         * two are cross-checked below, because reading RV relocations through
+         * the ARM patcher produces a corrupt image with exit code 0. */
+        const ArkBackend *link_be = opts->target ? ark_backend_find(opts->target) : 0;
+        int is_rv_link = (link_be && ark_streq(link_be->name, "riscv32")) ? 1 : 0;
+        int ld_isa_rv32 = 0;
 
         /* The link phase allocates its symbol table, relocation table and
          * image buffer from the same bump pool the compiler uses, and this
@@ -1037,7 +1087,17 @@ int ark_compile(const ArkOptions *opts) {
                 int n = fs_read_file(opts->link_inputs[li], buf, LD_BUF_SIZE);
                 const unsigned char *up = (const unsigned char *)buf;
                 int pos = 8;  /* skip "ARKOBJ2\n" header */
-                int base = out_len;
+                int base;
+                if (is_rv_link) {
+                    /* A riscv32 object references everything PC-relative, so it
+                     * can be placed anywhere; 16 bytes keeps the section
+                     * alignment the assembler applied inside it meaningful, and
+                     * zero padding keeps the image free of uninitialised bytes.
+                     * ARM objects stay back-to-back, exactly as before. */
+                    while ((out_len & 15) && out_len < LD_BUF_SIZE)
+                        out_buf[out_len++] = 0;
+                }
+                base = out_len;
                 if (li < LD_MAX_OBJS) g_ld_code_base[li] = base;
                 int code_sz, sym_cnt, reloc_cnt, si, ri;
                 if (n < 0) {
@@ -1071,6 +1131,13 @@ int ark_compile(const ArkOptions *opts) {
                 }
                 { int k; for (k = 0; k < code_sz; k++) out_buf[out_len++] = up[pos + k]; }
                 pos += code_sz;
+                if (opts->verbose) {
+                    /* Where each object landed.  A flat image carries no symbol
+                     * table, so this line plus ARKCC_DUMP_SYMS is the only way
+                     * to turn an object-relative offset into an address. */
+                    ark_log("[link] object %d: base 0x%X, %d bytes\n",
+                            li, base, code_sz);
+                }
                 /* Symbol table: count + entries
                  * Each entry: name_len(4) + name(name_len) + offset(4) + type(1) + is_weak(1) */
                 sym_cnt = rd_le32(up + pos); pos += 4;
@@ -1095,6 +1162,10 @@ int ark_compile(const ArkOptions *opts) {
                             g_ld_text_base[li] = (unsigned)sym_off;
                             g_ld_have_text_base[li] = 1;
                         }
+                        continue;
+                    }
+                    if (ark_streq(sym_name, OBJ_ISA_RV32_SYM)) {
+                        ld_isa_rv32 = 1;
                         continue;
                     }
                     if (ark_streq(sym_name, OBJ_RAM_START_SYM)) {
@@ -1140,6 +1211,26 @@ int ark_compile(const ArkOptions *opts) {
             if (ld_rt_dup_count > 0) {
                 ark_log("[link] note: %d duplicate compiler-runtime symbols "
                         "merged (first definition kept)\n", ld_rt_dup_count);
+            }
+            /* The two object kinds need different relocation semantics, so a
+             * set that does not match the selected target is refused here
+             * rather than patched with the wrong reader. */
+            if (is_rv_link && !ld_isa_rv32) {
+                diag_tool(DIAG_SEV_ERROR, g_ld_image,
+                          "-target riscv32 was given but this object set carries no "
+                          "%s descriptor, so it was produced for another "
+                          "architecture; link it with that target instead",
+                          OBJ_ISA_RV32_SYM, 0,0,0,0,0);
+                return ARK_ERR_LINK;
+            }
+            if (!is_rv_link && ld_isa_rv32) {
+                diag_tool(DIAG_SEV_ERROR, g_ld_image,
+                          "these objects were compiled for riscv32 but the link "
+                          "target is not; pass -target riscv32 (the riscv32 "
+                          "relocations mean something else to the ARM patcher, so "
+                          "linking them here would produce a corrupt image)",
+                          0,0,0,0,0,0);
+                return ARK_ERR_LINK;
             }
             /* === Multi-object SRAM overlap check ===
              * -link concatenates code sections and resolves code relocations,
@@ -1553,7 +1644,43 @@ int ark_compile(const ArkOptions *opts) {
                         * symbol, so treating it as an unresolved reference
                         * would fail the link on a valid image. */
                     idx = ld_find_global(g_ld_relocs[ri].name);
-                    if (idx >= 0)
+                    if (idx >= 0 && (g_ld_relocs[ri].type == RV_RELOC_AUIPC ||
+                                     g_ld_relocs[ri].type == RV_RELOC_ABS32)) {
+#if ARKCC_BACKEND_RISCV32
+                        /* riscv32: the site carries an instruction pair (or an
+                         * address word), and the patch is computed from where
+                         * it actually landed.  A site that does not hold that
+                         * pattern means the object disagrees with its own
+                         * relocation table, so nothing gets written. */
+                        if (rv_patch_reloc(out_buf, out_len, g_ld_relocs[ri].offset,
+                                           g_ld_syms[idx].offset,
+                                           g_ld_relocs[ri].type,
+                                           0x08000000u) != 0) {
+                            char b1[12], b2[12];
+                            diag_tool(DIAG_SEV_ERROR, g_ld_image,
+                                      "the riscv32 relocation at offset %s for '%s' "
+                                      "does not hold the instruction pair it "
+                                      "describes, or its displacement does not fit; "
+                                      "no image was written",
+                                      diag_num(b1, g_ld_relocs[ri].offset),
+                                      g_ld_relocs[ri].name, 0,0,0,0);
+                            unresolved++;
+                        }
+#else
+                        /* This build has no riscv32 backend (the STM32 profiles
+                         * trim it), so there is no patcher for these types.
+                         * Feeding them to the ARM one would write Thumb
+                         * encodings into a RISC-V object and exit 0. */
+                        char b1[12];
+                        diag_tool(DIAG_SEV_ERROR, g_ld_image,
+                                  "this build has no riscv32 backend, so the "
+                                  "riscv32 relocation at offset %s for '%s' "
+                                  "cannot be applied; no image was written",
+                                  diag_num(b1, g_ld_relocs[ri].offset),
+                                  g_ld_relocs[ri].name, 0,0,0,0);
+                        unresolved++;
+#endif /* ARKCC_BACKEND_RISCV32 */
+                    } else if (idx >= 0)
                         ld_patch_ref(out_buf, out_len, g_ld_relocs[ri].offset,
                                      g_ld_syms[idx].offset, g_ld_relocs[ri].type);
                     else {
@@ -1681,6 +1808,12 @@ int ark_compile(const ArkOptions *opts) {
             return ARK_OK;
         }
 
+        /* -c wants an object, where an undefined symbol becomes a relocation;
+         * a flat .bin must refuse one, because nothing will ever fill it in.
+         * Only the riscv32 backend reads this flag. */
+#if ARKCC_BACKEND_RISCV32
+        g_rv_obj_mode = opts->compile_only ? 1 : 0;
+#endif
         code_size = be2->assemble(asm_text, g_code, ARK_CODE_BUF_SIZE);
         if (code_size < 0) {
             diag_tool(DIAG_SEV_ERROR, opts->input_path, "assembly failed", 0,0,0,0,0,0);
@@ -2131,7 +2264,15 @@ int ark_compile(const ArkOptions *opts) {
     /* -c mode: write an ARKOBJ2 object instead of a flat binary. */
     if (opts->compile_only) {
         int code_len = asm_len;
-        if (ark_streq(be->name, "arm") || ark_streq(be->name, "x86")) {
+        if (ark_streq(be->name, "arm") || ark_streq(be->name, "x86") ||
+            ark_streq(be->name, "riscv32")) {
+            /* riscv32 used to fall through with code_len = asm_len, i.e. the
+             * object body was the assembly text -- an "object" nothing could
+             * link. It has a real assembler now, so the object carries the
+             * machine code at the layout its -link path lays out. */
+#if ARKCC_BACKEND_RISCV32
+            g_rv_obj_mode = 1;
+#endif
             code_len = be->assemble(g_asm, g_code, ARK_CODE_BUF_SIZE);
             if (code_len < 0) {
                 diag_tool(DIAG_SEV_ERROR, g_ld_image, "assembly failed", 0,0,0,0,0,0);
@@ -2197,6 +2338,9 @@ int ark_compile(const ArkOptions *opts) {
         return ARK_OK;
     }
 
+#if ARKCC_BACKEND_RISCV32
+    g_rv_obj_mode = 0;    /* a raw image has no linker: unresolved is fatal */
+#endif
     code_size = be->assemble(g_asm, g_code, ARK_CODE_BUF_SIZE);
     if (code_size < 0) {
         diag_tool(DIAG_SEV_ERROR, "arkcc", "assembly failed", 0,0,0,0,0,0);

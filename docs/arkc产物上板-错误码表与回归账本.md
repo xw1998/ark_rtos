@@ -153,6 +153,35 @@ py -3 tools/final_app.py --only m2-pack
 
 ---
 
+## 6.1 板端没有 riscv32 后端（裁剪档）——RV 对象必须被拒，不能被当 ARM 补丁
+
+STM32 profile（`ARKCC_PROFILE=STM32_MIN` / `CROSS_COMPILE`）把 `ARKCC_BACKEND_RISCV32`
+置 0，所以板上这份 arkc **不编 `backend_riscv32.c`**：`ark_backend_find("riscv32")` 返回
+NULL，`-target riscv32` 在板上根本不可达。
+
+上游 0.9 给 riscv32 补了 `-c`/`-link`（对象体装机器码、跨对象 `auipc` 对与 `.word`
+绝对地址两种重定位），`src/compiler.c` 因此多了一批只在宿主构建里存在的引用
+（`rv_get_*` 九个 getter、`g_rv_obj_mode`、`rv_patch_reloc`）。这些**全部包在
+`#if ARKCC_BACKEND_RISCV32` 里**——不包的话板上链接阶段会直接
+`undefined reference to 'rv_get_symbol_count'` 一串，整个固件编不出来。
+
+那条 `#else` 里写的不是空语句，而是明确报错：
+
+```
+this build has no riscv32 backend, so the riscv32 relocation at offset <n>
+for '<sym>' cannot be applied; no image was written
+```
+
+因为「函数不存在」的正确后果是**拒绝这个对象**，而不是把它交给 ARM 的
+`ld_patch_ref`——那会把 Thumb 分支编码写进 RISC-V 对象，然后 exit 0。同一个逻辑在
+宿主侧的表现是 `__arkcc_isa_riscv32` 描述符的双向校验（见上游 README 的「RV32I 的对象
+模式」）。
+
+体积代价：这一轮（含上游 0.9 的 RV 对象模式与 ISA 校验）H743 干净构建
+`text 412972 / data 2256 / bss 463532`，比上一版 `text 412180` 多 792 B，FLASH 占用
+79.20%。板端能编出的目标只是 ARM，这些字节属于"永远走不到但必须存在的守卫"，不做
+进一步裁剪（裁到只剩 `#error` 会让板端拿到 RV 对象时的行为与宿主不一致）。
+
 ## 7. 相关文件
 
 | 文件 | 内容 |
