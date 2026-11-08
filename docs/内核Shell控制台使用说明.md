@@ -71,6 +71,7 @@ ark@arkrtos:~$
 | `trace` | `trace [start \| stop \| reset \| dump \| mark <n>]` | 内核事件 trace 的开关、复位、导出与打标记 |
 | `cfg` | `cfg [show \| load \| clear]` | 设备端布局配置：查看当前生效值 / 从配置区重新加载 / 清空配置区并回到编译期默认 |
 | `syncinfo` | `syncinfo` | 同步对象体检：sem / mtx / cond 三张表（count / owner / creator / waiters）+ 每个 sem 的 `posts takes queued last_waiter qbefore woke reason`，末尾三行 `ghost` / `dup` / `appwait hit`。判定口径见 §8 |
+| `stack` | `stack [check \| raw]` | 任务栈用量水印：每个任务的栈总量 / 已用 / 占比，超 75% 打 warn、超 90% 打 danger。`check` 在表后追加一行判词并用返回码表达结果；`raw` 把水印 fill 与最低 PSP 两路拆开打，加栈底采样，用于分辨是哪一路顶到边界。详见《任务栈用量（`stack`）》 |
 | `crash` | `crash` | 跨复位崩溃日记：UNINIT 区地址与大小、`boots` / `seq`、每槽故障数 / 最近原因 / 禁用原因 / 禁用时刻 |
 | `guard` | `guard` | 每任务心跳合同：是否声明、周期、报到间隔、裁决位 |
 | `audit` | `audit` | 内核结构自审 |
@@ -390,3 +391,56 @@ sync appwait: hit=480
 同源的另两个计数器在 `log` 里：`tx_drop` 才是控制台真实丢失字节数，
 `fifo_full_retries` 是被拒**尝试**数，不等于丢失；
 `bad_header` / `bytes_lost` 非 0 说明 FIFO 缓冲头被写穿，那条路上输出是被静默丢掉的。
+
+
+## 任务栈用量（`stack`）
+
+水印开关是 `ARKRTOS_USE_STACK_USAGE`（默认 1）。任务创建时把栈从下标 1 到 `words-1` 全部写成图案 `0xCDCDCDCD`；扫描时从下标 1 往上数连续未被改动的图案字得到 free，`used = total - free`。
+
+`stack`（不带参数）与 `stack check` 打同一张表：
+
+```
+id  total    used     free     pct    entry
+ 1   1024     304      720      29%    0x0800A1C1
+ 4   49152    30668    18484    62%    0x08013E5D
+stack: 2 task(s), worst 62% (task 4), 0 unmeasured, 0 at/over 90%  (accounting on)
+```
+
+- `used` 取**水印填充**与**最低 PSP** 两路里较大的那个：水印是真实峰值不会低估，PSP 只在任务切换时采样、会低估，所以单独看 PSP 小不代表栈用得浅（具体两路怎么对账见下面的 `raw`）；
+- 循环里对每个任务就地判定：`pct >= 90%` 打 `^ task N is at X% - raise its stack size`，`>= 75%` 打 `^ task N is at X% - watch it`；
+- `stack check` 追加一行判词并**决定返回码**：`stack: check ok - ...`（0）或 `stack: check FAILED - ...`（1）。有条件测不到（`unmeasured != 0`）也判失败——测不到不能当通过。
+
+`stack raw` 把两路读数拆开打，并多打一行栈底采样：
+
+```
+id  total    used     fill     psp      pct_f  pct_p  entry
+ 4   49152    30668    30668    9732      62%    19%   0x08013E5D
+      bottom 0x2400EA28  [1/8]=0xCDCDCDCD [4/8]=0xCDCDCDCD [7/8]=0xCDCDCDCD
+```
+
+| 列 | 含义 | 边界 |
+|----|------|------|
+| `fill` | 水印扫描出的峰值，不会低估 | 任务真的用过那么深就一定看得出来 |
+| `psp` | 任务切换时采样的最低 SP | 只是下界 |
+| `bottom ...` | 栈底第 1/8、4/8、7/8 处的**真实内存值** | 全是 `0xCDCDCDCD` = 那里从没被写过；出现别的值 = 那个位置被写过，此时 `pct_f` 通常已经很高 |
+
+这条采样存在的意义是「扫描说用过」与「内存里到底写着什么」必须能对照，否则分不清是栈真用过，还是扫描走错了地址。
+
+三种非数字出口，**都不等于用量 0**：
+
+| 输出 | 含义 |
+|------|------|
+| `n/a (no stack)` / 普通表整行 `n/a` | 这个任务没有登记的栈范围，测不了 |
+| `used` 列正常但 `pct` 列是 `unmeas`、`free` 列是 `0?` | 读出 `used == 0`。0 字节不可能，说明填充图案没生效（开关在位、功能没生效的唯一可检测形态） |
+| `stack: accounting is compiled out (ARKRTOS_USE_STACK_USAGE=0) - no numbers to show` | 整块统计被编掉了。命令仍在（帮助里还看得见），但不给编造的数字 |
+
+### 一次真实案例：栈被真的打到底
+
+板上执行 `cd /mnt/nor/va && make`（arkmake 调 arkc 反复跑 `cc --pack`）时 shell 任务栈被打穿：40 KB 测得 40 132 B(97.9%)、56 KB 测得 56 548 B(98%)、72 KB 测得 73 728 B(100%)——**加栈没用，用量跟着栈一起涨**。
+硬件写 watchpoint 打在栈底下一个字，命中后 `reg psp = 0x2400E9E8`，比栈底 `0x2400EA28` 还低 64 字节；栈底 dump 出的是 arkc 词法数据（double 常量与 `ct` / `s3` 片段），确认是真溢出而不是水印误判。
+
+根因不在 RTOS：`arkc/src/preproc.c` 的 `process()` 是递归的（宏 rescan，深度上限 64），每层原来都带一个 `char temp[16384]`，4 层就是 64 KB 栈。修法是把这块缓冲从栈搬到池里——按 `process()` **调用槽位**缓存（绝不能按宏深度共享，否则嵌套 rescan 会互相覆写，实测会把 `XSTR(MULTI(1,2))` 展开成 `1 + 1 + 1`），同时把「宏展开超长」从静默截断改为硬报错。
+
+修完在同一块板上实测：boot 2 300 B、`cc -E va.c` 11 236 B、`cc -c va.c` 17 884 B、`make` 30 668 B；栈因此定在 48 KB（62.4%，余 37.6%）。
+
+教训：`stack` 报 100% 时先别怀疑水印逻辑——填充图案从下标 1 被写掉，只有当 SP 真的踩到栈底才会发生。这类缺陷属于「不跑起来看不见」，闸门必须真跑并读数值。

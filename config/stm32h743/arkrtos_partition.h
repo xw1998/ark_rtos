@@ -695,13 +695,31 @@ typedef char arkrtos_pool_unit_check[
  * footprint - the switch stays a switch, not a permanent tax. */
 #define SHELL_TASK_STACK_SIZE    (1024 * 3)
 #else
-/* 40 KB, not 28: measured with the on-target compiler running *through ark
- * make*.  A direct `cc` command keeps the same work in a shallower call chain;
- * adding arkmake's frames (make handler -> arkmake_build -> make_pack ->
- * arkc_cc_pack) was enough to push a variadic source (example/mini_va) over
- * 28 KB and take the console down with a stack fault.  The old 28 KB figure
- * came from measuring cc alone at 22 000 B, i.e. without that extra depth. */
-#define SHELL_TASK_STACK_SIZE    (1024 * 40)
+/* 48 KB, not 40 and not 72.  The on-target compiler runs *through ark make*,
+ * so the console stack carries arkmake's frames on top of arkc's recursive
+ * descent (make handler -> arkmake_build -> make_pack -> arkc_cc_pack).
+ * Chasing that peak with a bigger stack does not work: 40 KB -> 56 KB ->
+ * 72 KB all measured 97.9 / 98 / 100 % used, i.e. the demand grew with the
+ * supply.  A hardware write watchpoint on the stack floor showed psp 64 B
+ * *below* it (0x2400E9E8 vs floor 0x2400EA28), and the floor contents were
+ * arkc lexer data (double literals plus "ct"/"s3" fragments), so this was a
+ * real overflow and not a watermark artefact.
+ *
+ * Root cause was fixed in arkc instead of paying more RAM here: preproc.c
+ * process() is recursive (macro rescan, depth < 64) and every level used to
+ * own a `char temp[16384]`.  Those per-level scratch buffers now come from a
+ * slot-cached pool arena, one slot per process() invocation and never a
+ * single buffer shared by nesting depth - sharing by depth aliased nested
+ * rescans and silently corrupted XSTR(MULTI(1,2)) into "1 + 1 + 1".  A macro
+ * expansion that no longer fits is now a hard diagnostic, not a silent
+ * truncation (ARKCC_MACRO_EXPAND_MAX).
+ *
+ * Measured peaks on this 48 KB build (`stack raw` on hardware, after a real
+ * `cd /mnt/nor/va && make`): boot 2 300 B, `cc -E va.c` 11 236 B,
+ * `cc -c va.c` 17 884 B, `make` 30 668 B.  That is 62.4 % of 48 KB, leaving
+ * 37.6 % (18 484 B) of headroom over the worst observed path.  RAM sits at
+ * 68.24 % of KERNEL_RAM_SIZE with this value. */
+#define SHELL_TASK_STACK_SIZE    (1024 * 48)
 #endif
 #define SHELL_TASK_PERIOD_MS     2               /* 无按键时的轮询间隔（ms） */
 /* Max RX bytes consumed per console round.  The host pushes a whole

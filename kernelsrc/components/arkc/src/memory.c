@@ -14,10 +14,17 @@ static int           g_offset = 0;
  * ran out at N bytes" is what a failed build tells you, but a successful one
  * only tells you it was under the limit.  Reported by -v. */
 static int           g_high = 0;
+/* Bumped by mem_pool_reset(); see mem_pool_generation() in memory.h. */
+static int           g_generation = 0;
 
 void mem_pool_reset(void) {
     g_offset = 0;
     g_high = 0;
+    g_generation++;
+}
+
+int mem_pool_generation(void) {
+    return g_generation;
 }
 
 int mem_pool_used(void) {

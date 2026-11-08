@@ -438,7 +438,37 @@ CASES = [
                  wait=60.0),
             Step("rm /tmp/nmk"),
         ],
-    ),]
+    ),
+    Case(
+        "stack-usage",
+        "栈水印：每个任务的栈用量是真读数（填充图案 + 最低 PSP），不是 n/a 也不是 0",
+        CLEAN
+        + [
+            # 先把小程序停干净：正在跑的实例会让任务表多一行、也会让最坏
+            # 百分比漂移，而这条用例判的是**读数本身成立**，不是某个具体值。
+            Step("mini stop", wait=2.0),
+            Step("mini", expect=[r"^mini: none running"], wait=1.5),
+            # 反假绿：统计没编进来（ARKRTOS_USE_STACK_USAGE=0）时命令必须
+            # 说"compiled out"，不许给数字。上面两种形态都在源码里，所以
+            # 这里判的是本固件走的是哪一支——走错支就该红。
+            Step("stack",
+                 expect=[r"^id  total    used     free     pct    entry$",
+                         r"^stack: \d+ task\(s\), worst [1-9]\d*% \(task \d+\), "
+                         r"0 unmeasured, 0 at/over 90%  \(accounting on\)$"],
+                 forbid=[r"n/a", r"unmeas 0x",
+                         r"accounting is compiled out",
+                         r"^ \d+ +0 +\d+ "],
+                 wait=2.0),
+            # 判词一行：全部任务都测得到，且没有一个到 90%。返回 0 时打印
+            # ok；任何一条不成立它打 FAILED（这条用例就靠这两行分辨）。
+            Step("stack check",
+                 expect=[r"^stack: check ok - \d+ task\(s\) measured, worst "
+                         r"[1-9]\d*% \(task \d+\), none at/over 90%$"],
+                 forbid=[r"^stack: check FAILED"],
+                 wait=2.0),
+        ],
+    ),
+]
 
 
 # ---------------------------------------------------------------- 串口驱动

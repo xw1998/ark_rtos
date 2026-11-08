@@ -130,6 +130,73 @@ static int    g_macro_depth;
  * list of macro names that must not be re-expanded. */
 #define PP_BLUE_STACK 64
 static const char *g_blue_stack[PP_BLUE_STACK];
+
+/* Rescan scratch buffer for function-like macro expansion.
+ *
+ * This used to be a `char temp[16384]` local inside process().  process()
+ * recurses once per nested rescan (g_macro_depth may reach 64), so every
+ * nesting level cost another 16 KB of *stack*: four levels already need 64 KB.
+ * On the STM32H743 board build that overflowed the 72 KB shell-task stack --
+ * measured PSP 64 bytes *below* the stack bottom, with the compiler's double
+ * constants left at the bottom of the deepest frame -- and the earlier 40 KB
+ * stack survived only by silently writing past its own bottom into the .bss
+ * that follows it.
+ *
+ * The buffer is now taken from the memory pool (external SDRAM on the board)
+ * and cached per *live process() invocation* -- one slot per nesting level of
+ * process(), which is exactly the lifetime the stack array used to have.  It
+ * must NOT be keyed on g_macro_depth: expand_func_macro() calls process() for
+ * a substituted argument with the caller's own `out` (that is the temp buffer
+ * of the invocation it runs in), and that nested process() can start another
+ * expansion while the caller's temp is still half-written.  Keying both on the
+ * same macro depth made them share one buffer -- MULTI(1,2) then came out as
+ * "1 + 1 + 1 + ..." instead of "1 + 2".
+ *
+ * The cache is invalidated whenever the pool is rewound (mem_pool_generation()):
+ * a stale pointer would otherwise alias whatever the next translation unit put
+ * at the base of the pool.
+ *
+ * Growth is not silent: an expansion that would overflow its buffer is
+ * reported as an error instead of emitting a truncated token stream. */
+#ifndef PP_RESCAN_BUF_SIZE
+#   define PP_RESCAN_BUF_SIZE   16384
+#endif
+/* Slots are only allocated when a nesting level actually expands a macro, so
+ * the pool cost is (live levels) x 16 KB well below this bound.  Exceeding the
+ * bound is an error, never a silent share of someone else's buffer. */
+#define PP_RESCAN_MAX_SLOTS  128
+static char *g_rescan_buf[PP_RESCAN_MAX_SLOTS];
+static int   g_rescan_gen = -1;   /* pool generation the cache belongs to */
+static int   g_rescan_top;        /* live process() nesting levels */
+static int   g_buf_dropped;       /* buf_putc() had to drop a byte */
+static int   g_rescan_err_seen;   /* overflow already reported once */
+
+/* Reserve one slot for a process() invocation; released on its exit. */
+static int pp_scratch_reserve(void) {
+    if (g_rescan_top >= PP_RESCAN_MAX_SLOTS) return -1;
+    return g_rescan_top++;
+}
+
+static void pp_scratch_release(void) {
+    if (g_rescan_top > 0) g_rescan_top--;
+}
+
+/* Scratch buffer for slot `slot`.  Returns 0 when the slot is out of range;
+ * the caller must then report an error rather than use somebody else's data. */
+static char *pp_rescan_buf(int slot) {
+    int gen = mem_pool_generation();
+    int i;
+    if (gen != g_rescan_gen) {
+        for (i = 0; i < PP_RESCAN_MAX_SLOTS; i++) g_rescan_buf[i] = 0;
+        g_rescan_gen = gen;
+    }
+    if (slot < 0 || slot >= PP_RESCAN_MAX_SLOTS) return 0;
+    if (g_rescan_buf[slot] == 0) {
+        g_rescan_buf[slot] = (char *)mem_pool_alloc(PP_RESCAN_BUF_SIZE);
+    }
+    return g_rescan_buf[slot];
+}
+
 static int         g_blue_top;
 
 static int is_blue_painted(const char *name) {
@@ -307,7 +374,7 @@ static void add_func_macro(const char *name, char **params, int pc,
 }
 
 static void buf_putc(char *buf, int *plen, int cap, char c) {
-    if (*plen + 1 >= cap) return;
+    if (*plen + 1 >= cap) { g_buf_dropped = 1; return; }
     buf[(*plen)++] = c;
 }
 
@@ -466,6 +533,29 @@ static void pp_diag_msg(int line, int col, DiagSeverity sev, const char *msg,
     loc.line = line;
     loc.col  = col;
     diag_report_msg(sev, &loc, msg, a0, a1, 0);
+}
+
+/* Report a truncated expansion once per compile.  No armcc diagnostic number
+ * exists for an arkc capacity limit, so this uses the unnumbered channel. */
+static void pp_report_expand_overflow(const char *name) {
+    char cap_s[12];
+    if (g_rescan_err_seen) return;
+    g_rescan_err_seen = 1;
+    pp_diag_msg(g_pp_line, 0, DIAG_SEV_ERROR,
+                "macro '%s' expands past %s bytes (ARKCC_MACRO_EXPAND_MAX)",
+                name ? name : "?", diag_num(cap_s, PP_RESCAN_BUF_SIZE));
+}
+
+/* Every nesting level of process() needs its own rescan buffer; running out of
+ * slots is an internal limit (no armcc number to borrow), reported rather than
+ * worked around by sharing a buffer. */
+static void pp_report_scratch_exhausted(void) {
+    char cap_s[12];
+    if (g_rescan_err_seen) return;
+    g_rescan_err_seen = 1;
+    pp_diag_msg(g_pp_line, 0, DIAG_SEV_ERROR,
+                "macro expansion nested past %s levels (ARKCC_PP_RESCAN_SLOTS)",
+                diag_num(cap_s, PP_RESCAN_MAX_SLOTS), 0);
 }
 
 /* Point the caret machinery at the expression about to be evaluated.
@@ -1021,6 +1111,8 @@ static void process(const char *src, char *out, int *out_len, int out_cap,
                     int is_file) {
     const char *p = src;
     const char *outer_file = g_pp_file;   /* the file our caller was reading */
+    /* One scratch slot per live process() invocation (see pp_rescan_buf). */
+    int scratch = pp_scratch_reserve();
     /* Skip UTF-8 BOM (EF BB BF) if present at start of file. */
     if ((unsigned char)p[0] == 0xEF && (unsigned char)p[1] == 0xBB && (unsigned char)p[2] == 0xBF) {
         p += 3;
@@ -1695,11 +1787,17 @@ static void process(const char *src, char *out, int *out_len, int out_cap,
                     if (*r == '(') {
                         char *args[16] = {0};
                         int argc = 0;
-                        char temp[16384];
+                        char *temp = pp_rescan_buf(scratch);
                         int temp_len = 0;
+                        int drop0 = g_buf_dropped;
                         r = parse_macro_args(r, args, &argc, 16);
+                        if (temp == 0) {
+                            pp_report_scratch_exhausted();
+                            p = r;
+                            continue;
+                        }
                         /* Substitute into a temp buffer first. */
-                        expand_func_macro(m, args, argc, temp, &temp_len, (int)sizeof(temp) - 1);
+                        expand_func_macro(m, args, argc, temp, &temp_len, PP_RESCAN_BUF_SIZE - 1);
                         temp[temp_len] = 0;
                         /* C99 6.10.3.4: rescan the substituted token sequence
                          * for further macro expansion. The blue-paint stop-set
@@ -1720,6 +1818,9 @@ static void process(const char *src, char *out, int *out_len, int out_cap,
                             }
                         } else {
                             buf_puts(out, out_len, out_cap, temp);
+                        }
+                        if (g_buf_dropped != drop0) {
+                            pp_report_expand_overflow(m->name);
                         }
                         p = r;
                         continue;
@@ -1771,12 +1872,18 @@ static void process(const char *src, char *out, int *out_len, int out_cap,
                         if (*r2 == '(') {
                             char *args[16] = {0};
                             int argc = 0;
-                            char temp[16384];
+                            char *temp = pp_rescan_buf(scratch);
                             int temp_len = 0;
+                            int drop0 = g_buf_dropped;
                             const char *saved_blue = 0;
                             r2 = parse_macro_args(r2, args, &argc, 16);
+                            if (temp == 0) {
+                                pp_report_scratch_exhausted();
+                                p = r2;
+                                continue;
+                            }
                             expand_func_macro(fm, args, argc, temp, &temp_len,
-                                              (int)sizeof(temp) - 1);
+                                              PP_RESCAN_BUF_SIZE - 1);
                             temp[temp_len] = 0;
                             if (g_macro_depth < 64) {
                                 if (g_blue_top < PP_BLUE_STACK) {
@@ -1792,6 +1899,9 @@ static void process(const char *src, char *out, int *out_len, int out_cap,
                                     g_blue_top--;
                             } else {
                                 buf_puts(out, out_len, out_cap, temp);
+                            }
+                            if (g_buf_dropped != drop0) {
+                                pp_report_expand_overflow(fm->name);
                             }
                             p = r2;
                             continue;
@@ -1836,6 +1946,7 @@ static void process(const char *src, char *out, int *out_len, int out_cap,
     }
     g_pp_file = outer_file;
     g_cur_line = saved_line;
+    pp_scratch_release();
 }
 
 char *preproc_process(const char *src) {

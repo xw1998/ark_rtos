@@ -30,5 +30,11 @@ int   mem_pool_used(void);
  * instead of from the number in a failed build's error message. */
 int   mem_pool_high(void);
 int   mem_pool_capacity(void);
+/* Reset generation: bumped by every mem_pool_reset().  A caller that caches a
+ * pointer into the pool instead of re-allocating must compare this counter and
+ * drop its cache when it changes -- the pool is rewound between translation
+ * units, so an old pointer still addresses the pool but no longer owns what the
+ * caller put there. */
+int   mem_pool_generation(void);
 
 #endif /* ARK_MEMORY_H */

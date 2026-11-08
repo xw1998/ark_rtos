@@ -816,6 +816,198 @@ static int cmd_task(int argc, char *argv[])
 }
 
 /* ============================================================
+ * stack：每个任务的栈用量（峰值法，真读数）
+ *
+ * 任务建立时整段栈被填成 0xcdcdcdcd，运行中写过的字就覆盖了图案；从栈底
+ * 向上扫到第一个非图案字为止，"从未用过"的部分就出来了。再与上下文切换
+ * 记录的最低 PSP 取较大值，两者的较大者就是峰值用量。
+ *
+ * 为什么要有这条命令：栈够不够只有量出来才叫够。APP_TASK_STACK_SIZE 是
+ * 4 KB、控制台栈曾经只是"给到不崩"——这类数字靠猜，动一个局部数组就可能
+ * 越界，而 Cortex-M 上越界不报错，只会安静地改掉别人的数据。
+ *
+ * 两种失败都必须是可见的，且都不许冒充 0：
+ *   - 统计没编进来（ARKRTOS_USE_STACK_USAGE=0）：明说 n/a，不打印 0；
+ *   - 统计编进来了，但某个任务的读数是 0：说明填充图案没生效（或统计被
+ *     绕过），标 unmeasured。"用了 0 字节栈"这个断言不成立——任何跑过
+ *     的任务都至少写过初始栈帧。
+ *
+ * stack          逐任务列出 total / used / free / used%
+ * stack check    全部任务都测得到、且没有一个到危险线时返回 0
+ * stack raw      把两个读数来源分开报（扫描 / 最低 PSP），诊断用
+ * ============================================================ */
+#define SHELL_STACK_WARN_PCT    75u   /* 已用 >= 75%：打印提醒 */
+#define SHELL_STACK_DANGER_PCT  90u   /* 已用 >= 90%：判失败 */
+
+#if ARKRTOS_USE_STACK_USAGE
+static int cmd_stack(int argc, char *argv[])
+{
+    int32  i;
+    int    check = 0;
+    int    raw = 0;
+    uint32 unmeasured = 0u;
+    uint32 danger = 0u;
+    uint32 worst_pct = 0u;
+    int32  worst_id = 0;
+
+    if(argc >= 2)
+    {
+        if((argv[1][0] == 'c') && (argv[1][1] == 'h') && (argv[1][2] == 'e') &&
+           (argv[1][3] == 'c') && (argv[1][4] == 'k') && (argv[1][5] == '\0'))
+        {
+            check = 1;
+        }
+        else if((argv[1][0] == 'r') && (argv[1][1] == 'a') &&
+                (argv[1][2] == 'w') && (argv[1][3] == '\0'))
+        {
+            raw = 1;
+        }
+        else
+        {
+            ark_shell_printf("stack: unknown option '%s' "
+                             "(usage: stack [check|raw])\r\n", argv[1]);
+            return 1;
+        }
+    }
+
+    if(raw != 0)
+    {
+        /* 合成值取两路较大者；两路各自打出来，才能分清是「栈真用满」还是
+         * 「某一路读数本身有错」。这两件事的处置完全不同。 */
+        ark_shell_printf("\r\nid  total    used     fill     psp      "
+                         "pct_f  pct_p  entry\r\n");
+        for(i = 0; i < arkrtos_task_count; i++)
+        {
+            uint32 out4[4];
+            uint32 pf;
+            uint32 pp;
+
+            if(arkrtos_task_stack_info_raw(i + 1, out4) != 0)
+            {
+                ark_shell_printf(" %-3d n/a (no stack)\r\n", (int)(i + 1));
+                continue;
+            }
+            pf = (out4[0] != 0u) ? ((out4[2] * 100u) / out4[0]) : 0u;
+            pp = (out4[0] != 0u) ? ((out4[3] * 100u) / out4[0]) : 0u;
+            ark_shell_printf(" %-3d %-8u %-8u %-8u %-8u %3u%%   %3u%%   0x%08X\r\n",
+                             (int)(i + 1), (unsigned)out4[0], (unsigned)out4[1],
+                             (unsigned)out4[2], (unsigned)out4[3],
+                             (unsigned)pf, (unsigned)pp,
+                             (unsigned)arkrtos_task_table[i].entry);
+            /* 采样：底部/中间/上部各取一个字。扫描说“用过”与内存里到底
+             * 写着什么必须能对照，否则分不清是栈真用过还是扫描走错地址。 */
+            if(out4[0] >= 4096u)
+            {
+                const uint32 *pb = arkrtos_task_table[i].stack_bottom;
+                uint32 half = out4[0] / 8u;
+
+                ark_shell_printf("      bottom 0x%08X  [1/8]=0x%08X [4/8]=0x%08X "
+                                 "[7/8]=0x%08X\r\n",
+                                 (unsigned)(uintptr_t)pb,
+                                 (unsigned)pb[half / 4u],
+                                 (unsigned)pb[(out4[0] / 2u) / 4u],
+                                 (unsigned)pb[(out4[0] * 7u / 8u) / 4u]);
+            }
+        }
+        ark_shell_printf("stack raw: fill=scan of untouched fill pattern, "
+                         "psp=lowest SP seen (take the larger)\r\n");
+        return 0;
+    }
+
+    ark_shell_printf("\r\nid  total    used     free     pct    entry\r\n");
+    for(i = 0; i < arkrtos_task_count; i++)
+    {
+        uint32 out3[3];
+        uint32 pct;
+
+        if((arkrtos_task_stack_info_internal(i + 1, out3) != 0) || (out3[0] == 0u))
+        {
+            ark_shell_printf(" %-3d %-8s %-8s %-8s %-6s 0x%08X\r\n",
+                             (int)(i + 1), "n/a", "n/a", "n/a", "n/a",
+                             (unsigned)arkrtos_task_table[i].entry);
+            unmeasured++;
+            continue;
+        }
+        /* 0 字节不可能：填充图案没生效才会读出 0。这是"开关在位、功能没
+         * 生效"的唯一可检测形态，所以单独标出来而不是当成最省栈的任务。 */
+        if(out3[1] == 0u)
+        {
+            ark_shell_printf(" %-3d %-8u %-8s %-8u %-6s 0x%08X\r\n",
+                             (int)(i + 1), (unsigned)out3[0], "0?", (unsigned)out3[2],
+                             "unmeas", (unsigned)arkrtos_task_table[i].entry);
+            unmeasured++;
+            continue;
+        }
+
+        pct = (out3[1] * 100u) / out3[0];
+        ark_shell_printf(" %-3d %-8u %-8u %-8u %3u%%   0x%08X\r\n",
+                         (int)(i + 1), (unsigned)out3[0], (unsigned)out3[1],
+                         (unsigned)out3[2], (unsigned)pct,
+                         (unsigned)arkrtos_task_table[i].entry);
+
+        if((worst_id == 0) || (pct > worst_pct))
+        {
+            worst_pct = pct;
+            worst_id  = i + 1;
+        }
+        if(pct >= SHELL_STACK_DANGER_PCT)
+        {
+            ark_shell_printf("      ^ task %d is at %u%% - raise its stack size\r\n",
+                             (int)(i + 1), (unsigned)pct);
+            danger++;
+        }
+        else if(pct >= SHELL_STACK_WARN_PCT)
+        {
+            ark_shell_printf("      ^ task %d is at %u%% - watch it\r\n",
+                             (int)(i + 1), (unsigned)pct);
+        }
+    }
+
+    ark_shell_printf("stack: %d task(s), worst %u%% (task %d), "
+                     "%u unmeasured, %u at/over %u%%  (accounting on)\r\n",
+                     (int)arkrtos_task_count, (unsigned)worst_pct, (int)worst_id,
+                     (unsigned)unmeasured, (unsigned)danger,
+                     (unsigned)SHELL_STACK_DANGER_PCT);
+
+    if(check != 0)
+    {
+        /* 判词写成一行文本：串口上要能当闸禁，且打印读数本身。 */
+        if(unmeasured != 0u)
+        {
+            ark_shell_printf("stack: check FAILED - %u task(s) could not be "
+                             "measured (fill pattern not in effect?)\r\n",
+                             (unsigned)unmeasured);
+            return 1;
+        }
+        if(danger != 0u)
+        {
+            ark_shell_printf("stack: check FAILED - %u task(s) at/over %u%% "
+                             "of their stack\r\n",
+                             (unsigned)danger, (unsigned)SHELL_STACK_DANGER_PCT);
+            return 1;
+        }
+        ark_shell_printf("stack: check ok - %d task(s) measured, worst %u%% "
+                         "(task %d), none at/over %u%%\r\n",
+                         (int)arkrtos_task_count, (unsigned)worst_pct,
+                         (int)worst_id, (unsigned)SHELL_STACK_DANGER_PCT);
+        return 0;
+    }
+    return 0;
+}
+#else
+static int cmd_stack(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+    /* 没有统计就不要给数字：这一版把 ARKRTOS_USE_STACK_USAGE 编掉了，
+     * 任何字节数都只能是编的。 */
+    ark_shell_printf("stack: accounting is compiled out "
+                     "(ARKRTOS_USE_STACK_USAGE=0) - no numbers to show\r\n");
+    return 1;
+}
+#endif /* ARKRTOS_USE_STACK_USAGE */
+
+/* ============================================================
  * sched：调度器就绪队列自检
  *
  * 内核的就绪集现在是「256 位两级位图 + 每优先级双向循环链表」，
@@ -5171,7 +5363,7 @@ static int register_kernel_commands(void)
     int idx = g_cmd_count;
     /* Upper bound with every optional feature compiled in.  Kept above the
      * real count so a future command cannot silently overflow g_cmd_table. */
-    int need = 48
+    int need = 49   /* 48 shipped + "stack" (per-task stack usage) */
              + (ARKRTOS_USE_ARKVIM ? 1 : 0)
              + (ARKRTOS_USE_ARKC ? 1 : 0);
 
@@ -5190,6 +5382,8 @@ static int register_kernel_commands(void)
         "Dump the compiled device tree (model, nodes, compatible, reg)", 1);
     g_cmd_table[idx++] = ARK_SHELL_CMD("task", cmd_task,
         "List kernel tasks, or dump one task frame: task <id> (ids start at 1)", 3);
+    g_cmd_table[idx++] = ARK_SHELL_CMD("stack", cmd_stack,
+        "Per-task stack usage, measured (fill pattern + low PSP): stack [check]", 2);
     g_cmd_table[idx++] = ARK_SHELL_CMD("sched", cmd_sched,
         "Scheduler readiness self-check (0 = consistent)", 1);
     g_cmd_table[idx++] = ARK_SHELL_CMD("fault", cmd_fault,

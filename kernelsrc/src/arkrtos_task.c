@@ -2830,7 +2830,14 @@ int32 arkrtos_sched_lock_count_internal(void)
 *          1) 扫描填充图案得到“从未触及”区域；
 *          2) 上下文切换记录的历史最低栈指针。
 */
-int32 arkrtos_task_stack_info_internal(int32 task_id, uint32 *out3)
+/*
+ * 分项版本：把两个读数来源分开报，供诊断使用。
+ * 合成后的 used 取「填充扫描」与「最低 PSP」的较大者，只看合成值分不清是哪
+ * 一路顶到边界；而「栈真的用满」（要加栈或减递归）与「扫描/记录本身有错」
+ * 是两个完全不同的结论，不能靠猜。
+ *   out4[0]=总字节  out4[1]=合成已用  out4[2]=扫描已用  out4[3]=PSP 已用
+ */
+int32 arkrtos_task_stack_info_raw(int32 task_id, uint32 *out4)
 {
     arkrtos_task_t *p_task;
     uint32 words;
@@ -2840,12 +2847,16 @@ int32 arkrtos_task_stack_info_internal(int32 task_id, uint32 *out3)
     uint32 used_psp;
     uint32 used;
 
-    if((out3 == 0) || (task_id <= 0) || (task_id > arkrtos_task_count))
+    if((out4 == 0) || (task_id <= 0) || (task_id > arkrtos_task_count))
     {
         return -1;
     }
 
     p_task = &arkrtos_task_table[task_id - 1];
+    if(p_task->stack_size == 0u)
+    {
+        return -1;
+    }
     words  = p_task->stack_size / 4u;
 
     /* 从栈底（跳过保护字）向上扫描连续未使用的图案区 */
@@ -2868,9 +2879,31 @@ int32 arkrtos_task_stack_info_internal(int32 task_id, uint32 *out3)
         used = p_task->stack_size;
     }
 
-    out3[0] = p_task->stack_size;
-    out3[1] = used;
-    out3[2] = p_task->stack_size - used;
+    out4[0] = p_task->stack_size;
+    out4[1] = used;
+    out4[2] = used_fill;
+    out4[3] = used_psp;
+
+    return 0;
+}
+
+int32 arkrtos_task_stack_info_internal(int32 task_id, uint32 *out3)
+{
+    uint32 raw[4];
+
+    if(out3 == 0)
+    {
+        return -1;
+    }
+
+    if(arkrtos_task_stack_info_raw(task_id, raw) != 0)
+    {
+        return -1;
+    }
+
+    out3[0] = raw[0];
+    out3[1] = raw[1];
+    out3[2] = raw[0] - raw[1];
 
     return 0;
 }

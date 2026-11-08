@@ -106,6 +106,9 @@ int32  arkrtos_sched_lock_count_internal(void);
 #if (ARKRTOS_USE_STACK_USAGE == 1)
 /* 查询任务栈信息：out3[0]=总字节，out3[1]=峰值已用字节，out3[2]=剩余字节 */
 int32  arkrtos_task_stack_info_internal(int32 task_id, uint32 *out3);
+/* 分项查询（诊断用）：out4[0]=总字节 out4[1]=合成已用 out4[2]=扫描已用
+ * out4[3]=最低 PSP 已用。合成值取两路较大者，分开报才能判断是哪一路触顶 */
+int32  arkrtos_task_stack_info_raw(int32 task_id, uint32 *out4);
 #endif
 
 
