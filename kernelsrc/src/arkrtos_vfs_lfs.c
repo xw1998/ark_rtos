@@ -103,6 +103,24 @@ static int32_t p_io(const char *what, const char *path)
     return ARK_E_IO;
 }
 
+/** @brief 新建/截断失败时把原因说准：父目录不存在不是 backend error
+ *  @details littlefs 在 LFS_O_CREAT 时，若父目录不存在就回 LFS_ERR_NOENT。
+ *           这一条曾经统一走 p_io()，于是在 /mnt/nor/nodir/x.txt 上打印的是
+ *           "FAILED (-11: backend error)"——把一个「父目录不存在」报成了
+ *           「驱动出错」。而父目录存在时同一个调用是成功的，所以这不是
+ *           「新建文件只能落卷根」，是错误码把原因吃掉了。 */
+static int32_t p_open_create_err(const char *path)
+{
+    if (arkrtos_fs_last_is_noent() != 0u)
+    {
+        ARKRTOS_LOGW("ark_vfs", "open_write on %s: parent directory missing "
+                   "(arkrtos_fs last_error=%d)",
+                   path, (int)arkrtos_fs_last_error());
+        return ARK_E_NOENT;
+    }
+    return p_io("open_write", path);
+}
+
 /* ------------------------------------------------------------
  * fsdrv
  * ------------------------------------------------------------ */
@@ -191,7 +209,7 @@ static int32_t lfs_open(struct ark_vfs_mnt *mnt, const char *rel, int flags,
         if (arkrtos_fs_open_write(abs) != 0)
         {
             h->used = 0u;
-            return p_io("open_write", abs);
+            return p_open_create_err(abs);
         }
         g_writer = 1u;
         h->writable = 1u;

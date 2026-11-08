@@ -468,6 +468,33 @@ CASES = [
                  wait=2.0),
         ],
     ),
+    Case(
+        "vfs-create",
+        "VFS 新建：卷根与子目录都能落文件；父目录不存在时要说 no such file，"
+        "不能报成 backend error",
+        CLEAN
+        + [
+            # 先清掉上一轮可能留下的同名件，否则 touch 走的是「已存在就什么都不做」
+            # 那一支，这条用例就变成什么都没测。
+            Step("rm /mnt/nor/c3gate.txt", wait=0.6),
+            Step("rm /mnt/nor/va/c3gate.txt", wait=0.6),
+            # 1) 卷根新建：ls 必须把它列成 0 字节文件
+            Step("touch /mnt/nor/c3gate.txt", wait=1.0),
+            Step("ls /mnt/nor", expect=[r"^  c3gate\.txt +0$"], wait=1.5),
+            # 2) 子目录新建：同一卷下 /va 里也要能落
+            Step("touch /mnt/nor/va/c3gate.txt", wait=1.0),
+            Step("ls /mnt/nor/va", expect=[r"^  c3gate\.txt +0$"], wait=1.5),
+            # 3) 反假绿：父目录不存在时必须报「没有这个文件」，把 littlefs 的
+            #    LFS_ERR_NOENT 一路漏到 shell 上就变成 -11 backend error，
+            #    那是在报“驱动出错”，而真正的原因是路径不存在。
+            Step("touch /mnt/nor/c3nodir/x.txt",
+                 expect=[r"FAILED \(-1: no such file or mount\)"],
+                 forbid=[r"backend error"],
+                 wait=2.0),
+            Step("rm /mnt/nor/c3gate.txt", wait=0.6),
+            Step("rm /mnt/nor/va/c3gate.txt", wait=0.6),
+        ],
+    ),
 ]
 
 

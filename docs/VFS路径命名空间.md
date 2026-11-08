@@ -177,12 +177,34 @@ mount: FAILED (-7: already exists)
 | 持久卷挂载 | `mount /mnt/nor` → `[I][vfs:291] volume nor0 mounted at /mnt/nor` |
 | 卷内列目录 | `ls /mnt/nor` → 9 entries（含 `keep.txt` 15 B） |
 | 卷内读文件 | `cat /mnt/nor/keep.txt` → `persistent-data` / `15 bytes` |
+| 卷内新建（卷根） | `touch /mnt/nor/c3gate.txt` → `ls /mnt/nor` 里出现 `c3gate.txt 0` |
+| 卷内新建（子目录） | `touch /mnt/nor/va/c3gate.txt` → 子目录里同样出现 0 B 文件（同一个卷，不是「只能落卷根」） |
+| 父目录不存在 | `touch /mnt/nor/c3nodir/x.txt` → `-1: no such file or mount`，日志写 `parent directory missing`；**不是** `-11: backend error` |
 | 窗口过大被拒 | `mount nor0 0 0 /mnt/nor` → `-11: backend error`，日志带 `size=16777216` |
 | 已挂载时窗口不符 | `mount nor0 0 0 /mnt/nor` → `-7: already exists`，日志写明两边窗口 |
 | 错误路径 | `ls\|cat\|rm /mnt/nor/nosuch` → `-1: no such file or mount` |
 | 目录当文件读 | `cat /` → `-5: is a directory` |
 | 字符设备读 | `cat /dev/LED` → `-11: backend error`（驱动拒绝，不是 EOF） |
 | 卸载 | `umount /mnt/nor` → 成功，`mount` 回到两行 |
+
+### 新建文件失败时，原因不许混成 backend error
+
+`O_CREAT` 走的路径有两步能失败，两步的原因必须分开报：
+
+| 失败点 | 真实原因 | 应该报什么 |
+|---|---|---|
+| `stat` 说“没有这个条目” | 这是**正常**的新建前置，不是错 | 继续往下走成新建 |
+| `open_write` 回 `LFS_ERR_NOENT` | 父目录不存在 | `-1: no such file or mount` |
+| `open_write` 回其他 | 真的驱动/空间问题 | `-11: backend error` + 日志带原始码 |
+
+第二行曾经和其它错误一起走 `ARK_E_IO`，于是 `/mnt/nor/nodir/x.txt` 报成
+「backend error」——把「路径不存在」说成了「驱动出错」，而这种错报会把人
+往错的方向带（去查 QSPI 驱动）。反过来也不能把整个失败都当 NOENT：那会
+把真正的 I/O 故障说成路径写错了。
+
+同一条契约还有一半在 `arkrtos_fs` 侧：`fs_stream_open()` 的每条失败返回都
+必须写 `last_error`，否则桥读到的会是上一次的陈旧码，拿陈旧码做判断就等于
+猜。
 
 **上板验证过（并发）**：`example/stm32f427/app_sdk/APP_DEMO` 自检里的 `10c)` 一项把
 三块任务压到同一条路径上——两个写者（本任务写 32 B 的 `'A'`、一个 pthread 写 48 B 的 `'B'`，

@@ -708,8 +708,13 @@ static int32 fs_stream_open(const char *path, uint32 mode, uint32 flags)
     struct lfs_file_config fcfg;
     int err;
 
+    /* Every failure path must set last_error: the VFS bridge reads it to
+     * tell "parent directory missing" (NOENT) apart from a real backend
+     * error, and a stale value left behind here would make that
+     * judgement lie. */
     if((g_fs.mounted == 0u) || (fs_check_path(path) != 0))
     {
+        g_fs.last_error = ARKRTOS_FS_ERR_ARGS;
         return -1;
     }
 
