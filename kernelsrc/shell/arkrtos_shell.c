@@ -704,8 +704,15 @@ static int cmd_app(int argc, char *argv[])
     if((argc >= 2) && (strcmp(argv[1], "list") != 0))
     {
 #if (ARKRTOS_USE_APPRUN == 1)
+        /* flash 子命令只在这个开关打开时才存在；usage 里出现一条敲不出来的命令
+         * 比不写更糟（用户会以为是自己参数写错了）。 */
+#if (ARKRTOS_USE_FLASHAPP == 1)
         sh_out("usage: app [list | install <path> [slot] | start <slot> | stop <slot> |"
                " uninstall <slot> | run <path> | flash <write <path>|run|erase|info>]\r\n");
+#else
+        sh_out("usage: app [list | install <path> [slot] | start <slot> | stop <slot> |"
+               " uninstall <slot> | run <path>]\r\n");
+#endif
 #else
         sh_out("usage: app [list | install <path> [slot] | start <slot> | stop <slot> | uninstall <slot>]\r\n");
 #endif

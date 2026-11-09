@@ -327,9 +327,10 @@ bank2 尾部），`app flash run` 用 `mini_alloc` 借 RAM 窗口 + `task_regist
    必须同时校验日志里的入口点在 Flash 区。
 2. **先验后擦**：明显不对的文件不该擦掉还能跑的那份，所以形状校验（SP 在 RAM 窗口顶、
    入口在镜像内、入口前两字节是 `0xB5E0`）全部在 `erase` 之前。
-3. **默认关闭零变化**：`USE_FLASHAPP=0` 时源文件不编进来、命令表与体积不变；
-   打开时 `arkrtos_features.h` 的 `#error` 与 Kconfig 的 `depends on` 是同一套规则的
-   两种表达。
+3. **默认关闭零变化**：`USE_FLASHAPP=0` 时源文件不编进来、命令表里也没有 `flash`
+   子命令。例外是**分区上那 128 KB 照样预留**（池少一个扇区，固件 +16 B）：分区
+   是板级静态决定，`.sct`/`.ld` 生成器与 C 必须看到同一个数。打开时
+   `arkrtos_features.h` 的 `#error` 与 Kconfig 的 `depends on` 是同一套规则的两种表达。
 
 ### 9.5 实测读数
 
