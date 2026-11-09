@@ -46,6 +46,9 @@
 #if (ARKRTOS_USE_APPPACK == 1)
 #include "include/flash_fs.h"      /* fs_write_file / fs_last_error */
 #include "arkrtos_apppack.h"       /* the four-pass diff itself (pure) */
+#include "arkrtos_partition.h"    /* ARKRTOS_APP_NOMINAL_*_BASE: the layout
+                                  * lives in exactly one place, so the bases
+                                  * baked into the image come from there too */
 #include "arkrtos_ptable.h"        /* four payloads + the image come from the pool */
 #endif
 
@@ -105,7 +108,7 @@ static void cc_usage(void)
         "  --reloc-text: let the linker fix in-section absolute addresses (string\r\n"
         "         literals) per object.  ON by default for -link: every object was\r\n"
         "         compiled against another base, so leaving it off points those\r\n"
-        "         addresses at 0x08000000.  --no-reloc-text keeps the old output\r\n"
+        "         addresses at the image ROM base.  --no-reloc-text keeps the old\r\n"
         "  --reloc-data: give every object its own slice of SRAM and rewrite\r\n"
         "         the .data/.bss addresses baked into its code.  ON by default\r\n"
         "         once -link or --scatter is in play: without it a second object\r\n"
@@ -260,8 +263,8 @@ static uint8_t s_cc_pack_extram[CC_PACK_EXTRAM_SIZE] CC_PACK_EXTRAM_ATTR;
  * nominal_ram_base); the loader adds (landing point - nominal) at run time, so
  * these values never have to be reached.  ARM's default bases keep them
  * comparable with a plain .sct. */
-#define CC_PACK_ROM_BASE     0x08000000u
-#define CC_PACK_RAM_BASE     0x20000000u
+#define CC_PACK_ROM_BASE     ARKRTOS_APP_NOMINAL_ROM_BASE
+#define CC_PACK_RAM_BASE     ARKRTOS_APP_NOMINAL_RAM_BASE
 /* Base increment: must be at least one window (see arkrtos_apppack.h) so that
  * the four address ranges cannot overlap; 512 KB is far larger than 8 KB. */
 #define CC_PACK_DELTA        0x00080000u

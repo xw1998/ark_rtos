@@ -4529,27 +4529,66 @@ typedef struct {
     uint32 disabled;
 } mini_auto_ctx_t;
 
+/* 清单里的一条路径存在不存在：**必须按内核读镜像的那一层去问**。
+ * mini 在 VFS 构建里按命名空间路径读（/mnt/nor/hello/hello.svcm），而
+ * arkrtos_fs_stat_path() 解的是卷内路径（/hello/hello.svcm）。拿错一层问，
+ * 就会得到「明明刚 mini run 成功、清单却报 not in the volume」这种读数——
+ * 上板实测过：删了又写都不管用，因为文件本来就在那儿，只是查错了地方。 */
+static int mini_auto_stat(const char *path, uint32 *size, uint32 *is_dir,
+                           int32 *out_err, const char **out_layer)
+{
+#if ARKRTOS_MINI_READ_VFS
+    uint32 mode = 0u;
+    int32  rc   = arkrtos_vfs_app_stat(path, size, &mode);
+
+    *out_layer = "vfs";
+    *out_err   = rc;
+    if(rc != ARK_VFS_OK)
+    {
+        return -1;
+    }
+    if(is_dir != 0)
+    {
+        *is_dir = ((mode & ARKRTOS_VFS_S_IFDIR) != 0u) ? 1u : 0u;
+    }
+    return 0;
+#else
+    int32 rc = arkrtos_fs_stat_path(path, size, is_dir);
+
+    *out_layer = "fs";
+    *out_err   = arkrtos_fs_last_error();
+    return (rc == 0) ? 0 : -1;
+#endif
+}
+
 static int mini_auto_show(const char *path, void *arg)
 {
     mini_auto_ctx_t *c = (mini_auto_ctx_t *)arg;
     uint32 size   = 0u;
     uint32 is_dir = 0u;
     uint32 hash;
+    int32  err    = 0;
+    const char *layer = "fs";
 
     c->index++;
 
     ark_shell_printf("  [%u] %s\r\n", (unsigned)c->index, path);
 
-    if(arkrtos_fs_stat_path(path, &size, &is_dir) != 0)
+    if(mini_auto_stat(path, &size, &is_dir, &err, &layer) != 0)
     {
-        int32 e = arkrtos_fs_last_error();
-
         c->missing++;
+#if ARKRTOS_MINI_READ_VFS
+        ark_shell_printf("      not in the volume (vfs err %d: %s)\r\n",
+                         (int)err, arkrtos_vfs_error_name(err));
+#else
+        (void)layer;
         ark_shell_printf("      not in the volume (fs err %d: %s)\r\n",
-                         (int)e, arkrtos_fs_error_name(e));
+                         (int)err, arkrtos_fs_error_name(err));
+#endif
     }
     else
     {
+        (void)layer;
         ark_shell_printf("      %u bytes%s\r\n", (unsigned)size,
                          (is_dir != 0u) ? " (a directory)" : "");
     }

@@ -87,6 +87,25 @@ class Case(object):
         self.why = why          # 这条用例在证明什么（打印给人看）
         self.steps = steps
 
+class Reset(object):
+    """复位板子（不重烧、不断电），然后把复位后那段输出当一次「步骤输出」判。
+
+    为什么需要它：有一类行为只在**开机那一刻**发生（卷挂上时的自启），
+    串口上敲命令复现不了。不能靠「重烧」代替复位——重烧会重新写 flash，
+    而这里要证明的恰恰是「同一个固件、同一块 NOR，换个开机就自动跑起来」。
+
+    expect/forbid 与 Step 完全同一套语义（search + re.M），所以写的时候
+    仍然要自己带边界。wait 是从 reset 命令返回后开始 Drain 的时长，要盖住
+    banner + 挂载 + 装载，默认给得比较宽。
+    """
+
+    def __init__(self, wait=8.0, expect=None, forbid=None, check=None):
+        self.cmd = "<reset>"
+        self.expect = expect or []
+        self.forbid = forbid or []
+        self.wait = wait
+        self.check = check
+
 
 # --- 源码：两个都被 M1/M2 实测过。不要随手加长：板的 arkc 池只有 80 KB，
 #     809 B 的源在 pass A 就会 memory pool exhausted（实测），所以这里给的是
@@ -160,6 +179,28 @@ SRC_M2 = [
     "}",
 ]
 
+
+# --- M3-d 跨复位自启：被测程序 -------------------------------------------
+# 这个程序只有一个作用：打一行**只有它有**的字符串然后自己退出。
+# 它必须自己退出，不能死循环：自启的判据不是「窗口被占住了」，而是「没人敲
+# mini run，这行字也出现在串口上」；若它死循环，就会把窗口与单实例闸门一起
+# 占住，后面的用例全毁。
+SRC_AUTO = [
+    "typedef unsigned int u32;",
+    "extern void __arkcc_init_globals(void);",
+    "int __svc(0x1A) svc_shell(u32 *p);",
+    "int __svc(0x1B) svc_thread(u32 *p);",
+    "void Reset_Handler(void)",
+    "{",
+    "u32 p[3];",
+    "__arkcc_init_globals();",
+    'p[0] = 3u; p[1] = (u32)"C3 autostart alive\\r\\n"; p[2] = 0u;',
+    "svc_shell(p);",
+    "p[0] = 3u; p[1] = 0u; p[2] = 0u;",
+    "svc_thread(p);",
+    "for (;;) { }",
+    "}",
+]
 
 # --- M2 判据 C：跨翻译单元（两源 -> 两对象 -> 一次 -link -> app run）------
 # 判据 C 要的是「四类绝对地址各至少命中一次」：
@@ -705,6 +746,76 @@ CASES = [
                  expect=[r"^  hello +0 +<dir>$"], wait=2.0),
         ],
     ),
+    Case(
+        "mini-autostart-reboot",
+        "M3-d 跨复位自启：清单里的路径在开机时由内核自己跑起来（没人敲 mini run）；"
+        "从清单里删掉再开机就必须不再跑——证明那行输出来自清单，而不是别的路",
+        CLEAN
+        + [
+            # 0) 先把上一轮可能残留的痕清干净（那才是真正会污染后面的东西：
+            #    清单在 NOR 上，复位清不掉）。空改动的 del 也是成功的，所以
+            #    这里不写 expect 文字，下一步自己会把状态读回来。
+            # 清单本来就不存在时的读数是 "no list (/mini.autostart)"（文件都不在），
+            # 存在但删空时才走 "empty list"。这里要的是"卷上真的没有清单"，
+            # 所以判 no list——它比 empty list 更强。
+            Step("mini autostart del /mnt/nor/c3auto.svcm", wait=1.2),
+            Step("mini autostart",
+                 expect=[r"^mini autostart: no list \(/mini\.autostart\)"],
+                 wait=1.5),
+        ]
+        # 1) 造镜像：必须落在 NOR 上。ramfs 复位就没了，而这条用例的全部
+        #    内容就是"复位之后还在"。
+        + _steps_emit("/tmp/auto.c", SRC_AUTO)
+        + [
+            Step("cc /tmp/auto.c --pack -o /mnt/nor/c3auto.svcm",
+                 expect=[r"^cc: +packed in \d+ ms$"],
+                 forbid=[r"unresolved symbol", r"pack failed"],
+                 wait=25.0),
+            Step("rm /tmp/auto.c"),
+            # 2) 先手工跑一次：否则“开机没跑起来”分不清是清单的错还是镜像的错。
+            Step("mini run /mnt/nor/c3auto.svcm",
+                 expect=[r"C3 autostart alive$",
+                         r"task \d+ returned: MiniApp finished"],
+                 forbid=[r"mini run: .* failed", r"(HARD|MEM|BUS|USG)FAULT"],
+                 wait=4.0),
+            # 3) 写清单，并把清单读回来（“写进去了”和“内核看到的是它”是两件事）
+            Step("mini autostart add /mnt/nor/c3auto.svcm",
+                 expect=[r"^mini autostart: /mnt/nor/c3auto\.svcm will start at boot$"],
+                 wait=1.5),
+            Step("mini autostart",
+                 expect=[r"^  \[1\] /mnt/nor/c3auto\.svcm$",
+                         r"^  1 listed, 0 missing in the volume, 0 disabled$"],
+                 wait=1.5),
+            # 4) 复位（不重烧、不断电）。从这里开始串口上的每一行都是内核
+            #    自己跑出来的：没有人敲 mini run。
+            Reset(
+                wait=9.0,
+                expect=[r"autostart: /mnt/nor/c3auto\.svcm started$",
+                        r"boot autostart: 1 started from /mini\.autostart$",
+                        r"C3 autostart alive$"],
+                forbid=[r"autostart: /mnt/nor/c3auto\.svcm not started",
+                        r"(HARD|MEM|BUS|USG)FAULT"],
+            ),
+            Step("mini", expect=[r"^mini: none running"], wait=2.0),
+            # 5) 反假绿：把它从清单里删掉，再复位一次。若那行字又出现，就说明
+            #    它根本不是清单触发的（例如 loader 扫描 slot 自启了它）——
+            #    那样这条用例测的就是别的东西。
+            Step("mini autostart del /mnt/nor/c3auto.svcm",
+                 expect=[r"^mini autostart: /mnt/nor/c3auto\.svcm will not start at boot$"],
+                 wait=1.5),
+            Step("mini autostart",
+                 expect=[r"^mini autostart: no list \(/mini\.autostart\)"],
+                 wait=1.5),
+            Reset(
+                wait=9.0,
+                expect=[r"no autostart list \(/mini\.autostart\)$"],
+                forbid=[r"boot autostart: \d+ started", r"C3 autostart alive"],
+            ),
+            # 6) 收尾：镜像也不留在卷上（下一轮从干净状态开始）
+            Step("rm /mnt/nor/c3auto.svcm", wait=1.0),
+            Step("ls /mnt/nor", expect=[r"^  hello +0 +<dir>$"], wait=1.5),
+        ],
+    ),
 ]
 
 
@@ -744,6 +855,15 @@ class Board(object):
         self.ser.write((cmd + "\r\n").encode("utf-8"))
         return self.drain(wait)
 
+    def drop(self):
+        """丢掉已经不新鲜的输出（复位前用）：不这样做，复位后的“证据”里
+        会混进复位前最后几行，而那正是判据最容易自己骗自己的地方。"""
+        del self.buf[:]
+        try:
+            self.ser.reset_input_buffer()
+        except Exception:
+            pass
+
     def close(self):
         self.stop[0] = True
         self.th.join(2)
@@ -770,10 +890,37 @@ def clean(text):
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
+def reset_board():
+    """复位 MCU（不重烧）：openocd 只做 reset run 就退出。
+
+    判据为什么是“进程退出码 0 且日志里没有 Error”：openocd 对 reset 没有
+    类似烧录的 “** Verified OK **” 那种肯定句，而「板子真重启了」这件事
+    由用例自己的 expect（banner / 开机日志）来证——复位本身就是那个前题。
+    """
+    if not os.path.isfile(OCD):
+        sys.stderr.write("FAIL: openocd not found: %s (set ARK_OPENOCD)\n" % OCD)
+        return False
+    cmd = "init; reset_config srst_only srst_nogate; reset run; shutdown"
+    proc = subprocess.run([OCD, "-s", OCD_SCRIPTS, "-f", OCD_CFG, "-c", cmd],
+                          capture_output=True, text=True)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0 or ("Error" in out):
+        sys.stderr.write("FAIL: reset via openocd: rc=%d\n%s\n"
+                         % (proc.returncode, out[-1200:]))
+        return False
+    return True
+
 def run_case(board, case):
     problems = []
     for step in case.steps:
-        out = clean(board.send(step.cmd, step.wait))
+        if isinstance(step, Reset):
+            board.drop()
+            if not reset_board():
+                problems.append("could not reset the board")
+                break
+            out = clean(board.drain(step.wait))
+        else:
+            out = clean(board.send(step.cmd, step.wait))
         for pat in step.expect:
             if not re.search(pat, out, re.M):
                 problems.append("missing /%s/ after `%s`" % (pat, step.cmd))

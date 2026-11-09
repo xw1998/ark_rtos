@@ -221,6 +221,10 @@ void arkrtos_vfs_app_task_exit(uint32 task_id)
 extern const ark_vfs_fsdrv_t arkrtos_vfs_lfs_fsdrv;
 #endif
 
+#if (ARKRTOS_USE_MINIAPP == 1) && (ARKRTOS_MINI_READ_VFS == 1)
+#include "arkrtos_mini.h"       /* 挂点建好后才跑自启，见 mount_volume() 末尾 */
+#endif
+
 /* arkrtos_current_task_id（句柄归属）与 arkrtos_task_status_get_internal
  * （清理已死任务留下的句柄） */
 #include "arkrtos_task.h"
@@ -449,6 +453,16 @@ int32 arkrtos_vfs_mount_volume(const char *dev, uint32 offset, uint32 size,
         return ARK_E_NAMETOOLONG;
     }
     ARKRTOS_LOGI("vfs", "volume %s mounted at %s", dev, target);
+
+#if (ARKRTOS_USE_MINIAPP == 1) && (ARKRTOS_MINI_READ_VFS == 1)
+    /* 现在挂点存在了，清单里的路径才解得开——这也是自启唯一能放的位置。
+     * arkrtos_fs_mount() 早于 ark_vfs_mount()，所以「卷挂上」那一刻名字
+     * 还解不出（VFS 构建里镜像就是按命名空间路径读的）；把自启留在那一步
+     * 会让每条清单项都以 -18 失败，而且 boot-done 位已经置上、不再重试。
+     * 本次开机只做一次；没有清单文件就安静地什么都不做。 */
+    (void)arkrtos_mini_boot_autostart();
+#endif
+
     return ARK_VFS_OK;
 #endif
 }

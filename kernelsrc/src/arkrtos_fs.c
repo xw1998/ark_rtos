@@ -349,11 +349,18 @@ static int32 fs_mount_with(struct lfs_config *cfg)
     g_fs.mounted = 1u;
     g_fs.last_error = 0;
 
-#if (ARKRTOS_USE_MINIAPP == 1)
+#if (ARKRTOS_USE_MINIAPP == 1) && (ARKRTOS_MINI_READ_VFS == 0)
     /* 卷可用了——这是小程序唯一能起来的时刻：它的代码就放在这个卷里，而内核
      * 不去猜哪个设备上有文件系统（那是板级知识，挂载由上层发起）。所以把
      * 「挂上」当作「可以自启了」的信号：谁把它挂上，自启就在那一刻被带上。
-     * 本次开机只做一次；没有清单文件就安静地什么都不做。 */
+     * 本次开机只做一次；没有清单文件就安静地什么都不做。
+     *
+     * 只在「按卷根路径读镜像」的构建里放在这里（ARKRTOS_MINI_READ_VFS==0）。
+     * VFS 构建不能在这里自启：清单里写的是 `mini run` 那条写法（如
+     * /mnt/nor/hello/hello.svcm），而它要靠挂载点解析；本函数是被
+     * arkrtos_vfs_mount_volume() 调进来的，此刻 ark_vfs_mount() 还没执行，
+     * 名字解不开、每一条都会以 -18 失败。那一支的自启挂在挂载点建好之后
+     * （见 arkrtos_vfs.c 末尾）。 */
     (void)arkrtos_mini_boot_autostart();
 #endif
 

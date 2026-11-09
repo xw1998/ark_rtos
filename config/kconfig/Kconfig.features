@@ -349,6 +349,15 @@ config ARKRTOS_USE_ARKC
 	  .ark_buf section, which the board may place in external SDRAM.  Off
 	  compiles the component out and leaves the command table unchanged.
 
+config ARKRTOS_USE_ARKMAKE
+	bool "On-board make (arkmake)"
+	default n
+	depends on ARKRTOS_USE_ARKC && ARKRTOS_USE_APPPACK
+	help
+	  Build a MiniApp project from its makefile on the board, through the
+	  same four-pass packer as `cc --pack`.  Adds the `make` shell command.
+	  Off compiles arkmake out entirely; `cc --pack` still works.
+
 config ARKRTOS_USE_SDRAM
 	bool "External SDRAM (FMC SDRAM Bank1)"
 	default n
@@ -360,6 +369,37 @@ config ARKRTOS_USE_SDRAM
 	  no FMC register and nothing is mapped at 0xC0000000.  When on, the
 	  board also registers the `sdram` shell command (info / full-chip
 	  self test).
+
+config ARKRTOS_USE_QSPI
+	bool "QSPI NOR flash block device (nor0)"
+	default n
+	depends on ARKRTOS_USE_BLK
+	help
+	  Register the on-board W25Qxx as block device nor0 and add the `nor`
+	  shell command.  Off: no QSPI peripheral is touched and no block
+	  device appears, so anything that wants a persistent volume (the
+	  file system, automount, MiniApps kept on NOR) has nothing to mount.
+
+config ARKRTOS_AUTOMOUNT_NOR
+	bool "Mount the NOR volume at boot (board fstab)"
+	default n
+	depends on ARKRTOS_USE_QSPI && ARKRTOS_USE_FS && ARKRTOS_USE_VFS && ARKRTOS_USE_VFS_LFS
+	help
+	  Mount nor0 at ARKRTOS_AUTOMOUNT_NOR_POINT during board init, so the
+	  console can `cd` into it without a manual `fs mount` / `mount`.
+	  A failed mount does not block the boot: the console still comes up
+	  and says why.  Mounting never formats - a blank volume stays blank
+	  until someone runs `fs format` on purpose.
+
+config ARKRTOS_AUTOMOUNT_NOR_POINT
+	string "Mount point for the boot volume"
+	default "/mnt/nor"
+	depends on ARKRTOS_AUTOMOUNT_NOR
+	help
+	  Where the boot volume appears in the VFS namespace.  MiniApp paths
+	  on that volume are written exactly as `mini run` takes them, so this
+	  name is part of the identity string the crash bookkeeping uses;
+	  changing it changes those paths too.
 
 config ARKRTOS_USE_APPRUN
 	bool "On-board app runner (app run)"

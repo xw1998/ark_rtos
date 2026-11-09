@@ -17,7 +17,12 @@ Modes
 The generator is deliberately boring: bool becomes 1/0 (never left undefined),
 int/hex a parenthesised constant, string a quoted literal.  Emitting 0 for a
 disabled bool is intentional - it lets a Kconfig "n" override a header default
-of 1, which a missing #define could not do.
+of 1, which a missing #define could not do.  An *empty* string is the one case
+that is omitted instead of emitted as "": "" is a legal value that no header
+default can tell apart from "not configured", and a path macro that silently
+became empty mounts at the wrong place (ARKRTOS_AUTOMOUNT_NOR_POINT did exactly
+that: Kconfig left it unset because its dependency was off in the defconfig,
+the board turned the feature on with -D, and the boot mounted at "").
 """
 import argparse
 import os
@@ -60,6 +65,10 @@ def render(kconf, values, source):
         if typ == kc.BOOL:
             body = "#define %s %s" % (name, "1" if val not in ("n", "", "0") else "0")
         elif typ == kc.STRING:
+            if val == "":
+                # Leave it undefined so the #ifndef default in
+                # arkrtos_features.h applies; "" would defeat it.
+                continue
             body = '#define %s "%s"' % (name, val)
         else:  # int / hex
             body = "#define %s (%s)" % (name, val if val != "" else "0")

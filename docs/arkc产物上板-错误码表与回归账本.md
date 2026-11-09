@@ -762,3 +762,90 @@ make -j8 USE_SDRAM=1 USE_APPRUN=1 USE_APPPACK=1 USE_ARKMAKE=1 USE_MINI_VFS=1 USE
 结果（`python tools/final_app.py --noflash`）：`m1-fixed-window`、`m1-wrong-window`、
 `m2-pack-run`、`m2-two-landings`、`mini-sdk-std-hello`、`mini-sdk-va`、
 `mini-sdk-missing-main`、`stack-usage`、`vfs-create` —— **all 9 cases PASS**。
+
+---
+
+## 2026-11-09：M3-d 跨复位自启 + 回归 12/12 PASS + 结构门禁 12/12 绿
+
+### 三条真缺陷（都只在真机上才现形）
+
+**① 自启跑到 VFS 挂点建好之前 ⇒ 每条清单项都 -18。**
+自启原来在 `arkrtos_fs_mount()` 里触发，而这个函数是被
+`arkrtos_vfs_mount_volume()` 调进来的——此刻 `ark_vfs_mount()` 还没执行，
+`/mnt/nor` 这个挂点根本不存在。清单里写的是 `mini run` 那条写法
+（`/mnt/nor/xxx.svcm`），靠挂载点解析，于是每一条都以 `-18` 失败；
+更糟的是 `g_mini_auto_boot_done` 已经置上，**整次开机不再重试**。
+改法：VFS 构建把自启搬到挂载成功之后（`arkrtos_vfs.c` 里新增调用点），
+`arkrtos_fs.c` 那边加 `&& (ARKRTOS_MINI_READ_VFS == 0)` 只留给非 VFS 构建，
+保证「默认关闭时行为零变化」。
+
+**② 清单路径的存在性被问到了错的那一层。**
+`mini autostart` 用 `arkrtos_fs_stat_path()`（卷根坐标）去查
+`/mnt/nor/c3auto.svcm`，而内核读镜像走的是 VFS 命名空间 ⇒ 于是出现
+「`mini run` 刚跑成功、紧接着 `mini autostart` 报 `not in the volume (fs err -2)`」。
+改法：VFS 构建改问 `arkrtos_vfs_app_stat()`，并且错误文案也走
+`arkrtos_vfs_error_name()`——问哪一层，就说哪一层的话。
+
+**③ Kconfig 的 string 符号被生成成 `""`，把头文件默认值吃掉。**
+`ARKRTOS_AUTOMOUNT_NOR_POINT` 的 Kconfig 默认是 `"/mnt/nor"`，但它的依赖
+（`ARKRTOS_AUTOMOUNT_NOR`）在 defconfig 里是 `n`，板子是在 **Makefile 里用
+`-DARKRTOS_AUTOMOUNT_NOR=$(USE_QSPI)` 打开**的。于是 genconfig 解析出空值、
+原样写成 `#define ARKRTOS_AUTOMOUNT_NOR_POINT ""`——`#ifndef` 兜底再也轮不到，
+开机挂载点变成空串，`mount nor0 at : -2`，**整块 NOR 没挂上，6 条用例连带红**。
+改法：`tools/kconfig/genconfig.py` 对空 string **不生成**（bool 仍然恒生成 0，
+那条注释里说的理由对 string 不成立：`""` 是合法值，头文件默认值分不出
+「配成空」与「没配」）。这一条是「宁可报错不给错答案」在生成器上的落点——
+空路径不该被当成一个可用的挂载点。
+
+另外 `main.c` 调 `arkrtos_fs_last_error()` / `arkrtos_fs_err_is_unformatted()`
+却没包含 `arkrtos_fs.h`（隐式声明，d32fb84 带进来的），一并补上。
+
+### 打包器的标称基址改成走分区头
+
+`arkc_shell_cmd.c` 里 `CC_PACK_ROM_BASE/CC_PACK_RAM_BASE` 原来写死
+`0x08000000/0x20000000`，改成 `ARKRTOS_APP_NOMINAL_ROM_BASE` /
+`ARKRTOS_APP_NOMINAL_RAM_BASE`（`config/arkrtos_partition.h` 的唯一来源）。
+语义不变：这两个值只进镜像头，装载器运行时按「落点 − 标称」补差；
+变的是 delta 从「大偏移」变成「池内小偏移」，`m2-pack-run` /
+`m2-two-landings` / `m2-cross-tu-link` 三条用例已实测不退化。
+帮助文本里那个具体地址也改成「the image ROM base」，让
+`ci_gate` 的 `single-address-source` 真正只剩一个来源。
+
+### 门禁
+
+```sh
+env -u PYTHONPATH -u PYTHONHOME <py310> -X utf8 tools/ci_gate.py
+# 12 check(s) passed, 0 failed
+```
+
+补的四个 Kconfig 符号（`ARKRTOS_USE_QSPI` / `ARKRTOS_AUTOMOUNT_NOR` /
+`ARKRTOS_AUTOMOUNT_NOR_POINT` / `ARKRTOS_USE_ARKMAKE`）让 `features-switches`
+转绿；`arkrtos_autoconf.h` 重新生成后 `config-generated` 转绿。
+
+### 板级回归：all 12 cases PASS
+
+```sh
+make -j8 USE_SDRAM=1 USE_APPRUN=1 USE_APPPACK=1 USE_ARKMAKE=1 USE_MINI_VFS=1 USE_QSPI=1
+# FLASH 492900 B (94.01%) / RAM 308240 B (68.41%)
+# text 490596 / data 2284 / bss 17191012
+python tools/final_app.py     # 会重烧，因为固件变了
+```
+
+新增用例 **`mini-autostart-reboot`** 是这条链的正向证据 + 反假绿：
+先 `cc --pack` 出一个 svcm、`mini run` 手工跑一次确认它能跑，
+再 `mini autostart add` 进清单，然后**复位**（`openocd reset run`，不重烧——
+重烧会改 flash，而这条要证明的正是「同一固件、同一块 NOR，换个开机就自己跑」），
+断言三行：`autostart: /mnt/nor/c3auto.svcm started`、
+`boot autostart: 1 started from /mini.autostart`、程序自己打的 `C3 autostart alive`。
+反假绿：从清单里删掉再复位，这两类行**必须不再出现**（若还出现，说明那行输出
+来自别的路径，例如 loader 的 slot 自启）。
+
+### 新登记两条（可复用的口径）
+
+**⑤ 「开机那一刻做的事」必须在它依赖的对象存在之后。** 讲顺序的缺陷不会在
+单测里现形（函数都返回成功），只在真机冷启动的那一次才现形；判据要能跨复位
+（`tools/final_app.py` 的 `Reset` 步），且反假绿必须是「删掉触发条件再复位」。
+**⑥ 同一个路径在不同层有不同的坐标。** 问存在性时先确认「内核读它时走的是哪一层」
+（fs 卷根坐标 vs VFS 命名空间坐标，错配就会给出「刚跑成功却报不存在」）。
+**⑦ 生成器的空值策略也是判据的一部分。** `""` 与「未配置」必须分开表示；
+能兜底的 `#ifndef` 只在符号**没被生成**时才有效。

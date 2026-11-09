@@ -33,6 +33,7 @@
 #include "arkrtos_shell.h"
 #include "arkrtos_log.h"
 #include "arkrtos_vfs.h"
+#include "arkrtos_fs.h"      /* last_error / err_is_unformatted: the mount path asks why */
 #include "arkrtos_mq.h"
 #include "arkrtos_timer.h"
 #include "arkrtos_fault.h"
