@@ -161,6 +161,67 @@ SRC_M2 = [
 ]
 
 
+# --- M2 判据 C：跨翻译单元（两源 -> 两对象 -> 一次 -link -> app run）------
+# 判据 C 要的是「四类绝对地址各至少命中一次」：
+#   ① 带初值的全局      g_init = 7          （.data，落在 ER_IRAM1）
+#   ② 字符串字面量      tag = "C1 tag alpha"（.rodata，落在 ER_IROM1）
+#   ③ 函数指针          fp = b_add           （跨 TU 的函数地址，靠重定位）
+#   ④ 跨文件调用        fp(g_init, 5) == 12  （b.c 里的函数，另一个对象）
+# 真值由程序自己算：7 + 5 = 12 就打 "C1 ok"，否则 "C1 BAD"——判据不是"有没有
+# 输出"，而是"这个数字是不是用对了地址算出来的"。写错重定位会得到 BAD 或
+# 直接跑飞（HARD/MEMFAULT），两种都在 forbid 里。
+SRC_C1A = [
+    "typedef unsigned int u32;",
+    "extern void __arkcc_init_globals(void);",
+    # p[0] 是 SVC 0x1A 的子命令，不是参数个数：1=注册 2=注销 3=打印。
+    # 写错成 2 的后果是"注销一个名叫 C1 tag alpha 的命令"——SVC 返回错误码、
+    # 屏幕上一个字都不出。第一版就是这么写的，板上表现为 app run 打印
+    # "started (task 4)" 之后彻底安静，既不报错也不退出（下面还挂着死循环）。
+    "int __svc(0x1A) svc_shell(u32 *p);",
+    # 0x1B 子命令 3 = 当前线程退出。宿主镜像必须显式走这一条：
+    # app run 的窗口只在"任务退出"时归还（arkrtos_apprun_on_task_exit），
+    # 挂一个死循环会把窗口和单实例闸门一起永久占住——板上实测只剩
+    # 复位一条路，而复位会清掉 ramfs，编译产物全丢。
+    "int __svc(0x1B) svc_thread(u32 *p);",
+    "int g_init = 7;",
+    'const char tag[] = "C1 tag alpha\\r\\n";',
+    "extern int b_add(int a, int v);",
+    "int (*fp)(int, int) = b_add;",
+    "void Reset_Handler(void)",
+    "{",
+    "u32 p[4];",
+    "int r;",
+    "__arkcc_init_globals();",
+    "p[0] = 3u; p[1] = (u32)tag; p[2] = 0u;",
+    "svc_shell(p);",
+    "r = fp(g_init, 5);",
+    "p[0] = 3u;",
+    'p[1] = (u32)((r == 12) ? "C1 ok\\r\\n" : "C1 BAD\\r\\n");',
+    "p[2] = 0u;",
+    "svc_shell(p);",
+    "p[0] = 3u; p[1] = 0u; p[2] = 0u;",
+    "svc_thread(p);",
+    "for (;;) { }",
+    "}",
+]
+
+# b.c 自己也带一个初值全局：这样第二个对象同样有 .data 窗口，链接器必须把
+# 它挪到第一个对象之后（--reloc-data）并把 b_add 里烤进去的地址改成新基址，
+# 同时把两个对象的 __arkcc_init_globals 链起来各跑一遍。没有这一项就只能
+# 验到"跨文件调用"，验不到"每个对象的 .data 都初始化对了"——实测缺它时
+# 第二份 init 体被同名合并吃掉，b_bias 停在 0，结果算成 7 而不是 12。
+SRC_C1B = [
+    "int b_bias = 5;",
+    "int b_add(int a, int v)",
+    "{",
+    "return a + v + (b_bias - 5);",
+    "}",
+]
+
+# 散列文件与 M1 同款窗口：代码 0x24070000/0x2000、RAM 0x24072000/0x2000。
+# 只有第一个对象带 --vector-table（0x400 的洞），第二个不必——两个都带会白扔 1 KB。
+SCT_C1 = SCT_OK
+
 def _emit(path, lines):
     """把源码/散列文件写进板上 ramfs。用 shell 的 echo（shell 只有 128 B 行缓冲，
     这些行都远短于它）。"""
@@ -190,6 +251,10 @@ CLEAN = [
     # /mnt/nor 上构建现成的工程（那份是设备上常驻的，不能删）。ramfs 在 SDRAM
     # 档只有 11 个槽，上一轮半路 FAIL 留下的文件会把槽占住。
     Step("rm /tmp/nmk", wait=0.25), Step("rm /tmp/nom.svcm", wait=0.25),
+    # 判据 C 的六个文件（两源 + 两对象 + 散列 + 产物）
+    Step("rm /tmp/c1a.c", wait=0.25), Step("rm /tmp/c1b.c", wait=0.25),
+    Step("rm /tmp/c1.sct", wait=0.25), Step("rm /tmp/c1a.obj", wait=0.25),
+    Step("rm /tmp/c1b.obj", wait=0.25), Step("rm /tmp/c1.bin", wait=0.25),
 ]
 
 
@@ -358,6 +423,47 @@ CASES = [
                  wait=2.0, check=_m2_two_blocks_ok),
             Step("mini stop", expect=[r"^mini stopped: all blocks returned to the pool$"],
                  wait=2.0),
+        ],
+    ),
+    Case(
+        "m2-cross-tu-link",
+        "M2 判据 C：两源 -> 两对象 -> 一次 -link -> 固定窗口跑起来；带初值全局、字符串字面量、"
+        "函数指针、跨文件调用四类绝对地址各命中一次",
+        CLEAN
+        + _steps_emit("/tmp/c1a.c", SRC_C1A)
+        + _steps_emit("/tmp/c1b.c", SRC_C1B)
+        + _steps_emit("/tmp/c1.sct", SCT_C1)
+        + [
+            # 第一个对象留向量表洞，第二个不留：-link --vector-table 只要求镜像头部
+            # 是空的，两个对象都留等于白扔 1 KB 代码窗。
+            # 每个对象都按同一份 .sct 编：arkc 把 .data/.bss 的绝对地址烤进
+            # 指令，所以对象只能对它将来真正落的那块内存编基址；--scatter 一
+            # 出现在命令行上，reloc-data/reloc-text 就默认打开（对象里记下可
+            # 重定位站点），-link 才有东西可改。
+            Step("cc /tmp/c1a.c --scatter /tmp/c1.sct --vector-table -c -o /tmp/c1a.obj",
+                 expect=[r"^cc: /tmp/c1a\.c -> /tmp/c1a\.obj \(target arm, -O\d\), -c$",
+                         r"^cc: scatter /tmp/c1\.sct$",
+                         r"^cc: done in \d+ ms$"], wait=8.0),
+            Step("cc /tmp/c1b.c --scatter /tmp/c1.sct -c -o /tmp/c1b.obj",
+                 expect=[r"^cc: /tmp/c1b\.c -> /tmp/c1b\.obj \(target arm, -O\d\), -c$",
+                         r"^cc: scatter /tmp/c1\.sct$",
+                         r"^cc: done in \d+ ms$"], wait=8.0),
+            Step("cc -link /tmp/c1a.obj /tmp/c1b.obj --scatter /tmp/c1.sct "
+                 "--vector-table -o /tmp/c1.bin",
+                 expect=[r"^cc: link 2 obj -> /tmp/c1\.bin$",
+                         r"^cc: scatter /tmp/c1\.sct$",
+                         r"^cc: reloc-text on$",
+                         r"^cc: reloc-data on$",
+                         r"^cc: done in \d+ ms$"], wait=10.0),
+            Step("app run /tmp/c1.bin",
+                 # tag 的字节在 .rodata（代码窗），g_init 在 .data（RAM 窗），
+                 # b_add 在另一个对象里——三样都命中才算判据 C 过。
+                 expect=[r"C1 tag alpha$", r"C1 ok$",
+                         r"APPRUN:\d+ task \d+ exited, window returned to the pool$"],
+                 forbid=[r"C1 BAD", r"(HARD|MEM|BUS|USG)FAULT", r"rc=-"],
+                 wait=3.0),
+            Step("rm /tmp/c1a.c"), Step("rm /tmp/c1b.c"), Step("rm /tmp/c1.sct"),
+            Step("rm /tmp/c1a.obj"), Step("rm /tmp/c1b.obj"), Step("rm /tmp/c1.bin"),
         ],
     ),
     Case(

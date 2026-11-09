@@ -5198,12 +5198,43 @@ static char *codegen_arm(IrProgram *prog) {
                 emit_mov_addr32(&buf, 1, addr, addr_in_own_data(addr));
                 asmbuf_puts(&buf, "    STR r0, [r1]\n");
             } else if (g->init_str) {
-                /* String initializer for char array: emit byte-by-byte */
+                /* String initializer for char array.  Every byte of the object
+                 * is written, the terminating NUL included.  This used to stop
+                 * at the last character, so a global `char tag[] = "abc"`
+                 * (size 4) had offset 3 left holding whatever SRAM powered up
+                 * with: `sizeof` said 4, the init body wrote 3, and printing
+                 * the tag ran on into uninitialised memory.  .data in SRAM is
+                 * not zeroed for us (only .bss is), so the zero fill of a
+                 * longer array (`char s[8] = "ab"`) is written here too,
+                 * exactly as the aggregate path below does it. */
+                int slen = ark_strlen(g->init_str);
                 int si;
-                for (si = 0; si < sz && g->init_str[si]; si++) {
-                    emit_mov_imm(&buf, 0, (int)(unsigned char)g->init_str[si]);
-                    emit_mov_addr32(&buf, 1, addr + (unsigned)si, addr_in_own_data(addr));
-                    asmbuf_puts(&buf, "    STRB r0, [r1]\n");
+                if (sz < 4096) {
+                    /* One base load, then STRB with an immediate offset. */
+                    emit_mov_addr32(&buf, 1, addr, addr_in_own_data(addr));
+                    for (si = 0; si < sz; si++) {
+                        int ch = (si < slen)
+                               ? (int)(unsigned char)g->init_str[si] : 0;
+                        emit_mov_imm(&buf, 0, ch);
+                        if (si == 0) {
+                            asmbuf_puts(&buf, "    STRB r0, [r1]\n");
+                        } else {
+                            asmbuf_puts(&buf, "    STRB r0, [r1, #");
+                            asmbuf_int(&buf, si);
+                            asmbuf_puts(&buf, "]\n");
+                        }
+                    }
+                } else {
+                    /* Huge object: the byte offset no longer fits the STRB
+                     * immediate, so recompute the address per byte. */
+                    for (si = 0; si < sz; si++) {
+                        int ch = (si < slen)
+                               ? (int)(unsigned char)g->init_str[si] : 0;
+                        emit_mov_imm(&buf, 0, ch);
+                        emit_mov_addr32(&buf, 1, addr + (unsigned)si,
+                                        addr_in_own_data(addr));
+                        asmbuf_puts(&buf, "    STRB r0, [r1]\n");
+                    }
                 }
             } else {
                 /* Integer scalar initialization */
@@ -5446,10 +5477,14 @@ static char *codegen_arm(IrProgram *prog) {
                 asmbuf_puts(&buf, hex);
                 asmbuf_putc(&buf, '\n');
             } else if (g->init_str) {
-                /* String array initialization: same escaping as IR_PUSH_STR */
+                /* String array initialization: same escaping as IR_PUSH_STR.
+                 * `.asciz` appends the NUL, so an array with exactly no room
+                 * for it (`char s[4] = "abcd"`) must use `.ascii` -- otherwise
+                 * the object emitted one byte more than it occupies and ran
+                 * over whatever the next symbol was. */
                 int slen = ark_strlen(g->init_str);
                 int k;
-                asmbuf_puts(&buf, "    .asciz \"");
+                asmbuf_puts(&buf, (slen >= sz) ? "    .ascii \"" : "    .asciz \"");
                 for (k = 0; k < slen; k++) {
                     char c = g->init_str[k];
                     if (c == '\n') asmbuf_puts(&buf, "\\n");

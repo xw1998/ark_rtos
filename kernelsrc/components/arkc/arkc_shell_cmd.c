@@ -87,6 +87,7 @@ static void cc_usage(void)
 #if (CC_LAYOUT_OPTS == 1)
         "          [--scatter <file.sct>] [--vector-table]\r\n"
         "          [--reloc-text|--no-reloc-text]\r\n"
+        "          [--reloc-data|--no-reloc-data]\r\n"
         "          [-link <a.obj> [<b.obj> ...]]\r\n"
 #endif
         "  no -o: writes <file>.bin (or prints to the console with -S/-E)\r\n"
@@ -105,6 +106,12 @@ static void cc_usage(void)
         "         literals) per object.  ON by default for -link: every object was\r\n"
         "         compiled against another base, so leaving it off points those\r\n"
         "         addresses at 0x08000000.  --no-reloc-text keeps the old output\r\n"
+        "  --reloc-data: give every object its own slice of SRAM and rewrite\r\n"
+        "         the .data/.bss addresses baked into its code.  ON by default\r\n"
+        "         once -link or --scatter is in play: without it a second object\r\n"
+        "         would write its globals on top of the first object's.\r\n"
+        "         Compile every .obj with --scatter <same file> too, or the\r\n"
+        "         linker refuses the image (the baked base would be stale)\r\n"
 #endif
 #if (ARKRTOS_USE_APPPACK == 1)
         "          [--pack [-o <f.svcm>]] <file.c> [<file2.c> ...]\r\n"
@@ -956,6 +963,12 @@ static int cmd_cc(int argc, char *argv[])
     /* --reloc-text: -1 = not on the command line (decided after parsing:
      * on for -link, off otherwise).  0/1 = what the caller asked for. */
     int        reloc_text = -1;
+    /* --reloc-data: same protocol.  On by default whenever a layout is known
+     * (-link or --scatter), because that is the only case where more than one
+     * object can share the image: each object was compiled against the same
+     * +RW base, so without this they would all write their globals to the same
+     * addresses and the linker would (correctly) refuse the overlap. */
+    int        reloc_data = -1;
 #endif
 #if (ARKRTOS_USE_APPPACK == 1)
     /* --pack: same source, four layouts, one relocatable image.  Left at 0
@@ -1041,6 +1054,10 @@ static int cmd_cc(int argc, char *argv[])
             reloc_text = 1;
         } else if (strcmp(a, "--no-reloc-text") == 0) {
             reloc_text = 0;
+        } else if (strcmp(a, "--reloc-data") == 0) {
+            reloc_data = 1;
+        } else if (strcmp(a, "--no-reloc-data") == 0) {
+            reloc_data = 0;
         } else if (strcmp(a, "-link") == 0) {
             /* Turns the following bare arguments into inputs; nothing else is
              * needed here because the branch above already routes them. */
@@ -1196,6 +1213,15 @@ static int cmd_cc(int argc, char *argv[])
         reloc_text = (link_mode != 0) ? 1 : 0;
     }
     g_config.enable_reloc_text = reloc_text;
+    /* Same shape for data, with one addition: `-c --scatter` also enables it.
+     * An object only knows where its .data/.bss will live because the scatter
+     * told it, so that is exactly the moment to record those addresses as
+     * relocatable.  Off (today's output, byte for byte) when neither -link nor
+     * --scatter is given. */
+    if (reloc_data < 0) {
+        reloc_data = ((link_mode != 0) || (scatter != NULL)) ? 1 : 0;
+    }
+    g_config.enable_reloc_data = reloc_data;
 #endif
 
 #if (CC_LAYOUT_OPTS == 1)
@@ -1223,6 +1249,11 @@ static int cmd_cc(int argc, char *argv[])
     }
     if (link_mode != 0) {
         ark_shell_printf("cc: reloc-text %s\r\n", (reloc_text != 0) ? "on" : "off");
+    }
+    if ((reloc_data != 0) && !link_mode) {
+        ark_shell_printf("cc: reloc-data on (object records .data/.bss sites)\r\n");
+    } else if (link_mode != 0) {
+        ark_shell_printf("cc: reloc-data %s\r\n", (reloc_data != 0) ? "on" : "off");
     }
 #endif
 

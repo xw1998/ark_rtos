@@ -231,7 +231,16 @@
  *   ARKCC_FEATURE_ASM_EXTRA      汇编器扩展指令集。默认 0：--asm-extra 打开。 */
 /* 编译期：这几段代码是否进入产物。板上（STM32_MIN）默认裁掉以省 Flash；
  * 宿主/交叉编译保留，于是运行时开关 --xxx 才有的可开。
- * 运行时的默认值一律是 0（见 config.c），所以默认行为与旧版本逐字节相同。 */
+ * 运行时的默认值一律是 0（见 config.c），所以默认行为与旧版本逐字节相同。
+ *
+ * 例外：ARKCC_FEATURE_ARM_RELOC_DATA 在板上也必须编进去。它不是"省 Flash 的
+ * 优化项"，而是"多目标文件能不能链接"的硬条件——板上 build 的最小演示就是
+ * 两个 .c 各带 .data 链成一个镜像。裁掉它的后果不是"这个开关无效"，而是
+ * 后端不发 .arkdata 站点（emit_mov_addr32 的 marked 分支整个被编译掉），
+ * 链接期 ld_relocate_data 于是 patch 到 0 个站点、报 "declares data but
+ * carries no relocatable address"，而运行时 --reloc-data 明明已经 on。
+ * 当时把它当成"可选优化"裁掉，正是板上 m2-cross-tu-link 反复失败的真因。
+ * 代价很小（一个分支 + 标记发射），运行时不打开时输出仍逐字节不变。 */
 #ifndef ARKCC_FEATURE_OPT_DCE_CFG
 #   if ARKCC_PROFILE == ARKCC_PROFILE_STM32_MIN
 #       define ARKCC_FEATURE_OPT_DCE_CFG      0
@@ -240,11 +249,7 @@
 #   endif
 #endif
 #ifndef ARKCC_FEATURE_ARM_RELOC_DATA
-#   if ARKCC_PROFILE == ARKCC_PROFILE_STM32_MIN
-#       define ARKCC_FEATURE_ARM_RELOC_DATA   0
-#   else
-#       define ARKCC_FEATURE_ARM_RELOC_DATA   1
-#   endif
+#   define ARKCC_FEATURE_ARM_RELOC_DATA       1
 #endif
 /* 0.8.0: 段内绝对地址也能交给链接器修正（--reloc-text）。
  *
