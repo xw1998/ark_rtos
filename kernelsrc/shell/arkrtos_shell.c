@@ -35,6 +35,9 @@
 #include "arkrtos_loader.h"
 #include "arkrtos_mini.h"
 #include "arkrtos_apprun.h"
+#if (ARKRTOS_USE_FLASHAPP == 1)
+#include "arkrtos_flashapp.h"
+#endif
 #include "arkrtos_dev.h"
 #include "arkrtos_layout.h"
 #include "arkrtos_ptable.h"
@@ -436,6 +439,127 @@ static int cmd_app(int argc, char *argv[])
         return 0;
     }
 #endif /* ARKRTOS_USE_APPRUN */
+#if (ARKRTOS_USE_FLASHAPP == 1)
+    /* 阶段 3c：app flash <write <path>|run|erase|info>
+     * 与 app run 的差别只有「代码从哪里取指」：run 是每次把文件读进 RAM 窗，
+     * flash 是把产物烧在片内 Flash 应用区、掉电不丢。四条子命令各自一种失败
+     * 后果，所以不合并成 install 的选项。 */
+    if((argc >= 3) && (strcmp(argv[1], "flash") == 0))
+    {
+        int32 rc = 0;
+
+        if((argc == 4) && (strcmp(argv[2], "write") == 0))
+        {
+            uint32 wrote = 0u;
+
+            rc = arkrtos_flashapp_write(argv[3], &wrote);
+            if(rc == 0)
+            {
+                ark_shell_printf("\r\napp flash write: %s, %u B at 0x%08X (verified)\r\n",
+                                 argv[3], (unsigned)wrote,
+                                 (unsigned)ARKRTOS_FLASHAPP_BASE);
+                ark_shell_printf("  run it with 'app flash run'\r\n");
+                return 0;
+            }
+        }
+        else if((argc == 3) && (strcmp(argv[2], "run") == 0))
+        {
+            uint32 task = 0u;
+
+            rc = arkrtos_flashapp_run(&task);
+            if(rc == 0)
+            {
+                ark_shell_printf("\r\napp flash run: started (task %u, code at 0x%08X)\r\n",
+                                 (unsigned)task, (unsigned)ARKRTOS_FLASHAPP_BASE);
+                return 0;
+            }
+        }
+        else if((argc == 3) && (strcmp(argv[2], "erase") == 0))
+        {
+            rc = arkrtos_flashapp_erase();
+            if(rc == 0)
+            {
+                ark_shell_printf("\r\napp flash erase: 0x%08X..0x%08X cleared\r\n",
+                                 (unsigned)ARKRTOS_FLASHAPP_BASE,
+                                 (unsigned)ARKRTOS_FLASHAPP_END);
+                return 0;
+            }
+        }
+        else if((argc == 3) && (strcmp(argv[2], "info") == 0))
+        {
+            uint32 len = 0u;
+            uint32 crc = 0u;
+            uint32 ent = 0u;
+
+            rc = arkrtos_flashapp_info(&len, &crc, &ent);
+            if(rc == 0)
+            {
+                /* 显示时抹掉 Thumb 位：向量表 +4 的最低位恒 1，直接印出来会
+                 * 和 'app flash run' 日志里的入口地址差一个 1（同一个入口）。 */
+                ark_shell_printf("\r\nflash app: %u B, crc 0x%08X, entry 0x%08X, area 0x%08X +%uK\r\n",
+                                 (unsigned)len, (unsigned)crc, (unsigned)(ent & ~1u),
+                                 (unsigned)ARKRTOS_FLASHAPP_BASE,
+                                 (unsigned)(ARKRTOS_FLASHAPP_SIZE / 1024u));
+                ark_shell_printf("  terminal region: 0x%08X (power-cycle safe, no re-flash)\r\n",
+                                 (unsigned)ARKRTOS_FLASHAPP_END);
+                return 0;
+            }
+        }
+        else
+        {
+            sh_out("usage: app flash [write <path> | run | erase | info]\r\n");
+            return -1;
+        }
+
+        {
+            const char *name = arkrtos_flashapp_error_name(rc);
+
+            ark_shell_printf("\r\napp flash: failed, rc=%d%s%s\r\n", (int)rc,
+                             (name != 0) ? " - " : "", (name != 0) ? name : "");
+            if(rc == ARKRTOS_FLASHAPP_ERR_BUSY)
+            {
+                sh_out("  a direct-run program is alive (see 'task')\r\n");
+            }
+            if(rc == ARKRTOS_FLASHAPP_ERR_LAYOUT)
+            {
+                /* 这份镜像是给别人链的：说清要不要满足哪两条，改 scatter 即可。 */
+                ark_shell_printf("  vector table: +0 must be 0x%08X (data window top, "
+                                 "no separate code window), "
+                                 "+4 must be inside 0x%08X..0x%08X\r\n",
+                                 (unsigned)(ARKRTOS_FLASHAPP_RAM_BASE + ARKRTOS_FLASHAPP_RAM_SIZE),
+                                 (unsigned)ARKRTOS_FLASHAPP_BASE,
+                                 (unsigned)ARKRTOS_FLASHAPP_END);
+            }
+            if(rc == ARKRTOS_FLASHAPP_ERR_META)
+            {
+                sh_out("  nothing valid in the area: 'app flash write <path>' first\r\n");
+            }
+            if(rc == ARKRTOS_FLASHAPP_ERR_VERIFY)
+            {
+                sh_out("  read-back differs from the file: the area may now hold a partial image\r\n");
+            }
+            if(rc == ARKRTOS_FLASHAPP_ERR_FLASH)
+            {
+                sh_out("  flash erase/program failed: the area is now empty (no rollback)\r\n");
+            }
+            if(rc == ARKRTOS_FLASHAPP_ERR_WINDOW)
+            {
+                sh_out("  the data window is taken by another direct-run program (see 'free')\r\n");
+            }
+            if(rc == ARKRTOS_LOADER_ERR_SIZE)
+            {
+                ark_shell_printf("  image limit: %u B (flash app area 0x%08X)\r\n",
+                                 (unsigned)ARKRTOS_FLASHAPP_MAX_IMAGE,
+                                 (unsigned)ARKRTOS_FLASHAPP_BASE);
+            }
+            if(rc == ARKRTOS_MINI_ERR_FS)
+            {
+                sh_out("  cannot read the image (check 'ls' and the image limit)\r\n");
+            }
+            return 1;
+        }
+    }
+#endif /* ARKRTOS_USE_FLASHAPP */
 
 
     if((argc >= 2) && (strcmp(argv[1], "start") == 0))
@@ -581,7 +705,7 @@ static int cmd_app(int argc, char *argv[])
     {
 #if (ARKRTOS_USE_APPRUN == 1)
         sh_out("usage: app [list | install <path> [slot] | start <slot> | stop <slot> |"
-               " uninstall <slot> | run <path>]\r\n");
+               " uninstall <slot> | run <path> | flash <write <path>|run|erase|info>]\r\n");
 #else
         sh_out("usage: app [list | install <path> [slot] | start <slot> | stop <slot> | uninstall <slot>]\r\n");
 #endif

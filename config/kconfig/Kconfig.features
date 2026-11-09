@@ -414,6 +414,23 @@ config ARKRTOS_USE_APPRUN
 	  instance at a time.  Off compiles the source out entirely and leaves the
 	  command table unchanged.
 
+config ARKRTOS_USE_FLASHAPP
+	bool "Run an app straight out of internal flash (app flash)"
+	default n
+	depends on ARKRTOS_USE_APPRUN && ARKRTOS_USE_VFS
+	help
+	  `app flash write <path>` copies an arkc-produced executable into the
+	  flash app area declared by the board partition header (ARKRTOS_FLASHAPP_*:
+	  the bank2 tail, right after the image pool), verifies it by reading the
+	  bytes back, and records a 32-byte trailer (magic / length / CRC) at the
+	  end of the area.  `app flash run` starts it from that area as an
+	  unprivileged task, so the image survives a reset with no file system in
+	  the path.  The image is checked (SP inside the RAM window, entry inside
+	  the image, arkc prologue) BEFORE the area is erased: a wrong image never
+	  takes away the one that still runs.  One instance at a time, and it
+	  shares the app-run RAM window.  Off compiles the source out entirely and
+	  leaves the command table unchanged.
+
 config ARKRTOS_SHELL_BOARD_CMDS
 	bool "Board-owned shell commands"
 	default n

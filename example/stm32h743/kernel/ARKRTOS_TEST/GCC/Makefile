@@ -60,6 +60,12 @@ USE_SDRAM  ?= 0
 # 不在这里。默认 0：关掉时那个源文件编出为空目标，
 # 镜像与命令表逐字节不变。
 USE_APPRUN ?= 0
+# 片内 Flash 应用区（阶段 3c）：1 = 编入 `app flash write/run/erase/info`，
+# 产物烧在 Flash 应用区（分区头 ARKRTOS_FLASHAPP_*，bank2 尾部 128K），
+# 掉电不丢、复位后不必重烧。依赖 USE_APPRUN=1 与 USE_MINI_VFS=1：
+# 写路径从 /tmp 读文件（VFS），跑路径与 app run 抢同一段 RAM 数据窗口。
+# 默认 0：关掉时那个源文件编出为空目标，镜像与命令表逐字节不变。
+USE_FLASHAPP ?= 0
 # 小程序读镜像的后端：0 = arkrtos_fs（littlefs 卷，与引入开关前逐字节一致）；
 # 1 = VFS 命名空间（含板上编译器写产物的 /tmp ramfs）。判据在
 # docs/arkc编译产物上板运行-实施计划.md 的 M3-a：默认关时行为不变。
@@ -113,6 +119,7 @@ DEFS := \
   -DARKRTOS_USE_SDRAM=$(USE_SDRAM) -DARKRTOS_USE_QSPI=$(USE_QSPI) \
   -DARKRTOS_SHELL_BOARD_CMDS=$(BOARD_CMDS) \
   -DARKRTOS_USE_APPRUN=$(USE_APPRUN) \
+  -DARKRTOS_USE_FLASHAPP=$(USE_FLASHAPP) \
   -DARKRTOS_MINI_READ_VFS=$(USE_MINI_VFS) \
   -DARKRTOS_USE_APPPACK=$(USE_APPPACK) \
   -DARKRTOS_PACK_IN_EXTRAM=$(USE_SDRAM) \
@@ -325,7 +332,7 @@ else
 ARK_RAMFS_SIG = 16k-3
 endif
 
-SWITCH_SIG = ark=$(USE_ARKC) vim=$(USE_ARKVIM) make=$(USE_ARKMAKE) sdram=$(USE_SDRAM) apprun=$(USE_APPRUN) apppack=$(USE_APPPACK) qspi=$(USE_QSPI) automount=$(USE_QSPI) ramfs=$(ARK_RAMFS_SIG) mini=$(MINI_PRIORITY)
+SWITCH_SIG = ark=$(USE_ARKC) vim=$(USE_ARKVIM) make=$(USE_ARKMAKE) sdram=$(USE_SDRAM) apprun=$(USE_APPRUN) flashapp=$(USE_FLASHAPP) apppack=$(USE_APPPACK) qspi=$(USE_QSPI) automount=$(USE_QSPI) ramfs=$(ARK_RAMFS_SIG) mini=$(MINI_PRIORITY)
 
 $(BUILD)/.ldcfg: FORCE
 	@mkdir -p $(BUILD)

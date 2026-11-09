@@ -35,6 +35,9 @@
 #endif
 #include "arkrtos_mini.h"   /* SVC 0x18 子命令：小程序装载/停止 */
 #include "arkrtos_apprun.h"  /* 板上直跑：任务退出时还窗 */
+#if (ARKRTOS_USE_FLASHAPP == 1)
+#include "arkrtos_flashapp.h"  /* flash app: return the data window on task exit */
+#endif
 #include "arkrtos_partition.h"    /* 用户可见内存窗口（共享区/App RAM/驱动 RAM/固件区） */
 
 /* ------------------------------------------------------------------
@@ -2623,6 +2626,12 @@ void arkrtos_task_kill_internal(void)
      * 与小程序同位：在切走之前，且此刻自身已被置为 INVALID。 */
     (void)arkrtos_apprun_on_task_exit((uint32)arkrtos_current_task_id);
 #endif /* ARKRTOS_USE_APPRUN */
+#if (ARKRTOS_USE_FLASHAPP == 1)
+    /* flash app recycle: the code lives in internal flash (power-cycle safe),
+     * only the borrowed data window has to go back to the pool. Same slot as
+     * the two above: before the switch away, self already INVALID. */
+    (void)arkrtos_flashapp_on_task_exit((uint32)arkrtos_current_task_id);
+#endif /* ARKRTOS_USE_FLASHAPP */
 
     {
         ARKRTOS_SWITCH_TASK();

@@ -151,6 +151,48 @@ SCT_BAD = [
     "}",
 ]
 
+# 阶段 3c：同一份源码换一条链接链——text/rodata 链到片内 Flash 应用区
+# （0x081E0000，bank2 尾部 128 KB），data/bss/stack 仍链到 APPRUN 的 RAM
+# 数据窗口（0x24072000/8K，于是初始 SP = 0x24074000）。SP 这条与 app run
+# 完全相同：flash app 与 app run 共用数据窗口，所以窗口校验天然通用。
+# 区别只有一处——代码不再进 RAM，掉电不丢。
+SRC_M5 = [
+    "typedef unsigned int u32;",
+    "extern void __arkcc_init_globals(void);",
+    "int __svc(0x1A) svc_shell(u32 *p);",
+    "int __svc(0x1B) svc_thread(u32 *p);",
+    "volatile u32 g_anchor = 0x5A5A5A5Au;",
+    "void Reset_Handler(void)",
+    "{",
+    "u32 p[3];",
+    "__arkcc_init_globals();",
+    'p[0] = 3u; p[1] = (u32)"M5 alive in flash\\r\\n"; p[2] = 0u;',
+    "if (g_anchor == 0x5A5A5A5Au) { svc_shell(p); }",
+    'p[1] = (u32)"M5 tag bravo\\r\\n";',
+    "svc_shell(p);",
+    "p[0] = 3u; p[1] = 0u; p[2] = 0u;",
+    "svc_thread(p);",
+    "for (;;) { }",
+    "}",
+]
+
+SCT_M5 = [
+    "LR_IROM1 0x081E0000 0x00020000",
+    "{",
+    "ER_IROM1 0x081E0000 0x00020000 { *.o (RESET, +First) .ANY (+RO) }",
+    "ER_IRAM1 0x24072000 0x00002000 { .ANY (+RW +ZI) }",
+    "}",
+]
+# 反假绿：RAM 数据窗口挪 4 KB（于是初始 SP 变成 0x24075000）。这份镜像必须
+# 在「擦之前」就被拒——它是这条用例的第二判据：先验后擦。
+SCT_M5_BAD = [
+    "LR_IROM1 0x081E0000 0x00020000",
+    "{",
+    "ER_IROM1 0x081E0000 0x00020000 { *.o (RESET, +First) .ANY (+RO) }",
+    "ER_IRAM1 0x24073000 0x00002000 { .ANY (+RW +ZI) }",
+    "}",
+]
+
 # M2 用一份「自己量落点」的程序：块号 = (字面量绝对地址 - 池基址) >> 12，
 # 打成 '0'+n 一个字输出。所以串口上的单个数字不是推断，是程序自己算的。
 SRC_M2 = [
@@ -288,6 +330,8 @@ CLEAN = [
     Step("rm /tmp/m1.c", wait=0.25), Step("rm /tmp/m1.sct", wait=0.25),
     Step("rm /tmp/m1.bin", wait=0.25), Step("rm /tmp/m2.c", wait=0.25),
     Step("rm /tmp/m2.svcm", wait=0.25), Step("rm /tmp/pp.sct", wait=0.25),
+    # 阶段 3c 的四个文件（两源 + 两散列 + 两产物）。ramfs 槽数是硬上限，
+    # 一个用例半路 FAIL 留下的文件会让下一个用例撞上「槽用完」。
     # 小程序的两个用例：一个在 /tmp 里建一份"缺 MiniMain"的工程，一个在
     # /mnt/nor 上构建现成的工程（那份是设备上常驻的，不能删）。ramfs 在 SDRAM
     # 档只有 11 个槽，上一轮半路 FAIL 留下的文件会把槽占住。
@@ -296,6 +340,9 @@ CLEAN = [
     Step("rm /tmp/c1a.c", wait=0.25), Step("rm /tmp/c1b.c", wait=0.25),
     Step("rm /tmp/c1.sct", wait=0.25), Step("rm /tmp/c1a.obj", wait=0.25),
     Step("rm /tmp/c1b.obj", wait=0.25), Step("rm /tmp/c1.bin", wait=0.25),
+    Step("rm /tmp/m5.c", wait=0.25), Step("rm /tmp/m5.sct", wait=0.25),
+    Step("rm /tmp/m5b.sct", wait=0.25), Step("rm /tmp/m5.bin", wait=0.25),
+    Step("rm /tmp/m5bad.bin", wait=0.25),
 ]
 
 
@@ -914,6 +961,101 @@ CASES = [
             # 6) 收尾：镜像也不留在卷上（下一轮从干净状态开始）
             Step("rm /mnt/nor/c3auto.svcm", wait=1.0),
             Step("ls /mnt/nor", expect=[r"^  hello +0 +<dir>$"], wait=1.5),
+        ],
+    ),
+    Case(
+        "m5-flashapp",
+        "阶段 3c：产物烧进片内 Flash 应用区（0x081E0000，bank2）后从 Flash 取指执行，复位后仍在",
+        CLEAN
+        + [
+            # 这条用例要证明「没烧过的时候是 -44」，所以先擦一次：上一轮（或
+            # 手工调试）留下的镜像必须先清掉，否则第一步就在测别人的产物。
+            Step("app flash erase",
+                 expect=[r"^app flash erase: 0x081E0000\.\.0x08200000 cleared$"],
+                 wait=4.0),
+            Step("app flash info",
+                 expect=[r"rc=-44", r"no image in the flash app area"], wait=1.0),
+        ]
+        + _steps_emit("/tmp/m5.c", SRC_M5)
+        + _steps_emit("/tmp/m5.sct", SCT_M5)
+        + [
+            Step("cc /tmp/m5.c --scatter /tmp/m5.sct --vector-table -o /tmp/m5.bin",
+                 expect=[r"^cc: done in \d+ ms$"], wait=6.0),
+            # 写路径自带三条读数：长度/CRC、目标地址、以及「回读逐字节比对通过」。
+            Step("app flash write /tmp/m5.bin",
+                 expect=[r"FLASHAPP:\d+ /tmp/m5\.bin: \d+ B, crc 0x[0-9A-F]{8} -> 0x081E0000",
+                         r"^app flash write: /tmp/m5\.bin, \d+ B at 0x081E0000 \(verified\)$"],
+                 wait=6.0),
+            Step("app flash info",
+                 expect=[r"^flash app: \d+ B, crc 0x[0-9A-F]{8}, entry 0x081E0[0-9A-F]{3}, "
+                         r"area 0x081E0000 \+128K$"],
+                 wait=1.0),
+            # 判据：日志里的入口点击在 0x081E0000 区（真从 Flash 取指），且程序
+            # 自己打出了源码独有字符串（那几条指令确实被执行了）。两条缺一不可
+            # ——只看字符串，把镜像拷到 RAM 里跑也能通过。
+            Step("app flash run",
+                 expect=[r"FLASHAPP:\d+ \d+ B from flash 0x081E0000, entry 0x081E0[0-9A-F]{3}",
+                         r"M5 alive in flash$", r"M5 tag bravo$",
+                         r"FLASHAPP:\d+ task \d+ exited, data window returned to the pool$"],
+                 wait=3.0),
+            # 掉电不丢：复位后 /tmp/m5.bin 已经没了（ramfs 是易失的），Flash 里
+            # 那份还在、仍能跑。这是「烧在 Flash」与「读进 RAM」的唯一分辨点。
+            Reset(wait=9.0,
+                  expect=[r"Ark RTOS kernel shell"],
+                  forbid=[r"(HARD|MEM|BUS|USG)FAULT"]),
+            Step("ls /tmp", forbid=[r"m5\.bin"], wait=1.0),
+            Step("app flash info", expect=[r"^flash app: \d+ B, crc 0x[0-9A-F]{8}"], wait=1.0),
+            Step("app flash run",
+                 expect=[r"FLASHAPP:\d+ \d+ B from flash 0x081E0000", r"M5 alive in flash$"],
+                 wait=3.0),
+            # 反假绿 1：擦掉之后必须报 -44，不能「跑上一次缓存的那份」。
+            Step("app flash erase",
+                 expect=[r"^app flash erase: 0x081E0000\.\.0x08200000 cleared$"], wait=4.0),
+            Step("app flash run", expect=[r"rc=-44"], forbid=[r"M5 alive in flash$"], wait=1.5),
+            # 反假绿 2：没有这条子命令时用法行必须列全四条，否则「怎么用」只能靠猜。
+            Step("app flash bogus",
+                 expect=[r"usage: app flash \[write <path> \| run \| erase \| info\]"], wait=0.5),
+            Step("fault", forbid=[r"(HARD|MEM|BUS|USG)FAULT"]),
+            Step("rm /tmp/m5.c", wait=0.25), Step("rm /tmp/m5.sct", wait=0.25),
+            Step("rm /tmp/m5.bin", wait=0.25),
+        ],
+    ),
+    Case(
+        "m5-wrong-window",
+        "阶段 3c 反假绿：数据窗口错位的镜像在擦除之前就被拒（-42），区里那份还能跑",
+        CLEAN
+        + [
+            Step("app flash erase", wait=4.0),
+        ]
+        + _steps_emit("/tmp/m5.c", SRC_M5)
+        + _steps_emit("/tmp/m5.sct", SCT_M5)
+        + _steps_emit("/tmp/m5b.sct", SCT_M5_BAD)
+        + [
+            Step("cc /tmp/m5.c --scatter /tmp/m5.sct --vector-table -o /tmp/m5.bin",
+                 expect=[r"^cc: done in \d+ ms$"], wait=6.0),
+            Step("cc /tmp/m5.c --scatter /tmp/m5b.sct --vector-table -o /tmp/m5bad.bin",
+                 expect=[r"^cc: done in \d+ ms$"], wait=6.0),
+            Step("app flash write /tmp/m5.bin",
+                 expect=[r"^app flash write: /tmp/m5\.bin, \d+ B at 0x081E0000 \(verified\)$"],
+                 wait=6.0),
+            # 关键：坏镜像被拒之后，区里那份**必须还在**。若这里 info 报 -44，
+            # 说明实现是「先擦后验」，等于拿一个明显不对的文件毁掉了上一份。
+            Step("app flash write /tmp/m5bad.bin",
+                 expect=[r"rc=-42", r"image was not linked for the flash app area"],
+                 forbid=[r"^app flash write: /tmp/m5bad\.bin"], wait=6.0),
+            Step("app flash info",
+                 expect=[r"^flash app: \d+ B, crc 0x[0-9A-F]{8}, entry 0x081E0[0-9A-F]{3}"],
+                 wait=1.0),
+            Step("app flash run",
+                 expect=[r"FLASHAPP:\d+ \d+ B from flash 0x081E0000", r"M5 alive in flash$"],
+                 wait=3.0),
+            # 收尾：区里不留镜像（后面的用例从头开始，这条用例也不该污染它们）
+            Step("app flash erase",
+                 expect=[r"^app flash erase: 0x081E0000\.\.0x08200000 cleared$"], wait=4.0),
+            Step("fault", forbid=[r"(HARD|MEM|BUS|USG)FAULT"]),
+            Step("rm /tmp/m5.c", wait=0.25), Step("rm /tmp/m5.sct", wait=0.25),
+            Step("rm /tmp/m5b.sct", wait=0.25), Step("rm /tmp/m5.bin", wait=0.25),
+            Step("rm /tmp/m5bad.bin", wait=0.25),
         ],
     ),
 ]

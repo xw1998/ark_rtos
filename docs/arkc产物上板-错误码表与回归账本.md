@@ -30,32 +30,39 @@ M1/M2 通路上同一个「跑不起来」有五种完全不同的原因：镜�
 只有本路径独有的情况才另开码。**跨路径有两处编号重叠**，这是故意的（同一个数字在不同
 路径里语义不同），代价是报错文案必须把路径名带上，否则人会看错。
 
-| 码 | `loader`（安装/App） | `mini`（文件里的负载） | `apprun`（固定窗口直跑） | `apppack`（打包期） |
-|----|----|----|----|----|
-| -1 | PARAM 参数非法 | 同 loader | 同 loader | PARAM 指针/窗口/长度非法 |
-| -2 | MAGIC 镜像头魔数错 | 同 loader | 同 loader | — |
-| -3 | COMPAT 硬件签名不符 | 同 loader | 同 loader | — |
-| -4 | SIZE 长度非法/超空间 | 同 loader | 同 loader | — |
-| -5 | CRC32 失败 | 同 loader | 同 loader | — |
-| -6 | FLASH 擦写失败 | — | — | — |
-| -7 | NO_SLOT 无空闲槽 | — | — | — |
-| -8 | TASK 任务注册失败 | 同 loader | 同 loader | — |
-| -9 | STATE 槽位状态不允许 | 同 loader | — | — |
-| -10 | ADDR 落点非法 | 同 loader | — | — |
-| -11 | ENTRY 入口偏移越界 | 同 loader | — | — |
-| -12 | OCCUPIED 区间重叠 | 同 loader | — | — |
-| -13 | RELOC 表非法/补丁后不一致 | 同 loader | — | — |
-| -14 | NOSPACE 池内无足够空间 | 同 loader | — | — |
-| -15 | BUSY 镜像在跑 | BUSY 实例数已满 / 有一次装载在进行 | — | — |
-| -16 | VERSION 版本回灌 | — | — | — |
-| -17 | DUP 重复副本 | — | — | — |
-| -18 | SIGN 签名失败 | **FS：读镜像失败**（原因另见 `read: %d`） | — | — |
-| -19 | — | DISABLED 崩溃到上限已禁用 | — | — |
-| -20 | — | **SHORT_READ 读到文件尾** | **BUSY 已有一个在跑** | — |
-| -21 | — | — | WINDOW 池里没拿到这块地 | — |
-| -22 | — | — | PROLOGUE 首半字不是 arkc 序言 | — |
-| -23 | — | — | LAYOUT 镜像不是给这个窗口链的 | — |
-| -30..-34 | — | — | — | PARAM / DIFF / VERIFY / SIZE / ENTRY |
+| 码 | `loader`（安装/App） | `mini`（文件里的负载） | `apprun`（固定窗口直跑） | `flashapp`（烧在 Flash 里跑） | `apppack`（打包期） |
+|----|----|----|----|----|----|
+| -1 | PARAM 参数非法 | 同 loader | — | 同 loader | PARAM 指针/窗口/长度非法 |
+| -2 | MAGIC 镜像头魔数错 | 同 loader | — | 同 loader | — |
+| -3 | COMPAT 硬件签名不符 | 同 loader | — | 同 loader | — |
+| -4 | SIZE 长度非法/超空间 | 同 loader | — | 同 loader | — |
+| -5 | CRC32 失败 | 同 loader | — | 同 loader | — |
+| -6 | FLASH 擦写失败 | — | — | — | — |
+| -7 | NO_SLOT 无空闲槽 | — | — | — | — |
+| -8 | TASK 任务注册失败 | 同 loader | — | 同 loader | — |
+| -9 | STATE 槽位状态不允许 | 同 loader | — | — | — |
+| -10 | ADDR 落点非法 | 同 loader | — | — | — |
+| -11 | ENTRY 入口偏移越界 | 同 loader | — | — | — |
+| -12 | OCCUPIED 区间重叠 | 同 loader | — | — | — |
+| -13 | RELOC 表非法/补丁后不一致 | 同 loader | — | — | — |
+| -14 | NOSPACE 池内无足够空间 | 同 loader | — | — | — |
+| -15 | BUSY 镜像在跑 | BUSY 实例数已满 / 有一次装载在进行 | — | — | — |
+| -16 | VERSION 版本回灌 | — | — | — | — |
+| -17 | DUP 重复副本 | — | — | — | — |
+| -18 | SIGN 签名失败 | **FS：读镜像失败**（原因另见 `read: %d`） | — | — | — |
+| -19 | — | DISABLED 崩溃到上限已禁用 | — | — | — |
+| -20 | — | **SHORT_READ 读到文件尾** | — | **BUSY 已有一个在跑** | — |
+| -21 | — | — | — | WINDOW 池里没拿到这块地 | — |
+| -22 | — | — | — | PROLOGUE 首半字不是 arkc 序言 | — |
+| -23 | — | — | — | LAYOUT 镜像不是给这个窗口链的 | — |
+| -30..-34 | — | — | — | — | PARAM / DIFF / VERIFY / SIZE / ENTRY |
+| -40 | — | — | — | **BUSY 已有一个直跑/写入在进行** | — |
+| -41 | — | — | — | WINDOW 数据窗口拿不到（被 app run 占 / 池表满） | — |
+| -42 | — | — | — | LAYOUT 产物不是给这个 Flash 区链的（SP/入口越界） | — |
+| -43 | — | — | — | PROLOGUE 入口首半字不是 arkc 序言 | — |
+| -44 | — | — | — | META 区内没有有效产物（未烧 / 已擦 / 元数据坏） | — |
+| -45 | — | — | — | VERIFY 回读比对不符（写进去的和文件不一样） | — |
+| -46 | — | — | — | FLASH 底层擦/写失败 | — |
 
 两处重叠：**-18**（loader 的签名失败 vs mini 的读失败）、**-20**（mini 的短读 vs apprun 的
 已在跑）。所以 shell 的文案一律写成 `mini run: <path> failed, rc=-18` + `read: -1 (...)`，
@@ -967,3 +974,73 @@ python tools/final_app.py            # 会重烧；--noflash 复用已烧固件
 
 **⑩ `__thread` 的可移植性要按目标后端问，不按语言标准问。** 「编译器支持
 `__thread` 关键字」与「目标上每线程一份」是两件事；这条链路上只有前者。
+
+---
+
+## 2026-11-09：阶段 3c —— 产物烧进片内 Flash 并从那里执行（`app flash`）+ 回归 16/16 PASS
+
+前面所有直跑路径的产物都活在 RAM 里，掉电即失。这一轮补最后一段：
+镜像写进 `0x081E0000 + 128K`（bank2 尾部）并从 Flash 取指执行，复位后仍在。
+
+### 实测读数
+
+```sh
+make -j8 USE_SDRAM=1 USE_APPRUN=1 USE_APPPACK=1 USE_ARKMAKE=1 USE_MINI_VFS=1 USE_QSPI=1 USE_FLASHAPP=1
+# FLASH 497700 B (94.93%) / RAM 309360 B (68.66%)
+python tools/final_app.py            # all 16 cases PASS
+python tools/ci_gate.py              # 12 check(s) passed, 0 failed
+```
+
+```
+cc: done in 58 ms                                   -> 1452 B
+app flash write /tmp/m5.bin
+    FLASHAPP:410 /tmp/m5.bin: 1452 B, crc 0x612B4A1E -> 0x081E0000..0x081E05AC (verified)
+app flash info
+    flash app: 1452 B, crc 0x612B4A1E, entry 0x081E0424, area 0x081E0000 +128K
+app flash run
+    FLASHAPP:412 1452 B from flash 0x081E0000, entry 0x081E0424, data 0x24072000 (8192 B), task 4
+    M5 alive in flash
+    M5 tag bravo
+    FLASHAPP:413 task 4 exited, data window returned to the pool
+（复位；ramfs 清空，ls /tmp 里没有 m5.bin）
+app flash info / run                                -> 仍成功
+app flash erase;  app flash run                     -> rc=-44
+```
+
+### 新增两条用例
+
+* `m5-flashapp` —— 空区 `info` 报 `-44` → `cc --scatter --vector-table` → `write`
+  （带长度 / CRC / 目标地址 / `(verified)`）→ `info` → `run` → **Reset** →
+  `ls /tmp` 无 `m5.bin` → `info`/`run` 仍成功 → `erase` → `run` 报 `-44` →
+  `app flash bogus` 打 usage → 全程无异常。
+* `m5-wrong-window` —— 先用好镜像写成功，再用 **RAM 窗口挪 4 KB**（初始 SP 变成
+  `0x24075000`）的坏镜像写，必须报 `-42`，**且区里那份仍能 `info`/`run`**。
+
+### 三条新口径
+
+**⑪ 「写进去了」不等于「写对了」。** `arkrtos_port_flash_write()` 是读-改-写逐
+32 B flash word（同一块只能写一次），所以只有**回读逐字节比对**能证明内容正确；
+长度与 CRC 只是"我算过"，不是"Flash 里现在是这个"。`write` 的 `(verified)` 就是
+这条比对的结果，不是推断。
+
+**⑫ 破坏性动作之前必须先验完形状。** 一个明显不对的镜像不该擦掉区里那份还能跑的。
+把 SP / 入口 / 序言三项校验全部放在 `erase` 之前，换来的是"坏输入不损失已有产物"
+这条性质——`m5-wrong-window` 就是它的判据（只看错误码不够，必须看旧的那份还在）。
+
+**⑬ 校验"从 Flash 取指"必须同时看两样。** 只看源码独有字符串，把镜像拷进 RAM 里跑
+也会通过；判据必须同时要求**日志里的入口点落在 Flash 区**。这条和 `m2-two-landings`
+"让程序自己算落点"是同一个思路：让设备报出那个只有真这样跑才会出现的数。
+
+### 顺带修掉的一处会静默 fallback 的隐患
+
+`ARKRTOS_MPU_IMAGE_POOL_SIZE` 原来只覆盖 RAM 池。FlashApp 任务的 `rom_start` 落在
+窗口外时，`arkrtos_mpu_rom_window()` 会**静默 fallback 到内核 Flash 窗口**，第一次
+取指就 fault —— 现象是"程序一启动就死"，而所有校验都通过。现在这个宏改成
+「池 + FlashApp 两段之和」，并加了编译期校验（区必须落在 bank2、区尾必须等于
+Flash 末尾、`MAX_IMAGE` 至少要容下 头+256 B）。
+
+### 回归用例的断言形态坑
+
+`Reset` 之后原本断言 `^ark@arkrtos:~/`，但提示符经 ANSI 清理后是
+`ark@arkrtos:~$ `（**尾部带一个空格**），`$` 前不匹配 ⇒ 假 FAIL。
+`Reset` 只留 `expect=[r"Ark RTOS kernel shell"]`，别处不再重复断言提示符。

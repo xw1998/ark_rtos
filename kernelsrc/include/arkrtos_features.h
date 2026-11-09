@@ -398,6 +398,18 @@
 #define ARKRTOS_USE_APPRUN              0
 #endif
 
+/* 阶段 3c：产物烧回**片内 Flash** 并由内核引导器跳转执行。
+ * `app flash write <path>` 把 /tmp 里的裸文件擦进 Flash 应用区
+ * （分区头的 ARKRTOS_FLASHAPP_*），`app flash run` 校验向量表后起任务
+ * 从 Flash 直接取指，`app flash info / erase` 查与擦。
+ * 与 app run 的差别只有「代码从哪来」：那边从文件读进 RAM 窗口，这边代码
+ * 本来就在 Flash 里；两块路径共用同一段数据窗口，所以同一个时刻只跑一个。
+ * 默认 0：关掉时源文件编成空、命令表与镜像逐字节不变。需要 VFS 读文件
+ * （写入那一步）与 APPRUN 的数据窗口（执行那一步）。 */
+#ifndef ARKRTOS_USE_FLASHAPP
+#define ARKRTOS_USE_FLASHAPP            0
+#endif
+
 
 /* ============================================================
  * 五、依赖校验
@@ -426,6 +438,14 @@
 
 #if ARKRTOS_USE_APPRUN && !ARKRTOS_USE_VFS
 #error "ARKRTOS_USE_APPRUN=1 requires ARKRTOS_USE_VFS=1 (the program is read from the file system)"
+#endif
+
+#if ARKRTOS_USE_FLASHAPP && !ARKRTOS_USE_APPRUN
+#error "ARKRTOS_USE_FLASHAPP=1 requires ARKRTOS_USE_APPRUN=1 (the data/stack window is the app-run window)"
+#endif
+
+#if ARKRTOS_USE_FLASHAPP && !ARKRTOS_USE_VFS
+#error "ARKRTOS_USE_FLASHAPP=1 requires ARKRTOS_USE_VFS=1 (the image is read from the file system)"
 #endif
 
 /* 并发数要么是 1（退化成原来的单实例），要么必须落在共享表数组的容量内：

@@ -280,3 +280,72 @@ M0 ──→ M1 ──→ M2 ──→ M4
 **M0 之后仍待用户决定**
 
 1. ~~**M1 的 `app run` 是否接受**「单实例固定窗口」这个中间态~~ —— **已按单实例实施并实机通过**（用户 2026-11-05 指示「在 STM32 上用这个编译器编译并运行，继续推进」，见记录文档 §8 的边界表）： —— 它是把「编译→执行」这一段先钉死而引入的窄入口，M2 之后由 `mini` 取代。
+7. **阶段 3c（M5）已打通（2026-11-09 实机）**：`app flash write/run/erase/info` 上线，镜像落到 `0x081E0000 + 128K`（bank2 尾部）并从 Flash 取指执行，复位后仍在；写路径先验后擦 + 回读逐字节比对；判据与反假绿见 §9。
+
+---
+
+## 9. M5 / 阶段 3c：产物烧进片内 Flash 并被执行（2026-11-09 打通）
+
+M0–M4 的产物都活在 RAM 里（`app run` 的固定窗口、`mini` 的池块），掉电即失。
+阶段 3c 补最后一段：**镜像落进片内 Flash，复位后仍在，可以直接执行**。
+
+### 9.1 形态
+
+不复用 bootloader 形状（裸跳 VTOR + `NVIC_SystemReset` 接管），而是复用已验证的
+apprun 那条路：`app flash write` 把镜像写进 Flash 应用区（`0x081E0000 + 128K`，
+bank2 尾部），`app flash run` 用 `mini_alloc` 借 RAM 窗口 + `task_register` 起一个
+非特权任务，**PC 直接落在 Flash 区**。掉电保留天然成立，且不引入第二套调度/异常/
+退出路径（跑完走同一条 `SVC 0x1B`，数据窗口还给池子）。
+
+### 9.2 改点
+
+| 文件 | 改动 |
+| --- | --- |
+| `config/stm32h743/arkrtos_partition.h` | 新增 `ARKRTOS_FLASHAPP_*`（区基址/大小/元数据/上限/魔数/许可码/RAM 别名）；`IMAGE_POOL_SIZE` 扣掉该区；`ARKRTOS_MPU_IMAGE_POOL_SIZE` 改为「池 + FlashApp」两段之和；新增编译期校验 `arkrtos_flashapp_layout_check` |
+| `kernelsrc/include/arkrtos_features.h` | 新增 `ARKRTOS_USE_FLASHAPP`（默认 0）+ 两条 `#error` 依赖（需 `USE_APPRUN` 与 `USE_VFS`） |
+| `kernelsrc/include/arkrtos_flashapp.h` | **新增**：错误码 `-40..-46` 与五个入口 |
+| `kernelsrc/src/arkrtos_flashapp.c` | **新增**：`write`（扫描 + 形状校验 → 擦 → 分块写 → 回读比对 → 元数据）/ `erase` / `info` / `run` / `on_task_exit` / `task_id` / `error_name` |
+| `kernelsrc/src/arkrtos_task.c` | 任务退出钩子里调 `arkrtos_flashapp_on_task_exit()`（**GBK/CRLF，字节级补丁，只插 ASCII**） |
+| `kernelsrc/shell/arkrtos_shell.c` | `app flash <write <path>\|run\|erase\|info>` 四个子命令 + usage |
+| `config/kconfig/Kconfig.features` | 新增 `config ARKRTOS_USE_FLASHAPP`（`depends on` 与 C 侧 `#error` 同一条规则） |
+| `kernelsrc/include/arkrtos_autoconf.h` | 由 `tools/kconfig/genconfig.py` 重新生成（新增一条 `#define ... 0`） |
+| `example/stm32h743/kernel/ARKRTOS_TEST/GCC/{sources.mk,Makefile}` | 加源文件、`USE_FLASHAPP ?= 0`、`-DARKRTOS_USE_FLASHAPP=$(USE_FLASHAPP)`、`SWITCH_SIG` |
+| `tools/final_app.py` | 新增 scatter 模板 `SCT_M5` / `SCT_M5_BAD` 与两条用例 |
+
+### 9.3 判据
+
+* **正**（`m5-flashapp`）：写入给出 `长度/CRC/目标地址 + (verified)`；`info` 报入口；
+  `run` 的日志入口点**在 `0x081E0***` 区**且程序打出源码独有字符串；`Reset` 之后
+  `/tmp` 已清空（`ls` 看不到 `m5.bin`）仍能 `info`/`run`；`erase` 后 `run` 报 `-44`；
+  `app flash bogus` 打 usage。
+* **反假绿**（`m5-wrong-window`）：先用好镜像写成功，再用 RAM 窗口挪 4 KB 的坏镜像写，
+  必须报 `-42`，**且区里那份仍能 `info`/`run`** —— 证明是"先验后擦"而不是恰好失败。
+
+### 9.4 反假绿的三处刻意设计
+
+1. **判据必须两条并存**：只看源码独有字符串，把镜像拷到 RAM 里跑也能通过；
+   必须同时校验日志里的入口点在 Flash 区。
+2. **先验后擦**：明显不对的文件不该擦掉还能跑的那份，所以形状校验（SP 在 RAM 窗口顶、
+   入口在镜像内、入口前两字节是 `0xB5E0`）全部在 `erase` 之前。
+3. **默认关闭零变化**：`USE_FLASHAPP=0` 时源文件不编进来、命令表与体积不变；
+   打开时 `arkrtos_features.h` 的 `#error` 与 Kconfig 的 `depends on` 是同一套规则的
+   两种表达。
+
+### 9.5 实测读数
+
+```
+cc: 58 ms                                  -> 1452 B
+app flash write  -> FLASHAPP:410 1452 B, crc 0x612B4A1E -> 0x081E0000..0x081E05AC (verified)
+app flash info   -> 1452 B, crc 0x612B4A1E, entry 0x081E0424, area 0x081E0000 +128K
+app flash run    -> entry 0x081E0424, data 0x24072000 (8192 B), task 4
+                    M5 alive in flash / M5 tag bravo / task 4 exited
+复位后           -> /tmp 里没有 m5.bin，info / run 仍成功
+```
+
+固件体积（`USE_FLASHAPP=1` 全开）：`FLASH 497700 B / 512 KB / 94.93%`、
+`RAM 309360 B / 68.66%`。板级回归 `all 16 cases PASS`；结构门禁 `12 passed, 0 failed`。
+
+### 9.6 边界
+
+不是"接管整机"的 bootloader：内核还在、shell 还在，Flash 里的程序是一个任务。
+一次只跑一个，且与 `app run` 共用同一段 RAM 窗口。

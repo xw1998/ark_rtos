@@ -133,6 +133,23 @@
 #ifndef CONFIG_SIZE
 #define CONFIG_SIZE          (IMAGE_POOL_SECTOR)
 #endif
+/* ---- 片内 Flash 应用区（阶段 3c：产物烧回内部 Flash 并由引导跳转执行）----
+ * 从镜像池尾部切出整数个物理擦除单位（默认 1 个 = 128 KB），专放
+ * 「按 Flash 地址链接的 arkc 产物」：`app flash write` 把 /tmp 里的裸文件
+ * 擦进去，`app flash run` 由内核引导器校验向量表后起任务从 Flash 直接取指。
+ *
+ * 三条硬约束决定了它只能在这儿、只能是这个形状：
+ *   ① **必须在 bank2**（0x08100000 以上）：H743 是双 bank，擦写 bank2 时
+ *      内核仍能从 bank1 取指（read-while-write）；放 bank1 就等于在擦除
+ *      期间把正在执行的代码一起停掉。下面的编译期断言挡这一条。
+ *   ② 必须是**整数个擦除单位**：擦除只能整扇区，跨半扇区的区划出来也用不了。
+ *   ③ 必须从池里**扣掉**，不能让池分配器偶尔分到这儿 —— 那样一次 App 安装
+ *      就会把烧在 Flash 里的程序覆盖掉，而且看不出是谁干的。
+ * 0 = 不划分（小容量档 / 不需要这条路径的板子），此时池与改动前逐字节相同。 */
+#ifndef ARKRTOS_FLASHAPP_SIZE
+#define ARKRTOS_FLASHAPP_SIZE   (IMAGE_POOL_SECTOR)
+#endif
+
 #define ARKRTOS_POOL_ALLOC_UNIT (1024)         /* 池分配粒度 / 落点对齐单位（字节） */
 #ifndef POOL_RESERVE_SECTORS
 #define POOL_RESERVE_SECTORS (1)             /* 压实余量：保留不分配的整扇区数（>=1） */
@@ -195,8 +212,12 @@
 #define KERNEL_BASE          (BOOT_BASE   + BOOT_SIZE)
 #define CONFIG_BASE          (KERNEL_BASE + KERNEL_SIZE)
 #define IMAGE_POOL_BASE      (CONFIG_BASE + CONFIG_SIZE)
-#define IMAGE_POOL_SIZE      (CHIP_FLASH_SIZE - BOOT_SIZE - KERNEL_SIZE - CONFIG_SIZE)
-#define IMAGE_POOL_END       (CHIP_FLASH_BASE + CHIP_FLASH_SIZE)
+#define IMAGE_POOL_SIZE      (CHIP_FLASH_SIZE - BOOT_SIZE - KERNEL_SIZE - CONFIG_SIZE \
+                              - ARKRTOS_FLASHAPP_SIZE)
+/* 池尾 = 池基址 + 池长；FLASHAPP 区紧跟其后、顶到 Flash 末尾。
+ * 写成派生式而不是「Flash 末尾」：漏掉 FLASHAPP 那一截会让池分配器
+ * 把 App 镜像写进 Flash 应用区（见 ARKRTOS_FLASHAPP_SIZE 的注释 ③）。 */
+#define IMAGE_POOL_END       (IMAGE_POOL_BASE + IMAGE_POOL_SIZE)
 #define IMAGE_POOL_UNITS     (IMAGE_POOL_SIZE / IMAGE_POOL_SECTOR)
 
 /* 压实余量占用的字节数，以及真正可以分配给镜像的区间。
@@ -213,6 +234,48 @@
 
 /* 0 号单元（保留的名字，等价于 IMAGE_POOL_BASE）：裸镜像开发路径的默认落点 */
 #define IMAGE_UNIT0_BASE     (IMAGE_POOL_BASE)
+
+/* ---- 片内 Flash 应用区地址与元数据（与上面 ARKRTOS_FLASHAPP_SIZE 同源）----
+ * 布局（区内从低到高）：
+ *
+ *     +0                          负载（arkc 的裸文件，向量表在 +0）
+ *     ...                         负载之后到区尾是 0xFF（擦除态）
+ *     END-32                      元数据 flash word（魔数 / 长度 / CRC32）
+ *
+ * 为什么元数据放**区尾固定位置**而不是负载头部：Cortex-M 的装载约定要求
+ * 向量表在 +0（+0 = 初始 SP、+4 = Reset_Handler），任何头都会把它推后。
+ * 放区尾的代价是「擦除必须擦整个区」——128 KB 一个扇区，本来也是一次擦完。
+ *
+ * 元数据是 32 字节（H7 的最小可编程单位是 256 bit flash word，写半块不行）：
+ *     [0..3]   魔数 'FLAP'
+ *     [4..7]   负载字节数
+ *     [8..11]  负载 CRC32
+ *     [12..15] 格式版本（1）
+ *     [16..31] 保留（0xFF）
+ * 负载上限因此比区小 64 字节：留一个 word 给元数据，再留一个 word 的余量
+ * （负载长度向上对齐到 32 时可能多吃一个 word）。 */
+#define ARKRTOS_FLASHAPP_BASE       (IMAGE_POOL_END)
+#define ARKRTOS_FLASHAPP_END        (ARKRTOS_FLASHAPP_BASE + ARKRTOS_FLASHAPP_SIZE)
+#define ARKRTOS_FLASHAPP_META_SIZE  (32)
+#define ARKRTOS_FLASHAPP_META_BASE  (ARKRTOS_FLASHAPP_END - ARKRTOS_FLASHAPP_META_SIZE)
+#define ARKRTOS_FLASHAPP_MAX_IMAGE  (ARKRTOS_FLASHAPP_SIZE - 2 * ARKRTOS_FLASHAPP_META_SIZE)
+/* 元数据魔数：'F' 'L' 'A' 'P' 小端拼成一个字。读的时候要求整字相等，
+ * 半写（掉电）时大概率既不等于它、也不等于 0xFFFFFFFF，能被认出来。 */
+#define ARKRTOS_FLASHAPP_MAGIC      (0x50414C46u)
+#define ARKRTOS_FLASHAPP_VERSION    (1u)
+
+/* 产物执行用的 RAM 窗口：与 app run（L1 固定窗口）**共用**那块数据窗口。
+ * 共用是有意的——同一时刻只允许一个直跑程序，两条路径抢的是同一段 RAM，
+ * 于是「同时跑两个」不需要额外闸门，池分配器自己会拒绝第二个。
+ * 栈顶 = RAM 窗口顶（arkc 的 -link 把向量表 +0 填成 ER_IRAM1 的顶），
+ * 所以产物按同一份 .sct 链出来即可，两种跑法共用一份 scatter。 */
+#define ARKRTOS_FLASHAPP_RAM_BASE   (ARKRTOS_APPRUN_RAM_BASE)
+#define ARKRTOS_FLASHAPP_RAM_SIZE   (ARKRTOS_APPRUN_RAM_SIZE)
+#define ARKRTOS_FLASHAPP_STACK_SIZE (ARKRTOS_APPRUN_STACK_SIZE)
+#define ARKRTOS_FLASHAPP_PROLOGUE   (ARKRTOS_APPRUN_PROLOGUE)
+/* 优先级与 app run 同档（都在控制台之下）：直跑程序是人从 shell 敲起来的，
+ * 放在控制台之上就会把 shell 永久饿死，控制台再也回不来。 */
+#define ARKRTOS_FLASHAPP_PRIORITY   (ARKRTOS_APPRUN_PRIORITY)
 
 #define ARKRTOS_FLASH_END      (CHIP_FLASH_BASE  + CHIP_FLASH_SIZE)   /* 避开 CMSIS 的 FLASH_END 宏 */
 
@@ -564,7 +627,12 @@
 #define ARKRTOS_MPU_KERNEL_ROM_BASE   (KERNEL_BASE)
 #define ARKRTOS_MPU_KERNEL_ROM_SIZE   (KERNEL_SIZE)
 #define ARKRTOS_MPU_IMAGE_POOL_BASE   (IMAGE_POOL_BASE)
-#define ARKRTOS_MPU_IMAGE_POOL_SIZE   (IMAGE_POOL_SIZE)
+/* MPU view of the executable internal-flash area: the image pool PLUS the
+ * flash-app area right after it. Both are contiguous and together touch the
+ * end of chip flash, so one range covers both. Keeping it at IMAGE_POOL_SIZE
+ * alone would make a flash-app task fall through to the kernel ROM window
+ * below and fault on its first fetch (see arkrtos_mpu_rom_window). */
+#define ARKRTOS_MPU_IMAGE_POOL_SIZE   ((CHIP_FLASH_BASE + CHIP_FLASH_SIZE) - IMAGE_POOL_BASE)
 #define ARKRTOS_MPU_KERNEL_RAM_FALLBACK (CHIP_RAM_BASE)   /* kernel tasks fall back to the whole chip RAM */
 #define ARKRTOS_MPU_SHARE_RAM_BASE    (SHARE_RAM_BASE)
 #define ARKRTOS_MPU_SHARE_RAM_SIZE    (SHARE_RAM_SIZE)
@@ -611,6 +679,22 @@ typedef char arkrtos_apprun_window_check[
     * (((ARKRTOS_APPRUN_BASE     % ARKRTOS_APPRUN_CODE_SIZE) == 0) ? 1 : -1)
     * (((ARKRTOS_APPRUN_RAM_BASE % ARKRTOS_APPRUN_RAM_SIZE)  == 0) ? 1 : -1)
     * 1];
+
+/* Flash 应用区（阶段 3c）自检：0 = 不划分，三条都不适用（折成 1）。
+ * 非零时必须满足：整数个擦除单位 / 区顶正好是 Flash 末尾 / 放得下最小负载 /
+ * 按擦除单位对齐 / 整区落在 bank2（0x08100000 以上）。最后一条是
+ * H743 双 bank 的 read-while-write：擦写 bank2 时内核仍能从 bank1 取指，
+ * 放 bank1 就等于在擦除期间把正在执行的代码一起停掉。 */
+typedef char arkrtos_flashapp_layout_check[
+    ((ARKRTOS_FLASHAPP_SIZE == 0)
+        ? 1
+        : (((ARKRTOS_FLASHAPP_SIZE % IMAGE_POOL_SECTOR) == 0) &&
+           (ARKRTOS_FLASHAPP_END == (CHIP_FLASH_BASE + CHIP_FLASH_SIZE)) &&
+           (ARKRTOS_FLASHAPP_MAX_IMAGE >= (APP_IMAGE_HEADER_SIZE + 256)) &&
+           (ARKRTOS_FLASHAPP_BASE >= (CHIP_FLASH_BASE + (CHIP_FLASH_SIZE / 2))) &&
+           ((ARKRTOS_FLASHAPP_BASE % IMAGE_POOL_SECTOR) == 0) &&
+           (IMAGE_POOL_UNITS >= 2)))
+        ? 1 : -1];
 
 /* 池一定是整数个扇区，且必须留出至少一个扇区的压实余量。
  * KERNEL_SIZE 必须是 IMAGE_POOL_SECTOR 的整数倍，否则池基址会落在

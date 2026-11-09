@@ -48,6 +48,7 @@ SRCS := \
   kernelsrc/src/arkrtos_loader.c \
   kernelsrc/src/arkrtos_mini.c \
   kernelsrc/src/arkrtos_apprun.c \
+  kernelsrc/src/arkrtos_flashapp.c \
   kernelsrc/src/arkrtos_installer.c \
   kernelsrc/src/arkrtos_log.c \
   kernelsrc/src/arkrtos_utest.c \
