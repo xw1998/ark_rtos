@@ -668,6 +668,43 @@ CASES = [
             Step("rm /mnt/nor/va/c3gate.txt", wait=0.6),
         ],
     ),
+    Case(
+        "fs-mount-blank",
+        "M3-c：第一次挂一块没格式化过的卷必须明确报错，且不许静默格盘——"
+        "报错后字节一个都没写（同样的挂载再失败一次），真卷挂回来照常可用",
+        CLEAN
+        + [
+            # 目标卷：NOR 上 4 MiB 之后那块从来没被格式化过的区域（出厂 0xFF）。
+            # 先卸掉真卷——严格挂载是「同一时刻只有一个卷」，这也是它比
+            # 「挂着一个再挂一个」更值得测的地方：卸完还能挂回来。
+            Step("fs unmount", expect=[r"^unmounted$"], wait=1.0),
+            Step("fs mount nor0 4194304 1048576",
+                 expect=[
+                     r"^mount: FAILED \(littlefs error -(84|22): LFS_ERR_(CORRUPT|INVAL)\)$",
+                     r"^.*these bytes hold no littlefs superblock.*$",
+                     r"^.*Nothing was written\.$",
+                     r"^.*'fs format nor0 0x400000 1048576' creates an empty volume on purpose.*$",
+                 ],
+                 # 格盘是不许发生的事：出现格式化成功的行，或者出现
+                 # 「mounted …」都说明它抢在被测对象前面动了手。
+                 forbid=[r"format : ok", r"^mounted nor0 at 0x400000"],
+                 wait=2.5),
+            # 反假绿的第二问：报错到底有没有写字节？再挂一次同样失败，且卷里
+            # 依旧没有文件系统——若上一次「失败但顺手格了盘」，这一次就会成功。
+            Step("fs mount nor0 4194304 1048576",
+                 expect=[r"^mount: FAILED \(littlefs error -(84|22): LFS_ERR_(CORRUPT|INVAL)\)$"],
+                 forbid=[r"^mounted nor0 at 0x400000"],
+                 wait=2.5),
+            # 真卷挂回来，并且要能过 VFS 用（/mnt/nor 是自启时挂上的那层）：
+            # 只验 fs 层会说谎——上板实测过「fs info 说 yes、/mnt/nor 打不开」
+            # 那种状态，所以两条都问。
+            Step("fs mount nor0 0 4194304",
+                 expect=[r"^mounted nor0 at 0x0, 4194304 bytes$"], wait=2.0),
+            Step("fs info", expect=[r"^mounted  : yes"], wait=1.0),
+            Step("ls /mnt/nor",
+                 expect=[r"^  hello +0 +<dir>$"], wait=2.0),
+        ],
+    ),
 ]
 
 

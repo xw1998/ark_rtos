@@ -109,6 +109,17 @@ uint8 arkrtos_fs_last_is_noent(void)
     return (g_fs.last_error == LFS_ERR_NOENT) ? 1u : 0u;
 }
 
+uint8 arkrtos_fs_err_is_unformatted(int32 lfs_err)
+{
+    /* Two numbers, one meaning: littlefs could not find a superblock it
+     * recognises.  CORRUPT is "the first blocks do not look like littlefs"
+     * (blank NOR reads as 0xFF, another file system reads as its own magic);
+     * INVAL is "these bytes cannot be a volume" (a superblock whose geometry
+     * does not match this block size).  Both mean the caller has to decide to
+     * format - the mount path itself never writes. */
+    return ((lfs_err == LFS_ERR_CORRUPT) || (lfs_err == LFS_ERR_INVAL)) ? 1u : 0u;
+}
+
 const char *arkrtos_fs_error_name(int32 e)
 {
     /* Names come from the enum in lfs.h, never from a numbering of our own:
@@ -1264,6 +1275,12 @@ int32 arkrtos_fs_last_error(void)
 uint8 arkrtos_fs_last_is_noent(void)
 {
     return 0u;   /* no volume, so nothing is ever merely "absent" */
+}
+
+uint8 arkrtos_fs_err_is_unformatted(int32 lfs_err)
+{
+    (void)lfs_err;
+    return 0u;   /* no file system in this build (ARKRTOS_USE_FS = 0) */
 }
 
 const char *arkrtos_fs_error_name(int32 lfs_err)

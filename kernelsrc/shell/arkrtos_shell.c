@@ -3185,7 +3185,23 @@ static int cmd_fs(int argc, char *argv[])
 
         if(arkrtos_fs_mount(dev, off, size) != 0)
         {
-            return fs_fail("mount");
+            /* A blank or foreign volume is a normal first-boot state, not a
+             * fault: say what it is and what the next step is, and say that
+             * nothing was written.  Mount never formats - and if it did, this
+             * line would be a lie that costs the operator a volume. */
+            int32 e = arkrtos_fs_last_error();
+            int   rc = fs_fail("mount");
+
+            if(arkrtos_fs_err_is_unformatted(e) != 0u)
+            {
+                sh_out("       these bytes hold no littlefs superblock: blank NOR,"
+                       " another file system,\r\n"
+                       "       or a damaged one.  Nothing was written.\r\n");
+                ark_shell_printf("       'fs format %s 0x%X %u' creates an empty volume"
+                                 " on purpose (every file on it is lost).\r\n",
+                                 dev, (unsigned)off, (unsigned)size);
+            }
+            return rc;
         }
 
         ark_shell_printf("\r\nmounted %s at 0x%X, %u bytes\r\n",

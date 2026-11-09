@@ -394,6 +394,19 @@ static void arkrtos_kernel_init(void)
                            "the console still comes up, run 'fs mount' / 'nor info'",
                            ARKRTOS_FS_DEV_NAME, ARKRTOS_AUTOMOUNT_NOR_POINT,
                            (int)mrc, arkrtos_vfs_error_name(mrc));
+
+                /* The common first-boot state: the chip is blank (or was
+                 * formatted for something else).  Autostart must not format -
+                 * that would erase a volume because a mount happened to fail -
+                 * so name the situation and leave the decision to the
+                 * console. */
+                if(arkrtos_fs_err_is_unformatted(arkrtos_fs_last_error()) != 0u)
+                {
+                    ARKRTOS_LOGE("BOOT", "%s holds no littlefs volume (blank or foreign); "
+                               "nothing was written.  Run 'fs format %s' on purpose "
+                               "to create one",
+                               ARKRTOS_FS_DEV_NAME, ARKRTOS_FS_DEV_NAME);
+                }
             }
         }
 #endif /* ARKRTOS_AUTOMOUNT_NOR */

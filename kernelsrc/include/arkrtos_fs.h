@@ -189,6 +189,19 @@ int32 arkrtos_fs_last_error(void);
 uint8 arkrtos_fs_last_is_noent(void);
 
 /**
+ * @brief 1 = this error number means "there is no littlefs volume here"
+ * @details A mount over blank NOR, over another file system, or over a volume
+ *          whose superblock is damaged returns LFS_ERR_CORRUPT (or INVAL) -
+ *          littlefs never formats on its own, and neither does this layer.
+ *          The predicate exists so a caller can print the *next step*
+ *          ("format it on purpose") instead of guessing a cause from the
+ *          number.  It is a diagnosis of the failure, never a licence to
+ *          write: nothing in this file formats except arkrtos_fs_format().
+ * @return 1 when lfs_err is LFS_ERR_CORRUPT or LFS_ERR_INVAL, 0 otherwise.
+ */
+uint8 arkrtos_fs_err_is_unformatted(int32 lfs_err);
+
+/**
  * @brief Human readable name of an error code, for reports.
  * @details Callers must print the number the file system returned, not a
  *          guessed cause; this only adds the short symbol on top of it.
