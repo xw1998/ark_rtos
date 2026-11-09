@@ -4853,6 +4853,27 @@ static void irgen_expr(IrGen *g, AstNode *node) {
                             }
                         }
                     }
+                    /* bit 16 of wires[] carries "this argument needs 8-byte
+                     * alignment", which is what AAPCS32 stage C.3 rounds up to
+                     * an even core register / an 8-byte-aligned stack slot.
+                     * The type's *alignment* decides, not its size (measured
+                     * against arm-none-eabi-gcc 12.3): a 5..8-byte struct with
+                     * alignment 4 must NOT be padded, and a >8-byte struct with
+                     * alignment 8 must be.  Both backends mask the low 16 bits
+                     * for the byte count.  When the alignment disagrees with
+                     * what the 2-bit argmask implies (argmask can only say
+                     * "8-byte wire", which the backend reads as "padded"), the
+                     * side table is required even though every size fits. */
+                    if (use_t && wires[i] > 4) {
+                        /* A variadic float has already been promoted to double
+                         * for the call (the IR_F2F above), so the value on the
+                         * wire is a double and is 8-byte aligned: use the wire
+                         * type's alignment, not the argument expression's. */
+                        int al = (use_t->kind == TYPE_FLOAT)
+                                 ? 8 : type_align(use_t);
+                        if (al >= 8) wires[i] |= 0x10000;
+                        else if (wires[i] == 8) wire_extra = 1;
+                    }
                 }
                 if (wire_extra) {
                     int start = ir_program_add_argbytes(g->prog, wires, max_args);

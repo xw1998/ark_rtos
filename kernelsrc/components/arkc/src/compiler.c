@@ -1908,6 +1908,13 @@ int ark_compile(const ArkOptions *opts) {
     /* --cpu/-mcpu: override default (M7) predefined macros and FPU/DSP switches based on target CPU.
      * Must be called before preproc_process so later preprocessing sees the correct
      * __TARGET_ARCH_* / __TARGET_FEATURE_DSP / __TARGET_FPU_VFP macros. */
+    /* 复位为「保守值」（double<->float 走软件 __aeabi_*）。必须在下面的 -cpu 块
+     * **之前**：板端同一个进程里会反复调 ark_compile()，上一次带 -cpu cortex-m7
+     * 留下的 g_arm_fpu_dp=1 不能泄漏到这一次没有 -cpu 的编译里。
+     * 历史缺陷：这一行原来写在下游（预处理/读源之后），把 -cpu 刚算出来的值又
+     * 清回了 0 —— `-cpu cortex-m7` 看着被接受，实际仍发 BL __aeabi_f2d，
+     * 在没有符号解析运行库的小程序侧就是 unresolved symbol。 */
+    g_arm_fpu_dp = 0;
     if (opts->cpu) {
         const CpuInfo *cpu = cpu_lookup(opts->cpu);
         if (!cpu) {
@@ -2004,9 +2011,6 @@ int ark_compile(const ArkOptions *opts) {
      * the backend) because it is an option, and the backend sees only opts-free
      * state.  Zero by default: every existing command line is unchanged. */
     g_arm_vt_reserve = (opts->vector_table != 0) ? 1 : 0;
-    /* No -cpu: the conservative value (software double<->float conversion).
-     * Set before the -cpu block below can raise it. */
-    g_arm_fpu_dp = 0;
 
     {
         /* fs_read_file() truncates at ARK_SRC_BUF_SIZE-1 without saying so,

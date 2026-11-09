@@ -1468,139 +1468,99 @@ static int expr_mentions_float(AstNode *n) {
     }
 }
 
-/* declarator: handle * modifier, array dimensions, function params; return final type, write name to out_name.
+/* declarator: prefix `*`s, a (possibly parenthesized) direct declarator, then
+ * an array or function suffix -- the standard construction, parsed once.
  *
- * Parenthesized declarators are supported for the one shape that matters in
- * practice: `( * name ) ( params )`, i.e. a pointer to function.  Its parameter
- * list is parsed for real and kept on the pointer type (Type::params), because
- * a call through the pointer needs the parameter widths to materialise an
- * argument that is wider than one IR word.  Nested/returning-function-pointer
- * shapes such as `int (*pick(int))(int)` are still not parsed.
+ * The old code knew exactly one parenthesized shape, `( * name )`, and gave up
+ * on everything else: `int (*pick(int))(int,int)` (a function returning a
+ * pointer to a function) was a syntax error, and because the parameter list
+ * of `( * name )` was read but never attached to a *type* until the pointer
+ * was built, `is_func_ptr` had to stand in for "the pointee is a function".
+ * That is also why `_Generic` could not tell `int (*)(int)` from
+ * `int (*)(double)`.
+ *
+ * Rewritten into the two-phase form every real C parser uses:
+ *
+ *   1. decl_parse() walks the declarator forward and records a small tree of
+ *      levels.  A level is {prefix `*`s, at most one suffix, inner declarator}.
+ *      Nothing is applied to the base type yet, so the token stream is read
+ *      exactly once -- re-parsing a group to find its `)` (the chibicc trick)
+ *      would run the parameter list twice and register its parameters twice.
+ *
+ *   2. decl_apply() applies the levels outside-in.  The rule it encodes is
+ *      `T(* D') = T'(D')` with T' = pointer-to-T, and `T(D' suffix) = T''(D')`
+ *      with T'' = suffix applied to T.  So a level's pointers and its suffix
+ *      are applied *before* descending into its inner declarator, which is
+ *      what makes `int (*pick(int))(int,int)` come out as
+ *      "function(int) returning pointer to function(int,int) returning int".
+ *
+ *   3. decl_normalise() flattens `pointer -> TYPE_FUNC` back into the shape the
+ *      rest of the compiler has always seen: the pointer itself carries
+ *      `is_func_ptr` plus the parameter types, and its pointee is the return
+ *      type.  Building the general shape first is what makes nesting work;
+ *      flattening once at the end keeps irgen/sema untouched.
+ *
+ * One shape stays hand-off: a declarator whose leaf is reached without any
+ * parentheses (`int f(int)`, `int *f(int)`) leaves its parameter list
+ * unconsumed, because the caller needs the AstNode parameters -- not just
+ * their Types -- to build a definition, and `typedef int binop(int);` uses the
+ * same hand-off.  Everything reached through a group is consumed here.
  */
+#define DECL_MAX_PTR_LEVELS 16
+
+#define DECL_SK_NONE  0
+#define DECL_SK_ARRAY 1
+#define DECL_SK_FUNC  2
+
+typedef struct DeclNode {
+    int           nptr;                     /* number of leading '*' at this level */
+    unsigned char pvol[DECL_MAX_PTR_LEVELS];
+    unsigned char pconst[DECL_MAX_PTR_LEVELS];
+    unsigned char ppacked[DECL_MAX_PTR_LEVELS];
+    int           suffix;                   /* DECL_SK_NONE / ARRAY / FUNC */
+    int           dims[ARK_MAX_ARRAY_DIMS];
+    int           ndims;
+    int           vla_dim;                  /* index of the VLA dimension, -1 = none */
+    AstNode     **params;                   /* suffix FUNC: parameter ASTs are dropped,
+                                             * only their types are kept */
+    Type        **ptypes;
+    int           nparams;
+    int           variadic;
+    struct DeclNode *inner;                 /* parenthesized declarator; NULL at the leaf */
+    char         *name;
+    int           name_line, name_col;
+} DeclNode;
+
 static void parse_param_list(Parser *p, AstNode ***out_params, int *out_count,
                              int *out_variadic, int line);
+static DeclNode *decl_parse(Parser *p, int top);
+static void      decl_parse_suffixes(Parser *p, DeclNode *n, int consume_paren);
+static Type     *decl_apply(Parser *p, DeclNode *n, Type *T, char **out_name);
+static Type     *decl_normalise(Type *t);
 
-static Type *parse_declarator(Parser *p, Type *base, char **out_name) {
-    Type *t = base;
-    p->name_line = 0;
-    p->name_col  = 0;
-    /* Pointer */
-    while (lexer_peek(p->lex).kind == TOK_MUL) {
-        int ptr_vol = 0, ptr_const = 0;
-        lexer_advance(p->lex);
-        skip_qualifiers(p, &ptr_vol, &ptr_const);
-        t = type_pointer(t);
-        /* F2: pointer-level qualifiers (e.g., `int *volatile p`) */
-        if (ptr_vol) t->is_volatile = 1;
-        if (ptr_const) t->is_const = 1;
-        /* __packed pointer: mark this pointer type as packed, irgen/ARM backend accordingly
-         * uses byte-wise access instead of LDR/STR to avoid unaligned access exceptions.
-         * Flag is set at each pointer level (supports __packed int **p etc). */
-        if (g_decl_packed_ptr) t->is_packed = 1;
-    }
-    /* Optional parenthesized declarator (function pointer): ("(" "*" name ")" "(" params ")") */
-    if (lexer_peek(p->lex).kind == TOK_LPAREN &&
-        lexer_peek2(p->lex).kind == TOK_MUL) {
-        /* Skip (*name) */
-        lexer_advance(p->lex); /* '(' */
-        lexer_advance(p->lex); /* '*' */
-        while (lexer_peek(p->lex).kind == TOK_MUL) lexer_advance(p->lex);
-        if (lexer_peek(p->lex).kind == TOK_IDENT) {
-            if (out_name) *out_name = mem_strdup(lexer_peek(p->lex).str);
-            p->name_line = lexer_peek(p->lex).line;
-            p->name_col  = lexer_peek(p->lex).col;
+/* Skip one balanced `( ... )`, used only to resynchronise after a declarator
+ * that is rejected (the diagnostic has already been issued). */
+static void decl_skip_group(Parser *p) {
+    int depth = 0;
+    while (lexer_peek(p->lex).kind != TOK_EOF) {
+        TokenKind k = lexer_peek(p->lex).kind;
+        if (k == TOK_LPAREN) {
+            depth++;
+        } else if (k == TOK_RPAREN) {
+            depth--;
             lexer_advance(p->lex);
+            if (depth <= 0) return;
+            continue;
         }
-        /* Pointer-to-function type.  Everything below -- the optional array
-         * suffix inside the parentheses and the parameter list outside them --
-         * is a suffix on *this* node, so keep a separate handle: for
-         * `int (*arr[2])(int,int)` the final type is array(pointer(func)) and
-         * the prototypes belong to the inner pointer, not to the array. */
-        t = type_pointer(t);
-        t->is_func_ptr = 1;
-        {
-            Type *fp = t;
-            /* Array suffix inside the parentheses: `int (*arr[2])(int,int)` is
-             * "array of 2 pointers to function returning int".  Only integer
-             * constant dimensions are accepted here -- an alloca'd array of
-             * function pointers would need run-time element strides for every
-             * later index, which is not worth guessing at. */
-            if (lexer_peek(p->lex).kind == TOK_LBRACKET) {
-                int fdims[ARK_MAX_ARRAY_DIMS];
-                int fdn = 0, fdi;
-                while (lexer_peek(p->lex).kind == TOK_LBRACKET) {
-                    int v = 0;
-                    lexer_advance(p->lex);  /* '[' */
-                    if (lexer_peek(p->lex).kind == TOK_RBRACKET) {
-                        v = 0;  /* deduced from an initialiser */
-                    } else {
-                        AstNode *dim_expr = parse_cond_expr(p);
-                        long long folded = 0;
-                        if (dim_expr && eval_const_expr(dim_expr, &folded) && folded > 0) {
-                            v = (int)folded;
-                        } else {
-                            perror_at(p, "the dimension of an array of function pointers "
-                                         "must be an integer constant expression");
-                            v = 1;
-                        }
-                    }
-                    lexer_expect(p->lex, TOK_RBRACKET);
-                    if (fdn < ARK_MAX_ARRAY_DIMS) fdims[fdn++] = v;
-                    else perror_at(p, "too many array dimensions");
-                }
-                for (fdi = fdn - 1; fdi >= 0; fdi--)
-                    t = type_array(t, fdims[fdi]);
-            }
-            lexer_expect(p->lex, TOK_RPAREN);
-            /* Parameter list.  It used to be skipped as balanced tokens, which threw
-             * the prototypes away: every function-pointer call then had unknown
-             * parameter widths, so a 16-byte _Complex (or a >8-byte struct)
-             * argument could not be materialised and was refused instead.  The type
-             * itself stays "pointer whose base is the return type" -- that is what
-             * `*fp` and the call lowering expect -- so the parameter types are kept
-             * on the pointer type, where irgen looks for them. */
-            if (lexer_peek(p->lex).kind == TOK_LPAREN) {
-                AstNode **fparams = 0;
-                int fpc = 0, fva = 0, fi;
-                lexer_advance(p->lex);
-                parse_param_list(p, &fparams, &fpc, &fva, p->name_line);
-                lexer_expect(p->lex, TOK_RPAREN);
-                fp->is_variadic = fva;
-                if (fpc > 0 && fparams) {
-                    Type **ftypes = (Type **)mem_pool_alloc(fpc * (int)sizeof(Type *));
-                    for (fi = 0; fi < fpc; fi++)
-                        ftypes[fi] = !fparams[fi] ? 0
-                                     : (fparams[fi]->type ? fparams[fi]->type
-                                                           : fparams[fi]->u.var.var_type);
-                    fp->params = ftypes;
-                    fp->param_count = fpc;
-                }
-            }
-        }
-        /* Treat as function pointer. The pointee is a function, not a data
-         * object: mark it so `*fp` dereferences to the designator itself
-         * instead of loading the function's first bytes as a value. */
-        return t;
-    }
-    if (lexer_peek(p->lex).kind == TOK_IDENT) {
-        if (out_name) *out_name = mem_strdup(lexer_peek(p->lex).str);
-        p->name_line = lexer_peek(p->lex).line;
-        p->name_col  = lexer_peek(p->lex).col;
         lexer_advance(p->lex);
     }
-    /* armcc/GCC register binding: `register T name __asm("reg")`.
-     * Skip the __asm("regname") clause - we don't honor register binding
-     * (would require backend support for specific register allocation). */
-    if (lexer_peek(p->lex).kind == TOK_ASM) {
-        lexer_advance(p->lex);
-        if (lexer_peek(p->lex).kind == TOK_LPAREN) {
-            lexer_advance(p->lex);
-            while (lexer_peek(p->lex).kind != TOK_RPAREN &&
-                   lexer_peek(p->lex).kind != TOK_EOF)
-                lexer_advance(p->lex);
-            if (lexer_peek(p->lex).kind == TOK_RPAREN) lexer_advance(p->lex);
-        }
-    }
+}
+
+/* Arrays and the function parameter list that follow a declarator.
+ *
+ * `consume_paren == 0` means the caller wants the parameter list (see the
+ * hand-off note above): the '(' is left in place and no suffix is recorded. */
+static void decl_parse_suffixes(Parser *p, DeclNode *n, int consume_paren) {
     /* Array dimensions (multi-dimensional supported) */
     {
         /* Collect dimensions, then construct array(array(...)) */
@@ -1675,19 +1635,179 @@ static Type *parse_declarator(Parser *p, Type *base, char **out_name) {
         }
         if (dim_count > 0) {
             int i;
-            /* Construct nested arrays from right to left; keep size==0 for to-be-deduced (e.g. char s[] = "...").
-             * Flexible array members also use size==0 form, handled by type_struct_add_field. */
-            for (i = dim_count - 1; i >= 0; i--) {
-                if (i == vla_dim) {
-                    /* B3: VLA dimension replaced by pointer; mark is_vla.
-                     * Subsequent irgen emits IR_ALLOCA for dynamic allocation at variable declaration. */
-                    t = type_pointer(t);
-                    t->is_vla = 1;
-                } else {
-                    t = type_array(t, dims[i]);
-                }
+            n->suffix  = DECL_SK_ARRAY;
+            n->ndims   = dim_count;
+            n->vla_dim = vla_dim;
+            for (i = 0; i < dim_count; i++) n->dims[i] = dims[i];
+        }
+    }
+    if (lexer_peek(p->lex).kind != TOK_LPAREN) return;
+    if (!consume_paren) return;
+    if (n->suffix != DECL_SK_NONE) {
+        /* `int a[2](void)` / `int f(void)[2]`: an object cannot be both an array
+         * and a function, and a function cannot return an array.  Report it and
+         * swallow the group so the rest of the declaration still parses. */
+        perror_at(p, "a function declarator cannot be combined with an array "
+                     "declarator; a function cannot return an array");
+        decl_skip_group(p);
+        return;
+    }
+    {
+        AstNode **params = 0;
+        int       npc = 0, nva = 0, i;
+        Type    **ptypes = 0;
+        lexer_advance(p->lex);                      /* '(' */
+        parse_param_list(p, &params, &npc, &nva, p->name_line);
+        lexer_expect(p->lex, TOK_RPAREN);
+        if (npc > 0 && params) {
+            ptypes = (Type **)mem_pool_alloc(npc * (int)sizeof(Type *));
+            for (i = 0; i < npc; i++)
+                ptypes[i] = !params[i] ? 0
+                            : (params[i]->type ? params[i]->type
+                                               : params[i]->u.var.var_type);
+        }
+        n->suffix   = DECL_SK_FUNC;
+        n->params   = params;
+        n->ptypes   = ptypes;
+        n->nparams  = npc;
+        n->variadic = nva;
+    }
+}
+
+/* One level of a declarator: `*`s, then either `( declarator )` or an
+ * identifier, then the suffixes.  `top` marks the outermost level of the whole
+ * declarator, which is the only place a trailing parameter list is left for
+ * the caller. */
+static DeclNode *decl_parse(Parser *p, int top) {
+    DeclNode *n = (DeclNode *)mem_pool_alloc((int)sizeof(DeclNode));
+    n->vla_dim = -1;
+    while (lexer_peek(p->lex).kind == TOK_MUL) {
+        int ptr_vol = 0, ptr_const = 0;
+        lexer_advance(p->lex);
+        skip_qualifiers(p, &ptr_vol, &ptr_const);
+        if (n->nptr >= DECL_MAX_PTR_LEVELS) {
+            /* Dropping a pointer level silently changes the type of everything
+             * that follows, so this is an error rather than a truncation. */
+            perror_at(p, "too many '*' in one declarator");
+            continue;
+        }
+        n->pvol[n->nptr]    = (unsigned char)(ptr_vol ? 1 : 0);
+        n->pconst[n->nptr]  = (unsigned char)(ptr_const ? 1 : 0);
+        n->ppacked[n->nptr] = (unsigned char)(g_decl_packed_ptr ? 1 : 0);
+        n->nptr++;
+    }
+    /* `(` starts a parenthesized declarator -- but only when what follows can
+     * begin one.  `int (int)` (an unnamed function type used as a type name)
+     * must keep falling through to the suffix path. */
+    if (lexer_peek(p->lex).kind == TOK_LPAREN &&
+        (lexer_peek2(p->lex).kind == TOK_MUL ||
+         lexer_peek2(p->lex).kind == TOK_LPAREN ||
+         lexer_peek2(p->lex).kind == TOK_IDENT)) {
+        lexer_advance(p->lex);                      /* '(' */
+        n->inner = decl_parse(p, 0);
+        lexer_expect(p->lex, TOK_RPAREN);
+        decl_parse_suffixes(p, n, 1);
+        return n;
+    }
+    if (lexer_peek(p->lex).kind == TOK_IDENT) {
+        n->name = mem_strdup(lexer_peek(p->lex).str);
+        n->name_line = lexer_peek(p->lex).line;
+        n->name_col  = lexer_peek(p->lex).col;
+        lexer_advance(p->lex);
+    }
+    /* armcc/GCC register binding: `register T name __asm("reg")`.
+     * Skip the __asm("regname") clause - we don't honor register binding
+     * (would require backend support for specific register allocation). */
+    if (lexer_peek(p->lex).kind == TOK_ASM) {
+        lexer_advance(p->lex);
+        if (lexer_peek(p->lex).kind == TOK_LPAREN) {
+            decl_skip_group(p);
+        }
+    }
+    decl_parse_suffixes(p, n, !top);
+    return n;
+}
+
+/* Apply the levels outside-in; see the ordering note at the top. */
+static Type *decl_apply(Parser *p, DeclNode *n, Type *T, char **out_name) {
+    int i;
+    for (i = 0; i < n->nptr; i++) {
+        T = type_pointer(T);
+        if (n->pvol[i])    T->is_volatile = 1;
+        if (n->pconst[i])  T->is_const = 1;
+        if (n->ppacked[i]) T->is_packed = 1;
+    }
+    if (n->suffix == DECL_SK_ARRAY) {
+        /* Construct nested arrays from right to left; keep size==0 for
+         * to-be-deduced (e.g. char s[] = "...").  Flexible array members use
+         * the same size==0 form, handled by type_struct_add_field. */
+        for (i = n->ndims - 1; i >= 0; i--) {
+            if (i == n->vla_dim) {
+                /* B3: VLA dimension replaced by pointer; mark is_vla.
+                 * irgen emits IR_ALLOCA for the declaration. */
+                T = type_pointer(T);
+                T->is_vla = 1;
+            } else {
+                T = type_array(T, n->dims[i]);
             }
         }
+    } else if (n->suffix == DECL_SK_FUNC) {
+        T = type_func(T, n->ptypes, n->nparams, n->variadic);
+    }
+    if (n->inner) return decl_apply(p, n->inner, T, out_name);
+    if (out_name) *out_name = n->name;
+    p->name_line = n->name_line;
+    p->name_col  = n->name_col;
+    return T;
+}
+
+/* Flatten `pointer -> TYPE_FUNC` into the legacy function-pointer shape (see
+ * the note at the top).  Recurses through the element type so an array of
+ * function pointers and a function returning a pointer to a function both come
+ * out in the shape irgen/sema already handle. */
+static Type *decl_normalise(Type *t) {
+    if (!t) return t;
+    if (t->kind == TYPE_PTR && t->base && t->base->kind == TYPE_FUNC &&
+        !t->is_func_ptr) {
+        Type *f = t->base;
+        t->base        = f->base;          /* pointee becomes the return type */
+        t->is_func_ptr = 1;
+        t->params      = f->params;
+        t->param_count = f->param_count;
+        t->is_variadic = f->is_variadic;
+        return t;
+    }
+    t->base = decl_normalise(t->base);
+    return t;
+}
+
+/* Hand-off for the one shape the caller has to finish itself: a declarator
+ * that consumed its own parameter list and whose declared type is a function,
+ * i.e. everything reached through a parenthesized declarator such as
+ * `int (*pick(int))(int,int)`.  parse_declarator can only return a Type, but a
+ * definition needs the AstNode parameters, so the last call leaves them here.
+ * The ordinary spelling `int f(int)` does not use this: its '(' stays in the
+ * token stream and the caller reads the parameters as before. */
+static AstNode **g_decl_func_params;
+static int       g_decl_func_nparams;
+static int       g_decl_func_variadic;
+static int       g_decl_func_active;
+
+static Type *parse_declarator(Parser *p, Type *base, char **out_name) {
+    DeclNode *root, *leaf;
+    Type *t;
+    p->name_line = 0;
+    p->name_col  = 0;
+    g_decl_func_active = 0;
+    root = decl_parse(p, 1);
+    t = decl_apply(p, root, base, out_name);
+    t = decl_normalise(t);
+    for (leaf = root; leaf->inner; leaf = leaf->inner) { }
+    if (t && t->kind == TYPE_FUNC && leaf->suffix == DECL_SK_FUNC) {
+        g_decl_func_params   = leaf->params;
+        g_decl_func_nparams  = leaf->nparams;
+        g_decl_func_variadic = leaf->variadic;
+        g_decl_func_active   = 1;
     }
     return t;
 }
@@ -2003,7 +2123,18 @@ static AstNode *parse_top_decl(Parser *p) {
          * other type name afterwards. */
         if (is_td) {
             Type *ft = 0;
-            if (parse_func_type_tail(p, t, &ft, line)) {
+            /* `t` is already a function type in two cases: the declarator
+             * built one (`typedef int (*pick(int))(int,int);`), or the
+             * declared type is a function type reached through another
+             * typedef (`typedef binop myalias;`).  Both are typedefs; before
+             * this check they fell through to the function-declaration branch
+             * below and silently became prototypes. */
+            if (t && t->kind == TYPE_FUNC) {
+                ft = t;
+            } else if (!parse_func_type_tail(p, t, &ft, line)) {
+                ft = 0;
+            }
+            if (ft) {
                 Type *first_ft = ft;
                 sym_add(SYM_TYPEDEF, name, ft, 0);
                 while (lexer_peek(p->lex).kind == TOK_COMMA) {
@@ -2012,8 +2143,12 @@ static AstNode *parse_top_decl(Parser *p) {
                     lexer_advance(p->lex);
                     t2 = parse_declarator(p, base, &nm2);
                     if (!nm2) break;
-                    if (parse_func_type_tail(p, t2, &ft2, line)) t2 = ft2;
-                    sym_add(SYM_TYPEDEF, nm2, t2, 0);
+                    if (t2 && t2->kind == TYPE_FUNC) {
+                        ft2 = t2;
+                    } else if (!parse_func_type_tail(p, t2, &ft2, line)) {
+                        ft2 = t2;
+                    }
+                    sym_add(SYM_TYPEDEF, nm2, ft2, 0);
                 }
                 lexer_expect(p->lex, TOK_SEMICOLON);
                 {
@@ -2025,17 +2160,33 @@ static AstNode *parse_top_decl(Parser *p) {
             }
         }
 
-        /* Function definition */
-        if (lexer_peek(p->lex).kind == TOK_LPAREN) {
+        /* Function definition (or a prototype of one).
+         *
+         * Two spellings arrive here.  The ordinary one leaves the '(' in the
+         * token stream: `int f(int)`, `int *f(int)`.  The other is reached
+         * through a parenthesized declarator, which consumed the parameter
+         * list while building the type: `int (*pick(int))(int,int)` is a
+         * function returning a pointer to a function, so the declared type is
+         * a function type and the AST parameters came back through the
+         * hand-off instead of being read again here. */
+        if (lexer_peek(p->lex).kind == TOK_LPAREN ||
+            (t && t->kind == TYPE_FUNC && g_decl_func_active)) {
             AstNode **params = 0;
             int param_count = 0;
             int is_variadic = 0;
             Type *ret_type = t;
             AstNode *body = 0;
 
-            lexer_advance(p->lex);
-            parse_param_list(p, &params, &param_count, &is_variadic, line);
-            lexer_expect(p->lex, TOK_RPAREN);
+            if (lexer_peek(p->lex).kind == TOK_LPAREN) {
+                lexer_advance(p->lex);
+                parse_param_list(p, &params, &param_count, &is_variadic, line);
+                lexer_expect(p->lex, TOK_RPAREN);
+            } else {
+                params      = g_decl_func_params;
+                param_count = g_decl_func_nparams;
+                is_variadic = g_decl_func_variadic;
+                ret_type    = t->base;
+            }
             /* Function declaration/definition may have trailing __attribute__ */
             while (lexer_peek(p->lex).kind == TOK_ATTRIBUTE) parse_attribute(p, ret_type);
             func_mods |= parse_func_modifiers(p);  /* __irq etc after parameter list */
@@ -2416,7 +2567,14 @@ static AstNode *parse_local_var_decl(Parser *p, Type *base, int storage, int is_
          * register the name as a function. */
         if (is_typedef) {
             Type *ft = 0;
-            if (parse_func_type_tail(p, t, &ft, line)) {
+            /* Same two cases as at file scope: a function type the declarator
+             * built, or one reached through another typedef. */
+            if (t && t->kind == TYPE_FUNC) {
+                ft = t;
+            } else if (!parse_func_type_tail(p, t, &ft, line)) {
+                ft = 0;
+            }
+            if (ft) {
                 sym_add(SYM_TYPEDEF, name, ft, 0);
                 while (lexer_peek(p->lex).kind == TOK_COMMA) {
                     char *nm2 = 0;
@@ -2424,8 +2582,12 @@ static AstNode *parse_local_var_decl(Parser *p, Type *base, int storage, int is_
                     lexer_advance(p->lex);
                     t2 = parse_declarator(p, base, &nm2);
                     if (!nm2) break;
-                    if (parse_func_type_tail(p, t2, &ft2, line)) t2 = ft2;
-                    sym_add(SYM_TYPEDEF, nm2, t2, 0);
+                    if (t2 && t2->kind == TYPE_FUNC) {
+                        ft2 = t2;
+                    } else if (!parse_func_type_tail(p, t2, &ft2, line)) {
+                        ft2 = t2;
+                    }
+                    sym_add(SYM_TYPEDEF, nm2, ft2, 0);
                 }
                 lexer_expect(p->lex, TOK_SEMICOLON);
                 {

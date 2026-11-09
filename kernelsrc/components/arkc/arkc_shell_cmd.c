@@ -390,6 +390,12 @@ static void cc_pack_fill(ArkOptions *o, const char *src, const char *out,
     o->output_path  = out;
     o->verbose      = verbose;
     o->target       = target;
+    /* 板端就是 H743（Cortex-M7 + 双精度 FPU）：把 CPU 明说出来，否则后端走保守路径，
+     * double<->float 会发 BL __aeabi_f2d / __aeabi_d2f —— 这两个符号在小程序侧的
+     * SDK 运行时里没有，链接期就是 unresolved symbol（真机实测：va_arg 取 double 的
+     * 用例报 `cc: pass A failed: unresolved symbol "__aeabi_f2d"`）。
+     * 说了 CPU，后端改发 VCVT.F64.F32 / VCVT.F32.F64，用的是板上真有的硬件。 */
+    o->cpu          = "cortex-m7";
     o->opt_level    = opt_level;
     /* 四遍的差别就在这份 .sct 上：编译期就按它把 .text/.data 基址烤进代码，
      * 所以对象也只能在这一遍的 .sct 下编译（这正是不能复用 -c 产物的原因）。 */
@@ -1157,6 +1163,7 @@ static int cmd_cc(int argc, char *argv[])
     opts.preprocess_only = preprocess_only;
     opts.verbose        = (int)verbose;
     opts.target         = target;
+    opts.cpu            = "cortex-m7";   /* 同上：板端是 M7 DP，别走 __aeabi_f2d */
     opts.opt_level      = opt_level;
 #if (CC_LAYOUT_OPTS == 1)
     opts.scatter_file   = scatter;

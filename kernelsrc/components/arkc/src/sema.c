@@ -762,12 +762,51 @@ static void sema_stmt(AstNode *node) {
  * so a plain `int *` association would otherwise be compatible with a
  * function designator -- exactly the kind of silently wrong branch that
  * _Generic must never take.  Compare the flag too, but only here. */
+/* Where pointer-to-function types keep their signature depends on how the
+ * type was built: the declarator path (decl_normalise in parser.c) compresses
+ * `pointer -> TYPE_FUNC` into a pointer carrying params/param_count/is_variadic,
+ * while sema's function-designator path builds `type_pointer(fs->type)` and
+ * leaves the signature on the TYPE_FUNC pointee.  Read both shapes so the
+ * comparison below does not depend on which one produced the type.
+ * A signature with param_count == 0 and no params array is an old-style
+ * `int (*)()` -- "no prototype" -- and is reported as such (pc = 0). */
+static void generic_sig_of(Type *t, Type ***params, int *pc, int *variadic) {
+    *params = 0; *pc = 0; *variadic = 0;
+    if (!t || t->kind != TYPE_PTR || !t->is_func_ptr) return;
+    if (t->params || t->param_count > 0) {
+        *params = t->params; *pc = t->param_count; *variadic = t->is_variadic;
+        return;
+    }
+    if (t->base && t->base->kind == TYPE_FUNC) {
+        *params = t->base->params; *pc = t->base->param_count;
+        *variadic = t->base->is_variadic;
+    }
+}
+
 static int generic_type_match(Type *a, Type *b) {
     if (!a || !b) return 0;
     if (!type_equal(a, b)) return 0;
-    if (a->kind == TYPE_PTR && b->kind == TYPE_PTR &&
-        a->is_func_ptr != b->is_func_ptr)
-        return 0;
+    if (a->kind == TYPE_PTR && b->kind == TYPE_PTR) {
+        Type **ap, **bp;
+        int apc, bpc, av, bv, i;
+        if (a->is_func_ptr != b->is_func_ptr) return 0;
+        if (!a->is_func_ptr) return 1;
+        /* Two function pointers of the same return type still differ when
+         * their parameter lists differ: `int (*)(int)` and `int (*)(double)`
+         * are not compatible types (6.7.6.3p15).  type_equal() stops at
+         * "pointer to int", which would silently pick the first branch.
+         * Only compare when both sides carry a prototype: an old-style
+         * `int (*)()` is not a prototype and compatibility there is a
+         * different (looser) rule, so leave it alone rather than invent it. */
+        generic_sig_of(a, &ap, &apc, &av);
+        generic_sig_of(b, &bp, &bpc, &bv);
+        if (apc > 0 && bpc > 0) {
+            if (apc != bpc) return 0;
+            if (av != bv) return 0;
+            for (i = 0; i < apc; i++)
+                if (!generic_type_match(ap[i], bp[i])) return 0;
+        }
+    }
     return 1;
 }
 

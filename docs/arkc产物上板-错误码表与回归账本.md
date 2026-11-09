@@ -148,12 +148,49 @@ py -3 tools/final_app.py --only m2-pack
 | 项 | 现状 | 归谁 |
 |----|------|------|
 | M2 判据 C 的「跨文件调用」 | `-link` 已接线但没用过：`-link` 要「两份源 + 两份目标 + 散列文件 + 产物」六份，ramfs 只有 3 槽 | M3-b 之后（持久化 + 更多槽）再补 |
-| 板上产物与宿主产物的 108 B 差异 | 同源码同 `-O1`：板上 3006 B、宿主 3114 B，两边各自自洽，**成因未查明** | 待查，不据此推任何等价性结论 |
+| 板上产物与宿主产物的 108 B 差异 | **已查明（2026-11-09）**：对照的不是同一优化档——板端 `cc` 默认 `-O1`，宿主 `arkcc.exe` 默认 `-O0`。把两边都钉在同一档后**逐字节相同**（§6.1） | 结论已落地，撤销「待查」 |
 | M3-b（QSPI W25Q64 + littlefs 持久化） | 未开始，风险最高，放在最后 | 独立阶段，M1/M2 结论不依赖它 |
+
+## 6.1 「108 B 差异」的结论：不是编译器分歧，是对照档位不对
+
+**现象**：同一份 `m1.c` + `m1.sct`，板上 `cc` 出 1444 B，宿主 `arkcc.exe` 出 1528 B，差 −84 B；
+更早 M2 那次是 3006 vs 3114（−108 B）。两次都登记为「成因未查明」。
+
+**取证路径**（前几轮走过弯路，这里写下来避免重犯）：
+
+1. 不再猜 `.bin` 字节，改为抓 `cc -S` 的**汇编文本**（`cat` 对可打印 ASCII 无损），
+   拿板端汇编与宿主各档汇编逐行对账。
+2. 一对比就看见：「板上产物 = 宿主 `-O2` 产物去掉 DWARF 指令」——板上把 `i*4` 全常量折叠了，
+   宿主旧对照里还留着 `MOV/PUSH/POP/MUL`。
+3. 于是把宿主 `-O0/-O1/-O2` 三档全部重生成：**`-O0` 是 257 行 1528 B、`-O1` 与 `-O2` 都是 215 行 1444 B**。
+   也就是说，之前那份被当成「宿主 -O1」的汇编其实是 **-O0**，`MUL` 消失的真正原因是档位差一档，
+   不是板端偷偷抬档。
+4. 直接读代码也没找到能抬档的地方：`config_init()` 把 `g_config.opt_level` 置 0；
+   板端 `arkc_shell_cmd.c` 的 `cc_reset_state()`/`cc_pack_fill()` 都写 `opt_level`（`-O` 解析，缺省 1）；
+   `compiler.c:2229` 取 `max(命令行档, g_config.opt_level)`；`config.c:237` 的 `-O` 解析只有 `>=2` 才顺带开
+   inline/vectorize，没有任何一处把 1 改成 2。
+
+**板上实测（回归档固件，`cc` 与 `arkcc.exe` 同源 `ca969c6`）**：
+
+| 档位 | 宿主 `arkcc.exe` | 板上 `cc` | 结果 |
+|------|-----------------|----------|------|
+| `-O0` | 1528 B | 1528 B | 逐字节相同 |
+| `-O1` | 1444 B | 1444 B | 逐字节相同 |
+| `-O2` | 1444 B | 1444 B | 逐字节相同 |
+
+`-O1`/`-O2` 在这份源上同尺寸是同一条事实：该文件只有一个函数、无可内联对象，
+`-O2` 额外打开的 `opt_inline`/`opt_vectorize` 无事可做。
+
+**复跑**：`python <工作区>/board_cmp_lvl.py`（三档全对账）、`board_cmp_o1.py`（单档）。
+两者都用 `cat` 抓回字节、按 shell 转义规则解码，再与宿主产物逐字节比；
+解码长度必须与 `stat` 报的 Size 相等，否则脚本自己判「通路丢字节、结论不成立」。
+
+**仍然记着的一条限制**：`cat` 通路在数据里出现字面 `0x5C` 时会有歧义（脚本会把歧义位置打出来），
+本次两档都是 `0` 处歧义；超出 3 个 ramfs 槽位的更大工程没有走这条对账路径。
 
 ---
 
-## 6.1 板端没有 riscv32 后端（裁剪档）——RV 对象必须被拒，不能被当 ARM 补丁
+## 6.2 板端没有 riscv32 后端（裁剪档）——RV 对象必须被拒，不能被当 ARM 补丁
 
 STM32 profile（`ARKCC_PROFILE=STM32_MIN` / `CROSS_COMPILE`）把 `ARKCC_BACKEND_RISCV32`
 置 0，所以板上这份 arkc **不编 `backend_riscv32.c`**：`ark_backend_find("riscv32")` 返回
@@ -658,3 +695,70 @@ initialiser of the global 'a' into data`），文案不贴切但至少不静默�
 20/5/13/12/11/7、`rv_link 10/0`、`func_typedef 24/0`、`capacity 4/0`、`diag 0 failure`、
 `diag_boundary all held`、`regalloc all claims hold`、`reloc_text all passed`、
 `complex_gate 9/9`。
+
+---
+
+## 2026-11-09：`-mcpu Cortex-M7` 的双精度开关被清零（板端 `__aeabi_f2d` 的根因）
+
+**现象**：`mini-sdk-va` 用例（板上 `cc` 编标准 C 的 `va_start/va_arg`，取 `double`）
+链接期报 `unresolved symbol "__aeabi_f2d"`。
+
+**根因分三层，缺一层都修不好**：
+
+1. 上一轮把 `float` 穿 `...` 改成按 C 标准**提升为 `double`**（正确），于是需要一次
+   `float -> double` 的转换指令。
+2. 板端 port 从没告诉编译器目标 CPU，后端走保守路径发 `BL __aeabi_f2d`；
+   而小程序侧的 SDK 运行时（`kernelsrc/sdk/mini_sdk/arkc/arkrtos_mini_rt_arkc.c`）
+   **没有任何 `__aeabi_f2d`/`__aeabi_d2f`**——这个符号在板端不存在。
+3. 更深的一层在上游：`src/compiler.c` 里 `-mcpu` 块已经按 CPU 表算出
+   `g_arm_fpu_dp = cpu->has_fpu_dp`，但**下游又有一句 `g_arm_fpu_dp = 0;`**
+   把它清回 0 ⇒ `-mcpu Cortex-M7` 看着被接受、实际仍发 `BL __aeabi_f2d`。
+   这不是板端问题，是编译器缺陷。
+
+**修法**：
+
+- 上游 `src/compiler.c`：把 `g_arm_fpu_dp = 0` 从下游挪到 `-mcpu` 块**之前**。
+  挪之前还必须是「复位」语义——板端同一个进程里反复调 `ark_compile()`，
+  上一次带 `-mcpu Cortex-M7` 留下的 1 不能泄漏进这一次没有 `-mcpu` 的编译。
+- 板端 port `kernelsrc/components/arkc/arkc_shell_cmd.c`：`cc_pack_fill()` 与单编路径
+  都显式 `cpu = "cortex-m7"`（板子就是 H743，VFPv5-D16）。**不去手写软浮 helper**——
+  用板上真有的硬件。
+
+**实测**：`--cpu cortex-m7` 时 `float->double` 发 `VCVT.F64.F32 d0, s0`；
+不带 `-mcpu` 时仍发 `BL __aeabi_f2d`（保守路径不变，宿主既有产物一个字节都没动）。
+板端回归 `mini-sdk-va` 由 FAIL 转 PASS。
+
+---
+
+## 2026-11-09：M2 判据 B 改成「按真实落点现算」，不再写死块大小
+
+判据 B 要验的是「程序读自己的绝对地址读对了」，所以期望值必须由 `mini run` 自报的基址
+现算：`want = (base - 0x24070000) >> 12`。上一版把期望写成「4096 B 块、落点 0x24070000/0x24071000、
+打印 0/1」，而伙伴池的块是「≥ 负载的最小 2 的幂」——`m2.svcm` 负载 1652 B ⇒ 2048 B 块，
+两次落点 `0x24070000` / `0x24070800`，`>>12` 后都是 0。写死块大小等于把判据变成
+「这块板今天几 B 一块」，不是被测对象。
+
+同时修掉判据里的一个真 bug：取程序自报数字的正则原来写了 `^M2 alive\n...`，
+而串口回显里 `M2 alive` 前面还挂着提示符（`ark@arkrtos:~$ M2 alive`）⇒ 永远匹配不上、
+用例假 FAIL，并且因为程序是死循环，失败后残留两个实例把池占满，
+**后面三条 `mini-sdk-*` 全部级联 FAIL**。去掉 `^`（保留 `re.M`）后 9/9 全绿。
+
+---
+
+## 2026-11-09：板级回归 9/9 PASS（固件 `FLASH 488988 B / 93.27%`）
+
+构建档（**缺一项就会假 FAIL**，前一版只给了 `USE_ARKC/USE_APPRUN/USE_APPPACK/USE_MINI_VFS`
+⇒ `/mnt/nor` 根本没挂载、`make: command not found`，5 条用例红）：
+
+```sh
+cd example/stm32h743/kernel/ARKRTOS_TEST/GCC
+make -j8 USE_SDRAM=1 USE_APPRUN=1 USE_APPPACK=1 USE_ARKMAKE=1 USE_MINI_VFS=1 USE_QSPI=1
+```
+
+实测体积：`FLASH 488988 B (93.27%)`、`RAM 308240 B (68.41%)`、
+`SDRAMBUF 10744 KB / 12 MB`、`SDRAMFS 5882656 B / 6 MB`；
+`text 486692 / data 2284 / bss 17191012`。
+
+结果（`python tools/final_app.py --noflash`）：`m1-fixed-window`、`m1-wrong-window`、
+`m2-pack-run`、`m2-two-landings`、`mini-sdk-std-hello`、`mini-sdk-va`、
+`mini-sdk-missing-main`、`stack-usage`、`vfs-create` —— **all 9 cases PASS**。

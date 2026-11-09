@@ -64,7 +64,7 @@ extern unsigned int *_ark_va_ptr;
  * base is 8-byte aligned, so "even word index" and "8-byte aligned address"
  * are the same thing. */
 #define ark_va__take(ap, type)                                             \
-    (((sizeof(type) == 8)                                                  \
+    (((_Alignof(type) >= 8)                                                \
         ? ((ap) = (unsigned int *)(((unsigned int)(ap) + 7u) & ~7u))       \
         : (ap)),                                                           \
      ((ap) += ark_va__words(type)) - ark_va__words(type))

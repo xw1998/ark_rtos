@@ -2013,37 +2013,37 @@ static int is_va_ptr_sym(const char *name) {
  * two hand-written versions of the same rule; the caller laid 64-bit stack
  * arguments out high-word-first while the callee read them low-word-first, so
  * `f(1LL, 2LL, 3LL)` summed the wrong halves (measured in unicorn). */
-static int aapcs_assign(const int *sizes, int n, int ncrn_start,
-                        int *reg, int *soff) {
+static int aapcs_assign(const int *sizes, const int *aligns, int n,
+                        int ncrn_start, int *reg, int *soff) {
     int ncrn = ncrn_start;
     int nsaa = 0;
     int slot = 0;
     int i;
     for (i = 0; i < n; i++) {
-        if (sizes[i] > 8) {
-            /* More than two words: no all-or-nothing rule applies, the words
-             * fill the remaining core register(s) and then the stack in order.
-             * Measured against arm-none-eabi-gcc 12.3 -- `f(1, s12)` with three
-             * named words ahead of it puts word 0 in r3 and words 1,2 on the
-             * stack.  No alignment hole is inserted: nothing here can make
-             * <stdarg.h> round up (it decides by sizeof, and a hole would only
-             * be visible to a reader that knows the type's alignment). */
-            int w = (sizes[i] + 3) / 4;
-            int j;
-            for (j = 0; j < w; j++) {
-                if (ncrn < 4) {
-                    reg[slot] = ncrn++;
-                    soff[slot] = -1;
-                } else {
-                    reg[slot] = -1;
-                    soff[slot] = nsaa;
-                    nsaa += 4;
-                }
-                slot += 1;
-            }
-        } else if (sizes[i] == 8) {
-            int r = ncrn;
-            if (r & 1) r++;                     /* start on an even register */
+        /* AAPCS32 5.5 stage C.3 rounds an argument that needs 8-byte
+         * alignment up to an even core register and an 8-byte-aligned stack
+         * slot.  The type's *alignment* decides, not its size -- measured
+         * against arm-none-eabi-gcc 12.3 with `vf(int a, ...)`:
+         *   struct { long long v; }       8 B / align 8 -> r2:r3         even
+         *   struct { int a, b; }          8 B / align 4 -> r1:r2         NOT
+         *   struct { double d; int i; }  16 B / align 8 -> r2,r3 + stack  even
+         *   struct { int a,b,c,d; }      16 B / align 4 -> r1,r2,r3 + stk NOT
+         *   _Complex float                8 B / align 4 -> r1,r2         NOT
+         * The old "size == 8" test padded in front of an align-4 pair and
+         * failed to pad an align-8 composite.  An align-4 composite whose
+         * first word still fits in r3 splits across r3 and the stack
+         * (`vf(a, b, c, (struct A4){b, c})` puts b in r3 and c on the stack),
+         * so it takes the same word-by-word fill as a >8-byte composite; only
+         * the 8-byte-aligned pair is all-or-nothing. */
+        int a8 = aligns ? (aligns[i] >= 8) : (sizes[i] == 8);
+        int w = (sizes[i] > 0) ? (sizes[i] + 3) / 4 : 1;
+        int j;
+        if (a8) {
+            if (ncrn < 4 && (ncrn & 1)) ncrn++;      /* even core register */
+            if (ncrn >= 4) nsaa = (nsaa + 7) & ~7;   /* 8-aligned stack slot */
+        }
+        if (w == 2 && a8) {
+            int r = ncrn;                    /* even, from the step above */
             if (r <= 2) {
                 reg[slot] = r;
                 reg[slot + 1] = r + 1;
@@ -2061,15 +2061,23 @@ static int aapcs_assign(const int *sizes, int n, int ncrn_start,
             }
             slot += 2;
         } else {
-            if (ncrn < 4) {
-                reg[slot] = ncrn++;
-                soff[slot] = -1;
-            } else {
-                reg[slot] = -1;
-                soff[slot] = nsaa;
-                nsaa += 4;
+            /* One word, an align-4 pair, or a composite of any size: the words
+             * fill the remaining core register(s) and then the stack in order.
+             * Measured against arm-none-eabi-gcc 12.3 -- `f(1, s12)` with three
+             * named words ahead of it puts word 0 in r3 and words 1,2 on the
+             * stack.  An 8-byte-aligned composite already got its stack hole
+             * from the a8 step above. */
+            for (j = 0; j < w; j++) {
+                if (ncrn < 4) {
+                    reg[slot] = ncrn++;
+                    soff[slot] = -1;
+                } else {
+                    reg[slot] = -1;
+                    soff[slot] = nsaa;
+                    nsaa += 4;
+                }
+                slot += 1;
             }
-            slot += 1;
         }
     }
     return nsaa;
@@ -2488,24 +2496,33 @@ static char *codegen_arm(IrProgram *prog) {
              * rule in aapcs_assign() so the callee reads exactly what the
              * caller wrote. */
             static int psz[64];
+            static int pal[64];     /* natural alignment, for AAPCS stage C.3 */
             int pj;
             for (pj = 0; pj < 64; pj++) { aapcs_map[pj] = -1; aapcs_soff[pj] = -1; }
             for (pj = 0; pj < f->param_count && pj < 64; pj++) {
                 Type *pt = (f->param_types && pj < f->param_count)
                            ? f->param_types[pj] : 0;
                 int sz = pt ? type_size(pt) : 4;
+                int al = pt ? type_align(pt) : 4;
                 if (sz <= 0) sz = 4;
                 /* A struct passed by value travels as a pointer word, and so
                  * does a four-word _Complex value (irgen materialises it in a
                  * temporary and passes its address, matching IR_GETARG's
-                 * >8-byte memcpy path). */
-                if (pt && (pt->kind == TYPE_STRUCT || pt->kind == TYPE_UNION) && sz > 8)
+                 * >8-byte memcpy path).  Those are one ordinary word, so their
+                 * alignment does not round anything. */
+                if (pt && (pt->kind == TYPE_STRUCT || pt->kind == TYPE_UNION) && sz > 8) {
                     sz = 4;
-                if (pt && ARK_IS_CX(pt) && sz > 8)
+                    al = 4;
+                }
+                if (pt && ARK_IS_CX(pt) && sz > 8) {
                     sz = 4;
+                    al = 4;
+                }
                 psz[pj] = sz;
+                pal[pj] = al;
             }
-            g_va_nsaa = aapcs_assign(psz, (f->param_count < 64) ? f->param_count : 64,
+            g_va_nsaa = aapcs_assign(psz, pal,
+                                    (f->param_count < 64) ? f->param_count : 64,
                                     is_sret ? 1 : 0, aapcs_map, aapcs_soff);
             /* Words used by the named parameters, and where the variadic
              * words start.
@@ -4211,6 +4228,8 @@ static char *codegen_arm(IrProgram *prog) {
                          * (aapcs_assign fills the slots it uses and the loops
                          * below only read those). */
                         static int asz[64];
+                        static int aal[64];   /* wire alignment, stage C.3 */
+                        static int asplit[64]; /* a 2-word arg with one word in r3 */
                         static int aslot_reg[192];
                         static int aslot_soff[192];
                         static int areg[64];
@@ -4228,12 +4247,19 @@ static char *codegen_arm(IrProgram *prog) {
                                            ? &prog->argbytes[I->aux2 - 1] : 0;
                         for (i = 0; i < 192; i++) { aslot_reg[i] = -1; aslot_soff[i] = -1; }
                         for (kk = 0; kk < real_args && kk < 64; kk++) {
-                            int b = wires ? wires[kk]
+                            int b = wires ? (wires[kk] & 0xFFFF)
                                           : (((argmask >> (2 * kk + 1)) & 1) ? 8 : 4);
                             int w;
                             if (b < 4) b = 4;
                             w = (b + 3) / 4;
                             asz[kk] = b;
+                            asplit[kk] = 0;
+                            /* bit 16 of a wires[] entry says "this argument
+                             * needs 8-byte alignment" (see irgen).  Without a
+                             * table the old rule is reproduced exactly: an
+                             * 8-byte wire was the only even-padded shape. */
+                            aal[kk] = (wires ? (((wires[kk] >> 16) & 1) != 0)
+                                             : (b >= 8)) ? 8 : 4;
                             abase[kk] = sl;
                             awords[kk] = w;
                             sl += w;
@@ -4246,7 +4272,8 @@ static char *codegen_arm(IrProgram *prog) {
                                       "the arm backend handles at most 192",
                                       I->name, diag_num(b1, sl), 0,0,0,0);
                         }
-                        nsaa = aapcs_assign(asz, (real_args < 64) ? real_args : 64,
+                        nsaa = aapcs_assign(asz, aal,
+                                            (real_args < 64) ? real_args : 64,
                                             is_sret_call ? 1 : 0,
                                             aslot_reg, aslot_soff);
                         /* Pop the register arguments.  They are always the
@@ -4260,6 +4287,26 @@ static char *codegen_arm(IrProgram *prog) {
                             int base = abase[kk], w = awords[kk], j;
                             if (w == 2) {
                                 if (aslot_reg[base] < 0) break;
+                                if (aslot_reg[base + 1] < 0) {
+                                    /* Split: only the first word found a core
+                                     * register, which happens when an align-4
+                                     * two-word value arrives with exactly r3
+                                     * left.  The image carries word 1 on top
+                                     * and word 0 under it, so lift word 1 out
+                                     * through r7, pop word 0 into its register
+                                     * and put word 1 back: the image ends up
+                                     * holding exactly the one word this
+                                     * argument still needs on the stack, in
+                                     * the same relative place. */
+                                    asplit[kk] = 1;
+                                    asmbuf_puts(&buf, "    POP {r7}\n");
+                                    asmbuf_puts(&buf, "    POP {r");
+                                    asmbuf_int(&buf, aslot_reg[base]);  /* low word */
+                                    asmbuf_puts(&buf, "}\n");
+                                    asmbuf_puts(&buf, "    PUSH {r7}\n");
+                                    reg_slots += 1;
+                                    break;
+                                }
                                 asmbuf_puts(&buf, "    POP {r");
                                 asmbuf_int(&buf, aslot_reg[base] + 1);  /* high word */
                                 asmbuf_puts(&buf, "}\n");
@@ -4321,6 +4368,20 @@ static char *codegen_arm(IrProgram *prog) {
                                 int base = abase[kk], w = awords[kk], j;
                                 if (w == 2) {
                                     int s_off, d_off;
+                                    if (asplit[kk]) {
+                                        /* Only word 1 is left on the image
+                                         * for this argument (see the pop loop). */
+                                        s_off = 4 * si;
+                                        d_off = aslot_soff[base + 1];
+                                        asmbuf_puts(&buf, "    LDR r7, [r5, #");
+                                        asmbuf_int(&buf, s_off);
+                                        asmbuf_puts(&buf, "]\n");
+                                        asmbuf_puts(&buf, "    STR r7, [r4, #");
+                                        asmbuf_int(&buf, d_off);
+                                        asmbuf_puts(&buf, "]\n");
+                                        si += 1;
+                                        continue;
+                                    }
                                     if (aslot_reg[base] >= 0) continue;
                                     s_off = 4 * si;
                                     d_off = aslot_soff[base];

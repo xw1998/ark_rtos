@@ -70,11 +70,15 @@ class Step(object):
     边界（例如 r"^R2 alive$" 配 re.M），否则子串匹配会放过「上一份镜像」。
     """
 
-    def __init__(self, cmd, expect=None, forbid=None, wait=DEFAULT_WAIT):
+    def __init__(self, cmd, expect=None, forbid=None, wait=DEFAULT_WAIT, check=None):
         self.cmd = cmd
         self.expect = expect or []
         self.forbid = forbid or []
         self.wait = wait
+        # check: 可选的「按本行输出现算期望」的判据（expect 只能写死正则，
+        # 写死就意味着把判据改成「这块板今天几 B 一块」，而不是被测对象）。
+        # 回调收到清理后的输出，返回问题字符串列表（空 = 通过）。
+        self.check = check
 
 
 class Case(object):
@@ -199,6 +203,70 @@ PRELUDE = [
 ]
 
 
+# --- M2 判据 B 的「按实际落点现算」判据 -------------------------------------
+# 这条用例的源码会把「字符串字面量的绝对地址 − 0x24070000」右移 12 位当落点号打出来，
+# 于是「同一份镜像换一个落点」就变成了「屏幕上那个数字跟着变」。
+#
+# 关键点：**不能把块大小写死**。伙伴池的块是「≥ 负载的最小2 的幂」（1 KB…32 KB），
+# 负载 1652 B 时是 2048 B 块，两个落点差 0x800，右移 12 位后两边都是 0 —— 不是程序
+# 量错了，是 4 KB 一格的口径不适用了。所以期望值改成从 `mini run` 自己报的
+# `code 0x........` 现算：拿到真实落点，再算「这个落点应该打印几」。
+# 这样断的东西就不再是「这块板今天几 B 一块」，而是「程序读自己的绝对地址读对了」。
+_POOL_BASE = 0x24070000
+
+
+def _m2_landing(out):
+    """从 `mini run` 的输出里取本次落点。返回 (base, block) 或 None。"""
+    m = re.search(r"MINI:\d+ /tmp/m2\.svcm: \d+ B payload -> code 0x([0-9A-Fa-f]{8})"
+                  r" \((\d+) B block\)", out)
+    if not m:
+        return None
+    return int(m.group(1), 16), int(m.group(2))
+
+
+def _m2_digit_ok(out):
+    """本行输出里的落点号是否等于「按真实落点算出来的那一位」。"""
+    land = _m2_landing(out)
+    if land is None:
+        return ["missing the load line (no landing address in this output)"]
+    base, block = land
+    if base < _POOL_BASE or (base - _POOL_BASE) % block != 0:
+        return ["landing 0x%08X is not a block start of the 64 KB pool" % base]
+    want = (base - _POOL_BASE) >> 12
+    if want > 9:
+        return ["landing 0x%08X is more than 9 blocks from the pool base; "
+                "the fixture only prints one decimal digit" % base]
+    # 串口回显里 `M2 alive` 前面还挂着提示符（`ark@arkrtos:~$ M2 alive`），
+    # 所以这里不能用 `^` 锚行首；只锚 `M2 alive` 之后那一行。
+    m = re.search(r"M2 alive\n\s*(\S)\s*$", out, re.M)
+    if not m:
+        return ["missing the program's own landing digit after `M2 alive`"]
+    got = m.group(1)
+    if got != str(want):
+        return ["program measured landing digit %r but 0x%08X is %d blocks "
+                "from 0x%08X (expected %r)"
+                % (got, base, want, _POOL_BASE, str(want))]
+    return []
+
+
+def _m2_two_blocks_ok(out):
+    """`mini` 的两条记录：两块确实相邻，且块大小一致。"""
+    ent = re.findall(r"code (\d+) B in (\d+) B block @ 0x([0-9A-Fa-f]{8})", out)
+    if len(ent) != 2:
+        return ["expected 2 running entries in `mini`, got %d" % len(ent)]
+    szs = [int(b) for _, b, _ in ent]
+    bases = [int(a, 16) for _, _, a in ent]
+    if bases[0] != _POOL_BASE:
+        return ["first landing 0x%08X is not the pool base 0x%08X"
+                % (bases[0], _POOL_BASE)]
+    if szs[0] != szs[1]:
+        return ["two landings got different block sizes %d / %d" % (szs[0], szs[1])]
+    if bases[1] != bases[0] + szs[0]:
+        return ["second landing 0x%08X is not the next block after 0x%08X (%d B each)"
+                % (bases[1], bases[0], szs[0])]
+    return []
+
+
 CASES = [
     Case(
         "m1-fixed-window",
@@ -270,7 +338,8 @@ CASES = [
     ),
     Case(
         "m2-two-landings",
-        "M2 判据 B：同一份 .svcm 连跑两次，落点不同、程序自己量出的块号跟着变",
+        "M2 判据 B：同一份 .svcm 连跑两次，落点不同、程序自己量出的落点号与真实落点对得上"
+        "（期望值按 `mini run` 报的基址现算，不写死块大小）",
         CLEAN
         + _steps_emit("/tmp/m2.c", SRC_M2)
         + [
@@ -279,16 +348,14 @@ CASES = [
                  expect=[r"^cc: +packed in \d+ ms$"], wait=25.0),   # 同上：实测 8.35 s
             Step("rm /tmp/m2.c"),
             Step("mini run /tmp/m2.svcm",
-                 expect=[r"M2 alive$", r"0$"], wait=3.0),
+                 expect=[r"M2 alive$"], wait=3.0, check=_m2_digit_ok),
             Step("mini run /tmp/m2.svcm",
-                 expect=[r"M2 alive$", r"1$"], wait=3.0),
+                 expect=[r"M2 alive$"], wait=3.0, check=_m2_digit_ok),
             Step("mini",
-                 expect=[r"\[0\] task \d+ entry 0x240704[0-9A-F]{2}",
-                         r"\[1\] task \d+ entry 0x240714[0-9A-F]{2}",
-                         r"code \d+ B in 4096 B block @ 0x24070000",
-                         r"code \d+ B in 4096 B block @ 0x24071000",
+                 expect=[r"\[0\] task \d+ entry 0x2407",
+                         r"\[1\] task \d+ entry 0x2407",
                          r"2 running of 2 allowed"],
-                 wait=2.0),
+                 wait=2.0, check=_m2_two_blocks_ok),
             Step("mini stop", expect=[r"^mini stopped: all blocks returned to the pool$"],
                  wait=2.0),
         ],
@@ -570,6 +637,9 @@ def run_case(board, case):
         for pat in step.forbid:
             if re.search(pat, out, re.M):
                 problems.append("forbidden /%s/ appeared after `%s`" % (pat, step.cmd))
+        if step.check is not None and not problems:
+            for p in step.check(out):
+                problems.append("%s after `%s`" % (p, step.cmd))
         if problems:
             problems.append("---- last output of `%s` ----\n%s" % (step.cmd, out.strip()))
             break
