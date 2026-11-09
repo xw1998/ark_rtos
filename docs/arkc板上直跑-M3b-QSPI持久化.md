@@ -321,16 +321,9 @@ make USE_QSPI=1 USE_APPPACK=1 USE_MINI_VFS=1
 
 ## 10. 已知限制与欠账
 
-1. **开机仍要手动挂载**：`fs mount` + `mount /mnt/nor` 两条命令。`arkrtos_mini_boot_autostart()`
-   只在「本次开机第一次成功挂载」时读 `/mini.autostart`，而那份清单在 **ramfs 根**
-   上，复位即失；所以**跨复位自启目前不成立**（M3-b 判据里的「`mini autostart` 能
-   起来」这一条**尚未达成**）。要达成它需要有「开机自动挂 nor0」的板级动作 + 清单
-   落在持久卷上，属新功能，须先定开关与零变化口径。
-2. **`mini autostart` 的清单路径与卷绑定**：清单写的是 VFS 路径（如
-   `/mnt/nor/k.svcm`），而清单文件是 ramfs 的 `/mini.autostart` —— 两者不在同一个
-   卷上，掉电后清单先没，路径再对也没用。
-3. **M3-c 未做**：首次挂载未格式化的卷要**明确报错**而不静默格盘，现在还没有专门
-   的判据与用例。
+1. ~~**开机仍要手动挂载**~~ **已解决（2026-11-09，M3-d）**：内核开机自己挂 nor0 并读清单，复位后串口上直接是 `boot autostart: 1 started from /mini.autostart`，没有人敲 `fs mount` / `mini run`。判据在 `tools/final_app.py` 的 `mini-autostart-reboot`：先手工跑一次（分清是清单的错还是镜像的错），写清单读回来，复位，删掉清单再复位必须**不再跑**。
+2. ~~**`mini autostart` 的清单路径与卷绑定**~~ **已解决，且比原来记的更简单**：清单 `/mini.autostart` 走 `arkrtos_fs`，而 `arkrtos_fs` 与 VFS 的 `/mnt/nor` 是**同一个 littlefs 卷**（`arkrtos_vfs_lfs.c` 的 `lfs_mount` 明确不自己挂卷，只检查 `arkrtos_fs_mounted()`）——所以清单和它点名的镜像同生共死，掉电不会只剩一半。
+3. ~~**M3-c 未做**~~ **已完成**：`fs-mount-blank` 用例——首次挂一个没格式化过的卷必须明确报错且**一个字节都不写**（同样挂载再失败一次来证明没静默格盘），真卷挂回来照常可用。
 4. **速度**：读侧已优化（§3.1、§8），**写/擦仍走位敲**：`nor_delay_us()` 的空转
    循环一次约 26 us（不是 1 us），位敲按说还能快一个数量级，但写侧在当前负载里
    只占 0.4 s 量级，未做。
