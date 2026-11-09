@@ -9799,6 +9799,21 @@ unsigned arm_get_ram_start(void) { return g_data_sram_start; }
  * work out how far it had to move this object. */
 unsigned arm_get_text_base(void) { return (unsigned)g_flash_base; }
 unsigned arm_get_ram_end(void)   { return g_bss_sram_end; }
+/* Zero the .data/.bss window this translation unit reports to the linker.
+ *
+ * The four bounds above are written by codegen_arm() and by nothing else.  An
+ * assembly-only input (cc -c x.s) never reaches codegen, so without this the
+ * object inherited the window of whatever C file the same process compiled
+ * before it.  The true statement for a unit like that is "no RAM window", and
+ * it matters: -link then tries to move this object's window, finds no patch
+ * site inside it, and refuses the whole image with "declares data but carries
+ * no relocatable address" -- a diagnostic that blames the object for
+ * something it never declared (measured: cc --pack over start.c / rt.c /
+ * setjmp.s / sj.c, where object #2 is the .s file). */
+void arm_reset_ram_window(void) {
+    g_data_sram_start = 0; g_data_sram_end = 0;
+    g_bss_sram_start  = 0; g_bss_sram_end  = 0;
+}
 
 /* Bug-A2: Export relocation info for the linker */
 int arm_get_reloc_count(void) { return g_arm_reloc_count; }

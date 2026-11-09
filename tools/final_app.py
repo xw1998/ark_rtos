@@ -624,6 +624,106 @@ CASES = [
         ],
     ),
     Case(
+        "mini-setjmp",
+        "setjmp/longjmp（真机）：SDK 里的 setjmp 是 ARM 汇编函数，工程跨 6 层递归 longjmp 回来，"
+        "五条读数全对；它同时是 `cc --pack` 多对象数据段重定位的闸门",
+        CLEAN
+        + [
+            # 为什么这对函数必须是汇编写在工程的 SRCS 里：setjmp 要存调用者的
+            # sp/lr，用 C 包装拿到的永远是包装自己的帧——包装 return 后那帧
+            # 会被下一次调用复用，longjmp 恢复 sp 再 bx 回去，就顺着正常返回
+            # 路径一路 unwind（本项目实测过：main 拿到 99 而不是 7）。
+            Step("ls -l /mnt/nor",
+                 expect=[r"\d  setjmp\.h$", r"\d  setjmp\.s$", r"\d  sj$"],
+                 forbid=[r"ls: no such file or directory"],
+                 wait=2.0),
+            Step("cd /mnt/nor/sj"),
+            Step("cat sj.c",
+                 expect=[r"#include <setjmp\.h>$", r"longjmp\(back, 7\);"],
+                 wait=1.5),
+            Step("make",
+                 expect=[r"^make: sj\.svcm <- /mnt/nor/start\.c \(\+more\)$",
+                         r"^make:   src /mnt/nor/setjmp\.s$",
+                         r"^make:   src sj\.c$",
+                         r"^cc: pack 4 sources -> sj\.svcm \(4 passes, -O1\)$",
+                         r"^cc:   A \d+ B$", r"^cc:   B \d+ B$",
+                         r"^cc:   C \d+ B$", r"^cc:   D \d+ B$",
+                         # ram_movw 必须 >0：.s 对象自己没有数据段，但顺序在它
+                         # 之后的 C 对象带全局量，链接器得给它们各分一块 SRAM
+                         # 并改写地址。这一行是「多对象数据段真的被搬过」的读数
+                         # ——它曾经是 >0 却仍失败的形态（.s 对象谎报窗口）。
+                         r"^cc:   reloc rom \d+ / ram \d+ / rom_movw [1-9]\d* / "
+                         r"ram_movw [1-9]\d*, entry \+0x0$",
+                         r"^cc: packed in \d+ ms$",
+                         r"^make: ok$"],
+                 # 这三条是这一轮真缺陷的原文：`cc --pack` 不打开 reloc-data 时
+                 # 两个带全局量的对象会撞 SRAM；打开后 .s 对象又谎报前一个
+                 # 编译单元的窗口。两者都不许再出现。
+                 forbid=[r"SRAM overlap between objects", r"carries no relocatable address",
+                         r"link failed", r"pack failed", r"unresolved symbol"],
+                 wait=90.0),
+            Step("mini run sj.svcm",
+                 # 第一行不锚行首：shell 先回显提示符、小程序随后接管输出，
+                 # 实测会出现 "ark@arkrtos:/mnt/nor/sj$ sj: first pass r=0"
+                 # 挤在同一行（mini-sdk-va 同型）。其余各行是程序独占的完整行。
+                 expect=[r"sj: first pass r=0$",
+                         r"^sj: jumped back r=7 \(want 7\)$",
+                         r"^sj: frames abandoned = 6 \(want 6\)$",
+                         r"^sj: longjmp\(env, 0\) -> 1 \(want 1\)$",
+                         r"^sj: ok$",
+                         r"task \d+ returned: MiniApp finished"],
+                 forbid=[r"dive returned normally", r"FAIL",
+                         r"(HARD|MEM|BUS|USG)FAULT", r"mini run: sj\.svcm failed"],
+                 wait=8.0),
+            Step("mini", expect=[r"^mini: none running"], wait=2.0),
+            Step("cd /"),
+        ],
+    ),
+    Case(
+        "mini-tls",
+        "__thread（真机读数）：这块板上的 ARM 后端把 __thread 当普通全局量——没有 TP 基址、单实例，"
+        "初值与清零都正确；这条用例把这个边界写成可重复的读数",
+        CLEAN
+        + [
+            # 这条不是「TLS 能用」，恰恰相反：它把「在这条链路上 __thread 只有
+            # 一个实例」这件事变成板上的读数，免得有人把 __thread 当成每线程
+            # 一份来写，然后在多线程场景里静默出错。（arkc 的 ARM 后端不输出
+            # 任何数据段，全局初值由 __arkcc_init_globals 逐条写，.tdata/.tbss
+            # 分支在这条路上没有任何差别。）
+            Step("ls -l /mnt/nor",
+                 expect=[r"\d  tls$"],
+                 forbid=[r"ls: no such file or directory"],
+                 wait=2.0),
+            Step("cd /mnt/nor/tls"),
+            Step("cat tls.c",
+                 # 板上 cat 把非 ASCII 打印成 \xE5... 转义，所以整行末尾是注释；
+                 # 只锚行首，不断言行尾。
+                 expect=[r"^__thread int counter = 5;"],
+                 wait=1.5),
+            Step("make",
+                 expect=[r"^make: tls\.svcm <- /mnt/nor/start\.c \(\+more\)$",
+                         r"^cc: pack 3 sources -> tls\.svcm \(4 passes, -O1\)$",
+                         r"^cc:   reloc rom \d+ / ram \d+ / rom_movw [1-9]\d* / "
+                         r"ram_movw [1-9]\d*, entry \+0x0$",
+                         r"^cc: packed in \d+ ms$",
+                         r"^make: ok$"],
+                 forbid=[r"SRAM overlap between objects", r"carries no relocatable address",
+                         r"link failed", r"pack failed", r"unresolved symbol"],
+                 wait=90.0),
+            Step("mini run tls.svcm",
+                 # 首行不锚行首：实测提示符与第一行打印挤在同一行（同 setjmp）。
+                 expect=[r"tls: init=5 \(want 5\)$",
+                         r"^tls: after write=9 \(want 9\)$",
+                         r"^tls: zeroed=0 \(want 0\)$",
+                         r"^tls: ok \(single instance, no TP base",
+                         r"task \d+ returned: MiniApp finished"],
+                 forbid=[r"(HARD|MEM|BUS|USG)FAULT", r"mini run: tls\.svcm failed"],
+                 wait=8.0),
+            Step("mini", expect=[r"^mini: none running"], wait=2.0),
+            Step("cd /"),
+        ],
+    ),
+    Case(
         "mini-sdk-missing-main",
         "反假绿：工程没有 int main(void) 时链接必须报 unresolved symbol main，不许出一个空程序",
         CLEAN

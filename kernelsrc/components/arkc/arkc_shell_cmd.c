@@ -446,6 +446,16 @@ static int cc_pack_obj(const char *src, const char *obj_name, const char *target
     popts.compile_only = 1;
 
     cc_reset_state(src, opt_level);
+    /* --pack always links, and it always has more than one object in
+     * flight, so the objects must record where they baked their
+     * .data/.bss addresses: -link moves each object's RAM slice
+     * after the previous one and rewrites those sites.  Without
+     * this, two objects that both declare a global trip the link
+     * time "SRAM overlap" check (measured: start.c/rt.c/sj.c ->
+     * both at 0x24070000..0x240700C8).  config_init() inside
+     * cc_reset_state() has just cleared the flag, so it is set
+     * here, after it, and not once outside the loop. */
+    g_config.enable_reloc_data = 1;
 
     arkc_port_set_abort_target(&pad);
     if (setjmp(pad) != 0) {
@@ -524,6 +534,12 @@ static int cc_pack_link(const char *out_name, const char *target, int opt_level,
     }
 
     cc_reset_state("link", opt_level);
+    /* Same reason as in cc_pack_obj: the objects were built with
+     * --reloc-data, so the link side must apply the records.
+     * A link that ignored them would place every object's data
+     * at the same base and fail the overlap check it just passed.
+     */
+    g_config.enable_reloc_data = 1;
 
     if (arkc_port_capture_begin(win, CC_PACK_WIN_SIZE) != 0) {
         return -2;

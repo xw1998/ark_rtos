@@ -1895,6 +1895,15 @@ int ark_compile(const ArkOptions *opts) {
         }
         mem_pool_reset();
         asm_len = fs_read_file(opts->input_path, g_asm, ARK_ASM_BUF_SIZE);
+        /* Assembly-only unit: it has no .data/.bss of its own, and this path
+         * never reaches codegen_arm(), which is the only writer of the four
+         * window bounds.  Left alone they still hold the previous C file's
+         * window, so the object would claim RAM it never declared and -link
+         * would refuse it for having no patch site inside that window. */
+        {
+            extern void arm_reset_ram_window(void);
+            arm_reset_ram_window();
+        }
         if (asm_len < 0) {
             diag_tool(DIAG_SEV_ERROR, opts->input_path,
                       "cannot read source file", 0,0,0,0,0,0);

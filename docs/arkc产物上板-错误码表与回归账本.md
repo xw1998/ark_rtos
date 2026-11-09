@@ -849,3 +849,121 @@ python tools/final_app.py     # 会重烧，因为固件变了
 （fs 卷根坐标 vs VFS 命名空间坐标，错配就会给出「刚跑成功却报不存在」）。
 **⑦ 生成器的空值策略也是判据的一部分。** `""` 与「未配置」必须分开表示；
 能兜底的 `#ifndef` 只在符号**没被生成**时才有效。
+
+## 2026-11-09：setjmp/longjmp 变成真函数 + `cc --pack` 多对象数据段三处真缺陷 + 回归 14/14 PASS
+
+这一轮补的是「一个完整可用的 C 编译器」里最后两处语言级欠账：`<setjmp.h>`
+的一对函数，和 `__thread`。两件事都**只在真机上**才给得出结论，取数方式
+一样：板上 `make` + `mini run`，期望串写死，闸门自带防假绿。
+
+### c6-1 `setjmp`/`longjmp`：必须是汇编函数，不能是 C 包装
+
+SDK 新增 `kernelsrc/sdk/mini_sdk/arkc/setjmp.h`（`typedef int jmp_buf[20]`，
+用前 40 B：`[0..7]=r4-r11`、`[8]=sp`、`[9]=lr`）与 `setjmp.s`。
+工程模板 `example/mini_setjmp/`（`sj.c` 是纯标准 C，`SRCS` 里带上 `setjmp.s`）。
+
+**为什么不用 C 包装 + 机器码 blob**：`setjmp` 要存**调用者**的 `sp`/`lr`，
+而 C 包装拿到的永远是包装自己那一帧；包装 `return` 之后那帧会被下一次调用
+复用，`longjmp` 恢复 `sp` 再 `bx` 回去，就顺着正常返回路径一路 unwind。
+本项目实测过这个错答案：期望 `longjmp(env,7)` 之后 main 拿到 7，实际拿到
+**99**（`deep(5)` 正常返回、main 走了自己的 `return 99`）。改成 `.s` 之后
+宿主 unicorn 立刻是 `status=returned r0=0`，五条断言全过。
+
+汇编选型上还有一处坑：`it eq; moveq` 里的 `MOVS` 在 ARMv7-M 上
+UNPREDICTABLE，所以本实现用 `cmp r0,#0 / bne .L_nonzero / movs r1,#1`。
+内部汇编器不支持数字局部标号（`1:` / `1f`，会报 `unresolved symbol "1f"`），
+标号必须写成 `.L_xxx`。镜像里逐字节核对过：`2900 f040 8001 2101` 就是
+`cmp r0,#0; bne.w; movs r1,#1`。
+
+真机读数（`mini run sj.svcm`）：
+
+```
+sj: first pass r=0
+sj: jumped back r=7 (want 7)
+sj: frames abandoned = 6 (want 6)
+sj: longjmp(env, 0) -> 1 (want 1)
+sj: ok
+```
+
+四条边界写在头文件里，不许当成「已实现完整 C 标准」：不保存 VFP 状态、
+没有 signal mask、`jmp_buf` 的布局是本实现私有的、同一份字节在 arkc 仓库
+镜像为 `stdlib/src/arm/setjmp.s`（两边必须一致）。
+
+### c6-2 三处真缺陷（都只在板上多对象打包时才现形）
+
+**缺陷 ⑧ `cc --pack` 不打开 `--reloc-data`，两个带全局量的对象撞 SRAM。**
+现象：`/tmp/ppA.bin: Error: SRAM overlap between objects #1 and #2: both place
+.data/.bss in 0x24070000..0x240700C8` → `make: link failed (-12)`。
+根因：`config_init()` 里 `enable_reloc_data` 默认 0，只有 `cc` 命令行在
+`-link`/`--scatter` 时才置 1；`cc --pack` 走的是另一条路（它永远在链接，
+且同时有多个对象在飞）。修法：接线文件 `arkc_shell_cmd.c` 的
+`cc_pack_obj()` 与 `cc_pack_link()` 在各自 `cc_reset_state()` **之后**各加
+`g_config.enable_reloc_data = 1;`（必须在其后，`config_init()` 会把它清 0）。
+此前只有 hello/va 工程（只有一个对象带全局量）所以从未暴露。
+
+**缺陷 ⑨ 汇编对象谎报前一个编译单元的 RAM 窗口。**
+打开 ⑧ 之后现象变了：`object #2 declares data but carries no relocatable
+address (compiled without --reloc-data)`，而 #2 正是 `setjmp.s`。
+根因：`g_data_sram_start/end`、`g_bss_sram_start/end` 只有 `codegen_arm()`
+会写，而汇编输入（`cc -c x.s`）根本不进 codegen——四个边界还是**进程里
+上一个** C 文件（rt.c/start.c）留下的值，于是这个对象凭空「声明」了一块
+RAM，链接器去搬它、一个补丁站点都找不到，就拒绝了整张镜像。
+修法在 arkc 上游（`src/backend/arm/backend_arm.c` 新增
+`arm_reset_ram_window()`，`src/compiler.c` 的汇编输入分支在 `mem_pool_reset()`
+之后调用它），再 `tools/sync_arkc.py --apply` 同步到 vendored 副本。
+口径：**「这个对象没有 RAM 窗口」必须显式说，不能靠上一个对象的状态继承。**
+
+**缺陷 ⑩（口径登记，不是缺陷）`__thread` 在 ARM 上等于普通全局量。**
+`__thread int counter = 5;` 与 `int counter = 5;` 生成完全相同的东西：ARM
+后端根本不输出数据段，全局初值一律编进 `__arkcc_init_globals()` 逐条写
+RAM，所以 `.tbss/.tdata` 的分段选择在这条路上没有任何差别，也没有 TP 基址。
+单线程不给错答案，但把它当成「每线程一份」写会在多线程场景静默出错。
+真机读数（`mini run tls.svcm`）：
+
+```
+tls: init=5 (want 5)
+tls: after write=9 (want 9)
+tls: zeroed=0 (want 0)
+tls: ok (single instance, no TP base -- see the header)
+```
+
+**没有**给这条降级加 warning（会打破 `tests/arm_exec` 与 `run_full_test.ps1`
+里对 `0 warnings` 的断言，且当前板上没有多线程小程序）；边界写在这里与
+`example/mini_tls/tls.c` 的文件头，并用一条板上用例把它钉成可重复读数。
+
+### 板级回归：all 14 cases PASS
+
+```sh
+make -j8 USE_SDRAM=1 USE_APPRUN=1 USE_APPPACK=1 USE_ARKMAKE=1 USE_MINI_VFS=1 USE_QSPI=1
+# FLASH 492940 B (94.02%) / RAM 308240 B (68.41%)
+python tools/final_app.py            # 会重烧；--noflash 复用已烧固件
+```
+
+新增两条用例：
+
+* `mini-setjmp` —— `ls` 确认 `/mnt/nor/{setjmp.h,setjmp.s,sj}`、`cat sj.c`
+  看到标准 `<setjmp.h>`、`make` 断言 `pack 4 sources` 且
+  `ram_movw [1-9]\d*`（多对象数据段真的被搬过的读数）、`mini run` 五条读数
+  全对；`forbid` 里钉着本轮两条错误的原文
+  （`SRAM overlap between objects` / `carries no relocatable address`）。
+* `mini-tls` —— 三条读数 + 「单实例、无 TP 基址」这条边界。
+
+两条用例各踩了一个**断言形态**坑（不是设备问题，记在这里免得下次再犯）：
+① 小程序的第一行输出会和 shell 提示符挤在同一行
+（`ark@arkrtos:/mnt/nor/sj$ sj: first pass r=0`），所以**首行不能锚 `^`**，
+其余各行照旧锚整行——`mini-sdk-va` 早就是这么写的；
+② 板上 `cat` 把非 ASCII 打成 `\xE5...` 转义，所以 `cat tls.c` 的行尾可能是
+注释，只能锚行首不能断言行尾。
+
+### 新登记三条（可复用的口径）
+
+**⑧ `--pack` 天生是「多对象 + 链接」**：凡是「只有一个对象时看不出来」的
+数据段语义（`reloc_data`、`reloc_text`），默认值都不能沿用单对象那套；
+判定方法是问「这条路径上会不会同时有第二个对象带全局量」。
+
+**⑨ 每个对象必须显式声明自己有什么、没有什么。** 进程内反复编译时，
+「上一个单元留下的静态状态」会被下一个单元继承，而继承出来的东西在单对象
+场景下永远看不见；这类缺陷的修法是在入口处清零，不是在出口处判断。
+
+**⑩ `__thread` 的可移植性要按目标后端问，不按语言标准问。** 「编译器支持
+`__thread` 关键字」与「目标上每线程一份」是两件事；这条链路上只有前者。
