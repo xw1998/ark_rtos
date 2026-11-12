@@ -717,6 +717,25 @@ def check_seccheck_syntax():
         fail("seccheck", txt[-260:])
 
 
+def check_sign_host():
+    """IMAGE_SIGN (HMAC-SHA256) must agree between kernel and packer.
+
+    ARKRTOS_USE_IMAGE_SIGN defaults to 0, so arkrtos_sign.c is not compiled by
+    any build and nothing ever runs it.  A mismatch in "which header bytes are
+    zeroed / how much is covered" makes a device reject the image its own
+    packer signed, and the symptom looks like a key problem.  This compiles the
+    real arkrtos_sign.c on the host and compares its MAC against
+    tools/pack_app.py::calc_sign() on the same bytes.  No board, no key file:
+    a missing host compiler is a FAIL, not a skip.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "sign_host_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "SIGN-GATE OK" in txt:
+        ok("sign-host", "kernel MAC == packer MAC (2 files compiled on host)")
+    else:
+        fail("sign-host", txt[-260:])
+
+
 def check_features_switches():
     """Every gate in arkrtos_features.h must be declared in Kconfig.
 
@@ -805,6 +824,7 @@ def main(argv):
     check_arkmake_syntax()
     check_rtstat_syntax()
     check_seccheck_syntax()
+    check_sign_host()
     if do_build:
         check_builds(uv4)
 

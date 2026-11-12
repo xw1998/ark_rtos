@@ -761,7 +761,7 @@ STM32F427VGTx @96 MHz，DAPLink（SWD 两线，无 SWO）经 mdkdebug 的 SWD tr
 - **真实以太网收发**：板级无可用 PHY（`board/stm32f427/` 下没有 PHY 驱动、MDIO 读写、`eth_` 接口与 RMII 引脚分配），网络路径跑的是回环网卡，未做真实链路收发验证（见 [docs/lwIP协议栈接入.md](docs/lwIP协议栈接入.md) §1）
 - **小程序正常退出走计划内交接**：Ark 侧未取到（该路径已在 svcrtos_nano 侧落地上板，见 nano 同名文档）
 - **软总线的物理线两节点**：板上只有一路 USART1 且被内核控制台独占，无空闲 UART，故只验证了板内 loopback；真实串口线上两节点（两块板 / 板 + PC）**未验证**（见 [docs/软总线接入.md](docs/软总线接入.md) §7）
-- **安全认证相关的三项开关后复验**：镜像签名强制（`ARKRTOS_USE_IMAGE_SIGN=1`）、看门狗复位（`ARKRTOS_WDG_ENABLE=1`）、篡改镜像被拒（T6/T10/T12）**未做**——这三项要先把开关打开再跑用例，属 P1；现状以 [docs/安全认证准备.md](docs/安全认证准备.md) §7 的缺口寄存器为准
+- **安全认证相关的两项开关后复验**：镜像签名强制（`ARKRTOS_USE_IMAGE_SIGN=1`，T12）与看门狗复位（`ARKRTOS_WDG_ENABLE=1`，T10）**未做**——这两项要先把开关打开、并由部署侧注入签名密钥后再跑用例，属 P1（T6 篡改镜像被拒已上板实测，见 `docs/安全认证准备.md` §8）；现状以同文件 §7 的缺口寄存器为准
 
 文档索引见 [docs/README.md](docs/README.md)。
 
