@@ -299,6 +299,18 @@
 #ifndef ARKRTOS_USE_IMAGE_SIGN
 #define ARKRTOS_USE_IMAGE_SIGN          0
 #endif
+/* 密钥注入通道：32 字节初始化列表放在一个不进仓库的头文件里（.gitignore 忽略
+ * *_sign_key_local.h），开关 ARKRTOS_SIGN_KEY_LOCAL=1 时把它包含进来：
+ *   -DARKRTOS_USE_IMAGE_SIGN=1 -DARKRTOS_SIGN_KEY_LOCAL=1
+ * 头文件里写一行： #define ARKRTOS_IMAGE_SIGN_KEY  { 0x.., ... }
+ * 这里用无引号的开关，而不是 -DARKRTOS_SIGN_KEY_HEADER=\"xxx.h\"：Keil 的
+ * Define 框里同一个字段放两个带引号的宏时，后面的 ARKRTOS_BOARD_CONFIG 会
+ * 传不过去（实测 drvflash.c / arkrtos_port.c 因缺 HAL/CMSIS 头报 39 个
+ * uint32_t/SCB 未定义错误）。
+ * 不定义 ARKRTOS_SIGN_KEY_LOCAL 时本段完全不参与，默认档零变化。 */
+#if defined(ARKRTOS_SIGN_KEY_LOCAL)
+#include "arkrtos_sign_key_local.h"
+#endif
 #if (ARKRTOS_USE_IMAGE_SIGN == 1) && !defined(ARKRTOS_IMAGE_SIGN_KEY)
 #error "ARKRTOS_USE_IMAGE_SIGN=1 requires ARKRTOS_IMAGE_SIGN_KEY (32 byte initialiser list)"
 #endif

@@ -78,6 +78,76 @@ def load_pack_app():
     return mod
 
 
+KEY_CHANNEL_C = """#include "arkrtos_features.h"
+#ifndef ARKRTOS_IMAGE_SIGN_KEY
+#error "key not injected through ARKRTOS_SIGN_KEY_LOCAL"
+#endif
+static const unsigned char k[] = ARKRTOS_IMAGE_SIGN_KEY;
+struct chk { int a[(sizeof k == 32) ? 1 : -1]; };
+int main(void) { return (int)sizeof k - 32; }
+"""
+
+KEY_CHANNEL_OFF_C = """#include "arkrtos_features.h"
+#ifdef ARKRTOS_IMAGE_SIGN_KEY
+#error "key leaked into the default build"
+#endif
+int main(void) { return 0; }
+"""
+
+
+def check_key_channel(cc):
+    """密钥注入通道（ARKRTOS_SIGN_KEY_LOCAL）的编入档。
+
+    通道本身没有算法可对拍，它只会静默失效：改名、少一层间接、或者被
+    `#if` 包错位置，症状都是"打开 IMAGE_SIGN 后编译期报 requires
+    ARKRTOS_IMAGE_SIGN_KEY"。所以这里两头都钉一次：给了开关就必须正好
+    拿到 32 字节；没给开关就一个字节都不许进来（默认档零变化）。
+    """
+    td = tempfile.mkdtemp(prefix="arkrtos-key-channel-")
+    try:
+        key = bytes(range(1, 33))
+        with open(os.path.join(td, "arkrtos_sign_key_local.h"), "w", encoding="utf-8") as f:
+            f.write("#define ARKRTOS_IMAGE_SIGN_KEY {"
+                    + ",".join("0x%02X" % x for x in key) + " }\n")
+        inc = ["-I" + td,
+               "-I" + os.path.join(ROOT, "kernelsrc", "include"),
+               "-I" + os.path.join(ROOT, "config")]
+        base = [cc, "-std=gnu11"] + inc + ["-o",
+                os.path.join(td, "ch.ex" if os.name == "nt" else "ch")]
+
+        src_on = os.path.join(td, "on.c")
+        with open(src_on, "w", encoding="utf-8") as f:
+            f.write(KEY_CHANNEL_C)
+        r = subprocess.run(base + ["-DARKRTOS_USE_IMAGE_SIGN=1",
+                                   "-DARKRTOS_SIGN_KEY_LOCAL=1", src_on],
+                           cwd=ROOT, capture_output=True, text=True)
+        if r.returncode != 0:
+            print("SIGN-GATE FAIL: key channel (ON) does not compile",
+                  file=sys.stderr)
+            print((r.stdout or "") + (r.stderr or ""), file=sys.stderr)
+            return False
+        r = subprocess.run([base[-1]], cwd=ROOT, capture_output=True, text=True)
+        if r.returncode != 0:
+            print("SIGN-GATE FAIL: key channel did not deliver 32 bytes (rc=%d)"
+                  % r.returncode, file=sys.stderr)
+            return False
+
+        src_off = os.path.join(td, "off.c")
+        with open(src_off, "w", encoding="utf-8") as f:
+            f.write(KEY_CHANNEL_OFF_C)
+        r = subprocess.run(base + ["-DARKRTOS_USE_IMAGE_SIGN=0", src_off],
+                           cwd=ROOT, capture_output=True, text=True)
+        if r.returncode != 0:
+            print("SIGN-GATE FAIL: default build picks up a key",
+                  file=sys.stderr)
+            print((r.stdout or "") + (r.stderr or ""), file=sys.stderr)
+            return False
+        print("ok: key channel ARKRTOS_SIGN_KEY_LOCAL (ON=32 bytes, OFF=none)")
+        return True
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Host gate for the image signature")
     ap.add_argument("--gcc", help="gcc 可执行文件（默认自动找）")
@@ -160,6 +230,9 @@ def main():
         print("SIGN-GATE FAIL: kernel MAC != packer MAC", file=sys.stderr)
         print("  kernel: %s" % got, file=sys.stderr)
         print("  packer: %s" % want, file=sys.stderr)
+        return 1
+
+    if not check_key_channel(cc):
         return 1
 
     print("ok: kernel arkrtos_sign_image() == tools/pack_app.calc_sign()")

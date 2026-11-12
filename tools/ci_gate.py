@@ -731,7 +731,7 @@ def check_sign_host():
     r = _run_check([sys.executable, os.path.join("tools", "sign_host_gate.py")])
     txt = ((r.stdout or "") + (r.stderr or "")).strip()
     if r.returncode == 0 and "SIGN-GATE OK" in txt:
-        ok("sign-host", "kernel MAC == packer MAC (2 files compiled on host)")
+        ok("sign-host", "kernel MAC == packer MAC + key channel, default off (4 TUs on host)")
     else:
         fail("sign-host", txt[-260:])
 
