@@ -163,6 +163,15 @@ mount: FAILED (-7: already exists)
 | F427 | 0 Error / 1 Warning（唯一告警是基线 `arkrtos_context.S` A1581W） | 92206 → **103070** |
 | F401 | 0 Error / 1 Warning（同上） | 86222 → — |
 
+> **2026-11-12 订正**：上表 F401 的 `Code 86222` 是 VFS 投产时那次构建的读数，不能当成当前值。
+> 其后 F401 工程一直**没收录** `arkrtos_mempool.c` / `arkrtos_utest.c` / `arkrtos_utest_cases.c`
+> （F427 有），之前靠链接期 `L6218E` 之外的路径没暴露，直到 2026-11-12 全量构建才撞上。
+> 补齐三个源 + `MDK_TRACE_SWD_BYTES` 8192→4096 + `-DARKRTOS_USE_UTEST=0 -DARKRTOS_USE_PROCFS=0`
+> （Flash 需 139,948 B > 131,072 B，缺 8,876 B）之后复验：
+> `Code=116006 RO-data=13034 RW-data=476 ZI-data=53472`，**0 Error / 1 Warning**（唯一告警仍是
+> `arkrtos_context.S` 的 A1581W 填充）；ROM 余量 1,556 B、RAM 余量 3,396 B。
+> 结论口径：**仅编译通过（Keil 全量链接），未上板验证 F401**。
+
 裁剪组合也各自编过：`-DARKRTOS_USE_VFS_LFS=0`、`-DARKRTOS_USE_VFS=0 -DARKRTOS_USE_VFS_LFS=0`。
 
 **主机测试通过**（在 ark_vfs 仓库里）：核心 161 checks + Ark RTOS 端口 70 checks，

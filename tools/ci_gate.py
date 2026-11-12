@@ -660,6 +660,23 @@ def check_tickless():
     else:
         fail("tickless", txt[-260:])
 
+def check_arkmake_syntax():
+    """ark make must compile with the switch ON.
+
+    ARKRTOS_USE_ARKMAKE defaults to 0 and the component is only wired into the
+    H743 GCC project, while --build runs the F427/F401 Keil projects. Without
+    this check the two wiring files are never compiled by any gate: a typo in
+    the command layer stays green until someone turns the switch on. The gate
+    script does the four files with the H743 include/define set; a missing
+    armclang is a FAIL, not a skip.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "arkmake_syntax_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "ARKMAKE-GATE OK" in txt:
+        ok("arkmake", "ON-path compile verified (4 files)")
+    else:
+        fail("arkmake", txt[-260:])
+
 def check_features_switches():
     """Every gate in arkrtos_features.h must be declared in Kconfig.
 
@@ -745,6 +762,7 @@ def main(argv):
     check_sbuf_host()
     check_mempool_host()
     check_tickless()
+    check_arkmake_syntax()
     if do_build:
         check_builds(uv4)
 

@@ -151,3 +151,12 @@ RAM 窗口内**最高一段留给内核设置的任务栈**（App/小程序 4K�
 未做项：GCC 侧镜像的**安装路径打包**（`.svcapp` 头 + 重定位表）尚未实现，
 目前只覆盖「调试裸镜像」；后续如需要，可在 `gen_ld.py` 补标称（nominal）路径
 并接入 `tools/pack_app.py`。
+
+**2026-11-12 记账（欠账 C6c）**：这条不动手的理由是**本机不可能验证**，不是忘了做。
+现有 `tools/pack_app.py` 只有两条入口——`--project <uvprojx>`（Keil 四遍差分）与
+离线 `--bin-a..d`（配 `--axf` 或 `--entry-offset`），`probe_elf` 只吃 ELF32；
+`tools/gen_ld.py` 只有 `--raw` 这一种布局，**没有 nominal/delta 支持**。
+而本机 `which arm-none-eabi-gcc` 为空（无 GCC 交叉工具链），四遍差分根本跑不起来，
+硬写出来也无法与真实工具链对拍 ⇒ 按「宁可不出错答案」只记账。
+要做时需要：① 装 `arm-none-eabi` 工具链；② `gen_ld.py` 补 nominal 布局；
+③ `pack_app.py` 增加「GCC 四遍」入口；④ 在真机上装载跑通。

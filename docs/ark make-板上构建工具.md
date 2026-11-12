@@ -24,7 +24,8 @@ ARKMAKE: cross-file add3=6
 ## 用法
 
 ```
-make [<makefile>] [-f <makefile>] [-o <out>] [-v]
+make [<makefile>] [-f <makefile>] [-o <out>] [-v] [-j]
+make clean [<makefile>] [-f <makefile>] [-o <out>]
 ```
 
 | 参数 | 含义 |
@@ -32,9 +33,36 @@ make [<makefile>] [-f <makefile>] [-o <out>] [-v]
 | `<makefile>` / `-f <f>` | 工程描述文件，缺省 `makefile`（相对当前目录解析） |
 | `-o <out>` | 覆盖工程里的 `OUT` |
 | `-v` | 把 `cc --pack` 的逐对象读数打出来（每一遍、每一份源的 code 长度与落点） |
+| `-j` / `-jN` | **认得出来，但不生效**：单核 + 单个编译池，构建本来就是串行的 |
+| `clean` | 删掉这份工程构建出的**成品镜像**（没有中间产物可删，见下） |
 
 选项写错会**立刻**报出来，不会先跑三十秒再失败：一次构建是几十秒的操作，
 把参数错拖到最后发现是最浪费时间的一种失败。
+
+`-j` 的处理是**说清楚而不是装没看见**，也不是报错退出：从桌面工程照抄
+`make -j8` 的人应该看到一句人话，而不是以为自己拿到了并行加速。
+
+```
+ark@arkrtos:/mnt/nor$ make -j8
+make: -j has no effect: one core and one compile pool, the build is serial by construction
+make: /mnt/nor/app.svcm <- /mnt/nor/a.c (+more)
+...
+```
+
+`make clean` 删的是**成品**，因为对象文件过完这四遍就不存在了——它们活在
+`cc_pack` 的编译池（或静态 arena）里，从来不落到卷上。所以它只做一件事：
+
+```
+ark@arkrtos:/mnt/nor$ make clean
+make: clean: removed /mnt/nor/app.svcm (4776 bytes)
+make: clean: no object files to remove (they live in the compile pool)
+ark@arkrtos:/mnt/nor$ make clean
+make: clean: /mnt/nor/app.svcm: no such image
+```
+
+第二条返回成功（GNU make 的 clean 在没东西可删时也是成功），但必须把
+"没找到"说出来，不能安静地什么都不做。clean 也走完整的 makefile 解析：
+`OUT`/`TARGET` 认不出来就不知道要删什么，那一步会直接失败而不是猜一个名字。
 
 ## 为什么它刻意不是 GNU make
 
@@ -45,6 +73,8 @@ make [<makefile>] [-f <makefile>] [-o <out>] [-v]
 | 时间戳依赖（`mtime`） | littlefs / ramfs 不保证可靠的 `mtime`。用"比较时间"决定要不要重编，得到的结论是随机的——而且错了以后镜像看起来完全正常 |
 | 隐含规则 / 后缀规则 | 需要一套模式匹配与搜索路径语义；它的失败方式是"没有规则可用"和"用了你没想过的规则"两种，很难在板上解释清楚 |
 | recipe（每行一个 shell） | 板上没有 shell 子进程，也没有 `sh -c`。留一个假 recipe 只会让人以为能写 `mkdir -p` |
+| 并行构建（`-j`） | 一个核、一个编译池（对象槽是静态 arena），没有可并的东西。参数认下来，但明说它不生效 |
+| `clean` | 只保留"删成品"这一层语义：板上没有 `.o` 可删，也没有时间戳依赖需要清理 |
 
 **其余任何写法一律报错，不静默忽略**。读不懂却照样构建出一份东西，是这个工具
 最该避免的失败方式。实测：
@@ -239,8 +269,16 @@ make: link failed (-12)          <- 这条又被阶段码问题掩盖了一层
   `ARKC_DEFS` 里调 `ARK_POOL_SIZE`（当前 RAM 只剩约 6.8 KB 余量，调大要先在
   别处腾出来）。
 - **SRCS 上限 4**：与 `cc --pack` 的对象槽一致；超了在解析层就报
-  `too many entries`，不是等四遍跑完。
-- **没有 `clean` / 没有 `-j`**：板上没有中间产物可清，也没有第二个核。
+  `too many entries`，不是等四遍跑完。这个数**不是随手拍的**，抬它要同时动
+  四处：`arkmake.h` 的 `ARKMAKE_MAX_SRCS`（上游源仓库）、`arkc_shell_cmd.c`
+  的 `CC_PACK_MAX_SRCS`、对象槽预算（槽容量 = arena / 源数），以及上板复验。
+  具体卡点：SDRAM 档 arena 48 KB，8 源均分只剩 6 KB 一槽，而实测一个带 printf
+  的 10 函数对象是 8660 B——当场 `File too large`；片内档只有 16 KB arena，
+  连 4 源都得 12 KB/槽才刚好。所以上限留在 4，超了就说清楚，不静默截断。
+- **`-j` 只有"认得出来"这一层**：单核 + 单编译池，构建是串行的。参数不报错，
+  但每次都会打出"has no effect"那一行，不假装并行。
+- **`clean` 只删成品**：板上没有中间产物（对象活在编译池里，构建结束即消失），
+  也没有时间戳依赖需要清理。`clean` 不碰源码、不碰 makefile。
 
 ## 复跑步骤
 

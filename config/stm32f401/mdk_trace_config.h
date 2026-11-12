@@ -17,7 +17,7 @@
 *          见 mdkdebug 的 trace_guide(topic="time_granularity")。
 *
 *          其余旋钮走组件默认值（在 mdk_trace_config_default.h 里）：
-*            MDK_TRACE_SWD_BYTES        8192   环字节数 = 静态 RAM 开销
+*            MDK_TRACE_SWD_BYTES        4096   环字节数 = 静态 RAM 开销（见下）
 *            MDK_TRACE_SWD_TS_SHIFT     0      出厂默认粒度 = DWT 周期，11.9ns/拍
 *            MDK_TRACE_SWD_CLEAR_ON_INIT 1     上电清环（无缝流的唯一安全默认）
 *
@@ -39,6 +39,22 @@
  * （见 mdk_trace_arkrtos.h）。置 0 时固件照样能编译、照样能录，但时间线上
  * 没有内核事件，只剩应用代码手工插的那些点。 */
 #define MDK_TRACE_ARKRTOS_HOOKS         1
+
+/* 环字节数：本板 96 KB RAM，而整机静态区已经把这块预算吃满——2026-11-12
+ * 的 F401 内核工程在 8192 档下链接溢出 0x348 B（.data/.bss 无执行区可放），
+ * 缩到 4096 后放得下并留出余量。
+ *
+ * 为什么缩这个而不是别的：环满时的行为是**丢新事件并计数**（lost_events /
+ * lost_bytes，主机读得到），不是覆盖已有记录、更不是越界写——所以缩小只会
+ * 降低"主机停顿多久才丢事件"的容忍度，不会变成错误答案。4096 B 在实测
+ * ~2.35 B/事件下约 1700 条，对这块演示板足够；真需要长录制时把它调回 8192
+ * 并同步腾出 RAM。
+ *
+ * 必须是 2 的幂（下标按掩码算，不在中断里做除法），所以只有 8192/4096 两档
+ * 可选，没有 6144。 */
+#ifndef MDK_TRACE_SWD_BYTES
+#define MDK_TRACE_SWD_BYTES           4096
+#endif
 
 /* 主频：把目标侧周期换算成时间要用到，84MHz。 */
 #define MDK_TRACE_CPU_HZ              84000000
