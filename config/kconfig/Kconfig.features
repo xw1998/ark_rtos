@@ -497,6 +497,24 @@ config ARKRTOS_USE_RTSTAT
 	  change, and the shell command table is unchanged.
 
 config ARKRTOS_USE_UTEST
+config ARKRTOS_USE_SECCHECK
+	bool "Security baseline self-check (sec command)"
+	default n
+	depends on SHELL_ENABLE
+	help
+	  arkrtos_sec: twelve read-only checks that report PASS / FAIL /
+	  FINDING / SKIP about the build in front of you - MPU/priv/stack/
+	  fault/crash/audit gates, MMU slot windows, structural audit, image
+	  headers, image signature policy, hardware dead-man, watchdog guard,
+	  crash journal, shell authentication, flash read-out protection and
+	  measured real-time counters.  It never changes state: a FAIL here
+	  means the configuration is not what you think it is, a FINDING
+	  means the property is genuinely absent (and is named), and SKIP
+	  means this build has no path to observe it (the reason is printed).
+	  It is a baseline self-check, NOT a certification statement.  Off
+	  (the default) compiles the module and the `sec` command out: zero
+	  size change and the shell command table is unchanged.
+
 	bool "On-board unit test framework"
 	default y
 	help

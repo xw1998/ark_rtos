@@ -68,6 +68,9 @@
 #include "arkrtos_hal.h"
 #include "arkrtos_version.h"
 #include "arkrtos_rt.h"
+#if (ARKRTOS_USE_SECCHECK == 1)
+#include "arkrtos_sec.h"
+#endif
 #include "arkrtos_dt.h"
 
 #if (ARKRTOS_USE_ARKVIM == 1)
@@ -2427,6 +2430,86 @@ static int cmd_rt(int argc, char *argv[])
     return -1;
 }
 #endif /* ARKRTOS_USE_RTSTAT */
+
+/* ============================================================
+ * sec：安全基线自检（只读，不改任何结构）
+ * ============================================================ */
+#if (ARKRTOS_USE_SECCHECK == 1)
+static int cmd_sec(int argc, char *argv[])
+{
+    /* 报告里带 16 个项，别放栈上：内核任务栈不一定宽裕。 */
+    static arkrtos_sec_report_t rep;
+    const char *filter = (argc >= 2) ? argv[1] : "all";
+    uint32 want = 0xFFFFFFFFu;
+    uint32 i;
+    uint32 fails;
+
+    if(strcmp(filter, "all") == 0)
+    {
+        want = 0xFFFFFFFFu;
+    }
+    else if(strcmp(filter, "pass") == 0)
+    {
+        want = (uint32)ARKRTOS_SEC_PASS;
+    }
+    else if(strcmp(filter, "fail") == 0)
+    {
+        want = (uint32)ARKRTOS_SEC_FAIL;
+    }
+    else if((strcmp(filter, "find") == 0) || (strcmp(filter, "finding") == 0))
+    {
+        want = (uint32)ARKRTOS_SEC_FINDING;
+    }
+    else if(strcmp(filter, "skip") == 0)
+    {
+        want = (uint32)ARKRTOS_SEC_SKIP;
+    }
+    else
+    {
+        ark_shell_printf("usage: sec [all | pass | fail | find | skip]\r\n");
+        return -1;
+    }
+
+    fails = arkrtos_sec_run(&rep);
+
+    ark_shell_printf("sec: %u checks - pass %u, fail %u, finding %u, skip %u\r\n",
+                     (unsigned)rep.count, (unsigned)rep.pass, (unsigned)rep.fail,
+                     (unsigned)rep.finding, (unsigned)rep.skip);
+
+    for(i = 0u; i < rep.count; i++)
+    {
+        const arkrtos_sec_item_t *p_it = &rep.item[i];
+
+        if((want != 0xFFFFFFFFu) && (p_it->state != want))
+        {
+            continue;
+        }
+
+        ark_shell_printf("  [%s] %-18s ", arkrtos_sec_state_name(p_it->state), p_it->name);
+        if((p_it->fmt != 0) && (p_it->fmt[0] != '\0'))
+        {
+            ark_shell_printf(p_it->fmt, (unsigned)p_it->v[0], (unsigned)p_it->v[1],
+                             (unsigned)p_it->v[2], (unsigned)p_it->v[3]);
+        }
+        ark_shell_printf("\r\n");
+    }
+
+    if(fails == 0u)
+    {
+        ark_shell_printf("verdict: no hard failure (FINDING = known gap, SKIP = no path to see it)\r\n");
+    }
+    else
+    {
+        ark_shell_printf("verdict: %u hard failure(s) - this build is not what you think it is\r\n",
+                         (unsigned)fails);
+    }
+
+    ark_shell_printf("note: read-only baseline; the privilege/MPU denials are exercised by an App"
+                     " (HWSAFE_DEMO, APP_BAD), not from here\r\n");
+    return (fails == 0u) ? 0 : -1;
+}
+#endif /* ARKRTOS_USE_SECCHECK */
+
 
 /* ============================================================
  * utest：板端单元测试
@@ -5720,7 +5803,8 @@ static int register_kernel_commands(void)
     int need = 49   /* 48 shipped + "stack" (per-task stack usage) */
              + (ARKRTOS_USE_ARKVIM ? 1 : 0)
              + (ARKRTOS_USE_ARKC ? 1 : 0)
-             + (ARKRTOS_USE_RTSTAT ? 1 : 0);
+             + (ARKRTOS_USE_RTSTAT ? 1 : 0)
+             + (ARKRTOS_USE_SECCHECK ? 1 : 0);
 
     if((idx + need) > ARK_SHELL_MAX_COMMANDS)
     {
@@ -5843,6 +5927,10 @@ static int register_kernel_commands(void)
     g_cmd_table[idx++] = ARK_SHELL_CMD("rt", cmd_rt,
         "Real-time latency (DWT cycles): rt [show | reset | run [n]]", 3);
 #endif /* ARKRTOS_USE_RTSTAT */
+#if (ARKRTOS_USE_SECCHECK == 1)
+    g_cmd_table[idx++] = ARK_SHELL_CMD("sec", cmd_sec,
+        "Security baseline self-check: sec [all | pass | fail | find | skip]", 2);
+#endif /* ARKRTOS_USE_SECCHECK */
 
     g_cmd_table[idx++] = ARK_SHELL_CMD("ps", cmd_ps,
         "List kernel tasks and installed images", 1);

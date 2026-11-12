@@ -133,6 +133,13 @@
 #define ARKRTOS_USE_RTSTAT              0
 #endif
 
+/* 安全基线自检（sec 命令）。只读：不改任何结构、不装任何策略。
+ * 十二项逐条给 PASS/FAIL/FINDING/SKIP，SKIP 必须写清为什么测不了。
+ * 默认关时整个 .c 不编入、shell 命令表不变：体积与行为零变化。 */
+#ifndef ARKRTOS_USE_SECCHECK
+#define ARKRTOS_USE_SECCHECK            0
+#endif
+
 /* ============================================================
  * 三、服务与组件
  * ============================================================ */

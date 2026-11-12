@@ -75,6 +75,7 @@ ark@arkrtos:~$
 | `crash` | `crash` | 跨复位崩溃日记：UNINIT 区地址与大小、`boots` / `seq`、每槽故障数 / 最近原因 / 禁用原因 / 禁用时刻 |
 | `guard` | `guard` | 每任务心跳合同：是否声明、周期、报到间隔、裁决位 |
 | `audit` | `audit` | 内核结构自审 |
+| `sec` | `sec [all \| pass \| fail \| find \| skip]` | 安全基线自检（12 项只读）：编译期门禁、槽位 RAM 窗口、结构不变式、镜像头、开机复核 CRC（SKIP）、镜像签名、硬件安全态、看门狗、崩溃台账、控制台认证、Flash 保护（SKIP）、实时性读数。四档结论 `PASS` / `FAIL` / `FIND` / `SKIP`，返回码 = FAIL 条数。见 [安全基线自检](安全基线自检.md) |
 | `blk` | `blk [list \| probe \| rd \| wr \| erase \| test]` | 块设备（NOR / 内部 Flash）：枚举、探测、读写、擦除、自测 |
 | `fs` | `fs [mount \| unmount \| format \| info \| ls \| wr \| rd \| put \| rm \| test \| err]` | littlefs 卷：挂载 / 卸载 / 格式化 / 容量 / 列目录 / 写 / 读 / 收文件 / 删 / 自测 / 错误名。挂载点形如 `mounted nor0 at 0x0, 4194304 bytes` |
 | `mini` | `mini [list \| run <path> \| stop [n] \| count [n] \| limit [bytes] \| forget <path> \| autostart [list \| add <path> \| del <path> \| now]]` | 小程序（放在文件系统里、`run` 时 load 进内存执行的第三种用户态应用）：列实例 / 跑一个路径 / 停一个 / 查改并发上限 / 清某路径的崩溃计数 / 维护开机自启清单 `/mini.autostart` |

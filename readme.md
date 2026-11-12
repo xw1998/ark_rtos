@@ -70,6 +70,7 @@ Ark RTOS 把这件事拆成五层，每层各拦一种失败，且每一层的"�
 | 双板同源 | F427 与 F401 同一份内核源码均编译通过（F401 `Code=46526`） | 本文 §验证状态 |
 | 板端单元测试 | F427 上 `utest run` → **9 matched / 9 passed / 0 failed**，73 条断言；`utest-host` 门禁验框架记账 | [单元测试框架](docs/单元测试框架.md) |
 | 实时性实测（96 MHz、2 kHz 节拍） | 节拍 ISR 本体 4.3 / 6.3 / 71.6 µs；低优先级唤醒 45.4 / 45.8 / 229.9 µs；抢占唤醒 41.4 / 52.6 / 80.5 µs；临界区最坏 3.1 µs；节拍抖动 ±22 µs（**实测最大值，非形式化 WCET**） | [实时性与最坏延迟](docs/实时性与最坏延迟.md) |
+| 安全基线自检（`sec`，只读 12 项） | F427 上 `sec` 报 **12 checks - pass 8, fail 0, finding 2, skip 2**：机制缺口打到 `FIND`（无签名、控制台无认证），看不见的通路打 `SKIP` 并写原因（开机不复核 CRC、无选项字节读取），不拿 PASS 蒙过去 | [安全基线自检](docs/安全基线自检.md) |
 | App 崩溃的硬件安全态（"遗言"） | F427 上 App 越权崩溃后内核在收尸时执行遗言，`hwsafe` 报 `neutralized=6 last_owner=12`，LED 目视由亮转灭 | [App崩溃硬件安全与遗言机制](docs/App崩溃硬件安全与遗言机制.md) |
 | 跨设备软总线 | F427 板内两节点 `bus selftest` **10 项全 PASS**（`checks 56, failed 0`），`bus info` 报 `ark_softbus 18c6ccf` | [软总线接入](docs/软总线接入.md) |
 
@@ -760,6 +761,7 @@ STM32F427VGTx @96 MHz，DAPLink（SWD 两线，无 SWO）经 mdkdebug 的 SWD tr
 - **真实以太网收发**：板级无可用 PHY（`board/stm32f427/` 下没有 PHY 驱动、MDIO 读写、`eth_` 接口与 RMII 引脚分配），网络路径跑的是回环网卡，未做真实链路收发验证（见 [docs/lwIP协议栈接入.md](docs/lwIP协议栈接入.md) §1）
 - **小程序正常退出走计划内交接**：Ark 侧未取到（该路径已在 svcrtos_nano 侧落地上板，见 nano 同名文档）
 - **软总线的物理线两节点**：板上只有一路 USART1 且被内核控制台独占，无空闲 UART，故只验证了板内 loopback；真实串口线上两节点（两块板 / 板 + PC）**未验证**（见 [docs/软总线接入.md](docs/软总线接入.md) §7）
+- **安全认证相关的三项开关后复验**：镜像签名强制（`ARKRTOS_USE_IMAGE_SIGN=1`）、看门狗复位（`ARKRTOS_WDG_ENABLE=1`）、篡改镜像被拒（T6/T10/T12）**未做**——这三项要先把开关打开再跑用例，属 P1；现状以 [docs/安全认证准备.md](docs/安全认证准备.md) §7 的缺口寄存器为准
 
 文档索引见 [docs/README.md](docs/README.md)。
 
@@ -785,6 +787,8 @@ STM32F427VGTx @96 MHz，DAPLink（SWD 两线，无 SWO）经 mdkdebug 的 SWD tr
 | 让设备之间互相发现、发事件、远程调用、传数据（软总线） | [软总线接入](docs/软总线接入.md) |
 | 在板上跑单元测试、加自己的用例 | [单元测试框架](docs/单元测试框架.md) |
 | 看实时性指标、最坏延迟怎么量 | [实时性与最坏延迟](docs/实时性与最坏延迟.md) |
+| 想知道这套构建的安全基线还在不在 | [安全基线自检](docs/安全基线自检.md) |
+| 要过安全认证：资产、威胁模型、标准差距、缺口清单 | [安全认证准备](docs/安全认证准备.md) |
 | 换一颗芯片 | [Ark RTOS移植手册](Ark RTOS移植手册.md) |
 | 查 API 签名与参数 | [api/Ark RTOS_API参考.md](docs/api/Ark RTOS_API参考.md) |
 | 让自动化流程（含 AI agent 工作流）驱动这块板子 | [skills/arkrtos/SKILL.md](skills/arkrtos/SKILL.md) |

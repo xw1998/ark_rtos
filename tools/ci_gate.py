@@ -696,6 +696,27 @@ def check_rtstat_syntax():
     else:
         fail("rtstat", txt[-260:])
 
+def check_seccheck_syntax():
+    """SECCHECK (security baseline self-check) must compile with the switch ON.
+
+    ARKRTOS_USE_SECCHECK defaults to 0, so arkrtos_sec.c in full, the three
+    prototypes in arkrtos_sec.h and `cmd_sec` plus its command-table line are
+    never seen by a compiler in a default build.  Same false-green shape as the
+    rtstat gate: a typo there stays green until someone arms it for an
+    assessment and gets a build break instead of a reading.  This runs
+    armclang -fsyntax-only with the switch forced to 1 over the module and the
+    shell wiring (optional components forced on so the whole command table is
+    walked); a missing armclang is a FAIL, not a skip.  Syntax only -- whether
+    the twelve verdicts are right still needs a board (docs/安全基线自检.md §4).
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "seccheck_syntax_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "SECCHECK-GATE OK" in txt:
+        ok("seccheck", "ON-path compile verified (2 files)")
+    else:
+        fail("seccheck", txt[-260:])
+
+
 def check_features_switches():
     """Every gate in arkrtos_features.h must be declared in Kconfig.
 
@@ -783,6 +804,7 @@ def main(argv):
     check_tickless()
     check_arkmake_syntax()
     check_rtstat_syntax()
+    check_seccheck_syntax()
     if do_build:
         check_builds(uv4)
 

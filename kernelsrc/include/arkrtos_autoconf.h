@@ -241,6 +241,9 @@
 #ifndef ARKRTOS_USE_SDRAM
 #define ARKRTOS_USE_SDRAM 0
 #endif
+#ifndef ARKRTOS_USE_SECCHECK
+#define ARKRTOS_USE_SECCHECK 0
+#endif
 #ifndef ARKRTOS_USE_SOFTBUS
 #define ARKRTOS_USE_SOFTBUS 0
 #endif

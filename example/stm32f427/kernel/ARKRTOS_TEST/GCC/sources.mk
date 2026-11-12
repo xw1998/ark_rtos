@@ -63,6 +63,7 @@ SRCS := \
   kernelsrc/src/arkrtos_guard.c \
   kernelsrc/src/arkrtos_crash.c \
   kernelsrc/src/arkrtos_sign.c \
+  kernelsrc/src/arkrtos_sec.c \
   kernelsrc/fs/littlefs/lfs.c \
   kernelsrc/fs/littlefs/lfs_util.c \
   kernelsrc/src/arkrtos_trace.c \
