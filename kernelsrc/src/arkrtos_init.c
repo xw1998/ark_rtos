@@ -38,6 +38,7 @@
 #include "arkrtos_mpu.h"
 #include "arkrtos_config.h"
 #include "arkrtos_sbuf.h"
+#include "arkrtos_rt.h"
 #include "arkrtos_init.h"
 
 /* 内核模块初始化：唯一权威顺序实现（任何工程的 main 都只调用它） */
@@ -60,5 +61,9 @@ void arkrtos_kernel_module_init(void)
 
     #if (ARKRTOS_USE_MPU == 1)
     arkrtos_mpu_module_init();
+    #endif
+
+    #if (ARKRTOS_USE_RTSTAT == 1)
+    arkrtos_rt_init();
     #endif
 }

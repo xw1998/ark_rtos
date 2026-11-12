@@ -82,6 +82,7 @@ per item.
 | Device tree | On the F427 board the `dt` command prints 20 nodes (model / compatible / reg / enabled flag) exactly as written in `dts/stm32f427.dts` | [Device tree](docs/设备树.md) |
 | Two boards, one source | F427 and F401 both build from the same kernel sources (F401 `Code=46526`) | This file, "Verification status" |
 | On-board unit tests | `utest run` on F427 -> **9 matched / 9 passed / 0 failed**, 73 assertions; the `utest-host` gate checks the framework's bookkeeping | [Unit test framework](docs/单元测试框架.md) |
+| Real-time measurements (96 MHz, 2 kHz tick) | Tick ISR body 4.3 / 6.3 / 71.6 us; low-priority wake 45.4 / 45.8 / 229.9 us; preemption wake 41.4 / 52.6 / 80.5 us; worst critical section 3.1 us; tick jitter +-22 us (**observed maxima, not a formal WCET**) | [Real-time and worst-case latency](docs/实时性与最坏延迟.md) |
 | Hardware safe state on app crash (the "last will") | On F427, after an app crashes on a deliberate violation the kernel runs its will while reaping the task: `hwsafe` reports `neutralized=6 last_owner=12` and the LED visibly goes off | [Hardware safe state](docs/App崩溃硬件安全与遗言机制.md) |
 | Cross-device soft bus | Two nodes in one F427 firmware, `bus selftest` **all 10 stages PASS** (`checks 56, failed 0`), `bus info` reports `ark_softbus 18c6ccf` | [Soft bus](docs/软总线接入.md) |
 
@@ -912,6 +913,7 @@ The documentation index is [docs/README.md](docs/README.md).
 | Keep hardware out of a dangerous state when an app crashes | [App崩溃硬件安全与遗言机制](docs/App崩溃硬件安全与遗言机制.md) |
 | Let devices discover each other, publish events, call remotely and stream data (soft bus) | [软总线接入](docs/软总线接入.md) |
 | Run unit tests on the board and add your own | [单元测试框架](docs/单元测试框架.md) |
+| See real-time numbers and how worst-case latency is measured | [实时性与最坏延迟](docs/实时性与最坏延迟.md) |
 | Port to another chip | [Ark RTOS移植手册](Ark RTOS移植手册.md) |
 | Look up API signatures and parameters | [api/Ark RTOS_API参考.md](docs/api/Ark RTOS_API参考.md) |
 | Drive the board from an automated workflow (including AI agent workflows) | [skills/arkrtos/SKILL.md](skills/arkrtos/SKILL.md) |

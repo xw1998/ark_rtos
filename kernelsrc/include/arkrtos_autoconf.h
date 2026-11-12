@@ -226,6 +226,9 @@
 #ifndef ARKRTOS_USE_QSPI
 #define ARKRTOS_USE_QSPI 0
 #endif
+#ifndef ARKRTOS_USE_RTSTAT
+#define ARKRTOS_USE_RTSTAT 0
+#endif
 #ifndef ARKRTOS_USE_SBUF
 #define ARKRTOS_USE_SBUF 0
 #endif

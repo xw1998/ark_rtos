@@ -25,6 +25,7 @@
 #include "arkrtos_trace.h"
 #include "arkrtos_timer.h"
 #include "arkrtos_tickless.h"
+#include "arkrtos_rt.h"
 #include "arkrtos_fault.h"
 #include "arkrtos_ptable.h"
 #include "arkrtos_mpu.h"
@@ -410,6 +411,9 @@ static void arkrtos_kernel_tick_body(void)
 void arkrtos_kernel_tick_handler(void)
 #endif
 {
+    #if (ARKRTOS_USE_RTSTAT == 1)
+    arkrtos_rt_tick_enter();
+    #endif
     arkrtos_kernel_tick++;
 
     /* Guard first: it records which task was on the CPU when this tick
@@ -482,6 +486,10 @@ void arkrtos_kernel_tick_handler(void)
         arkrtos_cpu_busy_ticks = arkrtos_cpu_load_counter;
         arkrtos_cpu_load_counter = 0;
     }
+    #endif
+
+    #if (ARKRTOS_USE_RTSTAT == 1)
+    arkrtos_rt_tick_exit();
     #endif
 }
 

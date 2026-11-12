@@ -677,6 +677,25 @@ def check_arkmake_syntax():
     else:
         fail("arkmake", txt[-260:])
 
+def check_rtstat_syntax():
+    """RTSTAT (DWT cycle-based latency metering) must compile with the switch ON.
+
+    ARKRTOS_USE_RTSTAT defaults to 0, so the five #if blocks that carry the
+    measurement body, the tick stamps, the boot-time arming and the `rt` shell
+    command are never seen by a compiler in a default build.  A typo there stays
+    green until someone arms it on a board and gets a wrong reading instead of a
+    build error.  This runs armclang -fsyntax-only with the switch forced to 1
+    over the kernel files and all three port layers; a missing armclang is a
+    FAIL, not a skip.  It checks syntax only -- DWT behaviour and whether the
+    numbers mean anything still need a board.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "rtstat_syntax_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "RTSTAT-GATE OK" in txt:
+        ok("rtstat", "ON-path compile verified (7 files)")
+    else:
+        fail("rtstat", txt[-260:])
+
 def check_features_switches():
     """Every gate in arkrtos_features.h must be declared in Kconfig.
 
@@ -763,6 +782,7 @@ def main(argv):
     check_mempool_host()
     check_tickless()
     check_arkmake_syntax()
+    check_rtstat_syntax()
     if do_build:
         check_builds(uv4)
 

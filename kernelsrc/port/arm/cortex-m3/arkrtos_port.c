@@ -11,6 +11,10 @@
 #include "arkrtos_task.h"
 #include "arkrtos_config.h"
 
+#if (ARKRTOS_USE_RTSTAT == 1)
+#include "arkrtos_rt.h"
+#endif
+
 #ifdef ARKRTOS_BOARD_CONFIG
 #include ARKRTOS_BOARD_CONFIG
 #endif
@@ -113,6 +117,9 @@ uint32 arkrtos_port_enter_critical(void)
 {
     uint32 primask = __get_PRIMASK();
     __disable_irq();
+#if (ARKRTOS_USE_RTSTAT == 1)
+    arkrtos_rt_crit_enter();
+#endif
     return primask;
 }
 
@@ -121,6 +128,9 @@ uint32 arkrtos_port_enter_critical(void)
 */
 void arkrtos_port_exit_critical(uint32 state)
 {
+#if (ARKRTOS_USE_RTSTAT == 1)
+    arkrtos_rt_crit_exit();
+#endif
     __set_PRIMASK(state);
 }
 
@@ -246,6 +256,42 @@ uint32 arkrtos_port_get_timer_reload(void)
 {
     return SysTick->LOAD;
 }
+
+/* ============================================================
+ * 周期级时间基准 (DWT CYCCNT)
+ * ------------------------------------------------------------
+ * 只给实时性度量模块 (arkrtos_rt.c) 用: 提供 1 个 CPU 周期的
+ * 分辨率, 用来量 tick/唤醒/抢占/临界区的真实耗时。
+ * 关掉 ARKRTOS_USE_RTSTAT 时下面两个函数是死代码。
+ * 若板级也开了 DWT 追踪 (mdk_trace), 两边都只是置 DEMCR 的
+ * TRCENA 位与 CYCCNT 使能位, 属幂等操作, 互不影响。
+ * ============================================================ */
+#if (ARKRTOS_USE_RTSTAT == 1)
+#define ARKRTOS_PORT_DEMCR      (*(volatile uint32 *)0xE000EDFCu)
+#define ARKRTOS_PORT_DWT_CTRL   (*(volatile uint32 *)0xE0001000u)
+#define ARKRTOS_PORT_DWT_CYCCNT (*(volatile uint32 *)0xE0001004u)
+
+/**
+* @brief 使能 DWT 周期计数器（不清零：它是自由运行计数器，
+*        清零会让另一处正在计时的时间戳突然对不上）
+* @return 0 成功
+*/
+int32 arkrtos_port_cyccnt_init(void)
+{
+    ARKRTOS_PORT_DEMCR |= (1u << 24);      /* TRCENA */
+    ARKRTOS_PORT_DWT_CTRL |= 1u;           /* CYCCNTENA */
+    return 0;
+}
+
+/**
+* @brief 读 DWT 周期计数器 (自然回绕)
+* @return 当前周期计数
+*/
+uint32 arkrtos_port_get_cyccnt(void)
+{
+    return ARKRTOS_PORT_DWT_CYCCNT;
+}
+#endif /* ARKRTOS_USE_RTSTAT */
 
 void arkrtos_port_start_timer(uint32 tick_period_us)
 {

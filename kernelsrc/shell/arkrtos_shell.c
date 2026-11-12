@@ -65,7 +65,9 @@
 #endif
 #include "arkrtos_crash.h"
 #include "arkrtos_partition.h"
+#include "arkrtos_hal.h"
 #include "arkrtos_version.h"
+#include "arkrtos_rt.h"
 #include "arkrtos_dt.h"
 
 #if (ARKRTOS_USE_ARKVIM == 1)
@@ -2259,6 +2261,172 @@ static int cmd_mpool(int argc, char *argv[])
 }
 
 #endif /* ARKRTOS_USE_MEMPOOL */
+
+/* ============================================================
+ * rt：实时性度量（DWT 周期计数）
+ * ------------------------------------------------------------
+ * 回答的是"这套系统的时间上界在哪"这一类问题，不是把实时性证明出来：
+ * 打出来的是本机本配置下测到的最大值，测不到更坏的情况只说明这段时间
+ * 没发生更坏的情况。三条边界的完整说法见 arkrtos_rt.h 文件头。
+ * ============================================================ */
+#if (ARKRTOS_USE_RTSTAT == 1)
+static const char *rt_unit_c = "cyc";
+static const char *rt_unit_us = "us";
+
+static void rt_print_row(const arkrtos_rt_row_t *r)
+{
+    if(r->n == 0u)
+    {
+        ark_shell_printf("  %-9s %-7s (no sample)\r\n", r->name, "-");
+        return;
+    }
+
+    ark_shell_printf("  %-9s %-7u %-9u %-9u %-9u %-8u %-8u %-8u",
+                     r->name, r->n,
+                     r->min_c, r->avg_c, r->max_c,
+                     r->min_us, r->avg_us, r->max_us);
+    if(r->late_n != 0u)
+    {
+        ark_shell_printf("  late=%u", r->late_n);
+    }
+    ark_shell_printf("\r\n");
+}
+
+static int rt_show(void)
+{
+    arkrtos_rt_row_t rows[ARKRTOS_RT_ROWS];
+    uint32 n;
+    uint32 k;
+    uint32 per_tick = arkrtos_rt_cycles_per_tick();
+    int32  j_min = 0;
+    int32  j_max = 0;
+    uint32 j_n   = 0;
+
+    ark_shell_printf("\r\nreal-time measurement (DWT cycle counter)\r\n");
+
+    if(per_tick == 0u)
+    {
+        ark_shell_printf("  cycle counter unavailable (DWT) - no measurement possible\r\n");
+        ark_shell_printf("  (nothing is estimated from the tick period on purpose)\r\n");
+        return -1;
+    }
+
+    {
+        uint32 clk = arkrtos_port_get_system_clock();
+        uint32 tick_us;
+
+        tick_us = (clk != 0u) ?
+                  (uint32)(((unsigned long long)per_tick * 1000000ull) /
+                           (unsigned long long)clk) : 0u;
+        ark_shell_printf("  cycles per tick: %u  (clock %u Hz, tick %u us)\r\n",
+                         per_tick, clk, tick_us);
+
+        /* 先证明计数器本身在走再谈读数。调试器断开时会把 DEMCR.TRCENA 清掉，
+         * 那之后 CYCCNT 就停在原地；这里重新武装一次并当场报出来。 */
+        if(arkrtos_rt_counter_alive() != 0)
+        {
+            ark_shell_printf("  counter: running\r\n");
+        }
+        else
+        {
+            ark_shell_printf("  counter: NOT running (DWT CYCCNT does not advance)"
+                             " - numbers below are stale\r\n");
+        }
+    }
+
+    ark_shell_printf("  %-9s %-7s %-9s %-9s %-9s %-8s %-8s %-8s\r\n",
+                     "ROW", "N", "MIN(" , "AVG(", "MAX(", rt_unit_us, rt_unit_us, rt_unit_us);
+    ark_shell_printf("  %-9s %-7s %-9s %-9s %-9s %-8s %-8s %-8s\r\n",
+                     "", "", rt_unit_c, rt_unit_c, rt_unit_c, "MIN", "AVG", "MAX");
+
+    n = arkrtos_rt_snapshot(rows, ARKRTOS_RT_ROWS);
+    for(k = 0u; k < n; k++)
+    {
+        rt_print_row(&rows[k]);
+    }
+
+    if(arkrtos_rt_jitter(&j_min, &j_max, &j_n) != 0u)
+    {
+        ark_shell_printf("  jitter    n=%u  min=%d  max=%d  (signed cycles, + = late)\r\n",
+                         j_n, j_min, j_max);
+    }
+    else
+    {
+        ark_shell_printf("  jitter    (no sample)\r\n");
+    }
+
+    ark_shell_printf("  note: maxima measured on this board with this build;\r\n");
+    ark_shell_printf("        they are not a formal WCET bound.  rows with no sample\r\n");
+    ark_shell_printf("        mean nothing of that kind happened since the last reset\r\n");
+    ark_shell_printf("        (crit.max fills only when the kernel really enters a\r\n");
+    ark_shell_printf("        critical section).\r\n");
+    return 0;
+}
+
+static int cmd_rt(int argc, char *argv[])
+{
+    const char *sub = (argc >= 2) ? argv[1] : "show";
+    uint32 n = 200u;
+    int ret;
+
+    if(strcmp(sub, "show") == 0)
+    {
+        return rt_show();
+    }
+
+    if(strcmp(sub, "reset") == 0)
+    {
+        arkrtos_rt_reset();
+        ark_shell_printf("real-time statistics cleared\r\n");
+        return 0;
+    }
+
+    if(strcmp(sub, "run") == 0)
+    {
+        if(argc >= 3)
+        {
+            if((parse_u32(argv[2], &n) != 0) || (n < 1u) || (n > 5000u))
+            {
+                ark_shell_printf("usage: rt run [n]   (1 <= n <= 5000)\r\n");
+                return -1;
+            }
+        }
+
+        ark_shell_printf("measuring %u samples (wake, then preempt)...\r\n", n);
+
+        /* 开测前重新武装计数器并清空统计：开机到现在的样本是在"计数器可能
+         * 被调试器关掉"的窗口里采的，不能混进这一轮。 */
+        arkrtos_rt_init();
+        if(arkrtos_rt_cycles_per_tick() == 0u)
+        {
+            ark_shell_printf("cycle counter still not running - cannot measure\r\n");
+            return -1;
+        }
+
+        ret = arkrtos_rt_measure_wake(n);
+        if(ret != 0)
+        {
+            ark_shell_printf("wake scenario: sampler not ready (DWT unavailable)\r\n");
+            return -1;
+        }
+
+        ret = arkrtos_rt_measure_preempt(n);
+        if(ret != 0)
+        {
+            ark_shell_printf("preempt scenario: failed (reason code %d)\r\n",
+                             (int)arkrtos_rt_last_error());
+            ark_shell_printf("  see arkrtos_rt.h: 1/2 = semaphore create,"
+                             " 5 = helper task register\r\n");
+            return -1;
+        }
+
+        return rt_show();
+    }
+
+    ark_shell_printf("\r\nusage: rt [show | reset | run [n]]\r\n");
+    return -1;
+}
+#endif /* ARKRTOS_USE_RTSTAT */
 
 /* ============================================================
  * utest：板端单元测试
@@ -5551,7 +5719,8 @@ static int register_kernel_commands(void)
      * real count so a future command cannot silently overflow g_cmd_table. */
     int need = 49   /* 48 shipped + "stack" (per-task stack usage) */
              + (ARKRTOS_USE_ARKVIM ? 1 : 0)
-             + (ARKRTOS_USE_ARKC ? 1 : 0);
+             + (ARKRTOS_USE_ARKC ? 1 : 0)
+             + (ARKRTOS_USE_RTSTAT ? 1 : 0);
 
     if((idx + need) > ARK_SHELL_MAX_COMMANDS)
     {
@@ -5670,6 +5839,10 @@ static int register_kernel_commands(void)
     g_cmd_table[idx++] = ARK_SHELL_CMD("utest", cmd_utest,
         "On-board unit tests: utest [list | run [pattern]]", 3);
 #endif /* ARKRTOS_USE_UTEST */
+#if (ARKRTOS_USE_RTSTAT == 1)
+    g_cmd_table[idx++] = ARK_SHELL_CMD("rt", cmd_rt,
+        "Real-time latency (DWT cycles): rt [show | reset | run [n]]", 3);
+#endif /* ARKRTOS_USE_RTSTAT */
 
     g_cmd_table[idx++] = ARK_SHELL_CMD("ps", cmd_ps,
         "List kernel tasks and installed images", 1);

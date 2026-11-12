@@ -224,6 +224,15 @@ uint32 arkrtos_port_get_system_clock(void);
 */
 uint32 arkrtos_port_get_timer_counter(void);
 
+/* Free-running CPU cycle counter (DWT CYCCNT), for latency measurement.
+ * arkrtos_port_cyccnt_init() returns 0 when the core can serve it, -1 when
+ * it cannot (then arkrtos_port_get_cyccnt() returns 0 forever and callers
+ * must report "not available" instead of inventing a resolution that is
+ * three orders of magnitude coarser).  Called once, at ARKRTOS_USE_RTSTAT
+ * init; nothing else in the kernel reads these two unless that switch is on. */
+int32  arkrtos_port_cyccnt_init(void);
+uint32 arkrtos_port_get_cyccnt(void);
+
 /**
 * @brief 获取系统节拍定时器重载值（计数上限）
 * @return 重载值

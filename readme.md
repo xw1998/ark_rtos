@@ -69,6 +69,7 @@ Ark RTOS 把这件事拆成五层，每层各拦一种失败，且每一层的"�
 | 设备树 | F427 板上 `dt` 命令打印 20 个节点（model / compatible / reg / enabled/disabled），与 `dts/stm32f427.dts` 一致 | [设备树](docs/设备树.md) |
 | 双板同源 | F427 与 F401 同一份内核源码均编译通过（F401 `Code=46526`） | 本文 §验证状态 |
 | 板端单元测试 | F427 上 `utest run` → **9 matched / 9 passed / 0 failed**，73 条断言；`utest-host` 门禁验框架记账 | [单元测试框架](docs/单元测试框架.md) |
+| 实时性实测（96 MHz、2 kHz 节拍） | 节拍 ISR 本体 4.3 / 6.3 / 71.6 µs；低优先级唤醒 45.4 / 45.8 / 229.9 µs；抢占唤醒 41.4 / 52.6 / 80.5 µs；临界区最坏 3.1 µs；节拍抖动 ±22 µs（**实测最大值，非形式化 WCET**） | [实时性与最坏延迟](docs/实时性与最坏延迟.md) |
 | App 崩溃的硬件安全态（"遗言"） | F427 上 App 越权崩溃后内核在收尸时执行遗言，`hwsafe` 报 `neutralized=6 last_owner=12`，LED 目视由亮转灭 | [App崩溃硬件安全与遗言机制](docs/App崩溃硬件安全与遗言机制.md) |
 | 跨设备软总线 | F427 板内两节点 `bus selftest` **10 项全 PASS**（`checks 56, failed 0`），`bus info` 报 `ark_softbus 18c6ccf` | [软总线接入](docs/软总线接入.md) |
 
@@ -782,6 +783,7 @@ STM32F427VGTx @96 MHz，DAPLink（SWD 两线，无 SWO）经 mdkdebug 的 SWD tr
 | App 崩溃后硬件怎么被带离危险态 | [App崩溃硬件安全与遗言机制](docs/App崩溃硬件安全与遗言机制.md) |
 | 让设备之间互相发现、发事件、远程调用、传数据（软总线） | [软总线接入](docs/软总线接入.md) |
 | 在板上跑单元测试、加自己的用例 | [单元测试框架](docs/单元测试框架.md) |
+| 看实时性指标、最坏延迟怎么量 | [实时性与最坏延迟](docs/实时性与最坏延迟.md) |
 | 换一颗芯片 | [Ark RTOS移植手册](Ark RTOS移植手册.md) |
 | 查 API 签名与参数 | [api/Ark RTOS_API参考.md](docs/api/Ark RTOS_API参考.md) |
 | 让自动化流程（含 AI agent 工作流）驱动这块板子 | [skills/arkrtos/SKILL.md](skills/arkrtos/SKILL.md) |

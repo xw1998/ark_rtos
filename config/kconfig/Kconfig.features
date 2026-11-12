@@ -481,6 +481,21 @@ config ARKRTOS_SHELL_BOARD_CMDS
 	  registered during board init silently disappears ("sdram: command not
 	  found").  Off: no call is compiled, the command table is unchanged.
 
+config ARKRTOS_USE_RTSTAT
+	bool "Real-time latency measurement (DWT cycle counter)"
+	default n
+	help
+	  arkrtos_rt: timestamps in fixed places (tick entry/exit, critical
+	  section enter/exit) plus two scenarios (wake after task_wait, wake of a
+	  highest-priority helper task after a sem post) accumulated against the
+	  DWT cycle counter; the shell gains the `rt` command.  It reports the
+	  max measured on THIS board with THIS build - not a formal WCET bound.
+	  Measurement costs a cycle-counter read inside every critical section,
+	  so a config with this on shows a slightly larger crit.max than the same
+	  config with it off; compare the two before quoting a number.  Off (the
+	  default) compiles every timestamp out: zero size change, zero behaviour
+	  change, and the shell command table is unchanged.
+
 config ARKRTOS_USE_UTEST
 	bool "On-board unit test framework"
 	default y
