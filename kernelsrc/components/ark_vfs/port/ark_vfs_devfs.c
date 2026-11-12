@@ -379,7 +379,8 @@ const ark_vfs_fsdrv_t ark_vfs_arkrtos_devfs = {
     devfs_readdir,
     devfs_closedir,
     NULL,               /* chmod: a device node has no access bits      */
-    NULL                /* chown: and no owner to change                */
+    NULL,               /* chown: and no owner to change                */
+    NULL                /* truncate: a device has no length to set      */
 };
 
 #endif  /* ARKRTOS_USE_VFS */

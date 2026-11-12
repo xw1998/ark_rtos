@@ -594,7 +594,8 @@ const ark_vfs_fsdrv_t ark_vfs_arkrtos_procfs = {
     procfs_readdir,
     procfs_closedir,
     NULL,               /* chmod: a generated file has no access bits */
-    NULL                /* chown: and no owner to change             */
+    NULL,               /* chown: and no owner to change             */
+    NULL                /* truncate: a generated file has no length  */
 };
 
 #endif  /* ARKRTOS_USE_VFS && ARKRTOS_USE_PROCFS */

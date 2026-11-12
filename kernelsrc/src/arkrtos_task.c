@@ -1673,6 +1673,34 @@ void SVC_Server(void *p_svc_ctx)
                                                            (const char *)p[2]));
                 break;
 
+            case 22:                /* truncate path, size */
+                if(arkrtos_kernel_svc_args_ok(p, 12u) == 0u)
+                {
+                    ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+                    break;
+                }
+                if(arkrtos_kernel_user_name_ok((const void *)p[1],
+                                             ARKRTOS_VFS_PATH_MAX) == 0u)
+                {
+                    ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+                    break;
+                }
+                ARKRTOS_SVC_RET(p_svc_ctx,
+                              (uint32)arkrtos_vfs_app_truncate_path(
+                                  (const char *)p[1], p[2]));
+                break;
+
+            case 23:                /* ftruncate handle, size */
+                if(arkrtos_kernel_svc_args_ok(p, 12u) == 0u)
+                {
+                    ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+                    break;
+                }
+                ARKRTOS_SVC_RET(p_svc_ctx,
+                              (uint32)arkrtos_vfs_app_truncate((int32)p[1],
+                                                             p[2]));
+                break;
+
             default:
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
                 break;

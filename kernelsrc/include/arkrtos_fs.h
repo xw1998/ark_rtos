@@ -86,6 +86,19 @@ int32 arkrtos_fs_stat_path(const char *path, uint32 *size, uint32 *is_dir);
 
 int32 arkrtos_fs_write_file(const char *path, const uint8 *data, uint32 len);
 
+/**
+ * @brief Set the length of one file, leaving its content alone up to @p size.
+ * @details Shrinking drops the tail, growing fills the new bytes with zeros
+ *          (POSIX truncate). The file must already exist: this call never
+ *          creates one. It shares the single file cache with the streaming
+ *          entry points and refuses with ARKRTOS_FS_ERR_BUSY while a stream is
+ *          open, because resizing underneath an open stream is exactly the
+ *          half-true state this facade does not hand out.
+ * @return 0 on success, -1 on failure (nothing mounted, bad path, not found,
+ *         or a stream already open); arkrtos_fs_last_error() has the reason.
+ */
+int32 arkrtos_fs_truncate(const char *path, uint32 size);
+
 /** @brief Read at most max bytes; *out_len gets the real length */
 int32 arkrtos_fs_read_file(const char *path, uint8 *buf, uint32 max, uint32 *out_len);
 
@@ -187,6 +200,16 @@ int32 arkrtos_fs_last_error(void);
  * @return 1 when arkrtos_fs_last_error() is LFS_ERR_NOENT, 0 otherwise.
  */
 uint8 arkrtos_fs_last_is_noent(void);
+
+/**
+ * @brief 1 = the last call failed only because the backend is out of space
+ * @details Resizing a file is the one call where "too big" is a normal answer
+ *          a caller can act on (it may retry smaller). littlefs reports it as
+ *          LFS_ERR_NOSPC, and this predicate is the single place that number
+ *          is turned into a decision, so no other file has to know it.
+ * @return 1 when arkrtos_fs_last_error() is LFS_ERR_NOSPC, 0 otherwise.
+ */
+uint8 arkrtos_fs_last_is_nospc(void);
 
 /**
  * @brief 1 = this error number means "there is no littlefs volume here"

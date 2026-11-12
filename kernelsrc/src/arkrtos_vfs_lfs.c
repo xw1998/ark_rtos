@@ -446,6 +446,37 @@ static int32_t lfs_readdir(struct ark_vfs_file *d, struct ark_vfs_dirent *ent)
     return ARK_VFS_OK;
 }
 
+/* 改长度。这里必须绕开 open：本驱动的 open 只要带写意图就先开一条
+ * 「新建 + 截断」写流（arkrtos_fs_open_write 本身就是 create/truncate），
+ * 拿它去做 truncate(path, n) 等于先把内容删掉再补长度。
+ * 所以写句柄上的 truncate 只认 0（那条写流打开时已经空了），其余一律
+ * NOSYS；只读/未知句柄走门面的 arkrtos_fs_truncate()，它用 lfs 直接改长度。
+ * 不猜、不近似：做不到就说做不到。 */
+static int32_t lfs_truncate(struct ark_vfs_mnt *mnt, struct ark_vfs_file *f,
+                            ark_off_t size)
+{
+    if (f == NULL) { return ARK_E_BADF; }
+    if (f->is_dir != 0u) { return ARK_E_ISDIR; }
+    if (size < 0) { return ARK_E_INVAL; }
+    if ((mnt->flags & ARK_MNT_RO) != 0u) { return ARK_E_ROFS; }
+
+    if (f->writable != 0u)
+    {
+        /* 写流是顺序的，而且打开那一刻文件已经被清空。 */
+        return (size == 0) ? ARK_VFS_OK : ARK_E_NOSYS;
+    }
+    if (g_writer != 0u) { return ARK_E_BUSY; }   /* 一份文件缓存，别人在写 */
+    if (arkrtos_fs_truncate(f->path, (uint32)size) != 0)
+    {
+        /* 「太大装不下」是可回答的失败，不是 IO：门面的谓词把
+         * LFS_ERR_NOSPC 翻成同一个意思，本文件不必知道那个数字。 */
+        if (arkrtos_fs_last_is_nospc() != 0u) { return ARK_E_NOSPC; }
+        return p_io("truncate", f->path);
+    }
+    if (f->pos > (uint32)size) { f->pos = (uint32)size; }
+    return ARK_VFS_OK;
+}
+
 static int32_t lfs_closedir(struct ark_vfs_mnt *mnt, struct ark_vfs_file *d)
 {
     (void)mnt;
@@ -473,7 +504,8 @@ const ark_vfs_fsdrv_t arkrtos_vfs_lfs_fsdrv = {
     lfs_readdir,
     lfs_closedir,
     NULL,               /* chmod: littlefs 没有访问位可改           */
-    NULL                /* chown: 也没有属主可改                    */
+    NULL,               /* chown: 也没有属主可改                    */
+    lfs_truncate        /* 改长度：见上面的理由                      */
 };
 
 #else   /* VFS / VFS_LFS / FS 三者不全开 */

@@ -336,6 +336,26 @@ int32 arkrtos_vfs_app_rmdir(const char *path);
 int32 arkrtos_vfs_app_rename(const char *old_path, const char *new_path);
 
 /**
+* @brief 改一个已打开文件的长度（POSIX 的 ftruncate）。
+* @param size 新长度；变小丢尾部，变大用 0 填充
+* @return 0=成功；ARK_E_ISDIR / ARK_E_ROFS / ARK_E_NOSPC / ARK_E_NOSYS
+*         或下层错误码
+* @note  只改长度，不删条目：长度 0 的文件还在。日志、环形缓冲这类
+*        「用过就清空」的用法靠它，不必 unlink 再 create。
+*        偏移不动（POSIX）：落在新长度之外不算错，下一次读就是文件尾。
+*        写流打开着的文件不支持（那个驱动一边顺写一边改长度会产出
+*        半真半假的状态），会报 ARK_E_NOSYS 而不是近似一个答案。
+*/
+int32 arkrtos_vfs_app_truncate(int32 handle, uint32 size);
+
+/**
+* @brief 按路径改长度（POSIX 的 truncate）。
+* @return 0=成功；名字不存在时 ARK_E_NOENT（**绝不**顺手建一个空文件）；
+*         目录 ARK_E_ISDIR；只读挂载 ARK_E_ROFS；文件系统不支持 ARK_E_NOSYS
+*/
+int32 arkrtos_vfs_app_truncate_path(const char *path, uint32 size);
+
+/**
 * @brief 关掉 task_id 名下全部句柄。任务退出/崩溃路径调用。
 * @note  必须在任务还被标记为有效时调用（表里靠任务号比对），且对没有
 *        句柄的任务是无副作用的空操作。

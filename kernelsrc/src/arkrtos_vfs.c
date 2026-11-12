@@ -165,6 +165,18 @@ int32 arkrtos_vfs_app_readdir(int32 handle, char *name, uint32 cap,
     return ARKRTOS_VFS_ENOSYS;
 }
 
+int32 arkrtos_vfs_app_truncate(int32 handle, uint32 size)
+{
+    (void)handle; (void)size;
+    return ARKRTOS_VFS_ENOSYS;
+}
+
+int32 arkrtos_vfs_app_truncate_path(const char *path, uint32 size)
+{
+    (void)path; (void)size;
+    return ARKRTOS_VFS_ENOSYS;
+}
+
 int32 arkrtos_vfs_app_close(int32 handle)
 {
     (void)handle;
@@ -942,6 +954,31 @@ int32 arkrtos_vfs_app_seek(int32 handle, int32 off, uint32 whence)
         g_app_fds[slot].pos = (uint32)(base + off);
         return (int32)g_app_fds[slot].pos;
     }
+}
+
+int32 arkrtos_vfs_app_truncate(int32 handle, uint32 size)
+{
+    uint32 slot;
+    int32 rc;
+
+    rc = app_fd_lookup(handle, &slot);
+    if (rc != ARK_VFS_OK) { return rc; }
+    if (g_app_fds[slot].is_dir != 0u) { return ARK_E_ISDIR; }
+    rc = ark_vfs_ftruncate(g_app_fds[slot].fd, (ark_off_t)size);
+    if (rc != ARK_VFS_OK) { return rc; }
+    /* 镜像的大小要与盘上一致：seek(END) 与 stat 都读这个值。位置可能
+     * 落到新长度之外（POSIX 允许），下一次读就是 EOF，不是错。 */
+    g_app_fds[slot].size = size;
+    return ARK_VFS_OK;
+}
+
+int32 arkrtos_vfs_app_truncate_path(const char *path, uint32 size)
+{
+    if ((g_vfs_ready == 0u) || (path == NULL) || (path[0] == '\0'))
+    {
+        return ARK_E_INVAL;
+    }
+    return ark_vfs_truncate(path, (ark_off_t)size);
 }
 
 int32 arkrtos_vfs_app_readdir(int32 handle, char *name, uint32 cap,

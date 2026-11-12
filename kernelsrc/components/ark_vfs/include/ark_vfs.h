@@ -231,6 +231,23 @@ typedef struct ark_vfs_fsdrv {
     /** @brief Replace the owner.  NULL -> ARK_E_NOSYS.  Optional. */
     int32_t  (*chown)(struct ark_vfs_mnt *mnt, const char *rel,
                       uint32_t uid, uint32_t gid);
+
+    /** @brief Set the length of an already open file.  NULL -> ARK_E_NOSYS.
+     *
+     *  @p f is the handle ark_vfs_open() returned, and it is opened
+     *  READ ONLY by ark_vfs_truncate() - so a filesystem must not assume
+     *  the handle carries its write path.  Growing a file fills the new
+     *  bytes with zeros (POSIX).  Shrinking commonly works on a file the
+     *  caller opened for reading, which is why the core does not open it
+     *  for writing first: on some filesystems opening for write already
+     *  destroys the content.
+     *
+     *  A filesystem that can only truncate to zero (or not at all) must
+     *  say so: return ARK_E_NOSYS rather than accept the length and do
+     *  something smaller.
+     */
+    int32_t  (*truncate)(struct ark_vfs_mnt *mnt, struct ark_vfs_file *f,
+                         ark_off_t size);
 } ark_vfs_fsdrv_t;
 
 /** @brief A mount point (also the handle a filesystem gets back). */
@@ -348,6 +365,28 @@ int32_t ark_vfs_unlink(const char *path);
  *  taken by rmdir. */
 int32_t ark_vfs_rmdir(const char *path);
 int32_t ark_vfs_rename(const char *old_path, const char *new_path);
+
+/** @brief Set the length of the open file @p fd (POSIX ftruncate).
+ *  @param fd    descriptor returned by ark_vfs_open(), any access mode
+ *  @param size  new length in bytes; 0 empties the file, a larger value
+ *               extends it with zeros
+ *  @return ARK_VFS_OK, ARK_E_BADF for a closed/directory fd, ARK_E_ROFS on a
+ *          read-only mount, ARK_E_NOSPC when the filesystem cannot hold that
+ *          many bytes, ARK_E_NOSYS when the filesystem has no truncate.
+ *  @note The file position of the handle is left where it was (POSIX); a
+ *        position past the new end is not an error, the next read simply
+ *        reports end of file.
+ */
+int32_t ark_vfs_ftruncate(int fd, ark_off_t size);
+
+/** @brief Set the length of the file at @p path (POSIX truncate).
+ *  @return ARK_E_NOENT when the path does not exist - unlike open(O_CREAT)
+ *          this call never creates anything, because a caller that asked to
+ *          truncate a missing file is describing a bug in itself.
+ *  @note Implemented as open-for-reading + the filesystem's truncate + close,
+ *        so it costs one fd from the table while it runs.
+ */
+int32_t ark_vfs_truncate(const char *path, ark_off_t size);
 
 int32_t ark_vfs_opendir(const char *path);
 int32_t ark_vfs_readdir(int fd, struct ark_vfs_dirent *ent);

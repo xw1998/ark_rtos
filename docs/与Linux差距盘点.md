@@ -77,9 +77,9 @@
 | Linux 有 | Ark RTOS | 归类 |
 |---------|---------|------|
 | ext4 / xfs / btrfs / tmpfs / sysfs / debugfs / FUSE… | 只有四种：**ramfs（易失 `/`）、littlefs（持久卷）、devfs 镜像、procfs（只读扁平）** | 取舍（小系统） |
-| 符号链接 `symlink` / 硬链接 `link` | VFS **无 symlink/link**；POSIX 层也没有 | 欠账 |
-| `truncate` / `ftruncate` | VFS 无 `truncate` | 欠账 |
-| `mkdir` / `rename` / `rmdir` | VFS **有** `mkdir` / `rename` / `unlink`，但 **POSIX 层只封了 `unlink`**，`rmdir`/`mkdir`/`rename` 没有 POSIX 名字 | 欠账（接口没接线） |
+| 符号链接 `symlink` / 硬链接 `link` | VFS **刻意不做** symlink/link（见 `docs/architecture.md §9`）；POSIX 层现在有 `link()`/`symlink()`/`readlink()` 三个名字，前两个**恒返 `EPERM`**，`readlink()` 按真实语义报 `ENOENT`/`EINVAL`，不假装成功 | 取舍（名字已接线，能力不做） |
+| `truncate` / `ftruncate` | **已支持**：`ark_vfs_truncate`/`ark_vfs_ftruncate` + fsdrv `truncate` 回调 + `ARK_FS_CAP_TRUNC`，littlefs 与 ramfs 都实现；POSIX 名 `truncate()`/`ftruncate()` 已接线 | 已补齐 |
+| `mkdir` / `rename` / `rmdir` | VFS 有 `mkdir` / `rename` / `unlink`，POSIX 层**已全部接线**（`mkdir` 在 `sys/stat.h`，`rmdir`/`rename`/`unlink` 在 `unistd.h`） | 已补齐 |
 | `inode` 语义（`st_ino` / `st_nlink`） | `struct stat` 故意只放 VFS 答得出的字段：`st_mode` 类型位、`st_size`、`st_mtime`；**无 `st_ino`/`st_nlink`** | 取舍 |
 | 文件权限 `rwx`、属主/属组 | **无权限位、无 `chmod` 语义的 rwx**；模型是"这个 App 能不能走到这个路径" | 取舍 |
 | `ioctl` / `fcntl` 锁 / `flock` | 无文件锁；设备侧 `ctrl` 是私有控制接口，不是 POSIX `ioctl` | 取舍 |
@@ -155,10 +155,9 @@
 
 | 优先级 | 欠账 | 现状 | 备注 |
 |--------|------|------|------|
-| 高 | POSIX 层缺 `mkdir`/`rmdir`/`rename` 封装 | VFS 内核面已有，只是没接线 | 成本最低、收益最直接；补上后文件目录操作与 Linux 一致 |
 | 高 | 真实以太网收发 | 只有回环网卡 | 需板级 PHY 驱动 + RMII 引脚；是"能不能说支持网络"的分水岭 |
-| 中 | `truncate` / `ftruncate`、软/硬链接 | VFS 无 | 需要 littlefs 后端配合 |
-| 中 | API 缺口：`symlink`、文件锁、`epoll` | 无 | 按需补，不是迁移硬门槛 |
+| 中 | 软/硬链接能力 | 名字已接线，`link`/`symlink` 恒返 `EPERM` | VFS 无 inode / 无第二名字，属架构取舍；改要动命名空间模型 |
+| 中 | 文件锁、`epoll` | 无 | 按需补，不是迁移硬门槛 |
 | 低 | `nice` / `sched_setscheduler` 等调度 POSIX 名字 | 无 | 建线程时已能定优先级，够用 |
 | 低 | `/sys` 风格可写内核属性面 | 无（`/proc` 只读） | 有需要再做 |
 

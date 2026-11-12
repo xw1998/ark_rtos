@@ -1103,6 +1103,26 @@ int32 arkrtos_path_rename(const char *old_path, const char *new_path)
     return arkrtos_call_file_svc(parameters);
 }
 
+int32 arkrtos_path_truncate(const char *path, uint32 size)
+{
+    uint32 parameters[3];
+
+    parameters[0] = 22;
+    parameters[1] = (uint32)path;
+    parameters[2] = size;
+    return arkrtos_call_file_svc(parameters);
+}
+
+int32 arkrtos_path_ftruncate(int32 handle, uint32 size)
+{
+    uint32 parameters[3];
+
+    parameters[0] = 23;
+    parameters[1] = (uint32)handle;
+    parameters[2] = size;
+    return arkrtos_call_file_svc(parameters);
+}
+
 /* ============================================================
  * 固定块内存池（SVC 0x20）
  * 池的内存区由调用者提供（必须在本任务可见 RAM 内，内核会校验整段范围），

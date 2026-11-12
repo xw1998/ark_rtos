@@ -36,6 +36,27 @@ int           arkrtos_posix_unlink(const char *path);
 int           arkrtos_posix_rmdir(const char *path);
 /** Rename or move a path inside one mount. Returns 0, or -1 with errno set. */
 int           arkrtos_posix_rename(const char *old_path, const char *new_path);
+/** Set the length of a named file. The file must exist - "truncate" is not
+ *  "create empty". Growing the file zero-fills. With the current drivers a
+ *  file that is open for writing cannot be resized: the write stream is
+ *  sequential and was cleared at open, so a length change would leave a
+ *  half-true state, and the call refuses instead of approximating it. */
+int           arkrtos_posix_truncate(const char *path, arkrtos_off_t length);
+/** Set the length of an open file. EINVAL on a descriptor that is not open
+ *  for writing (POSIX: resizing is a write, even when the new length is 0),
+ *  EISDIR on a directory. The offset is pulled back if it now points past
+ *  the end. */
+int           arkrtos_posix_ftruncate(int fd, arkrtos_off_t length);
+/** Hard links do not exist in this namespace: always EPERM, never a silent
+ *  copy. POSIX's own answer for "filesystem without hard links". */
+int           arkrtos_posix_link(const char *old_path, const char *new_path);
+/** Symbolic links do not exist here either: always EPERM. */
+int           arkrtos_posix_symlink(const char *target, const char *linkpath);
+/** Read a symbolic link. There is nothing to read: a missing path answers
+ *  with errno ENOENT and an existing non-link with EINVAL, exactly as POSIX
+ *  describes, rather than a fake empty success. */
+arkrtos_ssize_t arkrtos_posix_readlink(const char *path, char *buf,
+                                       uint32 bufsiz);
 
 /** Suspend the calling thread for whole seconds (scheduler based). */
 uint32 arkrtos_posix_sleep(uint32 seconds);
@@ -56,6 +77,11 @@ int    arkrtos_posix_clock_gettime(arkrtos_clockid_t clk, struct timespec *ts);
 #define unlink(path)            arkrtos_posix_unlink(path)
 #define rmdir(path)             arkrtos_posix_rmdir(path)
 #define rename(oldp, newp)      arkrtos_posix_rename((oldp), (newp))
+#define truncate(p, len)        arkrtos_posix_truncate((p), (len))
+#define ftruncate(fd, len)      arkrtos_posix_ftruncate((fd), (len))
+#define link(oldp, newp)        arkrtos_posix_link((oldp), (newp))
+#define symlink(tgt, linkp)     arkrtos_posix_symlink((tgt), (linkp))
+#define readlink(p, buf, n)     arkrtos_posix_readlink((p), (buf), (n))
 #define sleep(s)                arkrtos_posix_sleep(s)
 #define usleep(us)              arkrtos_posix_usleep(us)
 #define nanosleep(req, rem)     arkrtos_posix_nanosleep((req), (rem))

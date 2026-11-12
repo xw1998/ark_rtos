@@ -1337,6 +1337,11 @@ typedef struct
     uint8 used;
     uint8 kind;
     uint8 is_dir;
+    /* The access mode the descriptor was opened with (O_ACCMODE). ftruncate
+     * has to refuse a read-only descriptor the way POSIX does, and this is
+     * the only place that fact is kept - the kernel handle does not carry
+     * the flags once it is open. */
+    uint8 accmode;
     uint32 mode;        /* S_IFMT type bits, captured at open; 0 = unknown */
 
 /* Socket only, i.e. when kind == ARKRTOS_POSIX_FD_SOCK; unused for a path
@@ -1407,6 +1412,7 @@ static int arkrtos_posix_fd_alloc(uint8 kind, int32 handle, uint8 is_dir,
             g_posix_fd[i].used   = 1u;
             g_posix_fd[i].kind   = kind;
             g_posix_fd[i].is_dir = is_dir;
+            g_posix_fd[i].accmode = 0u;
             g_posix_fd[i].mode   = mode;
             g_posix_fd[i].handle = handle;
             g_posix_fd[i].nonblock = 0u;
@@ -1469,6 +1475,7 @@ int arkrtos_posix_open(const char *name, int flags, ...)
         if(e != 0)
         {
             e->nonblock = ((flags & O_NONBLOCK) != 0) ? 1u : 0u;
+            e->accmode  = (uint8)(flags & O_ACCMODE);
         }
         return fd;
     }
@@ -1510,6 +1517,7 @@ int arkrtos_posix_open(const char *name, int flags, ...)
         if(e != 0)
         {
             e->nonblock = ((flags & O_NONBLOCK) != 0) ? 1u : 0u;
+            e->accmode  = (uint8)(flags & O_ACCMODE);
         }
         return fd;
     }
@@ -1728,6 +1736,89 @@ int arkrtos_posix_rmdir(const char *path)
     return 0;
 }
 
+/* ------------------------------------------------------------ truncate.
+ * POSIX asks for two entry points: truncate() by path and ftruncate() by
+ * descriptor. Both land on the same kernel call, so a caller gets the same
+ * answer either way. The length is a plain byte count; the file must exist,
+ * because "truncate a name that is not there" is a bug in the caller, not a
+ * request to create an empty file.
+ */
+int arkrtos_posix_truncate(const char *path, arkrtos_off_t length)
+{
+    int32 r;
+
+    if(path == 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    if(length < 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    if(path[0] != '/')
+    {
+        /* Only the namespace is addressable here; a bare device name has no
+         * length to set. Said out loud instead of pretending it worked. */
+        errno = EINVAL;
+        return -1;
+    }
+    r = arkrtos_path_truncate(path, (uint32)length);
+    if(r < 0)
+    {
+        errno = arkrtos_posix_errno_from_vfs(r);
+        return -1;
+    }
+    return 0;
+}
+
+int arkrtos_posix_ftruncate(int fd, arkrtos_off_t length)
+{
+    arkrtos_posix_fd_t *e;
+    int32 r;
+
+    if(length < 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    e = arkrtos_posix_fd_slot(fd);
+    if(e == 0)
+    {
+        /* A raw device handle from arkrtos_dev_open(): it has no length and
+         * no write stream to resize. */
+        errno = EBADF;
+        return -1;
+    }
+    if(e->kind != ARKRTOS_POSIX_FD_VFS)
+    {
+        errno = EINVAL;                 /* a socket or a device: not a file */
+        return -1;
+    }
+    if(e->is_dir != 0u)
+    {
+        errno = EISDIR;
+        return -1;
+    }
+    if(e->accmode == O_RDONLY)
+    {
+        /* POSIX: a descriptor that is not open for writing cannot be
+         * resized, whatever the new length is - even 0 is a write. */
+        errno = EINVAL;
+        return -1;
+    }
+    r = arkrtos_path_ftruncate(e->handle, (uint32)length);
+    if(r < 0)
+    {
+        errno = arkrtos_posix_errno_from_vfs(r);
+        return -1;
+    }
+    /* No cached size to refresh: fstat() asks the handle (SEEK_END), so it
+     * reports the new length without being told. */
+    return 0;
+}
+
 int arkrtos_posix_rename(const char *old_path, const char *new_path)
 {
     int32 r;
@@ -1780,6 +1871,69 @@ int arkrtos_posix_stat(const char *path, struct stat *st)
         return -1;
     }
     return arkrtos_posix_stat_fill(st, mode, size);
+}
+
+/* ------------------------------------------------------- link family.
+ * Ark RTOS has one namespace, no inodes and no second name for a file, so
+ * hard links and symbolic links are not a thing the VFS can express (see
+ * docs/architecture.md: symlink/link is a deliberate omission, not a TODO).
+ * POSIX already has the right answer for that case - EPERM - so the names
+ * exist and fail honestly instead of being absent at link time, which would
+ * make a portable program fail with an unrelated "undefined reference".
+ */
+int arkrtos_posix_link(const char *old_path, const char *new_path)
+{
+    (void)old_path;
+    (void)new_path;
+    /* EPERM is what POSIX names for "this filesystem does not support hard
+     * links". No length is checked: the call fails the same way whether the
+     * arguments are good or bad, and a caller must not read EINVAL as "fix
+     * your arguments and it will work". */
+    errno = EPERM;
+    return -1;
+}
+
+int arkrtos_posix_symlink(const char *target, const char *linkpath)
+{
+    (void)target;
+    (void)linkpath;
+    errno = EPERM;
+    return -1;
+}
+
+arkrtos_ssize_t arkrtos_posix_readlink(const char *path, char *buf,
+                                       uint32 bufsiz)
+{
+    struct stat st;
+
+    if((path == 0) || (buf == 0))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    if(bufsiz == 0u)
+    {
+        /* POSIX: a zero-sized buffer is an error, not "returns 0". */
+        errno = EINVAL;
+        return -1;
+    }
+    /* stat() first: a missing path is ENOENT and an existing non-link is
+     * EINVAL, which is exactly the pair POSIX describes. Today every path in
+     * this namespace answers to the EINVAL branch - that is the true fact,
+     * and it is reported as such rather than as an empty success. */
+    if(arkrtos_posix_stat(path, &st) != 0)
+    {
+        return -1;                      /* errno already set by stat() */
+    }
+    if(!S_ISLNK(st.st_mode))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    /* Unreachable while no driver reports S_IFLNK; kept so the function has
+     * one meaning if a driver ever does. */
+    errno = EOPNOTSUPP;
+    return -1;
 }
 
 int arkrtos_posix_fstat(int fd, struct stat *st)

@@ -35,10 +35,15 @@ struct stat
  * depends on the kernel's S_IF* set growing a matching bit. */
 #define S_IFSOCK 0xC000
 #define S_IFREG  0x8000
+/* No driver produces this bit today: the VFS has no symbolic links. It is
+ * defined so that readlink() can name the type it is looking for instead of
+ * inventing a private constant. */
+#define S_IFLNK  0xA000
 
 #define S_ISCHR(m)  (((m) & S_IFMT) == S_IFCHR)
 #define S_ISDIR(m)  (((m) & S_IFMT) == S_IFDIR)
 #define S_ISREG(m)  (((m) & S_IFMT) == S_IFREG)
+#define S_ISLNK(m)  (((m) & S_IFMT) == S_IFLNK)
 #define S_ISSOCK(m) (((m) & S_IFMT) == S_IFSOCK)
 
 

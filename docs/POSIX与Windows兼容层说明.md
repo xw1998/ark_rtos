@@ -24,11 +24,11 @@ Ark RTOS 的 App 侧兼容层。目标只有一条：**把一份为 Linux / Wind
 ```
 kernelsrc/sdk/posix/
 ├── arkrtos_posix.h          伞头：一次引入全部兼容层 + 堆接口 + 档位开关
-├── arkrtos_posix.c          实现（约 1900 行，App 工程加入这一个 .c 即可）
+├── arkrtos_posix.c          实现（约 3700 行，App 工程加入这一个 .c 即可）
 ├── arkrtos_posix_types.h    基础类型（ssize_t / off_t / time_t / struct timespec）
 ├── errno.h                错误码 + 每线程 errno
 ├── fcntl.h                open 标志（设备与 VFS 路径共用一套）
-├── unistd.h               read / write / close / lseek / unlink / sleep / usleep / nanosleep / time
+├── unistd.h               read / write / close / lseek / unlink / rmdir / rename / truncate / ftruncate / link / symlink / readlink / sleep / usleep / nanosleep / time
 ├── dirent.h               opendir / readdir / closedir
 ├── sys/stat.h             stat / fstat
 ├── time.h                 clock_gettime / sched_yield
@@ -219,7 +219,12 @@ pthread_create(&th, 0, worker, arg);   /* 零属性，栈从 SDK 静态池取 */
 | `open(path, flags)` | `arkrtos_path_open` | `O_RDONLY/O_WRONLY/O_RDWR/O_CREAT/O_TRUNC/O_APPEND/O_DIRECTORY` 都有意义 |
 | `read` / `write` | `arkrtos_path_read` / `arkrtos_path_write` | |
 | `lseek(fd,off,whence)` | `arkrtos_path_seek` | 返回**新的绝对偏移** |
-| `unlink(path)` | `arkrtos_path_unlink` | 只删文件；没有 `rmdir` / `mkdir` / `rename` |
+| `unlink(path)` | `arkrtos_path_unlink` | 只删文件；目录要 `rmdir` |
+| `rmdir` / `rename` | `arkrtos_path_rmdir` / `arkrtos_path_rename` | 同一挂载内改名；非空目录拒绝 |
+| `mkdir(path, mode)` | `arkrtos_path_mkdir` | 单层；`mode` 只为源码兼容而接受，**不生效**（无权限模型） |
+| `truncate(path,len)` / `ftruncate(fd,len)` | `arkrtos_path_truncate` / `arkrtos_path_ftruncate` | 文件必须存在（不创建）；增长补零；**写流开着时拒绝**（`ENOSYS`/`EBUSY`，不近似）；只读描述符 `ftruncate` 回 `EINVAL` |
+| `link` / `symlink` | 无 | **恒 `-1` + `EPERM`**：VFS 没有 inode、没有第二个名字，这是 POSIX 为"该文件系统不支持硬链接"规定的错码 |
+| `readlink(path,buf,n)` | 无 | 不存在 → `ENOENT`，存在但不是链接 → `EINVAL`；**不会**返回空串表示成功 |
 | `stat(path,st)` / `fstat(fd,st)` | `arkrtos_path_stat` | 只回答 VFS 真有的字段 |
 | `opendir` / `readdir` / `closedir` | `arkrtos_path_readdir` | `readdir` 在流末尾返回 `NULL` 且**把 `errno` 置 0**；出错也返回 `NULL` 但 `errno` 非 0 |
 

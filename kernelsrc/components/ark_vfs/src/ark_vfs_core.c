@@ -1220,6 +1220,118 @@ int32_t ark_vfs_chown(const char *path, uint32_t uid, uint32_t gid)
     return r;
 }
 
+int32_t ark_vfs_ftruncate(int fd, ark_off_t size)
+{
+    struct ark_vfs_fd_slot *slot;
+    void *token;
+    int32_t r;
+
+    if (size < 0)
+    {
+        return ARK_E_INVAL;     /* a negative length is never a "big file" */
+    }
+    token = ark_p_enter();
+    slot = ark_p_fd_get(fd);
+    if (slot == NULL)
+    {
+        ark_p_exit(token);
+        return ARK_E_BADF;
+    }
+    if (slot->is_dir != 0u)
+    {
+        ark_p_exit(token);
+        return ARK_E_ISDIR;
+    }
+    if ((slot->mnt->flags & ARK_MNT_RO) != 0u)
+    {
+        ark_p_exit(token);
+        return ARK_E_ROFS;
+    }
+    if (slot->mnt->fs->truncate == NULL)
+    {
+        ark_p_exit(token);
+        return ARK_E_NOSYS;     /* the filesystem cannot resize at all */
+    }
+    /* The access mode is deliberately NOT checked here: ark_vfs_truncate()
+     * itself opens the file read only, because on some filesystems opening
+     * for write already empties it.  Write permission is enforced by the
+     * mount flag above and by whoever owns the descriptor. */
+    r = slot->mnt->fs->truncate(slot->mnt, slot->file, size);
+    ark_p_exit(token);
+    return r;
+}
+
+int32_t ark_vfs_truncate(const char *path, ark_off_t size)
+{
+    char rel[ARK_VFS_PATH_MAX];
+    struct ark_vfs_mnt *mnt = NULL;
+    struct ark_vfs_stat st;
+    void *token;
+    int fd;
+    int32_t r;
+
+    if (path == NULL)
+    {
+        return ARK_E_INVAL;
+    }
+    if (size < 0)
+    {
+        return ARK_E_INVAL;
+    }
+    token = ark_p_enter();
+    r = ark_vfs_resolve(path, &mnt, rel);
+    if (r != ARK_VFS_OK)
+    {
+        ark_p_exit(token);
+        return r;
+    }
+    if ((mnt->flags & ARK_MNT_RO) != 0u)
+    {
+        ark_p_exit(token);
+        return ARK_E_ROFS;
+    }
+    if (rel[0] == '\0')
+    {
+        ark_p_exit(token);
+        return ARK_E_ISDIR;     /* the mount root */
+    }
+    if (mnt->fs->truncate == NULL)
+    {
+        ark_p_exit(token);
+        return ARK_E_NOSYS;
+    }
+    /* Ask what the path is first: truncate is for files, and it must never
+     * create. A missing path is ENOENT here, not "make an empty file". */
+    if (mnt->fs->stat == NULL)
+    {
+        ark_p_exit(token);
+        return ARK_E_NOSYS;
+    }
+    r = mnt->fs->stat(mnt, rel, &st);
+    if (r != ARK_VFS_OK)
+    {
+        ark_p_exit(token);
+        return r;
+    }
+    if ((st.mode & (uint32_t)ARK_S_IFMT) == (uint32_t)ARK_S_IFDIR)
+    {
+        ark_p_exit(token);
+        return ARK_E_ISDIR;
+    }
+    /* Open read only on purpose (see the note in ark_vfs_ftruncate): the
+     * core must not destroy the content on its way to resizing it. */
+    fd = ark_vfs_open(path, ARK_O_RDONLY);
+    if (fd < 0)
+    {
+        ark_p_exit(token);
+        return fd;
+    }
+    r = ark_vfs_ftruncate(fd, size);
+    (void)ark_vfs_close(fd);
+    ark_p_exit(token);
+    return r;
+}
+
 int32_t ark_vfs_opendir(const char *path)
 {
     return ark_vfs_open(path, ARK_O_RDONLY | ARK_O_DIRECTORY);

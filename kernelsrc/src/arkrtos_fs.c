@@ -109,6 +109,11 @@ uint8 arkrtos_fs_last_is_noent(void)
     return (g_fs.last_error == LFS_ERR_NOENT) ? 1u : 0u;
 }
 
+uint8 arkrtos_fs_last_is_nospc(void)
+{
+    return (g_fs.last_error == LFS_ERR_NOSPC) ? 1u : 0u;
+}
+
 uint8 arkrtos_fs_err_is_unformatted(int32 lfs_err)
 {
     /* Two numbers, one meaning: littlefs could not find a superblock it
@@ -827,6 +832,65 @@ int32 arkrtos_fs_close_write(void)
     return fs_stream_close();
 }
 
+int32 arkrtos_fs_truncate(const char *path, uint32 size)
+{
+    struct lfs_file_config fcfg;
+    lfs_file_t              file;
+    int                     err;
+
+    if((g_fs.mounted == 0u) || (fs_check_path(path) != 0))
+    {
+        g_fs.last_error = ARKRTOS_FS_ERR_ARGS;
+        return -1;
+    }
+
+    /* One file cache, one user at a time: the truncate needs the same cache a
+     * stream would be using, and resizing a file underneath an open stream is
+     * exactly the kind of half-true state this facade refuses. */
+    if(g_fs.stream_mode != ARKRTOS_FS_STREAM_NONE)
+    {
+        g_fs.last_error = ARKRTOS_FS_ERR_BUSY;
+        return -1;
+    }
+
+    fcfg.buffer     = g_fs.file_cache;
+    fcfg.attrs      = 0;
+    fcfg.attr_count = 0;
+
+    /* Open read/write, but **neither** LFS_O_TRUNC nor LFS_O_CREAT: the
+     * length is set below, and an open that already empties the file would
+     * turn "shorten to n" into "delete the content" the moment
+     * lfs_file_truncate failed. Creating one is not this call's business
+     * either - truncate() on a missing name is ENOENT, never "make an empty
+     * file". */
+    err = lfs_file_opencfg(&g_fs.lfs, &file, path, LFS_O_RDWR, &fcfg);
+
+    if(err != 0)
+    {
+        g_fs.last_error = err;
+        return -1;
+    }
+
+    err = lfs_file_truncate(&g_fs.lfs, &file, (lfs_off_t)size);
+
+    if(err != 0)
+    {
+        g_fs.last_error = err;
+        (void)lfs_file_close(&g_fs.lfs, &file);
+        return -1;
+    }
+
+    err = lfs_file_close(&g_fs.lfs, &file);
+
+    if(err != 0)
+    {
+        g_fs.last_error = err;
+        return -1;
+    }
+
+    return 0;
+}
+
 int32 arkrtos_fs_remove(const char *path)
 {
     int err;
@@ -1187,6 +1251,13 @@ int32 arkrtos_fs_write_file(const char *path, const uint8 *data, uint32 len)
     return -1;
 }
 
+int32 arkrtos_fs_truncate(const char *path, uint32 size)
+{
+    (void)path;
+    (void)size;
+    return -1;
+}
+
 int32 arkrtos_fs_read_file(const char *path, uint8 *buf, uint32 max, uint32 *out_len)
 {
     (void)path;
@@ -1282,6 +1353,11 @@ int32 arkrtos_fs_last_error(void)
 uint8 arkrtos_fs_last_is_noent(void)
 {
     return 0u;   /* no volume, so nothing is ever merely "absent" */
+}
+
+uint8 arkrtos_fs_last_is_nospc(void)
+{
+    return 0u;   /* no file system at all (ARKRTOS_USE_FS = 0) */
 }
 
 uint8 arkrtos_fs_err_is_unformatted(int32 lfs_err)

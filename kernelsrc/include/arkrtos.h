@@ -930,6 +930,27 @@ int32  arkrtos_path_rmdir(const char *path);
 */
 int32  arkrtos_path_rename(const char *old_path, const char *new_path);
 
+/**
+* @brief Set the length of a file by path (POSIX truncate).
+* @param path absolute namespace path
+* @param size new length; shrinking drops the tail, growing fills with 0
+* @return 0 on success, a negative error code on failure
+* @note A missing path is -1 (no such file): this call never creates one.
+*       A directory is refused (-5). Nothing is left half done: the length
+*       either changed or the call reported why.
+*/
+int32  arkrtos_path_truncate(const char *path, uint32 size);
+
+/**
+* @brief Set the length of an open file (POSIX ftruncate).
+* @param handle a handle from arkrtos_path_open()
+* @param size   new length
+* @return 0 on success, a negative error code on failure
+* @note The offset is left where it was (POSIX); a position past the new end
+*       is not an error, the next read just reports end of file.
+*/
+int32  arkrtos_path_ftruncate(int32 handle, uint32 size);
+
 /** @} */
 
 #endif
