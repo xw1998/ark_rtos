@@ -37,7 +37,7 @@
 | 7 | 任务通知 | ✓（轻量同步，V8.2+） | — | — | **✗ 定位差**（事件 + 信号量已覆盖，不打算为省几字节再造一套） |
 | 8 | **完全静态分配** | ✓（V9+，`configSUPPORT_STATIC_ALLOCATION`） | ✓ | ✓ | **✓（更彻底：内核不拥有堆，对象全静态；堆只存在于 App 侧静态 arena）** |
 | 9 | 动态堆 | heap_1…heap_5 | memheap / mempool / 小内存管理 | k_heap / k_mem_slab | **△** 内核无堆；App 侧 POSIX 层有静态 arena |
-| 10 | 固定块内存池 | ✓（heap_4 的合并策略 + heap_5） | ✓（mem pool） | ✓（k_mem_slab） | **✓** `arkrtos_mempool`（内核侧，shell `mpool` 自检已上板；App/驱动经 SVC 的通道待补） |
+| 10 | 固定块内存池 | ✓（heap_4 的合并策略 + heap_5） | ✓（mem pool） | ✓（k_mem_slab） | **✓** `arkrtos_mempool`（内核侧 + App/驱动经 SVC 0x20；存储区由调用者提供、额外 RAM 为零，见 [固定块内存池](固定块内存池.md)） |
 | 11 | 低功耗 / tickless | ✓（tickless idle） | ✓ | ✓（device/runtime/system PM，最完整） | **✗ 欠账**（idle 只 `WFI`，SysTick 常开；见 §三-③） |
 | 12 | 设备驱动模型 | ✗（只有 demo） | ✓（`rt_device` 框架） | ✓（devicetree 驱动模型） | **✓**（统一设备框架 + `arkrtos_dt` 按 `compatible` 找设备） |
 | 13 | 配置系统 | `FreeRTOSConfig.h` | Kconfig + menuconfig | Kconfig（+ west） | **✓**（Kconfig 子集，符号名=宏名） |
@@ -61,7 +61,7 @@
 | # | 缺口 | 档位 | 处置 |
 |---|---|---|---|
 | ① | 流缓冲 / 消息缓冲 | **已补（触发水位除外）** | `arkrtos_sbuf`（字节流，send 可部分成功）+ `arkrtos_mbuf`（4 字节长度头，整条原子；接收缓冲不足整条丢弃而不是留半条）。阻塞/超时、ISR 发送、句柄生命周期与 mq 同一套。宿主 11 组断言 + `ci_gate` 门禁已过；H743 GCC 开档实测 +7792 B FLASH / +1248 B RAM，**F427 演示工程开档链接溢出**（那个工程只剩 4.8 KB）。阻塞/唤醒路径**未上板验证**。见 [流缓冲与消息缓冲](流缓冲与消息缓冲.md) |
-| ② | 固定块内存池 | **已补（内核侧）** | `arkrtos_mempool`：固定块、零碎片、不依赖堆；错误口径为非法释放拒绝且不动池状态；shell `mpool` 自检 9/9 上板通过。App/驱动经 SVC 使用的通道尚未开放 |
+| ② | 固定块内存池 | **已补** | `arkrtos_mempool`：固定块、零碎片、不依赖堆；错误口径为非法释放拒绝且不动池状态；shell `mpool` 自检 9/9 上板通过。**App/驱动侧通道已开**（SVC 0x20，池内存区在边界上校验必须落在调用者可见 RAM）。宿主 47 条断言 + `ci_gate` 门禁已过；默认档真实链接 +536 B FLASH（H743）/ +404 B（F427，98.32%）。SVC 路径**未上板验证**（本机无板）。见 [固定块内存池](固定块内存池.md) |
 | ③ | 低功耗 / tickless | **欠账** | 计划补：idle 时若下一次唤醒 > 1 tick，则推迟 SysTick 并进入低功耗，唤醒后补偿 |
 | ④ | 单元测试框架 | **已补** | 板端 `utest` 框架：用例自动注册、统一断言宏、上板 `utest run` 汇总（9 用例，F427 上板 9/9）；另有 `utest-host` 门禁用宿主 gcc 验框架记账。见 [单元测试框架](单元测试框架.md) |
 | ⑤ | GCC / Make 样例工程 | **已补** | F427 的内核工程已带 GNU Make 构建（`example/stm32f427/kernel/ARKRTOS_TEST/GCC`），`sources.mk` 由 `tools/gen_gcc_sources.py` 从 uvprojx 生成；工具链、用法与三个坑见 [GCC构建指南](GCC构建指南.md) |

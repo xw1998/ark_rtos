@@ -418,6 +418,7 @@ int32 arkrtos_cond_delete(int32 handle)
  * ============================================================ */
 ARKRTOS_SVC_DECL_1(int32, 0x16, arkrtos_call_mq_ctrl, uint32 *);
 ARKRTOS_SVC_DECL_1(int32, 0x1F, arkrtos_call_sbuf_ctrl, uint32 *);
+ARKRTOS_SVC_DECL_1(int32, 0x20, arkrtos_call_mpool_ctrl, uint32 *);
 ARKRTOS_SVC_DECL_1(int32, 0x17, arkrtos_call_timer_ctrl, uint32 *);
 ARKRTOS_SVC_DECL_2(int32, 0x11, arkrtos_call_task_ctrl_ret, uint32, uint32);
 ARKRTOS_SVC_DECL_3(uint32, 0x12, arkrtos_call_sys_info_ext, uint32, uint32, uint32);
@@ -1100,4 +1101,47 @@ int32 arkrtos_path_rename(const char *old_path, const char *new_path)
     parameters[1] = (uint32)old_path;
     parameters[2] = (uint32)new_path;
     return arkrtos_call_file_svc(parameters);
+}
+
+/* ============================================================
+ * 固定块内存池（SVC 0x20）
+ * 池的内存区由调用者提供（必须在本任务可见 RAM 内，内核会校验整段范围），
+ * 所以这里不需要任何内核侧的动态内存；分配/释放都不阻塞。
+ * ============================================================ */
+int32 arkrtos_mpool_create(char *name, void *pool, uint32 block_size, uint32 block_count)
+{
+    uint32 p[6];
+    p[0] = 1; p[1] = (uint32)name; p[2] = (uint32)pool;
+    p[3] = block_size; p[4] = block_count; p[5] = 0;
+    return arkrtos_call_mpool_ctrl(p);
+}
+
+void *arkrtos_mpool_alloc(int32 handle)
+{
+    uint32 p[6];
+    p[0] = 2; p[1] = (uint32)handle; p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
+    return (void *)arkrtos_call_mpool_ctrl(p);
+}
+
+int32 arkrtos_mpool_free(int32 handle, void *ptr)
+{
+    uint32 p[6];
+    p[0] = 3; p[1] = (uint32)handle; p[2] = (uint32)ptr;
+    p[3] = 0; p[4] = 0; p[5] = 0;
+    return arkrtos_call_mpool_ctrl(p);
+}
+
+int32 arkrtos_mpool_query(int32 handle, arkrtos_mpool_stat_t *out)
+{
+    uint32 p[6];
+    p[0] = 4; p[1] = (uint32)handle; p[2] = (uint32)out;
+    p[3] = 0; p[4] = 0; p[5] = 0;
+    return arkrtos_call_mpool_ctrl(p);
+}
+
+int32 arkrtos_mpool_delete(int32 handle)
+{
+    uint32 p[6];
+    p[0] = 5; p[1] = (uint32)handle; p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
+    return arkrtos_call_mpool_ctrl(p);
 }

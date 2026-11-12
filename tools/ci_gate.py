@@ -608,6 +608,43 @@ def check_sbuf_host():
         else:
             fail("sbuf-host", "gate failed: %s" % txt.strip()[:160])
 
+def check_mempool_host():
+    """Fixed-block pool: the pointer arithmetic must be provably right.
+
+    kernelsrc/tests/test_mempool_host.c links the real arkrtos_mempool.c against
+    stub critical-section / task-id functions, so creation guards (block
+    geometry, arena alignment, size wrap), the O(1) alloc/free path and the
+    "a refused free must not touch the pool" contract are exercised on the host.
+    SVC 0x20 argument checking and App-side wrappers are NOT covered here - they
+    need the SVC boundary - so this gate must not be read as "the channel is
+    verified". A missing host compiler is a FAIL, not a skip.
+    """
+    import tempfile
+    cc = _find_host_cc()
+    if not cc:
+        fail("mempool-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        exe = os.path.join(td, "mempool_host.exe" if os.name == "nt" else "mempool_host")
+        cmd = [cc]
+        if "mingw" in cc.replace("\\", "/").lower():
+            cmd.append("-B" + os.path.dirname(cc))
+        cmd += ["-std=gnu11", "-DARKRTOS_USE_MEMPOOL=1",
+                "-Ikernelsrc/include", "-Ikernelsrc/components/mdk_trace",
+                "-Iboard/stm32f427", "-Iconfig", "-o", exe,
+                "kernelsrc/tests/test_mempool_host.c", "kernelsrc/src/arkrtos_mempool.c"]
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            fail("mempool-host", "gate did not build: %s"
+                 % (r.stderr or "").strip().splitlines()[-1:])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode == 0 and "MEMPOOL-HOST OK" in txt:
+            ok("mempool-host", "block geometry + alloc/free contract verified on host")
+        else:
+            fail("mempool-host", "gate failed: %s" % txt.strip()[:160])
+
 def check_features_switches():
     """Every gate in arkrtos_features.h must be declared in Kconfig.
 
@@ -691,6 +728,7 @@ def main(argv):
     check_utest_host()
     check_sdk_stdio_host()
     check_sbuf_host()
+    check_mempool_host()
     if do_build:
         check_builds(uv4)
 

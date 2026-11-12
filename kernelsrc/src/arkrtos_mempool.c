@@ -12,6 +12,7 @@
 
 #include "arkrtos_mempool.h"
 #include "arkrtos_hal.h"
+#include "arkrtos_task.h"
 
 #if (ARKRTOS_USE_MEMPOOL == 1)
 
@@ -19,6 +20,7 @@
  * 池的内存区由调用者提供，对象本身不持有池内存，只记几何与空闲链头。 */
 typedef struct {
     uint32 used;                              /* 1 = 该表项被占用 */
+    int32  creator_id;                        /* 创建者任务号；0 = 内核/无人认领 */
     char   name[ARKRTOS_MEMPOOL_NAME_MAX];
     uint8 *base;                              /* 调用者提供的内存区首址 */
     uint32 block_size;
@@ -83,6 +85,7 @@ void arkrtos_mempool_module_init(void)
     for(i = 0; i < ARKRTOS_MEMPOOL_NUM; i++)
     {
         arkrtos_mempools[i].used        = 0;
+        arkrtos_mempools[i].creator_id  = 0;
         arkrtos_mempools[i].name[0]     = 0;
         arkrtos_mempools[i].base        = 0;
         arkrtos_mempools[i].block_size  = 0;
@@ -125,6 +128,17 @@ int32 arkrtos_mempool_create_internal(const char *name, void *pool,
     {
         return -1;
     }
+    /* 池首址也必须对齐：块地址是 base + k*block_size，base 歪了整池都歪 */
+    if(((uint32)pool & ((uint32)sizeof(void *) - 1u)) != 0u)
+    {
+        return -1;
+    }
+    /* 区大小不许回绕：free() 的边界判断用 block_size*block_count，
+     * 这里放过去的话，越界指针会被算成"池内"。 */
+    if(block_count > (0xFFFFFFFFu / block_size))
+    {
+        return -1;
+    }
     name_len = 0;
     while((name_len < ARKRTOS_MEMPOOL_NAME_MAX) && (name[name_len] != 0))
     {
@@ -162,6 +176,7 @@ int32 arkrtos_mempool_create_internal(const char *name, void *pool,
 
     p = &arkrtos_mempools[i];
     p->used        = 1;
+    p->creator_id  = (arkrtos_current_task_id > 0) ? arkrtos_current_task_id : 0;
     mp_name_copy(p->name, name);
     p->base        = (uint8 *)pool;
     p->block_size  = block_size;
@@ -269,9 +284,10 @@ int32 arkrtos_mempool_delete_internal(int32 handle)
     }
 
     state = ARKRTOS_ENTER_CRITICAL();
-    p->used      = 0;
-    p->name[0]   = 0;
-    p->free_list = 0;
+    p->used       = 0;
+    p->creator_id = 0;
+    p->name[0]    = 0;
+    p->free_list  = 0;
     ARKRTOS_EXIT_CRITICAL(state);
     return 0;
 }
@@ -279,6 +295,33 @@ int32 arkrtos_mempool_delete_internal(int32 handle)
 int32 arkrtos_mempool_is_alive(int32 handle)
 {
     return (mp_get(handle) != 0) ? 1 : 0;
+}
+
+/* 任务下线：回收它创建的池。
+ * 不回收的话，一个反复安装/卸载的 App 每轮都占一个表项，池表迟早满，
+ * 而且满的时候是"创建失败"——现场表现是"第一次能用，装几次就不能用了"。 */
+void arkrtos_mempool_release_task(int32 task_id)
+{
+    uint32 state;
+    int32  i;
+
+    if(task_id <= 0)
+    {
+        return;
+    }
+    state = ARKRTOS_ENTER_CRITICAL();
+    for(i = 0; i < ARKRTOS_MEMPOOL_NUM; i++)
+    {
+        if((arkrtos_mempools[i].used != 0) &&
+           (arkrtos_mempools[i].creator_id == task_id))
+        {
+            arkrtos_mempools[i].used       = 0;
+            arkrtos_mempools[i].creator_id = 0;
+            arkrtos_mempools[i].name[0]    = 0;
+            arkrtos_mempools[i].free_list  = 0;
+        }
+    }
+    ARKRTOS_EXIT_CRITICAL(state);
 }
 
 int32 arkrtos_mempool_query_internal(int32 handle, arkrtos_mempool_stat_t *out)
@@ -327,9 +370,12 @@ int32 arkrtos_mempool_delete_internal(int32 handle) { (void)handle; return -1; }
 
 int32 arkrtos_mempool_is_alive(int32 handle) { (void)handle; return 0; }
 
-int32 arkrtos_mempool_query_internal(int32 handle, arkrtos_mempool_stat_t *out)
+/* 关档时快照类型跟着模块一起消失，桩只能用 void* 接 */
+int32 arkrtos_mempool_query_internal(int32 handle, void *out)
 {
     (void)handle; (void)out; return -1;
 }
+
+void  arkrtos_mempool_release_task(int32 task_id) { (void)task_id; }
 
 #endif /* ARKRTOS_USE_MEMPOOL */

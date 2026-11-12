@@ -21,6 +21,7 @@
 #include "arkrtos_config.h"
 #include "arkrtos_mq.h"
 #include "arkrtos_sbuf.h"
+#include "arkrtos_mempool.h"
 #include "arkrtos_trace.h"
 #include "arkrtos_timer.h"
 #include "arkrtos_fault.h"
@@ -966,6 +967,69 @@ void SVC_Server(void *p_svc_ctx)
             break;
         case 12:
             ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_mbuf_peek_len_internal((int32)p[1]));
+            break;
+        default:
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+#else
+        /* 功能没编进来：如实拒绝，不要装作成功 */
+        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+#endif
+        break;
+
+    case ARKRTOS_SVC_MEMPOOL_CTRL:
+        p = (uint32 *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+        /* 用户参数块必须先校验再解引用：内核 RAM / 内核 Flash 一律拒绝 */
+        if(arkrtos_kernel_svc_args_ok(p, 24u) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+#if (ARKRTOS_USE_MEMPOOL == 1)
+        switch(p[0])
+        {
+        case 1:                       /* create(name, pool, block_size, block_count) */
+            if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_MEMPOOL_NAME_MAX) == 0u)
+            {
+                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+                break;
+            }
+            /* block_count 为 0 或乘积回绕一律拒绝：否则下面的长度校验会被绕过去 */
+            if((p[3] == 0u) || (p[4] == 0u) || (p[4] > (0xFFFFFFFFu / p[3])))
+            {
+                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+                break;
+            }
+            /* 池内存区必须整段落在本任务可见 RAM：不校验就等于让 App 借内核
+             * 之手在任意地址（含内核 RAM）发块，那是提权不是分配。 */
+            if(arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)(p[3] * p[4])) == 0u)
+            {
+                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+                break;
+            }
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_mempool_create_internal((char *)p[1],
+                                                    (void *)p[2], p[3], p[4]));
+            break;
+        case 2:                       /* alloc(handle) */
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_mempool_alloc_internal((int32)p[1]));
+            break;
+        case 3:                       /* free(handle, ptr) */
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_mempool_free_internal((int32)p[1],
+                                                    (void *)p[2]));
+            break;
+        case 4:                       /* query(handle, out) */
+            if(arkrtos_kernel_dev_buf_ok((const void *)p[2],
+                                         (int32)sizeof(arkrtos_mempool_stat_t)) == 0u)
+            {
+                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+                break;
+            }
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_mempool_query_internal((int32)p[1],
+                                                    (arkrtos_mempool_stat_t *)(void *)p[2]));
+            break;
+        case 5:                       /* delete(handle) */
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_mempool_delete_internal((int32)p[1]));
             break;
         default:
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
@@ -2626,6 +2690,9 @@ static void arkrtos_task_release_resources_core(int32 task_id, int32 handover)
     arkrtos_mq_release_task(task_id);
 #if (ARKRTOS_USE_SBUF == 1)
     arkrtos_sbuf_release_task(task_id);
+#endif
+#if (ARKRTOS_USE_MEMPOOL == 1)
+    arkrtos_mempool_release_task(task_id);
 #endif
     arkrtos_event_release_task(task_id);
     /* Sockets are marked for the service task to close - no lwIP call

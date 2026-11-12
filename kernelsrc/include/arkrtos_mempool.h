@@ -15,8 +15,18 @@
 *          - free() 传入不在本池内、或未按块对齐的指针 → 失败且**不动池状态**
 *            （绝不做"尽力而为"的插入，那会静默毁掉整条空闲链）。
 *
-*          本模块当前只提供内核侧 API（内核组件、shell 自检使用）。
-*          App / 驱动经 SVC 使用内存池的通道尚未开放，见 docs/与成熟RTOS对比.md。
+*          两种使用面：
+*          - 内核侧 API（本头文件）：内核组件、shell 自检直接调用；
+*          - App / 驱动：经 SVC 0x20（`ARKRTOS_SVC_MEMPOOL_CTRL`）使用，
+*            见 `kernelsrc/sdk/app_sdk/arkrtos_oslib.c` 的 `arkrtos_mpool_*`。
+*            用户态的池内存区由调用者自己在**本任务可见 RAM** 里划出，
+*            内核在开放通道前会校验整段 [pool, pool + block_size*block_count)
+*            落在用户可见 RAM 内（否则就等于让 App 借内核之手在任意地址上
+*            发块，那是提权而不是分配）。
+*
+*          生命周期：池记着创建者任务号，任务下线时由
+*          arkrtos_mempool_release_task() 回收（否则反复装卸的 App 会把
+*          对象表占满，表现成"第一次能用，装几次就不能用了"）。
 */
 
 #ifndef __ARKRTOS_MEMPOOL_H__
@@ -24,22 +34,16 @@
 
 #include "arkrtos_def.h"
 #include "arkrtos_config.h"
+/* 快照结构与池名长度直接复用应用侧公开头文件，避免"两份定义悄悄跑偏"
+ * 导致 SVC 回填的统计数字错位。 */
+#include "arkrtos.h"
 
 #if (ARKRTOS_USE_MEMPOOL == 1)
 
-#define ARKRTOS_MEMPOOL_NAME_MAX   (8)
+#define ARKRTOS_MEMPOOL_NAME_MAX   ARKRTOS_MPOOL_NAME_MAX
 
-/** @brief 池的只读快照，供 shell / 自检使用 */
-typedef struct {
-    char     name[ARKRTOS_MEMPOOL_NAME_MAX];
-    uint32   block_size;      /* 每块字节数 */
-    uint32   block_count;     /* 总块数 */
-    uint32   free_count;      /* 当前空闲块数 */
-    uint32   alloc_ok;        /* 累计分配成功次数 */
-    uint32   alloc_fail;      /* 累计分配失败次数 */
-    uint32   free_bad;        /* 累计非法释放（被拒绝）次数 */
-    uint32   peak_used;       /* 历史最大同时占用块数 */
-} arkrtos_mempool_stat_t;
+/** @brief 池的只读快照，供 shell / 自检使用（定义在 arkrtos.h，两侧共用一份） */
+typedef arkrtos_mpool_stat_t arkrtos_mempool_stat_t;
 
 /** @brief 对象表初始化；由 arkrtos_kernel_init() 调用 */
 void  arkrtos_mempool_module_init(void);
@@ -75,6 +79,13 @@ int32 arkrtos_mempool_is_alive(int32 handle);
 
 /** @brief 取池快照 @return 0 = 成功；-1 = 句柄非法 */
 int32 arkrtos_mempool_query_internal(int32 handle, arkrtos_mempool_stat_t *out);
+
+/**
+ * @brief 回收某个任务创建的池（任务下线时由内核调用）
+ * @note 只释放对象表项；池占用的内存区属于调用者，不在这里释放。
+ *       内核/无人认领（creator_id==0）的池不会被任何任务下线带走。
+ */
+void  arkrtos_mempool_release_task(int32 task_id);
 
 #endif /* ARKRTOS_USE_MEMPOOL */
 

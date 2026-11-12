@@ -44,6 +44,9 @@
 /* Stream / message buffer service (SVC 0x1F). Gated by ARKRTOS_USE_SBUF:
  * with the gate off the handler answers -1 instead of pretending success. */
 #define ARKRTOS_SVC_SBUF_CTRL         (0x1F)
+/* Fixed block memory pool service (SVC 0x20). Gated by ARKRTOS_USE_MEMPOOL:
+ * with the gate off the handler answers -1 instead of pretending success. */
+#define ARKRTOS_SVC_MEMPOOL_CTRL      (0x20)
 
 /* 同步原语（信号量/互斥锁）返回码：0=成功，负值=失败。
  * 超时必须返回负值——调用方据此判断“本次没有拿到资源”；

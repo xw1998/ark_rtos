@@ -391,6 +391,63 @@ int32  arkrtos_mbuf_peek_len(int32 handle);
 /** @} */
 #endif /* ARKRTOS_USE_SBUF */
 
+#if (ARKRTOS_USE_MEMPOOL == 1)
+/** @defgroup mpool 固定块内存池
+ *  @{ */
+
+/* 与内核头文件 arkrtos_mempool.h 保持同一组定义：应用侧看不到内核头文件，
+   池名长度与快照字段是接口契约，所以在应用侧再给一份。
+   字段顺序即 SVC 回填顺序，改动必须两侧同时改。 */
+#ifndef ARKRTOS_MPOOL_NAME_MAX
+#define ARKRTOS_MPOOL_NAME_MAX   (8)
+#endif
+
+/** @brief 池的只读快照 */
+typedef struct {
+    char     name[ARKRTOS_MPOOL_NAME_MAX];
+    uint32   block_size;      /* 每块字节数 */
+    uint32   block_count;     /* 总块数 */
+    uint32   free_count;      /* 当前空闲块数 */
+    uint32   alloc_ok;        /* 累计分配成功次数 */
+    uint32   alloc_fail;      /* 累计分配失败次数 */
+    uint32   free_bad;        /* 累计非法释放（被拒绝）次数 */
+    uint32   peak_used;       /* 历史最大同时占用块数 */
+} arkrtos_mpool_stat_t;
+
+/**
+* @brief 在调用者提供的内存区上创建固定块池
+* @param name        池名（非空，长度 < ARKRTOS_MPOOL_NAME_MAX）
+* @param pool        内存区首地址，必须整段落在本任务的可见 RAM 内
+* @param block_size  每块字节数，必须 >= 指针宽度且按指针宽度对齐
+* @param block_count 块数，必须 > 0
+* @return >=0 句柄；负值=参数非法/名字重复/对象表已满/内存区不在可见 RAM
+* @note 池不加锁也不阻塞：分配与释放都在极短临界区内完成，可以被中断调用
+*       的前提是同一池不在中断里与任务里同时释放同一个块（那本来就是错用）。
+*       任务下线时，该任务创建的池会被内核自动回收（内存区归调用者，不会释放）。
+*/
+int32  arkrtos_mpool_create(char *name, void *pool, uint32 block_size, uint32 block_count);
+
+/**
+* @brief 取一块（不阻塞）
+* @return 块地址；0 表示当前没有空闲块或句柄非法
+*/
+void  *arkrtos_mpool_alloc(int32 handle);
+
+/**
+* @brief 归还一块
+* @return 0=成功；负值=句柄非法或指针不属于本池（池状态保持不变）
+*/
+int32  arkrtos_mpool_free(int32 handle, void *p);
+
+/** @brief 取池快照 @return 0=成功；负值=句柄非法或输出区不在可见 RAM */
+int32  arkrtos_mpool_query(int32 handle, arkrtos_mpool_stat_t *out);
+
+/** @brief 销毁池（只释放对象表项，调用者提供的内存区不受影响） */
+int32  arkrtos_mpool_delete(int32 handle);
+/** @} */
+#endif /* ARKRTOS_USE_MEMPOOL */
+
+
 /** @defgroup timer 软定时器
  *  @{ */
 
