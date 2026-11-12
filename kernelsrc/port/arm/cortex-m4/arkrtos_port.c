@@ -293,6 +293,35 @@ void arkrtos_port_start_timer(uint32 tick_period_us)
                     SysTick_CTRL_ENABLE_Msk;
 }
 
+/* tickless: program the tick timer directly in counts (no us conversion).
+ * LOAD holds counts-1 and SysTick tops out at 24 bits, so a value that wide
+ * is clamped here too - silently truncating to 0 would stop the tick. */
+void arkrtos_port_start_timer_counts(uint32 counts)
+{
+    if(counts == 0u)
+    {
+        counts = 1u;
+    }
+    if(counts > 0x00FFFFFFu)
+    {
+        counts = 0x00FFFFFFu;
+    }
+    SysTick->LOAD = counts - 1u;
+    SysTick->VAL  = 0u;
+    SysTick->CTRL = SysTick_CTRL_CLKSOURCE_Msk |
+                    SysTick_CTRL_TICKINT_Msk   |
+                    SysTick_CTRL_ENABLE_Msk;
+}
+
+/* Reading CTRL clears COUNTFLAG (writing it does not), so read once and use
+ * that single sample to decide whether the counter wrapped. */
+uint32 arkrtos_port_timer_countflag_take(void)
+{
+    uint32 ctrl = SysTick->CTRL;
+
+    return ((ctrl & SysTick_CTRL_COUNTFLAG_Msk) != 0u) ? 1u : 0u;
+}
+
 void arkrtos_port_delay_us(uint32 us)
 {
     int32 tm_start = (int32)arkrtos_port_get_timer_counter();

@@ -645,6 +645,21 @@ def check_mempool_host():
         else:
             fail("mempool-host", "gate failed: %s" % txt.strip()[:160])
 
+def check_tickless():
+    """tickless idle: the accounting must be provably right, and the ON path must compile.
+
+    tools/tickless_host_gate.py does both halves for the same reason: the switch
+    defaults to 0, so without the second half every line of this feature is dead
+    code in the normal build and a typo in it would sit there until someone
+    turned the switch on. A missing compiler is a FAIL, not a skip.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "tickless_host_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "TICKLESS-GATE OK" in txt:
+        ok("tickless", "phase accounting (host) + ON-path compile verified")
+    else:
+        fail("tickless", txt[-260:])
+
 def check_features_switches():
     """Every gate in arkrtos_features.h must be declared in Kconfig.
 
@@ -729,6 +744,7 @@ def main(argv):
     check_sdk_stdio_host()
     check_sbuf_host()
     check_mempool_host()
+    check_tickless()
     if do_build:
         check_builds(uv4)
 

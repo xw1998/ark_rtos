@@ -35,6 +35,11 @@ void  arkrtos_timer_task_install(void);
 
 /* 由 arkrtos_kernel_tick_handler 在 tick 中断中调用：倒计时 + 到期标记 + 唤醒定时器任务 */
 void  arkrtos_timer_tick_handler(void);
+#if (ARKRTOS_USE_TICKLESS == 1)
+/* tickless idle 用：所有活动定时器里最近一次到期还有几拍。
+ * 没有活动定时器时返回 ARKRTOS_TICKLESS_NO_EVENT。 */
+uint32 arkrtos_timer_next_ticks(void);
+#endif
 
 int32 arkrtos_timer_create_internal(char *name);
 int32 arkrtos_timer_start_internal(int32 handle, uint32 period_ms, uint8 mode,

@@ -238,6 +238,27 @@ uint32 arkrtos_port_get_timer_reload(void);
 void arkrtos_port_start_timer(uint32 tick_period_us);
 
 /**
+* @brief 以原始计数编程节拍定时器（tickless 用）
+* @param counts 一个"长节拍"的计数值（= n 个正常节拍）
+* @details 与 arkrtos_port_start_timer(us) 的区别只在于单位：这里给的是
+*          时钟计数，port 层不再做微秒换算，避免 n*TICK_PERIOD_US 的整数
+*          除法丢相位。计数值必须落在定时器自身位宽内（Cortex-M 的 SysTick
+*          是 24 位），越界由调用者负责（arkrtos_tickless_idle 会先夹住）。
+*/
+void arkrtos_port_start_timer_counts(uint32 counts);
+
+/**
+* @brief 读取并清除节拍定时器的"计到过 0"标志
+* @return 1 = 自上次读取以来计数器到过 0；0 = 没有
+* @details ARM 上是 SysTick->CTRL 的 COUNTFLAG（读 CTRL 会顺带清它）。
+*          tickless 用它区分"睡满了整段"和"被别的中断提前叫醒"：前者
+*          计数器已经回卷，后者没有。没有这个位的架构返回 0，调用方按
+*          "提前唤醒"处理（结果仍然正确，只是少省一次）。
+*/
+uint32 arkrtos_port_timer_countflag_take(void);
+
+
+/**
 * @brief 微秒级忙等延时
 * @param us 延时微秒数
 * @details 使用硬件定时器实现精确延时，

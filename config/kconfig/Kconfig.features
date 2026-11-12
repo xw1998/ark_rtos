@@ -51,6 +51,33 @@ config ARKRTOS_USE_FAST_TICK_SWITCH
 	  Skip the context-switch interrupt on a tick when no higher-priority
 	  task became ready.  Measured at roughly half the tick overhead.
 
+config ARKRTOS_USE_TICKLESS
+	bool "Tickless idle"
+	default n
+	help
+	  When the idle loop would sleep at least two ticks, reprogram SysTick
+	  for one longer span instead of one tick at a time, then deliver the
+	  skipped ticks in one go on wake.  The saving is real (at 2 kHz the
+	  tick interrupt drops from 2000/s to ~125/s while idle) and so is the
+	  cost: the wake path has to reconstruct how much time actually passed,
+	  which is why it is off by default and why the pending ticks are
+	  delivered in one batch rather than replayed from the ISR.
+	  Everything is bounded by ARKRTOS_TICKLESS_MAX_TICKS, so the sleep is
+	  never longer than the counter can express and the catch-up work per
+	  wake stays small.
+
+config ARKRTOS_TICKLESS_MAX_TICKS
+	int "Longest skipped span (ticks)"
+	default 8
+	range 2 64
+	help
+	  Upper bound on how many ticks one sleep may skip.  8 ticks is 4 ms
+	  at the default 500 us tick: long enough to matter for an idle CPU,
+	  short enough that the ticks delivered on wake are cheap.  A larger
+	  value saves more interrupt entries but delivers a longer burst, and
+	  at 500 us/tick a span beyond ~390 ticks would not even fit SysTick's
+	  24-bit counter on a fast core (the value is clamped regardless).
+
 config ARKRTOS_USE_FAULT_RECOVER
 	bool "Faulting task recovery"
 	default y

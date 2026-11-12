@@ -24,6 +24,7 @@
 #include "arkrtos_mempool.h"
 #include "arkrtos_trace.h"
 #include "arkrtos_timer.h"
+#include "arkrtos_tickless.h"
 #include "arkrtos_fault.h"
 #include "arkrtos_ptable.h"
 #include "arkrtos_mpu.h"
@@ -378,7 +379,36 @@ extern void arkrtos_sched_stat_close(uint32 t0);
 #define ARKRTOS_SCHED_STAT_END()     do { } while(0)
 #endif
 
+/* tickless：长节拍睡满之后，这一次中断要补发多拍。
+ * 包装只做"这次该算几拍"的结账，节拍体原样留在 arkrtos_kernel_tick_body() 里；
+ * 关闭 tickless 时两者合回一个函数，行为与体积都不变。 */
+#if (ARKRTOS_USE_TICKLESS == 1)
+static void arkrtos_kernel_tick_body(void);
+
+/* 补发 n 拍：只跑节拍体，不再结账。
+ * tickless 提前唤醒时用它把"过去"的整拍一次补上；不要在普通路径里
+ * 拿它替代 tick_handler，否则结账就被绕过去了。 */
+void arkrtos_kernel_tick_ticks(uint32 n)
+{
+    uint32 i;
+
+    for(i = 0u; i < n; i++)
+    {
+        arkrtos_kernel_tick_body();
+    }
+}
+
 void arkrtos_kernel_tick_handler(void)
+{
+    uint32 n = arkrtos_tickless_wake_ticks();
+
+    arkrtos_kernel_tick_ticks((n == 0u) ? 1u : n);
+}
+
+static void arkrtos_kernel_tick_body(void)
+#else
+void arkrtos_kernel_tick_handler(void)
+#endif
 {
     arkrtos_kernel_tick++;
 
@@ -2287,6 +2317,27 @@ void arkrtos_delay_tick(void)
         arkrtos_ready_add(idx);
     }
 }
+
+#if (ARKRTOS_USE_TICKLESS == 1)
+/* tickless idle 用：延时链里最近一次超时还有几拍。
+ * 链按 delay_tick 有序，所以只看链头。已经到期（<=0，通常是僵尸节点，
+ * 下一个 tick 就会清掉）按 1 拍报，让调用方不要试图跳过它。 */
+uint32 arkrtos_task_next_delay_ticks(void)
+{
+    int32 dist;
+
+    if(arkrtos_delay_head == ARKRTOS_TASK_NIL)
+    {
+        return ARKRTOS_TICKLESS_NO_EVENT;
+    }
+    dist = (int32)(arkrtos_task_table[arkrtos_delay_head].delay_tick - arkrtos_kernel_tick);
+    if(dist <= 0)
+    {
+        return 1u;
+    }
+    return (uint32)dist;
+}
+#endif
 
 void arkrtos_ready_reset(void)
 {

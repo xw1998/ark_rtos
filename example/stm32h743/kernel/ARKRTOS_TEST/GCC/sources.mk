@@ -40,6 +40,7 @@ SRCS := \
   kernelsrc/src/arkrtos_mempool.c \
   kernelsrc/src/arkrtos_net.c \
   kernelsrc/src/arkrtos_timer.c \
+  kernelsrc/src/arkrtos_tickless.c \
   kernelsrc/src/arkrtos_fault.c \
   kernelsrc/src/arkrtos_hwsafe.c \
   kernelsrc/src/arkrtos_init.c \

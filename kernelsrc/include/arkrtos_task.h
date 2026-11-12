@@ -206,6 +206,13 @@ int32 arkrtos_sched_is_switching(void);
 int32 arkrtos_sched_activate(int32 new_task, uint32 old_psp);
 
 void arkrtos_kernel_tick_handler(void);
+#if (ARKRTOS_USE_TICKLESS == 1)
+/* tickless idle 用：延时链里最近一次到期还有几拍。
+ * 没有等待中的任务时返回 ARKRTOS_TICKLESS_NO_EVENT（见 arkrtos_tickless.h）。 */
+uint32 arkrtos_task_next_delay_ticks(void);
+/* tickless 补发整拍：只跑节拍体，不结账 */
+void   arkrtos_kernel_tick_ticks(uint32 n);
+#endif
 /* 各 CPU 异常共用入口：fault_type 取 arkrtos_fault_type_t 中的 HARDFAULT/MEMFAULT/BUSFAULT/USGFAULT
  * 返回值：可用于恢复的任务栈指针（非 0 时由板级层调用 arkrtos_port_resume_task 完成恢复）；
  *         0 表示不可恢复（内核/中断上下文故障），板级层应停机等待调试器。 */

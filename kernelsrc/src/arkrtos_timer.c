@@ -12,6 +12,7 @@
 #include "arkrtos_timer.h"
 #include "arkrtos_hal.h"
 #include "arkrtos_cfg.h"
+#include "arkrtos_tickless.h"
 
 #if (ARKRTOS_USE_TIMER == 1)
 
@@ -143,6 +144,35 @@ void arkrtos_timer_tick_handler(void)
         }
     }
 }
+
+#if (ARKRTOS_USE_TICKLESS == 1)
+/* tickless idle 用：所有活动定时器里最近一次到期还有几拍。
+ * 倒计时是每拍减一，所以 remain_ticks 就是"还有几拍"；周期定时器到期后
+ * 立刻回填 period_ticks，所以这里读到的始终是下一次到期的距离。 */
+uint32 arkrtos_timer_next_ticks(void)
+{
+    uint32 best = ARKRTOS_TICKLESS_NO_EVENT;
+    int32 i;
+
+    for(i = 0; i < ARKRTOS_TIMER_NUM; i++)
+    {
+        if(arkrtos_timers[i].used == 1 && arkrtos_timers[i].active == 1)
+        {
+            uint32 r = arkrtos_timers[i].remain_ticks;
+
+            if(r == 0u)
+            {
+                return 1u;              /* 本拍就该到期，别跳 */
+            }
+            if(r < best)
+            {
+                best = r;
+            }
+        }
+    }
+    return best;
+}
+#endif
 
 static void arkrtos_timer_copy_name(char *dst, char *src)
 {

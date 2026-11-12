@@ -110,6 +110,21 @@
 #define ARKRTOS_USE_SBUF                0
 #endif
 
+/* tickless idle。
+ * 为什么默认关：省的是 idle 期间的中断次数，代价是唤醒路径要自己重建
+ * "这段时间过去了多少"，属于改调度时序的功能；默认关时 idle 循环就是
+ * 一次 WFI，行为与没有这个开关时逐位相同。 */
+#ifndef ARKRTOS_USE_TICKLESS
+#define ARKRTOS_USE_TICKLESS            0
+#endif
+
+/* 一次最多跳过的节拍数（仅 tickless 打开时有意义）。默认 8 拍 = 4 ms
+ * （500 us 一拍）：够让 idle 的 tick 中断从 2000/s 降到 ~125/s，
+ * 又保证唤醒后补发的节拍只有几拍。 */
+#ifndef ARKRTOS_TICKLESS_MAX_TICKS
+#define ARKRTOS_TICKLESS_MAX_TICKS      8
+#endif
+
 /* ============================================================
  * 三、服务与组件
  * ============================================================ */

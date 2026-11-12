@@ -994,6 +994,11 @@
               <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_timer.c</FilePath>
             </File>
             <File>
+              <FileName>arkrtos_tickless.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_tickless.c</FilePath>
+            </File>
+            <File>
               <FileName>arkrtos_fault.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_fault.c</FilePath>

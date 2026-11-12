@@ -20,6 +20,7 @@
 /* USER CODE BEGIN Includes */
 #include "arkrtos.h"
 #include "arkrtos_hal.h"
+#include "arkrtos_tickless.h"
 #include "arkrtos_cfg.h"
 #include "arkrtos_event.h"
 #include "arkrtos_dev.h"
@@ -486,7 +487,12 @@ static void arkrtos_start_idle(void)
 
     while(1)
     {
+    #if (ARKRTOS_USE_TICKLESS == 1)
+        /* 没有任务要跑：按"下一个事件"睡整段，醒来一次补齐节拍 */
+        arkrtos_tickless_idle();
+    #else
         ARKRTOS_WFI();
+    #endif
     }
 }
 
