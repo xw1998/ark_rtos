@@ -46,7 +46,7 @@ int write(int fd, const void *buf, unsigned int len);
 
 /**
 * @brief 结束本小程序，把代码块与 RAM 块交还内核
-* @note 等价于 MiniMain() 正常返回；调用后不会再回到本程序。
+* @note 等价于 main() 正常返回；调用后不会再回到本程序。
 */
 void _exit(int code);
 

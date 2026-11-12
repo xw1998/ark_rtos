@@ -14,8 +14,8 @@
 *              SDK 的启动桩（`arkrtos_mini_start_arkc.c`）调它，它 return
 *              之后由桩调 `arkrtos_thread_exit()` 收尾。SDK 不提供 main()，
 *              漏定义就是链接期 `undefined symbol "main"`。
-*              （Keil / GCC 档仍是用 SDK 的 `main()` + 工程写 `MiniMain()`，
-*               那是那两个工具链的历史写法，与 arkc 不通用。）
+*              三个工具链现在是同一条约定：入口 = 工程自己写的标准
+*              `int main(void)`，SDK 不提供 main。
 *            - `ARKRTOS_WEAK`：弱符号属性。arkc 档自己也用不到它，留着是因为
 *              工程可能想给自己的回调加弱定义。
 *            - `arkrtos_thread_exit()`：结束小程序、交还两块 RAM。
@@ -28,16 +28,17 @@
 #define __ARKRTOS_MINI_ARKC_ARKRTOS_H__
 
 /* 与 kernelsrc/include/arkrtos_types.h 里的定义相同：弱符号。
- * 小程序用它是为了让 SDK 提供一个空的 MiniMain()，工程自己定义的那份
- * 覆盖它——没有这一条，SDK 的 main() 会因为没有 MiniMain 而链接失败。 */
+ * arkc 档自己不依赖它（入口是本工程的 int main），留着是因为工程可能想给
+ * 自己的回调加弱定义。注意 arkc 的自包含对象模型：同一翻译单元内的调用在
+ * 汇编期就绑死，弱定义覆盖不到，别拿它当"可覆盖的默认实现"用。 */
 #ifndef ARKRTOS_WEAK
 #define ARKRTOS_WEAK                    __attribute__((weak))
 #endif
 
-/* 入口不在这个头里：arkc 档的入口就是标准 C 的 `int main(void)`，由工程
- * 自己定义，不需要声明（启动桩里有 `extern int main(void);`）。
- * 旧写法 `void MiniMain(void)` 只在 Keil / GCC 档有效，arkc 档不要用：
- * 那套骨架（arkrtos_mini_main.c）在 arkc 下会直接 #error。 */
+/* 入口不在这个头里：入口就是标准 C 的 `int main(void)`，由工程自己定义，
+ * 不需要声明（启动桩里有 `extern int main(void);`）。
+ * 旧写法 `void MiniMain(void)` 已经取消：Keil / GCC 档同样是工程自己写 main，
+ * SDK 只提供退出胶水（arkrtos_mini_main.c，arkc 档 #error 拦住）。 */
 
 /**
 * @brief 结束当前小程序，把代码块与 RAM 块交还给内核

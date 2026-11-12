@@ -89,7 +89,7 @@ Ark RTOS 是一个面向ARM Cortex-M系列MCU的实时操作系统，核心特�
    `arkrtos_loader_scan_driver()` 识别镜像并建任务，运行期用
    `arkrtos_app_start()` / `arkrtos_app_load()` / `arkrtos_driver_load()` 管理。
 
-App / 驱动侧只需要实现 `AppMain()` / `DrvMain()`，其余交给 SDK 与内核。
+App / 小程序侧只需要实现标准 C 的 `main()`，驱动侧实现 `DrvMain()`，其余交给 SDK 与内核。
 详细步骤见 [`../docs/Ark RTOS应用安装与调试指南.md`](../docs/Ark RTOS应用安装与调试指南.md)。
 
 ### 2.4 注册驱动
@@ -296,8 +296,8 @@ CPU负载统计通过 `ARKRTOS_USE_CPU_LOAD` 配置开关控制。开启后，�
 ### 8.1 应用开发流程
 
 1. 包含 `arkrtos.h` 头文件
-2. 实现 `AppMain()` 函数
-3. 在 `AppMain()` 中使用OS API
+2. 实现标准 C 的 `main()` 函数
+3. 在 `main()` 中使用 OS API
 4. 编译为独立固件，烧录到指定分区
 
 ### 8.2 App SDK 文件清单
@@ -307,7 +307,7 @@ CPU负载统计通过 `ARKRTOS_USE_CPU_LOAD` 配置开关控制。开启后，�
 | `arkrtos.h` | 应用API入口头文件 |
 | `arkrtos_types.h` | 基础类型定义 |
 | `arkrtos_oslib.c` | SVC系统调用封装 |
-| `arkrtos_app_main.c` | 入口模板（含AppMain弱定义） |
+| `arkrtos_app_main.c` | 退出胶水（`main` 返回 / `exit()` → 结束任务），不含 `main` |
 | `arkrtos_app_start.s` | 应用启动汇编 |
 
 ### 8.3 完整应用示例
@@ -315,7 +315,7 @@ CPU负载统计通过 `ARKRTOS_USE_CPU_LOAD` 配置开关控制。开启后，�
 ```c
 #include "arkrtos.h"
 
-void AppMain(void)
+int main(void)
 {
     int32 com1 = arkrtos_dev_open("ttyS0", 115200);
     int32 led  = arkrtos_dev_open("led0", 0);

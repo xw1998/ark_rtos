@@ -48,5 +48,8 @@ MINISTART:
     /* 3) 静态构造 + 入口 */
     bl   __libc_init_array
     bl   main
+    /* main 返回 == 小程序结束：走 newlib 的 exit -> _exit，由 SDK 的退出
+     * 胶水结束任务并归还代码块 / RAM 块。不能直接死循环。 */
+    bl   _exit
 5:  b    5b
     .size MINISTART, .-MINISTART

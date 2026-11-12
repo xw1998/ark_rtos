@@ -11,7 +11,7 @@
 
 #include "arkrtos.h"
 
-void AppMain(void)
+int main(void)
 {
     int32 bled;
     uint8 on;

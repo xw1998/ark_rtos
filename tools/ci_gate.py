@@ -538,6 +538,40 @@ def check_utest_host():
         else:
             fail("utest-host", "selftest failed: %s" % txt.strip()[:160])
 
+def check_sdk_stdio_host():
+    """The SDK's printf shim must produce exactly the right bytes.
+
+    arkrtos_stdio.c is what makes `#include <stdio.h>` + `printf("Hello, World!\\n")`
+    work in an App or a mini program without any toolchain retarget.  Its failure
+    mode is silent: the program prints a *different* sentence, which nobody
+    notices on a board but a host byte comparison catches immediately.
+    A missing host compiler is a FAIL, not a skip.
+    """
+    import tempfile
+    cc = _find_host_cc()
+    if not cc:
+        fail("sdk-stdio-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        exe = os.path.join(td, "stdio_host.exe" if os.name == "nt" else "stdio_host")
+        cmd = [cc]
+        if "mingw" in cc.replace("\\", "/").lower():
+            cmd.append("-B" + os.path.dirname(cc))
+        cmd += ["-std=gnu11", "-Ikernelsrc/include", "-o", exe,
+                "kernelsrc/sdk/app_sdk/tests/test_stdio_host.c",
+                "kernelsrc/sdk/app_sdk/arkrtos_stdio.c"]
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            fail("sdk-stdio-host", "gate did not build: %s"
+                 % (r.stderr or "").strip().splitlines()[-1:])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode == 0 and "STDIO-HOST OK" in txt:
+            ok("sdk-stdio-host", "printf/puts/putchar byte-exact on host")
+        else:
+            fail("sdk-stdio-host", "gate failed: %s" % txt.strip()[:160])
+
 def check_features_switches():
     """Every gate in arkrtos_features.h must be declared in Kconfig.
 
@@ -619,6 +653,7 @@ def main(argv):
     check_softbus_sync_header()
     check_devicetree_generated()
     check_utest_host()
+    check_sdk_stdio_host()
     if do_build:
         check_builds(uv4)
 

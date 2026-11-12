@@ -4,7 +4,7 @@
 
 #include "arkrtos.h"
 
-void AppMain(void)
+int main(void)
 {
     int32 com1 = arkrtos_dev_open("ttyS0", 0);
     int32 led  = arkrtos_dev_open("led0", 0);

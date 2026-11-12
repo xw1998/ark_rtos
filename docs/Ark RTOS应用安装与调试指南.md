@@ -265,8 +265,8 @@ python tools/pack_app.py --verify build/APP_DEMO/APP_DEMO.svcapp    # 校验完�
 
 | 符号 | 说明 |
 |---|---|
-| `APPSTART` / `DRVSTART`（默认） | SDK 启动入口，先做 C 运行库初始化（`.data` 拷贝、`.bss` 清零）再进 `AppMain`/`DrvMain`。**镜像含初始化全局变量时必须用它** |
-| `AppMain` / `DrvMain` | 直接进业务函数，跳过运行时初始化 |
+| `APPSTART` / `DRVSTART`（默认） | SDK 启动入口，先做 C 运行库初始化（`.data` 拷贝、`.bss` 清零）再进 App 的 `main` / 驱动的 `DrvMain`。**镜像含初始化全局变量时必须用它** |
+| `main`（App）/ `DrvMain`（驱动） | 直接进业务函数，跳过运行时初始化 |
 
 ### 3.2.1 版本号从哪来，以及安装时的版本把关
 

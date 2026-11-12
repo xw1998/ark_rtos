@@ -346,7 +346,7 @@ static void release(uint32 now)
 
 /* ---------------- entry ---------------- */
 
-void MiniMain(void)
+int main(void)
 {
     uint32 now;
     uint32 last;
@@ -395,7 +395,7 @@ void MiniMain(void)
             lb_u32(prev.iterations);
             lb_str("\r\n");
             lb_flush();
-            return;
+            return 0;           /* 标准 C：main 返回 = 结束本任务 */
         }
 
         /* Our own state from an earlier run: carry it on instead of starting
@@ -517,7 +517,7 @@ void MiniMain(void)
                  * the release timestamp is what the new version uses to
                  * measure the handover gap. */
                 release(arkrtos_get_time_ms());
-                return;             /* the kernel returns both RAM blocks */
+                return 0;             /* the kernel returns both RAM blocks */
             }
         }
 

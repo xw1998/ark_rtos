@@ -44,7 +44,8 @@ sdk/app_sdk/
 ├── arkrtos.h              ← 应用API入口头文件（唯一需要包含的文件）
 ├── arkrtos_types.h        ← 基础类型定义（被arkrtos.h自动包含）
 ├── arkrtos_oslib.c        ← SVC系统调用封装实现
-├── arkrtos_app_main.c     ← 应用入口模板（含AppMain弱定义）
+├── arkrtos_app_main.c     ← 退出胶水（main 返回 / exit() → 结束任务），不含 main
+├── arkrtos_stdio.c        ← printf / puts / putchar（接到内核控制台）
 ├── arkrtos_app_start.s    ← 应用启动汇编入口
 └── examples/
     └── example_app.c    ← 完整示例应用
@@ -60,23 +61,27 @@ sdk/app_sdk/
 #include "arkrtos.h"
 ```
 
-#### 步骤2：实现 AppMain()
+#### 步骤2：写标准 C 的 `main()`
 
-`AppMain()` 是应用程序的入口函数，相当于普通C程序的 `main()`：
+应用的入口就是**你自己写的 `main()`**——和你写一段能在 Linux / Windows 上直接
+编译运行的程序没有区别。SDK 不提供 `main`，也不再要求你写 `AppMain()` 这样的回调：
 
 ```c
-void AppMain(void)
+#include <stdio.h>
+
+int main()
 {
-    // 你的应用逻辑
+    printf("Hello, World!\n");
+    return 0;          /* 返回 = 进程结束 = 结束本 App 任务 */
 }
 ```
 
 #### 步骤3：使用OS API
 
-在 `AppMain()` 中调用OS接口：
+在 `main()` 中调用OS接口：
 
 ```c
-void AppMain(void)
+int main(void)
 {
     int32 led = arkrtos_dev_open("led0", 0);
 
@@ -386,7 +391,7 @@ void arkrtos_event_set(int32 handle);
 
 ```c
 // 生产者任务
-void AppMain(void)
+int main(void)
 {
     int32 evt = arkrtos_event_create("data_ready");
 
@@ -399,7 +404,7 @@ void AppMain(void)
 }
 
 // 消费者任务（另一个分区）
-void AppMain(void)
+int main(void)
 {
     int32 evt = arkrtos_event_create("data_ready");
 
@@ -420,7 +425,7 @@ void AppMain(void)
 ```c
 #include "arkrtos.h"
 
-void AppMain(void)
+int main(void)
 {
     int32 com1 = arkrtos_dev_open("ttyS0", 115200);
     uint8 buf[64];
@@ -442,7 +447,7 @@ void AppMain(void)
 
 ```c
 /* 控制任务：每按一次按键触发一次事件 */
-void AppMain(void)
+int main(void)
 {
     int32 key = arkrtos_dev_open("KEY", 0);
     int32 evt = arkrtos_event_create("blink");
@@ -456,7 +461,7 @@ void AppMain(void)
 }
 
 /* LED 任务：收到事件后闪烁 3 次 */
-void AppMain(void)
+int main(void)
 {
     int32 led = arkrtos_dev_open("led0", 0);
     int32 evt = arkrtos_event_create("blink");
@@ -478,7 +483,7 @@ void AppMain(void)
 演示一个应用同时驱动多个设备：
 
 ```c
-void AppMain(void)
+int main(void)
 {
     int32 com1 = arkrtos_dev_open("ttyS0", 115200);
     int32 spi  = arkrtos_dev_open("SPI1", 0);
@@ -512,7 +517,7 @@ void AppMain(void)
 
 ### 7. App SDK 编程规范
 
-1. **`AppMain()` 不能返回** — 必须包含无限循环，否则任务会被销毁
+1. **`main()` 返回即结束任务** — C 标准里 `main` 返回等于进程结束；板上没有进程，于是结束本 App 任务（栈由内核回收），本 App 的其它线程继续运行。要常驻就自己写循环
 2. **长延时让出 CPU** — 使用 `arkrtos_task_wait` / `arkrtos_event_wait` 让出 CPU
 3. **栈空间有限** — 默认 1~2KB，禁止在栈上分配大数组
 4. **设备名称要匹配** — `arkrtos_dev_open` 的名称必须与驱动注册的名称完全一致
@@ -1023,7 +1028,7 @@ App SDK 与 Driver SDK 的用户态固件以**独立 .bin** 形式烧录到专�
 4. 运行期可用 `arkrtos_app_load/start/stop/status`、`arkrtos_driver_load` 动态管理，
    或让内核安装任务从串口收 `.svcapp` 并按镜像头 `type` 自动分流。
 
-任务被调度时 PC 跳到分区入口，执行启动汇编 → `__main` → `main` → `AppMain`/`DrvMain`。
+任务被调度时 PC 跳到分区入口，执行启动汇编 → `__main` → `main` → `main`/`DrvMain`。
 
 ### B. 启动汇编必须经 `__main`（C 运行时初始化）
 

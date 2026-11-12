@@ -13,14 +13,14 @@ APP_DEMO/
 ├── MDK-ARM/
 │   └── app_demo.uvprojx     # Keil MDK 工程文件（scatter 由脚本生成，见下）
 └── Src/
-    └── app_demo.c           # 应用主体，含 AppMain() 入口
+    └── app_demo.c           # 应用主体，入口就是标准 C 的 int main(void)
 ```
 
 工程引用的 SDK 文件位于 `kernelsrc/sdk/app_sdk/`：
 
 | 文件 | 作用 |
 |------|------|
-| `arkrtos_app_main.c` | 提供 `main()` 入口，调用用户实现的 `AppMain()` |
+| `arkrtos_app_main.c` | 退出胶水：把 `main` 返回 / `exit()` 接到 `arkrtos_thread_exit()`。**它不提供 `main()`** |
 | `arkrtos_oslib.c`    | SVC 系统调用封装（唯一实现，全工程共用） |
 | `arkrtos_app_start.s`| RESET 向量，导出 `APPSTART` 入口点 |
 
@@ -56,14 +56,14 @@ APP_DEMO/
 |------|------|
 | 正式安装包 | `python tools/pack_app.py --project MDK-ARM/app_demo.uvprojx --type app --name APP_DEMO --out app_demo.svcapp`（工具自动编译 A/B/C/D 四遍做差分重定位），再通过内核安装任务（串口）下发 |
 | 开发期快速验证 | 直接把裸 `.bin` 烧到本应用分区基址，内核扫描时按裸镜像识别入口（`APP_ALLOW_RAW_IMAGE`） |
-| MDK 在线调试 | 固定地址烧录后直接在 MDK 里 Load & Debug，可对 `AppMain()` 下断点 |
+| MDK 在线调试 | 固定地址烧录后直接在 MDK 里 Load & Debug，可对 `main()` 下断点 |
 
 > 发布固件时请把 `config/arkrtos_partition.h` 里的 `APP_ALLOW_RAW_IMAGE` 置 0，
 > 只接受带 CRC 的 `.svcapp`。
 
 ## 示例功能概览
 
-`app_demo.c` 中的 `AppMain()` 演示了：
+`app_demo.c` 中的 `main()` 演示了：
 
 - **设备 IO**：`arkrtos_dev_open/write/read`（LED 与串口）
 - **任务延时**：`arkrtos_task_wait`
@@ -73,7 +73,7 @@ APP_DEMO/
 ## 注意事项
 
 1. 应用代码不能直接访问硬件寄存器，必须通过 `arkrtos_dev_*` 接口；
-2. `AppMain()` 不能返回，必须包含无限循环；
+2. `main()` 可以返回：返回等于进程结束（结束本 App 任务），其它线程继续运行；
 3. 栈大小由 `config/arkrtos_partition.h` 的 `APP_TASK_STACK_SIZE` 决定（当前 4KB），
    不要在栈上分配大数组；
 4. 仅需包含 `arkrtos.h` 即可使用全部用户态 API。

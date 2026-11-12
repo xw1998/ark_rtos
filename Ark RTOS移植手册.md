@@ -624,7 +624,7 @@ Ark RTOS 支持把应用和驱动编译为**独立固件**，烧录到专属 ROM
    `arkrtos_app_status()` / `arkrtos_driver_load()` 动态管理，
    或由内核安装任务从串口接收 `.svcapp` 并按镜像头 `type` 自动分流。
 
-任务调度时 PC 跳入分区，执行：启动汇编 → `__main` → `main` → `AppMain`/`DrvMain`。
+任务调度时 PC 跳入分区，执行：启动汇编 → `__main` → `main`（App / 小程序）或 `DrvMain`（驱动）。
 
 ### 10.2 外部固件必须经 `__main` 初始化
 

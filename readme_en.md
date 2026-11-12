@@ -153,6 +153,7 @@ board self-test:
 | `app_sdk/POSIX_DEMO` | App | A C program written for Linux or Windows, compiled as-is |
 | `app_sdk/FS_DEMO` | App | File POSIX calls routed into VFS / littlefs |
 | `app_sdk/SOCKET_DEMO` | App | POSIX socket / select on the lwIP loopback netif |
+| `app_sdk/HELLO_APP` / `HELLO_MINI` | App / mini app | The smallest standard C program: `#include <stdio.h>` + `printf("Hello, World!\n")` + `return 0`; the same source builds either way |
 | `app_sdk/MINI_DEMO` | Mini app | Loaded from the file system into RAM, both memory blocks returned on exit |
 | `app_sdk/SEAMLESS_V1` / `SEAMLESS_V2` | Mini apps | Handing a control loop over while running (seamless upgrade), see [Seamless upgrade](docs/无缝升级例程.md) |
 | `app_sdk/BLED_APP` + `driver_sdk/BLED_DRV` | App + standalone driver | End-to-end example where three firmwares share no addresses, see `BLUE_LED_E2E_README.md` |
@@ -457,7 +458,7 @@ without knowing the implementation or the address.
 │   Kernel firmware   │   │  Standalone driver  │   │  Standalone app     │
 │   (ROM partition 0) │   │   BLED (part. 1)    │   │   (ROM partition 2) │
 │                     │   │                     │   │                     │
-│ Scheduler/devices   │   │  DrvMain()          │   │  AppMain()          │
+│ Scheduler/devices   │   │  DrvMain()          │   │  main()             │
 │         ▲           │   │   ├ register "BLED" │   │   ├ open("BLED")    │
 │         │ SVC 0x14  │?──┼───┘ (arkrtos_drv_     │   │   └ write(...)      │
 │         │ register  │   │      register)      │   │         │           │

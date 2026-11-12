@@ -95,8 +95,8 @@ int write(int fd, const void *buf, unsigned int len)
 
 /**
 * @brief POSIX _exit：小程序没有进程，交还自己占的两块 RAM
-* @note 与 app_sdk 的 arkrtos_thread_exit() 是同一条 SVC。MiniMain() 正常
-*       返回时由 SDK 的 main() 调用它，程序里显式调用也合法（提前结束）。
+* @note 与 app_sdk 的 arkrtos_thread_exit() 是同一条 SVC。main() 正常返回时
+*       由启动桩调用它，程序里显式调用也合法（提前结束）。
 */
 void _exit(int code)
 {

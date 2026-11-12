@@ -135,7 +135,7 @@ int main(void) {
 }
 ```
 
-它在 Linux 上就是 `cc hello.c && ./a.out`，连输出都一样。**没有 `MiniMain`、
+它在 Linux 上就是 `cc hello.c && ./a.out`，连输出都一样。**没有 `MiniMain` / `AppMain`、
 没有 `write`、没有一句 Ark RTOS 的头文件**。
 
 `main()` 就是入口：SDK 的启动桩（`start.c`）调它，它 `return` 之后由桩调
@@ -270,9 +270,9 @@ INCS   = /mnt/nor
   `..` 这种要靠路径解析去猜的写法。
 - `SRCS` 的第一份必须是启动桩：镜像的入口偏移是相对负载起点算的，`MINISTART`
   必须落在偏移 0。
-- **没有** `mini_main.c`：arkc 档的入口是工程自己的 `int main(void)`，那份
-  「main() 调 MiniMain()」的骨架是 Keil / GCC 档的写法，arkc 档塞进来会直接
-  `#error`（见 §5 第 7 条）。
+- **没有** `mini_main.c`：入口是工程自己的 `int main(void)`。那份
+  「main() 调 MiniMain()」的旧骨架已经全部取消（Keil / GCC 档也一样），
+  arkc 档若把它塞进来会直接 `#error`（见 §5 第 8 条）。
 
 ## 4. 上电就挂好 `/mnt/nor`（`ARKRTOS_AUTOMOUNT_NOR`）
 

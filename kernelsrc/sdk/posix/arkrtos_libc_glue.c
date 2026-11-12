@@ -177,13 +177,28 @@ int fgetc(FILE *f)
     return EOF;
 }
 
-/** @brief Process exit. An App has no process to end; park the thread. */
+/**
+* @brief Process exit: end the calling thread.
+* @details `main` 返回与 `exit()` 在标准 C 里是同义语——进程结束。板上没有进程，
+*          只有任务，所以这里结束调用线程（SVC 0x1B 子命令 3），由内核回收它的
+*          栈；本 App 的其它线程继续运行。
+*
+*          这里**不能**改成"挂起任务等一会儿"：那会让 `return 0` 变成"永远不退"，
+*          与 `arkrtos_app_main.c` / `arkrtos_mini_main.c` 给出的语义不一致，
+*          而用户写的是一段标准 C 程序。
+*
+*          @note 本文件提供 `_sys_exit` / `_exit`，`arkrtos_app_main.c` 也提供，
+*                两者不要编进同一个工程（用 libc_glue 的工程就不需要 app_main.c）。
+*/
 void arkrtos_glue_exit(int code)
 {
     (void)code;
+
+    arkrtos_thread_exit();
+
+    /* 不会返回；防御性兜底 */
     for(;;)
     {
-        arkrtos_task_wait(1000u);
     }
 }
 

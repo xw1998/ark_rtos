@@ -821,7 +821,7 @@ static void *fpu_probe_worker(void *arg)
     return 0;
 }
 
-void AppMain(void)
+int main(void)
 {
     uint32 t0;
     uint32 t1;

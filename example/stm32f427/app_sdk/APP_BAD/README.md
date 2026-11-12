@@ -23,7 +23,7 @@ APP_BAD/
 ├── MDK-ARM/
 │   └── app_bad.uvprojx     # Keil MDK 工程（scatter 由 BeforeMake 钩子生成）
 └── Src/
-    └── app_bad.c           # 探针主体，含 AppMain() 入口
+    └── app_bad.c           # 探针主体，入口就是标准 C 的 int main(void)
 ```
 
 ## 用法

@@ -438,7 +438,7 @@ static void run_loop(uint32 now)
     }
 }
 
-void MiniMain(void)
+int main(void)
 {
     uint32 now;
     uint32 deadline;
@@ -487,7 +487,7 @@ void MiniMain(void)
         write_state();
         arkrtos_heartbeat(SXP_HEARTBEAT_MS);
         run_loop(now);
-        return;
+        return 0;               /* 标准 C：main 返回 = 结束本任务 */
     }
 
     if((n != 0) && (prev.phase == SXP_PHASE_ACTIVE) && (prev.owner != SXP_OWNER))
@@ -556,7 +556,7 @@ void MiniMain(void)
             lb_version(sxp_owner_version(prev.owner));
             lb_str(" in control, exiting\r\n");
             lb_flush();
-            return;
+            return 0;
         }
 
         handover_gap = now - prev.tick_ms;
@@ -596,7 +596,7 @@ void MiniMain(void)
 
         arkrtos_heartbeat(SXP_HEARTBEAT_MS);
         run_loop(now);
-        return;
+        return 0;               /* 标准 C：main 返回 = 结束本任务 */
     }
 
     /* Nobody is in control: this version starts the loop on its own. */

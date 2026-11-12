@@ -43,7 +43,7 @@ static void hw_puts(int32 con, const char *s)
     }
 }
 
-void AppMain(void)
+int main(void)
 {
     int32 con;
     int32 led;

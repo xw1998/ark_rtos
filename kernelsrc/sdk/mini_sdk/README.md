@@ -10,7 +10,7 @@
 | 文件 | 作用 |
 |------|------|
 | `arkrtos_mini_start.s` | `MINISTART` 桩：跳到 C 运行时 `__main`（.data/.bss 初始化后进 `main()`） |
-| `arkrtos_mini_main.c` | **Keil / GCC 档**的 `main()` 骨架：调用 `MiniMain()`，返回后 `arkrtos_thread_exit()` 交还内存。**arkc 档不要编它**（文件里有 `#error`）：arkc 档的入口是工程自己的 `int main(void)` |
+| `arkrtos_mini_main.c` | **Keil / GCC 档**的「退出胶水」：把 `main` 返回 / `exit()` 接到 `arkrtos_thread_exit()`，交还代码块与 RAM 块。**它不提供 `main()`，也不要求 `MiniMain()`**。**arkc 档不要编它**（文件里有 `#error`） |
 | `arkrtos_types.h` | 基础类型 + `ARKRTOS_WEAK`（与 App / 驱动 SDK 同名文件一致） |
 | `arkrtos_mini_start_arkc.c` | **arkc 专用** `MINISTART` 桩：调 `__arkcc_init_globals()`（arkc 不生成数据段加载表，全局初值被编成一个函数）再进 `main()`。落在负载偏移 0，镜像的 `entry_offset` 就是 0 |
 | `arkc/arkrtos_mini_rt_arkc.c` | **arkc 专用**运行时：POSIX `write()` / `_exit()` + `arkrtos_thread_exit()`，只两条 SVC（`0x1A`/3 打印、`0x1B`/3 退出），号与 `app_sdk/arkrtos_oslib.c` 逐位相同 |
@@ -67,35 +67,36 @@ INCS   = /mnt/nor
 完整演示（怎么把文件送进 NOR、板上 `make`、`mini run`、已知限制）见
 `docs/arkc板上直跑-M4-hello演示.md`；`tools/mini_deploy.py --port COM3` 一键部署。
 
-**Keil / GCC 档**：
+**Keil / GCC 档**：同一段标准 C 程序，一个字符都不用改：
 
-1. 写你自己的 `MiniMain()`：
+```c
+#include <stdio.h>
 
-   ```c
-   #include "arkrtos.h"
+int main(void)
+{
+    printf("Hello, World!\n");
+    return 0;               /* = 进程结束 = 结束本任务，内存归还 */
+}
+```
 
-   void MiniMain(void)
-   {
-       int32 con = arkrtos_dev_open("ttyS0", 0);
-       arkrtos_dev_write(con, (void *)"hello from mini\r\n", 17);
-       /* 返回即退出，内存归还 */
-   }
-   ```
-
-2. 工程里加进 `mini_sdk` 的两个源文件 + `app_sdk/arkrtos_oslib.c`，
-   包含路径加 `kernelsrc/sdk/mini_sdk`、`kernelsrc/sdk/app_sdk`、`kernelsrc/include`。
+1. 工程里加进 `mini_sdk` 的 `arkrtos_mini_main.c` + `arkrtos_mini_start.s`
+   （或 GCC 档的 `arkrtos_mini_start_gcc.s`）、`app_sdk` 的 `arkrtos_oslib.c`，
+   需要 `printf` 时再加 `app_sdk/arkrtos_stdio.c`；包含路径加
+   `kernelsrc/sdk/mini_sdk`、`kernelsrc/sdk/app_sdk`、`kernelsrc/include`。
+   现成的两个最小例子：`example/stm32f427/app_sdk/HELLO_MINI`（小程序）与
+   `HELLO_APP`（App），两者源码逐字相同。
 
 3. 打包（四遍差分链接 + 重定位表，与 App 同一条流水线）：
 
    ```
-   py -3 tools/pack_app.py --project <你的工程>.uvprojx --type miniapp \
+   python tools/pack_app.py --project <你的工程>.uvprojx --type miniapp \
            --name MINI_DEMO --out build/mini_demo.svcapp
    ```
 
 4. 放进文件系统并运行：
 
    ```
-   # 主机侧：py -3 tools/fs_put.py --port COM3 --path /mini_demo.app <镜像>
+   # 主机侧：python tools/fs_put.py --port COM3 --path /mini_demo.app <镜像>
    # 卷里可以建目录（shell 的 mkdir，落点是 littlefs），也可以直接放卷根
    mini run /mini_demo.app
    mini stat

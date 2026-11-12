@@ -142,7 +142,7 @@ mini 程序的符号数必须压在 64 以内。**推论**：应用必须**单�
 void MINISTART(void)
 {
     __arkcc_init_globals();      /* extern 声明；由 arkc 在存在 .data/.bss 时生成 */
-    MiniMain();                  /* SDK 骨架：返回后调 arkrtos_thread_exit() */
+    main();                      /* 工程自己写的标准 C 入口 */
     arkrtos_thread_exit();
 }
 ```

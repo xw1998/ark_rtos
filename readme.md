@@ -107,6 +107,7 @@ Ark RTOS 把这件事拆成五层，每层各拦一种失败，且每一层的"�
 |---|---|---|
 | `kernel/ARKRTOS_TEST` | 内核 | 内核本体（板上在跑的这一份） |
 | `app_sdk/APP_DEMO` | 应用 | 全功能自测八节：任务 / 事件 / 信号量 / 互斥锁 / 消息队列 / 软定时器 / 堆与 pthread / FPU |
+| `app_sdk/HELLO_APP` / `HELLO_MINI` | 应用 / 小程序 | 最小的标准 C 程序：`#include <stdio.h>` + `printf("Hello, World!\n")` + `return 0`，同一份源码两边都能编 |
 | `app_sdk/POSIX_DEMO` | 应用 | 把 Linux / Windows 写法的 C 程序直接搬上来 |
 | `app_sdk/FS_DEMO` | 应用 | 文件类 POSIX 打到 VFS / littlefs |
 | `app_sdk/SOCKET_DEMO` | 应用 | POSIX socket / select 跑在 lwIP 回环网卡上 |
@@ -388,7 +389,7 @@ python tools/pack_app.py --project example/stm32f427/driver_sdk/DRV_DEMO/MDK-ARM
 │   内核固件           │   │  独立驱动固件 BLED   │   │  独立应用固件 BLED   │
 │   (ROM 分区 0)       │   │  (ROM 分区 1)        │   │  (ROM 分区 2)        │
 │                     │   │                     │   │                     │
-│  任务调度/设备框架   │   │  DrvMain()          │   │  AppMain()          │
+│  任务调度/设备框架   │   │  DrvMain()          │   │  main()             │
 │         ▲           │   │   ├ 注册 "BLED"     │   │   ├ open("BLED")    │
 │         │ SVC 0x14  │?──┼───┘ (arkrtos_drv_     │   │   └ write(...)      │
 │         │ 注册设备   │   │      register)      │   │         │           │
