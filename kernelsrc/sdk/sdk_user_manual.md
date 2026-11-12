@@ -1117,7 +1117,7 @@ static void worker(void)
     }
 }
 
-void app_main(void)
+int main(void)
 {
     int32 tid = arkrtos_thread_create(worker, g_worker_stack,
                                     sizeof(g_worker_stack), 10u, 0u);
