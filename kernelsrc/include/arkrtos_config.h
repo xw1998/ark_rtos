@@ -188,6 +188,21 @@
 #define ARKRTOS_MQ_MSG_WORDS        (4)
 #endif
 
+/* 流缓冲 / 消息缓冲（SVC 0x1F）。对象表与缓冲都静态驻留：
+ * 一个对象固定占 ARKRTOS_SBUF_BUF_SIZE 字节，没有动态内存。
+ * ARKRTOS_SBUF_NUM * ARKRTOS_SBUF_BUF_SIZE 就是这块表的全部 RAM 代价
+ * （默认档关着时不占）。 */
+#ifndef ARKRTOS_SBUF_NUM
+#define ARKRTOS_SBUF_NUM            (4)
+#endif
+#ifndef ARKRTOS_SBUF_BUF_SIZE
+#define ARKRTOS_SBUF_BUF_SIZE       (256)
+#endif
+/* 消息缓冲的长度头字节数。4 字节够装下整块缓冲的长度，且天然 4 字节对齐。 */
+#ifndef ARKRTOS_MBUF_HDR_BYTES
+#define ARKRTOS_MBUF_HDR_BYTES      (4)
+#endif
+
 #ifndef ARKRTOS_TIMER_NUM
 #define ARKRTOS_TIMER_NUM           (8)
 #endif

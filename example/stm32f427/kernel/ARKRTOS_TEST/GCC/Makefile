@@ -29,6 +29,11 @@ ELF      := $(BUILD)/$(TARGET).elf
 # 或 make CROSS=... 直接覆盖。
 -include toolchain.local.mk
 
+# 内核组件开关（与 kernelsrc/include/arkrtos_features.h 同名宏）。
+# 默认 0 与「没有这个开关」逐字节一致：arkrtos_sbuf.c 整个文件被
+# #if (ARKRTOS_USE_SBUF == 1) 包住，关档编出空目标，镜像与命令表不动。
+USE_SBUF ?= 0
+
 # 交叉工具链前缀；默认取 PATH 上的 arm-none-eabi-
 CROSS ?= arm-none-eabi-
 CC    := $(CROSS)gcc
@@ -50,7 +55,8 @@ DEFS := \
   -DARK_BUS_TOPIC_NAME_MAX=24 -DARK_BUS_QOS_MAX_SESSIONS=2 -DARK_BUS_RPC_MAX_SLOTS=4 \
   -DARK_BUS_RPC_MAX_METHODS=4 -DARK_BUS_TASK_ENABLED=0 -DARK_BUS_COLL_ENABLED=0 \
   -DARK_BUS_INFER_ENABLED=0 -DARK_BUS_STREAM_TX_SLOTS=1 -DARK_BUS_STREAM_RX_SLOTS=1 \
-  -DARK_BUS_STREAM_RX_MAX=256 -DARK_BUS_STREAM_MAX_BYTES=256
+  -DARK_BUS_STREAM_RX_MAX=256 -DARK_BUS_STREAM_MAX_BYTES=256 \
+  -DARKRTOS_USE_SBUF=$(USE_SBUF)
 
 # 头文件搜索路径：与 Keil 工程的 IncludePath 一致
 # （本目录与 MDK-ARM 同为 ARKRTOS_TEST 的子目录，所以 ../ 与 ../../../../../ 同样成立）

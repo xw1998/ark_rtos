@@ -31,6 +31,7 @@
 #include "arkrtos_fifo.h"
 #include "arkrtos_event.h"
 #include "arkrtos_timer.h"
+#include "arkrtos_sbuf.h"
 #include "arkrtos_audit.h"
 
 /* ============================================================
@@ -316,6 +317,83 @@ UTEST_CASE(timer_lifecycle)
 }
 
 #endif /* ARKRTOS_USE_TIMER */
+
+/* ============================================================
+ * 流缓冲 / 消息缓冲
+ * 只走非阻塞形态：用例在 shell 任务里跑，绝不能把控制台挂住。
+ * 阻塞/唤醒路径不在这里测——它需要第二个任务，属于上板实验而不是用例。
+ * ============================================================ */
+#if (ARKRTOS_USE_SBUF == 1)
+
+UTEST_CASE(sbuf_stream_contract)
+{
+    int32 h;
+    uint8 out[16];
+    int32 i;
+
+    h = arkrtos_sbuf_create_internal("utsb");
+    UTEST_REQUIRE(h >= 0);
+    UTEST_CHECK_EQ(arkrtos_sbuf_used_internal(h), 0);
+    UTEST_CHECK_EQ(arkrtos_sbuf_free_internal(h), (int32)ARKRTOS_SBUF_BUF_SIZE);
+
+    /* 部分成功：流语义下"写进去多少算多少" */
+    UTEST_CHECK_EQ(arkrtos_sbuf_send_internal(h, "abcdef", 6, 0), 6);
+    UTEST_CHECK_EQ(arkrtos_sbuf_recv_internal(h, out, 2, 0), 2);
+    UTEST_CHECK_EQ(out[0], 'a');
+    UTEST_CHECK_EQ(out[1], 'b');
+    UTEST_CHECK_EQ(arkrtos_sbuf_recv_internal(h, out, sizeof(out), 0), 4);
+    UTEST_CHECK_EQ(out[3], 'f');
+
+    /* 空读不等待：必须报超时而不是返回 0 假装读到了 */
+    UTEST_CHECK_EQ(arkrtos_sbuf_recv_internal(h, out, 4, 0), ARKRTOS_SBUF_ERR_TIMEOUT);
+
+    /* 写满 + 回绕 + 顺序不变 */
+    for(i = 0; i < (int32)sizeof(out); i++)
+    {
+        out[i] = (uint8)i;
+    }
+    UTEST_CHECK_EQ(arkrtos_sbuf_send_internal(h, out, (int32)ARKRTOS_SBUF_BUF_SIZE - 2, 0),
+                   (int32)ARKRTOS_SBUF_BUF_SIZE - 2);
+    UTEST_CHECK_EQ(arkrtos_sbuf_send_internal(h, out, 8, 0), 2);   /* 只剩 2 字节空间 */
+    UTEST_CHECK_EQ(arkrtos_sbuf_free_internal(h), 0);
+    UTEST_CHECK_EQ(arkrtos_sbuf_send_internal(h, out, 1, 0), ARKRTOS_SBUF_ERR_TIMEOUT);
+
+    UTEST_CHECK_EQ(arkrtos_sbuf_reset_internal(h), ARKRTOS_SBUF_OK);
+    UTEST_CHECK_EQ(arkrtos_sbuf_used_internal(h), 0);
+
+    UTEST_CHECK_EQ(arkrtos_sbuf_delete_internal(h), ARKRTOS_SBUF_OK);
+    UTEST_CHECK_EQ(arkrtos_sbuf_is_alive(h), 0);
+    UTEST_CHECK_EQ(arkrtos_sbuf_send_internal(h, out, 1, 0), ARKRTOS_SBUF_ERR_PARAM);
+}
+
+UTEST_CASE(mbuf_framing_contract)
+{
+    int32 h;
+    uint8 out[16];
+
+    h = arkrtos_sbuf_create_internal("utmb");
+    UTEST_REQUIRE(h >= 0);
+
+    UTEST_CHECK_EQ(arkrtos_mbuf_send_internal(h, "hello", 5, 0), ARKRTOS_SBUF_OK);
+    UTEST_CHECK_EQ(arkrtos_mbuf_peek_len_internal(h), 5);
+    UTEST_CHECK_EQ(arkrtos_mbuf_recv_internal(h, out, sizeof(out), 0), 5);
+    UTEST_CHECK_EQ(out[4], 'o');
+
+    /* 接收缓冲放不下：整条丢弃，但下一条不能被串味 */
+    UTEST_CHECK_EQ(arkrtos_mbuf_send_internal(h, "0123456789", 10, 0), ARKRTOS_SBUF_OK);
+    UTEST_CHECK_EQ(arkrtos_mbuf_send_internal(h, "next", 4, 0), ARKRTOS_SBUF_OK);
+    UTEST_CHECK_EQ(arkrtos_mbuf_recv_internal(h, out, 4, 0), ARKRTOS_SBUF_ERR_TOO_SMALL);
+    UTEST_CHECK_EQ(arkrtos_mbuf_recv_internal(h, out, sizeof(out), 0), 4);
+    UTEST_CHECK_EQ(out[0], 'n');
+
+    /* 比整块缓冲还大：立刻报 NOSPC，不能无限重试 */
+    UTEST_CHECK_EQ(arkrtos_mbuf_send_internal(h, out, (int32)ARKRTOS_SBUF_BUF_SIZE, 0),
+                   ARKRTOS_SBUF_ERR_NOSPC);
+
+    UTEST_CHECK_EQ(arkrtos_sbuf_delete_internal(h), ARKRTOS_SBUF_OK);
+}
+
+#endif /* ARKRTOS_USE_SBUF */
 
 /* ============================================================
  * 内核结构自审：静止态下必须自洽

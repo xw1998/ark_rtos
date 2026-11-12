@@ -88,6 +88,18 @@ config ARKRTOS_USE_TIMER
 	bool "Software timers (SVC 0x17)"
 	default y
 
+config ARKRTOS_USE_SBUF
+	bool "Stream / message buffers (SVC 0x1F)"
+	default n
+	help
+	  Byte-stream buffers (single writer, single reader) plus
+	  length-prefixed message buffers on top of them.  Fills the gap
+	  between the fixed-slot message queue and a raw device byte stream:
+	  the storage is a static ARKRTOS_SBUF_NUM * ARKRTOS_SBUF_BUF_SIZE
+	  array, so it defaults off - a project that never moves byte streams
+	  pays neither RAM nor code for it.  With the gate off the SVC
+	  answers -1 instead of pretending success.
+
 endmenu
 
 menu "Services and components"

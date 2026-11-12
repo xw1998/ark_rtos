@@ -20,6 +20,7 @@
 #include "arkrtos_def.h"
 #include "arkrtos_config.h"
 #include "arkrtos_mq.h"
+#include "arkrtos_sbuf.h"
 #include "arkrtos_trace.h"
 #include "arkrtos_timer.h"
 #include "arkrtos_fault.h"
@@ -876,6 +877,104 @@ void SVC_Server(void *p_svc_ctx)
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
+        break;
+
+    case ARKRTOS_SVC_SBUF_CTRL:
+        p = (uint32 *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+        /* 用户参数块必须先校验再解引用：内核 RAM / 内核 Flash 一律拒绝 */
+        if(arkrtos_kernel_svc_args_ok(p, 24u) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+#if (ARKRTOS_USE_SBUF == 1)
+        switch(p[0])
+        {
+        case 1:                       /* create(name) */
+            if(arkrtos_kernel_user_name_ok((const void *)p[1], 8u) == 0u)
+            {
+                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+                break;
+            }
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_sbuf_create_internal((char *)p[1]));
+            break;
+        case 2:                       /* sbuf send：内核只读调用者缓冲 */
+            if(arkrtos_kernel_user_ro_ok((const void *)p[2], p[3]) == 0u)
+            {
+                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+                break;
+            }
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_sbuf_send_internal((int32)p[1], (const void *)p[2],
+                                                                 (int32)p[3], (int32)p[4]));
+            break;
+        case 3:                       /* sbuf recv：内核往调用者缓冲写 */
+            if(arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u)
+            {
+                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+                break;
+            }
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_sbuf_recv_internal((int32)p[1], (void *)p[2],
+                                                                 (int32)p[3], (int32)p[4]));
+            break;
+        case 4:                       /* sbuf send from isr */
+            if(arkrtos_kernel_user_ro_ok((const void *)p[2], p[3]) == 0u)
+            {
+                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+                break;
+            }
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_sbuf_send_from_isr_internal((int32)p[1],
+                                                                          (const void *)p[2], (int32)p[3]));
+            break;
+        case 5:
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_sbuf_used_internal((int32)p[1]));
+            break;
+        case 6:
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_sbuf_free_internal((int32)p[1]));
+            break;
+        case 7:
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_sbuf_reset_internal((int32)p[1]));
+            break;
+        case 8:
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_sbuf_delete_internal((int32)p[1]));
+            break;
+        case 9:                       /* mbuf send */
+            if(arkrtos_kernel_user_ro_ok((const void *)p[2], p[3]) == 0u)
+            {
+                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+                break;
+            }
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_mbuf_send_internal((int32)p[1], (const void *)p[2],
+                                                                 (int32)p[3], (int32)p[4]));
+            break;
+        case 10:                      /* mbuf recv */
+            if(arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u)
+            {
+                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+                break;
+            }
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_mbuf_recv_internal((int32)p[1], (void *)p[2],
+                                                                 (int32)p[3], (int32)p[4]));
+            break;
+        case 11:                      /* mbuf send from isr */
+            if(arkrtos_kernel_user_ro_ok((const void *)p[2], p[3]) == 0u)
+            {
+                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+                break;
+            }
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_mbuf_send_from_isr_internal((int32)p[1],
+                                                                          (const void *)p[2], (int32)p[3]));
+            break;
+        case 12:
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_mbuf_peek_len_internal((int32)p[1]));
+            break;
+        default:
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+#else
+        /* 功能没编进来：如实拒绝，不要装作成功 */
+        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+#endif
         break;
 
     case ARKRTOS_SVC_TIMER_CTRL:
@@ -2525,6 +2624,9 @@ static void arkrtos_task_release_resources_core(int32 task_id, int32 handover)
     state = ARKRTOS_ENTER_CRITICAL();
     arkrtos_sync_release_task(task_id);
     arkrtos_mq_release_task(task_id);
+#if (ARKRTOS_USE_SBUF == 1)
+    arkrtos_sbuf_release_task(task_id);
+#endif
     arkrtos_event_release_task(task_id);
     /* Sockets are marked for the service task to close - no lwIP call
      * from here (this path can run with interrupts masked). */

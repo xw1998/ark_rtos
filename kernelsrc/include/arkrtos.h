@@ -322,6 +322,75 @@ int32  arkrtos_mq_recv(int32 handle, void *buf, int32 len_words, int32 timeout);
 int32  arkrtos_mq_delete(int32 handle);
 /** @} */
 
+#if (ARKRTOS_USE_SBUF == 1)
+/** @defgroup sbuf 流缓冲 / 消息缓冲
+ *  @{ */
+
+/**
+* @brief 创建流缓冲
+* @param name 缓冲名（最长 7 字节）
+* @return 句柄，失败返回负值
+* @note 每个对象固定占用 ARKRTOS_SBUF_BUF_SIZE 字节静态缓冲，没有动态内存。
+*       同一块缓冲既可以按字节流（arkrtos_sbuf_*）用，也可以按消息
+*       （arkrtos_mbuf_*）用，但两者不要混用：消息靠长度头定界，
+*       掺进裸字节流后长度头就错位了。
+*/
+int32  arkrtos_sbuf_create(char *name);
+
+/**
+* @brief 写入字节流
+* @param handle     流缓冲句柄
+* @param buf        数据
+* @param len        字节数（不得超过 ARKRTOS_SBUF_BUF_SIZE）
+* @param timeout_ms 0=不等待，负值=永久等待
+* @return 实际写入的字节数（>0，可能小于 len）；负值为错误码
+* @note 与其他 RTOS 的流缓冲一致：空间不够时能写多少写多少，
+*       返回实际量，调用方据此推进偏移后再写剩下的部分。
+*/
+int32  arkrtos_sbuf_send(int32 handle, const void *buf, int32 len, int32 timeout_ms);
+
+/**
+* @brief 读取字节流
+* @return 实际读出的字节数（>0）；负值为超时/参数错误
+*/
+int32  arkrtos_sbuf_recv(int32 handle, void *buf, int32 len, int32 timeout_ms);
+
+/**
+* @brief 中断上下文写入（不阻塞：满了返回负值）
+* @return 实际写入的字节数
+*/
+int32  arkrtos_sbuf_send_from_isr(int32 handle, const void *buf, int32 len);
+
+/** @brief 当前已存字节数，负值=句柄非法 */
+int32  arkrtos_sbuf_used(int32 handle);
+/** @brief 当前剩余空间字节数，负值=句柄非法 */
+int32  arkrtos_sbuf_free(int32 handle);
+/** @brief 清空缓冲（唤醒等待空间的写者） */
+int32  arkrtos_sbuf_reset(int32 handle);
+/** @brief 删除缓冲（等待者收到"对象已删除"，不会睡到超时） */
+int32  arkrtos_sbuf_delete(int32 handle);
+
+/**
+* @brief 发送一条带长度头的消息（整条原子）
+* @return 0=整条写入；负值=超时/NOSPC(比整块缓冲还大)/参数错误
+*/
+int32  arkrtos_mbuf_send(int32 handle, const void *buf, int32 len, int32 timeout_ms);
+
+/**
+* @brief 接收一条消息
+* @param buf 接收缓冲；比消息小时整条丢弃并返回 ARKRTOS_SBUF_ERR_TOO_SMALL
+* @return 消息长度（>0）；负值为错误码
+*/
+int32  arkrtos_mbuf_recv(int32 handle, void *buf, int32 len, int32 timeout_ms);
+
+/** @brief 中断上下文发送消息（整条写入，放不下返回负值） */
+int32  arkrtos_mbuf_send_from_isr(int32 handle, const void *buf, int32 len);
+
+/** @brief 下一条完整消息的长度；没有完整消息返回负值（可先问长度再准备缓冲） */
+int32  arkrtos_mbuf_peek_len(int32 handle);
+/** @} */
+#endif /* ARKRTOS_USE_SBUF */
+
 /** @defgroup timer 软定时器
  *  @{ */
 

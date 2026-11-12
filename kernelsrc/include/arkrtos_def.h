@@ -41,6 +41,9 @@
 #define ARKRTOS_SVC_FILE_SYS          (0x1C)
 /* Network service: the App side socket/select face (arkrtos_net.c) */
 #define ARKRTOS_SVC_NET               (0x1E)
+/* Stream / message buffer service (SVC 0x1F). Gated by ARKRTOS_USE_SBUF:
+ * with the gate off the handler answers -1 instead of pretending success. */
+#define ARKRTOS_SVC_SBUF_CTRL         (0x1F)
 
 /* 同步原语（信号量/互斥锁）返回码：0=成功，负值=失败。
  * 超时必须返回负值——调用方据此判断“本次没有拿到资源”；
@@ -68,5 +71,6 @@
 #define ARKRTOS_MQ_HANDLE_FLAG        (0x01500000)
 #define ARKRTOS_TIMER_HANDLE_FLAG     (0x01600000)
 #define ARKRTOS_COND_HANDLE_FLAG      (0x01700000)
+#define ARKRTOS_SBUF_HANDLE_FLAG      (0x01800000)
 
 #endif

@@ -417,6 +417,7 @@ int32 arkrtos_cond_delete(int32 handle)
  * 消息队列 / 软定时器 / 任务与故障查询（P0 扩展）
  * ============================================================ */
 ARKRTOS_SVC_DECL_1(int32, 0x16, arkrtos_call_mq_ctrl, uint32 *);
+ARKRTOS_SVC_DECL_1(int32, 0x1F, arkrtos_call_sbuf_ctrl, uint32 *);
 ARKRTOS_SVC_DECL_1(int32, 0x17, arkrtos_call_timer_ctrl, uint32 *);
 ARKRTOS_SVC_DECL_2(int32, 0x11, arkrtos_call_task_ctrl_ret, uint32, uint32);
 ARKRTOS_SVC_DECL_3(uint32, 0x12, arkrtos_call_sys_info_ext, uint32, uint32, uint32);
@@ -489,6 +490,170 @@ int32 arkrtos_mq_delete(int32 handle)
     uint32 p[6];
     p[0] = 4; p[1] = (uint32)handle; p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
     return arkrtos_call_mq_ctrl(p);
+}
+
+/* ============================================================
+ * 流缓冲 / 消息缓冲（SVC 0x1F）
+ * 阻塞语义与消息队列一致：内核在 SVC 里只登记，真正让出 CPU 由这里的
+ * 轮询做（WOULDBLOCK -> 等 1 ms -> 重问 -> 直到超时）。
+ * ============================================================ */
+int32 arkrtos_sbuf_create(char *name)
+{
+    uint32 p[6];
+    p[0] = 1; p[1] = (uint32)name; p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
+    return arkrtos_call_sbuf_ctrl(p);
+}
+
+/* 流语义下"部分成功"是正常返回，不重试；只有 WOULDBLOCK 才重问。 */
+int32 arkrtos_sbuf_send(int32 handle, const void *buf, int32 len, int32 timeout_ms)
+{
+    uint32 start = arkrtos_get_time_ms();
+
+    for(;;)
+    {
+        uint32 p[6];
+        int32 r;
+
+        p[0] = 2; p[1] = (uint32)handle; p[2] = (uint32)buf;
+        p[3] = (uint32)len; p[4] = (uint32)timeout_ms; p[5] = 0;
+        r = arkrtos_call_sbuf_ctrl(p);
+
+        if(r != ARKRTOS_SYNC_ERR_WOULDBLOCK)
+        {
+            return r;
+        }
+        if(arkrtos_sync_wait_expired(start, timeout_ms) != 0)
+        {
+            return ARKRTOS_SYNC_ERR_TIMEOUT;
+        }
+        (void)arkrtos_task_wait(ARKRTOS_APP_POLL_MS);
+    }
+}
+
+int32 arkrtos_sbuf_recv(int32 handle, void *buf, int32 len, int32 timeout_ms)
+{
+    uint32 start = arkrtos_get_time_ms();
+
+    for(;;)
+    {
+        uint32 p[6];
+        int32 r;
+
+        p[0] = 3; p[1] = (uint32)handle; p[2] = (uint32)buf;
+        p[3] = (uint32)len; p[4] = (uint32)timeout_ms; p[5] = 0;
+        r = arkrtos_call_sbuf_ctrl(p);
+
+        if(r != ARKRTOS_SYNC_ERR_WOULDBLOCK)
+        {
+            return r;
+        }
+        if(arkrtos_sync_wait_expired(start, timeout_ms) != 0)
+        {
+            return ARKRTOS_SYNC_ERR_TIMEOUT;
+        }
+        (void)arkrtos_task_wait(ARKRTOS_APP_POLL_MS);
+    }
+}
+
+int32 arkrtos_sbuf_send_from_isr(int32 handle, const void *buf, int32 len)
+{
+    uint32 p[6];
+    p[0] = 4; p[1] = (uint32)handle; p[2] = (uint32)buf;
+    p[3] = (uint32)len; p[4] = 0; p[5] = 0;
+    return arkrtos_call_sbuf_ctrl(p);
+}
+
+int32 arkrtos_sbuf_used(int32 handle)
+{
+    uint32 p[6];
+    p[0] = 5; p[1] = (uint32)handle; p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
+    return arkrtos_call_sbuf_ctrl(p);
+}
+
+int32 arkrtos_sbuf_free(int32 handle)
+{
+    uint32 p[6];
+    p[0] = 6; p[1] = (uint32)handle; p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
+    return arkrtos_call_sbuf_ctrl(p);
+}
+
+int32 arkrtos_sbuf_reset(int32 handle)
+{
+    uint32 p[6];
+    p[0] = 7; p[1] = (uint32)handle; p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
+    return arkrtos_call_sbuf_ctrl(p);
+}
+
+int32 arkrtos_sbuf_delete(int32 handle)
+{
+    uint32 p[6];
+    p[0] = 8; p[1] = (uint32)handle; p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
+    return arkrtos_call_sbuf_ctrl(p);
+}
+
+int32 arkrtos_mbuf_send(int32 handle, const void *buf, int32 len, int32 timeout_ms)
+{
+    uint32 start = arkrtos_get_time_ms();
+
+    for(;;)
+    {
+        uint32 p[6];
+        int32 r;
+
+        p[0] = 9; p[1] = (uint32)handle; p[2] = (uint32)buf;
+        p[3] = (uint32)len; p[4] = (uint32)timeout_ms; p[5] = 0;
+        r = arkrtos_call_sbuf_ctrl(p);
+
+        if(r != ARKRTOS_SYNC_ERR_WOULDBLOCK)
+        {
+            return r;
+        }
+        if(arkrtos_sync_wait_expired(start, timeout_ms) != 0)
+        {
+            return ARKRTOS_SYNC_ERR_TIMEOUT;
+        }
+        (void)arkrtos_task_wait(ARKRTOS_APP_POLL_MS);
+    }
+}
+
+int32 arkrtos_mbuf_recv(int32 handle, void *buf, int32 len, int32 timeout_ms)
+{
+    uint32 start = arkrtos_get_time_ms();
+
+    for(;;)
+    {
+        uint32 p[6];
+        int32 r;
+
+        p[0] = 10; p[1] = (uint32)handle; p[2] = (uint32)buf;
+        p[3] = (uint32)len; p[4] = (uint32)timeout_ms; p[5] = 0;
+        r = arkrtos_call_sbuf_ctrl(p);
+
+        if(r != ARKRTOS_SYNC_ERR_WOULDBLOCK)
+        {
+            return r;
+        }
+        if(arkrtos_sync_wait_expired(start, timeout_ms) != 0)
+        {
+            return ARKRTOS_SYNC_ERR_TIMEOUT;
+        }
+        (void)arkrtos_task_wait(ARKRTOS_APP_POLL_MS);
+    }
+}
+
+int32 arkrtos_mbuf_send_from_isr(int32 handle, const void *buf, int32 len)
+{
+    uint32 p[6];
+    p[0] = 11; p[1] = (uint32)handle; p[2] = (uint32)buf;
+    p[3] = (uint32)len; p[4] = 0; p[5] = 0;
+    return arkrtos_call_sbuf_ctrl(p);
+}
+
+int32 arkrtos_mbuf_peek_len(int32 handle)
+{
+    uint32 p[6];
+    p[0] = 12; p[1] = (uint32)handle; p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
+    return arkrtos_call_sbuf_ctrl(p);
 }
 
 int32 arkrtos_timer_create(char *name)

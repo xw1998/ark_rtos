@@ -572,6 +572,42 @@ def check_sdk_stdio_host():
         else:
             fail("sdk-stdio-host", "gate failed: %s" % txt.strip()[:160])
 
+def check_sbuf_host():
+    """Byte-stream / message buffers: the ring arithmetic must be provably right.
+
+    kernelsrc/tests/test_sbuf_host.c links the real arkrtos_sbuf.c against stub
+    scheduler / critical-section / trace functions, so the byte moving (wrap
+    around, partial send, length-prefixed framing, discard-without-desync) is
+    exercised on the host.  The blocking paths are NOT covered here - they need
+    a real scheduler - so this gate must not be read as "the module is verified".
+    A missing host compiler is a FAIL, not a skip.
+    """
+    import tempfile
+    cc = _find_host_cc()
+    if not cc:
+        fail("sbuf-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        exe = os.path.join(td, "sbuf_host.exe" if os.name == "nt" else "sbuf_host")
+        cmd = [cc]
+        if "mingw" in cc.replace("\\", "/").lower():
+            cmd.append("-B" + os.path.dirname(cc))
+        cmd += ["-std=gnu11", "-DARKRTOS_USE_SBUF=1",
+                "-Ikernelsrc/include", "-Ikernelsrc/components/mdk_trace",
+                "-Iboard/stm32f427", "-Iconfig", "-o", exe,
+                "kernelsrc/tests/test_sbuf_host.c", "kernelsrc/src/arkrtos_sbuf.c"]
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            fail("sbuf-host", "gate did not build: %s"
+                 % (r.stderr or "").strip().splitlines()[-1:])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode == 0 and "SBUF-HOST OK" in txt:
+            ok("sbuf-host", "ring + message framing verified on host")
+        else:
+            fail("sbuf-host", "gate failed: %s" % txt.strip()[:160])
+
 def check_features_switches():
     """Every gate in arkrtos_features.h must be declared in Kconfig.
 
@@ -654,6 +690,7 @@ def main(argv):
     check_devicetree_generated()
     check_utest_host()
     check_sdk_stdio_host()
+    check_sbuf_host()
     if do_build:
         check_builds(uv4)
 

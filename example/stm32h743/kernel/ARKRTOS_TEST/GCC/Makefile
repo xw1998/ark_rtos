@@ -86,6 +86,11 @@ USE_QSPI ?= 0
 MINI_PRIORITY ?= 20
 
 
+# 内核组件开关（与 kernelsrc/include/arkrtos_features.h 同名宏）。
+# 默认 0 与「没有这个开关」逐字节一致：arkrtos_sbuf.c 整个文件被
+# #if (ARKRTOS_USE_SBUF == 1) 包住，关档编出空目标，镜像与命令表不动。
+USE_SBUF ?= 0
+
 # 交叉工具链前缀；默认取 PATH 上的 arm-none-eabi-
 CROSS ?= arm-none-eabi-
 CC    := $(CROSS)gcc
@@ -123,7 +128,8 @@ DEFS := \
   -DARKRTOS_MINI_READ_VFS=$(USE_MINI_VFS) \
   -DARKRTOS_USE_APPPACK=$(USE_APPPACK) \
   -DARKRTOS_PACK_IN_EXTRAM=$(USE_SDRAM) \
-  -DARKRTOS_AUTOMOUNT_NOR=$(USE_QSPI)
+  -DARKRTOS_AUTOMOUNT_NOR=$(USE_QSPI) \
+  -DARKRTOS_USE_SBUF=$(USE_SBUF)
 
 ifneq ($(MINI_PRIORITY),)
 DEFS += -DARKRTOS_MINI_TASK_PRIORITY=$(MINI_PRIORITY)

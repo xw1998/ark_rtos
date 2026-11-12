@@ -550,6 +550,11 @@
               <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_sync.c</FilePath>
             </File>
             <File>
+              <FileName>arkrtos_sbuf.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_sbuf.c</FilePath>
+            </File>
+            <File>
               <FileName>arkrtos_mq.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_mq.c</FilePath>
