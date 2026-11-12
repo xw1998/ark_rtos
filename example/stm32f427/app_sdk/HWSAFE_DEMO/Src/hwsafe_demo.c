@@ -4,17 +4,24 @@
 *          崩溃、任务被故障恢复杀掉之后，由**内核**（而不是崩溃的 App）把它带回
 *          安全态。
 *
-*          流程：
-*            1. 打开 led0（PC0）并点亮；
-*            2. 用 arkrtos_dev_set_will("led0", 0, 0) 留一句遗言：
-*               "我死后请对 led0 执行 drv_ctrl(cmd=0)（关灯）"；
-*            3. 故意越权写内核私有 RAM -> MemManage -> 任务被杀；
-*            4. 内核在收尸路径执行该遗言 -> LED 被强制关掉。
+*          流程（两次启动各走一条通道，用故障环计数分阶段）：
+*            第 1 次（通道 B，所有者遗言）：
+*              1. 打开 led0（PC0）并点亮；
+*              2. 用 arkrtos_dev_set_will("led0", 0, 0) 留一句遗言：
+*                 "我死后请对 led0 执行 drv_ctrl(cmd=0)（关灯）"；
+*              3. 故意越权写内核私有 RAM -> MemManage -> 任务被杀；
+*              4. 内核在收尸路径执行该遗言 -> LED 被强制关掉。
+*            第 2 次及以后（通道 A，驱动回调）：
+*              1. 打开 led1 并点亮，**不留遗言**；
+*              2. 同样越权崩溃 -> 内核退回驱动注册的安全态回调关灯。
+*          `hwsafe` 的 (will= cb= none=) 计数因此可以分开取证：两条通道
+*          各走一次，计数各加一，不允许互相顶替。
 *
 *          验证口径（shell 侧，见 README）：
-*            - `hwsafe` 显示 neutralized>=1、last_owner=<本槽任务号>；
+*            - `hwsafe` 显示 neutralized 递增、last_owner=<本槽任务号>；
+*              第 1 次启动后 will+1，之后每次 cb+1；
 *            - `fault` 有 MEMFAULT 记录；
-*            - 目视 LED 已灭。
+*            - 目视 LED 已灭（led0 / led1）。
 *
 *          本镜像**故意不带心跳**，整机是否还活着要在 shell 侧看。
 *          探针只跑一次就转长睡（连续 3 次故障会把整槽禁掉）。
@@ -48,36 +55,69 @@ int main(void)
     int32 con;
     int32 led;
     int32 r;
+    int32 n;
 
     con = arkrtos_dev_open("ttyS0", 0);
+
+    /* 两条通道的取证分工：同一镜像靠故障环计数分阶段。
+     *   第 1 次启动 —— 通道 B（所有者遗言）：开 led0、留遗言、崩溃；
+     *   之后启动    —— 通道 A（驱动回调）：开 led1、**不留遗言**、崩溃。
+     * `hwsafe` 的计数因此能分开读：will 说明通道 B 走了，cb 说明没有遗言时
+     * 内核退回到了驱动注册的安全态回调（两条通道不能互相顶替）。
+     * 计数只增不减，所以「第几次启动」用 arkrtos_fault_record_count() 判定，
+     * 与 APP_BAD 的做法一致。 */
+    n = arkrtos_fault_record_count();
 
     /* 每次被启动都跑一次探针：内核不会自动重启崩溃的 App，需要复验时由操作者
      * 再 `app start <slot>`（注意同一槽连续 3 次故障会被终局策略 held，用
      * `app start` 可再放行）。 */
     hw_puts(con, "\r\nHWSAFE_DEMO: App-crash hardware safe-state probe\r\n");
 
-    /* 1) 打开 led0 并点亮（cmd 1 = on，见 drvled.h 的 ARKRTOS_LED_CTRL_ON）。 */
-    led = arkrtos_dev_open("led0", 0);
-    if(led >= 0)
+    if(n <= 0)
     {
-        (void)arkrtos_dev_ctrl(led, 1u, 0u);
-        hw_puts(con, "HWSAFE_DEMO: led0 opened and turned ON\r\n");
+        /* 阶段 1/2 · 通道 B（所有者遗言） */
+        hw_puts(con, "HWSAFE_DEMO: stage 1/2 - will channel (led0)\r\n");
 
-        /* 2) 留遗言：我死后把 led0 关掉（cmd 0 = off）。内核据此在本任务死亡
-         *    时执行 drv_ctrl(obj, 0, 0) —— 不需要本 App 的代码还能被调用。 */
-        r = arkrtos_dev_set_will("led0", 0, 0);
-        if(r == 0)
+        /* 1) 打开 led0 并点亮（cmd 1 = on，见 drvled.h 的 ARKRTOS_LED_CTRL_ON）。 */
+        led = arkrtos_dev_open("led0", 0);
+        if(led >= 0)
         {
-            hw_puts(con, "HWSAFE_DEMO: will declared (led0 ctrl=0 off)\r\n");
+            (void)arkrtos_dev_ctrl(led, 1u, 0u);
+            hw_puts(con, "HWSAFE_DEMO: led0 opened and turned ON\r\n");
+
+            /* 2) 留遗言：我死后把 led0 关掉（cmd 0 = off）。内核据此在本任务死亡
+             *    时执行 drv_ctrl(obj, 0, 0) —— 不需要本 App 的代码还能被调用。 */
+            r = arkrtos_dev_set_will("led0", 0, 0);
+            if(r == 0)
+            {
+                hw_puts(con, "HWSAFE_DEMO: will declared (led0 ctrl=0 off)\r\n");
+            }
+            else
+            {
+                hw_puts(con, "HWSAFE_DEMO: will REFUSED (kernel ARKRTOS_HW_SAFE=0?)\r\n");
+            }
         }
         else
         {
-            hw_puts(con, "HWSAFE_DEMO: will REFUSED (kernel ARKRTOS_HW_SAFE=0?)\r\n");
+            hw_puts(con, "HWSAFE_DEMO: led0 open failed\r\n");
         }
     }
     else
     {
-        hw_puts(con, "HWSAFE_DEMO: led0 open failed\r\n");
+        /* 阶段 2/2 · 通道 A（驱动回调）：同一个 led_drv，板级已注册安全态回调。
+         * 这里刻意不留遗言，内核必须退回驱动回调把灯关掉。 */
+        hw_puts(con, "HWSAFE_DEMO: stage 2/2 - driver callback channel (led1, no will)\r\n");
+
+        led = arkrtos_dev_open("led1", 0);
+        if(led >= 0)
+        {
+            (void)arkrtos_dev_ctrl(led, 1u, 0u);
+            hw_puts(con, "HWSAFE_DEMO: led1 opened and turned ON (no will declared)\r\n");
+        }
+        else
+        {
+            hw_puts(con, "HWSAFE_DEMO: led1 open failed\r\n");
+        }
     }
 
     hw_puts(con, "HWSAFE_DEMO: now violating on purpose (write kernel RAM, expect MemManage)\r\n");

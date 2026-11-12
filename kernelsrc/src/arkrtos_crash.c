@@ -189,37 +189,99 @@ void arkrtos_crash_scan_apply(void)
     uint32 limit = arkrtos_crash_limit();
     uint32 changed = 0u;
     uint32 i;
+    uint32 k;
 
+    /* Pass 1 - file every entry under the record that owns its address.
+     * The journal is indexed by slot record, but the record order is rebuilt
+     * on every reset (records come back sorted by pool address), so an image
+     * can sit under a different index than the one that charged it. Only
+     * entries that are moved are consumed here: an entry that looks orphaned
+     * from one index may be the only history of a record further down the
+     * table, and clearing it now would forgive the crashes of a slot this
+     * pass has not reached yet. */
     for(i = 0u; (i < p_pt->slot_max) && (i < (uint32)ARKRTOS_SLOT_ARRAY_MAX); i++)
     {
-        if(p_pt->slot_type[i] == ARKRTOS_SLOT_FREE)
+        uint32 taken = 0u;
+
+        if((p_pt->slot_type[i] == ARKRTOS_SLOT_FREE) || (p_pt->slot_base[i] == 0u))
         {
-            /* No image in this record: any entry left over from an uninstall
-             * must not be waiting to charge the next occupant. */
-            if((p_j->base[i] != 0u) || (p_j->crash_cnt[i] != 0u) ||
-               (p_j->dis_reason[i] != ARKRTOS_CRASH_REASON_NONE))
-            {
-                arkrtos_crash_clear_entry(i);
-                changed = 1u;
-            }
-            continue;
+            continue;           /* nothing to claim; the sweep deals with it */
         }
 
-        if((p_pt->slot_base[i] == 0u) || (p_j->base[i] != p_pt->slot_base[i]))
+        if(p_j->base[i] == p_pt->slot_base[i])
         {
-            /* The entry describes a different image - replaced, moved by
-             * compaction, or the record was reused. Drop it rather than charge
-             * a newcomer with someone else's crashes. */
+            continue;           /* already filed under the right index */
+        }
+
+        for(k = 0u; (k < p_pt->slot_max) && (k < (uint32)ARKRTOS_SLOT_ARRAY_MAX); k++)
+        {
+            if((k == i) || (p_j->base[k] != p_pt->slot_base[i]))
+            {
+                continue;
+            }
+
+            /* Take the whole entry, then blank the source so the same address
+             * cannot be charged twice in this pass. */
+            p_j->base[i]        = p_j->base[k];
+            p_j->crash_cnt[i]   = p_j->crash_cnt[k];
+            p_j->last_reason[i] = p_j->last_reason[k];
+            p_j->dis_reason[i]  = p_j->dis_reason[k];
+            p_j->dis_tick[i]    = p_j->dis_tick[k];
+            arkrtos_crash_clear_entry(k);
+            taken = 1u;
+            changed = 1u;
+            break;
+        }
+
+        if(taken == 0u)
+        {
+            /* Nothing carries this address: the entry describes a different
+             * image - replaced, moved elsewhere, or the record was reused.
+             * Drop it rather than charge a newcomer with someone else's
+             * crashes. */
             arkrtos_crash_clear_entry(i);
             changed = 1u;
         }
+    }
 
-        /* Re-tag unconditionally: from here on the entry belongs to the image
-         * the scan just found, whatever it replaced. */
-        p_j->base[i] = p_pt->slot_base[i];
-        changed = 1u;
+    /* Pass 2 - drop history no record claims any more (an uninstalled image,
+     * or an address that left the table). Without this, a later install that
+     * happens to land on the same address would inherit the old count. */
+    for(i = 0u; (i < (uint32)ARKRTOS_SLOT_ARRAY_MAX); i++)
+    {
+        uint32 claimed = 0u;
 
+        if(p_j->base[i] == 0u)
+        {
+            continue;
+        }
+
+        for(k = 0u; (k < p_pt->slot_max) && (k < (uint32)ARKRTOS_SLOT_ARRAY_MAX); k++)
+        {
+            if((p_pt->slot_type[k] != ARKRTOS_SLOT_FREE) &&
+               (p_pt->slot_base[k] == p_j->base[i]))
+            {
+                claimed = 1u;
+                break;
+            }
+        }
+
+        if(claimed == 0u)
+        {
+            arkrtos_crash_clear_entry(i);
+            changed = 1u;
+        }
+    }
+
+    /* Pass 3 - publish the counts and apply the hold. */
+    for(i = 0u; (i < p_pt->slot_max) && (i < (uint32)ARKRTOS_SLOT_ARRAY_MAX); i++)
+    {
         p_pt->slot_crash_cnt[i] = p_j->crash_cnt[i];
+
+        if(p_pt->slot_type[i] == ARKRTOS_SLOT_FREE)
+        {
+            continue;
+        }
 
         /* Two ways a slot can already be past the limit at boot:
          *   - it was disabled in a previous run and the journal survived;

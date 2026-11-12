@@ -750,14 +750,15 @@ STM32F427VGTx @96 MHz，DAPLink（SWD 两线，无 SWO）经 mdkdebug 的 SWD tr
 | 常驻安装器的固定槽覆盖安装（`SHELL_ENABLE=0`） | `INSTALLER_FIXED_SLOT=0` 变体上板：上电先 `fixed slot 0 holds a running image (slot 0): stopping it first` → `fixed slot 0 cleared, send the file now`；覆盖安装不再出现 `err -4`，镜像装入后正常自启；同一上电周期内第二帧被干净拒绝（`one image already installed this boot: reboot before sending another one` + `drained 1932 B of the rejected frame`） |
 | 运行中无缝升级 | 两个小程序（`SEAMLESS_V1` / `SEAMLESS_V2`）交接控制权：V1 独占 10.7 ms/轮、V2 接管后 5.9 ms/轮；交接空洞 27/31/224/407 ms（只算交权那一瞬，装载停顿另计、已削到 45/64/72 ms）；迭代计数逐字连续（`it=994` → `994`）；受控量 `pv` 未回零；`guard starves=0`；交接前后 `fault` 行数不变。反例侧：旧版抢不回控制权、新版超时后 5000 ms 内无人释放、残留请求已撤回（见 [docs/无缝升级例程.md](docs/无缝升级例程.md)） |
 | App 崩溃的硬件安全态（遗言） | `HWSAFE_DEMO`：App 打开 `led0` 点亮并声明遗言（关灯）后故意越权 → 被 MPU 拦下 → 故障恢复杀任务；内核收尸时执行遗言，`hwsafe` 报 `neutralized=6 last_owner=12`，`fault` 走 `MEMFAULT` → `RECOVER`×3 → `TASKKILL` → `APPDISABLED`，LED 目视由亮转灭（两次独立新装复现，提交 `c021168`） |
+| 遗言机制的通道拆分 | `HWSAFE_DEMO 1.0.1` 两阶段上板：`hwsafe` 报 `will=1 cb=2 none=3 fail=0 handover=0`；阶段 1/2 走遗言（通道 B），阶段 2/2 不留遗言、由驱动回调（通道 A）中和，LED 均目视由亮转灭（见 [docs/App崩溃硬件安全与遗言机制.md](docs/App崩溃硬件安全与遗言机制.md) §六） |
+| 崩溃上限的三次禁用 + 跨复位保持 | 崩 3 次 → `CRASH:3006 slot N disabled: crash-limit, 3 consecutive faults`；`reboot` 后开机首行即 `CRASH: slot N held: crash-limit, 3 faults, last at tick <原 tick>`、`app list` `auto=no`/`INVALID` 且不再自启；**卸载低地址槽造成槽位下标 1→0 漂移后仍能接管该历史**，二次重启幂等（修前实测不保持，见 [docs/崩溃恢复与镜像版本把关.md](docs/崩溃恢复与镜像版本把关.md) §1.7） |
+| 固定槽 `install <slot>` 的落点 | `install 2` 落 `0x080A0000` → `reboot` 后仍在 `0x080A0000` 且 `RUNNING`；装 slot 1 不影响 slot 2。修前实测镜像会被开机回收搬到 `0x08060000` 并擦掉配置槽（见 [docs/配置区与安装策略.md](docs/配置区与安装策略.md) §3.2.1） |
 | 软总线（板内两节点） | F427 上 `bus selftest` 10 项全 PASS（`checks 56, failed 0`），`bus info` 报 `ark_softbus 18c6ccf` 与同步副本一致 |
 
 仍未上板验证或未闭环的项：
 
 - **真实以太网收发**：板级无可用 PHY（`board/stm32f427/` 下没有 PHY 驱动、MDIO 读写、`eth_` 接口与 RMII 引脚分配），网络路径跑的是回环网卡，未做真实链路收发验证（见 [docs/lwIP协议栈接入.md](docs/lwIP协议栈接入.md) §1）
-- **故障恢复的「连续重启 3 次禁用」**策略未做专项真机验证
-- **固定槽位模式下一次真实 `install <slot>` 的落点复验**（槽表已生效并被 `pool` 列出，但「装进去正好落在配置地址」这一环还没跑）
-- **遗言机制的通道拆分取证**：Ark 侧只走过 `HWSAFE_DEMO` 的遗言（通道 B）路径，驱动回调（通道 A）单独取证、`will`/`cb`/`none` 拆分计数与「小程序正常退出走计划内交接」均**未在 Ark 侧取到**（该三者已在 svcrtos_nano 侧落地上板，见 nano 同名文档）
+- **小程序正常退出走计划内交接**：Ark 侧未取到（该路径已在 svcrtos_nano 侧落地上板，见 nano 同名文档）
 - **软总线的物理线两节点**：板上只有一路 USART1 且被内核控制台独占，无空闲 UART，故只验证了板内 loopback；真实串口线上两节点（两块板 / 板 + PC）**未验证**（见 [docs/软总线接入.md](docs/软总线接入.md) §7）
 
 文档索引见 [docs/README.md](docs/README.md)。

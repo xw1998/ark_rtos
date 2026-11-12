@@ -2504,6 +2504,16 @@ int32 arkrtos_loader_reclaim(void)
     uint32 erased = 0u;
     uint32 sect;
 
+    /* FIXED 模式下固定槽不是池空间：搬走落在槽里的镜像、或擦掉槽所在的扇区，
+     * 都会当场毁掉这个模式唯一的承诺（「这个地址永远属于这个槽」）。
+     * 实测形态：装进 fixed slot 2 的镜像，重启后出现在 0x08060000，配置里的
+     * 槽 2 读成 empty。固定槽的清理是显式的（clear_fixed_slot，在收帧之前），
+     * 所以这里没有需要回收的东西。 */
+    if(pt->layout_mode == (uint32)ARKRTOS_LAYOUT_MODE_FIXED)
+    {
+        return 0;
+    }
+
     /* 回收力度是运行期决定的（宿主机在配置区里选），不再是编译期的 #if：
      * 先全局压实：把活镜像尽量往下挤，剩下的死字节再按扇区收尾。
      * 下面的逐扇区处理对两种力度都要跑：它们是两种策略，

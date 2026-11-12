@@ -219,6 +219,7 @@ hwsafe: enabled, devs=3 owners=6 neutralized=6 (will=3 cb=0 none=3 fail=0 handov
 | 内核编译（F427，`ARKRTOS_HW_SAFE=1`） | **0 Error(s)** |
 | 门禁 `tools/ci_gate.py` | **全过** |
 | 上板验证：收尸—中和路径（App 崩溃后硬件被带离） | **通过**（`c021168`，`neutralized=6 last_owner=12`，两次独立新装） |
-| 上板验证：**通道拆分计数**（`will` / `cb` / `none` 各几次） | **未取到**（当时安装报 `-14 NOSPACE`、槽位碎片化，`out6` 那一轮没拿到） |
-| 上板验证：驱动回调通道单独取证 | **未做**（同上：只有 `HWSAFE_DEMO` 的遗言路径走过上板） |
+| 上板验证：**通道拆分计数**（`will` / `cb` / `none` 各几次） | **通过**（`HWSAFE_DEMO 1.0.1` 两阶段：`will=1 cb=2 none=3 fail=0 handover=0`，三次崩溃后 `app list` 该槽 `crash=3 held=crash-limit`） |
+| 上板验证：驱动回调通道单独取证（通道 A，App 不留遗言） | **通过**（同一镜像阶段 2/2：`led1` 点亮后不留 `will` 就崩溃，`cb` 计数 2 次全部来自该通道，LED 由亮转灭；`hwsafe` 每条 `own` 行 `will=none`） |
+| 上板验证：崩溃上限的三次禁用 + 跨复位保持 | **通过**（`CRASH:3006 slot N disabled: crash-limit, 3 consecutive faults`；`reboot` 后开机首行即 `CRASH:xxx slot N held: crash-limit, 3 faults, last at tick <原 tick>`，`app list` 显示 `auto=no`/`INVALID` 且不再自启；同盘二次重启读数不变） |
 | 上板验证：计划内交接（小程序正常退出） | **未做**（交接语义本轮才引入；同一套改动已在 svcrtos_nano 侧落地上板验证，见 nano 的 `docs/App崩溃硬件安全与遗言机制.md`） |
