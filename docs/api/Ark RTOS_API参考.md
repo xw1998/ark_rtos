@@ -17,7 +17,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（30 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（32 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -3083,6 +3083,27 @@ uint32 arkrtos_port_flash_sector_size(uint32 addr);
 **获取指定地址所在扇区的大小（字节）**
 - `addr`：Flash 地址
 **返回**：扇区大小；地址非法返回 0
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**片内 Flash 的保护状态（只读，不解锁、不写选项字节）**
+由板级实现；内核的安全基线自检用它把"读保护/写保护到底什么档"
+摆出读数，而不是报一句"没通路"。
+
+### `int32  arkrtos_port_flash_protection(arkrtos_flash_prot_t *p_out);`
+
+```c
+int32  arkrtos_port_flash_protection(arkrtos_flash_prot_t *p_out);
+```
+
+**读取片内 Flash 的保护状态**
+- `p_out`：输出（三个字段全部由实现填写）
+**返回**：0=读取成功；其他=读不到（板级未实现 / 该芯片没有这些寄存器）
+> 说明：只读操作：不解除 OPTLOCK、不擦除、不改变任何保护位。
 
 ## kernelsrc/include/arkrtos_hwsafe.h
 

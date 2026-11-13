@@ -338,13 +338,39 @@ static void sec_check_console(arkrtos_sec_report_t *p_rep)
             0u, 0u, 0u, 0u);
 }
 
-/* 11. Flash 读保护 / 写保护：内核没有读取选项字节的通路，只能用调试器读。
- *     这一条 SKIP 而不是 PASS —— "没读过"和"读出来是 0 级"是两件事。 */
+/* 11. Flash 读保护 / 写保护：读选项字节（只读、不解锁、不改任何保护位）。
+ *     板级实现 arkrtos_port_flash_protection()；没实现的板子由下面的弱符号兜住，
+ *     输出与"没有这条通路"时逐字节相同（仍是 SKIP）。
+ *     读到了就报读数：RDP 生效算 PASS；RDP 还是 0 级（谁拿到片子都能读走固件）
+ *     算 FINDING —— "没读过"和"读出来是 0 级"始终是两件事。 */
+__attribute__((weak)) int32 arkrtos_port_flash_protection(arkrtos_flash_prot_t *p_out)
+{
+    (void)p_out;
+    return -1;
+}
+
 static void sec_check_flash_protection(arkrtos_sec_report_t *p_rep)
 {
-    sec_add(p_rep, "flash.protection", (uint32)ARKRTOS_SEC_SKIP,
-            "no HAL path to option bytes: read RDP/WRP with a debug probe",
-            0u, 0u, 0u, 0u);
+    arkrtos_flash_prot_t fp;
+    int32 rc;
+
+    fp.rdp_level   = 0u;
+    fp.wrp_mask_lo = 0u;
+    fp.wrp_mask_hi = 0u;
+
+    rc = arkrtos_port_flash_protection(&fp);
+    if(rc != 0)
+    {
+        sec_add(p_rep, "flash.protection", (uint32)ARKRTOS_SEC_SKIP,
+                "no HAL path to option bytes: read RDP/WRP with a debug probe",
+                0u, 0u, 0u, 0u);
+        return;
+    }
+
+    sec_add(p_rep, "flash.protection",
+            (fp.rdp_level != 0u) ? (uint32)ARKRTOS_SEC_PASS : (uint32)ARKRTOS_SEC_FINDING,
+            "rdp=%u (0=none), wrp lo=0x%04x hi=0x%04x, bit=protected",
+            fp.rdp_level, fp.wrp_mask_lo & 0x0FFFu, fp.wrp_mask_hi & 0x0FFFu, 0u);
 }
 
 /* 12. 实时性读数：既然"响应时间可度量"是安全功能（看门狗喂狗窗口、急停）的前提，

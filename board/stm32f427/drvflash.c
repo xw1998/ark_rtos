@@ -147,3 +147,30 @@ int32 arkrtos_port_flash_write(uint32 addr, const uint8 *data, uint32 len)
     HAL_FLASH_Lock();
     return ret;
 }
+
+
+/* 选项字节（只读）。F427 的布局：
+ *   FLASH->OPTCR  bit1  = RDP   1 = 0 级（无保护），0 = 1 级（读保护生效）
+ *                 [31:16] nWRP  扇区 0..11，0 = 该扇区被写保护
+ *   FLASH->OPTCR1 [27:16] nWRP  扇区 12..23
+ * 读这些寄存器不需要解锁、也不受 OPTLOCK 影响；本函数不写任何一位。 */
+int32 arkrtos_port_flash_protection(arkrtos_flash_prot_t *p_out)
+{
+    uint32 optcr;
+    uint32 optcr1;
+
+    if(p_out == 0)
+    {
+        return -1;
+    }
+
+    optcr  = FLASH->OPTCR;
+    optcr1 = FLASH->OPTCR1;
+
+    /* nWRP 位为 1 表示"不保护"，所以取反后再截出有效位 */
+    p_out->rdp_level   = ((optcr & FLASH_OPTCR_RDP) != 0u) ? 0u : 1u;
+    p_out->wrp_mask_lo = (~(optcr  >> FLASH_OPTCR_nWRP_Pos)) & 0x0FFFu;
+    p_out->wrp_mask_hi = (~(optcr1 >> FLASH_OPTCR1_nWRP_Pos)) & 0x0FFFu;
+
+    return 0;
+}

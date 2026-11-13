@@ -406,6 +406,26 @@ int32  arkrtos_port_flash_write(uint32 addr, const uint8 *data, uint32 len);
 */
 uint32 arkrtos_port_flash_sector_size(uint32 addr);
 
+/**
+* @brief 片内 Flash 的保护状态（只读，不解锁、不写选项字节）
+* @details 由板级实现；内核的安全基线自检用它把"读保护/写保护到底什么档"
+*          摆出读数，而不是报一句"没通路"。
+*/
+typedef struct
+{
+    uint32 rdp_level;    /* 0 = 无读保护（谁拿到片子都能读走固件）, 1 = 读保护生效 */
+    uint32 wrp_mask_lo;  /* 扇区 0..11 的写保护位，1 = 该扇区被保护 */
+    uint32 wrp_mask_hi;  /* 扇区 12..23 的写保护位（低 12 位有效） */
+} arkrtos_flash_prot_t;
+
+/**
+* @brief 读取片内 Flash 的保护状态
+* @param p_out 输出（三个字段全部由实现填写）
+* @return 0=读取成功；其他=读不到（板级未实现 / 该芯片没有这些寄存器）
+* @note 只读操作：不解除 OPTLOCK、不擦除、不改变任何保护位。
+*/
+int32  arkrtos_port_flash_protection(arkrtos_flash_prot_t *p_out);
+
 #include "arkrtos_spin.h"
 
 #endif

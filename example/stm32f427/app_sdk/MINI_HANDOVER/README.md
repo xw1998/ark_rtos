@@ -16,13 +16,14 @@
 
 ## 程序做了什么
 
-`Src/mini_handover.c` 只有三步：
+`Src/mini_handover.c`：
 
 1. `arkrtos_dev_open("led2", 0)` —— led0/led1 被内核任务 1/2 占着，led2 平时无所有者；
 2. `arkrtos_dev_ctrl(led, 1u, 0u)` 点亮（`ARKRTOS_LED_CTRL_ON = 1`，led2 = PC2，低电平点亮）；
-3. **故意不 `close`**，打印三行后从 `main` 正常 `return 0`。
+3. 原地待 3 秒（`arkrtos_task_delay`，参数是微秒）——留出**目视**窗口；
+4. **故意不 `close`**，打印后从 `main` 正常 `return 0`。
 
-第 3 步是判据的前提：LED 驱动的 `close()` 会把灯关掉，退出那一刻台账就空了；
+第 4 步是判据的前提：LED 驱动的 `close()` 会把灯关掉，退出那一刻台账就空了；
 只有「不 close 直接 return」才构造出「退出时仍持有设备」的状态。
 若先 close，退出时无台账可摘，`handover` 不会动，用例等于白跑。
 
@@ -31,9 +32,8 @@
 | 项 | 手段 | 读数 |
 |---|---|---|
 | 基线 | `hwsafe` | `enabled, devs=3 owners=3 neutralized=0 (will=0 cb=0 none=0 fail=0 handover=0)`；own = led0(task1) / led1(task2) / ttyS0(task6) |
-| 运行 | `mini run /mh.svcm` | 见下方串口原文；末尾 `mini run: /mh.svcm loaded but no longer running` |
+| 运行 | `mini run /mh.svcm` | 见下方串口原文 |
 | 交接计数 | 再发 `hwsafe` | `... neutralized=0 (will=0 cb=0 none=0 fail=0 handover=1)`；led2 的 own 条目消失，无新条目 |
-| 硬件未被中和 | `pyocd cmd -t stm32f427zi -c "read32 0x40020814"`（GPIOC_ODR） | `40020814: 03000000` —— PC2 为低，**led2 仍亮着**；被中和会写成 1（灭） |
 | 两块回收 | `mini stat` | `mini: none running` |
 
 串口原文：
@@ -41,17 +41,31 @@
 ```
 MINI_HANDOVER: mini starts (planned hand-over probe)
 MINI_HANDOVER: led2 handle=18874370 ctrl(ON)=0
+MINI_HANDOVER: holding, round 1
+MINI_HANDOVER: holding, round 2
+MINI_HANDOVER: holding, round 3
 MINI_HANDOVER: returning from main, device still held
-mini run: /mh.svcm loaded but no longer running (returned or stopped)
+mini run: /mh.svcm loaded but no longer running (a program that exits on its own looks the same; 'dmesg' shows which)
 ```
 
-体积：`Code=2308 RO-data=236 RW-data=0 ZI-data=4096`；打包后
-`build/mini_handover.svcapp` 2840 B（负载 2544 B），重定位表 10 项，
+体积：`Code=2408 RO-data=272 RW-data=0 ZI-data=4096`；打包后
+`build/mini_handover.svcapp` 2980 B（负载 2680 B），重定位表 11 项，
 代码块 4096 B + RAM 块 8192 B，镜像**不自启**。
 
 > **口径**：判据必须成对读 —— `handover` +1 **且** `neutralized` 不变。
 > 单独看 `neutralized=0` 不算过（没有台账可摘时它同样不动）。
-> 计数是判据，LED 目视是辅助，硬件侧主证据是 `GPIOC_ODR` 的读数，两者一致才算过。
+
+## 为什么没有用 GPIO / LED 当证据
+
+试过用 `pyocd` 读 `GPIOC_ODR` 证明"灯还亮着"，这条路在本机**不能用**：
+
+- 目标**运行时**读外设返回常量假值：`RCC_CR` / `FLASH_OPTCR` / `GPIOC_ODR` 三个不同地址
+  返回同一个 `0x03000000`；`halt` 之后才是真值（`OPTCR=0x0FFFAAED`、`ODR=0x00000006`）。
+- `halt` 本身会干扰目标：几次 `halt → read → go` 之后 `hwsafe` 的 `handover` 回到 0、
+  `tick.isr` 从头计数 —— 目标在调试期间被复位过（看门狗）。
+
+所以瞬时状态只认内核自己记的 `handover` / `neutralized` 与台账条目；LED 目视只能当人的辅助，
+不能进判据。详见 [已知限制](../../../../docs/已知限制.md) §五。
 
 ## 编译、打包、上板
 

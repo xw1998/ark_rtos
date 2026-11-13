@@ -35,6 +35,7 @@ int main(void)
 {
     int32 led;
     int32 r;
+    int   i;
 
     printf("MINI_HANDOVER: mini starts (planned hand-over probe)\n");
 
@@ -47,6 +48,14 @@ int main(void)
 
     r = arkrtos_dev_ctrl(led, 1u, 0u);          /* ARKRTOS_LED_CTRL_ON = 1 */
     printf("MINI_HANDOVER: led2 handle=%d ctrl(ON)=%d\n", (int)led, (int)r);
+
+    /* 先原地待 3 秒：这段时间里用调试器读 GPIOC_ODR，能看到"灯确实是点亮的"
+     * （PC2 = 0）。没有这个窗口就分不清"ctrl 没生效"和"退出时被谁关了" ——
+     * 探针在目标运行时读外设会返回假值，只有 halt 后读才是真的。 */
+    for (i = 0; i < 3; i++) {
+        arkrtos_task_delay(1000000u);           /* 参数是微秒 */
+        printf("MINI_HANDOVER: holding, round %d\n", (int)(i + 1));
+    }
 
     /* 故意不 close：台账在任务退出那一刻仍指向本任务，这正是要验的状态。
      * 如果这里先 close，退出时就无台账可摘，handover 不会动，用例也就白跑。 */
