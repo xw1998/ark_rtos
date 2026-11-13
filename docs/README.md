@@ -72,6 +72,7 @@ docs/
 ├── arkc板上直跑-M3b-QSPI持久化.md       # 【实机记录】QSPI NOR 持久化：引脚/AF 取证、位敲数据面取舍、noent 内核缺陷、全链路实录、速度账与欠账
 ├── arkc板上直跑-M4-hello演示.md      # 【实机记录】标准 C 的 printf/main 小程序：SDK 与工程分目录放 NOR、`make` + `mini run`、printf 取参桩、七条硬限制、回归与宿主门禁
 ├── arkvim编辑器显示约定.md            # 【约定】屏幕布局、五条显示约定与判据、已知限制、host 门禁与板上取证、vendored 同步流程
+├── stm32h743-external-memory.md             # 【实机记录】H743 外置 SDRAM/FMC：FMCEN 总闸门、32 MB 读写验证、编译器池与 ramfs 落 SDRAM
 ├── 功能开关.md                              # 【设计说明】三层开关、逐项"关掉后"语义、依赖约束、真能关的验证方法
 ├── 流缓冲与消息缓冲.md                      # 【用法+证据】sbuf/mbuf 两种语义、返回码、配置与 H743/F427 开档体积
 ├── 固定块内存池.md                          # 【用法+证据】固定块池、SVC 0x20、拒绝口径与默认档链接实测
@@ -82,6 +83,8 @@ docs/
 ├── Kconfig配置系统.md                       # 【设计说明】Kconfig 菜单、纯 Python 工具链、符号=宏名、注入点、依赖关系、数量限制迁移
 ├── 设备树.md                                # 【设计说明】DTS 子集与 dtc_lite、arkrtos_dt 查询 API、生成与校验、`dt` 命令、验证状态
 ├── 内核Shell控制台使用说明.md               # 【操作手册】console 命令（info/app/drv/task/sched/fault/install/log/pool/trace/cfg）
+├── 已知限制.md                              # 【设计说明】唯一一页限制清单：执行模型/应用形态/系统服务/可靠性安全/工具链，逐条标注取舍或欠账
+├── 欠账盘点.md                              # 【清单】功能/工程能力/易读性/文档四类欠账，每条带核对命令与判据、优先级与维护规则
 ├── 与Linux差距盘点.md                      # 【设计说明】与 Linux 逐维度差距表 + 欠账排序 + 明确不做的取舍
 ├── 与成熟RTOS对比.md                       # 【设计说明】对 FreeRTOS/RT-Thread/Zephyr 的逐维度矩阵 + 缺口分档
 ├── 硬件耦合审计.md                          # 【设计说明】内核硬件耦合点清单与处置、移植要动的范围

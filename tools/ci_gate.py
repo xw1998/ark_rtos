@@ -341,6 +341,32 @@ def check_encoding_eol():
 
 
 # ---------------------------------------------------------------- check 4
+def check_doc_index(dry_run=None):
+    """Every docs/*.md page must be reachable from docs/README.md.
+
+    This is not tidiness: the index is the only map a reader has.  A page that
+    exists but is not listed is a page nobody finds, and it drifted once for
+    real (stm32h743-external-memory.md was added and never listed).
+
+    Matching is by file name, so a rename breaks the link (which is the point)
+    and the fix is to update the index, not to loosen the check.
+    """
+    docs_dir = os.path.join(ROOT, "docs")
+    index_path = os.path.join(docs_dir, "README.md")
+    if not os.path.exists(index_path):
+        fail("doc-index", "docs/README.md is missing")
+        return
+    index = read(index_path).decode("utf-8", "replace")
+    pages = sorted(f for f in os.listdir(docs_dir)
+                   if f.endswith(".md") and f != "README.md")
+    missing = [f for f in pages if f not in index]
+    if missing:
+        fail("doc-index", "%d page(s) absent from docs/README.md: %s"
+             % (len(missing), ", ".join(missing[:6])))
+    else:
+        ok("doc-index", "all %d docs pages are indexed" % len(pages))
+
+
 def check_layout_and_scatter():
     """Two different questions, answered separately.
 
@@ -810,6 +836,7 @@ def main(argv):
     check_partition_twins()
     check_single_address_source()
     check_encoding_eol()
+    check_doc_index()
     check_layout_and_scatter()
     check_no_partition_include_in_app()
     check_config_generated()
