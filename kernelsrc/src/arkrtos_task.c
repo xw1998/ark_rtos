@@ -1853,10 +1853,255 @@ static void svc_app_mgr(void *p_svc_ctx)
     }
 }
 
+#if (ARKRTOS_USE_TASK_SWAP == 1)
+/* ============================================================
+ * 任务热切换（A/B 双缓冲无缝升级的内核一侧）
+ *
+ * 场景：任务的代码在 A 里跑着，B 已经装进第二个缓冲（小程序是第二对 RAM 块，
+ * App 是第二个 Flash 槽）。要让它在**下一个系统调用点**就地换到 B 上：不重启
+ * 任务、不进一次调度、不写 Flash、不碰文件系统。
+ *
+ * 做法只有四步，全部站在 SVC 的硬件栈帧上：
+ *   1) 整块把旧数据块拷到新数据块（含栈与当前这一帧）；
+ *   2) 在新块里把那一帧改写成「新镜像 main() 的第一行」——R0-R3/R12/LR 归零、
+ *      PC 取新入口、xPSR 只留 Thumb 位；
+ *   3) PSP 挪到新块里的同一个偏移：异常返回时硬件从 PSP 弹帧，于是直接落进新入口；
+ *   4) TCB 的窗口与 MPU 上下文跟上，并**立刻**写进硬件（任务马上就要在新窗口里
+ *      取指，晚一拍就是一次 MemManage）。
+ * 旧栈上的调用链被放弃——新 main() 会自己建栈，所以拷的是整块而不是「已用部分」。
+ *
+ * 三条拒绝而不是猜的边界：新旧 RAM 块大小必须相同（整块搬运的前提）、
+ * 目标任务不能还挂着同窗口的子线程（它们会指着被归还的旧块）、
+ * 栈帧必须是基本帧（用过 FPU 的任务是扩展帧，[7] 不是 xPSR，改错一个字
+ * 就是任务在错误地址上取指）。
+ *
+ * 同时只允许一次切换在路上：这不是省内存，而是「第三份缓冲」正是本机制
+ * 要拒绝的东西——能排队第二份就等于承认需要三份。
+ * ============================================================ */
+
+typedef struct {
+    int32  task_id;             /* 0 = 没有挂起的切换 */
+    uint32 new_rom_start;
+    uint32 new_rom_size;
+    uint32 new_ram_start;
+    uint32 new_ram_size;
+    uint32 new_entry;
+} arkrtos_task_swap_t;
+
+static arkrtos_task_swap_t g_task_swap;
+
+int32 arkrtos_task_swap_pending(void)
+{
+    return g_task_swap.task_id;
+}
+
+/* 基本异常帧判据：Thumb 位必须是 1，IPSR 必须是 0（Thread 模式）。
+ * 扩展帧（用过 FPU 的任务）的 [7] 是 S6，不是 xPSR；命中概率近乎为零，
+ * 所以这里能可靠地把「不是基本帧」认出来，而不是靠运气。 */
+static int arkrtos_task_swap_basic_frame(const uint32 *p_frame)
+{
+    uint32 xpsr = p_frame[7];
+
+    if((xpsr & 0x01000000u) == 0u)
+    {
+        return 0;
+    }
+    if((xpsr & 0x000001FFu) != 0u)
+    {
+        return 0;
+    }
+
+    return 1;
+}
+
+int32 arkrtos_task_swap_arm(int32 task_id, uint32 rom_start, uint32 rom_size,
+                            uint32 ram_start, uint32 ram_size, uint32 entry)
+{
+    arkrtos_task_t *p_task;
+    int32 i;
+
+    if((task_id <= 0) || (task_id > arkrtos_task_count))
+    {
+        return ARKRTOS_SWAP_ERR_PARAM;
+    }
+    if((rom_start == 0u) || (rom_size == 0u) || (ram_start == 0u) ||
+       (ram_size == 0u) || (entry == 0u))
+    {
+        return ARKRTOS_SWAP_ERR_PARAM;
+    }
+    /* 块必须是 2 的幂且按自身对齐：MPU 一个 region 才能盖住整块，
+     * 整块搬运也才有确定的边界。 */
+    if(((ram_size & (ram_size - 1u)) != 0u) ||
+       ((ram_start & (ram_size - 1u)) != 0u))
+    {
+        return ARKRTOS_SWAP_ERR_PARAM;
+    }
+    if(g_task_swap.task_id != 0)
+    {
+        return ARKRTOS_SWAP_ERR_BUSY;
+    }
+
+    p_task = &arkrtos_task_table[task_id - 1];
+    if(p_task->status == ARKRTOS_TASK_INVALID)
+    {
+        return ARKRTOS_SWAP_ERR_PARAM;
+    }
+    /* 整块按字节搬过去，所以两块必须一样大。不同大小意味着数据布局不同，
+     * 那种升级只能走「交接协议」那条路，不能在这里假装无缝。 */
+    if(p_task->ram_size != ram_size)
+    {
+        return ARKRTOS_SWAP_ERR_LAYOUT;
+    }
+
+    /* 同窗口（同一份代码块）的其它任务会跟着旧块一起失效：小程序建的自建线程
+     * 继承创建者的窗口。这种情形直接拒绝，不静默让它们跑在已归还的块上。 */
+    for(i = 0; (i < arkrtos_task_count) && (i < ARKRTOS_TASK_MAX_NUM); i++)
+    {
+        if((i != (task_id - 1)) &&
+           (arkrtos_task_table[i].status != ARKRTOS_TASK_INVALID) &&
+           (arkrtos_task_table[i].rom_start != 0u) &&
+           (arkrtos_task_table[i].rom_start == p_task->rom_start))
+        {
+            return ARKRTOS_SWAP_ERR_THREAD;
+        }
+    }
+
+    g_task_swap.task_id       = task_id;
+    g_task_swap.new_rom_start = rom_start;
+    g_task_swap.new_rom_size  = rom_size;
+    g_task_swap.new_ram_start = ram_start;
+    g_task_swap.new_ram_size  = ram_size;
+    g_task_swap.new_entry     = entry;
+
+    return 0;
+}
+
+int32 arkrtos_task_swap_cancel(int32 task_id)
+{
+    if((g_task_swap.task_id == 0) ||
+       ((task_id != 0) && (task_id != g_task_swap.task_id)))
+    {
+        return ARKRTOS_SWAP_ERR_PARAM;
+    }
+
+    g_task_swap.task_id = 0;
+    return 0;
+}
+
+/* 返回值：0 = 没有针对这个任务的挂起项（调用方照常继续）；
+ *         1 = 已切换（这一帧已经被改成新镜像的入口，本次 SVC 不再执行）；
+ *         负值 = 已拒绝并撤掉挂起项（调用方负责把新缓冲还回去）。 */
+int32 arkrtos_task_swap_take(void *p_exc_ctx, int32 task_id)
+{
+    uint32 *p_frame = (uint32 *)p_exc_ctx;
+    arkrtos_task_t *p_task;
+    uint32 old_ram;
+    uint32 blk;
+    uint32 off;
+    uint32 *p_new;
+    uint32 *p_old;
+    uint32 i;
+
+    if((g_task_swap.task_id == 0) || (task_id != g_task_swap.task_id) ||
+       (p_frame == 0))
+    {
+        return 0;
+    }
+
+    p_task  = &arkrtos_task_table[task_id - 1];
+    old_ram = p_task->ram_start;
+    blk     = p_task->ram_size;
+
+    if(blk != g_task_swap.new_ram_size)
+    {
+        g_task_swap.task_id = 0;
+        return ARKRTOS_SWAP_ERR_LAYOUT;
+    }
+
+    /* 帧必须整个落在旧块的栈区里。落在外面说明这不是这个任务的 SVC
+     * （例如中断上下文里发的 SVC 走的是 MSP）——那就等它自己再发一次，
+     * 不在这里猜。 */
+    if(((uint32)p_frame < old_ram) ||
+       (((uint32)p_frame + 32u) > (old_ram + blk)))
+    {
+        return 0;
+    }
+
+    if(arkrtos_task_swap_basic_frame(p_frame) == 0)
+    {
+        g_task_swap.task_id = 0;
+        return ARKRTOS_SWAP_ERR_FRAME;
+    }
+
+    off   = (uint32)p_frame - old_ram;
+    p_old = (uint32 *)(void *)old_ram;
+    p_new = (uint32 *)(void *)(g_task_swap.new_ram_start + off);
+
+    /* 1) 整块搬（含栈与当前帧）。此刻元数据一个字都还没改：任何一步失败
+     *    都还停在旧镜像上，不是「一半新一半旧」。 */
+    for(i = 0u; i < (blk >> 2); i++)
+    {
+        ((uint32 *)(void *)g_task_swap.new_ram_start)[i] = p_old[i];
+    }
+
+    /* 2) 把新块里这一帧改成「新 main() 的第一行」。 */
+    p_new[0] = 0u;                  /* R0 */
+    p_new[1] = 0u;                  /* R1 */
+    p_new[2] = 0u;                  /* R2 */
+    p_new[3] = 0u;                  /* R3 */
+    p_new[4] = 0u;                  /* R12 */
+    p_new[5] = 0u;                  /* LR：main 若返回则落到 0（与新建任务的栈帧一致） */
+    p_new[6] = g_task_swap.new_entry & ~1u;   /* 硬件按约定忽略 Thumb 位 */
+    p_new[7] = 0x01000000u;                   /* xPSR：只留 Thumb 位 */
+
+    /* 3) 异常返回从 PSP 弹帧：把它挪到新块里的同一个偏移。 */
+    arkrtos_port_set_psp((uint32)p_new);
+
+    /* 4) 窗口与 MPU 上下文跟上，并立刻写进硬件。 */
+    p_task->rom_start = g_task_swap.new_rom_start;
+    p_task->rom_size  = g_task_swap.new_rom_size;
+    p_task->ram_start = g_task_swap.new_ram_start;
+    p_task->ram_size  = g_task_swap.new_ram_size;
+    p_task->stack_top = g_task_swap.new_ram_start + g_task_swap.new_ram_size;
+    p_task->stack_bottom = (uint32 *)(void *)(p_task->stack_top - p_task->stack_size);
+    p_task->entry = (void (*)(void))g_task_swap.new_entry;
+    #if (ARKRTOS_USE_STACK_USAGE == 1)
+    p_task->stack_peak_low = p_task->stack_top;
+    #endif
+    arkrtos_mpu_build_task(p_task);
+    arkrtos_mpu_set_app(p_task);
+
+    g_task_swap.task_id = 0;
+
+    ARKRTOS_LOGI("SWAP", "task %d now runs 0x%08X (rom 0x%08X, ram 0x%08X)",
+               (int)task_id, (unsigned)g_task_swap.new_entry,
+               (unsigned)p_task->rom_start, (unsigned)p_task->ram_start);
+
+    return 1;
+}
+#endif /* ARKRTOS_USE_TASK_SWAP */
+
 void SVC_Server(void *p_svc_ctx)
 {
     arkrtos_trace_isr(ARKRTOS_TR_IRQ_SVC, ARKRTOS_TR_ISR_ENTER);
     uint32 svc_num = ARKRTOS_SVC_NUM(p_svc_ctx);
+
+#if (ARKRTOS_USE_TASK_SWAP == 1)
+    /* 热切换的落地钩子必须在「活体证据」之前：换成功之后这一帧已经是新镜像的
+     * main()，本次系统调用不该再被记到旧镜像头上。两个消费者各查自己的在途账
+     * （小程序 / App 槽位），内核那侧只挂一份，所以至多一个返回「已切换」；
+     * 返回值 <0 的拒绝已经在各自的 take 里清账并打过日志，这里不重复报。 */
+    if(arkrtos_mini_swap_take(p_svc_ctx, arkrtos_current_task_id) > 0)
+    {
+        arkrtos_trace_isr(ARKRTOS_TR_IRQ_SVC, ARKRTOS_TR_ISR_EXIT);
+        return;
+    }
+    if(arkrtos_loader_swap_take(p_svc_ctx, arkrtos_current_task_id) > 0)
+    {
+        arkrtos_trace_isr(ARKRTOS_TR_IRQ_SVC, ARKRTOS_TR_ISR_EXIT);
+        return;
+    }
+#endif
 
     /* Free liveness evidence: this task called into the kernel. */
     arkrtos_guard_svc(arkrtos_current_task_id);

@@ -796,6 +796,27 @@ def check_sign_host():
         fail("sign-host", txt[-260:])
 
 
+def check_swap_syntax():
+    """Seamless upgrade (A/B task swap) must compile with the switch ON.
+
+    ARKRTOS_USE_TASK_SWAP defaults to 0, so the swap primitives in
+    arkrtos_task.c, both consumers (arkrtos_mini.c / arkrtos_loader.c), the two
+    SVC hooks and the `mini swap` / `app swap` shell branches are never seen by
+    a compiler in a default build.  The whole point of that code is that it
+    rewrites an exception frame and moves the PSP -- a typo there builds fine
+    and misbehaves only on a board, which is the worst possible place to find
+    it.  This runs armclang -fsyntax-only with the switch forced to 1 over the
+    seven affected translation units; a missing armclang is a FAIL, not a
+    skip.  Syntax only -- whether the hand-off is actually seamless still needs
+    a board (docs/无缝升级-双缓冲热切换.md §6).
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "swap_syntax_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "SWAP-GATE OK" in txt:
+        ok("swap", "ON-path compile verified (7 files)")
+    else:
+        fail("swap", txt[-260:])
+
 def check_features_switches():
     """Every gate in arkrtos_features.h must be declared in Kconfig.
 
@@ -887,6 +908,7 @@ def main(argv):
     check_rtstat_syntax()
     check_seccheck_syntax()
     check_sign_host()
+    check_swap_syntax()
     if do_build:
         check_builds(uv4)
 

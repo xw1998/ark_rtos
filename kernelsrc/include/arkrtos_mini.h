@@ -241,4 +241,28 @@ uint32 arkrtos_mini_boot_autostart(void);
 */
 int32 arkrtos_mini_autostart_set(const char *path, uint32 on);
 
+/**
+* @brief 小程序的无缝升级：把第 index 个在跑的小程序换成 path 这份镜像
+* @param index 与 arkrtos_mini_info_at / arkrtos_mini_stop_at 同一个密集编号
+* @param path  新镜像（文件系统内的路径，写法与 mini run 相同）
+* @return 0=已挂上（在目标任务的下一次系统调用里落地）；负值为
+*         ARKRTOS_LOADER_ERR_x / ARKRTOS_MINI_ERR_x / ARKRTOS_SWAP_ERR_LAYOUT
+* @details A/B 双缓冲：新版本装进**第二对**块，旧的一对在切换落地那一刻才还池，
+*          因此峰值是两套（不是三套）。切换不重启任务、不进一次调度、不写 Flash。
+*          新旧的代码块大小 / RAM 块大小 / 镜像头 RAM 需求必须全等：整块搬运的
+*          前提。布局不一致的升级只能走交接协议（docs/无缝升级例程.md）。
+* @note 同时只允许一份在途（能排队第二份就等于承认需要第三份）。装载期间与
+*       `mini run` 共用同一道串行闸门，所以两者不会同时进行。
+*/
+int32 arkrtos_mini_swap_at(uint32 index, const char *path);
+
+/**
+* @brief 热切换的落地钩子（由 SVC_Server 在分派之前调用）
+* @param p_exc_ctx 硬件异常栈帧（SVC 入口的 p_svc_ctx）
+* @param task_id   当前任务号
+* @return 0=与本模块无关（或已拒绝并清账）；1=已切换（这一帧已是新镜像的入口）
+*/
+int32 arkrtos_mini_swap_take(void *p_exc_ctx, int32 task_id);
+
+
 #endif /* __ARKRTOS_MINI_H__ */

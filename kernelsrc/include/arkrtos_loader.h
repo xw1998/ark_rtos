@@ -262,6 +262,30 @@ int32 arkrtos_loader_on_fault(int32 task_id);
 int32 arkrtos_loader_start(uint32 slot);
 
 /**
+ * @brief App 的无缝升级：让 old_slot 里正在跑的任务改跑 new_slot 里的镜像
+ * @param old_slot 正在运行（RUNNING）的槽位
+ * @param new_slot 已装好、未启动（LOADED）的槽位
+ * @return 0=已挂上（在目标任务的下一次系统调用里落地）；负值为
+ *         ARKRTOS_LOADER_ERR_x（PARAM / STATE）或 ARKRTOS_SWAP_ERR_x
+ * @details A/B 双 Flash 槽：新镜像由普通的 `app install` 写进第二个槽（它自带
+ *          一块自己的 RAM 块），切换在系统调用点就地完成，不重启任务、不擦写
+ *          Flash。旧的代码镜像与 RAM 块**保留**，旧槽退回 LOADED —— 那正是
+ *          A/B 的另一半：回滚就是把两者反过来再切一次。
+ * @note 两块 RAM 必须一样大、槽位类型必须同类：整块搬运的前提。数据段不重置
+ *       （这正是「无缝」的含义），因此新版本必须能接受旧版本留下的数据布局。
+ * @note 同时只允许一份在途，且与小程序的热切换共用一个内核挂起槽。
+ */
+int32 arkrtos_loader_swap(uint32 old_slot, uint32 new_slot);
+
+/**
+ * @brief App 热切换的落地钩子（由 SVC_Server 在分派之前调用）
+ * @param p_exc_ctx 硬件异常栈帧（SVC 入口的 p_svc_ctx）
+ * @param task_id   当前任务号
+ * @return 0=与本模块无关（或已拒绝并清账）；1=已切换（这一帧已是新镜像的入口）
+ */
+int32 arkrtos_loader_swap_take(void *p_exc_ctx, int32 task_id);
+
+/**
 * @brief 安装前的版本把关：同一 image_id 的已装副本不允许被「不更高」的版本覆盖
 * @param p_hdr 待安装镜像的镜像头（调用方已完成魔数同步与基本校验）
 * @return 0=可以安装；负值为 ARKRTOS_LOADER_ERR_x

@@ -251,6 +251,25 @@
 #define ARKRTOS_MINI_YIELD_CHUNKS       1u
 #endif
 
+/* 任务热切换（A/B 双缓冲无缝升级的内核一侧）。
+ *   0（默认）= 一整块代码不编进来，体积与行为与引入本开关之前逐字节一致。
+ *   1        = 编入 arkrtos_task_swap_arm() / arkrtos_task_swap_take()：把一个
+ *              正在跑的任务在「下一次 SVC 的硬件栈帧」上就地换到另一份镜像上
+ *              ——PC 改成新入口、PSP 挪到新数据块（整块先拷过去）、MPU 窗口跟上。
+ *              不重启任务、不经过调度器、不写 Flash、不碰文件系统。
+ *
+ * 为什么默认关：它改的是「异常返回落到哪里」这一个字。没有板上验证之前，
+ * 任何默认档都不该带上这种能力。打开后小程序侧（mini swap）与 App 侧
+ * （app swap）两条命令才出现。
+ *
+ * 边界（都是刻意的）：数据块整块按字节搬过去，所以新旧镜像的 RAM 块大小
+ * 必须相同（数据布局一致）；用过 FPU 的任务其栈帧是扩展帧，这里直接拒绝
+ * 而不是猜——换错一个字的代价是任务在错误地址上取指。 */
+#ifndef ARKRTOS_USE_TASK_SWAP
+#define ARKRTOS_USE_TASK_SWAP           0
+#endif
+
+
 /* POSIX / Windows 兼容层（kernelsrc/sdk/posix）。关掉后 App 只能用
  * 原生 oslib，不能 include <pthread.h> 那一套 */
 #ifndef ARKRTOS_USE_POSIX

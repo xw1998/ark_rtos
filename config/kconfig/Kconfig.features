@@ -245,6 +245,27 @@ config ARKRTOS_MINI_YIELD_CHUNKS
 	  releasing it cannot let two loaders interleave.  0 keeps the lock
 	  for the whole load, exactly as before this option existed.
 
+config ARKRTOS_USE_TASK_SWAP
+	bool "Task hot swap (A/B in-place switch, seamless upgrade)"
+	default n
+	help
+	  Compile the kernel half of a two-buffer (A/B) seamless upgrade: swap a
+	  running task onto another image at its next SVC, in place - rewrite the
+	  stacked PC to the new entry, move PSP to the copied data block, refit the
+	  MPU windows.  No task restart, no scheduler round trip, no flash write,
+	  no file-system traffic.
+
+	  Off (default) compiles none of it: the image is byte-for-byte what it was
+	  before this option existed.  It changes where the exception return lands,
+	  which is not something a default build should carry before it has been
+	  verified on a board.
+
+	  Preconditions are deliberate: the two images must declare the same RAM
+	  block size (the block is copied byte-for-byte, so the data layout must
+	  match), and a task whose stacked frame is the FPU-extended one is refused
+	  rather than guessed at.  Adds `mini swap <path>` and `app swap <slot>`
+	  only when enabled.
+
 config ARKRTOS_USE_POSIX
 	bool "POSIX / Windows compatibility layer"
 	default y

@@ -567,6 +567,50 @@ static int cmd_app(int argc, char *argv[])
 #endif /* ARKRTOS_USE_FLASHAPP */
 
 
+#if (ARKRTOS_USE_TASK_SWAP == 1)
+    /* app swap <运行中的槽> <新槽>：A/B 双 Flash 槽的无缝升级。
+     * 两个槽都必须显式给出：同时在跑的 App 可能不止一个，「谁在换」不能让命令
+     * 去猜。新槽要先 `app install` 装好（LOADED）。 */
+    if((argc >= 2) && (strcmp(argv[1], "swap") == 0))
+    {
+        uint32 old_s = 0u;
+        uint32 new_s = 0u;
+        int32  rc;
+
+        if((argc < 4) || (parse_u32(argv[2], &old_s) != 0) ||
+           (parse_u32(argv[3], &new_s) != 0))
+        {
+            sh_out("usage: app swap <running slot> <new slot>"
+                   "   (install the new image first)\r\n");
+            return -1;
+        }
+
+        rc = arkrtos_loader_swap(old_s, new_s);
+        if(rc == 0)
+        {
+            ark_shell_printf("app swap: slot %u -> %u armed; it switches at the task's"
+                             " next syscall (slot %u keeps its image for rollback)\r\n",
+                             (unsigned)old_s, (unsigned)new_s, (unsigned)old_s);
+            return 0;
+        }
+        ark_shell_printf("app swap: refused, rc=%d\r\n", (int)rc);
+        if(rc == ARKRTOS_LOADER_ERR_STATE)
+        {
+            sh_out("  the old slot must be RUNNING and the new one LOADED (see 'app list')\r\n");
+        }
+        if(rc == ARKRTOS_SWAP_ERR_LAYOUT)
+        {
+            sh_out("  the two slots need the same RAM block size and the same slot type\r\n");
+        }
+        if(rc == ARKRTOS_LOADER_ERR_BUSY)
+        {
+            sh_out("  another swap is already in flight\r\n");
+        }
+        return 1;
+    }
+#endif /* ARKRTOS_USE_TASK_SWAP */
+
+
     if((argc >= 2) && (strcmp(argv[1], "start") == 0))
     {
         if((argc < 3) || (parse_u32(argv[2], &slot) != 0) ||
@@ -708,6 +752,9 @@ static int cmd_app(int argc, char *argv[])
 
     if((argc >= 2) && (strcmp(argv[1], "list") != 0))
     {
+#if (ARKRTOS_USE_TASK_SWAP == 1)
+        sh_out("  app swap <running slot> <new slot>: seamless switch (A/B flash slots)\r\n");
+#endif
 #if (ARKRTOS_USE_APPRUN == 1)
         /* flash 子命令只在这个开关打开时才存在；usage 里出现一条敲不出来的命令
          * 比不写更糟（用户会以为是自己参数写错了）。 */
@@ -5097,6 +5144,71 @@ static int cmd_mini(int argc, char *argv[])
                          (unsigned)arkrtos_mini_max_count());
         return 0;
     }
+
+#if (ARKRTOS_USE_TASK_SWAP == 1)
+    /* mini swap <编号> <新镜像>：A/B 两块 RAM 的无缝升级。
+     * 编号与 'mini' / 'mini stop <n>' 是同一套（密集编号）。新镜像装进第二对
+     * 块，切换在它的下一次系统调用里落地，落地那一刻旧的一对块才还池。 */
+    if((argc == 4) && (strcmp(argv[1], "swap") == 0))
+    {
+        static char  simg[ARK_SHELL_PATH_SIZE];
+        const char  *starget = argv[3];
+        uint32       want = 0u;
+        int32        src;
+
+        if(parse_u32(argv[2], &want) != 0)
+        {
+            ark_shell_printf("\r\nmini swap: %s is not a decimal number (see 'mini')\r\n",
+                             argv[2]);
+            return 1;
+        }
+
+#if ARKRTOS_USE_VFS
+        if(shell_vfs_path(argv[3], simg, sizeof(simg)) != 0)
+        {
+            ark_shell_printf("\r\nmini swap: %s: path too long\r\n", argv[3]);
+            return 1;
+        }
+        starget = simg;
+#endif
+
+        src = arkrtos_mini_swap_at(want, starget);
+        if(src != 0)
+        {
+            ark_shell_printf("\r\nmini swap: %u -> %s failed, rc=%d\r\n",
+                             (unsigned)want, argv[3], (int)src);
+            if(src == ARKRTOS_LOADER_ERR_STATE)
+            {
+                ark_shell_printf("  no running MiniApp with that number"
+                                 " (running %u, see 'mini')\r\n",
+                                 (unsigned)arkrtos_mini_running());
+            }
+            if(src == ARKRTOS_LOADER_ERR_BUSY)
+            {
+                sh_out("  a load or another swap is already in progress\r\n");
+            }
+            if(src == ARKRTOS_SWAP_ERR_LAYOUT)
+            {
+                sh_out("  the two images need the same code/RAM block sizes"
+                       " (a layout change needs the handover protocol)\r\n");
+            }
+            if(src == ARKRTOS_LOADER_ERR_SIZE)
+            {
+                ark_shell_printf("  size limit: %u B now (mini limit <bytes>)\r\n",
+                                 (unsigned)arkrtos_mini_max_bytes());
+            }
+            if(src == ARKRTOS_MINI_ERR_FS)
+            {
+                sh_out("  cannot read the new image (check 'ls' and the path)\r\n");
+            }
+            return 1;
+        }
+
+        ark_shell_printf("\r\nmini swap: %u -> %s armed; it switches at the next syscall,"
+                         " the old blocks return then\r\n", (unsigned)want, argv[3]);
+        return 0;
+    }
+#endif /* ARKRTOS_USE_TASK_SWAP */
 
     /* mini stop / mini stop <n>：停全部，或只停第 n 个（编号见 'mini'） */
     if((argc >= 2) && (argc <= 3) && (strcmp(argv[1], "stop") == 0))

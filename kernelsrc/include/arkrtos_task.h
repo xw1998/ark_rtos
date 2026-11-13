@@ -202,6 +202,26 @@ int32  arkrtos_task_recover(int32 task_id);
 
 void arkrtos_sched_activate_higher(uint8 ck_pri);
 
+/* ============================================================
+ * 任务热切换（A/B 双缓冲无缝升级的内核一侧）
+ *
+ * 用法是两段式：先 arm（把「换到哪份镜像的哪个入口与哪块 RAM」挂上去），
+ * 再到目标任务下一次 SVC 的入口处由 SVC_Server 调 take 完成切换。
+ * 之所以不能一口气做完：改的是「异常返回到哪里」，只有站在 SVC 的硬件栈帧上
+ * 才有一份可以安全改写的栈帧。arm 只记账、不动任何正在跑的东西，因此随时可撤。
+ * ============================================================ */
+#define ARKRTOS_SWAP_ERR_PARAM   (-1)   /* 参数非法 / 任务号非法 */
+#define ARKRTOS_SWAP_ERR_BUSY    (-2)   /* 已经有一次切换在路上（同时只允许一次） */
+#define ARKRTOS_SWAP_ERR_LAYOUT  (-3)   /* 新旧 RAM 块大小不同：数据布局不兼容，拒绝 */
+#define ARKRTOS_SWAP_ERR_THREAD  (-4)   /* 还有同窗口的线程：它们会指着旧块，拒绝 */
+#define ARKRTOS_SWAP_ERR_FRAME   (-5)   /* 当前栈帧不是基本帧（用过 FPU），拒绝 */
+
+int32 arkrtos_task_swap_arm(int32 task_id, uint32 rom_start, uint32 rom_size,
+                            uint32 ram_start, uint32 ram_size, uint32 entry);
+int32 arkrtos_task_swap_take(void *p_exc_ctx, int32 task_id);
+int32 arkrtos_task_swap_cancel(int32 task_id);
+int32 arkrtos_task_swap_pending(void);
+
 int32 arkrtos_sched_is_switching(void);
 int32 arkrtos_sched_activate(int32 new_task, uint32 old_psp);
 

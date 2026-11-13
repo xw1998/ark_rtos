@@ -23,10 +23,10 @@
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
 - [kernelsrc/include/arkrtos_layout.h](#kernelsrcincludearkrtos_layouth)（11 项）
 - [kernelsrc/include/arkrtos_layout_def.h](#kernelsrcincludearkrtos_layout_defh)（2 项）
-- [kernelsrc/include/arkrtos_loader.h](#kernelsrcincludearkrtos_loaderh)（29 项）
+- [kernelsrc/include/arkrtos_loader.h](#kernelsrcincludearkrtos_loaderh)（31 项）
 - [kernelsrc/include/arkrtos_log.h](#kernelsrcincludearkrtos_logh)（16 项）
 - [kernelsrc/include/arkrtos_mempool.h](#kernelsrcincludearkrtos_mempoolh)（9 项）
-- [kernelsrc/include/arkrtos_mini.h](#kernelsrcincludearkrtos_minih)（18 项）
+- [kernelsrc/include/arkrtos_mini.h](#kernelsrcincludearkrtos_minih)（20 项）
 - [kernelsrc/include/arkrtos_net.h](#kernelsrcincludearkrtos_neth)（6 项）
 - [kernelsrc/include/arkrtos_ptable.h](#kernelsrcincludearkrtos_ptableh)（23 项）
 - [kernelsrc/include/arkrtos_rt.h](#kernelsrcincludearkrtos_rth)（13 项）
@@ -3621,6 +3621,36 @@ int32 arkrtos_loader_start(uint32 slot);
 > 说明：这个门不接受被内核禁用的槽位：禁用的意思是“除非有人明确要求，
 否则别再自己跑起来”。控制台的人工重试用 arkrtos_loader_start_manual()。
 
+### `int32 arkrtos_loader_swap(uint32 old_slot, uint32 new_slot);`
+
+```c
+int32 arkrtos_loader_swap(uint32 old_slot, uint32 new_slot);
+```
+
+**App 的无缝升级：让 old_slot 里正在跑的任务改跑 new_slot 里的镜像**
+- `old_slot`：正在运行（RUNNING）的槽位
+- `new_slot`：已装好、未启动（LOADED）的槽位
+**返回**：0=已挂上（在目标任务的下一次系统调用里落地）；负值为
+ARKRTOS_LOADER_ERR_x（PARAM / STATE）或 ARKRTOS_SWAP_ERR_x
+A/B 双 Flash 槽：新镜像由普通的 `app install` 写进第二个槽（它自带
+一块自己的 RAM 块），切换在系统调用点就地完成，不重启任务、不擦写
+Flash。旧的代码镜像与 RAM 块**保留**，旧槽退回 LOADED —— 那正是
+A/B 的另一半：回滚就是把两者反过来再切一次。
+> 说明：两块 RAM 必须一样大、槽位类型必须同类：整块搬运的前提。数据段不重置
+（这正是「无缝」的含义），因此新版本必须能接受旧版本留下的数据布局。
+> 说明：同时只允许一份在途，且与小程序的热切换共用一个内核挂起槽。
+
+### `int32 arkrtos_loader_swap_take(void *p_exc_ctx, int32 task_id);`
+
+```c
+int32 arkrtos_loader_swap_take(void *p_exc_ctx, int32 task_id);
+```
+
+**App 热切换的落地钩子（由 SVC_Server 在分派之前调用）**
+- `p_exc_ctx`：硬件异常栈帧（SVC 入口的 p_svc_ctx）
+- `task_id`：当前任务号
+**返回**：0=与本模块无关（或已拒绝并清账）；1=已切换（这一帧已是新镜像的入口）
+
 ### `int32 arkrtos_loader_check_install(const arkrtos_app_header_t *p_hdr);`
 
 ```c
@@ -4227,6 +4257,35 @@ int32 arkrtos_mini_autostart_set(const char *path, uint32 on);
 **返回**：0=已生效（含「本来就是这样、未改动」）；ARKRTOS_LOADER_ERR_PARAM=路径不合法；
 ARKRTOS_LOADER_ERR_NOSPACE=清单文件装不下；ARKRTOS_MINI_ERR_FS=写盘失败
 > 说明：空改动不落盘：已经在清单里再加、或本来就不在清单里再删，都不重写文件。
+
+### `int32 arkrtos_mini_swap_at(uint32 index, const char *path);`
+
+```c
+int32 arkrtos_mini_swap_at(uint32 index, const char *path);
+```
+
+**小程序的无缝升级：把第 index 个在跑的小程序换成 path 这份镜像**
+- `index`：与 arkrtos_mini_info_at / arkrtos_mini_stop_at 同一个密集编号
+- `path`：新镜像（文件系统内的路径，写法与 mini run 相同）
+**返回**：0=已挂上（在目标任务的下一次系统调用里落地）；负值为
+ARKRTOS_LOADER_ERR_x / ARKRTOS_MINI_ERR_x / ARKRTOS_SWAP_ERR_LAYOUT
+A/B 双缓冲：新版本装进**第二对**块，旧的一对在切换落地那一刻才还池，
+因此峰值是两套（不是三套）。切换不重启任务、不进一次调度、不写 Flash。
+新旧的代码块大小 / RAM 块大小 / 镜像头 RAM 需求必须全等：整块搬运的
+前提。布局不一致的升级只能走交接协议（docs/无缝升级例程.md）。
+> 说明：同时只允许一份在途（能排队第二份就等于承认需要第三份）。装载期间与
+`mini run` 共用同一道串行闸门，所以两者不会同时进行。
+
+### `int32 arkrtos_mini_swap_take(void *p_exc_ctx, int32 task_id);`
+
+```c
+int32 arkrtos_mini_swap_take(void *p_exc_ctx, int32 task_id);
+```
+
+**热切换的落地钩子（由 SVC_Server 在分派之前调用）**
+- `p_exc_ctx`：硬件异常栈帧（SVC 入口的 p_svc_ctx）
+- `task_id`：当前任务号
+**返回**：0=与本模块无关（或已拒绝并清账）；1=已切换（这一帧已是新镜像的入口）
 
 ## kernelsrc/include/arkrtos_net.h
 

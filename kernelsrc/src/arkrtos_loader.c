@@ -2793,6 +2793,161 @@ int32 arkrtos_loader_start(uint32 slot)
     return task_id;
 }
 
+
+#if (ARKRTOS_USE_TASK_SWAP == 1)
+/* ============================================================
+ * App 的无缝升级：A/B 两块 Flash 槽就地换
+ *
+ * 与小程序那边同一条思路，只是缓冲的位置不同：小程序的代码在 RAM 里，
+ * App 的两份代码各占一个 Flash 槽（各自的 RAM 块在安装时就绑好了）。用户明确
+ * 要求「不要为了升级再加一级缓冲」，所以这里不造第三份：
+ *   - old_slot 的任务正在跑；
+ *   - new_slot 是普通 `app install` 装好的第二份（LOADED）；
+ *   - 切换在目标任务的下一次系统调用里落地，那一刻起它就执行新镜像的 main()。
+ * 旧槽**不擦、不还**：退回 LOADED，镜像与 RAM 块都留着——A/B 的另一半就是
+ * 回滚（把两个槽反过来再切一次）。
+ * ============================================================ */
+
+typedef struct {
+    uint32 active;
+    uint32 old_slot;
+    uint32 new_slot;
+    uint32 old_entry;
+    uint32 new_entry;
+    int32  task_id;
+} arkrtos_loader_swap_t;
+
+static arkrtos_loader_swap_t g_loader_swap;
+
+int32 arkrtos_loader_swap(uint32 old_slot, uint32 new_slot)
+{
+    arkrtos_partition_table_t *pt = arkrtos_ptable_get();
+    uint32 old_state = ARKRTOS_APP_SLOT_EMPTY;
+    uint32 old_entry = 0u;
+    uint32 old_task  = 0u;
+    uint32 new_state = ARKRTOS_APP_SLOT_EMPTY;
+    uint32 new_entry = 0u;
+    uint32 new_task  = 0u;
+    uint32 old_ram_base = 0u;
+    uint32 old_ram_size = 0u;
+    uint32 new_ram_base = 0u;
+    uint32 new_ram_size = 0u;
+    int32  ret;
+
+    if((old_slot == new_slot) ||
+       (old_slot >= pt->slot_max) || (new_slot >= pt->slot_max) ||
+       (old_slot >= ARKRTOS_SLOT_ARRAY_MAX) || (new_slot >= ARKRTOS_SLOT_ARRAY_MAX))
+    {
+        return ARKRTOS_LOADER_ERR_PARAM;
+    }
+
+    /* 同时只有一份在途：内核只有一个挂起槽，两个消费者同时挂上去会互相覆盖。 */
+    if((g_loader_swap.active != 0u) || (arkrtos_task_swap_pending() != 0))
+    {
+        return ARKRTOS_LOADER_ERR_BUSY;
+    }
+
+    if(arkrtos_ptable_get_slot(old_slot, &old_state, &old_entry, &old_task) != 0)
+    {
+        return ARKRTOS_LOADER_ERR_PARAM;
+    }
+    if((old_state != ARKRTOS_APP_SLOT_RUNNING) || (old_task == 0u))
+    {
+        return ARKRTOS_LOADER_ERR_STATE;      /* 旧槽没在跑，就没有「无缝」可言 */
+    }
+
+    if(arkrtos_ptable_get_slot(new_slot, &new_state, &new_entry, &new_task) != 0)
+    {
+        return ARKRTOS_LOADER_ERR_PARAM;
+    }
+    if((new_state != ARKRTOS_APP_SLOT_LOADED) || (new_entry == 0u))
+    {
+        return ARKRTOS_LOADER_ERR_STATE;      /* 新槽必须先 install 好、且不能已在跑 */
+    }
+
+    /* 槽位类型必须同类：App 换成 Driver 不是升级，是把特权换了。 */
+    if(pt->slot_type[old_slot] != pt->slot_type[new_slot])
+    {
+        return ARKRTOS_SWAP_ERR_LAYOUT;
+    }
+
+    if((arkrtos_ptable_ram_info(old_slot, &old_ram_base, &old_ram_size) != 0) ||
+       (arkrtos_ptable_ram_info(new_slot, &new_ram_base, &new_ram_size) != 0))
+    {
+        return ARKRTOS_LOADER_ERR_STATE;
+    }
+
+    /* 整块搬运的前提：两块一样大。arm 里还会再校一次（含 2 的幂与对齐）。 */
+    if((old_ram_size == 0u) || (old_ram_size != new_ram_size) ||
+       (new_ram_base == 0u))
+    {
+        return ARKRTOS_SWAP_ERR_LAYOUT;
+    }
+
+    ret = arkrtos_task_swap_arm((int32)old_task,
+                                pt->slot_base[new_slot], pt->slot_size[new_slot],
+                                new_ram_base, new_ram_size, new_entry);
+    if(ret != 0)
+    {
+        return ret;
+    }
+
+    g_loader_swap.active    = 1u;
+    g_loader_swap.old_slot  = old_slot;
+    g_loader_swap.new_slot  = new_slot;
+    g_loader_swap.old_entry = old_entry;
+    g_loader_swap.new_entry = new_entry;
+    g_loader_swap.task_id   = (int32)old_task;
+
+    ARKRTOS_LOGI("LOADER", "swap armed: task %d moves from slot %u to slot %u"
+               " at its next syscall (code 0x%08X, ram 0x%08X)",
+               (int)old_task, (unsigned)old_slot, (unsigned)new_slot,
+               (unsigned)pt->slot_base[new_slot], (unsigned)new_ram_base);
+    return 0;
+}
+
+int32 arkrtos_loader_swap_take(void *p_exc_ctx, int32 task_id)
+{
+    int32 rc;
+
+    if((g_loader_swap.active == 0u) || (task_id <= 0) ||
+       (task_id != g_loader_swap.task_id))
+    {
+        return 0;
+    }
+
+    rc = arkrtos_task_swap_take(p_exc_ctx, task_id);
+
+    if(rc == 0)
+    {
+        return 0;       /* 这一帧不在旧块里：等下一次系统调用 */
+    }
+
+    if(rc > 0)
+    {
+        /* 槽位账目跟着执行流走：旧槽退回 LOADED（镜像与 RAM 块都留着 = 可回滚），
+         * 新槽接管 RUNNING。不擦不还，所以这一步没有失败路径。 */
+        (void)arkrtos_ptable_set_slot(g_loader_swap.old_slot, ARKRTOS_APP_SLOT_LOADED,
+                                      g_loader_swap.old_entry, 0u);
+        (void)arkrtos_ptable_set_slot(g_loader_swap.new_slot, ARKRTOS_APP_SLOT_RUNNING,
+                                      g_loader_swap.new_entry, (uint32)task_id);
+        g_loader_swap.active = 0u;
+
+        ARKRTOS_LOGI("LOADER", "swap done: task %d now in slot %u"
+                   " (slot %u kept LOADED for rollback)",
+                   (int)task_id, (unsigned)g_loader_swap.new_slot,
+                   (unsigned)g_loader_swap.old_slot);
+        return 1;
+    }
+
+    /* 内核拒绝：任务继续跑旧镜像，账目一个都不动。 */
+    g_loader_swap.active = 0u;
+    ARKRTOS_LOGE("LOADER", "swap refused (%d), slot %u keeps running",
+               (int)rc, (unsigned)g_loader_swap.old_slot);
+    return 0;
+}
+#endif /* ARKRTOS_USE_TASK_SWAP */
+
 /* Console-facing start: the same door as arkrtos_loader_start(), with one
  * addition - a slot the kernel disabled for repeated faults is treated as a
  * human retry. The disable is cleared and the count restarts, but only if the
