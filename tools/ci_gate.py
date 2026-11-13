@@ -829,6 +829,50 @@ def check_loader_host():
         else:
             fail("loader-host", "gate failed: %s" % txt.strip()[:160])
 
+def check_fifo_host():
+    """Byte FIFO: capacity accounting and the two silent-loss counters.
+
+    kernelsrc/tests/test_fifo_host.c links the real arkrtos_fifo.c; the module
+    needs no scheduler, no critical section and no board resource, so the test
+    file carries no kernel stubs. Covered: create's size threshold (size <= 8
+    returns 0 without touching the caller's buffer; usable capacity is
+    size - 9), write refusing the remainder when full without overwriting
+    unread data, ring wrap preserving byte order, short read returning what
+    is stored, len <= 0 as a no-op, bad-magic reporting on both write and
+    read (read reports calls only, it loses no bytes), NULL handle on the
+    same path, and that write_refused accumulates across all FIFOs.
+
+    NOT covered: anything beyond the documented single-producer /
+    single-consumer contract, size > 65543 (uint16 truncation, a known
+    limit), and a hand-built size == 0 header (division by zero, caller
+    breach, not provoked here). A missing host compiler is a FAIL.
+    """
+    import tempfile
+    cc = _find_host_cc()
+    if not cc:
+        fail("fifo-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        exe = os.path.join(td, "fifo_host.exe" if os.name == "nt" else "fifo_host")
+        cmd = [cc]
+        if "mingw" in cc.replace("\\", "/").lower():
+            cmd.append("-B" + os.path.dirname(cc))
+        cmd += ["-std=gnu11", "-fno-asynchronous-unwind-tables",
+                "-Ikernelsrc/include", "-Ikernelsrc/components/mdk_trace",
+                "-Iboard/stm32f427", "-Iconfig", "-o", exe,
+                "kernelsrc/tests/test_fifo_host.c", "kernelsrc/src/arkrtos_fifo.c"]
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            fail("fifo-host", "gate did not build: %s"
+                 % (r.stderr or "").strip().splitlines()[-1:])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode == 0 and "FIFO-HOST OK" in txt:
+            ok("fifo-host", "capacity + wrap order + refused/bad-magic counters verified on host")
+        else:
+            fail("fifo-host", "gate failed: %s" % txt.strip()[:160])
+
 def check_tickless():
     """tickless idle: the accounting must be provably right, and the ON path must compile.
 
@@ -1030,6 +1074,7 @@ def main(argv):
     check_mq_host()
     check_sync_host()
     check_loader_host()
+    check_fifo_host()
     check_tickless()
     check_arkmake_syntax()
     check_rtstat_syntax()
