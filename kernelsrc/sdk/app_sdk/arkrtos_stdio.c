@@ -36,6 +36,12 @@
 
 #include "arkrtos_ulog.h"
 
+/* AC6 的 <stdio.h> 把 putchar 定义成宏（`#define putchar(c) putc(c, stdout)`），
+ * 直接写同名函数会被宏展开成语法错误。先撤掉宏，再定义这个强符号。 */
+#ifdef putchar
+#undef putchar
+#endif
+
 /* 一次 SVC 最多送多少字节（内核侧上限 128，留出余量）。分段是为了让"补 '\r'"
  * 不会把一条已满的缓冲顶爆。 */
 #define ARKRTOS_STDIO_CHUNK     (96u)
