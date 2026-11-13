@@ -175,7 +175,33 @@ int main(void)
     chk(r == 4, "the app's own flash is a legal source buffer");
     (void)arkrtos_sbuf_reset(h);
 
-    /* 8. 生命周期：删除后句柄立刻失效 */
+    /* 8. 阻塞超时：App 侧没有"让出"的通道，封装是 1 ms 轮询 + 重试直到超时。
+     *    所以这里能量的是"超时有没有被尊重"：早醒（没真等到）或者不醒（挂住）
+     *    都会让金标失败。App 的 oslib 里有毫秒口径的 arkrtos_get_time_ms()。 */
+    (void)arkrtos_sbuf_reset(h);
+    {
+        uint32_t t0 = arkrtos_get_time_ms();
+        uint32_t dt;
+
+        r = arkrtos_sbuf_recv(h, (void *)s_rx, 4, 100);
+        dt = arkrtos_get_time_ms() - t0;
+        printf("recv(empty, 100ms) -> %d in %u ms\n", (int)r, (unsigned)dt);
+        chk(r < 0, "a blocking read on an empty buffer times out");
+        chk(dt >= 99u && dt <= 130u, "the read waited its full 100 ms");
+
+        /* 写满之后带超时写：没有读者，写不完就必须报超时而不是把控制台挂住 */
+        fill(s_tx, sizeof(s_tx), 0);
+        (void)arkrtos_sbuf_send(h, (const void *)s_tx, (int)sizeof(s_tx), 0);
+        t0 = arkrtos_get_time_ms();
+        r = arkrtos_sbuf_send(h, (const void *)"z", 1, 50);
+        dt = arkrtos_get_time_ms() - t0;
+        printf("send(full buffer, 50ms) -> %d in %u ms\n", (int)r, (unsigned)dt);
+        chk(r < 0, "a blocking write on a full buffer times out");
+        chk(dt >= 49u && dt <= 80u, "the write waited its full 50 ms");
+        (void)arkrtos_sbuf_reset(h);
+    }
+
+    /* 9. 生命周期：删除后句柄立刻失效 */
 del:
     r = arkrtos_sbuf_delete(h);
     printf("delete -> %d\n", (int)r);
