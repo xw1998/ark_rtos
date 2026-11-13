@@ -629,6 +629,14 @@ int32 arkrtos_mq_delete_internal(int32 handle)
         return -1;
 
     ARKRTOS_DISABLE_IRQ();
+    /* 查 used：把一个已经不存在的对象报成“删掉了”是错答案。
+     * 句柄在对象没了之后仍能过范围检查，所以范围检查不够；
+     * 这里与 send/recv 对 used 的判定保持一致。 */
+    if(arkrtos_mqs[idx].used == 0)
+    {
+        ARKRTOS_ENABLE_IRQ();
+        return -1;
+    }
     /* 先唤醒所有等待者（原因=对象已删除），否则队列清空后没有人再唤醒它们 */
     arkrtos_mq_wake_all(arkrtos_mqs[idx].send_waiters, ARKRTOS_WAKE_OBJ_DELETED);
     arkrtos_mq_wake_all(arkrtos_mqs[idx].recv_waiters, ARKRTOS_WAKE_OBJ_DELETED);

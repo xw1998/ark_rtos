@@ -848,6 +848,13 @@ int32 arkrtos_sem_delete_internal(int32 handle)
         return -1;
 
     ARKRTOS_DISABLE_IRQ();
+    /* 查 used：把一个已经不存在的对象报成“删掉了”是错答案；
+     * 与对同一对象的其他接口对 used 的判定保持一致。 */
+    if(arkrtos_sems[idx].used == 0)
+    {
+        ARKRTOS_ENABLE_IRQ();
+        return -1;
+    }
     /* 先唤醒全部等待者（原因=对象已删除），否则它们会永远阻塞：
      * 对象删除后等待队列被清空，再也没有 post 来唤醒它们。 */
     arkrtos_waiters_wake_all(arkrtos_sems[idx].waiters, ARKRTOS_WAKE_OBJ_DELETED);
@@ -1101,6 +1108,13 @@ int32 arkrtos_mtx_delete_internal(int32 handle)
         return -1;
 
     ARKRTOS_DISABLE_IRQ();
+    /* 查 used：把一个已经不存在的对象报成“删掉了”是错答案；
+     * 与对同一对象的其他接口对 used 的判定保持一致。 */
+    if(arkrtos_mtxs[idx].used == 0)
+    {
+        ARKRTOS_ENABLE_IRQ();
+        return -1;
+    }
     /* 删除锁相当于释放它：持有者按基准优先级（及仍持有的其它锁）重算，
      * 不再依赖加锁时的快照。 */
     if(arkrtos_mtxs[idx].owner != 0)

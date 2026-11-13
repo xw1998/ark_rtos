@@ -705,6 +705,82 @@ def check_mempool_host():
         else:
             fail("mempool-host", "gate failed: %s" % txt.strip()[:160])
 
+def check_mq_host():
+    """Message queues: the slot bookkeeping must be provably right.
+
+    kernelsrc/tests/test_mq_host.c links the real arkrtos_mq.c against stub
+    scheduler / critical-section / trace functions, so the ring of slots (tail
+    wrap, declared-length copy, truncation that still consumes the whole
+    message, "full" refusing without overwriting, delete invalidating the
+    handle) is exercised on the host.  The blocking paths are NOT covered here
+    - they need a real scheduler - so this gate must not be read as "the module
+    is verified". A missing host compiler is a FAIL, not a skip.
+    """
+    import tempfile
+    cc = _find_host_cc()
+    if not cc:
+        fail("mq-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        exe = os.path.join(td, "mq_host.exe" if os.name == "nt" else "mq_host")
+        cmd = [cc]
+        if "mingw" in cc.replace("\\", "/").lower():
+            cmd.append("-B" + os.path.dirname(cc))
+        cmd += ["-std=gnu11", "-DARKRTOS_USE_MQ=1",
+                "-Ikernelsrc/include", "-Ikernelsrc/components/mdk_trace",
+                "-Iboard/stm32f427", "-Iconfig", "-o", exe,
+                "kernelsrc/tests/test_mq_host.c", "kernelsrc/src/arkrtos_mq.c"]
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            fail("mq-host", "gate did not build: %s"
+                 % (r.stderr or "").strip().splitlines()[-1:])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode == 0 and "MQ-HOST OK" in txt:
+            ok("mq-host", "slot wrap + declared-length contract verified on host")
+        else:
+            fail("mq-host", "gate failed: %s" % txt.strip()[:160])
+
+def check_sync_host():
+    """Synchronisation primitives: the token-conservation rules must hold.
+
+    kernelsrc/tests/test_sync_host.c links the real arkrtos_sync.c against stub
+    scheduler / trace functions, but unlike the other host gates it hands
+    arkrtos_task_get_current() a *settable* pointer, so ownership decisions
+    (who may unlock, what counts as a recursive lock) are really exercised.
+    Covered: initial count, take/exhaust/0-timeout, post parking the token in
+    the count, delete invalidating every entry point, non-owner unlock refused,
+    deleted object reported as not held.  Blocking, hand-off and priority
+    inheritance need a real scheduler and are NOT covered - this gate must not
+    be read as "the module is verified". A missing host compiler is a FAIL.
+    """
+    import tempfile
+    cc = _find_host_cc()
+    if not cc:
+        fail("sync-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        exe = os.path.join(td, "sync_host.exe" if os.name == "nt" else "sync_host")
+        cmd = [cc]
+        if "mingw" in cc.replace("\\", "/").lower():
+            cmd.append("-B" + os.path.dirname(cc))
+        cmd += ["-std=gnu11",
+                "-Ikernelsrc/include", "-Ikernelsrc/components/mdk_trace",
+                "-Iboard/stm32f427", "-Iconfig", "-o", exe,
+                "kernelsrc/tests/test_sync_host.c", "kernelsrc/src/arkrtos_sync.c"]
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            fail("sync-host", "gate did not build: %s"
+                 % (r.stderr or "").strip().splitlines()[-1:])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode == 0 and "SYNC-HOST OK" in txt:
+            ok("sync-host", "token conservation + ownership verified on host")
+        else:
+            fail("sync-host", "gate failed: %s" % txt.strip()[:160])
+
 def check_tickless():
     """tickless idle: the accounting must be provably right, and the ON path must compile.
 
@@ -903,6 +979,8 @@ def main(argv):
     check_sdk_stdio_host()
     check_sbuf_host()
     check_mempool_host()
+    check_mq_host()
+    check_sync_host()
     check_tickless()
     check_arkmake_syntax()
     check_rtstat_syntax()
