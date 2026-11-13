@@ -1,0 +1,83 @@
+# MINI_HANDOVER：小程序正常退出 = 计划内交接
+
+这份例程是 `docs/欠账盘点.md` §一那条欠账的判据实现：
+
+> 小程序正常退出后 `hwsafe` 报 `handover=1` 且设备未被中和
+
+它和「崩溃遗言」是**相反**的两个动作：
+
+| 退出方式 | 内核动作 | `hwsafe` 读数 |
+|---|---|---|
+| fault / 被强杀 | 把死者名下的硬件驱动到安全态 | `neutralized` +1 |
+| 正常 `return`（`ARKRTOS_MINI_EXIT_IS_HANDOVER`，默认 1） | 只摘台账，**不碰硬件** | `handover` +1，`neutralized` 不动 |
+
+理由在 `docs/小程序设计.md` §9.4：无缝升级里马上接手的新版本会重新 `open` 同一台设备，
+此刻把它打到安全态是抖动而不是安全。
+
+## 程序做了什么
+
+`Src/mini_handover.c` 只有三步：
+
+1. `arkrtos_dev_open("led2", 0)` —— led0/led1 被内核任务 1/2 占着，led2 平时无所有者；
+2. `arkrtos_dev_ctrl(led, 1u, 0u)` 点亮（`ARKRTOS_LED_CTRL_ON = 1`，led2 = PC2，低电平点亮）；
+3. **故意不 `close`**，打印三行后从 `main` 正常 `return 0`。
+
+第 3 步是判据的前提：LED 驱动的 `close()` 会把灯关掉，退出那一刻台账就空了；
+只有「不 close 直接 return」才构造出「退出时仍持有设备」的状态。
+若先 close，退出时无台账可摘，`handover` 不会动，用例等于白跑。
+
+## 实测（STM32F427，2026-11-13）
+
+| 项 | 手段 | 读数 |
+|---|---|---|
+| 基线 | `hwsafe` | `enabled, devs=3 owners=3 neutralized=0 (will=0 cb=0 none=0 fail=0 handover=0)`；own = led0(task1) / led1(task2) / ttyS0(task6) |
+| 运行 | `mini run /mh.svcm` | 见下方串口原文；末尾 `mini run: /mh.svcm loaded but no longer running` |
+| 交接计数 | 再发 `hwsafe` | `... neutralized=0 (will=0 cb=0 none=0 fail=0 handover=1)`；led2 的 own 条目消失，无新条目 |
+| 硬件未被中和 | `pyocd cmd -t stm32f427zi -c "read32 0x40020814"`（GPIOC_ODR） | `40020814: 03000000` —— PC2 为低，**led2 仍亮着**；被中和会写成 1（灭） |
+| 两块回收 | `mini stat` | `mini: none running` |
+
+串口原文：
+
+```
+MINI_HANDOVER: mini starts (planned hand-over probe)
+MINI_HANDOVER: led2 handle=18874370 ctrl(ON)=0
+MINI_HANDOVER: returning from main, device still held
+mini run: /mh.svcm loaded but no longer running (returned or stopped)
+```
+
+体积：`Code=2308 RO-data=236 RW-data=0 ZI-data=4096`；打包后
+`build/mini_handover.svcapp` 2840 B（负载 2544 B），重定位表 10 项，
+代码块 4096 B + RAM 块 8192 B，镜像**不自启**。
+
+> **口径**：判据必须成对读 —— `handover` +1 **且** `neutralized` 不变。
+> 单独看 `neutralized=0` 不算过（没有台账可摘时它同样不动）。
+> 计数是判据，LED 目视是辅助，硬件侧主证据是 `GPIOC_ODR` 的读数，两者一致才算过。
+
+## 编译、打包、上板
+
+```bash
+# 1. 编译
+env -u PYTHONHOME -u PYTHONPATH "D:/Keil_v5/UV4/UV4.exe" -b \
+    example/stm32f427/app_sdk/MINI_HANDOVER/MDK-ARM/mini_handover.uvprojx -j0 -o C:/tmp/mh.log
+
+# 2. 打包（miniapp 类型：不自启，失败也不计入 App 槽位）
+env -u PYTHONHOME -u PYTHONPATH py -3 tools/pack_app.py \
+    --project example/stm32f427/app_sdk/MINI_HANDOVER/MDK-ARM/mini_handover.uvprojx \
+    --type miniapp --no-autostart --name MINI_HANDOVER --version 1.0.0 \
+    --out build/mini_handover.svcapp
+
+# 3. 送进 NOR 卷（注意：小程序走 fs 卷，不是 VFS 的 /）
+MSYS_NO_PATHCONV=1 env -u PYTHONHOME -u PYTHONPATH py -3 tools/fs_put.py \
+    --port COM21 --path /mh.svcm build/mini_handover.svcapp
+
+# 4. 取证：先记基线，再跑，再读
+#    hwsafe
+#    mini run /mh.svcm
+#    hwsafe
+#    mini stat
+```
+
+## 未验证
+
+- `ARKRTOS_MINI_EXIT_IS_HANDOVER` 置 **0**（正常退出也回安全态）这一档没上板 ——
+  需要另编一版内核，本轮板上的内核是默认档（该宏 = 1）。
