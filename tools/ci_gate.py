@@ -367,6 +367,40 @@ def check_doc_index(dry_run=None):
         ok("doc-index", "all %d docs pages are indexed" % len(pages))
 
 
+def check_api_doc_fresh():
+    """docs/api/Ark RTOS_API参考.md must match what the generator produces today.
+
+    The reference sat at 2026-10-07 for five weeks while the kernel changed under
+    it, which is exactly how an API doc becomes worse than none: a reader trusts
+    a stale signature more than a missing one.
+
+    The check regenerates into the working tree and asks git whether the file
+    changed.  It therefore has to be run *after* the file has been committed at
+    least once - the first time it runs on a new doc it will fail with a diff,
+    which is the intended behaviour (commit the regenerated file).
+    """
+    gen = os.path.join(ROOT, "tools", "gen_api_doc.py")
+    doc = os.path.join(ROOT, "docs", "api", "Ark RTOS_API参考.md")
+    if not os.path.exists(gen) or not os.path.exists(doc):
+        fail("api-doc", "generator or reference is missing")
+        return
+    env = dict(os.environ)
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    r = subprocess.run([sys.executable, gen, "--md"], cwd=ROOT, env=env,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if r.returncode != 0:
+        fail("api-doc", "generator failed: %s"
+             % (r.stdout or b"").decode("utf-8", "replace").strip()[-200:])
+        return
+    d = subprocess.run(["git", "diff", "--stat", "--", "docs/api/Ark RTOS_API参考.md"],
+                       cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if (d.stdout or b"").strip():
+        fail("api-doc", "reference is stale, regenerate and commit it")
+    else:
+        ok("api-doc", "reference matches the current sources")
+
+
 def check_layout_and_scatter():
     """Two different questions, answered separately.
 
@@ -837,6 +871,7 @@ def main(argv):
     check_single_address_source()
     check_encoding_eol()
     check_doc_index()
+    check_api_doc_fresh()
     check_layout_and_scatter()
     check_no_partition_include_in_app()
     check_config_generated()
