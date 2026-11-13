@@ -5474,6 +5474,9 @@ static int cmd_mini(int argc, char *argv[])
 
     ark_shell_printf("\r\nusage: mini [stat|list] | mini run <path> | mini stop [n] |"
                      " mini count [n] | mini limit [bytes] | mini forget <path> |"
+#if (ARKRTOS_USE_TASK_SWAP == 1)
+                     " mini swap <n> <path> |"
+#endif
                      " mini autostart [list | add <path> | del <path> | now]\r\n");
     return 1;
 }
