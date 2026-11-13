@@ -320,8 +320,8 @@ UTEST_CASE(timer_lifecycle)
 
 /* ============================================================
  * 流缓冲 / 消息缓冲
- * 只走非阻塞形态：用例在 shell 任务里跑，绝不能把控制台挂住。
- * 阻塞/唤醒路径不在这里测——它需要第二个任务，属于上板实验而不是用例。
+ * 前两条只走非阻塞形态：用例在 shell 任务里跑，绝不能把控制台挂住。
+ * 第三条（sbuf_block_wake_contract）例外，它故意睡一小段，见那里的说明。
  * ============================================================ */
 #if (ARKRTOS_USE_SBUF == 1)
 
@@ -392,6 +392,78 @@ UTEST_CASE(mbuf_framing_contract)
 
     UTEST_CHECK_EQ(arkrtos_sbuf_delete_internal(h), ARKRTOS_SBUF_OK);
 }
+
+/* ------------------------------------------------------------
+ * 阻塞 / 唤醒（这一条故意让出 CPU）
+ * 上面两条用例只走非阻塞形态；「挂等待表 -> 真让出 -> 被唤醒接管 /
+ * 超时重睡」这三段不真睡就看不见。所以这条用例会让出控制台任务两次
+ * （约 20 ms 与约 30 ms），并且**自带上限**：即使内核的挂表或唤醒坏了，
+ * 它也会在 400 ms 超时后返回并报红，不会把控制台挂死。
+ *
+ * 送数据的是软件定时器的回调（定时器任务上下文，**不是真 ISR**），所以
+ * 这里证明的是「跨任务唤醒 + 超时重睡」；ISR 唤醒仍只有代码路径证据，
+ * 要一条真中断才能作证。
+ * ------------------------------------------------------------ */
+#if (ARKRTOS_USE_TIMER == 1)
+
+static int32 s_ut_blk_sb = -1;
+
+static void ut_sbuf_blk_send_cb(void *p_arg)
+{
+    (void)p_arg;
+    (void)arkrtos_sbuf_send_from_isr_internal(s_ut_blk_sb, (const void *)"wake", 4);
+}
+
+UTEST_CASE(sbuf_block_wake_contract)
+{
+    int32  h;
+    int32  t;
+    uint8  out[8];
+    uint32 t0;
+    uint32 dt;
+
+    h = arkrtos_sbuf_create_internal("utbk");
+    UTEST_CHECK(h >= 0);
+    if(h < 0)
+    {
+        return;
+    }
+    s_ut_blk_sb = h;
+
+    t = arkrtos_timer_create_internal("utbkt");
+    UTEST_CHECK(t >= 0);
+    if(t < 0)
+    {
+        (void)arkrtos_sbuf_delete_internal(h);
+        s_ut_blk_sb = -1;
+        return;
+    }
+
+    /* 空缓冲 + 20 ms 后由定时器任务塞 4 字节：读的人必须被唤醒，而不是睡到超时 */
+    UTEST_CHECK_EQ(arkrtos_timer_start_internal(t, 20u, ARKRTOS_TIMER_MODE_ONESHOT,
+                                               ut_sbuf_blk_send_cb, 0), 0);
+    t0 = arkrtos_kernel_get_tick();
+    UTEST_CHECK_EQ(arkrtos_sbuf_recv_internal(h, (void *)out, sizeof(out), 400), 4);
+    dt = arkrtos_kernel_get_tick() - t0;
+    UTEST_CHECK_EQ(out[0], 'w');
+    UTEST_CHECK_EQ(out[3], 'e');
+    /* 板上实测 40 拍（20.0 ms）：定时器 20 ms 到点即被唤醒，不是睡满超时 */
+    UTEST_CHECK_RANGE(ARKRTOS_MS_TO_TICK(15u), dt, ARKRTOS_MS_TO_TICK(100u));
+
+    /* 没人送数据：睡满超时后必须报 TIMEOUT，既不能立刻返回也不能永不返回 */
+    t0 = arkrtos_kernel_get_tick();
+    UTEST_CHECK_EQ(arkrtos_sbuf_recv_internal(h, (void *)out, sizeof(out), 30),
+                   ARKRTOS_SBUF_ERR_TIMEOUT);
+    dt = arkrtos_kernel_get_tick() - t0;
+    /* 板上实测 60 拍（30.0 ms）：睡满声明的超时后返回，不早不晚 */
+    UTEST_CHECK_RANGE(ARKRTOS_MS_TO_TICK(20u), dt, ARKRTOS_MS_TO_TICK(100u));
+
+    UTEST_CHECK_EQ(arkrtos_timer_delete_internal(t), 0);
+    UTEST_CHECK_EQ(arkrtos_sbuf_delete_internal(h), ARKRTOS_SBUF_OK);
+    s_ut_blk_sb = -1;
+}
+
+#endif /* ARKRTOS_USE_TIMER */
 
 #endif /* ARKRTOS_USE_SBUF */
 
