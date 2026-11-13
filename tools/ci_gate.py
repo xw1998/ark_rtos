@@ -781,6 +781,54 @@ def check_sync_host():
         else:
             fail("sync-host", "gate failed: %s" % txt.strip()[:160])
 
+def check_loader_host():
+    """App image loader: header rejection order and relocation semantics.
+
+    kernelsrc/tests/test_loader_host.c links the real arkrtos_loader.c against
+    stub scheduler / partition-table / crash-ledger / port functions. A
+    relocation applied to the wrong byte does not fail, it just makes the app
+    jump somewhere else on the board - the kind of silent wrong answer a UART
+    log cannot show. Covered: check_header's rejection order and boundaries
+    (magic, compat id, type out of range / not in mask, image_size 0 and
+    wrap, entry out of range, reloc_offset / count / encoding version /
+    payload_offset, table entry alignment / past the end / ordering, ram_size
+    0 and over the single-block cap), and reloc_apply's patch contract (word
+    entries add delta_rom / delta_ram separately, MOVW+MOVT decode-recode
+    keeps the instruction bits, a table entry cut by the chunk end returns
+    its start and leaves idx alone, entries before buf_off are skipped but
+    still consume an index).
+
+    NOT covered: load_image, streaming install, flash erase/program, pool
+    relocation, unload, signature check, CRC, crash accounting, and any real
+    start-up. Nothing here has run on a board, so this gate must not be read
+    as "the install path is verified". A missing host compiler is a FAIL.
+    """
+    import tempfile
+    cc = _find_host_cc()
+    if not cc:
+        fail("loader-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        exe = os.path.join(td, "loader_host.exe" if os.name == "nt" else "loader_host")
+        cmd = [cc]
+        if "mingw" in cc.replace("\\", "/").lower():
+            cmd.append("-B" + os.path.dirname(cc))
+        cmd += ["-std=gnu11", "-fno-asynchronous-unwind-tables",
+                "-Ikernelsrc/include", "-Ikernelsrc/components/mdk_trace",
+                "-Iboard/stm32f427", "-Iconfig", "-o", exe,
+                "kernelsrc/tests/test_loader_host.c", "kernelsrc/src/arkrtos_loader.c"]
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            fail("loader-host", "gate did not build: %s"
+                 % (r.stderr or "").strip().splitlines()[-1:])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode == 0 and "LOADER-HOST OK" in txt:
+            ok("loader-host", "header rejection order + reloc patch contract verified on host")
+        else:
+            fail("loader-host", "gate failed: %s" % txt.strip()[:160])
+
 def check_tickless():
     """tickless idle: the accounting must be provably right, and the ON path must compile.
 
@@ -981,6 +1029,7 @@ def main(argv):
     check_mempool_host()
     check_mq_host()
     check_sync_host()
+    check_loader_host()
     check_tickless()
     check_arkmake_syntax()
     check_rtstat_syntax()

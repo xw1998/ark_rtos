@@ -215,7 +215,9 @@ typedef struct {
     uint32 ram_size;            /* 镜像运行所需 RAM 字节数（伙伴分配器的依据） */
     uint32 reloc_offset;        /* 重定位表相对镜像起始的偏移，恒为 ARKRTOS_APP_RELOC_OFFSET */
     uint32 reloc_count;         /* 重定位表条目数（必须 <= ARKRTOS_APP_RELOC_MAX） */
-    uint32 reloc_kind;          /* 重定位表编码版本，当前恒为 ARKRTOS_APP_RELOC_KIND_32 */
+    uint32 reloc_kind;          /* 重定位表编码版本，当前恒为 ARKRTOS_APP_RELOC_KIND_CUR
+                                   （loader_check_header 拒绝一切非 KIND_CUR 的值；
+                                    KIND_32 是旧的纯 32 位整字编码，已不再接收） */
     uint32 payload_offset;      /* 负载相对镜像起始的偏移，必须 = 头长 + reloc_count*4 */
     uint32 nominal_ram_base;    /* RAM 重定位标称基址：镜像 RW/ZI 的链接基址。
                                    实际 RAM 块由内核按 ram_size 分配，两者之差即 RAM 增量 */
