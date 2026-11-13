@@ -873,6 +873,50 @@ def check_fifo_host():
         else:
             fail("fifo-host", "gate failed: %s" % txt.strip()[:160])
 
+def check_fault_host():
+    """Fault record ring: the index semantics the post-mortem depends on.
+
+    kernelsrc/tests/test_fault_host.c links the real arkrtos_fault.c against
+    three stubs (enter/exit critical, arkrtos_kernel_tick). That table is the
+    only clue left after a crash, and an off-by-one in the ring shows the
+    previous fault - a plausible but wrong answer over the console. Covered:
+    empty after init, 0 = oldest before the ring fills, count capped at
+    ARKRTOS_FAULT_RECORD_NUM, overwrite-oldest on wrap, "0 = total - N"
+    after several wraps, out-of-range index returns NULL, tick captured per
+    record, init resets the write cursor too, and every record sits between
+    a matched enter/exit pair.
+
+    NOT covered: atomicity under real interrupt nesting (the stubs no-op the
+    critical section, so the count only proves pairing), calling it from a
+    real HardFault, and the SVC read packing format. A missing host compiler
+    is a FAIL.
+    """
+    import tempfile
+    cc = _find_host_cc()
+    if not cc:
+        fail("fault-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        exe = os.path.join(td, "fault_host.exe" if os.name == "nt" else "fault_host")
+        cmd = [cc]
+        if "mingw" in cc.replace("\\", "/").lower():
+            cmd.append("-B" + os.path.dirname(cc))
+        cmd += ["-std=gnu11", "-fno-asynchronous-unwind-tables",
+                "-Ikernelsrc/include", "-Ikernelsrc/components/mdk_trace",
+                "-Iboard/stm32f427", "-Iconfig", "-o", exe,
+                "kernelsrc/tests/test_fault_host.c", "kernelsrc/src/arkrtos_fault.c"]
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            fail("fault-host", "gate did not build: %s"
+                 % (r.stderr or "").strip().splitlines()[-1:])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode == 0 and "FAULT-HOST OK" in txt:
+            ok("fault-host", "ring index semantics + tick capture + critical pairing verified on host")
+        else:
+            fail("fault-host", "gate failed: %s" % txt.strip()[:160])
+
 def check_tickless():
     """tickless idle: the accounting must be provably right, and the ON path must compile.
 
@@ -1075,6 +1119,7 @@ def main(argv):
     check_sync_host()
     check_loader_host()
     check_fifo_host()
+    check_fault_host()
     check_tickless()
     check_arkmake_syntax()
     check_rtstat_syntax()
