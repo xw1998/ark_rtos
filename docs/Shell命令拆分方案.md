@@ -82,13 +82,13 @@
 ## 6. 迁移顺序（每一步都能停）
 
 1. 只加 `arkrtos_shell_internal.h`：把 §4 的共享符号改成「头里声明、`.c` 里定义」，
-   `static` 去掉。**这一步不改任何行为**，先让 25 项门禁全绿。
+   `static` 去掉。**这一步不改任何行为**，先让全部门禁通过（写作时是 28 项）。
 2. 搬 `ushell`（312 行，边界最干净）：它有自己的注册表与跳板，跨族依赖只有 `sh_out`。
 3. 搬 `fs + blk`（约 2700 行，最大一块，也最容易证明「搬完命令还在」）。
 4. 搬 `image`、`cfg`、`diag`、`misc`，每搬一族跑一次门禁。
 5. 最后才整理 `register_kernel_commands()` 的 `need` 上界与文件头注释。
 
-每一小步的验收：`env -u PYTHONHOME -u PYTHONPATH py -3 tools/ci_gate.py` 25 项全过 +
+每一小步的验收：`env -u PYTHONHOME -u PYTHONPATH py -3 tools/ci_gate.py` 全部门禁通过 +
 Keil 工程 0 error + `help` 的命令集合与拆分前逐字相同 + `Code` 变化如实记账。
 
 ## 7. 为什么现在不做
@@ -114,6 +114,6 @@ Keil 工程 0 error + `help` 的命令集合与拆分前逐字相同 + `Code` �
 
 - 每个新文件顶部写清「本文件负责哪几族命令、受哪个门控」；
 - `docs/内核Shell控制台使用说明.md` 的命令表与拆分后的文件一一对应；
-- `ci_gate` 25 项全过；Keil 全量 0 error；
+- `ci_gate` 全部门禁通过；Keil 全量 0 error；
 - `help` 输出的命令集合与拆分前逐字相同（排序也相同）；
 - `Code / RO-data / RW-data / ZI-data` 四个数都给出，变化写进本页或 `docs/欠账盘点.md`。
