@@ -159,6 +159,7 @@ board self-test:
 | `app_sdk/SEAMLESS_V1` / `SEAMLESS_V2` | Mini apps | Handing a control loop over while running (seamless upgrade), see [Seamless upgrade](docs/无缝升级例程.md) |
 | `app_sdk/BLED_APP` + `driver_sdk/BLED_DRV` | App + standalone driver | End-to-end example where three firmwares share no addresses, see `BLUE_LED_E2E_README.md` |
 | `app_sdk/APP_BAD` | App | A deliberately broken image: crash accounting and the three-strikes rule |
+| `app_sdk/APP_BADBEAT` | App | A deliberately heartbeat-violating image: promises a beat every 1 s but stays silent for 3 s per round, until `held=heartbeat` |
 | `driver_sdk/DRV_DEMO` | Driver | Driver skeleton on the same install channel as an app: `--type driver` -> `.svcapp` -> `install` |
 | `example/stm32f401/kernel/ARKRTOS_TEST` | Kernel | What a chip change costs (only `board/` and the board partition header) |
 

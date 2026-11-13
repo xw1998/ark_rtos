@@ -117,6 +117,7 @@ Ark RTOS 把这件事拆成五层，每层各拦一种失败，且每一层的"�
 | `app_sdk/SEAMLESS_V1` / `SEAMLESS_V2` | 小程序 | 运行中交接控制权（无缝升级），见 [无缝升级例程](docs/无缝升级例程.md) |
 | `app_sdk/BLED_APP` + `driver_sdk/BLED_DRV` | 应用 + 独立驱动 | 三个固件互不依赖地址的端到端例子，见 `BLUE_LED_E2E_README.md` |
 | `app_sdk/APP_BAD` | 应用 | 故意写错的镜像：验证崩溃记账与「连续 3 次禁用」 |
+| `app_sdk/APP_BADBEAT` | 应用 | 故意违反心跳合同：声明 1 s 报一次到却每轮沉默 3 s，直到 `held=heartbeat` |
 | `driver_sdk/DRV_DEMO` | 驱动 | 驱动骨架，与 App 同一条安装通道：`--type driver` → `.svcapp` → `install` |
 | `example/stm32f401/kernel/ARKRTOS_TEST` | 内核 | 换一颗芯片要改多少（只改 `board/` 与板级分区头） |
 
