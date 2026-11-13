@@ -1,5 +1,5 @@
 /**
-* @file  mpool_demo.c
+* @file  main.c
 * @brief 固定块内存池（SVC 0x20）的非特权通道自检程序。
 * @details 这份程序跑在 App 自己的非特权任务里，池的内存区是 App 自己的一段
 *          静态数组。所有分配/释放/查询都经 SVC 0x20 进内核，因此它同时验证

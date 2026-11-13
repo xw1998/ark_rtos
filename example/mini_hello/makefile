@@ -1,7 +1,7 @@
 # /mnt/nor/hello/makefile -- 标准 C 的 hello world，作为 Ark RTOS 小程序编译
 #
-# 这个工程里只有 hello.c 一行 #include <stdio.h> 和一句 printf——没有一句
-# Ark RTOS 的东西，在 Linux 上就是 `cc hello.c && ./a.out`。在这里是：
+# 这个工程里只有 main.c 一行 #include <stdio.h> 和一句 printf——没有一句
+# Ark RTOS 的东西，在 Linux 上就是 `cc main.c && ./a.out`。在这里是：
 #
 #   cd /mnt/nor/hello
 #   make
@@ -26,5 +26,5 @@
 # MiniMain()」的骨架是 Keil / GCC 档的写法，arkc 档塞进来会直接 #error。
 TARGET = hello
 OUT    = hello.svcm
-SRCS   = /mnt/nor/start.c /mnt/nor/rt.c hello.c
+SRCS   = /mnt/nor/start.c /mnt/nor/rt.c main.c
 INCS   = /mnt/nor

@@ -243,9 +243,9 @@
           <GroupName>Mini</GroupName>
           <Files>
             <File>
-              <FileName>seamless_v1.c</FileName>
+              <FileName>main.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\Src\seamless_v1.c</FilePath>
+              <FilePath>..\Src\main.c</FilePath>
             </File>
           </Files>
         </Group>

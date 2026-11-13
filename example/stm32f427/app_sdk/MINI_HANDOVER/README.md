@@ -16,7 +16,7 @@
 
 ## 程序做了什么
 
-`Src/mini_handover.c`：
+`Src/main.c`：
 
 1. `arkrtos_dev_open("led2", 0)` —— led0/led1 被内核任务 1/2 占着，led2 平时无所有者；
 2. `arkrtos_dev_ctrl(led, 1u, 0u)` 点亮（`ARKRTOS_LED_CTRL_ON = 1`，led2 = PC2，低电平点亮）；

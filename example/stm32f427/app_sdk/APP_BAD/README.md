@@ -13,7 +13,7 @@
 | probe1 | 写内核私有 RAM 的字（`0x20003000`，不在本 App 的 MPU 窗口内） | MemManage |
 | probe2 | 非特权态写 `SCB->SHCSR`（`0xE000ED24`） | BusFault / HardFault |
 
-两个探针**各自只跑一次**（用内核的故障累计数当"走到哪一步"的标记，见 `app_bad.c` 注释）：
+两个探针**各自只跑一次**（用内核的故障累计数当"走到哪一步"的标记，见 `main.c` 注释）：
 一路撞下去的话第三次会把整槽禁掉，而故障环又会在随后的复位里被清空，什么都看不到。
 
 ## 目录结构
@@ -23,7 +23,7 @@ APP_BAD/
 ├── MDK-ARM/
 │   └── app_bad.uvprojx     # Keil MDK 工程（scatter 由 BeforeMake 钩子生成）
 └── Src/
-    └── app_bad.c           # 探针主体，入口就是标准 C 的 int main(void)
+    └── main.c           # 探针主体，入口就是标准 C 的 int main(void)
 ```
 
 ## 用法

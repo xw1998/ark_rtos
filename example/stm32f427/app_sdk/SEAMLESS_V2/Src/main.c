@@ -1,5 +1,5 @@
 /**
-* @file seamless_v2.c
+* @file main.c
 * @brief Seamless upgrade demo, version 1.1.0: the control loop that takes over.
 * @details Same loop as version 1.0.0, retuned and running twice as fast, plus
 *          the other half of the handover:

@@ -1,5 +1,5 @@
 /**
-* @file posix_demo.c
+* @file main.c
 * @brief An ordinary POSIX C program, built as an Ark RTOS App without edits.
 * @details Everything here is what a small console program does on a desktop:
 *          it includes <stdio.h>, <string.h>, <stdlib.h>, <ctype.h> for the
@@ -7,7 +7,7 @@
 *          There is no arkrtos.h, no device name, no address and no partition -
 *          the App side compatibility layer answers those names.
 *
-*          The same source builds on Linux with `cc posix_demo.c -pthread`
+*          The same source builds on Linux with `cc main.c -pthread`
 *          (where the headers come from glibc) and here with the Keil
 *          toolchain (where they come from kernelsrc/sdk/posix). That is the
 *          point of the file: it is a porting proof, not a target specific

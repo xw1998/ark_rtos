@@ -13,7 +13,7 @@ APP_DEMO/
 ├── MDK-ARM/
 │   └── app_demo.uvprojx     # Keil MDK 工程文件（scatter 由脚本生成，见下）
 └── Src/
-    └── app_demo.c           # 应用主体，入口就是标准 C 的 int main(void)
+    └── main.c           # 应用主体，入口就是标准 C 的 int main(void)
 ```
 
 工程引用的 SDK 文件位于 `kernelsrc/sdk/app_sdk/`：
@@ -63,7 +63,7 @@ APP_DEMO/
 
 ## 示例功能概览
 
-`app_demo.c` 中的 `main()` 演示了：
+`main.c` 中的 `main()` 演示了：
 
 - **设备 IO**：`arkrtos_dev_open/write/read`（LED 与串口）
 - **任务延时**：`arkrtos_task_wait`

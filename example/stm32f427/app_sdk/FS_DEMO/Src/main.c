@@ -1,5 +1,5 @@
 /**
-* @file fs_demo.c
+* @file main.c
 * @brief File-class POSIX on Ark RTOS: an ordinary C program that reaches the
 *        VFS namespace through open/read/write/lseek/stat/opendir/readdir.
 * @details Everything here is standard POSIX: the includes are <stdio.h>,

@@ -60,7 +60,7 @@ int main(void) {
 ```
 TARGET = hello
 OUT    = hello.svcm
-SRCS   = /mnt/nor/start.c /mnt/nor/rt.c hello.c
+SRCS   = /mnt/nor/start.c /mnt/nor/rt.c main.c
 INCS   = /mnt/nor
 ```
 

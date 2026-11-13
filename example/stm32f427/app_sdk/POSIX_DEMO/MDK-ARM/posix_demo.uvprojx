@@ -384,9 +384,9 @@
           <GroupName>App</GroupName>
           <Files>
             <File>
-              <FileName>posix_demo.c</FileName>
+              <FileName>main.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\Src\posix_demo.c</FilePath>
+              <FilePath>..\Src\main.c</FilePath>
             </File>
           </Files>
         </Group>

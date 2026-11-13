@@ -10,7 +10,7 @@ ark@arkrtos:~$ cd /mnt/nor/hello
 ark@arkrtos:/mnt/nor/hello$ make
 make: hello.svcm <- /mnt/nor/start.c (+more)
 make:   src /mnt/nor/rt.c
-make:   src hello.c
+make:   src main.c
 ...
 cc: hello.svcm: payload 10760 + table 26 x 4 = 11120 B
 make: ok
@@ -65,7 +65,7 @@ py -3 tools/mini_deploy.py --port COM3
 它做两件事：
 
 1. 在卷上建出 **`/mnt/nor/hello/`** 目录（走 littlefs 的 `mkdir`），把工程目录
-   （`example/mini_hello/` 的 `hello.c` + `makefile`）放进去；
+   （`example/mini_hello/` 的 `main.c` + `makefile`）放进去；
 2. 把小程序 SDK 的 6 个文件放到**卷根**（`start.c` / `rt.c` / `arkrtos.h` /
    `unistd.h` / `stdio.h` / `stdarg.h`），并清掉老形态留下的 `/mini_main.c`。
 
@@ -87,13 +87,13 @@ ark@arkrtos:~$ ls -l /mnt/nor
   -rw-r--r--   1 0     0         3418  stdio.h
   drwxr-xr-x   1 0     0            0  hello
 ark@arkrtos:~$ ls -l /mnt/nor/hello
-  -rw-r--r--   1 0     0           84  hello.c
+  -rw-r--r--   1 0     0           84  main.c
   -rw-r--r--   1 0     0         1533  makefile
 ark@arkrtos:~$ cd /mnt/nor/hello
 ark@arkrtos:/mnt/nor/hello$ make
 make: hello.svcm <- /mnt/nor/start.c (+more)
 make:   src /mnt/nor/rt.c
-make:   src hello.c
+make:   src main.c
 make:   -I/mnt/nor
 cc: pack 3 sources -> hello.svcm (4 passes, -O1)
 cc:   A 10760 B
@@ -124,7 +124,7 @@ mini: none running (usage: mini run <path>)
 
 ## 3. 这个工程里有什么
 
-### 3.1 `hello.c` —— 84 字节，标准 C
+### 3.1 `main.c` —— 84 字节，标准 C
 
 ```c
 #include <stdio.h>
@@ -135,7 +135,7 @@ int main(void) {
 }
 ```
 
-它在 Linux 上就是 `cc hello.c && ./a.out`，连输出都一样。**没有 `MiniMain` / `AppMain`、
+它在 Linux 上就是 `cc main.c && ./a.out`，连输出都一样。**没有 `MiniMain` / `AppMain`、
 没有 `write`、没有一句 Ark RTOS 的头文件**。
 
 `main()` 就是入口：SDK 的启动桩（`start.c`）调它，它 `return` 之后由桩调
@@ -262,7 +262,7 @@ __asm int printf(const char *fmt, ...)
 ```
 TARGET = hello
 OUT    = hello.svcm
-SRCS   = /mnt/nor/start.c /mnt/nor/rt.c hello.c
+SRCS   = /mnt/nor/start.c /mnt/nor/rt.c main.c
 INCS   = /mnt/nor
 ```
 
@@ -326,7 +326,7 @@ FAIL BOOT: cannot mount nor0 at /mnt/nor: -5 (...); the console still comes up, 
 
 | 用例 | 判什么 |
 |------|--------|
-| `mini-sdk-std-hello` | `ls -l /mnt/nor` 能看到 SDK 六件 + `hello` 目录（证明上电自动挂载）→ `hello` **command not found**（反假绿）→ `cd /mnt/nor/hello` → `cat hello.c` 里就是 `#include <stdio.h>` 与 `printf("Hello, World!\n");` → `make`（3 份源、四遍、`entry mode: flat miniapp`、`payload + table`）→ `mini run hello.svcm` 打出 `Hello, World!` 且两块 RAM 归还 |
+| `mini-sdk-std-hello` | `ls -l /mnt/nor` 能看到 SDK 六件 + `hello` 目录（证明上电自动挂载）→ `hello` **command not found**（反假绿）→ `cd /mnt/nor/hello` → `cat main.c` 里就是 `#include <stdio.h>` 与 `printf("Hello, World!\n");` → `make`（3 份源、四遍、`entry mode: flat miniapp`、`payload + table`）→ `mini run hello.svcm` 打出 `Hello, World!` 且两块 RAM 归还 |
 | `mini-sdk-missing-main` | 工程没定义 `main` 时必须 `unresolved symbol "main"` + `cc: pass A failed`；**不许**"报错但照样出文件"（链接器以前只报诊断、仍写出镜像，四遍照做，最后在打包阶段报一个不相干的 -33） |
 
 ## 7. `printf` 的宿主门禁

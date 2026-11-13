@@ -1,7 +1,7 @@
 /**
-* @file  hello_mini.c
+* @file  main.c
 * @brief 一个普通的标准 C 程序：在 Ark RTOS 上作为**小程序**运行。
-* @details 与 `HELLO_APP/Src/hello_app.c` 逐字相同——同一段源码既能编成 App，
+* @details 与 `HELLO_APP/Src/main.c` 逐字相同——同一段源码既能编成 App，
 *          也能编成小程序，差别只在工程里链接哪份 SDK 启动桩：
 *
 *              App   : kernelsrc/sdk/app_sdk   （常驻槽位，开机自启）

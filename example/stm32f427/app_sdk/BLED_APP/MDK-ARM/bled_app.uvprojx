@@ -384,9 +384,9 @@
           <GroupName>App</GroupName>
           <Files>
             <File>
-              <FileName>bled_app.c</FileName>
+              <FileName>main.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\Src\bled_app.c</FilePath>
+              <FilePath>..\Src\main.c</FilePath>
             </File>
           </Files>
         </Group>

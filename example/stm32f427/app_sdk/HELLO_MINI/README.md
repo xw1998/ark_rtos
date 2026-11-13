@@ -1,6 +1,6 @@
 # HELLO_MINI —— 最小的小程序：同一个标准 C 程序
 
-`Src/hello_mini.c` 与 `../HELLO_APP/Src/hello_app.c` **逐字相同**：
+`Src/main.c` 与 `../HELLO_APP/Src/main.c` **逐字相同**：
 
 ```c
 #include <stdio.h>

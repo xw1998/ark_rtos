@@ -38,7 +38,7 @@
 在 MobaXterm 上就是光标每秒闪十来次——用户报的「光标闪烁异常」就是这个。
 
 **判据**：串口在空闲期必须**零字节**。板上实测（`rawcap.py`，按时间戳记录每
-一个字节）：打开 `/mnt/nor/hello.c` 整屏画完是 `t=1.569`，之后到 `t=5.309`
+一个字节）：打开 `/mnt/nor/main.c` 整屏画完是 `t=1.569`，之后到 `t=5.309`
 我按下 `:` 之前，**3721 ms 零字节**。
 
 ### 2.2 命令行只画一次前缀
@@ -106,7 +106,7 @@ cd D:/工作/git_project/arkvim && make test
 ```bash
 # 空闲零字节 + :q 单冒号 + 退出
 python C:/Users/14905/AppData/Local/Temp/rawcap.py \
-  "vim /mnt/nor/hello.c" CR "wait=2.0" "wait=1.5" ":" "q" CR "wait=1.0"
+  "vim /mnt/nor/main.c" CR "wait=2.0" "wait=1.5" ":" "q" CR "wait=1.0"
 ```
 
 看三件事：整屏画完与下一次按键之间是不是一段长空档（零字节）、按 `:` 那一

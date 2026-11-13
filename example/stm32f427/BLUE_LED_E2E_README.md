@@ -38,7 +38,7 @@ example/stm32f427/
 |
 +-- app_sdk/BLED_APP/             # 外部蓝灯应用
     +-- MDK-ARM/bled_app.uvprojx  # scatter 由脚本生成到 build/app.sct
-    +-- Src/bled_app.c            # open("BLED") + 周期闪烁
+    +-- Src/main.c            # open("BLED") + 周期闪烁
 ```
 
 两个工程都不再需要各自的 `.sct` 与 `app_config.c`：地址只在
@@ -100,7 +100,7 @@ arkrtos_drv_register("BLED", &bled_drv, 0);
 > 注意：这里是**外设寄存器地址**（0x4002_xxxx），不是分区地址，不违反
 > “地址只在 config 定义一次”的原则——分区地址才是需要唯一源头的东西。
 
-### 2. 外部应用通过设备框架操作（bled_app.c）
+### 2. 外部应用通过设备框架操作（main.c）
 
 应用**不碰硬件**，只通过设备 API：
 

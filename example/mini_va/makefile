@@ -1,7 +1,7 @@
 # /mnt/nor/va/makefile -- 标准 C 的变参函数，作为 Ark RTOS 小程序编译
 #
 # 这个工程里只有标准 C（<stdio.h> + <stdarg.h> + va_start/va_arg）——没有一句
-# Ark RTOS 的东西，在 Linux 上就是 `cc va.c && ./a.out`。在这里是：
+# Ark RTOS 的东西，在 Linux 上就是 `cc main.c && ./a.out`。在这里是：
 #
 #   cd /mnt/nor/va
 #   make
@@ -26,5 +26,5 @@
 # MiniMain()」的骨架是 Keil / GCC 档的写法，arkc 档塞进来会直接 #error。
 TARGET = va
 OUT    = va.svcm
-SRCS   = /mnt/nor/start.c /mnt/nor/rt.c va.c
+SRCS   = /mnt/nor/start.c /mnt/nor/rt.c main.c
 INCS   = /mnt/nor

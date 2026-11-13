@@ -2,9 +2,9 @@
 
 这份示例要证明一句话：**把一个为 Linux / Windows 写的控制台程序搬到 Ark RTOS 上，改的是 include 列表，不是程序结构。**
 
-`Src/posix_demo.c` 里没有 `arkrtos.h`、没有控制台设备名、没有地址、没有分区号和槽位号。它只用
+`Src/main.c` 里没有 `arkrtos.h`、没有控制台设备名、没有地址、没有分区号和槽位号。它只用
 `<stdio.h>` / `<string.h>` / `<stdlib.h>` / `<ctype.h>` 加 `<unistd.h>` / `<pthread.h>` / `<semaphore.h>`。
-同一份源码在 Linux 上 `cc posix_demo.c -pthread` 也能编。
+同一份源码在 Linux 上 `cc main.c -pthread` 也能编。
 
 ## 编译与烧录
 
@@ -24,7 +24,7 @@ env -u PYTHONHOME -u PYTHONPATH "D:/Keil_v5/UV4/UV4.exe" -f \
 
 | 位置 | 为什么 |
 |------|--------|
-| BeforeMake 钩子 `--heap-size 2048` | `posix_demo.c` 用了 `malloc`。散列默认不划库堆区，不给就会在链接期报 `L6915E: Heap was used, but no heap region was defined` |
+| BeforeMake 钩子 `--heap-size 2048` | `main.c` 用了 `malloc`。散列默认不划库堆区，不给就会在链接期报 `L6915E: Heap was used, but no heap region was defined` |
 | 源文件里**没有** `arkrtos_app_main.c` | 它自带强 `int main(void)`，与用户 `main` 一起会产出两个 `__ARM_use_no_argv` 定义，链接期 `L6200E` |
 | `.uvoptx` 的 `<TargetName>` 必须是 `POSIX_DEMO` | 它是 Keil 下载/调试入口的索引。复制别的工程当模板忘了改，`UV4 -f` 会以 `Internal DLL Error` / `Flash Download failed - Target DLL has been cancelled` 失败——现象像硬件坏了，实际只是这一个字段 |
 

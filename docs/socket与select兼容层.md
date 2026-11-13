@@ -86,9 +86,9 @@ App 侧映射成 `EOPNOTSUPP`。也就是说**内核没编协议栈时，`socket
 
 ## 6. SOCKET_DEMO：一份不改动的 socket 程序
 
-`example/stm32f427/app_sdk/SOCKET_DEMO/Src/socket_demo.c` 是 B 面的试验件（A 面是 `FS_DEMO`，
+`example/stm32f427/app_sdk/SOCKET_DEMO/Src/main.c` 是 B 面的试验件（A 面是 `FS_DEMO`，
 进程/线程面是 `POSIX_DEMO`）：一份普通的 POSIX sockets 程序，同一个源码在 Linux 上
-`cc socket_demo.c` 能编，在这里名字由兼容层回答。
+`cc main.c` 能编，在这里名字由兼容层回答。
 
 它盖的事：`htons/ntohs` 往返、`inet_addr` / `inet_ntoa`；TCP 回显（socket / `SO_REUSEADDR` /
 bind / listen / getsockname / connect / accept / getpeername / 双向 send-recv / `select` 可读 /

@@ -1,5 +1,5 @@
 /**
-* @file  mini_handover.c
+* @file  main.c
 * @brief 小程序「正常退出 = 计划内交接」的上板判据实现。
 * @details 判据原文（`docs/欠账盘点.md` §一）：
 *

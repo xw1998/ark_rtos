@@ -3,7 +3,7 @@
 # 与 Keil 工程同一文件集；启动文件与上下文切换已按 GCC 工具链替换
 
 SRCS := \
-  example/stm32f427/app_sdk/HELLO_MINI/Src/hello_mini.c \
+  example/stm32f427/app_sdk/HELLO_MINI/Src/main.c \
   kernelsrc/sdk/mini_sdk/arkrtos_mini_main.c \
   kernelsrc/sdk/app_sdk/arkrtos_stdio.c \
   kernelsrc/sdk/app_sdk/arkrtos_oslib.c \

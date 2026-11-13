@@ -1,8 +1,8 @@
 # SOCKET_DEMO
 
-A plain POSIX sockets program (`Src/socket_demo.c`) built as an Ark RTOS App
+A plain POSIX sockets program (`Src/main.c`) built as an Ark RTOS App
 **without edits**. It is the B-side counterpart of `POSIX_DEMO` (files) and of
-`FS_DEMO` (VFS): the same source compiles on Linux with `cc socket_demo.c`,
+`FS_DEMO` (VFS): the same source compiles on Linux with `cc main.c`,
 and here the names `socket/bind/listen/accept/connect/send/recv/select/...`
 come from `kernelsrc/sdk/posix`.
 

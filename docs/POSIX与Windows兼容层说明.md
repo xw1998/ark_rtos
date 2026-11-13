@@ -338,9 +338,9 @@ win.strcpy_s / strcpy_s_bounds / sprintf_s                           OK
 | `kernelsrc/include/arkrtos.h` | 线程服务（`arkrtos_thread_*`）与各内核服务契约 |
 | `kernelsrc/src/arkrtos_loader.c` | 线程服务 SVC 0x1B 与 VFS 路径服务 SVC 0x1C 的分发 |
 | `kernelsrc/include/arkrtos_vfs.h` / `kernelsrc/src/arkrtos_vfs.c` | App 侧文件类 POSIX 的内核面（§4.7） |
-| `example/stm32f427/app_sdk/APP_DEMO/Src/app_demo.c` | 第九节自测（兼容层的真机验证） |
-| `example/stm32f427/app_sdk/POSIX_DEMO/Src/posix_demo.c` | 第十节试验件（未修改的 POSIX 程序） |
-| `example/stm32f427/app_sdk/FS_DEMO/Src/fs_demo.c` | 第十一节试验件（文件类 POSIX 自检） |
+| `example/stm32f427/app_sdk/APP_DEMO/Src/main.c` | 第九节自测（兼容层的真机验证） |
+| `example/stm32f427/app_sdk/POSIX_DEMO/Src/main.c` | 第十节试验件（未修改的 POSIX 程序） |
+| `example/stm32f427/app_sdk/FS_DEMO/Src/main.c` | 第十一节试验件（文件类 POSIX 自检） |
 | `docs/配置区与安装策略.md` | 槽位 RAM 窗口与安装策略 |
 | `docs/Ark RTOS应用安装与调试指南.md` | 打包、安装、上板全流程 |
 | `docs/api/Ark RTOS_API参考.md` | SDK 接口参考 |
@@ -351,9 +351,9 @@ win.strcpy_s / strcpy_s_bounds / sprintf_s                           OK
 
 前面各节讲的是"能力清单"，这一节讲"**改的是 include 列表，不是程序结构**"这句话到底验到了什么程度。
 
-试验件：`example/stm32f427/app_sdk/POSIX_DEMO/Src/posix_demo.c`。它是一份普通的控制台程序——
+试验件：`example/stm32f427/app_sdk/POSIX_DEMO/Src/main.c`。它是一份普通的控制台程序——
 `<stdio.h>` / `<string.h>` / `<stdlib.h>` / `<ctype.h>` 加 `<unistd.h>` / `<pthread.h>` / `<semaphore.h>`，
-里面没有 `arkrtos.h`、没有设备名、没有地址、没有分区号。同一份源码在 Linux 上 `cc posix_demo.c -pthread` 就能编。
+里面没有 `arkrtos.h`、没有设备名、没有地址、没有分区号。同一份源码在 Linux 上 `cc main.c -pthread` 就能编。
 
 ### 10.1 为了让它能编过，兼容层补了什么
 
@@ -421,7 +421,7 @@ id  type  state    auto  task  crash  held  base        size     ram         ent
 ## 11. 文件类 POSIX 也跑起来了（上板验证过）
 
 第十节验的是"设备与线程"这一半（`pthread` / `semaphore` / `printf`）。文件类那一半的试验件是
-`example/stm32f427/app_sdk/FS_DEMO/Src/fs_demo.c`：只 include `<stdio.h>` / `<string.h>` /
+`example/stm32f427/app_sdk/FS_DEMO/Src/main.c`：只 include `<stdio.h>` / `<string.h>` /
 `<fcntl.h>` / `<unistd.h>` / `<sys/stat.h>` / `<dirent.h>`，跑到 `/`（ramfs）上做一遍自检。
 
 它盖的事（详见该目录 `README.md`）：建/写/读回、`lseek(SEEK_SET/SEEK_END)`、`stat`/`fstat` 的类型位与长度、
@@ -434,7 +434,7 @@ id  type  state    auto  task  crash  held  base        size     ram         ent
 尖括号形式先找到的是工具链那一份——而它没有 `ENOENT` 这类 POSIX 错误码，于是编不过：
 
 ```
-..\Src\fs_demo.c(226): error:  #20: identifier "ENOENT" is undefined
+..\Src\main.c(226): error:  #20: identifier "ENOENT" is undefined
 ```
 
 `<unistd.h>` / `<dirent.h>` / `<sys/stat.h>` 这些 POSIX 头工具链不提供，所以尖括号形式反而能找到 SDK 的，

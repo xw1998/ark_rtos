@@ -10,7 +10,7 @@
 ----
     python tools/mini_deploy.py --port COM3
     python tools/mini_deploy.py --port COM3 --project example/mini_hello
-    python tools/mini_deploy.py --port COM3 --only hello.c
+    python tools/mini_deploy.py --port COM3 --only main.c
 
 部署清单
 --------

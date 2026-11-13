@@ -1,5 +1,5 @@
 /**
-* @file  sbuf_demo.c
+* @file  main.c
 * @brief 流缓冲 / 消息缓冲（SVC 0x1F）的非特权通道自检程序。
 * @details 这份程序跑在 App 自己的非特权任务里，缓冲由内核创建、数据放在 App
 *          自己的静态数组里。所有 sbuf / mbuf 调用都经 SVC 0x1F 进内核，因此它

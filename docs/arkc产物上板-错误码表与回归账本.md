@@ -867,7 +867,7 @@ python tools/final_app.py     # 会重烧，因为固件变了
 
 SDK 新增 `kernelsrc/sdk/mini_sdk/arkc/setjmp.h`（`typedef int jmp_buf[20]`，
 用前 40 B：`[0..7]=r4-r11`、`[8]=sp`、`[9]=lr`）与 `setjmp.s`。
-工程模板 `example/mini_setjmp/`（`sj.c` 是纯标准 C，`SRCS` 里带上 `setjmp.s`）。
+工程模板 `example/mini_setjmp/`（`main.c` 是纯标准 C，`SRCS` 里带上 `setjmp.s`）。
 
 **为什么不用 C 包装 + 机器码 blob**：`setjmp` 要存**调用者**的 `sp`/`lr`，
 而 C 包装拿到的永远是包装自己那一帧；包装 `return` 之后那帧会被下一次调用
@@ -936,7 +936,7 @@ tls: ok (single instance, no TP base -- see the header)
 
 **没有**给这条降级加 warning（会打破 `tests/arm_exec` 与 `run_full_test.ps1`
 里对 `0 warnings` 的断言，且当前板上没有多线程小程序）；边界写在这里与
-`example/mini_tls/tls.c` 的文件头，并用一条板上用例把它钉成可重复读数。
+`example/mini_tls/main.c` 的文件头，并用一条板上用例把它钉成可重复读数。
 
 ### 板级回归：all 14 cases PASS
 
@@ -948,7 +948,7 @@ python tools/final_app.py            # 会重烧；--noflash 复用已烧固件
 
 新增两条用例：
 
-* `mini-setjmp` —— `ls` 确认 `/mnt/nor/{setjmp.h,setjmp.s,sj}`、`cat sj.c`
+* `mini-setjmp` —— `ls` 确认 `/mnt/nor/{setjmp.h,setjmp.s,sj}`、`cat main.c`
   看到标准 `<setjmp.h>`、`make` 断言 `pack 4 sources` 且
   `ram_movw [1-9]\d*`（多对象数据段真的被搬过的读数）、`mini run` 五条读数
   全对；`forbid` 里钉着本轮两条错误的原文
@@ -959,7 +959,7 @@ python tools/final_app.py            # 会重烧；--noflash 复用已烧固件
 ① 小程序的第一行输出会和 shell 提示符挤在同一行
 （`ark@arkrtos:/mnt/nor/sj$ sj: first pass r=0`），所以**首行不能锚 `^`**，
 其余各行照旧锚整行——`mini-sdk-va` 早就是这么写的；
-② 板上 `cat` 把非 ASCII 打成 `\xE5...` 转义，所以 `cat tls.c` 的行尾可能是
+② 板上 `cat` 把非 ASCII 打成 `\xE5...` 转义，所以 `cat main.c` 的行尾可能是
 注释，只能锚行首不能断言行尾。
 
 ### 新登记三条（可复用的口径）

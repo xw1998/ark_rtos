@@ -3,7 +3,7 @@
 # 与 Keil 工程同一文件集；启动文件与上下文切换已按 GCC 工具链替换
 
 SRCS := \
-  example/stm32f427/app_sdk/HELLO_APP/Src/hello_app.c \
+  example/stm32f427/app_sdk/HELLO_APP/Src/main.c \
   kernelsrc/sdk/app_sdk/arkrtos_app_main.c \
   kernelsrc/sdk/app_sdk/arkrtos_stdio.c \
   kernelsrc/sdk/app_sdk/arkrtos_oslib.c \

@@ -243,9 +243,9 @@
           <GroupName>Mini</GroupName>
           <Files>
             <File>
-              <FileName>mini_handover.c</FileName>
+              <FileName>main.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\Src\mini_handover.c</FilePath>
+              <FilePath>..\Src\main.c</FilePath>
             </File>
           </Files>
         </Group>

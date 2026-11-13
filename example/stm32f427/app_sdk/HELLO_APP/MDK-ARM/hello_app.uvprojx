@@ -243,9 +243,9 @@
           <GroupName>Hello</GroupName>
           <Files>
             <File>
-              <FileName>hello_app.c</FileName>
+              <FileName>main.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\Src\hello_app.c</FilePath>
+              <FilePath>..\Src\main.c</FilePath>
             </File>
           </Files>
         </Group>

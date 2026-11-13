@@ -1,6 +1,6 @@
 # HELLO_APP —— 最小的 App：一个标准 C 程序
 
-`Src/hello_app.c` 就是你在 Linux / Windows 上写的那段程序，逐字相同：
+`Src/main.c` 就是你在 Linux / Windows 上写的那段程序，逐字相同：
 
 ```c
 #include <stdio.h>
@@ -25,8 +25,8 @@ int main()
 
 | 文件 | 作用 |
 |------|------|
-| `Src/hello_app.c` | 用户程序（本文件） |
-| `MDK-ARM/hello_app.uvprojx` | Keil 工程（AC6），源：`hello_app.c` + `arkrtos_app_main.c` + `arkrtos_stdio.c` + `arkrtos_oslib.c` + `arkrtos_app_start.s` |
+| `Src/main.c` | 用户程序（本文件） |
+| `MDK-ARM/hello_app.uvprojx` | Keil 工程（AC6），源：`main.c` + `arkrtos_app_main.c` + `arkrtos_stdio.c` + `arkrtos_oslib.c` + `arkrtos_app_start.s` |
 | `GCC/Makefile`、`GCC/sources.mk` | 同一份文件集的 GCC 工程（`sources.mk` 由 `.uvprojx` 派生，不要手改） |
 
 ## 编译

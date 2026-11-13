@@ -1,5 +1,5 @@
 /*
- * va.c -- C 变参函数在 Ark RTOS 小程序里跑（arkc 的 stdarg.h）
+ * main.c -- C 变参函数在 Ark RTOS 小程序里跑（arkc 的 stdarg.h）
  *
  * 这份工程存在的理由：变参支持是"编译器里最容易被自己的门禁骗过去"的一块。
  * 宿主上门禁（examples/run_va_gate.py）拿 unicorn 跑 arkcc 的产物，但那走的

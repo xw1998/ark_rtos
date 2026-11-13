@@ -8,5 +8,5 @@
 # 初值由启动桩调用的 __arkcc_init_globals() 写入。
 TARGET = tls
 OUT    = tls.svcm
-SRCS   = /mnt/nor/start.c /mnt/nor/rt.c tls.c
+SRCS   = /mnt/nor/start.c /mnt/nor/rt.c main.c
 INCS   = /mnt/nor

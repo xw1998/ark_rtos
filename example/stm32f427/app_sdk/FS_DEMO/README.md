@@ -6,7 +6,7 @@
 `readdir` / `unlink`）就能走到内核的 VFS 命名空间，源码里没有 `arkrtos.h`、没有
 地址、没有分区号。
 
-`Src/fs_demo.c` 只 include 标准头，同一份源码在 Linux 上 `cc fs_demo.c` 也能编。
+`Src/main.c` 只 include 标准头，同一份源码在 Linux 上 `cc main.c` 也能编。
 它开机跑一遍自检，然后进入心跳。
 
 ## 自检覆盖什么

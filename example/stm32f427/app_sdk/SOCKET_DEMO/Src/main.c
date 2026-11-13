@@ -1,5 +1,5 @@
 /**
-* @file socket_demo.c
+* @file main.c
 * @brief A POSIX sockets program, built as an Ark RTOS App without edits.
 * @details This is what a small TCP/UDP program looks like on a desktop: it
 *          includes <sys/socket.h>, <netinet/in.h>, <arpa/inet.h>, <sys/time.h>
@@ -9,7 +9,7 @@
 *          (kernelsrc/sdk/posix) answers those names and forwards them over
 *          SVC 0x1E.
 *
-*          The same source builds on Linux with `cc socket_demo.c` (headers
+*          The same source builds on Linux with `cc main.c` (headers
 *          from glibc) and here with the Keil toolchain (headers from
 *          kernelsrc/sdk/posix). That is the point of the file.
 *

@@ -1,8 +1,8 @@
 /*
- * sj.c -- setjmp / longjmp 在 Ark RTOS 小程序里跑（arkc + SDK 的 setjmp.s）
+ * main.c -- setjmp / longjmp 在 Ark RTOS 小程序里跑（arkc + SDK 的 setjmp.s）
  *
  * 这个工程里只有标准 C（<setjmp.h> + setjmp + longjmp）——在 Linux 上就是
- * `cc sj.c && ./a.out`。在这里是：
+ * `cc main.c && ./a.out`。在这里是：
  *
  *   cd /mnt/nor/sj
  *   make

@@ -799,8 +799,8 @@ typedef char arkrtos_pool_unit_check[
  * truncation (ARKCC_MACRO_EXPAND_MAX).
  *
  * Measured peaks on this 48 KB build (`stack raw` on hardware, after a real
- * `cd /mnt/nor/va && make`): boot 2 300 B, `cc -E va.c` 11 236 B,
- * `cc -c va.c` 17 884 B, `make` 30 668 B.  That is 62.4 % of 48 KB, leaving
+ * `cd /mnt/nor/va && make`): boot 2 300 B, `cc -E main.c` 11 236 B,
+ * `cc -c main.c` 17 884 B, `make` 30 668 B.  That is 62.4 % of 48 KB, leaving
  * 37.6 % (18 484 B) of headroom over the worst observed path.  RAM sits at
  * 68.24 % of KERNEL_RAM_SIZE with this value. */
 #define SHELL_TASK_STACK_SIZE    (1024 * 48)

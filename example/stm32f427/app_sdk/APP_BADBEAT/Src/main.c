@@ -1,5 +1,5 @@
 /**
-* @file  beat_bad.c
+* @file  main.c
 * @brief 故意违反心跳合同的应用（负向用例）。
 * @details 应用自己声明一个心跳窗口（`arkrtos_heartbeat(1000)` = "我最久隔 1 s
 *          报一次到"），然后每轮睡 3 s——比自己的承诺还久。守卫按违约记一条
