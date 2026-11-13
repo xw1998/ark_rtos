@@ -433,7 +433,6 @@ int32 arkrtos_sbuf_send_internal(int32 handle, const void *buf, int32 len, int32
     uint32 deadline;
     int32 remain;
     int32 ret;
-    int32 written = 0;
 
     if(buf == 0 || len <= 0)
     {
