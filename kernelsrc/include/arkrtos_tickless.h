@@ -73,6 +73,21 @@ uint32 arkrtos_tickless_idle(void);
 */
 uint32 arkrtos_tickless_wake_ticks(void);
 
+/**
+* @brief 累计读数：SysTick 中断次数与长睡眠次数
+* @param isrs    输出：进入 SysTick 中断的次数（一个中断算一次，不管它补了几拍）
+* @param sleeps  输出：成功编程为长节拍并进 WFI 的次数（0 = 没睡过）
+* @details 板端唯一能证明"tickless 真的在睡"的读数：没有它，"节拍没变慢"
+*          与"开关没生效"在串口上长得一模一样。两个指针都可以传空。
+*
+*          "跳过的拍数"不单独计数，直接用 `arkrtos_kernel_get_tick() - isrs`
+*          算：每个中断至少贡献一拍，剩下的必然是补发路径走完的。
+*          所以 `节拍总数 == isrs + skipped` 是定义而不是测得量。
+*          真正有信息量的是 `isrs` 与节拍总数的比值（4 倍睡眠时约 1:4）。
+*          计数只增不清，复位才归零。
+*/
+void arkrtos_tickless_stats(uint32 *isrs, uint32 *sleeps);
+
 #endif /* ARKRTOS_USE_TICKLESS */
 
 #endif /* __ARKRTOS_TICKLESS_H__ */

@@ -68,6 +68,9 @@
 #include "arkrtos_hal.h"
 #include "arkrtos_version.h"
 #include "arkrtos_rt.h"
+#if (ARKRTOS_USE_TICKLESS == 1)
+#include "arkrtos_tickless.h"
+#endif
 #if (ARKRTOS_USE_SECCHECK == 1)
 #include "arkrtos_sec.h"
 #endif
@@ -2404,6 +2407,25 @@ static int rt_show(void)
     {
         ark_shell_printf("  jitter    (no sample)\r\n");
     }
+
+    #if (ARKRTOS_USE_TICKLESS == 1)
+    {
+        /* 开关生效的反假绿读数：没有这一行，"节拍没变慢"与"根本
+         * 没在睡"在串口上无法区分。 */
+        uint32 tl_isrs   = 0u;
+        uint32 tl_sleeps = 0u;
+        uint32 tl_ticks  = arkrtos_kernel_get_tick();
+
+        arkrtos_tickless_stats(&tl_isrs, &tl_sleeps);
+        /* 跳过的拍数不单独统计：每个中断至少贡献一拍，剩下的必然是补发
+         * 路径走完的。所以这里用减法算，identity 是定义而不是测得量。 */
+        ark_shell_printf("  tickless  isr=%u  sleeps=%u  skipped=%u of %u tick(s)"
+                         "  cap=%u\r\n",
+                         tl_isrs, tl_sleeps,
+                         (tl_ticks > tl_isrs) ? (tl_ticks - tl_isrs) : 0u,
+                         tl_ticks, (uint32)ARKRTOS_TICKLESS_MAX_TICKS);
+    }
+    #endif
 
     ark_shell_printf("  note: maxima measured on this board with this build;\r\n");
     ark_shell_printf("        they are not a formal WCET bound.  rows with no sample\r\n");

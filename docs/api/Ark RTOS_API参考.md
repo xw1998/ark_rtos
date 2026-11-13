@@ -38,7 +38,7 @@
 - [kernelsrc/include/arkrtos_spin.h](#kernelsrcincludearkrtos_spinh)（10 项）
 - [kernelsrc/include/arkrtos_svc_call.h](#kernelsrcincludearkrtos_svc_callh)（10 项）
 - [kernelsrc/include/arkrtos_task.h](#kernelsrcincludearkrtos_taskh)（3 项）
-- [kernelsrc/include/arkrtos_tickless.h](#kernelsrcincludearkrtos_ticklessh)（5 项）
+- [kernelsrc/include/arkrtos_tickless.h](#kernelsrcincludearkrtos_ticklessh)（6 项）
 - [kernelsrc/include/arkrtos_ulog.h](#kernelsrcincludearkrtos_ulogh)（5 项）
 - [kernelsrc/include/arkrtos_ushell.h](#kernelsrcincludearkrtos_ushellh)（4 项）
 - [kernelsrc/include/arkrtos_utest.h](#kernelsrcincludearkrtos_utesth)（22 项）
@@ -5510,6 +5510,23 @@ SysTick 恢复成正常周期（含相位余数），所以调用之后的中断
 相位不为 0 时恢复出来的是"补满这一拍"的短周期，并在那一次
 中断里自己恢复成整拍：短周期若不被收回，之后每一拍都会变短，
 节拍就永久性地快了。
+
+### `void arkrtos_tickless_stats(uint32 *isrs, uint32 *sleeps);`
+
+```c
+void arkrtos_tickless_stats(uint32 *isrs, uint32 *sleeps);
+```
+
+**累计读数：SysTick 中断次数与长睡眠次数**
+- `isrs`：输出：进入 SysTick 中断的次数（一个中断算一次，不管它补了几拍）
+- `sleeps`：输出：成功编程为长节拍并进 WFI 的次数（0 = 没睡过）
+板端唯一能证明"tickless 真的在睡"的读数：没有它，"节拍没变慢"
+与"开关没生效"在串口上长得一模一样。两个指针都可以传空。
+"跳过的拍数"不单独计数，直接用 `arkrtos_kernel_get_tick() - isrs`
+算：每个中断至少贡献一拍，剩下的必然是补发路径走完的。
+所以 `节拍总数 == isrs + skipped` 是定义而不是测得量。
+真正有信息量的是 `isrs` 与节拍总数的比值（4 倍睡眠时约 1:4）。
+计数只增不清，复位才归零。
 
 ## kernelsrc/include/arkrtos_ulog.h
 

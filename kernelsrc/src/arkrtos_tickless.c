@@ -40,6 +40,13 @@ static volatile uint32 s_tl_counts;     /* 这次编程下去的计数          
 static volatile uint32 s_tl_cpt;        /* 一个正常节拍的计数               */
 static volatile uint32 s_tl_phase;      /* 已朝下一拍走过的计数（< cpt）    */
 
+/* 板端可见的累计读数（见 arkrtos_tickless_stats）：只增不清，复位归零。
+ * 计数在"真的把硬件编程成短周期并 WFI"那一刻加一，所以它同时能证明
+ * 开关生效与省下了中断。 */
+static volatile uint32 s_tl_isrs;       /* 进 SysTick 中断的次数             */
+static volatile uint32 s_tl_sleeps;     /* 进过长睡眠的次数                 */
+
+
 /* 一个正常节拍有多少个时钟计数。与 arkrtos_port_start_timer() 同一算式，
  * 但那一个入口只收微秒，tickless 要的是计数本身（见 arkrtos_hal.h）。 */
 static uint32 arkrtos_tl_counts_per_tick(void)
@@ -67,6 +74,18 @@ uint32 arkrtos_tickless_plan(uint32 delay_ticks, uint32 timer_ticks, uint32 cap)
         next = cap;
     }
     return next;
+}
+
+void arkrtos_tickless_stats(uint32 *isrs, uint32 *sleeps)
+{
+    if(isrs != 0)
+    {
+        *isrs = s_tl_isrs;
+    }
+    if(sleeps != 0)
+    {
+        *sleeps = s_tl_sleeps;
+    }
 }
 
 void arkrtos_tickless_split(uint32 elapsed_counts, uint32 counts_per_tick,
@@ -176,7 +195,13 @@ static uint32 arkrtos_tl_settle(void)
 
 uint32 arkrtos_tickless_wake_ticks(void)
 {
-    return arkrtos_tl_settle();
+    uint32 n = arkrtos_tl_settle();
+
+    /* 一个 SysTick 中断算一次，不管它结账出几拍（stats 的 isrs 列）。
+     * 只在这一处加：这是中断路径上唯一的入口。同一处把结账出的拍数
+     * 累加进 comp：`节拍总数 == isrs + comp` 因此恒成立。 */
+    s_tl_isrs++;
+    return n;
 }
 
 uint32 arkrtos_tickless_idle(void)
@@ -231,12 +256,14 @@ uint32 arkrtos_tickless_idle(void)
     s_tl_counts = counts;
     s_tl_short  = 0u;
     s_tl_armed  = 1u;
+    s_tl_sleeps++;
     arkrtos_port_start_timer_counts(counts);
     ARKRTOS_WFI();
 
     if(s_tl_armed == 0u)
     {
-        /* 睡满整段：tick 中断已经结账并补发（见 tick handler 的包装）。 */
+        /* 睡满整段：tick 中断已经结账并补发（见 tick handler 的包装），
+         * 补发量在中断路径上计入 s_tl_comp，这里不重复记。 */
         return n;
     }
 
