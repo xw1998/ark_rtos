@@ -6,6 +6,7 @@ SRCS := \
   example/stm32f427/kernel/ARKRTOS_TEST/Drivers/CMSIS/Device/ST/STM32F4xx/Source/Templates/gcc/startup_stm32f427xx.s \
   example/stm32f427/kernel/ARKRTOS_TEST/Core/Src/system_stm32f4xx.c \
   example/stm32f427/kernel/ARKRTOS_TEST/Core/Src/main.c \
+  example/stm32f427/kernel/ARKRTOS_TEST/Core/Src/arkrtos_isr_case.c \
   example/stm32f427/kernel/ARKRTOS_TEST/Core/Src/gpio.c \
   example/stm32f427/kernel/ARKRTOS_TEST/Core/Src/rtc.c \
   example/stm32f427/kernel/ARKRTOS_TEST/Core/Src/sdio.c \
