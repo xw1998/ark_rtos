@@ -44,8 +44,8 @@ typedef struct {
     uint32 head;                                        /* 读位置 */
     uint32 tail;                                        /* 写位置 */
     uint32 count;                                       /* 当前消息条数 */
-    arkrtos_task_t *send_waiters[ARKRTOS_MAX_SYNC_WAITERS]; /* 队列满时阻塞的发送者 */
-    arkrtos_task_t *recv_waiters[ARKRTOS_MAX_SYNC_WAITERS]; /* 队列空时阻塞的接收者 */
+    arkrtos_task_t *send_waiters[ARKRTOS_WQ_SLOTS]; /* 队列满时阻塞的发送者 */
+    arkrtos_task_t *recv_waiters[ARKRTOS_WQ_SLOTS]; /* 队列空时阻塞的接收者 */
     uint32 buf[ARKRTOS_MQ_DEPTH * ARKRTOS_MQ_MSG_WORDS];    /* 消息存储区（定长槽） */
     uint8  msglen[ARKRTOS_MQ_DEPTH];                      /* 每个槽里消息实际占的字数 */
 } arkrtos_mq_obj_t;

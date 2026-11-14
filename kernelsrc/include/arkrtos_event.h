@@ -30,7 +30,7 @@ typedef struct {
     uint8  used;                                        /* 该事件对象是否已被占用 */
     uint8  flag;                                        /* 自动复位式置位标记：1=已置位 */
     int32  creator_id;                                  /* creator task id; 0 = kernel. Dropped together with its creator's image */
-    arkrtos_task_t *waiting_tasks[ARKRTOS_MAX_EVENT_WAITERS];
+    arkrtos_task_t *waiting_tasks[ARKRTOS_WQ_SLOTS];
 } arkrtos_event_obj_t;
 
 void arkrtos_event_module_init(void);

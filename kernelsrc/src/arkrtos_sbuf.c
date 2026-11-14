@@ -54,7 +54,7 @@ void arkrtos_sbuf_module_init(void)
         arkrtos_sbufs[i].wt         = 0;
         arkrtos_sbufs[i].rd         = 0;
         arkrtos_sbufs[i].count      = 0;
-        for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+        for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
         {
             arkrtos_sbufs[i].send_waiters[j] = 0;
             arkrtos_sbufs[i].recv_waiters[j] = 0;
@@ -81,7 +81,7 @@ static void arkrtos_sbuf_clear_waiters(arkrtos_sbuf_obj_t *p_sb)
 {
     int32 j;
 
-    for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         p_sb->send_waiters[j] = 0;
         p_sb->recv_waiters[j] = 0;
@@ -166,14 +166,14 @@ static int32 arkrtos_sbuf_waiter_add(arkrtos_task_t **waiters, arkrtos_task_t *p
 {
     int32 j;
 
-    for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         if(waiters[j] == p_tsk)
         {
             return ARKRTOS_SBUF_WAITER_DUP;              /* 已经在表里，等价于登记成功 */
         }
     }
-    for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         if(waiters[j] == 0)
         {
@@ -188,7 +188,7 @@ static void arkrtos_sbuf_waiter_remove(arkrtos_task_t **waiters, arkrtos_task_t 
 {
     int32 j;
 
-    for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         if(waiters[j] == p_tsk)
         {
@@ -203,7 +203,7 @@ static void arkrtos_sbuf_wake_one(arkrtos_task_t **waiters)
 {
     int32 j;
 
-    for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         if(waiters[j] != 0)
         {
@@ -226,7 +226,7 @@ static void arkrtos_sbuf_wake_all(arkrtos_task_t **waiters, int32 reason)
 {
     int32 j;
 
-    for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         if(waiters[j] != 0)
         {

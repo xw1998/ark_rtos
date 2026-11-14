@@ -1048,6 +1048,26 @@ def check_eset_syntax():
     else:
         fail("eset-syntax", txt[-260:])
 
+def check_waitq():
+    """Waiter capacity (ARKRTOS_USE_WAIT_UNBOUNDED) must hold in both modes.
+
+    With the switch OFF every object table uses ARKRTOS_MAX_SYNC_WAITERS; with
+    it ON ARKRTOS_WQ_SLOTS grows to the task table size, so no object can ever
+    overflow its waiter array (a task waits on at most one object at a time).
+    Two parts: armclang -fsyntax-only over the five waiter-owning sources with
+    the switch forced to 1 (sync / mq / sbuf / event / waitmulti), and the host
+    test suite re-run in --unbounded mode where it asserts the derived sizes
+    compile-time and at runtime.  A missing armclang is a FAIL, not a skip.
+    Scope: mq / sbuf / event have compile-level coverage only -- their waiter
+    arrays are checked for size, not for behaviour under a full queue.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "waitq_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "WAITQ-GATE OK" in txt:
+        ok("waitq", "ON-path compile + host size assertions verified (5 files)")
+    else:
+        fail("waitq", txt[-260:])
+
 def check_rtstat_syntax():
     """RTSTAT (DWT cycle-based latency metering) must compile with the switch ON.
 
@@ -1227,6 +1247,7 @@ def main(argv):
     check_rtstat_syntax()
     check_eset_syntax()
     check_waitmulti_syntax()
+    check_waitq()
     check_seccheck_syntax()
     check_sign_host()
     check_swap_syntax()

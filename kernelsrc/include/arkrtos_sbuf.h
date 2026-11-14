@@ -52,8 +52,8 @@ typedef struct {
     uint32 wt;                                           /* 写索引（环形，按字节回绕） */
     uint32 rd;                                           /* 读索引 */
     uint32 count;                                        /* 当前存了多少字节 */
-    arkrtos_task_t *send_waiters[ARKRTOS_MAX_SYNC_WAITERS]; /* 没空间时等着的写者 */
-    arkrtos_task_t *recv_waiters[ARKRTOS_MAX_SYNC_WAITERS]; /* 没数据时等着的读者 */
+    arkrtos_task_t *send_waiters[ARKRTOS_WQ_SLOTS]; /* 没空间时等着的写者 */
+    arkrtos_task_t *recv_waiters[ARKRTOS_WQ_SLOTS]; /* 没数据时等着的读者 */
     uint8  data[ARKRTOS_SBUF_BUF_SIZE];
 } arkrtos_sbuf_obj_t;
 

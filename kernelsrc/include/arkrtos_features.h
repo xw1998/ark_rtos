@@ -137,6 +137,15 @@
 /* 多对象同时就绪探测（SVC 0x22）。
  * 一次问一组句柄「谁已就绪」，只报状态、不消费令牌；带超时的等待由
  * SDK 侧轮询完成。默认关时本模块、SVC 分派项与 SDK 包装都不编进来。 */
+/* 等待者容量：默认每个对象固定 ARKRTOS_MAX_SYNC_WAITERS（4）个等待槽。
+ * 打开这个开关后槽位放大到任务表容量（ARKRTOS_TASK_MAX_NUM）。理由：一个
+ * 任务同一时刻只能等一个对象，所以任何对象的等待者数不可能超过任务数——
+ * 对本内核来说这就是「无上限」，不需要链表也不需要堆。代价是所有对象表
+ * 一起线性变大（每个槽 4 字节 × 所有对象表的排队数目），因此默认关。 */
+#ifndef ARKRTOS_USE_WAIT_UNBOUNDED
+#define ARKRTOS_USE_WAIT_UNBOUNDED       0
+#endif
+
 #ifndef ARKRTOS_USE_WAITMULTI
 #define ARKRTOS_USE_WAITMULTI           0
 #endif

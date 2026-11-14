@@ -65,6 +65,8 @@ def main():
     ap = argparse.ArgumentParser(description="Host gate for the synchronisation primitives")
     ap.add_argument("--gcc", help="gcc 可执行文件（默认自动找）")
     ap.add_argument("--keep", action="store_true", help="保留生成的 exe 便于手工复跑")
+    ap.add_argument("--unbounded", action="store_true",
+                    help="把等待者槽位放大到任务表容量（ARKRTOS_USE_WAIT_UNBOUNDED=1）再跑一遍")
     args = ap.parse_args()
 
     for path in (TEST_C, MQ_C):
@@ -83,6 +85,8 @@ def main():
     if "mingw" in cc.replace("\\", "/").lower():
         cmd.append("-B" + os.path.dirname(cc))
     cmd += ["-std=gnu11", "-DARKRTOS_USE_MTX_RECURSIVE=1", "-DARKRTOS_SYNC_HOST_TEST"]
+    if args.unbounded:
+        cmd += ["-DARKRTOS_USE_WAIT_UNBOUNDED=1"]
     cmd += ["-I" + p for p in INCLUDES]
     cmd += ["-o", exe, TEST_C, MQ_C]
 

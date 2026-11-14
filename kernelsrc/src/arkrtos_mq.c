@@ -35,7 +35,7 @@ void arkrtos_mq_module_init(void)
         arkrtos_mqs[i].head    = 0;
         arkrtos_mqs[i].tail    = 0;
         arkrtos_mqs[i].count   = 0;
-        for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+        for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
         {
             arkrtos_mqs[i].send_waiters[j] = 0;
             arkrtos_mqs[i].recv_waiters[j] = 0;
@@ -99,7 +99,7 @@ static int32 arkrtos_mq_get(arkrtos_mq_obj_t *p_mq, uint32 *p_dst, int32 max_len
 static void arkrtos_mq_wake_one(arkrtos_task_t **waiters)
 {
     int32 j;
-    for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         if(waiters[j] != 0)
         {
@@ -120,14 +120,14 @@ static int32 arkrtos_mq_waiter_add(arkrtos_task_t **waiters, arkrtos_task_t *p_t
     /* Same rule as arkrtos_waiters_add: one task, one slot.  A user-mode
      * waiter re-enters on every poll, so a duplicate must be recognised
      * instead of filling the queue. */
-    for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         if(waiters[j] == p_tsk)
         {
             return ARKRTOS_MQ_WAITER_DUP;
         }
     }
-    for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         if(waiters[j] == 0)
         {
@@ -142,7 +142,7 @@ static int32 arkrtos_mq_waiter_add(arkrtos_task_t **waiters, arkrtos_task_t *p_t
 static void arkrtos_mq_waiter_remove(arkrtos_task_t **waiters, arkrtos_task_t *p_tsk)
 {
     int32 j;
-    for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         if(waiters[j] == p_tsk)
         {
@@ -157,7 +157,7 @@ static void arkrtos_mq_wake_all(arkrtos_task_t **waiters, int32 reason)
 {
     int32 j;
 
-    for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         if(waiters[j] != 0)
         {
@@ -198,7 +198,7 @@ void arkrtos_mq_release_task(int32 task_id)
             continue;
         }
 
-        for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+        for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
         {
             if(arkrtos_mqs[i].send_waiters[j] == p_tsk)
             {
@@ -219,7 +219,7 @@ void arkrtos_mq_release_task(int32 task_id)
     {
         if((arkrtos_mqs[i].used != 0) && (arkrtos_mqs[i].creator_id == task_id))
         {
-            for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+            for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
             {
                 arkrtos_mqs[i].send_waiters[j] = 0;
                 arkrtos_mqs[i].recv_waiters[j] = 0;

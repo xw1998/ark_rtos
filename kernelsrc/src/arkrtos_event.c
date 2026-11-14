@@ -19,14 +19,14 @@ static int32 arkrtos_event_waiter_add(arkrtos_task_t **waiters, arkrtos_task_t *
     /* Same rule as arkrtos_waiters_add: one task, one slot.  A user-mode
      * waiter re-enters on every poll, so a duplicate must be recognised
      * instead of filling the queue.  -2 = already registered. */
-    for(j = 0; j < ARKRTOS_MAX_EVENT_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         if(waiters[j] == p_tsk)
         {
             return ARKRTOS_EVENT_WAITER_DUP;
         }
     }
-    for(j = 0; j < ARKRTOS_MAX_EVENT_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         if(waiters[j] == 0)
         {
@@ -40,7 +40,7 @@ static int32 arkrtos_event_waiter_add(arkrtos_task_t **waiters, arkrtos_task_t *
 static int32 arkrtos_event_waiter_remove(arkrtos_task_t **waiters, arkrtos_task_t *p_tsk)
 {
     int32 j;
-    for(j = 0; j < ARKRTOS_MAX_EVENT_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         if(waiters[j] == p_tsk)
         {
@@ -61,7 +61,7 @@ void arkrtos_event_module_init(void)
         arkrtos_events[i].used = 0;
         arkrtos_events[i].flag = 0;
         arkrtos_events[i].creator_id = 0;
-        for(j = 0; j < ARKRTOS_MAX_EVENT_WAITERS; j++)
+        for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
             arkrtos_events[i].waiting_tasks[j] = 0;
     }
 }
@@ -100,7 +100,7 @@ void arkrtos_event_release_task(int32 task_id)
     {
         if((arkrtos_events[i].used != 0) && (arkrtos_events[i].creator_id == task_id))
         {
-            for(j = 0; j < ARKRTOS_MAX_EVENT_WAITERS; j++)
+            for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
             {
                 arkrtos_events[i].waiting_tasks[j] = 0;
             }
@@ -146,7 +146,7 @@ int32 arkrtos_event_create_internal(char *name)
             arkrtos_events[i].flag      = 0;
             arkrtos_events[i].creator_id = (arkrtos_current_task_id > 0)
                                          ? arkrtos_current_task_id : 0;
-            for(j = 0; j < ARKRTOS_MAX_EVENT_WAITERS; j++)
+            for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
             {
                 arkrtos_events[i].waiting_tasks[j] = 0;
             }
@@ -281,7 +281,7 @@ void arkrtos_event_set_internal(int32 event_handle)
     /* 记录置位：没有等待者时留给下一次 wait 消费，避免“先 set 后 wait”丢事件 */
     arkrtos_events[idx].flag = 1u;
 
-    for(j = 0; j < ARKRTOS_MAX_EVENT_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         arkrtos_task_t *p_w = arkrtos_events[idx].waiting_tasks[j];
 

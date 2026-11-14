@@ -160,6 +160,17 @@ config ARKRTOS_USE_MTX_RECURSIVE
 	  Default off: with the gate closed the create function, the SVC case
 	  and the SDK wrapper are not compiled in at all (byte-identical image).
 
+config ARKRTOS_USE_WAIT_UNBOUNDED
+    bool "Unbounded number of waiters per object"
+    default n
+    help
+      每个同步对象的等待者槽位从 ARKRTOS_MAX_SYNC_WAITERS（4）放大到
+      任务表容量（ARKRTOS_TASK_MAX_NUM）。一个任务同一时刻只能等一个
+      对象，所以任何对象的等待者数不可能超过任务数——对本内核而言这就是
+      无上限，不需要链表也不需要堆。
+      代价：所有对象表的排队槽一起线性变大（每槽 4 字节 × 各表的排队数），
+      所以默认关。关掉时体积与行为逐字节不变。
+
 config ARKRTOS_USE_WAITMULTI
 	bool "Multi-object readiness probe (SVC 0x22)"
 	default n

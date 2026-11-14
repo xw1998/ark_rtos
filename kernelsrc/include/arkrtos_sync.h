@@ -35,7 +35,7 @@ typedef struct {
     int32  count;                                       /* 计数值：>0 表示可用资源数，0 表示需排队等待 */
     uint8  used;                                        /* 该对象是否已被占用 */
     int32  creator_id;                                  /* creator task id; 0 = kernel. Dropped together with its creator's image */
-    arkrtos_task_t *waiters[ARKRTOS_MAX_SYNC_WAITERS];      /* 等待者列表 */
+    arkrtos_task_t *waiters[ARKRTOS_WQ_SLOTS];      /* 等待者列表 */
 } arkrtos_sem_obj_t;
 
 typedef struct {
@@ -46,14 +46,14 @@ typedef struct {
     uint8  recursive;                                   /* 1 = 递归锁；只有 ARKRTOS_USE_MTX_RECURSIVE=1 才会被置位 */
     uint8  nest;                                        /* 递归深度：0 = 未上锁，1 = 第一次持有 */
     int32  creator_id;                                  /* creator task id; 0 = kernel. Dropped together with its creator's image */
-    arkrtos_task_t *waiters[ARKRTOS_MAX_SYNC_WAITERS];      /* 等待者列表 */
+    arkrtos_task_t *waiters[ARKRTOS_WQ_SLOTS];      /* 等待者列表 */
 } arkrtos_mtx_obj_t;
 
 typedef struct {
     char   name[8];
     uint8  used;                                        /* 该对象是否已被占用 */
     int32  creator_id;                                  /* creator task id; 0 = kernel */
-    arkrtos_task_t *waiters[ARKRTOS_MAX_SYNC_WAITERS];      /* 等待者列表（signal 按优先级挑一个） */
+    arkrtos_task_t *waiters[ARKRTOS_WQ_SLOTS];      /* 等待者列表（signal 按优先级挑一个） */
 } arkrtos_cond_obj_t;
 
 void  arkrtos_sync_module_init(void);
@@ -109,7 +109,7 @@ typedef struct
     int32  owner_id;                     /* mutex only, 0 = free            */
     int32  count;                        /* semaphore tokens, 0 otherwise   */
     int32  nwait;                        /* registered waiters              */
-    uint32 waiter_id[ARKRTOS_MAX_SYNC_WAITERS];
+    uint32 waiter_id[ARKRTOS_WQ_SLOTS];
 } arkrtos_sync_dbg_row_t;
 
 /* Copies row idx into out.  Returns 0 on success, -1 when idx is out of

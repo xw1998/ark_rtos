@@ -109,7 +109,7 @@ static int32 sync_dbg_row(uint8 used, int32 creator, int32 owner, int32 count,
     out->owner_id    = owner;
     out->count       = count;
     out->nwait       = 0;
-    for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         out->waiter_id[j] = 0u;
         if(waiters[j] != 0)
@@ -163,7 +163,7 @@ void arkrtos_sync_module_init(void)
         arkrtos_sems[i].count   = 0;
         arkrtos_sems[i].used    = 0;
         arkrtos_sems[i].creator_id = 0;
-        for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+        for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
             arkrtos_sems[i].waiters[j] = 0;
     }
     for(i = 0; i < ARKRTOS_MTX_NUM; i++)
@@ -177,7 +177,7 @@ void arkrtos_sync_module_init(void)
         arkrtos_mtxs[i].nest          = 0;
 #endif
         arkrtos_mtxs[i].creator_id    = 0;
-        for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+        for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
             arkrtos_mtxs[i].waiters[j] = 0;
     }
     for(i = 0; i < ARKRTOS_COND_NUM; i++)
@@ -185,7 +185,7 @@ void arkrtos_sync_module_init(void)
         arkrtos_conds[i].name[0]    = 0;
         arkrtos_conds[i].used       = 0;
         arkrtos_conds[i].creator_id = 0;
-        for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+        for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
             arkrtos_conds[i].waiters[j] = 0;
     }
 }
@@ -264,7 +264,7 @@ static int32 arkrtos_waiters_add(arkrtos_task_t **waiters, arkrtos_task_t *p_tsk
      * stale pointer behind after the next remove() clears only the first
      * match, and a later post would then wake a task that is not waiting
      * any more - i.e. hand out a token that was never posted to it. */
-    for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         if(waiters[j] == p_tsk)
         {
@@ -272,7 +272,7 @@ static int32 arkrtos_waiters_add(arkrtos_task_t **waiters, arkrtos_task_t *p_tsk
             return ARKRTOS_SYNC_WAITER_DUP;
         }
     }
-    for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         if(waiters[j] == 0)
         {
@@ -289,7 +289,7 @@ static arkrtos_task_t *arkrtos_waiters_pop_highest(arkrtos_task_t **waiters)
     int32 j;
     int32 best = -1;
     uint8 best_pri = 255;
-    for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         if(waiters[j] != 0 && waiters[j]->priority <= best_pri)
         {
@@ -315,7 +315,7 @@ static arkrtos_task_t *arkrtos_waiters_peek(arkrtos_task_t **waiters, uint8 only
     int32 best = -1;
     uint8 best_pri = 255;
 
-    for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         arkrtos_task_t *p = waiters[j];
 
@@ -340,7 +340,7 @@ static arkrtos_task_t *arkrtos_waiters_peek(arkrtos_task_t **waiters, uint8 only
 static int32 arkrtos_waiters_remove(arkrtos_task_t **waiters, arkrtos_task_t *p_tsk)
 {
     int32 j;
-    for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         if(waiters[j] == p_tsk)
         {
@@ -375,7 +375,7 @@ static void arkrtos_mtx_recalc_task_priority(arkrtos_task_t *p_tsk)
             continue;
         }
 
-        for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+        for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
         {
             arkrtos_task_t *p_w = arkrtos_mtxs[i].waiters[j];
 
@@ -422,7 +422,7 @@ ARKRTOS_SYNC_STATIC void arkrtos_mtx_propagate(void)
                 continue;
             }
 
-            for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+            for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
             {
                 arkrtos_task_t *p_w = arkrtos_mtxs[i].waiters[j];
 
@@ -473,7 +473,7 @@ static void arkrtos_waiters_wake_all(arkrtos_task_t **waiters, int32 reason)
 {
     int32 j;
 
-    for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         if(waiters[j] != 0)
         {
@@ -513,7 +513,7 @@ void arkrtos_sync_release_task(int32 task_id)
         {
             continue;
         }
-        for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+        for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
         {
             if(arkrtos_conds[i].waiters[j] == p_tsk)
             {
@@ -528,7 +528,7 @@ void arkrtos_sync_release_task(int32 task_id)
         {
             continue;
         }
-        for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+        for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
         {
             if(arkrtos_sems[i].waiters[j] == p_tsk)
             {
@@ -544,7 +544,7 @@ void arkrtos_sync_release_task(int32 task_id)
             continue;
         }
 
-        for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+        for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
         {
             if(arkrtos_mtxs[i].waiters[j] == p_tsk)
             {
@@ -594,7 +594,7 @@ void arkrtos_sync_release_task(int32 task_id)
     {
         if((arkrtos_sems[i].used != 0) && (arkrtos_sems[i].creator_id == task_id))
         {
-            for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+            for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
             {
                 arkrtos_sems[i].waiters[j] = 0;
             }
@@ -620,7 +620,7 @@ void arkrtos_sync_release_task(int32 task_id)
             arkrtos_mtxs[i].recursive     = 0;
             arkrtos_mtxs[i].nest          = 0;
 #endif
-            for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+            for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
             {
                 arkrtos_mtxs[i].waiters[j] = 0;
             }
@@ -649,7 +649,7 @@ int32 arkrtos_sem_create_internal(char *name, int32 init_count)
              * of the object state, not an optimisation.  Skipping this lets a
              * post on the new object pop a pointer the old object left behind
              * and hand a token to a task that never waited on it. */
-            for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+            for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
             {
                 arkrtos_sems[i].waiters[j] = 0;
             }
@@ -817,7 +817,7 @@ int32 arkrtos_sem_post_internal(int32 handle)
     dbg_sem_qbefore[idx] = 0u;
     {
         int32 jj;
-        for(jj = 0; jj < ARKRTOS_MAX_SYNC_WAITERS; jj++)
+        for(jj = 0; jj < ARKRTOS_WQ_SLOTS; jj++)
         {
             if(arkrtos_sems[idx].waiters[jj] != 0)
             {
@@ -903,7 +903,7 @@ int32 arkrtos_mtx_create_internal(char *name)
             arkrtos_mtxs[i].nest      = 0;
 #endif
             /* See arkrtos_sem_create_internal: the queue starts empty. */
-            for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+            for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
             {
                 arkrtos_mtxs[i].waiters[j] = 0;
             }
@@ -932,7 +932,7 @@ int32 arkrtos_mtx_create_recursive_internal(char *name)
             arkrtos_mtxs[i].recursive     = 1;
             arkrtos_mtxs[i].nest          = 0;
             arkrtos_mtxs[i].orig_priority = 0;
-            for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+            for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
             {
                 arkrtos_mtxs[i].waiters[j] = 0;
             }
@@ -1276,7 +1276,7 @@ int32 arkrtos_cond_create_internal(char *name)
             arkrtos_sync_copy_name(arkrtos_conds[i].name, name);
             arkrtos_conds[i].used       = 1;
             arkrtos_conds[i].creator_id = arkrtos_current_task_id;
-            for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+            for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
             {
                 arkrtos_conds[i].waiters[j] = 0;
             }
@@ -1454,7 +1454,7 @@ int32 arkrtos_cond_poll_internal(int32 cond_handle)
         return ARKRTOS_SYNC_ERR_PARAM;
 
     ARKRTOS_DISABLE_IRQ();
-    for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         if(arkrtos_conds[idx].waiters[j] == p_tsk)
         {
@@ -1535,7 +1535,7 @@ int32 arkrtos_cond_broadcast_internal(int32 handle)
         return ARKRTOS_SYNC_ERR_HANDLE;
 
     ARKRTOS_DISABLE_IRQ();
-    for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+    for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
     {
         if(arkrtos_conds[idx].waiters[j] != 0)
         {

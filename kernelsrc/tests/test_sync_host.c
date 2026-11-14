@@ -28,6 +28,21 @@
 #include <stdio.h>
 #include <string.h>
 
+/* 等待者容量：开关决定每个对象有多少个等待槽。这条 #error 是「派生宏真的
+ * 落到了每个对象结构里」的编译期证据——如果某个头文件还在用旧的固定长度，
+ * 下面的 sizeof 断言会在运行时把它抓出来。 */
+#if (ARKRTOS_USE_WAIT_UNBOUNDED == 1)
+#if (ARKRTOS_WQ_SLOTS != ARKRTOS_TASK_MAX_NUM)
+#error "unbounded waiters: ARKRTOS_WQ_SLOTS must equal ARKRTOS_TASK_MAX_NUM"
+#endif
+#else
+#if (ARKRTOS_WQ_SLOTS != ARKRTOS_MAX_SYNC_WAITERS)
+#error "default waiters: ARKRTOS_WQ_SLOTS must equal ARKRTOS_MAX_SYNC_WAITERS"
+#endif
+#endif
+
+#define WQ_SLOTS_OF(t, field)  ((int)(sizeof(((t *)0)->field) / sizeof(((t *)0)->field[0])))
+
 /* ------------------------------------------------------------------
  * 内核桩
  * ------------------------------------------------------------------ */
@@ -281,6 +296,19 @@ int main(void)
     check(arkrtos_mtx_unlock_internal(mtx) == 0, "the normal mutex unlocks");
     (void)arkrtos_mtx_delete_internal(mtx);
 #endif /* ARKRTOS_USE_MTX_RECURSIVE == 1 */
+
+    /* ================= 等待者容量账目 ================= */
+    /* 三种同步对象的等待槽位必须都等于同一个 ARKRTOS_WQ_SLOTS。漏掉一处
+     * （例如结构里还是固定 4、循环却按槽位数走）在这种表驱动的内核里就是
+     * 静默越界或永远填不满，宿主上量尺寸最便宜。 */
+    check(WQ_SLOTS_OF(arkrtos_sem_obj_t, waiters) == (int)ARKRTOS_WQ_SLOTS,
+          "semaphore waiter slots match ARKRTOS_WQ_SLOTS");
+    check(WQ_SLOTS_OF(arkrtos_mtx_obj_t, waiters) == (int)ARKRTOS_WQ_SLOTS,
+          "mutex waiter slots match ARKRTOS_WQ_SLOTS");
+    check(WQ_SLOTS_OF(arkrtos_cond_obj_t, waiters) == (int)ARKRTOS_WQ_SLOTS,
+          "cond waiter slots match ARKRTOS_WQ_SLOTS");
+    printf("WQ-SLOTS=%d unbounded=%d\n", (int)ARKRTOS_WQ_SLOTS,
+           (int)ARKRTOS_USE_WAIT_UNBOUNDED);
 
     /* ================= 条件变量 ================= */
     use_task(0, 5);

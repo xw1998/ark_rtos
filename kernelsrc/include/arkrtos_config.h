@@ -175,6 +175,14 @@
 #define ARKRTOS_MAX_SYNC_WAITERS    (4)
 #endif
 
+/* 每个对象的等待者槽位数：由 ARKRTOS_USE_WAIT_UNBOUNDED 派生，派生宏不
+ * 用 #ifndef 包（它不是配置项本身，配置项是上面那个开关）。 */
+#if (ARKRTOS_USE_WAIT_UNBOUNDED == 1)
+#define ARKRTOS_WQ_SLOTS            (ARKRTOS_TASK_MAX_NUM)
+#else
+#define ARKRTOS_WQ_SLOTS            (ARKRTOS_MAX_SYNC_WAITERS)
+#endif
+
 #define ARKRTOS_MS_TO_TICK(ms)      ((ms) * 1000 / ARKRTOS_TICK_PERIOD_US)
 
 /* ============================================================
