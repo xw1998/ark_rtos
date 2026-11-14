@@ -136,6 +136,8 @@ arena 与线程栈都是**静态**的：不用也占着。App 槽位 RAM 更大�
 | `pthread_self` | `arkrtos_thread_self` |
 | `pthread_mutex_*` | 内核互斥量（`arkrtos_mutex_*`） |
 | `pthread_cond_*` | 内核条件变量（`arkrtos_cond_*`，三步式：见 [同步原语与令牌守恒.md](同步原语与令牌守恒.md) §5.3） |
+| `pthread_rwlock_*` | **用户态组合**：内核互斥量 + 两个条件变量（读条件、写条件），零 SVC 改动。**写者优先**（纯读优先会饿死写者）——因此 `pthread_rwlockattr_setkind_np(PTHREAD_PREFER_READER_NP)` 返回 `ENOTSUP`，而不是接受后偷偷按写者优先跑。惰性建内核对象，失败回滚并报 `ENOMEM`；`destroy` 时有持有者/等待者返回 `EBUSY` |
+| `pthread_barrier_*` | **用户态组合**：互斥量 + 条件变量 + 代数 `gen`，因此屏障可复用（下一轮不会误唤醒上一轮的等待者）。`pthread_barrier_wait` 有一个线程返回 `PTHREAD_BARRIER_SERIAL_THREAD(-1)`；`pshared != 0` 返回 `ENOTSUP` |
 
 `pthread_attr_t` 是 Ark RTOS 自己的结构（`stackaddr` / `stacksize` / `priority` / `period_ms`），**全 0 即为默认**：
 
@@ -148,6 +150,7 @@ pthread_create(&th, 0, worker, arg);   /* 零属性，栈从 SDK 静态池取 */
 
 - **没有 `pthread_attr_set*` 系列**。属性直接填结构体字段；POSIX 那套 setter 在 32 位小系统上只是额外的间接层。
 - 互斥量**没有优先级继承的对外接口**。内核互斥量确实做了优先级继承，但 POSIX 程序既观察不到也设置不了。
+- **读写锁 / 屏障是用户态组合，不是内核对象**：它们各占内核 `ARKRTOS_MTX_NUM` / `ARKRTOS_COND_NUM` 的名额，表满同样表现成 `ENOMEM`（见 §4.4 的容量预算）。写者优先是刻意选择，`PTHREAD_PREFER_READER_NP` 明确不支持。**未上板**：只有编译证据（F427 / APP_DEMO / POSIX_DEMO 0 Error），没有并发行为用例。
 - `thread == 0` 表示"无此线程"，与 `pthread_t`（`uint32`）同宽。
 
 线程栈的所有权：要么由调用者提供（`stackaddr`），要么取自兼容层的静态池。**内核不会替你分配栈**，也不会接受一个落在内核或别的 App RAM 里的栈指针。
