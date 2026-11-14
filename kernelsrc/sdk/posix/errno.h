@@ -60,6 +60,10 @@
 #define EINPROGRESS 115
 #define EOPNOTSUPP   95
 
+/* POSIX spells the same condition ENOTSUP; both names must work because
+ * library code checks whichever it grew up with. */
+#define ENOTSUP      EOPNOTSUPP
+
 /* ---- sockets ---------------------------------------------------------- */
 
 /* Two names, one condition: a non-blocking socket that cannot proceed now. */

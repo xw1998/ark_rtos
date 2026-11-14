@@ -160,4 +160,133 @@ int  arkrtos_posix_once(pthread_once_t *once_control, void (*init_routine)(void)
 
 #endif /* ARKRTOS_POSIX_PTHREAD_KEY */
 
+
+/* ==========================================================================
+ * 读写锁与屏障
+ *
+ * 两者都不是内核对象，而是**架在已有的内核互斥锁 + 条件变量上**的用户态
+ * 组合：读写锁 = 1 把互斥锁 + 2 个条件变量（读者等一个、写者等一个），
+ * 屏障 = 1 把互斥锁 + 1 个条件变量。这样做的好处是不新增 SVC、不改内核，
+ * 代价是**每个对象要占内核的锁/条件变量表名额**（ARKRTOS_MTX_NUM /
+ * ARKRTOS_COND_NUM），表满了 init 返回 ENOMEM，不会静默降级。
+ *
+ * 如实写明的边界：
+ *   - 读写锁是**写者优先**：只要有人在等写锁，新来的读者也会排队。读优先
+ *     会让写者饿死，而"读多写少"的常见负载里写者饿死是最难查的故障。
+ *     pthread_rwlockattr_setkind_np(PTHREAD_PREFER_READER_NP) 因此返回
+ *     ENOTSUP，而不是接受参数再按写者优先跑（那是给了个假选项）。
+ *   - 读写锁**不可递归**：持读锁再去拿写锁、持写锁再拿读锁都会阻塞到死，
+ *     与 POSIX 允许的实现一致，但本实现不做 EDEADLK 检测。
+ *   - 屏障可重复使用（内部有 generation 计数），唤醒时计数与代次在同一把
+ *     互斥锁下更新，所以"最后到达者清零、其余人看到代次变化"不会丢唤醒。
+ *     销毁一个还有人等着的屏障是未定义行为，POSIX 也不保证。
+ * ========================================================================== */
+
+typedef struct
+{
+    arkrtos_pthread_mutex_t mtx;    /* 保护下面几个计数 */
+    arkrtos_pthread_cond_t  rcond;  /* 读者在这里排队 */
+    arkrtos_pthread_cond_t  wcond;  /* 写者在这里排队 */
+    int32 readers;                  /* 当前持读锁的线程数 */
+    int32 writer;                   /* 1 = 写锁被持有 */
+    int32 wait_writers;             /* 正在等写锁的线程数（写者优先的门槛） */
+    int32 bound;                    /* 0 = 三个内核对象还没建 */
+} arkrtos_pthread_rwlock_t;
+
+typedef arkrtos_pthread_rwlock_t pthread_rwlock_t;
+
+#define PTHREAD_RWLOCK_INITIALIZER  { { -1 }, { -1 }, { -1 }, 0, 0, 0, 0 }
+
+int arkrtos_posix_rwlock_init(arkrtos_pthread_rwlock_t *rw);
+int arkrtos_posix_rwlock_destroy(arkrtos_pthread_rwlock_t *rw);
+int arkrtos_posix_rwlock_rdlock(arkrtos_pthread_rwlock_t *rw);
+int arkrtos_posix_rwlock_tryrdlock(arkrtos_pthread_rwlock_t *rw);
+int arkrtos_posix_rwlock_timedrdlock(arkrtos_pthread_rwlock_t *rw,
+                                     const struct timespec *abstime);
+int arkrtos_posix_rwlock_wrlock(arkrtos_pthread_rwlock_t *rw);
+int arkrtos_posix_rwlock_trywrlock(arkrtos_pthread_rwlock_t *rw);
+int arkrtos_posix_rwlock_timedwrlock(arkrtos_pthread_rwlock_t *rw,
+                                     const struct timespec *abstime);
+int arkrtos_posix_rwlock_unlock(arkrtos_pthread_rwlock_t *rw);
+
+#define pthread_rwlock_init(r, a)          arkrtos_posix_rwlock_init(r)
+#define pthread_rwlock_destroy(r)          arkrtos_posix_rwlock_destroy(r)
+#define pthread_rwlock_rdlock(r)           arkrtos_posix_rwlock_rdlock(r)
+#define pthread_rwlock_tryrdlock(r)        arkrtos_posix_rwlock_tryrdlock(r)
+#define pthread_rwlock_timedrdlock(r, t)   arkrtos_posix_rwlock_timedrdlock((r), (t))
+#define pthread_rwlock_wrlock(r)           arkrtos_posix_rwlock_wrlock(r)
+#define pthread_rwlock_trywrlock(r)        arkrtos_posix_rwlock_trywrlock(r)
+#define pthread_rwlock_timedwrlock(r, t)   arkrtos_posix_rwlock_timedwrlock((r), (t))
+#define pthread_rwlock_unlock(r)           arkrtos_posix_rwlock_unlock(r)
+
+/* 属性对象只是为了不打断移植过来的代码：本实现只有一种行为（进程内、
+ * 写者优先），所以属性里能设的只有"私有"这一档，其余一律 ENOTSUP。 */
+typedef struct
+{
+    int32 pshared;      /* PTHREAD_PROCESS_PRIVATE / SHARED */
+    int32 kind;         /* PTHREAD_PREFER_READER_NP / WRITER_NONRECURSIVE_NP */
+} arkrtos_pthread_rwlockattr_t;
+
+typedef arkrtos_pthread_rwlockattr_t pthread_rwlockattr_t;
+
+#define PTHREAD_PROCESS_PRIVATE              0
+#define PTHREAD_PROCESS_SHARED               1
+#define PTHREAD_PREFER_READER_NP             0
+#define PTHREAD_PREFER_WRITER_NONRECURSIVE_NP 1
+
+int arkrtos_posix_rwlockattr_init(arkrtos_pthread_rwlockattr_t *a);
+int arkrtos_posix_rwlockattr_destroy(arkrtos_pthread_rwlockattr_t *a);
+int arkrtos_posix_rwlockattr_setpshared(arkrtos_pthread_rwlockattr_t *a, int32 v);
+int arkrtos_posix_rwlockattr_getpshared(const arkrtos_pthread_rwlockattr_t *a, int32 *v);
+int arkrtos_posix_rwlockattr_setkind(arkrtos_pthread_rwlockattr_t *a, int32 v);
+int arkrtos_posix_rwlockattr_getkind(const arkrtos_pthread_rwlockattr_t *a, int32 *v);
+
+#define pthread_rwlockattr_init(a)          arkrtos_posix_rwlockattr_init(a)
+#define pthread_rwlockattr_destroy(a)       arkrtos_posix_rwlockattr_destroy(a)
+#define pthread_rwlockattr_setpshared(a, v) arkrtos_posix_rwlockattr_setpshared((a), (v))
+#define pthread_rwlockattr_getpshared(a, v) arkrtos_posix_rwlockattr_getpshared((a), (v))
+#define pthread_rwlockattr_setkind_np(a, v) arkrtos_posix_rwlockattr_setkind((a), (v))
+#define pthread_rwlockattr_getkind_np(a, v) arkrtos_posix_rwlockattr_getkind((a), (v))
+
+/* 屏障 */
+typedef struct
+{
+    arkrtos_pthread_mutex_t mtx;
+    arkrtos_pthread_cond_t  cond;
+    uint32 count;       /* 本轮已到达数 */
+    uint32 gen;         /* 代次：每放行一轮 +1，唤醒条件用它，避免丢唤醒 */
+    uint32 n;           /* 阈值（参与线程数） */
+    int32  bound;       /* 0 = 两个内核对象还没建 */
+} arkrtos_pthread_barrier_t;
+
+typedef arkrtos_pthread_barrier_t pthread_barrier_t;
+
+#define PTHREAD_BARRIER_SERIAL_THREAD  (-1)
+
+int arkrtos_posix_barrier_init(arkrtos_pthread_barrier_t *b, uint32 count);
+int arkrtos_posix_barrier_destroy(arkrtos_pthread_barrier_t *b);
+int arkrtos_posix_barrier_wait(arkrtos_pthread_barrier_t *b);
+
+#define pthread_barrier_init(b, a, n)  arkrtos_posix_barrier_init((b), (n))
+#define pthread_barrier_destroy(b)     arkrtos_posix_barrier_destroy(b)
+#define pthread_barrier_wait(b)        arkrtos_posix_barrier_wait(b)
+
+/* 屏障属性：本实现只有"进程内屏障"一种，setpshared(SHARED) 返回 ENOTSUP */
+typedef struct
+{
+    int32 pshared;
+} arkrtos_pthread_barrierattr_t;
+
+typedef arkrtos_pthread_barrierattr_t pthread_barrierattr_t;
+
+int arkrtos_posix_barrierattr_init(arkrtos_pthread_barrierattr_t *a);
+int arkrtos_posix_barrierattr_destroy(arkrtos_pthread_barrierattr_t *a);
+int arkrtos_posix_barrierattr_setpshared(arkrtos_pthread_barrierattr_t *a, int32 v);
+int arkrtos_posix_barrierattr_getpshared(const arkrtos_pthread_barrierattr_t *a, int32 *v);
+
+#define pthread_barrierattr_init(a)           arkrtos_posix_barrierattr_init(a)
+#define pthread_barrierattr_destroy(a)        arkrtos_posix_barrierattr_destroy(a)
+#define pthread_barrierattr_setpshared(a, v)  arkrtos_posix_barrierattr_setpshared((a), (v))
+#define pthread_barrierattr_getpshared(a, v)  arkrtos_posix_barrierattr_getpshared((a), (v))
+
 #endif /* __ARKRTOS_PTHREAD_H__ */

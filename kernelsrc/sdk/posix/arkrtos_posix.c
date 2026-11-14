@@ -3751,4 +3751,598 @@ int arkrtos_posix_select(int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
     }
 }
 
+
+/* ==========================================================================
+ * 3d. read-write lock / barrier
+ * ==========================================================================
+ *
+ * Both are built out of objects the kernel already has - one mutex plus two
+ * condition variables for the read-write lock, one mutex plus one condition
+ * variable for the barrier. No new SVC, no kernel change. The price is that
+ * each of them occupies slots in the kernel's mutex / condition tables
+ * (ARKRTOS_MTX_NUM / ARKRTOS_COND_NUM); a full table makes init fail with
+ * ENOMEM instead of degrading silently.
+ *
+ * The lock is writer preferring. Making readers prefer would starve writers,
+ * and a starved writer is the hardest failure to diagnose in a read-mostly
+ * workload: nothing crashes, the writer just never runs. The attribute call
+ * that asks for reader preference therefore answers ENOTSUP rather than
+ * accepting the flag and doing something else.
+ */
+
+/* Create the three kernel objects on first use (PTHREAD_RWLOCK_INITIALIZER
+ * leaves them at -1). The scheduler lock makes the check-then-create atomic
+ * against other threads on this single core; creating a mutex or a condition
+ * never blocks, so holding it is safe. On a partial failure every object that
+ * did get created is deleted again - otherwise a retry would leak table
+ * slots one by one until the table is empty for everybody. */
+static int arkrtos_posix_rw_bind(arkrtos_pthread_rwlock_t *rw)
+{
+    if(rw->bound != 0)
+    {
+        return 0;
+    }
+
+    arkrtos_sched_lock();
+    if(rw->bound != 0)
+    {
+        arkrtos_sched_unlock();
+        return 0;
+    }
+
+    rw->mtx.handle   = arkrtos_mutex_create("pthrwm");
+    rw->rcond.handle = arkrtos_cond_create("pthrwr");
+    rw->wcond.handle = arkrtos_cond_create("pthrww");
+
+    if((rw->mtx.handle < 0) || (rw->rcond.handle < 0) || (rw->wcond.handle < 0))
+    {
+        if(rw->mtx.handle >= 0)
+        {
+            (void)arkrtos_mutex_delete(rw->mtx.handle);
+        }
+        if(rw->rcond.handle >= 0)
+        {
+            (void)arkrtos_cond_delete(rw->rcond.handle);
+        }
+        if(rw->wcond.handle >= 0)
+        {
+            (void)arkrtos_cond_delete(rw->wcond.handle);
+        }
+        rw->mtx.handle   = -1;
+        rw->rcond.handle = -1;
+        rw->wcond.handle = -1;
+        arkrtos_sched_unlock();
+        errno = ENOMEM;
+        return -1;
+    }
+
+    rw->readers      = 0;
+    rw->writer       = 0;
+    rw->wait_writers = 0;
+    rw->bound        = 1;
+    arkrtos_sched_unlock();
+    return 0;
+}
+
+int arkrtos_posix_rwlock_init(arkrtos_pthread_rwlock_t *rw)
+{
+    if(rw == 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    rw->mtx.handle   = -1;
+    rw->rcond.handle = -1;
+    rw->wcond.handle = -1;
+    rw->readers      = 0;
+    rw->writer       = 0;
+    rw->wait_writers = 0;
+    rw->bound        = 0;
+    return arkrtos_posix_rw_bind(rw);
+}
+
+int arkrtos_posix_rwlock_destroy(arkrtos_pthread_rwlock_t *rw)
+{
+    if((rw == 0) || (rw->bound == 0))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    /* A lock that is still held or still has waiters cannot be destroyed
+     * meaningfully; the kernel would wake the waiters and they would find a
+     * handle that no longer names anything. Refuse instead. */
+    if((rw->writer != 0) || (rw->readers != 0) || (rw->wait_writers != 0))
+    {
+        errno = EBUSY;
+        return -1;
+    }
+    (void)arkrtos_mutex_delete(rw->mtx.handle);
+    (void)arkrtos_cond_delete(rw->rcond.handle);
+    (void)arkrtos_cond_delete(rw->wcond.handle);
+    rw->mtx.handle   = -1;
+    rw->rcond.handle = -1;
+    rw->wcond.handle = -1;
+    rw->bound        = 0;
+    return 0;
+}
+
+/* abstime == 0 means "wait forever"; otherwise the deadline is absolute,
+ * exactly as pthread_rwlock_timedrdlock specifies. Return 0 or -1 with errno.
+ */
+static int arkrtos_posix_rw_wait(arkrtos_pthread_cond_t *c,
+                                 arkrtos_pthread_mutex_t *m,
+                                 const struct timespec *abstime)
+{
+    if(abstime == 0)
+    {
+        return arkrtos_posix_cond_wait(c, m);
+    }
+    return arkrtos_posix_cond_timedwait(c, m, abstime);
+}
+
+/* Shared body of rdlock / tryrdlock / timedrdlock.
+ * nonblock != 0 is the try variant: report EBUSY instead of queueing. */
+static int arkrtos_posix_rw_rdlock(arkrtos_pthread_rwlock_t *rw,
+                                   const struct timespec *abstime, int nonblock)
+{
+    if(rw == 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    if(arkrtos_posix_rw_bind(rw) != 0)
+    {
+        return -1;
+    }
+    if(arkrtos_posix_mutex_lock(&rw->mtx) != 0)
+    {
+        return -1;
+    }
+
+    for(;;)
+    {
+        /* Writer preferring: readers also wait while a writer is queued, so a
+         * steady stream of readers cannot keep a writer out forever. */
+        if((rw->writer == 0) && (rw->wait_writers == 0))
+        {
+            rw->readers++;
+            (void)arkrtos_posix_mutex_unlock(&rw->mtx);
+            return 0;
+        }
+        if(nonblock != 0)
+        {
+            (void)arkrtos_posix_mutex_unlock(&rw->mtx);
+            errno = EBUSY;
+            return -1;
+        }
+        if(arkrtos_posix_rw_wait(&rw->rcond, &rw->mtx, abstime) != 0)
+        {
+            /* The kernel re-acquired the mutex on every wake-up path, and the
+             * expired-deadline path never released it at all, so the mutex is
+             * held here in both cases and must be given back. */
+            int saved = errno;
+
+            (void)arkrtos_posix_mutex_unlock(&rw->mtx);
+            errno = saved;
+            return -1;
+        }
+    }
+}
+
+/* Shared body of wrlock / trywrlock / timedwrlock. */
+static int arkrtos_posix_rw_wrlock(arkrtos_pthread_rwlock_t *rw,
+                                   const struct timespec *abstime, int nonblock)
+{
+    if(rw == 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    if(arkrtos_posix_rw_bind(rw) != 0)
+    {
+        return -1;
+    }
+    if(arkrtos_posix_mutex_lock(&rw->mtx) != 0)
+    {
+        return -1;
+    }
+
+    for(;;)
+    {
+        if((rw->writer == 0) && (rw->readers == 0))
+        {
+            rw->writer = 1;
+            (void)arkrtos_posix_mutex_unlock(&rw->mtx);
+            return 0;
+        }
+        if(nonblock != 0)
+        {
+            (void)arkrtos_posix_mutex_unlock(&rw->mtx);
+            errno = EBUSY;
+            return -1;
+        }
+
+        /* The queue count is what makes readers stand aside; it must be
+         * raised before sleeping and lowered on every exit path, including
+         * the timeout one, or a failed timedwrlock would block readers for
+         * the rest of the program's life. */
+        rw->wait_writers++;
+        if(arkrtos_posix_rw_wait(&rw->wcond, &rw->mtx, abstime) != 0)
+        {
+            int saved = errno;
+
+            rw->wait_writers--;
+            (void)arkrtos_posix_mutex_unlock(&rw->mtx);
+            errno = saved;
+            return -1;
+        }
+        rw->wait_writers--;
+    }
+}
+
+int arkrtos_posix_rwlock_rdlock(arkrtos_pthread_rwlock_t *rw)
+{
+    return arkrtos_posix_rw_rdlock(rw, 0, 0);
+}
+
+int arkrtos_posix_rwlock_tryrdlock(arkrtos_pthread_rwlock_t *rw)
+{
+    return arkrtos_posix_rw_rdlock(rw, 0, 1);
+}
+
+int arkrtos_posix_rwlock_timedrdlock(arkrtos_pthread_rwlock_t *rw,
+                                     const struct timespec *abstime)
+{
+    if(abstime == 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    return arkrtos_posix_rw_rdlock(rw, abstime, 0);
+}
+
+int arkrtos_posix_rwlock_wrlock(arkrtos_pthread_rwlock_t *rw)
+{
+    return arkrtos_posix_rw_wrlock(rw, 0, 0);
+}
+
+int arkrtos_posix_rwlock_trywrlock(arkrtos_pthread_rwlock_t *rw)
+{
+    return arkrtos_posix_rw_wrlock(rw, 0, 1);
+}
+
+int arkrtos_posix_rwlock_timedwrlock(arkrtos_pthread_rwlock_t *rw,
+                                     const struct timespec *abstime)
+{
+    if(abstime == 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    return arkrtos_posix_rw_wrlock(rw, abstime, 0);
+}
+
+int arkrtos_posix_rwlock_unlock(arkrtos_pthread_rwlock_t *rw)
+{
+    if((rw == 0) || (rw->bound == 0))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    if(arkrtos_posix_mutex_lock(&rw->mtx) != 0)
+    {
+        return -1;
+    }
+
+    if(rw->writer != 0)
+    {
+        rw->writer = 0;
+    }
+    else if(rw->readers > 0)
+    {
+        rw->readers--;
+    }
+    else
+    {
+        (void)arkrtos_posix_mutex_unlock(&rw->mtx);
+        errno = EPERM;
+        return -1;
+    }
+
+    if(rw->wait_writers > 0)
+    {
+        /* One writer only: it needs the lock exclusively, so waking more than
+         * one would just move the queue around. */
+        (void)arkrtos_posix_cond_signal(&rw->wcond);
+    }
+    else if((rw->writer == 0) && (rw->wait_writers == 0))
+    {
+        /* Nobody is queued ahead of the readers, so everyone may enter.
+         * Waiting readers can only exist while a writer held the lock or a
+         * writer was queued, so a broadcast here is not a herd - the queue is
+         * exactly the set that was kept out. */
+        (void)arkrtos_posix_cond_broadcast(&rw->rcond);
+    }
+
+    (void)arkrtos_posix_mutex_unlock(&rw->mtx);
+    return 0;
+}
+
+/* ---- attributes: one behaviour, so anything else is ENOTSUP ------------- */
+
+int arkrtos_posix_rwlockattr_init(arkrtos_pthread_rwlockattr_t *a)
+{
+    if(a == 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    a->pshared = PTHREAD_PROCESS_PRIVATE;
+    a->kind    = PTHREAD_PREFER_WRITER_NONRECURSIVE_NP;
+    return 0;
+}
+
+int arkrtos_posix_rwlockattr_destroy(arkrtos_pthread_rwlockattr_t *a)
+{
+    if(a == 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    return 0;
+}
+
+int arkrtos_posix_rwlockattr_setpshared(arkrtos_pthread_rwlockattr_t *a, int32 v)
+{
+    if(a == 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    if(v == PTHREAD_PROCESS_PRIVATE)
+    {
+        a->pshared = v;
+        return 0;
+    }
+    /* A lock shared between processes would need to live outside this
+     * process's RAM; there is no such object on this kernel. */
+    errno = ENOTSUP;
+    return -1;
+}
+
+int arkrtos_posix_rwlockattr_getpshared(const arkrtos_pthread_rwlockattr_t *a, int32 *v)
+{
+    if((a == 0) || (v == 0))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    *v = a->pshared;
+    return 0;
+}
+
+int arkrtos_posix_rwlockattr_setkind(arkrtos_pthread_rwlockattr_t *a, int32 v)
+{
+    if(a == 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    if(v == PTHREAD_PREFER_WRITER_NONRECURSIVE_NP)
+    {
+        a->kind = v;
+        return 0;
+    }
+    /* Reader preference is not implemented. Accepting the flag and running
+     * writer preferring would be a silent lie about the scheduling the caller
+     * asked for. */
+    errno = ENOTSUP;
+    return -1;
+}
+
+int arkrtos_posix_rwlockattr_getkind(const arkrtos_pthread_rwlockattr_t *a, int32 *v)
+{
+    if((a == 0) || (v == 0))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    *v = a->kind;
+    return 0;
+}
+
+/* ==========================================================================
+ * 3e. barrier
+ * ========================================================================== */
+
+static int arkrtos_posix_barrier_bind(arkrtos_pthread_barrier_t *b)
+{
+    if(b->bound != 0)
+    {
+        return 0;
+    }
+
+    arkrtos_sched_lock();
+    if(b->bound != 0)
+    {
+        arkrtos_sched_unlock();
+        return 0;
+    }
+
+    b->mtx.handle  = arkrtos_mutex_create("pthbrm");
+    b->cond.handle = arkrtos_cond_create("pthbrc");
+
+    if((b->mtx.handle < 0) || (b->cond.handle < 0))
+    {
+        if(b->mtx.handle >= 0)
+        {
+            (void)arkrtos_mutex_delete(b->mtx.handle);
+        }
+        if(b->cond.handle >= 0)
+        {
+            (void)arkrtos_cond_delete(b->cond.handle);
+        }
+        b->mtx.handle  = -1;
+        b->cond.handle = -1;
+        arkrtos_sched_unlock();
+        errno = ENOMEM;
+        return -1;
+    }
+
+    b->bound = 1;
+    arkrtos_sched_unlock();
+    return 0;
+}
+
+int arkrtos_posix_barrier_init(arkrtos_pthread_barrier_t *b, uint32 count)
+{
+    if(b == 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    /* A barrier with no participants can never be passed; POSIX calls that
+     * EINVAL and so do we, rather than hanging the first waiter forever. */
+    if(count == 0u)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    b->mtx.handle  = -1;
+    b->cond.handle = -1;
+    b->count       = 0u;
+    b->gen         = 0u;
+    b->n           = count;
+    b->bound       = 0;
+    return arkrtos_posix_barrier_bind(b);
+}
+
+int arkrtos_posix_barrier_destroy(arkrtos_pthread_barrier_t *b)
+{
+    if((b == 0) || (b->bound == 0))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    /* Destroying a barrier with threads still parked on it would drop them
+     * onto a handle that no longer names anything. */
+    if(arkrtos_posix_mutex_lock(&b->mtx) != 0)
+    {
+        return -1;
+    }
+    if(b->count != 0u)
+    {
+        (void)arkrtos_posix_mutex_unlock(&b->mtx);
+        errno = EBUSY;
+        return -1;
+    }
+    (void)arkrtos_posix_mutex_unlock(&b->mtx);
+
+    (void)arkrtos_mutex_delete(b->mtx.handle);
+    (void)arkrtos_cond_delete(b->cond.handle);
+    b->mtx.handle  = -1;
+    b->cond.handle = -1;
+    b->n           = 0u;
+    b->bound       = 0;
+    return 0;
+}
+
+int arkrtos_posix_barrier_wait(arkrtos_pthread_barrier_t *b)
+{
+    uint32 gen;
+
+    if((b == 0) || (b->n == 0u))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    if(arkrtos_posix_barrier_bind(b) != 0)
+    {
+        return -1;
+    }
+    if(arkrtos_posix_mutex_lock(&b->mtx) != 0)
+    {
+        return -1;
+    }
+
+    /* Last arrival: reset the counter and move the generation on. Waking by
+     * "generation changed" rather than "count reached n" is what makes the
+     * barrier reusable - a thread that wakes late must not mistake the next
+     * round's counter for the round it is waiting for. */
+    if((b->count + 1u) >= b->n)
+    {
+        b->count = 0u;
+        b->gen++;
+        (void)arkrtos_posix_cond_broadcast(&b->cond);
+        (void)arkrtos_posix_mutex_unlock(&b->mtx);
+        return PTHREAD_BARRIER_SERIAL_THREAD;
+    }
+
+    b->count++;
+    gen = b->gen;
+    while(gen == b->gen)
+    {
+        if(arkrtos_posix_cond_wait(&b->cond, &b->mtx) != 0)
+        {
+            int saved = errno;
+
+            (void)arkrtos_posix_mutex_unlock(&b->mtx);
+            errno = saved;
+            return -1;
+        }
+    }
+    (void)arkrtos_posix_mutex_unlock(&b->mtx);
+    return 0;
+}
+
+/* ---- barrier attributes: private only -------------------------------- */
+
+int arkrtos_posix_barrierattr_init(arkrtos_pthread_barrierattr_t *a)
+{
+    if(a == 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    a->pshared = 0;
+    return 0;
+}
+
+int arkrtos_posix_barrierattr_destroy(arkrtos_pthread_barrierattr_t *a)
+{
+    if(a == 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    return 0;
+}
+
+int arkrtos_posix_barrierattr_setpshared(arkrtos_pthread_barrierattr_t *a, int32 v)
+{
+    if(a == 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    if(v != 0)
+    {
+        errno = ENOTSUP;
+        return -1;
+    }
+    a->pshared = 0;
+    return 0;
+}
+
+int arkrtos_posix_barrierattr_getpshared(const arkrtos_pthread_barrierattr_t *a, int32 *v)
+{
+    if((a == 0) || (v == 0))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    *v = a->pshared;
+    return 0;
+}
+
 #endif /* ARKRTOS_USE_POSIX */
