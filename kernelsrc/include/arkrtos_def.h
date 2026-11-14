@@ -9,6 +9,10 @@
 #define __ARKRTOS_DEF_H__
 
 #include "arkrtos_types.h"
+/* SVC sub-command numbers (p[0] of every multi-op service). Kept in a
+ * separate, include-free header so the App and Driver SDKs can use the
+ * same names as the kernel dispatch without pulling kernel headers. */
+#include "arkrtos_svc_abi.h"
 
 #define ARKRTOS_EVENT_HANDLE_FLAG     (0x01100000)
 #define ARKRTOS_DEV_HANDLE_FLAG       (0x01200000)

@@ -11,13 +11,14 @@
 */
 
 #include "arkrtos_driver_sdk.h"
+#include "arkrtos_def.h"
 
 #ifdef ARKRTOS_DRV_USER_MODE
 
 int32 arkrtos_drv_register(const char *name, arkrtos_dev_drv_t *drv, uint32 dev_num)
 {
     uint32 p[4];
-    p[0] = 1;
+    p[0] = ARKRTOS_DRV_SUB_REGISTER;
     p[1] = (uint32)name;
     p[2] = (uint32)drv;
     p[3] = dev_num;
@@ -27,7 +28,7 @@ int32 arkrtos_drv_register(const char *name, arkrtos_dev_drv_t *drv, uint32 dev_
 int32 arkrtos_drv_unregister(const char *name)
 {
     uint32 p[4];
-    p[0] = 2;
+    p[0] = ARKRTOS_DRV_SUB_UNREGISTER;
     p[1] = (uint32)name;
     return arkrtos_call_drv_mgr(p);
 }
@@ -35,14 +36,14 @@ int32 arkrtos_drv_unregister(const char *name)
 int32 arkrtos_drv_get_count(void)
 {
     uint32 p[4];
-    p[0] = 3;
+    p[0] = ARKRTOS_DRV_SUB_COUNT;
     return arkrtos_call_drv_mgr(p);
 }
 
 int32 arkrtos_drv_hwsafe_register(const char *dev_name, arkrtos_hwsafe_fn fn)
 {
     uint32 p[4];
-    p[0] = 4;
+    p[0] = ARKRTOS_DRV_SUB_HSAFE_REGISTER;
     p[1] = (uint32)dev_name;
     p[2] = (uint32)fn;
     p[3] = 0;
@@ -52,7 +53,7 @@ int32 arkrtos_drv_hwsafe_register(const char *dev_name, arkrtos_hwsafe_fn fn)
 int32 arkrtos_drv_hwsafe_unregister(const char *dev_name)
 {
     uint32 p[4];
-    p[0] = 6;
+    p[0] = ARKRTOS_DRV_SUB_HSAFE_UNREGISTER;
     p[1] = (uint32)dev_name;
     return arkrtos_call_drv_mgr(p);
 }

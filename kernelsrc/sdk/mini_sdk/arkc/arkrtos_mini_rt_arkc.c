@@ -33,9 +33,18 @@
  * gcc 不认 __svc，所以非 arkc 档只留两条普通声明，由那里提供桩。 */
 typedef unsigned int u32;
 
+/* 服务号与子命令号：与 kernelsrc/include/arkrtos_svc_abi.h（子命令号）和
+ * arkrtos_def.h（服务号）逐位相同。这里不 include 那两个头 —— 本文件要被
+ * arkc（只吃部署清单里的文件）和宿主 gcc 门禁（不带 -I）各编一遍，两边都
+ * 拿不到头文件搜索路径。副本只在这两处，值一旦改动这里必须同时改。 */
+#define ARKRTOS_SVC_SHELL            (0x1A)
+#define ARKRTOS_SVC_THREAD_CTRL      (0x1B)
+#define ARKRTOS_SHELL_SUB_PRINT      (3u)
+#define ARKRTOS_THREAD_SUB_EXIT      (3u)
+
 #if defined(__ARK_CC__)
-int __svc(0x1A) arkrtos_call_shell_svc(u32 *p);
-int __svc(0x1B) arkrtos_call_thread_ctrl(u32 *p);
+int __svc(ARKRTOS_SVC_SHELL) arkrtos_call_shell_svc(u32 *p);
+int __svc(ARKRTOS_SVC_THREAD_CTRL) arkrtos_call_thread_ctrl(u32 *p);
 #else
 int arkrtos_call_shell_svc(u32 *p);
 int arkrtos_call_thread_ctrl(u32 *p);
@@ -84,7 +93,7 @@ int write(int fd, const void *buf, unsigned int len)
         }
         g_chunk[n] = 0;
 
-        q[0] = 3u; q[1] = (u32)g_chunk; q[2] = 0u;
+        q[0] = ARKRTOS_SHELL_SUB_PRINT; q[1] = (u32)g_chunk; q[2] = 0u;
         (void)arkrtos_call_shell_svc(q);
 
         done += n;
@@ -103,7 +112,7 @@ void _exit(int code)
     u32 q[3];
 
     (void)code;
-    q[0] = 3u; q[1] = 0u; q[2] = 0u;
+    q[0] = ARKRTOS_THREAD_SUB_EXIT; q[1] = 0u; q[2] = 0u;
     (void)arkrtos_call_thread_ctrl(q);
 
     /* 内核不会再调度这个任务；真回来了就停住，不往前跑到别人的代码上。 */
