@@ -108,7 +108,7 @@ App/驱动均不生成 `ARM_LIB_HEAP`；要动态内存请用 `arkrtos_posix_mal
 | `APP_AUTO_START` | 1 | 扫描到有效 App 后自动启动 | 调试时置 0，免得内核抢在你下断点前启动 |
 | `DRIVER_AUTO_START` | 1 | 扫描到有效驱动后自动启动 | 同上 |
 | `APP_CRASH_RESTART_MAX` | 3 | 连续故障重启上限，达到即禁用；0 = 不限 | 按可靠性要求调整 |
-| `SHELL_ENABLE` | 1 | 内核 shell 控制台任务（占串口读权） | 不用控制台时置 0 |
+| `SHELL_ENABLE` | 1 | 内核 shell 控制台任务（占串口读权）；取值来自 Kconfig `ARKRTOS_USE_SHELL` | 不用控制台时把 defconfig 里的 `ARKRTOS_USE_SHELL` 置 `n` |
 | `INSTALLER_ENABLE` | 1 | 启用内核内安装逻辑 | 不用串口安装时置 0 |
 | `INSTALLER_AUTO_START` | 1 | 安装完成后立即启动该 App | 需要"先装好、稍后手动启动"时置 0 |
 

@@ -37,6 +37,8 @@ import subprocess
 import sys
 import tempfile
 
+from arkrtos_f427_env import EXTRA_INCLUDES, SOFTBUS_TIER_DEFS
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
@@ -76,6 +78,11 @@ MAIN_INCLUDES = INCLUDES + [
     "example/stm32f427/kernel/ARKRTOS_TEST/Drivers/STM32F4xx_HAL_Driver/Inc",
     "example/stm32f427/kernel/ARKRTOS_TEST/Drivers/STM32F4xx_HAL_Driver/Inc/Legacy",
 ]
+
+# 共享头按 F427 的真值打开了 lwIP 与软总线，这两个组件的头必须能搜到
+# （见 arkrtos_f427_env.py）。
+INCLUDES += EXTRA_INCLUDES
+MAIN_INCLUDES += EXTRA_INCLUDES
 
 def find_tool(explicit, candidates):
     if explicit:
@@ -135,6 +142,8 @@ def on_path_stage(armclang):
         cmd = [armclang, "--target=arm-arm-none-eabi", "-mcpu=cortex-m4",
                "-std=c99", "-fsyntax-only", "-DARKRTOS_USE_TICKLESS=1"]
         cmd += ["-I" + os.path.join(ROOT, p) for p in incs]
+        # 软总线档位宏：与 F427 工程 MiscControls 一致。
+        cmd += ["-D" + d for d in SOFTBUS_TIER_DEFS]
         cmd += extra + [src]
         r = run(cmd)
         if r.returncode != 0:

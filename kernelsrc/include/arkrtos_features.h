@@ -28,7 +28,7 @@
  * 默认值（多为 1），Kconfig 里明明写了 n 也关不掉；实测症状是关档构建
  * 编出实体代码、链接期报 L6218E 未定义符号（arkrtos_fs_mkdir /
  * ark_bus_port_lock …）。命令行 -D 仍优先，因为它在任何头文件之前生效。 */
-#include "arkrtos_autoconf.h"
+#include <arkrtos_autoconf.h>
 
 /* ============================================================
  * 一、内核基础机制
@@ -197,10 +197,18 @@
 #define ARKRTOS_USE_PROCFS              1
 #endif
 
-/* 内核 Shell 控制台（SVC 0x1A）的开关不在这里，而是沿用既有的
- * SHELL_ENABLE（config/arkrtos_partition.h）；arkrtos_shell.c 的整文件门控
- * 与关闭时的空实现早已就位。不要在此再定义第二个 shell 开关：两个名字
- * 管一件事，迟早会出现「看着关了其实还开着」。 */
+/* 内核 Shell 控制台（SVC 0x1A）。开关本身是 Kconfig 的 ARKRTOS_USE_SHELL，
+ * 但代码侧（arkrtos_shell.c 的整文件门控）与历史约定用的是 SHELL_ENABLE
+ * （原先定义在 config/arkrtos_partition.h，那只是分区头的历史遗留位置）。
+ * 这里把它接成**同一个开关的别名**，不是第二个开关：一个 Kconfig 符号、
+ * 一个值。命令行先定义 SHELL_ENABLE 时以命令行为准（先定义者赢）。
+ * 实测：关掉这一档省 33184 B Flash / 14620 B RAM，是单块最大的选配。 */
+#ifndef SHELL_ENABLE
+#define SHELL_ENABLE                    ARKRTOS_USE_SHELL
+#endif
+
+/* Shell 开着但控制台那套常量（SHELL_DEV_NAME / SHELL_TASK_STACK_SIZE …）
+ * 仍在 config/arkrtos_partition.h：那是板级资源，不是功能开关。 */
 
 /* 小程序（arkrtos_mini.c）：把文件系统里的一份负载按需 load 进 RAM 执行，
  * 退出或停止即把整块 RAM 还回档位池。它复用 App 的镜像容器与 App SDK，

@@ -53,7 +53,7 @@
 | 23 | 单元测试框架 | ✗ | ✓（utest + CI） | ✓（ztest + Twister） | **✓**（板端 `utest`：用例自动注册 + 断言记账，`utest run` 上板 9/9；`utest-host` 门禁验框架本身的记账） |
 | 24 | 支持的架构 | 极广（40+） | 广 | ARM/RISC-V/x86/ARC/… | Cortex-M3/M4/M7（RISC-V / LoongArch 抽象层已就绪，移植实现待补） |
 | 25 | 主构建工具链 | 任意（Keil/GCC/IAR） | SCons / MDK | CMake + west | **Keil MDK（AC5/AC6）+ GNU Make / arm-none-eabi-gcc（F427 例程，见 §三-⑤ 与 [GCC构建指南](GCC构建指南.md)）** |
-| 26 | **可裁剪下限（实测）** | 约 6–10 KB Flash（最小配置，社区口径） | 内核约 3 KB + 组件按需 | 约 8–20 KB（视设备树与子系统） | **37.8 KB Flash / 28.3 KB RAM**（`config/minimal_defconfig` + `SHELL_ENABLE=0`，F427 内核工程实测；含板级 HAL 7.4 KB、演示应用 1.1 KB，内核本体 RAM ≈ 18.9 KB）。默认档 234.6 KB / 118.9 KB。见 [功能开关](功能开关.md) §"量到的最小档" |
+| 26 | **可裁剪下限（实测）** | 约 6–10 KB Flash（最小配置，社区口径） | 内核约 3 KB + 组件按需 | 约 8–20 KB（视设备树与子系统） | **37.8 KB Flash / 28.3 KB RAM**（`config/minimal_noshell_defconfig`，F427 内核工程实测；含板级 HAL 7.4 KB、演示应用 1.1 KB，内核本体 RAM ≈ 18.9 KB）。默认档 234.6 KB / 118.9 KB。见 [功能开关](功能开关.md) §"量到的最小档" |
 
 ---
 

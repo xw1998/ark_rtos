@@ -13,7 +13,8 @@ Ark RTOS 除了 Keil MDK（AC5/AC6）工程之外，为 **STM32F427** 例程提�
 
 | 工程 | 目录 | 产物 |
 |---|---|---|
-| 内核 | `example/stm32f427/kernel/ARKRTOS_TEST/GCC/` | `build/ARKRTOS_TEST.elf/.bin/.hex` |
+| 内核（F427） | `example/stm32f427/kernel/ARKRTOS_TEST/GCC/` | `build/ARKRTOS_TEST.elf/.bin/.hex` |
+| 内核（H743） | `example/stm32h743/kernel/ARKRTOS_TEST/GCC/` | 同上 |
 | 应用示例 | `example/stm32f427/app_sdk/APP_DEMO/GCC/` | `build/app_demo.elf/.bin/.hex` |
 | 驱动示例 | `example/stm32f427/driver_sdk/DRV_DEMO/GCC/` | `build/drv_demo.elf/.bin/.hex` |
 | 小程序示例 | `example/stm32f427/app_sdk/MINI_DEMO/GCC/` | `build/mini_demo.elf/.bin/.hex` |
@@ -44,7 +45,8 @@ echo 'CROSS := D:/path/to/bin/arm-none-eabi-' > toolchain.local.mk
 ## 3. 用法（在各工程 GCC 目录下）
 
 ```bash
-make              # 生成 ld + 编译 + 链接，产出 elf/bin/hex + 打印体积
+make              # 生成 defconfig + autoconf.h + ld，编译链接，产出 elf/bin/hex + 打印体积
+make kconfig      # 只生成并打印本次的 per-build defconfig
 make size         # 只打印固件体积
 make gen-sources  # 从 .uvprojx 重新派生 sources.mk（改了 Keil 工程后跑）
 make clean
@@ -61,8 +63,23 @@ pyocd flash -t stm32f427vgtx --format hex build/ARKRTOS_TEST.hex
 头文件依赖已由 `-MMD -MP` 自动跟踪（对象同目录下的 `.d`）：改一个头，
 所有 `#include` 到它的译都会重编，不用手工 clean。
 
-**编译选项不在依赖里。** 改 `USE_*` 开关、`-D...` 宏、`sources.mk` 里的源集合之后
-必须 `make clean`，否则只有命令行变了的那几个对象会重编，其余仍是旧值编出来的。
+**功能开关不在此列（2026-11-14 起）。** 两个 GCC 工程都改成「每次构建生成
+per-build `arkrtos_autoconf.h`」，`USE_*` 旋钮（如 `make USE_ARKVIM=0`）写进
+per-build defconfig，生成头内容一变，`-MMD` 依赖就失配 ⇒ 自动重编。开关不再走
+`-D`，因此不再有「命令行变了但对象没重编」这个坑。机制见
+[Kconfig配置系统](Kconfig配置系统.md) §8.1。
+
+实测（2026-11-14，F427 GCC）：`make USE_SHELL=0` 得 `text 170008 / data 336 /
+bss 88792`，默认档是 `259412 / 368 / 113536`——差 89436 B Flash、24744 B RAM。
+这组数只作「旋钮连通、生成头真的重编了」的证据，**不要**当作「Shell 有多大」：
+两套工具链裁掉的符号集不同（同一批源码、不同 libc 与内联决策），Keil 侧的
+对应读数见 [功能开关](功能开关.md)。
+
+**仍需 `make clean` 的两种改动**：改分区头（`config/<chip>/arkrtos_partition.h`，
+它决定地址与容量）、改 `sources.mk` 里的源集合。这两类都不进生成头。
+
+> 历史事实：在此之前功能开关是 `-D`，改开关必须 `make clean`，否则只有命令行变了
+> 的那几个对象会重编，其余仍是旧值编出来的。
 
 ### 结构体改动没 clean 会是什么样子（2026-11-05 实例）
 

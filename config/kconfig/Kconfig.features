@@ -219,6 +219,19 @@ config ARKRTOS_USE_APPPACK
 	  file I/O and allocates nothing (buffers come from the caller), so it
 	  does not force the VFS in.
 
+config ARKRTOS_PACK_IN_EXTRAM
+	bool "Packer workspace in external SDRAM"
+	default n
+	help
+	  Where the on-board packer (cc --pack, ARKRTOS_USE_APPPACK) keeps its
+	  four-pass diff workspace: off (default) uses the on-chip .ark_buf window
+	  carved by the partition header; on moves it into the external SDRAM
+	  partition (0xC0000000), which is the only way the four passes fit at
+	  the "pool 4 MB / source 512 KB" scale.  It has to agree with the
+	  partition header and with ARKRTOS_USE_SDRAM: a build that turns this
+	  on without the SDRAM window linked in fails to link, on purpose,
+	  instead of silently shrinking the pool.
+
 config ARKRTOS_MINI_READ_VFS
 	bool "MiniApp: read images through the VFS namespace"
 	default n
@@ -232,6 +245,19 @@ config ARKRTOS_MINI_READ_VFS
 	  Not "try one then the other": the two backends have different
 	  preconditions, so silently falling back would explain a broken read on
 	  one namespace as a path in the other.
+
+config ARKRTOS_MINI_TASK_PRIORITY
+	int "MiniApp task priority"
+	default 10
+	range 1 255
+	depends on ARKRTOS_USE_MINIAPP
+	help
+	  Priority handed to the task that runs a MiniApp.  The default equals
+	  APP_TASK_PRIORITY, which is the kernel's historical behaviour.  The
+	  H743 example passes 20 instead: a demo MiniApp that spins forever at
+	  priority 10 sits above the shell (14) and takes the console down with
+	  it, so there the MiniApp is put below the console.  Numbers are
+	  lower-is-higher, as everywhere else in the scheduler.
 
 config ARKRTOS_MINI_YIELD_CHUNKS
 	int "MiniApp load: yield every N chunks (0 = never)"
@@ -299,15 +325,21 @@ config ARKRTOS_USE_SOFTBUS
 	  the per-MCU -DARK_BUS_* set in the project, or arkrtos_softbus.h
 	  fails the build with #error instead of quietly taking defaults.
 
-endmenuconfig ARKRTOS_USE_CM_BACKTRACE
-	bool "cm_backtrace fault traceback"
-	default y
-	help
-	  components/cm_backtrace; needs DWT/NVIC.
-
 endmenu
 
 menu "Shell"
+
+config ARKRTOS_USE_SHELL
+	bool "Kernel shell console (SVC 0x1A)"
+	default y
+	help
+	  The console task: command table, line editing, history, completion
+	  and the board/app command registration.  It is a whole task plus
+	  three kilobytes of stack, and it is by far the largest single
+	  optional block in the image (measured: -33184 B Flash / -14620 B
+	  RAM on the STM32F427 example).  Off compiles kernelsrc/shell down
+	  to an empty object: arkrtos_shell_init() returns 0 and every
+	  command disappears.
 
 config ARKRTOS_SHELL_GLOB
 	bool "Shell glob expansion (unquoted * and ?)"
@@ -494,7 +526,7 @@ config ARKRTOS_USE_FLASHAPP
 config ARKRTOS_SHELL_BOARD_CMDS
 	bool "Board-owned shell commands"
 	default n
-	depends on SHELL_ENABLE
+	depends on ARKRTOS_USE_SHELL
 	help
 	  Add one call inside register_kernel_commands() so the board can append
 	  its own commands after ark_shell_init() has rebuilt g_cmd_table.  Before
@@ -518,10 +550,18 @@ config ARKRTOS_USE_RTSTAT
 	  change, and the shell command table is unchanged.
 
 config ARKRTOS_USE_UTEST
+	bool "On-board unit test framework"
+	default y
+	help
+	  arkrtos_utest: cases self-register (constructor) and assertions are
+	  accounted, not aborted; the shell gains the `utest` command.  Off
+	  compiles the framework and the command out entirely.  Auto
+	  registration needs constructor support (armclang / GCC).
+
 config ARKRTOS_USE_SECCHECK
 	bool "Security baseline self-check (sec command)"
 	default n
-	depends on SHELL_ENABLE
+	depends on ARKRTOS_USE_SHELL
 	help
 	  arkrtos_sec: twelve read-only checks that report PASS / FAIL /
 	  FINDING / SKIP about the build in front of you - MPU/priv/stack/
@@ -535,20 +575,5 @@ config ARKRTOS_USE_SECCHECK
 	  It is a baseline self-check, NOT a certification statement.  Off
 	  (the default) compiles the module and the `sec` command out: zero
 	  size change and the shell command table is unchanged.
-
-	bool "On-board unit test framework"
-	default y
-	help
-	  arkrtos_utest: cases self-register (constructor) and assertions are
-	  accounted, not aborted; the shell gains the `utest` command.  Off
-	  compiles the framework and the command out entirely.  Auto
-	  registration needs constructor support (armclang / GCC).
-
-endmenuconfig ARKRTOS_USE_AUDIT
-	bool "Structural self-check"
-	default y
-	help
-	  Partition table / slot / image header consistency checks and an
-	  audit record.  Off keeps the loader's minimal legality checks only.
 
 endmenu

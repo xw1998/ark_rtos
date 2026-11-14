@@ -6,9 +6,9 @@
 | 项 | 值 |
 |---|---|
 | 来源 | `D:/工作/git_project/ark_softbus` |
-| 源 commit | `18c6ccf9213549d9f82c8845c916d13376f38fad` |
+| 源 commit | `1c3c27c826305dcc3f91176f014e09a7fb27237c` |
 | 工作区 | 干净 |
-| 同步日期 | 2026-10-07 |
+| 同步日期 | 2026-11-14 |
 | 文件数 | 70 |
 
 复制范围：`include/` → `include/`、`src/` → `src/`、

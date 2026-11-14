@@ -9,7 +9,7 @@
 
 /* Pull the generated Kconfig header so a Kconfig override reaches this file.
  * Every default below is #ifndef-guarded, so an absent header changes nothing. */
-#include "arkrtos_autoconf.h"
+#include <arkrtos_autoconf.h>
 
 #ifdef __cplusplus
 extern "C" {

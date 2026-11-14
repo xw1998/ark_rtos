@@ -744,9 +744,9 @@ typedef char arkrtos_pool_unit_check[
  *          本节的 APP_AUTO_START / DRIVER_AUTO_START 只影响「裸镜像」这条
  *          开发调试路径。
  * ============================================================ */
-#ifndef SHELL_ENABLE
-#define SHELL_ENABLE             1               /* 1=启用内核 shell 控制台任务 */
-#endif
+/* Shell 开关在 Kconfig（ARKRTOS_USE_SHELL，见 config/kconfig/Kconfig.features），
+ * kernelsrc/include/arkrtos_features.h 把它接成 SHELL_ENABLE 别名；
+ * 这里只留板级资源常量（设备名/优先级/栈大小），不再定义开关。 */
 #define SHELL_DEV_NAME           "ttyS0"          /* 控制台串口设备名 */
 #define SHELL_DEV_ARG            115200          /* 设备打开参数（波特率） */
 #define SHELL_TASK_PRIORITY      14              /* 控制台优先级（最低：人机交互，不抢业务 CPU） */

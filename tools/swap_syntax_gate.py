@@ -34,6 +34,8 @@ import shutil
 import subprocess
 import sys
 
+from arkrtos_f427_env import EXTRA_INCLUDES, SOFTBUS_TIER_DEFS
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
@@ -62,12 +64,19 @@ INCLUDES = [
     "example/stm32f427/kernel/ARKRTOS_TEST/Drivers/CMSIS/Core/Include",
 ]
 
+# 共享头按 F427 的真值打开了 lwIP 与软总线，这两个组件的头必须能搜到
+# （见 arkrtos_f427_env.py）。
+INCLUDES += EXTRA_INCLUDES
+
 DEFS = [
     "ARKRTOS_USE_TASK_SWAP=1",
     'ARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',
     "STM32F427xx",
     "USE_HAL_DRIVER",
 ]
+
+# 软总线档位宏：与 F427 工程 MiscControls 一致。
+DEFS += SOFTBUS_TIER_DEFS
 
 # (源文件, -mcpu)。内核文件用 m4（F427 就是 m4），移植层各编各的。
 TARGETS = [

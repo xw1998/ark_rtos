@@ -61,6 +61,11 @@
 #endif
 #if ARKRTOS_USE_MEMPOOL
 #include "arkrtos_mempool.h"
+#endif
+/* utest 曾经被塞在 MEMPOOL 的条件块里 —— 于是「关内存池、开单元测试」
+ * 这种合法组合会在 cmd_utest() 里报 ark_utest_summary_t 未定义（实测最小档
+ * 1 Error）。它的门控必须只看自己的开关。 */
+#if (ARKRTOS_USE_UTEST == 1)
 #include "arkrtos_utest.h"
 #endif
 #include "arkrtos_crash.h"

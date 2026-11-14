@@ -494,7 +494,7 @@ arkrtos_dev_write(h, &on, 1);            /* 点亮蓝灯 */
 | `APP_ALLOW_RAW_IMAGE` | 0 | 是否认领裸镜像（无镜像头、直接烧进池的固件）。编译期默认 0，F427 板级置 1；**运行期还要设备端配置区 `flags` 的 `RAW_ALLOW` 位一起成立**，两处都开才生效 |
 | `APP_CRASH_RESTART_MAX` | 3 | App/驱动连续故障重启上限，达到即禁用；0 = 不限次 |
 | `INSTALLER_ENABLE` | 1 | 内核内安装模块（占用 ttyS0）；不用串口安装时置 0 |
-| `SHELL_ENABLE` | 1 | 内核 Shell 控制台（ark-shell，占用 `SHELL_DEV_NAME`）；置 1 时不注册常驻安装任务，安装改由 `install` 命令触发一次性窗口 |
+| `SHELL_ENABLE` | 1 | 内核 Shell 控制台（ark-shell，占用 `SHELL_DEV_NAME`）；置 1 时不注册常驻安装任务，安装改由 `install` 命令触发一次性窗口。**取值来自 Kconfig `ARKRTOS_USE_SHELL`**，`SHELL_ENABLE` 只是代码里的别名 |
 | `INSTALLER_FIXED_SLOT` | -1 | 固定槽模式下常驻安装任务的目标槽（配置槽序号）；`-1` = 不指定，此时常驻任务拒绝任何帧。设成 N：上电时先停掉该槽里正在运行的镜像、再整槽擦一次，然后只接受一帧，要再装就重启 |
 | 镜像头 `flags` | 0x1 | 逐槽开机自启标志，打包时由 `tools/pack_app.py --autostart / --no-autostart` 写入；运行期用 `app list` / `drv list` 的 auto 列查看 |
 | `SLOT_MAX` / `ARKRTOS_CFG_SLOT_MAX` | 16 / 8 | 槽位记录条数上限（共享表数组 / 设备端配置区容量）。两者都必须 ≤ `ARKRTOS_SLOT_ARRAY_MAX`（16，见 `arkrtos_share.h`），越界由编译期断言拦住 |

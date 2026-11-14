@@ -28,6 +28,8 @@ import shutil
 import subprocess
 import sys
 
+from arkrtos_f427_env import SOFTBUS_TIER_DEFS
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
@@ -72,7 +74,7 @@ DEFS_SHELL = DEFS + [
     "ARKRTOS_USE_RTSTAT=1",
     "ARKRTOS_HW_SAFE=1",
     "ARKRTOS_USE_UTEST=1",
-]
+] + SOFTBUS_TIER_DEFS
 
 TARGETS = [
     ("kernelsrc/src/arkrtos_sec.c", "cortex-m4", DEFS),

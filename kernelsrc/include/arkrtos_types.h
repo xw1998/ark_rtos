@@ -12,7 +12,7 @@
  * reaches, so the whole product sees one set of values.  Every macro in
  * the generated file is #ifndef-guarded, so a -D on the compiler command
  * line still wins. */
-#include "arkrtos_autoconf.h"
+#include <arkrtos_autoconf.h>
 
 typedef unsigned long  uint32;
 typedef signed   long  int32;

@@ -37,7 +37,10 @@ F401 内核工程回归 0 Error；F427 上装 `SOCKET_DEMO`（固定槽 0 覆盖
 
 - `ARKRTOS/lwIP`：`src/**` 下 33 个 `.c`；`ARKRTOS/lwIP Port`：`port/**` 下 2 个 `.c`；
 - include 路径：`kernelsrc\components\lwip\src\include`、`kernelsrc\components\lwip\port`；
-- 工程宏：`ARKRTOS_USE_LWIP=1`（`arkrtos_features.h` 里默认是 **0**，不想要就撤掉这个宏）。
+- 开关：Kconfig 符号 `ARKRTOS_USE_LWIP`（默认 `n`）。F427 的默认档在
+  `config/arkrtos_defconfig` 里开着它，F401 / H743 的板级头与 defconfig 关着。
+  **不要再在工程 `<Define>` 里写 `ARKRTOS_USE_LWIP=1`**——2026-11-14 起工程宏已清零，
+  取值只来自 Kconfig（见 [Kconfig配置系统](Kconfig配置系统.md) §8）。
 
 ## 4. 端口层的三条口径
 

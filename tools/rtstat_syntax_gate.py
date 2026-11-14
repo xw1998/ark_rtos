@@ -34,6 +34,8 @@ import shutil
 import subprocess
 import sys
 
+from arkrtos_f427_env import EXTRA_INCLUDES, SOFTBUS_TIER_DEFS
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
@@ -62,6 +64,10 @@ INCLUDES = [
     "example/stm32f427/kernel/ARKRTOS_TEST/Drivers/CMSIS/Core/Include",
 ]
 
+# 共享头按 F427 的真值打开了 lwIP 与软总线，这两个组件的头必须能搜到，
+# 否则编出来的是"文件没找到"，不是被测开关的问题（见 arkrtos_f427_env.py）。
+INCLUDES += EXTRA_INCLUDES
+
 # 板级配置必须一起给：port 层用到的 SCB / __set_PRIMASK 来自 CMSIS core 头，
 # 而那条链是 arkrtos_config.h -> ARKRTOS_BOARD_CONFIG -> stm32f4xx.h -> core_cm4.h。
 # 少这个 -D，编出来就是"未声明的标识符"，而真机工程里它一直是被定义的。
@@ -73,6 +79,9 @@ DEFS = [
     "STM32F427xx",
     "USE_HAL_DRIVER",
 ]
+
+# 软总线档位宏：与 F427 工程 MiscControls 一致（arkrtos_softbus.h 的 #error 要它们）。
+DEFS += SOFTBUS_TIER_DEFS
 
 # (源文件, -mcpu)。内核三个文件用 m4（F427 就是 m4），移植层各编各的。
 TARGETS = [

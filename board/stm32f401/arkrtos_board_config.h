@@ -37,6 +37,20 @@
 #undef  ARKRTOS_USE_MINIAPP
 #define ARKRTOS_USE_MINIAPP         0
 
+/* F401 是 96 KB SRAM 的小板（还要减 8 KB 共享区与 32 KB 槽池）。默认
+ * defconfig 现在按 F427 示例工程的口径把那几项打开，这里逐条关掉，
+ * 保持这块板原有的构建结果不变：Kconfig 给默认值，板子只说自己的差异。 */
+#undef  ARKRTOS_HW_SAFE
+#define ARKRTOS_HW_SAFE             0
+#undef  ARKRTOS_USE_LWIP
+#define ARKRTOS_USE_LWIP            0
+#undef  ARKRTOS_USE_RTSTAT
+#define ARKRTOS_USE_RTSTAT          0
+#undef  ARKRTOS_USE_SECCHECK
+#define ARKRTOS_USE_SECCHECK        0
+#undef  ARKRTOS_USE_SOFTBUS
+#define ARKRTOS_USE_SOFTBUS         0
+
 /* Independent watchdog (IWDG). Hardware fact, so it lives with the board:
  * 1 = the kernel guard owns the counter and stops feeding when an invariant
  *     is violated (see arkrtos_guard.c);

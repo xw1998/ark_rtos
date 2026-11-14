@@ -19,7 +19,7 @@
 
 | 宏 | 默认 | 说明 |
 |----|------|------|
-| `SHELL_ENABLE` | 1 | 0 = 不编译控制台任务（省下 ~4KB 内核 RAM + 任务槽） |
+| `SHELL_ENABLE` | 1 | 0 = 不编译控制台任务（省下 ~4KB 内核 RAM + 任务槽）。**取值来自 Kconfig `ARKRTOS_USE_SHELL`**（`arkrtos_features.h` 接成别名）；`0` 档实测省 33184 B Flash / 14620 B RAM |
 | `SHELL_DEV_NAME` | `"ttyS0"` | 控制台串口设备名（板级注册名） |
 | `SHELL_DEV_ARG` | 115200 | 打开设备时的参数（波特率） |
 | `SHELL_TASK_PRIORITY` | 14 | 控制台优先级，取最低，交互不抢业务 CPU |

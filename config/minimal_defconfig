@@ -2,6 +2,9 @@
 # 最小档（config/minimal_defconfig）：每个"不是每个系统都要"的选配都关掉，
 # 只留调度/同步/事件/定时器与演示应用需要的东西。实测体积见
 # docs/功能开关.md §"量到的最小档"。开关一开就是另外一档，别拿它当默认。
+#   ARKRTOS_USE_UTEST 也显式写 n：它默认 y，而板端 utest 框架与 63 条断言
+#   在最小档里只占体积不增加任何内核能力（实测约 +4.3 KB Flash）。
+#   要它就把这一行改成 y —— 这是 Kconfig 开关，不是工程宏。
 # Format: NAME=value, one per line. Reapply with --defconfig.
 
 ARKRTOS_AUTOMOUNT_NOR=n
@@ -85,5 +88,6 @@ ARKRTOS_USE_STACK_USAGE=n
 ARKRTOS_USE_TASK_SWAP=n
 ARKRTOS_USE_TICKLESS=n
 ARKRTOS_USE_TIMER=n
+ARKRTOS_USE_UTEST=n
 ARKRTOS_USE_VFS=n
 ARKRTOS_USE_VFS_LFS=n
