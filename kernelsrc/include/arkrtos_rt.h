@@ -8,7 +8,15 @@
 *            - 节拍中断自己占多少时间（tick.isr）；
 *            - 节拍间隔抖多少（jitter，有符号，单位周期）；
 *            - 一个任务从"该被唤醒"到"真的在跑"要多久（wake.lo / wake.hi）；
+*            - 只算切换、不含节拍体的那一段（switch，见下）；
 *            - 内核最长的一次关中断有多久（crit.max）。
+*
+*          口径说明（2026-11-14 新增 switch 行）：wake.lo 从「节拍中断入口」起算，
+*          里面包含整个节拍的中断体（guard / 定时器 / 延时链 / 记账），所以它
+*          天然比「一次任务切换」大一个节拍体的量。多数 RTOS 的公开基准报的是
+*          后者——从「调度决策点」到「被选中任务的第一条指令」。switch 就是这
+*          个起点的读数：tick_end_cyc 在节拍体最后一行取，wake.lo 与 switch 相
+*          减即节拍体本身。两行同时给出，读的人不必猜对方的数字是哪一段。
 *
 *          三条边界，写在这里以免被读成"实时性已被证明"：
 *          1) 这些是**本机在本配置下测到的最大值**，不是形式化 WCET。测不到
@@ -45,10 +53,11 @@ typedef struct {
     uint32 min_c, avg_c, max_c;   /* CPU 周期 */
     uint32 min_us, avg_us, max_us;/* 微秒（整数，四舍五入到 1 us） */
     uint32 late_n;          /* 被丢弃的"迟到"样本（见 arkrtos_rt_measure_wake） */
+    uint32 skip_n;          /* 被丢弃的"节拍序号不配对"样本（仅 switch 行） */
 } arkrtos_rt_row_t;
 
 /** @brief 读数行数上限（由 arkrtos_rt_snapshot 填） */
-#define ARKRTOS_RT_ROWS                 4u
+#define ARKRTOS_RT_ROWS                 5u
 
 /** @brief 模块初始化：打开周期计数器、算出每拍周期数、清空统计 */
 void   arkrtos_rt_init(void);

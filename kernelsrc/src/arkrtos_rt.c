@@ -26,7 +26,8 @@
 #define RT_ROW_TICK_ISR     0u
 #define RT_ROW_WAKE_LO      1u
 #define RT_ROW_WAKE_HI      2u
-#define RT_ROW_CRIT         3u
+#define RT_ROW_SWITCH       3u      /* 只算切换：节拍体最后一行 → 任务第一行 */
+#define RT_ROW_CRIT         4u
 
 /* 辅助任务（场景二）的静态栈：只调两次 SVC 内部入口，256 字够用且留了余量。 */
 #define RT_HELPER_STACK_WORDS   256u
@@ -54,12 +55,21 @@ static struct {
     uint32 last_tick_cyc;       /* 最近一次节拍入口的时间戳 */
     uint8  have_tick;
     uint32 tick_t0;             /* 本次节拍入口 */
+    uint32 tick_end_cyc;        /* 本次节拍体最后一行（即调度决策点） */
+    uint8  have_tick_end;
+    /* 节拍序号配对。节拍体里如果直接切走（FAST_TICK_SWITCH），被唤醒的任务
+     * 会先跑，rt_tick_exit 还没轮到执行，tick_end_cyc 就还是上一拍的值；
+     * 拿它做减法会得到一个无法解释的数。用序号配对把这类样本挡掉：
+     * 只有"记下的节拍体末尾"与"当前这一拍"是同一拍时，switch 才成立。 */
+    uint32 tick_seq;
+    uint32 tick_end_seq;
     uint8  in_tick;
     uint32 crit_t0;
 
     rt_acc_t  acc[ARKRTOS_RT_ROWS];
     rt_jit_t  jit;
     uint32    late_n;           /* 唤醒场景里"超过一拍"的样本数 */
+    uint32    switch_skip;      /* 节拍序号不配对而丢弃的 switch 样本数 */
 
     uint8  helper_up;
     int32  sem_hi;              /* 辅助任务等它 */
@@ -181,6 +191,10 @@ void arkrtos_rt_reset(void)
     g_rt.jit.max_c = 0;
     g_rt.late_n = 0u;
     g_rt.have_tick = 0u;
+    g_rt.have_tick_end = 0u;
+    g_rt.tick_seq = 0u;
+    g_rt.tick_end_seq = 0u;
+    g_rt.switch_skip = 0u;
 }
 
 void arkrtos_rt_tick_enter(void)
@@ -214,6 +228,7 @@ void arkrtos_rt_tick_enter(void)
 
     g_rt.last_tick_cyc = now;
     g_rt.have_tick = 1u;
+    g_rt.tick_seq++;
 }
 
 void arkrtos_rt_tick_exit(void)
@@ -221,8 +236,16 @@ void arkrtos_rt_tick_exit(void)
     if((g_rt.ready == 0u) || (g_rt.in_tick == 0u)) { return; }
 
     g_rt.in_tick = 0u;
-    rt_acc_add(&g_rt.acc[RT_ROW_TICK_ISR],
-               arkrtos_port_get_cyccnt() - g_rt.tick_t0);
+    {
+        uint32 now = arkrtos_port_get_cyccnt();
+
+        /* 这两行顺序不能变：先记“节拍体到此结束”的时刻，再用它之外的
+         * 差值记 tick.isr。switch 行的起点就是这个时刻。 */
+        g_rt.tick_end_cyc = now;
+        g_rt.tick_end_seq  = g_rt.tick_seq;
+        g_rt.have_tick_end = 1u;
+        rt_acc_add(&g_rt.acc[RT_ROW_TICK_ISR], now - g_rt.tick_t0);
+    }
 }
 
 void arkrtos_rt_crit_enter(void)
@@ -280,6 +303,19 @@ int32 arkrtos_rt_measure_wake(uint32 n)
             continue;
         }
         rt_acc_add(&g_rt.acc[RT_ROW_WAKE_LO], d);
+
+        /* 同一个样本的“只算切换”版本：起点从节拍中断入口挪到节拍体最后
+         * 一行。两个数相减就是节拍体本身，不需要另外猜。 */
+        if((g_rt.have_tick_end != 0u) && (g_rt.tick_end_seq == g_rt.tick_seq))
+        {
+            rt_acc_add(&g_rt.acc[RT_ROW_SWITCH], now - g_rt.tick_end_cyc);
+        }
+        else
+        {
+            /* 这一拍是"节拍体内直接切走"的样本：tick_end 还是上一拍的，
+             * 差值没有意义。丢弃，并单独计数，读数里能看见它被丢了多少。 */
+            g_rt.switch_skip++;
+        }
     }
     return 0;
 }
@@ -366,6 +402,7 @@ static void rt_fill_row(arkrtos_rt_row_t *p_row, const char *name, uint32 idx)
 
     p_row->name = name;
     p_row->late_n = 0u;
+    p_row->skip_n = 0u;
     p_row->n = p_acc->n;
     if(p_acc->n == 0u)
     {
@@ -391,9 +428,12 @@ uint32 arkrtos_rt_snapshot(arkrtos_rt_row_t *rows, uint32 max_rows)
     if((rows == 0) || (max_rows == 0u)) { return 0u; }
 
     if(max_rows > 0u) { rt_fill_row(&rows[0], "tick.isr", RT_ROW_TICK_ISR); }
-    if(max_rows > 1u) { rt_fill_row(&rows[1], "wake.lo", RT_ROW_WAKE_LO); }
+    if(max_rows > 1u) { rt_fill_row(&rows[1], "wake.lo", RT_ROW_WAKE_LO);
+                        rows[1].late_n = g_rt.late_n; }
     if(max_rows > 2u) { rt_fill_row(&rows[2], "wake.hi", RT_ROW_WAKE_HI); }
-    if(max_rows > 3u) { rt_fill_row(&rows[3], "crit.max", RT_ROW_CRIT); }
+    if(max_rows > 3u) { rt_fill_row(&rows[3], "switch",   RT_ROW_SWITCH);
+                        rows[3].skip_n = g_rt.switch_skip; }
+    if(max_rows > 4u) { rt_fill_row(&rows[4], "crit.max", RT_ROW_CRIT); }
 
     if(max_rows > 1u) { rows[1].late_n = g_rt.late_n; }
 

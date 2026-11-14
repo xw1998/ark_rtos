@@ -4687,10 +4687,10 @@ typedef struct {
 
 **一行读数（周期 + 微秒两种单位，微秒按当前主频折算） */**
 
-### `#define ARKRTOS_RT_ROWS                 4u`
+### `#define ARKRTOS_RT_ROWS                 5u`
 
 ```c
-#define ARKRTOS_RT_ROWS                 4u
+#define ARKRTOS_RT_ROWS                 5u
 ```
 
 **读数行数上限（由 arkrtos_rt_snapshot 填） */**

@@ -35,8 +35,11 @@ config ARKRTOS_USE_STACK_CHECK
 config ARKRTOS_USE_SCHED_STAT
 	bool "Scheduler statistics"
 	default y
+	depends on ARKRTOS_USE_MDK_TRACE
 	help
-	  Per-task switch count and time.
+	  Per-task switch count and time.  The counters live in
+	  arkrtos_trace.c and need the DWT reader from MDK trace;
+	  turning MDK trace off turns this off with it.
 
 config ARKRTOS_USE_CPU_LOAD
 	bool "CPU load statistics"

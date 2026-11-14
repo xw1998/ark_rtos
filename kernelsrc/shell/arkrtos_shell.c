@@ -2347,6 +2347,10 @@ static void rt_print_row(const arkrtos_rt_row_t *r)
     {
         ark_shell_printf("  late=%u", r->late_n);
     }
+    if(r->skip_n != 0u)
+    {
+        ark_shell_printf("  skip=%u", r->skip_n);
+    }
     ark_shell_printf("\r\n");
 }
 
