@@ -10,6 +10,20 @@
 #include "arkrtos_def.h"
 #include "arkrtos_task.h"
 #include "arkrtos_config.h"
+/* 返回值约定：0 成功，负值失败。原先失败处一律写裸 -1，读代码看不出
+ * 「为什么失败」；下面这些名字把原因写进代码，**值不得单独修改**
+ * （多个名字共用 -1 是有意的，分名只为表意）。 */
+#define ARKRTOS_EVENT_ERR_PARAM     (-1)   /* 名字指针为空 */
+#define ARKRTOS_EVENT_ERR_HANDLE    (-1)   /* 句柄不是事件对象（标志位不对） */
+#define ARKRTOS_EVENT_ERR_STATE     (-1)   /* 对象未创建 / 已被删除（used==0） */
+#define ARKRTOS_EVENT_ERR_NOSPACE   (-1)   /* 等待队列已满，登记不上等待者 */
+#define ARKRTOS_EVENT_ERR_CONTEXT   (-1)   /* 当前任务不可用 / 未能进入阻塞 */
+#define ARKRTOS_EVENT_ERR_DELETED   (-1)   /* 等待期间对象被删除 */
+#define ARKRTOS_EVENT_ERR_NOSLOT    (-1)   /* 对象表已满，建不出新事件 */
+
+/* 以下两个不是错误，是比较结果： */
+#define ARKRTOS_EVENT_WAITER_DUP    (-2)   /* 同一任务已在等待队列里，无需重复登记 */
+#define ARKRTOS_EVENT_WAITER_ABSENT (-1)   /* 摘除时该任务不在等待队列里 */
 
 typedef struct {
     char   name[16];

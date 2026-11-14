@@ -37,6 +37,19 @@
 #include "arkrtos_features.h"
 #include "arkrtos_types.h"
 
+/* 软总线门面与 shell 命令的返回值：0/成功值为好，负值失败。
+ * 原先失败处一律写裸 -1，读代码看不出「为什么失败」；下面这些名字把原因
+ * 写进代码，**值不得单独修改**（多个名字共用 -1 是有意的，分名只为表意）。 */
+#define ARKRTOS_SOFTBUS_ERR_INIT      (-1)   /* ark_bus_start / 初始化失败 */
+#define ARKRTOS_SOFTBUS_ERR_NOTUP     (-1)   /* 软总线尚未起来，先调 init */
+#define ARKRTOS_SOFTBUS_ERR_PARAM     (-1)   /* 参数/缓冲为空 */
+#define ARKRTOS_SOFTBUS_ERR_PARSE     (-1)   /* 命令行数字解析失败（溢出或没有数字） */
+#define ARKRTOS_SOFTBUS_ERR_USAGE     (-1)   /* 命令行参数个数不对 */
+#define ARKRTOS_SOFTBUS_ERR_SUBSCRIBE (-1)   /* 订阅失败（主题表满） */
+#define ARKRTOS_SOFTBUS_ERR_PUBLISH   (-1)   /* 发布失败 */
+#define ARKRTOS_SOFTBUS_ERR_RPC       (-1)   /* RPC 请求发不出去 */
+#define ARKRTOS_SOFTBUS_ERR_NOREPLY   (-1)   /* RPC 发出去了但对端没有回调 */
+#define ARKRTOS_SOFTBUS_ERR_STREAM    (-1)   /* 流发送被拒（多半超过长度上限） */
 #if (ARKRTOS_USE_SOFTBUS == 1)
 
 #include "ark_bus.h"

@@ -42,6 +42,11 @@
 #define ARKRTOS_SEC_FINDING         (2u)
 #define ARKRTOS_SEC_SKIP            (3u)
 
+/** @brief 板级弱符号的返回值：本板没有实现这条自查通路（不是"检查通过"）。
+ *         与上面的 PASS/FAIL/FINDING/SKIP 是两套语义：那是检查结果，这是
+ *         「根本没有读数」。值不得单独修改。 */
+#define ARKRTOS_SEC_ERR_NO_PORT     (-1)
+
 /**
 * @brief 一条自检项
 * @details 说明文字不做字符串拼接：模块只给出 printf 风格的格式串与最多 4 个

@@ -14,6 +14,26 @@
 #include "arkrtos_def.h"
 #include "arkrtos_task.h"
 #include "arkrtos_config.h"
+/* 返回值：0 成功，负值失败。历史上每次失败都写裸 -1，读代码看不出
+ * 「为什么失败」；下面这些名字把原因写进代码，但**值不得单独修改**——
+ * 同一模块里多个名字共用 -1 是有意的（分名只为表意），且 mq 的超时
+ * 与 sync 的 -2 是两套契约，本模块 send 侧的超时就是 -1。 */
+#define ARKRTOS_MQ_ERR_PARAM     (-1)   /* 参数非法：缓冲为空 / 消息字数越界 */
+#define ARKRTOS_MQ_ERR_HANDLE    (-1)   /* 句柄不是消息队列（标志位不对） */
+#define ARKRTOS_MQ_ERR_STATE     (-1)   /* 对象未创建 / 已被删除（used==0） */
+#define ARKRTOS_MQ_ERR_FULL      (-1)   /* 队列已满（且不等待） */
+#define ARKRTOS_MQ_ERR_EMPTY     (-1)   /* 队列为空（且不等待） */
+#define ARKRTOS_MQ_ERR_NOSPACE   (-1)   /* 等待队列已满，登记不上等待者 */
+#define ARKRTOS_MQ_ERR_CONTEXT   (-1)   /* 当前任务不可用 / 未能进入阻塞 */
+#define ARKRTOS_MQ_ERR_TIMEOUT   (-1)   /* 等到超时仍未成功（send 侧超时是 -1） */
+#define ARKRTOS_MQ_ERR_DELETED   (-1)   /* 等待期间对象被删除 */
+#define ARKRTOS_MQ_ERR_NOSLOT    (-1)   /* 队列表已满，建不出新队列 */
+#define ARKRTOS_MQ_ERR_DISABLED  (-1)   /* ARKRTOS_USE_MQ=0：特性未编入 */
+
+/* 以下两个不是错误，是比较结果 / 哨兵值： */
+#define ARKRTOS_MQ_WAITER_DUP    (-2)   /* 同一个任务已在等待队列里，无需重复登记 */
+#define ARKRTOS_MQ_WAIT_INFINITE (-1)   /* remain_ms 的「无限等待」标记 */
+
 
 #if (ARKRTOS_USE_MQ == 1)
 

@@ -205,7 +205,7 @@ int32 arkrtos_timer_create_internal(char *name)
         }
     }
     ARKRTOS_ENABLE_IRQ();
-    return -1;
+    return ARKRTOS_TIMER_ERR_NOSLOT;
 }
 
 int32 arkrtos_timer_start_internal(int32 handle, uint32 period_ms, uint8 mode,
@@ -215,13 +215,13 @@ int32 arkrtos_timer_start_internal(int32 handle, uint32 period_ms, uint8 mode,
     uint32 ticks;
 
     if(ARKRTOS_TIMER_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
-        return -1;
+        return ARKRTOS_TIMER_ERR_HANDLE;
     if(idx >= ARKRTOS_TIMER_NUM || arkrtos_timers[idx].used == 0)
-        return -1;
+        return ARKRTOS_TIMER_ERR_STATE;
     if(cb == 0 || period_ms == 0)
-        return -1;
+        return ARKRTOS_TIMER_ERR_PARAM;
     if(mode != ARKRTOS_TIMER_MODE_ONESHOT && mode != ARKRTOS_TIMER_MODE_PERIODIC)
-        return -1;
+        return ARKRTOS_TIMER_ERR_PARAM;
 
     ticks = ARKRTOS_MS_TO_TICK(period_ms);
     if(ticks == 0)
@@ -244,9 +244,9 @@ int32 arkrtos_timer_stop_internal(int32 handle)
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
     if(ARKRTOS_TIMER_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
-        return -1;
+        return ARKRTOS_TIMER_ERR_HANDLE;
     if(idx >= ARKRTOS_TIMER_NUM || arkrtos_timers[idx].used == 0)
-        return -1;
+        return ARKRTOS_TIMER_ERR_STATE;
 
     ARKRTOS_DISABLE_IRQ();
     arkrtos_timers[idx].active  = 0;
@@ -260,9 +260,9 @@ int32 arkrtos_timer_delete_internal(int32 handle)
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
     if(ARKRTOS_TIMER_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
-        return -1;
+        return ARKRTOS_TIMER_ERR_HANDLE;
     if(idx >= ARKRTOS_TIMER_NUM)
-        return -1;
+        return ARKRTOS_TIMER_ERR_HANDLE;
 
     ARKRTOS_DISABLE_IRQ();
     arkrtos_timers[idx].used    = 0;
@@ -295,7 +295,7 @@ void arkrtos_timer_tick_handler(void)
 int32 arkrtos_timer_create_internal(char *name)
 {
     (void)name;
-    return -1;
+    return ARKRTOS_TIMER_ERR_DISABLED;
 }
 
 int32 arkrtos_timer_start_internal(int32 handle, uint32 period_ms, uint8 mode,
@@ -306,19 +306,19 @@ int32 arkrtos_timer_start_internal(int32 handle, uint32 period_ms, uint8 mode,
     (void)mode;
     (void)cb;
     (void)arg;
-    return -1;
+    return ARKRTOS_TIMER_ERR_DISABLED;
 }
 
 int32 arkrtos_timer_stop_internal(int32 handle)
 {
     (void)handle;
-    return -1;
+    return ARKRTOS_TIMER_ERR_DISABLED;
 }
 
 int32 arkrtos_timer_delete_internal(int32 handle)
 {
     (void)handle;
-    return -1;
+    return ARKRTOS_TIMER_ERR_DISABLED;
 }
 
 #endif /* ARKRTOS_USE_TIMER */

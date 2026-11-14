@@ -124,7 +124,7 @@ static int32 arkrtos_mq_waiter_add(arkrtos_task_t **waiters, arkrtos_task_t *p_t
     {
         if(waiters[j] == p_tsk)
         {
-            return -2;
+            return ARKRTOS_MQ_WAITER_DUP;
         }
     }
     for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
@@ -135,7 +135,7 @@ static int32 arkrtos_mq_waiter_add(arkrtos_task_t **waiters, arkrtos_task_t *p_t
             return 0;
         }
     }
-    return -1;
+    return ARKRTOS_MQ_ERR_NOSPACE;
 }
 
 /* 从等待列表中摘除当前任务（超时唤醒时由接收路径清理） */
@@ -258,7 +258,7 @@ int32 arkrtos_mq_create_internal(char *name)
         }
     }
     ARKRTOS_ENABLE_IRQ();
-    return -1;
+    return ARKRTOS_MQ_ERR_NOSLOT;
 }
 
 /* Kernel owned variant of arkrtos_mq_create_internal(): same table, same
@@ -284,7 +284,7 @@ int32 arkrtos_mq_create_kernel_internal(char *name)
         }
     }
     ARKRTOS_ENABLE_IRQ();
-    return -1;
+    return ARKRTOS_MQ_ERR_NOSLOT;
 }
 
 /* 计算“被唤醒后重新排队”可用的剩余超时（ms）。
@@ -295,7 +295,7 @@ static int32 arkrtos_mq_remain_ms(uint32 start_tick, uint32 deadline)
 
     if(deadline == 0u)
     {
-        return -1;
+        return ARKRTOS_MQ_WAIT_INFINITE;
     }
 
     elapsed = arkrtos_kernel_tick - start_tick;
@@ -319,11 +319,11 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
     uint32 deadline = 0u;
 
     if(buf == 0 || len_words <= 0 || len_words > ARKRTOS_MQ_MSG_WORDS)
-        return -1;
+        return ARKRTOS_MQ_ERR_PARAM;
     if(ARKRTOS_MQ_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
-        return -1;
+        return ARKRTOS_MQ_ERR_HANDLE;
     if(idx >= ARKRTOS_MQ_NUM || arkrtos_mqs[idx].used == 0)
-        return -1;
+        return ARKRTOS_MQ_ERR_STATE;
     p_mq = &arkrtos_mqs[idx];
 
     ARKRTOS_DISABLE_IRQ();
@@ -348,14 +348,14 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
             arkrtos_mq_waiter_remove(p_mq->send_waiters, p_tsk);
         }
         ARKRTOS_ENABLE_IRQ();
-        return -1;
+        return ARKRTOS_MQ_ERR_FULL;
     }
 
     p_tsk = arkrtos_task_get_current();
     if(p_tsk == 0)
     {
         ARKRTOS_ENABLE_IRQ();
-        return -1;
+        return ARKRTOS_MQ_ERR_CONTEXT;
     }
 
     /* 记录起始节拍与超时上限：被唤醒后若空间又被别人抢走，需要按剩余时间重试 */
@@ -368,7 +368,7 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
         if((added < 0) && (added != -2))
         {
             ARKRTOS_ENABLE_IRQ();
-            return -1;              /* waiter queue is full */
+            return ARKRTOS_MQ_ERR_NOSPACE;              /* waiter queue is full */
         }
     }
     /* 注意：此处不放开中断——入队与下面的 block_in_critical 必须在同一临界区内，
@@ -390,21 +390,21 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
         /* 未能进入阻塞（内核上下文/调度器锁定）：撤销入队 */
         arkrtos_mq_waiter_remove(p_mq->send_waiters, p_tsk);
         ARKRTOS_ENABLE_IRQ();
-        return -1;
+        return ARKRTOS_MQ_ERR_CONTEXT;
     }
 
     if(ret == ARKRTOS_WAKE_OBJ_DELETED)
     {
         /* 等待期间消息队列被删除：队列已被删除方清空，直接返回失败 */
         ARKRTOS_ENABLE_IRQ();
-        return -1;
+        return ARKRTOS_MQ_ERR_DELETED;
     }
 
     if(ret == ARKRTOS_WAKE_TIMEOUT)
     {
         arkrtos_mq_waiter_remove(p_mq->send_waiters, p_tsk);
         ARKRTOS_ENABLE_IRQ();
-        return -1;                          /* 超时未发送成功 */
+        return ARKRTOS_MQ_ERR_TIMEOUT;                          /* 超时未发送成功 */
     }
     /* 被唤醒时空间可能已被他人占用（多个发送者被同时唤醒的场景不存在，
      * 但为稳妥起见仍检查一次；占用则按错误处理） */
@@ -416,7 +416,7 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
         if(remain == 0)
         {
             ARKRTOS_ENABLE_IRQ();
-            return -1;                      /* 超时：未发送成功 */
+            return ARKRTOS_MQ_ERR_TIMEOUT;                      /* 超时：未发送成功 */
         }
 
         {
@@ -425,7 +425,7 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
             if((added < 0) && (added != -2))
             {
                 ARKRTOS_ENABLE_IRQ();
-                return -1;          /* waiter queue is full */
+                return ARKRTOS_MQ_ERR_NOSPACE;          /* waiter queue is full */
             }
         }
 
@@ -438,9 +438,9 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
             ARKRTOS_ENABLE_IRQ();
             if(ret == ARKRTOS_WAKE_TIMEOUT)
             {
-                return -1;
+                return ARKRTOS_MQ_ERR_TIMEOUT;
             }
-            return -1;                      /* 对象被删 / 未能阻塞 */
+            return ARKRTOS_MQ_ERR_DELETED;                      /* 对象被删 / 未能阻塞 */
         }
     }
     arkrtos_mq_put(p_mq, buf, len_words);
@@ -464,11 +464,11 @@ int32 arkrtos_mq_recv_internal(int32 handle, uint32 *buf, int32 len_words, int32
     uint32 deadline = 0u;
 
     if(buf == 0 || len_words <= 0 || len_words > ARKRTOS_MQ_MSG_WORDS)
-        return -1;
+        return ARKRTOS_MQ_ERR_PARAM;
     if(ARKRTOS_MQ_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
-        return -1;
+        return ARKRTOS_MQ_ERR_HANDLE;
     if(idx >= ARKRTOS_MQ_NUM || arkrtos_mqs[idx].used == 0)
-        return -1;
+        return ARKRTOS_MQ_ERR_STATE;
     p_mq = &arkrtos_mqs[idx];
 
     ARKRTOS_DISABLE_IRQ();
@@ -492,14 +492,14 @@ int32 arkrtos_mq_recv_internal(int32 handle, uint32 *buf, int32 len_words, int32
             arkrtos_mq_waiter_remove(p_mq->recv_waiters, p_tsk);
         }
         ARKRTOS_ENABLE_IRQ();
-        return -1;
+        return ARKRTOS_MQ_ERR_EMPTY;
     }
 
     p_tsk = arkrtos_task_get_current();
     if(p_tsk == 0)
     {
         ARKRTOS_ENABLE_IRQ();
-        return -1;
+        return ARKRTOS_MQ_ERR_CONTEXT;
     }
 
     /* 记录起始节拍与超时上限：被唤醒后若消息又被别人取走，需要按剩余时间重试 */
@@ -512,7 +512,7 @@ int32 arkrtos_mq_recv_internal(int32 handle, uint32 *buf, int32 len_words, int32
         if((added < 0) && (added != -2))
         {
             ARKRTOS_ENABLE_IRQ();
-            return -1;              /* waiter queue is full */
+            return ARKRTOS_MQ_ERR_NOSPACE;              /* waiter queue is full */
         }
     }
     /* 同 mq_send：不放开中断，入队与 block_in_critical 必须同处一个临界区 */
@@ -532,14 +532,14 @@ int32 arkrtos_mq_recv_internal(int32 handle, uint32 *buf, int32 len_words, int32
     {
         arkrtos_mq_waiter_remove(p_mq->recv_waiters, p_tsk);
         ARKRTOS_ENABLE_IRQ();
-        return -1;
+        return ARKRTOS_MQ_ERR_CONTEXT;
     }
 
     if(reason == ARKRTOS_WAKE_OBJ_DELETED)
     {
         /* 等待期间消息队列被删除：队列已被删除方清空，直接返回失败 */
         ARKRTOS_ENABLE_IRQ();
-        return -1;
+        return ARKRTOS_MQ_ERR_DELETED;
     }
 
     if(reason == ARKRTOS_WAKE_TIMEOUT)
@@ -565,7 +565,7 @@ int32 arkrtos_mq_recv_internal(int32 handle, uint32 *buf, int32 len_words, int32
             if((added < 0) && (added != -2))
             {
                 ARKRTOS_ENABLE_IRQ();
-                return -1;          /* waiter queue is full */
+                return ARKRTOS_MQ_ERR_NOSPACE;          /* waiter queue is full */
             }
         }
 
@@ -580,7 +580,7 @@ int32 arkrtos_mq_recv_internal(int32 handle, uint32 *buf, int32 len_words, int32
             {
                 return ARKRTOS_SYNC_ERR_TIMEOUT;
             }
-            return -1;
+            return ARKRTOS_MQ_ERR_DELETED;
         }
     }
     got = arkrtos_mq_get(p_mq, buf, len_words);
@@ -597,18 +597,18 @@ int32 arkrtos_mq_send_from_isr_internal(int32 handle, void *buf, int32 len_words
     arkrtos_mq_obj_t *p_mq;
 
     if(buf == 0 || len_words <= 0 || len_words > ARKRTOS_MQ_MSG_WORDS)
-        return -1;
+        return ARKRTOS_MQ_ERR_PARAM;
     if(ARKRTOS_MQ_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
-        return -1;
+        return ARKRTOS_MQ_ERR_HANDLE;
     if(idx >= ARKRTOS_MQ_NUM || arkrtos_mqs[idx].used == 0)
-        return -1;
+        return ARKRTOS_MQ_ERR_STATE;
     p_mq = &arkrtos_mqs[idx];
 
     ARKRTOS_DISABLE_IRQ();
     if(p_mq->count >= ARKRTOS_MQ_DEPTH)
     {
         ARKRTOS_ENABLE_IRQ();
-        return -1;
+        return ARKRTOS_MQ_ERR_FULL;
     }
     arkrtos_mq_put(p_mq, (uint32 *)buf, len_words);
     arkrtos_mq_wake_one(p_mq->recv_waiters);
@@ -624,9 +624,9 @@ int32 arkrtos_mq_delete_internal(int32 handle)
     int32 i;
 
     if(ARKRTOS_MQ_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
-        return -1;
+        return ARKRTOS_MQ_ERR_HANDLE;
     if(idx >= ARKRTOS_MQ_NUM)
-        return -1;
+        return ARKRTOS_MQ_ERR_HANDLE;
 
     ARKRTOS_DISABLE_IRQ();
     /* 查 used：把一个已经不存在的对象报成“删掉了”是错答案。
@@ -635,7 +635,7 @@ int32 arkrtos_mq_delete_internal(int32 handle)
     if(arkrtos_mqs[idx].used == 0)
     {
         ARKRTOS_ENABLE_IRQ();
-        return -1;
+        return ARKRTOS_MQ_ERR_STATE;
     }
     /* 先唤醒所有等待者（原因=对象已删除），否则队列清空后没有人再唤醒它们 */
     arkrtos_mq_wake_all(arkrtos_mqs[idx].send_waiters, ARKRTOS_WAKE_OBJ_DELETED);
@@ -682,7 +682,7 @@ void arkrtos_mq_module_init(void)
 int32 arkrtos_mq_create_internal(char *name)
 {
     (void)name;
-    return -1;
+    return ARKRTOS_MQ_ERR_DISABLED;
 }
 
 int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words,
@@ -692,7 +692,7 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words,
     (void)buf;
     (void)len_words;
     (void)timeout_ms;
-    return -1;
+    return ARKRTOS_MQ_ERR_DISABLED;
 }
 
 int32 arkrtos_mq_recv_internal(int32 handle, uint32 *buf, int32 len_words,
@@ -702,19 +702,19 @@ int32 arkrtos_mq_recv_internal(int32 handle, uint32 *buf, int32 len_words,
     (void)buf;
     (void)len_words;
     (void)timeout_ms;
-    return -1;
+    return ARKRTOS_MQ_ERR_DISABLED;
 }
 
 int32 arkrtos_mq_delete_internal(int32 handle)
 {
     (void)handle;
-    return -1;
+    return ARKRTOS_MQ_ERR_DISABLED;
 }
 
 int32 arkrtos_mq_create_kernel_internal(char *name)
 {
     (void)name;
-    return -1;
+    return ARKRTOS_MQ_ERR_DISABLED;
 }
 
 int32 arkrtos_mq_is_alive(int32 handle)
@@ -728,7 +728,7 @@ int32 arkrtos_mq_send_from_isr_internal(int32 handle, void *buf, int32 len_words
     (void)handle;
     (void)buf;
     (void)len_words;
-    return -1;
+    return ARKRTOS_MQ_ERR_DISABLED;
 }
 
 void arkrtos_mq_release_task(int32 task_id)

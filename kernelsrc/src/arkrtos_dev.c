@@ -40,7 +40,7 @@ int32 arkrtos_dev_register(const char *name, arkrtos_dev_drv_t *drv, uint32 dev_
     int32 slot = -1;
 
     if(name == 0 || drv == 0)
-        return -2;
+        return ARKRTOS_DEV_ERR_ARG;
 
     /* 空槽位以 dev_name[0]==0 标记。注销设备时只清空槽位、不移动数组元素：
      * 设备句柄就是槽位下标（i | ARKRTOS_DEV_HANDLE_FLAG），一旦移动，
@@ -70,11 +70,11 @@ int32 arkrtos_dev_register(const char *name, arkrtos_dev_drv_t *drv, uint32 dev_
                 break;
         }
         if(match)
-            return -2;
+            return ARKRTOS_DEV_ERR_EXIST;
     }
 
     if(slot < 0)
-        return -1;
+        return ARKRTOS_DEV_ERR_NOSLOT;
 
     for(i = 0; i < 7; i++)
     {
@@ -93,7 +93,7 @@ int32 arkrtos_dev_unregister(const char *name)
 {
     int32 i, j;
     if(name == 0)
-        return -1;
+        return ARKRTOS_DEV_ERR_PARAM;
 
     for(i = 0; i < ARKRTOS_DEV_MAX_NUM; i++)
     {
@@ -136,7 +136,7 @@ int32 arkrtos_dev_unregister(const char *name)
             return 0;
         }
     }
-    return -1;
+    return ARKRTOS_DEV_ERR_NOTFOUND;
 }
 
 int32 arkrtos_dev_get_count(void)
@@ -149,16 +149,16 @@ int32 arkrtos_dev_name_at(uint32 idx, char *out, uint32 max)
     uint32 i;
     if(out == 0 || max == 0u)
     {
-        return -1;
+        return ARKRTOS_DEV_ERR_PARAM;
     }
     out[0] = 0;
     if(idx >= (uint32)ARKRTOS_DEV_MAX_NUM)
     {
-        return -1;
+        return ARKRTOS_DEV_ERR_HANDLE;
     }
     if(arkrtos_dev_list[idx].dev_name[0] == 0)
     {
-        return -1;
+        return ARKRTOS_DEV_ERR_STATE;
     }
     for(i = 0; i + 1u < max; i++)
     {
@@ -229,7 +229,7 @@ int32 arkrtos_dev_open_internal(char *name, uint32 param)
             }
         }
     }
-    return -1;
+    return ARKRTOS_DEV_ERR_NOTFOUND;
 }
 
 int32 arkrtos_dev_close_internal(int32 handle)
@@ -237,10 +237,10 @@ int32 arkrtos_dev_close_internal(int32 handle)
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
     if(ARKRTOS_DEV_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
-        return -1;
+        return ARKRTOS_DEV_ERR_HANDLE;
     /* 句柄是槽位下标：合法范围是整个设备表，而不是当前在用数量 */
     if(idx < 0 || idx >= ARKRTOS_DEV_MAX_NUM)
-        return -1;
+        return ARKRTOS_DEV_ERR_HANDLE;
 
 #if ARKRTOS_HW_SAFE
     /* Owner closing normally: withdraw its claim before the refcount logic -
@@ -274,18 +274,18 @@ int32 arkrtos_dev_read_internal(int32 handle, uint8 *pdata, int32 len)
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
     if(ARKRTOS_DEV_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
-        return -1;
+        return ARKRTOS_DEV_ERR_HANDLE;
     /* 句柄是槽位下标：合法范围是整个设备表，而不是当前在用数量 */
     if(idx < 0 || idx >= ARKRTOS_DEV_MAX_NUM)
-        return -1;
+        return ARKRTOS_DEV_ERR_HANDLE;
     if(arkrtos_dev_handles[idx] == 0)
-        return -1;
+        return ARKRTOS_DEV_ERR_STATE;
 
     if(arkrtos_dev_list[idx].drv != 0 && arkrtos_dev_list[idx].drv->drv_read != 0)
     {
         return arkrtos_dev_list[idx].drv->drv_read(arkrtos_dev_handles[idx], pdata, len);
     }
-    return -1;
+    return ARKRTOS_DEV_ERR_NOIMPL;
 }
 
 int32 arkrtos_dev_write_internal(int32 handle, uint8 *pdata, int32 len)
@@ -293,18 +293,18 @@ int32 arkrtos_dev_write_internal(int32 handle, uint8 *pdata, int32 len)
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
     if(ARKRTOS_DEV_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
-        return -1;
+        return ARKRTOS_DEV_ERR_HANDLE;
     /* 句柄是槽位下标：合法范围是整个设备表，而不是当前在用数量 */
     if(idx < 0 || idx >= ARKRTOS_DEV_MAX_NUM)
-        return -1;
+        return ARKRTOS_DEV_ERR_HANDLE;
     if(arkrtos_dev_handles[idx] == 0)
-        return -1;
+        return ARKRTOS_DEV_ERR_STATE;
 
     if(arkrtos_dev_list[idx].drv != 0 && arkrtos_dev_list[idx].drv->drv_write != 0)
     {
         return arkrtos_dev_list[idx].drv->drv_write(arkrtos_dev_handles[idx], pdata, len);
     }
-    return -1;
+    return ARKRTOS_DEV_ERR_NOIMPL;
 }
 
 int32 arkrtos_dev_ctrl_internal(int32 handle, uint32 code, uint32 value)
@@ -312,18 +312,18 @@ int32 arkrtos_dev_ctrl_internal(int32 handle, uint32 code, uint32 value)
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
     if(ARKRTOS_DEV_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
-        return -1;
+        return ARKRTOS_DEV_ERR_HANDLE;
     /* 句柄是槽位下标：合法范围是整个设备表，而不是当前在用数量 */
     if(idx < 0 || idx >= ARKRTOS_DEV_MAX_NUM)
-        return -1;
+        return ARKRTOS_DEV_ERR_HANDLE;
     if(arkrtos_dev_handles[idx] == 0)
-        return -1;
+        return ARKRTOS_DEV_ERR_STATE;
 
     if(arkrtos_dev_list[idx].drv != 0 && arkrtos_dev_list[idx].drv->drv_ctrl != 0)
     {
         return arkrtos_dev_list[idx].drv->drv_ctrl(arkrtos_dev_handles[idx], code, value);
     }
-    return -1;
+    return ARKRTOS_DEV_ERR_NOIMPL;
 }
 
 #if ARKRTOS_HW_SAFE
@@ -336,7 +336,7 @@ int32 arkrtos_dev_ctrl_obj(arkrtos_dev_hdr_t *obj, uint32 code, uint32 value)
 
     if(obj == 0)
     {
-        return -1;
+        return ARKRTOS_DEV_ERR_PARAM;
     }
     for(i = 0; i < ARKRTOS_DEV_MAX_NUM; i++)
     {
@@ -347,9 +347,9 @@ int32 arkrtos_dev_ctrl_obj(arkrtos_dev_hdr_t *obj, uint32 code, uint32 value)
             {
                 return arkrtos_dev_list[i].drv->drv_ctrl(obj, code, value);
             }
-            return -1;                  /* device has no ctrl: say so, do not fake */
+            return ARKRTOS_DEV_ERR_NOIMPL;                  /* device has no ctrl: say so, do not fake */
         }
     }
-    return -1;                          /* instance not in the table any more */
+    return ARKRTOS_DEV_ERR_NOTFOUND;                          /* instance not in the table any more */
 }
 #endif

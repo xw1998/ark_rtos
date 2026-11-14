@@ -51,6 +51,12 @@
  *         not be judged, and pretending to judge it would be a false verdict). */
 #define ARKRTOS_GUARD_MIN_PERIOD_MS   (100u)
 
+/* Return codes. Failures used to be a bare -1; the names below say why.
+ * Values are frozen and several share -1 on purpose - the name only states
+ * the reason, so do not renumber one of them in isolation. */
+#define ARKRTOS_GUARD_ERR_PARAM    (-1)   /* out of range id/index, null output, period too short */
+#define ARKRTOS_GUARD_ERR_DISABLED (-1)   /* heartbeat gating compiled out */
+
 /** @brief One entry of the per-task heartbeat table, as reported to callers */
 typedef struct {
     int32  task_id;         /* 0 when this index has no task */

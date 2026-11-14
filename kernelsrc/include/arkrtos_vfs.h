@@ -60,6 +60,14 @@ extern "C" {
 */
 #define ARKRTOS_VFS_EINVAL     (-2)
 
+/* 门面自身的少数几个 -1 返回（历史遗留）。注意本文件上面两个码是门面契约
+ * （ENOSYS / EINVAL），这三个名字只描述门面自己的失败，**值不得单独修改**
+ * ——把 -1 改成 -2 会让调用方把「没初始化」读成「路径非法」。 */
+#define ARKRTOS_VFS_ERR_DISABLED (-1)   /* ARKRTOS_USE_VFS=0：本构建没有 VFS */
+#define ARKRTOS_VFS_ERR_PARAM    (-1)   /* 输出缓冲/源指针为空，或拷贝放不下 */
+#define ARKRTOS_VFS_ERR_STATE    (-1)   /* 参数为空 或 VFS 尚未初始化 */
+#define ARKRTOS_VFS_ERR_RANGE    (-1)   /* 挂载点下标越界 */
+
 /**
 * @brief 挂载点的一行信息，用于 shell 的 mount 命令
 * @note  fs/source 两个指针指向只读常量，调用者不得释放或改写。

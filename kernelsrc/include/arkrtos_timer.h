@@ -13,6 +13,14 @@
 #include "arkrtos_task.h"
 #include "arkrtos_config.h"
 
+/* 返回值约定：0 成功，负值失败。原先失败处一律写裸 -1，读代码看不出
+ * 「为什么失败」；下面这些名字把原因写进代码，**值不得单独修改**
+ * （多个名字共用 -1 是有意的，分名只为表意）。 */
+#define ARKRTOS_TIMER_ERR_PARAM    (-1)   /* 回调为空 / 周期为 0 / 模式非法 */
+#define ARKRTOS_TIMER_ERR_HANDLE   (-1)   /* 句柄不是定时器（标志位/下标不对） */
+#define ARKRTOS_TIMER_ERR_STATE    (-1)   /* 对象未创建 / 已被删除（used==0） */
+#define ARKRTOS_TIMER_ERR_NOSLOT   (-1)   /* 对象表已满，建不出新定时器 */
+#define ARKRTOS_TIMER_ERR_DISABLED (-1)   /* ARKRTOS_USE_TIMER=0：特性未编入 */
 #if (ARKRTOS_USE_TIMER == 1)
 
 #define ARKRTOS_TIMER_MODE_ONESHOT    0

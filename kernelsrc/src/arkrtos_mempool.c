@@ -112,32 +112,32 @@ int32 arkrtos_mempool_create_internal(const char *name, void *pool,
     /* ---- 参数校验：宁可拒绝，也不建一个"看着能用"的池 ---- */
     if((name == 0) || (name[0] == 0) || (pool == 0))
     {
-        return -1;
+        return ARKRTOS_MEMPOOL_ERR_PARAM;
     }
     if(block_count == 0u)
     {
-        return -1;
+        return ARKRTOS_MEMPOOL_ERR_PARAM;
     }
     /* 空闲链要把 next 存进块里，块必须放得下一个指针 */
     if(block_size < (uint32)sizeof(void *))
     {
-        return -1;
+        return ARKRTOS_MEMPOOL_ERR_PARAM;
     }
     /* 块大小必须按指针宽度对齐，否则 (void**)blk 是非对齐写 */
     if((block_size & ((uint32)sizeof(void *) - 1u)) != 0u)
     {
-        return -1;
+        return ARKRTOS_MEMPOOL_ERR_PARAM;
     }
     /* 池首址也必须对齐：块地址是 base + k*block_size，base 歪了整池都歪 */
     if(((uint32)pool & ((uint32)sizeof(void *) - 1u)) != 0u)
     {
-        return -1;
+        return ARKRTOS_MEMPOOL_ERR_PARAM;
     }
     /* 区大小不许回绕：free() 的边界判断用 block_size*block_count，
      * 这里放过去的话，越界指针会被算成"池内"。 */
     if(block_count > (0xFFFFFFFFu / block_size))
     {
-        return -1;
+        return ARKRTOS_MEMPOOL_ERR_PARAM;
     }
     name_len = 0;
     while((name_len < ARKRTOS_MEMPOOL_NAME_MAX) && (name[name_len] != 0))
@@ -146,7 +146,7 @@ int32 arkrtos_mempool_create_internal(const char *name, void *pool,
     }
     if(name_len >= ARKRTOS_MEMPOOL_NAME_MAX)
     {
-        return -1;
+        return ARKRTOS_MEMPOOL_ERR_PARAM;
     }
 
     state = ARKRTOS_ENTER_CRITICAL();
@@ -157,7 +157,7 @@ int32 arkrtos_mempool_create_internal(const char *name, void *pool,
            (mp_name_eq(arkrtos_mempools[i].name, name) != 0))
         {
             ARKRTOS_EXIT_CRITICAL(state);
-            return -1;                          /* 重名 */
+            return ARKRTOS_MEMPOOL_ERR_DUPLICATE;                          /* 重名 */
         }
     }
 
@@ -171,7 +171,7 @@ int32 arkrtos_mempool_create_internal(const char *name, void *pool,
     if(i >= ARKRTOS_MEMPOOL_NUM)
     {
         ARKRTOS_EXIT_CRITICAL(state);
-        return -1;                              /* 对象表已满 */
+        return ARKRTOS_MEMPOOL_ERR_NOSLOT;                              /* 对象表已满 */
     }
 
     p = &arkrtos_mempools[i];
@@ -243,7 +243,7 @@ int32 arkrtos_mempool_free_internal(int32 handle, void *p_blk)
 
     if((p == 0) || (p_blk == 0))
     {
-        return -1;
+        return ARKRTOS_MEMPOOL_ERR_PARAM;
     }
 
     state = ARKRTOS_ENTER_CRITICAL();
@@ -254,7 +254,7 @@ int32 arkrtos_mempool_free_internal(int32 handle, void *p_blk)
     {
         p->free_bad++;
         ARKRTOS_EXIT_CRITICAL(state);
-        return -1;
+        return ARKRTOS_MEMPOOL_ERR_RANGE;
     }
     off = (uint32)((uint8 *)p_blk - p->base);
     if((off >= (p->block_size * p->block_count)) ||
@@ -262,7 +262,7 @@ int32 arkrtos_mempool_free_internal(int32 handle, void *p_blk)
     {
         p->free_bad++;
         ARKRTOS_EXIT_CRITICAL(state);
-        return -1;                              /* 越界或不对齐：拒绝，池不变 */
+        return ARKRTOS_MEMPOOL_ERR_RANGE;                              /* 越界或不对齐：拒绝，池不变 */
     }
 
     *(void **)p_blk = p->free_list;
@@ -280,7 +280,7 @@ int32 arkrtos_mempool_delete_internal(int32 handle)
 
     if(p == 0)
     {
-        return -1;
+        return ARKRTOS_MEMPOOL_ERR_HANDLE;
     }
 
     state = ARKRTOS_ENTER_CRITICAL();
@@ -331,7 +331,7 @@ int32 arkrtos_mempool_query_internal(int32 handle, arkrtos_mempool_stat_t *out)
 
     if((p == 0) || (out == 0))
     {
-        return -1;
+        return ARKRTOS_MEMPOOL_ERR_PARAM;
     }
 
     for(i = 0; i < ARKRTOS_MEMPOOL_NAME_MAX; i++)
@@ -356,24 +356,24 @@ int32 arkrtos_mempool_create_internal(const char *name, void *pool,
                                       uint32 block_size, uint32 block_count)
 {
     (void)name; (void)pool; (void)block_size; (void)block_count;
-    return -1;
+    return ARKRTOS_MEMPOOL_ERR_DISABLED;
 }
 
 void *arkrtos_mempool_alloc_internal(int32 handle) { (void)handle; return 0; }
 
 int32 arkrtos_mempool_free_internal(int32 handle, void *p)
 {
-    (void)handle; (void)p; return -1;
+    (void)handle; (void)p; return ARKRTOS_MEMPOOL_ERR_DISABLED;
 }
 
-int32 arkrtos_mempool_delete_internal(int32 handle) { (void)handle; return -1; }
+int32 arkrtos_mempool_delete_internal(int32 handle) { (void)handle; return ARKRTOS_MEMPOOL_ERR_DISABLED; }
 
 int32 arkrtos_mempool_is_alive(int32 handle) { (void)handle; return 0; }
 
 /* 关档时快照类型跟着模块一起消失，桩只能用 void* 接 */
 int32 arkrtos_mempool_query_internal(int32 handle, void *out)
 {
-    (void)handle; (void)out; return -1;
+    (void)handle; (void)out; return ARKRTOS_MEMPOOL_ERR_DISABLED;
 }
 
 void  arkrtos_mempool_release_task(int32 task_id) { (void)task_id; }

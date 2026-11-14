@@ -491,7 +491,7 @@ static int32 arkrtos_crash_mini_find(uint32 hash)
         }
     }
 
-    return -1;
+    return ARKRTOS_CRASH_INDEX_NONE;
 }
 
 /* Pick an entry for a path that is not tracked yet: an empty one, else the

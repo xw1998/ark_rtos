@@ -23,7 +23,7 @@ static int32 arkrtos_event_waiter_add(arkrtos_task_t **waiters, arkrtos_task_t *
     {
         if(waiters[j] == p_tsk)
         {
-            return -2;
+            return ARKRTOS_EVENT_WAITER_DUP;
         }
     }
     for(j = 0; j < ARKRTOS_MAX_EVENT_WAITERS; j++)
@@ -34,7 +34,7 @@ static int32 arkrtos_event_waiter_add(arkrtos_task_t **waiters, arkrtos_task_t *
             return 0;
         }
     }
-    return -1;
+    return ARKRTOS_EVENT_ERR_NOSPACE;
 }
 
 static int32 arkrtos_event_waiter_remove(arkrtos_task_t **waiters, arkrtos_task_t *p_tsk)
@@ -48,7 +48,7 @@ static int32 arkrtos_event_waiter_remove(arkrtos_task_t **waiters, arkrtos_task_
             return 0;
         }
     }
-    return -1;
+    return ARKRTOS_EVENT_WAITER_ABSENT;
 }
 
 void arkrtos_event_module_init(void)
@@ -126,7 +126,7 @@ int32 arkrtos_event_create_internal(char *name)
 
     if(name == 0)
     {
-        return -1;
+        return ARKRTOS_EVENT_ERR_PARAM;
     }
 
     ARKRTOS_DISABLE_IRQ();
@@ -158,7 +158,7 @@ int32 arkrtos_event_create_internal(char *name)
 
     if(idx < 0)
     {
-        return -1;
+        return ARKRTOS_EVENT_ERR_NOSLOT;
     }
     return (idx | ARKRTOS_EVENT_HANDLE_FLAG);
 }
@@ -171,9 +171,9 @@ int32 arkrtos_event_wait_internal(int32 event_handle, int32 timeout_ms)
     int32 reason;
 
     if(ARKRTOS_EVENT_HANDLE_FLAG != (event_handle & ARKRTOS_HANDLE_MASK))
-        return -1;
+        return ARKRTOS_EVENT_ERR_HANDLE;
     if(idx >= ARKRTOS_EVENT_NUM || arkrtos_events[idx].used == 0)
-        return -1;
+        return ARKRTOS_EVENT_ERR_STATE;
 
     ARKRTOS_DISABLE_IRQ();
 
@@ -203,7 +203,7 @@ int32 arkrtos_event_wait_internal(int32 event_handle, int32 timeout_ms)
     if(p_tsk == 0)
     {
         ARKRTOS_ENABLE_IRQ();
-        return -1;
+        return ARKRTOS_EVENT_ERR_CONTEXT;
     }
 
     /* 等待队列满时必须报错返回：原先只跳过登记仍然睡下去，
@@ -217,7 +217,7 @@ int32 arkrtos_event_wait_internal(int32 event_handle, int32 timeout_ms)
         if((added < 0) && (added != -2))
         {
             ARKRTOS_ENABLE_IRQ();
-            return -1;                  /* waiter queue is full */
+            return ARKRTOS_EVENT_ERR_NOSPACE;                  /* waiter queue is full */
         }
     }
 
@@ -237,13 +237,13 @@ int32 arkrtos_event_wait_internal(int32 event_handle, int32 timeout_ms)
     {
         (void)arkrtos_event_waiter_remove(arkrtos_events[idx].waiting_tasks, p_tsk);
         ARKRTOS_ENABLE_IRQ();
-        return -1;
+        return ARKRTOS_EVENT_ERR_CONTEXT;
     }
 
     if(reason == ARKRTOS_WAKE_OBJ_DELETED)
     {
         ARKRTOS_ENABLE_IRQ();
-        return -1;
+        return ARKRTOS_EVENT_ERR_DELETED;
     }
 
     if(reason == 1)

@@ -9,6 +9,17 @@
 
 #include "arkrtos_def.h"
 #include "arkrtos_config.h"
+/* 返回值约定：0 成功，负值失败。原先失败处一律写裸 -1/-2，读代码看不出
+ * 「为什么失败」；下面这些名字把原因写进代码，**值不得单独修改**
+ * （多个名字共用同一个值是有意的，分名只为表意）。 */
+#define ARKRTOS_DEV_ERR_PARAM    (-1)   /* 名字/描述符/输出缓冲为空或长度非法 */
+#define ARKRTOS_DEV_ERR_ARG      (-2)   /* 注册时名字或驱动指针为空（历史值是 -2，不得改成 -1） */
+#define ARKRTOS_DEV_ERR_EXIST    (-2)   /* 同名设备已注册（历史值是 -2，不得改成 -1） */
+#define ARKRTOS_DEV_ERR_NOTFOUND (-1)   /* 设备表里没有这个名字 / 驱动缺对应入口 */
+#define ARKRTOS_DEV_ERR_HANDLE   (-1)   /* 句柄不是设备（标志位/槽位下标不对） */
+#define ARKRTOS_DEV_ERR_STATE    (-1)   /* 槽位已注销 / 设备当前没有打开实例 */
+#define ARKRTOS_DEV_ERR_NOIMPL   (-1)   /* 驱动没有实现 read/write/ctrl 中的这一个 */
+#define ARKRTOS_DEV_ERR_NOSLOT   (-1)   /* 设备表已满，注册不进去 */
 
 typedef struct {
     uint32 block_size;

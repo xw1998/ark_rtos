@@ -33,7 +33,7 @@ static int32 blk_index(const arkrtos_blk_dev_t *dev)
 
     if(dev == 0)
     {
-        return -1;
+        return ARKRTOS_BLK_ERR_PARAM;
     }
 
     for(i = 0u; i < g_count; i++)
@@ -44,7 +44,7 @@ static int32 blk_index(const arkrtos_blk_dev_t *dev)
         }
     }
 
-    return -1;
+    return ARKRTOS_BLK_ERR_NOTFOUND;
 }
 
 int32 arkrtos_blk_register(const arkrtos_blk_dev_t *dev)
@@ -54,7 +54,7 @@ int32 arkrtos_blk_register(const arkrtos_blk_dev_t *dev)
     if((dev == 0) || (dev->name == 0) ||
        (dev->read == 0) || (dev->write == 0) || (dev->erase == 0))
     {
-        return -1;
+        return ARKRTOS_BLK_ERR_PARAM;
     }
 
     while((dev->name[n] != '\0') && (n < ARKRTOS_BLK_NAME_MAX))
@@ -64,19 +64,19 @@ int32 arkrtos_blk_register(const arkrtos_blk_dev_t *dev)
 
     if((n == 0u) || (n >= ARKRTOS_BLK_NAME_MAX))
     {
-        return -1;
+        return ARKRTOS_BLK_ERR_PARAM;
     }
 
     /* Registering the same descriptor twice is a caller mistake that would
      * make arkrtos_blk_find() order-dependent; refuse it instead. */
     if(blk_index(dev) >= 0)
     {
-        return -1;
+        return ARKRTOS_BLK_ERR_EXIST;
     }
 
     if(g_count >= ARKRTOS_BLK_MAX_DEVS)
     {
-        return -1;
+        return ARKRTOS_BLK_ERR_NOSLOT;
     }
 
     g_dev[g_count]   = dev;
@@ -145,7 +145,7 @@ int32 arkrtos_blk_init(const arkrtos_blk_dev_t *dev)
 
     if(idx < 0)
     {
-        return -1;
+        return ARKRTOS_BLK_ERR_NOTFOUND;
     }
 
     if(g_ready[idx] != 0u)
@@ -157,7 +157,7 @@ int32 arkrtos_blk_init(const arkrtos_blk_dev_t *dev)
     {
         if(dev->bringup() != 0)
         {
-            return -1;
+            return ARKRTOS_BLK_ERR_BRINGUP;
         }
     }
 
@@ -165,17 +165,17 @@ int32 arkrtos_blk_init(const arkrtos_blk_dev_t *dev)
      * range checks below would accept nothing (or, worse, everything). */
     if((dev->size == 0u) && (dev->size_fn == 0))
     {
-        return -1;
+        return ARKRTOS_BLK_ERR_DESC;
     }
 
     if(arkrtos_blk_size(dev) == 0u)
     {
-        return -1;
+        return ARKRTOS_BLK_ERR_SIZE;
     }
 
     if((dev->erase_unit == 0u) || ((dev->erase_unit & (dev->erase_unit - 1u)) != 0u))
     {
-        return -1;
+        return ARKRTOS_BLK_ERR_PARAM;
     }
 
     g_ready[idx] = 1u;
@@ -225,26 +225,26 @@ static int32 blk_check(const arkrtos_blk_dev_t *dev, uint32 off, uint32 len, uin
 
     if((dev == 0) || (arkrtos_blk_is_ready(dev) == 0u))
     {
-        return -1;
+        return ARKRTOS_BLK_ERR_NOTREADY;
     }
 
     if(len == 0u)
     {
-        return -1;
+        return ARKRTOS_BLK_ERR_PARAM;
     }
 
     size = arkrtos_blk_size(dev);
 
     if((len > size) || (off > (size - len)))
     {
-        return -1;
+        return ARKRTOS_BLK_ERR_RANGE;
     }
 
     if(align != 0u)
     {
         if(((off % align) != 0u) || ((len % align) != 0u))
         {
-            return -1;
+            return ARKRTOS_BLK_ERR_ALIGN;
         }
     }
 
@@ -255,12 +255,12 @@ int32 arkrtos_blk_read(const arkrtos_blk_dev_t *dev, uint32 off, uint8 *buf, uin
 {
     if(buf == 0)
     {
-        return -1;
+        return ARKRTOS_BLK_ERR_PARAM;
     }
 
     if(blk_check(dev, off, len, 0u) != 0)
     {
-        return -1;
+        return ARKRTOS_BLK_ERR_CHECK;
     }
 
     return dev->read(off, buf, len);
@@ -270,12 +270,12 @@ int32 arkrtos_blk_write(const arkrtos_blk_dev_t *dev, uint32 off, const uint8 *b
 {
     if(buf == 0)
     {
-        return -1;
+        return ARKRTOS_BLK_ERR_PARAM;
     }
 
     if(blk_check(dev, off, len, 0u) != 0)
     {
-        return -1;
+        return ARKRTOS_BLK_ERR_CHECK;
     }
 
     return dev->write(off, buf, len);
@@ -285,12 +285,12 @@ int32 arkrtos_blk_erase(const arkrtos_blk_dev_t *dev, uint32 off, uint32 len)
 {
     if(dev == 0)
     {
-        return -1;
+        return ARKRTOS_BLK_ERR_PARAM;
     }
 
     if(blk_check(dev, off, len, dev->erase_unit) != 0)
     {
-        return -1;
+        return ARKRTOS_BLK_ERR_CHECK;
     }
 
     return dev->erase(off, len);
@@ -304,7 +304,7 @@ int32 arkrtos_blk_erase(const arkrtos_blk_dev_t *dev, uint32 off, uint32 len)
 int32 arkrtos_blk_register(const arkrtos_blk_dev_t *dev)
 {
     (void)dev;
-    return -1;
+    return ARKRTOS_BLK_ERR_DISABLED;
 }
 
 uint32 arkrtos_blk_count(void)
@@ -327,7 +327,7 @@ const arkrtos_blk_dev_t *arkrtos_blk_find(const char *name)
 int32 arkrtos_blk_init(const arkrtos_blk_dev_t *dev)
 {
     (void)dev;
-    return -1;
+    return ARKRTOS_BLK_ERR_DISABLED;
 }
 
 uint8 arkrtos_blk_is_ready(const arkrtos_blk_dev_t *dev)
@@ -348,7 +348,7 @@ int32 arkrtos_blk_read(const arkrtos_blk_dev_t *dev, uint32 off, uint8 *buf, uin
     (void)off;
     (void)buf;
     (void)len;
-    return -1;
+    return ARKRTOS_BLK_ERR_DISABLED;
 }
 
 int32 arkrtos_blk_write(const arkrtos_blk_dev_t *dev, uint32 off, const uint8 *buf, uint32 len)
@@ -357,7 +357,7 @@ int32 arkrtos_blk_write(const arkrtos_blk_dev_t *dev, uint32 off, const uint8 *b
     (void)off;
     (void)buf;
     (void)len;
-    return -1;
+    return ARKRTOS_BLK_ERR_DISABLED;
 }
 
 int32 arkrtos_blk_erase(const arkrtos_blk_dev_t *dev, uint32 off, uint32 len)
@@ -365,6 +365,6 @@ int32 arkrtos_blk_erase(const arkrtos_blk_dev_t *dev, uint32 off, uint32 len)
     (void)dev;
     (void)off;
     (void)len;
-    return -1;
+    return ARKRTOS_BLK_ERR_DISABLED;
 }
 #endif /* ARKRTOS_USE_BLK */

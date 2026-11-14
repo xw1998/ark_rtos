@@ -60,6 +60,11 @@
 #define ARKRTOS_CRASH_REASON_HEARTBEAT (2u)  /* stopped honouring its heartbeat contract */
 #define ARKRTOS_CRASH_REASON_AUDIT    (3u)   /* structure self-audit failed while it ran */
 
+/* Internal lookup result: "this entry is not in the table". Not an error
+ * code and not returned to callers - it is the index sentinel of
+ * arkrtos_crash_mini_find(). */
+#define ARKRTOS_CRASH_INDEX_NONE   (-1)
+
 /* ---- MiniApps (arkrtos_mini.c) -------------------------------------------------
  * A MiniApp has no slot and no pool address, so the identity used for slots does
  * not apply. Its identity is the FNV-1a hash of the image path inside the file

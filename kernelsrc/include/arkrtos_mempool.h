@@ -37,6 +37,15 @@
 /* 快照结构与池名长度直接复用应用侧公开头文件，避免"两份定义悄悄跑偏"
  * 导致 SVC 回填的统计数字错位。 */
 #include "arkrtos.h"
+/* 返回值约定：0 成功，负值失败。原先失败处一律写裸 -1，读代码看不出
+ * 「为什么失败」；下面这些名字把原因写进代码，**值不得单独修改**
+ * （多个名字共用 -1 是有意的，分名只为表意）。 */
+#define ARKRTOS_MEMPOOL_ERR_PARAM     (-1)   /* 参数非法（空指针/块数 0/块过大/未对齐/名字超长） */
+#define ARKRTOS_MEMPOOL_ERR_RANGE     (-1)   /* free() 的指针不在本池内或未按块对齐（池状态不变） */
+#define ARKRTOS_MEMPOOL_ERR_HANDLE    (-1)   /* 句柄非法（mp_get 取不到活着的池） */
+#define ARKRTOS_MEMPOOL_ERR_DUPLICATE (-1)   /* 池名重复 */
+#define ARKRTOS_MEMPOOL_ERR_NOSLOT    (-1)   /* 对象表已满，建不出新池 */
+#define ARKRTOS_MEMPOOL_ERR_DISABLED  (-1)   /* ARKRTOS_USE_MEMPOOL=0：特性未编入 */
 
 #if (ARKRTOS_USE_MEMPOOL == 1)
 

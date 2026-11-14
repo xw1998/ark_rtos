@@ -201,11 +201,11 @@ static int32 sb_build(void)
 
     if(ark_bus_start(&g_node, SB_NODE_ID, SB_NODE_TYPE, ARK_CAP_MCU_EDGE) < 0)
     {
-        return -1;
+        return ARKRTOS_SOFTBUS_ERR_INIT;
     }
     if(ark_bus_start(&g_peer, SB_PEER_ID, SB_PEER_TYPE, ARK_CAP_ACTUATOR) < 0)
     {
-        return -1;
+        return ARKRTOS_SOFTBUS_ERR_INIT;
     }
 
     g_up = 1u;
@@ -228,7 +228,7 @@ int32 arkrtos_softbus_pump(uint32 rounds)
 
     if(g_up == 0u)
     {
-        return -1;
+        return ARKRTOS_SOFTBUS_ERR_NOTUP;
     }
     if(rounds == 0u)
     {
@@ -256,7 +256,7 @@ int32 arkrtos_softbus_info(void)
         if(arkrtos_softbus_init() != 0)
         {
             ark_shell_printf("softbus: init failed\r\n");
-            return -1;
+            return ARKRTOS_SOFTBUS_ERR_INIT;
         }
     }
 
@@ -636,7 +636,7 @@ static int sb_parse_u32(const char *s, uint32 *out)
 
     if((s == NULL) || (out == NULL))
     {
-        return -1;
+        return ARKRTOS_SOFTBUS_ERR_PARAM;
     }
     while((*s == ' ') || (*s == '\t'))
     {
@@ -648,7 +648,7 @@ static int sb_parse_u32(const char *s, uint32 *out)
 
         if(v > ((0xFFFFFFFFu - d) / 10u))
         {
-            return -1;
+            return ARKRTOS_SOFTBUS_ERR_PARSE;
         }
         v = v * 10u + d;
         any = 1;
@@ -656,7 +656,7 @@ static int sb_parse_u32(const char *s, uint32 *out)
     }
     if(any == 0)
     {
-        return -1;
+        return ARKRTOS_SOFTBUS_ERR_PARSE;
     }
     *out = v;
     return 0;
@@ -675,14 +675,14 @@ static int sb_cmd_pub(int argc, char *argv[])
     if(argc < 4)
     {
         sb_usage();
-        return -1;
+        return ARKRTOS_SOFTBUS_ERR_USAGE;
     }
 
     /* 让对端先订阅这个主题，任何主题名都能被观察到（没有通配订阅）。 */
     if(ark_bus_subscribe(&g_peer, argv[2], sb_peer_on_msg, NULL) < 0)
     {
         ark_shell_printf("bus pub: peer subscribe failed (topic table full?)\r\n");
-        return -1;
+        return ARKRTOS_SOFTBUS_ERR_SUBSCRIBE;
     }
 
     g_peer_msgs = 0u;
@@ -690,7 +690,7 @@ static int sb_cmd_pub(int argc, char *argv[])
     if(rc <= 0)
     {
         ark_shell_printf("bus pub: publish failed (%d)\r\n", rc);
-        return -1;
+        return ARKRTOS_SOFTBUS_ERR_PUBLISH;
     }
 
     (void)arkrtos_softbus_pump(4u);
@@ -708,7 +708,7 @@ static int sb_cmd_rpc(int argc, char *argv[])
     if(argc < 3)
     {
         sb_usage();
-        return -1;
+        return ARKRTOS_SOFTBUS_ERR_USAGE;
     }
 
     g_node_rpc_calls = 0u;
@@ -720,7 +720,7 @@ static int sb_cmd_rpc(int argc, char *argv[])
                            sb_node_on_rpc, NULL) <= 0)
     {
         ark_shell_printf("bus rpc: request failed\r\n");
-        return -1;
+        return ARKRTOS_SOFTBUS_ERR_RPC;
     }
 
     for(guard = 0u; (guard < 20u) && (g_node_rpc_calls == 0u); guard++)
@@ -732,7 +732,7 @@ static int sb_cmd_rpc(int argc, char *argv[])
     {
         ark_shell_printf("bus rpc: no reply (peer handler=%u)\r\n",
                          (unsigned)g_peer_rpc_calls);
-        return -1;
+        return ARKRTOS_SOFTBUS_ERR_NOREPLY;
     }
 
     ark_shell_printf("bus rpc: status=%d result_len=%u result=\"%s\"\r\n",
@@ -779,7 +779,7 @@ static int sb_cmd_stream(int argc, char *argv[])
     {
         ark_shell_printf("bus stream: send refused (%u B > %u?)\r\n",
                          (unsigned)n, (unsigned)ARK_BUS_STREAM_MAX_BYTES);
-        return -1;
+        return ARKRTOS_SOFTBUS_ERR_STREAM;
     }
 
     for(guard = 0u; (guard < 200u) && (g_node_stream_done == 0u); guard++)
@@ -807,7 +807,7 @@ int arkrtos_softbus_shell_cmd(int argc, char **argv)
         if(arkrtos_softbus_init() != 0)
         {
             ark_shell_printf("softbus: init failed\r\n");
-            return -1;
+            return ARKRTOS_SOFTBUS_ERR_INIT;
         }
     }
 
@@ -882,7 +882,7 @@ int arkrtos_softbus_shell_cmd(int argc, char **argv)
     }
 
     sb_usage();
-    return -1;
+    return ARKRTOS_SOFTBUS_ERR_USAGE;
 }
 
 #endif /* ARKRTOS_USE_SOFTBUS */

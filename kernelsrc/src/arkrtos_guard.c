@@ -152,7 +152,7 @@ int32 arkrtos_guard_beat(int32 task_id, uint32 period_ms)
 
     if((task_id <= 0) || (task_id > ARKRTOS_TASK_MAX_NUM))
     {
-        return -1;
+        return ARKRTOS_GUARD_ERR_PARAM;
     }
 
     if((period_ms != 0u) && (period_ms < ARKRTOS_GUARD_MIN_PERIOD_MS))
@@ -160,7 +160,7 @@ int32 arkrtos_guard_beat(int32 task_id, uint32 period_ms)
         /* Refuse rather than accept a contract that cannot be checked: a
          * window shorter than the service period would be judged by sampling,
          * which produces verdicts that are not evidence. */
-        return -1;
+        return ARKRTOS_GUARD_ERR_PARAM;
     }
 
     now = arkrtos_kernel_get_tick();
@@ -376,7 +376,7 @@ int32 arkrtos_guard_task_at(uint32 idx, arkrtos_guard_task_t *p_out)
 
     if((p_out == 0) || (idx >= (uint32)ARKRTOS_TASK_MAX_NUM))
     {
-        return -1;
+        return ARKRTOS_GUARD_ERR_PARAM;
     }
 
     id = (int32)(idx + 1u);
@@ -431,7 +431,7 @@ int32 arkrtos_guard_beat(int32 task_id, uint32 period_ms)
 {
     (void)task_id;
     (void)period_ms;
-    return -1;
+    return ARKRTOS_GUARD_ERR_DISABLED;
 }
 
 void arkrtos_guard_status(arkrtos_guard_status_t *p_out)
@@ -446,7 +446,7 @@ int32 arkrtos_guard_task_at(uint32 idx, arkrtos_guard_task_t *p_out)
 {
     (void)idx;
     (void)p_out;
-    return -1;
+    return ARKRTOS_GUARD_ERR_DISABLED;
 }
 
 uint32 arkrtos_guard_task_slots(void)

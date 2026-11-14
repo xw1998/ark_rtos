@@ -30,7 +30,7 @@
 - [kernelsrc/include/arkrtos_net.h](#kernelsrcincludearkrtos_neth)（6 项）
 - [kernelsrc/include/arkrtos_ptable.h](#kernelsrcincludearkrtos_ptableh)（23 项）
 - [kernelsrc/include/arkrtos_rt.h](#kernelsrcincludearkrtos_rth)（13 项）
-- [kernelsrc/include/arkrtos_sec.h](#kernelsrcincludearkrtos_sech)（7 项）
+- [kernelsrc/include/arkrtos_sec.h](#kernelsrcincludearkrtos_sech)（8 项）
 - [kernelsrc/include/arkrtos_share.h](#kernelsrcincludearkrtos_shareh)（7 项）
 - [kernelsrc/include/arkrtos_shell.h](#kernelsrcincludearkrtos_shellh)（9 项）
 - [kernelsrc/include/arkrtos_sign.h](#kernelsrcincludearkrtos_signh)（5 项）
@@ -4824,6 +4824,16 @@ int32  arkrtos_rt_last_error(void);
 ```
 
 **单项结论 */**
+
+### `#define ARKRTOS_SEC_ERR_NO_PORT     (-1)`
+
+```c
+#define ARKRTOS_SEC_ERR_NO_PORT     (-1)
+```
+
+**板级弱符号的返回值：本板没有实现这条自查通路（不是"检查通过"）。**
+与上面的 PASS/FAIL/FINDING/SKIP 是两套语义：那是检查结果，这是
+「根本没有读数」。值不得单独修改。 */
 
 ### `typedef struct {`
 

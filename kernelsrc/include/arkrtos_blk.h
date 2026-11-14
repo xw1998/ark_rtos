@@ -45,6 +45,23 @@ extern "C" {
 /** How many backends a build can carry. Raise here, not at the call sites. */
 #define ARKRTOS_BLK_MAX_DEVS   (4u)
 
+/* Return codes of this layer. Every failure used to be a bare -1, which
+ * leaves the caller unable to tell "not registered" from "out of range".
+ * The values are frozen: several names share -1 on purpose, the name only
+ * states the reason. Do not renumber one of them in isolation. */
+#define ARKRTOS_BLK_ERR_PARAM     (-1)   /* null pointer / empty name / zero length */
+#define ARKRTOS_BLK_ERR_NOTFOUND  (-1)   /* descriptor is not registered */
+#define ARKRTOS_BLK_ERR_EXIST     (-1)   /* descriptor registered twice */
+#define ARKRTOS_BLK_ERR_NOSLOT    (-1)   /* registry table is full */
+#define ARKRTOS_BLK_ERR_BRINGUP   (-1)   /* the backend's bringup() failed */
+#define ARKRTOS_BLK_ERR_DESC      (-1)   /* descriptor cannot answer its size */
+#define ARKRTOS_BLK_ERR_SIZE      (-1)   /* reported size is 0 */
+#define ARKRTOS_BLK_ERR_NOTREADY  (-1)   /* arkrtos_blk_init() has not succeeded */
+#define ARKRTOS_BLK_ERR_RANGE     (-1)   /* off/len outside the device */
+#define ARKRTOS_BLK_ERR_ALIGN     (-1)   /* off/len not a multiple of erase_unit */
+#define ARKRTOS_BLK_ERR_CHECK     (-1)   /* refused by blk_check(), see its branches */
+#define ARKRTOS_BLK_ERR_DISABLED  (-1)   /* ARKRTOS_USE_BLK=0: layer not compiled in */
+
 /**
  * @brief One storage backend.
  * @note  Every function pointer except read/write/erase is optional. The

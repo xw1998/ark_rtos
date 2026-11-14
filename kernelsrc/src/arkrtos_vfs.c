@@ -58,7 +58,7 @@ int32 arkrtos_vfs_mount_info(uint32 idx, arkrtos_vfs_mount_info_t *out)
         out->source = NULL;
         out->ro     = 0u;
     }
-    return -1;
+    return ARKRTOS_VFS_ERR_DISABLED;
 }
 
 int32 arkrtos_vfs_mount_count(void) { return 0; }
@@ -291,7 +291,7 @@ static char  g_vol_target[ARKRTOS_VFS_PATH_MAX];   /* 空串=没有持久卷 */
 static int p_copy(char *dst, uint32 cap, const char *src)
 {
     uint32 i = 0u;
-    if ((dst == NULL) || (src == NULL) || (cap == 0u)) { return -1; }
+    if ((dst == NULL) || (src == NULL) || (cap == 0u)) { return ARKRTOS_VFS_ERR_PARAM; }
     while ((src[i] != '\0') && ((i + 1u) < cap))
     {
         dst[i] = src[i];
@@ -517,15 +517,15 @@ int32 arkrtos_vfs_mount_info(uint32 idx, arkrtos_vfs_mount_info_t *out)
     struct ark_vfs_mnt *m = NULL;
     uint32 i;
 
-    if ((out == NULL) || (g_vfs_ready == 0u)) { return -1; }
+    if ((out == NULL) || (g_vfs_ready == 0u)) { return ARKRTOS_VFS_ERR_STATE; }
     for (i = 0u; i <= idx; i++)
     {
         m = ark_vfs_next_mount(m);
-        if (m == NULL) { return -1; }
+        if (m == NULL) { return ARKRTOS_VFS_ERR_RANGE; }
     }
     if (p_copy(out->target, (uint32)sizeof(out->target), m->target) != 0)
     {
-        return -1;
+        return ARKRTOS_VFS_ERR_PARAM;
     }
     out->fs     = (m->fs != NULL) ? m->fs->name : "?";
     out->source = m->be != NULL ? m->be->name : NULL;

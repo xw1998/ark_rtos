@@ -346,7 +346,7 @@ static void sec_check_console(arkrtos_sec_report_t *p_rep)
 __attribute__((weak)) int32 arkrtos_port_flash_protection(arkrtos_flash_prot_t *p_out)
 {
     (void)p_out;
-    return -1;
+    return ARKRTOS_SEC_ERR_NO_PORT;
 }
 
 static void sec_check_flash_protection(arkrtos_sec_report_t *p_rep)
