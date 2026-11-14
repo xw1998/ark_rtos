@@ -86,6 +86,14 @@ static void use_task(int idx, uint8 prio)
     arkrtos_current_task_id = idx + 1;
 }
 
+#if defined(ARKRTOS_SYNC_HOST_TEST)
+/* 宿主上直接摆出等待关系：阻塞路径要真调度器，宿主拿不到，
+ * 但链式继承的判定只依赖「谁持有哪把锁、谁在等谁」这张图。 */
+extern arkrtos_mtx_obj_t arkrtos_mtxs[ARKRTOS_MTX_NUM];
+void arkrtos_mtx_propagate(void);
+void arkrtos_mtx_recalc_priority(int32 idx);
+#endif
+
 int main(void)
 {
     int32 sem;
@@ -184,6 +192,53 @@ int main(void)
     check(arkrtos_mtx_lock_internal(mtx, 0) == -1, "lock on a deleted mutex is rejected");
     check(arkrtos_mtx_unlock_internal(mtx) == -1, "unlock on a deleted mutex is rejected");
     check(arkrtos_mtx_delete_internal(mtx) == -1, "deleting it twice is rejected");
+
+#if defined(ARKRTOS_SYNC_HOST_TEST)
+    /* ============ 多级优先级继承（链式传播） ============
+     * 图：A(3) 等 L1（B(5) 持有），B 又在等 L2（C(7) 持有）。
+     * 只提升一层的话 C 仍停在 7，A 就还在等一个被 B 挡住的锁；
+     * 正确结果是最低优先级 3 沿链传到 C。 */
+    {
+        int32 l1, l2;
+        int32 i1, i2;
+
+        use_task(0, 3);      /* A：最高优先级（数值最小） */
+        use_task(1, 5);      /* B：中间 */
+        use_task(2, 7);      /* C：最低 */
+
+        l1 = arkrtos_mtx_create_internal("l1");
+        l2 = arkrtos_mtx_create_internal("l2");
+        check(l1 >= 0 && l2 >= 0, "both chain mutexes are created");
+        i1 = l1 & ARKRTOS_HANDLE_RELMASK;
+        i2 = l2 & ARKRTOS_HANDLE_RELMASK;
+
+        arkrtos_mtxs[i1].owner         = &arkrtos_task_table[1];
+        arkrtos_mtxs[i1].orig_priority = arkrtos_task_table[1].priority;
+        arkrtos_mtxs[i2].owner         = &arkrtos_task_table[2];
+        arkrtos_mtxs[i2].orig_priority = arkrtos_task_table[2].priority;
+        arkrtos_mtxs[i1].waiters[0]    = &arkrtos_task_table[0];   /* A 等 L1 */
+        arkrtos_mtxs[i2].waiters[0]    = &arkrtos_task_table[1];   /* B 等 L2 */
+
+        arkrtos_mtx_recalc_priority(-1);
+
+        check(arkrtos_task_table[1].priority == 3,
+              "the direct owner inherits the highest waiter priority");
+        check(arkrtos_task_table[2].priority == 3,
+              "the second-level owner inherits too (chain, not one hop)");
+
+        /* 拆掉等待关系：必须整体回到基准，不能滞留在被提升的优先级上 */
+        arkrtos_mtxs[i1].waiters[0] = 0;
+        arkrtos_mtxs[i2].waiters[0] = 0;
+        arkrtos_mtx_recalc_priority(-1);
+        check(arkrtos_task_table[1].priority == 5, "dropping the waiter restores B to its base priority");
+        check(arkrtos_task_table[2].priority == 7, "and C too (no permanent boost)");
+
+        arkrtos_mtxs[i1].owner = 0;
+        arkrtos_mtxs[i2].owner = 0;
+        (void)arkrtos_mtx_delete_internal(l1);
+        (void)arkrtos_mtx_delete_internal(l2);
+    }
+#endif /* ARKRTOS_SYNC_HOST_TEST */
 
 #if (ARKRTOS_USE_MTX_RECURSIVE == 1)
     /* ============ 递归互斥锁（ARKRTOS_USE_MTX_RECURSIVE=1） ============ */

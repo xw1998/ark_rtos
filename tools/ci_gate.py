@@ -765,7 +765,7 @@ def check_sync_host():
         cmd = [cc]
         if "mingw" in cc.replace("\\", "/").lower():
             cmd.append("-B" + os.path.dirname(cc))
-        cmd += ["-std=gnu11", "-DARKRTOS_USE_MTX_RECURSIVE=1",
+        cmd += ["-std=gnu11", "-DARKRTOS_USE_MTX_RECURSIVE=1", "-DARKRTOS_SYNC_HOST_TEST",
                 "-Ikernelsrc/include", "-Ikernelsrc/components/mdk_trace",
                 "-Iboard/stm32f427", "-Iconfig", "-o", exe,
                 "kernelsrc/tests/test_sync_host.c", "kernelsrc/src/arkrtos_sync.c"]

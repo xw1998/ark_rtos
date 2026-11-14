@@ -18,7 +18,13 @@
 #include "arkrtos_trace.h"     /* kernel auto hooks: object waits/wakes as sync records */
 
 static arkrtos_sem_obj_t arkrtos_sems[ARKRTOS_SEM_NUM];
-static arkrtos_mtx_obj_t arkrtos_mtxs[ARKRTOS_MTX_NUM];
+#if defined(ARKRTOS_SYNC_HOST_TEST)
+#define ARKRTOS_SYNC_STATIC        /* 宿主测试要直接摆等待关系，不藏对象表 */
+#else
+#define ARKRTOS_SYNC_STATIC static
+#endif
+
+ARKRTOS_SYNC_STATIC arkrtos_mtx_obj_t arkrtos_mtxs[ARKRTOS_MTX_NUM];
 static arkrtos_cond_obj_t arkrtos_conds[ARKRTOS_COND_NUM];
 
 /* Token-conservation diagnostics.  Both counters are only incremented on
@@ -345,10 +351,7 @@ static int32 arkrtos_waiters_remove(arkrtos_task_t **waiters, arkrtos_task_t *p_
     return ARKRTOS_SYNC_ERR_NOTFOUND;
 }
 
-/* 按该锁当前的等待者重算持锁者优先级，用于撤销优先级继承提升
- * （超时退出、等待队列满加锁失败等“等待者消失”的场景）。
- * 取持锁者原始优先级与所有等待者优先级中的最高者（数值最小）。
- * @note 多把锁嵌套时的优先级恢复仍不完善（见 docs 中的遗留问题清单）。 */
+
 /* 按“基准优先级 + 该任务持有的所有互斥锁的等待者”重算有效优先级。
  * 基准优先级（base_priority）在任务创建后不再变化，因此不会出现
  * “把被提升后的值当成原始值”导致永久提权的问题；
@@ -396,7 +399,7 @@ static void arkrtos_mtx_recalc_task_priority(arkrtos_task_t *p_tsk)
  * A(高) 等 B 持有的锁，而 B 又在等 C 持有的锁时，C 也必须继承 A 的优先级，
  * 否则“优先级反转”只被消掉一层。多轮迭代直到不再变化即收敛
  * （优先级只会向更高处单调收敛，等待关系有限，必然终止）。 */
-static void arkrtos_mtx_propagate(void)
+ARKRTOS_SYNC_STATIC void arkrtos_mtx_propagate(void)
 {
     int32 round, i, j, changed;
 
@@ -446,7 +449,7 @@ static void arkrtos_mtx_propagate(void)
  * 链式提升会把优先级传递给链上的中间持有者（T1 等 T2 的 M1、T2 又在等
  * T3 的 M2 时 T3 也会被提升），只重算 T2 会让 T3 永久滞留在被提升的优先级。
  * 全量重算先把所有人拉回基准，再按当前等待关系重新建立合法的继承。 */
-static void arkrtos_mtx_recalc_priority(int32 idx)
+ARKRTOS_SYNC_STATIC void arkrtos_mtx_recalc_priority(int32 idx)
 {
     int32 i;
 
