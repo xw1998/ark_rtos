@@ -34,6 +34,8 @@
 #include "arkrtos_sbuf.h"
 #include "arkrtos_audit.h"
 #include "arkrtos_waitmulti.h"
+#include "arkrtos_task.h"
+#include "arkrtos_cfg.h"
 
 /* ============================================================
  * 固定块内存池
@@ -614,5 +616,127 @@ UTEST_CASE(waitq_capacity_contract)
 }
 
 #endif /* ARKRTOS_USE_WAIT_UNBOUNDED */
+
+/* ============================================================
+ * 多级优先级继承（链式传播，真任务版）
+ * 契约：A 等 L1（B 持有），B 又在等 L2（C 持有）⇒ 优先级必须沿链传到 C，
+ *       只提一层的话 C 停在原地，A 仍在等一个被 B 挡住的锁。
+ *
+ * 板上怎么造这条链：控制台任务自己当链底 C——它先持有 L1；再注册两个优先级
+ * 更高的任务，MID 拿住 L2 后去等 L1（控制台的优先级这时被提到 MID 的档），
+ * HIGH 去等 L2（MID 被提到 HIGH 的档，并且这条提升必须沿链继续传到控制台）。
+ * 所以「控制台的有效优先级 == HIGH 的档」就是「链传了两跳」的直接读数：
+ * 只提一层的实现会停在 MID 的档。
+ *
+ * 这是本文件里唯一会睡一下的用例（每次几毫秒，加两条有界等待）：不睡的话
+ * 更高优先级的任务根本没机会跑起来把链搭起来。所有等待都带超时，坏掉时是
+ * 几百毫秒内报红，不会把控制台挂死。
+ * ============================================================ */
+#define PI_CHAIN_GAP         4u     /* 相邻两档之间留的优先级差 */
+#define PI_CHAIN_STACK_WORDS 128u   /* 512 B：这些任务只调几个内核函数 */
+
+static uint32 s_pi_chain_stack_mid[PI_CHAIN_STACK_WORDS];
+static uint32 s_pi_chain_stack_high[PI_CHAIN_STACK_WORDS];
+
+static int32 s_pi_chain_l1   = -1;
+static int32 s_pi_chain_l2   = -1;
+static int32 s_pi_chain_done = -1;
+
+/* 链中间那一环：先拿住 L2，再去等控制台手里的 L1，放完两把锁后退场。 */
+static void pi_chain_mid_entry(void)
+{
+    if(arkrtos_mtx_lock_internal(s_pi_chain_l2, 0) == 0)
+    {
+        if(arkrtos_mtx_lock_internal(s_pi_chain_l1, 300) == 0)
+        {
+            /* 先放 L1：HIGH 正是在这把锁上等的，它要先醒过来 */
+            (void)arkrtos_mtx_unlock_internal(s_pi_chain_l1);
+        }
+        (void)arkrtos_mtx_unlock_internal(s_pi_chain_l2);
+    }
+    (void)arkrtos_sem_post_internal(s_pi_chain_done);
+    arkrtos_task_kill_internal();
+}
+
+/* 链顶：等 L2，拿到即放，然后退场。 */
+static void pi_chain_high_entry(void)
+{
+    if(arkrtos_mtx_lock_internal(s_pi_chain_l2, 300) == 0)
+    {
+        (void)arkrtos_mtx_unlock_internal(s_pi_chain_l2);
+    }
+    (void)arkrtos_sem_post_internal(s_pi_chain_done);
+    arkrtos_task_kill_internal();
+}
+
+UTEST_CASE(mtx_pi_chain_contract)
+{
+    arkrtos_task_t *p_self = arkrtos_task_get_current();
+    uint8 base;
+    uint8 mid_prio;
+    uint8 high_prio;
+    int32 mid_id;
+    int32 high_id;
+
+    UTEST_REQUIRE(p_self != 0);
+
+    /* 链要三档：控制台、MID、HIGH。优先级空间不够就明说跳过，不假通过。 */
+    base = p_self->base_priority;
+    if((uint32)base < (2u * PI_CHAIN_GAP + 1u))
+    {
+        UTEST_SKIP("console priority too low to build a 3-level chain");
+    }
+    mid_prio  = (uint8)((uint32)base - PI_CHAIN_GAP);
+    high_prio = (uint8)((uint32)base - (2u * PI_CHAIN_GAP));
+
+    s_pi_chain_l1   = arkrtos_mtx_create_internal("utpi1");
+    s_pi_chain_l2   = arkrtos_mtx_create_internal("utpi2");
+    s_pi_chain_done = arkrtos_sem_create_internal("utpid", 0);
+    UTEST_REQUIRE((s_pi_chain_l1 >= 0) && (s_pi_chain_l2 >= 0) &&
+                  (s_pi_chain_done >= 0));
+
+    /* 控制台当链底：先拿住 L1；此刻它的有效优先级就是基准值 */
+    UTEST_REQUIRE(arkrtos_mtx_lock_internal(s_pi_chain_l1, 0) == 0);
+    UTEST_CHECK_EQ(p_self->priority, base);
+
+    /* ① 注册 MID：它一上来自带抢占，拿住 L2，然后卡在 L1 上 */
+    mid_id = arkrtos_task_register(pi_chain_mid_entry, s_pi_chain_stack_mid,
+                                   (uint32)sizeof(s_pi_chain_stack_mid),
+                                   mid_prio, 0u);
+    UTEST_REQUIRE(mid_id > 0);
+    arkrtos_task_wait_internal(5u);
+
+    /* 一跳：控制台被提到 MID 的档，基准值一个字不动 */
+    UTEST_CHECK_EQ(p_self->priority, mid_prio);
+    UTEST_CHECK_EQ(p_self->base_priority, base);
+
+    /* ② 注册 HIGH：它等 L2 ⇒ MID 继承 HIGH 的档，而且必须继续沿链传到控制台 */
+    high_id = arkrtos_task_register(pi_chain_high_entry, s_pi_chain_stack_high,
+                                    (uint32)sizeof(s_pi_chain_stack_high),
+                                    high_prio, 0u);
+    UTEST_REQUIRE(high_id > 0);
+    arkrtos_task_wait_internal(5u);
+
+    UTEST_CHECK_EQ(arkrtos_task_table[mid_id - 1].priority, high_prio);
+    UTEST_CHECK_EQ(arkrtos_task_table[mid_id - 1].base_priority, mid_prio);
+    UTEST_CHECK_EQ(p_self->priority, high_prio);    /* ← 两跳，不是一跳 */
+    UTEST_CHECK_EQ(p_self->base_priority, base);
+
+    /* ③ 放掉 L1：MID 拿到它再依次放出，HIGH 顺着 L2 醒过来，两个任务都退场 */
+    UTEST_CHECK_EQ(arkrtos_mtx_unlock_internal(s_pi_chain_l1), 0);
+    UTEST_CHECK_EQ(arkrtos_sem_wait_internal(s_pi_chain_done, 500), 0);
+    UTEST_CHECK_EQ(arkrtos_sem_wait_internal(s_pi_chain_done, 500), 0);
+
+    /* ④ 撤销：没有谁滞留在被提升的优先级上，锁与信号量都能干净删掉 */
+    UTEST_CHECK_EQ(p_self->priority, base);
+    UTEST_CHECK_EQ(p_self->base_priority, base);
+    UTEST_CHECK_EQ(arkrtos_mtx_delete_internal(s_pi_chain_l1), 0);
+    UTEST_CHECK_EQ(arkrtos_mtx_delete_internal(s_pi_chain_l2), 0);
+    UTEST_CHECK_EQ(arkrtos_sem_delete_internal(s_pi_chain_done), 0);
+
+    s_pi_chain_l1   = -1;
+    s_pi_chain_l2   = -1;
+    s_pi_chain_done = -1;
+}
 
 #endif /* ARKRTOS_USE_UTEST */
