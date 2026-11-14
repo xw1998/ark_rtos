@@ -32,6 +32,14 @@
 
 #include "arkrtos_def.h"
 
+/* 返回 -1 的名字。与 ARKRTOS_MINI_ERR_*(值 -18/-19/-20) 区分：
+ * 那几个的负值本身携带原因，这三个只是 -1 的别名，细节在 g_mini_read_err
+ * 或文件系统的 last_error 里。值不得单独修改。 */
+#define ARKRTOS_MINI_ERR_PARAM       (-1)   /* 参数/输出指针非法 */
+#define ARKRTOS_MINI_ERR_READ        (-1)   /* 读镜像失败（细节见 g_mini_read_err） */
+#define ARKRTOS_MINI_ERR_NOSTATE     (-1)   /* 没有正在运行的小程序 */
+
+
 /* 只有这一个错误码是本路径独有的；其余全部沿用 ARKRTOS_LOADER_ERR_x
  * （MAGIC / COMPAT / SIZE / CRC / RELOC / ENTRY / TASK / STATE / NOSPACE / BUSY），
  * 免得同一种错误在两条装载路径上报出两个名字。 */

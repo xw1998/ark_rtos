@@ -274,13 +274,13 @@ static int32 fs_build_config(const char *dev_name, uint32 offset, uint32 size,
     if(dev == 0)
     {
         g_fs.last_error = ARKRTOS_FS_ERR_NO_DEV;   /* no block device with that name */
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     if(arkrtos_blk_init(dev) != 0)
     {
         g_fs.last_error = ARKRTOS_FS_ERR_BLOCK;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     dev_size = arkrtos_blk_size(dev);
@@ -295,7 +295,7 @@ static int32 fs_build_config(const char *dev_name, uint32 offset, uint32 size,
        ((offset + size) > dev_size))
     {
         g_fs.last_error = ARKRTOS_FS_ERR_ARGS;   /* volume does not fit the device */
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     cfg->context         = (void *)dev;
@@ -324,7 +324,7 @@ static int32 fs_build_config(const char *dev_name, uint32 offset, uint32 size,
        (cfg->prog_size > cfg->block_size))
     {
         g_fs.last_error = ARKRTOS_FS_ERR_ARGS;   /* geometry littlefs cannot use */
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     g_fs.dev         = dev;
@@ -348,7 +348,7 @@ static int32 fs_mount_with(struct lfs_config *cfg)
     if(err != 0)
     {
         g_fs.last_error = err;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     g_fs.mounted = 1u;
@@ -377,7 +377,7 @@ int32 arkrtos_fs_mount(const char *dev, uint32 offset, uint32 size)
     if(dev == 0)
     {
         g_fs.last_error = ARKRTOS_FS_ERR_ARGS;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     /* Mounting on top of a live mount would lose the old lfs_t and leak its
@@ -385,14 +385,14 @@ int32 arkrtos_fs_mount(const char *dev, uint32 offset, uint32 size)
     if(g_fs.mounted != 0u)
     {
         g_fs.last_error = ARKRTOS_FS_ERR_MOUNTED;   /* unmount first */
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     if(fs_build_config(dev, offset, size, &g_fs.cfg,
                        g_fs.read_cache, g_fs.prog_cache,
                        g_fs.lookahead) != 0)
     {
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     return fs_mount_with(&g_fs.cfg);
@@ -408,7 +408,7 @@ int32 arkrtos_fs_mount_default(void)
      * read. */
 #if (ARKRTOS_FS_SIZE == 0u)
     g_fs.last_error = ARKRTOS_FS_ERR_NO_VOLUME;   /* see the partition header */
-    return -1;
+    return ARKRTOS_FS_FAIL;
 #else
     return arkrtos_fs_mount(ARKRTOS_FS_DEV_NAME, (uint32)ARKRTOS_FS_BASE,
                           (uint32)ARKRTOS_FS_SIZE);
@@ -434,7 +434,7 @@ int32 arkrtos_fs_unmount(void)
     if(err != 0)
     {
         g_fs.last_error = err;   /* report what littlefs said, not "failed" */
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     g_fs.mounted = 0u;
@@ -451,7 +451,7 @@ int32 arkrtos_fs_volume(const char **dev, uint32 *offset, uint32 *size)
 {
     if(g_fs.mounted == 0u)
     {
-        return -1;      /* nothing up: there is no geometry to report */
+        return ARKRTOS_FS_FAIL;      /* nothing up: there is no geometry to report */
     }
     /* g_fs.dev is the device object, not its name: report the registry key
      * a caller can compare against the name it asked for. */
@@ -470,7 +470,7 @@ int32 arkrtos_fs_format(const char *dev, uint32 offset, uint32 size)
     if(dev == 0)
     {
         g_fs.last_error = ARKRTOS_FS_ERR_ARGS;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     /* Formatting a mounted volume would leave the mounted lfs_t describing
@@ -478,7 +478,7 @@ int32 arkrtos_fs_format(const char *dev, uint32 offset, uint32 size)
     if(g_fs.mounted != 0u)
     {
         g_fs.last_error = ARKRTOS_FS_ERR_MOUNTED;   /* unmount first */
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     /* Safe to reuse the mount buffers: formatting is refused while a volume
@@ -487,7 +487,7 @@ int32 arkrtos_fs_format(const char *dev, uint32 offset, uint32 size)
                        g_fs.read_cache, g_fs.prog_cache,
                        g_fs.lookahead) != 0)
     {
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     err = lfs_format(&fmt_lfs, &fmt_cfg);
@@ -495,7 +495,7 @@ int32 arkrtos_fs_format(const char *dev, uint32 offset, uint32 size)
     if(err != 0)
     {
         g_fs.last_error = err;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     /* A freshly formatted volume is what the caller almost always wants to
@@ -512,7 +512,7 @@ static int32 fs_check_path(const char *path)
     if((path == 0) || (path[0] != '/'))
     {
         g_fs.last_error = ARKRTOS_FS_ERR_ARGS;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     return 0;
@@ -525,7 +525,7 @@ int32 arkrtos_fs_stat(uint32 *total, uint32 *used)
     if(g_fs.mounted == 0u)
     {
         g_fs.last_error = ARKRTOS_FS_ERR_NOT_MOUNTED;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     blocks = lfs_fs_size(&g_fs.lfs);
@@ -533,7 +533,7 @@ int32 arkrtos_fs_stat(uint32 *total, uint32 *used)
     if(blocks < 0)
     {
         g_fs.last_error = (int32)blocks;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     if(total != 0)
@@ -563,7 +563,7 @@ int32 arkrtos_fs_stat_path(const char *path, uint32 *size, uint32 *is_dir)
 
     if((g_fs.mounted == 0u) || (fs_check_path(path) != 0))
     {
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     err = lfs_stat(&g_fs.lfs, path, &info);
@@ -571,7 +571,7 @@ int32 arkrtos_fs_stat_path(const char *path, uint32 *size, uint32 *is_dir)
     if(err != 0)
     {
         g_fs.last_error = err;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     if(size != 0)
@@ -595,14 +595,14 @@ int32 arkrtos_fs_write_file(const char *path, const uint8 *data, uint32 len)
 
     if((g_fs.mounted == 0u) || (data == 0) || (fs_check_path(path) != 0))
     {
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     /* One file cache, one user at a time: see arkrtos_fs_open_read. */
     if(g_fs.stream_mode != ARKRTOS_FS_STREAM_NONE)
     {
         g_fs.last_error = ARKRTOS_FS_ERR_BUSY;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     fcfg.buffer = g_fs.file_cache;
@@ -615,14 +615,14 @@ int32 arkrtos_fs_write_file(const char *path, const uint8 *data, uint32 len)
     if(err != 0)
     {
         g_fs.last_error = err;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     if(lfs_file_write(&g_fs.lfs, &file, data, len) != (lfs_ssize_t)len)
     {
         g_fs.last_error = ARKRTOS_FS_ERR_SHORT;   /* short write */
         (void)lfs_file_close(&g_fs.lfs, &file);
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     err = lfs_file_close(&g_fs.lfs, &file);
@@ -630,7 +630,7 @@ int32 arkrtos_fs_write_file(const char *path, const uint8 *data, uint32 len)
     if(err != 0)
     {
         g_fs.last_error = err;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     return 0;
@@ -645,14 +645,14 @@ int32 arkrtos_fs_read_file(const char *path, uint8 *buf, uint32 max, uint32 *out
 
     if((g_fs.mounted == 0u) || (buf == 0) || (fs_check_path(path) != 0))
     {
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     /* A stream in flight owns the file cache: see arkrtos_fs_open_read. */
     if(g_fs.stream_mode != ARKRTOS_FS_STREAM_NONE)
     {
         g_fs.last_error = ARKRTOS_FS_ERR_BUSY;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     fcfg.buffer = g_fs.file_cache;
@@ -664,7 +664,7 @@ int32 arkrtos_fs_read_file(const char *path, uint8 *buf, uint32 max, uint32 *out
     if(err != 0)
     {
         g_fs.last_error = err;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     n = lfs_file_read(&g_fs.lfs, &file, buf, max);
@@ -673,7 +673,7 @@ int32 arkrtos_fs_read_file(const char *path, uint8 *buf, uint32 max, uint32 *out
     {
         g_fs.last_error = (int32)n;
         (void)lfs_file_close(&g_fs.lfs, &file);
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     if(out_len != 0)
@@ -686,7 +686,7 @@ int32 arkrtos_fs_read_file(const char *path, uint8 *buf, uint32 max, uint32 *out
     if(err != 0)
     {
         g_fs.last_error = err;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     return 0;
@@ -719,7 +719,7 @@ static int32 fs_stream_close(void)
     if(err != 0)
     {
         g_fs.last_error = err;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     return 0;
@@ -738,13 +738,13 @@ static int32 fs_stream_open(const char *path, uint32 mode, uint32 flags)
     if((g_fs.mounted == 0u) || (fs_check_path(path) != 0))
     {
         g_fs.last_error = ARKRTOS_FS_ERR_ARGS;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     if(g_fs.stream_mode != ARKRTOS_FS_STREAM_NONE)
     {
         g_fs.last_error = ARKRTOS_FS_ERR_BUSY;   /* close the other one first */
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     fcfg.buffer     = g_fs.file_cache;
@@ -756,7 +756,7 @@ static int32 fs_stream_open(const char *path, uint32 mode, uint32 flags)
     if(err != 0)
     {
         g_fs.last_error = err;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     g_fs.stream_mode = (uint8)mode;
@@ -775,7 +775,7 @@ int32 arkrtos_fs_read_next(uint8 *buf, uint32 max)
     if((g_fs.stream_mode != ARKRTOS_FS_STREAM_READ) || (buf == 0) || (max == 0u))
     {
         g_fs.last_error = ARKRTOS_FS_ERR_ARGS;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     n = lfs_file_read(&g_fs.lfs, &g_fs.stream, buf, max);
@@ -783,7 +783,7 @@ int32 arkrtos_fs_read_next(uint8 *buf, uint32 max)
     if(n < 0)
     {
         g_fs.last_error = (int32)n;   /* pass littlefs's own code through */
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     return (int32)n;
@@ -810,13 +810,13 @@ int32 arkrtos_fs_write_next(const uint8 *buf, uint32 len)
     if((g_fs.stream_mode != ARKRTOS_FS_STREAM_WRITE) || (buf == 0))
     {
         g_fs.last_error = ARKRTOS_FS_ERR_ARGS;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     if(lfs_file_write(&g_fs.lfs, &g_fs.stream, buf, len) != (lfs_ssize_t)len)
     {
         g_fs.last_error = ARKRTOS_FS_ERR_SHORT;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     return 0;
@@ -841,7 +841,7 @@ int32 arkrtos_fs_truncate(const char *path, uint32 size)
     if((g_fs.mounted == 0u) || (fs_check_path(path) != 0))
     {
         g_fs.last_error = ARKRTOS_FS_ERR_ARGS;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     /* One file cache, one user at a time: the truncate needs the same cache a
@@ -850,7 +850,7 @@ int32 arkrtos_fs_truncate(const char *path, uint32 size)
     if(g_fs.stream_mode != ARKRTOS_FS_STREAM_NONE)
     {
         g_fs.last_error = ARKRTOS_FS_ERR_BUSY;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     fcfg.buffer     = g_fs.file_cache;
@@ -868,7 +868,7 @@ int32 arkrtos_fs_truncate(const char *path, uint32 size)
     if(err != 0)
     {
         g_fs.last_error = err;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     err = lfs_file_truncate(&g_fs.lfs, &file, (lfs_off_t)size);
@@ -877,7 +877,7 @@ int32 arkrtos_fs_truncate(const char *path, uint32 size)
     {
         g_fs.last_error = err;
         (void)lfs_file_close(&g_fs.lfs, &file);
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     err = lfs_file_close(&g_fs.lfs, &file);
@@ -885,7 +885,7 @@ int32 arkrtos_fs_truncate(const char *path, uint32 size)
     if(err != 0)
     {
         g_fs.last_error = err;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     return 0;
@@ -897,7 +897,7 @@ int32 arkrtos_fs_remove(const char *path)
 
     if((g_fs.mounted == 0u) || (fs_check_path(path) != 0))
     {
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     err = lfs_remove(&g_fs.lfs, path);
@@ -905,7 +905,7 @@ int32 arkrtos_fs_remove(const char *path)
     if(err != 0)
     {
         g_fs.last_error = err;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     return 0;
@@ -917,7 +917,7 @@ int32 arkrtos_fs_mkdir(const char *path)
 
     if((g_fs.mounted == 0u) || (fs_check_path(path) != 0))
     {
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     err = lfs_mkdir(&g_fs.lfs, path);
@@ -925,7 +925,7 @@ int32 arkrtos_fs_mkdir(const char *path)
     if(err != 0)
     {
         g_fs.last_error = err;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     return 0;
@@ -952,14 +952,14 @@ int32 arkrtos_fs_read_at(const char *path, uint8 *buf, uint32 len, uint32 off,
 
     if((g_fs.mounted == 0u) || (buf == 0) || (fs_check_path(path) != 0))
     {
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     /* Same rule as read_file: the one file cache belongs to a stream. */
     if(g_fs.stream_mode != ARKRTOS_FS_STREAM_NONE)
     {
         g_fs.last_error = ARKRTOS_FS_ERR_BUSY;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     fcfg.buffer     = g_fs.file_cache;
@@ -971,7 +971,7 @@ int32 arkrtos_fs_read_at(const char *path, uint8 *buf, uint32 len, uint32 off,
     if(err != 0)
     {
         g_fs.last_error = err;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     pos = lfs_file_seek(&g_fs.lfs, &file, (lfs_soff_t)off, LFS_SEEK_SET);
@@ -980,7 +980,7 @@ int32 arkrtos_fs_read_at(const char *path, uint8 *buf, uint32 len, uint32 off,
     {
         g_fs.last_error = (int32)pos;
         (void)lfs_file_close(&g_fs.lfs, &file);
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     n = lfs_file_read(&g_fs.lfs, &file, buf, (lfs_size_t)len);
@@ -989,7 +989,7 @@ int32 arkrtos_fs_read_at(const char *path, uint8 *buf, uint32 len, uint32 off,
     {
         g_fs.last_error = (int32)n;
         (void)lfs_file_close(&g_fs.lfs, &file);
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     if(out_len != 0)
@@ -1002,7 +1002,7 @@ int32 arkrtos_fs_read_at(const char *path, uint8 *buf, uint32 len, uint32 off,
     if(err != 0)
     {
         g_fs.last_error = err;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     return 0;
@@ -1015,7 +1015,7 @@ int32 arkrtos_fs_rename(const char *old_path, const char *new_path)
     if((g_fs.mounted == 0u) || (fs_check_path(old_path) != 0) ||
        (fs_check_path(new_path) != 0))
     {
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     err = lfs_rename(&g_fs.lfs, old_path, new_path);
@@ -1023,7 +1023,7 @@ int32 arkrtos_fs_rename(const char *old_path, const char *new_path)
     if(err != 0)
     {
         g_fs.last_error = err;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     return 0;
@@ -1041,7 +1041,7 @@ int32 arkrtos_fs_list_names(const char *dir, char *out, uint32 out_size,
     if((g_fs.mounted == 0u) || (out == 0) || (out_size < 2u))
     {
         g_fs.last_error = ARKRTOS_FS_ERR_NOT_MOUNTED;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     if(dir == 0)
@@ -1051,7 +1051,7 @@ int32 arkrtos_fs_list_names(const char *dir, char *out, uint32 out_size,
 
     if(fs_check_path(dir) != 0)
     {
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     err = lfs_dir_open(&g_fs.lfs, &ditem, dir);
@@ -1059,7 +1059,7 @@ int32 arkrtos_fs_list_names(const char *dir, char *out, uint32 out_size,
     if(err != 0)
     {
         g_fs.last_error = err;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     for(;;)
@@ -1073,7 +1073,7 @@ int32 arkrtos_fs_list_names(const char *dir, char *out, uint32 out_size,
         {
             g_fs.last_error = err;
             (void)lfs_dir_close(&g_fs.lfs, &ditem);
-            return -1;
+            return ARKRTOS_FS_FAIL;
         }
 
         if(err == 0)
@@ -1106,7 +1106,7 @@ int32 arkrtos_fs_list_names(const char *dir, char *out, uint32 out_size,
     if(err != 0)
     {
         g_fs.last_error = err;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     out[used] = 0;
@@ -1127,7 +1127,7 @@ int32 arkrtos_fs_list(const char *dir, arkrtos_fs_list_cb_t cb, void *arg)
     if((g_fs.mounted == 0u) || (cb == 0))
     {
         g_fs.last_error = ARKRTOS_FS_ERR_NOT_MOUNTED;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     if(dir == 0)
@@ -1137,7 +1137,7 @@ int32 arkrtos_fs_list(const char *dir, arkrtos_fs_list_cb_t cb, void *arg)
 
     if(fs_check_path(dir) != 0)
     {
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     err = lfs_dir_open(&g_fs.lfs, &ditem, dir);
@@ -1145,7 +1145,7 @@ int32 arkrtos_fs_list(const char *dir, arkrtos_fs_list_cb_t cb, void *arg)
     if(err != 0)
     {
         g_fs.last_error = err;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     for(;;)
@@ -1156,7 +1156,7 @@ int32 arkrtos_fs_list(const char *dir, arkrtos_fs_list_cb_t cb, void *arg)
         {
             g_fs.last_error = err;
             (void)lfs_dir_close(&g_fs.lfs, &ditem);
-            return -1;
+            return ARKRTOS_FS_FAIL;
         }
 
         if(err == 0)
@@ -1176,7 +1176,7 @@ int32 arkrtos_fs_list(const char *dir, arkrtos_fs_list_cb_t cb, void *arg)
     if(err != 0)
     {
         g_fs.last_error = err;
-        return -1;
+        return ARKRTOS_FS_FAIL;
     }
 
     return 0;
@@ -1194,12 +1194,12 @@ int32 arkrtos_fs_mount(const char *dev, uint32 offset, uint32 size)
     (void)dev;
     (void)offset;
     (void)size;
-    return -1;
+    return ARKRTOS_FS_FAIL;
 }
 
 int32 arkrtos_fs_mount_default(void)
 {
-    return -1;
+    return ARKRTOS_FS_FAIL;
 }
 
 int32 arkrtos_fs_unmount(void)
@@ -1217,7 +1217,7 @@ int32 arkrtos_fs_volume(const char **dev, uint32 *offset, uint32 *size)
     (void)dev;
     (void)offset;
     (void)size;
-    return -1;
+    return ARKRTOS_FS_FAIL;
 }
 
 int32 arkrtos_fs_format(const char *dev, uint32 offset, uint32 size)
@@ -1225,14 +1225,14 @@ int32 arkrtos_fs_format(const char *dev, uint32 offset, uint32 size)
     (void)dev;
     (void)offset;
     (void)size;
-    return -1;
+    return ARKRTOS_FS_FAIL;
 }
 
 int32 arkrtos_fs_stat(uint32 *total, uint32 *used)
 {
     (void)total;
     (void)used;
-    return -1;
+    return ARKRTOS_FS_FAIL;
 }
 
 int32 arkrtos_fs_stat_path(const char *path, uint32 *size, uint32 *is_dir)
@@ -1240,7 +1240,7 @@ int32 arkrtos_fs_stat_path(const char *path, uint32 *size, uint32 *is_dir)
     (void)path;
     (void)size;
     (void)is_dir;
-    return -1;
+    return ARKRTOS_FS_FAIL;
 }
 
 int32 arkrtos_fs_write_file(const char *path, const uint8 *data, uint32 len)
@@ -1248,14 +1248,14 @@ int32 arkrtos_fs_write_file(const char *path, const uint8 *data, uint32 len)
     (void)path;
     (void)data;
     (void)len;
-    return -1;
+    return ARKRTOS_FS_FAIL;
 }
 
 int32 arkrtos_fs_truncate(const char *path, uint32 size)
 {
     (void)path;
     (void)size;
-    return -1;
+    return ARKRTOS_FS_FAIL;
 }
 
 int32 arkrtos_fs_read_file(const char *path, uint8 *buf, uint32 max, uint32 *out_len)
@@ -1264,20 +1264,20 @@ int32 arkrtos_fs_read_file(const char *path, uint8 *buf, uint32 max, uint32 *out
     (void)buf;
     (void)max;
     (void)out_len;
-    return -1;
+    return ARKRTOS_FS_FAIL;
 }
 
 int32 arkrtos_fs_open_read(const char *path)
 {
     (void)path;
-    return -1;
+    return ARKRTOS_FS_FAIL;
 }
 
 int32 arkrtos_fs_read_next(uint8 *buf, uint32 max)
 {
     (void)buf;
     (void)max;
-    return -1;
+    return ARKRTOS_FS_FAIL;
 }
 
 int32 arkrtos_fs_close_read(void)
@@ -1288,14 +1288,14 @@ int32 arkrtos_fs_close_read(void)
 int32 arkrtos_fs_open_write(const char *path)
 {
     (void)path;
-    return -1;
+    return ARKRTOS_FS_FAIL;
 }
 
 int32 arkrtos_fs_write_next(const uint8 *buf, uint32 len)
 {
     (void)buf;
     (void)len;
-    return -1;
+    return ARKRTOS_FS_FAIL;
 }
 
 int32 arkrtos_fs_close_write(void)
@@ -1306,7 +1306,7 @@ int32 arkrtos_fs_close_write(void)
 int32 arkrtos_fs_remove(const char *path)
 {
     (void)path;
-    return -1;
+    return ARKRTOS_FS_FAIL;
 }
 
 int32 arkrtos_fs_list(const char *dir, arkrtos_fs_list_cb_t cb, void *arg)
@@ -1314,7 +1314,7 @@ int32 arkrtos_fs_list(const char *dir, arkrtos_fs_list_cb_t cb, void *arg)
     (void)dir;
     (void)cb;
     (void)arg;
-    return -1;
+    return ARKRTOS_FS_FAIL;
 }
 
 int32 arkrtos_fs_read_at(const char *path, uint8 *buf, uint32 len, uint32 off,
@@ -1325,14 +1325,14 @@ int32 arkrtos_fs_read_at(const char *path, uint8 *buf, uint32 len, uint32 off,
     (void)len;
     (void)off;
     (void)out_len;
-    return -1;
+    return ARKRTOS_FS_FAIL;
 }
 
 int32 arkrtos_fs_rename(const char *old_path, const char *new_path)
 {
     (void)old_path;
     (void)new_path;
-    return -1;
+    return ARKRTOS_FS_FAIL;
 }
 
 int32 arkrtos_fs_list_names(const char *dir, char *out, uint32 out_size,
@@ -1342,7 +1342,7 @@ int32 arkrtos_fs_list_names(const char *dir, char *out, uint32 out_size,
     (void)out;
     (void)out_size;
     (void)count;
-    return -1;
+    return ARKRTOS_FS_FAIL;
 }
 
 int32 arkrtos_fs_last_error(void)

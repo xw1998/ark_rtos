@@ -28,6 +28,16 @@
 #include "arkrtos_def.h"
 #include "arkrtos_dev.h"
 
+/* 返回码：值不得单独修改（多个名字共用 -1 是有意的，分名只为表意）。
+ * 注册/设置遗言时的参数错误与同名冲突历史上都是 -2，不得改成 -1。 */
+#define ARKRTOS_HWSAFE_ERR_PARAM    (-1)   /* 下标/输出指针非法 */
+#define ARKRTOS_HWSAFE_ERR_ARG      (-2)   /* 设备名或所有者非法（历史值 -2） */
+#define ARKRTOS_HWSAFE_ERR_EXIST    (-2)   /* 同名设备已注册（历史值 -2） */
+#define ARKRTOS_HWSAFE_ERR_NOSLOT   (-1)   /* 登记表已满 */
+#define ARKRTOS_HWSAFE_ERR_NOTFOUND (-1)   /* 没有这个名字的登记 */
+#define ARKRTOS_HWSAFE_ERR_OWNER    (-1)   /* 该任务不持有这个设备：不能替别人留遗言 */
+
+
 /**
 * @brief 设备安全态回调（"中和"函数）
 * @param obj   该设备已被打开的实例（驱动的私有结构，hdr 在开头）

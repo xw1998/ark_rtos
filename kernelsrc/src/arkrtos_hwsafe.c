@@ -130,7 +130,7 @@ int32 arkrtos_hwsafe_register(const char *dev_name, arkrtos_hwsafe_fn fn)
 
     if(dev_name == 0 || fn == 0)
     {
-        return -2;
+        return ARKRTOS_HWSAFE_ERR_ARG;
     }
     /* 同名重复登记：报错而不是静默覆盖——两个驱动对同一台设备给出两套安全态
      * 是配置错误，静默留下其中一个会让"按哪个走"变成不可解释的行为。 */
@@ -138,12 +138,12 @@ int32 arkrtos_hwsafe_register(const char *dev_name, arkrtos_hwsafe_fn fn)
     {
         if(hwsafe_name_eq(g_hwsafe_dev[i].name, dev_name))
         {
-            return -2;
+            return ARKRTOS_HWSAFE_ERR_EXIST;
         }
     }
     if(g_hwsafe_dev_n >= (int32)ARKRTOS_HWSAFE_MAX_DEV)
     {
-        return -1;
+        return ARKRTOS_HWSAFE_ERR_NOSLOT;
     }
     hwsafe_name_cpy(g_hwsafe_dev[g_hwsafe_dev_n].name, dev_name);
     g_hwsafe_dev[g_hwsafe_dev_n].fn = fn;
@@ -175,7 +175,7 @@ static int32 hwsafe_find_dev_idx(const char *dev_name)
             return i;
         }
     }
-    return -1;
+    return ARKRTOS_HWSAFE_ERR_NOTFOUND;
 }
 
 int32 arkrtos_hwsafe_unregister(const char *dev_name)
@@ -184,12 +184,12 @@ int32 arkrtos_hwsafe_unregister(const char *dev_name)
 
     if(dev_name == 0)
     {
-        return -1;
+        return ARKRTOS_HWSAFE_ERR_PARAM;
     }
     idx = hwsafe_find_dev_idx(dev_name);
     if(idx < 0)
     {
-        return -1;                  /* no such registration: say so, do not fake */
+        return ARKRTOS_HWSAFE_ERR_NOTFOUND;                  /* no such registration: say so, do not fake */
     }
     g_hwsafe_dev[idx] = g_hwsafe_dev[g_hwsafe_dev_n - 1];
     g_hwsafe_dev[g_hwsafe_dev_n - 1].name[0] = 0;
@@ -278,7 +278,7 @@ static int32 hwsafe_find_own_idx(const char *dev_name, int32 owner)
             return i;
         }
     }
-    return -1;
+    return ARKRTOS_HWSAFE_ERR_NOTFOUND;
 }
 
 int32 arkrtos_hwsafe_set_will(const char *dev_name, int32 owner,
@@ -289,7 +289,7 @@ int32 arkrtos_hwsafe_set_will(const char *dev_name, int32 owner,
 
     if(dev_name == 0 || owner <= 0)
     {
-        return -2;
+        return ARKRTOS_HWSAFE_ERR_ARG;
     }
 
     state = ARKRTOS_ENTER_CRITICAL();
@@ -300,7 +300,7 @@ int32 arkrtos_hwsafe_set_will(const char *dev_name, int32 owner,
          * could leave a "will" on somebody else's device - that is not a
          * will, that is ordering another owner's hardware around. */
         ARKRTOS_EXIT_CRITICAL(state);
-        return -1;
+        return ARKRTOS_HWSAFE_ERR_OWNER;
     }
     g_hwsafe_own[idx].has_will = 1;
     g_hwsafe_own[idx].will_cmd = cmd;
@@ -316,7 +316,7 @@ int32 arkrtos_hwsafe_clear_will(const char *dev_name, int32 owner)
 
     if(dev_name == 0 || owner <= 0)
     {
-        return -1;
+        return ARKRTOS_HWSAFE_ERR_PARAM;
     }
 
     state = ARKRTOS_ENTER_CRITICAL();
@@ -324,7 +324,7 @@ int32 arkrtos_hwsafe_clear_will(const char *dev_name, int32 owner)
     if(idx < 0)
     {
         ARKRTOS_EXIT_CRITICAL(state);
-        return -1;
+        return ARKRTOS_HWSAFE_ERR_NOTFOUND;
     }
     g_hwsafe_own[idx].has_will = 0;
     g_hwsafe_own[idx].will_cmd = 0;
@@ -454,7 +454,7 @@ int32 arkrtos_hwsafe_info(int32 idx, char *name_out, uint32 max,
 
     if(idx < 0 || idx >= g_hwsafe_own_n)
     {
-        return -1;
+        return ARKRTOS_HWSAFE_ERR_PARAM;
     }
     if(name_out != 0 && max > 0u)
     {
@@ -485,7 +485,7 @@ int32 arkrtos_hwsafe_dev_at(int32 idx, char *name_out, uint32 max)
 
     if(idx < 0 || idx >= g_hwsafe_dev_n)
     {
-        return -1;
+        return ARKRTOS_HWSAFE_ERR_PARAM;
     }
     if(name_out != 0 && max > 0u)
     {
@@ -516,7 +516,7 @@ int32 arkrtos_hwsafe_will(int32 idx, int32 *has_will,
 {
     if(idx < 0 || idx >= g_hwsafe_own_n)
     {
-        return -1;
+        return ARKRTOS_HWSAFE_ERR_PARAM;
     }
     if(has_will != 0)
     {

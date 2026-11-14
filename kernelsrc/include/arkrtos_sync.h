@@ -15,6 +15,21 @@
 #include "arkrtos_task.h"
 #include "arkrtos_config.h"
 
+/* 返回码：值不得单独修改（多个名字共用 -1 是有意的，分名只为表意）。
+ * 注意 ARKRTOS_SYNC_ERR_TIMEOUT(-2) 是等待超时；WAITER_DUP(-2) 是
+ * "已经在等待队列里"的同值不同义哨兵。 */
+#define ARKRTOS_SYNC_ERR_PARAM     (-1)   /* 句柄/下标/输出指针非法 */
+#define ARKRTOS_SYNC_ERR_HANDLE    (-1)   /* 句柄不是该类型的对象 */
+#define ARKRTOS_SYNC_ERR_STATE     (-1)   /* 对象未创建 / 已被删除 */
+#define ARKRTOS_SYNC_ERR_CONTEXT   (-1)   /* 当前任务不可用 / 未能进入阻塞 */
+#define ARKRTOS_SYNC_ERR_NOSLOT    (-1)   /* 对象表已满 */
+#define ARKRTOS_SYNC_ERR_NOSPACE   (-1)   /* 等待队列已满，登记不上等待者 */
+#define ARKRTOS_SYNC_ERR_NOTFOUND  (-1)   /* 摘除时该任务不在等待队列里 */
+#define ARKRTOS_SYNC_ERR_RECURSIVE (-1)   /* 同一任务重复加锁（不支持递归） */
+#define ARKRTOS_SYNC_ERR_OWNER     (-1)   /* 非持有者解锁 */
+#define ARKRTOS_SYNC_WAITER_DUP    (-2)   /* 同一任务已在等待队列里（等价于登记成功） */
+
+
 typedef struct {
     char   name[8];
     int32  count;                                       /* 计数值：>0 表示可用资源数，0 表示需排队等待 */

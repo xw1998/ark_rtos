@@ -35,6 +35,10 @@
 #include "mdk_trace.h"
 #include "mdk_trace_arkrtos.h"   /* 内核自动钩子适配层（mdkdebug 组件） */
 
+/* 返回码：值不得单独修改。 */
+#define ARKRTOS_TRACE_ERR_DISABLED (-1)   /* trace 未编入（#else 桩） */
+
+
 /* ---------------- event ids ---------------- */
 #define ARKRTOS_TR_EV_NONE        0x00u
 #define ARKRTOS_TR_EV_MARK        0x01u   /* arg = user value                     */

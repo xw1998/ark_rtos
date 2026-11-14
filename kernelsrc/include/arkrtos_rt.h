@@ -27,6 +27,11 @@
 #include "arkrtos_def.h"
 #include "arkrtos_config.h"
 
+/* 返回码：值不得单独修改。last_err 里另有细分原因。 */
+#define ARKRTOS_RT_ERR_NOTREADY (-1)   /* 测量没起来 / 还没有读数 */
+#define ARKRTOS_RT_ERR_START    (-1)   /* 辅助任务起不来（细节见 arkrtos_rt_last_error） */
+
+
 #ifndef ARKRTOS_USE_RTSTAT
 #define ARKRTOS_USE_RTSTAT              0
 #endif

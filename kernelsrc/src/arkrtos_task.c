@@ -284,18 +284,18 @@ int32 arkrtos_thread_create_internal(void (*entry)(void), uint32 *stack_bottom,
      * never another App's image. */
     if(arkrtos_kernel_cb_own_region_ok((const void *)entry) == 0u)
     {
-        return -1;
+        return ARKRTOS_TASK_ERR_ENTRY;
     }
     /* The stack must be RAM the caller owns. */
     if(arkrtos_kernel_cb_own_ram_ok((const void *)stack_bottom, stack_size) == 0u)
     {
-        return -1;
+        return ARKRTOS_TASK_ERR_STACK;
     }
     /* 255 is the scheduler's "no candidate" sentinel, so a task carrying it
      * would never be picked. Refuse instead of silently clamping. */
     if(priority >= 255u)
     {
-        return -1;
+        return ARKRTOS_TASK_ERR_PRIORITY;
     }
     {
         int32 tid = arkrtos_task_register(entry, stack_bottom, stack_size, priority, period_ms);
@@ -2243,13 +2243,13 @@ int32 arkrtos_sched_is_switching(void)
     /* 调度器锁定期间不切换任务；超时处理已在 arkrtos_sched_next 内完成 */
     if(arkrtos_sched_lock_nest != 0u)
     {
-        return -1;
+        return ARKRTOS_TASK_ERR_CONTEXT;
     }
     #endif
 
     if(new_idx == arkrtos_current_task_id)
     {
-        return -1;                          /* 还是它自己，不必拉 PendSV */
+        return ARKRTOS_TASK_NONE;                          /* 还是它自己，不必拉 PendSV */
     }
     return new_idx;
 }
@@ -2457,7 +2457,7 @@ int32 arkrtos_ready_top(void)
 
     if(g == 0u)
     {
-        return -1;
+        return ARKRTOS_TASK_NONE;
     }
 
     w = (uint32)arkrtos_lowbit32(g);                       /* 组号 0..7 */
@@ -3047,13 +3047,13 @@ int32 arkrtos_task_block_in_critical(uint32 timeout_ms)
     /* 调用约定：进入时中断已关 */
     if(arkrtos_current_task_id <= 0)
     {
-        return -1;                      /* 内核上下文不允许阻塞 */
+        return ARKRTOS_TASK_ERR_CONTEXT;                      /* 内核上下文不允许阻塞 */
     }
 
     #if (ARKRTOS_USE_SCHED_LOCK == 1)
     if(arkrtos_sched_lock_blocks())
     {
-        return -1;                      /* 调度器锁定期间禁止阻塞 */
+        return ARKRTOS_TASK_ERR_CONTEXT;                      /* 调度器锁定期间禁止阻塞 */
     }
     #endif
 
@@ -3255,7 +3255,7 @@ void arkrtos_task_kill_internal(void)
 int32 arkrtos_task_status_get_internal(int32 task_id)
 {
     if(task_id <= 0 || task_id > arkrtos_task_count)
-        return -1;
+        return ARKRTOS_TASK_ERR_PARAM;
     return (int32)arkrtos_task_table[task_id - 1].status;
 }
 
@@ -3306,7 +3306,7 @@ int32 arkrtos_task_recover(int32 task_id)
 {
     if(task_id <= 0 || task_id > arkrtos_task_count)
     {
-        return -1;
+        return ARKRTOS_TASK_ERR_PARAM;
     }
 
     arkrtos_task_recover_mark(task_id);
@@ -3470,13 +3470,13 @@ int32 arkrtos_task_stack_info_raw(int32 task_id, uint32 *out4)
 
     if((out4 == 0) || (task_id <= 0) || (task_id > arkrtos_task_count))
     {
-        return -1;
+        return ARKRTOS_TASK_ERR_PARAM;
     }
 
     p_task = &arkrtos_task_table[task_id - 1];
     if(p_task->stack_size == 0u)
     {
-        return -1;
+        return ARKRTOS_TASK_ERR_NOSTATE;
     }
     words  = p_task->stack_size / 4u;
 
@@ -3514,12 +3514,12 @@ int32 arkrtos_task_stack_info_internal(int32 task_id, uint32 *out3)
 
     if(out3 == 0)
     {
-        return -1;
+        return ARKRTOS_TASK_ERR_PARAM;
     }
 
     if(arkrtos_task_stack_info_raw(task_id, raw) != 0)
     {
-        return -1;
+        return ARKRTOS_TASK_ERR_PARAM;
     }
 
     out3[0] = raw[0];

@@ -384,7 +384,7 @@ int32 arkrtos_apprun_info(uint32 *p_entry, uint32 *p_code_base, uint32 *p_ram_ba
     if((g_apprun_task == 0u) || (g_apprun_task == 0xFFFFFFFFu))
     {
         arkrtos_spin_unlock_irqrestore(&g_apprun_lock, irq);
-        return -1;
+        return ARKRTOS_APPRUN_ERR_NOSTATE;
     }
     if(p_entry != 0)
     {

@@ -11,6 +11,11 @@
 #include "arkrtos_task.h"
 #include "arkrtos_config.h"
 
+/* 返回码：值不得单独修改。 */
+#define ARKRTOS_CFG_ERR_PARAM  (-1)   /* 参数非法 */
+#define ARKRTOS_CFG_ERR_NOSLOT (-1)   /* 任务表已满 */
+
+
 extern arkrtos_task_t arkrtos_task_table[ARKRTOS_TASK_MAX_NUM];
 extern int32 arkrtos_task_count;
 

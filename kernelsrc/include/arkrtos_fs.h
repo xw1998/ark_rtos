@@ -30,6 +30,12 @@
 
 #include "arkrtos_types.h"
 
+/* 返回码：失败一律回 -1，具体原因看 arkrtos_fs_last_error()。
+ * 关闭档（ARKRTOS_USE_FS=0）的桩函数故意回同一个值：调用方不该能区分
+ * "没编进来"和"板上没卷"，这两件事对本模块是同一回事。值不得单独修改。 */
+#define ARKRTOS_FS_FAIL          (-1)
+
+
 #ifdef __cplusplus
 extern "C" {
 #endif

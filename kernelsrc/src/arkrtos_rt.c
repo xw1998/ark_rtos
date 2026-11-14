@@ -262,7 +262,7 @@ int32 arkrtos_rt_measure_wake(uint32 n)
     uint32 now;
     uint32 d;
 
-    if(g_rt.ready == 0u) { return -1; }
+    if(g_rt.ready == 0u) { return ARKRTOS_RT_ERR_NOTREADY; }
 
     for(i = 0u; i < n; i++)
     {
@@ -314,10 +314,10 @@ static int32 rt_helper_start(void)
     g_rt.last_err = 0;
 
     g_rt.sem_hi = arkrtos_sem_create_internal("rt_hi", 0);
-    if(g_rt.sem_hi < 0) { g_rt.last_err = 1; return -1; }
+    if(g_rt.sem_hi < 0) { g_rt.last_err = 1; return ARKRTOS_RT_ERR_START; }
 
     g_rt.sem_ack = arkrtos_sem_create_internal("rt_ack", 0);
-    if(g_rt.sem_ack < 0) { g_rt.last_err = 2; return -1; }
+    if(g_rt.sem_ack < 0) { g_rt.last_err = 2; return ARKRTOS_RT_ERR_START; }
 
     /* 用内核内部的 arkrtos_task_register()：辅助任务属于内核自己，不走
      * arkrtos_thread_create_internal() 的"入口必须在调用者自己的固件区内"
@@ -326,7 +326,7 @@ static int32 rt_helper_start(void)
         int32 tid = arkrtos_task_register(rt_helper_task, rt_helper_stack,
                                           sizeof(rt_helper_stack),
                                           RT_HELPER_PRIORITY, 0u);
-        if(tid <= 0) { g_rt.last_err = 4 - tid; return -1; }
+        if(tid <= 0) { g_rt.last_err = 4 - tid; return ARKRTOS_RT_ERR_START; }
     }
     g_rt.helper_up = 1u;
     return 0;
@@ -336,8 +336,8 @@ int32 arkrtos_rt_measure_preempt(uint32 n)
 {
     uint32 i;
 
-    if(g_rt.ready == 0u) { return -1; }
-    if(rt_helper_start() != 0) { return -1; }
+    if(g_rt.ready == 0u) { return ARKRTOS_RT_ERR_NOTREADY; }
+    if(rt_helper_start() != 0) { return ARKRTOS_RT_ERR_START; }
 
     g_rt.hi_done = 0u;
     g_rt.hi_target = n;

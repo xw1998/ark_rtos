@@ -147,7 +147,7 @@ int32 arkrtos_console_write(const uint8 *p_data, uint32 len)
 
     if(dev < 0)
     {
-        return -1;
+        return ARKRTOS_LOG_ERR_DEVICE;
     }
 
     held = arkrtos_console_lock();
@@ -437,7 +437,7 @@ int32 arkrtos_log_svc(uint32 level, const char *tag, const char *msg)
 
     if(msg == 0)
     {
-        return -1;
+        return ARKRTOS_LOG_ERR_PARAM;
     }
 
     arkrtos_log_emit(level, tag, 0u, msg);
@@ -479,12 +479,12 @@ int32 arkrtos_log_svc(uint32 level, const char *tag, const char *msg)
     (void)level;
     (void)tag;
     (void)msg;
-    return -1;
+    return ARKRTOS_LOG_ERR_DISABLED;
 }
 
 int32 arkrtos_console_handle(void)
 {
-    return -1;
+    return ARKRTOS_LOG_ERR_DISABLED;
 }
 
 int32 arkrtos_console_is_handle(int32 handle)
@@ -497,7 +497,7 @@ int32 arkrtos_console_write(const uint8 *p_data, uint32 len)
 {
     (void)p_data;
     (void)len;
-    return -1;
+    return ARKRTOS_LOG_ERR_DISABLED;
 }
 
 uint32 arkrtos_console_tx_drop_count(void)

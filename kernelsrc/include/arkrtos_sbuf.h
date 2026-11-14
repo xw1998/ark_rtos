@@ -26,6 +26,14 @@
 #include "arkrtos_task.h"
 #include "arkrtos_config.h"
 
+/* 返回 -1 的名字。与上面 ARKRTOS_SBUF_ERR_*(值 -1/-2/-3/-5/-6) 区分：
+ * 那组的负值携带原因；这里三个是 -1 的别名。值不得单独修改。 */
+#define ARKRTOS_SBUF_ERR_NOSPACE     (-1)   /* 等待者表已满（与 -5 的 NOSPC 不是一回事） */
+#define ARKRTOS_SBUF_ERR_BADLEN      (-1)   /* 消息长度头损坏（流/消息混用） */
+#define ARKRTOS_SBUF_WAITER_DUP      (-2)   /* 同一任务已在等待表里（等价于登记成功） */
+#define ARKRTOS_SBUF_WAIT_INFINITE   (-1)   /* remain_ms 的"无限等待"哨兵（不是错误码） */
+
+
 #if (ARKRTOS_USE_SBUF == 1)
 
 /* 返回码：与同步原语一致地使用负值表示"这次没成"，

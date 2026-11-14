@@ -81,7 +81,7 @@ static int32 arkrtos_installer_pump(int32 dev)
             idle++;
             if(idle > ARKRTOS_INSTALLER_IDLE_LIMIT)
             {
-                return -1;
+                return ARKRTOS_INSTALLER_ERR_TIMEOUT;
             }
             continue;
         }
@@ -353,7 +353,7 @@ static int32 arkrtos_installer_fixed_prepare(void)
         {
             ARKRTOS_LOGE("INSTALL", "INSTALLER_FIXED_SLOT %d is not a configured slot",
                        (int)INSTALLER_FIXED_SLOT);
-            return -1;
+            return ARKRTOS_INSTALLER_ERR_CONFIG;
         }
 
         /* There is no console here, so the operator's "app stop <slot>" has to
@@ -385,7 +385,7 @@ static int32 arkrtos_installer_fixed_prepare(void)
                 ARKRTOS_LOGE("INSTALL",
                            "cannot stop the running image in fixed slot %d: refusing frames",
                            (int)INSTALLER_FIXED_SLOT);
-                return -1;
+                return ARKRTOS_INSTALLER_ERR_BUSY;
             }
         }
     }
@@ -396,7 +396,7 @@ static int32 arkrtos_installer_fixed_prepare(void)
     {
         ARKRTOS_LOGE("INSTALL", "cannot clear fixed slot %d",
                    (int)INSTALLER_FIXED_SLOT);
-        return -1;
+        return ARKRTOS_INSTALLER_ERR_ERASE;
     }
 
     ARKRTOS_LOGI("INSTALL", "fixed slot %d cleared, send the file now",
@@ -410,7 +410,7 @@ static int32 arkrtos_installer_fixed_prepare(void)
                "fixed-slot mode but no INSTALLER_FIXED_SLOT configured: "
                "refusing frames (clearing a slot mid-frame would eat the "
                "relocation table)");
-    return -1;
+    return ARKRTOS_INSTALLER_ERR_CONFIG;
 #endif
 }
 
@@ -616,7 +616,7 @@ static int32 arkrtos_installer_file_read(arkrtos_dev_hdr_t *obj, uint8 *pdata, i
 
     if((pdata == 0) || (len <= 0))
     {
-        return -1;
+        return ARKRTOS_INSTALLER_ERR_PARAM;
     }
 
     return arkrtos_fs_read_next(pdata, (uint32)len);
@@ -650,7 +650,7 @@ static int32 arkrtos_installer_file_dev(void)
         if(arkrtos_dev_register(ARKRTOS_INSTALLER_FILE_DEV,
                               &arkrtos_installer_file_drv, 0u) != 0)
         {
-            return -1;
+            return ARKRTOS_INSTALLER_ERR_IO;
         }
 
         arkrtos_installer_file_reg = 1u;
@@ -672,7 +672,7 @@ static int32 arkrtos_installer_file_hdr(void)
 
         if(n <= 0)
         {
-            return -1;
+            return ARKRTOS_INSTALLER_ERR_IO;
         }
 
         got += (uint32)n;

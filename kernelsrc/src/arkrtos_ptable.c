@@ -256,7 +256,7 @@ static int32 arkrtos_pt_find_gap(uint32 pool_base, uint32 pool_end,
         }
     }
 
-    return -1;
+    return ARKRTOS_PTABLE_ERR_NOSPACE;
 }
 
 /* ---------------- 初始化 ---------------- */
@@ -382,17 +382,17 @@ int32 arkrtos_ptable_range_check(uint32 base, uint32 size)
 
     if((size == 0u) || (base < IMAGE_POOL_BASE))
     {
-        return -1;
+        return ARKRTOS_PTABLE_ERR_PARAM;
     }
 
     if((base % ARKRTOS_POOL_ALLOC_UNIT) != 0u)
     {
-        return -1;              /* 落点必须按分配粒度对齐（上电扫描依赖它） */
+        return ARKRTOS_PTABLE_ERR_ALIGN;              /* 落点必须按分配粒度对齐（上电扫描依赖它） */
     }
 
     if((base >= limit) || (size > (limit - base)))
     {
-        return -1;              /* 越界，或侵入了尾部压实余量 */
+        return ARKRTOS_PTABLE_ERR_RANGE;              /* 越界，或侵入了尾部压实余量 */
     }
 
     return 0;
@@ -408,7 +408,7 @@ int32 arkrtos_ptable_find_free(uint32 size, uint32 *p_base, uint32 *p_aligned)
 
     if((size == 0u) || (p_base == 0))
     {
-        return -1;
+        return ARKRTOS_PTABLE_ERR_PARAM;
     }
 
     arkrtos_spin_lock_irqsave(&arkrtos_ptable_lock, &irq_state);
@@ -435,12 +435,12 @@ int32 arkrtos_ptable_alloc(uint32 type, uint32 base, uint32 size)
 
     if((type != ARKRTOS_SLOT_APP) && (type != ARKRTOS_SLOT_DRIVER))
     {
-        return -1;
+        return ARKRTOS_PTABLE_ERR_PARAM;
     }
 
     if(arkrtos_ptable_range_check(base, size) != 0)
     {
-        return -1;
+        return ARKRTOS_PTABLE_ERR_RANGE;
     }
 
     arkrtos_spin_lock_irqsave(&arkrtos_ptable_lock, &irq_state);
@@ -470,7 +470,7 @@ int32 arkrtos_ptable_alloc(uint32 type, uint32 base, uint32 size)
         if((base < other_end) && (other_base < end))
         {
             arkrtos_spin_unlock_irqrestore(&arkrtos_ptable_lock, irq_state);
-            return -1;          /* 与已登记的镜像区间重叠 */
+            return ARKRTOS_PTABLE_ERR_OCCUPIED;          /* 与已登记的镜像区间重叠 */
         }
     }
 
@@ -489,7 +489,7 @@ int32 arkrtos_ptable_alloc(uint32 type, uint32 base, uint32 size)
     if(free_slot < 0)
     {
         arkrtos_spin_unlock_irqrestore(&arkrtos_ptable_lock, irq_state);
-        return -1;              /* 没有空闲记录 */
+        return ARKRTOS_PTABLE_ERR_NOSLOT;              /* 没有空闲记录 */
     }
 
     pt->slot_type[(uint32)free_slot]      = type;
@@ -517,13 +517,13 @@ int32 arkrtos_ptable_alloc_raw(uint32 type, uint32 base, uint32 size, uint32 ent
 
     if((type != ARKRTOS_SLOT_APP) && (type != ARKRTOS_SLOT_DRIVER))
     {
-        return -1;
+        return ARKRTOS_PTABLE_ERR_PARAM;
     }
 
     if((size == 0u) || (base < IMAGE_POOL_BASE) ||
        ((base + size) > (IMAGE_POOL_BASE + IMAGE_POOL_SIZE)))
     {
-        return -1;
+        return ARKRTOS_PTABLE_ERR_RANGE;
     }
 
     arkrtos_spin_lock_irqsave(&arkrtos_ptable_lock, &irq_state);
@@ -553,7 +553,7 @@ int32 arkrtos_ptable_alloc_raw(uint32 type, uint32 base, uint32 size, uint32 ent
     if(free_slot < 0)
     {
         arkrtos_spin_unlock_irqrestore(&arkrtos_ptable_lock, irq_state);
-        return -1;
+        return ARKRTOS_PTABLE_ERR_NOSLOT;
     }
 
     pt->slot_type[(uint32)free_slot]      = type;
@@ -607,12 +607,12 @@ int32 arkrtos_ptable_move(uint32 slot, uint32 new_base)
 
     if((slot >= pt->slot_max) || (slot >= ARKRTOS_SLOT_ARRAY_MAX))
     {
-        return -1;
+        return ARKRTOS_PTABLE_ERR_PARAM;
     }
 
     if(arkrtos_ptable_range_check(new_base, pt->slot_size[slot]) != 0)
     {
-        return -1;
+        return ARKRTOS_PTABLE_ERR_RANGE;
     }
 
     end = new_base + pt->slot_size[slot];
@@ -636,7 +636,7 @@ int32 arkrtos_ptable_move(uint32 slot, uint32 new_base)
         if((new_base < other_end) && (other_base < end))
         {
             arkrtos_spin_unlock_irqrestore(&arkrtos_ptable_lock, irq_state);
-            return -1;
+            return ARKRTOS_PTABLE_ERR_OCCUPIED;
         }
     }
 
@@ -700,7 +700,7 @@ int32 arkrtos_ptable_find_task(uint32 task_id)
 
     if(task_id == 0u)
     {
-        return -1;
+        return ARKRTOS_PTABLE_ERR_PARAM;
     }
 
     arkrtos_spin_lock_irqsave(&arkrtos_ptable_lock, &irq_state);
@@ -726,7 +726,7 @@ int32 arkrtos_ptable_slot_info(uint32 slot, uint32 *p_type, uint32 *p_base, uint
 
     if((slot >= pt->slot_max) || (slot >= ARKRTOS_SLOT_ARRAY_MAX))
     {
-        return -1;
+        return ARKRTOS_PTABLE_ERR_PARAM;
     }
 
     arkrtos_spin_lock_irqsave(&arkrtos_ptable_lock, &irq_state);
@@ -756,20 +756,20 @@ int32 arkrtos_ptable_read_header(uint32 slot, arkrtos_app_header_t *out)
 
     if((slot >= pt->slot_max) || (slot >= ARKRTOS_SLOT_ARRAY_MAX))
     {
-        return -1;
+        return ARKRTOS_PTABLE_ERR_PARAM;
     }
 
     if((pt->slot_type[slot] == ARKRTOS_SLOT_FREE) ||
        (pt->slot_state[slot] == ARKRTOS_APP_SLOT_RAW))
     {
-        return -1;              /* 裸镜像没有镜像头 */
+        return ARKRTOS_PTABLE_ERR_NOSTATE;              /* 裸镜像没有镜像头 */
     }
 
     p_hdr = (const arkrtos_app_header_t *)pt->slot_base[slot];
 
     if(p_hdr->magic != ARKRTOS_APP_MAGIC)
     {
-        return -2;
+        return ARKRTOS_PTABLE_ERR_MAGIC;
     }
 
     if(out != 0)
@@ -787,7 +787,7 @@ int32 arkrtos_ptable_set_slot(uint32 slot, uint32 state, uint32 entry, uint32 ta
 
     if((slot >= pt->slot_max) || (slot >= ARKRTOS_SLOT_ARRAY_MAX))
     {
-        return -1;
+        return ARKRTOS_PTABLE_ERR_PARAM;
     }
 
     arkrtos_spin_lock_irqsave(&arkrtos_ptable_lock, &irq_state);
@@ -808,7 +808,7 @@ int32 arkrtos_ptable_get_slot(uint32 slot, uint32 *p_state, uint32 *p_entry, uin
 
     if((slot >= pt->slot_max) || (slot >= ARKRTOS_SLOT_ARRAY_MAX))
     {
-        return -1;
+        return ARKRTOS_PTABLE_ERR_PARAM;
     }
 
     arkrtos_spin_lock_irqsave(&arkrtos_ptable_lock, &irq_state);
@@ -844,7 +844,7 @@ int32 arkrtos_ptable_ram_alloc(uint32 bytes, uint32 *p_base, uint32 *p_size)
 
     if((p_base == 0) || (p_size == 0) || (bytes == 0u))
     {
-        return -1;
+        return ARKRTOS_PTABLE_ERR_PARAM;
     }
 
     want = arkrtos_pt_pow2_ceil(bytes);
@@ -856,7 +856,7 @@ int32 arkrtos_ptable_ram_alloc(uint32 bytes, uint32 *p_base, uint32 *p_size)
 
     if(want > SLOT_RAM_MAX_BLOCK)
     {
-        return -1;              /* 镜像声明的 RAM 需求超过单块上限 */
+        return ARKRTOS_PTABLE_ERR_RANGE;              /* 镜像声明的 RAM 需求超过单块上限 */
     }
 
     arkrtos_spin_lock_irqsave(&arkrtos_ptable_lock, &irq_state);
@@ -895,7 +895,7 @@ int32 arkrtos_ptable_ram_reserve(uint32 base, uint32 size)
      * 2 的幂时镜像的 .data/.bss 会露在 region 外面，一访问就 MemManage。 */
     if((size == 0u) || ((size & (size - 1u)) != 0u))
     {
-        return -1;
+        return ARKRTOS_PTABLE_ERR_PARAM;
     }
 
     end = base + size;
@@ -904,7 +904,7 @@ int32 arkrtos_ptable_ram_reserve(uint32 base, uint32 size)
        (end > (SLOT_RAM_BASE + SLOT_RAM_TOTAL)) ||
        ((base % size) != 0u))
     {
-        return -1;              /* 越界（含回绕）或没按块大小对齐 */
+        return ARKRTOS_PTABLE_ERR_RANGE;              /* 越界（含回绕）或没按块大小对齐 */
     }
 
     arkrtos_spin_lock_irqsave(&arkrtos_ptable_lock, &irq_state);
@@ -934,7 +934,7 @@ int32 arkrtos_ptable_ram_bind(uint32 slot, uint32 base, uint32 size)
 
     if((slot >= pt->slot_max) || (slot >= ARKRTOS_SLOT_ARRAY_MAX))
     {
-        return -1;
+        return ARKRTOS_PTABLE_ERR_PARAM;
     }
 
     arkrtos_spin_lock_irqsave(&arkrtos_ptable_lock, &irq_state);
@@ -954,7 +954,7 @@ int32 arkrtos_ptable_ram_info(uint32 slot, uint32 *p_base, uint32 *p_size)
 
     if((slot >= pt->slot_max) || (slot >= ARKRTOS_SLOT_ARRAY_MAX))
     {
-        return -1;
+        return ARKRTOS_PTABLE_ERR_PARAM;
     }
 
     arkrtos_spin_lock_irqsave(&arkrtos_ptable_lock, &irq_state);
@@ -1025,7 +1025,7 @@ int32 arkrtos_ptable_mini_alloc(uint32 code_bytes, uint32 ram_bytes,
        (p_ram_base == 0) || (p_ram_size == 0) ||
        (code_bytes == 0u) || (ram_bytes == 0u))
     {
-        return -1;
+        return ARKRTOS_PTABLE_ERR_PARAM;
     }
 
     want_code = arkrtos_pt_pow2_ceil(code_bytes);
@@ -1045,7 +1045,7 @@ int32 arkrtos_ptable_mini_alloc(uint32 code_bytes, uint32 ram_bytes,
      * 判定落到别的分支上。超出报错，不做截断。 */
     if((want_code > SLOT_RAM_MAX_BLOCK) || (want_ram > SLOT_RAM_MAX_BLOCK))
     {
-        return -1;
+        return ARKRTOS_PTABLE_ERR_RANGE;
     }
 
     arkrtos_spin_lock_irqsave(&arkrtos_ptable_lock, &irq_state);
@@ -1065,7 +1065,7 @@ int32 arkrtos_ptable_mini_alloc(uint32 code_bytes, uint32 ram_bytes,
     if(have_slot == 0)
     {
         arkrtos_spin_unlock_irqrestore(&arkrtos_ptable_lock, irq_state);
-        return -1;
+        return ARKRTOS_PTABLE_ERR_NOSLOT;
     }
 
     n = arkrtos_pt_collect(pt, ranges, ARKRTOS_PT_RANGE_MAX, 1u);
@@ -1119,7 +1119,7 @@ int32 arkrtos_ptable_mini_free(uint32 index)
 
     if(index >= ARKRTOS_MINI_ARRAY_MAX)
     {
-        return -1;              /* 越界：不能拿一个下标去清别人那项 */
+        return ARKRTOS_PTABLE_ERR_PARAM;              /* 越界：不能拿一个下标去清别人那项 */
     }
 
     arkrtos_spin_lock_irqsave(&arkrtos_ptable_lock, &irq_state);
@@ -1128,7 +1128,7 @@ int32 arkrtos_ptable_mini_free(uint32 index)
        (pt->mini_ram_base[index] == 0u) && (pt->mini_ram_size[index] == 0u))
     {
         arkrtos_spin_unlock_irqrestore(&arkrtos_ptable_lock, irq_state);
-        return -1;              /* 本就没借：如实报错，不假装归还成功 */
+        return ARKRTOS_PTABLE_ERR_NOSTATE;              /* 本就没借：如实报错，不假装归还成功 */
     }
 
     pt->mini_code_base[index] = 0u;
@@ -1175,12 +1175,12 @@ int32 arkrtos_ptable_mini_info(uint32 index,
 
     if(index >= ARKRTOS_MINI_ARRAY_MAX)
     {
-        return -1;
+        return ARKRTOS_PTABLE_ERR_PARAM;
     }
     if((p_code_base == 0) && (p_code_size == 0) &&
        (p_ram_base == 0) && (p_ram_size == 0))
     {
-        return -1;
+        return ARKRTOS_PTABLE_ERR_PARAM;
     }
 
     arkrtos_spin_lock_irqsave(&arkrtos_ptable_lock, &irq_state);

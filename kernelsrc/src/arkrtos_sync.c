@@ -120,7 +120,7 @@ int32 arkrtos_sync_sem_debug(int32 idx, arkrtos_sync_dbg_row_t *out)
 {
     if((idx < 0) || (idx >= ARKRTOS_SEM_NUM) || (out == 0))
     {
-        return -1;
+        return ARKRTOS_SYNC_ERR_PARAM;
     }
     return sync_dbg_row(arkrtos_sems[idx].used, arkrtos_sems[idx].creator_id, 0,
                         arkrtos_sems[idx].count, arkrtos_sems[idx].waiters, out);
@@ -130,7 +130,7 @@ int32 arkrtos_sync_mtx_debug(int32 idx, arkrtos_sync_dbg_row_t *out)
 {
     if((idx < 0) || (idx >= ARKRTOS_MTX_NUM) || (out == 0))
     {
-        return -1;
+        return ARKRTOS_SYNC_ERR_PARAM;
     }
     return sync_dbg_row(arkrtos_mtxs[idx].used, arkrtos_mtxs[idx].creator_id,
                         (int32)((arkrtos_mtxs[idx].owner != 0)
@@ -142,7 +142,7 @@ int32 arkrtos_sync_cond_debug(int32 idx, arkrtos_sync_dbg_row_t *out)
 {
     if((idx < 0) || (idx >= ARKRTOS_COND_NUM) || (out == 0))
     {
-        return -1;
+        return ARKRTOS_SYNC_ERR_PARAM;
     }
     return sync_dbg_row(arkrtos_conds[idx].used, arkrtos_conds[idx].creator_id, 0, 0,
                         arkrtos_conds[idx].waiters, out);
@@ -259,7 +259,7 @@ static int32 arkrtos_waiters_add(arkrtos_task_t **waiters, arkrtos_task_t *p_tsk
         if(waiters[j] == p_tsk)
         {
             arkrtos_diag_sync_dup++;
-            return -2;
+            return ARKRTOS_SYNC_WAITER_DUP;
         }
     }
     for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
@@ -270,7 +270,7 @@ static int32 arkrtos_waiters_add(arkrtos_task_t **waiters, arkrtos_task_t *p_tsk
             return 0;
         }
     }
-    return -1;
+    return ARKRTOS_SYNC_ERR_NOSPACE;
 }
 
 /* 从等待者列表中取出优先级最高（priority 数值最小）的任务并移除 */
@@ -338,7 +338,7 @@ static int32 arkrtos_waiters_remove(arkrtos_task_t **waiters, arkrtos_task_t *p_
             return 0;
         }
     }
-    return -1;
+    return ARKRTOS_SYNC_ERR_NOTFOUND;
 }
 
 /* 按该锁当前的等待者重算持锁者优先级，用于撤销优先级继承提升
@@ -643,7 +643,7 @@ int32 arkrtos_sem_create_internal(char *name, int32 init_count)
         }
     }
     ARKRTOS_ENABLE_IRQ();
-    return -1;
+    return ARKRTOS_SYNC_ERR_NOSLOT;
 }
 
 int32 arkrtos_sem_wait_internal(int32 handle, int32 timeout_ms)
@@ -653,9 +653,9 @@ int32 arkrtos_sem_wait_internal(int32 handle, int32 timeout_ms)
     int32 reason;
 
     if(ARKRTOS_SEM_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
-        return -1;
+        return ARKRTOS_SYNC_ERR_HANDLE;
     if(idx >= ARKRTOS_SEM_NUM || arkrtos_sems[idx].used == 0)
-        return -1;
+        return ARKRTOS_SYNC_ERR_HANDLE;
 
     p_tsk = arkrtos_task_get_current();
 
@@ -699,7 +699,7 @@ int32 arkrtos_sem_wait_internal(int32 handle, int32 timeout_ms)
     if(p_tsk == 0)
     {
         ARKRTOS_ENABLE_IRQ();
-        return -1;
+        return ARKRTOS_SYNC_ERR_CONTEXT;
     }
 
     {
@@ -708,7 +708,7 @@ int32 arkrtos_sem_wait_internal(int32 handle, int32 timeout_ms)
         if((added < 0) && (added != -2))
         {
             ARKRTOS_ENABLE_IRQ();
-            return -1;                      /* waiter queue is full */
+            return ARKRTOS_SYNC_ERR_NOSPACE;                      /* waiter queue is full */
         }
         if(added == 0)
         {
@@ -791,9 +791,9 @@ int32 arkrtos_sem_post_internal(int32 handle)
     arkrtos_task_t *p_wake;
 
     if(ARKRTOS_SEM_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
-        return -1;
+        return ARKRTOS_SYNC_ERR_HANDLE;
     if(idx >= ARKRTOS_SEM_NUM || arkrtos_sems[idx].used == 0)
-        return -1;
+        return ARKRTOS_SYNC_ERR_HANDLE;
 
     dbg_sem_posts[idx]++;
     ARKRTOS_DISABLE_IRQ();
@@ -843,9 +843,9 @@ int32 arkrtos_sem_delete_internal(int32 handle)
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
     if(ARKRTOS_SEM_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
-        return -1;
+        return ARKRTOS_SYNC_ERR_HANDLE;
     if(idx >= ARKRTOS_SEM_NUM)
-        return -1;
+        return ARKRTOS_SYNC_ERR_HANDLE;
 
     ARKRTOS_DISABLE_IRQ();
     /* 查 used：把一个已经不存在的对象报成“删掉了”是错答案；
@@ -853,7 +853,7 @@ int32 arkrtos_sem_delete_internal(int32 handle)
     if(arkrtos_sems[idx].used == 0)
     {
         ARKRTOS_ENABLE_IRQ();
-        return -1;
+        return ARKRTOS_SYNC_ERR_STATE;
     }
     /* 先唤醒全部等待者（原因=对象已删除），否则它们会永远阻塞：
      * 对象删除后等待队列被清空，再也没有 post 来唤醒它们。 */
@@ -893,7 +893,7 @@ int32 arkrtos_mtx_create_internal(char *name)
         }
     }
     ARKRTOS_ENABLE_IRQ();
-    return -1;
+    return ARKRTOS_SYNC_ERR_NOSLOT;
 }
 
 int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms)
@@ -903,16 +903,16 @@ int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms)
     int32 reason;
 
     if(ARKRTOS_MTX_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
-        return -1;
+        return ARKRTOS_SYNC_ERR_HANDLE;
     if(idx >= ARKRTOS_MTX_NUM || arkrtos_mtxs[idx].used == 0)
-        return -1;
+        return ARKRTOS_SYNC_ERR_HANDLE;
 
     ARKRTOS_DISABLE_IRQ();
     p_tsk = arkrtos_task_get_current();
     if(p_tsk == 0)
     {
         ARKRTOS_ENABLE_IRQ();
-        return -1;
+        return ARKRTOS_SYNC_ERR_CONTEXT;
     }
 
     if(arkrtos_mtxs[idx].owner == 0)
@@ -937,7 +937,7 @@ int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms)
     {
         /* 同一任务重复加锁，不支持递归，返回错误 */
         ARKRTOS_ENABLE_IRQ();
-        return -1;
+        return ARKRTOS_SYNC_ERR_RECURSIVE;
     }
 
     /* timeout==0 表示“只试一次、不等待”：锁已被他人持有立即报超时。
@@ -1052,9 +1052,9 @@ int32 arkrtos_mtx_unlock_internal(int32 handle)
     arkrtos_task_t *p_next;
 
     if(ARKRTOS_MTX_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
-        return -1;
+        return ARKRTOS_SYNC_ERR_HANDLE;
     if(idx >= ARKRTOS_MTX_NUM || arkrtos_mtxs[idx].used == 0)
-        return -1;
+        return ARKRTOS_SYNC_ERR_HANDLE;
 
     ARKRTOS_DISABLE_IRQ();
     p_tsk = arkrtos_task_get_current();
@@ -1062,7 +1062,7 @@ int32 arkrtos_mtx_unlock_internal(int32 handle)
     {
         /* 非持有者不能解锁 */
         ARKRTOS_ENABLE_IRQ();
-        return -1;
+        return ARKRTOS_SYNC_ERR_OWNER;
     }
 
     /* 先把锁交出去，再重算优先级：
@@ -1103,9 +1103,9 @@ int32 arkrtos_mtx_delete_internal(int32 handle)
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
     if(ARKRTOS_MTX_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
-        return -1;
+        return ARKRTOS_SYNC_ERR_HANDLE;
     if(idx >= ARKRTOS_MTX_NUM)
-        return -1;
+        return ARKRTOS_SYNC_ERR_HANDLE;
 
     ARKRTOS_DISABLE_IRQ();
     /* 查 used：把一个已经不存在的对象报成“删掉了”是错答案；
@@ -1113,7 +1113,7 @@ int32 arkrtos_mtx_delete_internal(int32 handle)
     if(arkrtos_mtxs[idx].used == 0)
     {
         ARKRTOS_ENABLE_IRQ();
-        return -1;
+        return ARKRTOS_SYNC_ERR_STATE;
     }
     /* 删除锁相当于释放它：持有者按基准优先级（及仍持有的其它锁）重算，
      * 不再依赖加锁时的快照。 */
@@ -1193,7 +1193,7 @@ int32 arkrtos_cond_create_internal(char *name)
         }
     }
     ARKRTOS_ENABLE_IRQ();
-    return -1;                  /* 对象表满：明确失败，不静默复用 */
+    return ARKRTOS_SYNC_ERR_NOSLOT;                  /* 对象表满：明确失败，不静默复用 */
 }
 
 /* 等待：原子地「释放 mtx + 入队 + 挂起」，醒来后重新获取 mtx。
@@ -1394,9 +1394,9 @@ int32 arkrtos_cond_signal_internal(int32 handle)
     arkrtos_task_t *p_tsk;
 
     if(ARKRTOS_COND_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
-        return -1;
+        return ARKRTOS_SYNC_ERR_HANDLE;
     if(idx >= ARKRTOS_COND_NUM || arkrtos_conds[idx].used == 0)
-        return -1;
+        return ARKRTOS_SYNC_ERR_HANDLE;
 
     ARKRTOS_DISABLE_IRQ();
     p_tsk = arkrtos_waiters_pop_highest(arkrtos_conds[idx].waiters);
@@ -1426,9 +1426,9 @@ int32 arkrtos_cond_broadcast_internal(int32 handle)
     int32 woke = 0;
 
     if(ARKRTOS_COND_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
-        return -1;
+        return ARKRTOS_SYNC_ERR_HANDLE;
     if(idx >= ARKRTOS_COND_NUM || arkrtos_conds[idx].used == 0)
-        return -1;
+        return ARKRTOS_SYNC_ERR_HANDLE;
 
     ARKRTOS_DISABLE_IRQ();
     for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
@@ -1460,9 +1460,9 @@ int32 arkrtos_cond_delete_internal(int32 handle)
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
     if(ARKRTOS_COND_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
-        return -1;
+        return ARKRTOS_SYNC_ERR_HANDLE;
     if(idx >= ARKRTOS_COND_NUM || arkrtos_conds[idx].used == 0)
-        return -1;
+        return ARKRTOS_SYNC_ERR_HANDLE;
 
     ARKRTOS_DISABLE_IRQ();
     /* 唤醒全部等待者并告诉它们「对象没了」：不能让它们留在队列里等一个

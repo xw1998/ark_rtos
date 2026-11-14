@@ -238,7 +238,7 @@ static int32 arkrtos_mini_read_exact(const char *path, uint8 *buf, uint32 len, u
 #if (ARKRTOS_MINI_READ_VFS == 1)
         g_mini_read_err = rc;
 #endif
-        return -1;
+        return ARKRTOS_MINI_ERR_READ;
     }
     if(got != len)
     {
@@ -247,7 +247,7 @@ static int32 arkrtos_mini_read_exact(const char *path, uint8 *buf, uint32 len, u
 #if (ARKRTOS_MINI_READ_VFS == 1)
         g_mini_read_err = ARKRTOS_MINI_ERR_SHORT_READ;
 #endif
-        return -1;
+        return ARKRTOS_MINI_ERR_READ;
     }
 
     return 0;
@@ -1013,7 +1013,7 @@ int32 arkrtos_mini_info_at(uint32 index, arkrtos_mini_info_t *p_out)
 
     if(p_out == 0)
     {
-        return -1;
+        return ARKRTOS_MINI_ERR_PARAM;
     }
 
     arkrtos_spin_lock_irqsave(&g_mini_lock, &irq);
@@ -1021,7 +1021,7 @@ int32 arkrtos_mini_info_at(uint32 index, arkrtos_mini_info_t *p_out)
     if(slot == 0)
     {
         arkrtos_spin_unlock_irqrestore(&g_mini_lock, irq);
-        return -1;
+        return ARKRTOS_MINI_ERR_NOSTATE;
     }
     *p_out = slot->info;
     arkrtos_spin_unlock_irqrestore(&g_mini_lock, irq);
@@ -1033,12 +1033,12 @@ int32 arkrtos_mini_info(arkrtos_mini_info_t *p_out)
 {
     if(p_out == 0)
     {
-        return -1;
+        return ARKRTOS_MINI_ERR_PARAM;
     }
 
     if(arkrtos_mini_info_at(0u, p_out) != 0)
     {
-        return -1;
+        return ARKRTOS_MINI_ERR_NOSTATE;
     }
 
     return 0;
@@ -1114,7 +1114,7 @@ int32 arkrtos_mini_forget(const char *path)
 {
     if((path == 0) || (path[0] == '\0'))
     {
-        return -1;
+        return ARKRTOS_MINI_ERR_PARAM;
     }
 
     arkrtos_crash_mini_forget(arkrtos_crash_hash_path(path));
@@ -1302,7 +1302,7 @@ static int32 arkrtos_mini_auto_read(uint32 *out_len)
     if(arkrtos_fs_read_file(ARKRTOS_MINI_AUTOSTART_FILE, g_mini_auto_in,
                           (uint32)ARKRTOS_MINI_AUTOSTART_MAX - 1u, &len) != 0)
     {
-        return -1;
+        return ARKRTOS_MINI_ERR_READ;
     }
 
     g_mini_auto_in[len] = '\0';
@@ -1398,12 +1398,12 @@ static int32 arkrtos_mini_auto_walk(arkrtos_mini_auto_cb_t cb, void *arg)
 
     if(cb == 0)
     {
-        return -1;
+        return ARKRTOS_MINI_ERR_PARAM;
     }
 
     if(arkrtos_mini_auto_read(&len) != 0)
     {
-        return -1;
+        return ARKRTOS_MINI_ERR_READ;
     }
 
     while(arkrtos_mini_auto_next(&cur, len, &s, &e) != 0u)

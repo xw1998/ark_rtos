@@ -117,7 +117,7 @@ int32 arkrtos_sbuf_create_internal(char *name)
 {
     if(name == 0)
     {
-        return -1;
+        return ARKRTOS_SBUF_ERR_PARAM;
     }
     return arkrtos_sbuf_alloc(name, (arkrtos_current_task_id > 0)
                                     ? arkrtos_current_task_id : 0);
@@ -127,7 +127,7 @@ int32 arkrtos_sbuf_create_kernel_internal(char *name)
 {
     if(name == 0)
     {
-        return -1;
+        return ARKRTOS_SBUF_ERR_PARAM;
     }
     return arkrtos_sbuf_alloc(name, 0);
 }
@@ -170,7 +170,7 @@ static int32 arkrtos_sbuf_waiter_add(arkrtos_task_t **waiters, arkrtos_task_t *p
     {
         if(waiters[j] == p_tsk)
         {
-            return -2;              /* 已经在表里，等价于登记成功 */
+            return ARKRTOS_SBUF_WAITER_DUP;              /* 已经在表里，等价于登记成功 */
         }
     }
     for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
@@ -181,7 +181,7 @@ static int32 arkrtos_sbuf_waiter_add(arkrtos_task_t **waiters, arkrtos_task_t *p
             return 0;
         }
     }
-    return -1;                      /* 表满 */
+    return ARKRTOS_SBUF_ERR_NOSPACE;                      /* 表满 */
 }
 
 static void arkrtos_sbuf_waiter_remove(arkrtos_task_t **waiters, arkrtos_task_t *p_tsk)
@@ -410,7 +410,7 @@ static int32 arkrtos_sbuf_remain_ms(uint32 start_tick, uint32 deadline)
 
     if(deadline == 0u)
     {
-        return -1;
+        return ARKRTOS_SBUF_WAIT_INFINITE;
     }
 
     elapsed = arkrtos_kernel_tick - start_tick;
@@ -904,7 +904,7 @@ static int32 arkrtos_mbuf_hdr_peek(arkrtos_sbuf_obj_t *p_sb)
 
     if(p_sb->count < ARKRTOS_MBUF_HDR)
     {
-        return -1;
+        return ARKRTOS_SBUF_ERR_BADLEN;
     }
 
     arkrtos_sbuf_peek_at(p_sb, 0u, hdr, ARKRTOS_MBUF_HDR);
@@ -913,7 +913,7 @@ static int32 arkrtos_mbuf_hdr_peek(arkrtos_sbuf_obj_t *p_sb)
     {
         /* 长度头本身坏了（流/消息混用、或调用方自己写了裸字节）。
          * 报错而不是按一个荒唐的长度去读。 */
-        return -1;
+        return ARKRTOS_SBUF_ERR_BADLEN;
     }
     return (int32)len;
 }

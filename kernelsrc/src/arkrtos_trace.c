@@ -292,6 +292,6 @@ void   arkrtos_trace_record(uint8 ev, uint8 arg) { (void)ev; (void)arg; }
 void   arkrtos_trace_switch(uint8 from, uint8 to) { (void)from; (void)to; }
 void   arkrtos_trace_wait(uint8 task_id) { (void)task_id; }
 void   arkrtos_trace_isr(uint8 irq, uint8 kind) { (void)irq; (void)kind; }
-int    arkrtos_trace_shell_cmd(int argc, char *argv[]) { (void)argc; (void)argv; return -1; }
+int    arkrtos_trace_shell_cmd(int argc, char *argv[]) { (void)argc; (void)argv; return ARKRTOS_TRACE_ERR_DISABLED; }
 
 #endif /* ARKRTOS_USE_MDK_TRACE */

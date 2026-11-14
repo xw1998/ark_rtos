@@ -662,7 +662,7 @@ int32 arkrtos_layout_slot_by_base(uint32 addr)
             return (int32)i;
         }
     }
-    return -1;
+    return ARKRTOS_LAYOUT_ERR_NOTFOUND;
 }
 
 const char *arkrtos_layout_reason_text(uint32 reason)

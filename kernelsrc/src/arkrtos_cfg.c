@@ -69,14 +69,14 @@ int32 arkrtos_task_register(void (*entry)(void), uint32 *stack_bottom, uint32 st
         else
         {
             arkrtos_fault_record(ARKRTOS_FAULT_NOSLOT, 0);
-            return -1;
+            return ARKRTOS_CFG_ERR_NOSLOT;
         }
     }
 
     if((entry == 0) || (stack_bottom == 0) || (stack_size < 64u))
     {
         arkrtos_fault_record(ARKRTOS_FAULT_NOSLOT, 0);
-        return -1;
+        return ARKRTOS_CFG_ERR_PARAM;
     }
 
     stack_bottom[0] = ARKRTOS_STACK_END_FLAG_VAL;

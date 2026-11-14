@@ -32,6 +32,19 @@
 #include "arkrtos_types.h"
 #include "arkrtos_app_image.h"
 
+/* 返回 -1 的名字。与上面的 ARKRTOS_LOADER_ERR_*(值 -1..-18) 区分：
+ * ERR_* 的负值本身携带原因；FAIL_* 全回 -1，原因在本函数的分支里，
+ * 只是让读代码的人不用数 -1。值不得单独修改。 */
+#define ARKRTOS_LOADER_FAIL_PARAM    (-1)   /* 参数非法 */
+#define ARKRTOS_LOADER_FAIL_NOTFOUND (-1)   /* 找不到干净区间 / 找不到槽位 */
+#define ARKRTOS_LOADER_FAIL_TIMEOUT  (-1)   /* 等设备数据超时 */
+#define ARKRTOS_LOADER_FAIL_GEOMETRY (-1)   /* 池扇区未配置或长度不对齐 */
+#define ARKRTOS_LOADER_FAIL_ERASE    (-1)   /* 擦除失败（本返回点历史值 -1，不是 -6） */
+#define ARKRTOS_LOADER_FAIL_LAYOUT   (-1)   /* 布局模式 / 槽位配置不允许该操作 */
+#define ARKRTOS_LOADER_FAIL_STATE    (-1)   /* 镜像头字段或槽位状态不允许 */
+#define ARKRTOS_LOADER_FAIL_SIZE     (-1)   /* 长度越界（本返回点历史值 -1，不是 -4） */
+
+
 #if (defined(__cplusplus))
 extern "C" {
 #endif

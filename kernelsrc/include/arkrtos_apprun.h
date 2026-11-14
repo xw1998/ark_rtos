@@ -23,6 +23,10 @@
 
 #include "arkrtos_def.h"
 
+/* 返回码：值不得单独修改。 */
+#define ARKRTOS_APPRUN_ERR_NOSTATE (-1)   /* 没有正在运行的 App */
+
+
 /* 本路径独有的三个错误码；其余（NOMAGIC 以外的失败原因）沿用
  * ARKRTOS_LOADER_ERR_x 与 ARKRTOS_MINI_ERR_FS，免得同一种错误在三条路径上
  * 报出三个名字。 */

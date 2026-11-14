@@ -503,7 +503,7 @@ static int32 arkrtos_loader_find_clean(uint32 size, uint32 skip_base, uint32 ski
 
     if((size == 0u) || (size > IMAGE_POOL_USABLE_SIZE))
     {
-        return -1;
+        return ARKRTOS_LOADER_FAIL_PARAM;
     }
 
     for(p = begin; p < limit; p += 4u)
@@ -572,7 +572,7 @@ static int32 arkrtos_loader_find_clean(uint32 size, uint32 skip_base, uint32 ski
         }
     }
 
-    return -1;
+    return ARKRTOS_LOADER_FAIL_NOTFOUND;
 }
 
 /* ============================================================
@@ -792,7 +792,7 @@ static int32 arkrtos_loader_read_dev(int32 dev, uint8 *buf, uint32 len)
             idle++;
             if(idle > 100000u)      /* 约百万次空转后放弃，防止死等 */
             {
-                return -1;
+                return ARKRTOS_LOADER_FAIL_TIMEOUT;
             }
         }
     }
@@ -1128,7 +1128,7 @@ static int32 arkrtos_loader_clear_span(uint32 base, uint32 size)
 
     if((pt->pool_sector == 0u) || ((size % pt->pool_sector) != 0u))
     {
-        return -1;
+        return ARKRTOS_LOADER_FAIL_GEOMETRY;
     }
 
     if(arkrtos_loader_span_blank(base, size) != 0)
@@ -1140,7 +1140,7 @@ static int32 arkrtos_loader_clear_span(uint32 base, uint32 size)
     {
         if(arkrtos_port_flash_erase(clr, pt->pool_sector) != 0)
         {
-            return -1;
+            return ARKRTOS_LOADER_FAIL_ERASE;
         }
 
         /* One 128K sector takes about a second and a slot may span several,
@@ -1350,19 +1350,19 @@ int32 arkrtos_loader_fixed_slot_blank(int32 index)
 
     if(pt->layout_mode != (uint32)ARKRTOS_LAYOUT_MODE_FIXED)
     {
-        return -1;              /* AUTO mode never erases on reserve */
+        return ARKRTOS_LOADER_FAIL_LAYOUT;              /* AUTO mode never erases on reserve */
     }
 
     if((index < 0) || ((uint32)index >= arkrtos_layout_slot_count()))
     {
-        return -1;
+        return ARKRTOS_LOADER_FAIL_PARAM;
     }
 
     cs = arkrtos_layout_slot((uint32)index);
 
     if(cs == 0)
     {
-        return -1;
+        return ARKRTOS_LOADER_FAIL_LAYOUT;
     }
 
     return arkrtos_loader_span_blank(cs->base, cs->size);
@@ -1806,7 +1806,7 @@ static int32 arkrtos_loader_accept(uint32 base, uint32 *out_total, uint32 *out_e
         /* 头字段不合法：不属于可用镜像。给出一个保守的跳过长度，
          * 免得在残片里逐个分配单元地磨下去。 */
         *out_total = ARKRTOS_POOL_ALLOC_UNIT;
-        return -1;
+        return ARKRTOS_LOADER_FAIL_STATE;
     }
 
     total = ARKRTOS_APP_TOTAL_LEN(p_hdr);
@@ -1815,7 +1815,7 @@ static int32 arkrtos_loader_accept(uint32 base, uint32 *out_total, uint32 *out_e
        ((base + total) > (IMAGE_POOL_BASE + IMAGE_POOL_USABLE_SIZE)))
     {
         *out_total = ARKRTOS_POOL_ALLOC_UNIT;
-        return -1;
+        return ARKRTOS_LOADER_FAIL_SIZE;
     }
 
     *out_total = arkrtos_loader_align_up(total, ARKRTOS_POOL_ALLOC_UNIT);
@@ -1831,7 +1831,7 @@ static int32 arkrtos_loader_accept(uint32 base, uint32 *out_total, uint32 *out_e
      * 装完再回写一个任意 CRC 是做不到的）。 */
     if(p_hdr->state != ARKRTOS_APP_STATE_VALID)
     {
-        return -1;
+        return ARKRTOS_LOADER_FAIL_STATE;
     }
 
     *out_entry = arkrtos_loader_entry_addr(base, p_hdr->payload_offset, p_hdr->entry_offset);
@@ -3107,7 +3107,7 @@ int32 arkrtos_loader_on_fault(int32 task_id)
 
     if(task_id <= 0)
     {
-        return -1;
+        return ARKRTOS_LOADER_FAIL_PARAM;
     }
 
     slot = arkrtos_ptable_find_task((uint32)task_id);
@@ -3124,7 +3124,7 @@ int32 arkrtos_loader_on_fault(int32 task_id)
         }
         #endif
 
-        return -1;              /* 内核任务：沿用默认故障处理 */
+        return ARKRTOS_LOADER_FAIL_NOTFOUND;              /* 内核任务：沿用默认故障处理 */
     }
 
     /* Counting and the disable decision live in the crash journal, not here.

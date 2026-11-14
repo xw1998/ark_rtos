@@ -12,6 +12,16 @@
 #include "arkrtos_hal.h"
 #include "arkrtos_config.h"
 
+/* 返回码：值不得单独修改（多个名字共用 -1 是有意的，分名只为表意）。 */
+#define ARKRTOS_TASK_ERR_PARAM     (-1)   /* 任务号 / 输出指针 / 优先级非法 */
+#define ARKRTOS_TASK_ERR_ENTRY     (-1)   /* 入口不在调用方自己的代码区 */
+#define ARKRTOS_TASK_ERR_STACK     (-1)   /* 栈不在调用方自己的 RAM 区 */
+#define ARKRTOS_TASK_ERR_PRIORITY  (-1)   /* 255 是调度器的"无候选"哨兵，不能给任务 */
+#define ARKRTOS_TASK_ERR_CONTEXT   (-1)   /* 内核上下文 / 调度器锁定期间不允许阻塞 */
+#define ARKRTOS_TASK_ERR_NOSTATE   (-1)   /* 任务没有栈信息（已结束 / 未创建） */
+#define ARKRTOS_TASK_NONE          (-1)   /* 哨兵：没有就绪任务 / 不需要切换（不是错误码） */
+
+
 typedef enum {
     ARKRTOS_TASK_INVALID,
     ARKRTOS_TASK_READY,

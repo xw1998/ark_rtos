@@ -24,6 +24,17 @@
 #include "arkrtos_share.h"
 #include "arkrtos_app_image.h"
 
+/* 返回码：值不得单独修改（多个名字共用 -1 是有意的，分名只为表意）。 */
+#define ARKRTOS_PTABLE_ERR_PARAM     (-1)   /* 槽号/下标越界，或必填指针为空 */
+#define ARKRTOS_PTABLE_ERR_RANGE     (-1)   /* 地址/长度越出镜像池 */
+#define ARKRTOS_PTABLE_ERR_ALIGN     (-1)   /* 落点未按分配粒度对齐 */
+#define ARKRTOS_PTABLE_ERR_OCCUPIED  (-1)   /* 与已登记的区间重叠 */
+#define ARKRTOS_PTABLE_ERR_NOSLOT    (-1)   /* 槽位表已满，分配不到记录 */
+#define ARKRTOS_PTABLE_ERR_NOSPACE   (-1)   /* 池内没有足够大的连续区间 */
+#define ARKRTOS_PTABLE_ERR_NOSTATE   (-1)   /* 槽位未登记 / 裸镜像没有镜像头 */
+#define ARKRTOS_PTABLE_ERR_MAGIC     (-2)   /* 镜像头魔数不对（历史值是 -2，不得改成 -1） */
+
+
 #if (defined(__cplusplus))
 extern "C" {
 #endif

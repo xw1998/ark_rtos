@@ -21,6 +21,15 @@
 
 #include "arkrtos_types.h"
 
+/* 返回码：值不得单独修改（多个名字共用 -1 是有意的，分名只为表意）。 */
+#define ARKRTOS_INSTALLER_ERR_PARAM   (-1)   /* 参数/缓冲非法 */
+#define ARKRTOS_INSTALLER_ERR_TIMEOUT (-1)   /* 串口空闲超过上限，放弃这一帧 */
+#define ARKRTOS_INSTALLER_ERR_CONFIG  (-1)   /* 固定槽未配置 */
+#define ARKRTOS_INSTALLER_ERR_BUSY    (-1)   /* 固定槽里的镜像停不下来 */
+#define ARKRTOS_INSTALLER_ERR_ERASE   (-1)   /* 清槽失败 */
+#define ARKRTOS_INSTALLER_ERR_IO      (-1)   /* 设备注册失败 / 读文件失败 */
+
+
 #if (defined(__cplusplus))
 extern "C" {
 #endif

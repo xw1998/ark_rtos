@@ -34,6 +34,12 @@
 #include "arkrtos_log_defs.h"
 #include <stdio.h>              /* snprintf：日志宏在栈缓冲里完成格式化 */
 
+/* 返回码：值不得单独修改（多个名字共用 -1 是有意的，分名只为表意）。 */
+#define ARKRTOS_LOG_ERR_DEVICE   (-1)   /* 没有可写的控制台设备 */
+#define ARKRTOS_LOG_ERR_PARAM    (-1)   /* 消息指针为空 */
+#define ARKRTOS_LOG_ERR_DISABLED (-1)   /* 日志服务未编入（#else 桩） */
+
+
 #ifdef __cplusplus
 extern "C" {
 #endif
