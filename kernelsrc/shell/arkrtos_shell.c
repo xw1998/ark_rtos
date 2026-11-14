@@ -1638,6 +1638,42 @@ static int cmd_install(int argc, char *argv[])
          * symptom is err -4 with the table never written). So: clear first,
          * while the host is still waiting for its banner, then say "send".
          * The loader's own blank check then skips its erase. */
+        {
+            /* 清槽就是擦掉这个槽的 Flash。若还有镜像正从这里取指运行，擦完
+             * 它取到的是 0xFF（未定义指令）——板上实测：跟着三条 USGFAULT，
+             * 撞到崩溃上限后整个槽被禁用，而操作者只看到 install 成功，
+             * 上一个应用“无缘无故”被停。无头安装器（arkrtos_installer.c 的
+             * arkrtos_installer_fixed_prepare）早就会先停后擦，这里当初漏了。*/
+            arkrtos_partition_table_t *pt = arkrtos_ptable_get();
+            uint32 j;
+
+            for(j = 0u; (j < pt->slot_max) && (j < ARKRTOS_SLOT_ARRAY_MAX); j++)
+            {
+                if(pt->slot_type[j] == ARKRTOS_SLOT_FREE)
+                {
+                    continue;
+                }
+                if(!((cs->base < (pt->slot_base[j] + pt->slot_size[j])) &&
+                     (pt->slot_base[j] < (cs->base + cs->size))))
+                {
+                    continue;       /* 与要清的槽没有交集 */
+                }
+                if(pt->slot_state[j] != ARKRTOS_APP_SLOT_RUNNING)
+                {
+                    continue;       /* 没有东西在从这个槽执行 */
+                }
+
+                ark_shell_printf("install: slot %u still running (id %u), stopping it before the erase\r\n",
+                                 (unsigned)want, (unsigned)j);
+
+                if(arkrtos_loader_stop((uint32)j) != 0)
+                {
+                    sh_out("install: cannot stop the running image, refusing to erase its flash\r\n");
+                    return -1;
+                }
+            }
+        }
+
         if(arkrtos_loader_clear_fixed_slot((int32)want) != 0)
         {
             sh_out("install: cannot clear the slot (flash erase failed)\r\n");

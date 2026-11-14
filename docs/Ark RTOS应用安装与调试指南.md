@@ -80,6 +80,27 @@
 窗口算的，于是会按错的阈值生效。现场表现为「装完的同一上电周期内 App 早停，
 `fault` 里一条 `STACKOVF`，重启后却完全正常」。
 
+**现场一例（2026-11-14，POSIX_DEMO）**：该镜像声明 `ram_size = 16384`（RW/ZI 4348 +
+栈 4096 + heap 2048 = 10492，向上取 2 的幂），而当时 3 个固定槽登记的
+`ram_size` 都是 `0x2000`（8 KB）。`install 2` 打开接收窗口后 `send_image.py`
+在头+重定位表那一帧就被拒：`INSTALL: rejected: err -4, type 1, payload 10532 B,
+reloc 56`——`err -4` 就是 `ARKRTOS_LOADER_ERR_SIZE`，「镜像要得比槽登记的上限大」。
+调大方法是重写一条配置记录，不动别的字段：`tools/arkrtos_layout.py build
+--config <json> --bin layout.bin --seq <新序号>` 出记录 →
+`tools/arkrtos_cfg.py write --port COMx --bin layout.bin --reboot` 写进去。
+配置区是**追加**的（写进下一个空记录槽，旧记录不擦），所以写错还能往前回退；
+但 `cfg clear` 会擦掉整片配置区、直接摸到编译期默认（默认表是空的），
+除非你就是要那个状态，否则别用。
+
+> **`cfg show` 不打印每槽的 `ram_size`**，只给 Flash 基址、大小与 RAM 基址——
+> 从控制台看不出窗口上限。要看只能读配置区里的记录（`0x08040000`，一条 512 B，
+> 槽表从 +0x20 起、每槽 32 B，`ram_size` 在槽内 +16），且**必须先 `halt`**：
+> 目标在跑的时候用 pyocd / pyOCD cmd 连读同一段 Flash 会间歇性夹杂垃圾字
+> （实测同一地址两次读到 `2808b51c`、`b169d20e` 这类不属于该扇区的值），
+> 停机后连读两次逐字节一致。工具链侧的等价校验是
+> `tools/arkrtos_layout.py build ... --seq <旧序号>` 重建旧记录，与板上读回的
+> 512 字节逐字节比对（连同 CRC），一致才算读对了。
+
 **开发槽位走的是静态窗口**：每个槽位 16 KB（`ARKRTOS_DEV_RAM_WINDOW`），
 4 个槽位正好占满 `SLOT_RAM`。窗口基址公式：
 
@@ -309,9 +330,27 @@ python tools/pack_app.py --verify build/APP_DEMO/APP_DEMO.svcapp    # 校验完�
    `install` 在 fixed 模式下会直接回
    `usage: install <slot>   (fixed-slot mode needs an explicit slot)`
    **而且这个槽会先被清干净**：内核在告诉你「可以发送」之前就停掉该槽里正在跑的镜像、
-   擦掉整个槽（设备日志 `fixed slot %d: clearing it before receive`）。所以敲错槽的代价
+   擦掉整个槽（设备日志 `install: slot %u still running (id %u), stopping it before the erase`，
+   随后是卸载器的 `LOADER:183 halt task N`）。所以敲错槽的代价
    是那个槽里的旧镜像已经没了——**包括类型不符、最后被拒收（`err -7`）的时候**。
    要把驱动包装上板，目标槽必须是配置里 `type = driver` 的槽位。
+
+> **这条「先停后擦」是 2026-11-14 才补上的。** 本文件更早的版本写的是「内核会先停掉
+> 该槽里正在跑的镜像」，但 `cmd_install` 里当时只有“擦”，没有“停”——无头安装器
+> （`arkrtos_installer.c` 的 `arkrtos_installer_fixed_prepare`）早就会先停后擦，
+> 控制台这条路漏了。后果在板上能田字体看到：应用正在从该槽取指时，`install <槽>`
+> 把它脚下的 Flash 擦成 `0xFF`，三条 `USGFAULT` 撞上崩溃上限，整个槽被禁用。
+> 修复前的实测序列（F427）：
+>
+> ```
+> fault:  0 18062 5 USGFAULT | 1 18062 5 RECOVER | 2 18062 5 USGFAULT
+>         3 18062 5 RECOVER  | 4 18063 5 USGFAULT | 5 18063 5 TASKKILL | 6 18063 5 APPDISABLED
+> dmesg:  [   84.031] LOADER:183 halt task 5: taken out of the scheduler
+>         [   84.031] CRASH:3161 slot 1 disabled: crash-limit, 3 consecutive faults
+> ```
+>
+> 修复后同一条路径只剩一条 `TASKKILL`（有序停止），无 `USGFAULT`、无 `APPDISABLED`，
+> 随后 `install: ok` 与重新自启都正常。`Code=220290 → 220382`（+92 B）。
 3. 把 `.svcapp` 以**二进制方式**发给串口（不要用文本模式，会被改行尾）
    - `copy /b build\APP_DEMO\APP_DEMO.svcapp COM3`
 4. 发送完成后按 `INSTALLER_AUTO_START` 决定是否立即启动
