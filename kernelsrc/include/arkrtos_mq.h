@@ -69,6 +69,9 @@ int32 arkrtos_mq_recv_internal(int32 handle, uint32 *buf, int32 len_words, int32
 int32 arkrtos_mq_delete_internal(int32 handle);
 
 int32 arkrtos_mq_send_from_isr_internal(int32 handle, void *buf, int32 len_words);
+/* 中断里直接收：队列空返回 ARKRTOS_MQ_ERR_EMPTY，否则返回实际取到的字数。
+ * 不登记等待者、不阻塞；取走后会叫醒一个等发的人（只置 READY）。 */
+int32 arkrtos_mq_recv_from_isr_internal(int32 handle, uint32 *buf, int32 len_words);
 
 /* 任务下线收尸：把任务从所有消息队列的收发等待队列摘除。
  * 调用方需自行保证临界区；一般经 arkrtos_task_release_resources() 调用。 */

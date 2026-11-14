@@ -618,6 +618,57 @@ int32 arkrtos_mq_send_from_isr_internal(int32 handle, void *buf, int32 len_words
     return 0;
 }
 
+/* 中断里直接从队列取消息：不登记等待者、不阻塞、不切换。
+ *
+ * 为什么需要它：此前 ISR 侧只有 send（把消息塞进去），收到消息必须
+ * 「ISR 里置个标志 -> 唤醒一个线程 -> 线程再 recv」，多一次唤醒与一次
+ * 上下文切换。对高频采集的驱动，这一跳就是延迟的固定成本。
+ *
+ * 语义（与 recv_internal 的 timeout==0 路径同一套判定，但失败值不同）：
+ *   队列空 -> ARKRTOS_MQ_ERR_EMPTY（-1），不登记、不等待
+ *   取到   -> 返回实际取到的字数（>0，与 recv 返回值同一口径）
+ * 取走一条后唤醒一个等待中的发送者（只置 READY，切换交给下一次调度），
+ * 与 send_from_isr 的收尾方式对称。 */
+int32 arkrtos_mq_recv_from_isr_internal(int32 handle, uint32 *buf, int32 len_words)
+{
+    int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
+    arkrtos_mq_obj_t *p_mq;
+    int32 got;
+
+    if(buf == 0 || len_words <= 0 || len_words > ARKRTOS_MQ_MSG_WORDS)
+        return ARKRTOS_MQ_ERR_PARAM;
+    if(ARKRTOS_MQ_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+        return ARKRTOS_MQ_ERR_HANDLE;
+    if(idx >= ARKRTOS_MQ_NUM || arkrtos_mqs[idx].used == 0)
+        return ARKRTOS_MQ_ERR_STATE;
+    p_mq = &arkrtos_mqs[idx];
+
+    ARKRTOS_DISABLE_IRQ();
+    if(p_mq->count == 0u)
+    {
+        ARKRTOS_ENABLE_IRQ();
+        return ARKRTOS_MQ_ERR_EMPTY;
+    }
+    got = arkrtos_mq_get(p_mq, buf, len_words);
+    arkrtos_mq_wake_one(p_mq->send_waiters);
+    mdk_trace_arkrtos_obj_signal((uint16)idx, (uint8)MDK_TRACE_ARKRTOS_CLASS_QUEUE);
+    ARKRTOS_ENABLE_IRQ();
+    return got;
+}
+
+/* 公开的中断侧入口（arkrtos.h 里那两个声明）。它们此前只有声明、没有定义：
+ * 全仓库没有人调用，链接器不报错，所以「ISR 侧能直接收消息」一直是空头承诺。
+ * 定义补在这里，调用方拿到的就是上面那两条内部实现。 */
+int32 arkrtos_mq_send_from_isr(int32 handle, void *buf, int32 len_words)
+{
+    return arkrtos_mq_send_from_isr_internal(handle, buf, len_words);
+}
+
+int32 arkrtos_mq_recv_from_isr(int32 handle, void *buf, int32 len_words)
+{
+    return arkrtos_mq_recv_from_isr_internal(handle, (uint32 *)buf, len_words);
+}
+
 int32 arkrtos_mq_delete_internal(int32 handle)
 {
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
@@ -724,6 +775,30 @@ int32 arkrtos_mq_is_alive(int32 handle)
 }
 
 int32 arkrtos_mq_send_from_isr_internal(int32 handle, void *buf, int32 len_words)
+{
+    (void)handle;
+    (void)buf;
+    (void)len_words;
+    return ARKRTOS_MQ_ERR_DISABLED;
+}
+
+int32 arkrtos_mq_recv_from_isr_internal(int32 handle, uint32 *buf, int32 len_words)
+{
+    (void)handle;
+    (void)buf;
+    (void)len_words;
+    return ARKRTOS_MQ_ERR_DISABLED;
+}
+
+int32 arkrtos_mq_send_from_isr(int32 handle, void *buf, int32 len_words)
+{
+    (void)handle;
+    (void)buf;
+    (void)len_words;
+    return ARKRTOS_MQ_ERR_DISABLED;
+}
+
+int32 arkrtos_mq_recv_from_isr(int32 handle, void *buf, int32 len_words)
 {
     (void)handle;
     (void)buf;

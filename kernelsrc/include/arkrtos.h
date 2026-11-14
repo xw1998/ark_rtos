@@ -625,6 +625,17 @@ int32  arkrtos_event_set_from_isr(int32 handle);
 * @return 0=成功，负值=失败
 */
 int32  arkrtos_mq_send_from_isr(int32 handle, void *buf, int32 len_words);
+
+/**
+* @brief 中断中直接从消息队列取一条消息
+* @param handle    消息队列句柄
+* @param buf       接收缓冲区
+* @param len_words 缓冲区容量（字）
+* @return >0=实际取到的字数；负值=队列空/参数错（空队列不登记、不等待）
+* @note 与 send 版对称：唤醒的发送者只置 READY，切换交给下一次调度。
+*       有了它，ISR 不必再「置标志 -> 唤醒线程 -> 线程 recv」多绕一跳。
+*/
+int32  arkrtos_mq_recv_from_isr(int32 handle, void *buf, int32 len_words);
 /** @} */
 
 /** @defgroup crit 调度器锁（用户态临界区）

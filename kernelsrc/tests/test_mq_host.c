@@ -151,6 +151,20 @@ int main(void)
     n = arkrtos_mq_recv_internal(h, out, 1, 0);
     check((n == 1) && (out[0] == 0xFEEDFACEu), "the ISR-posted message is readable");
 
+    /* ---- 7b. 中断里直接收：空队列不登记、不等待；有消息就取走 ---- */
+    n = arkrtos_mq_recv_from_isr_internal(h, out, 1);
+    check(n == -1, "recv_from_isr on an empty queue fails instead of waiting");
+    in[0] = 0xA5A5A5A5u;
+    n = arkrtos_mq_send_from_isr_internal(h, in, 2);
+    check(n == 0, "send_from_isr feeds a 2-word message");
+    n = arkrtos_mq_recv_from_isr_internal(h, out, 2);
+    check(n == 2, "recv_from_isr reports the declared word count");
+    check(out[0] == 0xA5A5A5A5u, "recv_from_isr copies the payload");
+    n = arkrtos_mq_recv_from_isr_internal(h, out, 2);
+    check(n == -1, "the second recv_from_isr finds the queue empty");
+    n = arkrtos_mq_recv_from_isr(h, out, 1);
+    check(n == -1, "the public wrapper agrees with the internal entry point");
+
     /* ---- 8. 非法句柄 ---- */
     n = arkrtos_mq_send_internal(h + 0x00100000, in, 1, 0);   /* 错误的高位标志 */
     check(n == -1, "a handle with the wrong type flag is rejected");

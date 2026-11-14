@@ -5,7 +5,7 @@
 
 ## 目录
 
-- [kernelsrc/include/arkrtos.h](#kernelsrcincludearkrtosh)（105 项）
+- [kernelsrc/include/arkrtos.h](#kernelsrcincludearkrtosh)（106 项）
 - [kernelsrc/include/arkrtos_app_image.h](#kernelsrcincludearkrtos_app_imageh)（38 项）
 - [kernelsrc/include/arkrtos_apppack.h](#kernelsrcincludearkrtos_apppackh)（9 项）
 - [kernelsrc/include/arkrtos_apprun.h](#kernelsrcincludearkrtos_apprunh)（6 项）
@@ -811,6 +811,20 @@ int32  arkrtos_mq_send_from_isr(int32 handle, void *buf, int32 len_words);
 - `buf`：消息缓冲区
 - `len_words`：消息长度（字）
 **返回**：0=成功，负值=失败
+
+### `int32  arkrtos_mq_recv_from_isr(int32 handle, void *buf, int32 len_wor`
+
+```c
+int32  arkrtos_mq_recv_from_isr(int32 handle, void *buf, int32 len_words);
+```
+
+**中断中直接从消息队列取一条消息**
+- `handle`：消息队列句柄
+- `buf`：接收缓冲区
+- `len_words`：缓冲区容量（字）
+**返回**：>0=实际取到的字数；负值=队列空/参数错（空队列不登记、不等待）
+> 说明：与 send 版对称：唤醒的发送者只置 READY，切换交给下一次调度。
+有了它，ISR 不必再「置标志 -> 唤醒线程 -> 线程 recv」多绕一跳。
 
 ### `void   arkrtos_sched_lock(void);`
 
