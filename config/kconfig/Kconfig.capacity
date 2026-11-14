@@ -41,6 +41,16 @@ config ARKRTOS_MAX_EVENT_WAITERS
 	default 4
 	range 1 64
 
+config ARKRTOS_ESET_NUM
+	int "32-bit event set tables (ARKRTOS_USE_ESET=1)"
+	default 8
+	range 1 64
+
+config ARKRTOS_MAX_ESET_WAITERS
+	int "Max waiters per event set"
+	default 4
+	range 1 32
+
 config ARKRTOS_SEM_NUM
 	int "Semaphores"
 	default 24

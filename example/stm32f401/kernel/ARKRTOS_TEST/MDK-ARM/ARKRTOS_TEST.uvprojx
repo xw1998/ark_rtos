@@ -535,6 +535,11 @@
               <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_event.c</FilePath>
             </File>
             <File>
+              <FileName>arkrtos_eset.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_eset.c</FilePath>
+            </File>
+            <File>
               <FileName>arkrtos_fifo.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_fifo.c</FilePath>

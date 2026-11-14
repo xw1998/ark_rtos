@@ -14,6 +14,9 @@ ARKRTOS_SVC_DECL_1(int32, ARKRTOS_SVC_DEV_IO, arkrtos_call_dev_io, uint32 *);
 ARKRTOS_SVC_DECL_V2(ARKRTOS_SVC_TASK_CTRL, arkrtos_call_task_ctrl, uint32, uint32);
 ARKRTOS_SVC_DECL_1(uint32, ARKRTOS_SVC_SYS_INFO, arkrtos_call_sys_info, uint32);
 ARKRTOS_SVC_DECL_1(int32, ARKRTOS_SVC_EVENT_CTRL, arkrtos_call_event_ctrl, uint32 *);
+#if (ARKRTOS_USE_ESET == 1)
+ARKRTOS_SVC_DECL_1(int32, ARKRTOS_SVC_ESET_CTRL, arkrtos_call_eset_ctrl, uint32 *);
+#endif
 ARKRTOS_SVC_DECL_1(int32, ARKRTOS_SVC_SYNC_CTRL, arkrtos_call_sync_ctrl, uint32 *);
 
 int32 arkrtos_dev_open(char *name, uint32 param)
@@ -182,6 +185,97 @@ void arkrtos_event_set(int32 handle)
     p[1] = handle;
     arkrtos_call_event_ctrl(p);
 }
+
+#if (ARKRTOS_USE_ESET == 1)
+/* ------------------------------------------------------------------
+ * 32 位事件集（SVC 0x21）。
+ * 用户态不做等待登记：位是累加的，轮询入口自己判条件、自己消费。
+ * 内核在 SVC 里只回答 ARKRTOS_SYNC_ERR_WOULDBLOCK，真正的"等"在这里
+ * 让出一毫秒再问一次，直到拿到位、超时或对象报错。timeout <= 0
+ * 表示永久等待。
+ * ------------------------------------------------------------------ */
+int32 arkrtos_eset_create(char *name)
+{
+    uint32 p[3];
+    p[0] = ARKRTOS_ESET_SUB_CREATE;
+    p[1] = (uint32)name;
+    return arkrtos_call_eset_ctrl(p);
+}
+
+static int32 arkrtos_eset_wait_raw(int32 handle, uint32 mask, uint32 opt, uint32 *p_got, int32 timeout)
+{
+    uint32 p[6];
+    p[0] = ARKRTOS_ESET_SUB_WAIT;
+    p[1] = (uint32)handle;
+    p[2] = mask;
+    p[3] = opt;
+    p[4] = (uint32)p_got;
+    p[5] = (uint32)timeout;
+    return arkrtos_call_eset_ctrl(p);
+}
+
+int32 arkrtos_eset_wait(int32 handle, uint32 mask, uint32 opt, uint32 *p_got, int32 timeout)
+{
+    uint32 start = arkrtos_get_time_ms();
+
+    for(;;)
+    {
+        int32 r = arkrtos_eset_wait_raw(handle, mask, opt, p_got, timeout);
+
+        if(r != ARKRTOS_SYNC_ERR_WOULDBLOCK)
+        {
+            return r;
+        }
+        if(arkrtos_sync_wait_expired(start, timeout) != 0)
+        {
+            /* 用户态没有登记等待者，超时不需要回内核清账 */
+            return ARKRTOS_SYNC_ERR_TIMEOUT;
+        }
+        (void)arkrtos_task_wait(ARKRTOS_APP_POLL_MS);
+    }
+}
+
+int32 arkrtos_eset_set(int32 handle, uint32 mask)
+{
+    uint32 p[3];
+    p[0] = ARKRTOS_ESET_SUB_SET;
+    p[1] = (uint32)handle;
+    p[2] = mask;
+    return arkrtos_call_eset_ctrl(p);
+}
+
+int32 arkrtos_eset_set_from_isr(int32 handle, uint32 mask)
+{
+    /* set 本身不阻塞；SVC 入口对"中断上下文"与本任务上下文走同一条路径 */
+    return arkrtos_eset_set(handle, mask);
+}
+
+int32 arkrtos_eset_clear(int32 handle, uint32 mask)
+{
+    uint32 p[3];
+    p[0] = ARKRTOS_ESET_SUB_CLEAR;
+    p[1] = (uint32)handle;
+    p[2] = mask;
+    return arkrtos_call_eset_ctrl(p);
+}
+
+int32 arkrtos_eset_get(int32 handle, uint32 *p_flags)
+{
+    uint32 p[3];
+    p[0] = ARKRTOS_ESET_SUB_GET;
+    p[1] = (uint32)handle;
+    p[2] = (uint32)p_flags;
+    return arkrtos_call_eset_ctrl(p);
+}
+
+int32 arkrtos_eset_delete(int32 handle)
+{
+    uint32 p[3];
+    p[0] = ARKRTOS_ESET_SUB_DELETE;
+    p[1] = (uint32)handle;
+    return arkrtos_call_eset_ctrl(p);
+}
+#endif /* ARKRTOS_USE_ESET == 1 */
 
 int32 arkrtos_sem_create(char *name, int32 init_count)
 {

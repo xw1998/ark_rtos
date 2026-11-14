@@ -130,6 +130,20 @@ config ARKRTOS_USE_SBUF
 	  pays neither RAM nor code for it.  With the gate off the SVC
 	  answers -1 instead of pretending success.
 
+config ARKRTOS_USE_ESET
+	bool "32-bit event sets (SVC 0x21)"
+	default n
+	help
+	  A 32-bit event set is a table of independent bits waited on by
+	  mask.  A waiter declares the bits it wants and whether any (OR) or
+	  all (AND) of them must be set, and can ask the bits to be cleared
+	  when it takes them.  Different contract from the single-flag
+	  event: several conditions must hold before a task starts, or
+	  several producers report and the consumer needs to know which.
+	  Defaults off: with the gate off the object table, the waiter slots
+	  and the SVC dispatch arm are not built at all (footprint unchanged)
+	  and the SVC answers -1 instead of pretending success.
+
 endmenu
 
 menu "Services and components"

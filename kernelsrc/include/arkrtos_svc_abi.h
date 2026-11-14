@@ -171,4 +171,12 @@
 #define ARKRTOS_MPOOL_SUB_QUERY              (4u)
 #define ARKRTOS_MPOOL_SUB_DELETE             (5u)
 
+/* ARKRTOS_SVC_ESET_CTRL (0x21) - 32-bit event set (ARKRTOS_USE_ESET=1) */
+#define ARKRTOS_ESET_SUB_CREATE             (1u)
+#define ARKRTOS_ESET_SUB_WAIT               (2u)
+#define ARKRTOS_ESET_SUB_SET                (3u)
+#define ARKRTOS_ESET_SUB_CLEAR              (4u)
+#define ARKRTOS_ESET_SUB_GET                (5u)
+#define ARKRTOS_ESET_SUB_DELETE             (6u)
+
 #endif /* __ARKRTOS_SVC_ABI_H__ */

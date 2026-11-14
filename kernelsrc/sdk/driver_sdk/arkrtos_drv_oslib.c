@@ -8,11 +8,16 @@
 #include "arkrtos_driver_sdk.h"
 #include "arkrtos_ulog.h"
 #include "arkrtos_svc_call.h"
+#include "arkrtos_features.h"
+#include "arkrtos_svc_abi.h"   /* SVC 子命令号：与内核同一张表 */
 
 ARKRTOS_SVC_DECL_1(int32, 0x10, arkrtos_call_dev_io, uint32 *);
 ARKRTOS_SVC_DECL_V2(0x11, arkrtos_call_task_ctrl, uint32, uint32);
 ARKRTOS_SVC_DECL_1(uint32, 0x12, arkrtos_call_sys_info, uint32);
 ARKRTOS_SVC_DECL_1(int32, 0x13, arkrtos_call_event_ctrl, uint32 *);
+#if (ARKRTOS_USE_ESET == 1)
+ARKRTOS_SVC_DECL_1(int32, ARKRTOS_SVC_ESET_CTRL, arkrtos_call_eset_ctrl, uint32 *);
+#endif
 
 void arkrtos_task_wait(uint32 ms)
 {
@@ -96,6 +101,96 @@ void arkrtos_event_set(int32 handle)
     p[1] = handle;
     arkrtos_call_event_ctrl(p);
 }
+
+#if (ARKRTOS_USE_ESET == 1)
+/* 32-bit event sets (SVC 0x21). Same split as the event above: the kernel
+ * only registers / judges and answers WOULDBLOCK while a driver sits in the
+ * SVC handler, the polling loop here does the yielding.
+ * An event set keeps its bits (flags |= mask), so a user-mode waiter needs
+ * no registration at all: every poll judges the condition itself and takes
+ * the bits when it holds.  timeout <= 0 means "wait forever". */
+int32 arkrtos_eset_create(char *name)
+{
+    uint32 p[3];
+    p[0] = ARKRTOS_ESET_SUB_CREATE;
+    p[1] = (uint32)name;
+    return arkrtos_call_eset_ctrl(p);
+}
+
+static int32 arkrtos_drv_eset_wait_raw(int32 handle, uint32 mask, uint32 opt,
+                                       uint32 *p_got, int32 timeout)
+{
+    uint32 p[6];
+    p[0] = ARKRTOS_ESET_SUB_WAIT;
+    p[1] = (uint32)handle;
+    p[2] = mask;
+    p[3] = opt;
+    p[4] = (uint32)p_got;
+    p[5] = (uint32)timeout;
+    return arkrtos_call_eset_ctrl(p);
+}
+
+int32 arkrtos_eset_wait(int32 handle, uint32 mask, uint32 opt, uint32 *p_got, int32 timeout)
+{
+    uint32 start = arkrtos_get_time_ms();
+
+    for(;;)
+    {
+        int32 r = arkrtos_drv_eset_wait_raw(handle, mask, opt, p_got, timeout);
+
+        if(r != ARKRTOS_SYNC_ERR_WOULDBLOCK)
+        {
+            return r;
+        }
+        if(arkrtos_drv_wait_expired(start, timeout) != 0)
+        {
+            /* No registration was made, so nothing to close out */
+            return ARKRTOS_SYNC_ERR_TIMEOUT;
+        }
+        arkrtos_task_wait(ARKRTOS_DRV_POLL_MS);
+    }
+}
+
+int32 arkrtos_eset_set(int32 handle, uint32 mask)
+{
+    uint32 p[3];
+    p[0] = ARKRTOS_ESET_SUB_SET;
+    p[1] = (uint32)handle;
+    p[2] = mask;
+    return arkrtos_call_eset_ctrl(p);
+}
+
+int32 arkrtos_eset_set_from_isr(int32 handle, uint32 mask)
+{
+    return arkrtos_eset_set(handle, mask);
+}
+
+int32 arkrtos_eset_clear(int32 handle, uint32 mask)
+{
+    uint32 p[3];
+    p[0] = ARKRTOS_ESET_SUB_CLEAR;
+    p[1] = (uint32)handle;
+    p[2] = mask;
+    return arkrtos_call_eset_ctrl(p);
+}
+
+int32 arkrtos_eset_get(int32 handle, uint32 *p_flags)
+{
+    uint32 p[3];
+    p[0] = ARKRTOS_ESET_SUB_GET;
+    p[1] = (uint32)handle;
+    p[2] = (uint32)p_flags;
+    return arkrtos_call_eset_ctrl(p);
+}
+
+int32 arkrtos_eset_delete(int32 handle)
+{
+    uint32 p[3];
+    p[0] = ARKRTOS_ESET_SUB_DELETE;
+    p[1] = (uint32)handle;
+    return arkrtos_call_eset_ctrl(p);
+}
+#endif /* ARKRTOS_USE_ESET == 1 */
 
 /* ============================================================
  * Log and console services (SVC 0x19 / 0x1A)

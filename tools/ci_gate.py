@@ -966,6 +966,46 @@ def check_arkmake_syntax():
     else:
         fail("arkmake", txt[-260:])
 
+def check_eset_host():
+    """32-bit event set (ARKRTOS_USE_ESET): judge/deliver accounting on host.
+
+    kernelsrc/tests/test_eset_host.c links the real arkrtos_eset.c against stub
+    scheduler / trace / port functions.  The object table is exported through
+    -DARKRTOS_ESET_HOST_TEST so the test can park two waiters on one set (the
+    CLEAR single-consumer rule and the hand-off snapshot can only be checked
+    that way), and the blocking hand-off path is driven by a hook that runs
+    inside block_in_critical.  Covered: create/naming/slot exhaustion, set
+    accumulation, get/clear, non-blocking try, OR vs AND, CLEAR taken once,
+    timeout leaving no phantom registration, the handed-off value computed at
+    hand-off time, non-HANDOFF wake not counted as a hit, delete waking
+    everyone, task-release reaping, argument validation.  NOT covered: real
+    priority/wake ordering, the user-mode SVC polling path and ISR latency --
+    those need a board.  A missing host compiler is a FAIL.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "eset_host_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "ESET-HOST OK" in txt:
+        ok("eset-host", "OR/AND judge + CLEAR single-consumer + hand-off snapshot verified")
+    else:
+        fail("eset-host", "gate failed: %s" % txt.strip()[-300:])
+
+def check_eset_syntax():
+    """ESET must compile with the switch ON.
+
+    ARKRTOS_USE_ESET defaults to 0, so arkrtos_eset.c in full, the SVC 0x21
+    handler and dispatch entry in arkrtos_task.c, the boot-time init and both
+    SDK wrappers are never seen by a compiler in a default build.  Same
+    false-green shape as the rtstat gate.  armclang -fsyntax-only with the
+    switch forced to 1; a missing armclang is a FAIL, not a skip.  Syntax only
+    -- SVC/ISR behaviour still needs a board.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "eset_syntax_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "ESET-GATE OK" in txt:
+        ok("eset-syntax", "ON-path compile verified (5 files)")
+    else:
+        fail("eset-syntax", txt[-260:])
+
 def check_rtstat_syntax():
     """RTSTAT (DWT cycle-based latency metering) must compile with the switch ON.
 
@@ -1135,12 +1175,14 @@ def main(argv):
     check_mempool_host()
     check_mq_host()
     check_sync_host()
+    check_eset_host()
     check_loader_host()
     check_fifo_host()
     check_fault_host()
     check_tickless()
     check_arkmake_syntax()
     check_rtstat_syntax()
+    check_eset_syntax()
     check_seccheck_syntax()
     check_sign_host()
     check_swap_syntax()

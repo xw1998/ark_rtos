@@ -118,6 +118,15 @@
 #define ARKRTOS_USE_SBUF                0
 #endif
 
+/* 32 位事件集（SVC 0x21，arkrtos_eset.c）。
+ * 为什么单独一个开关、且默认关：arkrtos_event 的"单标志 + 广播 + 自动复位"
+ * 已经覆盖现有全部调用点（POSIX 门面、驱动框架、小程序）；事件集是另一套
+ * 契约——32 个独立位、按位掩码等待（OR / AND）、可选命中后清除。默认关时
+ * 本模块完全不编：对象表、等待槽、SVC 分派项都不存在，体积与行为逐位不变。 */
+#ifndef ARKRTOS_USE_ESET
+#define ARKRTOS_USE_ESET                0
+#endif
+
 /* tickless idle。
  * 为什么默认关：省的是 idle 期间的中断次数，代价是唤醒路径要自己重建
  * "这段时间过去了多少"，属于改调度时序的功能；默认关时 idle 循环就是

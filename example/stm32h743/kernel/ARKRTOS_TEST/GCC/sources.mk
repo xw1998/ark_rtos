@@ -33,6 +33,7 @@ SRCS := \
   kernelsrc/components/mdk_trace/mdk_trace_arkrtos.c \
   kernelsrc/src/arkrtos_dev.c \
   kernelsrc/src/arkrtos_event.c \
+  kernelsrc/src/arkrtos_eset.c \
   kernelsrc/src/arkrtos_fifo.c \
   kernelsrc/src/arkrtos_cfg.c \
   kernelsrc/src/arkrtos_sync.c \

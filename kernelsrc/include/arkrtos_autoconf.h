@@ -31,6 +31,9 @@
 #ifndef ARKRTOS_DEV_MAX_NUM
 #define ARKRTOS_DEV_MAX_NUM (8)
 #endif
+#ifndef ARKRTOS_ESET_NUM
+#define ARKRTOS_ESET_NUM (8)
+#endif
 #ifndef ARKRTOS_EVENT_NUM
 #define ARKRTOS_EVENT_NUM (10)
 #endif
@@ -42,6 +45,9 @@
 #endif
 #ifndef ARKRTOS_LOG_RING_SIZE
 #define ARKRTOS_LOG_RING_SIZE (4096)
+#endif
+#ifndef ARKRTOS_MAX_ESET_WAITERS
+#define ARKRTOS_MAX_ESET_WAITERS (4)
 #endif
 #ifndef ARKRTOS_MAX_EVENT_WAITERS
 #define ARKRTOS_MAX_EVENT_WAITERS (4)
@@ -180,6 +186,9 @@
 #endif
 #ifndef ARKRTOS_USE_CRASH_LOG
 #define ARKRTOS_USE_CRASH_LOG 1
+#endif
+#ifndef ARKRTOS_USE_ESET
+#define ARKRTOS_USE_ESET 0
 #endif
 #ifndef ARKRTOS_USE_FAST_TICK_SWITCH
 #define ARKRTOS_USE_FAST_TICK_SWITCH 1

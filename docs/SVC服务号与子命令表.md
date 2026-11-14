@@ -34,6 +34,7 @@ App / 驱动以非特权态运行时，每一个内核服务都经一条 `SVC` �
 | 0x1E | `ARKRTOS_SVC_NET` | `svc_net` | 17，见 `arkrtos_net_abi.h` |
 | 0x1F | `ARKRTOS_SVC_SBUF_CTRL` | `svc_sbuf_ctrl` | 12（流缓冲 1..8 + 消息缓冲 9..12） |
 | 0x20 | `ARKRTOS_SVC_MEMPOOL_CTRL` | `svc_mempool_ctrl` | 5 |
+| 0x21 | `ARKRTOS_SVC_ESET_CTRL` | `svc_eset_ctrl` | 6（`ARKRTOS_USE_ESET` 打开时才编进来） |
 
 ## 子命令号
 

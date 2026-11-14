@@ -51,6 +51,10 @@
 /* Fixed block memory pool service (SVC 0x20). Gated by ARKRTOS_USE_MEMPOOL:
  * with the gate off the handler answers -1 instead of pretending success. */
 #define ARKRTOS_SVC_MEMPOOL_CTRL      (0x20)
+/* 32 bit event set service (SVC 0x21). Gated by ARKRTOS_USE_ESET:
+ * with the gate off the handler is not compiled in at all, so a stray call
+ * traps as an unknown service instead of being silently accepted. */
+#define ARKRTOS_SVC_ESET_CTRL         (0x21)
 
 /* 同步原语（信号量/互斥锁）返回码：0=成功，负值=失败。
  * 超时必须返回负值——调用方据此判断“本次没有拿到资源”；
@@ -79,5 +83,6 @@
 #define ARKRTOS_TIMER_HANDLE_FLAG     (0x01600000)
 #define ARKRTOS_COND_HANDLE_FLAG      (0x01700000)
 #define ARKRTOS_SBUF_HANDLE_FLAG      (0x01800000)
+#define ARKRTOS_ESET_HANDLE_FLAG      (0x01900000)
 
 #endif

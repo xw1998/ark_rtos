@@ -14,6 +14,7 @@
 #define __ARKRTOS_H__
 
 #include "arkrtos_types.h"
+#include "arkrtos_features.h"   /* 特性开关：下面带门控的声明据此裁剪 */
 #include "arkrtos_ulog.h"
 #include "arkrtos_version.h"
 
@@ -111,6 +112,84 @@ int32  arkrtos_event_wait(int32 handle, int32 timeout);
 */
 void   arkrtos_event_set(int32 handle);
 /** @} */
+
+/* 32 位事件集（ARKRTOS_USE_ESET=1 才有；与上面的"事件"是两套不同语义，
+ * 见 docs/同步原语与令牌守恒.md 的分工表）：
+ *   事件   = 单标志 + 广播 + 自动复位，set 唤醒所有等待者；
+ *   事件集 = 32 个独立位 + 按掩码等待（OR / AND）+ 可选命中后清除。 */
+#if (ARKRTOS_USE_ESET == 1)
+/** @defgroup eset 32 位事件集
+ *  @{
+ */
+
+/* 等待选项：OR 与 AND 必须二选一，CLEAR 可叠加。数值是接口契约的一部分。 */
+#define ARKRTOS_ESET_OPT_OR         (0x01u)   /* 掩码内任一位成立即返回 */
+#define ARKRTOS_ESET_OPT_AND        (0x02u)   /* 掩码内所有位都成立才返回 */
+#define ARKRTOS_ESET_OPT_CLEAR      (0x04u)   /* 命中后清除命中的位 */
+
+/**
+* @brief 创建命名事件集（32 位）
+* @param name 事件集名（字符串）
+* @return 事件集句柄，失败返回负值
+*/
+int32  arkrtos_eset_create(char *name);
+
+/**
+* @brief 等待事件集里的一组位
+* @param handle  事件集句柄
+* @param mask    要等的位（非 0）
+* @param opt     ARKRTOS_ESET_OPT_OR / _AND 二选一，可 | ARKRTOS_ESET_OPT_CLEAR
+* @param p_got   成功时写入本次拿到的位（调用方缓冲）
+* @param timeout 超时（ms）：0 = 只试一次，负值 = 永久等待
+* @return 0 = 拿到位（见 *p_got）；ARKRTOS_SYNC_ERR_TIMEOUT = 超时；
+*         ARKRTOS_SYNC_ERR_DELETED = 等待期间对象被删除；负值 = 参数/句柄错误
+* @note AND 命中时 *p_got 等于 mask；OR 命中时只含当时成立的那些位。
+*       带 CLEAR 时，交给调用方的位同时从对象里清掉，且只交给一个等待者。
+*/
+int32  arkrtos_eset_wait(int32 handle, uint32 mask, uint32 opt,
+                         uint32 *p_got, int32 timeout);
+
+/**
+* @brief 置位（可累加）：flags |= mask
+* @param handle 事件集句柄
+* @param mask   要置的位（非 0）
+* @return 0 成功，负值失败
+* @note 没有等待者时位留在对象里，下一次 wait 直接命中，不会丢事件。
+*/
+int32  arkrtos_eset_set(int32 handle, uint32 mask);
+
+/**
+* @brief 中断中置位（语义与 arkrtos_eset_set 相同）
+* @param handle 事件集句柄
+* @param mask   要置的位（非 0）
+* @return 0 成功，负值失败
+*/
+int32  arkrtos_eset_set_from_isr(int32 handle, uint32 mask);
+
+/**
+* @brief 清除若干位：flags &= ~mask
+* @param handle 事件集句柄
+* @param mask   要清的位
+* @return 0 成功，负值失败
+*/
+int32  arkrtos_eset_clear(int32 handle, uint32 mask);
+
+/**
+* @brief 查询当前置位情况
+* @param handle  事件集句柄
+* @param p_flags 输出：当前 32 位掩码
+* @return 0 成功，负值失败
+*/
+int32  arkrtos_eset_get(int32 handle, uint32 *p_flags);
+
+/**
+* @brief 删除事件集（等待者以 ARKRTOS_SYNC_ERR_DELETED 放走）
+* @param handle 事件集句柄
+* @return 0 成功，负值失败
+*/
+int32  arkrtos_eset_delete(int32 handle);
+/** @} */
+#endif /* ARKRTOS_USE_ESET == 1 */
 
 /** @defgroup sem 信号量
  *  @{ */

@@ -140,6 +140,17 @@
 #define ARKRTOS_MAX_EVENT_WAITERS   (4)
 #endif
 
+/* 32 位事件集（ARKRTOS_USE_ESET=1 时才编进来）的对象表容量：
+ *   ARKRTOS_ESET_NUM          事件集对象数
+ *   ARKRTOS_MAX_ESET_WAITERS  每个事件集同时可挂的等待者数
+ * 表是静态的，关掉开关时不占 RAM。 */
+#ifndef ARKRTOS_ESET_NUM
+#define ARKRTOS_ESET_NUM            (8)
+#endif
+#ifndef ARKRTOS_MAX_ESET_WAITERS
+#define ARKRTOS_MAX_ESET_WAITERS    (4)
+#endif
+
 /* 信号量、互斥锁及其等待者数量 */
 /* Semaphore table capacity.  The table is kernel wide, so size it to the
  *   sum of every concurrent user, not to one user's peak.

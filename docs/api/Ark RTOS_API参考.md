@@ -5,7 +5,7 @@
 
 ## 目录
 
-- [kernelsrc/include/arkrtos.h](#kernelsrcincludearkrtosh)（98 项）
+- [kernelsrc/include/arkrtos.h](#kernelsrcincludearkrtosh)（105 项）
 - [kernelsrc/include/arkrtos_app_image.h](#kernelsrcincludearkrtos_app_imageh)（38 项）
 - [kernelsrc/include/arkrtos_apppack.h](#kernelsrcincludearkrtos_apppackh)（9 项）
 - [kernelsrc/include/arkrtos_apprun.h](#kernelsrcincludearkrtos_apprunh)（6 项）
@@ -66,6 +66,7 @@
 - [kernelsrc/sdk/posix/unistd.h](#kernelsrcsdkposixunistdh)（13 项）
 - [kernelsrc/src/arkrtos_apppack.c](#kernelsrcsrcarkrtos_apppackc)（1 项）
 - [kernelsrc/src/arkrtos_cfg.c](#kernelsrcsrcarkrtos_cfgc)（1 项）
+- [kernelsrc/src/arkrtos_eset.c](#kernelsrcsrcarkrtos_esetc)（1 项）
 - [kernelsrc/src/arkrtos_fs.c](#kernelsrcsrcarkrtos_fsc)（1 项）
 - [kernelsrc/src/arkrtos_guard.c](#kernelsrcsrcarkrtos_guardc)（1 项）
 - [kernelsrc/src/arkrtos_installer.c](#kernelsrcsrcarkrtos_installerc)（1 项）
@@ -171,6 +172,88 @@ void   arkrtos_event_set(int32 handle);
 
 **触发事件，唤醒所有等待该事件的任务**
 - `handle`：事件句柄
+
+### `int32  arkrtos_eset_create(char *name);`
+
+```c
+int32  arkrtos_eset_create(char *name);
+```
+
+**创建命名事件集（32 位）**
+- `name`：事件集名（字符串）
+**返回**：事件集句柄，失败返回负值
+
+### `int32  arkrtos_eset_wait(int32 handle, uint32 mask, uint32 opt,`
+
+```c
+int32  arkrtos_eset_wait(int32 handle, uint32 mask, uint32 opt,
+```
+
+**等待事件集里的一组位**
+- `handle`：事件集句柄
+- `mask`：要等的位（非 0）
+- `opt`：ARKRTOS_ESET_OPT_OR / _AND 二选一，可 | ARKRTOS_ESET_OPT_CLEAR
+- `p_got`：成功时写入本次拿到的位（调用方缓冲）
+- `timeout`：超时（ms）：0 = 只试一次，负值 = 永久等待
+**返回**：0 = 拿到位（见 *p_got）；ARKRTOS_SYNC_ERR_TIMEOUT = 超时；
+ARKRTOS_SYNC_ERR_DELETED = 等待期间对象被删除；负值 = 参数/句柄错误
+> 说明：AND 命中时 *p_got 等于 mask；OR 命中时只含当时成立的那些位。
+带 CLEAR 时，交给调用方的位同时从对象里清掉，且只交给一个等待者。
+
+### `int32  arkrtos_eset_set(int32 handle, uint32 mask);`
+
+```c
+int32  arkrtos_eset_set(int32 handle, uint32 mask);
+```
+
+**置位（可累加）：flags |= mask**
+- `handle`：事件集句柄
+- `mask`：要置的位（非 0）
+**返回**：0 成功，负值失败
+> 说明：没有等待者时位留在对象里，下一次 wait 直接命中，不会丢事件。
+
+### `int32  arkrtos_eset_set_from_isr(int32 handle, uint32 mask);`
+
+```c
+int32  arkrtos_eset_set_from_isr(int32 handle, uint32 mask);
+```
+
+**中断中置位（语义与 arkrtos_eset_set 相同）**
+- `handle`：事件集句柄
+- `mask`：要置的位（非 0）
+**返回**：0 成功，负值失败
+
+### `int32  arkrtos_eset_clear(int32 handle, uint32 mask);`
+
+```c
+int32  arkrtos_eset_clear(int32 handle, uint32 mask);
+```
+
+**清除若干位：flags &= ~mask**
+- `handle`：事件集句柄
+- `mask`：要清的位
+**返回**：0 成功，负值失败
+
+### `int32  arkrtos_eset_get(int32 handle, uint32 *p_flags);`
+
+```c
+int32  arkrtos_eset_get(int32 handle, uint32 *p_flags);
+```
+
+**查询当前置位情况**
+- `handle`：事件集句柄
+- `p_flags`：输出：当前 32 位掩码
+**返回**：0 成功，负值失败
+
+### `int32  arkrtos_eset_delete(int32 handle);`
+
+```c
+int32  arkrtos_eset_delete(int32 handle);
+```
+
+**删除事件集（等待者以 ARKRTOS_SYNC_ERR_DELETED 放走）**
+- `handle`：事件集句柄
+**返回**：0 成功，负值失败
 
 ### `int32  arkrtos_sem_create(char *name, int32 init_count);`
 
@@ -7303,6 +7386,23 @@ void arkrtos_task_stack_fill(uint32 *stack_bottom, uint32 stack_size)
 - `stack_size`：栈大小（字节）
 任务运行过程中会不断覆盖该图案，查询栈用量时扫描仍保持图案的
 连续区域即可得到“从未使用过”的栈空间，换算后即为峰值用量。
+
+## kernelsrc/src/arkrtos_eset.c
+
+**Ark RTOS 32 位事件集实现**
+位掩码等待（OR / AND）+ 累加式置位 + 可选清除。
+创建 / 等待 / 置位 / 清除 / 查询 / 删除 六条路径，
+以及任务下线收尸。语义与边界见 arkrtos_eset.h 文件头。
+
+### `#if defined(ARKRTOS_ESET_HOST_TEST) arkrtos_eset_obj_t arkrtos_esets[A`
+
+```c
+#if defined(ARKRTOS_ESET_HOST_TEST) arkrtos_eset_obj_t arkrtos_esets[ARKRTOS_ESET_NUM];
+```
+
+对象表。宿主门禁（-DARKRTOS_ESET_HOST_TEST）把它导出，好让测试直接摆
+两个等待槽，验证「谁先拿」「带 CLEAR 的位只交给一个等待者」这类判定；
+默认构建里它就是本文件内部的 static。 */
 
 ## kernelsrc/src/arkrtos_fs.c
 
