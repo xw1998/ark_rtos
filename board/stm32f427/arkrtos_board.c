@@ -156,7 +156,11 @@ void arkrtos_board_memmanage_body(void);
 void arkrtos_board_busfault_body(void);
 void arkrtos_board_usgfault_body(void);
 
-#if defined(__CC_ARM) && !defined(__clang__)
+/* AC5 的内联汇编向量直接 IMPORT/BL mdk_trace_fault_capture：这个符号只有
+ * MDK_TRACE 编入时才存在。开关关掉时必须退回下面的 C 版本（那时
+ * ARKRTOS_TRACE_FAULT_CAPTURE() 是空宏），否则关档构建链接期报
+ * L6218E: Undefined symbol mdk_trace_fault_capture。 */
+#if defined(__CC_ARM) && !defined(__clang__) && (ARKRTOS_USE_MDK_TRACE == 1)
 
 __asm void HardFault_Handler(void)
 {
@@ -236,7 +240,7 @@ void UsageFault_Handler(void)
     arkrtos_board_usgfault_body();
 }
 
-#endif /* __CC_ARM */
+#endif /* __CC_ARM && ARKRTOS_USE_MDK_TRACE */
 
 void arkrtos_board_hardfault_body(void)
 {

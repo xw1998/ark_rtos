@@ -22,6 +22,14 @@
 #ifndef __ARKRTOS_FEATURES_H__
 #define __ARKRTOS_FEATURES_H__
 
+/* 先吃 Kconfig 生成值。本文件下面每一条开关都是 `#ifndef` 兜底默认值，
+ * 而 autoconf.h 里的每一条也是 `#ifndef`——谁先定义谁赢。若这里不先包含
+ * autoconf.h，任何「直接 include features.h」的翻译单元就会拿到本文件的
+ * 默认值（多为 1），Kconfig 里明明写了 n 也关不掉；实测症状是关档构建
+ * 编出实体代码、链接期报 L6218E 未定义符号（arkrtos_fs_mkdir /
+ * ark_bus_port_lock …）。命令行 -D 仍优先，因为它在任何头文件之前生效。 */
+#include "arkrtos_autoconf.h"
+
 /* ============================================================
  * 一、内核基础机制
  * ============================================================ */

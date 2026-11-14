@@ -32,6 +32,7 @@ config/kconfig/
     Kconfig.posix              # POSIX 层容量
     Kconfig.net                # lwIP 端口容量
 config/arkrtos_defconfig       # 默认配置（--defconfig 的输入）
+config/minimal_defconfig       # 实测最小档（每个选配都关；体积读数见 [功能开关](功能开关.md)）
 kernelsrc/include/arkrtos_autoconf.h   # 生成产物（入库）
 tools/kconfig/
     kconfig.py                 # tokenizer + 递归下降求值 + 定点求解
