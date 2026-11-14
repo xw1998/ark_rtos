@@ -917,6 +917,23 @@ def check_fault_host():
         else:
             fail("fault-host", "gate failed: %s" % txt.strip()[:160])
 
+def check_release_consistency():
+    """Version header, both READMEs, release notes and the latest tag must agree.
+
+    The header comment has claimed since day one that the tag and the README
+    badge move together with the three numbers; nothing enforced it, and the
+    repo ended up claiming `0.0.2` in the README with no tag at all.  The
+    checks live in tools/release_check.py so they can also be run alone before
+    tagging; this wrapper is what makes them part of "before it lands".
+    """
+    r = _run_check([sys.executable, "tools/release_check.py"])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0:
+        ok("release-consistency", txt.splitlines()[-1] if txt else "")
+    else:
+        fail("release-consistency", txt[-300:])
+
+
 def check_tickless():
     """tickless idle: the accounting must be provably right, and the ON path must compile.
 
@@ -1111,6 +1128,7 @@ def main(argv):
     check_features_switches()
     check_softbus_sync_header()
     check_devicetree_generated()
+    check_release_consistency()
     check_utest_host()
     check_sdk_stdio_host()
     check_sbuf_host()

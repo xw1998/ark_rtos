@@ -7,7 +7,10 @@
 *          must be changed together with this file.
 *
 *          Scheme: MAJOR.MINOR.PATCH, matching the tag name one for one
-*          (tag 0.0.2  ->  0 . 0 . 2).
+*          (tag v0.0.3-preview.1  ->  0 . 0 . 3; the -preview.N suffix lives
+*          on the tag only and never in these numbers - see the release
+*          policy page under docs/ (kept ASCII here: this header is pulled
+*          into every translation unit).
 * @note    The three numbers are written without parentheses and without a
 *          suffix on purpose: ARKRTOS_VERSION_STRING stringifies them, and the
 *          preprocessor keeps any parentheses it sees in the produced string
@@ -26,7 +29,7 @@
 
 #define ARKRTOS_VERSION_MAJOR     0   /*!< Major, matches the first tag field.  */
 #define ARKRTOS_VERSION_MINOR     0   /*!< Minor, matches the second tag field. */
-#define ARKRTOS_VERSION_PATCH     2   /*!< Patch, matches the third tag field.  */
+#define ARKRTOS_VERSION_PATCH     3   /*!< Patch, matches the third tag field.  */
 
 /** The three numbers packed into one word: major << 24 | minor << 16 | patch << 8. */
 #define ARKRTOS_VERSION_NUM       (((unsigned)ARKRTOS_VERSION_MAJOR << 24) | \

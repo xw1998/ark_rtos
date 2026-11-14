@@ -1,7 +1,7 @@
 # Ark RTOS
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/release-0.0.2-brightgreen.svg)](https://gitee.com/xw19981010/ark-rtos/tags)
+[![Release](https://img.shields.io/badge/release-0.0.3--preview.1-orange.svg)](https://gitee.com/xw19981010/ark-rtos/tags)
 [![Gitee](https://img.shields.io/badge/gitee-ark__rtos-red.svg)](https://gitee.com/xw19981010/ark-rtos)
 
 **[简体中文](readme.md) | English**
@@ -937,8 +937,15 @@ The documentation index is [docs/README.md](docs/README.md).
 ## Licence and version
 
 - Licence: [MIT](LICENSE) (Copyright (c) 2026 春雫)
-- Current version: **0.0.2**. Versions are recorded as git tags only; the list is at
-  <https://gitee.com/xw19981010/ark-rtos/tags>
+- Current version: **0.0.3** (preview tag `v0.0.3-preview.1`). Versions are recorded as git tags
+  only; the list is at <https://gitee.com/xw19981010/ark-rtos/tags>; the numbering rules, release
+  artefact list and bump criteria are in [docs/发行版与版本策略.md](docs/发行版与版本策略.md) (Chinese).
+- **0.0.3 (preview)**: Kconfig became the single source of truth (project-level macros zeroed out,
+  five defconfigs, a per-build header for the GCC projects), the softbus port glue layer can now be
+  switched off, and the minimal build is 70.2 KB / 37.8 KB; tickless and the mempool SVC verified on
+  hardware; planned handover of mini apps, A/B hot switch, crash ledger surviving reset; SVC numbers
+  and return codes now named. Changes and **unverified items** are in
+  [Release-0.0.3-preview.1](docs/Release-0.0.3-preview.1.md) (Chinese).
 - **0.0.2**: the dynamic-installation main line completed - mini apps (a third kind of user-mode
   application living in the file system), seamless upgrade while running, socket / select on an lwIP
   loopback netif, and file POSIX; MPU violations and unprivileged FPU use verified on hardware; the

@@ -1,7 +1,7 @@
 # Ark RTOS
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/release-0.0.2-brightgreen.svg)](https://gitee.com/xw19981010/ark-rtos/tags)
+[![Release](https://img.shields.io/badge/release-0.0.3--preview.1-orange.svg)](https://gitee.com/xw19981010/ark-rtos/tags)
 [![Gitee](https://img.shields.io/badge/gitee-ark__rtos-red.svg)](https://gitee.com/xw19981010/ark-rtos)
 
 **简体中文 | [English](readme_en.md)**
@@ -761,9 +761,8 @@ STM32F427VGTx @96 MHz，DAPLink（SWD 两线，无 SWO）经 mdkdebug 的 SWD tr
 仍未上板验证或未闭环的项：
 
 - **真实以太网收发**：板级无可用 PHY（`board/stm32f427/` 下没有 PHY 驱动、MDIO 读写、`eth_` 接口与 RMII 引脚分配），网络路径跑的是回环网卡，未做真实链路收发验证（见 [docs/lwIP协议栈接入.md](docs/lwIP协议栈接入.md) §1）
-- **小程序正常退出走计划内交接**：Ark 侧未取到（该路径已在 svcrtos_nano 侧落地上板，见 nano 同名文档）
 - **软总线的物理线两节点**：板上只有一路 USART1 且被内核控制台独占，无空闲 UART，故只验证了板内 loopback；真实串口线上两节点（两块板 / 板 + PC）**未验证**（见 [docs/软总线接入.md](docs/软总线接入.md) §7）
-- **安全认证用例**：T1–T12 **全部有上板读数**（2026-11-12 补齐 T10 看门狗复位与 T12 签名强制：未签名镜像被拒 `err -18`、签名镜像装得上且起得来、`sec` 的 `images.signature` 转 PASS，见 `docs/安全认证准备.md` §8）。遗留不在机制而在部署：正式签名需要产线把真实密钥写进构建（密钥不进仓库），shell 认证与 Flash 选项字节读取通路仍缺，见同文件 §7 的缺口寄存器
+- **安全认证用例**：T1–T12 **全部有上板读数**（2026-11-12 补齐 T10 看门狗复位与 T12 签名强制：未签名镜像被拒 `err -18`、签名镜像装得上且起得来、`sec` 的 `images.signature` 转 PASS，见 `docs/安全认证准备.md` §8）。遗留不在机制而在部署：正式签名需要产线把真实密钥写进构建（密钥不进仓库），RDP/WRP 的**设置**通路与 shell 认证仍缺（**读取**通路已于 2026-11-13 闭环：`sec` 报出真实 `rdp`/`wrp`），见同文件 §7 的缺口寄存器
 
 文档索引见 [docs/README.md](docs/README.md)。
 
@@ -808,7 +807,8 @@ STM32F427VGTx @96 MHz，DAPLink（SWD 两线，无 SWO）经 mdkdebug 的 SWD tr
 ## 许可与版本
 
 - 许可证：[MIT](LICENSE)（Copyright © 2026 春雫）
-- 当前版本：**0.0.2**。版本以 git tag 为唯一记法，列表见 <https://gitee.com/xw19981010/ark-rtos/tags>
+- 当前版本：**0.0.3**（预览版 tag `v0.0.3-preview.1`）。版本以 git tag 为唯一记法，列表见 <https://gitee.com/xw19981010/ark-rtos/tags>；版本号规则、发布物清单与升版判据见 [发行版与版本策略](docs/发行版与版本策略.md)
+- **0.0.3（预览版）**：Kconfig 成为唯一取值来源（工程宏清零、五个 defconfig、GCC per-build 头）、软总线端口胶合层可关、最小档 70.2 KB / 37.8 KB；tickless 与 mempool SVC 上板；小程序计划内交接、A/B 热切换、崩溃台账跨复位；SVC 号与返回码具名化。变更与**未验证项**见 [Release-0.0.3-preview.1](docs/Release-0.0.3-preview.1.md)
 - **0.0.2**：动态安装主线补齐——小程序（文件系统里的第三种用户态应用）、运行中无缝升级、socket / select 与 lwIP 回环、文件类 POSIX；MPU 越权与 FPU 非特权使用上板验证；调度器就绪集改 256 位两级位图（单趟 PendSV −39%）
 - **0.0.1**：首个可安装应用的发布——自动选址与固定槽位两种安装模式可配置，图形上位机与项目内操作手册就位
 - 本文件为简体中文；英文版见 [readme_en.md](readme_en.md)
