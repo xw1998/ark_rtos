@@ -57,4 +57,19 @@
 #undef  APP_ALLOW_RAW_IMAGE
 #define APP_ALLOW_RAW_IMAGE       1
 
+
+/* 32-bit event set (SVC 0x21). Off by default in features.h; this board
+ * turns it on so the App-side SVC channel can be exercised on hardware
+ * (see example/stm32f427/app_sdk/ESET_DEMO). Removing these two lines
+ * restores the default footprint (the module then compiles to nothing). */
+#undef  ARKRTOS_USE_ESET
+#define ARKRTOS_USE_ESET            1
+/* Object table 4 instead of the kernel default 8: this image sits right
+ * at the 120 KB kernel RAM ceiling (free was 12 B before eset). One
+ * eset object is 108 B (16 name + 4 flags + 4 creator + 4 x 20 waiter),
+ * so 8 objects (864 B) does not fit; 4 does, with ~84 B left.
+ * Only the number of *concurrently existing* event sets is reduced;
+ * the per-object waiter slots (ARKRTOS_MAX_ESET_WAITERS) stay at 4. */
+#undef  ARKRTOS_ESET_NUM
+#define ARKRTOS_ESET_NUM            4
 #endif
