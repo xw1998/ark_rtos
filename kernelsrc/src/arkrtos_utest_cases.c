@@ -33,6 +33,7 @@
 #include "arkrtos_timer.h"
 #include "arkrtos_sbuf.h"
 #include "arkrtos_audit.h"
+#include "arkrtos_waitmulti.h"
 
 /* ============================================================
  * 固定块内存池
@@ -484,5 +485,134 @@ UTEST_CASE(audit_structures_consistent)
 }
 
 #endif /* ARKRTOS_USE_AUDIT */
+
+/* ============================================================
+ * 递归互斥锁（ARKRTOS_USE_MTX_RECURSIVE）
+ * 契约：可重入是**对象属性**不是全局语义——只有递归入口创建的锁能重入，
+ *       同一张表里的普通锁重入仍必须被拒；重入与解锁必须成对。
+ * ============================================================ */
+#if (ARKRTOS_USE_MTX_RECURSIVE == 1)
+
+UTEST_CASE(mtx_recursive_contract)
+{
+    int32 r = arkrtos_mtx_create_recursive_internal("utrec");
+    int32 p = arkrtos_mtx_create_internal("utplain");
+
+    UTEST_CHECK(r >= 0);
+    UTEST_CHECK(p >= 0);
+    if((r < 0) || (p < 0))
+    {
+        return;
+    }
+
+    /* 递归锁：同任务连加三次都成功（普通锁第二次就会 -1） */
+    UTEST_CHECK_EQ(arkrtos_mtx_lock_internal(r, 0), 0);
+    UTEST_CHECK_EQ(arkrtos_mtx_lock_internal(r, 0), 0);
+    UTEST_CHECK_EQ(arkrtos_mtx_lock_internal(r, 0), 0);
+
+    /* 解锁必须逐级配对：前两次只减 nest，第三次才真正释放 */
+    UTEST_CHECK_EQ(arkrtos_mtx_unlock_internal(r), 0);
+    UTEST_CHECK_EQ(arkrtos_mtx_unlock_internal(r), 0);
+    UTEST_CHECK_EQ(arkrtos_mtx_unlock_internal(r), 0);
+
+    /* 释放后能重新拿到（nest 已归零，不是"永远锁死"） */
+    UTEST_CHECK_EQ(arkrtos_mtx_lock_internal(r, 0), 0);
+    UTEST_CHECK_EQ(arkrtos_mtx_unlock_internal(r), 0);
+
+    /* 同一张表里的普通锁：重入仍被拒，语义没有被递归入口带跑 */
+    UTEST_CHECK_EQ(arkrtos_mtx_lock_internal(p, 0), 0);
+    UTEST_CHECK(arkrtos_mtx_lock_internal(p, 0) < 0);
+    UTEST_CHECK_EQ(arkrtos_mtx_unlock_internal(p), 0);
+
+    UTEST_CHECK_EQ(arkrtos_mtx_delete_internal(r), 0);
+    UTEST_CHECK_EQ(arkrtos_mtx_delete_internal(p), 0);
+}
+
+#endif /* ARKRTOS_USE_MTX_RECURSIVE */
+
+/* ============================================================
+ * 多对象同时就绪探测（ARKRTOS_USE_WAITMULTI）
+ * 契约：①一条句柄一个位；②ANY/ALL 判定正确；③**不消费令牌**——
+ *       探测说"有令牌"，随后的 timeout==0 取用必须真的取到；
+ *       ④任一句柄非法整组拒绝，不给一半答案。
+ * ============================================================ */
+#if (ARKRTOS_USE_WAITMULTI == 1)
+
+UTEST_CASE(waitmulti_probe_contract)
+{
+    uint32 h[3];
+    uint32 mask = 0u;
+    int32  s = arkrtos_sem_create_internal("utwms", 0);
+    int32  m = arkrtos_mtx_create_internal("utwmm");
+    int32  e = arkrtos_event_create_internal("utwme");
+
+    UTEST_CHECK(s >= 0);
+    UTEST_CHECK(m >= 0);
+    UTEST_CHECK(e >= 0);
+    if((s < 0) || (m < 0) || (e < 0))
+    {
+        return;
+    }
+
+    /* 顺序固定：0=sem（空）、1=event（未置位）、2=mtx（空闲）。
+     * 前两个只用来验"真的没就绪"，mtx 单独用来验"空闲锁算就绪"。 */
+    h[0] = (uint32)s;
+    h[1] = (uint32)e;
+    h[2] = (uint32)m;
+
+    /* 空信号量 + 未置位事件：ANY 与 ALL 都不满足，掩码为 0 */
+    UTEST_CHECK_EQ(arkrtos_wm_probe_internal(h, 2u, ARKRTOS_WM_OPT_ANY, &mask), -2);
+    UTEST_CHECK_EQ(mask, 0u);
+
+    /* 把空闲互斥锁加进组：ANY 立刻满足（"可以加锁"就是就绪），ALL 仍差 sem/event */
+    UTEST_CHECK_EQ(arkrtos_wm_probe_internal(h, 3u, ARKRTOS_WM_OPT_ANY, &mask), 0);
+    UTEST_CHECK_EQ(mask, 4u);
+    UTEST_CHECK_EQ(arkrtos_wm_probe_internal(h, 3u, ARKRTOS_WM_OPT_ALL, &mask), -2);
+
+    /* 投一个令牌：位 0 亮，ALL 仍差事件 */
+    UTEST_CHECK_EQ(arkrtos_sem_post_internal(s), 0);
+    UTEST_CHECK_EQ(arkrtos_wm_probe_internal(h, 3u, ARKRTOS_WM_OPT_ANY, &mask), 0);
+    UTEST_CHECK_EQ(mask, 5u);
+    UTEST_CHECK_EQ(arkrtos_wm_probe_internal(h, 3u, ARKRTOS_WM_OPT_ALL, &mask), -2);
+    UTEST_CHECK_EQ(mask & 2u, 0u);
+
+    arkrtos_event_set_internal(e);
+    UTEST_CHECK_EQ(arkrtos_wm_probe_internal(h, 3u, ARKRTOS_WM_OPT_ALL, &mask), 0);
+    UTEST_CHECK_EQ(mask, 7u);
+
+    /* 不消费令牌：探测了这么多次，令牌还在，取用仍成功 */
+    UTEST_CHECK_EQ(arkrtos_sem_wait_internal(s, 0), 0);
+
+    /* 非法句柄：整组拒绝，掩码清零（不给一半答案） */
+    mask = 0xFFFFFFFFu;
+    h[1] = 0x7FFFFFFFu;
+    UTEST_CHECK_EQ(arkrtos_wm_probe_internal(h, 3u, ARKRTOS_WM_OPT_ANY, &mask), -1);
+    UTEST_CHECK_EQ(mask, 0u);
+    h[1] = (uint32)m;
+
+    /* 参数边界：n==0 / 超上限 / 未知 opt 一律 -1 */
+    UTEST_CHECK_EQ(arkrtos_wm_probe_internal(h, 0u, ARKRTOS_WM_OPT_ANY, &mask), -1);
+    UTEST_CHECK_EQ(arkrtos_wm_probe_internal(h, 3u, 0u, &mask), -1);
+
+    UTEST_CHECK_EQ(arkrtos_sem_delete_internal(s), 0);
+    UTEST_CHECK_EQ(arkrtos_mtx_delete_internal(m), 0);
+}
+
+#endif /* ARKRTOS_USE_WAITMULTI */
+
+/* ============================================================
+ * 等待者容量（ARKRTOS_USE_WAIT_UNBOUNDED）
+ * 契约：打开后等待槽数必须等于任务表容量（一个任务同时只能等一个对象），
+ *       并且至少不小于原来的固定值——放大不许变成缩小。
+ * ============================================================ */
+#if (ARKRTOS_USE_WAIT_UNBOUNDED == 1)
+
+UTEST_CASE(waitq_capacity_contract)
+{
+    UTEST_CHECK_EQ((long)ARKRTOS_WQ_SLOTS, (long)ARKRTOS_TASK_MAX_NUM);
+    UTEST_CHECK((long)ARKRTOS_WQ_SLOTS >= (long)ARKRTOS_MAX_SYNC_WAITERS);
+}
+
+#endif /* ARKRTOS_USE_WAIT_UNBOUNDED */
 
 #endif /* ARKRTOS_USE_UTEST */

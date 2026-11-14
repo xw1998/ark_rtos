@@ -18,6 +18,9 @@
   2. 用同一开关跑 sync 宿主用例（76 条断言），确认槽位账目与令牌守恒在
      48 槽下仍然成立，并打印实际槽位数。
 
+顺带：同一组编译开关下还编一遍 arkrtos_utest_cases.c——递归锁与多对象探测
+两条板端用例只在各自开关打开时才存在，默认档编译看不到它们的 ON 分支。
+
 不覆盖：真实调度器下的排队与唤醒时序、板上 RAM 余量是否够（打开后所有
 对象表一起线性变大，本板 ARKRTOS_TASK_MAX_NUM 个槽 × 各表排队数）。
 
@@ -69,6 +72,10 @@ INCLUDES += EXTRA_INCLUDES
 
 DEFS = [
     "ARKRTOS_USE_WAIT_UNBOUNDED=1",
+    # 顺带把另外两个同步扩展的 ON 分支也编一遍：utest 用例里递归锁与
+    # 多对象探测的断言只有在各自开关打开时才存在，默认档看不到它们。
+    "ARKRTOS_USE_MTX_RECURSIVE=1",
+    "ARKRTOS_USE_WAITMULTI=1",
     'ARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',
     "STM32F427xx",
     "USE_HAL_DRIVER",
@@ -82,6 +89,7 @@ TARGETS = [
     "kernelsrc/src/arkrtos_sbuf.c",
     "kernelsrc/src/arkrtos_event.c",
     "kernelsrc/src/arkrtos_waitmulti.c",
+    "kernelsrc/src/arkrtos_utest_cases.c",
 ]
 
 
