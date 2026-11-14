@@ -150,7 +150,7 @@ pthread_create(&th, 0, worker, arg);   /* 零属性，栈从 SDK 静态池取 */
 
 - **没有 `pthread_attr_set*` 系列**。属性直接填结构体字段；POSIX 那套 setter 在 32 位小系统上只是额外的间接层。
 - 互斥量**没有优先级继承的对外接口**。内核互斥量确实做了优先级继承，但 POSIX 程序既观察不到也设置不了。
-- **读写锁 / 屏障是用户态组合，不是内核对象**：它们各占内核 `ARKRTOS_MTX_NUM` / `ARKRTOS_COND_NUM` 的名额，表满同样表现成 `ENOMEM`（见 §4.4 的容量预算）。写者优先是刻意选择，`PTHREAD_PREFER_READER_NP` 明确不支持。**未上板**：只有编译证据（F427 / APP_DEMO / POSIX_DEMO 0 Error），没有并发行为用例。
+- **读写锁 / 屏障是用户态组合，不是内核对象**：它们各占内核 `ARKRTOS_MTX_NUM` / `ARKRTOS_COND_NUM` 的名额，表满同样表现成 `ENOMEM`（见 §4.4 的容量预算）。写者优先是刻意选择，`PTHREAD_PREFER_READER_NP` 明确不支持。**已上板验证**（2026-11-14，F427）：`POSIX_DEMO` 自带两段自检——读写锁是单任务状态机（连读两次 → 写者申请应被拒 → 逐次解锁 → 写者拿到 → 读者申请应被拒），屏障是 3 参与者（2 个 worker + main，`count=3`，记录到达数与 `serial` 计数）。板上实测 `rwlock  : PASS (0 violations)`、`barrier : PASS (arrived=2 serial=1 bad=0)`。**这段用例覆盖的是状态机与一次性屏障语义**，没有覆盖「多个读者真并发重叠」「写者优先下不发生写者饿死」这类需要长跑争抢的路径，那两条仍无板级读数。
 - `thread == 0` 表示"无此线程"，与 `pthread_t`（`uint32`）同宽。
 
 线程栈的所有权：要么由调用者提供（`stackaddr`），要么取自兼容层的静态池。**内核不会替你分配栈**，也不会接受一个落在内核或别的 App RAM 里的栈指针。

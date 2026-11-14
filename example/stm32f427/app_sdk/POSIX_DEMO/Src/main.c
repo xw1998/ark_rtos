@@ -97,6 +97,38 @@ static void *worker(void *arg)
     return (void *)0;
 }
 
+/**
+* @brief Barrier participant: one of the two worker threads.
+* @note  The barrier releases all three participants (two workers + main) at
+*        once; exactly one of them gets PTHREAD_BARRIER_SERIAL_THREAD.
+*/
+static volatile int g_bar_arrived;
+static volatile int g_bar_serial;
+static volatile int g_bar_bad;
+static pthread_barrier_t g_bar;
+
+static void *bar_worker(void *arg)
+{
+    int r;
+
+    (void)arg;
+    r = pthread_barrier_wait(&g_bar);
+    if(r == PTHREAD_BARRIER_SERIAL_THREAD)
+    {
+        g_bar_serial++;
+    }
+    else if(r == 0)
+    {
+        /* ordinary participant */
+    }
+    else
+    {
+        g_bar_bad++;
+    }
+    g_bar_arrived++;
+    return (void *)0;
+}
+
 int main(void)
 {
     topic_t   topic[TOPIC_MAX];
@@ -175,6 +207,101 @@ int main(void)
     pthread_join(th[1], NULL);
     sem_destroy(&g_gate);
     printf("threads : joined\n");
+
+    /* -------------------------------------------- rwlock / barrier contract.
+     * 这一段是给板端取证用的：读写锁与屏障都是**用户态组合**（内核互斥量 +
+     * 条件变量），没有 SVC 可查，所以只有真跑起来才证明得了状态机。
+     *
+     * 读写锁用 trylock 单任务验状态机（不阻塞，阻塞语义要第二个任务才看得见）：
+     *   读者可共存 → 写者被拒 → 两个读者都放掉后写者能拿 → 那时读者被拒。
+     * 屏障必须多参与者：两个 worker + main 共 3 个，恰好一个拿到
+     * PTHREAD_BARRIER_SERIAL_THREAD(-1)，其余拿 0。
+     */
+    {
+        pthread_rwlock_t rw;
+        int rw_fail = 0;
+        int rc;
+
+        if(pthread_rwlock_init(&rw, NULL) != 0)
+        {
+            printf("rwlock  : init FAILED\n");
+        }
+        else
+        {
+            rc = pthread_rwlock_tryrdlock(&rw);
+            if(rc != 0) { rw_fail++; }
+            rc = pthread_rwlock_tryrdlock(&rw);      /* 第二个读者必须能共存 */
+            if(rc != 0) { rw_fail++; }
+            if(pthread_rwlock_trywrlock(&rw) == 0)   /* 有人读时写者必须被拒 */
+            {
+                rw_fail++;
+                (void)pthread_rwlock_unlock(&rw);
+            }
+            (void)pthread_rwlock_unlock(&rw);
+            (void)pthread_rwlock_unlock(&rw);
+
+            if(pthread_rwlock_trywrlock(&rw) != 0)   /* 读都放掉后写者能拿 */
+            {
+                rw_fail++;
+            }
+            else
+            {
+                if(pthread_rwlock_tryrdlock(&rw) == 0)   /* 写者持有时读者被拒 */
+                {
+                    rw_fail++;
+                    (void)pthread_rwlock_unlock(&rw);
+                }
+                (void)pthread_rwlock_unlock(&rw);
+            }
+
+            if(pthread_rwlock_destroy(&rw) != 0)
+            {
+                rw_fail++;
+            }
+            printf("rwlock  : %s (%d violations)\n",
+                   (rw_fail == 0) ? "PASS" : "FAIL", rw_fail);
+        }
+
+        if(pthread_barrier_init(&g_bar, NULL, 3) != 0)
+        {
+            printf("barrier : init FAILED\n");
+        }
+        else
+        {
+            int serial = 0;
+
+            g_bar_arrived = 0;
+            g_bar_serial  = 0;
+            g_bar_bad     = 0;
+
+            if((pthread_create(&th[0], NULL, bar_worker, (void *)0) == 0) &&
+               (pthread_create(&th[1], NULL, bar_worker, (void *)0) == 0))
+            {
+                rc = pthread_barrier_wait(&g_bar);
+                if(rc == PTHREAD_BARRIER_SERIAL_THREAD)
+                {
+                    serial++;
+                }
+                else if(rc != 0)
+                {
+                    g_bar_bad++;
+                }
+                pthread_join(th[0], NULL);
+                pthread_join(th[1], NULL);
+
+                serial += g_bar_serial;
+                printf("barrier : %s (arrived=%d serial=%d bad=%d)\n",
+                       ((g_bar_arrived == 2) && (serial == 1) && (g_bar_bad == 0))
+                           ? "PASS" : "FAIL",
+                       g_bar_arrived, serial, g_bar_bad);
+            }
+            else
+            {
+                printf("barrier : worker create FAILED\n");
+            }
+            (void)pthread_barrier_destroy(&g_bar);
+        }
+    }
 
     printf("done    : entering heartbeat\n");
     for(;;)
