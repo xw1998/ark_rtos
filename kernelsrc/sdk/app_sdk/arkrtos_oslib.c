@@ -17,6 +17,9 @@ ARKRTOS_SVC_DECL_1(int32, ARKRTOS_SVC_EVENT_CTRL, arkrtos_call_event_ctrl, uint3
 #if (ARKRTOS_USE_ESET == 1)
 ARKRTOS_SVC_DECL_1(int32, ARKRTOS_SVC_ESET_CTRL, arkrtos_call_eset_ctrl, uint32 *);
 #endif
+#if (ARKRTOS_USE_WAITMULTI == 1)
+ARKRTOS_SVC_DECL_1(int32, ARKRTOS_SVC_WAITMULTI_CTRL, arkrtos_call_wm_ctrl, uint32 *);
+#endif
 ARKRTOS_SVC_DECL_1(int32, ARKRTOS_SVC_SYNC_CTRL, arkrtos_call_sync_ctrl, uint32 *);
 
 int32 arkrtos_dev_open(char *name, uint32 param)
@@ -276,6 +279,52 @@ int32 arkrtos_eset_delete(int32 handle)
     return arkrtos_call_eset_ctrl(p);
 }
 #endif /* ARKRTOS_USE_ESET == 1 */
+
+#if (ARKRTOS_USE_WAITMULTI == 1)
+/* 一次探测走一次 SVC；超时等待由本层轮询完成（内核没有登记等待者，
+ * 所以超时也不需要回内核清账）。 */
+static int32 arkrtos_wait_multi_raw(const uint32 *handles, uint32 n,
+                                    uint32 opt, uint32 *ready_mask)
+{
+    uint32 p[5];
+    p[0] = ARKRTOS_WM_SUB_PROBE;
+    p[1] = (uint32)handles;
+    p[2] = n;
+    p[3] = opt;
+    p[4] = (uint32)ready_mask;
+    return arkrtos_call_wm_ctrl(p);
+}
+
+int32 arkrtos_wait_multi(const uint32 *handles, uint32 n, uint32 opt,
+                         int32 timeout_ms, uint32 *ready_mask)
+{
+    uint32 start;
+
+    if(timeout_ms == 0)
+    {
+        /* 只探一次，不做任何轮询 */
+        return arkrtos_wait_multi_raw(handles, n, opt, ready_mask);
+    }
+
+    start = arkrtos_get_time_ms();
+
+    for(;;)
+    {
+        int32 r = arkrtos_wait_multi_raw(handles, n, opt, ready_mask);
+
+        if(r != -2)
+        {
+            return r;
+        }
+        if((timeout_ms > 0) && (arkrtos_sync_wait_expired(start, timeout_ms) != 0))
+        {
+            /* 超时返回 -2：ready_mask 仍是最后一次快照，调用方可自行诊断 */
+            return -2;
+        }
+        (void)arkrtos_task_wait(ARKRTOS_APP_POLL_MS);
+    }
+}
+#endif /* ARKRTOS_USE_WAITMULTI == 1 */
 
 int32 arkrtos_sem_create(char *name, int32 init_count)
 {

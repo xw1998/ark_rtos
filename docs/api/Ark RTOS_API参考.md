@@ -5,7 +5,7 @@
 
 ## 目录
 
-- [kernelsrc/include/arkrtos.h](#kernelsrcincludearkrtosh)（107 项）
+- [kernelsrc/include/arkrtos.h](#kernelsrcincludearkrtosh)（108 项）
 - [kernelsrc/include/arkrtos_app_image.h](#kernelsrcincludearkrtos_app_imageh)（38 项）
 - [kernelsrc/include/arkrtos_apppack.h](#kernelsrcincludearkrtos_apppackh)（9 项）
 - [kernelsrc/include/arkrtos_apprun.h](#kernelsrcincludearkrtos_apprunh)（6 项）
@@ -317,6 +317,23 @@ int32  arkrtos_mutex_create_recursive(char *name);
 - `name`：互斥锁名
 **返回**：互斥锁句柄，失败返回负值
 > 说明：普通 arkrtos_mutex_create 创建的锁仍不可递归，重复加锁返回 -1。
+
+### `int32  arkrtos_wait_multi(const uint32 *handles, uint32 n, uint32 opt,`
+
+```c
+int32  arkrtos_wait_multi(const uint32 *handles, uint32 n, uint32 opt,
+```
+
+**探测一组句柄里哪些已就绪（不消费令牌）**
+- `handles`：句柄数组（信号量 / 互斥锁 / 消息队列 / 事件混用均可）
+- `n`：句柄个数，1..ARKRTOS_WAITMULTI_MAX_OBJS
+- `opt`：ARKRTOS_WM_OPT_ANY（任意一个就绪）或 ARKRTOS_WM_OPT_ALL
+- `timeout_ms`：超时：0=只探一次；>0=最多等这么多毫秒；<0=一直等
+- `ready_mask`：输出：bit i 对应 handles[i]，1=就绪（暂不满足时也可读）
+**返回**：0=满足条件；-1=参数/句柄非法；-2=超时仍未满足
+> 说明：非破坏性：就绪的对象不会被取走，调用方随后要用各自的 timeout=0
+接口去取。带超时的等待是轮询实现，唤醒延迟上限是一个轮询周期；
+32 位事件集需要每条目带掩码，本接口不支持。
 
 ### `int32  arkrtos_mutex_lock(int32 handle, int32 timeout);`
 

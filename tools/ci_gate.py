@@ -989,6 +989,48 @@ def check_eset_host():
     else:
         fail("eset-host", "gate failed: %s" % txt.strip()[-300:])
 
+def check_waitmulti_host():
+    """Multi-object ready probe: dispatch, bit mask and ANY/ALL judgement.
+
+    kernelsrc/tests/test_waitmulti_host.c links the real arkrtos_waitmulti.c
+    against programmable stubs for the four *_ready_internal() queries and an
+    empty disable/enable-irq pair.  The module has no scheduler involvement and
+    no token hand-off, so the whole decision surface is checkable on host.
+    Covered: all-not-ready, ANY partial (bit-exact mask), ALL partial, ALL
+    satisfied, n=0 / n over ARKRTOS_WAITMULTI_MAX_OBJS, illegal opt, NULL
+    pointers, one dead handle rejecting the whole group with the mask cleared,
+    unsupported handle class, dispatch to all four object kinds exactly once,
+    and that probing is read-only.  NOT covered: real concurrency (the window
+    between "probe says ready" and "the caller takes it" can only be observed
+    on a board), the user-mode SVC polling wrapper's timeout and 1 ms wake
+    granularity, and interrupt-off time under the real scheduler. A missing
+    host compiler is a FAIL.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "waitmulti_host_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "WM-HOST OK" in txt:
+        ok("waitmulti-host", "dispatch + bit mask + ANY/ALL verified")
+    else:
+        fail("waitmulti-host", "gate failed: %s" % txt.strip()[-300:])
+
+def check_waitmulti_syntax():
+    """WAITMULTI must compile with the switch ON.
+
+    ARKRTOS_USE_WAITMULTI defaults to 0, so arkrtos_waitmulti.c, the four ready
+    queries in sync/mq/event, the SVC 0x22 handler and dispatch entry in
+    arkrtos_task.c and the SDK polling wrapper are never seen by a compiler in
+    a default build.  Same false-green shape as the eset / rtstat gates.
+    armclang -fsyntax-only with the switch forced to 1 over six files; a
+    missing armclang is a FAIL, not a skip. Syntax only -- SVC behaviour and
+    the wake-up latency still need a board.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "waitmulti_syntax_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "WM-GATE OK" in txt:
+        ok("waitmulti-syntax", "ON-path compile verified (6 files)")
+    else:
+        fail("waitmulti-syntax", txt[-260:])
+
 def check_eset_syntax():
     """ESET must compile with the switch ON.
 
@@ -1176,6 +1218,7 @@ def main(argv):
     check_mq_host()
     check_sync_host()
     check_eset_host()
+    check_waitmulti_host()
     check_loader_host()
     check_fifo_host()
     check_fault_host()
@@ -1183,6 +1226,7 @@ def main(argv):
     check_arkmake_syntax()
     check_rtstat_syntax()
     check_eset_syntax()
+    check_waitmulti_syntax()
     check_seccheck_syntax()
     check_sign_host()
     check_swap_syntax()

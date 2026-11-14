@@ -77,6 +77,12 @@ int32 arkrtos_mq_recv_from_isr_internal(int32 handle, uint32 *buf, int32 len_wor
  * 调用方需自行保证临界区；一般经 arkrtos_task_release_resources() 调用。 */
 void  arkrtos_mq_release_task(int32 task_id);
 
+#if (ARKRTOS_USE_WAITMULTI == 1)
+/* 多对象探测用的只读「是否有消息可取」查询：1=有 / 0=空 / -1=句柄不可用。
+ * 不取走消息、不登记等待者。 */
+int32 arkrtos_mq_ready_internal(int32 handle);
+#endif /* ARKRTOS_USE_WAITMULTI == 1 */
+
 #endif /* ARKRTOS_USE_MQ */
 
 #endif

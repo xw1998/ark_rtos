@@ -160,6 +160,20 @@ config ARKRTOS_USE_MTX_RECURSIVE
 	  Default off: with the gate closed the create function, the SVC case
 	  and the SDK wrapper are not compiled in at all (byte-identical image).
 
+config ARKRTOS_USE_WAITMULTI
+	bool "Multi-object readiness probe (SVC 0x22)"
+	default n
+	help
+	  One call takes a group of handles and answers which of them are
+	  ready (semaphore has a token, queue has a message, event is set,
+	  mutex is free).  It never consumes anything: the caller then takes
+	  what it wants with each object's own timeout=0 call.  Blocking with
+	  a timeout is done by polling in the SDK wrapper, so the wake latency
+	  is one poll period, not zero - the API is a probe, not a kernel
+	  blocking primitive.  Supported types: sem / mtx / mq / event; the
+	  32-bit event set needs a per-entry mask and is out of scope.
+	  Default off: module, SVC case and SDK wrapper are not compiled in.
+
 config ARKRTOS_USE_LOG
 	bool "Kernel log"
 	default y

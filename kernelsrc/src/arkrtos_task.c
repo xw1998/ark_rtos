@@ -33,6 +33,7 @@
 #include "arkrtos_kernel_check.h"   /* shared SVC pointer checks */
 #include "arkrtos_net.h"            /* SVC 0x1E network service */
 #include "arkrtos_eset.h"           /* SVC 0x21 32-bit event set */
+#include "arkrtos_waitmulti.h"      /* SVC 0x22 multi-object probe */
 #include "arkrtos_fs.h"    /* SVC 0x1C user file service */
 #include "arkrtos_vfs.h"   /* SVC 0x1C sub 11..17: the VFS namespace face */
 #if ARKRTOS_HW_SAFE
@@ -956,6 +957,49 @@ static void svc_sync_ctrl(void *p_svc_ctx)
     }
 }
 
+#if (ARKRTOS_USE_WAITMULTI == 1)
+/* ARKRTOS_SVC_WAITMULTI_CTRL: 多对象就绪探测。参数块固定 5 个字（20 字节）：
+ *   p[0]=子命令  p[1]=句柄数组  p[2]=数量  p[3]=ANY/ALL  p[4]=结果掩码
+ * 句柄数组由内核只读、掩码由内核只写，两个指针都必须先过用户内存校验。
+ * 这里只做一次快照，不登记等待者也不阻塞：带超时的等待在 SDK 侧轮询完成。 */
+static void svc_waitmulti_ctrl(void *p_svc_ctx)
+{
+    uint32 *p;
+    int32  r;
+
+    p = (uint32 *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    if(arkrtos_kernel_svc_args_ok(p, 20u) == 0u)
+    {
+        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+        return;
+    }
+    switch(p[0])
+    {
+        case ARKRTOS_WM_SUB_PROBE:
+            if((p[2] == 0u) || (p[2] > (uint32)ARKRTOS_WAITMULTI_MAX_OBJS))
+            {
+                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+                break;
+            }
+            if(arkrtos_kernel_user_ro_ok((const void *)p[1], p[2] * 4u) == 0u)
+            {
+                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+                break;
+            }
+            if(arkrtos_kernel_dev_buf_ok((const void *)p[4], 4) == 0u)
+            {
+                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+                break;
+            }
+            r = arkrtos_wm_probe_internal((const uint32 *)p[1], p[2], p[3], (uint32 *)p[4]);
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)r);
+            break;
+        default:
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+    }
+}
+#endif /* ARKRTOS_USE_WAITMULTI == 1 */
 /* ARKRTOS_SVC_MQ_CTRL: argument check + inner dispatch only; the dispatch table is SVC_Server. */
 static void svc_mq_ctrl(void *p_svc_ctx)
 {
@@ -2235,6 +2279,11 @@ void SVC_Server(void *p_svc_ctx)
     #if (ARKRTOS_USE_ESET == 1)
     case ARKRTOS_SVC_ESET_CTRL:
         svc_eset_ctrl(p_svc_ctx);
+        break;
+    #endif
+    #if (ARKRTOS_USE_WAITMULTI == 1)
+    case ARKRTOS_SVC_WAITMULTI_CTRL:
+        svc_waitmulti_ctrl(p_svc_ctx);
         break;
     #endif
     case ARKRTOS_SVC_APP_MGR:

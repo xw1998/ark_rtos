@@ -244,6 +244,25 @@ int32  arkrtos_mutex_create(char *name);
 */
 int32  arkrtos_mutex_create_recursive(char *name);
 #endif
+#if (ARKRTOS_USE_WAITMULTI == 1)
+/** @defgroup waitmulti 多对象同时等待
+ *  @{ */
+/**
+* @brief 探测一组句柄里哪些已就绪（不消费令牌）
+* @param handles     句柄数组（信号量 / 互斥锁 / 消息队列 / 事件混用均可）
+* @param n           句柄个数，1..ARKRTOS_WAITMULTI_MAX_OBJS
+* @param opt         ARKRTOS_WM_OPT_ANY（任意一个就绪）或 ARKRTOS_WM_OPT_ALL
+* @param timeout_ms  超时：0=只探一次；>0=最多等这么多毫秒；<0=一直等
+* @param ready_mask 输出：bit i 对应 handles[i]，1=就绪（暂不满足时也可读）
+* @return 0=满足条件；-1=参数/句柄非法；-2=超时仍未满足
+* @note 非破坏性：就绪的对象不会被取走，调用方随后要用各自的 timeout=0
+*       接口去取。带超时的等待是轮询实现，唤醒延迟上限是一个轮询周期；
+*       32 位事件集需要每条目带掩码，本接口不支持。
+*/
+int32  arkrtos_wait_multi(const uint32 *handles, uint32 n, uint32 opt,
+                          int32 timeout_ms, uint32 *ready_mask);
+/** @} */
+#endif
 
 /**
 * @brief 加锁

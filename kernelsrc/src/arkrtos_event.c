@@ -301,3 +301,18 @@ void arkrtos_event_set_internal(int32 event_handle)
     /* 原先只置 READY 不触发切换，被唤醒的任务要等到下一次 tick 才运行 */
     ARKRTOS_SWITCH_TASK();
 }
+
+
+#if (ARKRTOS_USE_WAITMULTI == 1)
+int32 arkrtos_event_ready_internal(int32 handle)
+{
+    int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
+
+    if(ARKRTOS_EVENT_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+        return -1;
+    if(idx >= ARKRTOS_EVENT_NUM || arkrtos_events[idx].used == 0)
+        return -1;
+
+    return (arkrtos_events[idx].flag != 0u) ? 1 : 0;
+}
+#endif /* ARKRTOS_USE_WAITMULTI == 1 */

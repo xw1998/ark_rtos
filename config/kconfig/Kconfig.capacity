@@ -51,6 +51,14 @@ config ARKRTOS_MAX_ESET_WAITERS
 	default 4
 	range 1 32
 
+config ARKRTOS_WAITMULTI_MAX_OBJS
+	int "Handles per multi-object probe (ARKRTOS_USE_WAITMULTI=1)"
+	range 1 32
+	default 16
+	help
+	  Upper bound on the handle array handed to one probe.  The ready
+	  mask is 32 bits, so 32 is the hard ceiling.
+
 config ARKRTOS_SEM_NUM
 	int "Semaphores"
 	default 24

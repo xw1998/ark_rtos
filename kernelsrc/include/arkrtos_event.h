@@ -42,4 +42,10 @@ void arkrtos_event_set_internal(int32 handle);
  * 调用方需自行保证临界区；一般经 arkrtos_task_release_resources() 调用。 */
 void arkrtos_event_release_task(int32 task_id);
 
+#if (ARKRTOS_USE_WAITMULTI == 1)
+/* 多对象探测用的只读「该事件是否已置位」查询：1=已置位 / 0=未置位 /
+ * -1=句柄不可用。不消费置位标记、不登记等待者。 */
+int32 arkrtos_event_ready_internal(int32 handle);
+#endif /* ARKRTOS_USE_WAITMULTI == 1 */
+
 #endif

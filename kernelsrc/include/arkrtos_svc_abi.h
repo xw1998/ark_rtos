@@ -86,6 +86,10 @@
  * 加锁/解锁仍走 MTX_LOCK / MTX_UNLOCK：递归与否是对象的属性，
  * 不是每次调用另开一套入口。 */
 #define ARKRTOS_SYNC_SUB_MTX_CREATE_RECURSIVE (17u)
+/* ARKRTOS_SVC_WAITMULTI_CTRL：多对象就绪探测。
+ * 参数块：p[0]=子命令，p[1]=句柄数组指针，p[2]=数量，p[3]=ANY/ALL，
+ * p[4]=结果掩码指针。只做一次快照，不阻塞、不消费令牌。 */
+#define ARKRTOS_WM_SUB_PROBE                 (1u)
 #define ARKRTOS_SYNC_SUB_COND_CREATE         (9u)
 #define ARKRTOS_SYNC_SUB_COND_WAIT           (10u)
 #define ARKRTOS_SYNC_SUB_COND_SIGNAL         (11u)

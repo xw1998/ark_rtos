@@ -150,6 +150,11 @@
 #ifndef ARKRTOS_MAX_ESET_WAITERS
 #define ARKRTOS_MAX_ESET_WAITERS    (4)
 #endif
+/* 多对象就绪探测（ARKRTOS_USE_WAITMULTI=1 才编进来）：一次最多探几个句柄。
+ * 结果掩码是 32 位，所以上限 32。 */
+#ifndef ARKRTOS_WAITMULTI_MAX_OBJS
+#define ARKRTOS_WAITMULTI_MAX_OBJS  (16)
+#endif
 
 /* 信号量、互斥锁及其等待者数量 */
 /* Semaphore table capacity.  The table is kernel wide, so size it to the

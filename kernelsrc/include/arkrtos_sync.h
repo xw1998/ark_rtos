@@ -137,5 +137,14 @@ uint32 arkrtos_sync_sem_num(void);
 uint32 arkrtos_sync_mtx_num(void);
 uint32 arkrtos_sync_cond_num(void);
 
+#if (ARKRTOS_USE_WAITMULTI == 1)
+/* 多对象探测用的只读「就绪」查询：1=就绪 / 0=未就绪 / -1=句柄不可用。
+ * 都不消费令牌、不改对象状态。信号量的就绪是 count>0；互斥锁的就绪是
+ * owner==0（即「现在能加上」）。注意：有等待者排队时令牌/锁在探测之后
+ * 可能先被队首拿走，探测只代表「此刻可满足」。 */
+int32 arkrtos_sem_ready_internal(int32 handle);
+int32 arkrtos_mtx_ready_internal(int32 handle);
+#endif /* ARKRTOS_USE_WAITMULTI == 1 */
+
 
 #endif

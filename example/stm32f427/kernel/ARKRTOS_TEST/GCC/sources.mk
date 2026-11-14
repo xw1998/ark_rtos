@@ -76,6 +76,7 @@ SRCS := \
   kernelsrc/src/arkrtos_fifo.c \
   kernelsrc/src/arkrtos_cfg.c \
   kernelsrc/src/arkrtos_sync.c \
+  kernelsrc/src/arkrtos_waitmulti.c \
   kernelsrc/src/arkrtos_mq.c \
   kernelsrc/src/arkrtos_sbuf.c \
   kernelsrc/src/arkrtos_mempool.c \

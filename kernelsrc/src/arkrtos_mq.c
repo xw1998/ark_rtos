@@ -721,6 +721,21 @@ int32 arkrtos_mq_is_alive(int32 handle)
     return (arkrtos_mqs[idx].used != 0) ? 1 : 0;
 }
 
+
+#if (ARKRTOS_USE_WAITMULTI == 1)
+int32 arkrtos_mq_ready_internal(int32 handle)
+{
+    int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
+
+    if(ARKRTOS_MQ_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+        return -1;
+    if(idx >= ARKRTOS_MQ_NUM || arkrtos_mqs[idx].used == 0)
+        return -1;
+
+    return (arkrtos_mqs[idx].count > 0u) ? 1 : 0;
+}
+#endif /* ARKRTOS_USE_WAITMULTI == 1 */
+
 #else   /* ARKRTOS_USE_MQ == 0 */
 /* Message queues compiled out.  Creating one fails and every transfer is
  * refused, so an application that asks for a queue is told "no" here rather
@@ -810,5 +825,14 @@ void arkrtos_mq_release_task(int32 task_id)
 {
     (void)task_id;
 }
+
+
+#if (ARKRTOS_USE_WAITMULTI == 1)
+int32 arkrtos_mq_ready_internal(int32 handle)
+{
+    (void)handle;
+    return -1;
+}
+#endif /* ARKRTOS_USE_WAITMULTI == 1 */
 
 #endif /* ARKRTOS_USE_MQ */

@@ -963,6 +963,11 @@
               <FileType>1</FileType>
               <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_eset.c</FilePath>
             </File>
+<File>
+              <FileName>arkrtos_waitmulti.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_waitmulti.c</FilePath>
+            </File>
             <File>
               <FileName>arkrtos_fifo.c</FileName>
               <FileType>1</FileType>

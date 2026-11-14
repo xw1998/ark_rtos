@@ -1578,3 +1578,36 @@ int32 arkrtos_cond_delete_internal(int32 handle)
     ARKRTOS_ENABLE_IRQ();
     return ARKRTOS_SYNC_OK;
 }
+
+
+/* ============================================================
+ * 多对象探测用的只读就绪查询
+ * ============================================================ */
+#if (ARKRTOS_USE_WAITMULTI == 1)
+int32 arkrtos_sem_ready_internal(int32 handle)
+{
+    int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
+
+    if(ARKRTOS_SEM_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+        return -1;
+    if(idx >= ARKRTOS_SEM_NUM || arkrtos_sems[idx].used == 0)
+        return -1;
+
+    return (arkrtos_sems[idx].count > 0) ? 1 : 0;
+}
+
+int32 arkrtos_mtx_ready_internal(int32 handle)
+{
+    int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
+
+    if(ARKRTOS_MTX_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+        return -1;
+    if(idx >= ARKRTOS_MTX_NUM || arkrtos_mtxs[idx].used == 0)
+        return -1;
+
+    /* 只读 owner，不改优先级继承：探测不是加锁，不建立新的依赖关系。
+     * 递归锁被当前任务自己持有时 owner!=0，探测报「未就绪」——本接口不
+     * 替调用方判断重入。 */
+    return (arkrtos_mtxs[idx].owner == 0) ? 1 : 0;
+}
+#endif /* ARKRTOS_USE_WAITMULTI == 1 */

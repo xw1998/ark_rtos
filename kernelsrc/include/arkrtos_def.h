@@ -55,6 +55,7 @@
  * with the gate off the handler is not compiled in at all, so a stray call
  * traps as an unknown service instead of being silently accepted. */
 #define ARKRTOS_SVC_ESET_CTRL         (0x21)
+#define ARKRTOS_SVC_WAITMULTI_CTRL    (0x22)   /* 多对象就绪探测 */
 
 /* 同步原语（信号量/互斥锁）返回码：0=成功，负值=失败。
  * 超时必须返回负值——调用方据此判断“本次没有拿到资源”；

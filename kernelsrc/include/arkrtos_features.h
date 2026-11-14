@@ -134,6 +134,12 @@
 #ifndef ARKRTOS_USE_MTX_RECURSIVE
 #define ARKRTOS_USE_MTX_RECURSIVE       0
 #endif
+/* 多对象同时就绪探测（SVC 0x22）。
+ * 一次问一组句柄「谁已就绪」，只报状态、不消费令牌；带超时的等待由
+ * SDK 侧轮询完成。默认关时本模块、SVC 分派项与 SDK 包装都不编进来。 */
+#ifndef ARKRTOS_USE_WAITMULTI
+#define ARKRTOS_USE_WAITMULTI           0
+#endif
 
 /* tickless idle。
  * 为什么默认关：省的是 idle 期间的中断次数，代价是唤醒路径要自己重建
