@@ -183,6 +183,16 @@
 #define ARKRTOS_WQ_SLOTS            (ARKRTOS_MAX_SYNC_WAITERS)
 #endif
 
+/* SMP 骨架（ARKRTOS_USE_SMP=1 才编进来）的核数。1 = 单核，骨架不产生任何
+ * 代码。打开后每核一份 arkrtos_smp_cpu_t 状态块，在线核用 uint32 掩码记账，
+ * 所以上限 8：再大掩码就不够，且 8 核以内人工对账还做得动。 */
+#ifndef ARKRTOS_CPU_NUM
+#define ARKRTOS_CPU_NUM             (1)
+#endif
+#if (ARKRTOS_CPU_NUM < 1) || (ARKRTOS_CPU_NUM > 8)
+#error "ARKRTOS_CPU_NUM must be within 1..8 (online mask is a uint32, and more cores cannot be verified by hand)."
+#endif
+
 #define ARKRTOS_MS_TO_TICK(ms)      ((ms) * 1000 / ARKRTOS_TICK_PERIOD_US)
 
 /* ============================================================

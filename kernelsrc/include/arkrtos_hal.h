@@ -136,6 +136,25 @@ uint32 arkrtos_port_cpu_id(void);
 */
 void   arkrtos_port_spin_hint(void);
 
+#if (ARKRTOS_USE_SMP == 1)
+/**
+* @brief Start a secondary CPU (SMP scaffolding only).
+* @param cpu hardware core id, 1..ARKRTOS_CPU_NUM-1
+* @return 0 = start request accepted; -1 = this port has no secondary-core path
+* @note A single-core port returns -1 rather than pretending the core is up.
+*       The started core must enter arkrtos_smp_secondary_main(cpu) as its
+*       first C code, with its stack already in place.
+*/
+int32  arkrtos_port_cpu_start(uint32 cpu);
+
+/**
+* @brief Send an inter-processor interrupt (SMP scaffolding only).
+* @param cpu target core id, already checked online by the caller
+* @return 0 = sent; -1 = this port has no IPI path
+*/
+int32  arkrtos_port_send_ipi(uint32 cpu);
+#endif /* ARKRTOS_USE_SMP == 1 */
+
 
 /* ============================================================
  * иообнд╡Ц

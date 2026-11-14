@@ -545,6 +545,11 @@
               <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_waitmulti.c</FilePath>
             </File>
             <File>
+              <FileName>arkrtos_smp.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_smp.c</FilePath>
+            </File>
+            <File>
               <FileName>arkrtos_fifo.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_fifo.c</FilePath>

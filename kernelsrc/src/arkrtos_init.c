@@ -40,6 +40,7 @@
 #include "arkrtos_sbuf.h"
 #include "arkrtos_rt.h"
 #include "arkrtos_eset.h"
+#include "arkrtos_smp.h"
 #include "arkrtos_init.h"
 
 /* 内核模块初始化：唯一权威顺序实现（任何工程的 main 都只调用它） */
@@ -53,6 +54,13 @@ void arkrtos_kernel_module_init(void)
 #endif
 #if (ARKRTOS_USE_ESET == 1)
     arkrtos_eset_module_init();
+#endif
+#if (ARKRTOS_USE_SMP == 1)
+    /* SMP scaffolding: CPU0 marks itself online and hands cores 1..N-1 to
+     * the port layer. It must run before the scheduler starts, because a
+     * secondary core that is started later would find a running scheduler
+     * it does not own. */
+    arkrtos_smp_init();
 #endif
     arkrtos_mempool_module_init();
     arkrtos_timer_module_init();

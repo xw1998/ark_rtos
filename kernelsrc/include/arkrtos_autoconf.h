@@ -28,6 +28,9 @@
 #ifndef ARKRTOS_COND_NUM
 #define ARKRTOS_COND_NUM (8)
 #endif
+#ifndef ARKRTOS_CPU_NUM
+#define ARKRTOS_CPU_NUM (1)
+#endif
 #ifndef ARKRTOS_DEV_MAX_NUM
 #define ARKRTOS_DEV_MAX_NUM (8)
 #endif
@@ -264,6 +267,9 @@
 #endif
 #ifndef ARKRTOS_USE_SHELL
 #define ARKRTOS_USE_SHELL 1
+#endif
+#ifndef ARKRTOS_USE_SMP
+#define ARKRTOS_USE_SMP 0
 #endif
 #ifndef ARKRTOS_USE_SOFTBUS
 #define ARKRTOS_USE_SOFTBUS 1

@@ -17,7 +17,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（32 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（34 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -34,6 +34,7 @@
 - [kernelsrc/include/arkrtos_share.h](#kernelsrcincludearkrtos_shareh)（7 项）
 - [kernelsrc/include/arkrtos_shell.h](#kernelsrcincludearkrtos_shellh)（9 项）
 - [kernelsrc/include/arkrtos_sign.h](#kernelsrcincludearkrtos_signh)（5 项）
+- [kernelsrc/include/arkrtos_smp.h](#kernelsrcincludearkrtos_smph)（11 项）
 - [kernelsrc/include/arkrtos_softbus.h](#kernelsrcincludearkrtos_softbush)（5 项）
 - [kernelsrc/include/arkrtos_spin.h](#kernelsrcincludearkrtos_spinh)（10 项）
 - [kernelsrc/include/arkrtos_svc_call.h](#kernelsrcincludearkrtos_svc_callh)（10 项）
@@ -74,6 +75,7 @@
 - [kernelsrc/src/arkrtos_log.c](#kernelsrcsrcarkrtos_logc)（1 项）
 - [kernelsrc/src/arkrtos_mini.c](#kernelsrcsrcarkrtos_minic)（1 项）
 - [kernelsrc/src/arkrtos_mpu.c](#kernelsrcsrcarkrtos_mpuc)（1 项）
+- [kernelsrc/src/arkrtos_smp.c](#kernelsrcsrcarkrtos_smpc)（1 项）
 - [kernelsrc/src/arkrtos_task.c](#kernelsrcsrcarkrtos_taskc)（4 项）
 - [kernelsrc/src/arkrtos_tickless.c](#kernelsrcsrcarkrtos_ticklessc)（1 项）
 - [kernelsrc/src/arkrtos_vfs_lfs.c](#kernelsrcsrcarkrtos_vfs_lfsc)（3 项）
@@ -2966,6 +2968,29 @@ void   arkrtos_port_spin_hint(void);
 
 **自旋等待提示（降低自旋总线压力，可插入 NOP/WFE/PAUSE）**
 
+### `int32  arkrtos_port_cpu_start(uint32 cpu);`
+
+```c
+int32  arkrtos_port_cpu_start(uint32 cpu);
+```
+
+**Start a secondary CPU (SMP scaffolding only).**
+- `cpu`：hardware core id, 1..ARKRTOS_CPU_NUM-1
+**返回**：0 = start request accepted; -1 = this port has no secondary-core path
+> 说明：A single-core port returns -1 rather than pretending the core is up.
+The started core must enter arkrtos_smp_secondary_main(cpu) as its
+first C code, with its stack already in place.
+
+### `int32  arkrtos_port_send_ipi(uint32 cpu);`
+
+```c
+int32  arkrtos_port_send_ipi(uint32 cpu);
+```
+
+**Send an inter-processor interrupt (SMP scaffolding only).**
+- `cpu`：target core id, already checked online by the caller
+**返回**：0 = sent; -1 = this port has no IPI path
+
 ### `void arkrtos_port_set_psp(uint32 val);`
 
 ```c
@@ -5296,6 +5321,121 @@ image in RAM.  Feed the header (as written to Flash), then the nominal
 reloc table and payload bytes exactly as they arrive over the wire, then
 compare against p_hdr->signature.  Same coverage as arkrtos_sign_image();
 one such transfer is in flight at a time, so the state is module-static. */
+
+## kernelsrc/include/arkrtos_smp.h
+
+**SMP 骨架：每核状态、次核启动入口、核间中断通路（默认关）**
+必须先把话说清楚：**本内核的调度器是单核设计**——当前任务号
+是全局的（arkrtos_current_task_id）、就绪表是全局位图、延迟
+队列也是全局一份。打开 ARKRTOS_USE_SMP 不会把这些变成每核一份，
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**单核状态块**
+online 由次核自己在启动入口里置位（CPU0 由 init 置位）；
+started 只表示"port 层接受了启动请求"。
+
+### `int32 arkrtos_smp_init(void);`
+
+```c
+int32 arkrtos_smp_init(void);
+```
+
+**引导次核**
+CPU0（调用者）直接标记上线；1..ARKRTOS_CPU_NUM-1 逐个调用
+arkrtos_port_cpu_start()。
+**返回**：启动请求被接受的核数（含 CPU0）；port 层不支持的核不计入
+> 说明：返回 N 只代表"N 个核的启动请求被接受"，上线与否要看掩码。
+
+### `void arkrtos_smp_secondary_main(uint32 cpu);`
+
+```c
+void arkrtos_smp_secondary_main(uint32 cpu);
+```
+
+**次核启动入口（由 port 层在次核上调用）**
+- `cpu`：硬件核号（必须落在 1..ARKRTOS_CPU_NUM-1）
+> 说明：会把该核标记上线、开中断，然后进入空转循环，永不返回。
+核号越界时什么都不标记，直接空转——宁可停在那里，也不要让一个
+不知道自己是几号核的 CPU 去改别人的状态。
+
+### `void arkrtos_smp_cpu_online(uint32 cpu);`
+
+```c
+void arkrtos_smp_cpu_online(uint32 cpu);
+```
+
+**把指定核标记为上线（幂等）**
+- `cpu`：硬件核号，越界直接忽略
+> 说明：次核启动入口内部调用它；移植层若自己完成了启动，也可以直接调。
+
+### `arkrtos_smp_cpu_t *arkrtos_smp_cpu_self(void);`
+
+```c
+arkrtos_smp_cpu_t *arkrtos_smp_cpu_self(void);
+```
+
+**当前核的状态块**
+> 说明：arkrtos_port_cpu_id() 返回值越界时收敛到核 0：核号读错不应该变成
+越界写。
+
+### `uint32 arkrtos_smp_online_count(void);`
+
+```c
+uint32 arkrtos_smp_online_count(void);
+```
+
+**在线核数（按掩码统计） */**
+
+### `uint32 arkrtos_smp_online_mask_get(void);`
+
+```c
+uint32 arkrtos_smp_online_mask_get(void);
+```
+
+**在线核掩码 */**
+
+### `void arkrtos_smp_tick(void);`
+
+```c
+void arkrtos_smp_tick(void);
+```
+
+**记一拍（由各核的 tick 中断调用），只累加当前核的计数 */**
+
+### `int32 arkrtos_smp_send_ipi(uint32 cpu);`
+
+```c
+int32 arkrtos_smp_send_ipi(uint32 cpu);
+```
+
+**发核间中断**
+- `cpu`：目标核号
+**返回**：0 = 已交给 port 层发出；-1 = 核号越界 / 该核未上线 / port 不支持
+
+### `void arkrtos_smp_ipi_handler(void);`
+
+```c
+void arkrtos_smp_ipi_handler(void);
+```
+
+**核间中断服务例程（由 port 层的 IPI 中断调用）**
+> 说明：默认实现只累加当前核的 ipi_count。需要真实动作（例如踢调度）时，
+应用提供同名强符号即可覆盖（本实现标了 __weak）。
+
+### `void arkrtos_smp_idle_loop(void);`
+
+```c
+void arkrtos_smp_idle_loop(void);
+```
+
+**次核空转一步：累加 idle_count 后 WFI**
+> 说明：默认次核循环就是它；将来接每核调度器时，把这一步换成 idle 任务的
+调度入口。
 
 ## kernelsrc/include/arkrtos_softbus.h
 
@@ -7636,6 +7776,22 @@ True for MiniApps only (they are loaded into RAM and run there, see
 arkrtos_mini.c); every App / Driver / kernel task answers no. The test is on
 the recorded window, not on a flag: a window in the image RAM pool can only
 have been put there by the MiniApp loader. */
+
+## kernelsrc/src/arkrtos_smp.c
+
+**SMP 骨架实现：每核状态、次核启动、核间中断（默认关）**
+这个文件只做四件事，不多做一件：
+1) 维护每核状态表与在线掩码；
+2) 引导次核（CPU0 直接上线，其余交给 port 层）；
+
+### `static void smp_mask_set(uint32 cpu) {`
+
+```c
+static void smp_mask_set(uint32 cpu) {
+```
+
+**原子置位在线掩码的某一位**
+> 说明：用 CAS 重试而不是读-改-写：两个次核同时上线时，读-改-写会丢掉一个。
 
 ## kernelsrc/src/arkrtos_task.c
 

@@ -52,6 +52,16 @@
 #error "ARKRTOS_USE_SCHED_LOCK must stay 1: the scheduler lock has no honest fallback."
 #endif
 
+/* SMP 骨架（arkrtos_smp.c / arkrtos_smp.h）。
+ * 为什么默认关、并且不许把它读成"支持多核"：本内核的调度器是单核设计
+ * （全局当前任务号、全局就绪位图、全局延迟队列），打开这个开关不会把
+ * 调度器变成多核。它只提供多核的地基——每核状态块、次核启动入口、核间
+ * 中断通路、在线核掩码。关档下类型与符号都不存在，体积与行为逐位不变；
+ * 打开后次核只跑 WFI 空转，不参与调度。 */
+#ifndef ARKRTOS_USE_SMP
+#define ARKRTOS_USE_SMP                 0
+#endif
+
 /* 任务栈用量统计：填充图案 + 最低栈指针双手段，算每任务峰值 */
 #ifndef ARKRTOS_USE_STACK_USAGE
 #define ARKRTOS_USE_STACK_USAGE         1
@@ -134,9 +144,6 @@
 #ifndef ARKRTOS_USE_MTX_RECURSIVE
 #define ARKRTOS_USE_MTX_RECURSIVE       0
 #endif
-/* 多对象同时就绪探测（SVC 0x22）。
- * 一次问一组句柄「谁已就绪」，只报状态、不消费令牌；带超时的等待由
- * SDK 侧轮询完成。默认关时本模块、SVC 分派项与 SDK 包装都不编进来。 */
 /* 等待者容量：默认每个对象固定 ARKRTOS_MAX_SYNC_WAITERS（4）个等待槽。
  * 打开这个开关后槽位放大到任务表容量（ARKRTOS_TASK_MAX_NUM）。理由：一个
  * 任务同一时刻只能等一个对象，所以任何对象的等待者数不可能超过任务数——
@@ -146,6 +153,9 @@
 #define ARKRTOS_USE_WAIT_UNBOUNDED       0
 #endif
 
+/* 多对象同时就绪探测（SVC 0x22）。
+ * 一次问一组句柄「谁已就绪」，只报状态、不消费令牌；带超时的等待由
+ * SDK 侧轮询完成。默认关时本模块、SVC 分派项与 SDK 包装都不编进来。 */
 #ifndef ARKRTOS_USE_WAITMULTI
 #define ARKRTOS_USE_WAITMULTI           0
 #endif

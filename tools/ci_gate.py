@@ -1087,6 +1087,27 @@ def check_rtstat_syntax():
     else:
         fail("rtstat", txt[-260:])
 
+def check_smp():
+    """SMP scaffolding must build with the switch ON and keep its books straight.
+
+    ARKRTOS_USE_SMP defaults to 0, so arkrtos_smp.h/c, the boot call in
+    arkrtos_init.c, the two new port hooks in arkrtos_hal.h and the three
+    single-core port stubs are never seen by a compiler in a default build.
+    Two parts: a host run of test_smp_host.c with programmable port stubs
+    (online mask, out-of-range core ids, refused start requests, IPI target
+    check, re-init clearing, per-core counters), and armclang -fsyntax-only
+    with the switch forced to 1 over five files.  A missing compiler is a
+    FAIL, not a skip.  Scope: there is no multi-core board here, so this says
+    the scaffolding is self-consistent, not that SMP works -- the scheduler
+    is still single-core and secondary cores only spin in WFI.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "smp_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "SMP-GATE OK" in txt:
+        ok("smp", "host accounting + ON-path compile verified (5 files)")
+    else:
+        fail("smp", txt[-260:])
+
 def check_seccheck_syntax():
     """SECCHECK (security baseline self-check) must compile with the switch ON.
 
@@ -1248,6 +1269,7 @@ def main(argv):
     check_eset_syntax()
     check_waitmulti_syntax()
     check_waitq()
+    check_smp()
     check_seccheck_syntax()
     check_sign_host()
     check_swap_syntax()

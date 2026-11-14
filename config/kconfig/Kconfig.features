@@ -19,6 +19,16 @@ config ARKRTOS_USE_SCHED_LOCK
 	  Scheduler lock (SVC 0x1B lock/unlock).  Mandatory: the lock has no
 	  honest fallback, so arkrtos_features.h rejects anything but 1.
 
+config ARKRTOS_USE_SMP
+	bool "SMP scaffolding"
+	default n
+	help
+	  每核状态块 + 次核启动入口 + 核间中断通路 + 在线核掩码。
+	  默认关，也必须说清楚它不是什么：本内核的调度器是单核设计
+	  （全局当前任务号、全局就绪位图、全局延迟队列），打开这个开关
+	  不会把调度器变成多核。打开后次核只跑 WFI 空转，不参与调度。
+	  关档下类型与符号都不存在，体积与行为逐位不变。
+
 config ARKRTOS_USE_STACK_USAGE
 	bool "Task stack usage statistics"
 	default y

@@ -29,6 +29,20 @@ config ARKRTOS_TIME_SLICE_TICKS
 
 endmenu
 
+menu "SMP"
+
+config ARKRTOS_CPU_NUM
+	int "CPU cores (ARKRTOS_USE_SMP=1)"
+	default 1
+	range 1 8
+	help
+	  Cores covered by the SMP scaffolding: one arkrtos_smp_cpu_t block
+	  per core.  1 means single core and the scaffolding builds nothing.
+	  8 is the ceiling because the online mask is a uint32 and beyond that
+	  the bring-up cannot be checked by hand.
+
+endmenu
+
 menu "Synchronisation tables"
 
 config ARKRTOS_EVENT_NUM

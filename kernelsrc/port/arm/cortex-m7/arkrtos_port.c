@@ -80,6 +80,28 @@ void arkrtos_port_spin_hint(void)
     __NOP();
 }
 
+#if (ARKRTOS_USE_SMP == 1)
+/* ============================================================
+ * SMP scaffolding hooks
+ * @brief Single-core Cortex-M parts have no secondary core and no IPI
+ *        controller, so both hooks report "not supported" (-1).  A
+ *        multi-core port replaces these two functions and does not touch
+ *        the kernel: arkrtos_smp_init() only counts cores whose start
+ *        request returned 0, and send_ipi() propagates -1 upward.
+ * ============================================================ */
+int32 arkrtos_port_cpu_start(uint32 cpu)
+{
+    (void)cpu;
+    return -1;
+}
+
+int32 arkrtos_port_send_ipi(uint32 cpu)
+{
+    (void)cpu;
+    return -1;
+}
+#endif /* ARKRTOS_USE_SMP == 1 */
+
 
 /* ============================================================
  * ÖÐ¶Ï¿ª¹Ø
