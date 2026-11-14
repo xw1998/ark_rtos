@@ -235,6 +235,16 @@ int32  arkrtos_sem_delete(int32 handle);
 */
 int32  arkrtos_mutex_create(char *name);
 
+#if (ARKRTOS_USE_MTX_RECURSIVE == 1)
+/**
+* @brief 创建递归互斥锁（同一任务可重复加锁，解锁需与加锁次数配平）
+* @param name 互斥锁名
+* @return 互斥锁句柄，失败返回负值
+* @note 普通 arkrtos_mutex_create 创建的锁仍不可递归，重复加锁返回 -1。
+*/
+int32  arkrtos_mutex_create_recursive(char *name);
+#endif
+
 /**
 * @brief 加锁
 * @param handle  互斥锁句柄

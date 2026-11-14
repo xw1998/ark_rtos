@@ -5,7 +5,7 @@
 
 ## 目录
 
-- [kernelsrc/include/arkrtos.h](#kernelsrcincludearkrtosh)（106 项）
+- [kernelsrc/include/arkrtos.h](#kernelsrcincludearkrtosh)（107 项）
 - [kernelsrc/include/arkrtos_app_image.h](#kernelsrcincludearkrtos_app_imageh)（38 项）
 - [kernelsrc/include/arkrtos_apppack.h](#kernelsrcincludearkrtos_apppackh)（9 项）
 - [kernelsrc/include/arkrtos_apprun.h](#kernelsrcincludearkrtos_apprunh)（6 项）
@@ -306,6 +306,17 @@ int32  arkrtos_mutex_create(char *name);
 **创建互斥锁（带优先级继承，防止优先级反转）**
 - `name`：互斥锁名
 **返回**：互斥锁句柄，失败返回负值
+
+### `int32  arkrtos_mutex_create_recursive(char *name);`
+
+```c
+int32  arkrtos_mutex_create_recursive(char *name);
+```
+
+**创建递归互斥锁（同一任务可重复加锁，解锁需与加锁次数配平）**
+- `name`：互斥锁名
+**返回**：互斥锁句柄，失败返回负值
+> 说明：普通 arkrtos_mutex_create 创建的锁仍不可递归，重复加锁返回 -1。
 
 ### `int32  arkrtos_mutex_lock(int32 handle, int32 timeout);`
 

@@ -232,6 +232,9 @@
 #ifndef ARKRTOS_USE_MQ
 #define ARKRTOS_USE_MQ 1
 #endif
+#ifndef ARKRTOS_USE_MTX_RECURSIVE
+#define ARKRTOS_USE_MTX_RECURSIVE 0
+#endif
 #ifndef ARKRTOS_USE_POSIX
 #define ARKRTOS_USE_POSIX 1
 #endif

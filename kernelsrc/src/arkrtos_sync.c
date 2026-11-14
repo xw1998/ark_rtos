@@ -166,6 +166,10 @@ void arkrtos_sync_module_init(void)
         arkrtos_mtxs[i].owner         = 0;
         arkrtos_mtxs[i].used          = 0;
         arkrtos_mtxs[i].orig_priority = 0;
+#if (ARKRTOS_USE_MTX_RECURSIVE == 1)
+        arkrtos_mtxs[i].recursive     = 0;
+        arkrtos_mtxs[i].nest          = 0;
+#endif
         arkrtos_mtxs[i].creator_id    = 0;
         for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
             arkrtos_mtxs[i].waiters[j] = 0;
@@ -553,6 +557,9 @@ void arkrtos_sync_release_task(int32 task_id)
             {
                 arkrtos_mtxs[i].owner         = p_next;
                 arkrtos_mtxs[i].orig_priority = p_next->priority;
+#if (ARKRTOS_USE_MTX_RECURSIVE == 1)
+                arkrtos_mtxs[i].nest          = 1;
+#endif
                 p_next->wait_time   = 0;
                 p_next->wake_reason = ARKRTOS_WAKE_HANDOFF;
                 p_next->status      = ARKRTOS_TASK_READY;
@@ -560,6 +567,9 @@ void arkrtos_sync_release_task(int32 task_id)
             }
             else
             {
+#if (ARKRTOS_USE_MTX_RECURSIVE == 1)
+                arkrtos_mtxs[i].nest  = 0;
+#endif
                 arkrtos_mtxs[i].owner = 0;
             }
         }
@@ -603,6 +613,10 @@ void arkrtos_sync_release_task(int32 task_id)
              * it again corrupts the scheduler. */
             arkrtos_mtxs[i].owner         = 0;
             arkrtos_mtxs[i].orig_priority = 0;
+#if (ARKRTOS_USE_MTX_RECURSIVE == 1)
+            arkrtos_mtxs[i].recursive     = 0;
+            arkrtos_mtxs[i].nest          = 0;
+#endif
             for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
             {
                 arkrtos_mtxs[i].waiters[j] = 0;
@@ -881,6 +895,10 @@ int32 arkrtos_mtx_create_internal(char *name)
             arkrtos_sync_copy_name(arkrtos_mtxs[i].name, name);
             arkrtos_mtxs[i].owner = 0;
             arkrtos_mtxs[i].used  = 1;
+#if (ARKRTOS_USE_MTX_RECURSIVE == 1)
+            arkrtos_mtxs[i].recursive = 0;   /* 普通锁：不可递归 */
+            arkrtos_mtxs[i].nest      = 0;
+#endif
             /* See arkrtos_sem_create_internal: the queue starts empty. */
             for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
             {
@@ -896,6 +914,35 @@ int32 arkrtos_mtx_create_internal(char *name)
     return ARKRTOS_SYNC_ERR_NOSLOT;
 }
 
+#if (ARKRTOS_USE_MTX_RECURSIVE == 1)
+int32 arkrtos_mtx_create_recursive_internal(char *name)
+{
+    int32 i, j;
+    ARKRTOS_DISABLE_IRQ();
+    for(i = 0; i < ARKRTOS_MTX_NUM; i++)
+    {
+        if(arkrtos_mtxs[i].used == 0)
+        {
+            arkrtos_sync_copy_name(arkrtos_mtxs[i].name, name);
+            arkrtos_mtxs[i].owner         = 0;
+            arkrtos_mtxs[i].used          = 1;
+            arkrtos_mtxs[i].recursive     = 1;
+            arkrtos_mtxs[i].nest          = 0;
+            arkrtos_mtxs[i].orig_priority = 0;
+            for(j = 0; j < ARKRTOS_MAX_SYNC_WAITERS; j++)
+            {
+                arkrtos_mtxs[i].waiters[j] = 0;
+            }
+            arkrtos_mtxs[i].creator_id = (arkrtos_current_task_id > 0)
+                                       ? arkrtos_current_task_id : 0;
+            ARKRTOS_ENABLE_IRQ();
+            return (i | ARKRTOS_MTX_HANDLE_FLAG);
+        }
+    }
+    ARKRTOS_ENABLE_IRQ();
+    return ARKRTOS_SYNC_ERR_NOSLOT;
+}
+#endif /* ARKRTOS_USE_MTX_RECURSIVE == 1 */
 int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms)
 {
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
@@ -928,17 +975,36 @@ int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms)
             arkrtos_appq_set(p_tsk, 0u);
             arkrtos_mtxs[idx].owner         = p_tsk;
             arkrtos_mtxs[idx].orig_priority = p_tsk->priority;
+#if (ARKRTOS_USE_MTX_RECURSIVE == 1)
+            arkrtos_mtxs[idx].nest          = 1;   /* 第一次持有 */
+#endif
             ARKRTOS_ENABLE_IRQ();
             return 0;
         }
     }
 
+#if (ARKRTOS_USE_MTX_RECURSIVE == 1)
+    if(arkrtos_mtxs[idx].owner == p_tsk)
+    {
+        /* 递归锁：同一任务再次加锁只加深计数，不碰 owner / 继承。
+         * 可递归是创建时决定的属性，不是加锁时猜出来的。 */
+        if(arkrtos_mtxs[idx].recursive != 0u)
+        {
+            arkrtos_mtxs[idx].nest++;
+            ARKRTOS_ENABLE_IRQ();
+            return ARKRTOS_SYNC_OK;
+        }
+        ARKRTOS_ENABLE_IRQ();
+        return ARKRTOS_SYNC_ERR_RECURSIVE;
+    }
+#else
     if(arkrtos_mtxs[idx].owner == p_tsk)
     {
         /* 同一任务重复加锁，不支持递归，返回错误 */
         ARKRTOS_ENABLE_IRQ();
         return ARKRTOS_SYNC_ERR_RECURSIVE;
     }
+#endif
 
     /* timeout==0 表示“只试一次、不等待”：锁已被他人持有立即报超时。
      * 这里不登记等待者、也不做优先级继承——没建立等待关系就不该提权。 */
@@ -1065,6 +1131,17 @@ int32 arkrtos_mtx_unlock_internal(int32 handle)
         return ARKRTOS_SYNC_ERR_OWNER;
     }
 
+#if (ARKRTOS_USE_MTX_RECURSIVE == 1)
+    /* 递归锁只退一层：真正释放要等 nest 归零。这里提前返回，
+     * 既不改 owner 也不动继承（锁还在自己手上）。 */
+    if((arkrtos_mtxs[idx].recursive != 0u) && (arkrtos_mtxs[idx].nest > 1u))
+    {
+        arkrtos_mtxs[idx].nest--;
+        ARKRTOS_ENABLE_IRQ();
+        return ARKRTOS_SYNC_OK;
+    }
+#endif
+
     /* 先把锁交出去，再重算优先级：
      * 顺序反了会把“即将转交的等待者”也算进自己的继承来源。 */
     p_next = arkrtos_waiters_peek(arkrtos_mtxs[idx].waiters, 1u);
@@ -1074,6 +1151,9 @@ int32 arkrtos_mtx_unlock_internal(int32 handle)
         (void)arkrtos_waiters_remove(arkrtos_mtxs[idx].waiters, p_next);
         arkrtos_mtxs[idx].owner         = p_next;
         arkrtos_mtxs[idx].orig_priority = p_next->priority;
+#if (ARKRTOS_USE_MTX_RECURSIVE == 1)
+        arkrtos_mtxs[idx].nest          = 1;   /* 转交即第一次持有 */
+#endif
         p_next->wait_time = 0;
         p_next->wake_reason = ARKRTOS_WAKE_HANDOFF;
         p_next->status = ARKRTOS_TASK_READY;
@@ -1084,6 +1164,9 @@ int32 arkrtos_mtx_unlock_internal(int32 handle)
     }
     else
     {
+#if (ARKRTOS_USE_MTX_RECURSIVE == 1)
+        arkrtos_mtxs[idx].nest  = 0;
+#endif
         arkrtos_mtxs[idx].owner = 0;
         mdk_trace_arkrtos_mutex_release((uint16)idx);
     }
@@ -1121,6 +1204,9 @@ int32 arkrtos_mtx_delete_internal(int32 handle)
     {
         arkrtos_task_t *p_owner = arkrtos_mtxs[idx].owner;
         arkrtos_mtxs[idx].owner = 0;
+#if (ARKRTOS_USE_MTX_RECURSIVE == 1)
+        arkrtos_mtxs[idx].nest  = 0;
+#endif
         arkrtos_mtx_recalc_task_priority(p_owner);
     }
     arkrtos_waiters_wake_all(arkrtos_mtxs[idx].waiters, ARKRTOS_WAKE_OBJ_DELETED);
@@ -1164,6 +1250,9 @@ static void arkrtos_mtx_release_locked(int32 idx, arkrtos_task_t *p_owner)
     }
     else
     {
+#if (ARKRTOS_USE_MTX_RECURSIVE == 1)
+        arkrtos_mtxs[idx].nest  = 0;   /* 整份交出：等待期间不占递归深度 */
+#endif
         arkrtos_mtxs[idx].owner = 0;
         mdk_trace_arkrtos_mutex_release((uint16)idx);
     }
@@ -1253,6 +1342,12 @@ int32 arkrtos_cond_wait_internal(int32 cond_handle, int32 mtx_handle, int32 time
         }
     }
 
+#if (ARKRTOS_USE_MTX_RECURSIVE == 1)
+    /* 递归锁：等待期间整份释放，醒来要把加锁次数恢复回来，
+     * 否则嵌套深度被 cond_wait 吞掉，后续 unlock 会提前放手。 */
+    uint8 saved_nest = arkrtos_mtxs[mi].nest;
+#endif
+
     /* 关键的一步：交出锁 + 睡下，全程中断关闭 */
     arkrtos_trace_wait_obj(MDK_TRACE_ARKRTOS_OBJ(MDK_TRACE_ARKRTOS_CLASS_COND, ci));
     arkrtos_mtx_release_locked(mi, p_tsk);
@@ -1288,6 +1383,12 @@ int32 arkrtos_cond_wait_internal(int32 cond_handle, int32 mtx_handle, int32 time
     {
         return ARKRTOS_SYNC_ERR_PARAM;
     }
+#if (ARKRTOS_USE_MTX_RECURSIVE == 1)
+    if(arkrtos_mtxs[mi].recursive != 0u)
+    {
+        arkrtos_mtxs[mi].nest = saved_nest;
+    }
+#endif
 
     if(reason == ARKRTOS_WAKE_OBJ_DELETED)
     {

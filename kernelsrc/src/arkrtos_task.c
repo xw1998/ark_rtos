@@ -911,6 +911,16 @@ static void svc_sync_ctrl(void *p_svc_ctx)
         case ARKRTOS_SYNC_SUB_MTX_DELETE:
             ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_mtx_delete_internal((int32)p[1]));
             break;
+#if (ARKRTOS_USE_MTX_RECURSIVE == 1)
+        case ARKRTOS_SYNC_SUB_MTX_CREATE_RECURSIVE:
+            if(arkrtos_kernel_user_name_ok((const void *)p[1], 8u) == 0u)
+            {
+                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+                break;
+            }
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_mtx_create_recursive_internal((char *)p[1]));
+            break;
+#endif
         case ARKRTOS_SYNC_SUB_COND_CREATE:
             if(arkrtos_kernel_user_name_ok((const void *)p[1], 8u) == 0u)
             {

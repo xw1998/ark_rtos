@@ -340,6 +340,18 @@ int32 arkrtos_mutex_create(char *name)
     return arkrtos_call_sync_ctrl(p);
 }
 
+#if (ARKRTOS_USE_MTX_RECURSIVE == 1)
+/* 递归互斥锁：同一任务可重复加锁，解锁到计数归零才真正释放。
+ * 可递归是创建时决定的属性，普通 arkrtos_mutex_create 仍不可递归。 */
+int32 arkrtos_mutex_create_recursive(char *name)
+{
+    uint32 p[3];
+    p[0] = ARKRTOS_SYNC_SUB_MTX_CREATE_RECURSIVE;
+    p[1] = (uint32)name;
+    return arkrtos_call_sync_ctrl(p);
+}
+#endif /* ARKRTOS_USE_MTX_RECURSIVE == 1 */
+
 static int32 arkrtos_mutex_lock_raw(int32 handle, int32 timeout)
 {
     uint32 p[3];

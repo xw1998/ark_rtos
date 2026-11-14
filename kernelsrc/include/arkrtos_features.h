@@ -127,6 +127,14 @@
 #define ARKRTOS_USE_ESET                0
 #endif
 
+/* 递归互斥锁（同步服务子命令 ARKRTOS_SYNC_SUB_MTX_CREATE_RECURSIVE=17）。
+ * 默认关：创建函数、SVC 子命令 case、SDK 包装都不编进来；关档下普通锁的
+ * 重复加锁仍返回 RECURSIVE(-1)，体积与行为逐位不变。打开后也只有显式用
+ * arkrtos_mtx_create_recursive 创建的锁可递归，普通锁语义不变。 */
+#ifndef ARKRTOS_USE_MTX_RECURSIVE
+#define ARKRTOS_USE_MTX_RECURSIVE       0
+#endif
+
 /* tickless idle。
  * 为什么默认关：省的是 idle 期间的中断次数，代价是唤醒路径要自己重建
  * "这段时间过去了多少"，属于改调度时序的功能；默认关时 idle 循环就是

@@ -185,6 +185,48 @@ int main(void)
     check(arkrtos_mtx_unlock_internal(mtx) == -1, "unlock on a deleted mutex is rejected");
     check(arkrtos_mtx_delete_internal(mtx) == -1, "deleting it twice is rejected");
 
+#if (ARKRTOS_USE_MTX_RECURSIVE == 1)
+    /* ============ 递归互斥锁（ARKRTOS_USE_MTX_RECURSIVE=1） ============ */
+    use_task(0, 5);
+    mtx = arkrtos_mtx_create_recursive_internal("mr");
+    check(mtx >= 0, "recursive mtx create returns a handle");
+    check(arkrtos_mtx_lock_internal(mtx, 0) == 0, "recursive: the first lock succeeds");
+    check(arkrtos_mtx_lock_internal(mtx, 0) == 0, "recursive: the same task locks again");
+    check(arkrtos_mtx_lock_internal(mtx, 0) == 0, "recursive: and a third time (nest = 3)");
+
+    /* 递归不等于放开互斥：别人仍然拿不到，也不能替我解锁 */
+    use_task(1, 3);
+    check(arkrtos_mtx_lock_internal(mtx, 0) == ARKRTOS_SYNC_ERR_TIMEOUT,
+          "a recursive mutex is still exclusive to its owner");
+    check(arkrtos_mtx_unlock_internal(mtx) == -1,
+          "a non-owner cannot unlock a recursive mutex");
+
+    /* 退一层不等于释放：嵌套 3 层时解一次，锁仍归原持有者 */
+    use_task(0, 5);
+    check(arkrtos_mtx_unlock_internal(mtx) == 0, "unlocking one level reports success");
+    use_task(1, 3);
+    check(arkrtos_mtx_lock_internal(mtx, 0) == ARKRTOS_SYNC_ERR_TIMEOUT,
+          "one unlock out of three leaves the mutex held");
+    use_task(0, 5);
+    check(arkrtos_mtx_unlock_internal(mtx) == 0, "the second unlock peels another level");
+    check(arkrtos_mtx_unlock_internal(mtx) == 0, "the third unlock really releases it");
+
+    use_task(1, 3);
+    check(arkrtos_mtx_lock_internal(mtx, 0) == 0, "a freed recursive mutex is takeable by anyone");
+    check(arkrtos_mtx_unlock_internal(mtx) == 0, "and that task can release it");
+    check(arkrtos_mtx_delete_internal(mtx) == 0, "the recursive mutex deletes cleanly");
+    check(arkrtos_mtx_lock_internal(mtx, 0) == -1, "a deleted recursive mutex rejects lock");
+
+    /* 关键的反假绿：开关打开也不能把普通锁悄悄变成递归锁 */
+    use_task(0, 5);
+    mtx = arkrtos_mtx_create_internal("m2");
+    check(arkrtos_mtx_lock_internal(mtx, 0) == 0, "a normal mutex still locks");
+    check(arkrtos_mtx_lock_internal(mtx, 0) == ARKRTOS_SYNC_ERR_RECURSIVE,
+          "a normal mutex stays non-recursive even with the feature compiled in");
+    check(arkrtos_mtx_unlock_internal(mtx) == 0, "the normal mutex unlocks");
+    (void)arkrtos_mtx_delete_internal(mtx);
+#endif /* ARKRTOS_USE_MTX_RECURSIVE == 1 */
+
     /* ================= 条件变量 ================= */
     use_task(0, 5);
     cond = arkrtos_cond_create_internal("c1");

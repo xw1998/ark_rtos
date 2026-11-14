@@ -148,6 +148,18 @@ endmenu
 
 menu "Services and components"
 
+config ARKRTOS_USE_MTX_RECURSIVE
+	bool "Recursive mutexes (sync SVC sub-command 17)"
+	default n
+	help
+	  A mutex created by arkrtos_mtx_create is still non-recursive: the
+	  owner locking it twice gets RECURSIVE(-1).  A mutex created by
+	  arkrtos_mtx_create_recursive may be locked again by the same task;
+	  nest counts the depth and only the unlock that brings it back to 0
+	  actually releases the lock / hands it to a waiter.
+	  Default off: with the gate closed the create function, the SVC case
+	  and the SDK wrapper are not compiled in at all (byte-identical image).
+
 config ARKRTOS_USE_LOG
 	bool "Kernel log"
 	default y

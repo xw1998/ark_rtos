@@ -82,6 +82,10 @@
 #define ARKRTOS_SYNC_SUB_MTX_LOCK            (6u)
 #define ARKRTOS_SYNC_SUB_MTX_UNLOCK          (7u)
 #define ARKRTOS_SYNC_SUB_MTX_DELETE          (8u)
+/* 递归互斥锁创建（ARKRTOS_USE_MTX_RECURSIVE=1 才受理，关档返回 -1）。
+ * 加锁/解锁仍走 MTX_LOCK / MTX_UNLOCK：递归与否是对象的属性，
+ * 不是每次调用另开一套入口。 */
+#define ARKRTOS_SYNC_SUB_MTX_CREATE_RECURSIVE (17u)
 #define ARKRTOS_SYNC_SUB_COND_CREATE         (9u)
 #define ARKRTOS_SYNC_SUB_COND_WAIT           (10u)
 #define ARKRTOS_SYNC_SUB_COND_SIGNAL         (11u)
