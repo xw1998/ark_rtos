@@ -14,8 +14,20 @@
  * line still wins. */
 #include <arkrtos_autoconf.h>
 
+/* On LP64 targets (e.g. LoongArch64) `long` is 64 bits, so `uint32` cannot be
+ * defined in terms of it: every kernel struct, trap frame slot and MMIO
+ * access assumes four bytes. `unsigned int` is 32 bits on every supported
+ * toolchain (ARM AC5/AC6, RISC-V, LoongArch), so it is used only where a
+ * 64-bit long would otherwise leak into the type. 32-bit targets keep the
+ * historical definition so their object code stays bit-identical. */
+#if defined(__LP64__) || defined(_LP64) || \
+    (defined(__SIZEOF_LONG__) && (__SIZEOF_LONG__ > 4))
+typedef unsigned int   uint32;
+typedef signed   int   int32;
+#else
 typedef unsigned long  uint32;
 typedef signed   long  int32;
+#endif
 typedef unsigned short uint16;
 typedef signed   short int16;
 typedef unsigned char  uint8;

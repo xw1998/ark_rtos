@@ -117,6 +117,77 @@
         __asm volatile ("ecall" : "+r"(r_a0) : "r"(r_a1), "r"(r_a7) : "memory"); \
     }
 
+#elif defined(__loongarch__)
+
+/* ---------------------------------------------------------------------------
+ * LoongArch（GCC）。`syscall code` 的 code 是 15 位立即数，直接写在指令里
+ * （ARKRTOS_ARCH_SVC_NUM_BITS = 15），所以不需要像 RISC-V 那样借 a7 传号。
+ * 参数按 LoongArch psABI 走 a0~a2，返回值在 a0；内核侧
+ * arkrtos_port_syscall_num() 从 ERA 处的指令字解出 code。
+ *
+ * 注意：这里用显式寄存器变量把操作数钉在 a0/a1/a2 上，编译器负责在进出
+ * 内联汇编时搬运，因此不需要在 asm 里手写栈帧。
+ * ------------------------------------------------------------------------- */
+
+#define ARKRTOS_STR_(x)  #x
+#define ARKRTOS_STR(x)   ARKRTOS_STR_(x)
+
+/* Same reason as the RISC-V branch: declared-but-uncalled services must not
+ * trip -Wall. */
+#ifndef ARKRTOS_INLINE
+#define ARKRTOS_INLINE  static inline __attribute__((unused))
+#endif
+
+/** Declare an SVC service that takes one argument and returns a value. */
+#define ARKRTOS_SVC_DECL_1(ret, num, name, t0)                            \
+    ARKRTOS_INLINE ret name(t0 a0)                                        \
+    {                                                                     \
+        register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \
+        __asm volatile ("syscall " ARKRTOS_STR(num) : "+r"(r_a0) : : "memory"); \
+        return (ret)r_a0;                                                 \
+    }
+
+/** Declare an SVC service that takes two arguments and returns a value. */
+#define ARKRTOS_SVC_DECL_2(ret, num, name, t0, t1)                        \
+    ARKRTOS_INLINE ret name(t0 a0, t1 a1)                                 \
+    {                                                                     \
+        register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \
+        register unsigned long r_a1 __asm("a1") = (unsigned long)(a1);     \
+        __asm volatile ("syscall " ARKRTOS_STR(num)                        \
+                        : "+r"(r_a0) : "r"(r_a1) : "memory");              \
+        return (ret)r_a0;                                                 \
+    }
+
+/** Declare an SVC service that takes three arguments and returns a value. */
+#define ARKRTOS_SVC_DECL_3(ret, num, name, t0, t1, t2)                    \
+    ARKRTOS_INLINE ret name(t0 a0, t1 a1, t2 a2)                          \
+    {                                                                     \
+        register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \
+        register unsigned long r_a1 __asm("a1") = (unsigned long)(a1);     \
+        register unsigned long r_a2 __asm("a2") = (unsigned long)(a2);     \
+        __asm volatile ("syscall " ARKRTOS_STR(num)                        \
+                        : "+r"(r_a0) : "r"(r_a1), "r"(r_a2) : "memory");   \
+        return (ret)r_a0;                                                 \
+    }
+
+/** Declare an SVC service that takes one argument and returns nothing. */
+#define ARKRTOS_SVC_DECL_V1(num, name, t0)                                \
+    ARKRTOS_INLINE void name(t0 a0)                                       \
+    {                                                                     \
+        register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \
+        __asm volatile ("syscall " ARKRTOS_STR(num) : "+r"(r_a0) : : "memory"); \
+    }
+
+/** Declare an SVC service that takes two arguments and returns nothing. */
+#define ARKRTOS_SVC_DECL_V2(num, name, t0, t1)                            \
+    ARKRTOS_INLINE void name(t0 a0, t1 a1)                                \
+    {                                                                     \
+        register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \
+        register unsigned long r_a1 __asm("a1") = (unsigned long)(a1);     \
+        __asm volatile ("syscall " ARKRTOS_STR(num)                        \
+                        : "+r"(r_a0) : "r"(r_a1) : "memory");              \
+    }
+
 #else
 
 /* ---------------------------------------------------------------------------

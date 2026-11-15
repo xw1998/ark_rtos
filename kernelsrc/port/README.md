@@ -14,9 +14,9 @@ kernelsrc/port/
 ├── riscv/
 │   ├── rv32imac/                   # 已实现：QEMU virt 上实跑通过（M 模式，单 hart）
 │   └── rv64gc/                     # 规划中
-└── loongarch/                      # 规划中
-    ├── la32/
-    └── la64/
+└── loongarch/
+    ├── la32/                       # 规划中
+    └── la64/                       # 已实现：QEMU virt 上实跑通过（PLV0，单核）
 ```
 
 命名规则：`port/<架构族>/<具体核心>/`，与 `arkrtos_arch.h` 中的
@@ -65,7 +65,7 @@ void   arkrtos_port_svc_set_ret(void *p_exc_ctx, uint32 value);/* 写回返回�
 |---|---|
 | Cortex-M | 入口由 `SVC_Handler` 汇编取 MSP/PSP 后跳入；硬件压栈顺序为 R0,R1,R2,R3,...，故 `((uint32*)ctx)[idx]` 即第 idx 个参数；系统调用号取自 SVC 指令的 8 位立即数 |
 | RISC-V | `ecall` 无立即数，约定调用号放在寄存器（建议 `a7`），参数在 `a0~a3`，返回 `a0`；在 trap 入口保存的 trap 帧中按偏移取值 |
-| LoongArch | `syscall` 指令携带 15 位 code 作为调用号，参数在 `$a0~$a3`（r4~r7），返回 `$a0` |
+| LoongArch | `syscall` 指令携带 15 位 code 作为调用号，参数在 `$a0~$a3`（r4~r7），返回 `$a0`；本仓库 la64 实现改为从 `ERA-4` 解指令取号（不依赖 code 字段的译码），`ERA += 4` 由 port 做 |
 
 > 注意：由于 Cortex-M 的 SVC 号只有 8 位（0x00~0xFF），现行内核采用
 > 「一个模块占一个 SVC 号 + 子命令放在第 0 个参数」的两级分发（见 `arkrtos_def.h`），
@@ -83,7 +83,7 @@ void   arkrtos_port_enter_idle(uint32 stack_ptr, uint32 use_priv);     /* 启动
 |---|---|
 | Cortex-M | `arkrtos_context.S` 中 PendSV 保存/恢复 R4-R11（FPU 使能时含 S16-S31）；`switch_task` 置位 `SCB->ICSR.PENDSVSET` |
 | RISC-V | 任务切换通常在 `ecall`/`mret` 路径完成：保存 x1~x31、`mepc`、`mstatus` 到任务栈，`switch_task` 可置位软件中断（如 CLINT MSIP）触发切换 |
-| LoongArch | 保存 $r1~$r31、`ERA`、`PRMD` 到任务栈；`switch_task` 可写 `ESTAT.IS` 触发软件中断 |
+| LoongArch | 保存 `$ra/$tp/$a0-a7/$t0-t8/$fp/$s0-s8`（`$r21` 不使用）、`ERA`、`PRMD` 到任务栈（256 B，8 字节槽）。**注意 `ESTAT.IS` 自中断在 QEMU loongarch `virt` 上实测无效**，因此 la64 不照搬 PendSV，而是在 trap 上下文里就地切换、由 `ertn` 结算；**`PRMD` 位序与 `CRMD` 低 4 位相同（`PPLV=[1:0]`、`PIE=bit2`、`PWE=bit3`），回 PLV0 且开中断是 `0x4` 不是 `0x1`** |
 
 ### 3.3 内存保护
 
@@ -121,7 +121,7 @@ void   arkrtos_port_exit_critical(uint32 state);          /* 恢复状态 */
 |---|---|
 | Cortex-M | SysTick；临界区保存/恢复 `PRIMASK` |
 | RISC-V | 机器模式定时器（mtime/mtimecmp 或 CLINT）；临界区保存/恢复 `mstatus.MIE` |
-| LoongArch | 恒定频率定时器（TCFG/TVAL）；临界区保存/恢复 `CRMD.IE` |
+| LoongArch | 恒定频率定时器（TCFG/TVAL，QEMU `virt` 实测计数 25 MHz、`rdtime` 100 MHz）；临界区保存/恢复 `CRMD.IE` |
 
 ## 4. 移植新架构的完整步骤
 

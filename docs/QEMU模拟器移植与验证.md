@@ -304,39 +304,243 @@ cd build/qemu_riscv32
 | `ecall` 后 `mepc+=4` 由 port 做 | 换核/换编译器时须复核 | 不依赖硬件行为 |
 | 无 FPU 上下文 | 浮点任务不可用 | `USE_FPU=0` |
 | 单 hart | SMP 路径未验证 | `USE_SMP=0` |
-| QEMU 不模拟真实外设 | 驱动层仍需上板 | 只有 16550 UART + CLINT |
+| QEMU 不模拟真实外设 | 驱动层仍需上板 | 只有 16550 UART + CLINT（LoongArch 侧另有 ns16550a @0x1FE001E0） |
+| 无 IPI（LoongArch） | 不能在任意时刻异步触发切换 | QEMU loongarch `virt` 自写 `ESTAT.IS` 实测无投递 ⇒ 改就地切换 |
+| 仅 PLV0（LoongArch） | 同「无 U 模式」 | 不做 PLV3 + TLB 隔离 |
+| 串口轮询、无中断收发 | 不能验证中断驱动 UART | 简化实现 |
 
-## 5. LoongArch（未开始）
+## 5. LoongArch64 移植（已实现，QEMU 实跑通过）
 
-已实测的 QEMU loongarch64 `virt` 参数（来自环境探测，**port 尚未实现**）：
+### 5.1 目录落点
+
+```
+kernelsrc/port/loongarch/la64/arkrtos_port.c        # HAL 实现 + trap 分派
+kernelsrc/port/loongarch/la64/arkrtos_context.S     # 首次进入 / 切换 / 系统调用入口
+board/qemu_loongarch64/arkrtos_board.{c,h}          # 板级初始化、UART、节拍中断入口
+board/qemu_loongarch64/arkrtos_board_config.h       # 架构核选择与容量配置
+example/qemu_loongarch64/start.S                    # 复位入口（设 sp + 清 .bss）
+example/qemu_loongarch64/link.ld.in                 # 链接脚本模板
+example/qemu_loongarch64/gen_ldconsts.py            # 从分区头生成链接期常量
+example/qemu_loongarch64/libc_shim.c                # memset/memcpy/str* 等垫片
+example/qemu_loongarch64/Makefile
+```
+
+### 5.2 运行模式：单核、只有 PLV0、没有 IPI
+
+三条都是实测结论，不是选择：
+
+1. **IPI 无效**。向 `ESTAT.IS` 自写中断位后没有任何异常被投递。因此
+   不能照搬 Cortex-M 的 PendSV（「置位 pending → 等异常出口再切」），
+   改为**就地切换**：`arkrtos_port_switch_task()` 在 syscall / 节拍异常的
+   上下文里直接调 `arkrtos_port_switch_task_inline`（保存当前帧、恢复下一个
+   帧），返回后由 trap 出口的 `ertn` 结算。切换点因此只有两处：trap 出口
+   结算、以及 idle 首次进入。
+2. **只在 PLV0 运行**（`USE_PRIV=0`），不做 PLV3 用户态与 TLB 隔离。
+3. **单核**（`USE_SMP=0`）；`virt` 支持 `-smp`，但 SMP 路径本轮未验证。
+
+### 5.3 trap 帧：256 字节、8 字节槽
+
+帧从高地址往低地址排，槽宽 **8 字节**（LA64 的 GPR 与 `ERA`/`PRMD` 都是 64 位）：
+
+| 偏移 | 内容 |
+|---|---|
+| 0 | `$ra` (r1) |
+| 8 | `$tp` (r2) |
+| 16 | 原 `$sp`（入帧前的值，供调试/回溯） |
+| 24–80 | `$a0`–`$a7` (r4–r11) |
+| 88–152 | `$t0`–`$t8` (r12–r20) |
+| 160 | `$fp` (r22) |
+| 168 | `$s0` (r23) |
+| 176–232 | `$s1`–`$s8` (r24–r31) |
+| 240 | `ERA` |
+| 248 | `PRMD` |
+
+`$r21` 不进帧（psABI 保留寄存器，本 port 不用它，`start.S` 也不设 gp）。
+切换时 `$s0` 当帧指针使用，因此 `$s0` 自身在 168 处显式保存。
+
+### 5.4 PRMD 的位序（本轮最贵的一个坑）
+
+**PRMD 的位序与 CRMD 的低 4 位相同：`PPLV=[1:0]`、`PIE=bit2`、`PWE=bit3`。**
+
+我最初按「`PIE=bit0`、`PWE=bit1`、`PPLV=[3:2]`」处理，写成了
+`LA_PRMD_INIT = 1u`，并在 inline 切换里用
+`andi 1 / slli 2` 把 IE 往 `[3:2]` 放、把 `[3:2]` 往 bit0 放——位序正好反了。
+
+后果链（全部在 QEMU 上观察到，不是推测）：
+
+1. 首次 `idle` 在 PLV0 + IE1 下被节拍中断打断，硬件压的 PRMD 实测是 **0x4**；
+2. 我按 0x1 语义把它折回帧里，`ertn` 于是把上下文恢复到 **PLV=1 且 IE=0**；
+3. PLV1 下定时器中断不再投递（`ESTAT=0x800` 常驻、`CRMD=0x09`），
+   `idle 0` 永久挂死，PC 停在 `0x20b824`；
+4. 后续被 resume 出来的 sp/PC 是 32 位符号扩展残值（`0xfffffffeed07100` /
+   `0x20d000`），一执行就 `Ecode=0x48`（ADEM），嵌套异常自锁。
+
+修法两处（都按硬件语义改，而不是在 `ertn` 前强写 CRMD 绕过）：
+
+```c
+/* arkrtos_port.c */
+#define LA_PRMD_INIT (0x4u)   /* PPLV=0 且 PIE=1：回到 PLV0 并开中断 */
+```
+
+```asm
+/* arkrtos_context.S，inline 切换里折 PRMD */
+csrrd   $t0, 0x0          /* CRMD */
+andi    $t0, $t0, 7       /* bit3 是 CRMD 的 DA，不能带进 PRMD 的 PWE */
+st.d    $t0, $s0, 248
+```
+
+因为位序相同，「CRMD 低 3 位」就是 PRMD 需要的 `PPLV|PIE`，掩到 7 即可；
+多带 bit3 会把 `CRMD.DA` 写进 `PRMD.PWE`。
+
+定位手段见 §5.9：不要靠推理，去读硬件真实压进帧里的那个值。
+
+### 5.5 地址、UART 与定时器（实测标定）
 
 | 项 | 值 | 备注 |
 |---|---|---|
-| RAM base | **0x0** | size 128 MB |
-| 低 1 MB | boot_info 占用 | **链接基址必须 ≥ 0x200000** |
-| UART | ns16550a @ **0x1FE001E0** | 不是 0x10000000 |
-| `-bios none` | **不接受** | 会报 `Could not find ROM image 'none'` |
-| `-serial file:` | 只接受相对路径 | 绝对路径静默失败 |
+| RAM base / size | **0x0** / 128 MB | 低 1 MB 被 boot_info 占用 |
+| 链接基址 | **0x200000** | 低于此会被 boot_info 覆盖 |
+| UART | ns16550a @ **0x1FE001E0** | 不是 0x10000000；仅轮询收发 |
+| `rdtime` 频率 | **100 MHz** | `arkrtos_port_get_system_clock()` 返回此值 |
+| TCFG 计数频率 | **25 MHz** | `start_timer(us)` 里 `initval = us * 25` |
+| CSRs | CRMD=0x0 / PRMD=0x1 / ECFG=0x4 / ESTAT=0x5 / ERA=0x6 / EENTRY=0xC / TCFG=0x41 / TVAL=0x42 / TICLR=0x44 | 编号即 `csrrd/csrwr` 的立即数 |
 
-移植计划：
+节拍定时器配置：`TCFG = ((initval & 0x3FFFFFFF) << 2) | 0x3`
+（bit0 使能、bit1 周期模式，高位是计数值）。`TICLR` 写 1 清中断。
+`arkrtos_port_enter_idle` 的 `wfi` 对应 `idle 0`。
+
+`-bios none` **不能用**：LoongArch 的 `-kernel` 路径与 RISC-V 不同，
+加上反而起不来；`-serial file:` **只接受相对路径**（绝对路径静默不落盘），
+所以 `make run` 里先 `cd $(BUILD)`。
+
+### 5.6 构建约束
+
+```bash
+cd "D:/工作/git_project/ark rtos"          # 必须在仓库根目录
+make -f example/qemu_loongarch64/Makefile -j4
+make -f example/qemu_loongarch64/Makefile run
+```
+
+- **必须在仓库根目录执行**。在 `example/qemu_loongarch64/` 里 `make` 会因为
+  `build/` 相对路径解析而报 `No rule to make target ...`。
+- 工具链只有一个 multilib（`lp64d`），因此全程 `-nostdlib -nostartfiles`，
+  不链 newlib；用到的 libc 函数由 `libc_shim.c` 提供（与 RV32 同思路，
+  但 LA64 下 `size_t` 是 64 位，签名要按 `__SIZE_TYPE__` 对齐）。
+- Makefile 里通配全部 `kernelsrc/src/*.c` 后**剔除** `arkrtos_flashapp.c`、
+  `arkrtos_vfs_lfs.c`（文件头无条件包含 `drvflash.h` / `lfs.h`，本目标没有
+  Flash 控制器与 littlefs）。`arkrtos_fs.c` 保留（ramfs 需要）。
+- `gen_ldconsts.py` 的调用**末尾必须带分号**：MinGW 版 make 3.82 对「不含
+  shell 元字符」的命令走 `CreateProcess` 快路径，本机 python 装在含非 ASCII
+  字符的目录里，快路径定位不到；写个 `;` 才会交给 `sh` 按 PATH 解析。
+- 增量构建要跟踪 `-include` 的板级配置头，否则只改板级宏时旧 `.o` 会带着
+  上一套开关被复用（`-MMD -MP` + `-include $(OBJS:.o=.d)`）。
+
+### 5.7 LP64 带来的两个静默错答案
+
+1. **`uint32` 变成了 64 位**。老内核里不少地方把 `uint32` 当 32 位用
+   （地址字段、位宽假设），而它在 `unsigned long` 定义下 LP64 就是 64 位。
+   已用条件 typedef 修好：
+
+   ```c
+   #if defined(__LP64__)
+   typedef unsigned int  uint32;
+   #else
+   typedef unsigned long uint32;
+   #endif
+   ```
+
+2. **trap 帧槽必须 8 字节**。若 C 侧用 `uint32*`（4 字节步长）索引 8 字节槽，
+   `stack_init`、`ERA += 4`、`get_arg/set_ret`、epilogue 会**全部错位**，
+   表现为 ADEM 嵌套异常死循环。修法是新增
+
+   ```c
+   typedef unsigned long la_frame_word;   /* 帧槽宽 = 8 字节 */
+   ```
+
+   并把六处访问函数签名改型。**`.S` 侧不需要改**——汇编本来就是 8 字节步长，
+   错的只是 C 侧的指针类型。
+
+### 5.8 实测结果
+
+尺寸（`loongarch64-newlib-elf-size`）：
 
 ```
-kernelsrc/port/loongarch/la64/{arkrtos_port.c, arkrtos_context.S}
-board/qemu_loongarch64/{arkrtos_board.c, arkrtos_board_config.h}
-example/qemu_loongarch64/{main.c, start.S, link.ld.in, gen_ldconsts.py, libc_shim.c, Makefile}
+   text    data     bss     dec     hex  filename
+  54536      80   18032   72648   11bc8  ark_qemu_la64.elf
 ```
 
-要点：
+运行命令：
 
-- 系统调用走 `syscall` 指令，CSR 用 `ERA`（返回地址）、`PRMD`（特权/中断
-  状态）、`ESTAT`（异常状态）、`ECFG`（中断配置）；
-- 定时器走 `TCFG`/`TVAL` 或稳定计数器；
-- **LA64 指针是 64 位，而内核大量用 `uint32` 存地址**——port 里必须显式
-  截断/回填，并在文档里写清楚哪些位置做了这件事，否则会出现「高 32 位被
-  悄悄丢掉、访问到别名地址」这类静默错答案；
-- Makefile / `gen_ldconsts.py` 完全复用本轮的套路。
+```bash
+cd build/qemu_loongarch64
+"D:/env/tools/qemu/qemu9/mingw64/bin/qemu-system-loongarch64.exe" \
+  -M virt -m 128M -nographic -display none \
+  -serial file:outfinal.txt -kernel ark_qemu_la64.elf
+```
+
+串口原始输出（节选，未经修饰；删掉全部临时调试打印后的回归）：
+
+```
+[Ark RTOS] board: qemu_loongarch64 (virt, la64, 1 core)
+[Ark RTOS] arch=loongarch uart=0x1fe001e0 timer=25000000Hz rdtime=100000000Hz
+[boot] sem=19922944 taskA=1 taskB=2 tick_period_us=500
+[A] round=0 tick=2 d_tick=2 ms=1 d_ms=1 ms_svc=1 svc_ok
+[B] woke, round=1 tick=7
+[A] round=1 tick=8 d_tick=6 ms=4 d_ms=3 ms_svc=4 svc_ok
+[B] woke, round=2 tick=11
+...
+[A] round=17 tick=16020 d_tick=1000 ms=8010 d_ms=500 ms_svc=8010 svc_ok
+[B] woke, round=18 tick=16021
+[A] round=18 tick=17021 d_tick=1001 ms=8510 d_ms=500 ms_svc=8510 svc_ok
+[B] woke, round=19 tick=17022
+```
+
+可读出的三件事：
+
+1. **节拍换算正确**：`d_tick` 稳定在 1000/1001（2000 Hz 节拍 ↔ A 每次 500 ms），
+   `d_ms` 500/501，`ARKRTOS_TICK_PERIOD_US=500` 生效。
+2. **调度正确**：A 每轮 `task_wait(500 ms)` 后醒来、B 由信号量唤醒，
+   tick 单调递增、无插队、无挂死（连续 19 轮）。
+3. **SVC 通路正确**：`ms_svc` 与内核换算值逐轮一致，`svc_ok` 全绿，说明
+   `syscall` 取号（从 `ERA-4` 解指令）、`$a0` 回填、`ERA += 4` 都工作正常。
+
+### 5.9 调试手法：QEMU monitor over telnet
+
+板子不在手上时，「寄存器到底是多少」只能靠这个。起 QEMU 时加
+
+```
+-monitor telnet:127.0.0.1:4567,server,nowait
+```
+
+然后用 python socket 发命令（`info registers` / `xp /32gx 0x3086d0`）：
+
+```python
+import re, socket
+s = socket.create_connection(("127.0.0.1", 4567), timeout=2)
+s.recv(65536)                      # 吞掉 banner
+s.sendall(b"info registers\n")
+buf = b""
+while True:
+    chunk = s.recv(65536)
+    if not chunk: break
+    buf += chunk
+    if b"(qemu)" in chunk: break
+txt = re.sub(rb"\x1b\[[0-9;]*[A-Za-z]|.\x08", b"", buf).decode("ascii", "replace")
+print("\n".join(l for l in txt.splitlines() if re.match(r"^\s*[0-9a-f]+:", l)))
+```
+
+两个细节：
+
+- **回显带 ANSI 与退格**，必须先用 `re.sub(r'\x1b\[[0-9;]*[A-Za-z]|.\x08', '', txt)`
+  清掉，否则数字会夹着控制字节；
+- `xp` 的输出行用 `^\s*[0-9a-f]+:` 过滤，否则混着提示符。
+
+本轮就是靠「在 `.S` 里记一条内存轨迹环 + monitor `xp` 取回」量出
+**首次 trap 的 PRMD 是 0x4**，从而推翻自己原先 0x1 的假设。
 
 ## 6. 复现步骤
+
+### 6.1 RISC-V RV32
 
 ```bash
 cd "D:/工作/git_project/ark rtos/example/qemu_riscv32"
@@ -345,4 +549,26 @@ make size           # 打印 text/data/bss
 make run            # 启动 QEMU，串口写入 build/qemu_riscv32/out.txt
 ```
 
-`make run` 会一直跑（例程是无限循环），Ctrl-C 结束，然后 `cat out.txt` 看输出。
+### 6.2 LoongArch64
+
+```bash
+cd "D:/工作/git_project/ark rtos"          # 注意：必须在仓库根目录
+make -f example/qemu_loongarch64/Makefile -j4
+make -f example/qemu_loongarch64/Makefile size
+make -f example/qemu_loongarch64/Makefile run   # 串口写入 build/qemu_loongarch64/out.txt
+```
+
+带 monitor 调试时不要用 `run` 目标，直接手敲：
+
+```bash
+cd build/qemu_loongarch64
+"D:/env/tools/qemu/qemu9/mingw64/bin/qemu-system-loongarch64.exe" \
+  -M virt -m 128M -nographic -display none \
+  -serial file:out.txt -monitor telnet:127.0.0.1:4567,server,nowait \
+  -kernel ark_qemu_la64.elf
+```
+
+两个目标都是无限循环，Ctrl-C 或终止进程结束，然后 `cat out.txt` 看输出。
+
+> 重链接前要确保没有 QEMU 进程占着 ELF，否则 `ld` 报
+> `cannot open output file ...: Invalid argument`（Windows 文件锁，不是链接脚本问题）。
