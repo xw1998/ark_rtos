@@ -36,4 +36,10 @@ void arkrtos_board_putu(uint32 value);
 */
 void arkrtos_board_puthex(uint32 value);
 
+/**
+* @brief PMP 违规现场（覆盖 port 层弱钩子；mcause / mtval / 来源特权）
+* @note 只在 ARKRTOS_USE_PRIV == 1 且真的发生违规时被调用。
+*/
+void arkrtos_port_fault_detail(uint32 mcause, uint32 mtval, uint32 from_priv);
+
 #endif /* __ARKRTOS_BOARD_H__ */

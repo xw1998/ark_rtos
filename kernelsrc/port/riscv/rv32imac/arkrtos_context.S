@@ -33,6 +33,16 @@
 *              60    a6                  128    mstatus
 *              64    a7                  132..140 填充（对齐到 144）
 *
+*          特权级（U 模式）由帧内 mstatus.MPP 承载，但**恢复时以全局
+*          g_rv_next_mpp 为准**：一次不切换的 trap 要保持来源特权，切换时由
+*          arkrtos_port_set_thread_priv() 改成新任务的值。所以两条恢复路径
+*          （trap_entry 与 arkrtos_port_resume_task）都必须做这次覆盖，
+*          否则「切到 App 任务」会跑成 M 模式、「App 的 tick 中断」会把任务
+*          抬回 M 模式 —— 两种都不会报错，只会静默地没有隔离。
+*
+*          故障路径额外用一张**独立栈**（rv_fault_stack）：内核恢复故障任务时
+*          会重建它的栈，处理程序不能还坐在那段区间里（详见 rv_fault_enter）。
+*
 *          tp（x4）在帧内被当作帧指针使用：它是 callee-saved，跨 C 调用不会被
 *          改掉，所以「保存现场 → 调 C → 从返回的帧指针恢复」这条链不需要
 *          额外的全局变量。返回给 trap_entry 的帧指针可能已经换成了另一个任务
@@ -95,7 +105,16 @@ trap_entry:
      * 因为在这一步之前 tp 还是帧指针。 */
     lw      t0, 124(tp)
     csrw    mepc, t0
+    /* mstatus 的 MPP 不由帧决定，而由 g_rv_next_mpp 决定：
+     * 帧里那份 MPP 是「进 trap 时的来源特权」，切换后它就过期了。
+     * 其余位（MIE 的旧值、MPIE、MPP 之外的一切）取帧里保存的值。 */
     lw      t0, 128(tp)
+    la      t1, g_rv_next_mpp
+    lw      t1, 0(t1)
+    li      t2, 0xFFFFE7FF          /* 清 bit12:11（MPP） */
+    and     t0, t0, t2
+    slli    t1, t1, 11
+    or      t0, t0, t1
     csrw    mstatus, t0
     lw      ra,   0(tp)
     lw      gp,   8(tp)
@@ -140,7 +159,16 @@ arkrtos_port_resume_task:
     mv      tp, a0                  /* a0 = 目标任务的帧指针 */
     lw      t0, 124(tp)
     csrw    mepc, t0
+    /* mstatus 的 MPP 不由帧决定，而由 g_rv_next_mpp 决定：
+     * 帧里那份 MPP 是「进 trap 时的来源特权」，切换后它就过期了。
+     * 其余位（MIE 的旧值、MPIE、MPP 之外的一切）取帧里保存的值。 */
     lw      t0, 128(tp)
+    la      t1, g_rv_next_mpp
+    lw      t1, 0(t1)
+    li      t2, 0xFFFFE7FF          /* 清 bit12:11（MPP） */
+    and     t0, t0, t2
+    slli    t1, t1, 11
+    or      t0, t0, t1
     csrw    mstatus, t0
     lw      ra,   0(tp)
     lw      gp,   8(tp)
@@ -174,6 +202,25 @@ arkrtos_port_resume_task:
     lw      t0,  16(tp)
     lw      tp,  12(tp)
     mret
+
+/* ============================================================
+ * 故障路径：切到独立故障栈后交给 C
+ * @param a0 mcause，a1 from_priv（U/M）
+ * @details 本移植没有独立 handler 栈（普通 trap 就是在被中断任务的栈上
+ *          建帧），但**故障路径不能这样**：内核恢复故障任务时会重建那段
+ *          栈（先整段填 0xcdcdcdcd），正在用的活动栈帧会被一起填掉。
+ *          所以进入 C 之前先把 sp 搬到 rv_fault_stack 的栈顶。
+ *          栈顶地址由 C 侧的 rv_fault_stack_top_addr 给，两边不会漂移。
+ *          不返回：目标函数要么 resume_task 要么停机。
+ * ============================================================ */
+    .section .text.rv_fault_enter, "ax"
+    .globl  rv_fault_enter
+    .align  2
+rv_fault_enter:
+    la      t0, rv_fault_stack_top_addr
+    lw      sp, 0(t0)
+    andi    sp, sp, -16             /* 栈顶 16 字节对齐（ABI 硬要求） */
+    tail    arkrtos_port_fault_dispatch
 
 /* ============================================================
  * 进入空闲上下文

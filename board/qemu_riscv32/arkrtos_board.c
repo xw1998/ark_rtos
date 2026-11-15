@@ -16,6 +16,7 @@
 #include "arkrtos_hal.h"
 #include "arkrtos_config.h"
 #include "arkrtos_board.h"
+#include "arkrtos_task.h"   /* arkrtos_current_task_id（故障现场的任务号） */
 
 #ifdef ARKRTOS_BOARD_CONFIG
 #include ARKRTOS_BOARD_CONFIG
@@ -142,6 +143,38 @@ void arkrtos_port_board_init(void)
  * ============================================================ */
 void arkrtos_dev_board_init(void)
 {
+}
+
+/* ============================================================
+ * PMP 违规现场（覆盖 port 层的弱实现）
+ * @details 保护机制生效时，系统最想知道的是三件事：什么原因、碰了哪个
+ *          地址、从哪个特权级碰的。三个数都来自硬件（mcause / mtval /
+ *          进入 trap 前的 mstatus.MPP），不是内核推断出来的。
+ *          注意：这里**不做善于处理**——违规就是违规，先把它打出来，
+ *          恢复策略由上层的 arkrtos_cpu_fault_handler 决定。
+ * ============================================================ */
+void arkrtos_port_fault_detail(uint32 mcause, uint32 mtval, uint32 from_priv)
+{
+    uint32 mepc;
+    uint32 task;
+
+    __asm__ volatile("csrr %0, mepc" : "=r"(mepc) : : "memory");
+
+    /* 任务号取内核的当前任务：故障发生在任务上下文时它就是肇事者，
+     * 发生在内核/中断上下文时是 0。这两个数与 mcause/mtval 一起才够定位。 */
+    task = (arkrtos_current_task_id > 0) ? (uint32)arkrtos_current_task_id : 0u;
+
+    arkrtos_board_puts("\n[PMP] fault mcause=");
+    arkrtos_board_putu(mcause);
+    arkrtos_board_puts(" mtval=");
+    arkrtos_board_puthex(mtval);
+    arkrtos_board_puts(" mepc=");
+    arkrtos_board_puthex(mepc);
+    arkrtos_board_puts(" from=");
+    arkrtos_board_puts((from_priv == 0u) ? "U" : "M");
+    arkrtos_board_puts(" task=");
+    arkrtos_board_putu(task);
+    arkrtos_board_puts("\n");
 }
 
 /* ============================================================

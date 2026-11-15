@@ -72,18 +72,37 @@
 #define ARKRTOS_QEMU_UART_REG_SHIFT  0u        /* 寄存器按字节寻址，不移位 */
 
 /* ============================================================
+ * 三·B、U 模式任务可用的外设窗（MPU / PMP 用的那一份）
+ * @details 只开控制台 UART 的 4 KB 读写。理由：U 模式任务要能**自己**
+ *          把读数打出来，否则"保护生效了"这件事只能由 M 模式的任务
+ *          转述，证据链就断了一环。
+ *
+ *          故意**不开** CLINT（0x02000000）：U 模式没有任何正当理由去碰
+ *          定时器比较寄存器，而它正好是 example/qemu_riscv32/main.c 里
+ *          任务 C 的越权负对照目标（读它 → PMP 拒绝 → mcause=5）。
+ * ============================================================ */
+#define ARKRTOS_MPU_PERIPH_BASE      0x10000000u
+#define ARKRTOS_MPU_PERIPH_SIZE      0x00001000u
+#define ARKRTOS_MPU_PERIPH_RW        1
+
+/* ============================================================
  * 四、能力开关
- * @details RV32IMAC 没有 FPU；也没有可用的 PMP 配置（bring-up 阶段
- *          不做，见 kernelsrc/port/riscv/rv32imac/arkrtos_port.c 的文件头），
- *          所以 MPU 与特权分离都关掉。关掉不等于"做不到"，只是这一版
- *          没有把 U 模式 + PMP 搭起来 —— 不得对外说成"已有隔离"。
+ * @details RV32IMAC 没有 FPU。内存保护与特权分离**已经实现**：
+ *          U 模式 + PMP（见 kernelsrc/port/riscv/rv32imac/arkrtos_port.c
+ *          的「任务隔离（U 模式 + PMP）」段）。这两个开关必须打开，
+ *          否则内核里 is_priv 的判定与逐任务窗口会整段被编译掉，
+ *          隔离也就无从谈起。
+ *
+ *          两个外设窗故意留空（SIZE = 0）：QEMU 上给 U 模式任务开放
+ *          CLINT / 16550 没有正当用途（打印走 SVC，由 M 模式的内核代劳），
+ *          留空反而让「U 模式去摸外设」成为一条可复现的越权负对照。
  * ============================================================ */
 #undef  ARKRTOS_USE_FPU
 #define ARKRTOS_USE_FPU              0
 #undef  ARKRTOS_USE_MPU
-#define ARKRTOS_USE_MPU              0
+#define ARKRTOS_USE_MPU              1
 #undef  ARKRTOS_USE_PRIV
-#define ARKRTOS_USE_PRIV             0
+#define ARKRTOS_USE_PRIV             1
 
 /* 心跳合同：QEMU 没有看门狗，守卫真咬人的前提不存在，直接关掉。 */
 #undef  ARKRTOS_USE_KERNEL_GUARD

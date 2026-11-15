@@ -17,13 +17,32 @@
 *          | PRIMASK               | mstatus.MIE                             |
 *          | IPSR != 0 判在中断里  | 软件计数 s_in_trap                      |
 *
+*          ## 任务隔离（U 模式 + PMP）
+*
+*          `ARKRTOS_USE_MPU=1` 且 `ARKRTOS_USE_PRIV=1` 时，App 任务跑在
+*          **U 模式**，由 PMP 给出「代码窗口 RX / 数据窗口 RW / 共享区 R /
+*          外设窗口」，越权访问触发 access fault 后走内核的
+*          arkrtos_cpu_fault_handler()（记录 MEMFAULT 并重启/禁用任务）。
+*          M 模式不受 PMP 约束（entry 的 L 位保持 0），所以内核照常访问一切。
+*
+*          特权级的传递方式是**帧内的 mstatus.MPP**：硬件进 trap 时会把
+*          来源特权写进 MPP，本层在每次 mret 前用 g_rv_next_mpp 覆盖它。
+*          g_rv_next_mpp 默认跟随「本次 trap 的来源」，只有
+*          arkrtos_port_set_thread_priv() 在任务切换时改它 —— 这样一次
+*          不切换的 tick 中断不会把 U 模式任务意外抬回 M 模式。
+*
 *          ## 已经知道的边界（不得当成「已有隔离」对外表述）
 *
-*          1) 只跑 M 模式，没有 U 模式 / PMP，任务之间没有内存隔离；
-*          2) 异常处理程序与被中断的任务共用同一个栈（没有独立 handler 栈）；
-*          3) trap 不可嵌套：进 trap 时 mstatus.MIE 已被硬件清零，处理程序
-*             全程关中断；
-*          4) `ecall` 之后 mepc 由本层加 4（硬件不会自己前进，不加上就是死循环）。
+*          1) 异常处理程序与被中断的任务共用同一个栈（没有独立 handler 栈）；
+*          2) trap 不可嵌套：进 trap 时 mstatus.MIE 已被硬件清零，处理程序
+*             全程关中断。内核里有大量 ARKRTOS_ENABLE_IRQ() 位于可能从 trap
+*             里被调到的函数，所以 arkrtos_port_enable_irq() 在 s_in_trap
+*             非零时直接忽略请求；riscv_trap_c() 另有一道嵌套保护。
+*             这一条不是“风格”，是实测踩过的缺陷：放开它 U 模式任务会在
+*             一次故障重启后静默跑成 M 模式（详见 enable_irq 的注释）；
+*          3) `ecall` 之后 mepc 由本层加 4（硬件不会自己前进，不加上就是死循环）；
+*          4) PMP 只有 R/W/X 三个权限位，**没有可缓存性/共享性属性**：
+*             内存类型（Normal / Device）在该目标上无法按任务区分。
 *
 * @author xw
 */
@@ -31,6 +50,7 @@
 #include "arkrtos_hal.h"
 #include "arkrtos_task.h"
 #include "arkrtos_config.h"
+#include "arkrtos_fault.h"   /* ARKRTOS_FAULT_MEMFAULT */
 
 #if (ARKRTOS_USE_RTSTAT == 1)
 #include "arkrtos_rt.h"
@@ -84,12 +104,22 @@
 /* 任务首次运行时 mret 前的 mstatus：MPIE=1（mret 后 MIE=1）、MPP=3（M 模式） */
 #define RV_MSTATUS_INIT     (RV_MSTATUS_MPIE | RV_MSTATUS_MPP_M)
 
+/* mstatus.MPP 的位偏移（bit12:11）：mret 就是回到这个特权级 */
+#define RV_MSTATUS_MPP_SHIFT (11u)
+#define RV_PRIV_U           (0u)
+#define RV_PRIV_M           (3u)
+
 /* mie 位：MSIE = bit3（软件中断），MTIE = bit7（机器定时器） */
 #define RV_MIE_MSIE         (1u << 3)
 #define RV_MIE_MTIE         (1u << 7)
 
 /* mcause 编码 */
 #define RV_MCAUSE_IRQ_FLAG  (0x80000000u)
+#define RV_MCAUSE_ILLEGAL     (2u)   /* 非法指令：U 模式执行 CSR 特杈指令走这里 */
+#define RV_MCAUSE_INSN_FAULT  (1u)   /* 取指访问异常：PMP 拒绝执行 */
+#define RV_MCAUSE_LOAD_FAULT  (5u)   /* 取数访问异常：PMP 拒绝读 */
+#define RV_MCAUSE_STORE_FAULT (7u)   /* 存数访问异常：PMP 拒绝写 */
+#define RV_MCAUSE_ECALL_U   (8u)
 #define RV_MCAUSE_ECALL_M   (11u)
 #define RV_MCAUSE_IRQ_TMR   (7u)
 #define RV_MCAUSE_IRQ_SFT   (3u)
@@ -109,6 +139,16 @@ static volatile uint32 s_in_trap = 0u;
 /* 任务切换门闩：enter_idle 之前不切（与 M4 移植同一语义，理由见那边注释）。 */
 static uint8 s_switch_ready = 0u;
 
+/* 下一次 mret 要回到的特权级（0=U，3=M）。**必须是非 static 的全局**：
+ * trap_entry / arkrtos_port_resume_task 的恢复半段要在汇编里读它。 */
+volatile uint32 g_rv_next_mpp = RV_PRIV_M;
+
+/* ecall 来源统计：U 模式的 ecall 是 mcause=8，M 模式是 11。
+ * 两个计数分开记，是为了让「这个任务真的跑在 U 模式」变成一个可读的数字，
+ * 而不是靠"没有崩"来推断。SVC 号本身不区分来源，所以只能在这里分。 */
+volatile uint32 g_rv_ecall_u = 0u;
+volatile uint32 g_rv_ecall_m = 0u;
+
 /* 外部符号：异常入口与两个汇编入口 */
 extern void trap_entry(void);
 extern void arkrtos_port_resume_task(uint32 stack_ptr);
@@ -116,23 +156,39 @@ extern void arkrtos_port_enter_idle(uint32 stack_ptr, uint32 use_priv);
 
 /* 板级可覆盖的故障报告（默认什么都不打，见文件末尾） */
 void arkrtos_port_fatal_report(uint32 mcause);
+void arkrtos_port_fault_detail(uint32 mcause, uint32 mtval, uint32 from_priv);
+/* 故障路径的独立栈：asm 层的 rv_fault_enter 会把它装进 sp。
+ * 大小可在板级配置里覆盖（默认 1 KB，故障路径只做「报告 + 重建 + 切走」）。 */
+#ifndef ARKRTOS_RV32_FAULT_STACK_WORDS
+#define ARKRTOS_RV32_FAULT_STACK_WORDS   256u
+#endif
+
+/* 故障栈本体 + 它的栈顶指针。栈顶以「常量指针」导出，asm 和 C 两端
+ * 用的是同一个表达式，不会出现两边各自写一份大小而漂移的情况。 */
+uint32 rv_fault_stack[ARKRTOS_RV32_FAULT_STACK_WORDS] __attribute__((aligned(16)));
+uint32 * const rv_fault_stack_top_addr = &rv_fault_stack[ARKRTOS_RV32_FAULT_STACK_WORDS];
+
+void rv_fault_enter(uint32 mcause, uint32 from_priv);
+void arkrtos_port_fault_dispatch(uint32 mcause, uint32 from_priv);
+uint32 arkrtos_cpu_fault_handler(uint32 fault_type);
 
 /* ============================================================
  * CSR 小工具
  * ============================================================ */
-static uint32 rv_mstatus_read(void)
-{
-    uint32 v;
-
-    __asm__ volatile("csrr %0, mstatus" : "=r"(v) : : "memory");
-    return v;
-}
-
 static uint32 rv_mcause_read(void)
 {
     uint32 v;
 
     __asm__ volatile("csrr %0, mcause" : "=r"(v) : : "memory");
+    return v;
+}
+
+/* mtval：访问异常发生时给出错地址（QEMU 会填）。 */
+static uint32 rv_mtval_read(void)
+{
+    uint32 v;
+
+    __asm__ volatile("csrr %0, mtval" : "=r"(v) : : "memory");
     return v;
 }
 
@@ -305,6 +361,24 @@ void arkrtos_port_disable_irq(void)
 
 void arkrtos_port_enable_irq(void)
 {
+    /* 边界 2「trap 不可嵌套」的强制点：内核里有大量 ARKRTOS_ENABLE_IRQ()
+     * 位于可能从 trap 里被调用到的函数（tick 处理、故障处理、loader 记账等）。
+     * 在 M 模式里执行 csrsi mstatus,8 会真的把 MIE 打开，于是定时器立刻在
+     * **处理程序内部**再进一次 trap：
+     *   - 嵌套的 riscv_trap_c() 把 g_rv_next_mpp 改写成来源特权（M=3），
+     *     外层恢复时任务就被静默抬回 M 模式；
+     *   - 外层帧还在同一个栈上，嵌套帧压在其下方，恢复顺序也跟着错。
+     * QEMU 上实测过这条：U 任务第 1 轮越权读 CLINT 正常 trap，重启后
+     * ecall 变成 machine_ecall、CLINT 也能读了 —— 特权级就是这样丢的。
+     *
+     * 所以在这里吞掉 trap 内的开中断请求：返回用户上下文时 mstatus 从帧里
+     * 恢复（MIE = 帧里的 MPIE = trap 前的值），中断照样是开着的，只是
+     * 不会在处理程序中途被自己打断。 */
+    if(s_in_trap != 0u)
+    {
+        return;
+    }
+
     __asm__ volatile("csrsi mstatus, 8" ::: "memory");
 }
 
@@ -337,7 +411,9 @@ void arkrtos_port_exit_critical(uint32 state)
 
     if((state & RV_MSTATUS_MIE) != 0u)
     {
-        __asm__ volatile("csrsi mstatus, 8" ::: "memory");
+        /* 走同一个门控：trap 内部的「退出临界区」同样不许真的开 MIE，
+         * 否则又会把处理程序交给定时器打断（见 enable_irq 的注释）。 */
+        arkrtos_port_enable_irq();
     }
 }
 
@@ -384,9 +460,18 @@ void arkrtos_port_set_control(uint32 val)
     (void)val;
 }
 
+/**
+* @brief 设定「下一次 mret 回到哪个特权级」
+* @param is_priv 非 0 = 内核任务（M 模式），0 = App 任务（U 模式）
+* @details 本函数在 trap 处理程序里被调用（切换路径），此刻 CPU 已在 M 模式，
+*          所以改的是「即将恢复的任务」而不是自己。真正的落笔位置是汇编恢复
+*          半段的 mstatus.MPP —— 见 arkrtos_context.S 的注释。
+*          不在 C 里直接改帧的原因：arkrtos_sched_activate() 返回的帧指针
+*          要到它返回之后才拿到，而本函数是在它内部被调用的。
+*/
 void arkrtos_port_set_thread_priv(uint32 is_priv)
 {
-    (void)is_priv;
+    g_rv_next_mpp = (is_priv != 0u) ? RV_PRIV_M : RV_PRIV_U;
 }
 
 /**
@@ -522,8 +607,15 @@ void arkrtos_port_delay_us(uint32 us)
 uint32 *riscv_trap_c(uint32 *frame)
 {
     uint32 mcause;
+    uint32 prev_mpp = g_rv_next_mpp;
+    uint32 nested   = (s_in_trap != 0u) ? 1u : 0u;
 
     s_in_trap++;
+
+    /* 默认回到「本次 trap 的来源特权级」：不切换时这就是任务自己的特权，
+     * 切换时 arkrtos_port_set_thread_priv() 会把它改成新任务的值。
+     * 少了这一句，一次不切换的 tick 中断会把 U 模式任务抬回 M 模式。 */
+    g_rv_next_mpp = (frame[RV_FR_MSTATUS] >> RV_MSTATUS_MPP_SHIFT) & 3u;
 
     mcause = rv_mcause_read();
 
@@ -543,8 +635,10 @@ uint32 *riscv_trap_c(uint32 *frame)
 
             RV_CLINT_MSIP = 0u;
 
-            /* 与 PendSV_Handler 完全同一套判定：>= 0 才切（0 = 切到 idle）。 */
-            next = arkrtos_sched_is_switching();
+            /* 与 PendSV_Handler 完全同一套判定：>= 0 才切（0 = 切到 idle）。
+             * 嵌套时绝不切：外层帧还压在同一个栈上，换栈会把两层栈帧
+             * 一起丢掉（第二道保险，主保险在 arkrtos_port_enable_irq）。 */
+            next = (nested != 0u) ? ARKRTOS_TASK_NONE : arkrtos_sched_is_switching();
             if(next >= 0)
             {
                 next_sp = arkrtos_sched_activate(next, (uint32)frame);
@@ -565,11 +659,63 @@ uint32 *riscv_trap_c(uint32 *frame)
     }
     else
     {
-        if(mcause == RV_MCAUSE_ECALL_M)
+        if((mcause == RV_MCAUSE_ECALL_M) || (mcause == RV_MCAUSE_ECALL_U))
         {
-            /* 硬件不会让 mepc 前进，ecall 指令占 4 字节（RV32 无压缩形式）。 */
+            /* 硬件不会让 mepc 前进，ecall 指令占 4 字节（RV32 无压缩形式）。
+             * M 模式与 U 模式的 ecall 走同一个内核入口：越权检查靠的是
+             * PMP（U 模式根本碰不到内核数据），不是 SVC 号本身。 */
+            if(mcause == RV_MCAUSE_ECALL_U)
+            {
+                g_rv_ecall_u++;
+            }
+            else
+            {
+                g_rv_ecall_m++;
+            }
             frame[RV_FR_MEPC] += 4u;
             SVC_Server((void *)frame);
+        }
+        else if((mcause == RV_MCAUSE_STORE_FAULT) ||
+                (mcause == RV_MCAUSE_LOAD_FAULT)  ||
+                (mcause == RV_MCAUSE_INSN_FAULT)  ||
+                /* 非法指令只当「U 模式的越权」处理：U 模式执行 CSR 指令
+                 * （arkrtos_port_disable_irq 的 csrrc 就算）会得到 mcause=2，
+                 * 而不是 5/7 —— 特权级隔离本来就包含「不能改 CSR」这一条，
+                 * 把它当成致命错误停机就把保护机制自己搞死了（实测：U 任务
+                 * 一调内核内部函数就 FATAL: mcause=0x2）。M 模式碰到非法指令
+                 * 仍然是真 bug，保持下面 else 的停机路径。 */
+                (mcause == RV_MCAUSE_ILLEGAL))
+        {
+            /* PMP 拒绝访问 = 保护机制真的生效了。交给内核：App 任务会被记录
+             * MEMFAULT 并重启/禁用，内核上下文则停机等调试器。
+             *
+             * 这里**必须先切到独立故障栈**再往下走，不能继续用在被中断任务
+             * 的栈上（本移植没有独立 handler 栈，见文件头边界 1）：
+             * 内核的故障恢复（arkrtos_task_recover_pending）会调用
+             * arkrtos_task_stack_init() 把那个任务的整段栈重新填成
+             * 0xcdcdcdcd 再重建入口帧 —— 而处理程序自己的活动栈帧正在
+             * 那段区间里。填完一返回，栈上取回的 ra 就是 0xcdcdcdcd，
+             * PC 直接跳进填充图案（QEMU 上实测：每轮 8 层
+             * `fault_fetch epc=0xcdcdcdcc` 递归，并且叠到栈外去）。
+             * 任务栈的顶部 144 字节在活动栈帧之上，重建入口帧本身是安全的，
+             * 所以只需要把「执行处理程序的那段栈」搬走。 */
+            {
+                uint32 from_priv = (frame[RV_FR_MSTATUS] >> RV_MSTATUS_MPP_SHIFT) & 3u;
+
+                /* 非法指令只在 U 模式算越权；M 模式自己吃到 mcause=2 是
+                 * 移植层/内核的真 bug，不能拿“重启任务”掩掉。 */
+                if((mcause == RV_MCAUSE_ILLEGAL) && (from_priv != RV_PRIV_U))
+                {
+                    arkrtos_port_fatal_report(mcause);
+                    for(;;)
+                    {
+                        __asm__ volatile("wfi" ::: "memory");
+                    }
+                }
+
+                rv_fault_enter(mcause, from_priv);
+            }
+            /* 不返回：rv_fault_enter 换栈后 tail 进 arkrtos_port_fault_dispatch */
         }
         else
         {
@@ -582,6 +728,13 @@ uint32 *riscv_trap_c(uint32 *frame)
     }
 
     s_in_trap--;
+
+    /* 真要发生嵌套（不该发生，见 enable_irq 的门控），外层恢复时必须用
+     * 自己那一轮判定的特权级，不能被内层改写成来源特权。 */
+    if(nested != 0u)
+    {
+        g_rv_next_mpp = prev_mpp;
+    }
 
     return frame;
 }
@@ -629,6 +782,195 @@ ARKRTOS_WEAK void arkrtos_port_set_idle_mpu(uint32 task_func, uint32 stack_addr,
     (void)task_func;
     (void)stack_addr;
     (void)stack_size;
+}
+
+/* ============================================================
+ * PMP 内存保护（U 模式的隔离由它提供）
+ * @details RISC-V 的 PMP 与本内核的 MPU 抽象一一对应：
+ *          `arkrtos_arch_mpu_t.region_base[]` 存 pmpaddr，
+ *          `region_attr[]` 存 pmpcfg 的一个字节。区域列表由 arkrtos_mpu.c
+ *          按任务算好（代码 / 数据 / 共享区 / 两个外设窗 / 外部 RAM），
+ *          本层只负责编码与写 CSR。
+*
+ *          **为什么 M 模式不受影响**：PMP entry 的 L（lock）位保持 0 时，
+ *          M 模式在「没有匹配 entry」的情况下默认全部允许；U 模式没有匹配
+ *          就是全部拒绝。所以给 U 模式编排权限不会把自己锁在外面，内核
+ *          也仍然能访问所有内存与外设。
+ *
+ *          **为什么用 NAPOT**：区域大小在本内核里已经是 2 的幂
+ *          （arkrtos_mpu.c 的 round_up），NAPOT 正好表达「对齐的 2^n 区间」；
+ *          4 字节区域退回 NA4（NAPOT 只覆盖 >= 8 字节）。
+ *
+ *          **没有的属性**：PMP 只有 R/W/X 三个权限位，没有 ARM MPU 的
+ *          XN/Device/可缓存性。所以「外设窗口」在本目标上只表达读写权限，
+ *          不能阻止 U 模式做非对齐访问或写合并。
+ * ============================================================ */
+
+/* PMP 条目数：pmpcfg0/pmpcfg1 各管 4 条，共 8 条，与 ARKRTOS_MPU_REGION_MAX 对齐 */
+#define RV_PMP_ENTRIES       (8u)
+
+/* pmpcfg 字节位 */
+#define RV_PMP_R             (1u << 0)
+#define RV_PMP_W             (1u << 1)
+#define RV_PMP_X             (1u << 2)
+#define RV_PMP_A_MASK        (3u << 3)
+#define RV_PMP_A_NA4         (2u << 3)
+#define RV_PMP_A_NAPOT       (3u << 3)
+
+static void rv_pmpaddr_write(uint32 idx, uint32 value)
+{
+    switch(idx)
+    {
+        case 0u: __asm__ volatile("csrw pmpaddr0, %0" : : "r"(value) : "memory"); break;
+        case 1u: __asm__ volatile("csrw pmpaddr1, %0" : : "r"(value) : "memory"); break;
+        case 2u: __asm__ volatile("csrw pmpaddr2, %0" : : "r"(value) : "memory"); break;
+        case 3u: __asm__ volatile("csrw pmpaddr3, %0" : : "r"(value) : "memory"); break;
+        case 4u: __asm__ volatile("csrw pmpaddr4, %0" : : "r"(value) : "memory"); break;
+        case 5u: __asm__ volatile("csrw pmpaddr5, %0" : : "r"(value) : "memory"); break;
+        case 6u: __asm__ volatile("csrw pmpaddr6, %0" : : "r"(value) : "memory"); break;
+        case 7u: __asm__ volatile("csrw pmpaddr7, %0" : : "r"(value) : "memory"); break;
+        default: break;
+    }
+}
+
+/* 关掉全部 entry：U 模式随后对任何地址都没有权限（M 模式不受限）。 */
+static void rv_pmp_disable_all(void)
+{
+    __asm__ volatile("csrw pmpcfg0, zero" ::: "memory");
+    __asm__ volatile("csrw pmpcfg1, zero" ::: "memory");
+}
+
+/**
+* @brief 把一个区域编码进任务上下文（不碰硬件）
+* @details 只算 pmpaddr / pmpcfg 两个数。写 CSR 在 set_app() 里做，
+*          因为切换时必须「先关后写」，中间态不能让 U 模式看到。
+*/
+int32 arkrtos_port_mpu_encode(arkrtos_arch_mpu_t *p_mpu, uint32 idx, uint32 base, uint32 size,
+                            arkrtos_mpu_mem_t mem)
+{
+    uint32 attr;
+    uint32 addr;
+    uint32 pow2;
+
+    if((p_mpu == 0) || (idx >= RV_PMP_ENTRIES) || (size == 0u))
+    {
+        return -1;
+    }
+
+    /* 区域大小必须是 2 的幂（arkrtos_mpu.c 已经 round up，这里只做保险），
+     * 且至少 4 字节 —— PMP 的最小粒度就是 4 字节（NA4）。 */
+    pow2 = 4u;
+    while((pow2 < size) && (pow2 < 0x80000000u))
+    {
+        pow2 <<= 1u;
+    }
+
+    /* 基址向下对齐到区域大小：PMP 的区间必须自然对齐。 */
+    base &= ~(pow2 - 1u);
+
+    switch(mem)
+    {
+        case ARKRTOS_MPU_MEM_ROM:       attr = RV_PMP_R | RV_PMP_X; break;
+        case ARKRTOS_MPU_MEM_RAM:       attr = RV_PMP_R | RV_PMP_W; break;
+        case ARKRTOS_MPU_MEM_RAMX:      attr = RV_PMP_R | RV_PMP_W | RV_PMP_X; break;
+        case ARKRTOS_MPU_MEM_PERIPH_RO: attr = RV_PMP_R; break;
+        case ARKRTOS_MPU_MEM_PERIPH_RW: attr = RV_PMP_R | RV_PMP_W; break;
+        case ARKRTOS_MPU_MEM_EXTRAM:    attr = RV_PMP_R | RV_PMP_W; break;
+        default:                        return -1;
+    }
+
+    if(pow2 == 4u)
+    {
+        attr |= RV_PMP_A_NA4;
+        addr  = base >> 2u;
+    }
+    else
+    {
+        /* NAPOT：pmpaddr 低位连续 1 的个数编码区间大小，size = 2^(k+3)。 */
+        attr |= RV_PMP_A_NAPOT;
+        addr  = (base >> 2u) | ((pow2 >> 3u) - 1u);
+    }
+
+    p_mpu->region_base[idx] = addr;
+    p_mpu->region_attr[idx] = attr;
+
+    return 0;
+}
+
+/**
+* @brief 把一份任务上下文写进 PMP
+* @details 顺序很关键：先把所有 entry 关掉，再写 pmpaddr，最后一次性写
+*          pmpcfg。反过来的话，U 模式可能在「新地址 + 旧属性」的窗口里
+*          访问到一块本来不该给它的内存。
+*          传 0 表示「没有可给 U 模式的东西」——idle 任务与未配置的任务用它。
+*/
+void arkrtos_port_mpu_set_app(const arkrtos_arch_mpu_t *p_mpu)
+{
+    uint32 cfg0 = 0u;
+    uint32 cfg1 = 0u;
+    uint32 i;
+
+    rv_pmp_disable_all();
+
+    if(p_mpu == 0)
+    {
+        return;
+    }
+
+    for(i = 0u; i < RV_PMP_ENTRIES; i++)
+    {
+        uint32 a = p_mpu->region_attr[i];
+
+        if((a & RV_PMP_A_MASK) == 0u)
+        {
+            continue;                       /* A=OFF：区域未启用 */
+        }
+
+        rv_pmpaddr_write(i, p_mpu->region_base[i]);
+
+        if(i < 4u)
+        {
+            cfg0 |= (a & 0xFFu) << (8u * i);
+        }
+        else
+        {
+            cfg1 |= (a & 0xFFu) << (8u * (i - 4u));
+        }
+    }
+
+    __asm__ volatile("csrw pmpcfg0, %0" : : "r"(cfg0) : "memory");
+    __asm__ volatile("csrw pmpcfg1, %0" : : "r"(cfg1) : "memory");
+}
+
+/* 启动时 PMP 是空的（U 模式什么都碰不到），不需要额外初始化。 */
+void arkrtos_port_mpu_init(void)
+{
+    rv_pmp_disable_all();
+}
+
+/* 复位 = 退回「只有 M 模式」的状态：U 模式权限全部收走。 */
+void arkrtos_port_mpu_reset(void)
+{
+    rv_pmp_disable_all();
+}
+
+/* 空闲任务是内核代码，跑在 M 模式：U 模式权限全部收走即可。 */
+void arkrtos_port_mpu_set_idle(void)
+{
+    rv_pmp_disable_all();
+}
+
+/**
+* @brief 捕获空闲任务的保护上下文（与 M4 移植同名接口的语义对齐）
+* @details 本目标上空闲任务跑 M 模式，不需要任何 U 模式权限，所以这里
+*          只接收参数不建 region。
+*/
+void arkrtos_port_mpu_set_region(uint32 rom_addr, uint32 rom_size, uint32 ram_addr, uint32 ram_size)
+{
+    (void)rom_addr;
+    (void)rom_size;
+    (void)ram_addr;
+    (void)ram_size;
 }
 
 /* ============================================================
@@ -685,4 +1027,54 @@ ARKRTOS_WEAK uint32 arkrtos_port_wdg_timeout_ms(void)
 ARKRTOS_WEAK void arkrtos_port_fatal_report(uint32 mcause)
 {
     (void)mcause;
+}
+
+/**
+* @brief PMP 违规现场（mcause / mtval / 出错时的特权级）
+* @details 默认什么都不做；板级覆盖后打到串口，就是「保护真的挡下来了」的
+*          现场证据。单独一个钩子而不是复用 fatal_report，是因为访问异常是
+*          可恢复的（App 任务会被记录并重启），fatal_report 的语义是停机。
+*/
+ARKRTOS_WEAK void arkrtos_port_fault_detail(uint32 mcause, uint32 mtval, uint32 from_priv)
+{
+    (void)mcause;
+    (void)mtval;
+    (void)from_priv;
+}
+
+/* ============================================================
+ * 故障派发（跑在独立故障栈上，不返回）
+ * ============================================================ */
+/**
+* @brief 访问异常的实际处理体
+* @param mcause    硬件原因号（1/5/7）
+* @param from_priv 出事时的特权级（0=U，3=M）
+* @details 入口是汇编的 rv_fault_enter：它先把 sp 换成 rv_fault_stack_top_addr，
+*          再 tail 进来。换栈的理由只有一个但很硬：内核的故障恢复会重建
+*          肇事任务的栈（整段填 0xcdcdcdcd），如果处理程序还在那段栈上跑，
+*          重建一完成，处理程序自己取回的 ra 就是填充图案，返回就飞了。
+*
+*          本函数永不返回：要么装上下一个任务的上下文（resume_task），
+*          要么停机等调试器。
+*/
+void arkrtos_port_fault_dispatch(uint32 mcause, uint32 from_priv)
+{
+    uint32 resume_sp;
+
+    arkrtos_port_fault_detail(mcause, rv_mtval_read(), from_priv);
+
+    resume_sp = arkrtos_cpu_fault_handler(ARKRTOS_FAULT_MEMFAULT);
+
+    if(resume_sp != 0u)
+    {
+        /* 不经过 trap_entry 的返回半段，直接把状态收拾干净再换上下文。 */
+        s_in_trap = 0u;
+        arkrtos_port_resume_task(resume_sp);   /* 不返回 */
+    }
+
+    arkrtos_port_fatal_report(mcause);
+    for(;;)
+    {
+        __asm__ volatile("wfi" ::: "memory");
+    }
 }

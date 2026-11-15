@@ -12,7 +12,10 @@
 *             这是对 trap 帧 a7/a0 约定与 mepc+4 的端到端验证；
 *          4) **阻塞态唤醒**：任务用 arkrtos_task_wait() 挂进延时链，
 *             到期由节拍唤醒 —— 走的是"trap 里改调度状态、软件中断里换栈"
-*             这条最容易出问题的组合路径。
+*             这条最容易出问题的组合路径；
+*          5) **U 模式 + PMP 内存保护**：任务 C 以 is_priv = 0 运行，
+*             它读 CLINT（不在任何 PMP 窗口里）必须被打回并重启 ——
+*             这条负对照是整套保护机制唯一的现场证据，不是推断。
 *
 *          打印全部走板级轮询 16550，不依赖 libc 的 printf。
 *
@@ -38,6 +41,7 @@
 
 static uint32 s_stack_a[TASK_STACK_WORDS];
 static uint32 s_stack_b[TASK_STACK_WORDS];
+static uint32 s_stack_u[TASK_STACK_WORDS];
 static uint32 s_idle_stack[IDLE_STACK_WORDS];
 
 static int32 s_sem = -1;
@@ -126,6 +130,94 @@ static void task_b(void)
     }
 }
 
+/* ============================================================
+ * 任务 C：U 模式负对照（内存保护自检）
+ * @details 这个任务以 is_priv = 0 注册，运行在 **U 模式**。三件事各验一条：
+ *          1) 打印走板级给定的外设窗（UART 4 KB RW）—— 证明窗口本身是通的，
+ *             不是"什么都没给、所以什么都没跑"；
+ *          2) 读毫秒时间走 arkrtos_get_time_ms()（照旧是 ecall），
+ *             证明 U 模式的 trap 入口（mcause = 8）也接得住；
+ *          3) 故意读 CLINT（0x02000000）—— 该地址不在任何 PMP 窗口里。
+ *             M 模式读它是合法的（PMP 不管 M），U 模式读它必然被拒
+ *             （mcause = 5，mtval = 目标地址）。真被拦住时下面那行
+ *             "UNEXPECTED / no isolation" 永远打不出来，这是本用例的防假绿。
+ *          每次故障后内核记 MEMFAULT 并把任务重启，round 接着涨，
+ *          所以连续三条 [U] round=N 本身就是"拦住了 + 能恢复"的证据。
+ * @note 本任务由内核注册（rom_start = 0），因此拿到的是内核代码窗 + 整片
+ *       内核 RAM —— 隔离的是**特权级**（U 碰不到窗口外的地址、执行不了
+ *       csrw），不是任务间隔离。任务间隔离要等 App 镜像走 loader 拿到
+ *       自己的 slot，见 docs/QEMU模拟器移植与验证.md 的未完成项。
+ * ============================================================ */
+#define U_FAULT_ROUNDS       3u
+#define RV_CLINT_PROBE_ADDR  0x02000000u
+
+static volatile uint32 s_u_rounds = 0u;
+
+/* port 层的 ecall 来源计数（mcause=8 来自 U，11 来自 M）。放在这里读，
+ * 是为了让"这个任务真的在 U 模式"变成可读数字，而不是靠"没崩"推断。 */
+extern volatile uint32 g_rv_ecall_u;
+extern volatile uint32 g_rv_ecall_m;
+
+static void task_u(void)
+{
+    uint32 round = s_u_rounds + 1u;
+
+    s_u_rounds = round;
+
+    arkrtos_board_puts("[U] round=");
+    arkrtos_board_putu(round);
+    arkrtos_board_puts(" t=");
+    arkrtos_board_putu(arkrtos_get_time_ms());
+    arkrtos_board_puts(" ms ecall_u=");
+    arkrtos_board_putu(g_rv_ecall_u);
+    arkrtos_board_puts(" ecall_m=");
+    arkrtos_board_putu(g_rv_ecall_m);
+    arkrtos_board_puts("\n");
+
+    if(round <= U_FAULT_ROUNDS)
+    {
+        volatile uint32 *p_probe = (volatile uint32 *)RV_CLINT_PROBE_ADDR;
+        uint32 v;
+
+        arkrtos_board_puts("[U] reading CLINT (outside every PMP window) ...\n");
+
+        /* 这一句是整条用例的判据：U 模式下它必须 trap，永不返回。 */
+        v = *p_probe;
+
+        arkrtos_board_puts("[U] UNEXPECTED: read=");
+        arkrtos_board_puthex(v);
+        arkrtos_board_puts(" -> no isolation\n");
+    }
+
+    /* 第四条负对照：写 CSR。特权级隔离除了“碰不到窗口外地址”，还有一条
+     * “改不了控制寄存器”。U 模式执行任何 csr 写指令会被硬件报 mcause=2
+     * （非法指令），port 层把它归入越权处理（与 PMP 拒绝同一个出口）。
+     * 没接这条之前实测：U 任务只要碰一下内核内部函数就 FATAL: mcause=0x2。 */
+    if(round == (U_FAULT_ROUNDS + 1u))
+    {
+        arkrtos_board_puts("[U] writing mstatus (privileged CSR) ...\n");
+
+        /* 这一句必须在 U 模式 trap，永不返回。 */
+        __asm__ volatile("csrsi mstatus, 8" ::: "memory");
+
+        arkrtos_board_puts("[U] UNEXPECTED: csrsi mstatus ok -> no isolation\n");
+    }
+
+    /* 尾部循环的两条约束，都是实测踩出来的：
+     *  a) 不能用 arkrtos_task_delay() 当循环体：它是 SVC → port 忙等，而 SVC
+     *     在 trap 里执行时 mstatus.MIE = 0，忙等全程关中断；实测 200 ms 忙等
+     *     让节拍只按 ~5 Hz 前进、A/B 永远排不上（8 s 宿主只跑出 18 个 tick）。
+     *  b) 不能用 arkrtos_task_wait_internal()：它是内核内部函数，开头就
+     *     ARKRTOS_DISABLE_IRQ()（csrrc），U 模式一执行就是 mcause=2。
+     * 所以走 App 侧的 SVC 接口 arkrtos_task_wait()，一次 2 ms 忙等保留下来
+     * 当 SVC 通路的轻量探针（ecall_u 仍会随轮次增长），真正的让出 CPU 靠它。 */
+    for(;;)
+    {
+        arkrtos_task_delay(2000u);
+        arkrtos_task_wait(1000u);
+    }
+}
+
 /**
 * @brief 进入空闲上下文并启动调度
 * @details 顺序不可换：
@@ -157,6 +249,7 @@ int main(void)
 {
     int32 id_a;
     int32 id_b;
+    int32 id_u;
 
     arkrtos_port_board_init();
 
@@ -166,6 +259,15 @@ int main(void)
      * 那时任务表必须已经就位（顺序见 arkrtos_init.h 文件头 1~8 步）。 */
     id_a = arkrtos_task_register(task_a, s_stack_a, sizeof(s_stack_a), 10u, 0u);
     id_b = arkrtos_task_register(task_b, s_stack_b, sizeof(s_stack_b), 11u, 0u);
+    id_u = arkrtos_task_register(task_u, s_stack_u, sizeof(s_stack_u), 12u, 0u);
+
+    /* 把它降到 U 模式：内核注册出来的任务默认 is_priv = 1（见 arkrtos_cfg.c），
+     * 这里显式改 0 —— 与 loader / apprun 把 App 置 0 是同一处语义，
+     * 也是本目标上"特权隔离真的在起作用"的唯一入口。 */
+    if(id_u > 0)
+    {
+        arkrtos_task_table[id_u - 1].is_priv = 0u;
+    }
 
     arkrtos_port_irq_init();
 
@@ -188,11 +290,17 @@ int main(void)
     arkrtos_board_putu((uint32)id_a);
     arkrtos_board_puts(" taskB=");
     arkrtos_board_putu((uint32)id_b);
+    arkrtos_board_puts(" taskU=");
+    arkrtos_board_putu((uint32)id_u);
+    arkrtos_board_puts(" mpu=");
+    arkrtos_board_putu((uint32)ARKRTOS_USE_MPU);
+    arkrtos_board_puts(" priv=");
+    arkrtos_board_putu((uint32)ARKRTOS_USE_PRIV);
     arkrtos_board_puts(" tick_period_us=");
     arkrtos_board_putu(ARKRTOS_TICK_PERIOD_US);
     arkrtos_board_puts("\n");
 
-    if((id_a < 0) || (id_b < 0))
+    if((id_a < 0) || (id_b < 0) || (id_u < 0))
     {
         arkrtos_board_puts("[boot] task register FAILED, halted\n");
         for(;;)

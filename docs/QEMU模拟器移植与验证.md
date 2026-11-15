@@ -252,8 +252,11 @@ SVC 通路另用 `arkrtos_get_time_ms()` 每轮自检：把它返回的毫秒与
 
 ```
    text    data     bss     dec     hex  filename
-  42816      48   15968   58832    e5d0  ark_qemu_rv32.elf
+  46544      48   22128   68720  10c70  ark_qemu_rv32.elf
 ```
+
+（含 §3.10 的 U 模式 + PMP + 独立故障栈；开 U 模式之前的单 M 模式版本是
+`42816 / 48 / 15968`。）
 
 运行命令：
 
@@ -297,13 +300,136 @@ cd build/qemu_riscv32
 3. **SVC 通路正确**：`ms_svc` 与内核换算值一致（`svc_ok` 全绿），说明
    `ecall` 的 a7 取号、a0 回填、`mepc+4` 都工作正常。
 
+### 3.10 U 模式 + PMP 内存保护（实跑取证）
+
+与 §3.9 同一次构建：`USE_MPU=1`、`USE_PRIV=1`，内核注册一个 `is_priv = 0`
+的任务 C，它运行在 **U 模式**。四条负对照各验一条，每条都必须在 U 模式
+报错、并由内核干净重启 —— 这是"保护机制真的生效"唯一的现场证据。
+
+| # | 探针 | 预期 trap | 实测 |
+|---|---|---|---|
+| 1 | 读 CLINT `0x02000000`（不在任何 PMP 窗口） | `mcause=5` load fault，`mtval`=目标地址 | `mcause=5 mtval=0x02000000 mepc=0x8000a248 from=U task=3` |
+| 2 | 打印（UART 4 KB 窗口，`ARKRTOS_MPU_PERIPH_BASE/SIZE`） | 必须**成功** —— 否则"什么都没给所以什么都没跑" | `[U]` 每行都打出来了 |
+| 3 | `ecall` 取毫秒（`arkrtos_get_time_ms()`） | 必须**成功**，`ecall_u` 递增、`ecall_m` 不动 | `ecall_u` 1→5，`ecall_m` 恒 1 |
+| 4 | 写 CSR `csrsi mstatus, 8` | `mcause=2` 非法指令，`mtval`=指令编码 | `mcause=2 mtval=0x30046073 mepc=0x8000a21e from=U task=3` |
+
+串口原始输出（U 任务部分，30 s 宿主时间，未删行）：
+
+```
+[boot] sem=19922944 taskA=1 taskB=2 taskU=3 mpu=1 priv=1 tick_period_us=500
+[U] round=1 t=4 ms ecall_u=1 ecall_m=1
+[U] reading CLINT (outside every PMP window) ...
+
+[PMP] fault mcause=5 mtval=0x02000000 mepc=0x8000a248 from=U task=3
+[U] round=2 t=5 ms ecall_u=2 ecall_m=1
+[PMP] fault mcause=5 mtval=0x02000000 mepc=0x8000a248 from=U task=3
+[U] round=3 t=6 ms ecall_u=3 ecall_m=1
+[PMP] fault mcause=5 mtval=0x02000000 mepc=0x8000a248 from=U task=3
+[U] round=4 t=7 ms ecall_u=4 ecall_m=1
+[U] writing mstatus (privileged CSR) ...
+[PMP] fault mcause=2 mtval=0x30046073 mepc=0x8000a21e from=U task=3
+[U] round=5 t=8 ms ecall_u=5 ecall_m=1
+[A] round=1 tick=1004 d_tick=1002 ms=502 d_ms=501
+```
+
+四件事同时成立：4 次 `from=U` 的 trap、4 次干净重启（round 1→5 连续）、
+`ecall_u` 单调增且 `ecall_m` 不动（= 任务确实在 U 模式）、
+`UNEXPECTED` / `FATAL` / `0xcdcdcdcc` 三者计数均为 0。
+
+#### 3.10.1 实现要点
+
+- **特权传递走 trap 帧的 MPP 位，不是一个全局变量**：`riscv_trap_c()` 开头
+  `g_rv_next_mpp = (frame[RV_FR_MSTATUS] >> 11) & 3`，任务切换时由
+  `arkrtos_port_set_thread_priv()` 覆盖；`trap_entry` 与
+  `arkrtos_port_resume_task` 两条恢复路径都在 `csrw mstatus` 前把 MPP 位
+  换成 `g_rv_next_mpp`。不这么做，一次不切换的 tick 中断会把 U 模式任务
+  抬回 M 模式。
+- **PMP 用 8 个 entry 的 pmpcfg0/pmpcfg1**：attr `R=1 W=2 X=4 A=[4:3]`，
+  `pmpaddr = (base>>2) | ((pow2>>3)-1)`（NAPOT）。写序必须是
+  「先写 cfg=0 关掉 → 写 pmpaddr → 一次性写 cfg」，否则会出现半个窗口
+  的中间态。M 模式的 entry 一律 `L=0`，所以内核自己不受限。
+- **故障走独立栈**，见下一条根因。
+
+#### 3.10.2 三个实测踩出来的缺陷（都不是风格问题）
+
+**(a) trap 内真的开了 MIE ⇒ 嵌套 trap ⇒ 任务静默跑成 M 模式**
+
+内核里有几十处 `ARKRTOS_ENABLE_IRQ()` 位于可能从 trap 里被调到的函数。
+在 Cortex-M 上 `PendSV` 与 `SVC` 同优先级不会互相打断，所以这没毛病；
+RISC-V 上 `csrsi mstatus, 8` 在 trap 里是真的打开全局中断，于是：
+定时器在 SVC 处理程序内部再次进 trap → 嵌套的 `riscv_trap_c` 把
+`g_rv_next_mpp` 改写成"来源特权 M" → 外层 mret 后任务跑成 M 模式。
+
+症状非常隐蔽：**不崩、不报错，只是 ecall 从 `mcause=8` 变成 `mcause=11`**，
+并且 U 任务突然能读 CLINT 了。定位靠的是把"来源"变成可读数字：
+`g_rv_ecall_u` / `g_rv_ecall_m` 两个计数器，前者涨、后者也涨就是它。
+QEMU `-d int` 的 trace 直接指认 `m_timer epc=0x800096b0`（正是
+`arkrtos_port_enable_irq` 的 `ret`）。
+
+修法：`arkrtos_port_enable_irq()` 在 `s_in_trap != 0` 时**直接忽略请求**
+（改内核几十个调用点不可能，也违反移植层职责）；`riscv_trap_c()` 再加一道
+`nested` 保护，嵌套时既不切任务也不改写 `g_rv_next_mpp`。
+
+**(b) 故障重启会重填任务栈，而处理程序就跑在同一个栈上 ⇒ `0xcdcdcdcc` 递归**
+
+内核的故障恢复 `arkrtos_task_recover_pending()` 会调
+`arkrtos_task_stack_init()` 把那个任务的整段栈重填成
+`ARKRTOS_STACK_FILL_PATTERN = 0xcdcdcdcd` 再重建入口帧 —— 而本移植没有
+独立 handler 栈，处理程序自己的活动帧正在那段区间里。填完一返回，从栈上
+取回的 `ra` 就是 `0xcdcdcdcd`，`jalr` 清 bit0 后 PC 跳进 `0xcdcdcdcc`，
+再取指又 fault，递归下移。QEMU 上实测每轮 **8 层
+`fault_fetch epc=0xcdcdcdcc`**，每层下移 0xF0 = 240 字节（正好是一个
+36 字的 trap 帧），8 层后叠到栈外去。
+
+修法：故障分支在任何内核调用之前先 `rv_fault_enter()` 换到独立故障栈
+（`rv_fault_stack`，默认 256 字 = 1 KB，板级可用
+`ARKRTOS_RV32_FAULT_STACK_WORDS` 覆盖），再 tail 进
+`arkrtos_port_fault_dispatch()`。任务栈顶部 144 字节的重建本身是安全的，
+要搬走的只是"执行处理程序的那段栈"。修完 `fault_fetch` 计数为 0。
+
+**(c) U 模式执行特权指令是 `mcause=2`，不是 5/7**
+
+U 模式碰 CSR（U 任务误调内核内部函数，比如 `arkrtos_port_disable_irq()` 的
+`csrrc mstatus`）会得到非法指令异常 `mcause=2`。最初只把 1/5/7 归入越权，
+结果是 `[Ark RTOS] FATAL: mcause=0x00000002` 直接停机 —— **保护机制自己把
+内核搞死了**。现在 `mcause=2` 只在来源是 U 时按越权处理（与 PMP 拒绝同一个
+出口），来源是 M 时仍然是致命错误：M 模式吃到非法指令是移植层/内核的真
+bug，不能拿"重启任务"掩掉。
+
+#### 3.10.3 示例任务的两条写法约束（也是实测的）
+
+U 任务尾部不能这么写：
+
+```c
+for(;;) { arkrtos_task_delay(200000u); }        /* 错：关中断忙等 */
+for(;;) { arkrtos_task_wait_internal(1000u); }  /* 错：U 模式碰 CSR */
+```
+
+- `arkrtos_task_delay()` 是 SVC → `arkrtos_port_delay_us()` 忙等。SVC 在
+  trap 里执行，此时 `mstatus.MIE = 0`，忙等全程关中断。实测 200 ms 忙等
+  死循环让节拍只按 ~5 Hz 前进、A/B 永远排不上（8 s 宿主只跑出 18 个 tick，
+  看起来像"QEMU 时间不走"）。
+- `arkrtos_task_wait_internal()` 是内核内部函数，开头 `ARKRTOS_DISABLE_IRQ()`
+  就是 `csrrc`，U 模式一执行就是 (c) 那条。
+
+正确写法是 App 侧 SVC 接口：`arkrtos_task_wait(1000u)` —— 真正阻塞
+（挂延时链 + 触发切换），中断开着。
+
+#### 3.10.4 隔离的是什么，不是什么
+
+这一版隔离的是**特权级**（U 碰不到窗口外地址、改不了 CSR），**不是任务间
+隔离**。任务 C 由内核注册（`rom_start = 0`），拿到的是内核代码窗 + 整片
+内核 RAM，所以它写内核 RAM 是合法的 —— 负对照必须挑 CLINT 这种不在任何
+窗口里的地址才成立。任务间隔离要等 App 镜像走 loader 拿到自己的 slot。
+
 ## 4. 已知限制（明确不覆盖的部分）
 
 | 限制 | 影响 | 原因 |
 |---|---|---|
-| 无 U 模式 / 无 PMP | 测不出特权级隔离、App 越权 | 单 M 模式 port，`USE_PRIV=0` |
-| handler 与任务共用栈 | 栈溢出行为与真实中断不同 | 未做中断独立栈 |
-| trap 不可嵌套 | 不在中断里再开 `MIE` | 简化实现 |
+| 只有故障路径有独立栈，普通 trap 仍与任务共用栈 | 普通中断的栈溢出行为与真实机不同 | 独立 handler 栈要改通用调度路径，见 §3.10.2(b) |
+| trap 不可嵌套（强制） | 中断处理程序里不能开 `MIE` | 放开会让 U 任务静默跑成 M 模式，见 §3.10.2(a) |
+| 任务间隔离未做（只做了特权级） | 一个 App 碰不到另一个 App 的 RAM 这点**未验证** | 示例任务由内核注册，拿到内核窗口；需 App 镜像走 loader 才有单独 slot |
+| `mcause=2` 的 M 模式来源直接停机 | 内核自己写错 CSR 会停机而不是重启任务 | 故意：M 模式非法指令是真 bug，不能拿重启掩掉 |
 | `ecall` 后 `mepc+=4` 由 port 做 | 换核/换编译器时须复核 | 不依赖硬件行为 |
 | 无 FPU 上下文 | 浮点任务不可用 | `USE_FPU=0` |
 | 单 hart | SMP 路径未验证 | `USE_SMP=0` |

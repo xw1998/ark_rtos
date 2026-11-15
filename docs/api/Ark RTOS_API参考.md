@@ -50,7 +50,7 @@
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（11 项）
 - [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（10 项）
-- [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（8 项）
+- [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（14 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
 - [kernelsrc/sdk/app_sdk/tests/test_stdio_host.c](#kernelsrcsdkapp_sdkteststest_stdio_hostc)（2 项）
@@ -7300,6 +7300,20 @@ void arkrtos_port_switch_task(void) {
 - 在线程上下文里调用：立刻进 trap 完成切换。
 两种情形都与内核「置挂起、稍后切」的假设一致。
 
+### `void arkrtos_port_set_thread_priv(uint32 is_priv) {`
+
+```c
+void arkrtos_port_set_thread_priv(uint32 is_priv) {
+```
+
+**设定「下一次 mret 回到哪个特权级」**
+- `is_priv`：非 0 = 内核任务（M 模式），0 = App 任务（U 模式）
+本函数在 trap 处理程序里被调用（切换路径），此刻 CPU 已在 M 模式，
+所以改的是「即将恢复的任务」而不是自己。真正的落笔位置是汇编恢复
+半段的 mstatus.MPP —— 见 arkrtos_context.S 的注释。
+不在 C 里直接改帧的原因：arkrtos_sched_activate() 返回的帧指针
+要到它返回之后才拿到，而本函数是在它内部被调用的。
+
 ### `uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void)) `
 
 ```c
@@ -7357,6 +7371,65 @@ ARKRTOS_WEAK void arkrtos_port_irq_init(void) {
 3) mstatus.MIE = 1 —— 相当于 Cortex-M 复位后 PRIMASK 为 0。
 不在这里打开的话，switch_enable 置的软件中断永远不会被取走，
 第一个任务也就永远启动不了。
+
+### `int32 arkrtos_port_mpu_encode(arkrtos_arch_mpu_t *p_mpu, uint32 idx, u`
+
+```c
+int32 arkrtos_port_mpu_encode(arkrtos_arch_mpu_t *p_mpu, uint32 idx, uint32 base, uint32 size, arkrtos_mpu_mem_t mem) {
+```
+
+**把一个区域编码进任务上下文（不碰硬件）**
+只算 pmpaddr / pmpcfg 两个数。写 CSR 在 set_app() 里做，
+因为切换时必须「先关后写」，中间态不能让 U 模式看到。
+
+### `void arkrtos_port_mpu_set_app(const arkrtos_arch_mpu_t *p_mpu) {`
+
+```c
+void arkrtos_port_mpu_set_app(const arkrtos_arch_mpu_t *p_mpu) {
+```
+
+**把一份任务上下文写进 PMP**
+顺序很关键：先把所有 entry 关掉，再写 pmpaddr，最后一次性写
+pmpcfg。反过来的话，U 模式可能在「新地址 + 旧属性」的窗口里
+访问到一块本来不该给它的内存。
+传 0 表示「没有可给 U 模式的东西」——idle 任务与未配置的任务用它。
+
+### `void arkrtos_port_mpu_set_region(uint32 rom_addr, uint32 rom_size, uin`
+
+```c
+void arkrtos_port_mpu_set_region(uint32 rom_addr, uint32 rom_size, uint32 ram_addr, uint32 ram_size) {
+```
+
+**捕获空闲任务的保护上下文（与 M4 移植同名接口的语义对齐）**
+本目标上空闲任务跑 M 模式，不需要任何 U 模式权限，所以这里
+只接收参数不建 region。
+
+### `ARKRTOS_WEAK void arkrtos_port_fault_detail(uint32 mcause, uint32 mtva`
+
+```c
+ARKRTOS_WEAK void arkrtos_port_fault_detail(uint32 mcause, uint32 mtval, uint32 from_priv) {
+```
+
+**PMP 违规现场（mcause / mtval / 出错时的特权级）**
+默认什么都不做；板级覆盖后打到串口，就是「保护真的挡下来了」的
+现场证据。单独一个钩子而不是复用 fatal_report，是因为访问异常是
+可恢复的（App 任务会被记录并重启），fatal_report 的语义是停机。
+
+### `void arkrtos_port_fault_dispatch(uint32 mcause, uint32 from_priv) {`
+
+```c
+void arkrtos_port_fault_dispatch(uint32 mcause, uint32 from_priv) {
+```
+
+**访问异常的实际处理体**
+- `mcause`：硬件原因号（1/5/7）
+- `from_priv`：出事时的特权级（0=U，3=M）
+入口是汇编的 rv_fault_enter：它先把 sp 换成 rv_fault_stack_top_addr，
+再 tail 进来。换栈的理由只有一个但很硬：内核的故障恢复会重建
+肇事任务的栈（整段填 0xcdcdcdcd），如果处理程序还在那段栈上跑，
+重建一完成，处理程序自己取回的 ra 就是填充图案，返回就飞了。
+本函数永不返回：要么装上下一个任务的上下文（resume_task），
+要么停机等调试器。
 
 ## kernelsrc/sdk/app_sdk/arkrtos_app_main.c
 
