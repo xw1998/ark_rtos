@@ -30,7 +30,7 @@
 |---|---|---|---|---|---|
 | 1 | 优先级抢占调度 | ✓ | ✓ | ✓ | **✓**（就绪集为 256 位两级位图 + 每优先级链，O(1)） |
 | 2 | 时间片轮转 | ✓（可选） | ✓ | ✓ | **✓** |
-| 3 | 事件 / 事件组 / 信号量 / 互斥锁 | ✓ / ✓（32 位）/ ✓ / ✓（优先级继承） | ✓ / ✓（`rt_event` 单标志）/ ✓ / ✓ | ✓ / ✓（`k_event` 32 位）/ ✓ / ✓ | **✓ / △ / ✓ / ✓**（`arkrtos_event` 是**单标志**广播复位；32 位事件集 `arkrtos_eset` 已实现但默认关（`ARKRTOS_USE_ESET`），OR/AND 掩码等待 + 可选 CLEAR，其 **App 侧 SVC 0x21 通道与内核侧 ISR 入口（真 EXTI0 handler 里 `set`）均已于 F427 上板验证**（`ESET_DEMO` 37 条断言、`eset_from_isr_contract` 40 条断言，全 0 失败），见 [同步原语与令牌守恒](同步原语与令牌守恒.md) §5.4；互斥锁带优先级继承，且沿等待链**多级传播**（§5.7）；可选**递归锁**创建入口（`ARKRTOS_USE_MTX_RECURSIVE`，默认关，§5.6）；另有**多对象同时就绪探测**（SVC 0x22，`ARKRTOS_USE_WAITMULTI`，非破坏性探测，§5.8）） |
+| 3 | 事件 / 事件组 / 信号量 / 互斥锁 | ✓ / ✓（32 位）/ ✓ / ✓（优先级继承） | ✓ / ✓（`rt_event` 单标志）/ ✓ / ✓ | ✓ / ✓（`k_event` 32 位）/ ✓ / ✓ | **✓ / △ / ✓ / ✓**（`arkrtos_event` 是**单标志**广播复位；32 位事件集 `arkrtos_eset` 已实现但默认关（`ARKRTOS_USE_ESET`），OR/AND 掩码等待 + 可选 CLEAR，其 **App 侧 SVC 0x21 通道、内核侧 ISR 入口（真 EXTI0 handler 里 `set`）与真 SVC-in-ISR（EXTI0 降到 IP `0x40` 后在 handler 里发 `SVC 0x21`）均已于 F427 上板验证**（`ESET_DEMO` 37 条断言、`eset_from_isr_contract` 61 条断言，全 0 失败），见 [同步原语与令牌守恒](同步原语与令牌守恒.md) §5.4；互斥锁带优先级继承，且沿等待链**多级传播**（§5.7）；可选**递归锁**创建入口（`ARKRTOS_USE_MTX_RECURSIVE`，默认关，§5.6）；另有**多对象同时就绪探测**（SVC 0x22，`ARKRTOS_USE_WAITMULTI`，非破坏性探测，§5.8）） |
 | 4 | 消息队列 | ✓ | ✓ | ✓ | **✓**（`arkrtos_mq`） |
 | 5 | 软定时器 | ✓ | ✓ | ✓ | **✓**（`arkrtos_timer`） |
 | 6 | 流缓冲 / 消息缓冲 | ✓（V10 引入） | ✓（管道/ringbuffer） | ✓（k_pipe / k_fifo） | **✓**（`arkrtos_sbuf` 字节流 + `arkrtos_mbuf` 长度头消息；默认关，见 [流缓冲与消息缓冲](流缓冲与消息缓冲.md)。触发水位暂未提供） |
@@ -50,7 +50,7 @@
 | 20 | **运行期安装 / 卸载应用与驱动** | ✗ | △（`dlmodule` 动态模块） | ✗ | **✓（主线能力）**（镜像池 + 安装器 + 版本把关 + 无缝升级） |
 | 21 | 文件系统里跑小程序 | ✗ | ✗ | ✗ | **✓（独有）**（`arkrtos_mini`，不装槽位、多实例） |
 | 22 | 设备间互发现 / RPC / 流（软总线） | ✗（+TCP 另说） | △（软件包） | △（网络子系统） | **✓**（ark_softbus 组件，MCU 档已上板） |
-| 23 | 单元测试框架 | ✗ | ✓（utest + CI） | ✓（ztest + Twister） | **✓**（板端 `utest`：用例自动注册 + 断言记账，`utest run` 上板 12/12、169 条断言；`utest-host` 门禁验框架本身的记账） |
+| 23 | 单元测试框架 | ✗ | ✓（utest + CI） | ✓（ztest + Twister） | **✓**（板端 `utest`：用例自动注册 + 断言记账，`utest run` 上板 12/12、190 条断言；`utest-host` 门禁验框架本身的记账） |
 | 24 | 支持的架构 | 极广（40+） | 广 | ARM/RISC-V/x86/ARC/… | Cortex-M3/M4/M7（RISC-V / LoongArch 抽象层已就绪，移植实现待补） |
 | 25 | 主构建工具链 | 任意（Keil/GCC/IAR） | SCons / MDK | CMake + west | **Keil MDK（AC5/AC6）+ GNU Make / arm-none-eabi-gcc（F427 例程，见 §三-⑤ 与 [GCC构建指南](GCC构建指南.md)）** |
 | 26 | **可裁剪下限（实测）** | 约 6–10 KB Flash（最小配置，社区口径） | 内核约 3 KB + 组件按需 | 约 8–20 KB（视设备树与子系统） | **37.8 KB Flash / 28.3 KB RAM**（`config/minimal_noshell_defconfig`，F427 内核工程实测；含板级 HAL 7.4 KB、演示应用 1.1 KB，内核本体 RAM ≈ 18.9 KB）。默认档 234.6 KB / 118.9 KB。见 [功能开关](功能开关.md) §"量到的最小档" |
@@ -64,7 +64,7 @@
 | ① | 流缓冲 / 消息缓冲 | **已补（触发水位除外）** | `arkrtos_sbuf`（字节流，send 可部分成功）+ `arkrtos_mbuf`（4 字节长度头，整条原子；接收缓冲不足整条丢弃而不是留半条）。阻塞/超时、ISR 发送、句柄生命周期与 mq 同一套。宿主 11 组断言 + `ci_gate` 门禁已过；H743 GCC 开档实测 +7792 B FLASH / +1248 B RAM，**F427 演示工程开档链接溢出**（那个工程只剩 4.8 KB）。阻塞/唤醒路径**未上板验证**。见 [流缓冲与消息缓冲](流缓冲与消息缓冲.md) |
 | ② | 固定块内存池 | **已补** | `arkrtos_mempool`：固定块、零碎片、不依赖堆；错误口径为非法释放拒绝且不动池状态；shell `mpool` 自检 9/9 上板通过。**App/驱动侧通道已开**（SVC 0x20，池内存区在边界上校验必须落在调用者可见 RAM）。宿主 47 条断言 + `ci_gate` 门禁已过；默认档真实链接 +536 B FLASH（H743）/ +404 B（F427，98.32%）。**SVC 路径已上板（F427，2026-11-13）**：`MPOOL_DEMO.svcapp` 33 条用例全过，块地址落在 App 自己 RAM 内、六类非法创建全被拒；shell `mpool test` 9/9。见 [固定块内存池](固定块内存池.md) §七 |
 | ③ | 低功耗 / tickless | **已补（F427 上板实测）** | `ARKRTOS_USE_TICKLESS`（默认关）：idle 时取「延时链最近到期」与「软定时器最近到期」的较小值，夹到 `ARKRTOS_TICKLESS_MAX_TICKS`（默认 8 拍）后把 SysTick 编成长周期，醒来一次补齐跳过的节拍。相位由软件记住，余数进下一拍——连续 40 次非整拍提前唤醒后累计拍数仍等于「总计数/每拍计数」，这一条在宿主门禁里是等式。默认档体积与行为零变化（拍一档是死代码）。`tickless` 门禁 = 宿主 152 条断言 + ON 档 armclang 真编译（tickless.c / task.c / main.c）。F427 上板实测（2026-11-13）：`rt` 报 `isr=18605 sleeps=18682 skipped=48728 of 67333`，中断降到 **27.6%**（约 1/3.6），静置 20 s 节拍涨 40422 拍 = 20.2 s（不丢拍）；开档 +648 B Code / +68 RO / +24 RW / +8 ZI。**电流未测**。见 [低功耗与 tickless](低功耗与tickless.md) §8 |
-| ④ | 单元测试框架 | **已补** | 板端 `utest` 框架：用例自动注册、统一断言宏、上板 `utest run` 汇总（默认档 12 用例，F427 上板 12/12、169 条断言）；另有 `utest-host` 门禁用宿主 gcc 验框架记账。见 [单元测试框架](单元测试框架.md) |
+| ④ | 单元测试框架 | **已补** | 板端 `utest` 框架：用例自动注册、统一断言宏、上板 `utest run` 汇总（默认档 12 用例，F427 上板 12/12、190 条断言）；另有 `utest-host` 门禁用宿主 gcc 验框架记账。见 [单元测试框架](单元测试框架.md) |
 | ⑤ | GCC / Make 样例工程 | **已补** | F427 的内核工程已带 GNU Make 构建（`example/stm32f427/kernel/ARKRTOS_TEST/GCC`），`sources.mk` 由 `tools/gen_gcc_sources.py` 从 uvprojx 生成；工具链、用法与三个坑见 [GCC构建指南](GCC构建指南.md) |
 | ⑥ | 任务通知 | **定位差** | 不做，两条理由都是结构性的：①**语义是别家三种原语的合并体**——FreeRTOS 的 32 位通知同时充当二值/计数信号量、事件组和长度为 1 的队列，而这三样在 Ark 里分别是 `event`（单标志）与 `eset`（32 位位集，可选开关，可从 ISR set）、`sem`、`mq`，再加一套就是第 4 种语义重叠的 IPC；②**省不掉开销**。通知之所以在 FreeRTOS 上"轻"，是因为它把等待者直接挂在任务控制块上；Ark 的用户态等待是"调用方登记 → 派发方 peek(only_kernel) → 汇聚点派发"这一条路径（App 侧不能碰内核结构），通知仍要走同一条登记路径，只多出一份每任务 32 位状态字与一套 API，换不来任何指令数 |
 | ⑦ | SMP / 多核 | **仅骨架（不是多核支持）** | 调度器、就绪位图、延迟队列、对象表仍是**全局单核状态**，打开 `ARKRTOS_USE_SMP` 不会让两个核同时跑任务。骨架只补多核地基：每核状态表（`online`/`started`/`current_task_id`/`tick`/`ipi_count`/`idle_count`）、在线掩码、次核入口 `arkrtos_smp_secondary_main()`（未上线核只 WFI 空转）、IPI 通路（`arkrtos_smp_send_ipi()` + 弱符号收端）、`ARKRTOS_CPU_NUM` 1..8。`started`（启动请求被接受）与 `online`（核真在跑）分开记；单核 port 的 `arkrtos_port_cpu_start()` / `arkrtos_port_send_ipi()` **返回 -1 而不是假装成功**。默认关时体积与行为零变化（`Code=220290` 未变）。**验证档位=未验证（无多核板）**：宿主 44 条断言 + 5 文件 ON 档语法，无任何板级读数。真 SMP 要拆 per-CPU 就绪队列与逐核 MPU 上下文，属于另一件事，未做。见 [同步原语与令牌守恒](同步原语与令牌守恒.md) §5.10 |

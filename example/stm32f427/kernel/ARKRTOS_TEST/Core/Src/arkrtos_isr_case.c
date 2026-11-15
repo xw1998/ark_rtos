@@ -6,7 +6,10 @@
  *
  *            - mq_from_isr_contract   ：在 handler 里直接收发消息
  *            - eset_from_isr_contract ：在 handler 里 set 32 位事件集，
- *              唤醒一个**真的阻塞在等待队列上**的任务，并核对交班值
+ *              唤醒一个**真的阻塞在等待队列上**的任务，并核对交班值；
+ *              最后一段（D）在同一个 handler 里发 SVC 0x21 —— 就是 App 侧
+ *              arkrtos_eset_set_from_isr() 走到的那条 ABI —— 把「ISR 里发
+ *              系统调用」也变成板级读数（参数块位置的正反对照见 D 段注释）
  *
  *          为什么单独放在板级工程、不放进 kernelsrc：
  *          - 触发中断必须依赖具体芯片的 NVIC / EXTI，内核源码是板无关的；
@@ -25,6 +28,9 @@
  *             切换——handler 还没返回时它必须是 READY 而不是 RUNNING），
  *             交班值等于当时成立的那些位；OR|CLEAR 交出的位被清；
  *             AND 缺一位时不唤醒等待者；ISR 里 mask == 0 被拒且不动位图。
+ *          4. SVC-in-ISR：handler 里发的 SVC 0x21 返回 0 并真的把等待者
+ *             置 READY（不在异常里切换）；同一次 handler 里用内核栈上的
+ *             参数块再发一次必须被拒（-1）—— 证明参数窗口校验没被松开。
  *
  *          门控：ARKRTOS_USE_UTEST 为 1 且（MQ 或 ESET 至少一个为 1）才编入；
  *          两条用例各自再按自己的模块开关裁剪，缺功能的构建不会因为缺符号
@@ -46,6 +52,9 @@
 #include "arkrtos_sync.h"
 #include "arkrtos_task.h"
 #include "arkrtos_cfg.h"   /* arkrtos_task_table[] 的外部声明在这里 */
+#include "arkrtos_svc_call.h"    /* ARKRTOS_SVC_DECL_1：AC5 用 __svc(n) 内建 */
+#include "arkrtos_svc_abi.h"     /* ARKRTOS_ESET_SUB_SET 等子命令号 */
+#include "arkrtos_partition.h"   /* SHARE_RAM_BASE / SHARE_RAM_SIZE / CRASH_LOG_SIZE */
 #endif
 
 #if (ARKRTOS_USE_UTEST == 1) && ((ARKRTOS_USE_MQ == 1) || (ARKRTOS_USE_ESET == 1))
@@ -106,6 +115,43 @@ static uint32 s_isr_eset_wait_opt;                   /* 等待者的 OR/AND/CLEA
 static int32 s_isr_eset       = -1;
 static int32 s_isr_eset_done  = -1;   /* 等待者退场信号（计数信号量） */
 static int32 s_isr_eset_waiter = -1;  /* 等待者的任务 id，handler 用它取状态 */
+
+/* ------------------------------------------------------------------
+ * 真 SVC-in-ISR：在 handler 里发 SVC 0x21（App 侧
+ * arkrtos_eset_set_from_isr() 走的同一条 ABI：一条 SVC 指令 + 24 字节参数块）。
+ *
+ * ★ 硬前置：SVC(SVCall) 的优先级必须**高于**本中断，否则在 handler 里发
+ *   SVC 会被升级成 HardFault（SVC 不得以同级或更高优先级发出）。
+ *   arkrtos_port_irq_init() 给 SVCall 的是 0x01，本用例把 EXTI0 设成
+ *   逻辑优先级 4 —— 写进 NVIC->IP 就是 0x40（SVCall 是 0x10）。
+ *   注意 CMSIS 的坑：NVIC_SetPriority() 收的是“逻辑档位”（0x00..0x0F，
+ *   4 位实现），不是 IP 寄存器里的字节。直接传 0x40 会被
+ *   (0x40 << 4) & 0xFF 截成 0x00 —— 那等于把 EXTI0 提到最高优先级，
+ *   比 SVC 还高，正是本用例要避开的那一侧。
+ *
+ * ★ 参数块位置：svc_eset_ctrl() 先用 arkrtos_kernel_svc_args_ok() 校验
+ *   24 字节参数块是否落在“用户可见 RAM”（SHARE_RAM / SLOT_RAM）窗口里。
+ *   内核栈不在窗口内，所以这里用共享 RAM 的自由区放参数块；同一个
+ *   handler 里再用内核栈上的参数块发一次，作为“窗口校验不是假绿”的对照。
+ *   共享 RAM 的已知消费者只有开头的分区表与尾部 512 B 崩溃日志，
+ *   偏移 0x800 处的 24 字节无人使用（下面有编译期与运行期各一道边界检查）。
+ * ------------------------------------------------------------------ */
+#define ISR_SVC_ARGS_OFFSET   0x800u
+#define ISR_SVC_ARGS_WORDS    6u
+#define ISR_SVC_ARGS_ADDR     (SHARE_RAM_BASE + ISR_SVC_ARGS_OFFSET)
+
+/* EXTI0 的优先级：逻辑档位 4 → NVIC->IP 里的 0x40（SVCall 是 0x10） */
+#define ISR_EXTI0_PRIO_LEVEL  0x04u
+#define ISR_EXTI0_IP_REG      ((uint32)(ISR_EXTI0_PRIO_LEVEL << (8u - __NVIC_PRIO_BITS)))
+
+#if ((ISR_SVC_ARGS_OFFSET + (ISR_SVC_ARGS_WORDS * 4u)) > (SHARE_RAM_SIZE - CRASH_LOG_SIZE))
+#error "ISR SVC argument block would overlap the crash journal"
+#endif
+
+ARKRTOS_SVC_DECL_1(int32, ARKRTOS_SVC_ESET_CTRL, isr_svc_eset_ctrl, uint32 *);
+
+static volatile int32 s_isr_eset_svc_ret        = -99;  /* 共享 RAM 参数块的返回 */
+static volatile int32 s_isr_eset_svc_ret_kstack = -99;  /* 内核栈参数块的返回（期望 -1） */
 
 /* 等待者：睡在事件集上，拿到交班值后记下来、通知控制台、退场 */
 static void isr_eset_waiter_entry(void)
@@ -170,6 +216,38 @@ void EXTI0_IRQHandler(void)
          * "在中断里"就放松校验（返回 -1，位图一位不动）。 */
         s_isr_eset_set_ret_zero = arkrtos_eset_set_internal(s_isr_eset, 0u);
     }
+
+    if(s_isr_mode == 3u)
+    {
+        volatile uint32 *p_share = (volatile uint32 *)(uint32)ISR_SVC_ARGS_ADDR;
+        uint32 kp[3];
+        uint32 k;
+
+        /* 1) 参数块在共享 RAM（用户可见窗口）：SVC 必须真的走到内核并成功 */
+        p_share[0] = (uint32)ARKRTOS_ESET_SUB_SET;
+        p_share[1] = (uint32)s_isr_eset;
+        p_share[2] = s_isr_eset_isr_mask;
+        for(k = 3u; k < ISR_SVC_ARGS_WORDS; k++)
+        {
+            p_share[k] = 0u;
+        }
+        s_isr_eset_svc_ret = isr_svc_eset_ctrl((uint32 *)p_share);
+
+        /* SVC 里也只置 READY：异常还没返回，不能在这里切到等待者 */
+        if((s_isr_eset_isr_mask != 0u) && (s_isr_eset_waiter > 0))
+        {
+            s_isr_eset_waiter_state =
+                (uint32)arkrtos_task_table[s_isr_eset_waiter - 1].status;
+        }
+
+        /* 2) 对照：参数块在内核栈（不在 SHARE_RAM / SLOT_RAM 窗口里），
+         *    必须被拒。用 BIT3 试探——若窗口校验是假绿，BIT3 会留在位图上，
+         *    后面的 flags 断言就能抓住。 */
+        kp[0] = (uint32)ARKRTOS_ESET_SUB_SET;
+        kp[1] = (uint32)s_isr_eset;
+        kp[2] = ISR_ESET_BIT3;
+        s_isr_eset_svc_ret_kstack = isr_svc_eset_ctrl(kp);
+    }
 #endif /* ARKRTOS_USE_ESET */
 
     s_isr_hits++;
@@ -190,10 +268,18 @@ static void isr_test_arm(void)
 #endif
 
 #if (ARKRTOS_USE_ESET == 1)
-    s_isr_eset_set_ret      = -99;
-    s_isr_eset_set_ret_zero = -99;
-    s_isr_eset_waiter_state = 0xFFFFFFFFu;
+    s_isr_eset_set_ret        = -99;
+    s_isr_eset_set_ret_zero   = -99;
+    s_isr_eset_waiter_state   = 0xFFFFFFFFu;
+    s_isr_eset_svc_ret        = -99;
+    s_isr_eset_svc_ret_kstack = -99;
 #endif
+
+    /* SVC 的优先级是 0x01（arkrtos_port_irq_init 设的），必须比本中断高：
+     * 这里把 EXTI0 压到逻辑优先级 4（IP 寄存器值 0x40 > SVCall 的 0x10）。
+     * 论据见文件里「真 SVC-in-ISR」那段的注释：这里传的是逻辑档位，
+     * 不是 IP 字节（传 0x40 会被截成 0x00，反而比 SVC 高）。 */
+    NVIC_SetPriority(EXTI0_IRQn, ISR_EXTI0_PRIO_LEVEL);
 
     EXTI->IMR |= 0x1u;                          /* 打开 line0 中断屏蔽 */
     NVIC_ClearPendingIRQ(EXTI0_IRQn);
@@ -458,6 +544,42 @@ UTEST_CASE(eset_from_isr_contract)
     UTEST_CHECK_EQ(s_isr_eset_set_ret_zero, ARKRTOS_ESET_ERR_PARAM);  /* 同一次 handler 里再试一次，一样被拒 */
     UTEST_CHECK_EQ(arkrtos_eset_get_internal(s_isr_eset, &flags), 0);
     UTEST_CHECK_EQ(flags, ISR_ESET_BIT1 | ISR_ESET_BIT2 | ISR_ESET_BIT3);
+
+    /* ---- D) 真 SVC-in-ISR：handler 里发 SVC 0x21（App 侧 _from_isr 的同一条 ABI） ---- */
+    UTEST_CHECK_EQ(NVIC_GetPriority(EXTI0_IRQn), ISR_EXTI0_PRIO_LEVEL);
+    UTEST_CHECK_EQ((uint32)NVIC->IP[EXTI0_IRQn], ISR_EXTI0_IP_REG);   /* 寄存器里就是 0x40 */
+    /* 真正的硬前置：数值更大 = 优先级更低。写反了就变成 HardFault 那一侧 */
+    UTEST_CHECK(NVIC_GetPriority(EXTI0_IRQn) > NVIC_GetPriority(SVCall_IRQn));
+    /* 参数块位置自检：在共享 RAM 窗口内、且不碰尾部崩溃日志区 */
+    UTEST_CHECK(ISR_SVC_ARGS_ADDR >= SHARE_RAM_BASE);
+    UTEST_CHECK((ISR_SVC_ARGS_ADDR + (ISR_SVC_ARGS_WORDS * 4u)) <=
+                (SHARE_RAM_BASE + SHARE_RAM_SIZE - CRASH_LOG_SIZE));
+
+    /* 从干净的位图开始：前面几段留下的位会让下面的 flags 断言失去分辨力 */
+    UTEST_CHECK_EQ(arkrtos_eset_clear_internal(s_isr_eset, 0xFFFFFFFFu), 0);
+    UTEST_CHECK_EQ(arkrtos_eset_get_internal(s_isr_eset, &flags), 0);
+    UTEST_CHECK_EQ(flags, 0u);
+
+    UTEST_REQUIRE(isr_eset_start_waiter(ISR_ESET_BIT0 | ISR_ESET_BIT2,
+                                        ARKRTOS_ESET_OPT_OR | ARKRTOS_ESET_OPT_CLEAR) > 0);
+    arkrtos_task_wait_internal(2u);
+    UTEST_CHECK_EQ(arkrtos_task_table[s_isr_eset_waiter - 1].status, ARKRTOS_TASK_WAIT);
+
+    isr_test_arm();
+    s_isr_mode          = 3u;
+    s_isr_eset_isr_mask = ISR_ESET_BIT0 | ISR_ESET_BIT2;
+    UTEST_CHECK_NE(isr_test_fire(), 0u);
+    UTEST_CHECK_EQ(s_isr_hits, 1u);
+    UTEST_CHECK_EQ(s_isr_in_handler, 1u);                  /* SVC 发自真 handler */
+    UTEST_CHECK_EQ(s_isr_eset_svc_ret, 0);                 /* 共享 RAM 参数块：SVC 成功 */
+    UTEST_CHECK_EQ(s_isr_eset_svc_ret_kstack, ARKRTOS_ESET_ERR_PARAM);  /* 内核栈参数块：被拒 */
+    UTEST_CHECK_EQ(s_isr_eset_waiter_state, (uint32)ARKRTOS_TASK_READY);/* SVC 里只置 READY */
+
+    UTEST_CHECK_EQ(arkrtos_sem_wait_internal(s_isr_eset_done, 500), 0);
+    UTEST_CHECK_EQ(s_isr_eset_wait_rc, 0);
+    UTEST_CHECK_EQ(s_isr_eset_wait_got, ISR_ESET_BIT0 | ISR_ESET_BIT2);
+    UTEST_CHECK_EQ(arkrtos_eset_get_internal(s_isr_eset, &flags), 0);
+    UTEST_CHECK_EQ(flags, 0u);   /* CLEAR 交出的位被清，被拒的 BIT3 也没落下 */
 
     /* ---- 收尾：关中断源、删对象；删掉之后句柄不许再被当成活对象 ---- */
     isr_test_disarm();
