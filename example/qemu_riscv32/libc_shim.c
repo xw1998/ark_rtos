@@ -474,3 +474,168 @@ int snprintf(char *buf, unsigned int cap, const char *fmt, ...)
 
     return n;
 }
+
+/* ============================================================
+ * 字符串函数补件：littlefs 用到 strspn / strcspn
+ * @details lfs_dir_find() 用它把路径按 "/" 切成段。语义按 C 标准：
+ *          strspn 返回 s 开头「全部属于 accept」的最长长度，
+ *          strcspn 返回「不含 reject 任何字符」的最长长度。
+ * ============================================================ */
+
+unsigned int strspn(const char *s, const char *accept)
+{
+    unsigned int n = 0u;
+
+    while(s[n] != '\0')
+    {
+        const char *a = accept;
+
+        while((*a != '\0') && (*a != s[n]))
+        {
+            a++;
+        }
+
+        if(*a == '\0')
+        {
+            break;
+        }
+        n++;
+    }
+
+    return n;
+}
+
+unsigned int strcspn(const char *s, const char *reject)
+{
+    unsigned int n = 0u;
+
+    while(s[n] != '\0')
+    {
+        const char *r = reject;
+
+        while((*r != '\0') && (*r != s[n]))
+        {
+            r++;
+        }
+
+        if(*r != '\0')
+        {
+            break;
+        }
+        n++;
+    }
+
+    return n;
+}
+
+/* ============================================================
+ * libgcc 内置函数补件
+ * @details 全程 -nostdlib，没有 libgcc；而 GCC 会把
+ *          __builtin_bswap32 / __builtin_popcount / __builtin_clz /
+ *          __builtin_ctz 打桩成对 libgcc 的调用（littlefs 的
+ *          lfs_frombe32 / lfs_popc / lfs_npw2 / lfs_ctz 都是这样）。
+ *          这里给出同名实现，语义与 libgcc 一致：
+ *            - __clzsi2(0) 返回 32（未定义行为在 libgcc 里就是这个值）
+ *            - __ctzsi2(0) 返回 32（同上）
+ *          名字是 ABI 名字，不能改；它们不是给人直接调用的。
+ * ============================================================ */
+
+unsigned int __bswapsi2(unsigned int v)
+{
+    return ((v & 0x000000FFu) << 24) |
+           ((v & 0x0000FF00u) << 8)  |
+           ((v & 0x00FF0000u) >> 8)  |
+           ((v & 0xFF000000u) >> 24);
+}
+
+int __popcountsi2(unsigned int v)
+{
+    int n = 0;
+
+    while(v != 0u)
+    {
+        v &= (v - 1u);
+        n++;
+    }
+
+    return n;
+}
+
+int __clzsi2(unsigned int v)
+{
+    int n = 0;
+    unsigned int m = 0x80000000u;
+
+    while((n < 32) && ((v & m) == 0u))
+    {
+        m >>= 1;
+        n++;
+    }
+
+    return n;
+}
+
+int __ctzsi2(unsigned int v)
+{
+    int n = 0;
+    unsigned int m = 0x00000001u;
+
+    while((n < 32) && ((v & m) == 0u))
+    {
+        m <<= 1;
+        n++;
+    }
+
+    return n;
+}
+
+/* ============================================================
+ * strrchr / strpbrk
+ * @details Shell 引入的两个补件：arkrtos_shell.c 的 path_basename() 与
+ *          vfs_complete() 用 strrchr 找最后一个 '/'（不要用 strchr 拼，
+ *          两者对"路径里有多级"给出完全不同的答案）；ark_shell_eval.c 的
+ *          glob_can() 用 strpbrk 判断一行里有没有通配符/重定向字符。
+ *          语义按 C 标准：strrchr 返回最后一次出现的位置（含 '\0' 本身），
+ *          strpbrk 返回第一个属于 accept 的字符位置，都没有返回 0。
+ * ============================================================ */
+
+char *strrchr(const char *s, int c)
+{
+    char ch = (char)c;
+    const char *last = 0;
+
+    for(;;)
+    {
+        if(*s == ch)
+        {
+            last = s;
+        }
+        if(*s == '\0')
+        {
+            break;
+        }
+        s++;
+    }
+
+    return (char *)last;
+}
+
+char *strpbrk(const char *s, const char *accept)
+{
+    while(*s != '\0')
+    {
+        const char *a = accept;
+
+        while(*a != '\0')
+        {
+            if(*a == *s)
+            {
+                return (char *)s;
+            }
+            a++;
+        }
+        s++;
+    }
+
+    return 0;
+}

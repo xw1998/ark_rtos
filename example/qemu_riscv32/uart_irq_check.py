@@ -15,8 +15,14 @@
 
 判据（任一不满足即 FAIL，退出码非 0）：
   1. 启动横幅里出现 "[boot] uart irq on"；
-  2. 发送 b"hello\\n" 之后，回显行里出现 "[R] wake=" 且 "-> hello"；
-  3. 回显行里的 isr= / rx= 都 > 0（证明走的是中断，不是轮询）；
+  2. 发送 b"hello\\n" 之后出现 "[R] wake=" 行，且 isr= / rx= 都 > 0
+     —— 这一条证明字节走的是中断（ISR 累加计数），不是轮询；
+  3. payload 落到哪里，按编译档位分别判：
+       - shell=0（控制台归示例的接收任务）：回显行里必须出现 "-> hello"；
+       - shell=1（控制台归内核 Shell，同一个 FIFO 只能有一个读者）：
+         必须能看到 shell 对这个 payload 的响应（"hello" 被回显并被执行，
+         结果是 "command not found"）。此时"-> hello" 不可能出现，因为
+         接收任务按设计**不取字节**（见 main.c 的 task_rx）。
   4. 全程没有 "UNEXPECTED" / "FATAL"。
 """
 
@@ -144,9 +150,17 @@ def main():
         if not echo_lines:
             return fail("没有收到任何 [R] 回显行（中断没有把字节送到任务）", log)
 
-        has_payload = any("-> hello" in ln for ln in echo_lines)
-        if not has_payload:
-            return fail("回显行里没有 '-> hello'（字节收到了但内容不对）\n" + "\n".join(echo_lines), log)
+        # 控制台由谁读，决定了 payload 该出现在哪：shell=0 时是本示例的
+        # 接收任务（边收边回显），shell=1 时是内核 Shell（响应成一条命令）。
+        shell_on = " shell=0" not in log and "shell=" in log
+
+        if shell_on:
+            if "hello" not in log or "command not found" not in log:
+                return fail("shell 没把 payload 当成一条命令执行（字节没到 shell）", log)
+        else:
+            has_payload = any("-> hello" in ln for ln in echo_lines)
+            if not has_payload:
+                return fail("回显行里没有 '-> hello'（字节收到了但内容不对）\n" + "\n".join(echo_lines), log)
 
         ok_isr = False
         for ln in echo_lines:

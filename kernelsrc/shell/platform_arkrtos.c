@@ -29,6 +29,12 @@
 #include "arkrtos_task.h"
 #include "arkrtos_partition.h"      /* SHELL_DEV_NAME / SHELL_DEV_ARG */
 
+/* 复位入口归本地化时，特权制应用本机没有 AIRCR 这个寄存器；此时由板级提供
+ * arkrtos_board_reboot()，并由板级配置定义 ARKRTOS_PLATFORM_REBOOT_PORT。 */
+#if defined(ARKRTOS_PLATFORM_REBOOT_PORT)
+#include "arkrtos_board.h"
+#endif
+
 /* 发送忙等上限：中断发送在 TxFIFO 满时写不进去，等一小会儿再试。
  * 上限只用于防止串口彻底卡死时死循环，不是流量控制。 */
 #define SHELL_TX_SPIN_LIMIT    (200000u)
@@ -258,10 +264,17 @@ void platform_cleanup(void)
 
 void platform_reboot(void)
 {
+#if defined(ARKRTOS_PLATFORM_REBOOT_PORT)
+    /* 本平台没有 Cortex-M 的 AIRCR：0xE000ED0C 在 RV32/LA64 上没有映射，
+     * 写它只会得到一个 store fault，而不是复位。
+     * 所以复位交给板级实现（QEMU virt 上是 sifive_test 写 0x7777）。 */
+    arkrtos_board_reboot();
+#else
     /* Cortex-M 系统复位请求：AIRCR 写 VECTKEY(0x05FA) | SYSRESETREQ。
      * 无需关中断：复位控制器不看 PRIMASK，请求一旦写入即生效。
      * 这里不用内联汇编也不用 CMSIS，使本文件在 AC5 / AC6 / GCC 下都能编译。 */
     *(volatile uint32 *)SHELL_AIRCR_ADDR = SHELL_AIRCR_SYSRESET;
+#endif
 
     /* 正常情况下核心应在数微秒内复位，执行不到这里；真到了就自旋等着 */
     for(;;)

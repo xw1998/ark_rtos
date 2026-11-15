@@ -508,6 +508,47 @@ ISR 没把源摘干净（比如 IIR 里还有待读字节），claim 会一直�
    （实测 `[A] [R] wake=1 ... -> hello.`），按行首匹配永远找不到。
    改成 `log.find("[R] ")` 子串切到行尾。
 
+### 3.12 软件功能全开（进行中：存储栈已实跑通过，随机抢占故障未关闭）
+
+目标是把 RV32 从「port 层最小验证」推到与 ARM 板级同档的**全功能**：块设备 + FS + VFS
++ procfs + 日志 + 内核 Shell + 设备树。配置（`board/qemu_riscv32/arkrtos_board_config.h`）：
+`USE_BLK/USE_FS/USE_VFS/USE_VFS_LFS/USE_PROCFS=1`、`ARKRTOS_USE_LOG=1`、
+`ARKRTOS_USE_LOG_RING=1`、`ARKRTOS_PLATFORM_REBOOT_PORT=1`；`USE_SHELL` 在做存储链路诊断时
+临时置 0，收尾必须还原 1。
+
+板级新增：`drvblk.c`（RAM-NOR 512 KB，擦除粒度 4 KB，**写前必须为 0xFF 否则拒写**并计
+`rejected`）、`drvuart.c`（`SHELL_ENABLE` 前后两套设备 ops + 桩）、`arkrtos_dt.c` +
+`dts/qemu_riscv32.dts`（dtc_lite 生成的 9 节点）。
+
+**已实跑通过（无故障运行里，`[FS]` 段是 QEMU 实跑证据）**：`ram0` format/mount/写/读
+逐字节比对一致、`ls` 出 `hello.txt`、`/proc/version` 可读、不擦除覆写被拒
+（`rejected=1`）、计数器段 `written=1024 erases=2`；D-2 的 U 模式 PMP 负对照仍在
+（3× `mcause=5 mtval=0x02000000`、1× `mcause=2 mtval=0x30046073`，`from=U task=3`）。
+尺寸：text 170376 / data 112 / bss 580624 / dec 751112。
+
+**未关闭缺陷（必须如实标注：同一镜像的 FS 段会随机失败，`from=M`，不是 U 模式越权）**：
+约 2/8~5/8 的启动里 `[FS] format rc=-1 last_error=-1004`，故障点为
+`mcause=5 mtval=0x00000004 mepc=0x80011008 from=M task=5`，`addr2line` 落在
+`lfs.c:1620`（`lfs_dir_commitattr` 的 from-disk 分支，编译器把 `disk->block/off` 的
+load 提出循环 ⇒ 即使 size=0 也会解引用 `buffer=NULL`）。触发条件实测为
+「FS 任务被切走」（持调度锁时不复现）。已排除项与手法见下表，结论是**根因未定**，
+不得把这轮读数当成「存储栈已验证通过」。
+
+| 已排除的假说 | 做法 | 读数 |
+|---|---|---|
+| FS 任务自身栈溢出 | `FS_STACK_WORDS` 1024→4096 字 | 8 次仍 2/8 故障 |
+| Shell 并发 | `ARKRTOS_USE_SHELL=0` | 仍复现 |
+| 中断保存/恢复丢寄存器 | 逐条核对 `trap_entry` 31 个寄存器对称 | 对称、无缺 |
+| `lfs_dir_traverse` 显式栈越界 | 零打印计数器 | `maxsp=0 oob=0 popoob=0`（从未 push） |
+| 相邻任务栈向下越界写坏 FS 栈顶 | `s_stack_rx` 2 KB→4 KB（`nm` 显示它紧贴 `s_stack_fs` 之上，被破坏的 `attrs` 在 `s_stack_fs+3432`） | **5/8 仍故障，同一指令同一 mtval** ⇒ 不成立 |
+
+**Heisenbug 纪律（本轮最大教训）**：任何在 `lfs.c` / `main.c` 里加打印或加 `if` 都会让
+故障消失（-O0 全量构建 3/3 PASS、加计数器 5/5 PASS、gdb 下 PASS）。因此诊断只能走
+**不改变时序**的手段：`nm`/`addr2line` 静态分析、故障路径事后 dump 全局、调度锁/关中断
+对照，禁止「加打印再看一次」。下一个方向：`attrs` 位于 `s_stack_fs+3432`，即帧内较浅
+的位置，而写坏它的必须是**向高地址方向的越界写**（栈向低增长）或 **sp 恢复到 attrs
+之上**的路径，需在 `arkrtos_sched_activate` 的 `stack_peak/bottom` 与 trap 帧摆放上继续查。
+
 ## 4. 已知限制（明确不覆盖的部分）
 
 | 限制 | 影响 | 原因 |

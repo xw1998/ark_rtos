@@ -77,6 +77,11 @@
 #define ARKRTOS_PORT_PLIC_BASE       0x0C000000u
 #define ARKRTOS_QEMU_UART_IRQ        10u
 
+/* 复位不由内核的 Cortex-M 实现接管：0xE000ED0C 在 RV32 上没有映射，
+ * 写它只会得到 store fault。定义这个宏会让平台层改调板级的
+ * arkrtos_board_reboot()（sifive_test 写 0x7777）。 */
+#define ARKRTOS_PLATFORM_REBOOT_PORT 1
+
 /* ============================================================
  * 三·B、U 模式任务可用的外设窗（MPU / PMP 用的那一份）
  * @details 只开控制台 UART 的 4 KB 读写。理由：U 模式任务要能**自己**
@@ -120,24 +125,32 @@
  * 五、功能裁剪（把需要真实硬件 / 需要 libc 格式化的模块全部关掉）
  * ============================================================ */
 
-/* 日志走设备框架 + snprintf，bring-up 阶段没有设备框架，关掉。
- * 关掉后 ARKRTOS_LOGE/W/I/D 整体展开为空语句，格式化代码不进二进制。 */
+/* 日志走设备框架（SHELL_DEV_NAME）+ snprintf。设备框架在本板已经起来
+ * （drvuart.c 把 16550 注册成 ttyS0），格式化由 example/qemu_riscv32/
+ * libc_shim.c 的 vsnprintf 提供，所以这一层可以真开而不是留桩。
+ * LOG_RING 保留最近 4 KB 日志行，供 shell 的 dmesg 回看。 */
 #undef  ARKRTOS_USE_LOG
-#define ARKRTOS_USE_LOG              0
+#define ARKRTOS_USE_LOG              1
 #undef  ARKRTOS_USE_LOG_RING
-#define ARKRTOS_USE_LOG_RING         0
+#define ARKRTOS_USE_LOG_RING         1
 
-/* 存储栈：QEMU 上没有 NOR / eMMC，也没有镜像池可写 */
+/* 存储栈：QEMU virt 没有 Flash 控制器、没有 SPI NOR，也没有 eMMC。
+ * 但文件系统 / VFS / 安装链路属于「全功能」里必须验证的那一层，缺了它
+ * 只能证明调度器会跑。所以本板带一块 RAM 模拟的 NOR 语义块设备 ram0
+ * （见 board/qemu_riscv32/drvblk.c：擦除单位 4 KB、擦完全 0xFF、写只能
+ * 落在已擦除字节），把 blk 以上的整条软件栈真的跑起来。
+ * 诚实边界：**介质本身**（编程时序、忙等待、掉电中间态）没有验证，
+ * 那是 drvnor.c / drvflash.c 的事，这里一行都用不上。 */
 #undef  ARKRTOS_USE_BLK
-#define ARKRTOS_USE_BLK              0
+#define ARKRTOS_USE_BLK              1
 #undef  ARKRTOS_USE_FS
-#define ARKRTOS_USE_FS               0
+#define ARKRTOS_USE_FS               1
 #undef  ARKRTOS_USE_VFS
-#define ARKRTOS_USE_VFS              0
+#define ARKRTOS_USE_VFS              1
 #undef  ARKRTOS_USE_VFS_LFS
-#define ARKRTOS_USE_VFS_LFS          0
+#define ARKRTOS_USE_VFS_LFS          1
 #undef  ARKRTOS_USE_PROCFS
-#define ARKRTOS_USE_PROCFS           0
+#define ARKRTOS_USE_PROCFS           1
 
 /* 动态装载 / MiniApp / POSIX / 网络：都不是这次要验证的东西 */
 #undef  ARKRTOS_USE_MINIAPP
@@ -148,6 +161,10 @@
 #define ARKRTOS_USE_LWIP             0
 #undef  ARKRTOS_USE_SOFTBUS
 #define ARKRTOS_USE_SOFTBUS          0
+/* 内核 Shell 控制台：任务优先级/栈/周期都取 config/arkrtos_partition.h 的
+ * SHELL_TASK_*（14 / 3 KB / 2 ms），设备名取 SHELL_DEV_NAME（ttyS0），
+ * 打开动作在 arkrtos_shell_task 里由 platform_uart_init() 完成 —— 因此
+ * 板级必须先把这个名字注册进设备框架（board/qemu_riscv32/drvuart.c）。 */
 #undef  ARKRTOS_USE_SHELL
 #define ARKRTOS_USE_SHELL            0
 #undef  ARKRTOS_USE_APPPACK

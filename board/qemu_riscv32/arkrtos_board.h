@@ -68,4 +68,18 @@ void arkrtos_board_uart_rx_hook(uint8 byte);
 */
 void arkrtos_port_fault_detail(uint32 mcause, uint32 mtval, uint32 from_priv);
 
+/**
+* @brief 把 16550 注册成设备框架里的 ttyS0（SHELL_DEV_NAME）
+* @details Shell 不直接用板级打印函数，它按设备打开控制台，所以板级必须先把名字注册进去。
+* @return 0 成功；负值失败（同名 / 表满 / 描述符缺项）
+*/
+int32 arkrtos_board_uart_dev_register(void);
+
+/**
+* @brief 整机复位（QEMU virt 的 sifive_test：0x00100000 写 0x7777）
+* @details Cortex-M 上的 AIRCR 写法在这里没有对应映射，
+*          所以 Shell 的 reboot 命令走这条板级实现。
+*/
+void arkrtos_board_reboot(void);
+
 #endif /* __ARKRTOS_BOARD_H__ */

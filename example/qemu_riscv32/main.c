@@ -33,16 +33,28 @@
 #include "arkrtos_config.h"
 #include "arkrtos.h"
 #include "arkrtos_board.h"
+#include "arkrtos_blk.h"
+#include "arkrtos_fs.h"
+#include "arkrtos_vfs.h"
+#include "arkrtos_shell.h"     /* arkrtos_shell_init()：内核 Shell 控制台 */
+#include "drvblk.h"
 
 /* 任务栈：RISC-V 没有硬件压栈，只有软件帧，512 字（2 KB）很宽裕。
  * 栈必须是静态的（QEMU 上也没有堆分配器可用）。 */
 #define TASK_STACK_WORDS     512u
 #define IDLE_STACK_WORDS     256u
+#define FS_STACK_WORDS       1024u   /* 存储链路实测最深的栈（见 s_stack_fs） */
 
 static uint32 s_stack_a[TASK_STACK_WORDS];
 static uint32 s_stack_b[TASK_STACK_WORDS];
 static uint32 s_stack_u[TASK_STACK_WORDS];
 static uint32 s_stack_rx[TASK_STACK_WORDS];
+/* 存储任务单独给 4 KB：littlefs + VFS + 日志格式化这条链是本示例里
+ * 最深的调用栈 —— 2 KB 时 shell `stack` 命令实测峰值就已到 1408/2048
+ * （68%），而写文件/挂载的瞬时峰值比这个观测点还深。栈不够的后果不是
+ * "变慢"，是回到别处的一个随机指针（本轮就抓到过一次 memcpy 从 0x100
+ * 读的事故），所以这里按实测留一倍余量，不按"看起来够"留。 */
+static uint32 s_stack_fs[FS_STACK_WORDS];
 static uint32 s_idle_stack[IDLE_STACK_WORDS];
 
 static int32 s_sem = -1;
@@ -154,6 +166,10 @@ static void task_b(void)
  * ============================================================ */
 static volatile uint32 s_rx_wakes = 0u;
 
+/* 唤醒报告的上次打印时刻（ms）。只用于给"控制台归 shell"模式节流，
+ * 免得每敲一个字符就插一行，把交互界面糊满。 */
+static uint32 s_rx_report_ms = 0u;
+
 /**
 * @brief 串口接收钩子（在中断里执行）
 * @details 只做一件事：post 信号量。这里刻意**不**直接调用调度器的切换
@@ -172,13 +188,44 @@ static void task_rx(void)
     {
         if(arkrtos_sem_wait_internal(s_sem_uart, -1) == 0)
         {
+            s_rx_wakes++;
+
+#if (SHELL_ENABLE == 1)
+            /* 有 shell 时，控制台归 shell 独占：同一个 16550 RX 环形缓冲只能
+             * 有一个读者，本任务再去 read 会把用户刚敲的命令字节吃掉（实测
+             * 表现为"提示符在、输入没反应"）。所以这里只把"ISR 里 post 的
+             * 信号量真的把阻塞任务唤醒了"这件事打出来 —— 这仍然是中断链路
+             * 的证据，而且是逐字节的（rx= 由 ISR 累加）。
+             *
+             * 但**每条命令都打一行会把交互界面糊满**（每敲一个字符唤醒一次），
+             * 所以这里按 1 s 节流：唤醒次数是累计值，报告频率与打字速度无关。
+             * 判据仍然是"这一行出现过、且 isr/rx 非零"。 */
+            {
+                uint32 now = arkrtos_kernel_get_time();
+
+                if((now - s_rx_report_ms) < 1000u)
+                {
+                    continue;
+                }
+                s_rx_report_ms = now;
+            }
+
+            arkrtos_board_puts("[R] wake=");
+            arkrtos_board_putu(s_rx_wakes);
+            arkrtos_board_puts(" isr=");
+            arkrtos_board_putu(arkrtos_board_uart_isr_count());
+            arkrtos_board_puts(" rx=");
+            arkrtos_board_putu(arkrtos_board_uart_rx_bytes());
+            arkrtos_board_puts(" drop=");
+            arkrtos_board_putu(arkrtos_board_uart_rx_dropped());
+            arkrtos_board_puts(" (console owned by shell)\n");
+#else
             uint8 buf[32];
             uint32 n;
             uint32 i;
 
-            s_rx_wakes++;
-
-            /* 一次可能收到多个字节（FIFO/粘贴），全部取完再打印 */
+            /* 没有 shell：本任务独占控制台 RX，边收边回显（D-2 的证据）。
+             * 一次可能收到多个字节（FIFO/粘贴），全部取完再打印。 */
             for(;;)
             {
                 n = arkrtos_board_uart_rx_read(buf, (uint32)sizeof(buf));
@@ -212,6 +259,7 @@ static void task_rx(void)
                 }
                 arkrtos_board_puts("\n");
             }
+#endif /* SHELL_ENABLE */
         }
     }
 }
@@ -304,6 +352,218 @@ static void task_u(void)
     }
 }
 
+/* ============================================================
+ * 任务 D：存储栈自检（块设备 → littlefs → VFS → procfs）
+ * @details 这一条链路是「全功能」考题里最容易被跳过的一段：不做它，示例里
+ *          只剩调度器与两个同步原语，“文件系统能挂载、能读写、路径能解析”
+ *          全都只是文档上的话。四道读数：
+*
+*          1) 块设备：ram0 注册成功且能起得来（见 board/qemu_riscv32/drvblk.c）；
+*          2) littlefs：format 一个 512 KB 的卷，再 mount 上去（挂载不格式化，
+*             所以必须先 format，这是它自己的契约）；
+*          3) VFS：把同一个卷挂到 /mnt/ram，按路径写一个文件再读回来逐字节对比；
+*          4) procfs：读 /proc/version，证明 VFS 的另一个驱动也在岗。
+*
+*          另加一条**负对照**：对已经写过的偏移再写一次（不擦），块设备必须
+*          回 -1。这是 NOR 语义“只能 1→0”的现场证据，也是“写成功”这个读数
+*          唯一能证明自己不是空转的地方。
+*
+* @note 本任务跑一次就阻塞到底。它必须在内核模块初始化之后（VFS 与文件系统
+*       的模块状态在那里建），且在调度启动之后（它要用信号量/延时以外的
+*       普通阻塞——这里用 arkrtos_task_wait）。
+ * ============================================================ */
+static volatile uint32 s_fs_ok = 0u;
+
+static int fs_list_cb(const char *name, const arkrtos_vfs_stat_t *st, void *arg)
+{
+    (void)arg;
+
+    arkrtos_board_puts("  ");
+    arkrtos_board_puts(name);
+    arkrtos_board_puts(((st != 0) &&
+                       ((st->mode & ARKRTOS_VFS_S_IFMT) == ARKRTOS_VFS_S_IFDIR)) ? "/" : "");
+    arkrtos_board_puts(" size=");
+    arkrtos_board_putu((st != 0) ? (uint32)st->size : 0u);
+    arkrtos_board_puts("\n");
+
+    return 0;
+}
+
+static void task_fs(void)
+{
+    const arkrtos_blk_dev_t *dev;
+    uint8 rbuf[64];
+    uint32 n = 0u;
+    uint32 i;
+    uint32 diff = 0u;
+    int32 rc;
+    const char *msg = "ark rv32 vfs ok\n";
+    uint32 ok = 1u;
+
+    /* ---- 1) 块设备 ---- */
+    dev = arkrtos_blk_find(ARKRTOS_QEMU_BLK_NAME);
+    arkrtos_board_puts("[FS] blk ");
+    arkrtos_board_puts(ARKRTOS_QEMU_BLK_NAME);
+    arkrtos_board_puts(" found=");
+    arkrtos_board_putu((dev != 0) ? 1u : 0u);
+    if(dev == 0)
+    {
+        arkrtos_board_puts(" -> no storage, skip\n");
+        for(;;) { arkrtos_task_wait(1000u); }
+    }
+
+    rc = arkrtos_blk_init(dev);
+    arkrtos_board_puts(" init=");
+    arkrtos_board_putu((uint32)(rc == 0 ? 1u : 0u));
+    arkrtos_board_puts(" size=");
+    arkrtos_board_putu(arkrtos_blk_size(dev));
+    arkrtos_board_puts(" erase=");
+    arkrtos_board_putu(ARKRTOS_QEMU_BLK_ERASE);
+    arkrtos_board_puts("\n");
+
+    /* ---- 2) littlefs：format 再 mount ---- */
+    rc = arkrtos_fs_format(ARKRTOS_QEMU_BLK_NAME, 0u, (uint32)ARKRTOS_QEMU_BLK_SIZE);
+    arkrtos_board_puts("[FS] format rc=");
+    arkrtos_board_putu((uint32)rc);
+    if(rc != 0)
+    {
+        arkrtos_board_puts(" last_error=");
+        arkrtos_board_putu((uint32)arkrtos_fs_last_error());
+        arkrtos_board_puts(" -> FAIL\n");
+        ok = 0u;
+    }
+    arkrtos_board_puts("\n");
+
+    /* format 成功时会自己把卷挂上；接下来走 VFS 的挂载点，所以先摘掉，
+     * 让 arkrtos_vfs_mount_volume() 按同一窗口重新挂一次（它会把几何对齐核对）。 */
+    if(ok != 0u)
+    {
+        (void)arkrtos_fs_unmount();
+    }
+
+    /* ---- 3) VFS：/mnt/ram ---- */
+    if(ok != 0u)
+    {
+        rc = arkrtos_vfs_init();
+        arkrtos_board_puts("[FS] vfs_init rc=");
+        arkrtos_board_putu((uint32)rc);
+
+        rc = arkrtos_vfs_mount_volume(ARKRTOS_QEMU_BLK_NAME, 0u,
+                                     (uint32)ARKRTOS_QEMU_BLK_SIZE, "/mnt/ram");
+        arkrtos_board_puts(" mount rc=");
+        arkrtos_board_putu((uint32)rc);
+        arkrtos_board_puts(" mounts=");
+        arkrtos_board_putu((uint32)arkrtos_vfs_mount_count());
+        arkrtos_board_puts("\n");
+        if(rc != 0)
+        {
+            ok = 0u;
+        }
+    }
+
+    /* ---- 3b) 按路径写一个文件，再读回来逐字节对比 ---- */
+    if(ok != 0u)
+    {
+        rc = arkrtos_vfs_write_file("/mnt/ram/hello.txt", (const uint8 *)msg, 17u);
+        arkrtos_board_puts("[FS] write rc=");
+        arkrtos_board_putu((uint32)rc);
+
+        rc = arkrtos_vfs_read_file("/mnt/ram/hello.txt", rbuf, (uint32)sizeof(rbuf), &n);
+        arkrtos_board_puts(" read rc=");
+        arkrtos_board_putu((uint32)rc);
+        arkrtos_board_puts(" len=");
+        arkrtos_board_putu(n);
+
+        /* 逐字节对比：长度不对或内容不对都算失败，不给“差不多对”的结论。
+         * 自己写循环而不是调 memcmp：本目标 -nostdlib，字符串函数全部来自
+         * libc_shim.c，而那里没有 memcmp 的宽原型保证；这里不需要任何技巧。 */
+        diff = 0u;
+        if(n != 17u)
+        {
+            diff = 1u;
+        }
+        else
+        {
+            for(i = 0u; i < n; i++)
+            {
+                if(rbuf[i] != (uint8)msg[i]) { diff = 1u; break; }
+            }
+        }
+        if(diff != 0u)
+        {
+            ok = 0u;
+            arkrtos_board_puts(" -> MISMATCH");
+        }
+        else
+        {
+            arkrtos_board_puts(" -> match");
+        }
+        arkrtos_board_puts("\n");
+    }
+
+    /* ---- 3c) 列目录 + 读 procfs ---- */
+    if(ok != 0u)
+    {
+        arkrtos_board_puts("[FS] ls /mnt/ram:\n");
+        (void)arkrtos_vfs_list("/mnt/ram", fs_list_cb, 0);
+
+        rc = arkrtos_vfs_read_file("/proc/version", rbuf, (uint32)sizeof(rbuf) - 1u, &n);
+        if((rc == 0) && (n > 0u))
+        {
+            /* 只打前 40 字节：内容是内核版本串，长度由它自己决定 */
+            if(n > 40u) { n = 40u; }
+            arkrtos_board_puts("[FS] /proc/version: ");
+            for(i = 0u; i < n; i++)
+            {
+                arkrtos_board_putc((char)(((rbuf[i] >= 0x20u) && (rbuf[i] < 0x7Fu)) ? rbuf[i] : (uint8)'.'));
+            }
+            arkrtos_board_puts("\n");
+        }
+        else
+        {
+            arkrtos_board_puts("[FS] /proc/version rc=");
+            arkrtos_board_putu((uint32)rc);
+            arkrtos_board_puts(" -> FAIL\n");
+            ok = 0u;
+        }
+    }
+
+    /* ---- 4) 负对照：不擦就覆写，NOR 语义必须拒绝 ---- */
+    {
+        const uint8 probe[4] = { 0x11u, 0x22u, 0x33u, 0x44u };
+        uint32 rej_before = arkrtos_board_blk_write_rejected();
+
+        /* 卷的首个 4 字节已经被 littlefs 写过，此刻不可能是 0xFF */
+        rc = arkrtos_blk_write(dev, 0u, probe, 4u);
+        arkrtos_board_puts("[FS] overwrite-without-erase rc=");
+        arkrtos_board_putu((uint32)rc);
+        arkrtos_board_puts(" rejected=");
+        arkrtos_board_putu(arkrtos_board_blk_write_rejected() - rej_before);
+        if(rc != -1)
+        {
+            arkrtos_board_puts(" -> UNEXPECTED: NOR semantics not enforced");
+            ok = 0u;
+        }
+        arkrtos_board_puts("\n");
+    }
+
+    arkrtos_board_puts("[FS] counters written=");
+    arkrtos_board_putu(arkrtos_board_blk_bytes_written());
+    arkrtos_board_puts(" rejected=");
+    arkrtos_board_putu(arkrtos_board_blk_write_rejected());
+    arkrtos_board_puts(" erases=");
+    arkrtos_board_putu(arkrtos_board_blk_erase_count());
+    arkrtos_board_puts("\n");
+
+    s_fs_ok = ok;
+    arkrtos_board_puts(ok ? "[FS] PASS\n" : "[FS] FAIL\n");
+
+    for(;;)
+    {
+        arkrtos_task_wait(1000u);
+    }
+}
+
 /**
 * @brief 进入空闲上下文并启动调度
 * @details 顺序不可换：
@@ -337,6 +597,8 @@ int main(void)
     int32 id_b;
     int32 id_u;
     int32 id_rx;
+    int32 id_fs;
+    int32 id_shell;
 
     arkrtos_port_board_init();
 
@@ -349,6 +611,8 @@ int main(void)
     id_u = arkrtos_task_register(task_u, s_stack_u, sizeof(s_stack_u), 12u, 0u);
     /* 接收任务优先级最高：串口 ISR 靠它把字节取走，拖着不动就会丢。 */
     id_rx = arkrtos_task_register(task_rx, s_stack_rx, sizeof(s_stack_rx), 9u, 0u);
+    /* 存储自检放最低优先级：它跑一次就阻塞，不能跟 A/B 抢节拍读数 */
+    id_fs = arkrtos_task_register(task_fs, s_stack_fs, sizeof(s_stack_fs), 13u, 0u);
 
     /* 把它降到 U 模式：内核注册出来的任务默认 is_priv = 1（见 arkrtos_cfg.c），
      * 这里显式改 0 —— 与 loader / apprun 把 App 置 0 是同一处语义，
@@ -373,6 +637,12 @@ int main(void)
         }
     }
 
+    /* Shell 控制台任务：优先级 / 栈 / 周期取 config/arkrtos_partition.h 的
+     * SHELL_TASK_*（14 / 3 KB / 2 ms）。它打开的控制台设备 ttyS0 已经在
+     * arkrtos_kernel_module_init() 里由板级 arkrtos_dev_board_init() 注册，
+     * 所以这一步必须在 kernel_module_init() 之后。 */
+    id_shell = arkrtos_shell_init();
+
     arkrtos_board_puts("[boot] sem=");
     arkrtos_board_putu((uint32)s_sem);
     arkrtos_board_puts(" taskA=");
@@ -387,6 +657,18 @@ int main(void)
     arkrtos_board_putu((uint32)ARKRTOS_USE_PRIV);
     arkrtos_board_puts(" taskRX=");
     arkrtos_board_putu((uint32)id_rx);
+    arkrtos_board_puts(" taskFS=");
+    arkrtos_board_putu((uint32)id_fs);
+    arkrtos_board_puts(" blk=");
+    arkrtos_board_putu((uint32)ARKRTOS_USE_BLK);
+    arkrtos_board_puts(" fs=");
+    arkrtos_board_putu((uint32)ARKRTOS_USE_FS);
+    arkrtos_board_puts(" vfs=");
+    arkrtos_board_putu((uint32)ARKRTOS_USE_VFS);
+    arkrtos_board_puts(" shell=");
+    arkrtos_board_putu((uint32)id_shell);
+    arkrtos_board_puts(" log=");
+    arkrtos_board_putu((uint32)ARKRTOS_USE_LOG);
     arkrtos_board_puts(" tick_period_us=");
     arkrtos_board_putu(ARKRTOS_TICK_PERIOD_US);
     arkrtos_board_puts("\n");
@@ -410,7 +692,11 @@ int main(void)
 
     arkrtos_board_puts("[boot] uart irq on, send bytes to see [R] echo\n");
 
-    if((id_a < 0) || (id_b < 0) || (id_u < 0))
+    /* 块设备驱动在这里先注册（只登记描述符，不碰介质）；真正 init 交给
+     * task_fs —— 让“注册”和“起来”两件事各有一次可读的打印。 */
+    (void)arkrtos_board_blk_init();
+
+    if((id_a < 0) || (id_b < 0) || (id_u < 0) || (id_fs < 0))
     {
         arkrtos_board_puts("[boot] task register FAILED, halted\n");
         for(;;)

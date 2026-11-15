@@ -55,12 +55,28 @@ KERNEL_SRCS := $(filter-out kernelsrc/src/arkrtos_flashapp.c \
 SRCS_C := $(KERNEL_SRCS) \
 	kernelsrc/components/mdk_trace/mdk_trace_arkrtos.c \
 	kernelsrc/shell/arkrtos_shell.c \
+	kernelsrc/shell/platform_arkrtos.c \
+	kernelsrc/shell/ark_shell/ark_shell.c \
+	kernelsrc/shell/ark_shell/ark_shell_commands.c \
+	kernelsrc/shell/ark_shell/ark_shell_eval.c \
+	kernelsrc/shell/ark_shell/ark_shell_history.c \
+	kernelsrc/shell/ark_shell/ark_shell_line_editor.c \
+	kernelsrc/shell/ark_shell/ark_shell_autocomplete.c \
 	kernelsrc/src/arkrtos_fs.c \
+	kernelsrc/src/arkrtos_vfs_lfs.c \
 	kernelsrc/components/ark_vfs/src/ark_vfs_core.c \
 	kernelsrc/components/ark_vfs/src/ark_vfs_ramfs.c \
+	kernelsrc/components/ark_vfs/port/ark_vfs_port_arkrtos.c \
+	kernelsrc/components/ark_vfs/port/ark_vfs_devfs.c \
+	kernelsrc/components/ark_vfs/port/ark_vfs_procfs.c \
+	kernelsrc/fs/littlefs/lfs.c \
+	kernelsrc/fs/littlefs/lfs_util.c \
 	kernelsrc/sdk/app_sdk/arkrtos_oslib.c \
 	kernelsrc/port/riscv/rv32imac/arkrtos_port.c \
 	board/qemu_riscv32/arkrtos_board.c \
+	board/qemu_riscv32/arkrtos_dt.c \
+	board/qemu_riscv32/drvblk.c \
+	board/qemu_riscv32/drvuart.c \
 	example/qemu_riscv32/main.c \
 	example/qemu_riscv32/libc_shim.c
 

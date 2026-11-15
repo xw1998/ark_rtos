@@ -309,13 +309,20 @@ void arkrtos_port_board_init(void)
 
 /* ============================================================
  * 设备注册（覆盖内核期望的板级钩子）
- * @details QEMU virt 这台机器上没有任何真实外设：没有 LED、没有按键、
- *          没有 Flash 控制器。控制台走 16550 轮询，不经 arkrtos_dev 设备表。
- *          所以这里故意留空 —— 空实现的意思是"本板没有设备"，而不是
- *          "设备注册失败被吞掉"。
+ * @details QEMU virt 这台机器上没有 LED、没有按键、没有 Flash 控制器，
+ *          唯一真正存在且需要登记到设备框架里的是控制台 16550。
+ *          它必须在这里注册（而不是在 main 里）：Shell / 内核日志都按
+ *          SHELL_DEV_NAME 打开控制台，而本函数由 arkrtos_kernel_module_init()
+ *          在设备框架初始化之后、调度启动之前调用，正是注册的时点。
+ *          注册失败不再沉默：返回值不为 0 就打到控制台，否则 shell 起来
+ *          只会报"打不开串口"，看不出根因在注册这一步。
  * ============================================================ */
 void arkrtos_dev_board_init(void)
 {
+    if(arkrtos_board_uart_dev_register() != 0)
+    {
+        arkrtos_board_puts("[board] dev register ttyS0 FAILED\n");
+    }
 }
 
 /* ============================================================
@@ -329,9 +336,14 @@ void arkrtos_dev_board_init(void)
 void arkrtos_port_fault_detail(uint32 mcause, uint32 mtval, uint32 from_priv)
 {
     uint32 mepc;
+    uint32 ra;
     uint32 task;
 
     __asm__ volatile("csrr %0, mepc" : "=r"(mepc) : : "memory");
+    /* ra 是「谁调进来的」：故障常常落在库函数内部（memcpy/memset），
+     * 只有 ra 才指得出肇事的那一行调用。缺了它，mepc 只会告诉我们在
+     * memcpy 里，定位还得再烧一次。 */
+    __asm__ volatile("mv %0, ra" : "=r"(ra) : : "memory");
 
     /* 任务号取内核的当前任务：故障发生在任务上下文时它就是肇事者，
      * 发生在内核/中断上下文时是 0。这两个数与 mcause/mtval 一起才够定位。 */
@@ -343,6 +355,8 @@ void arkrtos_port_fault_detail(uint32 mcause, uint32 mtval, uint32 from_priv)
     arkrtos_board_puthex(mtval);
     arkrtos_board_puts(" mepc=");
     arkrtos_board_puthex(mepc);
+    arkrtos_board_puts(" ra=");
+    arkrtos_board_puthex(ra);
     arkrtos_board_puts(" from=");
     arkrtos_board_puts((from_priv == 0u) ? "U" : "M");
     arkrtos_board_puts(" task=");

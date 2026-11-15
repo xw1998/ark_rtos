@@ -1,0 +1,80 @@
+/*
+ * Ark RTOS board: QEMU `virt` machine, RISC-V RV32, single hart.
+ *
+ * 这张树描述的是 **QEMU virt 实际给出的机器**，不是我们自己画的板子：
+ * 地址、大小与中断号全部来自 `qemu-system-riscv32 -machine virt,dumpdtb`
+ * 解析出的设备树，以及 RISC-V 规范里固定下来的 CLINT/PLIC 布局。改它之前
+ * 先重新 dump 一次，不要照抄别的 SoC。
+ *
+ * 为什么这个目标也要有设备树：内核 shell 的 `dt` 命令与驱动的
+ * arkrtos_dt_find() 都按这张表工作。没有表的板子只能得到"查不到设备"，
+ * 那不是"这台机器没有外设"，而是"我们没有描述它"——两件事不能混。
+ */
+
+/dts-v1/;
+
+/ {
+	model = "QEMU virt rv32imac";
+	compatible = "qemu,virt";
+
+	chosen {
+		stdout-path = &uart0;
+		bootargs = "console=ttyS0";
+	};
+
+	/* 内存：virt 的 DRAM 从 0x80000000 起，本目标只用前 128 MB 中的
+	 * 8 MB 作为内核 RAM 池（见 board/qemu_riscv32/arkrtos_board_config.h），
+	 * 这里描述的是机器给的全部窗口。 */
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x80000000 0x08000000>;
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		timebase-frequency = <10000000>;
+
+		cpu@0 {
+			device_type = "cpu";
+			compatible = "riscv";
+			reg = <0>;
+			status = "okay";
+		};
+	};
+
+	/* 核心本地中断器：机器定时器 mtime/mtimecmp 与软件中断 msip。 */
+	clint@2000000 {
+		compatible = "riscv,clint0";
+		reg = <0x02000000 0x00010000>;
+	};
+
+	/* 平台级中断控制器：UART0 的中断从这里出来（源号 10）。 */
+	plic0: plic@c000000 {
+		compatible = "riscv,plic0";
+		reg = <0x0c000000 0x00400000>;
+	};
+
+	soc {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		compatible = "simple-bus";
+
+		uart0: serial@10000000 {
+			compatible = "ns16550a";
+			reg = <0x10000000 0x00000100>;
+			interrupt-parent = <&plic0>;
+			interrupts = <10>;
+			clock-frequency = <3686400>;
+			current-speed = <115200>;
+			status = "okay";
+		};
+
+		/* sifive_test：写 0x5555 关机、写 0x7777 整机复位。
+		 * 板级的 arkrtos_board_reboot() 与示例的 PASS 出口都走它。 */
+		test@100000 {
+			compatible = "sifive,test0";
+			reg = <0x00100000 0x00001000>;
+		};
+	};
+};
