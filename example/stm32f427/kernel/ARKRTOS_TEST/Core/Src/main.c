@@ -68,7 +68,9 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-#define ARKRTOS_IDLE_STACK_WORDS    512
+/* 1 KB: the idle context only sleeps/wakes, and this test image is RAM
+ * tight (utest statics + trace ring + lwIP + shell leave <100 B). */
+#define ARKRTOS_IDLE_STACK_WORDS    256
 #define ARKRTOS_LED_STACK_WORDS     1024
 #define ARKRTOS_LED2_STACK_WORDS    1024
 
