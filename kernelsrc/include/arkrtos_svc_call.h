@@ -44,6 +44,79 @@
 /** Declare an SVC service that takes two arguments and returns nothing. */
 #define ARKRTOS_SVC_DECL_V2(num, name, t0, t1)          void __svc(num) name(t0, t1);
 
+#elif defined(__riscv)
+
+/* ---------------------------------------------------------------------------
+ * RISC-V（GCC / Clang，RV32/RV64）。`ecall` 没有立即数字段
+ * （ARKRTOS_ARCH_SVC_NUM_BITS = -1），所以系统调用号经 a7 传递 —— 与
+ * Linux 的 RISC-V ABI 同一约定；参数仍在 a0~a2，返回值在 a0。
+ * 内核侧 arkrtos_port_syscall_num() 从 trap 帧的 a7 槽读出号码。
+ *
+ * 注意：这里用显式寄存器变量把操作数钉在 a0/a1/a2/a7 上，编译器负责在
+ * 进出内联汇编时搬运，因此不需要在 asm 里手写栈帧。
+ * ------------------------------------------------------------------------- */
+
+#define ARKRTOS_STR_(x)  #x
+#define ARKRTOS_STR(x)   ARKRTOS_STR_(x)
+
+/* Inline attribute for the ecall wrappers. The ARM branch below defines the
+ * same macro inside its own exclusive branch, so the two never collide. */
+#ifndef ARKRTOS_INLINE
+#define ARKRTOS_INLINE  static inline __attribute__((unused))
+#endif
+
+/** Declare an SVC service that takes one argument and returns a value. */
+#define ARKRTOS_SVC_DECL_1(ret, num, name, t0)                            \
+    ARKRTOS_INLINE ret name(t0 a0)                                        \
+    {                                                                     \
+        register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \
+        register unsigned long r_a7 __asm("a7") = (unsigned long)(num);    \
+        __asm volatile ("ecall" : "+r"(r_a0) : "r"(r_a7) : "memory");      \
+        return (ret)r_a0;                                                 \
+    }
+
+/** Declare an SVC service that takes two arguments and returns a value. */
+#define ARKRTOS_SVC_DECL_2(ret, num, name, t0, t1)                        \
+    ARKRTOS_INLINE ret name(t0 a0, t1 a1)                                 \
+    {                                                                     \
+        register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \
+        register unsigned long r_a1 __asm("a1") = (unsigned long)(a1);     \
+        register unsigned long r_a7 __asm("a7") = (unsigned long)(num);    \
+        __asm volatile ("ecall" : "+r"(r_a0) : "r"(r_a1), "r"(r_a7) : "memory"); \
+        return (ret)r_a0;                                                 \
+    }
+
+/** Declare an SVC service that takes three arguments and returns a value. */
+#define ARKRTOS_SVC_DECL_3(ret, num, name, t0, t1, t2)                    \
+    ARKRTOS_INLINE ret name(t0 a0, t1 a1, t2 a2)                          \
+    {                                                                     \
+        register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \
+        register unsigned long r_a1 __asm("a1") = (unsigned long)(a1);     \
+        register unsigned long r_a2 __asm("a2") = (unsigned long)(a2);     \
+        register unsigned long r_a7 __asm("a7") = (unsigned long)(num);    \
+        __asm volatile ("ecall" : "+r"(r_a0) : "r"(r_a1), "r"(r_a2), "r"(r_a7) : "memory"); \
+        return (ret)r_a0;                                                 \
+    }
+
+/** Declare an SVC service that takes one argument and returns nothing. */
+#define ARKRTOS_SVC_DECL_V1(num, name, t0)                                \
+    ARKRTOS_INLINE void name(t0 a0)                                       \
+    {                                                                     \
+        register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \
+        register unsigned long r_a7 __asm("a7") = (unsigned long)(num);    \
+        __asm volatile ("ecall" : "+r"(r_a0) : "r"(r_a7) : "memory");      \
+    }
+
+/** Declare an SVC service that takes two arguments and returns nothing. */
+#define ARKRTOS_SVC_DECL_V2(num, name, t0, t1)                            \
+    ARKRTOS_INLINE void name(t0 a0, t1 a1)                                \
+    {                                                                     \
+        register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \
+        register unsigned long r_a1 __asm("a1") = (unsigned long)(a1);     \
+        register unsigned long r_a7 __asm("a7") = (unsigned long)(num);    \
+        __asm volatile ("ecall" : "+r"(r_a0) : "r"(r_a1), "r"(r_a7) : "memory"); \
+    }
+
 #else
 
 /* ---------------------------------------------------------------------------

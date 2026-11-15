@@ -18,16 +18,34 @@
 #define ARKRTOS_PARTITION_H
 
 /* ============================================================
- * 一、芯片物理参数（移植新芯片只改这 4 行）
+ * 一、芯片物理参数（移植新芯片只改这 6 行）
+ * @brief 六个 CHIP_* 全部用 #ifndef 包住：本文件既服务片内 Flash 的
+ *        STM32 系列，也服务 QEMU 这类「把 RAM 当 Flash 用」的模拟平台。
+ *        板级配置（ARKRTOS_BOARD_CONFIG）先于本文件被包含，因此在板级
+ *        头里定义 CHIP_* 就能整体替换这里的默认值，不必改本文件；不定义
+ *        时取值与原来逐字节相同（tools/gen_scatter.py 只收集 #define，
+ *        忽略 #ifndef，故 STM32 各工程的 .sct 不变）。
  * ============================================================ */
+#ifndef CHIP_FLASH_BASE
 #define CHIP_FLASH_BASE      0x08000000
+#endif
+#ifndef CHIP_FLASH_SIZE
 #define CHIP_FLASH_SIZE      (1024 * 1024)   /* 1MB   */
+#endif
+#ifndef CHIP_RAM_BASE
 #define CHIP_RAM_BASE        0x20000000
+#endif
+#ifndef CHIP_RAM_SIZE
 #define CHIP_RAM_SIZE        (128 * 1024)    /* 128KB（SRAM1 112K + SRAM2 16K） */
+#endif
 
 /* 内核独享的 CCM / TCM RAM（无此内存的芯片填 0） */
+#ifndef CHIP_CCM_BASE
 #define CHIP_CCM_BASE        0x10000000
+#endif
+#ifndef CHIP_CCM_SIZE
 #define CHIP_CCM_SIZE        (64 * 1024)
+#endif
 
 /* ============================================================
  * 二、分区大小策略（按项目需求调整）

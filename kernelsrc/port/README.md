@@ -11,9 +11,9 @@ kernelsrc/port/
 ├── arm/
 │   ├── cortex-m3/                  # arkrtos_port.c + arkrtos_context.S
 │   └── cortex-m4/
-├── riscv/                          # 规划中
-│   ├── rv32imac/
-│   └── rv64gc/
+├── riscv/
+│   ├── rv32imac/                   # 已实现：QEMU virt 上实跑通过（M 模式，单 hart）
+│   └── rv64gc/                     # 规划中
 └── loongarch/                      # 规划中
     ├── la32/
     └── la64/

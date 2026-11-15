@@ -37,7 +37,7 @@
 - [kernelsrc/include/arkrtos_smp.h](#kernelsrcincludearkrtos_smph)（11 项）
 - [kernelsrc/include/arkrtos_softbus.h](#kernelsrcincludearkrtos_softbush)（5 项）
 - [kernelsrc/include/arkrtos_spin.h](#kernelsrcincludearkrtos_spinh)（10 项）
-- [kernelsrc/include/arkrtos_svc_call.h](#kernelsrcincludearkrtos_svc_callh)（10 项）
+- [kernelsrc/include/arkrtos_svc_call.h](#kernelsrcincludearkrtos_svc_callh)（15 项）
 - [kernelsrc/include/arkrtos_task.h](#kernelsrcincludearkrtos_taskh)（3 项）
 - [kernelsrc/include/arkrtos_tickless.h](#kernelsrcincludearkrtos_ticklessh)（6 项）
 - [kernelsrc/include/arkrtos_ulog.h](#kernelsrcincludearkrtos_ulogh)（5 项）
@@ -48,6 +48,7 @@
 - [kernelsrc/port/arm/cortex-m3/arkrtos_port.c](#kernelsrcportarmcortex-m3arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
+- [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（8 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
 - [kernelsrc/sdk/app_sdk/tests/test_stdio_host.c](#kernelsrcsdkapp_sdkteststest_stdio_hostc)（2 项）
@@ -5652,6 +5653,46 @@ Declare an SVC service that takes two arguments and returns nothing. */
 ### `#define ARKRTOS_SVC_DECL_1(ret, num, name, t0)                        `
 
 ```c
+#define ARKRTOS_SVC_DECL_1(ret, num, name, t0)                            \ ARKRTOS_INLINE ret name(t0 a0)                                        \ {                                                                     \ register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \ register unsigned long r_a7 __asm("a7") = (unsigned long)(num);    \ __asm volatile ("ecall" : "+r"(r_a0) : "r"(r_a7) : "memory");      \
+```
+
+Declare an SVC service that takes one argument and returns a value. */
+
+### `#define ARKRTOS_SVC_DECL_2(ret, num, name, t0, t1)                    `
+
+```c
+#define ARKRTOS_SVC_DECL_2(ret, num, name, t0, t1)                        \ ARKRTOS_INLINE ret name(t0 a0, t1 a1)                                 \ {                                                                     \ register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \ register unsigned long r_a1 __asm("a1") = (unsigned long)(a1);     \ register unsigned long r_a7 __asm("a7") = (unsigned long)(num);    \
+```
+
+Declare an SVC service that takes two arguments and returns a value. */
+
+### `#define ARKRTOS_SVC_DECL_3(ret, num, name, t0, t1, t2)                `
+
+```c
+#define ARKRTOS_SVC_DECL_3(ret, num, name, t0, t1, t2)                    \ ARKRTOS_INLINE ret name(t0 a0, t1 a1, t2 a2)                          \ {                                                                     \ register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \ register unsigned long r_a1 __asm("a1") = (unsigned long)(a1);     \ register unsigned long r_a2 __asm("a2") = (unsigned long)(a2);     \
+```
+
+Declare an SVC service that takes three arguments and returns a value. */
+
+### `#define ARKRTOS_SVC_DECL_V1(num, name, t0)                            `
+
+```c
+#define ARKRTOS_SVC_DECL_V1(num, name, t0)                                \ ARKRTOS_INLINE void name(t0 a0)                                       \ {                                                                     \ register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \ register unsigned long r_a7 __asm("a7") = (unsigned long)(num);    \ __asm volatile ("ecall" : "+r"(r_a0) : "r"(r_a7) : "memory");      \
+```
+
+Declare an SVC service that takes one argument and returns nothing. */
+
+### `#define ARKRTOS_SVC_DECL_V2(num, name, t0, t1)                        `
+
+```c
+#define ARKRTOS_SVC_DECL_V2(num, name, t0, t1)                            \ ARKRTOS_INLINE void name(t0 a0, t1 a1)                                \ {                                                                     \ register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \ register unsigned long r_a1 __asm("a1") = (unsigned long)(a1);     \ register unsigned long r_a7 __asm("a7") = (unsigned long)(num);    \
+```
+
+Declare an SVC service that takes two arguments and returns nothing. */
+
+### `#define ARKRTOS_SVC_DECL_1(ret, num, name, t0)                        `
+
+```c
 #define ARKRTOS_SVC_DECL_1(ret, num, name, t0)                          \ ARKRTOS_INLINE ret name(t0 a0)                                     \ {                                                                 \ register unsigned int r0 __asm("r0") = (unsigned int)a0;      \ __asm volatile ("svc #" ARKRTOS_STR(num) : "+r"(r0) : : "memory"); \ return (ret)r0;                                               \
 ```
 
@@ -6861,6 +6902,115 @@ uint32 arkrtos_port_get_cyccnt(void)
 
 **读 DWT 周期计数器 (自然回绕)**
 **返回**：当前周期计数
+
+## kernelsrc/port/riscv/rv32imac/arkrtos_port.c
+
+**Ark RTOS RISC-V RV32IMAC 移植层实现**
+实现 arkrtos_hal.h 声明的全部硬件抽象接口。目标平台是 QEMU 的
+`virt` 机器（单 hart、M 模式、CLINT + 16550 UART），但本文件里
+只有「内核移交点」与 CLINT 地址是平台相关的，其余都是 RISC-V
+
+### `uint32 arkrtos_port_atomic_cas(volatile uint32 *p_addr, uint32 expect,`
+
+```c
+uint32 arkrtos_port_atomic_cas(volatile uint32 *p_addr, uint32 expect, uint32 new_value) {
+```
+
+**比较并交换（LR/SC 实现）**
+QEMU 的 rv32 带 A 扩展，`lr.w` / `sc.w` 是真原子指令，不需要
+退化成「关中断近似」。单核下关中断也算正确，但这套写法在 SMP
+上同样成立，将来换多 hart 时不用重写。
+
+### `uint32 arkrtos_port_syscall_num(void *p_exc_ctx) {`
+
+```c
+uint32 arkrtos_port_syscall_num(void *p_exc_ctx) {
+```
+
+**从 trap 帧里取系统调用号**
+RISC-V 的 `ecall` 没有立即数字段（ARKRTOS_ARCH_SVC_NUM_BITS = -1），
+号由约定寄存器携带：本移植用 a7，与 Linux/RISC-V 的习惯一致。
+
+### `uint32 arkrtos_port_enter_critical(void) {`
+
+```c
+uint32 arkrtos_port_enter_critical(void) {
+```
+
+**进入临界区，返回进入前的 mstatus（只关心 MIE 位）**
+用 csrrc 一次完成「读旧值 + 清 MIE」，比先读后写少一条指令，
+也不会被两条指令之间的中断打断。
+
+### `void arkrtos_port_switch_task(void) {`
+
+```c
+void arkrtos_port_switch_task(void) {
+```
+
+**触发一次任务切换**
+置 CLINT 软件中断挂起位。这是 RISC-V 里 PendSV 的对应物：
+- 在中断上下文里调用：此刻 mstatus.MIE = 0，中断被挂起，
+等 mret 之后立刻进 trap → 切换，不会在 tick 处理中途换栈；
+- 在线程上下文里调用：立刻进 trap 完成切换。
+两种情形都与内核「置挂起、稍后切」的假设一致。
+
+### `uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void)) `
+
+```c
+uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void)) {
+```
+
+**构造任务初始 trap 帧**
+- `stack_top`：栈顶（高地址）
+- `entry`：任务入口
+**返回**：帧指针（存入 task->stack_ptr）
+帧格式与 arkrtos_context.S 完全一致。任务第一次被恢复时会走
+「trap_entry 的恢复半段」：mepc←entry、mstatus←0x1880、sp←stack_top，
+然后 mret 跳进任务，此时 MIE 已经打开。
+ra 置 0：任务函数返回就等于跳到 0 取指，会立刻进致命异常，
+与 Cortex-M 版（LR=0）同一处理口径。
+gp 取当前内核上下文里的值（start.S 设好了 __global_pointer$），
+否则链接器的 gp 相对松弛在小任务里会读到错误地址。
+
+### `void arkrtos_port_start_timer(uint32 tick_period_us) {`
+
+```c
+void arkrtos_port_start_timer(uint32 tick_period_us) {
+```
+
+**启动节拍定时器**
+- `tick_period_us`：节拍周期（微秒）
+用 CLINT 的 mtimecmp 做「下一次比较」：每进一次定时器中断就
+重装 mtime + s_tick_counts，硬件负不了这个责，由 riscv_trap_c 补。
+
+### `uint32 *riscv_trap_c(uint32 *frame) {`
+
+```c
+uint32 *riscv_trap_c(uint32 *frame) {
+```
+
+**trap 帧的统一 C 入口**
+- `frame`：当前上下文保存的帧指针（trap_entry 里由 tp 传入）
+**返回**：要恢复的帧指针：发生任务切换时换成另一个任务的帧，否则原样返回
+三条路径：
+- 机器定时器中断（0x80000007）：重装 mtimecmp 后交给内核节拍处理；
+- 机器软件中断（0x80000003）：清挂起位，做一次调度决策；
+- 环境调用（11 = M 模式 ecall）：mepc + 4 后进 SVC_Server。
+其余原因一律按致命异常处理（打印后停机，不做假恢复）。
+
+### `ARKRTOS_WEAK void arkrtos_port_irq_init(void) {`
+
+```c
+ARKRTOS_WEAK void arkrtos_port_irq_init(void) {
+```
+
+**安装异常入口并打开 M 模式中断**
+三件事：
+1) mtvec = trap_entry（直接模式，基址 4 字节对齐）；
+2) mie 打开 MSIE（软件中断，任务切换用）与 MTIE（定时器节拍）；
+3) mstatus.MIE = 1 —— 相当于 Cortex-M 复位后 PRIMASK 为 0。
+不在这里打开的话，switch_enable 置的软件中断永远不会被取走，
+第一个任务也就永远启动不了。
 
 ## kernelsrc/sdk/app_sdk/arkrtos_app_main.c
 

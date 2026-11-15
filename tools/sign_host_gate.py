@@ -112,7 +112,13 @@ def check_key_channel(cc):
         inc = ["-I" + td,
                "-I" + os.path.join(ROOT, "kernelsrc", "include"),
                "-I" + os.path.join(ROOT, "config")]
-        base = [cc, "-std=gnu11"] + inc + ["-o",
+        # -B: same reason as the main build above. Without it MinGW's gcc
+        # cannot locate cc1/as when it is invoked by absolute path, and the
+        # failure surfaces as "CreateProcess: No such file or directory".
+        base = [cc, "-std=gnu11"]
+        if "mingw" in cc.replace("\\", "/").lower():
+            base.append("-B" + os.path.dirname(cc))
+        base += inc + ["-o",
                 os.path.join(td, "ch.ex" if os.name == "nt" else "ch")]
 
         src_on = os.path.join(td, "on.c")
