@@ -37,6 +37,32 @@ void arkrtos_board_putu(uint32 value);
 void arkrtos_board_puthex(uint32 value);
 
 /**
+* @brief 开启 16550 的中断接收（IER.RDA）+ 使能 PLIC 上的 UART0 源
+* @details 必须在 arkrtos_port_irq_init() 之后调：PLIC 只能在内核已能接
+*          外部中断之后才启用源，否则第一个字节就可能把系统栽在中断入口里。
+*/
+void arkrtos_board_uart_irq_init(void);
+
+/**
+* @brief 从接收环形缓冲取数据（任务上下文）
+*/
+uint32 arkrtos_board_uart_rx_read(uint8 *buf, uint32 max);
+
+/** 中断层读数：进过几次串口 ISR / 收过多少字节 / 满缓冲丢了多少 */
+uint32 arkrtos_board_uart_isr_count(void);
+uint32 arkrtos_board_uart_rx_bytes(void);
+uint32 arkrtos_board_uart_rx_dropped(void);
+
+/** 投到本板但不属于 UART0 的外部中断号个数（正常应为 0） */
+uint32 arkrtos_board_uart_unknown_irq(void);
+
+/**
+* @brief 每收到一个字节在 ISR 里调一次（弱钩子，应用覆盖）
+* @note 只能做中断安全的事：不能阻塞、不能长循环。
+*/
+void arkrtos_board_uart_rx_hook(uint8 byte);
+
+/**
 * @brief PMP 违规现场（覆盖 port 层弱钩子；mcause / mtval / 来源特权）
 * @note 只在 ARKRTOS_USE_PRIV == 1 且真的发生违规时被调用。
 */

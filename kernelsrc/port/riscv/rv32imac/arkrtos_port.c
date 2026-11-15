@@ -112,6 +112,7 @@
 /* mie 位：MSIE = bit3（软件中断），MTIE = bit7（机器定时器） */
 #define RV_MIE_MSIE         (1u << 3)
 #define RV_MIE_MTIE         (1u << 7)
+#define RV_MIE_MEIE         (1u << 11)  /* machine external：PLIC */
 
 /* mcause 编码 */
 #define RV_MCAUSE_IRQ_FLAG  (0x80000000u)
@@ -123,6 +124,7 @@
 #define RV_MCAUSE_ECALL_M   (11u)
 #define RV_MCAUSE_IRQ_TMR   (7u)
 #define RV_MCAUSE_IRQ_SFT   (3u)
+#define RV_MCAUSE_IRQ_EXT   (11u)  /* machine external：走 PLIC */
 
 /* ============================================================
  * 内部状态
@@ -217,6 +219,101 @@ static void rv_mtimecmp_write(uint32 lo)
     RV_CLINT_MTIMECMP_HI = 0xFFFFFFFFu;
     RV_CLINT_MTIMECMP_LO = lo;
     RV_CLINT_MTIMECMP_HI = 0u;
+}
+
+/* ============================================================
+ * PLIC 外部中断（machine external interrupt，mcause = 0x8000000B）
+ * @details 定时器与软件中断都在 CLINT 里，外设（UART、虚拟磁盘等）走 PLIC。
+ *          单 hart 单 context（hart0 的 M 模式 = context 0），所以只需要
+ *          一套 enable / threshold / claim 寄存器。
+ *
+ *          布局（PLIC 规范，virt 机器一致）：
+ *            +0x000000 + 4*id   优先级（id 1..1023，0 = 永不触发）
+ *            +0x002000           context 0 的使能位图（每 id 1 bit）
+ *            +0x200000           context 0 的抢占阈值
+ *            +0x200004           context 0 的 claim/complete（读=claim，写=complete）
+ * ============================================================ */
+#ifndef ARKRTOS_PORT_PLIC_BASE
+#define ARKRTOS_PORT_PLIC_BASE   0x0C000000u
+#endif
+
+#define RV_PLIC_PRIORITY(id)  (*(volatile uint32 *)(ARKRTOS_PORT_PLIC_BASE + 4u * (uint32)(id)))
+#define RV_PLIC_ENABLE0       (*(volatile uint32 *)(ARKRTOS_PORT_PLIC_BASE + 0x2000u))
+#define RV_PLIC_THRESHOLD0    (*(volatile uint32 *)(ARKRTOS_PORT_PLIC_BASE + 0x200000u))
+#define RV_PLIC_CLAIM0        (*(volatile uint32 *)(ARKRTOS_PORT_PLIC_BASE + 0x200004u))
+
+/* 一次 trap 里最多处理几个外部中断。UART 是电平触发：如果处理程序
+ * 没把源摘干净，claim 会一直返回同一个 id，无上限的循环会把节拍饿死。
+ * 上限存在的意义是「宁可晚一拍，不要丢掉 tick」。 */
+#ifndef ARKRTOS_RV32_PLIC_CLAIM_MAX
+#define ARKRTOS_RV32_PLIC_CLAIM_MAX   8u
+#endif
+
+/* 板级实现；没实现时只是计数丢掉的 irq，不假处理。 */
+void arkrtos_port_external_isr(uint32 irq);
+volatile uint32 g_rv_ext_irq_count;    /* 进过几次外部中断 trap */
+volatile uint32 g_rv_ext_irq_unhandled;/* claim 到 0 的次数（正常应为 0） */
+
+/**
+* @brief 打开一个 PLIC 中断源（优先级 > 0 + 使能位 + 阈值放行）
+* @param irq 中断号（virt 机器：UART0 = 10，UART1 = 11，VIRTIO = 1..8）
+* @param prio 优先级 1..7，0 表示永久关闭
+* @note 阈值固定为 0（= 只要优先级 > 0 就放行）。做优先级分组需要它，
+*       但这套内核的中断优先级在 ARM 侧是 NVIC 的寄存器，语义不通用，
+*       所以这里不假装支持抢占级。
+*/
+void arkrtos_port_plic_enable(uint32 irq, uint32 prio)
+{
+    if((irq == 0u) || (irq >= 1024u))
+    {
+        return;
+    }
+
+    RV_PLIC_PRIORITY(irq) = prio;
+    RV_PLIC_ENABLE0 |= (1u << irq);
+    RV_PLIC_THRESHOLD0 = 0u;
+}
+
+/**
+* @brief 关闭一个 PLIC 中断源
+*/
+void arkrtos_port_plic_disable(uint32 irq)
+{
+    if((irq == 0u) || (irq >= 1024u))
+    {
+        return;
+    }
+
+    RV_PLIC_ENABLE0 &= ~(1u << irq);
+    RV_PLIC_PRIORITY(irq) = 0u;
+}
+
+/**
+* @brief 外部中断分发：claim -> 板级处理 -> complete
+* @details 必须先 claim 拿到 id、处理完再 complete，否则同一源会一直
+*          挂起（电平触发），trap 退不出去。
+*/
+static void rv_plic_dispatch(void)
+{
+    uint32 n;
+
+    g_rv_ext_irq_count++;
+
+    for(n = 0u; n < ARKRTOS_RV32_PLIC_CLAIM_MAX; n++)
+    {
+        uint32 irq = RV_PLIC_CLAIM0;
+
+        if((irq == 0u) || (irq > 1023u))
+        {
+            g_rv_ext_irq_unhandled++;
+            break;
+        }
+
+        arkrtos_port_external_isr(irq);
+
+        /* complete：写回同一个 id 才算摘掉这一轮挂起 */
+        RV_PLIC_CLAIM0 = irq;
+    }
 }
 
 /*
@@ -628,6 +725,14 @@ uint32 *riscv_trap_c(uint32 *frame)
             rv_mtimecmp_write(rv_mtime_read() + s_tick_counts);
             arkrtos_kernel_tick_handler();
         }
+        else if(cause == RV_MCAUSE_IRQ_EXT)
+        {
+            /* 外部中断：PLIC claim -> 板级处理 -> complete。
+             * 中断里不做任务切换判定：真正的切换由处理程序里调用的
+             * *_from_isr() 置的软件中断在 mret 之后完成（与 Cortex-M
+             * 的 PendSV 同一套时序），不在 trap 里换栈。 */
+            rv_plic_dispatch();
+        }
         else if(cause == RV_MCAUSE_IRQ_SFT)
         {
             int32 next;
@@ -768,8 +873,11 @@ ARKRTOS_WEAK void arkrtos_port_irq_init(void)
     rv_mtimecmp_write(0xFFFFFFFFu);
 
     /* 只放行软件中断（任务切换）。节拍中断由 start_timer() 放行 —— 那时
-     * 内核数据结构已初始化，在 trap 里改调度状态才是安全的。 */
-    __asm__ volatile("csrs mie, %0" : : "r"((uint32)RV_MIE_MSIE) : "memory");
+     * 内核数据结构已初始化，在 trap 里改调度状态才是安全的。
+     * 外部中断（MEIE）也在这里放行：PLIC 的每个源本身默认是关的
+     * （优先级 0 + 使能位 0），没源就不会进 trap；真正接上外设的是
+     * 板级调的 arkrtos_port_plic_enable()。 */
+    __asm__ volatile("csrs mie, %0" : : "r"((uint32)(RV_MIE_MSIE | RV_MIE_MEIE)) : "memory");
 
     /* 相当于 Cortex-M 复位后 PRIMASK = 0：不放这里，switch_enable() 置的
      * 软件中断永远取不走，第一个任务起不来。 */
@@ -1035,6 +1143,19 @@ ARKRTOS_WEAK void arkrtos_port_fatal_report(uint32 mcause)
 *          现场证据。单独一个钩子而不是复用 fatal_report，是因为访问异常是
 *          可恢复的（App 任务会被记录并重启），fatal_report 的语义是停机。
 */
+/*
+* 外部中断的默认实现：什么都不做。
+* @details 故意不在这里打印/不停机：PLIC 会继续挂起同一个源，但如果换成
+*          「停机」就会把一个配错的中断号变成整个系统的死机。板级覆盖它，
+*          并且必须把源摘干净（UART 要读干净 RX FIFO、清掉 LSR 错误位）。
+*          没被覆盖时应该在第一次启用 PLIC 源之前就发现 —— plic_enable()
+*          只在板级代码里调。
+*/
+ARKRTOS_WEAK void arkrtos_port_external_isr(uint32 irq)
+{
+    (void)irq;
+}
+
 ARKRTOS_WEAK void arkrtos_port_fault_detail(uint32 mcause, uint32 mtval, uint32 from_priv)
 {
     (void)mcause;

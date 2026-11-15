@@ -18,6 +18,10 @@
 #include "arkrtos_board.h"
 #include "arkrtos_task.h"   /* arkrtos_current_task_id（故障现场的任务号） */
 
+/* 外部中断（PLIC）通路由 port 层提供；头文件在 arkrtos_hal.h 里没开这一类
+ * 通用接口（各架构的接线方式差得太远），所以这里就地声明。 */
+void arkrtos_port_plic_enable(uint32 irq, uint32 prio);
+
 #ifdef ARKRTOS_BOARD_CONFIG
 #include ARKRTOS_BOARD_CONFIG
 #endif
@@ -31,13 +35,182 @@
 #define UART_RBR            0u   /* 读：接收缓冲；写同一地址 = THR（发送） */
 #define UART_IER            1u   /* 中断使能（本板不用中断收）             */
 #define UART_FCR            2u   /* 写：FIFO 控制                          */
+#define UART_IIR            2u   /* 读：中断标识（与 FCR 同地址，读写不同） */
 #define UART_LCR            3u   /* 线路控制（位宽/校验/停止位）           */
 #define UART_MCR            4u   /* MODEM 控制                             */
-#define UART_LSR            5u   /* 线路状态：bit5=THRE 发送保持寄存器空    */
+#define UART_LSR            5u   /* 线路状态：bit0=DR 有数据，bit5=THRE    */
 
 #define UART_LCR_8N1        0x03u
 #define UART_FCR_ENABLE     0x01u
-#define UART_LSR_THRE       0x20u
+#define UART_LSR_DR         0x01u  /* bit0：接收数据就绪 */
+#define UART_LSR_THRE       0x20u  /* bit5：发送保持寄存器空 */
+
+#define UART_IER_RDA        0x01u  /* 接收数据可用中断 */
+#define UART_IER_RLS        0x04u  /* 线路状态中断（溢出/帧错） */
+
+/* IIR：bit0 = 0 表示有中断挂起，bit3:1 = 类型 */
+#define UART_IIR_NO_PEND    0x01u
+#define UART_IIR_ID_MASK    0x0Eu
+#define UART_IIR_ID_RDA     0x04u  /* 接收数据可用 */
+#define UART_IIR_ID_RTO     0x0Cu  /* 字符超时（FIFO 里还有残字节） */
+#define UART_IIR_ID_LSR     0x06u  /* 线路状态（错误位） */
+
+/* 接收环形缓冲：256 字节。输入是人手敲的，但要能接住一次粘贴（上百字节）而不丢。 */
+#define UART_RX_RING_SIZE   256u
+
+static uint8  s_rx_ring[UART_RX_RING_SIZE];
+static volatile uint32 s_rx_head;
+static volatile uint32 s_rx_tail;
+static volatile uint32 s_rx_dropped;
+static volatile uint32 s_rx_bytes;
+static volatile uint32 s_isr_count;
+static volatile uint32 s_unknown_irq;
+
+/**
+* @brief 每收到一个字节在中断里调一次（弱钩子，应用可覆盖）
+* @details 存在的意义是让"中断 -> 内核"这一段变成应用可见的事件：应用在
+*          钩子里调 arkrtos_sem_post_from_isr()，就能拿到"在中断里唤醒任务"
+*          的完整证据链（而不是靠轮询"看起来切过去了"）。
+*          ！！只能做中断安全的事：不能阻塞、不能长循环。
+*/
+void arkrtos_board_uart_rx_hook(uint8 byte);
+
+__attribute__((weak)) void arkrtos_board_uart_rx_hook(uint8 byte)
+{
+    (void)byte;
+}
+
+/**
+* @brief 中断接收：把 16550 的"接收数据可用"接到 PLIC，并打开该源
+* @details 三条一起才成立：
+*          1) 16550 自己开 IER 的 RDA 位（否则它不会拉 INTx）；
+*          2) PLIC 给 UART0 的 IRQ（virt 机器固定 = 10）一个非零优先级；
+*          3) PLIC 的使能位与抢占阈值放行。
+*          少了 2 或 3，串口会在 host 端收到字节时把数据静静丢掉 ——
+*          表现为"能打不能收"，很容易误判成驱动写错。
+*
+*          发送仍然是轮询：QEMU 的 16550 发送永远就绪，用中断只会多一层
+*          状态机而没有任何收益；真实板子上发送中断的意义是"别忙等"，
+*          那是驱动层的取舍，与本移植要验证的"中断入口到得了内核"无关。
+*/
+void arkrtos_board_uart_irq_init(void)
+{
+    s_rx_head     = 0u;
+    s_rx_tail     = 0u;
+    s_rx_dropped  = 0u;
+    s_isr_count   = 0u;
+    s_rx_bytes    = 0u;
+    s_unknown_irq = 0u;
+
+    /* 先把 FIFO 里的残留读干净，再开中断，避免一开就进一次"假"中断 */
+    while((UART_REG(UART_LSR) & UART_LSR_DR) != 0u)
+    {
+        (void)UART_REG(UART_RBR);
+    }
+
+    UART_REG(UART_IER) = (uint8)(UART_IER_RDA | UART_IER_RLS);
+
+    arkrtos_port_plic_enable(ARKRTOS_QEMU_UART_IRQ, 1u);
+}
+
+/**
+* @brief 从接收环形缓冲取数据（任务上下文）
+* @param buf 目标缓冲
+* @param max 最多取多少字节
+* @return 实际取到的字节数（0 = 当前没有数据）
+*/
+uint32 arkrtos_board_uart_rx_read(uint8 *buf, uint32 max)
+{
+    uint32 n = 0u;
+
+    if(buf == 0)
+    {
+        return 0u;
+    }
+
+    while((n < max) && (s_rx_tail != s_rx_head))
+    {
+        buf[n] = s_rx_ring[s_rx_tail];
+        s_rx_tail = (s_rx_tail + 1u) % UART_RX_RING_SIZE;
+        n++;
+    }
+
+    return n;
+}
+
+uint32 arkrtos_board_uart_isr_count(void)  { return s_isr_count; }
+uint32 arkrtos_board_uart_rx_bytes(void)   { return s_rx_bytes; }
+uint32 arkrtos_board_uart_rx_dropped(void) { return s_rx_dropped; }
+uint32 arkrtos_board_uart_unknown_irq(void){ return s_unknown_irq; }
+
+/**
+* @brief 16550 中断服务：把源摘干净再返回
+* @details 电平触发断不能"看一眼就走"——IIR 的 bit0 还在就说明没摘净，
+*          PLIC 会立刻再投一次，表现为中断风暴把节拍饿死。所以这里是
+*          "按 IIR 的类型把对应寄存器读到空"的循环。
+*/
+static void uart_isr(void)
+{
+    uint32 guard = 0u;
+
+    s_isr_count++;
+
+    /* 最多转 64 圈：一个 FIFO 最多 16 字节，留足余量；真正兜底的是
+     * "读干净"本身，这个上限只防硬件异常导致的死循环。 */
+    while(((UART_REG(UART_IIR) & UART_IIR_NO_PEND) == 0u) && (guard < 64u))
+    {
+        uint32 id = UART_REG(UART_IIR) & UART_IIR_ID_MASK;
+
+        guard++;
+
+        if((id == UART_IIR_ID_RDA) || (id == UART_IIR_ID_RTO) || (id == UART_IIR_ID_LSR))
+        {
+            /* 读到 DR 空为止（顺带把 LSR 的错误位读掉） */
+            while((UART_REG(UART_LSR) & UART_LSR_DR) != 0u)
+            {
+                uint8 byte = (uint8)(UART_REG(UART_RBR) & 0xFFu);
+                uint32 next = (s_rx_head + 1u) % UART_RX_RING_SIZE;
+
+                s_rx_bytes++;
+
+                if(next == s_rx_tail)
+                {
+                    s_rx_dropped++;          /* 满了：丢新的，保住已收的 */
+                }
+                else
+                {
+                    s_rx_ring[s_rx_head] = byte;
+                    s_rx_head = next;
+                }
+
+                arkrtos_board_uart_rx_hook(byte);
+            }
+        }
+        else
+        {
+            /* 发送保持寄存器空之类的：本板发送走轮询，这里只要读一下
+             * IIR 就已经把它摘掉了（对 16550 而言 THRE 中断靠写 THR 或读 IIR 清）。 */
+            break;
+        }
+    }
+}
+
+/**
+* @brief 外部中断分发（覆盖 port 层弱实现）
+* @details 只认 UART0。其它中断号只计数不处理 —— 不假装处理，也不停机：
+*          停机会把一个配错的 plic_enable() 变成整机死机。
+*/
+void arkrtos_port_external_isr(uint32 irq)
+{
+    if(irq == ARKRTOS_QEMU_UART_IRQ)
+    {
+        uart_isr();
+    }
+    else
+    {
+        s_unknown_irq++;
+    }
+}
 
 void arkrtos_board_console_init(void)
 {

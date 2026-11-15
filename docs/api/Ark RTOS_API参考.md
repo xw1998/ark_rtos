@@ -50,7 +50,7 @@
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（11 项）
 - [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（10 项）
-- [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（14 项）
+- [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（16 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
 - [kernelsrc/sdk/app_sdk/tests/test_stdio_host.c](#kernelsrcsdkapp_sdkteststest_stdio_hostc)（2 项）
@@ -7256,6 +7256,37 @@ ARKRTOS_WEAK void arkrtos_port_irq_init(void) {
 `virt` 机器（单 hart、M 模式、CLINT + 16550 UART），但本文件里
 只有「内核移交点」与 CLINT 地址是平台相关的，其余都是 RISC-V
 
+### `void arkrtos_port_plic_enable(uint32 irq, uint32 prio) {`
+
+```c
+void arkrtos_port_plic_enable(uint32 irq, uint32 prio) {
+```
+
+**打开一个 PLIC 中断源（优先级 > 0 + 使能位 + 阈值放行）**
+- `irq`：中断号（virt 机器：UART0 = 10，UART1 = 11，VIRTIO = 1..8）
+- `prio`：优先级 1..7，0 表示永久关闭
+> 说明：阈值固定为 0（= 只要优先级 > 0 就放行）。做优先级分组需要它，
+但这套内核的中断优先级在 ARM 侧是 NVIC 的寄存器，语义不通用，
+所以这里不假装支持抢占级。
+
+### `void arkrtos_port_plic_disable(uint32 irq) {`
+
+```c
+void arkrtos_port_plic_disable(uint32 irq) {
+```
+
+**关闭一个 PLIC 中断源**
+
+### `static void rv_plic_dispatch(void) {`
+
+```c
+static void rv_plic_dispatch(void) {
+```
+
+**外部中断分发：claim -> 板级处理 -> complete**
+必须先 claim 拿到 id、处理完再 complete，否则同一源会一直
+挂起（电平触发），trap 退不出去。
+
 ### `uint32 arkrtos_port_atomic_cas(volatile uint32 *p_addr, uint32 expect,`
 
 ```c
@@ -7403,17 +7434,6 @@ void arkrtos_port_mpu_set_region(uint32 rom_addr, uint32 rom_size, uint32 ram_ad
 **捕获空闲任务的保护上下文（与 M4 移植同名接口的语义对齐）**
 本目标上空闲任务跑 M 模式，不需要任何 U 模式权限，所以这里
 只接收参数不建 region。
-
-### `ARKRTOS_WEAK void arkrtos_port_fault_detail(uint32 mcause, uint32 mtva`
-
-```c
-ARKRTOS_WEAK void arkrtos_port_fault_detail(uint32 mcause, uint32 mtval, uint32 from_priv) {
-```
-
-**PMP 违规现场（mcause / mtval / 出错时的特权级）**
-默认什么都不做；板级覆盖后打到串口，就是「保护真的挡下来了」的
-现场证据。单独一个钩子而不是复用 fatal_report，是因为访问异常是
-可恢复的（App 任务会被记录并重启），fatal_report 的语义是停机。
 
 ### `void arkrtos_port_fault_dispatch(uint32 mcause, uint32 from_priv) {`
 

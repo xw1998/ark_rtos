@@ -42,9 +42,11 @@
 static uint32 s_stack_a[TASK_STACK_WORDS];
 static uint32 s_stack_b[TASK_STACK_WORDS];
 static uint32 s_stack_u[TASK_STACK_WORDS];
+static uint32 s_stack_rx[TASK_STACK_WORDS];
 static uint32 s_idle_stack[IDLE_STACK_WORDS];
 
 static int32 s_sem = -1;
+static int32 s_sem_uart = -1;   /* 串口接收：ISR 里 post、任务里 wait */
 
 /* 统计变量：让读数本身可被观察，而不是"看起来在跑" */
 static volatile uint32 s_a_loops = 0u;
@@ -87,13 +89,19 @@ static void task_a(void)
 
         /* SVC 通路自检。内核任务跑在内核态，本可以直接读节拍；这里每轮
          * 仍走一次 ecall（arkrtos_get_time_ms），把 「trap → SVC_Server →
-         * 返回 a0」整条链也当成被测对象：它坏了，ms_svc 就会和 ms 对不上。 */
+         * 返回 a0」整条链也当成被测对象：它坏了，ms_svc 就会和 ms 对不上。
+         *
+         * 比的是「紧贴 ecall 之前重读一次节拍」而不是上面那次快照：上面那次
+         * 快照和这里之间隔了一整行打印（约 60 个字符），在 16550 上一轮就是
+         * 2~3 ms，够把 ±2 ms 的容差顶穿 —— 实测因此打出过假的 SVC_MISMATCH。
+         * 两侧都紧贴同一个时刻取值，容差才只需要 ±1。 */
         {
+            uint32 ms_now = (arkrtos_kernel_get_tick() * ARKRTOS_TICK_PERIOD_US) / 1000u;
             uint32 ms_svc = arkrtos_get_time_ms();
 
             arkrtos_board_puts(" ms_svc=");
             arkrtos_board_putu(ms_svc);
-            arkrtos_board_puts((ms_svc + 2u < ms || ms + 2u < ms_svc) ? " SVC_MISMATCH" : " svc_ok");
+            arkrtos_board_puts((ms_svc + 1u < ms_now || ms_now + 1u < ms_svc) ? " SVC_MISMATCH" : " svc_ok");
             arkrtos_board_puts("\n");
         }
 
@@ -126,6 +134,84 @@ static void task_b(void)
             arkrtos_board_puts(" tick=");
             arkrtos_board_putu(arkrtos_kernel_get_tick());
             arkrtos_board_puts("\n");
+        }
+    }
+}
+
+/* ============================================================
+ * 任务 C'：中断驱动串口接收
+ * @details 这一条验证的是「外设中断能不能从 PLIC 一路走到内核里，并且
+ *          在中断里唤醒一个任务」。三件事各有一个读数：
+ *          1) `isr=`   串口 ISR 进了多少次（来自板级计数器）—— 证明 PLIC
+ *                      的 claim/complete 通了，不是轮询装出来的；
+ *          2) `rx=`    中断里收了多少字节 —— 证明 16550 的 RDA 中断真的
+ *                      被清干净了（没清干净会中断风暴，节拍会停）；
+ *          3) `wake=`  本任务被信号量唤醒的次数 —— 信号量是在 **ISR 里**
+ *                      post 的，唤醒则发生在中断返回之后（本 port 的换栈
+ *                      不在 trap 里做，而是靠 mret 之后取走的软件中断）。
+ *          回显本身（把收到的字节原样打回去）也走同一个串口，所以终端
+ *          上看到 "[R] ... -> hello" 就是端到端证据。
+ * ============================================================ */
+static volatile uint32 s_rx_wakes = 0u;
+
+/**
+* @brief 串口接收钩子（在中断里执行）
+* @details 只做一件事：post 信号量。这里刻意**不**直接调用调度器的切换
+*          函数 —— 中断里能做的只应该是"唤醒谁"，"换给谁"由内核在中断
+*          返回后的软件中断里决定。
+*/
+void arkrtos_board_uart_rx_hook(uint8 byte)
+{
+    (void)byte;
+    (void)arkrtos_sem_post_from_isr(s_sem_uart);
+}
+
+static void task_rx(void)
+{
+    for(;;)
+    {
+        if(arkrtos_sem_wait_internal(s_sem_uart, -1) == 0)
+        {
+            uint8 buf[32];
+            uint32 n;
+            uint32 i;
+
+            s_rx_wakes++;
+
+            /* 一次可能收到多个字节（FIFO/粘贴），全部取完再打印 */
+            for(;;)
+            {
+                n = arkrtos_board_uart_rx_read(buf, (uint32)sizeof(buf));
+                if(n == 0u)
+                {
+                    break;
+                }
+
+                arkrtos_board_puts("[R] wake=");
+                arkrtos_board_putu(s_rx_wakes);
+                arkrtos_board_puts(" n=");
+                arkrtos_board_putu(n);
+                arkrtos_board_puts(" isr=");
+                arkrtos_board_putu(arkrtos_board_uart_isr_count());
+                arkrtos_board_puts(" rx=");
+                arkrtos_board_putu(arkrtos_board_uart_rx_bytes());
+                arkrtos_board_puts(" drop=");
+                arkrtos_board_putu(arkrtos_board_uart_rx_dropped());
+                arkrtos_board_puts(" -> ");
+
+                for(i = 0u; i < n; i++)
+                {
+                    if((buf[i] >= 0x20u) && (buf[i] < 0x7Fu))
+                    {
+                        arkrtos_board_putc((char)buf[i]);
+                    }
+                    else
+                    {
+                        arkrtos_board_putc('.');
+                    }
+                }
+                arkrtos_board_puts("\n");
+            }
         }
     }
 }
@@ -250,6 +336,7 @@ int main(void)
     int32 id_a;
     int32 id_b;
     int32 id_u;
+    int32 id_rx;
 
     arkrtos_port_board_init();
 
@@ -260,6 +347,8 @@ int main(void)
     id_a = arkrtos_task_register(task_a, s_stack_a, sizeof(s_stack_a), 10u, 0u);
     id_b = arkrtos_task_register(task_b, s_stack_b, sizeof(s_stack_b), 11u, 0u);
     id_u = arkrtos_task_register(task_u, s_stack_u, sizeof(s_stack_u), 12u, 0u);
+    /* 接收任务优先级最高：串口 ISR 靠它把字节取走，拖着不动就会丢。 */
+    id_rx = arkrtos_task_register(task_rx, s_stack_rx, sizeof(s_stack_rx), 9u, 0u);
 
     /* 把它降到 U 模式：内核注册出来的任务默认 is_priv = 1（见 arkrtos_cfg.c），
      * 这里显式改 0 —— 与 loader / apprun 把 App 置 0 是同一处语义，
@@ -296,9 +385,30 @@ int main(void)
     arkrtos_board_putu((uint32)ARKRTOS_USE_MPU);
     arkrtos_board_puts(" priv=");
     arkrtos_board_putu((uint32)ARKRTOS_USE_PRIV);
+    arkrtos_board_puts(" taskRX=");
+    arkrtos_board_putu((uint32)id_rx);
     arkrtos_board_puts(" tick_period_us=");
     arkrtos_board_putu(ARKRTOS_TICK_PERIOD_US);
     arkrtos_board_puts("\n");
+
+    /* 串口接收信号量：ISR 里 post、task_rx 里 wait。
+     * 必须先建再开 PLIC 源 —— 钩子里 post 的句柄不能是 -1。 */
+    s_sem_uart = arkrtos_sem_create_internal("qemu_uart", 0);
+    if(s_sem_uart < 0)
+    {
+        arkrtos_board_puts("[boot] uart sem_create FAILED, halted\n");
+        for(;;)
+        {
+            ARKRTOS_WFI();
+        }
+    }
+
+    /* 开中断接收：16550 IER.RDA + PLIC UART0 源。
+     * 位置很关键：必须在 irq_init()（mtvec/mie）之后，否则第一个字节
+     * 可能在中断入口还没装好时到来。 */
+    arkrtos_board_uart_irq_init();
+
+    arkrtos_board_puts("[boot] uart irq on, send bytes to see [R] echo\n");
 
     if((id_a < 0) || (id_b < 0) || (id_u < 0))
     {

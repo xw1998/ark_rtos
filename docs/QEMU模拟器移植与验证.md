@@ -422,6 +422,92 @@ for(;;) { arkrtos_task_wait_internal(1000u); }  /* 错：U 模式碰 CSR */
 内核 RAM，所以它写内核 RAM 是合法的 —— 负对照必须挑 CLINT 这种不在任何
 窗口里的地址才成立。任务间隔离要等 App 镜像走 loader 拿到自己的 slot。
 
+### 3.11 中断驱动串口（PLIC，RV32）
+
+§3.9/§3.10 的串口是轮询的：`arkrtos_board_console_putc()` 先等 THRE
+再写。这一节把接收侧改成**中断驱动**，并让中断处理程序去唤醒一个任务——
+这是「中断 → 内核调度」这条链在 RISC-V 上的第一条现场证据。
+
+#### 3.11.1 PLIC 接线（port 层）
+
+QEMU `virt` 的 PLIC 在 `0x0C000000`，取号方式与 16550 的 IRQ 号（10）无关，
+是板级 `ARKRTOS_QEMU_UART_IRQ` 告诉 port 的。寄存器布局：
+
+| 偏移 | 用途 |
+|---|---|
+| `+4*id` | 该中断源优先级 |
+| `+0x2000` | context 0 使能位图（bit `id`） |
+| `+0x200000` | context 0 阈值 |
+| `+0x200004` | context 0 claim / complete（读写同一个地址） |
+
+port 只暴露两个函数：`arkrtos_port_plic_enable(irq, prio)` /
+`arkrtos_port_plic_disable(irq)`。**没有通用外部中断注册 API** ——
+`arkrtos_hal.h` 里本来就只有 `disable_irq/enable_irq/irq_init`，硬加一层会把
+port 的边界搞糊。板级用弱钩子接：port 声明并弱实现
+`void arkrtos_port_external_isr(uint32 irq)`，板级覆盖它，进来自己按 `irq` 分发。
+
+`arkrtos_port_irq_init()` 里 `csrs mie` 从 `MSIE` 扩到 `MSIE|MEIE`，
+`riscv_trap_c()` 的 IRQ 分支新增 `cause == 11 → rv_plic_dispatch()`。
+
+**claim 上限 8**：`rv_plic_dispatch()` 最多 claim 8 次。电平触发的中断如果
+ISR 没把源摘干净（比如 IIR 里还有待读字节），claim 会一直返回同一个 id，
+一个中断风暴就能把 tick 饿死。宁可晚一拍，也不丢节拍。
+
+**中断里不做切换**：ISR 只调 `*_from_isr()` 置软件中断，真正的换栈由
+`mret` 之后的 `m_software` 完成——和 Cortex-M 上「ISR 里只投 PendSV」的时序
+是同一个道理。trap 内直接切会把外层帧丢掉（§3.10.2(b) 同一个坑）。
+
+#### 3.11.2 板级：16550 接收 + 256 B 环形缓冲
+
+- `arkrtos_board_uart_irq_init()`：清状态、读空 DR、`IER = RDA|RLS`、
+  再 `arkrtos_port_plic_enable(10, 1)`。顺序必须是「先配 UART 再放开 PLIC」，
+  反了会先吃一次中断再进去配中断源。
+- `uart_isr()` 按 IIR 的 ID 分支（RDA `0x04` / RTO `0x0C` / LSR `0x06`），
+  读空 DR，环形缓冲满则 `s_rx_dropped++`，每读到一字节调
+  `arkrtos_board_uart_rx_hook(byte)`。`guard < 64` 防 IIR 读不干净时的死循环。
+- 弱钩子 `arkrtos_board_uart_rx_hook()` 默认空实现。示例里它只做
+  `arkrtos_sem_post_from_isr(s_sem_uart)`。
+- 读数接口：`arkrtos_board_uart_rx_read(buf, max)`、
+  `..._isr_count()` / `..._rx_bytes()` / `..._rx_dropped()` / `..._unknown_irq()`。
+  把这几个数打进一行日志，等于把「中断真的发生了」变成可读数字，
+  而不是靠「好像有输出」。
+
+#### 3.11.3 实测读数
+
+```
+[boot] sem=19922944 taskA=1 taskB=2 taskU=3 mpu=1 priv=1 taskRX=4 tick_period_us=500
+[boot] uart irq on, send bytes to see [R] echo
+[R] wake=1 n=6 isr=2 rx=6 drop=0 -> hello.
+```
+
+`isr=2 rx=6`：两次 PLIC 中断搬完 6 个字节（第一次拿到 5 字节 `hello`，
+第二次拿到 `\n`）；`wake=1` 说明信号量 post 把它从阻塞里叫醒了；
+`drop=0` 说明缓冲够。回显 `-> hello.` 里的 `.` 是 `\n` 按不可打印字符的
+写法。
+
+#### 3.11.4 端到端自动检查（`example/qemu_riscv32/uart_irq_check.py`）
+
+`-serial file:` 是**单向**的，验证不了接收。脚本改用 TCP chardev：
+
+```
+-chardev socket,id=c0,host=127.0.0.1,port=<动态空闲端口>,server=on,wait=on
+-serial chardev:c0
+```
+
+判据四条：① 出现 `[boot] uart irq on`；② 发 `hello\n` 后出现 `[R] wake=`
+且含 `-> hello`；③ 该行 `isr>0` 且 `rx>0`；④ 全程无 `UNEXPECTED` / `FATAL`。
+实测 `PASS: 中断驱动串口端到端通`。
+
+三个坑：
+
+1. **`wait=off` 会漏掉启动横幅**：Python 连上时 guest 早已跑完那两行。
+   必须 `wait=on`，让 QEMU 等 socket 连上再启动。
+2. **`-kernel` 不能给含中文的绝对路径**：QEMU 在 Windows 上打不开且
+   **不报错**（表现为起不来、socket 连不上）。必须 `cwd=build目录` + 传相对文件名。
+3. **回显行不按行首出现**：`[R]` 那行会插在任务 A 正在打印的行中间
+   （实测 `[A] [R] wake=1 ... -> hello.`），按行首匹配永远找不到。
+   改成 `log.find("[R] ")` 子串切到行尾。
+
 ## 4. 已知限制（明确不覆盖的部分）
 
 | 限制 | 影响 | 原因 |
@@ -436,7 +522,8 @@ for(;;) { arkrtos_task_wait_internal(1000u); }  /* 错：U 模式碰 CSR */
 | QEMU 不模拟真实外设 | 驱动层仍需上板 | 只有 16550 UART + CLINT（LoongArch 侧另有 ns16550a @0x1FE001E0） |
 | 无 IPI（LoongArch） | 不能在任意时刻异步触发切换 | QEMU loongarch `virt` 自写 `ESTAT.IS` 实测无投递 ⇒ 改就地切换 |
 | 仅 PLV0（LoongArch） | 同「无 U 模式」 | 不做 PLV3 + TLB 隔离 |
-| 串口轮询、无中断收发 | 不能验证中断驱动 UART | 简化实现 |
+| 串口接收只在 RV32 上是中断驱动 | LoongArch 侧仍是轮询收（发送均为轮询） | RV32 已接 PLIC，见 §3.11；LA64/LA32 的 PLIC 等价物未接 |
+| 无通用外部中断注册 API | App 侧不能自己装 ISR | `arkrtos_hal.h` 只有 `disable/enable/irq_init`；外部中断目前靠 port 弱钩子 + 板级覆盖 |
 | **LA32 无任何执行载体** | LoongArch32 只有「编译 + 链接」证据，**没有任何运行证据** | QEMU 9.2.3 只有 `qemu-system-loongarch64`（上游无 loongarch32 系统模拟器，已 `ls` + `find` 双证），机器上也没有 LA32 板子 |
 
 ## 5. LoongArch64 移植（已实现，QEMU 实跑通过）

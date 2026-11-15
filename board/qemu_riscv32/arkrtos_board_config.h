@@ -71,6 +71,12 @@
 #define ARKRTOS_QEMU_UART_BASE       0x10000000u
 #define ARKRTOS_QEMU_UART_REG_SHIFT  0u        /* 寄存器按字节寻址，不移位 */
 
+/* 外部中断控制器 PLIC。virt 机器把 PLIC 放在 0x0C000000，
+ * 设备树里的中断号：UART0 = 10、UART1 = 11、VIRTIO-MMIO = 1..8。
+ * 这两件事都是平台常量（不是我们自己选的），所以放在板级配置里。 */
+#define ARKRTOS_PORT_PLIC_BASE       0x0C000000u
+#define ARKRTOS_QEMU_UART_IRQ        10u
+
 /* ============================================================
  * 三·B、U 模式任务可用的外设窗（MPU / PMP 用的那一份）
  * @details 只开控制台 UART 的 4 KB 读写。理由：U 模式任务要能**自己**
