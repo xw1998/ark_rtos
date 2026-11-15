@@ -15,7 +15,7 @@ kernelsrc/port/
 │   ├── rv32imac/                   # 已实现：QEMU virt 上实跑通过（M 模式，单 hart）
 │   └── rv64gc/                     # 规划中
 └── loongarch/
-    ├── la32/                       # 规划中
+    ├── la32/                       # 已实现：编译/链接通过，**无运行载体**（QEMU 无 loongarch32 系统模拟器）
     └── la64/                       # 已实现：QEMU virt 上实跑通过（PLV0，单核）
 ```
 
@@ -84,6 +84,7 @@ void   arkrtos_port_enter_idle(uint32 stack_ptr, uint32 use_priv);     /* 启动
 | Cortex-M | `arkrtos_context.S` 中 PendSV 保存/恢复 R4-R11（FPU 使能时含 S16-S31）；`switch_task` 置位 `SCB->ICSR.PENDSVSET` |
 | RISC-V | 任务切换通常在 `ecall`/`mret` 路径完成：保存 x1~x31、`mepc`、`mstatus` 到任务栈，`switch_task` 可置位软件中断（如 CLINT MSIP）触发切换 |
 | LoongArch | 保存 `$ra/$tp/$a0-a7/$t0-t8/$fp/$s0-s8`（`$r21` 不使用）、`ERA`、`PRMD` 到任务栈（256 B，8 字节槽）。**注意 `ESTAT.IS` 自中断在 QEMU loongarch `virt` 上实测无效**，因此 la64 不照搬 PendSV，而是在 trap 上下文里就地切换、由 `ertn` 结算；**`PRMD` 位序与 `CRMD` 低 4 位相同（`PPLV=[1:0]`、`PIE=bit2`、`PWE=bit3`），回 PLV0 且开中断是 `0x4` 不是 `0x1`** |
+| LoongArch32 | 与 la64 同构，帧降到 **128 B / 4 字节槽**（`ERA`@120、`PRMD`@124），全部用 `.w` 指令。**该目标只验证到编译+链接，没有任何运行证据**；另注意 la32 工具链在 `-march=loongarch32` 下**不拒绝** `.d` 指令 ⇒「汇编通过」不能证明 32 位合法 |
 
 ### 3.3 内存保护
 

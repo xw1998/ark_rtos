@@ -73,6 +73,9 @@ Git Bash 下缺 DLL 的表现是 **exit 127 且零输出**，看起来像「命�
   等）必须复制到 **`bin/` 与 `libexec/gcc/<target>/8.3.0/` 两处**。
   只放 `bin/` 时，`cc1` 是子进程、走的是 libexec 目录，表现为 **exit 127 /
   0xC000007B / cc1 静默失败**（编译器主程序能打印版本，实际编译却没有任何输出）。
+- LoongArch32 用另一套工具链：`D:/LoongIDE/la32-tool/bin/loongarch32-newlib-elf-gcc.exe`
+  （同为 GCC 8.3.0），必须用 `-march=loongarch32 -mabi=ilp32d`。
+  它**没有可运行的 QEMU 目标**（见 §6），只用于编译/链接验证。
 
 ## 3. RISC-V RV32 移植（已实现，QEMU 实跑通过）
 
@@ -308,6 +311,7 @@ cd build/qemu_riscv32
 | 无 IPI（LoongArch） | 不能在任意时刻异步触发切换 | QEMU loongarch `virt` 自写 `ESTAT.IS` 实测无投递 ⇒ 改就地切换 |
 | 仅 PLV0（LoongArch） | 同「无 U 模式」 | 不做 PLV3 + TLB 隔离 |
 | 串口轮询、无中断收发 | 不能验证中断驱动 UART | 简化实现 |
+| **LA32 无任何执行载体** | LoongArch32 只有「编译 + 链接」证据，**没有任何运行证据** | QEMU 9.2.3 只有 `qemu-system-loongarch64`（上游无 loongarch32 系统模拟器，已 `ls` + `find` 双证），机器上也没有 LA32 板子 |
 
 ## 5. LoongArch64 移植（已实现，QEMU 实跑通过）
 
@@ -538,9 +542,135 @@ print("\n".join(l for l in txt.splitlines() if re.match(r"^\s*[0-9a-f]+:", l)))
 本轮就是靠「在 `.S` 里记一条内存轨迹环 + monitor `xp` 取回」量出
 **首次 trap 的 PRMD 是 0x4**，从而推翻自己原先 0x1 的假设。
 
-## 6. 复现步骤
+## 6. LoongArch32 移植（仅编译通过，无运行载体）
 
-### 6.1 RISC-V RV32
+> **档位：仅编译通过。** 本节的每一条都是「源码写出来了、工具链认了、
+> 链接出了 ELF 并且反汇编核对过」，**不是「跑起来看过读数」**。
+> 本节不存在任何串口输出、节拍读数或上下文切换的现场证据。
+
+### 6.1 为什么是「参考目标」而不是 `qemu_loongarch32`
+
+先查载体，再动手：
+
+```bash
+ls D:/env/tools/qemu/qemu9/mingw64/bin/ | grep loongarch
+find D:/env/tools/qemu -name "qemu-system-loongarch32*"
+```
+
+两条都是空——QEMU 9.2.3 **只提供 `qemu-system-loongarch64`**，
+上游也没有 loongarch32 系统模拟器；机器上同样没有 LA32 板子。
+所以目录命名**故意不用 `qemu_` 前缀**：
+
+```
+kernelsrc/port/loongarch/la32/arkrtos_port.c        # HAL 实现（4 字节槽帧）
+kernelsrc/port/loongarch/la32/arkrtos_context.S     # eentry / 就地切换 / resume / idle
+board/la32_generic/arkrtos_board.{c,h}             # 「通用 LA32 参考目标」
+board/la32_generic/arkrtos_board_config.h          # ARKRTOS_ARCH_CORE = 0x0301（LA32）
+example/la32_generic/{main.c,start.S,link.ld.in,gen_ldconsts.py,libc_shim.c,Makefile}
+```
+
+叫 `qemu_loongarch32` 会让人以为有台机器能跑，那是在造证据。
+
+### 6.2 工具链与产物
+
+`D:/LoongIDE/la32-tool/bin/loongarch32-newlib-elf-gcc.exe`（GCC 8.3.0）。
+
+```bash
+-flags: -march=loongarch32 -mabi=ilp32d
+```
+
+实测约束（`-print-multi-lib`）：
+
+- 默认库是 `ilp32s`；另有 `base/ilp32f`、`base/ilp32s` 两档；
+- `-march` 的合法值只有 `loongarch32`；**`-mabi=ilp32` 不被接受**，必须
+  写全 `ilp32d`/`ilp32f`/`ilp32s` 之一（`lp64*` 是超集，用不了）。
+
+产物核对（2026-11-15 实测）：
+
+```
+file format elf32-loongarch
+architecture: Loongarch32, flags 0x00000112
+EXEC_P, HAS_SYMS, D_PAGED
+start address 0x00200000
+
+   text    data     bss     dec     hex  filename
+  52280      56   15968   68304   10ad0  build/la32_generic/ark_la32_generic.elf
+```
+
+全镜像反汇编中 `st.d|ld.d|addi.d|lu32i.d|lu52i.d|pcalau12i` 匹配数为 **0**。
+
+### 6.3 trap 帧：128 字节、4 字节槽
+
+与 la64 逐行同构，唯一变化是槽宽：
+
+| 偏移 | 内容 | 偏移 | 内容 |
+|---|---|---|---|
+| 0 | ra (r1) | 72 | t7 (r19) |
+| 4 | tp (r2) | 76 | t8 (r20) |
+| 8 | sp 原值 | 80 | fp (r22) |
+| 12–40 | a0–a7 | 84 | s0 (r23)（兼帧指针） |
+| 44–76 | t0–t8 | 88–116 | s1–s8 |
+| **120** | **ERA** | **124** | **PRMD** |
+
+`LA_FR_WORDS=32`、`LA_FR_SIZE=128`、`LA_FR_A0=3`、`LA_FR_ERA=30`、
+`LA_FR_PRMD=31`。r21 是 psABI 保留（TLS）寄存器，不进帧。
+
+### 6.4 `rdtime` 的写法与一个真陷阱
+
+`rdtime.w` / `rdtimeh.w` **本 binutils 不识别**（"no match insn"）；
+`rdtime.d $rd, $rj` 被接受，而且是**寄存器对**语义：低 32 位进 `$rd`、
+高 32 位进 `$rj`（反汇编确认编码 `rdtime.d $r12,$r13`）。所以 32 位取时
+基数的写法是：
+
+```c
+uint32 lo, hi;
+__asm__ volatile("rdtime.d %0, %1" : "=r"(lo), "=r"(hi) : : "memory");
+return lo;
+```
+
+### 6.5 最贵的一个坑：工具链不拒绝 `.d` 指令
+
+在 `-march=loongarch32` 下，`st.d` / `ld.d` / `addi.d` / `lu12i.w` /
+`la.abs` / `iblar` 等**都能汇编通过**（实测）。也就是说：
+
+> **「汇编通过」不能证明代码是 32 位合法的。**
+
+据此的纪律是：本目标所有汇编**一律只用 `.w` 形式**，并且这条告诫已经
+同时写在 `arkrtos_context.S` 文件头、`start.S`、`port.c` 与 `Makefile`
+四处。若将来有人把 la64 的 `.d` 代码复制过来，只要漏掉槽宽换算，
+汇编和链接都不会报错，只有真机运行才会错——而现在没有真机。
+
+### 6.6 `run` 目标故意报错
+
+`make -f example/la32_generic/Makefile run` 会打印一段说明并以退出码 1 结束：
+
+```
+ERROR: no LoongArch32 execution target is available.
+  - QEMU 9.2.3 ships only qemu-system-loongarch64; upstream has no
+    loongarch32 system emulator.
+  - There is no LA32 board on this machine either.
+  This target only verifies build + link: build/la32_generic/ark_la32_generic.elf
+```
+
+这是刻意的：宁可明确报错，也不给一个「看起来跑起来了」的错答案。
+
+### 6.7 哪些结论是从 la64 搬来的（未在 LA32 上验证）
+
+| 项 | 来源 | LA32 证据 |
+|---|---|---|
+| PRMD 位序（`PPLV[1:0]` / `PIE=bit2` ⇒ 回 PLV0 且开中断 = 0x4） | la64 QEMU 实测 | 无。`start.S`/`port.c` 按同一 `LA_PRMD_INIT` 写 |
+| 无软件自中断 ⇒ 就地切换 | la64 QEMU 实测（同代硬件语义） | 无 |
+| TIMER_HZ / RDTIME_HZ（100 MHz 计数、25 MHz 定时器） | la64 QEMU 实测 | 无。板级常量照搬，注释已标明 |
+| 地址映射 0x200000 起、UART @0x1FE001E0 | la64 QEMU virt 约定 | 无。接真实芯片必须重写 `.text` 起点与 `.data` LMA |
+| 构建告警 | — | 仅 14 条 `variably modified 'arkrtos_app_off_*_check'`（分区头既有写法，la64 同）+ 1 条 `'p_tsk' may be used uninitialized`（内核既有） |
+
+接上任何 LA32 载体（模拟器或芯片）时，先跑一遍 `example/la32_generic/main.c`
+的四组读数（500 ms 节拍、A/B 交替、`svc_ok`、无 `[dbg]`），才能把哪一条
+从「搬来的」改成「实测的」。
+
+## 7. 复现步骤
+
+### 7.1 RISC-V RV32
 
 ```bash
 cd "D:/工作/git_project/ark rtos/example/qemu_riscv32"
@@ -549,7 +679,7 @@ make size           # 打印 text/data/bss
 make run            # 启动 QEMU，串口写入 build/qemu_riscv32/out.txt
 ```
 
-### 6.2 LoongArch64
+### 7.2 LoongArch64
 
 ```bash
 cd "D:/工作/git_project/ark rtos"          # 注意：必须在仓库根目录
@@ -568,7 +698,26 @@ cd build/qemu_loongarch64
   -kernel ark_qemu_la64.elf
 ```
 
-两个目标都是无限循环，Ctrl-C 或终止进程结束，然后 `cat out.txt` 看输出。
+RV32 与 LoongArch64 这两个目标都是无限循环，Ctrl-C 或终止进程结束，
+然后 `cat out.txt` 看输出。
+
+### 7.3 LoongArch32（只到链接）
+
+```bash
+cd "D:/工作/git_project/ark rtos"          # 必须在仓库根目录
+make -f example/la32_generic/Makefile -j4
+make -f example/la32_generic/Makefile size
+make -f example/la32_generic/Makefile run   # **只会报错退出 1**，见 §6.6
+```
+
+没有串口文件可看——这个目标产出 ELF 就结束了。要核对「没有混进 64 位指令」：
+
+```bash
+D:/LoongIDE/la32-tool/bin/loongarch32-newlib-elf-objdump.exe -d \
+    build/la32_generic/ark_la32_generic.elf \
+  | grep -cE "\b(st\.d|ld\.d|addi\.d|lu32i\.d|lu52i\.d|pcalau12i)\b"
+# 期望输出 0
+```
 
 > 重链接前要确保没有 QEMU 进程占着 ELF，否则 `ld` 报
 > `cannot open output file ...: Invalid argument`（Windows 文件锁，不是链接脚本问题）。

@@ -478,7 +478,8 @@ void arkrtos_port_set_thread_priv(uint32 is_priv)
 * @param entry     任务入口
 * @return 帧指针（存入 task->stack_ptr）
 * @details 帧格式与 arkrtos_context.S 完全一致。任务第一次被恢复时会走
-*          「eentry 的恢复半段」：ERA←entry、PRMD←0x1（PIE=1、PPLV=0）、
+*          「eentry 的恢复半段」：ERA←entry、PRMD←LA_PRMD_INIT（PIE=1、
+*          PPLV=0，值为 0x4）、
 *          sp←stack_top，然后 ertn 跳进任务，此时 CRMD.IE 已经打开。
 *          ra 置 0：任务函数返回就等于跳到 0 取指，会立刻进致命异常，
 *          与 Cortex-M 版（LR=0）同一处理口径。

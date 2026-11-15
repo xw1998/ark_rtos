@@ -1,0 +1,79 @@
+/*
+ * Ark RTOS - LoongArch32 参考目标链接脚本模板
+ *
+ * 说明：几何与 la64 的 QEMU virt 版一致（镜像 2 MB 起、静态区 3 MB 起、
+ * DRAM 0x0..128 MB），因为本目标没有可运行的机器、只是为了让 ELF 具备完整
+ * 布局。**没有任何装载器真正跑过这份脚本**，接真实芯片时必须按芯片的
+ * 启动流程重写 .text 起点与 .data 的 LMA。
+ *
+ * 本文件由 C 预处理器展开，包含的是 gen_ldconsts.py 生成的一份"只有数值
+ * #define"的头文件（build/.../ldconsts.h）——那些数值来自
+ * config/arkrtos_partition.h 与板级配置头，与内核其它部分同源（分区头是
+ * 唯一允许出现物理地址的地方）。不直接 #include 分区头，是因为它含有 C 的
+ * 编译期断言，会被原样搬进 ld 脚本导致 `syntax error`。
+ *
+ * 内存模型：DRAM 从 0x0 起（128 MB），低 1 MB 归 boot_info（沿用 la64 的
+ * 约定），所以镜像从 2 MB 起链接（板级配置头里定），"Flash" 与 "RAM" 都是
+ * 同一片 DRAM 的两段，所以 .data 的 LMA 与 VMA 相同，不需要运行期搬运。
+ */
+
+#include "ldconsts.h"
+
+ENTRY(_start)
+
+/* 主栈（复位后到调度启动之间用）预留 64 KB，紧贴 RAM 顶端向低地址生长 */
+__ram_end       = (CHIP_RAM_BASE + CHIP_RAM_SIZE);
+__stack_reserve = (64 * 1024);
+
+SECTIONS
+{
+    /* ---- 代码与只读数据：内核镜像区间 ---- */
+    .text CHIP_FLASH_BASE :
+    {
+        KEEP(*(.text.start))          /* 复位入口必须落在分区首地址 */
+        *(.text .text.*)
+        *(.rodata .rodata.*)
+        *(.srodata .srodata.*)
+    }
+
+    . = ALIGN(16);
+    __text_end = .;
+
+    /* ---- 已初始化数据：内核 RAM 区间 ---- */
+    . = KERNEL_RAM_BASE;
+    .data : ALIGN(16)
+    {
+        __data_start = .;
+        *(.sdata .sdata.*)            /* gp 相对寻址的小数据（-msmall-data-limit） */
+        *(.data .data.*)
+        . = ALIGN(16);
+        __data_end = .;
+    }
+
+    /* ---- 未初始化数据（NOLOAD：不占 ELF 文件体积，由 start.S 清零） ---- */
+    .bss (NOLOAD) : ALIGN(16)
+    {
+        __bss_start = .;
+        *(.sbss .sbss.*)
+        *(.bss .bss.*)
+        *(COMMON)
+        . = ALIGN(16);
+        __bss_end = .;
+    }
+
+    /* LoongArch psABI 没有小数据基址寄存器（$r21 保留给 TLS），
+     * 因此这里不提供 __global_pointer$。 */
+
+    /* 主栈顶：RAM 末端 */
+    _stack_top = __ram_end;
+
+    /* 静态数据 + 主栈不得越过 RAM 末端 */
+    ASSERT(__bss_end + __stack_reserve <= __ram_end, "RAM overflow: .bss + stack exceeds CHIP_RAM")
+
+    /DISCARD/ :
+    {
+        *(.comment)
+        *(.note*)
+        *(.eh_frame*)
+    }
+}
