@@ -38,7 +38,8 @@
 #include "arkrtos_shell.h"     /* arkrtos_shell_init()：内核 Shell 控制台 */
 #include "arkrtos_blk.h"
 #include "arkrtos_ptable.h"    /* 分区表：崩溃日志按槽位记账，必须先于它初始化 */
-#include "arkrtos_crash.h"     /* 跨复位崩溃日志（ARKRTOS_USE_CRASH_LOG） */
+#include "arkrtos_crash.h"
+#include "arkrtos_guard.h"   /* 心跳窗口守卫（ARKRTOS_USE_KERNEL_GUARD） */     /* 跨复位崩溃日志（ARKRTOS_USE_CRASH_LOG） */
 #include "arkrtos_fs.h"
 #include "arkrtos_vfs.h"
 #include "drvblk.h"
@@ -645,6 +646,12 @@ int main(void)
 #if (ARKRTOS_USE_CRASH_LOG == 1)
     arkrtos_crash_init();
     arkrtos_crash_scan_apply();
+#endif
+
+    /* 内核守护：先声明「谁应该按时心跳」，再由任务自己打拍（arkrtos_guard_beat）。
+     * 开关关闭时 init/beat 都是空实现，这里的代价是零。 */
+#if (ARKRTOS_USE_KERNEL_GUARD == 1)
+    arkrtos_guard_init();
 #endif
 
     /* 块设备驱动在这里先注册（只登记描述符，不碰介质）；真正 init 交给

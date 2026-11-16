@@ -37,7 +37,8 @@ INCLUDES := -Ikernelsrc/include \
             -Ikernelsrc/fs/littlefs \
             -Ikernelsrc/components/ark_softbus/include \
             -Ikernelsrc/components/ark_softbus/src \
-            -Ikernelsrc/components/ark_softbus/port
+            -Ikernelsrc/components/ark_softbus/port \
+            -I$(BUILD)
 
 # ark_softbus MCU 档位（清单见 kernelsrc/include/arkrtos_softbus.h 顶部注释）。
 # 默认值与工程值必须同档，否则 arkrtos_softbus.h 里有 #error 闸门。
@@ -49,12 +50,25 @@ ARK_BUS_FLAGS := -DARK_BUS_MAX_TOPICS=12 -DARK_BUS_MAX_DEVICES=4 \
                  -DARK_BUS_STREAM_TX_SLOTS=1 -DARK_BUS_STREAM_RX_SLOTS=1 \
                  -DARK_BUS_STREAM_RX_MAX=256 -DARK_BUS_STREAM_MAX_BYTES=256
 
+# 默认目标显式写成 all：下面的密钥生成规则排在 all 之前，
+# 不写这句 make 会把第一个出现的规则当成默认目标。
+.DEFAULT_GOAL := all
+
+# 镜像签名用的测试密钥（32 字节，值 0x00..0x1F，与 tools/sign_host_gate.py 的 KEY 一致）。
+# 生成在构建目录里、不进仓库（.gitignore 忽略 *_sign_key_local.h）。
+# 走 ARKRTOS_SIGN_KEY_LOCAL 通道而不是 -D 直接给初值：bash 会对花括号做展开。
+SIGNKEY := $(BUILD)/arkrtos_sign_key_local.h
+
+$(SIGNKEY):
+	@mkdir -p $(BUILD)
+	@printf '#ifndef ARKRTOS_SIGN_KEY_LOCAL_H\n#define ARKRTOS_SIGN_KEY_LOCAL_H\n#define ARKRTOS_IMAGE_SIGN_KEY { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F }\n#endif\n' > $@ ;
+
 CFLAGS := $(ARCH_FLAGS) -g -O2 -ffreestanding -fno-common -nostdlib -nostartfiles \
           -fno-builtin -ffunction-sections -fdata-sections -Wall -MMD -MP \
           -DARKRTOS_BOARD_CONFIG='"arkrtos_board_config.h"' \
           -include arkrtos_board_config.h \
           -DLFS_NO_MALLOC -DLFS_NO_ASSERT -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR \
-          $(ARK_BUS_FLAGS) \
+          $(ARK_BUS_FLAGS) -DARKRTOS_SIGN_KEY_LOCAL=1 \
           -DMDK_TRACE_ENABLE=1 -DMDK_TRACE_BACKEND_BUFF=1 \
           -DMDK_TRACE_USE_RDTIME=1 -DMDK_TRACE_CPU_HZ=10000000u
 ASFLAGS := $(ARCH_FLAGS) -g
@@ -112,6 +126,9 @@ SRCS_S := \
 	example/qemu_riscv32/start.S
 
 OBJS := $(addprefix $(BUILD)/,$(addsuffix .o,$(basename $(SRCS_C) $(SRCS_S))))
+
+# 密钥头变了就重编：它被 arkrtos_features.h 间接包含。
+$(OBJS): $(SIGNKEY)
 
 .PHONY: all clean run size disasm
 

@@ -107,7 +107,7 @@
 
 /* 心跳合同：QEMU 没有看门狗，守卫真咬人的前提不存在，直接关掉。 */
 #undef  ARKRTOS_USE_KERNEL_GUARD
-#define ARKRTOS_USE_KERNEL_GUARD     0
+#define ARKRTOS_USE_KERNEL_GUARD     1
 #undef  ARKRTOS_WDG_ENABLE
 #define ARKRTOS_WDG_ENABLE           0
 
@@ -159,7 +159,7 @@
 #undef  ARKRTOS_USE_FLASHAPP
 #define ARKRTOS_USE_FLASHAPP         0
 #undef  ARKRTOS_USE_IMAGE_SIGN
-#define ARKRTOS_USE_IMAGE_SIGN       0
+#define ARKRTOS_USE_IMAGE_SIGN       1
 #undef  ARKRTOS_USE_QSPI
 #define ARKRTOS_USE_QSPI             0
 #undef  ARKRTOS_AUTOMOUNT_NOR
@@ -187,7 +187,7 @@
 #undef  ARKRTOS_USE_SECCHECK
 #define ARKRTOS_USE_SECCHECK         1
 #undef  ARKRTOS_HW_SAFE
-#define ARKRTOS_HW_SAFE              0
+#define ARKRTOS_HW_SAFE              1
 
 /* 单核：SMP 关掉（QEMU 能给多核，后续做 SMP 验证时再开） */
 #undef  ARKRTOS_USE_SMP

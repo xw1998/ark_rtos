@@ -39,6 +39,7 @@
 #include "arkrtos_shell.h"     /* arkrtos_shell_init()：内核 Shell 控制台 */
 #include "arkrtos_ptable.h"
 #include "arkrtos_crash.h"
+#include "arkrtos_guard.h"   /* 心跳窗口守卫（ARKRTOS_USE_KERNEL_GUARD） */
 #include "drvblk.h"
 
 /* 任务栈：RISC-V 没有硬件压栈，只有软件帧，512 字（2 KB）很宽裕。
@@ -637,6 +638,12 @@ int main(void)
 #if (ARKRTOS_USE_CRASH_LOG == 1)
     arkrtos_crash_init();
     arkrtos_crash_scan_apply();
+#endif
+
+    /* 内核守护：先声明「谁应该按时心跳」，再由任务自己打拍（arkrtos_guard_beat）。
+     * 开关关闭时 init/beat 都是空实现，这里的代价是零。 */
+#if (ARKRTOS_USE_KERNEL_GUARD == 1)
+    arkrtos_guard_init();
 #endif
 
     /* 信号量表由 kernel_module_init() 里的同步模块初始化，所以在这里创建 */

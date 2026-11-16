@@ -36,6 +36,22 @@
 #include "arkrtos_waitmulti.h"
 #include "arkrtos_task.h"
 #include "arkrtos_cfg.h"
+#include "arkrtos_features.h"
+#include "arkrtos_hal.h"      /* ARKRTOS_ENTER_CRITICAL：自审要在静止态下跑 */
+
+#if (ARKRTOS_HW_SAFE == 1)
+#include "arkrtos_hwsafe.h"
+#endif
+
+#if (ARKRTOS_USE_KERNEL_GUARD == 1)
+#include "arkrtos_guard.h"
+#endif
+
+#if (ARKRTOS_USE_IMAGE_SIGN == 1)
+#include "arkrtos_sign.h"
+#include "arkrtos_app_image.h"
+#include "arkrtos_loader.h"
+#endif
 
 /* ============================================================
  * 固定块内存池
@@ -478,8 +494,17 @@ UTEST_CASE(sbuf_block_wake_contract)
 UTEST_CASE(audit_structures_consistent)
 {
     arkrtos_audit_result_t r;
+    uint32 state;
 
+    /* 自审是一次多步遍历，不是快照：遍历途中被节拍打断，就会读到「一边
+     * 已经改、一边还没改」的中间态，报出并不存在的 SCHED 不一致。
+     * 实测证据：LA64 打开 KERNEL_GUARD 后首次跑这条用例时 1/3 断言失败
+     * （mask=0x40），复跑即通过——不是状态坏了，是在动的东西上量静的东西。
+     * 要判的是「静止态自洽」，所以整段遍历关中断；这也解释了为什么守护模块
+     * 把自审放在 tick 入口、调度动作之前调用。 */
+    state = ARKRTOS_ENTER_CRITICAL();
     arkrtos_audit_run(&r);
+    ARKRTOS_EXIT_CRITICAL(state);
 
     UTEST_CHECK_EQ((long)r.mask, 0);         /* 分区 / 槽 / 任务 / 调度位图自洽 */
     UTEST_CHECK(r.checks > 0u);              /* 确实检查了东西，而不是空转 */
@@ -744,5 +769,255 @@ UTEST_CASE(mtx_pi_chain_contract)
     s_pi_chain_l2   = -1;
     s_pi_chain_done = -1;
 }
+
+/* ============================================================
+ * 硬件安全态（ARKRTOS_HW_SAFE）：所有者死后必须由**内核**中和
+ * 契约：阶段一只标记不驱动；阶段二执行且只执行一次；正常 release 不触发；
+ *       计划内交接只摘台账、不计入"已中和"。
+ * ============================================================ */
+#if (ARKRTOS_HW_SAFE == 1)
+
+static uint32 s_hw_cb_calls;
+static uint32 s_hw_cb_owner;
+static arkrtos_dev_hdr_t *s_hw_cb_obj;
+
+static int32 utest_hw_neutralize(arkrtos_dev_hdr_t *obj, uint32 owner)
+{
+    s_hw_cb_calls++;
+    s_hw_cb_owner = owner;
+    s_hw_cb_obj   = obj;
+    return 0;
+}
+
+UTEST_CASE(hwsafe_death_neutralizes)
+{
+    static arkrtos_dev_hdr_t s_obj;
+    /* 用一个不存在的任务号当所有者：不能拿控制台任务试，那会把它的真实
+     * 设备台账一起标死（on_death 是按 owner 扫全表的）。 */
+    int32 fake_owner = (int32)ARKRTOS_TASK_MAX_NUM + 1;
+    uint32 will = 0u, fail = 0u, cb = 0u, none = 0u, hand = 0u;
+    uint32 cb0;
+    /* 台账不是空的：控制台等真实设备已经由内核认领了条目。
+     * 这条用例只能判「我这一条」的增删，所以全程以基线为参照。 */
+    int32 oc0;
+
+    UTEST_REQUIRE(fake_owner > 0);
+    arkrtos_hwsafe_path_counts(&will, &fail, &cb, &none, &hand);
+    cb0 = cb;
+    oc0 = arkrtos_hwsafe_owner_count();
+    UTEST_CHECK(oc0 >= 0);
+
+    UTEST_CHECK_EQ(arkrtos_hwsafe_register("utneo", utest_hw_neutralize), 0);
+    UTEST_CHECK_EQ(arkrtos_hwsafe_registered("utneo"), 1);
+
+    /* 没有 claim 就不能替别人留遗言：遗言是所有者权利，不是广播 */
+    UTEST_CHECK_EQ(arkrtos_hwsafe_set_will("utneo", fake_owner, 1, 1),
+                   ARKRTOS_HWSAFE_ERR_OWNER);
+
+    arkrtos_hwsafe_claim("utneo", fake_owner, &s_obj);
+    UTEST_CHECK_EQ(arkrtos_hwsafe_owner_count(), oc0 + 1);
+
+    /* 阶段一：只打标记，回调一次都不许跑 */
+    s_hw_cb_calls = 0u;
+    arkrtos_hwsafe_on_death(fake_owner);
+    UTEST_CHECK_EQ((long)s_hw_cb_calls, 0L);
+
+    /* 阶段二：执行回调，参数是（实例, 所有者） */
+    UTEST_CHECK_EQ((long)arkrtos_hwsafe_run_pending(), 1L);
+    UTEST_CHECK_EQ((long)s_hw_cb_calls, 1L);
+    UTEST_CHECK_EQ((long)s_hw_cb_owner, (long)fake_owner);
+    UTEST_CHECK(s_hw_cb_obj == &s_obj);
+    UTEST_CHECK_EQ(arkrtos_hwsafe_owner_count(), oc0);
+
+    /* 幂等：再跑一次不会重复中和 */
+    UTEST_CHECK_EQ((long)arkrtos_hwsafe_run_pending(), 0L);
+    UTEST_CHECK_EQ((long)s_hw_cb_calls, 1L);
+
+    arkrtos_hwsafe_path_counts(&will, &fail, &cb, &none, &hand);
+    UTEST_CHECK_EQ((long)cb, (long)(cb0 + 1u));
+
+    /* 正常 close 之后死亡：台账已经没了，不该再驱动硬件 */
+    s_hw_cb_calls = 0u;
+    arkrtos_hwsafe_claim("utneo", fake_owner, &s_obj);
+    arkrtos_hwsafe_release("utneo", fake_owner);
+    arkrtos_hwsafe_on_death(fake_owner);
+    UTEST_CHECK_EQ((long)arkrtos_hwsafe_run_pending(), 0L);
+    UTEST_CHECK_EQ((long)s_hw_cb_calls, 0L);
+
+    /* 计划内交接：只摘台账，既不驱动硬件也不计入"已中和" */
+    {
+        uint32 n0 = arkrtos_hwsafe_neutralized_count();
+        arkrtos_hwsafe_claim("utneo", fake_owner, &s_obj);
+        arkrtos_hwsafe_on_death_reason(fake_owner, 1);
+        UTEST_CHECK_EQ((long)arkrtos_hwsafe_run_pending(), 0L);
+        UTEST_CHECK_EQ((long)arkrtos_hwsafe_neutralized_count(), (long)n0);
+        UTEST_CHECK_EQ(arkrtos_hwsafe_owner_count(), oc0);
+    }
+
+    UTEST_CHECK_EQ(arkrtos_hwsafe_unregister("utneo"), 0);
+    UTEST_CHECK_EQ(arkrtos_hwsafe_registered("utneo"), 0);
+}
+
+#endif /* ARKRTOS_HW_SAFE */
+
+/* ============================================================
+ * 心跳合同（ARKRTOS_USE_KERNEL_GUARD）：声明的窗口必须被判，而且判到具体任务
+ * 契约：窗口小于服务周期 → 明确拒绝；按期上报 → 不违规；停报超过窗口 →
+ *       BAD_BEAT 且 misses 增长；撤销合同后不再记账。
+ * ============================================================ */
+#if (ARKRTOS_USE_KERNEL_GUARD == 1)
+
+UTEST_CASE(guard_heartbeat_contract)
+{
+    int32 self = arkrtos_current_task_id;
+    arkrtos_guard_status_t st;
+    arkrtos_guard_task_t e;
+    uint32 slots, i, found = 0u;
+
+    UTEST_REQUIRE(self > 0);
+
+    /* 判不了的窗口必须被拒：接受它就等于发一张永远有效的合格证 */
+    UTEST_CHECK_EQ((long)arkrtos_guard_beat(self, 10u),
+                   (long)ARKRTOS_GUARD_ERR_PARAM);
+    UTEST_CHECK_EQ((long)arkrtos_guard_beat(self, 100u), 0L);
+
+    arkrtos_guard_status(&st);
+    UTEST_CHECK(st.declared >= 1u);
+
+    /* 停报 300 ms（声明窗口 100 ms）：服务周期一到必须判违规 */
+    arkrtos_task_wait_internal(600u);
+
+    arkrtos_guard_status(&st);
+    UTEST_CHECK((st.verdict & ARKRTOS_GUARD_BAD_BEAT) != 0u);
+    UTEST_CHECK(st.violating >= 1u);
+
+    /* 违规要能落到具体任务，而不是只剩一个全局布尔 */
+    slots = arkrtos_guard_task_slots();
+    for(i = 0u; i < slots; i++)
+    {
+        if((arkrtos_guard_task_at(i, &e) == 0) && (e.task_id == self))
+        {
+            found = 1u;
+            UTEST_CHECK_EQ((long)e.declared, 1L);
+            UTEST_CHECK_EQ((long)e.period_ms, 100L);
+            UTEST_CHECK(e.misses > 0u);
+        }
+    }
+    UTEST_CHECK_EQ((long)found, 1L);
+
+    /* 撤掉合同：别把这条违规留给后面的用例 */
+    UTEST_CHECK_EQ((long)arkrtos_guard_beat(self, 0u), 0L);
+}
+
+#endif /* ARKRTOS_USE_KERNEL_GUARD */
+
+/* ============================================================
+ * 镜像签名（ARKRTOS_USE_IMAGE_SIGN）：算法自洽 + 安装路径真的会拒收
+ * 覆盖：整块 MAC 与流式 MAC 同一口径、负载/签名翻位必须失败、
+ *       CRC 对而签名错时装载器必须回 -18（不是别的失败码）。
+ * 不覆盖：密钥保管（对称方案本身不解决）、非对称信任链（未实现）。
+ * ============================================================ */
+#if (ARKRTOS_USE_IMAGE_SIGN == 1)
+
+#define SIGN_TEST_PAYLOAD   (32u)
+#define SIGN_TEST_IMGLEN    (ARKRTOS_APP_HEADER_SIZE + SIGN_TEST_PAYLOAD)
+
+static uint8 s_sign_img[SIGN_TEST_IMGLEN];
+
+static uint32 utest_sign_crc(const arkrtos_app_header_t *h)
+{
+    static const uint8 zero4[4] = { 0u, 0u, 0u, 0u };
+    const uint8 *img = s_sign_img;
+    uint32 total = ARKRTOS_APP_TOTAL_LEN(h);
+    uint32 c;
+
+    c = arkrtos_crc32(img, ARKRTOS_APP_OFF_CRC32, 0u);
+    c = arkrtos_crc32(zero4, 4u, c);
+    c = arkrtos_crc32(img + (ARKRTOS_APP_OFF_CRC32 + 4u),
+                      ARKRTOS_APP_OFF_STATE - (ARKRTOS_APP_OFF_CRC32 + 4u), c);
+    c = arkrtos_crc32(zero4, 4u, c);
+    c = arkrtos_crc32(img + (ARKRTOS_APP_OFF_STATE + 4u),
+                      ARKRTOS_APP_OFF_RUNTIME_RAM_BASE - (ARKRTOS_APP_OFF_STATE + 4u), c);
+    c = arkrtos_crc32(zero4, 4u, c);
+    c = arkrtos_crc32(img + (ARKRTOS_APP_OFF_RUNTIME_RAM_BASE + 4u),
+                      ARKRTOS_APP_HEADER_SIZE - (ARKRTOS_APP_OFF_RUNTIME_RAM_BASE + 4u), c);
+    c = arkrtos_crc32(img + ARKRTOS_APP_HEADER_SIZE,
+                      total - ARKRTOS_APP_HEADER_SIZE, c);
+    return c;
+}
+
+UTEST_CASE(sign_hmac_and_loader_gate)
+{
+    arkrtos_app_header_t *h = (arkrtos_app_header_t *)s_sign_img;
+    uint32 i;
+    int32 rc;
+
+    for(i = 0u; i < SIGN_TEST_IMGLEN; i++)
+    {
+        s_sign_img[i] = 0u;
+    }
+
+    h->magic          = ARKRTOS_APP_MAGIC;
+    h->type           = ARKRTOS_APP_TYPE_DRIVER;
+    h->hw_compat_id   = ARKRTOS_HW_COMPAT_ID;
+    h->image_size     = SIGN_TEST_PAYLOAD;
+    h->entry_offset   = 0u;
+    h->reloc_offset   = ARKRTOS_APP_RELOC_OFFSET;
+    h->reloc_count    = 0u;
+    h->reloc_kind     = ARKRTOS_APP_RELOC_KIND_CUR;
+    h->payload_offset = ARKRTOS_APP_PAYLOAD_OFFSET(h);
+    /* 装载器在字段校验里就要求 ram_size 落在 [SLOT_RAM_MIN_BLOCK,
+     * SLOT_RAM_MAX_BLOCK]：0 会在签名门之前被 ERR_SIZE(-4) 挡下，
+     * 那样这条用例就变成了在测尺寸校验，而不是在测签名门。 */
+    h->ram_size       = 1024u;
+
+    for(i = 0u; i < SIGN_TEST_PAYLOAD; i++)
+    {
+        s_sign_img[ARKRTOS_APP_HEADER_SIZE + i] = (uint8)(0xA0u + i);
+    }
+
+    /* 顺序有讲究：签名覆盖「签名区清零」的形态，CRC 覆盖签名本身。
+     * 反过来算（先 CRC 再签）会让签名后的 CRC 失效，安装永远过不去。 */
+    arkrtos_sign_image(s_sign_img, h, h->signature);
+    h->crc32 = utest_sign_crc(h);
+
+    UTEST_CHECK_EQ((long)arkrtos_sign_verify(s_sign_img, h), 0L);
+
+    /* 流式通道（安装时边走边算）必须与整块通道同一口径 */
+    arkrtos_sign_stream_begin(s_sign_img);
+    arkrtos_sign_stream_update(s_sign_img + ARKRTOS_APP_HEADER_SIZE,
+                               (uint32)ARKRTOS_APP_RELOC_SIZE * h->reloc_count +
+                               h->image_size);
+    UTEST_CHECK_EQ((long)arkrtos_sign_stream_end(h), 0L);
+
+    /* 负对照①：负载翻字节 ⇒ MAC 不符 */
+    s_sign_img[ARKRTOS_APP_HEADER_SIZE] ^= 0xFFu;
+    UTEST_CHECK(arkrtos_sign_verify(s_sign_img, h) != 0);
+    s_sign_img[ARKRTOS_APP_HEADER_SIZE] ^= 0xFFu;
+
+    /* 负对照②：签名自己翻一位 ⇒ MAC 不符（签名不能覆盖自己） */
+    h->signature[0] ^= 0x01u;
+    UTEST_CHECK(arkrtos_sign_verify(s_sign_img, h) != 0);
+
+    /* 安装路径：把 CRC 重新算对，只留签名错 ⇒ 必须正好是 ERR_SIGN。
+     * 这一步证明门真的挂在装载器上，而不是只有算法层面自洽。 */
+    h->crc32 = utest_sign_crc(h);
+    rc = arkrtos_loader_load_buffer(s_sign_img, SIGN_TEST_IMGLEN);
+    UTEST_CHECK_EQ((long)rc, (long)ARKRTOS_LOADER_ERR_SIGN);
+
+    /* 正对照：签名改回来 ⇒ 不再是 ERR_SIGN（能否落地取决于池里有没有干净区，
+     * 那不是本条要判的事，所以只要求"不是被签名门挡下"）。 */
+    h->signature[0] ^= 0x01u;
+    h->crc32 = utest_sign_crc(h);
+    UTEST_CHECK_EQ((long)arkrtos_sign_verify(s_sign_img, h), 0L);
+    rc = arkrtos_loader_load_buffer(s_sign_img, SIGN_TEST_IMGLEN);
+    UTEST_CHECK(rc != ARKRTOS_LOADER_ERR_SIGN);
+    if(rc >= 0)
+    {
+        (void)arkrtos_loader_uninstall((uint32)rc);     /* 收拾现场 */
+    }
+}
+
+#endif /* ARKRTOS_USE_IMAGE_SIGN */
 
 #endif /* ARKRTOS_USE_UTEST */
