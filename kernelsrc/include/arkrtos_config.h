@@ -89,6 +89,24 @@
 #endif
 
 /* ============================================================
+ * 隔离后端一致性守卫
+ * @details 两个后端只能选一个：窗口（USE_MPU）或页表（USE_PAGING）。
+ *          这里不做自动降级：任何矛盾配置都在编译期报错，避免出现
+ *          「说是分页保护、实际连 MPU 都没开」的假安全。
+ * ============================================================ */
+#if (ARKRTOS_USE_PAGING == 1)
+#if (ARKRTOS_ARCH_HAS_PAGING_HW != 1)
+#error "ARKRTOS_USE_PAGING=1 但本核心没有页表/TLB（见 arkrtos_arch.h 的 HAS_PAGING_HW）"
+#endif
+#if (ARKRTOS_USE_MPU == 1)
+#error "ARKRTOS_USE_PAGING=1 与 ARKRTOS_USE_MPU=1 互斥：同一时刻只能有一个隔离后端"
+#endif
+#if (ARKRTOS_USE_PRIV != 1)
+#error "ARKRTOS_USE_PAGING=1 需要 ARKRTOS_USE_PRIV=1：页表隔离靠特权级（PLV/U 态）落地"
+#endif
+#endif
+
+/* ============================================================
  * MPU peripheral windows (only used when ARKRTOS_USE_MPU == 1)
  * @details Unprivileged tasks may reach peripheral registers only through
  *          these two windows. 0 = window disabled by default; the real

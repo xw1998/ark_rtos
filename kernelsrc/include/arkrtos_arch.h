@@ -108,46 +108,60 @@
 #define ARKRTOS_ARCH_HAS_MPU           (1)
 #define ARKRTOS_ARCH_HAS_PRIV          (1)
 #define ARKRTOS_ARCH_HAS_PAGING        (0)     /* ARMv7-M 无页表，隔离由 MPU 提供 */
+#define ARKRTOS_ARCH_HAS_PAGING_HW     (0)     /* 硬件能力：ARMv7-M 无 TLB/页表 */
 #define ARKRTOS_ARCH_SVC_NUM_BITS      (8)     /* SVC 指令携带 8 位立即数 */
 #elif (ARKRTOS_ARCH_CORE == ARKRTOS_CPU_CORE_CORTEX_M4)
 #define ARKRTOS_ARCH_HAS_FPU           (1)
 #define ARKRTOS_ARCH_HAS_MPU           (1)
 #define ARKRTOS_ARCH_HAS_PRIV          (1)
 #define ARKRTOS_ARCH_HAS_PAGING        (0)     /* ARMv7-M 无页表，隔离由 MPU 提供 */
+#define ARKRTOS_ARCH_HAS_PAGING_HW     (0)     /* 硬件能力：ARMv7-M 无 TLB/页表 */
 #define ARKRTOS_ARCH_SVC_NUM_BITS      (8)
 #elif (ARKRTOS_ARCH_CORE == ARKRTOS_CPU_CORE_CORTEX_M7)
 #define ARKRTOS_ARCH_HAS_FPU           (1)
 #define ARKRTOS_ARCH_HAS_MPU           (1)
 #define ARKRTOS_ARCH_HAS_PRIV          (1)
 #define ARKRTOS_ARCH_HAS_PAGING        (0)     /* ARMv7-M 无页表，隔离由 MPU 提供 */
+#define ARKRTOS_ARCH_HAS_PAGING_HW     (0)     /* 硬件能力：ARMv7-M 无 TLB/页表 */
 #define ARKRTOS_ARCH_SVC_NUM_BITS      (8)
 #elif (ARKRTOS_ARCH_CORE == ARKRTOS_CPU_CORE_RV32IMAC)
 #define ARKRTOS_ARCH_HAS_FPU           (0)
 #define ARKRTOS_ARCH_HAS_MPU           (1)     /* 由 PMP 提供物理内存保护 */
 #define ARKRTOS_ARCH_HAS_PRIV          (1)
-#define ARKRTOS_ARCH_HAS_PAGING        (0)     /* 无页表部件 */
+#define ARKRTOS_ARCH_HAS_PAGING        (0)     /* 本 port 不用分页，隔离由 PMP 窗口提供 */
+#define ARKRTOS_ARCH_HAS_PAGING_HW     (0)     /* RV32IMAC 属 MCU 档，无 MMU */
 #define ARKRTOS_ARCH_SVC_NUM_BITS      (-1)    /* ecall 无立即数，号由寄存器传递 */
 #elif (ARKRTOS_ARCH_CORE == ARKRTOS_CPU_CORE_RV64GC)
 #define ARKRTOS_ARCH_HAS_FPU           (1)
 #define ARKRTOS_ARCH_HAS_MPU           (1)
 #define ARKRTOS_ARCH_HAS_PRIV          (1)
-#define ARKRTOS_ARCH_HAS_PAGING        (0)     /* 无页表部件 */
+#define ARKRTOS_ARCH_HAS_PAGING        (0)     /* 本 port 尚未启用分页（登记为欠账） */
+#define ARKRTOS_ARCH_HAS_PAGING_HW     (1)     /* RV64GC 标配 Sv39/Sv48：MMU 是硬件事实 */
 #define ARKRTOS_ARCH_SVC_NUM_BITS      (-1)
 #elif (ARKRTOS_ARCH_CORE == ARKRTOS_CPU_CORE_LA32)
 #define ARKRTOS_ARCH_HAS_FPU           (0)
 #define ARKRTOS_ARCH_HAS_MPU           (1)     /* 由页表 / 地址窗口提供隔离 */
 #define ARKRTOS_ARCH_HAS_PRIV          (1)
 #define ARKRTOS_ARCH_HAS_PAGING        (1)     /* LoongArch 自带 TLB/页表，隔离靠分页 + PLV */
+#define ARKRTOS_ARCH_HAS_PAGING_HW     (1)
 #define ARKRTOS_ARCH_SVC_NUM_BITS      (15)    /* syscall 指令携带 15 位 code */
 #elif (ARKRTOS_ARCH_CORE == ARKRTOS_CPU_CORE_LA64)
 #define ARKRTOS_ARCH_HAS_FPU           (1)
 #define ARKRTOS_ARCH_HAS_MPU           (1)
 #define ARKRTOS_ARCH_HAS_PRIV          (1)
 #define ARKRTOS_ARCH_HAS_PAGING        (1)     /* LoongArch 自带 TLB/页表，隔离靠分页 + PLV */
+#define ARKRTOS_ARCH_HAS_PAGING_HW     (1)
 #define ARKRTOS_ARCH_SVC_NUM_BITS      (15)
 #else
 #error "未知 CPU 核心，请在 arkrtos_arch.h 中补充能力派生"
 #endif
+
+/* ARKRTOS_ARCH_HAS_PAGING_HW is the hardware fact: does this core have a
+ * TLB / page table at all? It must never be read as "this build is protected
+ * by paging". Whether the build uses paging is ARKRTOS_USE_PAGING (Kconfig,
+ * default 0), and that is the only thing arkrtos_sec.c reads.
+ * ARKRTOS_ARCH_HAS_PAGING keeps its historical meaning for existing code.
+ */
 
 /* 系统调用参数个数上限（a0~a3 / r0~r3），内核按此约定存取 */
 #define ARKRTOS_ARCH_SVC_ARG_MAX       (4)

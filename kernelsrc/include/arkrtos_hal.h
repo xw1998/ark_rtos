@@ -388,6 +388,53 @@ void arkrtos_port_mpu_set_idle(void);
 
 #endif
 
+/* ============================================================
+ * 分页隔离后端（MMU）
+ * @brief 当 ARKRTOS_USE_PAGING=1 时，隔离契约（arkrtos_mpu_* 五个入口）
+ *        由 arkrtos_paging.c 实现，底层落到这四个 port 接口。
+ *        窗口后端（arkrtos_port_mpu_*）此时不参与编译，两者互斥，
+ *        由 arkrtos_config.h 的三条 #error 拦下。
+ *
+ *        与窗口后端的区别必须写清楚：窗口后端"改一次寄存器就换了权限"，
+ *        分页后端动的是地址翻译，撤销一段映射的代价远大于改寄存器。
+ *        因此这里的 check() 是**审计**语义（这段跨度有没有映射、权限够不够），
+ *        返回 -1 表示"这段地址在这套静态映射下过不去"，调用方负责计数上报，
+ *        不得把它当成可通过。
+ * ============================================================ */
+#if (ARKRTOS_USE_PAGING == 1)
+
+/** @brief 建立/确认分页映射
+ *  @return 0 = 映射可用；-1 = 本 port 不具备分页通路
+ *  @details LoongArch 的静态映射在 la_mmu_init() 里建好（开中断之前），
+ *           本函数只报告那份映射是否已经生效，不重建它。 */
+int32 arkrtos_port_paging_init(void);
+
+/** @brief 审计一段地址跨度
+ *  @param base 起始虚拟地址
+ *  @param size 字节数
+ *  @param mem  期望的内存属性（取自 arkrtos_mpu_mem_t）
+ *  @return 0 = 已映射且权限满足；-1 = 未映射 / 权限不足 / 该属性本 port 无对应窗口 */
+int32 arkrtos_port_paging_check(uint32 base, uint32 size, arkrtos_mpu_mem_t mem);
+
+/** @brief 追加一条动态映射（VA -> PA）
+ *  @return 0 = 已建立；-1 = 本 port 未实现
+ *  @details 动态映射是登记欠账，这里不假装支持。 */
+int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_t mem);
+
+/** @brief 让一段地址的翻译失效
+ *  @details 静态映射从不撤销，所以本 port 是空操作；留这个口是为了让
+ *           将来真做动态重映射时有地方落，而不是到时候改契约。 */
+void arkrtos_port_paging_flush(uint32 base, uint32 size);
+
+#else
+
+#define arkrtos_port_paging_init()                 (-1)
+#define arkrtos_port_paging_check(base, size, mem) (-1)
+#define arkrtos_port_paging_alias(va, pa, mem)     (-1)
+#define arkrtos_port_paging_flush(base, size)
+
+#endif
+
 
 /* ============================================================
  * 自旋锁 API（内核/驱动侧）

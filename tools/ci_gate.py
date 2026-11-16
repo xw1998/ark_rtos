@@ -1169,6 +1169,28 @@ def check_swap_syntax():
     else:
         fail("swap", txt[-260:])
 
+def check_paging_switch():
+    """Isolation backend switch must actually switch (both directions).
+
+    ARKRTOS_USE_PAGING picks between two implementations of one contract:
+    off = arkrtos_mpu.c (window backend), on = arkrtos_paging.c (page table).
+    Whichever side is off is an empty translation unit, so a default build
+    never sees the other half -- the same false-green shape as seccheck / swap.
+    Three ways that goes wrong silently: the paging body does not compile, the
+    switch is not wired (paging字面上打开、跑的仍是窗口后端), or the three
+    #error guards in arkrtos_config.h are decoration and a build with no TLB
+    requests paging anyway.  tools/paging_gate.py turns all three into a
+    reading with the real LA64 and RV32 cross compilers; a missing compiler is
+    a FAIL, not a skip.  Not covered: whether the isolation actually holds on
+    a board (that needs QEMU / hardware, see docs/内存保护与App越权验证.md).
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "paging_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "PAGING-GATE OK" in txt:
+        ok("paging", "default off + LA64 ON compiles (2 TUs) + 2 negative cases refused")
+    else:
+        fail("paging", txt[-260:])
+
 def check_features_switches():
     """Every gate in arkrtos_features.h must be declared in Kconfig.
 
@@ -1273,6 +1295,7 @@ def main(argv):
     check_seccheck_syntax()
     check_sign_host()
     check_swap_syntax()
+    check_paging_switch()
     if do_build:
         check_builds(uv4)
 

@@ -103,6 +103,25 @@ config ARKRTOS_USE_MPU_APPLY_CACHE
 	help
 	  Skip rewriting the MPU registers when a task re-enters unchanged.
 
+config ARKRTOS_USE_PAGING
+	bool "Paging isolation backend (MMU)"
+	default n
+	help
+	  Pick which implementation answers the isolation contract
+	  (arkrtos_mpu_module_init/_build_task/_set_app/_set_idle/_reset):
+	  off = window backend (arkrtos_mpu.c: ARM MPU / RISC-V PMP),
+	  on  = page-table backend (arkrtos_paging.c: TLB + PLV).
+	  The two are mutually exclusive and arkrtos_config.h rejects a build
+	  that sets both, that asks for paging on a core without a TLB
+	  (ARKRTOS_ARCH_HAS_PAGING_HW == 0), or that asks for paging without
+	  ARKRTOS_USE_PRIV - paging isolation lands in the privilege level, so
+	  it cannot work without it.  Nothing is downgraded silently.
+	  The paging backend itself is static: one map built before interrupts
+	  come up, ASID fixed at 0, no per-task page table, no page-frame
+	  allocator, no demand paging, no copy_from_user.  Its measured
+	  increment is an audit of every TCB window against the mapped spans,
+	  reported as counters, plus iso=2 in the security self-check.
+
 endmenu
 
 menu "Synchronisation and IPC"

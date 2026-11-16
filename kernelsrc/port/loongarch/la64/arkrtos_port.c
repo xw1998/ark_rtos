@@ -593,6 +593,127 @@ static void la_frame_apply_priv(la_frame_word *frame)
 #endif /* ARKRTOS_USE_PRIV == 1 */
 
 /* ============================================================
+ * 分页隔离后端（ARKRTOS_USE_PAGING=1）
+ * @brief 给 arkrtos_paging.c 提供四个 port 接口。
+ * @details 本 port 的映射是**静态**的：la_mmu_init() 在开中断之前把
+ *          内核低 16 MB、内核 UART、App 2 MB（PLV3）、App UART 别名
+ *          四条填进 TLB，此后不再变动。任务切换只换 PLV（帧里的
+ *          PRMD.PPLV），不换页表、不改 ASID。所以这里的 check() 是
+ *          **审计**：查一段跨度是否落在那几条条目里、权限够不够。
+ *          它不能撤销任何东西 —— 撤销需要动态地址空间，登记为欠账。
+ * ============================================================ */
+#if (ARKRTOS_USE_PAGING == 1)
+
+/* 跨度表：与 la_mmu_init() 里的 la_tlb_fill() 调用一一对应。
+ * mem 是允许的属性位掩码（位号 = arkrtos_mpu_mem_t 枚举值）。 */
+#define LA_PG_BIT(m)            (1u << (uint32)(m))
+
+typedef struct {
+    uint32 base;
+    uint32 size;
+    uint32 mem;                 /* allowed arkrtos_mpu_mem_t kinds */
+} la_pg_span_t;
+
+static const la_pg_span_t s_pg_spans[] = {
+    /* 内核恒等映射 0x00000000~0x00FFFFFF：PLV0、可读写、可执行 */
+    { 0x00000000u, 16u * 1024u * 1024u,
+      LA_PG_BIT(ARKRTOS_MPU_MEM_ROM) | LA_PG_BIT(ARKRTOS_MPU_MEM_RAM) },
+
+    /* App 页 0x02000000 + 2 MB：PLV3、RWX，App 的代码/数据/栈都在里面 */
+    { ARKRTOS_QEMU_APP_BASE, ARKRTOS_QEMU_APP_SIZE,
+      LA_PG_BIT(ARKRTOS_MPU_MEM_ROM) | LA_PG_BIT(ARKRTOS_MPU_MEM_RAM) |
+      LA_PG_BIT(ARKRTOS_MPU_MEM_RAMX) },
+
+    /* 内核 UART（PLV0、不缓存）：只有内核任务用得到它 */
+    { (ARKRTOS_QEMU_UART_BASE & ~0xFFFu), 0x1000u,
+      LA_PG_BIT(ARKRTOS_MPU_MEM_PERIPH_RO) | LA_PG_BIT(ARKRTOS_MPU_MEM_PERIPH_RW) },
+
+    /* App 的 UART 别名（PLV3、不缓存）：App 唯一的 MMIO 页 */
+    { (ARKRTOS_QEMU_APP_UART & ~0xFFFu), 0x1000u,
+      LA_PG_BIT(ARKRTOS_MPU_MEM_PERIPH_RO) | LA_PG_BIT(ARKRTOS_MPU_MEM_PERIPH_RW) },
+};
+
+#define LA_PG_SPAN_COUNT        (sizeof(s_pg_spans) / sizeof(s_pg_spans[0]))
+
+/**
+* @brief 报告分页通路可用
+* @return 0 = 本 port 有分页通路
+* @details 本函数**不**建映射：映射由 la_mmu_init() 在 arkrtos_port_irq_init()
+*          里建好，而 arkrtos_mpu_module_init() 可能比它更早被调用。在这里
+*          读 CRMD.PG 判断「是否已生效」会得到一个与调用时机有关的答案，
+*          那不是这条接口要回答的问题。真正建映射失败时 la_mmu_init 之后的
+*          首条取指就会 refill 致命，不会静默。
+*/
+int32 arkrtos_port_paging_init(void)
+{
+    return (ARKRTOS_USE_PRIV == 1) ? 0 : -1;
+}
+
+/**
+* @brief 审计一段地址跨度是否被静态映射覆盖
+* @param base 起始虚拟地址
+* @param size 字节数
+* @param mem  期望属性
+* @return 0 = 已覆盖且权限满足；-1 = 未覆盖 / 权限不足 / 参数非法
+* @details 判定按「整段必须落在单条跨度之内」：跨两条条目的跨度不在这里
+*          接受，因为调用方（TCB 窗口）本来就是单块连续内存，跨条目只可能
+*          是记录坏了 —— 那种情况下报 -1 才是诚实的。
+*/
+int32 arkrtos_port_paging_check(uint32 base, uint32 size, arkrtos_mpu_mem_t mem)
+{
+    uint32 i;
+    uint32 end;
+
+    if((size == 0u) || (base > (0xFFFFFFFFu - size)))
+    {
+        return -1;
+    }
+
+    end = base + size;
+
+    for(i = 0u; i < LA_PG_SPAN_COUNT; i++)
+    {
+        const la_pg_span_t *p = &s_pg_spans[i];
+
+        if((base >= p->base) && (end <= (p->base + p->size)))
+        {
+            return ((p->mem & LA_PG_BIT(mem)) != 0u) ? 0 : -1;
+        }
+    }
+
+    return -1;
+}
+
+/**
+* @brief 追加一条动态映射
+* @return 恒 -1（未实现）
+* @details 本 port 只做静态映射。假装能 alias 会让调用方以为拿到了
+*          「按需把任意物理页挂到任意 VA」的能力，而实际没有回收路径，
+*          那正是「看似权威的错答案」。
+*/
+int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_t mem)
+{
+    (void)va;
+    (void)pa;
+    (void)mem;
+
+    return -1;
+}
+
+/**
+* @brief 让一段地址的翻译失效
+* @details 静态映射从不撤销：真去 invtlb 会把内核自己的条目打掉，下一次
+*          取指就走 TLBRENTRY。所以这里是空操作，而不是「尽力而为」。
+*/
+void arkrtos_port_paging_flush(uint32 base, uint32 size)
+{
+    (void)base;
+    (void)size;
+}
+
+#endif /* ARKRTOS_USE_PAGING == 1 */
+
+/* ============================================================
  * 中断开关与异常上下文
  * ============================================================ */
 uint8 arkrtos_port_in_isr(void)

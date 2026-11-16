@@ -92,6 +92,15 @@
 #define ARKRTOS_USE_FAULT_RECOVER       1
 #endif
 
+/* 隔离后端：0 = 窗口（ARM MPU / RISC-V PMP），1 = 页表（MMU）。
+ * 由 Kconfig 选择（config ARKRTOS_USE_PAGING）。打开后 arkrtos_paging.c
+ * 接管 arkrtos_mpu_* 这一套契约；它要求芯片真有页表部件
+ * （ARKRTOS_ARCH_HAS_PAGING_HW == 1）且与 ARKRTOS_USE_MPU 互斥，
+ * 三条都在 arkrtos_config.h 里以 #error 拦下，不做静默降级。 */
+#ifndef ARKRTOS_USE_PAGING
+#define ARKRTOS_USE_PAGING              0
+#endif
+
 /* MPU 上下文差异应用缓存：同一任务重复进入时不重写 MPU 寄存器 */
 #ifndef ARKRTOS_USE_MPU_APPLY_CACHE
 #define ARKRTOS_USE_MPU_APPLY_CACHE     1

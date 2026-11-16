@@ -83,11 +83,18 @@ static void sec_check_gates(arkrtos_sec_report_t *p_rep)
      * Cortex-M 上它由 MPU 提供；LoongArch 没有 MPU 实体，隔离由分页 + PLV 提供
      * （见 la64 port 的 la_mmu_init 与 PLV3 用户态切换），要求 MPU 就是要求一个
      * 那块芯片上根本不存在的部件。两条路都没有时 iso 保持 0、bit0 仍然为 0，
-     * 所以这一位报的始终是真读数，不会为了变绿而恒真。 */
+     * 所以这一位报的始终是真读数，不会为了变绿而恒真。
+     *
+     * 判据只读「本构建用哪个后端」：
+     *   ARKRTOS_USE_MPU    = 窗口后端（ARM MPU / RISC-V PMP）
+     *   ARKRTOS_USE_PAGING = 页表后端（MMU）
+     * 这里**不能**读 ARKRTOS_ARCH_HAS_PAGING(_HW)：那是「这颗核有没有 TLB」
+     * 的硬件事实。RV64GC 标配 Sv39，但本仓还没有 RV64 port，更没有页表初始化，
+     * 按硬件位判就会让一个根本没打开分页的构建报 iso=2 —— 那是假绿。 */
 #if (ARKRTOS_USE_MPU == 1)
     m |= 1u;
     iso = 1u;
-#elif ((ARKRTOS_ARCH_HAS_PAGING == 1) && (ARKRTOS_USE_PRIV == 1))
+#elif (ARKRTOS_USE_PAGING == 1)
     m |= 1u;
     iso = 2u;
 #endif

@@ -17,7 +17,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（34 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（38 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -49,7 +49,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（11 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（19 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（23 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（16 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -78,6 +78,7 @@
 - [kernelsrc/src/arkrtos_log.c](#kernelsrcsrcarkrtos_logc)（1 项）
 - [kernelsrc/src/arkrtos_mini.c](#kernelsrcsrcarkrtos_minic)（1 项）
 - [kernelsrc/src/arkrtos_mpu.c](#kernelsrcsrcarkrtos_mpuc)（1 项）
+- [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（2 项）
 - [kernelsrc/src/arkrtos_smp.c](#kernelsrcsrcarkrtos_smpc)（1 项）
 - [kernelsrc/src/arkrtos_task.c](#kernelsrcsrcarkrtos_taskc)（4 项）
 - [kernelsrc/src/arkrtos_tickless.c](#kernelsrcsrcarkrtos_ticklessc)（1 项）
@@ -3203,6 +3204,49 @@ void arkrtos_port_set_idle_mpu(uint32 task_func, uint32 stack_addr, uint32 stack
 - `task_func`：任务函数地址
 - `stack_addr`：栈地址
 - `stack_size`：栈大小
+
+### `int32 arkrtos_port_paging_init(void);`
+
+```c
+int32 arkrtos_port_paging_init(void);
+```
+
+**建立/确认分页映射**
+**返回**：0 = 映射可用；-1 = 本 port 不具备分页通路
+LoongArch 的静态映射在 la_mmu_init() 里建好（开中断之前），
+本函数只报告那份映射是否已经生效，不重建它。 */
+
+### `int32 arkrtos_port_paging_check(uint32 base, uint32 size, arkrtos_mpu_`
+
+```c
+int32 arkrtos_port_paging_check(uint32 base, uint32 size, arkrtos_mpu_mem_t mem);
+```
+
+**审计一段地址跨度**
+- `base`：起始虚拟地址
+- `size`：字节数
+- `mem`：期望的内存属性（取自 arkrtos_mpu_mem_t）
+**返回**：0 = 已映射且权限满足；-1 = 未映射 / 权限不足 / 该属性本 port 无对应窗口 */
+
+### `int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_`
+
+```c
+int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_t mem);
+```
+
+**追加一条动态映射（VA -> PA）**
+**返回**：0 = 已建立；-1 = 本 port 未实现
+动态映射是登记欠账，这里不假装支持。 */
+
+### `void arkrtos_port_paging_flush(uint32 base, uint32 size);`
+
+```c
+void arkrtos_port_paging_flush(uint32 base, uint32 size);
+```
+
+**让一段地址的翻译失效**
+静态映射从不撤销，所以本 port 是空操作；留这个口是为了让
+将来真做动态重映射时有地方落，而不是到时候改契约。 */
 
 ### `int32  arkrtos_port_flash_erase(uint32 addr, uint32 size);`
 
@@ -7174,6 +7218,57 @@ static void la_frame_apply_priv(la_frame_word *frame)
 PRMD.PPLV 写 CRMD.PLV、按 PRMD.PIE 写 CRMD.IE，所以「回到
 PLV3 且开中断」= PPLV=3 + PIE=1 = 0x7。
 
+### `int32 arkrtos_port_paging_init(void) {`
+
+```c
+int32 arkrtos_port_paging_init(void) {
+```
+
+**报告分页通路可用**
+**返回**：0 = 本 port 有分页通路
+本函数**不**建映射：映射由 la_mmu_init() 在 arkrtos_port_irq_init()
+里建好，而 arkrtos_mpu_module_init() 可能比它更早被调用。在这里
+读 CRMD.PG 判断「是否已生效」会得到一个与调用时机有关的答案，
+那不是这条接口要回答的问题。真正建映射失败时 la_mmu_init 之后的
+首条取指就会 refill 致命，不会静默。
+
+### `int32 arkrtos_port_paging_check(uint32 base, uint32 size, arkrtos_mpu_`
+
+```c
+int32 arkrtos_port_paging_check(uint32 base, uint32 size, arkrtos_mpu_mem_t mem) {
+```
+
+**审计一段地址跨度是否被静态映射覆盖**
+- `base`：起始虚拟地址
+- `size`：字节数
+- `mem`：期望属性
+**返回**：0 = 已覆盖且权限满足；-1 = 未覆盖 / 权限不足 / 参数非法
+判定按「整段必须落在单条跨度之内」：跨两条条目的跨度不在这里
+接受，因为调用方（TCB 窗口）本来就是单块连续内存，跨条目只可能
+是记录坏了 —— 那种情况下报 -1 才是诚实的。
+
+### `int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_`
+
+```c
+int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_t mem) {
+```
+
+**追加一条动态映射**
+**返回**：恒 -1（未实现）
+本 port 只做静态映射。假装能 alias 会让调用方以为拿到了
+「按需把任意物理页挂到任意 VA」的能力，而实际没有回收路径，
+那正是「看似权威的错答案」。
+
+### `void arkrtos_port_paging_flush(uint32 base, uint32 size) {`
+
+```c
+void arkrtos_port_paging_flush(uint32 base, uint32 size) {
+```
+
+**让一段地址的翻译失效**
+静态映射从不撤销：真去 invtlb 会把内核自己的条目打掉，下一次
+取指就走 TLBRENTRY。所以这里是空操作，而不是「尽力而为」。
+
 ### `uint32 arkrtos_port_syscall_num(void *p_exc_ctx)`
 
 ```c
@@ -8489,6 +8584,35 @@ True for MiniApps only (they are loaded into RAM and run there, see
 arkrtos_mini.c); every App / Driver / kernel task answers no. The test is on
 the recorded window, not on a flag: a window in the image RAM pool can only
 have been put there by the MiniApp loader. */
+
+## kernelsrc/src/arkrtos_paging.c
+
+**Ark RTOS isolation backend #2: page table (MMU)**
+This file implements exactly the same five entry points as
+arkrtos_mpu.c (see arkrtos_mpu.h): the kernel keeps calling
+arkrtos_mpu_module_init/_build_task/_set_app/_set_idle/_reset, and
+
+### `static uint8 arkrtos_paging_code_in_ram(const arkrtos_task_t *p_task) `
+
+```c
+static uint8 arkrtos_paging_code_in_ram(const arkrtos_task_t *p_task) {
+```
+
+Is this task's code window in the RAM pool (a MiniApp block) rather than in
+the flash image pool? Same test as the window backend uses, and for the same
+reason: it is the recorded window that says so, not a flag that could lie. */
+
+### `int32 arkrtos_paging_stats(uint32 *p_checked, uint32 *p_bad, uint32 *p`
+
+```c
+int32 arkrtos_paging_stats(uint32 *p_checked, uint32 *p_bad, uint32 *p_bad_base) {
+```
+
+**Read the audit counters (kernel/shell only).**
+- `p_checked`：Receives the number of spans audited, may be 0.
+- `p_bad`：Receives the number of spans no mapping covers, may be 0.
+- `p_bad_base`：Receives the base of the first bad span, may be 0.
+**返回**：0 when the port brought the page tables up, -1 when it did not.
 
 ## kernelsrc/src/arkrtos_smp.c
 

@@ -98,6 +98,22 @@ py -3 tools/kconfig/menuconfig.py --defconfig config/arkrtos_defconfig
 在 menuconfig 里把依赖不满足的项置 `y`，会被明确拒绝（`REFUSED`），而不是悄悄
 生成一个编不过的配置。
 
+### 5.1 `ARKRTOS_USE_PAGING` 不在上面这张表里（不是漏了）
+
+`ARKRTOS_USE_PAGING` 选哪个隔离后端（详见
+[功能开关](功能开关.md) §「两种隔离后端」与
+[内存保护与App越权验证](内存保护与App越权验证.md) §7）。它写不出 `depends on`
+的原因很具体：它依赖的**不是一个 Kconfig 符号**，而是两样 Kconfig 管不到的东西 ——
+
+* `ARKRTOS_USE_PRIV`：板卡能力（§8），不在 Kconfig 里；
+* `ARKRTOS_ARCH_HAS_PAGING_HW`：这颗核有没有 TLB/页表的**硬件事实位**
+  （`kernelsrc/include/arkrtos_arch.h`，per-core）。
+
+所以它的合法组合由 C 侧 `arkrtos_config.h` 的三条 `#error` 兜住：无 TLB 却要分页 /
+与 `ARKRTOS_USE_MPU` 同开 / 分页但无特权级。都是硬报错，没有自动降级。
+`tools/paging_gate.py` 把这四条（默认档为 0 + 三条拒绝）变成可复跑的门禁，
+`tools/ci_gate.py` 的第 36 项就是它。
+
 ## 6. 数量限制
 
 原先散在头文件里写死的上限（任务表、同步对象表、队列、定时器、设备表、socket、
@@ -145,7 +161,12 @@ Keil 的 `Options → C/C++ → Define` 里写死的 `ARKRTOS_USE_LWIP=1` 等，
 
 * `ARKRTOS_USE_FPU` / `ARKRTOS_USE_MPU` / `ARKRTOS_USE_PRIV`：板卡能力，
   根 `Kconfig` 明写「Board capability is NOT here」；且上下文切换 `.s` 走
-  gcc/armasm 预处理，根本不经过板级头；
+  gcc/armasm 预处理，根本不经过板级头。
+  **`ARKRTOS_USE_PAGING` 不在此列**：它虽然与 `ARKRTOS_USE_MPU` 成对，描述的却
+  不是硬件有没有这块部件，而是「本次构建选哪个隔离后端」——纯软件取舍，所以它
+  是 Kconfig 符号（`config/kconfig/Kconfig.features`，`default n`，落到
+  `arkrtos_autoconf.h` 里是 `#define ARKRTOS_USE_PAGING 0`）。两个符号一个管
+  能力、一个管取舍，不要因为名字像就归到同一层；
 * `ARKRTOS_BOARD_CONFIG`：它本身就是「用哪个板级头」的选择器，鸡生蛋；
 * `MDK_TRACE_*` / `LFS_NO_*` / `ARK_BUS_*` / `ARKVIM_*` / `ARKC_*` / `ARK_RAMFS_*`：
   上游组件自己的编译期预算，不属于内核菜单；

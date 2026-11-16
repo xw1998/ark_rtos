@@ -1,8 +1,9 @@
 # 内存保护与外设权限（App 越权验证）
 
 > 结论分三档：**仅编译通过** / **上板验证过** / **未验证**。
-> 本文记录的内容全部是**上板验证过**，命令与读数逐条可复现。
-> 平台：STM32F427VGTx（DAPLink / SWD），内核 F427 工程，App 走 `app_sdk/APP_DEMO`。
+> §1–§6 是 **上板验证过**（STM32F427VGTx，DAPLink / SWD，内核 F427 工程，App 走 `app_sdk/APP_DEMO`）。
+> §7 的 MMU 后端是 **QEMU 实跑**（LA64 跑真内核、真 `utest`、真 `sec`），不是上板；
+> 两者分档标注，不混用，也不把 QEMU 的读数借给上板结论。
 
 ## 1. 这份文档回答什么
 
@@ -141,3 +142,164 @@ py -3 tools/fs_put.py build/APP_BAD/APP_BAD.svcapp --port COM3 --path /APP_BAD.s
 > 取证提示：长时内存转储前先写 `DBGMCU_APB1_FZ` bit12（`DBG_IWDG_STOP`）冻结独立看门狗，
 > 否则转储本身就会把现场复位掉；抓"出错指令"用 `DEMCR` bit4（`VC_MMERR`）做向量捕获，
 > 故障处理是微秒级的，halt/read/resume 轮询必然错过。
+
+## 7. 两种隔离后端：窗口 vs 页表（2026-11-16）
+
+> 分档：本节是 **QEMU 实跑**（LA64 跑真内核 / 真 `utest` / 真 `sec`，RV32 跑回归），
+> **不是上板**。§1–§6 的上板结论一个字都没有被本节改写或覆盖。
+
+### 7.1 为什么要分成两个后端
+
+「让 App 进不了内核」这件事，在不同芯片上落到**完全不同的硬件部件**上：
+
+| 后端 | 开关 | 靠什么隔离 | 适用核 | 实现文件 |
+|---|---|---|---|---|
+| 窗口 | `ARKRTOS_USE_MPU=1` | ARM MPU / RISC-V PMP 的**物理窗口寄存器**：按基址+大小划几段，越出即 fault | Cortex-M3/M4/M7、RV32IMAC（PMP） | `kernelsrc/src/arkrtos_mpu.c` |
+| 页表 | `ARKRTOS_USE_PAGING=1` | **TLB 映射 + 特权级**（LoongArch PLV0 内核 / PLV3 用户）：地址先过映射，再过权限 | LoongArch LA32/LA64；将来 RV64 port | `kernelsrc/src/arkrtos_paging.c` |
+
+前者是 MCU 的典型形态，后者是带 MMU 的芯片的典型形态。**它们不是两套 API**，而是
+同一套契约的两个实现。
+
+### 7.2 一套契约，两个实现（名字不改）
+
+`kernelsrc/include/arkrtos_mpu.h` 里的五个入口就是这套契约：
+
+```c
+arkrtos_mpu_module_init();      /* 初始化隔离硬件 */
+arkrtos_mpu_build_task(tcb);    /* 给这个任务套上隔离上下文 */
+arkrtos_mpu_set_app();          /* 切到 App 侧 */
+arkrtos_mpu_set_idle();         /* 切回内核侧 */
+arkrtos_mpu_reset();            /* 复位 */
+```
+
+名字里的 `mpu` 是历史写法。全仓有 **8 个调用点**，其中一个落在 GBK 编码的
+`arkrtos_task.c` 里——改名字的代价是把一个 GBK 文件拖进转码风险，收益只是好看。
+所以名字保留，语义按「给这个任务套上它的隔离上下文」读。两个 TU 由互斥宏保证
+符号不冲突：`USE_PAGING=1` 时 `arkrtos_mpu.c` 编出空目标，反之 `arkrtos_paging.c`
+整个文件在 `#if` 内、编出空 TU。
+
+### 7.3 三条守卫，全是 `#error`，没有静默降级
+
+写在 `kernelsrc/include/arkrtos_config.h`：
+
+| 条件 | 报错原文（节选） |
+|---|---|
+| `USE_PAGING=1` 但本核心 `ARKRTOS_ARCH_HAS_PAGING_HW != 1` | `ARKRTOS_USE_PAGING=1 但本核心没有页表/TLB（见 arkrtos_arch.h 的 HAS_PAGING_HW）` |
+| 两个后端同时为 1 | `ARKRTOS_USE_PAGING=1 与 ARKRTOS_USE_MPU=1 互斥：同一时刻只能有一个隔离后端` |
+| `USE_PAGING=1` 但 `USE_PRIV != 1` | `ARKRTOS_USE_PAGING=1 需要 ARKRTOS_USE_PRIV=1：页表隔离靠特权级（PLV/U 态）落地` |
+
+为什么不用「自动挑一个」：这三条里任何一条被违反，得到的都不是「次优配置」而是
+**一个自称有隔离、实际没有的二进制**。报错是唯一诚实的答案。
+
+顺便把两个容易混的符号分开：
+
+| 符号 | 是什么 | 谁读 |
+|---|---|---|
+| `ARKRTOS_ARCH_HAS_PAGING_HW` | **硬件事实**：这颗核有没有 TLB/页表。per-core，在 `arkrtos_arch.h` 里按核心定义（M3/M4/M7/RV32IMAC=0，RV64GC/LA32/LA64=1） | 只被 `arkrtos_config.h` 的守卫读 |
+| `ARKRTOS_USE_PAGING` | **本构建用不用**分页后端。Kconfig 符号，默认 0 | `arkrtos_mpu.h`、`arkrtos_paging.c`、port 层、`arkrtos_sec.c` |
+
+RV64GC 的硬件位是 1，但本仓还没有 RV64 port、也没有页表初始化，`USE_PAGING` 仍是 0。
+`sec` 的 `iso=` 只读后者；读硬件位会让一个根本没打开分页的构建报 `iso=2`——假绿。
+
+### 7.4 LA64 上真做到的事：静态映射 + 装载期跨度审计
+
+**映射表是静态的**，在 `arkrtos_port_irq_init()` 里由 `la_mmu_init()` 一次建好，
+之后不再变（`kernelsrc/port/loongarch/la64/arkrtos_port.c`）：
+
+| 跨度 | 大小 / 页大小 | 权限 |
+|---|---|---|
+| 内核低 16 MB | 16 MB，PS=22 ×2 | PLV0，可读写执行 |
+| 内核 UART | 4 KB | PLV0 |
+| App 区 `0x02000000` | 2 MB，PS=20 | **PLV3**，RWX |
+| App UART 别名 `0x02202000` | 4 KB | **PLV3**，读写 |
+
+`ASID` 固定 0；**任务切换不换页表**，只改 `s_next_pplv`（`arkrtos_port_set_thread_priv`），
+特权级由异常帧在返回用户态时落地。所以 `set_app` / `set_idle` / `reset` 在 paging
+后端里是空实现——它们要做的「换地址空间」这件事，本后端没有做。
+
+**那 paging 后端的真实增量是什么？**是**装载期跨度审计**：
+`arkrtos_mpu_build_task()` 里对每个任务的 ROM 区间与 RAM 区间调
+`arkrtos_port_paging_check(base, size, mem)`，要求整段落在**单条**已映射跨度内
+且属性位对得上；不满足就记首个 `bad_base` 并把 `bad` 计数加一。
+
+```c
+int32 arkrtos_paging_stats(uint32 *p_checked, uint32 *p_bad, uint32 *p_bad_base);
+```
+
+语义写死三条，都是为了不给出「看似权威的错答案」：
+
+1. **只审计，不修复**：发现越界只计数，不猜一个更宽的跨度把断言放过去；
+2. **`size == 0` 跳过**：空区间不是越界；
+3. **`arkrtos_port_paging_alias()` 恒返回 -1**：不假装支持运行期动态映射。
+   `flush()` 是空操作：真发 `invtlb` 会把内核自己的条目也打掉。
+
+### 7.5 QEMU 实测读数
+
+| 项 | LA64（`USE_PAGING=1`） | RV32（默认档，`USE_PAGING=0`） |
+|---|---|---|
+| 构建 | `make -f example/qemu_loongarch64/Makefile -j8` | `make -f example/qemu_riscv32/Makefile -j8` |
+| 产物 | `ark_qemu_la64.elf` = **2335944 B** | `ark_qemu_rv32.elf` = **2012860 B（与改动前逐字节等量）** |
+| `utest` | **13 matched, 13 passed, 0 failed** | **13 matched / 133 assertions / 0 failed** |
+| `sec` 的 `gates.kernel` | `[PASS] … iso=2 sign/hwsafe=0x3` | `[PASS] … iso=1` |
+
+读法：
+
+- LA64 的 `iso=2` 说明**页表后端真的在跑**，不是「开关打开了、代码没接上」。
+  这一位在改动前是 0（LA64 没有 MPU 实体，`USE_MPU=0`），bit0 一直是 FAIL——
+  也就是说 LA64 在此之前**根本没有地址隔离后端**。
+- RV32 的 `2012860 B` 逐字节等量，是「默认档零变化」这条承诺的实测证据。
+  这个读数在本轮中途曾经涨过 144 B，根因是一个没人调用的 `arkrtos_iso_backend()`
+  探测接口——删掉它就回来了。**零变化的判据必须实测到字节，不能靠读代码。**
+- LA64 在 `USE_PAGING=0` 档的体积本轮**没有单独测量**（那一档在 LA64 上没有可用
+  隔离后端，不是可发布配置），别把这个空位读成「已经验证过零变化」。
+
+### 7.6 真做到的 vs 欠账（别把「能切换」读成「MMU 版做完了」）
+
+| 能力 | 状态 |
+|---|---|
+| 两个后端可由 Kconfig 二选一，矛盾配置编译期拒绝 | **已做**（三条 `#error` + `tools/paging_gate.py` 门禁） |
+| 静态映射（内核 / App / UART）与 PLV3 用户态 | **已做**（LA64 port，QEMU 实跑） |
+| 装载期跨度审计 + 计数读数（`arkrtos_paging_stats`） | **已做** |
+| `sec` 报 `iso=2`，与窗口后端 `iso=1` 区分 | **已做** |
+| App 在非特权态跑完整自检 | **已做**（LA64 QEMU `utest` 13/13） |
+| 每 App 一份页表 / 同 VA 多实例 | **未做**（当前单页表、ASID=0） |
+| 页帧分配器 | **未做** |
+| 缺页处理 | **未做** |
+| `copy_from_user` / `copy_to_user`（内核安全访问用户地址） | **未做** |
+| 运行期动态映射（`arkrtos_port_paging_alias`） | **未做**，接口恒返回 -1 |
+| SMP（多核 TLB shootdown） | **未做** |
+
+验收判据（做这些欠账时按这条验收，不按「能跑起来」验收）：
+
+1. 两个 App 各自一份页表，**同一 VA** 在两个 App 里指向不同物理页，互不干扰；
+2. 反向三探针（写内核 RAM / 写别的 App RAM / 跳到未映射地址）**全拦**，且各有独立 fault 读数；
+3. 内核保持静态直映射，不被用户态页表影响；
+4. `copy_from_user` 对非法用户指针返回错误码，**不 fault 内核**。
+
+### 7.7 复现
+
+```bash
+# LA64（分页后端，iso=2）
+make -f example/qemu_loongarch64/Makefile -j8
+cd build/qemu_loongarch64 && (sleep 6; printf 'utest\n'; sleep 22) | \
+  timeout 36 "D:/env/tools/qemu/qemu9/mingw64/bin/qemu-system-loongarch64.exe" \
+  -machine virt -kernel ark_qemu_la64.elf -nographic
+
+# RV32（默认档，MPU 后端，iso=1）
+make -f example/qemu_riscv32/Makefile -j8
+cd build/qemu_riscv32 && (sleep 6; printf 'utest\n'; sleep 14) | \
+  timeout 24 "D:/env/tools/qemu/qemu9/mingw64/bin/qemu-system-riscv32.exe" \
+  -machine virt -cpu rv32 -bios none -kernel ark_qemu_rv32.elf -nographic
+
+# 只跑不放命令（看开机日志）：直接用 Makefile 的 run，把串口落到 out.txt
+make -f example/qemu_riscv32/Makefile run
+
+# 门禁：默认档=0 / LA64 打开编得过 / RV32 打开必须被拒 / 两后端互斥必须被拒
+python tools/paging_gate.py
+```
+
+> QEMU 参数别自己编：`-cpu loongarch64` 不存在（会报 `unable to find CPU model`），
+> RV32 少了 `-cpu rv32 -bios none` 会撞 opensbi 区域重叠。上面的 `-machine` / `-cpu` /
+> `-bios` / `-kernel` 与各自 `example/*/Makefile` 的 `run:` 目标同参数，差别只有一处：
+> `run:` 用 `-serial file:out.txt`，上面为了把 shell 命令喂进去换成了 stdio 管道。
+> `sleep` 的时机只是经验值，以 `utest` 提示符真出现为准——喂早了命令会被丢掉。

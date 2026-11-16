@@ -98,6 +98,13 @@
 #define ARKRTOS_USE_FPU              0
 #undef  ARKRTOS_USE_MPU
 #define ARKRTOS_USE_MPU              0
+/* 隔离后端选「页表」（MMU）而不是「窗口」：本核有 TLB/页表
+ * （ARKRTOS_ARCH_HAS_PAGING_HW=1），LoongArch 也没有 ARM 意义上的 MPU。
+ * 打开后 arkrtos_mpu_* 这套契约由 arkrtos_paging.c 实现，五个受限窗口
+ * 变成「静态映射 + PLV」+ 装载期跨度审计。与 ARKRTOS_USE_MPU=1 互斥，
+ * arkrtos_config.h 里以 #error 拦下。 */
+#undef  ARKRTOS_USE_PAGING
+#define ARKRTOS_USE_PAGING           1
 #undef  ARKRTOS_USE_PRIV
 #define ARKRTOS_USE_PRIV             1
 
