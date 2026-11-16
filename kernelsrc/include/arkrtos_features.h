@@ -110,6 +110,17 @@
 #define ARKRTOS_USE_ELF                 0
 #endif
 
+/* VxWorks 式可下载模块：0 = 关（空 TU，零体积），1 = 把 ET_REL 目标文件
+ * 现场链接进内核模块区并以 PLV0 任务起跑（按名字解析内核导出符号）。
+ * 这是与 ARKRTOS_USE_ELF **并列的另一种应用模型**，不是它的替代：
+ * 前者是「内核插件（放弃隔离）」，后者是「用户程序（PLV3 隔离）」。
+ * 两者可以同时打开（四种组合都能编）。要求 ARKRTOS_USE_PRIV == 1、
+ * 板级给出 ARKRTOS_MOD_AREA_SIZE、64 位端口，
+ * 缺一即 #error。由 Kconfig 选择（config ARKRTOS_USE_MODLOAD）。 */
+#ifndef ARKRTOS_USE_MODLOAD
+#define ARKRTOS_USE_MODLOAD             0
+#endif
+
 /* MPU 上下文差异应用缓存：同一任务重复进入时不重写 MPU 寄存器 */
 #ifndef ARKRTOS_USE_MPU_APPLY_CACHE
 #define ARKRTOS_USE_MPU_APPLY_CACHE     1

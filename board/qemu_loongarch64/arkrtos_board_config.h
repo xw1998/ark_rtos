@@ -120,6 +120,25 @@
 #define ARKRTOS_ELF_WINDOW_BASE      ARKRTOS_QEMU_APP_BASE
 #define ARKRTOS_ELF_WINDOW_SIZE      ARKRTOS_QEMU_APP_SIZE
 
+/* VxWorks 式可下载模块：与上面的 ELF 装载器**并列**，不是替代关系。
+ * 本示例板把两者都钉成 1，为的是 QEMU 里一次把两条路径都跑通：
+ *   exec /bin/hello           Linux 式（PLV3，地址链接期定死）
+ *   ld /mnt/ram/modhello.o    VxWorks 式（PLV0，装载期链接）
+ * 别的目标要不要开由 Kconfig（ARKRTOS_USE_MODLOAD）决定。
+ *
+ * 模块区是内核里的一块静态缓冲（.bss 里的 s_mod_pool），不用 heap：64 KB
+ * 分 4 槽，每槽 16 KB。它的地址由链接器决定，不再由宏钉死 —— 早先这里写过
+ * ARKRTOS_MOD_AREA_BASE 0x00600000，装载器却把模块拷进 .bss 的池子，于是
+ * 任务跳进 0x600000 抓到全 0 指令（INE 致命异常）。现在只需要给大小。
+ * 池子落在内核 .bss 里，已被 port 里「内核低 16 MB」那条 PS=22 的 TLB 条目
+ * 覆盖（PLV0 可读可写可执行），不需要另建映射。
+ *
+ * 代价写清楚：模块跑 PLV0，等于放弃 PLV3 隔离；它能直接按名字调内核函数，
+ * 也就同样能直接改内核内存。这是 VxWorks 5.x 的老模型。 */
+#undef  ARKRTOS_USE_MODLOAD
+#define ARKRTOS_USE_MODLOAD          1
+#define ARKRTOS_MOD_AREA_SIZE        (64u * 1024u)
+
 /* 本板没有 Cortex-M 的 AIRCR，复位由板级 arkrtos_board_reboot() 接管
  * （loongarch virt 也没有复位设备，那里只能明确报"做不到"）。 */
 #define ARKRTOS_PLATFORM_REBOOT_PORT 1

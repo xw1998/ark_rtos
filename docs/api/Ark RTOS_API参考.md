@@ -15,6 +15,7 @@
 - [kernelsrc/include/arkrtos_crash.h](#kernelsrcincludearkrtos_crashh)（22 项）
 - [kernelsrc/include/arkrtos_dt.h](#kernelsrcincludearkrtos_dth)（11 项）
 - [kernelsrc/include/arkrtos_elf.h](#kernelsrcincludearkrtos_elfh)（5 项）
+- [kernelsrc/include/arkrtos_export.h](#kernelsrcincludearkrtos_exporth)（3 项）
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
@@ -28,6 +29,7 @@
 - [kernelsrc/include/arkrtos_log.h](#kernelsrcincludearkrtos_logh)（16 项）
 - [kernelsrc/include/arkrtos_mempool.h](#kernelsrcincludearkrtos_mempoolh)（9 项）
 - [kernelsrc/include/arkrtos_mini.h](#kernelsrcincludearkrtos_minih)（20 项）
+- [kernelsrc/include/arkrtos_modld.h](#kernelsrcincludearkrtos_modldh)（8 项）
 - [kernelsrc/include/arkrtos_net.h](#kernelsrcincludearkrtos_neth)（6 项）
 - [kernelsrc/include/arkrtos_ptable.h](#kernelsrcincludearkrtos_ptableh)（23 项）
 - [kernelsrc/include/arkrtos_rt.h](#kernelsrcincludearkrtos_rth)（13 项）
@@ -73,12 +75,14 @@
 - [kernelsrc/src/arkrtos_cfg.c](#kernelsrcsrcarkrtos_cfgc)（1 项）
 - [kernelsrc/src/arkrtos_elf.c](#kernelsrcsrcarkrtos_elfc)（2 项）
 - [kernelsrc/src/arkrtos_eset.c](#kernelsrcsrcarkrtos_esetc)（1 项）
+- [kernelsrc/src/arkrtos_exports.c](#kernelsrcsrcarkrtos_exportsc)（1 项）
 - [kernelsrc/src/arkrtos_fs.c](#kernelsrcsrcarkrtos_fsc)（1 项）
 - [kernelsrc/src/arkrtos_guard.c](#kernelsrcsrcarkrtos_guardc)（1 项）
 - [kernelsrc/src/arkrtos_installer.c](#kernelsrcsrcarkrtos_installerc)（1 项）
 - [kernelsrc/src/arkrtos_loader.c](#kernelsrcsrcarkrtos_loaderc)（5 项）
 - [kernelsrc/src/arkrtos_log.c](#kernelsrcsrcarkrtos_logc)（1 项）
 - [kernelsrc/src/arkrtos_mini.c](#kernelsrcsrcarkrtos_minic)（1 项）
+- [kernelsrc/src/arkrtos_modld.c](#kernelsrcsrcarkrtos_modldc)（5 项）
 - [kernelsrc/src/arkrtos_mpu.c](#kernelsrcsrcarkrtos_mpuc)（1 项）
 - [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（2 项）
 - [kernelsrc/src/arkrtos_smp.c](#kernelsrcsrcarkrtos_smpc)（1 项）
@@ -2431,6 +2435,43 @@ const char *arkrtos_elf_error_name(int32 rc);
 
 **返回码的短名（只用于打印，不参与判定） */**
 
+## kernelsrc/include/arkrtos_export.h
+
+**内核符号导出表：可下载模块在装载时按名字解析外部引用**
+这张表回答的是「模块能按名字调用哪些内核函数」。
+它是**白名单**，不是「所有带导出符号的内核函数」：
+没进表的符号，模块里的引用会在装载阶段被拒并点出名字，
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**表项：名字 + 地址。地址用 unsigned long，64 位端口上不截断。 */**
+
+### `int32 arkrtos_export_lookup(const char *name, unsigned long *p_addr);`
+
+```c
+int32 arkrtos_export_lookup(const char *name, unsigned long *p_addr);
+```
+
+**按名字查一个导出符号**
+- `name`：符号名（不是路径，不是 "&name"）
+- `p_addr`：收地址；找到时写入
+**返回**：0 = 找到；<0 = 没有这个名字
+
+### `const arkrtos_export_t *arkrtos_export_table(uint32 *p_count);`
+
+```c
+const arkrtos_export_t *arkrtos_export_table(uint32 *p_count);
+```
+
+**取整张表（只读）**
+- `p_count`：收表项个数；可为 0
+**返回**：表首地址；关闭档返回 0
+> 说明：`lkup` 就是照着这张表打印的，不另存一份清单。
+
 ## kernelsrc/include/arkrtos_flashapp.h
 
 **阶段 3c：把 arkc 产物烧进**片内 Flash**，并由内核引导器跳转执行**
@@ -4558,6 +4599,85 @@ int32 arkrtos_mini_swap_take(void *p_exc_ctx, int32 task_id);
 - `p_exc_ctx`：硬件异常栈帧（SVC 入口的 p_svc_ctx）
 - `task_id`：当前任务号
 **返回**：0=与本模块无关（或已拒绝并清账）；1=已切换（这一帧已是新镜像的入口）
+
+## kernelsrc/include/arkrtos_modld.h
+
+**VxWorks 式可下载模块：把 ET_REL 目标文件在板上现场链接再跑起来**
+与 arkrtos_elf.h 是**两种应用模型**，不是同一件事的两步：
+|            | Linux 式（exec）        | VxWorks 式（ld）           |
+|------------|-------------------------|----------------------------|
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**一次装载的可读结果（全部是实测值，不是推算值） */**
+
+### `int32 arkrtos_mod_load(const char *path, int32 argc, char *argv[]);`
+
+```c
+int32 arkrtos_mod_load(const char *path, int32 argc, char *argv[]);
+```
+
+**装载一个 ET_REL 模块并起跑它的入口**
+- `path`：VFS 路径（如 "/mnt/ram/modhello.o"）
+- `argc`：传给 module_main 的参数个数（含 argv[0]）；0 表示自动补 1 个
+- `argv`：参数数组；0 时按 argc=0 处理
+**返回**：0 = 已装并起跑；负值 = ARKRTOS_MOD_ERR_*
+> 说明：起跑后立刻返回（不等待模块结束）。要等结束由调用者按 task 号看。
+
+### `int32 arkrtos_mod_count(void);`
+
+```c
+int32 arkrtos_mod_count(void);
+```
+
+**当前驻留的模块个数 */**
+
+### `int32 arkrtos_mod_info(int32 index, arkrtos_mod_info_t *p_out);`
+
+```c
+int32 arkrtos_mod_info(int32 index, arkrtos_mod_info_t *p_out);
+```
+
+**取第 index 个驻留模块（index 是「第几个」，不是槽号） @return 0/-1 */**
+
+### `int32 arkrtos_mod_unload(int32 index);`
+
+```c
+int32 arkrtos_mod_unload(int32 index);
+```
+
+**卸掉一个模块（按装载顺序的下标） @return 0 / ARKRTOS_MOD_ERR_* */**
+
+### `const char *arkrtos_mod_error_name(int32 rc);`
+
+```c
+const char *arkrtos_mod_error_name(int32 rc);
+```
+
+**返回码的短名（只用于打印，不参与判定） */**
+
+### `const char *arkrtos_mod_missing_symbol(void);`
+
+```c
+const char *arkrtos_mod_missing_symbol(void);
+```
+
+**最近一次装载失败缺失的外部符号名**
+**返回**：符号名；空串表示上次失败不是符号问题
+> 说明：只在 ARKRTOS_MOD_ERR_SYMBOL 之后有意义，其余情况返回空串。
+
+### `uint32 arkrtos_mod_bad_reloc(void);`
+
+```c
+uint32 arkrtos_mod_bad_reloc(void);
+```
+
+**最近一次装载失败遇到的重定位类型号**
+**返回**：LoongArch 重定位类型号；0 表示上次失败不是重定位问题
 
 ## kernelsrc/include/arkrtos_net.h
 
@@ -8478,6 +8598,24 @@ NULL(envp)、NULL(argv 结束)、argv[argc-1..0]、argc  <- sp
 两个等待槽，验证「谁先拿」「带 CLEAR 的位只交给一个等待者」这类判定；
 默认构建里它就是本文件内部的 static。 */
 
+## kernelsrc/src/arkrtos_exports.c
+
+**内核符号导出表：可下载模块能按名字用到的那一份白名单**
+表的每一行都是「模块里写 extern，装载器按名字找到这里」。
+三条约束写死在这里：
+1. **只导出内核自己的符号**，不导出示例程序里的东西
+
+### `int32 arkrtos_mod_printf(const char *fmt, ...);`
+
+```c
+int32 arkrtos_mod_printf(const char *fmt, ...);
+```
+
+**模块用的 printf：%s %c %d %i %u %x %p %% ，其余按字面输出**
+**返回**：写进控制台的字节数
+> 说明：不支持宽度/精度/浮点——模块要精确格式就自己拼。
+这里故意不做「尽量支持」：半支持的 printf 会让人以为 %5.2f 能用。
+
 ## kernelsrc/src/arkrtos_fs.c
 
 **littlefs port + Ark RTOS file system facade - see arkrtos_fs.h**
@@ -8649,6 +8787,60 @@ typedef struct {
 ```
 
 **一个在跑（或在装载/拆除）的小程序 */**
+
+## kernelsrc/src/arkrtos_modld.c
+
+**ET_REL 目标文件在板上现场链接（节放置 + GOT + SOP 栈机重定位）**
+这条路径与 arkrtos_elf.c 的区别不在「读文件」，而在**谁决定地址**：
+ET_EXEC 的地址是链接期写死的，ET_REL 的地址由装载器现在给，
+于是所有 PC 相对与 GOT 相对的重定位都得在这里现算。
+
+### `static int32 mod_sym(const mod_link_t *c, uint32 idx, const char **p_n`
+
+```c
+static int32 mod_sym(const mod_link_t *c, uint32 idx, const char **p_name, uint32 *p_shndx, unsigned long *p_value) {
+```
+
+**取一个符号的 (名字, 节下标, 值)；符号表坏了返回 -1 */**
+
+### `static int32 mod_sym_value(mod_link_t *c, uint32 idx, unsigned long *p`
+
+```c
+static int32 mod_sym_value(mod_link_t *c, uint32 idx, unsigned long *p_out) {
+```
+
+**求一个符号的最终地址**
+三种情况分开算，不能合并：
+- 空名字符号 0：值是 0（汇编器用它发 PUSH_ABSOLUTE 常量）；
+- 定义在本模块里的符号：所在节的装载地址 + st_value；
+- 未定义符号：查内核导出表；_GLOBAL_OFFSET_TABLE_ 指向本模块的 GOT 基址。
+
+### `static int32 mod_got_alloc(mod_link_t *c) {`
+
+```c
+static int32 mod_got_alloc(mod_link_t *c) {
+```
+
+**按「首次被 GPREL 引用的顺序」给外部数据符号分 GOT 槽**
+只有**未定义**符号需要槽：模块里自己定义的数据，编译器发的是
+pcalau12i 直接算地址；外部数据才走 `ld.d $r12,$r12,slot`。
+给本地符号也开槽也能跑，但会多一层间接，且和真实链接器不同。
+
+### `static int32 mod_fits(long v, uint32 bits) {`
+
+```c
+static int32 mod_fits(long v, uint32 bits) {
+```
+
+**有符号立即数是否装得下 bits 位 */**
+
+### `static int32 mod_one_rela(mod_link_t *c, uint32 target, uint32 off, ui`
+
+```c
+static int32 mod_one_rela(mod_link_t *c, uint32 target, uint32 off, uint32 type, uint32 symidx, long addend, unsigned long *st, uint32 *p_sp) {
+```
+
+**一条 rela 记录：在 SOP 栈机上求值后写回指令字 */**
 
 ## kernelsrc/src/arkrtos_mpu.c
 

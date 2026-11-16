@@ -36,6 +36,8 @@
 #include "arkrtos_mini.h"
 #include "arkrtos_apprun.h"
 #include "arkrtos_elf.h"
+#include "arkrtos_export.h"
+#include "arkrtos_modld.h"
 #if (ARKRTOS_USE_FLASHAPP == 1)
 #include "arkrtos_flashapp.h"
 #endif
@@ -6080,6 +6082,157 @@ int ark_shell_exec_fallback(int argc, char *argv[])
 }
 #endif /* ARKRTOS_USE_ELF */
 
+#if (ARKRTOS_USE_MODLOAD == 1)
+/* ============================================================
+ * ld / lkup / modules / unld：VxWorks 式可下载模块
+ * @details 与 exec 是两种模型，不是同一件事的两步：
+ *          exec 跑的是链接期定好地址的 ET_EXEC（PLV3，隔离）；
+ *          ld 跑的是板上现场链接的 ET_REL（PLV0，直接调内核 API）。
+ *          所以 ld 不等模块结束——VxWorks 的 ld 也是这样，装载动作本身
+ *          就把模块当任务挂起来了，输出由模块自己的任务打。
+ * ============================================================ */
+
+static int cmd_ld(int argc, char *argv[])
+{
+    arkrtos_mod_info_t info;
+    int32 rc;
+    int32 before;
+    int32 idx;
+
+    if (argc < 2)
+    {
+        sh_out("usage: ld <path.o> [args...]   link and run a relocatable module\r\n");
+        return 1;
+    }
+
+    before = arkrtos_mod_count();
+    rc = arkrtos_mod_load(argv[1], argc - 1, &argv[1]);
+    if (rc != ARKRTOS_MOD_OK)
+    {
+        /* 失败原因必须点到具体符号/类型号：只说一个 rc 等于让人去猜。 */
+        ark_shell_printf("\r\n%s: %s (rc=%d)\r\n", argv[1],
+                         arkrtos_mod_error_name(rc), (int)rc);
+        if ((rc == ARKRTOS_MOD_ERR_SYMBOL) &&
+            (arkrtos_mod_missing_symbol()[0] != '\0'))
+        {
+            ark_shell_printf("  missing symbol: %s\r\n",
+                             arkrtos_mod_missing_symbol());
+            sh_out("  (add it to kernelsrc/src/arkrtos_exports.c, or drop the "
+                   "reference from the module)\r\n");
+        }
+        else if (rc == ARKRTOS_MOD_ERR_RELOC)
+        {
+            ark_shell_printf("  unsupported relocation type: %u\r\n",
+                             (unsigned)arkrtos_mod_bad_reloc());
+        }
+        return 1;
+    }
+
+    idx = arkrtos_mod_count() - 1;
+    if ((idx >= before) && (arkrtos_mod_info(idx, &info) == 0))
+    {
+        ark_shell_printf("[MOD] %s: base 0x%08X, %u B, entry 0x%08X, "
+                         "%u reloc(s), %u import(s), task %d\r\n",
+                         info.name, (unsigned)info.base, (unsigned)info.size,
+                         (unsigned)info.entry, (unsigned)info.relocs,
+                         (unsigned)info.imports, (int)info.task);
+    }
+    return 0;
+}
+
+static int cmd_lkup(int argc, char *argv[])
+{
+    const arkrtos_export_t *tab;
+    uint32 n = 0u;
+    uint32 i;
+    unsigned long addr = 0ul;
+
+    if (argc >= 2)
+    {
+        if (arkrtos_export_lookup(argv[1], &addr) != 0)
+        {
+            ark_shell_printf("%s: not exported\r\n", argv[1]);
+            return 1;
+        }
+        ark_shell_printf("%s = 0x%08X\r\n", argv[1], (unsigned)addr);
+        return 0;
+    }
+
+    tab = arkrtos_export_table(&n);
+    if (tab == 0)
+    {
+        sh_out("export table not compiled in\r\n");
+        return 1;
+    }
+    ark_shell_printf("kernel exports (%u):\r\n", (unsigned)n);
+    for (i = 0u; i < n; i++)
+    {
+        ark_shell_printf("  0x%08X  %s\r\n",
+                         (unsigned)tab[i].addr,
+                         (tab[i].name != 0) ? tab[i].name : "?");
+    }
+    return 0;
+}
+
+static int cmd_modules(int argc, char *argv[])
+{
+    arkrtos_mod_info_t info;
+    int32 n;
+    int32 i;
+
+    (void)argc;
+    (void)argv;
+
+    n = arkrtos_mod_count();
+    if (n <= 0)
+    {
+        sh_out("no module loaded\r\n");
+        return 0;
+    }
+    sh_out("idx  name             base      size   entry     reloc  imp  task  state\r\n");
+    for (i = 0; i < n; i++)
+    {
+        if (arkrtos_mod_info(i, &info) != 0)
+        {
+            continue;
+        }
+        ark_shell_printf("%-4d %-16s 0x%08X %6u 0x%08X %5u %4u %5d %s\r\n",
+                         (int)i, info.name, (unsigned)info.base,
+                         (unsigned)info.size, (unsigned)info.entry,
+                         (unsigned)info.relocs, (unsigned)info.imports,
+                         (int)info.task,
+                         (info.state != 0) ? "run" : "done");
+    }
+    return 0;
+}
+
+static int cmd_unld(int argc, char *argv[])
+{
+    uint32 idx = 0u;
+    int32 rc;
+
+    if (argc < 2)
+    {
+        sh_out("usage: unld <index>   (index comes from 'modules')\r\n");
+        return 1;
+    }
+    if (parse_u32(argv[1], &idx) != 0)
+    {
+        ark_shell_printf("unld: bad index '%s'\r\n", argv[1]);
+        return 1;
+    }
+    rc = arkrtos_mod_unload((int32)idx);
+    if (rc != ARKRTOS_MOD_OK)
+    {
+        ark_shell_printf("unld %u: %s (rc=%d)\r\n", (unsigned)idx,
+                         arkrtos_mod_error_name(rc), (int)rc);
+        return 1;
+    }
+    ark_shell_printf("unld %u: slot released\r\n", (unsigned)idx);
+    return 0;
+}
+#endif /* ARKRTOS_USE_MODLOAD */
+
 static int register_kernel_commands(void)
 {
     int idx = g_cmd_count;
@@ -6090,6 +6243,7 @@ static int register_kernel_commands(void)
              + (ARKRTOS_USE_ARKC ? 1 : 0)
              + (ARKRTOS_USE_RTSTAT ? 1 : 0)
              + (ARKRTOS_USE_ELF ? 1 : 0)
+             + (ARKRTOS_USE_MODLOAD ? 4 : 0)
              + (ARKRTOS_USE_SECCHECK ? 1 : 0);
 
     if((idx + need) > ARK_SHELL_MAX_COMMANDS)
@@ -6105,6 +6259,16 @@ static int register_kernel_commands(void)
     g_cmd_table[idx++] = ARK_SHELL_CMD("exec", cmd_exec,
         "Run an ELF64 executable: exec <path> [args...] (or just type /path/prog)", 8);
 #endif /* ARKRTOS_USE_ELF */
+#if (ARKRTOS_USE_MODLOAD == 1)
+    g_cmd_table[idx++] = ARK_SHELL_CMD("ld", cmd_ld,
+        "Link and run a relocatable module: ld <path.o> [args...]", 8);
+    g_cmd_table[idx++] = ARK_SHELL_CMD("lkup", cmd_lkup,
+        "Kernel export table: lkup [symbol]", 2);
+    g_cmd_table[idx++] = ARK_SHELL_CMD("modules", cmd_modules,
+        "List resident modules (see also unld)", 1);
+    g_cmd_table[idx++] = ARK_SHELL_CMD("unld", cmd_unld,
+        "Unload a finished module: unld <index>", 2);
+#endif /* ARKRTOS_USE_MODLOAD */
     g_cmd_table[idx++] = ARK_SHELL_CMD("drv", cmd_drv,
         "Driver slots: drv [list | start <slot> | stop <slot> | uninstall <slot>]", 4);
     g_cmd_table[idx++] = ARK_SHELL_CMD("dt", cmd_dt,

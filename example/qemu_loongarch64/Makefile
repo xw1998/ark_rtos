@@ -126,6 +126,7 @@ SRCS_C := $(KERNEL_SRCS) \
 	board/qemu_loongarch64/arkrtos_bus_port.c \
 	example/qemu_loongarch64/main.c \
 	example/qemu_loongarch64/elf_demo.c \
+	example/qemu_loongarch64/mod_demo.c \
 	example/qemu_loongarch64/libc_shim.c
 
 SRCS_S := \
@@ -160,6 +161,25 @@ $(HELLO_H): $(HELLO_ELF) example/qemu_loongarch64/elf_blob.py
 	       --output $@ --name ark_example_hello ;
 
 $(BUILD)/example/qemu_loongarch64/elf_demo.o: $(HELLO_H)
+
+# VxWorks 式示例模块（modhello.o）：这里**只编译不链接**——它就该是一个
+# ET_REL 目标文件，地址留给板上装载器去填。所以规则里没有 -Ttext，也没有
+# 任何链接步骤；如果哪天有人给它加了链接，这个示例就证明不了"装载期
+# 定址"这件事了。
+MOD_SRC := example/qemu_loongarch64/mod/modhello.c
+MOD_OBJ := $(BUILD)/modhello.o
+MOD_H   := $(BUILD)/modhello_blob.h
+
+$(MOD_OBJ): $(MOD_SRC)
+	@mkdir -p $(BUILD)
+	$(CC) $(ARCH_FLAGS) -O2 -ffreestanding -fno-builtin -fno-common -Wall \
+	      -c $< -o $@ ;
+
+$(MOD_H): $(MOD_OBJ) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(MOD_OBJ) \
+	       --output $@ --name ark_example_modhello ;
+
+$(BUILD)/example/qemu_loongarch64/mod_demo.o: $(MOD_H)
 
 .PHONY: all clean run size disasm
 

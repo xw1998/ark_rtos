@@ -1211,6 +1211,29 @@ def check_elf_loader():
     else:
         fail("elf", txt[-260:])
 
+def check_modld():
+    """VxWorks-style downloadable modules (ARKRTOS_USE_MODLOAD) must be wired.
+
+    Same false-green shape as elf: the whole of arkrtos_modld.c /
+    arkrtos_exports.c sits inside #if (ARKRTOS_USE_MODLOAD == 1), and the
+    expensive failure is not "does it compile" but "does the demo .o only
+    reference symbols the export table really carries" -- an export missing
+    from the whitelist is ld rc=-6 on the board and green everywhere else.
+    tools/modld_gate.py compiles both TUs with the switch on, checks the
+    preprocessed result is not an empty TU, compiles the example module and
+    reconciles every undefined symbol against s_exports, and pins the
+    guards (ET_REL check, bounded reloc read/write, unknown-type report,
+    ARKRTOS_MOD_AREA_SIZE #error) plus the Kconfig/board wiring.
+    Not covered: runtime load/reloc/unld -- those are QEMU readings, see
+    docs/MMU平台可下载模块-VxWorks式.md.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "modld_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "MODLD-GATE OK" in txt:
+        ok("modld", "default off + LA64 ON compiles + export table covers the demo .o")
+    else:
+        fail("modld", txt[-260:])
+
 def check_features_switches():
     """Every gate in arkrtos_features.h must be declared in Kconfig.
 
@@ -1317,6 +1340,7 @@ def main(argv):
     check_swap_syntax()
     check_paging_switch()
     check_elf_loader()
+    check_modld()
     if do_build:
         check_builds(uv4)
 

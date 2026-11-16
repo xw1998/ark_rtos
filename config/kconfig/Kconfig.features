@@ -314,6 +314,49 @@ config ARKRTOS_USE_ELF
 	  segment is rejected as a format error rather than faulting later on an
 	  unresolved PLT slot.
 
+config ARKRTOS_USE_MODLOAD
+	bool "VxWorks-style downloadable modules (ld / lkup / modules / unld)"
+	depends on ARKRTOS_USE_VFS && ARKRTOS_USE_PRIV
+	help
+	  Build kernelsrc/src/arkrtos_modld.c and arkrtos_exports.c: read an
+	  ELF64 relocatable object (.o) from the VFS, lay its allocated
+	  sections into a board-provided module area, resolve every undefined
+	  symbol against the kernel export table (kernelsrc/src/
+	  arkrtos_exports.c, a whitelist of { name, address }), apply the
+	  LoongArch64 relocations on the board, and start module_main(argc,
+	  argv) as a task.  The shell then accepts:
+	      ld /mnt/ram/modhello.o a b   load and run
+	      lkup [name]                  list / query exported symbols
+	      modules                      list resident modules
+	      unld <index>                 unload a finished module
+
+	  This is a SECOND application model, not a replacement for
+	  ARKRTOS_USE_ELF.  The two answer different questions and may be
+	  enabled together (2x2 matrix, all four combinations build):
+
+	    |                | Linux-style (ELF)  | VxWorks-style (MODLOAD) |
+	    | input          | ET_EXEC executable | ET_REL object (.o)      |
+	    | address        | fixed at link time | chosen at load time     |
+	    | external refs  | self-contained     | resolved by name        |
+	    | privilege      | PLV3 (isolated)    | PLV0 (kernel)           |
+	    | audience       | end-user programs  | kernel plug-ins         |
+
+	  Enable this only if you accept that trade: a module runs in kernel
+	  mode and therefore has no memory isolation from the kernel (the
+	  VxWorks 5.x model).  A module that writes a bad pointer takes the
+	  system down; ARKRTOS_USE_ELF is the option that keeps the wall.
+
+	  Off (default) compiles nothing: the image is byte-for-byte what it
+	  was before this option existed, and arkrtos_modld.h /
+	  arkrtos_export.h still declare the API (returning -1) so call sites
+	  need no #if.
+
+	  Requires ARKRTOS_MOD_AREA_SIZE from the
+	  board header (the loader does not guess address space), a
+	  privileged kernel, and a 64-bit port: the relocation decoder is
+	  LoongArch64-specific.  Unsupported relocation types are rejected
+	  with the type number rather than guessed.
+
 config ARKRTOS_USE_APPPACK
 	bool "Relocatable image packer (four-pass diff)"
 	default n

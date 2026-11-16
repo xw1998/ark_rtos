@@ -25,9 +25,10 @@ extern "C" {
 
 /* Maximum capacity of command registry.  Must stay above the next free slot
  * plus the `need` upper bound in register_kernel_commands() (5 built-ins +
- * 44 kernel commands = 49), with headroom for app/driver commands that
- * share the same table. */
-#define ARK_SHELL_MAX_COMMANDS        56
+ * 49 kernel commands = 54, plus 9 optional ones, plus the 4 downloadable-
+ * module commands), with headroom for app/driver commands that share the
+ * same table.  80 leaves room for another feature without touching this. */
+#define ARK_SHELL_MAX_COMMANDS        80
 
 /* Prompt string (fallback when ARKRTOS_SHELL_PROMPT_LINUX is 0) */
 #define ARK_SHELL_PROMPT              "ark> "

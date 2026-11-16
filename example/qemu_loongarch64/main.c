@@ -56,6 +56,12 @@
 #if (ARKRTOS_USE_ELF == 1)
 extern int32 arkrtos_elf_demo_register(void);
 #endif
+/* 演示任务：把编进镜像的 modhello.o 写进 ramfs 再现场链接跑（见 mod_demo.c）。
+ * 与上面的 ELF 演示**并列**：两条路都跑一遍，才能在串口上直接对照
+ * 「Linux 式（PLV3、定址）」与「VxWorks 式（PLV0、装载期定址）」的差别。 */
+#if (ARKRTOS_USE_MODLOAD == 1)
+extern int32 arkrtos_mod_demo_register(void);
+#endif
 
 /* 任务栈：LoongArch 没有硬件压栈，只有软件帧，512 字（4 KB）很宽裕。
  * 栈必须是静态的（QEMU 上也没有堆分配器可用）。 */
@@ -649,6 +655,11 @@ int main(void)
     #if (ARKRTOS_USE_ELF == 1)
     /* ELF 装载演示：优先级 14（比存储任务 13 低），等 ramfs 挂上再写文件。 */
     (void)arkrtos_elf_demo_register();
+    #endif
+
+    #if (ARKRTOS_USE_MODLOAD == 1)
+    /* 模块装载演示：优先级 15，排在 ELF 演示之后，输出顺序读得通。 */
+    (void)arkrtos_mod_demo_register();
     #endif
 
     arkrtos_port_irq_init();
