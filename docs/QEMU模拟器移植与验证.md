@@ -27,6 +27,9 @@
   （同目录另有 `qemu-system-loongarch64.exe`）
 - 安装来源：清华 MSYS2 镜像的 `mingw-w64-x86_64-qemu-9.2.3-2-any.pkg.tar.zst`，
   解压后补齐约 163 个依赖包，最终 `bin/` 下 136+ 个 DLL。
+- **LA32 不在这个环境里**：公版 QEMU 9.2.3 与上游都没有
+  `qemu-system-loongarch32`；龙芯教育的 LA32 分支只有 Linux 发行包，
+  本机无法执行（§6.1）。
 
 补齐依赖时踩到的两个坑（换机器复现时会再遇到）：
 
@@ -1451,15 +1454,11 @@ fatal 转储（`kill_ret=`）。这条计数非 0，就等于坐实上面第二�
 RV32 连跑 12 轮全过、带诊断代码的 RV32 单跑仍 `9 matched, 9 passed`。
 **未复现不等于已修。**
 
-## 6. LoongArch32 移植（仅编译通过，无运行载体）
+## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
-> **档位：仅编译通过。** 本节的每一条都是「源码写出来了、工具链认了、
-> 链接出了 ELF 并且反汇编核对过」，**不是「跑起来看过读数」**。
-> 本节不存在任何串口输出、节拍读数或上下文切换的现场证据。
+### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行
 
-### 6.1 为什么是「参考目标」而不是 `qemu_loongarch32`
-
-先查载体，再动手：
+先查本机，再动手：
 
 ```bash
 ls D:/env/tools/qemu/qemu9/mingw64/bin/ | grep loongarch
@@ -1467,7 +1466,7 @@ find D:/env/tools/qemu -name "qemu-system-loongarch32*"
 ```
 
 两条都是空——QEMU 9.2.3 **只提供 `qemu-system-loongarch64`**，
-上游也没有 loongarch32 系统模拟器；机器上同样没有 LA32 板子。
+上游 QEMU 也没有 loongarch32 系统模拟器；机器上同样没有 LA32 板子。
 所以目录命名**故意不用 `qemu_` 前缀**：
 
 ```
@@ -1479,6 +1478,33 @@ example/la32_generic/{main.c,start.S,link.ld.in,gen_ldconsts.py,libc_shim.c,Make
 ```
 
 叫 `qemu_loongarch32` 会让人以为有台机器能跑，那是在造证据。
+
+**但「上游公版没有」不等于「没有」**：龙芯教育维护了一份支持
+LoongArch32 精简指令集的 QEMU 分支 ——
+`https://gitee.com/loongson-edu/la32r-QEMU.git`（GPL-2.0，默认分支
+`la32_debug`，`VERSION` = `6.2.50`）。本轮把它的源码读了一遍，
+**下面是源码口径，不是运行口径**：
+
+| 项 | 事实（源码） | 与本目标的对应关系 |
+|---|---|---|
+| 机器 | `DEFINE_MACHINE("ls3a5k32", …)`，描述 `ls3a32 test platform`；默认 CPU `la32`；`mc->max_cpus = 32`；`TARGET_SUPPORTS_MTTCG=y` | 一台真能装 ELF 的 LA32 机器 |
+| 内存 | 节点 0 = `-m` 指定的 RAM，映射在 **0x0**；节点 1 = 4 MB ROM @ `0x1c000000`（`LA_BIOS_BASE`） | 与本目标「DRAM 从 0x0 起、镜像 0x200000 起」一致 |
+| 串口 | `serial_mm_init(…, 0x1fe001e0, 0, irq3, 115200)`，寄存器步长 1（ns16550a 口径） | 与 `ARKRTOS_QEMU_UART_BASE = 0x1FE001E0`、`UART_REG_SHIFT = 0` 完全对上 |
+| 定时器 | 常量定时器 `CSR.TCFG / TVAL / TICLR`，计数 100 MHz（10 ns/tick） | 与 `la32` port 的 TCFG/TICLR 用法、100 MHz 标定一致（§6.4） |
+| `rdtime.d` | 32 位构建下**写寄存器对**：低 32 位进 rd、高 32 位进 rj（`insn_trans/trans_extra.c.inc` 的 `TARGET_LOONGARCH32` 分支） | 与本 port 的 `la_rdtime()` 两寄存器写法一致 |
+| 装载 | `-kernel` 走 `load_elf(…, EM_LOONGARCH, …)`，ELF32 可装；入口若落在 `0x8000_0000` 窗口则改写成有符号 32 位 | 本目标产物是 ELF32 / `EM_LOONGARCH` / entry `0x200000`，可被它装载 |
+| 强制外设 | `drive_get(IF_SD)` 为空就 `exit(1)` | 启动命令行**必须**带 `-drive if=sd,…`，否则起不来 |
+
+**跑不起来的唯一原因是宿主，不是目标**：官方发行包只有 Linux 二进制
+（`v0.0.2`：`la32r-QEMU-x86_64-ubuntu-22.04.tar`、`…-aarch64-…`；
+`v0.0.1-alpha`：debian / centos x86_64），**没有 Windows 版**。本机
+`wsl -l -v` 显示没有已安装的发行版，`C:/msys64` 也不存在，而 QEMU 6.2
+的 mingw64 构建要整套 MSYS2 工具链——本轮没有为它动工。
+
+所以本节结论不变、只是措辞要精确：**LA32 仍然只有编译面证据**；
+「没有载体」应读成「载体存在，但这台 Windows 机器执行不了它」。
+真接上它时，第一件事不是改代码，而是按 §6.8.5 的六组读数逐条验；
+验过之后 §6.7 那张「从 la64 搬来的」清单才能逐行划掉。
 
 ### 6.2 工具链与产物
 
@@ -1558,14 +1584,19 @@ return lo;
 `make -f example/la32_generic/Makefile run` 会打印一段说明并以退出码 1 结束：
 
 ```
-ERROR: no LoongArch32 execution target is available.
-  - QEMU 9.2.3 ships only qemu-system-loongarch64; upstream has no
-    loongarch32 system emulator.
+ERROR: no runnable LoongArch32 execution target on this host.
+  - QEMU 9.2.3 ships only qemu-system-loongarch64; upstream QEMU has no
+    loongarch32 system emulator either.
+  - A LoongArch32 QEMU fork does exist (gitee.com/loongson-edu/la32r-QEMU,
+    machine ls3a5k32), but its release binaries are Linux-only and this host
+    has neither a WSL distro nor MSYS2 -- see docs section 6.1.
   - There is no LA32 board on this machine either.
   This target only verifies build + link: build/la32_generic/ark_la32_generic.elf
 ```
 
 这是刻意的：宁可明确报错，也不给一个「看起来跑起来了」的错答案。
+等某台机器上真的有可执行的 `qemu-system-loongarch32`，`run` 目标才应该
+被补成真命令（命令行写法见 §6.8.5 末尾）。
 
 ### 6.7 哪些结论是从 la64 搬来的（未在 LA32 上验证）
 
@@ -1574,6 +1605,7 @@ ERROR: no LoongArch32 execution target is available.
 | PRMD 位序（`PPLV[1:0]` / `PIE=bit2` ⇒ 回 PLV0 且开中断 = 0x4） | la64 QEMU 实测 | 无。`start.S`/`port.c` 按同一 `LA_PRMD_INIT` 写 |
 | 无软件自中断 ⇒ 就地切换 | la64 QEMU 实测（同代硬件语义） | 无 |
 | TIMER_HZ / RDTIME_HZ（100 MHz 计数、25 MHz 定时器） | la64 QEMU 实测 | 无。板级常量照搬，注释已标明 |
+| `rdtime.d` 在 32 位下写寄存器对、`TCFG/TICLR` 定时器语义 | la64 QEMU 实测 + la32r-QEMU 源码（§6.1 那张表） | 无运行读数。若上游 32 位语义与硬件一致，本 port 的写法成立 |
 | 地址映射 0x200000 起、UART @0x1FE001E0 | la64 QEMU virt 约定 | 无。接真实芯片必须重写 `.text` 起点与 `.data` LMA |
 | 构建告警 | — | 仅 14 条 `variably modified 'arkrtos_app_off_*_check'`（分区头既有写法，la64 同）+ 1 条 `'p_tsk' may be used uninitialized`（内核既有） |
 
@@ -1706,6 +1738,34 @@ LA64/RV32 上真实发生过的假绿（§5.13.3）。LA32 因为没有执行载
 现在**既不能判通过也不能判失败**，只能说「修法已同步进 `start.S` /
 `link.ld.in`，符号 `__init_array_start/end` 在场（9×4 = 0x24 字节）」。
 
+#### 6.8.5 计时源、载体候选与首跑命令
+
+**计时源**：`MDK_TRACE` 的时间戳来自 `rdtime.d`（§6.4 的两寄存器写法）。
+本目标能核对到的只有「反汇编里 `rdtime.d $r12,$r0` 的编码合法」：
+
+```bash
+D:/LoongIDE/la32-tool/bin/loongarch32-newlib-elf-objdump.exe -d \
+    build/la32_generic/ark_la32_generic.elf | grep -n "rdtime"
+```
+
+这条是**编码合法性**，不是「读到的计数是 100 MHz」——后者要执行才知道。
+
+**载体候选**：§6.1 里的 `la32r-QEMU`（`ls3a5k32` 机器）。等有可执行的
+`qemu-system-loongarch32` 之后，首跑命令按它的机器约定写（注意两条：
+`-machine ls3a5k32`、必须给一块 SD 设备否则 `exit(1)`）：
+
+```bash
+qemu-system-loongarch32 -machine ls3a5k32 -m 128M -smp 1 \
+    -kernel build/la32_generic/ark_la32_generic.elf \
+    -drive if=sd,file=build/la32_generic/sd.img,format=raw -nographic
+```
+
+产物自身的装载面已经核对过：`ELF32` / `Machine: LoongArch` /
+`Flags: 0x1, LP32` / `Entry point 0x200000`（§6.2 的 `readelf -h` 读数），
+落在该机器的节点 0 RAM 里，不需要改链接脚本就能被 `-kernel` 装上。
+**装载得上不等于跑得对**：时钟频率、`TCFG` 的 tick 语义、UART 的
+`THRE` 行为仍要在执行后逐条确认，这些正是 §6.7 那张表的行。
+
 ## 7. 复现步骤
 
 ### 7.1 RISC-V RV32
@@ -1825,21 +1885,29 @@ RV32 另有 `MPU=1 PRIV=1`（PMP + U 模式），LA64 是 `MPU=0 PRIV=1`（PLV3 
 | 镜像签名 `ARKRTOS_USE_IMAGE_SIGN` | **实跑** `sign_hmac_and_loader_gate`（整块/流式同口径、篡改与 `-18` 装载门） | **实跑** 同左 | 编译 |
 | 硬件安全态 `ARKRTOS_HW_SAFE`（遗言/中和） | **实跑** `hwsafe_death_neutralizes`、`sec: hwsafe.deadman` | **实跑** 同左 | 编译 |
 | 内核守卫 `ARKRTOS_USE_KERNEL_GUARD`（心跳窗口） | **实跑** `guard_heartbeat_contract`、`sec: guard.watchdog`（FINDING：无硬件看门狗） | **实跑** 同左 | 编译 |
-| SMP（多核） | 未做（无多核板） | 未做（QEMU `virt` 单核配置） | 未做 |
+| SMP（多核） | 未做：机器能带多 hart，实测 `-smp 2` 直接崩（所有 hart 跑同一段启动代码，§9.2） | 未做：实测 `-smp 2` 不崩，但只有核 0 在跑；port 层 `cpu_start`/`send_ipi` 都返回 -1（§9.2） | 未做：`ls3a5k32` 支持 `-smp` 且建模 IPI，但本机无法执行（§6.1） |
 | tickless / waitq / swap | 编译档核对（`ci_gate`），未实跑 | 同左 | 同左 |
 
 ### 8.3 四条明确缺口（不要读成「等价完成」）
 
-1. **LA32 没有任何执行载体**：`qemu-system-loongarch32` 不存在，现成板子
-   也没有，所以矩阵里 LA32 那一列**全是「编译」**。它连 `MDK_TRACE` 的时间
-   源都只到「反汇编确认 `rdtime.d $r12,$r0` 编码合法」这一步（§6.8.5），
-   没有一条运行期读数。接上载体后的第一件事写在 §6.8.4 末尾。
-2. **SMP 无板**：`arkrtos_smp` 只有宿主侧计数与 ON-path 编译核对，没有
-   任何双核实跑证据。RV32/LA64 的 QEMU 机器都是单核配置。
-3. **App 整链（装载 + 执行）未在两个 QEMU 目标上跑**：现有实跑覆盖的是
-   「内核 + 一个手工放置的 PLV3 探针」，不是「从文件系统读出镜像、校验、
-   重定位、跳过去执行」。RV32 上这条链需要 arkc 的 RV32 后端同步，
-   LA64 上连 arkc loongarch 后端都还不存在。
+1. **LA32 没有在本机跑过**：公版 QEMU 没有 `qemu-system-loongarch32`，
+   本机也没有 LA32 板子；龙芯教育的 `la32r-QEMU` 是存在的载体，但只发
+   Linux 二进制，本机既无 WSL 发行版也无 MSYS2（§6.1）。所以矩阵里 LA32
+   那一列**全是「编译」**，它连 `MDK_TRACE` 的时间源都只到「反汇编确认
+   `rdtime.d $r12,$r0` 编码合法」这一步（§6.8.5），没有一条运行期读数。
+   接上载体后的第一件事写在 §6.8.5 末尾。
+2. **SMP 三处都没有实跑证据**：`arkrtos_smp` 只有宿主侧计数；三份板级
+   配置 `ARKRTOS_USE_SMP = 0`；三个 port 的 `cpu_start`/`send_ipi` 一律
+   返回 -1。QEMU 侧确实能仿真多核（§9.1），但这是**硬件能仿真**，不是
+   **我们能跑**——实测 `-smp 2` 在 RV32 上直接崩、在 LA64 上虽不崩但次核
+   不参与（§9.2）。
+3. **App 整链（装载 + 执行）未在两个 QEMU 目标上跑，但这条缺口在 arkc 侧**：
+   现有实跑覆盖的是「内核 + 一个手工放置的 PLV3 探针」，不是「从文件系统
+   读出镜像、校验、重定位、跳过去执行」。卡点只有一处：arkc 还没有
+   RV32 / LA64 后端，以及配套的打包与重定位口径（`cc --pack` 产出的镜像
+   装不进 App 内存池、装进去也起不来）。**这条只与 arkc 有关，本项目
+   暂时不推进**——不把它算成 QEMU port 这条线的未完成项，也不拿它当
+   「移植没做完」的理由。
 4. **签名/硬件安全/内核守卫三项只剩「硬件那一半」没取证**：算法与门本身
    已经在 QEMU 上跑出真读数（§8.4.8 ~ §8.4.10）——HMAC 覆盖面对得上、
    篡改会被 `-18` 挡在装载器上、遗言能按 owner 中和、心跳窗口能拒绝并
@@ -2131,3 +2199,79 @@ ISR 安全的」，不是「内核状态坏了」**。
 「窗口会被判、判到具体任务、撤销后不再记账」，判不了「喂狗与否真的会
 复位芯片」。
 
+## 9. SMP 能不能「用 QEMU 仿真」
+
+> 这一节回答一个具体问题，答案分两半：**QEMU 侧能不能仿真多核**，和
+> **我们的内核在这三个目标上能不能跑多核**。两半的答案不一样。
+
+### 9.1 QEMU 侧：三个机型都能多核
+
+| 目标 | 多核建模 | 依据 |
+|---|---|---|
+| RV32（`qemu-system-riscv32 -machine virt`） | 有：每个 hart 一份 CLINT/ACLINT 的 `msip`，`-smp N` 起 N 个 hart，IPI 走 `msip` 写 | 实测 `-smp 2` 确实起了 2 个 hart（§9.2 的重复启动输出）；IPI 具体寄存器依 ACLINT 模型 |
+| LA64（`qemu-system-loongarch64 -machine virt`） | 有：机器创建 `TYPE_LOONGARCH_IPI`，`num-cpu = smp.cpus`，IOCSR mailbox 挂进 `system_iocsr`，`ipi` 的 GPIO 接 `IRQ_IPI`（`hw/loongarch/virt.c`） | 读的是 QEMU 9.2.3 源码；更早的版本没有这个设备，所以「LA64 没有 IPI 模型」是老版本的结论，按本机这一版不成立 |
+| LA32（`la32r-QEMU` 的 `ls3a5k32`） | 有：`mc->max_cpus = 32`、`TARGET_SUPPORTS_MTTCG=y`；`iocsr` 写 `0x1040` 即给目标核置 `ESTAT.IRQ_IPI`（`target/loongarch/iocsr_helper.c`） | 读的是该分支源码；本机不能执行（§6.1） |
+
+### 9.2 我们这边：三个目标都还是单核，实测 `-smp` 不是「加上就能用」
+
+现状（可核）：三份板级配置 `ARKRTOS_USE_SMP = 0`；`arkrtos_smp.c` 文件头
+写明**不做**多核调度 / 每核运行队列 / 核间任务迁移 / 全局时钟同步；
+三个 QEMU port 的 `arkrtos_port_cpu_start()` / `arkrtos_port_send_ipi()`
+一律 `return -1`；两份 `start.S` 都没有「按核号分叉」（RV32 不读
+`mhartid`，LA64 不读 `CSR.TID`）。
+
+所以「给 QEMU 加个 `-smp 2`」在两个目标上的实测结果完全不同：
+
+**RV32 `-smp 2`：崩。** 两个 hart 同时从复位向量执行同一段启动代码，
+串口被两路打印撕成 `[A[rAkr kR TROTSO]S ]b obaoradr:d …`，随后：
+
+```
+[PMP] fault mcause=1 mtval=0x00000000 mepc=0x00000000 ra=0x8002b1a2 from=M task=4
+[PMP] fault mcause=1 mtval=0xcdcdcdcc mepc=0xcdcdcdcc ra=0x8002b1a2 from=M task=4
+[Ark RTOS] FATAL: mcause=0x1 mepc=0x0 …
+[Ark RTOS] halted.
+```
+
+原因是 RISC-V 规范里所有 hart 复位后同时开始执行，谁先清完 `.bss`、
+谁先建调度器都不确定；这不是 QEMU 的问题，是我们的启动代码只按单 hart
+写的。
+
+**LA64 `-smp 2`：不崩，但也不是多核在跑。** 同一份镜像照样
+`[FS] PASS`、`utest: 13 matched, 13 passed, 0 failed, 0 skipped;
+assertions 133 run / 0 failed`，节拍读数与单核一致（`[A] round=21
+tick=21018 d_tick=1000` 等），日志里没有第二个核的任何痕迹。**这条只说明
+「没被破坏」，不说明「次核起来了」**：本 port 没有任何启动次核的代码
+（`cpu_start` 返 -1），也没有核间中断（`send_ipi` 返 -1）。次核本轮观测
+始终不参与，QEMU 侧的保持机制没有逐行查明，不作结论。
+
+带 `-smp 2` 的复现命令（与 §7.1 / §7.2 只差一个参数）：
+
+```bash
+cd build/qemu_riscv32 && (sleep 6; printf 'utest\n'; sleep 20) | timeout 34 \
+  "D:/env/tools/qemu/qemu9/mingw64/bin/qemu-system-riscv32.exe" \
+  -machine virt -cpu rv32 -smp 2 -bios none -kernel ark_qemu_rv32.elf -nographic
+# 期望：两路启动打印交错 -> [Ark RTOS] FATAL -> halted（exit 124）
+
+cd build/qemu_loongarch64 && (sleep 6; printf 'utest\n'; sleep 20) | timeout 34 \
+  "D:/env/tools/qemu/qemu9/mingw64/bin/qemu-system-loongarch64.exe" \
+  -machine virt -smp 2 -nographic -kernel ark_qemu_la64.elf
+# 期望：与单核完全一致的 13/13 通过（次核未参与，不代表 SMP 可用）
+```
+
+### 9.3 结论
+
+- **「QEMU 能不能仿真 SMP」：能。** 三个机型都有多核与 IPI 建模
+  （§9.1），LA32 那台连 32 核都写了。
+- **「我们的内核能不能在这三个目标上跑 SMP」：不能，第一步都还没做。**
+  要真的看到双核参与（而不只是「没崩」），至少缺四件事，缺一不可：
+  1. **次核停靠**：`start.S` 按核号分叉（RV32 `mhartid`、LA32/LA64
+     `CSR.TID`），非 0 核先停在等待位，而不是直接跑 `main`；
+  2. **真核号**：`arkrtos_port_cpu_id()` 返回硬件核号（现在三处都写死
+     `return 0`）；
+  3. **IPI 通路**：`arkrtos_port_cpu_start()` / `arkrtos_port_send_ipi()`
+     的真实现（RV32 = ACLINT `msip`；LA64 / LA32 = IOCSR IPI mailbox）；
+  4. **调度分核**：`arkrtos_smp.c` 明确不做的那一半（每核运行队列、
+     核间任务迁移、全局时钟同步）。
+- 因此矩阵里 SMP 那一行**三列都是「未做」**，而且它不是「加个 `-smp`
+  就有的东西」——按上面四条估，它是独立的一件事，不该混在 QEMU port 这条
+  线里顺手宣称。

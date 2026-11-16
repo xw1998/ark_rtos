@@ -55,7 +55,7 @@
 | 不用 Keil，想用 GNU Make + arm-none-eabi-gcc 编 F427 例程 | [GCC构建指南.md](GCC构建指南.md)（工程位置、工具链、make 用法、与 Keil 的对应、GCC 侧三个坑、验证状态） |
 | 在板上跑单元测试、加自己的用例 | [单元测试框架.md](单元测试框架.md)（用例自动注册、断言宏、`utest` 命令、宿主自测门禁、用例清单） |
 | 换芯片前想知道内核耦合了哪些硬件 | [硬件耦合审计.md](硬件耦合审计.md)（耦合点清单与处置、移植要动的范围） |
-| 手上没有板子，想在 PC 上真跑一遍 port 层（trap 入口/上下文切换/SVC 通路/定时器） | [QEMU模拟器移植与验证.md](QEMU模拟器移植与验证.md)（QEMU 9.2.3 环境与依赖 DLL 补丁、RV32 单 M 模式 port、LA64 单核 port、**LA32 只到编译/链接（无运行载体）**、trap 帧与取号、无 libgcc/libc 约束、**PRMD 位序坑**、串口实录、已知限制、monitor telnet 调试手法、**三目标功能矩阵与逐开关实录（audit / crash_log / mdk_trace / seccheck / softbus / image_sign / hw_safe / kernel_guard）**） |
+| 手上没有板子，想在 PC 上真跑一遍 port 层（trap 入口/上下文切换/SVC 通路/定时器） | [QEMU模拟器移植与验证.md](QEMU模拟器移植与验证.md)（QEMU 9.2.3 环境与依赖 DLL 补丁、RV32 单 M 模式 port、LA64 单核 port、**LA32 只到编译/链接（载体 `la32r-QEMU` 存在但只有 Linux 发行包，本机不能执行）**、**SMP 可仿真但内核侧一步未做（§9）**、trap 帧与取号、无 libgcc/libc 约束、**PRMD 位序坑**、串口实录、已知限制、monitor telnet 调试手法、**三目标功能矩阵与逐开关实录（audit / crash_log / mdk_trace / seccheck / softbus / image_sign / hw_safe / kernel_guard）**） |
 
 ## 目录结构
 
@@ -103,7 +103,7 @@ docs/
 ├── 硬件耦合审计.md                          # 【设计说明】内核硬件耦合点清单与处置、移植要动的范围
 ├── 软总线接入.md                            # 【设计说明】ark_softbus 组件同步副本、板级三钩子、MCU 档位与 RAM 实测、`bus` 命令与上板自检
 ├── GCC构建指南.md                           # 【操作手册】GNU Make + arm-none-eabi-gcc 的 F427 例程：工具链、用法、与 Keil 的对应、GCC 侧三个坑、验证状态
-├── QEMU模拟器移植与验证.md                  # 【实机记录】QEMU 上的 port 层验证：环境与依赖 DLL 坑、RV32 单 M 模式 port（trap 帧/a7/CLINT）、LA64 单核端口（256 B 帧/就地切换/PRMD 位序/TCFG-RDTIME 标定）、LA32 参考目标（128 B 帧，仅编译/链接，无运行载体）、构建与链接约束、串口实录、已知限制、monitor telnet 调试
+├── QEMU模拟器移植与验证.md                  # 【实机记录】QEMU 上的 port 层验证：环境与依赖 DLL 坑、RV32 单 M 模式 port（trap 帧/a7/CLINT）、LA64 单核端口（256 B 帧/就地切换/PRMD 位序/TCFG-RDTIME 标定）、LA32 参考目标（128 B 帧，仅编译/链接；载体现状见 §6.1）、SMP 结论（§9）、构建与链接约束、串口实录、已知限制、monitor telnet 调试
 ├── 发行版与版本策略.md                       # 【设计说明】版本号规则与三处一致、发布物清单、ABI 升版判据、预览版/正式版/1.0 判据、发版六步、明确不做的
 ├── Release-0.0.3-preview.1.md               # 【发布说明】0.0.3 预览版：变更、体积账本、复现命令、兼容注意、未验证项
 ├── img/                                   # 【实测图】根 README §调度表现 引用（必须入库，勿被忽略规则吞掉）

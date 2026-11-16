@@ -171,8 +171,15 @@ board self-test:
 | Cortex-M3 | - | Yes | Implemented |
 | Cortex-M4 | Yes | Yes | Implemented (recommended) |
 | Cortex-M7 | Yes | Yes | Implemented (reuses the M4 port conventions) |
-| RISC-V (RV32/RV64) | Per core | PMP | Abstraction layer ready, port implementation pending |
-| LoongArch (LA32/LA64) | Per core | TLB / address windows | Abstraction layer ready, port implementation pending |
+| RISC-V (RV32) | Per core | PMP | Implemented (`rv32imac`, runs on QEMU `virt`): M-mode kernel + U-mode PMP isolation |
+| LoongArch64 | Per core | TLB / static entries | Implemented (runs on QEMU `virt`): PLV0 kernel + PLV3 user mode |
+| LoongArch32 | Per core | TLB / address windows | Implemented (build surface aligned with LA64, **no runnable carrier on this host**: the Loongson-Edu `la32r-QEMU` fork only ships Linux binaries, see docs/QEMU模拟器移植与验证.md section 6.1) |
+
+> **No board at hand?** The RV32 and LA64 ports run the full feature set on QEMU (commands and
+> measured readings: docs/QEMU模拟器移植与验证.md). The LA32 port is aligned with LA64 on the build
+> surface, but this host cannot execute it: the Loongson-Edu LA32 QEMU fork
+> https://gitee.com/loongson-edu/la32r-QEMU.git (machine ls3a5k32) ships Linux binaries only, and this
+> host has neither a WSL distro nor MSYS2. Section 6.1 of that document lists the machine parameters.
 
 ### The architecture abstraction layer
 

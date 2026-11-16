@@ -129,8 +129,15 @@ Ark RTOS 把这件事拆成五层，每层各拦一种失败，且每一层的"�
 | Cortex-M3 | - | 有 | 已实现 |
 | Cortex-M4 | 有 | 有 | 已实现（推荐） |
 | Cortex-M7 | 有 | 有 | 已实现（复用 M4 移植层约定） |
-| RISC-V（RV32/RV64） | 按核心 | PMP | 抽象层已就绪，移植实现待补 |
-| LoongArch（LA32/LA64） | 按核心 | TLB/地址窗口 | 抽象层已就绪，移植实现待补 |
+| RISC-V（RV32） | 按核心 | PMP | 已实现（`rv32imac`，QEMU `virt` 实跑）：M 模式内核 + U 模式 PMP 隔离 |
+| LoongArch64 | 按核心 | TLB / 静态条目 | 已实现（QEMU `virt` 实跑）：PLV0 内核 + PLV3 用户态隔离 |
+| LoongArch32 | 按核心 | TLB / 地址窗口 | 已实现（编译面与 LA64 对齐，**本机没有可执行载体**：龙芯教育 `la32r-QEMU` 只发 Linux 二进制，见 `docs/QEMU模拟器移植与验证.md` §6.1） |
+
+> **没有板子时**：RV32 与 LA64 两个移植可以直接在 QEMU 上跑通全功能档（命令与实测读数见
+> [`docs/QEMU模拟器移植与验证.md`](docs/QEMU模拟器移植与验证.md)）。LA32 的移植已与 LA64 对齐编译面，
+> 但本机没有可执行载体——龙芯教育维护的 LA32 QEMU 分支
+> `https://gitee.com/loongson-edu/la32r-QEMU.git`（machine `ls3a5k32`）只发布 Linux 二进制，
+> 本机既无 WSL 发行版也无 MSYS2，细节与该分支机器参数见该文档 §6.1。
 
 ### 架构抽象层
 

@@ -175,9 +175,12 @@ disasm: $(ELF)
 
 # 明确报错，而不是假装运行：没有 LA32 执行载体（见文件头）。
 run: $(ELF)
-	@echo "ERROR: no LoongArch32 execution target is available."
-	@echo "  - QEMU 9.2.3 ships only qemu-system-loongarch64; upstream has no"
-	@echo "    loongarch32 system emulator."
+	@echo "ERROR: no runnable LoongArch32 execution target on this host."
+	@echo "  - QEMU 9.2.3 ships only qemu-system-loongarch64; upstream QEMU has no"
+	@echo "    loongarch32 system emulator either."
+	@echo "  - A LoongArch32 QEMU fork does exist (gitee.com/loongson-edu/la32r-QEMU,"
+	@echo "    machine ls3a5k32), but its release binaries are Linux-only and this"
+	@echo "    host has neither a WSL distro nor MSYS2 -- see docs section 6.1."
 	@echo "  - There is no LA32 board on this machine either."
 	@echo "  This target only verifies build + link: $(ELF)"
 
