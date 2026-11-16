@@ -5,6 +5,10 @@
 #   make -f example/la32_generic/Makefile size   # 打印 text/data/bss
 #   make -f example/la32_generic/Makefile run    # **只会报错**，见下
 #
+# 功能面：与 la64 的 QEMU 目标对齐 —— Shell（ttyS0）/ 日志环 / 块设备
+#   （RAM 模拟 NOR）/ littlefs / VFS / procfs / UTEST 全部编进来，代码路径与
+#   la64 是同一套。**但只有编译 + 链接这一档**，没有任何运行期读数。
+#
 # 为什么没有真正的 run：
 #   QEMU 9.2.3 只提供 qemu-system-loongarch64，上游没有 loongarch32 系统模拟器；
 #   环境里也没有 LA32 板子。因此本目标只到「链接产出 ELF」这一步。run 目标
@@ -53,23 +57,35 @@ CFLAGS := $(ARCH_FLAGS) -g -O2 -ffreestanding -fno-common -nostdlib -nostartfile
           -DLFS_NO_MALLOC -DLFS_NO_ASSERT -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
 ASFLAGS := $(ARCH_FLAGS) -g
 
-# 通配全部内核源，再剔除本平台没有任何介质/驱动依赖的模块：
-# 它们即使功能开关为 0 也在文件头无条件包含硬件头（drvflash.h / lfs.h），
-# 而这个参考目标没有 Flash 控制器、也没有 littlefs 组件。
-KERNEL_SRCS := $(filter-out kernelsrc/src/arkrtos_flashapp.c \
-                            kernelsrc/src/arkrtos_fs.c \
-                            kernelsrc/src/arkrtos_vfs_lfs.c, \
+# 通配全部内核源，再剔除本平台没有对应硬件的模块：flashapp 在文件头无条件
+# 包含 drvflash.h（本目标没有 Flash 控制器），只有它被剔除。fs / vfs_lfs 现在
+# 是打开的功能（介质由板级 drvblk.c 在 RAM 里模拟 NOR），必须编进来。
+KERNEL_SRCS := $(filter-out kernelsrc/src/arkrtos_flashapp.c, \
                           $(wildcard kernelsrc/src/*.c))
 
 SRCS_C := $(KERNEL_SRCS) \
 	kernelsrc/components/mdk_trace/mdk_trace_arkrtos.c \
 	kernelsrc/shell/arkrtos_shell.c \
-	kernelsrc/src/arkrtos_fs.c \
+	kernelsrc/shell/platform_arkrtos.c \
+	kernelsrc/shell/ark_shell/ark_shell.c \
+	kernelsrc/shell/ark_shell/ark_shell_commands.c \
+	kernelsrc/shell/ark_shell/ark_shell_eval.c \
+	kernelsrc/shell/ark_shell/ark_shell_history.c \
+	kernelsrc/shell/ark_shell/ark_shell_line_editor.c \
+	kernelsrc/shell/ark_shell/ark_shell_autocomplete.c \
 	kernelsrc/components/ark_vfs/src/ark_vfs_core.c \
 	kernelsrc/components/ark_vfs/src/ark_vfs_ramfs.c \
+	kernelsrc/components/ark_vfs/port/ark_vfs_port_arkrtos.c \
+	kernelsrc/components/ark_vfs/port/ark_vfs_devfs.c \
+	kernelsrc/components/ark_vfs/port/ark_vfs_procfs.c \
+	kernelsrc/fs/littlefs/lfs.c \
+	kernelsrc/fs/littlefs/lfs_util.c \
 	kernelsrc/sdk/app_sdk/arkrtos_oslib.c \
 	kernelsrc/port/loongarch/la32/arkrtos_port.c \
 	board/la32_generic/arkrtos_board.c \
+	board/la32_generic/arkrtos_dt.c \
+	board/la32_generic/drvblk.c \
+	board/la32_generic/drvuart.c \
 	example/la32_generic/main.c \
 	example/la32_generic/libc_shim.c
 

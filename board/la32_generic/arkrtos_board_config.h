@@ -11,9 +11,10 @@
 *                 EENTRY 异常入口（CSR 0xC），无独立向量表基址
 *                 rdtime 100 MHz / 定时器 TCFG 计数 25 MHz（la64 实测值）
 *
-*          2) **功能裁剪**：这个参考目标上没有 Flash 控制器、没有看门狗、没有
-*             文件系统介质。凡是需要真实硬件的功能一律关掉，让第一次
-*             bring-up 的编译面尽量小。
+*          2) **功能面**：与 la64 的 QEMU 目标对齐 —— 控制台 Shell、日志环、
+*             块设备（RAM 模拟 NOR）/ littlefs / VFS / procfs、UTEST 全部打开，
+*             介质由板级 drvblk.c 在 RAM 里提供。看门狗与 Flash 控制器仍然
+*             关掉：这台参考映射上没有它们。
 *
 *          ## 验证状态（必读）
 *
@@ -93,34 +94,50 @@
 #undef  ARKRTOS_USE_PRIV
 #define ARKRTOS_USE_PRIV             0
 
-/* 心跳合同：QEMU 没有看门狗，守卫真咬人的前提不存在，直接关掉。 */
+/* 平台复位入口：shell 的 reboot 命令走 arkrtos_board_reboot()。本目标没有
+ * 复位机制，那个实现会打印一句说明后停机 —— 但入口必须存在，否则命令
+ * 会变成"未实现的静默成功"。 */
+#define ARKRTOS_PLATFORM_REBOOT_PORT 1
+
+/* 心跳合同：没有看门狗，守卫真咬人的前提不存在，直接关掉。 */
 #undef  ARKRTOS_USE_KERNEL_GUARD
 #define ARKRTOS_USE_KERNEL_GUARD     0
 #undef  ARKRTOS_WDG_ENABLE
 #define ARKRTOS_WDG_ENABLE           0
 
 /* ============================================================
- * 五、功能裁剪（把需要真实硬件 / 需要 libc 格式化的模块全部关掉）
+ * 五、功能面（与 la64 的 QEMU 目标对齐：控制台 + 存储栈 + 自检）
+ * @details 打开的是「能在 la64 上跑通的那一组」：LOG / LOG_RING / BLK / FS /
+ *          VFS / VFS_LFS / PROCFS / SHELL / UTEST。这样做的目的是让编译面
+ *          与 la64 的实跑面**同一套代码路径**，而不是「la32 编一个小内核」。
+ *
+ *          **但必须读清验证状态**：本目标没有 LA32 执行载体（QEMU 9.2.3 不含
+ *          loongarch32 系统模拟器，本机也没有 LA32 板子）。所以下面每一个
+ *          打开的功能都只到「编译 + 链接」这一档，没有任何运行期读数。
+ *          不要因为「la64 全绿」就把它读成 la32 也全绿 —— 那是两件事。
  * ============================================================ */
 
 #undef  ARKRTOS_USE_LOG
-#define ARKRTOS_USE_LOG              0
+#define ARKRTOS_USE_LOG              1
 #undef  ARKRTOS_USE_LOG_RING
-#define ARKRTOS_USE_LOG_RING         0
+#define ARKRTOS_USE_LOG_RING         1
 
-/* 存储栈：QEMU 上没有 NOR / eMMC，也没有镜像池可写 */
+/* 存储栈：没有 NOR / eMMC，介质由 board/la32_generic/drvblk.c 在 RAM 里
+ * 模拟 NOR 语义（擦除 4 KB、写只能 1->0），与 la64 目标同一份约定。 */
 #undef  ARKRTOS_USE_BLK
-#define ARKRTOS_USE_BLK              0
+#define ARKRTOS_USE_BLK              1
 #undef  ARKRTOS_USE_FS
-#define ARKRTOS_USE_FS               0
+#define ARKRTOS_USE_FS               1
 #undef  ARKRTOS_USE_VFS
-#define ARKRTOS_USE_VFS              0
+#define ARKRTOS_USE_VFS              1
 #undef  ARKRTOS_USE_VFS_LFS
-#define ARKRTOS_USE_VFS_LFS          0
+#define ARKRTOS_USE_VFS_LFS          1
 #undef  ARKRTOS_USE_PROCFS
-#define ARKRTOS_USE_PROCFS           0
+#define ARKRTOS_USE_PROCFS           1
 
-/* 动态装载 / MiniApp / POSIX / 网络：都不是这次要验证的东西 */
+/* 动态装载 / MiniApp / POSIX / 网络：仍然关掉。APPPACK / APPRUN 需要的是
+ * 装载器 + 地址窗口（la32 侧连执行载体都没有），POSIX / LWIP / SOFTBUS 与
+ * 「移植」本身无关，打开只会把编译面撑大而不增加任何证据。 */
 #undef  ARKRTOS_USE_MINIAPP
 #define ARKRTOS_USE_MINIAPP          0
 #undef  ARKRTOS_USE_POSIX
@@ -130,7 +147,7 @@
 #undef  ARKRTOS_USE_SOFTBUS
 #define ARKRTOS_USE_SOFTBUS          0
 #undef  ARKRTOS_USE_SHELL
-#define ARKRTOS_USE_SHELL            0
+#define ARKRTOS_USE_SHELL            1
 #undef  ARKRTOS_USE_APPPACK
 #define ARKRTOS_USE_APPPACK          0
 #undef  ARKRTOS_USE_APPRUN
@@ -160,13 +177,13 @@
 #undef  ARKRTOS_USE_AUDIT
 #define ARKRTOS_USE_AUDIT            0
 #undef  ARKRTOS_USE_UTEST
-#define ARKRTOS_USE_UTEST            0
+#define ARKRTOS_USE_UTEST            1
 #undef  ARKRTOS_USE_SECCHECK
 #define ARKRTOS_USE_SECCHECK         0
 #undef  ARKRTOS_HW_SAFE
 #define ARKRTOS_HW_SAFE              0
 
-/* 单核：SMP 关掉（QEMU 能给多核，后续做 SMP 验证时再开） */
+/* 单核：SMP 关掉。没有 LA32 运行载体，多核连调度行为都无从观察。 */
 #undef  ARKRTOS_USE_SMP
 #define ARKRTOS_USE_SMP              0
 

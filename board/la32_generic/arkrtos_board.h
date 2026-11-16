@@ -39,4 +39,19 @@ void arkrtos_board_putu(uint32 value);
 */
 void arkrtos_board_puthex(uint32 value);
 
+/**
+* @brief 把 ns16550a 注册成设备框架里的 ttyS0（`SHELL_DEV_NAME`）
+* @details Shell 不直接用板级打印函数，它按**设备**打开控制台，所以板级必须
+*          先把这个名字注册进去（见 board/la32_generic/drvuart.c）。
+* @return 0 成功；负值失败（同名 / 表满 / 描述符缺项）
+*/
+int32 arkrtos_board_uart_dev_register(void);
+
+/**
+* @brief 整机复位
+* @note 本目标没有任何已描述的复位机制，本实现只能打印一句说明后停机：
+*       假装复位成功比明确说"做不到"更糟。
+*/
+void arkrtos_board_reboot(void);
+
 #endif /* __ARKRTOS_BOARD_H__ */

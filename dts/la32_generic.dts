@@ -1,0 +1,72 @@
+/*
+ * Ark RTOS board: generic LoongArch32 reference target, single core.
+ *
+ * 这张树描述的是**参考映射**，不是任何一台真实机器：地址、定时器频率全部
+ * 来自 board/la32_generic/arkrtos_board_config.h —— 而那些常量本身是从
+ * la64 的 QEMU virt 实测值搬过来的（见该文件头部的验证状态说明）。
+ * 本目标没有 LA32 执行载体，树里的每一个数字都**未经 LA32 实测**。
+ *
+ * 为什么这个目标也要有设备树：内核 shell 的 `dt` 命令与驱动的
+ * arkrtos_dt_find() 都按这张表工作，缺少表就等于"这台机器没有外设"，
+ * 而事实是"我们还没有拿到描述它的真实硬件"。
+ *
+ * 地址宽度：LA32 的指针是 32 位，全部窗口都在低 4 GB 内，所以
+ * #address-cells = <1>。
+ */
+
+/dts-v1/;
+
+/ {
+	model = "Ark RTOS la32_generic (reference, no execution target)";
+	compatible = "ark,la32-generic";
+
+	chosen {
+		stdout-path = &uart0;
+		bootargs = "console=ttyS0";
+	};
+
+	/* DRAM 从 0 起 128 MB，低 1 MB 归 boot_info（沿用 la64 virt 约定），
+	 * 内核镜像从 2 MB、静态数据从 3 MB 开始。 */
+	memory@0 {
+		device_type = "memory";
+		reg = <0x00000000 0x08000000>;
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		timebase-frequency = <100000000>;
+
+		cpu@0 {
+			device_type = "cpu";
+			compatible = "loongarch";
+			reg = <0>;
+			status = "okay";
+		};
+	};
+
+	soc {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		compatible = "simple-bus";
+
+		/* ns16550a 控制台：收发都是轮询（本移植没有接外部中断控制器，
+		 * 所以这里不写 interrupt-parent / interrupts —— 写了就是假描述）。 */
+		uart0: serial@1fe001e0 {
+			compatible = "ns16550a";
+			reg = <0x1fe001e0 0x00000100>;
+			clock-frequency = <25000000>;
+			current-speed = <115200>;
+			status = "okay";
+		};
+
+		/* 板级 RAM 介质块设备（board/la32_generic/drvblk.c）：
+		 * 它不是硬件，是替代 NOR 的一块静态缓冲区，擦除单位 4 KB。 */
+		ramdisk@0 {
+			compatible = "ark,ram-blk";
+			reg = <0x00000000 0x00080000>;
+			erase-size = <0x00001000>;
+			status = "okay";
+		};
+	};
+};

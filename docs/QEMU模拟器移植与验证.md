@@ -1139,7 +1139,7 @@ example/la32_generic/{main.c,start.S,link.ld.in,gen_ldconsts.py,libc_shim.c,Make
 - `-march` 的合法值只有 `loongarch32`；**`-mabi=ilp32` 不被接受**，必须
   写全 `ilp32d`/`ilp32f`/`ilp32s` 之一（`lp64*` 是超集，用不了）。
 
-产物核对（2026-11-15 实测）：
+产物核对（2026-11-15 最小档实测；**全功能档的读数见 §6.8**）：
 
 ```
 file format elf32-loongarch
@@ -1150,6 +1150,10 @@ start address 0x00200000
    text    data     bss     dec     hex  filename
   52280      56   15968   68304   10ad0  build/la32_generic/ark_la32_generic.elf
 ```
+
+> 上面这一份是**只开调度/同步/阻塞唤醒**的最小档，已经不是当前默认。
+> 现在 `board/la32_generic/arkrtos_board_config.h` 默认打开的是与 la64 对齐的
+> 全功能档（Shell / 日志环 / 块设备 / littlefs / VFS / procfs / UTEST）。
 
 全镜像反汇编中 `st.d|ld.d|addi.d|lu32i.d|lu52i.d|pcalau12i` 匹配数为 **0**。
 
@@ -1222,6 +1226,113 @@ ERROR: no LoongArch32 execution target is available.
 的四组读数（500 ms 节拍、A/B 交替、`svc_ok`、无 `[dbg]`），才能把哪一条
 从「搬来的」改成「实测的」。
 
+### 6.8 全功能档：与 la64 对齐的编译面
+
+> **档位：仅编译 + 链接。** 本节所有数字都是构建产物读数，**没有任何一条是
+> 运行期读数**——LA32 没有执行载体（§6.1）。这一点在下面每一处都再标一次，
+> 因为「la64 全绿」与「la32 全绿」是两件事。
+
+#### 6.8.1 打开了什么
+
+目标是把 la64 QEMU 目标**跑通过的那一组**原样搬到 LA32，让编译面与实跑面
+是同一套代码路径，而不是「la32 编一个小内核」：
+
+| 层 | la64 QEMU 目标 | LA32 参考目标 | 差异 |
+|---|---|---|---|
+| 日志 | `LOG` + `LOG_RING` | 同 | 无 |
+| 块设备 | `BLK`，`ram0` = RAM 模拟 NOR（512 KB / 4 KB 擦除） | 同（`board/la32_generic/drvblk.c`） | 无（那一份本身与指针宽度无关） |
+| 文件系统 | `FS` + `VFS` + `VFS_LFS` + `PROCFS` | 同 | 无 |
+| 控制台 | `SHELL`，ns16550a 注册为 `ttyS0`，收发轮询 | 同（`board/la32_generic/drvuart.c`） | 无 |
+| 自检 | `UTEST` | 同 | 无 |
+| 设备树 | `dts/qemu_loongarch64.dts` → `arkrtos_dt.c` | `dts/la32_generic.dts` → `arkrtos_dt.c`（7 节点） | 树内容按参考映射重写，`dt` 命令可查 |
+| 仍关 | `MINIAPP` / `POSIX` / `LWIP` / `SOFTBUS` / `APPPACK` / `APPRUN` / `FLASHAPP` / `QSPI` / `SMP` | 同 | 无（`FLASHAPP` 两侧都剔除：它无条件 include `drvflash.h`，两个目标都没有 Flash 控制器） |
+
+`Makefile` 相应从「剔除 `fs` / `vfs_lfs`」改成「只剔除 `flashapp`」，并把
+shell（`platform_arkrtos.c` + `ark_shell/*.c` 六个）、VFS 的 4 个驱动、
+littlefs 两个源、`drvblk.c` / `drvuart.c` / `arkrtos_dt.c` 全部编进来。
+
+#### 6.8.2 构建读数（2026-11-16 实测）
+
+```bash
+rm -rf build/la32_generic
+make -f example/la32_generic/Makefile -j8
+make -f example/la32_generic/Makefile size
+```
+
+```
+   text    data     bss     dec     hex  filename
+ 213480     180  578592  792252   c16bc  build/la32_generic/ark_la32_generic.elf
+```
+
+- 与最小档（text 52280 / bss 15968）相比，text +161 KB、bss +562 KB
+  （其中 512 KB 是 `drvblk.c` 的 RAM 介质）。链接脚本的 ASSERT 没有被触发，
+  即该镜像仍落在参考映射的 8 MB 内核 RAM 段内。
+- 干净重建全量编译告警 **1 条**：`arkrtos_sync.c:518 'p_tsk' may be used
+  uninitialized` —— 内核既有告警，la64 上同样存在，与本轮改动无关。
+  （最小档曾出现 14 条 `variably modified 'arkrtos_app_off_*_check'`，
+  全功能档下不再出现，原因未追，登记为观测事实而非结论。）
+- ELF 头核对：`Class: ELF32`、`Machine: LoongArch`、`Entry point 0x200000`。
+- 全镜像反汇编 48,563 条指令中，`st.d` / `ld.d` / `addi.d` / `lu32i.d` /
+  `lu52i.d` / `pcalau12i` / `ldx.d` / `stx.d` 匹配数**全为 0** —— 这条检查
+  对应 §6.5 那条「工具链不拒绝 `.d` 指令」的纪律。
+
+符号在场证明（`nm` 摘录，证明「开关打开了、代码真的链进去了」，不是只改了宏）：
+
+```
+T ark_shell_init                 T arkrtos_shell_init
+T arkrtos_dev_register           T arkrtos_board_uart_dev_register
+T arkrtos_board_blk_init         T arkrtos_fs_format
+T arkrtos_vfs_mount_volume       T lfs_mount
+T ark_vfs_arkrtos_procfs         t procfs_mount / procfs_read / procfs_readdir
+T arkrtos_dt_count / _model / _node
+T ark_utest_list / ark_utest_run
+```
+
+#### 6.8.3 本轮暴露的一个真缺口：`-nostdlib` 下 littlefs 的两个桩
+
+第一次链接直接失败（这不是「配置没开」，是**代码真的缺**）：
+
+```
+lfs.o: undefined reference to `__popcountsi2'
+lfs.o: undefined reference to `__bswapsi2'
+lfs.o: undefined reference to `strspn'
+lfs.o: undefined reference to `strcspn'
+```
+
+两类的来源完全不同，必须分开记：
+
+1. **libgcc 内置函数**：`-nostdlib` 不链 libgcc，GCC 把
+   `__builtin_popcount` / `__builtin_bswap*` 打桩成对这些符号的调用。
+   最小档没编 littlefs，所以这个缺口一直没被触发；la64 的 `libc_shim.c`
+   早就给了 `__popcountsi2` / `__bswapsi2` 等四个，LA32 这一份当时还停在
+   「够跑调度器」的规模。
+2. **字符串函数**：`lfs_dir_find()` 用 `strspn` / `strcspn` 按 `/` 切路径，
+   VFS/Shell 还用 `strrchr` / `strpbrk`。同样是 la64 侧已有、LA32 侧缺。
+
+修法是把 la64 `example/qemu_loongarch64/libc_shim.c` 末尾那两段
+（字符串补件 + libgcc 补件，共 178 行）搬到 LA32 的同名文件，并把
+「lp64 下按 64 位字做 popcount」改成 ilp32 口径的说明。**语义不变、实现逐行
+相同**，所以这不是「为 LA32 另写一套」。
+
+> 这条缺口值得单独写出来的原因：它只在「功能面真的打开」时才出现。
+> 如果继续用最小档，编译器与链接器都不会提醒你 littlefs 在这个目标上
+> 根本链不起来。
+
+#### 6.8.4 这一节明确**没有**做的事
+
+- **没有跑过任何一条读数的**：节拍、任务切换、SVC、阻塞唤醒、littlefs
+  读写、Shell 命令、UTEST 汇总，全部**未经执行**。镜像能不能启动、能不能
+  进 shell，目前没有任何证据。
+- 没有接外部中断控制器：UART 仍是轮询（与 la64 同一条边界）。
+- 没有复位机制：`shell reboot` 走 `arkrtos_board_reboot()`，本目标实现为
+  打印一句说明后停机。
+- `example/la32_generic/Makefile run` 仍然是一条明确的错误（§6.6）。
+- 参考映射的地址/频率常量仍是从 la64 搬来的（§6.7 那张表一条都没变）。
+
+接上任何 LA32 载体后的第一件事，仍然是照 `example/la32_generic/main.c`
+的六组读数逐条看：500 ms 节拍、A/B 交替、`svc_ok`、`[FS] PASS`、
+`/proc/version` 可读、`utest` 汇总 `, 0 failed,`。
+
 ## 7. 复现步骤
 
 ### 7.1 RISC-V RV32
@@ -1264,6 +1375,10 @@ make -f example/la32_generic/Makefile -j4
 make -f example/la32_generic/Makefile size
 make -f example/la32_generic/Makefile run   # **只会报错退出 1**，见 §6.6
 ```
+
+期望体积（全功能档，§6.8）：`text 213480 / data 180 / bss 578592`。
+改了 `ARCH_FLAGS` 或板级开关后必须先 `rm -rf build/la32_generic` 全量重建
+——Makefile 不跟踪编译参数，增量构建会复用上一套开关的 `.o`。
 
 没有串口文件可看——这个目标产出 ELF 就结束了。要核对「没有混进 64 位指令」：
 
