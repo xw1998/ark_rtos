@@ -1581,7 +1581,8 @@ return lo;
 
 ### 6.6 `run` 目标故意报错
 
-`make -f example/la32_generic/Makefile run` 会打印一段说明并以退出码 1 结束：
+`make -f example/la32_generic/Makefile run` 会打印一段说明并**失败**
+（recipe 里 `exit 1`，make 自身退出码 2 并打 `make: *** [run] Error 1`）：
 
 ```
 ERROR: no runnable LoongArch32 execution target on this host.
@@ -1806,7 +1807,7 @@ RV32 与 LoongArch64 这两个目标都是无限循环，Ctrl-C 或终止进程�
 cd "D:/工作/git_project/ark rtos"          # 必须在仓库根目录
 make -f example/la32_generic/Makefile -j4
 make -f example/la32_generic/Makefile size
-make -f example/la32_generic/Makefile run   # **只会报错退出 1**，见 §6.6
+make -f example/la32_generic/Makefile run   # **只会报错失败**（exit 1 → make 退出码 2），见 §6.6
 ```
 
 期望体积（全功能档 + `.ctors` + libc 补件 + 五项取证开关 + 签名/遗言/心跳，

@@ -183,6 +183,7 @@ run: $(ELF)
 	@echo "    host has neither a WSL distro nor MSYS2 -- see docs section 6.1."
 	@echo "  - There is no LA32 board on this machine either."
 	@echo "  This target only verifies build + link: $(ELF)"
+	@exit 1
 
 clean:
 	rm -rf $(BUILD) 2>/dev/null || true
