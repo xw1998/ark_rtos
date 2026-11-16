@@ -63,6 +63,12 @@ eentry:
     addi.d  $sp, $sp, -256
     st.d    $ra, $sp, 0
     st.d    $tp, $sp, 8
+    /* t0 必须**先于**它被借用作临时寄存器存进帧：下面要用 t0 算「异常
+     * 发生时的原始 sp」（sp+256）。若等到那时才存，帧里的 t0 槽装的是
+     * sp+256 而不是调用者的 t0，ertn 之后 t0 就被改成 sp+256 —— 任何把
+     * 活值放在 t0 里的循环（例如 blk 驱动整卷填 0xFF）会拿着错指针继续
+     * 写，一路写到任务栈上。实测就是这样把栈整片写成 0xFF 后停机的。 */
+    st.d    $t0, $sp, 88            /* 原始 t0，先存 */
     addi.d  $t0, $sp, 256
     st.d    $t0, $sp, 16            /* 帧里的 sp 槽 = 异常发生时的原始 sp */
     st.d    $s0, $sp, 168           /* s0 即将被借用作帧指针，先存原值 */
@@ -76,7 +82,7 @@ eentry:
     st.d    $a5, $s0, 64
     st.d    $a6, $s0, 72
     st.d    $a7, $s0, 80
-    st.d    $t0, $s0, 88
+    /* t0 已在入口处存过，这里不能再写（那时 t0 是 sp+256） */
     st.d    $t1, $s0, 96
     st.d    $t2, $s0, 104
     st.d    $t3, $s0, 112
@@ -162,6 +168,7 @@ arkrtos_port_switch_task_inline:
     addi.d  $sp, $sp, -256
     st.d    $ra, $sp, 0
     st.d    $tp, $sp, 8
+    st.d    $t0, $sp, 88            /* 原始 t0，理由同 eentry */
     addi.d  $t0, $sp, 256
     st.d    $t0, $sp, 16
     st.d    $s0, $sp, 168
@@ -175,7 +182,7 @@ arkrtos_port_switch_task_inline:
     st.d    $a5, $s0, 64
     st.d    $a6, $s0, 72
     st.d    $a7, $s0, 80
-    st.d    $t0, $s0, 88
+    /* t0 已在入口处存过，这里不能再写（那时 t0 是 sp+256） */
     st.d    $t1, $s0, 96
     st.d    $t2, $s0, 104
     st.d    $t3, $s0, 112
@@ -203,6 +210,14 @@ arkrtos_port_switch_task_inline:
     csrrd   $t0, 0x0
     andi    $t0, $t0, 7
     st.d    $t0, $s0, 248
+    /* 存档之后立刻关中断：下面这段（bl 到恢复现场并 ertn）绝不能被 tick
+     * 打断。恢复序列开头就靠 csrwr 写 ERA/PRMD 来确定返回到哪里，而一次
+     * 中断会由硬件把这两个 CSR 改写成「被打断的那条恢复指令」——中断
+     * 返回后 ertn 于是落进恢复序列中间，带着半套寄存器继续跑，最终跳到
+     * 非法地址（实测表现为 ld.d 拿一个代码地址当帧指针、撞 ADEM 停机）。
+     * 关中断不影响语义：ertn 会按 PRMD.PIE（上面已从 CRMD 存好）恢复 IE。 */
+    ori     $t1, $zero, 1
+    csrxchg $zero, $t1, 0x0
 
     move    $a0, $s0
     bl      la_switch_inline

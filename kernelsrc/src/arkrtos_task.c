@@ -2363,6 +2363,12 @@ uint32 arkrtos_hardfault_handler(void)
     return arkrtos_cpu_fault_handler(ARKRTOS_FAULT_HARDFAULT);
 }
 
+/* 就绪位图自愈与调度决策探针的诊断变量定义在后面的「就绪队列」一节，
+ * 调度入口处也要写它们，这里前向声明（同文件内的全局对象）。 */
+extern volatile uint32 arkrtos_ready_heal_cnt;
+extern volatile uint32 arkrtos_ready_heal_head;
+extern volatile uint32 arkrtos_sched_probe_pos;
+
 int32 arkrtos_sched_is_switching(void)
 {
     int32 new_idx = arkrtos_sched_next() + 1;
@@ -2375,6 +2381,14 @@ int32 arkrtos_sched_is_switching(void)
     }
     #endif
 
+    if((new_idx < 0) || (new_idx > (int32)arkrtos_task_count))
+    {
+        /* 任务号越界：绝不能让上层拿它去索引任务表（越界读会读到介质数组，
+         * 拿到 0xffffffff 当栈指针，随后在架构层以「访存非对齐」崩溃）。
+         * 计数留证：这条分支真的被走到过，说明上游有脱钩还没修干净。 */
+        arkrtos_sched_probe_pos += 0x10000u;
+        return ARKRTOS_TASK_NONE;
+    }
     if(new_idx == arkrtos_current_task_id)
     {
         return ARKRTOS_TASK_NONE;                          /* 还是它自己，不必拉 PendSV */
@@ -2382,9 +2396,21 @@ int32 arkrtos_sched_is_switching(void)
     return new_idx;
 }
 
+/* 就绪位图自愈的诊断变量定义在后面的「就绪队列」一节，调度入口也要写它，
+ * 这里前向声明（同文件内的全局对象）。 */
 int32 arkrtos_sched_activate(int32 new_task, uint32 old_psp)
 {
     int32 tid = arkrtos_current_task_id - 1;
+
+    /* new_task == 0 表示切到空闲任务；1..task_count 是合法任务号。
+     * 越界号一律拒绝（返回 0 = 不切换，调用方保持原帧），
+     * 否则下面 tid = new_task - 1 会越界读写任务表与介质数组。 */
+    if((new_task < 0) || (new_task > (int32)arkrtos_task_count))
+    {
+        arkrtos_ready_heal_cnt++;
+        arkrtos_ready_heal_head = (uint32)new_task;
+        return 0;
+    }
 
     ARKRTOS_SCHED_STAT_BEGIN();
 
@@ -2577,20 +2603,82 @@ static void arkrtos_ready_unlink(int32 idx, uint8 prio)
     }
 }
 
+/* 位图自愈计数与现场快照（诊断用，非 static 以便从 QEMU monitor / nm 直接读）。
+ * 位图只是 status 的索引：一旦「组有位、组内无位」或「位有、桶头为空」这种脱钩
+ * 出现，旧实现会把 255（桶空哨兵）当成任务号返回，上层 +1 变成 256，
+ * 再拿去索引任务表就是越界读——那正是 LoongArch64 上偶发 ADEM 的成因。
+ * 这里不再返回哨兵，而是就地清掉脱钩的位，并把现场留下来。 */
+volatile uint32 arkrtos_ready_heal_cnt  = 0u;
+volatile uint32 arkrtos_ready_heal_g    = 0u;
+volatile uint32 arkrtos_ready_heal_word = 0u;
+volatile uint32 arkrtos_ready_heal_bit  = 0u;
+volatile uint32 arkrtos_ready_heal_head = 0u;
+volatile uint32 arkrtos_ready_heal_map[8];
+volatile uint32 arkrtos_ready_heal_total = 0u;
+
+static void arkrtos_ready_heal(uint32 w, uint32 b, uint32 head)
+{
+    arkrtos_ready_heal_cnt++;
+    arkrtos_ready_heal_g    = (uint32)arkrtos_ready_group;
+    arkrtos_ready_heal_word = (b == 0xFFFFFFFFu) ? 0u : arkrtos_ready_map[w];
+    arkrtos_ready_heal_bit  = b;
+    arkrtos_ready_heal_head = head;
+    arkrtos_ready_heal_total = arkrtos_ready_total;
+    {
+        uint32 i;
+
+        for(i = 0u; i < 8u; i++)
+        {
+            arkrtos_ready_heal_map[i] = arkrtos_ready_map[i];
+        }
+    }
+}
+
 int32 arkrtos_ready_top(void)
 {
     uint32 g = (uint32)arkrtos_ready_group;
     uint32 w;
     uint32 b;
+    uint32 h;
+    uint32 round;
 
-    if(g == 0u)
+    /* 最多自愈 8 轮（组数上限）：每轮要么返回一个合法任务，要么清掉一个脱钩位。
+     * 位图与桶是全空的正常情况走第一次循环的第一行直接返回。 */
+    for(round = 0u; round < 8u; round++)
     {
-        return ARKRTOS_TASK_NONE;
+        if(g == 0u)
+        {
+            return ARKRTOS_TASK_NONE;
+        }
+
+        w = (uint32)arkrtos_lowbit32(g);                    /* 组号 0..7 */
+        if(arkrtos_ready_map[w] == 0u)
+        {
+            /* 组位有、组内全 0：这一组没有任何优先级，直接清组位 */
+            arkrtos_ready_heal(w, 0xFFFFFFFFu, 0u);
+            arkrtos_ready_group = (uint8)(g & (uint8)~(1u << w));
+            g = (uint32)arkrtos_ready_group;
+            continue;
+        }
+
+        b = (uint32)arkrtos_lowbit32(arkrtos_ready_map[w]);   /* 组内位号 0..31 */
+        h = (uint32)arkrtos_ready_head[(uint8)((w << 5) | b)];
+        if((h == (uint32)ARKRTOS_TASK_NIL) || (h >= (uint32)arkrtos_task_count))
+        {
+            /* 位有、桶头为空或桶头越界：这个优先级没有可运行任务，清位 */
+            arkrtos_ready_heal(w, b, h);
+            arkrtos_ready_map[w] &= ~(1u << b);
+            if(arkrtos_ready_map[w] == 0u)
+            {
+                arkrtos_ready_group = (uint8)(arkrtos_ready_group & (uint8)~(1u << w));
+            }
+            g = (uint32)arkrtos_ready_group;
+            continue;
+        }
+        return (int32)h;
     }
 
-    w = (uint32)arkrtos_lowbit32(g);                       /* 组号 0..7 */
-    b = (uint32)arkrtos_lowbit32(arkrtos_ready_map[w]);      /* 组内位号 0..31 */
-    return (int32)arkrtos_ready_head[(uint8)((w << 5) | b)];
+    return ARKRTOS_TASK_NONE;
 }
 
 void arkrtos_ready_add(int32 idx)
@@ -3013,6 +3101,11 @@ int32 arkrtos_sched_check(void)
 /* 首次调度前重建就绪集的一次性标记 */
 static uint8 arkrtos_ready_built = 0u;
 
+/* 调度决策快照：每次 sched_next 记一条（结果 / 组位 / map[0] / map[6] /
+ * 就绪总数 / 当时的当前任务号）。只写不读，正常路径上就是六条 store。 */
+volatile uint32 arkrtos_sched_probe[6u * 16u];
+volatile uint32 arkrtos_sched_probe_pos = 0u;
+
 int32 arkrtos_sched_next(void)
 {
     if(arkrtos_ready_built == 0u)
@@ -3029,8 +3122,23 @@ int32 arkrtos_sched_next(void)
         arkrtos_task_recover_pending();
     }
 
-    /* O(1)：位图取最高优先级，再取该优先级就绪桶的队首 */
-    return arkrtos_ready_top();
+    /* O(1)：位图取最高优先级，再取该优先级就绪桶的队首。
+     * 每次决策留一条快照（16 条环形），崩溃转储/reprobe 时能看到
+     * 「做出这个决定时位图长什么样」——这是唯一能证明索引与 status
+     * 到底有没有脱钩的证据，比事后猜寄存器可靠。 */
+    {
+        int32 r = arkrtos_ready_top();
+        uint32 i = (arkrtos_sched_probe_pos & 15u) * 6u;
+
+        arkrtos_sched_probe[i + 0u] = (uint32)r;
+        arkrtos_sched_probe[i + 1u] = (uint32)arkrtos_ready_group;
+        arkrtos_sched_probe[i + 2u] = arkrtos_ready_map[0];
+        arkrtos_sched_probe[i + 3u] = arkrtos_ready_map[6];
+        arkrtos_sched_probe[i + 4u] = arkrtos_ready_total;
+        arkrtos_sched_probe[i + 5u] = (uint32)arkrtos_current_task_id;
+        arkrtos_sched_probe_pos++;
+        return r;
+    }
 }
 
 

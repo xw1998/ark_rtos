@@ -477,3 +477,181 @@ int snprintf(char *buf, unsigned long cap, const char *fmt, ...)
 
     return n;
 }
+
+/* ============================================================
+ * 字符串函数补件：littlefs 用到 strspn / strcspn / strrchr / strpbrk
+ * @details lfs_dir_find() 用 strspn/strcspn 把路径按 "/" 切成段；VFS 与
+ *          内核 Shell 的路径处理用 strrchr（找最后一个 '/'）与 strpbrk。
+ *          语义按 C 标准；返回值是 size_t（本目标 lp64 下 64 位）。
+ * ============================================================ */
+
+unsigned long strspn(const char *s, const char *accept)
+{
+    unsigned long n = 0u;
+
+    while(s[n] != '\0')
+    {
+        const char *a = accept;
+
+        while((*a != '\0') && (*a != s[n]))
+        {
+            a++;
+        }
+
+        if(*a == '\0')
+        {
+            break;
+        }
+        n++;
+    }
+
+    return n;
+}
+
+unsigned long strcspn(const char *s, const char *reject)
+{
+    unsigned long n = 0u;
+
+    while(s[n] != '\0')
+    {
+        const char *r = reject;
+
+        while((*r != '\0') && (*r != s[n]))
+        {
+            r++;
+        }
+
+        if(*r != '\0')
+        {
+            break;
+        }
+        n++;
+    }
+
+    return n;
+}
+
+char *strrchr(const char *s, int c)
+{
+    char ch = (char)c;
+    const char *last = 0;
+
+    for(;;)
+    {
+        if(*s == ch)
+        {
+            last = s;
+        }
+        if(*s == '\0')
+        {
+            break;
+        }
+        s++;
+    }
+
+    return (char *)last;
+}
+
+char *strpbrk(const char *s, const char *accept)
+{
+    while(*s != '\0')
+    {
+        const char *a = accept;
+
+        while(*a != '\0')
+        {
+            if(*a == *s)
+            {
+                return (char *)s;
+            }
+            a++;
+        }
+        s++;
+    }
+
+    return 0;
+}
+
+/* ============================================================
+ * libgcc 内置函数补件（64 位）
+ * @details 全程 -nostdlib，没有 libgcc；GCC 会把 __builtin_bswap* /
+ *          __builtin_popcount* / __builtin_clz* / __builtin_ctz* 打桩成
+ *          对 libgcc 的调用。littlefs 在 lp64 下按 64 位字做 popcount，
+ *          因此这里必须同时给 __popcountdi2。语义与 libgcc 一致：
+ *          零输入的 clz/ctz 返回位宽（libgcc 的实际取值）。
+ *          名字是 ABI 名字，不能改。
+ * ============================================================ */
+
+unsigned int __bswapsi2(unsigned int v)
+{
+    return ((v & 0x000000FFu) << 24) |
+           ((v & 0x0000FF00u) << 8)  |
+           ((v & 0x00FF0000u) >> 8)  |
+           ((v & 0xFF000000u) >> 24);
+}
+
+unsigned long long __bswapdi2(unsigned long long v)
+{
+    return ((v & 0x00000000000000FFULL) << 56) |
+           ((v & 0x000000000000FF00ULL) << 40) |
+           ((v & 0x0000000000FF0000ULL) << 24) |
+           ((v & 0x00000000FF000000ULL) << 8)  |
+           ((v & 0x000000FF00000000ULL) >> 8)  |
+           ((v & 0x0000FF0000000000ULL) >> 24) |
+           ((v & 0x00FF000000000000ULL) >> 40) |
+           ((v & 0xFF00000000000000ULL) >> 56);
+}
+
+int __popcountsi2(unsigned int v)
+{
+    int n = 0;
+
+    while(v != 0u)
+    {
+        v &= (v - 1u);
+        n++;
+    }
+
+    return n;
+}
+
+int __popcountdi2(unsigned long long v)
+{
+    int n = 0;
+
+    while(v != 0ull)
+    {
+        v &= (v - 1ull);
+        n++;
+    }
+
+    return n;
+}
+
+int __clzsi2(unsigned int v)
+{
+    int n = 0;
+    unsigned int m = 0x80000000u;
+
+    while((n < 32) && ((v & m) == 0u))
+    {
+        m >>= 1;
+        n++;
+    }
+
+    return n;
+}
+
+int __ctzsi2(unsigned int v)
+{
+    int n = 0;
+    unsigned int m = 0x00000001u;
+
+    while((n < 32) && ((v & m) == 0u))
+    {
+        m <<= 1;
+        n++;
+    }
+
+    return n;
+}

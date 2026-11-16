@@ -19,7 +19,12 @@ SIZE      := $(TOOLCHAIN)/$(CROSS)size$(EXT)
 
 QEMU      ?= D:/env/tools/qemu/qemu9/mingw64/bin/qemu-system-loongarch64.exe
 
-ARCH_FLAGS := -march=loongarch64 -mabi=lp64d
+# -mstrict-align：LA64 的普通 ld/st 要求自然对齐。内核与 VFS/littlefs 里
+# 有 u8 后面跟 u16/u32 的结构（例如 ark_ramfs_dir），GCC 默认会把相邻的
+# u8 字段合并成一条 st.w，落在 offset 2 上就是一条非对齐 32 位写，QEMU 会
+# 以 ADEF(ecode=8, EsubCode=1) 停机。加了这条 GCC 只生成对齐访问 + 逐字节
+# 拼接（必要时用 ldx/stx 非对齐指令），与硬件对得上。
+ARCH_FLAGS := -march=loongarch64 -mabi=lp64d -mstrict-align
 
 BUILD := build/qemu_loongarch64
 ELF   := $(BUILD)/ark_qemu_la64.elf
@@ -58,11 +63,18 @@ SRCS_C := $(KERNEL_SRCS) \
 	kernelsrc/components/mdk_trace/mdk_trace_arkrtos.c \
 	kernelsrc/shell/arkrtos_shell.c \
 	kernelsrc/src/arkrtos_fs.c \
+	kernelsrc/src/arkrtos_vfs_lfs.c \
 	kernelsrc/components/ark_vfs/src/ark_vfs_core.c \
 	kernelsrc/components/ark_vfs/src/ark_vfs_ramfs.c \
+	kernelsrc/components/ark_vfs/port/ark_vfs_port_arkrtos.c \
+	kernelsrc/components/ark_vfs/port/ark_vfs_devfs.c \
+	kernelsrc/components/ark_vfs/port/ark_vfs_procfs.c \
+	kernelsrc/fs/littlefs/lfs.c \
+	kernelsrc/fs/littlefs/lfs_util.c \
 	kernelsrc/sdk/app_sdk/arkrtos_oslib.c \
 	kernelsrc/port/loongarch/la64/arkrtos_port.c \
 	board/qemu_loongarch64/arkrtos_board.c \
+	board/qemu_loongarch64/drvblk.c \
 	example/qemu_loongarch64/main.c \
 	example/qemu_loongarch64/libc_shim.c
 

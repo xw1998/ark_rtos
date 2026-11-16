@@ -171,6 +171,29 @@ void arkrtos_port_fatal_report(uint32 code)
      * 这里重新读一次 ESTAT 打全，避免两处口径不一致。 */
     __asm__ volatile("csrrd %0, 0x5" : "=r"(ecode) : : "memory");
 
+    /* BADV（CSR 0x7）是出错地址、BADI（0x8）是出错指令，和 ARM 的 BFAR 同位：
+     * 没有它们只能知道"在哪条指令出事"，有了才知道"碰的是哪个地址"。 */
+    {
+        uint32 badv;
+        uint32 badi;
+
+        __asm__ volatile("csrrd %0, 0x7" : "=r"(badv) : : "memory");
+        __asm__ volatile("csrrd %0, 0x8" : "=r"(badi) : : "memory");
+        arkrtos_board_puts("\n[Ark RTOS] FATAL: estat=");
+        arkrtos_board_puthex(ecode);
+        arkrtos_board_puts(" ecode=");
+        arkrtos_board_puthex((ecode >> 16) & 0x3Fu);
+        arkrtos_board_puts(" era=");
+        arkrtos_board_puthex(era);
+        arkrtos_board_puts(" badv=");
+        arkrtos_board_puthex(badv);
+        arkrtos_board_puts(" badi=");
+        arkrtos_board_puthex(badi);
+        arkrtos_board_puts(" crmd=");
+        arkrtos_board_puthex(crmd);
+        arkrtos_board_puts("\n[Ark RTOS] halted.\n");
+        return;
+    }
     arkrtos_board_puts("\n[Ark RTOS] FATAL: estat=");
     arkrtos_board_puthex(ecode);
     arkrtos_board_puts(" ecode=");

@@ -68,6 +68,9 @@ eentry:
     addi.w  $sp, $sp, -128
     st.w    $ra, $sp, 0
     st.w    $tp, $sp, 4
+    /* 原始 t0 必须先存：下面要用 t0 算 sp+128，晚存就会把 sp+128 写进
+     * t0 槽，ertn 之后 t0 被改成 sp+128（LA64 上实测过同一处缺陷）。 */
+    st.w    $t0, $sp, 44
     addi.w  $t0, $sp, 128
     st.w    $t0, $sp, 8             /* 帧里的 sp 槽 = 异常发生时的原始 sp */
     st.w    $s0, $sp, 84            /* s0 即将被借用作帧指针，先存原值 */
@@ -81,7 +84,7 @@ eentry:
     st.w    $a5, $s0, 32
     st.w    $a6, $s0, 36
     st.w    $a7, $s0, 40
-    st.w    $t0, $s0, 44
+    /* t0 已在入口处存过，这里不能再写（那时 t0 是 sp+128） */
     st.w    $t1, $s0, 48
     st.w    $t2, $s0, 52
     st.w    $t3, $s0, 56
@@ -167,6 +170,7 @@ arkrtos_port_switch_task_inline:
     addi.w  $sp, $sp, -128
     st.w    $ra, $sp, 0
     st.w    $tp, $sp, 4
+    st.w    $t0, $sp, 44            /* 原始 t0，理由同 eentry */
     addi.w  $t0, $sp, 128
     st.w    $t0, $sp, 8
     st.w    $s0, $sp, 84
@@ -180,7 +184,7 @@ arkrtos_port_switch_task_inline:
     st.w    $a5, $s0, 32
     st.w    $a6, $s0, 36
     st.w    $a7, $s0, 40
-    st.w    $t0, $s0, 44
+    /* t0 已在入口处存过，这里不能再写（那时 t0 是 sp+128） */
     st.w    $t1, $s0, 48
     st.w    $t2, $s0, 52
     st.w    $t3, $s0, 56
@@ -208,6 +212,14 @@ arkrtos_port_switch_task_inline:
     csrrd   $t0, 0x0
     andi    $t0, $t0, 7
     st.w    $t0, $s0, 124
+    /* 存档之后立刻关中断：下面这段（bl 到恢复现场并 ertn）绝不能被 tick
+     * 打断。恢复序列开头就靠 csrwr 写 ERA/PRMD 来确定返回到哪里，而一次
+     * 中断会由硬件把这两个 CSR 改写成「被打断的那条恢复指令」——中断
+     * 返回后 ertn 于是落进恢复序列中间，带着半套寄存器继续跑，最终跳到
+     * 非法地址（实测表现为 ld.d 拿一个代码地址当帧指针、撞 ADEM 停机）。
+     * 关中断不影响语义：ertn 会按 PRMD.PIE（上面已从 CRMD 存好）恢复 IE。 */
+    ori     $t1, $zero, 1
+    csrxchg $zero, $t1, 0x0
 
     move    $a0, $s0
     bl      la_switch_inline

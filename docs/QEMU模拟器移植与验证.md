@@ -840,6 +840,177 @@ print("\n".join(l for l in txt.splitlines() if re.match(r"^\s*[0-9a-f]+:", l)))
 本轮就是靠「在 `.S` 里记一条内存轨迹环 + monitor `xp` 取回」量出
 **首次 trap 的 PRMD 是 0x4**，从而推翻自己原先 0x1 的假设。
 
+### 5.10 软件全栈实跑（blk → littlefs → VFS → procfs）
+
+> **档位：QEMU 实跑通过。** 读数全部来自串口原文，没有修饰。
+
+#### 5.10.1 打开了哪些开关
+
+`board/qemu_loongarch64/arkrtos_board_config.h`：
+
+| 开关 | 值 | 说明 |
+| --- | --- | --- |
+| `ARKRTOS_USE_BLK` | 1 | 块设备层 + 4 KB 擦除单位 |
+| `ARKRTOS_USE_FS` | 1 | 文件系统抽象层 |
+| `ARKRTOS_USE_VFS` | 1 | VFS 挂载表（实测 mounts=4） |
+| `ARKRTOS_USE_VFS_LFS` | 1 | littlefs 后端 |
+| `ARKRTOS_USE_PROCFS` | 1 | `/proc/version` 可读 |
+| `ARKRTOS_USE_MPU` / `ARKRTOS_USE_PRIV` | 0 | 见 5.10.5：LA64 的隔离要页表，尚未做 |
+
+为跑通这条链补的四个工程件：
+
+1. `board/qemu_loongarch64/drvblk.c|h`：512 KB RAM 介质（`ERASE=4096`），
+   首次 `arkrtos_board_blk_init()` 把整卷填 **0xFF**（等价于擦除态），
+   写只允许 1→0，否则整笔返回 -1 并计数 `rejected`——这是 NOR 语义，
+   也是 littlefs 判断「有没有按擦除单位擦过」的依据。
+2. `example/qemu_loongarch64/Makefile`：补 `arkrtos_vfs_lfs.c`、
+   `ark_vfs_port_arkrtos.c`、`ark_vfs_devfs.c`、`ark_vfs_procfs.c`、
+   `lfs.c`、`lfs_util.c`、`drvblk.c` 七个源，并加 `-mstrict-align`（见 5.10.3 Bug B）。
+3. `example/qemu_loongarch64/main.c`：新增第 3 个任务 `task_fs`（栈 1024 word = 4 KB），
+   启动顺序 `irq_init → kernel_module_init → arkrtos_board_blk_init() → 注册 A/B/FS`。
+4. `example/qemu_loongarch64/libc_shim.c`：补 `strspn/strcspn/strrchr/strpbrk` 与
+   `__bswapsi2/__bswapdi2/__popcountsi2/__popcountdi2/__clzsi2/__ctzsi2`
+   ——littlefs 用到了它们，而全程 `-nostdlib` 不链 newlib。
+
+#### 5.10.2 实测读数（串口原文）
+
+```
+[boot] sem=19922944 taskA=1 taskB=2 taskFS=3 blk=1 fs=1 vfs=1 tick_period_us=500
+[FS] blk ram0 found=1 init=1 size=524288 erase=4096
+[FS] format rc=0
+[FS] vfs_init rc=0 mount rc=0 mounts=4
+[FS] write rc=0 read rc=0 len=17 -> match
+[FS] ls /mnt/ram:
+  hello.txt size=17
+[FS] /proc/version: Ark RTOS arkrtos 0.0.3 (build Nov 16 202
+[FS] overwrite-without-erase rc=4294967295 rejected=1
+[FS] counters written=1024 rejected=1 erases=2
+[FS] PASS
+```
+
+五行读数各对应一件事，缺一条都不算通过：
+
+1. `blk ... found=1 init=1 size=524288`：设备枚举与初始化真的走通了，
+   容量与擦除单位是从设备属性读出来的，不是打印常量；
+2. `format rc=0` + `mounts=4`：littlefs 在 RAM 介质上建卷并挂进 VFS，
+   四个挂载点（ram/、dev/、proc/、以及默认根）都注册成功；
+3. `write/read len=17 -> match`：写入后读回的字节数一致；
+4. `/proc/version` 有内容：procfs 不是空壳；
+5. `overwrite-without-erase rc=-1 (4294967295) rejected=1` +
+   `counters written=1024 rejected=1 erases=2`：**不擦除直接覆盖被拒**
+   ——这条是「NOR 语义真的生效」的负对照，不是成功路径的复读。
+
+镜像尺寸（`loongarch64-newlib-elf-size`）：
+
+```
+   text    data     bss     dec     hex  filename
+ 131656     160  558096  689912   a86f8  ark_qemu_la64.elf
+```
+
+`bss` 里 512 KB 就是那块 RAM 介质，不是内核开销。
+
+栈是按实测留的，不是拍脑袋（用 `0xCDCDCDCD` 图案量高水位）：
+FS 任务峰值 **2040 / 4096 B = 49.8%**，任务 A 568 / 2048，任务 B 552 / 2048，
+idle 1020 / 1024。FS 给 4 KB 是因为 littlefs + VFS 是这条链里最深的调用栈。
+
+#### 5.10.3 两个「能编译、能链接、但语义错」的缺陷
+
+**Bug A：`$t0` 存进了 `sp+256`，不是 `sp+88`。**
+`eentry` 与 `arkrtos_port_switch_task_inline` 的入口先把 `$t0` 当临时寄存器用，
+却把它的保存槽算成了帧尾（`sp+256`），而 LA64 的 `t0` 槽是 `sp+88`。
+后果不是立刻崩，而是**中断返回后 `$r12` 变成 `sp+256`**——一个看起来像地址的值，
+在下一次用到 `$t0` 时才炸到别处。修法：入口先 `st.d $t0,$sp,88` 再算 sp 槽。
+
+**Bug B：LP64 下相邻 `u8` 字段被合并成非对齐 `st.w`。**
+`ark_vfs_ramfs.c` 里两个相邻 `u8` 结构字段，GCC 在 `-O2` 下用一条 4 字节 store 一起写，
+地址没对齐 → ADEM。这不是代码写错，是编译产物在宽松对齐假设下调优。
+修法是 `-mstrict-align`，并且**必须全量重建**：
+
+```bash
+rm -rf build/qemu_loongarch64
+make -f example/qemu_loongarch64/Makefile -j8
+```
+
+因为本工程的 Makefile **不跟踪编译参数**——只改 `ARCH_FLAGS`/`CFLAGS` 而增量编，
+会得到"旧的 .o + 新的命令行"，症状是改了半天毫无变化。
+
+#### 5.10.4 偶发 ADEM：从「卡在奇怪的地方」到「255 被当成任务号」
+
+现象：约每 3~10 次启动有 1 次，在 `[FS] PASS` 之后（FS 任务调
+`arkrtos_task_wait(1000)` 那一刻）打 FATAL：
+
+```
+[Ark RTOS] FATAL: estat=0x00480000 ecode=0x00000008 era=0x0021e534 badv=0x0021c258 badi=0x28c3c2ec crmd=0x00000008
+```
+
+`Ecode=8` 是 ADEM（访存非对齐），`EsubCode=1`；`era` 落在
+`arkrtos_port_switch_task_inline` 的第一条恢复指令上（`ld.d $r12,$r23,240`），
+`crmd=0x8` 说明已在内核态、中断已关。
+
+**先排除三条错判据**：ADEM 下 `BADV` 是 UNPREDICTABLE（实测读到 0x21c258，
+与 `era` 完全无关，不能当证据）；`estat` 只说明「什么错」，不说明「为什么」；
+打印探针会改时序、把偶发 bug 藏起来。所以取证只靠三样：
+帧内寄存器、内存里的环形日志、QEMU monitor 在 `for(;;) idle` 停机态直接读内存。
+
+取证结果（各字段都是现场读出来的）：
+
+1. `la_switch_inline()` 返回 **0xffffffff**，汇编 `move $r23,$r4` 之后
+   第一条 `ld.d $r12,$r23,240` 立刻非对齐 → ADEM；
+2. 切换环形日志（`next / 旧帧 / 新栈指针 / 切换后任务号`）最后一条是
+   `0x00000100  0x00389310  0xffffffff  0x00000100`
+   ——**任务号 256、新栈指针 0xffffffff**；
+3. `arkrtos_current_task_id` 现场被写成 `0x100`；
+4. `next = arkrtos_sched_is_switching()` = `arkrtos_sched_next() + 1`；
+   `sched_next()` 直接返回 `arkrtos_ready_top()`；
+   而 `ready_top()` 在「位图置位、但该优先级的桶头还是 `ARKRTOS_TASK_NIL`(0xFF)」时
+   **把 0xFF 当任务号返回** ⇒ 255 + 1 = **256**；
+5. `sched_activate(256, …)` ⇒ `tid = 255` ⇒ 读 `arkrtos_task_table[255]`
+   （越界，正好落在 0xFF 填充的 512 KB 介质数组里）⇒ `stack_ptr = 0xFFFFFFFF`
+   ⇒ 返回它 ⇒ ADEM；
+6. **附带损害比崩溃更严重**：`current_task_id=256` 之后每次切换都会把
+   `old_psp`/`status`/`touch_tick` 写进介质数组，静默破坏文件系统内容
+   ——即使没崩，卷也已经坏了。
+
+封堵是三层，跨架构的在前，架构层的在后：
+
+| 层 | 位置 | 做法 |
+| --- | --- | --- |
+| 内核 | `arkrtos_ready_top()` | 位图只是索引、`status` 才是真相：遇「组有位、组内无位」或「位有、桶头为空/越界」就**就地清位重取**（最多 8 轮），**绝不返回 255**；现场存进 `arkrtos_ready_heal_*` |
+| 内核 | `arkrtos_sched_is_switching()` / `arkrtos_sched_activate()` | 任务号范围检查（`0..task_count`），越界一律不切、不写任何状态 |
+| 架构 | `la_switch_inline()` | 栈帧闸门：`next_sp` 不在 `[0x300000,0xB00000)` 或未按 16 字节对齐 ⇒ 拒绝切换并计数（`s_swp_bogus`） |
+
+顺手修掉的取证缺陷：`la_fatal_dump()` 打印 switch-log 时只打 4 条、且从写指针
+`pos` 处起算，读到的全是空槽（这就是早前误判「pos=4 但记录全 0」的原因）。
+现在打印全部有效条目、按**最旧→最新**排列，并补打 `heal/bogus` 计数。
+
+**结果，以及没证明的部分**（这两句必须一起读）：
+
+- 修复后 **90 次连跑**：`[FS] PASS` 90/90、FATAL **0**；
+- 但三层守卫的计数在 90 次里**全是 0**（`heal=0`、`bogus=0`、任务号越界分支 0），
+  也就是说修复之后**再没有观测到那次「位图与桶脱钩」**；
+- 因此只能说：**下游链条已闭环取证**（255 → 256 → 越界 TCB → 0xFFFFFFFF → ADEM，
+  每一环都有现场），**上游「脱钩」的触发源没有拿到单次现场，不能声称根因已定位**；
+- 已排除：FS 栈溢出（实测峰值 49.8%）、`la_switch_inline` 未返回
+  （`enter == exit`，25 次早退都是「无就绪任务」的正常路径）；
+  「tick 打断恢复序列」这条在加了「保存完 PRMD 后关中断」之后仍崩，
+  所以它不是单独成因（该保护仍然保留）；
+- 崩溃率基线本身是时序敏感的（12 连跑 4 败 / 单次 2.5 s 内炸 / 18 连跑才炸一次），
+  所以 90 次全过是「不再复现」的证据，**不是**「数学上不可能再发生」；
+  三层守卫的价值在于：即使再发生，也不会变成 ADEM + 静默破坏介质，
+  而是被计数拦下，且 `s_swp_log` / `arkrtos_sched_probe` / `arkrtos_ready_heal_*`
+  三组现场足够定位。
+
+#### 5.10.5 这一节明确**没有**做的事
+
+1. **没有内存隔离**：`ARKRTOS_USE_MPU`/`PRIV` 仍为 0。LA64 的隔离要靠
+   PLV3 + 三级页表（PGDL/PGDH + PWCL/PWCH + 每任务 TID/ASID + TLB 重填向量），
+   这是独立的一档工作量，不能拿 ARM 的 MPU 语义类比；
+2. **SHELL / LOG / UTEST 还没开**：本节的第五个任务是存储链路，
+   控制台与单元测试的接线（`kernelsrc/shell/platform_arkrtos.c` + `ark_shell/*.c`）
+   尚未接到 LA64 的 Makefile 里；
+3. **LA32 只到编译**：`csrxchg` 与 `$t0` 槽的修复在 LA32 侧同步改了且能链接
+   （见第 6 节），但 QEMU 9.2.3 没有 loongarch32 系统模拟器，没有运行证据。
+
 ## 6. LoongArch32 移植（仅编译通过，无运行载体）
 
 > **档位：仅编译通过。** 本节的每一条都是「源码写出来了、工具链认了、

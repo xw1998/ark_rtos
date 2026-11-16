@@ -49,7 +49,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（11 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（10 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（11 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（16 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -7111,10 +7111,10 @@ ARKRTOS_WEAK void arkrtos_port_irq_init(void) {
 `virt` 机器（单核、PLV0、无页表），但本文件里只有 CSR 编号、
 定时器与 UART 的常量是平台相关的，其余都是 LoongArch 架构本身
 
-### `static uint32 la_us_to_counts(uint32 us) {`
+### `static uint32 la_us_to_counts(uint32 us)`
 
 ```c
-static uint32 la_us_to_counts(uint32 us) {
+static uint32 la_us_to_counts(uint32 us)
 ```
 
 **微秒 -> 定时器计数**
@@ -7124,7 +7124,7 @@ static uint32 la_us_to_counts(uint32 us) {
 ### `uint32 arkrtos_port_atomic_cas(volatile uint32 *p_addr, uint32 expect,`
 
 ```c
-uint32 arkrtos_port_atomic_cas(volatile uint32 *p_addr, uint32 expect, uint32 new_value) {
+uint32 arkrtos_port_atomic_cas(volatile uint32 *p_addr, uint32 expect, uint32 new_value)
 ```
 
 **比较并交换（LL/SC 实现）**
@@ -7133,10 +7133,10 @@ LoongArch 的 `ll.w` / `sc.w` 是真原子指令。单核下关中断也算
 > 说明：用 `.w` 而不是 `.d` 与内核的 uint32 宽度严格对应：内核的原子量
 是 32 位，用 64 位原子会读写到相邻字段。
 
-### `uint32 arkrtos_port_syscall_num(void *p_exc_ctx) {`
+### `uint32 arkrtos_port_syscall_num(void *p_exc_ctx)`
 
 ```c
-uint32 arkrtos_port_syscall_num(void *p_exc_ctx) {
+uint32 arkrtos_port_syscall_num(void *p_exc_ctx)
 ```
 
 **从异常帧里取系统调用号**
@@ -7149,10 +7149,10 @@ syscall 在 ERA - 4 处。两条路径（谁先谁后）在文件头注释里写
 解出的指令若不是 syscall 形式，返回 0xFFFFFFFF：调用方会落到
 default 分支拒绝这次服务，而不是拿一个看似合法的号去执行。
 
-### `uint32 arkrtos_port_enter_critical(void) {`
+### `uint32 arkrtos_port_enter_critical(void)`
 
 ```c
-uint32 arkrtos_port_enter_critical(void) {
+uint32 arkrtos_port_enter_critical(void)
 ```
 
 **进入临界区，返回进入前的 CRMD**
@@ -7161,10 +7161,10 @@ csrxchg 清 IE。csrxchg 的 rd 同时是新值来源，不能一次搞定两者
 所以这里是两条指令 —— 它们之间若来中断也不改变语义：临界区
 的调用方随后会发现自己拿到的 state 里 IE=1，退出时会重新打开。
 
-### `void arkrtos_port_switch_task(void) {`
+### `void arkrtos_port_switch_task(void)`
 
 ```c
-void arkrtos_port_switch_task(void) {
+void arkrtos_port_switch_task(void)
 ```
 
 **请求一次任务切换**
@@ -7177,10 +7177,10 @@ trap）——绝不能在 trap 里就地 ertn 换栈，那会把异常处理程�
 ertn（见 arkrtos_context.S）。
 门闩未打开时两种落点都退化为「什么都不做」。
 
-### `uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void)) `
+### `uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void))`
 
 ```c
-uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void)) {
+uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void))
 ```
 
 **构造任务初始 trap 帧**
@@ -7194,10 +7194,10 @@ sp←stack_top，然后 ertn 跳进任务，此时 CRMD.IE 已经打开。
 ra 置 0：任务函数返回就等于跳到 0 取指，会立刻进致命异常，
 与 Cortex-M 版（LR=0）同一处理口径。
 
-### `void arkrtos_port_start_timer(uint32 tick_period_us) {`
+### `void arkrtos_port_start_timer(uint32 tick_period_us)`
 
 ```c
-void arkrtos_port_start_timer(uint32 tick_period_us) {
+void arkrtos_port_start_timer(uint32 tick_period_us)
 ```
 
 **启动节拍定时器**
@@ -7208,20 +7208,35 @@ TCFG 是自动重装的周期定时器（Periodic 位），硬件负这个责，
 版同一顺序：irq_init() 只开全局中断，节拍在调度数据结构就绪后
 才允许进来。
 
-### `la_frame_word *la_switch_inline(la_frame_word *frame) {`
+### `la_frame_word *la_switch_inline(la_frame_word *frame)`
 
 ```c
-la_frame_word *la_switch_inline(la_frame_word *frame) {
+la_frame_word *la_switch_inline(la_frame_word *frame)
 ```
 
 **就地切换的 C 半段（由 arkrtos_context.S 的立即切换路径调用）**
 - `frame`：刚构造好的当前帧
 **返回**：要恢复的帧；不需要切换时原样返回
+> 说明：这里还有一道栈帧合法性闸门：next_sp 必须落在内核 RAM 窗内且按
+16 字节对齐，否则拒绝切换并计数（不拿野指针去 ld.d）。
 
-### `la_frame_word *la_trap_c(la_frame_word *frame) {`
+### `static void la_fatal_dump(la_frame_word *frame)`
 
 ```c
-la_frame_word *la_trap_c(la_frame_word *frame) {
+static void la_fatal_dump(la_frame_word *frame)
+```
+
+**致命异常时把出错上下文的寄存器打出来**
+ERA/ESTAT/BADI 只说明「在哪条指令、什么类型的错」，要定位「为什么」
+还得看出错那一刻的通用寄存器。帧指针由 eentry 传进 la_trap_c，
+这里直接从帧里取，不必再读硬件寄存器（那几个早被本函数改掉了）。
+本函数只在致命路径上调用，不影响正常路径的性能与时序。
+- `frame`：出错上下文保存的帧
+
+### `la_frame_word *la_trap_c(la_frame_word *frame)`
+
+```c
+la_frame_word *la_trap_c(la_frame_word *frame)
 ```
 
 **异常帧的统一 C 入口**
@@ -7235,10 +7250,10 @@ la_frame_word *la_trap_c(la_frame_word *frame) {
 不做假恢复）。
 出口处结算 s_switch_pending：这是「没有软中断」的补偿点。
 
-### `ARKRTOS_WEAK void arkrtos_port_irq_init(void) {`
+### `ARKRTOS_WEAK void arkrtos_port_irq_init(void)`
 
 ```c
-ARKRTOS_WEAK void arkrtos_port_irq_init(void) {
+ARKRTOS_WEAK void arkrtos_port_irq_init(void)
 ```
 
 **安装异常入口并打开全局中断**

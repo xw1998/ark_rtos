@@ -595,29 +595,157 @@ void arkrtos_port_delay_us(uint32 us)
  * 异常分发
  * ============================================================ */
 
+/* 切换路径环形日志：只在致命异常转储里读，正常路径上只是几条 store，
+ * 不打印、不死等，因此不会像打印探针那样把时序搅乱（那会让 bug 躲起来）。 */
+extern volatile uint32 arkrtos_ready_heal_cnt;
+extern volatile uint32 arkrtos_ready_heal_g;
+extern volatile uint32 arkrtos_ready_heal_word;
+extern volatile uint32 arkrtos_ready_heal_bit;
+extern volatile uint32 arkrtos_ready_heal_head;
+extern volatile uint32 arkrtos_ready_heal_total;
+
+uint32 s_swp_log[4u * 16u];
+uint32 s_swp_pos = 0u;
+uint32 s_swp_enter = 0u;
+uint32 s_swp_exit = 0u;
+uint32 s_swp_bogus = 0u;         /* 被栈帧合法性闸门拦下的次数 */
+uint32 s_swp_bogus_next = 0u;    /* 最近一次被拦下的栈指针 */
+uint32 s_swp_bogus_cur = 0u;     /* 拦下时的当前任务号 */
+
+/* 内核 RAM 窗（与 example 的链接脚本一致）：所有任务的栈都在这里，
+ * 帧指针不可能落在窗外，落在窗外就只可能是越界读出来的垃圾。 */
+#define LA_FRAME_MIN    0x00300000u
+#define LA_FRAME_MAX    0x00B00000u
+
 /**
 * @brief 就地切换的 C 半段（由 arkrtos_context.S 的立即切换路径调用）
 * @param frame 刚构造好的当前帧
 * @return 要恢复的帧；不需要切换时原样返回
+* @note 这里还有一道栈帧合法性闸门：next_sp 必须落在内核 RAM 窗内且按
+*       16 字节对齐，否则拒绝切换并计数（不拿野指针去 ld.d）。
 */
 la_frame_word *la_switch_inline(la_frame_word *frame)
 {
     int32 next;
     uint32 next_sp;
 
+    s_swp_enter++;
+
     next = arkrtos_sched_is_switching();
     if(next < 0)
     {
+        s_swp_exit++;
         return frame;
     }
 
     next_sp = arkrtos_sched_activate(next, (uint32)(unsigned long)frame);
+    {
+        uint32 i = (s_swp_pos & 15u) * 4u;
+
+        s_swp_log[i + 0u] = (uint32)next;
+        s_swp_log[i + 1u] = (uint32)(unsigned long)frame;
+        s_swp_log[i + 2u] = next_sp;
+        s_swp_log[i + 3u] = (uint32)arkrtos_current_task_id;
+        s_swp_pos++;
+    }
+    s_swp_exit++;
     if(next_sp != 0u)
     {
+        /* 栈帧合法性闸门：任务的栈全部落在内核 RAM 窗内、且按 16 字节对齐
+         * （arkrtos_port_stack_init 就是按 16 对齐造的帧）。内核侧已经有
+         * 任务号越界检查，这里是架构层的最后一道：宁可原地不切，
+         * 也不要拿一个野指针去 ld.d —— 那会变成一条没有任何线索的访存异常。 */
+        if((next_sp < LA_FRAME_MIN) || (next_sp >= LA_FRAME_MAX) || ((next_sp & 0xFu) != 0u))
+        {
+            s_swp_bogus++;
+            s_swp_bogus_next = next_sp;
+            s_swp_bogus_cur  = (uint32)arkrtos_current_task_id;
+            return frame;
+        }
         return (la_frame_word *)(unsigned long)next_sp;
     }
 
     return frame;
+}
+
+/**
+* @brief 致命异常时把出错上下文的寄存器打出来
+* @details ERA/ESTAT/BADI 只说明「在哪条指令、什么类型的错」，要定位「为什么」
+*          还得看出错那一刻的通用寄存器。帧指针由 eentry 传进 la_trap_c，
+*          这里直接从帧里取，不必再读硬件寄存器（那几个早被本函数改掉了）。
+*          本函数只在致命路径上调用，不影响正常路径的性能与时序。
+* @param frame 出错上下文保存的帧
+*/
+static void la_fatal_dump(la_frame_word *frame)
+{
+    uint32 i;
+
+    arkrtos_board_puts(" frame@");
+    arkrtos_board_puthex((uint32)(unsigned long)frame);
+    arkrtos_board_puts("\n");
+    for(i = 0u; i < LA_FR_WORDS; i++)
+    {
+        if((i & 3u) == 0u)
+        {
+            arkrtos_board_puts("  [");
+            arkrtos_board_puthex(i * 8u);
+            arkrtos_board_puts("] ");
+        }
+        arkrtos_board_puthex((uint32)frame[i]);
+        arkrtos_board_puts((i & 3u) == 3u ? "\n" : " ");
+    }
+
+    /* 最近若干次切换：next / 旧帧 / 返回的新帧 / 切换后的当前任务 id。
+     * next_sp == 0xffffffff 表示调度器交回一个非法栈指针。 */
+    arkrtos_board_puts(" enter=");
+    arkrtos_board_puthex(s_swp_enter);
+    arkrtos_board_puts(" exit=");
+    arkrtos_board_puthex(s_swp_exit);
+    arkrtos_board_puts(" pos=");
+    arkrtos_board_puthex(s_swp_pos);
+    arkrtos_board_puts("\n switch-log (next frame new_sp cur_id, newest last):\n");
+    {
+        uint32 k;
+
+        uint32 total = (s_swp_pos < 16u) ? s_swp_pos : 16u;
+
+        for(k = 0u; k < total; k++)
+        {
+            /* 从最旧的一条开始：写指针前方 total 条就是全部有效记录 */
+            uint32 i = ((s_swp_pos - total + k) & 15u) * 4u;
+
+            arkrtos_board_puts("  ");
+            arkrtos_board_puthex(s_swp_log[i + 0u]);
+            arkrtos_board_puts(" ");
+            arkrtos_board_puthex(s_swp_log[i + 1u]);
+            arkrtos_board_puts(" ");
+            arkrtos_board_puthex(s_swp_log[i + 2u]);
+            arkrtos_board_puts(" ");
+            arkrtos_board_puthex(s_swp_log[i + 3u]);
+            arkrtos_board_puts("\n");
+        }
+    }
+
+    /* 内核就绪位图自愈现场：非 0 说明「位图有位、桶头为空」这类脱钩真的发生过 */
+    arkrtos_board_puts(" heal=");
+    arkrtos_board_puthex(arkrtos_ready_heal_cnt);
+    arkrtos_board_puts(" heal_g=");
+    arkrtos_board_puthex(arkrtos_ready_heal_g);
+    arkrtos_board_puts(" heal_word=");
+    arkrtos_board_puthex(arkrtos_ready_heal_word);
+    arkrtos_board_puts(" heal_bit=");
+    arkrtos_board_puthex(arkrtos_ready_heal_bit);
+    arkrtos_board_puts(" heal_head=");
+    arkrtos_board_puthex(arkrtos_ready_heal_head);
+    arkrtos_board_puts(" heal_total=");
+    arkrtos_board_puthex(arkrtos_ready_heal_total);
+    arkrtos_board_puts("\n bogus=");
+    arkrtos_board_puthex(s_swp_bogus);
+    arkrtos_board_puts(" bogus_next=");
+    arkrtos_board_puthex(s_swp_bogus_next);
+    arkrtos_board_puts(" bogus_cur=");
+    arkrtos_board_puthex(s_swp_bogus_cur);
+    arkrtos_board_puts("\n");
 }
 
 /**
@@ -671,6 +799,7 @@ la_frame_word *la_trap_c(la_frame_word *frame)
     else
     {
         arkrtos_port_fatal_report(estat);
+        la_fatal_dump(frame);
         for(;;)
         {
             __asm__ volatile("idle 0" ::: "memory");

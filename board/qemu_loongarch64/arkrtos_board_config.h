@@ -100,17 +100,21 @@
 #undef  ARKRTOS_USE_LOG_RING
 #define ARKRTOS_USE_LOG_RING         0
 
-/* 存储栈：QEMU 上没有 NOR / eMMC，也没有镜像池可写 */
+/* 存储栈：QEMU 上没有真实 NOR / eMMC，但可以用板级 RAM 介质把 blk 以上
+ * 的整条软件栈（blk -> littlefs -> VFS -> procfs）真的跑起来，见
+ * board/qemu_loongarch64/drvblk.c：擦除单位 4 KB、擦完全 0xFF、写只能
+ * 落在已擦除字节。诚实边界：**介质本身**（编程时序、忙等待、掉电中间态）
+ * 没有验证，那是 drvnor.c / drvflash.c 的事。 */
 #undef  ARKRTOS_USE_BLK
-#define ARKRTOS_USE_BLK              0
+#define ARKRTOS_USE_BLK              1
 #undef  ARKRTOS_USE_FS
-#define ARKRTOS_USE_FS               0
+#define ARKRTOS_USE_FS               1
 #undef  ARKRTOS_USE_VFS
-#define ARKRTOS_USE_VFS              0
+#define ARKRTOS_USE_VFS              1
 #undef  ARKRTOS_USE_VFS_LFS
-#define ARKRTOS_USE_VFS_LFS          0
+#define ARKRTOS_USE_VFS_LFS          1
 #undef  ARKRTOS_USE_PROCFS
-#define ARKRTOS_USE_PROCFS           0
+#define ARKRTOS_USE_PROCFS           1
 
 /* 动态装载 / MiniApp / POSIX / 网络：都不是这次要验证的东西 */
 #undef  ARKRTOS_USE_MINIAPP
