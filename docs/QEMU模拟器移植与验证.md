@@ -1735,7 +1735,9 @@ make -f example/la32_generic/Makefile size
 make -f example/la32_generic/Makefile run   # **只会报错退出 1**，见 §6.6
 ```
 
-期望体积（全功能档，§6.8）：`text 213480 / data 180 / bss 578592`。
+期望体积（全功能档 + `.ctors` 与 libc 补件，2026-11-16 实测）：
+`text 227684 / data 196 / bss 582688`（此前的最小档是 213480/180/578592，
+差额来自构造段遍历与字符串/libgcc 补件，§6.8）。
 改了 `ARCH_FLAGS` 或板级开关后必须先 `rm -rf build/la32_generic` 全量重建
 ——Makefile 不跟踪编译参数，增量构建会复用上一套开关的 `.o`。
 
@@ -1750,3 +1752,61 @@ D:/LoongIDE/la32-tool/bin/loongarch32-newlib-elf-objdump.exe -d \
 
 > 重链接前要确保没有 QEMU 进程占着 ELF，否则 `ld` 报
 > `cannot open output file ...: Invalid argument`（Windows 文件锁，不是链接脚本问题）。
+
+## 8. 三目标功能矩阵（档位、开关与缺口）
+
+> 这一节只做一件事：把「哪些功能在哪三个目标上**真的跑过**」摊开。
+> 每个格子只有三种可能：**实跑**（QEMU 里跑出读数）、**编译**（工具链
+> 认了、链接出 ELF，但没执行过）、**未做**。没有第四种。
+
+### 8.1 三个目标各自打开的功能
+
+三条 `[boot]` 行是各自固件启动时自己报的（不是文档抄的）：
+
+| 目标 | 启动读数 | 体积 text/data/bss |
+| --- | --- | --- |
+| RV32 | `sem=19922944 taskA=1 taskB=2 taskU=3 mpu=1 priv=1 taskRX=4 taskFS=5 blk=1 fs=1 vfs=1 shell=7 log=1` | 187544 / 128 / 590864 |
+| LA64 | `sem=19922944 taskA=1 taskB=2 taskFS=3 blk=1 fs=1 vfs=1 shell=6 log=1 taskU=4 app_base=0x02000000 utest=1` | 247280 / 392 / 599072 |
+| LA32 | 无（没有执行载体） | 227684 / 196 / 582688 |
+
+三份板级配置里 `LOG / LOG_RING / BLK / FS / VFS / VFS_LFS / PROCFS / SHELL /
+UTEST` 都是 1；`MINIAPP / POSIX / LWIP / SOFTBUS / APPPACK / APPRUN /
+FLASHAPP / IMAGE_SIGN / QSPI / RTSTAT / SCHED_STAT / MDK_TRACE /
+CM_BACKTRACE / CRASH_LOG / AUDIT / SECCHECK / SMP` 都是 0（本三目标的示例
+配置，不代表这些功能不存在：它们由 `tools/ci_gate.py` 的「编入档」逐项
+做 ON-path 编译核对）。
+
+### 8.2 矩阵
+
+| 功能 | RV32 | LA64 | LA32 |
+| --- | --- | --- | --- |
+| 节拍 / 任务切换 / 抢占 | **实跑**（`taskA/B` 500 ms 交替） | **实跑** | 编译 |
+| 信号量 / 互斥 + 优先级继承 / FIFO / 事件 / 定时器 / mempool / mq | **实跑**（`utest 9/9`） | **实跑**（`utest 9/9`） | 编译 |
+| 阻塞与唤醒（`wait` / `sem_post`） | **实跑** | **实跑** | 编译 |
+| SVC 入口（`syscall 0x11` TASK_CTRL / `0x12` SYS_INFO） | **实跑** | **实跑**（PLV3 App 走同一条） | 编译 |
+| 内核日志（ring）/ 内核 Shell（help/ls/cat/stack/utest/dt） | **实跑**（`shell_check.py`） | **实跑**（`shell_check.py` 10 条判据） | 编译 |
+| blk（RAM 块设备）/ littlefs / VFS / procfs | **实跑**（`[FS] PASS`） | **实跑**（`[FS] PASS`） | 编译 |
+| 任务级内存隔离 | **实跑**：MPU（PMP）+ U 模式，`mpu=1 priv=1 taskRX` | **实跑**：PLV3 + 静态 TLB 条目（§5.12） | **未做**（`priv=0`，无载体） |
+| 越权访问的负对照 | **实跑**（`docs/` §3.10） | **实跑**（PPI / refill / IPE 三条，§5.12.8） | 未做 |
+| UTEST 全量（9 例 / 90 断言） | **实跑** `9 matched, 9 passed` | **实跑** `9 matched, 9 passed` | 编译 |
+| 调试/追踪族（mdk_trace / crash / rtstat / audit / sched_stat） | 未做（本示例关） | 未做（本示例关） | 未做 |
+| 网络 / 软总线（lwip / softbus） | 未做（本示例关） | 未做（本示例关） | 未做 |
+| App 装载族（apppack / miniapp / apprun / flashapp） | 未做（本示例关） | 未做（本示例关；且 LA64 缺 arkc 后端） | 未做 |
+| SMP（多核） | 未做（无多核板） | 未做（QEMU `virt` 单核配置） | 未做 |
+| tickless / waitq / swap / seccheck / sign | 编译档核对（`ci_gate`），未实跑 | 同左 | 同左 |
+
+### 8.3 三条明确缺口（不要读成「等价完成」）
+
+1. **LA32 没有任何执行载体**：`qemu-system-loongarch32` 不存在，现成板子
+   也没有，所以矩阵里 LA32 那一列**全是「编译」**。接上载体后的第一件事
+   写在 §6.8.4 末尾（六组读数逐条看）。
+2. **SMP 无板**：`arkrtos_smp` 只有宿主侧计数与 ON-path 编译核对，没有
+   任何双核实跑证据。RV32/LA64 的 QEMU 机器都是单核配置。
+3. **App 整链（装载 + 执行）未在两个 QEMU 目标上跑**：现有实跑覆盖的是
+   「内核 + 一个手工放置的 PLV3 探针」，不是「从文件系统读出镜像、校验、
+   重定位、跳过去执行」。RV32 上这条链需要 arkc 的 RV32 后端同步，
+   LA64 上连 arkc loongarch 后端都还不存在。
+
+另有一条**已修但需记住**的：`-nostdlib` 下 `libgcc` 的内置函数与
+`strspn/strcspn` 这类字符串函数都要自己补（§6.8），只在功能面真的打开时
+才暴露 —— 最小档跑得再绿，也证明不了全功能档能链起来。
