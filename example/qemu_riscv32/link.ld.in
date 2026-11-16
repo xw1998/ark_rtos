@@ -26,6 +26,19 @@ SECTIONS
     {
         KEEP(*(.text.start))          /* 复位入口必须落在分区首地址 */
         *(.text .text.*)
+
+        /* 构造函数表：utest 用例靠 __attribute__((constructor)) 自注册，
+         * 这一段不收就会被 --gc-sections 丢掉，`utest` 于是报
+         * "0 matched, 0 failed" —— 看着全绿，其实一条用例都没跑。 */
+        . = ALIGN(4);
+        __init_array_start = .;
+        KEEP(*(.ctors))
+        KEEP(*(.ctors.*))
+        KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*)))
+        KEEP(*(.init_array))
+        . = ALIGN(4);
+        __init_array_end = .;
+
         *(.rodata .rodata.*)
         *(.srodata .srodata.*)
     }

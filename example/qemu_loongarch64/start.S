@@ -36,6 +36,24 @@ _start:
     addi.d  $t0, $t0, 8
     blt     $t0, $t1, 1b
 2:
+    /* 跑构造函数表（.ctors / .init_array）：utest 用例的自动登记、以及
+     * 将来任何 __attribute__((constructor)) 的初始化都靠它。
+     * 必须在清零 .bss 之后 —— 用例的静态缓冲都在 .bss 里。
+     * 循环游标放 $s0/$s1（被调用者保存寄存器）：构造函数是普通 C 函数，
+     * 会把 $t0~$t8 随便改掉，用临时寄存器当游标会跑飞。 */
+    la.abs  $s0, __init_array_start
+    la.abs  $s1, __init_array_end
+    beq     $s0, $s1, 6f
+4:
+    ld.d    $t2, $s0, 0
+    beq     $t2, $zero, 5f          /* 空槽（部分工具链留 0 作结束符） */
+    addi.d  $t3, $zero, -1
+    beq     $t2, $t3, 5f            /* 老式 .ctors 用 -1 作结束标记 */
+    jirl    $ra, $t2, 0
+5:
+    addi.d  $s0, $s0, 8
+    blt     $s0, $s1, 4b
+6:
     bl      main
 
 3:

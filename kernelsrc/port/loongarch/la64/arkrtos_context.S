@@ -320,3 +320,63 @@ arkrtos_port_resume_task:
 arkrtos_port_enter_idle:
     move    $sp, $a0
     jr      $ra
+
+/* ============================================================
+ * TLB 重填入口（TLBRENTRY）
+ * @details 用户态（PLV3）访问未映射地址、或内核页对用户不可见时，硬件跳到
+ *          CSR.TLBRENTRY，此时 CRMD.DA=1 / PG=0 / PLV=0 / IE=0。触发者可能是
+ *          “sp 本身就指向非法页”的任务，所以第一件事必须换到静态故障栈，
+ *          否则压栈就会再次 refill，形成无限重填。
+ *          动作全在 la_refill_c() 里；它不返回（恢复上下文或停机）。
+ * ============================================================ */
+    .section .text.tlb_refill, "ax"
+    .globl  tlb_refill_entry
+    .align  2
+tlb_refill_entry:
+    la.abs  $sp, la_refill_stack_top
+    bl      la_refill_c
+1:
+    b       1b
+
+/* ============================================================
+ * TLB 重填专用的静态故障栈
+ * @details 只在 refill 入口用一次，8 KB（QEMU 版任务栈默认 4 KB，这里留足余量
+ *          以便 la_refill_c 里调用打印与调度接口）。
+ * ============================================================ */
+    .section .bss, "aw", @nobits
+    .align  4
+    .globl  la_refill_stack_bottom
+la_refill_stack_bottom:
+    .space  8192
+    .globl  la_refill_stack_top
+la_refill_stack_top:
+
+/* ============================================================
+ * App（PLV3）故障的派发入口
+ * @details eentry 把帧压在 App 自己的栈上，而故障处理最终会走到
+ *          arkrtos_task_recover_pending() -> arkrtos_task_stack_init()，
+ *          那一步把**整个任务栈**重填一遍。处理函数若还跑在 App 栈上，
+ *          它自己的 C 帧就被抹掉，返回时 ra = 0xcdcdcdcd、PC 跳到
+ *          0xcdcdcdcc（RV32 移植踩过同一个坑，见 c05f1a6）。
+ *          所以这里先把 sp 换到独立的故障栈再进 C。
+ *          不返回：la_app_fault_c() 要么用新帧恢复，要么停机。
+ * @param a0 eentry 压好的帧指针（App 栈上，此刻仍然完好）
+ * @param a1 ESTAT.Ecode
+ * ============================================================ */
+    .section .text.la_app_fault, "ax"
+    .globl  la_app_fault_switch
+    .align  2
+la_app_fault_switch:
+    la.abs  $sp, la_fault_stack_top
+    bl      la_app_fault_c
+1:
+    b       1b
+
+/* 故障派发专用的静态栈（4 KB：里面有调度器与恢复路径的调用） */
+    .section .bss, "aw", @nobits
+    .align  4
+    .globl  la_fault_stack_bottom
+la_fault_stack_bottom:
+    .space  4096
+    .globl  la_fault_stack_top
+la_fault_stack_top:

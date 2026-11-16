@@ -70,20 +70,36 @@
 #define ARKRTOS_QEMU_UART_BASE       0x1FE001E0u
 #define ARKRTOS_QEMU_UART_REG_SHIFT  0u
 
+/* PLV3 探针页（App 的代码/数据/栈）。
+ * 选址依据：DRAM 128 MB，内核占 0x00200000~0x00B00000（镜像 1 MB + RAM 8 MB），
+ * 所以 16 MB 以上是空地。取 0x02000000（16 MB 处、2 MB 对齐，正好满足
+ * PS=20 条目要求的 2^(20+1)=2 MB 对齐）。
+ * App 的 UART 是同页 VA 别名：一页 4 KB 的 PLV3 条目把 0x02200000 页内的
+ * 0x1E0 偏移映射到 PA 0x1FE001E0，所以 App 写的就是 APP_UART 这个完整地址。 */
+#define ARKRTOS_QEMU_APP_BASE        0x02000000u
+#define ARKRTOS_QEMU_APP_SIZE        (2u * 1024u * 1024u)
+/* App 的 UART 别名页取 0x02202000 而不是 0x02200000：STLB 的组号是
+ * (VA >> 13) & 0xFF，0x02200000 与内核 UART（0x1FE00000）算出来是同一组，
+ * 两条 4 KB 条目挤在一组里靠随机路号分家（1/8 概率互相覆盖）。挪一页就换到
+ * 另一组，彻底没有这个风险。页内 0x1E0 仍对应 PA 0x1FE001E0。 */
+#define ARKRTOS_QEMU_APP_UART        0x022021E0u
+
 /* ============================================================
  * 四、能力开关
  * @details LA64 硬件有 FPU，但这一版没有启用 FPU 上下文保存（任务切换不存
  *          FPR/ FCCR），所以 FPU 开关必须关掉：打开却没有上下文管理，
  *          多任务共用浮点寄存器会静默算错。
- *          MPU / 特权分离同样关掉——本移植只跑 PLV0，没有页表或地址窗口
-*           隔离，关掉不等于"做不到"，只是这一版没有搭起来。
+ *          特权分离打开：port 里建立静态 TLB 映射并打开 CRMD.PG（见
+ *          arkrtos_port.c 的「分页与 TLB」一节），内核页 PLV0、App 页 PLV3。
+ *          MPU 仍然关掉——LoongArch 没有 MPU，保护走的是分页 + 条目 PLV，
+ *          这条开关对本架构没有对应实体。
  * ============================================================ */
 #undef  ARKRTOS_USE_FPU
 #define ARKRTOS_USE_FPU              0
 #undef  ARKRTOS_USE_MPU
 #define ARKRTOS_USE_MPU              0
 #undef  ARKRTOS_USE_PRIV
-#define ARKRTOS_USE_PRIV             0
+#define ARKRTOS_USE_PRIV             1
 
 /* 本板没有 Cortex-M 的 AIRCR，复位由板级 arkrtos_board_reboot() 接管
  * （loongarch virt 也没有复位设备，那里只能明确报"做不到"）。 */

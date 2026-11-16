@@ -633,7 +633,13 @@ UTEST_CASE(waitq_capacity_contract)
  * 几百毫秒内报红，不会把控制台挂死。
  * ============================================================ */
 #define PI_CHAIN_GAP         4u     /* 相邻两档之间留的优先级差 */
-#define PI_CHAIN_STACK_WORDS 128u   /* 512 B：这些任务只调几个内核函数 */
+/* 栈要按**最宽的那个移植**算：trap 帧本身就占掉 256 B（LA64 是 32 个
+ * 8 字节槽），512 B 的任务栈只剩 256 B 给调用链，实测在 LA64 上不够 ——
+ * 溢出会写进相邻任务（.bss 里两块栈挨着）的保存帧，症状是那个任务被
+ * resume 时 ERA 变成溢出者压在栈上的参数（实测是 mtx_lock 的 300 ms
+ * 超时），于是跳到 0x12c 取指、报 INE 停机。RV32 的帧只有 144 B，
+ * 512 B 正好够，所以这条只在 LA64 上现形。给 2 KB，两边都宽裕。 */
+#define PI_CHAIN_STACK_WORDS 512u   /* 2 KB */
 
 static uint32 s_pi_chain_stack_mid[PI_CHAIN_STACK_WORDS];
 static uint32 s_pi_chain_stack_high[PI_CHAIN_STACK_WORDS];

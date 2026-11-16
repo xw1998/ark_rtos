@@ -350,6 +350,10 @@ void arkrtos_thread_exit_internal(void)
 volatile uint32 arkrtos_interrupt_nest = 0;
 uint32 arkrtos_kernel_tick = 0;
 int32  arkrtos_current_task_id = 0;
+/* DIAG: number of times a self-killing task came back from
+ * ARKRTOS_SWITCH_TASK() (i.e. the switch did not happen and the
+ * task entry is about to return into nothing). 0 in healthy runs. */
+volatile uint32 arkrtos_kill_ret_cnt = 0u;
 #if (ARKRTOS_USE_SCHED_LOCK == 1)
 /* 调度器锁嵌套计数：>0 表示当前禁止任务切换（arkrtos_sched_lock/unlock 维护） */
 volatile uint32 arkrtos_sched_lock_nest = 0;
@@ -3485,8 +3489,19 @@ void arkrtos_task_kill_internal(void)
 #endif /* ARKRTOS_USE_FLASHAPP */
 
     {
+        int32 killed_id = arkrtos_current_task_id;
+
         ARKRTOS_SWITCH_TASK();
         ARKRTOS_WFE();
+        /* DIAG: reaching this line means the switch did not take and
+         * the caller is about to return from the task entry (ra=0).
+         * Kept as evidence only -- behaviour is unchanged. */
+        if((killed_id > 0) && (arkrtos_current_task_id == killed_id))
+        {
+            arkrtos_kill_ret_cnt++;
+            ARKRTOS_LOGI("TASK", "kill: switch did not take (id=%d) -> entry returns",
+                         (int)killed_id);
+        }
     }
 }
 

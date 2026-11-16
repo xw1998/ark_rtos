@@ -32,6 +32,18 @@ SECTIONS
     {
         KEEP(*(.text.start))          /* 复位入口必须落在分区首地址 */
         *(.text .text.*)
+
+        /* 构造函数表：utest 用例靠 __attribute__((constructor)) 自注册。
+         * 与 la64/rv32 同名、同口径，三者必须一致。 */
+        . = ALIGN(4);
+        __init_array_start = .;
+        KEEP(*(.ctors))
+        KEEP(*(.ctors.*))
+        KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*)))
+        KEEP(*(.init_array))
+        . = ALIGN(4);
+        __init_array_end = .;
+
         *(.rodata .rodata.*)
         *(.srodata .srodata.*)
     }

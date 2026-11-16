@@ -46,6 +46,10 @@ WANTED = [
     "SHARE_RAM_SIZE",
     "KERNEL_RAM_BASE",
     "KERNEL_RAM_SIZE",
+    # PLV3 探针页：App 的代码/数据/栈落在镜像与内核 RAM 之外的空地，
+    # 由链接脚本单独开一段 .appprobe（见 link.ld.in）。
+    "ARKRTOS_QEMU_APP_BASE",
+    "ARKRTOS_QEMU_APP_SIZE",
 ]
 
 

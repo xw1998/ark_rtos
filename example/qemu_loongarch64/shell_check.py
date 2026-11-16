@@ -17,8 +17,16 @@
   6. `ls /mnt/ram` 列出 hello.txt（证明 ls 走的是 VFS，不是编造的目录）；
   7. `cat /proc/version` 打印内核版本行（procfs 在 shell 里可读）；
   8. `stack` 报出 5 个任务且 0 unmeasured（A/B/FS/shell/idle）；
-  9. `utest` 汇总行是 ", 0 failed,"（不绑用例名：用例表随开关变）；
+  9. `utest` 汇总行是 "N matched, N passed, 0 failed"，且 N >= 1
+     （不绑用例名：用例表随开关变；但**必须绑匹配数**，见下面的坑）；
  10. 全程没有 UNEXPECTED / FATAL / FAILED。
+
+第 9 条的教训（2026-11-16）：这条判据最早只查 ", 0 failed,"，而板端当时的
+读数是 "0 matched, 0 passed, 0 failed, 0 skipped" —— 一条用例都没跑，
+判据却通过了，是彻底的假绿。根因是示例目标的 start.S 从不遍历构造函数表，
+而 UTEST_CASE 靠 __attribute__((constructor)) 自注册（详见
+docs/QEMU模拟器移植与验证.md §5.13.3）。所以这里改成同时要求
+matched >= 1 且 matched == passed。
 
 跑法（仓库根目录）：
 
@@ -26,6 +34,7 @@
 """
 
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -173,11 +182,18 @@ def main():
         if "0 unmeasured" not in out:
             return fail("栈计量没有生效（unmeasured 非零）\n" + out, log)
 
-        # 8) utest：板端单元测试全量。只看汇总行的 "0 failed,"，不看单个用例
-        #    的名字 —— 用例表会随功能开关变，断言名字等于把测试写死在今天。
+        # 8) utest：板端单元测试全量。不绑单个用例的名字（用例表会随功能
+        #    开关变），但**必须绑匹配数**：只查 ", 0 failed," 会把
+        #    "0 matched, 0 passed, 0 failed" 判成通过（真实踩过，见文件头）。
         out = run("utest", wait=15.0)
-        if ", 0 failed," not in out:
-            return fail("utest 汇总不是 0 failed\n" + out, log)
+        m = re.search(r"(\d+) matched,\s*(\d+) passed,\s*0 failed", out)
+        if not m:
+            return fail("utest 汇总行不可解析或不是 0 failed\n" + out, log)
+        matched, passed = int(m.group(1)), int(m.group(2))
+        if matched < 1:
+            return fail("utest 一条用例都没匹配到（构造函数表没跑？）\n" + out, log)
+        if matched != passed:
+            return fail("utest 匹配 %d 通过 %d\n%s" % (matched, passed, out), log)
 
         # 9) 全程负向标记
         for bad in ("UNEXPECTED", "FATAL", "FAILED"):

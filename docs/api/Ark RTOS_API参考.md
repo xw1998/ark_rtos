@@ -49,7 +49,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（11 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（11 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（19 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（16 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -7133,6 +7133,47 @@ LoongArch 的 `ll.w` / `sc.w` 是真原子指令。单核下关中断也算
 > 说明：用 `.w` 而不是 `.d` 与内核的 uint32 宽度严格对应：内核的原子量
 是 32 位，用 64 位原子会读写到相邻字段。
 
+### `static void la_tlb_fill(uint32 vaddr, uint32 ps, uint32 index,`
+
+```c
+static void la_tlb_fill(uint32 vaddr, uint32 ps, uint32 index,
+```
+
+**填一条 TLB 条目**
+- `vaddr`：虚拟地址基址（必须按 2^(ps+1) 对齐）
+- `ps`：页大小指数（12 = 4 KB，22 = 4 MB）
+- `lo0`：偶页 TLBELO（映射 vaddr）
+- `lo1`：奇页 TLBELO（映射 vaddr + 2^ps）
+走 `tlbfill` 而不是自己算索引：QEMU 的 tlbfill 按 PS 自动选表 ——
+PS == STLBPS(12) 进 STLB（8 路 × 256 组），PS != 12 进 MTLB
+（绝对索引 2048..2111）。而**查找**时 STLB 的每一路都按
+stlb_ps(12) 去比 VPPN，所以大页条目一旦被塞进 STLB 就永远匹配
+不上（症状是「地址明明有映射却一直报重填」）。tlbfill 替你
+选了正确的表，这是用它而不是手工写索引的唯一理由。
+
+### `static void la_mmu_init(void)`
+
+```c
+static void la_mmu_init(void)
+```
+
+**建立静态映射并打开分页**
+必须在开中断之前调用（节拍一进来就要过 TLB），也必须在
+所有任务注册之后调用不需要 —— 帧内容与映射方式无关，
+帧所在的地址在 DA 模式下写和分页模式下写是同一块内存。
+
+### `static void la_frame_apply_priv(la_frame_word *frame)`
+
+```c
+static void la_frame_apply_priv(la_frame_word *frame)
+```
+
+**把「下一个任务的特权级」写进要恢复的帧**
+- `frame`：即将被 ertn 恢复的帧
+只改 PRMD.PPLV（低 2 位），PIE/PWE 原样保留：ertn 按
+PRMD.PPLV 写 CRMD.PLV、按 PRMD.PIE 写 CRMD.IE，所以「回到
+PLV3 且开中断」= PPLV=3 + PIE=1 = 0x7。
+
 ### `uint32 arkrtos_port_syscall_num(void *p_exc_ctx)`
 
 ```c
@@ -7176,6 +7217,18 @@ trap）——绝不能在 trap 里就地 ertn 换栈，那会把异常处理程�
 - 在任务上下文里调用：交给汇编的就地切换路径，构造同格式帧后
 ertn（见 arkrtos_context.S）。
 门闩未打开时两种落点都退化为「什么都不做」。
+
+### `void arkrtos_port_set_thread_priv(uint32 is_priv)`
+
+```c
+void arkrtos_port_set_thread_priv(uint32 is_priv)
+```
+
+**记录下一个任务的特权级（由 arkrtos_sched_activate 每次切换时调用）**
+- `is_priv`：1 = 内核任务（PLV0），0 = App（PLV3）
+这里**不能**直接写 CRMD.PLV：本函数在 sched_activate() 内部被
+调用，此刻还不知道要恢复哪个帧；而 ertn 恢复特权级只认帧里的
+PRMD.PPLV。所以只记下来，由拿帧的一方用 LA_PRIV_APPLY 补写。
 
 ### `uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void))`
 
@@ -7232,6 +7285,62 @@ ERA/ESTAT/BADI 只说明「在哪条指令、什么类型的错」，要定位�
 这里直接从帧里取，不必再读硬件寄存器（那几个早被本函数改掉了）。
 本函数只在致命路径上调用，不影响正常路径的性能与时序。
 - `frame`：出错上下文保存的帧
+
+### `static void la_fault_recover(void)`
+
+```c
+static void la_fault_recover(void)
+```
+
+**App（PLV3）故障的统一收尾：记录 → 交内核恢复 → 不返回**
+与 RISC-V 的 arkrtos_port_fault_dispatch() 同一语义：
+内核的 arkrtos_cpu_fault_handler() 负责计数、按崩溃策略
+决定「重建栈帧重启」还是「禁用该 App」，并返回下一个要跑的
+帧；本函数只负责把它恢复起来。
+帧在这里已经是内核态产物（可能是重建后的新帧），不再回到
+出错的那条指令。
+
+### `void la_app_fault_c(la_frame_word *frame, uint32 ecode)`
+
+```c
+void la_app_fault_c(la_frame_word *frame, uint32 ecode)
+```
+
+**从 eentry 抓到的 App 故障（PPI / IPE / 其它）**
+- `frame`：eentry 压好的帧（在 App 自己的栈上）
+- `ecode`：ESTAT.Ecode
+> 说明：不返回。调用者（arkrtos_context.S 的 la_app_fault_switch）已经先把
+sp 换到静态故障栈 la_fault_stack：本函数末尾会走
+arkrtos_task_recover_pending() -> arkrtos_task_stack_init()，那一步
+把**整个任务栈**重填一遍，若还跑在 App 栈上，自己的 C 帧就被抹掉
+（RV32 移植踩过，见 c05f1a6）。帧本身（frame 参数）仍在 App 栈上，
+所以下面要先把要用的字段取成局部量。
+
+### `void la_refill_c(void)`
+
+```c
+void la_refill_c(void)
+```
+
+**TLB 重填的处理（由 arkrtos_context.S 的 tlb_refill_entry 调入）**
+硬件进这条入口时：不保存任何通用寄存器、CRMD.DA=1、PG=0、
+PLV=0、IE=0，出错的信息只在 TLBRBADV / TLBRERA / TLBRPRMD 里。
+所以入口第一件事是换到静态故障栈（被打断的 sp 本身就可能是坏的）。
+两种来源必须分开：
+- TLBRPRMD.PPLV != 0：App 摸了未映射地址 ⇒ 正常保护，记一条并恢复；
+- PPLV == 0：内核自己摸了未映射地址 ⇒ 移植 bug，直接停机，
+绝不能拿「重启任务」把它掩掉（那会让 bug 变成随机重启）。
+**恢复时必须写 TLBRERA/TLBRPRMD**：ertn 看到 TLBRERA.ISTLBR=1 就
+走重填的返回分支，只认这对镜像 CSR，并把 CRMD.DA 清 0、PG 置 1。
+写错了的症状是「ertn 回到出错的那条指令」——无限重填。
+
+### `static const char *la_ecode_name(uint32 ecode)`
+
+```c
+static const char *la_ecode_name(uint32 ecode)
+```
+
+**异常码的短名（只用于打印，不参与判定）**
 
 ### `la_frame_word *la_trap_c(la_frame_word *frame)`
 

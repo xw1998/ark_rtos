@@ -606,7 +606,9 @@ from-disk 分支（`const struct lfs_diskoff *disk = buffer;` 解引用 `NULL`�
 | 单 hart | SMP 路径未验证 | `USE_SMP=0` |
 | QEMU 不模拟真实外设 | 驱动层仍需上板 | 只有 16550 UART + CLINT（LoongArch 侧另有 ns16550a @0x1FE001E0） |
 | 无 IPI（LoongArch） | 不能在任意时刻异步触发切换 | QEMU loongarch `virt` 自写 `ESTAT.IS` 实测无投递 ⇒ 改就地切换 |
-| 仅 PLV0（LoongArch） | 同「无 U 模式」 | 不做 PLV3 + TLB 隔离 |
+| PLV3 隔离靠**静态 TLB 条目**（无页表遍历、无按需换页） | 一个 App 只能落在启动时写死的一页 2 MB，不能动态分配、不能换出 | 见 §5.12；这一档是为了把 PLV/TLB 这条路验穿，不是多 App 内存管理 |
+| App 页是**整页 RWX**、App 的 sp 由 App 自己决定 | 没有 W^X；App 把 sp 指到内核页时，trap 帧会按它给的位置写 | 见 §5.12.4 的已知边界 |
+| 内核低 16 MB 映射只在 `virt` 的地址布局下成立 | 换真实芯片必须重做 `.text` 起点、`.data` LMA 与 TLB 条目 | 同 LA32，见 §6.7 |
 | 串口接收只在 RV32 上是中断驱动 | LoongArch 侧仍是轮询收（发送均为轮询） | RV32 已接 PLIC，见 §3.11；LA64/LA32 的 PLIC 等价物未接 |
 | 无通用外部中断注册 API | App 侧不能自己装 ISR | `arkrtos_hal.h` 只有 `disable/enable/irq_init`；外部中断目前靠 port 弱钩子 + 板级覆盖 |
 | **LA32 无任何执行载体** | LoongArch32 只有「编译 + 链接」证据，**没有任何运行证据** | QEMU 9.2.3 只有 `qemu-system-loongarch64`（上游无 loongarch32 系统模拟器，已 `ls` + `find` 双证），机器上也没有 LA32 板子 |
@@ -627,7 +629,7 @@ example/qemu_loongarch64/libc_shim.c                # memset/memcpy/str* 等垫�
 example/qemu_loongarch64/Makefile
 ```
 
-### 5.2 运行模式：单核、只有 PLV0、没有 IPI
+### 5.2 运行模式：PLV0 内核 + PLV3 用户态、单核、没有 IPI
 
 三条都是实测结论，不是选择：
 
@@ -637,7 +639,9 @@ example/qemu_loongarch64/Makefile
    上下文里直接调 `arkrtos_port_switch_task_inline`（保存当前帧、恢复下一个
    帧），返回后由 trap 出口的 `ertn` 结算。切换点因此只有两处：trap 出口
    结算、以及 idle 首次进入。
-2. **只在 PLV0 运行**（`USE_PRIV=0`），不做 PLV3 用户态与 TLB 隔离。
+2. **内核在 PLV0、示例 App 在 PLV3**（`ARKRTOS_USE_PRIV=1`）。隔离来自
+   五条静态 TLB 条目的 PLV 位，没有软件页表遍历、没有按需换页 —— 实现与
+   实测见 §5.12。`USE_PRIV=0` 时 port 退化为空操作，默认档字节不变。
 3. **单核**（`USE_SMP=0`）；`virt` 支持 `-smp`，但 SMP 路径本轮未验证。
 
 ### 5.3 trap 帧：256 字节、8 字节槽
@@ -1002,9 +1006,9 @@ make -f example/qemu_loongarch64/Makefile -j8
 
 #### 5.10.5 这一节明确**没有**做的事
 
-1. **没有内存隔离**：`ARKRTOS_USE_MPU`/`PRIV` 仍为 0。LA64 的隔离要靠
-   PLV3 + 三级页表（PGDL/PGDH + PWCL/PWCH + 每任务 TID/ASID + TLB 重填向量），
-   这是独立的一档工作量，不能拿 ARM 的 MPU 语义类比；
+1. **§5.10 当时没有内存隔离**：`ARKRTOS_USE_MPU`/`PRIV` 那时仍为 0。
+   这一项已在 **§5.12** 补齐：走的是 **PLV3 + 静态 TLB 条目 + 重填向量**，
+   而**不是**三级页表遍历（PGDL/PGDH + PWCL/PWCH 这套没实现，见 §5.12.4）；
 2. **SHELL / LOG / UTEST 在 §5.10 时还没开**：本节的第五个任务是存储链路，
    控制台与单元测试的接线（`kernelsrc/shell/platform_arkrtos.c` + `ark_shell/*.c`）
    那时尚未接到 LA64 的 Makefile 里 —— 这一项已在 **§5.11** 补齐并实跑通过；
@@ -1051,6 +1055,14 @@ PASS: LA64 内核 Shell 端到端通（横幅/help/uname/dt/ls/cat/stack/utest �
 其中 `stack` 与 `utest` 两条是「注册了但没跑」挡不住的：前者要求栈计量
 真的在算（`0 unmeasured`），后者要求用例全量跑完且 0 失败。
 
+> **勘误（2026-11-16）**：上面这条 `utest` 判据在本节写作时是**假绿**。
+> 当时汇总行确实打印 `, 0 failed,`，但它是
+> `0 matched, 0 passed, 0 failed, 0 skipped` —— **一条用例都没跑**。
+> 判据只看「0 failed」，所以通过了。根因与修法见 **§5.13.3**；修好之后
+> 现在的读数是 `9 matched, 9 passed, 0 failed, 0 skipped`，
+> `assertions 90 run / 0 failed`。`shell_check.py` 的 `utest` 判据已随之
+> 从「含 `, 0 failed,`」收紧为「含 `9 matched, 9 passed, 0 failed`」。
+
 #### 5.11.3 第三个静默错答案：异常内部开中断 ⇒ `s_in_trap` 永久漏 1
 
 **症状**（先看到的不是原因）：任务 A 每轮 `wait(500)` 之后读一次节拍差，
@@ -1095,6 +1107,347 @@ PASS: LA64 内核 Shell 端到端通（横幅/help/uname/dt/ls/cat/stack/utest �
 本文原先「90 连跑 0 失败」的口径只统计了 `FATAL` 与 `[FS] PASS`，
 把这条一直存在的 `MISMATCH` 漏掉了 —— 那个结论应读作「不再崩溃」，
 **不是**「连等待时长都对」。
+
+### 5.12 App 保护机制：PLV3 用户态 + 静态 TLB 隔离（QEMU 实跑通过）
+
+> **档位：QEMU 实跑验证过**（`qemu-system-loongarch64 -machine virt`）。
+> 这一节回答的是「App 能不能被内核挡住」，不是「多进程内存管理做好了」。
+> 边界写在 §5.12.10，读之前先看那一节。
+
+#### 5.12.1 为什么是静态条目而不是三级页表
+
+LoongArch 的 MMU 是**软填**式的：TLB 不由硬件遍历页表得到，而是由软件
+写 CSR 或执行 `tlbfill` 填进去。也就是说，**「隔离」这件事的全部来源
+就是 TLB 条目的 PLV 位与地址范围**，页表遍历只是「怎么把条目填进去」
+的一种实现方式，不是隔离的必要条件。
+
+于是本轮选的是代价最小、也最容易取证的那条：启动时一次性写死五条条目，
+运行期只在对 App 故障恢复时重填，**不做页表、不做按需换页、不做 ASID
+切换**。这样「App 读内核页」失败时的现场（`ecode=PPI`、`badv` 正好是
+内核地址、`plv=3`）能直接证明是条目权限挡的，而不是别的东西挡住。
+
+#### 5.12.2 五条条目（QEMU virt 上的实际布局）
+
+| VA 范围 | PS | 索引 | PLV | 缓存 | 用途 |
+| --- | --- | --- | --- | --- | --- |
+| `0x00000000`..`0x00800000` → PA 同址 | 22（4 MB ×2） | MTLB 2048 | 0 | 可缓存 | FLASH `0x00200000` + RAM 头 |
+| `0x00800000`..`0x01000000` → PA 同址 | 22 | MTLB 2049 | 0 | 可缓存 | RAM 尾（`__ram_end=0x00B00000`） |
+| `0x1FE00000`..`0x1FE01000` → PA 同址 | 12（4 KB） | STLB 组 `0x00`（`(VA>>13)&0xFF`） | 0 | **不缓存** | 内核 UART（MMIO） |
+| `0x02000000`..`0x02200000` → PA `0x00300000` | 20（1 MB ×2） | MTLB 2050 | **3** | 可缓存 | App 代码/数据/栈 |
+| `0x02202000`..`0x02203000` → PA `0x1FE00000` | 12 | STLB 组 `0x01` | **3** | **不缓存** | App 的 UART 别名 |
+
+两条内核大页各覆盖 8 MB（PS=22，偶页 + 奇页各 4 MB），加起来正好盖住
+`0x0`..`0x1000000`，即 `__ram_end` 以内的全部物理内存；PLV0 意味着 App
+（PLV3）**一条都碰不到**。App 那两条 PLV3 条目是它唯一能走的路。
+
+`MTLB 2048` 这个数不是我拍的，是 QEMU 源码的常量：`LOONGARCH_STLB 2048`、
+`LOONGARCH_MTLB 64`、`LOONGARCH_TLB_MAX 2112` ⇒ MTLB 的绝对索引就是
+`2048..2111`。真实硬件上 MTLB 的下标是 `0..63`、由 `CSR_TLBIDX` 的
+index 字段选，换板子要改这一处。
+
+#### 5.12.3 大页必须 `tlbwr`，4 KB 必须 `tlbfill`，大页塞不进 STLB
+
+`helper_tlbfill`（QEMU `target/loongarch/tlb_helper.c`）的行为是二选一：
+
+- `pagesize == CSR_STLBPS` ⇒ 写 STLB，路号 `get_random_tlb(0, 7)`（**随机**）；
+- 否则 ⇒ 写 MTLB，下标 `get_random_tlb(2048, 2111)`（**随机覆盖**）。
+
+`tlbfill` 的 index 是随机的，所以只要 TLB 里已经有别人的条目，用 `tlbfill`
+写大页就是在赌命。这就是为什么：
+
+1. **大页走 `tlbwr` + 显式 `CSR_TLBIDX`**（`index = 2048 + 槽号`、
+   `PS` 写进 TLBIDX.PS、`E=1`），落到确定的位置；
+2. **4 KB 页走 `tlbfill`**，让硬件按 `(VA>>13)&0xFF` 选组；
+3. 反过来的想法（把 1 MB 页也塞进 STLB 免掉 MTLB）**行不通**：STLB 的
+   查找是按 `PS` 字段和 `STLBPS` 比对页大小的，塞进去的大页永远匹配不上。
+
+#### 5.12.4 坑：QEMU 上 `STLBPS` 复位值是 0
+
+`target/loongarch/cpu.c:562` 是 `env->CSR_STLBPS = 0;`（复位值 0），而
+`tlbfill` 正是拿 `pagesize == stlb_ps` 判断「写 STLB 还是写 MTLB」。不写
+`STLBPS` 就直接 `tlbfill` 一个 4 KB 页 ⇒ 硬件认为「这不是 STLB 的页大小」
+⇒ **随机覆盖 MTLB 的某一条**，命中的是内核大页就当场炸：
+
+```
+[LA64U] KERNEL refill (plv0) badv=0x00afffb8 era=0x00206b64 -> fatal
+```
+
+现场是「跑一会儿就报一次、`badv`/`era` 每次都不一样」—— 典型的随机覆盖。
+修法是在 `la_mmu_init()` 里、填条目之前显式写一次：
+
+```c
+LA_CSRW(LA_CSR_STLBPS, 12UL);   /* PS 字段在 [4:0]，12 = 4 KB */
+```
+
+真实硬件上 `STLBPS` 复位即为 `0xC`，这一句是**幂等的**；写它只是为了在
+QEMU 上复现真实硬件的初值，不是硬件要求。
+
+#### 5.12.5 App 的 UART 别名为什么要换组
+
+App 要打印，但 `0x1FE001E0` 那条条目是 PLV0 的，App 用不了。给它一个
+PLV3 的别名是标准做法，可「随便挑一个地址」会踩另一个坑：**STLB 是组相联
+的**，组号是 `(VA>>13)&0xFF`。内核 UART 与 App 别名若落在同一组，两页
+不同 PLV 的条目会互相顶掉（而且 `tlbfill` 的路号是随机的，顶掉哪一路也不定）。
+
+所以 App 别名的页基选 `0x02202000`：`(0x1FE00000>>13)&0xFF = 0x00`、
+`(0x02202000>>13)&0xFF = 0x01`，**不同组**。App 侧看到的完整地址是
+`0x022021E0`（`0x1E0` 偏移映射到 PA `0x1FE001E0`）。
+
+> 这条坑是踩过的：`arkrtos_port.c` 里给的默认值是 `0x022001E0`（组 `0x00`，
+> **与内核 UART 同组**），板级配置 `board/qemu_loongarch64/arkrtos_board_config.h`
+> 才把它改成 `0x022021E0`。同组时两条 4 KB 条目会在同一组的 8 路里抢位置，
+> 而 `tlbfill` 的路号是随机的 ⇒ 控制台那一页被顶掉，表现为「App 一打印，
+> 内核就报重填」。
+
+#### 5.12.6 两条故障入口，两条都必须换静态栈
+
+| 入口 | CSR | 触发者 | 静态栈 | 为什么必须换 |
+| --- | --- | --- | --- | --- |
+| `eentry` | `CSR_EENTRY` | App 执行特权指令（`IPE`）、或访问**已映射但 PLV 不够**的页（`PPI`） | `la_fault_stack`（4 KB） | 故障处理最终会走 `arkrtos_task_recover_pending()` → `arkrtos_task_stack_init()`，**把整个任务栈重填**。处理函数若还在 App 栈上跑，它自己的 C 帧就被抹掉，返回时 `ra=0xcdcdcdcd`、PC 跳到 `0xcdcdcdcc`（RV32 移植踩过同一个坑） |
+| `TLBRENTRY` | `CSR_TLBRENTRY` | App 访问**未映射**地址 | `la_refill_stack`（8 KB） | 触发者的 `sp` 本身可能就是非法页，压栈会再次 refill，形成无限重填 |
+
+两条入口的共同纪律：
+
+- **第一件事是换栈**，换完才允许 C 代码运行；
+- 恢复上下文时必须显式写 `CSR_TLBRERA` / `CSR_TLBRPRMD`：`ertn` 看到
+  `TLBRERA.ISTLBR=1` 就从 `TLBRERA`/`TLBRPRMD` 取 PC 与特权级，写回时
+  **必须把 `ISTLBR` 位再置 1**，否则 `ertn` 会去用旧的 `ERA`/`PRMD`；
+- 内核（`PPLV=0`）自己触发 refill 一律**直接停机**并打印 —— 那是条目配错了，
+  不能让内核带着坏 TLB 继续跑。
+
+#### 5.12.7 `.appprobe`：让「测了」和「看着像测了」分开
+
+App 的代码、数据、字符串、栈全部落在 `.appprobe` 段，链接脚本把它放在
+`ARKRTOS_QEMU_APP_BASE`（`0x02000000`），并有 `ASSERT` 保证不越过 App 页：
+
+```ld
+.appprobe ARKRTOS_QEMU_APP_BASE :
+{
+    __appprobe_start = .;
+    KEEP(*(.appprobe))
+    KEEP(*(.appprobe.*))
+    __appprobe_end = .;
+}
+ASSERT(__appprobe_end <= (ARKRTOS_QEMU_APP_BASE + ARKRTOS_QEMU_APP_SIZE), "appprobe overflow")
+```
+
+四条配套纪律，缺一条就会变成「看起来测了、其实没测」：
+
+1. **三个节名分开**（`.appprobe` / `.appprobe.text` / `.appprobe.rodata`），
+   否则 `-ffunction-sections` 一开，函数被拎到 `.text.xxx` 里，PLV3 页上
+   根本没有那段代码；
+2. **所有 App 函数 `noinline`**，否则编译器把 App 函数内联进内核 caller，
+   实测的执行者是内核代码（PLV0），隔离自然「通过」；
+3. **App 不得调用任何内核封装**（`arkrtos_board_puts` 之类），必须自己写
+   裸 MMIO 循环 —— 调内核函数就又回到 PLV0 了；
+4. **装载自证**：`la_app_magic = 0x4C413634` 放在 `.appprobe.rodata`，内核
+   启动后读 `0x02000000` 页上的这个值并与定值比对。对不上就说明段没被装进
+   App 页（比如 `KEEP` 漏了、或者 `ASSERT` 没拦住），此时所有「App 隔离
+   通过」的读数都必须作废。
+
+启动日志里的这一行就是第 4 条在读：
+
+```
+[boot] paging on: kernel read 0x00300000=0x00000000 app_magic=0x4c413634 (probe image loaded)
+```
+
+#### 5.12.8 实跑读数
+
+三条**负对照**（App 试三种越权方式，全部被挡）：
+
+```
+[U] round=1
+[U] probe: read kernel page 0x00300000 ...
+[LA64U] app fault ecode=7(PPI:privilege) badv=0x00300000 era=0x02001284 plv=3
+[U] round=2
+[U] probe: read unmapped 0x05000000 ...
+[LA64U] tlb refill badv=0x05000000 era=0x020012ec plv=3
+[U] round=3
+[U] probe: csrrd CRMD (privileged) ...
+[LA64U] app fault ecode=14(IPE:privileged-insn) badv=0x020012b0 era=0x020012b0 plv=3
+```
+
+三条读数的要点：
+
+- `ecode=7` 是 `PPI`（page privilege illegal）⇒ 条目在、但 PLV 不够，**正是
+  静态条目这一档要证明的东西**；
+- `ecode=14` 是 `IPE`（privileged instruction）⇒ 特权指令在 PLV3 下非法；
+- 三次全部 `plv=3` ⇒ 出事时确实在用户态，不是内核自己踩的；
+- 每次故障后 App **回到 round 下一轮继续跑**（`round=4 ms=7 svc_ok`），
+  说明故障恢复路径把上下文重建了，而不是崩在那里。
+
+三条**正对照**（App 走自己的页与自己的 UART）：
+
+```
+[U] round=4 ms=7 svc_ok
+...
+[U] round=16 ms=6013 svc_ok
+```
+
+`svc_ok` 表示 App 通过 `syscall 0x11`（`TASK_CTRL`，`a0=SUB_WAIT`）拿到
+内核服务并按时被唤醒；`ms` 单调递增且与内核侧 `[A] round=N ms=…` 对得上。
+
+`[A]`（内核任务，500 ms 周期读节拍）、`[B]`（信号量唤醒）、`[U]`（PLV3 App）
+三条线交替出现，互不阻塞 —— 这是「PLV3 不是把系统停住」的证据。
+
+同一份固件上 `utest` 全量：
+
+```
+utest: 9 matched, 9 passed, 0 failed, 0 skipped; assertions 90 run / 0 failed
+```
+
+#### 5.12.9 为什么 App 的延时用 `SUB_WAIT` 而不是 `SUB_DELAY`
+
+`SUB_DELAY` 在 trap 内部忙等（此时 `CRMD.IE=0`），节拍被吃掉：App 忙等
+500 ms 时，主机 20 s 只前进了 37 ms。`SUB_WAIT` 走的是真阻塞（挂进延时链、
+切走、到点唤醒），所以 App 的 `round` 推进与内核的 `ms` 才能对上。
+
+> 这也顺带说明了 §5.11.3 那条约束的方向：**trap 内不开中断是对的**，
+> 所以任何「在 trap 里等待」的设计都得改成「挂起 + 由节拍结算」。
+
+#### 5.12.10 明确没做的部分（不要读成「做到了」）
+
+| 没做 | 后果 |
+| --- | --- |
+| **没有页表遍历**（PGDL/PGDH/PWCL/PWCH 全未实现） | 一个 App 只能落在启动时写死的那一页；不能动态分配、不能换出、不能按需映射 |
+| **没有 ASID 区分**（`ASID` 恒 0） | 换 App 必须整 TLB 刷；多 App 无法共存 |
+| **App 页整页 RWX** | 没有 W^X，App 可以改写自己的代码段 |
+| **App 的 sp 由 App 自己给** | App 把 sp 指到内核页时，trap 帧会按它给的位置写 —— 这是「信任 App 传进来的栈」这一档的固有缺口，不是 TLB 能挡的 |
+| **只有一个 App 页** | 证明的是「App 与内核之间」的隔离，**不证明 App 与 App 之间**的隔离 |
+| **只在 QEMU virt 上验证** | 换真机要重做：MTLB 索引 `2048..2111` 是 QEMU 的常量，硬件上是 `0..63`；`STLBPS` 复位值也要按手册核 |
+
+### 5.13 本轮修掉的三处真缺陷与一处未解
+
+这一节记的都是「已经存在、并且被读数抓到过」的问题。前三条已修并复验，
+第四条**没修**，只把现场钉住。
+
+#### 5.13.1 `delay_us` 的阈值少写了 1000 倍
+
+`delay_us` 用 `loops = us * factor` 估算循环数，`factor` 是从「1 µs 基准」
+反推出来的常数，但代码里按 `us * factor / 1000` 算 ⇒ **500 ms 的延时变成
+42.9 s**。修法是别再拍常数，直接按上限动态算：
+
+```c
+uint32 loops = (us > (0xFFFFFFFFu / factor)) ? (0xFFFFFFFFu / factor) : (us * factor);
+```
+
+判据是 Delay 在 QEMU 上实测的毫秒数与请求值同量级（见 §5.10 的 `d_ms` 读数）。
+
+#### 5.13.2 PI 用例把相邻任务的内存写花了
+
+`mtx_pi_chain_contract` 用例在 LA64 上偶发 `FATAL ecode=0x0d`、`era=0x300`
+（`0x300` 是**相邻任务的参数**，不是代码）。根因是用例自己的栈太小：
+优先级继承链上三层任务叠加的 C 帧超过了 `PI_CHAIN_STACK_WORDS`。修法是
+**只改用例栈大小**（`512` words），不动上下文帧布局 —— 改帧布局会把
+「栈溢出」变成一个看不见的偏移错误。
+
+> 这一条修掉的是「`era=0x300`」那一版现场（帧被写花）。§5.13.4 记录的
+> `era=0` 是**另一回事**：那是入口函数真的返回了，不是栈被写花。两件事
+> 都发生在同一个用例附近，不要混读。
+
+#### 5.13.3 `utest` 的 `0 matched, 0 passed, 0 failed` 假绿
+
+三个目标的链接脚本都没有 `KEEP(*(.ctors))`，启动代码也不遍历
+`.ctors/.init_array` ⇒ 构造函数表是空的 ⇒ **一条用例都没注册**，而汇总行
+照样打印 `0 failed`。`shell_check.py` 当时只查「含 `, 0 failed,`」，于是
+判过 —— 这是本项目里最典型的一次假绿。
+
+两处一起修：
+
+1. 三个目标（`qemu_loongarch64` / `qemu_riscv32` / `la32_generic`）的链接
+   脚本都 `KEEP` 构造段，启动代码按 `__init_array_start..__init_array_end`
+   遍历并调用（LA64 还要注意 `-mstrict-align` 下的取指对齐）；
+2. **判据收紧**：`shell_check.py` 改为要求 `N matched, N passed, 0 failed`
+   且 `N >= 1`，并对 `matched != passed` 单独报错。
+
+修后读数是 `9 matched, 9 passed, 0 failed, 0 skipped`，三目标一致。
+教训写在脚本头部：**「0 failed」只有在「matched ≥ 1」时才是通过**。
+
+#### 5.13.4 未解：约 1/12 概率的间歇致命异常（`ecode=0x0d`, `era=0`, `ra=0`）
+
+**现象**：LA64 上连跑 `utest`（连着跑两次命中率更高）时，隔十几次出现一次：
+
+```
+TASK:4582 task 8 exits (self kill)
+TASK:4582 task 7 exits (self kill)
+[Ark RTOS] FATAL: estat=0x000d0000 ecode=0x0000000d era=0x00000000 badv=0x0 badi=0x0 crmd=0x00000010
+ frame@0x003071d0
+  [0x00] ra=0x0        tp=0x0        sp=0x003072d0
+  [0x30] ERA=0x0       PRMD=0x00000004
+```
+
+**第一层：栈归属（已确定，不是猜）**
+
+`s_pi_chain_stack_mid` 在 `nm` 里是 `0x00306ad8`，`PI_CHAIN_STACK_WORDS=512`
+⇒ 栈顶 `0x00306ad8 + 0x800 = 0x003072d8`，按 16 对齐后 `0x003072d0`。
+故障帧在 `0x003071d0 = 栈顶 - 0x100`，**正是 `arkrtos_port_stack_init()` 放
+初始帧的那个槽位**，帧里的 `sp` 字段也正好是栈顶。
+
+也就是说：出事时**栈已经完全退到底**。这不是「野指针」，而是
+**mid 任务从入口函数返回了** —— 返回时 `sp` 回到栈顶、`ra` 是入口被调用时
+的值（这里是 0），于是 PC 跳到 0，取指得到 `INE`，`era=0`。
+
+**第二层：为什么入口会返回**
+
+`mtx_pi_chain_contract` 的两个辅助任务（`pi_chain_mid_entry` /
+`pi_chain_high_entry`）都以 `arkrtos_task_kill_internal()` 收尾：
+
+```c
+static void pi_chain_mid_entry(void)
+{
+    ...
+    arkrtos_task_kill_internal();
+}
+```
+
+而 `arkrtos_task_kill_internal()` 的末尾是「置 INVALID → `ARKRTOS_SWITCH_TASK()`
+→ `ARKRTOS_WFE()` → **返回**」。只要那一次切换没有真的发生（调度器返回
+`NONE`、或切到自己的帧），函数就返回，`pi_chain_mid_entry()` 随即也返回，
+`ra=0` ⇒ 上面那一幕。
+
+**第三层：切换日志说了什么（推翻先前读法）**
+
+本轮把切换日志扩到 6 个字段（`next / 旧帧 / 新帧 / 切后 cur_id /
+目标切换前 status / 目标切换前 ready_next`），命中一次完整现场：
+
+```
+  next     old_frame  new_sp     cur  st  rd
+  0x07  0x00309d80  0x003071d0  0x07  st=0x1 rd=0x6
+  0x00  0x00307140  0x00390310  0x00  st=0x0 rd=0x0     <- mid 切到 idle
+  0x08  0x00309d80  0x003069d0  0x08  st=0x1 rd=0x7
+  0x00  0x00306950  0x00390310  0x00
+  0x07  0x00309d50  0x00307140  0x07  st=0x1 rd=0x6
+  0x00  0x0030a3b0  0x00390310  0x00
+  0x06  0x00307140  0x00309bd0  0x06  st=0x1 rd=0x5     <- 从 mid 的帧切走
+  0x00  0x0030a3b0  0x00390310  0x00
+heal=0x00000006 heal_g=0x00000040 heal_word=0x0 ...
+task table:
+  6: status=0x1 14/14 ready_next=0x05  stack_ptr=0x00309bd0
+  7: status=0x3 10/10 ready_next=0xff  stack_ptr=0x00307140
+  8: status=0x0  6/6  ready_next=0xff  stack_ptr=0x00306940
+```
+
+两条读数：
+
+1. **所有非 idle 的目标，`st` 都是 `0x1`（READY）** ⇒ 「已退出（INVALID）的
+   任务被重新调度」这个读法**不成立**。被选中的任务在选中那一刻都是合法的
+   就绪任务，问题不在就绪集与 status 脱钩。
+2. `heal=6` 说明就绪位图自愈路径确实被走过 6 次，但它只是**结果**：位图会脱钩，
+   是因为有任务在「位图上、桶里没有」这种中间态被摘掉。方向还要往前找。
+
+**当前状态：没修。** 只在自杀路径上加了一条**不改行为**的诊断：切回来后
+若 `arkrtos_current_task_id` 仍是自己，就累加 `arkrtos_kill_ret_cnt` 并打印
+`kill: switch did not take (id=N) -> entry returns`，同时把这个计数打进
+fatal 转储（`kill_ret=`）。这条计数非 0，就等于坐实上面第二层的推断；
+为 0 则说明切换确实发生过、崩溃来自别处（下一步就该查「谁会 ertn 到一个
+已死任务的初始帧」）。
+
+**复现率与边界**：LA64 单 `utest` 15 轮 1 败、双 `utest` 8 会话 1 败 ⇒
+约 1/12~1/15。加上 `kill_ret` 诊断后又连跑 **36 会话（每会话两次 `utest`）0 复现**
+—— 这既不能读成「诊断代码把它治好了」（诊断不改行为），也不能读成「已经不会
+再出」；只能读成「命中率在这个构建上偏低，还需要更长的连跑才抓得到」。
+RV32 连跑 12 轮全过、带诊断代码的 RV32 单跑仍 `9 matched, 9 passed`。
+**未复现不等于已修。**
 
 ## 6. LoongArch32 移植（仅编译通过，无运行载体）
 
@@ -1331,7 +1684,13 @@ lfs.o: undefined reference to `strcspn'
 
 接上任何 LA32 载体后的第一件事，仍然是照 `example/la32_generic/main.c`
 的六组读数逐条看：500 ms 节拍、A/B 交替、`svc_ok`、`[FS] PASS`、
-`/proc/version` 可读、`utest` 汇总 `, 0 failed,`。
+`/proc/version` 可读、`utest` 汇总 **`9 matched, 9 passed, 0 failed`**。
+
+最后一条必须连 `matched` 一起看：只看 `, 0 failed,` 会把
+「0 matched, 0 passed, 0 failed」（一条用例都没跑）判成通过 —— 这正是
+LA64/RV32 上真实发生过的假绿（§5.13.3）。LA32 因为没有执行载体，这一条
+现在**既不能判通过也不能判失败**，只能说「修法已同步进 `start.S` /
+`link.ld.in`，符号 `__init_array_start/end` 在场（9×4 = 0x24 字节）」。
 
 ## 7. 复现步骤
 

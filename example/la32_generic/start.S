@@ -40,6 +40,21 @@ _start:
     addi.w  $t0, $t0, 4
     blt     $t0, $t1, 1b
 2:
+    /* 跑构造函数表（.ctors / .init_array）。游标放 $s0/$s1：构造函数是
+     * 普通 C 函数，会把 $t0~$t8 改掉，用临时寄存器当游标会跑飞。 */
+    la.abs  $s0, __init_array_start
+    la.abs  $s1, __init_array_end
+    beq     $s0, $s1, 6f
+4:
+    ld.w    $t2, $s0, 0
+    beq     $t2, $zero, 5f
+    addi.w  $t3, $zero, -1
+    beq     $t2, $t3, 5f
+    jirl    $ra, $t2, 0
+5:
+    addi.w  $s0, $s0, 4
+    blt     $s0, $s1, 4b
+6:
     bl      main
 
 3:

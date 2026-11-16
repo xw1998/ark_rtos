@@ -40,6 +40,22 @@ _start:
 2:
     bltu    t0, t1, 1b
 
+    /* 跑构造函数表（.ctors / .init_array）：utest 用例的自动登记靠它。
+     * 必须在清完 .bss 之后（用例的静态缓冲都在 .bss 里）。
+     * 游标放 s0/s1（被调用者保存）：构造函数会把 t0~t6 随便改掉。 */
+    la      s0, __init_array_start
+    la      s1, __init_array_end
+    beq     s0, s1, 6f
+4:
+    lw      t2, 0(s0)
+    beqz    t2, 5f
+    li      t3, -1
+    beq     t2, t3, 5f
+    jalr    t2
+5:
+    addi    s0, s0, 4
+    bltu    s0, s1, 4b
+6:
     call    main
 
 3:

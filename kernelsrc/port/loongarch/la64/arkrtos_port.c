@@ -34,8 +34,17 @@
 *
 *          ## 已经知道的边界（不得当成「已有隔离」对外表述）
 *
-*          1) 只跑 PLV0，没有页表 / 地址窗口隔离，任务之间没有内存隔离；
-*          2) 异常处理程序与被中断的任务共用同一个栈（没有独立 handler 栈）；
+*          1) **PLV3 用户态隔离已打开**（ARKRTOS_USE_PRIV=1）：内核低 16 MB、
+*             内核 UART 都是 PLV0 页，App 只拿到一页 2 MB（PLV3）加一页 UART
+*             别名。App 碰内核页 = PPI(7)、碰未映射地址 = 重填异常(1/2/3)、
+*             执行 CSR = IPE(14)，三条都走内核的故障恢复而不是停机。
+*             **没有做的**：没有软件页表（TLB 条目是启动时写死的静态映射，
+*             没有按需换页、没有 swap）、App 页是整页 RWX（不做 W^X）、
+*             App 的 sp 由 App 自己决定 —— 它若指向内核页，trap 帧就会按它
+*             给的位置写；
+*          2) 普通异常（eentry）与被中断的任务共用同一个栈（没有独立 handler
+*             栈）；只有 TLB 重填这条入口用静态故障栈（la_refill_stack），
+*             因为重填可能是「被打断的 sp 本身就是坏的」引起的；
 *          3) trap 不可嵌套：进异常时 CRMD.IE 已被硬件清零，处理程序全程关中断；
 *          4) `syscall` 之后 ERA 由本层加 4（硬件不会自己前进，不加上就是死循环）；
 *          5) **64 位指针、32 位内核**：内核的地址字段是 uint32，本 port 在两处
@@ -48,6 +57,13 @@
 
 #include "arkrtos_hal.h"
 #include "arkrtos_task.h"
+#include "arkrtos_fault.h"
+
+/* 板级输出。port 层不包含 board/<板>/arkrtos_board.h（换板时这个头会换），
+ * 这几个函数是唯一需要解析的板级符号，就地声明即可。 */
+extern void arkrtos_board_puts(const char *s);
+extern void arkrtos_board_putu(uint32 val);
+extern void arkrtos_board_puthex(uint32 val);
 #include "arkrtos_config.h"
 
 #if (ARKRTOS_USE_RTSTAT == 1)
@@ -61,18 +77,34 @@
 /* ============================================================
  * CSR 编号（LoongArch 手册固定值，不随平台变化）
  * ============================================================ */
-#define LA_CSR_CRMD         0x0u
-#define LA_CSR_PRMD         0x1u
-#define LA_CSR_ECFG         0x4u
-#define LA_CSR_ESTAT        0x5u
-#define LA_CSR_ERA          0x6u
-#define LA_CSR_EENTRY       0xCu
-#define LA_CSR_TCFG         0x41u
-#define LA_CSR_TVAL         0x42u
-#define LA_CSR_TICLR        0x44u
+#define LA_CSR_CRMD         0x0
+#define LA_CSR_PRMD         0x1
+#define LA_CSR_ECFG         0x4
+#define LA_CSR_ESTAT        0x5
+#define LA_CSR_ERA          0x6
+#define LA_CSR_EENTRY       0xC
+#define LA_CSR_TCFG         0x41
+#define LA_CSR_TVAL         0x42
+#define LA_CSR_TICLR        0x44
 
-/* CRMD：PLV[1:0]、IE[2]、DA[3] */
+/* 分页 / TLB 相关（PRIV=1 时才用到）。TLBEHI 的低 13 位是 VPPN 的起点，
+ * 所以「页基址」直接写进 TLBEHI 就是对的，不需要移位。 */
+#define LA_CSR_BADV         0x7
+#define LA_CSR_TLBIDX       0x10
+#define LA_CSR_TLBEHI       0x11
+#define LA_CSR_TLBELO0      0x12
+#define LA_CSR_TLBELO1      0x13
+#define LA_CSR_ASID         0x18
+#define LA_CSR_STLBPS       0x1e        /* STLB 页大小（PS 在 [4:0]） */
+#define LA_CSR_TLBRENTRY    0x88
+#define LA_CSR_TLBRBADV     0x89
+#define LA_CSR_TLBRERA      0x8A
+#define LA_CSR_TLBRPRMD     0x8F
+
+/* CRMD：PLV[1:0]、IE[2]、DA[3]、PG[4] */
 #define LA_CRMD_IE          (1u << 2)
+#define LA_CRMD_DA          (1u << 3)   /* 直接地址模式：不翻译、也不做任何 PLV 检查 */
+#define LA_CRMD_PG          (1u << 4)   /* 分页使能：访存经 TLB 翻译并做权限检查 */
 
 /* PRMD：PPLV[1:0]、PIE[2]、PWE[3]（位序与 CRMD 低 4 位相同，容易记反）。
  * `ERTN` 按 PRMD.PPLV 写 CRMD.PLV、按 PRMD.PIE 写 CRMD.IE，
@@ -83,6 +115,8 @@
 #define LA_ESTAT_IS_TIMER   (1u << 11)      /* TI：定时器中断 */
 #define LA_ESTAT_ECODE_SYS  (0xBu)          /* SYS：syscall    */
 #define LA_ESTAT_ECODE_INT  (0x0u)          /* 中断（Ecode=0，靠 IS 分源） */
+#define LA_ESTAT_ECODE_PPI  (0x7u)          /* PPI：页存在但 PLV 不够（App 摸内核页） */
+#define LA_ESTAT_ECODE_IPE  (0xEu)          /* IPE：特权指令（App 执行 CSR / idle） */
 
 /* ECFG：LIE[12:0]、VS[15:13]。定时器 = LIE[11] */
 #define LA_ECFG_LIE_TIMER   (1u << 11)
@@ -140,10 +174,35 @@ static volatile uint32 s_switch_pending = 0u;
 /* 任务切换门闩：enter_idle 之前不切（与 M4 / RV32 移植同一语义）。 */
 static uint8 s_switch_ready = 0u;
 
+#if (ARKRTOS_USE_PRIV == 1)
+/* 下一个要恢复的任务的 PLV（0 = 内核任务，3 = App）。
+ * arkrtos_port_set_thread_priv() 只写这里：它被调用时（在
+ * arkrtos_sched_activate() 内部）手上没有帧指针，而 ertn 只认帧里的
+ * PRMD.PPLV —— 帧由拿到的返回值补写，见 LA_PRIV_APPLY。 */
+static uint32 s_next_pplv = 0u;
+#endif
+
+/* 异常码短名（定义在异常分发一节，故障打印要用，这里先声明） */
+static const char *la_ecode_name(uint32 ecode);
+
+/* App 侧故障计数：只增不减，给「真的拒了几次」一个可核对的数。 */
+volatile uint32 la_cnt_ppi = 0u;
+volatile uint32 la_cnt_ipe = 0u;
+volatile uint32 la_cnt_refill = 0u;
+volatile uint32 la_cnt_other = 0u;
+
 /* 外部符号：异常入口与汇编入口 */
 extern void eentry(void);
 extern void arkrtos_port_resume_task(uint32 stack_ptr);
 extern void arkrtos_port_enter_idle(uint32 stack_ptr, uint32 use_priv);
+
+#if (ARKRTOS_USE_PRIV == 1)
+/* TLB 重填入口（arkrtos_context.S）。重填时硬件不保存任何通用寄存器，
+ * 入口第一件事就是换到静态故障栈，见 la_refill_c()。 */
+extern void tlb_refill_entry(void);
+/* App 故障的派发入口（同上，换栈后再进 C，见 arkrtos_context.S） */
+extern void la_app_fault_switch(la_frame_word *frame, uint32 ecode);
+#endif
 
 /* 板级可覆盖的故障报告（默认什么都不打，见文件末尾） */
 void arkrtos_port_fatal_report(uint32 code);
@@ -301,6 +360,237 @@ int32 arkrtos_port_send_ipi(uint32 cpu)
     return -1;
 }
 #endif /* ARKRTOS_USE_SMP == 1 */
+
+/* ============================================================
+ * 分页与 TLB（PLV3 用户态隔离）
+ * @details LoongArch 上「保护」只有一条路：分页 + TLB 条目里的 PLV。
+ *          CRMD.DA=1 时地址直接当物理地址用，**连 PLV 检查都不做** ——
+ *          这就是旧版本「只跑 PLV0、没有隔离」的真相。打开 PG 之后每次
+ *          访存都要先过条目的 V / PLV / WE / NX 判定，越权变成异常。
+ *
+ *          这里不用软件页表：QEMU 9.2.3 的 loongarch 目标 cpu->ptw = OFF，
+ *          既没有硬件遍历器，也没有 PWCL/PWCH 的配置，所以走「启动时
+ *          一次性写死 TLB 条目」的静态映射（四条）：
+ *
+ *          | 区域                       | VA            | PS | PLV | 权限 |
+ *          |----------------------------|---------------|----|-----|------|
+ *          | 内核低 16 MB（镜像/数据/栈）| 0x00000000   | 22 |  0  | RWX  |
+ *          | 内核 UART                  | 0x1FE00000    | 12 |  0  | RW   |
+ *          | App 页（代码/数据/栈）     | APP_BASE      | 20 |  3  | RWX  |
+ *          | App 的 UART 别名           | APP_UART 页   | 12 |  3  | RW   |
+ *
+ *          一条条目管「偶页 + 奇页」两页（LO1 的 PA 恒等于 LO0 + 2^PS），
+ *          所以 PS=22 的一条覆盖 8 MB，低 16 MB 两条就够。
+ *
+ *          PLV3 的页对 PLV0 **也**可访问（RPLV=0 时判 PLV <= 条目 PLV），
+ *          于是内核读写 App 页（trap 帧、栈帧重建）不用额外映射，
+ *          任务切换也不必重编程 TLB —— 切换只改帧里的 PRMD.PPLV。
+ * ============================================================ */
+
+/* App 页几何：板级头可覆盖。默认 2 MB @ 0x02000000（QEMU DRAM 内、
+ * 内核镜像与内核 RAM 之外的空地，见 board/qemu_loongarch64 的几何注释）。 */
+#ifndef ARKRTOS_QEMU_APP_BASE
+#define ARKRTOS_QEMU_APP_BASE       0x02000000u
+#endif
+#ifndef ARKRTOS_QEMU_APP_SIZE
+#define ARKRTOS_QEMU_APP_SIZE       (2u * 1024u * 1024u)
+#endif
+/* App 能直接写的 UART 别名地址（含页内偏移）。
+ * PS=12 的页映射保留页内偏移，所以 0x02200000 页里的 0x1E0 就对应
+ * PA 0x1FE001E0 —— App 用的就是这个完整地址，不是页基址。 */
+#ifndef ARKRTOS_QEMU_APP_UART
+#define ARKRTOS_QEMU_APP_UART       0x022001E0u
+#endif
+
+/* App 帧合法窗：App 任务的 trap 帧落在 App 页里（PLV3 页，内核可读写）。 */
+#define LA_FRAME_IN_APP(sp) \
+    ((((uint32)(sp)) >= ARKRTOS_QEMU_APP_BASE) && \
+     (((uint32)(sp)) < (ARKRTOS_QEMU_APP_BASE + ARKRTOS_QEMU_APP_SIZE)))
+
+#if (ARKRTOS_USE_PRIV == 1)
+
+/* TLBELO 位域（64 位形式）：V/WE/PLV/CCA/G + PPN[12+] + NR/NX/RPLV。
+ * PPN 只保留 bit12 以上：QEMU 会把条目里位于 [12, PS-1] 的软件位清掉，
+ * 留着只是自找「地址对不上」。 */
+#define LA_PTE_V            (1UL << 0)
+#define LA_PTE_WE           (1UL << 1)
+#define LA_PTE_PLV(n)       ((unsigned long)(n) << 2)
+#define LA_PTE_CCA(n)       ((unsigned long)(n) << 4)
+#define LA_PTE_G            (1UL << 6)
+#define LA_PTE_PPN(pa)      ((unsigned long)(pa) & ~0xFFFUL)
+
+/* 内核 RAM：恒等映射、可缓存（CCA=1）、全局、PLV0 */
+#define LA_PTE_KERNEL(pa)   (LA_PTE_V | LA_PTE_WE | LA_PTE_CCA(1u) | LA_PTE_G | \
+                             LA_PTE_PLV(0u) | LA_PTE_PPN(pa))
+/* MMIO：强序不缓存（CCA=0） */
+#define LA_PTE_MMIO(pa)     (LA_PTE_V | LA_PTE_WE | LA_PTE_CCA(0u) | LA_PTE_G | \
+                             LA_PTE_PLV(0u) | LA_PTE_PPN(pa))
+/* App 普通页：PLV3 ⇒ PLV0..3 都可访问 */
+#define LA_PTE_APP(pa)      (LA_PTE_V | LA_PTE_WE | LA_PTE_CCA(1u) | \
+                             LA_PTE_PLV(3u) | LA_PTE_PPN(pa))
+/* App 的 MMIO 别名：同样 PLV3，但不缓存 */
+#define LA_PTE_APP_MMIO(pa) (LA_PTE_V | LA_PTE_WE | LA_PTE_CCA(0u) | \
+                             LA_PTE_PLV(3u) | LA_PTE_PPN(pa))
+
+/* 表索引：STLB 是 8 路 × 256 组（组号 = (VA >> 13) & 0xFF，路号自己挑），
+ * MTLB 是 2048 起的 64 条绝对条目。 */
+#define LA_STLB_WAYS        8u
+#define LA_MTLB_INDEX       2048u
+#define LA_STLB_INDEX(va, way) \
+    ((((uint32)(way)) % LA_STLB_WAYS) * 256u + ((((uint32)(va)) >> 13) & 0xFFu))
+
+#define LA_STR_(x)          #x
+#define LA_STR(x)           LA_STR_(x)
+
+/* CSR 读写。`csrwr` 的 CSR 号必须是汇编期立即数，这里用「先展开再字符串化」
+ * 绕开：LA_CSRW(LA_CSR_TLBIDX, v) → csrwr %0, 0x10。 */
+#define LA_CSRW(n, v)       do { unsigned long _la_cv = (unsigned long)(v); \
+                                 __asm__ volatile("csrwr %0, " LA_STR(n) \
+                                                  : "+r"(_la_cv) : : "memory"); \
+                            } while(0)
+#define LA_CSRR(n, out)     do { unsigned long _la_cv; \
+                                 __asm__ volatile("csrrd %0, " LA_STR(n) \
+                                                  : "=r"(_la_cv) : : "memory"); \
+                                 (out) = _la_cv; \
+                            } while(0)
+
+/**
+* @brief 填一条 TLB 条目
+* @param vaddr 虚拟地址基址（必须按 2^(ps+1) 对齐）
+* @param ps    页大小指数（12 = 4 KB，22 = 4 MB）
+* @param lo0   偶页 TLBELO（映射 vaddr）
+* @param lo1   奇页 TLBELO（映射 vaddr + 2^ps）
+* @details 走 `tlbfill` 而不是自己算索引：QEMU 的 tlbfill 按 PS 自动选表 ——
+*          PS == STLBPS(12) 进 STLB（8 路 × 256 组），PS != 12 进 MTLB
+*          （绝对索引 2048..2111）。而**查找**时 STLB 的每一路都按
+*          stlb_ps(12) 去比 VPPN，所以大页条目一旦被塞进 STLB 就永远匹配
+*          不上（症状是「地址明明有映射却一直报重填」）。tlbfill 替你
+*          选了正确的表，这是用它而不是手工写索引的唯一理由。
+*/
+static void la_tlb_fill(uint32 vaddr, uint32 ps, uint32 index,
+                        unsigned long lo0, unsigned long lo1)
+{
+    /* TLBIDX = INDEX[23:0] | PS[29:24] | NE[31]（NE=0 ⇒ 写 INDEX 指定的条目） */
+    LA_CSRW(LA_CSR_TLBIDX, ((unsigned long)ps << 24) | (unsigned long)(index & 0xFFFFFFu));
+    LA_CSRW(LA_CSR_TLBEHI, (unsigned long)(vaddr & ~0x1FFFu));
+    LA_CSRW(LA_CSR_TLBELO0, lo0);
+    LA_CSRW(LA_CSR_TLBELO1, lo1);
+
+    if(ps == 12u)
+    {
+        /* 4 KB 页进 STLB：它的组号由 VA 决定、路号随机挑 8 路之一。
+         * 本移植的两条 4 KB 条目（内核 UART / App 的 UART 别名）分在不同的
+         * 组里，所以随机路号不会互相覆盖，tlbfill 是够用的。 */
+        __asm__ volatile("tlbfill" ::: "memory");
+    }
+    else
+    {
+        /* 大页进 MTLB：**必须用 tlbwr**。QEMU 9.2.3 的 helper_tlbfill 在
+         * PS != STLBPS 时执行 `index = get_random_tlb(LOONGARCH_STLB,
+         * LOONGARCH_TLB_MAX - 1)` —— 随机挑一条 MTLB 条目**覆盖掉**。
+         * 只写三四条时撞上的概率约 5%，症状是「启动时读得到 App 页、
+         * 跑一会儿就报 KERNEL refill」这种飘忽的失败（实测踩到过一次）。
+         * tlbwr 认 TLBIDX.INDEX，是确定的。 */
+        __asm__ volatile("tlbwr" ::: "memory");
+    }
+}
+
+/**
+* @brief 建立静态映射并打开分页
+* @details 必须在开中断之前调用（节拍一进来就要过 TLB），也必须在
+*          所有任务注册之后调用不需要 —— 帧内容与映射方式无关，
+*          帧所在的地址在 DA 模式下写和分页模式下写是同一块内存。
+*/
+static void la_mmu_init(void)
+{
+    /* ASID 全 0：内核与 App 共用一份映射，切换任务不换页 */
+    LA_CSRW(LA_CSR_ASID, 0UL);
+
+    /* STLB 的页大小必须显式写成 4 KB（0xC）。这条不写就有一个只在
+     * QEMU 上才现形的坑：STLBPS 实测复位值是 0，而 helper_tlbfill()
+     * 是拿 `pagesize == STLBPS` 来判断「写 STLB 还是写 MTLB」的——
+     * 我们按 4 KB 填 UART 页时 pagesize=12 与 stlb_ps=0 不等，QEMU 就
+     * 当成大页去随机覆盖一条 MTLB 条目（get_random_tlb(2048, 2111)），
+     * 于是内核那两条 PS=22 的大页会被陆续打掉，表现为「启动能跑，
+     * 跑一会儿 KERNEL refill (plv0) -> fatal」，且 badv/era 每次不同。
+     * 真实硬件上 STLBPS 复位即为 0xC，所以这是「QEMU 上必须写、
+     * 硬件上写了也无害」的一条。 */
+    LA_CSRW(LA_CSR_STLBPS, 12UL);
+
+    /* 复位后 TLB 本来是空的，但「空」不写下来就只能靠记忆：显式清一次 */
+    __asm__ volatile("invtlb 0, $zero, $zero" ::: "memory");
+
+    /* 内核低 16 MB 恒等映射。两条 PS=22：
+     *   0x00000000 → 覆盖 0x000000~0x7FFFFF（镜像 0x200000~、静态区 0x302000~）
+     *   0x00800000 → 覆盖 0x800000~0xFFFFFF（主栈顶 0xB00000 在这里） */
+    /* 大页必须落在 MTLB（绝对索引 2048 起，共 64 条）：STLB 的条目没有自己
+     * 的 PS 字段，查找一律按 STLBPS(12) 比，塞进去的大页永远匹配不上。
+     * 4 KB 页落 STLB，组号由 tlbfill 按 VA 自己算，index 参数对它们无效。 */
+    la_tlb_fill(0x00000000u, 22u, LA_MTLB_INDEX + 0u,
+                LA_PTE_KERNEL(0x00000000u), LA_PTE_KERNEL(0x00400000u));
+    la_tlb_fill(0x00800000u, 22u, LA_MTLB_INDEX + 1u,
+                LA_PTE_KERNEL(0x00800000u), LA_PTE_KERNEL(0x00C00000u));
+
+    /* 内核 UART（PLV0、RW）：控制台 */
+    la_tlb_fill(ARKRTOS_QEMU_UART_BASE & ~0xFFFu, 12u,
+                LA_STLB_INDEX(ARKRTOS_QEMU_UART_BASE, 0u),
+                LA_PTE_MMIO(ARKRTOS_QEMU_UART_BASE & ~0xFFFu),
+                LA_PTE_MMIO((ARKRTOS_QEMU_UART_BASE & ~0xFFFu) + 0x1000u));
+
+    /* App 页（PLV3、RWX）：App 的代码、数据、栈全在这 2 MB 里 */
+    la_tlb_fill(ARKRTOS_QEMU_APP_BASE, 20u, LA_MTLB_INDEX + 2u,
+                LA_PTE_APP(ARKRTOS_QEMU_APP_BASE),
+                LA_PTE_APP(ARKRTOS_QEMU_APP_BASE + 0x100000u));
+
+    /* App 的 UART 别名（PLV3、RW）：同一台 16550，换个 VA。
+     * 内核那页是 PLV0，App 碰不到，所以必须单独给一页 —— 这一页同时也是
+     * 正对照：App 在自己的页里读写是允许的，被拒的只有内核页与未映射地址。
+     * **它必须与内核 UART 落在不同的 STLB 组**：组号是 (VA >> 13) & 0xFF，
+     * 内核 UART 在组 0x00，所以这里取 0x02202000（组 0x01）。同组时两条
+     * 4 KB 条目会在同一组的 8 路里抢位置，而 tlbfill 的路号是随机的 ⇒
+     * 控制台那一页会被顶掉。传进去的 index 对 4 KB 页无效（tlbfill 自己
+     * 按 VA 选组），保留它只为让调用点与别的条目读起来对称。 */
+    la_tlb_fill(ARKRTOS_QEMU_APP_UART & ~0xFFFu, 12u,
+                LA_STLB_INDEX(ARKRTOS_QEMU_APP_UART, 1u),
+                LA_PTE_APP_MMIO(ARKRTOS_QEMU_UART_BASE & ~0xFFFu),
+                LA_PTE_APP_MMIO((ARKRTOS_QEMU_UART_BASE & ~0xFFFu) + 0x1000u));
+
+    /* 未映射地址的入口。硬件从这里进来时 CRMD.DA=1、PG=0、PLV=0、IE=0。 */
+    LA_CSRW(LA_CSR_TLBRENTRY, (unsigned long)&tlb_refill_entry);
+
+    /* 打开分页：先关 DA 再开 PG。下一条取指就走第一条条目了。 */
+    {
+        unsigned long crmd;
+
+        LA_CSRR(LA_CSR_CRMD, crmd);
+        crmd &= ~(unsigned long)LA_CRMD_DA;
+        crmd |= (unsigned long)LA_CRMD_PG;
+        LA_CSRW(LA_CSR_CRMD, crmd);
+    }
+
+    __asm__ volatile("ibar 0" ::: "memory");
+}
+
+/**
+* @brief 把「下一个任务的特权级」写进要恢复的帧
+* @param frame 即将被 ertn 恢复的帧
+* @details 只改 PRMD.PPLV（低 2 位），PIE/PWE 原样保留：ertn 按
+*          PRMD.PPLV 写 CRMD.PLV、按 PRMD.PIE 写 CRMD.IE，所以「回到
+*          PLV3 且开中断」= PPLV=3 + PIE=1 = 0x7。
+*/
+static void la_frame_apply_priv(la_frame_word *frame)
+{
+    frame[LA_FR_PRMD] = (frame[LA_FR_PRMD] & ~3UL) | (unsigned long)s_next_pplv;
+}
+
+/* 关掉时退化为空操作：默认档的代码与行为一个字节都不变。 */
+#define LA_PRIV_APPLY(f)    la_frame_apply_priv(f)
+
+#else  /* ARKRTOS_USE_PRIV == 0 */
+
+#define LA_PRIV_APPLY(f)    do { (void)(f); } while(0)
+
+#endif /* ARKRTOS_USE_PRIV == 1 */
 
 /* ============================================================
  * 中断开关与异常上下文
@@ -467,8 +757,9 @@ void arkrtos_port_switch_enable(void)
  * 上下文层
  * ============================================================ */
 
-/* LoongArch 移植没有 PSP/CONTROL 这组概念，也没有线程级特权切换
- * （不使用 PLV3）。这几个接口保留是为了满足 HAL 的完整声明。 */
+/* LoongArch 没有 PSP/CONTROL 这组寄存器，这三个接口保留是为了满足 HAL 的
+ * 完整声明。线程级特权走下面的 arkrtos_port_set_thread_priv()：它不是
+ * CPU 寄存器，而是「下一个帧的 PRMD.PPLV」。 */
 void arkrtos_port_set_psp(uint32 val)
 {
     (void)val;
@@ -484,9 +775,20 @@ void arkrtos_port_set_control(uint32 val)
     (void)val;
 }
 
+/**
+* @brief 记录下一个任务的特权级（由 arkrtos_sched_activate 每次切换时调用）
+* @param is_priv 1 = 内核任务（PLV0），0 = App（PLV3）
+* @details 这里**不能**直接写 CRMD.PLV：本函数在 sched_activate() 内部被
+*          调用，此刻还不知道要恢复哪个帧；而 ertn 恢复特权级只认帧里的
+*          PRMD.PPLV。所以只记下来，由拿帧的一方用 LA_PRIV_APPLY 补写。
+*/
 void arkrtos_port_set_thread_priv(uint32 is_priv)
 {
+#if (ARKRTOS_USE_PRIV == 1)
+    s_next_pplv = (is_priv != 0u) ? 0u : 3u;
+#else
     (void)is_priv;
+#endif
 }
 
 /**
@@ -600,7 +902,20 @@ uint32 arkrtos_port_timer_countflag_take(void)
 void arkrtos_port_delay_us(uint32 us)
 {
     uint32 start = la_rdtime();
-    uint32 wait  = (us > 42949u) ? 0xFFFFFFFFu : (us * (ARKRTOS_PORT_RDTIME_HZ / 1000000u));
+    uint32 factor = ARKRTOS_PORT_RDTIME_HZ / 1000000u;
+    uint32 wait;
+
+    /* 溢出保护必须按「每微秒多少计数」算，不能写死一个常数：
+     * 早先写死 42949（= 2^32/100000），在 RDTIME_HZ=100 MHz 下把
+     * 阈值缩小了一千倍 —— 任何超过 42.9 ms 的延时都会被夹成
+     * 0xFFFFFFFF 个计数，也就是 42.9 秒（实测 500 ms 的 App 延时
+     * 变成 42.9 s，看起来像「任务卡死」）。 */
+    if(factor == 0u)
+    {
+        factor = 1u;
+    }
+
+    wait = (us > (0xFFFFFFFFu / factor)) ? 0xFFFFFFFFu : (us * factor);
 
     while((uint32)(la_rdtime() - start) < wait)
     {
@@ -621,7 +936,17 @@ extern volatile uint32 arkrtos_ready_heal_bit;
 extern volatile uint32 arkrtos_ready_heal_head;
 extern volatile uint32 arkrtos_ready_heal_total;
 
-uint32 s_swp_log[4u * 16u];
+/* 每条 6 个字：next / 旧帧 / 新帧 / 切换后 cur_id / 目标切换前 status /
+ * 目标切换前 ready_next。后两个字段是「死任务被重新调度」这类脱钩现场
+ * 唯一能自证的证据：只看 next 分不出「它是可运行任务」还是「它已经
+ * INVALID、只是就绪集里还留着位」。 */
+#define LA_SWP_FIELDS   6u
+uint32 s_swp_log[LA_SWP_FIELDS * 16u];
+/* 任务表是内核全局对象（arkrtos_cfg.h），port 层就地声明，
+ * 不为一条诊断日志给公共头文件拉依赖。 */
+extern arkrtos_task_t arkrtos_task_table[];
+extern int32 arkrtos_task_count;
+extern volatile uint32 arkrtos_kill_ret_cnt;
 uint32 s_swp_pos = 0u;
 uint32 s_swp_enter = 0u;
 uint32 s_swp_exit = 0u;
@@ -645,6 +970,12 @@ la_frame_word *la_switch_inline(la_frame_word *frame)
 {
     int32 next;
     uint32 next_sp;
+#if (ARKRTOS_USE_PRIV == 1)
+    /* 本任务的 PLV：activate() 会把 s_next_pplv 改成「目标任务」的值，
+     * 而不切换（或切换被闸门拦下）时活在 ARM 上的仍然是本任务本身，
+     * 它的帧必须按本任务的特权级回落，否则一个 App 任务会被降成 PLV0。 */
+    uint32 self_pplv = s_next_pplv;
+#endif
 
     s_swp_enter++;
 
@@ -655,14 +986,26 @@ la_frame_word *la_switch_inline(la_frame_word *frame)
         return frame;
     }
 
-    next_sp = arkrtos_sched_activate(next, (uint32)(unsigned long)frame);
     {
-        uint32 i = (s_swp_pos & 15u) * 4u;
+        /* 切换目标的「切换前」状态，必须在 activate 改它之前取 */
+        uint32 i  = (s_swp_pos & 15u) * LA_SWP_FIELDS;
+        uint32 st = 0u;
+        uint32 rd = 0u;
+
+        if((next > 0) && (next <= (int32)arkrtos_task_count))
+        {
+            st = (uint32)arkrtos_task_table[next - 1].status;
+            rd = (uint32)arkrtos_task_table[next - 1].ready_next;
+        }
+
+        next_sp = arkrtos_sched_activate(next, (uint32)(unsigned long)frame);
 
         s_swp_log[i + 0u] = (uint32)next;
         s_swp_log[i + 1u] = (uint32)(unsigned long)frame;
         s_swp_log[i + 2u] = next_sp;
         s_swp_log[i + 3u] = (uint32)arkrtos_current_task_id;
+        s_swp_log[i + 4u] = st;
+        s_swp_log[i + 5u] = rd;
         s_swp_pos++;
     }
     s_swp_exit++;
@@ -672,16 +1015,34 @@ la_frame_word *la_switch_inline(la_frame_word *frame)
          * （arkrtos_port_stack_init 就是按 16 对齐造的帧）。内核侧已经有
          * 任务号越界检查，这里是架构层的最后一道：宁可原地不切，
          * 也不要拿一个野指针去 ld.d —— 那会变成一条没有任何线索的访存异常。 */
-        if((next_sp < LA_FRAME_MIN) || (next_sp >= LA_FRAME_MAX) || ((next_sp & 0xFu) != 0u))
+        /* 合法窗有两个：内核 RAM 窗，以及 App 页窗（App 任务的帧落在
+         * 它自己的 PLV3 页里 —— 内核对那页同样可读写）。 */
+        if((((next_sp < LA_FRAME_MIN) || (next_sp >= LA_FRAME_MAX)) &&
+            (LA_FRAME_IN_APP(next_sp) == 0)) ||
+           ((next_sp & 0xFu) != 0u))
         {
             s_swp_bogus++;
             s_swp_bogus_next = next_sp;
             s_swp_bogus_cur  = (uint32)arkrtos_current_task_id;
+#if (ARKRTOS_USE_PRIV == 1)
+            s_next_pplv = self_pplv;       /* 没切走：恢复本任务的特权级 */
+#endif
             return frame;
         }
-        return (la_frame_word *)(unsigned long)next_sp;
+        {
+            la_frame_word *next_frame = (la_frame_word *)(unsigned long)next_sp;
+
+            /* 真正的切换点：把目标任务的 PLV 写进它的帧，再 ertn 过去。
+             * 不切换（next_sp == 0）时不动自己的帧：那时 s_next_pplv 是
+             * 别处的残留值，套到自己头上会把自己的特权级改掉。 */
+            LA_PRIV_APPLY(next_frame);
+            return next_frame;
+        }
     }
 
+#if (ARKRTOS_USE_PRIV == 1)
+    s_next_pplv = self_pplv;           /* next_sp == 0：原地继续本任务 */
+#endif
     return frame;
 }
 
@@ -720,7 +1081,7 @@ static void la_fatal_dump(la_frame_word *frame)
     arkrtos_board_puthex(s_swp_exit);
     arkrtos_board_puts(" pos=");
     arkrtos_board_puthex(s_swp_pos);
-    arkrtos_board_puts("\n switch-log (next frame new_sp cur_id, newest last):\n");
+    arkrtos_board_puts("\n switch-log (next frame new_sp cur_id st rd, newest last):\n");
     {
         uint32 k;
 
@@ -729,7 +1090,7 @@ static void la_fatal_dump(la_frame_word *frame)
         for(k = 0u; k < total; k++)
         {
             /* 从最旧的一条开始：写指针前方 total 条就是全部有效记录 */
-            uint32 i = ((s_swp_pos - total + k) & 15u) * 4u;
+            uint32 i = ((s_swp_pos - total + k) & 15u) * LA_SWP_FIELDS;
 
             arkrtos_board_puts("  ");
             arkrtos_board_puthex(s_swp_log[i + 0u]);
@@ -739,6 +1100,10 @@ static void la_fatal_dump(la_frame_word *frame)
             arkrtos_board_puthex(s_swp_log[i + 2u]);
             arkrtos_board_puts(" ");
             arkrtos_board_puthex(s_swp_log[i + 3u]);
+            arkrtos_board_puts(" st=");
+            arkrtos_board_puthex(s_swp_log[i + 4u]);
+            arkrtos_board_puts(" rd=");
+            arkrtos_board_puthex(s_swp_log[i + 5u]);
             arkrtos_board_puts("\n");
         }
     }
@@ -756,6 +1121,37 @@ static void la_fatal_dump(la_frame_word *frame)
     arkrtos_board_puthex(arkrtos_ready_heal_head);
     arkrtos_board_puts(" heal_total=");
     arkrtos_board_puthex(arkrtos_ready_heal_total);
+    /* 自杀死任务从 SWITCH_TASK 里返回的次数：非 0 说明有一条任务入口
+     * 已经 return 到 ra=0（那正是本类致命异常的形状）。 */
+    arkrtos_board_puts(" kill_ret=");
+    arkrtos_board_puthex(arkrtos_kill_ret_cnt);
+    /* 任务表快照：致命异常时真正需要的是「谁还在就绪集里、它的栈指针指向
+     * 哪」。status 与 ready_next 分开打，是因为「INVALID 但仍挂在就绪链上」
+     * 这种组合本身就是脱钩现场。只在致命路径执行，正常路径零成本。 */
+    arkrtos_board_puts("\n task table (id: status prio/base ready_next entry stack_ptr):\n");
+    {
+        int32 t;
+
+        for(t = 0; t < arkrtos_task_count; t++)
+        {
+            arkrtos_board_puts("  ");
+            arkrtos_board_putu((uint32)t + 1u);
+            arkrtos_board_puts(": ");
+            arkrtos_board_puthex((uint32)arkrtos_task_table[t].status);
+            arkrtos_board_puts(" ");
+            arkrtos_board_putu((uint32)arkrtos_task_table[t].priority);
+            arkrtos_board_puts("/");
+            arkrtos_board_putu((uint32)arkrtos_task_table[t].base_priority);
+            arkrtos_board_puts(" ");
+            arkrtos_board_puthex((uint32)arkrtos_task_table[t].ready_next);
+            arkrtos_board_puts(" ");
+            arkrtos_board_puthex((uint32)(unsigned long)arkrtos_task_table[t].entry);
+            arkrtos_board_puts(" ");
+            arkrtos_board_puthex(arkrtos_task_table[t].stack_ptr);
+            arkrtos_board_puts("\n");
+        }
+    }
+
     arkrtos_board_puts("\n bogus=");
     arkrtos_board_puthex(s_swp_bogus);
     arkrtos_board_puts(" bogus_next=");
@@ -763,6 +1159,184 @@ static void la_fatal_dump(la_frame_word *frame)
     arkrtos_board_puts(" bogus_cur=");
     arkrtos_board_puthex(s_swp_bogus_cur);
     arkrtos_board_puts("\n");
+}
+
+/**
+* @brief App（PLV3）故障的统一收尾：记录 → 交内核恢复 → 不返回
+* @details 与 RISC-V 的 arkrtos_port_fault_dispatch() 同一语义：
+*          内核的 arkrtos_cpu_fault_handler() 负责计数、按崩溃策略
+*          决定「重建栈帧重启」还是「禁用该 App」，并返回下一个要跑的
+*          帧；本函数只负责把它恢复起来。
+*          帧在这里已经是内核态产物（可能是重建后的新帧），不再回到
+*          出错的那条指令。
+*/
+static void la_fault_recover(void)
+{
+    uint32 next = arkrtos_cpu_fault_handler(ARKRTOS_FAULT_MEMFAULT);
+
+    if(next != 0u)
+    {
+        la_frame_word *next_frame = (la_frame_word *)(unsigned long)next;
+
+        LA_PRIV_APPLY(next_frame);
+        /* 从这里开始不再算「在异常里」：resume_task 只做恢复 + ertn */
+        s_in_trap = 0u;
+        arkrtos_port_resume_task(next);
+    }
+
+    /* 连一个可恢复的任务都选不出来：明确停机，不假装恢复过。 */
+    arkrtos_board_puts("[LA64U] no recoverable task -> halt\n");
+    arkrtos_port_fatal_report(0xFEE1u);
+    for(;;)
+    {
+        __asm__ volatile("idle 0" ::: "memory");
+    }
+}
+
+/**
+* @brief 从 eentry 抓到的 App 故障（PPI / IPE / 其它）
+* @param frame eentry 压好的帧（在 App 自己的栈上）
+* @param ecode ESTAT.Ecode
+* @note 不返回。调用者（arkrtos_context.S 的 la_app_fault_switch）已经先把
+*       sp 换到静态故障栈 la_fault_stack：本函数末尾会走
+*       arkrtos_task_recover_pending() -> arkrtos_task_stack_init()，那一步
+*       把**整个任务栈**重填一遍，若还跑在 App 栈上，自己的 C 帧就被抹掉
+*       （RV32 移植踩过，见 c05f1a6）。帧本身（frame 参数）仍在 App 栈上，
+*       所以下面要先把要用的字段取成局部量。
+*/
+void la_app_fault_c(la_frame_word *frame, uint32 ecode)
+{
+    unsigned long badv = 0ul;
+    /* 先把要打的东西取成局部量：后面 arkrtos_cpu_fault_handler() 会重建
+     * 本任务的整个栈（含这个帧所在的位置），事后再读 frame[...] 就是读垃圾。 */
+    uint32 era_val  = (uint32)frame[LA_FR_ERA];
+    uint32 pplv_val = (uint32)(frame[LA_FR_PRMD] & 3UL);
+
+    LA_CSRR(LA_CSR_BADV, badv);
+
+    if(ecode == LA_ESTAT_ECODE_PPI)
+    {
+        la_cnt_ppi++;
+    }
+    else if(ecode == LA_ESTAT_ECODE_IPE)
+    {
+        la_cnt_ipe++;
+    }
+    else
+    {
+        la_cnt_other++;
+    }
+
+    arkrtos_board_puts("[LA64U] app fault ecode=");
+    arkrtos_board_putu(ecode);
+    arkrtos_board_puts("(");
+    arkrtos_board_puts(la_ecode_name(ecode));
+    arkrtos_board_puts(") badv=");
+    arkrtos_board_puthex((uint32)badv);
+    arkrtos_board_puts(" era=");
+    arkrtos_board_puthex(era_val);
+    arkrtos_board_puts(" plv=");
+    arkrtos_board_putu(pplv_val);
+    arkrtos_board_puts("\n");
+
+    la_fault_recover();
+}
+
+/**
+* @brief TLB 重填的处理（由 arkrtos_context.S 的 tlb_refill_entry 调入）
+* @details 硬件进这条入口时：不保存任何通用寄存器、CRMD.DA=1、PG=0、
+*          PLV=0、IE=0，出错的信息只在 TLBRBADV / TLBRERA / TLBRPRMD 里。
+*          所以入口第一件事是换到静态故障栈（被打断的 sp 本身就可能是坏的）。
+*
+*          两种来源必须分开：
+*            - TLBRPRMD.PPLV != 0：App 摸了未映射地址 ⇒ 正常保护，记一条并恢复；
+*            - PPLV == 0：内核自己摸了未映射地址 ⇒ 移植 bug，直接停机，
+*              绝不能拿「重启任务」把它掩掉（那会让 bug 变成随机重启）。
+*
+*          **恢复时必须写 TLBRERA/TLBRPRMD**：ertn 看到 TLBRERA.ISTLBR=1 就
+*          走重填的返回分支，只认这对镜像 CSR，并把 CRMD.DA 清 0、PG 置 1。
+*          写错了的症状是「ertn 回到出错的那条指令」——无限重填。
+*/
+void la_refill_c(void)
+{
+    unsigned long tlbrera = 0ul;
+    unsigned long tlbrprmd = 0ul;
+    unsigned long tlbrbadv = 0ul;
+
+    LA_CSRR(LA_CSR_TLBRERA, tlbrera);
+    LA_CSRR(LA_CSR_TLBRPRMD, tlbrprmd);
+    LA_CSRR(LA_CSR_TLBRBADV, tlbrbadv);
+
+    if((tlbrprmd & 3UL) == 0UL)
+    {
+        arkrtos_board_puts("[LA64U] KERNEL refill (plv0) badv=");
+        arkrtos_board_puthex((uint32)tlbrbadv);
+        arkrtos_board_puts(" era=");
+        arkrtos_board_puthex((uint32)(tlbrera & ~3UL));
+        arkrtos_board_puts(" -> fatal\n");
+        arkrtos_port_fatal_report((uint32)tlbrbadv);
+        for(;;)
+        {
+            __asm__ volatile("idle 0" ::: "memory");
+        }
+    }
+
+    la_cnt_refill++;
+    arkrtos_board_puts("[LA64U] tlb refill badv=");
+    arkrtos_board_puthex((uint32)tlbrbadv);
+    arkrtos_board_puts(" era=");
+    arkrtos_board_puthex((uint32)(tlbrera & ~3UL));
+    arkrtos_board_puts(" plv=");
+    arkrtos_board_putu((uint32)(tlbrprmd & 3UL));
+    arkrtos_board_puts("\n");
+
+    /* 重填也是「在异常里」：开着这个标志，恢复路径里的临界区退出不会真的
+     * 把 CRMD.IE 打开（否则节拍会嵌进故障处理里）。 */
+    s_in_trap = 1u;
+    s_switch_pending = 0u;
+
+    {
+        uint32 next = arkrtos_cpu_fault_handler(ARKRTOS_FAULT_MEMFAULT);
+
+        if(next != 0u)
+        {
+            la_frame_word *next_frame = (la_frame_word *)(unsigned long)next;
+
+            LA_PRIV_APPLY(next_frame);
+
+            LA_CSRW(LA_CSR_TLBRERA, ((unsigned long)next_frame[LA_FR_ERA] & ~3UL) | 1UL);
+            LA_CSRW(LA_CSR_TLBRPRMD, (unsigned long)next_frame[LA_FR_PRMD]);
+
+            s_in_trap = 0u;
+            arkrtos_port_resume_task(next);
+        }
+    }
+
+    arkrtos_board_puts("[LA64U] refill: no recoverable task -> halt\n");
+    arkrtos_port_fatal_report(0xFEE2u);
+    for(;;)
+    {
+        __asm__ volatile("idle 0" ::: "memory");
+    }
+}
+
+/**
+* @brief 异常码的短名（只用于打印，不参与判定）
+*/
+static const char *la_ecode_name(uint32 ecode)
+{
+    switch(ecode)
+    {
+        case 1u:  return "PIL:page-invalid-load";
+        case 2u:  return "PIS:page-invalid-store";
+        case 3u:  return "PIF:page-invalid-fetch";
+        case 7u:  return "PPI:privilege";
+        case 8u:  return "ADEM:misalign";
+        case 9u:  return "ALE:align";
+        case 12u: return "BRK:breakpoint";
+        case 14u: return "IPE:privileged-insn";
+        default:  return "other";
+    }
 }
 
 /**
@@ -815,6 +1389,18 @@ la_frame_word *la_trap_c(la_frame_word *frame)
     }
     else
     {
+        #if (ARKRTOS_USE_PRIV == 1)
+        /* 从 PLV3 进来的非 syscall 异常 = App 越权或非法指令。
+         * 走故障恢复（重启该 App）而不是停机：一个 App 的 bug 打死整个
+         * 系统，就不是「隔离」了。PLV0 自己的异常仍然按致命处理。 */
+        if((frame[LA_FR_PRMD] & 3UL) != 0UL)
+        {
+            /* 走换栈入口：故障处理会把整个任务栈重填，处理函数不能跑在
+             * 那个栈上（否则返回地址变成 0xcdcdcdcd）。不返回。 */
+            la_app_fault_switch(frame, ecode);
+        }
+        #endif
+
         arkrtos_port_fatal_report(estat);
         la_fatal_dump(frame);
         for(;;)
@@ -839,6 +1425,8 @@ la_frame_word *la_trap_c(la_frame_word *frame)
             if(next_sp != 0u)
             {
                 frame = (la_frame_word *)(unsigned long)next_sp;
+                /* 交换到别人（可能是 PLV3 的 App）时，把它的特权级写进帧 */
+                LA_PRIV_APPLY(frame);
             }
         }
     }
@@ -872,6 +1460,12 @@ ARKRTOS_WEAK void arkrtos_port_irq_init(void)
     __asm__ volatile("csrwr %0, 0xC" : "+r"(entry) : : "memory");
 
     la_ticlr_clear();
+
+    #if (ARKRTOS_USE_PRIV == 1)
+    /* 分页在开中断之前打开：节拍一进来就要经 TLB 取指/访存。
+     * 此时任务已经注册完（帧写在各自的栈上），映射与帧内容无关。 */
+    la_mmu_init();
+    #endif
 
     {
         uint32 mask = LA_CRMD_IE;

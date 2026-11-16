@@ -27,6 +27,21 @@ SECTIONS
     {
         KEEP(*(.text.start))          /* 复位入口必须落在分区首地址 */
         *(.text .text.*)
+
+        /* 构造函数表。本工具链（GCC 8.3）把 __attribute__((constructor))
+         * 放进 .ctors，新工具链放 .init_array —— 两种都收，start.S 在清零
+         * .bss 之后逐个调用。没有这一段，utest 用例的自动登记会被
+         * --gc-sections 丢掉，shell 的 `utest` 就报 "0 matched, 0 failed"，
+         * 看上去全绿、其实一条用例都没跑（假绿）。 */
+        . = ALIGN(8);
+        __init_array_start = .;
+        KEEP(*(.ctors))
+        KEEP(*(.ctors.*))
+        KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*)))
+        KEEP(*(.init_array))
+        . = ALIGN(8);
+        __init_array_end = .;
+
         *(.rodata .rodata.*)
         *(.srodata .srodata.*)
     }
@@ -64,6 +79,24 @@ SECTIONS
 
     /* 静态数据 + 主栈不得越过 RAM 末端 */
     ASSERT(__bss_end + __stack_reserve <= __ram_end, "RAM overflow: .bss + stack exceeds CHIP_RAM")
+
+    /* ---- PLV3 探针页：App 的代码/数据/栈 ----
+     * 单独一段、VMA == LMA == APP_BASE：QEMU 的 ELF 装载器按 p_paddr 把这段
+     * 拷进 DRAM，所以 App 一上电就在自己的 2 MB 页里。这段既不在镜像区间也
+     * 不在内核 RAM 区间内，内核 TLB 条目（PLV0）看不到它，全体也一样 ——
+     * 只有 PLV 那份 PS=20 的条目（PLV3）指向这里。
+     * 这段必须在 .bss 之后、并且这里显式给地址，否则会紧贴内核数据区。 */
+    .appprobe ARKRTOS_QEMU_APP_BASE :
+    {
+        __appprobe_start = .;
+        KEEP(*(.appprobe))
+        KEEP(*(.appprobe.*))
+        . = ALIGN(16);
+        __appprobe_end = .;
+    }
+
+    ASSERT(__appprobe_end <= (ARKRTOS_QEMU_APP_BASE + ARKRTOS_QEMU_APP_SIZE),
+           "App probe section exceeds ARKRTOS_QEMU_APP_SIZE")
 
     /DISCARD/ :
     {

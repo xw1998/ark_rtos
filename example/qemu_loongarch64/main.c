@@ -350,6 +350,226 @@ static void task_fs(void)
     }
 }
 
+/* ============================================================
+ * 任务 E：PLV3 App 保护自检（分页 + TLB 条目 PLV 的现场证据）
+ * @details 这个任务以 is_priv = 0 注册，于是 port 在返回它的帧时把
+ *          PRMD.PPLV 写成 3，由 ertn 落到 CRMD.PLV = 3。它与内核的隔离
+ *          完全来自 TLB 条目的 PLV 位（内核页 PLV0、App 页 PLV3），
+ *          不是靠「什么都没给」。
+ *
+ *          四条探针，每条都必须「被拒」才算通过：
+ *            round 1：读 0x00300000（内核 RAM，PLV0 页）=> PPI(7)
+ *            round 2：读 0x05000000（没有任何条目）    => refill(1)
+ *            round 3：csrrd CRMD（特权 CSR）           => IPE(14)
+ *            round 4：syscall 取时间 + 延时            => 正常返回
+ *          被拒之后内核把本任务原地重启并重建栈帧，所以 round 会接着涨 ——
+ *          连续几条 [U] round=N 本身就是「拦住了 + 恢复了」的证据。
+ *
+ *          两个必须写在代码里的前提：
+ *          1) **App 的代码/数据/字符串全部放 .appprobe**。这一节被链接到
+ *             0x02000000（App 页），页条目是 PLV3；内核的 .text/.rodata
+ *             在 PLV0 页里，App 连取指都过不去。字面量若落 .rodata，
+ *             被测的就不是保护机制了。
+ *          2) **App 不能调内核封装**（arkrtos_get_time_ms 之类是 PLV0 代码），
+ *             只能自己内联 syscall 指令。
+ * @note 已知边界（见 docs/QEMU模拟器移植与验证.md 的 LA64 PLV3 小节）：
+ *       App 页整页 RWX（不做 W^X）；没有页表遍历 / 按需换页 / swap；
+ *       App 的 sp 由内核给的栈顶决定，App 自己改坏了就是它自己的事。
+ * ============================================================ */
+#if (ARKRTOS_USE_PRIV == 1)
+
+/* App 页里的一切都带这一节属性。noinline 是必需的：一个被内联进内核
+ * 函数的 App 辅助函数会落在内核页里，App 一调就 PPI。
+ * 代码 / 只读常量 / 可写数据分三个节名：汇编器不允许同名节带两种类型
+ * （"ax" 与 "aw" 撞在一起会直接报 section type conflict）。三个名字都被
+ * 链接脚本收进同一个输出段 .appprobe。 */
+#define LA_APP_DATA     __attribute__((section(".appprobe"), used))
+#define LA_APP_RODATA   __attribute__((section(".appprobe.rodata"), used))
+#define LA_APP_CODE     __attribute__((section(".appprobe.text"), used, noinline))
+#define LA_APP_STR(n,t) static LA_APP_RODATA const char n[] = t
+
+/* 探针地址。第一个是内核 RAM 的首地址（PLV0 页，内核稍后会读成功一次），
+ * 第二个在 16 MB 以上、没有任何条目覆盖。 */
+#define LA_APP_KERNEL_ADDR   0x00300000u
+#define LA_APP_UNMAPPED      0x05000000u
+
+#define LA_APP_STACK_WORDS   1024u
+
+static LA_APP_DATA uint32 s_app_stack[LA_APP_STACK_WORDS];
+/* round 必须活过「故障 -> 重建栈帧 -> 重启」，所以不能放栈上 */
+static LA_APP_DATA volatile uint32 s_app_round = 0u;
+/* 装载自证：内核读这个值等于魔数，说明 ELF 的 .appprobe 段真的被
+ * QEMU 按 p_paddr 装进了 0x02000000（否则读到的是 DRAM 复位值）。 */
+LA_APP_RODATA const unsigned long la_app_magic = 0x4C413634UL;
+
+LA_APP_STR(la_s_round,      "[U] round=");
+LA_APP_STR(la_s_nl,         "\n");
+LA_APP_STR(la_s_kern_probe, "[U] probe: read kernel page 0x00300000 ...\n");
+LA_APP_STR(la_s_unm_probe,  "[U] probe: read unmapped 0x05000000 ...\n");
+LA_APP_STR(la_s_csr_probe,  "[U] probe: csrrd CRMD (privileged) ...\n");
+LA_APP_STR(la_s_unexpect,   "[U] UNEXPECTED: no protection, value=");
+LA_APP_STR(la_s_svc_ms,     " ms=");
+LA_APP_STR(la_s_svc_ok,     " svc_ok\n");
+LA_APP_STR(la_s_fatal,      "[U] FATAL: protection not enforced, halted\n");
+
+/* 10 的幂表：App 里不用除法（不依赖 libgcc 的 __udivsi3） */
+static LA_APP_RODATA const uint32 la_p10[10] = {
+    1000000000u, 100000000u, 10000000u, 1000000u, 100000u,
+    10000u, 1000u, 100u, 10u, 1u
+};
+
+/* UART 用 PLV3 别名页：0x02200000 页内 0x1E0 对应 PA 0x1FE001E0 */
+#define LA_APP_UART_PTR  ((volatile uint8 *)(unsigned long)ARKRTOS_QEMU_APP_UART)
+
+static LA_APP_CODE void app_putc(char c)
+{
+    /* LSR(5) bit5 = THR 空 */
+    while((LA_APP_UART_PTR[5] & 0x20u) == 0u)
+    {
+    }
+    LA_APP_UART_PTR[0] = (uint8)c;
+}
+
+static LA_APP_CODE void app_puts(const char *str)
+{
+    while(*str != 0)
+    {
+        app_putc(*str);
+        str++;
+    }
+}
+
+static LA_APP_CODE void app_putu(uint32 val)
+{
+    uint32 i;
+    uint32 started = 0u;
+
+    for(i = 0u; i < 10u; i++)
+    {
+        uint32 digit = 0u;
+
+        while(val >= la_p10[i])
+        {
+            val -= la_p10[i];
+            digit++;
+        }
+        if((digit != 0u) || (started != 0u) || (i == 9u))
+        {
+            app_putc((char)('0' + digit));
+            started = 1u;
+        }
+    }
+}
+
+static LA_APP_CODE void app_puthex(uint32 val)
+{
+    int32 i;
+    static LA_APP_RODATA const char hex[] = "0123456789abcdef";
+
+    app_puts("0x");
+    for(i = 7; i >= 0; i--)
+    {
+        app_putc(hex[(val >> (uint32)(i * 4)) & 0xFu]);
+    }
+}
+
+/* syscall 的号码编在指令立即数里（见 port 文件头），子功能在 a0、参数在 a1。
+ * 返回值由内核写回帧里的 a0，所以这里 a0 既是入参也是出参。 */
+static LA_APP_CODE uint32 app_get_time_ms(void)
+{
+    register unsigned long r_a0 __asm__("$a0") = (unsigned long)ARKRTOS_SYS_SUB_TIME;
+
+    __asm__ volatile("syscall 0x12" : "+r"(r_a0) : : "memory");
+
+    return (uint32)r_a0;
+}
+
+static LA_APP_CODE void app_delay_us(uint32 us)
+{
+    register unsigned long r_a0 __asm__("$a0") = (unsigned long)ARKRTOS_TASK_SUB_DELAY;
+    register unsigned long r_a1 __asm__("$a1") = (unsigned long)us;
+
+    __asm__ volatile("syscall 0x11" : "+r"(r_a0), "+r"(r_a1) : : "memory");
+}
+
+/* 让出 CPU 的等待（SUB_WAIT，单位毫秒）。与 SUB_DELAY 的区别是实测出来的：
+ * SUB_DELAY 是 port 里的忙等，而 SVC 在 trap 里执行时 CRMD.IE=0 —— 忙等
+ * 全程关中断，节拍走不动。实测 App 每轮忙等 500 ms，主机过了 20 s 而
+ * arkrtos_get_time_ms() 只前进 37 ms（丢掉了约 39 个节拍）。所以「读数
+ * 随时间增长」这条正对照必须靠 SUB_WAIT（真正阻塞让出），忙等那条只留
+ * 一个 2 ms 的轻探针证明它没坏。 */
+static LA_APP_CODE void app_wait_ms(uint32 ms)
+{
+    register unsigned long r_a0 __asm__("$a0") = (unsigned long)ARKRTOS_TASK_SUB_WAIT;
+    register unsigned long r_a1 __asm__("$a1") = (unsigned long)ms;
+
+    __asm__ volatile("syscall 0x11" : "+r"(r_a0), "+r"(r_a1) : : "memory");
+}
+
+static LA_APP_CODE void la_app_task(void)
+{
+    uint32 round = s_app_round + 1u;
+
+    s_app_round = round;
+
+    app_puts(la_s_round);
+    app_putu(round);
+    app_puts(la_s_nl);
+
+    if(round == 1u)
+    {
+        volatile uint32 *probe = (volatile uint32 *)(unsigned long)LA_APP_KERNEL_ADDR;
+
+        app_puts(la_s_kern_probe);
+        (void)*probe;                       /* 这一句必须 PPI，永不返回 */
+        app_puts(la_s_unexpect);            /* 走到这里就是没有隔离 */
+        app_puts(la_s_fatal);
+        for(;;) { }
+    }
+
+    if(round == 2u)
+    {
+        volatile uint32 *probe = (volatile uint32 *)(unsigned long)LA_APP_UNMAPPED;
+
+        app_puts(la_s_unm_probe);
+        (void)*probe;                       /* 这一句必须 refill，永不返回 */
+        app_puts(la_s_unexpect);
+        app_puts(la_s_fatal);
+        for(;;) { }
+    }
+
+    if(round == 3u)
+    {
+        unsigned long crmd = 0ul;
+
+        app_puts(la_s_csr_probe);
+        __asm__ volatile("csrrd %0, 0x0" : "=r"(crmd) : : "memory");  /* 必须 IPE */
+        app_puts(la_s_unexpect);
+        app_puthex((uint32)crmd);
+        app_puts(la_s_fatal);
+        for(;;) { }
+    }
+
+    /* round >= 4：只剩「合法路径也通」这条正对照。写成循环而不是只跑一轮，
+     * 是为了让读数随时间增长 —— 静止的数字说明不了任何事。 */
+    for(;;)
+    {
+        app_puts(la_s_round);
+        app_putu(round);
+        app_puts(la_s_svc_ms);
+        app_putu(app_get_time_ms());
+        app_puts(la_s_svc_ok);
+
+        round++;
+        s_app_round = round;
+
+        app_delay_us(2000u);                /* 忙等通路：2 ms 轻探针 */
+        app_wait_ms(500u);                  /* 让出 CPU：500 ms */
+    }
+}
+
+#endif /* ARKRTOS_USE_PRIV == 1 */
+
 /**
 * @brief 进入空闲上下文并启动调度
 * @details 顺序不可换：
@@ -383,6 +603,9 @@ int main(void)
     int32 id_b;
     int32 id_fs;
     int32 id_shell;
+#if (ARKRTOS_USE_PRIV == 1)
+    int32 id_u;
+#endif
 
     arkrtos_port_board_init();
 
@@ -394,6 +617,18 @@ int main(void)
     id_b = arkrtos_task_register(task_b, s_stack_b, sizeof(s_stack_b), 11u, 0u);
     /* 存储任务优先级低于 A/B：它是自检，不该抢占节拍/切换观测 */
     id_fs = arkrtos_task_register(task_fs, s_stack_fs, sizeof(s_stack_fs), 13u, 0u);
+
+    #if (ARKRTOS_USE_PRIV == 1)
+    /* PLV3 探针。栈在 App 页（.appprobe）里，代码也在那里 ——
+     * 注册时内核只按地址造帧，所以这两点都由链接脚本保证。 */
+    id_u = arkrtos_task_register(la_app_task, s_app_stack, sizeof(s_app_stack), 12u, 0u);
+    if(id_u > 0)
+    {
+        /* 内核注册出来的任务默认 is_priv = 1，必须显式降级，
+         * 否则 port 会按 PLV0 放它下去，探针就都在内核态跑（假绿）。 */
+        arkrtos_task_table[id_u - 1].is_priv = 0u;
+    }
+    #endif
 
     arkrtos_port_irq_init();
 
@@ -438,11 +673,28 @@ int main(void)
     arkrtos_board_putu((uint32)id_shell);
     arkrtos_board_puts(" log=");
     arkrtos_board_putu((uint32)ARKRTOS_USE_LOG);
+    #if (ARKRTOS_USE_PRIV == 1)
+    arkrtos_board_puts(" taskU=");
+    arkrtos_board_putu((uint32)id_u);
+    arkrtos_board_puts(" app_base=");
+    arkrtos_board_puthex(ARKRTOS_QEMU_APP_BASE);
+    #endif
     arkrtos_board_puts(" utest=");
     arkrtos_board_putu((uint32)ARKRTOS_USE_UTEST);
     arkrtos_board_puts(" tick_period_us=");
     arkrtos_board_putu(ARKRTOS_TICK_PERIOD_US);
     arkrtos_board_puts("\n");
+
+    #if (ARKRTOS_USE_PRIV == 1)
+    if(id_u < 0)
+    {
+        arkrtos_board_puts("[boot] PLV3 probe task register FAILED, halted\n");
+        for(;;)
+        {
+            ARKRTOS_WFI();
+        }
+    }
+    #endif
 
     if((id_a < 0) || (id_b < 0) || (id_fs < 0) || (id_shell < 0))
     {
@@ -452,6 +704,20 @@ int main(void)
             ARKRTOS_WFI();
         }
     }
+
+    #if (ARKRTOS_USE_PRIV == 1)
+    /* 两条正对照，都在 PLV0 侧做，作用是让「App 被拒」这件事有参照：
+     *  a) 内核读 0x00300000（同一页，App 读它必须 PPI）—— 读得到说明
+     *     映射在、是特权级拒绝而不是「没映射」；
+     *  b) 读 App 页里的装载魔数 —— 等于定值说明 .appprobe 被 QEMU 按
+     *     p_paddr 装进了 0x02000000，App 的代码真的在那里。 */
+    arkrtos_board_puts("[boot] paging on: kernel read 0x00300000=");
+    arkrtos_board_puthex(*(volatile uint32 *)(unsigned long)0x00300000u);
+    arkrtos_board_puts(" app_magic=");
+    arkrtos_board_puthex((uint32)la_app_magic);
+    arkrtos_board_puts((((uint32)la_app_magic) == 0x4C413634u) ? " (probe image loaded)\n"
+                                                             : " -> APP IMAGE NOT LOADED\n");
+    #endif
 
     arkrtos_start_idle();
 
