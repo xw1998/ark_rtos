@@ -178,12 +178,18 @@ def main():
         if "0 unmeasured" not in out:
             return fail("栈计量没有生效（unmeasured 非零）\n" + out, log)
 
-        # 8) 全程负向标记
+        # 8) utest：板端单元测试全量。只看汇总行的 "0 failed,"，不看单个用例
+        #    的名字 —— 用例表会随功能开关变，断言名字等于把测试写死在今天。
+        out = run("utest", wait=12.0)
+        if ", 0 failed," not in out:
+            return fail("utest 汇总不是 0 failed\n" + out, log)
+
+        # 9) 全程负向标记
         for bad in ("UNEXPECTED", "FATAL", "FAILED"):
             if bad in log:
                 return fail("全程出现 %s" % bad, log)
 
-        print("PASS: 内核 Shell 端到端通（横幅/help/uname/dt/ls/cat/task 全部通过）")
+        print("PASS: 内核 Shell 端到端通（横幅/help/uname/dt/ls/cat/task/utest 全部通过）")
         return 0
     finally:
         try:

@@ -199,7 +199,7 @@
 #undef  ARKRTOS_USE_AUDIT
 #define ARKRTOS_USE_AUDIT            0
 #undef  ARKRTOS_USE_UTEST
-#define ARKRTOS_USE_UTEST            0
+#define ARKRTOS_USE_UTEST            1
 #undef  ARKRTOS_USE_SECCHECK
 #define ARKRTOS_USE_SECCHECK         0
 #undef  ARKRTOS_HW_SAFE

@@ -273,17 +273,17 @@ typedef char arkrtos_app_header_size_check[
 *          就会静默算出错误的校验值。这里逐个钉死。
 */
 typedef char arkrtos_app_off_crc32_check[
-    (((uint32)&(((arkrtos_app_header_t *)0)->crc32)) == ARKRTOS_APP_OFF_CRC32) ? 1 : -1];
+    (__builtin_offsetof(arkrtos_app_header_t, crc32) == ARKRTOS_APP_OFF_CRC32) ? 1 : -1];
 typedef char arkrtos_app_off_state_check[
-    (((uint32)&(((arkrtos_app_header_t *)0)->state)) == ARKRTOS_APP_OFF_STATE) ? 1 : -1];
+    (__builtin_offsetof(arkrtos_app_header_t, state) == ARKRTOS_APP_OFF_STATE) ? 1 : -1];
 typedef char arkrtos_app_off_type_check[
-    (((uint32)&(((arkrtos_app_header_t *)0)->type)) == ARKRTOS_APP_OFF_TYPE) ? 1 : -1];
+    (__builtin_offsetof(arkrtos_app_header_t, type) == ARKRTOS_APP_OFF_TYPE) ? 1 : -1];
 
 /** @brief signature 字段的偏移断言（签名子系统按它取 64 字节） */
 typedef char arkrtos_app_off_sign_check[
-    (((uint32)&(((arkrtos_app_header_t *)0)->signature)) == ARKRTOS_APP_OFF_SIGN) ? 1 : -1];
+    (__builtin_offsetof(arkrtos_app_header_t, signature) == ARKRTOS_APP_OFF_SIGN) ? 1 : -1];
 typedef char arkrtos_app_off_runtime_ram_base_check[
-    (((uint32)&(((arkrtos_app_header_t *)0)->runtime_ram_base)) == ARKRTOS_APP_OFF_RUNTIME_RAM_BASE) ? 1 : -1];
+    (__builtin_offsetof(arkrtos_app_header_t, runtime_ram_base) == ARKRTOS_APP_OFF_RUNTIME_RAM_BASE) ? 1 : -1];
 
 #if (defined(__cplusplus))
 extern "C" {

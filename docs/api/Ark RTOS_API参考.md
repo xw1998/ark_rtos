@@ -1621,10 +1621,10 @@ typedef char arkrtos_app_header_size_check[ (sizeof(arkrtos_app_header_t) == ARK
 “结构体布局”和“固定长度宏”解释镜像，一旦不一致就会静默错位。
 此断言让不一致在编译期直接暴露。
 
-### `typedef char arkrtos_app_off_crc32_check[ (((uint32)&(((arkrtos_app_he`
+### `typedef char arkrtos_app_off_crc32_check[ (__builtin_offsetof(arkrtos_`
 
 ```c
-typedef char arkrtos_app_off_crc32_check[ (((uint32)&(((arkrtos_app_header_t *)0)->crc32)) == ARKRTOS_APP_OFF_CRC32) ? 1 : -1];
+typedef char arkrtos_app_off_crc32_check[ (__builtin_offsetof(arkrtos_app_header_t, crc32) == ARKRTOS_APP_OFF_CRC32) ? 1 : -1];
 ```
 
 **关键字段偏移静态校验**
@@ -1632,10 +1632,10 @@ Loader 计算 CRC 时按「偏移切片」而不是整体结构体来累加 CRC
 （crc32 与 state 两个字段要按 0 参与），因此这些偏移一旦漂移
 就会静默算出错误的校验值。这里逐个钉死。
 
-### `typedef char arkrtos_app_off_sign_check[ (((uint32)&(((arkrtos_app_hea`
+### `typedef char arkrtos_app_off_sign_check[ (__builtin_offsetof(arkrtos_a`
 
 ```c
-typedef char arkrtos_app_off_sign_check[ (((uint32)&(((arkrtos_app_header_t *)0)->signature)) == ARKRTOS_APP_OFF_SIGN) ? 1 : -1];
+typedef char arkrtos_app_off_sign_check[ (__builtin_offsetof(arkrtos_app_header_t, signature) == ARKRTOS_APP_OFF_SIGN) ? 1 : -1];
 ```
 
 **signature 字段的偏移断言（签名子系统按它取 64 字节） */**
