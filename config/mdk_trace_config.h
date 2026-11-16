@@ -30,8 +30,28 @@
 /* Master switch. 0 compiles the whole component down to empty functions. */
 #define MDK_TRACE_ENABLE              1
 
-/* Backend: compressed RAM ring, drained by the host over SWD. */
+/* Backend.
+ *   ARM (Cortex-M, SWD 调试器在位) —— 压缩字节环，主机按片抽取，录音不掉。
+ *   其它内核（本仓库的 QEMU RISC-V / LoongArch 目标）—— 没有 SWD 可抽，
+ *   改用定长记录环 BUFF：环在 .bss 里，主机按符号 mdk_trace_buff_blob
+ *   一次性读整窗；板子上自己只能答「记了多少 / 丢了多少 / 转过圈没有」。
+ * 两边的内核门面（kernelsrc/src/arkrtos_trace.c）都读后端的计数器，
+ * 所以换后端不改任何调用点。 */
+#if defined(__arm__) || defined(__ARM_ARCH) || defined(__ARMCC_VERSION) || \
+    defined(__ICCARM__) || defined(__TI_ARM__)
 #define MDK_TRACE_BACKEND_SWD         1
+#else
+#define MDK_TRACE_BACKEND_BUFF        1
+#endif
+
+/* RISC-V 上的时间戳来源。
+ *   0 = mcycle（MDK_TRACE_USE_DWT 决定是否开），数的是核被时钟驱动的周期数；
+ *   1 = rdtime（CSR 0xC01），读 mtime，与内核节拍同源。
+ * 模拟器（QEMU）里 mcycle 与真实时间无关，所以 RV32 目标用 rdtime；
+ * 真核上两者都可，按板子时钟树选，并把 MDK_TRACE_CPU_HZ 填成这条时钟的频率。 */
+#ifndef MDK_TRACE_USE_RDTIME
+#define MDK_TRACE_USE_RDTIME          0
+#endif
 
 /* Kernel automation hooks: the kernel reports its own switches, task
  * lifecycle and object waits/wakes (see mdk_trace_arkrtos.h). With this at 0
@@ -51,9 +71,13 @@
  * reads it today - but the difference matters here, because this value ends
  * up in the host's microsecond conversion. Do not copy the 168.
  */
+#ifndef MDK_TRACE_CPU_HZ
 #define MDK_TRACE_CPU_HZ              96000000
+#endif
 
-/* Fault snapshot: extra pc/lr/sp/xpsr/hfsr/mmfar/bfar in the fault path.
+/* Fault snapshot: extra pc/lr/sp/xpsr/hfsr/bfar in the fault path (ARM 上由
+ * 板级的四入口 thunk 提供 EXC_RETURN/MSP/PSP；其它内核这条帧捕获不参与
+ * 编译，见 mdk_trace.c 的 MDK_TRACE_FAULT_FRAME 门）。
  * The F427 board now wraps its four fault vectors (board/stm32f427/
  * arkrtos_board.c) with an AC5 assembly thunk that passes EXC_RETURN / MSP /
  * PSP to mdk_trace_fault_capture() before the C body runs, so there is a real

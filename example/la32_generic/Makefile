@@ -48,13 +48,29 @@ INCLUDES := -Ikernelsrc/include \
             -Ikernelsrc/components/ark_vfs/port \
             -Ikernelsrc/components/ark_vfs/src \
             -Ikernelsrc/fs \
-            -Ikernelsrc/fs/littlefs
+            -Ikernelsrc/fs/littlefs \
+            -Ikernelsrc/components/ark_softbus/include \
+            -Ikernelsrc/components/ark_softbus/src \
+            -Ikernelsrc/components/ark_softbus/port
+
+# ark_softbus MCU 档位（清单见 kernelsrc/include/arkrtos_softbus.h 顶部注释）。
+# 默认值与工程值必须同档，否则 arkrtos_softbus.h 里有 #error 闸门。
+ARK_BUS_FLAGS := -DARK_BUS_MAX_TOPICS=12 -DARK_BUS_MAX_DEVICES=4 \
+                 -DARK_BUS_MSG_MAX_SIZE=128 -DARK_BUS_TOPIC_NAME_MAX=24 \
+                 -DARK_BUS_QOS_MAX_SESSIONS=2 -DARK_BUS_RPC_MAX_SLOTS=4 \
+                 -DARK_BUS_RPC_MAX_METHODS=4 -DARK_BUS_TASK_ENABLED=0 \
+                 -DARK_BUS_COLL_ENABLED=0 -DARK_BUS_INFER_ENABLED=0 \
+                 -DARK_BUS_STREAM_TX_SLOTS=1 -DARK_BUS_STREAM_RX_SLOTS=1 \
+                 -DARK_BUS_STREAM_RX_MAX=256 -DARK_BUS_STREAM_MAX_BYTES=256
 
 CFLAGS := $(ARCH_FLAGS) -g -O2 -ffreestanding -fno-common -nostdlib -nostartfiles \
           -fno-builtin -ffunction-sections -fdata-sections -Wall -MMD -MP \
           -DARKRTOS_BOARD_CONFIG='"arkrtos_board_config.h"' \
           -include arkrtos_board_config.h \
-          -DLFS_NO_MALLOC -DLFS_NO_ASSERT -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
+          -DLFS_NO_MALLOC -DLFS_NO_ASSERT -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR \
+          $(ARK_BUS_FLAGS) \
+          -DMDK_TRACE_ENABLE=1 -DMDK_TRACE_BACKEND_BUFF=1 \
+          -DMDK_TRACE_CPU_HZ=100000000u
 ASFLAGS := $(ARCH_FLAGS) -g
 
 # 通配全部内核源，再剔除本平台没有对应硬件的模块：flashapp 在文件头无条件
@@ -63,7 +79,16 @@ ASFLAGS := $(ARCH_FLAGS) -g
 KERNEL_SRCS := $(filter-out kernelsrc/src/arkrtos_flashapp.c, \
                           $(wildcard kernelsrc/src/*.c))
 
+# 软总线组件本体（与 STM32F427 工程同一份清单）；transport_sock.c 不编，
+# 它需要 POSIX socket。port/ark_bus_hal_arkrtos.c 是三个板级钩子的装配层。
+SOFTBUS_SRCS := $(wildcard kernelsrc/components/ark_softbus/src/ark_bus_*.c) \
+                kernelsrc/components/ark_softbus/src/transport/transport_loopback.c \
+                kernelsrc/components/ark_softbus/src/transport/transport_uart.c \
+                kernelsrc/components/ark_softbus/port/ark_bus_hal_arkrtos.c
+
 SRCS_C := $(KERNEL_SRCS) \
+	kernelsrc/components/mdk_trace/mdk_trace.c \
+	kernelsrc/components/mdk_trace/mdk_trace_buff.c \
 	kernelsrc/components/mdk_trace/mdk_trace_arkrtos.c \
 	kernelsrc/shell/arkrtos_shell.c \
 	kernelsrc/shell/platform_arkrtos.c \
@@ -82,10 +107,12 @@ SRCS_C := $(KERNEL_SRCS) \
 	kernelsrc/fs/littlefs/lfs_util.c \
 	kernelsrc/sdk/app_sdk/arkrtos_oslib.c \
 	kernelsrc/port/loongarch/la32/arkrtos_port.c \
+	$(SOFTBUS_SRCS) \
 	board/la32_generic/arkrtos_board.c \
 	board/la32_generic/arkrtos_dt.c \
 	board/la32_generic/drvblk.c \
 	board/la32_generic/drvuart.c \
+	board/la32_generic/arkrtos_bus_port.c \
 	example/la32_generic/main.c \
 	example/la32_generic/libc_shim.c
 

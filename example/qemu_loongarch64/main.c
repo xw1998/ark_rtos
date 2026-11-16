@@ -37,6 +37,8 @@
 #include "arkrtos_board.h"
 #include "arkrtos_shell.h"     /* arkrtos_shell_init()：内核 Shell 控制台 */
 #include "arkrtos_blk.h"
+#include "arkrtos_ptable.h"    /* 分区表：崩溃日志按槽位记账，必须先于它初始化 */
+#include "arkrtos_crash.h"     /* 跨复位崩溃日志（ARKRTOS_USE_CRASH_LOG） */
 #include "arkrtos_fs.h"
 #include "arkrtos_vfs.h"
 #include "drvblk.h"
@@ -634,6 +636,17 @@ int main(void)
 
     arkrtos_kernel_module_init();
 
+    /* 分区表 + 跨复位崩溃日志。
+     * 顺序与 STM32 工程一致（见 example/stm32f427 的 arkrtos_kernel_init）：
+     * 分区表先就位，崩溃日志才能按槽位记账；crash_init() 只校验/播种日志，
+     * 不碰池扫描；scan_apply() 把日志里记着的「已禁用」落回槽位记录。
+     * 日志关闭时两者都是空实现，这两行的代价是零。 */
+    arkrtos_ptable_init();
+#if (ARKRTOS_USE_CRASH_LOG == 1)
+    arkrtos_crash_init();
+    arkrtos_crash_scan_apply();
+#endif
+
     /* 块设备驱动在这里先注册（只登记描述符，不碰介质）；真正 init 交给
      * task_fs —— 让"注册"和"起来"两件事各有一次可读的打印。 */
     (void)arkrtos_board_blk_init();
@@ -678,6 +691,12 @@ int main(void)
     arkrtos_board_putu((uint32)id_u);
     arkrtos_board_puts(" app_base=");
     arkrtos_board_puthex(ARKRTOS_QEMU_APP_BASE);
+    #endif
+    #if (ARKRTOS_USE_CRASH_LOG == 1)
+    arkrtos_board_puts(" crasharea=");
+    arkrtos_board_puthex(arkrtos_crash_area_base());
+    arkrtos_board_puts(" boots=");
+    arkrtos_board_putu(arkrtos_crash_boots());
     #endif
     arkrtos_board_puts(" utest=");
     arkrtos_board_putu((uint32)ARKRTOS_USE_UTEST);

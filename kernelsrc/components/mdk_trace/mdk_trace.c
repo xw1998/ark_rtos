@@ -60,6 +60,12 @@ static int _ready;
 #  define MDK_TRACE_ARCH_RISCV 0
 #endif
 
+#if defined(__loongarch__) || defined(__loongarch64) || defined(__loongarch_lp64)
+#  define MDK_TRACE_ARCH_LOONGARCH 1
+#else
+#  define MDK_TRACE_ARCH_LOONGARCH 0
+#endif
+
 /* ------------------------------------------------------------------- ARM */
 #if MDK_TRACE_ARCH_ARM
 
@@ -217,7 +223,15 @@ static void _arm_itm_byte(uint8_t b)
 #if MDK_TRACE_ARCH_RISCV
 static uint32_t _rv_cycles(void)
 {
-#if MDK_TRACE_USE_DWT
+#if (defined(MDK_TRACE_USE_RDTIME) && (MDK_TRACE_USE_RDTIME == 1))
+    /* rdtime = CSR 0xC01，机器态读 mtime。它和内核节拍同源（QEMU virt 的
+     * timebase-frequency = 10 MHz，见板级 ARKRTOS_MACHINE_TIMER_HZ），所以
+     * 时间戳可以直接换算成纳秒并与内核时间对齐。mcycle 是另一条路：在模拟器
+     * 里它数的是被模拟的工作量而不是时间，换算出的时长是假的。 */
+    unsigned long v;
+    __asm__ volatile ("csrr %0, time" : "=r"(v));
+    return (uint32_t)v;
+#elif MDK_TRACE_USE_DWT
     /* mcycle is the RISC-V equivalent of DWT->CYCCNT. Available on any core
      * that implements the counters (all ESP32-C/S and most RV32 cores do).
      * XLEN wide, so widen the register and truncate afterwards. */
@@ -229,6 +243,26 @@ static uint32_t _rv_cycles(void)
 #endif
 }
 #endif /* MDK_TRACE_ARCH_RISCV */
+
+/* ------------------------------------------------------------- LoongArch */
+#if MDK_TRACE_ARCH_LOONGARCH
+static uint32_t _la_cycles(void)
+{
+#if MDK_TRACE_USE_DWT
+    /* rdtime.d is the LoongArch stable-counter read: a 64-bit, constant-rate
+     * timer that is readable at any privilege level. It is not a cycle
+     * counter (its rate is fixed by the platform, not by the core clock), so
+     * MDK_TRACE_CPU_HZ must be set to the timer frequency, not the CPU
+     * frequency - that is still the number the host needs to turn dt into
+     * time, and a wrong one shows up as a uniformly scaled timeline. */
+    unsigned long v;
+    __asm__ volatile ("rdtime.d %0, $zero" : "=r"(v));
+    return (uint32_t)v;
+#else
+    return 0u;
+#endif
+}
+#endif /* MDK_TRACE_ARCH_LOONGARCH */
 
 /* ================================================================ CRC + MTF */
 
@@ -781,6 +815,8 @@ uint32_t mdk_trace_now(void)
     return _arm_cycles();
 #elif MDK_TRACE_ARCH_RISCV
     return _rv_cycles();
+#elif MDK_TRACE_ARCH_LOONGARCH
+    return _la_cycles();
 #else
     return 0u;
 #endif

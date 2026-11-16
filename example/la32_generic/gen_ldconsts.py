@@ -46,6 +46,11 @@ WANTED = [
     "SHARE_RAM_SIZE",
     "KERNEL_RAM_BASE",
     "KERNEL_RAM_SIZE",
+    # 跨复位崩溃日志：本平台没有散列文件，UNINIT 区由链接脚本按这两个宏显式
+    # 开一段（见 link.ld.in 的 .noinit）。符号落点必须与宏一致，否则内核写的
+    # 和 audit 报的不是同一块内存（audit 的运行期比对就查这一条）。
+    "CRASH_LOG_BASE",
+    "CRASH_LOG_SIZE",
 ]
 
 

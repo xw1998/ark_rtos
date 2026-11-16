@@ -77,9 +77,19 @@ static void sec_check_gates(arkrtos_sec_report_t *p_rep)
 {
     uint32 m = 0u;
     uint32 need;
+    uint32 iso = 0u;
 
+    /* bit0 是「地址隔离这件事有个实现在管」，不是「必须有一块 ARM 的 MPU」。
+     * Cortex-M 上它由 MPU 提供；LoongArch 没有 MPU 实体，隔离由分页 + PLV 提供
+     * （见 la64 port 的 la_mmu_init 与 PLV3 用户态切换），要求 MPU 就是要求一个
+     * 那块芯片上根本不存在的部件。两条路都没有时 iso 保持 0、bit0 仍然为 0，
+     * 所以这一位报的始终是真读数，不会为了变绿而恒真。 */
 #if (ARKRTOS_USE_MPU == 1)
     m |= 1u;
+    iso = 1u;
+#elif ((ARKRTOS_ARCH_HAS_PAGING == 1) && (ARKRTOS_USE_PRIV == 1))
+    m |= 1u;
+    iso = 2u;
 #endif
 #if (ARKRTOS_USE_PRIV == 1)
     m |= 2u;
@@ -109,8 +119,8 @@ static void sec_check_gates(arkrtos_sec_report_t *p_rep)
 
     sec_add(p_rep, "gates.kernel",
             ((m & need) == need) ? (uint32)ARKRTOS_SEC_PASS : (uint32)ARKRTOS_SEC_FAIL,
-            "mpu/priv/stk/fault/crash/audit bits=0x%X (need 0x%X), sign/hwsafe=0x%X",
-            m, need, (m >> 6) & 3u, 0u);
+            "iso(1=mpu 2=page)/priv/stk/fault/crash/audit bits=0x%X (need 0x%X), iso=%u sign/hwsafe=0x%X",
+            m, need, iso, (m >> 6) & 3u);
 }
 
 /* 2. 每个非空槽位都必须有 RAM 窗口：没有窗口的 App 任务跑起来就没有可写的

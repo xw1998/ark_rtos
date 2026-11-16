@@ -18,6 +18,7 @@
 
 #include "arkrtos_hal.h"
 #include "arkrtos_config.h"
+#include "arkrtos_trace.h"
 #include "arkrtos_board.h"
 
 #ifdef ARKRTOS_BOARD_CONFIG
@@ -139,6 +140,9 @@ void arkrtos_port_board_init(void)
     arkrtos_board_puts("Hz rdtime=");
     arkrtos_board_putu(ARKRTOS_PORT_RDTIME_HZ);
     arkrtos_board_puts("Hz\n");
+
+    /* 追踪随板起来（开关关掉时是空函数）。 */
+    arkrtos_trace_init();
 }
 
 /* ============================================================

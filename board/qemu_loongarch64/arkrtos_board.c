@@ -16,6 +16,7 @@
 #include "arkrtos_hal.h"
 #include "arkrtos_config.h"
 #include "arkrtos_board.h"
+#include "arkrtos_trace.h"     /* arkrtos_trace_init()：内核事件追踪 */
 
 #ifdef ARKRTOS_BOARD_CONFIG
 #include ARKRTOS_BOARD_CONFIG
@@ -136,6 +137,11 @@ void arkrtos_port_board_init(void)
     arkrtos_board_puts("Hz rdtime=");
     arkrtos_board_putu(ARKRTOS_PORT_RDTIME_HZ);
     arkrtos_board_puts("Hz\n");
+
+    /* 追踪组件与板子一起起来，而不是等谁敲一条 shell 命令：复位之后那一段
+     * 恰恰是「复现不了」的那一段。环是静态的（QEMU 目标用 BUFF 后端，环在
+     * .bss 里），init 只清游标、起时间基，不分配。开关关掉时这里是空函数。 */
+    arkrtos_trace_init();
 }
 
 /* ============================================================

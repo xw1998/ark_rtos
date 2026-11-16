@@ -145,7 +145,7 @@
 #undef  ARKRTOS_USE_LWIP
 #define ARKRTOS_USE_LWIP             0
 #undef  ARKRTOS_USE_SOFTBUS
-#define ARKRTOS_USE_SOFTBUS          0
+#define ARKRTOS_USE_SOFTBUS          1
 #undef  ARKRTOS_USE_SHELL
 #define ARKRTOS_USE_SHELL            1
 #undef  ARKRTOS_USE_APPPACK
@@ -169,17 +169,17 @@
 #undef  ARKRTOS_USE_SCHED_STAT
 #define ARKRTOS_USE_SCHED_STAT       0
 #undef  ARKRTOS_USE_MDK_TRACE
-#define ARKRTOS_USE_MDK_TRACE        0
+#define ARKRTOS_USE_MDK_TRACE        1
 #undef  ARKRTOS_USE_CM_BACKTRACE
 #define ARKRTOS_USE_CM_BACKTRACE     0
 #undef  ARKRTOS_USE_CRASH_LOG
-#define ARKRTOS_USE_CRASH_LOG        0
+#define ARKRTOS_USE_CRASH_LOG        1
 #undef  ARKRTOS_USE_AUDIT
-#define ARKRTOS_USE_AUDIT            0
+#define ARKRTOS_USE_AUDIT            1
 #undef  ARKRTOS_USE_UTEST
 #define ARKRTOS_USE_UTEST            1
 #undef  ARKRTOS_USE_SECCHECK
-#define ARKRTOS_USE_SECCHECK         0
+#define ARKRTOS_USE_SECCHECK         1
 #undef  ARKRTOS_HW_SAFE
 #define ARKRTOS_HW_SAFE              0
 

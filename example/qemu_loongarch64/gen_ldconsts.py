@@ -50,6 +50,11 @@ WANTED = [
     # 由链接脚本单独开一段 .appprobe（见 link.ld.in）。
     "ARKRTOS_QEMU_APP_BASE",
     "ARKRTOS_QEMU_APP_SIZE",
+    # 跨复位崩溃日志：本平台没有散列文件，UNINIT 区由链接脚本按这两个宏
+    # 显式开一段（见 link.ld.in 的 .noinit）。符号落点必须与宏一致，否则
+    # 内核写的和 audit 报的不是同一块内存（audit 的运行期比对就查这一条）。
+    "CRASH_LOG_BASE",
+    "CRASH_LOG_SIZE",
 ]
 
 

@@ -173,18 +173,25 @@ static void audit_partition(arkrtos_audit_result_t *p)
     }
 
     /* Cross-reset crash journal: it sits in the tail of shared RAM, so it has
-     * to stay inside it and stay word-aligned. The runtime checks below go
-     * one step further than the geometry: CRASH_LOG_BASE / SIZE are macros
-     * the linker script was generated from, while area_base() / area_size()
-     * are what the code actually writes to. If those two ever disagree, the
-     * scatter file and the module describe different memory - a build that
-     * links happily and then corrupts whatever is under the journal. */
+     * to stay inside it and stay word-aligned. This statement is about the
+     * macros alone, so it holds whether or not the journal is compiled in. */
     if((CRASH_LOG_BASE < t->share_ram_base) ||
        ((CRASH_LOG_BASE + CRASH_LOG_SIZE) > (t->share_ram_base + t->share_ram_size)) ||
        ((CRASH_LOG_BASE % 4u) != 0u))
     {
         audit_fail(p, ARKRTOS_AUDIT_PARTITION, ARKRTOS_AUDIT_INDEX_NONE);
     }
+
+#if ARKRTOS_USE_CRASH_LOG
+    /* The runtime check goes one step further than the geometry: CRASH_LOG_BASE
+     * / SIZE are macros the linker script was generated from, while area_base()
+     * / area_size() are what the code actually writes to. If those two ever
+     * disagree, the scatter file and the module describe different memory - a
+     * build that links happily and then corrupts whatever is under the journal.
+     *
+     * It only means anything with the journal compiled in: the disabled build
+     * answers 0 / 0 by contract (nothing is ever recorded), so comparing that
+     * against the macros would fail every build that turns the journal off. */
     p->checks++;
     if((CRASH_LOG_BASE != arkrtos_crash_area_base()) ||
        (CRASH_LOG_SIZE != arkrtos_crash_area_size()) ||
@@ -192,6 +199,7 @@ static void audit_partition(arkrtos_audit_result_t *p)
     {
         audit_fail(p, ARKRTOS_AUDIT_PARTITION, ARKRTOS_AUDIT_INDEX_NONE);
     }
+#endif /* ARKRTOS_USE_CRASH_LOG */
 
     /* Image RAM pool shape: buddy allocation needs powers of two, and the
      * pool must be able to hold at least one smallest block. */

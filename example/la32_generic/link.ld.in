@@ -51,6 +51,22 @@ SECTIONS
     . = ALIGN(16);
     __text_end = .;
 
+    /* ---- 跨复位崩溃日志（UNINIT） ---- */
+    /* 与 STM32 工程里 gen_scatter.py 生成的 UNINIT 段同义：这块内存既不在
+     * .data 也不在 .bss 里，启动代码不会碰它，于是它的内容能活过一次复位，
+     * 只有掉电才丢。位置由分区头的 CRASH_LOG_BASE 唯一决定 —— 内核写的是这个
+     * 符号，audit 比对的是同一个宏。NOLOAD：日志内容属于运行期状态，不占
+     * ELF 文件体积。 */
+    .noinit CRASH_LOG_BASE (NOLOAD) :
+    {
+        __noinit_start = .;
+        KEEP(*(.noinit .noinit.*))
+        . = ALIGN(4);
+        __noinit_end = .;
+    }
+    ASSERT(__noinit_end <= (CRASH_LOG_BASE + CRASH_LOG_SIZE),
+           "crash journal overlaps the rest of shared RAM")
+
     /* ---- 已初始化数据：内核 RAM 区间 ---- */
     . = KERNEL_RAM_BASE;
     .data : ALIGN(16)

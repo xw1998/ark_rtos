@@ -37,6 +37,8 @@
 #include "arkrtos_fs.h"
 #include "arkrtos_vfs.h"
 #include "arkrtos_shell.h"     /* arkrtos_shell_init()：内核 Shell 控制台 */
+#include "arkrtos_ptable.h"
+#include "arkrtos_crash.h"
 #include "drvblk.h"
 
 /* 任务栈：RISC-V 没有硬件压栈，只有软件帧，512 字（2 KB）很宽裕。
@@ -626,6 +628,17 @@ int main(void)
 
     arkrtos_kernel_module_init();
 
+    /* 分区表 + 跨复位崩溃日志。
+     * 顺序与 STM32 工程一致（见 example/stm32f427 的 arkrtos_kernel_init）：
+     * 分区表先就位，崩溃日志才能按槽位记账；crash_init() 只校验/播种日志，
+     * 不碰池扫描；scan_apply() 把日志里记着的「已禁用」落回槽位记录。
+     * 日志关闭时两者都是空实现，这两行的代价是零。 */
+    arkrtos_ptable_init();
+#if (ARKRTOS_USE_CRASH_LOG == 1)
+    arkrtos_crash_init();
+    arkrtos_crash_scan_apply();
+#endif
+
     /* 信号量表由 kernel_module_init() 里的同步模块初始化，所以在这里创建 */
     s_sem = arkrtos_sem_create_internal("qemu_sem", 0);
     if(s_sem < 0)
@@ -669,6 +682,12 @@ int main(void)
     arkrtos_board_putu((uint32)id_shell);
     arkrtos_board_puts(" log=");
     arkrtos_board_putu((uint32)ARKRTOS_USE_LOG);
+#if (ARKRTOS_USE_CRASH_LOG == 1)
+    arkrtos_board_puts(" crasharea=");
+    arkrtos_board_puthex(arkrtos_crash_area_base());
+    arkrtos_board_puts(" boots=");
+    arkrtos_board_putu(arkrtos_crash_boots());
+#endif
     arkrtos_board_puts(" tick_period_us=");
     arkrtos_board_putu(ARKRTOS_TICK_PERIOD_US);
     arkrtos_board_puts("\n");

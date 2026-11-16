@@ -1361,6 +1361,8 @@ uint32 loops = (us > (0xFFFFFFFFu / factor)) ? (0xFFFFFFFFu / factor) : (us * fa
    且 `N >= 1`，并对 `matched != passed` 单独报错。
 
 修后读数是 `9 matched, 9 passed, 0 failed, 0 skipped`，三目标一致。
+（后续又进了一例 `mtx_pi_chain_contract`，现在 RV32/LA64 实测都是
+`10 matched, 10 passed, 0 failed, 0 skipped; assertions 93 run / 0 failed`。）
 教训写在脚本头部：**「0 failed」只有在「matched ≥ 1」时才是通过**。
 
 #### 5.13.4 未解：约 1/12 概率的间歇致命异常（`ecode=0x0d`, `era=0`, `ra=0`）
@@ -1598,7 +1600,8 @@ ERROR: no LoongArch32 execution target is available.
 | 控制台 | `SHELL`，ns16550a 注册为 `ttyS0`，收发轮询 | 同（`board/la32_generic/drvuart.c`） | 无 |
 | 自检 | `UTEST` | 同 | 无 |
 | 设备树 | `dts/qemu_loongarch64.dts` → `arkrtos_dt.c` | `dts/la32_generic.dts` → `arkrtos_dt.c`（7 节点） | 树内容按参考映射重写，`dt` 命令可查 |
-| 仍关 | `MINIAPP` / `POSIX` / `LWIP` / `SOFTBUS` / `APPPACK` / `APPRUN` / `FLASHAPP` / `QSPI` / `SMP` | 同 | 无（`FLASHAPP` 两侧都剔除：它无条件 include `drvflash.h`，两个目标都没有 Flash 控制器） |
+| 自检/取证 | 无（la64 实跑那一轮没开） | `AUDIT` + `CRASH_LOG` + `MDK_TRACE` + `SECCHECK` + `SOFTBUS` 全 1 | 这五项在 la64/rv32 上已实跑取证（§8.4）；LA32 这一列是**编译面**对齐，没有运行期读数 |
+| 仍关 | `MINIAPP` / `POSIX` / `LWIP` / `APPPACK` / `APPRUN` / `FLASHAPP` / `QSPI` / `SMP` / `IMAGE_SIGN` / `HW_SAFE` / `KERNEL_GUARD` | 同 | 无（`FLASHAPP` 两侧都剔除：它无条件 include `drvflash.h`，两个目标都没有 Flash 控制器） |
 
 `Makefile` 相应从「剔除 `fs` / `vfs_lfs`」改成「只剔除 `flashapp`」，并把
 shell（`platform_arkrtos.c` + `ark_shell/*.c` 六个）、VFS 的 4 个驱动、
@@ -1614,8 +1617,13 @@ make -f example/la32_generic/Makefile size
 
 ```
    text    data     bss     dec     hex  filename
- 213480     180  578592  792252   c16bc  build/la32_generic/ark_la32_generic.elf
+ 267712     216  615956  883884   d7cac  build/la32_generic/ark_la32_generic.elf
 ```
+
+> 这组数字是「再打开 `AUDIT`/`CRASH_LOG`/`MDK_TRACE`/`SECCHECK`/`SOFTBUS`
+> 之后」的读数（2026-11-16 第二次实测）；只开内核+文件系统+SHELL 时是
+> `213480 / 180 / 578592`。差额主要来自软总线的静态池（bss）与 trace 的
+> 环形缓冲。
 
 - 与最小档（text 52280 / bss 15968）相比，text +161 KB、bss +562 KB
   （其中 512 KB 是 `drvblk.c` 的 RAM 介质）。链接脚本的 ASSERT 没有被触发，
@@ -1684,7 +1692,9 @@ lfs.o: undefined reference to `strcspn'
 
 接上任何 LA32 载体后的第一件事，仍然是照 `example/la32_generic/main.c`
 的六组读数逐条看：500 ms 节拍、A/B 交替、`svc_ok`、`[FS] PASS`、
-`/proc/version` 可读、`utest` 汇总 **`9 matched, 9 passed, 0 failed`**。
+`/proc/version` 可读、`utest` 汇总 **`10 matched, 10 passed, 0 failed`**
+（用例数从 9 涨到 10 是 `mtx_pi_chain_contract` 那一例进场后的事，rv32/la64
+实测均为 `assertions 93 run / 0 failed`）。
 
 最后一条必须连 `matched` 一起看：只看 `, 0 failed,` 会把
 「0 matched, 0 passed, 0 failed」（一条用例都没跑）判成通过 —— 这正是
@@ -1735,9 +1745,11 @@ make -f example/la32_generic/Makefile size
 make -f example/la32_generic/Makefile run   # **只会报错退出 1**，见 §6.6
 ```
 
-期望体积（全功能档 + `.ctors` 与 libc 补件，2026-11-16 实测）：
-`text 227684 / data 196 / bss 582688`（此前的最小档是 213480/180/578592，
-差额来自构造段遍历与字符串/libgcc 补件，§6.8）。
+期望体积（全功能档 + `.ctors` + libc 补件 + 五项取证开关，2026-11-16 实测）：
+`text 267712 / data 216 / bss 615956`。三个台阶分别是：最小档
+`52280/…/15968` → 内核+FS+SHELL 全功能档 `213480/180/578592` → 再开
+`AUDIT`/`CRASH_LOG`/`MDK_TRACE`/`SECCHECK`/`SOFTBUS` 后的上面这组（差额
+主要在软总线静态池与 trace 环形缓冲，§6.8）。
 改了 `ARCH_FLAGS` 或板级开关后必须先 `rm -rf build/la32_generic` 全量重建
 ——Makefile 不跟踪编译参数，增量构建会复用上一套开关的 `.o`。
 
@@ -1765,48 +1777,233 @@ D:/LoongIDE/la32-tool/bin/loongarch32-newlib-elf-objdump.exe -d \
 
 | 目标 | 启动读数 | 体积 text/data/bss |
 | --- | --- | --- |
-| RV32 | `sem=19922944 taskA=1 taskB=2 taskU=3 mpu=1 priv=1 taskRX=4 taskFS=5 blk=1 fs=1 vfs=1 shell=7 log=1` | 187544 / 128 / 590864 |
-| LA64 | `sem=19922944 taskA=1 taskB=2 taskFS=3 blk=1 fs=1 vfs=1 shell=6 log=1 taskU=4 app_base=0x02000000 utest=1` | 247280 / 392 / 599072 |
-| LA32 | 无（没有执行载体） | 227684 / 196 / 582688 |
+| RV32 | `sem=19922944 taskA=1 taskB=2 taskU=3 mpu=1 priv=1 taskRX=4 taskFS=5 blk=1 fs=1 vfs=1 shell=7 log=1 crasharea=0x80101e00 boots=1 tick_period_us=500` | 220676 / 128 / 624132 |
+| LA64 | `sem=19922944 taskA=1 taskB=2 taskFS=3 blk=1 fs=1 vfs=1 shell=6 log=1 taskU=4 app_base=0x02000000 crasharea=0x00301e00 boots=1 utest=1 tick_period_us=500` | 288880 / 416 / 632340 |
+| LA32 | 无（没有执行载体） | 267712 / 216 / 615956 |
 
 三份板级配置里 `LOG / LOG_RING / BLK / FS / VFS / VFS_LFS / PROCFS / SHELL /
-UTEST` 都是 1；`MINIAPP / POSIX / LWIP / SOFTBUS / APPPACK / APPRUN /
-FLASHAPP / IMAGE_SIGN / QSPI / RTSTAT / SCHED_STAT / MDK_TRACE /
-CM_BACKTRACE / CRASH_LOG / AUDIT / SECCHECK / SMP` 都是 0（本三目标的示例
-配置，不代表这些功能不存在：它们由 `tools/ci_gate.py` 的「编入档」逐项
-做 ON-path 编译核对）。
+UTEST / AUDIT / CRASH_LOG / MDK_TRACE / SECCHECK / SOFTBUS` 都是 1；
+`MINIAPP / POSIX / LWIP / APPPACK / APPRUN / FLASHAPP / IMAGE_SIGN / HW_SAFE /
+KERNEL_GUARD / QSPI / RTSTAT / SCHED_STAT / CM_BACKTRACE / SMP` 都是 0。
+RV32 另有 `MPU=1 PRIV=1`（PMP + U 模式），LA64 是 `MPU=0 PRIV=1`（PLV3 +
+分页），LA32 两者皆 0（无执行载体，只能编译）。
+
+两处**刻意不开**的，理由写在 §8.4.6：`RTSTAT` / `SCHED_STAT` 在本 port 上
+`cyccnt` 返的是 -1/0，打开只会得到假读数，不如关着。
 
 ### 8.2 矩阵
 
 | 功能 | RV32 | LA64 | LA32 |
 | --- | --- | --- | --- |
 | 节拍 / 任务切换 / 抢占 | **实跑**（`taskA/B` 500 ms 交替） | **实跑** | 编译 |
-| 信号量 / 互斥 + 优先级继承 / FIFO / 事件 / 定时器 / mempool / mq | **实跑**（`utest 9/9`） | **实跑**（`utest 9/9`） | 编译 |
+| 信号量 / 互斥 + 优先级继承 / FIFO / 事件 / 定时器 / mempool / mq | **实跑**（`utest 10/10`） | **实跑**（`utest 10/10`） | 编译 |
 | 阻塞与唤醒（`wait` / `sem_post`） | **实跑** | **实跑** | 编译 |
 | SVC 入口（`syscall 0x11` TASK_CTRL / `0x12` SYS_INFO） | **实跑** | **实跑**（PLV3 App 走同一条） | 编译 |
 | 内核日志（ring）/ 内核 Shell（help/ls/cat/stack/utest/dt） | **实跑**（`shell_check.py`） | **实跑**（`shell_check.py` 10 条判据） | 编译 |
 | blk（RAM 块设备）/ littlefs / VFS / procfs | **实跑**（`[FS] PASS`） | **实跑**（`[FS] PASS`） | 编译 |
 | 任务级内存隔离 | **实跑**：MPU（PMP）+ U 模式，`mpu=1 priv=1 taskRX` | **实跑**：PLV3 + 静态 TLB 条目（§5.12） | **未做**（`priv=0`，无载体） |
-| 越权访问的负对照 | **实跑**（`docs/` §3.10） | **实跑**（PPI / refill / IPE 三条，§5.12.8） | 未做 |
-| UTEST 全量（9 例 / 90 断言） | **实跑** `9 matched, 9 passed` | **实跑** `9 matched, 9 passed` | 编译 |
-| 调试/追踪族（mdk_trace / crash / rtstat / audit / sched_stat） | 未做（本示例关） | 未做（本示例关） | 未做 |
-| 网络 / 软总线（lwip / softbus） | 未做（本示例关） | 未做（本示例关） | 未做 |
-| App 装载族（apppack / miniapp / apprun / flashapp） | 未做（本示例关） | 未做（本示例关；且 LA64 缺 arkc 后端） | 未做 |
+| 越权访问的负对照 | **实跑**（§3.10） | **实跑**（PPI / refill / IPE 三条，§5.12.8） | 未做 |
+| UTEST 全量（10 例 / 93 断言） | **实跑** `10 matched, 10 passed` | **实跑** `10 matched, 10 passed` | 编译 |
+| 结构自检 `ARKRTOS_USE_AUDIT` | **实跑** `structures.audit checks=30` | **实跑** `checks=29` | 编译 |
+| 崩溃日志 `ARKRTOS_USE_CRASH_LOG` | **实跑** `crash.journal boots=1 seq=1`、`journal: 0x80101E00 +512 bytes` | **实跑** `boots=1 seq=1`、`journal: 0x00301E00 +512 bytes` | 编译 |
+| 指令追踪 `ARKRTOS_USE_MDK_TRACE` | **实跑** `trace : ARMED, cap=2048 records total=14729 lost=0 wrapped=1` | **实跑** `total=14646 lost=0 wrapped=1` | 编译 |
+| 安全自检 `ARKRTOS_USE_SECCHECK` | **实跑** `12 checks - pass 5, fail 0, finding 4, skip 3`、`gates.kernel bits=0x3F (need 0x3F), iso=1`（MPU） | 同上但 `iso=2`（分页 + PLV） | 编译 |
+| 软总线 `ARKRTOS_USE_SOFTBUS` | **实跑** `bus selftest: ALL PASS`（9 项 / 56 断言）、`bus info` peer online | **实跑** 同上 | 编译 |
+| 网络（lwip） | 未做（无网络后端） | 未做（同左） | 未做 |
+| App 装载族（apppack / miniapp / apprun / flashapp） | 未做（缺 arkc RV32 后端） | 未做（缺 arkc loongarch 后端） | 未做 |
+| 镜像签名 / 硬件安全 / 内核守卫（sign / hw_safe / kernel_guard） | 未做（无签名镜像、无对应硬件） | 未做（同左） | 未做 |
 | SMP（多核） | 未做（无多核板） | 未做（QEMU `virt` 单核配置） | 未做 |
-| tickless / waitq / swap / seccheck / sign | 编译档核对（`ci_gate`），未实跑 | 同左 | 同左 |
+| tickless / waitq / swap | 编译档核对（`ci_gate`），未实跑 | 同左 | 同左 |
 
-### 8.3 三条明确缺口（不要读成「等价完成」）
+### 8.3 四条明确缺口（不要读成「等价完成」）
 
 1. **LA32 没有任何执行载体**：`qemu-system-loongarch32` 不存在，现成板子
-   也没有，所以矩阵里 LA32 那一列**全是「编译」**。接上载体后的第一件事
-   写在 §6.8.4 末尾（六组读数逐条看）。
+   也没有，所以矩阵里 LA32 那一列**全是「编译」**。它连 `MDK_TRACE` 的时间
+   源都只到「反汇编确认 `rdtime.d $r12,$r0` 编码合法」这一步（§6.8.5），
+   没有一条运行期读数。接上载体后的第一件事写在 §6.8.4 末尾。
 2. **SMP 无板**：`arkrtos_smp` 只有宿主侧计数与 ON-path 编译核对，没有
    任何双核实跑证据。RV32/LA64 的 QEMU 机器都是单核配置。
 3. **App 整链（装载 + 执行）未在两个 QEMU 目标上跑**：现有实跑覆盖的是
    「内核 + 一个手工放置的 PLV3 探针」，不是「从文件系统读出镜像、校验、
    重定位、跳过去执行」。RV32 上这条链需要 arkc 的 RV32 后端同步，
    LA64 上连 arkc loongarch 后端都还不存在。
+4. **签名/硬件安全/内核守卫三项没有取证面**：它们要么需要签名过的镜像，
+   要么需要 MPU 之外的硬件（HSM/OTP），要么依赖 App 装载链，三条都落在
+   缺口 3 里。这三项当前只有 `ci_gate` 的 ON-path 编译核对。
 
 另有一条**已修但需记住**的：`-nostdlib` 下 `libgcc` 的内置函数与
 `strspn/strcspn` 这类字符串函数都要自己补（§6.8），只在功能面真的打开时
-才暴露 —— 最小档跑得再绿，也证明不了全功能档能链起来。
+才暴露 —— 最小档跑得再绿，也证明不了全功能档能链起来。本轮把五项功能
+真的开起来时，就又被这个坑咬了一次（软总线 `transport_uart.c` 的
+`ark_bus_priv.h` 与 `transport_loopback.c` 的漏挂钩）。
+
+### 8.4 逐开关打开实录（AUDIT / CRASH_LOG / MDK_TRACE / SECCHECK / SOFTBUS）
+
+> 这一小节记录「把开关真的拨到 1 之后，为了让它既编得过、又跑得出**真读数**，
+> 各自改了什么」。每条都分三段：机制 / 读数 / 边界。
+
+#### 8.4.1 `ARKRTOS_USE_AUDIT=1`（结构自检）
+
+**机制**：`arkrtos_audit.c` 遍历内核全局结构（任务表、信号量、mempool、
+定时器……）做一致性核对。它原本假定崩溃日志一定在，`audit_partition()`
+会拿「宏定义的地址」和「运行期 `area_base()`」比对；而 `CRASH_LOG=0` 时
+`area_base()` 按契约返 0，于是这条比对必然 FAIL —— 这是个**只在该开关组合
+下才现形的假失败**。
+
+**修法**：把该比对包进 `#if ARKRTOS_USE_CRASH_LOG`，几何部分（段不重叠、
+对齐、容量够）保持无条件检查。
+
+**读数**：RV32 `structures.audit checks=30`、LA64 `checks=29`（差 1 项是
+RV32 多了 PMP 相关的边界检查），两边都以 `audit: all structures
+self-consistent` 收尾。
+
+**边界**：它核对的是**静态结构一致性**，不是并发安全；跑通不代表没有竞态。
+
+#### 8.4.2 `ARKRTOS_USE_CRASH_LOG=1`（崩溃日志 + 启动次数）
+
+**机制**：日志区必须落在 **UNINIT（`.noinit`）** 段里，否则 C 启动代码会把
+它清零，「重启后还在」这个前提就没了。ARM 侧由 `gen_scatter.py` 按
+`CRASH_LOG_SIZE > 0` 生成 UNINIT 段；但三个 QEMU 目标用的是手写
+`link.ld.in`，**原先根本没有 `.noinit` 输出段**，于是链接出来的日志区
+落到了别的段里 —— 编译链接都成功，行为却是错的（清零）。
+
+**修法**（三目标同款）：
+
+1. `link.ld.in`：在 `__text_end` 之后加 `.noinit CRASH_LOG_BASE (NOLOAD)`
+   段，并加 `ASSERT(__noinit_end <= (CRASH_LOG_BASE + CRASH_LOG_SIZE),
+   "crash journal overlaps the rest of shared RAM")`；
+2. `gen_ldconsts.py`：`WANTED` 里补 `CRASH_LOG_BASE` / `CRASH_LOG_SIZE`
+   （它们由 `svcrt_partition` 式的地址常量表带进 C）；
+3. `main.c`：`arkrtos_kernel_module_init()` 之后依次
+   `arkrtos_ptable_init()` → `arkrtos_crash_init()` →
+   `arkrtos_crash_scan_apply()`（顺序不能反：`scan_apply` 要读已有
+   journal，必须在 `init` 之后、业务起来之前）；
+4. `arkrtos_crash.c` 全程只用符号 `arkrtos_crash_journal` 访问，不再用宏
+   地址 —— 这样 `CRASH_LOG_BASE` 改到哪里都跟着走。
+
+**读数**：RV32 `crasharea=0x80101e00 boots=1`、`crash.journal boots=1 seq=1`、
+`journal: 0x80101E00 +512 bytes`；LA64 `crasharea=0x00301e00`、`journal:
+0x00301E00 +512 bytes`。`boots=1` 说明这是第一轮启动（不是 0，也不是更大的
+残留值 —— 前者说明没扫到区，后者说明区被别的数据踩了）。
+
+**边界**：只证明「记账面工作」，没有做「真的崩一次再重启看 seq 变 2」的
+取证；要做得把 QEMU 停在异常里再 `-kernel` 重跑。
+
+#### 8.4.3 `ARKRTOS_USE_MDK_TRACE=1`（指令/事件追踪）
+
+**机制**：本仓库对 mdk_trace 是**部分 vendored**，原本缺 `mdk_trace_buff.c/h`
+（上游在 `mdk_agent` 仓库），而后端在 `config/mdk_trace_config.h` 里被**无条件**
+定义成 SWD —— 非 ARM 目标上就会引用到不存在的 `mdk_trace_swd_blob`。
+另外内核侧门面 `kernelsrc/src/arkrtos_trace.c` 原先直连 SWD，换后端就要改内核。
+
+**修法**：
+
+1. 从上游复制 `mdk_trace_buff.c/h` 进 vendored 目录；
+2. `mdk_trace_config.h` 按架构选后端：`__arm__` → SWD，其余 → BUFF；
+3. `arkrtos_trace.c` 改成后端无关门面（`status_line` 三档、capacity/total/
+   overrun 从后端取）；
+4. **时间源**：RISC-V 原本用 `mcycle`，但**在模拟器里 `mcycle` 数的是被模拟
+   的工作量，不是时间**，换算出来的时长是假的。新增 `MDK_TRACE_USE_RDTIME=1`
+   走 `csrr %0, time`（CSR 0xC01），与内核节拍同源（QEMU virt timebase
+   10 MHz）；LoongArch 用 `rdtime.d`，LA64 virt 定时器 100 MHz。默认值
+   仍是 0，对 ARM 目标零变化。
+
+**读数**：RV32 `trace : ARMED, cap=2048 records total=14729 lost=0 wrapped=1`；
+LA64 `total=14646 lost=0 wrapped=1`。`lost=0` 且 `wrapped=1` 说明是**溢出后
+覆盖**（环形缓冲的正常行为），不是丢记录。
+
+**边界**：`wrapped=1` 意味着最早的一段记录已被覆盖；所以「total 有多大」
+不等于「能回看多少」。另外 LA64 的 `MDK_TRACE_CPU_HZ=100000000u` 是按
+QEMU virt 的定时器频率填的，换真机要按该核时钟树重填。
+
+#### 8.4.4 `ARKRTOS_USE_SECCHECK=1`（安全自检闸门）—— 本轮唯一改了判据语义的地方
+
+**机制**：`sec_check_gates()` 用一组 bit 表示「各项安全机制是否在岗」，
+bit0 原本硬绑 `ARKRTOS_USE_MPU`。但 LoongArch 没有 MPU 这种部件，它靠
+**TLB/页表 + PLV** 做隔离 —— 于是在 LA64 上必然报
+`gates.kernel FAIL bits=0x3E (need 0x3F)`，而这不是「隔离没开」，是
+「判据只认一种实现」。
+
+**修法（两处）**：
+
+1. 新增架构能力宏 `ARKRTOS_ARCH_HAS_PAGING`：
+   ARM(M3/M4/M7)=0、RV32IMAC=0、RV64GC=0、**LA32=1、LA64=1**。
+   它只表达 **ISA 的能力**，不代表板级真的开了隔离。
+2. `sec_check_gates()` 的 bit0 改成双路，并把「是哪一路」作为 `iso` 报出来：
+
+   ```
+   #if (ARKRTOS_USE_MPU == 1)
+       m |= 1u; iso = 1u;      /* MPU/PMP */
+   #elif ((ARKRTOS_ARCH_HAS_PAGING == 1) && (ARKRTOS_USE_PRIV == 1))
+       m |= 1u; iso = 2u;      /* 分页 + 特权级 */
+   #endif
+   ```
+
+   报告串变成 `... bits=0x%X (need 0x%X), iso=%u sign/hwsafe=0x%X`。
+
+**为什么不是「恒 PASS」**：`ARKRTOS_ARCH_HAS_PAGING` 单独为 1 不给 bit0，
+必须同时 `ARKRTOS_USE_PRIV=1`。LA32 正是这个组合的反例 ——
+`HAS_PAGING=1` 但 `USE_PRIV=0`，bit0 仍为 0，SECCHECK 仍会 FAIL。若只按
+ISA 能力给绿，就会造出一个「有页表就等于隔离已开」的假绿。
+
+**读数**：RV32 `12 checks - pass 5, fail 0, finding 4, skip 3`、
+`gates.kernel ... bits=0x3F (need 0x3F), iso=1`；LA64 同款但 `iso=2`。
+两边 `fail=0`。`finding=4` 是「如实登记但不当失败」的项（例如某硬件安全项
+在 QEMU 上不可用），`skip=3` 是无载体项。
+
+**边界**：`iso=2` 只能证明「分页+PLV 这条路在管隔离」，不能证明 TLB 条目
+覆盖了所有该覆盖的页 —— 后者由 §5.12 的越权负对照（PPI/refill/IPE 三条）
+单独取证。
+
+#### 8.4.5 `ARKRTOS_USE_SOFTBUS=1`（软总线）
+
+**机制**：软总线在 MCU 档位上有一组 `ARK_BUS_*` 宏必须与
+`arkrtos_softbus.h` 顶部注释**同档**，否则组件 `#error`。它还需要三个
+include 路径（`include` / `src` / `port`）—— `src` 那条容易漏，因为
+`transport_uart.c` 直接 `#include "ark_bus_priv.h"`（内部头）。
+
+**修法**：
+
+1. Makefile 加 `ARK_BUS_FLAGS`（14 个 `-DARK_BUS_*`），**必须定义在
+   `CFLAGS :=` 之前** —— `:=` 是立即展开，写在后面就是空串，然后组件
+   `#error`（这个坑踩过一次）；
+2. `SOFTBUS_SRCS` 除 `src/ark_bus_*.c` 还要显式加
+   `src/transport/transport_loopback.c`、`src/transport/transport_uart.c`
+   与 `port/ark_bus_hal_arkrtos.c`（通配符漏的，漏了就是
+   `undefined reference to ark_bus_loopback_init`）；
+3. 板级补三个钩子文件 `board/<板>/arkrtos_bus_port.c`（tick_ms / 调度器
+   加锁 / 解锁），内容与 `board/stm32f427` 同一份，跨目标通用；
+4. `ARKRTOS_TICK_PERIOD_US=500` ⇒ 2 ticks/ms，满足「能整除 1000us」的闸门。
+
+**读数**：三份 `bus selftest` 全部 `9 项 / checks 56, failed 0 / ALL PASS`；
+`bus info` 显示 `node id 0x00001001`、`peers 1 (peer 0x00001002 online)`、
+`profile msg<=128 topic<=12 dev<=4 qos=2 rpc=4 stream=1`。走的是真实的
+帧编解码 + 环缓冲（`transport_loopback`），不是桩。
+
+**边界**：loopback 传输在同一进程内转圈，**没有**验证「跨 UART 物理链路」
+的时序与丢帧（`transport_uart.c` 编进去了但没接真实对端）。所以
+「软总线在 QEMU 上通」应读作「协议栈 + 多节点注册 + 收发路径通」，
+不能读成「链路层已在硬件的波特率/中断下验证」。
+
+#### 8.4.6 刻意留关的：`RTSTAT` / `SCHED_STAT`
+
+这两个的读数是「每任务 CPU 占用 / 调度延迟」，来源是 `cyccnt`。本 port 的
+`cyccnt` 返 -1/0（没有可用的周期计数器），打开后算出来的占用率是假的。
+**关着不是「没做」，是「做了也是错的」** —— 按「宁可报错不给错答案」，
+不如不报。若要开，先给这两个 port 补一个真周期源（RV32 可试
+`mcycle`，但要先确认模拟器与真机的语义差；LA64 有 `rdtime`）。
+
+#### 8.4.7 LA32 的反汇编核对（不是运行期读数）
+
+LA32 没有执行载体，所以 `_la_cycles()` 只能到「这指令编码对不对」这一步。
+`rdtime.d` 在 LoongArch 里写的是**偶/奇寄存器对**，32 位下必须写进偶号
+寄存器（`rdtime.d` 的 rd 最低位保留）。核对方式：
+
+```
+loongarch32-newlib-elf-objdump -d build/la32_generic/ark_la32_generic.elf
+```
+
+实测出现 `21a050: 0000680c  rdtime.d  $r12,$r0`（rd=`$r12`，偶数），编码
+合法。**但这仍然只是「反汇编长得对」，不是「时间戳对」** —— LA32 那一列
+在矩阵里必须读作「编译」。
+

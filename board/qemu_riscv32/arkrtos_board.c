@@ -17,6 +17,7 @@
 #include "arkrtos_config.h"
 #include "arkrtos_board.h"
 #include "arkrtos_task.h"   /* arkrtos_current_task_id（故障现场的任务号） */
+#include "arkrtos_trace.h"  /* arkrtos_trace_init()：追踪随板起来 */
 
 /* 外部中断（PLIC）通路由 port 层提供；头文件在 arkrtos_hal.h 里没开这一类
  * 通用接口（各架构的接线方式差得太远），所以这里就地声明。 */
@@ -305,6 +306,10 @@ void arkrtos_port_board_init(void)
     arkrtos_board_puts(" timebase=");
     arkrtos_board_putu(ARKRTOS_MACHINE_TIMER_HZ);
     arkrtos_board_puts("Hz\n");
+
+    /* 追踪随板起来：环是静态的，不需要堆；档位由 MDK_TRACE_* 决定。
+     * ARKRTOS_USE_MDK_TRACE=0 时 arkrtos_trace_init() 是空函数，这行代价为零。 */
+    arkrtos_trace_init();
 }
 
 /* ============================================================

@@ -20,7 +20,17 @@
 #include "arkrtos_trace.h"
 #include "arkrtos_task.h"
 #include "mdk_trace.h"
+
+/* 两种在片后端都能给内核用：
+ *   SWD  —— 压缩字节环，主机经调试器按片取（Cortex-M 常规配置）。
+ *   BUFF —— 定长记录环，主机一次性读整窗（无调试器 / 非 ARM 内核，例如
+ *           QEMU 上的 LoongArch、RISC-V）。两者都由组件自己维护控制块，
+ *           这一层只读它们的计数器，不复制环实现。 */
+#if MDK_TRACE_BACKEND_SWD
 #include "mdk_trace_swd.h"
+#elif MDK_TRACE_BACKEND_BUFF
+#include "mdk_trace_buff.h"
+#endif
 
 /* ---- 阻塞对象登记（见 arkrtos_trace.h 的契约） ----
  * 放在 #if 之外：关掉追踪时这两句也必须在，因为 arkrtos_task.c 无条件调用。 */
@@ -85,10 +95,20 @@ void arkrtos_trace_enable(uint8 on)
 
 uint8  arkrtos_trace_enabled(void)   { return g_tr_on; }
 
+uint32 arkrtos_trace_last_cycles(void) { return mdk_trace_now(); }
+#if MDK_TRACE_BACKEND_SWD
 uint32 arkrtos_trace_capacity(void)  { return mdk_trace_swd_blob.ctrl.cap; }
 uint32 arkrtos_trace_total(void)     { return mdk_trace_swd_blob.ctrl.events; }
-uint32 arkrtos_trace_last_cycles(void) { return mdk_trace_now(); }
 uint32 arkrtos_trace_overrun(void)   { return mdk_trace_swd_blob.ctrl.lost_events; }
+#elif MDK_TRACE_BACKEND_BUFF
+uint32 arkrtos_trace_capacity(void)  { return mdk_trace_buff_capacity(); }
+uint32 arkrtos_trace_total(void)     { return mdk_trace_buff_total(); }
+uint32 arkrtos_trace_overrun(void)   { return mdk_trace_buff_lost(); }
+#else
+uint32 arkrtos_trace_capacity(void)  { return 0u; }
+uint32 arkrtos_trace_total(void)     { return 0u; }
+uint32 arkrtos_trace_overrun(void)   { return 0u; }
+#endif
 
 uint32 arkrtos_trace_switch_count(uint8 task_id)
 {
@@ -198,6 +218,7 @@ static int trc_streq(const char *a, const char *b)
 
 static void trc_status_line(void)
 {
+#if MDK_TRACE_BACKEND_SWD
     const mdk_trace_swd_ctrl_t *c = &mdk_trace_swd_blob.ctrl;
     uint32 pending = c->head - c->drained;
 
@@ -215,6 +236,23 @@ static void trc_status_line(void)
     }
     ark_shell_printf("        read it with the host tools trace_swd_status / "
                      "trace_swd_read / trace_swd_reset\r\n");
+#elif MDK_TRACE_BACKEND_BUFF
+    /* BUFF 后端的环就在 .bss 里的 mdk_trace_buff_blob，主机按符号取整窗。
+     * 板子上能自己回答的只有「记了多少、丢了多少、转过圈没有」。 */
+    ark_shell_printf("\r\ntrace : %s, cap=%u records total=%u lost=%u "
+                     "wrapped=%u\r\n",
+                     (g_tr_on != 0u) ? "ARMED" : "idle",
+                     (unsigned)mdk_trace_buff_capacity(),
+                     (unsigned)mdk_trace_buff_total(),
+                     (unsigned)mdk_trace_buff_lost(),
+                     ((mdk_trace_buff_blob.ctrl.flags &
+                       (uint32)MDK_TRACE_BUFF_FLAG_WRAPPED) != 0u) ? 1u : 0u);
+    ark_shell_printf("        read it with the host tools trace_buff_status / "
+                     "trace_buff_read (symbol mdk_trace_buff_blob)\r\n");
+#else
+    ark_shell_printf("\r\ntrace : %s, no on-chip backend\r\n",
+                     (g_tr_on != 0u) ? "ARMED" : "idle");
+#endif
 }
 
 int arkrtos_trace_shell_cmd(int argc, char *argv[])
@@ -224,24 +262,24 @@ int arkrtos_trace_shell_cmd(int argc, char *argv[])
     if(trc_streq(sub, "start") != 0)
     {
         arkrtos_trace_init();
-        ark_shell_printf("\r\ntrace : armed, %u B ring, %u cycles/s\r\n",
-                         (unsigned)mdk_trace_swd_blob.ctrl.cap,
-                         (unsigned)mdk_trace_swd_blob.ctrl.cpu_hz);
+        ark_shell_printf("\r\ntrace : armed, %u records, %u ticks/s\r\n",
+                         (unsigned)arkrtos_trace_capacity(),
+                         (unsigned)mdk_trace_hz());
         return 0;
     }
     if(trc_streq(sub, "stop") != 0)
     {
         arkrtos_trace_enable(0u);
         ark_shell_printf("\r\ntrace : stopped, %u events, %u lost\r\n",
-                         (unsigned)mdk_trace_swd_blob.ctrl.events,
-                         (unsigned)mdk_trace_swd_blob.ctrl.lost_events);
+                         (unsigned)arkrtos_trace_total(),
+                         (unsigned)arkrtos_trace_overrun());
         return 0;
     }
     if(trc_streq(sub, "reset") != 0)
     {
         arkrtos_trace_reset();
         ark_shell_printf("\r\ntrace : switch counters cleared "
-                         "(the ring restarts via the host's trace_swd_reset)\r\n");
+                         "(the ring is cleared by the host's reset request)\r\n");
         return 0;
     }
     if(trc_streq(sub, "dump") != 0)

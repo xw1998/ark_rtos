@@ -107,36 +107,43 @@
 #define ARKRTOS_ARCH_HAS_FPU           (0)
 #define ARKRTOS_ARCH_HAS_MPU           (1)
 #define ARKRTOS_ARCH_HAS_PRIV          (1)
+#define ARKRTOS_ARCH_HAS_PAGING        (0)     /* ARMv7-M 无页表，隔离由 MPU 提供 */
 #define ARKRTOS_ARCH_SVC_NUM_BITS      (8)     /* SVC 指令携带 8 位立即数 */
 #elif (ARKRTOS_ARCH_CORE == ARKRTOS_CPU_CORE_CORTEX_M4)
 #define ARKRTOS_ARCH_HAS_FPU           (1)
 #define ARKRTOS_ARCH_HAS_MPU           (1)
 #define ARKRTOS_ARCH_HAS_PRIV          (1)
+#define ARKRTOS_ARCH_HAS_PAGING        (0)     /* ARMv7-M 无页表，隔离由 MPU 提供 */
 #define ARKRTOS_ARCH_SVC_NUM_BITS      (8)
 #elif (ARKRTOS_ARCH_CORE == ARKRTOS_CPU_CORE_CORTEX_M7)
 #define ARKRTOS_ARCH_HAS_FPU           (1)
 #define ARKRTOS_ARCH_HAS_MPU           (1)
 #define ARKRTOS_ARCH_HAS_PRIV          (1)
+#define ARKRTOS_ARCH_HAS_PAGING        (0)     /* ARMv7-M 无页表，隔离由 MPU 提供 */
 #define ARKRTOS_ARCH_SVC_NUM_BITS      (8)
 #elif (ARKRTOS_ARCH_CORE == ARKRTOS_CPU_CORE_RV32IMAC)
 #define ARKRTOS_ARCH_HAS_FPU           (0)
 #define ARKRTOS_ARCH_HAS_MPU           (1)     /* 由 PMP 提供物理内存保护 */
 #define ARKRTOS_ARCH_HAS_PRIV          (1)
+#define ARKRTOS_ARCH_HAS_PAGING        (0)     /* 无页表部件 */
 #define ARKRTOS_ARCH_SVC_NUM_BITS      (-1)    /* ecall 无立即数，号由寄存器传递 */
 #elif (ARKRTOS_ARCH_CORE == ARKRTOS_CPU_CORE_RV64GC)
 #define ARKRTOS_ARCH_HAS_FPU           (1)
 #define ARKRTOS_ARCH_HAS_MPU           (1)
 #define ARKRTOS_ARCH_HAS_PRIV          (1)
+#define ARKRTOS_ARCH_HAS_PAGING        (0)     /* 无页表部件 */
 #define ARKRTOS_ARCH_SVC_NUM_BITS      (-1)
 #elif (ARKRTOS_ARCH_CORE == ARKRTOS_CPU_CORE_LA32)
 #define ARKRTOS_ARCH_HAS_FPU           (0)
 #define ARKRTOS_ARCH_HAS_MPU           (1)     /* 由页表 / 地址窗口提供隔离 */
 #define ARKRTOS_ARCH_HAS_PRIV          (1)
+#define ARKRTOS_ARCH_HAS_PAGING        (1)     /* LoongArch 自带 TLB/页表，隔离靠分页 + PLV */
 #define ARKRTOS_ARCH_SVC_NUM_BITS      (15)    /* syscall 指令携带 15 位 code */
 #elif (ARKRTOS_ARCH_CORE == ARKRTOS_CPU_CORE_LA64)
 #define ARKRTOS_ARCH_HAS_FPU           (1)
 #define ARKRTOS_ARCH_HAS_MPU           (1)
 #define ARKRTOS_ARCH_HAS_PRIV          (1)
+#define ARKRTOS_ARCH_HAS_PAGING        (1)     /* LoongArch 自带 TLB/页表，隔离靠分页 + PLV */
 #define ARKRTOS_ARCH_SVC_NUM_BITS      (15)
 #else
 #error "未知 CPU 核心，请在 arkrtos_arch.h 中补充能力派生"

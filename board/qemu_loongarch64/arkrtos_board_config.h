@@ -147,7 +147,7 @@
 #undef  ARKRTOS_USE_LWIP
 #define ARKRTOS_USE_LWIP             0
 #undef  ARKRTOS_USE_SOFTBUS
-#define ARKRTOS_USE_SOFTBUS          0
+#define ARKRTOS_USE_SOFTBUS          1
 /* Shell：`ttyS0` 由 board/qemu_loongarch64/drvuart.c 注册进设备表，
  * 收发都是 16550 轮询（本移植没有接外部中断控制器，见该文件头）。 */
 #undef  ARKRTOS_USE_SHELL
@@ -173,19 +173,19 @@
 #undef  ARKRTOS_USE_SCHED_STAT
 #define ARKRTOS_USE_SCHED_STAT       0
 #undef  ARKRTOS_USE_MDK_TRACE
-#define ARKRTOS_USE_MDK_TRACE        0
+#define ARKRTOS_USE_MDK_TRACE        1
 #undef  ARKRTOS_USE_CM_BACKTRACE
 #define ARKRTOS_USE_CM_BACKTRACE     0
 #undef  ARKRTOS_USE_CRASH_LOG
-#define ARKRTOS_USE_CRASH_LOG        0
+#define ARKRTOS_USE_CRASH_LOG        1
 #undef  ARKRTOS_USE_AUDIT
-#define ARKRTOS_USE_AUDIT            0
+#define ARKRTOS_USE_AUDIT            1
 /* 板端单元测试：shell 的 `utest` 命令跑全量用例，判据只看汇总行的
  * "0 failed"，不绑用例名 —— 用例表随功能开关变。 */
 #undef  ARKRTOS_USE_UTEST
 #define ARKRTOS_USE_UTEST            1
 #undef  ARKRTOS_USE_SECCHECK
-#define ARKRTOS_USE_SECCHECK         0
+#define ARKRTOS_USE_SECCHECK         1
 #undef  ARKRTOS_HW_SAFE
 #define ARKRTOS_HW_SAFE              0
 
