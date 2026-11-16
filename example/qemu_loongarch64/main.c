@@ -2,7 +2,7 @@
 * @file main.c
 * @brief Ark RTOS 在 QEMU `virt`（LoongArch64）上的验证示例
 * @details 这不是一个"跑个空任务证明能启动"的最小例子，而是把内核真正会
-*          依赖硬件的五条链路各自压一遍边：
+*          依赖硬件的六条链路各自压一遍边：
 *
 *          1) **节拍**：TCFG 周期定时器每 500 us 进一次异常，
 *             tick 与 ms 时间必须同步增长（读数不一致就说明节拍换算错了）；
@@ -16,6 +16,8 @@
 *          5) **存储栈**：块设备 → littlefs → VFS → procfs，写在 RAM 介质上
 *             读回逐字节一致，并以 NOR 语义负对照（1→0 才允许、0→1 必须被拒）
 *             证明这条链不是"假成功"（见 docs/QEMU模拟器移植与验证.md §5.10）。
+*          6) **控制台 Shell**：ttyS0 → ark_shell（行编辑 / 命令分发 / 历史 /
+*             补全），收是 16550 轮询（本移植没接外部中断控制器）；
 *
 *          打印全部走板级轮询 ns16550a，不依赖 libc 的 printf。
 *
@@ -33,6 +35,7 @@
 #include "arkrtos_config.h"
 #include "arkrtos.h"
 #include "arkrtos_board.h"
+#include "arkrtos_shell.h"     /* arkrtos_shell_init()：内核 Shell 控制台 */
 #include "arkrtos_blk.h"
 #include "arkrtos_fs.h"
 #include "arkrtos_vfs.h"
@@ -379,6 +382,7 @@ int main(void)
     int32 id_a;
     int32 id_b;
     int32 id_fs;
+    int32 id_shell;
 
     arkrtos_port_board_init();
 
@@ -410,6 +414,12 @@ int main(void)
         }
     }
 
+    /* Shell 控制台任务：优先级 / 栈 / 周期取 config/arkrtos_partition.h 的
+     * SHELL_TASK_*（14 / 3 KB / 2 ms）。它打开的 ttyS0 由板级
+     * arkrtos_dev_board_init() 在 kernel_module_init() 里注册，
+     * 所以这一步必须在 kernel_module_init() 之后。 */
+    id_shell = arkrtos_shell_init();
+
     arkrtos_board_puts("[boot] sem=");
     arkrtos_board_putu((uint32)s_sem);
     arkrtos_board_puts(" taskA=");
@@ -424,11 +434,17 @@ int main(void)
     arkrtos_board_putu((uint32)ARKRTOS_USE_FS);
     arkrtos_board_puts(" vfs=");
     arkrtos_board_putu((uint32)ARKRTOS_USE_VFS);
+    arkrtos_board_puts(" shell=");
+    arkrtos_board_putu((uint32)id_shell);
+    arkrtos_board_puts(" log=");
+    arkrtos_board_putu((uint32)ARKRTOS_USE_LOG);
+    arkrtos_board_puts(" utest=");
+    arkrtos_board_putu((uint32)ARKRTOS_USE_UTEST);
     arkrtos_board_puts(" tick_period_us=");
     arkrtos_board_putu(ARKRTOS_TICK_PERIOD_US);
     arkrtos_board_puts("\n");
 
-    if((id_a < 0) || (id_b < 0) || (id_fs < 0))
+    if((id_a < 0) || (id_b < 0) || (id_fs < 0) || (id_shell < 0))
     {
         arkrtos_board_puts("[boot] task register FAILED, halted\n");
         for(;;)

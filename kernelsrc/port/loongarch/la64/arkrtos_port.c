@@ -369,6 +369,23 @@ void arkrtos_port_enable_irq(void)
 {
     uint32 mask = LA_CRMD_IE;
 
+    /* **异常内部不允许开中断。** LoongArch 的 ERA/PRMD 只有一份、没有嵌套
+     * 栈：在异常处理程序里把 CRMD.IE 打开，节拍连接进来就成了嵌套异常，
+     * 而嵌套异常的出口一旦发生任务切换（s_switch_pending 可能是外层刚刚
+     * 置上的），外层处理程序的 C 栈帧就再也回不去了 —— 它那句
+     * `s_in_trap--` 永远执行不到，于是 s_in_trap 永久漏 1。之后**所有**
+     * 任务上下文的切换请求都被当成「在中断里」而只置 pending：
+     * `arkrtos_task_wait_internal()` 会把任务标成 WAIT、挂进延时链，然后
+     * 立刻返回（0 拍），要等下一拍节拍在异常出口才真的切走。实测症状是
+     * A 任务的等待 0 拍就返回、SVC 读到的毫秒比本地读数大 500 ms。
+     *
+     * 异常返回时 PRMD.PIE 会按被打断时的状态恢复，所以这里不做事才是对的：
+     * 该开的中断由 ertn 负责开。 */
+    if(s_in_trap != 0u)
+    {
+        return;
+    }
+
     __asm__ volatile("csrxchg %0, %0, 0x0" : "+r"(mask) : : "memory");
 }
 

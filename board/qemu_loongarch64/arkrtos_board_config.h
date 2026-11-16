@@ -85,6 +85,10 @@
 #undef  ARKRTOS_USE_PRIV
 #define ARKRTOS_USE_PRIV             0
 
+/* 本板没有 Cortex-M 的 AIRCR，复位由板级 arkrtos_board_reboot() 接管
+ * （loongarch virt 也没有复位设备，那里只能明确报"做不到"）。 */
+#define ARKRTOS_PLATFORM_REBOOT_PORT 1
+
 /* 心跳合同：QEMU 没有看门狗，守卫真咬人的前提不存在，直接关掉。 */
 #undef  ARKRTOS_USE_KERNEL_GUARD
 #define ARKRTOS_USE_KERNEL_GUARD     0
@@ -95,10 +99,13 @@
  * 五、功能裁剪（把需要真实硬件 / 需要 libc 格式化的模块全部关掉）
  * ============================================================ */
 
+/* 日志：控制台已经有一条可用的输出通路（ns16550a 轮询），日志走它。
+ * LOG_RING 打开后 `log show` / 崩溃转储能从环形缓冲里翻历史，是 shell
+ * 之外第二条可核对的口径，代价只有几十字节。 */
 #undef  ARKRTOS_USE_LOG
-#define ARKRTOS_USE_LOG              0
+#define ARKRTOS_USE_LOG              1
 #undef  ARKRTOS_USE_LOG_RING
-#define ARKRTOS_USE_LOG_RING         0
+#define ARKRTOS_USE_LOG_RING         1
 
 /* 存储栈：QEMU 上没有真实 NOR / eMMC，但可以用板级 RAM 介质把 blk 以上
  * 的整条软件栈（blk -> littlefs -> VFS -> procfs）真的跑起来，见
@@ -125,8 +132,10 @@
 #define ARKRTOS_USE_LWIP             0
 #undef  ARKRTOS_USE_SOFTBUS
 #define ARKRTOS_USE_SOFTBUS          0
+/* Shell：`ttyS0` 由 board/qemu_loongarch64/drvuart.c 注册进设备表，
+ * 收发都是 16550 轮询（本移植没有接外部中断控制器，见该文件头）。 */
 #undef  ARKRTOS_USE_SHELL
-#define ARKRTOS_USE_SHELL            0
+#define ARKRTOS_USE_SHELL            1
 #undef  ARKRTOS_USE_APPPACK
 #define ARKRTOS_USE_APPPACK          0
 #undef  ARKRTOS_USE_APPRUN
@@ -155,8 +164,10 @@
 #define ARKRTOS_USE_CRASH_LOG        0
 #undef  ARKRTOS_USE_AUDIT
 #define ARKRTOS_USE_AUDIT            0
+/* 板端单元测试：shell 的 `utest` 命令跑全量用例，判据只看汇总行的
+ * "0 failed"，不绑用例名 —— 用例表随功能开关变。 */
 #undef  ARKRTOS_USE_UTEST
-#define ARKRTOS_USE_UTEST            0
+#define ARKRTOS_USE_UTEST            1
 #undef  ARKRTOS_USE_SECCHECK
 #define ARKRTOS_USE_SECCHECK         0
 #undef  ARKRTOS_HW_SAFE

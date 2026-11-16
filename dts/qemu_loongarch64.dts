@@ -1,0 +1,74 @@
+/*
+ * Ark RTOS board: QEMU `virt` machine, LoongArch64, single core.
+ *
+ * 这张树描述的是 **QEMU loongarch virt 实际给出的机器**，不是我们自己画的
+ * 板子：UART 地址、定时器频率全部来自 board/qemu_loongarch64/arkrtos_board_config.h
+ * 里实测标定的常量（同一份事实只写一次，这里只是把它变成可查询的表）。
+ *
+ * 为什么这个目标也要有设备树：内核 shell 的 `dt` 命令与驱动的
+ * arkrtos_dt_find() 都按这张表工作。没有表的板子只能得到"查不到设备"，
+ * 那不是"这台机器没有外设"，而是"我们没有描述它"——两件事不能混。
+ *
+ * 地址宽度：LoongArch64 的指针是 64 位，但本机所有窗口都在低 4 GB 内
+ * （UART 0x1FE001E0、DRAM 从 0 起），所以这里用 #address-cells = <1>。
+ * 哪天出现 4 GB 以上的窗口，必须先让 dtc_lite 支持 64 位 cell 再改这里，
+ * 不能靠拼两个 cell "看起来像"。
+ */
+
+/dts-v1/;
+
+/ {
+	model = "QEMU virt loongarch64";
+	compatible = "qemu,virt";
+
+	chosen {
+		stdout-path = &uart0;
+		bootargs = "console=ttyS0";
+	};
+
+	/* DRAM 从 0 起 128 MB，但低 1 MB 被固件的启动信息占用（见板级配置），
+	 * 所以内核镜像从 2 MB、静态数据从 3 MB 开始。这里描述机器给的全部窗口。 */
+	memory@0 {
+		device_type = "memory";
+		reg = <0x00000000 0x08000000>;
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		timebase-frequency = <100000000>;
+
+		cpu@0 {
+			device_type = "cpu";
+			compatible = "loongarch";
+			reg = <0>;
+			status = "okay";
+		};
+	};
+
+	soc {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		compatible = "simple-bus";
+
+		/* ns16550a 控制台：收发都是轮询（本移植没接外部中断控制器，
+		 * 所以这里不写 interrupt-parent / interrupts —— 写了就是假描述）。 */
+		uart0: serial@1fe001e0 {
+			compatible = "ns16550a";
+			reg = <0x1fe001e0 0x00000100>;
+			clock-frequency = <25000000>;
+			current-speed = <115200>;
+			status = "okay";
+		};
+
+		/* 板级 RAM 介质块设备（board/qemu_loongarch64/drvblk.c）：
+		 * 它不是硬件，是 QEMU 上替代 NOR 的一块静态缓冲区，擦除单位 4 KB。
+		 * 写进树里是为了让 `dt` 能如实报出"这台机器上有哪些块设备"。 */
+		ramdisk@0 {
+			compatible = "ark,ram-blk";
+			reg = <0x00000000 0x00080000>;
+			erase-size = <0x00001000>;
+			status = "okay";
+		};
+	};
+};

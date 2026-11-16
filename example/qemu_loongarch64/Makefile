@@ -62,6 +62,13 @@ KERNEL_SRCS := $(filter-out kernelsrc/src/arkrtos_flashapp.c \
 SRCS_C := $(KERNEL_SRCS) \
 	kernelsrc/components/mdk_trace/mdk_trace_arkrtos.c \
 	kernelsrc/shell/arkrtos_shell.c \
+	kernelsrc/shell/platform_arkrtos.c \
+	kernelsrc/shell/ark_shell/ark_shell.c \
+	kernelsrc/shell/ark_shell/ark_shell_commands.c \
+	kernelsrc/shell/ark_shell/ark_shell_eval.c \
+	kernelsrc/shell/ark_shell/ark_shell_history.c \
+	kernelsrc/shell/ark_shell/ark_shell_line_editor.c \
+	kernelsrc/shell/ark_shell/ark_shell_autocomplete.c \
 	kernelsrc/src/arkrtos_fs.c \
 	kernelsrc/src/arkrtos_vfs_lfs.c \
 	kernelsrc/components/ark_vfs/src/ark_vfs_core.c \
@@ -74,7 +81,9 @@ SRCS_C := $(KERNEL_SRCS) \
 	kernelsrc/sdk/app_sdk/arkrtos_oslib.c \
 	kernelsrc/port/loongarch/la64/arkrtos_port.c \
 	board/qemu_loongarch64/arkrtos_board.c \
+	board/qemu_loongarch64/arkrtos_dt.c \
 	board/qemu_loongarch64/drvblk.c \
+	board/qemu_loongarch64/drvuart.c \
 	example/qemu_loongarch64/main.c \
 	example/qemu_loongarch64/libc_shim.c
 

@@ -1005,11 +1005,96 @@ make -f example/qemu_loongarch64/Makefile -j8
 1. **没有内存隔离**：`ARKRTOS_USE_MPU`/`PRIV` 仍为 0。LA64 的隔离要靠
    PLV3 + 三级页表（PGDL/PGDH + PWCL/PWCH + 每任务 TID/ASID + TLB 重填向量），
    这是独立的一档工作量，不能拿 ARM 的 MPU 语义类比；
-2. **SHELL / LOG / UTEST 还没开**：本节的第五个任务是存储链路，
+2. **SHELL / LOG / UTEST 在 §5.10 时还没开**：本节的第五个任务是存储链路，
    控制台与单元测试的接线（`kernelsrc/shell/platform_arkrtos.c` + `ark_shell/*.c`）
-   尚未接到 LA64 的 Makefile 里；
+   那时尚未接到 LA64 的 Makefile 里 —— 这一项已在 **§5.11** 补齐并实跑通过；
 3. **LA32 只到编译**：`csrxchg` 与 `$t0` 槽的修复在 LA32 侧同步改了且能链接
    （见第 6 节），但 QEMU 9.2.3 没有 loongarch32 系统模拟器，没有运行证据。
+
+### 5.11 控制台 Shell / 日志 / 板端单元测试（QEMU 实跑通过）
+
+> **档位：QEMU 实跑通过。** 判据是一条**双向链路**的端到端自动检查
+> （`example/qemu_loongarch64/shell_check.py`），不是「横幅打出来了」。
+
+#### 5.11.1 接了什么
+
+| 落点 | 内容 |
+| --- | --- |
+| `board/qemu_loongarch64/drvuart.c` | 新增：把 ns16550a 注册成 `ttyS0`（`arkrtos_dev_register(SHELL_DEV_NAME, ...)`），**收发都是轮询** |
+| `dts/qemu_loongarch64.dts` → `board/qemu_loongarch64/arkrtos_dt.c` | 新增：`cmd_dt` 依赖的设备树（7 个节点），由 `tools/dts/dtc_lite.py` 生成，不手写 |
+| `board/qemu_loongarch64/arkrtos_board.c` / `.h` | `arkrtos_dev_board_init()` 由空实现改为注册 `ttyS0`（失败会打印）；新增 `arkrtos_board_reboot()` |
+| `board/qemu_loongarch64/arkrtos_board_config.h` | `SHELL` / `LOG` / `LOG_RING` / `UTEST` = 1，新增 `ARKRTOS_PLATFORM_REBOOT_PORT 1` |
+| `example/qemu_loongarch64/Makefile` | 补 `platform_arkrtos.c`、`ark_shell/*.c`(6 个)、`drvuart.c`、`arkrtos_dt.c` |
+| `example/qemu_loongarch64/main.c` | `id_shell = arkrtos_shell_init()`，成为第 5 个任务；启动行打印 `shell=/log=/utest=` |
+
+三处诚实边界：
+
+1. **串口是轮询，不是中断**：这个移植没有接外部中断控制器（本版只有
+   TCFG 定时器一个中断源），所以 `uart_drv_ctrl` 对「开中断收」返回
+   `ARKRTOS_DEV_ERR_NOIMPL`，而不是伪造一条收中断的路径；
+2. **没有复位**：QEMU virt 没有复位设备，`reboot` 明确打印「做不到」后停机，
+   不假装成功；
+3. **`LOG` 走同一条 16550 轮询通路**，不做时间戳精度承诺。
+
+#### 5.11.2 实测读数
+
+`python example/qemu_loongarch64/shell_check.py`（TCP chardev，双向收发）连续 4 次：
+
+```
+PASS: LA64 内核 Shell 端到端通（横幅/help/uname/dt/ls/cat/stack/utest 全部通过）
+```
+
+脚本的 10 条判据：横幅 + 提示符、`[FS] PASS`、`help` 含 blk/mount/reboot、
+`uname`、`dt` 含 `ns16550a` 且地址 `0x1fe001e0`、`ls /mnt/ram` 列出 `hello.txt`、
+`cat /proc/version`、`stack` 为 `5 task(s)` 且 `0 unmeasured`、
+`utest` 汇总行 `, 0 failed,`、全程无 `UNEXPECTED`/`FATAL`/`FAILED`。
+其中 `stack` 与 `utest` 两条是「注册了但没跑」挡不住的：前者要求栈计量
+真的在算（`0 unmeasured`），后者要求用例全量跑完且 0 失败。
+
+#### 5.11.3 第三个静默错答案：异常内部开中断 ⇒ `s_in_trap` 永久漏 1
+
+**症状**（先看到的不是原因）：任务 A 每轮 `wait(500)` 之后读一次节拍差，
+偶发 `d_tick=0`；同一轮里 SVC 读回的毫秒比本地读数大 **500 ms**。
+两件事同源：A 的「睡眠」根本没发生 —— 它被标成 WAIT、挂进延时链，
+然后**立刻返回**，真正切走要等下一拍节拍在异常出口结算。于是 A 打印的
+是自己停住的旧节拍，而 SVC 读到的是错开 1000 拍之后的时间。
+
+**取证**：在 `wait` 返回处读自己的 TCB，得到 `status=2 (WAIT)`、
+`wait_time=1000`、`delay_queued=1`（「已经睡下但还在跑」）；再读
+`arkrtos_port_switch_task()` 入口的快照，拿到 `ready=1`、**`in_trap=1`**。
+任务上下文里 `s_in_trap` 是 1 —— 这就是根因。
+
+**机制**：`arkrtos_port_switch_task()` 用 `s_in_trap` 区分「任务上下文」与
+「异常上下文」，异常里只置 `s_switch_pending`、等 `la_trap_c()` 出口结算。
+而 `arkrtos_port_enable_irq()` 当时**无条件**写 `CRMD.IE`，于是内核里那些
+「临界区末尾开中断」的代码（阻塞类 SVC 的结尾就有一处）会在**异常处理程序
+内部**把中断打开，节拍一进来就是嵌套异常。LoongArch 的 ERA/PRMD 只有一份、
+没有嵌套栈：嵌套异常的出口一旦发生任务切换（pending 可能是外层刚置的），
+外层处理程序的 C 栈帧就再也回不去，那句 `s_in_trap--` 永远执行不到 ——
+`s_in_trap` 从此永久为 1，之后**所有**任务上下文的切换请求都被当成
+「在中断里」，只置 pending。
+
+**修法**（`kernelsrc/port/loongarch/la64/arkrtos_port.c`）：`s_in_trap != 0`
+时 `arkrtos_port_enable_irq()` 直接返回。异常返回时 `PRMD.PIE` 会按被打断
+时的状态恢复，该开的中断由 `ertn` 负责开 —— 这里什么都不做才是对的。
+
+> 这不是 LA64 的「风格选择」：RV32 移植早已因为同类问题（嵌套 trap 把
+> `g_rv_next_mpp` 改写成 M 模式，任务在一次故障重启后被静默提权到 M）
+> 在 `enable_irq` 里装了同一道闸门，并把「trap 不可嵌套」写成边界。
+> LA64 侧漏掉的正是这条**已经成立**的约束。
+
+**修复前后**（同一份代码、同一批连跑，只差这一处）：
+
+| | `[W!]`（wait 未阻塞） | `SVC_MISMATCH` |
+| --- | --- | --- |
+| 修复前，14 次 × 14~15 s | 6 次出现，每次 8~11 处 | 2/3 次出现 |
+| 修复后，18 次（8 短跑 + 10 长跑）+ 4 次 `shell_check` | 0 | 0 |
+
+修复后每轮 `d_tick` 分布：1000 占 34、1001 占 13、1002 占 1
+（首轮冷启动的 6 个 2 拍不计），即 500 ms 周期真的按 1000 拍走。
+本文原先「90 连跑 0 失败」的口径只统计了 `FATAL` 与 `[FS] PASS`，
+把这条一直存在的 `MISMATCH` 漏掉了 —— 那个结论应读作「不再崩溃」，
+**不是**「连等待时长都对」。
 
 ## 6. LoongArch32 移植（仅编译通过，无运行载体）
 
@@ -1155,6 +1240,7 @@ cd "D:/工作/git_project/ark rtos"          # 注意：必须在仓库根目录
 make -f example/qemu_loongarch64/Makefile -j4
 make -f example/qemu_loongarch64/Makefile size
 make -f example/qemu_loongarch64/Makefile run   # 串口写入 build/qemu_loongarch64/out.txt
+python example/qemu_loongarch64/shell_check.py  # 双向 shell 端到端检查（§5.11.2）
 ```
 
 带 monitor 调试时不要用 `run` 目标，直接手敲：
