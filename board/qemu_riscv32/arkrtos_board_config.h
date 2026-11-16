@@ -166,7 +166,7 @@
  * 打开动作在 arkrtos_shell_task 里由 platform_uart_init() 完成 —— 因此
  * 板级必须先把这个名字注册进设备框架（board/qemu_riscv32/drvuart.c）。 */
 #undef  ARKRTOS_USE_SHELL
-#define ARKRTOS_USE_SHELL            0
+#define ARKRTOS_USE_SHELL            1
 #undef  ARKRTOS_USE_APPPACK
 #define ARKRTOS_USE_APPPACK          0
 #undef  ARKRTOS_USE_APPRUN

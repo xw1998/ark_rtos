@@ -362,6 +362,41 @@ void arkrtos_port_fault_detail(uint32 mcause, uint32 mtval, uint32 from_priv)
     arkrtos_board_puts(" task=");
     arkrtos_board_putu(task);
     arkrtos_board_puts("\n");
+
+    /* 故障现场实参。trap_entry 把 sp 存进 tp 当帧指针，故障派发只换 sp
+     * （rv_fault_enter），tp 仍指向中断帧，所以帧里的 a0-a3/s3/sp0/ra0
+     * 就是出事那条指令真正拿到的参数。只有 mepc 时只能知道"在哪个函数里"，
+     * 有了这一行才知道"用哪个指针、哪个长度进来的"——例如
+     * s3=0 又 mtval=0x4，就是 size=0 却仍解引用了 buffer。
+     * 只在故障路径执行，不影响正常运行的非故障时序。 */
+    {
+        uint32 fp;
+        __asm__ volatile("mv %0, tp" : "=r"(fp) : : "memory");
+        if ((fp >= 0x80100000u) && (fp < 0x80200000u))
+        {
+            arkrtos_board_puts("[FRAME] a0=");
+            arkrtos_board_puthex(((volatile uint32 *)fp)[9]);
+            arkrtos_board_puts(" a1=");
+            arkrtos_board_puthex(((volatile uint32 *)fp)[10]);
+            arkrtos_board_puts(" a2=");
+            arkrtos_board_puthex(((volatile uint32 *)fp)[11]);
+            arkrtos_board_puts(" a3=");
+            arkrtos_board_puthex(((volatile uint32 *)fp)[12]);
+            arkrtos_board_puts(" s3=");
+            arkrtos_board_puthex(((volatile uint32 *)fp)[18]);
+            arkrtos_board_puts(" sp0=");
+            arkrtos_board_puthex(((volatile uint32 *)fp)[1]);
+            arkrtos_board_puts(" ra0=");
+            arkrtos_board_puthex(((volatile uint32 *)fp)[0]);
+            arkrtos_board_puts(" s0=");
+            arkrtos_board_puthex(((volatile uint32 *)fp)[7]);
+            arkrtos_board_puts(" s1=");
+            arkrtos_board_puthex(((volatile uint32 *)fp)[8]);
+            arkrtos_board_puts(" s4=");
+            arkrtos_board_puthex(((volatile uint32 *)fp)[19]);
+            arkrtos_board_puts("\n");
+        }
+    }
 }
 
 /* ============================================================

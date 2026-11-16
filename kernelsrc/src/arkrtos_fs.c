@@ -92,6 +92,14 @@ static struct
      * needs the object to stay alive between calls, and the facade allows
      * one stream at a time. */
     lfs_file_t             stream;
+    /* The per-file config has to outlive fs_stream_open(): littlefs keeps the
+     * pointer (file->cfg) and reads cfg->attr_count again inside
+     * lfs_file_close -> lfs_file_sync_. A stack local there left the pointer
+     * dangling, so the close read whatever the FS task stack held next and
+     * built a corrupt LFS_FROM_USERATTRS tag (bit31 set, attrs NULL), which
+     * faulted in lfs_dir_commitattr. Keep it beside the stream so both live
+     * exactly as long as the stream does. */
+    struct lfs_file_config stream_cfg;
     uint8                  stream_mode;
 } g_fs;
 
@@ -728,7 +736,7 @@ static int32 fs_stream_close(void)
 /* Shared body of open_read / open_write: only the littlefs flags differ. */
 static int32 fs_stream_open(const char *path, uint32 mode, uint32 flags)
 {
-    struct lfs_file_config fcfg;
+    struct lfs_file_config *fcfg = &g_fs.stream_cfg;
     int err;
 
     /* Every failure path must set last_error: the VFS bridge reads it to
@@ -747,11 +755,11 @@ static int32 fs_stream_open(const char *path, uint32 mode, uint32 flags)
         return ARKRTOS_FS_FAIL;
     }
 
-    fcfg.buffer     = g_fs.file_cache;
-    fcfg.attrs      = 0;
-    fcfg.attr_count = 0;
+    fcfg->buffer     = g_fs.file_cache;
+    fcfg->attrs      = 0;
+    fcfg->attr_count = 0;
 
-    err = lfs_file_opencfg(&g_fs.lfs, &g_fs.stream, path, (int)flags, &fcfg);
+    err = lfs_file_opencfg(&g_fs.lfs, &g_fs.stream, path, (int)flags, fcfg);
 
     if(err != 0)
     {

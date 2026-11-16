@@ -508,46 +508,90 @@ ISR 没把源摘干净（比如 IIR 里还有待读字节），claim 会一直�
    （实测 `[A] [R] wake=1 ... -> hello.`），按行首匹配永远找不到。
    改成 `log.find("[R] ")` 子串切到行尾。
 
-### 3.12 软件功能全开（进行中：存储栈已实跑通过，随机抢占故障未关闭）
+### 3.12 软件功能全开（RV32 全功能档：已实跑通过）
 
 目标是把 RV32 从「port 层最小验证」推到与 ARM 板级同档的**全功能**：块设备 + FS + VFS
 + procfs + 日志 + 内核 Shell + 设备树。配置（`board/qemu_riscv32/arkrtos_board_config.h`）：
-`USE_BLK/USE_FS/USE_VFS/USE_VFS_LFS/USE_PROCFS=1`、`ARKRTOS_USE_LOG=1`、
-`ARKRTOS_USE_LOG_RING=1`、`ARKRTOS_PLATFORM_REBOOT_PORT=1`；`USE_SHELL` 在做存储链路诊断时
-临时置 0，收尾必须还原 1。
+`USE_BLK/USE_FS/USE_VFS/USE_VFS_LFS/USE_PROCFS=1`、`ARKRTOS_USE_SHELL=1`、
+`ARKRTOS_USE_LOG=1`、`ARKRTOS_USE_LOG_RING=1`、`ARKRTOS_PLATFORM_REBOOT_PORT=1`。
 
 板级新增：`drvblk.c`（RAM-NOR 512 KB，擦除粒度 4 KB，**写前必须为 0xFF 否则拒写**并计
 `rejected`）、`drvuart.c`（`SHELL_ENABLE` 前后两套设备 ops + 桩）、`arkrtos_dt.c` +
 `dts/qemu_riscv32.dts`（dtc_lite 生成的 9 节点）。
 
-**已实跑通过（无故障运行里，`[FS]` 段是 QEMU 实跑证据）**：`ram0` format/mount/写/读
-逐字节比对一致、`ls` 出 `hello.txt`、`/proc/version` 可读、不擦除覆写被拒
-（`rejected=1`）、计数器段 `written=1024 erases=2`；D-2 的 U 模式 PMP 负对照仍在
-（3× `mcause=5 mtval=0x02000000`、1× `mcause=2 mtval=0x30046073`，`from=U task=3`）。
-尺寸：text 170376 / data 112 / bss 580624 / dec 751112。
+**实跑通过（QEMU 真跑，`[FS]` 段逐行读数）**：`ram0` format/mount/写/读逐字节比对一致
+（`write rc=0 read rc=0 len=17 -> match`）、`ls` 出 `hello.txt`、`/proc/version` 可读、
+不擦除覆写被拒（`rejected=1`）、计数器段 `written=1024 rejected=1 erases=2`、`[FS] PASS`；
+D-2 的 U 模式 PMP 负对照仍在（3× `mcause=5 mtval=0x02000000`、1× `mcause=2
+mtval=0x30046073`，`from=U task=3`）。
+尺寸：text 171296 / data 112 / bss 582672 / dec 754080。
 
-**未关闭缺陷（必须如实标注：同一镜像的 FS 段会随机失败，`from=M`，不是 U 模式越权）**：
-约 2/8~5/8 的启动里 `[FS] format rc=-1 last_error=-1004`，故障点为
-`mcause=5 mtval=0x00000004 mepc=0x80011008 from=M task=5`，`addr2line` 落在
-`lfs.c:1620`（`lfs_dir_commitattr` 的 from-disk 分支，编译器把 `disk->block/off` 的
-load 提出循环 ⇒ 即使 size=0 也会解引用 `buffer=NULL`）。触发条件实测为
-「FS 任务被切走」（持调度锁时不复现）。已排除项与手法见下表，结论是**根因未定**，
-不得把这轮读数当成「存储栈已验证通过」。
+#### 3.12.1 随机 M 模式故障：根因与本轮修复
 
-| 已排除的假说 | 做法 | 读数 |
+**现象**：同一镜像约 40%~60% 的启动里 `[FS] format rc=-1 last_error=-1004`，故障点是
+`mcause=5 mtval=0x00000004 from=M task=5`，`mepc` 落在 `lfs_dir_commitattr` 的
+from-disk 分支（`const struct lfs_diskoff *disk = buffer;` 解引用 `NULL`）。
+
+**根因（已闭环）**：`g_fs.stream.cfg` 悬空。
+
+1. `arkrtos_fs_open_write()` → `fs_stream_open()` 里 `struct lfs_file_config fcfg;` 是
+   **栈局部变量**，`fcfg.attr_count = 0` 写得好好的；
+2. `lfs_file_opencfg()` 不复制 config，只存指针：`file->cfg = &fcfg`（`g_fs.stream` 是
+   **跨调用存活**的对象，config 是**不跨调用存活**的栈变量）；
+3. `fs_stream_open()` 返回后该指针指向已弹出的栈帧；`write_next` / `close_write` 的更深
+   调用把同一段栈区覆盖成自己的局部量与返回值；
+4. `close_write → lfs_file_close → lfs_file_sync_` 里
+   `LFS_MKATTRS({...}, {LFS_MKTAG(LFS_FROM_USERATTRS, file->id, file->cfg->attr_count),
+   file->cfg->attrs})` 读到的 `attr_count` 已是别人的残留值（本轮实测 **`0xffffffac` =
+   `-84` = `LFS_ERR_CORRUPT`**，即某次调用的返回值）；
+5. `LFS_MKTAG` 只做 `type<<20 | id<<10 | size` 的移位或、**不掩码**，垃圾高位把 tag 的
+   bit31 带上来；bit31 是 traverse 内部给 from-disk 用的标记，于是这条「用户属性」被当成
+   from-disk 项，`buffer`（`cfg->attrs == NULL`）被当 `lfs_diskoff*` 解引用 ⇒ `mtval=0x4`。
+6. 「随机」的来源：`attr_count` 是别的调用的栈残留，其最高位是否被置上取决于当时栈上写了
+   什么（错误码 `-84`、`0xFFFF...` 之类很常见），所以表现为时好时坏；`attr_count` 恰为 0
+   的启动就正常。同理，**加任何打印/探针都会改变这段栈的历史**，故障率随之漂移——这不是
+   「Heisenbug 不能诊断」，而是「症状取决于栈残留」。
+
+**取证链（全部为 RAM-only 探针 + 故障路径事后打印，不改变非故障路径时序）**：
+
+| 观测 | 读数 | 结论 |
 |---|---|---|
-| FS 任务自身栈溢出 | `FS_STACK_WORDS` 1024→4096 字 | 8 次仍 2/8 故障 |
-| Shell 并发 | `ARKRTOS_USE_SHELL=0` | 仍复现 |
-| 中断保存/恢复丢寄存器 | 逐条核对 `trap_entry` 31 个寄存器对称 | 对称、无缺 |
-| `lfs_dir_traverse` 显式栈越界 | 零打印计数器 | `maxsp=0 oob=0 popoob=0`（从未 push） |
-| 相邻任务栈向下越界写坏 FS 栈顶 | `s_stack_rx` 2 KB→4 KB（`nm` 显示它紧贴 `s_stack_fs` 之上，被破坏的 `attrs` 在 `s_stack_fs+3432`） | **5/8 仍故障，同一指令同一 mtval** ⇒ 不成立 |
+| `lfs_dir_commitattr` 入口 | `tag=0xffffffac buf=0x00000000 ptag=0x20100411` | 坏 tag 已带 bit31，buffer 为 NULL |
+| 同一 `attrs` 指针逐层扫描位标记 | `bm=0x3f`（commit/orphaning/relocating/…全置位） | 坏值在 `lfs_dir_commit` **入口**就存在，不是提交过程中被踩 |
+| `lfs_dir_commit` 入口快照 | `c1=0xffffffac catt=0x80190310 cn=2` 且 `cat=10 == commitattr_n` | 同一数组、同一次提交，**构造时就错** |
+| `lfs_file_sync_` 入口快照 | `ffile=0x8010be60 fac=0xffffffac fcfg=0x801901b4 fid=1` | `ffile` 是 `&g_fs.stream`；`cfg->attr_count` 在 sync 入口已是垃圾 |
+| 地址比对 | `fcfg=0x801901b4` 落在 `s_stack_fs`(0x8018f40c–0x8019040c) 之内 | `file->cfg` 指向 **FS 任务栈**上的一个已失效帧 |
+| 反汇编 `lfs_file_sync_` | `lw a2,80(s0)`（`file->cfg`）→ `lw a4,8(a2)`（`attr_count`）→ `or a4,a4,0x10200...` | 垃圾高位经无掩码的 `LFS_MKTAG` 直接进 tag |
 
-**Heisenbug 纪律（本轮最大教训）**：任何在 `lfs.c` / `main.c` 里加打印或加 `if` 都会让
-故障消失（-O0 全量构建 3/3 PASS、加计数器 5/5 PASS、gdb 下 PASS）。因此诊断只能走
-**不改变时序**的手段：`nm`/`addr2line` 静态分析、故障路径事后 dump 全局、调度锁/关中断
-对照，禁止「加打印再看一次」。下一个方向：`attrs` 位于 `s_stack_fs+3432`，即帧内较浅
-的位置，而写坏它的必须是**向高地址方向的越界写**（栈向低增长）或 **sp 恢复到 attrs
-之上**的路径，需在 `arkrtos_sched_activate` 的 `stack_peak/bottom` 与 trap 帧摆放上继续查。
+**修复**（`kernelsrc/src/arkrtos_fs.c`）：把 stream 的 `struct lfs_file_config` 放进
+`g_fs`（新成员 `stream_cfg`，紧邻 `stream` 声明），`fs_stream_open()` 用
+`struct lfs_file_config *fcfg = &g_fs.stream_cfg;` 并传 `fcfg`。这样 config 与 stream
+同寿命（两者都在 `g_fs` 里），`lfs_file_close → lfs_file_sync_` 读到的 `attr_count` 恒为 0，
+构造出的 tag 为 `0x10200400`（无 bit31）⇒ 走 from-memory 分支、写 0 字节、不解引用 NULL。
+
+注意：`write_file` / `read_file` / `truncate` / `read_at` 等处的 `fcfg` 是栈局部变量，
+但**开与关在同一帧内**（`opencfg` → … → `lfs_file_close` 都在函数返回前完成），指针不会
+跨越返回，因此不构成同类缺陷；只有 stream（`open_*` 与 `close_*` 分属不同调用）会悬空。
+
+**验证**（同一台机、同一二进制）：
+
+| 构建 | 运行次数 | 结果 |
+|---|---|---|
+| 修复前（SHELL=1，无探针） | 8 | 5 FAIL |
+| 修复前（各档探针） | 14~20 | 3~7 FAIL（故障率随探针漂移） |
+| 修复后 + 探针仍在（用于确认 `fac`） | 20 | **20/20 PASS**，`hit` 恒 0 |
+| 修复后（探针已全部清理，终版） | 20 | **20/20 PASS**，`[FS] format rc=0` 全数 |
+
+**三条可复用教训**：
+
+1. **`lfs_file_opencfg` 的 `cfg` 是「借指针」不是「拷贝」**。任何 `file` 对象的寿命长于
+   当次函数调用，`cfg` 就必须是 static/成员，不能是栈局部。
+2. **故障率随探针漂移 ≠ 探针不可用**。正确的用法是「探针只写 RAM，故障路径事后 dump」，
+   并把「同一个指针 / 同一个序号」作为事件对齐手段（本轮用 `cat == commitattr_n` 把两次
+   观测锁成同一次提交，才没有被随机性带偏）。
+3. **`LFS_MKTAG` 不做掩码**：它把 `size` 直接或进 tag，而 tag 的 bit31 另有语义（from-disk）。
+   所以任何进 `LFS_MKTAG` 的 `size/attr_count` 一旦是垃圾，症状是「解引用 NULL」而不是
+   「数值不对」——排错时要先怀疑「tag 的输入量」，再怀疑「数组被踩」。
 
 ## 4. 已知限制（明确不覆盖的部分）
 
