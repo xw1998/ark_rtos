@@ -49,6 +49,23 @@ extern "C" {
 #define ARKRTOS_SHELL_REDIRECT_BUF    1024
 #endif
 
+/* Exec fallback -------------------------------------------------------
+ * When an unknown command word looks like a path (/x, ./x, ../x), hand it to
+ * the platform before printing "command not found".  That is what makes a
+ * typed program name behave like a shell rather than like a menu.
+ *
+ * Tied to ARKRTOS_USE_ELF: the board header (or the generated autoconf) sets
+ * it, and every other build keeps the macro at 0, which compiles the call site
+ * out entirely - no size change, no link dependency on the loader.
+ * ------------------------------------------------------------------- */
+#ifndef ARK_SHELL_ENABLE_EXEC_FALLBACK
+#if defined(ARKRTOS_USE_ELF) && (ARKRTOS_USE_ELF == 1)
+#define ARK_SHELL_ENABLE_EXEC_FALLBACK 1
+#else
+#define ARK_SHELL_ENABLE_EXEC_FALLBACK 0
+#endif
+#endif
+
 /* Identity shown in the Linux-style prompt, and the working-directory limits. */
 #define ARK_SHELL_USER                "ark"
 #define ARK_SHELL_HOSTNAME            "arkrtos"

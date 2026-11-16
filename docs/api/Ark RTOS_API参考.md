@@ -14,6 +14,7 @@
 - [kernelsrc/include/arkrtos_cfg.h](#kernelsrcincludearkrtos_cfgh)（1 项）
 - [kernelsrc/include/arkrtos_crash.h](#kernelsrcincludearkrtos_crashh)（22 项）
 - [kernelsrc/include/arkrtos_dt.h](#kernelsrcincludearkrtos_dth)（11 项）
+- [kernelsrc/include/arkrtos_elf.h](#kernelsrcincludearkrtos_elfh)（5 项）
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
@@ -70,6 +71,7 @@
 - [kernelsrc/sdk/posix/unistd.h](#kernelsrcsdkposixunistdh)（13 项）
 - [kernelsrc/src/arkrtos_apppack.c](#kernelsrcsrcarkrtos_apppackc)（1 项）
 - [kernelsrc/src/arkrtos_cfg.c](#kernelsrcsrcarkrtos_cfgc)（1 项）
+- [kernelsrc/src/arkrtos_elf.c](#kernelsrcsrcarkrtos_elfc)（2 项）
 - [kernelsrc/src/arkrtos_eset.c](#kernelsrcsrcarkrtos_esetc)（1 项）
 - [kernelsrc/src/arkrtos_fs.c](#kernelsrcsrcarkrtos_fsc)（1 项）
 - [kernelsrc/src/arkrtos_guard.c](#kernelsrcsrcarkrtos_guardc)（1 项）
@@ -2376,6 +2378,58 @@ int arkrtos_dt_str_eq(const char *a, const char *b);
 ```
 
 **NULL-safe string equality; 1 when equal and both non-NULL. */**
+
+## kernelsrc/include/arkrtos_elf.h
+
+**从 VFS 里的 ELF64 可执行文件直接起一个隔离任务（M1：静态映射档）**
+这一层回答的是「文件即程序」：给定一个路径，校验它是本架构的
+ELF64、把 PT_LOAD 段读进 App 窗口、按 Linux 的约定铺好用户栈
+（sp 指向 argc），再以降到非特权的任务把它跑起来。
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**一次装载的可读结果（全部是实测值，不是推算值） */**
+
+### `int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[]);`
+
+```c
+int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[]);
+```
+
+**装载并起跑一个 ELF64 可执行文件**
+- `path`：VFS 路径（如 "/bin/hello"）
+- `argc`：参数个数（含 argv[0]）；0 表示自动补一个 argv[0] = path
+- `argv`：参数数组；传 0 时按 argc=0 处理
+**返回**：0 = 已起跑；负值 = ARKRTOS_ELF_ERR_*
+> 说明：起跑后立刻返回（不等待程序退出）。要等退出由调用者自己按任务号看。
+
+### `int32 arkrtos_elf_info(arkrtos_elf_info_t *p_out);`
+
+```c
+int32 arkrtos_elf_info(arkrtos_elf_info_t *p_out);
+```
+
+**上一次成功装载的读数；没有过成功装载时返回 ARKRTOS_ELF_ERR_PARAM */**
+
+### `int32 arkrtos_elf_running(void);`
+
+```c
+int32 arkrtos_elf_running(void);
+```
+
+**1 = 有一个 ELF 任务在跑（M1 单实例），0 = 窗口空着 */**
+
+### `const char *arkrtos_elf_error_name(int32 rc);`
+
+```c
+const char *arkrtos_elf_error_name(int32 rc);
+```
+
+**返回码的短名（只用于打印，不参与判定） */**
 
 ## kernelsrc/include/arkrtos_flashapp.h
 
@@ -7218,10 +7272,10 @@ static void la_frame_apply_priv(la_frame_word *frame)
 PRMD.PPLV 写 CRMD.PLV、按 PRMD.PIE 写 CRMD.IE，所以「回到
 PLV3 且开中断」= PPLV=3 + PIE=1 = 0x7。
 
-### `int32 arkrtos_port_paging_init(void) {`
+### `int32 arkrtos_port_paging_init(void)`
 
 ```c
-int32 arkrtos_port_paging_init(void) {
+int32 arkrtos_port_paging_init(void)
 ```
 
 **报告分页通路可用**
@@ -7235,7 +7289,7 @@ int32 arkrtos_port_paging_init(void) {
 ### `int32 arkrtos_port_paging_check(uint32 base, uint32 size, arkrtos_mpu_`
 
 ```c
-int32 arkrtos_port_paging_check(uint32 base, uint32 size, arkrtos_mpu_mem_t mem) {
+int32 arkrtos_port_paging_check(uint32 base, uint32 size, arkrtos_mpu_mem_t mem)
 ```
 
 **审计一段地址跨度是否被静态映射覆盖**
@@ -7250,7 +7304,7 @@ int32 arkrtos_port_paging_check(uint32 base, uint32 size, arkrtos_mpu_mem_t mem)
 ### `int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_`
 
 ```c
-int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_t mem) {
+int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_t mem)
 ```
 
 **追加一条动态映射**
@@ -7259,10 +7313,10 @@ int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_t mem) {
 「按需把任意物理页挂到任意 VA」的能力，而实际没有回收路径，
 那正是「看似权威的错答案」。
 
-### `void arkrtos_port_paging_flush(uint32 base, uint32 size) {`
+### `void arkrtos_port_paging_flush(uint32 base, uint32 size)`
 
 ```c
-void arkrtos_port_paging_flush(uint32 base, uint32 size) {
+void arkrtos_port_paging_flush(uint32 base, uint32 size)
 ```
 
 **让一段地址的翻译失效**
@@ -8376,6 +8430,36 @@ void arkrtos_task_stack_fill(uint32 *stack_bottom, uint32 stack_size)
 - `stack_size`：栈大小（字节）
 任务运行过程中会不断覆盖该图案，查询栈用量时扫描仍保持图案的
 连续区域即可得到“从未使用过”的栈空间，换算后即为峰值用量。
+
+## kernelsrc/src/arkrtos_elf.c
+
+**ELF64 装载器：把 VFS 里的可执行文件搬进 App 窗口并降权起跑**
+装载是**流式**的：先读 64 字节 ELF 头，再按 e_phoff 读程序头表，
+最后按每个 PT_LOAD 的 p_offset 用 arkrtos_vfs_read_at() 直接读进
+目标地址。整份镜像从不进临时缓冲——窗口本身就只有 2 MB，
+
+### `static int32 elf_check_header(const uint8 *h, unsigned long *p_entry, `
+
+```c
+static int32 elf_check_header(const uint8 *h, unsigned long *p_entry, unsigned long *p_phoff, uint16 *p_phnum, uint16 *p_phentsize) {
+```
+
+**校验 ELF 头，把 entry / phoff / phnum / phentsize 取出来**
+> 说明：e_machine 单独返回 ERR_ARCH，是为了让「这是 x86 的 ELF」和
+「这不是 ELF」在日志里能分开——两者的修法完全不同。
+
+### `static int32 elf_build_stack(uint32 win_top, uint32 argv_start, int32 `
+
+```c
+static int32 elf_build_stack(uint32 win_top, uint32 argv_start, int32 argc, char *argv[], uint32 *p_sp) {
+```
+
+**把 argv 铺成 Linux 的形状，返回初始 sp**
+布局（地址从高到低）：
+字符串区（argv[i] 的字节）
+NULL(envp)、NULL(argv 结束)、argv[argc-1..0]、argc  <- sp
+字符串从窗口顶端往下写，数组紧贴在 argv_start 之上。
+**返回**：0 = 成功（*p_sp 有效）；否则为负错误码
 
 ## kernelsrc/src/arkrtos_eset.c
 

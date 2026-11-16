@@ -247,7 +247,13 @@ int32 arkrtos_paging_stats(uint32 *p_checked, uint32 *p_bad, uint32 *p_bad_base)
 - LA64 的 `iso=2` 说明**页表后端真的在跑**，不是「开关打开了、代码没接上」。
   这一位在改动前是 0（LA64 没有 MPU 实体，`USE_MPU=0`），bit0 一直是 FAIL——
   也就是说 LA64 在此之前**根本没有地址隔离后端**。
-- RV32 的 `2012860 B` 逐字节等量，是「默认档零变化」这条承诺的实测证据。
+- RV32 的逐字节等量，是「默认档零变化」这条承诺的实测证据。**读数更新
+  （2026-11-16）**：这份文档原先记的 `2012860 B` 是当时那一次构建的值；同一天在
+  `127ce6d` 上重新构建得到 `2012876 B`（工具链/构建日期差异，与该提交的行为无关），
+  本轮加入 `ARKRTOS_USE_ELF`（默认关）后为 `2012924 B`，`text` 只涨 12 B，来源是
+  `arkrtos_task_kill_internal` 里那条诊断闸门 `arkrtos_port_in_isr()==0u`
+  （修掉"推迟切换被误报成 switch did not take"），与 ELF 装载器无关
+  （ELF 关档时那一整个 TU 是空目标，`exec` 命令也不注册）。判据仍是**实测到字节**。
   这个读数在本轮中途曾经涨过 144 B，根因是一个没人调用的 `arkrtos_iso_backend()`
   探测接口——删掉它就回来了。**零变化的判据必须实测到字节，不能靠读代码。**
 - LA64 在 `USE_PAGING=0` 档的体积本轮**没有单独测量**（那一档在 LA64 上没有可用
@@ -262,6 +268,7 @@ int32 arkrtos_paging_stats(uint32 *p_checked, uint32 *p_bad, uint32 *p_bad_base)
 | 装载期跨度审计 + 计数读数（`arkrtos_paging_stats`） | **已做** |
 | `sec` 报 `iso=2`，与窗口后端 `iso=1` 区分 | **已做** |
 | App 在非特权态跑完整自检 | **已做**（LA64 QEMU `utest` 13/13） |
+| 把**可执行文件**装进用户窗口直接跑（`exec` / 敲路径，Linux 入口约定） | **已做 M1**（`ARKRTOS_USE_ELF=1`，单窗口 + 单实例；见 [MMU进程模型与ELF装载](MMU进程模型与ELF装载.md)）。它是"文件即程序"，**不是**进程 |
 | 每 App 一份页表 / 同 VA 多实例 | **未做**（当前单页表、ASID=0） |
 | 页帧分配器 | **未做** |
 | 缺页处理 | **未做** |

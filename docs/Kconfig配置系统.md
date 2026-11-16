@@ -112,7 +112,8 @@ py -3 tools/kconfig/menuconfig.py --defconfig config/arkrtos_defconfig
 所以它的合法组合由 C 侧 `arkrtos_config.h` 的三条 `#error` 兜住：无 TLB 却要分页 /
 与 `ARKRTOS_USE_MPU` 同开 / 分页但无特权级。都是硬报错，没有自动降级。
 `tools/paging_gate.py` 把这四条（默认档为 0 + 三条拒绝）变成可复跑的门禁，
-`tools/ci_gate.py` 的第 36 项就是它。
+`tools/ci_gate.py` 的第 36 项就是它；第 37 项是 `tools/elf_gate.py`（ELF64 可执行
+文件装载开关的同一套拨法，见 [MMU进程模型与ELF装载](MMU进程模型与ELF装载.md)）。
 
 ## 6. 数量限制
 

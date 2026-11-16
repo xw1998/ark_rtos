@@ -108,6 +108,18 @@
 #undef  ARKRTOS_USE_PRIV
 #define ARKRTOS_USE_PRIV             1
 
+/* ELF 装载器：打开后 shell 能直接把 ELF64 可执行文件当命令跑
+ * （`exec /bin/hello world`，或者直接敲 /bin/hello）。窗口就用 PLV3 探针
+ * 那 2 MB（硬件映射已经由 port 建好，装载器只往里拷），所以两个宏直接
+ * 指向 QEMU_APP_BASE/SIZE，不另立地址。
+ * 注意：M1 是单实例 + 共享地址空间，同一个窗口里同时只能跑一个程序；
+ * 每进程页表 / 同 VA 多实例 / 缺页都是 M2 的欠账，见
+ * docs/MMU进程模型与ELF装载.md。 */
+#undef  ARKRTOS_USE_ELF
+#define ARKRTOS_USE_ELF              1
+#define ARKRTOS_ELF_WINDOW_BASE      ARKRTOS_QEMU_APP_BASE
+#define ARKRTOS_ELF_WINDOW_SIZE      ARKRTOS_QEMU_APP_SIZE
+
 /* 本板没有 Cortex-M 的 AIRCR，复位由板级 arkrtos_board_reboot() 接管
  * （loongarch virt 也没有复位设备，那里只能明确报"做不到"）。 */
 #define ARKRTOS_PLATFORM_REBOOT_PORT 1
@@ -195,6 +207,19 @@
 #define ARKRTOS_USE_SECCHECK         1
 #undef  ARKRTOS_HW_SAFE
 #define ARKRTOS_HW_SAFE              1
+
+/* 软定时器服务任务的栈（字）。必须覆盖「最深 sp + 一整个陷阱帧 + 异常处理链」：
+ * 本 port 的陷阱帧直接压在被中断任务的栈上，一帧 256 B，C 处理链每层序言 128 B。
+ * 实测（2026-11-16，QEMU la64）：任务 5 = 软定时器服务任务，栈 0x304C30..0x304DB0
+ * （96 字 = 384 B），`task` 报 peak/low = 0x304C60，即休眠前已用掉 336 B、只剩 48 B；
+ * 它一旦被调度回来，第一个 tick 中断把帧写到 sp-256 = 0x304B60，帧内第 18 个字
+ * 正好落在 0x304BA8 = g_hwsafe_dev_n，把它写成了一个 trace 返回地址（0x0021BCA8），
+ * 之后 hwsafe_find_fn 拿它当循环上界，一路走到未映射的 0x01000000 触发 KERNEL refill
+ * ——表现为「第 2 次 exec /mnt/ram/hello 必崩」，与 ELF 装载器本身无关。
+ * 512 字 = 2 KB：把峰值 336 B、一帧 256 B、四层处理链（4x128 B）全部装下仍有余量。
+ * 换 64 位新端口时同样要给足，32 位端口（帧 128 B）保持 96 字以免改既有镜像基线。 */
+#undef  ARKRTOS_TIMER_TASK_STACK_WORDS
+#define ARKRTOS_TIMER_TASK_STACK_WORDS (512)
 
 /* 单核：SMP 关掉（QEMU 能给多核，后续做 SMP 验证时再开） */
 #undef  ARKRTOS_USE_SMP

@@ -1,0 +1,543 @@
+/**
+* @file arkrtos_elf.c
+* @brief ELF64 装载器：把 VFS 里的可执行文件搬进 App 窗口并降权起跑
+* @details 装载是**流式**的：先读 64 字节 ELF 头，再按 e_phoff 读程序头表，
+*          最后按每个 PT_LOAD 的 p_offset 用 arkrtos_vfs_read_at() 直接读进
+*          目标地址。整份镜像从不进临时缓冲——窗口本身就只有 2 MB，
+*          再备一份同尺寸的拷件既没必要，也会在 8 MB 内核 RAM 上挤掉别的东西。
+*
+*          为什么入口约定用 Linux 那一套（sp 指向 argc）而不是传 a0/a1：
+*          任务创建路径最后落到 arkrtos_task_stack_init()，它把初始 sp 设成
+*          stack_bottom + stack_size 并按 16 字节对齐。所以只要让
+*          「stack_size = argv 区起点 - 栈底」，初始 sp 就正好指向 argc。
+*          这样任何按 Linux crt 写的静态程序都不用为 Ark 改一行。
+*
+*          三条边界写死在这里，不做「尽力而为」：
+*            1. 只收 ET_EXEC 静态 ELF64（PT_INTERP 一律拒绝：本仓没有动态链接器，
+*               半跑起来的动态程序会在第一条 PLT 指令上给一个看不懂的 refill）；
+*            2. 段必须整段落在 [window_base, stack_bottom)：越过栈底就是覆盖
+*               自己的栈，那不是一个可以「再想想」的情况；
+*            3. p_filesz > p_memsz 直接拒绝——按 memsz 清零会把文件外的字节
+*               当成数据，按 filesz 拷又会写过段尾，两种猜法都是错的。
+*
+* @note 开关：ARKRTOS_USE_ELF。关闭时本文件是空目标（零体积零符号），
+*       打开时要求板级给出 ARKRTOS_ELF_WINDOW_BASE/SIZE，缺一个就 #error。
+* @author xw
+*/
+
+#include "arkrtos_config.h"
+
+#if (ARKRTOS_USE_ELF == 1)
+
+#include "arkrtos_elf.h"
+#include "arkrtos_task.h"
+#include "arkrtos_cfg.h"
+#include "arkrtos_vfs.h"
+
+/* ---------------------------------------------------------------- 编译期 */
+
+#ifndef ARKRTOS_ELF_WINDOW_BASE
+#error "ARKRTOS_USE_ELF=1 需要板级给出 ARKRTOS_ELF_WINDOW_BASE（可执行文件能落进去的地址）"
+#endif
+#ifndef ARKRTOS_ELF_WINDOW_SIZE
+#error "ARKRTOS_USE_ELF=1 需要板级给出 ARKRTOS_ELF_WINDOW_SIZE（这块窗口有多大）"
+#endif
+#if (ARKRTOS_USE_PRIV != 1)
+#error "ARKRTOS_USE_ELF=1 需要 ARKRTOS_USE_PRIV=1：ELF 程序必须以非特权任务起跑，否则隔离为空"
+#endif
+
+/* 栈与参数区从窗口顶端往下切。两者都可由板级覆盖，因为窗口大小是板级事实。 */
+#ifndef ARKRTOS_ELF_STACK_SIZE
+#define ARKRTOS_ELF_STACK_SIZE      (32u * 1024u)
+#endif
+#ifndef ARKRTOS_ELF_ARGV_SIZE
+#define ARKRTOS_ELF_ARGV_SIZE       (16u * 1024u)
+#endif
+#ifndef ARKRTOS_ELF_TASK_PRIORITY
+#define ARKRTOS_ELF_TASK_PRIORITY   (12u)
+#endif
+
+#define ARKRTOS_ELF_MAX_ARGS        (16u)
+#define ARKRTOS_ELF_MAX_ARG_LEN     (256u)
+#define ARKRTOS_ELF_MAX_PHNUM       (16u)
+
+/* ELF64 常量。只用得到的这几个，不引 <elf.h>：内核不依赖宿主头。 */
+#define ELF_EI_CLASS64              (2u)
+#define ELF_EI_DATA_LSB             (1u)
+#define ELF_TYPE_EXEC               (2u)
+#define ELF_MACHINE_LOONGARCH       (258u)
+#define ELF_PT_LOAD                 (1u)
+#define ELF_PT_INTERP               (3u)
+
+#define ELF64_EHDR_SIZE             (64u)
+#define ELF64_PHDR_SIZE             (56u)
+
+/* 小端读：本文件只服务 64 位 port（见下方 #error），unsigned long 即 64 位。 */
+#if !(defined(__LP64__) || defined(_LP64) || \
+      (defined(__SIZEOF_LONG__) && (__SIZEOF_LONG__ > 4)))
+#error "arkrtos_elf.c 只支持 64 位 port：ELF64 的字段宽度无法在 32 位 long 上表达"
+#endif
+
+static unsigned long elf_rd64(const uint8 *p)
+{
+    return ((unsigned long)p[0])
+         | ((unsigned long)p[1] << 8)
+         | ((unsigned long)p[2] << 16)
+         | ((unsigned long)p[3] << 24)
+         | ((unsigned long)p[4] << 32)
+         | ((unsigned long)p[5] << 40)
+         | ((unsigned long)p[6] << 48)
+         | ((unsigned long)p[7] << 56);
+}
+
+static uint32 elf_rd32(const uint8 *p)
+{
+    return ((uint32)p[0])
+         | ((uint32)p[1] << 8)
+         | ((uint32)p[2] << 16)
+         | ((uint32)p[3] << 24);
+}
+
+static uint16 elf_rd16(const uint8 *p)
+{
+    return (uint16)(((uint16)p[0]) | ((uint16)p[1] << 8));
+}
+
+static void elf_wr32(uint8 *p, uint32 v)
+{
+    p[0] = (uint8)(v & 0xFFu);
+    p[1] = (uint8)((v >> 8) & 0xFFu);
+    p[2] = (uint8)((v >> 16) & 0xFFu);
+    p[3] = (uint8)((v >> 24) & 0xFFu);
+}
+
+static void elf_wr64(uint8 *p, unsigned long v)
+{
+    elf_wr32(p, (uint32)(v & 0xFFFFFFFFu));
+    elf_wr32(p + 4, (uint32)((v >> 32) & 0xFFFFFFFFu));
+}
+
+/* 内核侧没有 libc：这三个小工具只在本文件用得到，不往外放。 */
+static uint32 elf_strlen(const char *s)
+{
+    uint32 n = 0u;
+
+    while(s[n] != '\0')
+    {
+        n++;
+    }
+    return n;
+}
+
+static void elf_memzero(uint8 *p, uint32 n)
+{
+    uint32 i;
+
+    for(i = 0u; i < n; i++)
+    {
+        p[i] = 0u;
+    }
+}
+
+static void elf_memcpy(uint8 *dst, const uint8 *src, uint32 n)
+{
+    uint32 i;
+
+    for(i = 0u; i < n; i++)
+    {
+        dst[i] = src[i];
+    }
+}
+
+/* ---------------------------------------------------------------- 状态 */
+
+/* M1 是单实例：窗口只有一块，两个程序同时在一个地址空间里跑没有任何意义。
+ * 这个变量记着「窗口现在归谁」，任务退出后由 arkrtos_elf_running() 懒清理。 */
+static int32 s_elf_task = 0;
+static arkrtos_elf_info_t s_elf_info;
+
+/* ---------------------------------------------------------------- 内部 */
+
+static int32 elf_read_exact(const char *path, uint8 *buf, uint32 len, uint32 off)
+{
+    uint32 got = 0u;
+    int32 rc;
+
+    if(len == 0u)
+    {
+        return ARKRTOS_ELF_OK;
+    }
+
+    rc = arkrtos_vfs_read_at(path, buf, len, off, &got);
+    if(rc < 0)
+    {
+        return ARKRTOS_ELF_ERR_FS;
+    }
+    /* 短读 = 文件比程序头声明的短。这不是「容错一下」的场景：
+     * 少读的字节会被当成上一个程序留下的数据执行。 */
+    if(got != len)
+    {
+        return ARKRTOS_ELF_ERR_FS;
+    }
+    return ARKRTOS_ELF_OK;
+}
+
+/**
+* @brief 校验 ELF 头，把 entry / phoff / phnum / phentsize 取出来
+* @note  e_machine 单独返回 ERR_ARCH，是为了让「这是 x86 的 ELF」和
+*        「这不是 ELF」在日志里能分开——两者的修法完全不同。
+*/
+static int32 elf_check_header(const uint8 *h, unsigned long *p_entry,
+                              unsigned long *p_phoff, uint16 *p_phnum,
+                              uint16 *p_phentsize)
+{
+    if((h[0] != 0x7Fu) || (h[1] != 'E') || (h[2] != 'L') || (h[3] != 'F'))
+    {
+        return ARKRTOS_ELF_ERR_FORMAT;
+    }
+    if((h[4] != ELF_EI_CLASS64) || (h[5] != ELF_EI_DATA_LSB))
+    {
+        return ARKRTOS_ELF_ERR_FORMAT;
+    }
+    if(elf_rd16(h + 18) != (uint16)ELF_MACHINE_LOONGARCH)
+    {
+        return ARKRTOS_ELF_ERR_ARCH;
+    }
+    if(elf_rd16(h + 16) != (uint16)ELF_TYPE_EXEC)
+    {
+        /* ET_DYN 需要按加载基址重定位所有绝对地址，本仓没有重定位器；
+         * 混进来只能得到一堆指向 0 的调用。 */
+        return ARKRTOS_ELF_ERR_FORMAT;
+    }
+
+    *p_entry     = elf_rd64(h + 24);
+    *p_phoff     = elf_rd64(h + 32);
+    *p_phentsize = elf_rd16(h + 54);
+    *p_phnum     = elf_rd16(h + 56);
+
+    if((*p_phentsize != (uint16)ELF64_PHDR_SIZE) ||
+       (*p_phnum == 0u) || (*p_phnum > (uint16)ARKRTOS_ELF_MAX_PHNUM))
+    {
+        return ARKRTOS_ELF_ERR_FORMAT;
+    }
+    return ARKRTOS_ELF_OK;
+}
+
+/**
+* @brief 把 argv 铺成 Linux 的形状，返回初始 sp
+* @details 布局（地址从高到低）：
+*            字符串区（argv[i] 的字节）
+*            NULL(envp)、NULL(argv 结束)、argv[argc-1..0]、argc  <- sp
+*          字符串从窗口顶端往下写，数组紧贴在 argv_start 之上。
+* @return 0 = 成功（*p_sp 有效）；否则为负错误码
+*/
+static int32 elf_build_stack(uint32 win_top, uint32 argv_start,
+                             int32 argc, char *argv[], uint32 *p_sp)
+{
+    uint32 str_low = win_top;
+    uint32 addrs[ARKRTOS_ELF_MAX_ARGS];
+    uint32 array_bytes;
+    uint32 i;
+    uint8 *p_array;
+
+    /* 先放字符串，并把每个字符串的最终地址记下来。
+     * 不能事后用「win_top 减长度累加」重算：8 字节对齐会额外下移，
+     * 重算出的地址与真正写入的位置差几个字节，程序读到的 argv[i]
+     * 就是别人字符串的后半截。 */
+    for(i = 0u; i < (uint32)argc; i++)
+    {
+        uint32 n = elf_strlen(argv[i]);
+
+        if(n >= ARKRTOS_ELF_MAX_ARG_LEN)
+        {
+            return ARKRTOS_ELF_ERR_PARAM;
+        }
+        str_low -= (n + 1u);
+        str_low &= ~0x7u;
+        elf_memcpy((uint8 *)(unsigned long)str_low, (const uint8 *)argv[i], n + 1u);
+        addrs[i] = str_low;
+    }
+
+    /* 数组：argc + argv[argc] + envp[0] + 一个冗余槽，全部按 8 字节。 */
+    array_bytes = 8u * ((uint32)argc + 3u);
+    if((argv_start + array_bytes) > str_low)
+    {
+        return ARKRTOS_ELF_ERR_LAYOUT;
+    }
+
+    p_array = (uint8 *)(unsigned long)argv_start;
+    elf_wr64(p_array, (unsigned long)(uint32)argc);
+    for(i = 0u; i < (uint32)argc; i++)
+    {
+        elf_wr64(p_array + 8u + (8u * i), (unsigned long)addrs[i]);
+    }
+    elf_wr64(p_array + 8u + (8u * (uint32)argc), 0ul);
+    elf_wr64(p_array + 8u + (8u * ((uint32)argc + 1u)), 0ul);
+
+    *p_sp = argv_start;
+    return ARKRTOS_ELF_OK;
+}
+
+/* ---------------------------------------------------------------- 对外 */
+
+int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[])
+{
+    uint8 hdr[ELF64_EHDR_SIZE];
+    uint8 phdr[ELF64_PHDR_SIZE];
+    unsigned long entry = 0ul;
+    unsigned long phoff = 0ul;
+    uint16 phnum = 0u;
+    uint16 phentsize = 0u;
+    uint32 win_base = (uint32)ARKRTOS_ELF_WINDOW_BASE;
+    uint32 win_top;
+    uint32 argv_start;
+    uint32 stack_bottom;
+    uint32 stack_bytes;
+    uint32 bytes = 0u;
+    uint32 segs = 0u;
+    uint32 sp = 0u;
+    uint32 i;
+    int32 rc;
+    int32 id;
+    char *argv_auto[1];
+
+    if((path == 0) || (path[0] == '\0'))
+    {
+        return ARKRTOS_ELF_ERR_PARAM;
+    }
+    if(argc < 0)
+    {
+        return ARKRTOS_ELF_ERR_PARAM;
+    }
+    if(argc > (int32)ARKRTOS_ELF_MAX_ARGS)
+    {
+        return ARKRTOS_ELF_ERR_PARAM;
+    }
+    if(arkrtos_elf_running() != 0)
+    {
+        return ARKRTOS_ELF_ERR_BUSY;
+    }
+
+    /* argv[0] 缺省 = 程序路径：Linux 的 shell 也这么补，
+     * 而程序自己按 argv[0] 判断「我是谁」是常见写法，不能给 0。 */
+    if((argc == 0) || (argv == 0))
+    {
+        argv_auto[0] = (char *)path;
+        argv = argv_auto;
+        argc = 1;
+    }
+    for(i = 0u; i < (uint32)argc; i++)
+    {
+        if(argv[i] == 0)
+        {
+            return ARKRTOS_ELF_ERR_PARAM;
+        }
+    }
+
+    win_top      = win_base + (uint32)ARKRTOS_ELF_WINDOW_SIZE;
+    argv_start   = (win_top - (uint32)ARKRTOS_ELF_ARGV_SIZE) & ~0xFu;
+    stack_bottom = argv_start - (uint32)ARKRTOS_ELF_STACK_SIZE;
+    if((stack_bottom <= win_base) ||
+       (argv_start <= stack_bottom) ||
+       (win_top <= argv_start))
+    {
+        /* 窗口小到连栈+参数区都放不下：这是板级配置错误，不是程序问题。 */
+        return ARKRTOS_ELF_ERR_LAYOUT;
+    }
+
+    rc = elf_read_exact(path, hdr, ELF64_EHDR_SIZE, 0u);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return rc;
+    }
+    rc = elf_check_header(hdr, &entry, &phoff, &phnum, &phentsize);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return rc;
+    }
+
+
+    /* 入口必须落在窗口内且 4 字节对齐：LoongArch 的指令永远是 4 字节。 */
+    if((entry < (unsigned long)win_base) ||
+       (entry + 4ul > (unsigned long)stack_bottom) ||
+       ((entry & 3ul) != 0ul))
+    {
+        return ARKRTOS_ELF_ERR_LAYOUT;
+    }
+
+    /* 第一遍：只校验。任何一段不合法都在**写坏字节之前**返回，
+     * 否则一个坏镜像会留下半个程序，下一次装载读到的是混合内容。 */
+    for(i = 0u; i < (uint32)phnum; i++)
+    {
+        unsigned long p_type;
+        unsigned long p_vaddr;
+        unsigned long p_filesz;
+        unsigned long p_memsz;
+
+        rc = elf_read_exact(path, phdr, ELF64_PHDR_SIZE,
+                            (uint32)phoff + (i * (uint32)phentsize));
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return rc;
+        }
+
+        p_type   = elf_rd32(phdr + 0);
+        p_vaddr  = elf_rd64(phdr + 16);
+        p_filesz = elf_rd64(phdr + 32);
+        p_memsz  = elf_rd64(phdr + 40);
+
+        if(p_type == (unsigned long)ELF_PT_INTERP)
+        {
+            /* 有解释器 = 动态链接。没有 ld.so，跑起来只会跳到 PLT 桩。 */
+            return ARKRTOS_ELF_ERR_FORMAT;
+        }
+        if(p_type != (unsigned long)ELF_PT_LOAD)
+        {
+            continue;
+        }
+        if(p_filesz > p_memsz)
+        {
+            return ARKRTOS_ELF_ERR_LAYOUT;
+        }
+        if((p_vaddr < (unsigned long)win_base) ||
+           ((p_vaddr + p_memsz) > (unsigned long)stack_bottom) ||
+           (p_vaddr > 0xFFFFFFFFul) || ((p_vaddr + p_memsz) > 0xFFFFFFFFul))
+        {
+            return ARKRTOS_ELF_ERR_LAYOUT;
+        }
+        segs++;
+    }
+
+    if(segs == 0u)
+    {
+        /* 没有 PT_LOAD 的 ELF 是合法的（目标文件/调试信息），但没有东西可跑。 */
+        return ARKRTOS_ELF_ERR_FORMAT;
+    }
+
+    /* 第二遍：真写。先 filesz 拷数据，再 memsz-filesz 清零（BSS）。
+     * 顺序不能反：清零写在拷贝之前会被后面的数据覆盖，写在之后才是对的。 */
+    bytes = 0u;
+    for(i = 0u; i < (uint32)phnum; i++)
+    {
+        unsigned long p_type;
+        unsigned long p_offset;
+        unsigned long p_vaddr;
+        unsigned long p_filesz;
+        unsigned long p_memsz;
+        uint8 *dst;
+
+        rc = elf_read_exact(path, phdr, ELF64_PHDR_SIZE,
+                            (uint32)phoff + (i * (uint32)phentsize));
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return rc;
+        }
+
+        p_type   = elf_rd32(phdr + 0);
+        if(p_type != (unsigned long)ELF_PT_LOAD)
+        {
+            continue;
+        }
+        p_offset = elf_rd64(phdr + 8);
+        p_vaddr  = elf_rd64(phdr + 16);
+        p_filesz = elf_rd64(phdr + 32);
+        p_memsz  = elf_rd64(phdr + 40);
+        dst      = (uint8 *)(unsigned long)p_vaddr;
+
+        if(p_filesz > 0ul)
+        {
+            rc = elf_read_exact(path, dst, (uint32)p_filesz, (uint32)p_offset);
+            if(rc != ARKRTOS_ELF_OK)
+            {
+                return rc;
+            }
+            bytes += (uint32)p_filesz;
+        }
+        if(p_memsz > p_filesz)
+        {
+            elf_memzero(dst + p_filesz, (uint32)(p_memsz - p_filesz));
+        }
+    }
+
+    rc = elf_build_stack(win_top, argv_start, argc, argv, &sp);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return rc;
+    }
+
+    stack_bytes = argv_start - stack_bottom;
+
+    /* 关键一步：stack_size 取到 argv 区起点，初始 sp 就会落在 argc 上。
+     * 这里若改成「传栈大小 32 KB 再多给 16 KB」，sp 会指向参数数组中段，
+     * 程序读到的 argc 是某个字符串的字节——一个只在运行期才暴露的错答案。 */
+    id = arkrtos_task_register((void (*)(void))(unsigned long)entry,
+                               (uint32 *)(unsigned long)stack_bottom,
+                               stack_bytes,
+                               (uint8)ARKRTOS_ELF_TASK_PRIORITY, 0u);
+    if(id <= 0)
+    {
+        return ARKRTOS_ELF_ERR_NOMEM;
+    }
+
+    /* 注册出来的任务默认是特权任务；ELF 程序必须降权，否则隔离为空。 */
+    arkrtos_task_table[id - 1].is_priv = 0u;
+
+    s_elf_task = id;
+    s_elf_info.entry      = (uint32)entry;
+    s_elf_info.bytes      = bytes;
+    s_elf_info.segs       = segs;
+    s_elf_info.argc       = (uint32)argc;
+    s_elf_info.sp         = sp;
+    s_elf_info.stack_size = stack_bytes;
+    s_elf_info.task       = id;
+
+    return ARKRTOS_ELF_OK;
+}
+
+int32 arkrtos_elf_running(void)
+{
+    if(s_elf_task <= 0)
+    {
+        return 0;
+    }
+    /* 任务退出后 status 会回到 INVALID。这里懒清理，而不是要求退出路径
+     * 回调进来：M1 只有一个实例，代价是一次数组读。 */
+    if(arkrtos_task_table[s_elf_task - 1].status == ARKRTOS_TASK_INVALID)
+    {
+        s_elf_task = 0;
+        return 0;
+    }
+    return 1;
+}
+
+int32 arkrtos_elf_info(arkrtos_elf_info_t *p_out)
+{
+    if(p_out == 0)
+    {
+        return ARKRTOS_ELF_ERR_PARAM;
+    }
+    if(s_elf_info.task <= 0)
+    {
+        return ARKRTOS_ELF_ERR_PARAM;
+    }
+    *p_out = s_elf_info;
+    return ARKRTOS_ELF_OK;
+}
+
+const char *arkrtos_elf_error_name(int32 rc)
+{
+    switch(rc)
+    {
+    case ARKRTOS_ELF_OK:            return "ok";
+    case ARKRTOS_ELF_ERR_PARAM:     return "bad parameter";
+    case ARKRTOS_ELF_ERR_FS:        return "cannot read file";
+    case ARKRTOS_ELF_ERR_FORMAT:    return "not a static ELF64 executable";
+    case ARKRTOS_ELF_ERR_ARCH:      return "wrong machine (need LoongArch)";
+    case ARKRTOS_ELF_ERR_LAYOUT:    return "segment outside exec window";
+    case ARKRTOS_ELF_ERR_NOMEM:     return "no task slot for the program";
+    case ARKRTOS_ELF_ERR_BUSY:      return "exec window already in use";
+    default:                        return "unknown";
+    }
+}
+
+#endif /* ARKRTOS_USE_ELF */

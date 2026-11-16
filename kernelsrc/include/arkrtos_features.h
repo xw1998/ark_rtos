@@ -101,6 +101,15 @@
 #define ARKRTOS_USE_PAGING              0
 #endif
 
+/* ELF 装载器：0 = 关（空 TU，零体积），1 = 把 ELF64 可执行文件装进
+ * 板级给定的用户窗口并以 PLV3 任务起跑（Linux 式入口约定：sp 指向
+ * argc/argv）。要求 ARKRTOS_USE_PRIV == 1 且板级给出
+ * ARKRTOS_ELF_WINDOW_BASE / ARKRTOS_ELF_WINDOW_SIZE，缺一即 #error。
+ * 由 Kconfig 选择（config ARKRTOS_USE_ELF）。 */
+#ifndef ARKRTOS_USE_ELF
+#define ARKRTOS_USE_ELF                 0
+#endif
+
 /* MPU 上下文差异应用缓存：同一任务重复进入时不重写 MPU 寄存器 */
 #ifndef ARKRTOS_USE_MPU_APPLY_CACHE
 #define ARKRTOS_USE_MPU_APPLY_CACHE     1

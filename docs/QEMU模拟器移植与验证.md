@@ -1454,6 +1454,71 @@ fatal 转储（`kill_ret=`）。这条计数非 0，就等于坐实上面第二�
 RV32 连跑 12 轮全过、带诊断代码的 RV32 单跑仍 `9 matched, 9 passed`。
 **未复现不等于已修。**
 
+**后续（本轮收口）：这条诊断本身是误报，已加闸门。** `arkrtos_task_kill_internal()`
+在**中断上下文**里被调用时，那次 `ARKRTOS_SWITCH_TASK()` 是**推迟**执行的：
+LA64 的 port 在 `CRMD.IE=0`（trap 内）只置软切换请求，真正的 `ertn` 要等
+回到任务上下文。所以「切回来后 `arkrtos_current_task_id` 仍是自己」在
+`in_isr` 下是**正确行为**，不是缺陷。修法是把诊断本身收窄：
+
+```c
+if (arkrtos_current_task_id == id && arkrtos_port_in_isr() == 0u) { ... }
+```
+
+加闸门后 LA64 连跑 10 次 `exec`（11 次任务自杀）**零** `kill: switch did not take`。
+代价是 `text +12 B`（RV32 镜像 `2012876 -> 2012924 B` 的唯一来源），与 ELF 无关。
+**注意这只关掉了「误报」这条路，不等于 §5.13.4 那个 `era=0` 的间歇异常被解释了**
+——那是入口函数真的返回，根因仍未定，欠账照旧。
+
+### 5.14 软定时器栈装不下陷阱帧：KERNEL refill 的真根因（已修）
+
+**现象**：接上 ELF 装载器后，第 2 次 `exec /mnt/ram/hello` 必崩：
+
+```
+[LA64U] KERNEL refill (plv0) badv=0x01000000 era=0x0020b9d8
+```
+
+而串口最后打出来的那一行 `FATAL: ecode=0x0b era=0x02000558` **是陈旧的**：
+本移植把 `0xB` 当 SYS，`ESTAT` 是上一次 syscall 留下的读数；`TLB refill` 只更新
+`TLBRERA/TLBRBADV/TLBRPRMD`，不碰 `ESTAT`。按 FATAL 行的 `ecode` 去查会查错方向。
+
+**四步证据链**（每步都是读数，不是推断）：
+
+1. `nm` + `task` 命令：软定时器服务任务栈 `arkrtos_timer_task_stack` 在
+   `0x00304C30`，`ARKRTOS_TIMER_TASK_STACK_WORDS=96` ⇒ 384 B；
+   `task` 报 `peak/low = 0x00304C60` ⇒ 已用 336 B，**只剩 48 B**。
+2. 它一回场，第一个 tick 中断把 **256 B 陷阱帧写到 `sp - 256 = 0x00304B60`**。
+3. 帧内第 18 个字正好落在 `0x00304BA8` = `g_hwsafe_dev_n`，被写成
+   `0x0021BCA8`（某个返回地址）。
+4. 随后 ELF 程序 `open("ttyS0")` 走 `hwsafe_find_fn`，拿 `dev_n = 2210696`
+   当循环上界，一路走到**未映射**的 `0x01000000` ⇒ `KERNEL refill`。
+
+**反证**：把栈临时放大 8 倍（768 字）后连续 6 次 `exec` 不崩；96 字必崩。
+
+**修法**：不改共享 defconfig（那会动 RV32 镜像基线），按项目既有风格在**板级头**
+覆盖：
+
+```c
+#undef  ARKRTOS_TIMER_TASK_STACK_WORDS
+#define ARKRTOS_TIMER_TASK_STACK_WORDS (512)   /* 2 KB，LA64 帧 256 B */
+```
+
+`board/qemu_loongarch64/arkrtos_board_config.h` 取 `512`，
+`board/la32_generic/arkrtos_board_config.h` 取 `256`（LA32 帧 128 B）。
+`nm` 复核 `arkrtos_timer_task_stack` 变为 `0x800`。
+
+**可复用的口径**：**这个移植的陷阱帧落在任务栈上**，所以任何「会跑用户回调的
+小栈」必须按「峰值 + 一帧上下文 + 处理链」给足，而不是按「函数调用深度」给。
+`arkrtos_config.h` 里的 96 字是按 32 位端口（帧 128 B）定的，照搬到 64 位端口
+就正好差一帧。
+
+**修后读数**：连续 10 次 `exec`（11 次任务自杀、11 个 `bye`）**零 FATAL**；
+再跑一轮 `exec one two` + 5 次 `exec a<i> b` + 直接敲 `/mnt/ram/hello direct`，
+末态 `hwsafe: enabled, devs=0 owners=2 neutralized=8 ... last_owner=7`
+（修前 `devs` 是天文数字）。RV32 仍是 96 字，实测 `peak/low=0x80104A80`
+⇒ 已用 184 B / 剩 200 B，帧 128 B，处理链只剩 ~72 B —— **同型风险，本轮只登记
+不修**（改它会动 `2012924 B` 基线），见 [MMU进程模型与ELF装载](MMU进程模型与ELF装载.md)
+§6 欠账 U-12。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

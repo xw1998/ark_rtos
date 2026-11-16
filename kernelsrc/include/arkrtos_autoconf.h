@@ -190,6 +190,9 @@
 #ifndef ARKRTOS_USE_CRASH_LOG
 #define ARKRTOS_USE_CRASH_LOG 1
 #endif
+#ifndef ARKRTOS_USE_ELF
+#define ARKRTOS_USE_ELF 0
+#endif
 #ifndef ARKRTOS_USE_ESET
 #define ARKRTOS_USE_ESET 0
 #endif

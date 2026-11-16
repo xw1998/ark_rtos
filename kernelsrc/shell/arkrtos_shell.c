@@ -35,6 +35,7 @@
 #include "arkrtos_loader.h"
 #include "arkrtos_mini.h"
 #include "arkrtos_apprun.h"
+#include "arkrtos_elf.h"
 #if (ARKRTOS_USE_FLASHAPP == 1)
 #include "arkrtos_flashapp.h"
 #endif
@@ -5977,6 +5978,108 @@ static int cmd_hwsafe(int argc, char *argv[])
 }
 #endif /* ARKRTOS_HW_SAFE */
 
+#if (ARKRTOS_USE_ELF == 1)
+/* ============================================================
+ * exec：把 ELF64 可执行文件当命令跑
+ * @details 与 app run 的区别：那条走裸镜像 + 固定入口约定；这条走标准
+ *          ELF64，入口按 Linux 约定（sp 指向 argc/argv/NULL/envp NULL），
+ *          所以一个普通 -static 程序不需要为 Ark 改一行。
+ *          装载器只装了「文件进窗口 + 降权起任务」，地址空间仍是共享的
+ *          那一个（M1），所以这里同时只允许一个程序在跑。
+ * ============================================================ */
+
+/* 等程序结束的上限。程序自己卡死时不能让 shell 永远不回来，但也不能
+ * 杀掉它——那是用户的东西。到点就交还提示符，用 'task' 能看到还在跑。 */
+#define SHELL_EXEC_WAIT_MS     30000u
+#define SHELL_EXEC_POLL_MS     20u
+
+static int shell_exec_file(const char *path, int argc, char *argv[])
+{
+    arkrtos_elf_info_t info;
+    int32 rc;
+    uint32 waited = 0u;
+
+    if (arkrtos_elf_running() != 0)
+    {
+        ark_shell_printf("\r\n%s: busy - another program is still in the "
+                         "exec window (see 'task')\r\n", path);
+        return 1;
+    }
+
+    rc = arkrtos_elf_exec(path, argc, argv);
+    if (rc != ARKRTOS_ELF_OK)
+    {
+        /* 错误名来自装载器，不在 shell 里另写一套文案：同一个 rc 在两处
+         * 说法不一致时，读数就没法对账了。 */
+        ark_shell_printf("\r\n%s: %s (rc=%d)\r\n", path,
+                         arkrtos_elf_error_name(rc), (int)rc);
+        return 1;
+    }
+
+    if (arkrtos_elf_info(&info) == 0)
+    {
+        ark_shell_printf("\r\n[ELF] %s: %u B, %u segment(s), entry 0x%08X, "
+                         "sp 0x%08X, argc %u, task %d\r\n",
+                         path, (unsigned)info.bytes, (unsigned)info.segs,
+                         (unsigned)info.entry, (unsigned)info.sp,
+                         (unsigned)info.argc, (int)info.task);
+    }
+
+    /* 等它跑完。必须让出 CPU 而不是忙等：本函数在 shell 任务里，忙等期间
+     * 同优先级上下的程序任务拿不到时间片的概率全看调度器，读数会飘。 */
+    while (arkrtos_elf_running() != 0)
+    {
+        if (waited >= SHELL_EXEC_WAIT_MS)
+        {
+            ark_shell_printf("[ELF] %s: still running after %u ms, prompt is "
+                             "back (see 'task')\r\n",
+                             path, (unsigned)SHELL_EXEC_WAIT_MS);
+            return 0;
+        }
+        arkrtos_task_wait_internal(SHELL_EXEC_POLL_MS);
+        waited += SHELL_EXEC_POLL_MS;
+    }
+
+    /* 退出码还没有通道：用户态的 _exit(code) 走 SVC 0x1B 子 3，那个协议
+     * 没有 code 参数，TCB 里也没有字段接着。所以这里只说「结束了」，
+     * 不编一个看起来像退出码的数字。欠账记在
+     * docs/MMU进程模型与ELF装载.md。 */
+    ark_shell_printf("[ELF] %s: finished after %u ms\r\n", path, (unsigned)waited);
+    return 0;
+}
+
+static int cmd_exec(int argc, char *argv[])
+{
+    if (argc < 2)
+    {
+        sh_out("usage: exec <path> [args...]   run an ELF64 executable\r\n");
+        return 1;
+    }
+    return shell_exec_file(argv[1], argc - 1, &argv[1]);
+}
+
+/* 未知命令的回落点（ark_shell_eval.c 在报 command not found 之前调）。
+ * 只有长得像路径的词（/x、./x、../x）才接，其他原样返回 -1 让 shell
+ * 照旧报 command not found——否则打错的命令名会被当成文件名去开门。 */
+int ark_shell_exec_fallback(int argc, char *argv[])
+{
+    const char *p;
+
+    if ((argc <= 0) || (argv == 0) || (argv[0] == 0))
+    {
+        return -1;
+    }
+    p = argv[0];
+    if ((p[0] == '/') ||
+        ((p[0] == '.') && (p[1] == '/')) ||
+        ((p[0] == '.') && (p[1] == '.') && (p[2] == '/')))
+    {
+        return shell_exec_file(argv[0], argc, argv);
+    }
+    return -1;
+}
+#endif /* ARKRTOS_USE_ELF */
+
 static int register_kernel_commands(void)
 {
     int idx = g_cmd_count;
@@ -5986,6 +6089,7 @@ static int register_kernel_commands(void)
              + (ARKRTOS_USE_ARKVIM ? 1 : 0)
              + (ARKRTOS_USE_ARKC ? 1 : 0)
              + (ARKRTOS_USE_RTSTAT ? 1 : 0)
+             + (ARKRTOS_USE_ELF ? 1 : 0)
              + (ARKRTOS_USE_SECCHECK ? 1 : 0);
 
     if((idx + need) > ARK_SHELL_MAX_COMMANDS)
@@ -5997,6 +6101,10 @@ static int register_kernel_commands(void)
         "Kernel, partition and task capacity info", 1);
     g_cmd_table[idx++] = ARK_SHELL_CMD("app", cmd_app,
         "App slots: app [list | install <path> [slot] | start <slot> | stop <slot> | uninstall <slot>]", 4);
+#if (ARKRTOS_USE_ELF == 1)
+    g_cmd_table[idx++] = ARK_SHELL_CMD("exec", cmd_exec,
+        "Run an ELF64 executable: exec <path> [args...] (or just type /path/prog)", 8);
+#endif /* ARKRTOS_USE_ELF */
     g_cmd_table[idx++] = ARK_SHELL_CMD("drv", cmd_drv,
         "Driver slots: drv [list | start <slot> | stop <slot> | uninstall <slot>]", 4);
     g_cmd_table[idx++] = ARK_SHELL_CMD("dt", cmd_dt,

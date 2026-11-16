@@ -561,6 +561,20 @@ static int run_stage(ark_shell_t *shell, eval_tok_t *toks, int a, int b,
 
     cmd = ark_shell_find_command(xargv[0]);
     if (cmd == 0) {
+#if ARK_SHELL_ENABLE_EXEC_FALLBACK
+        /* A word that looks like a path is a program, not a typo: hand it to
+         * the platform, which loads and runs it.  <0 means it did not take it
+         * (not a path, or the loader is not built in), so the ordinary
+         * "command not found" still happens below. */
+        {
+            extern int ark_shell_exec_fallback(int argc, char *argv[]);
+            rc = ark_shell_exec_fallback(xargc, xargv);
+        }
+        if (rc >= 0) {
+            eval_set_status(shell, rc);
+            return rc;
+        }
+#endif
         ark_shell_printf("%s%s: command not found%s\r\n",
 #if ARK_SHELL_ENABLE_COLOR
                          ARK_SHELL_COLOR_ERROR,

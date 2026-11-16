@@ -96,6 +96,19 @@ static uint8 arkrtos_kernel_ptr_ram_ok(const void *p, uint32 len)
     {
         return 1u;
     }
+#if (ARKRTOS_USE_ELF == 1)
+    /* ELF 程序窗口也是"用户可见 RAM"：
+     * 装载器把程序放在 SLOT_RAM 之外的用户页里（LA64 = 0x02000000 的 2 MB
+     * PLV3 窗口），它的栈和 .data 就在那里。少了这一条，程序每次带参数块
+     * 调 SVC 都会被判"指针非法"返回 -1——而这不是安全问题，是漏认了一块
+     * 本来就属于用户的内存。窗口边界由板级给出，与装载器同一对宏，
+     * 装载器往外写不了、这里也不会放进内核 RAM。 */
+    if(arkrtos_kernel_in_window(start, end, ARKRTOS_ELF_WINDOW_BASE,
+                                ARKRTOS_ELF_WINDOW_SIZE) != 0u)
+    {
+        return 1u;
+    }
+#endif
     return 0u;
 }
 
@@ -3496,7 +3509,8 @@ void arkrtos_task_kill_internal(void)
         /* DIAG: reaching this line means the switch did not take and
          * the caller is about to return from the task entry (ra=0).
          * Kept as evidence only -- behaviour is unchanged. */
-        if((killed_id > 0) && (arkrtos_current_task_id == killed_id))
+        if((killed_id > 0) && (arkrtos_current_task_id == killed_id) &&
+           (arkrtos_port_in_isr() == 0u))
         {
             arkrtos_kill_ret_cnt++;
             ARKRTOS_LOGI("TASK", "kill: switch did not take (id=%d) -> entry returns",

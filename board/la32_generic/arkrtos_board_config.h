@@ -187,4 +187,12 @@
 #undef  ARKRTOS_USE_SMP
 #define ARKRTOS_USE_SMP              0
 
+/* 软定时器服务任务的栈（字）。本 port 的陷阱帧压在被中断任务的栈上，
+ * 一帧 128 B（arkrtos_context.S: addi.w $sp,$sp,-128），C 处理链每层序言 128 B。
+ * 96 字 = 384 B 撑不住「深层休眠 sp + 一帧 + 处理链」，一旦溢出会向下踩坏紧邻
+ * 的静态量（LA64 上就因此把 g_hwsafe_dev_n 写成 trace 返回地址，见
+ * docs/MMU进程模型与ELF装载.md 的排查记录）。给 256 字 = 1 KB。 */
+#undef  ARKRTOS_TIMER_TASK_STACK_WORDS
+#define ARKRTOS_TIMER_TASK_STACK_WORDS (256)
+
 #endif /* __ARKRTOS_BOARD_CONFIG_H__ */

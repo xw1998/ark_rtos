@@ -125,6 +125,7 @@ SRCS_C := $(KERNEL_SRCS) \
 	board/qemu_loongarch64/drvuart.c \
 	board/qemu_loongarch64/arkrtos_bus_port.c \
 	example/qemu_loongarch64/main.c \
+	example/qemu_loongarch64/elf_demo.c \
 	example/qemu_loongarch64/libc_shim.c
 
 SRCS_S := \
@@ -135,6 +136,30 @@ OBJS := $(addprefix $(BUILD)/,$(addsuffix .o,$(basename $(SRCS_C) $(SRCS_S))))
 
 # 密钥头变了就重编：它被 arkrtos_features.h 间接包含。
 $(OBJS): $(SIGNKEY)
+
+# ELF 示例程序（hello.elf）：按窗口基址链接的标准 ELF64 静态可执行文件。
+# 它走的是装载器真正读的那条路（VFS 里的一个文件），所以链接基址必须落在
+# 板级给的窗口里；入口固定 _start，不链启动代码/libc。
+#
+# QEMU 没有宿主文件注入通道（ramfs 是启动时在 RAM 里 format 出来的），
+# 所以再把它转成 C 数组编进镜像，由演示任务写进 ramfs —— 数组只是送文件的
+# 手段，不是装载器的输入。
+HELLO_SRC := example/qemu_loongarch64/elf/hello.c
+HELLO_ELF := $(BUILD)/hello.elf
+HELLO_H   := $(BUILD)/hello_blob.h
+
+$(HELLO_ELF): $(HELLO_SRC)
+	@mkdir -p $(BUILD)
+	$(CC) $(ARCH_FLAGS) -O2 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
+	      -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	      -Wl,-Ttext=0x02000000 -Wl,-e,_start -Wl,--strip-all \
+	      -Wl,-z,max-page-size=4096 -o $@ $< ;
+
+$(HELLO_H): $(HELLO_ELF) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(HELLO_ELF) \
+	       --output $@ --name ark_example_hello ;
+
+$(BUILD)/example/qemu_loongarch64/elf_demo.o: $(HELLO_H)
 
 .PHONY: all clean run size disasm
 

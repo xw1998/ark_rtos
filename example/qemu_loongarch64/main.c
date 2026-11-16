@@ -42,7 +42,20 @@
 #include "arkrtos_guard.h"   /* 心跳窗口守卫（ARKRTOS_USE_KERNEL_GUARD） */     /* 跨复位崩溃日志（ARKRTOS_USE_CRASH_LOG） */
 #include "arkrtos_fs.h"
 #include "arkrtos_vfs.h"
+#include "arkrtos_elf.h"       /* ARKRTOS_USE_ELF：ELF64 装载器（M1） */
 #include "drvblk.h"
+
+/* PLV3 探针与 ELF 装载器抢同一块 2 MB 窗口（0x02000000）：
+ * 探针的代码/栈全在 .appprobe 里，而装载器要往同一页拷程序，先跑探针再
+ * 覆盖它等于让程序踩正在执行的代码。所以二选一——本板打开 ELF 装载器时
+ * 不注册探针任务，PLV3 的现场证据改由跑在 PLV3 的 ELF 程序给出
+ * （它只能走 SVC，读内核页会 PPI）。 */
+#define ARK_EXAMPLE_PLV3_PROBE   ((ARKRTOS_USE_PRIV == 1) && (ARKRTOS_USE_ELF == 0))
+
+/* 演示任务：把编进镜像的 hello.elf 写进 ramfs 再跑（见 elf_demo.c）。 */
+#if (ARKRTOS_USE_ELF == 1)
+extern int32 arkrtos_elf_demo_register(void);
+#endif
 
 /* 任务栈：LoongArch 没有硬件压栈，只有软件帧，512 字（4 KB）很宽裕。
  * 栈必须是静态的（QEMU 上也没有堆分配器可用）。 */
@@ -606,7 +619,7 @@ int main(void)
     int32 id_b;
     int32 id_fs;
     int32 id_shell;
-#if (ARKRTOS_USE_PRIV == 1)
+#if ARK_EXAMPLE_PLV3_PROBE
     int32 id_u;
 #endif
 
@@ -621,7 +634,7 @@ int main(void)
     /* 存储任务优先级低于 A/B：它是自检，不该抢占节拍/切换观测 */
     id_fs = arkrtos_task_register(task_fs, s_stack_fs, sizeof(s_stack_fs), 13u, 0u);
 
-    #if (ARKRTOS_USE_PRIV == 1)
+    #if ARK_EXAMPLE_PLV3_PROBE
     /* PLV3 探针。栈在 App 页（.appprobe）里，代码也在那里 ——
      * 注册时内核只按地址造帧，所以这两点都由链接脚本保证。 */
     id_u = arkrtos_task_register(la_app_task, s_app_stack, sizeof(s_app_stack), 12u, 0u);
@@ -631,6 +644,11 @@ int main(void)
          * 否则 port 会按 PLV0 放它下去，探针就都在内核态跑（假绿）。 */
         arkrtos_task_table[id_u - 1].is_priv = 0u;
     }
+    #endif
+
+    #if (ARKRTOS_USE_ELF == 1)
+    /* ELF 装载演示：优先级 14（比存储任务 13 低），等 ramfs 挂上再写文件。 */
+    (void)arkrtos_elf_demo_register();
     #endif
 
     arkrtos_port_irq_init();
@@ -693,11 +711,15 @@ int main(void)
     arkrtos_board_putu((uint32)id_shell);
     arkrtos_board_puts(" log=");
     arkrtos_board_putu((uint32)ARKRTOS_USE_LOG);
-    #if (ARKRTOS_USE_PRIV == 1)
+    #if ARK_EXAMPLE_PLV3_PROBE
     arkrtos_board_puts(" taskU=");
     arkrtos_board_putu((uint32)id_u);
+    #endif
+    #if (ARKRTOS_USE_PRIV == 1)
     arkrtos_board_puts(" app_base=");
     arkrtos_board_puthex(ARKRTOS_QEMU_APP_BASE);
+    arkrtos_board_puts(" elf=");
+    arkrtos_board_putu((uint32)ARKRTOS_USE_ELF);
     #endif
     #if (ARKRTOS_USE_CRASH_LOG == 1)
     arkrtos_board_puts(" crasharea=");
@@ -711,7 +733,7 @@ int main(void)
     arkrtos_board_putu(ARKRTOS_TICK_PERIOD_US);
     arkrtos_board_puts("\n");
 
-    #if (ARKRTOS_USE_PRIV == 1)
+    #if ARK_EXAMPLE_PLV3_PROBE
     if(id_u < 0)
     {
         arkrtos_board_puts("[boot] PLV3 probe task register FAILED, halted\n");
@@ -720,6 +742,10 @@ int main(void)
             ARKRTOS_WFI();
         }
     }
+    #endif
+    #if ((ARKRTOS_USE_PRIV == 1) && (ARKRTOS_USE_ELF == 1))
+    arkrtos_board_puts("[PRIV] PLV3 probe task skipped: ARKRTOS_USE_ELF owns "
+                       "the app window\n");
     #endif
 
     if((id_a < 0) || (id_b < 0) || (id_fs < 0) || (id_shell < 0))

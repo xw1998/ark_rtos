@@ -285,6 +285,35 @@ config ARKRTOS_MINI_EXIT_IS_HANDOVER
 	  crashes, kills and fault recovery always neutralise fully.
 	  Only meaningful with ARKRTOS_USE_MINIAPP.
 
+config ARKRTOS_USE_ELF
+	bool "ELF64 executable loader (exec)"
+	depends on ARKRTOS_USE_VFS && ARKRTOS_USE_PRIV
+	help
+	  Build kernelsrc/src/arkrtos_elf.c: read an ELF64 executable from the
+	  VFS, lay its PT_LOAD segments into the board-provided user window and
+	  start it as a PLV3 task with the Linux entry convention (sp points at
+	  argc / argv / NULL / NULL envp).  The shell then accepts
+	  "exec /bin/hello world" and, for a leading '/' or "./", runs the file
+	  directly.
+
+	  Off (default) compiles nothing: the image is byte-for-byte what it was
+	  before this option existed, and arkrtos_elf.h still declares the API
+	  (returning -1) so call sites need no #if.
+
+	  Requires ARKRTOS_ELF_WINDOW_BASE and ARKRTOS_ELF_WINDOW_SIZE from the
+	  board header (the loader does not guess address space) and a
+	  privileged kernel (ARKRTOS_USE_PRIV), because the program runs at
+	  PLV3 and the loader writes into its window from the kernel.
+
+	  Scope of this first milestone: one program at a time in that single
+	  static window, shared address space.  It refuses a second run with
+	  ERR_BUSY instead of queueing.  Per-process page tables, the same
+	  virtual address running twice, a page-frame allocator, ASID switching,
+	  demand paging and copy_from_user are the next milestone, written down
+	  in docs/MMU进程模型与ELF装载.md.  No dynamic linking: a PT_INTERP
+	  segment is rejected as a format error rather than faulting later on an
+	  unresolved PLT slot.
+
 config ARKRTOS_USE_APPPACK
 	bool "Relocatable image packer (four-pass diff)"
 	default n

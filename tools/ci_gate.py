@@ -1191,6 +1191,26 @@ def check_paging_switch():
     else:
         fail("paging", txt[-260:])
 
+def check_elf_loader():
+    """ELF64 executable loader (ARKRTOS_USE_ELF) must be wired, not decorative.
+
+    Same false-green shape as paging / seccheck / swap: the whole of
+    arkrtos_elf.c is wrapped in #if (ARKRTOS_USE_ELF == 1), so the default
+    build never compiles it.  tools/elf_gate.py compiles it for real both ways
+    (LA64 with the feature on, RV32 where the 64-bit guard must refuse), plus
+    a board probe with the window macros removed and a pin on the two wire
+    constants (EM_LOONGARCH=258, ET_EXEC=2) that decide what counts as an
+    executable at all.  A missing compiler is a FAIL, not a skip.
+    Not covered: runtime rejection of wrong machine / ET_DYN / out-of-window
+    segments -- those are QEMU readings, see docs/MMU进程模型与ELF装载.md §5.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "elf_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "ELF-GATE OK" in txt:
+        ok("elf", "default off + LA64 ON compiles (2 TUs) + 2 negative cases refused")
+    else:
+        fail("elf", txt[-260:])
+
 def check_features_switches():
     """Every gate in arkrtos_features.h must be declared in Kconfig.
 
@@ -1296,6 +1316,7 @@ def main(argv):
     check_sign_host()
     check_swap_syntax()
     check_paging_switch()
+    check_elf_loader()
     if do_build:
         check_builds(uv4)
 
