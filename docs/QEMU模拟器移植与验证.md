@@ -1506,6 +1506,47 @@ LoongArch32 精简指令集的 QEMU 分支 ——
 真接上它时，第一件事不是改代码，而是按 §6.8.5 的六组读数逐条验；
 验过之后 §6.7 那张「从 la64 搬来的」清单才能逐行划掉。
 
+#### 6.1.1 还有哪些 LA32 的 QEMU 载体（都是查来的源码事实，没有一条是本机读数）
+
+上面那份 la32r-QEMU 不是唯一的。下面四条是本轮逐个访问仓库/发布页核到的，
+**分成三档写清楚，不要把「有项目」读成「能跑」**：
+
+| 载体 | 是什么（已核事实） | 可执行性 |
+|---|---|---|
+| `gitee.com/loongson-edu/la32r-QEMU` | QEMU 派生，`VERSION` = `6.2.50`；分支 `la32_debug`（默认）/ `la32_release`；targets 有 `loongarch32-softmmu` 与 `loongarch32-linux-user`；机器 `ls3a5k32`（§6.1 那张表） | 有 Linux 预编译包（`v0.0.1-alpha` / `v0.0.2`），**没有 Windows 版** |
+| `github.com/loongson-community/qemu` 分支 `la32-user-exp` | QEMU **9.2.94**；在 `target/loongarch/cpu.c` 里新增 LA32/LA32R CPU 模型 `la32r` / `max32r` / `max32`（`CPUCFG1.ARCH` 置 0 或 1，`dtb_compatible` 为 `loongarch,la32r` / `loongarch,la32`）；`configs/targets/` 下**没有** `loongarch32-*.mak`，即 LA32 是跑在 `loongarch64-softmmu` 目标下的 CPU 模型；`hw/loongarch/virt.c` 未为 LA32 改动 | 只有源码（configure + ninja，需 Linux 构建环境），**无预编译、无 Windows 版** |
+| `github.com/sunhaiyong1978/Yongbao-Embedded` 发布页 | 0.15 提供 `qemu-x86_64-to-loongarch32` / `qemu-loongarch64-to-loongarch32`（各 4.8 MB，`qemu-user` 模式，binfmt + chroot）；0.16 另给 `…la32s_custom.qcow2` 与 `vmlinux-6.18.0_la32s.efi`（配 system 模式用）；0.18 无附件 | 二进制**只对 Linux x86_64 / LoongArch64**，**没有 Windows 版** |
+| `gitee.com/loongson-edu/la32r-Linux` | 支持 la32r 的 Linux 5.14 内核，README 声明可跑在 la32r-QEMU、chiplab/loongson-soc、全流程参考 SOC 三个平台 | 是内核不是模拟器；说明 la32r-QEMU 是被官方内核支持的运行目标 |
+
+旁证（说明这条路在上游是活的、不是孤例）：`binutils` 的 LA32 补丁
+（2025-06，`mengqinggang`）正文直接引 `sunhaiyong1978/CLFS-for-LoongArch32`
+的 `Qemu_For_LoongArch32-Simple.md` 作为「基于 qemu 的 LA32 Linux 系统」；
+`glibc` 的 LA32 补丁（2026-03，v5）写明 **LA32 tested by qemu-user and
+qemu-system**；内核侧 LA32 基本支持（Huacai Chen，`[PATCH V3 00/14]`，
+2025-11）已进主线讨论。工具链仓库：`cloudspurs/{gcc,binutils-gdb,glibc}`
+的 `la32` 分支。
+
+一条容易看走眼的差异：`la32-user-exp` 那条路是
+`qemu-system-loongarch64 -cpu max32 -m 256M -smp 1 -nographic`
+（CLFS 文档原命令，跑 **virt** 机器、挂 `vmlinux.efi`），**不是**
+`ls3a5k32`。本目标的地址常量（DRAM 从 `0x0`、镜像 `0x200000`、UART
+`0x1FE001E0`、BIOS `0x1c000000`）是按 `ls3a5k32` 定的，virt 的内存基址
+与装载路径不同；**要拿 `-cpu max32` 跑本目标，先按 §6.8.5 验地址，
+不能当成同一个载体**（此为读源码的判断，无运行读数）。
+
+再确认一次上游公版：QEMU master（`VERSION` = `11.1.90`）的
+`configs/targets/` 里仍**只有** `loongarch64-softmmu.mak`、
+`loongarch32-softmmu.mak` 是 404 —— 所以「LA32 系统模拟器」目前**只在
+上面两份 fork 里**，公版没有。
+
+结论（保持三档分法，不合并）：**有源码可编 2 份**（la32r-QEMU、
+la32-user-exp）、**有 Linux 预编译 1 套**（Yongbao-Embedded 的 qemu-user
+与 qcow2 镜像）、**本机可执行 0 个** —— 本机 `D:/env/tools/qemu/` 只有
+`qemu32`、`qemu9` 两个目录，`find` 到 `loongarch32` 的命中全是
+`D:/LoongIDE/la32-tool/bin/loongarch32-newlib-elf-*` 工具链，没有任何
+`qemu-system-loongarch32*`。要真跑，仍然得先有 Linux（WSL2 发行版或一台
+Linux 机）。
+
 ### 6.2 工具链与产物
 
 `D:/LoongIDE/la32-tool/bin/loongarch32-newlib-elf-gcc.exe`（GCC 8.3.0）。
