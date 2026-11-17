@@ -1294,6 +1294,46 @@
               <FilePath>..\..\..\..\..\kernelsrc\shell\arkrtos_shell.c</FilePath>
             </File>
             <File>
+              <FileName>arkrtos_shell_image.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\..\..\kernelsrc\shell\arkrtos_shell_image.c</FilePath>
+            </File>
+            <File>
+              <FileName>arkrtos_shell_diag.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\..\..\kernelsrc\shell\arkrtos_shell_diag.c</FilePath>
+            </File>
+            <File>
+              <FileName>arkrtos_shell_cfg.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\..\..\kernelsrc\shell\arkrtos_shell_cfg.c</FilePath>
+            </File>
+            <File>
+              <FileName>arkrtos_shell_fs.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\..\..\kernelsrc\shell\arkrtos_shell_fs.c</FilePath>
+            </File>
+            <File>
+              <FileName>arkrtos_shell_misc.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\..\..\kernelsrc\shell\arkrtos_shell_misc.c</FilePath>
+            </File>
+            <File>
+              <FileName>arkrtos_shell_mod.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\..\..\kernelsrc\shell\arkrtos_shell_mod.c</FilePath>
+            </File>
+            <File>
+              <FileName>arkrtos_shell_pmap.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\..\..\kernelsrc\shell\arkrtos_shell_pmap.c</FilePath>
+            </File>
+            <File>
+              <FileName>arkrtos_shell_ushell.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\..\..\kernelsrc\shell\arkrtos_shell_ushell.c</FilePath>
+            </File>
+            <File>
               <FileName>ark_shell.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\..\..\..\..\kernelsrc\shell\ark_shell\ark_shell.c</FilePath>

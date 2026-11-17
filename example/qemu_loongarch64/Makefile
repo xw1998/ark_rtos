@@ -130,6 +130,14 @@ SRCS_C := $(KERNEL_SRCS) \
 	kernelsrc/components/mdk_trace/mdk_trace_buff.c \
 	kernelsrc/components/mdk_trace/mdk_trace_arkrtos.c \
 	kernelsrc/shell/arkrtos_shell.c \
+	kernelsrc/shell/arkrtos_shell_cfg.c \
+	kernelsrc/shell/arkrtos_shell_diag.c \
+	kernelsrc/shell/arkrtos_shell_fs.c \
+	kernelsrc/shell/arkrtos_shell_image.c \
+	kernelsrc/shell/arkrtos_shell_misc.c \
+	kernelsrc/shell/arkrtos_shell_mod.c \
+	kernelsrc/shell/arkrtos_shell_pmap.c \
+	kernelsrc/shell/arkrtos_shell_ushell.c \
 	kernelsrc/shell/platform_arkrtos.c \
 	kernelsrc/shell/ark_shell/ark_shell.c \
 	kernelsrc/shell/ark_shell/ark_shell_commands.c \

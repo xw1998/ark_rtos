@@ -96,6 +96,7 @@ static void task_a(void)
     for(;;)
     {
         uint32 tick = arkrtos_kernel_get_tick();
+#if !defined(ARKRTOS_QEMU_DEMO_QUIET) || (ARKRTOS_QEMU_DEMO_QUIET == 0)
         /* 毫秒由节拍换算，不经 SVC：内核任务跑在内核态，SVC 是给 App 的
          * 入口；在调度器内部拿 SVC 换毫秒只是多一次 syscall 往返。 */
         uint32 ms   = (tick * ARKRTOS_TICK_PERIOD_US) / 1000u;
@@ -127,6 +128,7 @@ static void task_a(void)
             arkrtos_board_puts((ms_svc + 2u < ms || ms + 2u < ms_svc) ? " SVC_MISMATCH" : " svc_ok");
             arkrtos_board_puts("\n");
         }
+#endif
 
         /* 释放信号量：唤醒任务 B */
         (void)arkrtos_sem_post_internal(s_sem);
@@ -152,11 +154,13 @@ static void task_b(void)
             round++;
             s_b_loops++;
 
+#if !defined(ARKRTOS_QEMU_DEMO_QUIET) || (ARKRTOS_QEMU_DEMO_QUIET == 0)
             arkrtos_board_puts("[B] woke, round=");
             arkrtos_board_putu(round);
             arkrtos_board_puts(" tick=");
             arkrtos_board_putu(arkrtos_kernel_get_tick());
             arkrtos_board_puts("\n");
+#endif
         }
     }
 }

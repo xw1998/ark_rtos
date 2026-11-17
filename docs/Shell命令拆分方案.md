@@ -1,4 +1,4 @@
-# Shell 命令拆分方案（只读盘点，未实施）
+# Shell 命令拆分方案（已实施，2026-11-17）
 
 ## 一句话
 
@@ -91,7 +91,7 @@
 每一小步的验收：`env -u PYTHONHOME -u PYTHONPATH py -3 tools/ci_gate.py` 全部门禁通过 +
 Keil 工程 0 error + `help` 的命令集合与拆分前逐字相同 + `Code` 变化如实记账。
 
-## 7. 为什么现在不做
+## 7. 当时为什么先不做（本节是 2026-11-13 的判断；2026-11-17 已实施，见 §10）
 
 - 本机没有 DAP 探针（`pyocd list` 无设备），拆完只能证明「编译通过 + 门禁通过」，
   不能证明「每条命令在板上还一样」。这条限制与 SVC 拆分时相同，但 shell 的命令面更宽
@@ -117,3 +117,80 @@ Keil 工程 0 error + `help` 的命令集合与拆分前逐字相同 + `Code` �
 - `ci_gate` 全部门禁通过；Keil 全量 0 error；
 - `help` 输出的命令集合与拆分前逐字相同（排序也相同）；
 - `Code / RO-data / RW-data / ZI-data` 四个数都给出，变化写进本页或 `docs/欠账盘点.md`。
+
+## 10. 实施记录（2026-11-17 完成）
+
+动手时的主文件已经不是 §1 那个 6244 行快照——这一年里 SVC 拆分、`sec` / `utest` /
+`rt` / `pool` 等命令都加了进来，实际是 **7952 行**。所以行段按 7952 行重新切，
+但原则照旧：**按符号切，不照抄本文行号**。
+
+拆分脚本是 `build/split_shell.py`（`build/` 被忽略，不入库）。它只做三件事：
+按分节行段搬运；给**跨文件真的用到**的函数去掉 `static`（族内 helper 保持文件内
+可见，不把整份 shell 的名字灌进全局符号表）；把共享声明写进内部头。命令体逐字未改。
+
+| 文件 | 行数 | 负责 |
+|---|---|---|
+| `arkrtos_shell.c` | 569 | 控制台实例与栈、跨族小工具（`sh_out` / `parse_u32` / 名字表）、`register_kernel_commands()`、控制台任务 |
+| `arkrtos_shell_internal.h` | 205 | 内部头：包含 + feature fallback 宏 + 共享声明（67 个函数原型 + `g_shell` / `g_ushell`） |
+| `arkrtos_shell_ushell.c` | 313 | 用户命令注册表 + SVC 0x1A 跳板 |
+| `arkrtos_shell_image.c` | 796 | `info` / `app` / `drv` / `install` |
+| `arkrtos_shell_diag.c` | 1196 | `task` / `stack` / `sched` / `audit` / `guard` / `crash` / `fault` / `log` / `syncinfo` / `rt` / `sec` / `utest` |
+| `arkrtos_shell_cfg.c` | 420 | `pool` / `cfg` |
+| `arkrtos_shell_fs.c` | 2730 | `blk` / `fs` / `pwd` / `cd` / `df` / 整套 VFS 命令 |
+| `arkrtos_shell_misc.c` | 318 | `history` / `uname` / `free` / `ps` / `which` / `man` / `dmesg` / `hwsafe` |
+| `arkrtos_shell_mod.c` | 357 | `exec` / `wait` / `ld` / `lkup` / `modules` / `unld` |
+| `arkrtos_shell_pmap.c` | 1249 | `pmap` 全族 |
+
+### 10.1 行为等价怎么证明（不是"看起来一样"）
+
+1. **先把噪声关掉**：示例 `example/qemu_loongarch64/main.c` 的 `task_a` / `task_b`
+   周期打印包了一层 `#if !defined(ARKRTOS_QEMU_DEMO_QUIET) || (ARKRTOS_QEMU_DEMO_QUIET == 0)`
+   （默认未定义 ⇒ 行为零变化）。带 `-DARKRTOS_QEMU_DEMO_QUIET=1` 另建
+   `build/qemu_la64_quiet`，两次运行才可能逐行一致（已实测）。
+2. **37 条只读命令**跑一遍，转录逐行比较（`build/shell_regress_cmds.txt` +
+   `build/shell_cmp.py`）。比较器只做四件事：去 ANSI 转义、把 `[A]`/`[B]` 计时行
+   **连同换行**一起删（否则会留下 `bus in` 这类残片）、去提示符、丢空行。
+3. **只掩"天然会变"的部分**：hex 一律掩掉（镜像布局一变，任务表里的入口地址就整体
+   平移）；`info` / `task` / `stack` / `fault` / `syncinfo` / `trace dump` / `dmesg` /
+   `guard` 的数字也掩掉。
+4. **先证明判据本身有分辨力**：同一个镜像连跑两次也必须逐行相同。这一步抓到两条
+   真·噪声——`task` 的状态列会在 `WAIT` / `READY` 之间翻；`stack` 的水位一次一个数
+   （同一镜像两跑：task 3 报 2324 / 2180、task 5 报 3044 / 2708）。两条都按证据降级为
+   "只比结构"，**不是为了让结果变绿而放宽**。
+
+读数（拆分后 vs 拆分前基线，同一静音档）：
+
+- `SHELL-CMP OK: 37 条命令输出逐行相同`
+- `help` 的 59 条命令集合与顺序逐字相同（基线存 `build/help_baseline_cmds.txt`）
+
+### 10.2 体积（同配置前后对照）
+
+| | text | data | bss |
+|---|---|---|---|
+| 拆分前 | 367304 | 416 | 767508 |
+| 拆分后 | 366744 | 440 | 767508 |
+
+text **−560 B**、data **+24 B**、bss 不变。负号不是"优化"：跨 TU 之后内联决策与字符串
+合并的边界都变了（§2 已写过，纯搬运也会动布局），所以体积只记账，不作判据。
+
+### 10.3 门禁怎么跟着改（这一段比拆分本身重要）
+
+有 5 处门禁原本直接在 `kernelsrc/shell/arkrtos_shell.c` 里 grep 字符串做 pin。命令一搬家，
+这些 pin 就**一条也匹配不上、却仍然通过**——那是空转，不是覆盖。所以：
+
+- 新增 `tools/shell_src.py`（`rel_list()` 给出 `kernelsrc/shell/arkrtos_shell*.c` 全清单），
+  `elf_gate` / `shell_auth_gate` / `paging_gate` 的 pin 改成读**并集**；
+- `rtstat` / `seccheck` / `swap` 三道"编入档"改成把**每一个** shell 源文件都编一遍，
+  免得这一档编的只是个空壳；
+- `elf_gate` 的 F2 pin 从 `static int cmd_wait(...)` 放宽到 `int cmd_wait(...)`
+  （函数已跨文件可见，`static` 不可能还在）。判据本身没放松：仍在查 wait 按 INVALID
+  判结束、从 TCB 取码、区分"没上报过码"与"码是 0"，三条变异自检照跑。
+
+全量门禁：`44 check(s) passed, 0 failed, 0 skipped`。
+
+### 10.4 板端读数（如实）
+
+- 本机没有 DAP 探针：**上板验证未做**。本轮只到"QEMU 跑得起来 + 37 条命令输出逐行
+  相同 + 门禁全绿"。
+- `stack` 的 `watch it` 告警行不可作判据（见 §10.1 第 4 条）：三次读数里 task 5 的水位
+  在 2708 / 3044 / 3092 之间浮动，最差 75%，距 90% 警戒仍有 1004 B 余量。

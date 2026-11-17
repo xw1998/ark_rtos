@@ -59,6 +59,8 @@ import re
 import shutil
 import subprocess
 import sys
+
+import shell_src
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -283,7 +285,7 @@ def pin_i(auth, shell):
     init = _body(auth, "void arkrtos_shell_auth_init(")
     if "s_auth_locked      = 1" not in init:
         bad.append("I: init 没有把控制台置成锁定（开机即锁）")
-    task = _body(shell, "static void arkrtos_shell_task(")
+    task = _body(shell, "void arkrtos_shell_task(")
     if "arkrtos_shell_auth_init();" not in task:
         bad.append("I: shell 任务没有初始化登录状态")
     if "ark_shell_set_gate(&g_shell, arkrtos_shell_auth_gate)" not in task:
@@ -453,7 +455,8 @@ def main():
     mk = _src("example/qemu_loongarch64/Makefile")
     auth = _src(src_auth)
     evalsrc = _src(src_eval)
-    shell = _src(src_shell)
+    # Shell 已按命令族拆分：pin 读全部 shell 源文件的并集（见 tools/shell_src.py）。
+    shell = "\n".join(_src(rel) for rel in shell_src.rel_list(ROOT))
     gi = _src(".gitignore")
     rc, out = _run([git_exe(), "ls-files"])
     tracked = out.splitlines() if rc == 0 else []

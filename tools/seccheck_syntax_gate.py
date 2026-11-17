@@ -28,6 +28,8 @@ import shutil
 import subprocess
 import sys
 
+import shell_src
+
 from arkrtos_f427_env import SOFTBUS_TIER_DEFS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -78,7 +80,8 @@ DEFS_SHELL = DEFS + [
 
 TARGETS = [
     ("kernelsrc/src/arkrtos_sec.c", "cortex-m4", DEFS),
-    ("kernelsrc/shell/arkrtos_shell.c", "cortex-m4", DEFS_SHELL),
+    # Shell 已按命令族拆分：每一个 shell 源文件都编进档（防止命令搬家后空转）。
+] + [(rel, "cortex-m4", DEFS_SHELL) for rel in shell_src.rel_list(ROOT)] + [
 ]
 
 

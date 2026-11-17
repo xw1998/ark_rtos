@@ -34,6 +34,8 @@ import shutil
 import subprocess
 import sys
 
+import shell_src
+
 from arkrtos_f427_env import EXTRA_INCLUDES, SOFTBUS_TIER_DEFS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -83,7 +85,8 @@ TARGETS = [
     ("kernelsrc/src/arkrtos_task.c", "cortex-m4"),
     ("kernelsrc/src/arkrtos_mini.c", "cortex-m4"),
     ("kernelsrc/src/arkrtos_loader.c", "cortex-m4"),
-    ("kernelsrc/shell/arkrtos_shell.c", "cortex-m4"),
+    # Shell 已按命令族拆分：每一个 shell 源文件都编进档（防止命令搬家后空转）。
+] + [(rel, "cortex-m4") for rel in shell_src.rel_list(ROOT)] + [
     ("kernelsrc/port/arm/cortex-m3/arkrtos_port.c", "cortex-m3"),
     ("kernelsrc/port/arm/cortex-m4/arkrtos_port.c", "cortex-m4"),
     ("kernelsrc/port/arm/cortex-m7/arkrtos_port.c", "cortex-m7"),

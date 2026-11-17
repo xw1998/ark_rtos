@@ -140,6 +140,28 @@ ark@arkrtos:~$
 自测方法（PC 模拟器即可）：把回显字节抓下来按 VT100 渲染，输入 `ls` 后屏幕上应当
 是 `ark> ls`，而不是 `ark> s`；输入 `echo hi` 后回车，提示符只应出现一次。
 
+### 3.3 命令实现在哪个文件
+
+命令按族拆在 `kernelsrc/shell/`。`arkrtos_shell.c` 只留控制台本体、跨族小工具与
+**唯一的**命令注册点，其余各文件自负一族：
+
+| 文件 | 命令 |
+|---|---|
+| `arkrtos_shell.c` | 控制台任务、`register_kernel_commands()`、`sh_out` / `parse_u32` 等跨族小工具 |
+| `arkrtos_shell_image.c` | `info` / `app` / `drv` / `install` |
+| `arkrtos_shell_diag.c` | `task` / `stack` / `sched` / `audit` / `guard` / `crash` / `fault` / `log` / `syncinfo` / `rt` / `sec` / `utest` |
+| `arkrtos_shell_cfg.c` | `pool` / `cfg` |
+| `arkrtos_shell_fs.c` | `blk` / `fs` / `pwd` / `cd` / `df` / `mount` / `umount` / `ls` / `cat` / `rm` / `mkdir` / `rmdir` / `mv` / `cp` / `touch` / `stat` / `chmod` / `chown` |
+| `arkrtos_shell_mod.c` | `exec` / `wait` / `ld` / `lkup` / `modules` / `unld` |
+| `arkrtos_shell_pmap.c` | `pmap` |
+| `arkrtos_shell_misc.c` | `history` / `uname` / `free` / `ps` / `which` / `man` / `dmesg` / `hwsafe` |
+| `arkrtos_shell_ushell.c` | App 侧命令注册表与 SVC 0x1A 跳板（不注册具体命令） |
+| `arkrtos_shell_internal.h` | 上述文件之间**唯一**允许共享的内部头；只许 `arkrtos_shell*.c` 包含 |
+
+新增一条命令的落点 = 找到它的族文件，实现函数，然后**只在** `arkrtos_shell.c` 的
+`register_kernel_commands()` 里注册一次。命令表容量是固定数组，注册点集中在一处，
+溢出是静默写越界——所以宁可让 `need` 预算报错，也不要各文件各注册一份。
+
 ## 4. 典型操作
 
 ### 4.1 控制一个 App（不自启 + 随时退出）

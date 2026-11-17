@@ -135,6 +135,14 @@ SRCS := \
   kernelsrc/components/ark_softbus/port/ark_bus_hal_arkrtos.c \
   kernelsrc/shell/platform_arkrtos.c \
   kernelsrc/shell/arkrtos_shell.c \
+  kernelsrc/shell/arkrtos_shell_cfg.c \
+  kernelsrc/shell/arkrtos_shell_diag.c \
+  kernelsrc/shell/arkrtos_shell_fs.c \
+  kernelsrc/shell/arkrtos_shell_image.c \
+  kernelsrc/shell/arkrtos_shell_misc.c \
+  kernelsrc/shell/arkrtos_shell_mod.c \
+  kernelsrc/shell/arkrtos_shell_pmap.c \
+  kernelsrc/shell/arkrtos_shell_ushell.c \
   kernelsrc/shell/ark_shell/ark_shell.c \
   kernelsrc/shell/ark_shell/ark_shell_commands.c \
   kernelsrc/shell/ark_shell/ark_shell_eval.c \

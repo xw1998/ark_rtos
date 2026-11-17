@@ -56,6 +56,8 @@ import subprocess
 import sys
 import tempfile
 
+import shell_src
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
@@ -237,7 +239,8 @@ def main():
     text_taskc = _read("kernelsrc/src/arkrtos_task.c")
     text_elfc  = _read("kernelsrc/src/arkrtos_elf.c")
     text_elfh  = _read("kernelsrc/include/arkrtos_elf.h")
-    text_shell = _read("kernelsrc/shell/arkrtos_shell.c")
+    # Shell 已按命令族拆分：pin 读全部 shell 源文件的并集（见 tools/shell_src.py）。
+    text_shell = "\n".join(_read(rel) for rel in shell_src.rel_list(ROOT))
     text_user  = _read("kernelsrc/include/arkrtos.h")
     text_hello = _read("example/qemu_loongarch64/elf/hello.c")
 
@@ -282,7 +285,7 @@ def main():
 
     def pin_f2(shell_text, app_text):
         bad = []
-        if "static int cmd_wait(int argc, char *argv[])" not in shell_text:
+        if "int cmd_wait(int argc, char *argv[])" not in shell_text:
             bad.append("F2: shell 没有 cmd_wait")
         if 'ARK_SHELL_CMD("wait", cmd_wait' not in shell_text:
             bad.append("F2: wait 没有注册进命令表")

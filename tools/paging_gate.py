@@ -88,6 +88,8 @@ import os
 import shutil
 import subprocess
 import sys
+
+import shell_src
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -662,8 +664,7 @@ def main():
                 "kernelsrc/include/arkrtos_hal.h",
                 "kernelsrc/include/arkrtos_mpu.h",
                 "kernelsrc/include/arkrtos_elf.h",
-                "kernelsrc/src/arkrtos_elf.c",
-                "kernelsrc/shell/arkrtos_shell.c"):
+                "kernelsrc/src/arkrtos_elf.c") + tuple(shell_src.rel_list(ROOT)):
         if not os.path.isfile(os.path.join(ROOT, rel)):
             failures.append("E-M: 缺文件 %s" % rel)
 
@@ -674,7 +675,8 @@ def main():
         src_hal = _src("kernelsrc/include/arkrtos_hal.h")
         src_mpu = _src("kernelsrc/include/arkrtos_mpu.h")
         src_elf = _src("kernelsrc/src/arkrtos_elf.c")
-        src_sh = _src("kernelsrc/shell/arkrtos_shell.c")
+        # Shell 已按命令族拆分：pin 读全部 shell 源文件的并集（见 tools/shell_src.py）。
+        src_sh = "\n".join(_src(rel) for rel in shell_src.rel_list(ROOT))
         src_feats = _src("kernelsrc/include/arkrtos_features.h")
         src_kconf = _src("config/kconfig/Kconfig.features")
         src_board = _src("board/qemu_loongarch64/arkrtos_board_config.h")
