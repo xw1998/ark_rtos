@@ -478,6 +478,27 @@ uint32 arkrtos_port_paging_space_count(void);
  *           另一条陈旧条目」——地址空间切换静默失效时就靠它定位。 */
 uint32 arkrtos_port_paging_lookup(uint32 va, uint32 *index, uint32 *ppn, uint32 *ps);
 
+/** @brief Allocate a run of contiguous 4 KB page frames (U-3)
+ *  @param count  frames wanted (> 0)
+ *  @param p_base on success, physical base of the first frame
+ *  @return 0 = allocated; -1 = bad argument; -2 = no run that long
+ *  @details Bookkeeping only: it does not install any mapping and does not
+ *           touch the App window.  See ARKRTOS_USE_PAGING_FRAMES. */
+int32 arkrtos_port_paging_frame_alloc(uint32 count, uint32 *p_base);
+
+/** @brief Return a run of contiguous 4 KB page frames
+ *  @return 0 = returned; -1 = outside the pool / unaligned / bad count;
+ *          -3 = the run contains a frame that was not allocated (nothing moved)
+ *  @details All-or-nothing: one stray free frame refuses the whole run, so a
+ *           frame can never end up owned by two callers. */
+int32 arkrtos_port_paging_frame_free(uint32 base, uint32 count);
+
+/** @brief Total frames in the board pool (0 when there is none) */
+uint32 arkrtos_port_paging_frame_total(void);
+
+/** @brief Frames currently allocated from the board pool */
+uint32 arkrtos_port_paging_frame_used(void);
+
 #else
 
 #define arkrtos_port_paging_init()                 (-1)
@@ -492,6 +513,10 @@ uint32 arkrtos_port_paging_lookup(uint32 va, uint32 *index, uint32 *ppn, uint32 
 #define arkrtos_port_paging_space_count()          (1u)
 #define arkrtos_port_paging_lookup(va, index, ppn, ps) (0u)
 #define arkrtos_port_paging_flush(base, size)
+#define arkrtos_port_paging_frame_alloc(count, p_base)  (-1)
+#define arkrtos_port_paging_frame_free(base, count)     (-1)
+#define arkrtos_port_paging_frame_total()               (0u)
+#define arkrtos_port_paging_frame_used()                (0u)
 
 #endif
 

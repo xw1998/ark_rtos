@@ -198,6 +198,33 @@ int32 arkrtos_paging_bind_task(arkrtos_task_t *p_task, uint32 space);
 /** @brief Space a task is bound to (0 when unknown) */
 uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task);
 
+/* ------------------------------------------------------------------
+ * 4 KB page-frame pool (U-3)
+ *
+ * The pool is a board-given run of physical memory (ARKRTOS_QEMU_FRAME_BASE
+ * / COUNT) that the port book-keeps in a bitmap and maps identity so the
+ * kernel can reach it.  This layer is deliberately thin: it forwards to the
+ * port and turns "there is no pool" into the same refusal codes, so a caller
+ * never has to know which build it is in.  It does NOT install mappings and
+ * does NOT touch the App window - turning a frame into an App-visible page is
+ * a later stage with its own switch.
+ *
+ *   alloc(count, &base)  0 / -1 bad arg / -2 no run that long
+ *   free(base, count)    0 / -1 outside pool / -3 run has a free frame
+ * ------------------------------------------------------------------ */
+
+/** @brief Allocate a run of contiguous 4 KB page frames */
+int32 arkrtos_paging_frame_alloc(uint32 count, uint32 *p_base);
+
+/** @brief Return a run of contiguous 4 KB page frames (all-or-nothing) */
+int32 arkrtos_paging_frame_free(uint32 base, uint32 count);
+
+/** @brief Total frames in the board pool (0 when there is none) */
+uint32 arkrtos_paging_frame_total(void);
+
+/** @brief Frames currently allocated from the board pool */
+uint32 arkrtos_paging_frame_used(void);
+
 #else
 
 #define arkrtos_paging_stats(p_checked, p_bad, p_bad_base)   (-1)
@@ -217,6 +244,10 @@ uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task);
 #define arkrtos_paging_space_activate(space)                 (-1)
 #define arkrtos_paging_bind_task(p_task, space)              (-1)
 #define arkrtos_paging_space_of(p_task)                      (0u)
+#define arkrtos_paging_frame_alloc(count, p_base)            (-1)
+#define arkrtos_paging_frame_free(base, count)               (-1)
+#define arkrtos_paging_frame_total()                         (0u)
+#define arkrtos_paging_frame_used()                          (0u)
 
 #endif
 

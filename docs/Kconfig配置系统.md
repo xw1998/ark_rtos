@@ -130,6 +130,15 @@ tag 签名门，含内核 MAC 与 Python 实现的逐字节对拍、开档/关�
 拆成独立 gate 会把同一份「八处必须同时存在」的断言写两遍。见
 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.20。
 
+同样不新增 ci_gate 项的是 `ARKRTOS_USE_PAGING_FRAMES`（U-3 第一阶 4 KB 页帧池，
+缺省 n，只有 `board/qemu_loongarch64` 开 1）。它在 Kconfig 里是
+`depends on ARKRTOS_USE_PAGING` 的 bool，但真正的合法性（`ARKRTOS_USE_PAGING == 1`、
+板级必须给 `ARKRTOS_QEMU_FRAME_BASE` / `ARKRTOS_QEMU_FRAME_COUNT`、基址 8 MB 对齐、
+帧数 1..2048）由 port 里的四条 `#error` 兜住。门禁挂在已有的 `tools/paging_gate.py`
+的 **R pin**（带两条变异自检），因为这几项横跨 features / Kconfig / 板级 / port / hal /
+mpu / paging.c / shell 七处，「缺一处就静默不生效」正是要用 pin 抓的东西。
+见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.21。
+
 ## 6. 数量限制
 
 原先散在头文件里写死的上限（任务表、同步对象表、队列、定时器、设备表、socket、

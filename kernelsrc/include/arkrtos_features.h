@@ -127,6 +127,20 @@
 #define ARKRTOS_USE_EXIT_CODE           0
 #endif
 
+/* 分页帧池（U-3）：0 = 关（port 不定义帧池、四个接口退化成返回 -1/0），
+ * 1 = port 在板级给定的物理区间里维护一个 4 KB 页帧位图，提供
+ * alloc/free/total/used 四个接口，并在 la_mmu_init() 里给帧池补一条
+ * PS=22 恒等映射（否则帧池在内核里不可触及）。要求 ARKRTOS_USE_PAGING == 1
+ * 且板级给出 ARKRTOS_QEMU_FRAME_BASE / ARKRTOS_QEMU_FRAME_COUNT（8 MB 对齐、
+ * 上限 2048 帧 = 8 MB）。由 Kconfig 选择（config ARKRTOS_USE_PAGING_FRAMES）。
+ *
+ * 它只是「页帧从哪来」这一层：**不改**现有的 App 窗口映射（那条仍是
+ * 每条目 2 MB 的 PS=20），所以打开它不会让任何既有行为变一个字节。
+ * 把窗口切成 4 KB 页、按需缺页是后续两阶段（各有自己的开关）。 */
+#ifndef ARKRTOS_USE_PAGING_FRAMES
+#define ARKRTOS_USE_PAGING_FRAMES       0
+#endif
+
 /* VxWorks 式可下载模块：0 = 关（空 TU，零体积），1 = 把 ET_REL 目标文件
  * 现场链接进内核模块区并以 PLV0 任务起跑（按名字解析内核导出符号）。
  * 这是与 ARKRTOS_USE_ELF **并列的另一种应用模型**，不是它的替代：

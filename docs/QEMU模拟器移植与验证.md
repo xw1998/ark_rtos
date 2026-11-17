@@ -2400,6 +2400,138 @@ TCB 有两个字段且在 `is_priv` 之前 → `arkrtos_task.c` 有实现、有 
   码就丢了（实测 exec 的 20 ms 轮询使这窗口实际不可达，但机制上没有保护）。
 - **板级只开了 LA64**：RV32 板配置没开，因此 32 位侧只有「关档零变化」这一条读数。
 
+### 5.21 4 KB 页帧池（U-3 第一阶，2026-11-17）
+
+#### 5.21.1 欠的是什么
+
+U-1 让每个 App 有自己的地址空间，但**帧从哪来**一直是写死的：
+`space n -> APP_BASE + n * APP_SIZE`（2 MB 步进）。于是三件事做不到：
+
+- 空间号与帧号绑死，删掉一个 App 也不会把帧还回来（空间不能回收）；
+- 2 MB 的粒度对「按需缺页」没有意义——断层只可能落在 2 MB 边界，
+  一条 `PS=20` 条目要么整体有效、要么整体无效；
+- 内核没有任何「借一页内存」的接口，将来驱动、共享内存、页缓存都得
+  自己另起一套。
+
+这一阶只补第一层：**4 KB 页帧池 + 分配/归还/计数**。它刻意**不动**
+App 窗口的映射（那条仍是每空间一条 `PS=20`），也**不动**任何既有行为：
+打开开关后 App 窗口还是原来那条条目，`pmap u1/u2` 的读数逐字不变。
+
+#### 5.21.2 开关与几何
+
+| 项 | 内容 |
+|---|---|
+| 开关 | `ARKRTOS_USE_PAGING_FRAMES`（`arkrtos_features.h` 缺省 **0**；`config/kconfig/Kconfig.features` 里 `depends on ARKRTOS_USE_PAGING`；板级 `#undef/#define 1`） |
+| 关档 | port 侧只有四个返回 `-1`/`0` 的桩，**不占一个字节的 .bss**（RV32 关档体积 `text 235828 / data 128 / bss 628228` 逐字节不变） |
+| 帧池 | `ARKRTOS_QEMU_FRAME_BASE = 0x04000000`（64 MB）、`ARKRTOS_QEMU_FRAME_COUNT = 2048`（8 MB） |
+| 位图 | `static uint32 s_fr_bits[(COUNT + 31)/32]` = 64 个字 = **256 B**，加一个 `s_fr_used` 计数 |
+| 映射 | `la_mmu_init()` 给帧池补一条 `PS=22` 恒等映射，落在 `MTLB[2059]`（`LA_MTLB_INDEX + 11`），避开动态映射那 8 个槽位（2051..2058） |
+| 编译期守卫 | 基址必须 8 MB 对齐、`1 <= COUNT <= 2048`，任一条不满足就 `#error` |
+
+为什么基址要 8 MB 对齐：`PS=22` 条目覆盖 2^23 字节，VA/PA 都必须按
+2^(22+1) 对齐。为什么必须给帧池一条恒等映射：内核在分页模式下按**物理
+地址**访问帧，没有这一条映射它就只能在 `DA=1` 的窗口期用——那窗口期在
+启动早期就结束了，之后分配出去的帧是一块内核也碰不到的黑洞，自测写图案
+就会当场重填致命。
+
+为什么是 `0x04000000` 而**不是** `0x03000000`：后者是 `pmap test` 动态
+映射的靶子 VA（`PMAP_TEST_VA`）。同一个 VA 上同时存在一条 `PS=22` 静态
+条目和一条 4 KB 动态条目，命中的是谁取决于条目顺序——那是随机的错答案。
+第一版就是把帧池放在 `0x03000000`，`pmap test` 仍报 PASS（它恰好命中
+动态条目），但两套机制共用同一个 VA 这件事本身就是缺陷；换基址是这个
+缺陷的修法，不是「测试碰巧过了」。
+
+#### 5.21.3 接口与返回码
+
+port 层四个接口（`arkrtos_hal.h` 声明，`arkrtos_paging.c` 转发成
+`arkrtos_paging_frame_*`，关档时是 `(-1)`/`(0u)` 宏）：
+
+| 接口 | 返回 |
+|---|---|
+| `arkrtos_paging_frame_alloc(count, &base)` | `0` 成功（`base` = 首帧物理地址）；`-1` 参数非法（`count == 0` / 超总数 / `p_base` 空）；`-2` 没有这么长的**连续**空闲段 |
+| `arkrtos_paging_frame_free(base, count)` | `0` 已归还；`-1` 池外 / 未 4 KB 对齐 / `count` 越界；`-3` 这段里**本来就有没分配过的帧**（此时一帧都不动） |
+| `arkrtos_paging_frame_total()` | 池内帧总数（关档 0） |
+| `arkrtos_paging_frame_used()` | 已分配帧数（关档 0） |
+
+三条刻意的「不猜」：
+
+1. 分配必须给出一段**连续**的帧（将来一次装 2 MB 的窗口要一整块），
+   没有就报 `-2`，不做「只给一部分」；
+2. first-fit，从低帧号往高扫，不做**碎片整理**——整理会移动别人正在
+   用的帧，那不是分配器该悄悄做的事；
+3. 归还走「先全部验证再改」：只要有一帧本来空闲，整段拒绝（`-3`）。
+   否则同一个帧会被两个持有者同时以为归自己，那个 bug 只在很久以后
+   显形。
+
+#### 5.21.4 QEMU 实测（2026-11-17）
+
+```
+$ pmap frame
+pmap: frames total=2048 used=0 free=2048
+
+$ pmap ftest
+pmap: frame alloc 1 rc=0 base=0x04000000
+pmap: frame alloc 3 rc=0 base=0x04001000
+pmap: frame free 1 rc=0
+pmap: frame double-free rc=-3 (want -3)
+pmap: frame free outside rc=-1 (want -1)
+pmap: frame free 3 rc=0
+pmap ftest: PASS (alloc/free/double-free/pattern, used back to 0)
+```
+
+`pmap ftest` 的判据按顺序是：1 帧 + 3 帧两段连续分配都成功；四帧各写
+一段 64 字的图案（`0xA5A50000 ^ (frame<<8) ^ k`）**再逐字读回**；重复
+释放返回 `-3`；池外释放返回 `-1`；两段都归还后 `used` 回到初值。
+写图案再读回这一条是关键——它同时验证了「分配器记账对」与「帧池那条
+`PS=22` 恒等映射真的生效」；少了它，一个只记对账但帧在内核里不可达的
+实现也会 PASS。
+
+同一次启动里的回归（逐字不变）：
+
+```
+$ pmap test      -> pmap test: PASS (map / unmap / rebind / unmap)
+$ pmap u1        -> pmap u1: PASS - same VA, two frames   (entry=2050 ps=20)
+$ pmap u2        -> pmap u2: PASS - two instances, two spaces, neither frame overwritten
+$ utest          -> utest: 13 matched, 13 passed, 0 failed, 0 skipped
+$ exec /mnt/ram/hello one two
+                 -> [ELF] /mnt/ram/hello: finished after 0 ms (space 0, exit code 3)
+```
+
+#### 5.21.5 门禁
+
+`tools/paging_gate.py` 新增 **pin R**（源码 pin，带两条防假绿自检）：
+
+- port 里有 `s_fr_bits` 位图与 `run == count` 连续段判据；
+- `frame_free` 的 `-1` / `-3` 两条拒绝码都在；
+- `la_mmu_init()` 里有 `la_tlb_fill(ARKRTOS_QEMU_FRAME_BASE, 22u, LA_MTLB_INDEX + 11u, ...)`；
+- `arkrtos_hal.h` / `arkrtos_mpu.h` 的关档回退是 `(-1)`，`arkrtos_mpu.h` 有声明；
+- `arkrtos_paging.c` 的包装真的转发到 port；
+- shell 有 `pmap frame` / `pmap ftest` 与 PASS 串。
+
+自检两条：把 `run == count` 改成 `run =X= count`（pin 必须报「不做连续段
+搜索」）；把 PASS 串改成 `PASSX`（pin 必须报「PASS 串不在」）。
+
+**自检本身踩到的坑**：第一版把 `run == count` 改成 `run == countX`，
+pin **仍然通过**——因为 `"run == count"` 还是 `"run == countX"` 的前缀。
+变异串必须破坏被判定的子串本身，不能只是加后缀。
+
+`ARKRTOS_USE_PAGING_FRAMES` 的门禁挂在 `paging_gate.py` 的 pin R 上，
+**不新增 ci_gate 项**（与 U-8 同一条约定）。
+
+#### 5.21.6 明确没做的部分
+
+- **App 窗口仍是每空间一条 `PS=20`**：这一阶只是「帧从哪来」，不是
+  「窗口怎么按页装」。把窗口切成 4 KB 页需要每页一条 `PS=12` 条目
+  （STLB 2048 条足够装 2 MB = 512 页，每 set 2 页），`activate` /
+  `la_pg_assert_window` / `pmap u1/u2` 的判据全都要跟着改——单独一阶。
+- **没有按需缺页**：`la_refill_c()` 里那条「按需换入」分支还没写。
+- **分配出去的帧没有主人**：这一阶不接管 App 窗口，所以没有任何代码
+  会调 `frame_alloc`。真正的使用方是下一阶的窗口装载 + 退出释放。
+- **没有回收调用方的检查**：谁分配谁负责归还，池子不记账「哪个空间
+  用了哪些帧」。
+- **帧池只在 LA64 板级打开**：RV32 板配置没开，因此 32 位侧只有
+  「关档零变化」这一条读数。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行
@@ -2535,6 +2667,10 @@ $ wsl -l -v
 
 两条都要**先装环境**，属于项目级取舍，不在「顺手补欠账」的尺度内；
 因此本轮登记为待裁定项，未动工（`docs/欠账盘点.md` 第一节同名行）。
+
+**用户裁定（2026-11-17）：先收档，判词 `carrier_unavailable_on_this_machine`
+留存。** 不装 MSYS2、不换 WSL/Linux 宿主；LA32 port 保持「只到编译/链接」这一档，
+哪天有了 LA32 载体再按 §6.8.5 首跑，判词与核对命令原样留在这里当入口。
 
 ### 6.2 工具链与产物
 

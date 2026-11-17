@@ -19,7 +19,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（46 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（50 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -30,7 +30,7 @@
 - [kernelsrc/include/arkrtos_mempool.h](#kernelsrcincludearkrtos_mempoolh)（9 项）
 - [kernelsrc/include/arkrtos_mini.h](#kernelsrcincludearkrtos_minih)（20 项）
 - [kernelsrc/include/arkrtos_modld.h](#kernelsrcincludearkrtos_modldh)（8 项）
-- [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（14 项）
+- [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（18 项）
 - [kernelsrc/include/arkrtos_net.h](#kernelsrcincludearkrtos_neth)（6 项）
 - [kernelsrc/include/arkrtos_ptable.h](#kernelsrcincludearkrtos_ptableh)（23 项）
 - [kernelsrc/include/arkrtos_rt.h](#kernelsrcincludearkrtos_rth)（13 项）
@@ -53,7 +53,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（11 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（40 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（47 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（16 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -85,7 +85,7 @@
 - [kernelsrc/src/arkrtos_mini.c](#kernelsrcsrcarkrtos_minic)（1 项）
 - [kernelsrc/src/arkrtos_modld.c](#kernelsrcsrcarkrtos_modldc)（5 项）
 - [kernelsrc/src/arkrtos_mpu.c](#kernelsrcsrcarkrtos_mpuc)（1 项）
-- [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（18 项）
+- [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（22 项）
 - [kernelsrc/src/arkrtos_smp.c](#kernelsrcsrcarkrtos_smpc)（1 项）
 - [kernelsrc/src/arkrtos_task.c](#kernelsrcsrcarkrtos_taskc)（5 项）
 - [kernelsrc/src/arkrtos_tickless.c](#kernelsrcsrcarkrtos_ticklessc)（1 项）
@@ -3491,6 +3491,47 @@ uint32 arkrtos_port_paging_lookup(uint32 va, uint32 *index, uint32 *ppn, uint32 
 只读，不建映射。用于分辨「tlbwr 没生效」与「生效了但查找命中
 另一条陈旧条目」——地址空间切换静默失效时就靠它定位。 */
 
+### `int32 arkrtos_port_paging_frame_alloc(uint32 count, uint32 *p_base);`
+
+```c
+int32 arkrtos_port_paging_frame_alloc(uint32 count, uint32 *p_base);
+```
+
+**Allocate a run of contiguous 4 KB page frames (U-3)**
+- `count`：frames wanted (> 0)
+- `p_base`：on success, physical base of the first frame
+**返回**：0 = allocated; -1 = bad argument; -2 = no run that long
+Bookkeeping only: it does not install any mapping and does not
+touch the App window.  See ARKRTOS_USE_PAGING_FRAMES. */
+
+### `int32 arkrtos_port_paging_frame_free(uint32 base, uint32 count);`
+
+```c
+int32 arkrtos_port_paging_frame_free(uint32 base, uint32 count);
+```
+
+**Return a run of contiguous 4 KB page frames**
+**返回**：0 = returned; -1 = outside the pool / unaligned / bad count;
+-3 = the run contains a frame that was not allocated (nothing moved)
+All-or-nothing: one stray free frame refuses the whole run, so a
+frame can never end up owned by two callers. */
+
+### `uint32 arkrtos_port_paging_frame_total(void);`
+
+```c
+uint32 arkrtos_port_paging_frame_total(void);
+```
+
+**Total frames in the board pool (0 when there is none) */**
+
+### `uint32 arkrtos_port_paging_frame_used(void);`
+
+```c
+uint32 arkrtos_port_paging_frame_used(void);
+```
+
+**Frames currently allocated from the board pool */**
+
 ### `int32  arkrtos_port_flash_erase(uint32 addr, uint32 size);`
 
 ```c
@@ -5001,6 +5042,38 @@ uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task);
 ```
 
 **Space a task is bound to (0 when unknown) */**
+
+### `int32 arkrtos_paging_frame_alloc(uint32 count, uint32 *p_base);`
+
+```c
+int32 arkrtos_paging_frame_alloc(uint32 count, uint32 *p_base);
+```
+
+**Allocate a run of contiguous 4 KB page frames */**
+
+### `int32 arkrtos_paging_frame_free(uint32 base, uint32 count);`
+
+```c
+int32 arkrtos_paging_frame_free(uint32 base, uint32 count);
+```
+
+**Return a run of contiguous 4 KB page frames (all-or-nothing) */**
+
+### `uint32 arkrtos_paging_frame_total(void);`
+
+```c
+uint32 arkrtos_paging_frame_total(void);
+```
+
+**Total frames in the board pool (0 when there is none) */**
+
+### `uint32 arkrtos_paging_frame_used(void);`
+
+```c
+uint32 arkrtos_paging_frame_used(void);
+```
+
+**Frames currently allocated from the board pool */**
 
 ## kernelsrc/include/arkrtos_net.h
 
@@ -8041,6 +8114,73 @@ void arkrtos_port_paging_flush(uint32 base, uint32 size)
 静态映射从不撤销：真去 invtlb 会把内核自己的条目打掉，下一次
 取指就走 TLBRENTRY。所以这里是空操作，而不是「尽力而为」。
 
+### `static uint32 la_fr_test(uint32 i)`
+
+```c
+static uint32 la_fr_test(uint32 i)
+```
+
+该帧是否已分配 */
+
+### `static void la_fr_mark(uint32 i)`
+
+```c
+static void la_fr_mark(uint32 i)
+```
+
+标记已分配（调用方保证之前是空闲） */
+
+### `static void la_fr_clear(uint32 i)`
+
+```c
+static void la_fr_clear(uint32 i)
+```
+
+标记空闲（调用方保证之前是已分配） */
+
+### `int32 arkrtos_port_paging_frame_alloc(uint32 count, uint32 *p_base)`
+
+```c
+int32 arkrtos_port_paging_frame_alloc(uint32 count, uint32 *p_base)
+```
+
+**分配一段连续的 4 KB 页帧**
+- `count`：需要的帧数（> 0）
+- `p_base`：成功时写回首帧的物理基址
+**返回**：0 = 成功；-1 = 参数非法；-2 = 没有这么长的连续空闲段
+从低帧号往高扫，取第一段满足的 run（first-fit）。不做碎片整理：
+整理会移动别人正在用的帧，那不是分配器该悄悄做的事。
+
+### `int32 arkrtos_port_paging_frame_free(uint32 base, uint32 count)`
+
+```c
+int32 arkrtos_port_paging_frame_free(uint32 base, uint32 count)
+```
+
+**归还一段连续 4 KB 页帧**
+- `base`：首帧物理基址（必须 4 KB 对齐、落在池内）
+- `count`：帧数（> 0）
+**返回**：0 = 已归还；-1 = 不在池内 / 未对齐 / count 越界；
+-3 = 这段里本来就有没分配过的帧（此时**一帧都不动**）
+「先全部验证再改」：只要有一帧本来空闲，整段拒绝。否则同一个
+帧会被两个持有者同时以为归自己，那个 bug 只在很久以后显形。
+
+### `uint32 arkrtos_port_paging_frame_total(void)`
+
+```c
+uint32 arkrtos_port_paging_frame_total(void)
+```
+
+帧总数 */
+
+### `uint32 arkrtos_port_paging_frame_used(void)`
+
+```c
+uint32 arkrtos_port_paging_frame_used(void)
+```
+
+已分配帧数 */
+
 ### `uint32 arkrtos_port_syscall_num(void *p_exc_ctx)`
 
 ```c
@@ -9503,47 +9643,47 @@ This file implements exactly the same five entry points as
 arkrtos_mpu.c (see arkrtos_mpu.h): the kernel keeps calling
 arkrtos_mpu_module_init/_build_task/_set_app/_set_idle/_reset, and
 
-### `static uint8 arkrtos_paging_code_in_ram(const arkrtos_task_t *p_task) `
+### `static uint8 arkrtos_paging_code_in_ram(const arkrtos_task_t *p_task)`
 
 ```c
-static uint8 arkrtos_paging_code_in_ram(const arkrtos_task_t *p_task) {
+static uint8 arkrtos_paging_code_in_ram(const arkrtos_task_t *p_task)
 ```
 
 Is this task's code window in the RAM pool (a MiniApp block) rather than in
 the flash image pool? Same test as the window backend uses, and for the same
 reason: it is the recorded window that says so, not a flag that could lie. */
 
-### `uint32 arkrtos_paging_space_count(void) {`
+### `uint32 arkrtos_paging_space_count(void)`
 
 ```c
-uint32 arkrtos_paging_space_count(void) {
+uint32 arkrtos_paging_space_count(void)
 ```
 
 **How many address spaces the board provides**
 1 means "only the frame this port has always used": nothing about
 the build changes until the board asks for more.
 
-### `uint32 arkrtos_paging_space_frame(uint32 space) {`
+### `uint32 arkrtos_paging_space_frame(uint32 space)`
 
 ```c
-uint32 arkrtos_paging_space_frame(uint32 space) {
+uint32 arkrtos_paging_space_frame(uint32 space)
 ```
 
 **Physical frame base behind an address space**
 **返回**：frame base, or 0 when the space does not exist (never a guess)
 
-### `uint32 arkrtos_paging_space_current(void) {`
+### `uint32 arkrtos_paging_space_current(void)`
 
 ```c
-uint32 arkrtos_paging_space_current(void) {
+uint32 arkrtos_paging_space_current(void)
 ```
 
 **Which space is currently installed in the App window**
 
-### `int32 arkrtos_paging_space_activate(uint32 space) {`
+### `int32 arkrtos_paging_space_activate(uint32 space)`
 
 ```c
-int32 arkrtos_paging_space_activate(uint32 space) {
+int32 arkrtos_paging_space_activate(uint32 space)
 ```
 
 **Install an address space now**
@@ -9555,10 +9695,10 @@ directly when it is about to write into a frame that is not the one
 currently installed - the ELF loader will do exactly that once
 second-instance loading exists (debt U-2).
 
-### `int32 arkrtos_paging_bind_task(arkrtos_task_t *p_task, uint32 space) {`
+### `int32 arkrtos_paging_bind_task(arkrtos_task_t *p_task, uint32 space)`
 
 ```c
-int32 arkrtos_paging_bind_task(arkrtos_task_t *p_task, uint32 space) {
+int32 arkrtos_paging_bind_task(arkrtos_task_t *p_task, uint32 space)
 ```
 
 **Bind a task to an address space**
@@ -9567,18 +9707,50 @@ Binding only stores a number; the switch happens lazily, at the next
 schedule to that task. That is deliberate: binding inside the loader
 must not change the translation of the frame it is still writing.
 
-### `uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task) {`
+### `uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task)`
 
 ```c
-uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task) {
+uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task)
 ```
 
 **Space a task is bound to (0 for unbound / unknown)**
 
+### `int32 arkrtos_paging_frame_alloc(uint32 count, uint32 *p_base)`
+
+```c
+int32 arkrtos_paging_frame_alloc(uint32 count, uint32 *p_base)
+```
+
+**Allocate a run of contiguous 4 KB page frames from the board pool */**
+
+### `int32 arkrtos_paging_frame_free(uint32 base, uint32 count)`
+
+```c
+int32 arkrtos_paging_frame_free(uint32 base, uint32 count)
+```
+
+**Return a run of contiguous 4 KB page frames (all-or-nothing) */**
+
+### `uint32 arkrtos_paging_frame_total(void)`
+
+```c
+uint32 arkrtos_paging_frame_total(void)
+```
+
+**Total frames in the board pool (0 when there is none) */**
+
+### `uint32 arkrtos_paging_frame_used(void)`
+
+```c
+uint32 arkrtos_paging_frame_used(void)
+```
+
+**Frames currently allocated from the board pool */**
+
 ### `int32 arkrtos_paging_map_span(uint32 va, uint32 pa, uint32 size, arkrt`
 
 ```c
-int32 arkrtos_paging_map_span(uint32 va, uint32 pa, uint32 size, arkrtos_mpu_mem_t mem) {
+int32 arkrtos_paging_map_span(uint32 va, uint32 pa, uint32 size, arkrtos_mpu_mem_t mem)
 ```
 
 **Register a run-time dynamic mapping, page by page**
@@ -9598,19 +9770,19 @@ arkrtos_paging_map_pages() shows how many pages did land. The honest
 reason is that there is no unmap path on this port yet (debt U-15),
 and pretending to roll back would need one.
 
-### `uint32 arkrtos_paging_map_pages(void) {`
+### `uint32 arkrtos_paging_map_pages(void)`
 
 ```c
-uint32 arkrtos_paging_map_pages(void) {
+uint32 arkrtos_paging_map_pages(void)
 ```
 
 **How many pages have been registered through map_span()**
 **返回**：cumulative page count (0 on any build without the paging backend)
 
-### `int32 arkrtos_paging_unmap_span(uint32 va, uint32 size) {`
+### `int32 arkrtos_paging_unmap_span(uint32 va, uint32 size)`
 
 ```c
-int32 arkrtos_paging_unmap_span(uint32 va, uint32 size) {
+int32 arkrtos_paging_unmap_span(uint32 va, uint32 size)
 ```
 
 **Undo pages registered through map_span() (U-15)**
@@ -9626,10 +9798,10 @@ map_span(), and for the same reason: no rollback without a re-map).
 s_pg_map_pages counts pages that ARE mapped, so it drops by exactly
 the number of pages this call took out.
 
-### `uint32 arkrtos_paging_dyn_used(void) {`
+### `uint32 arkrtos_paging_dyn_used(void)`
 
 ```c
-uint32 arkrtos_paging_dyn_used(void) {
+uint32 arkrtos_paging_dyn_used(void)
 ```
 
 **How many dynamic mapping slots are in use right now**
@@ -9638,10 +9810,10 @@ This is the readout that was missing while maps could only be
 added: a driver that registered eight 4 KB pages had no way to see
 how close it was to the table being full.
 
-### `static uint8 arkrtos_paging_span_has(uint32 base, uint32 size, uint32 `
+### `static uint8 arkrtos_paging_span_has(uint32 base, uint32 size,`
 
 ```c
-static uint8 arkrtos_paging_span_has(uint32 base, uint32 size, uint32 uva, uint32 len) {
+static uint8 arkrtos_paging_span_has(uint32 base, uint32 size,
 ```
 
 **整段是否落在给定窗口里**
@@ -9652,10 +9824,10 @@ static uint8 arkrtos_paging_span_has(uint32 base, uint32 size, uint32 uva, uint3
 末尾的指针会让拷贝循环走进未映射页，在内核态变成 refill 致命
 —— 那正是这条接口要消灭的「内核陪着 fault」。
 
-### `int32 arkrtos_paging_user_copy(uint32 rom_start, uint32 rom_size, uint`
+### `int32 arkrtos_paging_user_copy(uint32 rom_start, uint32 rom_size,`
 
 ```c
-int32 arkrtos_paging_user_copy(uint32 rom_start, uint32 rom_size, uint32 ram_start, uint32 ram_size, uint32 space, uint32 installed, void *kern, const void *user, uint32 len, uint8 write) {
+int32 arkrtos_paging_user_copy(uint32 rom_start, uint32 rom_size,
 ```
 
 **受控访问用户地址的本体（读写两个方向共用一套判据）**
@@ -9666,10 +9838,10 @@ int32 arkrtos_paging_user_copy(uint32 rom_start, uint32 rom_size, uint32 ram_sta
 糟得多。判据全部在第一次 load/store 之前完成，因此拒绝一次非法
 指针不会在内核态产生任何异常。
 
-### `int32 arkrtos_copy_from_user_task(arkrtos_task_t *p_task, void *dst, c`
+### `int32 arkrtos_copy_from_user_task(arkrtos_task_t *p_task, void *dst,`
 
 ```c
-int32 arkrtos_copy_from_user_task(arkrtos_task_t *p_task, void *dst, const void *usrc, uint32 len) {
+int32 arkrtos_copy_from_user_task(arkrtos_task_t *p_task, void *dst,
 ```
 
 **从指定任务的用户缓冲区拷到内核缓冲区（内核内部）**
@@ -9677,26 +9849,26 @@ int32 arkrtos_copy_from_user_task(arkrtos_task_t *p_task, void *dst, const void 
 内核任务（is_priv != 0）一律 -2：它没有用户窗口，拿一个「用户
 指针」进来是契约错误，不应该被当成合法调用。
 
-### `int32 arkrtos_copy_to_user_task(arkrtos_task_t *p_task, void *udst, co`
+### `int32 arkrtos_copy_to_user_task(arkrtos_task_t *p_task, void *udst,`
 
 ```c
-int32 arkrtos_copy_to_user_task(arkrtos_task_t *p_task, void *udst, const void *src, uint32 len) {
+int32 arkrtos_copy_to_user_task(arkrtos_task_t *p_task, void *udst,
 ```
 
 **从内核缓冲区拷到指定任务的用户缓冲区（内核内部）**
 
-### `int32 arkrtos_copy_from_user(void *dst, const void *usrc, uint32 len) `
+### `int32 arkrtos_copy_from_user(void *dst, const void *usrc, uint32 len)`
 
 ```c
-int32 arkrtos_copy_from_user(void *dst, const void *usrc, uint32 len) {
+int32 arkrtos_copy_from_user(void *dst, const void *usrc, uint32 len)
 ```
 
 **从当前任务的用户缓冲区拷出**
 
-### `int32 arkrtos_copy_to_user(void *udst, const void *src, uint32 len) {`
+### `int32 arkrtos_copy_to_user(void *udst, const void *src, uint32 len)`
 
 ```c
-int32 arkrtos_copy_to_user(void *udst, const void *src, uint32 len) {
+int32 arkrtos_copy_to_user(void *udst, const void *src, uint32 len)
 ```
 
 **往当前任务的用户缓冲区拷入**
@@ -9704,7 +9876,7 @@ int32 arkrtos_copy_to_user(void *udst, const void *src, uint32 len) {
 ### `int32 arkrtos_paging_stats(uint32 *p_checked, uint32 *p_bad, uint32 *p`
 
 ```c
-int32 arkrtos_paging_stats(uint32 *p_checked, uint32 *p_bad, uint32 *p_bad_base) {
+int32 arkrtos_paging_stats(uint32 *p_checked, uint32 *p_bad, uint32 *p_bad_base)
 ```
 
 **Read the audit counters (kernel/shell only).**

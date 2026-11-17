@@ -6487,6 +6487,113 @@ static int cmd_pmap(int argc, char *argv[])
         return 0;
     }
 
+    if((argc >= 2) && (strcmp(argv[1], "frame") == 0))
+    {
+        uint32 total = arkrtos_paging_frame_total();
+        uint32 used = arkrtos_paging_frame_used();
+
+        ark_shell_printf("pmap: frames total=%u used=%u free=%u\r\n",
+                         (unsigned)total, (unsigned)used,
+                         (unsigned)((total >= used) ? (total - used) : 0u));
+        return 0;
+    }
+
+    if((argc >= 2) && (strcmp(argv[1], "ftest") == 0))
+    {
+        uint32 used0 = arkrtos_paging_frame_used();
+        uint32 a = 0u;
+        uint32 b = 0u;
+        uint32 i;
+        int pass = 1;
+
+        /* 1 帧 + 3 帧两段连续的分配。帧池在板级是恒等映射的，所以拿到
+         * 物理基址就能直接写图案——读不回来说明那条 PS=22 没生效，
+         * 而这正是「分配器能跑但帧用不了」的那种假绿。 */
+        rc = arkrtos_paging_frame_alloc(1u, &a);
+        ark_shell_printf("pmap: frame alloc 1 rc=%d base=0x%08X\r\n", (int)rc, (unsigned)a);
+        if((rc != 0) || (a == 0u))
+        {
+            sh_out("pmap ftest: FAIL (alloc 1)\r\n");
+            return 1;
+        }
+
+        rc = arkrtos_paging_frame_alloc(3u, &b);
+        ark_shell_printf("pmap: frame alloc 3 rc=%d base=0x%08X\r\n", (int)rc, (unsigned)b);
+        if((rc != 0) || (b == 0u))
+        {
+            (void)arkrtos_paging_frame_free(a, 1u);
+            sh_out("pmap ftest: FAIL (alloc 3)\r\n");
+            return 1;
+        }
+
+        for(i = 0u; i < 4u; i++)
+        {
+            uint32 base = (i == 0u) ? a : (b + ((i - 1u) * 0x1000u));
+            volatile uint32 *p = (volatile uint32 *)(size_t)base;
+            uint32 k;
+
+            for(k = 0u; k < 64u; k++)
+            {
+                p[k] = 0xA5A50000u ^ (i << 8) ^ k;
+            }
+            for(k = 0u; k < 64u; k++)
+            {
+                if(p[k] != (0xA5A50000u ^ (i << 8) ^ k))
+                {
+                    ark_shell_printf("pmap: pattern mismatch base=0x%08X word=%u\r\n",
+                                     (unsigned)base, (unsigned)k);
+                    pass = 0;
+                    break;
+                }
+            }
+        }
+
+        rc = arkrtos_paging_frame_free(a, 1u);
+        ark_shell_printf("pmap: frame free 1 rc=%d\r\n", (int)rc);
+        if(rc != 0)
+        {
+            pass = 0;
+        }
+
+        rc = arkrtos_paging_frame_free(a, 1u);
+        ark_shell_printf("pmap: frame double-free rc=%d (want -3)\r\n", (int)rc);
+        if(rc != -3)
+        {
+            pass = 0;
+        }
+
+        rc = arkrtos_paging_frame_free(0x1000u, 1u);
+        ark_shell_printf("pmap: frame free outside rc=%d (want -1)\r\n", (int)rc);
+        if(rc != -1)
+        {
+            pass = 0;
+        }
+
+        rc = arkrtos_paging_frame_free(b, 3u);
+        ark_shell_printf("pmap: frame free 3 rc=%d\r\n", (int)rc);
+        if(rc != 0)
+        {
+            pass = 0;
+        }
+
+        if(arkrtos_paging_frame_used() != used0)
+        {
+            ark_shell_printf("pmap: frame used %u != %u after release\r\n",
+                             (unsigned)arkrtos_paging_frame_used(), (unsigned)used0);
+            pass = 0;
+        }
+
+        if(pass == 0)
+        {
+            sh_out("pmap ftest: FAIL\r\n");
+            return 1;
+        }
+
+        ark_shell_printf("pmap ftest: PASS (alloc/free/double-free/pattern, used back to %u)\r\n",
+                         (unsigned)used0);
+        return 0;
+    }
+
     if((argc >= 2) && (strcmp(argv[1], "test") == 0))
     {
         int i;

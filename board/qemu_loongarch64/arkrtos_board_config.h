@@ -91,6 +91,21 @@
  * QEMU 的 DRAM 有 128 MB，0x02200000~0x02400000 是 .appprobe 之后的空地。 */
 #define ARKRTOS_PAGING_APPS_MAX      2u
 
+/* 4 KB 页帧池（U-3）。取 0x04000000（64 MB）起 8 MB = 2048 帧：
+ *   - 避开 App 区 0x02000000~0x02400000、内核 0~0x00B00000，以及
+ *     `pmap test` 用的那块测试 VA 0x03000000（那是动态映射的靶子，
+ *     和帧池共用同一段会变成两条条目抢同一个 VA）；
+ *   - QEMU virt 的 DRAM 到 128 MB，0x04000000 之后是空地；
+ *   - 8 MB 对齐（满足 PS=22 条目要求的 2^(22+1)=8 MB 对齐），
+ *     port 会给它单独补一条恒等映射，内核才能在分页模式下直接读写帧；
+ *   - 2048 帧正好是 ARKRTOS_USE_PAGING_FRAMES 的编译期上限，
+ *     位图就是 64 个 uint32。 */
+#define ARKRTOS_QEMU_FRAME_BASE      0x04000000u
+#define ARKRTOS_QEMU_FRAME_COUNT     2048u
+
+#undef  ARKRTOS_USE_PAGING_FRAMES
+#define ARKRTOS_USE_PAGING_FRAMES    1
+
 /* ============================================================
  * 四、能力开关
  * @details LA64 硬件有 FPU，但这一版没有启用 FPU 上下文保存（任务切换不存

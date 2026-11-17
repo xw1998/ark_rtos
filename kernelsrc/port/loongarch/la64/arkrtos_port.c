@@ -587,6 +587,18 @@ static void la_mmu_init(void)
                 LA_PTE_APP_MMIO(ARKRTOS_QEMU_UART_BASE & ~0xFFFu),
                 LA_PTE_APP_MMIO((ARKRTOS_QEMU_UART_BASE & ~0xFFFu) + 0x1000u));
 
+#if (ARKRTOS_USE_PAGING_FRAMES == 1)
+    /* 4 KB 页帧池（U-3）：一条 PS=22 恒等映射，让内核在分页模式下按物理
+     * 地址直接读写帧本身。没有这一条，帧池就是一块在 PLV0 下也触不到的
+     * 黑洞 —— 分配出去的帧只能用、不能被自检写图案再读回。
+     * 落在 MTLB 的 2059（= LA_MTLB_INDEX + 11），避开动态映射那 8 个槽位
+     * （2051..2058）。基址 8 MB 对齐、长度不超过 8 MB，两条编译期 #error
+     * 在下面的帧池一节里拦。 */
+    la_tlb_fill(ARKRTOS_QEMU_FRAME_BASE, 22u, LA_MTLB_INDEX + 11u,
+                LA_PTE_KERNEL(ARKRTOS_QEMU_FRAME_BASE),
+                LA_PTE_KERNEL(ARKRTOS_QEMU_FRAME_BASE + 0x400000u));
+#endif
+
     /* 未映射地址的入口。硬件从这里进来时 CRMD.DA=1、PG=0、PLV=0、IE=0。 */
     LA_CSRW(LA_CSR_TLBRENTRY, (unsigned long)&tlb_refill_entry);
 
@@ -1376,6 +1388,192 @@ void arkrtos_port_paging_flush(uint32 base, uint32 size)
     (void)base;
     (void)size;
 }
+
+/* ------------------------------------------------------------
+ * 4 KB 页帧池（U-3）
+ * @details 一块板级给定的物理区间（ARKRTOS_QEMU_FRAME_BASE 起
+ *          ARKRTOS_QEMU_FRAME_COUNT 帧），用一张位图记录哪些帧已分配。
+ *          这是「帧从哪来」这一层：分配器只管记账与连续区间搜索，
+ *          **不**建映射、**不**碰 App 窗口。
+ *
+ *          三条不猜的规矩：
+ *            1. 帧号与地址的换算是 base + i * 4 KB，不做别的解释；
+ *            2. 分配必须给出一段**连续**的帧（App 的 2 MB 窗口要一整块），
+ *               找不到就返回 -2，不做「只给一部分」；
+ *            3. 释放一个没分配过的帧返回 -3 且**一个字节不动** —— 静默
+ *               把位图清零会让两个持有者拿到同一帧。
+ * ------------------------------------------------------------ */
+#if (ARKRTOS_USE_PAGING_FRAMES == 1)
+
+#ifndef ARKRTOS_QEMU_FRAME_BASE
+#error "ARKRTOS_USE_PAGING_FRAMES=1 requires ARKRTOS_QEMU_FRAME_BASE from the board"
+#endif
+#ifndef ARKRTOS_QEMU_FRAME_COUNT
+#error "ARKRTOS_USE_PAGING_FRAMES=1 requires ARKRTOS_QEMU_FRAME_COUNT from the board"
+#endif
+#if ((ARKRTOS_QEMU_FRAME_BASE & 0x7FFFFFu) != 0u)
+#error "frame pool base must be 8 MB aligned (the PS=22 identity entry needs it)"
+#endif
+#if (ARKRTOS_QEMU_FRAME_COUNT == 0u) || (ARKRTOS_QEMU_FRAME_COUNT > 2048u)
+#error "frame pool must hold 1..2048 frames (8 MB, one PS=22 pair)"
+#endif
+
+#define LA_FR_BIT_WORDS     ((ARKRTOS_QEMU_FRAME_COUNT + 31u) / 32u)
+
+static uint32 s_fr_bits[LA_FR_BIT_WORDS];
+static uint32 s_fr_used;
+
+/** 该帧是否已分配 */
+static uint32 la_fr_test(uint32 i)
+{
+    return (s_fr_bits[i >> 5] >> (i & 31u)) & 1u;
+}
+
+/** 标记已分配（调用方保证之前是空闲） */
+static void la_fr_mark(uint32 i)
+{
+    s_fr_bits[i >> 5] |= (1u << (i & 31u));
+    s_fr_used++;
+}
+
+/** 标记空闲（调用方保证之前是已分配） */
+static void la_fr_clear(uint32 i)
+{
+    s_fr_bits[i >> 5] &= ~(1u << (i & 31u));
+    s_fr_used--;
+}
+
+/**
+* @brief 分配一段连续的 4 KB 页帧
+* @param count 需要的帧数（> 0）
+* @param p_base 成功时写回首帧的物理基址
+* @return 0 = 成功；-1 = 参数非法；-2 = 没有这么长的连续空闲段
+* @details 从低帧号往高扫，取第一段满足的 run（first-fit）。不做碎片整理：
+*          整理会移动别人正在用的帧，那不是分配器该悄悄做的事。
+*/
+int32 arkrtos_port_paging_frame_alloc(uint32 count, uint32 *p_base)
+{
+    uint32 i;
+    uint32 run;
+
+    if((count == 0u) || (p_base == 0) || (count > (uint32)ARKRTOS_QEMU_FRAME_COUNT))
+    {
+        return -1;
+    }
+
+    run = 0u;
+    for(i = 0u; i < (uint32)ARKRTOS_QEMU_FRAME_COUNT; i++)
+    {
+        if(la_fr_test(i) == 0u)
+        {
+            run++;
+            if(run == count)
+            {
+                uint32 first = i + 1u - count;
+                uint32 k;
+
+                for(k = first; k <= i; k++)
+                {
+                    la_fr_mark(k);
+                }
+
+                *p_base = ARKRTOS_QEMU_FRAME_BASE + (first * 0x1000u);
+                return 0;
+            }
+        }
+        else
+        {
+            run = 0u;
+        }
+    }
+
+    return -2;
+}
+
+/**
+* @brief 归还一段连续 4 KB 页帧
+* @param base 首帧物理基址（必须 4 KB 对齐、落在池内）
+* @param count 帧数（> 0）
+* @return 0 = 已归还；-1 = 不在池内 / 未对齐 / count 越界；
+*         -3 = 这段里本来就有没分配过的帧（此时**一帧都不动**）
+* @details 「先全部验证再改」：只要有一帧本来空闲，整段拒绝。否则同一个
+*          帧会被两个持有者同时以为归自己，那个 bug 只在很久以后显形。
+*/
+int32 arkrtos_port_paging_frame_free(uint32 base, uint32 count)
+{
+    uint32 first;
+    uint32 k;
+
+    if((count == 0u) || ((base & 0xFFFu) != 0u) ||
+       (base < (uint32)ARKRTOS_QEMU_FRAME_BASE))
+    {
+        return -1;
+    }
+
+    first = (base - (uint32)ARKRTOS_QEMU_FRAME_BASE) >> 12;
+    if((first >= (uint32)ARKRTOS_QEMU_FRAME_COUNT) ||
+       (count > ((uint32)ARKRTOS_QEMU_FRAME_COUNT - first)))
+    {
+        return -1;
+    }
+
+    for(k = first; k < (first + count); k++)
+    {
+        if(la_fr_test(k) == 0u)
+        {
+            return -3;
+        }
+    }
+
+    for(k = first; k < (first + count); k++)
+    {
+        la_fr_clear(k);
+    }
+
+    return 0;
+}
+
+/** 帧总数 */
+uint32 arkrtos_port_paging_frame_total(void)
+{
+    return (uint32)ARKRTOS_QEMU_FRAME_COUNT;
+}
+
+/** 已分配帧数 */
+uint32 arkrtos_port_paging_frame_used(void)
+{
+    return s_fr_used;
+}
+
+#else  /* ARKRTOS_USE_PAGING_FRAMES == 0：没有帧池 */
+
+int32 arkrtos_port_paging_frame_alloc(uint32 count, uint32 *p_base)
+{
+    (void)count;
+    (void)p_base;
+
+    return -1;
+}
+
+int32 arkrtos_port_paging_frame_free(uint32 base, uint32 count)
+{
+    (void)base;
+    (void)count;
+
+    return -1;
+}
+
+uint32 arkrtos_port_paging_frame_total(void)
+{
+    return 0u;
+}
+
+uint32 arkrtos_port_paging_frame_used(void)
+{
+    return 0u;
+}
+
+#endif /* ARKRTOS_USE_PAGING_FRAMES == 1 */
 
 #endif /* ARKRTOS_USE_PAGING == 1 */
 

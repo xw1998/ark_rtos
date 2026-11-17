@@ -51,12 +51,17 @@
 *                    frame per space, and the kernel keeps its static direct
 *                    map untouched. Demonstrated in QEMU with data written and
 *                    read back through the same VA in two spaces (pmap u1).
-*            NOT   - a page-frame allocator (frames are a fixed board-level
-*                    array, space n -> window base + n * window size);
-*                  - a concurrent second instance is possible since U-2
-*                    (exec_space); a page-frame allocator would still be
-*                    needed before a space can be recycled;
+*            NOT   - a concurrent second instance is possible since U-2
+*                    (exec_space); space recycling still needs a caller that
+*                    frees the frames it was handed;
 *                  - demand paging; ASID; TLB shootdown;
+*                  - the App window is still one 2 MB PS=20 entry per space,
+*                    NOT a set of 4 KB pages.  U-3 stage 1 (2026-11-17) added
+*                    the 4 KB page-frame pool and the alloc/free/total/used
+*                    interface (pmap frame / pmap ftest) but deliberately did
+*                    not rewire the window: a pool-sized allocation is only
+*                    useful once the window can be paged, which is the next
+*                    stage behind its own switch;
 *                  - the SVC handlers still validate pointers with the
 *                    boolean helpers in arkrtos_kernel_check.h: U-6 added
 *                    copy_from_user / copy_to_user and self-tests them, but
@@ -327,6 +332,39 @@ uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task)
     }
 
     return (uint32)s_pg_task_space[idx];
+}
+
+/* ------------------------------------------------------------------
+ * 4 KB page-frame pool (U-3)
+ *
+ * Thin forwards to the port.  They exist so the shell and any kernel code
+ * talk to one name and get the same refusal codes whether or not the board
+ * has a pool; when there is none the macros in arkrtos_mpu.h answer instead
+ * and these bodies never compile.
+ * ------------------------------------------------------------------ */
+
+/** @brief Allocate a run of contiguous 4 KB page frames from the board pool */
+int32 arkrtos_paging_frame_alloc(uint32 count, uint32 *p_base)
+{
+    return arkrtos_port_paging_frame_alloc(count, p_base);
+}
+
+/** @brief Return a run of contiguous 4 KB page frames (all-or-nothing) */
+int32 arkrtos_paging_frame_free(uint32 base, uint32 count)
+{
+    return arkrtos_port_paging_frame_free(base, count);
+}
+
+/** @brief Total frames in the board pool (0 when there is none) */
+uint32 arkrtos_paging_frame_total(void)
+{
+    return arkrtos_port_paging_frame_total();
+}
+
+/** @brief Frames currently allocated from the board pool */
+uint32 arkrtos_paging_frame_used(void)
+{
+    return arkrtos_port_paging_frame_used();
 }
 
 /**

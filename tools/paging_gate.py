@@ -44,8 +44,12 @@
   Q. invtlb 不放过窗口：QEMU 的 `invtlb 3` 实测会连带打掉 App 窗口那条
      PS=20 条目，所以 unalias 末尾必须重写它，activate 的「已是该空间」
      短路必须先查条目还在。
+  R. 4 KB 页帧池（U-3）：port 有位图与连续段搜索、free 的两条拒绝码
+     （-1 池外 / -3 本来没分配），la_mmu_init 给帧池补一条 PS=22 恒等映射
+     （否则帧在内核里不可触及），hal / mpu.h 有 (-1) 回退，paging.c 转发到
+     port，shell 有 `pmap frame` 与 `pmap ftest` 及其 PASS 串。
 
-E–M、P、Q 每条都自带**防假绿自检**：把源串故意改坏一次，对应 pin 必须报错；
+E–M、P–R 每条都自带**防假绿自检**：把源串故意改坏一次，对应 pin 必须报错；
 报不出错就说明这条 pin 是空转的。
 
 不覆盖：分页后端在板上给出的实际隔离效果（哪条地址被拦、PLV 是否真降）、
@@ -499,6 +503,44 @@ def main():
                 bad.append("Q: activate 的短路不核对条目指向的帧")
         return bad
 
+    def pin_r(pg, port, sh, hal, mpu):
+        bad = []
+        if "static uint32 s_fr_bits[" not in port:
+            bad.append("R: port 里没有页帧位图 s_fr_bits")
+        al = _body(port, "int32 arkrtos_port_paging_frame_alloc(")
+        if not al:
+            bad.append("R: 找不到 frame_alloc 的定义")
+        elif ("la_fr_test(i) == 0u" not in al) or ("run == count" not in al):
+            bad.append("R: frame_alloc 不做连续空闲段搜索（run == count 判据不在）")
+        fr = _body(port, "int32 arkrtos_port_paging_frame_free(")
+        if not fr:
+            bad.append("R: 找不到 frame_free 的定义")
+        else:
+            if "return -3;" not in fr:
+                bad.append("R: frame_free 对「本来没分配」不返回 -3")
+            if "return -1;" not in fr:
+                bad.append("R: frame_free 对「池外/未对齐」不返回 -1")
+        if "la_tlb_fill(ARKRTOS_QEMU_FRAME_BASE, 22u, LA_MTLB_INDEX + 11u" not in port:
+            bad.append("R: la_mmu_init 没给帧池补 PS=22 恒等映射（帧在内核里不可触及）")
+        if "#define arkrtos_port_paging_frame_alloc(count, p_base)  (-1)" not in hal:
+            bad.append("R: hal 的关档回退里没有 arkrtos_port_paging_frame_alloc")
+        if "int32 arkrtos_paging_frame_alloc(uint32 count, uint32 *p_base);" not in mpu:
+            bad.append("R: mpu.h 里没有 arkrtos_paging_frame_alloc 的声明")
+        if "#define arkrtos_paging_frame_alloc(count, p_base)            (-1)" not in mpu:
+            bad.append("R: mpu.h 的关档回退里没有 arkrtos_paging_frame_alloc")
+        fw = _body(pg, "int32 arkrtos_paging_frame_alloc(")
+        if not fw:
+            bad.append("R: paging.c 里没有 frame_alloc 的包装")
+        elif "arkrtos_port_paging_frame_alloc(count, p_base)" not in fw:
+            bad.append("R: paging.c 的 frame_alloc 没转发到 port")
+        if '"frame"' not in sh:
+            bad.append("R: shell 里没有 pmap frame")
+        if '"ftest"' not in sh:
+            bad.append("R: shell 里没有 pmap ftest")
+        if "pmap ftest: PASS (alloc/free/double-free/pattern" not in sh:
+            bad.append("R: pmap ftest 的 PASS 串不在")
+        return bad
+
     for rel in ("kernelsrc/src/arkrtos_paging.c",
                 "kernelsrc/port/loongarch/la64/arkrtos_port.c",
                 "kernelsrc/port/loongarch/la64/arkrtos_context.S",
@@ -526,7 +568,7 @@ def main():
                     pin_m(src_elf, src_sh) +
                     pin_n(src_port) + pin_o(src_pg, src_sh, src_hal, src_mpu) +
                     pin_p(src_pg, src_sh, src_hal, src_mpu) +
-                    pin_q(src_port)):
+                    pin_q(src_port) + pin_r(src_pg, src_port, src_sh, src_hal, src_mpu)):
             failures.append("源码 pin 不成立 " + msg)
 
         # 自检：把每条 pin 依赖的那一句改坏，对应 pin 必须报错
@@ -569,6 +611,13 @@ def main():
                           src_sh, src_hal, src_mpu)),
             ("Q", pin_q(src_port.replace("    la_pg_assert_window();",
                                           "    la_pg_assert_windowX();", 1))),
+            ("R", pin_r(src_pg,
+                        src_port.replace("run == count", "run =X= count", 1),
+                        src_sh, src_hal, src_mpu)),
+            ("R-", pin_r(src_pg, src_port,
+                         src_sh.replace('pmap ftest: PASS (alloc/free/double-free/pattern',
+                                        'pmap ftest: PASSX (alloc/free/double-free/pattern', 1),
+                         src_hal, src_mpu)),
         ]
         for tag, got in selfchecks:
             if not got:
@@ -586,7 +635,8 @@ def main():
           "每 App 地址空间 I-J pin 成立且自检有效 / "
           "U-2 延迟换窗口 K-M pin 成立且自检有效 / "
           "U-15 映射撤销 N-O pin 成立且自检有效 / "
-          "U-6 受控用户拷贝 P pin 与 invtlb 后重写窗口 Q pin 成立且自检有效")
+          "U-6 受控用户拷贝 P pin 与 invtlb 后重写窗口 Q pin 成立且自检有效 / "
+          "U-3 页帧池 R pin 成立且自检有效")
     return 0
 
 

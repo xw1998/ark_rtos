@@ -313,6 +313,20 @@ config ARKRTOS_USE_EXIT_CODE
 	  as unknown, and arkrtos_thread_exit_code() calls
 	  arkrtos_thread_exit(), so call sites need no #if.
 
+config ARKRTOS_USE_PAGING_FRAMES
+	bool "4 KB page-frame pool (U-3)"
+	depends on ARKRTOS_USE_PAGING
+	help
+	  Maintain a 4 KB page-frame bitmap inside the physical range the board
+	  gives (ARKRTOS_QEMU_FRAME_BASE / ARKRTOS_QEMU_FRAME_COUNT) and expose
+	  alloc/free/total/used through the paging backend, plus one PS=22
+	  identity entry so the kernel can actually reach the pool.  The App
+	  window mapping is NOT changed by this option: it still uses one 2 MB
+	  PS=20 entry per space, so switching it on changes no existing
+	  behaviour.  Splitting the window into 4 KB pages and demand paging
+	  are later stages with their own switches.
+
+	  Off (default) changes nothing.
 config ARKRTOS_USE_ELF
 	bool "ELF64 executable loader (exec)"
 	depends on ARKRTOS_USE_VFS && ARKRTOS_USE_PRIV
