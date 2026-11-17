@@ -77,11 +77,57 @@ int32 arkrtos_paging_map_span(uint32 va, uint32 pa, uint32 size, arkrtos_mpu_mem
 /** @brief How many pages this layer has registered (cumulative readout) */
 uint32 arkrtos_paging_map_pages(void);
 
+/* ------------------------------------------------------------------
+ * Per-App address spaces (U-1)
+ *
+ * What "one page table per process" means on a core without a hardware page
+ * walker (this port): each App owns a set of TLB entries, and the scheduler
+ * re-installs that set on every switch. The App window keeps the SAME virtual
+ * address in every space; only the physical frame behind it changes. So two
+ * Apps cannot address each other's memory at all - there is no VA that maps
+ * to the other App's frame.
+ *
+ * Space 0 is the frame the image/loader has always used (PA = the window
+ * base), so a build that never binds a task behaves exactly as before.
+ * ------------------------------------------------------------------ */
+
+/** @brief How many address spaces the board provides (>= 1) */
+uint32 arkrtos_paging_space_count(void);
+
+/** @brief Physical frame base behind a space; 0 when the space does not exist */
+uint32 arkrtos_paging_space_frame(uint32 space);
+
+/** @brief Which space is currently installed in the App window */
+uint32 arkrtos_paging_space_current(void);
+
+/** @brief Install a space right now (kernel-side, e.g. before writing a load)
+ *  @return 0 = installed or already there; -1 = bad space / no TLB path
+ *  @details The scheduler also does this on every switch to an App, from the
+ *           task's binding. Calling it from a kernel task is what lets a loader
+ *           write into a frame the kernel is not currently "in". */
+int32 arkrtos_paging_space_activate(uint32 space);
+
+/** @brief Bind a task to an address space (default for every task is 0)
+ *  @return 0 = bound; -1 = bad task or bad space
+ *  @details Only App tasks (is_priv == 0) trigger a switch on schedule; a
+ *           kernel task leaves whatever space is installed alone, because
+ *           kernel access to a frame is a deliberate, momentary thing. */
+int32 arkrtos_paging_bind_task(arkrtos_task_t *p_task, uint32 space);
+
+/** @brief Space a task is bound to (0 when unknown) */
+uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task);
+
 #else
 
 #define arkrtos_paging_stats(p_checked, p_bad, p_bad_base)   (-1)
 #define arkrtos_paging_map_span(va, pa, size, mem)           (-1)
 #define arkrtos_paging_map_pages()                           (0u)
+#define arkrtos_paging_space_count()                         (1u)
+#define arkrtos_paging_space_frame(space)                    (0u)
+#define arkrtos_paging_space_current()                       (0u)
+#define arkrtos_paging_space_activate(space)                 (-1)
+#define arkrtos_paging_bind_task(p_task, space)              (-1)
+#define arkrtos_paging_space_of(p_task)                      (0u)
 
 #endif
 

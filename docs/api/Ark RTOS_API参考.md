@@ -19,7 +19,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（38 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（43 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -30,7 +30,7 @@
 - [kernelsrc/include/arkrtos_mempool.h](#kernelsrcincludearkrtos_mempoolh)（9 项）
 - [kernelsrc/include/arkrtos_mini.h](#kernelsrcincludearkrtos_minih)（20 项）
 - [kernelsrc/include/arkrtos_modld.h](#kernelsrcincludearkrtos_modldh)（8 项）
-- [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（2 项）
+- [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（8 项）
 - [kernelsrc/include/arkrtos_net.h](#kernelsrcincludearkrtos_neth)（6 项）
 - [kernelsrc/include/arkrtos_ptable.h](#kernelsrcincludearkrtos_ptableh)（23 项）
 - [kernelsrc/include/arkrtos_rt.h](#kernelsrcincludearkrtos_rth)（13 项）
@@ -53,7 +53,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（11 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（27 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（34 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（16 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -85,7 +85,7 @@
 - [kernelsrc/src/arkrtos_mini.c](#kernelsrcsrcarkrtos_minic)（1 项）
 - [kernelsrc/src/arkrtos_modld.c](#kernelsrcsrcarkrtos_modldc)（5 项）
 - [kernelsrc/src/arkrtos_mpu.c](#kernelsrcsrcarkrtos_mpuc)（1 项）
-- [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（4 项）
+- [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（10 项）
 - [kernelsrc/src/arkrtos_smp.c](#kernelsrcsrcarkrtos_smpc)（1 项）
 - [kernelsrc/src/arkrtos_task.c](#kernelsrcsrcarkrtos_taskc)（5 项）
 - [kernelsrc/src/arkrtos_tickless.c](#kernelsrcsrcarkrtos_ticklessc)（1 项）
@@ -3344,6 +3344,56 @@ void arkrtos_port_paging_flush(uint32 base, uint32 size);
 静态映射从不撤销，所以本 port 是空操作；留这个口是为了让
 将来真做动态重映射时有地方落，而不是到时候改契约。 */
 
+### `int32 arkrtos_port_paging_activate(uint32 space);`
+
+```c
+int32 arkrtos_port_paging_activate(uint32 space);
+```
+
+**把一个 App 地址空间装进 App 窗口（U-1）**
+- `space`：0 .. arkrtos_port_paging_space_count()-1
+**返回**：0 = 已是该空间或切换成功；-1 = 空间号越界 / 本 port 无 TLB 通路
+本 port 没有硬件页表遍历，所以「每进程页表」= 每个 App 一组
+条目、切换时重写 App 窗口那一条 PS=20 条目。空间号即帧号：
+space 0 是 PA = ARKRTOS_QEMU_APP_BASE（行为与之前完全一致），
+space n 是 ARKRTOS_QEMU_APP_BASE + n * APP_SIZE。
+内核的恒等映射与 UART 条目一条都不动。 */
+
+### `uint32 arkrtos_port_paging_space(void);`
+
+```c
+uint32 arkrtos_port_paging_space(void);
+```
+
+**当前装进 App 窗口的空间号 */**
+
+### `uint32 arkrtos_port_paging_space_frame(uint32 space);`
+
+```c
+uint32 arkrtos_port_paging_space_frame(uint32 space);
+```
+
+**空间号对应的物理帧基址；越界返回 0（不猜一个地址出去） */**
+
+### `uint32 arkrtos_port_paging_space_count(void);`
+
+```c
+uint32 arkrtos_port_paging_space_count(void);
+```
+
+**板级给了几个 App 地址空间（>= 1） */**
+
+### `uint32 arkrtos_port_paging_lookup(uint32 va, uint32 *index, uint32 *pp`
+
+```c
+uint32 arkrtos_port_paging_lookup(uint32 va, uint32 *index, uint32 *ppn, uint32 *ps);
+```
+
+**读回一个 VA 当前由哪条 TLB 条目翻译（诊断用）**
+**返回**：1 = 命中（index/ppn/ps 被写）；0 = 未命中（输出参数不动）
+只读，不建映射。用于分辨「tlbwr 没生效」与「生效了但查找命中
+另一条陈旧条目」——地址空间切换静默失效时就靠它定位。 */
+
 ### `int32  arkrtos_port_flash_erase(uint32 addr, uint32 size);`
 
 ```c
@@ -4717,6 +4767,62 @@ uint32 arkrtos_paging_map_pages(void);
 ```
 
 **How many pages this layer has registered (cumulative readout) */**
+
+### `uint32 arkrtos_paging_space_count(void);`
+
+```c
+uint32 arkrtos_paging_space_count(void);
+```
+
+**How many address spaces the board provides (>= 1) */**
+
+### `uint32 arkrtos_paging_space_frame(uint32 space);`
+
+```c
+uint32 arkrtos_paging_space_frame(uint32 space);
+```
+
+**Physical frame base behind a space; 0 when the space does not exist */**
+
+### `uint32 arkrtos_paging_space_current(void);`
+
+```c
+uint32 arkrtos_paging_space_current(void);
+```
+
+**Which space is currently installed in the App window */**
+
+### `int32 arkrtos_paging_space_activate(uint32 space);`
+
+```c
+int32 arkrtos_paging_space_activate(uint32 space);
+```
+
+**Install a space right now (kernel-side, e.g. before writing a load)**
+**返回**：0 = installed or already there; -1 = bad space / no TLB path
+The scheduler also does this on every switch to an App, from the
+task's binding. Calling it from a kernel task is what lets a loader
+write into a frame the kernel is not currently "in". */
+
+### `int32 arkrtos_paging_bind_task(arkrtos_task_t *p_task, uint32 space);`
+
+```c
+int32 arkrtos_paging_bind_task(arkrtos_task_t *p_task, uint32 space);
+```
+
+**Bind a task to an address space (default for every task is 0)**
+**返回**：0 = bound; -1 = bad task or bad space
+Only App tasks (is_priv == 0) trigger a switch on schedule; a
+kernel task leaves whatever space is installed alone, because
+kernel access to a frame is a deliberate, momentary thing. */
+
+### `uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task);`
+
+```c
+uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task);
+```
+
+**Space a task is bound to (0 when unknown) */**
 
 ## kernelsrc/include/arkrtos_net.h
 
@@ -7507,6 +7613,86 @@ static void la_frame_apply_priv(la_frame_word *frame)
 PRMD.PPLV 写 CRMD.PLV、按 PRMD.PIE 写 CRMD.IE，所以「回到
 PLV3 且开中断」= PPLV=3 + PIE=1 = 0x7。
 
+### `static uint32 la_pg_app_frame(uint32 space)`
+
+```c
+static uint32 la_pg_app_frame(uint32 space)
+```
+
+空间号 -> 物理帧基址（2 MB 对齐，满足 PS=20 条目要求） */
+
+### `static void la_tlb_inval_page(uint32 va)`
+
+```c
+static void la_tlb_inval_page(uint32 va)
+```
+
+**让某个 VA 的翻译失效（含 QEMU 的地址翻译缓存）**
+`invtlb` op=3（PAGEASID）：按 (ASID, VA) 清掉命中的 TLB 条目，
+并整表 flush 掉 QEMU 的 softmmu 缓存。
+为什么必须显式做：QEMU 的 tlbwr 只清它覆盖到的地址范围，而它算
+**奇页**地址的那句写错成 `addr & pagesize`（应为 `| pagesize`），
+于是 PS=20 条目的上半 1 MB 永远留在 softmmu 缓存里 —— 重写条目
+后经那半页读写仍是旧物理帧，症状正是「切换静默失效」。
+顺序要紧：先 invtlb 再写新条目（invtlb 会按旧条目的 PS 匹配）。
+
+### `int32 arkrtos_port_paging_activate(uint32 space)`
+
+```c
+int32 arkrtos_port_paging_activate(uint32 space)
+```
+
+**把一个地址空间装进 App 窗口**
+- `space`：空间号（0 .. 板级 ARKRTOS_PAGING_APPS_MAX-1）
+**返回**：0 = 已是该空间或切换成功；-1 = 空间号越界
+只换 App 窗口那一条 PS=20 条目。调用方（调度器切到某个 App）
+保证此时不会有别的任务正在这个窗口里取指 —— 调用点在切换路径上，
+当前任务已经不在 App 页里跑。
+
+### `uint32 arkrtos_port_paging_space(void)`
+
+```c
+uint32 arkrtos_port_paging_space(void)
+```
+
+当前装进 App 窗口的空间号 */
+
+### `uint32 arkrtos_port_paging_space_frame(uint32 space)`
+
+```c
+uint32 arkrtos_port_paging_space_frame(uint32 space)
+```
+
+空间号对应的物理帧基址；越界返回 0（不猜一个地址出去） */
+
+### `uint32 arkrtos_port_paging_space_count(void)`
+
+```c
+uint32 arkrtos_port_paging_space_count(void)
+```
+
+板级给了几个地址空间（>= 1） */
+
+### `uint32 arkrtos_port_paging_lookup(uint32 va, uint32 *index, uint32 *pp`
+
+```c
+uint32 arkrtos_port_paging_lookup(uint32 va, uint32 *index, uint32 *ppn, uint32 *ps)
+```
+
+**读回一个 VA 当前由哪条 TLB 条目翻译（诊断用）**
+- `va`：要查的虚拟地址
+- `index`：命中条目的绝对号（STLB 0..2047 / MTLB 2048..）
+- `ppn`：命中条目的偶页物理基址（TLBELO0 的 PPN）
+- `ps`：命中条目的页大小指数（12 = 4 KB，22 = 4 MB）
+**返回**：1 = 命中；0 = 未命中（此时三个输出参数不被写）
+`tlbsrch` 按 TLBEHI.VPPN 查找，命中时把命中条目的 INDEX/PS 写回
+TLBIDX、把 TLBELO0/1 写回 CSR。未命中时 TLBIDX 的 EHINV 位
+（bit 31）置 1。这条接口只读，不建映射、不改状态。
+存在的理由：tlbwr 写完一条条目后，「查找到底命中谁」在 C 层
+看不见；地址空间切换曾经**静默失效**（写进 space 1 的数据在
+space 0 里读得到），就是靠它把「写进去了但没生效」和「生效了
+但命中另一条」分开的。
+
 ### `static uint32 la_pg_static_hit(uint32 base, uint32 size)`
 
 ```c
@@ -9015,6 +9201,68 @@ static uint8 arkrtos_paging_code_in_ram(const arkrtos_task_t *p_task) {
 Is this task's code window in the RAM pool (a MiniApp block) rather than in
 the flash image pool? Same test as the window backend uses, and for the same
 reason: it is the recorded window that says so, not a flag that could lie. */
+
+### `uint32 arkrtos_paging_space_count(void) {`
+
+```c
+uint32 arkrtos_paging_space_count(void) {
+```
+
+**How many address spaces the board provides**
+1 means "only the frame this port has always used": nothing about
+the build changes until the board asks for more.
+
+### `uint32 arkrtos_paging_space_frame(uint32 space) {`
+
+```c
+uint32 arkrtos_paging_space_frame(uint32 space) {
+```
+
+**Physical frame base behind an address space**
+**返回**：frame base, or 0 when the space does not exist (never a guess)
+
+### `uint32 arkrtos_paging_space_current(void) {`
+
+```c
+uint32 arkrtos_paging_space_current(void) {
+```
+
+**Which space is currently installed in the App window**
+
+### `int32 arkrtos_paging_space_activate(uint32 space) {`
+
+```c
+int32 arkrtos_paging_space_activate(uint32 space) {
+```
+
+**Install an address space now**
+- `space`：0 .. arkrtos_paging_space_count()-1
+**返回**：0 = installed or already installed; -1 = bad space / no TLB path
+The scheduler calls this indirectly on every switch to an App
+(arkrtos_mpu_set_app -> the task's binding). A kernel task calls it
+directly when it is about to write into a frame that is not the one
+currently installed - the ELF loader will do exactly that once
+second-instance loading exists (debt U-2).
+
+### `int32 arkrtos_paging_bind_task(arkrtos_task_t *p_task, uint32 space) {`
+
+```c
+int32 arkrtos_paging_bind_task(arkrtos_task_t *p_task, uint32 space) {
+```
+
+**Bind a task to an address space**
+**返回**：0 = bound; -1 = bad task pointer / bad space
+Binding only stores a number; the switch happens lazily, at the next
+schedule to that task. That is deliberate: binding inside the loader
+must not change the translation of the frame it is still writing.
+
+### `uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task) {`
+
+```c
+uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task) {
+```
+
+**Space a task is bound to (0 for unbound / unknown)**
 
 ### `int32 arkrtos_paging_map_span(uint32 va, uint32 pa, uint32 size, arkrt`
 

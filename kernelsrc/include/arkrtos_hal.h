@@ -426,11 +426,41 @@ int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_t mem);
  *           将来真做动态重映射时有地方落，而不是到时候改契约。 */
 void arkrtos_port_paging_flush(uint32 base, uint32 size);
 
+/** @brief 把一个 App 地址空间装进 App 窗口（U-1）
+ *  @param space 0 .. arkrtos_port_paging_space_count()-1
+ *  @return 0 = 已是该空间或切换成功；-1 = 空间号越界 / 本 port 无 TLB 通路
+ *  @details 本 port 没有硬件页表遍历，所以「每进程页表」= 每个 App 一组
+ *           条目、切换时重写 App 窗口那一条 PS=20 条目。空间号即帧号：
+ *           space 0 是 PA = ARKRTOS_QEMU_APP_BASE（行为与之前完全一致），
+ *           space n 是 ARKRTOS_QEMU_APP_BASE + n * APP_SIZE。
+ *           内核的恒等映射与 UART 条目一条都不动。 */
+int32 arkrtos_port_paging_activate(uint32 space);
+
+/** @brief 当前装进 App 窗口的空间号 */
+uint32 arkrtos_port_paging_space(void);
+
+/** @brief 空间号对应的物理帧基址；越界返回 0（不猜一个地址出去） */
+uint32 arkrtos_port_paging_space_frame(uint32 space);
+
+/** @brief 板级给了几个 App 地址空间（>= 1） */
+uint32 arkrtos_port_paging_space_count(void);
+
+/** @brief 读回一个 VA 当前由哪条 TLB 条目翻译（诊断用）
+ *  @return 1 = 命中（index/ppn/ps 被写）；0 = 未命中（输出参数不动）
+ *  @details 只读，不建映射。用于分辨「tlbwr 没生效」与「生效了但查找命中
+ *           另一条陈旧条目」——地址空间切换静默失效时就靠它定位。 */
+uint32 arkrtos_port_paging_lookup(uint32 va, uint32 *index, uint32 *ppn, uint32 *ps);
+
 #else
 
 #define arkrtos_port_paging_init()                 (-1)
 #define arkrtos_port_paging_check(base, size, mem) (-1)
 #define arkrtos_port_paging_alias(va, pa, mem)     (-1)
+#define arkrtos_port_paging_activate(space)        (-1)
+#define arkrtos_port_paging_space()                (0u)
+#define arkrtos_port_paging_space_frame(space)     (0u)
+#define arkrtos_port_paging_space_count()          (1u)
+#define arkrtos_port_paging_lookup(va, index, ppn, ps) (0u)
 #define arkrtos_port_paging_flush(base, size)
 
 #endif

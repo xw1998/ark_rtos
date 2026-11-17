@@ -564,10 +564,15 @@ static void la_mmu_init(void)
                 LA_PTE_MMIO(ARKRTOS_QEMU_UART_BASE & ~0xFFFu),
                 LA_PTE_MMIO((ARKRTOS_QEMU_UART_BASE & ~0xFFFu) + 0x1000u));
 
-    /* App 页（PLV3、RWX）：App 的代码、数据、栈全在这 2 MB 里 */
-    la_tlb_fill(ARKRTOS_QEMU_APP_BASE, 20u, LA_MTLB_INDEX + 2u,
-                LA_PTE_APP(ARKRTOS_QEMU_APP_BASE),
-                LA_PTE_APP(ARKRTOS_QEMU_APP_BASE + 0x100000u));
+    /* App 页（PLV3、RWX）：App 的代码、数据、栈全在这 2 MB 里。
+     * **必须用 tlbwr 写固定索引**：这是唯一一条会在运行期被换掉的条目
+     * （每 App 地址空间切换，见 arkrtos_port_paging_activate），索引必须
+     * 已知。走 tlbfill 会被随机塞进某条 MTLB 槽，切换时往 2050 写一条新的，
+     * 而旧条目仍留在别的槽里 —— 查找命中旧的那条，切换静默失效（实测：
+     * space 1 写入的数据在 space 0 里被读到）。 */
+    la_tlb_write(ARKRTOS_QEMU_APP_BASE, 20u, LA_MTLB_INDEX + 2u,
+                 LA_PTE_APP(ARKRTOS_QEMU_APP_BASE),
+                 LA_PTE_APP(ARKRTOS_QEMU_APP_BASE + 0x100000u));
 
     /* App 的 UART 别名（PLV3、RW）：同一台 16550，换个 VA。
      * 内核那页是 PLV0，App 碰不到，所以必须单独给一页 —— 这一页同时也是
@@ -661,6 +666,211 @@ static const la_pg_span_t s_pg_spans[] = {
 };
 
 #define LA_PG_SPAN_COUNT        (sizeof(s_pg_spans) / sizeof(s_pg_spans[0]))
+
+/* 板级给了几个 App 地址空间。缺省 1 = 只有 space 0（PA 0x02000000），
+ * 也就是这条机制出现之前的行为；多个空间要板级显式给数。 */
+#ifndef ARKRTOS_PAGING_APPS_MAX
+#define ARKRTOS_PAGING_APPS_MAX     1u
+#endif
+
+static uint32 s_pg_app_space;       /* 当前装进 App 窗口的空间号 */
+
+/* ------------------------------------------------------------
+ * 每 App 地址空间（U-1）：同一 VA，不同物理帧
+ * @details 本 port 没有硬件页表遍历（QEMU 9.2.3 的 cpu->ptw = OFF），所以
+ *          「每进程页表」在这里的落地形态是：**每个 App 一组条目，切换时
+ *          用 tlbwr 把 App 窗口那一条换成该 App 的物理帧**。地址空间号就是
+ *          帧号，帧从 ARKRTOS_QEMU_APP_BASE 起按 2 MB 步进：
+ *
+ *            space 0 -> PA 0x02000000（QEMU 把 .appprobe 装到这里，也是
+ *                       ELF 装载器一直以来用的那一块，行为不变）
+ *            space 1 -> PA 0x04000000
+ *            ...
+ *
+ *          为什么帧不放在内核恒等映射（低 16 MB）里：App 的 2 MB 窗口
+ *          本身就在 16 MB 以上，内核是通过**同一个 VA**（PLV0 可以访问
+ *          PLV3 条目，LoongArch 的判据是 current PLV <= 条目的 PLV）读写
+ *          App 内存的，因此帧只要落在 DRAM 里、由 App 窗口条目指过去就行。
+ *          这也顺带把「一个 App 的物理页对另一个 App 不可达」变成结构性
+ *          事实：别的 App 的帧没有任何 VA 映射到它。
+ *
+ *          切换只需要重写一条 MTLB 条目（PS=20，索引 LA_MTLB_INDEX+2），
+ *          不需要 invtlb：同一条条目被 tlbwr 覆盖后旧翻译就不存在了。
+ *          内核那两条 PS=22 恒等映射与两条 4 KB UART 条目一根手指都不碰。
+ *
+ *          帧数由板级 ARKRTOS_PAGING_APPS_MAX 决定，**默认 1**（只有 space 0，
+ *          与改动前逐字节同义）。这个宏缺省时取 1，别的 LA 板不需要改。
+ * ------------------------------------------------------------ */
+/** 空间号 -> 物理帧基址（2 MB 对齐，满足 PS=20 条目要求） */
+static uint32 la_pg_app_frame(uint32 space)
+{
+    return ARKRTOS_QEMU_APP_BASE + (space * ARKRTOS_QEMU_APP_SIZE);
+}
+
+#if (ARKRTOS_USE_PRIV == 1)
+
+/**
+* @brief 让某个 VA 的翻译失效（含 QEMU 的地址翻译缓存）
+* @details `invtlb` op=3（PAGEASID）：按 (ASID, VA) 清掉命中的 TLB 条目，
+*          并整表 flush 掉 QEMU 的 softmmu 缓存。
+*          为什么必须显式做：QEMU 的 tlbwr 只清它覆盖到的地址范围，而它算
+*          **奇页**地址的那句写错成 `addr & pagesize`（应为 `| pagesize`），
+*          于是 PS=20 条目的上半 1 MB 永远留在 softmmu 缓存里 —— 重写条目
+*          后经那半页读写仍是旧物理帧，症状正是「切换静默失效」。
+*          顺序要紧：先 invtlb 再写新条目（invtlb 会按旧条目的 PS 匹配）。
+*/
+static void la_tlb_inval_page(uint32 va)
+{
+    __asm__ volatile("invtlb 3, $zero, %0"
+                     :: "r"((unsigned long)va) : "memory");
+}
+
+/**
+* @brief 把一个地址空间装进 App 窗口
+* @param space 空间号（0 .. 板级 ARKRTOS_PAGING_APPS_MAX-1）
+* @return 0 = 已是该空间或切换成功；-1 = 空间号越界
+* @details 只换 App 窗口那一条 PS=20 条目。调用方（调度器切到某个 App）
+*          保证此时不会有别的任务正在这个窗口里取指 —— 调用点在切换路径上，
+*          当前任务已经不在 App 页里跑。
+*/
+int32 arkrtos_port_paging_activate(uint32 space)
+{
+    uint32 pa;
+
+    if(space >= (uint32)ARKRTOS_PAGING_APPS_MAX)
+    {
+        return -1;
+    }
+
+    if(space == s_pg_app_space)
+    {
+        return 0;
+    }
+
+    pa = la_pg_app_frame(space);
+
+    /* VA 与 PA 都必须 2 MB 对齐（PS=20 的条目要求），帧号与 VA 基址都是
+     * 2 MB 的整数倍，这条由构造保证。一条 MTLB 条目覆盖 2 MB（LO0/LO1
+     * 各 1 MB）。 */
+    la_tlb_inval_page(ARKRTOS_QEMU_APP_BASE);
+    la_tlb_write(ARKRTOS_QEMU_APP_BASE, 20u, LA_MTLB_INDEX + 2u,
+                 LA_PTE_APP(pa), LA_PTE_APP(pa + 0x100000u));
+
+    /* 写进去不等于生效：tlbwr 认不认这条索引、查找会不会命中另一条陈旧
+     * 条目，只有读回来才知道。读回来对不上就报 -2 并**不改** s_pg_app_space
+     * —— 报错留在原地，比「切换了」这句谎话好。 */
+    {
+        uint32 probed_ppn = 0u;
+
+        if((arkrtos_port_paging_lookup(ARKRTOS_QEMU_APP_BASE, 0, &probed_ppn, 0) == 0u) ||
+           (probed_ppn != pa))
+        {
+            return -2;
+        }
+    }
+
+    s_pg_app_space = space;
+    return 0;
+}
+
+#else  /* ARKRTOS_USE_PRIV == 0：没有 TLB 通路 */
+
+int32 arkrtos_port_paging_activate(uint32 space)
+{
+    (void)space;
+    return -1;
+}
+
+#endif /* ARKRTOS_USE_PRIV == 1 */
+
+/** 当前装进 App 窗口的空间号 */
+uint32 arkrtos_port_paging_space(void)
+{
+    return s_pg_app_space;
+}
+
+/** 空间号对应的物理帧基址；越界返回 0（不猜一个地址出去） */
+uint32 arkrtos_port_paging_space_frame(uint32 space)
+{
+    if(space >= (uint32)ARKRTOS_PAGING_APPS_MAX)
+    {
+        return 0u;
+    }
+
+    return la_pg_app_frame(space);
+}
+
+/** 板级给了几个地址空间（>= 1） */
+uint32 arkrtos_port_paging_space_count(void)
+{
+    return (uint32)ARKRTOS_PAGING_APPS_MAX;
+}
+
+/**
+* @brief 读回一个 VA 当前由哪条 TLB 条目翻译（诊断用）
+* @param va     要查的虚拟地址
+* @param index  命中条目的绝对号（STLB 0..2047 / MTLB 2048..）
+* @param ppn    命中条目的偶页物理基址（TLBELO0 的 PPN）
+* @param ps     命中条目的页大小指数（12 = 4 KB，22 = 4 MB）
+* @return 1 = 命中；0 = 未命中（此时三个输出参数不被写）
+* @details `tlbsrch` 按 TLBEHI.VPPN 查找，命中时把命中条目的 INDEX/PS 写回
+*          TLBIDX、把 TLBELO0/1 写回 CSR。未命中时 TLBIDX 的 EHINV 位
+*          （bit 31）置 1。这条接口只读，不建映射、不改状态。
+*          存在的理由：tlbwr 写完一条条目后，「查找到底命中谁」在 C 层
+*          看不见；地址空间切换曾经**静默失效**（写进 space 1 的数据在
+*          space 0 里读得到），就是靠它把「写进去了但没生效」和「生效了
+*          但命中另一条」分开的。
+*/
+uint32 arkrtos_port_paging_lookup(uint32 va, uint32 *index, uint32 *ppn, uint32 *ps)
+{
+#if (ARKRTOS_USE_PRIV == 1)
+    unsigned long idx = 0UL;
+    unsigned long lo0 = 0UL;
+
+    LA_CSRW(LA_CSR_TLBEHI, (unsigned long)va);
+    __asm__ volatile("tlbsrch" ::: "memory");
+    LA_CSRR(LA_CSR_TLBIDX, idx);
+
+    /* TLBSRCH 只写 TLBIDX（INDEX/NE），**不**写 TLBELO；条目内容要用 TLBRD
+     * 按 TLBIDX.INDEX 读回。少了这一步，读到的 PPN 会是上一次 tlbwr 留下的
+     * 陈旧值 —— 看起来「对上了」，其实什么都没验证。 */
+    if(((uint32)idx & 0x80000000u) != 0u)     /* NE：未命中 */
+    {
+        return 0u;
+    }
+    __asm__ volatile("tlbrd" ::: "memory");
+    LA_CSRR(LA_CSR_TLBIDX, idx);
+    LA_CSRR(LA_CSR_TLBELO0, lo0);
+    if(((uint32)idx & 0x80000000u) != 0u)     /* 条目无效 */
+    {
+        return 0u;
+    }
+    if(((uint32)lo0 & LA_PTE_V) == 0u)
+    {
+        return 0u;
+    }
+
+    if(index != 0)
+    {
+        *index = (uint32)idx & 0xFFFu;
+    }
+    if(ppn != 0)
+    {
+        *ppn = (uint32)(lo0 & ~0xFFFUL);
+    }
+    if(ps != 0)
+    {
+        *ps = ((uint32)idx >> 24) & 0x3Fu;
+    }
+    return 1u;
+#else
+    (void)va;
+    (void)index;
+    (void)ppn;
+    (void)ps;
+    return 0u;
+#endif
+}
 
 #if (ARKRTOS_USE_PRIV == 1)
 

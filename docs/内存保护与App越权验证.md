@@ -215,9 +215,15 @@ RV64GC 的硬件位是 1，但本仓还没有 RV64 port、也没有页表初始�
 | App 区 `0x02000000` | 2 MB，PS=20 | **PLV3**，RWX |
 | App UART 别名 `0x02202000` | 4 KB | **PLV3**，读写 |
 
-`ASID` 固定 0；**任务切换不换页表**，只改 `s_next_pplv`（`arkrtos_port_set_thread_priv`），
-特权级由异常帧在返回用户态时落地。所以 `set_app` / `set_idle` / `reset` 在 paging
-后端里是空实现——它们要做的「换地址空间」这件事，本后端没有做。
+`ASID` 固定 0：这台机器上没有硬件页表遍历，所以「换页表」= **重写 App 窗口那一条
+PS=20 条目**（2026-11-17 起，U-1；见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.17）。
+`arkrtos_mpu_set_app()` 在切到 App 任务时按任务的绑定重写这一条，内核任务不切
+（它们跑在恒等映射上）；特权级仍由 `s_next_pplv` 与异常帧落地。于是
+`0x02000000` 在每个空间里 VA 相同、物理帧不同：一个 App 连别的 App 的帧都叫不出来。
+静态的那几条（内核低 16 MB / 内核 UART / App UART 别名）一条都不动。
+
+板级 `ARKRTOS_PAGING_APPS_MAX` **缺省 1**：此时 `activate()` 在「已是该空间」处直接
+返回，调度路径与改动前零差别；示例板开成 2 只是为了出读数。
 
 **那 paging 后端的真实增量是什么？**是**装载期跨度审计**：
 `arkrtos_mpu_build_task()` 里对每个任务的 ROM 区间与 RAM 区间调
@@ -274,7 +280,8 @@ int32 arkrtos_paging_stats(uint32 *p_checked, uint32 *p_bad, uint32 *p_bad_base)
 | `sec` 报 `iso=2`，与窗口后端 `iso=1` 区分 | **已做** |
 | App 在非特权态跑完整自检 | **已做**（LA64 QEMU `utest` 13/13） |
 | 把**可执行文件**装进用户窗口直接跑（`exec` / 敲路径，Linux 入口约定） | **已做 M1**（`ARKRTOS_USE_ELF=1`，单窗口 + 单实例；见 [MMU进程模型与ELF装载](MMU进程模型与ELF装载.md)）。它是"文件即程序"，**不是**进程 |
-| 每 App 一份页表 / 同 VA 多实例 | **未做**（当前单页表、ASID=0） |
+| 每 App 一份地址空间（**机制**） | **已做（2026-11-17）**：空间号即帧号（`space n → 0x02000000 + n*2 MB`），`set_app` 重写 App 窗口 PS=20 条目，VA 恒 `0x02000000`；读数 `pmap u1: PASS - same VA, two frames`（space 0 读到 `0xA5A50001`、space 1 读到 `0xA5A50002`），`pmap look` 直接打印条目号与 PPN。坑：QEMU 的 `tlbwr` 不刷新大页**奇页**，切换前必须按 VA 发 `invtlb 3`，否则静默失效 |
+| 同 VA **并发**多实例（两个 App 同时在场） | **未做**（U-2）：ELF 装载器仍单实例，第二个 `exec` 返回 `ERR_BUSY`。机制已具备，缺的是「同时存在两个任务各在自己空间里跑」的调度与装载 |
 | 页帧分配器 | **未做** |
 | 缺页处理 | **未做** |
 | `copy_from_user` / `copy_to_user`（内核安全访问用户地址） | **未做** |
@@ -284,7 +291,8 @@ int32 arkrtos_paging_stats(uint32 *p_checked, uint32 *p_bad, uint32 *p_bad_base)
 
 验收判据（做这些欠账时按这条验收，不按「能跑起来」验收）：
 
-1. 两个 App 各自一份页表，**同一 VA** 在两个 App 里指向不同物理页，互不干扰；
+1. 两个 App 各自一份页表，**同一 VA** 在两个 App 里指向不同物理页，互不干扰
+   （**机制已达成**：`pmap u1` 在同一 VA 上读出两个不同值；**并发**未达成，见 U-2）；
 2. 反向三探针（写内核 RAM / 写别的 App RAM / 跳到未映射地址）**全拦**，且各有独立 fault 读数；
 3. 内核保持静态直映射，不被用户态页表影响；
 4. `copy_from_user` 对非法用户指针返回错误码，**不 fault 内核**。

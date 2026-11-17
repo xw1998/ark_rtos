@@ -269,6 +269,33 @@ def main():
             bad.append("H: 命令表容量预算没有算上 pmap")
         return bad
 
+    def pin_i(port):
+        bad = []
+        if "static void la_tlb_inval_page(" not in port:
+            bad.append("I: port 里没有 la_tlb_inval_page（切换前按 VA 失效）")
+        inv = _body(port, "static void la_tlb_inval_page(")
+        if "invtlb 3" not in inv:
+            bad.append("I: la_tlb_inval_page 没有走 invtlb op=3")
+        body = _body(port, "int32 arkrtos_port_paging_activate(")
+        if not body:
+            bad.append("I: 找不到 arkrtos_port_paging_activate 的定义")
+        else:
+            if "la_tlb_inval_page(" not in body:
+                bad.append("I: activate 没有先失效旧翻译（切换会留在 softmmu 缓存里）")
+            if "la_tlb_write(ARKRTOS_QEMU_APP_BASE, 20u, LA_MTLB_INDEX + 2u" not in body:
+                bad.append("I: activate 没有重写 App 窗口那条 PS=20 条目")
+        return bad
+
+    def pin_j(pg, hal, mpu):
+        bad = []
+        if "arkrtos_port_paging_activate(" not in _body(pg, "void arkrtos_mpu_set_app("):
+            bad.append("J: set_app 没有切地址空间")
+        if "#define arkrtos_port_paging_lookup(va, index, ppn, ps) (0u)" not in hal:
+            bad.append("J: arkrtos_hal.h 关档回退没有 lookup（恒 0 = 未命中）")
+        if "arkrtos_paging_space_activate(" not in mpu:
+            bad.append("J: arkrtos_mpu.h 没有 space_activate 接口")
+        return bad
+
     for rel in ("kernelsrc/src/arkrtos_paging.c",
                 "kernelsrc/port/loongarch/la64/arkrtos_port.c",
                 "kernelsrc/include/arkrtos_hal.h",
@@ -285,7 +312,8 @@ def main():
         src_sh = _src("kernelsrc/shell/arkrtos_shell.c")
 
         for msg in (pin_e(src_pg) + pin_f(src_port) +
-                    pin_g(src_hal, src_mpu) + pin_h(src_sh)):
+                    pin_g(src_hal, src_mpu) + pin_h(src_sh) +
+                    pin_i(src_port) + pin_j(src_pg, src_hal, src_mpu)):
             failures.append("源码 pin 不成立 " + msg)
 
         # 自检：把每条 pin 依赖的那一句改坏，对应 pin 必须报错
@@ -299,6 +327,11 @@ def main():
                 "#define arkrtos_port_paging_alias(va, pa, mem)     (0)", 1), src_mpu)),
             ("H", pin_h(src_sh.replace('ARK_SHELL_CMD("pmap", cmd_pmap',
                                        'ARK_SHELL_CMD("pmapX", cmd_pmap', 1))),
+            ("I", pin_i(src_port.replace("la_tlb_inval_page(",
+                                         "la_tlb_inval_page_X("))),
+            ("J", pin_j(src_pg.replace("arkrtos_port_paging_activate(",
+                                       "arkrtos_port_paging_activate_X(", 1),
+                         src_hal, src_mpu)),
         ]
         for tag, got in selfchecks:
             if not got:
@@ -312,7 +345,8 @@ def main():
         return 1
 
     print("PAGING-GATE OK: 默认档=0 / LA64 打开编得过(2 TU) / RV32 负向被拒 / "
-          "两后端互斥被拒 / 动态映射接线 E-H 四条 pin 成立且自检有效")
+          "两后端互斥被拒 / 动态映射接线 E-H 四条 pin 成立且自检有效 / "
+          "每 App 地址空间 I-J 两条 pin 成立且自检有效")
     return 0
 
 

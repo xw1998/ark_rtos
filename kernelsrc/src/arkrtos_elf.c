@@ -35,6 +35,9 @@
 #include "arkrtos_vfs.h"
 #if (ARKRTOS_USE_EXEC_SIGN == 1)
 #include "arkrtos_sign.h"
+#if (ARKRTOS_USE_PAGING == 1)
+#include "arkrtos_mpu.h"
+#endif
 #endif
 
 /* ---------------------------------------------------------------- 编译期 */
@@ -551,6 +554,14 @@ int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[])
 
     /* 注册出来的任务默认是特权任务；ELF 程序必须降权，否则隔离为空。 */
     arkrtos_task_table[id - 1].is_priv = 0u;
+
+#if (ARKRTOS_USE_PAGING == 1)
+    /* 装载是把段按 p_vaddr 写进「当前装着的那个 App 帧」的（U-1 之后
+     * 0x02000000 的落点由地址空间决定），所以任务必须绑到同一个空间：
+     * 否则写的是 frame A、跑的是 frame B —— 程序一取指就落进别人的帧。 */
+    (void)arkrtos_paging_bind_task(&arkrtos_task_table[id - 1],
+                                   arkrtos_paging_space_current());
+#endif
 
     s_elf_task = id;
     s_elf_info.entry      = (uint32)entry;

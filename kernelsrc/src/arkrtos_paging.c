@@ -27,12 +27,17 @@
 *               and remembered, so "the image landed somewhere the TLB will
 *               never translate" becomes a number instead of a mysterious
 *               refill fault at first fetch.
-*            3. set_app/set_idle do **not** switch address spaces. There is one
-*               page table and ASID is fixed at 0; what changes between a
-*               kernel task and an App is the privilege level (PLV0 / PLV3),
-*               which the port already applies through the trap frame
-*               (arkrtos_port_set_thread_priv -> PRMD.PPLV). Pretending to
-*               switch a page table here would be an empty instruction.
+*            3. set_app() DOES switch address spaces as of U-1 (2026-11-17):
+*               each App task carries a space number (task -> space table in
+*               this file), and switching to it re-installs the App window's
+*               single PS=20 MTLB entry to point at that space's physical
+*               frame. The virtual address of the window is identical in every
+*               space, so an App cannot name another App's frame at all. Kernel
+*               tasks do not switch: they keep whatever space is installed and
+*               use arkrtos_paging_space_activate() when they deliberately
+*               write into a given frame. There is still no ASID (all 0) and no
+*               hardware page walker on this port, so "per-process page table"
+*               means "per-process set of entries", not a walkable table.
 *
 *          What IS here as of the MMIO registration round: map_span(), a 4 KB
 *          granular run-time mapping request that the port turns into real TLB
@@ -40,18 +45,22 @@
 *          (PLV0); an App-visible dynamic mapping needs the per-process table
 *          below, so it is refused rather than approximated.
 *
-*          Deliberately NOT here (registered as debt, with the acceptance test
-*          written down so it cannot be claimed later without doing the work):
-*            - a page-frame allocator and one page table per App (same virtual
-*              addresses in two instances);
-*            - copy_from_user / copy_to_user and any form of uaccess;
-*            - demand paging;
-*            - an ASID per task.
-*          The acceptance test for that debt is: two Apps each own a page
-*          table, the same VA maps to different PA in each, three reverse
+*          What U-1 delivers (2026-11-17) and what it does not:
+*            DONE  - App tasks bind to an address space, the scheduler installs
+*                    it on switch, the same VA maps to a different physical
+*                    frame per space, and the kernel keeps its static direct
+*                    map untouched. Demonstrated in QEMU with data written and
+*                    read back through the same VA in two spaces (pmap u1).
+*            NOT   - a page-frame allocator (frames are a fixed board-level
+*                    array, space n -> window base + n * window size);
+*                  - the loader running two instances: arkrtos_elf.c still
+*                    loads into space 0 and refuses a second program (U-2);
+*                  - copy_from_user / copy_to_user; demand paging; ASID;
+*                  - the PLV3 reverse probes for a second instance (there is
+*                    no second runnable App on this board yet).
+*          The acceptance test for the remaining debt is unchanged: two Apps
+*          each own a space, the same VA maps to different PA, three reverse
 *          probes are refused, and the kernel keeps its static direct map.
-*          Until then this backend isolates by mapped-span + privilege level
-*          only, and says so.
 *
 * @note ARKRTOS_USE_PAGING == 0 removes the whole body: the translation unit is
 *       empty, so the default build (ARM Cortex-M, RV32 PMP) keeps byte-for-byte
@@ -66,6 +75,7 @@
 #if (ARKRTOS_USE_PAGING == 1)
 
 #include "arkrtos_partition.h"    /* kernel only: single source of addresses */
+#include "arkrtos_cfg.h"          /* arkrtos_task_table: task -> space binding */
 
 /* ------------------------------------------------------------ audit state */
 
@@ -74,6 +84,11 @@ static uint32 s_pg_checked;       /* spans audited since boot */
 static uint32 s_pg_bad;           /* spans that no mapping covers properly */
 static uint32 s_pg_bad_base;      /* start address of the first bad span */
 static uint32 s_pg_map_pages;     /* pages registered through map_span() */
+
+/* Task -> address space binding. Kept here rather than in the TCB so that the
+ * window backend and every non-paging build are untouched: a task that is never
+ * bound stays at 0, which is the frame this port has always used. */
+static uint8  s_pg_task_space[ARKRTOS_TASK_MAX_NUM];
 
 /* One call may register at most this many 4 KB pages. The port keeps 8 entry
  * pairs (one STLB entry covers two pages), and a device window larger than
@@ -127,6 +142,15 @@ void arkrtos_mpu_module_init(void)
     s_pg_bad_base  = 0u;
     s_pg_map_pages = 0u;
 
+    {
+        uint32 i;
+
+        for(i = 0u; i < (uint32)ARKRTOS_TASK_MAX_NUM; i++)
+        {
+            s_pg_task_space[i] = 0u;
+        }
+    }
+
     if(arkrtos_port_paging_init() != 0)
     {
         s_pg_init_err = 1u;
@@ -159,9 +183,30 @@ void arkrtos_mpu_build_task(arkrtos_task_t *p_task)
 
 void arkrtos_mpu_set_app(arkrtos_task_t *p_app)
 {
-    /* Address space does not change per task (one page table, ASID 0). The
-     * privilege change is applied by the scheduler through the trap frame. */
-    (void)p_app;
+    int32 idx;
+
+    if(p_app == 0)
+    {
+        return;
+    }
+
+    /* Kernel tasks (is_priv != 0) do not own an address space: they run on the
+     * kernel identity map, and when they touch an App window they mean
+     * "whatever is installed right now" (a loader writing into a frame does it
+     * through arkrtos_paging_space_activate() first). Switching here would
+     * make the meaning of 0x02000000 depend on scheduling order. */
+    if(p_app->is_priv != 0u)
+    {
+        return;
+    }
+
+    idx = (int32)(p_app - arkrtos_task_table);
+    if((idx < 0) || (idx >= (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return;
+    }
+
+    (void)arkrtos_port_paging_activate((uint32)s_pg_task_space[idx]);
 }
 
 void arkrtos_mpu_set_idle(void)
@@ -172,7 +217,106 @@ void arkrtos_mpu_set_idle(void)
 
 void arkrtos_mpu_reset(void)
 {
-    /* Nothing to restore: the static map is never torn down. */
+    /* The static map is never torn down; the only thing that has state is
+     * which App frame is installed, and going back to space 0 is the value
+     * every build started with. */
+    (void)arkrtos_port_paging_activate(0u);
+}
+
+/* ----------------------------------------------------- address spaces (U-1) */
+
+/**
+* @brief How many address spaces the board provides
+* @details 1 means "only the frame this port has always used": nothing about
+*          the build changes until the board asks for more.
+*/
+uint32 arkrtos_paging_space_count(void)
+{
+    return arkrtos_port_paging_space_count();
+}
+
+/**
+* @brief Physical frame base behind an address space
+* @return frame base, or 0 when the space does not exist (never a guess)
+*/
+uint32 arkrtos_paging_space_frame(uint32 space)
+{
+    return arkrtos_port_paging_space_frame(space);
+}
+
+/**
+* @brief Which space is currently installed in the App window
+*/
+uint32 arkrtos_paging_space_current(void)
+{
+    return arkrtos_port_paging_space();
+}
+
+/**
+* @brief Install an address space now
+* @param space 0 .. arkrtos_paging_space_count()-1
+* @return 0 = installed or already installed; -1 = bad space / no TLB path
+* @details The scheduler calls this indirectly on every switch to an App
+*          (arkrtos_mpu_set_app -> the task's binding). A kernel task calls it
+*          directly when it is about to write into a frame that is not the one
+*          currently installed - the ELF loader will do exactly that once
+*          second-instance loading exists (debt U-2).
+*/
+int32 arkrtos_paging_space_activate(uint32 space)
+{
+    if(space >= arkrtos_port_paging_space_count())
+    {
+        return -1;
+    }
+
+    return arkrtos_port_paging_activate(space);
+}
+
+/**
+* @brief Bind a task to an address space
+* @return 0 = bound; -1 = bad task pointer / bad space
+* @details Binding only stores a number; the switch happens lazily, at the next
+*          schedule to that task. That is deliberate: binding inside the loader
+*          must not change the translation of the frame it is still writing.
+*/
+int32 arkrtos_paging_bind_task(arkrtos_task_t *p_task, uint32 space)
+{
+    int32 idx;
+
+    if((p_task == 0) || (space >= arkrtos_port_paging_space_count()))
+    {
+        return -1;
+    }
+
+    idx = (int32)(p_task - arkrtos_task_table);
+    if((idx < 0) || (idx >= (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return -1;
+    }
+
+    s_pg_task_space[idx] = (uint8)space;
+    return 0;
+}
+
+/**
+* @brief Space a task is bound to (0 for unbound / unknown)
+*/
+uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task)
+{
+    int32 idx;
+
+    if(p_task == 0)
+    {
+        return 0u;
+    }
+
+    idx = (int32)(p_task - arkrtos_task_table);
+    if((idx < 0) || (idx >= (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return 0u;
+    }
+
+    return (uint32)s_pg_task_space[idx];
 }
 
 /**

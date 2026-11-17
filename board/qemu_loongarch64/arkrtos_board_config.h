@@ -84,6 +84,13 @@
  * 另一组，彻底没有这个风险。页内 0x1E0 仍对应 PA 0x1FE001E0。 */
 #define ARKRTOS_QEMU_APP_UART        0x022021E0u
 
+/* 每 App 地址空间的帧数（U-1）。space n 的物理帧 = APP_BASE + n * APP_SIZE，
+ * 所以 space 0 = 0x02000000（QEMU 装 .appprobe 的地方，也是 ELF 装载器一直
+ * 用的那块，行为不变）、space 1 = 0x02200000。取 2 只为在 QEMU 上把「同一
+ * VA 映到不同 PA」跑出读数；帧是固定数组，没有页帧分配器（欠账 U-3）。
+ * QEMU 的 DRAM 有 128 MB，0x02200000~0x02400000 是 .appprobe 之后的空地。 */
+#define ARKRTOS_PAGING_APPS_MAX      2u
+
 /* ============================================================
  * 四、能力开关
  * @details LA64 硬件有 FPU，但这一版没有启用 FPU 上下文保存（任务切换不存

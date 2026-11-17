@@ -1788,6 +1788,141 @@ pin F 的自检第一版是**空转**的：变异串 `la_tlb_write(pair, 12u` �
   （路径已知但设计未定）。登记为 **U-15**——符合"宁可报错，也不给看似权威的错答案"。
 - **App 可见的动态映射**：属 U-1（每进程页表），接口一律拒绝。
 
+### 5.17 每 App 地址空间：同一 VA、两块物理帧（U-1，2026-11-17）
+
+#### 5.17.1 本 port 没有硬件页表遍历，所以「每进程页表」= 每进程一组条目
+
+QEMU 的 LA64 板（`cpu->ptw = OFF`）不会走内存里的页表，翻译只来自 TLB。
+所以 U-1 在这里只能落成：**每个 App 地址空间占一条 App 窗口条目，切换时重写
+那一条**，而不是「每个进程一张可遍历的页表」。
+
+- 空间号即帧号：`space n → PA = ARKRTOS_QEMU_APP_BASE + n * ARKRTOS_QEMU_APP_SIZE`
+  （2 MB 步进，space 0 = `0x02000000`、space 1 = `0x02200000`）。
+- VA 在每个空间里完全一样（`0x02000000`），所以一个 App **连别的 App 的帧都叫不出来**
+  —— 不是"越权被拒"，是那个地址根本不存在。
+- 帧是板级固定数组（`ARKRTOS_PAGING_APPS_MAX`），**缺省 1**：此时 `activate()`
+  在 `space == s_pg_app_space` 处直接返回，调度路径与改动前零差别。
+- 内核任务（`is_priv != 0`）不切空间：它们跑在内核恒等映射上，要写某个帧就显式
+  `arkrtos_paging_space_activate()`。切换发生在 `arkrtos_mpu_set_app()` 里，而
+  App 任务的 `is_priv == 0`，所以只有 App 会带走空间。
+- ELF 装载器落在**当前装着的那个空间**：写完段之后把新任务绑到同一个空间号
+  （`arkrtos_paging_bind_task()`），否则会出现「写的是 frame A、跑的是 frame B」。
+
+| 层 | 接口 | 说明 |
+|---|---|---|
+| port | `arkrtos_port_paging_activate(space)` | 0 = 成功/已在；-1 越界；**-2 = 写完读回对不上** |
+| port | `arkrtos_port_paging_space()` / `space_frame(n)` / `space_count()` | 当前空间 / 帧基址 / 板级给的个数 |
+| port | `arkrtos_port_paging_lookup(va, &idx, &ppn, &ps)` | 只读诊断：这个 VA 由哪条条目翻译 |
+| paging | `arkrtos_paging_space_count/space_frame/space_current/space_activate` | 后端与 port 解耦，窗口档恒 1 |
+| paging | `arkrtos_paging_bind_task(task, space)` / `space_of(task)` | 绑定只存号，切换发生在下次调度 |
+| shell | `pmap space [n]` / `pmap look <va>` / `pmap u1` | 读数、切空间、看条目、跑自测 |
+
+#### 5.17.2 根因：QEMU 的 `tlbwr` 不刷新大页的**奇页**
+
+第一版按「重写索引 2050 那条 PS=20 条目」实现，`pmap u1` 直接给 FAIL：
+
+```
+pmap u1: va=0x02100000 space0=0xA5A50002 space1=0xA5A50002
+pmap u1: FAIL (1 of 2 reads wrong)
+```
+
+`space 1` 写入的值在 `space 0` 里读得到，但 `pmap space 1` 又报 `rc=0`
+—— 状态说切了，翻译没换。根因不在我们这边，在 QEMU：
+
+`target/loongarch/tcg/tlb_helper.c` 的 `invalidate_tlb_entry()` 算失效地址时，
+**偶页**用 `& ~mask`、**奇页**却写成 `& pagesize`（应为 `| pagesize`）：
+
+```c
+pagesize = MAKE_64BIT_MASK(tlb_ps, 1);            /* ps=20 -> 0x1FFFFE */
+mask = MAKE_64BIT_MASK(0, tlb_ps + 1);            /*      -> 0x1FFFFF */
+if (tlb_v0) { addr = (tlb_vppn << 13) & ~mask; ... }   /* 0x02000000：对 */
+if (tlb_v1) { addr = (tlb_vppn << 13) & pagesize; ...} /* 0x02000000 & 0x1FFFFE = 0：错 */
+```
+
+于是 PS=20 条目**上半 1 MB**（奇页）的 softmmu 翻译从不失效：`tlbwr` 把 TLB 条目
+改成 frame 1 了，可 CPU 取指/读写走的是 QEMU 的翻译缓存，仍然指向 frame 0。
+`pmap u1` 正好把探针放在 `base + 1 MB`（奇页中段），所以每读必错。
+
+修法：切换前按 VA 发一次 `invtlb` op=3（PAGEASID）：
+
+```c
+static void la_tlb_inval_page(uint32 va)
+{
+    __asm__ volatile("invtlb 3, $zero, %0" :: "r"((unsigned long)va) : "memory");
+}
+```
+
+`helper_invtlb_page_asid()` 结尾是**整表** `tlb_flush()`，所以缓存一起清干净。
+顺序必须是「先失效、再 `tlbwr`」：`invtlb` 是按**旧条目**的 PS 匹配 VA 的。
+代价只有切换那一瞬（`APPS_MAX == 1` 时根本走不到这里）。
+
+#### 5.17.3 `pmap look`：读回诊断，以及 `tlbsrch` 不写 `TLBELO` 的坑
+
+`arkrtos_port_paging_lookup()` 用 `tlbsrch` + `tlbrd` 读回一条 VA 命中的条目。
+第一版只做了 `tlbsrch`，读 `CSR_TLBELO0` 当 PPN —— 那是**上一次 `tlbwr` 留下的
+陈旧值**：`tlbsrch` 只写 `TLBIDX`（INDEX/NE），条目的 VPPN/PS/LO0 要用 `tlbrd`
+按 `TLBIDX.INDEX` 读回。少了这一步，`activate()` 里的读回校验会"永远对上"，
+是标准的假绿。现在的形态：
+
+```
+pmap look: va=0x02000000 entry=2050 ps=20 ppn=0x02000000
+pmap: space 1 rc=0 (current=1)
+pmap look: va=0x02100000 entry=2050 ps=20 ppn=0x02200000
+```
+
+（条目号 2050 = MTLB 绝对号 `LA_MTLB_INDEX + 2`；`tlbrd` 会顺带把 `CSR_ASID`
+改成条目里的 ASID，本 port ASID 恒 0，所以无害。）
+
+#### 5.17.4 读数
+
+```
+$ python tools/qemu_shell_drive.py --boot 50 --port <p> --cmd \
+    "pmap space;pmap look 0x02000000;pmap u1;pmap test;exec /mnt/ram/hello a b c"
+
+pmap: spaces=2 current=0
+  space 0 -> frame 0x02000000
+  space 1 -> frame 0x02200000
+pmap look: va=0x02000000 entry=2050 ps=20 ppn=0x02000000
+pmap u1: va=0x02100000 space0=0xA5A50001 space1=0xA5A50002
+pmap u1: frame0=0x02000000 frame1=0x02200000
+pmap u1: rc0=0 rc1=0
+pmap u1: look0 entry=2050 ps=20 ppn=0x02000000
+pmap u1: look1 entry=2050 ps=20 ppn=0x02200000
+pmap u1: PASS - same VA, two frames
+pmap: compare 16 words, mismatch=0
+pmap test: PASS
+[hello] argc=4
+[hello] argv[1]=a
+[ELF] /mnt/ram/hello: finished after 0 ms
+```
+
+另外验过「在 space 1 里 `exec`」：程序在 frame 1 里装载并跑完（`argv[1]=z` 照常），
+说明装载点与运行空间被绑在一起，而不是各说各话。
+
+#### 5.17.5 门禁：I / J 两条 pin
+
+`tools/paging_gate.py` 在 E~H 之后新增两条源码 pin（与其余四条一样，每条都把源串
+改坏一次验证 pin 会报错）：
+
+| pin | 断言 |
+|---|---|
+| I | port 有 `la_tlb_inval_page()` 且函数体含 `invtlb 3`；`activate()` 体内**先** `la_tlb_inval_page(` 再 `la_tlb_write(ARKRTOS_QEMU_APP_BASE, 20u, LA_MTLB_INDEX + 2u` |
+| J | `set_app()` 体内调 `arkrtos_port_paging_activate(`；`arkrtos_hal.h` 关档回退 `lookup` 恒 0；`arkrtos_mpu.h` 有 `arkrtos_paging_space_activate(` |
+
+pin I 就是这次那个坑的护栏：少了 `invtlb`，切换在 QEMU 上静默失效，而所有
+状态读数都还是"成功"。
+
+#### 5.17.6 明确没做的部分
+
+- **同一个 VA 上并发跑两个程序（U-2）**：装载器仍是单实例（`s_elf_task`），
+  第二次 `exec` 返回 `ERR_BUSY`。本轮的读数是「同一 VA 两块物理内存」的**机制**，
+  不是「两个 App 同时在场」。
+- **页帧分配器（U-3）**：帧是板级固定数组，只按 `ARKRTOS_PAGING_APPS_MAX` 开。
+- **ASID / TLB shootdown（U-7）**：ASID 恒 0，切换靠重写条目。
+- **`copy_from_user`（U-6）**、按需缺页（U-5）、App 反向探测（PLV3 读内核页/别的帧）
+  都不在本轮：本轮的隔离证据是「同一 VA → 两块物理内存」，越权证据仍来自
+  PLV/`PLV3` 探针那一套（[内存保护与App越权验证](内存保护与App越权验证.md)）。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

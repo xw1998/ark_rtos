@@ -6253,6 +6253,10 @@ static int cmd_unld(int argc, char *argv[])
  *            pmap rb   <va>                            经映射读一个字节
  *            pmap wrb  <va> <byte>                     经映射写一个字节（MMIO 才用）
  *            pmap test                                 自测：内核 ROM 页映射后逐字比对
+ *            pmap space [n]                            地址空间：读（无参）或切换
+ *            pmap u1                                   自测：同一 VA 在两个空间里是
+ *                                                      两块物理内存（U-1 的读数）
+ *            pmap look <va>                            读回该 VA 命中的 TLB 条目
  *
  *          **注意**：`pmap rd/rb/wrb` 不做保护性检查 —— 地址没映射就是一次
  *          重填致命。这是刻意的：它们就是用来验证「这条地址到底通不通」的，
@@ -6459,12 +6463,155 @@ static int cmd_pmap(int argc, char *argv[])
         return (diff == 0) ? 0 : 1;
     }
 
+    if((argc >= 2) && (strcmp(argv[1], "space") == 0))
+    {
+        uint32 count = arkrtos_paging_space_count();
+
+        if(argc >= 3)
+        {
+            uint32 want = 0u;
+
+            if(pmap_hex(argv[2], &want) != 0)
+            {
+                sh_out("usage: pmap space [n]\r\n");
+                return -1;
+            }
+
+            rc = arkrtos_paging_space_activate(want);
+            ark_shell_printf("pmap: space %u rc=%d (current=%u)\r\n",
+                             (unsigned)want, (int)rc,
+                             (unsigned)arkrtos_paging_space_current());
+            return (rc == 0) ? 0 : 1;
+        }
+
+        {
+            uint32 i;
+
+            ark_shell_printf("pmap: spaces=%u current=%u\r\n",
+                             (unsigned)count,
+                             (unsigned)arkrtos_paging_space_current());
+            for(i = 0u; i < count; i++)
+            {
+                ark_shell_printf("  space %u -> frame 0x%08X\r\n", (unsigned)i,
+                                 (unsigned)arkrtos_paging_space_frame(i));
+            }
+        }
+        return 0;
+    }
+
+    if((argc >= 2) && (strcmp(argv[1], "look") == 0))
+    {
+        uint32 va = 0u;
+        uint32 idx = 0u;
+        uint32 ppn = 0u;
+        uint32 ps = 0u;
+
+        if((argc < 3) || (pmap_hex(argv[2], &va) != 0))
+        {
+            sh_out("usage: pmap look <va>\r\n");
+            return -1;
+        }
+
+        if(arkrtos_port_paging_lookup(va, &idx, &ppn, &ps) == 0u)
+        {
+            ark_shell_printf("pmap look: va=0x%08X no entry\r\n", (unsigned)va);
+            return 1;
+        }
+
+        ark_shell_printf("pmap look: va=0x%08X entry=%u ps=%u ppn=0x%08X\r\n",
+                         (unsigned)va, (unsigned)idx, (unsigned)ps,
+                         (unsigned)ppn);
+        return 0;
+    }
+
+    if((argc >= 2) && (strcmp(argv[1], "u1") == 0))
+    {
+        /* 同一 VA、两个地址空间：写进去的东西必须互不相干。
+         * 判据不是「PA 数字不一样」（那是我们自己说的），而是**同一个地址
+         * 在两个空间里读出两个不同的值**——翻译真的换了帧。
+         *
+         * 下面这段在窗口内取一块空地（base + 1 MB），所以先确认没有程序
+         * 正在窗口里跑：ELF 装载器与运行中的程序都在这个 2 MB 里。 */
+        /* 窗口基址不写死板级宏：space 0 的帧就是窗口基址（这条对应关系由
+         * port 建立），所以从它推。+1 MB 落在 2 MB 窗口的中段。 */
+        uint32 va = arkrtos_paging_space_frame(0u) + 0x100000u;
+        uint32 m0;
+        uint32 m1;
+        int fails = 0;
+
+        #if (ARKRTOS_USE_ELF == 1)
+        if(arkrtos_elf_running() != 0)
+        {
+            sh_out("pmap u1: refused - an ELF program is using the window\r\n");
+            return 1;
+        }
+        #endif
+
+        if(arkrtos_paging_space_count() < 2u)
+        {
+            sh_out("pmap u1: refused - board provides only one address space\r\n");
+            return 1;
+        }
+
+        uint32 rc0;
+        uint32 rc1;
+        uint32 idx0 = 0u, ppn0 = 0u, ps0 = 0u;
+        uint32 idx1 = 0u, ppn1 = 0u, ps1 = 0u;
+
+        rc0 = (uint32)arkrtos_paging_space_activate(0u);
+        (void)arkrtos_port_paging_lookup(va, &idx0, &ppn0, &ps0);
+        *(volatile uint32 *)(unsigned long)va = 0xA5A50001u;
+        rc1 = (uint32)arkrtos_paging_space_activate(1u);
+        (void)arkrtos_port_paging_lookup(va, &idx1, &ppn1, &ps1);
+        *(volatile uint32 *)(unsigned long)va = 0xA5A50002u;
+
+        /* 回到 space 0 读，再切回 space 1 读：顺序反过来也行，两个方向都读 */
+        (void)arkrtos_paging_space_activate(0u);
+        m0 = *(volatile uint32 *)(unsigned long)va;
+        (void)arkrtos_paging_space_activate(1u);
+        m1 = *(volatile uint32 *)(unsigned long)va;
+
+        if(m0 != 0xA5A50001u)
+        {
+            fails++;
+        }
+        if(m1 != 0xA5A50002u)
+        {
+            fails++;
+        }
+
+        ark_shell_printf("pmap u1: va=0x%08X space0=0x%08X space1=0x%08X\r\n",
+                         (unsigned)va, (unsigned)m0, (unsigned)m1);
+        ark_shell_printf("pmap u1: frame0=0x%08X frame1=0x%08X\r\n",
+                         (unsigned)arkrtos_paging_space_frame(0u),
+                         (unsigned)arkrtos_paging_space_frame(1u));
+        ark_shell_printf("pmap u1: rc0=%d rc1=%d\r\n", (int)(int32)rc0, (int)(int32)rc1);
+        ark_shell_printf("pmap u1: look0 entry=%u ps=%u ppn=0x%08X\r\n",
+                         (unsigned)idx0, (unsigned)ps0, (unsigned)ppn0);
+        ark_shell_printf("pmap u1: look1 entry=%u ps=%u ppn=0x%08X\r\n",
+                         (unsigned)idx1, (unsigned)ps1, (unsigned)ppn1);
+
+        /* 回到 space 0：这是这台机器默认的那一帧，shell 之后看到的窗口内容
+         * 与没有这条命令时一致。 */
+        (void)arkrtos_paging_space_activate(0u);
+
+        if(fails != 0)
+        {
+            ark_shell_printf("pmap u1: FAIL (%d of 2 reads wrong)\r\n", fails);
+            return 1;
+        }
+
+        sh_out("pmap u1: PASS - same VA, two frames\r\n");
+        return 0;
+    }
+
     rc = arkrtos_paging_stats(&checked, &bad, &bad_base);
     ark_shell_printf("pmap: init_rc=%d checked=%u bad=%u bad_base=0x%08X pages=%u\r\n",
                      (int)rc, (unsigned)checked, (unsigned)bad,
                      (unsigned)bad_base, (unsigned)arkrtos_paging_map_pages());
     sh_out("usage: pmap [map <va> <pa> <size> <kind> | check <va> <size> <kind> |"
-           " rd <va> [n] | rb <va> | wrb <va> <byte> | test]\r\n");
+           " rd <va> [n] | rb <va> | wrb <va> <byte> | test | space [n] | u1 |\r\n"
+           " look <va>]\r\n");
     return 0;
 }
 #endif /* ARKRTOS_USE_PAGING == 1 */
@@ -6516,7 +6663,7 @@ static int register_kernel_commands(void)
         "Per-task stack usage, measured (fill pattern + low PSP): stack [check]", 2);
 #if (ARKRTOS_USE_PAGING == 1)
     g_cmd_table[idx++] = ARK_SHELL_CMD("pmap", cmd_pmap,
-        "Dynamic (MMIO) mappings: pmap [map|check|rd|rb|wrb|test] ...", 6);
+        "Paging: pmap [map|check|rd|rb|wrb|test|space|u1|look] ...", 6);
 #endif /* ARKRTOS_USE_PAGING */
     g_cmd_table[idx++] = ARK_SHELL_CMD("sched", cmd_sched,
         "Scheduler readiness self-check (0 = consistent)", 1);
