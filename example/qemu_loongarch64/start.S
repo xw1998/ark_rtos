@@ -25,6 +25,26 @@
     .globl  _start
     .align  2
 _start:
+#if (ARKRTOS_USE_SMP == 1)
+    /* 次核停靠：CSR.TID（0x40）是本核硬件号，QEMU 在 cpu reset 里直接填
+     * env->CSR_TID = cpu_index（target/loongarch/cpu.c），所以读出来就是
+     * 核号，不依赖任何板级寄存器。
+     *
+     * 非 0 核不设 sp、不清 .bss、不跑构造函数表、不进 main —— 这三件事只能
+     * 由主核做一次，做两遍就会互相踩。
+     *
+     * **本机（QEMU）这条分支不可达**：hw/loongarch/boot.c 的
+     * loongarch_direct_kernel_boot() 给次核设的 PC 是 VIRT_FLASH0_BASE 里的
+     * slave_boot_code（idle 等 mailbox），不是本 ELF 的 entry；它要等 IPI
+     * 与 mailbox 才跳进来，那属于 IPI 通路（本轮不做）。所以这个分支服务于
+     * 真实硬件 / 其它启动路径，本机没有能触发它的路径。 */
+    csrrd   $t0, 0x40
+    beqz    $t0, 7f
+8:
+    idle    0
+    b       8b
+7:
+#endif
     la.abs  $sp, _stack_top
 
     /* 清 .bss：8 字节一步，起止地址由链接脚本给出（都按 16 字节对齐） */

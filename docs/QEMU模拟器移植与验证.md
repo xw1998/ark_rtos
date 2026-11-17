@@ -3858,3 +3858,107 @@ cd build/qemu_loongarch64 && (sleep 6; printf 'utest\n'; sleep 20) | timeout 34 
 `ci_gate` 43 项）。按「默认档零变化 + 不破坏既有基线」的约定，
 **须用户明确批准动启动路径后再开工**；批准前的状态就是
 `smp_not_implemented_four_gaps`。
+
+### 9.5 最小子步实测（2026-11-17）：判 `smp_park_unreachable_on_qemu_kernel_boot`
+
+用户批准做 §9.3 的 ①②（次核停靠 + 真核号），不碰 ③IPI 与 ④调度分核。
+代码写完了，但**第一条判据在本机不可达**——原因不是代码没写，是 QEMU 不给这条路。
+
+#### 9.5.1 决定性事实：QEMU 直启时次核的 PC 不是我们的 entry
+
+读的是 QEMU 9.2.3 源码（`hw/loongarch/boot.c`）：
+
+- `loongarch_direct_kernel_boot()` 给每个 CPU 都设 `env.load_elf = true`，
+  但**只有 `first_cpu` 拿到 `elf_address = kernel_entry`**，其余核拿到
+  `elf_address = VIRT_FLASH0_BASE`（pflash 的 BIOS 区）；
+- 那块 pflash 里放的是同一文件开头的 `slave_boot_code`（指令数组）：关中断、
+  清 mailbox、开 IPI，然后 `idle` 等 mailbox 非零，最后 `jirl` 跳到 mailbox 里的地址。
+
+所以 `-smp 2` 时**次核从来没执行过 `start.S`** —— 这也是 §9.2「LA64 不崩、日志
+无痕」的真正解释（当时只有现象，没有原因）。要让次核进入我们的代码，唯一的路是
+**往 IOCSR mailbox 写入口地址再发 IPI**，那属于 §9.3 第 ③ 条，本轮明确不做。
+
+#### 9.5.2 本轮实际落地（全部在开关下，默认档不编译）
+
+1. `example/qemu_loongarch64/start.S`：`_start` 开头读 `CSR.TID`（0x40），非 0 核
+   不清 `.bss`、不跑构造函数表、不进 `main`，直接 `idle` 死等。注释写明本机不可达
+   及原因。
+2. `kernelsrc/port/loongarch/la64/arkrtos_port.c`：`arkrtos_port_cpu_id()` 在
+   `ARKRTOS_USE_SMP == 1` 时读 `csrrd 0x40`（QEMU 在 cpu reset 里写
+   `env->CSR_TID = cs->cpu_index`，`target/loongarch/cpu.c`），关档仍 `return 0u`。
+3. `kernelsrc/src/arkrtos_smp.c`：`arkrtos_smp_init()` 改用
+   `arkrtos_port_cpu_id()` 取「本核」核号，不再写死 0（写死会让在线掩码与每核
+   状态表整体错一格）。
+4. `board/qemu_loongarch64/arkrtos_board_config.h`：`ARKRTOS_USE_SMP` 的
+   `#undef` + `#define 0` 改成 `#ifndef` 守卫。不改的话
+   `EXTRA_CFLAGS=-DARKRTOS_USE_SMP=1` 会被板级无条件覆盖，症状是「编出来了，
+   但和目标文件一字节没变」。
+
+这是第二次踩「宏被后 include 的头覆盖」（第一次是 U-3 的
+`ARKRTOS_USE_PAGING_DEMAND`），已写死为约定：**板级配置头里凡是允许命令行覆盖
+的开关，一律用 `#ifndef` 守卫**。
+
+#### 9.5.3 实跑读数
+
+```bash
+make -f example/qemu_loongarch64/Makefile BUILD=build/qemu_la64_smp2 \
+     EXTRA_CFLAGS="-DARKRTOS_USE_SMP=1 -DARKRTOS_CPU_NUM=2" -j8
+```
+
+`size`：SMP 档 text **366440** / data 416 / bss 767508；默认档 text 366120
+（+320 B = `arkrtos_smp.c` 全部代码 + `cpu_id` 的 CSR 读）。
+
+`-smp 1` 与 `-smp 2` 各跑一次 `utest`，两次都是：
+
+```
+utest: 13 matched, 13 passed, 0 failed, 0 skipped; assertions 133 run / 0 failed
+```
+
+`-smp 2` 的串口里**没有第二个核的任何输出**，与 §9.5.1 的源码事实一致。必须把
+话说死：**13/13 通过只证明「SMP 档代码没破坏单核」，不证明次核起来了。**
+
+#### 9.5.4 关档零变化（口径同 §5.23.6）
+
+`SOURCE_DATE_EPOCH=1600000000` 各建一版，`objcopy --strip-debug` 后比 sha256：
+
+| 版本 | stripped.elf |
+|---|---|
+| 改动前（`77f2384` 的构建） | `027dcf53…6114b`，460264 B |
+| 本轮改动后（默认档） | `027dcf53…6114b`，460264 B |
+
+逐字节相同 ⇒ 默认档体积与行为零变化。
+
+#### 9.5.5 门禁 pin U（`tools/smp_gate.py`）
+
+新增 LA64 段，五条断言 + 一条自检：
+
+1. `start.S` 三条硬标记必须在：`csrrd   $t0, 0x40`、`beqz    $t0, 7f`、`idle    0`；
+2. **自检**：把 `csrrd` 换成 `nop` 的临时副本必须被判缺失（否则这道门禁是假绿）；
+3. `start.S` 用 LA64 gcc 以 `-DARKRTOS_USE_SMP=1 -DARKRTOS_CPU_NUM=2` **真汇编**，
+   产物反汇编里必须同时出现 `csrrd` 与 `idle`（防「被 `#if` 吃掉」）；
+4. `arkrtos_port.c` 同档 `-fsyntax-only` 真编译（这条曾抓到 `LA_CSRR` 宏定义在
+   函数之后导致的 `undefined reference to LA_CSRR`）；
+5. 关档 `cpu_id` 仍必须有 `return 0u;`（默认档不许读 CSR）。
+
+`py -3 tools/smp_gate.py` 全过；`ci_gate.py` 43 项里的 `smp` 项随之变成
+「44 条宿主断言 + 5 个 ARM 文件 + LA64 pin U」。
+
+#### 9.5.6 判词与三条不许读法
+
+判词：**`smp_park_unreachable_on_qemu_kernel_boot`** —— ①② 的代码已落地，但 ①
+在本机（QEMU `-kernel` 直启）没有可触发路径，② 只能以「读到 0、与写死 0 行为
+一致」的形式验证，**区分性未验证**。§9.4 的 `smp_not_implemented_four_gaps` 里
+③④ 仍然成立，所以矩阵里 SMP 那一行的结论**不变**。
+
+不许读法：
+
+- 不能把 `-smp 2` 的 13/13 读成「次核停靠成功」—— 次核在 QEMU 的
+  `slave_boot_code` 里，从未进过我们的镜像；
+- 不能把 `csrrd 0x40` 在 CPU0 上返回 0 读成「真核号已验证」—— 只有一个核在跑我们
+  的代码，读到的值没有区分度；只能写「实现存在，区分性未验证」；
+- 不能把本轮读成「SMP 有进展所以矩阵那一行可以改」—— ③④ 未做，改法不变。
+
+下一步若要真看到次核进我们的代码，最小实验是：主核往 IOCSR mailbox
+（`CORE_BUF_20`）写入一个 C 入口地址，再对 `CORE_EN_OFF` 发 IPI；次核从
+`slave_boot_code` 跳出后进该入口，并自己建栈与 TLB 映射。那已经是 §9.3 第 ③ 条
+的工作量，须另行批准。

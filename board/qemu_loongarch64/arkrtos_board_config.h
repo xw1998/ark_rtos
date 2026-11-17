@@ -295,8 +295,12 @@
 #undef  ARKRTOS_TIMER_TASK_STACK_WORDS
 #define ARKRTOS_TIMER_TASK_STACK_WORDS (512)
 
-/* 单核：SMP 关掉（QEMU 能给多核，后续做 SMP 验证时再开） */
-#undef  ARKRTOS_USE_SMP
+/* 单核：SMP 关掉（QEMU 能给多核，后续做 SMP 验证时再开）。
+ * 用 #ifndef 而不是 #undef：SMP 档要靠 EXTRA_CFLAGS=-DARKRTOS_USE_SMP=1 出
+ * 独立镜像，无条件的 #undef 会把命令行定义吃掉（症状是"编出来了但一字节
+ * 没变"）。默认档没有这个 -D，取到的仍是 0。 */
+#ifndef ARKRTOS_USE_SMP
 #define ARKRTOS_USE_SMP              0
+#endif
 
 #endif /* __ARKRTOS_BOARD_CONFIG_H__ */

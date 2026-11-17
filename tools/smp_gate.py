@@ -59,9 +59,44 @@ GCC_FALLBACKS = [
     r"C:\mingw64\bin\gcc.exe",
 ]
 
+LA64_GCC_FALLBACKS = [
+    r"D:\LoongIDE\la64-tool\bin\loongarch64-newlib-elf-gcc.exe",
+]
+
 ARMCLANG_FALLBACKS = [
     r"D:\Keil_v5\ARM\ARMCLANG\bin\armclang.exe",
     r"C:\Keil_v5\ARM\ARMCLANG\bin\armclang.exe",
+]
+
+# LA64 那一档（pin U）：start.S 的次核停靠分支 + port 层真核号。
+LA64_ASM  = "example/qemu_loongarch64/start.S"
+LA64_PORT = "kernelsrc/port/loongarch/la64/arkrtos_port.c"
+
+LA64_INCLUDES = [
+    "kernelsrc/include",
+    "config",
+    "board/qemu_loongarch64",
+    "kernelsrc/port/loongarch/la64",
+    "example/qemu_loongarch64",
+    "kernelsrc/components/mdk_trace",
+    "kernelsrc/shell",
+    "kernelsrc/shell/ark_shell",
+    "kernelsrc/components/ark_vfs/include",
+    "kernelsrc/components/ark_vfs/port",
+    "kernelsrc/components/ark_vfs/src",
+    "kernelsrc/fs",
+    "kernelsrc/fs/littlefs",
+    "kernelsrc/components/ark_softbus/include",
+    "kernelsrc/components/ark_softbus/src",
+    "kernelsrc/components/ark_softbus/port",
+]
+
+# 次核停靠分支的三条硬标记：读 CSR.TID、核 0 跳到清 .bss 之前、其它核死等。
+# 少任何一条，SMP 档要么两个核一起清 .bss，要么次核进 main —— 都是静默错答案。
+PARK_MARKERS = [
+    "csrrd   $t0, 0x40",
+    "beqz    $t0, 7f",
+    "idle    0",
 ]
 
 INCLUDES = [
@@ -172,10 +207,131 @@ def run_syntax(cc):
             print("ok: %s" % rel)
     return bad == 0
 
+def find_la64(explicit):
+    if explicit:
+        return explicit if os.path.exists(explicit) else None
+    for cand in LA64_GCC_FALLBACKS:
+        if os.path.exists(cand):
+            return cand
+    return None
+
+
+def park_markers_present(path):
+    try:
+        text = open(path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return False
+    return all(m in text for m in PARK_MARKERS)
+
+
+def run_la64(cc):
+    """pin U：LA64 次核停靠（真汇编 + 反汇编断言）与真核号（port.c 真编译）。
+
+    三条自检，任一条不过就是假绿：
+      1) 把 start.S 的 csrrd 换掉，标记检查必须判缺失；
+      2) 汇编产物里必须真出现 csrrd 与 idle（不是被 #if 吃掉）；
+      3) 关档文本里 cpu_id 必须仍是 return 0（默认档不许读 CSR）。
+    """
+    od = cc.replace("gcc", "objdump")
+    if not os.path.exists(od):
+        print("SMP-GATE FAIL: no LA64 objdump next to %s" % cc)
+        return False
+
+    td = tempfile.mkdtemp(prefix="arkrtos-smp-la64-")
+    bad = 0
+    src = os.path.join(ROOT, LA64_ASM)
+
+    # 自检 1：改坏副本必须被抓住
+    mut = os.path.join(td, "start_mut.S")
+    with open(src, encoding="utf-8") as f:
+        text = f.read()
+    with open(mut, "w", encoding="utf-8", newline="") as f:
+        f.write(text.replace("csrrd   $t0, 0x40", "nop"))
+    if park_markers_present(mut):
+        print("SMP-GATE FAIL: LA64 self-check missed a removed TID read")
+        bad += 1
+    else:
+        print("ok: LA64 self-check (removed TID read is caught)")
+
+    if not park_markers_present(src):
+        print("SMP-GATE FAIL: %s lost the secondary-core park branch" % LA64_ASM)
+        bad += 1
+    else:
+        print("ok: LA64 park branch present in %s" % LA64_ASM)
+
+    # 签名键：features 里有硬闸门，不给 32 字节初值就编不过（不是可有可无）
+    key = os.path.join(td, "arkrtos_sign_key_local.h")
+    with open(key, "w", encoding="utf-8") as f:
+        f.write("#ifndef ARKRTOS_SIGN_KEY_LOCAL_H\n"
+                "#define ARKRTOS_SIGN_KEY_LOCAL_H\n"
+                "#define ARKRTOS_IMAGE_SIGN_KEY { " +
+                ", ".join("0x%02X" % i for i in range(32)) + " }\n"
+                "#endif\n")
+
+    defs = ["-D" + d for d in DEFS]
+    defs += ["-DARKRTOS_USE_SMP=1", "-DARKRTOS_CPU_NUM=2",
+             "-DARKRTOS_SIGN_KEY_LOCAL=1",
+             "-DARKRTOS_BOARD_CONFIG=\"arkrtos_board_config.h\""]
+
+    inc = ["-I" + os.path.join(ROOT, x) for x in LA64_INCLUDES]
+    inc.insert(0, "-I" + td)
+
+    # 真汇编
+    obj = os.path.join(td, "start.o")
+    cmd = [cc, "-march=loongarch64", "-mabi=lp64d", "-c", src, "-o", obj,
+           "-include", "arkrtos_board_config.h"] + defs + inc
+    r = subprocess.run(cmd, cwd=ROOT, capture_output=True,
+                       encoding="utf-8", errors="replace")
+    out = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode != 0:
+        print("SMP-GATE FAIL: LA64 start.S does not assemble with SMP=1")
+        print(out[-900:])
+        bad += 1
+    else:
+        d = subprocess.run([od, "-d", obj], capture_output=True,
+                           encoding="utf-8", errors="replace")
+        dis = (d.stdout or "") + (d.stderr or "")
+        missing = [m for m in ("csrrd", "idle") if m not in dis]
+        if missing:
+            print("SMP-GATE FAIL: %s not in the object (branch got compiled out)" %
+                  ", ".join(missing))
+            bad += 1
+        else:
+            print("ok: LA64 start.S assembles, csrrd/idle both in the object")
+
+    # port.c 真编译（-fsyntax-only 能抓到符号/宏错误，抓不到链接期）
+    cmd = [cc, "-march=loongarch64", "-mabi=lp64d", "-std=c99", "-fsyntax-only",
+           os.path.join(ROOT, LA64_PORT),
+           "-include", "arkrtos_board_config.h"] + defs + inc
+    r = subprocess.run(cmd, cwd=ROOT, capture_output=True,
+                       encoding="utf-8", errors="replace")
+    out = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode != 0:
+        print("SMP-GATE FAIL: LA64 port does not compile with SMP=1")
+        print(out[-900:])
+        bad += 1
+    else:
+        print("ok: LA64 %s compiles with SMP=1" % LA64_PORT)
+
+    # 自检 3：关档的 cpu_id 必须还是常量 0
+    with open(os.path.join(ROOT, LA64_PORT), encoding="utf-8", errors="replace") as f:
+        port = f.read()
+    if "return 0u;" not in port:
+        print("SMP-GATE FAIL: LA64 port lost the SMP-off constant return")
+        bad += 1
+    else:
+        print("ok: LA64 port keeps the SMP-off constant return")
+
+    shutil.rmtree(td, ignore_errors=True)
+    return bad == 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="Host + syntax gate for the SMP scaffolding")
     ap.add_argument("--gcc", default=None)
     ap.add_argument("--armclang", default=None)
+    ap.add_argument("--la64", default=None,
+                    help="LoongArch64 gcc (default: D:\\LoongIDE\\la64-tool\\bin\\loongarch64-newlib-elf-gcc.exe)")
     args = ap.parse_args()
 
     cc = find_gcc(args.gcc)
@@ -186,14 +342,21 @@ def main():
     if not ac:
         print("SMP-GATE FAIL: armclang not found (a skip would be a false green)")
         return 1
+    la = find_la64(args.la64)
+    if not la:
+        print("SMP-GATE FAIL: LA64 gcc not found (use --la64); a skip would be a false green")
+        return 1
 
     print("gcc: %s" % cc)
     if not run_host(cc):
         return 1
     if not run_syntax(ac):
         return 1
+    if not run_la64(la):
+        return 1
 
-    print("SMP-GATE OK (host accounting + %d ON-path files, CPU_NUM=4/2)" % len(TARGETS))
+    print("SMP-GATE OK (host accounting + %d ARM ON-path files + LA64 pin U, CPU_NUM=4/2)" %
+          len(TARGETS))
     return 0
 
 if __name__ == "__main__":

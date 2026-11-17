@@ -1101,16 +1101,21 @@ def check_smp():
     single-core port stubs are never seen by a compiler in a default build.
     Two parts: a host run of test_smp_host.c with programmable port stubs
     (online mask, out-of-range core ids, refused start requests, IPI target
-    check, re-init clearing, per-core counters), and armclang -fsyntax-only
-    with the switch forced to 1 over five files.  A missing compiler is a
-    FAIL, not a skip.  Scope: there is no multi-core board here, so this says
-    the scaffolding is self-consistent, not that SMP works -- the scheduler
-    is still single-core and secondary cores only spin in WFI.
+    check, re-init clearing, per-core counters), armclang -fsyntax-only
+    with the switch forced to 1 over five files, and the LA64 pin U
+    (start.S secondary-core park branch assembled for real + port.c compiled
+    with SMP=1 + a self-check that a removed CSR.TID read is caught).  A
+    missing compiler is a FAIL, not a skip.  Scope: there is no multi-core
+    board here, so this says the scaffolding is self-consistent, not that SMP
+    works -- the scheduler is still single-core and secondary cores only spin
+    in WFI.  The LA64 park branch is unreachable under QEMU's -kernel direct
+    boot (secondary PC is the pflash slave_boot_code), see
+    docs/QEMU模拟器移植与验证.md section 9.5.
     """
     r = _run_check([sys.executable, os.path.join("tools", "smp_gate.py")])
     txt = ((r.stdout or "") + (r.stderr or "")).strip()
     if r.returncode == 0 and "SMP-GATE OK" in txt:
-        ok("smp", "host accounting + ON-path compile verified (5 files)")
+        ok("smp", "host accounting + ARM ON-path compile (5 files) + LA64 park/CSR pin U")
     else:
         fail("smp", txt[-260:])
 

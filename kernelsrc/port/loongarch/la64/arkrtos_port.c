@@ -86,6 +86,7 @@ extern void arkrtos_board_puthex(uint32 val);
 #define LA_CSR_TCFG         0x41
 #define LA_CSR_TVAL         0x42
 #define LA_CSR_TICLR        0x44
+#define LA_CSR_TID          0x40        /* 只读：本核硬件号 */
 
 /* 分页 / TLB 相关（PRIV=1 时才用到）。TLBEHI 的低 13 位是 VPPN 的起点，
  * 所以「页基址」直接写进 TLBEHI 就是对的，不需要移位。 */
@@ -340,7 +341,21 @@ uint32 arkrtos_port_atomic_cas(volatile uint32 *p_addr, uint32 expect, uint32 ne
 
 uint32 arkrtos_port_cpu_id(void)
 {
+#if (ARKRTOS_USE_SMP == 1)
+    /* CSR.TID 是只读的"定时器 ID"，其值就是硬件核号：QEMU 在 cpu reset 里
+     * 写 env->CSR_TID = cs->cpu_index（target/loongarch/cpu.c:551）。读 CSR
+     * 不需要 TLB，也不受 CRMD.DA 影响，所以次核一进 C 就能用。
+     *
+     * 关档（默认）下仍然返回常量 0：默认镜像的字节不许因为这一条变动。 */
+    unsigned long tid;
+
+    /* 不用 LA_CSRR 宏：它定义在本文件后半段（分页那一节），这个函数在它
+     * 之前，宏还不存在（症状是链接期报 undefined reference to LA_CSRR）。 */
+    __asm__ volatile("csrrd %0, 0x40" : "=r"(tid) : : "memory");
+    return (uint32)(tid & 0x3FFu);        /* 规范里 TID 的核号在低 10 位 */
+#else
     return 0u;
+#endif
 }
 
 void arkrtos_port_spin_hint(void)
@@ -350,7 +365,13 @@ void arkrtos_port_spin_hint(void)
 
 #if (ARKRTOS_USE_SMP == 1)
 /* 单核移植：没有第二核可启动，也没有跨核 IPI 通路（CSR.IPI 只发给其他核，
- * 单核上无对端可发）。 */
+ * 单核上无对端可发）。
+ *
+ * 2026-11-17 补一条实测事实：QEMU LoongArch 的 -kernel 直启模式里，次核
+ * 的复位 PC 被 hw/loongarch/boot.c 设到 VIRT_FLASH0_BASE（pflash 里的
+ * slave_boot_code），次核在那边 idle 等 IOCSR mailbox 与 IPI，**根本不经过
+ * 我们 ELF 的 _start**。所以"启动次核"在 QEMU 上等价于"往 mailbox 写入口
+ * 地址再发 IPI"，那是 IPI 通路那条欠账（§9.3 第 ③ 条），本轮不做。 */
 int32 arkrtos_port_cpu_start(uint32 cpu)
 {
     (void)cpu;

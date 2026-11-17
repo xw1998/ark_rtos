@@ -82,6 +82,7 @@ static void smp_mask_set(uint32 cpu)
 int32 arkrtos_smp_init(void)
 {
     uint32 i;
+    uint32 self;
     int32  accepted;
 
     for(i = 0u; i < (uint32)ARKRTOS_CPU_NUM; i++)
@@ -89,11 +90,18 @@ int32 arkrtos_smp_init(void)
         smp_cpu_clear(&arkrtos_smp_cpu[i]);
     }
 
-    /* 调用者就是 CPU0，它已经在跑，不需要"启动" */
-    arkrtos_smp_cpu[0].started = 1u;
-    arkrtos_smp_cpu[0].online  = 1u;
-    arkrtos_smp_online_mask   = 0u;      /* 重复初始化时旧掩码必须清掉 */
-    smp_mask_set(0u);
+    /* 调用者就是"本核"，它已经在跑，不需要"启动"。
+     * 核号必须问 port：LA64 上 CPU0 是 CSR.TID==0，但真硬件上启动核不一定
+     * 是 0；写死 0 会让后面的掩码/状态表整体错位一格。 */
+    self = arkrtos_port_cpu_id();
+    if(self >= (uint32)ARKRTOS_CPU_NUM)
+    {
+        self = 0u;                        /* 读错时收敛到 0，不越界 */
+    }
+    arkrtos_smp_cpu[self].started = 1u;
+    arkrtos_smp_cpu[self].online  = 1u;
+    arkrtos_smp_online_mask       = 0u;  /* 重复初始化时旧掩码必须清掉 */
+    smp_mask_set(self);
     accepted = 1;
 
     for(i = 1u; i < (uint32)ARKRTOS_CPU_NUM; i++)
