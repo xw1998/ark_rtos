@@ -182,6 +182,22 @@
 #define ARKRTOS_USE_PAGING_SWAP         0
 #endif
 
+/* ASID / 空间标签（U-7）：0 = 关（ASID 恒 0，切地址空间靠整段 invtlb +
+ * 重铺 256 条 PS=12 条目，与 U-3 第二阶逐字节相同），1 = 每个地址空间一个
+ * ASID（空间 s -> ASID s+1，内核默认视图是 space 0 的 ASID），窗口条目按
+ * ASID 区分、每个空间独占一路 STLB（空间 s 用 way s % 8），切换空间只剩
+ * 一次 CSR.ASID 写入 —— 关档每次切换要 512 次 invtlb + 256 次 tlbwr。
+ * 要求 ARKRTOS_USE_PAGING_PAGES == 1（PS=20 的静态窗口没有「每空间一组
+ * 条目」可复用）且 ARKRTOS_PAGING_APPS_MAX <= 8（一路一个空间）。
+ * 由 Kconfig 选择（config ARKRTOS_USE_PAGING_ASID）。
+ *
+ * 这一档改的是**切换的代价与条目的归属**，不是隔离强度：关档下切空间会
+ * 把旧空间的条目整段失效，开档下它们留在 TLB 里只是换了 ASID，别的空间
+ * 仍然翻译不到（条目 ASID 不匹配就是未命中）。 */
+#ifndef ARKRTOS_USE_PAGING_ASID
+#define ARKRTOS_USE_PAGING_ASID         0
+#endif
+
 /* VxWorks 式可下载模块：0 = 关（空 TU，零体积），1 = 把 ET_REL 目标文件
  * 现场链接进内核模块区并以 PLV0 任务起跑（按名字解析内核导出符号）。
  * 这是与 ARKRTOS_USE_ELF **并列的另一种应用模型**，不是它的替代：

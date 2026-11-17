@@ -268,6 +268,41 @@ def main():
         if rc != 0:
             failures.append("V 页替换档：%s 带 SWAP=1 编不过：\n%s" % (rel, out[-600:]))
 
+    # --- W. ASID 档必须真编得过（U-7） -----------------------------------
+    asid_flags = board_flags("qemu_loongarch64") + \
+        ["-DARKRTOS_USE_PAGING_ASID=1"]
+    for rel in ("kernelsrc/port/loongarch/la64/arkrtos_port.c",
+                "kernelsrc/src/arkrtos_paging.c"):
+        rc, out = _run(la64, LA64_ARCH + COMMON + asid_flags + [rel])
+        if rc != 0:
+            failures.append("W ASID 档：%s 带 ASID=1 编不过：\n%s" % (rel, out[-600:]))
+
+    # W 负向：PAGES=0 时 ASID=1 必须被那条 #error 拦住（否则「每空间一路 way」
+    # 的假设不成立，却会静默编过、在板上跑成共享条目）
+    if "#define ARKRTOS_USE_PAGING_PAGES     1" not in board_text:
+        failures.append("W 负向：板级里找不到 PAGES=1 那行，判据已过期")
+    else:
+        np_dir = os.path.join(tmp, "np")
+        os.makedirs(np_dir)
+        np_board = board_text.replace(
+            "#define ARKRTOS_USE_PAGING_PAGES     1",
+            "#define ARKRTOS_USE_PAGING_PAGES     0", 1)
+        with open(os.path.join(np_dir, "asid_np_board.h"), "w",
+                  encoding="utf-8", newline="\n") as f:
+            f.write(np_board)
+        rc, out = _run(la64, LA64_ARCH + COMMON +
+                       ["-DARKRTOS_BOARD_CONFIG=\"asid_np_board.h\"",
+                        "-include", "asid_np_board.h",
+                        "-I" + key_dir,
+                        "-I" + np_dir,
+                        "-DARKRTOS_USE_PAGING_ASID=1"] +
+                       _includes("qemu_loongarch64", "loongarch/la64") +
+                       ["kernelsrc/port/loongarch/la64/arkrtos_port.c"])
+        if rc == 0:
+            failures.append("W 负向：ASID=1 配 PAGES=0 竟然编过了（守卫没生效）")
+        elif "requires ARKRTOS_USE_PAGING_PAGES=1" not in out:
+            failures.append("W 负向：编不过但不是那条 #error：\n%s" % out[-400:])
+
     # --- E..H 源码 pin（每条都做一次「改坏必须报错」的自检） ---------------
     def _src(rel):
         with open(os.path.join(ROOT, rel), "rb") as f:
@@ -810,6 +845,95 @@ def main():
             bad.append("U: pmap rel 不打印回收前后的帧数（没有读数就不是判据）")
         return bad
 
+    def pin_w(port, hal, feats, kconf, board, sh, pg):
+        bad = []
+        # --- 开关三处 ---
+        if "#define ARKRTOS_USE_PAGING_ASID         0" not in feats:
+            bad.append("W: features.h 里没有 ARKRTOS_USE_PAGING_ASID 的缺省 0")
+        if "#define ARKRTOS_USE_PAGING_ASID      0" not in board:
+            bad.append("W: 板级里没有 ASID 的 #ifndef/#define 0 回退")
+        i = kconf.find("config ARKRTOS_USE_PAGING_ASID")
+        if i < 0:
+            bad.append("W: Kconfig 里没有 ARKRTOS_USE_PAGING_ASID")
+        else:
+            blk = kconf[i:kconf.find("\nconfig ", i + 10)]
+            if "depends on ARKRTOS_USE_PAGING\n" not in blk:
+                bad.append("W: Kconfig 的 ASID 不依赖 ARKRTOS_USE_PAGING")
+            if "depends on ARKRTOS_USE_PAGING_PAGES" not in blk:
+                bad.append("W: Kconfig 的 ASID 不依赖 ARKRTOS_USE_PAGING_PAGES")
+            if "Off (default) changes nothing" not in blk:
+                bad.append("W: Kconfig 的 ASID 没写明「关档零变化」")
+        # --- 组合守卫（三条）---
+        for one in ('#error "ARKRTOS_USE_PAGING_ASID=1 requires ARKRTOS_USE_PAGING_PAGES=1"',
+                    '#error "ARKRTOS_USE_PAGING_ASID=1 requires ARKRTOS_USE_PRIV=1"',
+                    "ARKRTOS_PAGING_APPS_MAX must be <= 8"):
+            if one not in port:
+                bad.append("W: port 里缺组合守卫 %s" % one)
+        # --- 映射关系 ---
+        if "#define LA_PG_ASID_OF(space)      ((unsigned long)(space) + 1UL)" not in port:
+            bad.append("W: 空间 -> ASID 不是 s+1（0 要留给内核默认视图）")
+        if "#define LA_PG_WIN_WAY_OF(space)   ((uint32)(space) % LA_STLB_WAYS)" not in port:
+            bad.append("W: 空间 -> way 不是 s %% 8")
+        if "#define LA_PG_DYN_G               (LA_PTE_G)" not in port:
+            bad.append("W: 动态别名在 ASID 档下不是全局（换空间后 MMIO 会看不见）")
+        # --- 原语与接线 ---
+        if "static unsigned long la_asid_swap(unsigned long asid)" not in port:
+            bad.append("W: port 里没有 la_asid_swap（一次 csrwr 换 ASID）")
+        ins = _body(port, "static int32 la_pg_install_space(")
+        if not ins:
+            bad.append("W: 找不到 la_pg_install_space 的定义")
+        else:
+            if "la_asid_swap(LA_PG_ASID_OF(space))" not in ins:
+                bad.append("W: 装空间时不切到该空间的 ASID（条目会记在别人的名下）")
+            if "LA_STLB_INDEX(va, LA_PG_WIN_WAY_OF(space))" not in ins:
+                bad.append("W: 装空间时不用该空间自己的 way")
+            if "la_asid_swap(saved_asid)" not in ins:
+                bad.append("W: 装完不还原 ASID（调用者会莫名跑在别人的视图里）")
+        act = _body(port, "int32 arkrtos_port_paging_activate(")
+        if not act:
+            bad.append("W: 找不到 activate 的定义")
+        else:
+            if "la_asid_swap(LA_PG_ASID_OF(space))" not in act:
+                bad.append("W: activate 在 ASID 档下不写 CSR.ASID")
+            if "la_pg_pair_check(space, " not in act:
+                bad.append("W: activate 切换后不做读回校验")
+        # --- 读回校验不许自己骗自己 ---
+        chk = _body(port, "static int32 la_pg_pair_check(")
+        if not chk:
+            bad.append("W: port 里没有 la_pg_pair_check")
+        elif "arkrtos_port_paging_lookup(" not in chk:
+            bad.append("W: 读回校验没有走 tlbsrch（那是唯一能看见「条目归谁」的口子）")
+        # --- 回收与启动 ---
+        rl = _body(port, "int32 arkrtos_port_paging_space_release(")
+        if (not rl) or ("la_asid_swap(LA_PG_ASID_OF(space))" not in rl):
+            bad.append("W: 空间回收不在该空间的 ASID 下撤条目（撤的是当前视图的）")
+        bm = _body(port, "static void la_pg_boot_map(")
+        if (not bm) or ("(void)la_asid_swap(LA_PG_ASID_OF(0u));" not in bm):
+            bad.append("W: 启动后没有把内核默认视图设成 space 0 的 ASID")
+        # --- 动态别名全局 ---
+        dy = _body(port, "static unsigned long la_pg_dyn_lo(")
+        if not dy:
+            bad.append("W: 找不到 la_pg_dyn_lo 的定义")
+        else:
+            if dy.count("LA_PG_DYN_G") < 4:
+                bad.append("W: la_pg_dyn_lo 的返回路径没有全部带上全局位（有分支会漏）")
+        # --- 接口两处 ---
+        if "#if (ARKRTOS_USE_PAGING_ASID == 1)" not in hal or \
+                "uint32 arkrtos_port_paging_asid_of(uint32 space);" not in hal:
+            bad.append("W: hal 里没有 ASID 读接口（或没按 ASID 档出符号）")
+        if "#define arkrtos_port_paging_asid_of(space)              (0u)" not in hal:
+            bad.append("W: hal 关档回退里没有 asid_of（关档会读成别的答案）")
+        # --- shell ---
+        if 'strcmp(argv[1], "asid")' not in sh:
+            bad.append("W: shell 没有 pmap asid 分支")
+        for one in ("pmap asid: mode=on current=", "ns/switch"):
+            if one not in sh:
+                bad.append("W: pmap asid 不打 %s" % one)
+        wf = _body(sh, "int cmd_pmap(")
+        if (not wf) or ('strcmp(argv[1], "asid")' not in wf):
+            bad.append("W: pmap asid 不在 cmd_pmap 里")
+        return bad
+
     def pin_v(port, pg, sh, hal, mpu, feats, kconf, drv):
         bad = []
         # --- 开关三处 ---
@@ -950,7 +1074,9 @@ def main():
                     pin_t(src_port, src_asm, src_feats, src_kconf, src_board) +
                     pin_u(src_port, src_pg, src_sh, src_hal, src_mpu, src_elf) +
                     pin_v(src_port, src_pg, src_sh, src_hal, src_mpu,
-                          src_feats, src_kconf, src_drv)):
+                          src_feats, src_kconf, src_drv) +
+                    pin_w(src_port, src_hal, src_feats, src_kconf, src_board,
+                          src_sh, src_pg)):
             failures.append("源码 pin 不成立 " + msg)
 
         # 自检：把每条 pin 依赖的那一句改坏，对应 pin 必须报错
@@ -1028,6 +1154,15 @@ def main():
             ("V--", pin_v(src_port, src_pg,
                           src_sh.replace("pmap swaptest: PASS", "pmap swaptest: OK", 1),
                           src_hal, src_mpu, src_feats, src_kconf, src_drv)),
+            ("W", pin_w(src_port.replace(
+                "(void)la_asid_swap(saved_asid);", "(void)0;", 1),
+                src_hal, src_feats, src_kconf, src_board, src_sh, src_pg)),
+            ("W-", pin_w(src_port, src_hal, src_feats, src_kconf, src_board,
+                         src_sh.replace("ns/switch", "ns/xswitch", 1), src_pg)),
+            ("W--", pin_w(src_port, src_hal, src_feats,
+                          src_kconf.replace("config ARKRTOS_USE_PAGING_ASID",
+                                            "config ARKRTOS_USE_PAGING_ASID_X", 1),
+                          src_board, src_sh, src_pg)),
             ("T-", pin_t(src_port,
                          src_asm.replace("la.abs  $r21, la_refill_stack_top",
                                           "la.abs  $t0, la_refill_stack_top", 1),
@@ -1054,7 +1189,8 @@ def main():
           "U-3 第二阶页级窗口 S pin 成立且自检有效 / "
           "U-3 第三阶按需缺页 T pin 成立且自检有效（C 侧真编、.S 侧真汇编） / "
           "U-3 空间回收 U pin 成立且自检有效 / "
-          "U-16 页替换 V pin 成立且自检有效（真编 SWAP 档）")
+          "U-16 页替换 V pin 成立且自检有效（真编 SWAP 档） / "
+          "U-7 每空间 ASID W pin 成立且自检有效（真编 ASID 档 + PAGES=0 被拒）")
     return 0
 
 

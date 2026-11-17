@@ -19,7 +19,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（53 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（54 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -55,7 +55,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（11 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（64 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（71 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（16 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -3580,6 +3580,17 @@ arkrtos_port_paging_space_frame(); the VA side never moves.  Code
 that pokes the window must use this instead of the frame base:
 with ARKRTOS_USE_PAGING_PAGES=1 the frames come from the pool and
 no longer coincide with the window VA. */
+
+### `#if (ARKRTOS_USE_PAGING_ASID == 1) unsigned long arkrtos_port_paging_a`
+
+```c
+#if (ARKRTOS_USE_PAGING_ASID == 1) unsigned long arkrtos_port_paging_asid_current(void);
+```
+
+**Hardware ASID currently in CSR.ASID (U-7); 0 when ASID is off**
+关档（ARKRTOS_USE_PAGING_ASID=0）时恒为 0：本 port 把每个 App 空间
+摊在一组固定的 TLB way 上、切换靠重写条目，压根没有 ASID 这个
+概念，返回一个非零值就是编的。 */
 
 ### `int32  arkrtos_port_flash_erase(uint32 addr, uint32 size);`
 
@@ -8033,6 +8044,25 @@ MTLB 是确定索引、查找时按条目自己的 PS 比 VPPN，不会和内核
 静态 4 KB 条目抢同一组的 8 路，也不需要知道 STLB 的 way 布局。
 代价是 MTLB 只有 64 条，所以动态表的上限由它决定（见 LA_PG_DYN_PAIRS）。
 
+### `static unsigned long la_asid_get(void)`
+
+```c
+static unsigned long la_asid_get(void)
+```
+
+**读 CSR.ASID（10 位，本 port 只用到 1..ARKRTOS_PAGING_APPS_MAX）**
+
+### `static unsigned long la_asid_swap(unsigned long asid)`
+
+```c
+static unsigned long la_asid_swap(unsigned long asid)
+```
+
+**换 CSR.ASID，返回换之前的值**
+- `asid`：目标 ASID（只取低 10 位）
+`csrwr` 把旧值写回同一个寄存器，所以一次指令就够 —— 切换路径上
+每一次多余的 CSR 访问都是白花钱。
+
 ### `static void la_tlb_fill_refill(uint32 vaddr, unsigned long lo0, unsign`
 
 ```c
@@ -8116,7 +8146,7 @@ static int32 la_pg_space_ensure(uint32 space)
 static void la_pg_install_space(uint32 space)
 ```
 
-把该空间的 512 页铺进窗口（256 条 PS=12 条目，way 0） */
+把该空间的 512 页铺进窗口（256 条 PS=12 条目，占该空间自己那一路） */
 
 ### `static void la_pg_drop_window(void)`
 
@@ -8246,6 +8276,22 @@ no entry，紧接着任何一次窗口访问都是 KERNEL refill (plv0)。
 真机上按 VA 失效不该波及其他页，但这条修复在真机上也只是一次
 tlbwr，代价可忽略，换来的是「invtlb 之后窗口一定还在」。
 
+### `static uint32 la_pg_pair_expect(uint32 space, uint32 idx)`
+
+```c
+static uint32 la_pg_pair_expect(uint32 space, uint32 idx)
+```
+
+这一对 8 KB 在这个空间里「应该」翻译到哪；0 = 这一档说不出该是什么 */
+
+### `static int32 la_pg_pair_check(uint32 space, uint32 idx)`
+
+```c
+static int32 la_pg_pair_check(uint32 space, uint32 idx)
+```
+
+读回校验一对 8 KB：期望值为 0（这一档还没付费）时视为通过 */
+
 ### `static uint32 la_sp_in_app_window(void)`
 
 ```c
@@ -8343,6 +8389,40 @@ uint32 arkrtos_port_paging_window_va(void)
 
 App 窗口的 VA 基址：各空间共用同一个 VA，物理侧才按空间换 */
 
+### `unsigned long arkrtos_port_paging_asid_current(void)`
+
+```c
+unsigned long arkrtos_port_paging_asid_current(void)
+```
+
+**读当前硬件的 CSR.ASID（U-7）**
+**返回**：0..1023
+只读，不改状态。地址空间切换之后用它回报「现在跑在谁的视图里」，
+这是 ASID 档下判断「切换到底做了没有」的唯一直接读数。
+
+### `uint32 arkrtos_port_paging_asid_of(uint32 space)`
+
+```c
+uint32 arkrtos_port_paging_asid_of(uint32 space)
+```
+
+**空间号对应的 ASID（空间 s -> ASID s+1，0 留给内核默认视图）**
+- `space`：0 .. arkrtos_port_paging_space_count()-1
+**返回**：ASID 值；空间号越界时返回 0（不猜一个别空间的号）
+
+### `uint32 arkrtos_port_paging_window_way(uint32 space)`
+
+```c
+uint32 arkrtos_port_paging_window_way(uint32 space)
+```
+
+**空间的窗口条目落在哪一条 STLB way 上**
+- `space`：0 .. arkrtos_port_paging_space_count()-1
+**返回**：way 号；越界返回 0
+ASID 档下每个空间占一条独立 way，所以「两个空间的窗口条目并存」
+这件事在硬件上是看得见的（不同的 way）；关档时全部挤在 way 0，
+切换必须重写条目。
+
 ### `uint32 arkrtos_port_paging_lookup(uint32 va, uint32 *index, uint32 *pp`
 
 ```c
@@ -8377,7 +8457,10 @@ static uint32 la_pg_static_hit(uint32 base, uint32 size)
 static unsigned long la_pg_dyn_lo(uint32 pa, arkrtos_mpu_mem_t mem)
 ```
 
-mem -> TLBELO；0 表示这条属性不提供动态映射 */
+mem -> TLBELO；0 表示这条属性不提供动态映射
+> 说明：开 ASID 档时四条都带 G（全局）：动态别名是**内核**的 MMIO 通路
+（PLV0），它不属于任何一个 App 空间，绑死在某一个 ASID 上就会出现
+「换个空间就 VFS 读不动 / 控制台写不出」这种只在开档后显形的形态。 */
 
 ### `static uint32 la_pg_dyn_mask(arkrtos_mpu_mem_t mem)`
 

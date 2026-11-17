@@ -602,6 +602,33 @@ static void la_tlb_write(uint32 vaddr, uint32 ps, uint32 index,
     __asm__ volatile("tlbwr" ::: "memory");
 }
 
+#if (ARKRTOS_USE_PAGING_ASID == 1)
+/**
+* @brief 读 CSR.ASID（10 位，本 port 只用到 1..ARKRTOS_PAGING_APPS_MAX）
+*/
+static unsigned long la_asid_get(void)
+{
+    unsigned long v = 0UL;
+
+    LA_CSRR(LA_CSR_ASID, v);
+    return v & 0x3FFUL;
+}
+
+/**
+* @brief 换 CSR.ASID，返回换之前的值
+* @param asid 目标 ASID（只取低 10 位）
+* @details `csrwr` 把旧值写回同一个寄存器，所以一次指令就够 —— 切换路径上
+*          每一次多余的 CSR 访问都是白花钱。
+*/
+static unsigned long la_asid_swap(unsigned long asid)
+{
+    unsigned long v = (unsigned long)(asid & 0x3FFUL);
+
+    __asm__ volatile("csrwr %0, " LA_STR(LA_CSR_ASID) : "+r"(v) : : "memory");
+    return v & 0x3FFUL;
+}
+#endif
+
 #if (ARKRTOS_USE_PAGING_DEMAND == 1)
 /**
 * @brief 在 TLB 重填上下文里装一条 4 KB 对（只能在 refill 入口里用）
@@ -846,6 +873,44 @@ static const la_pg_span_t s_pg_spans[] = {
 
 static uint32 s_pg_app_space;       /* 当前装进 App 窗口的空间号 */
 
+/* ------------------------------------------------------------
+ * ASID（U-7）：空间标签，切换只剩一次 CSR 写
+ * @details 关档时 ASID 恒 0：切空间必须把窗口那 256 条条目整段失效再重铺，
+ *          因为所有空间的条目在 TLB 里长得一模一样（同一个 VA、同一个
+ *          ASID），留着就一定是别人的帧。
+ *          开档时空间 s 对应 ASID s+1（0 留给内核自己的默认视图 = space 0），
+ *          每个空间独占一路 STLB（way = s % 8）：
+ *            - 条目按 ASID 区分 ⇒ 别的空间那 256 条**留着也无害**，
+ *              它们只是「不匹配」；
+ *            - 切换就是一次 `csrwr CSR.ASID`，不再 512 次 invtlb +
+ *              256 次 tlbwr（关档每切一次都要付这一笔）。
+ *          三处配套，缺一条就不成立：
+ *            1. 内核自有映射（恒等映射、两条 UART 页、动态 MMIO 别名）
+ *               必须是全局条目（TLBELO.G=1），否则换个 ASID 就看不见；
+ *            2. 铺条目之前必须先切到该空间的 ASID —— 条目记的是写的那一刻
+ *               的 CSR.ASID，不是空间的号码；
+ *            3. `invtlb 3` 是**按 VA** 失效、不看 ASID ⇒ 它会连带清掉别的
+ *               空间同 VA 的条目，所以撤映射之后要把当前空间补铺回来。
+ * ------------------------------------------------------------ */
+#if (ARKRTOS_USE_PAGING_ASID == 1)
+#if (ARKRTOS_USE_PAGING_PAGES != 1)
+#error "ARKRTOS_USE_PAGING_ASID=1 requires ARKRTOS_USE_PAGING_PAGES=1"
+#endif
+#if (ARKRTOS_USE_PRIV != 1)
+#error "ARKRTOS_USE_PAGING_ASID=1 requires ARKRTOS_USE_PRIV=1"
+#endif
+#if (ARKRTOS_PAGING_APPS_MAX > 8u)
+#error "ARKRTOS_USE_PAGING_ASID=1 gives every space one STLB way: ARKRTOS_PAGING_APPS_MAX must be <= 8"
+#endif
+#define LA_PG_WIN_WAY_OF(space)   ((uint32)(space) % LA_STLB_WAYS)
+#define LA_PG_ASID_OF(space)      ((unsigned long)(space) + 1UL)
+#define LA_PG_DYN_G               (LA_PTE_G)
+#else
+#define LA_PG_WIN_WAY_OF(space)   LA_PG_WIN_WAY
+#define LA_PG_ASID_OF(space)      0UL
+#define LA_PG_DYN_G               (0UL)
+#endif
+
 #if (ARKRTOS_USE_PAGING_PAGES == 1)
 /* 页级窗口下每个空间的帧基址：0 = 还没从帧池分配（池基址至少 0x04000000，
  * 所以 0 不会与任何合法帧冲突）。空间一旦拿到帧就不还 —— 空间回收仍欠，
@@ -967,10 +1032,16 @@ static int32 la_pg_space_ensure(uint32 space)
     return 0;
 }
 
-/** 把该空间的 512 页铺进窗口（256 条 PS=12 条目，way 0） */
+/** 把该空间的 512 页铺进窗口（256 条 PS=12 条目，占该空间自己那一路） */
 static void la_pg_install_space(uint32 space)
 {
     uint32 i;
+#if (ARKRTOS_USE_PAGING_ASID == 1)
+    /* 条目记的是**写的那一刻**的 CSR.ASID（TLBWR/TLBFILL 把 CSR.ASID 抄进
+     * 表项），不是「空间的号码」。所以铺之前先切过去，铺完换回调用者的值：
+     * 切不切到该空间由调用者决定（activate 会切，回收路径只是借用一下）。 */
+    unsigned long saved_asid = la_asid_swap(LA_PG_ASID_OF(space));
+#endif
 #if (ARKRTOS_USE_PAGING_DEMAND == 1)
     /* 按需档：只重铺**已经付过费**的那几对（invtlb 之后要补回来，见
      * la_pg_assert_window）；没摸过的对留空，等它自己 fault。 */
@@ -982,7 +1053,7 @@ static void la_pg_install_space(uint32 space)
         {
             uint32 va = ARKRTOS_QEMU_APP_BASE + (i * 0x2000u);
 
-            la_tlb_write(va, 12u, LA_STLB_INDEX(va, LA_PG_WIN_WAY),
+            la_tlb_write(va, 12u, LA_STLB_INDEX(va, LA_PG_WIN_WAY_OF(space)),
                          LA_PTE_APP(pa), LA_PTE_APP(pa + 0x1000u));
         }
     }
@@ -993,10 +1064,13 @@ static void la_pg_install_space(uint32 space)
     {
         uint32 va = ARKRTOS_QEMU_APP_BASE + (i * 0x2000u);
 
-        la_tlb_write(va, 12u, LA_STLB_INDEX(va, LA_PG_WIN_WAY),
+        la_tlb_write(va, 12u, LA_STLB_INDEX(va, LA_PG_WIN_WAY_OF(space)),
                      LA_PTE_APP(base + (i * 0x2000u)),
                      LA_PTE_APP(base + (i * 0x2000u) + 0x1000u));
     }
+#endif
+#if (ARKRTOS_USE_PAGING_ASID == 1)
+    (void)la_asid_swap(saved_asid);
 #endif
 }
 
@@ -1390,6 +1464,13 @@ static void la_pg_boot_map(void)
     }
 
     la_pg_install_space(0u);
+
+#if (ARKRTOS_USE_PAGING_ASID == 1)
+    /* 内核的默认视图就是 space 0：内核经窗口读写 space 0 的帧时 CSR.ASID
+     * 必须是这个空间的 ASID，否则那条非全局的窗口条目匹配不上（内核自己的
+     * 恒等映射、UART 页都是全局条目，不受影响）。 */
+    (void)la_asid_swap(LA_PG_ASID_OF(0u));
+#endif
 }
 #endif /* ARKRTOS_USE_PAGING_PAGES == 1 */
 
@@ -1412,7 +1493,19 @@ static void la_pg_boot_map(void)
 */
 static void la_pg_assert_window(void)
 {
-#if (ARKRTOS_USE_PAGING_PAGES == 1)
+#if (ARKRTOS_USE_PAGING_ASID == 1)
+    /* ASID 档：条目按 ASID 分开，补铺自己这一路就够，不必先失效（tlbwr 覆盖
+     * 同一条目）。别的空间若被一次 invtlb 3 连带清掉，下一次 activate 的读回
+     * 校验会补回来 —— 这一条只保证「当前空间的窗口一定在」。 */
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
+    la_pg_install_space(s_pg_app_space);
+#else
+    if(s_pg_space_base[s_pg_app_space] != 0u)
+    {
+        la_pg_install_space(s_pg_app_space);
+    }
+#endif
+#elif (ARKRTOS_USE_PAGING_PAGES == 1)
     /* 页级窗口：一次 invtlb 只会打掉命中的那几页，所以这里整段重铺。
      * 代价（512 次 invtlb + 256 次 tlbwr）只在这一条路径上付，换来的是
      * 「撤销动态映射之后窗口一定还在」。 */
@@ -1438,8 +1531,87 @@ static void la_pg_assert_window(void)
 #endif
 }
 
+#if (ARKRTOS_USE_PAGING_ASID == 1)
+/** 这一对 8 KB 在这个空间里「应该」翻译到哪；0 = 这一档说不出该是什么 */
+static uint32 la_pg_pair_expect(uint32 space, uint32 idx)
+{
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
+    return s_pg_pair_pa[space][idx];
+#else
+    return s_pg_space_base[space] + (idx * 0x2000u);
+#endif
+}
+
+/** 读回校验一对 8 KB：期望值为 0（这一档还没付费）时视为通过 */
+static int32 la_pg_pair_check(uint32 space, uint32 idx)
+{
+    uint32 va = ARKRTOS_QEMU_APP_BASE + (idx * 0x2000u);
+    uint32 expect = la_pg_pair_expect(space, idx);
+    uint32 ppn = 0u;
+    uint32 ps = 0u;
+
+    if(expect == 0u)
+    {
+        return 0;
+    }
+
+    if((arkrtos_port_paging_lookup(va, 0, &ppn, &ps) == 0u) ||
+       (ppn != expect) || (ps != 12u))
+    {
+        return -1;
+    }
+
+    return 0;
+}
+#endif
+
 int32 arkrtos_port_paging_activate(uint32 space)
 {
+#if (ARKRTOS_USE_PAGING_ASID == 1)
+    /* ASID 档：切换 = 一次 CSR 写。别的空间那 256 条一条都不用动 —— 它们的
+     * ASID 不匹配，只是未命中，翻译不到别人的帧。
+     *
+     * 但「不动」不等于「一定还在」：invtlb 3 按 VA 失效、不看 ASID，会连带
+     * 清掉别的空间同 VA 的条目（撤销动态映射、空间回收都走它）。所以每次
+     * 切换都读回首末两对确认，缺了就补铺这一路。补完还对不上就返回 -2，
+     * 且 s_pg_app_space 照样更新 —— CSR.ASID 已经切过去了，说「没切」是
+     * 假话；这一档失败的形态是「条目缺了会 refill」，不是「读到别人的帧」。 */
+    if(space >= (uint32)ARKRTOS_PAGING_APPS_MAX)
+    {
+        return -1;
+    }
+
+#if (ARKRTOS_USE_PAGING_DEMAND != 1)
+    if(la_pg_space_ensure(space) != 0)
+    {
+        return -3;
+    }
+#endif
+
+    (void)la_asid_swap(LA_PG_ASID_OF(space));
+
+    {
+        int32 bad = 0;
+
+        if((la_pg_pair_check(space, 0u) != 0) ||
+           (la_pg_pair_check(space, LA_PG_WIN_ENTRIES - 1u) != 0))
+        {
+            la_pg_install_space(space);
+            bad = 1;
+        }
+
+        s_pg_app_space = space;
+
+        if((bad != 0) &&
+           ((la_pg_pair_check(space, 0u) != 0) ||
+            (la_pg_pair_check(space, LA_PG_WIN_ENTRIES - 1u) != 0)))
+        {
+            return -2;
+        }
+    }
+
+    return 0;
+#else
 #if (ARKRTOS_USE_PAGING_PAGES == 1)
 #if (ARKRTOS_USE_PAGING_DEMAND == 1)
     /* 按需档：切空间 = 清掉旧翻译 + 记账，条目一条都不铺（等第一次访问
@@ -1552,6 +1724,7 @@ int32 arkrtos_port_paging_activate(uint32 space)
     s_pg_app_space = space;
     return 0;
 #endif /* ARKRTOS_USE_PAGING_PAGES == 1 */
+#endif /* ARKRTOS_USE_PAGING_ASID == 1 */
 }
 
 /* ------------------------------------------------------------ 延迟换窗口 (U-2) */
@@ -1673,11 +1846,31 @@ int32 arkrtos_port_paging_space_release(uint32 space)
         return -3;
     }
 
+#if (ARKRTOS_USE_PAGING_ASID == 1)
+    {
+        /* ASID 档：要撤的是**那个空间**的条目，而 invtlb 3 按 VA 失效、不看
+         * ASID ⇒ 先切到它的 ASID 再撤（切不切其实都撤得到，切换是为了让
+         * 「撤的是谁」这件事在代码里写得出来），撤完切回原处并把当前空间的
+         * 窗口补铺回来 —— 那 512 次失效连它一起打掉了。
+         * 不撤的后果只有一个但足够：帧还回池子后被别的空间拿走，旧条目仍
+         * 指着它，两个空间共享同一块物理页而且没有任何报错。 */
+        unsigned long prev = la_asid_swap(LA_PG_ASID_OF(space));
+
+        la_pg_drop_window();
+        (void)la_asid_swap(prev);
+
+        if(space != s_pg_app_space)
+        {
+            la_pg_install_space(s_pg_app_space);
+        }
+    }
+#else
     if(space == s_pg_app_space)
     {
         /* 旧条目先撤。不撤 = 帧回池后被别人拿走、窗口仍指着它。 */
         la_pg_drop_window();
     }
+#endif
 
 #if (ARKRTOS_USE_PAGING_DEMAND == 1)
     /* 按需档：truth 在 s_pg_pair_pa，逐对还（一条 PS=12 条目管两页）。 */
@@ -1784,6 +1977,52 @@ uint32 arkrtos_port_paging_window_va(void)
 {
     return ARKRTOS_QEMU_APP_BASE;
 }
+
+#if (ARKRTOS_USE_PAGING_ASID == 1)
+/**
+* @brief 读当前硬件的 CSR.ASID（U-7）
+* @return 0..1023
+* @details 只读，不改状态。地址空间切换之后用它回报「现在跑在谁的视图里」，
+*          这是 ASID 档下判断「切换到底做了没有」的唯一直接读数。
+*/
+unsigned long arkrtos_port_paging_asid_current(void)
+{
+    return la_asid_get();
+}
+
+/**
+* @brief 空间号对应的 ASID（空间 s -> ASID s+1，0 留给内核默认视图）
+* @param space 0 .. arkrtos_port_paging_space_count()-1
+* @return ASID 值；空间号越界时返回 0（不猜一个别空间的号）
+*/
+uint32 arkrtos_port_paging_asid_of(uint32 space)
+{
+    if(space >= (uint32)ARKRTOS_PAGING_APPS_MAX)
+    {
+        return 0u;
+    }
+
+    return (uint32)LA_PG_ASID_OF(space);
+}
+
+/**
+* @brief 空间的窗口条目落在哪一条 STLB way 上
+* @param space 0 .. arkrtos_port_paging_space_count()-1
+* @return way 号；越界返回 0
+* @details ASID 档下每个空间占一条独立 way，所以「两个空间的窗口条目并存」
+*          这件事在硬件上是看得见的（不同的 way）；关档时全部挤在 way 0，
+*          切换必须重写条目。
+*/
+uint32 arkrtos_port_paging_window_way(uint32 space)
+{
+    if(space >= (uint32)ARKRTOS_PAGING_APPS_MAX)
+    {
+        return 0u;
+    }
+
+    return LA_PG_WIN_WAY_OF(space);
+}
+#endif
 
 /**
 * @brief 读回一个 VA 当前由哪条 TLB 条目翻译（诊断用）
@@ -1904,22 +2143,25 @@ static uint32 la_pg_static_hit(uint32 base, uint32 size)
     return 0u;
 }
 
-/** mem -> TLBELO；0 表示这条属性不提供动态映射 */
+/** mem -> TLBELO；0 表示这条属性不提供动态映射
+ *  @note 开 ASID 档时四条都带 G（全局）：动态别名是**内核**的 MMIO 通路
+ *        （PLV0），它不属于任何一个 App 空间，绑死在某一个 ASID 上就会出现
+ *        「换个空间就 VFS 读不动 / 控制台写不出」这种只在开档后显形的形态。 */
 static unsigned long la_pg_dyn_lo(uint32 pa, arkrtos_mpu_mem_t mem)
 {
     switch(mem)
     {
     case ARKRTOS_MPU_MEM_RAM:
-        return LA_PTE_V | LA_PTE_WE | LA_PTE_CCA(1u) | LA_PTE_PLV(0u) | LA_PTE_PPN(pa);
+        return LA_PTE_V | LA_PTE_WE | LA_PTE_CCA(1u) | LA_PTE_PLV(0u) | LA_PG_DYN_G | LA_PTE_PPN(pa);
 
     case ARKRTOS_MPU_MEM_ROM:
-        return LA_PTE_V | LA_PTE_CCA(1u) | LA_PTE_PLV(0u) | LA_PTE_PPN(pa);
+        return LA_PTE_V | LA_PTE_CCA(1u) | LA_PTE_PLV(0u) | LA_PG_DYN_G | LA_PTE_PPN(pa);
 
     case ARKRTOS_MPU_MEM_PERIPH_RW:
-        return LA_PTE_V | LA_PTE_WE | LA_PTE_CCA(0u) | LA_PTE_PLV(0u) | LA_PTE_PPN(pa);
+        return LA_PTE_V | LA_PTE_WE | LA_PTE_CCA(0u) | LA_PTE_PLV(0u) | LA_PG_DYN_G | LA_PTE_PPN(pa);
 
     case ARKRTOS_MPU_MEM_PERIPH_RO:
-        return LA_PTE_V | LA_PTE_CCA(0u) | LA_PTE_PLV(0u) | LA_PTE_PPN(pa);
+        return LA_PTE_V | LA_PTE_CCA(0u) | LA_PTE_PLV(0u) | LA_PG_DYN_G | LA_PTE_PPN(pa);
 
     default:
         return 0UL;

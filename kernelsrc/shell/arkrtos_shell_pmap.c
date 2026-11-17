@@ -36,6 +36,11 @@
  *            pmap dyn                                  动态槽位占用读数
  *            pmap cu                                   自测：内核受控访问用户
  *                                                      地址（U-6）的四种拒绝码
+ *            pmap asid                                 地址空间 ASID 读数（U-7，
+ *                                                      仅 ARKRTOS_USE_PAGING_ASID=1
+ *                                                      的镜像有）：当前 CSR.ASID、
+ *                                                      每个空间的 asid/way/帧，以及
+ *                                                      16 次切换的实测耗时
  *            pmap swap                                 页替换读数（U-16）：换出/
  *                                                      换回/失败/槽位/驻留对
  *            pmap swaptest                             自测：先吃掉空闲帧，再摸
@@ -668,6 +673,78 @@ int cmd_pmap(int argc, char *argv[])
         sh_out("pmap test: PASS (map / unmap / rebind / unmap)\r\n");
         return 0;
     }
+
+#if (ARKRTOS_USE_PAGING_ASID == 1)
+    if((argc >= 2) && (strcmp(argv[1], "asid") == 0))
+    {
+        uint32 count = arkrtos_paging_space_count();
+        uint32 hz    = arkrtos_port_get_system_clock();
+        uint32 i;
+
+        ark_shell_printf("pmap asid: mode=on current=%u spaces=%u\r\n",
+                         (unsigned)arkrtos_port_paging_asid_current(),
+                         (unsigned)count);
+
+        for(i = 0u; i < count; i++)
+        {
+            ark_shell_printf("  space %u -> asid %u way %u frame 0x%08X\r\n",
+                             (unsigned)i,
+                             (unsigned)arkrtos_port_paging_asid_of(i),
+                             (unsigned)arkrtos_port_paging_window_way(i),
+                             (unsigned)arkrtos_paging_space_frame(i));
+        }
+
+        /* 切换代价：ASID 档下攒成「一次 CSR 写」，关档是「512 次 invtlb +
+         * 256 次 tlbwr」。这里不靠推断，直接量 16 次来回切换的 tick 数。
+         * 前提两条：至少两个空间（只有一个就没得换），且没有 ELF 程序正在
+         * 窗口里跑（换空间会把它的帧换掉，等于把运行中的程序脚下的地抽了）。 */
+        #if (ARKRTOS_USE_ELF == 1)
+        if(arkrtos_elf_running() != 0)
+        {
+            sh_out("pmap asid: refused timing - an ELF program is using the window\r\n");
+            return 0;
+        }
+        #endif
+
+        if(count < 2u)
+        {
+            sh_out("pmap asid: switch timing skipped - only one address space\r\n");
+            return 0;
+        }
+
+        {
+            uint32 t0;
+            uint32 t1;
+            uint32 ticks;
+            uint32 ns;
+
+            t0 = arkrtos_port_get_timer_counter();
+            for(i = 0u; i < 16u; i++)
+            {
+                (void)arkrtos_paging_space_activate((i & 1u) == 0u ? 1u : 0u);
+            }
+            t1 = arkrtos_port_get_timer_counter();
+            (void)arkrtos_paging_space_activate(0u);
+
+            ticks = t1 - t0;
+            /* ns/次 = ticks * 1e9 / (hz * 16)；hz 未知时只报 tick，不编时间 */
+            if(hz == 0u)
+            {
+                ark_shell_printf("pmap asid: switch 16x %u ticks (clock unknown)\r\n",
+                                 (unsigned)ticks);
+            }
+            else
+            {
+                ns = (uint32)(((unsigned long long)ticks * 1000000000ull) /
+                              ((unsigned long long)hz * 16ull));
+                ark_shell_printf("pmap asid: switch 16x %u ticks, %u ns/switch "
+                                 "(clock %u Hz)\r\n",
+                                 (unsigned)ticks, (unsigned)ns, (unsigned)hz);
+            }
+        }
+        return 0;
+    }
+#endif
 
     if((argc >= 3) && (strcmp(argv[1], "rel") == 0))
     {

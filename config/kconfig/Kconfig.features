@@ -373,6 +373,24 @@ config ARKRTOS_USE_PAGING_SWAP
 
 	  Off (default) compiles nothing and changes no byte of the image.
 
+config ARKRTOS_USE_PAGING_ASID
+	bool "Per-space ASID, switch by CSR.ASID only (U-7)"
+	depends on ARKRTOS_USE_PAGING
+	depends on ARKRTOS_USE_PAGING_PAGES
+	help
+	  Give every App address space its own ASID (space s -> ASID s+1) and one
+	  STLB way (way s % 8), so the 256 PS=12 entries that cover the window of
+	  one space stay in the TLB while another space runs.  Switching a space
+	  then costs one CSR.ASID write instead of 512 invtlb plus 256 tlbwr.
+
+	  This changes the cost of a switch and which space an entry belongs to,
+	  not the strength of the isolation: entries of another space simply do
+	  not match, so they are misses, not aliases.  Kernel mappings (identity
+	  map, UART pages, dynamic MMIO aliases) are global and stay visible under
+	  every ASID.  Requires ARKRTOS_PAGING_APPS_MAX <= 8.
+
+	  Off (default) changes nothing.
+
 config ARKRTOS_USE_ELF
 	bool "ELF64 executable loader (exec)"
 	depends on ARKRTOS_USE_VFS && ARKRTOS_USE_PRIV

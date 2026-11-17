@@ -121,6 +121,16 @@
 #define ARKRTOS_USE_PAGING_DEMAND    0
 #endif
 
+/* U-7（ASID）同样默认关：ASID 恒 0 的那份镜像与上面几档逐字节相同。验证时
+ * 单独出一份镜像：
+ *   make -f example/qemu_loongarch64/Makefile BUILD=build/qemu_la64_asid \
+ *        EXTRA_CFLAGS=-DARKRTOS_USE_PAGING_ASID=1
+ * 开档后每个空间一个 ASID（space s -> s+1）并独占一路 STLB（way s % 8），
+ * 切空间只写一次 CSR.ASID，不再整段 invtlb / 重铺 256 条。 */
+#ifndef ARKRTOS_USE_PAGING_ASID
+#define ARKRTOS_USE_PAGING_ASID      0
+#endif
+
 /* ============================================================
  * 四、能力开关
  * @details LA64 硬件有 FPU，但这一版没有启用 FPU 上下文保存（任务切换不存

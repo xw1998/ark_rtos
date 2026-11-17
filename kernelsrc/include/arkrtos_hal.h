@@ -533,6 +533,23 @@ uint32 arkrtos_port_paging_swap_stat(uint32 which);
  *           no longer coincide with the window VA. */
 uint32 arkrtos_port_paging_window_va(void);
 
+/** @brief Hardware ASID currently in CSR.ASID (U-7); 0 when ASID is off
+ *  @details 关档（ARKRTOS_USE_PAGING_ASID=0）时恒为 0：本 port 把每个 App 空间
+ *           摊在一组固定的 TLB way 上、切换靠重写条目，压根没有 ASID 这个
+ *           概念，返回一个非零值就是编的。 */
+#if (ARKRTOS_USE_PAGING_ASID == 1)
+unsigned long arkrtos_port_paging_asid_current(void);
+uint32 arkrtos_port_paging_asid_of(uint32 space);
+uint32 arkrtos_port_paging_window_way(uint32 space);
+#else
+/* 关档不出符号：一个「永远返回 0 的函数」会被读成「ASID 就是 0」，
+ * 而真相是本 port 压根没有 ASID 概念（切换靠重写整组条目）。宏回 0
+ * 只保证调用方能编过，语义由调用方自己解释。 */
+#define arkrtos_port_paging_asid_current()              (0UL)
+#define arkrtos_port_paging_asid_of(space)              (0u)
+#define arkrtos_port_paging_window_way(space)           (0u)
+#endif
+
 #else
 
 #define arkrtos_port_paging_init()                 (-1)
@@ -553,6 +570,9 @@ uint32 arkrtos_port_paging_window_va(void);
 #define arkrtos_port_paging_frame_total()               (0u)
 #define arkrtos_port_paging_frame_used()                (0u)
 #define arkrtos_port_paging_window_va()                 (0u)
+#define arkrtos_port_paging_asid_current()              (0UL)
+#define arkrtos_port_paging_asid_of(space)              (0u)
+#define arkrtos_port_paging_window_way(space)           (0u)
 
 #endif
 

@@ -1356,7 +1356,7 @@ utest: 9 matched, 9 passed, 0 failed, 0 skipped; assertions 90 run / 0 failed
 | 没做 | 后果 |
 | --- | --- |
 | **没有页表遍历**（PGDL/PGDH/PWCL/PWCH 全未实现） | 一个 App 只能落在启动时写死的那一页；不能动态分配、不能换出、不能按需映射 |
-| **没有 ASID 区分**（`ASID` 恒 0） | 换 App 必须整 TLB 刷；多 App 无法共存 |
+| **默认档没有 ASID 区分**（`ASID` 恒 0） | 换 App 必须整 TLB 刷。U-7 的 ASID 档已做并实测（§5.28），缺省关 |
 | **App 页整页 RWX** | 没有 W^X，App 可以改写自己的代码段 |
 | **App 的 sp 由 App 自己给** | App 把 sp 指到内核页时，trap 帧会按它给的位置写 —— 这是「信任 App 传进来的栈」这一档的固有缺口，不是 TLB 能挡的 |
 | **只有一个 App 页** | 证明的是「App 与内核之间」的隔离，**不证明 App 与 App 之间**的隔离 |
@@ -2052,7 +2052,8 @@ pmap elf: 0 live instance(s)
 #### 5.17.7 明确没做的部分
 
 - **页帧分配器（U-3）**：帧是板级固定数组，只按 `ARKRTOS_PAGING_APPS_MAX` 开。
-- **ASID / TLB shootdown（U-7）**：ASID 恒 0，切换靠重写条目。
+- **ASID / TLB shootdown（U-7）**：这一节的镜像 ASID 恒 0、切换靠重写条目；
+  U-7 的 ASID 档已于同日做完并实测（§5.28），但 shootdown 仍没有。
 - **`copy_from_user`（U-6）**、按需缺页（U-5）、App 反向探测（PLV3 读内核页/别的帧）
   都不在本轮：本轮的隔离证据是「同一 VA → 两块物理内存」，越权证据仍来自
   PLV/`PLV3` 探针那一套（[内存保护与App越权验证](内存保护与App越权验证.md)）。
@@ -2177,7 +2178,8 @@ pin N 特意把 `la_tlb_inval_page(` 列为必需：把这一句删掉，功能�
 
 #### 5.18.5 明确没做的部分
 
-- **ASID 与批量失效**：ASID 仍恒 0；没有 `flush_tlb_range` / 整表 flush
+- **ASID 与批量失效**：这一档 ASID 仍恒 0（ASID 档见 §5.28）；没有
+  `flush_tlb_range` / 整表 flush
   （`arkrtos_port_paging_flush()` 仍空操作）。
 - **App 可见动态映射的撤销**：App 窗口走空间切换（U-1），那条 PS=20 条目由
   `activate()` 重写，不经过 `unalias`。
@@ -2746,8 +2748,8 @@ ci_gate 项**（与 U-8 / pin R 同一条约定）。
 - ~~**没有空间回收**~~：这一阶时帧拿过不还，空间跑满后再要空间就是 `-3`。
   **已于 §5.24 补上**（`arkrtos_paging_space_release`，装载器在 activate 之前
   回收该空间的旧窗口）；「页替换」**已由 §5.26 补上**（开 `ARKRTOS_USE_PAGING_SWAP` 的档；缺省仍落回原致命路径）。
-- **没有 ASID**：切换空间仍靠整段 `invtlb`（512 次），跨核 TLB shootdown
-  仍无从谈起（U-7）。
+- **默认档没有 ASID**：切换空间仍靠整段 `invtlb`（512 次）。U-7 的 ASID 档
+  已做并实测（§5.28），但跨核 TLB shootdown 仍无从谈起。
 - **窗口独占 way 0**：内核 UART / App UART 已经改走 way 7 / 6 让开，但
   其余经 `la_tlb_fill()` 进 STLB 的条目（如果有）仍可能与窗口抢路。
 - **只在 LA64 板级打开**：RV32 侧只有「关档零变化」这一条读数。
@@ -2974,7 +2976,7 @@ sha256sum <head>/stripped.elf <now>/stripped.elf
 - ~~**帧不还**~~：这一阶按需档只是「按对付款」，退出/切空间都不回收。
   **已由 §5.24 补上**（按需档逐对 `frame_free(pa, 2u)` 并销账）；页替换
   **已由 §5.26 补上**（开关 `ARKRTOS_USE_PAGING_SWAP`，缺省 0）。
-- **没有 ASID**：切空间仍是整段 `invtlb`（U-7）。
+- **默认档没有 ASID**：切空间仍是整段 `invtlb`；ASID 档见 §5.28（U-7）。
 - **refill 不区分 PLV**：内核与 App 走同一条路（5.23.3 里说明了为什么必须这样）。
 - ~~**没有页替换 / 淘汰**~~：缺省档仍是「帧池空了就 `return 0` → 原致命路径」；
   开 `ARKRTOS_USE_PAGING_SWAP=1` 后改为换出一对 8 KB 再重试（§5.26）。
@@ -3114,8 +3116,8 @@ bss 628228`。
 #### 5.24.8 仍然没做的
 
 - ~~**页替换**~~：**已由 §5.26 补上**（缺省关；开档后池空改为换出一对 8 KB）；
-- **ASID / TLB shootdown**（U-7）：切空间仍是整段 `invtlb`，回收也没有按
-  ASID 定向；
+- **ASID / TLB shootdown**（U-7）：这一档切空间仍是整段 `invtlb`，回收也没有按
+  ASID 定向；ASID 档见 §5.28（仍无 shootdown）；
 - **按需档的细粒度读数**：`pmap rel` 只报整池 `used` 前后值，没有「这个空间
   现在挂着哪几对」的命令；
 - **App 侧自回收**：`-3` 分支就是为它留的门，但当前没有这个调用者。
@@ -3304,7 +3306,8 @@ bss 增量 73 728 = 8 槽 × 8192 + bounce 8192，与实现逐项对得上。符
 
 - **交换区不在持久介质上**：`.bss` 数组，掉电即失，也**不省物理内存**；
 - **没有脏页判定**：每一对换出都整块 8 KB 拷贝，没有「没改过就不写」；
-- **没有 ASID / TLB shootdown**（U-7）：换出仍是按 VA 单条 `invtlb`；
+- **没有 ASID / TLB shootdown**（U-7）：换出仍是按 VA 单条 `invtlb`；ASID 档
+  见 §5.28，但换出/坏页失效仍没有按 ASID 定向的手段；
 - **`fail` 路径只有源码判据**：8 轮全败（池里所有对都在被用）在自测里构造不出来，
   没实跑过；
 - **只在 LA64 板级实测**：RV32 侧依旧只有「关档零变化」这一条读数。
@@ -3482,6 +3485,116 @@ E–K 每条都带「把源改坏必须报错」的自检，报不出错就算 p
   但也意味着**能按复位键的人可以无限重试**；
 - **没有运行期改口令 / 多用户**：凭据在编译期固定；
 - **不是设备身份**：不参与 SEC-G13，不替代签名与安全启动。
+
+### 5.28 每空间 ASID（U-7，2026-11-17）
+
+前几节留下的最大一条是「切空间 = 逐页 `invtlb 512` 次 + 重写 256 条」。这一节把
+它换成**每空间一个 ASID + 一条独立 STLB way**，切换只写一次 `CSR.ASID`。
+
+#### 5.28.1 开关与依赖
+
+| 项 | 值 |
+|----|----|
+| 开关 | `ARKRTOS_USE_PAGING_ASID`（缺省 0；`EXTRA_CFLAGS=-DARKRTOS_USE_PAGING_ASID=1` 出独立镜像） |
+| 依赖 | `ARKRTOS_USE_PAGING` + `ARKRTOS_USE_PAGING_PAGES=1` + `ARKRTOS_USE_PRIV=1`（不满足直接 `#error`） |
+| 约束 | `ARKRTOS_PAGING_APPS_MAX <= 8`（每个空间占一条 way） |
+| 关档 | 宏展开回原值（`LA_PG_WIN_WAY_OF(s) → LA_PG_WIN_WAY`、`LA_PG_ASID_OF(s) → 0`、`LA_PG_DYN_G → 0`），`la_asid_*` 整段不编 |
+
+映射关系：空间 `s` → `ASID s+1`（ASID 0 留给内核默认视图）、`way s % 8`。
+
+#### 5.28.2 实现要点
+
+- **装空间**（`la_pg_install_space`）：先 `la_asid_swap(LA_PG_ASID_OF(space))` 再写
+  256 条 PS=12 条目 —— `tlbwr` 把当时的 `CSR.ASID` 抄进条目，不切就装到别人名下；
+  装完还原调用者的 ASID。
+- **切换**（`arkrtos_port_paging_activate`）：`la_pg_space_ensure` → 写 `CSR.ASID`
+  → **读回校验**首末两对（`la_pg_pair_check` 走 `tlbsrch` + `tlbrd`），缺了就补铺。
+  这一步不赌 `invtlb` 是按 VA 还是按 (ASID,VA)，两种语义下结果都正确。
+- **回收**（`space_release`）：先切到该空间的 ASID 再撤条目，然后切回；若撤的不是
+  当前空间，再把当前空间补铺一遍。
+- **启动**：`la_pg_boot_map` 装完 space 0 之后把 `CSR.ASID` 设成 space 0 的号，
+  于是「内核默认视图」= space 0，shell 开机看到的窗口与关档一致。
+- **动态 MMIO 别名**：ASID 档下带 `LA_PTE_G`（全局），否则换空间后控制台/驱动
+  读不动 —— 它是内核 PLV0 通路，不属于任何 App 空间。
+
+#### 5.28.3 QEMU 实测读数（`--elf build/qemu_la64_asid/ark_qemu_la64.elf`）
+
+```
+pmap asid: mode=on current=1 spaces=2
+  space 0 -> asid 1 way 0 frame 0x04000000
+  space 1 -> asid 2 way 1 frame 0x00000000
+pmap asid: switch 16x 104910 ticks, 65568 ns/switch (clock 100000000 Hz)
+```
+
+最关键的一条是**同一 VA 在两个空间里命中不同的条目**（这是「条目并存」的直接
+证据，关档下它会命中同一条）：
+
+```
+pmap look 0x02000000        -> entry=0   ps=12 ppn=0x04000000      (space 0)
+pmap space 1                -> rc=0 (current=1)
+pmap look 0x02000000        -> entry=256 ps=12 ppn=0x04200000      (space 1)
+```
+
+`pmap u1` 也换了读法：两次 `look` 的 entry 号是 `128` / `384`（不同 way 的不同条目），
+不再是同一条被重写：
+
+```
+pmap u1: look0 entry=128 ps=12 ppn=0x04100000
+pmap u1: look1 entry=384 ps=12 ppn=0x04300000
+pmap u1: PASS - same VA, two frames
+pmap u2: PASS - two instances, two spaces, neither frame overwritten
+utest: 13 matched, 13 passed, 0 failed
+```
+
+#### 5.28.4 切换代价：三次读数与它们的分解
+
+同一镜像连续三次 `pmap asid`：
+
+| 次 | ticks / 16 次 | ns/次 | 说明 |
+|----|----|----|----|
+| 1 | 104910 | 65568 | 含 space 1 的**一次性**建窗（取 512 帧 + 装 256 条） |
+| 2 | 97170 | 60731 | 瞬态 |
+| 3 | 54960 | 34350 | 稳态 |
+
+稳态 34.35 µs/次。这个数**不是 `csrwr` 本身的代价**：每次 `activate` 还做两次
+`tlbsrch` 读回校验（QEMU 的 TLB 查找在 512 条量级上是线性扫描），当前的仪表
+分不开「写 CSR」与「两次校验」。诚实写法是：**端到端 34 µs/次，其中包含两次
+读回校验**；CSR 写本身的单次成本本轮没有独立读数。
+
+#### 5.28.5 默认档逐字节不变
+
+同一 `SOURCE_DATE_EPOCH=1600000000`、同 `--strip-debug` 口径，对 `git archive HEAD`
+导出的树做同构编译：
+
+```
+6859ec5387dd4f4d6697dbf8d394d0dc2724e03ff7cf9c605a1f7d9d0b1ad8d8  HEAD 树
+6859ec5387dd4f4d6697dbf8d394d0dc2724e03ff7cf9c605a1f7d9d0b1ad8d8  本轮工作区
+```
+
+三个读接口（`arkrtos_port_paging_asid_current/of/window_way`）在关档下是**宏**
+（`hal.h` 的 `#else` 分支），不出符号；shell 的 `pmap asid` 分支整段在
+`#if (ARKRTOS_USE_PAGING_ASID == 1)` 里 —— 默认档连一个字节的新代码都没有。
+
+#### 5.28.6 门禁
+
+`tools/paging_gate.py` 新增 pin W（三条变异自检 + 真编 ASID 档）：开关三处、
+三条 `#error`、空间→ASID/way 的映射、装空间时切 ASID 且用该空间自己的 way、
+装完还原、activate 写 ASID 并做读回校验、校验走 `tlbsrch`、回收先切 ASID、
+启动设 space 0、`la_pg_dyn_lo` 四条路径都带全局位、`hal.h` 条件声明与关档宏、
+shell 的 `pmap asid` 分支与 `ns/switch` 读数。另加一条**真负向**：把板级
+`PAGES` 改成 0 再开 ASID=1，必须被那条 `#error` 拦住（编过 = 守卫失效）。
+
+#### 5.28.7 仍然没做的 / 诚实边界
+
+- **没有 TLB shootdown**：ASID 只解决「换空间要重写」。一个空间**改自己的映射**
+  仍要按 VA 失效，且多核下要让别的核也失效 —— 那要 IPI，SMP 侧还没到那一步；
+- **没有真实硬件读数**：本机只有 QEMU。`tlbwr` 抄 `CSR.ASID`、`tlbsrch` 按当前
+  ASID 匹配这两条**是 QEMU 的行为**（LA64 手册语义一致，但本机没有第二块板可对拍）；
+- **`invtlb` 的 ASID 语义没有单独取证**：正因为不确定，`activate` 用读回校验兜住，
+  `space_release` 先切到目标 ASID 再撤 —— 两种语义下都正确，但「QEMU 到底是哪一种」
+  本轮没有测出来；
+- **ASID 只有 10 位**：`APPS_MAX <= 8` 的限制来自 way 数（8 条 STLB way），不是 ASID 位宽；
+- **窗口仍固定 2 MB / 512 帧**：这一节只换切换机制，不改变窗口大小与帧账本。
 
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
