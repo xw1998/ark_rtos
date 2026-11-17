@@ -2106,6 +2106,49 @@ la32-user-exp）、**有 Linux 预编译 1 套**（Yongbao-Embedded 的 qemu-use
 `qemu-system-loongarch32*`。要真跑，仍然得先有 Linux（WSL2 发行版或一台
 Linux 机）。
 
+#### 6.1.2 本轮本机核查（2026-11-17）：判 `carrier_unavailable_on_this_machine`
+
+§6.1.1 回答的是「上游有没有」，这一节回答的是「这台机器上今天能不能跑」。
+两者证据性质不同（读源码/发布页 vs 本机命令输出），所以判词分开写。
+
+五条命令，原样输出（2026-11-17）：
+
+```bash
+$ ls D:/env/tools/qemu/qemu9/mingw64/bin/qemu-system-*.exe | wc -l
+58                       # 含 loongarch64 / riscv32 / riscv64，无 loongarch32
+$ cat D:/env/tools/qemu/qemu32/VERSION
+3.0.0                    # 老版本，整目录 13 个 exe 全是 arm/mips/riscv，无 loongarch
+$ find D:/env -name "qemu-system-loongarch32*"
+                         # 空
+$ ls C:/msys64 ; which meson
+                         # ls: cannot access 'C:/msys64': No such file or directory
+                         # PATH 上只有 ninja 1.13.2，没有 meson
+$ wsl -l -v
+                         # 没有已安装的分发版
+```
+
+判词三句，各自独立成立，**不要合并成一句**：
+
+1. **`la32_execution_carrier` = `carrier_unavailable_on_this_machine`。**
+   本机两份 QEMU 都没有 LA32 机器：9.2.3 只到 `loongarch64`，3.0.0 连
+   `loongarch` 都没有（`find` 全盘为空）。
+2. **载体本身存在，缺的是宿主。** 上游 `la32r-QEMU` 能跑的发行物只有
+   Linux 二进制（§6.1.1 第三列），没有 Windows 版；自建它要 QEMU 6.2 的
+   `configure` + `ninja`，本机既无 MSYS2 也无 WSL 发行版，且 `meson` 不在
+   PATH 上 ⇒ 缺的是**整套宿主编译环境**，不是缺一个包。
+3. **这个判词只否证「今天在这台机器上执行 LA32」，不否证 LA32 port 的
+   代码，也不否证「上游没有 LA32 模拟器」。** 三件事分属三层，混着读会
+   把环境取舍读成代码缺陷。
+
+要把它变成可执行，只有两条环境级的路（都不是改代码）：
+
+- **A：换到 Linux 宿主（或装一个 WSL 发行版）**按上游 README 编
+  `la32r-QEMU`，然后跑 §6.8.5 的首跑命令，再按 §6.8.5 那六组读数逐条验；
+- **B：装 MSYS2 全套**，在 Windows 上自建 QEMU 6.2 的 mingw64 构建。
+
+两条都要**先装环境**，属于项目级取舍，不在「顺手补欠账」的尺度内；
+因此本轮登记为待裁定项，未动工（`docs/欠账盘点.md` 第一节同名行）。
+
 ### 6.2 工具链与产物
 
 `D:/LoongIDE/la32-tool/bin/loongarch32-newlib-elf-gcc.exe`（GCC 8.3.0）。
@@ -2881,3 +2924,32 @@ cd build/qemu_loongarch64 && (sleep 6; printf 'utest\n'; sleep 20) | timeout 34 
 - 因此矩阵里 SMP 那一行**三列都是「未做」**，而且它不是「加个 `-smp`
   就有的东西」——按上面四条估，它是独立的一件事，不该混在 QEMU port 这条
   线里顺手宣称。
+
+### 9.4 本轮本机核查（2026-11-17）：判 `smp_not_implemented_four_gaps`
+
+§9.1 / §9.2 / §9.3 是「上游能不能仿真」「我们跑到哪一步」「差哪四件」。
+本轮的核查只补一件事：**把「跑过 `-smp 2`」和「支持 SMP」彻底分开记账**。
+
+判词：`smp_not_implemented_four_gaps`（缺口 = §9.3 的四条，一件未做）。
+配套三条不许读法，写死在这里：
+
+- `-smp 2` 在 RV32 上**崩**，不能读成「SMP 有问题」——崩的是单 hart 启动代码
+  被两个 hart 同时执行（§9.2 的串口撕裂与 `mepc=0x0`）；
+- `-smp 2` 在 LA64 上**13/13 照旧通过**，不能读成「SMP 可用」——日志里没有
+  第二个核的任何痕迹，`cpu_start` / `send_ipi` 都还返 -1；
+- 两件事都**不改变**矩阵里 SMP 那行的「未做」。
+
+若要在本机推进，最小可验证子步是 §9.3 的 ①②（次核停靠 + 真核号），
+**不碰** ③IPI 与 ④调度分核：
+
+- 开关仍是 `ARKRTOS_USE_SMP`，默认 0，默认档体积与行为零变化；
+- 判据两条：`-smp 2` 时串口出现次核的 `parked` 读数（带硬件核号，
+  LA64 走 `CSR.TID`）；`-smp 1` 的镜像与日志**逐字节不变**；
+- 这一步结束时也不能说「多核在跑」——只能说「次核起来了并且停在该停的地方」。
+
+前置条件（本轮未做，先登记）：它会改
+`example/qemu_loongarch64/start.S` 与 `kernelsrc/src/arkrtos_smp.c`，
+直接威胁当前单核 QEMU 全绿基线（`utest` 13/13、`pmap` 系列、
+`ci_gate` 43 项）。按「默认档零变化 + 不破坏既有基线」的约定，
+**须用户明确批准动启动路径后再开工**；批准前的状态就是
+`smp_not_implemented_four_gaps`。
