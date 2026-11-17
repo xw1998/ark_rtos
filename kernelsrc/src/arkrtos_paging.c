@@ -53,9 +53,14 @@
 *                    read back through the same VA in two spaces (pmap u1).
 *            NOT   - a page-frame allocator (frames are a fixed board-level
 *                    array, space n -> window base + n * window size);
-*                  - the loader running two instances: arkrtos_elf.c still
-*                    loads into space 0 and refuses a second program (U-2);
-*                  - copy_from_user / copy_to_user; demand paging; ASID;
+*                  - a concurrent second instance is possible since U-2
+*                    (exec_space); a page-frame allocator would still be
+*                    needed before a space can be recycled;
+*                  - demand paging; ASID; TLB shootdown;
+*                  - the SVC handlers still validate pointers with the
+*                    boolean helpers in arkrtos_kernel_check.h: U-6 added
+*                    copy_from_user / copy_to_user and self-tests them, but
+*                    did not rewrite those handlers to stage through them;
 *                  - the PLV3 reverse probes for a second instance (there is
 *                    no second runnable App on this board yet).
 *          The acceptance test for the remaining debt is unchanged: two Apps
@@ -436,6 +441,150 @@ int32 arkrtos_paging_unmap_span(uint32 va, uint32 size)
 uint32 arkrtos_paging_dyn_used(void)
 {
     return arkrtos_port_paging_dyn_used();
+}
+
+/* ------------------------------------------------- user copies (U-6) */
+
+/**
+* @brief 整段是否落在给定窗口里
+* @param base/size 窗口（base 不为 0 才算有效）
+* @param uva/len   待判的一段
+* @return 1 = 整段在窗口内；0 = 不在 / 窗口记录坏了
+* @details 判据是「整段」不是「首地址」：只查首字节时，一个刚好跨出窗口
+*          末尾的指针会让拷贝循环走进未映射页，在内核态变成 refill 致命
+*          —— 那正是这条接口要消灭的「内核陪着 fault」。
+*/
+static uint8 arkrtos_paging_span_has(uint32 base, uint32 size,
+                                     uint32 uva, uint32 len)
+{
+    if((base == 0u) || (size == 0u) || ((base + size) < base))
+    {
+        return 0u;                       /* 窗口记录坏了：不放行，也不猜 */
+    }
+
+    return ((uva >= base) && ((uva + len) <= (base + size))) ? 1u : 0u;
+}
+
+/**
+* @brief 受控访问用户地址的本体（读写两个方向共用一套判据）
+* @return 0 = 已拷贝；-1 参数非法；-2 没有用户窗口；-3 整段不在窗口内；
+*         -4 当前装着的不是调用者自己的地址空间
+* @details 拷贝走的是「当前装着的那份翻译」，所以 -4 不是多余的保守：
+*          空间不对时读到的是另一个 App 的帧，那是**静默错答案**，比报错
+*          糟得多。判据全部在第一次 load/store 之前完成，因此拒绝一次非法
+*          指针不会在内核态产生任何异常。
+*/
+int32 arkrtos_paging_user_copy(uint32 rom_start, uint32 rom_size,
+                               uint32 ram_start, uint32 ram_size,
+                               uint32 space, uint32 installed,
+                               void *kern, const void *user, uint32 len,
+                               uint8 write)
+{
+    uint32 uva = (uint32)(unsigned long)user;
+    uint32 i;
+
+    if((kern == 0) || (user == 0) || (len == 0u) ||
+       ((0xFFFFFFFFu - uva) < len))
+    {
+        return -1;
+    }
+
+    if((rom_start == 0u) && (ram_start == 0u))
+    {
+        return -2;                       /* 没有用户窗口：这不是用户指针 */
+    }
+
+    if(space != installed)
+    {
+        return -4;
+    }
+
+    if(arkrtos_paging_span_has(ram_start, ram_size, uva, len) == 0u)
+    {
+        /* 写方向只认数据窗口：代码窗口是任务自己的镜像，内核路径没有
+         * 任何理由去改它。 */
+        if((write != 0u) ||
+           (arkrtos_paging_span_has(rom_start, rom_size, uva, len) == 0u))
+        {
+            return -3;
+        }
+    }
+
+    if(write != 0u)
+    {
+        volatile uint8 *p = (volatile uint8 *)user;
+
+        for(i = 0u; i < len; i++)
+        {
+            p[i] = ((const uint8 *)kern)[i];
+        }
+    }
+    else
+    {
+        const volatile uint8 *p = (const volatile uint8 *)user;
+
+        for(i = 0u; i < len; i++)
+        {
+            ((uint8 *)kern)[i] = p[i];
+        }
+    }
+
+    return 0;
+}
+
+/**
+* @brief 从指定任务的用户缓冲区拷到内核缓冲区（内核内部）
+* @return 0 = 已拷贝；-1/-2/-3/-4 同上
+* @details 内核任务（is_priv != 0）一律 -2：它没有用户窗口，拿一个「用户
+*          指针」进来是契约错误，不应该被当成合法调用。
+*/
+int32 arkrtos_copy_from_user_task(arkrtos_task_t *p_task, void *dst,
+                                  const void *usrc, uint32 len)
+{
+    if((p_task == 0) || (p_task->is_priv != 0u))
+    {
+        return -2;
+    }
+
+    return arkrtos_paging_user_copy(p_task->rom_start, p_task->rom_size,
+                                    p_task->ram_start, p_task->ram_size,
+                                    arkrtos_paging_space_of(p_task),
+                                    arkrtos_port_paging_space(),
+                                    dst, usrc, len, 0u);
+}
+
+/**
+* @brief 从内核缓冲区拷到指定任务的用户缓冲区（内核内部）
+*/
+int32 arkrtos_copy_to_user_task(arkrtos_task_t *p_task, void *udst,
+                                const void *src, uint32 len)
+{
+    if((p_task == 0) || (p_task->is_priv != 0u))
+    {
+        return -2;
+    }
+
+    return arkrtos_paging_user_copy(p_task->rom_start, p_task->rom_size,
+                                    p_task->ram_start, p_task->ram_size,
+                                    arkrtos_paging_space_of(p_task),
+                                    arkrtos_port_paging_space(),
+                                    (void *)src, udst, len, 1u);
+}
+
+/**
+* @brief 从当前任务的用户缓冲区拷出
+*/
+int32 arkrtos_copy_from_user(void *dst, const void *usrc, uint32 len)
+{
+    return arkrtos_copy_from_user_task(arkrtos_task_get_current(), dst, usrc, len);
+}
+
+/**
+* @brief 往当前任务的用户缓冲区拷入
+*/
+int32 arkrtos_copy_to_user(void *udst, const void *src, uint32 len)
+{
+    return arkrtos_copy_to_user_task(arkrtos_task_get_current(), udst, src, len);
 }
 
 /**

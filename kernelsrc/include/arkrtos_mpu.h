@@ -91,6 +91,74 @@ int32 arkrtos_paging_unmap_span(uint32 va, uint32 size);
 uint32 arkrtos_paging_dyn_used(void);
 
 /* ------------------------------------------------------------------
+ * Controlled kernel access to user memory (U-6)
+ *
+ * The kernel dereferences whatever pointer an SVC handed it. The boolean
+ * helpers in arkrtos_kernel_check.h answer "may I touch this", but they do
+ * not copy, and they judge against the board's global windows rather than
+ * the calling task's own recorded span. These two do the whole job: check
+ * the range, then copy, and never let an illegal pointer turn into a fault
+ * inside the kernel.
+ *
+ * Refusal codes (identical for both directions):
+ *    -1 null pointer / zero length / range wraps at 4 GB
+ *    -2 the task has no user window at all (a kernel task)
+ *    -3 the whole range is not inside the task's own recorded windows
+ *    -4 the installed App window is not this task's address space, so the
+ *       copy would read/write another App's frame (silent wrong answer)
+ *
+ * Reading is allowed from the task's code window and its data window;
+ * writing is allowed only from its data window. A task's code window is its
+ * own image - a kernel path that could patch it is not something any caller
+ * needs, so it is refused rather than merely discouraged.
+ * ------------------------------------------------------------------ */
+
+/** @brief Copy from a user buffer into a kernel buffer
+ *  @param dst  Kernel destination
+ *  @param usrc User source (validated against the calling task's windows)
+ *  @param len  Bytes
+ *  @return 0 = copied; -1/-2/-3/-4 as listed above
+ *  @details The caller is arkrtos_task_get_current(). On a build where the
+ *           calling task is a kernel task there is no user window, and the
+ *           answer is -2 instead of an unchecked memcpy. */
+int32 arkrtos_copy_from_user(void *dst, const void *usrc, uint32 len);
+
+/** @brief Copy from a kernel buffer into a user buffer
+ *  @return 0 = copied; -1/-2/-3/-4 as listed above */
+int32 arkrtos_copy_to_user(void *udst, const void *src, uint32 len);
+
+/** @brief Same, for a task named explicitly (kernel internal)
+ *  @details Used where the kernel works on behalf of a task that is not the
+ *           current one - a loader writing a program's argument block, for
+ *           instance. The caller must have installed that task's address
+ *           space first; if it did not, the copy is refused with -4 instead
+ *           of quietly reaching into whatever frame is installed. */
+int32 arkrtos_copy_from_user_task(arkrtos_task_t *p_task, void *dst,
+                                  const void *usrc, uint32 len);
+int32 arkrtos_copy_to_user_task(arkrtos_task_t *p_task, void *udst,
+                                const void *src, uint32 len);
+
+/** @brief The check-and-copy body, with the task's windows passed as numbers
+ *  @param rom_start/rom_size Code window (read only), 0 when there is none
+ *  @param ram_start/ram_size Data window (read/write), 0 when there is none
+ *  @param space     Address space the task is bound to
+ *  @param installed Space currently installed in the App window
+ *  @param kern      Kernel side buffer
+ *  @param user      User side address
+ *  @param len       Bytes
+ *  @param write     1 = user is the destination, 0 = user is the source
+ *  @return 0 = copied; -1/-2/-3/-4 as listed above
+ *  @details This exists so the QEMU self-test can exercise every refusal
+ *           without manufacturing a fake TCB: the guards are the same code
+ *           the task-based entry points run, only the numbers arrive
+ *           directly. Kernel internal; Apps never see it. */
+int32 arkrtos_paging_user_copy(uint32 rom_start, uint32 rom_size,
+                               uint32 ram_start, uint32 ram_size,
+                               uint32 space, uint32 installed,
+                               void *kern, const void *user, uint32 len,
+                               uint8 write);
+
+/* ------------------------------------------------------------------
  * Per-App address spaces (U-1)
  *
  * What "one page table per process" means on a core without a hardware page
@@ -137,6 +205,12 @@ uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task);
 #define arkrtos_paging_map_pages()                           (0u)
 #define arkrtos_paging_unmap_span(va, size)                  (-1)
 #define arkrtos_paging_dyn_used()                            (0u)
+#define arkrtos_copy_from_user(dst, usrc, len)               (-1)
+#define arkrtos_copy_to_user(udst, src, len)                 (-1)
+#define arkrtos_copy_from_user_task(p_task, dst, usrc, len)  (-1)
+#define arkrtos_copy_to_user_task(p_task, udst, src, len)    (-1)
+#define arkrtos_paging_user_copy(rom_start, rom_size, ram_start, ram_size, \
+                                 space, installed, kern, user, len, write) (-1)
 #define arkrtos_paging_space_count()                         (1u)
 #define arkrtos_paging_space_frame(space)                    (0u)
 #define arkrtos_paging_space_current()                       (0u)

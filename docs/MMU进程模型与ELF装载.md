@@ -272,13 +272,13 @@ QEMU LA64 实测（2026-11-17，同一次开机）：
 
 | # | 差距 | 现状（M1） | 影响 | 归属 |
 |---|---|---|---|---|
-| U-1 | 每进程地址空间 | **机制已做（2026-11-17）**：每个 App 空间一条 App 窗口条目（PS=20），`arkrtos_mpu_set_app()` 在切到 App 任务时重写它；空间号即帧号（`space n → APP_BASE + n*2 MB`），VA 恒为 `0x02000000` ⇒ 一个 App 连别的 App 的帧都叫不出来。板级 `ARKRTOS_PAGING_APPS_MAX` 缺省 1（默认档 `activate()` 立即返回，切换路径零变化）。ELF 装载落在**当前装着的那个空间**并把任务绑到同一空间 | **仍缺**：页帧分配器（U-3）、ASID（U-7）、按需缺页（U-5）、`copy_from_user`（U-6） | 已收机制部分（QEMU LA64 实跑，见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.17）；分配器仍是 M2 |
+| U-1 | 每进程地址空间 | **机制已做（2026-11-17）**：每个 App 空间一条 App 窗口条目（PS=20），`arkrtos_mpu_set_app()` 在切到 App 任务时重写它；空间号即帧号（`space n → APP_BASE + n*2 MB`），VA 恒为 `0x02000000` ⇒ 一个 App 连别的 App 的帧都叫不出来。板级 `ARKRTOS_PAGING_APPS_MAX` 缺省 1（默认档 `activate()` 立即返回，切换路径零变化）。ELF 装载落在**当前装着的那个空间**并把任务绑到同一空间 | **仍缺**：页帧分配器（U-3）、ASID（U-7）、按需缺页（U-5）；`copy_from_user`（U-6）已做 | 已收机制部分（QEMU LA64 实跑，见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.17）；分配器仍是 M2 |
 | U-2 | 同 VA 多实例 | **已做（2026-11-17，QEMU LA64 实跑）**：装载器从「单实例」改成「每个空间一个活实例」（`s_elf_task[]` / `s_elf_info[]` + `elf_slot_live()`），`arkrtos_elf_exec_space()` 先挑空空间、装载期把窗口切过去、装完把内核任务原来的视图装回去；段不再直接 `memcpy` 进窗口，而是每 4 KB 经内核暂存 `s_elf_stage[4096]` 搬进去。**崩溃根因**：LA64 的 trap 帧与内联切换帧都压在**被换下任务自己的栈**上，而 App 栈就在 App 窗口 VA 里 —— `arkrtos_mpu_set_app()` 一进来就重写窗口条目，调用者的返回地址与 `s0` 槽下一句 `ld.d` 就读到另一个 App 的帧（实测 `era=0xcdcdcdcd` = 栈填充图样，PLV3 ADEF 停机）。修法：`arkrtos_port_paging_switch_to()` 在 `sp` 落在窗口内时只记 `s_pg_pending_space`，`.S` 的两条恢复路径在拿到目标帧之后、读帧之前先把 `sp` 换到恒等映射的 `la_switch_stack`（2 KB，`.bss`）再 `bl la_switch_prepare()` 补做 `activate` + PRMD 补写；`new_frame == old_frame`（调度器最终没切走）时清 pending 不切 | 读数：`pmap u2` 两个实例各在自己的空间里跑完并 `bye`、`pmap u2: PASS - two instances, two spaces, neither frame overwritten`、`pmap elf` 报 `space 0/1` 各 1732 B 且 `0 live instance(s)`、无 FATAL | M2 剩余部分见 U-3 |
 | U-3 | 页帧分配器 | 无：段直接写进窗口 | 程序镜像必须能整块装进 2 MB | M2 |
 | U-3a | 运行期动态映射（登记 MMIO 跨度） | **已做完（2026-11-17）**：`arkrtos_paging_map_span()` → port 的 `arkrtos_port_paging_alias()` → `tlbwr` 写 MTLB；仅内核 PLV0、4 KB 粒度、最多 8 对页；拒绝码 -1/-2/-3/-5 原样透出 | 驱动在 MMU 档下终于能登记静态表里没有的 MMIO 窗口；**App 可见**的动态映射仍属 U-1 | 已收（QEMU LA64 实跑，见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.16） |
 | U-4 | `arkrtos_elf.c` 只支持 64 位 `long` | LA32（32 位）编出空目标（`#error` 保护） | LA32 后端暂时没有 ELF | M2 |
 | U-5 | 缺页处理（按需换入） | 无：装载时一次性写满 | 镜像必须整块驻留 RAM | M2 |
-| U-6 | `copy_from_user` 式的受控内核访问 | 无：内核直接 `memcpy` 到 PLV3 窗口（`LA_PTE_PLV(3)` 让它可行） | 用户指针的合法性靠"窗口内 + SVC 参数块 32 位"两条约定，不是逐次校验 | M2 |
+| U-6 | `copy_from_user` 式的受控内核访问 | **已做完并验证（2026-11-17，QEMU LA64 实跑）**：`arkrtos_copy_from_user` / `arkrtos_copy_to_user`（+ `*_task` 变体 + 纯本体 `arkrtos_paging_user_copy`）按四条拒绝码返回 **-1 参数/回绕、-2 无用户窗口、-3 整段不在窗口内（写方向只认 RAM 窗口）、-4 装着的不是调用者的空间**；判据是整段而非首地址，非法指针不再让内核吃 refill | 非分页档（ARM/RV32）一律宏回退 `(-1)`，默认档体积逐字节不变；SVC 处理器仍用原布尔校验，未改成走 `copy_*`；无 fixup 表、无 copy-on-write | M2 |
 | U-7 | ASID / TLB 批量失效 | ASID 恒 0 | 换进程要刷整表；SMP 下要 shootdown | M2 |
 | U-8 | 退出码通道 | `THREAD_EXIT` 不带 code，TCB 无字段；只打印 `finished after N ms` | 脚本没法判成败 | M2 |
 | U-9 | `fork` / 真正的 `exec` 替换自身 | 没有：`exec` 是"起一个任务并等它" | 与 POSIX 语义不同（已在 shell 帮助里写明） | M3 |

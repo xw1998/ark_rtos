@@ -733,6 +733,23 @@ static void la_tlb_inval_page(uint32 va)
 *          保证此时不会有别的任务正在这个窗口里取指 —— 调用点在切换路径上，
 *          当前任务已经不在 App 页里跑。
 */
+/**
+* @brief 把 App 窗口那一条 PS=20 条目按当前空间重写一遍
+* @details 映射内容不变，只是重新落一条有效条目。存在的理由是实测出来的：
+*          QEMU 的 `invtlb 3`（按 VA 失效）**会连带打掉这条 PS=20 条目**
+*          —— pmap test 末尾撤销动态映射之后再 pmap look 0x02000000 报
+*          no entry，紧接着任何一次窗口访问都是 KERNEL refill (plv0)。
+*          真机上按 VA 失效不该波及其他页，但这条修复在真机上也只是一次
+*          tlbwr，代价可忽略，换来的是「invtlb 之后窗口一定还在」。
+*/
+static void la_pg_assert_window(void)
+{
+    uint32 pa = la_pg_app_frame(s_pg_app_space);
+
+    la_tlb_write(ARKRTOS_QEMU_APP_BASE, 20u, LA_MTLB_INDEX + 2u,
+                 LA_PTE_APP(pa), LA_PTE_APP(pa + 0x100000u));
+}
+
 int32 arkrtos_port_paging_activate(uint32 space)
 {
     uint32 pa;
@@ -744,7 +761,15 @@ int32 arkrtos_port_paging_activate(uint32 space)
 
     if(space == s_pg_app_space)
     {
-        return 0;
+        /* 「同一个空间」不等于「条目还在」：别的路径的一次 invtlb 就可能
+         * 把它打掉（见 la_pg_assert_window）。读回来确认，对不上就重写。 */
+        uint32 probed = 0u;
+
+        if((arkrtos_port_paging_lookup(ARKRTOS_QEMU_APP_BASE, 0, &probed, 0) != 0u) &&
+           (probed == la_pg_app_frame(space)))
+        {
+            return 0;
+        }
     }
 
     pa = la_pg_app_frame(space);
@@ -1214,6 +1239,11 @@ int32 arkrtos_port_paging_unalias(uint32 va)
      * 空的那一半 V=0，不会匹配，也就不会顺手把邻居页放开。 */
     la_tlb_write(pair, 12u, LA_MTLB_INDEX + LA_MTLB_DYN_FIRST + slot,
                  s_pg_dyn[slot].lo[0], s_pg_dyn[slot].lo[1]);
+
+    /* invtlb 在 QEMU 上会连带打掉 App 窗口那条 PS=20 条目（实测：撤销
+     * 之后再访问窗口 = KERNEL refill）。窗口内容本来就没变，重写一遍
+     * 把它放回原位。 */
+    la_pg_assert_window();
 
     return 0;
 }

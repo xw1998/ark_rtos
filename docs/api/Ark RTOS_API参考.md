@@ -30,7 +30,7 @@
 - [kernelsrc/include/arkrtos_mempool.h](#kernelsrcincludearkrtos_mempoolh)（9 项）
 - [kernelsrc/include/arkrtos_mini.h](#kernelsrcincludearkrtos_minih)（20 项）
 - [kernelsrc/include/arkrtos_modld.h](#kernelsrcincludearkrtos_modldh)（8 项）
-- [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（10 项）
+- [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（14 项）
 - [kernelsrc/include/arkrtos_net.h](#kernelsrcincludearkrtos_neth)（6 项）
 - [kernelsrc/include/arkrtos_ptable.h](#kernelsrcincludearkrtos_ptableh)（23 项）
 - [kernelsrc/include/arkrtos_rt.h](#kernelsrcincludearkrtos_rth)（13 项）
@@ -85,7 +85,7 @@
 - [kernelsrc/src/arkrtos_mini.c](#kernelsrcsrcarkrtos_minic)（1 项）
 - [kernelsrc/src/arkrtos_modld.c](#kernelsrcsrcarkrtos_modldc)（5 项）
 - [kernelsrc/src/arkrtos_mpu.c](#kernelsrcsrcarkrtos_mpuc)（1 项）
-- [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（12 项）
+- [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（18 项）
 - [kernelsrc/src/arkrtos_smp.c](#kernelsrcsrcarkrtos_smpc)（1 项）
 - [kernelsrc/src/arkrtos_task.c](#kernelsrcsrcarkrtos_taskc)（5 项）
 - [kernelsrc/src/arkrtos_tickless.c](#kernelsrcsrcarkrtos_ticklessc)（1 项）
@@ -4877,6 +4877,64 @@ uint32 arkrtos_paging_dyn_used(void);
 
 **How many dynamic mapping slots are in use right now (readout) */**
 
+### `int32 arkrtos_copy_from_user(void *dst, const void *usrc, uint32 len);`
+
+```c
+int32 arkrtos_copy_from_user(void *dst, const void *usrc, uint32 len);
+```
+
+**Copy from a user buffer into a kernel buffer**
+- `dst`：Kernel destination
+- `usrc`：User source (validated against the calling task's windows)
+- `len`：Bytes
+**返回**：0 = copied; -1/-2/-3/-4 as listed above
+The caller is arkrtos_task_get_current(). On a build where the
+calling task is a kernel task there is no user window, and the
+answer is -2 instead of an unchecked memcpy. */
+
+### `int32 arkrtos_copy_to_user(void *udst, const void *src, uint32 len);`
+
+```c
+int32 arkrtos_copy_to_user(void *udst, const void *src, uint32 len);
+```
+
+**Copy from a kernel buffer into a user buffer**
+**返回**：0 = copied; -1/-2/-3/-4 as listed above */
+
+### `int32 arkrtos_copy_from_user_task(arkrtos_task_t *p_task, void *dst, c`
+
+```c
+int32 arkrtos_copy_from_user_task(arkrtos_task_t *p_task, void *dst, const void *usrc, uint32 len);
+```
+
+**Same, for a task named explicitly (kernel internal)**
+Used where the kernel works on behalf of a task that is not the
+current one - a loader writing a program's argument block, for
+instance. The caller must have installed that task's address
+space first; if it did not, the copy is refused with -4 instead
+of quietly reaching into whatever frame is installed. */
+
+### `int32 arkrtos_paging_user_copy(uint32 rom_start, uint32 rom_size, uint`
+
+```c
+int32 arkrtos_paging_user_copy(uint32 rom_start, uint32 rom_size, uint32 ram_start, uint32 ram_size, uint32 space, uint32 installed, void *kern, const void *user, uint32 len, uint8 write);
+```
+
+**The check-and-copy body, with the task's windows passed as numbers**
+- `rom_start/rom_size`：Code window (read only), 0 when there is none
+- `ram_start/ram_size`：Data window (read/write), 0 when there is none
+- `space`：Address space the task is bound to
+- `installed`：Space currently installed in the App window
+- `kern`：Kernel side buffer
+- `user`：User side address
+- `len`：Bytes
+- `write`：1 = user is the destination, 0 = user is the source
+**返回**：0 = copied; -1/-2/-3/-4 as listed above
+This exists so the QEMU self-test can exercise every refusal
+without manufacturing a fake TCB: the guards are the same code
+the task-based entry points run, only the numbers arrive
+directly. Kernel internal; Apps never see it. */
+
 ### `uint32 arkrtos_paging_space_count(void);`
 
 ```c
@@ -7745,18 +7803,19 @@ static void la_tlb_inval_page(uint32 va)
 后经那半页读写仍是旧物理帧，症状正是「切换静默失效」。
 顺序要紧：先 invtlb 再写新条目（invtlb 会按旧条目的 PS 匹配）。
 
-### `int32 arkrtos_port_paging_activate(uint32 space)`
+### `static void la_pg_assert_window(void)`
 
 ```c
-int32 arkrtos_port_paging_activate(uint32 space)
+static void la_pg_assert_window(void)
 ```
 
-**把一个地址空间装进 App 窗口**
-- `space`：空间号（0 .. 板级 ARKRTOS_PAGING_APPS_MAX-1）
-**返回**：0 = 已是该空间或切换成功；-1 = 空间号越界
-只换 App 窗口那一条 PS=20 条目。调用方（调度器切到某个 App）
-保证此时不会有别的任务正在这个窗口里取指 —— 调用点在切换路径上，
-当前任务已经不在 App 页里跑。
+**把 App 窗口那一条 PS=20 条目按当前空间重写一遍**
+映射内容不变，只是重新落一条有效条目。存在的理由是实测出来的：
+QEMU 的 `invtlb 3`（按 VA 失效）**会连带打掉这条 PS=20 条目**
+—— pmap test 末尾撤销动态映射之后再 pmap look 0x02000000 报
+no entry，紧接着任何一次窗口访问都是 KERNEL refill (plv0)。
+真机上按 VA 失效不该波及其他页，但这条修复在真机上也只是一次
+tlbwr，代价可忽略，换来的是「invtlb 之后窗口一定还在」。
 
 ### `static uint32 la_sp_in_app_window(void)`
 
@@ -9545,6 +9604,69 @@ uint32 arkrtos_paging_dyn_used(void) {
 This is the readout that was missing while maps could only be
 added: a driver that registered eight 4 KB pages had no way to see
 how close it was to the table being full.
+
+### `static uint8 arkrtos_paging_span_has(uint32 base, uint32 size, uint32 `
+
+```c
+static uint8 arkrtos_paging_span_has(uint32 base, uint32 size, uint32 uva, uint32 len) {
+```
+
+**整段是否落在给定窗口里**
+- `base/size`：窗口（base 不为 0 才算有效）
+- `uva/len`：待判的一段
+**返回**：1 = 整段在窗口内；0 = 不在 / 窗口记录坏了
+判据是「整段」不是「首地址」：只查首字节时，一个刚好跨出窗口
+末尾的指针会让拷贝循环走进未映射页，在内核态变成 refill 致命
+—— 那正是这条接口要消灭的「内核陪着 fault」。
+
+### `int32 arkrtos_paging_user_copy(uint32 rom_start, uint32 rom_size, uint`
+
+```c
+int32 arkrtos_paging_user_copy(uint32 rom_start, uint32 rom_size, uint32 ram_start, uint32 ram_size, uint32 space, uint32 installed, void *kern, const void *user, uint32 len, uint8 write) {
+```
+
+**受控访问用户地址的本体（读写两个方向共用一套判据）**
+**返回**：0 = 已拷贝；-1 参数非法；-2 没有用户窗口；-3 整段不在窗口内；
+-4 当前装着的不是调用者自己的地址空间
+拷贝走的是「当前装着的那份翻译」，所以 -4 不是多余的保守：
+空间不对时读到的是另一个 App 的帧，那是**静默错答案**，比报错
+糟得多。判据全部在第一次 load/store 之前完成，因此拒绝一次非法
+指针不会在内核态产生任何异常。
+
+### `int32 arkrtos_copy_from_user_task(arkrtos_task_t *p_task, void *dst, c`
+
+```c
+int32 arkrtos_copy_from_user_task(arkrtos_task_t *p_task, void *dst, const void *usrc, uint32 len) {
+```
+
+**从指定任务的用户缓冲区拷到内核缓冲区（内核内部）**
+**返回**：0 = 已拷贝；-1/-2/-3/-4 同上
+内核任务（is_priv != 0）一律 -2：它没有用户窗口，拿一个「用户
+指针」进来是契约错误，不应该被当成合法调用。
+
+### `int32 arkrtos_copy_to_user_task(arkrtos_task_t *p_task, void *udst, co`
+
+```c
+int32 arkrtos_copy_to_user_task(arkrtos_task_t *p_task, void *udst, const void *src, uint32 len) {
+```
+
+**从内核缓冲区拷到指定任务的用户缓冲区（内核内部）**
+
+### `int32 arkrtos_copy_from_user(void *dst, const void *usrc, uint32 len) `
+
+```c
+int32 arkrtos_copy_from_user(void *dst, const void *usrc, uint32 len) {
+```
+
+**从当前任务的用户缓冲区拷出**
+
+### `int32 arkrtos_copy_to_user(void *udst, const void *src, uint32 len) {`
+
+```c
+int32 arkrtos_copy_to_user(void *udst, const void *src, uint32 len) {
+```
+
+**往当前任务的用户缓冲区拷入**
 
 ### `int32 arkrtos_paging_stats(uint32 *p_checked, uint32 *p_bad, uint32 *p`
 

@@ -2183,6 +2183,120 @@ pin N 特意把 `la_tlb_inval_page(` 列为必需：把这一句删掉，功能�
   `activate()` 重写，不经过 `unalias`。
 - **撤销后的页面回收（U-3）**：槽位回收了，物理页本身仍由板级固定数组持有，
   没有页帧分配器可还。
+- **按 VA 失效会打掉窗口条目（U-6 时才发现）**：`invtlb 3` 连 PS=20 那条一起打掉，
+  修法与取证见 §5.19.3。
+
+### 5.19 受控访问用户地址：copy_from_user / copy_to_user（U-6，2026-11-17）
+
+U-5 之前，内核路径读用户缓冲靠两条口头约定：「调用者一定是用户任务」「指针一定落在
+窗口里」。任一条不成立，内核就按当前翻译去读 —— 读到的可能是另一个 App 的帧，
+更常见的是未映射页让内核自己吃一个 TLB refill。U-6 把这件事做成可被拒绝的原语。
+
+#### 5.19.1 接口与四条拒绝码
+
+```c
+int32 arkrtos_copy_from_user(void *dst, const void *usrc, uint32 len);
+int32 arkrtos_copy_to_user(void *udst, const void *src, uint32 len);
+int32 arkrtos_copy_from_user_task(arkrtos_task_t *p_task, void *dst, const void *usrc, uint32 len);
+int32 arkrtos_copy_to_user_task(arkrtos_task_t *p_task, void *udst, const void *src, uint32 len);
+int32 arkrtos_paging_user_copy(uint32 rom_start, uint32 rom_size,
+                               uint32 ram_start, uint32 ram_size,
+                               uint32 space, uint32 installed,
+                               void *kern, const void *user, uint32 len, uint8 write);
+```
+
+分三层：`arkrtos_paging_user_copy` 是纯算术 + 字节拷贝的本体（不打任务表），
+`*_task` 从 TCB 取四个跨度与绑定空间，`copy_*_user` 取当前任务。自测走的是
+本体那一层，跑的是生产同一段闸门代码，不必在栈上造假的 TCB
+（`arkrtos_paging_space_of()` 对不在表内的指针做相减属未定义行为）。
+
+返回 0 表示整段拷完，否则返回负值：
+
+| 码 | 含义 |
+|---|---|
+| -1 | 参数错或 `uva + len` 跨 4 GB 回绕 |
+| -2 | 这个任务没有用户窗口（内核任务 / `is_priv` 非 0） |
+| -3 | 整段不在允许的窗口内（写方向只认 RAM 窗口） |
+| -4 | 当前装着的是别的 App 的地址空间（拷贝会走错翻译，属于静默错答案） |
+
+判据是**整段**而不是首地址：只查首字节时，跨出窗口末尾的指针会让循环走进未映射页，
+内核照样 refill —— 那正是本接口要消灭的形态。写方向只允许 RAM 窗口，代码窗口是
+任务自己的镜像，内核路径没有理由改它，直接 -3 而不是「劝一劝」。
+
+本体用 `volatile uint8` 字节循环：不引入可能跨页的字宽拷贝，性能不是当前目的。
+非分页档（ARM / RV32）四条入口一律宏回退为 `(-1)` —— 那些后端没有「每任务虚拟空间」
+这个概念，假装支持比返回 -1 更糟，也保证了默认档体积逐字节不变。
+
+#### 5.19.2 实测（QEMU LA64 实跑）
+
+`pmap cu` 在 `pmap test` 之后运行，11 条判据全过：
+
+```
+pmap cu: PASS - from/to user, refusals -1/-2/-3/-4, kernel survived
+```
+
+覆盖：`from_user` RAM 窗口（返回 0 + 字节校验）、`from_user` ROM 窗口、整段在窗口外
+(-3)、内核镜像指针 0x00200000 (-3)、未映射指针 0x80000000 (-3)、区间回绕
+0xFFFFF000+0x2000 (-1)、`to_user` 写 ROM 窗口 (-3)、`to_user` 写 RAM 窗口
+(0 + 落字节校验)、没有用户窗口 (-2)、内核任务走 `arkrtos_copy_from_user` (-2)、
+空间不匹配 (-4，需 `space_count() >= 2`)。「kernel survived」的意思是：这些非法指针
+之后内核照常打印结论，没有 fault。
+
+同一轮回归：`utest` 13 matched / 13 passed / 0 failed（133 assertions）、
+`pmap u1` / `pmap u2` / `pmap test` 仍 PASS、`pmap dyn` 0 槽 0 页。RV32 镜像
+`text 235828 / data 128 / bss 628228` 与 U-15 后逐字节同尺寸。
+
+#### 5.19.3 顺手挖出的真缺陷：`invtlb 3` 会连带打掉 App 窗口那条 PS=20 条目
+
+第一次把 `pmap cu` 排在 `pmap test` 后面跑，内核直接死：
+
+```
+pmap look: va=0x02000000 entry=2050 ps=20 ppn=0x02000000
+pmap test: PASS (map / unmap / rebind / unmap)
+pmap look: va=0x02000000 no entry
+[LA64U] KERNEL refill (plv0) badv=0x02100000 era=0x00225c38 -> ...
+[Ark RTOS] FATAL: ... ecode=0x0
+```
+
+根因：QEMU 9.2.3 的 `invtlb 3, $zero, <va>`（按 VA 失效）会把该 VA 上**所有**页尺寸的
+条目一起打掉，包括 App 窗口那条 PS=20、走 MTLB+2 的条目；而 `pmap test` 末尾恰好
+撤销它自己的动态映射并做了一次按 VA 失效。更贵的是 `activate()` 的短路：
+`s_pg_app_space == space` 就直接返回 0 报「已装上」，条目已经没了也照报 —— 这是
+典型的静默错答案。
+
+两步修法（均落在 `kernelsrc/port/loongarch/la64/arkrtos_port.c`）：
+
+1. 新增 `la_pg_assert_window()`：按 `s_pg_app_space` → `la_pg_app_frame()` 把窗口条目
+   原样重写一遍（`la_tlb_write(ARKRTOS_QEMU_APP_BASE, 20u, LA_MTLB_INDEX + 2u, ...)`），
+   在 `unalias()` 的两处按 VA 失效之后各调一次。内容不变，代价一次 `tlbwr`。
+2. `activate()` 的「已是该空间」短路改成先 `arkrtos_port_paging_lookup(ARKRTOS_QEMU_APP_BASE, 0, &probed, 0)`
+   核对条目还在、且 PPN 与 `la_pg_app_frame(space)` 一致，才返回 0；否则照常重写。
+
+修后同一串命令（`pmap test` → `look` → `cu` → `dyn`）全绿，`look` 恢复
+`entry=2050 ps=20 ppn=0x02000000`。这条也解释了为什么它只在「先跑过会 invtlb 的自测」
+时出现：单纯 boot 起来直接用窗口是看不见的。
+
+#### 5.19.4 门禁：P / Q 两条 pin 与自检
+
+`tools/paging_gate.py` 新增两条源码 pin，各自带变异自检（把源串改坏一次，pin 必须报错）：
+
+| pin | 断言 |
+|---|---|
+| P | `arkrtos_paging_user_copy` 体内有回绕判据、`((rom_start == 0u) && (ram_start == 0u))`、`space != installed`、两个方向的字节循环、`if((write != 0u) ||`；`*_task` 体内有 `p_task->is_priv != 0u`、`arkrtos_paging_space_of(p_task)`、`arkrtos_port_paging_space()`；`copy_from_user` 体内有 `arkrtos_task_get_current()`；shell 有 `pmap cu` 分支、五条探针串与 PASS 串；mpu.h 有两条关档回退宏 |
+| Q | port 有 `static void la_pg_assert_window(void)`、`unalias` 体内调它、`activate` 体内有 `lookup(ARKRTOS_QEMU_APP_BASE` 与 `probed == la_pg_app_frame(space)` |
+
+自检这一条有个真实的坑：第一版把变异串写成 `... < len` → `... < lenX`，pin 判据是
+子串包含，`lenX` 仍包含 `len`，变异没落地、自检却报「pin 是空转的」。改成
+`(0xFFFFFFFFu - uva)` → `(0xFFFFFFFFu - uvaMut)` 才真正破坏判据。**变异串必须
+破坏被断言的子串本身，而不是它的前缀或后缀。**
+
+#### 5.19.5 明确没做的部分
+
+- **SVC 处理器没有改造**：`arkrtos_kernel_check.h` 里的布尔校验仍是原样，
+  `copy_*_user` 只交付原语 + 自测，没把整层改成走受控拷贝。
+- **没有 fixup 表**：拷贝中途失败就返回负值，不做「已经拷了几个字节」的部分成功语义。
+- **没有 copy-on-write / 用户页换出**：窗口内全部是板级固定帧，恒常驻。
+- **性能未优化**：逐字节 `volatile` 拷贝，不是 `memcpy` 的那种吞吐。
 
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 

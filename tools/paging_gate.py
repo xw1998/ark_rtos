@@ -38,8 +38,14 @@
      静态栈，再 bl la_switch_prepare；那块栈必须落在 .bss。
   M. ELF 装载器按空间记台账（elf_slot_live / elf_copy_to_window /
      exec_space 装完恢复视图），shell 里 `pmap u2` 的判据还在。
+  P. 受控访问用户地址（U-6）：`arkrtos_paging_user_copy()` 的四道闸门
+     （参数/回绕、无用户窗口、空间不符、整段不在窗口内）与两个方向的
+     字节循环，加 `pmap cu` 逐条判据。
+  Q. invtlb 不放过窗口：QEMU 的 `invtlb 3` 实测会连带打掉 App 窗口那条
+     PS=20 条目，所以 unalias 末尾必须重写它，activate 的「已是该空间」
+     短路必须先查条目还在。
 
-E–M 每条都自带**防假绿自检**：把源串故意改坏一次，对应 pin 必须报错；
+E–M、P、Q 每条都自带**防假绿自检**：把源串故意改坏一次，对应 pin 必须报错；
 报不出错就说明这条 pin 是空转的。
 
 不覆盖：分页后端在板上给出的实际隔离效果（哪条地址被拦、PLV 是否真降）、
@@ -426,6 +432,73 @@ def main():
             bad.append("O: pmap test 没有把 unmap/rebind 串进判据")
         return bad
 
+    def pin_p(pg, shell, hal, mpu):
+        bad = []
+        body = _body(pg, "int32 arkrtos_paging_user_copy(")
+        if not body:
+            bad.append("P: arkrtos_paging.c 里没有 arkrtos_paging_user_copy")
+        else:
+            if "(0xFFFFFFFFu - uva) < len" not in body:
+                bad.append("P: user_copy 不判地址回绕（跨 4 GB 的区间会算成合法）")
+            if "((rom_start == 0u) && (ram_start == 0u))" not in body:
+                bad.append("P: user_copy 不拒「没有用户窗口」的任务（内核任务）")
+            if "space != installed" not in body:
+                bad.append("P: user_copy 不比「装着的空间」，会从别的 App 的帧里拷")
+            if "p[i] = ((const uint8 *)kern)[i];" not in body:
+                bad.append("P: user_copy 没有 copy_to_user 方向的字节循环")
+            if "((uint8 *)kern)[i] = p[i];" not in body:
+                bad.append("P: user_copy 没有 copy_from_user 方向的字节循环")
+            if "if((write != 0u) ||" not in body:
+                bad.append("P: user_copy 不拒「往代码窗口写」")
+        fu = _body(pg, "int32 arkrtos_copy_from_user_task(")
+        if not fu:
+            bad.append("P: arkrtos_paging.c 里没有 arkrtos_copy_from_user_task")
+        else:
+            if "p_task->is_priv != 0u" not in fu:
+                bad.append("P: copy_*_user_task 不拒内核任务（它没有用户窗口）")
+            if "arkrtos_paging_space_of(p_task)" not in fu:
+                bad.append("P: copy_*_user_task 不拿任务的绑定空间去比对")
+            if "arkrtos_port_paging_space()" not in fu:
+                bad.append("P: copy_*_user_task 不读当前装着的空间")
+        cur = _body(pg, "int32 arkrtos_copy_from_user(void *dst")
+        if not cur:
+            bad.append("P: 没有 arkrtos_copy_from_user（当前任务入口）")
+        elif "arkrtos_task_get_current()" not in cur:
+            bad.append("P: arkrtos_copy_from_user 没有取当前任务")
+        if 'strcmp(argv[1], "cu")' not in shell:
+            bad.append("P: shell 没有 pmap cu 自测")
+        else:
+            for probe in ("range wrap", "no user window", "outside span",
+                          "wrong space", "kernel caller"):
+                if probe not in shell:
+                    bad.append("P: pmap cu 缺 %s 这一条判据" % probe)
+            if "pmap cu: PASS - from/to user, refusals -1/-2/-3/-4, kernel survived" not in shell:
+                bad.append("P: shell 里没有 pmap cu 的通过判据")
+        if "#define arkrtos_copy_from_user(dst, usrc, len)               (-1)" not in mpu:
+            bad.append("P: mpu.h 的关档回退里没有 arkrtos_copy_from_user")
+        if "#define arkrtos_copy_to_user_task(p_task, udst, src, len)    (-1)" not in mpu:
+            bad.append("P: mpu.h 的关档回退里没有 arkrtos_copy_to_user_task")
+        return bad
+
+    def pin_q(port):
+        bad = []
+        if "static void la_pg_assert_window(void)" not in port:
+            bad.append("Q: port 里没有 la_pg_assert_window（invtlb 之后重写窗口条目）")
+        un = _body(port, "int32 arkrtos_port_paging_unalias(")
+        if not un:
+            bad.append("Q: 找不到 unalias 的定义")
+        elif "la_pg_assert_window();" not in un:
+            bad.append("Q: unalias 之后不重写窗口条目（QEMU 的 invtlb 3 会连带打掉 PS=20）")
+        ac = _body(port, "int32 arkrtos_port_paging_activate(")
+        if not ac:
+            bad.append("Q: 找不到 activate 的定义")
+        else:
+            if "arkrtos_port_paging_lookup(ARKRTOS_QEMU_APP_BASE" not in ac:
+                bad.append("Q: activate 的「已是该空间」短路不查条目还在")
+            if "probed == la_pg_app_frame(space)" not in ac:
+                bad.append("Q: activate 的短路不核对条目指向的帧")
+        return bad
+
     for rel in ("kernelsrc/src/arkrtos_paging.c",
                 "kernelsrc/port/loongarch/la64/arkrtos_port.c",
                 "kernelsrc/port/loongarch/la64/arkrtos_context.S",
@@ -451,7 +524,9 @@ def main():
                     pin_i(src_port) + pin_j(src_pg, src_hal, src_mpu) +
                     pin_k(src_port) + pin_l(src_asm) +
                     pin_m(src_elf, src_sh) +
-                    pin_n(src_port) + pin_o(src_pg, src_sh, src_hal, src_mpu)):
+                    pin_n(src_port) + pin_o(src_pg, src_sh, src_hal, src_mpu) +
+                    pin_p(src_pg, src_sh, src_hal, src_mpu) +
+                    pin_q(src_port)):
             failures.append("源码 pin 不成立 " + msg)
 
         # 自检：把每条 pin 依赖的那一句改坏，对应 pin 必须报错
@@ -486,6 +561,14 @@ def main():
             ("O", pin_o(src_pg.replace("arkrtos_port_paging_unalias(va + off)",
                                        "arkrtos_port_paging_unalias_X(va + off)", 1),
                          src_sh, src_hal, src_mpu)),
+            ("P", pin_p(src_pg.replace("(0xFFFFFFFFu - uva)",
+                                       "(0xFFFFFFFFu - uvaMut)", 1),
+                         src_sh, src_hal, src_mpu)),
+            ("P-", pin_p(src_pg.replace("((uint8 *)kern)[i] = p[i];",
+                                        "((uint8 *)kern)[i] = p[i + 1];", 1),
+                          src_sh, src_hal, src_mpu)),
+            ("Q", pin_q(src_port.replace("    la_pg_assert_window();",
+                                          "    la_pg_assert_windowX();", 1))),
         ]
         for tag, got in selfchecks:
             if not got:
@@ -502,7 +585,8 @@ def main():
           "两后端互斥被拒 / 动态映射接线 E-H pin 成立且自检有效 / "
           "每 App 地址空间 I-J pin 成立且自检有效 / "
           "U-2 延迟换窗口 K-M pin 成立且自检有效 / "
-          "U-15 映射撤销 N-O pin 成立且自检有效")
+          "U-15 映射撤销 N-O pin 成立且自检有效 / "
+          "U-6 受控用户拷贝 P pin 与 invtlb 后重写窗口 Q pin 成立且自检有效")
     return 0
 
 

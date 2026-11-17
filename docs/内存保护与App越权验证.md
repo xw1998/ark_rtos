@@ -288,7 +288,7 @@ int32 arkrtos_paging_stats(uint32 *p_checked, uint32 *p_bad, uint32 *p_bad_base)
 | 同 VA **并发**多实例（两个 App 同时在场） | **已做（2026-11-17，QEMU LA64 实跑，U-2）**：装载器按空间记台账（`s_elf_task[]` / `elf_slot_live()`），段经内核暂存每 4 KB 写进目标空间那一块帧；读数 `pmap u2` 两个实例各跑完并 `bye`、`pmap elf` 两空间各 1732 B / `0 live`。\n坑（本轮根因）：trap 帧与内联切换帧都压在**被换下任务自己的栈**上，而 App 栈就在窗口 VA 里 ⇒ 切换路径里立刻重写窗口条目会让调用者的返回地址/帧指针槽读到另一个 App 的帧（`era=0xcdcdcdcd`）。修法：`sp` 在窗口内时只记 pending，`.S` 恢复现场先换到恒等映射静态栈再补做 `activate` + PRMD 补写 |
 | 页帧分配器 | **未做** |
 | 缺页处理 | **未做** |
-| `copy_from_user` / `copy_to_user`（内核安全访问用户地址） | **未做** |
+| `copy_from_user` / `copy_to_user`（内核安全访问用户地址） | **已做完**（U-6，2026-11-17，QEMU LA64 实跑）：`arkrtos_copy_from_user` / `arkrtos_copy_to_user` + `*_task` 变体 + 纯本体 `arkrtos_paging_user_copy`；四条拒绝码 **-1 参数/回绕 / -2 无用户窗口 / -3 整段不在窗口内（写方向只认 RAM 窗口）/ -4 装着的不是调用者的空间**；判据按整段而非首地址。读数 `pmap cu: PASS - from/to user, refusals -1/-2/-3/-4, kernel survived`（非法指针之后内核照常打印，不 fault）。非分页档宏回退 `(-1)`、默认档体积逐字节不变；SVC 处理器仍未改成走 `copy_*` |
 | 运行期动态映射（`arkrtos_port_paging_alias` / `arkrtos_paging_map_span`） | **已做（仅内核 PLV0、4 KB、最多 8 对页）**，QEMU LA64 实跑：同 VA 换 PA 返回 -5、落静态跨度内 -2、真设备页经新 VA 读得同值且写方向打出字符 |
 | 撤销 / 回收映射（unmap） | **已做完**（U-15，2026-11-17，QEMU LA64 实跑）：`pmap unmap` / `pmap dyn`，拒绝码 -1/-2/-4，槽位在两半都空时回收；只重写 MTLB 是假绿（先 `invtlb` 两半再 `tlbwr`） |
 | SMP（多核 TLB shootdown） | **未做** |
@@ -299,7 +299,7 @@ int32 arkrtos_paging_stats(uint32 *p_checked, uint32 *p_bad, uint32 *p_bad_base)
    （**机制已达成**：`pmap u1` 在同一 VA 上读出两个不同值；**并发**也已达成：`pmap u2` 两个实例各自跑完、各占一个空间，见 U-2）；
 2. 反向三探针（写内核 RAM / 写别的 App RAM / 跳到未映射地址）**全拦**，且各有独立 fault 读数；
 3. 内核保持静态直映射，不被用户态页表影响；
-4. `copy_from_user` 对非法用户指针返回错误码，**不 fault 内核**。
+4. `copy_from_user` 对非法用户指针返回错误码，**不 fault 内核**（**已达成**，U-6：`pmap cu` 11 条判据全过，含内核镜像指针 / 未映射指针 / 跨 4 GB 回绕 / 写代码窗口 / 空间不匹配）。
 
 ### 7.7 复现
 

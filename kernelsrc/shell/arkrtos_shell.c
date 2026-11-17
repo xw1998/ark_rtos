@@ -6261,6 +6261,8 @@ static int cmd_unld(int argc, char *argv[])
  *            pmap look <va>                            读回该 VA 命中的 TLB 条目
  *            pmap unmap <va> <size>                    撤销动态映射（U-15）
  *            pmap dyn                                  动态槽位占用读数
+ *            pmap cu                                   自测：内核受控访问用户
+ *                                                      地址（U-6）的四种拒绝码
  *
  *          **注意**：`pmap rd/rb/wrb` 不做保护性检查 —— 地址没映射就是一次
  *          重填致命。这是刻意的：它们就是用来验证「这条地址到底通不通」的，
@@ -6323,6 +6325,20 @@ static int pmap_kind(const char *s, arkrtos_mpu_mem_t *out)
     if(strcmp(s, "ro")  == 0) { *out = ARKRTOS_MPU_MEM_PERIPH_RO; return 0; }
     if(strcmp(s, "rw")  == 0) { *out = ARKRTOS_MPU_MEM_PERIPH_RW; return 0; }
     return -1;
+}
+
+/* U-6 自测：把一个返回码与期望对上。只报错不短路，四种拒绝码各看一次。 */
+static int pmap_cu_rc(const char *label, int32 got, int32 want, int *p_fails)
+{
+    if(got == want)
+    {
+        return 0;
+    }
+
+    (*p_fails)++;
+    ark_shell_printf("pmap cu: FAIL %s rc=%d want=%d\r\n",
+                     label, (int)got, (int)want);
+    return 1;
 }
 
 static int cmd_pmap(int argc, char *argv[])
@@ -6955,6 +6971,157 @@ static int cmd_pmap(int argc, char *argv[])
         return 0;
     }
 
+    if((argc >= 2) && (strcmp(argv[1], "cu") == 0))
+    {
+        /* U-6 自测：内核受控访问用户地址。
+         * 判据是**返回码**，不是"读到了什么"：四种拒绝码各来一次，然后
+         * 这条命令后面还要照常打印读数 —— 内核没有被任何一个非法指针
+         * 带进 fault，这本身就是"不 fault 内核"的证据。
+         * 用户侧那块内存取窗口里一段空地（与 pmap u1 同一位置，base+1 MB），
+         * 先确认没有程序正在用窗口。 */
+        uint32 win  = arkrtos_paging_space_frame(0u);
+        uint32 uram = win + 0x100000u;
+        uint32 urom = uram + 0x800u;
+        uint32 prev = arkrtos_paging_space_current();
+        uint32 i;
+        uint32 cur;
+        uint8 buf[16];
+        int32 rc_c;
+        int fails = 0;
+
+        #if (ARKRTOS_USE_ELF == 1)
+        if(arkrtos_elf_running() != 0)
+        {
+            sh_out("pmap cu: refused - an ELF program is using the window\r\n");
+            return 1;
+        }
+        #endif
+
+        if(arkrtos_paging_space_activate(0u) != 0)
+        {
+            sh_out("pmap cu: refused - cannot install space 0\r\n");
+            return 1;
+        }
+
+        cur = arkrtos_paging_space_current();
+
+        for(i = 0u; i < 16u; i++)
+        {
+            ((volatile uint8 *)(unsigned long)uram)[i] = (uint8)(0x40u + i);
+            ((volatile uint8 *)(unsigned long)urom)[i] = (uint8)(0x80u + i);
+        }
+
+        for(i = 0u; i < 16u; i++)
+        {
+            buf[i] = 0u;
+        }
+
+        /* 1) 读数据窗口：成功，字节与写进去的一致 */
+        rc_c = arkrtos_paging_user_copy(urom, 0x100u, uram, 0x100u, cur, cur,
+                                       buf, (const void *)(unsigned long)uram,
+                                       16u, 0u);
+        (void)pmap_cu_rc("from_user RAM", rc_c, 0, &fails);
+        if((rc_c == 0) && ((buf[0] != 0x40u) || (buf[15] != 0x4Fu)))
+        {
+            fails++;
+            ark_shell_printf("pmap cu: FAIL from_user RAM bytes 0x%02X..0x%02X\r\n",
+                             (unsigned)buf[0], (unsigned)buf[15]);
+        }
+
+        /* 2) 读代码窗口：允许（只读字符串常量的正常用法） */
+        rc_c = arkrtos_paging_user_copy(urom, 0x100u, uram, 0x100u, cur, cur,
+                                       buf, (const void *)(unsigned long)urom,
+                                       16u, 0u);
+        (void)pmap_cu_rc("from_user ROM", rc_c, 0, &fails);
+        if((rc_c == 0) && ((buf[0] != 0x80u) || (buf[15] != 0x8Fu)))
+        {
+            fails++;
+            ark_shell_printf("pmap cu: FAIL from_user ROM bytes 0x%02X..0x%02X\r\n",
+                             (unsigned)buf[0], (unsigned)buf[15]);
+        }
+
+        /* 3) 窗口内、但不在两个跨度里 -> -3 */
+        rc_c = arkrtos_paging_user_copy(urom, 0x100u, uram, 0x100u, cur, cur,
+                                       buf, (const void *)(unsigned long)(uram + 0x8000u),
+                                       16u, 0u);
+        (void)pmap_cu_rc("outside span", rc_c, -3, &fails);
+
+        /* 4) 内核镜像地址 -> -3（不是把内核内存读给用户） */
+        rc_c = arkrtos_paging_user_copy(urom, 0x100u, uram, 0x100u, cur, cur,
+                                       buf, (const void *)(unsigned long)0x00200000u,
+                                       16u, 0u);
+        (void)pmap_cu_rc("kernel image ptr", rc_c, -3, &fails);
+
+        /* 5) 完全没映射的地址 -> -3，且内核活着（后面还在打印） */
+        rc_c = arkrtos_paging_user_copy(urom, 0x100u, uram, 0x100u, cur, cur,
+                                       buf, (const void *)(unsigned long)0x80000000u,
+                                       16u, 0u);
+        (void)pmap_cu_rc("unmapped ptr", rc_c, -3, &fails);
+
+        /* 6) 长度把地址顶回 0 -> -1（不做回绕后的区间判断） */
+        rc_c = arkrtos_paging_user_copy(urom, 0x100u, uram, 0x100u, cur, cur,
+                                       buf, (const void *)(unsigned long)0xFFFFF000u,
+                                       0x2000u, 0u);
+        (void)pmap_cu_rc("range wrap", rc_c, -1, &fails);
+
+        /* 7) 往代码窗口写 -> -3 */
+        rc_c = arkrtos_paging_user_copy(urom, 0x100u, uram, 0x100u, cur, cur,
+                                       buf, (void *)(unsigned long)urom, 16u, 1u);
+        (void)pmap_cu_rc("to_user ROM", rc_c, -3, &fails);
+
+        /* 8) 往数据窗口写：成功，字节真的落地 */
+        buf[0] = 0xAAu;
+        buf[1] = 0x55u;
+        rc_c = arkrtos_paging_user_copy(urom, 0x100u, uram, 0x100u, cur, cur,
+                                       buf, (void *)(unsigned long)uram, 2u, 1u);
+        (void)pmap_cu_rc("to_user RAM", rc_c, 0, &fails);
+        if((((volatile uint8 *)(unsigned long)uram)[0] != 0xAAu) ||
+           (((volatile uint8 *)(unsigned long)uram)[1] != 0x55u))
+        {
+            fails++;
+            sh_out("pmap cu: FAIL to_user RAM did not reach user memory\r\n");
+        }
+
+        /* 9) 没有用户窗口的任务 -> -2 */
+        rc_c = arkrtos_paging_user_copy(0u, 0u, 0u, 0u, cur, cur,
+                                       buf, (const void *)(unsigned long)uram,
+                                       4u, 0u);
+        (void)pmap_cu_rc("no user window", rc_c, -2, &fails);
+
+        /* 10) 真正的入口、真正的调用者：shell 是内核任务 -> -2 */
+        rc_c = arkrtos_copy_from_user(buf, (const void *)(unsigned long)uram, 4u);
+        (void)pmap_cu_rc("kernel caller", rc_c, -2, &fails);
+
+        /* 11) 装着的不是调用者的空间 -> -4（读到的是别的 App 的帧） */
+        if(arkrtos_paging_space_count() >= 2u)
+        {
+            if(arkrtos_paging_space_activate(1u) == 0)
+            {
+                rc_c = arkrtos_paging_user_copy(urom, 0x100u, uram, 0x100u, 0u,
+                                               arkrtos_paging_space_current(),
+                                               buf, (const void *)(unsigned long)uram,
+                                               16u, 0u);
+                (void)pmap_cu_rc("wrong space", rc_c, -4, &fails);
+            }
+            else
+            {
+                fails++;
+                sh_out("pmap cu: FAIL cannot install space 1\r\n");
+            }
+        }
+
+        (void)arkrtos_paging_space_activate(prev);
+
+        if(fails != 0)
+        {
+            ark_shell_printf("pmap cu: FAIL (%d checks failed)\r\n", fails);
+            return 1;
+        }
+
+        sh_out("pmap cu: PASS - from/to user, refusals -1/-2/-3/-4, kernel survived\r\n");
+        return 0;
+    }
+
     rc = arkrtos_paging_stats(&checked, &bad, &bad_base);
     ark_shell_printf("pmap: init_rc=%d checked=%u bad=%u bad_base=0x%08X pages=%u\r\n",
                      (int)rc, (unsigned)checked, (unsigned)bad,
@@ -7013,7 +7180,8 @@ static int register_kernel_commands(void)
         "Per-task stack usage, measured (fill pattern + low PSP): stack [check]", 2);
 #if (ARKRTOS_USE_PAGING == 1)
     g_cmd_table[idx++] = ARK_SHELL_CMD("pmap", cmd_pmap,
-        "Paging: pmap [map|check|rd|rb|wrb|test|space|u1|look|unmap|dyn] ...", 6);
+        "Paging: pmap [map|check|rd|rb|wrb|test|space|u1|elf|u2|look|unmap|dyn|cu] ...",
+        6);
 #endif /* ARKRTOS_USE_PAGING */
     g_cmd_table[idx++] = ARK_SHELL_CMD("sched", cmd_sched,
         "Scheduler readiness self-check (0 = consistent)", 1);
