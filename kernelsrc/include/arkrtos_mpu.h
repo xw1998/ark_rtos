@@ -55,9 +55,33 @@ void arkrtos_mpu_reset(void);
 
 int32 arkrtos_paging_stats(uint32 *p_checked, uint32 *p_bad, uint32 *p_bad_base);
 
+/** @brief Register a run-time dynamic mapping (4 KB granularity)
+ *  @param va    Virtual base, must be 4 KB aligned
+ *  @param pa    Physical base, must be 4 KB aligned
+ *  @param size  Bytes, must be a non-zero multiple of 4 KB and at most
+ *               ARKRTOS_PAGING_MAP_MAX_PAGES * 4 KB
+ *  @param mem   One of ARKRTOS_MPU_MEM_RAM / _ROM / _PERIPH_RO / _PERIPH_RW
+ *  @return 0 = every page is in the TLB and in the audit span list;
+ *          <0 = refused, with the port's own reason passed through
+ *          (-1 parameter/attribute, -2 overlaps a static span, -3 table full)
+ *  @details This is the driver-side "register this MMIO region" entry. It is
+ *           deliberately restricted to kernel-visible mappings: App pages need
+ *           their own ASID and per-process tables, which is not built yet, and
+ *           pretending otherwise here would be an authoritative-looking wrong
+ *           answer. A failed call does not roll back the pages that already
+ *           went in - there is no unmap path yet (debt U-15), and the count
+ *           from arkrtos_paging_map_pages() is how a caller sees how far it got.
+ */
+int32 arkrtos_paging_map_span(uint32 va, uint32 pa, uint32 size, arkrtos_mpu_mem_t mem);
+
+/** @brief How many pages this layer has registered (cumulative readout) */
+uint32 arkrtos_paging_map_pages(void);
+
 #else
 
 #define arkrtos_paging_stats(p_checked, p_bad, p_bad_base)   (-1)
+#define arkrtos_paging_map_span(va, pa, size, mem)           (-1)
+#define arkrtos_paging_map_pages()                           (0u)
 
 #endif
 

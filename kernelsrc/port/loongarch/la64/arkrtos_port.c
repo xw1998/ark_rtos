@@ -496,6 +496,33 @@ static void la_tlb_fill(uint32 vaddr, uint32 ps, uint32 index,
 }
 
 /**
+* @brief 确定性写一条 TLB 条目（不经过 tlbfill 的随机选路）
+* @param vaddr 虚拟地址基址
+* @param ps    页大小指数
+* @param index 绝对条目号（STLB 用 way*256+组，MTLB 用 2048 起）
+* @details `tlbfill` 在 PS == STLBPS 时会替调用方随机挑一路，好处是不用
+*          知道 STLB 的索引布局，坏处是运行期反复调用会**随机顶掉同组里
+*          已有的条目**（内核 UART 与动态页恰好同组时就踩到过：登记完一条
+*          动态映射，紧接着控制台第一次打印就 KERNEL refill）。
+*          运行期登记不能用那种「碰运气」的写法，所以这里直接 `tlbwr`，
+*          索引由调用方算好。
+*
+*          4 KB 页刻意写进 **MTLB**（2048 起的绝对条目）而不是 STLB：
+*          MTLB 是确定索引、查找时按条目自己的 PS 比 VPPN，不会和内核那几条
+*          静态 4 KB 条目抢同一组的 8 路，也不需要知道 STLB 的 way 布局。
+*          代价是 MTLB 只有 64 条，所以动态表的上限由它决定（见 LA_PG_DYN_PAIRS）。
+*/
+static void la_tlb_write(uint32 vaddr, uint32 ps, uint32 index,
+                         unsigned long lo0, unsigned long lo1)
+{
+    LA_CSRW(LA_CSR_TLBIDX, ((unsigned long)ps << 24) | (unsigned long)(index & 0xFFFFFFu));
+    LA_CSRW(LA_CSR_TLBEHI, (unsigned long)(vaddr & ~0x1FFFu));
+    LA_CSRW(LA_CSR_TLBELO0, lo0);
+    LA_CSRW(LA_CSR_TLBELO1, lo1);
+    __asm__ volatile("tlbwr" ::: "memory");
+}
+
+/**
 * @brief 建立静态映射并打开分页
 * @details 必须在开中断之前调用（节拍一进来就要过 TLB），也必须在
 *          所有任务注册之后调用不需要 —— 帧内容与映射方式无关，
@@ -635,6 +662,210 @@ static const la_pg_span_t s_pg_spans[] = {
 
 #define LA_PG_SPAN_COUNT        (sizeof(s_pg_spans) / sizeof(s_pg_spans[0]))
 
+#if (ARKRTOS_USE_PRIV == 1)
+
+/* ------------------------------------------------------------
+ * 动态映射（运行期登记，给驱动登记 MMIO 用）
+ * @details 静态那四条只顾内核镜像 / App 页 / 两个 UART 页。驱动在板级初始化
+ *          时如果要用一个不在那四条里的设备窗口，就必须能往 STLB 里加一条，
+ *          这里就是那条路。粒度固定 4 KB：大页要占 MTLB（64 条，靠 tlbwr
+ *          确定性写入），那是「每进程页表」那条线的事，不在这条接口里混做。
+ *
+ *          四条硬约束，全部按「宁可报错」：
+ *            1. va/pa 必须 4 KB 对齐，属性只接受 RAM / ROM / PERIPH_RO /
+ *               PERIPH_RW。App 页要 ASID 与 PLV3 条目（属 U-1），这里一律
+ *               拒绝，而不是拿 PLV0 条目凑一个「看着能跑」的映射。
+ *            2. 落在静态跨度里的 VA 一律拒绝：同一 VA 两条条目谁先匹配
+ *               取决于表，症状是随机的重填错误。
+ *            3. 条目按「偶页 + 奇页」成对写（硬件一条条目管两页）。只登记
+ *               一半时另一半保持 V=0 —— 绝不顺手把邻居页也放开。
+ *            4. STLB 一组只有 8 路、而 tlbfill 的路号是随机的，所以登记前
+ *               先数该组已用条目（静态 4 KB 条目 + 已登记的对），到 8 就
+ *               拒绝，而不是等随机覆盖把内核 UART 顶掉。
+ * ------------------------------------------------------------ */
+/* 动态条目在 MTLB 里的起始偏移：静态三条大页占 2048..2050 */
+#define LA_MTLB_DYN_FIRST   3u
+#define LA_PG_DYN_PAIRS     8u
+
+typedef struct {
+    uint32        used;
+    uint32        pair;          /* va 与 va+4 KB 所在的那一对，8 KB 对齐 */
+    uint32        pa[2];         /* 每页登记到的物理页基址（冲突判定用） */
+    unsigned long lo[2];         /* 0 = 该页不做映射（TLBELO 留 V=0） */
+    uint32        mask[2];       /* 该页允许的 mem 位掩码 */
+} la_pg_dyn_t;
+
+static la_pg_dyn_t s_pg_dyn[LA_PG_DYN_PAIRS];
+
+/** 这段 VA 是否落在静态跨度里（重叠即算） */
+static uint32 la_pg_static_hit(uint32 base, uint32 size)
+{
+    uint32 i;
+
+    for(i = 0u; i < LA_PG_SPAN_COUNT; i++)
+    {
+        const la_pg_span_t *p = &s_pg_spans[i];
+
+        if((base < (p->base + p->size)) && (p->base < (base + size)))
+        {
+            return 1u;
+        }
+    }
+
+    return 0u;
+}
+
+/** mem -> TLBELO；0 表示这条属性不提供动态映射 */
+static unsigned long la_pg_dyn_lo(uint32 pa, arkrtos_mpu_mem_t mem)
+{
+    switch(mem)
+    {
+    case ARKRTOS_MPU_MEM_RAM:
+        return LA_PTE_V | LA_PTE_WE | LA_PTE_CCA(1u) | LA_PTE_PLV(0u) | LA_PTE_PPN(pa);
+
+    case ARKRTOS_MPU_MEM_ROM:
+        return LA_PTE_V | LA_PTE_CCA(1u) | LA_PTE_PLV(0u) | LA_PTE_PPN(pa);
+
+    case ARKRTOS_MPU_MEM_PERIPH_RW:
+        return LA_PTE_V | LA_PTE_WE | LA_PTE_CCA(0u) | LA_PTE_PLV(0u) | LA_PTE_PPN(pa);
+
+    case ARKRTOS_MPU_MEM_PERIPH_RO:
+        return LA_PTE_V | LA_PTE_CCA(0u) | LA_PTE_PLV(0u) | LA_PTE_PPN(pa);
+
+    default:
+        return 0UL;
+    }
+}
+
+/** 属性掩码：RW 的页同时满足 RO 的审计，反过来不行 */
+static uint32 la_pg_dyn_mask(arkrtos_mpu_mem_t mem)
+{
+    if(mem == ARKRTOS_MPU_MEM_PERIPH_RW)
+    {
+        return LA_PG_BIT(ARKRTOS_MPU_MEM_PERIPH_RO) | LA_PG_BIT(ARKRTOS_MPU_MEM_PERIPH_RW);
+    }
+
+    return LA_PG_BIT(mem);
+}
+
+/**
+* @brief 追加一条动态映射（一页 4 KB）
+* @return 0 = 已进 TLB 且可审计（同一页同一属性重复登记也是 0）；
+*         -1 = 参数/属性不支持；-2 = 与静态映射重叠；-3 = 动态表满；
+*         -5 = 同一 VA 已登记成别的物理页/属性
+*/
+int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_t mem)
+{
+    uint32 pair;
+    uint32 half;
+    uint32 i;
+    uint32 slot = LA_PG_DYN_PAIRS;
+    unsigned long lo;
+
+    if(((va & 0xFFFu) != 0u) || ((pa & 0xFFFu) != 0u))
+    {
+        return -1;                       /* 粒度是 4 KB，不对齐就不猜 */
+    }
+
+    lo = la_pg_dyn_lo(pa, mem);
+    if(lo == 0UL)
+    {
+        return -1;                       /* 该属性动态映射不提供 */
+    }
+
+    pair = va & ~0x1FFFu;
+    half = (va >> 12) & 1u;
+
+    if(la_pg_static_hit(va, 0x1000u) != 0u)
+    {
+        return -2;
+    }
+
+    /* 这一对已经登记过就复用槽位（幂等），否则找一个空槽 */
+    for(i = 0u; i < LA_PG_DYN_PAIRS; i++)
+    {
+        if((s_pg_dyn[i].used != 0u) && (s_pg_dyn[i].pair == pair))
+        {
+            slot = i;
+            break;
+        }
+    }
+
+    if(slot == LA_PG_DYN_PAIRS)
+    {
+        for(i = 0u; i < LA_PG_DYN_PAIRS; i++)
+        {
+            if(s_pg_dyn[i].used == 0u)
+            {
+                slot = i;
+                break;
+            }
+        }
+
+        if(slot == LA_PG_DYN_PAIRS)
+        {
+            return -3;
+        }
+
+        /* 条目落 MTLB，不与 STLB 抢组；上限就是那 8 个槽位本身 */
+
+        s_pg_dyn[slot].used    = 1u;
+        s_pg_dyn[slot].pair    = pair;
+        s_pg_dyn[slot].pa[0]   = 0u;
+        s_pg_dyn[slot].pa[1]   = 0u;
+        s_pg_dyn[slot].lo[0]   = 0UL;
+        s_pg_dyn[slot].lo[1]   = 0UL;
+        s_pg_dyn[slot].mask[0] = 0u;
+        s_pg_dyn[slot].mask[1] = 0u;
+    }
+
+    /* 同一 VA 已经登记成别的物理页（或别的属性）时拒绝：静默改绑会让
+     * 「我登记过这条」变成一句没有内容的话，也会让已经拿着这个 VA 的
+     * 调用方去访问另一块内存 —— 那是错答案，不是重映射。 */
+    if(s_pg_dyn[slot].lo[half] != 0UL)
+    {
+        if((s_pg_dyn[slot].pa[half] != pa) || (s_pg_dyn[slot].lo[half] != lo))
+        {
+            return -5;
+        }
+
+        /* 一字不差的重复登记：幂等 */
+        la_tlb_write(pair, 12u, LA_MTLB_INDEX + LA_MTLB_DYN_FIRST + slot,
+                     s_pg_dyn[slot].lo[0], s_pg_dyn[slot].lo[1]);
+        return 0;
+    }
+
+    s_pg_dyn[slot].pa[half]   = pa;
+    s_pg_dyn[slot].lo[half]   = lo;
+    s_pg_dyn[slot].mask[half] = la_pg_dyn_mask(mem);
+
+    /* 一对页一起写：TLBELO1 的 PA 由硬件推成 LO0 + 2^PS，所以没登记的那
+     * 一半必须是 0（V=0、不匹配），绝不能拿「另一页的 PA + 4 KB」凑一条
+     * 有效条目把邻居页顺手放开。
+     *
+     * 用 la_tlb_write（tlbwr）而不是 tlbfill：动态登记是运行期的，走 tlbfill
+     * 会随机挑路、有概率把同组的内核 UART 条目顶掉（实测踩到过一次，症状是
+     * 登记成功后的下一次控制台输出直接 KERNEL refill）。条目落 MTLB 的
+     * 绝对索引，就不会与静态 4 KB 条目抢 STLB 的组。 */
+    la_tlb_write(pair, 12u, LA_MTLB_INDEX + LA_MTLB_DYN_FIRST + slot,
+                 s_pg_dyn[slot].lo[0], s_pg_dyn[slot].lo[1]);
+
+    return 0;
+}
+
+#else  /* ARKRTOS_USE_PRIV == 0：没有 TLB 通路，动态映射一律拒绝 */
+
+int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_t mem)
+{
+    (void)va;
+    (void)pa;
+    (void)mem;
+
+    return -1;
+}
+
+#endif /* ARKRTOS_USE_PRIV == 1 */
+
 /**
 * @brief 报告分页通路可用
 * @return 0 = 本 port 有分页通路
@@ -681,21 +912,29 @@ int32 arkrtos_port_paging_check(uint32 base, uint32 size, arkrtos_mpu_mem_t mem)
         }
     }
 
-    return -1;
-}
+#if (ARKRTOS_USE_PRIV == 1)
+    /* 动态登记的页：同一条口径，整段必须落在一页之内 */
+    for(i = 0u; i < LA_PG_DYN_PAIRS; i++)
+    {
+        uint32 h;
 
-/**
-* @brief 追加一条动态映射
-* @return 恒 -1（未实现）
-* @details 本 port 只做静态映射。假装能 alias 会让调用方以为拿到了
-*          「按需把任意物理页挂到任意 VA」的能力，而实际没有回收路径，
-*          那正是「看似权威的错答案」。
-*/
-int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_t mem)
-{
-    (void)va;
-    (void)pa;
-    (void)mem;
+        if(s_pg_dyn[i].used == 0u)
+        {
+            continue;
+        }
+
+        for(h = 0u; h < 2u; h++)
+        {
+            uint32 page = s_pg_dyn[i].pair + (h * 0x1000u);
+
+            if((s_pg_dyn[i].lo[h] != 0UL) && (base >= page) &&
+               (end <= (page + 0x1000u)))
+            {
+                return ((s_pg_dyn[i].mask[h] & LA_PG_BIT(mem)) != 0u) ? 0 : -1;
+            }
+        }
+    }
+#endif /* ARKRTOS_USE_PRIV == 1 */
 
     return -1;
 }

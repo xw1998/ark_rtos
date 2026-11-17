@@ -203,8 +203,10 @@ RV64GC 的硬件位是 1，但本仓还没有 RV64 port、也没有页表初始�
 
 ### 7.4 LA64 上真做到的事：静态映射 + 装载期跨度审计
 
-**映射表是静态的**，在 `arkrtos_port_irq_init()` 里由 `la_mmu_init()` 一次建好，
-之后不再变（`kernelsrc/port/loongarch/la64/arkrtos_port.c`）：
+**主体映射是静态的**，在 `arkrtos_port_irq_init()` 里由 `la_mmu_init()` 一次建好
+（`kernelsrc/port/loongarch/la64/arkrtos_port.c`）。2026-11-17 起在这四条之外多了
+**运行期动态登记**的 4 KB 条目（`arkrtos_paging_map_span` → port 的
+`arkrtos_port_paging_alias` → `tlbwr` 写 MTLB），见 §5.16；静态这四条不变：
 
 | 跨度 | 大小 / 页大小 | 权限 |
 |---|---|---|
@@ -230,8 +232,11 @@ int32 arkrtos_paging_stats(uint32 *p_checked, uint32 *p_bad, uint32 *p_bad_base)
 
 1. **只审计，不修复**：发现越界只计数，不猜一个更宽的跨度把断言放过去；
 2. **`size == 0` 跳过**：空区间不是越界；
-3. **`arkrtos_port_paging_alias()` 恒返回 -1**：不假装支持运行期动态映射。
-   `flush()` 是空操作：真发 `invtlb` 会把内核自己的条目也打掉。
+3. **运行期动态映射只支持内核可见（PLV0）的 4 KB 页**（2026-11-17 落地，见
+   [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.16）：驱动要登记一块静态表里
+   没有的 MMIO 窗口，调 `arkrtos_paging_map_span(va, pa, size, mem)`。**App 可见**的
+   动态映射需要 ASID 或每进程表（U-1），接口一律拒绝而不是近似。**撤销没有做**
+   （U-15）：`flush()` 仍是空操作——按 VA 发 `invtlb` 会把内核自己的条目也打掉。
 
 ### 7.5 QEMU 实测读数
 
@@ -273,7 +278,8 @@ int32 arkrtos_paging_stats(uint32 *p_checked, uint32 *p_bad, uint32 *p_bad_base)
 | 页帧分配器 | **未做** |
 | 缺页处理 | **未做** |
 | `copy_from_user` / `copy_to_user`（内核安全访问用户地址） | **未做** |
-| 运行期动态映射（`arkrtos_port_paging_alias`） | **未做**，接口恒返回 -1 |
+| 运行期动态映射（`arkrtos_port_paging_alias` / `arkrtos_paging_map_span`） | **已做（仅内核 PLV0、4 KB、最多 8 对页）**，QEMU LA64 实跑：同 VA 换 PA 返回 -5、落静态跨度内 -2、真设备页经新 VA 读得同值且写方向打出字符 |
+| 撤销 / 回收映射（unmap） | **未做**（U-15）：`flush()` 仍是空操作，`invtlb` 具体 op 语义未核 |
 | SMP（多核 TLB shootdown） | **未做** |
 
 验收判据（做这些欠账时按这条验收，不按「能跑起来」验收）：

@@ -34,6 +34,12 @@
 *               (arkrtos_port_set_thread_priv -> PRMD.PPLV). Pretending to
 *               switch a page table here would be an empty instruction.
 *
+*          What IS here as of the MMIO registration round: map_span(), a 4 KB
+*          granular run-time mapping request that the port turns into real TLB
+*          entries and that check() then honours. It is kernel-visible only
+*          (PLV0); an App-visible dynamic mapping needs the per-process table
+*          below, so it is refused rather than approximated.
+*
 *          Deliberately NOT here (registered as debt, with the acceptance test
 *          written down so it cannot be claimed later without doing the work):
 *            - a page-frame allocator and one page table per App (same virtual
@@ -67,6 +73,13 @@ static uint32 s_pg_init_err;      /* 0 = port brought the map up, else its code 
 static uint32 s_pg_checked;       /* spans audited since boot */
 static uint32 s_pg_bad;           /* spans that no mapping covers properly */
 static uint32 s_pg_bad_base;      /* start address of the first bad span */
+static uint32 s_pg_map_pages;     /* pages registered through map_span() */
+
+/* One call may register at most this many 4 KB pages. The port keeps 8 entry
+ * pairs (one STLB entry covers two pages), and a device window larger than
+ * 64 KB is not something a driver maps page by page anyway: it wants a large
+ * page, which this interface deliberately does not hand out. */
+#define ARKRTOS_PAGING_MAP_MAX_PAGES    16u
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -112,6 +125,7 @@ void arkrtos_mpu_module_init(void)
     s_pg_checked   = 0u;
     s_pg_bad       = 0u;
     s_pg_bad_base  = 0u;
+    s_pg_map_pages = 0u;
 
     if(arkrtos_port_paging_init() != 0)
     {
@@ -159,6 +173,66 @@ void arkrtos_mpu_set_idle(void)
 void arkrtos_mpu_reset(void)
 {
     /* Nothing to restore: the static map is never torn down. */
+}
+
+/**
+* @brief Register a run-time dynamic mapping, page by page
+* @param va    virtual base (4 KB aligned)
+* @param pa    physical base (4 KB aligned)
+* @param size  bytes (non-zero multiple of 4 KB)
+* @param mem   RAM / ROM / PERIPH_RO / PERIPH_RW
+* @return 0 = all pages registered and auditable; -1 = refused
+* @details The port owns the TLB, so it also owns the decision of what may be
+*          added at run time (static-overlap refusal, STLB way budget). This
+*          layer only does the arithmetic: alignment, the page count cap, and
+*          the page-by-page loop so a caller never has to remember that one
+*          TLB entry covers two pages.
+*
+*          A failure part-way leaves the earlier pages in place. That is not a
+*          silent partial success: the return code is -1 and
+*          arkrtos_paging_map_pages() shows how many pages did land. The honest
+*          reason is that there is no unmap path on this port yet (debt U-15),
+*          and pretending to roll back would need one.
+*/
+int32 arkrtos_paging_map_span(uint32 va, uint32 pa, uint32 size, arkrtos_mpu_mem_t mem)
+{
+    uint32 off;
+
+    if((size == 0u) || ((size & 0xFFFu) != 0u) ||
+       ((va & 0xFFFu) != 0u) || ((pa & 0xFFFu) != 0u))
+    {
+        return -1;
+    }
+
+    if(size > (ARKRTOS_PAGING_MAP_MAX_PAGES * 0x1000u))
+    {
+        return -1;
+    }
+
+    for(off = 0u; off < size; off += 0x1000u)
+    {
+        int32 rc = arkrtos_port_paging_alias(va + off, pa + off, mem);
+
+        if(rc != 0)
+        {
+            /* port 的拒绝原因（-2 与静态映射重叠 / -3 动态表满 / -5 同一 VA
+             * 已登记成别的物理页 / …）原样透出：压成 -1 只能让人猜。 */
+            return rc;
+        }
+
+        s_pg_map_pages++;
+    }
+
+    return 0;
+}
+
+/**
+* @brief How many pages have been registered through map_span()
+* @return cumulative page count (0 on any build without the paging backend)
+*/
+uint32 arkrtos_paging_map_pages(void)
+{
+    return s_pg_map_pages;
 }
 
 /**

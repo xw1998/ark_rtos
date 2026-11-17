@@ -74,6 +74,7 @@
 #include "arkrtos_crash.h"
 #include "arkrtos_partition.h"
 #include "arkrtos_hal.h"
+#include "arkrtos_mpu.h"
 #include "arkrtos_version.h"
 #include "arkrtos_rt.h"
 #if (ARKRTOS_USE_TICKLESS == 1)
@@ -6239,18 +6240,248 @@ static int cmd_unld(int argc, char *argv[])
 }
 #endif /* ARKRTOS_USE_MODLOAD */
 
+#if (ARKRTOS_USE_PAGING == 1)
+/* ------------------------------------------------------------
+ * pmap：页表后端的运行期动态映射（驱动登记 MMIO 的那条 API）
+ * @details 静态映射只管内核镜像 / App 页 / 两个 UART 页。驱动要用的设备
+ *          窗口如果不在其中，就得在运行期登记一条。这里既是那套 API 的
+ *          命令行入口，也是它的实测手段：
+ *            pmap                                     读数（审计计数 + 已登记页数）
+ *            pmap map  <va> <pa> <size> <ram|rom|ro|rw>
+ *            pmap check <va> <size> <ram|rom|ro|rw>   审计探针（跨页/未映射都返回 -1）
+ *            pmap rd   <va> [count]                    经映射读（每行一个字）
+ *            pmap rb   <va>                            经映射读一个字节
+ *            pmap wrb  <va> <byte>                     经映射写一个字节（MMIO 才用）
+ *            pmap test                                 自测：内核 ROM 页映射后逐字比对
+ *
+ *          **注意**：`pmap rd/rb/wrb` 不做保护性检查 —— 地址没映射就是一次
+ *          重填致命。这是刻意的：它们就是用来验证「这条地址到底通不通」的，
+ *          替调用方兜住异常只会把「通不通」变成看不见。
+ * ------------------------------------------------------------ */
+#define PMAP_TEST_VA    0x03000000u     /* 静态映射之外的空地（16 MB 以上） */
+
+static int pmap_hex(const char *s, uint32 *out)
+{
+    uint32 v = 0u;
+    uint32 n = 0u;
+    char c;
+
+    if((s == 0) || (*s == '\0'))
+    {
+        return -1;
+    }
+
+    if((s[0] == '0') && ((s[1] == 'x') || (s[1] == 'X')))
+    {
+        s += 2;
+    }
+
+    while(*s != '\0')
+    {
+        c = *s;
+        if((c >= '0') && (c <= '9'))
+        {
+            v = (v << 4) | (uint32)(c - '0');
+        }
+        else if((c >= 'a') && (c <= 'f'))
+        {
+            v = (v << 4) | ((uint32)(c - 'a') + 10u);
+        }
+        else if((c >= 'A') && (c <= 'F'))
+        {
+            v = (v << 4) | ((uint32)(c - 'A') + 10u);
+        }
+        else
+        {
+            return -1;
+        }
+        n++;
+        s++;
+    }
+
+    if(n == 0u)
+    {
+        return -1;
+    }
+
+    *out = v;
+    return 0;
+}
+
+static int pmap_kind(const char *s, arkrtos_mpu_mem_t *out)
+{
+    if(strcmp(s, "ram") == 0) { *out = ARKRTOS_MPU_MEM_RAM;       return 0; }
+    if(strcmp(s, "rom") == 0) { *out = ARKRTOS_MPU_MEM_ROM;       return 0; }
+    if(strcmp(s, "ro")  == 0) { *out = ARKRTOS_MPU_MEM_PERIPH_RO; return 0; }
+    if(strcmp(s, "rw")  == 0) { *out = ARKRTOS_MPU_MEM_PERIPH_RW; return 0; }
+    return -1;
+}
+
+static int cmd_pmap(int argc, char *argv[])
+{
+    uint32 checked = 0u;
+    uint32 bad = 0u;
+    uint32 bad_base = 0u;
+    int32 rc;
+
+    if((argc >= 2) && (strcmp(argv[1], "map") == 0))
+    {
+        uint32 va = 0u;
+        uint32 pa = 0u;
+        uint32 size = 0u;
+        arkrtos_mpu_mem_t kind = ARKRTOS_MPU_MEM_RAM;
+
+        if((argc < 6) || (pmap_hex(argv[2], &va) != 0) ||
+           (pmap_hex(argv[3], &pa) != 0) || (pmap_hex(argv[4], &size) != 0) ||
+           (pmap_kind(argv[5], &kind) != 0))
+        {
+            sh_out("usage: pmap map <va> <pa> <size> <ram|rom|ro|rw>\r\n");
+            return 1;
+        }
+
+        rc = arkrtos_paging_map_span(va, pa, size, kind);
+        ark_shell_printf("pmap: map 0x%08X <- 0x%08X size=%u rc=%d pages=%u\r\n",
+                         (unsigned)va, (unsigned)pa, (unsigned)size, (int)rc,
+                         (unsigned)arkrtos_paging_map_pages());
+        return (rc == 0) ? 0 : 1;
+    }
+
+    if((argc >= 3) && (strcmp(argv[1], "check") == 0))
+    {
+        uint32 va = 0u;
+        uint32 size = 0u;
+        arkrtos_mpu_mem_t kind = ARKRTOS_MPU_MEM_RAM;
+
+        if((argc < 5) || (pmap_hex(argv[2], &va) != 0) ||
+           (pmap_hex(argv[3], &size) != 0) || (pmap_kind(argv[4], &kind) != 0))
+        {
+            sh_out("usage: pmap check <va> <size> <ram|rom|ro|rw>\r\n");
+            return 1;
+        }
+
+        rc = arkrtos_port_paging_check(va, size, kind);
+        ark_shell_printf("pmap: check 0x%08X +%u rc=%d\r\n",
+                         (unsigned)va, (unsigned)size, (int)rc);
+        return (rc == 0) ? 0 : 1;
+    }
+
+    if((argc >= 3) && (strcmp(argv[1], "rd") == 0))
+    {
+        uint32 va = 0u;
+        uint32 n = 1u;
+        uint32 i;
+
+        if((pmap_hex(argv[2], &va) != 0) ||
+           ((argc >= 4) && (parse_u32(argv[3], &n) != 0)))
+        {
+            sh_out("usage: pmap rd <va> [count]\r\n");
+            return 1;
+        }
+
+        if(n > 8u)
+        {
+            n = 8u;
+        }
+
+        for(i = 0u; i < n; i++)
+        {
+            uint32 addr = va + (i * 4u);
+            uint32 w = *(volatile uint32 *)(unsigned long)addr;
+            ark_shell_printf("pmap: [0x%08X] = 0x%08X\r\n", (unsigned)addr, (unsigned)w);
+        }
+        return 0;
+    }
+
+    if((argc >= 3) && (strcmp(argv[1], "rb") == 0))
+    {
+        uint32 va = 0u;
+
+        if(pmap_hex(argv[2], &va) != 0)
+        {
+            sh_out("usage: pmap rb <va>\r\n");
+            return 1;
+        }
+
+        ark_shell_printf("pmap: [0x%08X] = 0x%02X\r\n", (unsigned)va,
+                         (unsigned)(*(volatile uint8 *)(unsigned long)va));
+        return 0;
+    }
+
+    if((argc >= 4) && (strcmp(argv[1], "wrb") == 0))
+    {
+        uint32 va = 0u;
+        uint32 val = 0u;
+
+        if((pmap_hex(argv[2], &va) != 0) || (pmap_hex(argv[3], &val) != 0))
+        {
+            sh_out("usage: pmap wrb <va> <byte>\r\n");
+            return 1;
+        }
+
+        *(volatile uint8 *)(unsigned long)va = (uint8)(val & 0xFFu);
+        return 0;
+    }
+
+    if((argc >= 2) && (strcmp(argv[1], "test") == 0))
+    {
+        int i;
+        int diff = 0;
+
+        /* 把内核镜像的第一页挂到静态映射之外的空地，然后逐字比对：
+         * 经新翻译读到的东西必须和直连地址一模一样，否则就是翻译错了，
+         * 而不是「看起来能跑」。 */
+        rc = arkrtos_paging_map_span(PMAP_TEST_VA, (uint32)ARKRTOS_MPU_KERNEL_ROM_BASE,
+                                     0x1000u, ARKRTOS_MPU_MEM_ROM);
+        ark_shell_printf("pmap: map ROM 0x%08X <- 0x%08X rc=%d\r\n",
+                         (unsigned)PMAP_TEST_VA,
+                         (unsigned)ARKRTOS_MPU_KERNEL_ROM_BASE, (int)rc);
+        if(rc != 0)
+        {
+            sh_out("pmap test: FAIL (map refused)\r\n");
+            return 1;
+        }
+
+        for(i = 0; i < 16; i++)
+        {
+            uint32 off = (uint32)i * 4u;
+            uint32 a = *(volatile uint32 *)(unsigned long)(PMAP_TEST_VA + off);
+            uint32 b = *(volatile uint32 *)(unsigned long)
+                       ((uint32)ARKRTOS_MPU_KERNEL_ROM_BASE + off);
+
+            if(a != b)
+            {
+                diff++;
+            }
+        }
+
+        ark_shell_printf("pmap: compare 16 words, mismatch=%d\r\n", diff);
+        sh_out((diff == 0) ? "pmap test: PASS\r\n" : "pmap test: FAIL (translation)\r\n");
+        return (diff == 0) ? 0 : 1;
+    }
+
+    rc = arkrtos_paging_stats(&checked, &bad, &bad_base);
+    ark_shell_printf("pmap: init_rc=%d checked=%u bad=%u bad_base=0x%08X pages=%u\r\n",
+                     (int)rc, (unsigned)checked, (unsigned)bad,
+                     (unsigned)bad_base, (unsigned)arkrtos_paging_map_pages());
+    sh_out("usage: pmap [map <va> <pa> <size> <kind> | check <va> <size> <kind> |"
+           " rd <va> [n] | rb <va> | wrb <va> <byte> | test]\r\n");
+    return 0;
+}
+#endif /* ARKRTOS_USE_PAGING == 1 */
+
 static int register_kernel_commands(void)
 {
     int idx = g_cmd_count;
     /* Upper bound with every optional feature compiled in.  Kept above the
      * real count so a future command cannot silently overflow g_cmd_table. */
-    int need = 49   /* 48 shipped + "stack" (per-task stack usage) */
+    int need = 50   /* 48 shipped + "stack" + "pmap" (paging backend only) */
              + (ARKRTOS_USE_ARKVIM ? 1 : 0)
              + (ARKRTOS_USE_ARKC ? 1 : 0)
              + (ARKRTOS_USE_RTSTAT ? 1 : 0)
              + (ARKRTOS_USE_ELF ? 1 : 0)
              + (ARKRTOS_USE_MODLOAD ? 4 : 0)
-             + (ARKRTOS_USE_SECCHECK ? 1 : 0);
+             + (ARKRTOS_USE_SECCHECK ? 1 : 0)
+             + (ARKRTOS_USE_PAGING ? 1 : 0);
 
     if((idx + need) > ARK_SHELL_MAX_COMMANDS)
     {
@@ -6283,6 +6514,10 @@ static int register_kernel_commands(void)
         "List kernel tasks, or dump one task frame: task <id> (ids start at 1)", 3);
     g_cmd_table[idx++] = ARK_SHELL_CMD("stack", cmd_stack,
         "Per-task stack usage, measured (fill pattern + low PSP): stack [check]", 2);
+#if (ARKRTOS_USE_PAGING == 1)
+    g_cmd_table[idx++] = ARK_SHELL_CMD("pmap", cmd_pmap,
+        "Dynamic (MMIO) mappings: pmap [map|check|rd|rb|wrb|test] ...", 6);
+#endif /* ARKRTOS_USE_PAGING */
     g_cmd_table[idx++] = ARK_SHELL_CMD("sched", cmd_sched,
         "Scheduler readiness self-check (0 = consistent)", 1);
     g_cmd_table[idx++] = ARK_SHELL_CMD("fault", cmd_fault,

@@ -1624,6 +1624,170 @@ static uint32 g_shell_stack[ARKRTOS_SHELL_STACK_SIZE / 4u];
 任务摘除」。同型的 32 位端口（3 KB、帧 128 B）本轮**没测**，用 `stack` 在 RV32
 QEMU 上跑一次 `ld` 即可判定，登记为待复核项。
 
+### 5.16 运行动态映射：驱动登记 MMIO 跨度（欠账 #5，2026-11-17）
+
+到本轮之前，`arkrtos_port_paging_alias()` 是一个**恒返回 -1 的占位**：注释写"运行期映射
+未做"，于是「驱动在 MMU 档下访问一个静态映射表里没有的 MMIO 窗口」这件事在架构上无解。
+本轮把它变成真实现，并给出 QEMU 上的实测读数。
+
+#### 5.16.1 接口与契约
+
+```c
+/* kernelsrc/include/arkrtos_mpu.h */
+int32  arkrtos_paging_map_span(uint32 va, uint32 pa, uint32 size, arkrtos_mpu_mem_t mem);
+uint32 arkrtos_paging_map_pages(void);
+```
+
+- `map_span()` 把 `[va, va+size)` 逐 4 KB 登记到 `[pa, pa+size)`；
+  **返回 0 表示每一页都进了 TLB 且都进了审计跨度表**，`<0` 是拒绝。
+- 只支持 **4 KB 粒度**：`va`/`pa`/`size` 任一不是 4 KB 对齐、`size==0`、
+  `size > 16 页`（`ARKRTOS_PAGING_MAP_MAX_PAGES`）一律 -1。
+- **只做内核可见（PLV0）映射**。App 可见的动态映射需要 ASID 或每进程表 —— 那是 U-1，
+  在这里近似会给出「看似权威的错答案」，所以明确拒绝而不是假装支持。
+- **失败不回滚**：没有 unmap 路径（见 U-15），已登记上的前几页会留在表里。
+  调用方要按「要么整段成、要么当作部分成功」处理，返回值只说明断在哪一页。
+- 拒绝码由 port 原样透出，不压成 -1：
+
+  | 码 | 含义 |
+  |---|---|
+  | -1 | 参数/属性不支持（非 4 KB 对齐、size 非法、`mem` 不是 RAM/ROM/PERIPH_RW/PERIPH_RO） |
+  | -2 | 与静态映射跨度重叠（`s_pg_spans[]` 里已有） |
+  | -3 | 动态表满（`LA_PG_DYN_PAIRS` = 8 对） |
+  | -5 | 同一 VA 已登记成**别的** PA 或别的属性；一字不差的重复登记是幂等返回 0 |
+
+- `arkrtos_paging_map_pages()` 返回累计登记页数（只增不减，因为没有撤销）。
+
+#### 5.16.2 根因：`tlbfill` 在 STLB 里随机选路，会顶掉内核 UART 条目
+
+第一版实现直接沿用 `la_tlb_fill()`——它走 `tlbfill`。LoongArch 的 `tlbfill` 在
+`PS == STLBPS(12)` 时**从 STLB 的 8 路里随机挑一路**写。内核 UART 的静态条目
+（VA 0x1FE00000，组号 `(VA >> 13) & 0xFF = 0`）与测试 VA 0x03000000 **同组**，
+于是登记完成、控制台下一次打印就死：
+
+```text
+KERNEL refill (plv0) badv=0x1fe001e5 -> fatal
+```
+
+（`0x1fe001e5` 正是 UART LSR 的地址，读它触发了重填，而 UART 条目已被顶掉。）
+
+这不是"偶发"，是选路的性质：运行期反复写 4 KB 条目、且无法指定落哪一路，
+**必然**会与同组的静态条目互相顶掉。
+
+#### 5.16.3 修法：确定性 `tlbwr` + 落 MTLB
+
+新增 `la_tlb_write(vaddr, ps, index, lo0, lo1)`——全部走 `tlbwr`（索引由调用方给，
+行为确定）。动态 4 KB 条目**刻意写进 MTLB**（绝对索引 `LA_MTLB_INDEX + 3 + slot`，
+即 2048 起）而不是 STLB：
+
+- MTLB 的索引是确定的，`tlbwr` 写的就是那一条；
+- MTLB 查找按条目自己的 PS 比 VPPN，不与内核静态 4 KB 条目抢 STLB 的组预算；
+- 静态大页已占了 2048..2050，所以动态从 `2048 + 3` 起。
+
+代价是 MTLB 总共只有 64 条，动态表上限被它钉死：`LA_PG_DYN_PAIRS` = **8 对**
+（一对 = 偶页 + 奇页，因为一条 TLB 条目管 LO0 和 `LO0 + 2^PS`）。
+
+**未登记的那一半必须写 0（V=0）**：绝不"顺手放开"邻居页。
+
+修后同一段自测：`pmap: compare 16 words, mismatch=0` / `pmap test: PASS`，控制台不再死。
+
+#### 5.16.4 审计侧：`check()` 也认动态条目
+
+`arkrtos_port_paging_check(va, size, mem)` 末尾加了动态扫描：整段必须落在**同一页内**，
+且该页的权限掩码必须覆盖 `mem`。**RW 覆盖 RO**（`rw` 登记过的页按 `ro` 查是 0，
+按 `ram` 查是 -1）。
+
+#### 5.16.5 `pmap` 子命令与实测 transcript
+
+```text
+pmap                                     读数（init_rc / checked / bad / bad_base / pages）
+pmap map  <va> <pa> <size> <ram|rom|ro|rw>
+pmap check <va> <size> <ram|rom|ro|rw>   审计探针（跨页/未映射都返回 -1）
+pmap rd   <va> [count]                   经映射读（每行一个字，最多 8 个）
+pmap rb   <va>                           经映射读一个字节
+pmap wrb  <va> <byte>                    经映射写一个字节（MMIO 才用）
+pmap test                                自测：内核 ROM 页映射后逐字比对 16 个字
+```
+
+`rd/rb/wrb` **不做保护性检查**——地址没映射就是一次重填致命。这是刻意的：
+用它们验证"通不通"，不是验证"该不该"。
+
+QEMU LA64 实跑（`tools/qemu_shell_drive.py --port <p>`）：
+
+```text
+$ pmap
+pmap: init_rc=0 checked=0 bad=0 bad_base=0x00000000 pages=0
+
+$ pmap test
+pmap: map ROM 0x03000000 <- 0x00200000 rc=0
+pmap: compare 16 words, mismatch=0
+pmap test: PASS
+
+$ pmap map 0x03000000 0x00300000 0x1000 ram      # 同一 VA 换 PA
+pmap: map 0x03000000 <- 0x00300000 size=4096 rc=-5 pages=1
+
+$ pmap map 0x02000000 0x00300000 0x1000 ram      # 落在 App 静态跨度内
+pmap: map 0x02000000 <- 0x00300000 size=4096 rc=-2 pages=1
+
+$ pmap map 0x03002000 0x1FE00000 0x1000 rw       # 真设备页：串口
+pmap: map 0x03002000 <- 0x1FE00000 size=4096 rc=0 pages=2
+
+$ pmap rb 0x030021E5      -> pmap: [0x030021E5] = 0x60     # UART LSR，经新 VA
+$ pmap rb 0x1FE001E5      -> pmap: [0x1FE001E5] = 0x60     # 直连，同值
+$ pmap wrb 0x030021E0 0x5A -> 0x5A 写进 UART THR，串口上真的打出 'Z'
+
+$ pmap check 0x03002000 0x1000 ro  -> rc=0      # RW 覆盖 RO
+$ pmap check 0x03002000 0x1000 ram -> rc=-1     # 属性不符
+$ pmap check 0x03003000 0x1000 rw  -> rc=-1     # 未映射
+
+$ pmap map 0x03004000 0x00300000 0x2000 ram -> rc=0 pages=3   # 两页一次登记
+$ pmap test（第二次）-> 仍 PASS（幂等），pages 累计递增
+```
+
+判读要点：
+
+1. **`-5` 是被实测出来的真缺陷**——第一版没有「同一 VA 换 PA」检查，
+   `pmap map 0x03002000 0x00300000 ...` 返回 rc=0 并**真的改掉翻译**，
+   随后 `wrb` 打到的是内核 RAM 而不是 UART。加上 `pa[2]` 比对后才有 -5。
+2. **UART 的两条读路径同值**（`0x60`）说明动态条目真的在起翻译作用，
+   不是"碰巧映射到同一块内存"。
+3. **`wrb` 打出 'Z'** 说明写方向也通（不是只读副本）。
+
+回归（同一次改动）：
+
+```text
+$ python tools/qemu_shell_drive.py --port <p> --modld-check
+SHELL-DRIVE OK: 7 条命令全部符合预期
+
+$ python tools/qemu_shell_drive.py --port <p> --stack-guard-check
+SHELL-DRIVE OK: 1 条（0 173 4 STACKOVF）
+
+$ python tools/paging_gate.py
+PAGING-GATE OK: 默认档=0 / LA64 打开编得过(2 TU) / RV32 负向被拒 /
+两后端互斥被拒 / 动态映射接线 E-H 四条 pin 成立且自检有效
+```
+
+#### 5.16.6 门禁：E~H 四条 pin 与自检
+
+`tools/paging_gate.py` 新增四条**源码 pin**（每条都把源串改坏一次，验证 pin 真的会报错，
+不是空转）：
+
+| pin | 断言 |
+|---|---|
+| E | `arkrtos_paging.c` 定义 `arkrtos_paging_map_span(`，且函数体内调 `arkrtos_port_paging_alias(` |
+| F | port 有 `static void la_tlb_write(`；alias 函数体含 `la_tlb_write(`、不含 `(void)va;`（占位实现残留） |
+| G | `#else` 回退：`arkrtos_hal.h` 的 alias 恒 -1、`arkrtos_mpu.h` 的 `map_span` 恒 -1 |
+| H | shell 注册了 `pmap`，且 `#if (ARKRTOS_USE_PAGING == 1)` 出现在注册点之前，且 `need` 里含 `(ARKRTOS_USE_PAGING ? 1 : 0)` |
+
+pin F 的自检第一版是**空转**的：变异串 `la_tlb_write(pair, 12u` 在 alias 函数体里出现两次，
+`replace(..., 1)` 只改掉幂等分支那一处，pin 仍通过。改成替换全部出现才有效。
+
+#### 5.16.7 明确没做的部分
+
+- **撤销 / 回收映射**：`arkrtos_port_paging_flush()` 仍是空操作。撤销要么按 VA 发
+  `invtlb`（op 语义有多种读法，写错会把内核条目一起打掉），要么按 MTLB 索引写无效条目
+  （路径已知但设计未定）。登记为 **U-15**——符合"宁可报错，也不给看似权威的错答案"。
+- **App 可见的动态映射**：属 U-1（每进程页表），接口一律拒绝。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

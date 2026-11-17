@@ -21,9 +21,21 @@
      且错误信息必须点名 `ARKRTOS_USE_PAGING` 与 `HAS_PAGING_HW`；
   D. 互斥负向：把 LA64 板级改成 `USE_MPU=1` 与 `USE_PAGING=1` 同时成立，
      必须**编不过**，且错误信息必须点名「互斥」。
+  E. 动态映射接线（源码 pin）：`arkrtos_paging.c` 必须真的定义
+     `arkrtos_paging_map_span()` 并调用 `arkrtos_port_paging_alias()`。
+  F. port 侧不再占位：`arkrtos_port_paging_alias()` 的函数体必须走
+     `la_tlb_write()`（tlbwr 确定性写条目），且不能残留在 `(void)va;`。
+  G. 关档回退还在：`arkrtos_hal.h` / `arkrtos_mpu.h` 里的 `(-1)` 宏不能被
+     改成 0 —— 否则默认档会把「没有分页」读成「登记成功」。
+  H. shell 入口受开关约束：`pmap` 命令必须注册在 `ARKRTOS_USE_PAGING`
+     条件里，且命令表容量预算里含这一条。
+
+E–H 每条都自带**防假绿自检**：把源串故意改坏一次，对应 pin 必须报错；
+报不出错就说明这条 pin 是空转的。
 
 不覆盖：分页后端在板上给出的实际隔离效果（哪条地址被拦、PLV 是否真降）、
-跨度审计计数是否正确。那些要跑 QEMU 或上板，见 docs/内存保护与App越权验证.md。
+跨度审计计数是否正确。那些要跑 QEMU 或上板，见
+docs/QEMU模拟器移植与验证.md 的 §5.16 与 docs/内存保护与App越权验证.md。
 
 用法
 ----
@@ -191,6 +203,107 @@ def main():
         elif "ARKRTOS_USE_MPU=1" not in out:
             failures.append("D 互斥负向：编不过但不是互斥那条 #error：\n%s" % out[-400:])
 
+    # --- E..H 源码 pin（每条都做一次「改坏必须报错」的自检） ---------------
+    def _src(rel):
+        with open(os.path.join(ROOT, rel), "rb") as f:
+            return f.read().decode("utf-8", "replace")
+
+    def _body(text, sig):
+        """从签名的第一个 '{' 起按大括号配平截出函数体；找不到返回 ''。"""
+        i = text.find(sig)
+        if i < 0:
+            return ""
+        j = text.find("{", i)
+        if j < 0:
+            return ""
+        depth = 0
+        for k in range(j, len(text)):
+            if text[k] == "{":
+                depth += 1
+            elif text[k] == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[j:k + 1]
+        return ""
+
+    def pin_e(pg):
+        bad = []
+        if "int32 arkrtos_paging_map_span(" not in pg:
+            bad.append("E: arkrtos_paging.c 没有定义 map_span")
+        if "arkrtos_port_paging_alias(" not in _body(pg, "int32 arkrtos_paging_map_span("):
+            bad.append("E: map_span 的函数体没有调用 port 的 alias")
+        return bad
+
+    def pin_f(port):
+        bad = []
+        if "static void la_tlb_write(" not in port:
+            bad.append("F: port 里没有 la_tlb_write（确定性 tlbwr 写条目）")
+        body = _body(port, "int32 arkrtos_port_paging_alias(")
+        if not body:
+            bad.append("F: 找不到 arkrtos_port_paging_alias 的定义")
+        else:
+            if "la_tlb_write(" not in body:
+                bad.append("F: alias 函数体没有走 la_tlb_write")
+            if "(void)va;" in body:
+                bad.append("F: alias 仍是恒 -1 的占位实现")
+        return bad
+
+    def pin_g(hal, mpu):
+        bad = []
+        if "#define arkrtos_port_paging_alias(va, pa, mem)     (-1)" not in hal:
+            bad.append("G: arkrtos_hal.h 的关档回退不再返回 -1")
+        if "#define arkrtos_paging_map_span(va, pa, size, mem)           (-1)" not in mpu:
+            bad.append("G: arkrtos_mpu.h 的关档回退不再返回 -1")
+        return bad
+
+    def pin_h(shell):
+        bad = []
+        guard = "#if (ARKRTOS_USE_PAGING == 1)"
+        reg = 'ARK_SHELL_CMD("pmap", cmd_pmap'
+        if reg not in shell:
+            bad.append("H: shell 没有注册 pmap 命令")
+        else:
+            if shell.find(guard) > shell.find(reg) or shell.find(guard) < 0:
+                bad.append("H: pmap 注册不在 ARKRTOS_USE_PAGING 条件里")
+        if "(ARKRTOS_USE_PAGING ? 1 : 0)" not in shell:
+            bad.append("H: 命令表容量预算没有算上 pmap")
+        return bad
+
+    for rel in ("kernelsrc/src/arkrtos_paging.c",
+                "kernelsrc/port/loongarch/la64/arkrtos_port.c",
+                "kernelsrc/include/arkrtos_hal.h",
+                "kernelsrc/include/arkrtos_mpu.h",
+                "kernelsrc/shell/arkrtos_shell.c"):
+        if not os.path.isfile(os.path.join(ROOT, rel)):
+            failures.append("E-H: 缺文件 %s" % rel)
+
+    if not failures:
+        src_pg = _src("kernelsrc/src/arkrtos_paging.c")
+        src_port = _src("kernelsrc/port/loongarch/la64/arkrtos_port.c")
+        src_hal = _src("kernelsrc/include/arkrtos_hal.h")
+        src_mpu = _src("kernelsrc/include/arkrtos_mpu.h")
+        src_sh = _src("kernelsrc/shell/arkrtos_shell.c")
+
+        for msg in (pin_e(src_pg) + pin_f(src_port) +
+                    pin_g(src_hal, src_mpu) + pin_h(src_sh)):
+            failures.append("源码 pin 不成立 " + msg)
+
+        # 自检：把每条 pin 依赖的那一句改坏，对应 pin 必须报错
+        selfchecks = [
+            ("E", pin_e(src_pg.replace("arkrtos_port_paging_alias(",
+                                       "arkrtos_port_paging_alias_X(", 1))),
+            ("F", pin_f(src_port.replace("la_tlb_write(pair, 12u",
+                                         "la_tlb_write_X(pair, 12u"))),
+            ("G", pin_g(src_hal.replace(
+                "#define arkrtos_port_paging_alias(va, pa, mem)     (-1)",
+                "#define arkrtos_port_paging_alias(va, pa, mem)     (0)", 1), src_mpu)),
+            ("H", pin_h(src_sh.replace('ARK_SHELL_CMD("pmap", cmd_pmap',
+                                       'ARK_SHELL_CMD("pmapX", cmd_pmap', 1))),
+        ]
+        for tag, got in selfchecks:
+            if not got:
+                failures.append("自检 %s：把源改坏后这条 pin 仍然通过（pin 是空转的）" % tag)
+
     shutil.rmtree(tmp, ignore_errors=True)
 
     if failures:
@@ -198,7 +311,8 @@ def main():
             print("FAIL: " + f)
         return 1
 
-    print("PAGING-GATE OK: 默认档=0 / LA64 打开编得过(2 TU) / RV32 负向被拒 / 两后端互斥被拒")
+    print("PAGING-GATE OK: 默认档=0 / LA64 打开编得过(2 TU) / RV32 负向被拒 / "
+          "两后端互斥被拒 / 动态映射接线 E-H 四条 pin 成立且自检有效")
     return 0
 
 

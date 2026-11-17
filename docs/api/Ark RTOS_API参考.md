@@ -30,6 +30,7 @@
 - [kernelsrc/include/arkrtos_mempool.h](#kernelsrcincludearkrtos_mempoolh)（9 项）
 - [kernelsrc/include/arkrtos_mini.h](#kernelsrcincludearkrtos_minih)（20 项）
 - [kernelsrc/include/arkrtos_modld.h](#kernelsrcincludearkrtos_modldh)（8 项）
+- [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（2 项）
 - [kernelsrc/include/arkrtos_net.h](#kernelsrcincludearkrtos_neth)（6 项）
 - [kernelsrc/include/arkrtos_ptable.h](#kernelsrcincludearkrtos_ptableh)（23 项）
 - [kernelsrc/include/arkrtos_rt.h](#kernelsrcincludearkrtos_rth)（13 项）
@@ -52,7 +53,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（11 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（23 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（27 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（16 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -84,7 +85,7 @@
 - [kernelsrc/src/arkrtos_mini.c](#kernelsrcsrcarkrtos_minic)（1 项）
 - [kernelsrc/src/arkrtos_modld.c](#kernelsrcsrcarkrtos_modldc)（5 项）
 - [kernelsrc/src/arkrtos_mpu.c](#kernelsrcsrcarkrtos_mpuc)（1 项）
-- [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（2 项）
+- [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（4 项）
 - [kernelsrc/src/arkrtos_smp.c](#kernelsrcsrcarkrtos_smpc)（1 项）
 - [kernelsrc/src/arkrtos_task.c](#kernelsrcsrcarkrtos_taskc)（5 项）
 - [kernelsrc/src/arkrtos_tickless.c](#kernelsrcsrcarkrtos_ticklessc)（1 项）
@@ -4679,6 +4680,44 @@ uint32 arkrtos_mod_bad_reloc(void);
 **最近一次装载失败遇到的重定位类型号**
 **返回**：LoongArch 重定位类型号；0 表示上次失败不是重定位问题
 
+## kernelsrc/include/arkrtos_mpu.h
+
+**Ark RTOS memory protection manager (kernel internal interface)**
+Kernel code calls only this layer; all MPU register access lives in
+the port layer (arkrtos_port_mpu_*). Porting to a new architecture
+therefore only needs a new port implementation.
+
+### `int32 arkrtos_paging_map_span(uint32 va, uint32 pa, uint32 size, arkrt`
+
+```c
+int32 arkrtos_paging_map_span(uint32 va, uint32 pa, uint32 size, arkrtos_mpu_mem_t mem);
+```
+
+**Register a run-time dynamic mapping (4 KB granularity)**
+- `va`：Virtual base, must be 4 KB aligned
+- `pa`：Physical base, must be 4 KB aligned
+- `size`：Bytes, must be a non-zero multiple of 4 KB and at most
+ARKRTOS_PAGING_MAP_MAX_PAGES * 4 KB
+- `mem`：One of ARKRTOS_MPU_MEM_RAM / _ROM / _PERIPH_RO / _PERIPH_RW
+**返回**：0 = every page is in the TLB and in the audit span list;
+<0 = refused, with the port's own reason passed through
+(-1 parameter/attribute, -2 overlaps a static span, -3 table full)
+This is the driver-side "register this MMIO region" entry. It is
+deliberately restricted to kernel-visible mappings: App pages need
+their own ASID and per-process tables, which is not built yet, and
+pretending otherwise here would be an authoritative-looking wrong
+answer. A failed call does not roll back the pages that already
+went in - there is no unmap path yet (debt U-15), and the count
+from arkrtos_paging_map_pages() is how a caller sees how far it got.
+
+### `uint32 arkrtos_paging_map_pages(void);`
+
+```c
+uint32 arkrtos_paging_map_pages(void);
+```
+
+**How many pages this layer has registered (cumulative readout) */**
+
 ## kernelsrc/include/arkrtos_net.h
 
 **内核侧网络服务（SVC 0x1E）的入口。**
@@ -7424,6 +7463,27 @@ stlb_ps(12) 去比 VPPN，所以大页条目一旦被塞进 STLB 就永远匹配
 不上（症状是「地址明明有映射却一直报重填」）。tlbfill 替你
 选了正确的表，这是用它而不是手工写索引的唯一理由。
 
+### `static void la_tlb_write(uint32 vaddr, uint32 ps, uint32 index,`
+
+```c
+static void la_tlb_write(uint32 vaddr, uint32 ps, uint32 index,
+```
+
+**确定性写一条 TLB 条目（不经过 tlbfill 的随机选路）**
+- `vaddr`：虚拟地址基址
+- `ps`：页大小指数
+- `index`：绝对条目号（STLB 用 way*256+组，MTLB 用 2048 起）
+`tlbfill` 在 PS == STLBPS 时会替调用方随机挑一路，好处是不用
+知道 STLB 的索引布局，坏处是运行期反复调用会**随机顶掉同组里
+已有的条目**（内核 UART 与动态页恰好同组时就踩到过：登记完一条
+动态映射，紧接着控制台第一次打印就 KERNEL refill）。
+运行期登记不能用那种「碰运气」的写法，所以这里直接 `tlbwr`，
+索引由调用方算好。
+4 KB 页刻意写进 **MTLB**（2048 起的绝对条目）而不是 STLB：
+MTLB 是确定索引、查找时按条目自己的 PS 比 VPPN，不会和内核那几条
+静态 4 KB 条目抢同一组的 8 路，也不需要知道 STLB 的 way 布局。
+代价是 MTLB 只有 64 条，所以动态表的上限由它决定（见 LA_PG_DYN_PAIRS）。
+
 ### `static void la_mmu_init(void)`
 
 ```c
@@ -7446,6 +7506,41 @@ static void la_frame_apply_priv(la_frame_word *frame)
 只改 PRMD.PPLV（低 2 位），PIE/PWE 原样保留：ertn 按
 PRMD.PPLV 写 CRMD.PLV、按 PRMD.PIE 写 CRMD.IE，所以「回到
 PLV3 且开中断」= PPLV=3 + PIE=1 = 0x7。
+
+### `static uint32 la_pg_static_hit(uint32 base, uint32 size)`
+
+```c
+static uint32 la_pg_static_hit(uint32 base, uint32 size)
+```
+
+这段 VA 是否落在静态跨度里（重叠即算） */
+
+### `static unsigned long la_pg_dyn_lo(uint32 pa, arkrtos_mpu_mem_t mem)`
+
+```c
+static unsigned long la_pg_dyn_lo(uint32 pa, arkrtos_mpu_mem_t mem)
+```
+
+mem -> TLBELO；0 表示这条属性不提供动态映射 */
+
+### `static uint32 la_pg_dyn_mask(arkrtos_mpu_mem_t mem)`
+
+```c
+static uint32 la_pg_dyn_mask(arkrtos_mpu_mem_t mem)
+```
+
+属性掩码：RW 的页同时满足 RO 的审计，反过来不行 */
+
+### `int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_`
+
+```c
+int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_t mem)
+```
+
+**追加一条动态映射（一页 4 KB）**
+**返回**：0 = 已进 TLB 且可审计（同一页同一属性重复登记也是 0）；
+-1 = 参数/属性不支持；-2 = 与静态映射重叠；-3 = 动态表满；
+-5 = 同一 VA 已登记成别的物理页/属性
 
 ### `int32 arkrtos_port_paging_init(void)`
 
@@ -7475,18 +7570,6 @@ int32 arkrtos_port_paging_check(uint32 base, uint32 size, arkrtos_mpu_mem_t mem)
 判定按「整段必须落在单条跨度之内」：跨两条条目的跨度不在这里
 接受，因为调用方（TCB 窗口）本来就是单块连续内存，跨条目只可能
 是记录坏了 —— 那种情况下报 -1 才是诚实的。
-
-### `int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_`
-
-```c
-int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_t mem)
-```
-
-**追加一条动态映射**
-**返回**：恒 -1（未实现）
-本 port 只做静态映射。假装能 alias 会让调用方以为拿到了
-「按需把任意物理页挂到任意 VA」的能力，而实际没有回收路径，
-那正是「看似权威的错答案」。
 
 ### `void arkrtos_port_paging_flush(uint32 base, uint32 size)`
 
@@ -8932,6 +9015,38 @@ static uint8 arkrtos_paging_code_in_ram(const arkrtos_task_t *p_task) {
 Is this task's code window in the RAM pool (a MiniApp block) rather than in
 the flash image pool? Same test as the window backend uses, and for the same
 reason: it is the recorded window that says so, not a flag that could lie. */
+
+### `int32 arkrtos_paging_map_span(uint32 va, uint32 pa, uint32 size, arkrt`
+
+```c
+int32 arkrtos_paging_map_span(uint32 va, uint32 pa, uint32 size, arkrtos_mpu_mem_t mem) {
+```
+
+**Register a run-time dynamic mapping, page by page**
+- `va`：virtual base (4 KB aligned)
+- `pa`：physical base (4 KB aligned)
+- `size`：bytes (non-zero multiple of 4 KB)
+- `mem`：RAM / ROM / PERIPH_RO / PERIPH_RW
+**返回**：0 = all pages registered and auditable; -1 = refused
+The port owns the TLB, so it also owns the decision of what may be
+added at run time (static-overlap refusal, STLB way budget). This
+layer only does the arithmetic: alignment, the page count cap, and
+the page-by-page loop so a caller never has to remember that one
+TLB entry covers two pages.
+A failure part-way leaves the earlier pages in place. That is not a
+silent partial success: the return code is -1 and
+arkrtos_paging_map_pages() shows how many pages did land. The honest
+reason is that there is no unmap path on this port yet (debt U-15),
+and pretending to roll back would need one.
+
+### `uint32 arkrtos_paging_map_pages(void) {`
+
+```c
+uint32 arkrtos_paging_map_pages(void) {
+```
+
+**How many pages have been registered through map_span()**
+**返回**：cumulative page count (0 on any build without the paging backend)
 
 ### `int32 arkrtos_paging_stats(uint32 *p_checked, uint32 *p_bad, uint32 *p`
 
