@@ -147,7 +147,18 @@ $(OBJS): $(SIGNKEY)
 # 手段，不是装载器的输入。
 HELLO_SRC := example/qemu_loongarch64/elf/hello.c
 HELLO_ELF := $(BUILD)/hello.elf
+
+# 签名门（ARKRTOS_USE_EXEC_SIGN）：签名必须在**生成 blob 之前**做完。
+# 先转数组后签名，镜像里装的就是未签名的副本，板端会拒绝自己刚写进去的
+# 程序——这种假红最容易让人以为是装载器坏了。所以链路固定成
+#   hello.elf（链接产物，未签名） -> hello.signed.elf（+32 字节 tag） -> blob
+HELLO_SIGNED := $(BUILD)/hello.signed.elf
 HELLO_H   := $(BUILD)/hello_blob.h
+
+# 反例：同一份已签名文件把 tag 末字节翻掉。演示任务拿它去 exec，必须被拒
+# （ERR_SIGN）；否则「签名门开着」只是文档里的一句话。
+HELLO_TAMPERED := $(BUILD)/hello_tampered.elf
+HELLO_BAD_H    := $(BUILD)/hello_bad_blob.h
 
 $(HELLO_ELF): $(HELLO_SRC)
 	@mkdir -p $(BUILD)
@@ -156,11 +167,21 @@ $(HELLO_ELF): $(HELLO_SRC)
 	      -Wl,-Ttext=0x02000000 -Wl,-e,_start -Wl,--strip-all \
 	      -Wl,-z,max-page-size=4096 -o $@ $< ;
 
-$(HELLO_H): $(HELLO_ELF) example/qemu_loongarch64/elf_blob.py
-	python example/qemu_loongarch64/elf_blob.py --input $(HELLO_ELF) \
+$(HELLO_SIGNED): $(HELLO_ELF) tools/sign_payload.py
+	python tools/sign_payload.py sign $(HELLO_ELF) --out $@ ;
+
+$(HELLO_TAMPERED): $(HELLO_SIGNED) tools/sign_payload.py
+	python tools/sign_payload.py tamper $(HELLO_SIGNED) --out $@ ;
+
+$(HELLO_H): $(HELLO_SIGNED) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(HELLO_SIGNED) \
 	       --output $@ --name ark_example_hello ;
 
-$(BUILD)/example/qemu_loongarch64/elf_demo.o: $(HELLO_H)
+$(HELLO_BAD_H): $(HELLO_TAMPERED) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(HELLO_TAMPERED) \
+	       --output $@ --name ark_example_hello_tampered ;
+
+$(BUILD)/example/qemu_loongarch64/elf_demo.o: $(HELLO_H) $(HELLO_BAD_H)
 
 # VxWorks 式示例模块（modhello.o）：这里**只编译不链接**——它就该是一个
 # ET_REL 目标文件，地址留给板上装载器去填。所以规则里没有 -Ttext，也没有
@@ -168,18 +189,32 @@ $(BUILD)/example/qemu_loongarch64/elf_demo.o: $(HELLO_H)
 # 定址"这件事了。
 MOD_SRC := example/qemu_loongarch64/mod/modhello.c
 MOD_OBJ := $(BUILD)/modhello.o
+# 与 hello 同一条链路：签名之后再生成 blob（见上面 hello 的注释）。
+MOD_SIGNED := $(BUILD)/modhello.signed.o
 MOD_H   := $(BUILD)/modhello_blob.h
+MOD_TAMPERED := $(BUILD)/modhello_tampered.o
+MOD_BAD_H    := $(BUILD)/modhello_bad_blob.h
 
 $(MOD_OBJ): $(MOD_SRC)
 	@mkdir -p $(BUILD)
 	$(CC) $(ARCH_FLAGS) -O2 -ffreestanding -fno-builtin -fno-common -Wall \
 	      -c $< -o $@ ;
 
-$(MOD_H): $(MOD_OBJ) example/qemu_loongarch64/elf_blob.py
-	python example/qemu_loongarch64/elf_blob.py --input $(MOD_OBJ) \
+$(MOD_SIGNED): $(MOD_OBJ) tools/sign_payload.py
+	python tools/sign_payload.py sign $(MOD_OBJ) --out $@ ;
+
+$(MOD_TAMPERED): $(MOD_SIGNED) tools/sign_payload.py
+	python tools/sign_payload.py tamper $(MOD_SIGNED) --out $@ ;
+
+$(MOD_H): $(MOD_SIGNED) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(MOD_SIGNED) \
 	       --output $@ --name ark_example_modhello ;
 
-$(BUILD)/example/qemu_loongarch64/mod_demo.o: $(MOD_H)
+$(MOD_BAD_H): $(MOD_TAMPERED) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(MOD_TAMPERED) \
+	       --output $@ --name ark_example_modhello_tampered ;
+
+$(BUILD)/example/qemu_loongarch64/mod_demo.o: $(MOD_H) $(MOD_BAD_H)
 
 .PHONY: all clean run size disasm
 

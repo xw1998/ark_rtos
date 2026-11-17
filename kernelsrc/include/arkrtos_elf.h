@@ -37,6 +37,7 @@
 #define ARKRTOS_ELF_ERR_LAYOUT      (-5)    /* 段或入口落在窗口外、覆盖栈、filesz>memsz */
 #define ARKRTOS_ELF_ERR_NOMEM       (-6)    /* 任务表满 / 栈参数不合法 */
 #define ARKRTOS_ELF_ERR_BUSY        (-7)    /* M1：窗口是单实例，上一个还在跑 */
+#define ARKRTOS_ELF_ERR_SIGN        (-8)    /* 缺尾部签名 tag / tag 不匹配（EXEC_SIGN 档） */
 
 /** @brief 一次装载的可读结果（全部是实测值，不是推算值） */
 typedef struct {

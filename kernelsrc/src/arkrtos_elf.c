@@ -33,6 +33,9 @@
 #include "arkrtos_task.h"
 #include "arkrtos_cfg.h"
 #include "arkrtos_vfs.h"
+#if (ARKRTOS_USE_EXEC_SIGN == 1)
+#include "arkrtos_sign.h"
+#endif
 
 /* ---------------------------------------------------------------- 编译期 */
 
@@ -182,6 +185,62 @@ static int32 elf_read_exact(const char *path, uint8 *buf, uint32 len, uint32 off
     return ARKRTOS_ELF_OK;
 }
 
+#if (ARKRTOS_USE_EXEC_SIGN == 1)
+/* 尾部 32 字节签名 tag：tag 覆盖 [0, size-32)。
+ * ELF 装载只按 p_offset 读段，尾部这 32 字节永远不参与装载；但它们必须在
+ * 这里被"读过并按 MAC 核过"——否则一个改过的程序照样能起跑。 */
+static int32 elf_verify_signature(const char *path)
+{
+    uint8  tag[ARKRTOS_SIGN_LEN];
+    uint8  buf[512];
+    uint32 size = 0u;
+    uint32 body;
+    uint32 off = 0u;
+    int32  rc;
+
+    rc = arkrtos_vfs_size(path, &size);
+    if(rc < 0)
+    {
+        return ARKRTOS_ELF_ERR_FS;
+    }
+    if(size <= (uint32)ARKRTOS_SIGN_LEN)
+    {
+        /* 比 tag 还短：不可能既装得下 tag 又装得下 ELF。只能说"没有签名"。 */
+        return ARKRTOS_ELF_ERR_SIGN;
+    }
+    body = size - (uint32)ARKRTOS_SIGN_LEN;
+
+    rc = elf_read_exact(path, tag, (uint32)ARKRTOS_SIGN_LEN, body);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return rc;
+    }
+
+    arkrtos_sign_payload_begin();
+    while(off < body)
+    {
+        uint32 n = body - off;
+
+        if(n > (uint32)sizeof(buf))
+        {
+            n = (uint32)sizeof(buf);
+        }
+        rc = elf_read_exact(path, buf, n, off);
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return rc;
+        }
+        arkrtos_sign_payload_update(buf, n);
+        off += n;
+    }
+    if(arkrtos_sign_payload_end(tag) != 0)
+    {
+        return ARKRTOS_ELF_ERR_SIGN;
+    }
+    return ARKRTOS_ELF_OK;
+}
+#endif /* ARKRTOS_USE_EXEC_SIGN */
+
 /**
 * @brief 校验 ELF 头，把 entry / phoff / phnum / phentsize 取出来
 * @note  e_machine 单独返回 ERR_ARCH，是为了让「这是 x86 的 ELF」和
@@ -305,6 +364,17 @@ int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[])
     {
         return ARKRTOS_ELF_ERR_PARAM;
     }
+
+#if (ARKRTOS_USE_EXEC_SIGN == 1)
+    /* 签名先于一切：格式都还没看就先确认这份文件是我们签过的。
+     * 顺序有讲究——放在参数检查之后、读 ELF 头之前，避免"格式错误"的
+     * 报错把"文件没签名"这件事盖掉。 */
+    rc = elf_verify_signature(path);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return rc;
+    }
+#endif
     if(argc < 0)
     {
         return ARKRTOS_ELF_ERR_PARAM;
@@ -536,6 +606,7 @@ const char *arkrtos_elf_error_name(int32 rc)
     case ARKRTOS_ELF_ERR_LAYOUT:    return "segment outside exec window";
     case ARKRTOS_ELF_ERR_NOMEM:     return "no task slot for the program";
     case ARKRTOS_ELF_ERR_BUSY:      return "exec window already in use";
+    case ARKRTOS_ELF_ERR_SIGN:      return "missing or wrong signature tag (see tools/sign_payload.py)";
     default:                        return "unknown";
     }
 }

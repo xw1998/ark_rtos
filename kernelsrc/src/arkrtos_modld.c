@@ -38,6 +38,9 @@
 #include "arkrtos_task.h"
 #include "arkrtos_vfs.h"
 #include "arkrtos_log.h"
+#if (ARKRTOS_USE_EXEC_SIGN == 1)
+#include "arkrtos_sign.h"
+#endif
 
 /* ---------------------------------------------------------------- 编译期 */
 
@@ -1063,6 +1066,23 @@ int32 arkrtos_mod_load(const char *path, int32 argc, char *argv[])
     {
         return ARKRTOS_MOD_ERR_FS;
     }
+
+#if (ARKRTOS_USE_EXEC_SIGN == 1)
+    /* 尾部 32 字节 tag 覆盖 [0, len-32)。校验完把 len 缩回正文长度，后面的
+     * 节表/重定位一律按"文件只到 tag 之前"来解析——不缩的话，一个把
+     * shoff+shnum*64 顶到文件尾的坏对象会拿 tag 当节头表读。 */
+    if(len <= (uint32)ARKRTOS_SIGN_LEN)
+    {
+        return ARKRTOS_MOD_ERR_SIGN;
+    }
+    len -= (uint32)ARKRTOS_SIGN_LEN;
+    if(arkrtos_sign_payload_check(s_mod_file, len,
+                                  s_mod_file + len) != 0)
+    {
+        return ARKRTOS_MOD_ERR_SIGN;
+    }
+#endif
+
     if(len < MOD_EHDR_SIZE)
     {
         return ARKRTOS_MOD_ERR_FORMAT;
@@ -1328,6 +1348,7 @@ const char *arkrtos_mod_error_name(int32 rc)
     case ARKRTOS_MOD_ERR_NOENTRY:   return "no module_main entry in this object";
     case ARKRTOS_MOD_ERR_NOMEM:     return "no free module slot (or no task slot)";
     case ARKRTOS_MOD_ERR_BUSY:      return "module task still running";
+    case ARKRTOS_MOD_ERR_SIGN:      return "missing or wrong signature tag (see tools/sign_payload.py)";
     default:                        return "unknown";
     }
 }

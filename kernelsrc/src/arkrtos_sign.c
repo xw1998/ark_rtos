@@ -272,4 +272,79 @@ int32 arkrtos_sign_verify(const uint8 *image, const arkrtos_app_header_t *p_hdr)
     return (diff == 0u) ? 0 : -1;
 }
 
+/* ------------------------------------------------------------ payload MAC */
+
+#if (ARKRTOS_USE_EXEC_SIGN == 1)
+
+static arkrtos_hmac_t arkrtos_sign_payload_ctx;
+static uint8          arkrtos_sign_payload_open;
+
+void arkrtos_sign_payload(const uint8 *data, uint32 len,
+                        uint8 out[ARKRTOS_SIGN_LEN])
+{
+    arkrtos_hmac_t h;
+
+    arkrtos_hmac_init(&h, arkrtos_sign_key, ARKRTOS_SIGN_KEY_LEN);
+    if(len != 0u)
+    {
+        arkrtos_hmac_update(&h, data, len);
+    }
+    arkrtos_hmac_final(&h, out);
+}
+
+int32 arkrtos_sign_payload_check(const uint8 *data, uint32 len,
+                               const uint8 tag[ARKRTOS_SIGN_LEN])
+{
+    uint8  mac[ARKRTOS_SIGN_LEN];
+    uint8  diff = 0u;
+    uint32 i;
+
+    arkrtos_sign_payload(data, len, mac);
+    for(i = 0u; i < ARKRTOS_SIGN_LEN; i++)
+    {
+        diff |= (uint8)(mac[i] ^ tag[i]);
+    }
+    return (diff == 0u) ? 0 : -1;
+}
+
+void arkrtos_sign_payload_begin(void)
+{
+    arkrtos_hmac_init(&arkrtos_sign_payload_ctx, arkrtos_sign_key,
+                      ARKRTOS_SIGN_KEY_LEN);
+    arkrtos_sign_payload_open = 1u;
+}
+
+void arkrtos_sign_payload_update(const uint8 *data, uint32 len)
+{
+    /* 没 begin 就 update 属于调用方的错，但这里静默吞掉比「算出一个
+     * 只覆盖后半段、却照样能对上的 MAC」安全：后者会是一条假绿。 */
+    if((arkrtos_sign_payload_open == 0u) || (len == 0u))
+    {
+        return;
+    }
+    arkrtos_hmac_update(&arkrtos_sign_payload_ctx, data, len);
+}
+
+int32 arkrtos_sign_payload_end(const uint8 tag[ARKRTOS_SIGN_LEN])
+{
+    uint8  mac[ARKRTOS_SIGN_LEN];
+    uint8  diff = 0u;
+    uint32 i;
+
+    if(arkrtos_sign_payload_open == 0u)
+    {
+        return -1;
+    }
+    arkrtos_sign_payload_open = 0u;
+
+    arkrtos_hmac_final(&arkrtos_sign_payload_ctx, mac);
+    for(i = 0u; i < ARKRTOS_SIGN_LEN; i++)
+    {
+        diff |= (uint8)(mac[i] ^ tag[i]);
+    }
+    return (diff == 0u) ? 0 : -1;
+}
+
+#endif /* ARKRTOS_USE_EXEC_SIGN */
+
 #endif /* ARKRTOS_USE_IMAGE_SIGN */

@@ -223,6 +223,43 @@ TASK:4599 task 7 exits (self kill)
 
 ---
 
+### 5.3 签名门（`ARKRTOS_USE_EXEC_SIGN`，2026-11-17）
+
+`exec` 走的是"文件即代码"：谁把文件写进 `/mnt/ram`，谁就能在 PLV3 起一个任务。
+`ARKRTOS_USE_IMAGE_SIGN` 只管 App 安装/升级路径，管不到这里。补上的开关是
+`ARKRTOS_USE_EXEC_SIGN`（`depends on IMAGE_SIGN`，默认 **n**）：
+
+- 格式：**文件 + 末尾 32 字节 HMAC-SHA256 tag**，tag 覆盖 `[0, len-32)`。
+  ELF 按 `p_offset` 读段，尾部 32 字节不在任何段里，天然不参与装载，
+  所以既有格式一个字都不用改。
+- 校验点在**读 ELF 头之前**（`arkrtos_elf_exec` 参数检查之后）：格式错误
+  不能盖住"这份文件没签名"这件事。为不把整份镜像读进 RAM，走流式
+  `arkrtos_sign_payload_begin/update/end`，512 B 一块。
+- 取文件长度用新增门面 `arkrtos_vfs_size()`：`lseek(END)` 的返回值在
+  ramfs 与 littlefs 桥上约定不同（回新偏移 / 回 0），拿它当长度会静默偏掉。
+- 失败码 `ARKRTOS_ELF_ERR_SIGN (-8)`，文案点名 `tools/sign_payload.py`。
+
+QEMU LA64 实测（2026-11-17，同一次开机）：
+
+```text
+[ELF] write /mnt/ram/hello rc=0 size=6376           <- 6344 B 正文 + 32 B tag
+[ELF] exec rc=0                                     <- 签名版照常起跑
+[ELF] tamper check PASS (bad tag refused, rc=-8)    <- tag 末字节翻掉后被拒
+```
+
+反例文件不是"不存在的文件"或"格式坏的文件"：它与正例同一份内容，只有 tag
+的最后一个字节被翻过，由 `tools/sign_payload.py tamper` 生成、与正例一起
+编进镜像（`elf_demo.c` 每轮开机都拿它去 `exec` 一次）。这样"签名门开着"
+才是被驱动过的，而不是文档里的一句话。
+
+宿主的另一头是 `tools/payload_sign_gate.py`：用**真** `arkrtos_sign.c` 在宿主
+上算 MAC，与 `tools/sign_payload.py`（hashlib）逐字节比对，一次性与流式两条
+入口都要一致；并核「sign 幂等 / tamper 必拒 / 开档接线、关档零符号 /
+`EXEC_SIGN=1 + IMAGE_SIGN=0` 必须编译期报错」。它已进 `ci_gate`（第 39 项）。
+
+边界：这是**对称**方案（同一把预共享密钥），能读到设备密钥的人照样能签新
+程序；设备只持公钥的信任链不在本轮范围内。
+
 ## 6 与 Linux 的差距（M2 欠账表）
 
 | # | 差距 | 现状（M1） | 影响 | 归属 |
@@ -281,7 +318,7 @@ PY
 
 ```bash
 python tools/elf_gate.py      # 默认档零变化 / LA64 正向编得过 / 机器码/类型/窗口缺失都要被拒
-python tools/ci_gate.py       # 以末行为准（目前 38 项），含 paging / elf / modld 三组
+python tools/ci_gate.py       # 以末行为准（目前 39 项），含 paging / elf / modld / payload-sign 四组
 ```
 
 ---

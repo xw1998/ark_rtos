@@ -37,6 +37,11 @@
 #define ARKRTOS_USE_IMAGE_SIGN      0
 #endif
 
+/* Same fallback for the exec/ld payload gate; features.h is authoritative. */
+#ifndef ARKRTOS_USE_EXEC_SIGN
+#define ARKRTOS_USE_EXEC_SIGN       0
+#endif
+
 /** @brief Signature length in bytes (HMAC-SHA256 output).
  *  @note Stored in signature[0..32); signature[32..64) stays zero. */
 #define ARKRTOS_SIGN_LEN            (32u)
@@ -69,6 +74,35 @@ int32 arkrtos_sign_verify(const uint8 *image, const arkrtos_app_header_t *p_hdr)
 void  arkrtos_sign_stream_begin(const uint8 *image);
 void  arkrtos_sign_stream_update(const uint8 *data, uint32 len);
 int32 arkrtos_sign_stream_end(const arkrtos_app_header_t *p_hdr);
+
+/* ---- payload tag：给「整份文件」用的尾部签名（exec / ld 那一档） ----------
+ * 与上面那套镜像签名不同，这里没有头部参与：tag 覆盖文件前 len-32 字节的
+ * 全部内容，32 字节追加在文件末尾。ELF 与 ET_REL 都按偏移/节表读，尾部多
+ * 出来的字节天然不参与装载，所以打包侧只要「签名后再交给 blob 生成」即可，
+ * 不改任何既有格式。开关 ARKRTOS_USE_EXEC_SIGN（隐含 IMAGE_SIGN）；默认关
+ * 时本段不参与编译，下面五个符号一个字节都不出现。 */
+
+#if (ARKRTOS_USE_EXEC_SIGN == 1)
+
+/** @brief 一次算出 data[0..len) 的 tag；out 收 ARKRTOS_SIGN_LEN 字节 */
+void arkrtos_sign_payload(const uint8 *data, uint32 len,
+                        uint8 out[ARKRTOS_SIGN_LEN]);
+
+/** @brief 比较 data[0..len) 的 MAC 与 tag（常量时间）
+ *  @return 0 = 一致，-1 = 不符 */
+int32 arkrtos_sign_payload_check(const uint8 *data, uint32 len,
+                               const uint8 tag[ARKRTOS_SIGN_LEN]);
+
+/** @brief 流式三件套（begin / update / end）：装载器不把整份文件读进 RAM 时用
+ *  @note 一次只能有一路在算（状态是模块静态的），装载路径本身是串行的。 */
+void  arkrtos_sign_payload_begin(void);
+
+/** @brief 喂一块数据给流式 MAC；没 begin 过就调用会被静默丢弃 */
+void  arkrtos_sign_payload_update(const uint8 *data, uint32 len);
+/** @return 0 = 一致，-1 = 不符（或没有 begin 过） */
+int32 arkrtos_sign_payload_end(const uint8 tag[ARKRTOS_SIGN_LEN]);
+
+#endif /* ARKRTOS_USE_EXEC_SIGN */
 
 #endif /* ARKRTOS_USE_IMAGE_SIGN */
 

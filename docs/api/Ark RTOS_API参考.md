@@ -36,7 +36,7 @@
 - [kernelsrc/include/arkrtos_sec.h](#kernelsrcincludearkrtos_sech)（8 项）
 - [kernelsrc/include/arkrtos_share.h](#kernelsrcincludearkrtos_shareh)（7 项）
 - [kernelsrc/include/arkrtos_shell.h](#kernelsrcincludearkrtos_shellh)（9 项）
-- [kernelsrc/include/arkrtos_sign.h](#kernelsrcincludearkrtos_signh)（5 项）
+- [kernelsrc/include/arkrtos_sign.h](#kernelsrcincludearkrtos_signh)（10 项）
 - [kernelsrc/include/arkrtos_smp.h](#kernelsrcincludearkrtos_smph)（11 项）
 - [kernelsrc/include/arkrtos_softbus.h](#kernelsrcincludearkrtos_softbush)（5 项）
 - [kernelsrc/include/arkrtos_spin.h](#kernelsrcincludearkrtos_spinh)（10 项）
@@ -47,7 +47,7 @@
 - [kernelsrc/include/arkrtos_ushell.h](#kernelsrcincludearkrtos_ushellh)（4 项）
 - [kernelsrc/include/arkrtos_utest.h](#kernelsrcincludearkrtos_utesth)（22 项）
 - [kernelsrc/include/arkrtos_version.h](#kernelsrcincludearkrtos_versionh)（2 项）
-- [kernelsrc/include/arkrtos_vfs.h](#kernelsrcincludearkrtos_vfsh)（43 项）
+- [kernelsrc/include/arkrtos_vfs.h](#kernelsrcincludearkrtos_vfsh)（44 项）
 - [kernelsrc/port/arm/cortex-m3/arkrtos_port.c](#kernelsrcportarmcortex-m3arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
@@ -5543,6 +5543,48 @@ reloc table and payload bytes exactly as they arrive over the wire, then
 compare against p_hdr->signature.  Same coverage as arkrtos_sign_image();
 one such transfer is in flight at a time, so the state is module-static. */
 
+### `void arkrtos_sign_payload(const uint8 *data, uint32 len, uint8 out[ARK`
+
+```c
+void arkrtos_sign_payload(const uint8 *data, uint32 len, uint8 out[ARKRTOS_SIGN_LEN]);
+```
+
+**一次算出 data[0..len) 的 tag；out 收 ARKRTOS_SIGN_LEN 字节 */**
+
+### `int32 arkrtos_sign_payload_check(const uint8 *data, uint32 len, const `
+
+```c
+int32 arkrtos_sign_payload_check(const uint8 *data, uint32 len, const uint8 tag[ARKRTOS_SIGN_LEN]);
+```
+
+**比较 data[0..len) 的 MAC 与 tag（常量时间）**
+**返回**：0 = 一致，-1 = 不符 */
+
+### `void  arkrtos_sign_payload_begin(void);`
+
+```c
+void  arkrtos_sign_payload_begin(void);
+```
+
+**流式三件套（begin / update / end）：装载器不把整份文件读进 RAM 时用**
+> 说明：一次只能有一路在算（状态是模块静态的），装载路径本身是串行的。 */
+
+### `void  arkrtos_sign_payload_update(const uint8 *data, uint32 len);`
+
+```c
+void  arkrtos_sign_payload_update(const uint8 *data, uint32 len);
+```
+
+**喂一块数据给流式 MAC；没 begin 过就调用会被静默丢弃 */**
+
+### `int32 arkrtos_sign_payload_end(const uint8 tag[ARKRTOS_SIGN_LEN]);`
+
+```c
+int32 arkrtos_sign_payload_end(const uint8 tag[ARKRTOS_SIGN_LEN]);
+```
+
+**返回**：0 = 一致，-1 = 不符（或没有 begin 过） */
+
 ## kernelsrc/include/arkrtos_smp.h
 
 **SMP 骨架：每核状态、次核启动入口、核间中断通路（默认关）**
@@ -6601,6 +6643,19 @@ int32 arkrtos_vfs_read_at(const char *path, uint8 *buf, uint32 len, uint32 off,
 门面只回「读到多少字节」，短读是读数而不是错误。
 > 说明：线程/中断约束与 open_read 相同：同一时刻只能有一个读者拿着这份文件缓存，
 调用方负责串行化（mini 在调度器锁内调用）。
+
+### `int32 arkrtos_vfs_size(const char *path, uint32 *out_size);`
+
+```c
+int32 arkrtos_vfs_size(const char *path, uint32 *out_size);
+```
+
+**取一个文件的字节数（等价于 stat 里的 size 字段）。**
+- `path`：路径；out_size 收字节数（失败时置 0）
+**返回**：0=成功；负值为 ark_vfs 错误码
+> 说明：为什么单独一个门面：装载器要判断「文件末尾 32 字节之外还有没有内容」，
+需要文件总长，而 open+seek(END) 的返回值各后端约定不同（ramfs 回新
+偏移、littlefs 桥回 0），拿它当长度会静默偏掉。这里只回 size，一个数。
 
 ### `int32 arkrtos_vfs_open_read(const char *path);`
 

@@ -115,7 +115,10 @@ py -3 tools/kconfig/menuconfig.py --defconfig config/arkrtos_defconfig
 `tools/ci_gate.py` 的第 36 项就是它；第 37 项是 `tools/elf_gate.py`（ELF64 可执行
 文件装载开关的同一套拨法，见 [MMU进程模型与ELF装载](MMU进程模型与ELF装载.md)）；
 第 38 项是 `tools/modld_gate.py`（VxWorks 式可下载模块，见
-[MMU平台可下载模块-VxWorks式](MMU平台可下载模块-VxWorks式.md)）。
+[MMU平台可下载模块-VxWorks式](MMU平台可下载模块-VxWorks式.md)）；第 39 项是
+`tools/payload_sign_gate.py`（`ARKRTOS_USE_EXEC_SIGN`：ELF 与可载模块的尾部
+tag 签名门，含内核 MAC 与 Python 实现的逐字节对拍、开档/关档符号探针，
+见 [MMU进程模型与ELF装载](MMU进程模型与ELF装载.md) §5.3）。
 
 ## 6. 数量限制
 

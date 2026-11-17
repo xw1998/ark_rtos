@@ -60,6 +60,7 @@
 #define ARKRTOS_MOD_ERR_NOENTRY     (-8)    /* 找不到入口符号 */
 #define ARKRTOS_MOD_ERR_NOMEM       (-9)    /* 槽位满 / 任务表满 */
 #define ARKRTOS_MOD_ERR_BUSY        (-10)   /* 该槽里的模块还在跑，不能卸 */
+#define ARKRTOS_MOD_ERR_SIGN        (-11)   /* 缺尾部签名 tag / tag 不匹配（EXEC_SIGN 档） */
 
 /** @brief 一次装载的可读结果（全部是实测值，不是推算值） */
 typedef struct {

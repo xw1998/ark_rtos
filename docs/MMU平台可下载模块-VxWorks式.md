@@ -216,6 +216,29 @@ python tools/qemu_shell_drive.py --modld-check
 同一次运行里 `[ELF] exec rc=0` / `[ELF] demo program finished` 也照常出现 ——
 **两种模型同时开、互不影响**，这是本轮的验收判据之一。
 
+### 5.1 签名门（`ARKRTOS_USE_EXEC_SIGN`）
+
+模块这条路径比 `exec` 更"重"：它跑在 **PLV0**，一个坏 `.o` 不是"沙箱里的坏程序"，
+而是内核自身。所以同一个开关也管住 `ld`：
+
+- 读文件之后、解析 ELF 头之前校验末尾 32 字节 tag，覆盖 `[0, len-32)`；
+  校验通过后**把 `len` 缩回正文长度**再往下解析——不缩的话，一个把
+  `shoff + shnum*64` 顶到文件尾的坏对象会拿 tag 当节头表读。
+- 失败码 `ARKRTOS_MOD_ERR_SIGN (-11)`，`arkrtos_mod_error_name()` 给出
+  `missing or wrong signature tag (see tools/sign_payload.py)`。
+- 失败发生在占槽之前，所以被拒的对象不占模块槽（`modules` 里不会多出一行）。
+
+实测（QEMU LA64，2026-11-17，与 §5 同一次开机）：
+
+```text
+[MOD] write /mnt/ram/modhello.o rc=0 size=6256        <- 6224 B 正文 + 32 B tag
+[MOD] ld rc=0 [base=... relocs=165 imports=8 task=8]  <- 签名版照常装载
+[MOD] tamper check PASS (bad tag refused, rc=-11)     <- tag 末字节翻掉后被拒
+```
+
+`tools/sign_payload.py tamper` 生成的反例与正例同时编进镜像，`mod_demo.c`
+每轮开机跑一次——拒绝这件事由装载路径自己驱动，不靠人手工验。
+
 ## 6. 本轮的三个真 bug（都只在真机上现形）
 
 1. **模块池地址不能信宏**。第一版用 `ARKRTOS_MOD_AREA_BASE` 算槽地址，

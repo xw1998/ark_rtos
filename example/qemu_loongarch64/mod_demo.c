@@ -26,10 +26,17 @@
 #include "arkrtos_modld.h"
 #include "arkrtos_board.h"
 #include "modhello_blob.h"
+#if (ARKRTOS_USE_EXEC_SIGN == 1)
+#include "modhello_bad_blob.h"
+#endif
 
 #if (ARKRTOS_USE_MODLOAD == 1)
 
 #define MOD_DEMO_PATH       "/mnt/ram/modhello.o"
+#if (ARKRTOS_USE_EXEC_SIGN == 1)
+/* 反例文件：与 modhello.o 同一份内容，只是末尾 tag 的最后一个字节被翻过。 */
+#define MOD_DEMO_BAD_PATH   "/mnt/ram/modhello_tampered.o"
+#endif
 
 /* 装载器是示例里最深的调用栈（读 ELF、解析节、拷段、逐条重定位、现场查符号），
  * 实测单次 arkrtos_mod_load 需要 4 KB 量级的任务栈；512 字（2 KB）会向下溢出，
@@ -166,6 +173,37 @@ static void task_mod_demo(void)
         mod_demo_puts(MOD_DEMO_PATH);
         mod_demo_puts(" a b\n");
     }
+
+#if (ARKRTOS_USE_EXEC_SIGN == 1)
+    /* 反假绿：模块这条路径同样必须被驱动过。tag 翻一个字节后 ld 必须拒，
+     * 而且拒在解析节表之前（否则一个坏 tag 的 .o 会先占槽再报别的错）。 */
+    rc = arkrtos_vfs_write_file(MOD_DEMO_BAD_PATH,
+                                ark_example_modhello_tampered,
+                                (uint32)ARK_EXAMPLE_MODHELLO_TAMPERED_LEN);
+    if (rc < 0)
+    {
+        mod_demo_puts("[MOD] tamper check FAIL (cannot write ");
+        mod_demo_puts(MOD_DEMO_BAD_PATH);
+        mod_demo_puts(")\n");
+    }
+    else
+    {
+        argv[0] = "modhello_tampered.o";
+        rc = arkrtos_mod_load(MOD_DEMO_BAD_PATH, 1, argv);
+        if (rc == ARKRTOS_MOD_ERR_SIGN)
+        {
+            mod_demo_puts("[MOD] tamper check PASS (bad tag refused, rc=");
+            mod_demo_putu((uint32)rc);
+            mod_demo_puts(")\n");
+        }
+        else
+        {
+            mod_demo_puts("[MOD] tamper check FAIL (ld accepted a bad tag, rc=");
+            mod_demo_putu((uint32)rc);
+            mod_demo_puts(")\n");
+        }
+    }
+#endif
 
     for (;;)
     {

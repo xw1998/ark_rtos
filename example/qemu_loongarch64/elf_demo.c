@@ -22,10 +22,17 @@
 #include "arkrtos_elf.h"
 #include "arkrtos_board.h"
 #include "hello_blob.h"
+#if (ARKRTOS_USE_EXEC_SIGN == 1)
+#include "hello_bad_blob.h"
+#endif
 
 #if (ARKRTOS_USE_ELF == 1)
 
 #define DEMO_PATH           "/mnt/ram/hello"
+#if (ARKRTOS_USE_EXEC_SIGN == 1)
+/* 反例文件：与 hello 同一份内容，只是末尾 tag 的最后一个字节被翻过。 */
+#define DEMO_BAD_PATH       "/mnt/ram/hello_tampered"
+#endif
 #define DEMO_STACK_WORDS    1024u
 #define DEMO_WAIT_MS        3000u
 #define DEMO_POLL_MS        20u
@@ -117,6 +124,38 @@ static void task_elf_demo(void)
     demo_puts(" ms; try: exec ");
     demo_puts(DEMO_PATH);
     demo_puts(" a b c\n");
+
+#if (ARKRTOS_USE_EXEC_SIGN == 1)
+    /* 反假绿：签名门开着这件事必须是**被驱动过的**。
+     * 这里走的是与上面完全相同的装载路径（写文件 -> exec），区别只是这份
+     * 副本的 tag 被翻了一个字节：装载器必须在读 ELF 头之前就把它拒掉。
+     * 若这里返回 0，窗口会被这个坏文件占住，下面那句 PASS 也就不会出现。 */
+    rc = arkrtos_vfs_write_file(DEMO_BAD_PATH, ark_example_hello_tampered,
+                                (uint32)ARK_EXAMPLE_HELLO_TAMPERED_LEN);
+    if (rc < 0)
+    {
+        demo_puts("[ELF] tamper check FAIL (cannot write ");
+        demo_puts(DEMO_BAD_PATH);
+        demo_puts(")\n");
+    }
+    else
+    {
+        argv[0] = "hello_tampered";
+        rc = arkrtos_elf_exec(DEMO_BAD_PATH, 1, argv);
+        if (rc == ARKRTOS_ELF_ERR_SIGN)
+        {
+            demo_puts("[ELF] tamper check PASS (bad tag refused, rc=");
+            demo_putu((uint32)rc);
+            demo_puts(")\n");
+        }
+        else
+        {
+            demo_puts("[ELF] tamper check FAIL (exec accepted a bad tag, rc=");
+            demo_putu((uint32)rc);
+            demo_puts(")\n");
+        }
+    }
+#endif
 
     /* 演示结束，本任务留着空转（不自杀：示例里的任务死掉会让 'task' 表
      * 少一行，看起来像泄漏，其实是设计）。 */

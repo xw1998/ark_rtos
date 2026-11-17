@@ -421,6 +421,34 @@
 #error "ARKRTOS_USE_IMAGE_SIGN=1 requires ARKRTOS_IMAGE_SIGN_KEY (32 byte initialiser list)"
 #endif
 
+/* ELF 可执行文件与可下载模块的签名门（ARKRTOS_USE_EXEC_SIGN）。
+ * 打开后 `exec` 与 `ld` 只接受「文件末尾追加 32 字节 HMAC tag」的输入，
+ * 校验覆盖 tag 之前的全部字节（格式与理由见 kernelsrc/include/arkrtos_sign.h）。
+ * 为什么单独一个开关而不是并进 IMAGE_SIGN：IMAGE_SIGN 管的是 App 安装/升级
+ * 路径，已经打开它的板子不该因为我们多管了 exec/ld 而行为突变。
+ * 默认关；关档时装载器里那几行不参与编译，体积与行为零变化。
+ * 它依赖 IMAGE_SIGN（同一把预共享密钥、同一套 SHA-256/HMAC 实现）。 */
+#ifndef ARKRTOS_USE_EXEC_SIGN
+#define ARKRTOS_USE_EXEC_SIGN           0
+#endif
+#if (ARKRTOS_USE_EXEC_SIGN == 1) && (ARKRTOS_USE_IMAGE_SIGN != 1)
+#error "ARKRTOS_USE_EXEC_SIGN=1 requires ARKRTOS_USE_IMAGE_SIGN=1 (same pre-shared key)"
+#endif
+
+/* ELF 可执行文件与可下载模块的签名门（ARKRTOS_USE_EXEC_SIGN）。
+ * 打开后 `exec` 与 `ld` 只接受「文件末尾追加 32 字节 HMAC tag」的输入，
+ * 校验覆盖 tag 之前的全部字节（格式与理由见 kernelsrc/include/arkrtos_sign.h）。
+ * 为什么单独一个开关而不是并进 IMAGE_SIGN：IMAGE_SIGN 管的是 App 安装/升级
+ * 路径，已经打开它的板子不该因为我们多管了 exec/ld 而行为突变。
+ * 默认关；关档时装载器里那几行不参与编译，体积与行为零变化。
+ * 它依赖 IMAGE_SIGN（同一把预共享密钥、同一套 SHA-256/HMAC 实现）。 */
+#ifndef ARKRTOS_USE_EXEC_SIGN
+#define ARKRTOS_USE_EXEC_SIGN           0
+#endif
+#if (ARKRTOS_USE_EXEC_SIGN == 1) && (ARKRTOS_USE_IMAGE_SIGN != 1)
+#error "ARKRTOS_USE_EXEC_SIGN=1 requires ARKRTOS_USE_IMAGE_SIGN=1 (same pre-shared key)"
+#endif
+
 /* 跨复位崩溃日记（arkrtos_crash.c）：落在共享内存尾部的 .noinit 区 */
 #ifndef ARKRTOS_USE_CRASH_LOG
 #define ARKRTOS_USE_CRASH_LOG           1

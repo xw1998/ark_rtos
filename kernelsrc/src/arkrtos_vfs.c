@@ -79,6 +79,13 @@ int32 arkrtos_vfs_read_at(const char *path, uint8 *buf, uint32 len, uint32 off,
     return ARKRTOS_VFS_ENOSYS;
 }
 
+int32 arkrtos_vfs_size(const char *path, uint32 *out_size)
+{
+    (void)path;
+    if (out_size != NULL) { *out_size = 0u; }
+    return ARKRTOS_VFS_ENOSYS;
+}
+
 int32 arkrtos_vfs_write_file(const char *path, const uint8 *buf, uint32 len)
 {
     (void)path; (void)buf; (void)len;
@@ -593,6 +600,18 @@ int32 arkrtos_vfs_read_at(const char *path, uint8 *buf, uint32 len, uint32 off,
 
     (void)ark_vfs_close(fd);
     if (out_len != NULL) { *out_len = total; }
+    return ARK_VFS_OK;
+}
+
+int32 arkrtos_vfs_size(const char *path, uint32 *out_size)
+{
+    struct ark_vfs_stat st;
+
+    if (out_size != NULL) { *out_size = 0u; }
+    if ((path == NULL) || (out_size == NULL)) { return ARK_E_INVAL; }
+    if (ark_vfs_stat(path, &st) != ARK_VFS_OK) { return ARK_E_IO; }
+    /* 与 app_open_once() 同一口径：负数/未知一律当 0，不把"没量到"说成一个数 */
+    *out_size = (st.size > 0) ? (uint32)st.size : 0u;
     return ARK_VFS_OK;
 }
 

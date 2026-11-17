@@ -198,6 +198,10 @@
 #define ARKRTOS_USE_FLASHAPP         0
 #undef  ARKRTOS_USE_IMAGE_SIGN
 #define ARKRTOS_USE_IMAGE_SIGN       1
+/* exec/ld 的签名门：本板的 hello.elf 与 modhello.o 在 Makefile 里签过，
+ * 演示任务另外用一份「tag 被翻掉」的副本证明装载器真的会拒。 */
+#undef  ARKRTOS_USE_EXEC_SIGN
+#define ARKRTOS_USE_EXEC_SIGN        1
 #undef  ARKRTOS_USE_QSPI
 #define ARKRTOS_USE_QSPI             0
 #undef  ARKRTOS_AUTOMOUNT_NOR

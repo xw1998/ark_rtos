@@ -159,6 +159,16 @@ int32 arkrtos_vfs_read_at(const char *path, uint8 *buf, uint32 len, uint32 off,
                         uint32 *out_len);
 
 /**
+* @brief 取一个文件的字节数（等价于 stat 里的 size 字段）。
+* @param path 路径；out_size 收字节数（失败时置 0）
+* @return 0=成功；负值为 ark_vfs 错误码
+* @note  为什么单独一个门面：装载器要判断「文件末尾 32 字节之外还有没有内容」，
+*        需要文件总长，而 open+seek(END) 的返回值各后端约定不同（ramfs 回新
+*        偏移、littlefs 桥回 0），拿它当长度会静默偏掉。这里只回 size，一个数。
+*/
+int32 arkrtos_vfs_size(const char *path, uint32 *out_size);
+
+/**
 * @brief 按路径只读打开一个文件。
 * @return >=0 文件句柄；负值为 ark_vfs 错误码
 * @note  只放出只读打开这一种：写清一色走 arkrtos_vfs_write_file()，

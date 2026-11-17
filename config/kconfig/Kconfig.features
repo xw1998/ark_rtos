@@ -550,6 +550,17 @@ config ARKRTOS_USE_IMAGE_SIGN
 	  Symmetric by design: this is tamper detection plus provenance, not a
 	  full trust chain.
 
+config ARKRTOS_USE_EXEC_SIGN
+	bool "Signature gate for exec and ld (requires IMAGE_SIGN)"
+	default n
+	depends on ARKRTOS_USE_IMAGE_SIGN
+	help
+	  When on, arkrtos_elf_exec() and arkrtos_mod_load() accept only files
+	  that end with a 32-byte HMAC-SHA256 tag covering everything before it
+	  (tools/sign_payload.py appends it).  Off keeps both loaders exactly as
+	  they were -- no extra size, symbols or behaviour.  The App
+	  install/upgrade path stays under ARKRTOS_USE_IMAGE_SIGN.
+
 config ARKRTOS_USE_CRASH_LOG
 	bool "Cross-reset crash journal"
 	default y

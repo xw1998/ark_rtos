@@ -1211,6 +1211,25 @@ def check_elf_loader():
     else:
         fail("elf", txt[-260:])
 
+def check_payload_sign():
+    """exec/ld 的尾签名门（ARKRTOS_USE_EXEC_SIGN）必须两头对得上。
+
+    和 sign-host 同型：这条链的两头是两套独立实现（tools/sign_payload.py
+    用 Python hashlib，内核用手写 SHA-256），而两边都默认不参与构建。
+    tools/payload_sign_gate.py 把真内核 C 代码编到宿主上算 MAC，与 Python
+    逐字节比对；另外核三件事：sign 幂等、tamper 必拒、关档时两个装载器
+    的预处理结果里一个 arkrtos_sign_payload 都不出现（默认零变化）。
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "payload_sign_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "PAYLOAD-SIGN-GATE OK" in txt:
+        ok("payload-sign",
+           "kernel MAC == python MAC (once+stream) / sign idempotent / tamper refused / "
+           "ON wired, OFF zero symbols / dependency guard / -8,-11 pinned")
+    else:
+        fail("payload-sign", txt[-260:])
+
+
 def check_modld():
     """VxWorks-style downloadable modules (ARKRTOS_USE_MODLOAD) must be wired.
 
@@ -1344,6 +1363,7 @@ def main(argv):
     check_paging_switch()
     check_elf_loader()
     check_modld()
+    check_payload_sign()
     if do_build:
         check_builds(uv4)
 
