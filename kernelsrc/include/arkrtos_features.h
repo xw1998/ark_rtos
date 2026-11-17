@@ -141,6 +141,19 @@
 #define ARKRTOS_USE_PAGING_FRAMES       0
 #endif
 
+/* 页级 App 窗口（U-3 第二阶）：0 = 关（窗口仍是每个空间一条 2 MB 的 PS=20
+ * 条目，与第一阶逐字节相同），1 = 窗口切成 4 KB 页 —— 每个地址空间从帧池
+ * 里整块拿 512 帧（2 MB），切换地址空间时重写覆盖窗口的那 256 条 STLB
+ * 条目（一条 PS=12 条目管相邻两页）。要求 ARKRTOS_USE_PAGING == 1 且
+ * ARKRTOS_USE_PAGING_FRAMES == 1（帧只能从池里来）。由 Kconfig 选择
+ * （config ARKRTOS_USE_PAGING_PAGES）。
+ *
+ * 它只换「窗口怎么映射」这一层：装载仍是 eager 的整块拷贝，退出也不还
+ * 帧（空间回收仍欠），没有按需缺页（那是第三阶）。 */
+#ifndef ARKRTOS_USE_PAGING_PAGES
+#define ARKRTOS_USE_PAGING_PAGES        0
+#endif
+
 /* VxWorks 式可下载模块：0 = 关（空 TU，零体积），1 = 把 ET_REL 目标文件
  * 现场链接进内核模块区并以 PLV0 任务起跑（按名字解析内核导出符号）。
  * 这是与 ARKRTOS_USE_ELF **并列的另一种应用模型**，不是它的替代：

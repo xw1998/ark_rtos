@@ -178,6 +178,13 @@ uint32 arkrtos_paging_space_count(void);
 /** @brief Physical frame base behind a space; 0 when the space does not exist */
 uint32 arkrtos_paging_space_frame(uint32 space);
 
+/** @brief Virtual base of the App window (the same VA for every space)
+ *  @return the window VA base; 0 when the build has no paging backend
+ *  @details Use this - not arkrtos_paging_space_frame() - when poking the
+ *           window by address.  With ARKRTOS_USE_PAGING_PAGES=1 the frames come
+ *           from the frame pool, so a frame base is no longer a VA. */
+uint32 arkrtos_paging_window_va(void);
+
 /** @brief Which space is currently installed in the App window */
 uint32 arkrtos_paging_space_current(void);
 
@@ -240,6 +247,7 @@ uint32 arkrtos_paging_frame_used(void);
                                  space, installed, kern, user, len, write) (-1)
 #define arkrtos_paging_space_count()                         (1u)
 #define arkrtos_paging_space_frame(space)                    (0u)
+#define arkrtos_paging_window_va()                           (0u)
 #define arkrtos_paging_space_current()                       (0u)
 #define arkrtos_paging_space_activate(space)                 (-1)
 #define arkrtos_paging_bind_task(p_task, space)              (-1)

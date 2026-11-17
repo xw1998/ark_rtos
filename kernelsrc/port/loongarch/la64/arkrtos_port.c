@@ -402,6 +402,31 @@ int32 arkrtos_port_send_ipi(uint32 cpu)
 #define ARKRTOS_QEMU_APP_UART       0x022001E0u
 #endif
 
+/* 页级窗口（U-3 第二阶）的几何。一条 PS=12 的条目管**相邻两页**
+ * （TLBELO0 = vaddr、TLBELO1 = vaddr + 4 KB），所以 2 MB 窗口 = 512 页 =
+ * 256 条条目，正好铺满 STLB 的一个路（256 组）：
+ *     组号 = (VA >> 13) & 0xFF，窗口基址 0x02000000 的组号是 0
+ *     ⇒ 条目号 = way * 256 + i
+ * 窗口占 way 0；两条 4 KB 的 UART 页在打开这一档时改走 way 7 / 6，避免与
+ * 窗口第一条（同组 0）抢同一路 —— tlbfill 的路号是随机的，撞上一次就
+ * 顶掉窗口的映射，症状是 App 第一次取指就 refill。 */
+#define LA_PG_WIN_PAGES      ((uint32)(ARKRTOS_QEMU_APP_SIZE / 0x1000u))
+#define LA_PG_WIN_ENTRIES    ((uint32)(LA_PG_WIN_PAGES / 2u))
+#define LA_PG_WIN_WAY        0u
+#define LA_PG_KUART_WAY      7u
+#define LA_PG_AUART_WAY      6u
+
+/* 页级窗口的组合合法性：它只能长在「分页 + 帧池」之上，缺一个就直接
+ * 编不过 —— 那种档跑起来的表现是「窗口一半映射、一半 refill」，最难查。 */
+#if (ARKRTOS_USE_PAGING_PAGES == 1)
+#if (ARKRTOS_USE_PAGING != 1)
+#error "ARKRTOS_USE_PAGING_PAGES=1 requires ARKRTOS_USE_PAGING=1"
+#endif
+#if (ARKRTOS_USE_PAGING_FRAMES != 1)
+#error "ARKRTOS_USE_PAGING_PAGES=1 requires ARKRTOS_USE_PAGING_FRAMES=1"
+#endif
+#endif
+
 /* App 帧合法窗：App 任务的 trap 帧落在 App 页里（PLV3 页，内核可读写）。 */
 #define LA_FRAME_IN_APP(sp) \
     ((((uint32)(sp)) >= ARKRTOS_QEMU_APP_BASE) && \
@@ -528,6 +553,13 @@ static void la_tlb_write(uint32 vaddr, uint32 ps, uint32 index,
 *          所有任务注册之后调用不需要 —— 帧内容与映射方式无关，
 *          帧所在的地址在 DA 模式下写和分页模式下写是同一块内存。
 */
+#if ((ARKRTOS_USE_PAGING_PAGES == 1) && (ARKRTOS_USE_PRIV == 1) && \
+     (ARKRTOS_USE_PAGING == 1))
+/* 定义在下面的分页后端一节（要用帧池与 la_tlb_write），这里先声明：
+ * la_mmu_init() 打开分页之前必须把窗口铺好，否则第一条 App 取指就 refill。 */
+static void la_pg_boot_map(void);
+#endif
+
 static void la_mmu_init(void)
 {
     /* ASID 全 0：内核与 App 共用一份映射，切换任务不换页 */
@@ -559,10 +591,18 @@ static void la_mmu_init(void)
                 LA_PTE_KERNEL(0x00800000u), LA_PTE_KERNEL(0x00C00000u));
 
     /* 内核 UART（PLV0、RW）：控制台 */
+#if (ARKRTOS_USE_PAGING_PAGES == 1)
+    /* 页级窗口占了 way 0 的整套组，UART 页必须让开：显式写 way 7。 */
+    la_tlb_write(ARKRTOS_QEMU_UART_BASE & ~0xFFFu, 12u,
+                 LA_STLB_INDEX(ARKRTOS_QEMU_UART_BASE, LA_PG_KUART_WAY),
+                 LA_PTE_MMIO(ARKRTOS_QEMU_UART_BASE & ~0xFFFu),
+                 LA_PTE_MMIO((ARKRTOS_QEMU_UART_BASE & ~0xFFFu) + 0x1000u));
+#else
     la_tlb_fill(ARKRTOS_QEMU_UART_BASE & ~0xFFFu, 12u,
                 LA_STLB_INDEX(ARKRTOS_QEMU_UART_BASE, 0u),
                 LA_PTE_MMIO(ARKRTOS_QEMU_UART_BASE & ~0xFFFu),
                 LA_PTE_MMIO((ARKRTOS_QEMU_UART_BASE & ~0xFFFu) + 0x1000u));
+#endif
 
     /* App 页（PLV3、RWX）：App 的代码、数据、栈全在这 2 MB 里。
      * **必须用 tlbwr 写固定索引**：这是唯一一条会在运行期被换掉的条目
@@ -570,9 +610,14 @@ static void la_mmu_init(void)
      * 已知。走 tlbfill 会被随机塞进某条 MTLB 槽，切换时往 2050 写一条新的，
      * 而旧条目仍留在别的槽里 —— 查找命中旧的那条，切换静默失效（实测：
      * space 1 写入的数据在 space 0 里被读到）。 */
+#if (ARKRTOS_USE_PAGING_PAGES == 1)
+    /* 页级窗口：从帧池给 space 0 拿一整块 2 MB，再铺 256 条 4 KB 条目。 */
+    la_pg_boot_map();
+#else
     la_tlb_write(ARKRTOS_QEMU_APP_BASE, 20u, LA_MTLB_INDEX + 2u,
                  LA_PTE_APP(ARKRTOS_QEMU_APP_BASE),
                  LA_PTE_APP(ARKRTOS_QEMU_APP_BASE + 0x100000u));
+#endif
 
     /* App 的 UART 别名（PLV3、RW）：同一台 16550，换个 VA。
      * 内核那页是 PLV0，App 碰不到，所以必须单独给一页 —— 这一页同时也是
@@ -582,10 +627,17 @@ static void la_mmu_init(void)
      * 4 KB 条目会在同一组的 8 路里抢位置，而 tlbfill 的路号是随机的 ⇒
      * 控制台那一页会被顶掉。传进去的 index 对 4 KB 页无效（tlbfill 自己
      * 按 VA 选组），保留它只为让调用点与别的条目读起来对称。 */
+#if (ARKRTOS_USE_PAGING_PAGES == 1)
+    la_tlb_write(ARKRTOS_QEMU_APP_UART & ~0xFFFu, 12u,
+                 LA_STLB_INDEX(ARKRTOS_QEMU_APP_UART, LA_PG_AUART_WAY),
+                 LA_PTE_APP_MMIO(ARKRTOS_QEMU_UART_BASE & ~0xFFFu),
+                 LA_PTE_APP_MMIO((ARKRTOS_QEMU_UART_BASE & ~0xFFFu) + 0x1000u));
+#else
     la_tlb_fill(ARKRTOS_QEMU_APP_UART & ~0xFFFu, 12u,
                 LA_STLB_INDEX(ARKRTOS_QEMU_APP_UART, 1u),
                 LA_PTE_APP_MMIO(ARKRTOS_QEMU_UART_BASE & ~0xFFFu),
                 LA_PTE_APP_MMIO((ARKRTOS_QEMU_UART_BASE & ~0xFFFu) + 0x1000u));
+#endif
 
 #if (ARKRTOS_USE_PAGING_FRAMES == 1)
     /* 4 KB 页帧池（U-3）：一条 PS=22 恒等映射，让内核在分页模式下按物理
@@ -687,6 +739,13 @@ static const la_pg_span_t s_pg_spans[] = {
 
 static uint32 s_pg_app_space;       /* 当前装进 App 窗口的空间号 */
 
+#if (ARKRTOS_USE_PAGING_PAGES == 1)
+/* 页级窗口下每个空间的帧基址：0 = 还没从帧池分配（池基址至少 0x04000000，
+ * 所以 0 不会与任何合法帧冲突）。空间一旦拿到帧就不还 —— 空间回收仍欠，
+ * 与第一阶作为取舍登记在案的「没有使用方」变成「有使用方、但只借不还」。 */
+static uint32 s_pg_space_base[ARKRTOS_PAGING_APPS_MAX];
+#endif
+
 /* ------------------------------------------------------------
  * 每 App 地址空间（U-1）：同一 VA，不同物理帧
  * @details 本 port 没有硬件页表遍历（QEMU 9.2.3 的 cpu->ptw = OFF），所以
@@ -716,7 +775,12 @@ static uint32 s_pg_app_space;       /* 当前装进 App 窗口的空间号 */
 /** 空间号 -> 物理帧基址（2 MB 对齐，满足 PS=20 条目要求） */
 static uint32 la_pg_app_frame(uint32 space)
 {
+#if (ARKRTOS_USE_PAGING_PAGES == 1)
+    /* 页级窗口：帧由帧池按空间整块给出，不再由「空间号 × 2 MB」推出来。 */
+    return s_pg_space_base[space];
+#else
     return ARKRTOS_QEMU_APP_BASE + (space * ARKRTOS_QEMU_APP_SIZE);
+#endif
 }
 
 #if (ARKRTOS_USE_PRIV == 1)
@@ -737,6 +801,92 @@ static void la_tlb_inval_page(uint32 va)
                      :: "r"((unsigned long)va) : "memory");
 }
 
+#if (ARKRTOS_USE_PAGING_PAGES == 1)
+/* ------------------------------------------------------------
+ * 页级窗口（U-3 第二阶）：帧池的第一个真实使用方
+ * @details 每个地址空间从帧池里整块拿 LA_PG_WIN_PAGES（512）帧 = 2 MB，
+ *          然后把窗口铺成 LA_PG_WIN_ENTRIES（256）条 PS=12 条目，全部落在
+ *          STLB 的 way 0。切换空间 = 先把整段窗口 VA 逐页失效（QEMU 的
+ *          softmmu 缓存按 VA 记翻译，tlbwr 只清自己那 8 KB 且奇页地址
+ *          算错，所以必须显式 invtlb），再重写这 256 条。
+ *
+ *          三条不猜的规矩：
+ *            1. 帧不够就**不装**：ensure 失败时不留下半张窗口（半张窗口
+ *               会让 App 一半代码读得到、一半 refill，那种失败最难查）；
+ *            2. 装完必须抽查首尾两页的 PPN 与 ps，对不上报 -2 且不改
+ *               s_pg_app_space（报错留在原地，比「切换了」这句谎话好）；
+ *            3. 拿过的帧不还：空间回收是欠账，说清楚比偷偷还了更安全。
+ * ------------------------------------------------------------ */
+#if (ARKRTOS_USE_PAGING_FRAMES != 1)
+#error "ARKRTOS_USE_PAGING_PAGES=1 requires ARKRTOS_USE_PAGING_FRAMES=1"
+#endif
+#if ((ARKRTOS_QEMU_APP_SIZE % 0x2000u) != 0u)
+#error "page-granular window needs ARKRTOS_QEMU_APP_SIZE to be a multiple of 8 KB"
+#endif
+
+/** 给空间从帧池里拿一整块 2 MB；已经拿过就什么都不做 */
+static int32 la_pg_space_ensure(uint32 space)
+{
+    uint32 base = 0u;
+
+    if(space >= (uint32)ARKRTOS_PAGING_APPS_MAX)
+    {
+        return -1;
+    }
+    if(s_pg_space_base[space] != 0u)
+    {
+        return 0;
+    }
+    if(arkrtos_port_paging_frame_alloc(LA_PG_WIN_PAGES, &base) != 0)
+    {
+        return -3;
+    }
+
+    s_pg_space_base[space] = base;
+    return 0;
+}
+
+/** 把该空间的 512 页铺进窗口（256 条 PS=12 条目，way 0） */
+static void la_pg_install_space(uint32 space)
+{
+    uint32 i;
+    uint32 base = s_pg_space_base[space];
+
+    for(i = 0u; i < LA_PG_WIN_ENTRIES; i++)
+    {
+        uint32 va = ARKRTOS_QEMU_APP_BASE + (i * 0x2000u);
+
+        la_tlb_write(va, 12u, LA_STLB_INDEX(va, LA_PG_WIN_WAY),
+                     LA_PTE_APP(base + (i * 0x2000u)),
+                     LA_PTE_APP(base + (i * 0x2000u) + 0x1000u));
+    }
+}
+
+/** 把整段窗口 VA 的旧翻译清掉（逐 4 KB：QEMU 按 (ASID, VA) 匹配条目） */
+static void la_pg_drop_window(void)
+{
+    uint32 i;
+
+    for(i = 0u; i < LA_PG_WIN_PAGES; i++)
+    {
+        la_tlb_inval_page(ARKRTOS_QEMU_APP_BASE + (i * 0x1000u));
+    }
+}
+
+/** 开分页之前的首次铺窗口：只铺 space 0（其它空间等 activate 时再要帧） */
+static void la_pg_boot_map(void)
+{
+    if(la_pg_space_ensure(0u) != 0)
+    {
+        /* 帧池空 ⇒ 窗口没有任何映射。不假装铺好了：第一次 App 访问会走
+         * refill 并被当成保护错误，比「映射到 PA 0」这种错答案安全得多。 */
+        return;
+    }
+
+    la_pg_install_space(0u);
+}
+#endif /* ARKRTOS_USE_PAGING_PAGES == 1 */
+
 /**
 * @brief 把一个地址空间装进 App 窗口
 * @param space 空间号（0 .. 板级 ARKRTOS_PAGING_APPS_MAX-1）
@@ -756,14 +906,80 @@ static void la_tlb_inval_page(uint32 va)
 */
 static void la_pg_assert_window(void)
 {
+#if (ARKRTOS_USE_PAGING_PAGES == 1)
+    /* 页级窗口：一次 invtlb 只会打掉命中的那几页，所以这里整段重铺。
+     * 代价（512 次 invtlb + 256 次 tlbwr）只在这一条路径上付，换来的是
+     * 「撤销动态映射之后窗口一定还在」。 */
+    if(s_pg_space_base[s_pg_app_space] == 0u)
+    {
+        return;                     /* 还没铺过：没有可补的 */
+    }
+
+    la_pg_drop_window();
+    la_pg_install_space(s_pg_app_space);
+#else
     uint32 pa = la_pg_app_frame(s_pg_app_space);
 
     la_tlb_write(ARKRTOS_QEMU_APP_BASE, 20u, LA_MTLB_INDEX + 2u,
                  LA_PTE_APP(pa), LA_PTE_APP(pa + 0x100000u));
+#endif
 }
 
 int32 arkrtos_port_paging_activate(uint32 space)
 {
+#if (ARKRTOS_USE_PAGING_PAGES == 1)
+    /* 页级窗口：先要帧（不够就 -3，窗口一条都不动），再失效旧翻译、重铺
+     * 256 条，最后抽查首尾两页。 */
+    if(space >= (uint32)ARKRTOS_PAGING_APPS_MAX)
+    {
+        return -1;
+    }
+
+    if(la_pg_space_ensure(space) != 0)
+    {
+        return -3;
+    }
+
+    if(space == s_pg_app_space)
+    {
+        uint32 probed = 0u;
+        uint32 probed_ps = 0u;
+
+        if((arkrtos_port_paging_lookup(ARKRTOS_QEMU_APP_BASE, 0,
+                                       &probed, &probed_ps) != 0u) &&
+           (probed == s_pg_space_base[space]) && (probed_ps == 12u))
+        {
+            return 0;
+        }
+    }
+
+    la_pg_drop_window();
+    la_pg_install_space(space);
+
+    {
+        uint32 last_va = ARKRTOS_QEMU_APP_BASE + ARKRTOS_QEMU_APP_SIZE - 0x1000u;
+        uint32 probed = 0u;
+        uint32 probed_ps = 0u;
+
+        if((arkrtos_port_paging_lookup(ARKRTOS_QEMU_APP_BASE, 0, &probed, &probed_ps) == 0u) ||
+           (probed != s_pg_space_base[space]) || (probed_ps != 12u))
+        {
+            return -2;
+        }
+        /* 末页是某条条目的 TLBELO1（奇页），而 lookup 读回的永远是 TLBELO0
+         * （偶页）的 PPN —— 期望值是这一段 8 KB 的偶页基址，不是末页本身的
+         * 基址。写成末页基址会得到一次假失败（实测踩到过）。 */
+        if((arkrtos_port_paging_lookup(last_va, 0, &probed, &probed_ps) == 0u) ||
+           (probed != (s_pg_space_base[space] + ARKRTOS_QEMU_APP_SIZE - 0x2000u)) ||
+           (probed_ps != 12u))
+        {
+            return -2;
+        }
+    }
+
+    s_pg_app_space = space;
+    return 0;
+#else
     uint32 pa;
 
     if(space >= (uint32)ARKRTOS_PAGING_APPS_MAX)
@@ -808,6 +1024,7 @@ int32 arkrtos_port_paging_activate(uint32 space)
 
     s_pg_app_space = space;
     return 0;
+#endif /* ARKRTOS_USE_PAGING_PAGES == 1 */
 }
 
 /* ------------------------------------------------------------ 延迟换窗口 (U-2) */
@@ -925,6 +1142,12 @@ uint32 arkrtos_port_paging_space_frame(uint32 space)
 uint32 arkrtos_port_paging_space_count(void)
 {
     return (uint32)ARKRTOS_PAGING_APPS_MAX;
+}
+
+/** App 窗口的 VA 基址：各空间共用同一个 VA，物理侧才按空间换 */
+uint32 arkrtos_port_paging_window_va(void)
+{
+    return ARKRTOS_QEMU_APP_BASE;
 }
 
 /**

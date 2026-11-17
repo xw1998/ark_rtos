@@ -106,6 +106,12 @@
 #undef  ARKRTOS_USE_PAGING_FRAMES
 #define ARKRTOS_USE_PAGING_FRAMES    1
 
+/* U-3 第二阶：窗口按 4 KB 页映射，帧从上面的池里按空间整块分配（512 帧
+ * = 2 MB）。打开它时 space 0 的帧不再固定是 0x02000000，而是池分配出来
+ * 的那一块（首个空间 = 0x04000000）；窗口 VA 仍是 0x02000000。 */
+#undef  ARKRTOS_USE_PAGING_PAGES
+#define ARKRTOS_USE_PAGING_PAGES     1
+
 /* ============================================================
  * 四、能力开关
  * @details LA64 硬件有 FPU，但这一版没有启用 FPU 上下文保存（任务切换不存

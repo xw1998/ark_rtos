@@ -139,6 +139,17 @@ tag 签名门，含内核 MAC 与 Python 实现的逐字节对拍、开档/关�
 mpu / paging.c / shell 七处，「缺一处就静默不生效」正是要用 pin 抓的东西。
 见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.21。
 
+`ARKRTOS_USE_PAGING_PAGES`（U-3 第二阶 页级 App 窗口，缺省 n，只有
+`board/qemu_loongarch64` 开 1）同样是 `depends on ARKRTOS_USE_PAGING` **再加**
+`depends on ARKRTOS_USE_PAGING_FRAMES` 的 bool —— 窗口要按页铺，帧只能从池里来，
+两样缺一个就编不过（port 里有两条对应 `#error`，还有一条「窗口尺寸必须是 8 KB 倍数」）。
+它改的是**窗口的映射方式**（2 MB 一条 PS=20 → 256 条 PS=12，帧来自池、切换逐页
+`invtlb`），不改装载时机：仍是 eager、帧不还。门禁挂在同一个 `tools/paging_gate.py`
+的 **S pin**（带两条变异自检），断言覆盖开关三处、窗口几何、组合守卫、`-3`/`-2`
+两条拒绝码、末页偶页口径、两条 UART 固定 way、**PS=20 老路径仍在**，以及
+hal / mpu.h / paging.c / shell 的 `window_va` 转发链。
+见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.22。
+
 ## 6. 数量限制
 
 原先散在头文件里写死的上限（任务表、同步对象表、队列、定时器、设备表、socket、

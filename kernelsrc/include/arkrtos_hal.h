@@ -499,6 +499,15 @@ uint32 arkrtos_port_paging_frame_total(void);
 /** @brief Frames currently allocated from the board pool */
 uint32 arkrtos_port_paging_frame_used(void);
 
+/** @brief Virtual base of the App window (same VA for every address space)
+ *  @return the window VA base (0 when the board has no paging window)
+ *  @details The physical side of the window differs per space and comes from
+ *           arkrtos_port_paging_space_frame(); the VA side never moves.  Code
+ *           that pokes the window must use this instead of the frame base:
+ *           with ARKRTOS_USE_PAGING_PAGES=1 the frames come from the pool and
+ *           no longer coincide with the window VA. */
+uint32 arkrtos_port_paging_window_va(void);
+
 #else
 
 #define arkrtos_port_paging_init()                 (-1)
@@ -517,6 +526,7 @@ uint32 arkrtos_port_paging_frame_used(void);
 #define arkrtos_port_paging_frame_free(base, count)     (-1)
 #define arkrtos_port_paging_frame_total()               (0u)
 #define arkrtos_port_paging_frame_used()                (0u)
+#define arkrtos_port_paging_window_va()                 (0u)
 
 #endif
 

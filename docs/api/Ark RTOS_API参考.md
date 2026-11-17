@@ -19,7 +19,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（50 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（51 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -30,7 +30,7 @@
 - [kernelsrc/include/arkrtos_mempool.h](#kernelsrcincludearkrtos_mempoolh)（9 项）
 - [kernelsrc/include/arkrtos_mini.h](#kernelsrcincludearkrtos_minih)（20 项）
 - [kernelsrc/include/arkrtos_modld.h](#kernelsrcincludearkrtos_modldh)（8 项）
-- [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（18 项）
+- [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（19 项）
 - [kernelsrc/include/arkrtos_net.h](#kernelsrcincludearkrtos_neth)（6 项）
 - [kernelsrc/include/arkrtos_ptable.h](#kernelsrcincludearkrtos_ptableh)（23 项）
 - [kernelsrc/include/arkrtos_rt.h](#kernelsrcincludearkrtos_rth)（13 项）
@@ -53,7 +53,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（11 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（47 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（52 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（16 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -85,7 +85,7 @@
 - [kernelsrc/src/arkrtos_mini.c](#kernelsrcsrcarkrtos_minic)（1 项）
 - [kernelsrc/src/arkrtos_modld.c](#kernelsrcsrcarkrtos_modldc)（5 项）
 - [kernelsrc/src/arkrtos_mpu.c](#kernelsrcsrcarkrtos_mpuc)（1 项）
-- [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（22 项）
+- [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（23 项）
 - [kernelsrc/src/arkrtos_smp.c](#kernelsrcsrcarkrtos_smpc)（1 项）
 - [kernelsrc/src/arkrtos_task.c](#kernelsrcsrcarkrtos_taskc)（5 项）
 - [kernelsrc/src/arkrtos_tickless.c](#kernelsrcsrcarkrtos_ticklessc)（1 项）
@@ -3532,6 +3532,20 @@ uint32 arkrtos_port_paging_frame_used(void);
 
 **Frames currently allocated from the board pool */**
 
+### `uint32 arkrtos_port_paging_window_va(void);`
+
+```c
+uint32 arkrtos_port_paging_window_va(void);
+```
+
+**Virtual base of the App window (same VA for every address space)**
+**返回**：the window VA base (0 when the board has no paging window)
+The physical side of the window differs per space and comes from
+arkrtos_port_paging_space_frame(); the VA side never moves.  Code
+that pokes the window must use this instead of the frame base:
+with ARKRTOS_USE_PAGING_PAGES=1 the frames come from the pool and
+no longer coincide with the window VA. */
+
 ### `int32  arkrtos_port_flash_erase(uint32 addr, uint32 size);`
 
 ```c
@@ -5002,6 +5016,18 @@ uint32 arkrtos_paging_space_frame(uint32 space);
 ```
 
 **Physical frame base behind a space; 0 when the space does not exist */**
+
+### `uint32 arkrtos_paging_window_va(void);`
+
+```c
+uint32 arkrtos_paging_window_va(void);
+```
+
+**Virtual base of the App window (the same VA for every space)**
+**返回**：the window VA base; 0 when the build has no paging backend
+Use this - not arkrtos_paging_space_frame() - when poking the
+window by address.  With ARKRTOS_USE_PAGING_PAGES=1 the frames come
+from the frame pool, so a frame base is no longer a VA. */
 
 ### `uint32 arkrtos_paging_space_current(void);`
 
@@ -7863,10 +7889,10 @@ MTLB 是确定索引、查找时按条目自己的 PS 比 VPPN，不会和内核
 静态 4 KB 条目抢同一组的 8 路，也不需要知道 STLB 的 way 布局。
 代价是 MTLB 只有 64 条，所以动态表的上限由它决定（见 LA_PG_DYN_PAIRS）。
 
-### `static void la_mmu_init(void)`
+### `#if ((ARKRTOS_USE_PAGING_PAGES == 1) && (ARKRTOS_USE_PRIV == 1) && \`
 
 ```c
-static void la_mmu_init(void)
+#if ((ARKRTOS_USE_PAGING_PAGES == 1) && (ARKRTOS_USE_PRIV == 1) && \
 ```
 
 **建立静态映射并打开分页**
@@ -7908,6 +7934,38 @@ static void la_tlb_inval_page(uint32 va)
 于是 PS=20 条目的上半 1 MB 永远留在 softmmu 缓存里 —— 重写条目
 后经那半页读写仍是旧物理帧，症状正是「切换静默失效」。
 顺序要紧：先 invtlb 再写新条目（invtlb 会按旧条目的 PS 匹配）。
+
+### `static int32 la_pg_space_ensure(uint32 space)`
+
+```c
+static int32 la_pg_space_ensure(uint32 space)
+```
+
+给空间从帧池里拿一整块 2 MB；已经拿过就什么都不做 */
+
+### `static void la_pg_install_space(uint32 space)`
+
+```c
+static void la_pg_install_space(uint32 space)
+```
+
+把该空间的 512 页铺进窗口（256 条 PS=12 条目，way 0） */
+
+### `static void la_pg_drop_window(void)`
+
+```c
+static void la_pg_drop_window(void)
+```
+
+把整段窗口 VA 的旧翻译清掉（逐 4 KB：QEMU 按 (ASID, VA) 匹配条目） */
+
+### `static void la_pg_boot_map(void)`
+
+```c
+static void la_pg_boot_map(void)
+```
+
+开分页之前的首次铺窗口：只铺 space 0（其它空间等 activate 时再要帧） */
 
 ### `static void la_pg_assert_window(void)`
 
@@ -7990,6 +8048,14 @@ uint32 arkrtos_port_paging_space_count(void)
 ```
 
 板级给了几个地址空间（>= 1） */
+
+### `uint32 arkrtos_port_paging_window_va(void)`
+
+```c
+uint32 arkrtos_port_paging_window_va(void)
+```
+
+App 窗口的 VA 基址：各空间共用同一个 VA，物理侧才按空间换 */
 
 ### `uint32 arkrtos_port_paging_lookup(uint32 va, uint32 *index, uint32 *pp`
 
@@ -9671,6 +9737,17 @@ uint32 arkrtos_paging_space_frame(uint32 space)
 
 **Physical frame base behind an address space**
 **返回**：frame base, or 0 when the space does not exist (never a guess)
+
+### `uint32 arkrtos_paging_window_va(void)`
+
+```c
+uint32 arkrtos_paging_window_va(void)
+```
+
+**Virtual base of the App window (the same VA for every space)**
+窗口的 VA 是 port 的属性，物理侧才按空间换。页级窗口
+（ARKRTOS_USE_PAGING_PAGES=1）下帧来自帧池，帧基址不再是 VA，
+所以按地址摸窗口的代码必须问这一条。
 
 ### `uint32 arkrtos_paging_space_current(void)`
 

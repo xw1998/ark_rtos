@@ -260,6 +260,17 @@ uint32 arkrtos_paging_space_frame(uint32 space)
 }
 
 /**
+* @brief Virtual base of the App window (the same VA for every space)
+* @details 窗口的 VA 是 port 的属性，物理侧才按空间换。页级窗口
+*          （ARKRTOS_USE_PAGING_PAGES=1）下帧来自帧池，帧基址不再是 VA，
+*          所以按地址摸窗口的代码必须问这一条。
+*/
+uint32 arkrtos_paging_window_va(void)
+{
+    return arkrtos_port_paging_window_va();
+}
+
+/**
 * @brief Which space is currently installed in the App window
 */
 uint32 arkrtos_paging_space_current(void)

@@ -48,8 +48,14 @@
      （-1 池外 / -3 本来没分配），la_mmu_init 给帧池补一条 PS=22 恒等映射
      （否则帧在内核里不可触及），hal / mpu.h 有 (-1) 回退，paging.c 转发到
      port，shell 有 `pmap frame` 与 `pmap ftest` 及其 PASS 串。
+  S. 页级 App 窗口（U-3 第二阶）：开关三处（features.h 缺省 0 / Kconfig 两条
+     depends / 板级置 1），port 里窗口几何 LA_PG_WIN_ENTRIES、组合守卫 #error、
+     从帧池整块要帧（-3）、铺 256 条 PS=12 条目、逐页 invtlb、首末页抽查（-2，
+     末页期望是偶页基址）、UART 改走 way 7/6、la_pg_boot_map 在 la_mmu_init 里
+     真被调用，以及 PS=20 老路径仍在（两种档都在编）；hal / mpu.h / paging.c
+     的 window_va 转发链与 shell 三处改用。
 
-E–M、P–R 每条都自带**防假绿自检**：把源串故意改坏一次，对应 pin 必须报错；
+E–M、P–S 每条都自带**防假绿自检**：把源串故意改坏一次，对应 pin 必须报错；
 报不出错就说明这条 pin 是空转的。
 
 不覆盖：分页后端在板上给出的实际隔离效果（哪条地址被拦、PLV 是否真降）、
@@ -541,6 +547,77 @@ def main():
             bad.append("R: pmap ftest 的 PASS 串不在")
         return bad
 
+    def pin_s(port, hal, mpu, pg, sh, feats, kconf, board):
+        bad = []
+        # 开关三处：缺省 0 / Kconfig 两条依赖 / 板级打开
+        if "#define ARKRTOS_USE_PAGING_PAGES        0" not in feats:
+            bad.append("S: arkrtos_features.h 的缺省值不是 0")
+        if "config ARKRTOS_USE_PAGING_PAGES" not in kconf:
+            bad.append("S: Kconfig.features 里没有 ARKRTOS_USE_PAGING_PAGES")
+        elif kconf.count("depends on ARKRTOS_USE_PAGING") < 2:
+            bad.append("S: Kconfig 的页级窗口没有同时依赖 PAGING 与 FRAMES")
+        if "#define ARKRTOS_USE_PAGING_PAGES     1" not in board:
+            bad.append("S: LA64 板级没有把页级窗口打开")
+        # port：几何 + 组合守卫
+        if "#define LA_PG_WIN_ENTRIES" not in port:
+            bad.append("S: port 里没有窗口条目数几何 LA_PG_WIN_ENTRIES")
+        if ('#error "ARKRTOS_USE_PAGING_PAGES=1 requires '
+                'ARKRTOS_USE_PAGING_FRAMES=1"') not in port:
+            bad.append("S: port 里没有「页级窗口必须配帧池」的 #error")
+        body = _body(port, "static int32 la_pg_space_ensure(")
+        if not body:
+            bad.append("S: port 里没有 la_pg_space_ensure")
+        else:
+            if "arkrtos_port_paging_frame_alloc(LA_PG_WIN_PAGES, &base) != 0" not in body:
+                bad.append("S: space_ensure 没有从帧池整块要帧")
+            if "return -3;" not in body:
+                bad.append("S: space_ensure 帧不够时不返回 -3（会留下半张窗口）")
+        body = _body(port, "static void la_pg_install_space(")
+        if not body:
+            bad.append("S: port 里没有 la_pg_install_space")
+        elif "la_tlb_write(va, 12u, LA_STLB_INDEX(va, LA_PG_WIN_WAY)," not in body:
+            bad.append("S: install_space 没有按 PS=12 写窗口条目")
+        body = _body(port, "static void la_pg_drop_window(")
+        if not body:
+            bad.append("S: port 里没有 la_pg_drop_window")
+        elif "la_tlb_inval_page(" not in body:
+            bad.append("S: drop_window 不逐页 invtlb（QEMU 会留旧翻译）")
+        body = _body(port, "int32 arkrtos_port_paging_activate(")
+        if not body:
+            bad.append("S: 找不到 activate 的定义")
+        else:
+            if "return -2;" not in body:
+                bad.append("S: activate 装完不抽查首末页（-2 不在）")
+            if "(s_pg_space_base[space] + ARKRTOS_QEMU_APP_SIZE - 0x2000u)" not in body:
+                bad.append("S: activate 的末页期望值不是偶页基址（TLBELO0 口径）")
+            if "(probed_ps != 12u)" not in body:
+                bad.append("S: activate 抽查不核对 ps=12")
+        if "la_pg_boot_map();" not in port:
+            bad.append("S: la_mmu_init 没有调 la_pg_boot_map（第一条 App 取指就 refill）")
+        if "LA_STLB_INDEX(ARKRTOS_QEMU_UART_BASE, LA_PG_KUART_WAY)" not in port:
+            bad.append("S: 内核 UART 没有固定 way（会顶掉窗口条目）")
+        if "LA_STLB_INDEX(ARKRTOS_QEMU_APP_UART, LA_PG_AUART_WAY)" not in port:
+            bad.append("S: App UART 没有固定 way（会顶掉窗口条目）")
+        # 两种映射方式都要在源码里：默认关时仍编 PS=20 那条
+        if port.count("la_tlb_write(ARKRTOS_QEMU_APP_BASE, 20u, "
+                      "LA_MTLB_INDEX + 2u") < 2:
+            bad.append("S: PS=20 老路径不见了（默认档会没有窗口映射）")
+        # window_va 转发链
+        if "uint32 arkrtos_port_paging_window_va(void);" not in hal:
+            bad.append("S: hal 里没有 window_va 的声明")
+        if "#define arkrtos_port_paging_window_va()                 (0u)" not in hal:
+            bad.append("S: hal 的关档回退里没有 window_va")
+        if "uint32 arkrtos_paging_window_va(void);" not in mpu:
+            bad.append("S: mpu.h 里没有 window_va 的声明")
+        if "#define arkrtos_paging_window_va()                           (0u)" not in mpu:
+            bad.append("S: mpu.h 的关档回退里没有 window_va")
+        wv = _body(pg, "uint32 arkrtos_paging_window_va(")
+        if (not wv) or ("arkrtos_port_paging_window_va()" not in wv):
+            bad.append("S: paging.c 的 window_va 没有转发到 port")
+        if sh.count("arkrtos_paging_window_va()") < 3:
+            bad.append("S: shell 里少于三处改用 window_va（u1/u2/cu 有硬写窗口址的）")
+        return bad
+
     for rel in ("kernelsrc/src/arkrtos_paging.c",
                 "kernelsrc/port/loongarch/la64/arkrtos_port.c",
                 "kernelsrc/port/loongarch/la64/arkrtos_context.S",
@@ -560,6 +637,9 @@ def main():
         src_mpu = _src("kernelsrc/include/arkrtos_mpu.h")
         src_elf = _src("kernelsrc/src/arkrtos_elf.c")
         src_sh = _src("kernelsrc/shell/arkrtos_shell.c")
+        src_feats = _src("kernelsrc/include/arkrtos_features.h")
+        src_kconf = _src("config/kconfig/Kconfig.features")
+        src_board = _src("board/qemu_loongarch64/arkrtos_board_config.h")
 
         for msg in (pin_e(src_pg) + pin_f(src_port) +
                     pin_g(src_hal, src_mpu) + pin_h(src_sh) +
@@ -568,7 +648,9 @@ def main():
                     pin_m(src_elf, src_sh) +
                     pin_n(src_port) + pin_o(src_pg, src_sh, src_hal, src_mpu) +
                     pin_p(src_pg, src_sh, src_hal, src_mpu) +
-                    pin_q(src_port) + pin_r(src_pg, src_port, src_sh, src_hal, src_mpu)):
+                    pin_q(src_port) + pin_r(src_pg, src_port, src_sh, src_hal, src_mpu) +
+                    pin_s(src_port, src_hal, src_mpu, src_pg, src_sh,
+                          src_feats, src_kconf, src_board)):
             failures.append("源码 pin 不成立 " + msg)
 
         # 自检：把每条 pin 依赖的那一句改坏，对应 pin 必须报错
@@ -618,6 +700,15 @@ def main():
                          src_sh.replace('pmap ftest: PASS (alloc/free/double-free/pattern',
                                         'pmap ftest: PASSX (alloc/free/double-free/pattern', 1),
                          src_hal, src_mpu)),
+            ("S", pin_s(src_port.replace("#define LA_PG_WIN_ENTRIES",
+                                          "#define LA_PG_WIN_ENTRXIES", 1),
+                         src_hal, src_mpu, src_pg, src_sh,
+                         src_feats, src_kconf, src_board)),
+            ("S-", pin_s(src_port.replace(
+                "arkrtos_port_paging_frame_alloc(LA_PG_WIN_PAGES, &base) != 0",
+                "arkrtos_port_paging_frame_alloc(LA_PG_WIN_PAGEZ, &base) != 0", 1),
+                src_hal, src_mpu, src_pg, src_sh,
+                src_feats, src_kconf, src_board)),
         ]
         for tag, got in selfchecks:
             if not got:
@@ -636,7 +727,8 @@ def main():
           "U-2 延迟换窗口 K-M pin 成立且自检有效 / "
           "U-15 映射撤销 N-O pin 成立且自检有效 / "
           "U-6 受控用户拷贝 P pin 与 invtlb 后重写窗口 Q pin 成立且自检有效 / "
-          "U-3 页帧池 R pin 成立且自检有效")
+          "U-3 页帧池 R pin 成立且自检有效 / "
+          "U-3 第二阶页级窗口 S pin 成立且自检有效")
     return 0
 
 

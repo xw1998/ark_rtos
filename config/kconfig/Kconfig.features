@@ -327,6 +327,19 @@ config ARKRTOS_USE_PAGING_FRAMES
 	  are later stages with their own switches.
 
 	  Off (default) changes nothing.
+config ARKRTOS_USE_PAGING_PAGES
+	bool "4 KB page-granular App window (U-3 stage 2)"
+	depends on ARKRTOS_USE_PAGING
+	depends on ARKRTOS_USE_PAGING_FRAMES
+	help
+	  Map the App window page by page instead of one 2 MB PS=20 entry:
+	  every address space takes a 512-frame (2 MB) run from the frame pool,
+	  and switching spaces rewrites the 256 STLB entries that cover the
+	  window (one 4 KB entry covers two adjacent pages).  The mapping is
+	  still built eagerly and frames are never returned, so this option
+	  changes only how the window is mapped.
+
+	  Off (default) changes nothing.
 config ARKRTOS_USE_ELF
 	bool "ELF64 executable loader (exec)"
 	depends on ARKRTOS_USE_VFS && ARKRTOS_USE_PRIV

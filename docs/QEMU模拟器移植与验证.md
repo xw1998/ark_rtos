@@ -2532,6 +2532,161 @@ pin **仍然通过**——因为 `"run == count"` 还是 `"run == countX"` 的�
 - **帧池只在 LA64 板级打开**：RV32 板配置没开，因此 32 位侧只有
   「关档零变化」这一条读数。
 
+### 5.22 页级 App 窗口（U-3 第二阶，2026-11-17）
+
+#### 5.22.1 欠的是什么
+
+§5.21 给了帧池，但池子没有使用方：App 窗口仍是每空间**一条** `PS=20`
+（2 MB）条目，空间号即帧号（`space n -> APP_BASE + n * 2 MB`）。
+于是两件事做不到：
+
+- 帧从池里出；空间与物理地址仍绑死，`pmap frame` 的 `used` 永远是 0；
+- 页粒度。2 MB 条目只有「整块有效 / 整块无效」两种状态，按需缺页
+  （U-5）在它上面没有落点。
+
+这一阶把窗口改成 **512 条页映射**：每个地址空间从帧池整块取 512 帧
+（2 MB），把窗口铺成 256 条 `PS=12` 条目。**仍然 eager、仍然不还帧**
+——它是「窗口怎么装」的改变，不是「什么时候装」「装完怎么回收」。
+
+#### 5.22.2 几何：一条 PS=12 条目管相邻两页
+
+LoongArch 的页表项是成对的：`TLBELO0` 管 `vaddr`，`TLBELO1` 管
+`vaddr + 4 KB`。所以
+
+```
+2 MB 窗口 = 512 页 = 256 条 PS=12 条目
+组号 set = (VA >> 13) & 0xFF，窗口基址 0x02000000 的组号 = 0
+条目号 = way * 256 + set   ⇒ 256 条正好铺满 STLB 的一个路（256 组）
+```
+
+窗口独占 **way 0**。这带来一个必须一起解决的问题：两条 4 KB 的 UART
+页（内核 UART 与 App UART，都在组 0）以前走 `la_tlb_fill()`（`tlbfill`
+的路号是**随机**的），撞一次 way 0 就顶掉窗口的第一条映射，症状是 App
+第一次取指就 refill 到一个「映射明明在」的地址。因此打开这一档时两条
+UART 页改走固定路：内核 UART **way 7**、App UART **way 6**。
+
+关档（`ARKRTOS_USE_PAGING_PAGES = 0`）时这两个 `#define` 不参与编译，
+`la_tlb_fill()` 原样保留。
+
+#### 5.22.3 切换流程与三条「不猜」
+
+`arkrtos_port_paging_activate(space)`（页级档）：
+
+1. `la_pg_space_ensure(space)`：该空间第一次被装时从池里整块要
+   `LA_PG_WIN_PAGES`（512）帧；要不到就 `return -3`，**窗口一条都不动**
+   ——半张窗口（一半有效一半 refill）是最难查的失败形态；
+2. 同一空间且首条目 PPN == 该空间帧基址、`ps == 12`：直接返回 0
+   （不能只看 space 号，别的路径的一次 `invtlb` 就可能把条目打掉，见 §5.18）；
+3. `la_pg_drop_window()`：逐 4 KB 对整段窗口 VA 发 `invtlb 3`。QEMU 的
+   softmmu 按 VA 记翻译，`tlbwr` 只清自己那 8 KB 且**奇页地址算错**
+   （`addr & pagesize`），所以「换窗口」必须按源码页显式失效 512 次；
+4. `la_pg_install_space(space)`：256 次 `la_tlb_write(va, 12u, ...)`；
+5. 抽查**首页与末页**：任一条 PPN / ps 对不上就 `return -2`，且
+   `s_pg_app_space` 不被改（报错留在原地，比「切换了」这句谎话好）。
+
+第 5 步踩过一个坑：`lookup` 读回的是条目 **TLBELO0（偶页）** 的 PPN，
+所以末页 `0x02000000 + 2MB - 4KB` 的期望值是这一对 8 KB 的**偶页基址**
+`base + 2MB - 8KB`，写成末页本身会得到一次假失败（首轮 QEMU 实测
+`pmap u1: rc1=-2`，修正后 `rc0=0 rc1=0`）。代码里留了注释。
+
+帧的来源与归属：`static uint32 s_pg_space_base[ARKRTOS_PAGING_APPS_MAX]`，
+`0` = 还没分配；**拿过不还**（空间回收仍是欠账，如实登记，不做「偷偷还了
+又可能被别人拿走」的那种实现）。
+
+#### 5.22.4 窗口 VA 挪出 shell
+
+页级档下「空间号 → VA」这条等式没了（VA 恒为窗口基址，帧基址只在物理
+侧），所以新增 port 接口 `arkrtos_port_paging_window_va()`（→
+`arkrtos_paging_window_va()`，关档回退 `(0u)`）。shell 里 `pmap u1` /
+`pmap u2` / `pmap cu` 三处原本硬写 `0x02000000`，现在全部改为读这个接口。
+窗口 VA 是 port 属性，不是 shell 该知道的事。
+
+#### 5.22.5 QEMU 实测（2026-11-17）
+
+启动后 `pmap frame` 的 `used` 从 0 变成 **512** —— 帧池的第一个真实使用方
+出现了。原文（`build/s2_run2.log`，`--boot 25 --timeout 4`，7 条命令）：
+
+```
+$ pmap frame
+pmap: frames total=2048 used=512 free=1536
+
+$ pmap look 0x02000000
+pmap look: va=0x02000000 entry=0 ps=12 ppn=0x04000000
+
+$ pmap u1
+pmap u1: va=0x02100000 space0=0xA5A50001 space1=0xA5A50002
+pmap u1: frame0=0x04000000 frame1=0x04200000
+pmap u1: rc0=0 rc1=0
+pmap u1: look0 entry=128 ps=12 ppn=0x04100000
+pmap u1: look1 entry=128 ps=12 ppn=0x04300000
+pmap u1: PASS - same VA, two frames
+
+$ pmap u2      -> PASS - two instances, two spaces, neither frame overwritten
+$ pmap cu      -> PASS - from/to user, refusals -1/-2/-3/-4, kernel survived
+$ pmap test    -> PASS (map / unmap / rebind / unmap)
+$ utest run    -> 13 matched, 13 passed, 0 failed; assertions 133 run / 0 failed
+```
+
+三条读数的意思要分开读：
+
+- `pmap look 0x02000000` 报 `ps=12`（不是 20）——窗口真的换了映射方式；
+- `used=512` 且 `pmap frame` 的 `free=1536`——每个空间整块 2 MB，
+  space 0 在 `la_pg_boot_map()` 里就拿了；
+- `pmap u1` 的 `look0 entry=128`：组 0 way 0 的第 0 条 = `0*256+0`（首条目），
+  `look1 entry=128` 同一原因是两个空间的**同一个 VA** 都在首条 —— 编号相同
+  而 PPN 不同（`0x04100000` vs `0x04300000`），这正是「同一 VA 两块物理内存」。
+
+`pmap u1` 的 VA 是 `0x02100000`（窗口 + 1 MB），落在第几对上由 port 的
+页级计算，跟「末页是 TLBELO1」那个坑无关；这里两条读的都是偶页。
+
+首轮日志（`build/s2_run1.log`）另有 `pmap ftest` 在页级档下的读数：
+`used` 基线是 512（不是 0），`pmap: frame alloc 1 rc=0 base=0x04200000`，
+判尾仍是 `PASS (alloc/free/double-free/pattern, used back to 512)` ——
+帧池自己的契约不因窗口用了它而变。
+
+RV32 关档：`text 235828 / data 128 / bss 628228`，**逐字节不变**。
+
+#### 5.22.6 门禁
+
+`tools/paging_gate.py` 新增 **pin S**（带两条防假绿自检），断言链覆盖八处：
+
+- 开关三处：`arkrtos_features.h` 缺省 0 / `Kconfig.features` 里
+  `config ARKRTOS_USE_PAGING_PAGES` 且两条 `depends on`（PAGING 与
+  FRAMES）/ 板级 `#define ARKRTOS_USE_PAGING_PAGES     1`；
+- port：`LA_PG_WIN_ENTRIES` 几何、组合守卫
+  `#error "ARKRTOS_USE_PAGING_PAGES=1 requires ARKRTOS_USE_PAGING_FRAMES=1"`、
+  `la_pg_space_ensure` 里 `frame_alloc(LA_PG_WIN_PAGES, &base)` 与 `return -3;`、
+  `la_pg_install_space` 里 `la_tlb_write(va, 12u, LA_STLB_INDEX(va, LA_PG_WIN_WAY),`、
+  `la_pg_drop_window` 里 `la_tlb_inval_page(`、`activate` 里 `return -2;` 与
+  末页期望 `(s_pg_space_base[space] + ARKRTOS_QEMU_APP_SIZE - 0x2000u)` 与
+  `(probed_ps != 12u)`、`la_pg_boot_map();` 真被调用、两条 UART 固定 way；
+- **PS=20 老路径仍在**：`la_tlb_write(ARKRTOS_QEMU_APP_BASE, 20u, LA_MTLB_INDEX + 2u`
+  在源码里出现 ≥ 2 次（`la_mmu_init` 与 `la_pg_assert_window` 各一条，
+  默认档没有它就没有窗口映射）；
+- 转发链：hal 的声明与 `(0u)` 回退、mpu.h 的声明与回退、`paging.c` 的
+  `window_va` 真转发到 port、shell 里 ≥ 3 处改用 `arkrtos_paging_window_va()`。
+
+自检两条：把 `#define LA_PG_WIN_ENTRIES` 改成 `LA_PG_WIN_ENTRXIES`；
+把 `frame_alloc(LA_PG_WIN_PAGES, &base) != 0` 里的 `LA_PG_WIN_PAGES` 改成
+`LA_PG_WIN_PAGEZ`（破坏被判定的子串本身，不是加后缀）。
+
+`ARKRTOS_USE_PAGING_PAGES` 的门禁同样挂在 `paging_gate.py` 上，**不新增
+ci_gate 项**（与 U-8 / pin R 同一条约定）。
+
+#### 5.22.7 明确没做的部分
+
+- **没有按需缺页（U-5）**：装载仍然是先把 512 帧全给出去再整段铺满；
+  `tlb_refill_entry` 还没有「BADV 在窗口内 ⇒ 换入一页」的分支，而且那个
+  入口现在**不保存通用寄存器**，要加分支得先给它补齐保存/恢复——单独一阶。
+- **没有空间回收**：帧拿过不还，`ARKRTOS_PAGING_APPS_MAX` 个空间跑满之后
+  再要空间就是 `-3`。谁负责还、什么时候还（任务退出？最后一个实例退出？）
+  没有设计，登记为欠账。
+- **没有 ASID**：切换空间仍靠整段 `invtlb`（512 次），跨核 TLB shootdown
+  仍无从谈起（U-7）。
+- **窗口独占 way 0**：内核 UART / App UART 已经改走 way 7 / 6 让开，但
+  其余经 `la_tlb_fill()` 进 STLB 的条目（如果有）仍可能与窗口抢路。
+- **只在 LA64 板级打开**：RV32 侧只有「关档零变化」这一条读数。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

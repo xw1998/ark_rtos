@@ -6772,7 +6772,7 @@ static int cmd_pmap(int argc, char *argv[])
          * 正在窗口里跑：ELF 装载器与运行中的程序都在这个 2 MB 里。 */
         /* 窗口基址不写死板级宏：space 0 的帧就是窗口基址（这条对应关系由
          * port 建立），所以从它推。+1 MB 落在 2 MB 窗口的中段。 */
-        uint32 va = arkrtos_paging_space_frame(0u) + 0x100000u;
+        uint32 va = arkrtos_paging_window_va() + 0x100000u;
         uint32 m0;
         uint32 m1;
         int fails = 0;
@@ -6930,7 +6930,7 @@ static int cmd_pmap(int argc, char *argv[])
             return 1;
         }
 
-        win  = arkrtos_paging_space_frame(0u);   /* space 0 的帧就是窗口基址 */
+        win  = arkrtos_paging_window_va();       /* 窗口的 VA 基址，与空间无关 */
         prev = arkrtos_paging_space_current();
 
         /* 两个空间各写一个不同的哨兵。装载器只许冲掉目标空间那一个。 */
@@ -7099,7 +7099,7 @@ static int cmd_pmap(int argc, char *argv[])
          * 带进 fault，这本身就是"不 fault 内核"的证据。
          * 用户侧那块内存取窗口里一段空地（与 pmap u1 同一位置，base+1 MB），
          * 先确认没有程序正在用窗口。 */
-        uint32 win  = arkrtos_paging_space_frame(0u);
+        uint32 win  = arkrtos_paging_window_va();
         uint32 uram = win + 0x100000u;
         uint32 urom = uram + 0x800u;
         uint32 prev = arkrtos_paging_space_current();
