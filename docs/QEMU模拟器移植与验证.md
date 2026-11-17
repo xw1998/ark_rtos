@@ -1899,24 +1899,114 @@ pmap test: PASS
 另外验过「在 space 1 里 `exec`」：程序在 frame 1 里装载并跑完（`argv[1]=z` 照常），
 说明装载点与运行空间被绑在一起，而不是各说各话。
 
-#### 5.17.5 门禁：I / J 两条 pin
+#### 5.17.5 门禁：I~M 五条 pin
 
-`tools/paging_gate.py` 在 E~H 之后新增两条源码 pin（与其余四条一样，每条都把源串
-改坏一次验证 pin 会报错）：
+`tools/paging_gate.py` 在 E~H 之后新增 I~M 五条源码 pin（与其余几条一样，每条都把源串
+改坏一次验证 pin 会报错；J 另有反向断言的自检）：
 
 | pin | 断言 |
 |---|---|
 | I | port 有 `la_tlb_inval_page()` 且函数体含 `invtlb 3`；`activate()` 体内**先** `la_tlb_inval_page(` 再 `la_tlb_write(ARKRTOS_QEMU_APP_BASE, 20u, LA_MTLB_INDEX + 2u` |
-| J | `set_app()` 体内调 `arkrtos_port_paging_activate(`；`arkrtos_hal.h` 关档回退 `lookup` 恒 0；`arkrtos_mpu.h` 有 `arkrtos_paging_space_activate(` |
+| J | `set_app()` 体内调 `arkrtos_port_paging_switch_to(` **且不出现** `arkrtos_port_paging_activate(`（后者就是 U-2 的崩法）；`arkrtos_hal.h` 关档回退 `lookup` 恒 0；`arkrtos_mpu.h` 有 `arkrtos_paging_space_activate(` |
+| K | port 有 `arkrtos_port_paging_switch_to()` 定义且体内按 `la_sp_in_app_window()` 分岔、窗口内只记 `s_pg_pending_space`；`la_switch_prepare()` 体内清 pending、认 `new_frame == old_frame`、补 `LA_FR_PRMD`、真调 `activate(space)` |
+| L | `.S` 里 `bl      la_switch_prepare` 与 `la.abs  $sp, la_switch_stack_top` 各两次（`eentry` / `switch_inline` 两条恢复路径），且第一次换栈在第一次 `bl` 之前；`.bss` 里有 `la_switch_stack_top` 与 `.space 2048` |
+| M | `arkrtos_elf.c` 有 `elf_slot_live()` / `elf_copy_to_window()`，`exec_space()` 体内有 `arkrtos_paging_space_activate(space)`、`arkrtos_paging_space_activate(prev)`、`elf_slot_live(space)`；shell 里有 `pmap u2: PASS - two instances, two spaces, neither frame overwritten` |
 
 pin I 就是这次那个坑的护栏：少了 `invtlb`，切换在 QEMU 上静默失效，而所有
 状态读数都还是"成功"。
 
-#### 5.17.6 明确没做的部分
+#### 5.17.6 同一个 VA 上并发跑两个程序（U-2，2026-11-17 已做）
 
-- **同一个 VA 上并发跑两个程序（U-2）**：装载器仍是单实例（`s_elf_task`），
-  第二次 `exec` 返回 `ERR_BUSY`。本轮的读数是「同一 VA 两块物理内存」的**机制**，
-  不是「两个 App 同时在场」。
+上一版这里写的是「装载器仍是单实例，第二次 `exec` 返回 `ERR_BUSY`」。U-2 把它换掉了：
+
+装载器（`kernelsrc/src/arkrtos_elf.c`）：
+
+- `s_elf_task[ARKRTOS_PAGING_APPS_MAX]` / `s_elf_info[]` / `elf_slot_live()` ——
+  台账从「一个实例」变成「每个空间一个」；`exec_space()` 挑第一个空空间，
+  全占着才返回 `ERR_BUSY`（语义与之前「窗口被占」一致）。
+- 段不再直接 `memcpy` 到窗口指针：分页档下先读进内核暂存 `s_elf_stage[4096]`，
+  再 `arkrtos_paging_space_activate(space)` + 每 4 KB 拷过去（`elf_copy_to_window()`）。
+  理由：装载期间内核跑在恒等映射上，而窗口 VA 属于目标 App，
+  直接写依赖「窗口此刻恰好指着它」这个隐含前提。
+- 装载前后记住并恢复 `arkrtos_paging_space_current()`：失败也要装回去，
+  否则 shell 之后每一条内存命令读到的都是别人的帧。
+
+调度路径（本次真正的坑）：
+
+```
+arkrtos_sched_activate() -> arkrtos_mpu_set_app() -> 重写 App 窗口 MTLB 条目
+```
+
+而 LA64 的 trap 帧（`eentry`）与内联切换帧（`arkrtos_task_switch` 那条）都压在
+**被换下任务自己的栈**上，App 任务的栈就在 App 的 2 MB 窗口 VA 里。条目一换，
+这段 C 代码的返回地址、`$s0` 帧指针槽、局部量在下一句 `ld.d` / 函数返回时
+就从**另一个 App 的帧**里取值。实测：
+
+```
+FATAL estat=0x00080000 ecode=0x00000008 era=0xcdcdcdcd badv=0xcdcdcdcd
+      badi=0x002b0010 crmd=0x00000010
+```
+
+`0xcdcdcdcd` 是该 port 的栈填充图样起手，`ertn` 于是跳到那里，PLV3 里 ADEF 停机。
+
+修法（延迟换窗口）：
+
+1. `arkrtos_port_paging_switch_to(space)`（`arkrtos_hal.h` 有契约，关档宏恒 -1）：
+   越界 -1；`la_sp_in_app_window()` 为真（当前 `sp` 落在
+   `[APP_BASE, APP_BASE+APP_SIZE)`）就只记 `s_pg_pending_space` 并返回 0；
+   否则等价于 `activate()`。判据用 `sp` 而不是 `current->is_priv`：危险的
+   精确条件是「恢复现场要用的那一帧压在同一个 VA 上」。
+2. `arkrtos_context.S` 的两条恢复路径（`eentry`、`arkrtos_port_switch_task_inline`）
+   在 `la_trap_c` / `la_switch_inline` 返回、拿到目标帧之后，先
+   `la.abs $sp, la_switch_stack_top`（恒等映射里的 2 KB 静态栈，`.bss`），
+   再 `bl la_switch_prepare(new_frame, old_frame)`。换完之后不再碰任何栈，
+   只按 `$s0` 恢复寄存器。
+3. `la_switch_prepare()`（`arkrtos_port.c`）：无 pending 直接返回；
+   `new_frame == old_frame`（调度器最后没切走）则清 pending **不切**——否则
+   这一帧的恢复会从另一个 App 的帧里取值；否则 `activate(space)` 之后补写
+   `new_frame[LA_FR_PRMD]`（C 侧 `LA_PRIV_APPLY` 是在窗口还没换时执行的，
+   它写进去的是旧窗口里那块内存，不是目标帧）。
+
+错误/重填路径不用改：它们进 C 之前已经把 `sp` 换到 `la_fault_stack` / `la_refill_stack`，
+`la_sp_in_app_window()` 自然为假，行为退化成「立即生效」。
+
+实测读数（`build/u2run2.log`，端口 45841，`grep -c FATAL` = 0）：
+
+```
+$ pmap u2
+pmap u2: /mnt/ram/hello -> space 0 task 4, space 1 task 9
+pmap u2: frame0=0x02000000 frame1=0x02200000
+pmap u2: same VA 0x02000000 reads 0x00150064 / 0x00150064, other slot before/after 0xA5A50202 / 0x00150064
+[hello] entry sp=35635200 argc=1
+[hello] hello from an ELF64 program
+[hello] argc=1
+[hello] argv[0]=/mnt/ram/hello
+[hello] bye
+[hello] entry sp=35635200 argc=1
+[hello] hello from an ELF64 program
+[hello] argc=1
+[hello] argv[0]=/mnt/ram/hello
+[hello] bye
+pmap u2: PASS - two instances, two spaces, neither frame overwritten
+$ pmap elf
+pmap elf: spaces=2 last=1
+  space 0 frame=0x02000000 task=4 live=0 bytes=1732 entry=0x02000000
+  space 1 frame=0x02200000 task=9 live=0 bytes=1732 entry=0x02000000
+pmap elf: 0 live instance(s)
+```
+
+注意判据：同一 VA 两个空间读出**相同**字（`0x00150064` = hello 的第一条指令，
+不是 ELF 魔数——入口是 `0x02000000`），这是对的；区分身份靠 `frame0/frame1`、
+`task 4/9` 与「另一槽位装载前是 `0xA5A50202` 哨兵、装载后被覆盖」。
+两次 `bye` 才是「两个实例各自跑完」的证据——只有 `PASS` 而没看到两条 `bye`
+不算并发。
+
+回归（`build/regress_u2.log`，端口 45851）：`--modld-check` 7 条 +
+`--stack-guard-check` 1 条 + 单实例 `exec /mnt/ram/hello a b`（仍报
+`space 0`、`finished after 0 ms`）+ `pmap elf`，`SHELL-DRIVE OK: 10 条命令全部符合预期`。
+
+#### 5.17.7 明确没做的部分
+
 - **页帧分配器（U-3）**：帧是板级固定数组，只按 `ARKRTOS_PAGING_APPS_MAX` 开。
 - **ASID / TLB shootdown（U-7）**：ASID 恒 0，切换靠重写条目。
 - **`copy_from_user`（U-6）**、按需缺页（U-5）、App 反向探测（PLV3 读内核页/别的帧）

@@ -60,11 +60,33 @@ typedef struct {
 */
 int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[]);
 
-/** @brief 上一次成功装载的读数；没有过成功装载时返回 ARKRTOS_ELF_ERR_PARAM */
+/**
+* @brief 装进指定地址空间之外，多给一个"落到哪个空间"的出口
+* @param p_space 可为 0；成功时写回空间号
+* @return 0 = 已起跑；ARKRTOS_ELF_ERR_BUSY = 所有空间都有活实例
+* @note 挑空间是装载器的决定，调用方只读结果。U-2（2026-11-17）起，
+*       "同一时间只能跑一个程序"变成"每个地址空间一个"。
+*/
+int32 arkrtos_elf_exec_space(const char *path, int32 argc, char *argv[],
+                             uint32 *p_space);
+
+/** @brief 上一次成功装载的读数（最近一次的那个空间）；没有过成功装载时返回 ARKRTOS_ELF_ERR_PARAM */
 int32 arkrtos_elf_info(arkrtos_elf_info_t *p_out);
 
-/** @brief 1 = 有一个 ELF 任务在跑（M1 单实例），0 = 窗口空着 */
+/** @brief 指定空间的那次装载读数 */
+int32 arkrtos_elf_info_space(uint32 space, arkrtos_elf_info_t *p_out);
+
+/** @brief 1 = 指定空间里有活的 ELF 任务，0 = 该空间空着（或没有这个空间） */
+int32 arkrtos_elf_running_in(uint32 space);
+
+/** @brief 1 = 至少有一个 ELF 任务在跑，0 = 所有空间都空着 */
 int32 arkrtos_elf_running(void);
+
+/** @brief 可用的地址空间数（不分页的构建是 1） */
+int32 arkrtos_elf_space_count(void);
+
+/** @brief 最近一次成功装载落到哪个空间；-1 = 还没有过 */
+int32 arkrtos_elf_last_space(void);
 
 /** @brief 返回码的短名（只用于打印，不参与判定） */
 const char *arkrtos_elf_error_name(int32 rc);
@@ -73,8 +95,13 @@ const char *arkrtos_elf_error_name(int32 rc);
 
 /* 关闭档：调用点不必再套 #if，且每个入口都回答「没有这件事」。 */
 #define arkrtos_elf_exec(path, argc, argv)      ((int32)(-1))
+#define arkrtos_elf_exec_space(p, c, v, sp)     ((int32)(-1))
 #define arkrtos_elf_running()                   ((int32)0)
+#define arkrtos_elf_running_in(space)           ((int32)0)
+#define arkrtos_elf_space_count()               ((int32)1)
+#define arkrtos_elf_last_space()                ((int32)(-1))
 #define arkrtos_elf_info(out)                   ((int32)(-1))
+#define arkrtos_elf_info_space(space, out)      ((int32)(-1))
 #define arkrtos_elf_error_name(rc)              ("elf support not compiled in")
 
 #endif /* ARKRTOS_USE_ELF */

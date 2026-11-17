@@ -5993,8 +5993,9 @@ static int cmd_hwsafe(int argc, char *argv[])
  * @details 与 app run 的区别：那条走裸镜像 + 固定入口约定；这条走标准
  *          ELF64，入口按 Linux 约定（sp 指向 argc/argv/NULL/envp NULL），
  *          所以一个普通 -static 程序不需要为 Ark 改一行。
- *          装载器只装了「文件进窗口 + 降权起任务」，地址空间仍是共享的
- *          那一个（M1），所以这里同时只允许一个程序在跑。
+ *          U-2（2026-11-17）之后装载器会把每个程序放进一个空地址空间，
+ *          所以这里不再自己判"窗口是否被占"——那件事由装载器按空间台账回答，
+ *          全部空间都在用时它返回 ARKRTOS_ELF_ERR_BUSY。
  * ============================================================ */
 
 /* 等程序结束的上限。程序自己卡死时不能让 shell 永远不回来，但也不能
@@ -6007,36 +6008,33 @@ static int shell_exec_file(const char *path, int argc, char *argv[])
     arkrtos_elf_info_t info;
     int32 rc;
     uint32 waited = 0u;
+    uint32 space = 0u;
 
-    if (arkrtos_elf_running() != 0)
-    {
-        ark_shell_printf("\r\n%s: busy - another program is still in the "
-                         "exec window (see 'task')\r\n", path);
-        return 1;
-    }
-
-    rc = arkrtos_elf_exec(path, argc, argv);
+    rc = arkrtos_elf_exec_space(path, argc, argv, &space);
     if (rc != ARKRTOS_ELF_OK)
     {
         /* 错误名来自装载器，不在 shell 里另写一套文案：同一个 rc 在两处
-         * 说法不一致时，读数就没法对账了。 */
+         * 说法不一致时，读数就没法对账了。BUSY 的含义现在是"所有地址空间
+         * 都有程序在跑"，不是"窗口只有一块"。 */
         ark_shell_printf("\r\n%s: %s (rc=%d)\r\n", path,
                          arkrtos_elf_error_name(rc), (int)rc);
         return 1;
     }
 
-    if (arkrtos_elf_info(&info) == 0)
+    if (arkrtos_elf_info_space(space, &info) == 0)
     {
         ark_shell_printf("\r\n[ELF] %s: %u B, %u segment(s), entry 0x%08X, "
-                         "sp 0x%08X, argc %u, task %d\r\n",
+                         "sp 0x%08X, argc %u, task %d, space %u\r\n",
                          path, (unsigned)info.bytes, (unsigned)info.segs,
                          (unsigned)info.entry, (unsigned)info.sp,
-                         (unsigned)info.argc, (int)info.task);
+                         (unsigned)info.argc, (int)info.task, (unsigned)space);
     }
 
     /* 等它跑完。必须让出 CPU 而不是忙等：本函数在 shell 任务里，忙等期间
-     * 同优先级上下的程序任务拿不到时间片的概率全看调度器，读数会飘。 */
-    while (arkrtos_elf_running() != 0)
+     * 同优先级上下的程序任务拿不到时间片的概率全看调度器，读数会飘。
+     * 等的只是这个空间里的那个任务：别的空间里还有程序在跑时，本命令
+     * 不该跟着一起等（那会让"并发多实例"在 shell 上看起来又不成立）。 */
+    while (arkrtos_elf_running_in(space) != 0)
     {
         if (waited >= SHELL_EXEC_WAIT_MS)
         {
@@ -6053,7 +6051,8 @@ static int shell_exec_file(const char *path, int argc, char *argv[])
      * 没有 code 参数，TCB 里也没有字段接着。所以这里只说「结束了」，
      * 不编一个看起来像退出码的数字。欠账记在
      * docs/MMU进程模型与ELF装载.md。 */
-    ark_shell_printf("[ELF] %s: finished after %u ms\r\n", path, (unsigned)waited);
+    ark_shell_printf("[ELF] %s: finished after %u ms (space %u)\r\n",
+                     path, (unsigned)waited, (unsigned)space);
     return 0;
 }
 
@@ -6256,6 +6255,9 @@ static int cmd_unld(int argc, char *argv[])
  *            pmap space [n]                            地址空间：读（无参）或切换
  *            pmap u1                                   自测：同一 VA 在两个空间里是
  *                                                      两块物理内存（U-1 的读数）
+ *            pmap elf                                  每空间一份的 ELF 实例台账
+ *            pmap u2 [path]                            自测：同一份 ELF 装进两个空
+ *                                                      间、并发两个任务、互不覆盖
  *            pmap look <va>                            读回该 VA 命中的 TLB 条目
  *
  *          **注意**：`pmap rd/rb/wrb` 不做保护性检查 —— 地址没映射就是一次
@@ -6605,13 +6607,261 @@ static int cmd_pmap(int argc, char *argv[])
         return 0;
     }
 
+    if((argc >= 2) && (strcmp(argv[1], "elf") == 0))
+    {
+        int32 i;
+        int32 n = arkrtos_elf_space_count();
+        int32 live = 0;
+
+        ark_shell_printf("pmap elf: spaces=%d last=%d\r\n",
+                         (int)n, (int)arkrtos_elf_last_space());
+
+        for(i = 0; (i < n) && (i < (int32)ARKRTOS_TASK_MAX_NUM); i++)
+        {
+            arkrtos_elf_info_t inf;
+            uint32 frame = arkrtos_paging_space_frame((uint32)i);
+            int32 running = arkrtos_elf_running_in((uint32)i);
+
+            if(running != 0)
+            {
+                live++;
+            }
+
+            if((arkrtos_elf_info_space((uint32)i, &inf) == ARKRTOS_ELF_OK) &&
+               (inf.task > 0))
+            {
+                ark_shell_printf("  space %d frame=0x%08X task=%d live=%d "
+                                 "bytes=%u entry=0x%08X\r\n",
+                                 (int)i, (unsigned)frame, (int)inf.task,
+                                 (int)running, (unsigned)inf.bytes,
+                                 (unsigned)inf.entry);
+            }
+            else
+            {
+                ark_shell_printf("  space %d frame=0x%08X empty\r\n",
+                                 (int)i, (unsigned)frame);
+            }
+        }
+
+        ark_shell_printf("pmap elf: %d live instance(s)\r\n", (int)live);
+        return 0;
+    }
+
+    if((argc >= 2) && (strcmp(argv[1], "u2") == 0))
+    {
+        /* 同一份文件装进两个地址空间 -> 两个任务并发跑，各自的帧互不覆盖。
+         *
+         * 判据全部是"从同一 VA 读出什么"，不拿 PA 数字当证据：
+         *   1) 装载前在两块帧的窗口首字各放一个不同的哨兵；一次装载只许
+         *      冲掉自己那块帧的哨兵，另一块必须原封不动；
+         *   2) 两次装载必须落在两个不同的空间，两次装载后各自那块帧里
+         *      必须是程序自己写进去的内容（!= 哨兵）；
+         *   3) 两次装载都做完的那一刻，两个空间各有活任务、任务号不同、
+         *      绑定就是自己那个空间 —— 这才是"并发多实例"。
+         *
+         * 整段在调度器锁里做：测的是"装载 + 台账"，不是 hello 跑多久。
+         * 不加锁的话一个眨眼就退出的程序会在两次装载之间把任务槽还回来，
+         * 第二次装载拿到同一个任务号，读数看起来像"两个实例共用一个任务"，
+         * 其实只是前者已经退场。锁外那两个任务才开始跑。 */
+        const char *path = (argc >= 3) ? argv[2] : "/mnt/ram/hello";
+        char *uargv[1];
+        uint32 win;
+        uint32 prev;
+        uint32 s_first = 0u;
+        uint32 s_second = 0u;
+        uint32 other = 0u;
+        uint32 sentinel_first = 0xA5A50201u;
+        uint32 sentinel_other = 0xA5A50202u;
+        uint32 w_first;
+        uint32 w_other_before;
+        uint32 w_first_after;
+        uint32 w_second;
+        arkrtos_elf_info_t inf0;
+        arkrtos_elf_info_t inf1;
+        int fails = 0;
+        int locked = 0;
+        int32 rc;
+
+        if(arkrtos_paging_space_count() < 2u)
+        {
+            sh_out("pmap u2: refused - board provides only one address space\r\n");
+            return 1;
+        }
+        if(arkrtos_elf_running() != 0)
+        {
+            sh_out("pmap u2: refused - an ELF program is already running "
+                   "(try 'pmap elf')\r\n");
+            return 1;
+        }
+
+        win  = arkrtos_paging_space_frame(0u);   /* space 0 的帧就是窗口基址 */
+        prev = arkrtos_paging_space_current();
+
+        /* 两个空间各写一个不同的哨兵。装载器只许冲掉目标空间那一个。 */
+        (void)arkrtos_paging_space_activate(0u);
+        *(volatile uint32 *)(unsigned long)win = sentinel_first;
+        (void)arkrtos_paging_space_activate(1u);
+        *(volatile uint32 *)(unsigned long)win = sentinel_other;
+        (void)arkrtos_paging_space_activate(prev);
+
+        #if (ARKRTOS_USE_SCHED_LOCK == 1)
+        arkrtos_sched_lock();
+        locked = 1;
+        #endif
+
+        uargv[0] = (char *)path;
+        rc = arkrtos_elf_exec_space(path, 1, uargv, &s_first);
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            ark_shell_printf("pmap u2: first exec failed: %s (rc=%d)\r\n",
+                             arkrtos_elf_error_name(rc), (int)rc);
+            fails++;
+        }
+        else
+        {
+            other = (s_first == 0u) ? 1u : 0u;
+
+            (void)arkrtos_paging_space_activate(s_first);
+            w_first = *(volatile uint32 *)(unsigned long)win;
+            (void)arkrtos_paging_space_activate(other);
+            w_other_before = *(volatile uint32 *)(unsigned long)win;
+            (void)arkrtos_paging_space_activate(prev);
+
+            if(w_other_before != ((other == 0u) ? sentinel_first : sentinel_other))
+            {
+                fails++;
+                ark_shell_printf("pmap u2: FAIL - loading space %u wrote into "
+                                 "space %u (0x%08X)\r\n",
+                                 (unsigned)s_first, (unsigned)other,
+                                 (unsigned)w_other_before);
+            }
+            if(w_first == ((s_first == 0u) ? sentinel_first : sentinel_other))
+            {
+                fails++;
+                ark_shell_printf("pmap u2: FAIL - space %u still holds its "
+                                 "sentinel after the load\r\n", (unsigned)s_first);
+            }
+
+            rc = arkrtos_elf_exec_space(path, 1, uargv, &s_second);
+            if(rc != ARKRTOS_ELF_OK)
+            {
+                ark_shell_printf("pmap u2: second exec failed: %s (rc=%d)\r\n",
+                                 arkrtos_elf_error_name(rc), (int)rc);
+                fails++;
+            }
+            else if(s_second == s_first)
+            {
+                fails++;
+                ark_shell_printf("pmap u2: FAIL - second instance reused space %u\r\n",
+                                 (unsigned)s_first);
+            }
+            else
+            {
+                (void)arkrtos_paging_space_activate(s_second);
+                w_second = *(volatile uint32 *)(unsigned long)win;
+                (void)arkrtos_paging_space_activate(s_first);
+                w_first_after = *(volatile uint32 *)(unsigned long)win;
+                (void)arkrtos_paging_space_activate(prev);
+
+                if(w_second == ((s_second == 0u) ? sentinel_first : sentinel_other))
+                {
+                    fails++;
+                    ark_shell_printf("pmap u2: FAIL - space %u still holds its "
+                                     "sentinel after the load\r\n",
+                                     (unsigned)s_second);
+                }
+                if(w_first_after != w_first)
+                {
+                    fails++;
+                    ark_shell_printf("pmap u2: FAIL - the second load changed "
+                                     "space %u (0x%08X -> 0x%08X)\r\n",
+                                     (unsigned)s_first, (unsigned)w_first,
+                                     (unsigned)w_first_after);
+                }
+
+                /* 两个实例此刻都该是活的：调度器锁着，它们还没机会退出。 */
+                if(arkrtos_elf_running_in(s_first) == 0)
+                {
+                    fails++;
+                    ark_shell_printf("pmap u2: FAIL - space %u has no live task "
+                                     "right after the load\r\n", (unsigned)s_first);
+                }
+                if(arkrtos_elf_running_in(s_second) == 0)
+                {
+                    fails++;
+                    ark_shell_printf("pmap u2: FAIL - space %u has no live task "
+                                     "right after the load\r\n", (unsigned)s_second);
+                }
+
+                if((arkrtos_elf_info_space(s_first, &inf0) != ARKRTOS_ELF_OK) ||
+                   (arkrtos_elf_info_space(s_second, &inf1) != ARKRTOS_ELF_OK))
+                {
+                    fails++;
+                }
+                else
+                {
+                    if(inf0.task == inf1.task)
+                    {
+                        fails++;
+                        ark_shell_printf("pmap u2: FAIL - both instances share "
+                                         "task %d\r\n", (int)inf0.task);
+                    }
+                    if(arkrtos_paging_space_of(&arkrtos_task_table[inf0.task - 1]) != s_first)
+                    {
+                        fails++;
+                        ark_shell_printf("pmap u2: FAIL - task %d is not bound to "
+                                         "space %u\r\n", (int)inf0.task,
+                                         (unsigned)s_first);
+                    }
+                    if(arkrtos_paging_space_of(&arkrtos_task_table[inf1.task - 1]) != s_second)
+                    {
+                        fails++;
+                        ark_shell_printf("pmap u2: FAIL - task %d is not bound to "
+                                         "space %u\r\n", (int)inf1.task,
+                                         (unsigned)s_second);
+                    }
+                }
+
+                ark_shell_printf("pmap u2: %s -> space %u task %d, space %u task %d\r\n",
+                                 path, (unsigned)s_first, (int)inf0.task,
+                                 (unsigned)s_second, (int)inf1.task);
+                ark_shell_printf("pmap u2: frame%u=0x%08X frame%u=0x%08X\r\n",
+                                 (unsigned)s_first,
+                                 (unsigned)arkrtos_paging_space_frame(s_first),
+                                 (unsigned)s_second,
+                                 (unsigned)arkrtos_paging_space_frame(s_second));
+                ark_shell_printf("pmap u2: same VA 0x%08X reads 0x%08X / 0x%08X, "
+                                 "other slot before/after 0x%08X / 0x%08X\r\n",
+                                 (unsigned)win, (unsigned)w_first,
+                                 (unsigned)w_second, (unsigned)w_other_before,
+                                 (unsigned)w_first_after);
+            }
+        }
+
+        if(locked != 0)
+        {
+            #if (ARKRTOS_USE_SCHED_LOCK == 1)
+            (void)arkrtos_sched_unlock();
+            #endif
+        }
+
+        if(fails != 0)
+        {
+            ark_shell_printf("pmap u2: FAIL (%d checks failed)\r\n", fails);
+            return 1;
+        }
+
+        sh_out("pmap u2: PASS - two instances, two spaces, neither frame overwritten\r\n");
+        return 0;
+    }
+
     rc = arkrtos_paging_stats(&checked, &bad, &bad_base);
     ark_shell_printf("pmap: init_rc=%d checked=%u bad=%u bad_base=0x%08X pages=%u\r\n",
                      (int)rc, (unsigned)checked, (unsigned)bad,
                      (unsigned)bad_base, (unsigned)arkrtos_paging_map_pages());
     sh_out("usage: pmap [map <va> <pa> <size> <kind> | check <va> <size> <kind> |"
            " rd <va> [n] | rb <va> | wrb <va> <byte> | test | space [n] | u1 |\r\n"
-           " look <va>]\r\n");
+           " elf | u2 [path] | look <va>]\r\n");
     return 0;
 }
 #endif /* ARKRTOS_USE_PAGING == 1 */

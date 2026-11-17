@@ -108,7 +108,16 @@ eentry:
 
     move    $a0, $s0
     bl      la_trap_c               /* 返回要恢复的帧（可能已换成别的任务） */
+    move    $s1, $s0                /* 被换下任务的帧：用来判「到底切没切」 */
     move    $s0, $a0
+
+    /* 换窗口 (U-2)：目标帧可能落在另一个 App 的页里，而此刻 sp 还指向被打断
+     * 任务的栈 —— 那个栈本身就在 App 窗口里。所以先换到一块内核静态栈再进
+     * C（la_switch_prepare 自己要用栈），换完之后不再碰任何栈。 */
+    la.abs  $sp, la_switch_stack_top
+    move    $a0, $s0
+    move    $a1, $s1
+    bl      la_switch_prepare
 
     /* ERA / PRMD 与通用寄存器都从这里恢复；sp / tp / s0 最后取，
      * 因为在这一步之前 s0 还是帧指针。 */
@@ -219,9 +228,17 @@ arkrtos_port_switch_task_inline:
     ori     $t1, $zero, 1
     csrxchg $zero, $t1, 0x0
 
+    move    $s1, $s0                /* 本任务的帧：用来判「到底切没切」 */
     move    $a0, $s0
     bl      la_switch_inline
     move    $s0, $a0
+
+    /* 同 eentry：这段代码可能就跑在被换下 App 自己的栈上，换窗口只能推迟到
+     * 这里、并且换到内核静态栈上做。 */
+    la.abs  $sp, la_switch_stack_top
+    move    $a0, $s0
+    move    $a1, $s1
+    bl      la_switch_prepare
 
     ld.d    $t0, $s0, 240
     csrwr   $t0, 0x6
@@ -350,6 +367,21 @@ la_refill_stack_bottom:
     .space  8192
     .globl  la_refill_stack_top
 la_refill_stack_top:
+
+/* ============================================================
+ * 换窗口专用的静态栈 (U-2)
+ * @details 切换路径要重写 App 窗口条目，而调用它的代码可能就跑在被换下
+ *          App 自己的栈上（那个栈就在窗口里）。重写的一瞬间，栈上的返回
+ *          地址、s0 槽、局部量全部换了物理帧 —— 所以换窗口这一步必须搬
+ *          到一块**恒等映射**里的栈上做，这块就是它。2 KB：里面只跑
+ *          la_switch_prepare()（一次 tlbwr + 两次 tlbsrch/tlbrd）。
+ * ============================================================ */
+    .align  4
+    .globl  la_switch_stack_bottom
+la_switch_stack_bottom:
+    .space  2048
+    .globl  la_switch_stack_top
+la_switch_stack_top:
 
 /* ============================================================
  * App（PLV3）故障的派发入口

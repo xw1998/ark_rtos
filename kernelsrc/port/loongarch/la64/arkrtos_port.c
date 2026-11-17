@@ -773,12 +773,96 @@ int32 arkrtos_port_paging_activate(uint32 space)
     return 0;
 }
 
+/* ------------------------------------------------------------ 延迟换窗口 (U-2) */
+
+/* 待装的空间号。0xFFFFFFFF = 没有待装项：0 是合法空间号，不能拿它当空值。 */
+#define LA_PG_PENDING_NONE      0xFFFFFFFFu
+
+static volatile uint32 s_pg_pending_space = LA_PG_PENDING_NONE;
+
+/** 调用者此刻的 sp 是否落在 App 窗口里 */
+static uint32 la_sp_in_app_window(void)
+{
+    unsigned long sp;
+
+    __asm__ volatile("move %0, $sp" : "=r"(sp) : : "memory");
+
+    return (((uint32)sp >= (uint32)ARKRTOS_QEMU_APP_BASE) &&
+            ((uint32)sp <  ((uint32)ARKRTOS_QEMU_APP_BASE +
+                            (uint32)ARKRTOS_QEMU_APP_SIZE))) ? 1u : 0u;
+}
+
+/**
+* @brief 调度器换窗口：调用者自己站在窗口里时必须推迟（U-2）
+* @details 详见 arkrtos_hal.h 的声明。判据就是「我此刻的 sp 在不在窗口里」，
+*          它精确对应危险条件：恢复现场要用的那一帧（以及本函数的返回地址）
+*          正压在同一个窗口 VA 上。推迟不等于不换 —— 换的时机交给
+*          arkrtos_context.S：那里已经不再碰被换下任务的栈了。
+*/
+int32 arkrtos_port_paging_switch_to(uint32 space)
+{
+    if(space >= (uint32)ARKRTOS_PAGING_APPS_MAX)
+    {
+        return -1;
+    }
+
+    if(la_sp_in_app_window() != 0u)
+    {
+        s_pg_pending_space = space;
+        return 0;
+    }
+
+    return arkrtos_port_paging_activate(space);
+}
+
+/**
+* @brief 恢复现场之前补做被推迟的窗口切换（由 arkrtos_context.S 调用）
+* @param new_frame 即将恢复的帧
+* @param old_frame 被换下任务的帧（同一个 = 调度器最后没切走）
+* @details 本函数由汇编入口在**一块内核静态栈**上调用：进入时 sp 可能还指向
+*          App 窗口里的栈，而它自己一落地就要开始写栈 —— 所以汇编侧先把 sp
+*          换到 la_switch_stack，再进来。返回之后汇编侧不再碰任何栈，只按
+*          $s0 指向的目标帧恢复寄存器。
+*
+*          PRMD 也要在这里补：C 侧的 LA_PRIV_APPLY 在「窗口还没换」的时候
+*          执行，它写进去的是旧窗口里的那块内存，不是目标帧。
+*/
+void la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_frame)
+{
+    uint32 space = s_pg_pending_space;
+
+    if(space == LA_PG_PENDING_NONE)
+    {
+        return;
+    }
+
+    s_pg_pending_space = LA_PG_PENDING_NONE;
+
+    /* 调度器把帧原样交回来了：窗口必须留在原处，否则这一帧的恢复会从
+     * 另一个 App 的帧里取值。 */
+    if(new_frame == old_frame)
+    {
+        return;
+    }
+
+    (void)arkrtos_port_paging_activate(space);
+
+    new_frame[LA_FR_PRMD] = (new_frame[LA_FR_PRMD] & ~3UL) | (unsigned long)s_next_pplv;
+}
+
 #else  /* ARKRTOS_USE_PRIV == 0：没有 TLB 通路 */
 
 int32 arkrtos_port_paging_activate(uint32 space)
 {
     (void)space;
     return -1;
+}
+
+/** 没有窗口可换：恢复现场前没有要补做的事 */
+void la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_frame)
+{
+    (void)new_frame;
+    (void)old_frame;
 }
 
 #endif /* ARKRTOS_USE_PRIV == 1 */

@@ -35,9 +35,9 @@
 #include "arkrtos_vfs.h"
 #if (ARKRTOS_USE_EXEC_SIGN == 1)
 #include "arkrtos_sign.h"
+#endif
 #if (ARKRTOS_USE_PAGING == 1)
 #include "arkrtos_mpu.h"
-#endif
 #endif
 
 /* ---------------------------------------------------------------- 编译期 */
@@ -157,10 +157,67 @@ static void elf_memcpy(uint8 *dst, const uint8 *src, uint32 n)
 
 /* ---------------------------------------------------------------- 状态 */
 
-/* M1 是单实例：窗口只有一块，两个程序同时在一个地址空间里跑没有任何意义。
- * 这个变量记着「窗口现在归谁」，任务退出后由 arkrtos_elf_running() 懒清理。 */
-static int32 s_elf_task = 0;
-static arkrtos_elf_info_t s_elf_info;
+/* 实例台账，下标是地址空间号。
+ *
+ * U-2（2026-11-17）之前这里只有一个 s_elf_task，因为窗口只有一块，两个程序
+ * 同时在一个地址空间里跑没有意义。分页后端给每块窗口一个地址空间之后，
+ * 「窗口只有一块」这个前提不再成立：同一 VA 在每个空间里各指向一块物理帧，
+ * 所以每个空间各自记一份实例，互不覆盖。
+ *
+ * 不开分页的构建里空间数就是 1，台账退化成原来的单槽，行为与以前逐位一致。 */
+#if (ARKRTOS_USE_PAGING == 1)
+#ifndef ARKRTOS_PAGING_APPS_MAX
+#define ARKRTOS_PAGING_APPS_MAX     1u
+#endif
+#define ELF_INST_MAX                ARKRTOS_PAGING_APPS_MAX
+#else
+#define ELF_INST_MAX                1u
+#endif
+
+static int32 s_elf_task[ELF_INST_MAX];              /* 0 = 该空间空着 */
+static arkrtos_elf_info_t s_elf_info[ELF_INST_MAX]; /* 该空间最后一次装载的读数 */
+static int32 s_elf_last = -1;                       /* 最近一次装载落在哪个空间 */
+
+/* ------------------------------------------------------------ 实例台账 */
+
+/* 任务退出后 status 回到 INVALID。懒清理：不要求退出路径回调进来，
+ * 代价是一次数组读，和原来的单实例版本同量级。 */
+static int32 elf_slot_live(uint32 space)
+{
+    int32 id;
+
+    if(space >= (uint32)ELF_INST_MAX)
+    {
+        return 0;
+    }
+
+    id = s_elf_task[space];
+    if(id <= 0)
+    {
+        return 0;
+    }
+
+    if(arkrtos_task_table[id - 1].status == ARKRTOS_TASK_INVALID)
+    {
+        s_elf_task[space] = 0;
+        return 0;
+    }
+
+    return 1;
+}
+
+/* 可用空间数 = min(编译期台账长度, 端口真正提供的空间数)。板级把
+ * ARKRTOS_PAGING_APPS_MAX 写大了而端口只有一块窗口时，按端口算，不猜。 */
+static uint32 elf_space_capacity(void)
+{
+#if (ARKRTOS_USE_PAGING == 1)
+    uint32 n = arkrtos_paging_space_count();
+
+    return (n < (uint32)ELF_INST_MAX) ? n : (uint32)ELF_INST_MAX;
+#else
+    return 1u;
+#endif
+}
 
 /* ---------------------------------------------------------------- 内部 */
 
@@ -187,6 +244,59 @@ static int32 elf_read_exact(const char *path, uint8 *buf, uint32 len, uint32 off
     }
     return ARKRTOS_ELF_OK;
 }
+
+#if (ARKRTOS_USE_PAGING == 1)
+/* 往窗口里落字节必须「先装对空间、再落笔」。
+ *
+ * 为什么不能像以前那样把窗口地址直接交给 VFS 读：拷贝期间可能被抢占，
+ * 调度器切到别的 App 时会把这个 VA 重装成那个任务的帧，回来以后同一个 VA
+ * 指的是别人的内存。所以数据先读进内核暂存（完全不碰窗口），装好空间之后
+ * 再 memcpy 进去；memcpy 这段没有阻塞调用，中途不会被切走。 */
+#define ELF_COPY_CHUNK              (4096u)
+
+static uint8 s_elf_stage[ELF_COPY_CHUNK];
+
+static int32 elf_copy_to_window(uint32 space, const char *path, uint32 va,
+                                uint32 len, uint32 off)
+{
+    uint32 done = 0u;
+
+    while(done < len)
+    {
+        uint32 n = len - done;
+        int32 rc;
+
+        if(n > (uint32)ELF_COPY_CHUNK)
+        {
+            n = (uint32)ELF_COPY_CHUNK;
+        }
+
+        rc = elf_read_exact(path, s_elf_stage, n, off + done);
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return rc;
+        }
+
+        (void)arkrtos_paging_space_activate(space);
+        elf_memcpy((uint8 *)(unsigned long)(va + done), s_elf_stage, n);
+        done += n;
+    }
+
+    return ARKRTOS_ELF_OK;
+}
+
+static void elf_zero_window(uint32 space, uint32 va, uint32 len)
+{
+    if(len == 0u)
+    {
+        return;
+    }
+
+    (void)arkrtos_paging_space_activate(space);
+    elf_memzero((uint8 *)(unsigned long)va, len);
+}
+#endif /* ARKRTOS_USE_PAGING */
+
 
 #if (ARKRTOS_USE_EXEC_SIGN == 1)
 /* 尾部 32 字节签名 tag：tag 覆盖 [0, size-32)。
@@ -342,7 +452,15 @@ static int32 elf_build_stack(uint32 win_top, uint32 argv_start,
 
 /* ---------------------------------------------------------------- 对外 */
 
-int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[])
+/**
+* @brief 把一份 ELF64 装进指定地址空间并起一个降权任务
+* @param space   目标地址空间（0 .. 空间数-1）；窗口 VA 在每个空间里相同
+* @param p_info  成功时填装载读数（不接收失败值）
+* @details 空间选择、台账登记、以及"装载完把内核任务原来的视图装回去"
+*          都在 arkrtos_elf_exec_space() 里；这里只做"把这份文件装进这一块帧"。
+*/
+static int32 elf_load(uint32 space, const char *path, int32 argc,
+                      char *argv[], arkrtos_elf_info_t *p_info)
 {
     uint8 hdr[ELF64_EHDR_SIZE];
     uint8 phdr[ELF64_PHDR_SIZE];
@@ -386,11 +504,6 @@ int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[])
     {
         return ARKRTOS_ELF_ERR_PARAM;
     }
-    if(arkrtos_elf_running() != 0)
-    {
-        return ARKRTOS_ELF_ERR_BUSY;
-    }
-
     /* argv[0] 缺省 = 程序路径：Linux 的 shell 也这么补，
      * 而程序自己按 argv[0] 判断「我是谁」是常见写法，不能给 0。 */
     if((argc == 0) || (argv == 0))
@@ -516,10 +629,20 @@ int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[])
         p_filesz = elf_rd64(phdr + 32);
         p_memsz  = elf_rd64(phdr + 40);
         dst      = (uint8 *)(unsigned long)p_vaddr;
+#if (ARKRTOS_USE_PAGING == 1)
+        (void)dst;   /* 分页档不直接用窗口指针：统一走 elf_copy_to_window() */
+#endif
 
         if(p_filesz > 0ul)
         {
+#if (ARKRTOS_USE_PAGING == 1)
+            /* 这一段必须落在 space 的那块帧里：elf_copy_to_window() 每写
+             * 4 KB 之前重装一次空间，抢占把窗口换走也不会写错帧。 */
+            rc = elf_copy_to_window(space, path, (uint32)p_vaddr,
+                                    (uint32)p_filesz, (uint32)p_offset);
+#else
             rc = elf_read_exact(path, dst, (uint32)p_filesz, (uint32)p_offset);
+#endif
             if(rc != ARKRTOS_ELF_OK)
             {
                 return rc;
@@ -528,10 +651,20 @@ int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[])
         }
         if(p_memsz > p_filesz)
         {
+#if (ARKRTOS_USE_PAGING == 1)
+            elf_zero_window(space, (uint32)p_vaddr + (uint32)p_filesz,
+                            (uint32)(p_memsz - p_filesz));
+#else
             elf_memzero(dst + p_filesz, (uint32)(p_memsz - p_filesz));
+#endif
         }
     }
 
+#if (ARKRTOS_USE_PAGING == 1)
+    /* 用户栈与 argv 也在窗口里，铺之前同样把空间装对。elf_build_stack()
+     * 里没有阻塞调用，中途不会被切走。 */
+    (void)arkrtos_paging_space_activate(space);
+#endif
     rc = elf_build_stack(win_top, argv_start, argc, argv, &sp);
     if(rc != ARKRTOS_ELF_OK)
     {
@@ -556,52 +689,170 @@ int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[])
     arkrtos_task_table[id - 1].is_priv = 0u;
 
 #if (ARKRTOS_USE_PAGING == 1)
-    /* 装载是把段按 p_vaddr 写进「当前装着的那个 App 帧」的（U-1 之后
-     * 0x02000000 的落点由地址空间决定），所以任务必须绑到同一个空间：
-     * 否则写的是 frame A、跑的是 frame B —— 程序一取指就落进别人的帧。 */
-    (void)arkrtos_paging_bind_task(&arkrtos_task_table[id - 1],
-                                   arkrtos_paging_space_current());
+    /* 任务必须绑到「段被写进去的那个空间」：否则写的是 frame A、跑的是
+     * frame B —— 程序一取指就落进别人的帧。绑定只记一个号，真正切换
+     * 发生在下一次调度到它的时候。 */
+    (void)arkrtos_paging_bind_task(&arkrtos_task_table[id - 1], space);
 #endif
 
-    s_elf_task = id;
-    s_elf_info.entry      = (uint32)entry;
-    s_elf_info.bytes      = bytes;
-    s_elf_info.segs       = segs;
-    s_elf_info.argc       = (uint32)argc;
-    s_elf_info.sp         = sp;
-    s_elf_info.stack_size = stack_bytes;
-    s_elf_info.task       = id;
+    p_info->entry      = (uint32)entry;
+    p_info->bytes      = bytes;
+    p_info->segs       = segs;
+    p_info->argc       = (uint32)argc;
+    p_info->sp         = sp;
+    p_info->stack_size = stack_bytes;
+    p_info->task       = id;
 
     return ARKRTOS_ELF_OK;
 }
 
-int32 arkrtos_elf_running(void)
+/**
+* @brief 装一个 ELF 程序，返回它落到哪个地址空间
+* @param path     VFS 路径
+* @param argc     argv 个数（0 或缺省 argv 时按 Linux 习惯填成 path）
+* @param argv     argv 数组
+* @param p_space  可为 0；成功时写回这次装载用的空间号
+* @return ARKRTOS_ELF_OK / 负错误码（含 ARKRTOS_ELF_ERR_BUSY：空间全占着）
+* @details U-2（2026-11-17）：装载不再假设"只有一块窗口"。先挑一个没有
+*          活实例的空间，把它装进窗口，把段写进那块帧，任务绑上去，然后把
+*          内核任务原来的视图装回去。挑空间只看台账，不看地址：窗口 VA
+*          在所有空间里都是同一个值，这个值本身不携带任何身份。
+*/
+int32 arkrtos_elf_exec_space(const char *path, int32 argc, char *argv[],
+                             uint32 *p_space)
 {
-    if(s_elf_task <= 0)
+    uint32 space;
+    uint32 prev = 0u;
+    int32 rc;
+    arkrtos_elf_info_t info;
+
+    if(p_space != 0)
     {
-        return 0;
+        *p_space = 0u;
     }
-    /* 任务退出后 status 会回到 INVALID。这里懒清理，而不是要求退出路径
-     * 回调进来：M1 只有一个实例，代价是一次数组读。 */
-    if(arkrtos_task_table[s_elf_task - 1].status == ARKRTOS_TASK_INVALID)
+
+    /* 空间全占着时返回 BUSY —— 与 U-1 之前"窗口被占"是同一个语义，
+     * 只是判据从"有没有一个实例"变成"还有没有空空间"。 */
+    for(space = 0u; space < elf_space_capacity(); space++)
     {
-        s_elf_task = 0;
-        return 0;
+        if(elf_slot_live(space) == 0)
+        {
+            break;
+        }
     }
-    return 1;
+    if(space >= elf_space_capacity())
+    {
+        return ARKRTOS_ELF_ERR_BUSY;
+    }
+
+    info.entry      = 0u;
+    info.bytes      = 0u;
+    info.segs       = 0u;
+    info.argc       = 0u;
+    info.sp         = 0u;
+    info.stack_size = 0u;
+    info.task       = 0;
+
+#if (ARKRTOS_USE_PAGING == 1)
+    /* 装载期间窗口必须指着目标空间；失败也要装回去，否则 shell 之后的
+     * 每一条内存命令读到的都是别人的帧。 */
+    prev = arkrtos_paging_space_current();
+    (void)arkrtos_paging_space_activate(space);
+#endif
+
+    rc = elf_load(space, path, argc, argv, &info);
+
+#if (ARKRTOS_USE_PAGING == 1)
+    (void)arkrtos_paging_space_activate(prev);
+#else
+    (void)prev;
+#endif
+
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        /* 失败的装载不留台账：那块帧里可能是半个程序，但空间仍算空着，
+         * 下一次用一个合法镜像覆盖掉它。 */
+        return rc;
+    }
+
+    s_elf_task[space] = info.task;
+    s_elf_info[space] = info;
+    s_elf_last        = (int32)space;
+
+    if(p_space != 0)
+    {
+        *p_space = space;
+    }
+
+    return ARKRTOS_ELF_OK;
 }
 
-int32 arkrtos_elf_info(arkrtos_elf_info_t *p_out)
+/**
+* @brief 兼容入口：装一个 ELF 程序，不关心它落到哪个空间
+*/
+int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[])
+{
+    return arkrtos_elf_exec_space(path, argc, argv, 0);
+}
+
+int32 arkrtos_elf_running_in(uint32 space)
+{
+    return elf_slot_live(space);
+}
+
+int32 arkrtos_elf_running(void)
+{
+    uint32 i;
+
+    for(i = 0u; i < elf_space_capacity(); i++)
+    {
+        if(elf_slot_live(i) != 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int32 arkrtos_elf_space_count(void)
+{
+    return (int32)elf_space_capacity();
+}
+
+int32 arkrtos_elf_last_space(void)
+{
+    return s_elf_last;
+}
+
+int32 arkrtos_elf_info_space(uint32 space, arkrtos_elf_info_t *p_out)
 {
     if(p_out == 0)
     {
         return ARKRTOS_ELF_ERR_PARAM;
     }
-    if(s_elf_info.task <= 0)
+    if(space >= (uint32)ELF_INST_MAX)
     {
         return ARKRTOS_ELF_ERR_PARAM;
     }
-    *p_out = s_elf_info;
+    if(s_elf_info[space].task <= 0)
+    {
+        return ARKRTOS_ELF_ERR_PARAM;
+    }
+    *p_out = s_elf_info[space];
+    return ARKRTOS_ELF_OK;
+}
+
+int32 arkrtos_elf_info(arkrtos_elf_info_t *p_out)
+{
+    if((p_out == 0) || (s_elf_last < 0))
+    {
+        return ARKRTOS_ELF_ERR_PARAM;
+    }
+    if(s_elf_info[s_elf_last].task <= 0)
+    {
+        return ARKRTOS_ELF_ERR_PARAM;
+    }
+    *p_out = s_elf_info[s_elf_last];
     return ARKRTOS_ELF_OK;
 }
 

@@ -206,7 +206,12 @@ void arkrtos_mpu_set_app(arkrtos_task_t *p_app)
         return;
     }
 
-    (void)arkrtos_port_paging_activate((uint32)s_pg_task_space[idx]);
+    /* switch_to(), not activate(): this runs inside the switch path, on the
+     * outgoing task's own stack. When that task is an App the stack itself lives
+     * in the App window, so rewriting the window entry here would make the
+     * caller's next stack access read the other task's frame. The port defers
+     * the write to its restore path in that case (debt U-2). */
+    (void)arkrtos_port_paging_switch_to((uint32)s_pg_task_space[idx]);
 }
 
 void arkrtos_mpu_set_idle(void)

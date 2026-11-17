@@ -13,8 +13,11 @@ mark@arkrtos:~$ /mnt/ram/hello direct          # 也可以直接敲路径
 的可执行文件格式本身（Linux 的 `./prog` 也是 `PT_LOAD` + 跳 `e_entry`）。
 
 M1 交付的是「**文件即程序**」+ Linux 入口约定（`sp→argc/argv`）+ 单实例；**没有**
-交付「进程」：每进程地址空间、同 VA 多实例、按需缺页、`copy_from_user`、退出码通道
-都还没有，见 §6 欠账表。**不得把 M1 说成"Ark 有进程了"。**
+交付「进程」。后续两轮把其中两格补上了：U-1 给每个 App 一块自己的地址空间
+（空间号即帧号，VA 恒 `0x02000000`），U-2 让同一个 VA 上能**并发**跑两个实例
+（装载器按空间记台账、延迟换窗口，均 QEMU LA64 实跑）。仍缺按需缺页、
+`copy_from_user`、页帧分配器、退出码通道，见 §6 欠账表。
+**不得把「能并发跑两个实例」说成「Ark 有完整进程模型了」。**
 
 适用范围写死：
 
@@ -36,7 +39,8 @@ M1 交付的是「**文件即程序**」+ Linux 入口约定（`sp→argc/argv`�
 2. **进程模型层**：Linux 体验的内核不是文件格式，而是**每进程独立地址空间**。
    M1 把段装进**唯一一块 2 MB 的 PLV3 静态窗口**（`0x02000000`）、单实例、
    程序必须按 `-Ttext=0x02000000` 链到这个固定基址。所以 M1 是「文件即程序」，
-   **不是**「有进程」。这条差距全部列在 §6。
+   **不是**「有进程」。U-1/U-2 之后每块空间各一块帧、可并发两个实例，但仍是
+   静态窗口 + 固定基址，不是按需映射的进程。这条差距全部列在 §6。
 
 一句话对答：**格式上我们跑的就是可执行文件（ELF）；差距在地址空间，不在格式。**
 
@@ -92,8 +96,12 @@ ELF 程序占另一个）。
    `arkrtos_task_register(entry, stack_bottom, 32 KB, 优先级 12, 0)`，
    然后把 `is_priv` 置 0（非特权）——**ELF 程序永远以 PLV3 跑**，
    它在窗口里写自己的 `.data`/栈，出窗口就撞 TLB。
-6. **单实例**：`s_elf_task != 0` 时返回 `ERR_BUSY`；结束时（任务死亡检测）
-   清 `s_elf_task`。
+6. **每空间一个实例（U-2，2026-11-17）**：台账是 `s_elf_task[ARKRTOS_PAGING_APPS_MAX]`
+   + `s_elf_info[]`，`elf_slot_live(space)` 读它；挑空间只看台账不看地址（窗口 VA
+   在所有空间里都是同一个值，不携带身份）。空间全占着才返回 `ERR_BUSY`；结束时
+   （任务死亡检测）只清自己那一格。M1 的旧表述是「`s_elf_task != 0` 就 `ERR_BUSY`」，
+   即全局只能有一个实例——U-2 把这个限制换掉了。分页档下段不再直接 `memcpy` 到
+   窗口指针，而是先读进内核暂存 `s_elf_stage[4096]`，再切窗口 + 每 4 KB 拷进去。
 
 ### 3.1 入口约定：`sp` 指向 `argc`
 
@@ -264,8 +272,8 @@ QEMU LA64 实测（2026-11-17，同一次开机）：
 
 | # | 差距 | 现状（M1） | 影响 | 归属 |
 |---|---|---|---|---|
-| U-1 | 每进程地址空间 | **机制已做（2026-11-17）**：每个 App 空间一条 App 窗口条目（PS=20），`arkrtos_mpu_set_app()` 在切到 App 任务时重写它；空间号即帧号（`space n → APP_BASE + n*2 MB`），VA 恒为 `0x02000000` ⇒ 一个 App 连别的 App 的帧都叫不出来。板级 `ARKRTOS_PAGING_APPS_MAX` 缺省 1（默认档 `activate()` 立即返回，切换路径零变化）。ELF 装载落在**当前装着的那个空间**并把任务绑到同一空间 | **仍缺**：同 VA 并发多实例（U-2）、页帧分配器（U-3）、ASID（U-7）、按需缺页（U-5）、`copy_from_user`（U-6） | 已收机制部分（QEMU LA64 实跑，见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.17）；并发与分配器仍是 M2 |
-| U-2 | 同 VA 多实例 | 不支持；第二个 `exec` 返回 `ERR_BUSY` | 不能"同时开两个 hello" | M2 |
+| U-1 | 每进程地址空间 | **机制已做（2026-11-17）**：每个 App 空间一条 App 窗口条目（PS=20），`arkrtos_mpu_set_app()` 在切到 App 任务时重写它；空间号即帧号（`space n → APP_BASE + n*2 MB`），VA 恒为 `0x02000000` ⇒ 一个 App 连别的 App 的帧都叫不出来。板级 `ARKRTOS_PAGING_APPS_MAX` 缺省 1（默认档 `activate()` 立即返回，切换路径零变化）。ELF 装载落在**当前装着的那个空间**并把任务绑到同一空间 | **仍缺**：页帧分配器（U-3）、ASID（U-7）、按需缺页（U-5）、`copy_from_user`（U-6） | 已收机制部分（QEMU LA64 实跑，见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.17）；分配器仍是 M2 |
+| U-2 | 同 VA 多实例 | **已做（2026-11-17，QEMU LA64 实跑）**：装载器从「单实例」改成「每个空间一个活实例」（`s_elf_task[]` / `s_elf_info[]` + `elf_slot_live()`），`arkrtos_elf_exec_space()` 先挑空空间、装载期把窗口切过去、装完把内核任务原来的视图装回去；段不再直接 `memcpy` 进窗口，而是每 4 KB 经内核暂存 `s_elf_stage[4096]` 搬进去。**崩溃根因**：LA64 的 trap 帧与内联切换帧都压在**被换下任务自己的栈**上，而 App 栈就在 App 窗口 VA 里 —— `arkrtos_mpu_set_app()` 一进来就重写窗口条目，调用者的返回地址与 `s0` 槽下一句 `ld.d` 就读到另一个 App 的帧（实测 `era=0xcdcdcdcd` = 栈填充图样，PLV3 ADEF 停机）。修法：`arkrtos_port_paging_switch_to()` 在 `sp` 落在窗口内时只记 `s_pg_pending_space`，`.S` 的两条恢复路径在拿到目标帧之后、读帧之前先把 `sp` 换到恒等映射的 `la_switch_stack`（2 KB，`.bss`）再 `bl la_switch_prepare()` 补做 `activate` + PRMD 补写；`new_frame == old_frame`（调度器最终没切走）时清 pending 不切 | 读数：`pmap u2` 两个实例各在自己的空间里跑完并 `bye`、`pmap u2: PASS - two instances, two spaces, neither frame overwritten`、`pmap elf` 报 `space 0/1` 各 1732 B 且 `0 live instance(s)`、无 FATAL | M2 剩余部分见 U-3 |
 | U-3 | 页帧分配器 | 无：段直接写进窗口 | 程序镜像必须能整块装进 2 MB | M2 |
 | U-3a | 运行期动态映射（登记 MMIO 跨度） | **已做完（2026-11-17）**：`arkrtos_paging_map_span()` → port 的 `arkrtos_port_paging_alias()` → `tlbwr` 写 MTLB；仅内核 PLV0、4 KB 粒度、最多 8 对页；拒绝码 -1/-2/-3/-5 原样透出 | 驱动在 MMU 档下终于能登记静态表里没有的 MMIO 窗口；**App 可见**的动态映射仍属 U-1 | 已收（QEMU LA64 实跑，见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.16） |
 | U-4 | `arkrtos_elf.c` 只支持 64 位 `long` | LA32（32 位）编出空目标（`#error` 保护） | LA32 后端暂时没有 ELF | M2 |

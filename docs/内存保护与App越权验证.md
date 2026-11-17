@@ -279,9 +279,9 @@ int32 arkrtos_paging_stats(uint32 *p_checked, uint32 *p_bad, uint32 *p_bad_base)
 | 装载期跨度审计 + 计数读数（`arkrtos_paging_stats`） | **已做** |
 | `sec` 报 `iso=2`，与窗口后端 `iso=1` 区分 | **已做** |
 | App 在非特权态跑完整自检 | **已做**（LA64 QEMU `utest` 13/13） |
-| 把**可执行文件**装进用户窗口直接跑（`exec` / 敲路径，Linux 入口约定） | **已做 M1**（`ARKRTOS_USE_ELF=1`，单窗口 + 单实例；见 [MMU进程模型与ELF装载](MMU进程模型与ELF装载.md)）。它是"文件即程序"，**不是**进程 |
+| 把**可执行文件**装进用户窗口直接跑（`exec` / 敲路径，Linux 入口约定） | **已做**（`ARKRTOS_USE_ELF=1`；M1 是单窗口 + 单实例，U-1/U-2 之后是「每空间一块帧 + 可并发的两个实例」；见 [MMU进程模型与ELF装载](MMU进程模型与ELF装载.md)）。它是"文件即程序"，**不是**完整进程 |
 | 每 App 一份地址空间（**机制**） | **已做（2026-11-17）**：空间号即帧号（`space n → 0x02000000 + n*2 MB`），`set_app` 重写 App 窗口 PS=20 条目，VA 恒 `0x02000000`；读数 `pmap u1: PASS - same VA, two frames`（space 0 读到 `0xA5A50001`、space 1 读到 `0xA5A50002`），`pmap look` 直接打印条目号与 PPN。坑：QEMU 的 `tlbwr` 不刷新大页**奇页**，切换前必须按 VA 发 `invtlb 3`，否则静默失效 |
-| 同 VA **并发**多实例（两个 App 同时在场） | **未做**（U-2）：ELF 装载器仍单实例，第二个 `exec` 返回 `ERR_BUSY`。机制已具备，缺的是「同时存在两个任务各在自己空间里跑」的调度与装载 |
+| 同 VA **并发**多实例（两个 App 同时在场） | **已做（2026-11-17，QEMU LA64 实跑，U-2）**：装载器按空间记台账（`s_elf_task[]` / `elf_slot_live()`），段经内核暂存每 4 KB 写进目标空间那一块帧；读数 `pmap u2` 两个实例各跑完并 `bye`、`pmap elf` 两空间各 1732 B / `0 live`。\n坑（本轮根因）：trap 帧与内联切换帧都压在**被换下任务自己的栈**上，而 App 栈就在窗口 VA 里 ⇒ 切换路径里立刻重写窗口条目会让调用者的返回地址/帧指针槽读到另一个 App 的帧（`era=0xcdcdcdcd`）。修法：`sp` 在窗口内时只记 pending，`.S` 恢复现场先换到恒等映射静态栈再补做 `activate` + PRMD 补写 |
 | 页帧分配器 | **未做** |
 | 缺页处理 | **未做** |
 | `copy_from_user` / `copy_to_user`（内核安全访问用户地址） | **未做** |
@@ -292,7 +292,7 @@ int32 arkrtos_paging_stats(uint32 *p_checked, uint32 *p_bad, uint32 *p_bad_base)
 验收判据（做这些欠账时按这条验收，不按「能跑起来」验收）：
 
 1. 两个 App 各自一份页表，**同一 VA** 在两个 App 里指向不同物理页，互不干扰
-   （**机制已达成**：`pmap u1` 在同一 VA 上读出两个不同值；**并发**未达成，见 U-2）；
+   （**机制已达成**：`pmap u1` 在同一 VA 上读出两个不同值；**并发**也已达成：`pmap u2` 两个实例各自跑完、各占一个空间，见 U-2）；
 2. 反向三探针（写内核 RAM / 写别的 App RAM / 跳到未映射地址）**全拦**，且各有独立 fault 读数；
 3. 内核保持静态直映射，不被用户态页表影响；
 4. `copy_from_user` 对非法用户指针返回错误码，**不 fault 内核**。

@@ -14,12 +14,12 @@
 - [kernelsrc/include/arkrtos_cfg.h](#kernelsrcincludearkrtos_cfgh)（1 项）
 - [kernelsrc/include/arkrtos_crash.h](#kernelsrcincludearkrtos_crashh)（22 项）
 - [kernelsrc/include/arkrtos_dt.h](#kernelsrcincludearkrtos_dth)（11 项）
-- [kernelsrc/include/arkrtos_elf.h](#kernelsrcincludearkrtos_elfh)（5 项）
+- [kernelsrc/include/arkrtos_elf.h](#kernelsrcincludearkrtos_elfh)（10 项）
 - [kernelsrc/include/arkrtos_export.h](#kernelsrcincludearkrtos_exporth)（3 项）
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（43 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（44 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -53,7 +53,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（11 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（34 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（38 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（16 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -74,7 +74,7 @@
 - [kernelsrc/sdk/posix/unistd.h](#kernelsrcsdkposixunistdh)（13 项）
 - [kernelsrc/src/arkrtos_apppack.c](#kernelsrcsrcarkrtos_apppackc)（1 项）
 - [kernelsrc/src/arkrtos_cfg.c](#kernelsrcsrcarkrtos_cfgc)（1 项）
-- [kernelsrc/src/arkrtos_elf.c](#kernelsrcsrcarkrtos_elfc)（2 项）
+- [kernelsrc/src/arkrtos_elf.c](#kernelsrcsrcarkrtos_elfc)（5 项）
 - [kernelsrc/src/arkrtos_eset.c](#kernelsrcsrcarkrtos_esetc)（1 项）
 - [kernelsrc/src/arkrtos_exports.c](#kernelsrcsrcarkrtos_exportsc)（1 项）
 - [kernelsrc/src/arkrtos_fs.c](#kernelsrcsrcarkrtos_fsc)（1 项）
@@ -2412,13 +2412,41 @@ int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[]);
 **返回**：0 = 已起跑；负值 = ARKRTOS_ELF_ERR_*
 > 说明：起跑后立刻返回（不等待程序退出）。要等退出由调用者自己按任务号看。
 
+### `int32 arkrtos_elf_exec_space(const char *path, int32 argc, char *argv[`
+
+```c
+int32 arkrtos_elf_exec_space(const char *path, int32 argc, char *argv[], uint32 *p_space);
+```
+
+**装进指定地址空间之外，多给一个"落到哪个空间"的出口**
+- `p_space`：可为 0；成功时写回空间号
+**返回**：0 = 已起跑；ARKRTOS_ELF_ERR_BUSY = 所有空间都有活实例
+> 说明：挑空间是装载器的决定，调用方只读结果。U-2（2026-11-17）起，
+"同一时间只能跑一个程序"变成"每个地址空间一个"。
+
 ### `int32 arkrtos_elf_info(arkrtos_elf_info_t *p_out);`
 
 ```c
 int32 arkrtos_elf_info(arkrtos_elf_info_t *p_out);
 ```
 
-**上一次成功装载的读数；没有过成功装载时返回 ARKRTOS_ELF_ERR_PARAM */**
+**上一次成功装载的读数（最近一次的那个空间）；没有过成功装载时返回 ARKRTOS_ELF_ERR_PARAM */**
+
+### `int32 arkrtos_elf_info_space(uint32 space, arkrtos_elf_info_t *p_out);`
+
+```c
+int32 arkrtos_elf_info_space(uint32 space, arkrtos_elf_info_t *p_out);
+```
+
+**指定空间的那次装载读数 */**
+
+### `int32 arkrtos_elf_running_in(uint32 space);`
+
+```c
+int32 arkrtos_elf_running_in(uint32 space);
+```
+
+**1 = 指定空间里有活的 ELF 任务，0 = 该空间空着（或没有这个空间） */**
 
 ### `int32 arkrtos_elf_running(void);`
 
@@ -2426,7 +2454,23 @@ int32 arkrtos_elf_info(arkrtos_elf_info_t *p_out);
 int32 arkrtos_elf_running(void);
 ```
 
-**1 = 有一个 ELF 任务在跑（M1 单实例），0 = 窗口空着 */**
+**1 = 至少有一个 ELF 任务在跑，0 = 所有空间都空着 */**
+
+### `int32 arkrtos_elf_space_count(void);`
+
+```c
+int32 arkrtos_elf_space_count(void);
+```
+
+**可用的地址空间数（不分页的构建是 1） */**
+
+### `int32 arkrtos_elf_last_space(void);`
+
+```c
+int32 arkrtos_elf_last_space(void);
+```
+
+**最近一次成功装载落到哪个空间；-1 = 还没有过 */**
 
 ### `const char *arkrtos_elf_error_name(int32 rc);`
 
@@ -3358,6 +3402,24 @@ int32 arkrtos_port_paging_activate(uint32 space);
 space 0 是 PA = ARKRTOS_QEMU_APP_BASE（行为与之前完全一致），
 space n 是 ARKRTOS_QEMU_APP_BASE + n * APP_SIZE。
 内核的恒等映射与 UART 条目一条都不动。 */
+
+### `int32 arkrtos_port_paging_switch_to(uint32 space);`
+
+```c
+int32 arkrtos_port_paging_switch_to(uint32 space);
+```
+
+**调度器用的「装进窗口」：必要时推迟到恢复现场那一刻（U-2）**
+- `space`：目标空间号
+**返回**：0 = 已装上 / 已记下待装；-1 = 空间号越界 / 本 port 无 TLB 通路
+与 activate() 只差一条，但那条是致命的：调度器调它的时候内核
+还跑在**被换下任务自己的栈上**，而 App 任务的栈就在 App 窗口里。
+此刻重写窗口条目，紧接着的一次 ld.d / 函数返回就会从另一个 App
+的帧里取值 —— 实测症状是两个 hello 并发跑时 era=0xcdcdcdcd
+（栈填充图案）停机。所以本 port 在「调用者 sp 落在 App 窗口内」
+时只记下空间号，由 arkrtos_context.S 的恢复现场路径在读目标帧
+之前补上这一刀（la_switch_prepare）。内核任务的 sp 在恒等映射
+里，那种情况立即生效，与 activate() 完全等价。 */
 
 ### `uint32 arkrtos_port_paging_space(void);`
 
@@ -7649,6 +7711,50 @@ int32 arkrtos_port_paging_activate(uint32 space)
 保证此时不会有别的任务正在这个窗口里取指 —— 调用点在切换路径上，
 当前任务已经不在 App 页里跑。
 
+### `static uint32 la_sp_in_app_window(void)`
+
+```c
+static uint32 la_sp_in_app_window(void)
+```
+
+调用者此刻的 sp 是否落在 App 窗口里 */
+
+### `int32 arkrtos_port_paging_switch_to(uint32 space)`
+
+```c
+int32 arkrtos_port_paging_switch_to(uint32 space)
+```
+
+**调度器换窗口：调用者自己站在窗口里时必须推迟（U-2）**
+详见 arkrtos_hal.h 的声明。判据就是「我此刻的 sp 在不在窗口里」，
+它精确对应危险条件：恢复现场要用的那一帧（以及本函数的返回地址）
+正压在同一个窗口 VA 上。推迟不等于不换 —— 换的时机交给
+arkrtos_context.S：那里已经不再碰被换下任务的栈了。
+
+### `void la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_fr`
+
+```c
+void la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_frame)
+```
+
+**恢复现场之前补做被推迟的窗口切换（由 arkrtos_context.S 调用）**
+- `new_frame`：即将恢复的帧
+- `old_frame`：被换下任务的帧（同一个 = 调度器最后没切走）
+本函数由汇编入口在**一块内核静态栈**上调用：进入时 sp 可能还指向
+App 窗口里的栈，而它自己一落地就要开始写栈 —— 所以汇编侧先把 sp
+换到 la_switch_stack，再进来。返回之后汇编侧不再碰任何栈，只按
+$s0 指向的目标帧恢复寄存器。
+PRMD 也要在这里补：C 侧的 LA_PRIV_APPLY 在「窗口还没换」的时候
+执行，它写进去的是旧窗口里的那块内存，不是目标帧。
+
+### `void la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_fr`
+
+```c
+void la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_frame)
+```
+
+没有窗口可换：恢复现场前没有要补做的事 */
+
 ### `uint32 arkrtos_port_paging_space(void)`
 
 ```c
@@ -8904,6 +9010,43 @@ static int32 elf_build_stack(uint32 win_top, uint32 argv_start, int32 argc, char
 NULL(envp)、NULL(argv 结束)、argv[argc-1..0]、argc  <- sp
 字符串从窗口顶端往下写，数组紧贴在 argv_start 之上。
 **返回**：0 = 成功（*p_sp 有效）；否则为负错误码
+
+### `static int32 elf_load(uint32 space, const char *path, int32 argc, char`
+
+```c
+static int32 elf_load(uint32 space, const char *path, int32 argc, char *argv[], arkrtos_elf_info_t *p_info) {
+```
+
+**把一份 ELF64 装进指定地址空间并起一个降权任务**
+- `space`：目标地址空间（0 .. 空间数-1）；窗口 VA 在每个空间里相同
+- `p_info`：成功时填装载读数（不接收失败值）
+空间选择、台账登记、以及"装载完把内核任务原来的视图装回去"
+都在 arkrtos_elf_exec_space() 里；这里只做"把这份文件装进这一块帧"。
+
+### `int32 arkrtos_elf_exec_space(const char *path, int32 argc, char *argv[`
+
+```c
+int32 arkrtos_elf_exec_space(const char *path, int32 argc, char *argv[], uint32 *p_space) {
+```
+
+**装一个 ELF 程序，返回它落到哪个地址空间**
+- `path`：VFS 路径
+- `argc`：argv 个数（0 或缺省 argv 时按 Linux 习惯填成 path）
+- `argv`：argv 数组
+- `p_space`：可为 0；成功时写回这次装载用的空间号
+**返回**：ARKRTOS_ELF_OK / 负错误码（含 ARKRTOS_ELF_ERR_BUSY：空间全占着）
+U-2（2026-11-17）：装载不再假设"只有一块窗口"。先挑一个没有
+活实例的空间，把它装进窗口，把段写进那块帧，任务绑上去，然后把
+内核任务原来的视图装回去。挑空间只看台账，不看地址：窗口 VA
+在所有空间里都是同一个值，这个值本身不携带任何身份。
+
+### `int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[]) {`
+
+```c
+int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[]) {
+```
+
+**兼容入口：装一个 ELF 程序，不关心它落到哪个空间**
 
 ## kernelsrc/src/arkrtos_eset.c
 

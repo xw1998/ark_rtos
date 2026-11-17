@@ -436,6 +436,19 @@ void arkrtos_port_paging_flush(uint32 base, uint32 size);
  *           内核的恒等映射与 UART 条目一条都不动。 */
 int32 arkrtos_port_paging_activate(uint32 space);
 
+/** @brief 调度器用的「装进窗口」：必要时推迟到恢复现场那一刻（U-2）
+ *  @param space 目标空间号
+ *  @return 0 = 已装上 / 已记下待装；-1 = 空间号越界 / 本 port 无 TLB 通路
+ *  @details 与 activate() 只差一条，但那条是致命的：调度器调它的时候内核
+ *           还跑在**被换下任务自己的栈上**，而 App 任务的栈就在 App 窗口里。
+ *           此刻重写窗口条目，紧接着的一次 ld.d / 函数返回就会从另一个 App
+ *           的帧里取值 —— 实测症状是两个 hello 并发跑时 era=0xcdcdcdcd
+ *           （栈填充图案）停机。所以本 port 在「调用者 sp 落在 App 窗口内」
+ *           时只记下空间号，由 arkrtos_context.S 的恢复现场路径在读目标帧
+ *           之前补上这一刀（la_switch_prepare）。内核任务的 sp 在恒等映射
+ *           里，那种情况立即生效，与 activate() 完全等价。 */
+int32 arkrtos_port_paging_switch_to(uint32 space);
+
 /** @brief 当前装进 App 窗口的空间号 */
 uint32 arkrtos_port_paging_space(void);
 
@@ -457,6 +470,7 @@ uint32 arkrtos_port_paging_lookup(uint32 va, uint32 *index, uint32 *ppn, uint32 
 #define arkrtos_port_paging_check(base, size, mem) (-1)
 #define arkrtos_port_paging_alias(va, pa, mem)     (-1)
 #define arkrtos_port_paging_activate(space)        (-1)
+#define arkrtos_port_paging_switch_to(space)       (-1)
 #define arkrtos_port_paging_space()                (0u)
 #define arkrtos_port_paging_space_frame(space)     (0u)
 #define arkrtos_port_paging_space_count()          (1u)

@@ -29,8 +29,17 @@
      改成 0 —— 否则默认档会把「没有分页」读成「登记成功」。
   H. shell 入口受开关约束：`pmap` 命令必须注册在 `ARKRTOS_USE_PAGING`
      条件里，且命令表容量预算里含这一条。
+  I. 切换前按 VA 失效旧翻译，并重写 App 窗口那条 PS=20 条目。
+  J. `arkrtos_mpu_set_app()` 必须走 `arkrtos_port_paging_switch_to()`，
+     不许再直接 `activate()` —— 它跑在被换下任务自己的栈上（U-2）。
+  K. port 侧「延迟换窗口」本体：switch_to 必须按 sp 是否在窗口里分岔，
+     la_switch_prepare 必须清 pending、认出 new==old、补写 PRMD。
+  L. 汇编两条恢复路径（eentry / switch_inline）都必须先换到恒等映射的
+     静态栈，再 bl la_switch_prepare；那块栈必须落在 .bss。
+  M. ELF 装载器按空间记台账（elf_slot_live / elf_copy_to_window /
+     exec_space 装完恢复视图），shell 里 `pmap u2` 的判据还在。
 
-E–H 每条都自带**防假绿自检**：把源串故意改坏一次，对应 pin 必须报错；
+E–M 每条都自带**防假绿自检**：把源串故意改坏一次，对应 pin 必须报错；
 报不出错就说明这条 pin 是空转的。
 
 不覆盖：分页后端在板上给出的实际隔离效果（哪条地址被拦、PLV 是否真降）、
@@ -288,32 +297,104 @@ def main():
 
     def pin_j(pg, hal, mpu):
         bad = []
-        if "arkrtos_port_paging_activate(" not in _body(pg, "void arkrtos_mpu_set_app("):
-            bad.append("J: set_app 没有切地址空间")
+        body = _body(pg, "void arkrtos_mpu_set_app(")
+        if "arkrtos_port_paging_switch_to(" not in body:
+            bad.append("J: set_app 没有切地址空间（走 switch_to）")
+        # U-2：切窗口时会用的那一帧可能就压在窗口里（App 栈在窗口 VA），
+        # 所以 set_app 里再出现 activate() 就是退回旧的崩法。
+        if "arkrtos_port_paging_activate(" in body:
+            bad.append("J: set_app 绕过 switch_to 直接 activate（U-2 会崩）")
         if "#define arkrtos_port_paging_lookup(va, index, ppn, ps) (0u)" not in hal:
             bad.append("J: arkrtos_hal.h 关档回退没有 lookup（恒 0 = 未命中）")
         if "arkrtos_paging_space_activate(" not in mpu:
             bad.append("J: arkrtos_mpu.h 没有 space_activate 接口")
         return bad
 
+    def pin_k(port):
+        bad = []
+        body = _body(port, "int32 arkrtos_port_paging_switch_to(")
+        if not body:
+            bad.append("K: port 里没有 arkrtos_port_paging_switch_to 的定义")
+        else:
+            if "la_sp_in_app_window() != 0u" not in body:
+                bad.append("K: switch_to 没有按 sp 是否在窗口里分岔")
+            if "s_pg_pending_space = space;" not in body:
+                bad.append("K: switch_to 在窗口里没有记下待装空间")
+            if "arkrtos_port_paging_activate(space)" not in body:
+                bad.append("K: switch_to 不在窗口里时没有立即生效")
+        prep = _body(port, "void la_switch_prepare(")
+        if not prep:
+            bad.append("K: port 里没有 la_switch_prepare 的定义")
+        else:
+            if "s_pg_pending_space = LA_PG_PENDING_NONE;" not in prep:
+                bad.append("K: la_switch_prepare 没有清 pending")
+            if "new_frame == old_frame" not in prep:
+                bad.append("K: la_switch_prepare 没认出「调度器最终没切走」")
+            if "LA_FR_PRMD" not in prep:
+                bad.append("K: la_switch_prepare 没补写 PRMD（C 侧写在旧窗口里）")
+            if "arkrtos_port_paging_activate(space)" not in prep:
+                bad.append("K: la_switch_prepare 没有真正换窗口")
+        return bad
+
+    def pin_l(asm):
+        bad = []
+        if asm.count("bl      la_switch_prepare") != 2:
+            bad.append("L: 两条恢复路径（eentry / switch_inline）没有都调 la_switch_prepare")
+        if asm.count("la.abs  $sp, la_switch_stack_top") != 2:
+            bad.append("L: 恢复路径没有先换到恒等映射静态栈")
+        if "la_switch_stack_top:" not in asm or ".space  2048" not in asm:
+            bad.append("L: .S 里没有 la_switch_stack 那块静态栈")
+        # 换栈必须发生在进 C 之前：第一条 bl la_switch_prepare 前面要有换栈。
+        first = asm.find("bl      la_switch_prepare")
+        if first >= 0 and asm.rfind("la.abs  $sp, la_switch_stack_top", 0, first) < 0:
+            bad.append("L: 第一条恢复路径没有先换栈就进 la_switch_prepare")
+        return bad
+
+    def pin_m(elf, shell):
+        bad = []
+        if "static int32 elf_slot_live(" not in elf:
+            bad.append("M: elf.c 里没有 elf_slot_live（按空间记台账）")
+        if "static int32 elf_copy_to_window(" not in elf:
+            bad.append("M: elf.c 里没有 elf_copy_to_window（先读内核暂存再写窗口）")
+        body = _body(elf, "int32 arkrtos_elf_exec_space(")
+        if not body:
+            bad.append("M: elf.c 里没有 arkrtos_elf_exec_space 的定义")
+        else:
+            if "arkrtos_paging_space_activate(space)" not in body:
+                bad.append("M: exec_space 装载前没有把窗口切到目标空间")
+            if "arkrtos_paging_space_activate(prev)" not in body:
+                bad.append("M: exec_space 装完没有把内核任务原来的视图装回去")
+            if "elf_slot_live(space)" not in body:
+                bad.append("M: exec_space 挑空间没有看台账")
+        if "pmap u2: PASS - two instances, two spaces, neither frame overwritten" not in shell:
+            bad.append("M: shell 里没有 pmap u2 的通过判据")
+        return bad
+
     for rel in ("kernelsrc/src/arkrtos_paging.c",
                 "kernelsrc/port/loongarch/la64/arkrtos_port.c",
+                "kernelsrc/port/loongarch/la64/arkrtos_context.S",
                 "kernelsrc/include/arkrtos_hal.h",
                 "kernelsrc/include/arkrtos_mpu.h",
+                "kernelsrc/include/arkrtos_elf.h",
+                "kernelsrc/src/arkrtos_elf.c",
                 "kernelsrc/shell/arkrtos_shell.c"):
         if not os.path.isfile(os.path.join(ROOT, rel)):
-            failures.append("E-H: 缺文件 %s" % rel)
+            failures.append("E-M: 缺文件 %s" % rel)
 
     if not failures:
         src_pg = _src("kernelsrc/src/arkrtos_paging.c")
         src_port = _src("kernelsrc/port/loongarch/la64/arkrtos_port.c")
+        src_asm = _src("kernelsrc/port/loongarch/la64/arkrtos_context.S")
         src_hal = _src("kernelsrc/include/arkrtos_hal.h")
         src_mpu = _src("kernelsrc/include/arkrtos_mpu.h")
+        src_elf = _src("kernelsrc/src/arkrtos_elf.c")
         src_sh = _src("kernelsrc/shell/arkrtos_shell.c")
 
         for msg in (pin_e(src_pg) + pin_f(src_port) +
                     pin_g(src_hal, src_mpu) + pin_h(src_sh) +
-                    pin_i(src_port) + pin_j(src_pg, src_hal, src_mpu)):
+                    pin_i(src_port) + pin_j(src_pg, src_hal, src_mpu) +
+                    pin_k(src_port) + pin_l(src_asm) +
+                    pin_m(src_elf, src_sh)):
             failures.append("源码 pin 不成立 " + msg)
 
         # 自检：把每条 pin 依赖的那一句改坏，对应 pin 必须报错
@@ -329,9 +410,20 @@ def main():
                                        'ARK_SHELL_CMD("pmapX", cmd_pmap', 1))),
             ("I", pin_i(src_port.replace("la_tlb_inval_page(",
                                          "la_tlb_inval_page_X("))),
-            ("J", pin_j(src_pg.replace("arkrtos_port_paging_activate(",
-                                       "arkrtos_port_paging_activate_X(", 1),
+            ("J", pin_j(src_pg.replace("arkrtos_port_paging_switch_to(",
+                                       "arkrtos_port_paging_switch_to_X(", 1),
                          src_hal, src_mpu)),
+            # J 的反向断言：把 set_app 里的 switch_to 改回 activate，必须报错
+            ("J-", pin_j(src_pg.replace("(void)arkrtos_port_paging_switch_to(",
+                                        "(void)arkrtos_port_paging_activate(", 1),
+                          src_hal, src_mpu)),
+            ("K", pin_k(src_port.replace("if(la_sp_in_app_window() != 0u)",
+                                         "if(la_sp_in_app_window_X() != 0u)", 1))),
+            ("L", pin_l(src_asm.replace("bl      la_switch_prepare",
+                                         "bl      la_switchXprepare", 1))),
+            ("M", pin_m(src_elf.replace("arkrtos_paging_space_activate(prev)",
+                                         "arkrtos_paging_space_activate_X(prev)", 1),
+                         src_sh)),
         ]
         for tag, got in selfchecks:
             if not got:
@@ -345,8 +437,9 @@ def main():
         return 1
 
     print("PAGING-GATE OK: 默认档=0 / LA64 打开编得过(2 TU) / RV32 负向被拒 / "
-          "两后端互斥被拒 / 动态映射接线 E-H 四条 pin 成立且自检有效 / "
-          "每 App 地址空间 I-J 两条 pin 成立且自检有效")
+          "两后端互斥被拒 / 动态映射接线 E-H pin 成立且自检有效 / "
+          "每 App 地址空间 I-J pin 成立且自检有效 / "
+          "U-2 延迟换窗口 K-M pin 成立且自检有效")
     return 0
 
 
