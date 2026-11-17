@@ -6259,6 +6259,8 @@ static int cmd_unld(int argc, char *argv[])
  *            pmap u2 [path]                            自测：同一份 ELF 装进两个空
  *                                                      间、并发两个任务、互不覆盖
  *            pmap look <va>                            读回该 VA 命中的 TLB 条目
+ *            pmap unmap <va> <size>                    撤销动态映射（U-15）
+ *            pmap dyn                                  动态槽位占用读数
  *
  *          **注意**：`pmap rd/rb/wrb` 不做保护性检查 —— 地址没映射就是一次
  *          重填致命。这是刻意的：它们就是用来验证「这条地址到底通不通」的，
@@ -6428,6 +6430,34 @@ static int cmd_pmap(int argc, char *argv[])
         return 0;
     }
 
+    if((argc >= 3) && (strcmp(argv[1], "unmap") == 0))
+    {
+        uint32 va = 0u;
+        uint32 size = 0u;
+
+        if((argc < 4) || (pmap_hex(argv[2], &va) != 0) ||
+           (pmap_hex(argv[3], &size) != 0))
+        {
+            sh_out("usage: pmap unmap <va> <size>\r\n");
+            return 1;
+        }
+
+        rc = arkrtos_paging_unmap_span(va, size);
+        ark_shell_printf("pmap: unmap 0x%08X size=%u rc=%d pages=%u dyn=%u\r\n",
+                         (unsigned)va, (unsigned)size, (int)rc,
+                         (unsigned)arkrtos_paging_map_pages(),
+                         (unsigned)arkrtos_paging_dyn_used());
+        return (rc == 0) ? 0 : 1;
+    }
+
+    if((argc >= 2) && (strcmp(argv[1], "dyn") == 0))
+    {
+        ark_shell_printf("pmap: dyn slot(s) in use=%u pages=%u\r\n",
+                         (unsigned)arkrtos_paging_dyn_used(),
+                         (unsigned)arkrtos_paging_map_pages());
+        return 0;
+    }
+
     if((argc >= 2) && (strcmp(argv[1], "test") == 0))
     {
         int i;
@@ -6461,8 +6491,78 @@ static int cmd_pmap(int argc, char *argv[])
         }
 
         ark_shell_printf("pmap: compare 16 words, mismatch=%d\r\n", diff);
-        sh_out((diff == 0) ? "pmap test: PASS\r\n" : "pmap test: FAIL (translation)\r\n");
-        return (diff == 0) ? 0 : 1;
+
+        /* U-15：撤掉这一页之后，同一条 VA 必须真的不再命中任何条目。
+         * 只打印「rc=0」不够 —— 账面清了而翻译还在，就是这类改动的典型
+         * 假绿。所以这里直接问 port 的读回路径。 */
+        {
+            uint32 idx = 0u;
+            uint32 ppn = 0u;
+            uint32 ps = 0u;
+            uint32 again_va = PMAP_TEST_VA;
+            int still = 0;
+            int re_diff = 0;
+
+            rc = arkrtos_paging_unmap_span(PMAP_TEST_VA, 0x1000u);
+            still = (arkrtos_port_paging_lookup(again_va, &idx, &ppn, &ps) != 0u) ? 1 : 0;
+            ark_shell_printf("pmap: unmap 0x%08X rc=%d left_entry=%d dyn=%u\r\n",
+                             (unsigned)PMAP_TEST_VA, (int)rc, still,
+                             (unsigned)arkrtos_paging_dyn_used());
+            if((rc != 0) || (still != 0))
+            {
+                sh_out("pmap test: FAIL (unmap left an entry)\r\n");
+                return 1;
+            }
+
+            /* 同一个 VA 改绑另一块物理页（内核 ROM 的第二页）。槽位如果没
+             * 真的回收，这一步会撞上 -5（同 VA 已登记成别的 PA）—— 那正是
+             * 「撤销」与「改绑」之间的分界。 */
+            rc = arkrtos_paging_map_span(PMAP_TEST_VA,
+                                         ((uint32)ARKRTOS_MPU_KERNEL_ROM_BASE + 0x1000u),
+                                         0x1000u, ARKRTOS_MPU_MEM_ROM);
+            ark_shell_printf("pmap: rebind 0x%08X <- 0x%08X rc=%d dyn=%u\r\n",
+                             (unsigned)PMAP_TEST_VA,
+                             (unsigned)((uint32)ARKRTOS_MPU_KERNEL_ROM_BASE + 0x1000u),
+                             (int)rc, (unsigned)arkrtos_paging_dyn_used());
+            if(rc != 0)
+            {
+                sh_out("pmap test: FAIL (slot not recycled)\r\n");
+                return 1;
+            }
+
+            for(i = 0; i < 16; i++)
+            {
+                uint32 off = (uint32)i * 4u;
+                uint32 a = *(volatile uint32 *)(unsigned long)(PMAP_TEST_VA + off);
+                uint32 b = *(volatile uint32 *)(unsigned long)
+                           ((uint32)ARKRTOS_MPU_KERNEL_ROM_BASE + 0x1000u + off);
+
+                if(a != b)
+                {
+                    re_diff++;
+                }
+            }
+
+            ark_shell_printf("pmap: rebind compare 16 words, mismatch=%d\r\n", re_diff);
+            if(re_diff != 0)
+            {
+                sh_out("pmap test: FAIL (rebind translation)\r\n");
+                return 1;
+            }
+
+            rc = arkrtos_paging_unmap_span(PMAP_TEST_VA, 0x1000u);
+            still = (arkrtos_port_paging_lookup(again_va, &idx, &ppn, &ps) != 0u) ? 1 : 0;
+            ark_shell_printf("pmap: final unmap rc=%d left_entry=%d dyn=%u\r\n",
+                             (int)rc, still, (unsigned)arkrtos_paging_dyn_used());
+            if((rc != 0) || (still != 0))
+            {
+                sh_out("pmap test: FAIL (final unmap left an entry)\r\n");
+                return 1;
+            }
+        }
+
+        sh_out("pmap test: PASS (map / unmap / rebind / unmap)\r\n");
+        return 0;
     }
 
     if((argc >= 2) && (strcmp(argv[1], "space") == 0))
@@ -6913,7 +7013,7 @@ static int register_kernel_commands(void)
         "Per-task stack usage, measured (fill pattern + low PSP): stack [check]", 2);
 #if (ARKRTOS_USE_PAGING == 1)
     g_cmd_table[idx++] = ARK_SHELL_CMD("pmap", cmd_pmap,
-        "Paging: pmap [map|check|rd|rb|wrb|test|space|u1|look] ...", 6);
+        "Paging: pmap [map|check|rd|rb|wrb|test|space|u1|look|unmap|dyn] ...", 6);
 #endif /* ARKRTOS_USE_PAGING */
     g_cmd_table[idx++] = ARK_SHELL_CMD("sched", cmd_sched,
         "Scheduler readiness self-check (0 = consistent)", 1);

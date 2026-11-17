@@ -241,8 +241,12 @@ int32 arkrtos_paging_stats(uint32 *p_checked, uint32 *p_bad, uint32 *p_bad_base)
 3. **运行期动态映射只支持内核可见（PLV0）的 4 KB 页**（2026-11-17 落地，见
    [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.16）：驱动要登记一块静态表里
    没有的 MMIO 窗口，调 `arkrtos_paging_map_span(va, pa, size, mem)`。**App 可见**的
-   动态映射需要 ASID 或每进程表（U-1），接口一律拒绝而不是近似。**撤销没有做**
-   （U-15）：`flush()` 仍是空操作——按 VA 发 `invtlb` 会把内核自己的条目也打掉。
+   动态映射需要 ASID 或每进程表（U-1），接口一律拒绝而不是近似。
+4. **撤销（U-15，2026-11-17 做完）**：`arkrtos_paging_unmap_span(va, size)` 逐页撤，
+   静态跨度一律 -2（撤掉内核条目就是下一次取指 refill），没登记过报 -4 而不是静默成功。
+   实现在 port 侧是「先按 VA `invtlb` 失效 STLB/softmmu、再按 MTLB 绝对索引写回 V=0 条目」
+   两步 —— 只做后一步会留下「账面清了、旧翻译还在」的假绿（实测 rebind 16 字全错）。
+   整表 flush（`arkrtos_port_paging_flush()`）仍未做。
 
 ### 7.5 QEMU 实测读数
 
@@ -286,7 +290,7 @@ int32 arkrtos_paging_stats(uint32 *p_checked, uint32 *p_bad, uint32 *p_bad_base)
 | 缺页处理 | **未做** |
 | `copy_from_user` / `copy_to_user`（内核安全访问用户地址） | **未做** |
 | 运行期动态映射（`arkrtos_port_paging_alias` / `arkrtos_paging_map_span`） | **已做（仅内核 PLV0、4 KB、最多 8 对页）**，QEMU LA64 实跑：同 VA 换 PA 返回 -5、落静态跨度内 -2、真设备页经新 VA 读得同值且写方向打出字符 |
-| 撤销 / 回收映射（unmap） | **未做**（U-15）：`flush()` 仍是空操作，`invtlb` 具体 op 语义未核 |
+| 撤销 / 回收映射（unmap） | **已做完**（U-15，2026-11-17，QEMU LA64 实跑）：`pmap unmap` / `pmap dyn`，拒绝码 -1/-2/-4，槽位在两半都空时回收；只重写 MTLB 是假绿（先 `invtlb` 两半再 `tlbwr`） |
 | SMP（多核 TLB shootdown） | **未做** |
 
 验收判据（做这些欠账时按这条验收，不按「能跑起来」验收）：

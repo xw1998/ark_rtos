@@ -370,6 +370,62 @@ def main():
             bad.append("M: shell 里没有 pmap u2 的通过判据")
         return bad
 
+    def pin_n(port):
+        bad = []
+        if "int32 arkrtos_port_paging_unalias(" not in port:
+            bad.append("N: port 里没有 arkrtos_port_paging_unalias（U-15）")
+            return bad
+        body = _body(port, "int32 arkrtos_port_paging_unalias(")
+        if not body:
+            bad.append("N: 找不到 arkrtos_port_paging_unalias 的定义")
+            return bad
+        if "la_pg_static_hit(" not in body:
+            bad.append("N: unalias 不拒静态跨度（撤掉内核条目 = 下一次取指 refill）")
+        if "la_tlb_inval_page(" not in body:
+            bad.append("N: unalias 没有失效 STLB/softmmu 里的旧翻译"
+                       "（只重写 MTLB 时经该 VA 仍读到旧物理页）")
+        if "la_tlb_write(" not in body:
+            bad.append("N: unalias 没有把 V=0 的条目写回 machine TLB")
+        if (("lo[0] == 0UL" not in body) or ("lo[1] == 0UL" not in body)):
+            bad.append("N: unalias 不判两半是否都空了（会顺手回收还占着的槽位）")
+        if "used = 0u" not in body:
+            bad.append("N: unalias 从不回收槽位（撤销后仍报满）")
+        du = _body(port, "uint32 arkrtos_port_paging_dyn_used(")
+        if not du:
+            bad.append("N: port 里没有 arkrtos_port_paging_dyn_used（槽位读数）")
+        elif "used != 0u" not in du:
+            bad.append("N: dyn_used 没有数 used 标志")
+        return bad
+
+    def pin_o(pg, shell, hal, mpu):
+        bad = []
+        body = _body(pg, "int32 arkrtos_paging_unmap_span(")
+        if not body:
+            bad.append("O: arkrtos_paging.c 里没有 arkrtos_paging_unmap_span")
+        else:
+            if "arkrtos_port_paging_unalias(" not in body:
+                bad.append("O: unmap_span 没有调用 port 的 unalias")
+            if "s_pg_map_pages -= done" not in body:
+                bad.append("O: unmap_span 不结账（pages 读数会虚高）")
+        du = _body(pg, "uint32 arkrtos_paging_dyn_used(")
+        if (not du) or ("arkrtos_port_paging_dyn_used(" not in du):
+            bad.append("O: arkrtos_paging_dyn_used 没有委托 port")
+        if "#define arkrtos_port_paging_unalias(va)            (-1)" not in hal:
+            bad.append("O: hal 的关档回退里没有 arkrtos_port_paging_unalias")
+        if "#define arkrtos_paging_unmap_span(va, size)                  (-1)" not in mpu:
+            bad.append("O: mpu.h 的关档回退里没有 arkrtos_paging_unmap_span")
+        if 'strcmp(argv[1], "unmap")' not in shell:
+            bad.append("O: shell 没有 pmap unmap 分支")
+        elif "arkrtos_paging_unmap_span(" not in shell:
+            bad.append("O: shell 的 pmap unmap 没有调 unmap_span")
+        if 'strcmp(argv[1], "dyn")' not in shell:
+            bad.append("O: shell 没有 pmap dyn 读数")
+        elif "arkrtos_paging_dyn_used()" not in shell:
+            bad.append("O: shell 的 pmap dyn 没有读 dyn_used")
+        if "pmap test: PASS (map / unmap / rebind / unmap)" not in shell:
+            bad.append("O: pmap test 没有把 unmap/rebind 串进判据")
+        return bad
+
     for rel in ("kernelsrc/src/arkrtos_paging.c",
                 "kernelsrc/port/loongarch/la64/arkrtos_port.c",
                 "kernelsrc/port/loongarch/la64/arkrtos_context.S",
@@ -394,7 +450,8 @@ def main():
                     pin_g(src_hal, src_mpu) + pin_h(src_sh) +
                     pin_i(src_port) + pin_j(src_pg, src_hal, src_mpu) +
                     pin_k(src_port) + pin_l(src_asm) +
-                    pin_m(src_elf, src_sh)):
+                    pin_m(src_elf, src_sh) +
+                    pin_n(src_port) + pin_o(src_pg, src_sh, src_hal, src_mpu)):
             failures.append("源码 pin 不成立 " + msg)
 
         # 自检：把每条 pin 依赖的那一句改坏，对应 pin 必须报错
@@ -424,6 +481,11 @@ def main():
             ("M", pin_m(src_elf.replace("arkrtos_paging_space_activate(prev)",
                                          "arkrtos_paging_space_activate_X(prev)", 1),
                          src_sh)),
+            ("N", pin_n(src_port.replace("int32 arkrtos_port_paging_unalias(",
+                                         "int32 arkrtos_port_paging_unalias_X(", 1))),
+            ("O", pin_o(src_pg.replace("arkrtos_port_paging_unalias(va + off)",
+                                       "arkrtos_port_paging_unalias_X(va + off)", 1),
+                         src_sh, src_hal, src_mpu)),
         ]
         for tag, got in selfchecks:
             if not got:
@@ -439,7 +501,8 @@ def main():
     print("PAGING-GATE OK: 默认档=0 / LA64 打开编得过(2 TU) / RV32 负向被拒 / "
           "两后端互斥被拒 / 动态映射接线 E-H pin 成立且自检有效 / "
           "每 App 地址空间 I-J pin 成立且自检有效 / "
-          "U-2 延迟换窗口 K-M pin 成立且自检有效")
+          "U-2 延迟换窗口 K-M pin 成立且自检有效 / "
+          "U-15 映射撤销 N-O pin 成立且自检有效")
     return 0
 
 

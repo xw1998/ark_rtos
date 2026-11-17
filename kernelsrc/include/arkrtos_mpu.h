@@ -77,6 +77,19 @@ int32 arkrtos_paging_map_span(uint32 va, uint32 pa, uint32 size, arkrtos_mpu_mem
 /** @brief How many pages this layer has registered (cumulative readout) */
 uint32 arkrtos_paging_map_pages(void);
 
+/** @brief Undo pages registered through arkrtos_paging_map_span() (U-15)
+ *  @param va   Base of the span, must be 4 KB aligned
+ *  @param size Bytes, must be a non-zero multiple of 4 KB
+ *  @return 0 = every page is gone; <0 = the port's own reason for the page
+ *          that failed (-1 parameter, -2 static span, -4 not registered)
+ *  @details Only pages registered through map_span() can be taken out: static
+ *           spans are the kernel's own and the port refuses them. A span that
+ *           was only partly mapped reports the reason instead of a "done". */
+int32 arkrtos_paging_unmap_span(uint32 va, uint32 size);
+
+/** @brief How many dynamic mapping slots are in use right now (readout) */
+uint32 arkrtos_paging_dyn_used(void);
+
 /* ------------------------------------------------------------------
  * Per-App address spaces (U-1)
  *
@@ -122,6 +135,8 @@ uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task);
 #define arkrtos_paging_stats(p_checked, p_bad, p_bad_base)   (-1)
 #define arkrtos_paging_map_span(va, pa, size, mem)           (-1)
 #define arkrtos_paging_map_pages()                           (0u)
+#define arkrtos_paging_unmap_span(va, size)                  (-1)
+#define arkrtos_paging_dyn_used()                            (0u)
 #define arkrtos_paging_space_count()                         (1u)
 #define arkrtos_paging_space_frame(space)                    (0u)
 #define arkrtos_paging_space_current()                       (0u)

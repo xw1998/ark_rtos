@@ -385,6 +385,60 @@ uint32 arkrtos_paging_map_pages(void)
 }
 
 /**
+* @brief Undo pages registered through map_span() (U-15)
+* @param va   Base of the span, 4 KB aligned
+* @param size Bytes, non-zero multiple of 4 KB
+* @return 0 = every page is gone; <0 = the port's own reason for the page that
+*         failed (-1 alignment, -2 static span, -4 not registered)
+* @details The loop stops at the first refusal on purpose: a caller that asks
+*          to unmap a span it never mapped should hear about it instead of
+*          getting a "done" that quietly skipped half the pages. Pages already
+*          unmapped stay unmapped (same honest partial-progress rule as
+*          map_span(), and for the same reason: no rollback without a re-map).
+*
+*          s_pg_map_pages counts pages that ARE mapped, so it drops by exactly
+*          the number of pages this call took out.
+*/
+int32 arkrtos_paging_unmap_span(uint32 va, uint32 size)
+{
+    uint32 off;
+    uint32 done = 0u;
+
+    if((size == 0u) || ((size & 0xFFFu) != 0u) || ((va & 0xFFFu) != 0u))
+    {
+        return -1;
+    }
+
+    for(off = 0u; off < size; off += 0x1000u)
+    {
+        int32 rc = arkrtos_port_paging_unalias(va + off);
+
+        if(rc != 0)
+        {
+            s_pg_map_pages -= done;
+            return rc;
+        }
+
+        done++;
+    }
+
+    s_pg_map_pages -= done;
+    return 0;
+}
+
+/**
+* @brief How many dynamic mapping slots are in use right now
+* @return used slot count (0 on any build without the paging backend)
+* @details This is the readout that was missing while maps could only be
+*          added: a driver that registered eight 4 KB pages had no way to see
+*          how close it was to the table being full.
+*/
+uint32 arkrtos_paging_dyn_used(void)
+{
+    return arkrtos_port_paging_dyn_used();
+}
+
+/**
 * @brief Read the audit counters (kernel/shell only).
 * @param p_checked   Receives the number of spans audited, may be 0.
 * @param p_bad       Receives the number of spans no mapping covers, may be 0.

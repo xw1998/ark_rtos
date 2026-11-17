@@ -1147,6 +1147,97 @@ int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_t mem)
     return 0;
 }
 
+/**
+* @brief 撤销一条动态映射（U-15）
+* @return 0 = 已撤销；-1 = 未 4 KB 对齐；-2 = 落在静态跨度里；-4 = 没登记过
+* @details 动态条目落在 MTLB 的绝对索引上（LA_MTLB_INDEX + LA_MTLB_DYN_FIRST
+*          + slot），撤销时按同一个索引 tlbwr 写回一条 V=0 的条目。
+*          **但只重写 MTLB 不够**：这个 VA 一旦被访问过，STLB 与 QEMU 的
+*          softmmu 缓存里还留着旧翻译，tlbwr 只改 machine TLB，不会回头看
+*          STLB（实测症状：look 报 no entry，可经这个 VA 读出来的仍是旧物理
+*          页）。所以两半都先 invtlb 再写。静态映射一律拒绝（-2）：那是内核
+*          自己的条目，撤掉它下一次取指就 KERNEL refill。
+*
+*          只清被撤的那一半：一对 8 KB 里另一半还登记着就不能一起丢。两半
+*          都空了才把槽位标回空闲，让下一个调用方能用上它 —— 这正是 U-15 缺
+*          的那一半能力（「动态映射只增不减」）。 */
+int32 arkrtos_port_paging_unalias(uint32 va)
+{
+    uint32 pair;
+    uint32 half;
+    uint32 i;
+    uint32 slot = LA_PG_DYN_PAIRS;
+
+    if((va & 0xFFFu) != 0u)
+    {
+        return -1;
+    }
+
+    if(la_pg_static_hit(va, 0x1000u) != 0u)
+    {
+        return -2;
+    }
+
+    pair = va & ~0x1FFFu;
+    half = (va >> 12) & 1u;
+
+    for(i = 0u; i < LA_PG_DYN_PAIRS; i++)
+    {
+        if((s_pg_dyn[i].used != 0u) && (s_pg_dyn[i].pair == pair))
+        {
+            slot = i;
+            break;
+        }
+    }
+
+    if((slot == LA_PG_DYN_PAIRS) || (s_pg_dyn[slot].lo[half] == 0UL))
+    {
+        return -4;                       /* 本来就没登记过：不猜，报错 */
+    }
+
+    s_pg_dyn[slot].pa[half]   = 0u;
+    s_pg_dyn[slot].lo[half]   = 0UL;
+    s_pg_dyn[slot].mask[half] = 0u;
+
+    if((s_pg_dyn[slot].lo[0] == 0UL) && (s_pg_dyn[slot].lo[1] == 0UL))
+    {
+        s_pg_dyn[slot].used = 0u;        /* 两半都空了，槽位回收 */
+        s_pg_dyn[slot].pair = 0u;
+    }
+
+    /* 先让这个 8 KB 对的两半在 STLB / softmmu 里都失效，再写 machine TLB。
+     * 顺序不能颠倒：invtlb 是按旧条目的 PS 匹配的，写在后面会查不到旧条目。 */
+    la_tlb_inval_page(pair);
+    la_tlb_inval_page(pair + 0x1000u);
+
+    /* 剩下的那一半（或 _ ，两半都空时）照原样写回同一条 MTLB 条目：
+     * 空的那一半 V=0，不会匹配，也就不会顺手把邻居页放开。 */
+    la_tlb_write(pair, 12u, LA_MTLB_INDEX + LA_MTLB_DYN_FIRST + slot,
+                 s_pg_dyn[slot].lo[0], s_pg_dyn[slot].lo[1]);
+
+    return 0;
+}
+
+/**
+* @brief 已占用的动态映射槽位数
+* @details 只会数 used 标志，不去读 TLB：读回路径（tlbsrch/tlbrd）在
+*          撤销之后不一定还能告诉你「槽位空着」，而槽位书是真的。 */
+uint32 arkrtos_port_paging_dyn_used(void)
+{
+    uint32 i;
+    uint32 n = 0u;
+
+    for(i = 0u; i < LA_PG_DYN_PAIRS; i++)
+    {
+        if(s_pg_dyn[i].used != 0u)
+        {
+            n++;
+        }
+    }
+
+    return n;
+}
+
 #else  /* ARKRTOS_USE_PRIV == 0：没有 TLB 通路，动态映射一律拒绝 */
 
 int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_t mem)
@@ -1156,6 +1247,18 @@ int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_t mem)
     (void)mem;
 
     return -1;
+}
+
+int32 arkrtos_port_paging_unalias(uint32 va)
+{
+    (void)va;
+
+    return -1;                           /* 没有 TLB 通路就没有东西可撤 */
+}
+
+uint32 arkrtos_port_paging_dyn_used(void)
+{
+    return 0u;
 }
 
 #endif /* ARKRTOS_USE_PRIV == 1 */

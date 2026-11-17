@@ -19,7 +19,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（44 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（46 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -30,7 +30,7 @@
 - [kernelsrc/include/arkrtos_mempool.h](#kernelsrcincludearkrtos_mempoolh)（9 项）
 - [kernelsrc/include/arkrtos_mini.h](#kernelsrcincludearkrtos_minih)（20 项）
 - [kernelsrc/include/arkrtos_modld.h](#kernelsrcincludearkrtos_modldh)（8 项）
-- [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（8 项）
+- [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（10 项）
 - [kernelsrc/include/arkrtos_net.h](#kernelsrcincludearkrtos_neth)（6 项）
 - [kernelsrc/include/arkrtos_ptable.h](#kernelsrcincludearkrtos_ptableh)（23 项）
 - [kernelsrc/include/arkrtos_rt.h](#kernelsrcincludearkrtos_rth)（13 项）
@@ -53,7 +53,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（11 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（38 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（40 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（16 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -85,7 +85,7 @@
 - [kernelsrc/src/arkrtos_mini.c](#kernelsrcsrcarkrtos_minic)（1 项）
 - [kernelsrc/src/arkrtos_modld.c](#kernelsrcsrcarkrtos_modldc)（5 项）
 - [kernelsrc/src/arkrtos_mpu.c](#kernelsrcsrcarkrtos_mpuc)（1 项）
-- [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（10 项）
+- [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（12 项）
 - [kernelsrc/src/arkrtos_smp.c](#kernelsrcsrcarkrtos_smpc)（1 项）
 - [kernelsrc/src/arkrtos_task.c](#kernelsrcsrcarkrtos_taskc)（5 项）
 - [kernelsrc/src/arkrtos_tickless.c](#kernelsrcsrcarkrtos_ticklessc)（1 项）
@@ -3378,6 +3378,30 @@ int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_t mem);
 **返回**：0 = 已建立；-1 = 本 port 未实现
 动态映射是登记欠账，这里不假装支持。 */
 
+### `int32 arkrtos_port_paging_unalias(uint32 va);`
+
+```c
+int32 arkrtos_port_paging_unalias(uint32 va);
+```
+
+**撤销一条动态映射（U-15）**
+- `va`：登记的虚拟地址（4 KB 对齐）
+**返回**：0 = 已撤销（该页条目写成无效，同对另一页保持原样）；
+-1 = 未 4 KB 对齐；-2 = 落在静态跨度里（静态映射从不撤销）；
+-4 = 这个 VA 本来就没登记过
+撤销靠「按同一个绝对索引把这条条目重写空」完成：动态条目落
+MTLB 的绝对槽位，所以不需要 invtlb —— 覆盖后旧翻译就不存在了。
+两半都空了才把槽位标成空闲，否则只清被撤的那一半。 */
+
+### `uint32 arkrtos_port_paging_dyn_used(void);`
+
+```c
+uint32 arkrtos_port_paging_dyn_used(void);
+```
+
+**当前占用了几条动态映射槽位（pmap 读数用）**
+**返回**：已占用槽位数（0..上限） */
+
 ### `void arkrtos_port_paging_flush(uint32 base, uint32 size);`
 
 ```c
@@ -4829,6 +4853,29 @@ uint32 arkrtos_paging_map_pages(void);
 ```
 
 **How many pages this layer has registered (cumulative readout) */**
+
+### `int32 arkrtos_paging_unmap_span(uint32 va, uint32 size);`
+
+```c
+int32 arkrtos_paging_unmap_span(uint32 va, uint32 size);
+```
+
+**Undo pages registered through arkrtos_paging_map_span() (U-15)**
+- `va`：Base of the span, must be 4 KB aligned
+- `size`：Bytes, must be a non-zero multiple of 4 KB
+**返回**：0 = every page is gone; <0 = the port's own reason for the page
+that failed (-1 parameter, -2 static span, -4 not registered)
+Only pages registered through map_span() can be taken out: static
+spans are the kernel's own and the port refuses them. A span that
+was only partly mapped reports the reason instead of a "done". */
+
+### `uint32 arkrtos_paging_dyn_used(void);`
+
+```c
+uint32 arkrtos_paging_dyn_used(void);
+```
+
+**How many dynamic mapping slots are in use right now (readout) */**
 
 ### `uint32 arkrtos_paging_space_count(void);`
 
@@ -7834,6 +7881,35 @@ int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_t mem)
 -1 = 参数/属性不支持；-2 = 与静态映射重叠；-3 = 动态表满；
 -5 = 同一 VA 已登记成别的物理页/属性
 
+### `int32 arkrtos_port_paging_unalias(uint32 va)`
+
+```c
+int32 arkrtos_port_paging_unalias(uint32 va)
+```
+
+**撤销一条动态映射（U-15）**
+**返回**：0 = 已撤销；-1 = 未 4 KB 对齐；-2 = 落在静态跨度里；-4 = 没登记过
+动态条目落在 MTLB 的绝对索引上（LA_MTLB_INDEX + LA_MTLB_DYN_FIRST
++ slot），撤销时按同一个索引 tlbwr 写回一条 V=0 的条目。
+**但只重写 MTLB 不够**：这个 VA 一旦被访问过，STLB 与 QEMU 的
+softmmu 缓存里还留着旧翻译，tlbwr 只改 machine TLB，不会回头看
+STLB（实测症状：look 报 no entry，可经这个 VA 读出来的仍是旧物理
+页）。所以两半都先 invtlb 再写。静态映射一律拒绝（-2）：那是内核
+自己的条目，撤掉它下一次取指就 KERNEL refill。
+只清被撤的那一半：一对 8 KB 里另一半还登记着就不能一起丢。两半
+都空了才把槽位标回空闲，让下一个调用方能用上它 —— 这正是 U-15 缺
+的那一半能力（「动态映射只增不减」）。 */
+
+### `uint32 arkrtos_port_paging_dyn_used(void)`
+
+```c
+uint32 arkrtos_port_paging_dyn_used(void)
+```
+
+**已占用的动态映射槽位数**
+只会数 used 标志，不去读 TLB：读回路径（tlbsrch/tlbrd）在
+撤销之后不一定还能告诉你「槽位空着」，而槽位书是真的。 */
+
 ### `int32 arkrtos_port_paging_init(void)`
 
 ```c
@@ -9438,6 +9514,37 @@ uint32 arkrtos_paging_map_pages(void) {
 
 **How many pages have been registered through map_span()**
 **返回**：cumulative page count (0 on any build without the paging backend)
+
+### `int32 arkrtos_paging_unmap_span(uint32 va, uint32 size) {`
+
+```c
+int32 arkrtos_paging_unmap_span(uint32 va, uint32 size) {
+```
+
+**Undo pages registered through map_span() (U-15)**
+- `va`：Base of the span, 4 KB aligned
+- `size`：Bytes, non-zero multiple of 4 KB
+**返回**：0 = every page is gone; <0 = the port's own reason for the page that
+failed (-1 alignment, -2 static span, -4 not registered)
+The loop stops at the first refusal on purpose: a caller that asks
+to unmap a span it never mapped should hear about it instead of
+getting a "done" that quietly skipped half the pages. Pages already
+unmapped stay unmapped (same honest partial-progress rule as
+map_span(), and for the same reason: no rollback without a re-map).
+s_pg_map_pages counts pages that ARE mapped, so it drops by exactly
+the number of pages this call took out.
+
+### `uint32 arkrtos_paging_dyn_used(void) {`
+
+```c
+uint32 arkrtos_paging_dyn_used(void) {
+```
+
+**How many dynamic mapping slots are in use right now**
+**返回**：used slot count (0 on any build without the paging backend)
+This is the readout that was missing while maps could only be
+added: a driver that registered eight 4 KB pages had no way to see
+how close it was to the table being full.
 
 ### `int32 arkrtos_paging_stats(uint32 *p_checked, uint32 *p_bad, uint32 *p`
 

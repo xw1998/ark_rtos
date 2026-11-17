@@ -421,6 +421,20 @@ int32 arkrtos_port_paging_check(uint32 base, uint32 size, arkrtos_mpu_mem_t mem)
  *  @details 动态映射是登记欠账，这里不假装支持。 */
 int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_t mem);
 
+/** @brief 撤销一条动态映射（U-15）
+ *  @param va 登记的虚拟地址（4 KB 对齐）
+ *  @return 0 = 已撤销（该页条目写成无效，同对另一页保持原样）；
+ *          -1 = 未 4 KB 对齐；-2 = 落在静态跨度里（静态映射从不撤销）；
+ *          -4 = 这个 VA 本来就没登记过
+ *  @details 撤销靠「按同一个绝对索引把这条条目重写空」完成：动态条目落
+ *           MTLB 的绝对槽位，所以不需要 invtlb —— 覆盖后旧翻译就不存在了。
+ *           两半都空了才把槽位标成空闲，否则只清被撤的那一半。 */
+int32 arkrtos_port_paging_unalias(uint32 va);
+
+/** @brief 当前占用了几条动态映射槽位（pmap 读数用）
+ *  @return 已占用槽位数（0..上限） */
+uint32 arkrtos_port_paging_dyn_used(void);
+
 /** @brief 让一段地址的翻译失效
  *  @details 静态映射从不撤销，所以本 port 是空操作；留这个口是为了让
  *           将来真做动态重映射时有地方落，而不是到时候改契约。 */
@@ -469,6 +483,8 @@ uint32 arkrtos_port_paging_lookup(uint32 va, uint32 *index, uint32 *ppn, uint32 
 #define arkrtos_port_paging_init()                 (-1)
 #define arkrtos_port_paging_check(base, size, mem) (-1)
 #define arkrtos_port_paging_alias(va, pa, mem)     (-1)
+#define arkrtos_port_paging_unalias(va)            (-1)
+#define arkrtos_port_paging_dyn_used()             (0u)
 #define arkrtos_port_paging_activate(space)        (-1)
 #define arkrtos_port_paging_switch_to(space)       (-1)
 #define arkrtos_port_paging_space()                (0u)

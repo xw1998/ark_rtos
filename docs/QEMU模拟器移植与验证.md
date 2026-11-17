@@ -1687,7 +1687,7 @@ uint32 arkrtos_paging_map_pages(void);
   `size > 16 页`（`ARKRTOS_PAGING_MAP_MAX_PAGES`）一律 -1。
 - **只做内核可见（PLV0）映射**。App 可见的动态映射需要 ASID 或每进程表 —— 那是 U-1，
   在这里近似会给出「看似权威的错答案」，所以明确拒绝而不是假装支持。
-- **失败不回滚**：没有 unmap 路径（见 U-15），已登记上的前几页会留在表里。
+- **失败不回滚**：`map_span()` 中途失败时已登记的页会留在表里（没有 re-map 就没有回滚）；要收回就调 `unmap_span()`（U-15，§5.18）。
   调用方要按「要么整段成、要么当作部分成功」处理，返回值只说明断在哪一页。
 - 拒绝码由 port 原样透出，不压成 -1：
 
@@ -1826,9 +1826,10 @@ pin F 的自检第一版是**空转**的：变异串 `la_tlb_write(pair, 12u` �
 
 #### 5.16.7 明确没做的部分
 
-- **撤销 / 回收映射**：`arkrtos_port_paging_flush()` 仍是空操作。撤销要么按 VA 发
-  `invtlb`（op 语义有多种读法，写错会把内核条目一起打掉），要么按 MTLB 索引写无效条目
-  （路径已知但设计未定）。登记为 **U-15**——符合"宁可报错，也不给看似权威的错答案"。
+- **撤销 / 回收映射**：本轮做完了（U-15，见 §5.18）。原先担心「按 VA 发 `invtlb` 会把
+  内核条目一起打掉」这条风险是实打实的，所以实现走的是「先按 VA 失效、再按 MTLB 绝对
+  索引写回 V=0 条目」这两步的组合，且静态跨度一律拒绝（-2）。`arkrtos_port_paging_flush()`
+  （整表 flush）仍是空操作。
 - **App 可见的动态映射**：属 U-1（每进程页表），接口一律拒绝。
 
 ### 5.17 每 App 地址空间：同一 VA、两块物理帧（U-1，2026-11-17）
@@ -2055,6 +2056,133 @@ pmap elf: 0 live instance(s)
 - **`copy_from_user`（U-6）**、按需缺页（U-5）、App 反向探测（PLV3 读内核页/别的帧）
   都不在本轮：本轮的隔离证据是「同一 VA → 两块物理内存」，越权证据仍来自
   PLV/`PLV3` 探针那一套（[内存保护与App越权验证](内存保护与App越权验证.md)）。
+
+### 5.18 撤销动态映射：unmap 与槽位回收（U-15，2026-11-17）
+
+#### 5.18.1 接口与拒绝码
+
+| 层 | 接口 | 语义 |
+|---|---|---|
+| port | `int32 arkrtos_port_paging_unalias(uint32 va)` | 0 = 已撤销；-1 未 4 KB 对齐；-2 落在静态跨度；-4 没登记过 |
+| port | `uint32 arkrtos_port_paging_dyn_used(void)` | 当前占用的动态槽位数（只数 `used` 标志，不读 TLB） |
+| paging | `int32 arkrtos_paging_unmap_span(uint32 va, uint32 size)` | 逐页撤，第一个失败即返回那个码；`s_pg_map_pages` 只减已撤的页数 |
+| paging | `uint32 arkrtos_paging_dyn_used(void)` | 委托 port |
+| shell | `pmap unmap <va> <size>` / `pmap dyn` | 命令行入口与读数 |
+
+三条设计取舍，都是为了「宁可报错，也不给看似权威的错答案」：
+
+1. **没登记过就报 -4**，不静默成功。一个调用方撤自己没登记过的跨度，听到 "done" 比
+   听到 "没这回事" 危险得多。
+2. **静态跨度一律 -2**。内核镜像 / App 窗口 / 两根 UART 条目撤掉任意一条，下一次取指就是
+   KERNEL refill —— 那是故障，不是"释放"。
+3. **span 中途失败不回滚**（与 `map_span()` 同一条规则，理由也一样：没有 re-map 就没有
+   回滚），但已撤的页会从 `s_pg_map_pages` 里如实扣掉。
+
+槽位只在**一对 8 KB 的两半都空**时才回收：一条 MTLB 条目覆盖一对页，只撤一半时另半页
+仍然有效，`used` 不能归零，否则下一个 `map_span()` 会把槽位发给别的 VA 对。
+
+#### 5.18.2 本轮实测出来的一个真缺陷：只重写 MTLB 不够
+
+原设计（以及本页 §5.16.7 的旧说法）是「动态条目落在 MTLB 的绝对索引上，`tlbwr` 覆盖同
+一条索引后旧翻译就不存在了，所以撤销不需要 `invtlb`」。**前半句对，结论错。**
+
+实测（第一版实现，只有 `tlbwr`）：
+
+```text
+pmap: map ROM 0x03000000 <- 0x00200000 rc=0
+pmap: compare 16 words, mismatch=0
+pmap: unmap 0x03000000 rc=0 left_entry=0 dyn=0
+pmap: rebind 0x03000000 <- 0x00201000 rc=0 dyn=1
+pmap: rebind compare 16 words, mismatch=16      <-- 16 个字全错
+pmap test: FAIL (rebind translation)
+```
+
+根因：这个 VA 一旦被**用过**，翻译就同时存在于 STLB 和 QEMU 的 softmmu 缓存里。`tlbwr`
+只改 machine TLB，不会回头看 STLB；QEMU 的 softmmu 更是对已翻译过的页做缓存。于是出现了
+最坏的一种组合：
+
+- `pmap look` 报 `no entry`（它查的是 MTLB，账面确实空了）——**看起来成功了**；
+- 经同一个 VA 读出来的仍是旧物理页——**实际上没撤掉**。
+
+修法是两步，顺序不能颠倒（`invtlb` 是按旧条目的 PS 匹配的，写在后面就查不到旧条目了）：
+
+```c
+la_tlb_inval_page(pair);            /* invtlb 3：按 VA 失效 STLB + softmmu */
+la_tlb_inval_page(pair + 0x1000u);  /* 奇半页单独再来一次（QEMU 的奇页计算有偏差） */
+la_tlb_write(pair, 12u, ...);       /* 再把 V=0 的条目写回 machine TLB */
+```
+
+改后同一序列：`rebind compare 16 words, mismatch=0`，`pmap test: PASS`。
+
+这条与本页 §5.17.2（大页切换时 `tlbwr` 不刷新**奇页**）是同一类坑：**写进去 ≠ 生效，
+读回来才算**。
+
+#### 5.18.3 读数（QEMU LA64 实跑）
+
+正向（`pmap test` 已把 map / unmap / rebind / unmap 串成一条判据）：
+
+```text
+pmap: map ROM 0x03000000 <- 0x00200000 rc=0
+pmap: compare 16 words, mismatch=0
+pmap: unmap 0x03000000 rc=0 left_entry=0 dyn=0
+pmap: rebind 0x03000000 <- 0x00201000 rc=0 dyn=1
+pmap: rebind compare 16 words, mismatch=0
+pmap: final unmap rc=0 left_entry=0 dyn=0
+pmap test: PASS (map / unmap / rebind / unmap)
+```
+
+其中 `rebind` 那一步是「槽位真的回收了」的判据：如果只清了账面没回收槽位，
+同一个 VA 改绑另一块 PA 会撞上 `-5`。
+
+拒绝码（逐条实跑）：
+
+```text
+pmap: unmap 0x00200000 size=4096 rc=-2 pages=0 dyn=0    # 内核镜像静态跨度
+pmap: unmap 0x03000123 size=4096 rc=-1 pages=0 dyn=0    # 未 4 KB 对齐
+pmap: unmap 0x03000000 size=4096 rc=-4 pages=0 dyn=0    # 没登记过
+pmap: unmap 0x03000000 size=6144 rc=-1 pages=0 dyn=0    # 不是 4 KB 的整数倍
+```
+
+负向证据（撤掉之后**真的**访问一次，这才是「撤掉了」而不是「账面清零」）：
+
+```text
+pmap: map 0x03000000 <- 0x00200000 size=4096 rc=0 pages=1
+pmap: [0x03000000] = 0x14016003
+pmap: [0x03000004] = 0x03800063
+pmap: unmap 0x03000000 size=4096 rc=0 pages=0 dyn=0
+pmap look: va=0x03000000 no entry
+pmap rd 0x03000000 1
+[Ark RTOS] FATAL: estat=0x00010000 ecode=0x00000001 era=0x00225b20 badv=0x03000000 ...
+```
+
+`ecode=0x1` 是 TLB refill，`badv` 正是被撤的那个 VA。
+
+回归：`utest` 13 matched / 13 passed / 0 failed（133 assertions），`pmap u1` 与
+`pmap u2` 仍 PASS（同一 VA 两块帧的切换路径没被这条改动影响）。RV32 镜像体积与改动前
+逐字节同尺寸：`text 235828 / data 128 / bss 628228`（paging 关档时 `unalias`/`dyn_used`
+走宏回退，一行代码也不进镜像）。
+
+#### 5.18.4 门禁：N / O 两条 pin 与自检
+
+`tools/paging_gate.py` 新增两条源码 pin，各自带变异自检（把源串改坏一次，pin 必须报错）：
+
+| pin | 断言 |
+|---|---|
+| N | port 有 `arkrtos_port_paging_unalias(`，其函数体含 `la_pg_static_hit(`、`la_tlb_inval_page(`、`la_tlb_write(`、两半空判据与 `used = 0u`；`arkrtos_port_paging_dyn_used(` 数 `used` 标志 |
+| O | `arkrtos_paging_unmap_span(` 存在且调 `arkrtos_port_paging_unalias(` 并结账 `s_pg_map_pages -= done`；`arkrtos_paging_dyn_used` 委托 port；hal / mpu.h 两条关档回退；shell 有 `unmap` / `dyn` 分支且 `pmap test` 判据串了 unmap/rebind |
+
+pin N 特意把 `la_tlb_inval_page(` 列为必需：把这一句删掉，功能仍然"看起来对"
+（`look` 报 no entry），只有经该 VA 真读一次才暴露 —— 这类检查必须写进门禁，
+不能只写在文档里。
+
+#### 5.18.5 明确没做的部分
+
+- **ASID 与批量失效**：ASID 仍恒 0；没有 `flush_tlb_range` / 整表 flush
+  （`arkrtos_port_paging_flush()` 仍空操作）。
+- **App 可见动态映射的撤销**：App 窗口走空间切换（U-1），那条 PS=20 条目由
+  `activate()` 重写，不经过 `unalias`。
+- **撤销后的页面回收（U-3）**：槽位回收了，物理页本身仍由板级固定数组持有，
+  没有页帧分配器可还。
 
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
