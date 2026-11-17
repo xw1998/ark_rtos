@@ -400,6 +400,14 @@ uint32 arkrtos_paging_frame_used(void)
     return arkrtos_port_paging_frame_used();
 }
 
+#if (ARKRTOS_USE_PAGING_SWAP == 1)
+/** @brief Page replacement readout (U-16): forwards to the port's ledger */
+uint32 arkrtos_paging_swap_stat(uint32 which)
+{
+    return arkrtos_port_paging_swap_stat(which);
+}
+#endif
+
 /**
 * @brief Register a run-time dynamic mapping, page by page
 * @param va    virtual base (4 KB aligned)

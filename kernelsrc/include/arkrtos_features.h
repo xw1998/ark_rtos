@@ -167,6 +167,21 @@
 #define ARKRTOS_USE_PAGING_DEMAND       0
 #endif
 
+/* U-16 页替换（swap）：0 = 关（一个字节都不编进镜像），1 = 帧池空了就把某一对
+ * 8 KB 换出到内核静态交换区、把两帧还回池子，缺页时再换回来。
+ * 要求 ARKRTOS_USE_PAGING_DEMAND == 1 —— 只有按需档才有「这一对还没驻留」
+ * 这个状态可以换；页级窗口档（第二阶）里 2 MB 是一整块，没有可换的单位。
+ * 由 Kconfig 选择（config ARKRTOS_USE_PAGING_SWAP）。
+ *
+ * 为什么交换区是内核 .bss 而不是文件：换出发生在重填上下文里（ISTLBR=1），
+ * 那里不能调 VFS、不能睡眠、不能取锁，能做的只有内存到内存的拷贝。所以这一
+ * 档验证的是**账本与搬运的正确性**（换出的内容换回来逐字不变、帧数回到原值），
+ * 不是「省了内存」：静态交换区自己也占内存。要变成真的省内存，得先有可写的
+ * 持久交换介质，那属于块设备那一层的活。 */
+#ifndef ARKRTOS_USE_PAGING_SWAP
+#define ARKRTOS_USE_PAGING_SWAP         0
+#endif
+
 /* VxWorks 式可下载模块：0 = 关（空 TU，零体积），1 = 把 ET_REL 目标文件
  * 现场链接进内核模块区并以 PLV0 任务起跑（按名字解析内核导出符号）。
  * 这是与 ARKRTOS_USE_ELF **并列的另一种应用模型**，不是它的替代：

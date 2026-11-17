@@ -6278,12 +6278,29 @@ static int cmd_unld(int argc, char *argv[])
  *            pmap dyn                                  动态槽位占用读数
  *            pmap cu                                   自测：内核受控访问用户
  *                                                      地址（U-6）的四种拒绝码
+ *            pmap swap                                 页替换读数（U-16）：换出/
+ *                                                      换回/失败/槽位/驻留对
+ *            pmap swaptest                             自测：先吃掉空闲帧，再摸
+ *                                                      超驻留对的对，逐字比对
  *
  *          **注意**：`pmap rd/rb/wrb` 不做保护性检查 —— 地址没映射就是一次
  *          重填致命。这是刻意的：它们就是用来验证「这条地址到底通不通」的，
  *          替调用方兜住异常只会把「通不通」变成看不见。
  * ------------------------------------------------------------ */
 #define PMAP_TEST_VA    0x03000000u     /* 静态映射之外的空地（16 MB 以上） */
+
+#if (ARKRTOS_USE_PAGING_SWAP == 1)
+/* 页替换自测（U-16）用的两个东西：占位帧的账本、每对每个字的图案。
+ * 账本必须是静态的 —— 上千个帧基址放栈上，shell 的栈直接就没了一半。 */
+#define PMAP_SWAPTEST_HOLD_MAX   1024u
+static uint32 s_pmap_swap_hold[PMAP_SWAPTEST_HOLD_MAX];
+
+/** 自测图案：同一对里每个字都不同，不同对之间也不可互换 */
+static uint32 pmap_swaptest_word(uint32 pair, uint32 word)
+{
+    return (0xA5A50000u | ((pair & 0xFFu) << 8)) ^ ((word * 0x9E3779B1u) | 1u);
+}
+#endif
 
 static int pmap_hex(const char *s, uint32 *out)
 {
@@ -6488,6 +6505,197 @@ static int cmd_pmap(int argc, char *argv[])
                          (unsigned)arkrtos_paging_map_pages());
         return 0;
     }
+
+#if (ARKRTOS_USE_PAGING_SWAP == 1)
+    if((argc >= 2) && (strcmp(argv[1], "swap") == 0))
+    {
+        uint32 total = arkrtos_paging_frame_total();
+        uint32 used  = arkrtos_paging_frame_used();
+
+        ark_shell_printf("pmap: swap out=%u in=%u fail=%u slots=%u/%u "
+                         "resident=%u frames %u/%u\r\n",
+                         (unsigned)arkrtos_paging_swap_stat(0u),
+                         (unsigned)arkrtos_paging_swap_stat(1u),
+                         (unsigned)arkrtos_paging_swap_stat(3u),
+                         (unsigned)arkrtos_paging_swap_stat(2u),
+                         (unsigned)arkrtos_paging_swap_stat(5u),
+                         (unsigned)arkrtos_paging_swap_stat(4u),
+                         (unsigned)used, (unsigned)total);
+        return 0;
+    }
+
+    if((argc >= 2) && (strcmp(argv[1], "swaptest") == 0))
+    {
+        /* 页替换（U-16）自测：造出「帧池真的满了」这个前提，再看内容对不对。
+         *
+         * 为什么必须先把空闲帧吃光：窗口一共 256 对 = 512 帧，而池子有上千
+         * 帧 —— 光摸窗口永远摸不满，那种「全绿」什么都没验到。所以这里先把
+         * 空闲帧按 2 帧一段占掉，只留 8 帧（4 对），再摸
+         *   resident + 4 + slots
+         * 对（上限 256）：resident 是已经付过费的对，4 是剩下能直接拿的对，
+         * slots 是交换区能同时收下的对数。摸的就比「装得下的」多出来，
+         * 于是必然发生换出；再回头逐字读第二遍，必然发生换回。
+         *
+         * 判据只有三条，全部落在「读出来是什么」上，不拿计数当证据：
+         *   1) 第二遍逐字比对 0 处不符；
+         *   2) 换出、换回都真的发生过（>0）—— 否则这一轮根本没测到替换；
+         *   3) 收尾后槽位全空、帧数回到「测试前 - 驻留对的帧」，
+         *      即账本没有泄漏。
+         * ------------------------------------------------------------ */
+        uint32 space   = arkrtos_paging_space_current();
+        uint32 win     = arkrtos_paging_window_va();
+        uint32 total   = arkrtos_paging_frame_total();
+        uint32 used0   = arkrtos_paging_frame_used();
+        uint32 res0    = arkrtos_paging_swap_stat(4u);
+        uint32 slots   = arkrtos_paging_swap_stat(5u);
+        uint32 out0    = arkrtos_paging_swap_stat(0u);
+        uint32 in0     = arkrtos_paging_swap_stat(1u);
+        uint32 hold_n  = 0u;
+        uint32 npairs;
+        uint32 nspace;
+        uint32 i;
+        uint32 k;
+        int fails = 0;
+
+        if((win == 0u) || (total == 0u))
+        {
+            sh_out("pmap swaptest: refused - no paging window on this board\r\n");
+            return 1;
+        }
+        if(arkrtos_elf_running() != 0)
+        {
+            sh_out("pmap swaptest: refused - an ELF program is running "
+                   "(try 'pmap elf')\r\n");
+            return 1;
+        }
+        if(slots == 0u)
+        {
+            sh_out("pmap swaptest: refused - swap area has no slot\r\n");
+            return 1;
+        }
+
+        /* 1) 吃空闲帧，只留 8 帧（4 对）。分配粒度是 2 帧，所以这里也按 2
+         *    帧一段占 —— 免得留下奇数个碎片帧，反而挡住了本来能成的两帧分配。 */
+        while((total - arkrtos_paging_frame_used()) > 8u)
+        {
+            uint32 base = 0u;
+
+            if(hold_n >= PMAP_SWAPTEST_HOLD_MAX)
+            {
+                break;
+            }
+            if(arkrtos_paging_frame_alloc(2u, &base) != 0)
+            {
+                break;
+            }
+            s_pmap_swap_hold[hold_n] = base;
+            hold_n++;
+        }
+
+        npairs = res0 + 4u + slots;
+        if(npairs > 256u)
+        {
+            npairs = 256u;
+        }
+
+        ark_shell_printf("pmap swaptest: space=%u held=%u pair(s) free=%u "
+                         "resident=%u slots=%u touch=%u pair(s)\r\n",
+                         (unsigned)space, (unsigned)hold_n,
+                         (unsigned)(total - arkrtos_paging_frame_used()),
+                         (unsigned)res0, (unsigned)slots, (unsigned)npairs);
+
+        /* 2) 逐对写图案（每对 8 KB）。写到后面就会把前面的对挤进交换区。 */
+        for(i = 0u; i < npairs; i++)
+        {
+            volatile uint32 *p = (volatile uint32 *)(size_t)(win + (i * 0x2000u));
+
+            for(k = 0u; k < 2048u; k++)
+            {
+                p[k] = pmap_swaptest_word(i, k);
+            }
+        }
+
+        /* 3) 第二遍逐字比对：这一遍读的每一对，多半刚从交换区搬回来。 */
+        for(i = 0u; (i < npairs) && (fails == 0); i++)
+        {
+            volatile uint32 *p = (volatile uint32 *)(size_t)(win + (i * 0x2000u));
+
+            for(k = 0u; k < 2048u; k++)
+            {
+                if(p[k] != pmap_swaptest_word(i, k))
+                {
+                    ark_shell_printf("pmap swaptest: mismatch pair=%u word=%u "
+                                     "got=0x%08X want=0x%08X\r\n",
+                                     (unsigned)i, (unsigned)k,
+                                     (unsigned)p[k],
+                                     (unsigned)pmap_swaptest_word(i, k));
+                    fails++;
+                    break;
+                }
+            }
+        }
+
+        {
+            uint32 out1 = arkrtos_paging_swap_stat(0u);
+            uint32 in1  = arkrtos_paging_swap_stat(1u);
+
+            ark_shell_printf("pmap swaptest: swap out %u -> %u, in %u -> %u, "
+                             "mismatch=%d\r\n",
+                             (unsigned)out0, (unsigned)out1,
+                             (unsigned)in0, (unsigned)in1, fails);
+
+            if(out1 == out0)
+            {
+                sh_out("pmap swaptest: FAIL (no swap-out happened - "
+                       "the pool was never full)\r\n");
+                fails++;
+            }
+            if(in1 == in0)
+            {
+                sh_out("pmap swaptest: FAIL (no swap-in happened)\r\n");
+                fails++;
+            }
+        }
+
+        /* 4) 收尾：每个空间都回收（驻留的对与交换槽一起放），再把占住的帧
+         *    还回去。此后槽位必须全空、帧数必须回到 used0 - 2*res0。 */
+        nspace = arkrtos_paging_space_count();
+        for(i = 0u; i < nspace; i++)
+        {
+            (void)arkrtos_paging_space_release(i);
+        }
+        for(i = 0u; i < hold_n; i++)
+        {
+            (void)arkrtos_paging_frame_free(s_pmap_swap_hold[i], 2u);
+        }
+
+        {
+            uint32 expect = (used0 >= (res0 * 2u)) ? (used0 - (res0 * 2u)) : 0u;
+            uint32 got    = arkrtos_paging_frame_used();
+            uint32 left   = arkrtos_paging_swap_stat(2u);
+
+            ark_shell_printf("pmap swaptest: after release frames=%u expect=%u "
+                             "slots=%u\r\n",
+                             (unsigned)got, (unsigned)expect, (unsigned)left);
+
+            if((got != expect) || (left != 0u))
+            {
+                sh_out("pmap swaptest: FAIL (accounting leaked)\r\n");
+                fails++;
+            }
+        }
+
+        if(fails != 0)
+        {
+            ark_shell_printf("pmap swaptest: FAIL (%d problem(s))\r\n", fails);
+            return 1;
+        }
+
+        sh_out("pmap swaptest: PASS (swap out/in round trip, content "
+               "byte-identical, accounting clean)\r\n");
+        return 0;
+    }
+#endif /* ARKRTOS_USE_PAGING_SWAP == 1 */
 
     if((argc >= 2) && (strcmp(argv[1], "frame") == 0))
     {

@@ -245,6 +245,16 @@ uint32 arkrtos_paging_frame_total(void);
 /** @brief Frames currently allocated from the board pool */
 uint32 arkrtos_paging_frame_used(void);
 
+/** @brief Page replacement readout (U-16)
+ *  @param which 0 = swap-outs, 1 = swap-ins, 2 = slots in use, 3 = failures,
+ *               4 = resident pairs, 5 = slot count
+ *  @details 只在 ARKRTOS_USE_PAGING_SWAP=1 的镜像里存在；关档回 0（宏），
+ *           调用点因此不必套 #if —— 但 shell 里仍然套了，因为「这台板上没有
+ *           页替换」和「有页替换、一次没换过」是两句话。 */
+#if (ARKRTOS_USE_PAGING_SWAP == 1)
+uint32 arkrtos_paging_swap_stat(uint32 which);
+#endif
+
 #else
 
 #define arkrtos_paging_stats(p_checked, p_bad, p_bad_base)   (-1)
@@ -270,6 +280,7 @@ uint32 arkrtos_paging_frame_used(void);
 #define arkrtos_paging_frame_free(base, count)               (-1)
 #define arkrtos_paging_frame_total()                         (0u)
 #define arkrtos_paging_frame_used()                          (0u)
+#define arkrtos_paging_swap_stat(which)                      (0u)
 
 #endif
 

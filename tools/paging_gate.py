@@ -54,6 +54,11 @@
      末页期望是偶页基址）、UART 改走 way 7/6、la_pg_boot_map 在 la_mmu_init 里
      真被调用，以及 PS=20 老路径仍在（两种档都在编）；hal / mpu.h / paging.c
      的 window_va 转发链与 shell 三处改用。
+  V. 页替换（U-16）：开关三处（features.h 缺省 0 / Kconfig 两条 depends /
+     板级 0）、port 的组合守卫 #error、槽账本用「槽号 + 1」编码、换出先 invtlb
+     再还帧、换入先抄中继缓冲再放槽再要帧、新摸到的对显式清零、换回失败不吃
+     数据、空间回收连槽一起放掉、shell 的 `pmap swap` / `pmap swaptest` 与
+     PASS 串、驱动的 `--swap-check`，并真编一遍 SWAP 档。
   T. 按需缺页（U-3 第三阶 / U-5）：开关三处（features.h 缺省 0 / Kconfig 两条
      depends / 板级 0），port 的两条 #error、按对记账 s_pg_pair_pa、缺页处理里
      「一对 8 KB = 两帧」与 tlbfill 重装、refill 专用 C 入口读 TLBRBADV、
@@ -251,6 +256,15 @@ def main():
     if rc != 0:
         failures.append("T 按需缺页档：arkrtos_context.S 带 DEMAND=1 汇编不过：\n%s"
                         % out[-600:])
+
+    # --- V. 页替换档必须真编得过（DEMAND + SWAP 同时开） -------------------
+    swap_flags = board_flags("qemu_loongarch64") + \
+        ["-DARKRTOS_USE_PAGING_DEMAND=1", "-DARKRTOS_USE_PAGING_SWAP=1"]
+    for rel in ("kernelsrc/port/loongarch/la64/arkrtos_port.c",
+                "kernelsrc/src/arkrtos_paging.c"):
+        rc, out = _run(la64, LA64_ARCH + COMMON + swap_flags + [rel])
+        if rc != 0:
+            failures.append("V 页替换档：%s 带 SWAP=1 编不过：\n%s" % (rel, out[-600:]))
 
     # --- E..H 源码 pin（每条都做一次「改坏必须报错」的自检） ---------------
     def _src(rel):
@@ -664,6 +678,7 @@ def main():
         src_feats = _src("kernelsrc/include/arkrtos_features.h")
         src_kconf = _src("config/kconfig/Kconfig.features")
         src_board = _src("board/qemu_loongarch64/arkrtos_board_config.h")
+        src_drv = _src("tools/qemu_shell_drive.py")
 
     def pin_t(port, asm, feats, kconf, board):
         bad = []
@@ -793,6 +808,133 @@ def main():
             bad.append("U: pmap rel 不打印回收前后的帧数（没有读数就不是判据）")
         return bad
 
+    def pin_v(port, pg, sh, hal, mpu, feats, kconf, drv):
+        bad = []
+        # --- 开关三处 ---
+        if "#define ARKRTOS_USE_PAGING_SWAP         0" not in feats:
+            bad.append("V: features.h 里没有 ARKRTOS_USE_PAGING_SWAP 的缺省 0")
+        i = kconf.find("config ARKRTOS_USE_PAGING_SWAP")
+        if i < 0:
+            bad.append("V: Kconfig 里没有 ARKRTOS_USE_PAGING_SWAP")
+        else:
+            blk = kconf[i:kconf.find("\nconfig ", i + 10)]
+            if "depends on ARKRTOS_USE_PAGING\n" not in blk:
+                bad.append("V: Kconfig 的 SWAP 不依赖 ARKRTOS_USE_PAGING")
+            if "depends on ARKRTOS_USE_PAGING_DEMAND" not in blk:
+                bad.append("V: Kconfig 的 SWAP 不依赖 ARKRTOS_USE_PAGING_DEMAND")
+            if "compiles nothing" not in blk:
+                bad.append("V: Kconfig 的 SWAP 没写明「关档编出零字节」")
+        # --- 组合守卫 ---
+        if '#error "ARKRTOS_USE_PAGING_SWAP=1 requires ARKRTOS_USE_PAGING_DEMAND=1"' not in port:
+            bad.append("V: port 里没有「SWAP 要求 DEMAND」那条 #error")
+        if '#error "ARKRTOS_USE_PAGING_SWAP=1 requires ARKRTOS_USE_PAGING_FRAMES=1"' not in port:
+            bad.append("V: port 里没有「SWAP 要求 FRAMES」那条 #error")
+        if "#define ARKRTOS_PAGING_SWAP_SLOTS   8u" not in port:
+            bad.append("V: port 里没有交换槽数的缺省值（8 个槽）")
+        # --- 账本与缓冲 ---
+        if "static uint8  s_pg_pair_slot[" not in port:
+            bad.append("V: port 里没有「对 -> 槽」的账本")
+        if "static uint32 s_pg_swap_area[ARKRTOS_PAGING_SWAP_SLOTS][LA_PG_PAIR_WORDS];" not in port:
+            bad.append("V: port 里没有交换区（每槽一整对 8 KB）")
+        if "static uint32 s_pg_bounce[LA_PG_PAIR_WORDS];" not in port:
+            bad.append("V: port 里没有换入用的中继缓冲")
+        if "s_pg_pair_slot[space][idx] = (uint8)(slot + 1u);" not in port:
+            bad.append("V: 槽号不是「槽 + 1」编码（0 表示没有 ⇒ 静态零初始化才安全）")
+        # --- 换出：先 invtlb 再还帧 ---
+        so = _body(port, "static int32 la_pg_swap_out_one(")
+        if not so:
+            bad.append("V: 找不到 la_pg_swap_out_one 的定义")
+        else:
+            if "la_pg_copy_pair(s_pg_swap_area[slot], (const uint32 *)pa);" not in so:
+                bad.append("V: 换出不先抄内容到槽")
+            if "arkrtos_port_paging_frame_free(pa, 2u)" not in so:
+                bad.append("V: 换出不按「一对 = 两帧」还帧")
+            i_iv = so.find("la_tlb_inval_page(va);")
+            i_ff = so.find("arkrtos_port_paging_frame_free(pa, 2u)")
+            if i_iv < 0:
+                bad.append("V: 换出当前空间的对之前不失效 TLB 条目")
+            elif i_ff < 0 or i_iv > i_ff:
+                bad.append("V: 换出的顺序错了：先还帧后 invtlb = 帧已归池而条目还指着它")
+            if "s_pg_pair_slot[space][idx] = (uint8)(slot + 1u);" not in so:
+                bad.append("V: 换出不记账（下一次换入不知道内容在哪）")
+            if "s_pg_swap_out++;" not in so:
+                bad.append("V: 换出不计数（读数就没得看）")
+        # --- 要帧：池空就先换出 ---
+        tk = _body(port, "static int32 la_pg_take_pair(")
+        if not tk:
+            bad.append("V: 找不到 la_pg_take_pair 的定义")
+        else:
+            if "arkrtos_port_paging_frame_alloc(2u, &pa) == 0" not in tk:
+                bad.append("V: 要帧不是「一次要两帧」")
+            if "la_pg_swap_out_one(space, idx)" not in tk:
+                bad.append("V: 池空时不换出")
+            if "tries < 8u" not in tk:
+                bad.append("V: 换出后没有重试余量（碎片时一次失败就投降）")
+        # --- 缺页处理：中继缓冲 -> 放槽 -> 要帧；新对显式清零 ---
+        df = _body(port, "static int32 la_pg_demand_fault(")
+        if not df:
+            bad.append("V: 找不到 la_pg_demand_fault 的定义")
+        else:
+            i_b = df.find("la_pg_copy_pair(s_pg_bounce, s_pg_swap_area[slot - 1u]);")
+            i_f = df.find("la_pg_swap_slot_free(slot - 1u);")
+            i_t = df.find("la_pg_take_pair(space, idx, &pa)")
+            if i_b < 0:
+                bad.append("V: 换入不先把内容抄到中继缓冲")
+            if i_f < 0:
+                bad.append("V: 换入不放掉自己的槽（会与「要帧要先换出」死锁）")
+            if (i_b >= 0) and (i_f >= 0) and (i_b > i_f):
+                bad.append("V: 换入顺序错了：先放槽后抄内容")
+            if i_t < 0 or (i_f >= 0 and i_f > i_t):
+                bad.append("V: 换入顺序错了：要在放槽之后才要帧")
+            if "((uint32 *)pa)[w] = 0u;" not in df:
+                bad.append("V: 新摸到的对不清零（帧可能是别人换出来的旧内容）")
+            if "la_pg_copy_pair(s_pg_swap_area[back], s_pg_bounce);" not in df:
+                bad.append("V: 换回失败时把内容丢了（失败不许吃数据）")
+            if "s_pg_swap_fail++;" not in df:
+                bad.append("V: 换回失败不计数")
+        # --- 空间回收要把槽一起放掉 ---
+        rl = _body(port, "int32 arkrtos_port_paging_space_release(")
+        if (not rl) or ("la_pg_swap_slot_free((uint32)s_pg_pair_slot[space][i] - 1u);" not in rl):
+            bad.append("V: 空间回收不释放换出去的槽（槽会永久泄漏）")
+        # --- 读数 ---
+        st = _body(port, "uint32 arkrtos_port_paging_swap_stat(")
+        if not st:
+            bad.append("V: port 里没有 arkrtos_port_paging_swap_stat")
+        else:
+            for one in ("s_pg_swap_out", "s_pg_swap_in", "s_pg_swap_fail",
+                        "la_pg_swap_slots_used()", "la_pg_pair_resident_count()"):
+                if one not in st:
+                    bad.append("V: 读数缺 %s" % one)
+        # --- 接口三处 ---
+        if "uint32 arkrtos_port_paging_swap_stat(uint32 which);" not in hal:
+            bad.append("V: hal 里没有 swap_stat 的声明")
+        if "uint32 arkrtos_paging_swap_stat(uint32 which);" not in mpu:
+            bad.append("V: mpu.h 里没有 swap_stat 的声明")
+        if "#define arkrtos_paging_swap_stat(which)                      (0u)" not in mpu:
+            bad.append("V: mpu.h 的关档回退里没有 swap_stat（关档会把「没有」读成 0 以外的答案）")
+        w = _body(pg, "uint32 arkrtos_paging_swap_stat(")
+        if (not w) or ("arkrtos_port_paging_swap_stat(which)" not in w):
+            bad.append("V: paging.c 的 swap_stat 没转发到 port")
+        # --- shell ---
+        if 'strcmp(argv[1], "swap")' not in sh:
+            bad.append("V: shell 没有 pmap swap 分支")
+        if 'strcmp(argv[1], "swaptest")' not in sh:
+            bad.append("V: shell 没有 pmap swaptest 分支")
+        if "pmap: swap out=%u in=%u fail=%u slots=%u/%u" not in sh:
+            bad.append("V: pmap swap 不打全读数")
+        if "pmap swaptest: PASS" not in sh:
+            bad.append("V: pmap swaptest 没有 PASS 串")
+        for one in ("arkrtos_paging_space_release(i)",
+                    "arkrtos_paging_frame_free(s_pmap_swap_hold[i], 2u)"):
+            if one not in sh:
+                bad.append("V: pmap swaptest 收尾不干净（缺 %s）" % one)
+        # --- 驱动 ---
+        if "--swap-check" not in drv:
+            bad.append("V: qemu_shell_drive.py 没有 --swap-check")
+        if '("pmap swaptest", ["pmap swaptest: PASS"])' not in drv:
+            bad.append("V: --swap-check 的序列里没有「swaptest 必须 PASS」")
+        return bad
+
         for msg in (pin_e(src_pg) + pin_f(src_port) +
                     pin_g(src_hal, src_mpu) + pin_h(src_sh) +
                     pin_i(src_port) + pin_j(src_pg, src_hal, src_mpu) +
@@ -804,7 +946,9 @@ def main():
                     pin_s(src_port, src_hal, src_mpu, src_pg, src_sh,
                           src_feats, src_kconf, src_board) +
                     pin_t(src_port, src_asm, src_feats, src_kconf, src_board) +
-                    pin_u(src_port, src_pg, src_sh, src_hal, src_mpu, src_elf)):
+                    pin_u(src_port, src_pg, src_sh, src_hal, src_mpu, src_elf) +
+                    pin_v(src_port, src_pg, src_sh, src_hal, src_mpu,
+                          src_feats, src_kconf, src_drv)):
             failures.append("源码 pin 不成立 " + msg)
 
         # 自检：把每条 pin 依赖的那一句改坏，对应 pin 必须报错
@@ -873,6 +1017,15 @@ def main():
             ("U-", pin_u(src_port, src_pg, src_sh, src_hal, src_mpu,
                          src_elf.replace("(void)arkrtos_paging_space_release(space);",
                                          "", 1))),
+            ("V", pin_v(src_port.replace("static uint32 s_pg_bounce[LA_PG_PAIR_WORDS];",
+                                          "static uint32 s_pg_bounceX[LA_PG_PAIR_WORDS];", 1),
+                        src_pg, src_sh, src_hal, src_mpu, src_feats, src_kconf, src_drv)),
+            ("V-", pin_v(src_port.replace(
+                "                la_tlb_inval_page(va);", "                (void)0;", 1),
+                src_pg, src_sh, src_hal, src_mpu, src_feats, src_kconf, src_drv)),
+            ("V--", pin_v(src_port, src_pg,
+                          src_sh.replace("pmap swaptest: PASS", "pmap swaptest: OK", 1),
+                          src_hal, src_mpu, src_feats, src_kconf, src_drv)),
             ("T-", pin_t(src_port,
                          src_asm.replace("la.abs  $r21, la_refill_stack_top",
                                           "la.abs  $t0, la_refill_stack_top", 1),
@@ -898,7 +1051,8 @@ def main():
           "U-3 页帧池 R pin 成立且自检有效 / "
           "U-3 第二阶页级窗口 S pin 成立且自检有效 / "
           "U-3 第三阶按需缺页 T pin 成立且自检有效（C 侧真编、.S 侧真汇编） / "
-          "U-3 空间回收 U pin 成立且自检有效")
+          "U-3 空间回收 U pin 成立且自检有效 / "
+          "U-16 页替换 V pin 成立且自检有效（真编 SWAP 档）")
     return 0
 
 

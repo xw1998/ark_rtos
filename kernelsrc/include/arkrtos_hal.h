@@ -514,6 +514,16 @@ uint32 arkrtos_port_paging_frame_total(void);
 /** @brief Frames currently allocated from the board pool */
 uint32 arkrtos_port_paging_frame_used(void);
 
+/** @brief Page replacement readout (U-16) - only exists when the swap switch is on
+ *  @param which 0 = swap-outs, 1 = swap-ins, 2 = slots in use, 3 = failures,
+ *               4 = resident pairs, 5 = slot count
+ *  @return the reading; 0 for an unknown selector
+ *  @details 关档时连符号都不给（宏在 arkrtos_mpu.h 里回 0）：一个「永远返回 0
+ *           的统计函数」会被读成「一次都没换出过」，那是错答案。 */
+#if (ARKRTOS_USE_PAGING_SWAP == 1)
+uint32 arkrtos_port_paging_swap_stat(uint32 which);
+#endif
+
 /** @brief Virtual base of the App window (same VA for every address space)
  *  @return the window VA base (0 when the board has no paging window)
  *  @details The physical side of the window differs per space and comes from

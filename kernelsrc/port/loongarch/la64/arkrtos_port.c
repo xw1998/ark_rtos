@@ -462,6 +462,26 @@ int32 arkrtos_port_send_ipi(uint32 cpu)
 #endif
 #endif
 
+/* 页替换长在按需缺页上：只有按需档才有「某一对还没驻留」这个状态可换。
+ * 关档时下面整段（账本、交换区、中继缓冲）一个字节都不编进镜像。 */
+#if (ARKRTOS_USE_PAGING_SWAP == 1)
+#if (ARKRTOS_USE_PAGING_DEMAND != 1)
+#error "ARKRTOS_USE_PAGING_SWAP=1 requires ARKRTOS_USE_PAGING_DEMAND=1"
+#endif
+#if (ARKRTOS_USE_PAGING_FRAMES != 1)
+#error "ARKRTOS_USE_PAGING_SWAP=1 requires ARKRTOS_USE_PAGING_FRAMES=1"
+#endif
+/* 交换槽数：一个槽就是一整对 8 KB。8 个槽 = 64 KB .bss，够「少留几对常驻、
+ * 多留几对在盘上」这种实验，又不至于把 QEMU 的镜像撑大。（这里说的「盘上」
+ * 就是这个静态区，理由见 arkrtos_features.h 的开关说明。） */
+#ifndef ARKRTOS_PAGING_SWAP_SLOTS
+#define ARKRTOS_PAGING_SWAP_SLOTS   8u
+#endif
+#if (ARKRTOS_PAGING_SWAP_SLOTS == 0u) || (ARKRTOS_PAGING_SWAP_SLOTS > 64u)
+#error "ARKRTOS_PAGING_SWAP_SLOTS must be 1..64 (one slot holds one 8 KB pair)"
+#endif
+#endif
+
 /* App 帧合法窗：App 任务的 trap 帧落在 App 页里（PLV3 页，内核可读写）。 */
 #define LA_FRAME_IN_APP(sp) \
     ((((uint32)(sp)) >= ARKRTOS_QEMU_APP_BASE) && \
@@ -991,6 +1011,258 @@ static void la_pg_drop_window(void)
     }
 }
 
+#if (ARKRTOS_USE_PAGING_SWAP == 1)
+/* ------------------------------------------------------------
+ * 页替换（U-16）：帧池满了就换出一对
+ * @details 按需档原来的形态是「摸到就付两帧、永不归还」，于是帧池一满就
+ *          只能拒绝。这一档把「拒绝」换成「换出别的某一对」：
+ *
+ *            缺页 -> 要两帧 -> 池空 -> 挑一对换出（内容抄进交换槽、两帧还池）
+ *                 -> 再要一次 -> 装上 -> ertn 回原指令
+ *
+ *          账本用「槽号 + 1」而不是「0xFF = 没有」：静态对象初值只能是 0，
+ *          用 0 表示「没有」就不需要任何运行期初始化，也就不存在「忘了初始
+ *          化 ⇒ 一堆对指向 0 号槽」这种只在压力下显形的形态。
+ *
+ *          三条不猜的规矩：
+ *            1. 帧一帧都没拿到就返回 0（交回原来的故障路径），绝不装一条
+ *               半成品条目 —— 那会让同一条指令无限重填；
+ *            2. 换出**先失效 TLB 条目再还帧**。反序会出现「帧已归池、App 仍
+ *               能经旧条目读到它」，两个持有者共享一帧而且一声不响；
+ *            3. 换入先把内容抄到中继缓冲、放掉自己的槽，再去要帧。否则
+ *               死锁：要帧要先换出别人，换出要一个空槽，而唯一可能空着的
+ *               槽正是这一对自己占的。
+ * ------------------------------------------------------------ */
+#define LA_PG_PAIR_WORDS        2048u   /* 8 KB / 4 */
+
+static uint8  s_pg_pair_slot[ARKRTOS_PAGING_APPS_MAX][LA_PG_WIN_ENTRIES];
+static uint32 s_pg_swap_area[ARKRTOS_PAGING_SWAP_SLOTS][LA_PG_PAIR_WORDS];
+static uint32 s_pg_bounce[LA_PG_PAIR_WORDS];
+static uint32 s_pg_swap_bits;       /* 槽占用位图：bit s = 槽 s 有人占 */
+static uint32 s_pg_swap_hand;       /* 换出轮转指针（确定性，不取随机数） */
+static uint32 s_pg_swap_out;        /* 换出次数 */
+static uint32 s_pg_swap_in;         /* 换回次数 */
+static uint32 s_pg_swap_fail;       /* 「池空且换不出东西」的次数 */
+
+/** 8 KB 拷贝：重填上下文里没有 libc，也不能取锁/阻塞，只能是裸循环 */
+static void la_pg_copy_pair(uint32 *dst, const uint32 *src)
+{
+    uint32 i;
+
+    for(i = 0u; i < LA_PG_PAIR_WORDS; i++)
+    {
+        dst[i] = src[i];
+    }
+}
+
+/** 找一个空交换槽并占住；没有返回 -1 */
+static int32 la_pg_swap_slot_alloc(uint32 *p_slot)
+{
+    uint32 s;
+
+    for(s = 0u; s < (uint32)ARKRTOS_PAGING_SWAP_SLOTS; s++)
+    {
+        if((s_pg_swap_bits & (1u << s)) == 0u)
+        {
+            s_pg_swap_bits |= (1u << s);
+            *p_slot = s;
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
+/** 放掉一个交换槽 */
+static void la_pg_swap_slot_free(uint32 slot)
+{
+    if(slot < (uint32)ARKRTOS_PAGING_SWAP_SLOTS)
+    {
+        s_pg_swap_bits &= ~(1u << slot);
+    }
+}
+
+/** 占用的槽数（读数用） */
+static uint32 la_pg_swap_slots_used(void)
+{
+    uint32 s;
+    uint32 n = 0u;
+
+    for(s = 0u; s < (uint32)ARKRTOS_PAGING_SWAP_SLOTS; s++)
+    {
+        if((s_pg_swap_bits & (1u << s)) != 0u)
+        {
+            n++;
+        }
+    }
+
+    return n;
+}
+
+/** 驻留（有帧）的对数（读数用） */
+static uint32 la_pg_pair_resident_count(void)
+{
+    uint32 space;
+    uint32 i;
+    uint32 n = 0u;
+
+    for(space = 0u; space < (uint32)ARKRTOS_PAGING_APPS_MAX; space++)
+    {
+        for(i = 0u; i < LA_PG_WIN_ENTRIES; i++)
+        {
+            if(s_pg_pair_pa[space][i] != 0u)
+            {
+                n++;
+            }
+        }
+    }
+
+    return n;
+}
+
+/**
+* @brief 换出一对：内容抄进交换槽、两帧还回池子
+* @param skip_space 正在缺页的空间（第一轮避开它）
+* @param skip_idx   该空间里绝不换出的对号（正在换入的那一对）
+* @return 0 = 换出了；-1 = 没有驻留的对可换；-2 = 交换槽满；-3 = 帧池拒绝
+* @details 两轮挑选：第一轮只挑**别的空间**的对 —— 它们此刻一条条目都没装着，
+*          换掉不产生额外缺页；本空间的对可能正被这条取指路径用着，第二轮
+*          才轮到它们（仍然避开 skip_idx）。轮转指针跨调用保持，免得每次都
+*          盯着同一对换（那会退化成「只有一对在挪」）。
+*/
+static int32 la_pg_swap_out_one(uint32 skip_space, uint32 skip_idx)
+{
+    uint32 total = (uint32)ARKRTOS_PAGING_APPS_MAX * LA_PG_WIN_ENTRIES;
+    uint32 slot = 0u;
+    uint32 pass;
+    uint32 n;
+
+    if(la_pg_swap_slot_alloc(&slot) != 0)
+    {
+        return -2;
+    }
+
+    for(pass = 0u; pass < 2u; pass++)
+    {
+        for(n = 0u; n < total; n++)
+        {
+            uint32 k = (s_pg_swap_hand + n) % total;
+            uint32 space = k / LA_PG_WIN_ENTRIES;
+            uint32 idx = k % LA_PG_WIN_ENTRIES;
+            uint32 pa;
+
+            if((pass == 0u) && (space == skip_space))
+            {
+                continue;
+            }
+            if((pass == 1u) && (space != skip_space))
+            {
+                continue;
+            }
+            if((space == skip_space) && (idx == skip_idx))
+            {
+                continue;
+            }
+
+            pa = s_pg_pair_pa[space][idx];
+            if(pa == 0u)
+            {
+                continue;
+            }
+
+            la_pg_copy_pair(s_pg_swap_area[slot], (const uint32 *)pa);
+
+            if(space == s_pg_app_space)
+            {
+                uint32 va = ARKRTOS_QEMU_APP_BASE + (idx * 0x2000u);
+
+                la_tlb_inval_page(va);
+                la_tlb_inval_page(va + 0x1000u);
+            }
+
+            if(arkrtos_port_paging_frame_free(pa, 2u) != 0)
+            {
+                la_pg_swap_slot_free(slot);
+                return -3;
+            }
+
+            s_pg_pair_pa[space][idx] = 0u;
+            s_pg_pair_slot[space][idx] = (uint8)(slot + 1u);
+            s_pg_swap_hand = (k + 1u) % total;
+            s_pg_swap_out++;
+            return 0;
+        }
+    }
+
+    la_pg_swap_slot_free(slot);
+    return -1;
+}
+
+/**
+* @brief 给一对 8 KB 要到两帧：池里有就直接拿，没有就先换出一对
+* @param space 正在缺页的空间
+* @param idx   正在缺页的对号（绝不换出它自己）
+* @param p_pa  成功时写回首帧物理基址
+* @return 0 = 拿到；-1 = 池空且换不出东西
+* @details 换出一对还回的是两帧连续帧，所以正常一次就够；留 8 次循环是给
+*          「换出成功但那两帧拼不出一次两帧分配」的碎片情形当余量。
+*/
+static int32 la_pg_take_pair(uint32 space, uint32 idx, uint32 *p_pa)
+{
+    uint32 pa = 0u;
+    uint32 tries;
+
+    if(arkrtos_port_paging_frame_alloc(2u, &pa) == 0)
+    {
+        *p_pa = pa;
+        return 0;
+    }
+
+    for(tries = 0u; tries < 8u; tries++)
+    {
+        if(la_pg_swap_out_one(space, idx) != 0)
+        {
+            return -1;
+        }
+
+        if(arkrtos_port_paging_frame_alloc(2u, &pa) == 0)
+        {
+            *p_pa = pa;
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
+/**
+* @brief 页替换读数（U-16）
+* @param which 0 = 换出次数、1 = 换回次数、2 = 占用槽数、3 = 失败次数、
+*              4 = 驻留对数、5 = 槽总数
+* @return 对应的读数；which 越界返回 0
+*/
+uint32 arkrtos_port_paging_swap_stat(uint32 which)
+{
+    switch(which)
+    {
+    case 0u:
+        return s_pg_swap_out;
+    case 1u:
+        return s_pg_swap_in;
+    case 2u:
+        return la_pg_swap_slots_used();
+    case 3u:
+        return s_pg_swap_fail;
+    case 4u:
+        return la_pg_pair_resident_count();
+    case 5u:
+        return (uint32)ARKRTOS_PAGING_SWAP_SLOTS;
+    default:
+        return 0u;
+    }
+}
+#endif /* ARKRTOS_USE_PAGING_SWAP == 1 */
+
 #if (ARKRTOS_USE_PAGING_DEMAND == 1)
 /**
 * @brief 按需缺页：给 badv 所在的那一对 8 KB 拿帧并装条目
@@ -1032,12 +1304,65 @@ static int32 la_pg_demand_fault(uint32 badv)
     pa = s_pg_pair_pa[space][idx];
     if(pa == 0u)
     {
+#if (ARKRTOS_USE_PAGING_SWAP == 1)
+        uint32 slot = (uint32)s_pg_pair_slot[space][idx];
+
+        if(slot != 0u)
+        {
+            /* 换回：先把内容抄到中继缓冲并放掉自己的槽（理由见上面第 3 条
+             * 规矩：不放掉会死锁），再去要帧。 */
+            la_pg_copy_pair(s_pg_bounce, s_pg_swap_area[slot - 1u]);
+            s_pg_pair_slot[space][idx] = 0u;
+            la_pg_swap_slot_free(slot - 1u);
+        }
+
+        if(la_pg_take_pair(space, idx, &pa) != 0)
+        {
+            s_pg_swap_fail++;
+
+            if(slot != 0u)
+            {
+                /* 一帧都没拿到：内容还在中继缓冲里，放回一个槽。把内容吃掉
+                 * 比失败更糟 —— 那等于「换回失败顺便把数据丢了」。 */
+                uint32 back = 0u;
+
+                if(la_pg_swap_slot_alloc(&back) == 0)
+                {
+                    la_pg_copy_pair(s_pg_swap_area[back], s_pg_bounce);
+                    s_pg_pair_slot[space][idx] = (uint8)(back + 1u);
+                }
+            }
+
+            return 0;
+        }
+
+        s_pg_pair_pa[space][idx] = pa;
+
+        if(slot != 0u)
+        {
+            la_pg_copy_pair((uint32 *)pa, s_pg_bounce);
+            s_pg_swap_in++;
+        }
+        else
+        {
+            /* 第一次摸到这一对，而帧可能刚从别人手里换出来（里面是旧内容）。
+             * 必须显式清零：换出/换入让「帧池刚起来是干净的」这个前提不再
+             * 成立。关这一档时不做这件事 —— 那时帧确实来自刚清零的 RAM。 */
+            uint32 w;
+
+            for(w = 0u; w < LA_PG_PAIR_WORDS; w++)
+            {
+                ((uint32 *)pa)[w] = 0u;
+            }
+        }
+#else
         if(arkrtos_port_paging_frame_alloc(2u, &pa) != 0)
         {
             return 0;
         }
 
         s_pg_pair_pa[space][idx] = pa;
+#endif
     }
 
     {
@@ -1374,6 +1699,15 @@ int32 arkrtos_port_paging_space_release(uint32 space)
                 s_pg_pair_pa[space][i] = 0u;
             }
         }
+#if (ARKRTOS_USE_PAGING_SWAP == 1)
+        else if(s_pg_pair_slot[space][i] != 0u)
+        {
+            /* 换出去的对没有帧可还，但槽是它占着的：一起放掉，否则「空间
+             * 回收」之后槽永远泄漏，跑几轮就再也换不出东西。 */
+            la_pg_swap_slot_free((uint32)s_pg_pair_slot[space][i] - 1u);
+            s_pg_pair_slot[space][i] = 0u;
+        }
+#endif
     }
 
     (void)i;

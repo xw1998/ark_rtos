@@ -19,7 +19,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（52 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（53 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -30,7 +30,7 @@
 - [kernelsrc/include/arkrtos_mempool.h](#kernelsrcincludearkrtos_mempoolh)（9 项）
 - [kernelsrc/include/arkrtos_mini.h](#kernelsrcincludearkrtos_minih)（20 项）
 - [kernelsrc/include/arkrtos_modld.h](#kernelsrcincludearkrtos_modldh)（8 项）
-- [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（20 项）
+- [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（21 项）
 - [kernelsrc/include/arkrtos_net.h](#kernelsrcincludearkrtos_neth)（6 项）
 - [kernelsrc/include/arkrtos_ptable.h](#kernelsrcincludearkrtos_ptableh)（23 项）
 - [kernelsrc/include/arkrtos_rt.h](#kernelsrcincludearkrtos_rth)（13 项）
@@ -53,7 +53,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（11 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（56 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（64 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（16 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -85,7 +85,7 @@
 - [kernelsrc/src/arkrtos_mini.c](#kernelsrcsrcarkrtos_minic)（1 项）
 - [kernelsrc/src/arkrtos_modld.c](#kernelsrcsrcarkrtos_modldc)（5 项）
 - [kernelsrc/src/arkrtos_mpu.c](#kernelsrcsrcarkrtos_mpuc)（1 项）
-- [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（24 项）
+- [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（25 项）
 - [kernelsrc/src/arkrtos_smp.c](#kernelsrcsrcarkrtos_smpc)（1 项）
 - [kernelsrc/src/arkrtos_task.c](#kernelsrcsrcarkrtos_taskc)（5 项）
 - [kernelsrc/src/arkrtos_tickless.c](#kernelsrcsrcarkrtos_ticklessc)（1 项）
@@ -3552,6 +3552,19 @@ uint32 arkrtos_port_paging_frame_used(void);
 
 **Frames currently allocated from the board pool */**
 
+### `#if (ARKRTOS_USE_PAGING_SWAP == 1) uint32 arkrtos_port_paging_swap_sta`
+
+```c
+#if (ARKRTOS_USE_PAGING_SWAP == 1) uint32 arkrtos_port_paging_swap_stat(uint32 which);
+```
+
+**Page replacement readout (U-16) - only exists when the swap switch is on**
+- `which`：0 = swap-outs, 1 = swap-ins, 2 = slots in use, 3 = failures,
+4 = resident pairs, 5 = slot count
+**返回**：the reading; 0 for an unknown selector
+关档时连符号都不给（宏在 arkrtos_mpu.h 里回 0）：一个「永远返回 0
+的统计函数」会被读成「一次都没换出过」，那是错答案。 */
+
 ### `uint32 arkrtos_port_paging_window_va(void);`
 
 ```c
@@ -5138,6 +5151,19 @@ uint32 arkrtos_paging_frame_used(void);
 ```
 
 **Frames currently allocated from the board pool */**
+
+### `#if (ARKRTOS_USE_PAGING_SWAP == 1) uint32 arkrtos_paging_swap_stat(uin`
+
+```c
+#if (ARKRTOS_USE_PAGING_SWAP == 1) uint32 arkrtos_paging_swap_stat(uint32 which);
+```
+
+**Page replacement readout (U-16)**
+- `which`：0 = swap-outs, 1 = swap-ins, 2 = slots in use, 3 = failures,
+4 = resident pairs, 5 = slot count
+只在 ARKRTOS_USE_PAGING_SWAP=1 的镜像里存在；关档回 0（宏），
+调用点因此不必套 #if —— 但 shell 里仍然套了，因为「这台板上没有
+页替换」和「有页替换、一次没换过」是两句话。 */
 
 ## kernelsrc/include/arkrtos_net.h
 
@@ -8020,6 +8046,86 @@ static void la_pg_drop_window(void)
 
 把整段窗口 VA 的旧翻译清掉（逐 4 KB：QEMU 按 (ASID, VA) 匹配条目） */
 
+### `static void la_pg_copy_pair(uint32 *dst, const uint32 *src)`
+
+```c
+static void la_pg_copy_pair(uint32 *dst, const uint32 *src)
+```
+
+8 KB 拷贝：重填上下文里没有 libc，也不能取锁/阻塞，只能是裸循环 */
+
+### `static int32 la_pg_swap_slot_alloc(uint32 *p_slot)`
+
+```c
+static int32 la_pg_swap_slot_alloc(uint32 *p_slot)
+```
+
+找一个空交换槽并占住；没有返回 -1 */
+
+### `static void la_pg_swap_slot_free(uint32 slot)`
+
+```c
+static void la_pg_swap_slot_free(uint32 slot)
+```
+
+放掉一个交换槽 */
+
+### `static uint32 la_pg_swap_slots_used(void)`
+
+```c
+static uint32 la_pg_swap_slots_used(void)
+```
+
+占用的槽数（读数用） */
+
+### `static uint32 la_pg_pair_resident_count(void)`
+
+```c
+static uint32 la_pg_pair_resident_count(void)
+```
+
+驻留（有帧）的对数（读数用） */
+
+### `static int32 la_pg_swap_out_one(uint32 skip_space, uint32 skip_idx)`
+
+```c
+static int32 la_pg_swap_out_one(uint32 skip_space, uint32 skip_idx)
+```
+
+**换出一对：内容抄进交换槽、两帧还回池子**
+- `skip_space`：正在缺页的空间（第一轮避开它）
+- `skip_idx`：该空间里绝不换出的对号（正在换入的那一对）
+**返回**：0 = 换出了；-1 = 没有驻留的对可换；-2 = 交换槽满；-3 = 帧池拒绝
+两轮挑选：第一轮只挑**别的空间**的对 —— 它们此刻一条条目都没装着，
+换掉不产生额外缺页；本空间的对可能正被这条取指路径用着，第二轮
+才轮到它们（仍然避开 skip_idx）。轮转指针跨调用保持，免得每次都
+盯着同一对换（那会退化成「只有一对在挪」）。
+
+### `static int32 la_pg_take_pair(uint32 space, uint32 idx, uint32 *p_pa)`
+
+```c
+static int32 la_pg_take_pair(uint32 space, uint32 idx, uint32 *p_pa)
+```
+
+**给一对 8 KB 要到两帧：池里有就直接拿，没有就先换出一对**
+- `space`：正在缺页的空间
+- `idx`：正在缺页的对号（绝不换出它自己）
+- `p_pa`：成功时写回首帧物理基址
+**返回**：0 = 拿到；-1 = 池空且换不出东西
+换出一对还回的是两帧连续帧，所以正常一次就够；留 8 次循环是给
+「换出成功但那两帧拼不出一次两帧分配」的碎片情形当余量。
+
+### `uint32 arkrtos_port_paging_swap_stat(uint32 which)`
+
+```c
+uint32 arkrtos_port_paging_swap_stat(uint32 which)
+```
+
+**页替换读数（U-16）**
+- `which`：0 = 换出次数、1 = 换回次数、2 = 占用槽数、3 = 失败次数、
+4 = 驻留对数、5 = 槽总数
+**返回**：对应的读数；which 越界返回 0
+
 ### `static int32 la_pg_demand_fault(uint32 badv)`
 
 ```c
@@ -9957,6 +10063,14 @@ uint32 arkrtos_paging_frame_used(void)
 ```
 
 **Frames currently allocated from the board pool */**
+
+### `uint32 arkrtos_paging_swap_stat(uint32 which)`
+
+```c
+uint32 arkrtos_paging_swap_stat(uint32 which)
+```
+
+**Page replacement readout (U-16): forwards to the port's ledger */**
 
 ### `int32 arkrtos_paging_map_span(uint32 va, uint32 pa, uint32 size, arkrt`
 

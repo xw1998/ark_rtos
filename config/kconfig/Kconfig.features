@@ -353,6 +353,26 @@ config ARKRTOS_USE_PAGING_DEMAND
 	  changes only when entries are installed, not when frames are freed.
 	  Off (default) changes nothing.
 
+config ARKRTOS_USE_PAGING_SWAP
+	bool "Page replacement: swap a resident 8 KB pair out when the frame pool is empty (U-16)"
+	depends on ARKRTOS_USE_PAGING
+	depends on ARKRTOS_USE_PAGING_DEMAND
+	help
+	  Keep a bounded set of 8 KB pairs resident.  When the frame pool cannot
+	  give two frames for the pair a program just touched, evict a resident
+	  pair into a static kernel swap area (one slot per pair, 8 KB each),
+	  return its two frames to the pool and install the new pair.  A later
+	  touch of an evicted pair copies it back from its slot.
+
+	  The swap area is kernel .bss, not a file: eviction runs inside the TLB
+	  refill context (ISTLBR=1), where VFS calls, sleeping and locks are all
+	  unavailable - the only thing that can happen there is a memory copy.
+	  So this option exercises the ledger and the data movement (content is
+	  byte-identical after a round trip, frame accounting returns to its old
+	  value), not memory savings: the swap area itself costs memory.
+
+	  Off (default) compiles nothing and changes no byte of the image.
+
 config ARKRTOS_USE_ELF
 	bool "ELF64 executable loader (exec)"
 	depends on ARKRTOS_USE_VFS && ARKRTOS_USE_PRIV

@@ -15,6 +15,8 @@ unld`（见 docs/MMU平台可下载模块-VxWorks式.md §4.1）。
 用法
 ----
     python tools/qemu_shell_drive.py --modld-check
+    python tools/qemu_shell_drive.py --swap-check \
+        --elf build/qemu_la64_swap/ark_qemu_la64.elf
     python tools/qemu_shell_drive.py --cmd "uname -a" --cmd "free"
     python tools/qemu_shell_drive.py --script my_cmds.txt --timeout 2
 
@@ -73,6 +75,19 @@ MODLD_CHECK = [
 ]
 
 
+# --swap-check 的序列：页替换（U-16）的验收。只有在
+#   -DARKRTOS_USE_PAGING_DEMAND=1 -DARKRTOS_USE_PAGING_SWAP=1 那一档镜像里
+# 才成立（默认档没有 pmap swap / swaptest 这两个子命令）。
+# 三条判据都钉在「读出来是什么」上：自测自己会打印 PASS/FAIL，这里只认 PASS，
+# 再确认前后帧数与槽位的账本没有漂。
+SWAP_CHECK = [
+    ("pmap frame", ["pmap: frames total="]),
+    ("pmap swap", ["pmap: swap out=", "resident="]),
+    ("pmap swaptest", ["pmap swaptest: PASS"]),
+    ("pmap swap", ["pmap: swap out=", "slots=0/"]),
+    ("pmap frame", ["pmap: frames total="]),
+]
+
 def _strip(s):
     return ANSI.sub("", s)
 
@@ -92,6 +107,8 @@ def main():
     ap.add_argument("--script", default="", help="一行一条命令的文件")
     ap.add_argument("--stack-guard-check", action="store_true",
                     help="栈底守卫：fault 里必须出现 STACKOVF")
+    ap.add_argument("--swap-check", action="store_true",
+                    help="页替换（U-16）验收：pmap swaptest 必须 PASS")
     ap.add_argument("--modld-check", action="store_true",
                     help="跑可下载模块的验收序列并判每条的期望子串")
     a = ap.parse_args()
@@ -174,6 +191,8 @@ def main():
             seq += MODLD_CHECK
         if a.stack_guard_check:
             seq += STACK_GUARD_CHECK
+        if a.swap_check:
+            seq += SWAP_CHECK
         if a.script:
             with open(a.script, encoding="utf-8") as f:
                 for line in f:
