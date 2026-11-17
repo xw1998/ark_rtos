@@ -83,6 +83,7 @@ SKIP_DIRS = {".git", "build", "docs", "_nova", "RTE", "DebugConfig",
 
 FAILURES = []
 PASSED = []
+SKIPPED = []
 
 
 def fail(check, detail):
@@ -93,6 +94,11 @@ def fail(check, detail):
 def ok(check, detail=""):
     PASSED.append(check)
     print("ok   %-26s %s" % (check, detail))
+
+def skip(check, detail):
+    """A check that did not run is not a pass: it is counted on its own."""
+    SKIPPED.append(check)
+    print("skip %-26s %s" % (check, detail))
 
 
 def read(path):
@@ -1397,8 +1403,109 @@ def check_warn_host():
     else:
         fail("warn-clean", "gate failed: %s" % txt.strip()[-400:])
 
+# ---------------------------------------------------------------- 远程档
+#
+# 这些检查的 gate 脚本会去驱动「只存在于开发机上的工具链」：Keil 的 armclang /
+# arm-none-eabi，或者 LoongArch64 / RISC-V 交叉 gcc。Gitee Go 的 runner 上一个
+# 也没有，所以 --remote 把它们列为 skip 并在总结里单独报数 —— 没跑过的检查
+# 不算通过，runner 也不允许把「没工具链」说成「检查通过」。
+#
+# 键是 --remote 下要跳过的检查名（与打印出来的名字一致）；值只是给人看的理由。
+LOCAL_TOOLCHAIN = {
+    "tickless": "armclang (Keil MDK)",
+    "arkmake": "arm-none-eabi-gcc",
+    "rtstat": "armclang (Keil MDK)",
+    "eset-syntax": "armclang (Keil MDK)",
+    "waitmulti-syntax": "armclang (Keil MDK)",
+    "waitq": "armclang (Keil MDK)",
+    "smp": "armclang (Keil MDK)",
+    "seccheck": "armclang (Keil MDK)",
+    "swap": "armclang (Keil MDK)",
+    "paging": "LA64 / RV32 cross gcc",
+    "elf": "LA64 / RV32 cross gcc",
+    "modld": "LA64 / RV32 / LA32 cross gcc",
+    "payload-sign": "LA64 cross gcc",
+    "stack-guard": "LA64 / RV32 cross gcc",
+}
+
+# (打印名, 函数)。名字只用于 skip 行与自检，真正的读数由
+# 各检查自己打印；一个函数打两行的情况（encoding + mixed-eol）用第一行的名字。
+CHECK_TABLE = (
+    ("partition-twin", check_partition_twins),
+    ("single-address-source", check_single_address_source),
+    ("encoding", check_encoding_eol),
+    ("doc-index", check_doc_index),
+    ("api-doc", check_api_doc_fresh),
+    ("layout-check", check_layout_and_scatter),
+    ("no-app-partition-include", check_no_partition_include_in_app),
+    ("config-generated", check_config_generated),
+    ("features-switches", check_features_switches),
+    ("softbus-sync", check_softbus_sync_header),
+    ("devicetree-generated", check_devicetree_generated),
+    ("release-consistency", check_release_consistency),
+    ("utest-host", check_utest_host),
+    ("sdk-stdio-host", check_sdk_stdio_host),
+    ("sbuf-host", check_sbuf_host),
+    ("mempool-host", check_mempool_host),
+    ("mq-host", check_mq_host),
+    ("sync-host", check_sync_host),
+    ("eset-host", check_eset_host),
+    ("waitmulti-host", check_waitmulti_host),
+    ("loader-host", check_loader_host),
+    ("fifo-host", check_fifo_host),
+    ("fault-host", check_fault_host),
+    ("coverage-host", check_coverage_host),
+    ("warn-clean", check_warn_host),
+    ("tickless", check_tickless),
+    ("arkmake", check_arkmake_syntax),
+    ("rtstat", check_rtstat_syntax),
+    ("eset-syntax", check_eset_syntax),
+    ("waitmulti-syntax", check_waitmulti_syntax),
+    ("waitq", check_waitq),
+    ("smp", check_smp),
+    ("seccheck", check_seccheck_syntax),
+    ("sign-host", check_sign_host),
+    ("swap", check_swap_syntax),
+    ("paging", check_paging_switch),
+    ("elf", check_elf_loader),
+    ("modld", check_modld),
+    ("payload-sign", check_payload_sign),
+    ("stack-guard", check_stack_guard),
+)
+
+def check_remote_ci():
+    """远程档本身也要有读数：工作流文件在不在、skip 清单有没有打错名字。
+
+    两个真实的失败形态：
+      1. .workflow/ 里的流水线没指向 ci_gate（或者没带 --remote），
+         于是 runner 上跑的是一个更薄的项集，没人知道；
+      2. LOCAL_TOOLCHAIN 里的名字写错，那个检查在 runner 上照旧去开
+         armclang，然后在「没工具链」和「真失败」之间给人一个假红/假绿。
+    """
+    bad = []
+    wf = os.path.join(ROOT, ".workflow", "ci.yml")
+    if not os.path.isfile(wf):
+        bad.append(".workflow/ci.yml 不存在")
+    else:
+        txt = read(wf).decode("utf-8", "replace")
+        if "tools/ci_gate.py" not in txt:
+            bad.append("工作流没有调用 tools/ci_gate.py")
+        if "--remote" not in txt:
+            bad.append("工作流没有带 --remote（runner 上会去要 Keil/交叉编译器）")
+    labels = set(name for name, _fn in CHECK_TABLE)
+    strays = sorted(set(LOCAL_TOOLCHAIN) - labels)
+    if strays:
+        bad.append("LOCAL_TOOLCHAIN 里有检查表里不存在的名字: %s" % ", ".join(strays))
+    if bad:
+        fail("remote-ci", "; ".join(bad))
+    else:
+        ok("remote-ci",
+           "workflow calls the gate with --remote; %d skipped check(s) all named in the table"
+           % len(LOCAL_TOOLCHAIN))
+
 def main(argv):
     do_build = "--build" in argv
+    remote = "--remote" in argv
     uv4 = None
     if "--uv4" in argv:
         uv4 = argv[argv.index("--uv4") + 1]
@@ -1408,50 +1515,25 @@ def main(argv):
                 uv4 = cand
                 break
 
-    check_partition_twins()
-    check_single_address_source()
-    check_encoding_eol()
-    check_doc_index()
-    check_api_doc_fresh()
-    check_layout_and_scatter()
-    check_no_partition_include_in_app()
-    check_config_generated()
-    check_features_switches()
-    check_softbus_sync_header()
-    check_devicetree_generated()
-    check_release_consistency()
-    check_utest_host()
-    check_sdk_stdio_host()
-    check_sbuf_host()
-    check_mempool_host()
-    check_mq_host()
-    check_sync_host()
-    check_eset_host()
-    check_waitmulti_host()
-    check_loader_host()
-    check_fifo_host()
-    check_fault_host()
-    check_coverage_host()
-    check_warn_host()
-    check_tickless()
-    check_arkmake_syntax()
-    check_rtstat_syntax()
-    check_eset_syntax()
-    check_waitmulti_syntax()
-    check_waitq()
-    check_smp()
-    check_seccheck_syntax()
-    check_sign_host()
-    check_swap_syntax()
-    check_paging_switch()
-    check_elf_loader()
-    check_modld()
-    check_payload_sign()
-    check_stack_guard()
+    if remote:
+        print("[remote profile] skipping checks that need a local Keil / "
+              "LoongArch64 / RISC-V toolchain; skipped != passed\n")
+
+    for name, fn in CHECK_TABLE:
+        if remote and name in LOCAL_TOOLCHAIN:
+            skip(name, "needs %s (not on the runner)" % LOCAL_TOOLCHAIN[name])
+            continue
+        fn()
+
+    check_remote_ci()
+
     if do_build:
         check_builds(uv4)
 
-    print("\n%d check(s) passed, %d failed" % (len(PASSED), len(FAILURES)))
+    print("\n%d check(s) passed, %d failed, %d skipped (remote profile)"
+          % (len(PASSED), len(FAILURES), len(SKIPPED)))
+    if SKIPPED:
+        print("NOT VERIFIED on this run: %s" % ", ".join(SKIPPED))
     return 1 if FAILURES else 0
 
 

@@ -1,0 +1,32 @@
+# Ark RTOS 远程门禁（Gitee Go）
+#
+# 这一条流水线只做一件事：在 Gitee 的 runner 上跑 tools/ci_gate.py --remote，
+# 让门禁离开某台开发机。runner 上没有 Keil 的 armclang / arm-none-eabi，也没有
+# LoongArch64 / RISC-V 交叉 gcc，所以 --remote 会把这些检查列为 skip 并单独报数
+# （没跑过的检查不算通过，日志里会打印 NOT VERIFIED 清单）。
+#
+# 本文件在本机无法验证（本机没有 Gitee Go runner）。schema 按 Gitee Go 帮助中心
+# 「触发事件」「任务编排」的字段抄写；第一次在网页上启用流水线时以平台校验结果
+# 为准。裁剪了哪些检查、为什么裁，见 docs/远程CI与门禁裁剪.md。
+version: 1.0
+name: ark-rtos-gate
+displayName: Ark RTOS 门禁（远程档）
+triggers:
+  push:
+    branches:
+      precise:
+        - master
+stages:
+  - stage:
+      name: gate
+      displayName: ci_gate 远程档
+      strategy: naturally
+      trigger: auto
+      steps:
+        - step: build@python
+          name: ci_gate
+          displayName: 跑 ci_gate.py --remote
+          pythonVersion: 3.9
+          commands:
+            - python3 -V
+            - python3 tools/ci_gate.py --remote
