@@ -1988,7 +1988,9 @@ RV32 另有 `MPU=1 PRIV=1`（PMP + U 模式），LA64 是 `MPU=0 PRIV=1`（PLV3 
 | 安全自检 `ARKRTOS_USE_SECCHECK` | **实跑** `12 checks - pass 7, fail 0, finding 2, skip 3`、`gates.kernel bits=0xFF (need 0x3F), iso=1`（MPU）、`sign/hwsafe=0x3` | 同上但 `iso=2`（分页 + PLV） | 编译 |
 | 软总线 `ARKRTOS_USE_SOFTBUS` | **实跑** `bus selftest: ALL PASS`（9 项 / 56 断言）、`bus info` peer online | **实跑** 同上 | 编译 |
 | 网络（lwip） | 未做（无网络后端） | 未做（同左） | 未做 |
-| App 装载族（apppack / miniapp / apprun / flashapp） | 未做（缺 arkc RV32 后端） | 未做（缺 arkc loongarch 后端） | 未做 |
+| `exec` 原生 ELF64（`ARKRTOS_USE_ELF`，PLV3） | 未做（`arkrtos_elf.c` 只支持 64 位 `long`，见 U-4） | **实跑**：`[ELF] ... rc=0` + 程序自报 `argc/argv`，连跑 10 次（[MMU进程模型与ELF装载](MMU进程模型与ELF装载.md) §5） | 未做（同左，编成空目标） |
+| `ld` 可下载模块（`ARKRTOS_USE_MODLOAD`，PLV0） | 未做（32 位被 `#error` 挡住，负向用例在 `tools/modld_gate.py` F 段） | **实跑**：`ld rc=0 [base=... relocs=165 imports=8]`，`lkup/modules/unld` 走通（[MMU平台可下载模块-VxWorks式](MMU平台可下载模块-VxWorks式.md) §5） | 未做（同左） |
+| App 装载族（apppack / miniapp / apprun / flashapp） | 未做（缺 arkc RV32 后端） | 未做（缺 arkc loongarch 后端；板级 `APPRUN/FLASHAPP` 也置 0） | 未做 |
 | 镜像签名 `ARKRTOS_USE_IMAGE_SIGN` | **实跑** `sign_hmac_and_loader_gate`（整块/流式同口径、篡改与 `-18` 装载门） | **实跑** 同左 | 编译 |
 | 硬件安全态 `ARKRTOS_HW_SAFE`（遗言/中和） | **实跑** `hwsafe_death_neutralizes`、`sec: hwsafe.deadman` | **实跑** 同左 | 编译 |
 | 内核守卫 `ARKRTOS_USE_KERNEL_GUARD`（心跳窗口） | **实跑** `guard_heartbeat_contract`、`sec: guard.watchdog`（FINDING：无硬件看门狗） | **实跑** 同左 | 编译 |
@@ -2008,9 +2010,12 @@ RV32 另有 `MPU=1 PRIV=1`（PMP + U 模式），LA64 是 `MPU=0 PRIV=1`（PLV3 
    返回 -1。QEMU 侧确实能仿真多核（§9.1），但这是**硬件能仿真**，不是
    **我们能跑**——实测 `-smp 2` 在 RV32 上直接崩、在 LA64 上虽不崩但次核
    不参与（§9.2）。
-3. **App 整链（装载 + 执行）未在两个 QEMU 目标上跑，但这条缺口在 arkc 侧**：
-   现有实跑覆盖的是「内核 + 一个手工放置的 PLV3 探针」，不是「从文件系统
-   读出镜像、校验、重定位、跳过去执行」。卡点只有一处：arkc 还没有
+3. **App 整链里"arkc 产出的镜像"那一路未在两个 QEMU 目标上跑，缺口在 arkc 侧**：
+   注意这一条**不再覆盖** `exec`（原生 ELF64）与 `ld`（可下载 `.o`）：这两个
+   已经不需要 arkc —— ELF 由 `loongarch64-newlib-elf-gcc` 直接链出，模块由同一
+   工具链编出 `ET_REL`，两者都在 LA64 上实跑通过（见 §8.2 上方两行）。
+   仍欠的是 `apppack` / `miniapp` / `apprun` / `flashapp` 这一族"arkc 产出的
+   固定 ABI 镜像"。卡点只有一处：arkc 还没有
    RV32 / LA64 后端，以及配套的打包与重定位口径（`cc --pack` 产出的镜像
    装不进 App 内存池、装进去也起不来）。**这条只与 arkc 有关，本项目
    暂时不推进**——不把它算成 QEMU port 这条线的未完成项，也不拿它当

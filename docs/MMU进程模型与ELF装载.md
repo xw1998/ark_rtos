@@ -239,7 +239,7 @@ TASK:4599 task 7 exits (self kill)
 | U-10 | 动态链接（`PT_INTERP`、`ld.so`） | 明确拒绝（`ERR_FORMAT`） | 只能跑静态链接程序 | M3 |
 | U-11 | 文件描述符继承 / 管道 / 信号 | 无 | 只能单进程自娱自乐 | M3 |
 | U-12 | 软定时器栈的 32 位侧复核 | RV32 仍是 96 字：实测峰值 184 B 已用、剩 200 B，RV32 帧 ≈128 B ⇒ 处理链只剩 ~72 B | 与本次 LA64 同型的风险，尚未出事 | **本轮登记，单独一轮测完再定值**（改它会动 `2012924 B` 镜像基线） |
-| U-13 | 栈溢出 / 陷阱帧越界的检测 | **没有**：`arkrtos_task_stack_init` 会把 `ARKRTOS_STACK_END_FLAG (0xed01)` 写进 `stack_bottom[0]`，但**从来没有人检查过它** | 就是本次事故能潜伏整轮的原因 | 建议做成 `ARKRTOS_USE_STACK_GUARD`（默认关=零变化），在切换/异常入口校验 |
+| U-13 | 栈溢出 / 陷阱帧越界的检测 | **没有**：`arkrtos_task_stack_init` 会把 `ARKRTOS_STACK_END_FLAG (0xed01)` 写进 `stack_bottom[0]`，但**从来没有人检查过它** | 就是本次事故能潜伏整轮的原因 | 建议做成 `ARKRTOS_USE_STACK_GUARD`（默认关=零变化），在切换/异常入口校验；**已登记进 [欠账盘点](欠账盘点.md) §一** |
 
 ---
 
@@ -281,7 +281,7 @@ PY
 
 ```bash
 python tools/elf_gate.py      # 默认档零变化 / LA64 正向编得过 / 机器码/类型/窗口缺失都要被拒
-python tools/ci_gate.py       # 37 项，含 paging 与 elf 两组
+python tools/ci_gate.py       # 以末行为准（目前 38 项），含 paging / elf / modld 三组
 ```
 
 ---
