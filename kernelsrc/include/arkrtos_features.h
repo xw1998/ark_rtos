@@ -72,6 +72,14 @@
 #define ARKRTOS_USE_STACK_CHECK         1
 #endif
 
+/* 栈底守卫字：切换与异常入口读 stack_bottom[0] 是否仍是
+ * ARKRTOS_STACK_END_FLAG_VAL。与 STACK_CHECK 判的不是同一件事：陷阱帧、
+ * 越界指针、DMA 都能改写栈底而保存的 PSP 仍在上面。默认关，关档时
+ * 标志字照写但从不读，行为与体积逐字节不变。 */
+#ifndef ARKRTOS_USE_STACK_GUARD
+#define ARKRTOS_USE_STACK_GUARD         0
+#endif
+
 /* 调度器统计：每任务切换次数与耗时 */
 #ifndef ARKRTOS_USE_SCHED_STAT
 #define ARKRTOS_USE_SCHED_STAT          1

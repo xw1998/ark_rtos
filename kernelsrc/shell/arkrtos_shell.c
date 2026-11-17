@@ -102,8 +102,14 @@
 /* 控制台实例（含行编辑缓冲与命令历史，放 .bss 而不是任务栈） */
 static ark_shell_t g_shell;
 
-/* 控制台任务栈（内核任务，取自内核 RAM） */
-static uint32 g_shell_stack[SHELL_TASK_STACK_SIZE / 4u];
+/* 控制台任务栈（内核任务，取自内核 RAM）。
+ * 板级可用 ARKRTOS_SHELL_STACK_SIZE 覆盖：这个任务要扛整条命令链
+ * （解析 + VFS 读 + ld 的链接与打印），LA64 上一帧陷阱 256 B，
+ * 3 KB 在 ld 期间实测被用到 100%。见 QEMU 文档 §5.15。 */
+#ifndef ARKRTOS_SHELL_STACK_SIZE
+#define ARKRTOS_SHELL_STACK_SIZE    SHELL_TASK_STACK_SIZE
+#endif
+static uint32 g_shell_stack[ARKRTOS_SHELL_STACK_SIZE / 4u];
 
 /* ============================================================
  * 小工具

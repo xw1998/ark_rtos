@@ -39,6 +39,12 @@ QEMU_FALLBACKS = [
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 # --modld-check 的序列：(命令, [必须出现的子串...])
+# 栈底守卫：示例板上有一个任务故意踩自己的栈底字，切换时被摘除并记一条
+# ARKRTOS_FAULT_STACKOVF；fault 命令把它打出来，任务号在 task 列。
+STACK_GUARD_CHECK = [
+    ("fault", ["STACKOVF"]),
+]
+
 MODLD_CHECK = [
     ("lkup", ["kernel exports (6):",
               "arkrtos_mod_printf",
@@ -52,7 +58,11 @@ MODLD_CHECK = [
     ("ld /mnt/ram/modhello.o alpha 42",
      ["[modhello] hello from a relocatable module",
       "[modhello] argc=3",
-      "[modhello] argv[0]=modhello.o",
+      # argv[0] 是**用户敲进去的那个路径**（cmd_ld 把 argv[1] 原样传给装载器，
+      # VxWorks 的 ld 也是这样）。老期望写的是 modhello.o，那不是内核行为：
+      # 当时 shell 的 3 KB 栈在 ld 期间被用到 100%，溢出写坏了装载器静态区里的
+      # argv 指针，打印出来的才是被截短的 basename。见 QEMU 文档 §5.15。
+      "[modhello] argv[0]=/mnt/ram/modhello.o",
       "[modhello] argv[1]=alpha",
       "[modhello] argv[2]=42",
       "[modhello] bye",
@@ -80,6 +90,8 @@ def main():
     ap.add_argument("--cmd", action="append", default=[],
                     help="只发不判的命令，可多次给")
     ap.add_argument("--script", default="", help="一行一条命令的文件")
+    ap.add_argument("--stack-guard-check", action="store_true",
+                    help="栈底守卫：fault 里必须出现 STACKOVF")
     ap.add_argument("--modld-check", action="store_true",
                     help="跑可下载模块的验收序列并判每条的期望子串")
     a = ap.parse_args()
@@ -160,6 +172,8 @@ def main():
         seq = []
         if a.modld_check:
             seq += MODLD_CHECK
+        if a.stack_guard_check:
+            seq += STACK_GUARD_CHECK
         if a.script:
             with open(a.script, encoding="utf-8") as f:
                 for line in f:

@@ -91,6 +91,13 @@ int32 arkrtos_task_register(void (*entry)(void), uint32 *stack_bottom, uint32 st
     p_task->priority      = priority;
     p_task->base_priority = priority;   /* 基准优先级：撤销优先级继承时的恢复依据 */
     p_task->shm_attri   = 0;
+    #if (ARKRTOS_USE_STACK_GUARD == 1)
+    /* 上面那句 stack_bottom[0] 已经把保护字写进去了，这里只是登记
+     * 「这个任务的栈底有字可查」。没布防的任务（外部直接填 TCB 的）
+     * 不会被误判成溢出。 */
+    p_task->stack_guard_armed    = 1u;
+    p_task->stack_guard_reported = 0u;
+    #endif
     p_task->is_priv     = 1u;   /* kernel-created tasks run privileged */
     p_task->status      = ARKRTOS_TASK_READY;
     p_task->period_time = p_task->period;

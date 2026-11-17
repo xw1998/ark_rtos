@@ -42,6 +42,21 @@ config ARKRTOS_USE_STACK_CHECK
 	help
 	  Detect a stack overflow by the end-of-stack flag being overwritten.
 
+config ARKRTOS_USE_STACK_GUARD
+	bool "Stack bottom guard word check (switch + trap entry)"
+	default n
+	help
+	  Read the end-of-stack flag word (ARKRTOS_STACK_END_FLAG) on every
+	  task switch and at trap entry, and report the task id when it has
+	  been overwritten.  This is a different question from STACK_CHECK:
+	  a trap frame, a wild pointer or a DMA write can clobber the bottom
+	  word while the saved PSP is still above it.  Ports that run trap
+	  handlers on the interrupted task's stack (LoongArch64, RV32) need
+	  this because the frame itself is what walks past the bottom.
+
+	  Off = the flag word is still written but never read, byte-identical
+	  to the previous behaviour.
+
 config ARKRTOS_USE_SCHED_STAT
 	bool "Scheduler statistics"
 	default y

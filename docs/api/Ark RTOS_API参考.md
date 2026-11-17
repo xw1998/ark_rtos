@@ -86,7 +86,7 @@
 - [kernelsrc/src/arkrtos_mpu.c](#kernelsrcsrcarkrtos_mpuc)（1 项）
 - [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（2 项）
 - [kernelsrc/src/arkrtos_smp.c](#kernelsrcsrcarkrtos_smpc)（1 项）
-- [kernelsrc/src/arkrtos_task.c](#kernelsrcsrcarkrtos_taskc)（4 项）
+- [kernelsrc/src/arkrtos_task.c](#kernelsrcsrcarkrtos_taskc)（5 项）
 - [kernelsrc/src/arkrtos_tickless.c](#kernelsrcsrcarkrtos_ticklessc)（1 项）
 - [kernelsrc/src/arkrtos_vfs_lfs.c](#kernelsrcsrcarkrtos_vfs_lfsc)（3 项）
 
@@ -8967,6 +8967,20 @@ static void smp_mask_set(uint32 cpu) {
 实现任务调度器、上下文切换的 C 侧逻辑、SVC 系统调用分发，以及任务控制接口。
 中断入口（SysTick_Handler/HardFault_Handler）在 board/ 中实现，
 它们最终调用本文件的 arkrtos_kernel_tick_handler / arkrtos_hardfault_handler。
+
+### `int32 arkrtos_stack_guard_check(int32 slot)`
+
+```c
+int32 arkrtos_stack_guard_check(int32 slot)
+```
+
+**校验一个任务的栈底保护字（0 基槽位）**
+**返回**：1 = 保护字已被踩，0 = 正常或该任务未布防
+判据是「栈底那一个字还是不是 ARKRTOS_STACK_END_FLAG_VAL」。
+和「保存的 PSP 低于栈底」不是同一件事：陷阱帧、越界指针、
+DMA 写穿都能让栈底被改写而保存下来的 PSP 仍在上方。
+报一次就置 reported，避免每个节拍都往故障环里塞同一条记录；
+布防位保持不清，这样切换路径仍会据此把任务摘除。
 
 ### `static int32 arkrtos_sched_lock_blocks(void)`
 

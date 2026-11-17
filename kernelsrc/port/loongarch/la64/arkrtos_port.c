@@ -1479,6 +1479,13 @@ la_frame_word *la_trap_c(la_frame_word *frame)
 
     s_in_trap++;
 
+    #if (ARKRTOS_USE_STACK_GUARD == 1)
+    /* 本 port 的 trap 帧直接压在被中断任务的栈上：帧写下去之后立刻查一次
+     * 栈底保护字，把「帧把栈吃穿」变成一条带任务号的记录，而不是稍后
+     * 某个随机指针崩掉。这里只记录，不改调度状态（还在异常里）。 */
+    arkrtos_stack_guard_check_current();
+    #endif
+
     estat = la_estat_read();
     ecode = (estat >> 16) & 0x3Fu;
 

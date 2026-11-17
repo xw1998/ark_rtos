@@ -1230,6 +1230,24 @@ def check_payload_sign():
         fail("payload-sign", txt[-260:])
 
 
+def check_stack_guard():
+    """栈底守卫（ARKRTOS_USE_STACK_GUARD）必须两头都在。
+
+    U-13 的原状是「标志字写了但从来没人读」，这种代码不会报错、不会变慢，
+    只会让人以为有保护。tools/stack_guard_gate.py 把两个方向都变成读数：
+    开档时切换路径与两个 port 的 trap 入口都调检查、命中记 STACKOVF 并摘任务；
+    关档时预处理结果里 stack_guard 一个字都不出现。
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "stack_guard_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "STACK-GUARD-GATE OK" in txt:
+        ok("stack-guard",
+           "default off / LA64 ON has check+STACKOVF+task id / OFF zero symbols / "
+           "RV32 port ON compiles / removal wired / board + demo wired")
+    else:
+        fail("stack-guard", txt[-260:])
+
+
 def check_modld():
     """VxWorks-style downloadable modules (ARKRTOS_USE_MODLOAD) must be wired.
 
@@ -1364,6 +1382,7 @@ def main(argv):
     check_elf_loader()
     check_modld()
     check_payload_sign()
+    check_stack_guard()
     if do_build:
         check_builds(uv4)
 

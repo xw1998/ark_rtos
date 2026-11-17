@@ -601,6 +601,32 @@ static LA_APP_CODE void la_app_task(void)
 *             第一个任务在这一步之后才开始运行；
 *          4) 之后进入 WFI 循环，CPU 只在有中断时醒来。
 */
+#if (ARKRTOS_USE_STACK_GUARD == 1)
+/* 栈底守卫的演示任务：先把自己的栈底保护字写坏，再主动让出 CPU。
+ * 守卫打开时应该看到一行 [STK] task N: ... 且该任务被摘除（task 里 INVALID）；
+ * 守卫关闭时这整段不参与编译，行为与之前逐字节相同。
+ * 写的是它自己的栈底字，不会碰到别人的栈。 */
+#define STKGUARD_STACK_WORDS   512u   /* 与 A/B 同档：LA64 一帧 256 B + 调用链 */
+static uint32 s_stack_guard_demo[STKGUARD_STACK_WORDS];
+
+static void task_stack_guard_demo(void)
+{
+    volatile uint32 *bottom;
+
+    arkrtos_task_delay(200u);      /* 等 A/B 先跑起来，串口顺序好读 */
+
+    bottom = (volatile uint32 *)(unsigned long)s_stack_guard_demo;
+    *bottom = 0u;                  /* 模拟一次越界写：保护字不再是 0xed01 */
+
+    arkrtos_board_puts("[boot] stack guard demo: bottom word clobbered\n");
+
+    for(;;)
+    {
+        arkrtos_task_delay(100u);  /* 下一次切走时由守卫发现并摘除 */
+    }
+}
+#endif
+
 static void arkrtos_start_idle(void)
 {
     uint32 sp = (uint32)(unsigned long)(&s_idle_stack[IDLE_STACK_WORDS]);
@@ -639,6 +665,12 @@ int main(void)
     id_b = arkrtos_task_register(task_b, s_stack_b, sizeof(s_stack_b), 11u, 0u);
     /* 存储任务优先级低于 A/B：它是自检，不该抢占节拍/切换观测 */
     id_fs = arkrtos_task_register(task_fs, s_stack_fs, sizeof(s_stack_fs), 13u, 0u);
+
+    #if (ARKRTOS_USE_STACK_GUARD == 1)
+    /* 栈底守卫演示任务：优先级最低，只在 A/B/存储/装载都跑过之后踩自己的栈底。 */
+    (void)arkrtos_task_register(task_stack_guard_demo, s_stack_guard_demo,
+                                sizeof(s_stack_guard_demo), 18u, 0u);
+    #endif
 
     #if ARK_EXAMPLE_PLV3_PROBE
     /* PLV3 探针。栈在 App 页（.appprobe）里，代码也在那里 ——

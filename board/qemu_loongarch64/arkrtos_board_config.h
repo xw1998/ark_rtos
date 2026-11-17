@@ -202,6 +202,15 @@
  * 演示任务另外用一份「tag 被翻掉」的副本证明装载器真的会拒。 */
 #undef  ARKRTOS_USE_EXEC_SIGN
 #define ARKRTOS_USE_EXEC_SIGN        1
+/* 栈底守卫字：本板的 QEMU 示例里有一个专门踩自己栈底的任务，
+ * 用来证明「切换时读保护字」这条路径真的会咬人（见 main.c）。 */
+#undef  ARKRTOS_USE_STACK_GUARD
+#define ARKRTOS_USE_STACK_GUARD      1
+
+/* 控制台任务栈：SHELL_TASK_STACK_SIZE 的默认 3 KB 是按 32 位端口定的。
+ * LA64 上一帧陷阱 256 B，`ld` 要在这条栈上跑完「读文件 + 链接 + 打印」，
+ * 实测被用到 3072/3072 = 100%（栈底保护字被写穿，见 §5.15）——这里给 8 KB。 */
+#define ARKRTOS_SHELL_STACK_SIZE     (1024 * 8)
 #undef  ARKRTOS_USE_QSPI
 #define ARKRTOS_USE_QSPI             0
 #undef  ARKRTOS_AUTOMOUNT_NOR

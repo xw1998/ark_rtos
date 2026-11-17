@@ -118,7 +118,10 @@ py -3 tools/kconfig/menuconfig.py --defconfig config/arkrtos_defconfig
 [MMU平台可下载模块-VxWorks式](MMU平台可下载模块-VxWorks式.md)）；第 39 项是
 `tools/payload_sign_gate.py`（`ARKRTOS_USE_EXEC_SIGN`：ELF 与可载模块的尾部
 tag 签名门，含内核 MAC 与 Python 实现的逐字节对拍、开档/关档符号探针，
-见 [MMU进程模型与ELF装载](MMU进程模型与ELF装载.md) §5.3）。
+见 [MMU进程模型与ELF装载](MMU进程模型与ELF装载.md) §5.3）；第 40 项是
+`tools/stack_guard_gate.py`（`ARKRTOS_USE_STACK_GUARD`：栈底守卫字，判据是读
+`stack_bottom[0]` 而不是比 PSP，落点在调度切换与 LA64/RV32 的 C trap 入口，
+关档零符号，见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.15）。
 
 ## 6. 数量限制
 

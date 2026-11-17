@@ -276,7 +276,8 @@ QEMU LA64 实测（2026-11-17，同一次开机）：
 | U-10 | 动态链接（`PT_INTERP`、`ld.so`） | 明确拒绝（`ERR_FORMAT`） | 只能跑静态链接程序 | M3 |
 | U-11 | 文件描述符继承 / 管道 / 信号 | 无 | 只能单进程自娱自乐 | M3 |
 | U-12 | 软定时器栈的 32 位侧复核 | RV32 仍是 96 字：实测峰值 184 B 已用、剩 200 B，RV32 帧 ≈128 B ⇒ 处理链只剩 ~72 B | 与本次 LA64 同型的风险，尚未出事 | **本轮登记，单独一轮测完再定值**（改它会动 `2012924 B` 镜像基线） |
-| U-13 | 栈溢出 / 陷阱帧越界的检测 | **没有**：`arkrtos_task_stack_init` 会把 `ARKRTOS_STACK_END_FLAG (0xed01)` 写进 `stack_bottom[0]`，但**从来没有人检查过它** | 就是本次事故能潜伏整轮的原因 | 建议做成 `ARKRTOS_USE_STACK_GUARD`（默认关=零变化），在切换/异常入口校验；**已登记进 [欠账盘点](欠账盘点.md) §一** |
+| U-14 | 控制台任务栈的 32 位侧复核 | RV32 / LA32 / STM32 仍是 `SHELL_TASK_STACK_SIZE` = 3 KB（帧 128 B）；LA64 上同一份 3 KB 在 `ld` 期间实测 100%，已用板级 `ARKRTOS_SHELL_STACK_SIZE` 放到 8 KB | 还没在 32 位端口上跑过 `ld` + `stack`，不知道是不是同型 | **本轮登记**（判据 = RV32 QEMU 上一次 `ld` 后的 `stack` 读数） |
+| U-13 | 栈溢出 / 陷阱帧越界的检测 | **已做完（2026-11-17）**：开关 `ARKRTOS_USE_STACK_GUARD`（默认 n），判据是读 `stack_bottom[0]` 是否仍为 `0xed01`（不是比 PSP，陷阱帧/野指针改栈底而 PSP 仍在上方），落点在调度切换与 LA64/RV32 的 C trap 入口 | 命中记 `ARKRTOS_FAULT_STACKOVF` + `[STK] task N` + 摘任务；QEMU 实跑与门禁见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.15 | 已收 |
 
 ---
 
@@ -318,7 +319,7 @@ PY
 
 ```bash
 python tools/elf_gate.py      # 默认档零变化 / LA64 正向编得过 / 机器码/类型/窗口缺失都要被拒
-python tools/ci_gate.py       # 以末行为准（目前 39 项），含 paging / elf / modld / payload-sign 四组
+python tools/ci_gate.py       # 以末行为准（目前 40 项），含 paging / elf / modld / payload-sign / stack-guard 五组
 ```
 
 ---

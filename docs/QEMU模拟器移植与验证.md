@@ -1519,6 +1519,111 @@ if (arkrtos_current_task_id == id && arkrtos_port_in_isr() == 0u) { ... }
 不修**（改它会动 `2012924 B` 基线），见 [MMU进程模型与ELF装载](MMU进程模型与ELF装载.md)
 §6 欠账 U-12。
 
+### 5.15 栈底守卫：把「写了不读的标志字」接上（U-13，2026-11-17）
+
+**问题**：每任务栈底的标志字 `ARKRTOS_STACK_END_FLAG_VAL`（`0xed01`）一直写，
+但**没有任何代码读它**。已有的 `ARKRTOS_USE_STACK_CHECK` 判的是「保存的 PSP 是否
+低于栈底」，这只在「栈指针一路压下去」时成立。§5.14 现场的破坏方式是**陷阱帧
+直接写到 `sp - 256`**（栈指针本身还没越界）、或野指针 / DMA 直接改写了栈底字 ——
+这两种 PSP 判据全都看不见。
+
+**开关**：`ARKRTOS_USE_STACK_GUARD`（`Kconfig.features`，default `n`）。
+与 `ARKRTOS_USE_STACK_CHECK` 不是同一件事，两者可独立开关。
+
+**判据**：读 `stack_bottom[0]` 是否仍等于 `0xed01`。不等即命中。
+
+**两个落点**（都是「已经来不及但还救得回来」的位置）：
+
+1. 调度切换路径（`arkrtos_task.c` 的 `arkrtos_sched_activate`，所有 port 共用）：
+   命中后打一行 `[STK] task N: stack bottom flag overwritten`、记一次
+   `arkrtos_fault_record(ARKRTOS_FAULT_STACKOVF, slot+1)`，并把该任务从就绪集
+   摘除、置 `ARKRTOS_TASK_INVALID`（只打日志等于没有保护）。
+2. LA64 / RV32 的 C trap 入口（`s_in_trap++` 之后）：这两个 port 的陷阱帧压在
+   被中断任务的栈上，正是 §5.14 那种「一帧吃掉栈底」的现场。trap 里只记录与打
+   日志、**不改调度状态**（还在异常上下文里换栈不安全），摘除留给下一次切换。
+
+每任务两个标志位 `stack_guard_armed`（布防，注册时置 1）与
+`stack_guard_reported`（只报一次，防每拍刷故障环）。关档时字段、原型、调用、
+字符串全在 `#if` 内 ⇒ **零符号、零体积变化**。
+
+**QEMU LA64 实测**（编入档 `board/qemu_loongarch64/arkrtos_board_config.h` 置 1，
+示例里挂一个「延时 200 tick 后把栈底字写成 0 再让出 CPU」的任务）：
+
+```
+[boot] stack guard demo: bottom word clobbered
+[STK] task 4: stack bottom flag overwritten
+```
+
+shell `fault` 命令读到故障环：
+
+```
+$ fault
+#   tick      task  type
+ 0   165       4     STACKOVF
+```
+
+交互驱动已固化为可复跑的一步：
+
+```
+python tools/qemu_shell_drive.py --stack-guard-check --boot 45 --port 45571
+SHELL-DRIVE OK: 1 条命令全部符合预期
+```
+
+**一个踩过的坑**：演示任务栈最初给 `128` 字（512 B）。LA64 一帧陷阱 256 B 加上
+调用链，这个任务**还没踩到自己的栈底就把自己的调用帧写飞了**（`KERNEL refill
+badv=0x13d648d8 -> fatal`）。改成 `512` 字后 `[STK] task 4` 正常出现 —— 测守卫
+的任务栈本身必须够深，否则测的是它自己越界。
+
+**门禁**：`tools/stack_guard_gate.py`（ci_gate 第 40 项），A 默认档 autoconf 为 0；
+B LA64 开档预处理后 `arkrtos_task.c` 里必须有检查函数与故障码；C LA64 关档预处理
+结果里 `stack_guard` 一个字都不许有；D RV32 端口开档必须编得过；E 逐条 pin 住
+判据、切换调用、置 INVALID、注册布防、TCB 字段、features 回退与两块板级接线；
+F 板级置 1 且示例有踩栈底任务。
+
+
+#### 5.15.1 守卫抓到的第一个真问题：shell 的 3 KB 栈装不下 `ld`
+
+把守卫编进档之后，`--modld-check` 反而挂了：`ld` 之后 shell 的输出整段消失，
+`modules` 只剩一个 `[`，串口里在模块输出之前多出一行 `[STK] task 8`。
+
+按「先量后改」查下来，这不是守卫误报：
+
+```text
+$ stack                                      # 空载
+ 8   3072     2452     620       79%   0x0021F060     ← 控制台任务（SHELL_TASK_STACK_SIZE）
+$ ld /mnt/ram/modhello.o a b
+$ stack                                      # ld 之后
+ 8?  3072     3072     0        100%   ...          ← 整段栈被用满，护底字已被写穿
+```
+
+- 任务号会随槽位复用变（这里出现过 7 和 8），判据是 `total=3072` 那一行；
+- `used=3072` 是**扫描法能给出的上限值**，换句话说是「至少 3 KB，真实需求测不出来」；
+- 不带守卫时这层溢出**静默**写进 shell 栈下方的静态区。
+
+**连带暴露的一处假读数**：`--modld-check` 里原有的期望
+`[modhello] argv[0]=modhello.o` 一直"通过"，但内核从来没做过 basename——
+`cmd_ld` 把 `argv[1]` 原样交给装载器（VxWorks 的 `ld` 也是这样）。当时打印出
+basename，是溢出把装载器静态区里的 argv 指针写坏了、恰好指到路径的第 9 个字符。
+把栈修好之后同一行变成 `argv[0]=/mnt/ram/modhello.o`，即用户敲进去的那个路径；
+驱动里的期望已改成完整路径，并在注释里写清这条旧读数是被破坏内存凑出来的。
+
+**修法**（只动这块板，默认档零变化）：`arkrtos_shell.c` 给栈大小加一个板级钩子
+
+```c
+#ifndef ARKRTOS_SHELL_STACK_SIZE
+#define ARKRTOS_SHELL_STACK_SIZE    SHELL_TASK_STACK_SIZE
+#endif
+static uint32 g_shell_stack[ARKRTOS_SHELL_STACK_SIZE / 4u];
+```
+
+`board/qemu_loongarch64/arkrtos_board_config.h` 取 `1024 * 8`。
+修后读数：`ld` 跑完 shell 任务 `total=8192 used=3956 (48%)`——真实需求约 3.9 KB，
+比原来的 3 KB 多出一次 `ld` 的链接链，原来的 79% 空载占用就已经很贴边了。
+
+**结论口径**：这条不是「守卫太敏感」，而是「守卫把一段潜伏的静默破坏变成了可见的
+任务摘除」。同型的 32 位端口（3 KB、帧 128 B）本轮**没测**，用 `stack` 在 RV32
+QEMU 上跑一次 `ld` 即可判定，登记为待复核项。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

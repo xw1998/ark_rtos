@@ -2415,6 +2415,72 @@ int32 arkrtos_sched_is_switching(void)
 
 /* 就绪位图自愈的诊断变量定义在后面的「就绪队列」一节，调度入口也要写它，
  * 这里前向声明（同文件内的全局对象）。 */
+#if (ARKRTOS_USE_STACK_GUARD == 1)
+/**
+* @brief 校验一个任务的栈底保护字（0 基槽位）
+* @return 1 = 保护字已被踩，0 = 正常或该任务未布防
+* @details 判据是「栈底那一个字还是不是 ARKRTOS_STACK_END_FLAG_VAL」。
+*          和「保存的 PSP 低于栈底」不是同一件事：陷阱帧、越界指针、
+*          DMA 写穿都能让栈底被改写而保存下来的 PSP 仍在上方。
+*          报一次就置 reported，避免每个节拍都往故障环里塞同一条记录；
+*          布防位保持不清，这样切换路径仍会据此把任务摘除。
+*/
+int32 arkrtos_stack_guard_check(int32 slot)
+{
+    arkrtos_task_t *p_task;
+
+    if((slot < 0) || (slot >= (int32)arkrtos_task_count))
+    {
+        return 0;
+    }
+
+    p_task = &arkrtos_task_table[slot];
+    if((p_task->stack_bottom == 0) || (p_task->stack_guard_armed == 0u))
+    {
+        return 0;
+    }
+    if(p_task->stack_bottom[0] == (uint32)ARKRTOS_STACK_END_FLAG_VAL)
+    {
+        return 0;
+    }
+
+    if(p_task->stack_guard_reported == 0u)
+    {
+        char num[12];
+        uint32 n = (uint32)(slot + 1);
+        uint32 nd = 0u;
+
+        p_task->stack_guard_reported = 1u;
+        arkrtos_fault_record(ARKRTOS_FAULT_STACKOVF, slot + 1);
+
+        while(n > 0u)
+        {
+            num[nd++] = (char)('0' + (n % 10u));
+            n /= 10u;
+        }
+
+        (void)arkrtos_console_write((const uint8 *)"[STK] task ", 11u);
+        while(nd > 0u)
+        {
+            nd--;
+            (void)arkrtos_console_write((const uint8 *)&num[nd], 1u);
+        }
+        (void)arkrtos_console_write(
+            (const uint8 *)": stack bottom flag overwritten\n", 32u);
+    }
+
+    return 1;
+}
+
+void arkrtos_stack_guard_check_current(void)
+{
+    if(arkrtos_current_task_id > 0)
+    {
+        (void)arkrtos_stack_guard_check(arkrtos_current_task_id - 1);
+    }
+}
+#endif /* ARKRTOS_USE_STACK_GUARD */
+
 int32 arkrtos_sched_activate(int32 new_task, uint32 old_psp)
 {
     int32 tid = arkrtos_current_task_id - 1;
@@ -2452,6 +2518,18 @@ int32 arkrtos_sched_activate(int32 new_task, uint32 old_psp)
 
         if(arkrtos_task_table[tid].status == ARKRTOS_TASK_RUNNING)
         {
+            #if (ARKRTOS_USE_STACK_GUARD == 1)
+            /* 先查栈底保护字：它能在 PSP 还没掉到栈底以下时就把
+             * 「帧/野指针写穿栈底」认出来。命中即摘除，和下面的
+             * PSP 判据同一个去向（记录已在 check 里写过）。 */
+            if(arkrtos_stack_guard_check(tid) != 0)
+            {
+                arkrtos_ready_del(tid);
+                arkrtos_delay_disarm(tid);
+                arkrtos_task_table[tid].status = ARKRTOS_TASK_INVALID;
+            }
+            else
+            #endif
             #if (ARKRTOS_USE_STACK_CHECK == 1)
             /* 栈溢出检测：保存的 PSP 若已低于栈底地址，说明栈越界了。
              * 仅在 RUNNING 状态下检测，避免对 WAIT 任务误判（详见移植手册已知问题）。 */

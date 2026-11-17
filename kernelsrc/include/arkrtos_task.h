@@ -80,6 +80,10 @@ typedef struct {
     #if (ARKRTOS_USE_STACK_USAGE == 1)
     uint32 stack_peak_low;                          /* 历史最低栈指针，用于峰值栈用量统计 */
     #endif
+    #if (ARKRTOS_USE_STACK_GUARD == 1)
+    uint8  stack_guard_armed;                       /* 1 = 栈底保护字已由注册流程布防 */
+    uint8  stack_guard_reported;                    /* 1 = 已报过一次，避免每次切换刷同一条记录 */
+    #endif
     uint8  is_priv;                                 /* 1 = Thread mode privileged, 0 = unprivileged.
                                                      * Honoured only when ARKRTOS_USE_PRIV == 1;
                                                      * the switch path writes CONTROL.nPRIV from
@@ -231,6 +235,13 @@ int32 arkrtos_task_swap_arm(int32 task_id, uint32 rom_start, uint32 rom_size,
 int32 arkrtos_task_swap_take(void *p_exc_ctx, int32 task_id);
 int32 arkrtos_task_swap_cancel(int32 task_id);
 int32 arkrtos_task_swap_pending(void);
+
+#if (ARKRTOS_USE_STACK_GUARD == 1)
+/* 栈底守卫字检查：slot 是 0 基槽位。0 = 正常或未布防，1 = 被踩。
+ * 首次发现时记一条 ARKRTOS_FAULT_STACKOVF 并打一行控制台，之后只返回 1。 */
+int32 arkrtos_stack_guard_check(int32 slot);
+void  arkrtos_stack_guard_check_current(void);
+#endif
 
 int32 arkrtos_sched_is_switching(void);
 int32 arkrtos_sched_activate(int32 new_task, uint32 old_psp);
