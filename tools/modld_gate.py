@@ -27,7 +27,13 @@
   D. 守卫 pin：ET_REL 判定、读写有界、默认分支报错带类型号、
      `ARKRTOS_MOD_AREA_SIZE` 缺失必须 `#error`；
   E. Kconfig / 板级接线：`config ARKRTOS_USE_MODLOAD` 存在、depends 里有
-     VFS 与 PRIV、help 写明「第二种模型、不是替代」，板级置 1。
+     VFS 与 PRIV、help 写明「第二种模型、不是替代」，板级置 1；
+  F. 32 位负向（RV32 + LA32 各一条）：装载器读写的是 ELF64 的 RELA/符号表，
+     字段宽度在 32 位 long 上表达不了，所以必须由源文件顶部的 64 位守卫在
+     编译期挡住。两条都用 `-DARKRTOS_USE_MODLOAD=1` 强开，并**先把
+     `ARKRTOS_MOD_AREA_SIZE` 喂饱**——否则先炸的是「缺窗口」那条 `#error`，
+     这道负向就被别的原因蒙对了（假绿）。判据：退出码非 0 且输出里同时出现
+     `64` 与 `port`。
 
 不覆盖：运行期行为（真装载、真重定位、真调内核 API、`unld` 后再装）。
 那些要跑 QEMU，实测读数见 docs/MMU平台可下载模块-VxWorks式.md。
@@ -54,8 +60,16 @@ ROOT = os.path.dirname(HERE)
 LA64_FALLBACKS = [
     "D:/LoongIDE/la64-tool/bin/loongarch64-newlib-elf-gcc.exe",
 ]
+LA32_FALLBACKS = [
+    "D:/LoongIDE/la32-tool/bin/loongarch32-newlib-elf-gcc.exe",
+]
+RV32_FALLBACKS = [
+    "D:/Artchip/luban-lite-master/toolchain/bin/riscv64-unknown-elf-gcc.exe",
+]
 
 LA64_ARCH = ["-march=loongarch64", "-mabi=lp64d", "-mstrict-align"]
+LA32_ARCH = ["-march=loongarch32", "-mabi=ilp32d"]
+RV32_ARCH = ["-march=rv32imac", "-mabi=ilp32", "-mcmodel=medany", "-mno-relax"]
 
 COMMON = [
     "-O0",
@@ -134,9 +148,13 @@ def _exports_names():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--la64-gcc", default="")
+    ap.add_argument("--la32-gcc", default="")
+    ap.add_argument("--rv32-gcc", default="")
     a = ap.parse_args()
 
     la64 = _pick(LA64_FALLBACKS, a.la64_gcc, "LoongArch64 交叉编译器")
+    la32 = _pick(LA32_FALLBACKS, a.la32_gcc, "LoongArch32 交叉编译器")
+    rv32 = _pick(RV32_FALLBACKS, a.rv32_gcc, "RISCV32 交叉编译器")
     nm = os.path.join(os.path.dirname(la64),
                       os.path.basename(la64).replace("-gcc", "-nm"))
 
@@ -249,6 +267,29 @@ def main():
                 failures.append("E Kconfig：ARKRTOS_USE_MODLOAD 段里缺 %r（%s）"
                                 % (need, why))
 
+    # --- F. 32 位负向：RV32 / LA32 强开必须被 64 位守卫挡住 ----------------
+    # 板级没有这两个宏（32 位 port 本来就不该开），所以只能靠 -D 强开；
+    # 窗口大小必须一起喂，否则先炸的是「缺 ARKRTOS_MOD_AREA_SIZE」那条 #error。
+    neg_common = COMMON + [
+        "-DARKRTOS_BOARD_CONFIG=\"arkrtos_board_config.h\"",
+        "-include", "arkrtos_board_config.h",
+        "-I" + key_dir,
+        "-DARKRTOS_USE_MODLOAD=1",
+        "-DARKRTOS_MOD_AREA_SIZE=65536",
+        "kernelsrc/src/arkrtos_modld.c",
+    ]
+    for cc, arch, board, port, tag in (
+        (rv32, RV32_ARCH, "qemu_riscv32", "riscv/rv32imac", "RV32"),
+        (la32, LA32_ARCH, "la32_generic", "loongarch/la32", "LA32"),
+    ):
+        rc, out = _run(cc, arch + neg_common + _includes(board, port))
+        if rc == 0:
+            failures.append("F %s 负向：32 位工具链强开 USE_MODLOAD 竟然编过了"
+                            "（64 位守卫没生效）" % tag)
+        elif ("64" not in out) or ("port" not in out):
+            failures.append("F %s 负向：编不过但不是那条 64 位守卫，报的是别的错：\n%s"
+                            % (tag, out[-500:]))
+
     board = _read(os.path.join(ROOT, "board/qemu_loongarch64/arkrtos_board_config.h"))
     if not re.search(r"^#define\s+ARKRTOS_USE_MODLOAD\s+1", board, re.M):
         failures.append("E 板级：qemu_loongarch64 没有把 ARKRTOS_USE_MODLOAD 置 1")
@@ -263,7 +304,8 @@ def main():
         return 1
 
     print("MODLD-GATE OK: 默认档=0 / LA64 打开编得过(2 TU 且非空) / "
-          "示例模块未定义符号全在导出表 / 守卫未拆 / Kconfig 与板级接线在")
+          "示例模块未定义符号全在导出表 / 守卫未拆 / Kconfig 与板级接线在 / "
+          "RV32+LA32 强开被 64 位守卫挡住")
     return 0
 
 

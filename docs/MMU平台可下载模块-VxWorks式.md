@@ -96,11 +96,11 @@ GCC 8.3 的 LoongArch 后端只发 SOP 栈机重定位（`-mexplicit-relocs` / `
 ## 4. 用法
 
 ```text
-Ark> ld /mnt/ram/modhello.o a b
-Ark> lkup                      列出全部导出符号
-Ark> lkup arkrtos_mod_printf   查一个
-Ark> modules                   列出常驻模块（base/size/entry/relocs/imports/task/state）
-Ark> unld 0                    卸载（模块任务还在跑时返回 BUSY，不硬拔）
+mark@arkrtos:~$ ld /mnt/ram/modhello.o a b
+mark@arkrtos:~$ lkup                      列出全部导出符号
+mark@arkrtos:~$ lkup arkrtos_mod_printf   查一个
+mark@arkrtos:~$ modules                   列出常驻模块（base/size/entry/relocs/imports/task/state）
+mark@arkrtos:~$ unld 0                    卸载（模块任务还在跑时返回 BUSY，不硬拔）
 ```
 
 返回码（`arkrtos_mod_error_name()` 给名字）：
@@ -112,6 +112,86 @@ Ark> unld 0                    卸载（模块任务还在跑时返回 BUSY，�
 
 `-6` 时 `arkrtos_mod_missing_symbol()` 给出缺的那个名字，`-7` 时
 `arkrtos_mod_bad_reloc()` 给出类型号——**报错要能直接指到原因**，不给一个笼统的失败。
+
+### 4.1 在 QEMU 里交互式实测（可复跑的操作步骤）
+
+上板前先在 QEMU 上把 `ld / lkup / modules / unld` 走一遍。难点不在命令，而在
+**怎么把键盘输入送进去**——这两条路实测都不通，别浪费时间：
+
+* `-serial file:xxx.log` 只能收输出，**喂不进输入**；
+* `-nographic`（= `-serial mon:stdio`）配管道 stdin：字符有回显，但**回车不生效**，
+  命令一次都没执行过（monitor 复用层的问题）。
+
+能用的只有 **TCP chardev**：QEMU 监听本地端口，脚本连上去按字节发，回车发 `\r`。
+
+**① 先有 ELF**（模块池里要有 `modhello.o`，`mod_demo.c` 启动时会写进去）：
+
+```bash
+make -f example/qemu_loongarch64/Makefile -j
+# 产物：build/qemu_loongarch64/ark_qemu_la64.elf
+```
+
+**② 起 QEMU**（注意 `cwd`）：QEMU 在 Windows 上打不开含非 ASCII 的路径
+（`-kernel "D:/工作/git_project/..."` 会得到 `could not load kernel: Failed to load ELF`），
+所以**切到 elf 所在目录、`-kernel` 只给文件名**：
+
+```bash
+cd build/qemu_loongarch64
+"$QEMU" -machine virt -kernel ark_qemu_la64.elf \
+        -display none -monitor none \
+        -serial tcp:127.0.0.1:45553,server=on,wait=off
+```
+
+两点口径：
+`server=on,wait=off` —— 先起跑再等客户端，代价是**连上之前的开机输出（含第一条提示符）
+会丢**，所以客户端要**先敲回车探活**；`wait=on` 实测接上后命令进不了 shell，不要用。
+
+**③ 连上去敲**（`nc` / 任意 socket 客户端；每行结尾发 `\r`）：
+
+```text
+lkup                          ↑ 回车用 CR（'\r'），LF 也行：ark_shell.c 411/472 行两个都收
+lkup arkrtos_mod_printf
+ld /mnt/ram/modhello.o alpha 42
+modules
+unld 0
+modules
+```
+
+期望看到（节选，内核日志 `[A]/[B]` 会插进来，属正常）：
+
+```text
+mark@arkrtos:~$ lkup
+kernel exports (6):
+  arkrtos_mod_printf ...
+mark@arkrtos:~$ ld /mnt/ram/modhello.o alpha 42
+[modhello] hello from a relocatable module
+[modhello] argc=3
+[modhello] argv[2]=42
+[MOD] modhello.o: base 0x00312320, 544 B, entry 0x00312320, 165 reloc(s), 8 import(s), task 8
+mark@arkrtos:~$ unld 0
+unld 0: slot released
+```
+
+**提示符是 `mark@arkrtos:~$ `，带 ANSI 颜色**（`\x1b[1;32m...\x1b[0m`）。
+所以拿它当判据时必须**先去 ANSI 转义再找 `@arkrtos`**，直接 `grep "Ark>"` 一定落空。
+
+**④ 一键跑完（推荐）**：
+
+```bash
+python tools/qemu_shell_drive.py --modld-check
+```
+
+它自己起 QEMU、用 TCP 串口连上、发回车等提示符，然后按顺序执行 7 条命令并逐条
+校验期望子串（导出表 6 个符号 / `lkup` 单查 / `modules` 槽表 / `ld` 的 argv 与
+`165 reloc(s), 8 import(s)` / `unld 0: slot released` / 卸载后 `modules` 只剩另一槽）。
+全过时末行是 `SHELL-DRIVE OK: 7 条命令全部符合预期`，退出码 0。
+
+其它开关：`--cmd "..."`（只发不判，手工看）、`--script cmds.txt`（一行一条，`#` 跳过）、
+`--timeout 3`（每条命令等输出的秒数——**按时间收口**，因为每秒一行的内核日志
+会插在提示符后面，靠「行尾是 `$`」判结束不可靠）、`--port` / `--elf` / `--qemu`。
+
+**这一项不进 `ci_gate`**：它依赖 QEMU 与真跑内核，不是「一键静态检查」能承担的东西，
+属人工/专项复跑。`tools/modld_gate.py` 只做静态那半边（见 §7）。
 
 ## 5. QEMU 实测读数（LoongArch64，2026-11-17）
 
@@ -166,7 +246,16 @@ Ark> unld 0                    卸载（模块任务还在跑时返回 BUSY，�
   逐个必须在 `s_exports` 里；
 * D 守卫 pin：`ET_REL` 判定、`mod_read_word` / `mod_write_word` 有界、
   默认分支报错带类型号、缺 `ARKRTOS_MOD_AREA_SIZE` 必须 `#error`；
-* E Kconfig 与板级接线（`depends` 有 VFS 与 PRIV、help 写明「不是替代」）。
+* E Kconfig 与板级接线（`depends` 有 VFS 与 PRIV、help 写明「不是替代」）；
+* F **32 位负向**：RV32（`riscv64-unknown-elf-gcc -march=rv32imac`）与
+  LA32（`loongarch32-newlib-elf-gcc -march=loongarch32`）各一条，强开
+  `-DARKRTOS_USE_MODLOAD=1` 必须**编不过**，且错误必须是「只支持 64 位 port」。
+  注意两条都要**先把 `ARKRTOS_MOD_AREA_SIZE=65536` 喂饱**——否则先炸的是
+  「缺窗口」那条 `#error`，这道负向就被别的原因蒙对了。
+
+装载器读写的是 ELF64 的 RELA / 符号表（64 位字段、`r_info` 高 32 位取符号下标），
+32 位 `long` 上表达不了，所以**它是 LoongArch64 专用**：32 位 port 打开开关
+会在 `arkrtos_modld.c` 顶部被编译期挡住，不是运行期才出错。
 
 **不覆盖**：运行期行为（真装载、真重定位、真调内核 API、`unld` 后再装、`BUSY` 拒绝）。
 那些是 QEMU 读数，见 §5。门禁只保证「装得上、能编、导出表没漏、守卫没被拆」。

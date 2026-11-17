@@ -1223,14 +1223,17 @@ def check_modld():
     preprocessed result is not an empty TU, compiles the example module and
     reconciles every undefined symbol against s_exports, and pins the
     guards (ET_REL check, bounded reloc read/write, unknown-type report,
-    ARKRTOS_MOD_AREA_SIZE #error) plus the Kconfig/board wiring.
+    ARKRTOS_MOD_AREA_SIZE #error) plus the Kconfig/board wiring, and requires
+    the RV32 and LA32 toolchains to REJECT the switch (the loader reads ELF64
+    RELA/symtab field widths that do not fit in a 32-bit long).
     Not covered: runtime load/reloc/unld -- those are QEMU readings, see
     docs/MMU平台可下载模块-VxWorks式.md.
     """
     r = _run_check([sys.executable, os.path.join("tools", "modld_gate.py")])
     txt = ((r.stdout or "") + (r.stderr or "")).strip()
     if r.returncode == 0 and "MODLD-GATE OK" in txt:
-        ok("modld", "default off + LA64 ON compiles + export table covers the demo .o")
+        ok("modld", "default off + LA64 ON compiles + export table covers the demo .o"
+                    " + RV32/LA32 rejected by the 64-bit guard")
     else:
         fail("modld", txt[-260:])
 
