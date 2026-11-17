@@ -97,6 +97,37 @@
 #define ARKRTOS_MPU_PERIPH_RW        1
 
 /* ============================================================
+ * 三·C、可执行 RAM 窗口（ELF32 装载，可选档）
+ * @details 只在 `-DARKRTOS_USE_ELF=1` 时被用到（默认档 ARKRTOS_USE_ELF=0，
+ *          本段宏只是"如果打开，窗口在哪"的答案，不产生任何代码）。
+ *
+ *          位置：DRAM 白地。0x80000000 起是内核镜像区（1 MB），
+ *          0x80100000 起是内核 RAM（8 MB，到 0x80900000 为止），
+ *          QEMU virt 的 DRAM 到 0x88000000，所以 0x80A00000 起 1 MB
+ *          既在 DRAM 内、又不与任何分区重叠。1 MB 对齐是硬约束：
+ *          PMP 区域必须是 2 的幂且按自身对齐（mpu.c 里有编译期闸门）。
+ *
+ *          程序与它的栈、argv 区都在这块窗口里（栈从窗口顶往下切），
+ *          所以 U 模式任务的两个 PMP 区域（代码 RX / 数据 RW）都指向它。
+ * ============================================================ */
+/* 窗口基址/大小本身总是给出（文档与工具对账要用）。但**给 MPU 的那两个
+ * 别名只在开 ELF 档时定义**：mpu.c 用 `#if defined(...)` 判断要不要编进
+ * ELF 窗口分支，默认档若也定义这两个宏，分支就会被编进默认镜像（实测体积
+ * +564 B），违反"默认档零变化"。这里用 ARKRTOS_USE_ELF 把关 —— 该宏在
+ * 功能档里来自命令行 -D（先于 -include 生效），默认档由 autoconf 给 0，
+ * 此刻尚未可见，"未定义"与"0"都走同一个分支。 */
+#ifndef ARKRTOS_ELF_WINDOW_BASE
+#define ARKRTOS_ELF_WINDOW_BASE      0x80A00000u
+#endif
+#ifndef ARKRTOS_ELF_WINDOW_SIZE
+#define ARKRTOS_ELF_WINDOW_SIZE      (1024u * 1024u)
+#endif
+#if defined(ARKRTOS_USE_ELF) && (ARKRTOS_USE_ELF == 1)
+#define ARKRTOS_MPU_ELF_WINDOW_BASE  ARKRTOS_ELF_WINDOW_BASE
+#define ARKRTOS_MPU_ELF_WINDOW_SIZE  ARKRTOS_ELF_WINDOW_SIZE
+#endif
+
+/* ============================================================
  * 四、能力开关
  * @details RV32IMAC 没有 FPU。内存保护与特权分离**已经实现**：
  *          U 模式 + PMP（见 kernelsrc/port/riscv/rv32imac/arkrtos_port.c

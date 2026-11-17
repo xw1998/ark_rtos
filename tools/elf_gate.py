@@ -21,10 +21,16 @@
   A. 默认档：`kernelsrc/include/arkrtos_autoconf.h` 里 `ARKRTOS_USE_ELF` 必须是 0；
   B. LA64 正向：板级（`board/qemu_loongarch64`）已把开关置 1，
      `arkrtos_elf.c` 与 la64 port 必须**编得过**；
-  C. RV32 负向：同一个 TU 用 32 位工具链强开 `-DARKRTOS_USE_ELF=1` 必须**编不过**，
-     且错误信息必须点名「只支持 64 位 port」（ELF64 字段宽度在 32 位 long 上表达不了）；
+  C. RV32 正向（U-4 起）：同一个 TU 用 32 位工具链强开 `-DARKRTOS_USE_ELF=1` 必须
+     **编得过**。这里是 2026-11-17 的判据翻转：U-4 把装载器改成「按 port 的 long
+     宽度选 ELF32/ELF64 字段表」，RV32 不再是被拒绝的档。旧的「必须编不过（只支持
+     64 位 port）」判据留着会变成假绿——它要求的东西已经不存在了；
   D. 缺窗口负向：把板级里的两行窗口宏删掉后必须**编不过**，且错误必须点名
      `ARKRTOS_ELF_WINDOW_BASE`；
+  G. 接线 pin（U-4 收尾）：ELF32 字段偏移表、Makefile 的链接基址与板级窗口宏
+     对账、`arkrtos_mpu_rom_window()` 里的 ELF 窗口分支、装载期「注册→降权→
+     写回」是否真在同一临界区内、以及 `hello32` 的退出兜底。每条都配一次变异
+     自检（把被 pin 的字串改坏，pin 必须报错），防止 pin 空转。
   E. 口径 pin：`arkrtos_elf.c` 里两个线上格式常量必须还是
      `ELF_MACHINE_LOONGARCH (258u)` 与 `ELF_TYPE_EXEC (2u)`，并且 `ELF_PT_INTERP`
      仍在（动态链接必须是拒绝，不是忽略）。改了这两个值就等于改了「什么算可执行
@@ -160,25 +166,20 @@ def main():
         if rc != 0:
             failures.append("B LA64 编不过 %s：\n%s" % (rel, out[-600:]))
 
-    # --- C. RV32 负向：32 位 long 上编 ELF64 必须失败 -----------------------
+    # --- C. RV32 正向：32 位工具链开 USE_ELF 必须编得过（U-4） -------------
     rv32_flags = RV32_ARCH + COMMON + [
         "-DARKRTOS_BOARD_CONFIG=\"arkrtos_board_config.h\"",
         "-include", "arkrtos_board_config.h",
         "-I" + key_dir,
     ] + _includes("qemu_riscv32", "riscv/rv32imac")
-    # 先把窗口宏喂饱，这样「编不过」的唯一可能就只剩那条 64 位守卫；
-    # 否则窗口 #error 会先炸，等于这道负向被别的原因蒙对。
+    # 判据在 U-4 翻转：32 位 port 走 ELF32 字段表，不再有「只支持 64 位」那条守卫。
+    # 这一条必须真编，否则「RV32 也支持 ELF」这句话就没有编译器背过书。
     rc, out = _run(rv32, rv32_flags + [
         "-DARKRTOS_USE_ELF=1",
-        "-DARKRTOS_ELF_WINDOW_BASE=0x02000000",
-        "-DARKRTOS_ELF_WINDOW_SIZE=0x200000",
         "kernelsrc/src/arkrtos_elf.c",
     ])
-    if rc == 0:
-        failures.append("C RV32 负向：32 位工具链强开 USE_ELF 竟然编过了（64 位守卫没生效）")
-    elif ("64" not in out) or ("port" not in out):
-        failures.append("C RV32 负向：编不过但不是那条 64 位守卫，报的是别的错：\n%s"
-                        % out[-500:])
+    if rc != 0:
+        failures.append("C RV32 正向：32 位工具链开 USE_ELF 编不过：\n%s" % out[-700:])
 
     # --- D. 缺窗口宏必须失败 ----------------------------------------------
     src_board = os.path.join(ROOT, "board/qemu_loongarch64/arkrtos_board_config.h")
@@ -269,6 +270,97 @@ def main():
     if not got and not pin_f(text_shell.replace("exit code %d", "exit code X%d", 1)):
         failures.append("F 自检：把 shell 的退出码打印串改坏后 pin 仍然通过（空转）")
 
+    # --- G. 接线 pin（U-4 收尾）-----------------------------------------
+    # 这些 pin 防的都是「看起来做了、其实没接线」：字段偏移抄错一位、链接基址
+    # 与板级窗口宏各写一个值、MPU 的 ELF 分支被谁删了、竞态修复的临界区只包了
+    # 一半、示例程序退出路径没有兜底。每条都配一次变异自检，pin 空转要被抓到。
+    import re as _re
+
+    text_mpu    = _read("kernelsrc/src/arkrtos_mpu.c")
+    text_board  = _read("board/qemu_riscv32/arkrtos_board_config.h")
+    text_mk     = _read("example/qemu_riscv32/Makefile")
+    text_hello32 = _read("example/qemu_riscv32/elf/hello32.c")
+
+    # 32 位 ELF 头/程序头的字段偏移（一个都不能错：错了就是「装进去了但跑飞」）
+    ELF32_FIELDS = [
+        ("ELF_EHDR_SIZE", 52), ("ELF_PHDR_SIZE", 32),
+        ("ELF_WORD_SIZE", 4),
+        ("ELF_EH_ENTRY", 24), ("ELF_EH_PHOFF", 28),
+        ("ELF_EH_PHENTSIZE", 42), ("ELF_EH_PHNUM", 44),
+        ("ELF_PH_OFFSET", 4), ("ELF_PH_VADDR", 8),
+        ("ELF_PH_FILESZ", 16), ("ELF_PH_MEMSZ", 20),
+    ]
+
+    def _elf_win(text):
+        m = _re.search(r"ELF_WIN\s*:=\s*(0x[0-9A-Fa-f]+)", text)
+        return int(m.group(1), 16) if m else None
+
+    def _board_win(text):
+        m = _re.search(r"#define\s+ARKRTOS_ELF_WINDOW_BASE\s+(0x[0-9A-Fa-f]+)u", text)
+        return int(m.group(1), 16) if m else None
+
+    def _func_body(text, name):
+        i = text.find(name)
+        if i < 0:
+            return ""
+        j = text.find("\nstatic ", i + 1)
+        if j < 0:
+            j = len(text)
+        return text[i:j]
+
+    def g_pins(elfc, mpu, board, mk, hello32):
+        bad = []
+        for name, val in ELF32_FIELDS:
+            if not _re.search(r"#define\s+%s\s+\(%du\)" % (name, val), elfc):
+                bad.append("G: 32 位字段表里 %s 不是 %du（偏移抄错就会跑飞）" % (name, val))
+        w_mk, w_board = _elf_win(mk), _board_win(board)
+        if w_mk is None:
+            bad.append("G: RV32 Makefile 里找不到 ELF_WIN := 0x...（链接基址）")
+        if w_board is None:
+            bad.append("G: 板级里找不到 ARKRTOS_ELF_WINDOW_BASE 的数值定义")
+        if (w_mk is not None) and (w_board is not None) and (w_mk != w_board):
+            bad.append("G: Makefile ELF_WIN=0x%08X 与板级窗口基址 0x%08X 不一致"
+                       "（装载器会报『段在窗口外』，其实只是链接基址挪了）"
+                       % (w_mk, w_board))
+        if "ARKRTOS_MPU_ELF_WINDOW_BASE" not in _func_body(mpu, "arkrtos_mpu_rom_window("):
+            bad.append("G: arkrtos_mpu_rom_window() 里没有 ELF 窗口分支"
+                       "（U 模式一取指就 fault，且没有任何报错）")
+        # 装载期竞态：注册 -> 降权 -> MPU 写回 必须在同一个临界区内
+        i_enter = elfc.find("crit = ARKRTOS_ENTER_CRITICAL();")
+        i_reg   = elfc.find("id = arkrtos_task_register(")
+        i_priv  = elfc.find(".is_priv = 0u;", i_reg if i_reg > 0 else 0)
+        i_mpu   = elfc.find("arkrtos_mpu_build_task(p_task);", i_reg if i_reg > 0 else 0)
+        # 取最后一处 EXIT：中途「注册失败」那条早退也在临界区内，
+        # 用 find 会命中它，判据就假绿了。
+        i_exit  = elfc.rfind("ARKRTOS_EXIT_CRITICAL(crit);")
+        if min(i_enter, i_reg) < 0 or not (i_enter < i_reg < i_priv < i_mpu < i_exit):
+            bad.append("G: 装载期竞态修复不成立——注册→降权→MPU 写回 没有整体落在"
+                       " ARKRTOS_ENTER/EXIT_CRITICAL 之间")
+        if not _re.search(r"#define\s+ARK_THREAD_SUB_EXIT\s+3u", hello32):
+            bad.append("G: hello32 没有 EXIT（子 3）定义")
+        if "params[0] = ARK_THREAD_SUB_EXIT;" not in hello32:
+            bad.append("G: hello32 退出路径没有发子 3 兜底"
+                       "（本档没编 EXIT_CODE 时程序会掉进死循环，shell 永不返回）")
+        # 默认档零变化：给 MPU 的窗口别名只能在开 ELF 档才定义
+        m_guard = _re.search(r"#if defined\(ARKRTOS_USE_ELF\) && \(ARKRTOS_USE_ELF == 1\)", board)
+        m_alias = board.find("ARKRTOS_MPU_ELF_WINDOW_BASE")
+        if (m_guard is None) or (m_alias < m_guard.start()):
+            bad.append("G: 板级里 ARKRTOS_MPU_ELF_WINDOW_* 没被 USE_ELF 守住"
+                       "（默认档会编进 ELF 窗口分支，体积就变了）")
+        return bad
+
+    got = g_pins(text_elfc, text_mpu, text_board, text_mk, text_hello32)
+    failures.extend(got)
+    if not got:
+        # 变异自检 1：把 EXIT 兜底拿掉，pin 必须报错
+        if not g_pins(text_elfc, text_mpu, text_board, text_mk,
+                      text_hello32.replace("params[0] = ARK_THREAD_SUB_EXIT;", "params[0] = 0u;", 1)):
+            failures.append("G 自检1：把 hello32 的退出兜底改坏后 pin 仍然通过（空转）")
+        # 变异自检 2：把临界区入口改坏，pin 必须报错
+        if not g_pins(text_elfc.replace("crit = ARKRTOS_ENTER_CRITICAL();", "crit = 0u;", 1),
+                      text_mpu, text_board, text_mk, text_hello32):
+            failures.append("G 自检2：把装载期临界区改坏后 pin 仍然通过（空转）")
+
     shutil.rmtree(tmp, ignore_errors=True)
 
     if failures:
@@ -276,8 +368,9 @@ def main():
             print("FAIL: " + f)
         return 1
 
-    print("ELF-GATE OK: 默认档=0 / LA64 打开编得过(2 TU) / RV32 64 位守卫被拒 / "
-          "缺窗口宏被拒 / 线上格式常量未漂 / U-8 退出码通道 F pin 成立且自检有效")
+    print("ELF-GATE OK: 默认档=0 / LA64 打开编得过(2 TU) / RV32 打开也编得过(U-4) / "
+          "缺窗口宏被拒 / 线上格式常量未漂 / U-8 退出码通道 F pin 成立且自检有效 / "
+          "U-4 接线 G pin 成立且两项变异自检有效")
     return 0
 
 

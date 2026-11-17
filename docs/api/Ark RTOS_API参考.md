@@ -9474,15 +9474,15 @@ void arkrtos_task_stack_fill(uint32 *stack_bottom, uint32 stack_size)
 
 ## kernelsrc/src/arkrtos_elf.c
 
-**ELF64 装载器：把 VFS 里的可执行文件搬进 App 窗口并降权起跑**
+**ELF 装载器（32/64 位）：把 VFS 里的可执行文件搬进 App 窗口并降权起跑**
 装载是**流式**的：先读 64 字节 ELF 头，再按 e_phoff 读程序头表，
 最后按每个 PT_LOAD 的 p_offset 用 arkrtos_vfs_read_at() 直接读进
 目标地址。整份镜像从不进临时缓冲——窗口本身就只有 2 MB，
 
-### `static int32 elf_check_header(const uint8 *h, unsigned long *p_entry,`
+### `static int32 elf_check_header(const uint8 *h, elf_word_t *p_entry,`
 
 ```c
-static int32 elf_check_header(const uint8 *h, unsigned long *p_entry,
+static int32 elf_check_header(const uint8 *h, elf_word_t *p_entry,
 ```
 
 **校验 ELF 头，把 entry / phoff / phnum / phentsize 取出来**

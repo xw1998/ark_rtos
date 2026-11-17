@@ -30,6 +30,17 @@
 
 #include "arkrtos_partition.h"    /* kernel only: single source of addresses */
 
+/* 可执行 RAM 窗口（ELF 装载用）的硬约束在这里先闸住：MPU/PMP 区域必须
+ * 是 2 的幂且按自身对齐，窗口几何不是"随便给个数"就能跑的。 */
+#if defined(ARKRTOS_MPU_ELF_WINDOW_SIZE) && (ARKRTOS_MPU_ELF_WINDOW_SIZE != 0)
+#if ((ARKRTOS_MPU_ELF_WINDOW_SIZE & (ARKRTOS_MPU_ELF_WINDOW_SIZE - 1)) != 0)
+#error "ARKRTOS_MPU_ELF_WINDOW_SIZE 必须是 2 的幂（MPU/PMP 区域约束）"
+#endif
+#if ((ARKRTOS_MPU_ELF_WINDOW_BASE & (ARKRTOS_MPU_ELF_WINDOW_SIZE - 1)) != 0)
+#error "ARKRTOS_MPU_ELF_WINDOW_BASE 必须按窗口大小对齐（MPU/PMP 区域约束）"
+#endif
+#endif
+
 /* ---------------------------------------------------------------- helpers */
 
 static void arkrtos_mpu_clear(arkrtos_arch_mpu_t *p_mpu)
@@ -96,8 +107,29 @@ static uint8 arkrtos_mpu_code_in_ram(const arkrtos_task_t *p_task)
 {
     uint32 start = p_task->rom_start;
 
+#if !defined(ARKRTOS_MPU_ELF_WINDOW_SIZE) || (ARKRTOS_MPU_ELF_WINDOW_SIZE == 0)
+    /* 默认档（没有 ELF 窗口）：保持改动前的原写法。改成等价的 if/return
+     * 也会掉 16 B 代码，验证「默认档零变化」时会把它当成真差异翻半天。 */
     return ((start >= ARKRTOS_MPU_SLOT_RAM_BASE) &&
             (start <  (ARKRTOS_MPU_SLOT_RAM_BASE + ARKRTOS_MPU_SLOT_RAM_TOTAL))) ? 1u : 0u;
+#else
+    if((start >= ARKRTOS_MPU_SLOT_RAM_BASE) &&
+       (start <  (ARKRTOS_MPU_SLOT_RAM_BASE + ARKRTOS_MPU_SLOT_RAM_TOTAL)))
+    {
+        return 1u;
+    }
+
+    /* ELF 装载器把程序装进板级给的那块独立可执行 RAM 窗口（见
+     * arkrtos_elf.c 的 MPU 绑定段）。代码在 RAM 里，所以属性必须是 RAMX，
+     * 不能落到"内核 Flash 可读"那条 fallback 上。 */
+    if((start >= ARKRTOS_MPU_ELF_WINDOW_BASE) &&
+       (start <  (ARKRTOS_MPU_ELF_WINDOW_BASE + ARKRTOS_MPU_ELF_WINDOW_SIZE)))
+    {
+        return 1u;
+    }
+
+    return 0u;
+#endif
 }
 
 static void arkrtos_mpu_rom_window(const arkrtos_task_t *p_task,
@@ -105,6 +137,30 @@ static void arkrtos_mpu_rom_window(const arkrtos_task_t *p_task,
 {
     uint32 start = p_task->rom_start;
     uint32 span  = p_task->rom_size;
+
+#if defined(ARKRTOS_MPU_ELF_WINDOW_SIZE) && (ARKRTOS_MPU_ELF_WINDOW_SIZE != 0)
+    /* ELF 程序：代码落在那块独立可执行 RAM 窗口里。**不能**复用下面的
+     * MiniApp 分支——那一支按槽位池（SLOT_RAM_BASE..+TOTAL）校验，ELF 窗口
+     * 在池外，校验必然失败，区域退化成 size=0，U 模式一取指就 fault。
+     * 这里按窗口几何自己校验：形状对就放行，不对就拒绝（size=0）。 */
+    if((start >= ARKRTOS_MPU_ELF_WINDOW_BASE) &&
+       (start <  (ARKRTOS_MPU_ELF_WINDOW_BASE + ARKRTOS_MPU_ELF_WINDOW_SIZE)))
+    {
+        if((span != 0u) &&
+           ((span & (span - 1u)) == 0u) &&
+           ((start & (span - 1u)) == 0u) &&
+           ((start + span) <= (ARKRTOS_MPU_ELF_WINDOW_BASE + ARKRTOS_MPU_ELF_WINDOW_SIZE)))
+        {
+            *p_base = start;
+            *p_size = span;
+            return;
+        }
+
+        *p_base = 0u;
+        *p_size = 0u;
+        return;
+    }
+#endif
 
     /* MiniApp: code lives in RAM. The block is a buddy block, so it is already
      * a power of two aligned to its own size and the window comes out exact.
@@ -182,6 +238,21 @@ static void arkrtos_mpu_ram_window(const arkrtos_task_t *p_task,
         *p_size = size;
         return;
     }
+
+#if defined(ARKRTOS_MPU_ELF_WINDOW_SIZE) && (ARKRTOS_MPU_ELF_WINDOW_SIZE != 0)
+    /* ELF 程序的数据/栈窗口就是那块可执行 RAM 窗口本身。装载器把
+     * ram_start/ram_size 写成窗口几何，这里只做形状校验后放行。 */
+    if((addr >= ARKRTOS_MPU_ELF_WINDOW_BASE) &&
+       (addr <  (ARKRTOS_MPU_ELF_WINDOW_BASE + ARKRTOS_MPU_ELF_WINDOW_SIZE)) &&
+       (size != 0u) && ((size & (size - 1u)) == 0u) &&
+       ((addr & (size - 1u)) == 0u) &&
+       ((addr + size) <= (ARKRTOS_MPU_ELF_WINDOW_BASE + ARKRTOS_MPU_ELF_WINDOW_SIZE)))
+    {
+        *p_base = addr;
+        *p_size = size;
+        return;
+    }
+#endif
 
     /* A window in the pool that does not qualify is refused (size 0 = region
      * left disabled, the task faults instead of running with a wrong window).

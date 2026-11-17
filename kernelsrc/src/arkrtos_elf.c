@@ -1,6 +1,6 @@
 /**
 * @file arkrtos_elf.c
-* @brief ELF64 装载器：把 VFS 里的可执行文件搬进 App 窗口并降权起跑
+* @brief ELF 装载器（32/64 位）：把 VFS 里的可执行文件搬进 App 窗口并降权起跑
 * @details 装载是**流式**的：先读 64 字节 ELF 头，再按 e_phoff 读程序头表，
 *          最后按每个 PT_LOAD 的 p_offset 用 arkrtos_vfs_read_at() 直接读进
 *          目标地址。整份镜像从不进临时缓冲——窗口本身就只有 2 MB，
@@ -36,7 +36,7 @@
 #if (ARKRTOS_USE_EXEC_SIGN == 1)
 #include "arkrtos_sign.h"
 #endif
-#if (ARKRTOS_USE_PAGING == 1)
+#if ((ARKRTOS_USE_PAGING == 1) || (ARKRTOS_USE_MPU == 1))
 #include "arkrtos_mpu.h"
 #endif
 
@@ -67,35 +67,78 @@
 #define ARKRTOS_ELF_MAX_ARG_LEN     (256u)
 #define ARKRTOS_ELF_MAX_PHNUM       (16u)
 
-/* ELF64 常量。只用得到的这几个，不引 <elf.h>：内核不依赖宿主头。 */
+/* ELF 常量。只用得到的这几个，不引 <elf.h>：内核不依赖宿主头。 */
+#define ELF_EI_CLASS32              (1u)
 #define ELF_EI_CLASS64              (2u)
 #define ELF_EI_DATA_LSB             (1u)
 #define ELF_TYPE_EXEC               (2u)
 #define ELF_MACHINE_LOONGARCH       (258u)
+#define ELF_MACHINE_RISCV           (243u)
 #define ELF_PT_LOAD                 (1u)
 #define ELF_PT_INTERP               (3u)
 
-#define ELF64_EHDR_SIZE             (64u)
-#define ELF64_PHDR_SIZE             (56u)
-
-/* 小端读：本文件只服务 64 位 port（见下方 #error），unsigned long 即 64 位。 */
-#if !(defined(__LP64__) || defined(_LP64) || \
-      (defined(__SIZEOF_LONG__) && (__SIZEOF_LONG__ > 4)))
-#error "arkrtos_elf.c 只支持 64 位 port：ELF64 的字段宽度无法在 32 位 long 上表达"
+/* ---- 字段宽度随 class 变，语义不变 ----
+ *
+ * ELF32 与 ELF64 的差别只在这几个数上：头 52/64 字节、程序头 32/56 字节、
+ * 地址字段 4/8 字节、argv 槽 4/8 字节。**装载流程一行都不分叉**，所以这里
+ * 用一份 sizeof 宏表把差别收进来，下面的代码全部按 elf_word_t 写。
+ *
+ * class 的判据是 port 的 long 宽度：64 位 port 装 ELF64（LA64），32 位 port
+ * 装 ELF32（RV32）。机器号另行给：32 位默认 RISC-V(243)，板级可覆盖。 */
+#if (defined(__SIZEOF_LONG__) && (__SIZEOF_LONG__ > 4))
+#define ELF_HOST_64                 (1)
+typedef unsigned long elf_word_t;
+#define ELF_EHDR_SIZE               (64u)
+#define ELF_PHDR_SIZE               (56u)
+#define ELF_WORD_SIZE               (8u)
+#define ELF_EH_ENTRY                (24u)
+#define ELF_EH_PHOFF                (32u)
+#define ELF_EH_PHENTSIZE            (54u)
+#define ELF_EH_PHNUM                (56u)
+#define ELF_PH_OFFSET               (8u)
+#define ELF_PH_VADDR                (16u)
+#define ELF_PH_FILESZ               (32u)
+#define ELF_PH_MEMSZ                (40u)
+#else
+#define ELF_HOST_64                 (0)
+typedef uint32 elf_word_t;
+#define ELF_EHDR_SIZE               (52u)
+#define ELF_PHDR_SIZE               (32u)
+#define ELF_WORD_SIZE               (4u)
+#define ELF_EH_ENTRY                (24u)
+#define ELF_EH_PHOFF                (28u)
+#define ELF_EH_PHENTSIZE            (42u)
+#define ELF_EH_PHNUM                (44u)
+#define ELF_PH_OFFSET               (4u)
+#define ELF_PH_VADDR                (8u)
+#define ELF_PH_FILESZ               (16u)
+#define ELF_PH_MEMSZ                (20u)
 #endif
 
-static unsigned long elf_rd64(const uint8 *p)
-{
-    return ((unsigned long)p[0])
-         | ((unsigned long)p[1] << 8)
-         | ((unsigned long)p[2] << 16)
-         | ((unsigned long)p[3] << 24)
-         | ((unsigned long)p[4] << 32)
-         | ((unsigned long)p[5] << 40)
-         | ((unsigned long)p[6] << 48)
-         | ((unsigned long)p[7] << 56);
-}
+/* 期望的机器号。32 位的 LoongArch（LA32）是 258 号 + 32 位 class，
+ * 板级把 ARKRTOS_ELF_MACHINE 覆盖过去即可，不改这里。 */
+#ifndef ARKRTOS_ELF_MACHINE
+#if (ELF_HOST_64 == 1)
+#define ARKRTOS_ELF_MACHINE         ELF_MACHINE_LOONGARCH
+#else
+#define ARKRTOS_ELF_MACHINE         ELF_MACHINE_RISCV
+#endif
+#endif
 
+#if (ELF_HOST_64 == 1)
+#define ELF_EI_CLASS_OK             ELF_EI_CLASS64
+#else
+#define ELF_EI_CLASS_OK             ELF_EI_CLASS32
+#endif
+
+/* 小端读。字段宽度由 class 决定（见上面的 ELF_WORD_SIZE 表）：
+ * 32 位 port 上 elf_rd64/elf_wr64 整个不参与编译 —— 那两处 `<< 32`
+ * 在 32 位 unsigned long 上是未定义行为，不能只是"不调用"。 */
+/* 16/32 位的读写**两档都要**：ELF32 的字段、SVC 参数块、程序头里的
+ * e_phentsize 全是 32 位。它们与 port 宽度无关，所以放在条件外。
+ * （曾经整段包在 ELF_HOST_64 里，32 位 port 上 elf_rd32 变成隐式声明，
+ *  编译不报错、链接期才报 undefined reference —— 症状看起来像"函数忘了
+ *  写"，实际是条件编译把定义吃掉了。） */
 static uint32 elf_rd32(const uint8 *p)
 {
     return ((uint32)p[0])
@@ -117,10 +160,48 @@ static void elf_wr32(uint8 *p, uint32 v)
     p[3] = (uint8)((v >> 24) & 0xFFu);
 }
 
-static void elf_wr64(uint8 *p, unsigned long v)
+/* 64 位读写在 32 位 port 上必须整个不参与编译：`<< 32` 在 32 位
+ * unsigned long 上是未定义行为，不能只是"不调用"。 */
+#if (ELF_HOST_64 == 1)
+
+static elf_word_t elf_rd64(const uint8 *p)
+{
+    return ((unsigned long)p[0])
+         | ((unsigned long)p[1] << 8)
+         | ((unsigned long)p[2] << 16)
+         | ((unsigned long)p[3] << 24)
+         | ((unsigned long)p[4] << 32)
+         | ((unsigned long)p[5] << 40)
+         | ((unsigned long)p[6] << 48)
+         | ((unsigned long)p[7] << 56);
+}
+
+static void elf_wr64(uint8 *p, elf_word_t v)
 {
     elf_wr32(p, (uint32)(v & 0xFFFFFFFFu));
     elf_wr32(p + 4, (uint32)((v >> 32) & 0xFFFFFFFFu));
+}
+
+#endif /* ELF_HOST_64 */
+
+/* 一个 elf_word_t 的读写：64 位 port 走上面两个，32 位 port 走 elf_rd32/
+ * elf_wr32。下面所有代码只认这两个名字。 */
+static elf_word_t elf_rdword(const uint8 *p)
+{
+#if (ELF_HOST_64 == 1)
+    return elf_rd64(p);
+#else
+    return (elf_word_t)elf_rd32(p);
+#endif
+}
+
+static void elf_wrword(uint8 *p, elf_word_t v)
+{
+#if (ELF_HOST_64 == 1)
+    elf_wr64(p, v);
+#else
+    elf_wr32(p, (uint32)v);
+#endif
 }
 
 /* 内核侧没有 libc：这三个小工具只在本文件用得到，不往外放。 */
@@ -372,19 +453,21 @@ static int32 elf_verify_signature(const char *path)
 * @note  e_machine 单独返回 ERR_ARCH，是为了让「这是 x86 的 ELF」和
 *        「这不是 ELF」在日志里能分开——两者的修法完全不同。
 */
-static int32 elf_check_header(const uint8 *h, unsigned long *p_entry,
-                              unsigned long *p_phoff, uint16 *p_phnum,
+static int32 elf_check_header(const uint8 *h, elf_word_t *p_entry,
+                              elf_word_t *p_phoff, uint16 *p_phnum,
                               uint16 *p_phentsize)
 {
     if((h[0] != 0x7Fu) || (h[1] != 'E') || (h[2] != 'L') || (h[3] != 'F'))
     {
         return ARKRTOS_ELF_ERR_FORMAT;
     }
-    if((h[4] != ELF_EI_CLASS64) || (h[5] != ELF_EI_DATA_LSB))
+    if((h[4] != ELF_EI_CLASS_OK) || (h[5] != ELF_EI_DATA_LSB))
     {
+        /* class 与本 port 的宽度不匹配：64 位 port 装 ELF32 会按 8 字节
+         * 读字段，得到的是两个字段拼起来的垃圾 —— 必须在写任何字节之前拒。 */
         return ARKRTOS_ELF_ERR_FORMAT;
     }
-    if(elf_rd16(h + 18) != (uint16)ELF_MACHINE_LOONGARCH)
+    if(elf_rd16(h + 18) != (uint16)ARKRTOS_ELF_MACHINE)
     {
         return ARKRTOS_ELF_ERR_ARCH;
     }
@@ -395,12 +478,12 @@ static int32 elf_check_header(const uint8 *h, unsigned long *p_entry,
         return ARKRTOS_ELF_ERR_FORMAT;
     }
 
-    *p_entry     = elf_rd64(h + 24);
-    *p_phoff     = elf_rd64(h + 32);
-    *p_phentsize = elf_rd16(h + 54);
-    *p_phnum     = elf_rd16(h + 56);
+    *p_entry     = elf_rdword(h + ELF_EH_ENTRY);
+    *p_phoff     = elf_rdword(h + ELF_EH_PHOFF);
+    *p_phentsize = elf_rd16(h + ELF_EH_PHENTSIZE);
+    *p_phnum     = elf_rd16(h + ELF_EH_PHNUM);
 
-    if((*p_phentsize != (uint16)ELF64_PHDR_SIZE) ||
+    if((*p_phentsize != (uint16)ELF_PHDR_SIZE) ||
        (*p_phnum == 0u) || (*p_phnum > (uint16)ARKRTOS_ELF_MAX_PHNUM))
     {
         return ARKRTOS_ELF_ERR_FORMAT;
@@ -443,21 +526,23 @@ static int32 elf_build_stack(uint32 win_top, uint32 argv_start,
         addrs[i] = str_low;
     }
 
-    /* 数组：argc + argv[argc] + envp[0] + 一个冗余槽，全部按 8 字节。 */
-    array_bytes = 8u * ((uint32)argc + 3u);
+    /* 数组：argc + argv[argc] + envp[0] + 一个冗余槽，按本 class 的字宽。 */
+    array_bytes = (uint32)ELF_WORD_SIZE * ((uint32)argc + 3u);
     if((argv_start + array_bytes) > str_low)
     {
         return ARKRTOS_ELF_ERR_LAYOUT;
     }
 
     p_array = (uint8 *)(unsigned long)argv_start;
-    elf_wr64(p_array, (unsigned long)(uint32)argc);
+    elf_wrword(p_array, (elf_word_t)(uint32)argc);
     for(i = 0u; i < (uint32)argc; i++)
     {
-        elf_wr64(p_array + 8u + (8u * i), (unsigned long)addrs[i]);
+        elf_wrword(p_array + ELF_WORD_SIZE + ((uint32)ELF_WORD_SIZE * i),
+                   (elf_word_t)addrs[i]);
     }
-    elf_wr64(p_array + 8u + (8u * (uint32)argc), 0ul);
-    elf_wr64(p_array + 8u + (8u * ((uint32)argc + 1u)), 0ul);
+    elf_wrword(p_array + ELF_WORD_SIZE + ((uint32)ELF_WORD_SIZE * (uint32)argc), 0);
+    elf_wrword(p_array + ELF_WORD_SIZE +
+               ((uint32)ELF_WORD_SIZE * ((uint32)argc + 1u)), 0);
 
     *p_sp = argv_start;
     return ARKRTOS_ELF_OK;
@@ -475,10 +560,10 @@ static int32 elf_build_stack(uint32 win_top, uint32 argv_start,
 static int32 elf_load(uint32 space, const char *path, int32 argc,
                       char *argv[], arkrtos_elf_info_t *p_info)
 {
-    uint8 hdr[ELF64_EHDR_SIZE];
-    uint8 phdr[ELF64_PHDR_SIZE];
-    unsigned long entry = 0ul;
-    unsigned long phoff = 0ul;
+    uint8 hdr[ELF_EHDR_SIZE];
+    uint8 phdr[ELF_PHDR_SIZE];
+    elf_word_t entry = 0;
+    elf_word_t phoff = 0;
     uint16 phnum = 0u;
     uint16 phentsize = 0u;
     uint32 win_base = (uint32)ARKRTOS_ELF_WINDOW_BASE;
@@ -492,6 +577,7 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
     uint32 i;
     int32 rc;
     int32 id;
+    uint32 crit;
     char *argv_auto[1];
 
     if((path == 0) || (path[0] == '\0'))
@@ -544,7 +630,7 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
         return ARKRTOS_ELF_ERR_LAYOUT;
     }
 
-    rc = elf_read_exact(path, hdr, ELF64_EHDR_SIZE, 0u);
+    rc = elf_read_exact(path, hdr, ELF_EHDR_SIZE, 0u);
     if(rc != ARKRTOS_ELF_OK)
     {
         return rc;
@@ -557,9 +643,11 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
 
 
     /* 入口必须落在窗口内且 4 字节对齐：LoongArch 的指令永远是 4 字节。 */
-    if((entry < (unsigned long)win_base) ||
-       (entry + 4ul > (unsigned long)stack_bottom) ||
-       ((entry & 3ul) != 0ul))
+/* 入口必须落在窗口内且 4 字节对齐：RV32 与 LoongArch 的指令都是 4 字节
+ * （RV32 的压缩扩展只让指令可能变短，不会让入口变半字对齐）。 */
+    if((entry < (elf_word_t)win_base) ||
+       (entry > ((elf_word_t)stack_bottom - 4u)) ||
+       ((entry & 3u) != 0u))
     {
         return ARKRTOS_ELF_ERR_LAYOUT;
     }
@@ -568,22 +656,22 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
      * 否则一个坏镜像会留下半个程序，下一次装载读到的是混合内容。 */
     for(i = 0u; i < (uint32)phnum; i++)
     {
-        unsigned long p_type;
-        unsigned long p_vaddr;
-        unsigned long p_filesz;
-        unsigned long p_memsz;
+        elf_word_t p_type;
+        elf_word_t p_vaddr;
+        elf_word_t p_filesz;
+        elf_word_t p_memsz;
 
-        rc = elf_read_exact(path, phdr, ELF64_PHDR_SIZE,
+        rc = elf_read_exact(path, phdr, ELF_PHDR_SIZE,
                             (uint32)phoff + (i * (uint32)phentsize));
         if(rc != ARKRTOS_ELF_OK)
         {
             return rc;
         }
 
-        p_type   = elf_rd32(phdr + 0);
-        p_vaddr  = elf_rd64(phdr + 16);
-        p_filesz = elf_rd64(phdr + 32);
-        p_memsz  = elf_rd64(phdr + 40);
+        p_type   = (elf_word_t)elf_rd32(phdr + 0);
+        p_vaddr  = elf_rdword(phdr + ELF_PH_VADDR);
+        p_filesz = elf_rdword(phdr + ELF_PH_FILESZ);
+        p_memsz  = elf_rdword(phdr + ELF_PH_MEMSZ);
 
         if(p_type == (unsigned long)ELF_PT_INTERP)
         {
@@ -598,9 +686,11 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
         {
             return ARKRTOS_ELF_ERR_LAYOUT;
         }
-        if((p_vaddr < (unsigned long)win_base) ||
-           ((p_vaddr + p_memsz) > (unsigned long)stack_bottom) ||
-           (p_vaddr > 0xFFFFFFFFul) || ((p_vaddr + p_memsz) > 0xFFFFFFFFul))
+        /* 用减法写这个判据，不用 p_vaddr + p_memsz：32 位 port 上那个加法
+         * 会在 0xFFFFFFxx 处回绕，一段"跨过 4 GB 边界"的坏镜像就能通过。 */
+        if((p_vaddr < (elf_word_t)win_base) ||
+           (p_vaddr > (elf_word_t)stack_bottom) ||
+           (p_memsz > ((elf_word_t)stack_bottom - p_vaddr)))
         {
             return ARKRTOS_ELF_ERR_LAYOUT;
         }
@@ -618,14 +708,14 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
     bytes = 0u;
     for(i = 0u; i < (uint32)phnum; i++)
     {
-        unsigned long p_type;
-        unsigned long p_offset;
-        unsigned long p_vaddr;
-        unsigned long p_filesz;
-        unsigned long p_memsz;
+        elf_word_t p_type;
+        elf_word_t p_offset;
+        elf_word_t p_vaddr;
+        elf_word_t p_filesz;
+        elf_word_t p_memsz;
         uint8 *dst;
 
-        rc = elf_read_exact(path, phdr, ELF64_PHDR_SIZE,
+        rc = elf_read_exact(path, phdr, ELF_PHDR_SIZE,
                             (uint32)phoff + (i * (uint32)phentsize));
         if(rc != ARKRTOS_ELF_OK)
         {
@@ -637,10 +727,10 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
         {
             continue;
         }
-        p_offset = elf_rd64(phdr + 8);
-        p_vaddr  = elf_rd64(phdr + 16);
-        p_filesz = elf_rd64(phdr + 32);
-        p_memsz  = elf_rd64(phdr + 40);
+        p_offset = elf_rdword(phdr + ELF_PH_OFFSET);
+        p_vaddr  = elf_rdword(phdr + ELF_PH_VADDR);
+        p_filesz = elf_rdword(phdr + ELF_PH_FILESZ);
+        p_memsz  = elf_rdword(phdr + ELF_PH_MEMSZ);
         dst      = (uint8 *)(unsigned long)p_vaddr;
 #if (ARKRTOS_USE_PAGING == 1)
         (void)dst;   /* 分页档不直接用窗口指针：统一走 elf_copy_to_window() */
@@ -689,17 +779,40 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
     /* 关键一步：stack_size 取到 argv 区起点，初始 sp 就会落在 argc 上。
      * 这里若改成「传栈大小 32 KB 再多给 16 KB」，sp 会指向参数数组中段，
      * 程序读到的 argc 是某个字符串的字节——一个只在运行期才暴露的错答案。 */
+    /* 装配期竞态（本轮实测根因之一）：arkrtos_task_register() 内部会把任务
+     * 直接挂进就绪集，而「降权」与「MPU 窗口写回」是它之后才发生的两步。
+     * 若在这中间被 tick 切走，任务会以半配置状态被切进：跑在 M 模式看到的是
+     * 特权，降权后窗口未写回看到的就是 mcause=1 mtval=0x02000000 的取指 fault
+     * （5 连跑 2 败的间歇签名）。因此把 注册 → 降权 → MPU 写回 整段做成原子段。 */
+    crit = ARKRTOS_ENTER_CRITICAL();
     id = arkrtos_task_register((void (*)(void))(unsigned long)entry,
                                (uint32 *)(unsigned long)stack_bottom,
                                stack_bytes,
                                (uint8)ARKRTOS_ELF_TASK_PRIORITY, 0u);
     if(id <= 0)
     {
+        ARKRTOS_EXIT_CRITICAL(crit);
         return ARKRTOS_ELF_ERR_NOMEM;
     }
 
     /* 注册出来的任务默认是特权任务；ELF 程序必须降权，否则隔离为空。 */
     arkrtos_task_table[id - 1].is_priv = 0u;
+
+#if (ARKRTOS_USE_MPU == 1)
+    /* 无分页档（RV32 的 PMP）：U 模式任务能碰的只有 TCB 记的这几个窗口。
+     * 装载器必须把「代码窗口 = 数据窗口 = 这一块可执行 RAM」写回 TCB，
+     * 再重建区域集 —— 否则任务拿着内核默认窗口起跑：轻则一取指就 fault，
+     * 重则整块内核 RAM 对它可读可写，隔离等于没开。 */
+    {
+        arkrtos_task_t *p_task = &arkrtos_task_table[id - 1];
+
+        p_task->rom_start = win_base;
+        p_task->rom_size  = (uint32)ARKRTOS_ELF_WINDOW_SIZE;
+        p_task->ram_start = win_base;
+        p_task->ram_size  = (uint32)ARKRTOS_ELF_WINDOW_SIZE;
+        arkrtos_mpu_build_task(p_task);
+    }
+#endif
 
 #if (ARKRTOS_USE_PAGING == 1)
     /* 任务必须绑到「段被写进去的那个空间」：否则写的是 frame A、跑的是
@@ -707,6 +820,10 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
      * 发生在下一次调度到它的时候。 */
     (void)arkrtos_paging_bind_task(&arkrtos_task_table[id - 1], space);
 #endif
+
+    /* 原子段落在这里收口：此后任务已降权、窗口已写回、帧已绑定，
+     * 无论调度器在下一条指令切进来，看到的都是一个完整可跑的上下文。 */
+    ARKRTOS_EXIT_CRITICAL(crit);
 
     p_info->entry      = (uint32)entry;
     p_info->bytes      = bytes;
@@ -885,7 +1002,7 @@ const char *arkrtos_elf_error_name(int32 rc)
     case ARKRTOS_ELF_OK:            return "ok";
     case ARKRTOS_ELF_ERR_PARAM:     return "bad parameter";
     case ARKRTOS_ELF_ERR_FS:        return "cannot read file";
-    case ARKRTOS_ELF_ERR_FORMAT:    return "not a static ELF64 executable";
+    case ARKRTOS_ELF_ERR_FORMAT:    return "not a static ELF executable";
     case ARKRTOS_ELF_ERR_ARCH:      return "wrong machine (need LoongArch)";
     case ARKRTOS_ELF_ERR_LAYOUT:    return "segment outside exec window";
     case ARKRTOS_ELF_ERR_NOMEM:     return "no task slot for the program";

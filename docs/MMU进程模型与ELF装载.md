@@ -1,4 +1,4 @@
-# 像 Linux 一样跑可执行文件：MMU 平台的 ELF64 装载（M1）
+# 像 Linux 一样跑可执行文件：ELF64（MMU 档，M1）与 ELF32（PMP 档，U-4）
 
 ## 0 一句话
 
@@ -23,10 +23,13 @@ M1 交付的是「**文件即程序**」+ Linux 入口约定（`sp→argc/argv`�
 
 适用范围写死：
 
-* 已验证：`qemu_loongarch64`（LA64，页表后端 + PLV3 窗口），QEMU 实跑，见 §5。
-* 同源未跑：`la32_generic`（LA32，帧 128 B、装载器算术相同，但 `arkrtos_elf.c`
-  要求 64 位 `long`，因此 LA32 只能编进空目标——见 §6 欠账 U-4）。
-* 与本机制无关：无 MMU 后端（MPU/PMP）不做 ELF，用的是 `app run` 那条固定窗口路径。
+* 已验证（64 位）：`qemu_loongarch64`（LA64，页表后端 + PLV3 窗口），QEMU 实跑，见 §5。
+* 已验证（32 位）：`qemu_riscv32`（RV32IMAC，**无 MMU**，PMP + U 模式 + 独立可执行
+  RAM 窗口），QEMU 实跑，见 §9（U-4，2026-11-17）。同一个 TU 按 port 的 `long`
+  宽度选 ELF32/ELF64 字段表，不再是「只支持 64 位」。
+* 同源未跑：`la32_generic`（LA32，帧 128 B、装载器算术与 RV32 同源，但没有执行
+  载体——判词 `carrier_unavailable_on_this_machine`）；`app run` 那条固定窗口路径
+  与 ELF 装载是两条路，不要混着说。
 
 ---
 
@@ -345,3 +348,89 @@ python tools/ci_gate.py       # 以末行为准（目前 40 项），含 paging 
 5. 程序里**不要**假设自己是 PLV0：它在 PLV3，碰窗口外的地址会立刻被 TLB 拦住。
 
 `example/qemu_loongarch64/elf/hello.c` 是一份可编译的模板（含 `elf_blob.py` 打包步骤）。
+
+---
+
+## 9 RV32（无 MMU）上的 ELF32：U-4（2026-11-17，QEMU 实跑）
+
+### 9.1 为什么无 MMU 也能跑 ELF
+
+「跑 ELF」需要的是**地址在装载期可定 + 程序拿不到内核地址**，这两条 PMP 也能给：
+板级划出一块 1 MB 的可执行 RAM 窗口（`0x80A00000`，1 MB 对齐——PMP 区域必须是
+2 的幂且按自身对齐），装载器把 `PT_LOAD` 段写进去、把任务的两个窗口都指到它，
+再把 `is_priv` 置 0。于是 U 模式任务看得见的只有这一块，其余地址一碰就是
+`mcause=5/1` 的访问异常。**它没有地址空间隔离（所有实例共用同一块窗口），
+有的是「窗口隔离」**——别把这份读数说成「RV32 也有进程模型」。
+
+### 9.2 32/64 位共用一份装载器
+
+`arkrtos_elf.c` 里所有字段读写都走 `elf_word_t`，宽度与偏移由
+`__SIZEOF_LONG__` 选出的宏表决定：
+
+| 常量 | 64 位（LA64） | 32 位（RV32） |
+|---|---|---|
+| `ELF_EHDR_SIZE` / `ELF_PHDR_SIZE` | 64 / 56 | **52 / 32** |
+| `ELF_EH_PHOFF` / `_PHENTSIZE` / `_PHNUM` | 32 / 54 / 56 | **28 / 42 / 44** |
+| `ELF_PH_OFFSET` / `_VADDR` / `_FILESZ` / `_MEMSZ` | 8 / 16 / 32 / 40 | **4 / 8 / 16 / 20** |
+| 期望 class / 机器号 | `ELFCLASS64` / 258（LOONGARCH） | **`ELFCLASS32` / 243（RISCV）** |
+
+class 与本 port 宽度不匹配时直接 `ERR_FORMAT`（64 位 port 装 ELF32 会按 8 字节
+读栈上的 `argc/argv`，那是静默错答案）。`tools/elf_gate.py` 的 G pin 把这 11 个
+偏移逐个钉住。
+
+### 9.3 三个只在 RV32 上出现的坑
+
+1. **`-Ttext` 会把第一个 LOAD 段回退一页**：以 `0x80A00000` 链接，`readelf` 里
+   LOAD 却是 `0x809FF000`，装载器随即报「段在可执行窗口外」——看起来像装载器
+   bug，实际是链接基址少了一页。改用 **`-Wl,-Ttext-segment=0x80A00000`** 后 LOAD
+   与 `.text` 同在 `0x80a00000`。Makefile 里 `ELF_WIN` 与板级
+   `ARKRTOS_ELF_WINDOW_BASE` 必须同值，G pin 对账。
+2. **示例程序的退出码子命令可能没编进去**：`ARKRTOS_THREAD_SUB_EXIT_CODE`（子 4）
+   在 `#if (ARKRTOS_USE_EXIT_CODE == 1)` 里，RV32 默认档是 0 ⇒ 子 4 走 `default`
+   返回 -1，程序掉进 `for(;;)`；**ELF 任务优先级不低于 shell ⇒ shell 永远拿不回
+   CPU**（现象：`exec` 之后一条 shell 输出都没有，连「finished」都不打，
+   `arkrtos_elf_exec_space()` 停在返回前）。修法：示例程序在子 4 之后再发一次
+   **子 3 `ARKRTOS_THREAD_SUB_EXIT`** 兜底——子 3 是 ABI 里始终存在的那条。
+3. **装配期竞态**：`arkrtos_task_register()` 内部就把任务挂进就绪集，而「降权」与
+   「MPU 窗口写回」是它之后的两步。中途被 tick 切走时，任务以半配置状态起跑：
+   还在 M 模式则照跑，已降权但窗口没写回则 `mcause=1 mtval=0x02000000 from=M`
+   ——表现为**间歇性失败**（5 连跑 2 败）。修法：把 注册 → 降权 → MPU 写回
+   整段包进 `ARKRTOS_ENTER_CRITICAL()/ARKRTOS_EXIT_CRITICAL()`。
+
+### 9.4 读数（5 连跑，全部一致）
+
+```
+mark@arkrtos:~$ exec /mnt/ram/hello32 a b c
+[hello32] entry sp=-2135965696 argc=4          # = 0x80AFC000，窗口顶
+[hello32] hello from an ELF32 program
+[hello32] argc=4
+[hello32] argv[0]=/mnt/ram/hello32   argv[1]=a   argv[2]=b   argv[3]=c
+[hello32] bye, exit code = argc
+TASK:4717 task 8 exits (self kill)
+[ELF] /mnt/ram/hello32: 1081 B, 2 segment(s), entry 0x80A00074, sp 0x80AFC000, argc 4, task 8, space 0
+[ELF] /mnt/ram/hello32: finished after 0 ms (space 0)
+```
+
+同一份日志里另有**预期**负对照：`mcause=5 mtval=0x02000000 from=U task=3`（U 模式
+读 CLINT 被 PMP 拦住）与 `mcause=2 mtval=0x30046073`（U 模式写 mstatus 被拒）——
+隔离仍在，不是"跑起来就把保护关了"。
+
+### 9.5 默认档零变化
+
+`ARKRTOS_USE_ELF=0` 时：`arkrtos_elf.c` 编成空目标；板级给 MPU 的
+`ARKRTOS_MPU_ELF_WINDOW_*` 两个别名被 `#if defined(ARKRTOS_USE_ELF) && (…==1)`
+挡住（不挡的话 `mpu.c` 的窗口分支会编进默认镜像，实测体积 +564 B）；
+`arkrtos_mpu_code_in_ram()` 在无窗口宏时保留改动前的三元表达式写法（改成等价的
+if/return 也会掉 16 B，验证时会当成真差异）；
+Makefile 的 `hello32` blob 依赖是 `$(if $(findstring ARKRTOS_USE_ELF=1,…),…)`
+的条件依赖。判据：与同一 `SOURCE_DATE_EPOCH` 下的 HEAD 构建
+`objcopy --strip-debug` 后 **sha256 逐字节相同**（本次实测
+`7cf766ae…10b92a4`，text/data/bss = 235828/128/628228）。
+
+### 9.6 已知限制
+
+* 所有 RV32 实例共用一块窗口 ⇒ 不并发、不隔离实例之间（U-4 只做「跑得起来」）。
+* PMP 区域只有 8 条左右且当场景是 2 条（RX/RW）；窗口不能给单个任务再加细分。
+* 故障诊断：ELF 任务的陷阱帧在 `0x80A…` 窗口里，`arkrtos_port_fault_detail()`
+  的 `[FRAME]` 打印范围仍是内核 RAM（`0x801…`），ELF 任务出陷阱时只打
+  `mcause/mepc/ra`，不打 GPR。为了不让默认档字节变化，这条**没有**改。

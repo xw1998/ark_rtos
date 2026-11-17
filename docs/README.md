@@ -12,7 +12,7 @@
 | 在 App 里写 Linux 风格的 socket / select 程序 | [socket与select兼容层.md](socket与select兼容层.md)（名字与边界、SVC 0x1E 契约、阻塞在 App 侧兑现、SOCKET_DEMO、限制） |
 | 想知道网络协议栈怎么接进来、现在能验证到什么 | [lwIP协议栈接入.md](lwIP协议栈接入.md)（lwIP 2.1.3 端口层、回环网卡、socket 底座、未接真实以太网的边界） |
 | 搞懂 MPU 怎么隔离 App、越权会怎样 | [内存保护与App越权验证.md](内存保护与App越权验证.md)（逐任务 region 配置 + APP_BAD 越权验证） |
-| 带 MMU 的平台上想**像 Linux 那样直接执行可执行文件**（`exec /mnt/ram/hello a b` 或直接敲路径） | [MMU进程模型与ELF装载.md](MMU进程模型与ELF装载.md)（ELF64 两遍法装载、`sp→argc` 入口约定、与 PLV3 探针抢同一页的取舍、**M1 只到「文件即程序」不是「进程」**、软定时器栈装不下陷阱帧的完整根因、M2 欠账表） |
+| 带 MMU 的平台上想**像 Linux 那样直接执行可执行文件**（`exec /mnt/ram/hello a b` 或直接敲路径） | [MMU进程模型与ELF装载.md](MMU进程模型与ELF装载.md)（ELF64/ELF32 两遍法装载、`sp→argc` 入口约定、与 PLV3 探针抢同一页的取舍、**M1 只到「文件即程序」不是「进程」**、软定时器栈装不下陷阱帧的完整根因、RV32 无 MMU 档的 PMP 窗口装载（§9）、M2 欠账表） |
 | 想**像 VxWorks 那样把可下载模块装进已跑着的系统**（`ld /mnt/ram/modhello.o a b`、`lkup`、`modules`、`unld`） | [MMU平台可下载模块-VxWorks式.md](MMU平台可下载模块-VxWorks式.md)（`ET_REL` 现场链接、内核符号导出表、支持的重定位类型、PLV0 取舍、**与 ELF 是并列的两种模型不是替代**、装载器要 4 KB 栈这个真 bug） |
 | 搞懂文件路径怎么解析、挂载点怎么设、`/dev` 与 `/mnt` 从哪来 | [VFS路径命名空间.md](VFS路径命名空间.md)（挂载点、路径解析、根目录约定、设备与持久卷的位置） |
 | 查调度策略、这一轮调度器改了什么、还剩什么 | [调度器说明.md](调度器说明.md)（位图+链的 O(1) 就绪集、三种调度触发点、实测代价账与未做项） |
@@ -75,7 +75,7 @@ docs/
 ├── 同步原语与令牌守恒.md                    # 【设计说明】为何用户态等待只登记+轮询、派发方 peek(only_kernel)、三条契约、四个失败根因
 ├── Shell与日志Linux化.md                    # 【设计说明】Shell 命令风格与日志分级/出口/dmesg 环的 Linux 化取舍
 ├── 内存保护与App越权验证.md                  # 【设计说明】逐任务 MPU region 配置 + APP_BAD 越权验证
-├── MMU进程模型与ELF装载.md                  # 【实机记录+设计说明】页表后端下的 ELF64 装载：开关/窗口/互斥、两遍法、`sp→argc`、QEMU 实跑读数、`KERNEL refill` 根因、M2 欠账 U-1..U-13
+├── MMU进程模型与ELF装载.md                  # 【实机记录+设计说明】ELF 装载：页表后端 ELF64（LA64）与无 MMU 档 ELF32（RV32/PMP）；开关/窗口/互斥、两遍法、`sp→argc`、QEMU 实跑读数、`KERNEL refill` 根因、M2 欠账 U-1..U-13
 ├── MMU平台可下载模块-VxWorks式.md          # 【实机记录+设计说明】VxWorks 式可重定位模块：ET_REL 现场链接、导出表白名单、SOP 重定位、ld/lkup/modules/unld、PLV0 取舍、与 ELF 的 2x2 并存、QEMU 实测读数、三个真 bug
 ├── VFS路径命名空间.md                       # 【设计说明】VFS 挂载点、路径解析、根目录约定、/dev 与 /mnt
 ├── lwIP协议栈接入.md                        # 【设计说明】lwIP 2.1.3 端口层、回环网卡、socket 底座、未接真实以太网的边界

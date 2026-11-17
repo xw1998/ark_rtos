@@ -38,6 +38,9 @@
 #include "arkrtos_vfs.h"
 #include "arkrtos_shell.h"     /* arkrtos_shell_init()：内核 Shell 控制台 */
 #include "arkrtos_ptable.h"
+#if (ARKRTOS_USE_ELF == 1)
+#include "hello32_blob.h"
+#endif
 #include "arkrtos_crash.h"
 #include "arkrtos_guard.h"   /* 心跳窗口守卫（ARKRTOS_USE_KERNEL_GUARD） */
 #include "drvblk.h"
@@ -503,6 +506,29 @@ static void task_fs(void)
         }
         arkrtos_board_puts("\n");
     }
+
+#if (ARKRTOS_USE_ELF == 1)
+    /* ---- 3b2) ELF32 示例程序落进 ramfs ----
+     * 数组只是把文件送到板子上的手段（QEMU 没有宿主文件注入通道）；
+     * 装载器读的是 VFS 里的这个文件。随后在 shell 里
+     *     exec /mnt/ram/hello32 a b c
+     * 走真正的装载路径。 */
+    if(ok != 0u)
+    {
+        rc = arkrtos_vfs_write_file("/mnt/ram/hello32",
+                                    (const uint8 *)ark_example_hello32,
+                                    (uint32)ARK_EXAMPLE_HELLO32_LEN);
+        arkrtos_board_puts("[ELF32] write hello32 rc=");
+        arkrtos_board_putu((uint32)rc);
+        arkrtos_board_puts(" bytes=");
+        arkrtos_board_putu((uint32)ARK_EXAMPLE_HELLO32_LEN);
+        arkrtos_board_puts("\n");
+        if(rc != 0)
+        {
+            ok = 0u;
+        }
+    }
+#endif
 
     /* ---- 3c) 列目录 + 读 procfs ---- */
     if(ok != 0u)

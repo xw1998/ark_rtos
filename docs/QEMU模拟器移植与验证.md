@@ -3052,6 +3052,76 @@ bss 628228`。
   现在挂着哪几对」的命令；
 - **App 侧自回收**：`-3` 分支就是为它留的门，但当前没有这个调用者。
 
+### 5.25 RV32 上的 ELF32 装载（U-4，2026-11-17）
+
+RV32 是没有 MMU 的那一档，所以这里不是「换一套页表」，而是**PMP 窗口 + U 模式**：
+板级划一块 1 MB 可执行 RAM 窗口（`0x80A00000`，2 的幂且按自身对齐），装载器把
+`PT_LOAD` 段写进去，把任务 TC 的 `rom_*/ram_*` 都指到它，`is_priv=0`，再
+`arkrtos_mpu_build_task()` 重建区域集。
+
+#### 5.25.1 装载器：32/64 位同一份 TU
+
+字段宽度与偏移按 `__SIZEOF_LONG__` 选表（ELF32：EHDR 52 / PHDR 32 /
+`e_phoff`@28 / `e_phentsize`@42 / `p_filesz`@16 …），机器号 32 位默认 RISC-V(243)。
+`tools/elf_gate.py` 的 **C 项判据在 U-4 翻转**：RV32 强开 `-DARKRTOS_USE_ELF=1`
+必须**编得过**（此前要求必须编不过，因为那时只支持 64 位 `long`）。G pin 把 11 个
+ELF32 偏移逐个钉住，并把 Makefile 的 `ELF_WIN` 与板级 `ARKRTOS_ELF_WINDOW_BASE`
+对账。
+
+#### 5.25.2 MPU 侧：ELF 窗口必须走独立分支
+
+`arkrtos_mpu_rom_window()` 原来只有两个分支：MiniApp（校验槽位池
+`SLOT_RAM_BASE..+TOTAL`）与内核 Flash。ELF 窗口在池外 ⇒ 走 MiniApp 分支校验必然
+失败 ⇒ 区域退化成 `size=0` ⇒ **U 模式一取指就 fault**（`mcause=1`
+`mtval=0x02000000`，而且看起来像"窗口宏给错了"）。新增分支按窗口几何自校验，
+形状不对仍失败关闭（size=0），不向上取整。
+
+#### 5.25.3 三个只在实跑里现形的缺陷
+
+1. `-Ttext` 会让第一个 LOAD 段回退一页（`0x809FF000` 而不是 `0x80A00000`），
+   装载器报「段在窗口外」。改用 `-Wl,-Ttext-segment=$(ELF_WIN)`。
+2. `hello32` 发的退出码子命令（子 4）在 RV32 默认档**没编进去**
+   （`ARKRTOS_USE_EXIT_CODE=0`）⇒ 返回 -1，程序掉进 `for(;;)`，ELF 任务优先级
+   不低于 shell ⇒ **shell 永不返回**（现象：`exec` 之后 shell 一条输出都没有）。
+   修法是示例程序退回子 3 `ARKRTOS_THREAD_SUB_EXIT` 兜底。
+3. 装配期竞态：`arkrtos_task_register()` 内部已把任务挂上就绪集，而降权与 MPU
+   写回在它之后 ⇒ 中途被切走时任务半配置起跑，表现为**间歇失败**（5 连跑 2 败，
+   签名 `mcause=1 mtval=0x02000000 from=M`，帧内 `a0..a3` 全 0）。修法是把
+   注册 → 降权 → MPU 写回 包进 `ARKRTOS_ENTER_CRITICAL()/EXIT_CRITICAL()`。
+
+#### 5.25.4 读数（5 连跑全一致）
+
+```
+exec /mnt/ram/hello32 a b c
+[hello32] entry sp=-2135965696 argc=4          # 0x80AFC000
+[hello32] hello from an ELF32 program
+[hello32] argc=4
+[hello32] argv[0]=/mnt/ram/hello32  argv[1]=a  argv[2]=b  argv[3]=c
+[hello32] bye, exit code = argc
+TASK:4717 task 8 exits (self kill)
+[ELF] /mnt/ram/hello32: 1081 B, 2 segment(s), entry 0x80A00074, sp 0x80AFC000, argc 4, task 8, space 0
+[ELF] /mnt/ram/hello32: finished after 0 ms (space 0)
+```
+
+同一日志的**预期负对照**仍在：`mcause=5 mtval=0x02000000 from=U task=3`（读
+CLINT）、`mcause=2 mtval=0x30046073`（写 mstatus）——U 模式越权照旧被拒。
+
+#### 5.25.5 默认档零变化
+
+三处会让默认档变样的地方都已挡住：板级 `ARKRTOS_MPU_ELF_WINDOW_*` 只在
+`ARKRTOS_USE_ELF==1` 时定义（否则 `mpu.c` 的窗口分支编进默认镜像，实测 +564 B）；
+`arkrtos_mpu_code_in_ram()` 在无窗口宏时保留原三元表达式写法（等价改写也掉 16 B）；
+Makefile 的 `hello32` blob 是条件依赖。判据：与同一 `SOURCE_DATE_EPOCH` 下用
+`git archive HEAD` 出的树各自构建、`--strip-debug` 后 **sha256 逐字节相同**
+（`7cf766ae…`，text/data/bss = 235828/128/628228）。
+
+#### 5.25.6 仍然没做的
+
+- 所有 RV32 实例共用同一块窗口 ⇒ **没有地址空间隔离**，不并发；这条不是 U-4 的
+  目标，但别把「跑起来了」读成「RV32 也有进程模型」；
+- ELF 任务出陷阱时 `[FRAME]` 不打（打印范围仍限内核 RAM，见 §9.6）；
+- LA32 侧仍未实跑（无执行载体）。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行
@@ -3568,7 +3638,7 @@ RV32 另有 `MPU=1 PRIV=1`（PMP + U 模式），LA64 是 `MPU=0 PRIV=1`（PLV3 
 | 安全自检 `ARKRTOS_USE_SECCHECK` | **实跑** `12 checks - pass 7, fail 0, finding 2, skip 3`、`gates.kernel bits=0xFF (need 0x3F), iso=1`（MPU）、`sign/hwsafe=0x3` | 同上但 `iso=2`（分页 + PLV） | 编译 |
 | 软总线 `ARKRTOS_USE_SOFTBUS` | **实跑** `bus selftest: ALL PASS`（9 项 / 56 断言）、`bus info` peer online | **实跑** 同上 | 编译 |
 | 网络（lwip） | 未做（无网络后端） | 未做（同左） | 未做 |
-| `exec` 原生 ELF64（`ARKRTOS_USE_ELF`，PLV3） | 未做（`arkrtos_elf.c` 只支持 64 位 `long`，见 U-4） | **实跑**：`[ELF] ... rc=0` + 程序自报 `argc/argv`，连跑 10 次（[MMU进程模型与ELF装载](MMU进程模型与ELF装载.md) §5）；2026-11-17 起装载器在 `activate` 之前回收该空间的旧窗口（`used` 512→0→512，反复 `exec` 不再吃干帧池，§5.24 有 11 条读数） | 未做（同左，编成空目标） |
+| `exec` 原生 ELF（`ARKRTOS_USE_ELF`） | **实跑 ELF32（2026-11-17，U-4）**：PMP 窗口 + U 模式，`[hello32] … bye` 8 行 + `[ELF] … finished`，5 连跑 5 成（§5.25） | **实跑**：`[ELF] ... rc=0` + 程序自报 `argc/argv`，连跑 10 次（[MMU进程模型与ELF装载](MMU进程模型与ELF装载.md) §5）；2026-11-17 起装载器在 `activate` 之前回收该空间的旧窗口（`used` 512→0→512，反复 `exec` 不再吃干帧池，§5.24 有 11 条读数） | 未做（`arkrtos_elf.c` 只支持 64 位 `long`，见 U-4） |
 | `ld` 可下载模块（`ARKRTOS_USE_MODLOAD`，PLV0） | 未做（32 位被 `#error` 挡住，负向用例在 `tools/modld_gate.py` F 段） | **实跑**：`ld rc=0 [base=... relocs=165 imports=8]`，`lkup/modules/unld` 走通（[MMU平台可下载模块-VxWorks式](MMU平台可下载模块-VxWorks式.md) §5） | 未做（同左） |
 | App 装载族（apppack / miniapp / apprun / flashapp） | 未做（缺 arkc RV32 后端） | 未做（缺 arkc loongarch 后端；板级 `APPRUN/FLASHAPP` 也置 0） | 未做 |
 | 镜像签名 `ARKRTOS_USE_IMAGE_SIGN` | **实跑** `sign_hmac_and_loader_gate`（整块/流式同口径、篡改与 `-18` 装载门） | **实跑** 同左 | 编译 |
@@ -3591,7 +3661,7 @@ RV32 另有 `MPU=1 PRIV=1`（PMP + U 模式），LA64 是 `MPU=0 PRIV=1`（PLV3 
    **我们能跑**——实测 `-smp 2` 在 RV32 上直接崩、在 LA64 上虽不崩但次核
    不参与（§9.2）。
 3. **App 整链里"arkc 产出的镜像"那一路未在两个 QEMU 目标上跑，缺口在 arkc 侧**：
-   注意这一条**不再覆盖** `exec`（原生 ELF64）与 `ld`（可下载 `.o`）：这两个
+   注意这一条**不再覆盖** `exec`（原生 ELF，64/32 位）与 `ld`（可下载 `.o`）：这两个
    已经不需要 arkc —— ELF 由 `loongarch64-newlib-elf-gcc` 直接链出，模块由同一
    工具链编出 `ET_REL`，两者都在 LA64 上实跑通过（见 §8.2 上方两行）。
    仍欠的是 `apppack` / `miniapp` / `apprun` / `flashapp` 这一族"arkc 产出的

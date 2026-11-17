@@ -63,6 +63,12 @@ $(SIGNKEY):
 	@mkdir -p $(BUILD)
 	@printf '#ifndef ARKRTOS_SIGN_KEY_LOCAL_H\n#define ARKRTOS_SIGN_KEY_LOCAL_H\n#define ARKRTOS_IMAGE_SIGN_KEY { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F }\n#endif\n' > $@ ;
 
+# 额外编译选项（缺省为空，基线不变）。与 LA64 那套 Makefile 同名同义：
+# 只在出「功能档」镜像时用，例如
+#   make -f example/qemu_riscv32/Makefile BUILD=build/rv32_elf \
+#        EXTRA_CFLAGS=-DARKRTOS_USE_ELF=1 -j8
+EXTRA_CFLAGS ?=
+
 CFLAGS := $(ARCH_FLAGS) -g -O2 -ffreestanding -fno-common -nostdlib -nostartfiles \
           -fno-builtin -ffunction-sections -fdata-sections -Wall -MMD -MP \
           -DARKRTOS_BOARD_CONFIG='"arkrtos_board_config.h"' \
@@ -70,8 +76,11 @@ CFLAGS := $(ARCH_FLAGS) -g -O2 -ffreestanding -fno-common -nostdlib -nostartfile
           -DLFS_NO_MALLOC -DLFS_NO_ASSERT -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR \
           $(ARK_BUS_FLAGS) -DARKRTOS_SIGN_KEY_LOCAL=1 \
           -DMDK_TRACE_ENABLE=1 -DMDK_TRACE_BACKEND_BUFF=1 \
-          -DMDK_TRACE_USE_RDTIME=1 -DMDK_TRACE_CPU_HZ=10000000u
-ASFLAGS := $(ARCH_FLAGS) -g
+          -DMDK_TRACE_USE_RDTIME=1 -DMDK_TRACE_CPU_HZ=10000000u \
+          $(EXTRA_CFLAGS)
+# 汇编侧同样收 EXTRA_CFLAGS：.S 里也有按开关分叉的段（SMP 档的次核停靠），
+# 只给 CFLAGS 会让"镜像编出来了但 .S 那一半没变"。
+ASFLAGS := $(ARCH_FLAGS) -g $(EXTRA_CFLAGS)
 
 # 内核源：显式清单（不用通配，避免默认编入本平台用不到的功能模块）
 # 通配全部内核源，再剔除本平台没有任何介质/驱动依赖的模块：
@@ -124,6 +133,35 @@ SRCS_C := $(KERNEL_SRCS) \
 SRCS_S := \
 	kernelsrc/port/riscv/rv32imac/arkrtos_context.S \
 	example/qemu_riscv32/start.S
+
+# ELF32 示例程序（hello32.elf）：按可执行窗口基址链接的静态 ELF32。
+# ELF_WIN 必须与 board/qemu_riscv32/arkrtos_board_config.h 里的
+# ARKRTOS_ELF_WINDOW_BASE 一致；tools/elf_gate.py 会把这两处对账 ——
+# 两边不一致时装载器报的是"段在窗口外"，看起来像镜像坏了，实际是链接基址
+# 挪了，最容易查错方向。
+ELF_WIN     := 0x80A00000
+HELLO32_SRC := example/qemu_riscv32/elf/hello32.c
+HELLO32_ELF := $(BUILD)/hello32.elf
+HELLO32_H   := $(BUILD)/hello32_blob.h
+
+# 用 -Ttext-segment 而不是 -Ttext：实测 RV32 的 ld 在处理 -Ttext 时会把
+# 第一个 LOAD 段**回退一页**（.text 在 0x80a00000，LOAD 却是 0x809ff000），
+# 装载器的窗口判据随即报 "segment outside exec window"——看起来像装载器
+# 的 bug，实际是链接基址少了一个页。
+$(HELLO32_ELF): $(HELLO32_SRC)
+	@mkdir -p $(BUILD)
+	$(CC) $(ARCH_FLAGS) -O2 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
+	      -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	      -Wl,-Ttext-segment=$(ELF_WIN) -Wl,-e,_start -Wl,--strip-all -o $@ $< ;
+
+$(HELLO32_H): $(HELLO32_ELF) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(HELLO32_ELF) \
+	       --output $@ --name ark_example_hello32 ;
+
+# 只有在开 ELF 的功能档里才需要这个 blob：默认档 main.c 里那段被
+# ARKRTOS_USE_ELF 包着，不引用它。写成条件依赖，默认档的构建步骤与产物
+# 与改动前完全一致（零变化）。
+$(BUILD)/example/qemu_riscv32/main.o: $(if $(findstring ARKRTOS_USE_ELF=1,$(EXTRA_CFLAGS)),$(HELLO32_H),)
 
 OBJS := $(addprefix $(BUILD)/,$(addsuffix .o,$(basename $(SRCS_C) $(SRCS_S))))
 
