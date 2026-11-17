@@ -41,6 +41,14 @@
  *                                                      的镜像有）：当前 CSR.ASID、
  *                                                      每个空间的 asid/way/帧，以及
  *                                                      16 次切换的实测耗时
+ *            pmap asidinval                            自测：invtlb op=3 是按
+ *                                                      (当前 ASID, VA) 失效还是
+ *                                                      不看 ASID（U-7b）。两轮
+ *                                                      对称读数定形态
+ *            pmap invop <0..7> [asid]                 逐 op 取证用的裸 invtlb：
+ *                                                      一次调用后立刻报活/死。
+ *                                                      0/1/2/6 会把整表打掉、
+ *                                                      7 是非法指令 —— 会停机
  *            pmap swap                                 页替换读数（U-16）：换出/
  *                                                      换回/失败/槽位/驻留对
  *            pmap swaptest                             自测：先吃掉空闲帧，再摸
@@ -135,6 +143,23 @@ static int pmap_cu_rc(const char *label, int32 got, int32 want, int *p_fails)
                      label, (int)got, (int)want);
     return 1;
 }
+
+#if (ARKRTOS_USE_PAGING_ASID == 1)
+/* U-7b 探针：在某个空间的 ASID 下查一个 VA 的条目，查完换回来。
+ * 这里刻意用 asid_raw_swap 而不是 activate —— activate 会把缺的条目当场
+ * 补上，那样「被清掉了」永远读成「还在」。 */
+static uint32 pmap_asid_hit(uint32 space, uint32 va)
+{
+    unsigned long prev;
+    uint32 hit;
+
+    prev = arkrtos_port_paging_asid_raw_swap(
+               (unsigned long)arkrtos_port_paging_asid_of(space));
+    hit  = arkrtos_port_paging_lookup(va, 0, 0, 0);
+    (void)arkrtos_port_paging_asid_raw_swap(prev);
+    return hit;
+}
+#endif
 
 int cmd_pmap(int argc, char *argv[])
 {
@@ -743,6 +768,155 @@ int cmd_pmap(int argc, char *argv[])
             }
         }
         return 0;
+    }
+
+    if((argc >= 2) && (strcmp(argv[1], "invop") == 0))
+    {
+        uint32 op = 0u;
+        uint32 asid;
+        uint32 va = arkrtos_port_paging_window_va();
+        unsigned long lo = 0UL;
+        unsigned long hi = 0UL;
+
+        if((argc < 3) || (parse_u32(argv[2], &op) != 0) || (op > 7u))
+        {
+            sh_out("usage: pmap invop <0..7>   (one raw invtlb, then report)\r\n");
+            return 1;
+        }
+
+        asid = (uint32)arkrtos_port_paging_asid_current();
+        if((argc >= 4) && (parse_u32(argv[3], &asid) != 0))
+        {
+            sh_out("usage: pmap invop <0..7> [asid]\r\n");
+            return 1;
+        }
+
+        /* 先打一行再动 TLB：这个命令可能把机器当场打死（实测 op=6 就是），
+         * 死之前至少留下「用的是哪个 op / 哪个 asid」这条线索 —— 没有它，
+         * 后面只能看着 fatal 猜。 */
+        ark_shell_printf("pmap invop: op=%u va=0x%08X asid=%u running...\r\n",
+                         (unsigned)op, (unsigned)va, (unsigned)asid);
+
+        lo = (unsigned long)va;
+        hi = (unsigned long)asid;
+        switch(op)
+        {
+        case 0u: __asm__ volatile("invtlb 0, %0, %1" :: "r"(lo), "r"(hi) : "memory"); break;
+        case 1u: __asm__ volatile("invtlb 1, %0, %1" :: "r"(lo), "r"(hi) : "memory"); break;
+        case 2u: __asm__ volatile("invtlb 2, %0, %1" :: "r"(lo), "r"(hi) : "memory"); break;
+        case 3u: __asm__ volatile("invtlb 3, %0, %1" :: "r"(lo), "r"(hi) : "memory"); break;
+        case 4u: __asm__ volatile("invtlb 4, %0, %1" :: "r"(lo), "r"(hi) : "memory"); break;
+        case 5u: __asm__ volatile("invtlb 5, %0, %1" :: "r"(lo), "r"(hi) : "memory"); break;
+        case 6u: __asm__ volatile("invtlb 6, %0, %1" :: "r"(lo), "r"(hi) : "memory"); break;
+        default: __asm__ volatile("invtlb 7, %0, %1" :: "r"(lo), "r"(hi) : "memory"); break;
+        }
+
+        ark_shell_printf("pmap invop: survived op=%u window=%u asid_now=%u\r\n",
+                         (unsigned)op,
+                         (unsigned)pmap_asid_hit(0u, va),
+                         (unsigned)arkrtos_port_paging_asid_current());
+        return 0;
+    }
+
+    if((argc >= 2) && (strcmp(argv[1], "asidinval") == 0))
+    {
+        uint32 count = arkrtos_paging_space_count();
+        uint32 va    = arkrtos_port_paging_window_va();
+        uint32 orig  = arkrtos_port_paging_space();
+        uint32 a0;
+        uint32 a1;
+        uint32 b0;
+        uint32 b1;
+        uint32 c0;
+        uint32 c1;
+        uint32 d0;
+        uint32 d1;
+        uint32 form;
+
+        #if (ARKRTOS_USE_ELF == 1)
+        if(arkrtos_elf_running() != 0)
+        {
+            sh_out("pmap asidinval: refused - an ELF program is using the window\r\n");
+            return 0;
+        }
+        #endif
+
+        if((count < 2u) || (va == 0u))
+        {
+            sh_out("pmap asidinval: skipped - needs two spaces and a window\r\n");
+            return 0;
+        }
+
+        /* 问题只有一个：op=3 是按「(当前 ASID, VA)」失效，还是不看 ASID、
+         * 把每个空间同 VA 的条目一起打掉？U-7 的 space_release 与 activate
+         * 的补铺逻辑都建立在这个答案上，而它此前只是从行为反推的。
+         * 判据只用 tlbsrch 读条目在不在：raw_swap 换 ASID 时不补铺。 */
+        (void)arkrtos_paging_space_activate(0u);
+        (void)arkrtos_paging_space_activate(1u);   /* 当前 = space 1 */
+        a0 = pmap_asid_hit(0u, va);
+        a1 = pmap_asid_hit(1u, va);
+        ark_shell_printf("pmap asidinval: A baseline space0=%u space1=%u\r\n",
+                         (unsigned)a0, (unsigned)a1);
+
+        /* 当前 ASID 是 space 1 的，按 VA 撤一次，然后看两个空间的条目。 */
+        arkrtos_port_paging_inval_va(va);
+        b1 = pmap_asid_hit(1u, va);
+        b0 = pmap_asid_hit(0u, va);
+        ark_shell_printf("pmap asidinval: B op3(va) space0=%u space1=%u\r\n",
+                         (unsigned)b0, (unsigned)b1);
+
+        /* 换到 space 0 的 ASID 再按 VA 撤一次：对称的第二次读数，
+         * 用来排除「刚好只清了一个」的一次性巧合。 */
+        (void)arkrtos_paging_space_activate(0u);
+        (void)arkrtos_paging_space_activate(1u);
+        c0 = pmap_asid_hit(0u, va);
+        c1 = pmap_asid_hit(1u, va);
+        {
+            unsigned long prev = arkrtos_port_paging_asid_raw_swap(
+                (unsigned long)arkrtos_port_paging_asid_of(0u));
+            arkrtos_port_paging_inval_va(va);
+            (void)arkrtos_port_paging_asid_raw_swap(prev);
+        }
+        d0 = pmap_asid_hit(0u, va);
+        d1 = pmap_asid_hit(1u, va);
+        ark_shell_printf("pmap asidinval: C reinstall space0=%u space1=%u, "
+                         "D op3 under space0 space0=%u space1=%u\r\n",
+                         (unsigned)c0, (unsigned)c1, (unsigned)d0, (unsigned)d1);
+
+        (void)arkrtos_paging_space_activate(0u);
+        (void)arkrtos_paging_space_activate(1u);
+        (void)arkrtos_paging_space_activate(orig);
+
+        /* 形态判定：两轮都必须清掉「当前 ASID」的那条，且两轮结论一致。 */
+        if((b1 == 0u) && (b0 == 0u) && (d0 == 0u) && (d1 == 0u))
+        {
+            form = 2u;      /* 不看 ASID：连带清掉另一个空间 */
+        }
+        else if((b1 == 0u) && (b0 == 1u) && (d0 == 0u) && (d1 == 1u))
+        {
+            form = 3u;      /* 按 (当前 ASID, VA)：别的空间那条留着 */
+        }
+        else
+        {
+            form = 1u;      /* 混合/不一致：如实报，不让它凑成一个形态 */
+        }
+
+        if(form == 2u)
+        {
+            sh_out("pmap asidinval: OP3 IGNORES ASID - clearing one space also "
+                   "drops every space entry of that VA\r\n");
+        }
+        else if(form == 3u)
+        {
+            sh_out("pmap asidinval: OP3 SCOPED TO CURRENT ASID - the other "
+                   "space keeps its entry\r\n");
+        }
+        else
+        {
+            sh_out("pmap asidinval: MIXED - readings do not fit either shape "
+                   "(see A..D above)\r\n");
+        }
+        return (form == 1u) ? 1 : 0;
     }
 #endif
 

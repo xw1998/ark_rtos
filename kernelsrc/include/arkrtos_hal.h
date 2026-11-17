@@ -541,6 +541,21 @@ uint32 arkrtos_port_paging_window_va(void);
 unsigned long arkrtos_port_paging_asid_current(void);
 uint32 arkrtos_port_paging_asid_of(uint32 space);
 uint32 arkrtos_port_paging_window_way(uint32 space);
+
+/** @brief 只写一次 CSR.ASID 并返回换之前的值（诊断用，U-7b）
+ *  @param asid 目标 ASID（只取低 10 位）
+ *  @return 换之前的 CSR.ASID
+ *  @details 与 arkrtos_port_paging_activate() 的差别只有一条但很要紧：
+ *           activate 会读回校验、缺什么补什么，所以拿它测「条目还在不在」
+ *           测不出来。本函数只做一次 csrwr，不记账不补铺，调用方负责换回
+ *           去。生产路径不该用它。 */
+unsigned long arkrtos_port_paging_asid_raw_swap(unsigned long asid);
+
+/** @brief 按 VA 让翻译失效（invtlb op=3：不看 ASID，global 条目不动）
+ *  @param va 要失效的虚拟地址
+ *  @details 留着它是为了做对照：op=6 的「定向」只有跟 op=3 的连带行为摆
+ *           在一起才算证据。生产路径没有调用方。 */
+void arkrtos_port_paging_inval_va(uint32 va);
 #else
 /* 关档不出符号：一个「永远返回 0 的函数」会被读成「ASID 就是 0」，
  * 而真相是本 port 压根没有 ASID 概念（切换靠重写整组条目）。宏回 0

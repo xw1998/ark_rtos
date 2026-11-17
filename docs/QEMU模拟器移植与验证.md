@@ -3590,11 +3590,89 @@ shell 的 `pmap asid` 分支与 `ns/switch` 读数。另加一条**真负向**�
   仍要按 VA 失效，且多核下要让别的核也失效 —— 那要 IPI，SMP 侧还没到那一步；
 - **没有真实硬件读数**：本机只有 QEMU。`tlbwr` 抄 `CSR.ASID`、`tlbsrch` 按当前
   ASID 匹配这两条**是 QEMU 的行为**（LA64 手册语义一致，但本机没有第二块板可对拍）；
-- **`invtlb` 的 ASID 语义没有单独取证**：正因为不确定，`activate` 用读回校验兜住，
+- **`invtlb` 的 ASID 语义**（U-7b 已取证，见 §5.29）：当时正因为不确定，`activate` 用读回校验兜住，
   `space_release` 先切到目标 ASID 再撤 —— 两种语义下都正确，但「QEMU 到底是哪一种」
   本轮没有测出来；
 - **ASID 只有 10 位**：`APPS_MAX <= 8` 的限制来自 way 数（8 条 STLB way），不是 ASID 位宽；
 - **窗口仍固定 2 MB / 512 帧**：这一节只换切换机制，不改变窗口大小与帧账本。
+
+### 5.29 U-7b：按 ASID 定向失效在本载体上不可用（逐 op 取证）
+
+U-7 的 `space_release` 与 `activate` 都把「`invtlb` 到底按 VA 还是按
+(ASID, VA) 失效」当成一个没测过的前提，用读回校验兜着。这一节把它测掉：
+结论是**本载体的 `invtlb` 没有可用的「只清某一个 ASID」的形态**，所以
+U-7b 不引入定向失效，只把取证口留在 shell 里。
+
+#### 5.29.1 逐 op 实测（QEMU 9.2.3，`pmap invop <op> [asid]`）
+
+| op | 结果 | 现场 |
+|----|------|------|
+| 0 / 1 / 2 / 6 | 一次调用把**整张表**打掉（含内核恒等映射） | 下一条取指即 `[LA64U] KERNEL refill (plv0) badv=0x0023da58 era=0x0023da58 -> fatal`，`estat=0x00000800` |
+| 4 / 5 | 活下来，窗口条目一个没掉 | 本载体上等价空操作 |
+| 7 | 非法指令 | `estat ecode=0xd`，`badi=0x0649b587` |
+| 3 | 按 VA 失效，只清这个 VA | 内核不受影响；**不看 ASID**（见 5.29.2） |
+
+要害是 op=6：它在手册叙事里最像「按 (ASID, VA) 清一条」，实测是把整表
+清空 —— 谁把它写进 `space_release`，谁就在第一次回收空间时打死机器
+（本轮第一版 `pmap asidinval` 就是这么死的）。`pmap invop` 就是为这一条
+留的取证口：它**先打印 op / asid 再动 TLB**，死了至少留下线索。
+
+#### 5.29.2 对称两轮：op=3 不看 ASID
+
+`pmap asidinval` 用 `asid_raw_swap`（只 `csrwr`、不补铺）逐个读条目，
+A..D 四步、两轮对称：
+
+```
+pmap asidinval: A baseline space0=1 space1=1
+pmap asidinval: B op3(va) space0=0 space1=0
+pmap asidinval: C reinstall space0=1 space1=1, D op3 under space0 space0=0 space1=0
+pmap asidinval: OP3 IGNORES ASID - clearing one space also drops every space entry of that VA
+```
+
+当前 ASID 是 space 1 时按 VA 撤一次，space 0 的那条也掉了；换到 space 0
+的 ASID 再撤一次，两条又都掉了。判词三态（`OP3 IGNORES ASID` /
+`OP3 SCOPED TO CURRENT ASID` / `MIXED`），本轮落在第一态；`MIXED` 存在就是
+为了不让「两轮读数不吻合」被凑成某个形态。
+
+#### 5.29.3 于是代码只多了两个诊断口
+
+- `arkrtos_port_paging_asid_raw_swap(asid)`：只写一次 `CSR.ASID` 并返回
+  旧值，不记账、不补铺。`activate` 会补铺，所以拿它测「条目还在不在」
+  永远测不出来；
+- `arkrtos_port_paging_inval_va(va)`：`invtlb 3`。单独看它没有意义，必须和
+  op=6 的「整表清空」摆在一起才是证据。
+
+两条都只在 `ARKRTOS_USE_PAGING_ASID == 1` 下存在，默认档连声明都没有。
+曾经写过 `arkrtos_port_paging_inval_va_asid()`（`invtlb 6`）并已**整块删除**：
+它一调用就停机，留在源码里就是一个等着被调用的坑。
+
+#### 5.29.4 默认档仍然逐字节不变（这次是同参对拍）
+
+同 `SOURCE_DATE_EPOCH=1600000000`、同 `-B`、同 `--strip-debug`，三棵树各
+自全新编一遍：
+
+```
+3a6c4ba7d84d1b0be333e3e2dd54e0f228a5f00e5ea544bc31af535c4da1c3a0  git archive 1c14a36（U-7 之前的树）
+3a6c4ba7d84d1b0be333e3e2dd54e0f228a5f00e5ea544bc31af535c4da1c3a0  git archive d5ff09f（U-7 提交）
+3a6c4ba7d84d1b0be333e3e2dd54e0f228a5f00e5ea544bc31af535c4da1c3a0  本轮工作区（含 U-7b）
+```
+
+`size`：默认档 `text 367264 / data 440 / bss 767508`；ASID 档 `text 369848`
+（U-7b 的两条诊断口与 `pmap invop` / `pmap asidinval` 都在这 +2584 字节里）。
+
+**一条必须写下来的口径问题**：§5.28.5 记的 `6859ec53…` 今天复现不出来 ——
+上面三棵树同参编出来都是 `3a6c4ba7…`。三棵树给同一个数，说明这个差异不是
+源码带来的（只可能来自那次构建的现场，例如复用了没清理的对象文件）。那次
+读数**作废**，以本节这组同参对拍为准；结论不变：默认档里没有 U-7 / U-7b
+一个字节的新代码。
+
+#### 5.29.5 边界
+
+- **不得读成「Ark RTOS 不支持 shootdown」**：这里判的是本机 QEMU 9.2.3 的
+  `invtlb` 没有可用的「按 ASID 定向失效」，真机（ISA 层面）未验；
+- 多核 shootdown 还要 IPI，SMP 侧没到那一步；
+- `space_release` 的「切 ASID → 按 VA 撤 → 切回 → 补铺」不能省：op=3 连带
+  清掉别的空间同 VA 条目已由 5.29.2 实测确认。
 
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 

@@ -932,6 +932,46 @@ def main():
         wf = _body(sh, "int cmd_pmap(")
         if (not wf) or ('strcmp(argv[1], "asid")' not in wf):
             bad.append("W: pmap asid 不在 cmd_pmap 里")
+        # --- U-7b：定向失效取证（本载体做不到，只留诊断口） ---
+        if "unsigned long arkrtos_port_paging_asid_raw_swap(unsigned long asid)" not in port:
+            bad.append("W: port 里没有 asid_raw_swap（诊断要能只换 ASID 而不补铺）")
+        if "void arkrtos_port_paging_inval_va(uint32 va)" not in port:
+            bad.append("W: port 里没有 inval_va（op=3 的对照口）")
+        if "inval_va_asid" in port:
+            bad.append("W: port 里又出现了 inval_va_asid（U-7b 实测 op=6 清整表并打死机器）")
+        if "invtlb 6" in port:
+            bad.append("W: port 里出现 invtlb 6（U-7b 实测会清整表，生产路径不许有）")
+        if "U-7b 实测（QEMU 9.2.3" not in port:
+            bad.append("W: port 里没有 U-7b 的逐 op 实测表（不写下来后人会再试一遍 op=6）")
+        if "unsigned long arkrtos_port_paging_asid_raw_swap(unsigned long asid);" not in hal:
+            bad.append("W: hal 里没有 asid_raw_swap 的声明")
+        if "void arkrtos_port_paging_inval_va(uint32 va);" not in hal:
+            bad.append("W: hal 里没有 inval_va 的声明")
+        if "define arkrtos_port_paging_asid_raw_swap" in hal:
+            bad.append("W: hal 关档给 asid_raw_swap 配了宏（诊断口关档应当不存在）")
+        if "inval_va_asid" in hal:
+            bad.append("W: hal 里还留着 inval_va_asid 的声明")
+        for one in ('strcmp(argv[1], "invop")', 'strcmp(argv[1], "asidinval")'):
+            if one not in sh:
+                bad.append("W: shell 里没有 %s 分支" % one)
+        # 两个命令必须落在 ASID 块内：块起点之后、下一个 #endif 之前
+        last_asid = sh.rfind("#if (ARKRTOS_USE_PAGING_ASID == 1)")
+        if last_asid < 0:
+            bad.append("W: shell 里找不到 ASID 的条件块")
+        else:
+            for one in ('strcmp(argv[1], "invop")', 'strcmp(argv[1], "asidinval")'):
+                pos = sh.find(one)
+                if (pos > last_asid) and ("#endif" in sh[last_asid:pos]):
+                    bad.append("W: %s 掉到 ASID 块外面了（默认档会编不过或蹦出符号）" % one)
+        if 'pmap invop: op=%u va=0x%08X asid=%u running' not in sh:
+            bad.append("W: pmap invop 不在动 TLB 之前先打印 op/asid（死了就没线索）")
+        for one in ("OP3 IGNORES ASID", "OP3 SCOPED TO CURRENT ASID",
+                    "MIXED - readings do not fit either shape"):
+            if one not in sh:
+                bad.append("W: pmap asidinval 缺形态判词 %s（三态缺一就会被读成单态）" % one)
+        hit = _body(sh, "static uint32 pmap_asid_hit(")
+        if (not hit) or ("arkrtos_port_paging_asid_raw_swap(" not in hit):
+            bad.append("W: pmap_asid_hit 没走 raw_swap（走 activate 会当场把缺的补上）")
         return bad
 
     def pin_v(port, pg, sh, hal, mpu, feats, kconf, drv):
@@ -1163,6 +1203,17 @@ def main():
                           src_kconf.replace("config ARKRTOS_USE_PAGING_ASID",
                                             "config ARKRTOS_USE_PAGING_ASID_X", 1),
                           src_board, src_sh, src_pg)),
+            ("W---", pin_w(src_port.replace(
+                '__asm__ volatile("invtlb 3, $zero, %0"',
+                '__asm__ volatile("invtlb 6, $zero, %0"', 1),
+                src_hal, src_feats, src_kconf, src_board, src_sh, src_pg)),
+            ("W----", pin_w(src_port,
+                           src_hal.replace("void arkrtos_port_paging_inval_va(uint32 va);",
+                                           "void arkrtos_port_paging_inval_vaX(uint32 va);", 1),
+                           src_feats, src_kconf, src_board, src_sh, src_pg)),
+            ("W-----", pin_w(src_port, src_hal, src_feats, src_kconf, src_board,
+                            src_sh.replace('"OP3 IGNORES ASID',
+                                           '"OP3 IGNORES ASIDX', 1), src_pg)),
             ("T-", pin_t(src_port,
                          src_asm.replace("la.abs  $r21, la_refill_stack_top",
                                           "la.abs  $t0, la_refill_stack_top", 1),
@@ -1190,7 +1241,8 @@ def main():
           "U-3 第三阶按需缺页 T pin 成立且自检有效（C 侧真编、.S 侧真汇编） / "
           "U-3 空间回收 U pin 成立且自检有效 / "
           "U-16 页替换 V pin 成立且自检有效（真编 SWAP 档） / "
-          "U-7 每空间 ASID W pin 成立且自检有效（真编 ASID 档 + PAGES=0 被拒）")
+          "U-7 每空间 ASID W pin 成立且自检有效（真编 ASID 档 + PAGES=0 被拒） / "
+          "U-7b 定向失效取证 pin 成立且自检有效（op=6 不许进生产路径、三态判词齐全）")
     return 0
 
 

@@ -967,14 +967,27 @@ static uint32 la_pg_app_frame(uint32 space)
 
 /**
 * @brief 让某个 VA 的翻译失效（含 QEMU 的地址翻译缓存）
-* @details `invtlb` op=3（PAGEASID）：按 (ASID, VA) 清掉命中的 TLB 条目，
-*          并整表 flush 掉 QEMU 的 softmmu 缓存。
+* @details `invtlb` op=3：按 VA 清掉命中的 TLB 条目，并整表 flush 掉 QEMU
+*          的 softmmu 缓存。（旧注释写「按 (ASID, VA)」是错的：pmap
+*          asidinval 在 QEMU 上量出来的是「不看 ASID」，详见下面的 op 表。）
 *          为什么必须显式做：QEMU 的 tlbwr 只清它覆盖到的地址范围，而它算
 *          **奇页**地址的那句写错成 `addr & pagesize`（应为 `| pagesize`），
 *          于是 PS=20 条目的上半 1 MB 永远留在 softmmu 缓存里 —— 重写条目
 *          后经那半页读写仍是旧物理帧，症状正是「切换静默失效」。
 *          顺序要紧：先 invtlb 再写新条目（invtlb 会按旧条目的 PS 匹配）。
-*/
+*
+*          U-7b 实测（QEMU 9.2.3，pmap invop 逐 op 取证，别再试一遍）：
+ *   op 0 / 1 / 2 / 6 ：一次调用把**整张表**打掉（含内核恒等映射），
+ *                      紧接着取指就 KERNEL refill fatal。op 6 不是
+ *                      「按 (ASID, VA) 清一条」，别指望它。
+ *   op 4 / 5          ：活下来，窗口条目一个都没掉 —— 在本载体上
+ *                      等价于空操作。
+ *   op 7              ：非法指令（estat ecode=0xd）。
+ *   op 3              ：按 VA 失效，只清这个 VA，内核不受影响 ——
+ *                      这条是本 port 唯一敢用的失效手段。
+ * 于是「只清某个 ASID 的条目」在本载体上**做不到**：想只撤一个空间的
+ * 窗口，只能先切到它的 ASID 再按 VA 撤（撤完把当前空间补铺回来），
+ * 这就是 activate / space_release 现在走的那条路。 */
 static void la_tlb_inval_page(uint32 va)
 {
     __asm__ volatile("invtlb 3, $zero, %0"
@@ -2022,6 +2035,33 @@ uint32 arkrtos_port_paging_window_way(uint32 space)
 
     return LA_PG_WIN_WAY_OF(space);
 }
+
+/**
+* @brief 只写一次 CSR.ASID 并返回换之前的值（诊断用，U-7b）
+* @param asid 目标 ASID（只取低 10 位）
+* @return 换之前的 CSR.ASID
+* @details 与 activate() 的差别只有一条但很要紧：activate 会读回校验、缺
+*          什么补什么，所以拿它测「条目还在不在」测不出来 —— 它会当场把
+*          缺的补上。这个函数只做一次 csrwr：不记账、不补铺、不改
+*          s_pg_app_space，调用方负责换回去。生产路径不该用它。
+*/
+unsigned long arkrtos_port_paging_asid_raw_swap(unsigned long asid)
+{
+    return la_asid_swap(asid);
+}
+
+/**
+* @brief 按 VA 让翻译失效：`invtlb` op=3，不看 ASID、global 条目不动
+* @param va 要失效的虚拟地址
+* @details 这就是 U-7 里那个「会连带打掉别的空间同 VA 条目」的操作。留着
+*          它不是给生产路径用的，而是给 pmap asidinval 做对照 —— 「op=6 是
+*          定向的」这句话只有跟 op=3 的连带行为摆在一起才算证据。
+*/
+void arkrtos_port_paging_inval_va(uint32 va)
+{
+    la_tlb_inval_page(va);
+}
+
 #endif
 
 /**
