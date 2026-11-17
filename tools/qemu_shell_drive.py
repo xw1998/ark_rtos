@@ -22,6 +22,8 @@ unld`（见 docs/MMU平台可下载模块-VxWorks式.md §4.1）。
 
 `--modld-check` 是本次模块功能的验收序列（每条都带期望子串，缺一条就 FAIL）；
 `--cmd` 只发不判，用来手工看；`--script` 一行一条，`#` 开头跳过。
+脚本行可以用竖线带期望子串：`wait 8 | exit code 3` —— 竖线后的每一段都必须
+出现在这条命令的输出里，缺一段就退出码 1；不写竖线只是把命令发进去，没有判据。
 
 退出码 0 = 全部期望都出现过；1 = 有缺失 / 连不上串口 / QEMU 起不来。
 """
@@ -197,8 +199,13 @@ def main():
             with open(a.script, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
-                    if line and not line.startswith("#"):
-                        seq.append((line, []))
+                    if not line or line.startswith("#"):
+                        continue
+                    # 一行一条命令；竖线后面是「必须在这条命令的输出里出现」的
+                    # 子串，可以有多条：exec /mnt/ram/hello | exit code 3 | argc 4。
+                    # 不写竖线就等于只发不判（与 --cmd 相同）。
+                    parts = [x.strip() for x in line.split("|")]
+                    seq.append((parts[0], [x for x in parts[1:] if x]))
         for c in a.cmd:
             seq.append((c, []))
 

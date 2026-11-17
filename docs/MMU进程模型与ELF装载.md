@@ -17,8 +17,9 @@ M1 交付的是「**文件即程序**」+ Linux 入口约定（`sp→argc/argv`�
 （空间号即帧号，VA 恒 `0x02000000`），U-2 让同一个 VA 上能**并发**跑两个实例
 （装载器按空间记台账、延迟换窗口，均 QEMU LA64 实跑）。U-3 三阶（页帧池 →
 页级窗口 → 按需缺页）、空间回收（`arkrtos_paging_space_release`，先撤窗口条目
-再还帧）、`copy_from_user`、退出码通道、页替换（U-16）也都补上了；仍缺 ASID、`wait()`，
-见 §6 欠账表。
+再还帧）、`copy_from_user`、退出码通道、页替换（U-16）也都补上了；`wait <task id>` 与 `main` 返回值转码也于
+2026-11-17 补上（shell 侧 20 ms 轮询 + `app_sdk` 的 `arkrtos_app_exit`，**不是** POSIX
+`wait()`：无父子、无僵尸队列）。仍缺 ASID，见 §6 欠账表。
 **不得把「能并发跑两个实例」说成「Ark 有完整进程模型了」。**
 
 适用范围写死：
@@ -285,7 +286,7 @@ QEMU LA64 实测（2026-11-17，同一次开机）：
 | U-5 | 缺页处理（按需换入） | **已做（2026-11-17，QEMU LA64 实跑）**：`ARKRTOS_USE_PAGING_DEMAND=1` 时窗口在 `activate` 后为空，缺页经 `TLBRENTRY` 装一对 8 KB（两帧 + 一条 PS=12）后 `ertn` 回原指令重试；refill 入口改用 `$r21` 当帧基址保存全部 GPR（按需档专用分支，关档逐字节不变）。**不区分 PLV**、**不还帧**、**页替换**只在开 `ARKRTOS_USE_PAGING_SWAP` 时接管池空（缺省仍落回原致命路径，见 §5.26） | 镜像仍必须整块装得下才跑得动（只是不再整块驻留）；与 U-3 第三阶同一条 | 已收（见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.23） |
 | U-6 | `copy_from_user` 式的受控内核访问 | **已做完并验证（2026-11-17，QEMU LA64 实跑）**：`arkrtos_copy_from_user` / `arkrtos_copy_to_user`（+ `*_task` 变体 + 纯本体 `arkrtos_paging_user_copy`）按四条拒绝码返回 **-1 参数/回绕、-2 无用户窗口、-3 整段不在窗口内（写方向只认 RAM 窗口）、-4 装着的不是调用者的空间**；判据是整段而非首地址，非法指针不再让内核吃 refill | 非分页档（ARM/RV32）一律宏回退 `(-1)`，默认档体积逐字节不变；SVC 处理器仍用原布尔校验，未改成走 `copy_*`；无 fixup 表、无 copy-on-write | M2 |
 | U-7 | ASID / TLB 批量失效 | ASID 恒 0 | 换进程要刷整表；SMP 下要 shootdown | M2 |
-| U-8 | 退出码通道 | **已做完并验证（2026-11-17，QEMU LA64 实跑）**：`THREAD_CTRL` 子 4 = `ARKRTOS_THREAD_SUB_EXIT_CODE`（`p[1]` 是 int32 码，负数原样），行为与子 3 相同、只多一个可读的码；用户侧 `arkrtos_thread_exit_code(int32)`，关档退化成 `arkrtos_thread_exit()`（调用点无需 `#if`）。码先落 TCB（`exit_code` + `exit_code_set`），再由装载器在「任务变 `INVALID` 的那一次观察」取走存进 `arkrtos_elf_info_t`（懒清理，退出路径不回调任何人）；`exit_code_set` 区分「以 0 结束」与「没上报」 | 开关 `ARKRTOS_USE_EXIT_CODE` 默认 0，仅 qemu_loongarch64 开 1；关档 RV32 镜像 235828/128/628228 逐字节不变，开档每 TCB +8 B。**仍没做**：`wait()` 式可阻塞取码、`main` 返回值自动转码、mini_sdk/driver_sdk 接线、RV32 开档读数 | **已收**（细节见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.20；门禁 = `tools/elf_gate.py` 的 F pin） |
+| U-8 | 退出码通道 | **已做完并验证（2026-11-17，QEMU LA64 实跑）**：`THREAD_CTRL` 子 4 = `ARKRTOS_THREAD_SUB_EXIT_CODE`（`p[1]` 是 int32 码，负数原样），行为与子 3 相同、只多一个可读的码；用户侧 `arkrtos_thread_exit_code(int32)`，关档退化成 `arkrtos_thread_exit()`（调用点无需 `#if`）。码先落 TCB（`exit_code` + `exit_code_set`），再由装载器在「任务变 `INVALID` 的那一次观察」取走存进 `arkrtos_elf_info_t`（懒清理，退出路径不回调任何人）；`exit_code_set` 区分「以 0 结束」与「没上报」 | 开关 `ARKRTOS_USE_EXIT_CODE` 默认 0，仅 qemu_loongarch64 开 1；关档 RV32 镜像 235828/128/628228 逐字节不变，开档每 TCB +8 B。`wait <task id> [timeout ms]`（shell 侧轮询）与 `main` 返回值转码（`arkrtos_app_exit` 走 `arkrtos_thread_exit_code`）2026-11-17 已补上，F2 pin 与五条 QEMU 判据见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.20.7。**仍没做**：mini_sdk/driver_sdk 接线、RV32 开档读数、ARM 上板 | **已收**（细节见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.20；门禁 = `tools/elf_gate.py` 的 F pin） |
 | U-9 | `fork` / 真正的 `exec` 替换自身 | 没有：`exec` 是"起一个任务并等它" | 与 POSIX 语义不同（已在 shell 帮助里写明） | M3 |
 | U-10 | 动态链接（`PT_INTERP`、`ld.so`） | 明确拒绝（`ERR_FORMAT`） | 只能跑静态链接程序 | M3 |
 | U-11 | 文件描述符继承 / 管道 / 信号 | 无 | 只能单进程自娱自乐 | M3 |

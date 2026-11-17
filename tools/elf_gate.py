@@ -256,7 +256,9 @@ def main():
             bad.append("F: elf info 没有 exit_code / exit_code_set")
         if "arkrtos_task_exit_code(id, &code)" not in text_elfc:
             bad.append("F: 装载器没有在任务变 INVALID 时把码取走")
-        if "exit code %d" not in shell_text:
+        # 这一串只属于 exec。写宽了（只匹配 "exit code %d"）会让下面的变异
+        # 自检失去分辨力：wait 命令里也有同样的格式串，改坏 exec 那处仍能通过。
+        if "finished after %u ms (space %u, exit code %d)" not in shell_text:
             bad.append("F: shell 的 exec 不打印退出码")
         if "arkrtos_thread_exit_code(int32 code);" not in text_user:
             bad.append("F: 用户 API 头里没有 arkrtos_thread_exit_code")
@@ -267,8 +269,46 @@ def main():
 
     got = pin_f(text_shell)
     failures.extend(got)
-    if not got and not pin_f(text_shell.replace("exit code %d", "exit code X%d", 1)):
+    if not got and not pin_f(text_shell.replace(
+            "finished after %u ms (space %u, exit code %d)",
+            "finished after %u ms (space %u, exit code X%d)", 1)):
         failures.append("F 自检：把 shell 的退出码打印串改坏后 pin 仍然通过（空转）")
+
+    # --- F2. U-8 的另一半：wait 命令 + App 侧 main 返回值转码（2026-11-17） --
+    # 这两处最容易被拆成「只做了一半」：shell 有 wait 但读的是别人取走过的槽、
+    # 或者 App SDK 的 exit(code) 又把码丢了（那样 return 3 与 return 0 在板上
+    # 长得一模一样）。同样配一次变异自检。
+    text_appmain = _read("kernelsrc/sdk/app_sdk/arkrtos_app_main.c")
+
+    def pin_f2(shell_text, app_text):
+        bad = []
+        if "static int cmd_wait(int argc, char *argv[])" not in shell_text:
+            bad.append("F2: shell 没有 cmd_wait")
+        if 'ARK_SHELL_CMD("wait", cmd_wait' not in shell_text:
+            bad.append("F2: wait 没有注册进命令表")
+        if "(ARKRTOS_USE_EXIT_CODE == 1) ? 1 : 0" not in shell_text:
+            bad.append("F2: register 的 need 预算没有算上 wait（上限一满就静默丢命令）")
+        if "arkrtos_task_table[id32 - 1u].status == ARKRTOS_TASK_INVALID" not in shell_text:
+            bad.append("F2: wait 不是按 INVALID 判结束")
+        if "arkrtos_task_exit_code((int32)id32, &code)" not in shell_text:
+            bad.append("F2: wait 没有从 TCB 取退出码")
+        if "no exit code reported" not in shell_text:
+            bad.append("F2: wait 不区分「没上报过码」与「码是 0」")
+        if "arkrtos_thread_exit_code(code);" not in app_text:
+            bad.append("F2: App SDK 的 exit(code) 没有把码交给内核（main 返回值丢了）")
+        if "#if (ARKRTOS_USE_EXIT_CODE == 1)" not in app_text:
+            bad.append("F2: App SDK 的转码没有开关闸门")
+        return bad
+
+    got2 = pin_f2(text_shell, text_appmain)
+    failures.extend(got2)
+    if not got2 and not pin_f2(text_shell, text_appmain.replace(
+            "arkrtos_thread_exit_code(code);", "arkrtos_thread_exit();", 1)):
+        failures.append("F2 自检：把 App SDK 的转码改回普通退出后 pin 仍然通过（空转）")
+    if not got2 and not pin_f2(text_shell.replace(
+            "arkrtos_task_exit_code((int32)id32, &code)",
+            "arkrtos_task_exit_code(id32, 0)", 1), text_appmain):
+        failures.append("F2 自检：把 wait 的取码改成不落 code 后 pin 仍然通过（空转）")
 
     # --- G. 接线 pin（U-4 收尾）-----------------------------------------
     # 这些 pin 防的都是「看起来做了、其实没接线」：字段偏移抄错一位、链接基址

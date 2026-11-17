@@ -8964,8 +8964,10 @@ int main(void)
 void arkrtos_app_exit(int code) {
 ```
 
-**标准 C 的退出路径：结束当前线程**
-- `code`：退出码（保留；当前内核不按退出码做判定）
+**标准 C 的退出路径：结束当前线程（带退出码）**
+- `code`：退出码；ARKRTOS_USE_EXIT_CODE=1 时交给内核（SVC 0x1B/4），
+之后 shell 的 exec / wait 能读到；关档时忽略，行为与之前的
+普通退出逐位相同
 > 说明：不会返回。App 的其它线程不受影响。
 
 ## kernelsrc/sdk/app_sdk/arkrtos_stdio.c

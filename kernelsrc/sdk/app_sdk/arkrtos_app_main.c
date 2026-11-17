@@ -18,6 +18,10 @@
 *          返回语义：C 标准里 `main` 返回等于进程结束；这里没有进程，只有
 *          任务，所以 `return` 或 `exit()` 都会结束当前 App 任务（SVC
 *          0x1B/3），由内核回收该任务的栈。App 若另有线程，它们继续运行。
+*          `ARKRTOS_USE_EXIT_CODE=1` 的构建里，C 库启动代码用 `main` 的返回
+*          值调 `exit()`，于是它一路变成任务退出码（SVC 0x1B/4），shell 的
+*          `exec` / `wait` 能读到——在这之前 `arkrtos_app_exit()` 把码丢掉了，
+*          `return 3` 与 `return 0` 在板上长得一模一样。
 *
 *          Keil(microlib/AC6) 的退出链是 `exit -> _sys_exit`，GCC(newlib)
 *          是 `exit -> _exit`。这里两个都给出**强定义**，避免落到库的默认桩
@@ -30,15 +34,23 @@
 #include "arkrtos.h"
 
 /**
-* @brief 标准 C 的退出路径：结束当前线程
-* @param code 退出码（保留；当前内核不按退出码做判定）
+* @brief 标准 C 的退出路径：结束当前线程（带退出码）
+* @param code 退出码；ARKRTOS_USE_EXIT_CODE=1 时交给内核（SVC 0x1B/4），
+*             之后 shell 的 exec / wait 能读到；关档时忽略，行为与之前的
+*             普通退出逐位相同
 * @note 不会返回。App 的其它线程不受影响。
 */
 void arkrtos_app_exit(int code)
 {
+#if (ARKRTOS_USE_EXIT_CODE == 1)
+    /* 码先交给内核再 kill：内核把码落进 TCB，装载器在任务变 INVALID 的那
+     * 一次观察里取走。这里不做任何判定，也不等谁来收。 */
+    arkrtos_thread_exit_code(code);
+#else
     (void)code;
 
     arkrtos_thread_exit();
+#endif
 
     /* arkrtos_thread_exit() 不再返回；这一句只是防御性兜底，保证就算退出
      * 路径出了意外也不会跑到别的代码上。 */

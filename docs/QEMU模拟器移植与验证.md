@@ -2306,7 +2306,9 @@ pmap look: va=0x02000000 no entry
 U-6 之后 shell 已经能受控地把用户地址搬进内核，但 `exec` 仍然只回报
 「跑完了、用了 N ms、在哪个空间」。脚本要判一个程序的成败，只能去 grep 它
 自己打印的字符串——那是程序**说的话**，不是它的**结论**。Linux 的答案是
-`exit_group(status)` 加 `wait()`；本档只做前半截：
+`exit_group(status)` 加 `wait()`。本档先做内核侧前半截（退出码与台账），
+shell 侧的 `wait` 于 2026-11-17 补上（§5.20.7）——它是**轮询任务表**，不是 POSIX 语义：
+没有父子关系、没有僵尸队列，也不能「等任意一个子进程」。内核侧这部分是：
 
 - `THREAD_CTRL`（SVC `0x1B`）新增子命令 **4 = `ARKRTOS_THREAD_SUB_EXIT_CODE`**，
   `p[1]` 是退出码（`int32`，负数原样）。行为与子 3（`EXIT`）相同——都结束调用任务，
@@ -2388,17 +2390,66 @@ TCB 有两个字段且在 `is_priv` 之前 → `arkrtos_task.c` 有实现、有 
 > 判据是子串包含，`%dX` 仍包含 `%d`，**变异没落地**。变异串必须破坏被断言
 > 子串本身（同 §5.19.4）。
 
+**F2 pin（`wait` 与 `main` 返回值转码）**：同一个门禁里再加一处，读 shell 与 app_main
+两个文件、共 8 条断言——`arkrtos_shell.c` 里 `cmd_wait` 定义在
+`#if (ARKRTOS_USE_EXIT_CODE == 1)` 内、注册表有
+`ARK_SHELL_CMD("wait", cmd_wait` 且 `min_args` 为 3、拒绝自己
+（`arkrtos_current_task_id`）、有 `no such task`、按 `ARKRTOS_TASK_INVALID` 判结束、
+调 `arkrtos_task_exit_code`、两条打印串 `exited (exit code %d)` 与
+`exited (no exit code reported)`；`arkrtos_app_main.c` 的 `arkrtos_app_exit`
+开档走 `arkrtos_thread_exit_code(code)`、关档 `#else` 仍调 `arkrtos_thread_exit()`。
+F2 同样带两条变异自检。
+
+同时把 F pin 的打印串断言从 `"exit code %d"` **收窄**成
+`"finished after %u ms (space %u, exit code %d)"`：`cmd_wait` 里也有
+`"exit code %d"`，不收窄的话「把 exec 那处改坏」的变异不再使 F pin 失败，
+自检会静默空转（本轮实际踩到过一次）。
+
 #### 5.20.6 明确没做的部分
 
-- **没有 `wait()`**：码只能由装载器台账**事后**读（`arkrtos_elf_info_space()`），
-  父任务不能阻塞等一个指定子任务的码；也没做「一个进程多个子进程」的建模。
-- **没有 `arkrtos_thread_exit()` 带默认码**：子 3 仍是纯退出，TCB 里 `exit_code_set`
-  保持 0。C 的 `main` 返回值不会自动变成退出码——要让退出码成立，程序必须
-  显式调 `arkrtos_thread_exit_code(code)`。
-- **mini_sdk / driver_sdk 没接线**：只做了 `app_sdk` 的 `oslib`。
+- **`wait` 不是 POSIX 的 `wait()`**：没有父子关系、没有僵尸队列，码也不是由内核
+  主动投递。`wait <task id> [timeout ms]` 只是 shell 侧 20 ms 轮询任务表，等
+  `status` 变成 `ARKRTOS_TASK_INVALID` 后**只读**地取一次 TCB 里的码。所以它不等于
+  「回收子进程」，也做不了「等任意一个子进程」（没有这个概念）；槽被复用后读到的
+  码属于新任务。
+- **mini_sdk / driver_sdk 没接线**：只做了 `app_sdk` 的 `oslib`（`arkrtos_app_exit`
+  把 C 库 `exit()` 收到的码转成 `arkrtos_thread_exit_code(code)`）。
 - **码只在 TCB 槽被复用前有效**：若任务死后立刻有大量建/删任务把该槽复用，
   码就丢了（实测 exec 的 20 ms 轮询使这窗口实际不可达，但机制上没有保护）。
-- **板级只开了 LA64**：RV32 板配置没开，因此 32 位侧只有「关档零变化」这一条读数。
+- **板级只开了 LA64**：`board/qemu_loongarch64/arkrtos_board_config.h` 里
+  `ARKRTOS_USE_EXIT_CODE` 被 `#undef` 后重定义为 1，命令行关不掉；RV32 板配置没开，
+  因此 32 位侧只有「关档零变化」这一条读数，**RV32 开档没有任何 QEMU 读数**。
+- **ARM 侧只编译、没上板**：`example/stm32f427/app_sdk/HELLO_APP/GCC` 关档与
+  `DEFS="-DARKRTOS_USE_EXIT_CODE=1"` 开档都能编过并链接成 `build/hello_app.elf`，
+  没有实机读数。
+
+#### 5.20.7 读数：`wait` 与 main 返回值转码（2026-11-17）
+
+从本轮起 `tools/qemu_shell_drive.py --script` 支持**竖线期望**（`命令 | 期望子串 |
+期望子串2`），没有竖线就等于只发不判。这一点要诚实记下来：**此前用 `--script`
+得到的 `SHELL-DRIVE OK` 期望集是空的，只证明命令发进去了、回显里有那几个字**。
+
+LA64 默认档（`build/qemu_la64_zero`，带 `wait` 后 text 367744 / data 416 / bss 767508），
+五条判据一次跑过：
+
+| 命令 | 期望子串 | 实测回显 |
+| --- | --- | --- |
+| `exec /mnt/ram/hello one two` | `exit code 3` | `finished after 0 ms (space 0, exit code 3)`，hello 落在 task 4 |
+| `wait 4` | `exited (exit code 3)` | `task 4 exited (exit code 3)` |
+| `wait 5 100` | `still running after 100 ms` | `task 5 still running after 100 ms (status WAIT)` |
+| `wait 47` | `no such task 47` | `wait: no such task 47` |
+| `wait 0` | `usage` | 用法串 |
+
+无码路径单独跑一次（`ld /mnt/ram/modhello.o alpha 42`：模块落 task 4、退出时**没有**
+上报码）：`wait 4` → `task 4 exited (no exit code reported)`，两次都是
+`SHELL-DRIVE OK: N 条命令全部符合预期`。
+
+**关档零变化**由 RV32 逐字节证明：当前树（LA64 侧的 `wait` 与 app_main 改动都在，
+但 RV32 板 `ARKRTOS_USE_EXIT_CODE` 为 0）构建出 text 235828 / data 128 / bss 628228，
+`objcopy -O binary` 的 sha256 是
+`2251eb0996a0485778da8e24e82a54596e4de35024d807b3fd0a4cd2a1b807bd`；
+用 `git archive HEAD` 单独摊出的树（`/d/tmp_ark_head2`）同口径构建得到**同一个 sha256**。
+LA64 之所以不能用来证这条，是因为该板把开关写死成 1（见 §5.20.6）。
 
 ### 5.21 4 KB 页帧池（U-3 第一阶，2026-11-17）
 

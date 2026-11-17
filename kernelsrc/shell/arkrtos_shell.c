@@ -6080,6 +6080,84 @@ static int cmd_exec(int argc, char *argv[])
     return shell_exec_file(argv[1], argc - 1, &argv[1]);
 }
 
+#if (ARKRTOS_USE_EXIT_CODE == 1)
+/* U-8 的另一半：等一个已经起跑的任务结束，再把它的退出码取出来。
+ *
+ * 和 exec 的区别只有一点：exec 等的是"我刚起跑的那个空间"，wait 等的是
+ * 任意任务号——于是后台还在跑的东西（比如 exec 到 30 s 上限就交还提示符
+ * 的那个程序，或者 ld 装进去的模块）也能在这里收尾。
+ *
+ * 退出码从 TCB 里读，不清它：装载器的实例台账是"观察到 INVALID 的那一次"
+ * 取一次码，两边只读不写，所以谁先看到都不影响读数。槽位被复用后字段归零
+ * （创建任务时清），那时读到的是新任务，不是旧任务的码。
+ *
+ * 诚实边界：这不是 POSIX 的 wait()——没有父子关系、没有僵尸队列、也没有
+ * "只能由父进程回收一次"的约束；同时也没有反向的保证：任务号被复用后，
+ * 这里的读数属于新任务。 */
+static int cmd_wait(int argc, char *argv[])
+{
+    uint32 id32 = 0u;
+    uint32 limit = 5000u;
+    uint32 waited = 0u;
+
+    if ((argc < 2) || (parse_u32(argv[1], &id32) != 0) ||
+        (id32 == 0u) || (id32 > (uint32)ARKRTOS_TASK_MAX_NUM))
+    {
+        sh_out("usage: wait <task id> [timeout ms]   (0 = wait until it exits)\r\n");
+        return 1;
+    }
+    if (argc >= 3)
+    {
+        if (parse_u32(argv[2], &limit) != 0)
+        {
+            sh_out("wait: timeout must be a decimal number of milliseconds\r\n");
+            return 1;
+        }
+    }
+    if ((int32)id32 == arkrtos_current_task_id)
+    {
+        sh_out("wait: that is the shell's own task\r\n");
+        return 1;
+    }
+    if (arkrtos_task_table[id32 - 1u].stack_ptr == 0u)
+    {
+        ark_shell_printf("wait: no such task %u\r\n", (unsigned)id32);
+        return 1;
+    }
+
+    for (;;)
+    {
+        if (arkrtos_task_table[id32 - 1u].status == ARKRTOS_TASK_INVALID)
+        {
+            int32 code = 0;
+
+            if (arkrtos_task_exit_code((int32)id32, &code) != 0)
+            {
+                ark_shell_printf("task %u exited (exit code %d)\r\n",
+                                 (unsigned)id32, (int)code);
+            }
+            else
+            {
+                ark_shell_printf("task %u exited (no exit code reported)\r\n",
+                                 (unsigned)id32);
+            }
+            return 0;
+        }
+
+        if ((limit != 0u) && (waited >= limit))
+        {
+            ark_shell_printf("task %u still running after %u ms (status %s)\r\n",
+                             (unsigned)id32, (unsigned)waited,
+                             task_state_name((uint32)arkrtos_task_table[id32 - 1u].status));
+            return 0;
+        }
+
+        arkrtos_task_wait_internal(SHELL_EXEC_POLL_MS);
+        waited += SHELL_EXEC_POLL_MS;
+    }
+}
+#endif /* ARKRTOS_USE_EXIT_CODE */
+
 /* 未知命令的回落点（ark_shell_eval.c 在报 command not found 之前调）。
  * 只有长得像路径的词（/x、./x、../x）才接，其他原样返回 -1 让 shell
  * 照旧报 command not found——否则打错的命令名会被当成文件名去开门。 */
@@ -7502,6 +7580,7 @@ static int register_kernel_commands(void)
              + (ARKRTOS_USE_MODLOAD ? 4 : 0)
              + (ARKRTOS_USE_SECCHECK ? 1 : 0)
              + (ARKRTOS_USE_PAGING ? 1 : 0)
+             + ((ARKRTOS_USE_EXIT_CODE == 1) ? 1 : 0)
              + ((ARKRTOS_USE_SHELL_AUTH == 1) ? 2 : 0);
 
     if((idx + need) > ARK_SHELL_MAX_COMMANDS)
@@ -7517,6 +7596,10 @@ static int register_kernel_commands(void)
     g_cmd_table[idx++] = ARK_SHELL_CMD("exec", cmd_exec,
         "Run an ELF64 executable: exec <path> [args...] (or just type /path/prog)", 8);
 #endif /* ARKRTOS_USE_ELF */
+#if (ARKRTOS_USE_EXIT_CODE == 1)
+    g_cmd_table[idx++] = ARK_SHELL_CMD("wait", cmd_wait,
+        "Wait for a task to exit and report its exit code: wait <task id> [timeout ms]", 3);
+#endif /* ARKRTOS_USE_EXIT_CODE */
 #if (ARKRTOS_USE_MODLOAD == 1)
     g_cmd_table[idx++] = ARK_SHELL_CMD("ld", cmd_ld,
         "Link and run a relocatable module: ld <path.o> [args...]", 8);
