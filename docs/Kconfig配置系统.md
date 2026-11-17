@@ -123,6 +123,13 @@ tag 签名门，含内核 MAC 与 Python 实现的逐字节对拍、开档/关�
 `stack_bottom[0]` 而不是比 PSP，落点在调度切换与 LA64/RV32 的 C trap 入口，
 关档零符号，见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.15）。
 
+再往后有一个**不新增 ci_gate 项**的开关：`ARKRTOS_USE_EXIT_CODE`（U-8 任务退出码
+通道，缺省 n，只有 `board/qemu_loongarch64` 开 1）。它的门禁挂在已有的
+`tools/elf_gate.py` 里（F pin，带变异自检），理由是这条通道横跨
+`svc_abi.h` / `arkrtos_task.c` / `arkrtos_elf.c` / shell / `oslib` 五处，
+拆成独立 gate 会把同一份「八处必须同时存在」的断言写两遍。见
+[QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.20。
+
 ## 6. 数量限制
 
 原先散在头文件里写死的上限（任务表、同步对象表、队列、定时器、设备表、socket、

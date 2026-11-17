@@ -124,6 +124,11 @@
  * docs/MMU进程模型与ELF装载.md。 */
 #undef  ARKRTOS_USE_ELF
 #define ARKRTOS_USE_ELF              1
+
+/* U-8：本板打开退出码通道（hello.elf 用 argc 当退出码，exec 打印的读数
+ * 与程序自己打印的 argc 互为对证）。 */
+#undef  ARKRTOS_USE_EXIT_CODE
+#define ARKRTOS_USE_EXIT_CODE        1
 #define ARKRTOS_ELF_WINDOW_BASE      ARKRTOS_QEMU_APP_BASE
 #define ARKRTOS_ELF_WINDOW_SIZE      ARKRTOS_QEMU_APP_SIZE
 

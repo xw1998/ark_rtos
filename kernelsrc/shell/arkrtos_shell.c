@@ -6047,10 +6047,23 @@ static int shell_exec_file(const char *path, int argc, char *argv[])
         waited += SHELL_EXEC_POLL_MS;
     }
 
-    /* 退出码还没有通道：用户态的 _exit(code) 走 SVC 0x1B 子 3，那个协议
-     * 没有 code 参数，TCB 里也没有字段接着。所以这里只说「结束了」，
-     * 不编一个看起来像退出码的数字。欠账记在
-     * docs/MMU进程模型与ELF装载.md。 */
+    /* U-8（2026-11-17）之前这里只说「结束了」：EXIT 子命令没有 code 参数，
+     * TCB 里也没有字段接着。现在子 4（EXIT_CODE）可以带码，装载器在任务
+     * 变 INVALID 的那一次观察里把码取走存进 info。没上报过就只说时长，
+     * 不编一个看起来像退出码的数字。 */
+#if (ARKRTOS_USE_EXIT_CODE == 1)
+    {
+        arkrtos_elf_info_t fin;
+
+        if((arkrtos_elf_info_space(space, &fin) == 0) && (fin.exit_code_set != 0u))
+        {
+            ark_shell_printf("[ELF] %s: finished after %u ms (space %u, exit code %d)\r\n",
+                             path, (unsigned)waited, (unsigned)space,
+                             (int)fin.exit_code);
+            return 0;
+        }
+    }
+#endif
     ark_shell_printf("[ELF] %s: finished after %u ms (space %u)\r\n",
                      path, (unsigned)waited, (unsigned)space);
     return 0;

@@ -2298,6 +2298,108 @@ pmap look: va=0x02000000 no entry
 - **没有 copy-on-write / 用户页换出**：窗口内全部是板级固定帧，恒常驻。
 - **性能未优化**：逐字节 `volatile` 拷贝，不是 `memcpy` 的那种吞吐。
 
+
+### 5.20 任务退出码通道（U-8，2026-11-17）
+
+#### 5.20.1 欠的是什么
+
+U-6 之后 shell 已经能受控地把用户地址搬进内核，但 `exec` 仍然只回报
+「跑完了、用了 N ms、在哪个空间」。脚本要判一个程序的成败，只能去 grep 它
+自己打印的字符串——那是程序**说的话**，不是它的**结论**。Linux 的答案是
+`exit_group(status)` 加 `wait()`；本档只做前半截：
+
+- `THREAD_CTRL`（SVC `0x1B`）新增子命令 **4 = `ARKRTOS_THREAD_SUB_EXIT_CODE`**，
+  `p[1]` 是退出码（`int32`，负数原样）。行为与子 3（`EXIT`）相同——都结束调用任务，
+  差别只在「有没有一个可读的码」。
+- 退出码先落进 **TCB**，再由**装载器**在「任务变 `INVALID` 的那一次观察」把它取走
+  存进实例台账；shell 的 `exec` 在打印结束行时读台账。
+
+#### 5.20.2 开关与体积
+
+| 项 | 内容 |
+|---|---|
+| 开关 | `ARKRTOS_USE_EXIT_CODE`（`config/kconfig/Kconfig.features`，`kernelsrc/include/arkrtos_features.h` 里缺省 **0**） |
+| 开档 | 只有 `board/qemu_loongarch64/arkrtos_board_config.h` 打开（`#undef` + `#define ... 1`） |
+| 关档代价 | 子命令宏、TCB 两个字段、`*_internal` 实现、SVC 分支、shell 的带码打印、ELF 台账两个字段全部被 `#if` 摘掉 ⇒ **RV32 镜像 `text 235828 / data 128 / bss 628228` 与 U-6 之后逐字节相同** |
+| 开档代价 | 每个 TCB 多 8 字节（4 字节码 + 1 字节 flag + 3 字节对齐填充），镜像约 +240 B（首版没门控时 RV32 实测 `text 236068`，即 +240） |
+
+`arkrtos_thread_exit_code()` **两档都声明、都实现**：关档退化成
+`(void)code; arkrtos_thread_exit();`，所以 App 侧调用点不需要 `#if`
+（一个宏开关不该逼用户改源）。
+
+#### 5.20.3 为什么不在退出路径里回调
+
+任务自杀发生在**调度器的切换路径里**（`arkrtos_thread_exit_internal()` 之后
+不再回来）。在那里回调装载器意味着：切换路径要知道 ELF 台账、要持有它的锁、
+要保证被换下的栈还能用——U-2 已经踩过一次「切换路径里碰窗口就吃到别人的帧」。
+所以退出口只写两个 TCB 字段，**不通知任何人**；装载器侧改成懒清理：
+
+```
+elf_slot_live(space)               # 装载/查询/exec 等待循环都会走到这里
+  └ id = s_elf_task[space]
+    └ status == INVALID ?          # 就是"任务死了但槽还没被复用"那一刻
+        arkrtos_task_exit_code(id, &code)   # 有码才写台账
+        s_elf_task[space] = 0
+```
+
+`exit_code_set` 存在的理由只有一个：`exit code 0` 是一个**有效结论**，
+不能和「没上报过」混为一谈。没上报时 shell 仍打原来的无码行
+（`finished after N ms (space N)`），**不编一个看起来像退出码的 0**。
+
+#### 5.20.4 实测读数（QEMU LA64 实跑）
+
+`exec` 等程序结束的循环是 20 ms 一轮、每轮都调 `arkrtos_elf_running_in(space)`
+⇒ 触发 `elf_slot_live`，所以码通常在任务死后的第一次轮询就被取走。
+`hello.c` 故意把 **argc 当退出码**，让「程序自己打印的 argc」与「exec 打印的
+exit code」互为对证：
+
+```
+$ exec /mnt/ram/hello one two
+[hello] entry sp=35635200 argc=3
+[hello] argc=3
+[hello] bye, exit code = argc
+[ELF] /mnt/ram/hello: finished after 0 ms (space 0, exit code 3)
+
+$ exec /mnt/ram/hello
+[hello] argc=1
+[ELF] /mnt/ram/hello: finished after 20 ms (space 0, exit code 1)
+```
+
+同一次运行的其余判据：`utest: 13 matched, 13 passed`、`pmap u1` / `u2` /
+`test` / `cu` 仍 PASS、`dyn slot(s) in use=0`、`SHELL-DRIVE OK: 3 条命令全部符合预期`。
+
+> 记一条**测量环境**的坑（不是内核缺陷）：这轮 `qemu_shell_drive.py` 连跑三次
+> 都是「连上了 TCP 但 90 s 一个字节都没收到」。同一份镜像改用 `-serial file:`
+> 立刻能看到完整 banner + `mark@arkrtos:~$` 提示符 ⇒ 内核正常，是 host 侧
+> TCP chardev 的偶发竞态。**判据：`buf` 全空 ≠ 内核死了**，先用 file 串口
+> 单独确认一次再决定是重试还是查代码。
+
+#### 5.20.5 门禁
+
+`tools/elf_gate.py` 新增 **F pin**（读 8 个文件、逐环断言）：`svc_abi.h` 有子 4 宏 →
+TCB 有两个字段且在 `is_priv` 之前 → `arkrtos_task.c` 有实现、有 `case`、有
+`arkrtos_thread_exit_code_internal((int32)p[1])` → `arkrtos_elf.h` 台账两字段 →
+`arkrtos_elf.c` 有 `arkrtos_task_exit_code(id, &code)` → shell 有
+`exit code %d` → 用户 API 有声明 → `hello.c` 用 `ARKRTOS_THREAD_SUB_EXIT_CODE`
+且 `params[1] = (ark_u32)argc;`。F pin 自带变异自检（`"exit code %d"` →
+`"exit code X%d"`），自检不过就直接报「pin 空转」。
+
+> 同一条教训第二次出现：第一版变异串写成 `"exit code %d"` → `"exit code %dX"`，
+> 判据是子串包含，`%dX` 仍包含 `%d`，**变异没落地**。变异串必须破坏被断言
+> 子串本身（同 §5.19.4）。
+
+#### 5.20.6 明确没做的部分
+
+- **没有 `wait()`**：码只能由装载器台账**事后**读（`arkrtos_elf_info_space()`），
+  父任务不能阻塞等一个指定子任务的码；也没做「一个进程多个子进程」的建模。
+- **没有 `arkrtos_thread_exit()` 带默认码**：子 3 仍是纯退出，TCB 里 `exit_code_set`
+  保持 0。C 的 `main` 返回值不会自动变成退出码——要让退出码成立，程序必须
+  显式调 `arkrtos_thread_exit_code(code)`。
+- **mini_sdk / driver_sdk 没接线**：只做了 `app_sdk` 的 `oslib`。
+- **码只在 TCB 槽被复用前有效**：若任务死后立刻有大量建/删任务把该槽复用，
+  码就丢了（实测 exec 的 20 ms 轮询使这窗口实际不可达，但机制上没有保护）。
+- **板级只开了 LA64**：RV32 板配置没开，因此 32 位侧只有「关档零变化」这一条读数。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

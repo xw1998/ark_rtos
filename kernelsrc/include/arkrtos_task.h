@@ -84,6 +84,10 @@ typedef struct {
     uint8  stack_guard_armed;                       /* 1 = 栈底保护字已由注册流程布防 */
     uint8  stack_guard_reported;                    /* 1 = 已报过一次，避免每次切换刷同一条记录 */
     #endif
+#if (ARKRTOS_USE_EXIT_CODE == 1)
+    int32  exit_code;                               /* U-8：任务自己上报的退出码（exit_code_set=0 时无意义） */
+    uint8  exit_code_set;                           /* 1 = exit_code 已由 EXIT_CODE 子命令写入 */
+#endif
     uint8  is_priv;                                 /* 1 = Thread mode privileged, 0 = unprivileged.
                                                      * Honoured only when ARKRTOS_USE_PRIV == 1;
                                                      * the switch path writes CONTROL.nPRIV from
@@ -212,6 +216,22 @@ int32  arkrtos_thread_create_internal(void (*entry)(void), uint32 *stack_bottom,
                                     uint32 stack_size, uint8 priority, uint32 period_ms);
 int32  arkrtos_thread_self_internal(void);
 void   arkrtos_thread_exit_internal(void);
+#if (ARKRTOS_USE_EXIT_CODE == 1)
+/**
+* @brief 带退出码结束当前任务（U-8）。
+* @param code 退出码，原样记进 TCB 的 exit_code 并置 exit_code_set=1。
+* @note 只对「当前任务」有意义；内核线程调用等价于 arkrtos_thread_exit_internal()。
+*       ARKRTOS_USE_EXIT_CODE=0 时不提供这两个入口（不占一个字节）。
+*/
+void   arkrtos_thread_exit_code_internal(int32 code);
+/**
+* @brief 读某个任务上报的退出码。
+* @param task_id 任务号（1 起）
+* @param p_code 可为 0；成功时写回退出码
+* @return 1 = 该任务上报过退出码，0 = 没上报过 / 任务号非法
+*/
+int32  arkrtos_task_exit_code(int32 task_id, int32 *p_code);
+#endif
 int32  arkrtos_task_recover(int32 task_id);
 
 void arkrtos_sched_activate_higher(uint8 ck_pri);

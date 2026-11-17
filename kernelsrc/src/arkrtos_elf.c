@@ -199,6 +199,19 @@ static int32 elf_slot_live(uint32 space)
 
     if(arkrtos_task_table[id - 1].status == ARKRTOS_TASK_INVALID)
     {
+#if (ARKRTOS_USE_EXIT_CODE == 1)
+        /* U-8：任务死了但 TCB 还没被复用，这是唯一能安全取退出码的时刻；
+         * 取走之后再清槽位。没上报过就保持 exit_code_set=0，不编 0。 */
+        {
+            int32 code = 0;
+
+            if(arkrtos_task_exit_code(id, &code) != 0)
+            {
+                s_elf_info[space].exit_code = code;
+                s_elf_info[space].exit_code_set = 1u;
+            }
+        }
+#endif
         s_elf_task[space] = 0;
         return 0;
     }
@@ -752,6 +765,10 @@ int32 arkrtos_elf_exec_space(const char *path, int32 argc, char *argv[],
     info.sp         = 0u;
     info.stack_size = 0u;
     info.task       = 0;
+#if (ARKRTOS_USE_EXIT_CODE == 1)
+    info.exit_code  = 0;
+    info.exit_code_set = 0u;
+#endif
 
 #if (ARKRTOS_USE_PAGING == 1)
     /* 装载期间窗口必须指着目标空间；失败也要装回去，否则 shell 之后的

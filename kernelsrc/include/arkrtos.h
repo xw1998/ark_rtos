@@ -780,6 +780,14 @@ int32  arkrtos_thread_self(void);
 * @brief 结束当前线程，不再返回
 */
 void   arkrtos_thread_exit(void);
+
+/**
+* @brief 带退出码结束当前线程（U-8），不再返回
+* @param code 退出码；shell 的 exec 会把它打出来（exit code N）
+* @note 只有走这条路径才有可读的退出码；arkrtos_thread_exit() 不写码，
+*       接收方据此区分「结束了」与「以 0 结束」
+*/
+void   arkrtos_thread_exit_code(int32 code);
 /** @} */
 
 /** @} */

@@ -118,6 +118,15 @@
 #define ARKRTOS_USE_ELF                 0
 #endif
 
+/* 退出码通道（U-8）：0 = 关（TCB 无字段、SVC 子 4 不认、shell 不打印，
+ * 整个功能不占一个字节），1 = 任务可以用 EXIT_CODE 子命令上报 int32
+ * 退出码，装载器在任务变 INVALID 时取走，exec 打印 exit code N。
+ * 关档时 arkrtos_thread_exit_code() 仍存在（退化成 arkrtos_thread_exit），
+ * 调用点不需要 #if。由 Kconfig 选择（config ARKRTOS_USE_EXIT_CODE）。 */
+#ifndef ARKRTOS_USE_EXIT_CODE
+#define ARKRTOS_USE_EXIT_CODE           0
+#endif
+
 /* VxWorks 式可下载模块：0 = 关（空 TU，零体积），1 = 把 ET_REL 目标文件
  * 现场链接进内核模块区并以 PLV0 任务起跑（按名字解析内核导出符号）。
  * 这是与 ARKRTOS_USE_ELF **并列的另一种应用模型**，不是它的替代：

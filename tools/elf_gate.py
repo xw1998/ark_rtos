@@ -223,6 +223,52 @@ def main():
         if need not in elf_text:
             failures.append("E 口径 pin：arkrtos_elf.c 里找不到 %r（%s）" % (need, why))
 
+    # --- F. U-8 退出码通道 pin（链式：ABI -> TCB -> 内核 -> 装载器 -> shell） --
+    # 退出码最容易"看起来做了"：任何一环断了，读数要么变回「没有码」，要么
+    # 编出来的是别人的值。所以逐环钉住，并对 pin 本身做一次变异自检
+    # （把 shell 的打印串改坏一次，pin 必须报错）。
+    def _read(rel):
+        with open(os.path.join(ROOT, rel), encoding="utf-8", errors="replace") as f:
+            return f.read()
+
+    text_abi   = _read("kernelsrc/include/arkrtos_svc_abi.h")
+    text_taskh = _read("kernelsrc/include/arkrtos_task.h")
+    text_taskc = _read("kernelsrc/src/arkrtos_task.c")
+    text_elfc  = _read("kernelsrc/src/arkrtos_elf.c")
+    text_elfh  = _read("kernelsrc/include/arkrtos_elf.h")
+    text_shell = _read("kernelsrc/shell/arkrtos_shell.c")
+    text_user  = _read("kernelsrc/include/arkrtos.h")
+    text_hello = _read("example/qemu_loongarch64/elf/hello.c")
+
+    def pin_f(shell_text):
+        bad = []
+        if "#define ARKRTOS_THREAD_SUB_EXIT_CODE         (4u)" not in text_abi:
+            bad.append("F: svc_abi.h 没有 THREAD_SUB_EXIT_CODE 子号")
+        if "int32  exit_code;" not in text_taskh or "uint8  exit_code_set;" not in text_taskh:
+            bad.append("F: TCB 没有 exit_code / exit_code_set 字段")
+        if "void arkrtos_thread_exit_code_internal(int32 code)" not in text_taskc:
+            bad.append("F: task.c 没有带码结束的实现")
+        if "case ARKRTOS_THREAD_SUB_EXIT_CODE:" not in text_taskc or \
+           "arkrtos_thread_exit_code_internal((int32)p[1]);" not in text_taskc:
+            bad.append("F: task.c 的 SVC 分派没有接子 4（码从 p[1] 取）")
+        if "int32  exit_code;" not in text_elfh or "uint8  exit_code_set;" not in text_elfh:
+            bad.append("F: elf info 没有 exit_code / exit_code_set")
+        if "arkrtos_task_exit_code(id, &code)" not in text_elfc:
+            bad.append("F: 装载器没有在任务变 INVALID 时把码取走")
+        if "exit code %d" not in shell_text:
+            bad.append("F: shell 的 exec 不打印退出码")
+        if "arkrtos_thread_exit_code(int32 code);" not in text_user:
+            bad.append("F: 用户 API 头里没有 arkrtos_thread_exit_code")
+        if "ARK_THREAD_SUB_EXIT_CODE" not in text_hello or \
+           "params[1] = (ark_u32)argc;" not in text_hello:
+            bad.append("F: hello.elf 不再带退出码（QEMU 那轮的读数就失去对证）")
+        return bad
+
+    got = pin_f(text_shell)
+    failures.extend(got)
+    if not got and not pin_f(text_shell.replace("exit code %d", "exit code X%d", 1)):
+        failures.append("F 自检：把 shell 的退出码打印串改坏后 pin 仍然通过（空转）")
+
     shutil.rmtree(tmp, ignore_errors=True)
 
     if failures:
@@ -231,7 +277,7 @@ def main():
         return 1
 
     print("ELF-GATE OK: 默认档=0 / LA64 打开编得过(2 TU) / RV32 64 位守卫被拒 / "
-          "缺窗口宏被拒 / 线上格式常量未漂")
+          "缺窗口宏被拒 / 线上格式常量未漂 / U-8 退出码通道 F pin 成立且自检有效")
     return 0
 
 

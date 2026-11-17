@@ -48,6 +48,10 @@ typedef struct {
     uint32 sp;              /* 用户栈初始 sp（指向 argc） */
     uint32 stack_size;      /* 分给该任务的栈字节数（argv 区不在其中） */
     int32  task;            /* 任务号；<=0 表示这次调用失败了 */
+#if (ARKRTOS_USE_EXIT_CODE == 1)
+    int32  exit_code;       /* U-8：任务上报过的退出码（exit_code_set=0 时不作数） */
+    uint8  exit_code_set;   /* 1 = 该实例用 EXIT_CODE 子命令结束过，exit_code 有效 */
+#endif
 } arkrtos_elf_info_t;
 
 /**

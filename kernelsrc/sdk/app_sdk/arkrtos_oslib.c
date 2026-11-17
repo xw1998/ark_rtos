@@ -998,6 +998,23 @@ void arkrtos_thread_exit(void)
     (void)arkrtos_call_thread_ctrl(p);
 }
 
+/* U-8：带退出码结束自己。语义与 arkrtos_thread_exit 相同，只是把码交给内核，
+* shell 的 exec 在任务结束后会打印 exit code N。
+* ARKRTOS_USE_EXIT_CODE=0 的构建里内核不认子 4，这里退化成普通 exit —— 调用点
+* 不需要 #if，行为与原来逐位相同。 */
+void arkrtos_thread_exit_code(int32 code)
+{
+#if (ARKRTOS_USE_EXIT_CODE == 1)
+    uint32 p[6];
+    p[0] = ARKRTOS_THREAD_SUB_EXIT_CODE; p[1] = (uint32)code;
+    p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
+    (void)arkrtos_call_thread_ctrl(p);
+#else
+    (void)code;
+    arkrtos_thread_exit();
+#endif
+}
+
 /* ============================================================
  * File service (SVC 0x1C)
  *

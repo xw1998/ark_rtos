@@ -129,6 +129,9 @@
 #define ARKRTOS_THREAD_SUB_CREATE            (1u)
 #define ARKRTOS_THREAD_SUB_SELF              (2u)
 #define ARKRTOS_THREAD_SUB_EXIT              (3u)
+/* 子 4（U-8）：p[1] = 退出码（int32，负数原样传给静待方）。
+ * 与子 3 的差别只在「有没有一个可读的退出码」，两者都结束调用任务。 */
+#define ARKRTOS_THREAD_SUB_EXIT_CODE         (4u)
 
 /* ARKRTOS_SVC_FILE_SYS (0x1C) - volume relative file ops (1..10) and namespace path ops (11..23) */
 #define ARKRTOS_FILE_SUB_WRITE               (1u)

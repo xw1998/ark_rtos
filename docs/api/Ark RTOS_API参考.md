@@ -5,7 +5,7 @@
 
 ## 目录
 
-- [kernelsrc/include/arkrtos.h](#kernelsrcincludearkrtosh)（108 项）
+- [kernelsrc/include/arkrtos.h](#kernelsrcincludearkrtosh)（109 项）
 - [kernelsrc/include/arkrtos_app_image.h](#kernelsrcincludearkrtos_app_imageh)（38 项）
 - [kernelsrc/include/arkrtos_apppack.h](#kernelsrcincludearkrtos_apppackh)（9 项）
 - [kernelsrc/include/arkrtos_apprun.h](#kernelsrcincludearkrtos_apprunh)（6 项）
@@ -42,7 +42,7 @@
 - [kernelsrc/include/arkrtos_softbus.h](#kernelsrcincludearkrtos_softbush)（5 项）
 - [kernelsrc/include/arkrtos_spin.h](#kernelsrcincludearkrtos_spinh)（10 项）
 - [kernelsrc/include/arkrtos_svc_call.h](#kernelsrcincludearkrtos_svc_callh)（20 项）
-- [kernelsrc/include/arkrtos_task.h](#kernelsrcincludearkrtos_taskh)（3 项）
+- [kernelsrc/include/arkrtos_task.h](#kernelsrcincludearkrtos_taskh)（5 项）
 - [kernelsrc/include/arkrtos_tickless.h](#kernelsrcincludearkrtos_ticklessh)（6 项）
 - [kernelsrc/include/arkrtos_ulog.h](#kernelsrcincludearkrtos_ulogh)（5 项）
 - [kernelsrc/include/arkrtos_ushell.h](#kernelsrcincludearkrtos_ushellh)（4 项）
@@ -1000,6 +1000,17 @@ void   arkrtos_thread_exit(void);
 ```
 
 **结束当前线程，不再返回**
+
+### `void   arkrtos_thread_exit_code(int32 code);`
+
+```c
+void   arkrtos_thread_exit_code(int32 code);
+```
+
+**带退出码结束当前线程（U-8），不再返回**
+- `code`：退出码；shell 的 exec 会把它打出来（exit code N）
+> 说明：只有走这条路径才有可读的退出码；arkrtos_thread_exit() 不写码，
+接收方据此区分「结束了」与「以 0 结束」
 
 ### `int32  arkrtos_file_write(const char *path, const void *data, uint32 l`
 
@@ -6391,6 +6402,28 @@ void arkrtos_task_release_resources(int32 task_id);
 不做收尸的后果：post/unlock 会把一个已经不在等待的任务置为 READY
 （从旧栈“复活”）；它持有的互斥锁永久锁死，等待者全部饿死。
 本函数自带保存-恢复语义的临界区，可在已有临界区内安全调用。
+
+### `void   arkrtos_thread_exit_code_internal(int32 code);`
+
+```c
+void   arkrtos_thread_exit_code_internal(int32 code);
+```
+
+**带退出码结束当前任务（U-8）。**
+- `code`：退出码，原样记进 TCB 的 exit_code 并置 exit_code_set=1。
+> 说明：只对「当前任务」有意义；内核线程调用等价于 arkrtos_thread_exit_internal()。
+ARKRTOS_USE_EXIT_CODE=0 时不提供这两个入口（不占一个字节）。
+
+### `int32  arkrtos_task_exit_code(int32 task_id, int32 *p_code);`
+
+```c
+int32  arkrtos_task_exit_code(int32 task_id, int32 *p_code);
+```
+
+**读某个任务上报的退出码。**
+- `task_id`：任务号（1 起）
+- `p_code`：可为 0；成功时写回退出码
+**返回**：1 = 该任务上报过退出码，0 = 没上报过 / 任务号非法
 
 ## kernelsrc/include/arkrtos_tickless.h
 

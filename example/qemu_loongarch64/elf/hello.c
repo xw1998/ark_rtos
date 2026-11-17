@@ -9,15 +9,17 @@
 *            1) 读到正确的 argc/argv（证明装载器铺的栈对）；
 *            2) 通过 SVC 0x10（DEV_IO）写控制台（证明降权任务能走系统调用，
 *               且参数块落在内核认可的用户窗口里）；
-*            3) 通过 SVC 0x1B 子 3 结束自己（证明程序能自己退出，任务被回收）。
+*            3) 通过 SVC 0x1B 子 4 带退出码结束自己（证明程序能自己退出、任务被
+*               回收，且退出码能一路回到 shell 的 exec：exit code = argc）。
 *
 *          不链 libc、不链启动代码：本文件里的 main 不是 C 语义的 main，
 *          是链接脚本指定的入口。任何一个按 Linux 静态程序写的东西也能跑，
 *          只是这个例子故意把每一层都摊开，免得把"能跑"当成"内核支持多"。
 *
-* @note 退出码目前没有通道：SVC 0x1B 子 3 的协议里没有 code 参数，TCB 里也
-*       没有字段接。所以这里不假装能返回退出码。欠账见
-*       docs/MMU进程模型与ELF装载.md。
+* @note 退出码走 SVC 0x1B 子 4（U-8，2026-11-17）：带一个 int32 参数，内核记进
+*       TCB，装载器在任务变 INVALID 时取走，shell 的 exec 打印 exit code N。
+*       这里故意让退出码等于 argc，于是「打印出来的 argc」与「exec 报的退出码」
+*       互为对证——两边对不上就是通道断了，不是读数漂移。
 * @author xw
 */
 
@@ -31,7 +33,7 @@
 
 #define ARK_DEV_SUB_OPEN        1u
 #define ARK_DEV_SUB_WRITE       3u
-#define ARK_THREAD_SUB_EXIT     3u
+#define ARK_THREAD_SUB_EXIT_CODE 4u
 
 /* 参数块是 **32 位字** 的数组，这是内核 SVC 协议的既有形状（内核侧按
  * uint32* 解引用），不是本程序的偏好：64 位程序的指针也必须以 32 位字传。
@@ -191,15 +193,17 @@ void hello_main(unsigned long sp)
         out("\n");
     }
 
-    out("[hello] bye\n");
+    out("[hello] bye, exit code = argc\n");
 
     /* 结束自己：内核回收任务、释放它注册过的设备，之后同一个窗口就能再装
-     * 下一个程序。返回是不允许的——从 _start 返回等于跳到垃圾地址。 */
+     * 下一个程序。返回是不允许的——从 _start 返回等于跳到垃圾地址。
+     * U-8：退出码就是 argc，于是 exec 打印的 exit code 与上面打印的 argc
+     * 是同一个数，两个读数能互相对证。 */
     {
         ark_u32 params[6];
 
-        params[0] = ARK_THREAD_SUB_EXIT;
-        params[1] = 0u;
+        params[0] = ARK_THREAD_SUB_EXIT_CODE;
+        params[1] = (ark_u32)argc;
         params[2] = 0u;
         params[3] = 0u;
         params[4] = 0u;

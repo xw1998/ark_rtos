@@ -300,6 +300,19 @@ config ARKRTOS_MINI_EXIT_IS_HANDOVER
 	  crashes, kills and fault recovery always neutralise fully.
 	  Only meaningful with ARKRTOS_USE_MINIAPP.
 
+config ARKRTOS_USE_EXIT_CODE
+	bool "Task exit code channel (U-8)"
+	help
+	  Carry an int32 exit code from a task back to the caller: SVC 0x1B
+	  sub-command 4 records the code in the TCB, the loader captures it at
+	  the moment the task flips to INVALID, and the shell prints
+	  "exit code N" after exec.  arkrtos_thread_exit_code() is declared in
+	  arkrtos.h in both directions.
+
+	  Off (default) changes nothing: no TCB field, sub-command 4 rejected
+	  as unknown, and arkrtos_thread_exit_code() calls
+	  arkrtos_thread_exit(), so call sites need no #if.
+
 config ARKRTOS_USE_ELF
 	bool "ELF64 executable loader (exec)"
 	depends on ARKRTOS_USE_VFS && ARKRTOS_USE_PRIV

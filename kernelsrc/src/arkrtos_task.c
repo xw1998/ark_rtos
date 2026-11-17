@@ -360,6 +360,41 @@ void arkrtos_thread_exit_internal(void)
     arkrtos_task_kill_internal();
 }
 
+#if (ARKRTOS_USE_EXIT_CODE == 1)
+/* U-8：带退出码的自杀。退出码先落进 TCB 再 kill —— kill 之后这些字段
+ * 仍原样保留到该槽被复用为止，装载器只在「status 变成 INVALID 的那一次
+ * 观察」把码取走（见 arkrtos_elf.c 的 elf_slot_live），所以退出路径不需要
+ * 回调任何人，也就不会在切换路径里引入新的时序依赖。 */
+void arkrtos_thread_exit_code_internal(int32 code)
+{
+    int32 id = arkrtos_current_task_id;
+
+    if((id > 0) && (id <= (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        arkrtos_task_table[id - 1].exit_code = code;
+        arkrtos_task_table[id - 1].exit_code_set = 1u;
+    }
+    arkrtos_thread_exit_internal();
+}
+
+int32 arkrtos_task_exit_code(int32 task_id, int32 *p_code)
+{
+    if((task_id <= 0) || (task_id > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return 0;
+    }
+    if(arkrtos_task_table[task_id - 1].exit_code_set == 0u)
+    {
+        return 0;
+    }
+    if(p_code != 0)
+    {
+        *p_code = arkrtos_task_table[task_id - 1].exit_code;
+    }
+    return 1;
+}
+#endif /* ARKRTOS_USE_EXIT_CODE */
+
 volatile uint32 arkrtos_interrupt_nest = 0;
 uint32 arkrtos_kernel_tick = 0;
 int32  arkrtos_current_task_id = 0;
@@ -1312,7 +1347,13 @@ static void svc_thread_ctrl(void *p_svc_ctx)
             break;
         case ARKRTOS_THREAD_SUB_EXIT:
             arkrtos_thread_exit_internal();
-            break;
+            break;
+#if (ARKRTOS_USE_EXIT_CODE == 1)
+        case ARKRTOS_THREAD_SUB_EXIT_CODE:
+            /* U-8：p[1] = 退出码。参数块本身已由上面的 svc_args_ok 校验过。 */
+            arkrtos_thread_exit_code_internal((int32)p[1]);
+            break;
+#endif
         default:
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
