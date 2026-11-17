@@ -1,0 +1,44 @@
+# 编辑器约定。声明在这里的规则分两类：
+#
+#   * C 源的四条（无制表符 / 无行尾空白 / 文件以换行结尾 / 无 UTF-8 BOM）
+#     由 tools/format_gate.py 强制，接在 ci_gate 里（第 45 项）。加规则请先加判据
+#     与喂毒自检，再改这里 —— 顺序反了就又回到「风格靠人」。
+#   * 其余（缩进宽度、列宽、markdown 的空白）只是编辑器行为，没有门禁：
+#     本机没有 clang-format，也没法安全重排 22 个 GBK 旧文件。
+#
+# 刻意不写 charset：仓库里 UTF-8（77 个）与 GBK（22 个）并存，任何全局
+# charset = utf-8 都会诱导编辑器把 GBK 旧文件转码 —— 那正是本项目最不能出的事。
+# 编码口径由 ci_gate 的 encoding 项判（能解成 UTF-8 就是 UTF-8，否则 GBK）。
+# 也刻意不写 end_of_line：工作区里 CRLF / LF 混杂是刻意的，全树 eol 规则会改写
+# 一半文件。单个文件内部不许混行尾，由 ci_gate 的 mixed-eol 项负责。
+
+root = true
+
+[*]
+indent_style = space
+indent_size = 4
+trim_trailing_whitespace = true
+insert_final_newline = true
+max_line_length = 120
+
+# 汇编里制表符是列对齐惯例（kernelsrc/port/arm/*/arkrtos_context.S）。
+[*.{s,S}]
+indent_style = tab
+
+# make 的配方行必须是真制表符。
+[Makefile]
+indent_style = tab
+[*.mk]
+indent_style = tab
+
+# 行末两个空格是硬换行，别被「删行尾空白」吃掉。
+[*.{md,markdown}]
+trim_trailing_whitespace = false
+indent_size = 2
+max_line_length = off
+
+[*.{yml,yaml,json}]
+indent_size = 2
+
+[*.py]
+indent_size = 4

@@ -346,6 +346,33 @@ def check_encoding_eol():
         ok("mixed-eol", "no file mixes CRLF and LF")
 
 
+# ---------------------------------------------------------------- check 3b
+def check_format_baseline():
+    """格式基线（.editorconfig 里声明的四条）必须真被判到，且门禁自己不失明。
+
+    这几条是纯字节判断（无制表符 / 无行尾空白 / 文件以换行结尾 / 无 UTF-8 BOM），
+    不解码、不转码，所以对仓库里 22 个 GBK 旧文件同样成立 —— 这也是选了这四条、
+    而不是上 clang-format 的原因：这台机器没有 clang-format，网络也装不了，而整
+    文件重排版会把 GBK 字节改坏。
+
+    它抓到的第一件真事就够本：`kernelsrc/src/arkrtos_task.c` 里 1143 行、加上
+    `arkrtos_shell.h` 1 行，行尾是 `\r\r\n`（多一个 CR）。这种文件在编译器眼里
+    等同于普通 CRLF，但任何按行处理的脚本（diff、统计、断言）都会把它当成"行尾有
+    空白"，而且它让「这一行到底改了什么」永远看不出来。
+
+    自检失败不算通过：`FORMAT-GATE selfcheck FAIL` 说明判据本身没在匹配（走错目录、
+    后缀写错、豁免表过宽），那时候报"0 违规"是假绿。
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "format_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if "selfcheck ok" not in txt:
+        fail("format", "selfcheck did not run: %s" % txt.strip()[-300:])
+        return
+    if r.returncode == 0 and "FORMAT-GATE OK" in txt:
+        ok("format", txt.strip().splitlines()[-1])
+    else:
+        fail("format", txt.strip()[-400:])
+
 # ---------------------------------------------------------------- check 4
 def check_doc_index(dry_run=None):
     """Every docs/*.md page must be reachable from docs/README.md.
@@ -1468,6 +1495,7 @@ CHECK_TABLE = (
     ("partition-twin", check_partition_twins),
     ("single-address-source", check_single_address_source),
     ("encoding", check_encoding_eol),
+    ("format", check_format_baseline),
     ("doc-index", check_doc_index),
     ("api-doc", check_api_doc_fresh),
     ("layout-check", check_layout_and_scatter),

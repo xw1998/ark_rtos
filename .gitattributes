@@ -1,0 +1,20 @@
+# 只做两件事：给两个行尾异常的文件关掉转换，把二进制类型标清楚。
+#
+# 刻意不写 `* text=auto` / `eol=`：本仓库 index 里 2093 个 .c/.h 是 LF，
+# 工作区因 core.autocrlf=true 检出为 CRLF，另有 22 个 GBK 旧文件在工作区就是
+# LF（`arkrtos_hal.h` 是 GBK+LF）。任何 `eol=` 全树规则都会把其中一半改写掉，
+# 制造几万行的不可审 diff。单个文件内部「不许混 CRLF/LF」由 ci_gate 的
+# mixed-eol 项负责，不要在这里用属性去表达。
+#
+# 下面两行是例外：它们是全仓仅有的两个 index blob 为 CRLF 的文件（历史遗留），
+# core.autocrlf=true 会在 `git add` 时把它们整篇改写成 LF —— 一次删 3919 行、
+# 加 3919 行，真实改动（去掉 1143 个多余 CR）反而看不见。-text 关掉行尾转换，
+# 让 diff 只包含真正改的那几行。
+
+kernelsrc/src/arkrtos_task.c      -text
+kernelsrc/include/arkrtos_shell.h -text
+
+*.bin binary
+*.elf binary
+*.axf binary
+*.o   binary

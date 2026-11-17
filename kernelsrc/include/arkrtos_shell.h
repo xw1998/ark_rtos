@@ -40,7 +40,7 @@ int32 arkrtos_shell_uart_handle(void);
 * @return 设备句柄；打开失败返回 -1
 */
 int32 arkrtos_shell_uart_open(void);
-
+
 /**
 * @brief 往内核控制台注册一条用户态（App / 驱动）命令
 * @param cmd 用户态描述符；name / help 会被复制进内核 RAM，
