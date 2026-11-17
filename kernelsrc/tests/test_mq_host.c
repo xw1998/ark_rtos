@@ -17,6 +17,7 @@
 
 #include "arkrtos_mq.h"
 #include "arkrtos_cfg.h"
+#include "arkrtos.h"   /* arkrtos_mq_recv_from_isr 的公开声明在这里（mq.h 只有 *_internal） */
 
 #include <stdio.h>
 #include <string.h>

@@ -104,6 +104,8 @@ static void use_task(int idx, uint8 prio)
 #if defined(ARKRTOS_SYNC_HOST_TEST)
 /* 宿主上直接摆出等待关系：阻塞路径要真调度器，宿主拿不到，
  * 但链式继承的判定只依赖「谁持有哪把锁、谁在等谁」这张图。 */
+extern arkrtos_sem_obj_t arkrtos_sems[ARKRTOS_SEM_NUM];
+extern arkrtos_cond_obj_t arkrtos_conds[ARKRTOS_COND_NUM];
 extern arkrtos_mtx_obj_t arkrtos_mtxs[ARKRTOS_MTX_NUM];
 void arkrtos_mtx_propagate(void);
 void arkrtos_mtx_recalc_priority(int32 idx);
@@ -321,6 +323,57 @@ int main(void)
     check(arkrtos_cond_delete_internal(cond) == 0, "cond delete succeeds");
     check(arkrtos_cond_signal_internal(cond) == -1, "signal on a deleted cond is rejected");
     check(arkrtos_cond_delete_internal(cond) == -1, "deleting it twice is rejected");
+
+    /* ============ 任务下线收尸（arkrtos_sync_release_task） ============ */
+    /* 2026-11-17：-Wall -Wextra 在这份模块上抓到 p_tsk 声明了却从未赋值——
+     * 三张表的等待队列都在拿一个野指针做比较。后果不是"报错"，而是静默：
+     * 死任务永远留在别人的等待队列里（之后再被唤醒就是踩一个已经不存在的
+     * 任务），它持有的锁也永远不会交出去。下面这几条就是钉住修好后的行为。 */
+    {
+        int32 mh = arkrtos_mtx_create_internal("mdead");
+        int32 mi = mh & ARKRTOS_HANDLE_RELMASK;
+        int32 sh = arkrtos_sem_create_internal("sdead", 0);
+        int32 si = sh & ARKRTOS_HANDLE_RELMASK;
+        arkrtos_sync_dbg_row_t d;
+
+        for(i = 0; i < ARKRTOS_TASK_MAX_NUM; i++)
+        {
+            memset(&arkrtos_task_table[i], 0, sizeof(arkrtos_task_table[i]));
+            arkrtos_task_table[i].status = ARKRTOS_TASK_INVALID;
+        }
+        use_task(1, 3);      /* 等着那把锁的任务：优先级高于死任务 */
+        use_task(2, 6);      /* 要下线的任务：持锁，同时也排在信号量上 */
+        use_task(3, 9);      /* 不相干的任务：它的登记必须活下来 */
+
+        check((mh >= 0) && (sh >= 0), "both objects for the teardown case were created");
+
+        arkrtos_mtxs[mi].owner         = &arkrtos_task_table[2];
+        arkrtos_mtxs[mi].orig_priority = arkrtos_task_table[2].priority;
+        arkrtos_mtxs[mi].waiters[0]    = &arkrtos_task_table[1];
+        arkrtos_task_table[1].status   = ARKRTOS_TASK_WAIT;
+        arkrtos_sems[si].waiters[0]    = &arkrtos_task_table[2];
+        arkrtos_sems[si].waiters[1]    = &arkrtos_task_table[3];
+
+        arkrtos_sync_release_task(3);   /* 下标 2 的任务 = 任务 id 3 */
+
+        check(arkrtos_mtxs[mi].owner == &arkrtos_task_table[1],
+              "a mutex held by a dying task is handed to the highest-priority waiter");
+        check(arkrtos_task_table[1].status == ARKRTOS_TASK_READY,
+              "the handover puts the receiver back on the ready list");
+        check((arkrtos_task_table[1].wake_reason & ARKRTOS_WAKE_HANDOFF) != 0,
+              "the wake carries the HANDOFF reason, not a plain one");
+        check(arkrtos_mtxs[mi].waiters[0] == 0,
+              "the receiver is no longer queued on that mutex");
+        check(arkrtos_sems[si].waiters[0] == 0,
+              "the dying task is swept out of a semaphore queue it sat on");
+        check(arkrtos_sems[si].waiters[1] == &arkrtos_task_table[3],
+              "another task's registration on the same semaphore survives");
+        check((arkrtos_sync_sem_debug(si, &d) == 0) && (d.nwait == 1) &&
+              (d.waiter_id[0] == 0u) && (d.waiter_id[1] == 4u),
+              "the debug view agrees: the dead slot is empty and task 4 is still queued");
+        check((arkrtos_sync_mtx_debug(mi, &d) == 0) && (d.owner_id == 2),
+              "the debug view reports the mutex owner as task 2");
+    }
 
     if(g_fail != 0)
     {

@@ -1360,6 +1360,43 @@ def check_coverage_host():
     else:
         fail("coverage-host", "gate failed: %s" % txt.strip()[-400:])
 
+def check_warn_host():
+    """-Wall -Wextra must be silent on every host-compilable translation unit.
+
+    This is the only "look at the code without running it" step this machine
+    can actually do: there is no cppcheck / MISRA / clang-tidy, and GCC 4.8 has
+    no -fanalyzer. It is NOT static analysis, and must never be reported as
+    "static analysis done" -- it is the compiler's own semantic pass turned up
+    from its defaults.
+
+    Scope is honest and narrow: the 10 host test files, the 10 kernel modules
+    they link, and the SDK stdio test. Everything else in kernelsrc/ needs an
+    architecture toolchain (armcc/armclang, loongarch64, riscv64) to compile at
+    all, so it is out of reach here.
+
+    It has already paid for itself: on 2026-11-17 it found p_tsk declared and
+    never assigned in arkrtos_sync_release_task(), which meant a dying task was
+    never removed from any waiting queue and the mutex it held was never handed
+    over -- compiles clean, fails silently on a board.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "warn_gate.py"),
+                    "--selfcheck"])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode != 0 or "selfcheck ok" not in txt:
+        fail("warn-clean", "selfcheck did not see a deliberate warning: %s"
+             % txt.strip()[-300:])
+        return
+    if "WARN-GATE selfcheck FAIL" in txt:
+        fail("warn-clean", "selfcheck reported a blind gate")
+        return
+    r = _run_check([sys.executable, os.path.join("tools", "warn_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "WARN-GATE OK" in txt:
+        ok("warn-clean",
+           "21 host-compilable TU(s) build with zero -Wall -Wextra warnings (compiler pass, not static analysis)")
+    else:
+        fail("warn-clean", "gate failed: %s" % txt.strip()[-400:])
+
 def main(argv):
     do_build = "--build" in argv
     uv4 = None
@@ -1395,6 +1432,7 @@ def main(argv):
     check_fifo_host()
     check_fault_host()
     check_coverage_host()
+    check_warn_host()
     check_tickless()
     check_arkmake_syntax()
     check_rtstat_syntax()

@@ -17,15 +17,15 @@
 #include "arkrtos_cfg.h"
 #include "arkrtos_trace.h"     /* kernel auto hooks: object waits/wakes as sync records */
 
-static arkrtos_sem_obj_t arkrtos_sems[ARKRTOS_SEM_NUM];
 #if defined(ARKRTOS_SYNC_HOST_TEST)
 #define ARKRTOS_SYNC_STATIC        /* 宿主测试要直接摆等待关系，不藏对象表 */
 #else
 #define ARKRTOS_SYNC_STATIC static
 #endif
 
+ARKRTOS_SYNC_STATIC arkrtos_sem_obj_t arkrtos_sems[ARKRTOS_SEM_NUM];
+ARKRTOS_SYNC_STATIC arkrtos_cond_obj_t arkrtos_conds[ARKRTOS_COND_NUM];
 ARKRTOS_SYNC_STATIC arkrtos_mtx_obj_t arkrtos_mtxs[ARKRTOS_MTX_NUM];
-static arkrtos_cond_obj_t arkrtos_conds[ARKRTOS_COND_NUM];
 
 /* Token-conservation diagnostics.  Both counters are only incremented on
  * paths where the kernel refused to claim a success it could not prove, so a
@@ -506,6 +506,15 @@ void arkrtos_sync_release_task(int32 task_id)
     /* A dead task can never come back to poll: the marker has to go with it,
      * or posters keep skipping a slot nobody will ever serve again. */
     arkrtos_appq_set(&arkrtos_task_table[task_id - 1], 0u);
+
+    /* -Wall caught a real one here: p_tsk was declared and never
+     * assigned, so the cond / sem / mtx sweeps below compared every
+     * waiter against a garbage pointer (undefined behaviour, and in
+     * practice the dead task was never removed from any waiting queue,
+     * and a mutex it owned was never handed over). It is this task's
+     * slot, and the appq_set above already assumes task_id is valid. */
+    p_tsk = &arkrtos_task_table[task_id - 1];
+
 
     for(i = 0; i < ARKRTOS_COND_NUM; i++)
     {
