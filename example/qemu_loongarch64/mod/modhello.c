@@ -58,5 +58,10 @@ int module_main(int argc, char **argv)
     s_calls++;
     arkrtos_mod_printf("%s tick %u -> %u, calls=%d\n", s_tag, t0, t1, s_calls);
     arkrtos_mod_printf("%s bye\n", s_tag);
-    return 0;
+
+    /* 模块的返回值就是它的结论：内核在退出路径里把它转成任务退出码
+     * （开档时），shell 的 wait <task id> 能读到。这里故意返回 argc
+     * 而不是 0 —— 「没有码」和「码是 0」在读数上必须能分开，而 0 恰好
+     * 是最容易被误当默认值的那一个。 */
+    return argc;
 }

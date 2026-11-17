@@ -2400,6 +2400,14 @@ TCB 有两个字段且在 `is_priv` 之前 → `arkrtos_task.c` 有实现、有 
 开档走 `arkrtos_thread_exit_code(code)`、关档 `#else` 仍调 `arkrtos_thread_exit()`。
 F2 同样带两条变异自检。
 
+**F2b pin（另外两条退出路径）**：小程序 SDK（`kernelsrc/sdk/mini_sdk/arkrtos_mini_main.c`）
+的 `arkrtos_mini_exit(code)` 与可下载模块（`kernelsrc/src/arkrtos_modld.c` 的
+`mod_task_tramp`）——前者要求 `exit(code)` 在开关闸门里调
+`arkrtos_thread_exit_code(code)`，后者要求入口返回值先被**接住**
+（`rc = (int32)p_fn(...)`）再交出去（`arkrtos_thread_exit_code_internal(rc)`）。
+只查「有没有 `#if`」抓不到「码到手却丢掉」，所以断言落在接住与交出两个动作上，
+并各配一条变异自检。
+
 同时把 F pin 的打印串断言从 `"exit code %d"` **收窄**成
 `"finished after %u ms (space %u, exit code %d)"`：`cmd_wait` 里也有
 `"exit code %d"`，不收窄的话「把 exec 那处改坏」的变异不再使 F pin 失败，
@@ -2412,16 +2420,19 @@ F2 同样带两条变异自检。
   `status` 变成 `ARKRTOS_TASK_INVALID` 后**只读**地取一次 TCB 里的码。所以它不等于
   「回收子进程」，也做不了「等任意一个子进程」（没有这个概念）；槽被复用后读到的
   码属于新任务。
-- **mini_sdk / driver_sdk 没接线**：只做了 `app_sdk` 的 `oslib`（`arkrtos_app_exit`
-  把 C 库 `exit()` 收到的码转成 `arkrtos_thread_exit_code(code)`）。
+- **driver_sdk 没接线**（这是取舍，不是缺口）：驱动任务不是「跑完就退」的程序，
+  没有 `exec` / `wait` 那样的观察者，码写进 TCB 也没有人读。`app_sdk` 与
+  `mini_sdk` 都接了（C 库 `exit()` 收到的码转成 `arkrtos_thread_exit_code(code)`），
+  可下载模块由装载器在 `module_main` 返回后转发（`arkrtos_thread_exit_code_internal(rc)`）。
 - **码只在 TCB 槽被复用前有效**：若任务死后立刻有大量建/删任务把该槽复用，
   码就丢了（实测 exec 的 20 ms 轮询使这窗口实际不可达，但机制上没有保护）。
 - **板级只开了 LA64**：`board/qemu_loongarch64/arkrtos_board_config.h` 里
   `ARKRTOS_USE_EXIT_CODE` 被 `#undef` 后重定义为 1，命令行关不掉；RV32 板配置没开，
   因此 32 位侧只有「关档零变化」这一条读数，**RV32 开档没有任何 QEMU 读数**。
 - **ARM 侧只编译、没上板**：`example/stm32f427/app_sdk/HELLO_APP/GCC` 关档与
-  `DEFS="-DARKRTOS_USE_EXIT_CODE=1"` 开档都能编过并链接成 `build/hello_app.elf`，
-  没有实机读数。
+  `DEFS="-DARKRTOS_USE_EXIT_CODE=1"` 开档都能编过并链接成 `build/hello_app.elf`；
+  小程序侧 `HELLO_MINI/GCC` 两档也都编过（关档 484/8/28，开档 480/8/28——开档
+  更小是因为少了「忽略码再纯退出」那层包装），都没有实机读数。
 
 #### 5.20.7 读数：`wait` 与 main 返回值转码（2026-11-17）
 
@@ -2429,8 +2440,8 @@ F2 同样带两条变异自检。
 期望子串2`），没有竖线就等于只发不判。这一点要诚实记下来：**此前用 `--script`
 得到的 `SHELL-DRIVE OK` 期望集是空的，只证明命令发进去了、回显里有那几个字**。
 
-LA64 默认档（`build/qemu_la64_zero`，带 `wait` 后 text 367744 / data 416 / bss 767508），
-五条判据一次跑过：
+LA64 默认档（`build/qemu_la64_zero`：`wait` 那一笔 text 367744，再把小程序与模块的
+退出码转发接上后 **367824** / data 416 / bss 767508），五条判据一次跑过：
 
 | 命令 | 期望子串 | 实测回显 |
 | --- | --- | --- |
@@ -2440,9 +2451,13 @@ LA64 默认档（`build/qemu_la64_zero`，带 `wait` 后 text 367744 / data 416 
 | `wait 47` | `no such task 47` | `wait: no such task 47` |
 | `wait 0` | `usage` | 用法串 |
 
-无码路径单独跑一次（`ld /mnt/ram/modhello.o alpha 42`：模块落 task 4、退出时**没有**
-上报码）：`wait 4` → `task 4 exited (no exit code reported)`，两次都是
-`SHELL-DRIVE OK: N 条命令全部符合预期`。
+模块路径（`ld /mnt/ram/modhello.o alpha 42`）：示例模块的 `module_main` 现在
+`return argc;`，装载器的退出路径把它转发成任务退出码，于是
+`wait 4` → `task 4 exited (exit code 3)`——**非零**读数，0 与「没上报」在读数上
+分得开（没上报那条是 `exited (no exit code reported)`，本轮在模块接线之前实测过）。
+
+小程序（`mini_sdk`）这条路只到编译：它的宿主是 ARM 工程，本机没有板级读数；
+所以在表里它是「已接线、未上板」，不要读成「小程序退出码已验证」。
 
 **关档零变化**由 RV32 逐字节证明：当前树（LA64 侧的 `wait` 与 app_main 改动都在，
 但 RV32 板 `ARKRTOS_USE_EXIT_CODE` 为 0）构建出 text 235828 / data 128 / bss 628228，

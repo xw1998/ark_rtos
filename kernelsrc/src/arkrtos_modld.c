@@ -968,6 +968,7 @@ static void mod_task_tramp(void)
 {
     arkrtos_task_t *p_self = arkrtos_task_get_current();
     int32 i;
+    int32 rc = 0;
 
     for(i = 0; i < ARKRTOS_MOD_SLOTS; i++)
     {
@@ -977,11 +978,21 @@ static void mod_task_tramp(void)
             int (*p_fn)(int, char **) =
                 (int (*)(int, char **))(unsigned long)s_slots[i].entry;
 
-            (void)p_fn((int)s_slots[i].argc, s_mod_argp[i]);
+            /* 模块的 module_main 返回值就是它的结论。有一个口子必须说清：
+             * 这是「模块自己声明的码」，不是内核判定——返回 0 只表示它没
+             * 报告失败。 */
+            rc = (int32)p_fn((int)s_slots[i].argc, s_mod_argp[i]);
             break;
         }
     }
+#if (ARKRTOS_USE_EXIT_CODE == 1)
+    /* 开档：把码交给内核（与 App 走同一条 SVC 落地路径），shell 的
+     * wait <task id> 能读到；关档仍走纯退出，逐位不变。 */
+    arkrtos_thread_exit_code_internal(rc);
+#else
+    (void)rc;
     arkrtos_thread_exit_internal();
+#endif
     for(;;)
     {
     }

@@ -310,6 +310,36 @@ def main():
             "arkrtos_task_exit_code(id32, 0)", 1), text_appmain):
         failures.append("F2 自检：把 wait 的取码改成不落 code 后 pin 仍然通过（空转）")
 
+    # F2b：另外两条退出路径——小程序 SDK 的 main 返回值、可下载模块的入口
+    # 返回值。两处都是「码已经到手、只是没交出去」，所以 pin 必须落在
+    # 「接住」和「交出去」两个动作上，只看有没有 #if 是抓不到的。
+    text_mini  = _read("kernelsrc/sdk/mini_sdk/arkrtos_mini_main.c")
+    text_modld = _read("kernelsrc/src/arkrtos_modld.c")
+
+    def pin_f2b(mini, modld):
+        bad = []
+        if "#if (ARKRTOS_USE_EXIT_CODE == 1)" not in mini:
+            bad.append("F2b: 小程序 SDK 的转码没有开关闸门（关档会多出符号）")
+        if "arkrtos_thread_exit_code(code);" not in mini:
+            bad.append("F2b: 小程序 SDK 的 exit(code) 没有把码交给内核")
+        if "rc = (int32)p_fn((int)s_slots[i].argc, s_mod_argp[i]);" not in modld:
+            bad.append("F2b: 模块入口的返回值没有被接住（码到手就丢）")
+        if "arkrtos_thread_exit_code_internal(rc);" not in modld:
+            bad.append("F2b: 模块退出路径没有把码交给内核")
+        return bad
+
+    got2b = pin_f2b(text_mini, text_modld)
+    failures.extend(got2b)
+    if not got2b and not pin_f2b(
+            text_mini.replace("arkrtos_thread_exit_code(code);",
+                              "arkrtos_thread_exit();", 1), text_modld):
+        failures.append("F2b 自检：小程序 SDK 改回普通退出后 pin 仍然通过（空转）")
+    if not got2b and not pin_f2b(
+            text_mini,
+            text_modld.replace("arkrtos_thread_exit_code_internal(rc);",
+                               "arkrtos_thread_exit_internal();", 1)):
+        failures.append("F2b 自检：模块退出改回不带码后 pin 仍然通过（空转）")
+
     # --- G. 接线 pin（U-4 收尾）-----------------------------------------
     # 这些 pin 防的都是「看起来做了、其实没接线」：字段偏移抄错一位、链接基址
     # 与板级窗口宏各写一个值、MPU 的 ELF 分支被谁删了、竞态修复的临界区只包了
@@ -409,7 +439,7 @@ def main():
         return 1
 
     print("ELF-GATE OK: 默认档=0 / LA64 打开编得过(2 TU) / RV32 打开也编得过(U-4) / "
-          "缺窗口宏被拒 / 线上格式常量未漂 / U-8 退出码通道 F pin 成立且自检有效 / "
+          "缺窗口宏被拒 / 线上格式常量未漂 / U-8 退出码通道 F pin 与 F2/F2b（wait / App·小程序 SDK / 模块）成立且自检有效 / "
           "U-4 接线 G pin 成立且两项变异自检有效")
     return 0
 

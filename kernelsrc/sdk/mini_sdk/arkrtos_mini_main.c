@@ -16,7 +16,10 @@
 *
 *          返回语义：小程序是"跑完就退"的一次性程序，`main` 返回（或调用
 *          `exit()`）即结束任务，内核立刻归还代码块与 RAM 块——与标准 C
-*          的进程退出一致。
+*          的进程退出一致。`ARKRTOS_USE_EXIT_CODE=1` 的构建里 `main` 的返回
+*          值一路变成任务退出码（SVC 0x1B/4），shell 的 `wait <task id>` 能
+*          读到；关档时忽略码、行为与改动前逐位相同。小程序没有"父进程"，
+*          所以这个码是**旁观者读数**，不会有人被唤醒。
 *
 *          arkc 档**不要编这个文件**：arkc 的入口同样是工程自己的
 *          `int main(void)`，但它的退出由启动桩
@@ -32,15 +35,20 @@
 #include "arkrtos.h"
 
 /**
-* @brief 标准 C 的退出路径：结束当前小程序任务
-* @param code 退出码（保留；当前内核不按退出码做判定）
+* @brief 标准 C 的退出路径：结束当前小程序任务（带退出码）
+* @param code 退出码；ARKRTOS_USE_EXIT_CODE=1 时交给内核（SVC 0x1B/4），
+*             shell 的 wait 能读到；关档时忽略，行为与之前的普通退出逐位相同
 * @note 不会返回。内核在任务退出钩子里归还代码块与 RAM 块。
 */
 void arkrtos_mini_exit(int code)
 {
+#if (ARKRTOS_USE_EXIT_CODE == 1)
+    arkrtos_thread_exit_code(code);
+#else
     (void)code;
 
     arkrtos_thread_exit();
+#endif
 
     for(;;)
     {
