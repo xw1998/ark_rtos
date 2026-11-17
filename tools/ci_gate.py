@@ -1393,7 +1393,7 @@ def check_warn_host():
     txt = ((r.stdout or "") + (r.stderr or "")).strip()
     if r.returncode == 0 and "WARN-GATE OK" in txt:
         ok("warn-clean",
-           "21 host-compilable TU(s) build with zero -Wall -Wextra warnings (compiler pass, not static analysis)")
+           "21 host-compilable TU(s) build with zero -Wall -Wextra -Wshadow warnings (compiler pass, not static analysis)")
     else:
         fail("warn-clean", "gate failed: %s" % txt.strip()[-400:])
 

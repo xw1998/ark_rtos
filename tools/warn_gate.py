@@ -6,9 +6,15 @@
 ----------------
 这台机器上没有 cppcheck / MISRA / clang-tidy，GCC 4.8 也没有 -fanalyzer
 （GCC 10 才有），所以"静态分析"这条欠账没法照抄现成工具。能做的最强的一步
-是把编译器自己的语义分析开到满：-Wall -Wextra 覆盖未初始化、隐式声明、
-有符号/无符号混用、返回值未用、数组越界初判等。它**不等于静态分析**，只是
-比默认告警多看一眼。
+是把编译器自己的语义分析开到满：-Wall -Wextra -Wshadow 覆盖未初始化、隐式声明、
+有符号/无符号混用、返回值未用、数组越界初判、内外层变量同名遮蔽等。它
+**不等于静态分析**，只是比默认告警多看一眼。
+
+更重的告警集为什么不一起开（2026-11-17 实测计数，21 个 TU）：
+-Wconversion 33 条、-Wsign-conversion 27 条、-Wmissing-prototypes 一类 25 条。
+这些是类型收窄/接口暴露的风格问题，逐条改等于改内核 API 与数据通路，风险
+远大于收益，要动必须先单独定口径。所以本门禁只钉住「编译器能确定是错的」
+那一档，并把上面这三个数字登记在 docs/欠账盘点.md 里。
 
 它抓到过真东西：2026-11-17 它在 arkrtos_sync.c 上翻出 arkrtos_sync_release_task()
 里的 p_tsk 声明了却从未赋值 —— 死任务的锁永远不会移交、等待队列永远摘不干净。
@@ -25,6 +31,7 @@ riscv64 工具链）编，那是另一件事，本门禁不声称覆盖它们。
 判据与边界
 ----------
 * 判据 = 每一条 TU 编译成功且输出里没有 "warning:"。有任何一条告警就红。
+* 选项集固定为 -Wall -Wextra -Wshadow；加选项要先在宿主 21 个 TU 上跑成零告警。
 * 这里只证明"编译器在这个配置下没话说"，不证明没有逻辑缺陷；也不是 MISRA /
   认证意义上的静态分析。别拿它当"静态分析已完成"。
 * 宏组合与 tools/ci_gate.py 里对应的 *-host 检查逐条一致；改那边要同步这里。
@@ -64,7 +71,7 @@ def _dec(b):
 
 def compile_one(cc, src, defs):
     cmd = ([cc] + mingw_prefix(cc) +
-           ["-std=gnu11", "-O0", "-Wall", "-Wextra", "-c", "-o", os.devnull,
+           ["-std=gnu11", "-O0", "-Wall", "-Wextra", "-Wshadow", "-c", "-o", os.devnull,
             src] + list(defs) + COMMON_INC)
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True)
     out = _dec(r.stdout) + _dec(r.stderr)
@@ -131,7 +138,7 @@ def main():
     if bad:
         print("WARN-GATE FAIL: %d 个 TU 有问题（共 %d 条告警）" % (bad, total))
         return 1
-    print("WARN-GATE OK  (%d 个宿主可编 TU，-Wall -Wextra 零告警；"
+    print("WARN-GATE OK  (%d 个宿主可编 TU，-Wall -Wextra -Wshadow 零告警；"
           "这不是静态分析，内核其余文件由各自工具链编)" % len(tus))
     return 0
 
