@@ -205,6 +205,19 @@ int32 arkrtos_paging_bind_task(arkrtos_task_t *p_task, uint32 space);
 /** @brief Space a task is bound to (0 when unknown) */
 uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task);
 
+/** @brief Give an address space's frames back to the pool (U-3 leftover)
+ *  @param space 0 .. arkrtos_paging_space_count()-1
+ *  @return 0 = returned (also when it never took any); -1 = bad space;
+ *          -2 = no frame pool behind the window; -3 = refused because the
+ *          caller is standing inside the window VA; -4 = pool refused
+ *  @details Call it only when no App task is alive in that space: the window
+ *           entries of that space are dropped first, so anyone still running
+ *           there would fault on its next fetch. The space itself stays
+ *           (space_count does not change); the next activate() asks for fresh
+ *           frames again, which is what makes repeated exec runs stop draining
+ *           the pool. */
+int32 arkrtos_paging_space_release(uint32 space);
+
 /* ------------------------------------------------------------------
  * 4 KB page-frame pool (U-3)
  *
@@ -252,6 +265,7 @@ uint32 arkrtos_paging_frame_used(void);
 #define arkrtos_paging_space_activate(space)                 (-1)
 #define arkrtos_paging_bind_task(p_task, space)              (-1)
 #define arkrtos_paging_space_of(p_task)                      (0u)
+#define arkrtos_paging_space_release(space)                  (-1)
 #define arkrtos_paging_frame_alloc(count, p_base)            (-1)
 #define arkrtos_paging_frame_free(base, count)               (-1)
 #define arkrtos_paging_frame_total()                         (0u)

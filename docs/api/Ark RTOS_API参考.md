@@ -19,7 +19,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（51 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（52 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -30,7 +30,7 @@
 - [kernelsrc/include/arkrtos_mempool.h](#kernelsrcincludearkrtos_mempoolh)（9 项）
 - [kernelsrc/include/arkrtos_mini.h](#kernelsrcincludearkrtos_minih)（20 项）
 - [kernelsrc/include/arkrtos_modld.h](#kernelsrcincludearkrtos_modldh)（8 项）
-- [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（19 项）
+- [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（20 项）
 - [kernelsrc/include/arkrtos_net.h](#kernelsrcincludearkrtos_neth)（6 项）
 - [kernelsrc/include/arkrtos_ptable.h](#kernelsrcincludearkrtos_ptableh)（23 项）
 - [kernelsrc/include/arkrtos_rt.h](#kernelsrcincludearkrtos_rth)（13 项）
@@ -53,7 +53,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（11 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（55 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（56 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（16 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -85,7 +85,7 @@
 - [kernelsrc/src/arkrtos_mini.c](#kernelsrcsrcarkrtos_minic)（1 项）
 - [kernelsrc/src/arkrtos_modld.c](#kernelsrcsrcarkrtos_modldc)（5 项）
 - [kernelsrc/src/arkrtos_mpu.c](#kernelsrcsrcarkrtos_mpuc)（1 项）
-- [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（23 项）
+- [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（24 项）
 - [kernelsrc/src/arkrtos_smp.c](#kernelsrcsrcarkrtos_smpc)（1 项）
 - [kernelsrc/src/arkrtos_task.c](#kernelsrcsrcarkrtos_taskc)（5 项）
 - [kernelsrc/src/arkrtos_tickless.c](#kernelsrcsrcarkrtos_ticklessc)（1 项）
@@ -3480,6 +3480,26 @@ uint32 arkrtos_port_paging_space_count(void);
 
 **板级给了几个 App 地址空间（>= 1） */**
 
+### `int32 arkrtos_port_paging_space_release(uint32 space);`
+
+```c
+int32 arkrtos_port_paging_space_release(uint32 space);
+```
+
+**Give a space's frames back to the pool (U-3 leftover)**
+- `space`：0 .. arkrtos_port_paging_space_count()-1
+**返回**：0 = returned (also when the space never took any frames);
+-1 = bad space; -2 = this build has no frame pool behind the
+window; -3 = the caller is standing inside the window VA
+(nothing touched); -4 = the pool refused (its own -1/-3 passed on)
+空间回收：把该空间从帧池拿走的帧还回去，并且**先把窗口里属于它的
+条目撤掉**。不撤的话，帧已经回到池子、旧条目还指着那块物理页 ——
+它被别的空间拿走之后两个空间就共享内存，而且没有任何报错。
+只有页级窗口（ARKRTOS_USE_PAGING_PAGES=1）有帧可还；PS=20 的静态
+窗口是板级固定地址，没有可回收的东西，返回 -2。
+归还之后空间仍然存在（space_count 不变），下一次 activate() 会
+重新要帧 —— 语义是「这个空间空着」，不是「这个空间没了」。 */
+
 ### `uint32 arkrtos_port_paging_lookup(uint32 va, uint32 *index, uint32 *pp`
 
 ```c
@@ -5068,6 +5088,24 @@ uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task);
 ```
 
 **Space a task is bound to (0 when unknown) */**
+
+### `int32 arkrtos_paging_space_release(uint32 space);`
+
+```c
+int32 arkrtos_paging_space_release(uint32 space);
+```
+
+**Give an address space's frames back to the pool (U-3 leftover)**
+- `space`：0 .. arkrtos_paging_space_count()-1
+**返回**：0 = returned (also when it never took any); -1 = bad space;
+-2 = no frame pool behind the window; -3 = refused because the
+caller is standing inside the window VA; -4 = pool refused
+Call it only when no App task is alive in that space: the window
+entries of that space are dropped first, so anyone still running
+there would fault on its next fetch. The space itself stays
+(space_count does not change); the next activate() asks for fresh
+frames again, which is what makes repeated exec runs stop draining
+the pool. */
 
 ### `int32 arkrtos_paging_frame_alloc(uint32 count, uint32 *p_base);`
 
@@ -8058,6 +8096,27 @@ $s0 指向的目标帧恢复寄存器。
 PRMD 也要在这里补：C 侧的 LA_PRIV_APPLY 在「窗口还没换」的时候
 执行，它写进去的是旧窗口里的那块内存，不是目标帧。
 
+### `int32 arkrtos_port_paging_space_release(uint32 space)`
+
+```c
+int32 arkrtos_port_paging_space_release(uint32 space)
+```
+
+**把一个地址空间的物理帧还给帧池**
+- `space`：空间号
+**返回**：0 = 已归还（本来就没拿过也算 0，幂等）；-1 = 空间号越界；
+-2 = 这一档没有帧池可还（PS=20 静态窗口）；-3 = 调用者正站在
+这个窗口里（调用者自己的栈就在这块窗口里），此时一个字节都不动；-4 = 帧池拒绝
+（它的 -1/-3 原样透出，账本保持原样）
+归还之前先把窗口里属于这个空间的东西撤掉，理由只有一条但足够：
+帧还回池子之后会被别的空间拿走，而旧条目仍然指着它 —— 两个空间
+共享同一块物理页，没有任何报错，只在很久以后显形。
+撤法按档走：页级窗口整段逐页 invtlb（QEMU 的 softmmu 缓存按 VA
+记翻译）；按需档没有「整块帧」，逐对 free 并清账本。
+s_pg_app_space 保持原值：这个空间仍然存在，只是空着；下一次
+activate() 会重新要帧（ensure 看到基址 0 就再要一块）。这与
+「sid 不存在」是两件事，压成一个状态会让 activate 的短路判据骗人。
+
 ### `void la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_fr`
 
 ```c
@@ -9849,6 +9908,23 @@ uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task)
 ```
 
 **Space a task is bound to (0 for unbound / unknown)**
+
+### `int32 arkrtos_paging_space_release(uint32 space)`
+
+```c
+int32 arkrtos_paging_space_release(uint32 space)
+```
+
+**把一个地址空间的帧还给帧池（空间回收，U-3 遗留）**
+- `space`：0 .. arkrtos_paging_space_count()-1
+**返回**：0 = 已归还（本来就没拿过也算 0，幂等）；-1 = 空间号越界；
+-2 = 这一档没有帧池（PS=20 静态窗口）；-3 = 调用者正站在窗口里，
+本轮一个字节都不动；-4 = 帧池拒绝（原样透出它的 -1/-3）
+调用点只有装载器：它挑中的空间一定没有活实例（台账判据），所以
+撤窗口条目不会打断任何正在跑的程序。撤条目的理由见 port 侧注释
+—— 帧回到池子里而旧条目还指着它，是「两个空间共享同一块物理页」
+这种只在很久以后才显形的错。归还之后空间仍然存在，下一次
+activate() 重新要帧，于是反复 exec 不再把池子一格一格吃掉。
 
 ### `int32 arkrtos_paging_frame_alloc(uint32 count, uint32 *p_base)`
 

@@ -1306,6 +1306,98 @@ void la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_frame)
     new_frame[LA_FR_PRMD] = (new_frame[LA_FR_PRMD] & ~3UL) | (unsigned long)s_next_pplv;
 }
 
+/* ------------------------------------------------------------ 空间回收 (U-3) */
+
+/**
+* @brief 把一个地址空间的物理帧还给帧池
+* @param space 空间号
+* @return 0 = 已归还（本来就没拿过也算 0，幂等）；-1 = 空间号越界；
+*         -2 = 这一档没有帧池可还（PS=20 静态窗口）；-3 = 调用者正站在
+*         这个窗口里（调用者自己的栈就在这块窗口里），此时一个字节都不动；-4 = 帧池拒绝
+*         （它的 -1/-3 原样透出，账本保持原样）
+* @details 归还之前先把窗口里属于这个空间的东西撤掉，理由只有一条但足够：
+*          帧还回池子之后会被别的空间拿走，而旧条目仍然指着它 —— 两个空间
+*          共享同一块物理页，没有任何报错，只在很久以后显形。
+*          撤法按档走：页级窗口整段逐页 invtlb（QEMU 的 softmmu 缓存按 VA
+*          记翻译）；按需档没有「整块帧」，逐对 free 并清账本。
+*          s_pg_app_space 保持原值：这个空间仍然存在，只是空着；下一次
+*          activate() 会重新要帧（ensure 看到基址 0 就再要一块）。这与
+*          「sid 不存在」是两件事，压成一个状态会让 activate 的短路判据骗人。
+*/
+int32 arkrtos_port_paging_space_release(uint32 space)
+{
+#if (ARKRTOS_USE_PAGING_PAGES != 1)
+    /* 静态 PS=20 窗口：帧由板级地址决定，没有从池里拿过东西，也就没有
+     * 可归还的。返回 -2 而不是 0 —— 「本来就没有」和「已经还了」分开报。 */
+    (void)space;
+    return -2;
+#else
+    uint32 i;
+    int32  rc = 0;
+
+    if(space >= (uint32)ARKRTOS_PAGING_APPS_MAX)
+    {
+        return -1;
+    }
+
+    /* 自己就站在这个窗口里时不许动：撤掉条目之后，返回地址与栈都在一个
+     * 已经不存在的翻译里，接下来的一次 ret 就是 refill 致命。判据不依赖
+     * 调用方是谁（shell / 装载器都在核心里跑）。 */
+    if((space == s_pg_app_space) && (la_sp_in_app_window() != 0u))
+    {
+        return -3;
+    }
+
+    if(space == s_pg_app_space)
+    {
+        /* 旧条目先撤。不撤 = 帧回池后被别人拿走、窗口仍指着它。 */
+        la_pg_drop_window();
+    }
+
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
+    /* 按需档：truth 在 s_pg_pair_pa，逐对还（一条 PS=12 条目管两页）。 */
+    for(i = 0u; i < LA_PG_WIN_ENTRIES; i++)
+    {
+        uint32 pa = s_pg_pair_pa[space][i];
+
+        if(pa != 0u)
+        {
+            if(arkrtos_port_paging_frame_free(pa, 2u) != 0)
+            {
+                if(rc == 0)
+                {
+                    rc = -4;    /* 第一处拒绝如实上报，不继续假装 */
+                }
+            }
+            else
+            {
+                s_pg_pair_pa[space][i] = 0u;
+            }
+        }
+    }
+
+    (void)i;
+    return rc;
+#else
+    /* 页级窗口：整块 512 帧一起还；池子那边是 all-or-nothing，拒绝时账本
+     * 一个字不改（下次 activate 仍指向同一块帧，比「以为还了其实没还」安全）。 */
+    if(s_pg_space_base[space] != 0u)
+    {
+        if(arkrtos_port_paging_frame_free(s_pg_space_base[space],
+                                          LA_PG_WIN_PAGES) != 0)
+        {
+            return -4;
+        }
+
+        s_pg_space_base[space] = 0u;
+    }
+
+    (void)i;
+    return 0;
+#endif
+#endif /* ARKRTOS_USE_PAGING_PAGES */
+}
+
 #else  /* ARKRTOS_USE_PRIV == 0：没有 TLB 通路 */
 
 int32 arkrtos_port_paging_activate(uint32 space)
@@ -1319,6 +1411,13 @@ void la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_frame)
 {
     (void)new_frame;
     (void)old_frame;
+}
+
+int32 arkrtos_port_paging_space_release(uint32 space)
+{
+    (void)space;
+
+    return -1;                           /* 没有 TLB 通路就没有窗口可撤 */
 }
 
 #endif /* ARKRTOS_USE_PRIV == 1 */

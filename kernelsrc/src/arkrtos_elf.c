@@ -771,6 +771,11 @@ int32 arkrtos_elf_exec_space(const char *path, int32 argc, char *argv[],
 #endif
 
 #if (ARKRTOS_USE_PAGING == 1)
+    /* 空间回收（U-3 遗留）：挑中的空间一定没有活实例（上面按台账挑的），
+     * 所以先把上次用过的帧还回池子，让 activate() 重新要一块。两个作用：
+     * 装载永远落在没有旧内容的帧上，且反复 exec 不会把帧池一格一格吃干。 */
+    (void)arkrtos_paging_space_release(space);
+
     /* 装载期间窗口必须指着目标空间；失败也要装回去，否则 shell 之后的
      * 每一条内存命令读到的都是别人的帧。 */
     prev = arkrtos_paging_space_current();

@@ -2590,8 +2590,7 @@ UART 页改走固定路：内核 UART **way 7**、App UART **way 6**。
 `pmap u1: rc1=-2`，修正后 `rc0=0 rc1=0`）。代码里留了注释。
 
 帧的来源与归属：`static uint32 s_pg_space_base[ARKRTOS_PAGING_APPS_MAX]`，
-`0` = 还没分配；**拿过不还**（空间回收仍是欠账，如实登记，不做「偷偷还了
-又可能被别人拿走」的那种实现）。
+`0` = 还没分配；~~拿过不还~~（当时如实登记为欠账；**已于 §5.24 补上回收**，不是「偷偷还了又可能被别人拿走」的那种实现——回收严格「先撤窗口条目再还帧」）。
 
 #### 5.22.4 窗口 VA 挪出 shell
 
@@ -2678,9 +2677,9 @@ ci_gate 项**（与 U-8 / pin R 同一条约定）。
 - **没有按需缺页（U-5）**：装载仍然是先把 512 帧全给出去再整段铺满；
   `tlb_refill_entry` 还没有「BADV 在窗口内 ⇒ 换入一页」的分支，而且那个
   入口现在**不保存通用寄存器**，要加分支得先给它补齐保存/恢复——单独一阶。
-- **没有空间回收**：帧拿过不还，`ARKRTOS_PAGING_APPS_MAX` 个空间跑满之后
-  再要空间就是 `-3`。谁负责还、什么时候还（任务退出？最后一个实例退出？）
-  没有设计，登记为欠账。
+- ~~**没有空间回收**~~：这一阶时帧拿过不还，空间跑满后再要空间就是 `-3`。
+  **已于 §5.24 补上**（`arkrtos_paging_space_release`，装载器在 activate 之前
+  回收该空间的旧窗口）；仍未解决的是「页替换」，池空仍落回致命路径。
 - **没有 ASID**：切换空间仍靠整段 `invtlb`（512 次），跨核 TLB shootdown
   仍无从谈起（U-7）。
 - **窗口独占 way 0**：内核 UART / App UART 已经改走 way 7 / 6 让开，但
@@ -2704,8 +2703,8 @@ ci_gate 项**（与 U-8 / pin R 同一条约定）。
 - 装配方式：窗口的 way 在 §5.22 是「独占 way 0、写死 way 号」，而按需缺页要靠
   硬件 `tlbfill` 自己选组选路（见 5.23.4）。
 
-这一阶仍然**不还帧**（空间回收仍是欠账）：它改的是「什么时候装」，不是
-「装完怎么回收」。
+这一阶仍然**不还帧**：它改的是「什么时候装」，不是「装完怎么回收」。
+回收在下一节 §5.24 单独补齐（页级档整块还、按需档逐对还）。
 
 #### 5.23.2 三个静默错答案（都在 QEMU 上实测踩过）
 
@@ -2906,13 +2905,152 @@ sha256sum <head>/stripped.elf <now>/stripped.elf
 
 #### 5.23.8 明确没做的部分
 
-- **帧不还**：按需档只是「按对付款」，退出/切空间都不回收（与 §5.22 同一条欠账）。
+- ~~**帧不还**~~：这一阶按需档只是「按对付款」，退出/切空间都不回收。
+  **已由 §5.24 补上**（按需档逐对 `frame_free(pa, 2u)` 并销账）；仍未做页替换。
 - **没有 ASID**：切空间仍是整段 `invtlb`（U-7）。
 - **refill 不区分 PLV**：内核与 App 走同一条路（5.23.3 里说明了为什么必须这样）。
 - **没有页替换 / 淘汰**：帧池空了就是 `return 0` → 原来的致命路径，没有换出。
 - **只在 LA64 板级实测**：RV32 侧只有「关档零变化」这一条读数。
 - **`pmap u1/u2` 的帧号显示 0x0**：这一档的账本在 `s_pg_pair_pa`，shell 没有
   按需档专用的读数（要看清每一对，得加新命令，登记为可选）。
+
+### 5.24 空间回收（U-3 遗留，2026-11-17）
+
+#### 5.24.0 为什么是这一格
+
+U-3 三阶做完后，`docs/欠账盘点.md` 里剩下的最实一格是「帧拿过不还」：每次
+`exec` 挑一个空空间、装窗口要 512 帧（页级档）或按对付款（按需档），退出后
+一个都不还。`FRAME_COUNT = 2048`，于是**第四次 exec 就会把池吃干**，第五次
+落回原来的致命路径。这条不需要页替换（换出要挑牺牲页 + 写回，是另一条机制），
+只需要「把这一格还回去」，所以先做它。
+
+#### 5.24.1 接口与返回码
+
+一个接口，两层声明，一层转发：
+
+- `arkrtos_hal.h` / `arkrtos_mpu.h`：`int32 ...paging_space_release(uint32 space);`
+  关档恒等宏为 `(-1)`（与同族 `paging_*` 一致，关档调用点不会链接进任何东西）；
+- `arkrtos_paging.c`：越界先报 -1，其余原样转发到 port；
+- port：`arkrtos_port_paging_space_release()`。
+
+返回码写死（`0` 成功，其余一律负数，且**区分「没有」与「没还」**）：
+
+| 返回 | 含义 |
+| --- | --- |
+| `0` | 已归还。**幂等**：本来就没拿过（基址 0 / 账本全 0）也返回 0 |
+| `-1` | 空间号越界，或这一档根本没有 TLB 通路（`ARKRTOS_USE_PRIV == 0`） |
+| `-2` | 这一档没有帧池可还（`PAGES != 1`，即 PS=20 静态窗口） |
+| `-3` | 调用者的 `sp` 正站在这个空间的窗口 VA 里 —— **一个字节都不动** |
+| `-4` | 帧池拒绝（port 那边 `frame_free` 的 -1/-3 原样透出） |
+
+`-2` 与 `0` 必须分开：把「这一档本来就没从池里拿过」读成「已经还了」，会让
+上层在静态窗口档上误以为回收生效。
+
+#### 5.24.2 两档实现
+
+```c
+if (space >= APPS_MAX)                    return -1;
+if (space == s_pg_app_space && la_sp_in_app_window() != 0u) return -3;
+if (space == s_pg_app_space)              la_pg_drop_window();   /* 先撤条目 */
+```
+
+- **页级档**（`PAGING_PAGES=1, DEMAND=0`）：整块还。
+  `arkrtos_port_paging_frame_free(s_pg_space_base[space], LA_PG_WIN_PAGES)`，
+  成功才把 `s_pg_space_base[space] = 0u`。池子那边是 all-or-nothing（一次
+  验证全部帧再改位图），所以拒绝时账本一个字不改 —— 下次 `activate` 仍指向
+  同一块帧，比「以为还了其实没还」安全。
+- **按需档**（`DEMAND=1`）：truth 在 `s_pg_pair_pa[space][256]`，逐对
+  `frame_free(pa, 2u)`（一条 PS=12 条目管两页），成功才把该格清 0。第一处
+  拒绝记 `-4` 但**继续结账**（其余对还能还的就还掉），最后如实返回 -4。
+
+两档都**不动 `s_pg_app_space`**：空间仍然存在，只是空着（基址 0 / 账本全 0），
+下一次 `activate()` 的 `ensure()` 看到基址 0 会重新要帧。把「空间空了」压进
+「空间不存在」会让 `activate` 的短路判据骗人。
+
+#### 5.24.3 为什么必须「先撤条目，再还帧」
+
+反序是这一条最容易写错的地方：帧先回池、旧条目还指着它，中间只要有别人拿走
+这块帧，就会变成**两个空间共享同一块物理页**——而且没有任何报错，只在很久
+以后以「A 写了 B 也变了」的形式显形。所以顺序是死的：
+
+1. `la_pg_drop_window()`：页级档逐 4 KB `invtlb 3`（QEMU 的 softmmu 缓存按
+   VA 记翻译）；
+2. 再 `frame_free` 把帧交回池子。
+
+装载器 `arkrtos_elf_exec_space()` 里同理，`(void)arkrtos_paging_space_release(space);`
+必须落在 `arkrtos_paging_space_current()` / `activate(space)` **之前**：先回收
+要用的那个空间（它上一次留下的窗口），再激活它铺新的。反序会把刚铺好的窗口
+当场撤掉。这一条**由门禁按源码位置钉死**（`find` 位置比较），不靠注释。
+
+#### 5.24.4 QEMU 实跑读数（11 条命令全符合预期）
+
+镜像 `build/qemu_la64_rel/`（LA64 页级档，`PAGES=1, DEMAND=0`），
+`tools/qemu_shell_drive.py` 驱动，日志 `build/pmap_rel.log`：
+
+1. 开机 `pmap frame` → `used=512 free=1536`（space 0 启动时铺了一块）；
+2. `pmap rel 1` → `space 1 rc=0 frames 512 -> 512 (frame=0x00000000 current=0)`
+   —— 从未分配过的空间，**幂等 no-op**，帧数一分不动；
+3. `pmap rel 0` → `space 0 rc=0 frames 512 -> 0`；随后 `pmap frame` →
+   `used=0 free=2048`（整池干净）；
+4. `pmap space` → `spaces=2 current=0`，两个空间都 `frame 0x00000000`
+   —— **空间号还在，只是空着**，与 5.24.2 的口径一致；
+5. `pmap space 1` → `rc=0 (current=1)` 重新要帧 → `pmap frame` → `used=512`；
+   再 `pmap rel 1`（`current=1`、调用者在核心栈上）→ `rc=0 frames 512 -> 0`，
+   `current` 仍 1，`pmap frame` → `used=0`；
+6. `exec /mnt/ram/hello a b` → `finished after 0 ms (space 0, exit code 3)`，
+   随后 `pmap frame` → `used=1024 free=1024` = 程序自己那块 512 + 装载器装回
+   `prev`（space 1）又 512。**这就是回收生效的形态**：以前反复 exec 是单向
+   累加，现在同一空间复用时先还被再重拿，`used` 不随 exec 次数单调上涨。
+
+#### 5.24.5 没实跑的分支（必须如实写）
+
+`-3`（调用者 `sp` 就在窗口 VA 里）**只有源码判据，没有实跑**。现有调用点
+只有两处：`pmap rel`（在 shell 上下文，内核栈）与装载器（同样在内核栈），
+都不在窗口里。要造出这个调用者需要一个「App 在自己窗口里调内核回收自己」
+的用例，当前没有 —— 登记为可选，不写成已验证。
+
+`-2`（静态 PS=20 窗口档）也没有专门跑一次 shell 命令，它是编译期分支
+（`PAGES != 1`），由门禁的源码断言覆盖。
+
+#### 5.24.6 门禁：`paging_gate.py` 的 pin U + 两条自检
+
+沿用 R/S/T 的约定（**不新增 `ci_gate.py` 项**），新增 `pin_u()`：
+
+- port 侧：函数存在、越界 -1、`space == s_pg_app_space` 与
+  `la_sp_in_app_window() != 0u` 加 `return -3;`、先 `la_pg_drop_window();`、
+  页级档 `frame_free(s_pg_space_base[space],` 与 `LA_PG_WIN_PAGES`、按需档
+  `frame_free(pa, 2u)` 与销账 `s_pg_pair_pa[space][i] = 0u;`、静态档 `return -2;`；
+- hal / mpu：声明与关档宏；
+- `arkrtos_paging.c`：转发；
+- `arkrtos_elf.c`：**release 必须在 activate 之前**（比较 `find` 位置）；
+- shell：`pmap rel` 用法与读数行。
+
+两条防假绿自检：把 `frame_free` 调用改坏、把 elf 里那句 release 删掉，
+pin U 都必须报错。`PAGING-GATE OK`，末段含
+`U-3 空间回收 U pin 成立且自检有效`。
+
+#### 5.24.7 关档零变化（RV32，固定时间戳比 sha256）
+
+RV32 档 `PAGING=0`，新增代码全在 `#if` 内。证据不是「体积没变」而是逐字节：
+
+```bash
+SOURCE_DATE_EPOCH=1600000000 make -f example/qemu_riscv32/Makefile BUILD=<dir> -j8
+riscv64-unknown-elf-objcopy --strip-debug <dir>/ark_qemu_rv32.elf <dir>/stripped.elf
+sha256sum <head>/stripped.elf <now>/stripped.elf
+```
+
+`git worktree add ../ark_rtos_head 4d12e10` 出基线，两侧 `stripped.elf`
+**逐字节相同**（`7cf766ae...`）；`size` 同为 `text 235828 / data 128 /
+bss 628228`。
+
+#### 5.24.8 仍然没做的
+
+- **页替换**：池空仍然落回致命路径，不换出、不淘汰；
+- **ASID / TLB shootdown**（U-7）：切空间仍是整段 `invtlb`，回收也没有按
+  ASID 定向；
+- **按需档的细粒度读数**：`pmap rel` 只报整池 `used` 前后值，没有「这个空间
+  现在挂着哪几对」的命令；
+- **App 侧自回收**：`-3` 分支就是为它留的门，但当前没有这个调用者。
 
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
@@ -3430,7 +3568,7 @@ RV32 另有 `MPU=1 PRIV=1`（PMP + U 模式），LA64 是 `MPU=0 PRIV=1`（PLV3 
 | 安全自检 `ARKRTOS_USE_SECCHECK` | **实跑** `12 checks - pass 7, fail 0, finding 2, skip 3`、`gates.kernel bits=0xFF (need 0x3F), iso=1`（MPU）、`sign/hwsafe=0x3` | 同上但 `iso=2`（分页 + PLV） | 编译 |
 | 软总线 `ARKRTOS_USE_SOFTBUS` | **实跑** `bus selftest: ALL PASS`（9 项 / 56 断言）、`bus info` peer online | **实跑** 同上 | 编译 |
 | 网络（lwip） | 未做（无网络后端） | 未做（同左） | 未做 |
-| `exec` 原生 ELF64（`ARKRTOS_USE_ELF`，PLV3） | 未做（`arkrtos_elf.c` 只支持 64 位 `long`，见 U-4） | **实跑**：`[ELF] ... rc=0` + 程序自报 `argc/argv`，连跑 10 次（[MMU进程模型与ELF装载](MMU进程模型与ELF装载.md) §5） | 未做（同左，编成空目标） |
+| `exec` 原生 ELF64（`ARKRTOS_USE_ELF`，PLV3） | 未做（`arkrtos_elf.c` 只支持 64 位 `long`，见 U-4） | **实跑**：`[ELF] ... rc=0` + 程序自报 `argc/argv`，连跑 10 次（[MMU进程模型与ELF装载](MMU进程模型与ELF装载.md) §5）；2026-11-17 起装载器在 `activate` 之前回收该空间的旧窗口（`used` 512→0→512，反复 `exec` 不再吃干帧池，§5.24 有 11 条读数） | 未做（同左，编成空目标） |
 | `ld` 可下载模块（`ARKRTOS_USE_MODLOAD`，PLV0） | 未做（32 位被 `#error` 挡住，负向用例在 `tools/modld_gate.py` F 段） | **实跑**：`ld rc=0 [base=... relocs=165 imports=8]`，`lkup/modules/unld` 走通（[MMU平台可下载模块-VxWorks式](MMU平台可下载模块-VxWorks式.md) §5） | 未做（同左） |
 | App 装载族（apppack / miniapp / apprun / flashapp） | 未做（缺 arkc RV32 后端） | 未做（缺 arkc loongarch 后端；板级 `APPRUN/FLASHAPP` 也置 0） | 未做 |
 | 镜像签名 `ARKRTOS_USE_IMAGE_SIGN` | **实跑** `sign_hmac_and_loader_gate`（整块/流式同口径、篡改与 `-18` 装载门） | **实跑** 同左 | 编译 |

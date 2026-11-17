@@ -345,6 +345,28 @@ uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task)
     return (uint32)s_pg_task_space[idx];
 }
 
+/**
+* @brief 把一个地址空间的帧还给帧池（空间回收，U-3 遗留）
+* @param space 0 .. arkrtos_paging_space_count()-1
+* @return 0 = 已归还（本来就没拿过也算 0，幂等）；-1 = 空间号越界；
+*         -2 = 这一档没有帧池（PS=20 静态窗口）；-3 = 调用者正站在窗口里，
+*         本轮一个字节都不动；-4 = 帧池拒绝（原样透出它的 -1/-3）
+* @details 调用点只有装载器：它挑中的空间一定没有活实例（台账判据），所以
+*          撤窗口条目不会打断任何正在跑的程序。撤条目的理由见 port 侧注释
+*          —— 帧回到池子里而旧条目还指着它，是「两个空间共享同一块物理页」
+*          这种只在很久以后才显形的错。归还之后空间仍然存在，下一次
+*          activate() 重新要帧，于是反复 exec 不再把池子一格一格吃掉。
+*/
+int32 arkrtos_paging_space_release(uint32 space)
+{
+    if(space >= arkrtos_port_paging_space_count())
+    {
+        return -1;
+    }
+
+    return arkrtos_port_paging_space_release(space);
+}
+
 /* ------------------------------------------------------------------
  * 4 KB page-frame pool (U-3)
  *

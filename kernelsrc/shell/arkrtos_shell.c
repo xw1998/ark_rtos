@@ -6266,6 +6266,8 @@ static int cmd_unld(int argc, char *argv[])
  *            pmap wrb  <va> <byte>                     经映射写一个字节（MMIO 才用）
  *            pmap test                                 自测：内核 ROM 页映射后逐字比对
  *            pmap space [n]                            地址空间：读（无参）或切换
+ *            pmap rel <n>                              空间回收（U-3）：把该空间
+ *                                                      的帧还回池子，读数前后 frames
  *            pmap u1                                   自测：同一 VA 在两个空间里是
  *                                                      两块物理内存（U-1 的读数）
  *            pmap elf                                  每空间一份的 ELF 实例台账
@@ -6699,6 +6701,31 @@ static int cmd_pmap(int argc, char *argv[])
 
         sh_out("pmap test: PASS (map / unmap / rebind / unmap)\r\n");
         return 0;
+    }
+
+    if((argc >= 3) && (strcmp(argv[1], "rel") == 0))
+    {
+        uint32 want = 0u;
+        uint32 before;
+        uint32 after;
+        int32  rcv;
+
+        if(pmap_hex(argv[2], &want) != 0)
+        {
+            sh_out("usage: pmap rel <space>\r\n");
+            return -1;
+        }
+
+        before = arkrtos_paging_frame_used();
+        rcv    = arkrtos_paging_space_release(want);
+        after  = arkrtos_paging_frame_used();
+        ark_shell_printf("pmap rel: space %u rc=%d frames %u -> %u "
+                         "(frame=0x%08X current=%u)\r\n",
+                         (unsigned)want, (int)rcv,
+                         (unsigned)before, (unsigned)after,
+                         (unsigned)arkrtos_paging_space_frame(want),
+                         (unsigned)arkrtos_paging_space_current());
+        return (rcv == 0) ? 0 : 1;
     }
 
     if((argc >= 2) && (strcmp(argv[1], "space") == 0))

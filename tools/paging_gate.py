@@ -740,6 +740,58 @@ def main():
             bad.append("T: 老档的 refill 入口（换静态栈 + la_refill_c）不见了")
         return bad
 
+    def pin_u(port, pg, sh, hal, mpu, elf):
+        bad = []
+        body = _body(port, "int32 arkrtos_port_paging_space_release(")
+        if not body:
+            bad.append("U: port 里没有 arkrtos_port_paging_space_release（空间回收）")
+        else:
+            if "space == s_pg_app_space" not in body:
+                bad.append("U: 回收不看「这个空间是不是正装着」")
+            if "la_pg_drop_window();" not in body:
+                bad.append("U: 回收前不撤窗口条目（帧回池后旧条目仍指着它 = 两空间共享物理页）")
+            if "la_sp_in_app_window() != 0u" not in body:
+                bad.append("U: 回收不拒「调用者就站在窗口里」（撤条目后 ret 直接 refill）")
+            if "return -3;" not in body:
+                bad.append("U: 站在窗口里时不返回 -3")
+            if "arkrtos_port_paging_frame_free(s_pg_space_base[space]," not in body:
+                bad.append("U: 页级档不把整块空间帧还回池子")
+            if "LA_PG_WIN_PAGES" not in body:
+                bad.append("U: 归还帧数不是窗口那一整块（LA_PG_WIN_PAGES）")
+            if "arkrtos_port_paging_frame_free(pa, 2u)" not in body:
+                bad.append("U: 按需档不按「一对 = 两帧」归还")
+            if "s_pg_pair_pa[space][i] = 0u;" not in body:
+                bad.append("U: 按需档还了帧不销账（下一次缺页会拿到已回收的帧）")
+            if "return -2;" not in body:
+                bad.append("U: 没有帧池的档不返回 -2（「本来就没有」与「已归还」混成一个答案）")
+        if "int32 arkrtos_port_paging_space_release(uint32 space);" not in hal:
+            bad.append("U: hal 里没有 space_release 的声明")
+        if "#define arkrtos_port_paging_space_release(space)   (-1)" not in hal:
+            bad.append("U: hal 的关档回退里没有 space_release")
+        if "int32 arkrtos_paging_space_release(uint32 space);" not in mpu:
+            bad.append("U: mpu.h 里没有 space_release 的声明")
+        if "#define arkrtos_paging_space_release(space)                  (-1)" not in mpu:
+            bad.append("U: mpu.h 的关档回退里没有 space_release")
+        w = _body(pg, "int32 arkrtos_paging_space_release(")
+        if (not w) or ("arkrtos_port_paging_space_release(space)" not in w):
+            bad.append("U: paging.c 的 space_release 没转发到 port")
+        eb = _body(elf, "int32 arkrtos_elf_exec_space(")
+        if not eb:
+            bad.append("U: 找不到 arkrtos_elf_exec_space 的定义")
+        else:
+            i_rel = eb.find("arkrtos_paging_space_release(space)")
+            i_act = eb.find("arkrtos_paging_space_activate(space)")
+            if i_rel < 0:
+                bad.append("U: exec_space 装载前不回收该空间（反复 exec 会吃干帧池）")
+            elif (i_act >= 0) and (i_rel > i_act):
+                bad.append("U: exec_space 先 activate 后回收（回收会把刚铺好的窗口撤掉）")
+        if 'strcmp(argv[1], "rel")' not in sh:
+            bad.append("U: shell 没有 pmap rel 分支")
+        elif "arkrtos_paging_space_release(want)" not in sh:
+            bad.append("U: shell 的 pmap rel 没有调 space_release")
+        if "pmap rel: space %u rc=%d frames %u -> %u" not in sh:
+            bad.append("U: pmap rel 不打印回收前后的帧数（没有读数就不是判据）")
+        return bad
 
         for msg in (pin_e(src_pg) + pin_f(src_port) +
                     pin_g(src_hal, src_mpu) + pin_h(src_sh) +
@@ -751,7 +803,8 @@ def main():
                     pin_q(src_port) + pin_r(src_pg, src_port, src_sh, src_hal, src_mpu) +
                     pin_s(src_port, src_hal, src_mpu, src_pg, src_sh,
                           src_feats, src_kconf, src_board) +
-                    pin_t(src_port, src_asm, src_feats, src_kconf, src_board)):
+                    pin_t(src_port, src_asm, src_feats, src_kconf, src_board) +
+                    pin_u(src_port, src_pg, src_sh, src_hal, src_mpu, src_elf)):
             failures.append("源码 pin 不成立 " + msg)
 
         # 自检：把每条 pin 依赖的那一句改坏，对应 pin 必须报错
@@ -813,6 +866,13 @@ def main():
             ("T", pin_t(src_port.replace("static uint32 s_pg_pair_pa[",
                                           "static uint32 s_pg_pair_pX[", 1),
                         src_asm, src_feats, src_kconf, src_board)),
+            ("U", pin_u(src_port.replace(
+                "arkrtos_port_paging_frame_free(s_pg_space_base[space],",
+                "arkrtos_port_paging_frame_free(s_pg_space_base[space]X,", 1),
+                src_pg, src_sh, src_hal, src_mpu, src_elf)),
+            ("U-", pin_u(src_port, src_pg, src_sh, src_hal, src_mpu,
+                         src_elf.replace("(void)arkrtos_paging_space_release(space);",
+                                         "", 1))),
             ("T-", pin_t(src_port,
                          src_asm.replace("la.abs  $r21, la_refill_stack_top",
                                           "la.abs  $t0, la_refill_stack_top", 1),
@@ -837,7 +897,8 @@ def main():
           "U-6 受控用户拷贝 P pin 与 invtlb 后重写窗口 Q pin 成立且自检有效 / "
           "U-3 页帧池 R pin 成立且自检有效 / "
           "U-3 第二阶页级窗口 S pin 成立且自检有效 / "
-          "U-3 第三阶按需缺页 T pin 成立且自检有效（C 侧真编、.S 侧真汇编）")
+          "U-3 第三阶按需缺页 T pin 成立且自检有效（C 侧真编、.S 侧真汇编） / "
+          "U-3 空间回收 U pin 成立且自检有效")
     return 0
 
 

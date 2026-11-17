@@ -472,6 +472,21 @@ uint32 arkrtos_port_paging_space_frame(uint32 space);
 /** @brief 板级给了几个 App 地址空间（>= 1） */
 uint32 arkrtos_port_paging_space_count(void);
 
+/** @brief Give a space's frames back to the pool (U-3 leftover)
+ *  @param space 0 .. arkrtos_port_paging_space_count()-1
+ *  @return 0 = returned (also when the space never took any frames);
+ *          -1 = bad space; -2 = this build has no frame pool behind the
+ *          window; -3 = the caller is standing inside the window VA
+ *          (nothing touched); -4 = the pool refused (its own -1/-3 passed on)
+ *  @details 空间回收：把该空间从帧池拿走的帧还回去，并且**先把窗口里属于它的
+ *           条目撤掉**。不撤的话，帧已经回到池子、旧条目还指着那块物理页 ——
+ *           它被别的空间拿走之后两个空间就共享内存，而且没有任何报错。
+ *           只有页级窗口（ARKRTOS_USE_PAGING_PAGES=1）有帧可还；PS=20 的静态
+ *           窗口是板级固定地址，没有可回收的东西，返回 -2。
+ *           归还之后空间仍然存在（space_count 不变），下一次 activate() 会
+ *           重新要帧 —— 语义是「这个空间空着」，不是「这个空间没了」。 */
+int32 arkrtos_port_paging_space_release(uint32 space);
+
 /** @brief 读回一个 VA 当前由哪条 TLB 条目翻译（诊断用）
  *  @return 1 = 命中（index/ppn/ps 被写）；0 = 未命中（输出参数不动）
  *  @details 只读，不建映射。用于分辨「tlbwr 没生效」与「生效了但查找命中
@@ -520,6 +535,7 @@ uint32 arkrtos_port_paging_window_va(void);
 #define arkrtos_port_paging_space()                (0u)
 #define arkrtos_port_paging_space_frame(space)     (0u)
 #define arkrtos_port_paging_space_count()          (1u)
+#define arkrtos_port_paging_space_release(space)   (-1)
 #define arkrtos_port_paging_lookup(va, index, ppn, ps) (0u)
 #define arkrtos_port_paging_flush(base, size)
 #define arkrtos_port_paging_frame_alloc(count, p_base)  (-1)
