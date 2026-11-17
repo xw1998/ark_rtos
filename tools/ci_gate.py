@@ -1334,6 +1334,32 @@ def check_softbus_sync_header():
         ok("softbus-sync", "header commit matches VENDOR.md (%s)"
            % h.group(1)[:12])
 
+def check_coverage_host():
+    """Line coverage of the modules the host tests actually link.
+
+    The *-host checks above answer "did the case pass". A case can pass while
+    walking a third of the module, and that looks identical in this report.
+    tools/coverage_gate.py rebuilds those same cases with --coverage, runs
+    gcov, and compares each module's line coverage against the floor recorded
+    in tools/coverage_baseline.json.
+
+    Read the number for what it is: coverage of ONE .c per case (the one the
+    host test links), not of the kernel. Most of the kernel (scheduler, SVC,
+    drivers, shell) is not linked on the host at all, so whole-kernel coverage
+    is far below these numbers and this gate says nothing about it. The floor
+    is "not lower than when it was measured", not an industry target; when it
+    drops the right move is to add a case, and only with a stated reason to
+    re-pin the baseline (--update).
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "coverage_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "COVERAGE-GATE OK" in txt:
+        mods = len([l for l in txt.splitlines() if l.startswith(("ok  ", "new "))])
+        ok("coverage-host", "%d host-linked module(s) at or above the pinned line-coverage floor"
+           % mods)
+    else:
+        fail("coverage-host", "gate failed: %s" % txt.strip()[-400:])
+
 def main(argv):
     do_build = "--build" in argv
     uv4 = None
@@ -1368,6 +1394,7 @@ def main(argv):
     check_loader_host()
     check_fifo_host()
     check_fault_host()
+    check_coverage_host()
     check_tickless()
     check_arkmake_syntax()
     check_rtstat_syntax()

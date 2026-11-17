@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""宿主用例的行覆盖率门禁：把"没测过的行"变成可数的数字。
+
+为什么需要这一项
+----------------
+ci_gate 里那 9 条 *-host 检查只回答"用例过了没有"。用例过了但只走到模块的
+三成代码，与走了八成代码，在这套门禁里长得一模一样。覆盖率把这件事变成一行
+可比的数字，并且可以设一条"不许低于当前值"的下限——回归时掉下去就红。
+
+这台机器上没有 cppcheck / gcov 的板端工具链也没关系：宿主用例本来就是用
+MinGW gcc 编的，gcc 自带 --coverage + gcov，不需要额外装东西。
+
+口径（写死，避免误读）
+----------------------
+* 只量 kernelsrc/src 里**被宿主用例链接的那一个 .c**，不量测试文件本身，也不量
+  整仓。所以本门禁的数字**不代表内核整体覆盖率**——内核绝大多数的行（调度、
+  SVC、驱动、shell）在宿主上根本没有被链接。
+* 行覆盖率 = gcov 报的 Lines executed 那一行，分子分母都由 gcov 给，本文不重算。
+* 门槛是"不低于基线"，不是"达到某个行业标准"。基线由 --update 从实测写入
+  （见 tools/coverage_baseline.json），加代码导致覆盖率下降时会红，需要人工
+  判断是"该补用例"还是"该改基线"，不许默默调低。
+* 阻塞 / 上板路径在宿主上走不到，所以覆盖率天然有天花板。这是设计事实，不是
+  缺陷——别把它读成"这模块测好了"。
+
+用法
+----
+    python tools/coverage_gate.py                # 量一遍并和基线比
+    python tools/coverage_gate.py --update       # 用实测值重写基线
+    python tools/coverage_gate.py --gcc D:/mingw/MinGW/bin/gcc.exe
+
+退出码 0 = 全过；1 = 有用例失败 / 编不出来 / 覆盖率低于基线。
+"""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+BASELINE = os.path.join(HERE, "coverage_baseline.json")
+
+GCC_FALLBACKS = [
+    "gcc",
+    r"D:\mingw\MinGW\bin\gcc.exe",
+    r"C:\mingw64\bin\gcc.exe",
+    os.environ.get("ARKRTOS_HOST_CC", ""),
+]
+
+COMMON_INC = [
+    "-Ikernelsrc/include",
+    "-Ikernelsrc/components/mdk_trace",
+    "-Iboard/stm32f427",
+    "-Iconfig",
+]
+
+# (名字, 测试源, 被量的内核源, 额外宏, 成功标记)
+# 宏与标记逐条对齐 tools/ci_gate.py 里对应的 *-host 检查，改那边要同步这里。
+CASES = [
+    ("utest", "tools/utest_host_selftest.c",
+     ["kernelsrc/src/arkrtos_utest.c"], [], "HOST-SELFTEST OK"),
+    ("sbuf", "kernelsrc/tests/test_sbuf_host.c",
+     ["kernelsrc/src/arkrtos_sbuf.c"], ["-DARKRTOS_USE_SBUF=1"], "SBUF-HOST OK"),
+    ("mempool", "kernelsrc/tests/test_mempool_host.c",
+     ["kernelsrc/src/arkrtos_mempool.c"], ["-DARKRTOS_USE_MEMPOOL=1"],
+     "MEMPOOL-HOST OK"),
+    ("mq", "kernelsrc/tests/test_mq_host.c",
+     ["kernelsrc/src/arkrtos_mq.c"], ["-DARKRTOS_USE_MQ=1"], "MQ-HOST OK"),
+    ("sync", "kernelsrc/tests/test_sync_host.c",
+     ["kernelsrc/src/arkrtos_sync.c"],
+     ["-DARKRTOS_USE_MTX_RECURSIVE=1", "-DARKRTOS_SYNC_HOST_TEST"], "SYNC-HOST OK"),
+    ("loader", "kernelsrc/tests/test_loader_host.c",
+     ["kernelsrc/src/arkrtos_loader.c"],
+     ["-fno-asynchronous-unwind-tables"], "LOADER-HOST OK"),
+    ("fifo", "kernelsrc/tests/test_fifo_host.c",
+     ["kernelsrc/src/arkrtos_fifo.c"],
+     ["-fno-asynchronous-unwind-tables"], "FIFO-HOST OK"),
+    ("fault", "kernelsrc/tests/test_fault_host.c",
+     ["kernelsrc/src/arkrtos_fault.c"],
+     ["-fno-asynchronous-unwind-tables"], "FAULT-HOST OK"),
+    ("eset", "kernelsrc/tests/test_eset_host.c",
+     ["kernelsrc/src/arkrtos_eset.c"],
+     ["-DARKRTOS_USE_ESET=1", "-DARKRTOS_ESET_HOST_TEST"], "ESET-HOST OK"),
+    ("waitmulti", "kernelsrc/tests/test_waitmulti_host.c",
+     ["kernelsrc/src/arkrtos_waitmulti.c"],
+     ["-DARKRTOS_USE_WAITMULTI=1"], "WM-HOST OK"),
+]
+
+
+def find_cc(explicit):
+    for cand in ([explicit] if explicit else []) + GCC_FALLBACKS:
+        if not cand:
+            continue
+        if os.path.sep in cand or "/" in cand:
+            if os.path.isfile(cand):
+                return cand
+        else:
+            hit = shutil.which(cand)
+            if hit:
+                return hit
+    return None
+
+
+def mingw_prefix(cc):
+    """MinGW 的 gcc/gcov 要 -B<dir> 才找得到自己的 cc1 / 运行库。"""
+    norm = cc.replace("\\", "/").lower()
+    if "mingw" in norm:
+        return ["-B" + os.path.dirname(cc)]
+    return []
+
+
+def _run(cmd, cwd=None):
+    """跑一条命令并把输出解出来。MinGW 的 gcc/gcov 用本地代码页（GBK）输出，
+    直接按 UTF-8 解码会在中文诊断上抛异常，所以这里按顺序试。"""
+    r = subprocess.run(cmd, cwd=cwd, capture_output=True)
+
+    def dec(b):
+        for enc in ("utf-8", "gbk"):
+            try:
+                return b.decode(enc)
+            except Exception:
+                pass
+        return b.decode("latin-1")
+
+    return r.returncode, dec(r.stdout), dec(r.stderr)
+
+
+def parse_lines_executed(txt, src_base):
+    """从 gcov 文本里取该源文件的 Lines executed 百分比。"""
+    want = "File '" + src_base + "'"
+    cur = None
+    for line in txt.splitlines():
+        line = line.strip()
+        if line.startswith("File '"):
+            cur = line
+        elif cur and cur.startswith(want) and line.startswith("Lines executed:"):
+            val = line.split("Lines executed:")[1].split("%")[0]
+            return float(val)
+    # gcov 只处理一个源文件时，标题行可能被省略
+    for line in txt.splitlines():
+        line = line.strip()
+        if line.startswith("Lines executed:"):
+            return float(line.split("Lines executed:")[1].split("%")[0])
+    return None
+
+
+def measure(cc, name, test, mods, defs, marker):
+    """编 + 跑 + gcov，返回 {模块基名: 行覆盖率}；失败抛 RuntimeError。"""
+    base_cmd = [cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0", "--coverage"] + defs + COMMON_INC
+    with tempfile.TemporaryDirectory() as td:
+        objs = []
+        for src in [test] + mods:
+            obj = os.path.join(td, os.path.basename(src)[:-2] + ".o")
+            cmd = base_cmd + ["-c", "-o", obj, os.path.abspath(src)]
+            rc, _out, err = _run(cmd, cwd=ROOT)
+            if rc != 0:
+                raise RuntimeError("编译失败 %s: %s" % (src, err.strip()[-300:]))
+            objs.append(obj)
+        exe = os.path.join(td, "cov_" + name + (".exe" if os.name == "nt" else ""))
+        cmd = [cc] + mingw_prefix(cc) + ["--coverage", "-o", exe] + objs
+        rc, _out, err = _run(cmd, cwd=ROOT)
+        if rc != 0:
+            raise RuntimeError("链接失败 %s: %s" % (name, err.strip()[-300:]))
+        # 在临时目录里跑，.gcda 才会落在能读到的地方
+        rc, out, err = _run([exe], cwd=td)
+        out = out + err
+        if rc != 0 or marker not in out:
+            raise RuntimeError("用例没通过 %s: %s" % (name, out.strip()[-300:]))
+
+        gcov = os.path.join(os.path.dirname(cc),
+                            "gcov.exe" if os.name == "nt" else "gcov")
+        if not os.path.isfile(gcov):
+            hit = shutil.which("gcov")
+            if not hit:
+                raise RuntimeError("找不到 gcov（应与 gcc 同目录）")
+            gcov = hit
+        res = {}
+        for m in mods:
+            base = os.path.basename(m)[:-2]
+            # 注意：gcov 不认 gcc 的 -B，传了会 "invalid option -- B"
+            rc, out, err = _run([gcov, "-o", td, os.path.abspath(m)], cwd=td)
+            txt = out + err
+            pct = parse_lines_executed(txt, os.path.basename(m))
+            if pct is None:
+                raise RuntimeError("gcov 没给出覆盖率 %s: %s" % (base, txt.strip()[-300:]))
+            res[base] = pct
+        return res
+
+
+def load_baseline():
+    if not os.path.isfile(BASELINE):
+        return {}
+    with open(BASELINE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_baseline(data):
+    with open(BASELINE, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
+        f.write("\n")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--gcc", default=None)
+    ap.add_argument("--update", action="store_true",
+                    help="用实测值重写基线（只在明确理由下用）")
+    args = ap.parse_args()
+
+    cc = find_cc(args.gcc)
+    if not cc:
+        print("COVERAGE-GATE FAIL: 没有宿主 C 编译器（设置 ARKRTOS_HOST_CC）")
+        return 1
+
+    baseline = load_baseline()
+    measured = {}
+    bad = 0
+    for name, test, mods, defs, marker in CASES:
+        try:
+            res = measure(cc, name, test, mods, defs, marker)
+        except RuntimeError as exc:
+            print("FAIL %-10s %s" % (name, exc))
+            bad += 1
+            continue
+        for base, pct in sorted(res.items()):
+            measured[base] = pct
+            floor = baseline.get(base)
+            if args.update or floor is None:
+                print("new  %-24s %6.2f%%  (无基线，本次记下)" % (base, pct))
+            elif pct + 0.005 < floor:
+                print("FAIL %-24s %6.2f%%  < 基线 %.2f%%" % (base, pct, floor))
+                bad += 1
+            else:
+                print("ok   %-24s %6.2f%%  (基线 %.2f%%)" % (base, pct, floor))
+
+    if args.update:
+        save_baseline(measured)
+        print("基线已写入 %s（%d 个模块）" % (os.path.relpath(BASELINE, ROOT), len(measured)))
+
+    if bad:
+        print("COVERAGE-GATE FAIL: %d 处不达标" % bad)
+        return 1
+    print("COVERAGE-GATE OK  (%d 个模块，行覆盖率均不低于基线)" % len(measured))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
