@@ -2687,6 +2687,233 @@ ci_gate 项**（与 U-8 / pin R 同一条约定）。
   其余经 `la_tlb_fill()` 进 STLB 的条目（如果有）仍可能与窗口抢路。
 - **只在 LA64 板级打开**：RV32 侧只有「关档零变化」这一条读数。
 
+### 5.23 按需缺页（U-3 第三阶 / U-5，2026-11-17）
+
+#### 5.23.1 欠的是什么
+
+§5.22 之后窗口有了页粒度，但仍然是 **eager**：`activate()` 一被调用就把 512 帧
+全要下来、256 条条目一次铺满。于是「App 用了多少内存」与「App 有多大」仍然
+是两个无关的数 —— 2 MB 窗口哪怕只摸了 4 KB，也照付 512 帧。
+
+缺页处理这一层缺的不只是代码，还有三处**前提**：
+
+- `tlb_refill_entry` 从来**不保存通用寄存器**。它调的 `la_refill_c()` 只有两个
+  出口：换到另一个任务的帧、或者停机。按需缺页不一样 —— 装好条目之后要
+  `ertn` 回到**出错的那条指令**重试，被打断的寄存器必须原样还回去；
+- 重填上下文（`TLBRERA.ISTLBR = 1`）里能用的 CSR 与平时不同（见 5.23.2）；
+- 装配方式：窗口的 way 在 §5.22 是「独占 way 0、写死 way 号」，而按需缺页要靠
+  硬件 `tlbfill` 自己选组选路（见 5.23.4）。
+
+这一阶仍然**不还帧**（空间回收仍是欠账）：它改的是「什么时候装」，不是
+「装完怎么回收」。
+
+#### 5.23.2 三个静默错答案（都在 QEMU 上实测踩过）
+
+这一阶的难点不在逻辑，而在三条**会跑起来但答案错**的形态。三条都只在本轮
+一次实跑里暴露过一次，值得逐条写死：
+
+1. **重填上下文里不能用 `TLBEHI` + `tlbwr` 装条目。**
+   `helper_tlbwr` / `helper_tlbfill` 在 `ISTLBR = 1` 时只认
+   `CSR_TLBREHI / TLBRELO0 / TLBRELO1` 那一组镜像 CSR，忽略 `TLBEHI / TLBELO0/1`。
+   实测形态：在重填处理里写 `TLBEHI` 再 `tlbwr`，条目按硬件填的
+   `TLBREHI`（= 出错地址的 VPPN）落进去、`TLBELO` 取 `TLBRELO0/1` 的**旧值**
+   ⇒ 条目 **V = 0**。于是下一次访问命中一条 V=0 的条目，QEMU 报
+   `TLBRET_INVALID`（**不是** `TLBRET_NOMATCH`，不置 `ISTLBR`）⇒ 走 `eentry`
+   ⇒ `la_trap_c` 判 PIS 致命异常、停机：`FATAL ecode=0x2 (PIS) era=elf_memcpy`。
+   正确形态就是硬件重填处理惯用的那一套：写 `TLBREHI / TLBRELO0 / TLBRELO1`
+   再 `tlbfill`（`TLBREHI.PS` 在 bit[5:0]，VPPN 从 bit13 起 ⇒ 页基址直接或
+   `12` 就是完整值）。
+2. **`CSR.SAVE0`（0x30）在 QEMU 9.2.3 上不可用。** 规范里它是可选实现，
+   QEMU 写进去读回 **0**。第一版拿它暂存 `sp`，症状是 `la_refill_c` 里
+   `sp = 0`，第二次致命：`KERNEL refill (plv0) badv=0x15591570
+   era=arkrtos_sched_activate`。改静态槽之后才往下走。
+3. **不能先用要保存的寄存器当帧基址。** 第二版拿 `$t0` 做帧指针：`la.abs $t0,
+   <帧>` 这一步就把**被打断的 `$t0` 原值毁了**，之后才 `st.d $t0, ...` 存进去的
+   是帧地址。表现极隐蔽 —— 启动、装载、第一个 App 都正常，直到 `elf_memcpy`
+   （GCC 拿 `$t0`/`$t1` 当源/目的指针的循环）第一次缺页后才崩：源指针与目的指针
+   整段偏掉、循环尾判据不再等于 `n`，**2 MB 窗口被逐 8 KB 往外写到窗口外**，
+   停在 `badv=0x02200000 era=elf_memcpy`。定位靠临时在装载器里插桩 + 反汇编
+   （`21f4e0`–`21f504` 显示循环用 `$t0` 当源指针）。定案是改用 **`$r21`**：
+   LoongArch psABI 把它定为**保留寄存器**（内核与按 psABI 编译的 App 都不用，
+   `example/*/start.S` 里的注释也这么写），所以可以先拿它当指针、后面不必还原。
+   帧 256 字节、16 字节对齐，只放 GPR（`ERA` / `PRMD` 仍在 CSR 里）。
+
+#### 5.23.3 实现：开关、粒度、账本、流程
+
+开关三处：`ARKRTOS_USE_PAGING_DEMAND`（`arkrtos_features.h` 缺省 0 /
+`Kconfig.features` 的 `config ARKRTOS_USE_PAGING_DEMAND`，`depends on` PAGING 与
+PAGES 两条 / 板级同样缺省 0）。port 里配两条组合守卫：
+`=1 requires ARKRTOS_USE_PAGING_PAGES=1` 与 `=1 requires ARKRTOS_USE_PRIV=1`。
+
+粒度是**一对 8 KB**，不是一页：一条 `PS=12` 条目同时给出两页（`TLBELO0` 管
+`vaddr`、`TLBELO1` 管 `vaddr + 4 KB`），「装半条」表达不出来 ⇒ 要么两帧一起拿、
+要么一条都不装。
+
+账本是 `s_pg_pair_pa[space][256]`（0 = 这一对还没被摸过）。按需档里
+`s_pg_space_base` 恒 0 —— 空间不再有「整块 2 MB 的基址」，物理页是按对零散拿的。
+这也是 shell 读数的口径变化：`pmap u1` / `pmap u2` 的 `frame0` / `frame1`
+在这一档显示 `0x00000000`（`look` 报 `no entry ps=0`），它们的 PASS 判据靠
+「同一 VA 读到两份不同的内容、且对方槽位没被覆盖」，不靠帧号。
+
+流程：
+
+- `activate(space)`：`invtlb` 清掉旧空间的翻译 + 只改 `s_pg_app_space`，
+  **一条条目都不铺**，也不做「已是该空间」的短路（这一档的真相在
+  `s_pg_pair_pa`，短路省不下什么却多一条会骗人的路）；
+- 首次访问某一对 ⇒ `TLBRENTRY` ⇒ `la_refill_demand_c()`：读 `TLBRBADV`，
+  在窗口内就 `frame_alloc(2u, &pa)` 拿两帧、记账、`tlbfill` 装一条，
+  `ertn` 回原指令重试；不在窗口内 / 帧池空了就 `return 0`，汇编侧落回
+  `la_refill_c()`（原来的报错 / 杀任务路径，不返回）；
+- `la_pg_assert_window()`（撤销动态映射之后的重铺）：只补**已经付过费**的那几对。
+
+这一档**刻意不区分 PLV**：内核经窗口拷贝（ELF 装载、`pmap` 自测）与 App 自己
+访问走同一条路，否则装载器第一笔写就死在「KERNEL refill → fatal」上。
+
+#### 5.23.4 `tlbfill` 的 way 是随机的 ⇒ 两条 MMIO 页必须搬进 MTLB
+
+§5.22 靠「窗口独占 way 0、UART 写 way 7 / 6」把冲突躲开。按需档不成立：
+`tlbfill` 在 `pagesize == CSR.STLBPS`（12）时走
+`set = get_random_tlb(0, 7)` —— **way 由硬件随机挑**（`index = way*256 + set`，
+`set = (VA>>13) & 0xFF`）。窗口基址 `0x02000000`，2 MB 正好一个组（0..255）
+一条，所以窗口自己的 256 条不会自撞；但**组 0 与内核 UART `0x1fe00000` 同组**、
+组 1 与 App UART 别名 `0x02202000` 同组 ⇒ 窗口第 0 对（或第 1 对）随机落到那一
+路时就把控制台页顶掉。
+
+实测形态（两次同一形态）：`pmap u2` / `pmap test` 跑到一半
+`badv=0x1fe001e5` 致命。修法是把两条 MMIO 页搬进 **MTLB**（`tlbfill` 只碰
+STLB 0..2047，永不与 MTLB 撞），槽位分工写死在 `la_mmu_init()` 的注释里：
+
+```
++0/+1     内核两条 PS=22 大页
++2        App 整块（非页级档，PS=20）
++3..+10   动态 alias（LA_MTLB_DYN_FIRST，8 对）
++11       页帧池（PS=22）
++12/+13   内核 UART / App UART 别名（按需档专用）
+```
+
+第一版把它们放 `+3/+4`，正好和 `arkrtos_port_paging_alias()` 抢槽 ——
+`pmap test` 一登记动态映射就把控制台页顶掉（同一形态第二次踩到），于是挪到
+`+12/+13`。
+
+#### 5.23.5 构建与实跑读数
+
+按需档单独出一个 `BUILD` 目录，基线目录不动：
+
+```bash
+make -f example/qemu_loongarch64/Makefile -j8                      # 基线
+make -f example/qemu_loongarch64/Makefile BUILD=build/qemu_la64_demand \
+     EXTRA_CFLAGS=-DARKRTOS_USE_PAGING_DEMAND=1 -j8                # 按需档
+```
+
+`EXTRA_CFLAGS` 同时进 `CFLAGS` 与 `ASFLAGS` —— `.S` 也要按开关决定
+「refill 入口是否保存通用寄存器」，所以汇编侧必须看得见板级宏
+（`ASFLAGS` 里加了 `-include arkrtos_board_config.h`；这条本身不改默认档
+任何一个字节，见 5.23.6）。
+
+体积：`size` 报 text 366120 → **366152**（+32 B）、data 416 / bss 767508 不变
+（基线 `build/sde_final`，按需 `build/qemu_la64_demand`）。
+
+实跑（`--boot 25 --timeout 6`，`build/s3_run1.log`）：
+
+```
+$ pmap frame
+pmap: frames total=2048 used=14 free=2034
+
+$ exec /mnt/ram/hello one two
+[ELF] /mnt/ram/hello: 1748 B, 2 segment(s), entry 0x02000000, sp 0x021FC000, argc 3, task 4, space 0
+[hello] argv[0]=/mnt/ram/hello / [1]=one / [2]=two
+[ELF] /mnt/ram/hello: finished after 0 ms (space 0, exit code 3)
+
+$ pmap look 0x02000000
+pmap look: va=0x02000000 no entry
+
+$ pmap u1
+pmap u1: va=0x02100000 space0=0xA5A50001 space1=0xA5A50002
+pmap u1: frame0=0x00000000 frame1=0x00000000
+pmap u1: rc0=0 rc1=0
+pmap u1: look0 entry=0 ps=0 ppn=0x00000000
+pmap u1: PASS - same VA, two frames
+
+$ pmap u2
+pmap u2: same VA 0x02000000 reads 0x00150064 / 0x00150064, other slot before/after 0xA5A50202 / 0x00150064
+pmap u2: PASS - two instances, two spaces, neither frame overwritten
+
+$ pmap cu      -> PASS - from/to user, refusals -1/-2/-3/-4, kernel survived
+$ pmap test    -> PASS (map / unmap / rebind / unmap)
+$ utest run    -> 13 matched, 13 passed, 0 failed; assertions 133 run / 0 failed
+```
+
+三组读数要分开读：
+
+- `used=14` 而不是 §5.22 的 512 —— 窗口按摸到的对付款。一个 `hello`（两个
+  PT_LOAD 段 + 栈 + argv 区）摸到的对很少，加上自测的临时空间就是 14；
+- **`pmap look 0x02000000` 报 `no entry`**：这是按需档的正确形态，不是缺陷 ——
+  `activate` 之后窗口是空的，没被摸过的对没有条目。`pmap u1` 那两条
+  `look0/look1 entry=0 ps=0` 同理（它读的是切换后的空间视图）；
+- `pmap u1` / `pmap u2` 的 `frame0/frame1 = 0x0` 是账本口径（`s_pg_space_base`
+  在这一档不存在），不是「没有帧」——同一个 VA 在两空间读到两份不同的内容、
+  且退出后对方槽位没被覆盖，才是这条判据的实质。
+
+关档回归（基线目录）全部照旧：`used=512`、`pmap look 0x02000000 entry=0 ps=12
+ppn=0x04000000`、`pmap u1/u2/cu/test` 全 PASS、`utest 13/13`。
+
+#### 5.23.6 证明「关档零变化」的正确做法
+
+这一条踩过一次方法论错误，值得记下来。第一次比对是「带改动的基线镜像
+sha256 ≠ `git stash` 回 HEAD 重建的镜像 sha256」，于是怀疑是
+`ASFLAGS` 新加的 `-include` 让 `.S` 看到了板级宏。**那个结论是错的** ——
+两个镜像本来就不同，因为它们各含一个 `__DATE__` / `__TIME__` 生成的构建时间串
+（`arkrtos_shell.o` 里的 `build : Nov 17 2026 17:12:43` 一行）。
+
+正确做法两步：
+
+```bash
+# 1) 固定构建时间戳（GCC 认 SOURCE_DATE_EPOCH）
+SOURCE_DATE_EPOCH=1600000000 make -f example/qemu_loongarch64/Makefile BUILD=<dir> -j8
+# 2) 剔掉调试信息再比（DWARF 行表会随源文件改动自然变化，不是行为/体积变化）
+loongarch64-newlib-elf-objcopy --strip-debug <dir>/ark_qemu_la64.elf <dir>/stripped.elf
+sha256sum <head>/stripped.elf <now>/stripped.elf
+```
+
+实测结果：HEAD 与带改动的工作区各出一份，`stripped.elf` **逐字节相同**
+（`027dcf53...`，460264 B）。顺带把 `-include` 的嫌疑也证伪了：把
+`EXTRA_CFLAGS` 显式给成 `-DARKRTOS_USE_PAGING_DEMAND=0`（等价于「无条件让 `.S`
+看到板级宏」）再出一份，`stripped.elf` 仍然是同一串哈希。
+
+剩下的差异只有两类，都不是行为或体积：`__DATE__/__TIME__` 的时间串（不固定
+时间戳时必然不同，HEAD 自己重建两次也不同）与 DWARF（源文件改了，行表跟着改）。
+
+#### 5.23.7 门禁
+
+`tools/paging_gate.py` 新增 **pin T**（两条防假绿自检），并且这一条**真的编译**：
+
+- 源码断言：开关三处、port 的两条 `#error`、`s_pg_pair_pa`、
+  `la_pg_demand_fault` 里 `frame_alloc(2u, &pa) != 0` 与 `la_tlb_fill_refill(va,`、
+  `la_tlb_fill_refill` 里 `LA_CSRW(LA_CSR_TLBREHI` 与 `"tlbfill"`、
+  `la_refill_demand_c` 里 `LA_CSRR(LA_CSR_TLBRBADV`、MMIO 页的
+  `LA_MTLB_INDEX + 12u` / `+ 13u`、**老路径仍在**（`LA_STLB_INDEX(... KUART_WAY)`）、
+  汇编侧 `la.abs  $r21, la_refill_stack_top`、`st.d    $t0, $r21, 88`、
+  `bl      la_refill_demand_c`、`ld.d    $sp, $sp, 16`、`ertn`，以及
+  **`la.abs  $t0, la_refill_stack_top` 必须不存在**（把 5.23.2 的第 3 条钉死）、
+  老档的 `la.abs  $sp, la_refill_stack_top` + `bl la_refill_c` 仍在；
+- 两条自检：把 `s_pg_pair_pa` 改坏、把 `$r21` 换回 `$t0`，pin T 都必须报错；
+- **真编译**：`arkrtos_port.c` 带 `-DARKRTOS_USE_PAGING_DEMAND=1` 过一遍
+  `-fsyntax-only`；`arkrtos_context.S` 带同一组宏真汇编成 `.o`
+  （`-fsyntax-only` 不管汇编，这道必须用 `-c`，否则「汇编里写错了」这一整类
+  假绿都盖不到）。
+
+与 pin R / pin S 同约定：**不新增 `ci_gate.py` 项**，门禁挂 `paging_gate.py`。
+
+#### 5.23.8 明确没做的部分
+
+- **帧不还**：按需档只是「按对付款」，退出/切空间都不回收（与 §5.22 同一条欠账）。
+- **没有 ASID**：切空间仍是整段 `invtlb`（U-7）。
+- **refill 不区分 PLV**：内核与 App 走同一条路（5.23.3 里说明了为什么必须这样）。
+- **没有页替换 / 淘汰**：帧池空了就是 `return 0` → 原来的致命路径，没有换出。
+- **只在 LA64 板级实测**：RV32 侧只有「关档零变化」这一条读数。
+- **`pmap u1/u2` 的帧号显示 0x0**：这一档的账本在 `s_pg_pair_pa`，shell 没有
+  按需档专用的读数（要看清每一对，得加新命令，登记为可选）。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

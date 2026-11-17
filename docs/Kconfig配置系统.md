@@ -150,6 +150,26 @@ mpu / paging.c / shell 七处，「缺一处就静默不生效」正是要用 pi
 hal / mpu.h / paging.c / shell 的 `window_va` 转发链。
 见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.22。
 
+`ARKRTOS_USE_PAGING_DEMAND`（U-3 第三阶 / U-5 按需缺页，缺省 n，**板级也缺省 0**）
+是**唯一一个不靠板级、只靠命令行 `EXTRA_CFLAGS` 出镜像**的开关：它要改
+`arkrtos_context.S` 里 refill 入口的代码形状（是否保存全部 GPR），而基线构建
+必须逐字节不变，所以按需档单独一个 `BUILD` 目录：
+
+```bash
+make -f example/qemu_loongarch64/Makefile BUILD=build/qemu_la64_demand \
+     EXTRA_CFLAGS=-DARKRTOS_USE_PAGING_DEMAND=1 -j8
+```
+
+它在 Kconfig 里是 `depends on ARKRTOS_USE_PAGING` **再加**
+`depends on ARKRTOS_USE_PAGING_PAGES` 的 bool（按需改的是「什么时候装那 256 条
+条目」，没有页级窗口就没有落点），合法性另由 port 的两条 `#error` 兜住
+（`=1 requires ARKRTOS_USE_PAGING_PAGES=1` 与 `=1 requires ARKRTOS_USE_PRIV=1`）。
+门禁挂在 `tools/paging_gate.py` 的 **T pin**（两条变异自检 + **真编译**：C 侧
+`-fsyntax-only`、`.S` 侧真汇编成 `.o`）。注意 `EXTRA_CFLAGS` 同时进 `CFLAGS` 与
+`ASFLAGS`：`.S` 走 cpp，必须看得见板级宏才能按开关选分支；这条 `-include` 本身
+不改默认档任何一个字节（固定 `SOURCE_DATE_EPOCH` 后比 `--strip-debug` 镜像，
+哈希与改动前相同）。见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.23。
+
 ## 6. 数量限制
 
 原先散在头文件里写死的上限（任务表、同步对象表、队列、定时器、设备表、socket、

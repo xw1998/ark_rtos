@@ -99,6 +99,9 @@ extern void arkrtos_board_puthex(uint32 val);
 #define LA_CSR_TLBRENTRY    0x88
 #define LA_CSR_TLBRBADV     0x89
 #define LA_CSR_TLBRERA      0x8A
+#define LA_CSR_TLBRELO0     0x8C
+#define LA_CSR_TLBRELO1     0x8D
+#define LA_CSR_TLBREHI      0x8E        /* 重填入口用的 entryhi（PS 在 [5:0]，VPPN 从 bit13 起） */
 #define LA_CSR_TLBRPRMD     0x8F
 
 /* CRMD：PLV[1:0]、IE[2]、DA[3]、PG[4] */
@@ -427,6 +430,17 @@ int32 arkrtos_port_send_ipi(uint32 cpu)
 #endif
 #endif
 
+/* 按需缺页得长在页级窗口上（它改的是「什么时候装那 256 条条目」），
+ * 而且它要在 refill 里跑，所以还得有特权级那一档。 */
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
+#if (ARKRTOS_USE_PAGING_PAGES != 1)
+#error "ARKRTOS_USE_PAGING_DEMAND=1 requires ARKRTOS_USE_PAGING_PAGES=1"
+#endif
+#if (ARKRTOS_USE_PRIV != 1)
+#error "ARKRTOS_USE_PAGING_DEMAND=1 requires ARKRTOS_USE_PRIV=1"
+#endif
+#endif
+
 /* App 帧合法窗：App 任务的 trap 帧落在 App 页里（PLV3 页，内核可读写）。 */
 #define LA_FRAME_IN_APP(sp) \
     ((((uint32)(sp)) >= ARKRTOS_QEMU_APP_BASE) && \
@@ -547,6 +561,34 @@ static void la_tlb_write(uint32 vaddr, uint32 ps, uint32 index,
     __asm__ volatile("tlbwr" ::: "memory");
 }
 
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
+/**
+* @brief 在 TLB 重填上下文里装一条 4 KB 对（只能在 refill 入口里用）
+* @param vaddr 页对基址（8 KB 对齐）
+* @param lo0   偶页 TLBELO、lo1 奇页 TLBELO
+* @details **为什么不能在这里用 la_tlb_write()**：重填异常里 TLBRERA.ISTLBR=1，
+*          此刻 `tlbwr` 与 `tlbfill` 取的都不是 TLBEHI/TLBELO0/TLBELO1，而是
+*          TLBR* 那一组镜像 CSR。实测（QEMU 9.2.3）：重填处理里写 TLBEHI 再
+*          `tlbwr`，条目按硬件填的 TLBREHI（= 出错地址的 VPPN）落进去、
+*          TLBELO 取 TLBRELO0/1 的旧值 ⇒ V=0，于是**下一次访问变成
+*          TLBRET_INVALID 走 eentry 的 PIS**（不是重填，因为 tlbfill 只对
+*          "查不到"置 ISTLBR），直接撞上「PLV0 致命异常」停机。
+*          正确形态就是硬件重填处理惯用的那一套：写 TLBREHI/TLBRELO0/
+*          TLBRELO1 再 `tlbfill`。TLBREHI 的 PS 字段在 [5:0]，VPPN 从 bit13
+*          起 ⇒ 页基址直接或上 12 就是完整值。
+*          索引由 tlbfill 按 VA 自己算（PS==STLBPS 时进 STLB，way 0..7 由
+*          硬件随机挑）：窗口里每个 8 KB 对占一个 STLB 组、一组 8 路只用 1
+*          路，所以随便落哪一路都不会与别的对撞。
+*/
+static void la_tlb_fill_refill(uint32 vaddr, unsigned long lo0, unsigned long lo1)
+{
+    LA_CSRW(LA_CSR_TLBREHI, (unsigned long)(vaddr & ~0x1FFFu) | 12UL);
+    LA_CSRW(LA_CSR_TLBRELO0, lo0);
+    LA_CSRW(LA_CSR_TLBRELO1, lo1);
+    __asm__ volatile("tlbfill" ::: "memory");
+}
+#endif
+
 /**
 * @brief 建立静态映射并打开分页
 * @details 必须在开中断之前调用（节拍一进来就要过 TLB），也必须在
@@ -591,7 +633,23 @@ static void la_mmu_init(void)
                 LA_PTE_KERNEL(0x00800000u), LA_PTE_KERNEL(0x00C00000u));
 
     /* 内核 UART（PLV0、RW）：控制台 */
-#if (ARKRTOS_USE_PAGING_PAGES == 1)
+#if ((ARKRTOS_USE_PAGING_PAGES == 1) && (ARKRTOS_USE_PAGING_DEMAND == 1))
+    /* 按需档：窗口条目是在重填入口里用 tlbfill 装的，way 由硬件在那一个
+     * 组里**随机挑**（QEMU: get_random_tlb(0,7)），所以「给 UART 指定
+     * way 7 让开」这条在按需档不成立 —— 实测 pmap u2 跑到一半控制台那一
+     * 页被窗口第 0 对（同在第 0 组）随机顶掉，badv=0x1fe001e5 停机。
+     * 窗口永远是 PS=12 ⇒ 永远落 STLB（0..2047），把两条 MMIO 页放进
+     * MTLB 就再也不可能与窗口撞。MTLB 槽位分工写死在这里：
+     *   +0/+1 内核两条 PS=22 大页、+2 App 整块（非页级档）、
+     *   +3..+10 动态 alias（LA_MTLB_DYN_FIRST，8 对）、
+     *   +11 页帧池 PS=22，+12/+13 就是这两条 MMIO 页 —— 必须避开
+     *   +3..+10，否则 pmap test 一登记动态映射就把控制台页顶掉
+     *   （实测：badv=0x1fe001e5，同一形态第二次踩到）。 */
+    la_tlb_write(ARKRTOS_QEMU_UART_BASE & ~0xFFFu, 12u,
+                 LA_MTLB_INDEX + 12u,
+                 LA_PTE_MMIO(ARKRTOS_QEMU_UART_BASE & ~0xFFFu),
+                 LA_PTE_MMIO((ARKRTOS_QEMU_UART_BASE & ~0xFFFu) + 0x1000u));
+#elif (ARKRTOS_USE_PAGING_PAGES == 1)
     /* 页级窗口占了 way 0 的整套组，UART 页必须让开：显式写 way 7。 */
     la_tlb_write(ARKRTOS_QEMU_UART_BASE & ~0xFFFu, 12u,
                  LA_STLB_INDEX(ARKRTOS_QEMU_UART_BASE, LA_PG_KUART_WAY),
@@ -627,7 +685,15 @@ static void la_mmu_init(void)
      * 4 KB 条目会在同一组的 8 路里抢位置，而 tlbfill 的路号是随机的 ⇒
      * 控制台那一页会被顶掉。传进去的 index 对 4 KB 页无效（tlbfill 自己
      * 按 VA 选组），保留它只为让调用点与别的条目读起来对称。 */
-#if (ARKRTOS_USE_PAGING_PAGES == 1)
+#if ((ARKRTOS_USE_PAGING_PAGES == 1) && (ARKRTOS_USE_PAGING_DEMAND == 1))
+    /* 同上：按需档的窗口 way 是随机的，App UART 别名也在组 1，干脆也放
+     * MTLB +13（与上面 +12 一起避开动态映射的 +3..+10）。
+     * （这一页同时是「App 能读自己的页」的正对照，不能丢。） */
+    la_tlb_write(ARKRTOS_QEMU_APP_UART & ~0xFFFu, 12u,
+                 LA_MTLB_INDEX + 13u,
+                 LA_PTE_APP_MMIO(ARKRTOS_QEMU_UART_BASE & ~0xFFFu),
+                 LA_PTE_APP_MMIO((ARKRTOS_QEMU_UART_BASE & ~0xFFFu) + 0x1000u));
+#elif (ARKRTOS_USE_PAGING_PAGES == 1)
     la_tlb_write(ARKRTOS_QEMU_APP_UART & ~0xFFFu, 12u,
                  LA_STLB_INDEX(ARKRTOS_QEMU_APP_UART, LA_PG_AUART_WAY),
                  LA_PTE_APP_MMIO(ARKRTOS_QEMU_UART_BASE & ~0xFFFu),
@@ -746,6 +812,14 @@ static uint32 s_pg_app_space;       /* 当前装进 App 窗口的空间号 */
 static uint32 s_pg_space_base[ARKRTOS_PAGING_APPS_MAX];
 #endif
 
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
+/* 按需档的账本：每个空间 256 个 8 KB 对（一条 PS=12 条目管相邻两页），
+ * 0 = 这一对还没被摸过、没有帧。s_pg_space_base 在这档恒为 0 —— 空间不再
+ * 有一个「整块 2 MB 的基址」，物理页是按对零散拿的。 */
+static uint32 s_pg_pair_pa[ARKRTOS_PAGING_APPS_MAX][LA_PG_WIN_ENTRIES];
+static uint32 s_pg_demand_faults;   /* 装过条目的次数（诊断用） */
+#endif
+
 /* ------------------------------------------------------------
  * 每 App 地址空间（U-1）：同一 VA，不同物理帧
  * @details 本 port 没有硬件页表遍历（QEMU 9.2.3 的 cpu->ptw = OFF），所以
@@ -833,6 +907,12 @@ static int32 la_pg_space_ensure(uint32 space)
     {
         return -1;
     }
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
+    /* 按需档不在这里整块取帧：每一对 8 KB 在第一次被访问时才要两帧
+     * （见 la_pg_demand_fault），所以「空间帧基址」这个概念在这档不存在。 */
+    (void)base;
+    return 0;
+#endif
     if(s_pg_space_base[space] != 0u)
     {
         return 0;
@@ -850,6 +930,22 @@ static int32 la_pg_space_ensure(uint32 space)
 static void la_pg_install_space(uint32 space)
 {
     uint32 i;
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
+    /* 按需档：只重铺**已经付过费**的那几对（invtlb 之后要补回来，见
+     * la_pg_assert_window）；没摸过的对留空，等它自己 fault。 */
+    for(i = 0u; i < LA_PG_WIN_ENTRIES; i++)
+    {
+        uint32 pa = s_pg_pair_pa[space][i];
+
+        if(pa != 0u)
+        {
+            uint32 va = ARKRTOS_QEMU_APP_BASE + (i * 0x2000u);
+
+            la_tlb_write(va, 12u, LA_STLB_INDEX(va, LA_PG_WIN_WAY),
+                         LA_PTE_APP(pa), LA_PTE_APP(pa + 0x1000u));
+        }
+    }
+#else
     uint32 base = s_pg_space_base[space];
 
     for(i = 0u; i < LA_PG_WIN_ENTRIES; i++)
@@ -860,6 +956,7 @@ static void la_pg_install_space(uint32 space)
                      LA_PTE_APP(base + (i * 0x2000u)),
                      LA_PTE_APP(base + (i * 0x2000u) + 0x1000u));
     }
+#endif
 }
 
 /** 把整段窗口 VA 的旧翻译清掉（逐 4 KB：QEMU 按 (ASID, VA) 匹配条目） */
@@ -872,6 +969,69 @@ static void la_pg_drop_window(void)
         la_tlb_inval_page(ARKRTOS_QEMU_APP_BASE + (i * 0x1000u));
     }
 }
+
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
+/**
+* @brief 按需缺页：给 badv 所在的那一对 8 KB 拿帧并装条目
+* @param badv 触发 refill 的地址（CSR.TLBRBADV）
+* @return 1 = 条目已装好，调用方应 ertn 回到出错的那条指令重试；
+*         0 = 不归这一档管（不在窗口里 / 帧池空了），交给原来的故障路径
+* @details 粒度是**一对**而不是一页：一条 PS=12 条目同时给出两页，所以
+*          「装半条」根本表达不出来 —— 要么两帧一起拿，要么一条都不装。
+*          这一档刻意不区分 PLV：内核经窗口拷贝（ELF 装载、pmap 自测）
+*          与 App 自己访问走的是同一条路，否则装载器第一笔写就死在
+*          「KERNEL refill -> fatal」上。
+*
+*          没有帧就返回 0，让原来的路径去报错/杀任务 —— 这里绝不假装
+*          装好了（装一条 V=0 的条目会让 ertn 回到同一条指令上无限重填）。
+*/
+static int32 la_pg_demand_fault(uint32 badv)
+{
+    uint32 space = s_pg_app_space;
+    uint32 idx;
+    uint32 pa;
+
+    if((badv < ARKRTOS_QEMU_APP_BASE) ||
+       (badv >= (ARKRTOS_QEMU_APP_BASE + ARKRTOS_QEMU_APP_SIZE)))
+    {
+        arkrtos_board_puts("[DBG] out-of-window badv=");
+        arkrtos_board_puthex(badv);
+        arkrtos_board_puts(" faults=");
+        arkrtos_board_putu(s_pg_demand_faults);
+        arkrtos_board_puts("\n");
+        return 0;
+    }
+
+    idx = (badv - ARKRTOS_QEMU_APP_BASE) / 0x2000u;
+    if(idx >= LA_PG_WIN_ENTRIES)
+    {
+        return 0;
+    }
+
+    pa = s_pg_pair_pa[space][idx];
+    if(pa == 0u)
+    {
+        if(arkrtos_port_paging_frame_alloc(2u, &pa) != 0)
+        {
+            return 0;
+        }
+
+        s_pg_pair_pa[space][idx] = pa;
+    }
+
+    {
+        uint32 va = ARKRTOS_QEMU_APP_BASE + (idx * 0x2000u);
+
+        /* 这里处在重填上下文里：必须走 TLBREHI/TLBRELO + tlbfill
+         * （tlbwr/tlbfill 在 ISTLBR=1 时只认 TLBR* 那一组镜像 CSR）。 */
+        la_tlb_fill_refill(va, LA_PTE_APP(pa), LA_PTE_APP(pa + 0x1000u));
+    }
+
+    s_pg_demand_faults++;
+    return 1;
+}
+
+#endif /* ARKRTOS_USE_PAGING_DEMAND == 1 */
 
 /** 开分页之前的首次铺窗口：只铺 space 0（其它空间等 activate 时再要帧） */
 static void la_pg_boot_map(void)
@@ -910,6 +1070,12 @@ static void la_pg_assert_window(void)
     /* 页级窗口：一次 invtlb 只会打掉命中的那几页，所以这里整段重铺。
      * 代价（512 次 invtlb + 256 次 tlbwr）只在这一条路径上付，换来的是
      * 「撤销动态映射之后窗口一定还在」。 */
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
+    /* 按需档没有「空间帧基址」可判（恒 0），判据换成「有没有装过任何一对」；
+     * 重铺只补已经付过费的那几对，没摸过的继续留空。 */
+    la_pg_drop_window();
+    la_pg_install_space(s_pg_app_space);
+#else
     if(s_pg_space_base[s_pg_app_space] == 0u)
     {
         return;                     /* 还没铺过：没有可补的 */
@@ -917,6 +1083,7 @@ static void la_pg_assert_window(void)
 
     la_pg_drop_window();
     la_pg_install_space(s_pg_app_space);
+#endif
 #else
     uint32 pa = la_pg_app_frame(s_pg_app_space);
 
@@ -928,6 +1095,19 @@ static void la_pg_assert_window(void)
 int32 arkrtos_port_paging_activate(uint32 space)
 {
 #if (ARKRTOS_USE_PAGING_PAGES == 1)
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
+    /* 按需档：切空间 = 清掉旧翻译 + 记账，条目一条都不铺（等第一次访问
+     * 走 refill）。也不做「已是该空间」短路 —— 这一档的真相是
+     * s_pg_pair_pa，短路省不下什么却多一条会骗人的路。 */
+    if(space >= (uint32)ARKRTOS_PAGING_APPS_MAX)
+    {
+        return -1;
+    }
+
+    la_pg_drop_window();
+    s_pg_app_space = space;
+    return 0;
+#else
     /* 页级窗口：先要帧（不够就 -3，窗口一条都不动），再失效旧翻译、重铺
      * 256 条，最后抽查首尾两页。 */
     if(space >= (uint32)ARKRTOS_PAGING_APPS_MAX)
@@ -979,6 +1159,7 @@ int32 arkrtos_port_paging_activate(uint32 space)
 
     s_pg_app_space = space;
     return 0;
+#endif /* ARKRTOS_USE_PAGING_DEMAND */
 #else
     uint32 pa;
 
@@ -2527,6 +2708,36 @@ void la_refill_c(void)
         __asm__ volatile("idle 0" ::: "memory");
     }
 }
+
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
+/**
+* @brief refill 入口在按需档下的 C 入口（由 arkrtos_context.S 调入）
+* @return 1 = 条目已装好，汇编侧恢复被打断的全部寄存器后 ertn 回原指令；
+*         0 = 不是这一档能处理的（调用方落回 la_refill_c，那条不返回）
+* @details 与 la_refill_c() 的关键差别：**它要回到出错的那条指令**。
+*          la_refill_c() 的出口只有「换到另一个任务」和「停机」两种，
+*          所以它不需要、也从来没有保存过通用寄存器；按需缺页必须回到原
+*          指令重试，因此保存/恢复放在汇编入口里（见 arkrtos_context.S
+*          的 tlb_refill_entry），这里只负责装条目。
+*
+*          TLBRERA / TLBRPRMD 一个字都不碰：ertn 会按 TLBRERA.ISTLBR=1
+*          回到 era 并把 CRMD.DA/PG 恢复成分页态。
+*/
+int32 la_refill_demand_c(void)
+{
+    unsigned long tlbrbadv = 0ul;
+
+    LA_CSRR(LA_CSR_TLBRBADV, tlbrbadv);
+
+    if(la_pg_demand_fault((uint32)tlbrbadv) != 0)
+    {
+        return 1;
+    }
+
+    la_refill_c();                  /* 不返回：原来的报错 / 杀任务路径 */
+    return 0;
+}
+#endif /* ARKRTOS_USE_PAGING_DEMAND == 1 */
 
 /**
 * @brief 异常码的短名（只用于打印，不参与判定）

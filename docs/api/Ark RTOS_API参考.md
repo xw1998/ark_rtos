@@ -53,7 +53,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（11 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（52 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（55 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（16 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -7889,6 +7889,29 @@ MTLB 是确定索引、查找时按条目自己的 PS 比 VPPN，不会和内核
 静态 4 KB 条目抢同一组的 8 路，也不需要知道 STLB 的 way 布局。
 代价是 MTLB 只有 64 条，所以动态表的上限由它决定（见 LA_PG_DYN_PAIRS）。
 
+### `static void la_tlb_fill_refill(uint32 vaddr, unsigned long lo0, unsign`
+
+```c
+static void la_tlb_fill_refill(uint32 vaddr, unsigned long lo0, unsigned long lo1)
+```
+
+**在 TLB 重填上下文里装一条 4 KB 对（只能在 refill 入口里用）**
+- `vaddr`：页对基址（8 KB 对齐）
+- `lo0`：偶页 TLBELO、lo1 奇页 TLBELO
+**为什么不能在这里用 la_tlb_write()**：重填异常里 TLBRERA.ISTLBR=1，
+此刻 `tlbwr` 与 `tlbfill` 取的都不是 TLBEHI/TLBELO0/TLBELO1，而是
+TLBR* 那一组镜像 CSR。实测（QEMU 9.2.3）：重填处理里写 TLBEHI 再
+`tlbwr`，条目按硬件填的 TLBREHI（= 出错地址的 VPPN）落进去、
+TLBELO 取 TLBRELO0/1 的旧值 ⇒ V=0，于是**下一次访问变成
+TLBRET_INVALID 走 eentry 的 PIS**（不是重填，因为 tlbfill 只对
+"查不到"置 ISTLBR），直接撞上「PLV0 致命异常」停机。
+正确形态就是硬件重填处理惯用的那一套：写 TLBREHI/TLBRELO0/
+TLBRELO1 再 `tlbfill`。TLBREHI 的 PS 字段在 [5:0]，VPPN 从 bit13
+起 ⇒ 页基址直接或上 12 就是完整值。
+索引由 tlbfill 按 VA 自己算（PS==STLBPS 时进 STLB，way 0..7 由
+硬件随机挑）：窗口里每个 8 KB 对占一个 STLB 组、一组 8 路只用 1
+路，所以随便落哪一路都不会与别的对撞。
+
 ### `#if ((ARKRTOS_USE_PAGING_PAGES == 1) && (ARKRTOS_USE_PRIV == 1) && \`
 
 ```c
@@ -7958,6 +7981,24 @@ static void la_pg_drop_window(void)
 ```
 
 把整段窗口 VA 的旧翻译清掉（逐 4 KB：QEMU 按 (ASID, VA) 匹配条目） */
+
+### `static int32 la_pg_demand_fault(uint32 badv)`
+
+```c
+static int32 la_pg_demand_fault(uint32 badv)
+```
+
+**按需缺页：给 badv 所在的那一对 8 KB 拿帧并装条目**
+- `badv`：触发 refill 的地址（CSR.TLBRBADV）
+**返回**：1 = 条目已装好，调用方应 ertn 回到出错的那条指令重试；
+0 = 不归这一档管（不在窗口里 / 帧池空了），交给原来的故障路径
+粒度是**一对**而不是一页：一条 PS=12 条目同时给出两页，所以
+「装半条」根本表达不出来 —— 要么两帧一起拿，要么一条都不装。
+这一档刻意不区分 PLV：内核经窗口拷贝（ELF 装载、pmap 自测）
+与 App 自己访问走的是同一条路，否则装载器第一笔写就死在
+「KERNEL refill -> fatal」上。
+没有帧就返回 0，让原来的路径去报错/杀任务 —— 这里绝不假装
+装好了（装一条 V=0 的条目会让 ertn 回到同一条指令上无限重填）。
 
 ### `static void la_pg_boot_map(void)`
 
@@ -8406,6 +8447,23 @@ PLV=0、IE=0，出错的信息只在 TLBRBADV / TLBRERA / TLBRPRMD 里。
 **恢复时必须写 TLBRERA/TLBRPRMD**：ertn 看到 TLBRERA.ISTLBR=1 就
 走重填的返回分支，只认这对镜像 CSR，并把 CRMD.DA 清 0、PG 置 1。
 写错了的症状是「ertn 回到出错的那条指令」——无限重填。
+
+### `int32 la_refill_demand_c(void)`
+
+```c
+int32 la_refill_demand_c(void)
+```
+
+**refill 入口在按需档下的 C 入口（由 arkrtos_context.S 调入）**
+**返回**：1 = 条目已装好，汇编侧恢复被打断的全部寄存器后 ertn 回原指令；
+0 = 不是这一档能处理的（调用方落回 la_refill_c，那条不返回）
+与 la_refill_c() 的关键差别：**它要回到出错的那条指令**。
+la_refill_c() 的出口只有「换到另一个任务」和「停机」两种，
+所以它不需要、也从来没有保存过通用寄存器；按需缺页必须回到原
+指令重试，因此保存/恢复放在汇编入口里（见 arkrtos_context.S
+的 tlb_refill_entry），这里只负责装条目。
+TLBRERA / TLBRPRMD 一个字都不碰：ertn 会按 TLBRERA.ISTLBR=1
+回到 era 并把 CRMD.DA/PG 恢复成分页态。
 
 ### `static const char *la_ecode_name(uint32 ecode)`
 
@@ -9362,20 +9420,20 @@ void arkrtos_task_stack_fill(uint32 *stack_bottom, uint32 stack_size)
 最后按每个 PT_LOAD 的 p_offset 用 arkrtos_vfs_read_at() 直接读进
 目标地址。整份镜像从不进临时缓冲——窗口本身就只有 2 MB，
 
-### `static int32 elf_check_header(const uint8 *h, unsigned long *p_entry, `
+### `static int32 elf_check_header(const uint8 *h, unsigned long *p_entry,`
 
 ```c
-static int32 elf_check_header(const uint8 *h, unsigned long *p_entry, unsigned long *p_phoff, uint16 *p_phnum, uint16 *p_phentsize) {
+static int32 elf_check_header(const uint8 *h, unsigned long *p_entry,
 ```
 
 **校验 ELF 头，把 entry / phoff / phnum / phentsize 取出来**
 > 说明：e_machine 单独返回 ERR_ARCH，是为了让「这是 x86 的 ELF」和
 「这不是 ELF」在日志里能分开——两者的修法完全不同。
 
-### `static int32 elf_build_stack(uint32 win_top, uint32 argv_start, int32 `
+### `static int32 elf_build_stack(uint32 win_top, uint32 argv_start,`
 
 ```c
-static int32 elf_build_stack(uint32 win_top, uint32 argv_start, int32 argc, char *argv[], uint32 *p_sp) {
+static int32 elf_build_stack(uint32 win_top, uint32 argv_start,
 ```
 
 **把 argv 铺成 Linux 的形状，返回初始 sp**
@@ -9385,10 +9443,10 @@ NULL(envp)、NULL(argv 结束)、argv[argc-1..0]、argc  <- sp
 字符串从窗口顶端往下写，数组紧贴在 argv_start 之上。
 **返回**：0 = 成功（*p_sp 有效）；否则为负错误码
 
-### `static int32 elf_load(uint32 space, const char *path, int32 argc, char`
+### `static int32 elf_load(uint32 space, const char *path, int32 argc,`
 
 ```c
-static int32 elf_load(uint32 space, const char *path, int32 argc, char *argv[], arkrtos_elf_info_t *p_info) {
+static int32 elf_load(uint32 space, const char *path, int32 argc,
 ```
 
 **把一份 ELF64 装进指定地址空间并起一个降权任务**
@@ -9400,7 +9458,7 @@ static int32 elf_load(uint32 space, const char *path, int32 argc, char *argv[], 
 ### `int32 arkrtos_elf_exec_space(const char *path, int32 argc, char *argv[`
 
 ```c
-int32 arkrtos_elf_exec_space(const char *path, int32 argc, char *argv[], uint32 *p_space) {
+int32 arkrtos_elf_exec_space(const char *path, int32 argc, char *argv[],
 ```
 
 **装一个 ELF 程序，返回它落到哪个地址空间**
@@ -9414,10 +9472,10 @@ U-2（2026-11-17）：装载不再假设"只有一块窗口"。先挑一个没�
 内核任务原来的视图装回去。挑空间只看台账，不看地址：窗口 VA
 在所有空间里都是同一个值，这个值本身不携带任何身份。
 
-### `int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[]) {`
+### `int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[])`
 
 ```c
-int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[]) {
+int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[])
 ```
 
 **兼容入口：装一个 ELF 程序，不关心它落到哪个空间**

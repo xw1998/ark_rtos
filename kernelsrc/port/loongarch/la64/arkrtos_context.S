@@ -350,10 +350,102 @@ arkrtos_port_enter_idle:
     .globl  tlb_refill_entry
     .align  2
 tlb_refill_entry:
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
+    /* 按需缺页档：装好条目之后要 ertn 回到**出错的那条指令**重试，所以被
+     * 打断的全部通用寄存器必须原样还回去。故障路径（下面的 #else）从来不
+     * 回原指令 —— 它要么换到另一个任务的帧、要么停机 —— 所以那边不需要
+     * 保存，这一档必须保存。
+     *
+     * 帧基址用 $r21：LoongArch psABI 把它定为保留寄存器（内核与按 psABI
+     * 编译的 App 都不会用），所以可以先拿它当指针、后面不必还原。
+     *
+     * 这里曾经用 $t0 当帧基址，写下去就是**先毁 $t0 再保存**：被打断的
+     * $t0 原值在 `la.abs $t0, <帧>` 那一步就丢了，ertn 回来时它是帧地址。
+     * 实测形态：ELF 装载的 elf_memcpy 用 $t0 当源指针，第一次缺页之后源指针
+     * 变成帧地址、目的指针(v13=$t0-$t0_src+$t0)整段偏掉，2 MB 窗口被逐 8 KB
+     * 越写越远，最后停在窗口顶端之外的 0x02200000。用 r21 之后这个问题消失。
+     *
+     * 「CSR.SAVE0（0x30）」那条路也**实测在 QEMU 9.2.3 上不成立**（写进去
+     * 读回 0，硬件规范里它是可选实现），所以既不用 CSR 也不动任何活寄存器。
+     * 静态帧没有重入问题：异常入口硬件已关中断，而这段处理只碰内核恒等
+     * 映射区与 TLBR 镜像 CSR，自己不会再次触发重填。
+     * 帧 256 字节 / 16 字节对齐，只放 GPR（ERA/PRMD 仍在 CSR 里）。 */
+    la.abs  $r21, la_refill_stack_top
+    addi.d  $r21, $r21, -256
+    st.d    $ra, $r21, 0
+    st.d    $tp, $r21, 8
+    st.d    $sp, $r21, 16
+    st.d    $a0, $r21, 24
+    st.d    $a1, $r21, 32
+    st.d    $a2, $r21, 40
+    st.d    $a3, $r21, 48
+    st.d    $a4, $r21, 56
+    st.d    $a5, $r21, 64
+    st.d    $a6, $r21, 72
+    st.d    $a7, $r21, 80
+    st.d    $t0, $r21, 88
+    st.d    $t1, $r21, 96
+    st.d    $t2, $r21, 104
+    st.d    $t3, $r21, 112
+    st.d    $t4, $r21, 120
+    st.d    $t5, $r21, 128
+    st.d    $t6, $r21, 136
+    st.d    $t7, $r21, 144
+    st.d    $t8, $r21, 152
+    st.d    $fp, $r21, 160
+    st.d    $s0, $r21, 168
+    st.d    $s1, $r21, 176
+    st.d    $s2, $r21, 184
+    st.d    $s3, $r21, 192
+    st.d    $s4, $r21, 200
+    st.d    $s5, $r21, 208
+    st.d    $s6, $r21, 216
+    st.d    $s7, $r21, 224
+    st.d    $s8, $r21, 232
+    addi.d  $sp, $r21, 0
+    bl      la_refill_demand_c
+    bnez    $a0, 1f
+    /* 不是这一档能处理的：落回原路径（它自己会再换一次静态栈，不返回） */
+    la.abs  $sp, la_refill_stack_top
+    bl      la_refill_c
+1:
+    ld.d    $ra, $sp, 0
+    ld.d    $tp, $sp, 8
+    ld.d    $a0, $sp, 24
+    ld.d    $a1, $sp, 32
+    ld.d    $a2, $sp, 40
+    ld.d    $a3, $sp, 48
+    ld.d    $a4, $sp, 56
+    ld.d    $a5, $sp, 64
+    ld.d    $a6, $sp, 72
+    ld.d    $a7, $sp, 80
+    ld.d    $t0, $sp, 88
+    ld.d    $t1, $sp, 96
+    ld.d    $t2, $sp, 104
+    ld.d    $t3, $sp, 112
+    ld.d    $t4, $sp, 120
+    ld.d    $t5, $sp, 128
+    ld.d    $t6, $sp, 136
+    ld.d    $t7, $sp, 144
+    ld.d    $t8, $sp, 152
+    ld.d    $fp, $sp, 160
+    ld.d    $s0, $sp, 168
+    ld.d    $s1, $sp, 176
+    ld.d    $s2, $sp, 184
+    ld.d    $s3, $sp, 192
+    ld.d    $s4, $sp, 200
+    ld.d    $s5, $sp, 208
+    ld.d    $s6, $sp, 216
+    ld.d    $s7, $sp, 224
+    ld.d    $s8, $sp, 232
+    ld.d    $sp, $sp, 16         /* 原 sp 最后一个恢复：地址先算、再写 */
+    ertn
+#else
     la.abs  $sp, la_refill_stack_top
     bl      la_refill_c
 1:
     b       1b
+#endif
 
 /* ============================================================
  * TLB 重填专用的静态故障栈

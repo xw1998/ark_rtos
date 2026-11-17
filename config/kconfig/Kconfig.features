@@ -340,6 +340,19 @@ config ARKRTOS_USE_PAGING_PAGES
 	  changes only how the window is mapped.
 
 	  Off (default) changes nothing.
+config ARKRTOS_USE_PAGING_DEMAND
+	bool "Demand-install App window entries on first touch (U-3 stage 3)"
+	depends on ARKRTOS_USE_PAGING
+	depends on ARKRTOS_USE_PAGING_PAGES
+	help
+	  Leave the App window empty after a space switch and install one 8 KB
+	  pair (two frames from the pool, one PS=12 entry) only when the program
+	  first touches that pair.  The TLB refill entry saves every general
+	  register before resolving, so the faulting instruction is retried with
+	  its registers intact.  Frames are still never returned: this option
+	  changes only when entries are installed, not when frames are freed.
+	  Off (default) changes nothing.
+
 config ARKRTOS_USE_ELF
 	bool "ELF64 executable loader (exec)"
 	depends on ARKRTOS_USE_VFS && ARKRTOS_USE_PRIV

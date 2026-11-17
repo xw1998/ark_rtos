@@ -54,8 +54,16 @@
      末页期望是偶页基址）、UART 改走 way 7/6、la_pg_boot_map 在 la_mmu_init 里
      真被调用，以及 PS=20 老路径仍在（两种档都在编）；hal / mpu.h / paging.c
      的 window_va 转发链与 shell 三处改用。
+  T. 按需缺页（U-3 第三阶 / U-5）：开关三处（features.h 缺省 0 / Kconfig 两条
+     depends / 板级 0），port 的两条 #error、按对记账 s_pg_pair_pa、缺页处理里
+     「一对 8 KB = 两帧」与 tlbfill 重装、refill 专用 C 入口读 TLBRBADV、
+     两条 MMIO 页改走 MTLB +12/+13（避开 tlbfill 的随机 way 与动态 alias 的
+     +3..+10），以及汇编侧用 $r21 当帧基址保存全部 GPR（**不许**用 $t0 先毁
+     再存）、ertn 回原指令；老路径（PS=20 窗口 + STLB way 7/6 + 不保存寄存器
+     的 refill）必须仍在。另加两条**真编译**：C 侧带真编译器过一遍，
+     .S 侧真汇编一遍（-fsyntax-only 不管汇编）。
 
-E–M、P–S 每条都自带**防假绿自检**：把源串故意改坏一次，对应 pin 必须报错；
+E–M、P–T 每条都自带**防假绿自检**：把源串故意改坏一次，对应 pin 必须报错；
 报不出错就说明这条 pin 是空转的。
 
 不覆盖：分页后端在板上给出的实际隔离效果（哪条地址被拦、PLV 是否真降）、
@@ -227,6 +235,22 @@ def main():
             failures.append("D 互斥负向：USE_MPU=1 与 USE_PAGING=1 同时成立竟然编过了")
         elif "ARKRTOS_USE_MPU=1" not in out:
             failures.append("D 互斥负向：编不过但不是互斥那条 #error：\n%s" % out[-400:])
+
+    # --- T. 按需缺页档必须真编得过（C 侧语法 + .S 侧真汇编） --------------
+    demand_flags = board_flags("qemu_loongarch64") + \
+        ["-DARKRTOS_USE_PAGING_DEMAND=1"]
+    rc, out = _run(la64, LA64_ARCH + COMMON + demand_flags +
+                   ["kernelsrc/port/loongarch/la64/arkrtos_port.c"])
+    if rc != 0:
+        failures.append("T 按需缺页档：port.c 带 DEMAND=1 编不过：\n%s" % out[-600:])
+    asm_obj = os.path.join(tmp, "demand_context.o")
+    rc, out = _run(la64, LA64_ARCH +
+                   [f for f in COMMON if f != "-fsyntax-only"] + demand_flags +
+                   ["-c", "-o", asm_obj,
+                    "kernelsrc/port/loongarch/la64/arkrtos_context.S"])
+    if rc != 0:
+        failures.append("T 按需缺页档：arkrtos_context.S 带 DEMAND=1 汇编不过：\n%s"
+                        % out[-600:])
 
     # --- E..H 源码 pin（每条都做一次「改坏必须报错」的自检） ---------------
     def _src(rel):
@@ -641,6 +665,82 @@ def main():
         src_kconf = _src("config/kconfig/Kconfig.features")
         src_board = _src("board/qemu_loongarch64/arkrtos_board_config.h")
 
+    def pin_t(port, asm, feats, kconf, board):
+        bad = []
+        # 开关三处
+        if "#define ARKRTOS_USE_PAGING_DEMAND       0" not in feats:
+            bad.append("T: arkrtos_features.h 里按需缺页的缺省值不是 0")
+        if "config ARKRTOS_USE_PAGING_DEMAND" not in kconf:
+            bad.append("T: Kconfig.features 里没有 ARKRTOS_USE_PAGING_DEMAND")
+        else:
+            k = kconf.index("config ARKRTOS_USE_PAGING_DEMAND")
+            nk = kconf.find("\nconfig ", k + 1)
+            blk = kconf[k:nk] if nk > 0 else kconf[k:]
+            if ("depends on ARKRTOS_USE_PAGING\n" not in blk) or \
+               ("depends on ARKRTOS_USE_PAGING_PAGES" not in blk):
+                bad.append("T: Kconfig 的按需缺页没有同时依赖 PAGING 与 PAGES")
+        if "#define ARKRTOS_USE_PAGING_DEMAND    0" not in board:
+            bad.append("T: LA64 板级不该缺省打开按需缺页（应为 0，靠 EXTRA_CFLAGS 出镜像）")
+        # port：两条组合守卫
+        if ('#error "ARKRTOS_USE_PAGING_DEMAND=1 requires '
+                'ARKRTOS_USE_PAGING_PAGES=1"') not in port:
+            bad.append("T: port 里没有「按需缺页必须配页级窗口」的 #error")
+        if ('#error "ARKRTOS_USE_PAGING_DEMAND=1 requires '
+                'ARKRTOS_USE_PRIV=1"') not in port:
+            bad.append("T: port 里没有「按需缺页必须配特权级」的 #error")
+        # 按对记账
+        if "static uint32 s_pg_pair_pa[" not in port:
+            bad.append("T: port 里没有按对记账 s_pg_pair_pa（真相不在 space_base）")
+        # 缺页处理
+        fault = _body(port, "static int32 la_pg_demand_fault(")
+        if not fault:
+            bad.append("T: port 里没有 la_pg_demand_fault")
+        else:
+            if "arkrtos_port_paging_frame_alloc(2u, &pa) != 0" not in fault:
+                bad.append("T: 缺页不给「一对 = 两帧」要帧（一条 PS=12 覆盖两页）")
+            if "s_pg_pair_pa[space][idx] = pa;" not in fault:
+                bad.append("T: 缺页拿到帧之后不记账")
+            if "la_tlb_fill_refill(va," not in fault:
+                bad.append("T: 缺页没用重填上下文的装条目函数（tlbwr 在这里会装出 V=0）")
+        fill = _body(port, "static void la_tlb_fill_refill(")
+        if not fill:
+            bad.append("T: port 里没有 la_tlb_fill_refill")
+        else:
+            if "LA_CSRW(LA_CSR_TLBREHI" not in fill:
+                bad.append("T: 重填装条目不写 TLBREHI（ISTLBR=1 时只认 TLBR* 镜像 CSR）")
+            if '"tlbfill"' not in fill:
+                bad.append("T: 重填装条目没用 tlbfill")
+        rc = _body(port, "int32 la_refill_demand_c(")
+        if not rc:
+            bad.append("T: port 里没有 la_refill_demand_c")
+        elif "LA_CSRR(LA_CSR_TLBRBADV" not in rc:
+            bad.append("T: 按需 refill 不读 TLBRBADV（读 TLBEHI 在重填上下文里是错的）")
+        # MMIO 页必须让开 tlbfill 的随机 way
+        if "LA_MTLB_INDEX + 12u" not in port:
+            bad.append("T: 内核 UART 没有改走 MTLB +12（按需档 way 随机，STLB 会撞窗口）")
+        if "LA_MTLB_INDEX + 13u" not in port:
+            bad.append("T: App UART 别名没有改走 MTLB +13")
+        # 老路径必须还在（两种档都要在编）
+        if "LA_STLB_INDEX(ARKRTOS_QEMU_UART_BASE, LA_PG_KUART_WAY)" not in port:
+            bad.append("T: 页级窗口老档的 UART way 7 分支不见了")
+        # 汇编侧
+        if "la.abs  $r21, la_refill_stack_top" not in asm:
+            bad.append("T: refill 入口不用 $r21 当帧基址")
+        if "la.abs  $t0, la_refill_stack_top" in asm:
+            bad.append("T: refill 入口又拿 $t0 当帧基址（先毁再存，被打断的 $t0 回不来）")
+        if "st.d    $t0, $r21, 88" not in asm:
+            bad.append("T: refill 入口不保存 $t0（ertn 回来源/目的指针会整段偏掉）")
+        if "bl      la_refill_demand_c" not in asm:
+            bad.append("T: refill 入口没有调 la_refill_demand_c")
+        if "ld.d    $sp, $sp, 16" not in asm:
+            bad.append("T: refill 入口没有最后恢复原 sp（先算地址再写）")
+        if "ertn" not in asm:
+            bad.append("T: refill 入口没有 ertn（按需缺页必须回出错的那条指令重试）")
+        if "la.abs  $sp, la_refill_stack_top\n    bl      la_refill_c" not in asm:
+            bad.append("T: 老档的 refill 入口（换静态栈 + la_refill_c）不见了")
+        return bad
+
+
         for msg in (pin_e(src_pg) + pin_f(src_port) +
                     pin_g(src_hal, src_mpu) + pin_h(src_sh) +
                     pin_i(src_port) + pin_j(src_pg, src_hal, src_mpu) +
@@ -650,7 +750,8 @@ def main():
                     pin_p(src_pg, src_sh, src_hal, src_mpu) +
                     pin_q(src_port) + pin_r(src_pg, src_port, src_sh, src_hal, src_mpu) +
                     pin_s(src_port, src_hal, src_mpu, src_pg, src_sh,
-                          src_feats, src_kconf, src_board)):
+                          src_feats, src_kconf, src_board) +
+                    pin_t(src_port, src_asm, src_feats, src_kconf, src_board)):
             failures.append("源码 pin 不成立 " + msg)
 
         # 自检：把每条 pin 依赖的那一句改坏，对应 pin 必须报错
@@ -709,6 +810,13 @@ def main():
                 "arkrtos_port_paging_frame_alloc(LA_PG_WIN_PAGEZ, &base) != 0", 1),
                 src_hal, src_mpu, src_pg, src_sh,
                 src_feats, src_kconf, src_board)),
+            ("T", pin_t(src_port.replace("static uint32 s_pg_pair_pa[",
+                                          "static uint32 s_pg_pair_pX[", 1),
+                        src_asm, src_feats, src_kconf, src_board)),
+            ("T-", pin_t(src_port,
+                         src_asm.replace("la.abs  $r21, la_refill_stack_top",
+                                          "la.abs  $t0, la_refill_stack_top", 1),
+                         src_feats, src_kconf, src_board)),
         ]
         for tag, got in selfchecks:
             if not got:
@@ -728,7 +836,8 @@ def main():
           "U-15 映射撤销 N-O pin 成立且自检有效 / "
           "U-6 受控用户拷贝 P pin 与 invtlb 后重写窗口 Q pin 成立且自检有效 / "
           "U-3 页帧池 R pin 成立且自检有效 / "
-          "U-3 第二阶页级窗口 S pin 成立且自检有效")
+          "U-3 第二阶页级窗口 S pin 成立且自检有效 / "
+          "U-3 第三阶按需缺页 T pin 成立且自检有效（C 侧真编、.S 侧真汇编）")
     return 0
 
 

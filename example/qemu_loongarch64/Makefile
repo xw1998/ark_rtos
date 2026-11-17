@@ -71,14 +71,23 @@ $(SIGNKEY):
 	@mkdir -p $(BUILD)
 	@printf '#ifndef ARKRTOS_SIGN_KEY_LOCAL_H\n#define ARKRTOS_SIGN_KEY_LOCAL_H\n#define ARKRTOS_IMAGE_SIGN_KEY { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F }\n#endif\n' > $@ ;
 
+# 额外的 -D（测试变体用，例如按需缺页单独出一份镜像）。缺省为空，基线不变。
+EXTRA_CFLAGS ?=
+
 CFLAGS := $(ARCH_FLAGS) -g -O2 -ffreestanding -fno-common -nostdlib -nostartfiles \
           -fno-builtin -ffunction-sections -fdata-sections -Wall -MMD -MP \
           -DARKRTOS_BOARD_CONFIG='"arkrtos_board_config.h"' \
           -include arkrtos_board_config.h \
           -DLFS_NO_MALLOC -DLFS_NO_ASSERT -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR \
           -DMDK_TRACE_ENABLE=1 -DMDK_TRACE_BACKEND_BUFF=1 -DMDK_TRACE_CPU_HZ=100000000u \
-          $(ARK_BUS_FLAGS) -DARKRTOS_SIGN_KEY_LOCAL=1
-ASFLAGS := $(ARCH_FLAGS) -g
+          $(ARK_BUS_FLAGS) -DARKRTOS_SIGN_KEY_LOCAL=1 $(EXTRA_CFLAGS)
+# 汇编走预处理器（.S 的大写后缀已经打开了 cpp），所以板级宏在 .S 里也可见 ——
+# 按需缺页要按开关决定「refill 入口是否保存通用寄存器」，只能这样做。
+# 「默认关时体积与行为零变化」已经实测过：把构建时间戳固定（SOURCE_DATE_EPOCH），
+# 关掉这一档之后与改动前的镜像**逐字节相同**（测试只比剔除调试信息后的镜像，
+# 因为 DWARF 行表会随源文件改动而变化）。这条 -include 本身不改任何默认档代码。
+ASFLAGS := $(ARCH_FLAGS) -g -DARKRTOS_BOARD_CONFIG='"arkrtos_board_config.h"' \
+           -include arkrtos_board_config.h $(EXTRA_CFLAGS)
 
 # 通配全部内核源，再剔除本平台没有任何介质/驱动依赖的模块：
 # 它们即使功能开关为 0 也在文件头无条件包含硬件头（drvflash.h / lfs.h），

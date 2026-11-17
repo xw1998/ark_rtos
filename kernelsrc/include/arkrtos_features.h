@@ -154,6 +154,19 @@
 #define ARKRTOS_USE_PAGING_PAGES        0
 #endif
 
+/* 按需缺页（U-3 第三阶 / U-5）：0 = 关（窗口在 activate 时一次铺满 256 条
+ * 条目，与第二阶逐字节相同），1 = 窗口只在**第一次访问**到某一对 8 KB 时
+ * 才从帧池取两帧、装一条 PS=12 条目 —— App 的 2 MB 窗口按摸到的页付费。
+ * 要求 ARKRTOS_USE_PAGING_PAGES == 1 且 ARKRTOS_USE_PRIV == 1。
+ * 由 Kconfig 选择（config ARKRTOS_USE_PAGING_DEMAND）。
+ *
+ * 它改的是「什么时候装」：打开这一档时 refill 入口先保存被打断的全部通用
+ * 寄存器（关档不保存，镜像与行为逐字节不变），再由 la_refill_demand_c()
+ * 装好条目并 ertn 回到**出错的那条指令**重试。仍然不还帧。 */
+#ifndef ARKRTOS_USE_PAGING_DEMAND
+#define ARKRTOS_USE_PAGING_DEMAND       0
+#endif
+
 /* VxWorks 式可下载模块：0 = 关（空 TU，零体积），1 = 把 ET_REL 目标文件
  * 现场链接进内核模块区并以 PLV0 任务起跑（按名字解析内核导出符号）。
  * 这是与 ARKRTOS_USE_ELF **并列的另一种应用模型**，不是它的替代：

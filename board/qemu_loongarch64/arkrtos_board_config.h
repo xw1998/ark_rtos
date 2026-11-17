@@ -112,6 +112,15 @@
 #undef  ARKRTOS_USE_PAGING_PAGES
 #define ARKRTOS_USE_PAGING_PAGES     1
 
+/* U-3 第三阶（按需缺页）**默认不打开**：基线镜像的行为与读数（§5.22 的
+ * used=512）因此逐字节不变。验证时单独出一份镜像：
+ *   make -f example/qemu_loongarch64/Makefile BUILD=build/qemu_la64_demand \
+ *        EXTRA_CFLAGS=-DARKRTOS_USE_PAGING_DEMAND=1
+ * 用 #ifndef 而不是 #undef/#define，就是为了让这条 -D 能进来。 */
+#ifndef ARKRTOS_USE_PAGING_DEMAND
+#define ARKRTOS_USE_PAGING_DEMAND    0
+#endif
+
 /* ============================================================
  * 四、能力开关
  * @details LA64 硬件有 FPU，但这一版没有启用 FPU 上下文保存（任务切换不存
