@@ -209,4 +209,13 @@
 #undef  ARKRTOS_USE_SMP
 #define ARKRTOS_USE_SMP              0
 
+/* 软定时器服务任务的栈（字）。默认 96 字 = 384 B 在 RV32 上实测不够：
+ * 2026-11-17 QEMU 实测（`stack raw`，fill 扫描取大值），跑过
+ * `utest run` / `sec all` / `audit` / `dmesg` 之后 timer daemon 用到
+ * 372/384 B = 96%，只剩 12 B。本 port 的陷阱帧压在被中断任务的栈上
+ * （一帧 128 B），任何一次中断正好切到它就踩出去。
+ * 给 256 字 = 1 KB（与 board/la32_generic 同值），改后同口径复测。 */
+#undef  ARKRTOS_TIMER_TASK_STACK_WORDS
+#define ARKRTOS_TIMER_TASK_STACK_WORDS (256)
+
 #endif /* __ARKRTOS_BOARD_CONFIG_H__ */
