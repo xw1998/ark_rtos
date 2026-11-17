@@ -350,6 +350,49 @@
 #define SHELL_ENABLE                    ARKRTOS_USE_SHELL
 #endif
 
+/* 控制台登录（SEC-G01）：串口可达就能装/停/重启镜像，所以「谁能敲命令」
+ * 本身是安全边界。这一档给控制台加一道登录：开档后每条命令都要先过门，
+ * 只有 login / logout / help 在锁定期间放行。
+ *
+ * 凭据怎么来（没有任何默认口令）：
+ *   密码不落设备，落设备的是 sha256(salt || password) 的 32 字节摘要与 16
+ *   字节盐，写在一个不进仓库的头文件里（.gitignore 忽略
+ *   *_shell_auth_local.h），构建时用 -DARKRTOS_SHELL_AUTH_LOCAL=1 引进来：
+ *     #define ARKRTOS_SHELL_AUTH_SALT    { 0x.., ... }   (16 字节)
+ *     #define ARKRTOS_SHELL_AUTH_DIGEST  { 0x.., ... }   (32 字节)
+ *   开档却没给摘要就直接 #error —— 不给「开了但没人能登录」或「开了但有个
+ *   通用默认口令」这两种假绿。
+ *   摘要由 tools/shell_auth_cred.py 生成（同一份盐与口令，Python 侧算）。
+ *
+ * 诚实边界：
+ *   - 口令在串口上明文传输（串口没有加密层），能被抓包嗅到；
+ *   - 摘要与盐都在固件里，拿到固件的人可以离线爆破弱口令；
+ *   - 它不是设备身份（那是 SEC-G13），也不能阻止整片刷写 Flash。
+ *   它回答的是「串口敲命令的人是不是运维」。
+ *
+ * 连续失败 ARKRTOS_SHELL_AUTH_TRIES 次后锁定到底（复位才恢复），不做指数
+ * 退避：串口是低速链，退避只会让暴力尝试更便宜。 */
+#ifndef ARKRTOS_USE_SHELL_AUTH
+#define ARKRTOS_USE_SHELL_AUTH          0
+#endif
+#ifndef ARKRTOS_SHELL_AUTH_TRIES
+#define ARKRTOS_SHELL_AUTH_TRIES        5
+#endif
+#if defined(ARKRTOS_SHELL_AUTH_LOCAL)
+#include "arkrtos_shell_auth_local.h"
+#endif
+#if (ARKRTOS_USE_SHELL_AUTH == 1)
+#if (SHELL_ENABLE != 1)
+#error "ARKRTOS_USE_SHELL_AUTH=1 requires the shell console (SHELL_ENABLE=1): there is nothing to log into"
+#endif
+#if !defined(ARKRTOS_SHELL_AUTH_SALT)
+#error "ARKRTOS_USE_SHELL_AUTH=1 requires ARKRTOS_SHELL_AUTH_SALT (16 byte initialiser list)"
+#endif
+#if !defined(ARKRTOS_SHELL_AUTH_DIGEST)
+#error "ARKRTOS_USE_SHELL_AUTH=1 requires ARKRTOS_SHELL_AUTH_DIGEST (32 byte initialiser list)"
+#endif
+#endif
+
 /* Shell 开着但控制台那套常量（SHELL_DEV_NAME / SHELL_TASK_STACK_SIZE …）
  * 仍在 config/arkrtos_partition.h：那是板级资源，不是功能开关。 */
 

@@ -625,6 +625,36 @@ config ARKRTOS_SHELL_REDIRECT_BUF
 	  tight budget lowers this, or turns ARKRTOS_SHELL_REDIRECT off
 	  in its project file (-DARKRTOS_SHELL_REDIRECT=0).
 
+config ARKRTOS_USE_SHELL_AUTH
+	bool "Console login for the interactive shell"
+	default n
+	depends on ARKRTOS_USE_SHELL
+	help
+	  Require a password before the interactive shell accepts commands.
+	  The console starts locked; login unlocks it, logout (or the boot
+	  after too many wrong passwords) locks it again.  The password is
+	  never stored or compared in clear: the project supplies a 16-byte
+	  salt and the SHA-256 of salt||password through
+	  ARKRTOS_SHELL_AUTH_SALT / ARKRTOS_SHELL_AUTH_DIGEST (see
+	  tools/shell_auth_cred.py).  Enabling this without those two
+	  symbols is a compile error, not a silent open door.
+	  Honest limits: the password crosses the serial line in clear (the
+	  board has no trusted display), and the stored digest can be
+	  brute-forced offline if the image leaks.  This gates the console;
+	  it is not a device identity (SEC-G13).
+
+config ARKRTOS_SHELL_AUTH_TRIES
+	int "Wrong passwords before the console locks until reset"
+	depends on ARKRTOS_USE_SHELL_AUTH
+	default 5
+	range 1 100
+	help
+	  Number of consecutive wrong passwords tolerated.  At the limit the
+	  console locks hard until the next reset, so a serial brute force
+	  has to reboot the board for every TRIES guesses.  No exponential
+	  backoff: on a slow serial line a delay only makes guessing cheaper
+	  per unit time.
+
 endmenu
 
 menu "Reliability and operations"

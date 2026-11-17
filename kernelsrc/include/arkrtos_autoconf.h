@@ -121,6 +121,9 @@
 #ifndef ARKRTOS_SEM_NUM
 #define ARKRTOS_SEM_NUM (24)
 #endif
+#ifndef ARKRTOS_SHELL_AUTH_TRIES
+#define ARKRTOS_SHELL_AUTH_TRIES (5)
+#endif
 #ifndef ARKRTOS_SHELL_BOARD_CMDS
 #define ARKRTOS_SHELL_BOARD_CMDS 0
 #endif
@@ -294,6 +297,9 @@
 #endif
 #ifndef ARKRTOS_USE_SHELL
 #define ARKRTOS_USE_SHELL 1
+#endif
+#ifndef ARKRTOS_USE_SHELL_AUTH
+#define ARKRTOS_USE_SHELL_AUTH 0
 #endif
 #ifndef ARKRTOS_USE_SMP
 #define ARKRTOS_USE_SMP 0

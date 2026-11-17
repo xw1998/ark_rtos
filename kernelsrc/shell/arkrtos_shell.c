@@ -54,6 +54,7 @@
 #include "arkrtos_fs.h"
 #include "arkrtos_vfs.h"
 #include "ark_vfs.h"
+#include "arkrtos_shell_auth.h"
 #include "arkrtos_audit.h"
 #include "arkrtos_guard.h"
 #if ARKRTOS_HW_SAFE
@@ -7500,7 +7501,8 @@ static int register_kernel_commands(void)
              + (ARKRTOS_USE_ELF ? 1 : 0)
              + (ARKRTOS_USE_MODLOAD ? 4 : 0)
              + (ARKRTOS_USE_SECCHECK ? 1 : 0)
-             + (ARKRTOS_USE_PAGING ? 1 : 0);
+             + (ARKRTOS_USE_PAGING ? 1 : 0)
+             + ((ARKRTOS_USE_SHELL_AUTH == 1) ? 2 : 0);
 
     if((idx + need) > ARK_SHELL_MAX_COMMANDS)
     {
@@ -7699,6 +7701,15 @@ static int register_kernel_commands(void)
     idx = arkrtos_board_shell_register(idx);
 #endif
 
+#if (ARKRTOS_USE_SHELL_AUTH == 1)
+    /* Two slots, always present when the switch is on: the gate exempts them
+     * while the console is locked, so they must exist in both states. */
+    g_cmd_table[idx++] = ARK_SHELL_CMD("login", arkrtos_shell_auth_cmd_login,
+        "Unlock the console: login <password>", 2);
+    g_cmd_table[idx++] = ARK_SHELL_CMD("logout", arkrtos_shell_auth_cmd_logout,
+        "Lock the console again: logout", 1);
+#endif /* ARKRTOS_USE_SHELL_AUTH */
+
     g_cmd_table[idx].name = NULL;
     g_cmd_table[idx].func = NULL;
     g_cmd_table[idx].help = NULL;
@@ -7714,6 +7725,17 @@ static void arkrtos_shell_task(void)
 {
     /* ark_shell_init 内部会调用 platform_uart_init()，即打开控制台串口 */
     ark_shell_init(&g_shell, (uint32_t)SHELL_DEV_ARG);
+
+#if (ARKRTOS_USE_SHELL_AUTH == 1)
+    /* Boot starts locked.  ark_shell_init() has already printed the banner and
+     * drawn a prompt; print the state on its own line and redraw the prompt,
+     * so the operator sees why the first command will be refused instead of
+     * having to guess from a "login: console is locked" reply. */
+    arkrtos_shell_auth_init();
+    ark_shell_set_gate(&g_shell, arkrtos_shell_auth_gate);
+    sh_out("\r\nconsole: locked - type 'login <password>'\r\n");
+    line_editor_redraw(&g_shell.editor);
+#endif
 
     if(register_kernel_commands() != 0)
     {

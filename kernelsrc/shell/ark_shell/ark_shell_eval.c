@@ -559,6 +559,15 @@ static int run_stage(ark_shell_t *shell, eval_tok_t *toks, int a, int b,
         }
     }
 
+#if ARK_SHELL_ENABLE_GATE
+    /* Console gate: before the lookup, so it covers the command table and the
+     * exec fallback below alike.  126 is "could not execute". */
+    if ((shell->gate_fn != NULL) && (shell->gate_fn(xargv[0]) != 0)) {
+        eval_set_status(shell, 126);
+        return 126;
+    }
+#endif
+
     cmd = ark_shell_find_command(xargv[0]);
     if (cmd == 0) {
 #if ARK_SHELL_ENABLE_EXEC_FALLBACK

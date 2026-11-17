@@ -35,8 +35,10 @@
 - [kernelsrc/include/arkrtos_ptable.h](#kernelsrcincludearkrtos_ptableh)（23 项）
 - [kernelsrc/include/arkrtos_rt.h](#kernelsrcincludearkrtos_rth)（13 项）
 - [kernelsrc/include/arkrtos_sec.h](#kernelsrcincludearkrtos_sech)（8 项）
+- [kernelsrc/include/arkrtos_sha256.h](#kernelsrcincludearkrtos_sha256h)（3 项）
 - [kernelsrc/include/arkrtos_share.h](#kernelsrcincludearkrtos_shareh)（7 项）
 - [kernelsrc/include/arkrtos_shell.h](#kernelsrcincludearkrtos_shellh)（9 项）
+- [kernelsrc/include/arkrtos_shell_auth.h](#kernelsrcincludearkrtos_shell_authh)（5 项）
 - [kernelsrc/include/arkrtos_sign.h](#kernelsrcincludearkrtos_signh)（10 项）
 - [kernelsrc/include/arkrtos_smp.h](#kernelsrcincludearkrtos_smph)（11 项）
 - [kernelsrc/include/arkrtos_softbus.h](#kernelsrcincludearkrtos_softbush)（5 项）
@@ -5737,6 +5739,37 @@ const char *arkrtos_sec_state_name(uint32 state);
 
 **结论名：pass / fail / finding / skip */**
 
+## kernelsrc/include/arkrtos_sha256.h
+
+**SHA-256 (FIPS 180-4), shared by the image/payload signature code and**
+the console login (SEC-G01).
+This used to be a static block inside arkrtos_sign.c, which meant the
+only way to hash a runtime string was to turn the *image signature*
+
+### `#define ARKRTOS_SHA256_LEN          (32u)`
+
+```c
+#define ARKRTOS_SHA256_LEN          (32u)
+```
+
+**Digest length in bytes. */**
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**Incremental hash context (caller owns it; may live on the stack). */**
+
+### `ARKRTOS_SHA256_UNUSED static void arkrtos_sha256_hash(const uint8 *dat`
+
+```c
+ARKRTOS_SHA256_UNUSED static void arkrtos_sha256_hash(const uint8 *data, uint32 len, uint8 out[32]) {
+```
+
+**One shot: digest of a single buffer (console login, small payloads). */**
+
 ## kernelsrc/include/arkrtos_share.h
 
 **Ark RTOS 共享内存分区表（内核 / Loader / App 运行期接口）**
@@ -5972,6 +6005,53 @@ int32 arkrtos_shell_resolve_path(const char *in, char *out, uint32 cap);
 一个文件，而不是各写一份略有差别的拼接规则。
 装不下时返回 -1 而不是悄悄截断——截断后的路径会指向另一个文件。
 > 说明：只在 ARKRTOS_USE_VFS=1 的构建里存在（分辨率依赖 VFS 路径语义）。
+
+## kernelsrc/include/arkrtos_shell_auth.h
+
+**Console login for the kernel shell (SEC-G01).**
+Four entry points:
+arkrtos_shell_auth_init()   - reset the state (boot starts locked)
+arkrtos_shell_auth_gate()   - the shell's gate hook: 0 lets the
+
+### `void arkrtos_shell_auth_init(void);`
+
+```c
+void arkrtos_shell_auth_init(void);
+```
+
+**Reset to "locked, no failures".  Called once from the shell task. */**
+
+### `int arkrtos_shell_auth_gate(const char *name);`
+
+```c
+int arkrtos_shell_auth_gate(const char *name);
+```
+
+**Gate hook: 0 = allowed, -1 = refused (reason already printed). */**
+
+### `int arkrtos_shell_auth_locked(void);`
+
+```c
+int arkrtos_shell_auth_locked(void);
+```
+
+**1 while the console refuses everything but login/logout/help. */**
+
+### `int arkrtos_shell_auth_cmd_login(int argc, char **argv);`
+
+```c
+int arkrtos_shell_auth_cmd_login(int argc, char **argv);
+```
+
+**`login <password>` */**
+
+### `int arkrtos_shell_auth_cmd_logout(int argc, char **argv);`
+
+```c
+int arkrtos_shell_auth_cmd_logout(int argc, char **argv);
+```
+
+**`logout` */**
 
 ## kernelsrc/include/arkrtos_sign.h
 

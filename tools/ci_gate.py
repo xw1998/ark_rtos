@@ -1202,6 +1202,34 @@ def check_paging_switch():
     else:
         fail("paging", txt[-260:])
 
+def check_shell_auth():
+    """Console login (ARKRTOS_USE_SHELL_AUTH, SEC-G01) must actually gate.
+
+    The switch defaults to 0, so arkrtos_shell_auth.c, the shell gate hook and
+    the two login/logout command registrations are never seen by a compiler in
+    a default build -- the usual false-green shape.  Two of the failure modes
+    are worse than a build break: a gate that sits *after* command lookup
+    leaves the exec fallback wide open ("./prog" runs without a password), and
+    an "enabled" build with no salt/digest is a console nobody can log into.
+    tools/shell_auth_gate.py makes all of that a reading with the real LA64
+    cross compiler: switch in three places, zero symbols when off (nm on a real
+    object), three #error negatives that must each name their symbol, the
+    constant-time 32-byte compare, the hook position, the failure limit and hard
+    lock, the two command registrations plus the table budget, and the demo
+    credentials recomputed by tools/shell_auth_cred.py.  Every source pin has a
+    self-check that a deliberately broken copy is caught.  A missing compiler is
+    a FAIL, not a skip.  Not covered: the runtime behaviour (login refused /
+    accepted on a real console) -- that is a QEMU reading, see
+    docs/QEMU模拟器移植与验证.md section 5.27.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "shell_auth_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "SHELL-AUTH-GATE OK" in txt:
+        ok("shell-auth",
+           "default off (no symbols) + LA64 ON compiles (3 TUs) + 3 negatives refused")
+    else:
+        fail("shell-auth", txt[-260:])
+
 def check_elf_loader():
     """ELF64 executable loader (ARKRTOS_USE_ELF) must be wired, not decorative.
 
@@ -1427,6 +1455,7 @@ LOCAL_TOOLCHAIN = {
     "seccheck": "armclang (Keil MDK)",
     "swap": "armclang (Keil MDK)",
     "paging": "LA64 / RV32 cross gcc",
+    "shell-auth": "LA64 cross gcc",
     "elf": "LA64 / RV32 cross gcc",
     "modld": "LA64 / RV32 / LA32 cross gcc",
     "payload-sign": "LA64 cross gcc",
@@ -1473,6 +1502,7 @@ CHECK_TABLE = (
     ("swap", check_swap_syntax),
     ("paging", check_paging_switch),
     ("elf", check_elf_loader),
+    ("shell-auth", check_shell_auth),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),

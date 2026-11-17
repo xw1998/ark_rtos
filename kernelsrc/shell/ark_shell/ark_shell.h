@@ -59,6 +59,12 @@ typedef int (*ark_shell_complete_fn)(struct ark_shell_s *shell,
                                      char cand[][ARK_SHELL_LINE_SIZE],
                                      int max);
 
+/* Console gate.  Called with the command word about to run (after alias
+ * expansion, before the lookup); returning non-zero refuses it, and the gate
+ * is responsible for saying why.  The kernel installs one for the console
+ * login (SEC-G01); the shell core only knows the signature. */
+typedef int (*ark_shell_gate_fn)(const char *name);
+
 typedef struct ark_shell_s {
     line_editor_t     editor;                              /* Line editor */
     history_t         history;                             /* Command history */
@@ -79,6 +85,9 @@ typedef struct ark_shell_s {
     const char       *search_match;                        /* Search match result */
 #endif
     ark_shell_complete_fn complete_fn;                     /* External completer, or NULL */
+#if ARK_SHELL_ENABLE_GATE
+    ark_shell_gate_fn gate_fn;                             /* Console gate, or NULL */
+#endif
 } ark_shell_t;
 
 /* ============================================================
@@ -88,6 +97,16 @@ typedef struct ark_shell_s {
  * without the shell core needing to know about the filesystem.
  * ============================================================ */
 void ark_shell_set_completer(ark_shell_t *shell, ark_shell_complete_fn fn);
+
+/* ============================================================
+ * ark_shell_set_gate - Install the console gate (NULL removes it)
+ *
+ * Only compiled when a gate exists (ARK_SHELL_ENABLE_GATE); a build without
+ * one has neither the field nor this function.
+ * ============================================================ */
+#if ARK_SHELL_ENABLE_GATE
+void ark_shell_set_gate(ark_shell_t *shell, ark_shell_gate_fn fn);
+#endif
 
 /* ============================================================
  * ark_shell_init - Shell initialization

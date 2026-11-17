@@ -72,3 +72,5 @@ toolchain.local.mk
 
 # ---- 部署侧镜像签名密钥（本机私有；密钥绝不入库）----
 *_sign_key_local.h
+# ---- 控制台登录凭据（盐+sha256），不入库 ----
+*_shell_auth_local.h

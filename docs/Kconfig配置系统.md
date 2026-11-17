@@ -82,6 +82,22 @@ py -3 tools/kconfig/menuconfig.py --defconfig config/arkrtos_defconfig
 
 `--savedefconfig` 可把当前配置回写成 defconfig；`--olddefconfig` 用旧配置补齐新符号。
 
+### 4.1 未激活的 int 生成的是「默认值」，不是下界（2026-11-17）
+
+`depends on` 不满足的 `int` / `hex` 符号在生成的 `arkrtos_autoconf.h` 里仍然要有一个
+**能用的字面量**，因为 `-D` 覆盖父开关是允许的用法：`-DARKRTOS_USE_SHELL_AUTH=1`
+打开的子开关参数，配的却是 defconfig 里把它关着的那棵树。
+
+早期实现让未激活的 `int` 走哨兵 `0`，随后 `_apply_ranges()` 把 `0` 抬到 `range`
+下界——于是 `ARKRTOS_SHELL_AUTH_TRIES`（`range 1 100`、`default 5`）在关档树里生成
+`1`，`-D...=1` 覆盖父开关后**失败容忍次数悄悄变成 1**，而文档与 `arkrtos_features.h`
+的缺省都写 5。现在改为：未激活的 `int` / `hex` 取它自己的第一条满足条件的 `default`，
+再走同一套 `range` 钳制（`tools/kconfig/kconfig.py` 的 `_compute()`）。当前树里
+只有 `ARKRTOS_SHELL_AUTH_TRIES` 受影响，其余 108 个符号的生成值一个字节没变。
+
+判据：改完重新生成 `--list` 后 `ARKRTOS_SHELL_AUTH_TRIES` 应为 `5`，并且
+`git diff kernelsrc/include/arkrtos_autoconf.h` 只有新增符号那几行。
+
 ## 5. 依赖关系
 
 功能之间的硬约束写在 Kconfig 里（`depends on`），和 C 侧 `arkrtos_features.h` 的

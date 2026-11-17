@@ -148,6 +148,15 @@ void ark_shell_set_completer(ark_shell_t *shell, ark_shell_complete_fn fn)
     }
 }
 
+#if ARK_SHELL_ENABLE_GATE
+void ark_shell_set_gate(ark_shell_t *shell, ark_shell_gate_fn fn)
+{
+    if (shell != NULL) {
+        shell->gate_fn = fn;
+    }
+}
+#endif
+
 void ark_shell_init(ark_shell_t *shell, uint32_t baudrate)
 {
     if (shell == NULL) {

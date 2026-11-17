@@ -45,6 +45,22 @@ extern "C" {
 #define ARKRTOS_SHELL_REDIRECT        1
 #endif
 
+/* Console gate -------------------------------------------------------
+ * When the kernel enables a console gate (ARKRTOS_USE_SHELL_AUTH), the gate
+ * decides whether a word may run at all.  The hook sits in run_stage() before
+ * the command lookup, so it covers the kernel command table *and* the
+ * exec fallback that turns "./prog" into a program - a gate that only hid
+ * commands would leave the back door open.
+ * Off (the default) compiles the call site out entirely.
+ * ------------------------------------------------------------------- */
+#ifndef ARK_SHELL_ENABLE_GATE
+#if defined(ARKRTOS_USE_SHELL_AUTH) && (ARKRTOS_USE_SHELL_AUTH == 1)
+#define ARK_SHELL_ENABLE_GATE         1
+#else
+#define ARK_SHELL_ENABLE_GATE         0
+#endif
+#endif
+
 /* Bytes per capture slot; a pipeline alternates two of them. */
 #ifndef ARKRTOS_SHELL_REDIRECT_BUF
 #define ARKRTOS_SHELL_REDIRECT_BUF    1024

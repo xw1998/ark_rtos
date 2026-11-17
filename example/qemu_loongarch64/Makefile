@@ -71,6 +71,23 @@ $(SIGNKEY):
 	@mkdir -p $(BUILD)
 	@printf '#ifndef ARKRTOS_SIGN_KEY_LOCAL_H\n#define ARKRTOS_SIGN_KEY_LOCAL_H\n#define ARKRTOS_IMAGE_SIGN_KEY { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F }\n#endif\n' > $@ ;
 
+# 控制台登录（SEC-G01）的凭据头：盐 16 字节 + sha256(盐 || 口令)。
+# 同样生成在构建目录、不进仓库；只有 EXTRA_CFLAGS 里显式开了
+# ARKRTOS_USE_SHELL_AUTH=1 时才生成、才加 -DARKRTOS_SHELL_AUTH_LOCAL=1，
+# 默认档的编译命令行与产物逐字节不变。
+# 这里的演示口令是 arkrtos-demo（源码注释里明写，本来就是演示凭据）；
+# 真板子用 tools/shell_auth_cred.py 自己生成一对，别抄这一份。
+SHELL_AUTH_HDR := $(BUILD)/arkrtos_shell_auth_local.h
+ARK_AUTH_ON    := $(findstring ARKRTOS_USE_SHELL_AUTH=1,$(EXTRA_CFLAGS))
+
+ifneq ($(ARK_AUTH_ON),)
+ARK_AUTH_FLAGS := -DARKRTOS_SHELL_AUTH_LOCAL=1
+endif
+
+$(SHELL_AUTH_HDR):
+	@mkdir -p $(BUILD)
+	@printf '#ifndef ARKRTOS_SHELL_AUTH_LOCAL_H\n#define ARKRTOS_SHELL_AUTH_LOCAL_H\n/* demo credentials: salt "ark-rtos-console", password "arkrtos-demo"; regenerate with tools/shell_auth_cred.py */\n#define ARKRTOS_SHELL_AUTH_SALT { 0x61, 0x72, 0x6B, 0x2D, 0x72, 0x74, 0x6F, 0x73, 0x2D, 0x63, 0x6F, 0x6E, 0x73, 0x6F, 0x6C, 0x65 }\n#define ARKRTOS_SHELL_AUTH_DIGEST { 0x04, 0xE5, 0xF6, 0x9B, 0x6F, 0x84, 0xB7, 0xAB, 0xD7, 0x5F, 0x71, 0xA9, 0xA8, 0x9C, 0xDA, 0x92, 0x12, 0xD7, 0x65, 0x56, 0x27, 0x8B, 0xD2, 0x60, 0xE2, 0x88, 0x14, 0x9A, 0x93, 0x2D, 0x87, 0x16 }\n#endif\n' > $@ ;
+
 # 额外的 -D（测试变体用，例如按需缺页单独出一份镜像）。缺省为空，基线不变。
 EXTRA_CFLAGS ?=
 
@@ -80,7 +97,7 @@ CFLAGS := $(ARCH_FLAGS) -g -O2 -ffreestanding -fno-common -nostdlib -nostartfile
           -include arkrtos_board_config.h \
           -DLFS_NO_MALLOC -DLFS_NO_ASSERT -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR \
           -DMDK_TRACE_ENABLE=1 -DMDK_TRACE_BACKEND_BUFF=1 -DMDK_TRACE_CPU_HZ=100000000u \
-          $(ARK_BUS_FLAGS) -DARKRTOS_SIGN_KEY_LOCAL=1 $(EXTRA_CFLAGS)
+          $(ARK_BUS_FLAGS) -DARKRTOS_SIGN_KEY_LOCAL=1 $(ARK_AUTH_FLAGS) $(EXTRA_CFLAGS)
 # 汇编走预处理器（.S 的大写后缀已经打开了 cpp），所以板级宏在 .S 里也可见 ——
 # 按需缺页要按开关决定「refill 入口是否保存通用寄存器」，只能这样做。
 # 「默认关时体积与行为零变化」已经实测过：把构建时间戳固定（SOURCE_DATE_EPOCH），
@@ -92,10 +109,14 @@ ASFLAGS := $(ARCH_FLAGS) -g -DARKRTOS_BOARD_CONFIG='"arkrtos_board_config.h"' \
 # 通配全部内核源，再剔除本平台没有任何介质/驱动依赖的模块：
 # 它们即使功能开关为 0 也在文件头无条件包含硬件头（drvflash.h / lfs.h），
 # 而这套 QEMU 目标没有 Flash 控制器、也没有 littlefs 组件。
-KERNEL_SRCS := $(filter-out kernelsrc/src/arkrtos_flashapp.c \
+# sort 不是装饰：$(wildcard) 的顺序来自文件系统的目录枚举顺序，往 kernelsrc/src
+# 里增删一个 .c 就可能让顺序重排（实测：新增 arkrtos_shell_auth.c 之后
+# arkrtos_task.c 换了个位置）。链接顺序一漂，默认档的镜像就不再逐字节可复现，
+# 「零变化」也就没法比对。排序把链接顺序钉在文件名字典序上。
+KERNEL_SRCS := $(sort $(filter-out kernelsrc/src/arkrtos_flashapp.c \
                             kernelsrc/src/arkrtos_fs.c \
                             kernelsrc/src/arkrtos_vfs_lfs.c, \
-                          $(wildcard kernelsrc/src/*.c))
+                          $(wildcard kernelsrc/src/*.c)))
 
 # 软总线组件本体（与 STM32F427 工程同一份清单）；transport_sock.c 不编，
 # 它需要 POSIX socket。port/ark_bus_hal_arkrtos.c 是三个板级钩子的装配层。
@@ -146,6 +167,11 @@ OBJS := $(addprefix $(BUILD)/,$(addsuffix .o,$(basename $(SRCS_C) $(SRCS_S))))
 
 # 密钥头变了就重编：它被 arkrtos_features.h 间接包含。
 $(OBJS): $(SIGNKEY)
+
+# 同一条规则给控制台登录的凭据头（只在开档时成立，默认档不生成也不依赖）。
+ifneq ($(ARK_AUTH_ON),)
+$(OBJS): $(SHELL_AUTH_HDR)
+endif
 
 # ELF 示例程序（hello.elf）：按窗口基址链接的标准 ELF64 静态可执行文件。
 # 它走的是装载器真正读的那条路（VFS 里的一个文件），所以链接基址必须落在

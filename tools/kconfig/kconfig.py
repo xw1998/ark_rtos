@@ -577,7 +577,23 @@ class Config(object):
                 return self.user[s.name]
             return "y" if self._choice_pick.get(s.choice.name) == s.name else "n"
         if not active:
-            return "n" if typ == BOOL else ("0" if typ in (INT, HEX) else "")
+            if typ == BOOL:
+                return "n"
+            if typ in (INT, HEX):
+                # An inactive int still has to generate a usable literal: the
+                # header is what a command-line override of the *parent* bool
+                # compiles against (e.g. -DARKRTOS_USE_SHELL_AUTH=1 against a
+                # tree whose defconfig leaves it off).  Returning the sentinel
+                # "0" is not usable there - _apply_ranges() clamps it up to the
+                # low bound, so the override silently runs with the minimum
+                # instead of the documented default.  Give the declared default
+                # instead; the range clamp below then lands on the same value
+                # the symbol would have once its deps are met.
+                for val, cond in s.defaults:
+                    if cond is None or self.eval_bool(cond):
+                        return val
+                return "0"
+            return ""
         # user override wins when the symbol is visible
         if s.name in self.user:
             return self.user[s.name]

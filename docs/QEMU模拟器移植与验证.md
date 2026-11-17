@@ -3230,8 +3230,9 @@ bss 增量 73 728 = 8 槽 × 8192 + bounce 8192，与实现逐项对得上。符
 与 shell 的 `s_pmap_swap_hold`，**基线里这些符号一个都没有**。
 
 零变化：默认档与 `git archive HEAD` 出的树各自以 `SOURCE_DATE_EPOCH=1600000000`
-构建、`--strip-debug` 后 **sha256 逐字节相同**
-（`7e71813c458044c36989610daf86b143cde15d28a40ee187d76931917de64b05`）。
+构建、`--strip-debug` 后 **sha256 逐字节相同**。这道读数取自引入 `KERNEL_SRCS`
+排序（`$(sort)`）之前；排序之后同一比对改了口径，见 §5.27.6 的新基线
+（可加载镜像 `a510d493…`）。
 
 #### 5.26.8 仍然没做的
 
@@ -3241,6 +3242,180 @@ bss 增量 73 728 = 8 槽 × 8192 + bounce 8192，与实现逐项对得上。符
 - **`fail` 路径只有源码判据**：8 轮全败（池里所有对都在被用）在自测里构造不出来，
   没实跑过；
 - **只在 LA64 板级实测**：RV32 侧依旧只有「关档零变化」这一条读数。
+
+### 5.27 控制台登录（SEC-G01，2026-11-17）
+
+#### 5.27.0 这一格要回答什么
+
+QEMU 与真板上的串口是**唯一的运维入口**：谁把线插上，谁就能敲 `poweroff`、
+卸掉还没跑起来的程序、或者把日志刷屏。SEC-G01 要的是「进控制台之前先证明
+自己是运维」，而不是「设备认识你是谁」。
+
+同一句话必须连着它的反面一起读，否则很容易被读成「有认证了、安全了」：
+
+- 它**不是设备身份**（那是 SEC-G13，需要密钥/证书）；
+- 它**不阻止**整片刷写 Flash（能接 SWD 的人不需要串口）；
+- 口令**明文过串口**，抓线就能看到；
+- 镜像泄露后，摘要可以**离线爆破**（这正是为什么它要求口令不能太弱）。
+
+#### 5.27.1 三条设计规矩
+
+1. **设备不存口令**：存 16 字节盐与 `sha256(salt || password)` 的 32 字节摘要，
+   都在编译期注入。口令本身一个字节都不落设备。
+2. **比对长度不随内容变**：`auth_digest_equal()` 固定 32 次 XOR 累加、一次
+   `diff == 0`，没有「第一个字节不同就 return」——否则错误口令的耗时泄漏了
+   匹配到第几位。
+3. **开机即锁、错误到上限就硬锁**：`ARKRTOS_SHELL_AUTH_TRIES`（默认 5）次连续
+   错误之后，控制台锁到**下一次复位**为止，此后即使口令正确也拒。不做指数
+   退避：串口是低速链，退避只会让单位时间内的猜测次数变少、每次猜测更便宜。
+
+放行名单只有 `login` / `logout` / `help`：没有 `login` 就永远解不开锁，`help`
+用来解释为什么被拒。
+
+#### 5.27.2 门钩放在哪里（这一格最容易做错）
+
+门钩是 `ark_shell_t` 上的一个函数指针（`ark_shell_gate_fn`），调用点在
+`ark_shell_eval.c` 的 `run_stage()` 里、**`ark_shell_find_command()` 之前**：
+
+```c
+#if ARK_SHELL_ENABLE_GATE
+    if ((shell->gate_fn != NULL) && (shell->gate_fn(xargv[0]) != 0)) {
+        eval_set_status(shell, 126);
+        return 126;
+    }
+#endif
+
+    cmd = ark_shell_find_command(xargv[0]);
+```
+
+放错位置（挂在查找之后）会留一条**旁路**：未知词会掉进 exec 回退，`./prog`
+照样能跑，门钩等于没拦。`tools/shell_auth_gate.py` 的 F pin 把这条顺序钉死，
+并且带一条「把门钩整体搬到查找之后必须报错」的自检。
+
+`ARK_SHELL_ENABLE_GATE` 由 `ark_shell_config.h` 从 `ARKRTOS_USE_SHELL_AUTH`
+派生；关档时这段调用点整段不编（预处理后的源码里 `gate_fn(xargv[0])` 一个
+都不剩，门禁按预处理结果判）。
+
+#### 5.27.3 凭据怎么进镜像
+
+`tools/shell_auth_cred.py` 是唯一的入口：
+
+```bash
+py -3 tools/shell_auth_cred.py --salt 61726b2d72746f732d636f6e736f6c65 \
+    --password <口令>                      # 打印凭据头正文
+py -3 tools/shell_auth_cred.py --salt <hex> --password <口令> \
+    --check <32 字节 hex>                  # 返回 0 = 匹配
+```
+
+生成的头叫 `arkrtos_shell_auth_local.h`，由 `.gitignore` 挡住
+（`*_shell_auth_local.h`），构建时靠 `-DARKRTOS_SHELL_AUTH_LOCAL=1` 引进来。
+`arkrtos_features.h` 在开档时逐项 `#error`：没有 shell、没有盐、没有摘要，
+全部编不过并**点名缺哪一个**——不给「开了但没人能登录」或「有个通用默认
+口令」两种假绿。
+
+`example/qemu_loongarch64/Makefile` 里那份是**演示凭据**（盐
+`ark-rtos-console`、口令 `arkrtos-demo`），只在 `EXTRA_CFLAGS` 里显式带
+`-DARKRTOS_USE_SHELL_AUTH=1` 时才生成、才加 `-D`。真板子用脚本自己生成
+一对，别抄这一份。
+
+#### 5.27.4 QEMU 实跑读数（LA64，登录档）
+
+构建：
+
+```bash
+make -f example/qemu_loongarch64/Makefile -j8 BUILD=build/qemu_la64_auth \
+     EXTRA_CFLAGS="-DARKRTOS_USE_SHELL_AUTH=1"
+```
+
+开机横幅之后（直接抓串口，`-serial file:…`）：
+
+```
+console: locked - type 'login <password>'
+```
+
+三组命令序列（`tools/qemu_shell_drive.py` 驱动，三组都打印
+`SHELL-DRIVE OK`）：
+
+| 序列 | 期望 | 实测 |
+|---|---|---|
+| `info` → `login wrongpw` → `login arkrtos-demo` → `info` → `logout` → `info` | 先拒、错口令计次、正确口令解锁、登出后又锁 | `login: console is locked, type 'login <password>'` / `login: wrong password (1/5)` / `login: ok, console unlocked` / `logout: console locked` / 再 `console is locked` |
+| `help` → `ls` → `w1`…`w5` → 正确口令 → `logout` → `ls` | help 放行、其余被拒 6 次、解锁后可执行、登出后又拒 | 与期望一致 |
+| `login a`…`login e` → 正确口令 → `help` → `logout` | 第 5 次 `(5/5)` 硬锁；之后**正确口令也拒** | `login: wrong password, console locked until reset (5/5)` → `login: locked until reset (5 wrong passwords); reboot to try again` → `logout: console already locked until reset` |
+
+`info` 在锁定状态下**不执行**，只打印拒绝理由——这是「报错而不是给错答案」：
+它不会假装跑完了再把结果藏起来。
+
+#### 5.27.5 体积
+
+| 档 | text | data | bss |
+|---|---|---|---|
+| 默认档（`KERNEL_SRCS` 已排序） | 366744 | 416 | 767508 |
+| 登录档（`ARKRTOS_USE_SHELL_AUTH=1`） | **370320** | **440** | 767508 |
+
+开档 **+3576 B text / +24 B data**，与实现规模（SHA-256 头内静态实现被两个
+TU 各内联一份、门钩、两条命令、若干提示串）对得上。
+
+#### 5.27.6 零变化与「为什么改成 `objcopy -O binary` 比对」
+
+这一轮的默认档**体积与 HEAD 逐项相同**（366744 / 416 / 767508），但它带进来
+一行与安全无关的改动：`KERNEL_SRCS` 加了 `$(sort)`。
+
+理由是实测出来的：`$(wildcard kernelsrc/src/*.c)` 的顺序来自 NTFS 的目录枚举，
+往 `kernelsrc/src/` 里**增删一个 `.c`** 就会重排——这一轮新增
+`arkrtos_shell_auth.c` 之后，`arkrtos_task.c` 的链接位置就换了。链接顺序一变，
+默认档镜像就不再逐字节可复现，「零变化」也就没法比对。排序把链接顺序钉在
+文件名字典序上，代价是**旧的可复现基线作废**（§5.26 里那个 `7e71813c…` 是
+排序之前的读数，本机已不能复现）。
+
+新的比对口径：
+
+1. 两棵树都加同一行 `$(sort)`，各自以 `SOURCE_DATE_EPOCH=1600000000` 构建；
+2. 用 `objcopy -O binary` 取**可加载镜像**（真正上板跑的字节），比 sha256。
+
+实测：当前树与「`git archive HEAD` 出的树 + 同一行 `$(sort)`」两枚镜像
+**逐字节相同**，`a510d493843a107911603930b41ca6787bc9165e5e22e70f2da555b85a8f1c3f`
+（31 462 512 字节）。
+
+为什么不再比 (stripped) ELF：`arkrtos_sha256.h` 是 header-only，默认档里这些
+`static` 函数仍会被内联掉、不产生代码，但**gcc 给本地静态符号的自动编号**会
+往前挪（`big.3660` → `big.3662`、`rwx.6503` → `rwx.6505` 等 32 项，地址与大小
+全部相同），ELF 头里的符号表因此抖动。真正"上板跑的字节"是 loadable image，
+用它比对更诚实，也更稳定。
+
+#### 5.27.7 门禁：`tools/shell_auth_gate.py`
+
+`py -3 tools/shell_auth_gate.py` 全过，`ci_gate.py` 随之从 43 项变 **44 项**。
+它钉的是：
+
+- **A** 开关三处：`features.h` 缺省 0 / Kconfig 两项（`depends on ARKRTOS_USE_SHELL`、
+  `range 1 100`）/ Makefile 只在 `EXTRA_CFLAGS` 显式开档时生成凭据头并加 `-D`；
+- **B** 关档零符号（真编 `.o` 后 `nm`）：关档 `arkrtos_shell_auth.c` 编出空
+  TU、`ark_shell.c` 里没有 `ark_shell_set_gate`；开档三样都在，且
+  `ark_shell_eval.c` 预处理后必须有门钩调用点、关档必须一个不剩；
+- **C** 三个 TU 用真 LA64 交叉编译器带开关编得过；
+- **D** 三条 `#error` 真会触发且各自点名（无盐 / 有盐无摘要 / 没有 shell）；
+- **E** 常量时间比对（32 字节整段 XOR 累加、循环里没有提前 return）；
+- **F** 门钩位置（在 `ark_shell_find_command` 之前）+ 放行名单只有
+  `login` / `logout` / `help`；
+- **G** 失败上限与硬锁（置 `s_auth_locked_hard`，且硬锁判断在口令比对之前）；
+- **H** `login` / `logout` 在开档条件里注册、命令表预算 `+2`；
+- **I** 开机即锁（`init` 置 1）+ shell 任务里真调 `init`/`set_gate` 并打印提示；
+- **J** 演示凭据自洽（`Makefile` 里的盐/摘要必须与 `shell_auth_cred.py` 现算的一致，
+  且脚本对错口令必须报 mismatch）；
+- **K** 凭据头不入库（`.gitignore` 覆盖 + `git ls-files` 干净）。
+
+E–K 每条都带「把源改坏必须报错」的自检，报不出错就算 pin 空转。
+
+#### 5.27.8 仍然没做的 / 诚实边界
+
+- **口令明文过串口**：板子没有可信显示，也没有非对称密钥，只能这样。抓线者
+  能看到口令；
+- **离线爆破**：摘要就在镜像里，弱口令挡不住离线字典（这一条在 Kconfig help
+  与 `docs/安全认证准备.md` 里都写着）；
+- **硬锁不跨复位**：复位就清（这正是设计意图——爆破者每次要重启板子），
+  但也意味着**能按复位键的人可以无限重试**；
+- **没有运行期改口令 / 多用户**：凭据在编译期固定；
+- **不是设备身份**：不参与 SEC-G13，不替代签名与安全启动。
 
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
