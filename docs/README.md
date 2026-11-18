@@ -5,6 +5,7 @@
 | 我想…… | 看这份 |
 |---|---|
 | 把 App/驱动调试起来、装到板子上、处理崩溃 | **[Ark RTOS应用安装与调试指南.md](Ark RTOS应用安装与调试指南.md)**（操作手册，先读这份） |
+| Read the same page in English | [Ark RTOS应用安装与调试指南.en.md](Ark RTOS应用安装与调试指南.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 搞懂安装策略、设备端配置区、槽位与 RAM 窗口 | [配置区与安装策略.md](配置区与安装策略.md)（配置记录格式 + 两种安装策略） |
 | 用英文读同一份配置区与安装策略 | [配置区与安装策略.en.md](配置区与安装策略.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 把为 Linux/Windows 写的 C 程序搬到 Ark RTOS 上跑 | [POSIX与Windows兼容层说明.md](POSIX与Windows兼容层说明.md)（能力表 + 不支持项及原因） |
@@ -113,6 +114,7 @@
 docs/
 ├── README.md                              # 本文件（文档索引 + API 文档生成说明）
 ├── Ark RTOS应用安装与调试指南.md             # 【操作手册】开发调试/串口安装/启动流程/故障处理/排错
+├── Ark RTOS应用安装与调试指南.en.md         # 【English】Ark RTOS应用安装与调试指南页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── 配置区与安装策略.md                      # 【设计说明】分区/池粒度/槽位与 RAM 窗口/配置记录格式/安装策略
 ├── 配置区与安装策略.en.md                   # 【English】配置区页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── POSIX与Windows兼容层说明.md              # 【设计说明】兼容层能力与边界、启动门闩、堆、真机自测
