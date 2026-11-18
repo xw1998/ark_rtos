@@ -955,25 +955,12 @@ int32 arkrtos_mtx_create_recursive_internal(char *name)
     return ARKRTOS_SYNC_ERR_NOSLOT;
 }
 #endif /* ARKRTOS_USE_MTX_RECURSIVE == 1 */
-int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms)
+/* 快路径：无人持有（含自队首接锁）/ 递归重复加锁 / timeout==0 只试一次。
+ * 返回 1 表示要继续走等待路径（中断仍关）；返回 0 表示 *p_ret 已是最终
+ * 返回码（本函数内已开中断）。 */
+static int mtx_lock_try_immediate(int32 idx, arkrtos_task_t *p_tsk,
+                                  int32 timeout_ms, int32 *p_ret)
 {
-    int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
-    arkrtos_task_t *p_tsk;
-    int32 reason;
-
-    if(ARKRTOS_MTX_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
-        return ARKRTOS_SYNC_ERR_HANDLE;
-    if(idx >= ARKRTOS_MTX_NUM || arkrtos_mtxs[idx].used == 0)
-        return ARKRTOS_SYNC_ERR_HANDLE;
-
-    ARKRTOS_DISABLE_IRQ();
-    p_tsk = arkrtos_task_get_current();
-    if(p_tsk == 0)
-    {
-        ARKRTOS_ENABLE_IRQ();
-        return ARKRTOS_SYNC_ERR_CONTEXT;
-    }
-
     if(arkrtos_mtxs[idx].owner == 0)
     {
         /* Same rule as the semaphore: with waiters queued the lock goes to
@@ -991,6 +978,7 @@ int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms)
             arkrtos_mtxs[idx].nest          = 1;   /* 第一次持有 */
 #endif
             ARKRTOS_ENABLE_IRQ();
+            *p_ret = 0;
             return 0;
         }
     }
@@ -1004,17 +992,20 @@ int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms)
         {
             arkrtos_mtxs[idx].nest++;
             ARKRTOS_ENABLE_IRQ();
-            return ARKRTOS_SYNC_OK;
+            *p_ret = ARKRTOS_SYNC_OK;
+            return 0;
         }
         ARKRTOS_ENABLE_IRQ();
-        return ARKRTOS_SYNC_ERR_RECURSIVE;
+        *p_ret = ARKRTOS_SYNC_ERR_RECURSIVE;
+        return 0;
     }
 #else
     if(arkrtos_mtxs[idx].owner == p_tsk)
     {
         /* 同一任务重复加锁，不支持递归，返回错误 */
         ARKRTOS_ENABLE_IRQ();
-        return ARKRTOS_SYNC_ERR_RECURSIVE;
+        *p_ret = ARKRTOS_SYNC_ERR_RECURSIVE;
+        return 0;
     }
 #endif
 
@@ -1031,9 +1022,18 @@ int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms)
             arkrtos_appq_set(p_tsk, 0u);
         }
         ARKRTOS_ENABLE_IRQ();
-        return ARKRTOS_SYNC_ERR_TIMEOUT;
+        *p_ret = ARKRTOS_SYNC_ERR_TIMEOUT;
+        return 0;
     }
 
+    return 1;
+}
+
+/* 登记等待者：优先级继承 + 入队 + 用户态只登记不阻塞。
+ * 返回 1 表示可以继续阻塞等待（中断仍关）；返回 0 表示 *p_ret 已是最终
+ * 返回码（已开中断）。 */
+static int mtx_lock_register(int32 idx, arkrtos_task_t *p_tsk, int32 *p_ret)
+{
     /* 优先级继承：若持有者优先级低于当前等待者，临时提升持有者优先级以避免优先级反转 */
     if(arkrtos_mtxs[idx].owner->priority > p_tsk->priority)
     {
@@ -1049,7 +1049,8 @@ int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms)
          * waiter believes it is queued while nothing will ever wake it. */
         arkrtos_mtx_recalc_priority(idx);
         ARKRTOS_ENABLE_IRQ();
-        return ARKRTOS_SYNC_ERR_PARAM;
+        *p_ret = ARKRTOS_SYNC_ERR_PARAM;
+        return 0;
     }
 
     /* User-mode waiter: register only (same rule as sem_wait). */
@@ -1057,8 +1058,19 @@ int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms)
     {
         arkrtos_appq_set(p_tsk, 1u);
         ARKRTOS_ENABLE_IRQ();
-        return ARKRTOS_SYNC_ERR_WOULDBLOCK;
+        *p_ret = ARKRTOS_SYNC_ERR_WOULDBLOCK;
+        return 0;
     }
+
+    return 1;
+}
+
+/* 真正阻塞等待并判定唤醒是“锁已转交”还是假醒/超时/被删。恒为最终结论，
+ * 每条分支自己开中断。 */
+static int32 mtx_lock_block_and_claim(int32 idx, arkrtos_task_t *p_tsk,
+                                      int32 timeout_ms)
+{
+    int32 reason;
 
     /* 链式传播：被提升的持有者若自己也在等别的锁，那把锁的持有者同样要提升 */
     arkrtos_mtx_propagate();
@@ -1121,6 +1133,32 @@ int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms)
 
     ARKRTOS_ENABLE_IRQ();
     return ARKRTOS_SYNC_OK;
+}
+
+int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms)
+{
+    int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
+    arkrtos_task_t *p_tsk;
+    int32 ret;
+
+    if(ARKRTOS_MTX_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+        return ARKRTOS_SYNC_ERR_HANDLE;
+    if(idx >= ARKRTOS_MTX_NUM || arkrtos_mtxs[idx].used == 0)
+        return ARKRTOS_SYNC_ERR_HANDLE;
+
+    ARKRTOS_DISABLE_IRQ();
+    p_tsk = arkrtos_task_get_current();
+    if(p_tsk == 0)
+    {
+        ARKRTOS_ENABLE_IRQ();
+        return ARKRTOS_SYNC_ERR_CONTEXT;
+    }
+
+    if(mtx_lock_try_immediate(idx, p_tsk, timeout_ms, &ret) == 0)
+        return ret;
+    if(mtx_lock_register(idx, p_tsk, &ret) == 0)
+        return ret;
+    return mtx_lock_block_and_claim(idx, p_tsk, timeout_ms);
 }
 
 int32 arkrtos_mtx_unlock_internal(int32 handle)

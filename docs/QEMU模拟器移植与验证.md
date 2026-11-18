@@ -4376,6 +4376,47 @@ text `367528 → 367576`（**+48 B**），`data` 440 / `bss` 767508 / 镜像总�
 
 **结论分档：QEMU 实跑验证过（端到端 PASS + utest 用例真调这个函数且实测提交成功），未上板。**
 
+#### 5.30.19 第十四笔：`arkrtos_mtx_lock_internal()` 按「快路径 / 登记等待 / 阻塞判定」分三段（2026-11-18）
+
+`kernelsrc/src/arkrtos_sync.c` 的 `arkrtos_mtx_lock_internal()`（167 行）是互斥锁加锁的唯一入口，
+它把四种完全不同的处境写在同一个函数里：锁空着（可以就地拿）、自己已经持有（递归或报错）、
+`timeout==0` 只试一次（不登记等待者）、真要排队等（继承优先级 + 入队 + 阻塞 + 判唤醒真假）。
+这四段的前置状态不同，临界区（`ARKRTOS_DISABLE_IRQ()` 之后）却只有一份，所以按「拿到结论就开中断返回」
+切成三段：
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `mtx_lock_try_immediate()` | owner 为空（含「队列头就是自己」则摘掉自己的登记再拿锁）、自己已是 owner 的递归加深 / 非递归报错（两个 `#if` 分支各一份）、`timeout==0` 的只试一次；返回 1 表示还要继续等，返回 0 表示 `*p_ret` 已是最终码 | 68 |
+| `mtx_lock_register()` | 优先级继承（只有「持有者优先级低于等待者」才提）→ `waiters_add`（队列满则 `recalc_priority` 回滚）→ 用户态等待者只登记（`appq_set(p_tsk, 1u)` + `WOULDBLOCK`）；同样用 1/0 区分「继续」与「已是最终码」 | 31 |
+| `mtx_lock_block_and_claim()` | `propagate()` → `trace_wait_obj()` → `task_block_in_critical()`，然后按 `reason` 分类：`<0` 参数错、`OBJ_DELETED` 删锁、`1` 超时与转交的竞态、以及「`owner` 不是自己或没带 HANDOFF 位」的假醒自检（`owner` 恰是自己时 `arkrtos_diag_sync_ghost++`）；恒为最终结论 | 65 |
+| `arkrtos_mtx_lock_internal()` 自己 | 句柄校验 + 临界区入口 + `arkrtos_task_get_current()` 判上下文 + 三次调用 | **24**（原 167） |
+
+口径就一条：**每个 helper 内自己开中断再 return**，入口不再补开 —— 一次失败一次开中断，不重不漏。
+三个 helper 一律返回「是否已给出结论」而不是错误码，因为 `ARKRTOS_SYNC_OK` 本身就是 0，用返回值兼作
+「继续」会和成功码撞车；所以结论走 `int32 *p_ret` 出参。
+
+等价性归一化比对（剥注释、逐行去空白、取多重集差）：only-OLD 只剩 **6 行**，就是被搬进 helper 的六个
+`return ARKRTOS_SYNC_ERR_* / OK;`；only-NEW 全是 `*p_ret = ...; return 0;` 六处、`return 1;` 两处、
+`int32 ret;` 与入口那三次调用。**没有判断条件、错误码、优先级继承口径、等待者摘除时机被改。**
+
+这一笔的对象同时是宿主用例的链接对象（`kernelsrc/tests/test_sync_host.c`，`-DARKRTOS_USE_MTX_RECURSIVE=1
+-DARKRTOS_SYNC_HOST_TEST`），所以证据里必须带上它：`SYNC-HOST OK (85 checks)`，另用
+`-DARKRTOS_USE_MTX_RECURSIVE=0` 单独编一次确认非递归那个 `#else` 分支也过编译。
+
+体积：`arkrtos_sync.c` 在 LA64 默认档**真的被编进去**，所以这一笔**不是**「逐字节不变」 ——
+text `367576 → 367672`（**+96 B**，多出来的部分是三个 helper 的栈帧与调用点），`data` 440 /
+`bss` 767508 / 镜像总长 31,462,512 B 不变；`BUILD=build/mtx_split` 与重建后的默认档目录两份 `.bin`
+在 `SOURCE_DATE_EPOCH=1600000000` 下 **sha256 逐字节相同**（`d3c34f6e…`）。单文件告警 **0 条**
+（同一组 flag 对拆分前副本与现文件各 `-c` 一次对照）。
+
+门禁：`coverage-host` 里 `arkrtos_sync` **49.05%**（基线 43.79，未下调）；`sec-crc` 8 pin 全过（这一笔
+不动 CRC 路径）；`format_gate` 361 个自有文件干净；`example/qemu_loongarch64/shell_check.py` **PASS**
+（`build/shell_check_mtx.log`）。
+
+`doc_audit.py funcs`：超过 120 行的函数 **20 → 19**；最长换成 `arkrtos_loader_move_slot()`（167）。
+
+**结论分档：宿主用例实跑验证过（85 checks）+ QEMU 端到端 PASS，未上板。**
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

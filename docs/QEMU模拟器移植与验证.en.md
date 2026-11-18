@@ -2071,6 +2071,54 @@ lowering a threshold:
 **Evidence class: executed under QEMU (end-to-end PASS plus a utest case that really calls this function and
 a measured successful commit), not on hardware.**
 
+#### 5.30.19 Fourteenth one: `arkrtos_mtx_lock_internal()` split into fast paths / register waiter / block and claim (2026-11-18)
+
+`arkrtos_mtx_lock_internal()` in `kernelsrc/src/arkrtos_sync.c` (167 lines) is the only mutex lock entry, and
+it carries four different situations: the lock is free (take it right there), the caller already owns it
+(deepen the recursion or report an error), `timeout == 0` (try once, never register a waiter), and a real
+queue-and-wait (inherit priority, enqueue, block, then decide whether the wake was a handover). The
+preconditions differ, but there is only one critical section, so the split follows "conclude, then re-enable
+interrupts and return":
+
+| Function | Scope | Lines |
+|---|---|---|
+| `mtx_lock_try_immediate()` | empty owner (including "the queue head is me, so drop my own registration and take it"), self-recursion / non-recursive error (one copy per `#if` branch), `timeout == 0` single try; returns 1 to keep waiting, 0 when `*p_ret` is final | 68 |
+| `mtx_lock_register()` | priority inheritance (only when the owner's priority is lower than the waiter's) -> `waiters_add` (queue full rolls back via `recalc_priority`) -> user-mode waiter registers only (`appq_set(p_tsk, 1u)` + `WOULDBLOCK`); same 1/0 convention | 31 |
+| `mtx_lock_block_and_claim()` | `propagate()` -> `trace_wait_obj()` -> `task_block_in_critical()`, then classify `reason`: `< 0` parameter error, `OBJ_DELETED`, `1` for the timeout-versus-handover race, and the spurious-wake self-check ("owner is not me, or no HANDOFF bit", with `arkrtos_diag_sync_ghost++` when the owner happens to be me); always final | 65 |
+| `arkrtos_mtx_lock_internal()` itself | handle checks, critical-section entry, `arkrtos_task_get_current()` context check, three calls | **24** (was 167) |
+
+The one rule: **each helper re-enables interrupts itself before returning**, and the entry never patches it up
+afterwards - one failure, one re-enable, no double and no missing.
+
+The helpers return "did I conclude" rather than an error code, because `ARKRTOS_SYNC_OK` is itself 0 and an
+error-code return would collide with "keep going"; the verdict therefore leaves through an `int32 *p_ret`
+out-parameter.
+
+Normalised equivalence check (comments stripped, whitespace removed per line, multiset difference): only-OLD
+holds **6 lines**, exactly the six `return ARKRTOS_SYNC_ERR_* / OK;` statements that moved into helpers;
+only-NEW is six `*p_ret = ...; return 0;`, two `return 1;`, one `int32 ret;` and the three calls in the entry.
+No condition, error code, inheritance rule or waiter-removal timing changed.
+
+This translation unit is also linked by the host test (`kernelsrc/tests/test_sync_host.c`,
+`-DARKRTOS_USE_MTX_RECURSIVE=1 -DARKRTOS_SYNC_HOST_TEST`), so the evidence includes it:
+`SYNC-HOST OK (85 checks)`, plus a separate compile with `-DARKRTOS_USE_MTX_RECURSIVE=0` to prove the
+non-recursive `#else` branch still builds.
+
+Size: `arkrtos_sync.c` **is** part of the LA64 default build, so this is **not** byte-identical: text
+`367576 -> 367672` (**+96 B**, the extra frames and call sites of the three helpers), `data` 440 / `bss`
+767508 / total image 31,462,512 B unchanged; `BUILD=build/mtx_split` and a rebuilt default-directory binary
+are **sha256-identical** (`d3c34f6e...`) under `SOURCE_DATE_EPOCH=1600000000`. Warnings for the file: **0**
+(same flags, `-c` on both the pre-split copy and the current file).
+
+Gates: `coverage-host` reports `arkrtos_sync` at **49.05%** (baseline 43.79, not lowered); `sec-crc` passes
+all 8 pins (this change does not touch a CRC path); `format_gate` reports 361 own files clean;
+`example/qemu_loongarch64/shell_check.py` **PASS** (`build/shell_check_mtx.log`).
+
+`doc_audit.py funcs`: functions longer than 120 lines go **20 -> 19**; the longest is now
+`arkrtos_loader_move_slot()` (167).
+
+**Evidence class: host tests executed (85 checks) plus QEMU end-to-end PASS, not on hardware.**
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine
