@@ -1,5 +1,7 @@
 # arkc 板上直跑 — M1 实机记录（固定窗口）
 
+**[简体中文](arkc板上直跑-M1实机记录.md) | English([arkc板上直跑-M1实机记录.en.md](arkc板上直跑-M1实机记录.en.md))**
+
 > 判据的自动复跑见 [arkc产物上板-错误码表与回归账本.md](arkc产物上板-错误码表与回归账本.md) §5
 > （`py -3 tools/final_app.py`，其中 `m1-fixed-window` / `m1-wrong-window` 两条就是本文 §6 的正反用例）。
 
