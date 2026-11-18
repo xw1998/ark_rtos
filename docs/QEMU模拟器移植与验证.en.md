@@ -2119,6 +2119,67 @@ all 8 pins (this change does not touch a CRC path); `format_gate` reports 361 ow
 
 **Evidence class: host tests executed (85 checks) plus QEMU end-to-end PASS, not on hardware.**
 
+#### 5.30.20 Fifteenth one: `arkrtos_loader_move_slot()` split into precheck / program / finalize (2026-11-18)
+
+`arkrtos_loader_move_slot()` in `kernelsrc/src/arkrtos_loader.c` (167 lines) is the only in-pool move
+implementation, and it did three unrelated things at once: prove the slot may move at all (state, downward
+only, header valid, target erased), actually move the bytes (write an UNCOMMITTED header -> copy the reloc
+table as-is -> read the payload's already-patched bytes and add the (new - old) delta -> roll every chunk
+into a CRC), and finally re-verify the whole span, commit VALID with a single word and repoint the slot.
+The three parts have different preconditions and different failure meanings, so they became:
+
+| Function | Scope | Lines |
+|---|---|---|
+| `loader_move_precheck()` | slot state must be LOADED, `new_base` non-zero and strictly below the old base, `check_header(TYPE_MASK_POOL)`, total length, pool bounds, `span_erased()` on the target; on success hands out the old base, the total length and a header copy **already set to UNCOMMITTED** | 51 |
+| `loader_move_program()` | write the UNCOMMITTED header -> `crc_header` -> copy the reloc table as-is (chunked, CRC-rolled, written) -> read the payload's old patched bytes and `reloc_apply(..., delta, 0u)` on top -> roll each chunk into the CRC; `*p_crc` hands out the CRC of what was actually written | 96 |
+| `loader_move_finalize()` | full `image_crc` re-check -> single-word write of `state = VALID` -> `ptable_move` repoints the slot -> `ptable_set_slot` recomputes the entry | 32 |
+| `arkrtos_loader_move_slot()` itself | three calls plus one `delta = new_base - old_base` | **25** (was 167) |
+
+Three conventions: (1) old base / total length / header copy travel through out-parameters, so no part
+re-reads the on-flash header - this function has already rewritten it, and re-reading would only fetch its
+own half-written copy; (2) "decide to move" and "state is now UNCOMMITTED" happen in the same place inside
+precheck instead of being a side effect in the middle of the function; (3) `delta` is computed once.
+
+Normalised equivalence check (comments stripped, whitespace removed per line, multiset difference):
+only-OLD is **19 lines, all `hdr.` -> `p_hdr->` renames** (including `hdr = *p_old;` / `hdr.state = UNCOMMITTED;`
+moving into precheck); only-NEW is signatures, out-parameter writes, braces and the three calls. **No
+condition, error code, CRC rule or commit order was changed.**
+
+Size: text `367672 -> 367656` (**-16 B**), `data` 440 / `bss` 767508 / image length 31,462,512 B unchanged;
+under `SOURCE_DATE_EPOCH=1600000000` the two `.bin` files from `BUILD=build/move_split` and a rebuild of the
+default directory are **byte-identical** (`f7658a81...`). Single-file warnings **21 = 21 before the split**
+(this file always had 21; the point is only that the count is strictly unchanged).
+
+The host test is the real gain here: `find_clean()` / `move_slot()` / `pool_free()` all scan absolute
+addresses starting at `IMAGE_POOL_BASE`, so on a host the move path used to contribute 0 covered lines. The
+new `test_move_slot_e2e()` uses `VirtualAlloc` (POSIX branch: `MAP_FIXED`) to map `0x08060000` for real and
+then runs one genuine reclaim against a RAM fake Flash: an image loaded at "pool base + one sector" is
+compacted down to the pool base, the header is re-committed as VALID, the ROM word entry gets the
+`(new base - old base)` delta added on top of what was already patched, the old range returns to erased
+state, and a second reclaim moves nothing. `loader-host: 88 passed, 0 failed` (was 75).
+
+Two pitfalls that only show up on a host:
+
+1. **The mapping length must be `IMAGE_POOL_SIZE`, not `IMAGE_POOL_USABLE_SIZE`.** The reclaim
+   sector loop runs `pool_units` (= `IMAGE_POOL_SIZE` / sector) sectors; the trailing reserved sector lies
+   outside USABLE but is still read by `span_erased()` => mapping only USABLE reads unmapped memory and
+   segfaults - it is not "a bit less coverage", it is a crash.
+2. **`arkrtos_loader_reclaim()` returns the number of sectors actually erased, not a status code.** After
+   the move the sector holding the old copy is unused, so that pass erases it and the first reclaim
+   returns **1**; only the second returns 0.
+
+Gates: `coverage-host` reports `arkrtos_loader` **45.25%** (previous baseline 29.38, **not lowered** - per
+the standing rule the baseline was raised to the measured value with `--update`; `arkrtos_sync` was
+likewise raised from 43.79 to the measured 49.05 in the same run); `sec-crc` 8 pins; `format_gate` 361 own
+files clean; `example/qemu_loongarch64/shell_check.py` **PASS**.
+
+`doc_audit.py funcs`: functions over 120 lines **19 -> 18**; the longest is now `arkrtos_guard_tick()` (166).
+
+**Evidence tier: host tests really executed (88 checks) + QEMU end-to-end PASS; not verified on board.**
+The runtime evidence for the move path comes from the **host** (`VirtualAlloc` pinning the pool at its real
+absolute address + RAM fake Flash), not from QEMU or hardware; when the mapping fails the test prints
+`SKIP` and returns instead of pretending it ran.
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine

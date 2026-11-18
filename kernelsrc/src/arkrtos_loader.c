@@ -2463,17 +2463,16 @@ uint32 arkrtos_loader_scan_driver(void)
  *          上电扫描丢弃的残片。
  * @return 0=成功，负值为 ARKRTOS_LOADER_ERR_x
  * ============================================================ */
-static int32 arkrtos_loader_move_slot(uint32 slot, uint32 new_base)
+/* 搬移前置：只有「已加载、未运行」且只向下搬的镜像可以动，目标还必须干净。
+ * 成功时用出参交出旧落点、镜像总长与一份头副本（已置 UNCOMMITTED）。 */
+static int32 loader_move_precheck(uint32 slot, uint32 new_base,
+                                  uint32 *p_old_base, uint32 *p_total,
+                                  arkrtos_app_header_t *p_hdr)
 {
     arkrtos_partition_table_t *pt = arkrtos_ptable_get();
     const arkrtos_app_header_t *p_old;
-    arkrtos_app_header_t hdr;
     uint32 old_base = pt->slot_base[slot];
     uint32 total;
-    uint32 delta;
-    uint32 written;
-    uint32 idx = 0u;
-    uint32 crc_written;
 
     /* 只有「已加载、未运行」的镜像可以搬：运行中的镜像 RAM 里有活状态，
      * 而且它的代码正在被取指；裸镜像没有镜像头，根本无从重定位。 */
@@ -2511,20 +2510,32 @@ static int32 arkrtos_loader_move_slot(uint32 slot, uint32 new_base)
         return ARKRTOS_LOADER_ERR_OCCUPIED;
     }
 
-    hdr = *p_old;
-    hdr.state = ARKRTOS_APP_STATE_UNCOMMITTED;
-    delta = new_base - old_base;
+    *p_hdr = *p_old;
+    p_hdr->state = ARKRTOS_APP_STATE_UNCOMMITTED;
+    *p_old_base = old_base;
+    *p_total = total;
+    return 0;
+}
 
-    if(arkrtos_port_flash_write(new_base, (const uint8 *)&hdr, ARKRTOS_APP_HEADER_SIZE) != 0)
+/* 真搬：写 UNCOMMITTED 头 -> 表原样搬 -> 负载读出旧补丁再叠加 (新落点 - 旧落点)。
+ * 每写一段就把落盘形态滚进 *p_crc，供调用方最后整段复核。 */
+static int32 loader_move_program(uint32 old_base, uint32 new_base, uint32 delta,
+                                 const arkrtos_app_header_t *p_hdr, uint32 *p_crc)
+{
+    uint32 written;
+    uint32 idx = 0u;
+    uint32 crc_written;
+
+    if(arkrtos_port_flash_write(new_base, (const uint8 *)p_hdr, ARKRTOS_APP_HEADER_SIZE) != 0)
     {
         return ARKRTOS_LOADER_ERR_FLASH;
     }
 
-    crc_written = arkrtos_loader_crc_header(&hdr);
+    crc_written = arkrtos_loader_crc_header(p_hdr);
 
     /* 重定位表原样搬：表项是「相对镜像起始」的偏移，与新落点无关 */
     {
-        uint32 rt_len = hdr.reloc_count * ARKRTOS_APP_RELOC_SIZE;
+        uint32 rt_len = p_hdr->reloc_count * ARKRTOS_APP_RELOC_SIZE;
         uint32 got = 0u;
 
         while(got < rt_len)
@@ -2556,9 +2567,9 @@ static int32 arkrtos_loader_move_slot(uint32 slot, uint32 new_base)
     }
 
     /* 负载：读出旧副本已打好的补丁，再叠加 (新落点 - 旧落点) */
-    for(written = 0u; written < hdr.image_size; )
+    for(written = 0u; written < p_hdr->image_size; )
     {
-        uint32 want = hdr.image_size - written;
+        uint32 want = p_hdr->image_size - written;
         uint32 submit;
         uint32 i;
 
@@ -2570,49 +2581,57 @@ static int32 arkrtos_loader_move_slot(uint32 slot, uint32 new_base)
         for(i = 0u; i < want; i++)
         {
             arkrtos_loader_chunk[i] =
-                *(const uint8 *)(old_base + hdr.payload_offset + written + i);
+                *(const uint8 *)(old_base + p_hdr->payload_offset + written + i);
         }
 
         /* 旧副本还在 Flash 里，被切开的尾部下一轮重读即可 */
         submit = arkrtos_loader_reloc_apply(
                      arkrtos_loader_chunk,
-                     hdr.payload_offset + written, want,
-                     &hdr,
+                     p_hdr->payload_offset + written, want,
+                     p_hdr,
                      (const uint32 *)(old_base + ARKRTOS_APP_RELOC_OFFSET),
                      &idx, delta, 0u);
 
-        if(submit <= (hdr.payload_offset + written))
+        if(submit <= (p_hdr->payload_offset + written))
         {
             return ARKRTOS_LOADER_ERR_RELOC;
         }
 
         {
-            uint32 n = submit - (hdr.payload_offset + written);
+            uint32 n = submit - (p_hdr->payload_offset + written);
 
             crc_written = arkrtos_crc32(arkrtos_loader_chunk, n, crc_written);
 
-            if(arkrtos_port_flash_write(new_base + hdr.payload_offset + written,
+            if(arkrtos_port_flash_write(new_base + p_hdr->payload_offset + written,
                                       arkrtos_loader_chunk, n) != 0)
             {
                 return ARKRTOS_LOADER_ERR_FLASH;
             }
         }
 
-        written = submit - hdr.payload_offset;
+        written = submit - p_hdr->payload_offset;
     }
 
+    *p_crc = crc_written;
+    return 0;
+}
+
+/* 收尾：整段复核 -> 单字写 VALID -> 改指新落点并平移入口。 */
+static int32 loader_move_finalize(uint32 slot, uint32 new_base,
+                                  arkrtos_app_header_t *p_hdr, uint32 crc_written)
+{
     /* 全量复核：搬完的字节必须与「刚写下去的那份」逐字节等价。
-     * 比的是本次会话攒出来的落盘形态 CRC，不是 hdr.crc32（标称形态）。 */
-    if(arkrtos_loader_image_crc((const uint8 *)new_base, &hdr) != crc_written)
+     * 比的是本次会话攒出来的落盘形态 CRC，不是 p_hdr->crc32（标称形态）。 */
+    if(arkrtos_loader_image_crc((const uint8 *)new_base, p_hdr) != crc_written)
     {
         return ARKRTOS_LOADER_ERR_CRC;
     }
 
     /* 提交：单字写 VALID。此前掉电 = 新副本作废、旧副本仍是有效的那份 */
-    hdr.state = ARKRTOS_APP_STATE_VALID;
+    p_hdr->state = ARKRTOS_APP_STATE_VALID;
 
     if(arkrtos_port_flash_write(new_base + ARKRTOS_APP_OFF_STATE,
-                              (const uint8 *)&hdr.state, 4u) != 0)
+                              (const uint8 *)&p_hdr->state, 4u) != 0)
     {
         return ARKRTOS_LOADER_ERR_FLASH;
     }
@@ -2624,11 +2643,37 @@ static int32 arkrtos_loader_move_slot(uint32 slot, uint32 new_base)
     }
 
     (void)arkrtos_ptable_set_slot(slot, ARKRTOS_APP_SLOT_LOADED,
-                                arkrtos_loader_entry_addr(new_base, hdr.payload_offset,
-                                                        hdr.entry_offset),
+                                arkrtos_loader_entry_addr(new_base, p_hdr->payload_offset,
+                                                        p_hdr->entry_offset),
                                 0u);
 
     return 0;
+}
+
+static int32 arkrtos_loader_move_slot(uint32 slot, uint32 new_base)
+{
+    arkrtos_app_header_t hdr;
+    uint32 old_base = 0u;
+    uint32 total = 0u;
+    uint32 delta;
+    uint32 crc_written = 0u;
+    int32 ret;
+
+    ret = loader_move_precheck(slot, new_base, &old_base, &total, &hdr);
+    if(ret != 0)
+    {
+        return ret;
+    }
+
+    delta = new_base - old_base;
+
+    ret = loader_move_program(old_base, new_base, delta, &hdr, &crc_written);
+    if(ret != 0)
+    {
+        return ret;
+    }
+
+    return loader_move_finalize(slot, new_base, &hdr, crc_written);
 }
 
 /* 扇区内是否还有在用记录 */

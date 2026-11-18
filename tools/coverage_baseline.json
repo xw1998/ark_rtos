@@ -2,11 +2,11 @@
   "arkrtos_eset": 92.02,
   "arkrtos_fault": 100.0,
   "arkrtos_fifo": 100.0,
-  "arkrtos_loader": 29.38,
+  "arkrtos_loader": 45.25,
   "arkrtos_mempool": 95.65,
   "arkrtos_mq": 43.42,
   "arkrtos_sbuf": 44.85,
-  "arkrtos_sync": 43.79,
+  "arkrtos_sync": 49.05,
   "arkrtos_utest": 83.65,
   "arkrtos_waitmulti": 100.0
 }

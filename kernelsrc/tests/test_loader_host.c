@@ -24,6 +24,15 @@
 #include <stdint.h>
 #include <string.h>
 
+/* 搬移用例要把镜像池映射到它**真实的**绝对地址（IMAGE_POOL_BASE）：
+ * 压实/选址两条路径写死用这个编译期常量扫内存，宿主上只有把这段地址
+ * 真映射出来才能跑，否则只能测纯函数。 */
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#endif
+
 #include "arkrtos_loader.h"
 #include "arkrtos_app_image.h"
 #include "arkrtos_cfg.h"
@@ -138,7 +147,15 @@ int32 arkrtos_ptable_alloc(uint32 type, uint32 base, uint32 size)
     return 0;
 }
 void arkrtos_ptable_free(uint32 slot) { (void)slot; g_free_n++; }
-int32 arkrtos_ptable_move(uint32 slot, uint32 new_base) { (void)slot; (void)new_base; return -1; }
+int32 arkrtos_ptable_move(uint32 slot, uint32 new_base)
+{
+    if(slot >= (uint32)ARKRTOS_SLOT_ARRAY_MAX)
+    {
+        return -1;
+    }
+    g_pt.slot_base[slot] = new_base;      /* 搬移用例需要真记账，否则"搬成功"读不出来 */
+    return 0;
+}
 int32 arkrtos_ptable_find_addr(uint32 addr, uint32 *p_base, uint32 *p_size)
 {
     (void)addr; (void)p_base; (void)p_size; return -1;
@@ -146,7 +163,14 @@ int32 arkrtos_ptable_find_addr(uint32 addr, uint32 *p_base, uint32 *p_size)
 int32 arkrtos_ptable_find_task(uint32 task_id) { (void)task_id; return -1; }
 int32 arkrtos_ptable_set_slot(uint32 slot, uint32 state, uint32 entry, uint32 task_id)
 {
-    (void)slot; (void)state; (void)entry; (void)task_id; return -1;
+    if(slot >= (uint32)ARKRTOS_SLOT_ARRAY_MAX)
+    {
+        return -1;
+    }
+    g_pt.slot_state[slot]   = state;
+    g_pt.slot_entry[slot]   = entry;
+    g_pt.slot_task_id[slot] = task_id;
+    return 0;
 }
 int32 arkrtos_ptable_get_slot(uint32 slot, uint32 *p_state, uint32 *p_entry, uint32 *p_task_id)
 {
@@ -689,8 +713,128 @@ static void test_load_buffer_e2e(void)
 
 #endif /* ARKRTOS_USE_IMAGE_CRC_RECHECK */
 
+/* ------------------------------------------------------------------ */
+/* 搬移（move_slot）：把镜像池 map 到真实绝对地址后，跑一次 compress     */
+/* ------------------------------------------------------------------ */
+
+static void *map_pool_at(uint32 addr, uint32 size)
+{
+#if defined(_WIN32)
+    return VirtualAlloc((void *)(uintptr_t)addr, (SIZE_T)size,
+                        MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+    void *p = mmap((void *)(uintptr_t)addr, (size_t)size,
+                   PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    return (p == MAP_FAILED) ? (void *)0 : p;
+#endif
+}
+
+/* arkrtos_loader_move_slot() 只能通过 arkrtos_loader_reclaim() 的压实路径到达。
+ * 它里面的池边界判断与「找干净空位」都写死用 IMAGE_POOL_BASE 扫绝对地址，
+ * 所以宿主上必须先把那段地址真映射出来（Windows 用 VirtualAlloc，类 Unix 用
+ * MAP_FIXED），否则这条路径在宿主上永远只能读到 0 行覆盖。
+ * 映射不上就明说 SKIP —— 不假装跑过。 */
+static void test_move_slot_e2e(void)
+{
+    static uint8 img[1024] __attribute__((aligned(8)));
+    arkrtos_app_header_t h;
+    const arkrtos_app_header_t *ph;
+    uint32 rel[1];
+    uint32 pool = (uint32)IMAGE_POOL_BASE;
+    uint32 old_base;
+    uint32 total;
+    uint32 pay_off;
+    uint32 word_before;
+    uint32 i;
+
+    /* 映射长度必须用 IMAGE_POOL_SIZE 而不是 IMAGE_POOL_USABLE_SIZE：
+     * 回收的逐扇区循环跑的是 pool_units（= IMAGE_POOL_SIZE / 扇区）个扇区，
+     * 末尾那个保留扇区在 USABLE 之外，但它照样会被 span_erased() 读一遍。
+     * 只映射 USABLE 的话，宿主上这一步就是读未映射地址 —— 直接段错误，
+     * 而不是"少测一点"。 */
+    if(map_pool_at(pool, (uint32)IMAGE_POOL_SIZE) == (void *)0)
+    {
+        printf("SKIP test_move_slot_e2e: cannot map image pool at 0x%08X\n",
+               (unsigned)pool);
+        return;
+    }
+
+    memset((void *)(uintptr_t)pool, 0xFF, (size_t)IMAGE_POOL_SIZE);
+
+    hdr_init(&h);
+    h.type  = ARKRTOS_APP_TYPE_APP;
+    h.state = ARKRTOS_APP_STATE_VALID;
+    h.image_size  = 64u;
+    h.reloc_count = 1u;
+    h.payload_offset = ARKRTOS_APP_PAYLOAD_OFFSET(&h);
+    pay_off = h.payload_offset;
+    total   = ARKRTOS_APP_TOTAL_LEN(&h);
+
+    /* 一个比池底高一个扇区的落点：压实必然要把它往下搬 */
+    old_base = pool + (uint32)IMAGE_POOL_SECTOR;
+
+    memset(img, 0xEE, sizeof(img));
+    rel[0] = ARKRTOS_APP_RELOC_ENTRY(pay_off, ARKRTOS_APP_RELOC_KIND_ROM);
+    memcpy(img + ARKRTOS_APP_RELOC_OFFSET, rel, sizeof(rel));
+    for(i = 0u; i < h.image_size; i++)
+    {
+        img[pay_off + i] = (uint8)(0x10u + i);
+    }
+    /* 已落盘的形态：这个字是「标称值 + 旧落点增量」，搬移要在它上面再加一次
+     * (新落点 - 旧落点)，所以断言值就是下面这个数加同一个差 */
+    word_before = old_base + 0x1234u;
+    memcpy(img + pay_off, &word_before, sizeof(word_before));
+    memcpy(img, &h, sizeof(h));
+
+    memcpy((void *)(uintptr_t)old_base, img, (size_t)total);
+
+    memset(&g_pt, 0, sizeof(g_pt));
+    g_pt.layout_mode  = (uint32)ARKRTOS_LAYOUT_MODE_AUTO;
+    g_pt.pool_base    = pool;
+    g_pt.pool_sector  = (uint32)IMAGE_POOL_SECTOR;
+    g_pt.pool_units   = (uint32)IMAGE_POOL_UNITS;
+    g_pt.pool_size    = (uint32)IMAGE_POOL_USABLE_SIZE;
+    g_pt.reclaim_mode = (uint32)ARKRTOS_CFG_RECLAIM_GLOBAL;
+    g_pt.slot_max     = (uint32)ARKRTOS_SLOT_ARRAY_MAX;
+    g_pt.slot_type[0] = (uint32)ARKRTOS_SLOT_APP;
+    g_pt.slot_state[0] = (uint32)ARKRTOS_APP_SLOT_LOADED;
+    g_pt.slot_base[0] = old_base;
+    g_pt.slot_size[0] = total;
+
+    g_flash_on   = 1;
+    g_flash_fail = 0;
+
+    /* 正向：压实把它搬到池底，头重新提交成 VALID，ROM 补丁再叠一次落点差。
+     * 返回值是「实际擦掉的扇区数」，不是状态码：搬完之后旧副本所在的扇区
+     * 已经没人占，逐扇区那一轮会把它擦掉，所以这里正好是 1。 */
+    CHECK(arkrtos_loader_reclaim() == 1);
+    CHECK(g_pt.slot_base[0] == pool);
+    CHECK(g_pt.slot_state[0] == (uint32)ARKRTOS_APP_SLOT_LOADED);
+
+    ph = (const arkrtos_app_header_t *)(const void *)(uintptr_t)pool;
+    CHECK(ph->state == ARKRTOS_APP_STATE_VALID);
+    CHECK(ph->image_size == total - pay_off);
+    CHECK(*(const uint32 *)(const void *)(uintptr_t)(pool + pay_off) ==
+          (word_before + (pool - old_base)));
+    CHECK(*((const uint8 *)(uintptr_t)pool + pay_off + 4u) == (uint8)0x14u);
+    CHECK(*((const uint8 *)(uintptr_t)pool + pay_off + 63u) == (uint8)(0x10u + 63u));
+
+    /* 旧位置必须整段回到擦除态：搬完还留旧副本等于池里有两份有效镜像 */
+    CHECK(*(const volatile uint32 *)(const void *)(uintptr_t)old_base == 0xFFFFFFFFu);
+    CHECK(*(const volatile uint32 *)(const void *)(uintptr_t)(old_base + total - 4u) == 0xFFFFFFFFu);
+
+    /* 再回收一次不该再动：已经贴在池底，没有更低的位置可去 */
+    CHECK(arkrtos_loader_reclaim() == 0);
+    CHECK(g_pt.slot_base[0] == pool);
+    CHECK(ph->state == ARKRTOS_APP_STATE_VALID);
+
+    g_flash_on = 0;
+}
+
 int main(void)
 {
+
     test_check_header();
     test_reloc_words();
     test_reloc_movw();
@@ -699,6 +843,7 @@ int main(void)
     test_crc_recheck();
     test_load_buffer_e2e();
 #endif
+    test_move_slot_e2e();
 
     printf("loader-host: %d passed, %d failed\n", g_pass, g_fail);
     if(g_fail == 0)

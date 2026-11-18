@@ -4417,6 +4417,56 @@ text `367576 → 367672`（**+96 B**，多出来的部分是三个 helper 的栈
 
 **结论分档：宿主用例实跑验证过（85 checks）+ QEMU 端到端 PASS，未上板。**
 
+#### 5.30.20 第十五笔：`arkrtos_loader_move_slot()` 按「前置把关 / 真搬 / 收尾提交」分三段（2026-11-18）
+
+`kernelsrc/src/arkrtos_loader.c` 的 `arkrtos_loader_move_slot()`（167 行）是池内搬移的唯一实现，
+它同时做三件互不相干的事：先证明这个槽真的可以动（状态、只向下搬、头合法、目标干净），
+再把字节真搬过去（写 UNCOMMITTED 头 → 表原样搬 → 负载读出旧补丁再叠加落点差 → 每段滚 CRC），
+最后整段复核并单字提交 VALID、把槽位改指新落点。三段的前置不同、失败语义也不同，按段切成：
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `loader_move_precheck()` | 槽状态必须是 LOADED、`new_base` 非 0 且严格小于旧落点、`check_header(TYPE_MASK_POOL)`、总长、池边界、目标 `span_erased()`；成功时交出旧落点、总长与一份**已置 UNCOMMITTED 的头副本** | 51 |
+| `loader_move_program()` | 写 UNCOMMITTED 头 → `crc_header` → 重定位表原样搬（分块 + 滚 CRC + 落盘）→ 负载读出旧补丁再 `reloc_apply(..., delta, 0u)` → 每段滚 CRC；`*p_crc` 交出「本次写下去的落盘形态」CRC | 96 |
+| `loader_move_finalize()` | `image_crc` 整段复核 → 单字写 `state = VALID` 提交 → `ptable_move` 改指新落点 → `ptable_set_slot` 重算入口 | 32 |
+| `arkrtos_loader_move_slot()` 自己 | 三次调用 + 一次 `delta = new_base - old_base` | **25**（原 167） |
+
+口径三条：① 旧落点 / 总长 / 头副本走**出参**传递，三段都不再重读 Flash 里的头 —— 头在本函数里已经被改写过，
+重读只会读到「自己刚写坏的那份」；② 「决定搬」与「已经把 state 改成 UNCOMMITTED」合在 precheck 里完成，
+不再是函数中部的一个副作用；③ `delta` 算一次传下去，避免两段各算一遍。
+
+等价性归一化比对（剥注释、逐行去空白、取多重集差）：only-OLD **19 行全部是 `hdr.` → `p_hdr->` 改名**
+（含 `hdr = *p_old;` / `hdr.state = UNCOMMITTED;` 两行搬进 precheck），only-NEW 全是签名、出参赋值、花括号与
+三次调用。**没有判断条件、错误码、CRC 口径、提交顺序被改。**
+
+体积：text `367672 → 367656`（**−16 B**），`data` 440 / `bss` 767508 / 镜像总长 31,462,512 B 不变；
+`SOURCE_DATE_EPOCH=1600000000` 下 `BUILD=build/move_split` 与重建后的默认档两份 `.bin` **sha256 逐字节相同**
+（`f7658a81…`）。单文件告警 **21 条 = 拆分前 21 条**（这个文件本来就有 21 条告警，这里只保证严格同数）。
+
+宿主用例是这一笔真正的收获：`find_clean()` / `move_slot()` / `pool_free()` 都写死用 `IMAGE_POOL_BASE`
+扫绝对地址，所以搬移路径在宿主上原本只能读到 0 行覆盖。新增的 `test_move_slot_e2e()` 先用 `VirtualAlloc`
+（POSIX 分支用 `MAP_FIXED`）把 `0x08060000` 真映射出来，再用 RAM 假 Flash 跑一次真实回收：装载在
+「池底 + 一个扇区」的镜像被压实到池底、头重新提交成 VALID、ROM 表项的整字补丁再叠一次
+`(新落点 − 旧落点)`，旧位置整段回到擦除态，再回收一次不再移动。`loader-host: 88 passed, 0 failed`（原 75）。
+
+两个坑都只在宿主上才现形：
+
+1. **映射长度必须用 `IMAGE_POOL_SIZE`，不能用 `IMAGE_POOL_USABLE_SIZE`**。回收的逐扇区循环跑的是
+   `pool_units`（= `IMAGE_POOL_SIZE` / 扇区）个扇区，末尾那个保留扇区在 USABLE 之外，但它照样会被
+   `span_erased()` 读一遍 ⇒ 只映射 USABLE 就是读未映射地址，直接段错误 —— 不是"少测一点"。
+2. **`arkrtos_loader_reclaim()` 返回的是「实际擦掉的扇区数」，不是状态码**。搬完之后旧副本所在的扇区
+   已经没人占，逐扇区那一轮会把它擦掉，所以首次回收返回 **1**；第二次才是 0。
+
+门禁：`coverage-host` 里 `arkrtos_loader` **45.25%**（原基线 29.38，**未下调**，按惯例用 `--update`
+把基线抬到实测值；同一轮 `arkrtos_sync` 也由 43.79 抬到实测 49.05）；`sec-crc` 8 pin 全过；
+`format_gate` 361 个自有文件干净；`example/qemu_loongarch64/shell_check.py` **PASS**。
+
+`doc_audit.py funcs`：超过 120 行的函数 **19 → 18**；最长换成 `arkrtos_guard_tick()`（166）。
+
+**结论分档：宿主用例实跑验证过（88 checks）+ QEMU 端到端 PASS，未上板。**
+搬移路径的运行时证据来自**宿主**（`VirtualAlloc` 把池映射到真实绝对地址 + RAM 假 Flash），不是 QEMU/真机；
+映射失败时用例打印 `SKIP` 并返回，不假装跑过。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行
