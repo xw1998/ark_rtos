@@ -1781,21 +1781,14 @@ int32 arkrtos_loader_load_driver(int32 dev, uint32 image_len)
     return arkrtos_loader_load_driver_dev(dev, &hdr, image_len);
 }
 
-/* 内存缓冲区安装路径：把整镜像拷进 RAM 打补丁后再落盘。
- * 预留给内核自测 / 后续 OTA 复用；当前内核内没有调用者。 */
-int32 arkrtos_loader_load_buffer(const uint8 *image, uint32 image_len)
+/* 校验一份内存镜像：参数、头（含签名门）、总长、整镜像 CRC。
+ * 成功时把 p_src / total 交给后面两步；任何一步不过就直接返回错误码。 */
+static int32 loader_verify_buffer(const uint8 *image, uint32 image_len,
+                                 const arkrtos_app_header_t **pp_src,
+                                 uint32 *p_total)
 {
-    arkrtos_partition_table_t *pt;
     const arkrtos_app_header_t *p_src;
-    arkrtos_app_header_t hdr;
     uint32 total;
-    uint32 base = 0u;
-    uint32 ram_base = 0u;
-    uint32 delta_rom;
-    uint32 delta_ram;
-    uint32 idx = 0u;
-    uint32 crc_written;
-    int32 slot;
     int32 ret;
 
     if(image == 0 || image_len < ARKRTOS_APP_HEADER_SIZE)
@@ -1834,7 +1827,29 @@ int32 arkrtos_loader_load_buffer(const uint8 *image, uint32 image_len)
         }
     }
 
-    pt = arkrtos_ptable_get();
+    *pp_src  = p_src;
+    *p_total = total;
+
+    return 0;
+}
+
+/* 预留槽位并把「头 + 重定位表 + 负载」真正写进 Flash（负载分块搬运、
+ * 边搬边按重定位表打补丁），同时把写下去的 CRC 滚出来给回读复核用。
+ * 失败路径各自还槽（arkrtos_ptable_free），一个不留。 */
+static int32 loader_program_slot(const uint8 *image, const arkrtos_app_header_t *p_src,
+                                 uint32 total,
+                                 int32 *p_slot, uint32 *p_base,
+                                 arkrtos_app_header_t *p_hdr,
+                                 uint32 *p_crc_written)
+{
+    int32  slot;
+    uint32 base = 0u;
+    uint32 ram_base = 0u;
+    uint32 delta_rom;
+    uint32 delta_ram;
+    arkrtos_app_header_t hdr;
+    uint32 crc_written;
+    uint32 idx = 0u;
 
     slot = arkrtos_loader_reserve(p_src->type, p_src, total, &base, &ram_base);
     if(slot < 0)
@@ -1933,18 +1948,31 @@ int32 arkrtos_loader_load_buffer(const uint8 *image, uint32 image_len)
         }
     }
 
+    *p_slot        = slot;
+    *p_base        = base;
+    *p_hdr         = hdr;
+    *p_crc_written = crc_written;
+
+    return 0;
+}
+
+/* 回读复核 + 提交点 + 记账：复核对象是刚写下去的那份（含打过的补丁），
+ * 与 loader_program_slot 滚出来的 CRC 逐字节等价。 */
+static int32 loader_commit_slot(arkrtos_partition_table_t *pt, int32 slot, uint32 base,
+                                arkrtos_app_header_t *p_hdr, uint32 crc_written)
+{
     /* 回读复核：与刚刚真正写下去的那份比（标称 CRC 对不上打了补丁的形态） */
-    if(arkrtos_loader_image_crc((const uint8 *)base, &hdr) != crc_written)
+    if(arkrtos_loader_image_crc((const uint8 *)base, p_hdr) != crc_written)
     {
         arkrtos_ptable_free((uint32)slot);
         return ARKRTOS_LOADER_ERR_CRC;
     }
 
     /* 提交点：见 arkrtos_loader_load_dev_hdr 的说明 */
-    hdr.state = ARKRTOS_APP_STATE_VALID;
+    p_hdr->state = ARKRTOS_APP_STATE_VALID;
 
     if(arkrtos_port_flash_write(base + ARKRTOS_APP_OFF_STATE,
-                              (const uint8 *)&hdr.state, 4u) != 0)
+                              (const uint8 *)&p_hdr->state, 4u) != 0)
     {
         arkrtos_ptable_free((uint32)slot);
         return ARKRTOS_LOADER_ERR_FLASH;
@@ -1954,8 +1982,42 @@ int32 arkrtos_loader_load_buffer(const uint8 *image, uint32 image_len)
     arkrtos_crash_forget((uint32)slot);   /* the cross-reset copy goes too */
 
     arkrtos_ptable_set_slot((uint32)slot, ARKRTOS_APP_SLOT_LOADED,
-                          arkrtos_loader_entry_addr(base, hdr.payload_offset, hdr.entry_offset),
+                          arkrtos_loader_entry_addr(base, p_hdr->payload_offset, p_hdr->entry_offset),
                           0u);
+
+    return 0;
+}
+
+int32 arkrtos_loader_load_buffer(const uint8 *image, uint32 image_len)
+{
+    arkrtos_partition_table_t *pt;
+    const arkrtos_app_header_t *p_src;
+    arkrtos_app_header_t hdr;
+    uint32 total;
+    uint32 base = 0u;
+    uint32 crc_written;
+    int32 slot;
+    int32 ret;
+
+    ret = loader_verify_buffer(image, image_len, &p_src, &total);
+    if(ret != 0)
+    {
+        return ret;
+    }
+
+    pt = arkrtos_ptable_get();
+
+    ret = loader_program_slot(image, p_src, total, &slot, &base, &hdr, &crc_written);
+    if(ret != 0)
+    {
+        return ret;
+    }
+
+    ret = loader_commit_slot(pt, slot, base, &hdr, crc_written);
+    if(ret != 0)
+    {
+        return ret;
+    }
 
     return slot;
 }

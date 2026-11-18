@@ -103,16 +103,17 @@ def pin_loader_c_guard(txt):
 
 
 def pin_load_buffer_table_crc(txt):
-    """load_buffer 里：表体必须进 crc_written，且要发生在负载循环之前。"""
-    start = txt.find("int32 arkrtos_loader_load_buffer(")
-    if start < 0:
+    """装载路径里：表体必须进 crc_written，且要发生在负载循环之前。
+
+    这一条原先取的是 `arkrtos_loader_load_buffer()` 的函数体；该函数拆成
+    verify / program / commit 三段之后，表体折叠发生在 `loader_program_slot()`
+    里，而「先折表、再搬负载」这个约束没变。所以判据改成「同一文件内，折叠
+    那一行出现在负载循环之前」——顺序是实质，函数边界不是。"""
+    crc = txt.find("crc_written = arkrtos_crc32(image + ARKRTOS_APP_RELOC_OFFSET")
+    loop = txt.find("while(written < p_src->image_size)")
+    if (crc < 0) or (loop < 0):
         return False
-    body = txt[start:]
-    loop = body.find("while(written < p_src->image_size)")
-    if loop < 0:
-        return False
-    head = body[:loop]
-    return ("crc_written = arkrtos_crc32(image + ARKRTOS_APP_RELOC_OFFSET" in head)
+    return crc < loop
 
 
 SEC_CRC_LINE = '"checked=%u bad=%u unknown=%u first=%u"'
@@ -146,7 +147,7 @@ PINS = [
     ("Kconfig default n + 依赖 SECCHECK", KCONFIG, pin_kconfig),
     ("loader.h 声明在开关内", LOADER_H, pin_loader_h_guard),
     ("loader.c 实现在开关内", LOADER_C, pin_loader_c_guard),
-    ("load_buffer 把表体折进 crc_written", LOADER_C, pin_load_buffer_table_crc),
+    ("装载路径把表体折进 crc_written", LOADER_C, pin_load_buffer_table_crc),
     ("sec.c 全 unknown 走 SKIP", SEC_C, pin_sec_unknown_is_skip),
     ("sec.c 默认档 SKIP 文案逐字未变", SEC_C, pin_sec_legacy_text),
     ("autoconf 默认 0", AUTOCONF, pin_autoconf),
@@ -191,7 +192,7 @@ MUTATORS = {
     "Kconfig default n + 依赖 SECCHECK": "kconfig_default_y",
     "loader.h 声明在开关内": "drop_guard",
     "loader.c 实现在开关内": "drop_guard",
-    "load_buffer 把表体折进 crc_written": "drop_table_crc",
+    "装载路径把表体折进 crc_written": "drop_table_crc",
     "sec.c 全 unknown 走 SKIP": "drop_unknown_skip",
     "sec.c 默认档 SKIP 文案逐字未变": "edit_legacy_text",
     "autoconf 默认 0": "autoconf_one",

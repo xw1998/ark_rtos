@@ -21,6 +21,7 @@
 */
 
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "arkrtos_loader.h"
@@ -61,16 +62,34 @@ void arkrtos_port_enable_irq(void)  {}
 void arkrtos_port_switch_task(void) {}
 void arkrtos_port_wdg_feed(void)    {}
 
+/* 本文件默认只跑纯函数，不碰 Flash / 槽位表；下面这几面旗子由
+ * test_load_buffer_e2e() 打开，让同一份桩既能当"什么都没有"，也能当
+ * "一块可写的 RAM 假装 Flash + 一份固定槽位配置"。 */
+static int   g_layout_on  = 0;
+static int   g_flash_on   = 0;
+static int   g_flash_fail = 0;
+static int   g_alloc_n    = 0;
+static int   g_free_n     = 0;
+static arkrtos_cfg_slot_t g_fake_slot;
+
 int32 arkrtos_port_flash_erase(uint32 addr, uint32 size)
 {
-    (void)addr; (void)size;
-    return -1;
+    if(!g_flash_on)
+    {
+        return -1;
+    }
+    memset((void *)(uintptr_t)addr, 0xFF, size);   /* 擦除 == 全 0xFF，与 NOR 同义 */
+    return 0;
 }
 
 int32 arkrtos_port_flash_write(uint32 addr, const uint8 *data, uint32 len)
 {
-    (void)addr; (void)data; (void)len;
-    return -1;
+    if(!g_flash_on || g_flash_fail)
+    {
+        return -1;
+    }
+    memcpy((void *)(uintptr_t)addr, data, len);
+    return 0;
 }
 
 uint32 arkrtos_log_get_level(void) { return 0u; }
@@ -105,13 +124,20 @@ int32 arkrtos_dev_write_internal(int32 handle, uint8 *pdata, int32 len)
 
 static arkrtos_partition_table_t g_pt;
 
+
 arkrtos_partition_table_t *arkrtos_ptable_get(void) { return &g_pt; }
 void arkrtos_ptable_clear_slots(void) {}
 int32 arkrtos_ptable_alloc(uint32 type, uint32 base, uint32 size)
 {
-    (void)type; (void)base; (void)size; return -1;
+    if(!g_layout_on)
+    {
+        return -1;
+    }
+    (void)type; (void)base; (void)size;
+    g_alloc_n++;
+    return 0;
 }
-void arkrtos_ptable_free(uint32 slot) { (void)slot; }
+void arkrtos_ptable_free(uint32 slot) { (void)slot; g_free_n++; }
 int32 arkrtos_ptable_move(uint32 slot, uint32 new_base) { (void)slot; (void)new_base; return -1; }
 int32 arkrtos_ptable_find_addr(uint32 addr, uint32 *p_base, uint32 *p_size)
 {
@@ -140,10 +166,16 @@ int32 arkrtos_ptable_ram_info(uint32 slot, uint32 *p_base, uint32 *p_size)
     (void)slot; (void)p_base; (void)p_size; return -1;
 }
 
-uint32 arkrtos_layout_slot_count(void) { return 0u; }
+uint32 arkrtos_layout_slot_count(void) { return g_layout_on ? 1u : 0u; }
 uint32 arkrtos_layout_raw_allow(void)  { return 0u; }
-const arkrtos_cfg_slot_t *arkrtos_layout_slots(void) { return (const arkrtos_cfg_slot_t *)0; }
-const arkrtos_cfg_slot_t *arkrtos_layout_slot(uint32 index) { (void)index; return (const arkrtos_cfg_slot_t *)0; }
+const arkrtos_cfg_slot_t *arkrtos_layout_slots(void)
+{
+    return g_layout_on ? &g_fake_slot : (const arkrtos_cfg_slot_t *)0;
+}
+const arkrtos_cfg_slot_t *arkrtos_layout_slot(uint32 index)
+{
+    return (g_layout_on && (index == 0u)) ? &g_fake_slot : (const arkrtos_cfg_slot_t *)0;
+}
 
 /* ------------------------------------------------------------------ */
 /* 用例                                                                */
@@ -546,6 +578,115 @@ static void test_crc_recheck(void)
     CHECK(arkrtos_loader_crc_recheck(img, base, total, &got) ==
           (int32)ARKRTOS_LOADER_ERR_RELOC);
 }
+
+/* load_buffer 的整条链：verify -> program -> commit。宿主上用一块 RAM 假装
+ * Flash、用一份固定槽位配置假装分区表，所以「擦/写/回读」都真的发生了，
+ * 只是介质在内存里。这条用例盯的是拆分后的三段有没有把活干完，以及失败
+ * 路径有没有把槽还回去。 */
+static void test_load_buffer_e2e(void)
+{
+    static uint8 pool[0x4000] __attribute__((aligned(8)));
+    static uint8 ram[0x1000] __attribute__((aligned(8)));
+    static uint8 img[512] __attribute__((aligned(8)));
+    arkrtos_app_header_t h;
+    const arkrtos_app_header_t *ph;
+    uint32 rel[1];
+    uint32 base;
+    uint32 ram_base;
+    uint32 total;
+    uint32 pay_off;
+    uint32 i;
+
+    memset(pool, 0xFF, sizeof(pool));
+    memset(ram, 0, sizeof(ram));
+    memset(img, 0, sizeof(img));
+
+    base     = (uint32)(uintptr_t)pool;
+    ram_base = (uint32)(uintptr_t)ram;
+
+    memset(&g_pt, 0, sizeof(g_pt));
+    g_pt.layout_mode = (uint32)ARKRTOS_LAYOUT_MODE_FIXED;
+    g_pt.pool_sector = 0x1000u;          /* 擦除粒度；槽位大小必须是它的整数倍 */
+    g_pt.slot_max    = (uint32)ARKRTOS_SLOT_ARRAY_MAX;
+
+    memset(&g_fake_slot, 0, sizeof(g_fake_slot));
+    g_fake_slot.base     = base;
+    g_fake_slot.size     = (uint32)sizeof(pool);
+    g_fake_slot.type     = (uint32)ARKRTOS_CFG_TYPE_APP;
+    g_fake_slot.ram_base = ram_base;
+    g_fake_slot.ram_size = (uint32)sizeof(ram);
+    g_layout_on = 1;
+    g_flash_on  = 1;
+    g_flash_fail = 0;
+
+    hdr_init(&h);
+    h.type             = ARKRTOS_APP_TYPE_APP;
+    h.image_size       = 32u;
+    h.reloc_count      = 1u;
+    h.nominal_base     = base;
+    h.nominal_ram_base = ram_base;
+    h.payload_offset   = ARKRTOS_APP_PAYLOAD_OFFSET(&h);
+    pay_off = h.payload_offset;
+    total   = ARKRTOS_APP_TOTAL_LEN(&h);
+
+    /* 一条 ROM 整字表项：落盘后那个字要变成「标称值 + delta_rom」 */
+    rel[0] = ARKRTOS_APP_RELOC_ENTRY(pay_off, ARKRTOS_APP_RELOC_KIND_ROM);
+    memcpy(img + ARKRTOS_APP_RELOC_OFFSET, rel, sizeof(rel));
+    for(i = 0u; i < h.image_size; i++)
+    {
+        img[pay_off + i] = (uint8)(0xA0u + i);
+    }
+    *(uint32 *)(img + pay_off) = base + 0x1234u;
+
+    /* 头最后落盘：crc32 覆盖「头 + 表 + 负载」，所以要在表与负载都就位之后再算 */
+    memcpy(img, &h, sizeof(h));
+    ((arkrtos_app_header_t *)(void *)img)->crc32 = nominal_crc(img, &h);
+
+    /* 正向：三段全走完，槽位真的被提交成 VALID */
+    g_alloc_n = 0;
+    g_free_n  = 0;
+    CHECK(arkrtos_loader_load_buffer(img, total) == 0);
+    CHECK(g_alloc_n == 1);
+    CHECK(g_free_n == 0);
+
+    ph = (const arkrtos_app_header_t *)(const void *)pool;
+    CHECK(ph->state == ARKRTOS_APP_STATE_VALID);
+    CHECK(ph->runtime_ram_base == ram_base);
+    /* delta_rom = (base + payload_offset) - nominal_base = payload_offset */
+    CHECK(*(uint32 *)(pool + pay_off) == (base + 0x1234u + pay_off));
+    CHECK(pool[pay_off + 4u] == (uint8)(0xA4u + 0u));
+    CHECK(pool[pay_off + 31u] == (uint8)(0xA0u + 31u));
+
+    /* 负向 1：长度不足 —— 在碰任何槽位之前就该被挡下 */
+    g_alloc_n = 0;
+    g_free_n  = 0;
+    CHECK(arkrtos_loader_load_buffer(img, (uint32)ARKRTOS_APP_HEADER_SIZE - 4u) ==
+          (int32)ARKRTOS_LOADER_ERR_PARAM);
+    CHECK(g_alloc_n == 0);
+    CHECK(g_free_n == 0);
+
+    /* 负向 2：负载被改坏一个字节 —— 整镜像 CRC 不过，同样不该动槽位 */
+    img[pay_off + 5u] ^= 0xFFu;
+    g_alloc_n = 0;
+    g_free_n  = 0;
+    CHECK(arkrtos_loader_load_buffer(img, total) == (int32)ARKRTOS_LOADER_ERR_CRC);
+    CHECK(g_alloc_n == 0);
+    CHECK(g_free_n == 0);
+    img[pay_off + 5u] ^= 0xFFu;
+
+    /* 负向 3：Flash 写失败 —— 槽位必须还回去，而且只还一次 */
+    g_flash_fail = 1;
+    g_alloc_n = 0;
+    g_free_n  = 0;
+    CHECK(arkrtos_loader_load_buffer(img, total) == (int32)ARKRTOS_LOADER_ERR_FLASH);
+    CHECK(g_alloc_n == 1);
+    CHECK(g_free_n == 1);
+    g_flash_fail = 0;
+
+    g_layout_on = 0;
+    g_flash_on  = 0;
+}
+
 #endif /* ARKRTOS_USE_IMAGE_CRC_RECHECK */
 
 int main(void)
@@ -556,6 +697,7 @@ int main(void)
     test_reloc_offsets();
 #if (ARKRTOS_USE_IMAGE_CRC_RECHECK == 1)
     test_crc_recheck();
+    test_load_buffer_e2e();
 #endif
 
     printf("loader-host: %d passed, %d failed\n", g_pass, g_fail);

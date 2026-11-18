@@ -4310,6 +4310,72 @@ shim，`-DARKRTOS_USE_APPPACK=1`）后 `-c` 编译 exit=0、**告警 0 条与基
 **结论分档：编译通过（开关打开档，类型与内联都验过）+ 默认档逐字节不变 + 端到端 PASS；这条扫描
 路径本身没有在板上或 QEMU 上真跑过（默认档不打包），未上板。**
 
+#### 5.30.18 第十三笔：`arkrtos_loader_load_buffer()` 按「验镜像 / 落槽 / 提交」分三段（2026-11-18）
+
+`kernelsrc/src/arkrtos_loader.c` 的 `arkrtos_loader_load_buffer()`（176 行）是「从内存缓冲区装一个应用」
+的入口：校验 → 落槽（预留 + 写头 + 写重定位表 + 分块写 Flash）→ 回读复核并把状态字改成 `VALID`。
+三段的**前置契约**本来就不同（第一段只读、第二段持有一槽、第三段把槽提交成可用），所以按这三段抽三个
+`static` helper，而不是按语句切碎：
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `loader_verify_buffer()` | 参数检查、给出 `p_src`、`arkrtos_loader_check_header(... TYPE_MASK_POOL)`、算总长、整镜像 CRC、签名门；成功时用出参把 `p_src` / `total` 交给后两段 | 49 |
+| `loader_program_slot()` | `reserve_fixed` 拿槽 → 算 `delta_rom` / `delta_ram` → 写 UNCOMMITTED 头 → 头 CRC → 写重定位表并入 CRC → 负载分块搬运、按表打补丁、写 Flash；**每条失败路径自己 `ptable_free` 再返回**；成功写回 `slot` / `base` / `hdr` / `crc_written` | 119 |
+| `loader_commit_slot()` | 回读复核、`p_hdr->state = VALID` 落盘、`slot_crash_cnt[slot] = 0`、`arkrtos_crash_forget`、`ptable_set_slot` | 29 |
+| `arkrtos_loader_load_buffer()` 自己 | 三次调用 + 逐段短路；失败就地 `return`，没有跨段 `goto` | **33**（原 176） |
+
+第二段仍然偏长（119 行），这是刻意的：它本来就是「一槽之内的一条直线」，每一步失败都要先还槽再返回；
+再切碎会把「谁欠谁一次 free」的账拆到两个函数里，那才是真正的漏洞来源。**按段切，不按语句切。**
+
+等价性归一化比对：only-OLD 只剩 **4 行**，全是同一次改名 —— `hdr.state = ARKRTOS_APP_STATE_VALID;`、
+`(const uint8 *)&hdr.state, 4u) != 0)`、`arkrtos_loader_entry_addr(base, hdr.payload_offset, hdr.entry_offset),`、
+`if(arkrtos_loader_image_crc((const uint8 *)base, &hdr) != crc_written)`：原函数用栈上 `hdr`，拆开后三段
+必须共用同一份头，于是头由入口持有、后两段收 `arkrtos_app_header_t *p_hdr`。only-NEW 51 行全是签名、
+花括号、四个出参写回、三处 `ret = loader_*(...); if(ret != 0){ return ret; }`。**没有判断条件、错误码、
+CRC 口径、槽位序号被改。**
+
+体积：`arkrtos_loader.c` 在 LA64 默认档**真的被编进去**，所以这一笔**不是**「逐字节不变」——
+text `367528 → 367576`（**+48 B**），`data` 440 / `bss` 767508 / 镜像总长 31,462,512 B 不变；
+`BUILD=build/loadbuf_split` 与重建后的默认档目录两份 `.bin` 在 `SOURCE_DATE_EPOCH=1600000000` 下
+**sha256 逐字节相同**（`eb5abe42…`）。`arkrtos_loader.c` 单文件告警 **21 条与基线同数**（同一组 flag 对
+拆分前副本与现文件各 `-c` 一次对照；该文件既有的 `-Wint-to-pointer-cast` 与本次拆分无关）。
+
+行为证据比前几笔强，因为它有真运行读数：`utest` 用例 `sign_hmac_and_loader_gate` 里
+`arkrtos_loader_load_buffer()` 被调两次 —— 第一次签名错 ⇒ 串口见
+`LOADER:452 signature mismatch: image rejected`（第一段的分支）；第二次把签名改回来，而用例只断言
+「不是 `ERR_SIGN`」，停在哪一段从汇总行看不出来。于是在本文件里临时插一行探针（`loader_commit_slot`
+成功之后打印槽号与 base），单独构建 `build/_probe` 跑一次 `utest`，得到
+`LOADER:2022 probe: load_buffer committed slot 0 base 0x00260000` ⇒ **三段全部走通、真装成了一槽**。
+探针随后整文件回滚（回滚后 `probe:` 计数 0、行尾仍是 `crlf 3483 / lf 3483`），提交里不含探针。
+`shell_check.py` `PASS`（`build/shell_check_loadbuf.log`，`13 matched, 13 passed, 133 assertions`）。
+
+顺带记一条本轮踩到的坑：`shell_check.py` 的 ELF 路径写死 `build/qemu_loongarch64/`，在别的 `BUILD=`
+目录构建完直接跑，它会测到**上一次的旧镜像**（本轮第一次跑就撞上：日志 PASS，可那个 ELF 比源码老一小时）。
+所以体积读数取 `BUILD=build/loadbuf_split`，行为读数前先把新源码增量重编进默认目录再跑。
+
+这一笔把两道门禁碰红了，两条都是真问题，按「先补证据、再改判据」处理，没有一条是靠调低门槛过去的：
+
+1. `coverage-host`：拆出来的入口与参数检查行没有被宿主用例执行，`arkrtos_loader` 从 15.89% 掉到
+   15.55%。**没有下调基线**，而是给 `kernelsrc/tests/test_loader_host.c` 加了一条
+   `test_load_buffer_e2e()`：用一块 RAM 假 Flash（擦除 = 填 0xFF、写 = `memcpy`、回读 = 直接读那块
+   内存）+ 一份固定槽位配置，把 verify → program → commit 三段真跑一遍。正向断言槽位被提交成
+   `VALID`、`runtime_ram_base` 被固化、ROM 表项那个字变成「标称值 + delta」、其余负载逐字节落盘；
+   反向三条分别断言：长度不足 ⇒ `PARAM` 且**一个槽都没占**、负载改坏一个字节 ⇒ `CRC` 且一个槽都没占、
+   Flash 写失败 ⇒ `FLASH` 且**占一次还一次**。改完 `arkrtos_loader` 覆盖率 15.55% → **29.38%**，
+   基线同步抬到 29.38（把这次的有效覆盖冻住，以后加代码不再白掉）；该用例在 `loader-host` 的同一组
+   flag 下是 `75 passed, 0 failed`。
+2. `sec-crc`：pin「load_buffer 把表体折进 crc_written」取的是 `load_buffer` 的函数体，表体折叠搬进
+   `loader_program_slot()` 之后它变红。**约束本身没变**（先折表、再搬负载），所以把判据改成「同一
+   文件内，折叠那一行出现在负载循环之前」，pin 改名 `装载路径把表体折进 crc_written`；`drop_table_crc`
+   这个改坏方式仍能让它变红（`SEC-CRC-GATE OK`，8 pin 自检全过）。
+
+`ci_gate.py` 复跑：**47 check(s) passed, 0 failed, 0 skipped**（`build/ci_gate_loadbuf2.log`）。
+
+`doc_audit.py funcs`：超过 120 行的函数 **21 → 20**；最长 **并列 167 行** —— `arkrtos_mtx_lock_internal()`
+与 `arkrtos_loader_move_slot()`。
+
+**结论分档：QEMU 实跑验证过（端到端 PASS + utest 用例真调这个函数且实测提交成功），未上板。**
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

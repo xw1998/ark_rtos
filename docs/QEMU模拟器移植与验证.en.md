@@ -2000,6 +2000,77 @@ profile never takes this path, so that run proves "nothing was broken", not "the
 profile + end-to-end PASS; the scan path itself has not been executed on board or in QEMU (the default
 profile does not pack), not on board.**
 
+#### 5.30.18 Thirteenth one: `arkrtos_loader_load_buffer()` split into verify / program / commit (2026-11-18)
+
+`arkrtos_loader_load_buffer()` in `kernelsrc/src/arkrtos_loader.c` (176 lines) is the "install an app from a
+memory buffer" entry: verify -> program a slot (reserve, write header, write reloc table, write Flash in
+chunks) -> read back and flip the state byte to `VALID`. The three phases have different preconditions
+(read-only / holding a slot / committing it), so the split follows the phases rather than chopping statements:
+
+| Function | Scope | Lines |
+|---|---|---|
+| `loader_verify_buffer()` | argument check, expose `p_src`, `arkrtos_loader_check_header(... TYPE_MASK_POOL)`, total length, whole-image CRC, signature gate; hands `p_src` / `total` to the next two phases through out-parameters | 49 |
+| `loader_program_slot()` | `reserve_fixed` -> `delta_rom` / `delta_ram` -> header written as UNCOMMITTED -> header CRC -> reloc table folded into the CRC -> payload copied in chunks, patched through the table, written to Flash; **every failure path frees its own slot before returning**; success writes back `slot` / `base` / `hdr` / `crc_written` | 119 |
+| `loader_commit_slot()` | read-back recheck, `p_hdr->state = VALID`, `slot_crash_cnt[slot] = 0`, `arkrtos_crash_forget`, `ptable_set_slot` | 29 |
+| `arkrtos_loader_load_buffer()` itself | three calls, short-circuit per phase, plain `return` on failure | **33** (was 176) |
+
+The middle phase stays long on purpose: it is a single straight line inside one slot, and each failure must
+return the slot before returning; splitting it further would spread the "who owes a free" ledger across two
+functions, which is where leaks come from. Split by phase, not by statement.
+
+Normalised equivalence check: only-OLD holds **4 lines**, all one rename (`hdr.` -> `p_hdr->`) because the
+header used to be a stack local and now has to be shared by the last two phases. only-NEW is 51 lines of
+signatures, braces, four out-parameter writes and three `ret = loader_*(...); if(ret != 0){ return ret; }`.
+No condition, error code, CRC rule or slot index changed.
+
+Size: this translation unit **is** part of the LA64 default build, so this change is **not** byte-identical:
+text `367528 -> 367576` (**+48 B**), `data` 440 / `bss` 767508 / total image 31,462,512 B unchanged; the
+`BUILD=build/loadbuf_split` binary and a rebuilt default-directory binary are **sha256-identical**
+(`eb5abe42...`) under `SOURCE_DATE_EPOCH=1600000000`. `arkrtos_loader.c` warnings stay at **21, same as
+baseline** (same flags, `-c` on both the pre-split copy and the current file).
+
+Behavioural evidence is stronger than in the previous entries because there is a real runtime reading:
+`utest` case `sign_hmac_and_loader_gate` calls `arkrtos_loader_load_buffer()` twice — the first call has a
+bad signature and the serial log shows `LOADER:452 signature mismatch: image rejected` (a phase-1 branch);
+the second call restores the signature, but the assertion only requires "not `ERR_SIGN`", so the summary line
+cannot say how far it got. A temporary probe (one log line after `loader_commit_slot` succeeds) built into
+`build/_probe` produced `LOADER:2022 probe: load_buffer committed slot 0 base 0x00260000` — all three phases
+ran and a slot was really committed. The probe was rolled back whole-file (`probe:` count 0, line endings
+still `crlf 3483 / lf 3483`) and is not part of the commit. `shell_check.py` `PASS`
+(`build/shell_check_loadbuf.log`, `13 matched, 13 passed, 133 assertions`).
+
+One pitfall worth recording: `shell_check.py` hardcodes `build/qemu_loongarch64/`, so running it right after
+building into another `BUILD=` directory tests the **previous** image (it happened in this round: PASS, but
+that ELF was an hour older than the source). Size readings therefore come from `build/loadbuf_split`, and the
+behavioural run happens only after the new source is rebuilt into the default directory.
+
+Two gates went red on this change. Both were real, and both were fixed by adding evidence first, not by
+lowering a threshold:
+
+1. `coverage-host`: the new entry and its parameter checks are not executed by the host tests, so
+   `arkrtos_loader` fell from 15.89% to 15.55%. The baseline was **not** lowered; instead
+   `kernelsrc/tests/test_loader_host.c` gained `test_load_buffer_e2e()`, which fakes Flash with a RAM
+   buffer (erase = fill 0xFF, program = `memcpy`, read-back = plain memory read) plus one fixed slot
+   configuration, and drives verify -> program -> commit for real. Positive assertions: the slot ends up
+   `VALID`, `runtime_ram_base` is frozen, the ROM table entry becomes "nominal + delta", the rest of the
+   payload lands byte for byte. Negative assertions: short length -> `PARAM` with no slot taken, one
+   corrupted payload byte -> `CRC` with no slot taken, a failing Flash program -> `FLASH` with exactly one
+   slot taken and one returned. Coverage goes 15.55% -> **29.38%**, and the baseline is raised to 29.38 to
+   freeze it; the case reports `75 passed, 0 failed` under the same flags `loader-host` uses.
+2. `sec-crc`: the pin "load_buffer folds the table into crc_written" looked inside the `load_buffer` body,
+   which is now in `loader_program_slot()`. The constraint did not change (fold the table before the
+   payload loop), so the pin now checks "the fold line appears before the payload loop in the same file"
+   and is renamed accordingly; the `drop_table_crc` mutation still turns it red (`SEC-CRC-GATE OK`,
+   8 pins with mutation self-check).
+
+`ci_gate.py` rerun: **47 check(s) passed, 0 failed, 0 skipped** (`build/ci_gate_loadbuf2.log`).
+
+`doc_audit.py funcs`: functions longer than 120 lines go **21 -> 20**; the longest are now tied at 167 lines,
+`arkrtos_mtx_lock_internal()` and `arkrtos_loader_move_slot()`.
+
+**Evidence class: executed under QEMU (end-to-end PASS plus a utest case that really calls this function and
+a measured successful commit), not on hardware.**
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine
