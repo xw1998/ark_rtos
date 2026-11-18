@@ -743,33 +743,15 @@ static int32 elf_start_task(elf_word_t entry, uint32 stack_bottom,
     return id;
 }
 
-/**
-* @brief 把一份 ELF64 装进指定地址空间并起一个降权任务
-* @param space   目标地址空间（0 .. 空间数-1）；窗口 VA 在每个空间里相同
-* @param p_info  成功时填装载读数（不接收失败值）
-* @details 空间选择、台账登记、以及"装载完把内核任务原来的视图装回去"
-*          都在 arkrtos_elf_exec_space() 里；这里只做"把这份文件装进这一块帧"。
-*/
-static int32 elf_load(uint32 space, const char *path, int32 argc,
-                      char *argv[], arkrtos_elf_info_t *p_info)
+/* 参数关：路径非空 -> 签名门 -> argc 范围 -> argv 缺省 -> 逐项非空。
+ * 签名故意排在「路径非空」之后、「读 ELF 头」之前：既不让格式错误盖掉
+ * 「文件没签名」，也不对空路径白算一遍 HMAC。 */
+static int32 elf_prepare_args(const char *path, int32 *p_argc, char ***p_argv,
+                              char *argv_auto[1])
 {
-    uint8 hdr[ELF_EHDR_SIZE];
-    elf_word_t entry = 0;
-    elf_word_t phoff = 0;
-    uint16 phnum = 0u;
-    uint16 phentsize = 0u;
-    uint32 win_base = (uint32)ARKRTOS_ELF_WINDOW_BASE;
-    uint32 win_top;
-    uint32 argv_start;
-    uint32 stack_bottom;
-    uint32 stack_bytes;
-    uint32 bytes = 0u;
-    uint32 segs = 0u;
-    uint32 sp = 0u;
+    int32 argc = *p_argc;
+    char **argv = *p_argv;
     uint32 i;
-    int32 rc;
-    int32 id;
-    char *argv_auto[1];
 
     if((path == 0) || (path[0] == '\0'))
     {
@@ -780,10 +762,13 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
     /* 签名先于一切：格式都还没看就先确认这份文件是我们签过的。
      * 顺序有讲究——放在参数检查之后、读 ELF 头之前，避免"格式错误"的
      * 报错把"文件没签名"这件事盖掉。 */
-    rc = elf_verify_signature(path);
-    if(rc != ARKRTOS_ELF_OK)
     {
-        return rc;
+        int32 rc = elf_verify_signature(path);
+
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return rc;
+        }
     }
 #endif
     if(argc < 0)
@@ -810,15 +795,139 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
         }
     }
 
-    win_top      = win_base + (uint32)ARKRTOS_ELF_WINDOW_SIZE;
-    argv_start   = (win_top - (uint32)ARKRTOS_ELF_ARGV_SIZE) & ~0xFu;
-    stack_bottom = argv_start - (uint32)ARKRTOS_ELF_STACK_SIZE;
+    *p_argc = argc;
+    *p_argv = argv;
+    return ARKRTOS_ELF_OK;
+}
+
+/* 窗口切分：顶部往下依次是 argv 区（16 字节对齐）与用户栈，剩下的是可执行区。
+ * 三段一个都不能为空——窗口小到放不下属于板级配置错误，不是程序问题。 */
+static int32 elf_window_layout(uint32 win_base, uint32 *p_win_top,
+                               uint32 *p_argv_start, uint32 *p_stack_bottom)
+{
+    uint32 win_top      = win_base + (uint32)ARKRTOS_ELF_WINDOW_SIZE;
+    uint32 argv_start   = (win_top - (uint32)ARKRTOS_ELF_ARGV_SIZE) & ~0xFu;
+    uint32 stack_bottom = argv_start - (uint32)ARKRTOS_ELF_STACK_SIZE;
+
     if((stack_bottom <= win_base) ||
        (argv_start <= stack_bottom) ||
        (win_top <= argv_start))
     {
         /* 窗口小到连栈+参数区都放不下：这是板级配置错误，不是程序问题。 */
         return ARKRTOS_ELF_ERR_LAYOUT;
+    }
+
+    *p_win_top      = win_top;
+    *p_argv_start   = argv_start;
+    *p_stack_bottom = stack_bottom;
+    return ARKRTOS_ELF_OK;
+}
+
+/* 入口回跳区：必须在可执行区里、且 4 字节对齐。 */
+static int32 elf_check_entry(elf_word_t entry, uint32 win_base, uint32 stack_bottom)
+{
+    /* 入口必须落在窗口内且 4 字节对齐：RV32 与 LoongArch 的指令都是 4 字节
+     * （RV32 的压缩扩展只让指令可能变短，不会让入口变半字对齐）。 */
+    if((entry < (elf_word_t)win_base) ||
+       (entry > ((elf_word_t)stack_bottom - 4u)) ||
+       ((entry & 3u) != 0u))
+    {
+        return ARKRTOS_ELF_ERR_LAYOUT;
+    }
+    return ARKRTOS_ELF_OK;
+}
+
+/* 段关：先只校验（一个字节都不写），通过了才真写。两遍读同一张段表，
+ * 校验不过就绝不在窗口里留下半份镜像。 */
+static int32 elf_load_segments(const char *path, uint32 space, uint32 phoff,
+                               uint16 phnum, uint16 phentsize,
+                               uint32 win_base, uint32 stack_bottom,
+                               uint32 *p_segs, uint32 *p_bytes)
+{
+    uint32 segs = 0u;
+    uint32 bytes = 0u;
+    int32 rc;
+
+    rc = elf_check_segments(path, (uint32)phoff, phnum, phentsize,
+                            win_base, stack_bottom, &segs);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return rc;
+    }
+
+    rc = elf_write_segments(path, space, (uint32)phoff, phnum, phentsize,
+                            &bytes);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return rc;
+    }
+
+    *p_segs  = segs;
+    *p_bytes = bytes;
+    return ARKRTOS_ELF_OK;
+}
+
+/* 栈关：用户栈与 argv 也在窗口里，铺之前先把地址空间装对。 */
+static int32 elf_stack_build(uint32 space, uint32 win_top, uint32 argv_start,
+                             int32 argc, char *argv[], uint32 *p_sp)
+{
+    uint32 sp = 0u;
+    int32 rc;
+
+#if (ARKRTOS_USE_PAGING == 1)
+    /* 用户栈与 argv 也在窗口里，铺之前同样把空间装对。elf_build_stack()
+     * 里没有阻塞调用，中途不会被切走。 */
+    (void)arkrtos_paging_space_activate(space);
+#else
+    (void)space;
+#endif
+    rc = elf_build_stack(win_top, argv_start, argc, argv, &sp);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return rc;
+    }
+
+    *p_sp = sp;
+    return ARKRTOS_ELF_OK;
+}
+
+/**
+* @brief 把一份 ELF64 装进指定地址空间并起一个降权任务
+* @param space   目标地址空间（0 .. 空间数-1）；窗口 VA 在每个空间里相同
+* @param p_info  成功时填装载读数（不接收失败值）
+* @details 空间选择、台账登记、以及"装载完把内核任务原来的视图装回去"
+*          都在 arkrtos_elf_exec_space() 里；这里只做"把这份文件装进这一块帧"。
+*/
+static int32 elf_load(uint32 space, const char *path, int32 argc,
+                      char *argv[], arkrtos_elf_info_t *p_info)
+{
+    uint8 hdr[ELF_EHDR_SIZE];
+    elf_word_t entry = 0;
+    elf_word_t phoff = 0;
+    uint16 phnum = 0u;
+    uint16 phentsize = 0u;
+    uint32 win_base = (uint32)ARKRTOS_ELF_WINDOW_BASE;
+    uint32 win_top;
+    uint32 argv_start;
+    uint32 stack_bottom;
+    uint32 stack_bytes;
+    uint32 bytes = 0u;
+    uint32 segs = 0u;
+    uint32 sp = 0u;
+    int32 rc;
+    int32 id;
+    char *argv_auto[1];
+
+    rc = elf_prepare_args(path, &argc, &argv, argv_auto);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return rc;
+    }
+
+    rc = elf_window_layout(win_base, &win_top, &argv_start, &stack_bottom);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return rc;
     }
 
     rc = elf_read_exact(path, hdr, ELF_EHDR_SIZE, 0u);
@@ -832,36 +941,20 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
         return rc;
     }
 
-    /* 入口必须落在窗口内且 4 字节对齐：RV32 与 LoongArch 的指令都是 4 字节
-     * （RV32 的压缩扩展只让指令可能变短，不会让入口变半字对齐）。 */
-    if((entry < (elf_word_t)win_base) ||
-       (entry > ((elf_word_t)stack_bottom - 4u)) ||
-       ((entry & 3u) != 0u))
-    {
-        return ARKRTOS_ELF_ERR_LAYOUT;
-    }
-
-    rc = elf_check_segments(path, (uint32)phoff, phnum, phentsize,
-                            win_base, stack_bottom, &segs);
+    rc = elf_check_entry(entry, win_base, stack_bottom);
     if(rc != ARKRTOS_ELF_OK)
     {
         return rc;
     }
 
-
-    rc = elf_write_segments(path, space, (uint32)phoff, phnum, phentsize,
-                            &bytes);
+    rc = elf_load_segments(path, space, (uint32)phoff, phnum, phentsize,
+                           win_base, stack_bottom, &segs, &bytes);
     if(rc != ARKRTOS_ELF_OK)
     {
         return rc;
     }
 
-#if (ARKRTOS_USE_PAGING == 1)
-    /* 用户栈与 argv 也在窗口里，铺之前同样把空间装对。elf_build_stack()
-     * 里没有阻塞调用，中途不会被切走。 */
-    (void)arkrtos_paging_space_activate(space);
-#endif
-    rc = elf_build_stack(win_top, argv_start, argc, argv, &sp);
+    rc = elf_stack_build(space, win_top, argv_start, argc, argv, &sp);
     if(rc != ARKRTOS_ELF_OK)
     {
         return rc;

@@ -2536,6 +2536,63 @@ run on hardware.** The runtime evidence for the blocking paths comes from the ho
 stubs, judged on return values and queue state, not by a real scheduler); really sleeping, really being
 woken by an ISR and really advancing to a timeout still need a hardware case.
 
+#### 5.30.28 Twenty-third one: `elf_load()` split into args / window layout / entry / segments / stack (2026-11-18)
+
+`elf_load()` in `kernelsrc/src/arkrtos_elf.c` (143 lines) was the pipeline itself: argument and signature
+gates, window layout, reading the header, entry check, segment check + write, stack build, task start,
+filling in the readings. Each of the first six gates was "return its own error code as-is", so eight error
+codes lived in one body, with two blocks of comments that must stay whole (the stack-size rule and the
+assembly-time race) wedged in between:
+
+| Function | What it owns | Lines |
+|---|---|---|
+| `elf_prepare_args()` | non-empty path -> **signature gate** -> `argc` bounds -> `argv` defaulted to `path` -> every item non-null; hands out the final `argc`/`argv` | 53 |
+| `elf_window_layout()` | the three window bands `win_top` / `argv_start` (16-byte aligned) / `stack_bottom`; any empty band is `ERR_LAYOUT` | 20 |
+| `elf_check_entry()` | the entry lies in the executable band and is 4-byte aligned | 12 |
+| `elf_load_segments()` | `elf_check_segments` first (writing not a single byte), then `elf_write_segments`; hands out `segs`/`bytes` | 27 |
+| `elf_stack_build()` | with paging, activate the space before `elf_build_stack`; hands out `sp` | 22 |
+| `elf_load()` itself | read the ELF header, five sequential calls, compute `stack_bytes`, start the task, fill the seven `p_info` fields | **88** (was 143) |
+
+Three rules: (1) **the signature gate still sits after the non-empty-path check and before the ELF header
+read** -- that order has a history (it keeps a "bad format" error from covering up "the file is unsigned",
+and avoids running the HMAC for an empty path); it moved together with `elf_prepare_args()` and did not
+shift; (2) the `#if (ARKRTOS_USE_EXEC_SIGN == 1)` and `#if (ARKRTOS_USE_PAGING == 1)` blocks each stay in
+the helper they belong to, so a disabled branch emits no symbol at all (in a paging-off profile
+`elf_stack_build()` swallows its parameter with `(void)space;` and raises no unused warning); (3) the two
+"must stay whole" comments stay at the entry point right above `elf_start_task()` -- they explain why
+"register -> drop privilege -> write back MPU" cannot be interrupted, which is the entry point's semantics,
+not any helper's.
+
+Normalised equivalence: only-OLD is **4 lines**, all "declaration merged with initializer" -- 1 is
+`rc = elf_verify_signature(path);` (now `int32 rc = elf_verify_signature(path);`, scoped inside the
+helper's `#if` block) and 3 are `win_top = ...` / `argv_start = ...` / `stack_bottom = ...` (now
+initialised declarations, because their first assignment in the helper is already their value); only-NEW is
+75 lines of signatures, local declarations, `return` / `*p_... =`, braces and the five calls.
+**No condition, error code, address computation or conditional-compilation boundary was changed.**
+
+Size: this one is **not** byte-identical -- text `367608 -> 367640` (**+32 B**), `data` 440 / `bss` 767508 /
+image total 31,462,512 B unchanged, two independent builds under `SOURCE_DATE_EPOCH=1600000000`
+(`build/qemu_loongarch64` and `build/_elf_repro`) produce the same `.bin` sha256
+(`1b6982cceaf26da927284bfaf3ff7fdefabbe53ba06727d3d9774f871b21b7a3`), different from the pre-split one
+(`c6f984f3...`); `arkrtos_elf.c` warnings **0 = 0 before the split** (the three warnings in the build log
+are still the pre-existing LA64 pointer-width casts in `arkrtos_shell_image.c` / `arkrtos_shell_misc.c`).
+
+Gates: `coverage-host` all ten modules at or above baseline (this file is not a coverage target, baseline
+untouched); `sec-crc` 8 pins; `format_gate` 361 own files clean; `doc_audit.py funcs` functions over 120
+lines **11 -> 10** (the longest is now `arkrtos_sync_release_task()` at 141); `shell_check.py` **PASS**;
+`ci_gate` **47 passed / 0 failed**.
+
+**The first end-to-end run failed and that is recorded here, not glossed over**: `FAIL: help output has no
+command 'blk'`. The raw serial output shows `blk` is registered (`[boot] ... blk=1`); what actually happened
+is the pre-existing intermittent `ecode=0x000d era=0x00000008` exception -- it killed the kernel right after
+`[MOD] tamper check PASS`, so the shell never reached `help`. A plain re-run is **PASS**. This change
+contains no exception / privilege / context-switch path (it only moved argument and layout computation) and
+the exception landing after the mod demo is unrelated; the root cause of that intermittent exception is
+still open under the §5.13.4 debt and was not touched this round.
+
+**Verdict class: compiles + same warning count + two independent reproducible builds with the same sha256 +
+only-OLD 4 lines all attributable + QEMU end-to-end PASS (second run), never run on hardware.**
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine

@@ -4774,6 +4774,54 @@ sha256 相同（`c6f984f31f23080b8ab0d611ea56c37768916b635bae64bac34891813b40227
 sha256 相同 + QEMU 端到端 PASS，未上板。** 阻塞路径的运行证据来自宿主（可编程桩驱动，判据是返回值
 与队列状态，不是真调度器），真睡下/真被 ISR 唤醒/真超时推进仍只有上板用例能证明。
 
+#### 5.30.28 第二十三笔：`elf_load()` 按「参数关 / 窗口切分 / 入口 / 段 / 栈」分五段（2026-11-18）
+
+`kernelsrc/src/arkrtos_elf.c` 的 `elf_load()`（143 行）是这条流水线本身：参数与签名关、窗口切分、
+读头、入口检查、段校验+写入、铺栈、起任务、填读数。前六关每一关都是「不通过就原样返回它的错误码」，
+八种错误码混在一具函数体里，而中间还夹着两段必须整段原子的注释（栈尺寸口径、装配期竞态）：
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `elf_prepare_args()` | 路径非空 → **签名门** → `argc` 上下界 → `argv` 缺省补成 `path` → 逐项非空；成功用出参交出最终 `argc`/`argv` | 53 |
+| `elf_window_layout()` | 窗口三段：`win_top` / `argv_start`（16 字节对齐）/ `stack_bottom`，任一段为空即 `ERR_LAYOUT` | 20 |
+| `elf_check_entry()` | 入口落在可执行区里且 4 字节对齐 | 12 |
+| `elf_load_segments()` | 先 `elf_check_segments`（一个字节都不写）再 `elf_write_segments`，成功交出 `segs`/`bytes` | 27 |
+| `elf_stack_build()` | 无分页档不需要；有分页档先 `paging_space_activate` 再 `elf_build_stack`，成功交出 `sp` | 22 |
+| `elf_load()` 自己 | 读 ELF 头、五次顺序调用、算 `stack_bytes`、起任务、填 `p_info` 七项 | **88**（原 143） |
+
+口径三条：① **签名门仍在「路径非空之后、读 ELF 头之前」** —— 这个顺序是有来历的（既不让「格式错误」
+把「文件没签名」盖掉，也不对空路径白算一遍 HMAC），拆段时跟着 `elf_prepare_args()` 一起搬，位置没动；
+② `#if (ARKRTOS_USE_EXEC_SIGN == 1)` 与 `#if (ARKRTOS_USE_PAGING == 1)` 两个条件编译块各自留在它所属的
+helper 里，条件不成立时那一段连符号都不生成（无分页档 `elf_stack_build()` 用 `(void)space;` 消化形参，
+不产生未使用告警）；③ 两段「必须整段原子」的注释留在入口，紧贴 `elf_start_task()` —— 它们解释的是
+「注册 → 降权 → MPU 写回」这一步为什么不能被打断，属入口的语义，不属任何 helper。
+
+等价性归一化比对：only-OLD **4 行**，全部是「声明与初始化合并」——1 行 `rc = elf_verify_signature(path);`
+（改成 `int32 rc = elf_verify_signature(path);`，作用域收进 helper 的 `#if` 块）与 3 行
+`win_top = …` / `argv_start = …` / `stack_bottom = …`（改成带初值的声明，因为它们在 helper 里第一次赋值
+就是取值）；only-NEW 75 行全是签名、局部声明、`return`/`*p_…=`、花括号与入口五次调用。
+**判断条件、错误码、地址计算、条件编译的边界一处未改。**
+
+体积：这一笔**不是**逐字节不变 —— text `367608 → 367640`（**+32 B**），`data` 440 / `bss` 767508 /
+镜像总长 31,462,512 B 不变，`SOURCE_DATE_EPOCH=1600000000` 下两次独立构建（`build/qemu_loongarch64` 与
+`build/_elf_repro`）的 `.bin` sha256 相同（`1b6982cceaf26da927284bfaf3ff7fdefabbe53ba06727d3d9774f871b21b7a3`），
+且与拆分前（`c6f984f3…`）不同；`arkrtos_elf.c` 告警 **0 条 = 拆分前 0 条**（构建日志里 3 条仍是
+`arkrtos_shell_image.c` / `arkrtos_shell_misc.c` 既有的 LA64 指针宽度转换）。
+
+门禁：`coverage-host` 10 个模块不低于基线（本文件不在覆盖对象内，未动基线）、`sec-crc` 8 pin 全过、
+`format_gate` 361 个自有文件干净、`doc_audit.py funcs` 超过 120 行的函数 **11 → 10**（最长换成
+`arkrtos_sync_release_task()` 141）、`example/qemu_loongarch64/shell_check.py` **PASS**、`ci_gate`
+**47 passed / 0 failed**。
+
+**第一次跑端到端失败，记在这里不粉饰**：`FAIL: help 输出里没有命令 'blk'`。查串口原始输出，`blk` 确实
+注册着（`[boot] … blk=1`），真正的原因是既有的 `ecode=0x000d era=0x00000008` 间歇异常——它在
+`[MOD] tamper check PASS` 之后直接打死内核，shell 根本没走到 `help`。原样重跑一次即 **PASS**。
+这笔改动不含任何异常/特权/上下文切换路径（只搬了参数与布局计算），异常落在 mod 演示之后也与
+本笔无关；该间歇异常的根因仍挂在 §5.13.4 的欠账里，未在本轮处理。
+
+**结论分档：编译通过 + 告警同数 + 两次独立可复现构建 sha256 相同 + only-OLD 4 行逐条可归因 +
+QEMU 端到端 PASS（第二次），未上板。**
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行
