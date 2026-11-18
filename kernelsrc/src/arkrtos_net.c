@@ -674,8 +674,133 @@ uint8 arkrtos_net_ready(void)
     return (arkrtos_mq_is_alive(g_net_mq) != 0) ? 1u : 0u;
 }
 
+/* Every sub command whose only requirement is "the handle belongs to the
+ * caller". */
+static int32 net_validate_own(const uint32 *p)
+{
+    return (arkrtos_net_own(p[1], arkrtos_current_task_id) != 0)
+           ? 0 : ARKRTOS_NET_EINVAL;
+}
+
+static int32 net_validate_listen(const uint32 *p)
+{
+    if(net_validate_own(p) != 0)
+    {
+        return ARKRTOS_NET_EINVAL;
+    }
+    return (p[2] <= 255u) ? 0 : ARKRTOS_NET_EINVAL;
+}
+
+/* send() and sendto(): the payload is read out of the caller's buffer, so it
+ * has to be a readable user range whenever there is anything to read. Both
+ * sub commands carry the same argument shape, so one check serves both. */
+static int32 net_validate_send(const uint32 *p)
+{
+    if((net_validate_own(p) != 0) || (p[3] > 0xFFFFu))
+    {
+        return ARKRTOS_NET_EINVAL;
+    }
+    if((p[3] != 0u) &&
+       (arkrtos_kernel_user_ro_ok((const void *)p[2], p[3]) == 0u))
+    {
+        return ARKRTOS_NET_EINVAL;
+    }
+    return 0;
+}
+
+/* recv(): the payload is written into the caller's buffer, and a zero length
+ * would be a call that can never make progress. */
+static int32 net_validate_recv(const uint32 *p)
+{
+    if((net_validate_own(p) != 0) ||
+       (p[3] == 0u) || (p[3] > 0xFFFFu))
+    {
+        return ARKRTOS_NET_EINVAL;
+    }
+    if(arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u)
+    {
+        return ARKRTOS_NET_EINVAL;
+    }
+    return 0;
+}
+
+/* recvfrom(): the recv() contract plus two optional 4-byte outputs for the
+ * peer address and port. */
+static int32 net_validate_recvfrom(const uint32 *p)
+{
+    if(net_validate_recv(p) != 0)
+    {
+        return ARKRTOS_NET_EINVAL;
+    }
+    if(((p[4] != 0u) &&
+        (arkrtos_kernel_dev_buf_ok((const void *)p[4], 4) == 0u)) ||
+       ((p[5] != 0u) &&
+        (arkrtos_kernel_dev_buf_ok((const void *)p[5], 4) == 0u)))
+    {
+        return ARKRTOS_NET_EINVAL;
+    }
+    return 0;
+}
+
+/* getsockopt(): one optional 4-byte output. */
+static int32 net_validate_getsockopt(const uint32 *p)
+{
+    if(net_validate_own(p) != 0)
+    {
+        return ARKRTOS_NET_EINVAL;
+    }
+    if((p[3] != 0u) &&
+       (arkrtos_kernel_dev_buf_ok((const void *)p[3], 4) == 0u))
+    {
+        return ARKRTOS_NET_EINVAL;
+    }
+    return 0;
+}
+
+/* getsockname() and getpeername(): two optional 4-byte outputs. */
+static int32 net_validate_name(const uint32 *p)
+{
+    if(net_validate_own(p) != 0)
+    {
+        return ARKRTOS_NET_EINVAL;
+    }
+    if(((p[2] != 0u) &&
+        (arkrtos_kernel_dev_buf_ok((const void *)p[2], 4) == 0u)) ||
+       ((p[3] != 0u) &&
+        (arkrtos_kernel_dev_buf_ok((const void *)p[3], 4) == 0u)))
+    {
+        return ARKRTOS_NET_EINVAL;
+    }
+    return 0;
+}
+
+static int32 net_validate_shutdown(const uint32 *p)
+{
+    if(net_validate_own(p) != 0)
+    {
+        return ARKRTOS_NET_EINVAL;
+    }
+    return (p[2] <= (uint32)ARKRTOS_NET_SHUT_RDWR) ? 0 : ARKRTOS_NET_EINVAL;
+}
+
+static int32 net_validate_poll(const uint32 *p)
+{
+    if(net_validate_own(p) != 0)
+    {
+        return ARKRTOS_NET_EINVAL;
+    }
+    if((p[2] == 0u) ||
+       ((p[2] & ~(uint32)(ARKRTOS_NET_POLL_IN | ARKRTOS_NET_POLL_OUT |
+                          ARKRTOS_NET_POLL_ERR)) != 0u))
+    {
+        return ARKRTOS_NET_EINVAL;
+    }
+    return 0;
+}
+
 /* Everything the kernel is about to dereference gets checked here, in the
- * caller's own context (the window checks read the current task). */
+ * caller's own context (the window checks read the current task). The switch
+ * only routes each sub command to the check for its argument shape. */
 static int32 arkrtos_net_validate(const uint32 *p)
 {
     switch(p[0])
@@ -690,131 +815,36 @@ static int32 arkrtos_net_validate(const uint32 *p)
 
     case ARKRTOS_NET_SUB_BIND:
     case ARKRTOS_NET_SUB_CONNECT:
-        return (arkrtos_net_own(p[1], arkrtos_current_task_id) != 0)
-               ? 0 : ARKRTOS_NET_EINVAL;
-
-    case ARKRTOS_NET_SUB_LISTEN:
-        if(arkrtos_net_own(p[1], arkrtos_current_task_id) == 0)
-        {
-            return ARKRTOS_NET_EINVAL;
-        }
-        return (p[2] <= 255u) ? 0 : ARKRTOS_NET_EINVAL;
-
     case ARKRTOS_NET_SUB_ACCEPT:
     case ARKRTOS_NET_SUB_CLOSE:
-        return (arkrtos_net_own(p[1], arkrtos_current_task_id) != 0)
-               ? 0 : ARKRTOS_NET_EINVAL;
+    case ARKRTOS_NET_SUB_SETSOCKOPT:
+        return net_validate_own(p);
+
+    case ARKRTOS_NET_SUB_LISTEN:
+        return net_validate_listen(p);
 
     case ARKRTOS_NET_SUB_SEND:
-        if((arkrtos_net_own(p[1], arkrtos_current_task_id) == 0) ||
-           (p[3] > 0xFFFFu))
-        {
-            return ARKRTOS_NET_EINVAL;
-        }
-        if((p[3] != 0u) &&
-           (arkrtos_kernel_user_ro_ok((const void *)p[2], p[3]) == 0u))
-        {
-            return ARKRTOS_NET_EINVAL;
-        }
-        return 0;
+    case ARKRTOS_NET_SUB_SENDTO:
+        return net_validate_send(p);
 
     case ARKRTOS_NET_SUB_RECV:
-        if((arkrtos_net_own(p[1], arkrtos_current_task_id) == 0) ||
-           (p[3] == 0u) || (p[3] > 0xFFFFu))
-        {
-            return ARKRTOS_NET_EINVAL;
-        }
-        if(arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u)
-        {
-            return ARKRTOS_NET_EINVAL;
-        }
-        return 0;
-
-    case ARKRTOS_NET_SUB_SENDTO:
-        if((arkrtos_net_own(p[1], arkrtos_current_task_id) == 0) ||
-           (p[3] > 0xFFFFu))
-        {
-            return ARKRTOS_NET_EINVAL;
-        }
-        if((p[3] != 0u) &&
-           (arkrtos_kernel_user_ro_ok((const void *)p[2], p[3]) == 0u))
-        {
-            return ARKRTOS_NET_EINVAL;
-        }
-        return 0;
+        return net_validate_recv(p);
 
     case ARKRTOS_NET_SUB_RECVFROM:
-        if((arkrtos_net_own(p[1], arkrtos_current_task_id) == 0) ||
-           (p[3] == 0u) || (p[3] > 0xFFFFu))
-        {
-            return ARKRTOS_NET_EINVAL;
-        }
-        if(arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u)
-        {
-            return ARKRTOS_NET_EINVAL;
-        }
-        if(((p[4] != 0u) &&
-            (arkrtos_kernel_dev_buf_ok((const void *)p[4], 4) == 0u)) ||
-           ((p[5] != 0u) &&
-            (arkrtos_kernel_dev_buf_ok((const void *)p[5], 4) == 0u)))
-        {
-            return ARKRTOS_NET_EINVAL;
-        }
-        return 0;
-
-    case ARKRTOS_NET_SUB_SETSOCKOPT:
-        if(arkrtos_net_own(p[1], arkrtos_current_task_id) == 0)
-        {
-            return ARKRTOS_NET_EINVAL;
-        }
-        return 0;
+        return net_validate_recvfrom(p);
 
     case ARKRTOS_NET_SUB_GETSOCKOPT:
-        if(arkrtos_net_own(p[1], arkrtos_current_task_id) == 0)
-        {
-            return ARKRTOS_NET_EINVAL;
-        }
-        if((p[3] != 0u) &&
-           (arkrtos_kernel_dev_buf_ok((const void *)p[3], 4) == 0u))
-        {
-            return ARKRTOS_NET_EINVAL;
-        }
-        return 0;
+        return net_validate_getsockopt(p);
 
     case ARKRTOS_NET_SUB_GETSOCKNAME:
     case ARKRTOS_NET_SUB_GETPEERNAME:
-        if(arkrtos_net_own(p[1], arkrtos_current_task_id) == 0)
-        {
-            return ARKRTOS_NET_EINVAL;
-        }
-        if(((p[2] != 0u) &&
-            (arkrtos_kernel_dev_buf_ok((const void *)p[2], 4) == 0u)) ||
-           ((p[3] != 0u) &&
-            (arkrtos_kernel_dev_buf_ok((const void *)p[3], 4) == 0u)))
-        {
-            return ARKRTOS_NET_EINVAL;
-        }
-        return 0;
+        return net_validate_name(p);
 
     case ARKRTOS_NET_SUB_SHUTDOWN:
-        if(arkrtos_net_own(p[1], arkrtos_current_task_id) == 0)
-        {
-            return ARKRTOS_NET_EINVAL;
-        }
-        return (p[2] <= (uint32)ARKRTOS_NET_SHUT_RDWR) ? 0 : ARKRTOS_NET_EINVAL;
+        return net_validate_shutdown(p);
 
     case ARKRTOS_NET_SUB_POLL:
-        if(arkrtos_net_own(p[1], arkrtos_current_task_id) == 0)
-        {
-            return ARKRTOS_NET_EINVAL;
-        }
-        if((p[2] == 0u) ||
-           ((p[2] & ~(uint32)(ARKRTOS_NET_POLL_IN | ARKRTOS_NET_POLL_OUT |
-                              ARKRTOS_NET_POLL_ERR)) != 0u))
-        {
-            return ARKRTOS_NET_EINVAL;
-        }
-        return 0;
+        return net_validate_poll(p);
 
     default:
         return ARKRTOS_NET_EINVAL;

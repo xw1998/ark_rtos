@@ -2361,6 +2361,56 @@ identical sha256 + QEMU end-to-end PASS; not verified on board.** No new runtime
 itself: it needs a board-level slot table (`arkrtos_layout_slots()` is generated from `config/`) plus a real Flash
 backend; on the host `test_load_buffer_e2e` goes through the in-pool AUTO path and never reaches this function.
 
+#### 5.30.25 Twentieth one: `arkrtos_net_validate()` split by the argument shape of each sub command (2026-11-18)
+
+`arkrtos_net_validate()` in `kernelsrc/src/arkrtos_net.c` (144 lines) was a flat switch of sixteen cases,
+each case body doing its own "is this handle mine" plus its own buffer checks. Three kinds of check were
+copy-pasted across a dozen cases, so verifying one rule meant reading the whole switch:
+
+| Function | What it owns | Lines |
+|---|---|---|
+| `net_validate_own()` | the single exit for sub commands whose only requirement is "the handle belongs to the caller" | 5 |
+| `net_validate_listen()` | `own` plus the backlog limit of 255 | 8 |
+| `net_validate_send()` | `own` plus the `0xFFFF` length cap plus `user_ro_ok` when non-empty (**SEND and SENDTO had byte-identical case bodies**, they now share this one) | 13 |
+| `net_validate_recv()` | `own` plus a non-zero length within `0xFFFF` plus `dev_buf_ok` | 13 |
+| `net_validate_recvfrom()` | calls `net_validate_recv()`, then checks the two optional 4-byte outputs | 15 |
+| `net_validate_getsockopt()` | `own` plus one optional 4-byte output | 13 |
+| `net_validate_name()` | `own` plus two optional 4-byte outputs (shared by GETSOCKNAME / GETPEERNAME) | 15 |
+| `net_validate_shutdown()` | `own` plus `how` not beyond `SHUT_RDWR` | 8 |
+| `net_validate_poll()` | `own` plus a non-zero event mask without bits beyond IN/OUT/ERR | 14 |
+| `arkrtos_net_validate()` itself | `SOCKET` still inline (the only sub command that does not look at a handle), every other case is `return net_validate_*(p);`, `default` still `EINVAL` | **49** (was 144) |
+
+Three rules: (1) grouping is by **argument shape**, not one helper per sub command -- the five sub commands
+that only check ownership (BIND/CONNECT/ACCEPT/CLOSE/SETSOCKOPT, written twice before) share
+`net_validate_own()`; (2) `recvfrom` is a superset of `recv`, so it calls `net_validate_recv()` first and the
+order "length and output first, then the two optional address outputs" is unchanged; (3) the entry point adds
+no checks of its own; every helper returns its own verdict, and the set and order of return codes across the
+sixteen cases is untouched.
+
+Normalised equivalence: only-OLD is **24 lines**, each attributable -- 19 of them are the second copy of the
+**byte-identical SENDTO case body** removed by merging into `net_validate_send()`, the rest are the two places
+where `if(net_validate_own(p) != 0) return ...;` became one combined condition and the `return 0;` reshaping;
+only-NEW is 36 lines of signatures, `return net_validate_*(p);`, braces and indentation.
+**No condition, return code or case mapping was changed**; the SEND/SENDTO merge is a designed deduplication,
+not a semantic change.
+
+Size: text `367752 -> 367752` (**+/-0 B** -- all nine helpers inline, and the compiler had already merged the
+two duplicate SEND/SENDTO bodies), `data` 440 / `bss` 767508 / image total 31,462,512 B unchanged; under
+`SOURCE_DATE_EPOCH=1600000000` the `BUILD=build/net_split` and default-directory `.bin` files are **sha256
+identical** (`63796b55...`), and identical to the previous split as well -- same shape as the seventeenth one:
+this buys readability, not size. `arkrtos_net.c` has **0 warnings** (the file never had any).
+
+Gates: `coverage-host` all ten modules at or above baseline (`arkrtos_net` is not a coverage target, baseline
+untouched); `sec-crc` 8 pins pass; `format_gate` 361 own files clean; `shell_check.py` **PASS**.
+
+`doc_audit.py funcs`: functions over 120 lines **14 -> 13**; the longest is now `arkrtos_mini_run()` (144).
+
+**Verdict class: compiles + same warning count + two reproducible builds with identical sha256, identical to the
+pre-split image + every only-OLD line attributed + QEMU end-to-end PASS, never run on hardware.**
+No new test cases: the nine branches need real socket handles, a real `net_own` ledger and a real App window
+boundary to tell apart; a host harness could only stub them, and a stubbed red/green would only prove the
+predicates are written correctly, not that the real path is.
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine

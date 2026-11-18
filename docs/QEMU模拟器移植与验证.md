@@ -4622,6 +4622,53 @@ only-NEW 37 行全是六个签名、七对花括号、`return 0;` / `return 1;` 
 固定槽位这条路径本身没有新增运行读数：它要一份板级槽表（`arkrtos_layout_slots()` 由 `config/` 生成）
 加上真 Flash 后端，宿主上 `test_load_buffer_e2e` 走的是池内 AUTO 路径，不经过本函数。
 
+#### 5.30.25 第二十笔：`arkrtos_net_validate()` 按「子命令的参数形状」分九段（2026-11-18）
+
+`kernelsrc/src/arkrtos_net.c` 的 `arkrtos_net_validate()`（144 行）是一个十六个 `case` 的平铺 switch：
+每个 case 体自己做「句柄是不是我的」加本子命令特有的缓冲区校验。三类检查在十六个 case 里被抄了十几遍，
+想核一条规则得把整段扫一遍：
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `net_validate_own()` | 只要求「句柄属于 caller」的子命令统一出口：`arkrtos_net_own(...) != 0` 才是 0 | 5 |
+| `net_validate_listen()` | `own` + backlog 上限 255 | 8 |
+| `net_validate_send()` | `own` + 长度上限 `0xFFFF` + 非空时 `user_ro_ok`（**SEND 与 SENDTO 的 case 体原本逐字相同**，共用这一份） | 13 |
+| `net_validate_recv()` | `own` + 长度非 0 且不超 `0xFFFF` + `dev_buf_ok` | 13 |
+| `net_validate_recvfrom()` | 调 `net_validate_recv()`，再校验两个可选的 4 字节出参 | 15 |
+| `net_validate_getsockopt()` | `own` + 一个可选的 4 字节出参 | 13 |
+| `net_validate_name()` | `own` + 两个可选的 4 字节出参（GETSOCKNAME / GETPEERNAME 共用） | 15 |
+| `net_validate_shutdown()` | `own` + `how` 不超过 `SHUT_RDWR` | 8 |
+| `net_validate_poll()` | `own` + 事件位非 0 且不含 IN/OUT/ERR 之外的位 | 14 |
+| `arkrtos_net_validate()` 自己 | `SOCKET` 的类型校验仍内联（它是唯一不看句柄的子命令），其余各 case 只 `return net_validate_*(p);`，`default` 仍 `EINVAL` | **49**（原 144） |
+
+口径三条：① **只按「参数形状」归并**，不按子命令逐个拆 —— BIND/CONNECT/ACCEPT/CLOSE/SETSOCKOPT 五个
+原本写了两遍的「只看归属」合成一个 `net_validate_own()`；② `recvfrom` 是 `recv` 的超集，改成调用
+`net_validate_recv()`，顺序仍是「先长度与出参、后两个可选地址出参」，与原文一致；③ 入口不补任何检查，
+每个 helper 自己返回结论 —— 十六个 case 的返回码集合与先后顺序一处未改。
+
+等价性归一化比对：only-OLD **24 行**，可逐件对齐 —— `SENDTO` 那一段**逐字重复的 case 体 24 行中的
+19 行**（`own` 判、长度判、`user_ro_ok` 判、两个 `return`）因为被合并成 `net_validate_send()` 而少了一份，
+剩下的是 `if(net_validate_own(p) != 0) return ARKRTOS_NET_EINVAL;` 改成 `if((net_validate_own(p) != 0) || …)`
+的两处合写与 `return 0;` 变形；only-NEW 36 行全是九个签名、`return net_validate_*(p);`、花括号与缩进。
+**判断条件、返回码、`case` 的归属关系一处未改**；`SEND`/`SENDTO` 这一处是**设计内去重**（两份逐字相同的
+代码合成一份），不是语义改动。
+
+体积：text `367752 → 367752`（**±0 B**，九个 helper 全内联，且编译器本来就把 SEND/SENDTO 两份重复体合并了），
+`data` 440 / `bss` 767508 / 镜像总长 31,462,512 B 不变；`SOURCE_DATE_EPOCH=1600000000` 下
+`BUILD=build/net_split` 与重建后的默认档两份 `.bin` **sha256 逐字节相同**（`63796b55…`），
+**且与拆分前那一笔是同一个 sha256** —— 这一笔与第十七笔同型：买的是可读性，不是体积。
+`arkrtos_net.c` 告警 **0 条**（该文件本来就没有告警）。
+
+门禁：`coverage-host` 10 个模块全部不低于基线（`arkrtos_net` 不在覆盖对象内，未动基线）；
+`sec-crc` 8 pin 全过；`format_gate` 361 个自有文件干净；`example/qemu_loongarch64/shell_check.py` **PASS**
+（横幅 / help / uname / dt / ls / cat / stack / utest 全过）。
+
+`doc_audit.py funcs`：超过 120 行的函数 **14 → 13**；最长换成 `arkrtos_mini_run()`（144）。
+
+**结论分档：编译通过 + 告警同数 + 两份可复现构建 sha256 相同且与拆分前逐字节相同 + only-OLD 逐行可归因 + QEMU 端到端 PASS，未上板。**
+这一笔不新增用例：九条分支要真套接字句柄、真 `net_own` 台账与真 App 窗口边界才判得出来，
+宿主上只能堆桩，堆出来的「红/绿」只证明判据写对了，不证明真路径对。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行
