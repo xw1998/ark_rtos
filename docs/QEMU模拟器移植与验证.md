@@ -3855,6 +3855,40 @@ stack/utest 九组全部通过，`[ELF]`/`[MOD]` 两条 tamper check 也在其�
 拆完之后 `doc_audit.py funcs` 的最长函数换成 `arkrtos_modld.c` 的 `mod_one_rela()`
 （252 行），`elf_load` 退出最前列。
 
+#### 5.30.7 又拆一笔：`mod_one_rela()` 按四类机器分开（2026-11-18）
+
+`kernelsrc/src/arkrtos_modld.c` 的 `mod_one_rela()`（252 行）是一个大 `switch`，本来就把
+重定位分成四类互不相干的机器。现在按这四类拆成四个 `static` 函数，各自只保留自己那段
+`switch`，`default` 统一返回一个局部哨兵 `MOD_RELA_PASS`（= 1，意思是"这个类型不归我"）：
+
+| 函数 | 管哪些类型 | 需要什么 |
+|---|---|---|
+| `mod_rela_push()` | `R_LA_SOP_PUSH_ABSOLUTE` / `PUSH_PCREL` / `PUSH_PLT_PCREL` / `PUSH_GPREL` | 符号值 `S`、地址 `P`、栈；`GPREL` 还会去查 GOT 槽 |
+| `mod_rela_alu()` | `R_LA_SOP_ADD` / `SUB` / `SL` / `SR` / `NOT` / `ASSERT` | 只动 SOP 栈 |
+| `mod_rela_pop()` | `POP_32_S_10_12` / `S_5_20` / `S_10_16_S2` / `S_0_10_10_16_S2` / `POP_32_U` | 栈顶值 + `P`（要读/写指令字） |
+| `mod_rela_write()` | `R_LA_32` / `R_LA_64` | 符号值 `S` + `addend` + `P` |
+
+`mod_one_rela()` 自己只剩「算 `P` 与 `S` → 依次问这四个 → 四类都不认就
+`c->last_reloc = type` 并返回 `ARKRTOS_MOD_ERR_RELOC`」，约 40 行。case 体是**逐行搬运**，
+等价性用归一化行多重集比对：差异只允许是四个函数骨架、`MOD_RELA_PASS` 的 `default`、
+四条 dispatch 与签名。`switch` 的分派顺序不影响语义——四类的类型集合互不相交。
+
+同口径读数：
+
+```
+before  text 367600 / data 440 / bss 767508   sha256 2968c36e…   31,462,512 B
+after   text 367392 / data 440 / bss 767508   sha256 1d94199f…   31,462,512 B
+```
+
+即 `text` **−208 B**（每个 helper 只看自己那几条 `case`，`-O2` 下的跳转表与常量装载都变窄了），
+`data`/`bss` 与镜像总长不变。行为判据 `shell_check.py`：三次里两次 `PASS`，第三次在
+`help` 一行上判 FAIL，原始转录末端是 §5.13.4 那个既有的
+`FATAL estat=0x000d0000 ecode=0x0000000d era=0x00000008` 间歇异常——按上一节的结论，
+这一类间歇与代码改动无关，两次 `PASS` 的转录里 `[ELF]`/`[MOD]` 两条 tamper check 都在。
+
+拆完之后 `doc_audit.py funcs` 里超过 120 行的函数从 32 个降到 **31 个**，最长换成
+`arkrtos_apppack.c` 的 `arkrtos_apppack_build()`（244 行）。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

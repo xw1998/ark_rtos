@@ -1482,6 +1482,45 @@ still prints `PASS` (all nine groups, including the `[ELF]` / `[MOD]` tamper che
 After the split the longest function reported by `doc_audit.py funcs` is `mod_one_rela()` in
 `arkrtos_modld.c` (252 lines); `elf_load` leaves the front of the list.
 
+#### 5.30.7 One more: `mod_one_rela()` split by machine class (2026-11-18)
+
+`mod_one_rela()` in `kernelsrc/src/arkrtos_modld.c` (252 lines) was one big `switch` that
+already grouped relocation types into four unrelated machines. It is now four `static`
+functions, each keeping only its own `switch`, with `default` returning a local sentinel
+`MOD_RELA_PASS` (= 1, meaning "not my type"):
+
+| Function | Types it owns | What it needs |
+|---|---|---|
+| `mod_rela_push()` | `R_LA_SOP_PUSH_ABSOLUTE` / `PUSH_PCREL` / `PUSH_PLT_PCREL` / `PUSH_GPREL` | symbol value `S`, address `P`, the stack; `GPREL` also looks up the GOT slot |
+| `mod_rela_alu()` | `R_LA_SOP_ADD` / `SUB` / `SL` / `SR` / `NOT` / `ASSERT` | the SOP stack only |
+| `mod_rela_pop()` | `POP_32_S_10_12` / `S_5_20` / `S_10_16_S2` / `S_0_10_10_16_S2` / `POP_32_U` | the stack top plus `P` (it reads and writes instruction words) |
+| `mod_rela_write()` | `R_LA_32` / `R_LA_64` | symbol value `S`, `addend`, `P` |
+
+`mod_one_rela()` keeps only "compute `P` and `S` -> ask the four in turn -> if none of them
+claims the type, set `c->last_reloc = type` and return `ARKRTOS_MOD_ERR_RELOC`", about 40
+lines. Case bodies were moved line for line; equivalence was argued with the normalised line
+multiset, where the only permitted differences are the four function skeletons, the
+`MOD_RELA_PASS` `default`, the four dispatch calls and the signatures. The dispatch order is
+irrelevant because the four type sets are disjoint.
+
+Same criterion:
+
+```
+before  text 367600 / data 440 / bss 767508   sha256 2968c36e...   31,462,512 B
+after   text 367392 / data 440 / bss 767508   sha256 1d94199f...   31,462,512 B
+```
+
+That is `text` **-208 B** (each helper only sees its own handful of `case` labels, so the jump
+tables and constant loads under `-O2` shrink); `data` / `bss` and the image length are
+unchanged. The behavioural criterion `shell_check.py` gave two `PASS` out of three runs; the
+third failed on the `help` line and its raw transcript ends with the pre-existing intermittent
+`FATAL estat=0x000d0000 ecode=0x0000000d era=0x00000008` described in section 5.13.4 - by the
+conclusion recorded there this kind of intermittent is unrelated to code changes, and both
+`PASS` transcripts contain the `[ELF]` / `[MOD]` tamper checks.
+
+After this split `doc_audit.py funcs` reports **31** functions over 120 lines instead of 32;
+the longest is now `arkrtos_apppack_build()` in `arkrtos_apppack.c` (244 lines).
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine

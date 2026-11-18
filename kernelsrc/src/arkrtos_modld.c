@@ -595,34 +595,17 @@ static int32 mod_fits(long v, uint32 bits)
     return ((v >= lo) && (v <= hi)) ? 0 : -1;
 }
 
-/** @brief 一条 rela 记录：在 SOP 栈机上求值后写回指令字 */
-static int32 mod_one_rela(mod_link_t *c, uint32 target, uint32 off,
-                          uint32 type, uint32 symidx, long addend,
-                          unsigned long *st, uint32 *p_sp)
+/* 重定位分四类机器，各管一段：压栈组算值入 SOP 栈、算数组只动栈、
+ * 出栈组把栈顶按指令字段编码写回、写数数组直接写数据字。
+ * 每类返回 MOD_RELA_PASS 表示「这个类型不归我」，由 mod_one_rela()
+ * 依次问下去；四类都不认就报错并点出类型号——不猜编码。 */
+#define MOD_RELA_PASS (1)
+
+/* SOP 栈机：压栈组（符号值已由调用方算好，这里只管入栈） */
+static int32 mod_rela_push(mod_link_t *c, uint32 type, uint32 symidx,
+                           long addend, uint32 P, unsigned long S,
+                           unsigned long *st, uint32 *p_sp)
 {
-    uint32 P = c->sec_addr[target] + off;
-    unsigned long S = 0ul;
-    int32 rc;
-
-    /* 需要符号值的类型先算出来；纯运算类型不看符号。 */
-    switch(type)
-    {
-    case R_LA_SOP_PUSH_PCREL:
-    case R_LA_SOP_PUSH_ABSOLUTE:
-    case R_LA_SOP_PUSH_GPREL:
-    case R_LA_SOP_PUSH_PLT_PCREL:
-    case R_LA_32:
-    case R_LA_64:
-        rc = mod_sym_value(c, symidx, &S);
-        if(rc != ARKRTOS_MOD_OK)
-        {
-            return rc;
-        }
-        break;
-    default:
-        break;
-    }
-
     switch(type)
     {
     case R_LA_SOP_PUSH_ABSOLUTE:
@@ -682,6 +665,16 @@ static int32 mod_one_rela(mod_link_t *c, uint32 target, uint32 off,
         return ARKRTOS_MOD_OK;
     }
 
+    default:
+        return MOD_RELA_PASS;
+    }
+}
+
+/* SOP 栈机：算数组（只看栈，不看符号与地址） */
+static int32 mod_rela_alu(uint32 type, unsigned long *st, uint32 *p_sp)
+{
+    switch(type)
+    {
     case R_LA_SOP_ADD:
         if(*p_sp < 2u) { return ARKRTOS_MOD_ERR_RELOC; }
         st[*p_sp - 2u] = st[*p_sp - 2u] + st[*p_sp - 1u];
@@ -722,6 +715,19 @@ static int32 mod_one_rela(mod_link_t *c, uint32 target, uint32 off,
         }
         return ARKRTOS_MOD_OK;
 
+    default:
+        return MOD_RELA_PASS;
+    }
+}
+
+/* SOP 栈机：出栈组（把栈顶编码进 LoongArch 指令字，或写一个数据字） */
+static int32 mod_rela_pop(mod_link_t *c, uint32 type, uint32 P,
+                          unsigned long *st, uint32 *p_sp)
+{
+    int32 rc;
+
+    switch(type)
+    {
     case R_LA_SOP_POP_32_S_10_12:
     {
         uint32 w = 0u;
@@ -812,6 +818,17 @@ static int32 mod_one_rela(mod_link_t *c, uint32 target, uint32 off,
         return ARKRTOS_MOD_OK;
     }
 
+    default:
+        return MOD_RELA_PASS;
+    }
+}
+
+/* 直接写数据字：R_LA_32 / R_LA_64（符号值加 addend） */
+static int32 mod_rela_write(mod_link_t *c, uint32 type, uint32 P,
+                            unsigned long S, long addend)
+{
+    switch(type)
+    {
     case R_LA_32:
     {
         uint32 at;
@@ -843,10 +860,53 @@ static int32 mod_one_rela(mod_link_t *c, uint32 target, uint32 off,
     }
 
     default:
-        /* 不认识就报错，并把类型号带出去：不猜编码。 */
-        c->last_reloc = type;
-        return ARKRTOS_MOD_ERR_RELOC;
+        return MOD_RELA_PASS;
     }
+}
+
+/** @brief 一条 rela 记录：在 SOP 栈机上求值后写回指令字 */
+static int32 mod_one_rela(mod_link_t *c, uint32 target, uint32 off,
+                          uint32 type, uint32 symidx, long addend,
+                          unsigned long *st, uint32 *p_sp)
+{
+    uint32 P = c->sec_addr[target] + off;
+    unsigned long S = 0ul;
+    int32 rc;
+
+    /* 需要符号值的类型先算出来；纯运算类型不看符号。 */
+    switch(type)
+    {
+    case R_LA_SOP_PUSH_PCREL:
+    case R_LA_SOP_PUSH_ABSOLUTE:
+    case R_LA_SOP_PUSH_GPREL:
+    case R_LA_SOP_PUSH_PLT_PCREL:
+    case R_LA_32:
+    case R_LA_64:
+        rc = mod_sym_value(c, symidx, &S);
+        if(rc != ARKRTOS_MOD_OK)
+        {
+            return rc;
+        }
+        break;
+    default:
+        break;
+    }
+
+    rc = mod_rela_push(c, type, symidx, addend, P, S, st, p_sp);
+    if(rc != MOD_RELA_PASS) { return rc; }
+
+    rc = mod_rela_alu(type, st, p_sp);
+    if(rc != MOD_RELA_PASS) { return rc; }
+
+    rc = mod_rela_pop(c, type, P, st, p_sp);
+    if(rc != MOD_RELA_PASS) { return rc; }
+
+    rc = mod_rela_write(c, type, P, S, addend);
+    if(rc != MOD_RELA_PASS) { return rc; }
+
+    /* 不认识就报错，并把类型号带出去：不猜编码。 */
+    c->last_reloc = type;
+    return ARKRTOS_MOD_ERR_RELOC;
 }
 
 static int32 mod_reloc_all(mod_link_t *c)
