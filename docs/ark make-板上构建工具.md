@@ -1,5 +1,7 @@
 # ark make：板上的构建工具
 
+**[简体中文](ark make-板上构建工具.md) | English([ark make-板上构建工具.en.md](ark make-板上构建工具.en.md))**
+
 ## 一句话
 
 板子上已经有 `cc`、`vim`、`shell`、`vfs`，把**几份 `.c` 打成一个能跑的镜像**却
