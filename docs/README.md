@@ -16,6 +16,7 @@
 | 想**像 VxWorks 那样把可下载模块装进已跑着的系统**（`ld /mnt/ram/modhello.o a b`、`lkup`、`modules`、`unld`） | [MMU平台可下载模块-VxWorks式.md](MMU平台可下载模块-VxWorks式.md)（`ET_REL` 现场链接、内核符号导出表、支持的重定位类型、PLV0 取舍、**与 ELF 是并列的两种模型不是替代**、装载器要 4 KB 栈这个真 bug） |
 | 搞懂文件路径怎么解析、挂载点怎么设、`/dev` 与 `/mnt` 从哪来 | [VFS路径命名空间.md](VFS路径命名空间.md)（挂载点、路径解析、根目录约定、设备与持久卷的位置） |
 | 查调度策略、这一轮调度器改了什么、还剩什么 | [调度器说明.md](调度器说明.md)（位图+链的 O(1) 就绪集、三种调度触发点、实测代价账与未做项） |
+| 用英文读同一份调度器设计 | [调度器说明.en.md](调度器说明.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 看调度器在真机上长什么样（图） | 根目录 [`README.md`](../README.md) §调度表现（4.97 s trace 实测图，图存 `docs/img/`） |
 | 读英文项目说明 | 根目录 [`readme_en.md`](../readme_en.md)（与中文 [`readme.md`](../readme.md) 对应，同一份内容） |
 | 用串口控制台看状态、启停 App、改配置 | [内核Shell控制台使用说明.md](内核Shell控制台使用说明.md) |
@@ -73,6 +74,7 @@ docs/
 ├── 返回码与错误码约定.md                    # 【协议】11 个模块的 ARKRTOS_*_ERR_* 具名码、值逐处不变、哨兵与不得统一的既有契约
 ├── socket与select兼容层.md                  # 【设计说明】App 侧 socket/select：头文件与边界、SVC 0x1E wire 契约、阻塞/超时在 App 侧兑现、SOCKET_DEMO、fd 空间重叠等限制
 ├── 调度器说明.md                            # 【设计说明】调度模型、O(1) 就绪集/延时链/时间片、三种触发点、实测与未做项
+├── 调度器说明.en.md                         # 【English】调度器页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── 同步原语与令牌守恒.md                    # 【设计说明】为何用户态等待只登记+轮询、派发方 peek(only_kernel)、三条契约、四个失败根因
 ├── Shell与日志Linux化.md                    # 【设计说明】Shell 命令风格与日志分级/出口/dmesg 环的 Linux 化取舍
 ├── 内存保护与App越权验证.md                  # 【设计说明】逐任务 MPU region 配置 + APP_BAD 越权验证
