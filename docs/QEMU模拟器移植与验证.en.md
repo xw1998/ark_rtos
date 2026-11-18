@@ -1586,6 +1586,47 @@ Readings and criteria:
 Evidence tier: **compiles plus default-config QEMU end-to-end**; `APPPACK=1` only reaches
 "type-correct", with no runtime evidence.
 
+#### 5.30.9 Fourth one: `svc_fs_namespace()` split by four subcommand ranges (2026-11-18)
+
+`svc_fs_namespace()` in `kernelsrc/src/arkrtos_task.c` (232 lines) serves SVC 0x1C subcommands
+11..23. Those numbers already form four contiguous ranges that map to four kinds of object, so the
+function is now four `static` helpers:
+
+| Function | Subcommands | Responsibility | Lines |
+|---|---|---|---|
+| `svc_fs_ns_io()` | 11..14 | open / read / write / close (byte stream on a handle) | 74 |
+| `svc_fs_ns_meta()` | 15..17 | stat / seek / readdir | 73 |
+| `svc_fs_ns_tree()` | 18..21 | unlink / mkdir / rmdir / rename | 76 |
+| `svc_fs_ns_size()` | 22..23 | truncate(path) / ftruncate(handle) | 36 |
+| `svc_fs_namespace()` itself | - | four boundary tests, unknown number returns `EINVAL` | **24** (was 232) |
+
+Case bodies were moved line for line and each family keeps the original `switch` / `default`
+style. Equivalence was argued with the normalised line multiset: **only-OLD is empty** (no
+statement lost), only-NEW is the four function skeletons, three extra `default` blocks and four
+boundary tests. **No scheduler lock was added or removed**: the original note that ark_vfs's port
+lock is `arkrtos_sched_lock`, so this side must not nest it, stays in the first family's comment
+and the other three follow the same rule. The numbering is contiguous, so the entry point selects
+a family by boundary only; 24 and above still falls through to `EINVAL`, as the old `default` did.
+
+One real pitfall from this split, recorded for later: the generated section comment placed above
+`switch` was missing its closing `*/`, so the C comment swallowed up to the first `*/` at the end
+of the first `case` line, taking `switch`, `{` and that `case` with it. The normalised comparison
+caught it immediately (only-OLD lost `case ARKRTOS_PATH_SUB_OPEN:`, only-NEW gained two `switch`
+lines); `format_gate` would not have, because it only checks byte rules. **A split script has to
+compare by itself; do not rely on the compiler or the format gate to catch this class.**
+
+Readings:
+
+```
+before  text 367392 / data 440 / bss 767508   sha256 1d94199f...   31,462,512 B
+after   text 367336 / data 440 / bss 767508   sha256 b0ad6a91...   31,462,512 B
+```
+
+`text` **-56 B**; `data` / `bss` and the image length are unchanged. `shell_check.py` `PASS` once;
+`arkrtos_task.c` reports the same **147** warnings as before the change (all pre-existing
+pointer-width casts; the new code adds none). `doc_audit.py funcs`: functions over 120 lines
+**30 -> 29**, and the longest is now `arkrtos_mini_load_image()` (229 lines).
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine

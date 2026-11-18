@@ -1701,16 +1701,18 @@ static void svc_fs_volume(void *p_svc_ctx, uint32 *p)
 
 /* ARKRTOS_SVC_FILE_SYS 11..23: the VFS namespace (POSIX style).
  * Moved verbatim out of svc_file_sys, same rule as above. */
-static void svc_fs_namespace(void *p_svc_ctx, uint32 *p)
+/* ARKRTOS_SVC_FILE_SYS 11..14: open / read / write / close on a handle.
+ * Moved verbatim out of svc_fs_namespace, same rule as above. */
+static void svc_fs_ns_io(void *p_svc_ctx, uint32 *p)
 {
+    /* No scheduler lock of our own here: ark_vfs takes the port lock
+     * (which is arkrtos_sched_lock) around everything it does, and nesting
+     * it would only make the unlock order something to get wrong. Path and
+     * buffer checks stay on this side because only the kernel knows what
+     * the caller may legally reach. */
+    /* ---- 11..14: handle oriented; 15..23 below keep the same rule. */
     switch(p[0])
     {
-    /* ---- 11..23: the VFS namespace ----
-     * No scheduler lock of our own here: ark_vfs takes the port lock
-     * (which is arkrtos_sched_lock) around everything it does, and
-     * nesting it would only make the unlock order something to get
-     * wrong. Path and buffer checks stay on this side because only
-     * the kernel knows what the caller may legally reach. */
     case ARKRTOS_PATH_SUB_OPEN:                /* open  path, flags -> handle */
         if(arkrtos_kernel_svc_args_ok(p, 12u) == 0u)
         {
@@ -1770,6 +1772,18 @@ static void svc_fs_namespace(void *p_svc_ctx, uint32 *p)
                       (uint32)arkrtos_vfs_app_close((int32)p[1]));
         break;
 
+        default:
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+    }
+}
+
+/* ARKRTOS_SVC_FILE_SYS 15..17: stat / seek / readdir.
+ * Moved verbatim out of svc_fs_namespace. */
+static void svc_fs_ns_meta(void *p_svc_ctx, uint32 *p)
+{
+    switch(p[0])
+    {
     case ARKRTOS_PATH_SUB_STAT:                /* stat path, size out, mode out */
         if(arkrtos_kernel_svc_args_ok(p, 16u) == 0u)
         {
@@ -1834,6 +1848,18 @@ static void svc_fs_namespace(void *p_svc_ctx, uint32 *p)
                                                     (uint32 *)p[5]));
         break;
 
+        default:
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+    }
+}
+
+/* ARKRTOS_SVC_FILE_SYS 18..21: unlink / mkdir / rmdir / rename.
+ * Moved verbatim out of svc_fs_namespace. */
+static void svc_fs_ns_tree(void *p_svc_ctx, uint32 *p)
+{
+    switch(p[0])
+    {
     case ARKRTOS_PATH_SUB_UNLINK:                /* unlink path */
         if(arkrtos_kernel_svc_args_ok(p, 8u) == 0u)
         {
@@ -1901,6 +1927,18 @@ static void svc_fs_namespace(void *p_svc_ctx, uint32 *p)
                                                    (const char *)p[2]));
         break;
 
+        default:
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+    }
+}
+
+/* ARKRTOS_SVC_FILE_SYS 22..23: truncate by path, truncate by handle.
+ * Moved verbatim out of svc_fs_namespace. */
+static void svc_fs_ns_size(void *p_svc_ctx, uint32 *p)
+{
+    switch(p[0])
+    {
     case ARKRTOS_PATH_SUB_TRUNCATE:                /* truncate path, size */
         if(arkrtos_kernel_svc_args_ok(p, 12u) == 0u)
         {
@@ -1932,6 +1970,35 @@ static void svc_fs_namespace(void *p_svc_ctx, uint32 *p)
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
             break;
     }
+}
+
+/* ARKRTOS_SVC_FILE_SYS 11..23: the VFS namespace (POSIX style).
+ * Moved verbatim out of svc_file_sys, same rule as above.
+ * The 13 subcommands form four contiguous ranges, so the family is
+ * chosen by boundary only; anything above 23 still lands on EINVAL. */
+static void svc_fs_namespace(void *p_svc_ctx, uint32 *p)
+{
+    if(p[0] <= ARKRTOS_PATH_SUB_CLOSE)
+    {
+        svc_fs_ns_io(p_svc_ctx, p);
+        return;
+    }
+    if(p[0] <= ARKRTOS_PATH_SUB_READDIR)
+    {
+        svc_fs_ns_meta(p_svc_ctx, p);
+        return;
+    }
+    if(p[0] <= ARKRTOS_PATH_SUB_RENAME)
+    {
+        svc_fs_ns_tree(p_svc_ctx, p);
+        return;
+    }
+    if(p[0] <= ARKRTOS_PATH_SUB_FTRUNCATE)
+    {
+        svc_fs_ns_size(p_svc_ctx, p);
+        return;
+    }
+    ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
 }
 
 /* ARKRTOS_SVC_FILE_SYS: argument check + dispatch only; the dispatch table

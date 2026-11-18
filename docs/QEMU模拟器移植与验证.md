@@ -3947,6 +3947,43 @@ after   text 367392 / data 440 / bss 767508   sha256 1d94199f…   31,462,512 B
 
 结论档位：**仅编译通过 + 默认档 QEMU 端到端跑过**；`APPPACK=1` 只到「类型正确」，没有运行证据。
 
+#### 5.30.9 第四笔：`svc_fs_namespace()` 按四段子命令区间分开（2026-11-18）
+
+`kernelsrc/src/arkrtos_task.c` 的 `svc_fs_namespace()`（232 行）处理 SVC 0x1C 的 11..23 号子命令。
+这些编号本来就分成连续的四段，正好对应四种对象，于是按段拆成四个 `static`：
+
+| 函数 | 子命令 | 管什么 | 行数 |
+|---|---|---|---|
+| `svc_fs_ns_io()` | 11..14 | open / read / write / close（句柄上的字节流） | 74 |
+| `svc_fs_ns_meta()` | 15..17 | stat / seek / readdir | 73 |
+| `svc_fs_ns_tree()` | 18..21 | unlink / mkdir / rmdir / rename | 76 |
+| `svc_fs_ns_size()` | 22..23 | truncate(path) / ftruncate(handle) | 36 |
+| `svc_fs_namespace()` 自己 | — | 四条边界判断 + 未识别号回 `EINVAL` | **24**（原 232） |
+
+case 体逐行搬运，各族的 `switch` 与 `default` 沿用原样式；等价性用归一化行多重集比对：
+**only-OLD 为空**（一条语句都没丢），only-NEW 只有四个函数骨架、三条额外的 `default` 与四条
+边界判断。**调度锁一处未增未删**：原函数里「不自己加锁，ark_vfs 的 port lock 就是
+`arkrtos_sched_lock`」那句说明留在第一族注释里，后三族沿用同一规则。子命令编号连续，所以
+入口只按边界选族；24 及以上仍落到最后的 `EINVAL`，与原 `default` 同义。
+
+一个在这笔里真实踩到的坑，记下来备查：用脚本拼装新函数时，插在 `switch` 前面的那行
+分节注释漏了收尾 `*/`，C 注释直接吃到第一个 `case` 行尾的 `*/` 为止，于是整个
+`switch`/`{`/第一个 `case` 一起被当成注释 —— 归一化比对立刻显示 only-OLD 少了
+`case ARKRTOS_PATH_SUB_OPEN:`、only-NEW 多了两条 `switch`，`format_gate` 也不会报
+（它只管字节规则）。**拆分脚本必须自己比对，不能指望编译或格式门禁兜住这一类。**
+
+读数：
+
+```
+before  text 367392 / data 440 / bss 767508   sha256 1d94199f…   31,462,512 B
+after   text 367336 / data 440 / bss 767508   sha256 b0ad6a91…   31,462,512 B
+```
+
+`text` **−56 B**，`data`/`bss` 与镜像总长不变。行为判据 `shell_check.py` 一次 `PASS`；
+`arkrtos_task.c` 的编译告警与改动前**同为 147 条**（全部是既有的指针宽度转换告警，
+新增代码零新增告警）。`doc_audit.py funcs`：超过 120 行的函数 **30 → 29**，
+最长换成 `arkrtos_mini_load_image()`（229 行）。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行
