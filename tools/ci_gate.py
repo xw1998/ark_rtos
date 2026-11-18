@@ -434,8 +434,42 @@ def check_doc_index(dry_run=None):
     if missing:
         fail("doc-index", "%d page(s) absent from docs/README.md: %s"
              % (len(missing), ", ".join(missing[:6])))
-    else:
-        ok("doc-index", "all %d docs pages are indexed" % len(pages))
+        return
+
+    # The English index (docs/README.en.md) is a second map over the same pages,
+    # so it can lose a page exactly the same way.  It is checked by file name too:
+    # the English row for a page keeps the page's own (Chinese) file name, which is
+    # the house convention and is what makes this a mechanical check rather than a
+    # translation review.  Descriptions may differ; the page set may not.
+    en_path = os.path.join(docs_dir, "README.en.md")
+    if not os.path.exists(en_path):
+        fail("doc-index", "docs/README.en.md is missing (the English index is part of the map)")
+        return
+    en = read(en_path).decode("utf-8", "replace")
+    if "README.en.md" not in index:
+        fail("doc-index", "docs/README.md does not mention README.en.md, so English readers cannot find the English index")
+        return
+    en_missing = [f for f in pages + ["README.en.md"] if f not in en]
+    if en_missing:
+        fail("doc-index", "%d page(s) absent from docs/README.en.md: %s"
+             % (len(en_missing), ", ".join(en_missing[:6])))
+        return
+
+    # A link that points at a file nobody renamed into existence is the other half
+    # of the same failure: the index says the page is there and it is not.
+    broken = []
+    for target in re.findall(r"\]\(([^)#]+)\)", en):
+        if target.startswith("http://") or target.startswith("https://"):
+            continue
+        if not os.path.exists(os.path.join(docs_dir, target)):
+            broken.append(target)
+    if broken:
+        fail("doc-index", "%d link(s) in docs/README.en.md point at missing files: %s"
+             % (len(broken), ", ".join(sorted(set(broken))[:6])))
+        return
+
+    ok("doc-index", "all %d docs pages are indexed (zh + en), and every en link resolves"
+       % len(pages))
 
 
 def check_api_doc_fresh():
