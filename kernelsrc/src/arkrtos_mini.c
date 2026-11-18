@@ -751,6 +751,15 @@ typedef struct {
 
 static arkrtos_mini_swap_t g_mini_swap;
 
+/* 入口拍下来的旧版本特征：装载会放开锁（读文件），回读时实例可能已经变了。 */
+typedef struct {
+    int32  task_id;
+    uint32 ram_block;
+    uint32 ram_size;
+    uint32 code_block;
+    uint32 max_block;
+} arkrtos_mini_swap_ver_t;
+
 /* 撤掉在途的那一份，返回要归还的借据（0 = 本来就没有在途的）。
  * 必须在持 g_mini_lock 时调用；真正的归还（会进 ptable 自己的锁）留在锁外做。 */
 static uint32 arkrtos_mini_swap_drop(void)
@@ -768,19 +777,10 @@ static uint32 arkrtos_mini_swap_drop(void)
     return pt;
 }
 
-int32 arkrtos_mini_swap_at(uint32 index, const char *path)
+/* 路径合法性：非空、且必须在 ARKRTOS_MINI_PATH_MAX 以内（不含结尾 0 的越界）。 */
+static int32 arkrtos_mini_swap_check_path(const char *path)
 {
-    arkrtos_mini_slot_t *slot;
-    uint32 irq;
     uint32 path_len = 0u;
-    uint32 hash;
-    uint32 max_block;
-    uint32 drop_pt = 0u;
-    int32  ret;
-    uint32 old_ram_block;
-    uint32 old_ram_size;
-    uint32 old_code_block;
-    int32  task_id;
 
     if(path == 0)
     {
@@ -795,6 +795,21 @@ int32 arkrtos_mini_swap_at(uint32 index, const char *path)
     {
         return ARKRTOS_LOADER_ERR_PARAM;
     }
+
+    return 0;
+}
+
+/* 持锁做完全部前置判定与记账：崩溃禁用、三条互斥、目标存在、
+ * 拍下旧版本特征、置在途标志、记路径。
+ * 返回 0 表示已进入在途态（此后必须走 stage/commit 或 abort_*）；
+ * 任何非 0 返回都不改 g_mini_busy / g_mini_swap.active。 */
+static int32 arkrtos_mini_swap_begin(uint32 index, const char *path,
+                                     arkrtos_mini_swap_ver_t *p_ver)
+{
+    arkrtos_mini_slot_t *slot;
+    uint32 irq;
+    uint32 hash;
+    uint32 k;
 
     hash = arkrtos_crash_hash_path(path);
 
@@ -823,58 +838,69 @@ int32 arkrtos_mini_swap_at(uint32 index, const char *path)
     }
 
     /* 旧版本的四样特征先拍下来：装载会放开锁（读文件），回读时它可能已经变了。 */
-    task_id       = (int32)slot->info.task_id;
-    old_ram_block = slot->ram_block;
-    old_ram_size  = slot->info.ram_size;
-    old_code_block = slot->info.code_block;
+    p_ver->task_id    = (int32)slot->info.task_id;
+    p_ver->ram_block  = slot->ram_block;
+    p_ver->ram_size   = slot->info.ram_size;
+    p_ver->code_block = slot->info.code_block;
 
     g_mini_busy = 1u;
     g_mini_swap.active = 1u;
     g_mini_swap.slot_i = (uint32)(slot - g_mini);
     g_mini_swap.img.pt_index = 0u;
+    for(k = 0u; (k + 1u) < (uint32)ARKRTOS_MINI_PATH_MAX; k++)
     {
-        uint32 k;
-
-        for(k = 0u; (k + 1u) < (uint32)ARKRTOS_MINI_PATH_MAX; k++)
+        g_mini_swap.path[k] = path[k];
+        if(path[k] == '\0')
         {
-            g_mini_swap.path[k] = path[k];
-            if(path[k] == '\0')
-            {
-                break;
-            }
+            break;
         }
-        g_mini_swap.path[ARKRTOS_MINI_PATH_MAX - 1u] = '\0';
     }
-    max_block = g_mini_max_block;
+    g_mini_swap.path[ARKRTOS_MINI_PATH_MAX - 1u] = '\0';
+
+    p_ver->max_block = g_mini_max_block;
 
     arkrtos_spin_unlock_irqrestore(&g_mini_lock, irq);
 
-    ret = arkrtos_mini_load_image(path, max_block, &g_mini_swap.img);
+    return 0;
+}
+
+/* 锁外装载 + 布局核对 + 挂切换。*p_loaded 区分失败点：
+ * 0 = 装载本身没成功（镜像没留下借出的块）；1 = 装载成功、后续任一步失败（已借出块）。 */
+static int32 arkrtos_mini_swap_stage(const arkrtos_mini_swap_ver_t *p_ver,
+                                     const char *path, uint32 *p_loaded)
+{
+    int32 ret;
+
+    *p_loaded = 0u;
+
+    ret = arkrtos_mini_load_image(path, p_ver->max_block, &g_mini_swap.img);
     if(ret != 0)
     {
-        goto load_fail;
+        return ret;
     }
+    *p_loaded = 1u;
 
     /* 布局必须一致：整块搬运的前提。四样都得对上——代码块大小、RAM 块大小、
      * 镜像头声明的 RAM 需求，以及目标任务自己的 RAM 块大小。任何一条不等都说
      * 明这两份镜像不是「同一布局的两个版本」，那种升级只能走交接协议，
      * 不能在这里假装无缝。 */
-    if((g_mini_swap.img.code_block != old_code_block) ||
-       (g_mini_swap.img.ram_block != old_ram_block) ||
-       (g_mini_swap.img.ram_size != old_ram_size))
+    if((g_mini_swap.img.code_block != p_ver->code_block) ||
+       (g_mini_swap.img.ram_block != p_ver->ram_block) ||
+       (g_mini_swap.img.ram_size != p_ver->ram_size))
     {
-        ret = ARKRTOS_SWAP_ERR_LAYOUT;
-        goto refuse;
+        return ARKRTOS_SWAP_ERR_LAYOUT;
     }
 
-    ret = arkrtos_task_swap_arm(task_id,
+    return arkrtos_task_swap_arm(p_ver->task_id,
                                 g_mini_swap.img.code_base, g_mini_swap.img.code_block,
                                 g_mini_swap.img.ram_base, g_mini_swap.img.ram_block,
                                 g_mini_swap.img.entry);
-    if(ret != 0)
-    {
-        goto refuse;
-    }
+}
+
+/* 成功路径：放开装载闸门并打日志。 */
+static void arkrtos_mini_swap_commit(int32 task_id, const char *path)
+{
+    uint32 irq;
 
     /* 装载完成、切换已挂上：装载闸门放开（别的 `mini run` 可以继续），
      * 「同时只有一份在途」由 g_mini_swap.active 继续守着。 */
@@ -886,9 +912,25 @@ int32 arkrtos_mini_swap_at(uint32 index, const char *path)
                " (code 0x%08X, RW 0x%08X)",
                path, (int)task_id, (unsigned)g_mini_swap.img.code_base,
                (unsigned)g_mini_swap.img.ram_base);
-    return 0;
+}
 
-refuse:
+/* 失败路径一：装载本身失败时它自己没留下借出的块，这里只清账。 */
+static void arkrtos_mini_swap_abort_load(void)
+{
+    uint32 irq;
+
+    arkrtos_spin_lock_irqsave(&g_mini_lock, &irq);
+    g_mini_swap.active = 0u;
+    g_mini_busy = 0u;
+    arkrtos_spin_unlock_irqrestore(&g_mini_lock, irq);
+}
+
+/* 失败路径二：装载已成功、后续步骤失败，必须把借出的那一对块还回池子。 */
+static void arkrtos_mini_swap_abort_loaded(void)
+{
+    uint32 irq;
+    uint32 drop_pt;
+
     arkrtos_spin_lock_irqsave(&g_mini_lock, &irq);
     drop_pt = arkrtos_mini_swap_drop();
     g_mini_busy = 0u;
@@ -897,15 +939,42 @@ refuse:
     {
         (void)arkrtos_ptable_mini_free(drop_pt);
     }
-    return ret;
+}
 
-load_fail:
-    /* 装载失败时它自己没留下借出的块，这里只清账。 */
-    arkrtos_spin_lock_irqsave(&g_mini_lock, &irq);
-    g_mini_swap.active = 0u;
-    g_mini_busy = 0u;
-    arkrtos_spin_unlock_irqrestore(&g_mini_lock, irq);
-    return ret;
+int32 arkrtos_mini_swap_at(uint32 index, const char *path)
+{
+    arkrtos_mini_swap_ver_t ver;
+    uint32 loaded = 0u;
+    int32  ret;
+
+    ret = arkrtos_mini_swap_check_path(path);
+    if(ret != 0)
+    {
+        return ret;
+    }
+
+    ret = arkrtos_mini_swap_begin(index, path, &ver);
+    if(ret != 0)
+    {
+        return ret;
+    }
+
+    ret = arkrtos_mini_swap_stage(&ver, path, &loaded);
+    if(ret != 0)
+    {
+        if(loaded != 0u)
+        {
+            arkrtos_mini_swap_abort_loaded();
+        }
+        else
+        {
+            arkrtos_mini_swap_abort_load();
+        }
+        return ret;
+    }
+
+    arkrtos_mini_swap_commit(ver.task_id, path);
+    return 0;
 }
 
 /* SVC 入口的落地钩子。返回值：0 = 与本模块无关（或已拒绝并清账）；

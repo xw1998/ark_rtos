@@ -2766,6 +2766,69 @@ heading and its own section content -- in both the Chinese and the English file.
 split back into two lines, 5.30.30/5.30.31 back at the tail of section 5, section 6 back to
 heading -> 6.1).
 
+#### 5.30.32 Split #27: `arkrtos_mini_swap_at()` split into six helpers around path check, entering the in-flight state, loading and arming, and three exits (2026-11-18)
+
+`arkrtos_mini_swap_at()` in `kernelsrc/src/arkrtos_mini.c` (139 lines) is the shell around the MiniApp A/B seamless
+upgrade: check the path, take the lock and run three mutual-exclusion tests plus the crash-disable test, snapshot the
+old version's geometry and mark the swap in flight, drop the lock and load the new image, verify the layout, arm the
+switch, and then land on one of three exits (success, load failed, failed after load). Each exit had to re-take the
+lock and touch a different set of bookkeeping entries, and the two failure exits were reached through `goto load_fail`
+and `goto refuse`, which forces a reader to jump around to work out who cleared what.
+
+| Function | Responsibility | Lines |
+|---|---|---|
+| `arkrtos_mini_swap_check_path()` | `path==0` and length (`0` or `>= ARKRTOS_MINI_PATH_MAX`) both return `PARAM`; otherwise 0 | 20 |
+| `arkrtos_mini_swap_begin()` | All pre-checks under the lock: crash disable (`hash` from `arkrtos_crash_hash_path()`) then the three mutual-exclusion tests (`g_mini_busy` / `g_mini_swap.active` / `arkrtos_task_swap_pending()`), target must exist, snapshot `task_id/ram_block/ram_size/code_block/max_block`, mark in flight, record `slot_i`, clear `img.pt_index`, copy the path | 60 |
+| `arkrtos_mini_swap_stage()` | Load outside the lock (`max_block` from `begin`), set **`*p_loaded=1`**, three layout comparisons, then `arkrtos_task_swap_arm()` | 30 |
+| `arkrtos_mini_swap_commit()` | Success: release the load gate (`g_mini_busy=0`) and log `armed` | 15 |
+| `arkrtos_mini_swap_abort_load()` | The load itself failed: clear the books only (`active=0`, `busy=0`); no `drop`, no `free` — nothing was borrowed | 9 |
+| `arkrtos_mini_swap_abort_loaded()` | Loaded but a later step failed: take the receipt from `arkrtos_mini_swap_drop()`, clear `busy`, then `arkrtos_ptable_mini_free()` outside the lock | 14 |
+| `arkrtos_mini_swap_at()` itself | Check path, enter in-flight state, load and arm, then dispatch on `loaded` to one of the two failure exits or commit | **35** (was 139) |
+
+Four rules: (1) the two failure exits are deliberately **not** merged. `load_fail` (the load itself failed and the
+image left no receipt behind) and `refuse` (the load succeeded and the borrowed block pair must go back to the pool)
+mean different things; merging them would replace an invariant by an implicit assumption about whether load already
+set `img.pt_index`. Instead `arkrtos_mini_swap_stage()` reports where the failure happened through the `*p_loaded`
+out-parameter. (2) Every non-zero return still releases the lock first and still leaves `g_mini_busy` /
+`g_mini_swap.active` untouched — identical to before. (3) `max_block` is snapshotted together with the old geometry:
+the load releases the lock (file I/O), so neither `g_mini_max_block` nor `slot->info` may be re-read afterwards.
+(4) The path copy loop is kept verbatim, including the `(k+1) < MAX` bound and the trailing `'\0'`.
+
+Normalized equivalence (strip comments, strip per-line whitespace, multiset difference): **only-OLD 20 lines**, all
+attributable — 10 lines of local declarations and renames, `goto load_fail`, `goto refuse` twice, the two labels, the
+three former `ret = ...` assignments, and the three `old_*` comparisons now reading `p_ver->*`. only-NEW 65 lines
+(44 distinct) are six signatures, nine brace groups, `return 0` / `return ret`, `p_ver->*`, `*p_loaded = 0|1` and the
+three calls plus dispatch in the entry.
+
+Size: the default QEMU LA64 profile has `ARKRTOS_USE_MINIAPP=0` (and `TASK_SWAP=0`), so the whole `.c` compiles to an
+empty object and **this commit leaves size and sha256 byte-identical in the default profile** — text **367432**,
+data 440, bss 767508, image total 31,462,512 B, sha256
+`9caa8220238bda251737efeae12c51e8e61a78f0d280a72a1e256adb50d1d9b3`.
+
+**Compiled-in check (guarding against a false green)**: an empty object proves nothing, so `build/_miniswap_chk/`
+holds a board header that includes the real board configuration and then forces `ARKRTOS_USE_MINIAPP 1` and
+`ARKRTOS_USE_TASK_SWAP 1`, and `arkrtos_mini.c` is compiled with `-c` against it. **The first attempt was a false
+green**: `-include arkrtos_board_config.h` picked up the real header under `-Iboard/qemu_loongarch64` that pins
+`MINIAPP` to 0, so `-dM -E` printed `MINIAPP 0` and `nm` had no `arkrtos_mini_swap_at` at all. Putting
+`-Ibuild/_miniswap_chk` **before every other `-I`** makes both macros 1 (verified with `-dM -E` plus a sentinel
+macro). With the code really compiled in: `exit=0`, **5 warnings** of the same class and count as the baseline (all
+pre-existing `-Wint-to-pointer-cast` warnings in `mini_load_stream` / `arkrtos_mini_run`), and `nm` shows
+`T arkrtos_mini_swap_at` / `T arkrtos_mini_swap_take`. Object-size reconciliation with identical flags, base vs new:
+text **16392 -> 16440 (+48 B)**, of which `arkrtos_mini_swap_at` itself is `0x6c0 -> 0x6e4` (**+36 B**), while
+`arkrtos_mini_swap_take` (`0x310`) and the `g_mini_swap` bss (`0x6c`) are unchanged — i.e. the function got smaller
+but the object got slightly bigger. That is the normal cost of splitting and **must not be presented as a code
+reduction**.
+
+Gates: `doc_audit.py funcs` **7 -> 6** (longest is now `arkrtos_flashapp_run` at 139), `format_gate` 361 own files,
+`sec_crc_gate` 8 pins + 4 TUs in both profiles, `coverage_gate` ten modules not below baseline (mini is not a covered
+module), `mq_host_gate` 108 checks, `example/qemu_loongarch64/shell_check.py` **PASS**, `ci_gate`
+**47 passed / 0 failed**.
+
+**Confidence tier: default profile byte-identical (three independent builds, same sha256) + compiled-in build passes + same warning
+count + QEMU end-to-end PASS, not run on hardware.** This commit **adds no new runtime measurement**: a mini swap only
+acts at the target task's next system call, and the QEMU profile does not compile this code at all, so getting a
+reading would require a runnable MiniApp plus a real SVC landing — a separate piece of work.
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine

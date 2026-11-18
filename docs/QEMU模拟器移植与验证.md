@@ -4966,6 +4966,63 @@ QEMU 端到端 PASS，未上板。** 这一笔**没有新增运行读数**：`sc
 §5.30.30 的正文落在了第六节标题与它自己的引言之间；中英文两份文档同样症状。本轮把标题拆回两行、把
 §5.30.30 与 §5.30.31 放回第五节尾部，第六节恢复「标题 → 6.1 …」的原结构。
 
+#### 5.30.32 第二十七笔：`arkrtos_mini_swap_at()` 按「查路径 / 进入在途 / 装载挂切换 / 三类收尾」拆成六个 helper（2026-11-18）
+
+`kernelsrc/src/arkrtos_mini.c` 的 `arkrtos_mini_swap_at()`（139 行）是「小程序 A/B 无缝升级」的外壳：
+查路径 → 关中断做三条互斥与崩溃禁用判定 → 拍下旧版本特征并置在途 → 开中断、锁外装载新镜像 →
+核对布局 → 挂切换 → 三条出口（成功 / 装载失败 / 装载后失败）。三条出口各自要开中断、各自要动不同的账，
+原来靠 `goto load_fail` 与 `goto refuse` 两个标签兜住，读的时候必须来回跳着看谁清了什么。
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `arkrtos_mini_swap_check_path()` | `path==0` 与长度（`0` 或 `>= ARKRTOS_MINI_PATH_MAX`）两条 `PARAM`，否则 0 | 20 |
+| `arkrtos_mini_swap_begin()` | 持锁做完全部前置判定：崩溃禁用（`hash` 由 `arkrtos_crash_hash_path()` 算）→ 三条互斥（`g_mini_busy` / `g_mini_swap.active` / `arkrtos_task_swap_pending()`）→ 目标任务存在 → 拍下 `task_id/ram_block/ram_size/code_block/max_block` → 置在途、记 `slot_i`、清 `img.pt_index`、拷路径 | 60 |
+| `arkrtos_mini_swap_stage()` | 锁外装载（`max_block` 用 `begin` 拍下的那个）→ **`*p_loaded=1`** → 三条布局核对 → `arkrtos_task_swap_arm()` | 30 |
+| `arkrtos_mini_swap_commit()` | 成功路径：放开装载闸门（`g_mini_busy=0`）→ 打 `armed` 日志 | 15 |
+| `arkrtos_mini_swap_abort_load()` | 装载本身失败：**只清账**（`active=0`、`busy=0`），不 `drop`、不 `free` —— 镜像没成功就没借出块 | 9 |
+| `arkrtos_mini_swap_abort_loaded()` | 装载成功但后续失败：`arkrtos_mini_swap_drop()` 拿借据 → 清 `busy` → 锁外 `arkrtos_ptable_mini_free()` | 14 |
+| `arkrtos_mini_swap_at()` 自己 | 查路径 → 进入在途 → 装载挂切换 → 按 `loaded` 分派两条失败出口 / 成功收尾 | **35**（原 139） |
+
+口径四条：① **两条失败出口不合并**。`load_fail`（装载失败，镜像自己不留借据）与 `refuse`（装载后失败，
+必须把借出的一对块还池）语义不同，合并成一个 abort 就得对「`img.pt_index` 是否已被 load 置位」做推理，
+那是把一个不变量换成一个隐含假设；这里的做法是让 `arkrtos_mini_swap_stage()` 用 `*p_loaded` 出参把
+「失败发生在装载之前还是之后」显式带回来。② **每条非零返回前都还锁，且都不动 `g_mini_busy` /
+`g_mini_swap.active`** —— 与拆分前逐条一致（前置判定失败时账本一个字段都不该变）。③ `max_block` 与旧版本
+四样特征一起在锁内拍下：装载本身会放开锁（读文件），回读时 `g_mini_max_block` 与 `slot->info` 都不该再被读。
+④ 路径拷贝的 `for` 循环原样保留（`(k+1) < MAX` 的边界与末尾补 `'\0'` 都没动）。
+
+等价性归一化比对（剥注释 → 逐行去空白 → 多重集差）：**only-OLD 20 行**，逐条可归因 —— 局部变量声明与
+改名 10 行（`drop_pt` / `old_ram_block` / `old_ram_size` / `old_code_block` 的声明，`task_id = slot->info.task_id`
+与三处 `old_* = ...` 的赋值，`max_block = g_mini_max_block`），`goto load_fail` 1 行、`goto refuse` 2 行、
+两个标签 `refuse:` / `load_fail:` 各 1 行（改成两个 helper 调用），`ret = arkrtos_mini_load_image(...)`、
+`ret = ARKRTOS_SWAP_ERR_LAYOUT`、`ret = arkrtos_task_swap_arm(` 各 1 行（改写为 `return` / 直接返回 `arm` 的结果），
+三条布局比对里的 `old_*` 3 行（改成 `p_ver->*`）。only-NEW 65 行（44 个不同文本）全是六个签名、
+九组花括号、`return 0` / `return ret`、`p_ver->*`、`*p_loaded = 0|1` 与入口的三次调用与分派。
+
+体积：默认 QEMU LA64 档 `ARKRTOS_USE_MINIAPP=0`（`TASK_SWAP` 也默认 0），整个 `.c` 被包成空目标，
+**这一笔在默认档下体积与 sha256 逐字节不变** —— text **367432** / data 440 / bss 767508 / 镜像总长
+31,462,512 B，sha256 `9caa8220238bda251737efeae12c51e8e61a78f0d280a72a1e256adb50d1d9b3`（与上一笔读数同值）。
+
+**编入档（防假绿）**：默认档空目标意味着「编译通过」什么都不证明，所以另建 `build/_miniswap_chk/` 板级头，
+先 `#include` 真实板级配置再 `#undef/#define ARKRTOS_USE_MINIAPP 1` 与 `ARKRTOS_USE_TASK_SWAP 1`，
+单独 `-c` 编译 `arkrtos_mini.c`。**这一步本轮第一次是假绿的**：`-include arkrtos_board_config.h` 会先命中
+`-Iboard/qemu_loongarch64` 里那份把 `MINIAPP` 写成 0 的真实头，于是 `-dM -E` 打出 `MINIAPP 0`、`nm` 里连
+`arkrtos_mini_swap_at` 都没有 —— 把 `-Ibuild/_miniswap_chk` 放到**所有 `-I` 之前**才真正编进来
+（`-dM -E` 同时打出 `MINIAPP 1` / `TASK_SWAP 1` 与一个哨兵宏）。真正编入后：`exit=0`、告警 **5 条**且与基线
+同类同数（全是既有 `-Wint-to-pointer-cast`，位置在 `mini_load_stream` / `arkrtos_mini_run` 里，与本次改动无关），
+`nm` 见 `T arkrtos_mini_swap_at` / `T arkrtos_mini_swap_take`。编入档对象体积对账（同一套 flags 各编一次
+`build/arkrtos_mini_swap.base.c` 与新文件）：text **16392 → 16440（+48 B）**，其中
+`arkrtos_mini_swap_at` 自身 `0x6c0 → 0x6e4`（**+36 B**）、`arkrtos_mini_swap_take` `0x310` 不变、
+`g_mini_swap` 的 bss `0x6c` 不变 —— 即「切小了但它总代码变多」，这是拆分的正常代价，**不能当成去重收益**。
+
+门禁：`doc_audit.py funcs` **7 → 6**（最长变 `arkrtos_flashapp_run` 139）、`format_gate` 361 个自有文件、
+`sec_crc_gate` 8 pin + 4 TU 两档、`coverage_gate` 十模块不降（mini 不在覆盖对象内）、`mq_host_gate` 108 checks、
+`example/qemu_loongarch64/shell_check.py` **PASS**、`ci_gate` **47 passed / 0 failed**。
+
+**结论分档：默认档逐字节不变（三次独立构建同 sha256）+ 编入档编译通过 + 告警同数 + QEMU 端到端 PASS，未上板。**
+这一笔**没有新增运行读数**：mini swap 的真行为是「目标任务的下一次系统调用里换镜像」，QEMU 档 `MINIAPP=0`
+根本不编这段代码，要出读数得先有能跑起来的小程序 + 一次真实的 SVC 落地，属另一件事。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行
