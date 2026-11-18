@@ -4071,6 +4071,51 @@ after   text 367400 / data 440 / bss 767508   sha256 a5403823…   31,462,512 B
 总长不变；`arkrtos_modld.c` 在默认档 **0 条告警**。`doc_audit.py funcs`：超过 120 行的函数
 **28 → 27**，最长换成 `arkrtos_loader_stream_image()`（212 行）。
 
+#### 5.30.12 第七笔：`arkrtos_loader_stream_image()` 按「表 / 负载 / 收尾」分开（2026-11-18）
+
+`kernelsrc/src/arkrtos_loader.c` 的 `arkrtos_loader_stream_image()`（212 行）是串口安装的落盘段：
+先整段接收重定位表并校验，再按 ACK 节奏收负载、边收边打重定位补丁、边算两个 CRC，最后比 CRC 与
+签名。拆成两段 `static` + 收尾：
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `loader_stream_reloc_table()` | 按 `ARKRTOS_LOADER_CHUNK_SIZE` 收完整张重定位表、原样落盘（同时滚标称 CRC 与落盘 CRC、喂签名）、落盘后调 `arkrtos_loader_check_header()` 校验表体，失败先打日志再 NAK（NAK 只带 0x15，日志是主机唯一能拿到的原因），通过才 ACK 放行负载 | 66 |
+| `loader_stream_payload()` | `while(written < image_size)` 逐块读、`carry` 处理被表项切开的尾部、先算标称 CRC 再调 `arkrtos_loader_reloc_apply()` 打补丁、写 Flash、滚落盘 CRC、每块 ACK | 106 |
+| `arkrtos_loader_stream_image()` 自己 | 两个 CRC 的初值、`arkrtos_sign_stream_begin()`、串起两段、比 `crc_recv` 与头里的 `crc32`、`arkrtos_sign_stream_end()`、交回 `*p_crc_written` | **61**（原 212） |
+
+两个 CRC 都没有做成「拷回去再传进来」：`loader_stream_*` 收 `uint32 *p_crc_recv` /
+`uint32 *p_crc_written`，在调用点的值上继续滚。等价性用归一化行多重集比对：only-OLD 只有
+`crc_recv = arkrtos_crc32(..., crc_recv)` 这类改写成 `*p_crc_recv = ...` 的 4 条、`int32 chk =`
+拆成声明 + 赋值的 1 条，以及外层那句 `if(rt_len != 0u)`（`while(got < 0)` 天然不进循环，语义相同），
+**没有语句丢失**。
+
+这一笔的行为证据分两段，都是 QEMU 上的真读数（用一个 socket 版发送器驱动 `install` 窗口，
+按设备 ACK 逐块发，脚本本身在 `build/` 里、不入库）：
+
+1. **未签名镜像**（`build/APP_DEMO/APP_DEMO.svcapp`，28204 B = 256 头 + 1612 表 + 26336 负载）：
+   表段 ACK、52 个负载块全部 ACK，设备随后报
+   `LOADER:1242 signature mismatch: image rejected` / `INSTALL:266 rejected: err -18`。
+   报的是签名而不是 CRC ⇒ **传输 CRC 已经比对通过**，也就是「收表 → 校验表 → 收负载 → 打补丁 →
+   落盘 → 滚 CRC」这条链上每个字节都对。
+2. **用本地开发密钥签过的同一镜像**：同上两段都 ACK，然后设备**静默挂住**（60 s 内串口零输出、
+   周期任务的秒级打印也停）。把这笔改动 `git checkout` 回 HEAD 用同样的脚本重跑，**基线以完全相同
+   的方式挂住** ⇒ 挂起与本次拆分无关，位置在签名门之后（回读复核 / 提交点那条路）。
+
+**新欠账（本轮只登记，不明白根因）**：QEMU 上签名通过之后的那段路会挂死，HEAD 与拆分版一致；
+真板上同一路径已装成过（见 [Ark RTOS应用安装与调试指南](Ark RTOS应用安装与调试指南.md)），所以更像是这台 QEMU 的 Flash 后端在「写满一整片 + 回读
++ 再写状态字」这一串上的问题，不能读成内核缺陷，也不能读成这次的拆分有问题。
+
+读数：
+
+```
+before  text 367400 / data 440 / bss 767508   sha256 a5403823…   31,462,512 B
+after   text 367384 / data 440 / bss 767508   sha256 660b94c9…   31,462,512 B
+```
+
+`text` **−16 B**，`data`/`bss` 与镜像总长不变；`arkrtos_loader.c` 的告警改动前后**同为 21 条**
+（既有的指针宽度转换告警，新增代码零新增告警）。`shell_check.py` `PASS`。`doc_audit.py funcs`：
+超过 120 行的函数 **27 → 26**，最长换成 `arkrtos_flashapp_write()`（211 行）。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

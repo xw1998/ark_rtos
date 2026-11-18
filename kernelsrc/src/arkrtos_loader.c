@@ -1007,16 +1007,196 @@ int32 arkrtos_loader_crc_recheck(const uint8 *p_img, uint32 base, uint32 cap, ui
  *       不是标称基址，两者就不一样，回读比 hdr.crc32 永远不过。
  *       回读那一遍另有用途：把回读值和本文里记下的 p_crc_written 比，
  *       那才是真在验「Flash 写进去的字节对不对」。 */
+/* 重定位表紧跟镜像头，先整段落盘，再在负载到来之前校验它。
+ * 表体原样落盘，所以这一份字节既进标称 CRC 也进落盘 CRC。
+ * 出参 *p_crc_recv / *p_crc_written 在进函数时的值上继续滚动。 */
+static int32 loader_stream_reloc_table(int32 dev, uint32 base,
+                                       const arkrtos_app_header_t *p_hdr,
+                                       uint32 rt_len,
+                                       uint32 *p_crc_recv, uint32 *p_crc_written)
+{
+    uint32 got = 0u;
+    int32 chk;
+
+    while(got < rt_len)
+    {
+        uint32 want = rt_len - got;
+
+        if(want > ARKRTOS_LOADER_CHUNK_SIZE)
+        {
+            want = ARKRTOS_LOADER_CHUNK_SIZE;
+        }
+
+        if(arkrtos_loader_read_dev(dev, arkrtos_loader_chunk, want) != (int32)want)
+        {
+            return ARKRTOS_LOADER_ERR_SIZE;
+        }
+
+        /* 表体是原样落盘的，所以这一份字节既进标称 CRC 也进落盘 CRC */
+        *p_crc_recv    = arkrtos_crc32(arkrtos_loader_chunk, want, *p_crc_recv);
+        *p_crc_written = arkrtos_crc32(arkrtos_loader_chunk, want, *p_crc_written);
+        arkrtos_sign_stream_update(arkrtos_loader_chunk, want);   /* table is nominal */
+
+        if(arkrtos_port_flash_write(base + ARKRTOS_APP_RELOC_OFFSET + got,
+                                  arkrtos_loader_chunk, want) != 0)
+        {
+            return ARKRTOS_LOADER_ERR_FLASH;
+        }
+
+        got += want;
+    }
+
+    /* 表体到这一刻才落盘，也才能被寻址：在这里校验它。
+     * 表体非法的话，后面的补丁会按乱序/越界的偏移乱改 Flash，
+     * 而且改完就不可逆，所以必须在收负载之前先拒掉。 */
+    chk = arkrtos_loader_check_header(
+              p_hdr,
+              (const uint32 *)(base + ARKRTOS_APP_RELOC_OFFSET),
+              ARKRTOS_APP_TYPE_MASK_POOL);
+
+    if(chk != 0)
+    {
+        /* NAK 在协议里只是一个字节（0x15 = 本帧到此为止），不带原因。主机的做法是
+         * 读同一路串口，所以**这里打出来的日志就是主机唯一能拿到的失败原因**。
+         * 以前这里闷着不响，主机只好自己猜一个原因（曾把任何 NAK 都印成
+         * "relocation table invalid"），而真正的失败点可能是魔数/兼容号/类型/
+         * 尺寸/入口中的任何一个，猜错方向会让排查白跑一轮。 */
+        ARKRTOS_LOGE("LOADER", "frame rejected before payload: err=%d", (int)chk);
+        ARKRTOS_LOGE("LOADER", "hdr: magic=%08X compat=%08X type=%u size=%u ent=%u r_off=%u r_cnt=%u r_kind=%u",
+                   (unsigned)p_hdr->magic, (unsigned)p_hdr->hw_compat_id,
+                   (unsigned)p_hdr->type, (unsigned)p_hdr->image_size,
+                   (unsigned)p_hdr->entry_offset, (unsigned)p_hdr->reloc_offset,
+                   (unsigned)p_hdr->reloc_count, (unsigned)p_hdr->reloc_kind);
+        arkrtos_loader_nak(dev);
+        return chk;         /* 返回细分码，不再一律报 RELOC：上层与日志都按真实原因走 */
+    }
+
+    /* 表和字段都过了，主机可以开始送负载 */
+    arkrtos_loader_ack(dev);
+
+    return 0;
+}
+
+/* 接收负载：边收边按重定位表打补丁，再落盘。
+ * *p_crc_recv 是标称形态（打补丁之前）的滚动值，*p_crc_written 是落盘形态；
+ * 两者都在进函数时的值上继续滚动。 */
+static int32 loader_stream_payload(int32 dev, uint32 base,
+                                   const arkrtos_app_header_t *p_hdr,
+                                   uint32 *p_idx, uint32 delta_rom, uint32 delta_ram,
+                                   uint32 *p_crc_recv, uint32 *p_crc_written)
+{
+    uint32 written = 0u;
+    uint32 carry = 0u;      /* 上一轮被表项切开、留到本轮开头的字节数 */
+
+    while(written < p_hdr->image_size)
+    {
+        /* How many bytes still have to arrive over the wire: the payload
+         * that is left, minus the tail already held in carry.  Sizing this
+         * from image_size - written alone over-reads by carry, and that
+         * only shows up on the last round: when a relocation entry
+         * straddles the final host block, the loop would wait for bytes
+         * the host has already finished sending (it sent the whole
+         * payload), stalling until the read times out with ERR_SIZE. */
+        uint32 left = p_hdr->image_size - written;
+        uint32 want = (left > carry) ? (left - carry) : 0u;
+        uint32 submit;
+        uint32 keep;
+
+        if(want > (ARKRTOS_LOADER_CHUNK_SIZE - carry))
+        {
+            want = ARKRTOS_LOADER_CHUNK_SIZE - carry;
+        }
+
+        {
+            uint32 recv = want;     /* 本轮真正新收到的字节数（不含上一轮的尾巴） */
+
+            if(want == 0u)
+            {
+                /* Nothing left to read yet the payload is not committed:
+                 * the relocation table runs past the end of the image.
+                 * The packer must never produce that, so refuse the frame
+                 * instead of spinning on bytes that will never arrive. */
+                ARKRTOS_LOGE("LOADER", "reloc table runs past payload end: written=%u carry=%u size=%u",
+                           (unsigned)written, (unsigned)carry,
+                           (unsigned)p_hdr->image_size);
+                arkrtos_loader_nak(dev);
+                return ARKRTOS_LOADER_ERR_RELOC;
+            }
+
+            if(arkrtos_loader_read_dev(dev, arkrtos_loader_chunk + carry, want) != (int32)want)
+            {
+                return ARKRTOS_LOADER_ERR_SIZE;
+            }
+
+            /* 标称 CRC 必须在打补丁之前算：这些字节马上会被就地改成落盘形态。
+             * 只算新收到的这段，尾巴在上一轮已经算过了。 */
+            *p_crc_recv = arkrtos_crc32(arkrtos_loader_chunk + carry, recv, *p_crc_recv);
+            arkrtos_sign_stream_update(arkrtos_loader_chunk + carry, recv);   /* pre-patch, nominal */
+        }
+
+        want += carry;
+
+        /* 补丁必须在落盘之前打：Flash 只能把 1 写成 0，写下去就改不动了。
+         * 若块尾正好切开一条 MOVW/MOVT 表项，本块只落盘到该表项之前，
+         * 尾部几个字节原样留到下一轮开头，和后续数据拼齐再处理。 */
+        submit = arkrtos_loader_reloc_apply(arkrtos_loader_chunk,
+                                          p_hdr->payload_offset + written, want,
+                                          p_hdr,
+                                          (const uint32 *)(base + ARKRTOS_APP_RELOC_OFFSET),
+                                          p_idx, delta_rom, delta_ram);
+
+        keep = want - (submit - (p_hdr->payload_offset + written));
+
+        if(keep == want)
+        {
+            return ARKRTOS_LOADER_ERR_RELOC;  /* 缓冲装不下一条表项，不应发生 */
+        }
+
+        if((submit - (p_hdr->payload_offset + written)) != 0u)
+        {
+            uint32 n = submit - (p_hdr->payload_offset + written);
+
+            /* 落盘 CRC 算的是「打进 Flash 的那份字节」，与回读结果对得上才算写对 */
+            *p_crc_written = arkrtos_crc32(arkrtos_loader_chunk, n, *p_crc_written);
+
+            if(arkrtos_port_flash_write(base + p_hdr->payload_offset + written,
+                                      arkrtos_loader_chunk, n) != 0)
+            {
+                return ARKRTOS_LOADER_ERR_FLASH;
+            }
+        }
+
+        written = submit - p_hdr->payload_offset;
+
+        if(keep != 0u)
+        {
+            uint32 k;
+
+            for(k = 0u; k < keep; k++)
+            {
+                arkrtos_loader_chunk[k] = arkrtos_loader_chunk[want - keep + k];
+            }
+        }
+
+        carry = keep;
+
+        /* This chunk is in flash: let the host send the next one. */
+        arkrtos_loader_ack(dev);
+    }
+
+    return 0;
+}
+
 static int32 arkrtos_loader_stream_image(int32 dev, uint32 base, const arkrtos_app_header_t *p_hdr,
                                        uint32 *p_idx, uint32 delta_rom, uint32 delta_ram,
                                        uint32 *p_crc_written)
 {
     uint32 rt_len = p_hdr->reloc_count * ARKRTOS_APP_RELOC_SIZE;
-    uint32 written = 0u;
     uint32 crc_recv;            /* 标称形态（收到的原始字节） */
     uint32 crc_written;         /* 落盘形态（打过补丁的字节） */
     uint32 crc_hdr;             /* 只算完镜像头时的值（诊断用） */
     uint32 crc_rel;             /* 只算完重定位表时的值（诊断用） */
+    int32  rc;
 
     crc_recv    = arkrtos_loader_crc_header(p_hdr);
     crc_written = crc_recv;
@@ -1029,170 +1209,19 @@ static int32 arkrtos_loader_stream_image(int32 dev, uint32 base, const arkrtos_a
      * excludes (crc32/state/runtime) is zeroed below, the rest is nominal. */
     arkrtos_sign_stream_begin((const uint8 *)base);
 
-    /* 重定位表紧跟镜像头，先整段落盘 */
-    if(rt_len != 0u)
+    rc = loader_stream_reloc_table(dev, base, p_hdr, rt_len, &crc_recv, &crc_written);
+    if(rc != 0)
     {
-        uint32 got = 0u;
-
-        while(got < rt_len)
-        {
-            uint32 want = rt_len - got;
-
-            if(want > ARKRTOS_LOADER_CHUNK_SIZE)
-            {
-                want = ARKRTOS_LOADER_CHUNK_SIZE;
-            }
-
-            if(arkrtos_loader_read_dev(dev, arkrtos_loader_chunk, want) != (int32)want)
-            {
-                return ARKRTOS_LOADER_ERR_SIZE;
-            }
-
-            /* 表体是原样落盘的，所以这一份字节既进标称 CRC 也进落盘 CRC */
-            crc_recv    = arkrtos_crc32(arkrtos_loader_chunk, want, crc_recv);
-            crc_written = arkrtos_crc32(arkrtos_loader_chunk, want, crc_written);
-            arkrtos_sign_stream_update(arkrtos_loader_chunk, want);   /* table is nominal */
-
-            if(arkrtos_port_flash_write(base + ARKRTOS_APP_RELOC_OFFSET + got,
-                                      arkrtos_loader_chunk, want) != 0)
-            {
-                return ARKRTOS_LOADER_ERR_FLASH;
-            }
-
-            got += want;
-        }
+        return rc;
     }
 
     crc_rel = crc_recv;
 
-    /* 表体到这一刻才落盘，也才能被寻址：在这里校验它。
-     * 表体非法的话，后面的补丁会按乱序/越界的偏移乱改 Flash，
-     * 而且改完就不可逆，所以必须在收负载之前先拒掉。 */
+    rc = loader_stream_payload(dev, base, p_hdr, p_idx, delta_rom, delta_ram,
+                               &crc_recv, &crc_written);
+    if(rc != 0)
     {
-        int32 chk = arkrtos_loader_check_header(
-                        p_hdr,
-                        (const uint32 *)(base + ARKRTOS_APP_RELOC_OFFSET),
-                        ARKRTOS_APP_TYPE_MASK_POOL);
-
-        if(chk != 0)
-        {
-            /* NAK 在协议里只是一个字节（0x15 = 本帧到此为止），不带原因。主机的做法是
-             * 读同一路串口，所以**这里打出来的日志就是主机唯一能拿到的失败原因**。
-             * 以前这里闷着不响，主机只好自己猜一个原因（曾把任何 NAK 都印成
-             * "relocation table invalid"），而真正的失败点可能是魔数/兼容号/类型/
-             * 尺寸/入口中的任何一个，猜错方向会让排查白跑一轮。 */
-            ARKRTOS_LOGE("LOADER", "frame rejected before payload: err=%d", (int)chk);
-            ARKRTOS_LOGE("LOADER", "hdr: magic=%08X compat=%08X type=%u size=%u ent=%u r_off=%u r_cnt=%u r_kind=%u",
-                       (unsigned)p_hdr->magic, (unsigned)p_hdr->hw_compat_id,
-                       (unsigned)p_hdr->type, (unsigned)p_hdr->image_size,
-                       (unsigned)p_hdr->entry_offset, (unsigned)p_hdr->reloc_offset,
-                       (unsigned)p_hdr->reloc_count, (unsigned)p_hdr->reloc_kind);
-            arkrtos_loader_nak(dev);
-            return chk;         /* 返回细分码，不再一律报 RELOC：上层与日志都按真实原因走 */
-        }
-    }
-
-    /* 表和字段都过了，主机可以开始送负载 */
-    arkrtos_loader_ack(dev);
-
-    {
-        uint32 carry = 0u;      /* 上一轮被表项切开、留到本轮开头的字节数 */
-
-        while(written < p_hdr->image_size)
-        {
-            /* How many bytes still have to arrive over the wire: the payload
-             * that is left, minus the tail already held in carry.  Sizing this
-             * from image_size - written alone over-reads by carry, and that
-             * only shows up on the last round: when a relocation entry
-             * straddles the final host block, the loop would wait for bytes
-             * the host has already finished sending (it sent the whole
-             * payload), stalling until the read times out with ERR_SIZE. */
-            uint32 left = p_hdr->image_size - written;
-            uint32 want = (left > carry) ? (left - carry) : 0u;
-            uint32 submit;
-            uint32 keep;
-
-            if(want > (ARKRTOS_LOADER_CHUNK_SIZE - carry))
-            {
-                want = ARKRTOS_LOADER_CHUNK_SIZE - carry;
-            }
-
-            {
-                uint32 recv = want;     /* 本轮真正新收到的字节数（不含上一轮的尾巴） */
-
-                if(want == 0u)
-                {
-                    /* Nothing left to read yet the payload is not committed:
-                     * the relocation table runs past the end of the image.
-                     * The packer must never produce that, so refuse the frame
-                     * instead of spinning on bytes that will never arrive. */
-                    ARKRTOS_LOGE("LOADER", "reloc table runs past payload end: written=%u carry=%u size=%u",
-                               (unsigned)written, (unsigned)carry,
-                               (unsigned)p_hdr->image_size);
-                    arkrtos_loader_nak(dev);
-                    return ARKRTOS_LOADER_ERR_RELOC;
-                }
-
-                if(arkrtos_loader_read_dev(dev, arkrtos_loader_chunk + carry, want) != (int32)want)
-                {
-                    return ARKRTOS_LOADER_ERR_SIZE;
-                }
-
-                /* 标称 CRC 必须在打补丁之前算：这些字节马上会被就地改成落盘形态。
-                 * 只算新收到的这段，尾巴在上一轮已经算过了。 */
-                crc_recv = arkrtos_crc32(arkrtos_loader_chunk + carry, recv, crc_recv);
-                arkrtos_sign_stream_update(arkrtos_loader_chunk + carry, recv);   /* pre-patch, nominal */
-            }
-
-            want += carry;
-
-            /* 补丁必须在落盘之前打：Flash 只能把 1 写成 0，写下去就改不动了。
-             * 若块尾正好切开一条 MOVW/MOVT 表项，本块只落盘到该表项之前，
-             * 尾部几个字节原样留到下一轮开头，和后续数据拼齐再处理。 */
-            submit = arkrtos_loader_reloc_apply(arkrtos_loader_chunk,
-                                              p_hdr->payload_offset + written, want,
-                                              p_hdr,
-                                              (const uint32 *)(base + ARKRTOS_APP_RELOC_OFFSET),
-                                              p_idx, delta_rom, delta_ram);
-
-            keep = want - (submit - (p_hdr->payload_offset + written));
-
-            if(keep == want)
-            {
-                return ARKRTOS_LOADER_ERR_RELOC;  /* 缓冲装不下一条表项，不应发生 */
-            }
-
-            if((submit - (p_hdr->payload_offset + written)) != 0u)
-            {
-                uint32 n = submit - (p_hdr->payload_offset + written);
-
-                /* 落盘 CRC 算的是「打进 Flash 的那份字节」，与回读结果对得上才算写对 */
-                crc_written = arkrtos_crc32(arkrtos_loader_chunk, n, crc_written);
-
-                if(arkrtos_port_flash_write(base + p_hdr->payload_offset + written,
-                                          arkrtos_loader_chunk, n) != 0)
-                {
-                    return ARKRTOS_LOADER_ERR_FLASH;
-                }
-            }
-
-            written = submit - p_hdr->payload_offset;
-
-            if(keep != 0u)
-            {
-                uint32 k;
-
-                for(k = 0u; k < keep; k++)
-                {
-                    arkrtos_loader_chunk[k] = arkrtos_loader_chunk[want - keep + k];
-                }
-            }
-
-            carry = keep;
-
-            /* This chunk is in flash: let the host send the next one. */
-            arkrtos_loader_ack(dev);
-        }
+        return rc;
     }
 
     /* 收到的字节和打包时算出来的 crc32 必须一致：这一步盖住了传输丢字节、

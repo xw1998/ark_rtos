@@ -1722,6 +1722,59 @@ inline away); `data` / `bss` and the image length are unchanged; `arkrtos_modld.
 **0 warnings**. `doc_audit.py funcs`: functions over 120 lines **28 -> 27**, and the longest is now
 `arkrtos_loader_stream_image()` (212 lines).
 
+#### 5.30.12 Seventh one: `arkrtos_loader_stream_image()` split by table, payload and finish (2026-11-18)
+
+`arkrtos_loader_stream_image()` in `kernelsrc/src/arkrtos_loader.c` (212 lines) is the programming
+half of a serial install: receive the whole relocation table and validate it, then take the payload
+in ACK-paced chunks, patch relocations as bytes arrive, keep two CRCs, and finally compare the CRC
+and the signature. It is now two `static` helpers plus a short entry point:
+
+| Function | Responsibility | Lines |
+|---|---|---|
+| `loader_stream_reloc_table()` | take the whole table in `ARKRTOS_LOADER_CHUNK_SIZE` chunks, program it verbatim (rolling both CRCs, feeding the signature), then validate the table in place with `arkrtos_loader_check_header()`; on failure print the reason before NAKing (the NAK byte is only 0x15, so those log lines are the host's only statement of why), on success ACK so the payload may start | 66 |
+| `loader_stream_payload()` | `while(written < image_size)`: read a chunk, keep the tail of an entry split across blocks in `carry`, compute the nominal CRC before patching, call `arkrtos_loader_reloc_apply()`, program flash, roll the written-form CRC, ACK each block | 106 |
+| `arkrtos_loader_stream_image()` itself | initial CRC values, `arkrtos_sign_stream_begin()`, chain the two helpers, compare `crc_recv` with the header `crc32`, `arkrtos_sign_stream_end()`, hand back `*p_crc_written` | **61** (was 212) |
+
+Neither CRC is copied back out and in again: the helpers take `uint32 *p_crc_recv` /
+`uint32 *p_crc_written` and keep rolling on the caller's values. Equivalence was argued with the
+normalised line multiset: only-OLD holds the four `crc_recv = arkrtos_crc32(..., crc_recv)` rewrites
+into `*p_crc_recv = ...`, one `int32 chk =` split into a declaration plus an assignment, and the outer
+`if(rt_len != 0u)` guard (the `while` simply does not run when the length is zero, which is the same
+thing). **No statement was lost.**
+
+The behavioural evidence for this split comes in two parts, both real QEMU readings (a socket-based
+sender drove the `install` window and paced blocks on the device ACK; the script lives in `build/`
+and is not committed):
+
+1. **Unsigned image** (`build/APP_DEMO/APP_DEMO.svcapp`, 28204 B = 256 header + 1612 table + 26336
+   payload): the table was ACKed, all 52 payload blocks were ACKed, and the device then reported
+   `LOADER:1242 signature mismatch: image rejected` / `INSTALL:266 rejected: err -18`. The failure is
+   the signature and not the CRC, so **the transfer CRC already matched**: every byte through
+   "take the table, validate it, stream the payload, patch relocations, program flash, roll the CRC"
+   was correct.
+2. **The same image signed with the local development key**: both phases ACKed again, and then the
+   device went silent (no serial output for 60 s, and the periodic task prints stopped as well).
+   Reverting this change with `git checkout` and running the same script against a HEAD build hangs
+   in exactly the same way, so the hang is not caused by this split; it sits after the signature
+   gate (read-back verification / commit).
+
+**New debt, registered only, root cause unknown**: on QEMU the path after a passing signature hangs,
+identically on HEAD and on the split build. The same path has completed on the real board (see the
+application install and debug guide), so this looks
+like this QEMU build's flash backend over "program a whole region, read it back, then write the state
+word" rather than a kernel defect, and it is certainly not evidence against the split.
+
+Readings:
+
+```
+before  text 367400 / data 440 / bss 767508   sha256 a5403823...   31,462,512 B
+after   text 367384 / data 440 / bss 767508   sha256 660b94c9...   31,462,512 B
+```
+
+`text` **-16 B**; `data` / `bss` and the image length are unchanged; `arkrtos_loader.c` reports the
+same **21** warnings before and after. `shell_check.py` `PASS`. `doc_audit.py funcs`: functions over
+120 lines **27 -> 26**, and the longest is now `arkrtos_flashapp_write()` (211 lines).
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine
