@@ -529,27 +529,17 @@ unlock_out:
     return ret;
 }
 
-int32 arkrtos_mini_run(const char *path)
+/* 路径长度先量出来：实例表按 ARKRTOS_MINI_PATH_MAX 存路径，超了就不能悄悄
+ * 截断——截断会让两个不同的路径撞成同一个身份。 */
+static int32 mini_run_check_path(const char *path)
 {
-    arkrtos_mini_slot_t *slot = 0;
-    arkrtos_mini_image_t img;
-    uint32 irq;
     uint32 path_len = 0u;
-    uint32 hash;
-    uint32 in_use = 0u;
-    uint32 max_block = 0u;
-    uint32 i;
-    int32  free_i = -1;
-    int32  ret;
-    int32  task_id;
 
     if(path == 0)
     {
         return ARKRTOS_LOADER_ERR_PARAM;
     }
 
-    /* 路径长度先量出来：实例表按 ARKRTOS_MINI_PATH_MAX 存路径，超了就不能
-     * 悄悄截断——截断会让两个不同的路径撞成同一个身份。 */
     while((path_len < (uint32)ARKRTOS_MINI_PATH_MAX) && (path[path_len] != '\0'))
     {
         path_len++;
@@ -558,11 +548,23 @@ int32 arkrtos_mini_run(const char *path)
     {
         return ARKRTOS_LOADER_ERR_PARAM;
     }
+    return 0;
+}
+
+/* 先占位：装载期间项就要被占住，而不是等文件读完才发现没名额——那时两块 RAM
+ * 已经借出去了。同时把「装载串行」和「并发数上限」一次判掉。 */
+static int32 mini_run_slot_claim(const char *path, arkrtos_mini_slot_t **p_slot,
+                                 uint32 *p_max_block)
+{
+    arkrtos_mini_slot_t *slot;
+    uint32 irq;
+    uint32 hash;
+    uint32 in_use = 0u;
+    uint32 i;
+    int32  free_i = -1;
 
     hash = arkrtos_crash_hash_path(path);
 
-    /* 先占位：装载期间项就要被占住，而不是等文件读完才发现没名额——那时
-     * 两块 RAM 已经借出去了。同时把「装载串行」和「并发数上限」一次判掉。 */
     arkrtos_spin_lock_irqsave(&g_mini_lock, &irq);
 
     if(arkrtos_crash_mini_disabled(hash) != 0u)
@@ -600,10 +602,102 @@ int32 arkrtos_mini_run(const char *path)
     arkrtos_mini_slot_clear(slot);
     slot->state = ARKRTOS_MINI_ST_LOAD;
     arkrtos_mini_slot_set_path(slot, path);
-    max_block  = g_mini_max_block;          /* 本次装载用哪条上限，此刻定下来 */
+    *p_max_block = g_mini_max_block;        /* 本次装载用哪条上限，此刻定下来 */
     g_mini_busy = 1u;
 
     arkrtos_spin_unlock_irqrestore(&g_mini_lock, irq);
+
+    *p_slot = slot;
+    return 0;
+}
+
+/* 起任务并把 TCB 的区域描述填成这两块：rom_* = 代码块（在池里 -> 代码窗口用
+ * 可执行的 RAMX 属性），ram_* = RAM 块（RW/ZI + 栈，走常规数据窗口，不可执行）。
+ * 两块基址不同、大小不同，因此 region0 / region1 是两个独立的精确窗口，
+ * 不需要「两个窗口必须同属性」那种妥协（见 arkrtos_mpu.c）。 */
+static int32 mini_run_start_task(const arkrtos_mini_image_t *p_img, int32 *p_task_id)
+{
+    int32 task_id;
+
+    task_id = arkrtos_task_register((void (*)(void))p_img->entry,
+                                  (uint32 *)(void *)(p_img->ram_base + p_img->ram_block - APP_TASK_STACK_SIZE),
+                                  (uint32)APP_TASK_STACK_SIZE,
+                                  (uint8)ARKRTOS_MINI_TASK_PRIORITY,
+                                  (uint32)APP_TASK_PERIOD_MS);
+    if(task_id <= 0)
+    {
+        (void)arkrtos_ptable_mini_free(p_img->pt_index);     /* 任务表满了：两块还在我们手里 */
+        return ARKRTOS_LOADER_ERR_TASK;
+    }
+
+    arkrtos_task_table[task_id - 1].rom_start = p_img->code_base;
+    arkrtos_task_table[task_id - 1].rom_size  = p_img->code_block;
+    arkrtos_task_table[task_id - 1].ram_start = p_img->ram_base;
+    arkrtos_task_table[task_id - 1].ram_size  = p_img->ram_block;
+    arkrtos_task_table[task_id - 1].is_priv   = 0u;   /* 与 App 同级：非特权 */
+
+    arkrtos_mpu_build_task(&arkrtos_task_table[task_id - 1]);
+
+    *p_task_id = task_id;
+    return 0;
+}
+
+/* 起任务之后再把实例表的项从 LOAD 改成 RUN；这一步之前谁都能看见「正在装」，
+ * 所以中途失败只需要把项清回 FREE。 */
+static void mini_run_commit(arkrtos_mini_slot_t *slot, const arkrtos_mini_image_t *p_img,
+                            int32 task_id)
+{
+    uint32 irq;
+
+    arkrtos_spin_lock_irqsave(&g_mini_lock, &irq);
+    slot->state     = ARKRTOS_MINI_ST_RUN;
+    slot->pt_index  = p_img->pt_index;
+    slot->ram_block = p_img->ram_block;
+    slot->info.task_id    = (uint32)task_id;
+    slot->info.code_base  = p_img->code_base;
+    slot->info.code_block = p_img->code_block;
+    slot->info.code_size  = p_img->code_size;
+    slot->info.ram_base   = p_img->ram_base;
+    slot->info.ram_size   = p_img->ram_size;
+    slot->info.entry      = p_img->entry;
+    slot->info.crc        = p_img->crc;
+    g_mini_busy = 0u;
+    arkrtos_spin_unlock_irqrestore(&g_mini_lock, irq);
+}
+
+/* 装载失败：清掉占位项并放开装载闸门。 */
+static void mini_run_abort(arkrtos_mini_slot_t *slot)
+{
+    uint32 irq;
+
+    arkrtos_spin_lock_irqsave(&g_mini_lock, &irq);
+    if(slot != 0)
+    {
+        arkrtos_mini_slot_clear(slot);
+    }
+    g_mini_busy = 0u;
+    arkrtos_spin_unlock_irqrestore(&g_mini_lock, irq);
+}
+
+int32 arkrtos_mini_run(const char *path)
+{
+    arkrtos_mini_slot_t *slot = 0;
+    arkrtos_mini_image_t img;
+    uint32 max_block = 0u;
+    int32  ret;
+    int32  task_id;
+
+    ret = mini_run_check_path(path);
+    if(ret != 0)
+    {
+        return ret;
+    }
+
+    ret = mini_run_slot_claim(path, &slot, &max_block);
+    if(ret != 0)
+    {
+        return ret;
+    }
 
     /* 读镜像 + 借两块 + 打补丁 + 校 CRC：与热切换共用同一份实现。
      * 调度器锁在它内部放开，此处已经不在锁里。 */
@@ -613,44 +707,13 @@ int32 arkrtos_mini_run(const char *path)
         goto out;
     }
 
-    task_id = arkrtos_task_register((void (*)(void))img.entry,
-                                  (uint32 *)(void *)(img.ram_base + img.ram_block - APP_TASK_STACK_SIZE),
-                                  (uint32)APP_TASK_STACK_SIZE,
-                                  (uint8)ARKRTOS_MINI_TASK_PRIORITY,
-                                  (uint32)APP_TASK_PERIOD_MS);
-    if(task_id <= 0)
+    ret = mini_run_start_task(&img, &task_id);
+    if(ret != 0)
     {
-        (void)arkrtos_ptable_mini_free(img.pt_index);     /* 任务表满了：两块还在我们手里 */
-        ret = ARKRTOS_LOADER_ERR_TASK;
         goto out;
     }
 
-    /* TCB 的区域描述就是这两块：rom_* = 代码块（在池里 -> 代码窗口用可执行的
-     * RAMX 属性），ram_* = RAM 块（RW/ZI + 栈，走常规数据窗口，不可执行）。
-     * 两块基址不同、大小不同，因此 region0 / region1 是两个独立的精确窗口，
-     * 不需要「两个窗口必须同属性」那种妥协（见 arkrtos_mpu.c）。 */
-    arkrtos_task_table[task_id - 1].rom_start = img.code_base;
-    arkrtos_task_table[task_id - 1].rom_size  = img.code_block;
-    arkrtos_task_table[task_id - 1].ram_start = img.ram_base;
-    arkrtos_task_table[task_id - 1].ram_size  = img.ram_block;
-    arkrtos_task_table[task_id - 1].is_priv   = 0u;   /* 与 App 同级：非特权 */
-
-    arkrtos_mpu_build_task(&arkrtos_task_table[task_id - 1]);
-
-    arkrtos_spin_lock_irqsave(&g_mini_lock, &irq);
-    slot->state     = ARKRTOS_MINI_ST_RUN;
-    slot->pt_index  = img.pt_index;
-    slot->ram_block = img.ram_block;
-    slot->info.task_id    = (uint32)task_id;
-    slot->info.code_base  = img.code_base;
-    slot->info.code_block = img.code_block;
-    slot->info.code_size  = img.code_size;
-    slot->info.ram_base   = img.ram_base;
-    slot->info.ram_size   = img.ram_size;
-    slot->info.entry      = img.entry;
-    slot->info.crc        = img.crc;
-    g_mini_busy = 0u;
-    arkrtos_spin_unlock_irqrestore(&g_mini_lock, irq);
+    mini_run_commit(slot, &img, task_id);
 
     ARKRTOS_LOGI("MINI", "%s: %u B payload -> code 0x%08X (%u B block), RW/stack 0x%08X (%u B), task %d",
                path, (unsigned)img.code_size, (unsigned)img.code_base, (unsigned)img.code_block,
@@ -660,17 +723,7 @@ int32 arkrtos_mini_run(const char *path)
     return 0;
 
 out:
-    {
-        uint32 irq2;
-
-        arkrtos_spin_lock_irqsave(&g_mini_lock, &irq2);
-        if(slot != 0)
-        {
-            arkrtos_mini_slot_clear(slot);
-        }
-        g_mini_busy = 0u;
-        arkrtos_spin_unlock_irqrestore(&g_mini_lock, irq2);
-    }
+    mini_run_abort(slot);
     return ret;
 }
 

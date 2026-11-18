@@ -2411,6 +2411,59 @@ No new test cases: the nine branches need real socket handles, a real `net_own` 
 boundary to tell apart; a host harness could only stub them, and a stubbed red/green would only prove the
 predicates are written correctly, not that the real path is.
 
+#### 5.30.26 Twenty-first one: `arkrtos_mini_run()` split into path / claim / start / commit / rollback (2026-11-18)
+
+`arkrtos_mini_run()` in `kernelsrc/src/arkrtos_mini.c` (144 lines) did five things in a row: measure the
+path, claim an instance slot, read the image and borrow two blocks, start the task and fill its TCB, then move
+the slot from `LOAD` to `RUN`; any failure in the middle jumped to one `out:` label. Every step had its own
+error code, and a single body made "which step failed" unreadable:
+
+| Function | What it owns | Lines |
+|---|---|---|
+| `mini_run_check_path()` | measures the length: non-empty and within `ARKRTOS_MINI_PATH_MAX`, never truncated (truncation would let two different paths collide into one identity) | 19 |
+| `mini_run_slot_claim()` | crash hash -> mask interrupts -> "disabled" / "loading busy" -> scan for a free slot and count the running ones (hitting the concurrency cap is also `BUSY`) -> clear the slot, set `LOAD`, store the path, pin this load's block limit, set `g_mini_busy`; hands out the slot and `max_block` | 57 |
+| `mini_run_start_task()` | `arkrtos_task_register`; on failure it returns both blocks with `ptable_mini_free` first and yields `ERR_TASK`; on success fills `rom_*` / `ram_*` / `is_priv` and calls `mpu_build_task` | 26 |
+| `mini_run_commit()` | under the lock, moves the slot from `LOAD` to `RUN`, writes `pt_index` / `ram_block` / the seven `info.*` fields, releases `g_mini_busy` | 20 |
+| `mini_run_abort()` | rollback: clears the claimed slot and releases `g_mini_busy` (the old `out:` block) | 12 |
+| `arkrtos_mini_run()` itself | five sequential calls plus one `MINI` log line and `sched_activate_higher` on success | **47** (was 144) |
+
+Three rules: (1) **the atomicity of the claim is preserved** -- "check disabled / check busy / scan / set
+LOAD / set busy" all still happen inside one interrupt-masked region, and by the time
+`mini_run_slot_claim()` releases the lock the slot is sitting there with its path; (2) rollback still has a
+single entry (`out:` -> `mini_run_abort()`), shared by the `load_image` and `start_task` failures, one cleanup
+per failure, no double free; (3) `max_block` is still read **before** the lock is released (the original
+comment "which limit this load uses is fixed right here" still holds).
+
+Normalised equivalence: only-OLD is **21 lines**, all attributable -- 18 are `img.` -> `p_img->` renames
+(the image struct is held by the entry point and shared by the later stages), 1 is
+`max_block = g_mini_max_block;` becoming `*p_max_block = ...`, 1 is `uint32 irq2;` plus its lock/unlock
+rewritten as `irq` inside `mini_run_abort()` (the rollback no longer borrows the entry point's `irq`);
+only-NEW is 60 lines of signatures, local declarations, `return 0;` / `return ret;`, braces and the five
+calls. **No condition, return code, log text or interrupt boundary was changed.**
+
+Size: under the default QEMU LA64 board profile **this TU is an empty target** --
+`board/qemu_loongarch64/arkrtos_board_config.h` sets `ARKRTOS_USE_MINIAPP` to 0 -- so text `367752 -> 367752`,
+`data` 440 / `bss` 767508 / image total 31,462,512 B unchanged, and both `.bin` files are sha256 identical
+under `SOURCE_DATE_EPOCH=1600000000` (`63796b55...`), **the same hash as before the split**. So that "empty
+target" does not hide the change, the TU was compiled on its own with a shim header
+(`build/_mini_chk/arkrtos_board_config.h`: real board config first, then `#undef` / `#define
+ARKRTOS_USE_MINIAPP 1`): **exit=0**, warnings **5 = 5 in the baseline** (all pre-existing
+`-Wint-to-pointer-cast`, the only difference being the function name printed with the warning, now
+`mini_run_start_task` instead of `arkrtos_mini_run`).
+
+Gates: `coverage-host` all ten modules at or above baseline (`arkrtos_mini` is not a coverage target,
+baseline untouched); `sec-crc` 8 pins; `format_gate` 361 own files clean; `shell_check.py` **PASS**;
+`ci_gate` **47 passed / 0 failed**.
+
+`doc_audit.py funcs`: functions over 120 lines **13 -> 12**; the longest is now `arkrtos_mq_send_internal()`
+(143).
+
+**Verdict class: compiles (including the forced MINIAPP=1 build) + same warning count + default-profile
+sha256 identical to the pre-split image + QEMU end-to-end PASS, never run on hardware.**
+This one has **no runtime reading**: loading a MiniApp needs the file system, the instance table and a real
+RAM pool, while the QEMU LA64 board profile keeps `ARKRTOS_USE_MINIAPP` off; turning it on means changing the
+board profile, which is a different change (it would grow the default image), so it is not done here.
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine

@@ -4669,6 +4669,50 @@ only-NEW 37 行全是六个签名、七对花括号、`return 0;` / `return 1;` 
 这一笔不新增用例：九条分支要真套接字句柄、真 `net_own` 台账与真 App 窗口边界才判得出来，
 宿主上只能堆桩，堆出来的「红/绿」只证明判据写对了，不证明真路径对。
 
+#### 5.30.26 第二十一笔：`arkrtos_mini_run()` 按「路径 / 占位 / 起任务 / 提交 / 回滚」分五段（2026-11-18）
+
+`kernelsrc/src/arkrtos_mini.c` 的 `arkrtos_mini_run()`（144 行）从头到尾是五件事连做：量路径长度、
+抢一个实例项、读镜像借块、起任务填 TCB、把项从 `LOAD` 改成 `RUN`；中间任意一步失败都落到同一个
+`out:` 标签回滚。每件事的失败码不同，混在一个函数体里读不出「错在哪一步」：
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `mini_run_check_path()` | 量长度：`ARKRTOS_MINI_PATH_MAX` 以内且非空，超了不截断（截断会让两个不同路径撞成同一个身份） | 19 |
+| `mini_run_slot_claim()` | 算崩溃哈希 → 关中断 → 判「被禁用」/「装载忙」→ 扫空项与在跑计数（到并发上限也是 `BUSY`）→ 清项、置 `LOAD`、写路径、定下本次的上限、置 `g_mini_busy`，成功交出项指针与 `max_block` | 57 |
+| `mini_run_start_task()` | `arkrtos_task_register` 起任务；失败先 `ptable_mini_free` 把两块还回去再返回 `ERR_TASK`；成功填 TCB 的 `rom_*` / `ram_*` / `is_priv` 并 `mpu_build_task` | 26 |
+| `mini_run_commit()` | 关中断把项从 `LOAD` 改成 `RUN`，写 `pt_index` / `ram_block` / 七个 `info.*`，放开 `g_mini_busy` | 20 |
+| `mini_run_abort()` | 回滚：清占位项 + 放开 `g_mini_busy`（原 `out:` 标签里那段） | 12 |
+| `arkrtos_mini_run()` 自己 | 五步顺序调用 + 成功后一条 `MINI` 日志 + `sched_activate_higher` | **47**（原 144） |
+
+口径三条：① **占位的原子性没被拆散** —— 「判禁用 / 判忙 / 扫空项 / 置 LOAD / 置 busy」仍在同一次
+关中断里，`mini_run_slot_claim()` 出锁之后实例项已经带着路径站在那里；② 回滚仍只有一处入口
+（`out:` → `mini_run_abort()`），`load_image` 与 `start_task` 两条失败路径共用它，一次失败一次清、
+不漏不双；③ `max_block` 仍然在**出锁之前**取值（原代码就是「本次装载用哪条上限，此刻定下来」）。
+
+等价性归一化比对：only-OLD **21 行**，全部可归因 —— 18 行是 `img.` → `p_img->` 的改名（镜像结构由
+入口持有后两段共用）、1 行 `max_block = g_mini_max_block;` 变成 `*p_max_block = …`、1 行 `uint32 irq2;`
+与它的 `lock/unlock` 两行改写成 `mini_run_abort()` 里的 `irq`（回滚段独立成函数，不再借用入口的
+`irq`）；only-NEW 60 行全是五个签名、局部声明、`return 0;` / `return ret;`、花括号与入口的五次调用。
+**判断条件、返回码、日志文案、关中断的边界一处未改。**
+
+体积：这一笔在 QEMU LA64 默认档下**该 TU 是空目标** —— `board/qemu_loongarch64/arkrtos_board_config.h`
+把 `ARKRTOS_USE_MINIAPP` 定成 0，所以 text `367752 → 367752`、`data` 440 / `bss` 767508 /
+镜像总长 31,462,512 B，两份 `.bin` 在 `SOURCE_DATE_EPOCH=1600000000` 下 sha256 相同（`63796b55…`），
+**与拆分前是同一个 sha256**。为了不让「空目标等于没改」混过去，另用 shim 头（`build/_mini_chk/
+arkrtos_board_config.h`：先吃真板级配置再 `#undef` / `#define ARKRTOS_USE_MINIAPP 1`）把该 TU 单独
+`-c` 编了一遍：**exit=0**，告警 **5 条 = 基线 5 条**（全是既有的 `-Wint-to-pointer-cast`，唯一差异是
+告警里打印的函数名从 `arkrtos_mini_run` 变成 `mini_run_start_task`）。
+
+门禁：`coverage-host` 10 个模块不低于基线（`arkrtos_mini` 不在覆盖对象内，未动基线）；
+`sec-crc` 8 pin 全过；`format_gate` 361 个自有文件干净；`example/qemu_loongarch64/shell_check.py`
+**PASS**；`ci_gate` **47 passed / 0 failed**。
+
+`doc_audit.py funcs`：超过 120 行的函数 **13 → 12**；最长换成 `arkrtos_mq_send_internal()`（143）。
+
+**结论分档：编译通过（含 MINIAPP=1 强制档）+ 告警同数 + 默认档 sha256 与拆分前相同 + QEMU 端到端 PASS，未上板。**
+这一笔**没有运行读数**：小程序装载要 FS + 实例表 + 真 RAM 池，QEMU LA64 板档把 `ARKRTOS_USE_MINIAPP`
+关着，开口令就要改板级配置、那是另一件事（会增加默认档体积），故不在这里做。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行
