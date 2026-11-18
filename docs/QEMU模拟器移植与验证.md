@@ -1098,10 +1098,18 @@ PASS: LA64 内核 Shell 端到端通（横幅/help/uname/dt/ls/cat/stack/utest �
 
 脚本的 10 条判据：横幅 + 提示符、`[FS] PASS`、`help` 含 blk/mount/reboot、
 `uname`、`dt` 含 `ns16550a` 且地址 `0x1fe001e0`、`ls /mnt/ram` 列出 `hello.txt`、
-`cat /proc/version`、`stack` 为 `5 task(s)` 且 `0 unmeasured`、
-`utest` 汇总行 `, 0 failed,`、全程无 `UNEXPECTED`/`FATAL`/`FAILED`。
+`cat /proc/version`、`stack` 的任务数 ≥ 5、与 `ps` 的 PID 行数相等且 `0 unmeasured`/
+`0 at/over 90%`、`utest` 汇总行 `, 0 failed,`、全程无 `UNEXPECTED`/`FATAL`/`FAILED`。
 其中 `stack` 与 `utest` 两条是「注册了但没跑」挡不住的：前者要求栈计量
 真的在算（`0 unmeasured`），后者要求用例全量跑完且 0 失败。
+
+> **勘误（2026-11-18）**：`stack` 这条判据原本写死 `5 task(s)`
+> （A/B/FS/shell/idle）。示例后来为 ELF/MOD 演示又注册了任务，总数变 9，
+> 判据就一直 FAIL——而 FAIL 跟被测对象无关，脚本因此长期是红的。
+> 现在改成三条不随示例成长的判据：任务数 ≥ 5（少一个说明有任务没起来）、
+> `stack` 的任务数与 `ps` 的 PID 行数**相等**（两个独立视图对不上就是有一边
+> 在编数字，比一个常数可靠）、`0 unmeasured` 与 `0 at/over 90%` 同时出现。
+> 当前读数是 `9 task(s), 0 unmeasured, 0 at/over 90%`，脚本重新 PASS。
 
 > **勘误（2026-11-16）**：上面这条 `utest` 判据在本节写作时是**假绿**。
 > 当时汇总行确实打印 `, 0 failed,`，但它是
@@ -3796,6 +3804,26 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/sec_crc_gate.py   # SEC-CRC-GATE OK 
 
 端口每次换新；`qemu_shell_drive.py` 偶发「90 s 内没等到 shell 提示符」，同参数换端口重试即可
 （已确认与代码无关）。
+
+#### 5.30.5 后续体积变化（2026-11-18，与本节无关）
+
+同一个默认档镜像在**后一次纯代码整理**之后不再是 `fbd1094e…`。整理内容是
+`kernelsrc/src/arkrtos_task.c` 的 `svc_file_sys()`（458 行）按注释里写明的路径模型边界
+拆成三个函数——`svc_fs_volume()`（子命令 1..10，卷相对）、`svc_fs_namespace()`
+（子命令 11..23，命名空间绝对）与只剩参数检查 + 一次分支的 `svc_file_sys()`；
+case 体逐行搬运、只整体 dedent 4 个空格，返回值与错误码一处未改。
+
+同口径（`SOURCE_DATE_EPOCH=1600000000`、`objcopy -O binary`）读数：
+
+```
+before  text 367536 / data 440 / bss 767508   sha256 fbd1094e…   31,462,512 B
+after   text 367584 / data 440 / bss 767508   sha256 66a09c13…   31,462,512 B
+```
+
+即 `text` +48 B（多一层函数调用与两次 `-O2` 下不再共享的常量装载），`data`/`bss` 与
+镜像总长不变。**不得声称逐字节不变**——二进制确实变了，只是行为不变。行为侧的判据是
+`python example/qemu_loongarch64/shell_check.py` 仍 `PASS`（横幅/help/uname/dt/ls/cat/
+stack/utest 九组全部通过），`stack` 报 `9 task(s)`、`0 unmeasured`、`0 at/over 90%`。
 
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 

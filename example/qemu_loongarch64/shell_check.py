@@ -16,10 +16,15 @@
      这张表由 dts/qemu_loongarch64.dts 生成，改了树不改表会被 ci_gate 抓住；
   6. `ls /mnt/ram` 列出 hello.txt（证明 ls 走的是 VFS，不是编造的目录）；
   7. `cat /proc/version` 打印内核版本行（procfs 在 shell 里可读）；
-  8. `stack` 报出 5 个任务且 0 unmeasured（A/B/FS/shell/idle）；
+  8. `stack` 的任务数 >= 5、与 `ps` 的 PID 行数相等、`0 unmeasured`
+     且 `0 at/over 90%`（不写死任务数，见下面的坑）；
   9. `utest` 汇总行是 "N matched, N passed, 0 failed"，且 N >= 1
      （不绑用例名：用例表随开关变；但**必须绑匹配数**，见下面的坑）；
  10. 全程没有 UNEXPECTED / FATAL / FAILED。
+
+第 8 条的教训（2026-11-18）：这条判据原本写死 "5 task(s)"，示例后来
+多注册了 ELF/MOD 两个演示任务、总数变 9，于是脚本长期 FAIL，而失败
+跟被测对象无关。改成「下限 + 与 ps 交叉核对」，既不写死也不放水。
 
 第 9 条的教训（2026-11-16）：这条判据最早只查 ", 0 failed,"，而板端当时的
 读数是 "0 matched, 0 passed, 0 failed, 0 skipped" —— 一条用例都没跑，
@@ -173,14 +178,33 @@ def main():
         if "Ark RTOS" not in out:
             return fail("cat /proc/version 没打印版本行\n" + out, log)
 
-        # 7) stack：任务表里必须有 shell 任务。本示例注册 5 个任务
-        #    （A/B/FS/shell/idle）；"0 unmeasured" 说明栈计量真的在算，
-        #    而不是全零占位。
+        # 7) stack：任务表里必须有 shell 任务，且栈计量真的在算。
+        #    这里**不写死任务数**（2026-11-18 的教训）：本判据最早写的是
+        #    "5 task(s)"（A/B/FS/shell/idle），后来示例又注册了 ELF/MOD
+        #    两个演示任务，总数变 9，判据就一直红着，而红的原因跟被测对象
+        #    无关。改成三条不随示例成长的判据：
+        #      a) >= 5（A/B/FS/shell/idle 是下限，少一个说明有任务没起来）；
+        #      b) stack 的任务数与 ps 的 PID 行数**相等**——两个独立视图
+        #         对不上就是有一边在编数字，比一个常数可靠；
+        #      c) "0 unmeasured" 与 "0 at/over 90%" 同时出现。
         out = run("stack")
-        if "5 task(s)" not in out:
-            return fail("任务数不是 5（shell 没注册？）\n" + out, log)
+        m = re.search(r"stack:\s*(\d+)\s+task\(s\)", out)
+        if m is None:
+            return fail("stack 汇总行不可解析\n" + out, log)
+        n_stack = int(m.group(1))
+        if n_stack < 5:
+            return fail("任务数 %d < 5（A/B/FS/shell/idle 至少 5 个）\n"
+                        % n_stack + out, log)
+        out_ps = run("ps")
+        n_ps = len(re.findall(r"^\s+\d+\s+\d+\s+\S+\s+0x[0-9A-Fa-f]{8}",
+                              out_ps, re.M))
+        if n_ps != n_stack:
+            return fail("stack 报 %d 个任务，ps 列了 %d 行 PID，两个视图不一致"
+                        "\n" + out_ps, log)
         if "0 unmeasured" not in out:
             return fail("栈计量没有生效（unmeasured 非零）\n" + out, log)
+        if "0 at/over 90%" not in out:
+            return fail("有任务栈用量到/超 90%\n" + out, log)
 
         # 8) utest：板端单元测试全量。不绑单个用例的名字（用例表会随功能
         #    开关变），但**必须绑匹配数**：只查 ", 0 failed," 会把

@@ -1504,6 +1504,439 @@ static void svc_heartbeat(void *p_svc_ctx)
 }
 
 /* ARKRTOS_SVC_FILE_SYS: argument check + inner dispatch only; the dispatch table is SVC_Server. */
+/* ARKRTOS_SVC_FILE_SYS 1..10: volume-relative paths on the one mount.
+ * Moved verbatim out of svc_file_sys; the argument block has already been
+ * bounds checked by the caller. */
+static void svc_fs_volume(void *p_svc_ctx, uint32 *p)
+{
+    int32 fs_ret;
+
+    switch(p[0])
+    {
+    case ARKRTOS_FILE_SUB_WRITE:                 /* create / truncate and write */
+        if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+        if((p[3] != 0u) &&
+           (arkrtos_kernel_user_ro_ok((const void *)p[2], p[3]) == 0u))
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+        arkrtos_sched_lock_internal();
+        fs_ret = arkrtos_fs_write_file((const char *)p[1],
+                                     (const uint8 *)p[2], p[3]);
+        arkrtos_sched_unlock_internal();
+        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
+        break;
+
+    case ARKRTOS_FILE_SUB_READ:                 /* read into a caller buffer */
+        if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+        if(arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+        {
+            uint32 got = 0u;
+
+            arkrtos_sched_lock_internal();
+            fs_ret = arkrtos_fs_read_file((const char *)p[1],
+                                        (uint8 *)p[2], p[3], &got);
+            arkrtos_sched_unlock_internal();
+            ARKRTOS_SVC_RET(p_svc_ctx,
+                          (uint32)((fs_ret == 0) ? (int32)got : fs_ret));
+        }
+        break;
+
+    case ARKRTOS_FILE_SUB_REMOVE:                 /* remove */
+        if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+        arkrtos_sched_lock_internal();
+        fs_ret = arkrtos_fs_remove((const char *)p[1]);
+        arkrtos_sched_unlock_internal();
+        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
+        break;
+
+    case ARKRTOS_FILE_SUB_STAT:                 /* stat */
+        if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+        if(((p[2] != 0u) &&
+            (arkrtos_kernel_dev_buf_ok((const void *)p[2], 4) == 0u)) ||
+           ((p[3] != 0u) &&
+            (arkrtos_kernel_dev_buf_ok((const void *)p[3], 4) == 0u)))
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+        arkrtos_sched_lock_internal();
+        fs_ret = arkrtos_fs_stat_path((const char *)p[1],
+                                     (uint32 *)p[2], (uint32 *)p[3]);
+        arkrtos_sched_unlock_internal();
+        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
+        break;
+
+    case ARKRTOS_FILE_SUB_MOUNT:                 /* make sure the default volume is up */
+        if(arkrtos_kernel_svc_args_ok(p, 4u) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+        arkrtos_sched_lock_internal();
+        /* Idempotent on purpose: arkrtos_fs_mount() refuses to stack
+         * on a live mount (that would drop the old lfs_t and leak its
+         * state), and an App asking for the volume only means "I need
+         * it up".  The shell keeps the strict mount/unmount pair. */
+        fs_ret = (arkrtos_fs_mounted() != 0u) ? 0 : arkrtos_fs_mount_default();
+        arkrtos_sched_unlock_internal();
+        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
+        break;
+
+    case ARKRTOS_FILE_SUB_UNMOUNT:                 /* unmount */
+        arkrtos_sched_lock_internal();
+        fs_ret = arkrtos_fs_unmount();
+        arkrtos_sched_unlock_internal();
+        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
+        break;
+
+    case ARKRTOS_FILE_SUB_READ_AT:                 /* read a slice: path, buf, len, off */
+        if(arkrtos_kernel_svc_args_ok(p, 20u) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+        if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+        if(arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+        {
+            uint32 got = 0u;
+
+            arkrtos_sched_lock_internal();
+            fs_ret = arkrtos_fs_read_at((const char *)p[1], (uint8 *)p[2],
+                                      p[3], p[4], &got);
+            arkrtos_sched_unlock_internal();
+            ARKRTOS_SVC_RET(p_svc_ctx,
+                          (uint32)((fs_ret == 0) ? (int32)got : fs_ret));
+        }
+        break;
+
+    case ARKRTOS_FILE_SUB_RENAME:                 /* rename: old, new */
+        if(arkrtos_kernel_svc_args_ok(p, 12u) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+        if((arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u) ||
+           (arkrtos_kernel_user_name_ok((const void *)p[2], ARKRTOS_FS_PATH_MAX) == 0u))
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+        arkrtos_sched_lock_internal();
+        fs_ret = arkrtos_fs_rename((const char *)p[1], (const char *)p[2]);
+        arkrtos_sched_unlock_internal();
+        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
+        break;
+
+    case ARKRTOS_FILE_SUB_LIST:                /* list names: dir, buf, size, count out */
+        if(arkrtos_kernel_svc_args_ok(p, 20u) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+        if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+        if((arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u) ||
+           (arkrtos_kernel_dev_buf_ok((const void *)p[4], 4) == 0u))
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+        arkrtos_sched_lock_internal();
+        fs_ret = arkrtos_fs_list_names((const char *)p[1], (char *)p[2],
+                                     p[3], (uint32 *)p[4]);
+        arkrtos_sched_unlock_internal();
+        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
+        break;
+
+    case ARKRTOS_FILE_SUB_INFO:                 /* volume capacity */
+        if((arkrtos_kernel_dev_buf_ok((const void *)p[1], 4) == 0u) ||
+           (arkrtos_kernel_dev_buf_ok((const void *)p[2], 4) == 0u))
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+        arkrtos_sched_lock_internal();
+        fs_ret = arkrtos_fs_stat((uint32 *)p[1], (uint32 *)p[2]);
+        arkrtos_sched_unlock_internal();
+        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
+        break;
+        default:
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+    }
+}
+
+/* ARKRTOS_SVC_FILE_SYS 11..23: the VFS namespace (POSIX style).
+ * Moved verbatim out of svc_file_sys, same rule as above. */
+static void svc_fs_namespace(void *p_svc_ctx, uint32 *p)
+{
+    switch(p[0])
+    {
+    /* ---- 11..23: the VFS namespace ----
+     * No scheduler lock of our own here: ark_vfs takes the port lock
+     * (which is arkrtos_sched_lock) around everything it does, and
+     * nesting it would only make the unlock order something to get
+     * wrong. Path and buffer checks stay on this side because only
+     * the kernel knows what the caller may legally reach. */
+    case ARKRTOS_PATH_SUB_OPEN:                /* open  path, flags -> handle */
+        if(arkrtos_kernel_svc_args_ok(p, 12u) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        if(arkrtos_kernel_user_name_ok((const void *)p[1],
+                                     ARKRTOS_VFS_PATH_MAX) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        ARKRTOS_SVC_RET(p_svc_ctx,
+                      (uint32)arkrtos_vfs_app_open((const char *)p[1], p[2]));
+        break;
+
+    case ARKRTOS_PATH_SUB_READ:                /* read  handle, buf, len -> bytes */
+        if(arkrtos_kernel_svc_args_ok(p, 16u) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        if(arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        ARKRTOS_SVC_RET(p_svc_ctx,
+                      (uint32)arkrtos_vfs_app_read((int32)p[1],
+                                                 (uint8 *)p[2], p[3]));
+        break;
+
+    case ARKRTOS_PATH_SUB_WRITE:                /* write handle, buf, len -> bytes */
+        if(arkrtos_kernel_svc_args_ok(p, 16u) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        if((p[3] != 0u) &&
+           (arkrtos_kernel_user_ro_ok((const void *)p[2], p[3]) == 0u))
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        ARKRTOS_SVC_RET(p_svc_ctx,
+                      (uint32)arkrtos_vfs_app_write((int32)p[1],
+                                                  (const uint8 *)p[2], p[3]));
+        break;
+
+    case ARKRTOS_PATH_SUB_CLOSE:                /* close handle */
+        if(arkrtos_kernel_svc_args_ok(p, 8u) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        ARKRTOS_SVC_RET(p_svc_ctx,
+                      (uint32)arkrtos_vfs_app_close((int32)p[1]));
+        break;
+
+    case ARKRTOS_PATH_SUB_STAT:                /* stat path, size out, mode out */
+        if(arkrtos_kernel_svc_args_ok(p, 16u) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        if(arkrtos_kernel_user_name_ok((const void *)p[1],
+                                     ARKRTOS_VFS_PATH_MAX) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        if(((p[2] != 0u) &&
+            (arkrtos_kernel_dev_buf_ok((const void *)p[2], 4) == 0u)) ||
+           ((p[3] != 0u) &&
+            (arkrtos_kernel_dev_buf_ok((const void *)p[3], 4) == 0u)))
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        ARKRTOS_SVC_RET(p_svc_ctx,
+                      (uint32)arkrtos_vfs_app_stat((const char *)p[1],
+                                                 (uint32 *)p[2],
+                                                 (uint32 *)p[3]));
+        break;
+
+    case ARKRTOS_PATH_SUB_SEEK:                /* seek handle, off, whence */
+        if(arkrtos_kernel_svc_args_ok(p, 16u) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        ARKRTOS_SVC_RET(p_svc_ctx,
+                      (uint32)arkrtos_vfs_app_seek((int32)p[1],
+                                                 (int32)p[2], p[3]));
+        break;
+
+    case ARKRTOS_PATH_SUB_READDIR:                /* readdir handle, name, cap, mode, size */
+        if(arkrtos_kernel_svc_args_ok(p, 24u) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        if((p[3] == 0u) ||
+           (arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u))
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        if(((p[4] != 0u) &&
+            (arkrtos_kernel_dev_buf_ok((const void *)p[4], 4) == 0u)) ||
+           ((p[5] != 0u) &&
+            (arkrtos_kernel_dev_buf_ok((const void *)p[5], 4) == 0u)))
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        ARKRTOS_SVC_RET(p_svc_ctx,
+                      (uint32)arkrtos_vfs_app_readdir((int32)p[1],
+                                                    (char *)p[2], p[3],
+                                                    (uint32 *)p[4],
+                                                    (uint32 *)p[5]));
+        break;
+
+    case ARKRTOS_PATH_SUB_UNLINK:                /* unlink path */
+        if(arkrtos_kernel_svc_args_ok(p, 8u) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        if(arkrtos_kernel_user_name_ok((const void *)p[1],
+                                     ARKRTOS_VFS_PATH_MAX) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        ARKRTOS_SVC_RET(p_svc_ctx,
+                      (uint32)arkrtos_vfs_app_unlink((const char *)p[1]));
+        break;
+
+    case ARKRTOS_PATH_SUB_MKDIR:                /* mkdir path */
+        if(arkrtos_kernel_svc_args_ok(p, 8u) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        if(arkrtos_kernel_user_name_ok((const void *)p[1],
+                                     ARKRTOS_VFS_PATH_MAX) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        ARKRTOS_SVC_RET(p_svc_ctx,
+                      (uint32)arkrtos_vfs_app_mkdir((const char *)p[1]));
+        break;
+
+    case ARKRTOS_PATH_SUB_RMDIR:                /* rmdir path */
+        if(arkrtos_kernel_svc_args_ok(p, 8u) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        if(arkrtos_kernel_user_name_ok((const void *)p[1],
+                                     ARKRTOS_VFS_PATH_MAX) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        ARKRTOS_SVC_RET(p_svc_ctx,
+                      (uint32)arkrtos_vfs_app_rmdir((const char *)p[1]));
+        break;
+
+    case ARKRTOS_PATH_SUB_RENAME:                /* rename old, new */
+        if(arkrtos_kernel_svc_args_ok(p, 12u) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        if((arkrtos_kernel_user_name_ok((const void *)p[1],
+                                      ARKRTOS_VFS_PATH_MAX) == 0u) ||
+           (arkrtos_kernel_user_name_ok((const void *)p[2],
+                                      ARKRTOS_VFS_PATH_MAX) == 0u))
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        ARKRTOS_SVC_RET(p_svc_ctx,
+                      (uint32)arkrtos_vfs_app_rename((const char *)p[1],
+                                                   (const char *)p[2]));
+        break;
+
+    case ARKRTOS_PATH_SUB_TRUNCATE:                /* truncate path, size */
+        if(arkrtos_kernel_svc_args_ok(p, 12u) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        if(arkrtos_kernel_user_name_ok((const void *)p[1],
+                                     ARKRTOS_VFS_PATH_MAX) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        ARKRTOS_SVC_RET(p_svc_ctx,
+                      (uint32)arkrtos_vfs_app_truncate_path(
+                          (const char *)p[1], p[2]));
+        break;
+
+    case ARKRTOS_PATH_SUB_FTRUNCATE:                /* ftruncate handle, size */
+        if(arkrtos_kernel_svc_args_ok(p, 12u) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+        }
+        ARKRTOS_SVC_RET(p_svc_ctx,
+                      (uint32)arkrtos_vfs_app_truncate((int32)p[1],
+                                                     p[2]));
+        break;
+        default:
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+            break;
+    }
+}
+
+/* ARKRTOS_SVC_FILE_SYS: argument check + dispatch only; the dispatch table
+ * is SVC_Server. 1..10 and 11..23 are two different path models, so each
+ * half lives in its own handler above. */
 static void svc_file_sys(void *p_svc_ctx)
 {
     uint32 *p;
@@ -1516,7 +1949,7 @@ static void svc_file_sys(void *p_svc_ctx)
      *   p[0] = 3 remove (p[1] = path)
      *   p[0] = 4 stat   (p[1] = path, p[2] = size out, p[3] = is_dir out)
      *   p[0] = 5 info   (p[1] = total out, p[2] = used out)
-     *   p[0] = 11..21 the VFS namespace (POSIX style open/read/write):
+     *   p[0] = 11..23 the VFS namespace (POSIX style open/read/write):
      *                  11 open    (p[1]=path, p[2]=flags)      -> handle
      *                  12 read    (p[1]=handle, p[2]=buf, p[3]=len)
      *                  13 write   (p[1]=handle, p[2]=buf, p[3]=len)
@@ -1529,8 +1962,10 @@ static void svc_file_sys(void *p_svc_ctx)
      *                  19 mkdir   (p[1]=path)
      *                  20 rmdir   (p[1]=path)
      *                  21 rename  (p[1]=old, p[2]=new)
+     *                  22 truncate (p[1]=path, p[2]=size)
+     *                  23 ftruncate(p[1]=handle, p[2]=size)
      *   The two groups keep different path models on purpose: 1..10 are
-     *   volume relative (arkrtos_fs), 11..21 are namespace absolute
+     *   volume relative (arkrtos_fs), 11..23 are namespace absolute
      *   ("/mnt/nor/a.txt", "/dev/uart0"). A handle from 11 is only valid
      *   for the task that opened it; see arkrtos_vfs.h.
      * One global mount with one set of static caches means two callers
@@ -1538,428 +1973,24 @@ static void svc_file_sys(void *p_svc_ctx)
      * keeps other tasks out without disabling interrupts (a NOR erase
      * takes milliseconds, an interrupt lock would be the wrong tool).
      * Mount / format stay with the shell and the kernel. */
+
+    p = (uint32 *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+
+    if(arkrtos_kernel_svc_args_ok(p, 16u) == 0u)
     {
-        int32 fs_ret;
+        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+        return;
+    }
 
-        p = (uint32 *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
-
-        if(arkrtos_kernel_svc_args_ok(p, 16u) == 0u)
-        {
-            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-            return;
-        }
-
-        switch(p[0])
-        {
-        case ARKRTOS_FILE_SUB_WRITE:                 /* create / truncate and write */
-            if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-                break;
-            }
-            if((p[3] != 0u) &&
-               (arkrtos_kernel_user_ro_ok((const void *)p[2], p[3]) == 0u))
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-                break;
-            }
-            arkrtos_sched_lock_internal();
-            fs_ret = arkrtos_fs_write_file((const char *)p[1],
-                                         (const uint8 *)p[2], p[3]);
-            arkrtos_sched_unlock_internal();
-            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
-            break;
-
-        case ARKRTOS_FILE_SUB_READ:                 /* read into a caller buffer */
-            if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-                break;
-            }
-            if(arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-                break;
-            }
-            {
-                uint32 got = 0u;
-
-                arkrtos_sched_lock_internal();
-                fs_ret = arkrtos_fs_read_file((const char *)p[1],
-                                            (uint8 *)p[2], p[3], &got);
-                arkrtos_sched_unlock_internal();
-                ARKRTOS_SVC_RET(p_svc_ctx,
-                              (uint32)((fs_ret == 0) ? (int32)got : fs_ret));
-            }
-            break;
-
-        case ARKRTOS_FILE_SUB_REMOVE:                 /* remove */
-            if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-                break;
-            }
-            arkrtos_sched_lock_internal();
-            fs_ret = arkrtos_fs_remove((const char *)p[1]);
-            arkrtos_sched_unlock_internal();
-            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
-            break;
-
-        case ARKRTOS_FILE_SUB_STAT:                 /* stat */
-            if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-                break;
-            }
-            if(((p[2] != 0u) &&
-                (arkrtos_kernel_dev_buf_ok((const void *)p[2], 4) == 0u)) ||
-               ((p[3] != 0u) &&
-                (arkrtos_kernel_dev_buf_ok((const void *)p[3], 4) == 0u)))
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-                break;
-            }
-            arkrtos_sched_lock_internal();
-            fs_ret = arkrtos_fs_stat_path((const char *)p[1],
-                                         (uint32 *)p[2], (uint32 *)p[3]);
-            arkrtos_sched_unlock_internal();
-            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
-            break;
-
-        case ARKRTOS_FILE_SUB_MOUNT:                 /* make sure the default volume is up */
-            if(arkrtos_kernel_svc_args_ok(p, 4u) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-                break;
-            }
-            arkrtos_sched_lock_internal();
-            /* Idempotent on purpose: arkrtos_fs_mount() refuses to stack
-             * on a live mount (that would drop the old lfs_t and leak its
-             * state), and an App asking for the volume only means "I need
-             * it up".  The shell keeps the strict mount/unmount pair. */
-            fs_ret = (arkrtos_fs_mounted() != 0u) ? 0 : arkrtos_fs_mount_default();
-            arkrtos_sched_unlock_internal();
-            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
-            break;
-
-        case ARKRTOS_FILE_SUB_UNMOUNT:                 /* unmount */
-            arkrtos_sched_lock_internal();
-            fs_ret = arkrtos_fs_unmount();
-            arkrtos_sched_unlock_internal();
-            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
-            break;
-
-        case ARKRTOS_FILE_SUB_READ_AT:                 /* read a slice: path, buf, len, off */
-            if(arkrtos_kernel_svc_args_ok(p, 20u) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-                break;
-            }
-            if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-                break;
-            }
-            if(arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-                break;
-            }
-            {
-                uint32 got = 0u;
-
-                arkrtos_sched_lock_internal();
-                fs_ret = arkrtos_fs_read_at((const char *)p[1], (uint8 *)p[2],
-                                          p[3], p[4], &got);
-                arkrtos_sched_unlock_internal();
-                ARKRTOS_SVC_RET(p_svc_ctx,
-                              (uint32)((fs_ret == 0) ? (int32)got : fs_ret));
-            }
-            break;
-
-        case ARKRTOS_FILE_SUB_RENAME:                 /* rename: old, new */
-            if(arkrtos_kernel_svc_args_ok(p, 12u) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-                break;
-            }
-            if((arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u) ||
-               (arkrtos_kernel_user_name_ok((const void *)p[2], ARKRTOS_FS_PATH_MAX) == 0u))
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-                break;
-            }
-            arkrtos_sched_lock_internal();
-            fs_ret = arkrtos_fs_rename((const char *)p[1], (const char *)p[2]);
-            arkrtos_sched_unlock_internal();
-            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
-            break;
-
-        case ARKRTOS_FILE_SUB_LIST:                /* list names: dir, buf, size, count out */
-            if(arkrtos_kernel_svc_args_ok(p, 20u) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-                break;
-            }
-            if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-                break;
-            }
-            if((arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u) ||
-               (arkrtos_kernel_dev_buf_ok((const void *)p[4], 4) == 0u))
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-                break;
-            }
-            arkrtos_sched_lock_internal();
-            fs_ret = arkrtos_fs_list_names((const char *)p[1], (char *)p[2],
-                                         p[3], (uint32 *)p[4]);
-            arkrtos_sched_unlock_internal();
-            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
-            break;
-
-        case ARKRTOS_FILE_SUB_INFO:                 /* volume capacity */
-            if((arkrtos_kernel_dev_buf_ok((const void *)p[1], 4) == 0u) ||
-               (arkrtos_kernel_dev_buf_ok((const void *)p[2], 4) == 0u))
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-                break;
-            }
-            arkrtos_sched_lock_internal();
-            fs_ret = arkrtos_fs_stat((uint32 *)p[1], (uint32 *)p[2]);
-            arkrtos_sched_unlock_internal();
-            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
-            break;
-
-        /* ---- 11..18: the VFS namespace ----
-         * No scheduler lock of our own here: ark_vfs takes the port lock
-         * (which is arkrtos_sched_lock) around everything it does, and
-         * nesting it would only make the unlock order something to get
-         * wrong. Path and buffer checks stay on this side because only
-         * the kernel knows what the caller may legally reach. */
-        case ARKRTOS_PATH_SUB_OPEN:                /* open  path, flags -> handle */
-            if(arkrtos_kernel_svc_args_ok(p, 12u) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            if(arkrtos_kernel_user_name_ok((const void *)p[1],
-                                         ARKRTOS_VFS_PATH_MAX) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            ARKRTOS_SVC_RET(p_svc_ctx,
-                          (uint32)arkrtos_vfs_app_open((const char *)p[1], p[2]));
-            break;
-
-        case ARKRTOS_PATH_SUB_READ:                /* read  handle, buf, len -> bytes */
-            if(arkrtos_kernel_svc_args_ok(p, 16u) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            if(arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            ARKRTOS_SVC_RET(p_svc_ctx,
-                          (uint32)arkrtos_vfs_app_read((int32)p[1],
-                                                     (uint8 *)p[2], p[3]));
-            break;
-
-        case ARKRTOS_PATH_SUB_WRITE:                /* write handle, buf, len -> bytes */
-            if(arkrtos_kernel_svc_args_ok(p, 16u) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            if((p[3] != 0u) &&
-               (arkrtos_kernel_user_ro_ok((const void *)p[2], p[3]) == 0u))
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            ARKRTOS_SVC_RET(p_svc_ctx,
-                          (uint32)arkrtos_vfs_app_write((int32)p[1],
-                                                      (const uint8 *)p[2], p[3]));
-            break;
-
-        case ARKRTOS_PATH_SUB_CLOSE:                /* close handle */
-            if(arkrtos_kernel_svc_args_ok(p, 8u) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            ARKRTOS_SVC_RET(p_svc_ctx,
-                          (uint32)arkrtos_vfs_app_close((int32)p[1]));
-            break;
-
-        case ARKRTOS_PATH_SUB_STAT:                /* stat path, size out, mode out */
-            if(arkrtos_kernel_svc_args_ok(p, 16u) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            if(arkrtos_kernel_user_name_ok((const void *)p[1],
-                                         ARKRTOS_VFS_PATH_MAX) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            if(((p[2] != 0u) &&
-                (arkrtos_kernel_dev_buf_ok((const void *)p[2], 4) == 0u)) ||
-               ((p[3] != 0u) &&
-                (arkrtos_kernel_dev_buf_ok((const void *)p[3], 4) == 0u)))
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            ARKRTOS_SVC_RET(p_svc_ctx,
-                          (uint32)arkrtos_vfs_app_stat((const char *)p[1],
-                                                     (uint32 *)p[2],
-                                                     (uint32 *)p[3]));
-            break;
-
-        case ARKRTOS_PATH_SUB_SEEK:                /* seek handle, off, whence */
-            if(arkrtos_kernel_svc_args_ok(p, 16u) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            ARKRTOS_SVC_RET(p_svc_ctx,
-                          (uint32)arkrtos_vfs_app_seek((int32)p[1],
-                                                     (int32)p[2], p[3]));
-            break;
-
-        case ARKRTOS_PATH_SUB_READDIR:                /* readdir handle, name, cap, mode, size */
-            if(arkrtos_kernel_svc_args_ok(p, 24u) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            if((p[3] == 0u) ||
-               (arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u))
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            if(((p[4] != 0u) &&
-                (arkrtos_kernel_dev_buf_ok((const void *)p[4], 4) == 0u)) ||
-               ((p[5] != 0u) &&
-                (arkrtos_kernel_dev_buf_ok((const void *)p[5], 4) == 0u)))
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            ARKRTOS_SVC_RET(p_svc_ctx,
-                          (uint32)arkrtos_vfs_app_readdir((int32)p[1],
-                                                        (char *)p[2], p[3],
-                                                        (uint32 *)p[4],
-                                                        (uint32 *)p[5]));
-            break;
-
-        case ARKRTOS_PATH_SUB_UNLINK:                /* unlink path */
-            if(arkrtos_kernel_svc_args_ok(p, 8u) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            if(arkrtos_kernel_user_name_ok((const void *)p[1],
-                                         ARKRTOS_VFS_PATH_MAX) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            ARKRTOS_SVC_RET(p_svc_ctx,
-                          (uint32)arkrtos_vfs_app_unlink((const char *)p[1]));
-            break;
-
-        case ARKRTOS_PATH_SUB_MKDIR:                /* mkdir path */
-            if(arkrtos_kernel_svc_args_ok(p, 8u) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            if(arkrtos_kernel_user_name_ok((const void *)p[1],
-                                         ARKRTOS_VFS_PATH_MAX) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            ARKRTOS_SVC_RET(p_svc_ctx,
-                          (uint32)arkrtos_vfs_app_mkdir((const char *)p[1]));
-            break;
-
-        case ARKRTOS_PATH_SUB_RMDIR:                /* rmdir path */
-            if(arkrtos_kernel_svc_args_ok(p, 8u) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            if(arkrtos_kernel_user_name_ok((const void *)p[1],
-                                         ARKRTOS_VFS_PATH_MAX) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            ARKRTOS_SVC_RET(p_svc_ctx,
-                          (uint32)arkrtos_vfs_app_rmdir((const char *)p[1]));
-            break;
-
-        case ARKRTOS_PATH_SUB_RENAME:                /* rename old, new */
-            if(arkrtos_kernel_svc_args_ok(p, 12u) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            if((arkrtos_kernel_user_name_ok((const void *)p[1],
-                                          ARKRTOS_VFS_PATH_MAX) == 0u) ||
-               (arkrtos_kernel_user_name_ok((const void *)p[2],
-                                          ARKRTOS_VFS_PATH_MAX) == 0u))
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            ARKRTOS_SVC_RET(p_svc_ctx,
-                          (uint32)arkrtos_vfs_app_rename((const char *)p[1],
-                                                       (const char *)p[2]));
-            break;
-
-        case ARKRTOS_PATH_SUB_TRUNCATE:                /* truncate path, size */
-            if(arkrtos_kernel_svc_args_ok(p, 12u) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            if(arkrtos_kernel_user_name_ok((const void *)p[1],
-                                         ARKRTOS_VFS_PATH_MAX) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            ARKRTOS_SVC_RET(p_svc_ctx,
-                          (uint32)arkrtos_vfs_app_truncate_path(
-                              (const char *)p[1], p[2]));
-            break;
-
-        case ARKRTOS_PATH_SUB_FTRUNCATE:                /* ftruncate handle, size */
-            if(arkrtos_kernel_svc_args_ok(p, 12u) == 0u)
-            {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-                break;
-            }
-            ARKRTOS_SVC_RET(p_svc_ctx,
-                          (uint32)arkrtos_vfs_app_truncate((int32)p[1],
-                                                         p[2]));
-            break;
-
-        default:
-            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-            break;
-        }
+    /* Anything 11 or above goes to the namespace half, so an unknown
+     * subcommand lands on its default and comes back EINVAL, as before. */
+    if(p[0] <= ARKRTOS_FILE_SUB_LIST)
+    {
+        svc_fs_volume(p_svc_ctx, p);
+    }
+    else
+    {
+        svc_fs_namespace(p_svc_ctx, p);
     }
 }
 

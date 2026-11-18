@@ -256,6 +256,7 @@ text 54536 / data 80 / bss 18032
 
 - Polled serial, no reset, 10 criteria.
 - **Erratum 2026-11-16**: the `utest` criterion used to be a false green (`0 matched, 0 passed, 0 failed`).
+- **Erratum 2026-11-18**: the `stack` criterion was hard-coded at `5 task(s)`. The example later registered ELF/MOD demo tasks, the count became 9, and the script had been failing for a reason unrelated to the object under test. Replaced by three criteria that do not grow with the example: count >= 5, `stack` count == `ps` PID rows (two independent views disagreeing means one of them is inventing numbers), plus `0 unmeasured` and `0 at/over 90%`. Current reading `9 task(s)`, script PASS again.
 - §5.11.3, the third silent wrong answer: enabling interrupts inside the exception path left `s_in_trap` permanently off by 1, so `d_tick=0` while SVC lagged 500 ms. Fix: `enable_irq` returns immediately when `s_in_trap != 0`. Before the fix, 6 of 14 runs showed it; after, 0 of 18.
 
 ### 5.12 PLV3 + static TLB
@@ -1426,6 +1427,27 @@ Root cause: `load_buffer` never folded the relocation table into `crc_written`, 
 Readings: switch-on build 17/17, `assertions 155`; default build 13/13, `133`; `sec: 12 checks - pass 7, fail 0, finding 2, skip 3`.
 
 `tools/sec_crc_gate.py` covers 8 pins and both builds of 4 translation units.
+#### 5.30.5 Later size change (2026-11-18, unrelated to this section)
+
+After a later purely structural cleanup the same default image is no longer `fbd1094e...`.
+`svc_file_sys()` in `kernelsrc/src/arkrtos_task.c` (458 lines) was split along the path-model
+boundary its own comment already described, into `svc_fs_volume()` (subcommands 1..10,
+volume relative), `svc_fs_namespace()` (11..23, namespace absolute) and a `svc_file_sys()`
+that is now only an argument check plus one branch. Case bodies were moved line for line and
+dedented by 4 spaces; no return value or error code changed.
+
+Same criterion (`SOURCE_DATE_EPOCH=1600000000`, `objcopy -O binary`):
+
+```
+before  text 367536 / data 440 / bss 767508   sha256 fbd1094e...   31,462,512 B
+after   text 367584 / data 440 / bss 767508   sha256 66a09c13...   31,462,512 B
+```
+
+That is `text` +48 B (one extra call level plus constants `-O2` no longer shares); `data`,
+`bss` and the image length are unchanged. **Do not claim byte-identical** - the binary did
+change, only the behaviour did not. The behavioural criterion is that
+`python example/qemu_loongarch64/shell_check.py` still prints `PASS` (all nine groups),
+with `stack` reporting `9 task(s)`, `0 unmeasured`, `0 at/over 90%`.
 
 ## 6. LoongArch32 port (compiles, never executed)
 
