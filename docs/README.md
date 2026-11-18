@@ -84,6 +84,7 @@
 | 想知道它和 Linux 比还差什么、哪些是欠账哪些是定位差 | [与Linux差距盘点.md](与Linux差距盘点.md) |
 | Read the same Linux gap inventory in English | [与Linux差距盘点.en.md](与Linux差距盘点.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 想知道它和 FreeRTOS / RT-Thread / Zephyr 比还缺什么 | [与成熟RTOS对比.md](与成熟RTOS对比.md)（逐维度矩阵 + 缺口分档 + 明确不做的） |
+| Read the same page in English | [与成熟RTOS对比.en.md](与成熟RTOS对比.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 让设备之间互相发现、发事件、远程调用、传数据（软总线） | [软总线接入.md](软总线接入.md)（ark_softbus 同步副本、三钩子端口、MCU 档与 RAM 实测、`bus` 命令与上板自检） |
 | Read the softbus integration page in English | [软总线接入.en.md](软总线接入.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 不用 Keil，想用 GNU Make + arm-none-eabi-gcc 编 F427 例程 | [GCC构建指南.md](GCC构建指南.md)（工程位置、工具链、make 用法、与 Keil 的对应、GCC 侧三个坑、验证状态） |
@@ -184,6 +185,7 @@ docs/
 ├── 与Linux差距盘点.en.md                    # 【English】浓缩英文版：三类口径（取舍/欠账/生态）、九维度差距表、欠账排序与不做的清单；中文页 normative
 
 ├── 与成熟RTOS对比.md                       # 【设计说明】对 FreeRTOS/RT-Thread/Zephyr 的逐维度矩阵 + 缺口分档
+├── 与成熟RTOS对比.en.md                     # 【English】与成熟RTOS对比页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── 硬件耦合审计.md                          # 【设计说明】内核硬件耦合点清单与处置、移植要动的范围
 ├── 硬件耦合审计.en.md                       # 【English】浓缩英文版：达标/待修/结构性解耦三档结论、八方向依赖矩阵、内核里 HAL 令牌扫描命中表、三条待修（guard 反向 include、死宏 168 MHz 对实测 96 MHz、F401 借用 F427 HAL 目录）、四层耦合原则（capability/feature/contract/layout）、ark_vfs 切分形态与 12 个 include 分区头的文件里唯一例外；中文页 normative
 ├── 软总线接入.md                            # 【设计说明】ark_softbus 组件同步副本、板级三钩子、MCU 档位与 RAM 实测、`bus` 命令与上板自检

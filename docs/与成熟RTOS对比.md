@@ -1,5 +1,7 @@
 # 与成熟 RTOS 的对比：FreeRTOS / RT-Thread / Zephyr
 
+**[简体中文](与成熟RTOS对比.md) | English([与成熟RTOS对比.en.md](与成熟RTOS对比.en.md))**
+
 > **口径**
 > - **Ark RTOS 一列**来自本仓库现状（源码 + `docs/`），可逐条核对。
 > - **其余三列**来自各自官方文档（页面见文末），只写稳定事实。
