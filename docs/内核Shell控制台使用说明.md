@@ -1,5 +1,7 @@
 # 内核 Shell 控制台使用说明（ark-shell 移植）
 
+**[简体中文](内核Shell控制台使用说明.md) | English([内核Shell控制台使用说明.en.md](内核Shell控制台使用说明.en.md))**
+
 > 源码：[`kernelsrc/shell/`](../kernelsrc/shell/)（上游 [ark-shell](https://gitee.com/xw19981010/ark-shell.git) 原样引入 + 一个 Ark RTOS 平台适配层）。
 > 配置：`config/arkrtos_partition.h` 第四节「内核 Shell 控制台」。
 

@@ -23,6 +23,7 @@
 | 看调度器在真机上长什么样（图） | 根目录 [`README.md`](../README.md) §调度表现（4.97 s trace 实测图，图存 `docs/img/`） |
 | 读英文项目说明 | 根目录 [`readme_en.md`](../readme_en.md)（与中文 [`readme.md`](../readme.md) 对应，同一份内容） |
 | 用串口控制台看状态、启停 App、改配置 | [内核Shell控制台使用说明.md](内核Shell控制台使用说明.md) |
+| 用英文读同一份 Shell 控制台说明 | [内核Shell控制台使用说明.en.md](内核Shell控制台使用说明.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 搞清 Shell / 日志为什么长这样、和 Linux 差在哪 | [Shell与日志Linux化.md](Shell与日志Linux化.md)（命令风格、日志分级与出口、dmesg 环） |
 | 不想敲命令行，要图形界面 | `python tools/arkrtos_host_gui.py`（连接 / 控制台 / 安装 / 布局配置四个页签） |
 | 用脚本 / 自动化流程驱动这块板子 | [`../skills/arkrtos/SKILL.md`](../skills/arkrtos/SKILL.md) 与《Ark RTOS应用安装与调试指南.md》§11 |
@@ -116,6 +117,7 @@ docs/
 ├── Shell命令拆分方案.md                     # 【方案·未实施】shell 单文件 6244 行的只读盘点、目标文件划分、共享符号清单、迁移顺序与判据
 ├── 设备树.md                                # 【设计说明】DTS 子集与 dtc_lite、arkrtos_dt 查询 API、生成与校验、`dt` 命令、验证状态
 ├── 内核Shell控制台使用说明.md               # 【操作手册】console 命令（info/app/drv/task/sched/fault/install/log/pool/trace/cfg）
+├── 内核Shell控制台使用说明.en.md              # 【English】Shell 控制台页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── 已知限制.md                              # 【设计说明】唯一一页限制清单：执行模型/应用形态/系统服务/可靠性安全/工具链，逐条标注取舍或欠账
 ├── 欠账盘点.md                              # 【清单】功能/工程能力/易读性/文档四类欠账，每条带核对命令与判据、优先级与维护规则
 ├── 格式基线.md                              # 【设计说明】`.editorconfig` + `tools/format_gate.py`：四条纯字节规则（无制表符/无行尾空白/文件以换行结尾/无 BOM）、vendored 豁免表、喂毒自检、`\r\r\n` 致 `__LINE__` 偏移 1143 的取证
