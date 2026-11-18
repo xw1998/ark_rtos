@@ -1083,33 +1083,13 @@ static int32 mod_task_alive(const mod_slot_t *s)
     return (arkrtos_task_table[s->task - 1].status != ARKRTOS_TASK_INVALID) ? 1 : 0;
 }
 
-int32 arkrtos_mod_load(const char *path, int32 argc, char *argv[])
+/* 参数表自检：每个 argv[i] 非空且短于 MOD_ARG_LEN。
+ * 「缺省成一个参数」不在这里补——那要一个返回后仍然有效的数组，只能由
+ * 调用点自己持有。 */
+static int32 mod_args_valid(int32 argc, char *argv[])
 {
-    mod_link_t c;
-    mod_shdr_t sh;
     uint32 i;
-    uint32 len = 0u;
-    uint32 entry = 0u;
-    int32 slot;
-    int32 rc;
-    int32 id;
-    char *argv_auto[1];
-    const char *base_name;
 
-    if((path == 0) || (path[0] == '\0'))
-    {
-        return ARKRTOS_MOD_ERR_PARAM;
-    }
-    if((argc < 0) || (argc > (int32)MOD_MAX_ARGS))
-    {
-        return ARKRTOS_MOD_ERR_PARAM;
-    }
-    if((argc == 0) || (argv == 0))
-    {
-        argv_auto[0] = (char *)path;
-        argv = argv_auto;
-        argc = 1;
-    }
     for(i = 0u; i < (uint32)argc; i++)
     {
         if(argv[i] == 0)
@@ -1121,17 +1101,16 @@ int32 arkrtos_mod_load(const char *path, int32 argc, char *argv[])
             return ARKRTOS_MOD_ERR_PARAM;
         }
     }
+    return ARKRTOS_MOD_OK;
+}
 
-    s_last_missing[0] = '\0';
-    s_last_bad_reloc  = 0u;
+/* 把整个 .o 读进 s_mod_file，出参是正文长度（已扣掉可选的签名 tag）。
+ * 文件比槽还大就读不进来：这是容量事实，不是格式问题。 */
+static int32 mod_read_image(const char *path, uint32 *p_len)
+{
+    uint32 len = 0u;
+    int32 rc;
 
-    slot = mod_slot_find_free();
-    if(slot < 0)
-    {
-        return ARKRTOS_MOD_ERR_NOMEM;
-    }
-
-    /* 读整个 .o。文件比槽还大就读不进来：这是容量事实，不是格式问题。 */
     rc = arkrtos_vfs_read_file(path, s_mod_file, ARKRTOS_MOD_SLOT_SIZE, &len);
     if(rc < 0)
     {
@@ -1159,19 +1138,30 @@ int32 arkrtos_mod_load(const char *path, int32 argc, char *argv[])
         return ARKRTOS_MOD_ERR_FORMAT;
     }
 
-    for(i = 0u; i < sizeof(c); i++)
+    *p_len = len;
+    return ARKRTOS_MOD_OK;
+}
+
+/* 解析 ELF 头与节表，找出 .symtab / .strtab，并把链接上下文（c）按这个槽
+ * 的落点填好。只读不写镜像。 */
+static int32 mod_parse_elf(mod_link_t *c, int32 slot, uint32 len)
+{
+    mod_shdr_t sh;
+    uint32 i;
+
+    for(i = 0u; i < sizeof(*c); i++)
     {
-        ((uint8 *)&c)[i] = 0u;
+        ((uint8 *)c)[i] = 0u;
     }
-    c.file = s_mod_file;
-    c.file_len = len;
-    c.img = s_mod_pool + ((uint32)slot * ARKRTOS_MOD_SLOT_SIZE);
+    c->file = s_mod_file;
+    c->file_len = len;
+    c->img = s_mod_pool + ((uint32)slot * ARKRTOS_MOD_SLOT_SIZE);
     /* 窗口地址 = 池子在这个槽上的真实地址（恒等映射下即可执行地址）。
      * 不能拿宏来算：宏只是「期望窗口在哪」，池子的实际落点由链接器定。 */
-    c.base = (uint32)(unsigned long)c.img;
-    c.size = ARKRTOS_MOD_SLOT_SIZE;
-    c.symtab = 0xFFFFFFFFu;
-    c.strtab = 0xFFFFFFFFu;
+    c->base = (uint32)(unsigned long)c->img;
+    c->size = ARKRTOS_MOD_SLOT_SIZE;
+    c->symtab = 0xFFFFFFFFu;
+    c->strtab = 0xFFFFFFFFu;
 
     /* --- ELF 头 --- */
     if((s_mod_file[0] != 0x7Fu) || (s_mod_file[1] != 'E') ||
@@ -1193,73 +1183,94 @@ int32 arkrtos_mod_load(const char *path, int32 argc, char *argv[])
         return ARKRTOS_MOD_ERR_FORMAT;
     }
 
-    c.shoff     = (uint32)m_rd64(s_mod_file + 40);
-    c.shentsize = m_rd16(s_mod_file + 58);
-    c.shnum     = m_rd16(s_mod_file + 60);
-    if((c.shentsize != MOD_SHDR_SIZE) || (c.shnum == 0u) ||
-       (c.shnum > MOD_MAX_SEC) ||
-       ((c.shoff + (c.shnum * c.shentsize)) > len))
+    c->shoff     = (uint32)m_rd64(s_mod_file + 40);
+    c->shentsize = m_rd16(s_mod_file + 58);
+    c->shnum     = m_rd16(s_mod_file + 60);
+    if((c->shentsize != MOD_SHDR_SIZE) || (c->shnum == 0u) ||
+       (c->shnum > MOD_MAX_SEC) ||
+       ((c->shoff + (c->shnum * c->shentsize)) > len))
     {
         return ARKRTOS_MOD_ERR_FORMAT;
     }
 
     /* --- 找 .symtab / .strtab --- */
-    for(i = 0u; i < c.shnum; i++)
+    for(i = 0u; i < c->shnum; i++)
     {
-        mod_shdr(&c, i, &sh);
+        mod_shdr(c, i, &sh);
         if(sh.sh_type == MOD_SHT_SYMTAB)
         {
-            c.symtab = i;
-            c.strtab = sh.sh_link;
+            c->symtab = i;
+            c->strtab = sh.sh_link;
         }
     }
-    if((c.symtab == 0xFFFFFFFFu) || (c.strtab >= c.shnum))
+    if((c->symtab == 0xFFFFFFFFu) || (c->strtab >= c->shnum))
     {
         /* 没有符号表就既找不到入口也解析不了外部引用——不是可以「凑合跑」的情况。 */
         return ARKRTOS_MOD_ERR_FORMAT;
     }
 
-    rc = mod_place(&c);
+    return ARKRTOS_MOD_OK;
+}
+
+/* 布局 -> GOT -> 搬字节 -> 回填 GOT -> 重定位 -> 找入口。
+ * 失败时把「缺哪个符号 / 哪条重定位坏了」留在诊断变量里：调用者要知道缺谁，
+ * 不能只拿到一个 -6/-7。 */
+static int32 mod_link_image(mod_link_t *c, uint32 *p_entry)
+{
+    int32 rc;
+
+    rc = mod_place(c);
     if(rc != ARKRTOS_MOD_OK)
     {
         return rc;
     }
-    rc = mod_got_alloc(&c);
+    rc = mod_got_alloc(c);
     if(rc != ARKRTOS_MOD_OK)
     {
         return rc;
     }
-    rc = mod_copy(&c);
+    rc = mod_copy(c);
     if(rc != ARKRTOS_MOD_OK)
     {
         return rc;
     }
-    rc = mod_got_fill(&c);
+    rc = mod_got_fill(c);
     if(rc != ARKRTOS_MOD_OK)
     {
         return rc;
     }
-    rc = mod_reloc_all(&c);
+    rc = mod_reloc_all(c);
     if(rc != ARKRTOS_MOD_OK)
     {
         /* 部分失败只剩诊断信息，不能只说一个 -6/-7：调用者要知道缺谁。 */
         if(rc == ARKRTOS_MOD_ERR_SYMBOL)
         {
-            m_strcpy_n(s_last_missing, MOD_NAME_LEN, c.last_sym);
+            m_strcpy_n(s_last_missing, MOD_NAME_LEN, c->last_sym);
         }
         else if(rc == ARKRTOS_MOD_ERR_RELOC)
         {
-            s_last_bad_reloc = c.last_reloc;
+            s_last_bad_reloc = c->last_reloc;
         }
         return rc;
     }
-    rc = mod_find_entry(&c, &entry);
+    rc = mod_find_entry(c, p_entry);
     if(rc != ARKRTOS_MOD_OK)
     {
         return rc;
     }
 
-    /* --- 记槽 --- */
+    return ARKRTOS_MOD_OK;
+}
+
+/* 链接成功之后才记槽：名字、几何、参数表。
+ * 参数拷进槽自己的静态区：shell 的 argv 指向它的行缓冲，等模块任务真跑起来
+ * 时那行可能已经被下一行覆盖了。 */
+static void mod_commit_slot(int32 slot, const char *path, int32 argc,
+                            char *argv[], const mod_link_t *c, uint32 entry)
+{
+    const char *base_name;
+    uint32 i;
+
     base_name = path;
     for(i = 0u; path[i] != '\0'; i++)
     {
@@ -1271,16 +1282,14 @@ int32 arkrtos_mod_load(const char *path, int32 argc, char *argv[])
     m_strcpy_n(s_slots[slot].name, MOD_NAME_LEN, base_name);
 
     s_slots[slot].used       = 1;
-    s_slots[slot].base       = c.base;
-    s_slots[slot].size       = c.cur - c.base;
+    s_slots[slot].base       = c->base;
+    s_slots[slot].size       = c->cur - c->base;
     s_slots[slot].entry      = entry;
-    s_slots[slot].text_bytes = c.text_bytes;
-    s_slots[slot].relocs     = c.relocs;
-    s_slots[slot].imports    = c.imports;
+    s_slots[slot].text_bytes = c->text_bytes;
+    s_slots[slot].relocs     = c->relocs;
+    s_slots[slot].imports    = c->imports;
     s_slots[slot].argc       = (uint32)argc;
 
-    /* 参数拷进槽自己的静态区：shell 的 argv 指向它的行缓冲，等模块任务真
-     * 跑起来时那行可能已经被下一行覆盖了。 */
     for(i = 0u; i < (uint32)argc; i++)
     {
         m_strcpy_n(s_mod_argv[slot][i], MOD_ARG_LEN, argv[i]);
@@ -1290,6 +1299,64 @@ int32 arkrtos_mod_load(const char *path, int32 argc, char *argv[])
     {
         s_mod_argp[slot][i] = (char *)0;      /* argv[argc] == NULL，模块可以靠它收尾 */
     }
+}
+
+int32 arkrtos_mod_load(const char *path, int32 argc, char *argv[])
+{
+    mod_link_t c;
+    uint32 len = 0u;
+    uint32 entry = 0u;
+    int32 slot;
+    int32 rc;
+    int32 id;
+    char *argv_auto[1];
+
+    if((path == 0) || (path[0] == '\0'))
+    {
+        return ARKRTOS_MOD_ERR_PARAM;
+    }
+    if((argc < 0) || (argc > (int32)MOD_MAX_ARGS))
+    {
+        return ARKRTOS_MOD_ERR_PARAM;
+    }
+    if((argc == 0) || (argv == 0))
+    {
+        argv_auto[0] = (char *)path;
+        argv = argv_auto;
+        argc = 1;
+    }
+    rc = mod_args_valid(argc, argv);
+    if(rc != ARKRTOS_MOD_OK)
+    {
+        return rc;
+    }
+
+    s_last_missing[0] = '\0';
+    s_last_bad_reloc  = 0u;
+
+    slot = mod_slot_find_free();
+    if(slot < 0)
+    {
+        return ARKRTOS_MOD_ERR_NOMEM;
+    }
+
+    rc = mod_read_image(path, &len);
+    if(rc != ARKRTOS_MOD_OK)
+    {
+        return rc;
+    }
+    rc = mod_parse_elf(&c, slot, len);
+    if(rc != ARKRTOS_MOD_OK)
+    {
+        return rc;
+    }
+    rc = mod_link_image(&c, &entry);
+    if(rc != ARKRTOS_MOD_OK)
+    {
+        return rc;
+    }
+
+    mod_commit_slot(slot, path, argc, argv, &c, entry);
 
     id = arkrtos_task_register(mod_task_tramp, s_mod_stack[slot],
                               (uint32)sizeof(s_mod_stack[slot]),

@@ -4027,6 +4027,50 @@ after   text 367336 / data 440 / bss 767508   sha256 b0ad6a91…   31,462,512 B
 编译），**行为未验证**。`doc_audit.py funcs`：超过 120 行的函数 **29 → 28**，最长换成
 `arkrtos_mod_load()`（220 行）。
 
+#### 5.30.11 第六笔：`arkrtos_mod_load()` 按「读 / 解析 / 链接 / 记槽」分开（2026-11-18）
+
+`kernelsrc/src/arkrtos_modld.c` 的 `arkrtos_mod_load()`（220 行）是模块装载的总入口：自检参数、
+读整个 `.o`（含可选签名 tag）、解析 ELF 头与节表、布局 / GOT / 搬运 / 重定位 / 找入口、最后记槽
+并起任务。按这五段拆成五个 `static`：
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `mod_args_valid()` | 每个 `argv[i]` 非空且短于 `MOD_ARG_LEN`；「缺省成一个参数」不在这里补（那要一个返回后仍然有效的数组，只能由调用点自己持有） | 17 |
+| `mod_read_image()` | 读整个 `.o` 进 `s_mod_file`；`ARKRTOS_USE_EXEC_SIGN` 下校验尾部 32 字节 tag 并把 `len` 缩回正文长度（不缩的话坏对象会拿 tag 当节头表读） | 35 |
+| `mod_parse_elf()` | 清零链接上下文、按本槽落点填 `img`/`base`/`size`、校 ELF 头（magic / class / machine / `ET_REL`）、校节表边界、找 `.symtab` / `.strtab` | 67 |
+| `mod_link_image()` | `mod_place` → `mod_got_alloc` → `mod_copy` → `mod_got_fill` → `mod_reloc_all`（失败时把缺的符号名 / 坏的重定位类型留在诊断变量里）→ `mod_find_entry` | 46 |
+| `mod_commit_slot()` | 取 basename、写槽的名字与几何、把 `argv` 拷进槽自己的静态区并补 `argv[argc] = NULL` | 35 |
+| `arkrtos_mod_load()` 自己 | 参数形态与缺省、清诊断、选空槽、串起五段、`arkrtos_task_register`（失败时把 `used` 清回 0） | **69**（原 220） |
+
+`mod_parse_elf()` 与其余几段都收 `mod_link_t *`，`field` 一律从 `.` 改成 `->`；`mod_commit_slot()`
+只读上下文（`const mod_link_t *`）。等价性仍用归一化行多重集比对：only-OLD 只剩这些 `.` → `->`、
+`&c` → `c` 的改写（33 条），**没有语句丢失**。
+
+**这一笔是本轮第一次拿到真运行读数**（前四笔里有三笔落在默认档关着的路径上）。LA64 默认档
+`ARKRTOS_USE_MODLOAD=1`，`example/qemu_loongarch64/mod_demo.c` 在开机后会把编进镜像的
+`modhello.o` 写进 ramfs 再现场链接执行；QEMU 串口抓到：
+
+```
+[MOD] write /mnt/ram/modhello.o rc=0 size=6256
+[MOD] ld[modhello] hello from a relocatable module
+[MOD] module finished after 0 ms; try: ld /mnt/ram/modhello.o a b
+[MOD] tamper check PASS (bad tag refused, rc=4294967285)
+```
+
+即装载、重定位、入口查找、参数传递、跑完退出、以及签名 tag 拒绝这六件事全部照旧。`shell_check.py`
+也 `PASS`（但它本身不跑 `mod` 命令，模块这条链的证据来自上面的串口读数，不是来自它）。
+
+读数：
+
+```
+before  text 367336 / data 440 / bss 767508   sha256 b0ad6a91…   31,462,512 B
+after   text 367400 / data 440 / bss 767508   sha256 a5403823…   31,462,512 B
+```
+
+`text` **+64 B**（多出五组函数进出与一次 `slot` 传参，`-O2` 没能完全内联掉），`data`/`bss` 与镜像
+总长不变；`arkrtos_modld.c` 在默认档 **0 条告警**。`doc_audit.py funcs`：超过 120 行的函数
+**28 → 27**，最长换成 `arkrtos_loader_stream_image()`（212 行）。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

@@ -1675,6 +1675,53 @@ for this split. Verdict level: compiles (including the forced-switch shim build)
 verified**. `doc_audit.py funcs`: functions over 120 lines **29 -> 28**, and the longest is now
 `arkrtos_mod_load()` (220 lines).
 
+#### 5.30.11 Sixth one: `arkrtos_mod_load()` split by read, parse, link and commit (2026-11-18)
+
+`arkrtos_mod_load()` in `kernelsrc/src/arkrtos_modld.c` (220 lines) is the module loader's entry
+point: validate arguments, read the whole object (plus an optional signature tag), parse the ELF
+header and section table, run layout / GOT / copy / relocation / entry lookup, then record the slot
+and start the task. It is now five `static` helpers:
+
+| Function | Responsibility | Lines |
+|---|---|---|
+| `mod_args_valid()` | every `argv[i]` non-null and shorter than `MOD_ARG_LEN`; the "default to a single argument" shape is *not* built here, because that needs an array which outlives the call, so the caller keeps it | 17 |
+| `mod_read_image()` | read the whole object into `s_mod_file`; under `ARKRTOS_USE_EXEC_SIGN` verify the 32-byte trailing tag and shrink `len` back to the body length (otherwise a crafted object can make the tag look like a section header table) | 35 |
+| `mod_parse_elf()` | zero the link context, fill `img` / `base` / `size` from this slot, check the ELF header (magic / class / machine / `ET_REL`), check section table bounds, find `.symtab` / `.strtab` | 67 |
+| `mod_link_image()` | `mod_place` -> `mod_got_alloc` -> `mod_copy` -> `mod_got_fill` -> `mod_reloc_all` (recording the missing symbol name or bad relocation type for diagnostics) -> `mod_find_entry` | 46 |
+| `mod_commit_slot()` | basename, slot name and geometry, copy `argv` into the slot's own static area and add `argv[argc] = NULL` | 35 |
+| `arkrtos_mod_load()` itself | argument shape and default, clear diagnostics, pick a free slot, chain the five stages, `arkrtos_task_register` (clearing `used` on failure) | **69** (was 220) |
+
+The helpers take a `mod_link_t *`, so `field` becomes `->field`; `mod_commit_slot()` takes it as
+`const`. Equivalence was again argued with the normalised line multiset: only-OLD contains just the
+33 `.` -> `->` / `&c` -> `c` rewrites, **no statement was lost**.
+
+**This is the first split in this round with real runtime readings.** `ARKRTOS_USE_MODLOAD=1` in the
+LA64 default build, and `example/qemu_loongarch64/mod_demo.c` writes the embedded `modhello.o` into
+ramfs after boot and links it on the spot. The QEMU serial output shows:
+
+```
+[MOD] write /mnt/ram/modhello.o rc=0 size=6256
+[MOD] ld[modhello] hello from a relocatable module
+[MOD] module finished after 0 ms; try: ld /mnt/ram/modhello.o a b
+[MOD] tamper check PASS (bad tag refused, rc=4294967285)
+```
+
+That covers loading, relocation, entry lookup, argument passing, normal exit and the signature-tag
+rejection. `shell_check.py` also reports `PASS`, but it does not run the `mod` command itself; the
+module evidence is the serial output above.
+
+Readings:
+
+```
+before  text 367336 / data 440 / bss 767508   sha256 b0ad6a91...   31,462,512 B
+after   text 367400 / data 440 / bss 767508   sha256 a5403823...   31,462,512 B
+```
+
+`text` **+64 B** (five function prologues/epilogues plus one `slot` argument that `-O2` did not
+inline away); `data` / `bss` and the image length are unchanged; `arkrtos_modld.c` compiles with
+**0 warnings**. `doc_audit.py funcs`: functions over 120 lines **28 -> 27**, and the longest is now
+`arkrtos_loader_stream_image()` (212 lines).
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine
