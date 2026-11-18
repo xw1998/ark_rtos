@@ -48,6 +48,7 @@
 | 让板上编译出来的产物**掉电后还在**、复位后还能跑（外部 QSPI NOR + littlefs） | [arkc板上直跑-M3b-QSPI持久化.md](arkc板上直跑-M3b-QSPI持久化.md)（AF 权威表来源与逐脚映射、/WP /HOLD 单线坑、为什么读也走位敲、「新建文件被判 I/O 错误」这条只在 littlefs 上现形的内核缺陷、`fs put` 上传通道、24.8 s / 33.7 s 的速度账、跨复位自启尚未达成） |
 | Read the same page in English | [arkc板上直跑-M3b-QSPI持久化.en.md](arkc板上直跑-M3b-QSPI持久化.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 板上一声「跑不起来」到底看哪个错误码、编进去多少、怎么一条命令复跑 M1/M2 | [arkc产物上板-错误码表与回归账本.md](arkc产物上板-错误码表与回归账本.md)（三条装载路径的错误码表 + 两处编号重叠、五类典型失败落点、六行尺寸账本、`tools/final_app.py` 四条用例与它自己踩过的四个坑） |
+| Read the same page in English | [arkc产物上板-错误码表与回归账本.en.md](arkc产物上板-错误码表与回归账本.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 板上一份工程描述把几份 `.c` 打成一个能跑的镜像（`make`） | [ark make-板上构建工具.md](ark make-板上构建工具.md)（为什么不是 GNU make、五个键、四遍打包的三条硬约束、失败阶段怎么翻成错误码、关掉时零体积、这一轮抓到的两个真缺陷） |
 | Read the same page in English | [ark make-板上构建工具.en.md](ark make-板上构建工具.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 从 NOR 上的工程目录 `make` 出一个**标准 C** 的 hello world（`<stdio.h>` + `printf` + `int main`），再 `mini run` 跑起来 | [arkc板上直跑-M4-hello演示.md](arkc板上直跑-M4-hello演示.md)（SDK 两源三头、`cd /mnt/nor/hello && make && mini run` 实录、`printf` 的 `__asm` 取参桩怎么绕开"没有 va_list"、七条硬限制、两条回归用例与 printf 宿主门禁） |
