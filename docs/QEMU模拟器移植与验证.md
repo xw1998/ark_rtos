@@ -4239,6 +4239,42 @@ after               text 367480 / data 440 / bss 767508   sha256 666ef74f…   3
 
 **结论分档：QEMU 实跑验证过（默认档逐字节不变 + 端到端 PASS），未上板。**
 
+#### 5.30.16 第十一笔：`svc_fs_volume()` 按「内容读写 / 元数据 / 命名空间编辑 / 挂载对」分开（2026-11-18）
+
+`kernelsrc/src/arkrtos_task.c` 的 `svc_fs_volume()`（191 行）是 `ARKRTOS_SVC_FILE_SYS` 子命令
+1..10 的服务端实现：全是「参数再核一遍 → 加调度锁 → 调 `arkrtos_fs_*` → 放锁 → 回一个值」的
+同一副骨架，只是载体不同。这一笔按参数形状把它分成四组，主函数只剩分发：
+
+| 函数 | 管哪些子命令 | 行数 |
+|---|---|---|
+| `svc_fs_vol_io()` | 1 WRITE / 2 READ / 7 READ_AT——都是「路径 + 调用方缓冲区」的内容读写，读类在 `fs_ret == 0` 时把 `got` 当返回值 | 77 |
+| `svc_fs_vol_meta()` | 4 STAT / 10 INFO——调用方交进来的是 4 字节出参，服务端不读用户内存 | 41 |
+| `svc_fs_vol_tree()` | 3 REMOVE / 8 RENAME / 9 LIST——命名空间上的改动与枚举 | 61 |
+| `svc_fs_vol_mount()` | 5 MOUNT / 6 UNMOUNT——默认卷这一对（MOUNT 故意幂等，UNMOUNT 严格） | 30 |
+| `svc_fs_volume()` 自己 | 十个 case 归成四组 dispatch，末尾 `default` 回 `ARKRTOS_VFS_EINVAL` | **31**（原 191） |
+
+等价性用归一化行多重集比对：**only-OLD 为空**——一个 case 体、一条参数检查、一次加锁/放锁、
+一个返回值都没被改写或丢失，十个 case 体是整段原样搬进各自的 helper（缩进都没变，因为 helper
+里的 `switch` 与原函数同一层）。only-NEW 45 行全是结构性新增：4 个函数签名、4 个 `switch(p[0])`、
+8 个 `{`/`}`、3 个 `int32 fs_ret;`、10 个 case 标号（入口那 10 个标号的注释被去掉后与原标号
+逐字相同，计入抵消）、4 处 dispatch 调用与 4 个 `break;`。
+
+这一笔是默认档真实生效的代码，且**真的被 `shell_check.py` 走到**（`ls` / `cat` 走的就是这套
+VFS SVC）。体积：
+
+```
+before（第十笔之后） text 367480 / data 440 / bss 767508   sha256 666ef74f…   31,462,512 B
+after              text 367528 / data 440 / bss 767508   sha256 f33290de…   31,462,512 B
+```
+
+`text` **+48 B**（四次额外调用与四个新函数入口的常数开销；内层 case 体字节不变所以远小于
+拆出的源码行数），`data`/`bss` 与镜像总长不变；`arkrtos_task.c` 告警前后**同为 147 条**，
+全部是该文件既有的 `-Wpointer-to-int-cast` / `-Wint-to-pointer-cast`（这个文件在搬用户指针，
+与本次拆分无关）。`shell_check.py` `PASS`（`build/shell_check_fsvol.log`）。`doc_audit.py funcs`：
+超过 120 行的函数 **23 → 22**，最长换成 `apppack_scan()`（185 行）。
+
+**结论分档：QEMU 实跑验证过（默认档 + 端到端 PASS 且真走这条 SVC），未上板。**
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

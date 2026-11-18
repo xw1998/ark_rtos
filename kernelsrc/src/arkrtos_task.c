@@ -1504,10 +1504,10 @@ static void svc_heartbeat(void *p_svc_ctx)
 }
 
 /* ARKRTOS_SVC_FILE_SYS: argument check + inner dispatch only; the dispatch table is SVC_Server. */
-/* ARKRTOS_SVC_FILE_SYS 1..10: volume-relative paths on the one mount.
- * Moved verbatim out of svc_file_sys; the argument block has already been
+/* API NOTE: ARKRTOS_SVC_FILE_SYS 1 / 2 / 7: path plus caller buffer, content read and write.
+ * Moved verbatim out of svc_fs_volume; the argument block has already been
  * bounds checked by the caller. */
-static void svc_fs_volume(void *p_svc_ctx, uint32 *p)
+static void svc_fs_vol_io(void *p_svc_ctx, uint32 *p)
 {
     int32 fs_ret;
 
@@ -1555,62 +1555,6 @@ static void svc_fs_volume(void *p_svc_ctx, uint32 *p)
         }
         break;
 
-    case ARKRTOS_FILE_SUB_REMOVE:                 /* remove */
-        if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
-        {
-            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-            break;
-        }
-        arkrtos_sched_lock_internal();
-        fs_ret = arkrtos_fs_remove((const char *)p[1]);
-        arkrtos_sched_unlock_internal();
-        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
-        break;
-
-    case ARKRTOS_FILE_SUB_STAT:                 /* stat */
-        if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
-        {
-            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-            break;
-        }
-        if(((p[2] != 0u) &&
-            (arkrtos_kernel_dev_buf_ok((const void *)p[2], 4) == 0u)) ||
-           ((p[3] != 0u) &&
-            (arkrtos_kernel_dev_buf_ok((const void *)p[3], 4) == 0u)))
-        {
-            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-            break;
-        }
-        arkrtos_sched_lock_internal();
-        fs_ret = arkrtos_fs_stat_path((const char *)p[1],
-                                     (uint32 *)p[2], (uint32 *)p[3]);
-        arkrtos_sched_unlock_internal();
-        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
-        break;
-
-    case ARKRTOS_FILE_SUB_MOUNT:                 /* make sure the default volume is up */
-        if(arkrtos_kernel_svc_args_ok(p, 4u) == 0u)
-        {
-            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-            break;
-        }
-        arkrtos_sched_lock_internal();
-        /* Idempotent on purpose: arkrtos_fs_mount() refuses to stack
-         * on a live mount (that would drop the old lfs_t and leak its
-         * state), and an App asking for the volume only means "I need
-         * it up".  The shell keeps the strict mount/unmount pair. */
-        fs_ret = (arkrtos_fs_mounted() != 0u) ? 0 : arkrtos_fs_mount_default();
-        arkrtos_sched_unlock_internal();
-        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
-        break;
-
-    case ARKRTOS_FILE_SUB_UNMOUNT:                 /* unmount */
-        arkrtos_sched_lock_internal();
-        fs_ret = arkrtos_fs_unmount();
-        arkrtos_sched_unlock_internal();
-        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
-        break;
-
     case ARKRTOS_FILE_SUB_READ_AT:                 /* read a slice: path, buf, len, off */
         if(arkrtos_kernel_svc_args_ok(p, 20u) == 0u)
         {
@@ -1637,6 +1581,72 @@ static void svc_fs_volume(void *p_svc_ctx, uint32 *p)
             ARKRTOS_SVC_RET(p_svc_ctx,
                           (uint32)((fs_ret == 0) ? (int32)got : fs_ret));
         }
+        break;
+    }
+}
+
+/* API NOTE: ARKRTOS_SVC_FILE_SYS 4 / 10: callers hand in 4-byte out-params, no user memory
+ * is read here.  Moved verbatim out of svc_fs_volume. */
+static void svc_fs_vol_meta(void *p_svc_ctx, uint32 *p)
+{
+    int32 fs_ret;
+
+    switch(p[0])
+    {
+    case ARKRTOS_FILE_SUB_STAT:                 /* stat */
+        if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+        if(((p[2] != 0u) &&
+            (arkrtos_kernel_dev_buf_ok((const void *)p[2], 4) == 0u)) ||
+           ((p[3] != 0u) &&
+            (arkrtos_kernel_dev_buf_ok((const void *)p[3], 4) == 0u)))
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+        arkrtos_sched_lock_internal();
+        fs_ret = arkrtos_fs_stat_path((const char *)p[1],
+                                     (uint32 *)p[2], (uint32 *)p[3]);
+        arkrtos_sched_unlock_internal();
+        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
+        break;
+
+    case ARKRTOS_FILE_SUB_INFO:                 /* volume capacity */
+        if((arkrtos_kernel_dev_buf_ok((const void *)p[1], 4) == 0u) ||
+           (arkrtos_kernel_dev_buf_ok((const void *)p[2], 4) == 0u))
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+        arkrtos_sched_lock_internal();
+        fs_ret = arkrtos_fs_stat((uint32 *)p[1], (uint32 *)p[2]);
+        arkrtos_sched_unlock_internal();
+        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
+        break;
+    }
+}
+
+/* API NOTE: ARKRTOS_SVC_FILE_SYS 3 / 8 / 9: edits and enumeration over the volume-relative
+ * namespace.  Moved verbatim out of svc_fs_volume. */
+static void svc_fs_vol_tree(void *p_svc_ctx, uint32 *p)
+{
+    int32 fs_ret;
+
+    switch(p[0])
+    {
+    case ARKRTOS_FILE_SUB_REMOVE:                 /* remove */
+        if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
+        {
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+            break;
+        }
+        arkrtos_sched_lock_internal();
+        fs_ret = arkrtos_fs_remove((const char *)p[1]);
+        arkrtos_sched_unlock_internal();
+        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
         break;
 
     case ARKRTOS_FILE_SUB_RENAME:                 /* rename: old, new */
@@ -1680,22 +1690,75 @@ static void svc_fs_volume(void *p_svc_ctx, uint32 *p)
         arkrtos_sched_unlock_internal();
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
         break;
+    }
+}
 
-    case ARKRTOS_FILE_SUB_INFO:                 /* volume capacity */
-        if((arkrtos_kernel_dev_buf_ok((const void *)p[1], 4) == 0u) ||
-           (arkrtos_kernel_dev_buf_ok((const void *)p[2], 4) == 0u))
+/* API NOTE: ARKRTOS_SVC_FILE_SYS 5 / 6: the default-volume pair (MOUNT is idempotent on
+ * purpose, UNMOUNT is strict).  Moved verbatim out of svc_fs_volume. */
+static void svc_fs_vol_mount(void *p_svc_ctx, uint32 *p)
+{
+    int32 fs_ret;
+
+    switch(p[0])
+    {
+    case ARKRTOS_FILE_SUB_MOUNT:                 /* make sure the default volume is up */
+        if(arkrtos_kernel_svc_args_ok(p, 4u) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
         arkrtos_sched_lock_internal();
-        fs_ret = arkrtos_fs_stat((uint32 *)p[1], (uint32 *)p[2]);
+        /* Idempotent on purpose: arkrtos_fs_mount() refuses to stack
+         * on a live mount (that would drop the old lfs_t and leak its
+         * state), and an App asking for the volume only means "I need
+         * it up".  The shell keeps the strict mount/unmount pair. */
+        fs_ret = (arkrtos_fs_mounted() != 0u) ? 0 : arkrtos_fs_mount_default();
         arkrtos_sched_unlock_internal();
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
         break;
-        default:
-            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
-            break;
+
+    case ARKRTOS_FILE_SUB_UNMOUNT:                 /* unmount */
+        arkrtos_sched_lock_internal();
+        fs_ret = arkrtos_fs_unmount();
+        arkrtos_sched_unlock_internal();
+        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
+        break;
+    }
+}
+
+/* ARKRTOS_SVC_FILE_SYS 1..10: volume-relative paths on the one mount.
+ * Moved verbatim out of svc_file_sys; the argument block has already been
+ * bounds checked by the caller.  Dispatch only: the bodies live in
+ * svc_fs_vol_io / svc_fs_vol_meta / svc_fs_vol_tree / svc_fs_vol_mount. */
+static void svc_fs_volume(void *p_svc_ctx, uint32 *p)
+{
+    switch(p[0])
+    {
+    case ARKRTOS_FILE_SUB_WRITE:                 /* create / truncate and write */
+    case ARKRTOS_FILE_SUB_READ:                  /* read into a caller buffer */
+    case ARKRTOS_FILE_SUB_READ_AT:               /* read a slice: path, buf, len, off */
+        svc_fs_vol_io(p_svc_ctx, p);
+        break;
+
+    case ARKRTOS_FILE_SUB_STAT:                  /* stat */
+    case ARKRTOS_FILE_SUB_INFO:                  /* volume capacity */
+        svc_fs_vol_meta(p_svc_ctx, p);
+        break;
+
+    case ARKRTOS_FILE_SUB_REMOVE:                /* remove */
+    case ARKRTOS_FILE_SUB_RENAME:                /* rename: old, new */
+    case ARKRTOS_FILE_SUB_LIST:                  /* list names: dir, buf, size, count out */
+        svc_fs_vol_tree(p_svc_ctx, p);
+        break;
+
+    case ARKRTOS_FILE_SUB_MOUNT:                 /* make sure the default volume is up */
+    case ARKRTOS_FILE_SUB_UNMOUNT:               /* unmount */
+        svc_fs_vol_mount(p_svc_ctx, p);
+        break;
+
+    default:
+        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
+        break;
     }
 }
 

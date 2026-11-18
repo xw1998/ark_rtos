@@ -1917,6 +1917,48 @@ longest is now `svc_fs_volume()` (191 lines).
 
 **Evidence tier: executed on QEMU (byte-identical default profile plus end-to-end PASS); not on board.**
 
+#### 5.30.16 Eleventh one: `svc_fs_volume()` split by content I/O, metadata, namespace edits and the mount pair (2026-11-18)
+
+`svc_fs_volume()` in `kernelsrc/src/arkrtos_task.c` (191 lines) serves `ARKRTOS_SVC_FILE_SYS`
+sub-commands 1..10. Every one of them has the same skeleton — re-check the arguments, take the
+scheduler lock, call `arkrtos_fs_*`, drop the lock, answer — only the payload differs. This split groups
+them by argument shape and leaves the entry point as pure dispatch:
+
+| Function | Sub-commands | Lines |
+|---|---|---|
+| `svc_fs_vol_io()` | 1 WRITE / 2 READ / 7 READ_AT — path plus caller buffer; the read variants answer with `got` when `fs_ret == 0` | 77 |
+| `svc_fs_vol_meta()` | 4 STAT / 10 INFO — callers hand in 4-byte out-params, no user memory is read here | 41 |
+| `svc_fs_vol_tree()` | 3 REMOVE / 8 RENAME / 9 LIST — edits and enumeration on the namespace | 61 |
+| `svc_fs_vol_mount()` | 5 MOUNT / 6 UNMOUNT — the default-volume pair (MOUNT is idempotent on purpose, UNMOUNT is strict) | 30 |
+| `svc_fs_volume()` itself | the ten cases fold into four dispatch groups, with `default` answering `ARKRTOS_VFS_EINVAL` | **31** (was 191) |
+
+Equivalence was argued with the normalised line multiset: **only-OLD is empty** — not one case body, not
+one argument check, not one lock/unlock pair and not one return value was rewritten or dropped; the ten
+case bodies moved verbatim (even their indentation, because the helper `switch` sits at the same depth).
+only-NEW holds 45 structural lines: four signatures, four `switch(p[0])`, eight braces, three
+`int32 fs_ret;`, ten case labels (the ten labels in the entry point, once their trailing comments are
+stripped, are textually identical to the originals and cancel out), four dispatch calls and four
+`break;`.
+
+This is live code in the default profile, and `shell_check.py` **actually exercises it** (`ls` and `cat`
+go through this VFS SVC):
+
+```
+before (after the tenth commit)  text 367480 / data 440 / bss 767508   sha256 666ef74f...   31,462,512 B
+after                            text 367528 / data 440 / bss 767508   sha256 f33290de...   31,462,512 B
+```
+
+`text` **+48 B** (constant overhead of four extra calls and four new function entry points — the inner
+case bodies are byte-identical, so the growth is far smaller than the number of moved source lines);
+`data` / `bss` and the image length are unchanged. `arkrtos_task.c` reports **147** warnings before and
+after, all of them the file's existing `-Wpointer-to-int-cast` / `-Wint-to-pointer-cast` (this file
+marshals user pointers; unrelated to the split). `shell_check.py` `PASS`
+(`build/shell_check_fsvol.log`). `doc_audit.py funcs`: functions over 120 lines **23 -> 22**, and the
+longest is now `apppack_scan()` (185 lines).
+
+**Evidence tier: executed on QEMU (default profile plus end-to-end PASS, and the path is really taken);
+not on board.**
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine
