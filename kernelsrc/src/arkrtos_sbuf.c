@@ -540,7 +540,9 @@ int32 arkrtos_sbuf_send_internal(int32 handle, const void *buf, int32 len, int32
                                                      (handle & ARKRTOS_HANDLE_RELMASK)));
         ret = arkrtos_task_block_in_critical((remain < 0) ? 0u : (uint32)remain);
 
-        if((ret & ARKRTOS_WAKE_HANDOFF) == 0)
+        /* ret < 0 是「没能睡下」（内核上下文 / 调度器锁定），不是交接：
+         * -1 的每一位都是 1，单看令牌位会把它当成「拿到了」，于是原地重睡到死。 */
+        if((ret < 0) || ((ret & ARKRTOS_WAKE_HANDOFF) == 0))
         {
             arkrtos_sbuf_waiter_remove(p_sb->send_waiters, p_tsk);
             ARKRTOS_ENABLE_IRQ();
@@ -548,7 +550,11 @@ int32 arkrtos_sbuf_send_internal(int32 handle, const void *buf, int32 len, int32
             {
                 return ARKRTOS_SBUF_ERR_TIMEOUT;
             }
-            return ARKRTOS_SBUF_ERR_PARAM;   /* 对象被删 / 未能阻塞 */
+            if(ret == ARKRTOS_WAKE_OBJ_DELETED)
+            {
+                return ARKRTOS_SBUF_ERR_DELETED;
+            }
+            return ARKRTOS_SBUF_ERR_PARAM;   /* 未能阻塞（ret < 0）/ 其他唤醒原因 */
         }
 
         n = sbuf_send_fit(p_sb, handle, buf, len);
@@ -647,13 +653,19 @@ int32 arkrtos_sbuf_recv_internal(int32 handle, void *buf, int32 len, int32 timeo
                                                      (handle & ARKRTOS_HANDLE_RELMASK)));
         ret = arkrtos_task_block_in_critical((remain < 0) ? 0u : (uint32)remain);
 
-        if((ret & ARKRTOS_WAKE_HANDOFF) == 0)
+        /* ret < 0 是「没能睡下」（内核上下文 / 调度器锁定），不是交接：
+         * -1 的每一位都是 1，单看令牌位会把它当成「拿到了」，于是原地重睡到死。 */
+        if((ret < 0) || ((ret & ARKRTOS_WAKE_HANDOFF) == 0))
         {
             arkrtos_sbuf_waiter_remove(p_sb->recv_waiters, p_tsk);
             ARKRTOS_ENABLE_IRQ();
             if(ret == ARKRTOS_WAKE_TIMEOUT)
             {
                 return ARKRTOS_SBUF_ERR_TIMEOUT;
+            }
+            if(ret == ARKRTOS_WAKE_OBJ_DELETED)
+            {
+                return ARKRTOS_SBUF_ERR_DELETED;
             }
             return ARKRTOS_SBUF_ERR_PARAM;
         }
@@ -881,13 +893,19 @@ int32 arkrtos_mbuf_send_internal(int32 handle, const void *buf, int32 len, int32
                                                      (handle & ARKRTOS_HANDLE_RELMASK)));
         ret = arkrtos_task_block_in_critical((remain < 0) ? 0u : (uint32)remain);
 
-        if((ret & ARKRTOS_WAKE_HANDOFF) == 0)
+        /* ret < 0 是「没能睡下」（内核上下文 / 调度器锁定），不是交接：
+         * -1 的每一位都是 1，单看令牌位会把它当成「拿到了」，于是原地重睡到死。 */
+        if((ret < 0) || ((ret & ARKRTOS_WAKE_HANDOFF) == 0))
         {
             arkrtos_sbuf_waiter_remove(p_sb->send_waiters, p_tsk);
             ARKRTOS_ENABLE_IRQ();
             if(ret == ARKRTOS_WAKE_TIMEOUT)
             {
                 return ARKRTOS_SBUF_ERR_TIMEOUT;
+            }
+            if(ret == ARKRTOS_WAKE_OBJ_DELETED)
+            {
+                return ARKRTOS_SBUF_ERR_DELETED;
             }
             return ARKRTOS_SBUF_ERR_PARAM;
         }
@@ -1040,13 +1058,19 @@ static int32 mbuf_recv_wait(arkrtos_sbuf_obj_t *p_sb, void *buf, int32 len,
                                                      (handle & ARKRTOS_HANDLE_RELMASK)));
         ret = arkrtos_task_block_in_critical((remain < 0) ? 0u : (uint32)remain);
 
-        if((ret & ARKRTOS_WAKE_HANDOFF) == 0)
+        /* ret < 0 是「没能睡下」（内核上下文 / 调度器锁定），不是交接：
+         * -1 的每一位都是 1，单看令牌位会把它当成「拿到了」，于是原地重睡到死。 */
+        if((ret < 0) || ((ret & ARKRTOS_WAKE_HANDOFF) == 0))
         {
             arkrtos_sbuf_waiter_remove(p_sb->recv_waiters, p_tsk);
             ARKRTOS_ENABLE_IRQ();
             if(ret == ARKRTOS_WAKE_TIMEOUT)
             {
                 return ARKRTOS_SBUF_ERR_TIMEOUT;
+            }
+            if(ret == ARKRTOS_WAKE_OBJ_DELETED)
+            {
+                return ARKRTOS_SBUF_ERR_DELETED;
             }
             return ARKRTOS_SBUF_ERR_PARAM;
         }

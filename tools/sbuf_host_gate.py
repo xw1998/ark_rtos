@@ -10,9 +10,14 @@
 消息长度头错位、装不下时留下半条。这些在板子上只能靠眼睛看串口，
 在宿主上可以逐字节断言。
 
-已知边界：阻塞 / 唤醒路径需要真实调度器，测试里的 task_get_current()
-返回 0，所以只有非阻塞路径被覆盖。那部分只有上板用例能证明，不要把这
-条门禁读成"整个模块已验证"。
+覆盖面：非阻塞路径（字节搬运、回绕、部分成功、长度头）逐字节断言；
+阻塞路径由测试里那套**可编程桩**驱动，六类收尾都走到了——登记后无法阻塞、
+被唤醒但资源没到手（重新排队到超时）、被唤醒且资源到手、剩余时间用尽、
+等待期间对象被删除、用户态轮询（只登记不睡）。
+
+已知边界：桩只回答"唤醒原因给成这样时代码走哪条路"，不回答"调度器会不会
+按时唤醒它"——真睡下、真越 ISR 唤醒、真节拍推进、真超时只有上板用例能证明。
+不要把这门禁读成"整个模块已验证"。
 
 用法
 ----
@@ -33,6 +38,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 TEST_C = os.path.join(ROOT, "kernelsrc", "tests", "test_sbuf_host.c")
 SBUF_C = os.path.join(ROOT, "kernelsrc", "src", "arkrtos_sbuf.c")
+
+MARKER = "SBUF-HOST OK"
 
 GCC_FALLBACKS = [
     "gcc",
@@ -94,8 +101,15 @@ def main():
         print("build failed", file=sys.stderr)
         return 1
 
-    r = subprocess.run([exe], cwd=ROOT)
-    ok = (r.returncode == 0)
+    r = subprocess.run([exe], cwd=ROOT, capture_output=True)
+    out = (r.stdout + r.stderr).decode("utf-8", "replace")
+    sys.stdout.write(out)
+    # 只判退出码不够：用例全 FAIL 也是非 0，但"一条没跑"同样可能是非 0。
+    # 成功的标记行必须在，否则说明用例根本没走到最后。
+    ok = (r.returncode == 0) and (MARKER in out)
+    if not ok:
+        print("SBUF-GATE FAIL: 退出码 %d，标记行「%s」%s"
+              % (r.returncode, MARKER, "在" if MARKER in out else "不在"), file=sys.stderr)
 
     if not args.keep:
         shutil.rmtree(td, ignore_errors=True)
