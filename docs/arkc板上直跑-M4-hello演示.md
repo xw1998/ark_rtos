@@ -1,5 +1,7 @@
 # arkc 板上直跑 M4：NOR 上的标准 C hello world，`cd` 进目录 `make`，再 `mini run`
 
+**[简体中文](arkc板上直跑-M4-hello演示.md) | English([arkc板上直跑-M4-hello演示.en.md](arkc板上直跑-M4-hello演示.en.md))**
+
 **这份文档记录演示路径本身**：一个**标准 C** 的 hello world 工程（`#include
 <stdio.h>` + `printf` + `int main(void)`，一句 Ark RTOS 的东西都没有），源码
 常驻在外置 NOR flash 的 `/mnt/nor/hello/` 里，板上敲一条 `make` 编出小程序
