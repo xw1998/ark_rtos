@@ -56,6 +56,7 @@
 | 用英文读同一份开关清单 | [功能开关.en.md](功能开关.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 用字节流缓冲或定界消息缓冲传数据 | [流缓冲与消息缓冲.md](流缓冲与消息缓冲.md)（两种语义不可混用、返回码为什么避开 -4、开档体积实测） |
 | 要在固定块上分配（零碎片、O(1)、不依赖堆） | [固定块内存池.md](固定块内存池.md)（存储区由调用者提供、拒绝口径、SVC 0x20 子命令） |
+| Read the fixed-block pool in English | [固定块内存池.en.md](固定块内存池.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 想让空闲时别每 500 µs 被叫醒一次（省电） | [低功耗与tickless.md](低功耗与tickless.md)（按最近事件夹住睡眠、相位结算为什么不会越睡越慢、上限与边界、验证档位） |
 | Read the tickless-idle design in English | [低功耗与tickless.en.md](低功耗与tickless.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 要看实时性到底多少、最坏延迟多大 | [实时性与最坏延迟.md](实时性与最坏延迟.md)（DWT 周期计数器、四项读数口径、上板实测、三条边界、调试器清 TRCENA 的坑） |
@@ -124,6 +125,8 @@ docs/
 ├── 功能开关.en.md                           # 【English】功能开关页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── 流缓冲与消息缓冲.md                      # 【用法+证据】sbuf/mbuf 两种语义、返回码、配置与 H743/F427 开档体积
 ├── 固定块内存池.md                          # 【用法+证据】固定块池、SVC 0x20、拒绝口径与默认档链接实测
+├── 固定块内存池.en.md                       # 【English】浓缩英文版：为何不用堆、调用者提供存储区、接口与 SVC 0x20 子命令、拒绝口径、宿主 47 条与板端 9/9 与 MPOOL_DEMO 33 条证据；中文页 normative
+
 ├── 低功耗与tickless.md                      # 【设计说明+证据】睡眠长度怎么算、相位结算防丢拍、补齐走节拍体、边界与验收口径
 ├── 低功耗与tickless.en.md                   # 【English】浓缩英文版：睡眠长度怎么算、相位结算防丢拍、补齐走节拍体、F427 板端四个读数与体积账、功耗未测；中文页 normative
 
