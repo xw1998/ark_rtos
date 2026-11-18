@@ -2639,7 +2639,57 @@ reading: exercising it needs a real task exit plus real waiter queues (the `sync
 lock / semaphore waits and does not drive task teardown), so conclusions such as "who the lock was handed
 to" still need hardware or a dedicated host fixture and are not claimed here.
 
-## 6. LoongArch32 port (compiles, never executed)
+## 6. LoongArch32 port (compiles, never executed)#### 5.30.30 Twenty-fifth one: `arkrtos_crash_scan_apply()` split into claim-slot / sweep-unclaimed / publish-and-hold (2026-11-18)
+
+`arkrtos_crash_scan_apply()` in `kernelsrc/src/arkrtos_crash.c` (141 lines) is the one-shot reconciliation of
+the cross-reset crash journal at boot: the partition table is re-sorted by pool address on every reset while
+the journal still carries the previous indices, so the function first re-files every journal entry under the
+record that really owns its address, then sweeps the entries no record claims any more, and finally publishes
+the counts and holds the slots that are at or past the limit. Three sweeps of the whole table, separated by
+comments, which makes "claim" and "sweep" easy to read as one pass:
+
+| Function | What it owns | Lines |
+|---|---|---|
+| `arkrtos_crash_scan_rebind()` | Pass 1: for every non-empty slot whose index does not match the journal's base, find another journal entry carrying the same base, move it in whole and blank the source (so one address cannot be charged twice in the same pass); when nothing carries the address, drop the entry (replaced image / reused record must not hand its crashes to a newcomer) | 52 |
+| `arkrtos_crash_scan_drop_unclaimed()` | Pass 2: drop every journal entry whose base no non-empty slot claims (uninstalled image, address left the table) -- otherwise a later install landing on the same address would inherit the old count | 33 |
+| `arkrtos_crash_scan_publish()` | Pass 3: copy the counts into `slot_crash_cnt`; for a non-empty slot that already carries a disable reason or has reached the limit, fill in the reason and tick, clear autostart, hold it via `arkrtos_ptable_set_slot(..., INVALID, ...)` and emit one `ARKRTOS_LOGE` | 51 |
+| `arkrtos_crash_scan_apply()` itself | take the table / journal / limit -> three calls -> commit when anything changed | **16** (was 141) |
+
+Three rules: (1) the three passes share one "did anything change" accumulator, now an out-parameter
+`uint32 *p_changed`, and the entry no longer decides on committing inside a pass; (2) the limit `limit` is only
+used by Pass 3, so only `publish()` takes the extra parameter -- nothing is stuffed into a shared parameter
+struct just to make the signatures uniform, that only pushes each pass further from its own meaning; (3) the
+loop bounds `(i < p_pt->slot_max) && (i < (uint32)ARKRTOS_SLOT_ARRAY_MAX)`, the local flags `taken` /
+`claimed` and the position of every `break` are unchanged.
+
+Normalised equivalence: **only-OLD is 4 lines**, all the same edit -- four `changed = 1u;` become
+`*p_changed = 1u;` (one in Pass 1's move, one in its drop, one in Pass 2, one in Pass 3); only-NEW is 26 lines
+of three signatures (9 lines), three brace pairs, `uint32 i;` twice and `uint32 k;` once lifted to the helper
+tops, the `uint32 limit,` parameter, and the entry point's three calls.
+
+Size: text `367640 -> 367640` (**+-0 B**, all three helpers inlined back into `scan_apply` by `-O2`),
+`data` 440 / `bss` 767508 / image total 31,462,512 B unchanged. **The sha256 did change though**:
+`1b6982cc...` -> `3d6a3c84a305a68f76417977c192306fba750cebef6d399475e3d282564c476b`. That is not a semantic
+change: turning one long body into three inlined helpers made `-O2` re-order `scan_apply`'s stack slots. Both
+builds disassemble `arkrtos_crash_scan_apply` to **0x354 bytes / 213 instructions**; with register numbers and
+immediates masked to placeholders the **opcode stream is identical line by line** (`identical opcode stream:
+True`), and only 5 `st.d` spill offsets swap places (`0xc8/0xb0/0xa0/0xe0/0xd8`). Three independent builds
+(`build/_crash_repro`, `build/_crash_repro2`, and a rebuilt `build/qemu_loongarch64`) all produce the same
+`.bin` sha256 under `SOURCE_DATE_EPOCH=1600000000`. `arkrtos_crash.c` warnings **0 = 0 before the split**.
+
+Gates: `coverage-host` all 10 modules at or above baseline (`arkrtos_crash` is not a covered module, baseline
+untouched), `sec-crc` 8 pins, `format_gate` 361 own files clean, `doc_audit.py funcs` functions over 120 lines
+**9 -> 8** (longest is now `arkrtos_mq_recv_internal()` 139), `example/qemu_loongarch64/shell_check.py`
+**PASS**, `ci_gate` **47 passed / 0 failed**.
+
+**Conclusion tier: compiles + same warning count + three builds agree on sha256 + all 4 only-OLD lines
+accounted for + instruction stream proven equivalent + QEMU end-to-end PASS, not run on hardware.** This one
+adds **no new runtime reading**: `scan_apply` only does real work when a journal survives a reset *and* the
+table indices drift across it; on QEMU a normal boot leaves the journal empty and all three passes rotate
+through nothing, so "how many entries were claimed / swept / held" is not claimed here -- producing it would
+mean crashing an image on purpose and then changing the pool layout, which is a separate job.
+
+
 
 ### 6.1 No carrier on this machine
 

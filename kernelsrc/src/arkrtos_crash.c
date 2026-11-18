@@ -182,15 +182,6 @@ void arkrtos_crash_init(void)
     arkrtos_crash_commit();
 }
 
-void arkrtos_crash_scan_apply(void)
-{
-    arkrtos_partition_table_t *p_pt = arkrtos_ptable_get();
-    arkrtos_crash_journal_t *p_j = &arkrtos_crash_journal;
-    uint32 limit = arkrtos_crash_limit();
-    uint32 changed = 0u;
-    uint32 i;
-    uint32 k;
-
     /* Pass 1 - file every entry under the record that owns its address.
      * The journal is indexed by slot record, but the record order is rebuilt
      * on every reset (records come back sorted by pool address), so an image
@@ -199,6 +190,13 @@ void arkrtos_crash_scan_apply(void)
      * from one index may be the only history of a record further down the
      * table, and clearing it now would forgive the crashes of a slot this
      * pass has not reached yet. */
+static void arkrtos_crash_scan_rebind(arkrtos_partition_table_t *p_pt,
+                                      arkrtos_crash_journal_t *p_j,
+                                      uint32 *p_changed)
+{
+    uint32 i;
+    uint32 k;
+
     for(i = 0u; (i < p_pt->slot_max) && (i < (uint32)ARKRTOS_SLOT_ARRAY_MAX); i++)
     {
         uint32 taken = 0u;
@@ -229,7 +227,7 @@ void arkrtos_crash_scan_apply(void)
             p_j->dis_tick[i]    = p_j->dis_tick[k];
             arkrtos_crash_clear_entry(k);
             taken = 1u;
-            changed = 1u;
+            *p_changed = 1u;
             break;
         }
 
@@ -240,13 +238,21 @@ void arkrtos_crash_scan_apply(void)
              * Drop it rather than charge a newcomer with someone else's
              * crashes. */
             arkrtos_crash_clear_entry(i);
-            changed = 1u;
+            *p_changed = 1u;
         }
     }
+}
 
-    /* Pass 2 - drop history no record claims any more (an uninstalled image,
-     * or an address that left the table). Without this, a later install that
-     * happens to land on the same address would inherit the old count. */
+/* Pass 2 - drop history no record claims any more (an uninstalled image,
+ * or an address that left the table). Without this, a later install that
+ * happens to land on the same address would inherit the old count. */
+static void arkrtos_crash_scan_drop_unclaimed(arkrtos_partition_table_t *p_pt,
+                                              arkrtos_crash_journal_t *p_j,
+                                              uint32 *p_changed)
+{
+    uint32 i;
+    uint32 k;
+
     for(i = 0u; (i < (uint32)ARKRTOS_SLOT_ARRAY_MAX); i++)
     {
         uint32 claimed = 0u;
@@ -269,11 +275,19 @@ void arkrtos_crash_scan_apply(void)
         if(claimed == 0u)
         {
             arkrtos_crash_clear_entry(i);
-            changed = 1u;
+            *p_changed = 1u;
         }
     }
+}
 
-    /* Pass 3 - publish the counts and apply the hold. */
+/* Pass 3 - publish the counts and apply the hold. */
+static void arkrtos_crash_scan_publish(arkrtos_partition_table_t *p_pt,
+                                       arkrtos_crash_journal_t *p_j,
+                                       uint32 limit,
+                                       uint32 *p_changed)
+{
+    uint32 i;
+
     for(i = 0u; (i < p_pt->slot_max) && (i < (uint32)ARKRTOS_SLOT_ARRAY_MAX); i++)
     {
         p_pt->slot_crash_cnt[i] = p_j->crash_cnt[i];
@@ -297,7 +311,7 @@ void arkrtos_crash_scan_apply(void)
                                    ? p_j->last_reason[i]
                                    : (uint32)ARKRTOS_CRASH_REASON_FAULT;
                 p_j->dis_tick[i] = 0u;      /* disabled before this boot began */
-                changed = 1u;
+                *p_changed = 1u;
             }
 
             /* Keep the image out of this boot's autostart, and keep the state
@@ -317,6 +331,18 @@ void arkrtos_crash_scan_apply(void)
                        (unsigned)i, (unsigned)i);
         }
     }
+}
+
+void arkrtos_crash_scan_apply(void)
+{
+    arkrtos_partition_table_t *p_pt = arkrtos_ptable_get();
+    arkrtos_crash_journal_t *p_j = &arkrtos_crash_journal;
+    uint32 limit = arkrtos_crash_limit();
+    uint32 changed = 0u;
+
+    arkrtos_crash_scan_rebind(p_pt, p_j, &changed);
+    arkrtos_crash_scan_drop_unclaimed(p_pt, p_j, &changed);
+    arkrtos_crash_scan_publish(p_pt, p_j, limit, &changed);
 
     if(changed != 0u)
     {

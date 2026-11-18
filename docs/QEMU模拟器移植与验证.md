@@ -4861,7 +4861,49 @@ sha256**）；`arkrtos_sync.c` 告警 0 条与拆分前同数。
 宿主用例只覆盖加锁/等信号量，不驱动任务下线收尸），所以「谁被移交到锁」这类结论仍只有上板或专门的
 宿主夹具才能证明，本轮不声称。
 
-## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
+## 6. LoongArch32 移植#### 5.30.30 第二十五笔：`arkrtos_crash_scan_apply()` 按「认领槽 / 清扫无主 / 发布并扣留」分三段（2026-11-18）
+
+`kernelsrc/src/arkrtos_crash.c` 的 `arkrtos_crash_scan_apply()`（141 行）是开机时对跨复位崩溃日志做的一次性
+对账：分区表每次复位都会按池地址重排下标，日志却按上一次的下标记着账，所以要先「把每条账认领到名下地址真
+的属于它的槽」，再「把没有任何槽认领的账扫掉」，最后「把计数发布到分区表并按上限扣留」。三段各扫一次整表，
+中间隔着注释，混在一起读很容易把「认领」与「清扫」当成同一趟：
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `arkrtos_crash_scan_rebind()` | Pass 1：分区表里非空、且日志下标与该槽基址对不上的项，去全表找「基址相同」的另一条日志整条搬过来并把源条目清空（防止同一地址在同一趟里被记两次）；找不到就清掉（换了镜像 / 槽被复用，不能让新来者继承别人的崩溃） | 52 |
+| `arkrtos_crash_scan_drop_unclaimed()` | Pass 2：日志里任何「没有任何非空槽认领的基址」整条清掉（卸载的镜像 / 地址已离开分区表），否则后一次恰好落到同地址的安装会继承旧计数 | 33 |
+| `arkrtos_crash_scan_publish()` | Pass 3：把计数写进 `slot_crash_cnt`；对「已带禁用原因」或「计数达上限」的非空槽补禁用原因与 tick、清自动启动、`arkrtos_ptable_set_slot(..., INVALID, ...)` 扣留并打一条 `ARKRTOS_LOGE` | 51 |
+| `arkrtos_crash_scan_apply()` 自己 | 取分区表 / 日志 / 上限 → 三段调用 → 有任何改动就提交 | **16**（原 141） |
+
+口径三条：① 三段共用同一个「改过没有」的累计量，改成出参 `uint32 *p_changed`，入口不再在段内判断提交；
+② 上限 `limit` 只有 Pass 3 用得到，所以只有 `publish()` 多带一个形参，另两段不带 —— 不为「签名统一」把
+用不到的东西塞进去，那只会让三段离自己的语义更远；③ 循环边界 `(i < p_pt->slot_max) && (i <
+(uint32)ARKRTOS_SLOT_ARRAY_MAX)`、两个局部标志 `taken` / `claimed`、`break` 的位置全部原样保留。
+
+等价性归一化比对：**only-OLD 4 行**，全是同一件事——4 处 `changed = 1u;` 改成 `*p_changed = 1u;`
+（Pass 1 里搬成一条、找不到来源清掉一条，Pass 2 一条，Pass 3 一条）；only-NEW 26 行全是三个签名（9 行）、
+三组花括号、提到 helper 顶上的 `uint32 i;` 两处与 `uint32 k;` 一处、`uint32 limit,` 形参、入口的三次调用。
+
+体积：text `367640 → 367640`（**±0 B**，三个 helper 都被 `-O2` 内联回 `scan_apply`），`data` 440 /
+`bss` 767508 / 镜像总长 31,462,512 B 不变。**但 sha256 变了**：`1b6982cc…` →
+`3d6a3c84a305a68f76417977c192306fba750cebef6d399475e3d282564c476b`。这不是语义变化，是「一大段」变成
+「三段 + 内联」之后 `-O2` 换了 `scan_apply` 的栈槽分配顺序：把两个构建的 `arkrtos_crash_scan_apply`
+反汇编出来逐条比，都是 **0x354 字节 / 213 条指令**；把寄存器号与立即数抹成占位符后**指令流逐条完全相同**
+（`identical opcode stream: True`），只有 5 处 `st.d` 的栈偏移换了位次（`0xc8/0xb0/0xa0/0xe0/0xd8`）。
+三次独立构建（`build/_crash_repro`、`build/_crash_repro2`、重编的 `build/qemu_loongarch64`）的 `.bin`
+在 `SOURCE_DATE_EPOCH=1600000000` 下 sha256 全等于上面那一串。`arkrtos_crash.c` 告警 **0 条 = 拆分前 0 条**。
+
+门禁：`coverage-host` 10 个模块均不低于基线（`arkrtos_crash` 不在覆盖对象内，基线未动）、`sec-crc` 8 pin
+全过、`format_gate` 361 个自有文件干净、`doc_audit.py funcs` 超过 120 行的函数 **9 → 8**（最长换成
+`arkrtos_mq_recv_internal()` 139）、`example/qemu_loongarch64/shell_check.py` **PASS**、`ci_gate`
+**47 passed / 0 failed**。
+
+**结论分档：编译通过 + 告警同数 + 三次构建 sha256 一致 + only-OLD 4 行逐条可归因 + 指令流逐条等价 +
+QEMU 端到端 PASS，未上板。** 这一笔**没有新增运行读数**：`scan_apply` 真正干事要有「上一轮留下的日志 +
+这一轮分区表下标漂移」，QEMU 上正常启动时日志全空、三段都空转，所以「认领 / 清扫 / 扣留各命中几条」这类
+结论本轮不声称；要造出来得先让镜像崩一次再改池布局，属另一件事。
+
+（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行
 
