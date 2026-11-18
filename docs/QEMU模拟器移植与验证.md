@@ -3889,6 +3889,64 @@ after   text 367392 / data 440 / bss 767508   sha256 1d94199f…   31,462,512 B
 拆完之后 `doc_audit.py funcs` 里超过 120 行的函数从 32 个降到 **31 个**，最长换成
 `arkrtos_apppack.c` 的 `arkrtos_apppack_build()`（244 行）。
 
+#### 5.30.8 第三笔：`arkrtos_apppack_build()` 按五段分开（2026-11-18）
+
+`kernelsrc/src/arkrtos_apppack.c` 的 `arkrtos_apppack_build()`（244 行）本来就是按注释分好的
+五段流水，现在按这五段拆成五个 `static` 函数，主函数只剩「串起来并回填 `stats`」：
+
+| 函数 | 行数 | 管什么 | 进出什么 |
+|---|---|---|---|
+| `apppack_resolve_entry()` | 约 30 | 入口的两种合法形态（`e_entry` 直接落在负载内 / 落在头里的 `entry_off` 字段） | 出参 `*p_entry_off` |
+| `apppack_count_pass()` | 约 31 | 第一遍：逐条扫出补丁条数，不写任何输出 | 出参 `*p_count` / `*p_n` |
+| `apppack_write_table()` | 约 29 | 第二遍：写补丁表 + 确定性对账 + 偏移从「相对负载」换算成「相对镜像」 | 入 `n`/`payload_off`，出 `table[]` |
+| `apppack_verify_payload()` | 约 61 | 拷 A → 按表打补丁 → 与 D 逐字节比 → 再还原成 A（不让校验顺手改数据） | 入 `table`/`n`，出 `payload` |
+| `apppack_fill_header()` | 约 51 | 头清零 + 逐字段填 + `image_id` + 三段 CRC | 入 `payload`/`table`/`n` |
+| `arkrtos_apppack_build()` 自己 | **101**（原 244） | 校验参数 → 算 `payload_off`/`total` 与越界判据 → 依次调五个 → `*out_len = total` → 回填 `stats` | — |
+
+`payload_off` / `total` / `table` / `payload` 四个量**留在主函数**：它们要等第一遍数完 `n`
+才算得出来，搬进任何 helper 都只会多一层出参。case 体是逐行搬运，等价性同样用归一化行
+多重集比对：only-OLD 只剩被有意改写的几类语句（`entry_off =` → `*p_entry_off =`、
+`count.n_* = 0u` 的清零、`apppack_scan(…, &count)` → `(…, p_count)`、
+`n = count.n_rom + …` → `p_count->…`）与被搬到函数外的长注释首行；only-NEW 全是函数骨架、
+五条调用与 `if (rc != 0) { return rc; }`。**没有语句丢失**。
+
+**这一笔在默认档下体积逐字节不变**，与本文件前两笔的口径不同，原因必须写清：
+
+```
+before  text 367392 / data 440 / bss 767508   sha256 1d94199f…   31,462,512 B
+after   text 367392 / data 440 / bss 767508   sha256 1d94199f…   31,462,512 B
+```
+
+默认档 `ARKRTOS_USE_APPPACK=0`，整个 TU 被 `#if` 包成空目标，所以拆它不可能改变默认档的
+任何一个字节。这不是「拆分不留痕」的证据，只是「这条路径默认关着」。
+
+**那 `APPPACK=1` 的路径怎么验？** 所有板级头都是 `#undef` 后 `#define … 0`，命令行 `-D`
+打不过去；而 `tools/arkmake_syntax_gate.py` 与 `ci_gate.py` 都不编这个 TU。做法是造一个只
+用于校验的板级头 shim（放 `build/` 下，不入库）：
+
+```c
+/* build/_apppack_chk/arkrtos_board_config.h */
+#include "../../board/qemu_loongarch64/arkrtos_board_config.h"
+#undef  ARKRTOS_USE_APPPACK
+#define ARKRTOS_USE_APPPACK 1
+```
+
+把它放在 `-I` 列表第一位、配合 `-include arkrtos_board_config.h`，用与 make 相同的 LA64 flags
+`-c kernelsrc/src/arkrtos_apppack.c`：`exit=0`、零 warning，`nm` 见到
+`T arkrtos_apppack_build` 与 `T arkrtos_apppack_error_name` 两个真符号。**这是目前唯一能证明
+该 TU 在 `APPPACK=1` 下类型正确的办法**；它不是行为验证，`APPPACK=1` 的端到端仍属未验证。
+
+读数与判据：
+
+- 构建：`make -f example/qemu_loongarch64/Makefile` `exit=0`，`arkrtos_apppack.c` 零 warning；
+- 行为：`shell_check.py` **一次 `PASS`**（横幅/help/uname/dt/ls/cat/stack/utest 九组全过，
+  转录里 `[ELF]`/`[MOD]` 两条 tamper check 都在）；
+- `format_gate.py`：`361 own C/asm file(s) clean on F1-F4`；
+- `doc_audit.py funcs`：超过 120 行的函数 **31 → 30**，`arkrtos_apppack_build` 退出清单，
+  `apppack.c` 内最长换成 `apppack_scan()`（185 行，本笔未动）。
+
+结论档位：**仅编译通过 + 默认档 QEMU 端到端跑过**；`APPPACK=1` 只到「类型正确」，没有运行证据。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

@@ -413,74 +413,30 @@ const char *arkrtos_apppack_error_name(int32 code)
     }
 }
 
-int32 arkrtos_apppack_build(const uint8 *a, const uint8 *b, const uint8 *c,
-                          const uint8 *d, uint32 len, uint32 delta,
-                          const arkrtos_apppack_win_t *win, uint32 type,
-                          uint32 version, uint8 *out, uint32 out_cap,
-                          uint32 *out_len, arkrtos_apppack_stats_t *stats)
+/* 入口解析。两种合法形态只能靠负载自己的字节分辨——不能用「调用方说是
+ * 小程序所以肯定没有向量表」这种声明：cc --pack 的同一条路径既打过带
+ * Reset_Handler 的镜像（有表），也打小程序（没有表），源码里没有额外的入口
+ * 标志位，多造一个参数就等于让调用方去猜。
+ *
+ *   (1) 带向量表：+0 = 初始 SP（落在 RAM 窗口内）、+4 = 入口（Thumb 位为 1、
+ *       落在载荷内、且不落在表自己那 8 个字节上）。
+ *
+ *   (2) 平铺的小程序：没有复位向量——它是被内核当任务起来的（栈由 mini run
+ *       从 RAM 块里给，见 arkrtos_mini.c），负载 +0 就是 MINISTART 的第一条
+ *       指令，入口偏移恒为 0。这一种必须**正面认出**启动桩的序言
+ *       （THUMB PUSH：0xB4xx / 0xB5xx，SDK 里实测 0xB5E0），认不出就报错：
+ *       那说明 SRCS 的第一个不是启动桩，入口是错的，而错入口要到板上跑起来才炸。
+ *
+ * 顺序不能倒，也不能只留 (2)：先判 (1)，三个条件同时成立时把一份带表的
+ * 镜像误判成平铺镜像是不可能的（RAM 窗口在 0x24xxxxxx，而 PUSH 的机器码
+ * 是 0x0000B5E0 这一档）。 */
+static int32 apppack_resolve_entry(const uint8 *a, uint32 len,
+                                  const arkrtos_apppack_win_t *win,
+                                  uint32 *p_entry_off)
 {
-    arkrtos_app_header_t *p_hdr;
-    uint32 *table;
-    uint8  *payload;
-    apppack_count_t count;
-    uint32 n;
-    uint32 i;
-    uint32 payload_off;
-    uint32 total;
-    uint32 entry_value;
-    uint32 entry_off;
-    uint32 crc;
     uint32 sp;
+    uint32 entry_value;
 
-    if((a == 0) || (b == 0) || (c == 0) || (d == 0) || (win == 0) ||
-       (out == 0) || (out_len == 0))
-    {
-        return ARKRTOS_APPPACK_ERR_PARAM;
-    }
-
-    *out_len = 0u;
-
-    if((len == 0u) || ((len % 4u) != 0u) ||
-       (apppack_is_pow2(win->rom_size) == 0u) ||
-       (apppack_is_pow2(win->ram_size) == 0u) ||
-       (win->rom_size < 8u) || (win->ram_size < 8u))
-    {
-        return ARKRTOS_APPPACK_ERR_PARAM;
-    }
-
-    /* delta 小于任一窗口时，B/C 的地址段会与 A 重叠：重叠段里一个普通常量
-     * 也可能「恰好差 delta」，那样差分就不再是「这是个绝对地址」的证据。
-     * 这是判据成立的前提，不是保守。 */
-    if((delta < win->rom_size) || (delta < win->ram_size) || (delta == 0u))
-    {
-        return ARKRTOS_APPPACK_ERR_PARAM;
-    }
-
-    if(len > win->rom_size)
-    {
-        /* 负载比 ROM 窗口还大：它根本装不进按这个窗口链出来的镜像，继续打包
-         * 只会产出一份装上就撞坏邻居的镜像。 */
-        return ARKRTOS_APPPACK_ERR_SIZE;
-    }
-
-    /* 入口有两种合法形态，只能靠负载自己的字节分辨——不能用「调用方说是
-     * 小程序所以肯定没有向量表」这种声明：`cc --pack` 的同一条路径既打过
-     * 带 Reset_Handler 的镜像（有表），也打小程序（没有表），源码里没有
-     * 额外的入口标志位，多造一个参数就等于让调用方去猜。
-     *
-     *   (1) 带向量表：+0 = 初始 SP（落在 RAM 窗口内）、+4 = 入口（Thumb 位为 1、
-     *       落在载荷内、且不落在表自己那 8 个字节上）。
-     *
-     *   (2) 平铺的小程序：没有复位向量——它是被内核当任务起来的（栈由 mini run
-     *       从 RAM 块里给，见 arkrtos_mini.c），负载 +0 就是 MINISTART 的第一条
-     *       指令，入口偏移恒为 0。这一种必须**正面认出**启动桩的序言
-     *       （THUMB PUSH：0xB4xx / 0xB5xx，SDK 里实测 0xB5E0），认不出就报错：
-     *       那说明 SRCS 的第一个不是启动桩，入口是错的，而错入口要到板上跑起来才炸。
-     *
-     * 顺序不能倒，也不能只留 (2)：先判 (1)，三个条件同时成立时把一份带表的
-     * 镜像误判成平铺镜像是不可能的（RAM 窗口在 0x24xxxxxx，而 PUSH 的机器码
-     * 是 0x0000B5E0 这一档）。
-     */
     sp = apppack_rd32(a);
     entry_value = apppack_rd32(a + 4u);
 
@@ -490,29 +446,37 @@ int32 arkrtos_apppack_build(const uint8 *a, const uint8 *b, const uint8 *c,
        (((entry_value & ~1u) - win->rom_base) >= 8u) &&
        (((entry_value & ~1u) - win->rom_base) < len))
     {
-        entry_off = (entry_value & ~1u) - win->rom_base;
+        *p_entry_off = (entry_value & ~1u) - win->rom_base;
     }
     else if((apppack_rd32(a) & 0xFE00u) == 0xB400u)
     {
-        entry_off = 0u;
+        *p_entry_off = 0u;
     }
     else
     {
         return ARKRTOS_APPPACK_ERR_ENTRY;
     }
+    return 0;
+}
 
-    /* 第一遍只数：表有多大决定负载起点，也决定输出缓冲够不够。 */
-    count.n_rom      = 0u;
-    count.n_ram      = 0u;
-    count.n_rom_movw = 0u;
-    count.n_ram_movw = 0u;
+/* 第一遍只数：表有多大决定负载起点，也决定输出缓冲够不够。 */
+static int32 apppack_count_pass(const uint8 *a, const uint8 *b,
+                                const uint8 *c, uint32 len, uint32 delta,
+                                apppack_count_t *p_count, uint32 *p_n)
+{
+    uint32 n;
 
-    if(apppack_scan(a, b, c, len, delta, 0, &count) < 0)
+    p_count->n_rom      = 0u;
+    p_count->n_ram      = 0u;
+    p_count->n_rom_movw = 0u;
+    p_count->n_ram_movw = 0u;
+
+    if(apppack_scan(a, b, c, len, delta, 0, p_count) < 0)
     {
         return ARKRTOS_APPPACK_ERR_DIFF;
     }
 
-    n = count.n_rom + count.n_ram + count.n_rom_movw + count.n_ram_movw;
+    n = p_count->n_rom + p_count->n_ram + p_count->n_rom_movw + p_count->n_ram_movw;
 
     if((n == 0u) || (n > ARKRTOS_APP_RELOC_MAX))
     {
@@ -521,19 +485,19 @@ int32 arkrtos_apppack_build(const uint8 *a, const uint8 *b, const uint8 *c,
         return ARKRTOS_APPPACK_ERR_SIZE;
     }
 
-    payload_off = ARKRTOS_APP_HEADER_SIZE + (n * ARKRTOS_APP_RELOC_SIZE);
-    total       = payload_off + len;
+    *p_n = n;
+    return 0;
+}
 
-    if((total > out_cap) || (total < payload_off))
-    {
-        return ARKRTOS_APPPACK_ERR_SIZE;
-    }
+/* 第二遍写表（偏移此时仍相对负载），顺手再做一次计数以便和第一遍对账：
+ * 两次数出来不一样说明扫描不是确定性的，那种表不能用来打补丁。 */
+static int32 apppack_write_table(const uint8 *a, const uint8 *b,
+                                 const uint8 *c, uint32 len, uint32 delta,
+                                 uint32 n, uint32 payload_off, uint32 *table)
+{
+    apppack_count_t count;
+    uint32 i;
 
-    table   = (uint32 *)(void *)(out + ARKRTOS_APP_RELOC_OFFSET);
-    payload = out + payload_off;
-
-    /* 第二遍写表（偏移此时仍相对负载），顺手再做一次计数以便和第一遍对账：
-     * 两次数出来不一样说明扫描不是确定性的，那种表不能用来打补丁。 */
     count.n_rom      = 0u;
     count.n_ram      = 0u;
     count.n_rom_movw = 0u;
@@ -551,7 +515,18 @@ int32 arkrtos_apppack_build(const uint8 *a, const uint8 *b, const uint8 *c,
         table[i] += ((payload_off / ARKRTOS_APP_RELOC_OFF_UNIT) << 2);
     }
 
-    /* 负载就是 A，原样搬过去；随后在这份副本上把表打一遍，必须等于 D。 */
+    return 0;
+}
+
+/* 负载就是 A，原样搬过去；随后在这份副本上把表打一遍，必须等于 D。
+ * 复核完再还原成 A：镜像里必须躺标称形态 A，装载期才按落点打补丁。 */
+static int32 apppack_verify_payload(const uint8 *a, const uint8 *d, uint32 len,
+                                    uint8 *payload, uint32 payload_off,
+                                    uint32 total, const uint32 *table,
+                                    uint32 n, uint32 delta)
+{
+    uint32 i;
+
     for(i = 0u; i < len; i++)
     {
         payload[i] = a[i];
@@ -601,8 +576,21 @@ int32 arkrtos_apppack_build(const uint8 *a, const uint8 *b, const uint8 *c,
         payload[i] = a[i];
     }
 
-    /* 头：先整块清零，再逐字段填——reserved 区里残留上一轮的字节会让 CRC
-     * 对不上，而且那种错只在上板时暴露。 */
+    return 0;
+}
+
+/* 头：先整块清零，再逐字段填——reserved 区里残留上一轮的字节会让 CRC
+ * 对不上，而且那种错只在上板时暴露。 */
+static void apppack_fill_header(uint8 *out, uint32 type, uint32 version,
+                                uint32 len, uint32 entry_off,
+                                const arkrtos_apppack_win_t *win, uint32 n,
+                                uint32 payload_off, const uint32 *table,
+                                const uint8 *payload)
+{
+    arkrtos_app_header_t *p_hdr;
+    uint32 i;
+    uint32 crc;
+
     for(i = 0u; i < ARKRTOS_APP_HEADER_SIZE; i++)
     {
         out[i] = 0u;
@@ -642,6 +630,92 @@ int32 arkrtos_apppack_build(const uint8 *a, const uint8 *b, const uint8 *c,
     crc = arkrtos_crc32(payload, len, crc);
 
     p_hdr->crc32 = crc;
+}
+
+int32 arkrtos_apppack_build(const uint8 *a, const uint8 *b, const uint8 *c,
+                          const uint8 *d, uint32 len, uint32 delta,
+                          const arkrtos_apppack_win_t *win, uint32 type,
+                          uint32 version, uint8 *out, uint32 out_cap,
+                          uint32 *out_len, arkrtos_apppack_stats_t *stats)
+{
+    uint32 *table;
+    uint8  *payload;
+    apppack_count_t count;
+    uint32 n;
+    uint32 payload_off;
+    uint32 total;
+    uint32 entry_off;
+    int32 rc;
+
+    if((a == 0) || (b == 0) || (c == 0) || (d == 0) || (win == 0) ||
+       (out == 0) || (out_len == 0))
+    {
+        return ARKRTOS_APPPACK_ERR_PARAM;
+    }
+
+    *out_len = 0u;
+
+    if((len == 0u) || ((len % 4u) != 0u) ||
+       (apppack_is_pow2(win->rom_size) == 0u) ||
+       (apppack_is_pow2(win->ram_size) == 0u) ||
+       (win->rom_size < 8u) || (win->ram_size < 8u))
+    {
+        return ARKRTOS_APPPACK_ERR_PARAM;
+    }
+
+    /* delta 小于任一窗口时，B/C 的地址段会与 A 重叠：重叠段里一个普通常量
+     * 也可能「恰好差 delta」，那样差分就不再是「这是个绝对地址」的证据。
+     * 这是判据成立的前提，不是保守。 */
+    if((delta < win->rom_size) || (delta < win->ram_size) || (delta == 0u))
+    {
+        return ARKRTOS_APPPACK_ERR_PARAM;
+    }
+
+    if(len > win->rom_size)
+    {
+        /* 负载比 ROM 窗口还大：它根本装不进按这个窗口链出来的镜像，继续打包
+         * 只会产出一份装上就撞坏邻居的镜像。 */
+        return ARKRTOS_APPPACK_ERR_SIZE;
+    }
+
+    rc = apppack_resolve_entry(a, len, win, &entry_off);
+    if(rc != 0)
+    {
+        return rc;
+    }
+
+    rc = apppack_count_pass(a, b, c, len, delta, &count, &n);
+    if(rc != 0)
+    {
+        return rc;
+    }
+
+    payload_off = ARKRTOS_APP_HEADER_SIZE + (n * ARKRTOS_APP_RELOC_SIZE);
+    total       = payload_off + len;
+
+    if((total > out_cap) || (total < payload_off))
+    {
+        return ARKRTOS_APPPACK_ERR_SIZE;
+    }
+
+    table   = (uint32 *)(void *)(out + ARKRTOS_APP_RELOC_OFFSET);
+    payload = out + payload_off;
+
+    rc = apppack_write_table(a, b, c, len, delta, n, payload_off, table);
+    if(rc != 0)
+    {
+        return rc;
+    }
+
+    rc = apppack_verify_payload(a, d, len, payload, payload_off, total,
+                                table, n, delta);
+    if(rc != 0)
+    {
+        return rc;
+    }
+
+    apppack_fill_header(out, type, version, len, entry_off, win, n,
+                        payload_off, table, payload);
 
     *out_len = total;
 

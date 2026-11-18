@@ -1521,6 +1521,71 @@ conclusion recorded there this kind of intermittent is unrelated to code changes
 After this split `doc_audit.py funcs` reports **31** functions over 120 lines instead of 32;
 the longest is now `arkrtos_apppack_build()` in `arkrtos_apppack.c` (244 lines).
 
+#### 5.30.8 Third one: `arkrtos_apppack_build()` split into five stages (2026-11-18)
+
+`arkrtos_apppack_build()` in `kernelsrc/src/arkrtos_apppack.c` (244 lines) was already a five-stage
+pipeline separated by comments. Each stage is now a `static` function and the entry point only
+wires them together and fills `stats`:
+
+| Function | Lines | Responsibility | In / out |
+|---|---|---|---|
+| `apppack_resolve_entry()` | ~30 | the two legal entry forms (`e_entry` inside the payload / the header `entry_off` field) | out `*p_entry_off` |
+| `apppack_count_pass()` | ~31 | first pass: count patch entries, write nothing | out `*p_count` / `*p_n` |
+| `apppack_write_table()` | ~29 | second pass: fill the table, deterministic reconciliation, rebase offsets from payload-relative to image-relative | in `n`/`payload_off`, out `table[]` |
+| `apppack_verify_payload()` | ~61 | copy A, apply the table, compare byte for byte against D, restore A | in `table`/`n`, out `payload` |
+| `apppack_fill_header()` | ~51 | zero the header, fill fields, `image_id`, three CRCs | in `payload`/`table`/`n` |
+| `arkrtos_apppack_build()` itself | **101** (was 244) | check arguments, derive `payload_off`/`total` and bounds, call the five, `*out_len = total`, fill `stats` | - |
+
+`payload_off` / `total` / `table` / `payload` stay in the entry point: they only exist after the
+first pass knows `n`. Case bodies were moved line for line, and equivalence was again argued with
+the normalised line multiset: only-OLD is reduced to the deliberately rewritten statements
+(`entry_off =` -> `*p_entry_off =`, the `count.n_* = 0u` resets,
+`apppack_scan(..., &count)` -> `(..., p_count)`, `n = count.n_rom + ...` -> `p_count->...`) plus the
+comment heads moved out of the function; only-NEW is function skeletons, five calls and
+`if (rc != 0) { return rc; }`. **No statement was lost.**
+
+**This change is byte-identical in the default configuration**, unlike the previous two splits, and
+the reason has to be stated:
+
+```
+before  text 367392 / data 440 / bss 767508   sha256 1d94199f...   31,462,512 B
+after   text 367392 / data 440 / bss 767508   sha256 1d94199f...   31,462,512 B
+```
+
+With `ARKRTOS_USE_APPPACK=0` the whole translation unit is an empty target, so splitting it cannot
+change a single byte of the default build. That is not evidence that the split is invisible; it is
+only evidence that this path is off by default.
+
+**How was the `APPPACK=1` path checked?** Every board header does `#undef` then `#define ... 0`, so
+a command-line `-D` cannot win, and neither `tools/arkmake_syntax_gate.py` nor `ci_gate.py`
+compiles this TU. The workaround is a board-header shim used only for checking (written under
+`build/`, not tracked):
+
+```c
+/* build/_apppack_chk/arkrtos_board_config.h */
+#include "../../board/qemu_loongarch64/arkrtos_board_config.h"
+#undef  ARKRTOS_USE_APPPACK
+#define ARKRTOS_USE_APPPACK 1
+```
+
+Placed first in the `-I` list together with `-include arkrtos_board_config.h`, and compiled with the
+same LA64 flags as the makefile (`-c kernelsrc/src/arkrtos_apppack.c`): `exit=0`, zero warnings, and
+`nm` shows two real symbols, `T arkrtos_apppack_build` and `T arkrtos_apppack_error_name`. **This is
+currently the only way to show the TU is type-correct with `APPPACK=1`.** It is not a behavioural
+check; end-to-end behaviour of `APPPACK=1` remains unverified.
+
+Readings and criteria:
+
+- build: `make -f example/qemu_loongarch64/Makefile` `exit=0`, no warning in `arkrtos_apppack.c`;
+- behaviour: `shell_check.py` **PASS once** (banner/help/uname/dt/ls/cat/stack/utest, with the
+  `[ELF]` / `[MOD]` tamper checks present in the transcript);
+- `format_gate.py`: `361 own C/asm file(s) clean on F1-F4`;
+- `doc_audit.py funcs`: functions over 120 lines go **31 -> 30**, `arkrtos_apppack_build` leaves the
+  list, and the longest function in `apppack.c` becomes `apppack_scan()` (185 lines, untouched).
+
+Evidence tier: **compiles plus default-config QEMU end-to-end**; `APPPACK=1` only reaches
+"type-correct", with no runtime evidence.
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine
