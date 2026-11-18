@@ -1,5 +1,7 @@
 # Release 0.0.3-preview.1
 
+**[简体中文](Release-0.0.3-preview.1.md) | English([Release-0.0.3-preview.1.en.md](Release-0.0.3-preview.1.en.md))**
+
 - tag：`v0.0.3-preview.1`
 - 版本号（固件内）：`0.0.3`（`ARKRTOS_VERSION_STRING`，`version` 命令可读）
 - 发布类型：**预览版**。判据与分档见 [发行版与版本策略](发行版与版本策略.md) §5。

@@ -51,6 +51,9 @@ def find_notes(root, ver):
              if os.path.exists(os.path.join(root, d))]
     cands += sorted(os.path.relpath(p, root).replace(os.sep, "/")
                     for p in glob.glob(os.path.join(root, NOTES_FMT % (ver + "-*")).replace("/", os.sep)))
+    # 英文页是中文发布说明的浓缩镜像（.en.md），不是第二份发布说明——按约定中文页 normative，
+    # 所以只认不带 .en.md 后缀的那一份，否则每加一页英文页就会把这里判成歧义。
+    cands = [d for d in cands if not d.endswith(".en.md")]
     return cands
 
 

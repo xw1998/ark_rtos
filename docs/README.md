@@ -90,6 +90,7 @@
 | 想发一个版本，要说清「这版能当正式版吗」 | [发行版与版本策略.md](发行版与版本策略.md)（版本号规则与三处一致、发布物清单与变更控制、ABI 三编号与升版判据、预览版/正式版/1.0 判据、发版六步、明确不做的四条） |
 | Read the release and version-policy page in English | [发行版与版本策略.en.md](发行版与版本策略.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 查某一版到底改了什么、哪些还没验证 | [Release-0.0.3-preview.1.md](Release-0.0.3-preview.1.md)（构建与配置变更、能力与真机证据、体积账本、复现命令、兼容注意、未验证项清单） |
+| Read the same page in English | [Release-0.0.3-preview.1.en.md](Release-0.0.3-preview.1.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 查 API 签名与参数 | [api/Ark RTOS_API参考.md](api/Ark RTOS_API参考.md) |
 | 想知道它和 Linux 比还差什么、哪些是欠账哪些是定位差 | [与Linux差距盘点.md](与Linux差距盘点.md) |
 | Read the same Linux gap inventory in English | [与Linux差距盘点.en.md](与Linux差距盘点.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
@@ -216,6 +217,7 @@ docs/
 ├── 发行版与版本策略.md                       # 【设计说明】版本号规则与三处一致、发布物清单、ABI 升版判据、预览版/正式版/1.0 判据、发版六步、明确不做的
 ├── 发行版与版本策略.en.md                   # 【English】浓缩英文版：发布=一个 tag + 一份发布说明、三段版本号何时动、-preview 只在 tag 上、四处一致与 release_check 六项、发布物清单、三个 ABI 编号、预览/正式/1.0 五条判据、发版六步顺序、四条不做；中文页 normative
 ├── Release-0.0.3-preview.1.md               # 【发布说明】0.0.3 预览版：变更、体积账本、复现命令、兼容注意、未验证项
+├── Release-0.0.3-preview.1.en.md            # 【English】Release-0.0.3-preview.1页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── img/                                   # 【实测图】根 README §调度表现 引用（必须入库，勿被忽略规则吞掉）
 │   ├── sched-overview.png                 # 整体调度时间线 + 切换间隔（4.97 s 窗口）
 │   ├── sched-switch-detail.png            # 单次切换细节 + App 任务被调度进来跑 72.7 µs
