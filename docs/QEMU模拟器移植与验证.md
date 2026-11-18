@@ -5262,6 +5262,66 @@ delta 硬算出一个不匹配」，把这句话摊在两处就等于给两种�
 复核（默认档开关是 `n`，QEMU 档不开），以及真 Flash 的电离位翻转 —— 这两条仍然只有
 `utest run loader_crc_recheck_pool_e2e` 那条需要开档的手工路径，不在本笔证据范围内。
 
+#### 5.30.37 第三十二笔：`arkrtos_loader_check_header()` 按「身份三查 / 形状七查 / 表体」拆成三段（2026-11-18）
+
+`arkrtos_loader_check_header()`（125 行，`kernelsrc/src/arkrtos_loader.c`）是装载链路上最热的一道闸门：
+安装、扫描、搬移、流式安装、CRC 复核、小程序装载等六类路径共九处调用点都要过它。它把三类判据塞在一个函数里 ——
+「这张头是不是我们的」（魔数 / 兼容号 / 类型位）、「这张头描述的镜像有多大、入口在哪、表在哪」、
+以及「重定位表每一个表项本身合不合法」。三类判据之间没有任何共享状态，只有一份 `p_hdr`（和 `p_rel`），
+所以这一笔是**纯搬运**：原函数每一行语句原样活在新的位置上，连缩进都没动。
+
+| 单元 | 管什么 | 行数 |
+|---|---|---|
+| `loader_hdr_check_id()` | 身份三查：`magic` → `ERR_MAGIC`；`hw_compat_id` → `ERR_COMPAT`；`(type >= 32u) || ((types_mask >> type) & 1u) == 0u` → `ERR_PARAM`。**越界的 `type` 必须先挡住**，因为 `1u << 33` 是未定义行为，不能把它当掩码判断用 | 19 |
+| `loader_hdr_check_layout()` | 形状七查：`image_size == 0` / `image_size > 0xFFFFFFFF - ARKRTOS_APP_HEADER_SIZE`（回绕）→ `ERR_SIZE`；`entry_offset >= image_size` → `ERR_ENTRY`；`reloc_offset` / `reloc_count` 上限 / `reloc_kind` / `payload_offset` 四条 → `ERR_RELOC` | 45 |
+| `loader_hdr_check_reloc()` | 表体：逐表项算 `kind`/`off`/`need`，按种类定粒度（`MOVW` 半字对齐且覆盖 8 字节，数据类整字 4 字节对齐）→ 必须落在 `[payload_offset, TOTAL_LEN - need]` → 必须升序（`off < prev` 报 `RELOC`） | 50 |
+| `arkrtos_loader_check_header()` 自己 | `check_id` → `check_layout` → `if(p_rel != 0) check_reloc` → **`ram_size` 两条检查 → `return 0`** | **36**（原 125） |
+
+口径三条：① **顺序即优先级**：三段严格按「是不是我们的 → 描述得对不对 → 表体对不对」排，
+每一段不进就直接上抛，不再往下判 —— 一张魔数都不对的头报 `ERR_MAGIC`，不会因为 `image_size` 也是 0
+就报 `ERR_SIZE`。② **`ram_size` 检查刻意留在最后**（原代码就在表体之后）：先验「这张头描述的是什么」，
+再验「这台设备装不装得下」，所以表体错误优先于 RAM 大小错误，这条错误优先级一处未改，注释里写明了原因。
+③ `p_rel` 的空判留在入口 —— 它决定「要不要校验表体」，不是校验本身（流式安装只先拿到 256 字节的头，
+表体还在串口上，此时 `p_rel == 0` 是合法状态，调用方必须在表体落盘后补一次带地址的调用）。
+
+等价性归一化比对：**only-OLD 0 行 / 0 个文本** —— 剥掉注释与空白后，原函数的每一行都逐字出现在
+新位置，一条语句都没丢、没改名、没合并。only-NEW **28 行 / 12 个文本**，全部是新增的骨架：
+三个 `static int32 …(…)` 签名、三组花括号（各 6 行的 `{` 与 `}`）、三个 `return 0;`、`int32 ret;`、
+三处 `ret = loader_hdr_check_…(...);`、三处 `if(ret != 0) { return ret; }`（第三个在 `if` 块内）。
+这是拆到现在**第二笔 only-OLD 为空的**（第一笔是 `audit_partition`），也与本笔选择「纯搬运」一致：
+三个 helper 之间不共享任何参数，没有任何理由做变量改名或状态外提。
+
+体积：**默认档 text 仍是 367512（±0 B）**，`data` 440 / `bss` 767508 / 镜像总长 31,462,512 B 全部不变，
+但 sha256 由 `d8a3afb0…` 变成 **`9e59d69377d3e52d0c7ac478a1a19ddeab0bd4a7bea31ad07494e5e5a5804683`**。
+同目录同 `SOURCE_DATE_EPOCH=1600000000`、基线与新版各构建一次、`cmp -l` 得 **292 个字节 / 74 处**不同，
+逐个归因成三件事：① `__LINE__` 常量 —— 日志里的行号立即数全部 **+40**（`addi.w $r6,$r0,1566` → `1606`、
+`1159` → `1199`、`1107` → `1147`、`1778` → `1818` …），因为插入块让插入点之后的行整体后移 40 行
+（文件 3633 → 3673 行）；② `arkrtos_loader_check_header` 自己缩了 **8 字节**（`nm -S` 0x150 → 0x148），
+`-O2` 把三个 helper 全内联回来了（`nm` 里一个 `loader_hdr_check_*` 符号都没有），只是分支编码变了；
+③ `arkrtos_loader_load_dev_hdr` 里一个共用的错误返回基本块换了落点（`0x84ac` → `0x8400`），
+连带整段分支位移重算 —— 函数本身的尺寸、地址一处未变（0x8D8）。**instruction 条数与段布局没动，
+`text` 读数一分没变；但「逐字节不变」这句在这一笔不成立**，不能省。
+
+**编入档（防假绿）**：`check_header` 没有 `#if` 包着（六条路径都要过它），默认档真的编它 ——
+LA64 那份读数就是它的证据。另用 armclang 对 F427 板级做 `-O2 -c` 单 TU 编译，同一套头路径与宏
+编基线/新版各一次：**告警 0 条 = 0 条**，`fromelf -z` 得 Code **14620 → 14616（−4 B）**、
+RO Data 713 / RW Data 4 / ZI Data 521 不变（这条路径上 `-O2` 也把三个 helper 内联了，
+减掉的 4 字节是分支编码差异）。`tools/sec_crc_gate.py` 仍 `SEC-CRC-GATE OK (8 pin + 4 TU 两档)`。
+
+门禁：`doc_audit.py funcs` **2 → 1**（唯一剩下的超过 120 行的函数是 `arkrtos_sbuf_send_internal` 124，
+`kernelsrc/src/arkrtos_sbuf.c:428`）、`format_gate` 361 个自有文件、
+`coverage_gate` 十模块 OK（`arkrtos_loader` **52.78% → 53.41%**，`--update` 把基线抬到 53.41，只抬不降）、
+`sec_crc_gate` 8 pin + 4 TU、`mq_host_gate` 108 checks、
+`example/qemu_loongarch64/shell_check.py` **PASS**、`ci_gate` **47 passed / 0 failed**。
+
+**结论分档：宿主用例实跑 + 默认档体积不变（行号常量与基本块落点除外）+ armclang F427 编译通过零告警
++ QEMU 端到端 PASS，未上板。** `check_header` 的运行证据来自宿主：`test_loader_host.c` 里大量
+「头部该被拒」的用例按错误码逐条判（`ERR_MAGIC` / `ERR_COMPAT` / `ERR_PARAM`（类型位越界与不接受两种）/
+`ERR_SIZE`（`image_size` 为 0、回绕、`ram_size` 越界）/ `ERR_ENTRY` / `ERR_RELOC`（四条头字段与
+表体越界、粒度、乱序各一条）），`loader-host` **107 passed / 0 failed / 0 SKIP**；QEMU 默认档开机后
+的 `exec` / `ld` 走的就是同一条函数。**没有的读数**：九处调用点各自的拒绝计数没有独立探针
+（现有用例是「返回码对不对」，不是「哪条路径报的」）。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

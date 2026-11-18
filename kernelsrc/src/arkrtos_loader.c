@@ -254,9 +254,9 @@ void arkrtos_loader_halt_image(uint32 task_id)
  *              装进池里必须报错）；小程序装载路径传 MASK_MINI。
  * @note 非 static：小程序装载路径（arkrtos_mini.c）必须用同一份字段与表体校验，
  *       抄一份出来迟早在两条路径上给出不同判定。 */
-int32 arkrtos_loader_check_header(const arkrtos_app_header_t *p_hdr,
-                                const uint32 *p_rel,
-                                uint32 types_mask)
+/* 身份三查：魔数、硬件兼容号、类型位。越界的 type 必须先挡住，
+ * 因为 1u << 33 是未定义行为，不能把它当掩码判断用。 */
+static int32 loader_hdr_check_id(const arkrtos_app_header_t *p_hdr, uint32 types_mask)
 {
     if(p_hdr->magic != ARKRTOS_APP_MAGIC)
     {
@@ -268,12 +268,19 @@ int32 arkrtos_loader_check_header(const arkrtos_app_header_t *p_hdr,
         return ARKRTOS_LOADER_ERR_COMPAT;
     }
 
-    /* 越界的 type 必须先挡住：1u << 33 是未定义行为，不能把它当掩码判断用 */
     if((p_hdr->type >= 32u) || (((types_mask >> p_hdr->type) & 1u) == 0u))
     {
         return ARKRTOS_LOADER_ERR_PARAM;
     }
 
+    return 0;
+}
+
+/* 形状七查：长度、入口、重定位表的三条头字段。这几条决定「这张头描述的
+ * 镜像有多大、入口在哪、表在哪」，任何一条不成立后面的读写都会按错的长度
+ * 或错的地址进行，所以必须在上板之前（而不是在写坏邻居之后）挡住。 */
+static int32 loader_hdr_check_layout(const arkrtos_app_header_t *p_hdr)
+{
     if(p_hdr->image_size == 0u)
     {
         return ARKRTOS_LOADER_ERR_SIZE;
@@ -315,63 +322,96 @@ int32 arkrtos_loader_check_header(const arkrtos_app_header_t *p_hdr,
         return ARKRTOS_LOADER_ERR_RELOC;
     }
 
-    /* 重定位表项的偏移必须落在负载内、4 字节对齐、且按升序排列：
-     * 流式打补丁靠一个前进指针走完整表，乱序或越界都会静默漏改。
-     *
-     * 只能用调用方交给的 p_rel，不能用 p_hdr + ARKRTOS_APP_RELOC_OFFSET 现推：
-     * 那个表达式只在「头与表在内存里连续」的路径（RAM 缓冲、Flash 常驻镜像）
-     * 成立；流式安装与池内搬移传进来的只是一份 256 字节的头拷贝，
-     * 推出来的地址落在栈/全局变量的邻居上，会把随机的栈字节当成表项。 */
+    return 0;
+}
+
+/* 表体：每个表项的偏移必须落在负载内、对齐到该表项需要的粒度、且按升序。
+ * 流式打补丁靠一个前进指针走完整表，乱序或越界都会静默漏改。
+ *
+ * 只能用调用方交给的 p_rel，不能用 p_hdr + ARKRTOS_APP_RELOC_OFFSET 现推：
+ * 那个表达式只在「头与表在内存里连续」的路径（RAM 缓冲、Flash 常驻镜像）
+ * 成立；流式安装与池内搬移传进来的只是一份 256 字节的头拷贝，
+ * 推出来的地址落在栈/全局变量的邻居上，会把随机的栈字节当成表项。 */
+static int32 loader_hdr_check_reloc(const arkrtos_app_header_t *p_hdr, const uint32 *p_rel)
+{
+    uint32 prev = 0u;
+    uint32 i;
+
+    for(i = 0u; i < p_hdr->reloc_count; i++)
+    {
+        uint32 entry = p_rel[i];
+        uint32 kind  = ARKRTOS_APP_RELOC_KIND(entry);
+        uint32 off   = ARKRTOS_APP_RELOC_OFF(entry);
+        uint32 need;
+
+        /* 数据类表项是整字、4 字节对齐；指令类表项指向一条 Thumb 指令，
+         * 半字对齐即可，但要覆盖 MOVW+MOVT 两条指令共 8 字节 */
+        if((kind == ARKRTOS_APP_RELOC_KIND_ROM_MOVW) ||
+           (kind == ARKRTOS_APP_RELOC_KIND_RAM_MOVW))
+        {
+            need = ARKRTOS_APP_RELOC_MOV_SIZE;
+
+            if((off % 2u) != 0u)
+            {
+                return ARKRTOS_LOADER_ERR_RELOC;
+            }
+        }
+        else
+        {
+            need = ARKRTOS_APP_RELOC_SIZE;
+
+            if((off % ARKRTOS_APP_RELOC_SIZE) != 0u)
+            {
+                return ARKRTOS_LOADER_ERR_RELOC;
+            }
+        }
+
+        if((off < p_hdr->payload_offset) ||
+           (off > (ARKRTOS_APP_TOTAL_LEN(p_hdr) - need)))
+        {
+            return ARKRTOS_LOADER_ERR_RELOC;
+        }
+
+        if((i > 0u) && (off < prev))
+        {
+            return ARKRTOS_LOADER_ERR_RELOC;
+        }
+
+        prev = off;
+    }
+
+    return 0;
+}
+
+int32 arkrtos_loader_check_header(const arkrtos_app_header_t *p_hdr,
+                                const uint32 *p_rel,
+                                uint32 types_mask)
+{
+    int32 ret;
+
+    ret = loader_hdr_check_id(p_hdr, types_mask);
+    if(ret != 0)
+    {
+        return ret;
+    }
+
+    ret = loader_hdr_check_layout(p_hdr);
+    if(ret != 0)
+    {
+        return ret;
+    }
+
     if(p_rel != 0)
     {
-        uint32 prev = 0u;
-        uint32 i;
-
-        for(i = 0u; i < p_hdr->reloc_count; i++)
+        ret = loader_hdr_check_reloc(p_hdr, p_rel);
+        if(ret != 0)
         {
-            uint32 entry = p_rel[i];
-            uint32 kind  = ARKRTOS_APP_RELOC_KIND(entry);
-            uint32 off   = ARKRTOS_APP_RELOC_OFF(entry);
-            uint32 need;
-
-            /* 数据类表项是整字、4 字节对齐；指令类表项指向一条 Thumb 指令，
-             * 半字对齐即可，但要覆盖 MOVW+MOVT 两条指令共 8 字节 */
-            if((kind == ARKRTOS_APP_RELOC_KIND_ROM_MOVW) ||
-               (kind == ARKRTOS_APP_RELOC_KIND_RAM_MOVW))
-            {
-                need = ARKRTOS_APP_RELOC_MOV_SIZE;
-
-                if((off % 2u) != 0u)
-                {
-                    return ARKRTOS_LOADER_ERR_RELOC;
-                }
-            }
-            else
-            {
-                need = ARKRTOS_APP_RELOC_SIZE;
-
-                if((off % ARKRTOS_APP_RELOC_SIZE) != 0u)
-                {
-                    return ARKRTOS_LOADER_ERR_RELOC;
-                }
-            }
-
-            if((off < p_hdr->payload_offset) ||
-               (off > (ARKRTOS_APP_TOTAL_LEN(p_hdr) - need)))
-            {
-                return ARKRTOS_LOADER_ERR_RELOC;
-            }
-
-            if((i > 0u) && (off < prev))
-            {
-                return ARKRTOS_LOADER_ERR_RELOC;
-            }
-
-            prev = off;
+            return ret;
         }
     }
 
-    /* RAM 需求必须能在单块上限内满足，否则装上也没法启动 */
+    /* RAM 需求必须能在单块上限内满足，否则装上也没法启动。
+     * 这一条留在表体之后：先验「这张头描述的是什么」，再验「这台设备装不装得下」。 */
     if((p_hdr->ram_size == 0u) || (p_hdr->ram_size > SLOT_RAM_MAX_BLOCK))
     {
         return ARKRTOS_LOADER_ERR_SIZE;

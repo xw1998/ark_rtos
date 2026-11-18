@@ -3103,6 +3103,81 @@ not "correct"), and (6) a backwards entry reporting `ERR_RELOC`; `loader-host` i
 the default profile) and real Flash bit-flips -- those remain the manual `utest run
 loader_crc_recheck_pool_e2e` path with the switch on, outside this change's evidence.
 
+#### 5.30.37 Split #32: `arkrtos_loader_check_header()` split into identity, layout and relocation-table checks (2026-11-18)
+
+`arkrtos_loader_check_header()` (125 lines, `kernelsrc/src/arkrtos_loader.c`) is the hottest gate on the
+load path: nine call sites across six kinds of paths (install, scan, move, streaming install, CRC recheck,
+mini-app load) all pass through it. It
+used to hold three unrelated groups of judgements in one body -- "is this header ours" (magic / compat id /
+type bit), "how big is the image this header describes, where is the entry, where is the table", and "is
+every relocation table entry itself legal". The three groups share no mutable state, only `p_hdr` (and
+`p_rel`), so this change is a **pure move**: every original statement lives verbatim in its new position,
+indentation included.
+
+| Unit | Responsibility | Lines |
+|---|---|---|
+| `loader_hdr_check_id()` | Identity: `magic` -> `ERR_MAGIC`; `hw_compat_id` -> `ERR_COMPAT`; `(type >= 32u) || ((types_mask >> type) & 1u) == 0u` -> `ERR_PARAM`. **An out-of-range `type` has to be rejected first**, because `1u << 33` is undefined behaviour and must never be used as a mask test | 19 |
+| `loader_hdr_check_layout()` | Shape: `image_size == 0` / `image_size > 0xFFFFFFFF - ARKRTOS_APP_HEADER_SIZE` (wrap) -> `ERR_SIZE`; `entry_offset >= image_size` -> `ERR_ENTRY`; `reloc_offset` / `reloc_count` limit / `reloc_kind` / `payload_offset` -> `ERR_RELOC` | 45 |
+| `loader_hdr_check_reloc()` | Table body: per entry derive `kind`/`off`/`need`, pick the granularity by kind (`MOVW` halfword-aligned and 8 bytes wide, data entries word-aligned), require `[payload_offset, TOTAL_LEN - need]`, require ascending (`off < prev` -> `RELOC`) | 50 |
+| `arkrtos_loader_check_header()` itself | `check_id` -> `check_layout` -> `if(p_rel != 0) check_reloc` -> **both `ram_size` checks -> `return 0`** | **36** (was 125) |
+
+Three rules: (1) **order is priority**: the three groups run "is it ours -> is what it describes valid ->
+is the table body valid" and any failure propagates immediately; a header with a wrong magic reports
+`ERR_MAGIC` and never `ERR_SIZE` even when `image_size` is also 0. (2) The `ram_size` checks are
+**deliberately kept last** (where they already were): first validate what the header describes, then
+whether this device can hold it, so a table-body error outranks a RAM-size error; that priority is
+untouched and the comment says why. (3) The `p_rel` null test stays in the entry -- it decides *whether*
+to check the table, it is not validation itself (a streaming install only holds the first 256 bytes of
+header, so `p_rel == 0` is a legal state and the caller must call again with an address once the table
+has landed).
+
+Normalised-equivalence diff: **only-OLD 0 lines / 0 distinct texts** -- after stripping comments and
+whitespace, every line of the original appears verbatim at its new location; no statement lost, renamed or
+merged. only-NEW is **28 lines / 12 distinct texts**, all of it new scaffolding: three
+`static int32 ...(...)` signatures, three brace groups (6 `{` and 6 `}`), three `return 0;`, `int32 ret;`,
+three `ret = loader_hdr_check_...(...);` and three `if(ret != 0) { return ret; }` (the third inside the
+`if` block). This is the **second split with an empty only-OLD** (the first was `audit_partition`) and it
+matches the choice of a pure move: the three helpers share no parameters, so there is no reason to rename
+variables or hoist state.
+
+Size: **default profile text stays at 367512 (+-0 B)**, with `data` 440 / `bss` 767508 / total image
+31,462,512 B unchanged, but sha256 moves from `d8a3afb0...` to
+**`9e59d69377d3e52d0c7ac478a1a19ddeab0bd4a7bea31ad07494e5e5a5804683`**. In one build directory with the
+same `SOURCE_DATE_EPOCH=1600000000`, baseline and new revision were each built once and `cmp -l` reports
+**292 differing bytes at 74 locations**, attributable to exactly three things: (1) `__LINE__` constants --
+every line-number immediate in log calls is **+40** (`addi.w $r6,$r0,1566` -> `1606`, `1159` -> `1199`,
+`1107` -> `1147`, `1778` -> `1818`, ...) because the inserted block pushes everything after the insertion
+point down by 40 lines (3633 -> 3673 lines); (2) `arkrtos_loader_check_header` itself shrinks by
+**8 bytes** (`nm -S` 0x150 -> 0x148) because `-O2` inlined all three helpers back (`nm` shows no
+`loader_hdr_check_*` symbol at all) and only the branch encoding changed; (3) one shared error-return
+basic block inside `arkrtos_loader_load_dev_hdr` moved (`0x84ac` -> `0x8400`) with its branch
+displacements recomputed -- that function's size (0x8D8) and address are unchanged. **Instruction count
+and section layout are untouched and the `text` reading does not move by a single byte; but
+"byte-identical" does not hold for this change** and must not be claimed.
+
+**Switched-on build (false-green guard)**: `check_header` sits under no `#if` (all six paths need it) and
+the default profile really compiles it -- the LA64 reading above is its evidence. As a second target,
+armclang on F427 with `-O2 -c`, same include paths and defines, baseline and new revision: **0 warnings
+= 0 warnings**, `fromelf -z` gives Code **14620 -> 14616 (-4 B)** with RO Data 713 / RW Data 4 / ZI Data
+521 unchanged (this path inlines the helpers too; the 4 bytes are a branch-encoding difference).
+`tools/sec_crc_gate.py` still reports `SEC-CRC-GATE OK (8 pin + 4 TU ...)`.
+
+Gates: `doc_audit.py funcs` **2 -> 1** (the only function above 120 lines left is
+`arkrtos_sbuf_send_internal` at 124, `kernelsrc/src/arkrtos_sbuf.c:428`), `format_gate` 361 own files,
+`coverage_gate` ten modules OK (`arkrtos_loader` **52.78% -> 53.41%**, baseline raised to 53.41 by
+`--update`, raise only), `sec_crc_gate` 8 pins + 4 TUs, `mq_host_gate` 108 checks,
+`example/qemu_loongarch64/shell_check.py` **PASS**, `ci_gate` **47 passed / 0 failed**.
+
+**Evidence tier: host tests actually executed + default-profile size unchanged (except line-number
+constants and one basic-block move) + armclang F427 build clean + QEMU end-to-end PASS, not run on
+hardware.** The runtime evidence for `check_header` comes from the host: the many "this header must be
+refused" cases in `test_loader_host.c` assert by error code (`ERR_MAGIC` / `ERR_COMPAT` / `ERR_PARAM`
+(type bit out of range and type not accepted) / `ERR_SIZE` (`image_size` zero, wrapping, `ram_size` over
+the limit) / `ERR_ENTRY` / `ERR_RELOC` (four header fields plus table-body out-of-range, granularity and
+descending order)), and `loader-host` is **107 passed / 0 failed / 0 SKIP**; the QEMU default profile's
+`exec` / `ld` run through the same function. **Not covered**: there is no per-call-site probe counting which of
+the nine callers produced a given refusal (the existing cases check the returned code, not the caller).
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine
