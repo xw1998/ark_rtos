@@ -2829,6 +2829,69 @@ count + QEMU end-to-end PASS, not run on hardware.** This commit **adds no new r
 acts at the target task's next system call, and the QEMU profile does not compile this code at all, so getting a
 reading would require a runnable MiniApp plus a real SVC landing — a separate piece of work.
 
+#### 5.30.33 Split #28: `arkrtos_flashapp_run()` split into gate, entry check, window borrow, task start and publish (2026-11-18)
+
+`arkrtos_flashapp_run()` in `kernelsrc/src/arkrtos_flashapp.c` (139 lines) is the shell that runs the application
+living in flash: claim the single-instance gate, read length and entry from the metadata, re-check that the entry
+lies inside the region and starts with the expected prologue halfword, borrow a window and compare all four window
+constants, register the task and write both windows into the TCB, build the MPU view, mark the slot RUNNING, then
+publish the three bookkeeping entries, log and activate. Six failure paths used to converge on a single
+`goto release_slot`, although the object that must be released differs between "borrow failed" and "registration
+failed".
+
+| Function | Responsibility | Lines |
+|---|---|---|
+| `flashapp_run_claim()` | Single-instance gate: lock, reject when `g_flashapp_task` is non-zero, otherwise stamp `0xFFFFFFFF` | 15 |
+| `flashapp_run_release()` | Failure exit: clear `g_flashapp_task` only (each failure point releases its own window) | 8 |
+| `flashapp_run_check_entry()` | `entry = vec & ~1u`, inside the region and `+2` not past the end, then first halfword equals `ARKRTOS_FLASHAPP_PROLOGUE` | 18 |
+| `flashapp_run_borrow()` | `arkrtos_ptable_mini_alloc(APPRUN_CODE_SIZE, FLASHAPP_RAM_SIZE)` under the scheduler lock, then compare the four window constants; both failures unlock/release themselves | 39 |
+| `flashapp_run_start()` | Register the task (stack at the last 4 KB of the window), write both TCB windows plus `is_priv=0`, build the MPU view, mark the slot RUNNING; **frees the borrowed window itself when registration fails** | 37 |
+| `flashapp_run_publish()` | Lock, write `g_flashapp_pt/entry/task` and `task_out`, log, `arkrtos_sched_activate_higher()` | 23 |
+| `arkrtos_flashapp_run()` itself | Calls the five stages in order; every failure lands on `release_slot` | **48** (was 139) |
+
+Four rules: (1) **ownership of the window transfers on success** — once `flashapp_run_borrow()` returns 0 the window
+belongs to this path, so `flashapp_run_start()` must free it when registration fails (exactly as before), and the
+entry's failure exit only clears the gate. That makes "who releases the window" single-valued instead of an
+inference from whether `pt_index` is non-zero. (2) The borrow stage takes and drops the scheduler lock itself, on both
+failure paths; the entry no longer touches it. (3) The gate's stamp (`0xFFFFFFFF`) and clear (`0`) still share
+`g_flashapp_lock`, now split across claim/release so the pairing is visible instead of being 139 lines apart.
+(4) `task_out` is still handed out before `arkrtos_sched_activate_higher()` (the new task may finish immediately), so
+publishing keeps "write the books and hand out the id" in the same function as activation; the order is unchanged.
+
+Normalized equivalence: **only-OLD 18 lines**, all attributable — the two `code_base` / `code_size` locals are gone
+(the window geometry is only checked inside the borrow stage), `uint32 entry;` becomes `uint32 entry = 0u;`, two
+`goto release_slot` in the borrow stage become `return`, `entry = vec & ~1u` moved into the check stage, the three
+former `ret = ERR_*` assignments, the merged `c_base/c_size/r_base/r_size` declaration split into four lines, the
+removed `ret = ERR_WINDOW` pair, the four `code_base = c_base` family assignments, `ret = LOADER_ERR_TASK`, and the
+two casts dropped because the ids are now `uint32`. only-NEW 65 lines (41 distinct) are six signatures, nine brace
+groups, `return 0|ret|ERR_*`, `*p_* = ...` and the four calls in the entry.
+
+Size: the LA64 default Makefile does not compile this TU at all (that target has no flash controller), so the
+**default image and its sha256 are byte-identical** — text 367432, data 440, bss 767508, total 31,462,512 B,
+sha256 `9caa8220…` (one build measured).
+
+**Compiled-in check (guarding against a false green)** with armclang against the H743 board:
+`armclang --target=arm-arm-none-eabi -mcpu=cortex-m7 -O2 -c` with `kernelsrc/include`, `config/stm32h743` (the
+FLASHAPP address macros are only defined in `config/stm32h743/arkrtos_partition.h`), `board/stm32h743`,
+`kernelsrc/port/arm/cortex-m7` and CMSIS, forcing `ARKRTOS_USE_FLASHAPP=1` / `ARKRTOS_USE_APPRUN=1` /
+`ARKRTOS_USE_VFS=1`, disabling `ARKRTOS_USE_IMAGE_SIGN=0` and adding `-DSTM32H743xx`. **Two traps here**: the shim
+left in `build/_flashapp_chk` by the previous commit points at STM32F427 (`stm32f4xx.h` does not exist on this
+machine, so that path never compiled), and the H743 CMSIS headers need an explicit `-DSTM32H743xx` or they abort with
+"Please select first the target STM32H7xx device". Compiling base and new with identical flags gives **0 warnings vs
+0 warnings**, and `fromelf -z` reports Code **3818 -> 3888 (+70 B)**, RO Data 447 unchanged, RW Data 12 / ZI Data
+1064 unchanged; 3818 matches the reading left by the previous commit (the `flashapp_write` split) exactly, which
+cross-validates the measurement. **The +70 B is the real cost of splitting, not a code reduction.**
+
+Gates: `doc_audit.py funcs` **6 -> 5** (longest is now `arkrtos_sem_wait_internal` at 138), `format_gate` 361 own
+files, `sec_crc_gate` 8 pins + 4 TUs in both profiles, `coverage_gate` ten modules not below baseline,
+`mq_host_gate` 108 checks, `example/qemu_loongarch64/shell_check.py` **PASS**, `ci_gate`
+**47 passed / 0 failed**.
+
+**Confidence tier: default profile byte-identical + compiled-in H743 armclang build passes with zero warnings +
+QEMU end-to-end PASS, not run on hardware.** This commit **adds no new runtime measurement**: running a flash
+application needs a real artifact in flash plus a real scheduler switch, and the QEMU profile has neither a flash
+controller nor this code compiled in.
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine

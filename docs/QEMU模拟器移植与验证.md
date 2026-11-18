@@ -5023,6 +5023,63 @@ QEMU 端到端 PASS，未上板。** 这一笔**没有新增运行读数**：`sc
 这一笔**没有新增运行读数**：mini swap 的真行为是「目标任务的下一次系统调用里换镜像」，QEMU 档 `MINIAPP=0`
 根本不编这段代码，要出读数得先有能跑起来的小程序 + 一次真实的 SVC 落地，属另一件事。
 
+#### 5.30.33 第二十八笔：`arkrtos_flashapp_run()` 按「闸门 / 核入口 / 借窗 / 起任务 / 发布」拆成六段（2026-11-18）
+
+`kernelsrc/src/arkrtos_flashapp.c` 的 `arkrtos_flashapp_run()`（139 行）是「跑 Flash 里那个应用」的外壳：
+占单实例闸门 → 从元数据取长度与入口 → 复核入口落在区内且首半字是序言 → 借窗并逐字段核对四个窗口常量 →
+注册任务、把两块窗口写进 TCB、建 MPU 视图、置槽位为 RUNNING → 发布三样账、打日志、激活。
+六条失败路径原来都靠 `goto release_slot` 兜住，而其中「借窗失败要归还」与「注册失败要归还」的归还对象并不相同。
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `flashapp_run_claim()` | 单实例闸门：持锁看 `g_flashapp_task`，非 0 报 `ERR_BUSY`，否则写 `0xFFFFFFFF` 占位 | 15 |
+| `flashapp_run_release()` | 失败出口：只把 `g_flashapp_task` 清回 0（借窗由各自的失败点自己还） | 8 |
+| `flashapp_run_check_entry()` | `entry = vec & ~1u` 后在区内且 `+2` 不越界，再核首半字等于 `ARKRTOS_FLASHAPP_PROLOGUE` | 18 |
+| `flashapp_run_borrow()` | 调度器锁内 `arkrtos_ptable_mini_alloc(APPRUN_CODE_SIZE, FLASHAPP_RAM_SIZE)`，再逐字段核对四个窗口常量，两步失败都自己解锁/归还 | 39 |
+| `flashapp_run_start()` | 注册任务（栈取窗口末尾 4 KB）、写 TCB 的两窗口与 `is_priv=0`、建 MPU、置槽位 RUNNING；**注册失败时自己把借来的窗还掉** | 37 |
+| `flashapp_run_publish()` | 持锁写 `g_flashapp_pt/entry/task`、`task_out`、打日志、`arkrtos_sched_activate_higher()` | 23 |
+| `arkrtos_flashapp_run()` 自己 | 依次调用五段，失败统一落到 `release_slot` | **48**（原 139） |
+
+口径四条：① **借窗的所有权随成功转移**：`flashapp_run_borrow()` 成功即表示窗已属于本路径，`flashapp_run_start()`
+注册失败时必须自己 `arkrtos_ptable_mini_free()`（与原来一致），调用方的失败出口一律只清闸门 —— 这样
+「谁还窗」在代码里是唯一的，不靠 `pt_index` 是否非零去推断。② 借窗段自己开/关调度器锁，两条失败路径都
+在返回前解锁，入口不再管调度器锁。③ 闸门的占位（`0xFFFFFFFF`）与释放（`0`）仍是同一把 `g_flashapp_lock`，
+只是分别落在 claim / release 两个 helper，成对关系比原来隔着 139 行更容易看。④ `task_out` 必须仍在
+`arkrtos_sched_activate_higher()` 之前带出去（新任务可能立刻跑完），所以发布段把「写账 + 带出」与「激活」
+放在同一个函数里，顺序没动。
+
+等价性归一化比对：**only-OLD 18 行**，逐条可归因 —— `code_base` / `code_size` 两个局部量消失（窗的几何只在
+借用段内部核对，不再搬回入口）2 行、`uint32 entry;` 改 `uint32 entry = 0u;` 1 行、借用段两处
+`goto release_slot` 改成 `return` 2 行、`entry = vec & ~1u` 搬进核入口段 1 行、`ret = ERR_LAYOUT` /
+`ret = ERR_PROLOGUE` 各 1 行、`c_base/c_size/r_base/r_size` 的合并声明拆成四行 1 行、`ret = ERR_WINDOW` 2 行、
+四个 `code_base = c_base` 一族的搬移 4 行、`ret = LOADER_ERR_TASK` 1 行、`g_flashapp_task = (uint32)task_id`
+与 `*task_out = (uint32)task_id` 各 1 行（类型已统一成 `uint32`，不再需要强转）。only-NEW 65 行（41 个不同文本）
+全是六个签名、九组花括号、`return 0|ret|ERR_*`、`*p_* = ...` 与入口的四次调用。
+
+体积：LA64 默认档 Makefile 根本不编这个 TU（该目标没有 Flash 控制器），所以**默认档镜像与 sha256 逐字节不变**
+—— text 367432 / data 440 / bss 767508 / 总长 31,462,512 B / sha256 `9caa8220…`（实测一次构建）。
+
+**编入档（防假绿）**：用 armclang 对 H743 板级做真编译。命令是
+`armclang --target=arm-arm-none-eabi -mcpu=cortex-m7 -O2 -c`，头路径 `kernelsrc/include` +
+`config/stm32h743`（FLASHAPP 的一组地址宏只在 `config/stm32h743/arkrtos_partition.h` 里定义）+
+`board/stm32h743` + `kernelsrc/port/arm/cortex-m7` + CMSIS（`example/stm32h743/kernel/ARKRTOS_TEST/Drivers/CMSIS`
+的 `Include` 与 `Device/ST/STM32H7xx/Include`），并强制打开
+`ARKRTOS_USE_FLASHAPP=1` / `ARKRTOS_USE_APPRUN=1` / `ARKRTOS_USE_VFS=1`、关掉 `ARKRTOS_USE_IMAGE_SIGN=0`、
+补 `-DSTM32H743xx`。**这一步踩了两个坑**：上一笔留在 `build/_flashapp_chk` 的 shim 指向 STM32F427（`stm32f4xx.h`
+在本机不存在，那条路根本编不起来），而 H743 的 CMSIS 头必须显式给 `-DSTM32H743xx` 否则报
+"Please select first the target STM32H7xx device"。同一套 flags 各编一次 base 与新文件：**告警 0 条 = 0 条**，
+`fromelf -z` 得 Code **3818 → 3888（+70 B）**、RO Data 447 不变、RW Data 12 / ZI Data 1064 不变 ——
+其中 3818 与上一笔（`flashapp_write` 拆分）留下的读数逐字一致，可当作同一口径的交叉验证。
+**+70 B 是切分的真实代价，不是去重收益。**
+
+门禁：`doc_audit.py funcs` **6 → 5**（最长变 `arkrtos_sem_wait_internal` 138）、`format_gate` 361 个自有文件、
+`sec_crc_gate` 8 pin + 4 TU 两档、`coverage_gate` 十模块不降、`mq_host_gate` 108 checks、
+`example/qemu_loongarch64/shell_check.py` **PASS**、`ci_gate` **47 passed / 0 failed**。
+
+**结论分档：默认档逐字节不变 + 编入档（armclang H743）编译通过且告警 0 条 + QEMU 端到端 PASS，未上板。**
+这一笔**没有新增运行读数**：跑 Flash 应用要有真 Flash 里的产物与一次真的调度切换，QEMU 档既无 Flash
+控制器也不编这段代码。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

@@ -555,21 +555,11 @@ int32 arkrtos_flashapp_info(uint32 *p_len, uint32 *p_crc, uint32 *p_entry)
     return 0;
 }
 
-int32 arkrtos_flashapp_run(uint32 *task_out)
+/* 单实例闸门：先占位再干活（装载期间进来的第二个请求不能被放行）。 */
+static int32 flashapp_run_claim(void)
 {
     uint32 irq;
-    uint32 code_base = 0u;
-    uint32 code_size = 0u;
-    uint32 ram_base = 0u;
-    uint32 ram_size = 0u;
-    uint32 pt_index = 0u;
-    uint32 len = 0u;
-    uint32 vec = 0u;
-    uint32 entry;
-    int32  task_id;
-    int32  ret;
 
-    /* 单实例闸门：先占位再干活（装载期间进来的第二个请求不能被放行）。 */
     arkrtos_spin_lock_irqsave(&g_flashapp_lock, &irq);
     if(g_flashapp_task != 0u)
     {
@@ -579,66 +569,89 @@ int32 arkrtos_flashapp_run(uint32 *task_out)
     g_flashapp_task = 0xFFFFFFFFu;
     arkrtos_spin_unlock_irqrestore(&g_flashapp_lock, irq);
 
-    ret = arkrtos_flashapp_info(&len, 0, &vec);
-    if(ret != 0)
-    {
-        goto release_slot;
-    }
+    return 0;
+}
 
-    /* 入口复核：info 只核了 SP，这里再核「入口在区内且首半字是序言」——
-     * 从 Flash 取指时，这两条是唯一能在起任务前发现「区里是别的字节」的机会。 */
-    entry = vec & ~1u;
+/* 失败出口：把闸门放回「没在跑」。只清这一格——借窗由各自的失败点自己还。 */
+static void flashapp_run_release(void)
+{
+    uint32 irq;
+
+    arkrtos_spin_lock_irqsave(&g_flashapp_lock, &irq);
+    g_flashapp_task = 0u;
+    arkrtos_spin_unlock_irqrestore(&g_flashapp_lock, irq);
+}
+
+/* 入口复核：info 只核了 SP，这里再核「入口在区内且首半字是序言」——
+ * 从 Flash 取指时，这两条是唯一能在起任务前发现「区里是别的字节」的机会。 */
+static int32 flashapp_run_check_entry(uint32 len, uint32 vec, uint32 *p_entry)
+{
+    uint32 entry = vec & ~1u;
+
     if((entry < (uint32)ARKRTOS_FLASHAPP_BASE) ||
        ((entry + 2u) > ((uint32)ARKRTOS_FLASHAPP_BASE + len)))
     {
-        ret = ARKRTOS_FLASHAPP_ERR_LAYOUT;
-        goto release_slot;
+        return ARKRTOS_FLASHAPP_ERR_LAYOUT;
     }
     if(*(const volatile uint16 *)(const void *)entry !=
        (uint16)ARKRTOS_FLASHAPP_PROLOGUE)
     {
-        ret = ARKRTOS_FLASHAPP_ERR_PROLOGUE;
-        goto release_slot;
+        return ARKRTOS_FLASHAPP_ERR_PROLOGUE;
     }
 
-    /* 借窗：代码块借来是空占（产物在 Flash，不用 RAM 代码窗），作用是让
-     * 「app run 与 flash app 抢同一段数据窗口」由池分配器自己拒绝，不需要
-     * 再加一道只在这一处生效的闸门。ptable_mini_alloc 要求两个尺寸都非零。 */
+    *p_entry = entry;
+    return 0;
+}
+
+/* 借窗：代码块借来是空占（产物在 Flash，不用 RAM 代码窗），作用是让
+ * 「app run 与 flash app 抢同一段数据窗口」由池分配器自己拒绝，不需要
+ * 再加一道只在这一处生效的闸门。ptable_mini_alloc 要求两个尺寸都非零。 */
+static int32 flashapp_run_borrow(uint32 *p_pt_index, uint32 *p_ram_base,
+                                 uint32 *p_ram_size)
+{
+    uint32 c_base = 0u;
+    uint32 c_size = 0u;
+    uint32 r_base = 0u;
+    uint32 r_size = 0u;
+    uint32 pt_index = 0u;
+    int32  slot;
+
     arkrtos_sched_lock_internal();
+    slot = arkrtos_ptable_mini_alloc((uint32)ARKRTOS_APPRUN_CODE_SIZE,
+                                     (uint32)ARKRTOS_FLASHAPP_RAM_SIZE,
+                                     &pt_index,
+                                     &c_base, &c_size, &r_base, &r_size);
+    if(slot < 0)
     {
-        uint32 c_base = 0u, c_size = 0u, r_base = 0u, r_size = 0u;
-        int32  slot;
+        arkrtos_sched_unlock_internal();
+        return ARKRTOS_FLASHAPP_ERR_WINDOW;
+    }
 
-        slot = arkrtos_ptable_mini_alloc((uint32)ARKRTOS_APPRUN_CODE_SIZE,
-                                         (uint32)ARKRTOS_FLASHAPP_RAM_SIZE,
-                                         &pt_index,
-                                         &c_base, &c_size, &r_base, &r_size);
-        if(slot < 0)
-        {
-            arkrtos_sched_unlock_internal();
-            ret = ARKRTOS_FLASHAPP_ERR_WINDOW;
-            goto release_slot;
-        }
-
-        /* 数据窗口必须正好是 APPRUN 那一块：产物按这个地址链好了 stack 与
-         * .data，搬到别处跑等于让它跳进虚空。 */
-        if((c_base != (uint32)ARKRTOS_APPRUN_BASE) ||
-           (c_size != (uint32)ARKRTOS_APPRUN_CODE_SIZE) ||
-           (r_base != (uint32)ARKRTOS_FLASHAPP_RAM_BASE) ||
-           (r_size != (uint32)ARKRTOS_FLASHAPP_RAM_SIZE))
-        {
-            (void)arkrtos_ptable_mini_free(pt_index);
-            arkrtos_sched_unlock_internal();
-            ret = ARKRTOS_FLASHAPP_ERR_WINDOW;
-            goto release_slot;
-        }
-
-        code_base = c_base;
-        code_size = c_size;
-        ram_base  = r_base;
-        ram_size  = r_size;
+    /* 数据窗口必须正好是 APPRUN 那一块：产物按这个地址链好了 stack 与
+     * .data，搬到别处跑等于让它跳进虚空。 */
+    if((c_base != (uint32)ARKRTOS_APPRUN_BASE) ||
+       (c_size != (uint32)ARKRTOS_APPRUN_CODE_SIZE) ||
+       (r_base != (uint32)ARKRTOS_FLASHAPP_RAM_BASE) ||
+       (r_size != (uint32)ARKRTOS_FLASHAPP_RAM_SIZE))
+    {
+        (void)arkrtos_ptable_mini_free(pt_index);
+        arkrtos_sched_unlock_internal();
+        return ARKRTOS_FLASHAPP_ERR_WINDOW;
     }
     arkrtos_sched_unlock_internal();
+
+    *p_pt_index = pt_index;
+    *p_ram_base = r_base;
+    *p_ram_size = r_size;
+    return 0;
+}
+
+/* 起任务并把两块窗口写进 TCB。注册失败时借来的窗要在这里还掉——
+ * 走到这里说明窗已经属于本路径，调用方不必再还。 */
+static int32 flashapp_run_start(uint32 entry, uint32 ram_base, uint32 ram_size,
+                                uint32 pt_index, uint32 *p_task_id)
+{
+    int32 task_id;
 
     /* 栈取数据窗口末尾的 4 KB，向下增长；.data/.bss 落在窗口前段，由程序的
      * __arkcc_init_globals() 按链接地址初始化/清零。 */
@@ -652,8 +665,7 @@ int32 arkrtos_flashapp_run(uint32 *task_out)
     if(task_id <= 0)
     {
         (void)arkrtos_ptable_mini_free(pt_index);
-        ret = ARKRTOS_LOADER_ERR_TASK;
-        goto release_slot;
+        return ARKRTOS_LOADER_ERR_TASK;
     }
 
     /* TCB 的两窗口：rom 记成 Flash 应用区（只读可执行），ram 记成借到的
@@ -670,13 +682,25 @@ int32 arkrtos_flashapp_run(uint32 *task_out)
     (void)arkrtos_ptable_set_slot(pt_index, ARKRTOS_APP_SLOT_RUNNING,
                                   entry, (uint32)task_id);
 
+    *p_task_id = (uint32)task_id;
+    return 0;
+}
+
+/* 发布：把三样账写进全局、把任务号带给调用方、打日志、再激活。
+ * 顺序不能换——task_out 必须在 activate 之前带出去，否则新任务可能先跑完。 */
+static void flashapp_run_publish(uint32 task_id, uint32 entry, uint32 pt_index,
+                                 uint32 ram_base, uint32 ram_size, uint32 len,
+                                 uint32 *task_out)
+{
+    uint32 irq;
+
     arkrtos_spin_lock_irqsave(&g_flashapp_lock, &irq);
     g_flashapp_pt    = pt_index;
     g_flashapp_entry = entry;
-    g_flashapp_task  = (uint32)task_id;
+    g_flashapp_task  = task_id;
     if(task_out != 0)
     {
-        *task_out = (uint32)task_id;    /* activate 之前带出去 */
+        *task_out = task_id;    /* activate 之前带出去 */
     }
     arkrtos_spin_unlock_irqrestore(&g_flashapp_lock, irq);
 
@@ -686,12 +710,54 @@ int32 arkrtos_flashapp_run(uint32 *task_out)
                  (unsigned)ram_size, (int)task_id);
 
     arkrtos_sched_activate_higher((uint8)ARKRTOS_FLASHAPP_PRIORITY);
+}
+
+int32 arkrtos_flashapp_run(uint32 *task_out)
+{
+    uint32 pt_index = 0u;
+    uint32 len = 0u;
+    uint32 vec = 0u;
+    uint32 entry = 0u;
+    uint32 ram_base = 0u;
+    uint32 ram_size = 0u;
+    uint32 task_id = 0u;
+    int32  ret;
+
+    ret = flashapp_run_claim();
+    if(ret != 0)
+    {
+        return ret;
+    }
+
+    ret = arkrtos_flashapp_info(&len, 0, &vec);
+    if(ret != 0)
+    {
+        goto release_slot;
+    }
+
+    ret = flashapp_run_check_entry(len, vec, &entry);
+    if(ret != 0)
+    {
+        goto release_slot;
+    }
+
+    ret = flashapp_run_borrow(&pt_index, &ram_base, &ram_size);
+    if(ret != 0)
+    {
+        goto release_slot;
+    }
+
+    ret = flashapp_run_start(entry, ram_base, ram_size, pt_index, &task_id);
+    if(ret != 0)
+    {
+        goto release_slot;
+    }
+
+    flashapp_run_publish(task_id, entry, pt_index, ram_base, ram_size, len, task_out);
     return 0;
 
 release_slot:
-    arkrtos_spin_lock_irqsave(&g_flashapp_lock, &irq);
-    g_flashapp_task = 0u;
-    arkrtos_spin_unlock_irqrestore(&g_flashapp_lock, irq);
+    flashapp_run_release();
     return ret;
 }
 
