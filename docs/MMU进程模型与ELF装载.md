@@ -1,5 +1,7 @@
 # 像 Linux 一样跑可执行文件：ELF64（MMU 档，M1）与 ELF32（PMP 档，U-4）
 
+**[简体中文](MMU进程模型与ELF装载.md) | English([MMU进程模型与ELF装载.en.md](MMU进程模型与ELF装载.en.md))**
+
 ## 0 一句话
 
 带 MMU 的后端（页表后端，LA64 已实测、LA32 同源）现在可以
@@ -337,7 +339,7 @@ PY
 
 ```bash
 python tools/elf_gate.py      # 默认档零变化 / LA64 正向编得过 / 机器码/类型/窗口缺失都要被拒
-python tools/ci_gate.py       # 以末行为准（目前 40 项），含 paging / elf / modld / payload-sign / stack-guard 五组
+python tools/ci_gate.py       # 以末行为准（目前 47 项），含 paging / elf / modld / payload-sign / stack-guard 五组
 ```
 
 ---
