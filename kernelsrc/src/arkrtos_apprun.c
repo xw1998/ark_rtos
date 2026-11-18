@@ -120,26 +120,13 @@ static int32 apprun_read_file(const char *path, uint32 *p_size)
     return 0;
 }
 
-int32 arkrtos_apprun_run_ex(const char *path, uint32 *task_out)
+/* 单实例闸门：先占位再干活。装载可能耗时（读 8 KB + 建 MPU），期间进来的
+ * 第二个请求不能只看 g_apprun_task（那时还没起任务号）就放行。
+ * 成功时状态字被占成「装载中」，调用方必须配一次 apprun_gate_release()。 */
+static int32 apprun_gate_claim(void)
 {
     uint32 irq;
-    uint32 code_base = 0u;
-    uint32 code_size = 0u;
-    uint32 ram_base = 0u;
-    uint32 ram_size = 0u;
-    uint32 pt_index = 0u;
-    uint32 entry;
-    uint32 payload = 0u;
-    int32 task_id;
-    int32 ret;
 
-    if(path == 0)
-    {
-        return ARKRTOS_LOADER_ERR_PARAM;
-    }
-
-    /* 单实例闸门：先占位再干活。装载可能耗时（读 8 KB + 建 MPU），期间进来的
-     * 第二个请求不能只看 g_apprun_task（那时还没起任务号）就放行。 */
     arkrtos_spin_lock_irqsave(&g_apprun_lock, &irq);
     if(g_apprun_task != 0u)
     {
@@ -149,115 +136,114 @@ int32 arkrtos_apprun_run_ex(const char *path, uint32 *task_out)
     g_apprun_task = 0xFFFFFFFFu;            /* 占位：装载中 */
     arkrtos_spin_unlock_irqrestore(&g_apprun_lock, irq);
 
-    /* 前置条件是「VFS 起来了」，不是「littlefs 卷挂上了」：镜像从 /tmp 读，
-     * 而 /tmp 是 VFS 的 ramfs。用错一层的症状是编译成功、运行报「没有文件
-     * 系统」，第 5 节记了这次实测。 */
-    if(arkrtos_vfs_ready() == 0u)
+    return 0;
+}
+
+/* 放掉单实例闸门。任何失败路径都要走到这里。 */
+static void apprun_gate_release(void)
+{
+    uint32 irq;
+
+    arkrtos_spin_lock_irqsave(&g_apprun_lock, &irq);
+    g_apprun_task = 0u;
+    arkrtos_spin_unlock_irqrestore(&g_apprun_lock, irq);
+}
+
+/* 借窗：走小程序那套 RAM 池首适配（mini_alloc），**但没有**「够大就用」
+ * 这种自由度——裸镜像是按固定窗口地址链出来的，换地址跑等于让它跳进
+ * 虚空。所以借完必须逐字段核对：拿到的那一块必须与窗口常量完全相同，
+ * 否则当场归还并报窗口不可用。
+ *
+ * 为什么不用 arkrtos_ptable_alloc_raw()：它核的是 **Flash** 的镜像池
+ * （CONFIG_BASE + CONFIG_SIZE），不是这块 RAM 窗口，用它登记 RAM 区间
+ * 必然失败（板上实测 rc=-21）。
+ *
+ * 调用方须已持调度锁。 */
+static int32 apprun_borrow_window(uint32 *p_pt,
+                                  uint32 *p_code_base, uint32 *p_code_size,
+                                  uint32 *p_ram_base, uint32 *p_ram_size)
+{
+    uint32 c_base = 0u, c_size = 0u, r_base = 0u, r_size = 0u;
+    uint32 pt_index = 0u;
+    int32  slot;
+
+    slot = arkrtos_ptable_mini_alloc((uint32)ARKRTOS_APPRUN_CODE_SIZE,
+                                    (uint32)ARKRTOS_APPRUN_RAM_SIZE,
+                                    &pt_index,
+                                    &c_base, &c_size, &r_base, &r_size);
+    if(slot < 0)
     {
-        ret = ARKRTOS_LOADER_ERR_STATE;
-        goto release_slot;
+        /* 只可能是「窗口已被占」（上一份还没退出）或池表已满：
+         * 两种都报窗口不可用，别拿 NOSPACE 糊过去。 */
+        return ARKRTOS_APPRUN_ERR_WINDOW;
     }
 
-    /* 文件系统只有一份缓存：读文件的整个过程不能与别的任务读写交错。
-     * 与 mini / SVC 层同一套约定（调度器锁）。 */
-    arkrtos_sched_lock_internal();
+    /* slot 与 pt_index 是同一个下标（mini_alloc 两个都写）；拿 slot 做
+     * 成功/失败判断，下标一律用 pt_index，避免两个名字被读成两件事。 */
+    (void)slot;
 
-    /* 借窗：走小程序那套 RAM 池首适配（mini_alloc），**但没有**「够大就用」
-     * 这种自由度——裸镜像是按固定窗口地址链出来的，换地址跑等于让它跳进
-     * 虚空。所以借完必须逐字段核对：拿到的那一块必须与窗口常量完全相同，
-     * 否则当场归还并报窗口不可用。
-     *
-     * 为什么不用 arkrtos_ptable_alloc_raw()：它核的是 **Flash** 的镜像池
-     * （CONFIG_BASE + CONFIG_SIZE），不是这块 RAM 窗口，用它登记 RAM 区间
-     * 必然失败（板上实测 rc=-21）。 */
+    if((c_base != (uint32)ARKRTOS_APPRUN_BASE) ||
+       (c_size != (uint32)ARKRTOS_APPRUN_CODE_SIZE) ||
+       (r_base != (uint32)ARKRTOS_APPRUN_RAM_BASE) ||
+       (r_size != (uint32)ARKRTOS_APPRUN_RAM_SIZE))
     {
-        uint32 c_base = 0u, c_size = 0u, r_base = 0u, r_size = 0u;
-        int32  slot;
-
-        slot = arkrtos_ptable_mini_alloc((uint32)ARKRTOS_APPRUN_CODE_SIZE,
-                                        (uint32)ARKRTOS_APPRUN_RAM_SIZE,
-                                        &pt_index,
-                                        &c_base, &c_size, &r_base, &r_size);
-        if(slot < 0)
-        {
-            /* 只可能是「窗口已被占」（上一份还没退出）或池表已满：
-             * 两种都报窗口不可用，别拿 NOSPACE 糊过去。 */
-            arkrtos_sched_unlock_internal();
-            ret = ARKRTOS_APPRUN_ERR_WINDOW;
-            goto release_slot;
-        }
-
-        /* slot 与 pt_index 是同一个下标（mini_alloc 两个都写）；拿 slot 做
-         * 成功/失败判断，下标一律用 pt_index，避免两个名字被读成两件事。 */
-        (void)slot;
-
-        if((c_base != (uint32)ARKRTOS_APPRUN_BASE) ||
-           (c_size != (uint32)ARKRTOS_APPRUN_CODE_SIZE) ||
-           (r_base != (uint32)ARKRTOS_APPRUN_RAM_BASE) ||
-           (r_size != (uint32)ARKRTOS_APPRUN_RAM_SIZE))
-        {
-            /* 首适配给的不是窗口本身（池里在这个尺寸上有更靠前的空块）：
-             * 这块地址上跑不了按窗口链出来的镜像，如实拒绝，别悄悄挪位置。 */
-            (void)arkrtos_ptable_mini_free(pt_index);
-            arkrtos_sched_unlock_internal();
-            ret = ARKRTOS_APPRUN_ERR_WINDOW;
-            goto release_slot;
-        }
-
-        code_base = c_base;
-        code_size = c_size;
-        ram_base  = r_base;
-        ram_size  = r_size;
-    }
-
-    ret = apprun_read_file(path, &payload);
-    if(ret != 0)
-    {
+        /* 首适配给的不是窗口本身（池里在这个尺寸上有更靠前的空块）：
+         * 这块地址上跑不了按窗口链出来的镜像，如实拒绝，别悄悄挪位置。 */
         (void)arkrtos_ptable_mini_free(pt_index);
-        arkrtos_sched_unlock_internal();
-        goto release_slot;
+        return ARKRTOS_APPRUN_ERR_WINDOW;
     }
 
-    /* 入口与栈顶取自镜像自带的向量表，不是猜出来的：arkc 的 -link 把 256 项
-     * 向量表放在负载偏移 0（+0 = 初始 SP、+4 = Reset_Handler | Thumb 位），
-     * 这是 Cortex-M 的装载约定，与「入口函数排在文件第几个字节」无关。
-     * 两条都拿本次借到的窗口去核：
-     *   - SP 必须正好是数据窗口顶端：说明这份镜像就是按这个窗口链的；
-     *   - 入口必须落在代码窗口内，且入口首半字是 arkc 的函数序言。
-     * 对不上就拒绝：跑一份为别的布局链出来的镜像，等于执行任意字节。 */
+    *p_pt        = pt_index;
+    *p_code_base = c_base;
+    *p_code_size = c_size;
+    *p_ram_base  = r_base;
+    *p_ram_size  = r_size;
+
+    return 0;
+}
+
+/* 入口与栈顶取自镜像自带的向量表，不是猜出来的：arkc 的 -link 把 256 项
+ * 向量表放在负载偏移 0（+0 = 初始 SP、+4 = Reset_Handler | Thumb 位），
+ * 这是 Cortex-M 的装载约定，与「入口函数排在文件第几个字节」无关。
+ * 两条都拿本次借到的窗口去核：
+ *   - SP 必须正好是数据窗口顶端：说明这份镜像就是按这个窗口链的；
+ *   - 入口必须落在代码窗口内，且入口首半字是 arkc 的函数序言。
+ * 对不上就拒绝：跑一份为别的布局链出来的镜像，等于执行任意字节。 */
+static int32 apprun_check_vectors(uint32 payload, uint32 code_base, uint32 code_size,
+                                  uint32 *p_entry)
+{
+    const volatile uint32 *vt = (const volatile uint32 *)(const void *)ARKRTOS_APPRUN_BASE;
+    uint32 sp  = vt[0];
+    uint32 vec = vt[1];
+    uint32 ent = vec & ~1u;
+
+    if((payload < 8u) ||
+       (sp != (uint32)(ARKRTOS_APPRUN_RAM_BASE + ARKRTOS_APPRUN_RAM_SIZE)) ||
+       (ent < code_base) ||
+       ((ent + 2u) > (code_base + code_size)))
     {
-        const volatile uint32 *vt = (const volatile uint32 *)(const void *)ARKRTOS_APPRUN_BASE;
-        uint32 sp  = vt[0];
-        uint32 vec = vt[1];
-        uint32 ent = vec & ~1u;
-
-        if((payload < 8u) ||
-           (sp != (uint32)(ARKRTOS_APPRUN_RAM_BASE + ARKRTOS_APPRUN_RAM_SIZE)) ||
-           (ent < code_base) ||
-           ((ent + 2u) > (code_base + code_size)))
-        {
-            (void)arkrtos_ptable_mini_free(pt_index);
-            arkrtos_sched_unlock_internal();
-            ret = ARKRTOS_APPRUN_ERR_LAYOUT;
-            goto release_slot;
-        }
-
-        /* 序言校验：arkc 的每个函数都以 PUSH {r5,r6,r7,lr}（0xB5E0）开头。
-         * 这里核的是**入口那一条**指令，不是文件首字节——字符串字面量排在
-         * 代码前面，文件首字节本来就不是指令。 */
-        if(*(const volatile uint16 *)(const void *)ent != (uint16)ARKRTOS_APPRUN_PROLOGUE)
-        {
-            (void)arkrtos_ptable_mini_free(pt_index);
-            arkrtos_sched_unlock_internal();
-            ret = ARKRTOS_APPRUN_ERR_PROLOGUE;
-            goto release_slot;
-        }
-
-        entry = vec;
+        return ARKRTOS_APPRUN_ERR_LAYOUT;
     }
 
-    /* 调度器锁必须在起任务前放开：arkrtos_sched_activate_higher() 在锁内只记账。 */
-    arkrtos_sched_unlock_internal();
+    /* 序言校验：arkc 的每个函数都以 PUSH {r5,r6,r7,lr}（0xB5E0）开头。
+     * 这里核的是**入口那一条**指令，不是文件首字节——字符串字面量排在
+     * 代码前面，文件首字节本来就不是指令。 */
+    if(*(const volatile uint16 *)(const void *)ent != (uint16)ARKRTOS_APPRUN_PROLOGUE)
+    {
+        return ARKRTOS_APPRUN_ERR_PROLOGUE;
+    }
+
+    *p_entry = vec;
+
+    return 0;
+}
+
+/* 起任务并把两块窗口挂到 TCB 上。返回任务号（>0）或 ARKRTOS_LOADER_ERR_TASK；
+ * 失败时调用方负责还窗。 */
+static int32 apprun_start_task(uint32 entry, uint32 code_base, uint32 code_size,
+                               uint32 ram_base, uint32 ram_size, uint32 pt_index)
+{
+    int32 task_id;
 
     /* 栈取数据窗口末尾那 4 KB，向下增长；.data/.bss 落在窗口前段。程序的
      * __arkcc_init_globals() 会按链接地址初始化/清零，窗口里的旧内容不影响它。 */
@@ -270,9 +256,7 @@ int32 arkrtos_apprun_run_ex(const char *path, uint32 *task_out)
                                     (uint32)ARKRTOS_APPRUN_PERIOD_MS);
     if(task_id <= 0)
     {
-        (void)arkrtos_ptable_mini_free(pt_index);   /* 任务表满：两块还在手里 */
-        ret = ARKRTOS_LOADER_ERR_TASK;
-        goto release_slot;
+        return ARKRTOS_LOADER_ERR_TASK;
     }
 
     /* TCB 的两窗口就是这两块：代码块在池里 → region0 用可执行 RAM 属性；
@@ -292,6 +276,80 @@ int32 arkrtos_apprun_run_ex(const char *path, uint32 *task_out)
     (void)arkrtos_ptable_set_slot(pt_index, ARKRTOS_APP_SLOT_RUNNING,
                                   entry, (uint32)task_id);
 
+    return task_id;
+}
+
+int32 arkrtos_apprun_run_ex(const char *path, uint32 *task_out)
+{
+    uint32 irq;
+    uint32 code_base = 0u;
+    uint32 code_size = 0u;
+    uint32 ram_base = 0u;
+    uint32 ram_size = 0u;
+    uint32 pt_index = 0u;
+    uint32 entry = 0u;
+    uint32 payload = 0u;
+    int32 task_id;
+    int32 ret;
+
+    if(path == 0)
+    {
+        return ARKRTOS_LOADER_ERR_PARAM;
+    }
+
+    ret = apprun_gate_claim();
+    if(ret != 0)
+    {
+        return ret;
+    }
+
+    /* 前置条件是「VFS 起来了」，不是「littlefs 卷挂上了」：镜像从 /tmp 读，
+     * 而 /tmp 是 VFS 的 ramfs。用错一层的症状是编译成功、运行报「没有文件
+     * 系统」，第 5 节记了这次实测。 */
+    if(arkrtos_vfs_ready() == 0u)
+    {
+        ret = ARKRTOS_LOADER_ERR_STATE;
+        goto release_slot;
+    }
+
+    /* 文件系统只有一份缓存：读文件的整个过程不能与别的任务读写交错。
+     * 与 mini / SVC 层同一套约定（调度器锁）。 */
+    arkrtos_sched_lock_internal();
+
+    ret = apprun_borrow_window(&pt_index, &code_base, &code_size, &ram_base, &ram_size);
+    if(ret != 0)
+    {
+        arkrtos_sched_unlock_internal();
+        goto release_slot;
+    }
+
+    ret = apprun_read_file(path, &payload);
+    if(ret != 0)
+    {
+        (void)arkrtos_ptable_mini_free(pt_index);
+        arkrtos_sched_unlock_internal();
+        goto release_slot;
+    }
+
+    ret = apprun_check_vectors(payload, code_base, code_size, &entry);
+    if(ret != 0)
+    {
+        (void)arkrtos_ptable_mini_free(pt_index);
+        arkrtos_sched_unlock_internal();
+        goto release_slot;
+    }
+
+    /* 调度器锁必须在起任务前放开：arkrtos_sched_activate_higher() 在锁内只记账。 */
+    arkrtos_sched_unlock_internal();
+
+    task_id = apprun_start_task(entry, code_base, code_size, ram_base, ram_size, pt_index);
+    if(task_id <= 0)
+    {
+        (void)arkrtos_ptable_mini_free(pt_index);   /* 任务表满：两块还在手里 */
+        ret = ARKRTOS_LOADER_ERR_TASK;
+        goto release_slot;
+    }
+
     arkrtos_spin_lock_irqsave(&g_apprun_lock, &irq);
     g_apprun_pt    = pt_index;
     g_apprun_entry = entry;
@@ -310,9 +368,7 @@ int32 arkrtos_apprun_run_ex(const char *path, uint32 *task_out)
     return 0;
 
 release_slot:
-    arkrtos_spin_lock_irqsave(&g_apprun_lock, &irq);
-    g_apprun_task = 0u;
-    arkrtos_spin_unlock_irqrestore(&g_apprun_lock, irq);
+    apprun_gate_release();
     return ret;
 }
 

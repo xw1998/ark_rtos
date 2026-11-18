@@ -1864,6 +1864,59 @@ pointer-width casts). `shell_check.py` `PASS` — and this time it really exerci
 the default profile's layout goes through it. `doc_audit.py funcs`: functions over 120 lines
 **25 -> 24**, and the longest is now `arkrtos_apprun_run_ex()` (195 lines).
 
+#### 5.30.15 Tenth one: `arkrtos_apprun_run_ex()` split by gate, window, vectors and task start (2026-11-18)
+
+`arkrtos_apprun_run_ex()` in `kernelsrc/src/arkrtos_apprun.c` (195 lines) is the single entry point for
+running a raw image: single-instance gate, VFS precondition, window borrow, image read, vector-table
+check, task start and publishing global state. Four of those became `static` helpers; the entry point
+keeps only the ordering plus failure cleanup:
+
+| Function | Responsibility | Lines |
+|---|---|---|
+| `apprun_gate_claim()` | single-instance gate: `g_apprun_task != 0` returns `ERR_BUSY`, otherwise the word is claimed as `0xFFFFFFFF` (loading). On success the caller owes exactly one `apprun_gate_release()` | 15 |
+| `apprun_gate_release()` | clears `g_apprun_task` back to zero; every failure path must reach it | 8 |
+| `apprun_borrow_window()` | borrows the 16 KB code plus data window via `arkrtos_ptable_mini_alloc()` and **checks every field** against `ARKRTOS_APPRUN_*` (a raw image is linked for one fixed window; running it elsewhere means jumping into the void). On mismatch it frees immediately and returns `ERR_WINDOW`; four out-params plus `pt_index` | 42 |
+| `apprun_check_vectors()` | reads the image's own vector table: `+0` initial SP must equal the top of the data window, `+4` entry must land inside the code window (and `+2` must not run past it), then the first halfword at entry must be the arkc prologue `0xB5E0`; returns `ERR_LAYOUT` / `ERR_PROLOGUE`, with `p_entry` on success | 28 |
+| `apprun_start_task()` | registers the task (stack is the last 4 KB of the data window), fills both TCB windows, calls `arkrtos_mpu_build_task()` and `arkrtos_ptable_set_slot()` to record the entry; returns `ARKRTOS_LOADER_ERR_TASK` on failure (caller returns the window) | 38 |
+| `arkrtos_apprun_run_ex()` itself | argument check, gate, VFS ready, scheduler lock, the three calls with per-stage cleanup, unlock, task start, publish `g_apprun_pt/entry/task` and `*task_out`, log, `sched_activate_higher()`, and `release_slot:` releasing the gate | **92** (was 195) |
+
+Equivalence was argued with the normalised line multiset: only-OLD holds 15 lines in 12 classes, all of
+them shape rewrites internal to the split:
+
+- `uint32 entry;` becomes `uint32 entry = 0u;` (declaration merged with initialisation);
+- two `goto release_slot;` inside the borrow block become plain `return`s in the helper, with the entry
+  point cleaning up once through a single `if(ret != 0)`;
+- two `arkrtos_sched_unlock_internal();` inside the borrow block become one unlock on the shared borrow
+  failure branch;
+- two `ret = ARKRTOS_APPRUN_ERR_WINDOW;` plus one `ERR_LAYOUT` and one `ERR_PROLOGUE` become
+  `return ARKRTOS_APPRUN_ERR_*` in the helpers;
+- one `(void)arkrtos_ptable_mini_free(pt_index);` — the baseline prologue-failure branch freed the window
+  on its own; it now shares the entry point's `if(ret != 0)` cleanup with `ERR_LAYOUT`, so **one failure
+  still frees exactly once, never zero and never twice**;
+- the four `code_base = c_base;` / `code_size` / `ram_base` / `ram_size` assignments become out-params
+  `*p_code_base` and friends, and `entry = vec;` becomes `*p_entry = vec;`.
+
+only-NEW holds 53 lines, all of them new signatures (with continuation lines), braces, out-param
+assignments, `return X;`, `if(ret != 0)`, the four `ret = apprun_*(...)` calls and
+`apprun_gate_release();`. **No condition was rewritten, no return code was swapped, no comment was
+dropped.**
+
+This is live code in the default profile (the LA64 build compiles `arkrtos_apprun.c`):
+
+```
+before (after the ninth commit)  text 367480 / data 440 / bss 767508   sha256 666ef74f...   31,462,512 B
+after                            text 367480 / data 440 / bss 767508   sha256 666ef74f...   31,462,512 B
+```
+
+**Byte-identical** — all five helpers are `static` with a single call site, so `-O2` inlines them back
+into the entry point and the machine code equals the pre-split one. That is stronger evidence than the
+size number itself. `arkrtos_apprun.c` reports **0** warnings before and after (compiling the pre-split
+copy with the same flags yields the same object file). `shell_check.py` `PASS`
+(`build/shell_check_apprun.log`). `doc_audit.py funcs`: functions over 120 lines **24 -> 23**, and the
+longest is now `svc_fs_volume()` (191 lines).
+
+**Evidence tier: executed on QEMU (byte-identical default profile plus end-to-end PASS); not on board.**
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine

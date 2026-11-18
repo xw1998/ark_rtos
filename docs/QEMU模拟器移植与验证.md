@@ -4196,6 +4196,49 @@ after   text 367480 / data 440 / bss 767508   sha256 666ef74f…   31,462,512 B
 这条校验：默认档的布局走的就是它）。`doc_audit.py funcs`：超过 120 行的函数 **25 → 24**，最长换成
 `arkrtos_apprun_run_ex()`（195 行）。
 
+#### 5.30.15 第十笔：`arkrtos_apprun_run_ex()` 按「闸门 / 借窗 / 核向量 / 起任务」分开（2026-11-18）
+
+`kernelsrc/src/arkrtos_apprun.c` 的 `arkrtos_apprun_run_ex()`（195 行）是裸镜像运行的唯一入口：
+单实例闸门、VFS 前置、借窗口、读文件、核向量表、起任务、发布全局状态。这一笔把其中四段搬成
+`static`，主函数只剩「按顺序调用 + 失败清理」：
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `apprun_gate_claim()` | 单实例闸门：`g_apprun_task != 0` 报 `ERR_BUSY`，否则占成 `0xFFFFFFFF`（装载中）。成功时调用方必须配一次 `apprun_gate_release()` | 15 |
+| `apprun_gate_release()` | 把 `g_apprun_task` 清回 0；所有失败路径都要走到这里 | 8 |
+| `apprun_borrow_window()` | 走 `arkrtos_ptable_mini_alloc()` 借 16 KB 代码 + 数据窗口，**逐字段核对**四个基址/尺寸常量是否与 `ARKRTOS_APPRUN_*` 完全相等（裸镜像是按固定窗口链出来的，换地址等于让它跳进虚空）；对不上当场 `mini_free` 并报 `ERR_WINDOW`。出参四个 + `pt_index` | 42 |
+| `apprun_check_vectors()` | 读镜像自带向量表：`+0` 初始 SP 必须正好等于数据窗口顶端、`+4` 入口必须落在代码窗口内（且 `+2` 不越界），再核入口首半字是 arkc 序言 `0xB5E0`；分别报 `ERR_LAYOUT` / `ERR_PROLOGUE`，成功时出参 `p_entry` | 28 |
+| `apprun_start_task()` | 注册任务（栈取数据窗口末尾 4 KB）、填 TCB 两个窗口、`arkrtos_mpu_build_task()`、`arkrtos_ptable_set_slot()` 补入口；失败返回 `ARKRTOS_LOADER_ERR_TASK`（由调用方还窗） | 38 |
+| `arkrtos_apprun_run_ex()` 自己 | 参数检查 → 闸门 → VFS 就绪 → 调度锁 → 借窗/读文件/核向量三段调用与逐段清理 → 放锁 → 起任务 → 发布 `g_apprun_pt/entry/task` 与 `*task_out` → 日志 → `sched_activate_higher()` → `release_slot:` 统一放闸门 | **92**（原 195） |
+
+等价性用归一化行多重集比对，only-OLD 15 行 12 类，逐条都是拆分内的形态改写：
+
+- `uint32 entry;` → `uint32 entry = 0u;`（声明与初始化合并）；
+- 2× `goto release_slot;`（借窗块内两条失败路径）→ 改成 helper 直接 `return`，主函数统一一处 `if(ret != 0)` 清理；
+- 2× `arkrtos_sched_unlock_internal();`（借窗块内的 slot<0 与字段不符两条）→ 主函数在借窗失败分支解锁一次；
+- 2× `ret = ARKRTOS_APPRUN_ERR_WINDOW;` / 1× `ERR_LAYOUT` / 1× `ERR_PROLOGUE` → helper 内 `return ARKRTOS_APPRUN_ERR_*`；
+- 1× `(void)arkrtos_ptable_mini_free(pt_index);` —— 基线的**序言校验失败**分支自己还一次窗，现在它与 `ERR_LAYOUT` 共用主函数同一处 `if(ret != 0)` 清理，**仍是一次失败一次归还，没有漏还也没有双还**；
+- `code_base = c_base;` / `code_size` / `ram_base` / `ram_size` 四行 → helper 出参 `*p_code_base` 等；`entry = vec;` → `*p_entry = vec;`。
+
+only-NEW 53 行全是新签名（含续行）、`{`/`}`、出参赋值、`return X;`、`if(ret != 0)`、四处
+`ret = apprun_*(...)` 调用与 `apprun_gate_release();`。**没有判断条件被改写、没有返回码被换、
+没有注释被删。**
+
+这一笔是默认档真实生效的代码（LA64 构建会编 `arkrtos_apprun.c`），体积读数：
+
+```
+before（第九笔之后） text 367480 / data 440 / bss 767508   sha256 666ef74f…   31,462,512 B
+after               text 367480 / data 440 / bss 767508   sha256 666ef74f…   31,462,512 B
+```
+
+**逐字节相同**——五个新函数都是 `static` 且只有一个调用点，`-O2` 把它们整个内联回主函数，
+最终机器码与拆分前一模一样。这是「拆分不改行为」比体积数字更硬的证据（`arkrtos_apprun.c`
+告警前后同为 0 条；把拆分前的副本按同一组 flags 编译，`-c` 出来的目标文件也相同）。
+`shell_check.py` `PASS`（`build/shell_check_apprun.log`）。`doc_audit.py funcs`：超过 120 行的
+函数 **24 → 23**，最长换成 `svc_fs_volume()`（191 行）。
+
+**结论分档：QEMU 实跑验证过（默认档逐字节不变 + 端到端 PASS），未上板。**
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行
