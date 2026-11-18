@@ -1,5 +1,7 @@
 # Shell 命令拆分方案（已实施，2026-11-17）
 
+**[简体中文](Shell命令拆分方案.md) | English([Shell命令拆分方案.en.md](Shell命令拆分方案.en.md))**
+
 ## 一句话
 
 `kernelsrc/shell/arkrtos_shell.c` 现在是 **6244 行 / 37 个分节 / 111 个 static 函数**，
