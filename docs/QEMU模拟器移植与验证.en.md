@@ -3178,6 +3178,72 @@ descending order)), and `loader-host` is **107 passed / 0 failed / 0 SKIP**; the
 `exec` / `ld` run through the same function. **Not covered**: there is no per-call-site probe counting which of
 the nine callers produced a given refusal (the existing cases check the returned code, not the caller).
 
+#### 5.30.38 Split #33: de-duplicating the "write whatever fits" block in `arkrtos_sbuf_send_internal()` (2026-11-18)
+
+`arkrtos_sbuf_send_internal()` (124 lines, `kernelsrc/src/arkrtos_sbuf.c`) was the last entry on the long
+function list: parameter checks, fast-path delivery, no-wait, waiter registration, blocking and wake-up
+classification all in one body. Split apart, it has exactly one real duplication -- the "write whatever
+fits" block appears **twice, verbatim**:
+
+once as the fast path before blocking (`if(room > 0u) { ... }`), once as the retry after a `WAKE_HANDOFF`
+wake-up (`if(arkrtos_sbuf_room(p_sb) > 0u) { ... }`). The two copies differ in nesting depth (8 vs 12
+spaces), so they are invisible to the eye; fixing one and not the other gives no warning -- the same shape
+of problem `arkrtos_mbuf_recv_internal` (split #18) already had.
+
+| Unit | Responsibility | Lines |
+|---|---|---|
+| `sbuf_send_fit()` | Compute `room` -> `return 0` when 0 -> `n = min(len, room)` -> `put_bytes` -> `wake_one` -> one `mdk_trace_arkrtos_obj_signal` -> `return n`. **Writes only, never sleeps**: enabling interrupts and switching tasks stay with the caller, because only the caller knows whether a successful write ends the call | 18 |
+| `arkrtos_sbuf_send_internal()` itself | Three parameter checks (`buf`/`len`, handle, `len` not larger than the whole buffer) -> disable IRQ -> one `fit`, on success enable IRQ, switch task and return -> `timeout_ms == 0` returns without waiting (dropping its own stale registration) -> get current task -> compute `deadline` -> `for(;;)`: register when there is no room, user mode only registers, zero remaining time removes the registration and reports timeout, `block_in_critical`, without the `HANDOFF` bit classify by `reason` into "timeout" and "object deleted / could not block", with it `fit` once | **110** (was 124) |
+
+Three rules: (1) **de-duplication, not rewriting**: every statement in `fit` is the original text of the
+fast-path block; the only change is that the `room > 0u` early return became `return 0`, and the retry path
+now tests `n > 0` instead of `if(room > 0u)` -- the same fact. (2) `fit` **never touches interrupts**: both
+original call sites sat inside one critical section and did `ENABLE_IRQ + SWITCH_TASK` immediately after
+writing; moving the IRQ handling into the helper would also have to encode "who switches the task", which
+hides the ordering instead of stating it. (3) Nothing outside the two copies moved: the parameter checks,
+the `NOSPC` comment, the `-2` exception for a full waiter table, the `WOULDBLOCK` user-mode branch, the
+`HANDOFF` classification and the closing comment "woken but the space was taken again: sleep for the
+remaining timeout, never report a fake success" are all kept verbatim.
+
+Normalised-equivalence diff: **only-OLD 10 lines / 9 distinct texts** -- exactly the second copy
+(`uint32 room = ...`, `uint32 n = ((uint32)len < room) ? ...`, `put_bytes`, `wake_one`, the two
+`obj_signal` lines, `return (int32)n;`) plus the two room guards (`if(room > 0u)` and
+`if(arkrtos_sbuf_room(p_sb) > 0u)`); only-NEW **15 lines / 12 distinct texts** (two
+`n = sbuf_send_fit(...)`, two `if(n > 0)`, two `return n;`, `return 0;`, one `{` and one `}`, the helper's
+two signature lines, `uint32 n;`, `if(room == 0u)`, `n = ((uint32)len < room) ? ...`, and `int32 n;` in the
+entry). Every line is attributable; nothing else was touched.
+
+Size: **the default profile is byte-identical** -- text **367512 (+-0 B)**, `data` 440 / `bss` 767508 /
+total 31,462,512 B unchanged, sha256 **still `9e59d693...` with `cmp -l` reporting 0 differing bytes**,
+and the file growing from 1134 to 1147 lines (+13) moved no `__LINE__` constant either (there are no
+line-numbered log calls after this function in `arkrtos_sbuf.c`). Same cause as split #18: **GCC on LA64
+already merged the two identical blocks**, so the de-duplication buys readability, not size.
+
+**The same code is not like that on ARM**: armclang F427 with `-O2 -c`, one TU (with
+`-DARKRTOS_USE_SBUF=1` -- without it the default profile compiles the TU to nothing, `fromelf -z` reports
+all zeros, which is itself evidence that `-c` produced zero bytes of code) for baseline and new revision:
+**0 warnings = 0 warnings**, Code **9150 -> 9214 (+64 B)**, RO Data 176 -> 184 (+8), ZI 1264 unchanged.
+**+64 B is the real cost of this split on ARM** (one extra call layer; armclang neither inlined the helper
+nor expanded the two identical copies), which does not contradict the +-0 B on LA64: the two compilers
+treat duplicated code differently, and both readings have to be reported -- picking the flattering one is
+not allowed.
+
+Gates: `doc_audit.py funcs` **1 -> 0** -- the long-function list is **empty for the first time** (lower-bound
+measure: only functions whose name and parenthesis share a line are counted); `format_gate` 361 own files,
+`sec_crc_gate` 8 pins + 4 TUs, `coverage_gate` ten modules OK (`arkrtos_sbuf` **46.69% -> 47.57%**,
+`--update` raised it to 47.57, raise only -- it rose for the same reason as split #18: the duplicate copy
+was unreachable on the host, so removing it removed a permanently-unexecuted block from the denominator),
+`mq_host_gate` 108 checks, `example/qemu_loongarch64/shell_check.py` **PASS**, `ci_gate` **47 passed /
+0 failed**.
+
+**Evidence tier: host tests actually executed (`SBUF-HOST OK`, measured coverage rose) + default profile
+byte-identical (`cmp -l` 0 bytes) + armclang F427 with the switch on compiles clean (+64 B code, +8 B RO)
++ QEMU end-to-end PASS, not run on hardware.** The runtime evidence for `send_internal` comes from the
+host: `test_sbuf_host.c` covers ring-buffer and message-framing send/receive, but **the blocking-send path
+has no programmable-stub cases on the host** (the "six blocking paths" test that `test_mq_host.c` has does
+not exist for `sbuf` yet) -- that is a **known gap**, recorded rather than papered over; the `utest` suite
+that `shell_check.py` drives has no blocking-send case for `sbuf` either.
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine

@@ -425,6 +425,32 @@ static int32 arkrtos_sbuf_remain_ms(uint32 start_tick, uint32 deadline)
 /* ------------------------------------------------------------------
  * 流语义
  * ------------------------------------------------------------------ */
+/* 把「放得下的那部分」写进去，返回真正写下的字节数；0 表示此刻没有空间。
+ * 调用方必须在临界区内，且已经确认过参数（p_sb 非空、len 在缓冲容量之内）。
+ *
+ * 快路径与「被唤醒后空间又被别人占走」的重试共用这一份：这两段原本是
+ * 逐字相同的两份副本，改错一份没有任何提示。本函数**只写不睡** ——
+ * 开中断与切任务留给调用方，因为「写完就返回」与「写完继续判断」
+ * 只有调用方知道。 */
+static int32 sbuf_send_fit(arkrtos_sbuf_obj_t *p_sb, int32 handle,
+                           const void *buf, int32 len)
+{
+    uint32 room = arkrtos_sbuf_room(p_sb);
+    uint32 n;
+
+    if(room == 0u)
+    {
+        return 0;
+    }
+
+    n = ((uint32)len < room) ? (uint32)len : room;
+    arkrtos_sbuf_put_bytes(p_sb, (const uint8 *)buf, n);
+    arkrtos_sbuf_wake_one(p_sb->recv_waiters);
+    mdk_trace_arkrtos_obj_signal((uint16)(handle & ARKRTOS_HANDLE_RELMASK),
+                                 (uint8)MDK_TRACE_ARKRTOS_CLASS_QUEUE);
+    return (int32)n;
+}
+
 int32 arkrtos_sbuf_send_internal(int32 handle, const void *buf, int32 len, int32 timeout_ms)
 {
     arkrtos_sbuf_obj_t *p_sb;
@@ -433,6 +459,7 @@ int32 arkrtos_sbuf_send_internal(int32 handle, const void *buf, int32 len, int32
     uint32 deadline;
     int32 remain;
     int32 ret;
+    int32 n;
 
     if(buf == 0 || len <= 0)
     {
@@ -452,21 +479,12 @@ int32 arkrtos_sbuf_send_internal(int32 handle, const void *buf, int32 len, int32
     ARKRTOS_DISABLE_IRQ();
 
     /* 有地方就先把能写的写掉（部分成功也算成功） */
+    n = sbuf_send_fit(p_sb, handle, buf, len);
+    if(n > 0)
     {
-        uint32 room = arkrtos_sbuf_room(p_sb);
-
-        if(room > 0u)
-        {
-            uint32 n = ((uint32)len < room) ? (uint32)len : room;
-
-            arkrtos_sbuf_put_bytes(p_sb, (const uint8 *)buf, n);
-            arkrtos_sbuf_wake_one(p_sb->recv_waiters);
-            mdk_trace_arkrtos_obj_signal((uint16)(handle & ARKRTOS_HANDLE_RELMASK),
-                                         (uint8)MDK_TRACE_ARKRTOS_CLASS_QUEUE);
-            ARKRTOS_ENABLE_IRQ();
-            ARKRTOS_SWITCH_TASK();
-            return (int32)n;
-        }
+        ARKRTOS_ENABLE_IRQ();
+        ARKRTOS_SWITCH_TASK();
+        return n;
     }
 
     if(timeout_ms == 0)
@@ -533,18 +551,12 @@ int32 arkrtos_sbuf_send_internal(int32 handle, const void *buf, int32 len, int32
             return ARKRTOS_SBUF_ERR_PARAM;   /* 对象被删 / 未能阻塞 */
         }
 
-        if(arkrtos_sbuf_room(p_sb) > 0u)
+        n = sbuf_send_fit(p_sb, handle, buf, len);
+        if(n > 0)
         {
-            uint32 room = arkrtos_sbuf_room(p_sb);
-            uint32 n = ((uint32)len < room) ? (uint32)len : room;
-
-            arkrtos_sbuf_put_bytes(p_sb, (const uint8 *)buf, n);
-            arkrtos_sbuf_wake_one(p_sb->recv_waiters);
-            mdk_trace_arkrtos_obj_signal((uint16)(handle & ARKRTOS_HANDLE_RELMASK),
-                                         (uint8)MDK_TRACE_ARKRTOS_CLASS_QUEUE);
             ARKRTOS_ENABLE_IRQ();
             ARKRTOS_SWITCH_TASK();
-            return (int32)n;
+            return n;
         }
         /* 被唤醒但空间又被别人占走：按剩余超时重睡，不返回假成功 */
     }

@@ -5322,6 +5322,62 @@ RO Data 713 / RW Data 4 / ZI Data 521 不变（这条路径上 `-O2` 也把三�
 的 `exec` / `ld` 走的就是同一条函数。**没有的读数**：九处调用点各自的拒绝计数没有独立探针
 （现有用例是「返回码对不对」，不是「哪条路径报的」）。
 
+#### 5.30.38 第三十三笔：`arkrtos_sbuf_send_internal()` 把「放得下就写掉」那段去重（2026-11-18）
+
+`arkrtos_sbuf_send_internal()`（124 行，`kernelsrc/src/arkrtos_sbuf.c`）是长函数清单上的最后一个：
+它把参数校验、快路径投递、不等待、登记等待者、阻塞与唤醒分类全塞在一个函数里。拆开看，它只有两处
+真正的重复 —— 「把放得下的那部分写进去」这段代码在函数里出现了**两次，逐字相同**：
+
+第一次是进阻塞之前的快路径（`if(room > 0u) { … }`），第二次是被 `WAKE_HANDOFF` 唤醒之后的重试
+（`if(arkrtos_sbuf_room(p_sb) > 0u) { … }`）。两份副本的字数、缩进层次（8 空格 / 12 空格）不同，
+所以肉眼看不出来；改错一份没有任何提示 —— 这正是 `arkrtos_mbuf_recv_internal`（第十八笔）遇到过的同型问题。
+
+| 单元 | 管什么 | 行数 |
+|---|---|---|
+| `sbuf_send_fit()` | 算 `room` → 0 就 `return 0` → `n = min(len, room)` → `put_bytes` → `wake_one` → 一条 `mdk_trace_arkrtos_obj_signal` → `return n`。**只写不睡**：开中断与切任务留给调用方，因为「写完就返回」与「写完继续判断」只有调用方知道 | 18 |
+| `arkrtos_sbuf_send_internal()` 自己 | 参数三道（`buf`/`len`、句柄、`len` 不得超过整块缓冲）→ 关中断 → `fit` 一次、写成就开中断切任务返回 → `timeout_ms == 0` 不等待（顺手撤旧登记）→ 取当前任务 → 算 `deadline` → `for(;;)`：没空间就登记、用户态只登记、剩余时间为 0 撤登记报超时、`block_in_critical`、没有 `HANDOFF` 位按 `reason` 分「超时」与「对象被删 / 未能阻塞」、有则 `fit` 一次 | **110**（原 124） |
+
+口径三条：① **去重不是改写**：`fit` 里的每一句都是原快路径那段的原文，只是把 `room > 0u` 的提前返回
+换成了 `return 0`；重试那条路径原来靠 `if(room > 0u)` 判「有没有写」，现在靠 `n > 0` 判同一个事实。
+② `fit` **不碰中断**：原文两次调用都在同一个临界区里、写完立刻 `ENABLE_IRQ + SWITCH_TASK`，
+把开关中断塞进 helper 就得把「谁来切任务」也一起编码进去，那是把顺序藏起来而不是说清楚。
+③ 「两处相同代码」之外一个字都没动：参数校验、`NOSPC` 的注释、等待表满 `-2` 的例外、
+`WOULDBLOCK` 那条用户态分支、`HANDOFF` 位分类、末尾那条「被唤醒但空间又被别人占走：按剩余超时重睡，
+不返回假成功」的注释全部原样保留。
+
+等价性归一化比对：**only-OLD 10 行 / 9 个文本** —— 就是第二份副本本身（`uint32 room = …`、
+`uint32 n = ((uint32)len < room) ? …`、`put_bytes`、`wake_one`、`obj_signal` 两行、`return (int32)n;`）
+加上两个「有没有空间」的守卫（`if(room > 0u)` 与 `if(arkrtos_sbuf_room(p_sb) > 0u)`）；
+only-NEW **15 行 / 12 个文本**（两处 `n = sbuf_send_fit(…)`、两处 `if(n > 0)`、两处 `return n;`、
+`return 0;`、一个 `{` 与一个 `}`、helper 的两行签名、`uint32 n;`、`if(room == 0u)`、
+`n = ((uint32)len < room) ? …`、入口的 `int32 n;`）。逐条可归因，没有「顺手改了点别的」。
+
+体积：**默认档逐字节不变** —— text **367512（±0 B）**、`data` 440 / `bss` 767508 / 总长
+31,462,512 B 全不变，sha256 **仍是 `9e59d693…`（`cmp -l` 0 处不同）**，且文件从 1134 行变成 1147 行
+（+13）也没让任何 `__LINE__` 常量变 —— 这条函数之后 `arkrtos_sbuf.c` 里没有带行号的日志。
+原因与第十八笔同型：**LA64 上的 GCC 本来就把两份相同代码合并了**，去重买到的是可读性不是体积。
+
+**同一份代码在 ARM 上不是这样**：armclang F427 `-O2 -c` 单 TU（必须带 `-DARKRTOS_USE_SBUF=1`，
+默认档该 TU 是空目标，`fromelf -z` 全 0 —— 这一点本身也是证据：不开档时 `-c` 出来的是 0 字节 Code）
+基线与新版各一次：**告警 0 条 = 0 条**，Code **9150 → 9214（+64 B）**、RO Data 176 → 184（+8）、
+ZI 1264 不变。**+64 B 是这一笔在 ARM 上的真实代价**（多了一层调用，armclang 没把 helper 内联回去，
+也不再各自展开两份相同代码），与 LA64 的 ±0 B 并不矛盾：两个编译器对「重复代码」的处理本来就不同，
+两个读数都得报，不能只挑好看的那个。
+
+门禁：`doc_audit.py funcs` **1 → 0** —— 这是这条长函数清单**第一次清零**（下界口径：
+只认「函数名与括号同行」的函数）；`format_gate` 361 个自有文件、`sec_crc_gate` 8 pin + 4 TU、
+`coverage_gate` 十模块 OK（`arkrtos_sbuf` **46.69% → 47.57%**，`--update` 抬到 47.57，只抬不降 ——
+涨的原因与第十八笔一样：那份重复副本在宿主流上走不到，删掉它等于删掉分母里永不执行的整段）、
+`mq_host_gate` 108 checks、`example/qemu_loongarch64/shell_check.py` **PASS**、
+`ci_gate` **47 passed / 0 failed**。
+
+**结论分档：宿主用例实跑（`SBUF-HOST OK`，覆盖率实测有升）+ 默认档逐字节不变（`cmp -l` 0 处）
++ armclang F427 开档编译通过零告警（+64 B / +8 B RO）+ QEMU 端到端 PASS，未上板。**
+`send_internal` 的运行证据来自宿主：`test_sbuf_host.c` 覆盖环形缓冲与消息分帧的收发，
+但**阻塞发送这条路径在宿主上没有专门的形参化桩**（`test_mq_host.c` 那种「六条阻塞路径」的用例
+`sbuf` 侧还没有）—— 这一条是**已知缺口**，登记而不假装有；`shell_check.py` 走的 `utest` 里也没有
+`sbuf` 的阻塞发送用例。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行
