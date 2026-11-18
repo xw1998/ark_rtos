@@ -53,6 +53,7 @@
 | 让两个小程序交接控制权、不停机换版本 | [无缝升级例程.md](无缝升级例程.md)（状态记录 + 请求记录两个文件、三条硬规则、SEAMLESS_V1/V2 实测） |
 | Read the seamless-upgrade walkthrough in English | [无缝升级例程.en.md](无缝升级例程.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 让正在跑的任务原地换成另一个镜像（小程序两块 RAM / App 两块 Flash 槽，不加第三级缓冲） | [无缝升级-双缓冲热切换.md](无缝升级-双缓冲热切换.md)（异常栈帧改写四步、arm/take 两段式 API、三条拒绝边界、`mini swap` / `app swap`，以及 F427 上板实测：数据段"不重置"必须重新表述） |
+| Read the same page in English | [无缝升级-双缓冲热切换.en.md](无缝升级-双缓冲热切换.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 一个镜像反复崩溃会怎样、装镜像前内核怎么把关 | [崩溃恢复与镜像版本把关.md](崩溃恢复与镜像版本把关.md)（跨复位崩溃日记 + 版本三态判定 + 明确不做签名/回滚） |
 | 用英文读同一份崩溃恢复与版本把关说明 | [崩溃恢复与镜像版本把关.en.md](崩溃恢复与镜像版本把关.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | App 崩溃了，它控制过的硬件（电机/继电器）怎么被带离危险态 | [App崩溃硬件安全与遗言机制.md](App崩溃硬件安全与遗言机制.md)（遗言通道 A/B、两阶段中和、计划内交接 handover、`hwsafe` 命令） |
@@ -145,6 +146,7 @@ docs/
 ├── 无缝升级例程.en.md                       # 【English】浓缩英文版：为什么是小程序加外部 NOR、两个记录文件字段表、交接时序、装载分块让出与交接空洞实测、两处上板修掉的缺陷、未做项；中文页 normative
 
 ├── 无缝升级-双缓冲热切换.md                  # 【设计说明】A/B 双缓冲热切换：异常栈帧改写四步、arm/take、三条拒绝边界、数据段不重置、默认关与 +48 B
+├── 无缝升级-双缓冲热切换.en.md              # 【English】无缝升级-双缓冲热切换页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── 单元测试框架.md                          # 【设计说明】板端 utest：用例自动注册、断言宏、`utest` 命令、宿主自测门禁与用例清单
 ├── 单元测试框架.en.md                       # 【English】单元测试框架页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── arkc板上直跑-M3b-QSPI持久化.md       # 【实机记录】QSPI NOR 持久化：引脚/AF 取证、位敲数据面取舍、noent 内核缺陷、全链路实录、速度账与欠账
