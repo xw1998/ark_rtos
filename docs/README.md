@@ -14,6 +14,7 @@
 | 内核函数返回的那个负数是什么意思、能不能改成别的值 | [返回码与错误码约定.md](返回码与错误码约定.md)（11 个模块 62 个 `ARKRTOS_*_ERR_*`、值逐处保持历史原样、三个哨兵、三条不得统一的既有契约） |
 | 用英文读同一份返回码约定 | [返回码与错误码约定.en.md](返回码与错误码约定.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 在 App 里写 Linux 风格的 socket / select 程序 | [socket与select兼容层.md](socket与select兼容层.md)（名字与边界、SVC 0x1E 契约、阻塞在 App 侧兑现、SOCKET_DEMO、限制） |
+| Read the socket/select compatibility page in English | [socket与select兼容层.en.md](socket与select兼容层.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 想知道网络协议栈怎么接进来、现在能验证到什么 | [lwIP协议栈接入.md](lwIP协议栈接入.md)（lwIP 2.1.3 端口层、回环网卡、socket 底座、未接真实以太网的边界） |
 | Read the lwIP integration page in English | [lwIP协议栈接入.en.md](lwIP协议栈接入.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 搞懂 MPU 怎么隔离 App、越权会怎样 | [内存保护与App越权验证.md](内存保护与App越权验证.md)（逐任务 region 配置 + APP_BAD 越权验证） |
@@ -104,6 +105,7 @@ docs/
 ├── 返回码与错误码约定.en.md                 # 【English】浓缩英文版：五条约定、26 个模块 397 处码值账、六个哨兵、八条不得统一、littlefs 两处裸 return -1；中文页 normative
 
 ├── socket与select兼容层.md                  # 【设计说明】App 侧 socket/select：头文件与边界、SVC 0x1E wire 契约、阻塞/超时在 App 侧兑现、SOCKET_DEMO、fd 空间重叠等限制
+├── socket与select兼容层.en.md               # 【English】浓缩英文版：七个头文件与 Linux 布局、四条边界（只 AF_INET / 无 DNS / 只有 select / 4 个 socket）、内核只登记用户态轮询且按完整参数块匹配、SVC 0x1E 的 8 字参数块与 17 子命令与 -200..-215、未编协议栈时 socket 明着失败、三条限制、SOCKET_DEMO 覆盖项、上板 pass=36 fail=0 与首次上板三处读反导致静默错答案的取证；中文页 normative
 ├── 调度器说明.md                            # 【设计说明】调度模型、O(1) 就绪集/延时链/时间片、三种触发点、实测与未做项
 ├── 调度器说明.en.md                         # 【English】调度器页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── 同步原语与令牌守恒.md                    # 【设计说明】为何用户态等待只登记+轮询、派发方 peek(only_kernel)、三条契约、四个失败根因

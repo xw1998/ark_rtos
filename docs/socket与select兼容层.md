@@ -1,5 +1,7 @@
 # socket / select 兼容层（App 侧）
 
+**[简体中文](socket与select兼容层.md) | English([socket与select兼容层.en.md](socket与select兼容层.en.md))**
+
 ## 一句话
 
 App 里可以直接写 Linux 风格的 socket 程序：`socket/bind/listen/accept/connect/send/recv/
