@@ -4164,6 +4164,38 @@ H743 OFF 目标   Code 0 / RO 0 / RW 0 / ZI 0            （空 TU）
 `shell_check.py` `PASS`（LA64 默认档不受影响）。`doc_audit.py funcs`：超过 120 行的函数
 **26 → 25**，最长换成 `arkrtos_layout_validate()`（199 行）。
 
+#### 5.30.14 第九笔：`arkrtos_layout_validate()` 按「头部 / 槽位 / 重叠 / 参数」分开（2026-11-18）
+
+`kernelsrc/src/arkrtos_layout.c` 的 `arkrtos_layout_validate()`（199 行）是配置记录唯一的总校验：
+一条记录有 7 条整体属性、每个槽位 6~9 条字段要求、槽位之间的两两不重叠、以及尾部的运行期参数与
+「本内核还没接的项」。这一笔按这四类拆成 `static`，主函数只剩遍历与模式一致性：
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `layout_check_header()` | 整条记录的属性：指针非空、魔数、版本、CRC（`arkrtos_layout_crc()`）、硬件兼容号、模式合法、`slot_count` 上限 | 33 |
+| `layout_check_slot()` | 单个槽的字段：类型、`flags`/`reserved` 必须为 0、Flash 区间落在镜像池内、最小尺寸、分配粒度对齐；FIXED 模式再要求整扇区对齐与 RAM 窗口钉死；RAM 块要求 2 的幂、上下限、基址对齐与窗口内 | 66 |
+| `layout_check_overlap()` | 与下标更小的已检查槽两两比：Flash 区间不重叠，RAM 窗口（若都固定）不重叠 | 29 |
+| `layout_check_knobs()` | 尾部参数：回收力度、日志级别、崩溃重启上限、`flags` 只认 RAW_ALLOW 一位、`APP_ALLOW_RAW_IMAGE != 1` 时拒绝 RAW_ALLOW、挂接窗口上限、未接项（看门狗/堆/默认栈）必须为 0、保留区必须全 0 | 59 |
+| `arkrtos_layout_validate()` 自己 | 头部校验、逐槽遍历（跳过未用槽并数 `used`）、模式与槽表一致性（FIXED 至少一个槽、AUTO 不许带槽表）、最后交给 `layout_check_knobs()` | **53**（原 199） |
+
+等价性用归一化行多重集比对：**only-OLD 为空**，only-NEW 只有 5 个函数签名、`{`/`}`、`rc` 变量与
+`rc = layout_check_*(...)` 调用、`if(rc != ARKRTOS_CFG_OK)` / `return rc` 这三对，以及 3 个
+`return ARKRTOS_CFG_OK`。**一条语句都没被改写或丢失**：每个判断的条件、返回的错误码、注释原位
+未动，只是被搬进对应阶段。
+
+这一笔是**默认档真实生效的代码**（LA64 构建会编这个 TU），所以体积变化必须如实报，不能声称
+「逐字节不变」：
+
+```
+before  text 367384 / data 440 / bss 767508   sha256 660b94c9…   31,462,512 B
+after   text 367480 / data 440 / bss 767508   sha256 666ef74f…   31,462,512 B
+```
+
+`text` **+96 B**（4 个新函数的调用开销与入口），`data`/`bss` 与镜像总长不变；`arkrtos_layout.c`
+的告警改动前后**同为 3 条**（既有的指针宽度转换告警）。`shell_check.py` `PASS`（这次是真跑到了
+这条校验：默认档的布局走的就是它）。`doc_audit.py funcs`：超过 120 行的函数 **25 → 24**，最长换成
+`arkrtos_apprun_run_ex()`（195 行）。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

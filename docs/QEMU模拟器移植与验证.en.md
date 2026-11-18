@@ -1829,6 +1829,41 @@ H743 OFF object Code 0 / RO 0 / RW 0 / ZI 0            (empty TU)
 `shell_check.py` `PASS` (the LA64 default profile is unaffected). `doc_audit.py funcs`: functions
 over 120 lines **26 -> 25**, and the longest is now `arkrtos_layout_validate()` (199 lines).
 
+#### 5.30.14 Ninth one: `arkrtos_layout_validate()` split by header, slot, overlap and knobs (2026-11-18)
+
+`arkrtos_layout_validate()` in `kernelsrc/src/arkrtos_layout.c` (199 lines) is the single gate over a
+configuration record: seven whole-record properties, six to nine field rules per slot, pairwise
+non-overlap between slots, and the tail of runtime knobs plus "known but not wired" items. The split
+follows those four groups:
+
+| Function | Responsibility | Lines |
+|---|---|---|
+| `layout_check_header()` | whole-record properties: non-null pointer, magic, version, CRC (`arkrtos_layout_crc()`), hardware compat id, mode, `slot_count` ceiling | 33 |
+| `layout_check_slot()` | one slot's fields: type, `flags`/`reserved` must be zero, flash range inside the image pool, minimum size, alloc-unit alignment; FIXED mode additionally requires whole-sector alignment and a pinned RAM window; RAM blocks must be a power of two, within bounds, base-aligned and inside the window | 66 |
+| `layout_check_overlap()` | compare against the already-checked lower slots: flash ranges must not overlap, and pinned RAM windows must not overlap either | 29 |
+| `layout_check_knobs()` | tail knobs: reclaim mode, log level, fault restart limit, `flags` accepting only RAW_ALLOW, refusing RAW_ALLOW when `APP_ALLOW_RAW_IMAGE != 1`, boot-delay ceiling, unwired items (watchdog/heap/default stack) must be zero, reserved words must all be zero | 59 |
+| `arkrtos_layout_validate()` itself | header check, slot loop (skip unused slots and count `used`), mode-versus-table consistency (FIXED needs at least one slot, AUTO must not carry any), then hand over to `layout_check_knobs()` | **53** (was 199) |
+
+Equivalence was argued with the normalised line multiset: **only-OLD is empty**; only-NEW holds the
+five signatures, braces, the `rc` variable, the `rc = layout_check_*(...)` calls, the three
+`if(rc != ARKRTOS_CFG_OK)` / `return rc` pairs and three `return ARKRTOS_CFG_OK`. **No statement was
+rewritten or lost**: every condition, every returned error code and every comment stayed in place,
+only moved into its stage.
+
+This one is **live code in the default profile** (the LA64 build compiles this TU), so the size change
+is reported as it is rather than claimed byte-identical:
+
+```
+before  text 367384 / data 440 / bss 767508   sha256 660b94c9...   31,462,512 B
+after   text 367480 / data 440 / bss 767508   sha256 666ef74f...   31,462,512 B
+```
+
+`text` **+96 B** (call overhead and entry points of the four helpers); `data` / `bss` and the image
+length are unchanged; `arkrtos_layout.c` reports the same **3** warnings before and after (existing
+pointer-width casts). `shell_check.py` `PASS` — and this time it really exercises the validator, since
+the default profile's layout goes through it. `doc_audit.py funcs`: functions over 120 lines
+**25 -> 24**, and the longest is now `arkrtos_apprun_run_ex()` (195 lines).
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine

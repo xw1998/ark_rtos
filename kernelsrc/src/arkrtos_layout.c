@@ -274,12 +274,10 @@ uint32 arkrtos_layout_crc(const arkrtos_cfg_record_t *rec)
     return crc;
 }
 
-uint32 arkrtos_layout_validate(const arkrtos_cfg_record_t *rec)
+/* 记录头部的整份自检：指针、魔数、版本、CRC、硬件兼容号、模式、槽数上限。
+ * 这一段全部是「整条记录」的属性，与具体槽位无关。 */
+static uint32 layout_check_header(const arkrtos_cfg_record_t *rec)
 {
-    uint32 i;
-    uint32 j;
-    uint32 used = 0u;
-
     if(rec == 0)
     {
         return ARKRTOS_CFG_ERR_MAGIC;
@@ -309,115 +307,114 @@ uint32 arkrtos_layout_validate(const arkrtos_cfg_record_t *rec)
         return ARKRTOS_CFG_ERR_SLOT_COUNT_MAX;
     }
 
-    for(i = 0u; i < ARKRTOS_CFG_SLOT_MAX; i++)
+    return ARKRTOS_CFG_OK;
+}
+
+/* 单个槽位的字段自检（不看邻居）。调用方已确认这个下标是有效槽。 */
+static uint32 layout_check_slot(const arkrtos_cfg_record_t *rec, uint32 i)
+{
+    const arkrtos_cfg_slot_t *s = &rec->slot[i];
+
+    if((s->type != ARKRTOS_CFG_TYPE_APP) && (s->type != ARKRTOS_CFG_TYPE_DRIVER))
     {
-        const arkrtos_cfg_slot_t *s = &rec->slot[i];
+        return ARKRTOS_CFG_ERR_SLOT_TYPE;
+    }
+    if((s->flags != 0u) || (s->reserved != 0u))
+    {
+        return ARKRTOS_CFG_ERR_RESERVED;
+    }
+    if((s->base < IMAGE_POOL_BASE) || (s->base >= IMAGE_POOL_END) ||
+       (s->size > (IMAGE_POOL_END - s->base)))
+    {
+        return ARKRTOS_CFG_ERR_SLOT_RANGE;
+    }
+    if(s->size < (APP_IMAGE_HEADER_SIZE + 256u))
+    {
+        return ARKRTOS_CFG_ERR_SLOT_SIZE;
+    }
+    if((s->base % ARKRTOS_POOL_ALLOC_UNIT) != 0u)
+    {
+        return ARKRTOS_CFG_ERR_SLOT_ALIGN;
+    }
 
-        if((i >= rec->slot_count) || (s->type == ARKRTOS_CFG_TYPE_UNUSED))
-        {
-            continue;
-        }
-        used++;
-
-        if((s->type != ARKRTOS_CFG_TYPE_APP) && (s->type != ARKRTOS_CFG_TYPE_DRIVER))
-        {
-            return ARKRTOS_CFG_ERR_SLOT_TYPE;
-        }
-        if((s->flags != 0u) || (s->reserved != 0u))
-        {
-            return ARKRTOS_CFG_ERR_RESERVED;
-        }
-        if((s->base < IMAGE_POOL_BASE) || (s->base >= IMAGE_POOL_END) ||
-           (s->size > (IMAGE_POOL_END - s->base)))
-        {
-            return ARKRTOS_CFG_ERR_SLOT_RANGE;
-        }
-        if(s->size < (APP_IMAGE_HEADER_SIZE + 256u))
-        {
-            return ARKRTOS_CFG_ERR_SLOT_SIZE;
-        }
-        if((s->base % ARKRTOS_POOL_ALLOC_UNIT) != 0u)
+    /* 固定槽位是「给客户用 MDK 直接下载」的稳定落点，因此多两条要求：
+     *   1) 整槽落在整个物理扇区上 —— 卸载时擦除的就是它自己，不会连带
+     *      擦掉邻居（擦除粒度是扇区，不是字节）；
+     *   2) RAM 窗口必须钉死 —— 固定地址的镜像若去抢伙伴分配器的块，
+     *      同一块 RAM 可能被两个镜像同时拿到。
+     * 只对 FIXED 生效：AUTO 模式里的槽表来自「上一次自动安装的结果」，
+     * 它本来就落在分配粒度上、RAM 也由伙伴分配器给出。 */
+    if(rec->mode == ARKRTOS_LAYOUT_MODE_FIXED)
+    {
+        if(((s->base % (uint32)IMAGE_POOL_SECTOR) != 0u) ||
+           ((s->size % (uint32)IMAGE_POOL_SECTOR) != 0u))
         {
             return ARKRTOS_CFG_ERR_SLOT_ALIGN;
         }
-
-        /* 固定槽位是「给客户用 MDK 直接下载」的稳定落点，因此多两条要求：
-         *   1) 整槽落在整个物理扇区上 —— 卸载时擦除的就是它自己，不会连带
-         *      擦掉邻居（擦除粒度是扇区，不是字节）；
-         *   2) RAM 窗口必须钉死 —— 固定地址的镜像若去抢伙伴分配器的块，
-         *      同一块 RAM 可能被两个镜像同时拿到。
-         * 只对 FIXED 生效：AUTO 模式里的槽表来自「上一次自动安装的结果」，
-         * 它本来就落在分配粒度上、RAM 也由伙伴分配器给出。 */
-        if(rec->mode == ARKRTOS_LAYOUT_MODE_FIXED)
+        if((s->ram_base == 0u) || (s->ram_size == 0u))
         {
-            if(((s->base % (uint32)IMAGE_POOL_SECTOR) != 0u) ||
-               ((s->size % (uint32)IMAGE_POOL_SECTOR) != 0u))
-            {
-                return ARKRTOS_CFG_ERR_SLOT_ALIGN;
-            }
-            if((s->ram_base == 0u) || (s->ram_size == 0u))
+            return ARKRTOS_CFG_ERR_SLOT_RAM;
+        }
+    }
+    if(s->ram_size != 0u)
+    {
+        if((ARKRTOS_LAYOUT_IS_POW2(s->ram_size) == 0u) ||
+           (s->ram_size < SLOT_RAM_MIN_BLOCK) ||
+           (s->ram_size > SLOT_RAM_MAX_BLOCK))
+        {
+            return ARKRTOS_CFG_ERR_SLOT_RAM;
+        }
+        if(s->ram_base != 0u)
+        {
+            if(((s->ram_base % s->ram_size) != 0u) ||
+               (s->ram_base < SLOT_RAM_BASE) ||
+               (s->ram_size > ((SLOT_RAM_BASE + SLOT_RAM_TOTAL) - s->ram_base)))
             {
                 return ARKRTOS_CFG_ERR_SLOT_RAM;
             }
         }
-        if(s->ram_size != 0u)
+    }
+
+    return ARKRTOS_CFG_OK;
+}
+
+/* 与前面已经检查过的槽两两比对：Flash 区间不重叠；RAM 窗口（若都固定）
+ * 同样不重叠。只往回看，所以每对只比一次。 */
+static uint32 layout_check_overlap(const arkrtos_cfg_record_t *rec, uint32 i)
+{
+    const arkrtos_cfg_slot_t *s = &rec->slot[i];
+    uint32 j;
+
+    for(j = 0u; j < i; j++)
+    {
+        const arkrtos_cfg_slot_t *o = &rec->slot[j];
+
+        if((j >= rec->slot_count) || (o->type == ARKRTOS_CFG_TYPE_UNUSED))
         {
-            if((ARKRTOS_LAYOUT_IS_POW2(s->ram_size) == 0u) ||
-               (s->ram_size < SLOT_RAM_MIN_BLOCK) ||
-               (s->ram_size > SLOT_RAM_MAX_BLOCK))
-            {
-                return ARKRTOS_CFG_ERR_SLOT_RAM;
-            }
-            if(s->ram_base != 0u)
-            {
-                if(((s->ram_base % s->ram_size) != 0u) ||
-                   (s->ram_base < SLOT_RAM_BASE) ||
-                   (s->ram_size > ((SLOT_RAM_BASE + SLOT_RAM_TOTAL) - s->ram_base)))
-                {
-                    return ARKRTOS_CFG_ERR_SLOT_RAM;
-                }
-            }
+            continue;
         }
-
-        /* Flash 区间两两不重叠；RAM 窗口（若都固定）同样不重叠 */
-        for(j = 0u; j < i; j++)
+        if((s->base < (o->base + o->size)) && (o->base < (s->base + s->size)))
         {
-            const arkrtos_cfg_slot_t *o = &rec->slot[j];
-
-            if((j >= rec->slot_count) || (o->type == ARKRTOS_CFG_TYPE_UNUSED))
-            {
-                continue;
-            }
-            if((s->base < (o->base + o->size)) && (o->base < (s->base + s->size)))
+            return ARKRTOS_CFG_ERR_SLOT_OVERLAP;
+        }
+        if((s->ram_size != 0u) && (o->ram_size != 0u) && (s->ram_base != 0u) && (o->ram_base != 0u))
+        {
+            if((s->ram_base < (o->ram_base + o->ram_size)) &&
+               (o->ram_base < (s->ram_base + s->ram_size)))
             {
                 return ARKRTOS_CFG_ERR_SLOT_OVERLAP;
             }
-            if((s->ram_size != 0u) && (o->ram_size != 0u) && (s->ram_base != 0u) && (o->ram_base != 0u))
-            {
-                if((s->ram_base < (o->ram_base + o->ram_size)) &&
-                   (o->ram_base < (s->ram_base + s->ram_size)))
-                {
-                    return ARKRTOS_CFG_ERR_SLOT_OVERLAP;
-                }
-            }
         }
     }
 
-    /* 模式与槽表必须一致：
-     *   FIXED 至少要有一个可用槽，否则设备装不了也跑不了任何镜像；
-     *   AUTO  不许带槽表——自动选址会自己找落点，槽表放着也不会被读，
-     *         那就等于「配置里写了、设备没照做」，必须当场报错。 */
-    if(rec->mode == ARKRTOS_LAYOUT_MODE_FIXED)
-    {
-        if(used == 0u)
-        {
-            return ARKRTOS_CFG_ERR_SLOTS_IN_MODE;
-        }
-    }
-    else if(used != 0u)
-    {
-        return ARKRTOS_CFG_ERR_SLOTS_IN_MODE;
-    }
+    return ARKRTOS_CFG_OK;
+}
+
+/* 记录尾部的运行期参数与「本内核还没接的项」。看不懂的位一律拒绝，
+ * 不默默忽略——忽略等于替设备猜了一个它没提出的配置。 */
+static uint32 layout_check_knobs(const arkrtos_cfg_record_t *rec)
+{
+    uint32 i;
 
     /* 回收力度与运行期参数 */
     if((rec->reclaim_mode != ARKRTOS_CFG_RECLAIM_GLOBAL) &&
@@ -471,7 +468,62 @@ uint32 arkrtos_layout_validate(const arkrtos_cfg_record_t *rec)
             return ARKRTOS_CFG_ERR_RESERVED;
         }
     }
+
     return ARKRTOS_CFG_OK;
+}
+
+uint32 arkrtos_layout_validate(const arkrtos_cfg_record_t *rec)
+{
+    uint32 i;
+    uint32 used = 0u;
+    uint32 rc;
+
+    rc = layout_check_header(rec);
+    if(rc != ARKRTOS_CFG_OK)
+    {
+        return rc;
+    }
+
+    for(i = 0u; i < ARKRTOS_CFG_SLOT_MAX; i++)
+    {
+        const arkrtos_cfg_slot_t *s = &rec->slot[i];
+
+        if((i >= rec->slot_count) || (s->type == ARKRTOS_CFG_TYPE_UNUSED))
+        {
+            continue;
+        }
+        used++;
+
+        rc = layout_check_slot(rec, i);
+        if(rc != ARKRTOS_CFG_OK)
+        {
+            return rc;
+        }
+
+        rc = layout_check_overlap(rec, i);
+        if(rc != ARKRTOS_CFG_OK)
+        {
+            return rc;
+        }
+    }
+
+    /* 模式与槽表必须一致：
+     *   FIXED 至少要有一个可用槽，否则设备装不了也跑不了任何镜像；
+     *   AUTO  不许带槽表——自动选址会自己找落点，槽表放着也不会被读，
+     *         那就等于「配置里写了、设备没照做」，必须当场报错。 */
+    if(rec->mode == ARKRTOS_LAYOUT_MODE_FIXED)
+    {
+        if(used == 0u)
+        {
+            return ARKRTOS_CFG_ERR_SLOTS_IN_MODE;
+        }
+    }
+    else if(used != 0u)
+    {
+        return ARKRTOS_CFG_ERR_SLOTS_IN_MODE;
+    }
+
+    return layout_check_knobs(rec);
 }
 
 /* ============================================================
