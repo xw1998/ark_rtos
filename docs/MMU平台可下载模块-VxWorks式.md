@@ -1,5 +1,7 @@
 # MMU 平台上的可下载模块（VxWorks 式）与两种应用模型
 
+**[简体中文](MMU平台可下载模块-VxWorks式.md) | English([MMU平台可下载模块-VxWorks式.en.md](MMU平台可下载模块-VxWorks式.en.md))**
+
 本文记录 M2：**运行时装载、对内核符号表现场链接**的模块（VxWorks 的
 `ld` / `lkup` / `modules` / `unld` 那一套），以及它与 M1 的 Linux 式
 `exec`（[MMU进程模型与ELF装载.md](MMU进程模型与ELF装载.md)）的关系。
