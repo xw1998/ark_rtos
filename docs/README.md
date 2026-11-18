@@ -8,6 +8,7 @@
 | 搞懂安装策略、设备端配置区、槽位与 RAM 窗口 | [配置区与安装策略.md](配置区与安装策略.md)（配置记录格式 + 两种安装策略） |
 | 用英文读同一份配置区与安装策略 | [配置区与安装策略.en.md](配置区与安装策略.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 把为 Linux/Windows 写的 C 程序搬到 Ark RTOS 上跑 | [POSIX与Windows兼容层说明.md](POSIX与Windows兼容层说明.md)（能力表 + 不支持项及原因） |
+| 用英文读同一份 POSIX/Windows 兼容层说明 | [POSIX与Windows兼容层说明.en.md](POSIX与Windows兼容层说明.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 想知道 App 调内核时那两层编号（服务号 / 子命令号）怎么定、怎么加一个新子命令 | [SVC服务号与子命令表.md](SVC服务号与子命令表.md)（19 个服务号、133 个子命令号（含网络 17，按两个 abi 头文件里的 `SUB_` 宏实测）、ABI 规矩、新加一处要动哪三处） |
 | 内核函数返回的那个负数是什么意思、能不能改成别的值 | [返回码与错误码约定.md](返回码与错误码约定.md)（11 个模块 62 个 `ARKRTOS_*_ERR_*`、值逐处保持历史原样、三个哨兵、三条不得统一的既有契约） |
 | 在 App 里写 Linux 风格的 socket / select 程序 | [socket与select兼容层.md](socket与select兼容层.md)（名字与边界、SVC 0x1E 契约、阻塞在 App 侧兑现、SOCKET_DEMO、限制） |
@@ -78,6 +79,7 @@ docs/
 ├── 配置区与安装策略.md                      # 【设计说明】分区/池粒度/槽位与 RAM 窗口/配置记录格式/安装策略
 ├── 配置区与安装策略.en.md                   # 【English】配置区页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── POSIX与Windows兼容层说明.md              # 【设计说明】兼容层能力与边界、启动门闩、堆、真机自测
+├── POSIX与Windows兼容层说明.en.md           # 【English】兼容层页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── SVC服务号与子命令表.md                   # 【协议】服务号（SVC 立即数）+ 子命令号（p[0]）两层的唯一真源、ABI 规矩、加新子命令的三处改动
 ├── 返回码与错误码约定.md                    # 【协议】11 个模块的 ARKRTOS_*_ERR_* 具名码、值逐处不变、哨兵与不得统一的既有契约
 ├── socket与select兼容层.md                  # 【设计说明】App 侧 socket/select：头文件与边界、SVC 0x1E wire 契约、阻塞/超时在 App 侧兑现、SOCKET_DEMO、fd 空间重叠等限制

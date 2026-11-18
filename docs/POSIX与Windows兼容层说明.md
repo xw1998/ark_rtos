@@ -1,5 +1,7 @@
 # POSIX 与 Windows 兼容层说明
 
+**[简体中文](POSIX与Windows兼容层说明.md) | English([POSIX与Windows兼容层说明.en.md](POSIX与Windows兼容层说明.en.md))**
+
 Ark RTOS 的 App 侧兼容层。目标只有一条：**把一份为 Linux / Windows 写的 C 程序搬到 Ark RTOS 上跑，改的是 include 列表，不是程序结构。**
 
 兼容层的实现全部落在 App 自己的映射里，内核侧只提供它本来就有的能力（设备、信号量、消息队列、互斥量、时钟、新增的线程服务）。因此兼容层里没有一个地址、没有一个分区号、没有一个槽位号——同一份源码在任何板子上都能编译。
