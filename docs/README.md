@@ -41,6 +41,7 @@
 | 搞懂同步原语怎么写、令牌为什么不会丢、`syncinfo` 怎么读 | [同步原语与令牌守恒.md](同步原语与令牌守恒.md)（三条契约 + 返回值/唤醒原因 + 排障口径） |
 | 用英文读同一份同步原语说明 | [同步原语与令牌守恒.en.md](同步原语与令牌守恒.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 在板上用 arkc（shell 的 `cc`）编程序并**直接跑**（不安装、不占槽位、固定 RAM 窗口） | [arkc板上直跑-M1实机记录.md](arkc板上直跑-M1实机记录.md)（入口契约=向量表 + `--vector-table`、`app run`、四个错误码、优先级为什么在控制台之下、反假绿四条）与 [arkc编译产物上板运行-实施计划.md](arkc编译产物上板运行-实施计划.md) |
+| Read the same page in English | [arkc编译产物上板运行-实施计划.en.md](arkc编译产物上板运行-实施计划.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | Read the same page in English | [arkc板上直跑-M1实机记录.en.md](arkc板上直跑-M1实机记录.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 让板上编出来的程序**装到池里任意空块**去跑（可重定位，`.svcm` 走 `mini run`） | [arkc板上直跑-M2可重定位镜像.md](arkc板上直跑-M2可重定位镜像.md)（四遍差分口径、五个静默错答案的坑、宿主对拍与反假绿五条、`cc --pack` 常量、体积账、**未做完的两条判据如实记账**） |
 | Read the same page in English | [arkc板上直跑-M2可重定位镜像.en.md](arkc板上直跑-M2可重定位镜像.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
