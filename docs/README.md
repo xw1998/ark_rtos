@@ -51,6 +51,7 @@
 | App 崩溃了，它控制过的硬件（电机/继电器）怎么被带离危险态 | [App崩溃硬件安全与遗言机制.md](App崩溃硬件安全与遗言机制.md)（遗言通道 A/B、两阶段中和、计划内交接 handover、`hwsafe` 命令） |
 | 决定编什么功能、把上限改大改小 | [Kconfig配置系统.md](Kconfig配置系统.md)（符号名=宏名、依赖约束、零行为变化迁移） |
 | 改一个上限 / 开一个功能 / 挪一段地址，到底该动哪个头 | [配置头导航.md](配置头导航.md)（七个配置头的职责边界、包含顺序、五条规则、四条门禁怎么盯住） |
+| Read the configuration-header map in English | [配置头导航.en.md](配置头导航.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 6244 行的 shell 单文件该怎么拆、拆完怎么验 | [Shell命令拆分方案.md](Shell命令拆分方案.md)（只读盘点：命令族行段、跨族共享符号清单、三条硬约束、五步迁移、不做的理由） |
 | 查有哪些编译期开关、关掉后调用方看到什么 | [功能开关.md](功能开关.md)（三层开关、逐项"关掉后"语义、真能关的验证方法） |
 | 用英文读同一份开关清单 | [功能开关.en.md](功能开关.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
@@ -136,6 +137,8 @@ docs/
 ├── 安全认证准备.md                          # 【设计说明】资产与信任边界、STRIDE 威胁模型、五个标准差距表、17 条缺口寄存器、本地用例矩阵、P0–P3 路线
 ├── Kconfig配置系统.md                       # 【设计说明】Kconfig 菜单、纯 Python 工具链、符号=宏名、注入点、依赖关系、数量限制迁移
 ├── 配置头导航.md                            # 【导航】七个配置头各管什么、包含顺序（顺序本身是契约）、五条规则、门禁与典型症状落点
+├── 配置头导航.en.md                         # 【English】浓缩英文版：改什么动哪个头、包含顺序、七个头的边界、五条规则、五道门禁、三种改法命令；中文页 normative
+
 ├── Shell命令拆分方案.md                     # 【方案·未实施】shell 单文件 6244 行的只读盘点、目标文件划分、共享符号清单、迁移顺序与判据
 ├── 设备树.md                                # 【设计说明】DTS 子集与 dtc_lite、arkrtos_dt 查询 API、生成与校验、`dt` 命令、验证状态
 ├── 内核Shell控制台使用说明.md               # 【操作手册】console 命令（info/app/drv/task/sched/fault/install/log/pool/trace/cfg）
