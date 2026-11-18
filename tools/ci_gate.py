@@ -1664,8 +1664,12 @@ def main(argv):
     if do_build:
         check_builds(uv4)
 
-    print("\n%d check(s) passed, %d failed, %d skipped (remote profile)"
-          % (len(PASSED), len(FAILURES), len(SKIPPED)))
+    # The label used to be hardcoded, so a local full run also claimed to be
+    # the remote profile (16 skips vs 0).  A reading that misnames its own
+    # profile is not a reading.
+    print("\n%d check(s) passed, %d failed, %d skipped%s"
+          % (len(PASSED), len(FAILURES), len(SKIPPED),
+             " (remote profile)" if remote else " (local profile)"))
     if SKIPPED:
         print("NOT VERIFIED on this run: %s" % ", ".join(SKIPPED))
     return 1 if FAILURES else 0
