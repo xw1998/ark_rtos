@@ -1959,6 +1959,47 @@ longest is now `apppack_scan()` (185 lines).
 **Evidence tier: executed on QEMU (default profile plus end-to-end PASS, and the path is really taken);
 not on board.**
 
+#### 5.30.17 Twelfth one: `apppack_scan()` split into MOVW pair, word, same-instruction and rewritten pair (2026-11-18)
+
+`apppack_scan()` in `kernelsrc/src/arkrtos_apppack.c` (185 lines) is the scanning core of the
+four-pass differential packer: it walks bytes by Thumb instruction length and decides, at each
+position, whether it is a ROM/RAM whole-word entry or a MOVW/MOVT immediate pair rewritten at link time.
+The four checks have a hard ordering (the MOVW pair must come before the whole-word view, otherwise the
+MOVT halfword reads as a ROM data word of `+delta`), so this commit **keeps the order** and only turns
+each step into a "try once" helper:
+
+| Function | Responsibility | Lines |
+|---|---|---|
+| `apppack_scan_movw_first()` | step 0: 32-bit MOVW/MOVT immediate pairs — only accepted when the three builds really differ, and `pos` must be even; on a hit it writes the entry, bumps the counter and advances 4 bytes | 66 |
+| `apppack_scan_word()` | step 1: 4-byte data words (constant-pool pointers, constant tables); an entry also needs 4-byte alignment (the loader rejects unaligned entries), otherwise the position is handed back to the next step | 62 |
+| `apppack_scan_same_insn()` | step 2: all three builds agree on the halfword, so skip by instruction length (2 or 4, via `apppack_is32()`) | 26 |
+| `apppack_scan_movw_diff()` | step 3: the instruction itself differs, so it can only be a rewritten MOVW/MOVT pair; there is no "not mine" exit — consume one step or report `ERR_DIFF` | 59 |
+| `apppack_scan()` itself | a `while(pos < len)` that calls the four steps in order, propagating `< 0` as an error and treating `!= 0` as "consumed a step" and continuing | **29** (was 185) |
+
+All four helpers share one tri-state return contract: `1` = consumed a step (out-params `p_n` / `p_pos`
+advanced, entry and counter written), `0` = not this class, negative = differential failure. To keep the
+case bodies textually untouched, each helper works on local copies of `pos` / `n` and writes them back at
+the end of the hit path.
+
+The normalised comparison gives only-OLD of 7 lines in 4 classes — two `pos += ARKRTOS_APP_RELOC_MOV_SIZE;`,
+one `pos += 4u;`, one `pos += adv;` and three `continue;` — each matched in only-NEW by a
+`*p_pos = pos + ...;` and a `return 1;`. **No condition was rewritten, no entry encoding changed, no
+counter changed, no error code swapped**, and the order of the four steps in the entry point is literally
+unchanged.
+
+Size: with the default profile (`ARKRTOS_USE_APPPACK=0`) the TU compiles to an empty object, so the
+default image is **byte-identical** — text 367528 / sha256 `f33290de...` / 31,462,512 B. With the switch
+forced on (the board-config shim in `build/_apppack_chk`, `-DARKRTOS_USE_APPPACK=1`), `-c` exits 0 with
+**0 warnings, same as baseline**, and `text` goes 3851 -> 3947 (**+96 B**; all four helpers are inlined,
+`nm` shows no symbols for them). `shell_check.py` `PASS` (`build/shell_check_apppack.log`) — the default
+profile never takes this path, so that run proves "nothing was broken", not "the new code was executed".
+`doc_audit.py funcs`: functions over 120 lines **22 -> 21**, longest now
+`arkrtos_loader_load_buffer()` (176 lines).
+
+**Evidence tier: compiles with the switch forced on (types and inlining checked) + byte-identical default
+profile + end-to-end PASS; the scan path itself has not been executed on board or in QEMU (the default
+profile does not pack), not on board.**
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine

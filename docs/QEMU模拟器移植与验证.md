@@ -4275,6 +4275,41 @@ after              text 367528 / data 440 / bss 767508   sha256 f33290de…   31
 
 **结论分档：QEMU 实跑验证过（默认档 + 端到端 PASS 且真走这条 SVC），未上板。**
 
+#### 5.30.17 第十二笔：`apppack_scan()` 按「MOVW 对 / 整字 / 同指令 / 改写对」分出四步（2026-11-18）
+
+`kernelsrc/src/arkrtos_apppack.c` 的 `apppack_scan()`（185 行）是四遍差分打包里「扫一遍」的核心：
+它按 Thumb 指令长度走字节，判断每个位置是 ROM/RAM 整字表项、还是被链接期改写的 MOVW/MOVT 立即数对。
+四个判断按顺序有硬性先后（MOVW 对必须排在整字判之前，否则 MOVT 的高半字会被当成 `+delta` 的 ROM
+数据字），所以这一笔**不改顺序**，只把每一步整体搬成一个「试一次」的 helper：
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `apppack_scan_movw_first()` | 第 0 步：先按 32 位 MOVW/MOVT 立即数对判，三份里真的变了才认，还要求 `pos` 是 2 的倍数；命中就写表项、加计数、前进 4 字节 | 66 |
+| `apppack_scan_word()` | 第 1 步：4 字节纯数据字（常量池指针/常量表），命中后还要求 4 字节对齐（装载器的表检查会拒非对齐项），对齐不了就交回给下一步 | 62 |
+| `apppack_scan_same_insn()` | 第 2 步：三份的半字相同 ⇒ 按指令长度（`apppack_is32()` 判 2/4 字节）跳过 | 26 |
+| `apppack_scan_movw_diff()` | 第 3 步：指令本身不同 ⇒ 只能是 MOVW/MOVT 被改写；没有「不归它管」的出口，要么消费一步要么报 `ERR_DIFF` | 59 |
+| `apppack_scan()` 自己 | `while(pos < len)` 里依次调四步，`<0` 上抛错误、`!=0` 表示已消费一步即 `continue` | **29**（原 185） |
+
+四个 helper 的返回约定统一成三态：`1` = 消费了一步（出参 `p_n` / `p_pos` 已推进，表项与计数已写）、
+`0` = 不属于这一类、负值 = 差分失败。为了让 case 体逐字不动，helper 里用 `pos` / `n` 的局部副本干活，
+命中路径末尾写回 `*p_n` / `*p_pos`。
+
+等价性归一化比对：only-OLD 7 行 4 类 —— 2 处 `pos += ARKRTOS_APP_RELOC_MOV_SIZE;`、1 处 `pos += 4u;`、
+1 处 `pos += adv;`、3 处 `continue;`；它们在 only-NEW 里逐条对应成 4 处 `*p_pos = pos + ...;` 与
+4 处 `return 1;`。**没有判断条件被改写、没有表项编码被改、没有计数被改、没有错误码被换**（四步的
+顺序在主干里一字未动）。
+
+体积：默认档 `ARKRTOS_USE_APPPACK=0` 时这个 TU 被包成空目标，所以默认档**逐字节不变** ——
+text 367528 / sha256 `f33290de…` / 31,462,512 B。开关强制打开（`build/_apppack_chk` 的板级头
+shim，`-DARKRTOS_USE_APPPACK=1`）后 `-c` 编译 exit=0、**告警 0 条与基线同数**，`text` 3851 → 3947
+（**+96 B**，四个 helper 全被内联，`nm` 里看不到它们的符号）。`shell_check.py` `PASS`
+（`build/shell_check_apppack.log`，默认档不走这条路径，所以它证明的是「没被弄坏」，不是「这段新
+代码被跑到」）。`doc_audit.py funcs`：超过 120 行的函数 **22 → 21**，最长换成
+`arkrtos_loader_load_buffer()`（176 行）。
+
+**结论分档：编译通过（开关打开档，类型与内联都验过）+ 默认档逐字节不变 + 端到端 PASS；这条扫描
+路径本身没有在板上或 QEMU 上真跑过（默认档不打包），未上板。**
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

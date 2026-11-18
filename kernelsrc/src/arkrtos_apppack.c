@@ -182,6 +182,230 @@ static uint32 apppack_is_movw_kind(uint32 kind)
            ? 1u : 0u;
 }
 
+/* ---- 0) MOVW/MOVT 立即数对（32 位 Thumb，跨两个半字）。
+ * 返回 1 = 消费了一步（出参 p_n / p_pos 已推进，表项与计数已写），
+ * 0 = 不属于这一类，负值 = 差分失败。 */
+static int32 apppack_scan_movw_first(const uint8 *a, const uint8 *b, const uint8 *c,
+                                    uint32 len, uint32 delta,
+                                    uint32 *table, apppack_count_t *count,
+                                    uint32 *p_n, uint32 *p_pos)
+{
+    uint32 pos = *p_pos;
+    uint32 n   = *p_n;
+    uint32 kind = 0u;
+
+    /* ---- 0) 先判 MOVW/MOVT 立即数对（32 位 Thumb 指令，跨两个半字）----
+     * 必须排在整字判之前：MOVT 的高 16 位里只有 imm8 随基址变，站在 4 字节
+     * 整字视角看恰好等于「+delta」，会被误当成一条 ROM 数据字表项；而 MOVT
+     * 的起点常落在 2 mod 4 上，装载器按对齐规则本来就会拒收这种表项。
+     * 只有三份里真的变了才按指令处理：三份一致的 MOVW/MOVT 对是普通常量，
+     * 让它落到下面按指令长度正常跳过，免得把数据字误读成指令。 */
+    if((pos + ARKRTOS_APP_RELOC_MOV_SIZE) <= len)
+    {
+        uint32 va = 0u;
+        uint32 vb = 0u;
+        uint32 vc = 0u;
+
+        if((apppack_read_pair(a, len, pos, &va) != 0u) &&
+           (apppack_read_pair(b, len, pos, &vb) != 0u) &&
+           (apppack_read_pair(c, len, pos, &vc) != 0u))
+        {
+            uint32 db = (vb - va) & 0xFFFFFFFFu;
+            uint32 dc = (vc - va) & 0xFFFFFFFFu;
+
+            if((db != 0u) || (dc != 0u))
+            {
+                if((db == delta) && (dc == 0u))
+                {
+                    kind = APPPACK_KIND_ROM_MOVW;
+                }
+                else if((dc == delta) && (db == 0u))
+                {
+                    kind = APPPACK_KIND_RAM_MOVW;
+                }
+                else
+                {
+                    return ARKRTOS_APPPACK_ERR_DIFF;
+                }
+
+                if((pos % 2u) != 0u)
+                {
+                    return ARKRTOS_APPPACK_ERR_DIFF;
+                }
+
+                if(table != 0)
+                {
+                    table[n] = (pos / ARKRTOS_APP_RELOC_OFF_UNIT) << 2 | kind;
+                }
+                n++;
+
+                if(kind == APPPACK_KIND_ROM_MOVW) { count->n_rom_movw++; }
+                else                              { count->n_ram_movw++; }
+
+                *p_n   = n;
+                *p_pos = pos + ARKRTOS_APP_RELOC_MOV_SIZE;
+                return 1;
+            }
+        }
+    }
+
+    return 0;
+}
+
+/* ---- 1) 4 字节纯数据字（常量池里的指针、常量表）。返回约定同上。 */
+static int32 apppack_scan_word(const uint8 *a, const uint8 *b, const uint8 *c,
+                              uint32 len, uint32 delta,
+                              uint32 *table, apppack_count_t *count,
+                              uint32 *p_n, uint32 *p_pos)
+{
+    uint32 pos = *p_pos;
+    uint32 n   = *p_n;
+    uint32 kind = 0u;
+    uint32 hit  = 0u;
+
+    /* ---- 1) 先按 4 字节纯数据字判：常量池里的指针、常量表 ---- */
+    if((pos + 4u) <= len)
+    {
+        uint32 wa = apppack_rd32(a + pos);
+        uint32 wb = apppack_rd32(b + pos);
+        uint32 wc = apppack_rd32(c + pos);
+        uint32 db = (wb - wa) & 0xFFFFFFFFu;
+        uint32 dc = (wc - wa) & 0xFFFFFFFFu;
+
+        if((db != 0u) || (dc != 0u))
+        {
+            if((db == delta) && (dc == 0u))
+            {
+                kind = APPPACK_KIND_ROM;
+                hit  = 1u;
+            }
+            else if((dc == delta) && (db == 0u))
+            {
+                kind = APPPACK_KIND_RAM;
+                hit  = 1u;
+            }
+            else
+            {
+                /* 差了一个非 delta 的量：可能正好是 MOVW 立即数被改写了，
+                 * 留到下面按指令解释；这里不能直接判失败。 */
+                hit = 0u;
+            }
+
+            if(hit != 0u)
+            {
+                /* 整字表项要 4 字节对齐（装载器的表检查会拒绝非对齐项）；
+                 * 对齐不了的说明这个字不是独立的地址槽，交给指令解释。 */
+                if((pos % ARKRTOS_APP_RELOC_SIZE) == 0u)
+                {
+                    if(table != 0)
+                    {
+                        table[n] = (pos / ARKRTOS_APP_RELOC_OFF_UNIT) << 2 | kind;
+                    }
+                    n++;
+                    if(kind == APPPACK_KIND_ROM) { count->n_rom++; }
+                    else                          { count->n_ram++; }
+                    *p_n   = n;
+                    *p_pos = pos + 4u;
+                    return 1;
+                }
+                hit = 0u;
+            }
+        }
+    }
+
+    return 0;
+}
+
+/* ---- 2) 三份完全一样：按指令长度（16/32 位）走到下一条。 */
+static int32 apppack_scan_same_insn(const uint8 *a, const uint8 *b, const uint8 *c,
+                                   uint32 *p_pos)
+{
+    uint32 pos = *p_pos;
+    uint32 adv;
+    uint32 ha;
+    uint32 hb;
+    uint32 hc;
+
+    /* ---- 2) 三份完全一样：按指令长度走到下一条 ---- */
+    ha = apppack_rd16(a + pos);
+    hb = apppack_rd16(b + pos);
+    hc = apppack_rd16(c + pos);
+
+    if((ha == hb) && (ha == hc))
+    {
+        adv = (apppack_is32(ha) != 0u) ? 4u : 2u;
+
+        /* 半字一样、但整字不同的情况已经被第 1 步处理；这里能确定整条
+         * 指令（或半个字）三份一致，直接跳过。 */
+        *p_pos = pos + adv;
+        return 1;
+    }
+
+    return 0;
+}
+
+/* ---- 3) 指令本身不同：只能是 MOVW/MOVT 立即数对被链接期改写。
+ * 这一步没有「不归它管」的出口：要么消费一步，要么报 DIFF。 */
+static int32 apppack_scan_movw_diff(const uint8 *a, const uint8 *b, const uint8 *c,
+                                   uint32 len, uint32 delta,
+                                   uint32 *table, apppack_count_t *count,
+                                   uint32 *p_n, uint32 *p_pos)
+{
+    uint32 pos = *p_pos;
+    uint32 n   = *p_n;
+    uint32 kind = 0u;
+
+    /* ---- 3) 指令本身不同：只能是 MOVW/MOVT 立即数对被链接期改写 ---- */
+    {
+        uint32 va = 0u;
+        uint32 vb = 0u;
+        uint32 vc = 0u;
+        uint32 db;
+        uint32 dc;
+
+        if((apppack_read_pair(a, len, pos, &va) == 0u) ||
+           (apppack_read_pair(b, len, pos, &vb) == 0u) ||
+           (apppack_read_pair(c, len, pos, &vc) == 0u))
+        {
+            return ARKRTOS_APPPACK_ERR_DIFF;
+        }
+
+        db = (vb - va) & 0xFFFFFFFFu;
+        dc = (vc - va) & 0xFFFFFFFFu;
+
+        if((db == delta) && (dc == 0u))
+        {
+            kind = APPPACK_KIND_ROM_MOVW;
+            count->n_rom_movw++;
+        }
+        else if((dc == delta) && (db == 0u))
+        {
+            kind = APPPACK_KIND_RAM_MOVW;
+            count->n_ram_movw++;
+        }
+        else
+        {
+            return ARKRTOS_APPPACK_ERR_DIFF;
+        }
+
+        if((pos % 2u) != 0u)
+        {
+            return ARKRTOS_APPPACK_ERR_DIFF;
+        }
+
+        if(table != 0)
+        {
+            table[n] = (pos / ARKRTOS_APP_RELOC_OFF_UNIT) << 2 | kind;
+        }
+        n++;
+        *p_n   = n;
+        *p_pos = pos + ARKRTOS_APP_RELOC_MOV_SIZE;
+        return 1;
+    }
+
+    return 0;
+}
+
 /**
 * @brief 差分一遍：把 (相对偏移, 类型) 编码进 table，或只计数
 * @param table 非 0 时逐个写入编码后的表项（偏移相对负载，未加表长）
@@ -193,181 +417,25 @@ static int32 apppack_scan(const uint8 *a, const uint8 *b, const uint8 *c,
 {
     uint32 pos = 0u;
     uint32 n = 0u;
+    int32  hit;
 
     while(pos < len)
     {
-        uint32 kind = 0u;
-        uint32 hit  = 0u;   /* 「这一步认出了表项」的标志。不能用 kind != 0 代替：
-                             * ROM 类表项的种类值本来就是 0，混用会把整字 ROM 表项
-                             * 当成「没命中」静默丢掉，最后在别处报 DIFF。 */
-        uint32 adv;
-        uint32 ha;
-        uint32 hb;
-        uint32 hc;
+        hit = apppack_scan_movw_first(a, b, c, len, delta, table, count,
+                                     &n, &pos);
+        if(hit < 0) { return hit; }
+        if(hit != 0) { continue; }
 
-        /* ---- 0) 先判 MOVW/MOVT 立即数对（32 位 Thumb 指令，跨两个半字）----
-         * 必须排在整字判之前：MOVT 的高 16 位里只有 imm8 随基址变，站在 4 字节
-         * 整字视角看恰好等于「+delta」，会被误当成一条 ROM 数据字表项；而 MOVT
-         * 的起点常落在 2 mod 4 上，装载器按对齐规则本来就会拒收这种表项。
-         * 只有三份里真的变了才按指令处理：三份一致的 MOVW/MOVT 对是普通常量，
-         * 让它落到下面按指令长度正常跳过，免得把数据字误读成指令。 */
-        if((pos + ARKRTOS_APP_RELOC_MOV_SIZE) <= len)
-        {
-            uint32 va = 0u;
-            uint32 vb = 0u;
-            uint32 vc = 0u;
+        hit = apppack_scan_word(a, b, c, len, delta, table, count, &n, &pos);
+        if(hit < 0) { return hit; }
+        if(hit != 0) { continue; }
 
-            if((apppack_read_pair(a, len, pos, &va) != 0u) &&
-               (apppack_read_pair(b, len, pos, &vb) != 0u) &&
-               (apppack_read_pair(c, len, pos, &vc) != 0u))
-            {
-                uint32 db = (vb - va) & 0xFFFFFFFFu;
-                uint32 dc = (vc - va) & 0xFFFFFFFFu;
+        hit = apppack_scan_same_insn(a, b, c, &pos);
+        if(hit < 0) { return hit; }
+        if(hit != 0) { continue; }
 
-                if((db != 0u) || (dc != 0u))
-                {
-                    if((db == delta) && (dc == 0u))
-                    {
-                        kind = APPPACK_KIND_ROM_MOVW;
-                    }
-                    else if((dc == delta) && (db == 0u))
-                    {
-                        kind = APPPACK_KIND_RAM_MOVW;
-                    }
-                    else
-                    {
-                        return ARKRTOS_APPPACK_ERR_DIFF;
-                    }
-
-                    if((pos % 2u) != 0u)
-                    {
-                        return ARKRTOS_APPPACK_ERR_DIFF;
-                    }
-
-                    if(table != 0)
-                    {
-                        table[n] = (pos / ARKRTOS_APP_RELOC_OFF_UNIT) << 2 | kind;
-                    }
-                    n++;
-
-                    if(kind == APPPACK_KIND_ROM_MOVW) { count->n_rom_movw++; }
-                    else                              { count->n_ram_movw++; }
-
-                    pos += ARKRTOS_APP_RELOC_MOV_SIZE;
-                    continue;
-                }
-            }
-        }
-
-        /* ---- 1) 先按 4 字节纯数据字判：常量池里的指针、常量表 ---- */
-        if((pos + 4u) <= len)
-        {
-            uint32 wa = apppack_rd32(a + pos);
-            uint32 wb = apppack_rd32(b + pos);
-            uint32 wc = apppack_rd32(c + pos);
-            uint32 db = (wb - wa) & 0xFFFFFFFFu;
-            uint32 dc = (wc - wa) & 0xFFFFFFFFu;
-
-            if((db != 0u) || (dc != 0u))
-            {
-                if((db == delta) && (dc == 0u))
-                {
-                    kind = APPPACK_KIND_ROM;
-                    hit  = 1u;
-                }
-                else if((dc == delta) && (db == 0u))
-                {
-                    kind = APPPACK_KIND_RAM;
-                    hit  = 1u;
-                }
-                else
-                {
-                    /* 差了一个非 delta 的量：可能正好是 MOVW 立即数被改写了，
-                     * 留到下面按指令解释；这里不能直接判失败。 */
-                    hit = 0u;
-                }
-
-                if(hit != 0u)
-                {
-                    /* 整字表项要 4 字节对齐（装载器的表检查会拒绝非对齐项）；
-                     * 对齐不了的说明这个字不是独立的地址槽，交给指令解释。 */
-                    if((pos % ARKRTOS_APP_RELOC_SIZE) == 0u)
-                    {
-                        if(table != 0)
-                        {
-                            table[n] = (pos / ARKRTOS_APP_RELOC_OFF_UNIT) << 2 | kind;
-                        }
-                        n++;
-                        if(kind == APPPACK_KIND_ROM) { count->n_rom++; }
-                        else                          { count->n_ram++; }
-                        pos += 4u;
-                        continue;
-                    }
-                    hit = 0u;
-                }
-            }
-        }
-
-        /* ---- 2) 三份完全一样：按指令长度走到下一条 ---- */
-        ha = apppack_rd16(a + pos);
-        hb = apppack_rd16(b + pos);
-        hc = apppack_rd16(c + pos);
-
-        if((ha == hb) && (ha == hc))
-        {
-            adv = (apppack_is32(ha) != 0u) ? 4u : 2u;
-
-            /* 半字一样、但整字不同的情况已经被第 1 步处理；这里能确定整条
-             * 指令（或半个字）三份一致，直接跳过。 */
-            pos += adv;
-            continue;
-        }
-
-        /* ---- 3) 指令本身不同：只能是 MOVW/MOVT 立即数对被链接期改写 ---- */
-        {
-            uint32 va = 0u;
-            uint32 vb = 0u;
-            uint32 vc = 0u;
-            uint32 db;
-            uint32 dc;
-
-            if((apppack_read_pair(a, len, pos, &va) == 0u) ||
-               (apppack_read_pair(b, len, pos, &vb) == 0u) ||
-               (apppack_read_pair(c, len, pos, &vc) == 0u))
-            {
-                return ARKRTOS_APPPACK_ERR_DIFF;
-            }
-
-            db = (vb - va) & 0xFFFFFFFFu;
-            dc = (vc - va) & 0xFFFFFFFFu;
-
-            if((db == delta) && (dc == 0u))
-            {
-                kind = APPPACK_KIND_ROM_MOVW;
-                count->n_rom_movw++;
-            }
-            else if((dc == delta) && (db == 0u))
-            {
-                kind = APPPACK_KIND_RAM_MOVW;
-                count->n_ram_movw++;
-            }
-            else
-            {
-                return ARKRTOS_APPPACK_ERR_DIFF;
-            }
-
-            if((pos % 2u) != 0u)
-            {
-                return ARKRTOS_APPPACK_ERR_DIFF;
-            }
-
-            if(table != 0)
-            {
-                table[n] = (pos / ARKRTOS_APP_RELOC_OFF_UNIT) << 2 | kind;
-            }
-            n++;
-            pos += ARKRTOS_APP_RELOC_MOV_SIZE;
-        }
+        hit = apppack_scan_movw_diff(a, b, c, len, delta, table, count, &n, &pos);
+        if(hit < 0) { return hit; }
     }
 
     return (int32)n;
