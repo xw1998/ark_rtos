@@ -2464,6 +2464,78 @@ This one has **no runtime reading**: loading a MiniApp needs the file system, th
 RAM pool, while the QEMU LA64 board profile keeps `ARKRTOS_USE_MINIAPP` off; turning it on means changing the
 board profile, which is a different change (it would grow the default image), so it is not done here.
 
+#### 5.30.27 Twenty-second one: `arkrtos_mq_send_internal()` split into deliver / no-wait / register / classify-after-block (2026-11-18)
+
+`arkrtos_mq_send_internal()` in `kernelsrc/src/arkrtos_mq.c` (143 lines) was a three-stage
+"fast path + sleep + re-check", with four unrelated jobs wedged in between: deliver and wake a receiver,
+drop a stale registration when the queue is full and the caller will not wait, register itself in the waiter
+table, and classify the five outcomes of the blocking call. In one body with a dozen `return`s, every one of
+them required re-reading "is the interrupt still masked here, has my registration been removed":
+
+| Function | What it owns | Lines |
+|---|---|---|
+| `mq_send_deliver()` | `arkrtos_mq_put` -> `wake_one` -> trace -> unmask -> switch task; **the fast path and the "space arrived" tail are the same piece** | 8 |
+| `mq_send_no_wait()` | drops the caller's possibly stale registration (a user-mode poll finishes with `timeout==0`, and one stale entry would occupy a slot in the send waiter table forever), unmasks and returns `FULL` | 11 |
+| `mq_send_waiter_push()` | `waiter_add`; `-2` (already registered) counts as success and the caller continues, a genuinely full table yields `NOSPACE` | 10 |
+| `mq_send_after_block()` | five outcomes: `sync_in_handler` -> `WOULDBLOCK`; `ret<0` -> remove registration + `CONTEXT`; `OBJ_DELETED` -> **keep** the registration + `DELETED`; `WAKE_TIMEOUT` -> remove + `TIMEOUT`; anything else returns 1 meaning "woken, re-check the space" | 34 |
+| `arkrtos_mq_send_internal()` itself | argument/handle/state checks -> mask -> deliver when not full -> `timeout==0` goes no-wait -> fetch the current task -> record start tick and deadline -> register -> block -> classify -> `while(count>=DEPTH)` re-queue against the remaining time -> deliver | **55** (was 143) |
+
+Three rules: (1) **there is exactly one delivery piece** -- the old code had two verbatim copies of
+`put` / `wake_one` / trace / unmask / switch (the immediate attempt before blocking, and the tail once space
+was finally obtained), and breaking one of them gives no warning; both now share `mq_send_deliver()`, which
+is **in-design deduplication, not a semantic change**; (2) every helper unmasks before returning (the rule
+from the sixteenth split onward) and the entry point does not re-unmask; but "registration and
+`block_in_critical` must stay in one critical region" is **not** broken apart -- the entry point still keeps
+interrupts masked after `waiter_push()`, and the cut sits between those two lines; (3) the `OBJ_DELETED`
+branch **deliberately does not remove the registration** (the queue was cleared by whoever deleted it; going
+into their table to unlink ourselves would be an out-of-bounds operation), preserved verbatim with a comment.
+
+Normalised equivalence: only-OLD is **11 lines**, all attributable -- 5 are the second verbatim delivery
+copy (two -> one), 4 are `return ARKRTOS_MQ_ERR_*;` becoming `*p_ret=...; return 0;`, 2 are
+`int32 added = ...` and `if((added < 0) && (added != -2))`; only-NEW is 32 lines of signatures, local
+declarations, `return 0;` / `return 1;`, braces and the four calls from the entry point. **No condition,
+error code, log text or interrupt boundary was changed.**
+
+Size: this one is **not** byte-identical -- the deduplication really removes code: text `367752 -> 367608`
+(**-144 B**), `data` 440 / `bss` 767508 / image total 31,462,512 B unchanged, and both `.bin` files are
+sha256 identical under `SOURCE_DATE_EPOCH=1600000000`
+(`c6f984f31f23080b8ab0d611ea56c37768916b635bae64bac34891813b402276`); `arkrtos_mq.c` warnings
+**0 = 0 in the baseline** (the three warnings in the build log come from the pre-existing LA64 pointer-width
+casts in `arkrtos_shell_image.c` / `arkrtos_shell_misc.c`, not from this file).
+
+**Two gates turned red, both fixed by adding evidence, never by lowering a baseline:**
+
+- `coverage-host` first failed with `arkrtos_mq 43.24% < baseline 43.42%`. A manual gcov reproduction (two
+  directories, `build/_mqcov` and `build/_mqcov_base`, same host harness) showed this was not a coverage
+  loss: before the split **155 of 357 executable lines ran**, after it **160 of 370** -- **executed lines +5,
+  denominator +13** (the new helper signatures and `*p_ret=...` lines). It is purely "the denominator grew".
+  The fix was to add **real test cases** to `kernelsrc/tests/test_mq_host.c`, not to touch a threshold.
+- Those cases first make the two kernel stubs **programmable**: `arkrtos_task_get_current()` now returns
+  `g_cur_task` (default 0) instead of a hard 0, and `arkrtos_task_block_in_critical()` returns one of five
+  values selected by `g_block_mode` instead of a hard -1 (mode 0, the default, still returns -1). **The
+  defaults are identical to the pre-split stubs, so the eight earlier sections run the exact same path**;
+  only the new "10. blocking send" section flips them. Six paths are asserted one by one: A) a task exists
+  but cannot block -> five attempts in a row must all be refused (a leaked registration would collide with
+  the duplicate check on the second attempt); B) woken but the space was taken again -> re-queues once and
+  finally times out; C) woken with space available -> delivered, FIFO preserved; D) the remaining time is
+  already gone -> no re-queue, times out directly; E) the queue is deleted while waiting; F) a user-mode
+  poll -> `WOULDBLOCK` (**the only outcome distinguishable by value: -4 rather than -1**). The suite went
+  from **61 to 88 checks** (`MQ-HOST OK (88 checks)`). `coverage_gate.py --update` then raised
+  `arkrtos_mq` from **43.42% to the measured 63.51%**, with the other nine modules at or above their
+  baselines (the five `after_block` classes, the full waiter-table branch of `waiter_push()` and the
+  delivery tail that used to be unreachable now really execute).
+
+Gates: `coverage-host` all ten modules at or above baseline (the baseline was **raised**, not lowered);
+`sec-crc` 8 pins; `format_gate` 361 own files clean; `doc_audit.py funcs` functions over 120 lines
+**12 -> 11** (the longest is `elf_load()` at 143 again); `example/qemu_loongarch64/shell_check.py`
+**PASS**; `ci_gate` **47 passed / 0 failed**.
+
+**Verdict class: host test suite really executed (88 checks, including the six blocking-send paths) +
+compiles + same warning count + two reproducible builds with the same sha256 + QEMU end-to-end PASS, never
+run on hardware.** The runtime evidence for the blocking paths comes from the host (driven by programmable
+stubs, judged on return values and queue state, not by a real scheduler); really sleeping, really being
+woken by an ISR and really advancing to a timeout still need a hardware case.
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine

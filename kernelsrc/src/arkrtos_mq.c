@@ -307,6 +307,82 @@ static int32 arkrtos_mq_remain_ms(uint32 start_tick, uint32 deadline)
     return (int32)((deadline - elapsed) * ARKRTOS_TICK_PERIOD_US / 1000u);
 }
 
+/* 放进队列并叫醒一个接收者。快路径与「等到了空间」的收尾是同一段，
+ * 中断照旧由这里放开，之后切一次任务。 */
+static void mq_send_deliver(arkrtos_mq_obj_t *p_mq, int32 idx, uint32 *buf, int32 len_words)
+{
+    arkrtos_mq_put(p_mq, buf, len_words);
+    arkrtos_mq_wake_one(p_mq->recv_waiters);
+    mdk_trace_arkrtos_obj_signal((uint16)idx, (uint8)MDK_TRACE_ARKRTOS_CLASS_QUEUE);
+    ARKRTOS_ENABLE_IRQ();
+    ARKRTOS_SWITCH_TASK();
+}
+
+/* 队列满且不等待：顺手撤掉自己可能留下的登记（用户态轮询用 timeout 0 收尾，
+ * 一条过期登记会把发送等待表的一个位置永久占住），然后开中断报 FULL。 */
+static int32 mq_send_no_wait(arkrtos_mq_obj_t *p_mq, arkrtos_task_t *p_tsk)
+{
+    if(p_tsk != 0)
+    {
+        arkrtos_mq_waiter_remove(p_mq->send_waiters, p_tsk);
+    }
+    ARKRTOS_ENABLE_IRQ();
+    return ARKRTOS_MQ_ERR_FULL;
+}
+
+/* 登记一个发送等待者。 waiter_add 返回 -2 是「已经登记过」，照旧往下走。 */
+static int32 mq_send_waiter_push(arkrtos_mq_obj_t *p_mq, arkrtos_task_t *p_tsk)
+{
+    int32 added = arkrtos_mq_waiter_add(p_mq->send_waiters, p_tsk);
+
+    if((added < 0) && (added != -2))
+    {
+        return ARKRTOS_MQ_ERR_NOSPACE;              /* waiter queue is full */
+    }
+    return 0;
+}
+
+/* 第一次阻塞之后的分类：返回 1 表示「被唤醒，可以再判一次空间」，
+ * 返回 0 表示结论已给出（错误码写进 *p_ret，中断已按原样放开）。 */
+static int32 mq_send_after_block(arkrtos_mq_obj_t *p_mq, arkrtos_task_t *p_tsk,
+                                 int32 ret, int32 *p_ret)
+{
+    /* User-mode waiter: register only, yield in the user wrapper */
+    if(arkrtos_sync_in_handler() != 0u)
+    {
+        ARKRTOS_ENABLE_IRQ();
+        *p_ret = ARKRTOS_SYNC_ERR_WOULDBLOCK;
+        return 0;
+    }
+   /* 关中断返回 */
+
+    if(ret < 0)
+    {
+        /* 未能进入阻塞（内核上下文/调度器锁定）：撤销入队 */
+        arkrtos_mq_waiter_remove(p_mq->send_waiters, p_tsk);
+        ARKRTOS_ENABLE_IRQ();
+        *p_ret = ARKRTOS_MQ_ERR_CONTEXT;
+        return 0;
+    }
+
+    if(ret == ARKRTOS_WAKE_OBJ_DELETED)
+    {
+        /* 等待期间消息队列被删除：队列已被删除方清空，直接返回失败 */
+        ARKRTOS_ENABLE_IRQ();
+        *p_ret = ARKRTOS_MQ_ERR_DELETED;
+        return 0;
+    }
+
+    if(ret == ARKRTOS_WAKE_TIMEOUT)
+    {
+        arkrtos_mq_waiter_remove(p_mq->send_waiters, p_tsk);
+        ARKRTOS_ENABLE_IRQ();
+        *p_ret = ARKRTOS_MQ_ERR_TIMEOUT;            /* 超时未发送成功 */
+        return 0;
+    }
+    return 1;
+}
+
 int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32 timeout_ms)
 {
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
@@ -329,26 +405,14 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
     ARKRTOS_DISABLE_IRQ();
     if(p_mq->count < ARKRTOS_MQ_DEPTH)
     {
-        arkrtos_mq_put(p_mq, buf, len_words);
-        arkrtos_mq_wake_one(p_mq->recv_waiters);
-        mdk_trace_arkrtos_obj_signal((uint16)idx, (uint8)MDK_TRACE_ARKRTOS_CLASS_QUEUE);
-        ARKRTOS_ENABLE_IRQ();
-        ARKRTOS_SWITCH_TASK();
+        mq_send_deliver(p_mq, idx, buf, len_words);
         return 0;
     }
 
     /* 队列满：不等待则立即失败 */
     if(timeout_ms == 0)
     {
-        /* Non-blocking try.  Drop a leftover registration of our own:
-         * the user-mode poll loop closes a timed-out wait with timeout 0,
-         * and a stale entry would keep a queue slot busy forever. */
-        if(p_tsk != 0)
-        {
-            arkrtos_mq_waiter_remove(p_mq->send_waiters, p_tsk);
-        }
-        ARKRTOS_ENABLE_IRQ();
-        return ARKRTOS_MQ_ERR_FULL;
+        return mq_send_no_wait(p_mq, p_tsk);
     }
 
     p_tsk = arkrtos_task_get_current();
@@ -362,14 +426,11 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
     start_tick = arkrtos_kernel_tick;
     deadline   = (timeout_ms > 0) ? ARKRTOS_MS_TO_TICK((uint32)timeout_ms) : 0u;
 
+    ret = mq_send_waiter_push(p_mq, p_tsk);
+    if(ret != 0)
     {
-        int32 added = arkrtos_mq_waiter_add(p_mq->send_waiters, p_tsk);
-
-        if((added < 0) && (added != -2))
-        {
-            ARKRTOS_ENABLE_IRQ();
-            return ARKRTOS_MQ_ERR_NOSPACE;              /* waiter queue is full */
-        }
+        ARKRTOS_ENABLE_IRQ();
+        return ret;
     }
     /* 注意：此处不放开中断——入队与下面的 block_in_critical 必须在同一临界区内，
      * 否则 ISR 的唤醒会投给一个还没睡下的任务（唤醒丢失）。 */
@@ -377,34 +438,9 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
     /* 阻塞等待接收者腾出空间（wake_reason: 0=被唤醒 1=超时） */
     arkrtos_trace_wait_obj(MDK_TRACE_ARKRTOS_OBJ(MDK_TRACE_ARKRTOS_CLASS_QUEUE, idx));
     ret = arkrtos_task_block_in_critical((uint32)timeout_ms);
-    /* User-mode waiter: register only, yield in the user wrapper */
-    if(arkrtos_sync_in_handler() != 0u)
+    if(mq_send_after_block(p_mq, p_tsk, ret, &ret) == 0)
     {
-        ARKRTOS_ENABLE_IRQ();
-        return ARKRTOS_SYNC_ERR_WOULDBLOCK;
-    }
-   /* 关中断返回 */
-
-    if(ret < 0)
-    {
-        /* 未能进入阻塞（内核上下文/调度器锁定）：撤销入队 */
-        arkrtos_mq_waiter_remove(p_mq->send_waiters, p_tsk);
-        ARKRTOS_ENABLE_IRQ();
-        return ARKRTOS_MQ_ERR_CONTEXT;
-    }
-
-    if(ret == ARKRTOS_WAKE_OBJ_DELETED)
-    {
-        /* 等待期间消息队列被删除：队列已被删除方清空，直接返回失败 */
-        ARKRTOS_ENABLE_IRQ();
-        return ARKRTOS_MQ_ERR_DELETED;
-    }
-
-    if(ret == ARKRTOS_WAKE_TIMEOUT)
-    {
-        arkrtos_mq_waiter_remove(p_mq->send_waiters, p_tsk);
-        ARKRTOS_ENABLE_IRQ();
-        return ARKRTOS_MQ_ERR_TIMEOUT;                          /* 超时未发送成功 */
+        return ret;
     }
     /* 被唤醒时空间可能已被他人占用（多个发送者被同时唤醒的场景不存在，
      * 但为稳妥起见仍检查一次；占用则按错误处理） */
@@ -419,14 +455,10 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
             return ARKRTOS_MQ_ERR_TIMEOUT;                      /* 超时：未发送成功 */
         }
 
+        if(mq_send_waiter_push(p_mq, p_tsk) != 0)
         {
-            int32 added = arkrtos_mq_waiter_add(p_mq->send_waiters, p_tsk);
-
-            if((added < 0) && (added != -2))
-            {
-                ARKRTOS_ENABLE_IRQ();
-                return ARKRTOS_MQ_ERR_NOSPACE;          /* waiter queue is full */
-            }
+            ARKRTOS_ENABLE_IRQ();
+            return ARKRTOS_MQ_ERR_NOSPACE;          /* waiter queue is full */
         }
 
         arkrtos_trace_wait_obj(MDK_TRACE_ARKRTOS_OBJ(MDK_TRACE_ARKRTOS_CLASS_QUEUE, idx));
@@ -443,11 +475,7 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
             return ARKRTOS_MQ_ERR_DELETED;                      /* 对象被删 / 未能阻塞 */
         }
     }
-    arkrtos_mq_put(p_mq, buf, len_words);
-    arkrtos_mq_wake_one(p_mq->recv_waiters);
-    mdk_trace_arkrtos_obj_signal((uint16)idx, (uint8)MDK_TRACE_ARKRTOS_CLASS_QUEUE);
-    ARKRTOS_ENABLE_IRQ();
-    ARKRTOS_SWITCH_TASK();
+    mq_send_deliver(p_mq, idx, buf, len_words);
     return 0;
 }
 

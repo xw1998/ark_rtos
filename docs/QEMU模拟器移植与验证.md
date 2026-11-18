@@ -4713,6 +4713,67 @@ arkrtos_board_config.h`：先吃真板级配置再 `#undef` / `#define ARKRTOS_U
 这一笔**没有运行读数**：小程序装载要 FS + 实例表 + 真 RAM 池，QEMU LA64 板档把 `ARKRTOS_USE_MINIAPP`
 关着，开口令就要改板级配置、那是另一件事（会增加默认档体积），故不在这里做。
 
+#### 5.30.27 第二十二笔：`arkrtos_mq_send_internal()` 按「投递 / 不等待 / 登记 / 阻塞后分类」分四段（2026-11-18）
+
+`kernelsrc/src/arkrtos_mq.c` 的 `arkrtos_mq_send_internal()`（143 行）是一个「快路径 + 睡下去 + 醒来
+再判」的三段式，但三段之间还夹着四件互不相干的事：投递并叫醒接收者、满了且不等时撤掉过期登记、
+登记自己入等待表、阻塞返回后的五种分类。混在一个函数里，`return` 有十几处，每次都要回头看
+「此刻中断关着没有、我的登记撤了没有」：
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `mq_send_deliver()` | `arkrtos_mq_put` → `wake_one` → trace → 开中断 → 切任务；**快路径与「等到空间之后」的收尾是同一段** | 8 |
+| `mq_send_no_wait()` | 有当前任务就撤掉自己可能留下的登记（用户态轮询用 `timeout==0` 收尾，一条过期登记会永久占住发送等待表一位），开中断报 `FULL` | 11 |
+| `mq_send_waiter_push()` | `waiter_add` 登记自己；`-2`（已登记）视作成功照旧往下走，真满返回 `NOSPACE` | 10 |
+| `mq_send_after_block()` | 阻塞返回后的五种分类：`sync_in_handler` → `WOULDBLOCK`；`ret<0` → 撤登记 + `CONTEXT`；`OBJ_DELETED` → **不撤登记** + `DELETED`；`WAKE_TIMEOUT` → 撤登记 + `TIMEOUT`；其余返回 1 表示「被唤醒，可以再判一次空间」 | 34 |
+| `arkrtos_mq_send_internal()` 自己 | 参数/句柄/状态校验 → 关中断 → 未满投递 → `timeout==0` 走不等待 → 取当前任务 → 记起始节拍与上限 → 登记 → 阻塞 → 分类 → `while(count>=DEPTH)` 按剩余时间重排队 → 投递 | **55**（原 143） |
+
+口径三条：① **投递段只有一份** —— 原来「进阻塞前的即时投递」与「醒来后终于拿到空间的收尾」是两段
+逐字相同的代码（`put` / `wake_one` / trace / 开中断 / 切任务），改错一份没有任何提示，现在共用
+`mq_send_deliver()`，**这是设计内去重，不是语义改动**；② 每个 helper 自己开中断再返回（⑰ 起的口径），
+入口不补开；但「登记 + `block_in_critical` 必须在同一临界区内」这条**没被拆散**，`waiter_push()` 之后
+入口仍不放开中断，落刀处就在这两行之间；③ `OBJ_DELETED` 那条**故意不撤登记**（队列已被删除方清空，
+再去别人的表里摘自己是越界操作），这一条在 helper 里原样保留并加了注释。
+
+等价性归一化比对：only-OLD **11 行**，全部可归因 —— 5 行是第二份重复的投递代码（两份并一份）、
+4 行是 `return ARKRTOS_MQ_ERR_*;` 改成 `*p_ret=…; return 0;`、2 行是 `int32 added = …` 与
+`if((added < 0) && (added != -2))`；only-NEW 32 行全是签名、局部声明、`return 0;` / `return 1;`、
+花括号与入口的四处调用。**判断条件、错误码、日志文案、关中断的边界一处未改。**
+
+体积：这一笔**不是**逐字节不变 —— 去重真的省下代码：text `367752 → 367608`（**−144 B**），
+`data` 440 / `bss` 767508 / 镜像总长 31,462,512 B 不变，`SOURCE_DATE_EPOCH=1600000000` 下两份 `.bin`
+sha256 相同（`c6f984f31f23080b8ab0d611ea56c37768916b635bae64bac34891813b402276`）；`arkrtos_mq.c`
+告警 **0 条 = 拆分前 0 条**（构建日志里那 3 条是 `arkrtos_shell_image.c` / `arkrtos_shell_misc.c`
+既有的 LA64 指针宽度转换，与本文件无关）。
+
+**两道门禁被碰红，都是「先补证据」修好，没有下调基线：**
+
+- `coverage-host` 一开始 FAIL `arkrtos_mq 43.24% < 基线 43.42%`。手写 gcov 复现（`build/_mqcov` 与
+  `build/_mqcov_base` 两档，同一 host harness）判定这不是覆盖率掉了：拆分前 **357 个可执行行里执行
+  155 行**，拆分后 **370 行里执行 160 行** —— **执行行数 +5，分母 +13**（新增 helper 的签名行与
+  `*p_ret=…` 行），纯粹是「分母变大」。处置是给 `kernelsrc/tests/test_mq_host.c` 补**真用例**，
+  不是改阈值。
+- 补的用例先把两个内核桩改成**可编程**：`arkrtos_task_get_current()` 从「恒返回 0」改成返回
+  `g_cur_task`（默认 0），`arkrtos_task_block_in_critical()` 从「恒返回 -1」改成按 `g_block_mode`
+  给出五种返回值（默认 0 档仍是 -1）。**默认值与拆分前逐字一致，前面八段用例的路径一行没动**；
+  只有新加的「10. 阻塞发送」一段才临时打开。六条路径逐条断言：A) 有任务但进不了阻塞 → 连做 5 次
+  都必须是同一个拒绝（若登记没被撤销，第二次起会撞上重复登记）；B) 被唤醒时空间又被占走 → 重新
+  排队一次、最终超时；C) 被唤醒时空间已腾出 → 投递成功且先进先出；D) 剩余时间已用尽 → 不再排队、
+  直接超时；E) 等待期间队列被删除；F) 用户态轮询 → 报 `WOULDBLOCK`（**这是唯一能按数值区分的结论：
+  `-4` 而不是 `-1`**）。用例从 **61 条涨到 88 条**（`MQ-HOST OK (88 checks)`）。
+  随后 `coverage_gate.py --update` 把 `arkrtos_mq` 由 **43.42% 抬到实测 63.51%**，其余 9 个模块
+  不低于基线（`arkrtos_mq.c` 里原来走不到的 `after_block` 五个分类、`waiter_push` 的满表分支与
+  `deliver` 收尾现在都有真执行）。
+
+门禁：`coverage-host` 10 个模块不低于基线（基线**上调**到实测）；`sec-crc` 8 pin 全过；
+`format_gate` 361 个自有文件干净；`doc_audit.py funcs` 超过 120 行的函数 **12 → 11**（最长换回
+`elf_load()` 143）；`example/qemu_loongarch64/shell_check.py` **PASS**；`ci_gate` **47 passed /
+0 failed**。
+
+**结论分档：宿主用例实跑（88 checks，含 6 条阻塞发送路径）+ 编译通过 + 告警同数 + 两份可复现构建
+sha256 相同 + QEMU 端到端 PASS，未上板。** 阻塞路径的运行证据来自宿主（可编程桩驱动，判据是返回值
+与队列状态，不是真调度器），真睡下/真被 ISR 唤醒/真超时推进仍只有上板用例能证明。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行
