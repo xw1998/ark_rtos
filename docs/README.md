@@ -66,6 +66,7 @@
 | 想知道这套构建的安全基线还在不在（12 项只读自检） | [安全基线自检.md](安全基线自检.md)（PASS/FAIL/FINDING/SKIP 四档、12 条检查逐条判据、F427 逐字读数、三条边界与开关体积） |
 | 要过安全认证：资产、威胁模型、标准差距、缺口清单 | [安全认证准备.md](安全认证准备.md)（11 类资产与五条信任边界、STRIDE、62443-4-2/303 645/PSA/等保2.0/61508 差距表、17 条缺口寄存器、12 个本地用例、P0–P3 路线） |
 | 说清板子上有什么硬件、驱动按 compatible 找设备 | [设备树.md](设备树.md)（DTS 子集、dtc_lite、arkrtos_dt API、`dt` 命令） |
+| Read the device tree page in English | [设备树.en.md](设备树.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 想发一个版本，要说清「这版能当正式版吗」 | [发行版与版本策略.md](发行版与版本策略.md)（版本号规则与三处一致、发布物清单与变更控制、ABI 三编号与升版判据、预览版/正式版/1.0 判据、发版六步、明确不做的四条） |
 | 查某一版到底改了什么、哪些还没验证 | [Release-0.0.3-preview.1.md](Release-0.0.3-preview.1.md)（构建与配置变更、能力与真机证据、体积账本、复现命令、兼容注意、未验证项清单） |
 | 查 API 签名与参数 | [api/Ark RTOS_API参考.md](api/Ark RTOS_API参考.md) |
@@ -143,6 +144,7 @@ docs/
 
 ├── Shell命令拆分方案.md                     # 【方案·未实施】shell 单文件 6244 行的只读盘点、目标文件划分、共享符号清单、迁移顺序与判据
 ├── 设备树.md                                # 【设计说明】DTS 子集与 dtc_lite、arkrtos_dt 查询 API、生成与校验、`dt` 命令、验证状态
+├── 设备树.en.md                             # 【English】浓缩英文版：DTS 子集与拒绝未知指令、查询 API 只返回 enabled、生成与 --check、F427 dt 命令 20 节点原文、验证分档；中文页 normative
 ├── 内核Shell控制台使用说明.md               # 【操作手册】console 命令（info/app/drv/task/sched/fault/install/log/pool/trace/cfg）
 ├── 内核Shell控制台使用说明.en.md              # 【English】Shell 控制台页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── 已知限制.md                              # 【设计说明】唯一一页限制清单：执行模型/应用形态/系统服务/可靠性安全/工具链，逐条标注取舍或欠账
