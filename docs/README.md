@@ -42,6 +42,7 @@
 | 在板上用 arkc（shell 的 `cc`）编程序并**直接跑**（不安装、不占槽位、固定 RAM 窗口） | [arkc板上直跑-M1实机记录.md](arkc板上直跑-M1实机记录.md)（入口契约=向量表 + `--vector-table`、`app run`、四个错误码、优先级为什么在控制台之下、反假绿四条）与 [arkc编译产物上板运行-实施计划.md](arkc编译产物上板运行-实施计划.md) |
 | Read the same page in English | [arkc板上直跑-M1实机记录.en.md](arkc板上直跑-M1实机记录.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 让板上编出来的程序**装到池里任意空块**去跑（可重定位，`.svcm` 走 `mini run`） | [arkc板上直跑-M2可重定位镜像.md](arkc板上直跑-M2可重定位镜像.md)（四遍差分口径、五个静默错答案的坑、宿主对拍与反假绿五条、`cc --pack` 常量、体积账、**未做完的两条判据如实记账**） |
+| Read the same page in English | [arkc板上直跑-M2可重定位镜像.en.md](arkc板上直跑-M2可重定位镜像.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 让板上编译出来的产物**掉电后还在**、复位后还能跑（外部 QSPI NOR + littlefs） | [arkc板上直跑-M3b-QSPI持久化.md](arkc板上直跑-M3b-QSPI持久化.md)（AF 权威表来源与逐脚映射、/WP /HOLD 单线坑、为什么读也走位敲、「新建文件被判 I/O 错误」这条只在 littlefs 上现形的内核缺陷、`fs put` 上传通道、24.8 s / 33.7 s 的速度账、跨复位自启尚未达成） |
 | 板上一声「跑不起来」到底看哪个错误码、编进去多少、怎么一条命令复跑 M1/M2 | [arkc产物上板-错误码表与回归账本.md](arkc产物上板-错误码表与回归账本.md)（三条装载路径的错误码表 + 两处编号重叠、五类典型失败落点、六行尺寸账本、`tools/final_app.py` 四条用例与它自己踩过的四个坑） |
 | 板上一份工程描述把几份 `.c` 打成一个能跑的镜像（`make`） | [ark make-板上构建工具.md](ark make-板上构建工具.md)（为什么不是 GNU make、五个键、四遍打包的三条硬约束、失败阶段怎么翻成错误码、关掉时零体积、这一轮抓到的两个真缺陷） |
