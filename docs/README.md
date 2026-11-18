@@ -76,6 +76,7 @@
 | 想知道这套构建的安全基线还在不在（12 项只读自检） | [安全基线自检.md](安全基线自检.md)（PASS/FAIL/FINDING/SKIP 四档、12 条检查逐条判据、F427 逐字读数、三条边界与开关体积） |
 | Read the security baseline self-check in English | [安全基线自检.en.md](安全基线自检.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 要过安全认证：资产、威胁模型、标准差距、缺口清单 | [安全认证准备.md](安全认证准备.md)（11 类资产与五条信任边界、STRIDE、62443-4-2/303 645/PSA/等保2.0/61508 差距表、17 条缺口寄存器、12 个本地用例、P0–P3 路线） |
+| Read the same page in English | [安全认证准备.en.md](安全认证准备.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 说清板子上有什么硬件、驱动按 compatible 找设备 | [设备树.md](设备树.md)（DTS 子集、dtc_lite、arkrtos_dt API、`dt` 命令） |
 | Read the device tree page in English | [设备树.en.md](设备树.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 想发一个版本，要说清「这版能当正式版吗」 | [发行版与版本策略.md](发行版与版本策略.md)（版本号规则与三处一致、发布物清单与变更控制、ABI 三编号与升版判据、预览版/正式版/1.0 判据、发版六步、明确不做的四条） |
@@ -167,6 +168,7 @@ docs/
 ├── 安全基线自检.md                          # 【设计说明+证据】`sec` 12 项只读自检：四档结论、逐条判据、F427 逐字读数、开关与体积
 ├── 安全基线自检.en.md                       # 【English】浓缩英文版：四档结论与 FINDING/SKIP 为何必须分开、12 条检查逐条判据、iso 三值（0 无后端 / 1 窗口 / 2 页表）与不用 MPU 当唯一判据的理由、F427 上板逐字读数与 76 us 交叉核对、只读与 static 报告结构、三条边界、开关零变化与 +2056/+668 B 体积账、复现三条命令；中文页 normative
 ├── 安全认证准备.md                          # 【设计说明】资产与信任边界、STRIDE 威胁模型、五个标准差距表、17 条缺口寄存器、本地用例矩阵、P0–P3 路线
+├── 安全认证准备.en.md                       # 【English】安全认证准备页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── Kconfig配置系统.md                       # 【设计说明】Kconfig 菜单、纯 Python 工具链、符号=宏名、注入点、依赖关系、数量限制迁移
 ├── Kconfig配置系统.en.md                    # 【English】Kconfig配置系统页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── 配置头导航.md                            # 【导航】七个配置头各管什么、包含顺序（顺序本身是契约）、五条规则、门禁与典型症状落点
