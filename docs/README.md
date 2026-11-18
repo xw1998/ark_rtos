@@ -54,6 +54,7 @@
 | 一个镜像反复崩溃会怎样、装镜像前内核怎么把关 | [崩溃恢复与镜像版本把关.md](崩溃恢复与镜像版本把关.md)（跨复位崩溃日记 + 版本三态判定 + 明确不做签名/回滚） |
 | 用英文读同一份崩溃恢复与版本把关说明 | [崩溃恢复与镜像版本把关.en.md](崩溃恢复与镜像版本把关.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | App 崩溃了，它控制过的硬件（电机/继电器）怎么被带离危险态 | [App崩溃硬件安全与遗言机制.md](App崩溃硬件安全与遗言机制.md)（遗言通道 A/B、两阶段中和、计划内交接 handover、`hwsafe` 命令） |
+| Read the same page in English | [App崩溃硬件安全与遗言机制.en.md](App崩溃硬件安全与遗言机制.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 决定编什么功能、把上限改大改小 | [Kconfig配置系统.md](Kconfig配置系统.md)（符号名=宏名、依赖约束、零行为变化迁移） |
 | 改一个上限 / 开一个功能 / 挪一段地址，到底该动哪个头 | [配置头导航.md](配置头导航.md)（七个配置头的职责边界、包含顺序、五条规则、四条门禁怎么盯住） |
 | Read the configuration-header map in English | [配置头导航.en.md](配置头导航.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
@@ -131,6 +132,7 @@ docs/
 ├── 崩溃恢复与镜像版本把关.md                 # 【设计说明】B 项崩溃终局与跨复位计数、C 项版本三态判定；明确不做签名与回滚
 ├── 崩溃恢复与镜像版本把关.en.md             # 【English】崩溃恢复页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── App崩溃硬件安全与遗言机制.md              # 【设计说明】App 崩溃后的硬件安全态（遗言）机制：通道 A/B、两阶段中和、计划内交接、`hwsafe`
+├── App崩溃硬件安全与遗言机制.en.md          # 【English】App崩溃硬件安全与遗言机制页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── 无缝升级例程.md                          # 【例程说明】SEAMLESS_V1/V2 两个小程序交接控制权、两个记录文件与三条硬规则、实测数据
 ├── 无缝升级例程.en.md                       # 【English】浓缩英文版：为什么是小程序加外部 NOR、两个记录文件字段表、交接时序、装载分块让出与交接空洞实测、两处上板修掉的缺陷、未做项；中文页 normative
 
