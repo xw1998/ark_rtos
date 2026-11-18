@@ -2318,6 +2318,49 @@ partition table (`arkrtos_ptable_get()` plus board macros); making one assertion
 faking a whole table, and a faked red only proves the assertion is written correctly, not that the real layout
 is right.
 
+#### 5.30.24 Nineteenth one: `arkrtos_loader_reserve_fixed()` split into window / conflict / detach / claim (2026-11-18)
+
+`arkrtos_loader_reserve_fixed()` in `kernelsrc/src/arkrtos_loader.c` (148 lines) did four jobs inside one
+loop: compute the RAM window, decide whether this slot can take the image, decide whether something is running
+inside it, then detach old records and register the slot with a clean landing area. Four different failures with
+four different return codes all lived in the same loop body:
+
+| Function | Scope | Lines |
+|---|---|---|
+| `loader_fixed_ram_window()` | round the header's `ram_size` up to a power of two (same convention as the boot scan; the configured value is an upper bound, not the window), `ERR_SIZE` above `SLOT_RAM_MAX_BLOCK` | 17 |
+| `loader_fixed_slot_busy()` | walk the partition table; any overlapping slot in state `RUNNING` gives `ERR_BUSY` (erasing it would set that image running off the rails); every other state is overwritable | 23 |
+| `loader_fixed_slot_detach()` | overwrite install: `ptable_free` every old record overlapping this slot, so the table always equals the configured slot, no more, no less | 18 |
+| `loader_fixed_claim()` | `ptable_alloc` the whole slot -> `ram_bind` -> `clear_span` the landing area; on a failed clear it logs `LOADER`, frees the slot and returns `ERR_FLASH`; on success it hands back `base` / `ram_base` through out-params and returns the slot number | 24 |
+| `arkrtos_loader_reserve_fixed()` itself | fetch table / configured slots -> `want` -> window (fail => `ERR_SIZE`) -> consume the one-shot hint -> per-slot three filters (type, hint, fits) -> busy -> detach -> claim | **64** (was 148) |
+
+Three conventions: (1) **the window is computed once**, the loop only compares - the original computed it before
+the loop, so semantics are unchanged, but "cannot compute it means the whole thing does not apply" is now
+expressed by a return value; (2) `ERR_BUSY` and `ERR_FLASH` still mean "an image is running" and "cannot clean
+it", not one generic failure; (3) the one-shot hint is still consumed **before any slot is taken** (it is
+consumed even if the window computation fails) - that is the original order and it was not adjusted.
+
+Normalised equivalence check: only-OLD **4 lines** - `int32 slot;` merged with
+`slot = ptable_alloc(...)` into `int32 slot = arkrtos_ptable_alloc(...)`, and the `ram_bind` / `*p_ram_base`
+arguments renamed from `slots[i].ram_base` to the parameter `ram_base`; only-NEW's 35 lines are the four
+signatures, `uint32 j;` / `uint32 ram_size;`, `return 0;` / `return ERR_*`, braces and the four calls from the
+entry. **No condition, return code or log text was changed.**
+
+Size: text `367752 -> 367752` (**+/-0 B**; all four helpers inlined), `data` 440 / `bss` 767508 / image length
+31,462,512 B unchanged; under `SOURCE_DATE_EPOCH=1600000000` the `.bin` from `BUILD=build/reserve_split` and the
+rebuild in the default directory are **sha256-identical** (`63796b55...`). `arkrtos_loader.c` has **21 warnings
+= 21 before the split** (all pre-existing pointer-width casts).
+
+Gates: `loader-host: 88 passed, 0 failed` (this file is also linked into the host suite); `coverage-host` moves
+`arkrtos_loader` **45.25% -> 45.77%** (baseline raised to the measured value, never lowered); `sec-crc` 8 pins;
+`format_gate` 361 own files clean; the LA64 `example/qemu_loongarch64/shell_check.py` run **PASSES**.
+
+`doc_audit.py funcs`: functions over 120 lines **15 -> 14**; the longest is now `arkrtos_net_validate()` (144).
+
+**Evidence tier: host suite really ran (88 checks) + compiles + same warning count + two reproducible builds with
+identical sha256 + QEMU end-to-end PASS; not verified on board.** No new runtime reading for the fixed-slot path
+itself: it needs a board-level slot table (`arkrtos_layout_slots()` is generated from `config/`) plus a real Flash
+backend; on the host `test_load_buffer_e2e` goes through the in-pool AUTO path and never reaches this function.
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine

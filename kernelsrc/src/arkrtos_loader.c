@@ -1347,6 +1347,124 @@ static int32 arkrtos_loader_clear_span(uint32 base, uint32 size)
     return 0;
 }
 
+/* 固定槽位模式下，镜像绑定的 RAM 窗口按镜像头算，与开机扫描同一口径：
+ * buddy 分配器把 ram_size 向上取整到 2 的幂，那个块才是 MPU 区域与任务栈
+ * 的来源；配置里登记的 ram_size 是这个窗口的上界，不是窗口本身。
+ *
+ * 绑配置值会让同一份镜像因为启动方式不同而拿到两个不同的窗口：一个登记
+ * 16K 的槽装一份只声明 8K 的镜像，栈就比开机扫描算出来的位置高 8K，镜像
+ * 跑在一块它自己头里没有算过的 stack_bottom 上，第一次深调用就被判成栈
+ * 溢出，任务被杀掉，控制台上什么都没有。 */
+static int32 loader_fixed_ram_window(const arkrtos_app_header_t *p_hdr, uint32 *p_ram_size)
+{
+    uint32 ram_size;
+
+    for(ram_size = SLOT_RAM_MIN_BLOCK; ram_size < p_hdr->ram_size; ram_size <<= 1u)
+    {
+        /* smallest power of two not below the declared ram_size */
+    }
+
+    if(ram_size > SLOT_RAM_MAX_BLOCK)
+    {
+        return ARKRTOS_LOADER_ERR_SIZE;
+    }
+
+    *p_ram_size = ram_size;
+    return 0;
+}
+
+/* 正在运行的镜像不能被覆盖：擦写会让它当场跑飞。其它状态（EMPTY / LOADED /
+ * INSTALLING / INVALID）都可以覆盖——固定槽位的语义就是「这个地址永远属于
+ * 这个槽」。 */
+static int32 loader_fixed_slot_busy(const arkrtos_partition_table_t *pt,
+                                    uint32 s_base, uint32 s_size)
+{
+    uint32 j;
+
+    for(j = 0u; (j < pt->slot_max) && (j < ARKRTOS_SLOT_ARRAY_MAX); j++)
+    {
+        if(pt->slot_type[j] == ARKRTOS_SLOT_FREE)
+        {
+            continue;
+        }
+        if(!((s_base < (pt->slot_base[j] + pt->slot_size[j])) &&
+             (pt->slot_base[j] < (s_base + s_size))))
+        {
+            continue;           /* 与这个槽没有交集 */
+        }
+        if(pt->slot_state[j] == ARKRTOS_APP_SLOT_RUNNING)
+        {
+            return ARKRTOS_LOADER_ERR_BUSY;
+        }
+    }
+    return 0;
+}
+
+/* 覆盖安装：先把落在本槽内的旧记录摘掉，再按整槽登记，
+ * 这样分区表里的区间永远等于配置里的槽，不多不少。 */
+static void loader_fixed_slot_detach(arkrtos_partition_table_t *pt,
+                                     uint32 s_base, uint32 s_size)
+{
+    uint32 j;
+
+    for(j = 0u; (j < pt->slot_max) && (j < ARKRTOS_SLOT_ARRAY_MAX); j++)
+    {
+        if(pt->slot_type[j] == ARKRTOS_SLOT_FREE)
+        {
+            continue;
+        }
+        if((s_base < (pt->slot_base[j] + pt->slot_size[j])) &&
+           (pt->slot_base[j] < (s_base + s_size)))
+        {
+            arkrtos_ptable_free(j);
+        }
+    }
+}
+
+/* 登记整槽、绑 RAM 窗口、把落点清干净。清失败时把刚登记的槽还回去再报错。
+ *
+ * A fixed slot's landing area comes from the configuration, so what is
+ * in it right now is none of our business: re-installing over an
+ * existing image has to go through an erase first. Flash programming
+ * only clears bits (1 -> 0), so writing on top of the old image stores
+ * the AND of the two - reloc_count / payload_offset come back as
+ * (old & new), the relocation table is mangled the same way, and the
+ * device drops the frame while checking that table (err -13). The field
+ * symptom is "a fresh image installs fine, re-installing over one is
+ * refused".
+ *
+ * AUTO mode never reaches here: arkrtos_loader_find_clean() only accepts
+ * runs of 0xFF, so the base it reports is blank already.
+ *
+ * The wire-facing caller clears the slot before the frame starts (see
+ * arkrtos_loader_clear_fixed_slot), so in practice this finds it blank
+ * and returns without stalling the CPU - which matters, because an
+ * erase here would eat the relocation table already on the wire. */
+static int32 loader_fixed_claim(uint32 type, uint32 s_base, uint32 s_size,
+                                uint32 ram_base, uint32 ram_size,
+                                uint32 *p_base, uint32 *p_ram_base)
+{
+    int32 slot = arkrtos_ptable_alloc(type, s_base, s_size);
+
+    if(slot < 0)
+    {
+        return ARKRTOS_LOADER_ERR_NO_SLOT;
+    }
+
+    (void)arkrtos_ptable_ram_bind((uint32)slot, ram_base, ram_size);
+    if(arkrtos_loader_clear_span(s_base, s_size) != 0)
+    {
+        ARKRTOS_LOGE("LOADER", "cannot clear fixed slot %d (0x%08X +%u)",
+                   (int)slot, (unsigned)s_base, (unsigned)s_size);
+        arkrtos_ptable_free((uint32)slot);
+        return ARKRTOS_LOADER_ERR_FLASH;
+    }
+
+    *p_base     = s_base;
+    *p_ram_base = ram_base;
+    return slot;
+}
+
 /* 固定槽位模式下挑槽：只认配置里登记的地址，不在池里另找空位。 */
 static int32 arkrtos_loader_reserve_fixed(uint32 type, const arkrtos_app_header_t *p_hdr,
                                         uint32 total, uint32 *p_base, uint32 *p_ram_base)
@@ -1360,39 +1478,18 @@ static int32 arkrtos_loader_reserve_fixed(uint32 type, const arkrtos_app_header_
     uint32 i;
     uint32 ram_size;
 
-    /* The RAM window a fixed slot binds must be sized by the image header,
-     * the same way the boot scan computes it (see arkrtos_loader_scan): the
-     * buddy allocator rounds the header's ram_size up to a power of two, and
-     * that block is what the MPU region and the task stack are derived from.
-     * The ram_size registered for a slot in the configuration is an upper
-     * bound on the window, not the window itself.
-     *
-     * Binding the configured value instead hands one image two different
-     * windows depending on how it was started: a configured slot of 16K over
-     * an image that only declares 8K puts the stack 8K higher than the boot
-     * scan does. The image then runs against a stack_bottom its header never
-     * accounted for, and the first deep call chain is reported as a stack
-     * overflow, killing the task with nothing on the console. */
-    for(ram_size = SLOT_RAM_MIN_BLOCK; ram_size < p_hdr->ram_size; ram_size <<= 1u)
-    {
-        /* smallest power of two not below the declared ram_size */
-    }
-
-    if(ram_size > SLOT_RAM_MAX_BLOCK)
+    if(loader_fixed_ram_window(p_hdr, &ram_size) != 0)
     {
         return ARKRTOS_LOADER_ERR_SIZE;
     }
 
-
-    /* 提示是一次性的：消费掉，后面的安装回到默认行为 */
+/* 提示是一次性的：消费掉，后面的安装回到默认行为 */
     arkrtos_loader_slot_hint = -1;
 
     for(i = 0u; i < count; i++)
     {
         uint32 s_base = slots[i].base;
         uint32 s_size = slots[i].size;
-        uint32 j;
-        int32  slot;
 
         if(slots[i].type != want)
         {
@@ -1409,78 +1506,15 @@ static int32 arkrtos_loader_reserve_fixed(uint32 type, const arkrtos_app_header_
             return (hint >= 0) ? ARKRTOS_LOADER_ERR_SIZE : ARKRTOS_LOADER_ERR_NOSPACE;
         }
 
-        /* 正在运行的镜像不能被覆盖：擦写会让它当场跑飞。
-         * 其它状态（EMPTY / LOADED / INSTALLING / INVALID）都可以覆盖——
-         * 固定槽位的语义就是「这个地址永远属于这个槽」。 */
-        for(j = 0u; (j < pt->slot_max) && (j < ARKRTOS_SLOT_ARRAY_MAX); j++)
+        if(loader_fixed_slot_busy(pt, s_base, s_size) != 0)
         {
-            if(pt->slot_type[j] == ARKRTOS_SLOT_FREE)
-            {
-                continue;
-            }
-            if(!((s_base < (pt->slot_base[j] + pt->slot_size[j])) &&
-                 (pt->slot_base[j] < (s_base + s_size))))
-            {
-                continue;           /* 与这个槽没有交集 */
-            }
-            if(pt->slot_state[j] == ARKRTOS_APP_SLOT_RUNNING)
-            {
-                return ARKRTOS_LOADER_ERR_BUSY;
-            }
+            return ARKRTOS_LOADER_ERR_BUSY;
         }
 
-        /* 覆盖安装：先把落在本槽内的旧记录摘掉，再按整槽登记，
-         * 这样分区表里的区间永远等于配置里的槽，不多不少。 */
-        for(j = 0u; (j < pt->slot_max) && (j < ARKRTOS_SLOT_ARRAY_MAX); j++)
-        {
-            if(pt->slot_type[j] == ARKRTOS_SLOT_FREE)
-            {
-                continue;
-            }
-            if((s_base < (pt->slot_base[j] + pt->slot_size[j])) &&
-               (pt->slot_base[j] < (s_base + s_size)))
-            {
-                arkrtos_ptable_free(j);
-            }
-        }
+        loader_fixed_slot_detach(pt, s_base, s_size);
 
-        slot = arkrtos_ptable_alloc(type, s_base, s_size);
-
-        if(slot < 0)
-        {
-            return ARKRTOS_LOADER_ERR_NO_SLOT;
-        }
-
-        (void)arkrtos_ptable_ram_bind((uint32)slot, slots[i].ram_base, ram_size);
-        /* A fixed slot's landing area comes from the configuration, so what is
-         * in it right now is none of our business: re-installing over an
-         * existing image has to go through an erase first. Flash programming
-         * only clears bits (1 -> 0), so writing on top of the old image stores
-         * the AND of the two - reloc_count / payload_offset come back as
-         * (old & new), the relocation table is mangled the same way, and the
-         * device drops the frame while checking that table (err -13). The field
-         * symptom is "a fresh image installs fine, re-installing over one is
-         * refused".
-         *
-         * AUTO mode never reaches here: arkrtos_loader_find_clean() only accepts
-         * runs of 0xFF, so the base it reports is blank already.
-         *
-         * The wire-facing caller clears the slot before the frame starts (see
-         * arkrtos_loader_clear_fixed_slot), so in practice this finds it blank
-         * and returns without stalling the CPU - which matters, because an
-         * erase here would eat the relocation table already on the wire. */
-        if(arkrtos_loader_clear_span(s_base, s_size) != 0)
-        {
-            ARKRTOS_LOGE("LOADER", "cannot clear fixed slot %d (0x%08X +%u)",
-                       (int)slot, (unsigned)s_base, (unsigned)s_size);
-            arkrtos_ptable_free((uint32)slot);
-            return ARKRTOS_LOADER_ERR_FLASH;
-        }
-
-
-        *p_base     = s_base;
-        *p_ram_base = slots[i].ram_base;
-        return slot;
+        return loader_fixed_claim(type, s_base, s_size, slots[i].ram_base, ram_size,
+                                  p_base, p_ram_base);
     }
 
     if((hint >= 0) && ((uint32)hint < count))

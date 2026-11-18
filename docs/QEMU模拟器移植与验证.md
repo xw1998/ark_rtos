@@ -4583,6 +4583,45 @@ only-NEW 37 行全是六个签名、七对花括号、`return 0;` / `return 1;` 
 这一笔不新增用例：六组判据全部吃真实分区表（`arkrtos_ptable_get()` 的全局表 + 板级宏），宿主上要伪造
 整张表才能让某一条断言变红，而伪造出来的「红」只证明断言写对了、不证明真实布局对。
 
+#### 5.30.24 第十九笔：`arkrtos_loader_reserve_fixed()` 按「窗口 / 冲突 / 摘旧 / 登记」分四段（2026-11-18）
+
+`kernelsrc/src/arkrtos_loader.c` 的 `arkrtos_loader_reserve_fixed()`（148 行）在循环里连做四件事：
+算 RAM 窗口、判这个槽能不能装、判槽里有没有正在跑的镜像、摘旧记录再登记并清落点。四种失败各有各的
+返回码，四种理由混在一个 for 体里：
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `loader_fixed_ram_window()` | 把镜像头声明的 `ram_size` 向上取整到 2 的幂（与开机扫描同一口径，配置登记的是上界不是窗口），超过 `SLOT_RAM_MAX_BLOCK` 返回 `ERR_SIZE` | 17 |
+| `loader_fixed_slot_busy()` | 遍历分区表，与本槽有交集且状态是 `RUNNING` 的镜像 ⇒ `ERR_BUSY`（擦写会让它当场跑飞）；其它状态都可以覆盖 | 23 |
+| `loader_fixed_slot_detach()` | 覆盖安装：把落在本槽内的旧记录逐条 `ptable_free`，保证表里的区间等于配置里的槽，不多不少 | 18 |
+| `loader_fixed_claim()` | `ptable_alloc` 整槽 → `ram_bind` → `clear_span` 清落点；清失败打 `LOADER` 日志、把槽还回去、返回 `ERR_FLASH`；成功用出参交出 `base` / `ram_base`，返回值是槽号 | 24 |
+| `arkrtos_loader_reserve_fixed()` 自己 | 取表 / 取配置槽表 → `want` → 算窗口（失败即 `ERR_SIZE`）→ 消费一次性 hint → 逐槽三步筛（类型、hint、装得下）→ 冲突 → 摘旧 → 登记 | **64**（原 148） |
+
+口径三条：① **窗口先算一次**，循环里只比较 —— 原代码在 for 体之前算，语义不变，但「算不出来就整段不成立」
+这一点现在由一个函数的返回值表达；② `ERR_BUSY` 与 `ERR_FLASH` 仍各自对应「有镜像在跑」与「清不干净」，
+没合并成通用失败；③ 一次性 hint 仍在**任何取槽动作之前**消费掉（即使窗口算失败也已经消费）——
+这是原代码的顺序，未调整。
+
+等价性归一化比对：only-OLD **4 行** —— `int32 slot;` 声明与 `slot = ptable_alloc(...)` 合并成
+`int32 slot = arkrtos_ptable_alloc(...)`、`ram_bind` 与 `*p_ram_base` 的实参由 `slots[i].ram_base`
+改名成形参 `ram_base`；only-NEW 35 行全是四个签名、`uint32 j;` / `uint32 ram_size;`、`return 0;` /
+`return ERR_*`、花括号与入口的四处调用。**判断条件、返回码、日志文案一处未改。**
+
+体积：text `367752 → 367752`（**±0 B**，四个 helper 全内联），`data` 440 / `bss` 767508 /
+镜像总长 31,462,512 B 不变；`SOURCE_DATE_EPOCH=1600000000` 下 `BUILD=build/reserve_split` 与重建后的
+默认档两份 `.bin` **sha256 逐字节相同**（`63796b55…`）。`arkrtos_loader.c` 告警 **21 条 = 拆分前 21 条**
+（全是既有的指针宽度转换）。
+
+门禁：`loader-host: 88 passed, 0 failed`（本文件同时是宿主用例的链接对象）；`coverage-host` 里
+`arkrtos_loader` **45.25% → 45.77%**（基线按惯例抬到实测，未下调）；`sec-crc` 8 pin 全过；
+`format_gate` 361 个自有文件干净；`example/qemu_loongarch64/shell_check.py` **PASS**。
+
+`doc_audit.py funcs`：超过 120 行的函数 **15 → 14**；最长换成 `arkrtos_net_validate()`（144）。
+
+**结论分档：宿主用例实跑（88 checks）+ 编译通过 + 告警同数 + 两份可复现构建 sha256 相同 + QEMU 端到端 PASS，未上板。**
+固定槽位这条路径本身没有新增运行读数：它要一份板级槽表（`arkrtos_layout_slots()` 由 `config/` 生成）
+加上真 Flash 后端，宿主上 `test_load_buffer_e2e` 走的是池内 AUTO 路径，不经过本函数。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行
