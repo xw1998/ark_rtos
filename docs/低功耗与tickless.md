@@ -1,5 +1,7 @@
 # 低功耗与 tickless idle
 
+**[简体中文](低功耗与tickless.md) | English([低功耗与tickless.en.md](低功耗与tickless.en.md))**
+
 > 一句话：`ARKRTOS_USE_TICKLESS=1` 之后，空闲循环不再一拍一次 `WFI`，而是先算
 > "下一次真正要干活还有几拍"，把 SysTick 重新编程成一段更长的周期，睡完一次、
 > 醒来把跳过的节拍一次补齐。
