@@ -1,5 +1,7 @@
 # arkc 板上直跑 M3-b：QSPI NOR 持久化
 
+**[简体中文](arkc板上直跑-M3b-QSPI持久化.md) | English([arkc板上直跑-M3b-QSPI持久化.en.md](arkc板上直跑-M3b-QSPI持久化.en.md))**
+
 **状态：闭环成立（2026-11-05 实机）；读侧同日提速 1000 倍以上（§3、§8.1）。**
 板上 `cc --pack` 的产物落在外部 NOR 上，**复位后文件仍在，且能被 `mini run` 装载执行**。
 第一轮读通道也走位敲（1.5 KB/s），`ls /mnt/nor` 要 258 s；把**读**改成 QUADSPI 内存映射、
