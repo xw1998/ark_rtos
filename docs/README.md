@@ -15,6 +15,7 @@
 | 用英文读同一份返回码约定 | [返回码与错误码约定.en.md](返回码与错误码约定.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 在 App 里写 Linux 风格的 socket / select 程序 | [socket与select兼容层.md](socket与select兼容层.md)（名字与边界、SVC 0x1E 契约、阻塞在 App 侧兑现、SOCKET_DEMO、限制） |
 | 想知道网络协议栈怎么接进来、现在能验证到什么 | [lwIP协议栈接入.md](lwIP协议栈接入.md)（lwIP 2.1.3 端口层、回环网卡、socket 底座、未接真实以太网的边界） |
+| Read the lwIP integration page in English | [lwIP协议栈接入.en.md](lwIP协议栈接入.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 搞懂 MPU 怎么隔离 App、越权会怎样 | [内存保护与App越权验证.md](内存保护与App越权验证.md)（逐任务 region 配置 + APP_BAD 越权验证） |
 | 用英文读同一份内存保护说明 | [内存保护与App越权验证.en.md](内存保护与App越权验证.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 带 MMU 的平台上想**像 Linux 那样直接执行可执行文件**（`exec /mnt/ram/hello a b` 或直接敲路径） | [MMU进程模型与ELF装载.md](MMU进程模型与ELF装载.md)（ELF64/ELF32 两遍法装载、`sp→argc` 入口约定、与 PLV3 探针抢同一页的取舍、**M1 只到「文件即程序」不是「进程」**、软定时器栈装不下陷阱帧的完整根因、RV32 无 MMU 档的 PMP 窗口装载（§9）、M2 欠账表） |
@@ -117,6 +118,7 @@ docs/
 ├── VFS路径命名空间.md                       # 【设计说明】VFS 挂载点、路径解析、根目录约定、/dev 与 /mnt
 ├── VFS路径命名空间.en.md                    # 【English】VFS 页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── lwIP协议栈接入.md                        # 【设计说明】lwIP 2.1.3 端口层、回环网卡、socket 底座、未接真实以太网的边界
+├── lwIP协议栈接入.en.md                     # 【English】浓缩英文版：为什么先做回环（板级无 PHY 物证）、目录与 192 文件未改动、33+2 个 .c 与开关只来自 Kconfig、端口层三条口径（超时换算 / 失败不装成功 / 只用 _internal）、多线程回环不需 netif_poll_all 的纠错、内核区 128K 到 256K 与池 768 到 640 KB 连带重装、已验证与未验证分档、2 槽 2 KB 栈与五个内存参数；中文页 normative
 ├── 小程序设计.md                           # 【设计说明】文件系统里的第三种用户态应用：两块(代码/ RAM)内存模型、装载六步、体积上限、多实例/跨复位崩溃禁用/开机自启清单、与 ELF 的对照
 ├── 小程序设计.en.md                         # 【English】小程序页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── 崩溃恢复与镜像版本把关.md                 # 【设计说明】B 项崩溃终局与跨复位计数、C 项版本三态判定；明确不做签名与回滚

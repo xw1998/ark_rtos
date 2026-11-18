@@ -1,5 +1,7 @@
 # lwIP 协议栈接入（socket / select 面的底座）
 
+**[简体中文](lwIP协议栈接入.md) | English([lwIP协议栈接入.en.md](lwIP协议栈接入.en.md))**
+
 ## 一句话
 
 内核里编进了 lwIP 2.1.3（`kernelsrc/components/lwip`），由 `ARKRTOS_USE_LWIP` 门控；
