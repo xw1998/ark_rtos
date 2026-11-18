@@ -186,28 +186,24 @@ int32 arkrtos_guard_beat(int32 task_id, uint32 period_ms)
     return 0;
 }
 
-void arkrtos_guard_tick(void)
+/* 免费证据：本拍在 CPU 上跑过的任务，顺手记一笔。它不参与契约判定（见头文件），
+ * 所以单独开一段，免得和「契约判定」的两层含义混在一起读。 */
+static void guard_mark_running(uint32 now)
 {
-    uint32 now;
-    uint32 violating = 0u;
-    int32  id;
-
-    now = arkrtos_kernel_get_tick();
-
-    /* Free evidence: whatever was on the CPU at this tick did run. Deliberately
-     * not used to satisfy the contract (see the header). */
     if((arkrtos_current_task_id > 0) && (arkrtos_current_task_id <= ARKRTOS_TASK_MAX_NUM))
     {
         g_guard[arkrtos_current_task_id].cpu_tick  = now;
         g_guard[arkrtos_current_task_id].task_id   = (uint32)arkrtos_current_task_id;
     }
+}
 
-    if((now % ARKRTOS_GUARD_SERVICE_TICKS) != 0u)
-    {
-        return;
-    }
+/* 契约判定：逐个声明过周期的任务看它有没有按时「报到」，返回本拍违约个数。
+ * 只在服务拍调用（调用者已经过 now 对 ARKRTOS_GUARD_SERVICE_TICKS 取余的闸门）。 */
+static uint32 guard_count_violations(uint32 now)
+{
+    uint32 violating = 0u;
+    int32  id;
 
-    /* ---- contract ---- */
     for(id = 1; id <= ARKRTOS_TASK_MAX_NUM; id++)
     {
         arkrtos_guard_entry_t *p_e = &g_guard[id];
@@ -241,10 +237,14 @@ void arkrtos_guard_tick(void)
         }
     }
 
-    g_status.violating = violating;
+    return violating;
+}
 
-    /* ---- structure audit, at a slower cadence ---- */
+/* 结构审计走更慢的节拍：每 ARKRTOS_GUARD_AUDIT_DIV 个服务拍跑一次。 */
+static void guard_structure_audit(void)
+{
     g_audit_div++;
+
     if((g_audit_div % ARKRTOS_GUARD_AUDIT_DIV) == 0u)
     {
         arkrtos_audit_result_t r;
@@ -253,6 +253,101 @@ void arkrtos_guard_tick(void)
         g_status.audit_mask = r.mask;
         g_status.audit_runs++;
     }
+}
+
+/* 第一次判坏时给违约镜像记账（每次开机只记一次，锁是 g_status.starves）。
+ * 整段只在 verdict != OK 且尚未记过账时执行，所以单独成段。 */
+static void guard_starve_charge(uint32 now)
+{
+    int32 id;
+
+    /* Charge this reset to the images that broke their contract,
+     * before the watchdog ends the run.
+     *
+     * Once per boot, not once per tick. The latch is g_status.starves,
+     * which this function never clears after the first starvation: the
+     * tick re-evaluates the same violation every period, so charging per
+     * evaluation would turn one broken image into hundreds of "faults"
+     * and hold a slot for the single condition it was already in. That
+     * rate limit also sets the convergence speed - a slot that keeps
+     * breaking its promise gains exactly one fault per boot, so it is
+     * held on the boot after its count reaches the limit. Deliberately
+     * not per episode: an image whose health flickers would otherwise
+     * be accused faster than a reset can happen.
+     *
+     * Without the charge at all, the count dies with the RAM it lives in,
+     * the image autostarts again and the board reboots forever instead
+     * of holding one slot. */
+    for(id = 1; id <= ARKRTOS_TASK_MAX_NUM; id++)
+    {
+        arkrtos_guard_entry_t *p_v = &g_guard[id];
+        int32 slot;
+        uint32 n;
+
+        if((p_v->period_ms == 0u) || (p_v->task_id == 0u) ||
+           (guard_is_violating(p_v, now) == 0u))
+        {
+            continue;
+        }
+
+        slot = arkrtos_ptable_find_task((uint32)id);
+
+        /* No slot to tag (not an image task), or already held: the
+         * number would only grow without changing any decision. */
+        if((slot < 0) || (arkrtos_crash_disabled((uint32)slot) != 0u))
+        {
+            continue;
+        }
+
+        n = arkrtos_crash_fault((uint32)slot, ARKRTOS_CRASH_REASON_HEARTBEAT);
+
+        if(arkrtos_crash_disabled((uint32)slot) != 0u)
+        {
+            ARKRTOS_LOGE("CRASH", "slot %d held: %s, %u consecutive faults"
+                       " (declared %u ms, silent for %u ticks)",
+                       (int)slot,
+                       arkrtos_crash_reason_name(arkrtos_crash_disabled((uint32)slot)),
+                       (unsigned)n,
+                       (unsigned)p_v->period_ms,
+                       (unsigned)(now - p_v->beat_tick));
+        }
+    }
+
+    if((g_status.verdict & ARKRTOS_GUARD_BAD_AUDIT) != 0u)
+    {
+        arkrtos_fault_record(ARKRTOS_FAULT_AUDITFAIL, 0);
+    }
+    if((g_status.verdict & ARKRTOS_GUARD_BAD_BEAT) != 0u)
+    {
+        arkrtos_fault_record(ARKRTOS_FAULT_GUARDHB, 0);
+    }
+    ARKRTOS_LOGE("GUARD", "not feeding: verdict 0x%X (audit 0x%X, violating %u)",
+               (uint32)g_status.verdict, (uint32)g_status.audit_mask,
+               (uint32)g_status.violating);
+}
+
+void arkrtos_guard_tick(void)
+{
+    uint32 now;
+    uint32 violating;
+
+    now = arkrtos_kernel_get_tick();
+
+    /* Free evidence: whatever was on the CPU at this tick did run. Deliberately
+     * not used to satisfy the contract (see the header). */
+    guard_mark_running(now);
+
+    if((now % ARKRTOS_GUARD_SERVICE_TICKS) != 0u)
+    {
+        return;
+    }
+
+    /* ---- contract ---- */
+    violating = guard_count_violations(now);
+    g_status.violating = violating;
+
+    /* ---- structure audit, at a slower cadence ---- */
+    guard_structure_audit();
 
     g_status.verdict = ARKRTOS_GUARD_OK;
     if(g_status.audit_mask != 0u)
@@ -285,74 +380,11 @@ void arkrtos_guard_tick(void)
          * full fault ring would otherwise bury the first occurrence. */
         if(g_status.starves == 0u)
         {
-            /* Charge this reset to the images that broke their contract,
-             * before the watchdog ends the run.
-             *
-             * Once per boot, not once per tick. The latch is g_status.starves,
-             * which this function never clears after the first starvation: the
-             * tick re-evaluates the same violation every period, so charging per
-             * evaluation would turn one broken image into hundreds of "faults"
-             * and hold a slot for the single condition it was already in. That
-             * rate limit also sets the convergence speed - a slot that keeps
-             * breaking its promise gains exactly one fault per boot, so it is
-             * held on the boot after its count reaches the limit. Deliberately
-             * not per episode: an image whose health flickers would otherwise
-             * be accused faster than a reset can happen.
-             *
-             * Without the charge at all, the count dies with the RAM it lives in,
-             * the image autostarts again and the board reboots forever instead
-             * of holding one slot. */
-            for(id = 1; id <= ARKRTOS_TASK_MAX_NUM; id++)
-            {
-                arkrtos_guard_entry_t *p_v = &g_guard[id];
-                int32 slot;
-                uint32 n;
-
-                if((p_v->period_ms == 0u) || (p_v->task_id == 0u) ||
-                   (guard_is_violating(p_v, now) == 0u))
-                {
-                    continue;
-                }
-
-                slot = arkrtos_ptable_find_task((uint32)id);
-
-                /* No slot to tag (not an image task), or already held: the
-                 * number would only grow without changing any decision. */
-                if((slot < 0) || (arkrtos_crash_disabled((uint32)slot) != 0u))
-                {
-                    continue;
-                }
-
-                n = arkrtos_crash_fault((uint32)slot, ARKRTOS_CRASH_REASON_HEARTBEAT);
-
-                if(arkrtos_crash_disabled((uint32)slot) != 0u)
-                {
-                    ARKRTOS_LOGE("CRASH", "slot %d held: %s, %u consecutive faults"
-                               " (declared %u ms, silent for %u ticks)",
-                               (int)slot,
-                               arkrtos_crash_reason_name(arkrtos_crash_disabled((uint32)slot)),
-                               (unsigned)n,
-                               (unsigned)p_v->period_ms,
-                               (unsigned)(now - p_v->beat_tick));
-                }
-            }
-
-            if((g_status.verdict & ARKRTOS_GUARD_BAD_AUDIT) != 0u)
-            {
-                arkrtos_fault_record(ARKRTOS_FAULT_AUDITFAIL, 0);
-            }
-            if((g_status.verdict & ARKRTOS_GUARD_BAD_BEAT) != 0u)
-            {
-                arkrtos_fault_record(ARKRTOS_FAULT_GUARDHB, 0);
-            }
-            ARKRTOS_LOGE("GUARD", "not feeding: verdict 0x%X (audit 0x%X, violating %u)",
-                       (uint32)g_status.verdict, (uint32)g_status.audit_mask,
-                       (uint32)violating);
+            guard_starve_charge(now);
         }
         g_status.starves++;
     }
 }
-
 void arkrtos_guard_status(arkrtos_guard_status_t *p_out)
 {
     if(p_out == 0)

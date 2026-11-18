@@ -2180,6 +2180,52 @@ The runtime evidence for the move path comes from the **host** (`VirtualAlloc` p
 absolute address + RAM fake Flash), not from QEMU or hardware; when the mapping fails the test prints
 `SKIP` and returns instead of pretending it ran.
 
+#### 5.30.21 Sixteenth one: `arkrtos_guard_tick()` split into free evidence / contract / audit / charge (2026-11-18)
+
+`arkrtos_guard_tick()` in `kernelsrc/src/arkrtos_guard.c` (166 lines) runs every tick, but its parts run at
+different cadences: "who ran" is recorded every tick, "contract violations" is evaluated every service tick,
+"structure audit" runs once per `ARKRTOS_GUARD_AUDIT_DIV` service ticks, and "charge this reset to the broken
+images" runs at most once per boot. Four different triggers in one function make it impossible to read which
+part runs when:
+
+| Function | Scope | Lines |
+|---|---|---|
+| `guard_mark_running()` | free evidence: record `cpu_tick` / `task_id` for whatever was on the CPU at this tick (**not** used to satisfy the contract, as the header says) | 8 |
+| `guard_count_violations()` | judge each task that declared a period: a vanished task drops its contract (`declared--`), otherwise only the beat age matters; returns this tick's violation count | 40 |
+| `guard_structure_audit()` | bump `g_audit_div` and run `arkrtos_audit_run()` once every `ARKRTOS_GUARD_AUDIT_DIV` service ticks, writing back `audit_mask` / `audit_runs` | 13 |
+| `guard_starve_charge()` | the first time the verdict is bad, charge one crash per still-violating image (latch is `g_status.starves`): walk, `ptable_find_task`, `crash_fault`, log `CRASH` if the slot ended up held, then record `AUDITFAIL` / `GUARDHB` faults per verdict bit and log `GUARD` | 68 |
+| `arkrtos_guard_tick()` itself | get tick -> free evidence -> service-tick gate -> violation count -> audit -> compose `verdict` -> feed or starve (the starve side only calls `guard_starve_charge()` while `starves == 0`) | **59** (was 166) |
+
+Three conventions: (1) only `guard_count_violations()` writes `declared` / `misses`, so only it can shrink the
+contract set; (2) audit and contract do not depend on each other, so their order does not change the readings -
+it is kept as before (contract first) because `verdict` is the conjunction of both; (3) the `GUARD` log inside
+`guard_starve_charge()` used to print the local `violating`, which is out of scope after the split, so it now
+reads `g_status.violating` (written by the entry before the call) - **same number, same meaning**.
+
+Normalised equivalence check: only-OLD is **a single line** - `(uint32)violating);`, exactly the rename in (3);
+only-NEW is 20 lines of signatures, the two local declarations (`int32 id;` / `uint32 violating;`),
+`return violating;` and the four calls from the entry. **No condition, error code, log text or charge timing
+was changed.**
+
+Size: text `367656 -> 367752` (**+96 B**, the four helper frames and call sites), `data` 440 / `bss` 767508 /
+image length 31,462,512 B unchanged; under `SOURCE_DATE_EPOCH=1600000000` the two `.bin` files from
+`BUILD=build/guard_split` and a rebuild of the default directory are **byte-identical** (`783c394d...`).
+`arkrtos_guard.c` has **0** warnings.
+
+Gates: `coverage-host` reports all 10 modules at or above baseline (this file is not one of the measured
+targets, so no baseline was touched); `sec-crc` 8 pins; `format_gate` 361 own files clean; the LA64
+`example/qemu_loongarch64/shell_check.py` run **PASSES**.
+
+`doc_audit.py funcs`: functions over 120 lines **18 -> 17**; the longest is now `arkrtos_mbuf_recv_internal()`
+(153).
+
+**Evidence tier: compiles + same warning count + two reproducible builds with identical sha256 + QEMU
+end-to-end PASS; not verified on board.** No new test came with this one: every branch of
+`arkrtos_guard_tick()` needs a real task table, a real watchdog and a real crash counter; on a host that would
+mean a pile of stubs whose readings say nothing about "should the watchdog be fed". `utest` and `shell`
+exercise its call site, not its branches, so "ran once without crashing" is not written up as "branches
+verified".
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine

@@ -4467,6 +4467,43 @@ text `367576 → 367672`（**+96 B**，多出来的部分是三个 helper 的栈
 搬移路径的运行时证据来自**宿主**（`VirtualAlloc` 把池映射到真实绝对地址 + RAM 假 Flash），不是 QEMU/真机；
 映射失败时用例打印 `SKIP` 并返回，不假装跑过。
 
+#### 5.30.21 第十六笔：`arkrtos_guard_tick()` 按「免费证据 / 契约判定 / 审计 / 记账」分四段（2026-11-18）
+
+`kernelsrc/src/arkrtos_guard.c` 的 `arkrtos_guard_tick()`（166 行）每拍都在做，但每段节拍不同：
+「谁跑过」每拍记、「契约违约」每服务拍算、「结构审计」每 `ARKRTOS_GUARD_AUDIT_DIV` 个服务拍跑一次、
+「首次判坏时的崩溃记账」每次开机只跑一次。四段的触发条件不同，混在一个函数里读不出哪段在什么时候跑：
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `guard_mark_running()` | 免费证据：本拍在 CPU 上的任务记一笔 `cpu_tick` / `task_id`（**不参与契约判定**，头文件写明） | 8 |
+| `guard_count_violations()` | 逐个声明过周期的任务判违约：任务消失则契约随之注销（`declared--`），否则只看 beat 年龄，返回本拍违约个数 | 40 |
+| `guard_structure_audit()` | `g_audit_div++` 后按 `ARKRTOS_GUARD_AUDIT_DIV` 取模跑一次 `arkrtos_audit_run()`，写回 `audit_mask` / `audit_runs` | 13 |
+| `guard_starve_charge()` | 首次判坏时给违约镜像记一次崩溃（锁是 `g_status.starves`）：遍历、`ptable_find_task`、`crash_fault`、持有则打 `CRASH` 日志，再按 verdict 位记 `AUDITFAIL` / `GUARDHB` 两条 fault 并打 `GUARD` 日志 | 68 |
+| `arkrtos_guard_tick()` 自己 | 取 tick → 免费证据 → 服务拍闸门 → 违约计数 → 审计 → 组装 `verdict` → feed 或 starve（starve 侧只在 `starves == 0` 时调 `guard_starve_charge()`） | **59**（原 166） |
+
+口径三条：① 只有 `guard_count_violations()` 会写 `declared` / `misses`，也就只有它能让「契约集合」变小；
+② 审计与契约互不依赖，谁先谁后不影响读数 —— 但顺序保持原样（契约先），因为 `verdict` 是两段结果的**合取**；
+③ `guard_starve_charge()` 里那条 `GUARD` 日志原本打的是局部量 `violating`，拆段后局部量不在作用域内，
+改成读 `g_status.violating`（入口在调用它之前已经写过），**数值相同、语义相同**。
+
+等价性归一化比对（剥注释、逐行去空白、取多重集差）：only-OLD **只剩 1 行** —— `(uint32)violating);`，
+正是上面第 ③ 条那处改名的对象；only-NEW 20 行全是函数签名、`int32 id;` / `uint32 violating;` 两个局部声明、
+`return violating;` 与入口的四处调用。**判断条件、错误码、日志文案、记账时机一处未改。**
+
+体积：text `367656 → 367752`（**+96 B**，四个 helper 的栈帧与调用点），`data` 440 / `bss` 767508 /
+镜像总长 31,462,512 B 不变；`SOURCE_DATE_EPOCH=1600000000` 下 `BUILD=build/guard_split` 与重建后的默认档
+两份 `.bin` **sha256 逐字节相同**（`783c394d…`）。`arkrtos_guard.c` 告警 **0 条**。
+
+门禁：`coverage-host` 10 个模块全部不低于基线（本文件不在覆盖对象里，未改动基线）；`sec-crc` 8 pin 全过；
+`format_gate` 361 个自有文件干净；`example/qemu_loongarch64/shell_check.py` **PASS**（`build/shell_check_guard.log`）。
+
+`doc_audit.py funcs`：超过 120 行的函数 **18 → 17**；最长换成 `arkrtos_mbuf_recv_internal()`（153）。
+
+**结论分档：编译通过 + 告警同数 + 两份可复现构建 sha256 相同 + QEMU 端到端 PASS，未上板。**
+这一笔不新增用例：`arkrtos_guard_tick()` 的每条分支都要真任务表 / 真看门狗 / 真崩溃计数，
+宿主上只能靠大量桩，读数说明不了「看门狗该不该喂」；`utest` 与 `shell` 覆盖的是它的调用点而不是它的分支，
+所以这里不把「跑过一遍没崩」写成「分支已验」。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行
