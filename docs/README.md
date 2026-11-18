@@ -56,6 +56,7 @@
 | 查有哪些编译期开关、关掉后调用方看到什么 | [功能开关.md](功能开关.md)（三层开关、逐项"关掉后"语义、真能关的验证方法） |
 | 用英文读同一份开关清单 | [功能开关.en.md](功能开关.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 用字节流缓冲或定界消息缓冲传数据 | [流缓冲与消息缓冲.md](流缓冲与消息缓冲.md)（两种语义不可混用、返回码为什么避开 -4、开档体积实测） |
+| Read the stream/message buffer page in English | [流缓冲与消息缓冲.en.md](流缓冲与消息缓冲.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 要在固定块上分配（零碎片、O(1)、不依赖堆） | [固定块内存池.md](固定块内存池.md)（存储区由调用者提供、拒绝口径、SVC 0x20 子命令） |
 | Read the fixed-block pool in English | [固定块内存池.en.md](固定块内存池.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 想让空闲时别每 500 µs 被叫醒一次（省电） | [低功耗与tickless.md](低功耗与tickless.md)（按最近事件夹住睡眠、相位结算为什么不会越睡越慢、上限与边界、验证档位） |
@@ -125,6 +126,7 @@ docs/
 ├── 功能开关.md                              # 【设计说明】三层开关、逐项"关掉后"语义、依赖约束、真能关的验证方法
 ├── 功能开关.en.md                           # 【English】功能开关页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── 流缓冲与消息缓冲.md                      # 【用法+证据】sbuf/mbuf 两种语义、返回码、配置与 H743/F427 开档体积
+├── 流缓冲与消息缓冲.en.md                   # 【English】浓缩英文版：两种语义不可混用、返回码为何避开 -4、环形区与先挂表后睡、宿主 11 组与 F427/H743 体积账、上板三个用例与真 ISR 探针、SVC 0x1F 33 条；中文页 normative
 ├── 固定块内存池.md                          # 【用法+证据】固定块池、SVC 0x20、拒绝口径与默认档链接实测
 ├── 固定块内存池.en.md                       # 【English】浓缩英文版：为何不用堆、调用者提供存储区、接口与 SVC 0x20 子命令、拒绝口径、宿主 47 条与板端 9/9 与 MPOOL_DEMO 33 条证据；中文页 normative
 
