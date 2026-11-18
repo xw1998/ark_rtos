@@ -27,6 +27,8 @@
 > 演示路径与实测见 `docs/arkc板上直跑-M4-hello演示.md`。
 # STM32H743 板上外置存储器（SDRAM / QSPI NOR）：接起来了，但这块板子的窗口不应答
 
+**[简体中文](stm32h743-external-memory.md) | English([stm32h743-external-memory.en.md](stm32h743-external-memory.en.md))**
+
 **这份文档回答一个问题：板子上明明焊着 32MB 的 SDRAM 和 8MB 的 NOR Flash，
 为什么当初"空间不够"？现在控制器配好了，为什么还是用不上？**
 

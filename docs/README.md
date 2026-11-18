@@ -148,6 +148,7 @@ docs/
 ├── arkvim编辑器显示约定.md            # 【约定】屏幕布局、五条显示约定与判据、已知限制、host 门禁与板上取证、vendored 同步流程
 ├── arkvim编辑器显示约定.en.md               # 【English】arkvim 编辑器显示约定的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── stm32h743-external-memory.md             # 【实机记录】H743 外置 SDRAM/FMC：FMCEN 总闸门、32 MB 读写验证、编译器池与 ramfs 落 SDRAM
+├── stm32h743-external-memory.en.md          # 【English】stm32h743-external-memory页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── 功能开关.md                              # 【设计说明】三层开关、逐项"关掉后"语义、依赖约束、真能关的验证方法
 ├── 功能开关.en.md                           # 【English】功能开关页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── 流缓冲与消息缓冲.md                      # 【用法+证据】sbuf/mbuf 两种语义、返回码、配置与 H743/F427 开档体积
