@@ -29,6 +29,7 @@
 | 用串口控制台看状态、启停 App、改配置 | [内核Shell控制台使用说明.md](内核Shell控制台使用说明.md) |
 | 用英文读同一份 Shell 控制台说明 | [内核Shell控制台使用说明.en.md](内核Shell控制台使用说明.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 搞清 Shell / 日志为什么长这样、和 Linux 差在哪 | [Shell与日志Linux化.md](Shell与日志Linux化.md)（命令风格、日志分级与出口、dmesg 环） |
+| Read the Shell-and-logging page in English | [Shell与日志Linux化.en.md](Shell与日志Linux化.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 不想敲命令行，要图形界面 | `python tools/arkrtos_host_gui.py`（连接 / 控制台 / 安装 / 布局配置四个页签） |
 | 用脚本 / 自动化流程驱动这块板子 | [`../skills/arkrtos/SKILL.md`](../skills/arkrtos/SKILL.md) 与《Ark RTOS应用安装与调试指南.md》§11 |
 | 想在线把配置记录写进设备（不拆板、不用烧录器） | [配置区与安装策略.md](配置区与安装策略.md) §6.3（`tools/arkrtos_cfg.py`）与 §6.5（真机验收结论） |
@@ -104,6 +105,7 @@ docs/
 ├── 同步原语与令牌守恒.md                    # 【设计说明】为何用户态等待只登记+轮询、派发方 peek(only_kernel)、三条契约、四个失败根因
 ├── 同步原语与令牌守恒.en.md                   # 【English】同步原语页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── Shell与日志Linux化.md                    # 【设计说明】Shell 命令风格与日志分级/出口/dmesg 环的 Linux 化取舍
+├── Shell与日志Linux化.en.md                 # 【English】浓缩英文版：bash 形态提示符与路径规范化、13 条 Linux 风格命令与 5 个别名、诚实口径（没有的字段打 - 或 n/a）、dmesg 行格式与日志环 4096 B、/dev 改名表与根命名空间、F401 环尺寸覆盖到 512 与链接余量；中文页 normative
 ├── 内存保护与App越权验证.md                  # 【设计说明】逐任务 MPU region 配置 + APP_BAD 越权验证
 ├── 内存保护与App越权验证.en.md               # 【English】内存保护页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── MMU进程模型与ELF装载.md                  # 【实机记录+设计说明】ELF 装载：页表后端 ELF64（LA64）与无 MMU 档 ELF32（RV32/PMP）；开关/窗口/互斥、两遍法、`sp→argc`、QEMU 实跑读数、`KERNEL refill` 根因、M2 欠账 U-1..U-13

@@ -1,5 +1,7 @@
 # Shell 与日志：往 Linux 操作习惯上靠
 
+**[简体中文](Shell与日志Linux化.md) | English([Shell与日志Linux化.en.md](Shell与日志Linux化.en.md))**
+
 > 目标：让从 Linux 过来的人**不用重新学一套**——提示符、路径、命令名、输出措辞、
 > 日志形态都照 Linux 来。
 >
