@@ -1,8 +1,8 @@
 /**
-* @brief Ark RTOS Driver SDK »ù´¡ÀàĞÍ¶¨Òå
-* @details Îª Driver SDK Ìá¹©ÓëÄÚºËÒ»ÖÂµÄ»ù´¡ÕûĞÍ±ğÃû£¬
-*          ²»º¬ÈÎºÎ MCU Í·ÎÄ¼şÓë OS ÒÀÀµ£¬Çı¶¯¿É¶ÀÁ¢±àÒë¡£
-*          ¶¨ÒåÓë kernelsrc/include/arkrtos_types.h ±£³ÖÒ»ÖÂ¡£
+* @brief Ark RTOS Driver SDK åŸºç¡€ç±»å‹å®šä¹‰
+* @details ä¸º Driver SDK æä¾›ä¸å†…æ ¸ä¸€è‡´çš„åŸºç¡€æ•´å‹åˆ«åï¼Œ
+*          ä¸å«ä»»ä½• MCU å¤´æ–‡ä»¶ä¸ OS ä¾èµ–ï¼Œé©±åŠ¨å¯ç‹¬ç«‹ç¼–è¯‘ã€‚
+*          å®šä¹‰ä¸ kernelsrc/include/arkrtos_types.h ä¿æŒä¸€è‡´ã€‚
 */
 
 #ifndef __ARKRTOS_TYPES_H__

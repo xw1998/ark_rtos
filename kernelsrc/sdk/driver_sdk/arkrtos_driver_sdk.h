@@ -1,12 +1,12 @@
 /**
-* @brief Ark RTOS Driver SDK - Çı¶¯¿ª·¢½Ó¿Ú
-* @details Çı¶¯ÓĞÁ½ÖÖ²¿ÊğĞÎÌ¬£¬×¢²á/×¢Ïú/¼ÆÊı½Ó¿ÚÏàÍ¬£¬
-*          Çı¶¯´úÂë²»ĞèÒªÇø·Ö×Ô¼ºÊÇÄÄÖÖĞÎÌ¬£º
-*          ÓÉºê ARKRTOS_DRV_USER_MODE Ñ¡Ôñ£º
-*          - Î´¶¨Òå£¨Ä¬ÈÏ£©£ºÄÚºËÌ¬Ä£Ê½£¬ËæÄÚºËÒ»Æğ±àÒë£¬Ö±½Óµ÷ÓÃ arkrtos_dev_register µÈ
-*          - ÒÑ¶¨Òå£ºÓÃ»§Ì¬Ä£Ê½£¬±àÒëÎª¶ÀÁ¢¹Ì¼ş£¬¾­ SVC 0x14 ÓëÄÚºË½»»¥
-*          ÓÃ»§Ì¬Ä£Ê½ÏÂÈÎÎñ/ÊÂ¼ş½Ó¿ÚÓÉ arkrtos_drv_oslib.c Ìá¹© SVC ·â×°¡£
-*          ±¾Í·ÎÄ¼ş²»ÒÀÀµÈÎºÎ MCU Í·ÎÄ¼ş£¬SDK ¿É¶ÀÁ¢Ê¹ÓÃ¡£
+* @brief Ark RTOS Driver SDK - é©±åŠ¨å¼€å‘æ¥å£
+* @details é©±åŠ¨æœ‰ä¸¤ç§éƒ¨ç½²å½¢æ€ï¼Œæ³¨å†Œ/æ³¨é”€/è®¡æ•°æ¥å£ç›¸åŒï¼Œ
+*          é©±åŠ¨ä»£ç ä¸éœ€è¦åŒºåˆ†è‡ªå·±æ˜¯å“ªç§å½¢æ€ï¼š
+*          ç”±å® ARKRTOS_DRV_USER_MODE é€‰æ‹©ï¼š
+*          - æœªå®šä¹‰ï¼ˆé»˜è®¤ï¼‰ï¼šå†…æ ¸æ€æ¨¡å¼ï¼Œéšå†…æ ¸ä¸€èµ·ç¼–è¯‘ï¼Œç›´æ¥è°ƒç”¨ arkrtos_dev_register ç­‰
+*          - å·²å®šä¹‰ï¼šç”¨æˆ·æ€æ¨¡å¼ï¼Œç¼–è¯‘ä¸ºç‹¬ç«‹å›ºä»¶ï¼Œç» SVC 0x14 ä¸å†…æ ¸äº¤äº’
+*          ç”¨æˆ·æ€æ¨¡å¼ä¸‹ä»»åŠ¡/äº‹ä»¶æ¥å£ç”± arkrtos_drv_oslib.c æä¾› SVC å°è£…ã€‚
+*          æœ¬å¤´æ–‡ä»¶ä¸ä¾èµ–ä»»ä½• MCU å¤´æ–‡ä»¶ï¼ŒSDK å¯ç‹¬ç«‹ä½¿ç”¨ã€‚
 */
 
 #ifndef __ARKRTOS_DRIVER_SDK_H__
@@ -60,7 +60,7 @@ int32 arkrtos_drv_get_count(void);
 * @warning Runs from the task-exit / fault-recovery path, possibly with
 *          interrupts masked. Must be non-blocking (bounded register / GPIO
 *          writes only - no wait, no delay, no SVC, no filesystem or Flash)
-*          and idempotent. See docs/App±ÀÀ£Ó²¼ş°²È«ÓëÒÅÑÔ»úÖÆ.md.
+*          and idempotent. See docs/Appå´©æºƒç¡¬ä»¶å®‰å…¨ä¸é—è¨€æœºåˆ¶.md.
 */
 typedef int32 (*arkrtos_hwsafe_fn)(void *obj, uint32 owner);
 
@@ -73,7 +73,7 @@ int32 arkrtos_drv_hwsafe_unregister(const char *dev_name);
 
 ARKRTOS_SVC_DECL_1(int32, ARKRTOS_SVC_DRV_MGR, arkrtos_call_drv_mgr, uint32 *);
 
-/* ÒÔÏÂÈÎÎñ/ÊÂ¼ş½Ó¿ÚÓÉ arkrtos_drv_oslib.c Ìá¹© SVC ·â×° */
+/* ä»¥ä¸‹ä»»åŠ¡/äº‹ä»¶æ¥å£ç”± arkrtos_drv_oslib.c æä¾› SVC å°è£… */
 void   arkrtos_task_wait(uint32 ms);
 void   arkrtos_task_wait_period(void);
 void   arkrtos_task_delay(uint32 us);

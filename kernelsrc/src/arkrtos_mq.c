@@ -1,14 +1,14 @@
 /**
-* @brief Ark RTOS ÏûÏ¢¶ÓÁĞÄ£¿éÊµÏÖ
-* @details ±ä³¤¿½±´ÓïÒåµÄÏûÏ¢¶ÓÁĞ£¨ÏûÏ¢ 1..ARKRTOS_MQ_MSG_WORDS ×Ö£©£º
-*          - send£º¶ÓÁĞÎ´ÂúÊ±¿½±´ÏûÏ¢²¢»½ĞÑÒ»¸ö½ÓÊÕÕß£»ÒÑÂúÊ±×èÈû£¨´ø³¬Ê±£©»òÁ¢¼´Ê§°Ü
-*          - recv£º¶ÓÁĞ·Ç¿ÕÊ±È¡³öÒ»Ìõ²¢»½ĞÑÒ»¸ö·¢ËÍÕß£»Îª¿ÕÊ±×èÈû£¨´ø³¬Ê±£©»òÁ¢¼´Ê§°Ü
-*          - send_from_isr£ºÖĞ¶ÏÉÏÏÂÎÄ°²È«£¬½öÈë¶Ó»½ĞÑ£¬²»×èÈû¡¢²»×öÉÏÏÂÎÄÇĞ»»
-*          ·µ»ØÖµÔ¼¶¨£º
-*            send£º0=³É¹¦£¬¸ºÖµ=³¬Ê±»ò´íÎó£¨¾ä±ú·Ç·¨/¶ÓÁĞÂúÇÒ²»µÈ´ı/µÈ´ıÕßÂúµÈ£©
-*            recv£º>0=Êµ¼ÊÈ¡µ½µÄ×ÖÊı£¬¸ºÖµ=³¬Ê±»ò´íÎó
-*          ¿½±´³¤¶ÈÒ»ÂÉÒÔµ÷ÓÃÕßÉùÃ÷µÄ len_words Îª×¼£¬¾ø²»°´²Û¿íÕû¿é¿½¡ª¡ª
-*          µ÷ÓÃÕß»º³å¿ÉÄÜÖ»ÓĞ len_words ¸ö×Ö£¬Õû¿é¿½»á¶ÁĞ´Ô½½ç¡£
+* @brief Ark RTOS æ¶ˆæ¯é˜Ÿåˆ—æ¨¡å—å®ç°
+* @details å˜é•¿æ‹·è´è¯­ä¹‰çš„æ¶ˆæ¯é˜Ÿåˆ—ï¼ˆæ¶ˆæ¯ 1..ARKRTOS_MQ_MSG_WORDS å­—ï¼‰ï¼š
+*          - sendï¼šé˜Ÿåˆ—æœªæ»¡æ—¶æ‹·è´æ¶ˆæ¯å¹¶å”¤é†’ä¸€ä¸ªæ¥æ”¶è€…ï¼›å·²æ»¡æ—¶é˜»å¡ï¼ˆå¸¦è¶…æ—¶ï¼‰æˆ–ç«‹å³å¤±è´¥
+*          - recvï¼šé˜Ÿåˆ—éç©ºæ—¶å–å‡ºä¸€æ¡å¹¶å”¤é†’ä¸€ä¸ªå‘é€è€…ï¼›ä¸ºç©ºæ—¶é˜»å¡ï¼ˆå¸¦è¶…æ—¶ï¼‰æˆ–ç«‹å³å¤±è´¥
+*          - send_from_isrï¼šä¸­æ–­ä¸Šä¸‹æ–‡å®‰å…¨ï¼Œä»…å…¥é˜Ÿå”¤é†’ï¼Œä¸é˜»å¡ã€ä¸åšä¸Šä¸‹æ–‡åˆ‡æ¢
+*          è¿”å›å€¼çº¦å®šï¼š
+*            sendï¼š0=æˆåŠŸï¼Œè´Ÿå€¼=è¶…æ—¶æˆ–é”™è¯¯ï¼ˆå¥æŸ„éæ³•/é˜Ÿåˆ—æ»¡ä¸”ä¸ç­‰å¾…/ç­‰å¾…è€…æ»¡ç­‰ï¼‰
+*            recvï¼š>0=å®é™…å–åˆ°çš„å­—æ•°ï¼Œè´Ÿå€¼=è¶…æ—¶æˆ–é”™è¯¯
+*          æ‹·è´é•¿åº¦ä¸€å¾‹ä»¥è°ƒç”¨è€…å£°æ˜çš„ len_words ä¸ºå‡†ï¼Œç»ä¸æŒ‰æ§½å®½æ•´å—æ‹·â€”â€”
+*          è°ƒç”¨è€…ç¼“å†²å¯èƒ½åªæœ‰ len_words ä¸ªå­—ï¼Œæ•´å—æ‹·ä¼šè¯»å†™è¶Šç•Œã€‚
 */
 
 #include "arkrtos_mq.h"
@@ -55,9 +55,9 @@ static void arkrtos_mq_copy_name(char *dst, char *src)
     dst[7] = 0;
 }
 
-/* ¶ÓÁĞ²Ù×÷Í³Ò»¼ÙÉè£ºµ÷ÓÃÕßÒÑ³ÖÓĞ¹ØÖĞ¶ÏÁÙ½çÇø¡£
- * put£ºÖ»¿½µ÷ÓÃÕßÉùÃ÷µÄ len ¸ö×Ö£¬²ÛÄÚÊ£ÓàÎ»ÖÃ²¹ 0£¨±ÜÃâ°Ñµ÷ÓÃÕß»º³åÖ®ÍâµÄ
- *      ÄÚÈİ¶Á½øÀ´£©£¬Êµ¼Ê³¤¶È¼Ç½ø msglen[²Û]£¬¹© recv Ô­Ñù·µ»Ø¡£ */
+/* é˜Ÿåˆ—æ“ä½œç»Ÿä¸€å‡è®¾ï¼šè°ƒç”¨è€…å·²æŒæœ‰å…³ä¸­æ–­ä¸´ç•ŒåŒºã€‚
+ * putï¼šåªæ‹·è°ƒç”¨è€…å£°æ˜çš„ len ä¸ªå­—ï¼Œæ§½å†…å‰©ä½™ä½ç½®è¡¥ 0ï¼ˆé¿å…æŠŠè°ƒç”¨è€…ç¼“å†²ä¹‹å¤–çš„
+ *      å†…å®¹è¯»è¿›æ¥ï¼‰ï¼Œå®é™…é•¿åº¦è®°è¿› msglen[æ§½]ï¼Œä¾› recv åŸæ ·è¿”å›ã€‚ */
 static void arkrtos_mq_put(arkrtos_mq_obj_t *p_mq, uint32 *p_src, int32 len)
 {
     uint32 *p_dst;
@@ -73,8 +73,8 @@ static void arkrtos_mq_put(arkrtos_mq_obj_t *p_mq, uint32 *p_src, int32 len)
     p_mq->count++;
 }
 
-/* get£º×î¶à¿½ max_len ¸ö×Öµ½µ÷ÓÃÕß»º³å£¬·µ»ØÊµ¼Ê×ÖÊı¡£
- * ·¢ËÍ·½ÉùÃ÷µÄ³¤¶È³¬¹ı max_len Ê±°´ max_len ½Ø¶Ï£¨µ÷ÓÃÕß»º³åÊÇÓ²±ß½ç£©¡£ */
+/* getï¼šæœ€å¤šæ‹· max_len ä¸ªå­—åˆ°è°ƒç”¨è€…ç¼“å†²ï¼Œè¿”å›å®é™…å­—æ•°ã€‚
+ * å‘é€æ–¹å£°æ˜çš„é•¿åº¦è¶…è¿‡ max_len æ—¶æŒ‰ max_len æˆªæ–­ï¼ˆè°ƒç”¨è€…ç¼“å†²æ˜¯ç¡¬è¾¹ç•Œï¼‰ã€‚ */
 static int32 arkrtos_mq_get(arkrtos_mq_obj_t *p_mq, uint32 *p_dst, int32 max_len)
 {
     uint32 *p_src;
@@ -138,7 +138,7 @@ static int32 arkrtos_mq_waiter_add(arkrtos_task_t **waiters, arkrtos_task_t *p_t
     return ARKRTOS_MQ_ERR_NOSPACE;
 }
 
-/* ´ÓµÈ´ıÁĞ±íÖĞÕª³ıµ±Ç°ÈÎÎñ£¨³¬Ê±»½ĞÑÊ±ÓÉ½ÓÊÕÂ·¾¶ÇåÀí£© */
+/* ä»ç­‰å¾…åˆ—è¡¨ä¸­æ‘˜é™¤å½“å‰ä»»åŠ¡ï¼ˆè¶…æ—¶å”¤é†’æ—¶ç”±æ¥æ”¶è·¯å¾„æ¸…ç†ï¼‰ */
 static void arkrtos_mq_waiter_remove(arkrtos_task_t **waiters, arkrtos_task_t *p_tsk)
 {
     int32 j;
@@ -151,8 +151,8 @@ static void arkrtos_mq_waiter_remove(arkrtos_task_t **waiters, arkrtos_task_t *p
     }
 }
 
-/* »½ĞÑµÈ´ı¶ÓÁĞÀïµÄÈ«²¿ÈÎÎñ£¨¶ÔÏó±»É¾³ıÊ±ÓÃ£©£º
- * Ô­ÒòÖÃ ARKRTOS_WAKE_OBJ_DELETED£¬ÈÃµÈ´ıÕß·µ»Ø´íÎó¶ø²»ÊÇÓÀÔ¶Ë¯ÏÂÈ¥¡£ */
+/* å”¤é†’ç­‰å¾…é˜Ÿåˆ—é‡Œçš„å…¨éƒ¨ä»»åŠ¡ï¼ˆå¯¹è±¡è¢«åˆ é™¤æ—¶ç”¨ï¼‰ï¼š
+ * åŸå› ç½® ARKRTOS_WAKE_OBJ_DELETEDï¼Œè®©ç­‰å¾…è€…è¿”å›é”™è¯¯è€Œä¸æ˜¯æ°¸è¿œç¡ä¸‹å»ã€‚ */
 static void arkrtos_mq_wake_all(arkrtos_task_t **waiters, int32 reason)
 {
     int32 j;
@@ -177,8 +177,8 @@ static void arkrtos_mq_wake_all(arkrtos_task_t **waiters, int32 reason)
     }
 }
 
-/* ÈÎÎñÏÂÏßÊÕÊ¬£º°ÑÈÎÎñ´ÓËùÓĞÏûÏ¢¶ÓÁĞµÄÊÕ/·¢µÈ´ı¶ÓÁĞÖĞÕª³ı¡£
- * µ÷ÓÃ·½Ğè×ÔĞĞ±£Ö¤ÁÙ½çÇø£¨±¾º¯Êı²»¿ª¹ØÖĞ¶Ï£©¡£ */
+/* ä»»åŠ¡ä¸‹çº¿æ”¶å°¸ï¼šæŠŠä»»åŠ¡ä»æ‰€æœ‰æ¶ˆæ¯é˜Ÿåˆ—çš„æ”¶/å‘ç­‰å¾…é˜Ÿåˆ—ä¸­æ‘˜é™¤ã€‚
+ * è°ƒç”¨æ–¹éœ€è‡ªè¡Œä¿è¯ä¸´ç•ŒåŒºï¼ˆæœ¬å‡½æ•°ä¸å¼€å…³ä¸­æ–­ï¼‰ã€‚ */
 void arkrtos_mq_release_task(int32 task_id)
 {
     arkrtos_task_t *p_tsk;
@@ -287,8 +287,8 @@ int32 arkrtos_mq_create_kernel_internal(char *name)
     return ARKRTOS_MQ_ERR_NOSLOT;
 }
 
-/* ¼ÆËã¡°±»»½ĞÑºóÖØĞÂÅÅ¶Ó¡±¿ÉÓÃµÄÊ£Óà³¬Ê±£¨ms£©¡£
- * deadline==0 ±íÊ¾ÎŞÏŞµÈ´ı£¬·µ»Ø -1£»ÒÑÓÃ¾¡·µ»Ø 0¡£ */
+/* è®¡ç®—â€œè¢«å”¤é†’åé‡æ–°æ’é˜Ÿâ€å¯ç”¨çš„å‰©ä½™è¶…æ—¶ï¼ˆmsï¼‰ã€‚
+ * deadline==0 è¡¨ç¤ºæ— é™ç­‰å¾…ï¼Œè¿”å› -1ï¼›å·²ç”¨å°½è¿”å› 0ã€‚ */
 static int32 arkrtos_mq_remain_ms(uint32 start_tick, uint32 deadline)
 {
     uint32 elapsed;
@@ -337,7 +337,7 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
         return 0;
     }
 
-    /* ¶ÓÁĞÂú£º²»µÈ´ıÔòÁ¢¼´Ê§°Ü */
+    /* é˜Ÿåˆ—æ»¡ï¼šä¸ç­‰å¾…åˆ™ç«‹å³å¤±è´¥ */
     if(timeout_ms == 0)
     {
         /* Non-blocking try.  Drop a leftover registration of our own:
@@ -358,7 +358,7 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
         return ARKRTOS_MQ_ERR_CONTEXT;
     }
 
-    /* ¼ÇÂ¼ÆğÊ¼½ÚÅÄÓë³¬Ê±ÉÏÏŞ£º±»»½ĞÑºóÈô¿Õ¼äÓÖ±»±ğÈËÇÀ×ß£¬ĞèÒª°´Ê£ÓàÊ±¼äÖØÊÔ */
+    /* è®°å½•èµ·å§‹èŠ‚æ‹ä¸è¶…æ—¶ä¸Šé™ï¼šè¢«å”¤é†’åè‹¥ç©ºé—´åˆè¢«åˆ«äººæŠ¢èµ°ï¼Œéœ€è¦æŒ‰å‰©ä½™æ—¶é—´é‡è¯• */
     start_tick = arkrtos_kernel_tick;
     deadline   = (timeout_ms > 0) ? ARKRTOS_MS_TO_TICK((uint32)timeout_ms) : 0u;
 
@@ -371,10 +371,10 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
             return ARKRTOS_MQ_ERR_NOSPACE;              /* waiter queue is full */
         }
     }
-    /* ×¢Òâ£º´Ë´¦²»·Å¿ªÖĞ¶Ï¡ª¡ªÈë¶ÓÓëÏÂÃæµÄ block_in_critical ±ØĞëÔÚÍ¬Ò»ÁÙ½çÇøÄÚ£¬
-     * ·ñÔò ISR µÄ»½ĞÑ»áÍ¶¸øÒ»¸ö»¹Ã»Ë¯ÏÂµÄÈÎÎñ£¨»½ĞÑ¶ªÊ§£©¡£ */
+    /* æ³¨æ„ï¼šæ­¤å¤„ä¸æ”¾å¼€ä¸­æ–­â€”â€”å…¥é˜Ÿä¸ä¸‹é¢çš„ block_in_critical å¿…é¡»åœ¨åŒä¸€ä¸´ç•ŒåŒºå†…ï¼Œ
+     * å¦åˆ™ ISR çš„å”¤é†’ä¼šæŠ•ç»™ä¸€ä¸ªè¿˜æ²¡ç¡ä¸‹çš„ä»»åŠ¡ï¼ˆå”¤é†’ä¸¢å¤±ï¼‰ã€‚ */
 
-    /* ×èÈûµÈ´ı½ÓÊÕÕßÌÚ³ö¿Õ¼ä£¨wake_reason: 0=±»»½ĞÑ 1=³¬Ê±£© */
+    /* é˜»å¡ç­‰å¾…æ¥æ”¶è€…è…¾å‡ºç©ºé—´ï¼ˆwake_reason: 0=è¢«å”¤é†’ 1=è¶…æ—¶ï¼‰ */
     arkrtos_trace_wait_obj(MDK_TRACE_ARKRTOS_OBJ(MDK_TRACE_ARKRTOS_CLASS_QUEUE, idx));
     ret = arkrtos_task_block_in_critical((uint32)timeout_ms);
     /* User-mode waiter: register only, yield in the user wrapper */
@@ -383,11 +383,11 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
         ARKRTOS_ENABLE_IRQ();
         return ARKRTOS_SYNC_ERR_WOULDBLOCK;
     }
-   /* ¹ØÖĞ¶Ï·µ»Ø */
+   /* å…³ä¸­æ–­è¿”å› */
 
     if(ret < 0)
     {
-        /* Î´ÄÜ½øÈë×èÈû£¨ÄÚºËÉÏÏÂÎÄ/µ÷¶ÈÆ÷Ëø¶¨£©£º³·ÏúÈë¶Ó */
+        /* æœªèƒ½è¿›å…¥é˜»å¡ï¼ˆå†…æ ¸ä¸Šä¸‹æ–‡/è°ƒåº¦å™¨é”å®šï¼‰ï¼šæ’¤é”€å…¥é˜Ÿ */
         arkrtos_mq_waiter_remove(p_mq->send_waiters, p_tsk);
         ARKRTOS_ENABLE_IRQ();
         return ARKRTOS_MQ_ERR_CONTEXT;
@@ -395,7 +395,7 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
 
     if(ret == ARKRTOS_WAKE_OBJ_DELETED)
     {
-        /* µÈ´ıÆÚ¼äÏûÏ¢¶ÓÁĞ±»É¾³ı£º¶ÓÁĞÒÑ±»É¾³ı·½Çå¿Õ£¬Ö±½Ó·µ»ØÊ§°Ü */
+        /* ç­‰å¾…æœŸé—´æ¶ˆæ¯é˜Ÿåˆ—è¢«åˆ é™¤ï¼šé˜Ÿåˆ—å·²è¢«åˆ é™¤æ–¹æ¸…ç©ºï¼Œç›´æ¥è¿”å›å¤±è´¥ */
         ARKRTOS_ENABLE_IRQ();
         return ARKRTOS_MQ_ERR_DELETED;
     }
@@ -404,19 +404,19 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
     {
         arkrtos_mq_waiter_remove(p_mq->send_waiters, p_tsk);
         ARKRTOS_ENABLE_IRQ();
-        return ARKRTOS_MQ_ERR_TIMEOUT;                          /* ³¬Ê±Î´·¢ËÍ³É¹¦ */
+        return ARKRTOS_MQ_ERR_TIMEOUT;                          /* è¶…æ—¶æœªå‘é€æˆåŠŸ */
     }
-    /* ±»»½ĞÑÊ±¿Õ¼ä¿ÉÄÜÒÑ±»ËûÈËÕ¼ÓÃ£¨¶à¸ö·¢ËÍÕß±»Í¬Ê±»½ĞÑµÄ³¡¾°²»´æÔÚ£¬
-     * µ«ÎªÎÈÍ×Æğ¼ûÈÔ¼ì²éÒ»´Î£»Õ¼ÓÃÔò°´´íÎó´¦Àí£© */
-    /* ±»»½ĞÑ²»µÈÓÚÒ»¶¨ÄÃµ½¿Õ¼ä£º»½ĞÑºó¿Õ¼ä¿ÉÄÜÒÑ±»ÆäËü·¢ËÍÕßÕ¼×ß¡£
-     * Ô­ÊµÏÖ´ËÊ±Ö±½Ó·µ»Ø -1£¬ÏûÏ¢±»ÇÄÇÄ¶ªµô£»ÕâÀï°´Ê£ÓàÊ±¼äÖØĞÂÅÅ¶ÓµÈ´ı¡£ */
+    /* è¢«å”¤é†’æ—¶ç©ºé—´å¯èƒ½å·²è¢«ä»–äººå ç”¨ï¼ˆå¤šä¸ªå‘é€è€…è¢«åŒæ—¶å”¤é†’çš„åœºæ™¯ä¸å­˜åœ¨ï¼Œ
+     * ä½†ä¸ºç¨³å¦¥èµ·è§ä»æ£€æŸ¥ä¸€æ¬¡ï¼›å ç”¨åˆ™æŒ‰é”™è¯¯å¤„ç†ï¼‰ */
+    /* è¢«å”¤é†’ä¸ç­‰äºä¸€å®šæ‹¿åˆ°ç©ºé—´ï¼šå”¤é†’åç©ºé—´å¯èƒ½å·²è¢«å…¶å®ƒå‘é€è€…å èµ°ã€‚
+     * åŸå®ç°æ­¤æ—¶ç›´æ¥è¿”å› -1ï¼Œæ¶ˆæ¯è¢«æ‚„æ‚„ä¸¢æ‰ï¼›è¿™é‡ŒæŒ‰å‰©ä½™æ—¶é—´é‡æ–°æ’é˜Ÿç­‰å¾…ã€‚ */
     while(p_mq->count >= ARKRTOS_MQ_DEPTH)
     {
         remain = arkrtos_mq_remain_ms(start_tick, deadline);
         if(remain == 0)
         {
             ARKRTOS_ENABLE_IRQ();
-            return ARKRTOS_MQ_ERR_TIMEOUT;                      /* ³¬Ê±£ºÎ´·¢ËÍ³É¹¦ */
+            return ARKRTOS_MQ_ERR_TIMEOUT;                      /* è¶…æ—¶ï¼šæœªå‘é€æˆåŠŸ */
         }
 
         {
@@ -430,7 +430,7 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
         }
 
         arkrtos_trace_wait_obj(MDK_TRACE_ARKRTOS_OBJ(MDK_TRACE_ARKRTOS_CLASS_QUEUE, idx));
-        ret = arkrtos_task_block_in_critical((uint32)remain);     /* ¹ØÖĞ¶Ï·µ»Ø */
+        ret = arkrtos_task_block_in_critical((uint32)remain);     /* å…³ä¸­æ–­è¿”å› */
 
         if((ret & ARKRTOS_WAKE_HANDOFF) == 0)
         {
@@ -440,7 +440,7 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
             {
                 return ARKRTOS_MQ_ERR_TIMEOUT;
             }
-            return ARKRTOS_MQ_ERR_DELETED;                      /* ¶ÔÏó±»É¾ / Î´ÄÜ×èÈû */
+            return ARKRTOS_MQ_ERR_DELETED;                      /* å¯¹è±¡è¢«åˆ  / æœªèƒ½é˜»å¡ */
         }
     }
     arkrtos_mq_put(p_mq, buf, len_words);
@@ -502,7 +502,7 @@ int32 arkrtos_mq_recv_internal(int32 handle, uint32 *buf, int32 len_words, int32
         return ARKRTOS_MQ_ERR_CONTEXT;
     }
 
-    /* ¼ÇÂ¼ÆğÊ¼½ÚÅÄÓë³¬Ê±ÉÏÏŞ£º±»»½ĞÑºóÈôÏûÏ¢ÓÖ±»±ğÈËÈ¡×ß£¬ĞèÒª°´Ê£ÓàÊ±¼äÖØÊÔ */
+    /* è®°å½•èµ·å§‹èŠ‚æ‹ä¸è¶…æ—¶ä¸Šé™ï¼šè¢«å”¤é†’åè‹¥æ¶ˆæ¯åˆè¢«åˆ«äººå–èµ°ï¼Œéœ€è¦æŒ‰å‰©ä½™æ—¶é—´é‡è¯• */
     start_tick = arkrtos_kernel_tick;
     deadline   = (timeout_ms > 0) ? ARKRTOS_MS_TO_TICK((uint32)timeout_ms) : 0u;
 
@@ -515,7 +515,7 @@ int32 arkrtos_mq_recv_internal(int32 handle, uint32 *buf, int32 len_words, int32
             return ARKRTOS_MQ_ERR_NOSPACE;              /* waiter queue is full */
         }
     }
-    /* Í¬ mq_send£º²»·Å¿ªÖĞ¶Ï£¬Èë¶ÓÓë block_in_critical ±ØĞëÍ¬´¦Ò»¸öÁÙ½çÇø */
+    /* åŒ mq_sendï¼šä¸æ”¾å¼€ä¸­æ–­ï¼Œå…¥é˜Ÿä¸ block_in_critical å¿…é¡»åŒå¤„ä¸€ä¸ªä¸´ç•ŒåŒº */
 
     /* Same rule as mq_send: a user-mode waiter only registers here,
      * the yielding happens in the user-mode wrapper. */
@@ -526,7 +526,7 @@ int32 arkrtos_mq_recv_internal(int32 handle, uint32 *buf, int32 len_words, int32
     }
 
     arkrtos_trace_wait_obj(MDK_TRACE_ARKRTOS_OBJ(MDK_TRACE_ARKRTOS_CLASS_QUEUE, idx));
-    reason = arkrtos_task_block_in_critical((uint32)timeout_ms);   /* ¹ØÖĞ¶Ï·µ»Ø */
+    reason = arkrtos_task_block_in_critical((uint32)timeout_ms);   /* å…³ä¸­æ–­è¿”å› */
 
     if(reason < 0)
     {
@@ -537,7 +537,7 @@ int32 arkrtos_mq_recv_internal(int32 handle, uint32 *buf, int32 len_words, int32
 
     if(reason == ARKRTOS_WAKE_OBJ_DELETED)
     {
-        /* µÈ´ıÆÚ¼äÏûÏ¢¶ÓÁĞ±»É¾³ı£º¶ÓÁĞÒÑ±»É¾³ı·½Çå¿Õ£¬Ö±½Ó·µ»ØÊ§°Ü */
+        /* ç­‰å¾…æœŸé—´æ¶ˆæ¯é˜Ÿåˆ—è¢«åˆ é™¤ï¼šé˜Ÿåˆ—å·²è¢«åˆ é™¤æ–¹æ¸…ç©ºï¼Œç›´æ¥è¿”å›å¤±è´¥ */
         ARKRTOS_ENABLE_IRQ();
         return ARKRTOS_MQ_ERR_DELETED;
     }
@@ -546,17 +546,17 @@ int32 arkrtos_mq_recv_internal(int32 handle, uint32 *buf, int32 len_words, int32
     {
         arkrtos_mq_waiter_remove(p_mq->recv_waiters, p_tsk);
         ARKRTOS_ENABLE_IRQ();
-        return ARKRTOS_SYNC_ERR_TIMEOUT;       /* ³¬Ê±Î´ÊÕµ½ÏûÏ¢ */
+        return ARKRTOS_SYNC_ERR_TIMEOUT;       /* è¶…æ—¶æœªæ”¶åˆ°æ¶ˆæ¯ */
     }
-    /* ±»»½ĞÑ²»µÈÓÚÒ»¶¨ÄÃµ½ÏûÏ¢£º»½ĞÑºóÏûÏ¢¿ÉÄÜÒÑ±»ÆäËü½ÓÊÕÕßÈ¡×ß¡£
-     * Ô­ÊµÏÖ´ËÊ±Ö±½Ó·µ»Ø -1£¨¶ÓÁĞÀïÃ÷Ã÷ÓĞÊı¾İÈ´±»ÅĞÊ§°Ü£©£»ÕâÀï°´Ê£ÓàÊ±¼äÖØÊÔ¡£ */
+    /* è¢«å”¤é†’ä¸ç­‰äºä¸€å®šæ‹¿åˆ°æ¶ˆæ¯ï¼šå”¤é†’åæ¶ˆæ¯å¯èƒ½å·²è¢«å…¶å®ƒæ¥æ”¶è€…å–èµ°ã€‚
+     * åŸå®ç°æ­¤æ—¶ç›´æ¥è¿”å› -1ï¼ˆé˜Ÿåˆ—é‡Œæ˜æ˜æœ‰æ•°æ®å´è¢«åˆ¤å¤±è´¥ï¼‰ï¼›è¿™é‡ŒæŒ‰å‰©ä½™æ—¶é—´é‡è¯•ã€‚ */
     while(p_mq->count <= 0)
     {
         remain = arkrtos_mq_remain_ms(start_tick, deadline);
         if(remain == 0)
         {
             ARKRTOS_ENABLE_IRQ();
-            return ARKRTOS_SYNC_ERR_TIMEOUT;   /* ³¬Ê±Î´ÊÕµ½ÏûÏ¢ */
+            return ARKRTOS_SYNC_ERR_TIMEOUT;   /* è¶…æ—¶æœªæ”¶åˆ°æ¶ˆæ¯ */
         }
 
         {
@@ -570,7 +570,7 @@ int32 arkrtos_mq_recv_internal(int32 handle, uint32 *buf, int32 len_words, int32
         }
 
         arkrtos_trace_wait_obj(MDK_TRACE_ARKRTOS_OBJ(MDK_TRACE_ARKRTOS_CLASS_QUEUE, idx));
-        reason = arkrtos_task_block_in_critical((uint32)remain);  /* ¹ØÖĞ¶Ï·µ»Ø */
+        reason = arkrtos_task_block_in_critical((uint32)remain);  /* å…³ä¸­æ–­è¿”å› */
 
         if((reason & ARKRTOS_WAKE_HANDOFF) == 0)
         {
@@ -614,21 +614,21 @@ int32 arkrtos_mq_send_from_isr_internal(int32 handle, void *buf, int32 len_words
     arkrtos_mq_wake_one(p_mq->recv_waiters);
     mdk_trace_arkrtos_obj_signal((uint16)idx, (uint8)MDK_TRACE_ARKRTOS_CLASS_QUEUE);
     ARKRTOS_ENABLE_IRQ();
-    /* ²»ÔÚ ISR ÄÚ×öÉÏÏÂÎÄÇĞ»»£º»½ĞÑµÄÈÎÎñÖÃ READY ºóÓÉÏÂÒ»´Îµ÷¶È½Ó¹Ü */
+    /* ä¸åœ¨ ISR å†…åšä¸Šä¸‹æ–‡åˆ‡æ¢ï¼šå”¤é†’çš„ä»»åŠ¡ç½® READY åç”±ä¸‹ä¸€æ¬¡è°ƒåº¦æ¥ç®¡ */
     return 0;
 }
 
-/* ÖĞ¶ÏÀïÖ±½Ó´Ó¶ÓÁĞÈ¡ÏûÏ¢£º²»µÇ¼ÇµÈ´ıÕß¡¢²»×èÈû¡¢²»ÇĞ»»¡£
+/* ä¸­æ–­é‡Œç›´æ¥ä»é˜Ÿåˆ—å–æ¶ˆæ¯ï¼šä¸ç™»è®°ç­‰å¾…è€…ã€ä¸é˜»å¡ã€ä¸åˆ‡æ¢ã€‚
  *
- * ÎªÊ²Ã´ĞèÒªËü£º´ËÇ° ISR ²àÖ»ÓĞ send£¨°ÑÏûÏ¢Èû½øÈ¥£©£¬ÊÕµ½ÏûÏ¢±ØĞë
- * ¡¸ISR ÀïÖÃ¸ö±êÖ¾ -> »½ĞÑÒ»¸öÏß³Ì -> Ïß³ÌÔÙ recv¡¹£¬¶àÒ»´Î»½ĞÑÓëÒ»´Î
- * ÉÏÏÂÎÄÇĞ»»¡£¶Ô¸ßÆµ²É¼¯µÄÇı¶¯£¬ÕâÒ»Ìø¾ÍÊÇÑÓ³ÙµÄ¹Ì¶¨³É±¾¡£
+ * ä¸ºä»€ä¹ˆéœ€è¦å®ƒï¼šæ­¤å‰ ISR ä¾§åªæœ‰ sendï¼ˆæŠŠæ¶ˆæ¯å¡è¿›å»ï¼‰ï¼Œæ”¶åˆ°æ¶ˆæ¯å¿…é¡»
+ * ã€ŒISR é‡Œç½®ä¸ªæ ‡å¿— -> å”¤é†’ä¸€ä¸ªçº¿ç¨‹ -> çº¿ç¨‹å† recvã€ï¼Œå¤šä¸€æ¬¡å”¤é†’ä¸ä¸€æ¬¡
+ * ä¸Šä¸‹æ–‡åˆ‡æ¢ã€‚å¯¹é«˜é¢‘é‡‡é›†çš„é©±åŠ¨ï¼Œè¿™ä¸€è·³å°±æ˜¯å»¶è¿Ÿçš„å›ºå®šæˆæœ¬ã€‚
  *
- * ÓïÒå£¨Óë recv_internal µÄ timeout==0 Â·¾¶Í¬Ò»Ì×ÅĞ¶¨£¬µ«Ê§°ÜÖµ²»Í¬£©£º
- *   ¶ÓÁĞ¿Õ -> ARKRTOS_MQ_ERR_EMPTY£¨-1£©£¬²»µÇ¼Ç¡¢²»µÈ´ı
- *   È¡µ½   -> ·µ»ØÊµ¼ÊÈ¡µ½µÄ×ÖÊı£¨>0£¬Óë recv ·µ»ØÖµÍ¬Ò»¿Ú¾¶£©
- * È¡×ßÒ»Ìõºó»½ĞÑÒ»¸öµÈ´ıÖĞµÄ·¢ËÍÕß£¨Ö»ÖÃ READY£¬ÇĞ»»½»¸øÏÂÒ»´Îµ÷¶È£©£¬
- * Óë send_from_isr µÄÊÕÎ²·½Ê½¶Ô³Æ¡£ */
+ * è¯­ä¹‰ï¼ˆä¸ recv_internal çš„ timeout==0 è·¯å¾„åŒä¸€å¥—åˆ¤å®šï¼Œä½†å¤±è´¥å€¼ä¸åŒï¼‰ï¼š
+ *   é˜Ÿåˆ—ç©º -> ARKRTOS_MQ_ERR_EMPTYï¼ˆ-1ï¼‰ï¼Œä¸ç™»è®°ã€ä¸ç­‰å¾…
+ *   å–åˆ°   -> è¿”å›å®é™…å–åˆ°çš„å­—æ•°ï¼ˆ>0ï¼Œä¸ recv è¿”å›å€¼åŒä¸€å£å¾„ï¼‰
+ * å–èµ°ä¸€æ¡åå”¤é†’ä¸€ä¸ªç­‰å¾…ä¸­çš„å‘é€è€…ï¼ˆåªç½® READYï¼Œåˆ‡æ¢äº¤ç»™ä¸‹ä¸€æ¬¡è°ƒåº¦ï¼‰ï¼Œ
+ * ä¸ send_from_isr çš„æ”¶å°¾æ–¹å¼å¯¹ç§°ã€‚ */
 int32 arkrtos_mq_recv_from_isr_internal(int32 handle, uint32 *buf, int32 len_words)
 {
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
@@ -656,9 +656,9 @@ int32 arkrtos_mq_recv_from_isr_internal(int32 handle, uint32 *buf, int32 len_wor
     return got;
 }
 
-/* ¹«¿ªµÄÖĞ¶Ï²àÈë¿Ú£¨arkrtos.h ÀïÄÇÁ½¸öÉùÃ÷£©¡£ËüÃÇ´ËÇ°Ö»ÓĞÉùÃ÷¡¢Ã»ÓĞ¶¨Òå£º
- * È«²Ö¿âÃ»ÓĞÈËµ÷ÓÃ£¬Á´½ÓÆ÷²»±¨´í£¬ËùÒÔ¡¸ISR ²àÄÜÖ±½ÓÊÕÏûÏ¢¡¹Ò»Ö±ÊÇ¿ÕÍ·³ĞÅµ¡£
- * ¶¨Òå²¹ÔÚÕâÀï£¬µ÷ÓÃ·½ÄÃµ½µÄ¾ÍÊÇÉÏÃæÄÇÁ½ÌõÄÚ²¿ÊµÏÖ¡£ */
+/* å…¬å¼€çš„ä¸­æ–­ä¾§å…¥å£ï¼ˆarkrtos.h é‡Œé‚£ä¸¤ä¸ªå£°æ˜ï¼‰ã€‚å®ƒä»¬æ­¤å‰åªæœ‰å£°æ˜ã€æ²¡æœ‰å®šä¹‰ï¼š
+ * å…¨ä»“åº“æ²¡æœ‰äººè°ƒç”¨ï¼Œé“¾æ¥å™¨ä¸æŠ¥é”™ï¼Œæ‰€ä»¥ã€ŒISR ä¾§èƒ½ç›´æ¥æ”¶æ¶ˆæ¯ã€ä¸€ç›´æ˜¯ç©ºå¤´æ‰¿è¯ºã€‚
+ * å®šä¹‰è¡¥åœ¨è¿™é‡Œï¼Œè°ƒç”¨æ–¹æ‹¿åˆ°çš„å°±æ˜¯ä¸Šé¢é‚£ä¸¤æ¡å†…éƒ¨å®ç°ã€‚ */
 int32 arkrtos_mq_send_from_isr(int32 handle, void *buf, int32 len_words)
 {
     return arkrtos_mq_send_from_isr_internal(handle, buf, len_words);
@@ -680,15 +680,15 @@ int32 arkrtos_mq_delete_internal(int32 handle)
         return ARKRTOS_MQ_ERR_HANDLE;
 
     ARKRTOS_DISABLE_IRQ();
-    /* ²é used£º°ÑÒ»¸öÒÑ¾­²»´æÔÚµÄ¶ÔÏó±¨³É¡°É¾µôÁË¡±ÊÇ´í´ğ°¸¡£
-     * ¾ä±úÔÚ¶ÔÏóÃ»ÁËÖ®ºóÈÔÄÜ¹ı·¶Î§¼ì²é£¬ËùÒÔ·¶Î§¼ì²é²»¹»£»
-     * ÕâÀïÓë send/recv ¶Ô used µÄÅĞ¶¨±£³ÖÒ»ÖÂ¡£ */
+    /* æŸ¥ usedï¼šæŠŠä¸€ä¸ªå·²ç»ä¸å­˜åœ¨çš„å¯¹è±¡æŠ¥æˆâ€œåˆ æ‰äº†â€æ˜¯é”™ç­”æ¡ˆã€‚
+     * å¥æŸ„åœ¨å¯¹è±¡æ²¡äº†ä¹‹åä»èƒ½è¿‡èŒƒå›´æ£€æŸ¥ï¼Œæ‰€ä»¥èŒƒå›´æ£€æŸ¥ä¸å¤Ÿï¼›
+     * è¿™é‡Œä¸ send/recv å¯¹ used çš„åˆ¤å®šä¿æŒä¸€è‡´ã€‚ */
     if(arkrtos_mqs[idx].used == 0)
     {
         ARKRTOS_ENABLE_IRQ();
         return ARKRTOS_MQ_ERR_STATE;
     }
-    /* ÏÈ»½ĞÑËùÓĞµÈ´ıÕß£¨Ô­Òò=¶ÔÏóÒÑÉ¾³ı£©£¬·ñÔò¶ÓÁĞÇå¿ÕºóÃ»ÓĞÈËÔÙ»½ĞÑËüÃÇ */
+    /* å…ˆå”¤é†’æ‰€æœ‰ç­‰å¾…è€…ï¼ˆåŸå› =å¯¹è±¡å·²åˆ é™¤ï¼‰ï¼Œå¦åˆ™é˜Ÿåˆ—æ¸…ç©ºåæ²¡æœ‰äººå†å”¤é†’å®ƒä»¬ */
     arkrtos_mq_wake_all(arkrtos_mqs[idx].send_waiters, ARKRTOS_WAKE_OBJ_DELETED);
     arkrtos_mq_wake_all(arkrtos_mqs[idx].recv_waiters, ARKRTOS_WAKE_OBJ_DELETED);
     arkrtos_mqs[idx].used       = 0;

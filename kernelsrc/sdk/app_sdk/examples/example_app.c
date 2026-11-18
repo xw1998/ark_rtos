@@ -1,5 +1,5 @@
 /**
-* @brief Ark RTOS App SDK - 示例应用程序
+* @brief Ark RTOS App SDK - 绀轰緥搴旂敤绋嬪簭
 */
 
 #include "arkrtos.h"

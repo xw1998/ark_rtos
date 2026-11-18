@@ -1,8 +1,8 @@
 /**
-* @brief Ark RTOS ÄÚºË¹«¹²³£Á¿¶¨Òå
-* @details ¼¯ÖĞ¶¨Òå¾ä±ú±êÖ¾Î»¡¢¾ä±úÑÚÂëÒÔ¼°¸÷Àà SVC µ÷ÓÃºÅ¡£
-*          ¾ä±ú¸ßÎ»ÓÃ±êÖ¾Î»Çø·Ö¶ÔÏóÀàĞÍ£¨ÊÂ¼ş/Éè±¸/ĞÅºÅÁ¿/»¥³âËø£©£¬µÍÎ»Îª¶ÔÏóË÷Òı¡£
-* @note ÕâĞ©³£Á¿ÔÚÄÚºËÓë SDK ¼ä¹²Ïí£¬ĞŞ¸ÄÊ±Ğè±£Ö¤Á½²àÒ»ÖÂ¡£
+* @brief Ark RTOS å†…æ ¸å…¬å…±å¸¸é‡å®šä¹‰
+* @details é›†ä¸­å®šä¹‰å¥æŸ„æ ‡å¿—ä½ã€å¥æŸ„æ©ç ä»¥åŠå„ç±» SVC è°ƒç”¨å·ã€‚
+*          å¥æŸ„é«˜ä½ç”¨æ ‡å¿—ä½åŒºåˆ†å¯¹è±¡ç±»å‹ï¼ˆäº‹ä»¶/è®¾å¤‡/ä¿¡å·é‡/äº’æ–¥é”ï¼‰ï¼Œä½ä½ä¸ºå¯¹è±¡ç´¢å¼•ã€‚
+* @note è¿™äº›å¸¸é‡åœ¨å†…æ ¸ä¸ SDK é—´å…±äº«ï¼Œä¿®æ”¹æ—¶éœ€ä¿è¯ä¸¤ä¾§ä¸€è‡´ã€‚
 */
 
 #ifndef __ARKRTOS_DEF_H__
@@ -34,7 +34,7 @@
  * pthread facade in the App SDK; a thread needs a TCB and a scheduler slot,
  * which only the kernel owns, so this is the one place user code can ask for
  * a new execution context. */
-#define ARKRTOS_SVC_THREAD_CTRL       (0x1B)   /* App ¾µÏñ¹ÜÀíÓë·ÖÇø²éÑ¯ */
+#define ARKRTOS_SVC_THREAD_CTRL       (0x1B)   /* App é•œåƒç®¡ç†ä¸åˆ†åŒºæŸ¥è¯¢ */
 
 /* File service: path based read / write / remove / stat on the mounted
  * file system. Backs the arkrtos_file_*() facade in the App SDK; the kernel
@@ -55,28 +55,28 @@
  * with the gate off the handler is not compiled in at all, so a stray call
  * traps as an unknown service instead of being silently accepted. */
 #define ARKRTOS_SVC_ESET_CTRL         (0x21)
-#define ARKRTOS_SVC_WAITMULTI_CTRL    (0x22)   /* ¶à¶ÔÏó¾ÍĞ÷Ì½²â */
+#define ARKRTOS_SVC_WAITMULTI_CTRL    (0x22)   /* å¤šå¯¹è±¡å°±ç»ªæ¢æµ‹ */
 
-/* Í¬²½Ô­Óï£¨ĞÅºÅÁ¿/»¥³âËø£©·µ»ØÂë£º0=³É¹¦£¬¸ºÖµ=Ê§°Ü¡£
- * ³¬Ê±±ØĞë·µ»Ø¸ºÖµ¡ª¡ªµ÷ÓÃ·½¾İ´ËÅĞ¶Ï¡°±¾´ÎÃ»ÓĞÄÃµ½×ÊÔ´¡±£»
- * ÈôÓë 0£¨³É¹¦£©»ìÎªÒ»Ì¸£¬»á³öÏÖ¡°ÒÔÎªÄÃµ½ÁËĞÅºÅÁ¿¡¢¼ÆÊıÈ´Ã»¼õ¡±µÄ´íÂÒ¡£ */
+/* åŒæ­¥åŸè¯­ï¼ˆä¿¡å·é‡/äº’æ–¥é”ï¼‰è¿”å›ç ï¼š0=æˆåŠŸï¼Œè´Ÿå€¼=å¤±è´¥ã€‚
+ * è¶…æ—¶å¿…é¡»è¿”å›è´Ÿå€¼â€”â€”è°ƒç”¨æ–¹æ®æ­¤åˆ¤æ–­â€œæœ¬æ¬¡æ²¡æœ‰æ‹¿åˆ°èµ„æºâ€ï¼›
+ * è‹¥ä¸ 0ï¼ˆæˆåŠŸï¼‰æ··ä¸ºä¸€è°ˆï¼Œä¼šå‡ºç°â€œä»¥ä¸ºæ‹¿åˆ°äº†ä¿¡å·é‡ã€è®¡æ•°å´æ²¡å‡â€çš„é”™ä¹±ã€‚ */
 #define ARKRTOS_SYNC_OK             (0)
 #define ARKRTOS_SYNC_ERR_PARAM      (-1)
 #define ARKRTOS_SYNC_ERR_TIMEOUT    (-2)
 #ifndef ARKRTOS_SYNC_ERR_WOULDBLOCK
 #define ARKRTOS_SYNC_ERR_WOULDBLOCK (-4)
 #endif
-#define ARKRTOS_SYNC_ERR_DELETED    (-3)   /* µÈ´ıµÄÍ¬²½¶ÔÏó/ÏûÏ¢¶ÓÁĞÒÑ±»É¾³ı */
+#define ARKRTOS_SYNC_ERR_DELETED    (-3)   /* ç­‰å¾…çš„åŒæ­¥å¯¹è±¡/æ¶ˆæ¯é˜Ÿåˆ—å·²è¢«åˆ é™¤ */
 
-/* ÈÎÎñ»½ĞÑÔ­Òò£¨task->wake_reason£©£ºµÈ´ıÀà½Ó¿Ú¾İ´ËÅĞ¶Ï¡°ÊÇ·ñÕæµÄÄÃµ½ÁË×ÊÔ´¡±¡£
- * ¶ÔÏó±»É¾³ıÊ±µÈ´ıÕß±ØĞëÊÕµ½ 2£¬·ñÔò»áÒ»Ö±Ë¯ÏÂÈ¥£¨ÓÀ¾ÃĞ¹Â©£©¡£ */
-#define ARKRTOS_WAKE_NORMAL         (0)    /* ±»ÏÔÊ½»½ĞÑ£ºÒÑ»ñµÃ×ÊÔ´/ÊÂ¼ş */
-#define ARKRTOS_WAKE_TIMEOUT        (1)    /* µÈ´ı³¬Ê± */
-#define ARKRTOS_WAKE_OBJ_DELETED    (2)    /* µÈ´ıµÄÍ¬²½¶ÔÏó/ÏûÏ¢¶ÓÁĞÒÑ±»É¾³ı */
+/* ä»»åŠ¡å”¤é†’åŸå› ï¼ˆtask->wake_reasonï¼‰ï¼šç­‰å¾…ç±»æ¥å£æ®æ­¤åˆ¤æ–­â€œæ˜¯å¦çœŸçš„æ‹¿åˆ°äº†èµ„æºâ€ã€‚
+ * å¯¹è±¡è¢«åˆ é™¤æ—¶ç­‰å¾…è€…å¿…é¡»æ”¶åˆ° 2ï¼Œå¦åˆ™ä¼šä¸€ç›´ç¡ä¸‹å»ï¼ˆæ°¸ä¹…æ³„æ¼ï¼‰ã€‚ */
+#define ARKRTOS_WAKE_NORMAL         (0)    /* è¢«æ˜¾å¼å”¤é†’ï¼šå·²è·å¾—èµ„æº/äº‹ä»¶ */
+#define ARKRTOS_WAKE_TIMEOUT        (1)    /* ç­‰å¾…è¶…æ—¶ */
+#define ARKRTOS_WAKE_OBJ_DELETED    (2)    /* ç­‰å¾…çš„åŒæ­¥å¯¹è±¡/æ¶ˆæ¯é˜Ÿåˆ—å·²è¢«åˆ é™¤ */
 /* Bit, not a value: a wake that carries no ARKRTOS_WAKE_HANDOFF was not produced
  * by a poster/unlocker/signal claiming this task, so it must never be reported
  * to the caller as "you got the token". */
-#define ARKRTOS_WAKE_HANDOFF        (4)     /* »½ĞÑÀ´×ÔÈ·¶¨µÄÁîÅÆ½»½Ó */
+#define ARKRTOS_WAKE_HANDOFF        (4)     /* å”¤é†’æ¥è‡ªç¡®å®šçš„ä»¤ç‰Œäº¤æ¥ */
 
 #define ARKRTOS_SEM_HANDLE_FLAG       (0x01300000)
 #define ARKRTOS_MTX_HANDLE_FLAG       (0x01400000)

@@ -82,13 +82,13 @@
 #define ARKRTOS_SYNC_SUB_MTX_LOCK            (6u)
 #define ARKRTOS_SYNC_SUB_MTX_UNLOCK          (7u)
 #define ARKRTOS_SYNC_SUB_MTX_DELETE          (8u)
-/* µÝ¹é»¥³âËø´´½¨£¨ARKRTOS_USE_MTX_RECURSIVE=1 ²ÅÊÜÀí£¬¹Øµµ·µ»Ø -1£©¡£
- * ¼ÓËø/½âËøÈÔ×ß MTX_LOCK / MTX_UNLOCK£ºµÝ¹éÓë·ñÊÇ¶ÔÏóµÄÊôÐÔ£¬
- * ²»ÊÇÃ¿´Îµ÷ÓÃÁí¿ªÒ»Ì×Èë¿Ú¡£ */
+/* é€’å½’äº’æ–¥é”åˆ›å»ºï¼ˆARKRTOS_USE_MTX_RECURSIVE=1 æ‰å—ç†ï¼Œå…³æ¡£è¿”å›ž -1ï¼‰ã€‚
+ * åŠ é”/è§£é”ä»èµ° MTX_LOCK / MTX_UNLOCKï¼šé€’å½’ä¸Žå¦æ˜¯å¯¹è±¡çš„å±žæ€§ï¼Œ
+ * ä¸æ˜¯æ¯æ¬¡è°ƒç”¨å¦å¼€ä¸€å¥—å…¥å£ã€‚ */
 #define ARKRTOS_SYNC_SUB_MTX_CREATE_RECURSIVE (17u)
-/* ARKRTOS_SVC_WAITMULTI_CTRL£º¶à¶ÔÏó¾ÍÐ÷Ì½²â¡£
- * ²ÎÊý¿é£ºp[0]=×ÓÃüÁî£¬p[1]=¾ä±úÊý×éÖ¸Õë£¬p[2]=ÊýÁ¿£¬p[3]=ANY/ALL£¬
- * p[4]=½á¹ûÑÚÂëÖ¸Õë¡£Ö»×öÒ»´Î¿ìÕÕ£¬²»×èÈû¡¢²»Ïû·ÑÁîÅÆ¡£ */
+/* ARKRTOS_SVC_WAITMULTI_CTRLï¼šå¤šå¯¹è±¡å°±ç»ªæŽ¢æµ‹ã€‚
+ * å‚æ•°å—ï¼šp[0]=å­å‘½ä»¤ï¼Œp[1]=å¥æŸ„æ•°ç»„æŒ‡é’ˆï¼Œp[2]=æ•°é‡ï¼Œp[3]=ANY/ALLï¼Œ
+ * p[4]=ç»“æžœæŽ©ç æŒ‡é’ˆã€‚åªåšä¸€æ¬¡å¿«ç…§ï¼Œä¸é˜»å¡žã€ä¸æ¶ˆè´¹ä»¤ç‰Œã€‚ */
 #define ARKRTOS_WM_SUB_PROBE                 (1u)
 #define ARKRTOS_SYNC_SUB_COND_CREATE         (9u)
 #define ARKRTOS_SYNC_SUB_COND_WAIT           (10u)
@@ -129,8 +129,8 @@
 #define ARKRTOS_THREAD_SUB_CREATE            (1u)
 #define ARKRTOS_THREAD_SUB_SELF              (2u)
 #define ARKRTOS_THREAD_SUB_EXIT              (3u)
-/* ×Ó 4£¨U-8£©£ºp[1] = ÍË³öÂë£¨int32£¬¸ºÊýÔ­Ñù´«¸ø¾²´ý·½£©¡£
- * Óë×Ó 3 µÄ²î±ðÖ»ÔÚ¡¸ÓÐÃ»ÓÐÒ»¸ö¿É¶ÁµÄÍË³öÂë¡¹£¬Á½Õß¶¼½áÊøµ÷ÓÃÈÎÎñ¡£ */
+/* å­ 4ï¼ˆU-8ï¼‰ï¼šp[1] = é€€å‡ºç ï¼ˆint32ï¼Œè´Ÿæ•°åŽŸæ ·ä¼ ç»™é™å¾…æ–¹ï¼‰ã€‚
+ * ä¸Žå­ 3 çš„å·®åˆ«åªåœ¨ã€Œæœ‰æ²¡æœ‰ä¸€ä¸ªå¯è¯»çš„é€€å‡ºç ã€ï¼Œä¸¤è€…éƒ½ç»“æŸè°ƒç”¨ä»»åŠ¡ã€‚ */
 #define ARKRTOS_THREAD_SUB_EXIT_CODE         (4u)
 
 /* ARKRTOS_SVC_FILE_SYS (0x1C) - volume relative file ops (1..10) and namespace path ops (11..23) */

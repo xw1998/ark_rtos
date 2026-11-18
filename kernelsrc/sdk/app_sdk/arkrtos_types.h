@@ -1,8 +1,8 @@
 /**
-* @brief Ark RTOS Ӧ�ò�������Ͷ���
-* @details ���ļ�����App SDK���������������Ͷ��壬
-*          �������κ�MCUͷ�ļ����ں��ڲ�ͷ�ļ���
-*          Ӧ�ó���ֻ����� arkrtos.h ����ʹ������OS�ӿڡ�
+* @brief Ark RTOS 应用层基础类型定义
+* @details 此文件属于App SDK，仅包含基础类型定义，
+*          不依赖任何MCU头文件或内核内部头文件。
+*          应用程序只需包含 arkrtos.h 即可使用所有OS接口。
 */
 
 #ifndef __ARKRTOS_TYPES_H__

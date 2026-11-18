@@ -1,7 +1,7 @@
 /**
-* @brief Ark RTOS Éè±¸Çı¶¯¿ò¼ÜÊµÏÖ
-* @details Ìá¹©Í³Ò»µÄÉè±¸Çı¶¯½Ó¿ÚºÍ¶¯Ì¬Çı¶¯×¢²á»úÖÆ
-*          ÄÚÖÃÇı¶¯ºÍ¿É°²×°Çı¶¯¹²ÓÃÍ¬Ò»Ì×Éè±¸±í
+* @brief Ark RTOS è®¾å¤‡é©±åŠ¨æ¡†æ¶å®ç°
+* @details æä¾›ç»Ÿä¸€çš„è®¾å¤‡é©±åŠ¨æ¥å£å’ŒåŠ¨æ€é©±åŠ¨æ³¨å†Œæœºåˆ¶
+*          å†…ç½®é©±åŠ¨å’Œå¯å®‰è£…é©±åŠ¨å…±ç”¨åŒä¸€å¥—è®¾å¤‡è¡¨
 * @author xw
 * @date 2026.05.03
 */
@@ -42,9 +42,9 @@ int32 arkrtos_dev_register(const char *name, arkrtos_dev_drv_t *drv, uint32 dev_
     if(name == 0 || drv == 0)
         return ARKRTOS_DEV_ERR_ARG;
 
-    /* ¿Õ²ÛÎ»ÒÔ dev_name[0]==0 ±ê¼Ç¡£×¢ÏúÉè±¸Ê±Ö»Çå¿Õ²ÛÎ»¡¢²»ÒÆ¶¯Êı×éÔªËØ£º
-     * Éè±¸¾ä±ú¾ÍÊÇ²ÛÎ»ÏÂ±ê£¨i | ARKRTOS_DEV_HANDLE_FLAG£©£¬Ò»µ©ÒÆ¶¯£¬
-     * ÒÑ·¢·ÅµÄ¾ä±ú¾Í»áÖ¸ÏòÁíÒ»¸öÉè±¸¡£ */
+    /* ç©ºæ§½ä½ä»¥ dev_name[0]==0 æ ‡è®°ã€‚æ³¨é”€è®¾å¤‡æ—¶åªæ¸…ç©ºæ§½ä½ã€ä¸ç§»åŠ¨æ•°ç»„å…ƒç´ ï¼š
+     * è®¾å¤‡å¥æŸ„å°±æ˜¯æ§½ä½ä¸‹æ ‡ï¼ˆi | ARKRTOS_DEV_HANDLE_FLAGï¼‰ï¼Œä¸€æ—¦ç§»åŠ¨ï¼Œ
+     * å·²å‘æ”¾çš„å¥æŸ„å°±ä¼šæŒ‡å‘å¦ä¸€ä¸ªè®¾å¤‡ã€‚ */
     for(i = 0; i < ARKRTOS_DEV_MAX_NUM; i++)
     {
         int32 j;
@@ -101,7 +101,7 @@ int32 arkrtos_dev_unregister(const char *name)
 
         if(arkrtos_dev_list[i].dev_name[0] == 0)
         {
-            continue;                       /* ¿Õ²ÛÎ» */
+            continue;                       /* ç©ºæ§½ä½ */
         }
 
         for(j = 0; j < 8; j++)
@@ -116,9 +116,9 @@ int32 arkrtos_dev_unregister(const char *name)
         }
         if(match)
         {
-            /* Ä¹±®Ê½Çå¿Õ£º±£³Ö²ÛÎ»ÏÂ±ê²»±ä£¬ÒÑ·¢·ÅµÄ¾ä±úÈÔÖ¸ÏòÔ­²ÛÎ»£¬
-             * ´ËÊ±¸Ã²ÛÎ» drv==0 / handles==0£¬ºóĞø¶ÁĞ´»á°²È«µØ·µ»Ø -1£¬
-             * ¶ø²»ÊÇ£¨ÏñÕûÌåÇ°ÒÆÄÇÑù£©Ö¸ÏòÁíÒ»¸öÉè±¸¡£ */
+            /* å¢“ç¢‘å¼æ¸…ç©ºï¼šä¿æŒæ§½ä½ä¸‹æ ‡ä¸å˜ï¼Œå·²å‘æ”¾çš„å¥æŸ„ä»æŒ‡å‘åŸæ§½ä½ï¼Œ
+             * æ­¤æ—¶è¯¥æ§½ä½ drv==0 / handles==0ï¼Œåç»­è¯»å†™ä¼šå®‰å…¨åœ°è¿”å› -1ï¼Œ
+             * è€Œä¸æ˜¯ï¼ˆåƒæ•´ä½“å‰ç§»é‚£æ ·ï¼‰æŒ‡å‘å¦ä¸€ä¸ªè®¾å¤‡ã€‚ */
             arkrtos_dev_list[i].dev_name[0] = 0;
             arkrtos_dev_list[i].drv         = 0;
             arkrtos_dev_list[i].dev_num     = 0;
@@ -175,7 +175,7 @@ int32 arkrtos_dev_name_at(uint32 idx, char *out, uint32 max)
 int32 arkrtos_dev_open_internal(char *name, uint32 param)
 {
     int32 i;
-    /* ²ÛÎ»¿ÉÄÜ²»Á¬Ğø£¨×¢ÏúÁôÏÂµÄ¿Õ²ÛÎ»£©£¬±ØĞë±éÀúÕû¸ö±í */
+    /* æ§½ä½å¯èƒ½ä¸è¿ç»­ï¼ˆæ³¨é”€ç•™ä¸‹çš„ç©ºæ§½ä½ï¼‰ï¼Œå¿…é¡»éå†æ•´ä¸ªè¡¨ */
     for(i = 0; i < ARKRTOS_DEV_MAX_NUM; i++)
     {
         int32 j;
@@ -238,7 +238,7 @@ int32 arkrtos_dev_close_internal(int32 handle)
 
     if(ARKRTOS_DEV_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_DEV_ERR_HANDLE;
-    /* ¾ä±úÊÇ²ÛÎ»ÏÂ±ê£ººÏ·¨·¶Î§ÊÇÕû¸öÉè±¸±í£¬¶ø²»ÊÇµ±Ç°ÔÚÓÃÊıÁ¿ */
+    /* å¥æŸ„æ˜¯æ§½ä½ä¸‹æ ‡ï¼šåˆæ³•èŒƒå›´æ˜¯æ•´ä¸ªè®¾å¤‡è¡¨ï¼Œè€Œä¸æ˜¯å½“å‰åœ¨ç”¨æ•°é‡ */
     if(idx < 0 || idx >= ARKRTOS_DEV_MAX_NUM)
         return ARKRTOS_DEV_ERR_HANDLE;
 
@@ -275,7 +275,7 @@ int32 arkrtos_dev_read_internal(int32 handle, uint8 *pdata, int32 len)
 
     if(ARKRTOS_DEV_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_DEV_ERR_HANDLE;
-    /* ¾ä±úÊÇ²ÛÎ»ÏÂ±ê£ººÏ·¨·¶Î§ÊÇÕû¸öÉè±¸±í£¬¶ø²»ÊÇµ±Ç°ÔÚÓÃÊıÁ¿ */
+    /* å¥æŸ„æ˜¯æ§½ä½ä¸‹æ ‡ï¼šåˆæ³•èŒƒå›´æ˜¯æ•´ä¸ªè®¾å¤‡è¡¨ï¼Œè€Œä¸æ˜¯å½“å‰åœ¨ç”¨æ•°é‡ */
     if(idx < 0 || idx >= ARKRTOS_DEV_MAX_NUM)
         return ARKRTOS_DEV_ERR_HANDLE;
     if(arkrtos_dev_handles[idx] == 0)
@@ -294,7 +294,7 @@ int32 arkrtos_dev_write_internal(int32 handle, uint8 *pdata, int32 len)
 
     if(ARKRTOS_DEV_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_DEV_ERR_HANDLE;
-    /* ¾ä±úÊÇ²ÛÎ»ÏÂ±ê£ººÏ·¨·¶Î§ÊÇÕû¸öÉè±¸±í£¬¶ø²»ÊÇµ±Ç°ÔÚÓÃÊıÁ¿ */
+    /* å¥æŸ„æ˜¯æ§½ä½ä¸‹æ ‡ï¼šåˆæ³•èŒƒå›´æ˜¯æ•´ä¸ªè®¾å¤‡è¡¨ï¼Œè€Œä¸æ˜¯å½“å‰åœ¨ç”¨æ•°é‡ */
     if(idx < 0 || idx >= ARKRTOS_DEV_MAX_NUM)
         return ARKRTOS_DEV_ERR_HANDLE;
     if(arkrtos_dev_handles[idx] == 0)
@@ -313,7 +313,7 @@ int32 arkrtos_dev_ctrl_internal(int32 handle, uint32 code, uint32 value)
 
     if(ARKRTOS_DEV_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_DEV_ERR_HANDLE;
-    /* ¾ä±úÊÇ²ÛÎ»ÏÂ±ê£ººÏ·¨·¶Î§ÊÇÕû¸öÉè±¸±í£¬¶ø²»ÊÇµ±Ç°ÔÚÓÃÊıÁ¿ */
+    /* å¥æŸ„æ˜¯æ§½ä½ä¸‹æ ‡ï¼šåˆæ³•èŒƒå›´æ˜¯æ•´ä¸ªè®¾å¤‡è¡¨ï¼Œè€Œä¸æ˜¯å½“å‰åœ¨ç”¨æ•°é‡ */
     if(idx < 0 || idx >= ARKRTOS_DEV_MAX_NUM)
         return ARKRTOS_DEV_ERR_HANDLE;
     if(arkrtos_dev_handles[idx] == 0)

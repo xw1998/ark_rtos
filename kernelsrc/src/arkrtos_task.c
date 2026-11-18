@@ -1,9 +1,9 @@
 /**
-* @brief Ark RTOS ���������ϵͳ���÷ַ�ʵ��
-* @details ʵ��������������������л��� C ���߼���SVC ϵͳ���÷ַ����Լ�������ƽӿڡ�
-*          �ж���ڣ�SysTick_Handler/HardFault_Handler���� board/ ��ʵ�֣�
-*          �������յ��ñ��ļ��� arkrtos_kernel_tick_handler / arkrtos_hardfault_handler��
-*          ΢�뼶��ʱ�� port �� arkrtos_port_delay_us() ʵ�֣�����ϵͳ��Ƶ SystemCoreClock��
+* @brief Ark RTOS 任务调度与系统调用分发实现
+* @details 实现任务调度器、上下文切换的 C 侧逻辑、SVC 系统调用分发，以及任务控制接口。
+*          中断入口（SysTick_Handler/HardFault_Handler）在 board/ 中实现，
+*          它们最终调用本文件的 arkrtos_kernel_tick_handler / arkrtos_hardfault_handler。
+*          微秒级延时由 port 层 arkrtos_port_delay_us() 实现，依赖系统主频 SystemCoreClock。
 * @author xw
 * @date 2026.05.03
 */
@@ -39,28 +39,28 @@
 #if ARKRTOS_HW_SAFE
 #include "arkrtos_hwsafe.h"   /* App-crash hardware safe-state ("will") mechanism */
 #endif
-#include "arkrtos_mini.h"   /* SVC 0x18 �����С����װ��/ֹͣ */
-#include "arkrtos_apprun.h"  /* ����ֱ�ܣ������˳�ʱ���� */
+#include "arkrtos_mini.h"   /* SVC 0x18 子命令：小程序装载/停止 */
+#include "arkrtos_apprun.h"  /* 板上直跑：任务退出时还窗 */
 #if (ARKRTOS_USE_FLASHAPP == 1)
 #include "arkrtos_flashapp.h"  /* flash app: return the data window on task exit */
 #endif
-#include "arkrtos_partition.h"    /* �û��ɼ��ڴ洰�ڣ�������/App RAM/���� RAM/�̼����� */
+#include "arkrtos_partition.h"    /* 用户可见内存窗口（共享区/App RAM/驱动 RAM/固件区） */
 
 /* ------------------------------------------------------------------
- * �û�ָ��У�飨SVC ���ű߽磩
- * SVC �ַ����û��Ĵ������ֱֵ�ӵ�ָ������ã������顢��Ϣ��������
- * �豸������ʱ���ص�������������У��ʱ�û�̬�ɽ���Щ�ӿڶ�д�ں������ַ��
- * �����ں�����Ȩִ̬�����⺯����
- * ���ﰴ����ַ���������û��ɼ������ڡ�������޶�У�飺
- *   RAM ���ڣ�SHARE / SLOT_RAM������ RAM �أ���д�����������ķ�Χ��
- *   �̼����ڣ�IMAGE_POOL���û�������ֻ���������ڣ�
- * �ں� RAM����������ں�ջ�����ں� Flash һ�ɾܾ���
+ * 用户指针校验（SVC 可信边界）
+ * SVC 分发把用户寄存器里的值直接当指针解引用（参数块、消息缓冲区、
+ * 设备名、定时器回调……），不做校验时用户态可借这些接口读写内核任意地址、
+ * 或让内核在特权态执行任意函数。
+ * 这里按“地址必须落在用户可见窗口内”做最低限度校验：
+ *   RAM 窗口：SHARE / SLOT_RAM（镜像 RAM 池，可写缓冲区允许的范围）
+ *   固件窗口：IMAGE_POOL（用户代码与只读常量所在）
+ * 内核 RAM（任务表、内核栈）与内核 Flash 一律拒绝。
  * ------------------------------------------------------------------ */
 static uint8 arkrtos_kernel_in_window(uint32 start, uint32 end, uint32 base, uint32 size)
 {
     uint32 limit = base + size;
 
-    if(limit <= base)                   /* �������쳣ʱ��Ҫ����� */
+    if(limit <= base)                   /* 分区宏异常时不要误放行 */
     {
         return 0u;
     }
@@ -76,7 +76,7 @@ static uint8 arkrtos_kernel_ptr_ram_ok(const void *p, uint32 len)
     uint32 start = (uint32)p;
     uint32 end   = start + len;
 
-    if(p == 0 || end < start)           /* ��ָ��򳤶Ȼ��� */
+    if(p == 0 || end < start)           /* 空指针或长度回绕 */
     {
         return 0u;
     }
@@ -97,12 +97,12 @@ static uint8 arkrtos_kernel_ptr_ram_ok(const void *p, uint32 len)
         return 1u;
     }
 #if (ARKRTOS_USE_ELF == 1)
-    /* ELF ���򴰿�Ҳ��"�û��ɼ� RAM"��
-     * װ�����ѳ������ SLOT_RAM ֮����û�ҳ�LA64 = 0x02000000 �� 2 MB
-     * PLV3 ���ڣ�������ջ�� .data �������������һ��������ÿ�δ�������
-     * �� SVC ���ᱻ��"ָ��Ƿ�"���� -1�������ⲻ�ǰ�ȫ���⣬��©����һ��
-     * �����������û����ڴ档���ڱ߽��ɰ弶��������װ����ͬһ�Ժ꣬
-     * װ��������д���ˡ�����Ҳ����Ž��ں� RAM�� */
+    /* ELF 程序窗口也是"用户可见 RAM"：
+     * 装载器把程序放在 SLOT_RAM 之外的用户页里（LA64 = 0x02000000 的 2 MB
+     * PLV3 窗口），它的栈和 .data 就在那里。少了这一条，程序每次带参数块
+     * 调 SVC 都会被判"指针非法"返回 -1——而这不是安全问题，是漏认了一块
+     * 本来就属于用户的内存。窗口边界由板级给出，与装载器同一对宏，
+     * 装载器往外写不了、这里也不会放进内核 RAM。 */
     if(arkrtos_kernel_in_window(start, end, ARKRTOS_ELF_WINDOW_BASE,
                                 ARKRTOS_ELF_WINDOW_SIZE) != 0u)
     {
@@ -132,13 +132,13 @@ static uint8 arkrtos_kernel_ptr_flash_ok(const void *p, uint32 len)
     return 0u;
 }
 
-/* SVC �����飨sub-cmd + �������飩����λ���û��ɼ� RAM */
+/* SVC 参数块（sub-cmd + 参数数组）必须位于用户可见 RAM */
 uint8 arkrtos_kernel_svc_args_ok(const void *p, uint32 len)
 {
     return arkrtos_kernel_ptr_ram_ok(p, len);
 }
 
-/* ��Ϣ������������������ [1, ARKRTOS_MQ_MSG_WORDS] �ڣ�������λ���û��ɼ� RAM */
+/* 消息缓冲区：字数必须在 [1, ARKRTOS_MQ_MSG_WORDS] 内，且整块位于用户可见 RAM */
 static uint8 arkrtos_kernel_mq_buf_ok(const void *p, int32 len_words)
 {
     if(len_words <= 0 || len_words > ARKRTOS_MQ_MSG_WORDS)
@@ -148,19 +148,19 @@ static uint8 arkrtos_kernel_mq_buf_ok(const void *p, int32 len_words)
     return arkrtos_kernel_ptr_ram_ok(p, (uint32)len_words * 4u);
 }
 
-/* ������������豸��/�ź�����/��������/��Ϣ������/��ʱ����/�¼�������
- * �ں����� len �ֽڣ��� NUL�����ַ�������ͨ�����û��̼�����
- * ��˰���RAM ���� + �û��̼����ڡ��ж���
- * len ���밴Ŀ��������ֶε���ʵ��С�������¼����� char[16]������ 15 �ֽڣ���
- * ��������� char[8]��ͳһ�� 8 У������¼����� 7 ���ֽ�����У�鴰��֮�⡣ */
+/* 名字类参数（设备名/信号量名/互斥锁名/消息队列名/定时器名/事件名）：
+ * 内核最多读 len 字节（含 NUL），字符串常量通常在用户固件区，
+ * 因此按“RAM 窗口 + 用户固件窗口”判定。
+ * len 必须按目标对象名字段的真实大小给出：事件名是 char[16]（最多读 15 字节），
+ * 其余对象是 char[8]。统一按 8 校验会让事件名有 7 个字节落在校验窗口之外。 */
 uint8 arkrtos_kernel_user_name_ok(const void *p, uint32 len)
 {
     return arkrtos_kernel_ptr_flash_ok(p, len);
 }
 
-/* ��ʱ���ص����������ڵ����������Ĺ̼����ڡ�
- * ԭ�ж�ֻҪ�󡰲����ں� Flash��������ĳ�� App ���԰ѻص�ָ�������ػ���һ��
- * App �Ĳ�λ�������ڽ��ں���Ȩ̬ȥִ�б��˰�װ�Ĵ��롣 */
+/* 定时器回调：必须落在调用者自身的固件区内。
+ * 原判定只要求“不是内核 Flash”，于是某个 App 可以把回调指向驱动池或另一个
+ * App 的槽位——等于借内核特权态去执行别人安装的代码。 */
 static uint8 arkrtos_kernel_cb_own_region_ok(const void *p)
 {
     arkrtos_task_t *p_tsk = arkrtos_task_get_current();
@@ -178,13 +178,13 @@ static uint8 arkrtos_kernel_cb_own_region_ok(const void *p)
                 (start < (p_tsk->rom_start + p_tsk->rom_size))) ? 1u : 0u;
     }
 
-    /* �ں���������û�ж����̼�����rom_size==0�����˻ء��û��ɼ����������ж� */
+    /* 内核自身任务没有独立固件区（rom_size==0）：退回“用户可见代码区”判定 */
     return arkrtos_kernel_ptr_flash_ok(p, 2u);
 }
 
-/* �豸��д�����������ȱ���Ϊ���������������û��ɼ� RAM �ڡ�
- * ��У��ʱ�����������ں��������ַд�루dev_read����
- * ��������ַ�����ݶ������͸����裨dev_write���� */
+/* 设备读写缓冲区：长度必须为正，且整块落在用户可见 RAM 内。
+ * 不校验时调用者能让内核向任意地址写入（dev_read）、
+ * 或把任意地址的内容读出来送给外设（dev_write）。 */
 /* Stack window handed to a user thread. The whole [base, base+size) range has
  * to sit inside the caller's own RAM window - the one the loader recorded for
  * this task - otherwise a thread could be given a stack that overlaps the
@@ -251,8 +251,8 @@ uint8 arkrtos_kernel_user_ro_ok(const void *p, uint32 len)
     return arkrtos_kernel_cb_own_region_ok((const void *)&s[len - 1u]);
 }
 
-/* �����ص�����������λ���û��ɼ� RAM��5 ���ص�ָ����������û���������
- * ���⵲��ס�����Լ��Ĵ�����Ȩ�������ܵ�ס�ں������ں� Flash ִ�С��� */
+/* 驱动回调表：表本身位于用户可见 RAM，5 个回调指针必须落在用户代码区。
+ * （这挡不住“用自己的代码提权”，但能挡住内核跳到内核 Flash 执行。） */
 static uint8 arkrtos_kernel_dev_drv_ok(const arkrtos_dev_drv_t *drv)
 {
     if(drv == 0)
@@ -361,10 +361,10 @@ void arkrtos_thread_exit_internal(void)
 }
 
 #if (ARKRTOS_USE_EXIT_CODE == 1)
-/* U-8�����˳������ɱ���˳�������� TCB �� kill ���� kill ֮����Щ�ֶ�
- * ��ԭ���������ò۱�����Ϊֹ��װ����ֻ�ڡ�status ��� INVALID ����һ��
- * �۲졹����ȡ�ߣ��� arkrtos_elf.c �� elf_slot_live���������˳�·������Ҫ
- * �ص��κ��ˣ�Ҳ�Ͳ������л�·���������µ�ʱ�������� */
+/* U-8：带退出码的自杀。退出码先落进 TCB 再 kill —— kill 之后这些字段
+ * 仍原样保留到该槽被复用为止，装载器只在「status 变成 INVALID 的那一次
+ * 观察」把码取走（见 arkrtos_elf.c 的 elf_slot_live），所以退出路径不需要
+ * 回调任何人，也就不会在切换路径里引入新的时序依赖。 */
 void arkrtos_thread_exit_code_internal(int32 code)
 {
     int32 id = arkrtos_current_task_id;
@@ -403,7 +403,7 @@ int32  arkrtos_current_task_id = 0;
  * task entry is about to return into nothing). 0 in healthy runs. */
 volatile uint32 arkrtos_kill_ret_cnt = 0u;
 #if (ARKRTOS_USE_SCHED_LOCK == 1)
-/* ��������Ƕ�׼�����>0 ��ʾ��ǰ��ֹ�����л���arkrtos_sched_lock/unlock ά���� */
+/* 调度器锁嵌套计数：>0 表示当前禁止任务切换（arkrtos_sched_lock/unlock 维护） */
 volatile uint32 arkrtos_sched_lock_nest = 0;
 #endif
 
@@ -421,7 +421,7 @@ static void arkrtos_task_recover_pending(void);
 
 
 #if (ARKRTOS_USE_SCHED_STAT == 1)
-/* ͳ�Ʒ��Ŷ����� arkrtos_trace.c���ɹ۲���ģ�飩������ֻ���������� */
+/* 统计符号定义在 arkrtos_trace.c（可观测性模块），这里只做本地声明 */
 extern volatile uint32 arkrtos_sched_stat_n;
 extern volatile uint32 arkrtos_sched_stat_sum;
 extern volatile uint32 arkrtos_sched_stat_min;
@@ -434,15 +434,15 @@ extern void arkrtos_sched_stat_close(uint32 t0);
 #define ARKRTOS_SCHED_STAT_END()     do { } while(0)
 #endif
 
-/* tickless��������˯��֮����һ���ж�Ҫ�������ġ�
- * ��װֻ��"��θ��㼸��"�Ľ��ˣ�������ԭ������ arkrtos_kernel_tick_body() �
- * �ر� tickless ʱ���ߺϻ�һ����������Ϊ����������䡣 */
+/* tickless：长节拍睡满之后，这一次中断要补发多拍。
+ * 包装只做"这次该算几拍"的结账，节拍体原样留在 arkrtos_kernel_tick_body() 里；
+ * 关闭 tickless 时两者合回一个函数，行为与体积都不变。 */
 #if (ARKRTOS_USE_TICKLESS == 1)
 static void arkrtos_kernel_tick_body(void);
 
-/* ���� n �ģ�ֻ�ܽ����壬���ٽ��ˡ�
- * tickless ��ǰ����ʱ������"��ȥ"������һ�β��ϣ���Ҫ����ͨ·����
- * ������� tick_handler��������˾ͱ��ƹ�ȥ�ˡ� */
+/* 补发 n 拍：只跑节拍体，不再结账。
+ * tickless 提前唤醒时用它把"过去"的整拍一次补上；不要在普通路径里
+ * 拿它替代 tick_handler，否则结账就被绕过去了。 */
 void arkrtos_kernel_tick_ticks(uint32 n)
 {
     uint32 i;
@@ -488,19 +488,19 @@ void arkrtos_kernel_tick_handler(void)
     }
     #endif
     #if (ARKRTOS_USE_TIMER == 1)
-    /* ����ʱ������ʱ�뵽�ڻ��ѣ������ж���ִ���û��ص��� */
+    /* 软定时器倒计时与到期唤醒（不在中断里执行用户回调） */
     arkrtos_timer_tick_handler();
     #endif
 
-    /* ��ʱ�����ڴ�����ֻ������ͷ�Ѿ����ڵĽڵ㣨ͨ���� 0 ������
-     * ����ȫ��ɨ����ʱ��λ����ԭ�ȵȼۣ�ԭ��ɨ�跢����
-     * arkrtos_timer_tick_handler() ֮��sched_next �� PendSV ��������
-     * ���ڽ�������л�֮ǰ����֤���ĳ�ʱ���ѵ������ľ��ܱ�ѡ�С� */
+    /* 延时链到期处理：只处理链头已经到期的节点（通常是 0 个），
+     * 不再全表扫倒计时。位置与原先等价：原先扫描发生在
+     * arkrtos_timer_tick_handler() 之后（sched_next 由 PendSV 触发），
+     * 现在紧接其后、切换之前，保证本拍超时唤醒的任务当拍就能被选中。 */
     arkrtos_sched_tick_sweep();
 
     #if (ARKRTOS_TIME_SLICE_TICKS > 0)
-    /* ʱ��Ƭ����ǰ�������������� ARKRTOS_TIME_SLICE_TICKS �ĺ��ó�ͬ���ȼ����ס�
-     * ��ռ����Ƭ��Ӱ�죺�������ȼ��������ʱλͼֱ�Ӹ����������ľ��й�ȥ�� */
+    /* 时间片：当前任务连续运行满 ARKRTOS_TIME_SLICE_TICKS 拍后让出同优先级队首。
+     * 抢占不受片长影响：更高优先级任务就绪时位图直接给出它，本拍就切过去。 */
     if(arkrtos_current_task_id > 0)
     {
         arkrtos_task_t *p_cur = &arkrtos_task_table[arkrtos_current_task_id - 1];
@@ -515,14 +515,14 @@ void arkrtos_kernel_tick_handler(void)
     #endif
 
     #if (ARKRTOS_USE_SCHED_LOCK == 1)
-    if(arkrtos_sched_lock_nest == 0u)         /* �����������ڼ䲻���������л� */
+    if(arkrtos_sched_lock_nest == 0u)         /* 调度器锁定期间不触发任务切换 */
     #endif
     {
         #if (ARKRTOS_USE_FAST_TICK_SWITCH == 1)
-        /* ֻ��ȷʵҪ������ʱ���� PendSV��û��Ҫ�л�ʱҲ��һ�����쳣��������
-         * �˷ѣ�F427@96MHz ʵ�� 841 cycles/�ģ�2kHz ������Լ 1.7% CPU����
-         * arkrtos_sched_is_switching() �� PendSV �õ���ͬһ���ж�
-         * ������ arkrtos_sched_next() �� O(1) �������� + ��������飩�����ظ����á� */
+        /* 只有确实要换任务时才拉 PendSV。没人要切换时也走一整趟异常往返纯属
+         * 浪费（F427@96MHz 实测 841 cycles/拍，2kHz 节拍下约 1.7% CPU）。
+         * arkrtos_sched_is_switching() 与 PendSV 用的是同一份判定
+         * （都走 arkrtos_sched_next() 的 O(1) 就绪队列 + 调度锁检查），可重复调用。 */
         if(arkrtos_sched_is_switching() >= 0)
         {
             ARKRTOS_SWITCH_TASK();
@@ -553,7 +553,7 @@ static void svc_event_ctrl(void *p_svc_ctx)
     uint32 *p;
 
     p = (uint32 *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
-    /* �û������������У���ٽ����ã��ں� RAM / �ں� Flash һ�ɾܾ� */
+    /* 用户参数块必须先校验再解引用：内核 RAM / 内核 Flash 一律拒绝 */
     if(arkrtos_kernel_svc_args_ok(p, 16u) == 0u)
     {
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
@@ -562,7 +562,7 @@ static void svc_event_ctrl(void *p_svc_ctx)
     switch(p[0])
     {
         case ARKRTOS_EVENT_SUB_CREATE:
-            /* �¼����ֶ��� char[16]��У�鴰�ڱ������ 16 �ֽ� */
+            /* 事件名字段是 char[16]，校验窗口必须给到 16 字节 */
             if(arkrtos_kernel_user_name_ok((const void *)p[1], 16u) == 0u)
             {
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
@@ -582,11 +582,11 @@ static void svc_event_ctrl(void *p_svc_ctx)
 }
 
 #if (ARKRTOS_USE_ESET == 1)
-/* ARKRTOS_SVC_ESET_CTRL: 32 λ�¼�����������̶� 6 ���֣�24 �ֽڣ���
- *   p[0] �����p[1] ��� / ����ָ�룻p[2] ���� / ָ�룻p[3] ѡ�
- *   p[4] ���ָ�룻p[5] ��ʱ�����룩��
- * �û�̬�ĵȴ���������Ǽǵȴ��ߣ�λ���ۼӵģ�SVC ��ֻ�����������ѣ�
- * δ����ͷ��� WOULDBLOCK ���û�̬��ѯ����ʱ����Ҫ���ں����ˡ� */
+/* ARKRTOS_SVC_ESET_CTRL: 32 位事件集。参数块固定 6 个字（24 字节）：
+ *   p[0] 子命令；p[1] 句柄 / 名字指针；p[2] 掩码 / 指针；p[3] 选项；
+ *   p[4] 结果指针；p[5] 超时（毫秒）。
+ * 用户态的等待不在这里登记等待者：位是累加的，SVC 内只判条件并消费，
+ * 未满足就返回 WOULDBLOCK 由用户态轮询，超时不需要回内核清账。 */
 static void svc_eset_ctrl(void *p_svc_ctx)
 {
     uint32 *p;
@@ -601,7 +601,7 @@ static void svc_eset_ctrl(void *p_svc_ctx)
     switch(p[0])
     {
         case ARKRTOS_ESET_SUB_CREATE:
-            /* �¼������ֶ��� char[16]��У�鴰�ڱ������ 16 �ֽ� */
+            /* 事件集名字段是 char[16]，校验窗口必须给到 16 字节 */
             if(arkrtos_kernel_user_name_ok((const void *)p[1], 16u) == 0u)
             {
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
@@ -610,7 +610,7 @@ static void svc_eset_ctrl(void *p_svc_ctx)
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_eset_create_internal((char *)p[1]));
             break;
         case ARKRTOS_ESET_SUB_WAIT:
-            /* p[4] ���ں�Ҫд�صĽ��ָ�룬�����������ں� RAM/Flash �� */
+            /* p[4] 是内核要写回的结果指针，绝不能落在内核 RAM/Flash 里 */
             if(arkrtos_kernel_user_ro_ok((const void *)p[4], 4u) == 0u)
             {
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
@@ -658,11 +658,11 @@ static void svc_sys_info(void *p_svc_ctx)
             break;
         #endif
         case ARKRTOS_SYS_SUB_FAULT_COUNT:
-            /* ���ϼ�¼���� */
+            /* 故障记录条数 */
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_fault_record_count_internal());
             break;
         case ARKRTOS_SYS_SUB_FAULT_GET:
-            /* ��ȡ�� r1 �����ϼ�¼�� r2 ָ����û����壨3 ���֣� */
+            /* 读取第 r1 条故障记录到 r2 指向的用户缓冲（3 个字） */
             {
                 const arkrtos_fault_record_t *p_rec = arkrtos_fault_record_get((int32)ARKRTOS_SVC_ARG(p_svc_ctx, 1));
                 if(p_rec != 0 && ARKRTOS_SVC_ARG(p_svc_ctx, 2) != 0)
@@ -741,7 +741,7 @@ static void svc_task_ctrl(void *p_svc_ctx)
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
                 break;
             }
-            /* r1=����ţ�r2=�û���������3 ���֣����ֽ�/��ֵ����/ʣ�ࣩ */
+            /* r1=任务号，r2=用户缓冲区（3 个字：总字节/峰值已用/剩余） */
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_task_stack_info_internal(
                               (int32)ARKRTOS_SVC_ARG(p_svc_ctx, 1),
                               (uint32 *)ARKRTOS_SVC_ARG(p_svc_ctx, 2)));
@@ -758,7 +758,7 @@ static void svc_dev_io(void *p_svc_ctx)
     uint32 *p;
 
     p = (uint32 *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
-    /* �û������������У���ٽ����ã��ں� RAM / �ں� Flash һ�ɾܾ� */
+    /* 用户参数块必须先校验再解引用：内核 RAM / 内核 Flash 一律拒绝 */
     if(arkrtos_kernel_svc_args_ok(p, 16u) == 0u)
     {
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
@@ -847,7 +847,7 @@ static void svc_drv_mgr(void *p_svc_ctx)
     uint32 *p;
 
     p = (uint32 *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
-    /* �û������������У���ٽ����ã��ں� RAM / �ں� Flash һ�ɾܾ� */
+    /* 用户参数块必须先校验再解引用：内核 RAM / 内核 Flash 一律拒绝 */
     if(arkrtos_kernel_svc_args_ok(p, 16u) == 0u)
     {
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
@@ -922,7 +922,7 @@ static void svc_sync_ctrl(void *p_svc_ctx)
     uint32 *p;
 
     p = (uint32 *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
-    /* �û������������У���ٽ����ã��ں� RAM / �ں� Flash һ�ɾܾ� */
+    /* 用户参数块必须先校验再解引用：内核 RAM / 内核 Flash 一律拒绝 */
     if(arkrtos_kernel_svc_args_ok(p, 16u) == 0u)
     {
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
@@ -1010,10 +1010,10 @@ static void svc_sync_ctrl(void *p_svc_ctx)
 }
 
 #if (ARKRTOS_USE_WAITMULTI == 1)
-/* ARKRTOS_SVC_WAITMULTI_CTRL: ��������̽�⡣������̶� 5 ���֣�20 �ֽڣ���
- *   p[0]=������  p[1]=�������  p[2]=����  p[3]=ANY/ALL  p[4]=�������
- * ����������ں�ֻ�����������ں�ֻд������ָ�붼�����ȹ��û��ڴ�У�顣
- * ����ֻ��һ�ο��գ����Ǽǵȴ���Ҳ������������ʱ�ĵȴ��� SDK ����ѯ��ɡ� */
+/* ARKRTOS_SVC_WAITMULTI_CTRL: 多对象就绪探测。参数块固定 5 个字（20 字节）：
+ *   p[0]=子命令  p[1]=句柄数组  p[2]=数量  p[3]=ANY/ALL  p[4]=结果掩码
+ * 句柄数组由内核只读、掩码由内核只写，两个指针都必须先过用户内存校验。
+ * 这里只做一次快照，不登记等待者也不阻塞：带超时的等待在 SDK 侧轮询完成。 */
 static void svc_waitmulti_ctrl(void *p_svc_ctx)
 {
     uint32 *p;
@@ -1058,7 +1058,7 @@ static void svc_mq_ctrl(void *p_svc_ctx)
     uint32 *p;
 
     p = (uint32 *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
-    /* �û������������У���ٽ����ã��ں� RAM / �ں� Flash һ�ɾܾ� */
+    /* 用户参数块必须先校验再解引用：内核 RAM / 内核 Flash 一律拒绝 */
     if(arkrtos_kernel_svc_args_ok(p, 16u) == 0u)
     {
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
@@ -1107,7 +1107,7 @@ static void svc_sbuf_ctrl(void *p_svc_ctx)
     uint32 *p;
 
     p = (uint32 *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
-    /* �û������������У���ٽ����ã��ں� RAM / �ں� Flash һ�ɾܾ� */
+    /* 用户参数块必须先校验再解引用：内核 RAM / 内核 Flash 一律拒绝 */
     if(arkrtos_kernel_svc_args_ok(p, 24u) == 0u)
     {
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
@@ -1124,7 +1124,7 @@ static void svc_sbuf_ctrl(void *p_svc_ctx)
         }
         ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_sbuf_create_internal((char *)p[1]));
         break;
-    case ARKRTOS_SBUF_SUB_SEND:                       /* sbuf send���ں�ֻ�������߻��� */
+    case ARKRTOS_SBUF_SUB_SEND:                       /* sbuf send：内核只读调用者缓冲 */
         if(arkrtos_kernel_user_ro_ok((const void *)p[2], p[3]) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
@@ -1133,7 +1133,7 @@ static void svc_sbuf_ctrl(void *p_svc_ctx)
         ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_sbuf_send_internal((int32)p[1], (const void *)p[2],
                                                              (int32)p[3], (int32)p[4]));
         break;
-    case ARKRTOS_SBUF_SUB_RECV:                       /* sbuf recv���ں��������߻���д */
+    case ARKRTOS_SBUF_SUB_RECV:                       /* sbuf recv：内核往调用者缓冲写 */
         if(arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
@@ -1198,7 +1198,7 @@ static void svc_sbuf_ctrl(void *p_svc_ctx)
         break;
     }
 #else
-    /* ����û���������ʵ�ܾ�����Ҫװ���ɹ� */
+    /* 功能没编进来：如实拒绝，不要装作成功 */
     ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
 #endif
 }
@@ -1209,7 +1209,7 @@ static void svc_mempool_ctrl(void *p_svc_ctx)
     uint32 *p;
 
     p = (uint32 *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
-    /* �û������������У���ٽ����ã��ں� RAM / �ں� Flash һ�ɾܾ� */
+    /* 用户参数块必须先校验再解引用：内核 RAM / 内核 Flash 一律拒绝 */
     if(arkrtos_kernel_svc_args_ok(p, 24u) == 0u)
     {
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
@@ -1224,14 +1224,14 @@ static void svc_mempool_ctrl(void *p_svc_ctx)
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
-        /* block_count Ϊ 0 ��˻�����һ�ɾܾ�����������ĳ���У��ᱻ�ƹ�ȥ */
+        /* block_count 为 0 或乘积回绕一律拒绝：否则下面的长度校验会被绕过去 */
         if((p[3] == 0u) || (p[4] == 0u) || (p[4] > (0xFFFFFFFFu / p[3])))
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
-        /* ���ڴ��������������ڱ�����ɼ� RAM����У��͵����� App ���ں�
-         * ֮���������ַ�����ں� RAM�����飬������Ȩ���Ƿ��䡣 */
+        /* 池内存区必须整段落在本任务可见 RAM：不校验就等于让 App 借内核
+         * 之手在任意地址（含内核 RAM）发块，那是提权不是分配。 */
         if(arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)(p[3] * p[4])) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
@@ -1265,7 +1265,7 @@ static void svc_mempool_ctrl(void *p_svc_ctx)
         break;
     }
 #else
-    /* ����û���������ʵ�ܾ�����Ҫװ���ɹ� */
+    /* 功能没编进来：如实拒绝，不要装作成功 */
     ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
 #endif
 }
@@ -1276,7 +1276,7 @@ static void svc_timer_ctrl(void *p_svc_ctx)
     uint32 *p;
 
     p = (uint32 *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
-    /* �û������������У���ٽ����ã��ں� RAM / �ں� Flash һ�ɾܾ� */
+    /* 用户参数块必须先校验再解引用：内核 RAM / 内核 Flash 一律拒绝 */
     if(arkrtos_kernel_svc_args_ok(p, 16u) == 0u)
     {
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
@@ -1293,8 +1293,8 @@ static void svc_timer_ctrl(void *p_svc_ctx)
         ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_timer_create_internal((char *)p[1]));
         break;
     case ARKRTOS_TIMER_SUB_START:
-        /* �ص������ں���Ȩִ̬�У��ص��������ڵ������Լ��Ĺ̼����ڣ�
-         * ����ָ�����λ���û��ɼ� RAM */
+        /* 回调会在内核特权态执行：回调必须落在调用者自己的固件区内，
+         * 参数指针必须位于用户可见 RAM */
         if(arkrtos_kernel_svc_args_ok(p, 24u) == 0u ||
            arkrtos_kernel_cb_own_region_ok((const void *)p[4]) == 0u ||
            ((p[5] != 0u) &&
@@ -1350,7 +1350,7 @@ static void svc_thread_ctrl(void *p_svc_ctx)
             break;
 #if (ARKRTOS_USE_EXIT_CODE == 1)
         case ARKRTOS_THREAD_SUB_EXIT_CODE:
-            /* U-8��p[1] = �˳��롣�����鱾����������� svc_args_ok У����� */
+            /* U-8：p[1] = 退出码。参数块本身已由上面的 svc_args_ok 校验过。 */
             arkrtos_thread_exit_code_internal((int32)p[1]);
             break;
 #endif
@@ -1982,7 +1982,7 @@ static void svc_app_mgr(void *p_svc_ctx)
     uint32 *p;
 
     p = (uint32 *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
-    /* �û������������У���ٽ����ã��ں� RAM / �ں� Flash һ�ɾܾ� */
+    /* 用户参数块必须先校验再解引用：内核 RAM / 内核 Flash 一律拒绝 */
     if(arkrtos_kernel_svc_args_ok(p, 16u) == 0u)
     {
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
@@ -1990,27 +1990,27 @@ static void svc_app_mgr(void *p_svc_ctx)
     }
     switch(p[0])
     {
-    case ARKRTOS_APP_SUB_LOAD_DEV:     /* ���豸��ʽ���� App ���񵽿��в�λ */
+    case ARKRTOS_APP_SUB_LOAD_DEV:     /* 从设备流式加载 App 镜像到空闲槽位 */
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_loader_load_dev((int32)p[1], p[2]));
         break;
-    case ARKRTOS_APP_SUB_START:     /* ������λ�е� App */
+    case ARKRTOS_APP_SUB_START:     /* 启动槽位中的 App */
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_loader_start(p[1]));
         break;
-    case ARKRTOS_APP_SUB_STOP:     /* ֹͣ��λ�е� App */
+    case ARKRTOS_APP_SUB_STOP:     /* 停止槽位中的 App */
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_loader_stop(p[1]));
         break;
-    case ARKRTOS_APP_SUB_STATUS:     /* ��ѯ��λ״̬ */
+    case ARKRTOS_APP_SUB_STATUS:     /* 查询槽位状态 */
         ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_loader_state(p[1]));
         break;
-    case ARKRTOS_APP_SUB_DRIVER_LOAD:     /* ���豸��װ�������������� */
+    case ARKRTOS_APP_SUB_DRIVER_LOAD:     /* 从设备安装驱动镜像到驱动区 */
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_loader_load_driver((int32)p[1], p[2]));
         break;
 #if ARKRTOS_USE_MINIAPP
-    case ARKRTOS_APP_SUB_MINI_RUN:     /* ���ļ�ϵͳװ�ز�����һ��С����p[1]=·��ָ�룬p[2]=·������ */
-        /* ����Ҫ�ɵ��÷����������� [ptr, ptr+len] ��һ�Σ�����β NUL��
-         * �������ڵ������Լ��Ĵ����ڣ������ں˾���������Խ���
-         * �ַ�������ֻ��һ��ָ���ֽڸ��ϣ�Ҳ������Ϊ�ַ���ǡ��
-         * ���� App RAM ��β����ܡ� */
+    case ARKRTOS_APP_SUB_MINI_RUN:     /* 从文件系统装载并运行一个小程序：p[1]=路径指针，p[2]=路径长度 */
+        /* 长度要由调用方给出，并且 [ptr, ptr+len] 这一段（含结尾 NUL）
+         * 都必须在调用者自己的窗口内：否则内核就在替它读越界的
+         * 字符串。比只验一个指针字节更严，也不会因为字符串恰好
+         * 贴在 App RAM 块尾就误拒。 */
         if((p[2] == 0u) || (p[2] >= ARKRTOS_FS_PATH_MAX) ||
            (arkrtos_kernel_user_ro_ok((const void *)p[1], p[2] + 1u) == 0u))
         {
@@ -2019,7 +2019,7 @@ static void svc_app_mgr(void *p_svc_ctx)
         }
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_mini_run((const char *)p[1]));
         break;
-    case ARKRTOS_APP_SUB_MINI_STOP:     /* ֹͣС���򲢹黹���� RAM �� */
+    case ARKRTOS_APP_SUB_MINI_STOP:     /* 停止小程序并归还它的 RAM 块 */
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_mini_stop());
         break;
 #endif /* ARKRTOS_USE_MINIAPP */
@@ -2031,32 +2031,32 @@ static void svc_app_mgr(void *p_svc_ctx)
 
 #if (ARKRTOS_USE_TASK_SWAP == 1)
 /* ============================================================
- * �������л���A/B ˫�����޷��������ں�һ�ࣩ
+ * 任务热切换（A/B 双缓冲无缝升级的内核一侧）
  *
- * ����������Ĵ����� A �����ţ�B �Ѿ�װ���ڶ������壨С�����ǵڶ��� RAM �飬
- * App �ǵڶ��� Flash �ۣ���Ҫ������**��һ��ϵͳ���õ�**�͵ػ��� B �ϣ�������
- * ���񡢲���һ�ε��ȡ���д Flash�������ļ�ϵͳ��
+ * 场景：任务的代码在 A 里跑着，B 已经装进第二个缓冲（小程序是第二对 RAM 块，
+ * App 是第二个 Flash 槽）。要让它在**下一个系统调用点**就地换到 B 上：不重启
+ * 任务、不进一次调度、不写 Flash、不碰文件系统。
  *
- * ����ֻ���Ĳ���ȫ��վ�� SVC ��Ӳ��ջ֡�ϣ�
- *   1) ����Ѿ����ݿ鿽�������ݿ飨��ջ�뵱ǰ��һ֡����
- *   2) ���¿������һ֡��д�ɡ��¾��� main() �ĵ�һ�С�����R0-R3/R12/LR ���㡢
- *      PC ȡ����ڡ�xPSR ֻ�� Thumb λ��
- *   3) PSP Ų���¿����ͬһ��ƫ�ƣ��쳣����ʱӲ���� PSP ��֡������ֱ���������ڣ�
- *   4) TCB �Ĵ����� MPU �����ĸ��ϣ���**����**д��Ӳ�����������Ͼ�Ҫ���´�����
- *      ȡָ����һ�ľ���һ�� MemManage����
- * ��ջ�ϵĵ����������������� main() ���Լ���ջ�����Կ�������������ǡ����ò��֡���
+ * 做法只有四步，全部站在 SVC 的硬件栈帧上：
+ *   1) 整块把旧数据块拷到新数据块（含栈与当前这一帧）；
+ *   2) 在新块里把那一帧改写成「新镜像 main() 的第一行」——R0-R3/R12/LR 归零、
+ *      PC 取新入口、xPSR 只留 Thumb 位；
+ *   3) PSP 挪到新块里的同一个偏移：异常返回时硬件从 PSP 弹帧，于是直接落进新入口；
+ *   4) TCB 的窗口与 MPU 上下文跟上，并**立刻**写进硬件（任务马上就要在新窗口里
+ *      取指，晚一拍就是一次 MemManage）。
+ * 旧栈上的调用链被放弃——新 main() 会自己建栈，所以拷的是整块而不是「已用部分」。
  *
- * �����ܾ������ǲµı߽磺�¾� RAM ���С������ͬ��������˵�ǰ�ᣩ��
- * Ŀ�������ܻ�����ͬ���ڵ����̣߳����ǻ�ָ�ű��黹�ľɿ飩��
- * ջ֡�����ǻ���֡���ù� FPU ����������չ֡��[7] ���� xPSR���Ĵ�һ����
- * ���������ڴ����ַ��ȡָ����
+ * 三条拒绝而不是猜的边界：新旧 RAM 块大小必须相同（整块搬运的前提）、
+ * 目标任务不能还挂着同窗口的子线程（它们会指着被归还的旧块）、
+ * 栈帧必须是基本帧（用过 FPU 的任务是扩展帧，[7] 不是 xPSR，改错一个字
+ * 就是任务在错误地址上取指）。
  *
- * ͬʱֻ����һ���л���·�ϣ��ⲻ��ʡ�ڴ棬���ǡ������ݻ��塹���Ǳ�����
- * Ҫ�ܾ��Ķ����������Ŷӵڶ��ݾ͵��ڳ�����Ҫ���ݡ�
+ * 同时只允许一次切换在路上：这不是省内存，而是「第三份缓冲」正是本机制
+ * 要拒绝的东西——能排队第二份就等于承认需要三份。
  * ============================================================ */
 
 typedef struct {
-    int32  task_id;             /* 0 = û�й�����л� */
+    int32  task_id;             /* 0 = 没有挂起的切换 */
     uint32 new_rom_start;
     uint32 new_rom_size;
     uint32 new_ram_start;
@@ -2071,9 +2071,9 @@ int32 arkrtos_task_swap_pending(void)
     return g_task_swap.task_id;
 }
 
-/* �����쳣֡�оݣ�Thumb λ������ 1��IPSR ������ 0��Thread ģʽ����
- * ��չ֡���ù� FPU �����񣩵� [7] �� S6������ xPSR�����и��ʽ���Ϊ�㣬
- * ���������ܿɿ��ذѡ����ǻ���֡���ϳ����������ǿ������� */
+/* 基本异常帧判据：Thumb 位必须是 1，IPSR 必须是 0（Thread 模式）。
+ * 扩展帧（用过 FPU 的任务）的 [7] 是 S6，不是 xPSR；命中概率近乎为零，
+ * 所以这里能可靠地把「不是基本帧」认出来，而不是靠运气。 */
 static int arkrtos_task_swap_basic_frame(const uint32 *p_frame)
 {
     uint32 xpsr = p_frame[7];
@@ -2105,8 +2105,8 @@ int32 arkrtos_task_swap_arm(int32 task_id, uint32 rom_start, uint32 rom_size,
     {
         return ARKRTOS_SWAP_ERR_PARAM;
     }
-    /* ������� 2 �����Ұ��������룺MPU һ�� region ���ܸ�ס���飬
-     * �������Ҳ����ȷ���ı߽硣 */
+    /* 块必须是 2 的幂且按自身对齐：MPU 一个 region 才能盖住整块，
+     * 整块搬运也才有确定的边界。 */
     if(((ram_size & (ram_size - 1u)) != 0u) ||
        ((ram_start & (ram_size - 1u)) != 0u))
     {
@@ -2122,15 +2122,15 @@ int32 arkrtos_task_swap_arm(int32 task_id, uint32 rom_start, uint32 rom_size,
     {
         return ARKRTOS_SWAP_ERR_PARAM;
     }
-    /* ���鰴�ֽڰ��ȥ�������������һ���󡣲�ͬ��С��ζ�����ݲ��ֲ�ͬ��
-     * ��������ֻ���ߡ�����Э�项����·�������������װ�޷졣 */
+    /* 整块按字节搬过去，所以两块必须一样大。不同大小意味着数据布局不同，
+     * 那种升级只能走「交接协议」那条路，不能在这里假装无缝。 */
     if(p_task->ram_size != ram_size)
     {
         return ARKRTOS_SWAP_ERR_LAYOUT;
     }
 
-    /* ͬ���ڣ�ͬһ�ݴ���飩�������������žɿ�һ��ʧЧ��С���򽨵��Խ��߳�
-     * �̳д����ߵĴ��ڡ���������ֱ�Ӿܾ�������Ĭ�����������ѹ黹�Ŀ��ϡ� */
+    /* 同窗口（同一份代码块）的其它任务会跟着旧块一起失效：小程序建的自建线程
+     * 继承创建者的窗口。这种情形直接拒绝，不静默让它们跑在已归还的块上。 */
     for(i = 0; (i < arkrtos_task_count) && (i < ARKRTOS_TASK_MAX_NUM); i++)
     {
         if((i != (task_id - 1)) &&
@@ -2164,9 +2164,9 @@ int32 arkrtos_task_swap_cancel(int32 task_id)
     return 0;
 }
 
-/* ����ֵ��0 = û������������Ĺ�������÷��ճ���������
- *         1 = ���л�����һ֡�Ѿ����ĳ��¾������ڣ����� SVC ����ִ�У���
- *         ��ֵ = �Ѿܾ���������������÷�������»��廹��ȥ���� */
+/* 返回值：0 = 没有针对这个任务的挂起项（调用方照常继续）；
+ *         1 = 已切换（这一帧已经被改成新镜像的入口，本次 SVC 不再执行）；
+ *         负值 = 已拒绝并撤掉挂起项（调用方负责把新缓冲还回去）。 */
 int32 arkrtos_task_swap_take(void *p_exc_ctx, int32 task_id)
 {
     uint32 *p_frame = (uint32 *)p_exc_ctx;
@@ -2194,9 +2194,9 @@ int32 arkrtos_task_swap_take(void *p_exc_ctx, int32 task_id)
         return ARKRTOS_SWAP_ERR_LAYOUT;
     }
 
-    /* ֡�����������ھɿ��ջ�����������˵���ⲻ���������� SVC
-     * �������ж��������﷢�� SVC �ߵ��� MSP�������Ǿ͵����Լ��ٷ�һ�Σ�
-     * ��������¡� */
+    /* 帧必须整个落在旧块的栈区里。落在外面说明这不是这个任务的 SVC
+     * （例如中断上下文里发的 SVC 走的是 MSP）——那就等它自己再发一次，
+     * 不在这里猜。 */
     if(((uint32)p_frame < old_ram) ||
        (((uint32)p_frame + 32u) > (old_ram + blk)))
     {
@@ -2213,27 +2213,27 @@ int32 arkrtos_task_swap_take(void *p_exc_ctx, int32 task_id)
     p_old = (uint32 *)(void *)old_ram;
     p_new = (uint32 *)(void *)(g_task_swap.new_ram_start + off);
 
-    /* 1) ����ᣨ��ջ�뵱ǰ֡�����˿�Ԫ����һ���ֶ���û�ģ��κ�һ��ʧ��
-     *    ����ͣ�ھɾ����ϣ����ǡ�һ����һ��ɡ��� */
+    /* 1) 整块搬（含栈与当前帧）。此刻元数据一个字都还没改：任何一步失败
+     *    都还停在旧镜像上，不是「一半新一半旧」。 */
     for(i = 0u; i < (blk >> 2); i++)
     {
         ((uint32 *)(void *)g_task_swap.new_ram_start)[i] = p_old[i];
     }
 
-    /* 2) ���¿�����һ֡�ĳɡ��� main() �ĵ�һ�С��� */
+    /* 2) 把新块里这一帧改成「新 main() 的第一行」。 */
     p_new[0] = 0u;                  /* R0 */
     p_new[1] = 0u;                  /* R1 */
     p_new[2] = 0u;                  /* R2 */
     p_new[3] = 0u;                  /* R3 */
     p_new[4] = 0u;                  /* R12 */
-    p_new[5] = 0u;                  /* LR��main ���������䵽 0�����½������ջ֡һ�£� */
-    p_new[6] = g_task_swap.new_entry & ~1u;   /* Ӳ����Լ������ Thumb λ */
-    p_new[7] = 0x01000000u;                   /* xPSR��ֻ�� Thumb λ */
+    p_new[5] = 0u;                  /* LR：main 若返回则落到 0（与新建任务的栈帧一致） */
+    p_new[6] = g_task_swap.new_entry & ~1u;   /* 硬件按约定忽略 Thumb 位 */
+    p_new[7] = 0x01000000u;                   /* xPSR：只留 Thumb 位 */
 
-    /* 3) �쳣���ش� PSP ��֡������Ų���¿����ͬһ��ƫ�ơ� */
+    /* 3) 异常返回从 PSP 弹帧：把它挪到新块里的同一个偏移。 */
     arkrtos_port_set_psp((uint32)p_new);
 
-    /* 4) ������ MPU �����ĸ��ϣ�������д��Ӳ���� */
+    /* 4) 窗口与 MPU 上下文跟上，并立刻写进硬件。 */
     p_task->rom_start = g_task_swap.new_rom_start;
     p_task->rom_size  = g_task_swap.new_rom_size;
     p_task->ram_start = g_task_swap.new_ram_start;
@@ -2263,10 +2263,10 @@ void SVC_Server(void *p_svc_ctx)
     uint32 svc_num = ARKRTOS_SVC_NUM(p_svc_ctx);
 
 #if (ARKRTOS_USE_TASK_SWAP == 1)
-    /* ���л�����ع��ӱ����ڡ�����֤�ݡ�֮ǰ�����ɹ�֮����һ֡�Ѿ����¾����
-     * main()������ϵͳ���ò����ٱ��ǵ��ɾ���ͷ�ϡ����������߸����Լ�����;��
-     * ��С���� / App ��λ�����ں��ǲ�ֻ��һ�ݣ���������һ�����ء����л�����
-     * ����ֵ <0 �ľܾ��Ѿ��ڸ��Ե� take �����˲������־�����ﲻ�ظ����� */
+    /* 热切换的落地钩子必须在「活体证据」之前：换成功之后这一帧已经是新镜像的
+     * main()，本次系统调用不该再被记到旧镜像头上。两个消费者各查自己的在途账
+     * （小程序 / App 槽位），内核那侧只挂一份，所以至多一个返回「已切换」；
+     * 返回值 <0 的拒绝已经在各自的 take 里清账并打过日志，这里不重复报。 */
     if(arkrtos_mini_swap_take(p_svc_ctx, arkrtos_current_task_id) > 0)
     {
         arkrtos_trace_isr(ARKRTOS_TR_IRQ_SVC, ARKRTOS_TR_ISR_EXIT);
@@ -2355,14 +2355,14 @@ void SVC_Server(void *p_svc_ctx)
 
 
 /* ============================================================
- * CPU �쳣ͳһ�������
- * @brief HardFault / MemManage / BusFault / UsageFault ����
- * @details �����������з����쳣ʱ�����񼶻ָ����ؽ�ջ֡���������񣩣�
- *          �������ϴﵽ APP_CRASH_RESTART_MAX ��Ӧ���� arkrtos_loader_on_fault()
- *          ���ã����������������ں�/�ж��������쳣���¼��ͣ���ȵ������ӹܡ�
- *          ע�⣺CFSR/HFSR ���ֲ��壬�����õ�������λ����ԭ��
- * @return �����ڻָ�������ջָ�루�� 0 ʱ�弶����� arkrtos_port_resume_task ��ɻָ�����
- *         0 ��ʾ���ɻָ����弶��Ӧͣ���ȴ���������
+ * CPU 异常统一处理入口
+ * @brief HardFault / MemManage / BusFault / UsageFault 共用
+ * @details 任务上下文中发生异常时做任务级恢复（重建栈帧重启该任务），
+ *          连续故障达到 APP_CRASH_RESTART_MAX 的应用由 arkrtos_loader_on_fault()
+ *          禁用，不再无限重启；内核/中断上下文异常则记录后停机等调试器接管。
+ *          注意：CFSR/HFSR 保持不清，便于用调试器定位故障原因。
+ * @return 可用于恢复的任务栈指针（非 0 时板级层调用 arkrtos_port_resume_task 完成恢复）；
+ *         0 表示不可恢复，板级层应停机等待调试器。
  * ============================================================ */
 uint32 arkrtos_cpu_fault_handler(uint32 fault_type)
 {
@@ -2374,14 +2374,14 @@ uint32 arkrtos_cpu_fault_handler(uint32 fault_type)
         arkrtos_fault_record(fault_type, tid);
 
         #if (ARKRTOS_USE_FAULT_RECOVER == 1)
-        /* δ�������������ޣ������������ؽ�ջ֡����
-         * �ﵽ���ޣ�arkrtos_loader_on_fault �ڲ����� INVALID ������ recover_pending��
-         * �� App �����á����������� */
+        /* 未达连续故障上限：安排重启（重建栈帧）；
+         * 达到上限：arkrtos_loader_on_fault 内部已置 INVALID 并清零 recover_pending，
+         * 该 App 被禁用、不再重启。 */
         if(arkrtos_loader_on_fault(tid) == 1)
         {
-            /* �Ѵ������������ޡ��� App �ѱ����ã����ؽ�ջ֡��ֱ�Ӵӵ�����ժ����
-             * ���� -1 ��ʾ�����������κ� App ��λ/���������ں��������񣩣�
-             * �԰�Ĭ�ϲ������������ܵ������ѽ��á������� */
+            /* 已达连续故障上限、该 App 已被禁用：不重建栈帧，直接从调度中摘除。
+             * 返回 -1 表示该任务不属于任何 App 槽位/驱动区（内核内置任务），
+             * 仍按默认策略重启，不能当作“已禁用”处理。 */
         }
         else
         {
@@ -2393,25 +2393,25 @@ uint32 arkrtos_cpu_fault_handler(uint32 fault_type)
         arkrtos_task_table[tid - 1].status = ARKRTOS_TASK_INVALID;
         #endif
 
-        /* �ؼ�������·������ PendSV �л���
-         * HardFault ���ȼ�(-1)���� PendSV(0xFF)�����ϴ��������ڼ� PendSV
-         * ���ᱻ������ֻ�� PendSV �ͷ��أ�PendSV ��Զ����ִ�У����������
-         * �������ֳ��������У����������ĩβ�� while(1)�����������Ǵ�ǰ
-         * �����������ﵽ���޼����á�����ʵӲ���ϴӲ���Ч��ԭ��
-         * ����ֱ��ѡ����һ�����񣬰�����ջָ�뷵�ظ��弶�㣬
-         * �� arkrtos_port_resume_task() ��ɡ��ָ��Ĵ��� + �쳣���ء���
-         * �ȼ��� PendSV �л��ĺ��Ρ�
-         * old_psp �� 0�����������ֳ����ٱ��棨�������ؽ��򱻽��ã��� */
-        next = arkrtos_sched_next() + 1;      /* recover_pending �� sched_next �ڲ�����ؽ� */
+        /* 关键：故障路径不经 PendSV 切换。
+         * HardFault 优先级(-1)高于 PendSV(0xFF)，故障处理程序活动期间 PendSV
+         * 不会被服务；若只置 PendSV 就返回，PendSV 永远不会执行，故障任务会
+         * 带着损坏现场继续运行（或落回向量末尾的 while(1)）——这正是此前
+         * “连续崩溃达到上限即禁用”在真实硬件上从不生效的原因。
+         * 这里直接选出下一个任务，把它的栈指针返回给板级层，
+         * 由 arkrtos_port_resume_task() 完成“恢复寄存器 + 异常返回”，
+         * 等价于 PendSV 切换的后半段。
+         * old_psp 传 0：故障任务现场不再保存（它即将重建或被禁用）。 */
+        next = arkrtos_sched_next() + 1;      /* recover_pending 在 sched_next 内部完成重建 */
         if(next < 0)
         {
-            next = 0;                       /* �޾��������˻ؿ��� */
+            next = 0;                       /* 无就绪任务：退回空闲 */
         }
 
         return (uint32)arkrtos_sched_activate(next, 0u);
     }
 
-    /* �ں�/�ж��������쳣��û�п����������񣬼�¼��ͣ���ȴ��������ӹ� */
+    /* 内核/中断上下文异常：没有可重启的任务，记录后停机等待调试器接管 */
     arkrtos_fault_record(fault_type, 0);
     return 0u;
 }
@@ -2421,8 +2421,8 @@ uint32 arkrtos_hardfault_handler(void)
     return arkrtos_cpu_fault_handler(ARKRTOS_FAULT_HARDFAULT);
 }
 
-/* ����λͼ��������Ⱦ���̽�����ϱ��������ں���ġ��������С�һ�ڣ�
- * ������ڴ�ҲҪд���ǣ�����ǰ��������ͬ�ļ��ڵ�ȫ�ֶ��󣩡� */
+/* 就绪位图自愈与调度决策探针的诊断变量定义在后面的「就绪队列」一节，
+ * 调度入口处也要写它们，这里前向声明（同文件内的全局对象）。 */
 extern volatile uint32 arkrtos_ready_heal_cnt;
 extern volatile uint32 arkrtos_ready_heal_head;
 extern volatile uint32 arkrtos_sched_probe_pos;
@@ -2432,7 +2432,7 @@ int32 arkrtos_sched_is_switching(void)
     int32 new_idx = arkrtos_sched_next() + 1;
 
     #if (ARKRTOS_USE_SCHED_LOCK == 1)
-    /* �����������ڼ䲻�л����񣻳�ʱ�������� arkrtos_sched_next ����� */
+    /* 调度器锁定期间不切换任务；超时处理已在 arkrtos_sched_next 内完成 */
     if(arkrtos_sched_lock_nest != 0u)
     {
         return ARKRTOS_TASK_ERR_CONTEXT;
@@ -2441,30 +2441,30 @@ int32 arkrtos_sched_is_switching(void)
 
     if((new_idx < 0) || (new_idx > (int32)arkrtos_task_count))
     {
-        /* �����Խ�磺���������ϲ�����ȥ�����������Խ���������������飬
-         * �õ� 0xffffffff ��ջָ�룬����ڼܹ����ԡ��ô�Ƕ��롹��������
-         * ������֤��������֧��ı��ߵ�����˵���������ѹ���û�޸ɾ��� */
+        /* 任务号越界：绝不能让上层拿它去索引任务表（越界读会读到介质数组，
+         * 拿到 0xffffffff 当栈指针，随后在架构层以「访存非对齐」崩溃）。
+         * 计数留证：这条分支真的被走到过，说明上游有脱钩还没修干净。 */
         arkrtos_sched_probe_pos += 0x10000u;
         return ARKRTOS_TASK_NONE;
     }
     if(new_idx == arkrtos_current_task_id)
     {
-        return ARKRTOS_TASK_NONE;                          /* �������Լ��������� PendSV */
+        return ARKRTOS_TASK_NONE;                          /* 还是它自己，不必拉 PendSV */
     }
     return new_idx;
 }
 
-/* ����λͼ��������ϱ��������ں���ġ��������С�һ�ڣ��������ҲҪд����
- * ����ǰ��������ͬ�ļ��ڵ�ȫ�ֶ��󣩡� */
+/* 就绪位图自愈的诊断变量定义在后面的「就绪队列」一节，调度入口也要写它，
+ * 这里前向声明（同文件内的全局对象）。 */
 #if (ARKRTOS_USE_STACK_GUARD == 1)
 /**
-* @brief У��һ�������ջ�ױ����֣�0 ����λ��
-* @return 1 = �������ѱ��ȣ�0 = �����������δ����
-* @details �о��ǡ�ջ����һ���ֻ��ǲ��� ARKRTOS_STACK_END_FLAG_VAL����
-*          �͡������ PSP ����ջ�ס�����ͬһ���£�����֡��Խ��ָ�롢
-*          DMA д��������ջ�ױ���д������������ PSP �����Ϸ���
-*          ��һ�ξ��� reported������ÿ�����Ķ������ϻ�����ͬһ����¼��
-*          ����λ���ֲ��壬�����л�·���Ի�ݴ˰�����ժ����
+* @brief 校验一个任务的栈底保护字（0 基槽位）
+* @return 1 = 保护字已被踩，0 = 正常或该任务未布防
+* @details 判据是「栈底那一个字还是不是 ARKRTOS_STACK_END_FLAG_VAL」。
+*          和「保存的 PSP 低于栈底」不是同一件事：陷阱帧、越界指针、
+*          DMA 写穿都能让栈底被改写而保存下来的 PSP 仍在上方。
+*          报一次就置 reported，避免每个节拍都往故障环里塞同一条记录；
+*          布防位保持不清，这样切换路径仍会据此把任务摘除。
 */
 int32 arkrtos_stack_guard_check(int32 slot)
 {
@@ -2526,9 +2526,9 @@ int32 arkrtos_sched_activate(int32 new_task, uint32 old_psp)
 {
     int32 tid = arkrtos_current_task_id - 1;
 
-    /* new_task == 0 ��ʾ�е���������1..task_count �ǺϷ�����š�
-     * Խ���һ�ɾܾ������� 0 = ���л������÷�����ԭ֡����
-     * �������� tid = new_task - 1 ��Խ���д�������������顣 */
+    /* new_task == 0 表示切到空闲任务；1..task_count 是合法任务号。
+     * 越界号一律拒绝（返回 0 = 不切换，调用方保持原帧），
+     * 否则下面 tid = new_task - 1 会越界读写任务表与介质数组。 */
     if((new_task < 0) || (new_task > (int32)arkrtos_task_count))
     {
         arkrtos_ready_heal_cnt++;
@@ -2544,12 +2544,12 @@ int32 arkrtos_sched_activate(int32 new_task, uint32 old_psp)
     }
     else if(old_psp != 0u)
     {
-        /* old_psp == 0�����ϻָ�·�������÷���������������ֳ�
-         * �������񼴽��ؽ�ջ֡�򱻽��ã������� stack_ptr ��д��ջ��顣 */
+        /* old_psp == 0：故障恢复路径，调用方不保存故障任务现场
+         * （该任务即将重建栈帧或被禁用），跳过 stack_ptr 回写与栈检查。 */
         arkrtos_task_table[tid].stack_ptr = old_psp;
 
         #if (ARKRTOS_USE_STACK_USAGE == 1)
-        /* ��¼��ʷ���ջָ�루ջ��͵�ַ�����������ڷ�ֵջ����ͳ�� */
+        /* 记录历史最低栈指针（栈向低地址增长），用于峰值栈用量统计 */
         if(old_psp < arkrtos_task_table[tid].stack_peak_low)
         {
             arkrtos_task_table[tid].stack_peak_low = old_psp;
@@ -2560,9 +2560,9 @@ int32 arkrtos_sched_activate(int32 new_task, uint32 old_psp)
         if(arkrtos_task_table[tid].status == ARKRTOS_TASK_RUNNING)
         {
             #if (ARKRTOS_USE_STACK_GUARD == 1)
-            /* �Ȳ�ջ�ױ����֣������� PSP ��û����ջ������ʱ�Ͱ�
-             * ��֡/Ұָ��д��ջ�ס��ϳ��������м�ժ�����������
-             * PSP �о�ͬһ��ȥ�򣨼�¼���� check ��д������ */
+            /* 先查栈底保护字：它能在 PSP 还没掉到栈底以下时就把
+             * 「帧/野指针写穿栈底」认出来。命中即摘除，和下面的
+             * PSP 判据同一个去向（记录已在 check 里写过）。 */
             if(arkrtos_stack_guard_check(tid) != 0)
             {
                 arkrtos_ready_del(tid);
@@ -2572,14 +2572,14 @@ int32 arkrtos_sched_activate(int32 new_task, uint32 old_psp)
             else
             #endif
             #if (ARKRTOS_USE_STACK_CHECK == 1)
-            /* ջ�����⣺����� PSP ���ѵ���ջ�׵�ַ��˵��ջԽ���ˡ�
-             * ���� RUNNING ״̬�¼�⣬����� WAIT �������У������ֲ�ֲ���֪���⣩�� */
+            /* 栈溢出检测：保存的 PSP 若已低于栈底地址，说明栈越界了。
+             * 仅在 RUNNING 状态下检测，避免对 WAIT 任务误判（详见移植手册已知问题）。 */
             if(old_psp < (uint32)arkrtos_task_table[tid].stack_bottom)
             {
-                /* ��¼�����ϱ���ջ������ڡ����������������ǵĻ���
-                 * �������ֻ����һ�� INVALID������̨��û���κ������� */
+                /* 记录到故障表：栈溢出属于「无声死亡」，不记的话，
+                 * 任务表里只会多出一行 INVALID，控制台上没有任何线索。 */
                 arkrtos_fault_record(ARKRTOS_FAULT_STACKOVF, (int32)tid + 1);
-                arkrtos_ready_del(tid);           /* ջ������Ӿ�������ժ�� */
+                arkrtos_ready_del(tid);           /* 栈溢出：从就绪集中摘除 */
                 arkrtos_delay_disarm(tid);
                 arkrtos_task_table[tid].status = ARKRTOS_TASK_INVALID;
             }
@@ -2629,34 +2629,34 @@ int32 arkrtos_sched_activate(int32 new_task, uint32 old_psp)
 }
 
 /* ============================================================
- * O(1) ������������ʱ��
+ * O(1) 就绪队列与延时链
  *
- * ��ʵ��ÿ��һ�ε��Ⱦ��߾�ȫ��ɨһ�飨ѡ������ȼ�����
- *   ѡ�� O(N)��ͬ���ȼ���ת O(N)��ÿ�ĵ���ʱ O(N)��
- * ���ﻻ���������� + һ������λͼ���ѡ�ѡ���񡹡���ת��������ʱ��
- * ȫ������ O(1)����ʱ���Ĳ����� O(N)��������ֻ��������������ʱ��
- * ���ڵ��Ⱦ���·���ϣ�RT-Thread �� rt_timer_start ͬ���� O(N) ���룩��
+ * 旧实现每做一次调度决策就全表扫一遍（选最高优先级）：
+ *   选择 O(N)、同优先级轮转 O(N)、每拍倒计时 O(N)。
+ * 这里换成两个链表 + 一张两级位图，把「选任务」「轮转」「倒计时」
+ * 全部降到 O(1)。延时链的插入是 O(N)，但插入只发生在任务阻塞时，
+ * 不在调度决策路径上（RT-Thread 的 rt_timer_start 同样是 O(N) 插入）。
  * ============================================================ */
 
-/* ����λͼ��bit p = ���ȼ� p ���о�������
- * ���ȼ��� 0..254 �� uint8��255 �Ǳ����ڱ���ע��ʱ�Ѿܾ�����
- * ������ 8 �� 32 λ�� + һ�� 8 λ��λͼ��������λ�̶������� */
+/* 就绪位图：bit p = 优先级 p 上有就绪任务。
+ * 优先级是 0..254 的 uint8（255 是保留哨兵，注册时已拒绝），
+ * 所以用 8 个 32 位字 + 一个 8 位组位图，两级定位固定两步。 */
 static uint32 arkrtos_ready_map[8];
 static uint8  arkrtos_ready_group = 0u;
 
-/* ÿ�����ȼ��ľ�������˫��ѭ������ͷ���������±ꣻARKRTOS_TASK_NIL=��Ͱ�� */
+/* 每个优先级的就绪任务双向循环链表头（存任务下标；ARKRTOS_TASK_NIL=空桶） */
 static uint8 arkrtos_ready_head[256];
 
-/* ��ʱ������ delay_tick �����˫����������ͷ�������� */
+/* 延时链：按 delay_tick 升序的双向链表，表头单独保存 */
 static uint8 arkrtos_delay_head = ARKRTOS_TASK_NIL;
 
-static uint32 arkrtos_ready_total = 0u;       /* �������ϵ����������Լ�/�����ã� */
-static uint8  arkrtos_recover_cnt  = 0u;      /* ���ָ���������Ϊ 0 ʱ��������ɨ�� */
+static uint32 arkrtos_ready_total = 0u;       /* 就绪链上的任务数（自检/调试用） */
+static uint8  arkrtos_recover_cnt  = 0u;      /* 待恢复任务数：为 0 时整段跳过扫描 */
 
 /*
- * ȡ 32 λ�����λλ�ţ�0..31������α���� 0��
- * ���� CMSIS �� __CLZ/__RBIT���ں�Դ�ļ������� CMSIS ͷ��
- * �����ù̶� 5 �����֣������������޹أ����� O(1)��
+ * 取 32 位最低置位位号（0..31），入参必须非 0。
+ * 不用 CMSIS 的 __CLZ/__RBIT：内核源文件不依赖 CMSIS 头，
+ * 这里用固定 5 步二分，步数与输入无关，仍是 O(1)。
  */
 static uint8 arkrtos_lowbit32(uint32 v)
 {
@@ -2671,8 +2671,8 @@ static uint8 arkrtos_lowbit32(uint32 v)
 }
 
 /* ------------------------------------------------------------
- * ������������Ͱ / ��Ͱ / ȡ����
- * Լ�������÷����봦�ڹ��жϵ��ٽ����ڣ��ں������е��õ㶼���㣩��
+ * 就绪链表：入桶 / 出桶 / 取最优
+ * 约定：调用方必须处在关中断的临界区内（内核里所有调用点都满足）。
  * ------------------------------------------------------------ */
 
 static void arkrtos_ready_link(int32 idx, uint8 prio)
@@ -2688,7 +2688,7 @@ static void arkrtos_ready_link(int32 idx, uint8 prio)
     }
     else
     {
-        uint8 tail = arkrtos_task_table[h].ready_prev;    /* Ͱβ���¾������������ */
+        uint8 tail = arkrtos_task_table[h].ready_prev;    /* 桶尾：新就绪者排在最后 */
 
         arkrtos_task_table[tail].ready_next = i;
         arkrtos_task_table[i].ready_prev = tail;
@@ -2709,7 +2709,7 @@ static void arkrtos_ready_unlink(int32 idx, uint8 prio)
 
     if(n == ARKRTOS_TASK_NIL)
     {
-        return;                                 /* �����Ͳ������� */
+        return;                                 /* 本来就不在链上 */
     }
 
     if(n == i)
@@ -2739,11 +2739,11 @@ static void arkrtos_ready_unlink(int32 idx, uint8 prio)
     }
 }
 
-/* λͼ�����������ֳ����գ�����ã��� static �Ա�� QEMU monitor / nm ֱ�Ӷ�����
- * λͼֻ�� status ��������һ��������λ��������λ����λ�С�ͰͷΪ�ա������ѹ�
- * ���֣���ʵ�ֻ�� 255��Ͱ���ڱ�����������ŷ��أ��ϲ� +1 ��� 256��
- * ����ȥ�������������Խ������������� LoongArch64 ��ż�� ADEM �ĳ���
- * ���ﲻ�ٷ����ڱ������Ǿ͵�����ѹ���λ�������ֳ��������� */
+/* 位图自愈计数与现场快照（诊断用，非 static 以便从 QEMU monitor / nm 直接读）。
+ * 位图只是 status 的索引：一旦「组有位、组内无位」或「位有、桶头为空」这种脱钩
+ * 出现，旧实现会把 255（桶空哨兵）当成任务号返回，上层 +1 变成 256，
+ * 再拿去索引任务表就是越界读——那正是 LoongArch64 上偶发 ADEM 的成因。
+ * 这里不再返回哨兵，而是就地清掉脱钩的位，并把现场留下来。 */
 volatile uint32 arkrtos_ready_heal_cnt  = 0u;
 volatile uint32 arkrtos_ready_heal_g    = 0u;
 volatile uint32 arkrtos_ready_heal_word = 0u;
@@ -2778,8 +2778,8 @@ int32 arkrtos_ready_top(void)
     uint32 h;
     uint32 round;
 
-    /* ������� 8 �֣��������ޣ���ÿ��Ҫô����һ���Ϸ�����Ҫô���һ���ѹ�λ��
-     * λͼ��Ͱ��ȫ�յ���������ߵ�һ��ѭ���ĵ�һ��ֱ�ӷ��ء� */
+    /* 最多自愈 8 轮（组数上限）：每轮要么返回一个合法任务，要么清掉一个脱钩位。
+     * 位图与桶是全空的正常情况走第一次循环的第一行直接返回。 */
     for(round = 0u; round < 8u; round++)
     {
         if(g == 0u)
@@ -2787,21 +2787,21 @@ int32 arkrtos_ready_top(void)
             return ARKRTOS_TASK_NONE;
         }
 
-        w = (uint32)arkrtos_lowbit32(g);                    /* ��� 0..7 */
+        w = (uint32)arkrtos_lowbit32(g);                    /* 组号 0..7 */
         if(arkrtos_ready_map[w] == 0u)
         {
-            /* ��λ�С�����ȫ 0����һ��û���κ����ȼ���ֱ������λ */
+            /* 组位有、组内全 0：这一组没有任何优先级，直接清组位 */
             arkrtos_ready_heal(w, 0xFFFFFFFFu, 0u);
             arkrtos_ready_group = (uint8)(g & (uint8)~(1u << w));
             g = (uint32)arkrtos_ready_group;
             continue;
         }
 
-        b = (uint32)arkrtos_lowbit32(arkrtos_ready_map[w]);   /* ����λ�� 0..31 */
+        b = (uint32)arkrtos_lowbit32(arkrtos_ready_map[w]);   /* 组内位号 0..31 */
         h = (uint32)arkrtos_ready_head[(uint8)((w << 5) | b)];
         if((h == (uint32)ARKRTOS_TASK_NIL) || (h >= (uint32)arkrtos_task_count))
         {
-            /* λ�С�ͰͷΪ�ջ�ͰͷԽ�磺������ȼ�û�п�����������λ */
+            /* 位有、桶头为空或桶头越界：这个优先级没有可运行任务，清位 */
             arkrtos_ready_heal(w, b, h);
             arkrtos_ready_map[w] &= ~(1u << b);
             if(arkrtos_ready_map[w] == 0u)
@@ -2825,10 +2825,10 @@ void arkrtos_ready_add(int32 idx)
     }
     if(arkrtos_task_table[idx].ready_next != ARKRTOS_TASK_NIL)
     {
-        return;                                 /* ���ھ������ϣ��ݵ� */
+        return;                                 /* 已在就绪链上，幂等 */
     }
     arkrtos_ready_link(idx, arkrtos_task_table[idx].priority);
-    arkrtos_delay_disarm(idx);                    /* �ѿ����оͲ�����Ҫ���ڻ��� */
+    arkrtos_delay_disarm(idx);                    /* 已可运行就不再需要到期唤醒 */
 }
 
 void arkrtos_ready_del(int32 idx)
@@ -2848,7 +2848,7 @@ void arkrtos_ready_reprio(int32 idx, uint8 old_prio)
     }
     if(arkrtos_task_table[idx].ready_next == ARKRTOS_TASK_NIL)
     {
-        return;                                 /* ���ھ��������� priority ���� */
+        return;                                 /* 不在就绪集：改 priority 即可 */
     }
     arkrtos_ready_unlink(idx, old_prio);
     arkrtos_ready_link(idx, arkrtos_task_table[idx].priority);
@@ -2871,10 +2871,10 @@ void arkrtos_ready_rotate(int32 idx)
     if((arkrtos_ready_head[prio] == (uint8)idx) &&
        (arkrtos_task_table[idx].ready_next == (uint8)idx))
     {
-        return;                                 /* Ͱ��ֻ�����Լ�������ᶯ */
+        return;                                 /* 桶里只有它自己，无需搬动 */
     }
     arkrtos_ready_unlink(idx, prio);
-    arkrtos_ready_link(idx, prio);                /* ׷�ӵ�Ͱβ����һ����λ */
+    arkrtos_ready_link(idx, prio);                /* 追加到桶尾，下一拍让位 */
 }
 
 uint32 arkrtos_sched_ready_count(void)
@@ -2882,7 +2882,7 @@ uint32 arkrtos_sched_ready_count(void)
     return arkrtos_ready_total;
 }
 
-/* ����ã�������ǰ�Ƿ���ھ������ϣ��� sched_check ���о�һ�£� */
+/* 诊断用：该任务当前是否挂在就绪链上（与 sched_check 的判据一致） */
 uint8 arkrtos_ready_contains(int32 task_idx)
 {
     if((task_idx < 0) || (task_idx >= arkrtos_task_count))
@@ -2893,7 +2893,7 @@ uint8 arkrtos_ready_contains(int32 task_idx)
 }
 
 /* ------------------------------------------------------------
- * ��ʱ���������Ե��ڽ�������
+ * 延时链：按绝对到期节拍升序
  * ------------------------------------------------------------ */
 
 static void arkrtos_delay_link(int32 idx)
@@ -2961,7 +2961,7 @@ static void arkrtos_delay_unlink(int32 idx)
 
     if(v == ARKRTOS_TASK_NIL)
     {
-        arkrtos_delay_head = n;                   /* ���Ǳ�ͷ */
+        arkrtos_delay_head = n;                   /* 它是表头 */
     }
     else
     {
@@ -2983,7 +2983,7 @@ void arkrtos_delay_arm(int32 idx, uint32 ticks)
     {
         return;
     }
-    arkrtos_delay_unlink(idx);                    /* �ݵȣ���ժ�����ܲ����ľɽڵ� */
+    arkrtos_delay_unlink(idx);                    /* 幂等：先摘掉可能残留的旧节点 */
     arkrtos_task_table[idx].delay_tick = arkrtos_kernel_tick + ticks;
     arkrtos_delay_link(idx);
 }
@@ -2993,9 +2993,9 @@ void arkrtos_delay_disarm(int32 idx)
     arkrtos_delay_unlink(idx);
 }
 
-/* ÿ�ĵ��ã�ֻ������ͷ�Ѿ����ڵĽڵ㣬û���ھ����̷��ء�
- * ��ǰ�� post/unlock ���ѵ�������ڵ���ܻ��������ϣ�����·���������ժ������
- * ���ࡸ��ʬ�ڵ㡹����ʱ����״̬�Ѳ��� WAIT ��ֱ�Ӷ����������Ȼ��ȷ�� */
+/* 每拍调用：只处理链头已经到期的节点，没到期就立刻返回。
+ * 提前被 post/unlock 唤醒的任务其节点可能还挂在链上（唤醒路径不必逐个摘链），
+ * 这类「僵尸节点」到期时发现状态已不是 WAIT 就直接丢弃，结果仍然正确。 */
 void arkrtos_delay_tick(void)
 {
     while(arkrtos_delay_head != ARKRTOS_TASK_NIL)
@@ -3005,24 +3005,24 @@ void arkrtos_delay_tick(void)
 
         if((int32)(arkrtos_kernel_tick - p->delay_tick) < 0)
         {
-            break;                              /* �з��űȽϣ������Ļ��� */
+            break;                              /* 有符号比较，抗节拍回绕 */
         }
 
         arkrtos_delay_unlink(idx);
 
         if(p->status != ARKRTOS_TASK_WAIT)
         {
-            continue;                           /* �ѱ���ǰ���ѵĽ�ʬ�ڵ� */
+            continue;                           /* 已被提前唤醒的僵尸节点 */
         }
 
-        p->wake_reason = 1;                     /* 1 = ��ʱ���� */
+        p->wake_reason = 1;                     /* 1 = 超时唤醒 */
         if(p->wait_time > 0)
         {
             p->wait_time = 0;
         }
         else
         {
-            /* ���ڵȴ����ڣ���ԭ���岹��һ������ */
+            /* 周期等待到期：按原语义补回一个周期 */
             p->period_time += p->period;
             if(p->period_time <= 0)
             {
@@ -3035,9 +3035,9 @@ void arkrtos_delay_tick(void)
 }
 
 #if (ARKRTOS_USE_TICKLESS == 1)
-/* tickless idle �ã���ʱ�������һ�γ�ʱ���м��ġ�
- * ���� delay_tick ��������ֻ����ͷ���Ѿ����ڣ�<=0��ͨ���ǽ�ʬ�ڵ㣬
- * ��һ�� tick �ͻ�������� 1 �ı����õ��÷���Ҫ��ͼ�������� */
+/* tickless idle 用：延时链里最近一次超时还有几拍。
+ * 链按 delay_tick 有序，所以只看链头。已经到期（<=0，通常是僵尸节点，
+ * 下一个 tick 就会清掉）按 1 拍报，让调用方不要试图跳过它。 */
 uint32 arkrtos_task_next_delay_ticks(void)
 {
     int32 dist;
@@ -3084,13 +3084,13 @@ void arkrtos_ready_reset(void)
     arkrtos_delay_head  = ARKRTOS_TASK_NIL;
 }
 
-/* ��������� status ��������������������λͼ + ÿ���ȼ���������
+/* 从任务表的 status 重新派生整个就绪集（位图 + 每优先级链表）。
  *
- * Ϊʲô��Ҫ����status ��Ψһ���࣬λͼ/����ֻ����������������һ��������
- * �ѹ������������ᱨ��Ҳ�������ֻ�ᡸ��Ĭ�ذ�ĳ�� READY ������Զ�������⡹��
- * �ֹ��� TCB �ľ�ʽע�ᣨֻд status�������������������ѹ���
- * �״ε���ǰ�ؽ�һ�Σ���������ʷд��Ҳ������ȣ�O(N) ��ֻ����һ�Ρ�
- * �ؽ�ǰ���������Ͱ�� TCB ���ֶΣ���˲�������ظ��ڵ㡣 */
+ * 为什么需要它：status 是唯一真相，位图/链表只是它的索引。索引一旦与真相
+ * 脱钩，调度器不会报错也不会崩，只会「静默地把某个 READY 任务永远排在门外」。
+ * 手工填 TCB 的旧式注册（只写 status、不挂链）就是这种脱钩。
+ * 首次调度前重建一次，把这类历史写法也纳入调度；O(N) 且只发生一次。
+ * 重建前先清空所有桶与 TCB 链字段，因此不会产生重复节点。 */
 void arkrtos_ready_rebuild(void)
 {
     int32 i;
@@ -3123,9 +3123,9 @@ void arkrtos_ready_rebuild(void)
     }
 }
 
-/* һ�����Լ죺�ѡ�λͼ/�������롸�������ʵ״̬������һ�飬
- * �ٺ�һ��ȫ��ɨ��ѡ������������ȶԡ����ز�һ�µ���Ŀ����0 = һ�¡�
- * �� shell �� schedcheck ������ã���������ʱ����Ҫ���� */
+/* 一致性自检：把「位图/链表」与「任务表真实状态」对照一遍，
+ * 再和一次全表扫描选出的最优任务比对。返回不一致的条目数，0 = 一致。
+ * 供 shell 的 schedcheck 命令调用；正常运行时不需要它。 */
 int32 arkrtos_sched_check(void)
 {
     int32 bad = 0;
@@ -3154,7 +3154,7 @@ int32 arkrtos_sched_check(void)
         if((p->delay_queued != 0u) && (p->delay_prev == ARKRTOS_TASK_NIL) &&
            (arkrtos_delay_head != (uint8)idx))
         {
-            bad++;                              /* ��������ʱ����ȴ�Ҳ����� */
+            bad++;                              /* 声称在延时链上却找不到它 */
         }
     }
 
@@ -3165,11 +3165,11 @@ int32 arkrtos_sched_check(void)
 
         if((m != 0u) && ((arkrtos_ready_group & (uint8)(1u << idx)) == 0u))
         {
-            bad++;                              /* ��λͼ�ǿյ���λͼû�� */
+            bad++;                              /* 字位图非空但组位图没标 */
         }
         if((m == 0u) && ((arkrtos_ready_group & (uint8)(1u << idx)) != 0u))
         {
-            bad++;                              /* ��λͼ˵�У���λͼȴ�ǿյ� */
+            bad++;                              /* 组位图说有，字位图却是空的 */
         }
 
         for(k = 0u; k < 32u; k++)
@@ -3180,11 +3180,11 @@ int32 arkrtos_sched_check(void)
 
                 if(arkrtos_ready_head[pr] == ARKRTOS_TASK_NIL)
                 {
-                    bad++;                      /* λͼ˵�У�Ͱȴ�ǿյ� */
+                    bad++;                      /* 位图说有，桶却是空的 */
                 }
                 else if(arkrtos_task_table[arkrtos_ready_head[pr]].priority != pr)
                 {
-                    bad++;                      /* Ͱ����������ȼ��Բ��� */
+                    bad++;                      /* 桶里的任务优先级对不上 */
                 }
             }
         }
@@ -3228,17 +3228,17 @@ int32 arkrtos_sched_check(void)
     }
     else if((scan >= 0) && (arkrtos_task_table[scan].priority != arkrtos_task_table[top].priority))
     {
-        bad++;                                  /* ѡ�������ȼ���ͬ���治һ�� */
+        bad++;                                  /* 选出的优先级不同：真不一致 */
     }
 
     return bad;
 }
 
-/* �״ε���ǰ�ؽ���������һ���Ա�� */
+/* 首次调度前重建就绪集的一次性标记 */
 static uint8 arkrtos_ready_built = 0u;
 
-/* ���Ⱦ��߿��գ�ÿ�� sched_next ��һ������� / ��λ / map[0] / map[6] /
- * �������� / ��ʱ�ĵ�ǰ����ţ���ֻд����������·���Ͼ������� store�� */
+/* 调度决策快照：每次 sched_next 记一条（结果 / 组位 / map[0] / map[6] /
+ * 就绪总数 / 当时的当前任务号）。只写不读，正常路径上就是六条 store。 */
 volatile uint32 arkrtos_sched_probe[6u * 16u];
 volatile uint32 arkrtos_sched_probe_pos = 0u;
 
@@ -3246,22 +3246,22 @@ int32 arkrtos_sched_next(void)
 {
     if(arkrtos_ready_built == 0u)
     {
-        /* ������Ϊֹ����������ע����ϣ��״ε��ȱ�Ȼ����������֮�󣩣�
-         * �Ѿ������� status ��������һ�Σ���ס���ֹ��� TCB ������������д���� */
+        /* 到这里为止所有任务都已注册完毕（首次调度必然发生在启动之后），
+         * 把就绪集按 status 重新派生一次，兜住「手工填 TCB 不挂链」这类写法。 */
         arkrtos_ready_rebuild();
         arkrtos_ready_built = 1u;
     }
 
     if(arkrtos_recover_cnt != 0u)
     {
-        /* ֻ��ȷʵ���ڴ��ָ�����ʱ����Ҫɨ����β */
+        /* 只有确实存在待恢复任务时才需要扫表收尾 */
         arkrtos_task_recover_pending();
     }
 
-    /* O(1)��λͼȡ������ȼ�����ȡ�����ȼ�����Ͱ�Ķ��ס�
-     * ÿ�ξ�����һ�����գ�16 �����Σ�������ת��/reprobe ʱ�ܿ���
-     * �������������ʱλͼ��ʲô������������Ψһ��֤�������� status
-     * ������û���ѹ���֤�ݣ����º�¼Ĵ����ɿ��� */
+    /* O(1)：位图取最高优先级，再取该优先级就绪桶的队首。
+     * 每次决策留一条快照（16 条环形），崩溃转储/reprobe 时能看到
+     * 「做出这个决定时位图长什么样」——这是唯一能证明索引与 status
+     * 到底有没有脱钩的证据，比事后猜寄存器可靠。 */
     {
         int32 r = arkrtos_ready_top();
         uint32 i = (arkrtos_sched_probe_pos & 15u) * 6u;
@@ -3278,8 +3278,8 @@ int32 arkrtos_sched_next(void)
 }
 
 
-/* ÿ������ֻ������ʱ�����Ѿ����ڵ����񣬲���ȫ��ɨ����ʱ��
- * ѡ������ arkrtos_ready_top() ����ʱ����ɣ�Ҳ������Ҫ���ȼ����档 */
+/* 每个节拍只处理延时链上已经到期的任务，不再全表扫倒计时；
+ * 选择本身由 arkrtos_ready_top() 常数时间完成，也不再需要优先级缓存。 */
 static void arkrtos_sched_tick_sweep(void)
 {
     arkrtos_delay_tick();
@@ -3287,11 +3287,11 @@ static void arkrtos_sched_tick_sweep(void)
 
 arkrtos_task_t *arkrtos_task_get_current(void)
 {
-    /* ֻ��һ�������±꣬��������������ԭ�ӵģ����ﲻ��ҪҲ���ܹ��жϣ�
-     * �ź���/������/��Ϣ���ж����ڸ��Ե��ٽ����ڵ��ñ�������
-     * ���ڴ˴� ARKRTOS_ENABLE_IRQ()����򿪵��÷����ٽ�����
-     * ʹ���ѹҽ��ȴ����С�����û�� WAIT���Ĵ��ڱ�¶�� ISR ��� post/unlock��
-     * ���ѱ�Ͷ��һ����û˯�µ��������ĵ��������ѣ��� */
+    /* 只读一个整数下标，读操作本身就是原子的，这里不需要也不能关中断：
+     * 信号量/互斥锁/消息队列都是在各自的临界区内调用本函数，
+     * 若在此处 ARKRTOS_ENABLE_IRQ()，会打开调用方的临界区，
+     * 使“已挂进等待队列、但还没置 WAIT”的窗口暴露给 ISR 里的 post/unlock，
+     * 唤醒被投给一个还没睡下的任务并消耗掉（丢唤醒）。 */
     if(arkrtos_current_task_id > 0)
     {
         return &arkrtos_task_table[arkrtos_current_task_id - 1];
@@ -3301,10 +3301,10 @@ arkrtos_task_t *arkrtos_task_get_current(void)
 
 #if (ARKRTOS_USE_SCHED_LOCK == 1)
 /**
-* @brief �����������Ƿ񱻳��У�������ӿڵı�̴��������
-* @return 1=�����������÷�Ӧ���Ա����������󣩣�0=δ����
-* @details �ڵ����������ڼ���������ӿڻ��ƻ�����״̬һ���ԣ�
-*          �˴��������󲢼�¼һ�����ϼ�¼�����ڶ�λ������롣
+* @brief 检查调度器锁是否被持有（阻塞类接口的编程错误防护）
+* @return 1=已锁定（调用方应忽略本次阻塞请求），0=未锁定
+* @details 在调度器锁定期间调用阻塞接口会破坏任务状态一致性，
+*          此处忽略请求并记录一条故障记录，便于定位问题代码。
 */
 static int32 arkrtos_sched_lock_blocks(void)
 {
@@ -3325,7 +3325,7 @@ void arkrtos_task_wait_internal(uint32 ms)
     arkrtos_task_t *p_tsk;
     ARKRTOS_DISABLE_IRQ();
     #if (ARKRTOS_USE_SCHED_LOCK == 1)
-    if(arkrtos_sched_lock_blocks())       /* �����ڼ��ֹ���� */
+    if(arkrtos_sched_lock_blocks())       /* 锁定期间禁止阻塞 */
     {
         ARKRTOS_ENABLE_IRQ();
         return;
@@ -3350,7 +3350,7 @@ void arkrtos_task_wait_period_internal(void)
     arkrtos_task_t *p_tsk;
     ARKRTOS_DISABLE_IRQ();
     #if (ARKRTOS_USE_SCHED_LOCK == 1)
-    if(arkrtos_sched_lock_blocks())       /* �����ڼ��ֹ���� */
+    if(arkrtos_sched_lock_blocks())       /* 锁定期间禁止阻塞 */
     {
         ARKRTOS_ENABLE_IRQ();
         return;
@@ -3378,7 +3378,7 @@ void arkrtos_task_block_internal(void)
     arkrtos_task_t *p_tsk;
     ARKRTOS_DISABLE_IRQ();
     #if (ARKRTOS_USE_SCHED_LOCK == 1)
-    if(arkrtos_sched_lock_blocks())       /* �����ڼ��ֹ���� */
+    if(arkrtos_sched_lock_blocks())       /* 锁定期间禁止阻塞 */
     {
         ARKRTOS_ENABLE_IRQ();
         return;
@@ -3388,7 +3388,7 @@ void arkrtos_task_block_internal(void)
     if(arkrtos_current_task_id > 0)
     {
         p_tsk = &arkrtos_task_table[arkrtos_current_task_id - 1];
-        p_tsk->wait_time = -1;          /* �������������ܱ� post/unlock ���� */
+        p_tsk->wait_time = -1;          /* 无限阻塞，仅能被 post/unlock 唤醒 */
         arkrtos_ready_del(arkrtos_current_task_id - 1);
         arkrtos_trace_wait((uint8)(arkrtos_current_task_id - 1));
         p_tsk->status = ARKRTOS_TASK_WAIT;
@@ -3397,11 +3397,11 @@ void arkrtos_task_block_internal(void)
     ARKRTOS_ENABLE_IRQ();
 }
 
-/* �ڵ��÷��ѳ��е��ٽ�������ɡ��õȴ�״̬ + ���ߡ�������ʱ�ж��Թء�
- * �ؼ��㣺�ȴ����еĵǼǣ����÷��ڹ��ж�����ɣ��뱾�������� WAIT/����֮��
- * �����������жϴ򿪵�˲�䣬���� ISR ��� post/unlock/mq_put ��ѻ���Ͷ�ݸ�
- * һ����û˯�µ����񣬻����漴���̵��������һֱ��������ʱ����
- * @return 0=����ʽ���ѣ�1=��ʱ��-1=δ�����������ں������Ļ�������������� */
+/* 在调用方已持有的临界区内完成“置等待状态 + 切走”，返回时中断仍关。
+ * 关键点：等待队列的登记（调用方在关中断下完成）与本函数的置 WAIT/切走之间
+ * 不允许出现中断打开的瞬间，否则 ISR 里的 post/unlock/mq_put 会把唤醒投递给
+ * 一个还没睡下的任务，唤醒随即被吞掉（任务会一直阻塞到超时）。
+ * @return 0=被显式唤醒，1=超时，-1=未进入阻塞（内核上下文或调度器已锁定） */
 volatile uint8 arkrtos_dbg_wake_last[ARKRTOS_TASK_MAX_NUM];
 volatile uint8 arkrtos_dbg_wake_hits[ARKRTOS_TASK_MAX_NUM];
 
@@ -3416,24 +3416,24 @@ int32 arkrtos_task_block_in_critical(uint32 timeout_ms)
      * even on the early returns below. */
     tr_obj13 = arkrtos_trace_take_wait_obj();
 
-    /* ����Լ��������ʱ�ж��ѹ� */
+    /* 调用约定：进入时中断已关 */
     if(arkrtos_current_task_id <= 0)
     {
-        return ARKRTOS_TASK_ERR_CONTEXT;                      /* �ں������Ĳ��������� */
+        return ARKRTOS_TASK_ERR_CONTEXT;                      /* 内核上下文不允许阻塞 */
     }
 
     #if (ARKRTOS_USE_SCHED_LOCK == 1)
     if(arkrtos_sched_lock_blocks())
     {
-        return ARKRTOS_TASK_ERR_CONTEXT;                      /* �����������ڼ��ֹ���� */
+        return ARKRTOS_TASK_ERR_CONTEXT;                      /* 调度器锁定期间禁止阻塞 */
     }
     #endif
 
     p_tsk = &arkrtos_task_table[arkrtos_current_task_id - 1];
     p_tsk->wake_reason = 0;
-    /* ���������� uint32�����÷��� (uint32)(-1) ��ʾ���޵ȴ���
-     * ������ת���з������жϣ�����ֵ�ᱻ���� 0xFFFFFFFF ���룬
-     * MS_TO_TICK �����һ�����ɿصľ޴�������� */
+    /* 参数类型是 uint32，调用方用 (uint32)(-1) 表示无限等待；
+     * 必须先转成有符号再判断，否则负值会被当成 0xFFFFFFFF 毫秒，
+     * MS_TO_TICK 溢出成一个不可控的巨大节拍数。 */
     p_tsk->wait_time   = ((int32)timeout_ms > 0) ? (int32)ARKRTOS_MS_TO_TICK((uint32)timeout_ms) : -1;
     arkrtos_ready_del(arkrtos_current_task_id - 1);
     if(p_tsk->wait_time > 0)
@@ -3449,9 +3449,9 @@ int32 arkrtos_task_block_in_critical(uint32 timeout_ms)
         mdk_trace_arkrtos_obj_wait((uint16)(tr_obj13 & 0x3FFu), (uint8)(tr_obj13 >> 10));
     }
 
-    ARKRTOS_SWITCH_TASK();                /* ֻ���� PendSV pending���˿��жϻ����� */
-    ARKRTOS_ENABLE_IRQ();                 /* ���жϣ�PendSV ������ ISR ���Ѳ��л��ᷢ�� */
-    ARKRTOS_DISABLE_IRQ();                /* �ص�����������÷���ͬ���ٽ��� */
+    ARKRTOS_SWITCH_TASK();                /* 只是置 PendSV pending，此刻中断还关着 */
+    ARKRTOS_ENABLE_IRQ();                 /* 开中断：PendSV 切走与 ISR 唤醒才有机会发生 */
+    ARKRTOS_DISABLE_IRQ();                /* 回到本函数与调用方共同的临界区 */
 
     reason = p_tsk->wake_reason;
     if((tr_obj13 != 0u) && ((reason & ARKRTOS_WAKE_HANDOFF) == 0))
@@ -3486,8 +3486,8 @@ void arkrtos_task_delay_internal(uint32 us)
     arkrtos_port_delay_us(us);
 }
 
-/* ����������ʬ��������������ͬ������/��Ϣ�����еĵȴ��Ǽ��������й�ϵ��
- * �Դ�����-�ָ�������ٽ�������˿����������ٽ����ڵ��á� */
+/* 任务下线收尸：清理该任务在同步对象/消息队列中的等待登记与锁持有关系。
+ * 自带保存-恢复语义的临界区，因此可以在已有临界区内调用。 */
 static void arkrtos_task_release_resources_core(int32 task_id, int32 handover)
 {
     uint32 state;
@@ -3573,8 +3573,8 @@ void arkrtos_task_kill_internal(void)
     {
         ARKRTOS_LOGI("TASK", "task %d exits (self kill)",
                    (int)arkrtos_current_task_id);
-        /* ��ʬ���������Ļ���post/unlock ���һ���Ѿ����ڵȴ���������Ϊ
-         * READY���൱�ڴӾ�ջ������������������еĻ����������������� */
+        /* 收尸：不清理的话，post/unlock 会把一个已经不在等待的任务置为
+         * READY（相当于从旧栈“复活”它），而它持有的互斥锁会永久锁死。 */
         if(arkrtos_task_exit_is_handover(arkrtos_current_task_id) != 0)
         {
             arkrtos_task_release_resources_handover(arkrtos_current_task_id);
@@ -3603,14 +3603,14 @@ void arkrtos_task_kill_internal(void)
 #endif
 
 #if ARKRTOS_USE_MINIAPP
-    /* С������գ��������˳�����ζ������С���������������ǿ� RAM ���������ﻹ�سء�
-     * ��������֮ǰ���Ҵ˿������ѱ���Ϊ INVALID��halt_image �����ظ���ʬ�������ڻ���
-     * ���л�֮��û���κη��������ܣ�����ֻ�ڱ�������������﷢������ */
+    /* 小程序回收：主任务退出就意味着整个小程序结束，它借的那块 RAM 必须在这里还回池。
+     * 放在切走之前，且此刻自身已被置为 INVALID：halt_image 不会重复收尸它，而在还块
+     * 与切换之间没有任何分配者能跑（分配只在别的任务上下文里发生）。 */
     (void)arkrtos_mini_on_task_exit((uint32)arkrtos_current_task_id);
 #endif /* ARKRTOS_USE_MINIAPP */
 #if (ARKRTOS_USE_APPRUN == 1)
-    /* ֱ�ܻ��գ��������˳�����ζ����һ�����꣬�����Ĵ����뻹�سء�
-     * ��С����ͬλ��������֮ǰ���Ҵ˿������ѱ���Ϊ INVALID�� */
+    /* 直跑回收：主任务退出就意味着这一次跑完，借来的窗必须还回池。
+     * 与小程序同位：在切走之前，且此刻自身已被置为 INVALID。 */
     (void)arkrtos_apprun_on_task_exit((uint32)arkrtos_current_task_id);
 #endif /* ARKRTOS_USE_APPRUN */
 #if (ARKRTOS_USE_FLASHAPP == 1)
@@ -3638,7 +3638,7 @@ void arkrtos_task_kill_internal(void)
     }
 }
 
-/* ����״̬��ѯ��task_id �� 1 ��ʼ���Ƿ�����ŷ��� -1 */
+/* 任务状态查询：task_id 从 1 开始；非法任务号返回 -1 */
 int32 arkrtos_task_status_get_internal(int32 task_id)
 {
     if(task_id <= 0 || task_id > arkrtos_task_count)
@@ -3646,11 +3646,11 @@ int32 arkrtos_task_status_get_internal(int32 task_id)
     return (int32)arkrtos_task_table[task_id - 1].status;
 }
 
-/* ������ϻָ����ؽ�ջ֡����λ״̬�����µ��ȣ�
- * 相当于任务级“软复位”，避免故障后任务槽永久丢失 */
-/* ���������ָ����׶�1������ INVALID + recover_pending��
- * ������ջ֡�ؽ��Ƴٵ���һ�ε���ɨ�裨arkrtos_sched_next -> arkrtos_task_recover_pending����
- * ��ʱ��������ľ��ֳ��Ѿ������ٱ�д�� stack_ptr���ؽ��Ű�ȫ�� */
+/* 任务故障恢复：重建栈帧、复位状态后重新调度，
+ * 鐩稿綋浜庝换鍔＄骇鈥滆蒋澶嶄綅鈥濓紝閬垮厤鏁呴殰鍚庝换鍔℃Ы姘镐箙涓㈠け */
+/* 标记任务待恢复（阶段1）：置 INVALID + recover_pending。
+ * 真正的栈帧重建推迟到下一次调度扫描（arkrtos_sched_next -> arkrtos_task_recover_pending），
+ * 那时故障任务的旧现场已经不会再被写回 stack_ptr，重建才安全。 */
 static void arkrtos_task_recover_mark(int32 task_id)
 {
     arkrtos_task_t *p_task;
@@ -3662,23 +3662,23 @@ static void arkrtos_task_recover_mark(int32 task_id)
 
     p_task = &arkrtos_task_table[task_id - 1];
 
-    /* �����е�����ȴ��ǼǱ���һ��������������������������¿�ʼ��
-     * ������ȥ����/ժ�������µ��������������� */
+    /* 它持有的锁与等待登记必须一并清理：任务重启后会从入口重新开始，
+     * 不会再去解锁/摘除，留下的锁会永久锁死。 */
     arkrtos_task_release_resources(task_id);
 
     ARKRTOS_DISABLE_IRQ();
-    /* �������ȼ�����׼��λ������ʱ�����������̳�������
-     * ����ʬ�Ѱ��������еȴ���ϵ��ժ����������λ���ָ����������
-     * �������ĸ����ȼ�һֱ���С� */
-    /* �����Ȱ���ǰ���ȼ������Ӿ�����ժ����
-     * arkrtos_ready_del �õ��ǡ���ǰ priority����λͰ�����ȸ� priority
-     * �ͻ�ȥ�����Ͱ��ժ���������𻵡� */
+    /* 自身优先级按基准复位：故障时它可能正被继承提升，
+     * 而收尸已把它从所有等待关系里摘除，若不复位，恢复后它会带着
+     * 提升来的高优先级一直运行。 */
+    /* 必须先按当前优先级把它从就绪集摘出：
+     * arkrtos_ready_del 用的是「当前 priority」定位桶，若先改 priority
+     * 就会去错误的桶里摘，把链表拆坏。 */
     arkrtos_ready_del(task_id - 1);
     arkrtos_delay_disarm(task_id - 1);
     p_task->priority        = p_task->base_priority;
     if(p_task->recover_pending == 0u)
     {
-        arkrtos_recover_cnt++;            /* �ظ� mark ͬһ����ֻ��һ�� */
+        arkrtos_recover_cnt++;            /* 重复 mark 同一任务只计一次 */
     }
     p_task->recover_pending = 1;
     p_task->status          = ARKRTOS_TASK_INVALID;
@@ -3701,7 +3701,7 @@ int32 arkrtos_task_recover(int32 task_id)
     return 0;
 }
 
-/* �׶�2���������ָ������ڵ���ɨ���е��ã��������ֳ��ѱ�����ϣ��ؽ�ջ֡��ȫ�� */
+/* 阶段2：处理待恢复任务（在调度扫描中调用，旧任务现场已保存完毕，重建栈帧安全） */
 static void arkrtos_task_recover_pending(void)
 {
     int32 idx;
@@ -3709,7 +3709,7 @@ static void arkrtos_task_recover_pending(void)
 
     if(arkrtos_recover_cnt == 0u)
     {
-        return;                     /* ����������Ⱦ����������ɨ�� */
+        return;                     /* 绝大多数调度决策走这里，不扫表 */
     }
 
     for(idx = 0; idx < arkrtos_task_count; idx++)
@@ -3756,7 +3756,7 @@ void arkrtos_sched_activate_higher(uint8 ck_pri)
     #if (ARKRTOS_USE_SCHED_LOCK == 1)
     if(arkrtos_sched_lock_nest != 0u)
     {
-        return;                 /* ���������������Ӻ󵽽���ʱͳһ�л� */
+        return;                 /* 调度器已锁定，延后到解锁时统一切换 */
     }
     #endif
 
@@ -3776,9 +3776,9 @@ void arkrtos_sched_activate_higher(uint8 ck_pri)
 
 #if (ARKRTOS_USE_SCHED_LOCK == 1)
 /**
-* @brief ��ȡ�����������û����� SVC ���ã�
-* @details �ۼ�Ƕ�׼������ֹ�����л��������ر��жϡ�
-*          �ٽ����ڲ��õ��������ӿڣ��ᱻ���Բ���¼���ϣ���
+* @brief 获取调度器锁（用户任务经 SVC 调用）
+* @details 累加嵌套计数后禁止任务切换，但不关闭中断。
+*          临界区内不得调用阻塞接口（会被忽略并记录故障）。
 */
 void arkrtos_sched_lock_internal(void)
 {
@@ -3793,9 +3793,9 @@ void arkrtos_sched_lock_internal(void)
 }
 
 /**
-* @brief �ͷŵ�������
-* @return ʣ��Ƕ�ײ�����0 ��ʾ����ȫ������
-* @details ��������ʱ��������һ�������л������������ڼ䱻�Ƴٵĵ��ȡ�
+* @brief 释放调度器锁
+* @return 剩余嵌套层数（0 表示已完全解锁）
+* @details 计数归零时主动触发一次任务切换，补偿锁定期间被推迟的调度。
 */
 uint32 arkrtos_sched_unlock_internal(void)
 {
@@ -3812,15 +3812,15 @@ uint32 arkrtos_sched_unlock_internal(void)
 
     if(nest == 0u)
     {
-        ARKRTOS_SWITCH_TASK();        /* ���������ڼ䱻�Ƴٵ������л� */
+        ARKRTOS_SWITCH_TASK();        /* 补偿锁定期间被推迟的任务切换 */
     }
 
     return nest;
 }
 
 /**
-* @brief ��ѯ��������Ƕ�ײ���
-* @return ��ǰǶ�ײ�����0 ��ʾδ������
+* @brief 查询调度器锁嵌套层数
+* @return 当前嵌套层数（0 表示未锁定）
 */
 int32 arkrtos_sched_lock_count_internal(void)
 {
@@ -3830,20 +3830,20 @@ int32 arkrtos_sched_lock_count_internal(void)
 
 #if (ARKRTOS_USE_STACK_USAGE == 1)
 /**
-* @brief ��ѯ����ջʹ���������ֵ����
-* @param task_id ����ţ��� 1 ��ʼ��
-* @param out3    ������飺out3[0]=���ֽڣ�out3[1]=��ֵ�����ֽڣ�out3[2]=ʣ���ֽ�
-* @return 0=�ɹ���-1=�����Ƿ�
-* @details ͬʱʹ�������ֶβ�ȡ�ϴ�ֵ��
-*          1) ɨ�����ͼ���õ�����δ����������
-*          2) �������л���¼����ʷ���ջָ�롣
+* @brief 查询任务栈使用情况（峰值法）
+* @param task_id 任务号（从 1 开始）
+* @param out3    输出数组：out3[0]=总字节，out3[1]=峰值已用字节，out3[2]=剩余字节
+* @return 0=成功，-1=参数非法
+* @details 同时使用两种手段并取较大值：
+*          1) 扫描填充图案得到“从未触及”区域；
+*          2) 上下文切换记录的历史最低栈指针。
 */
 /*
- * ����汾��������������Դ�ֿ����������ʹ�á�
- * �ϳɺ�� used ȡ�����ɨ�衹�롸��� PSP���Ľϴ��ߣ�ֻ���ϳ�ֵ�ֲ�������
- * һ·�����߽磻����ջ�����������Ҫ��ջ����ݹ飩�롸ɨ��/��¼�����д���
- * ��������ȫ��ͬ�Ľ��ۣ����ܿ��¡�
- *   out4[0]=���ֽ�  out4[1]=�ϳ�����  out4[2]=ɨ������  out4[3]=PSP ����
+ * 分项版本：把两个读数来源分开报，供诊断使用。
+ * 合成后的 used 取「填充扫描」与「最低 PSP」的较大者，只看合成值分不清是哪
+ * 一路顶到边界；而「栈真的用满」（要加栈或减递归）与「扫描/记录本身有错」
+ * 是两个完全不同的结论，不能靠猜。
+ *   out4[0]=总字节  out4[1]=合成已用  out4[2]=扫描已用  out4[3]=PSP 已用
  */
 int32 arkrtos_task_stack_info_raw(int32 task_id, uint32 *out4)
 {
@@ -3867,7 +3867,7 @@ int32 arkrtos_task_stack_info_raw(int32 task_id, uint32 *out4)
     }
     words  = p_task->stack_size / 4u;
 
-    /* ��ջ�ף����������֣�����ɨ������δʹ�õ�ͼ���� */
+    /* 从栈底（跳过保护字）向上扫描连续未使用的图案区 */
     for(i = 1u; i < words; i++)
     {
         if(p_task->stack_bottom[i] != ARKRTOS_STACK_FILL_PATTERN)

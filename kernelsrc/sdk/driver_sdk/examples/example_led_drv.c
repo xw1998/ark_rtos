@@ -1,5 +1,5 @@
 /**
-* @brief Ark RTOS Driver SDK - Ê¾ÀýLEDÇý¶¯
+* @brief Ark RTOS Driver SDK - ç¤ºä¾‹LEDé©±åŠ¨
 */
 
 #include "arkrtos_driver_sdk.h"

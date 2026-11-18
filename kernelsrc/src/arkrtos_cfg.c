@@ -1,8 +1,8 @@
 /**
-* @brief Ark RTOS ÈÎÎñÅäÖÃ¼ÓÔØÄ£¿é
-* @details ¹ÜÀíÈÎÎñ±íºÍÈÎÎñÕ»³õÊ¼»¯¡£
-*          Õ»Ö¡¸ñÊ½ÓÉport²ãµÄ arkrtos_port_stack_init() ÊµÏÖ£¬
-*          ÄÚºË²»ÔÙÓ²±àÂëÈÎºÎ¼Ü¹¹ÌØ¶¨µÄ¼Ä´æÆ÷²¼¾Ö¡£
+* @brief Ark RTOS ä»»åŠ¡é…ç½®åŠ è½½æ¨¡å—
+* @details ç®¡ç†ä»»åŠ¡è¡¨å’Œä»»åŠ¡æ ˆåˆå§‹åŒ–ã€‚
+*          æ ˆå¸§æ ¼å¼ç”±portå±‚çš„ arkrtos_port_stack_init() å®ç°ï¼Œ
+*          å†…æ ¸ä¸å†ç¡¬ç¼–ç ä»»ä½•æ¶æ„ç‰¹å®šçš„å¯„å­˜å™¨å¸ƒå±€ã€‚
 * @author xw
 * @date 2026.05.03
 */
@@ -18,22 +18,22 @@
 arkrtos_task_t arkrtos_task_table[ARKRTOS_TASK_MAX_NUM];
 int32 arkrtos_task_count = 0;
 
-/* ÈÎÎñ±í RAM Ô¤ËãÊØ»¤£º°Ñ ARKRTOS_TASK_MAX_NUM µ÷µÃ¹ı´óÊ±Ö±½Ó±àÒë±¨´í£¬
- * ±ÜÃâ¾²Ì¬ TCB ±íÇÄÇÄ³ÔµôÄÚºË RAM¡£Ô¤Ëã¼û arkrtos_config.h µÄ
- * ARKRTOS_TASK_TABLE_RAM_MAX¡£ */
+/* ä»»åŠ¡è¡¨ RAM é¢„ç®—å®ˆæŠ¤ï¼šæŠŠ ARKRTOS_TASK_MAX_NUM è°ƒå¾—è¿‡å¤§æ—¶ç›´æ¥ç¼–è¯‘æŠ¥é”™ï¼Œ
+ * é¿å…é™æ€ TCB è¡¨æ‚„æ‚„åƒæ‰å†…æ ¸ RAMã€‚é¢„ç®—è§ arkrtos_config.h çš„
+ * ARKRTOS_TASK_TABLE_RAM_MAXã€‚ */
 typedef char arkrtos_task_table_ram_check[
     (sizeof(arkrtos_task_table) <= (ARKRTOS_TASK_TABLE_RAM_MAX)) ? 1 : -1];
 
 void arkrtos_cfg_load(void)
 {
     arkrtos_task_count = 0;
-    /* ¾ÍĞ÷¼¯ÓëÑÓÊ±Á´¹éÁã£º¾²Ì¬ TCB Êı×éÄ¬ÈÏÊÇ 0£¬¶ø 0 ÊÇºÏ·¨ÈÎÎñÏÂ±ê£¬
-     * ²»ÄÜµ±¡°²»ÔÚÁ´ÉÏ¡±ÓÃ£¬ËùÒÔ±ØĞëÏÔÊ½ÖÃ³É ARKRTOS_TASK_NIL¡£ */
+    /* å°±ç»ªé›†ä¸å»¶æ—¶é“¾å½’é›¶ï¼šé™æ€ TCB æ•°ç»„é»˜è®¤æ˜¯ 0ï¼Œè€Œ 0 æ˜¯åˆæ³•ä»»åŠ¡ä¸‹æ ‡ï¼Œ
+     * ä¸èƒ½å½“â€œä¸åœ¨é“¾ä¸Šâ€ç”¨ï¼Œæ‰€ä»¥å¿…é¡»æ˜¾å¼ç½®æˆ ARKRTOS_TASK_NILã€‚ */
     arkrtos_ready_reset();
 }
 
-/* ×¢²áÈÎÎñµÄÍ¨ÓÃ¸¨Öú£ºÌî³ä TCB È±Ê¡×Ö¶Î¡¢³õÊ¼»¯Õ»Ö¡²¢¼ÓÈëÈÎÎñ±í¡£
- * ¹©Ó¦ÓÃ main ÓëÄÚºËÄÚÖÃÈÎÎñ£¨¶¨Ê±Æ÷·şÎñ£©¹²ÓÃ¡£·µ»Ø 1 ÆğÊ¼ÈÎÎñºÅ£¬Ê§°Ü·µ»Ø -1¡£ */
+/* æ³¨å†Œä»»åŠ¡çš„é€šç”¨è¾…åŠ©ï¼šå¡«å…… TCB ç¼ºçœå­—æ®µã€åˆå§‹åŒ–æ ˆå¸§å¹¶åŠ å…¥ä»»åŠ¡è¡¨ã€‚
+ * ä¾›åº”ç”¨ main ä¸å†…æ ¸å†…ç½®ä»»åŠ¡ï¼ˆå®šæ—¶å™¨æœåŠ¡ï¼‰å…±ç”¨ã€‚è¿”å› 1 èµ·å§‹ä»»åŠ¡å·ï¼Œå¤±è´¥è¿”å› -1ã€‚ */
 int32 arkrtos_task_register(void (*entry)(void), uint32 *stack_bottom, uint32 stack_size,
                           uint8 priority, uint32 period_ms)
 {
@@ -89,12 +89,12 @@ int32 arkrtos_task_register(void (*entry)(void), uint32 *stack_bottom, uint32 st
     p_task->rom_size    = 0;
     p_task->period      = ARKRTOS_MS_TO_TICK(period_ms);
     p_task->priority      = priority;
-    p_task->base_priority = priority;   /* »ù×¼ÓÅÏÈ¼¶£º³·ÏúÓÅÏÈ¼¶¼Ì³ĞÊ±µÄ»Ö¸´ÒÀ¾İ */
+    p_task->base_priority = priority;   /* åŸºå‡†ä¼˜å…ˆçº§ï¼šæ’¤é”€ä¼˜å…ˆçº§ç»§æ‰¿æ—¶çš„æ¢å¤ä¾æ® */
     p_task->shm_attri   = 0;
     #if (ARKRTOS_USE_STACK_GUARD == 1)
-    /* ÉÏÃæÄÇ¾ä stack_bottom[0] ÒÑ¾­°Ñ±£»¤×ÖĞ´½øÈ¥ÁË£¬ÕâÀïÖ»ÊÇµÇ¼Ç
-     * ¡¸Õâ¸öÈÎÎñµÄÕ»µ×ÓĞ×Ö¿É²é¡¹¡£Ã»²¼·ÀµÄÈÎÎñ£¨Íâ²¿Ö±½ÓÌî TCB µÄ£©
-     * ²»»á±»ÎóÅĞ³ÉÒç³ö¡£ */
+    /* ä¸Šé¢é‚£å¥ stack_bottom[0] å·²ç»æŠŠä¿æŠ¤å­—å†™è¿›å»äº†ï¼Œè¿™é‡Œåªæ˜¯ç™»è®°
+     * ã€Œè¿™ä¸ªä»»åŠ¡çš„æ ˆåº•æœ‰å­—å¯æŸ¥ã€ã€‚æ²¡å¸ƒé˜²çš„ä»»åŠ¡ï¼ˆå¤–éƒ¨ç›´æ¥å¡« TCB çš„ï¼‰
+     * ä¸ä¼šè¢«è¯¯åˆ¤æˆæº¢å‡ºã€‚ */
     p_task->stack_guard_armed    = 1u;
     p_task->stack_guard_reported = 0u;
     #endif
@@ -121,8 +121,8 @@ int32 arkrtos_task_register(void (*entry)(void), uint32 *stack_bottom, uint32 st
 
     arkrtos_task_stack_init(p_task, entry, stack_bottom, stack_size);
 
-    /* ĞÂÈÎÎñÖ±½Ó¼ÓÈë¾ÍĞ÷¼¯£ºÎ»Í¼/Á´±íÔÚÕâÒ»²½Í¬²½Íê³É£¬
-     * ²»ĞèÒªÔÙ×÷·ÏÈÎºÎ»º´æ¡£ */
+    /* æ–°ä»»åŠ¡ç›´æ¥åŠ å…¥å°±ç»ªé›†ï¼šä½å›¾/é“¾è¡¨åœ¨è¿™ä¸€æ­¥åŒæ­¥å®Œæˆï¼Œ
+     * ä¸éœ€è¦å†ä½œåºŸä»»ä½•ç¼“å­˜ã€‚ */
     arkrtos_ready_add(free_idx);
 
     return (free_idx + 1);
@@ -130,11 +130,11 @@ int32 arkrtos_task_register(void (*entry)(void), uint32 *stack_bottom, uint32 st
 
 #if (ARKRTOS_USE_STACK_USAGE == 1)
 /**
-* @brief ÓÃÌî³äÍ¼°¸¸²¸ÇÕû¶ÎÈÎÎñÕ»£¨Ìø¹ıÏÂ±ê 0 µÄÕ»µ×±£»¤×Ö£©
-* @param stack_bottom Õ»µ×µØÖ·
-* @param stack_size   Õ»´óĞ¡£¨×Ö½Ú£©
-* @details ÈÎÎñÔËĞĞ¹ı³ÌÖĞ»á²»¶Ï¸²¸Ç¸ÃÍ¼°¸£¬²éÑ¯Õ»ÓÃÁ¿Ê±É¨ÃèÈÔ±£³ÖÍ¼°¸µÄ
-*          Á¬ĞøÇøÓò¼´¿ÉµÃµ½¡°´ÓÎ´Ê¹ÓÃ¹ı¡±µÄÕ»¿Õ¼ä£¬»»Ëãºó¼´Îª·åÖµÓÃÁ¿¡£
+* @brief ç”¨å¡«å……å›¾æ¡ˆè¦†ç›–æ•´æ®µä»»åŠ¡æ ˆï¼ˆè·³è¿‡ä¸‹æ ‡ 0 çš„æ ˆåº•ä¿æŠ¤å­—ï¼‰
+* @param stack_bottom æ ˆåº•åœ°å€
+* @param stack_size   æ ˆå¤§å°ï¼ˆå­—èŠ‚ï¼‰
+* @details ä»»åŠ¡è¿è¡Œè¿‡ç¨‹ä¸­ä¼šä¸æ–­è¦†ç›–è¯¥å›¾æ¡ˆï¼ŒæŸ¥è¯¢æ ˆç”¨é‡æ—¶æ‰«æä»ä¿æŒå›¾æ¡ˆçš„
+*          è¿ç»­åŒºåŸŸå³å¯å¾—åˆ°â€œä»æœªä½¿ç”¨è¿‡â€çš„æ ˆç©ºé—´ï¼Œæ¢ç®—åå³ä¸ºå³°å€¼ç”¨é‡ã€‚
 */
 void arkrtos_task_stack_fill(uint32 *stack_bottom, uint32 stack_size)
 {
@@ -157,7 +157,7 @@ void arkrtos_task_stack_init(arkrtos_task_t *p_task, void (*entry)(void),
     stack_top &= ~0x7u;
 
     #if (ARKRTOS_USE_STACK_USAGE == 1)
-    /* ÏÈÌî³äÕû¶ÎÕ»£¬ÔÙ½¨Á¢³õÊ¼Õ»Ö¡£¬±ãÓÚºóĞøÍ³¼Æ·åÖµÕ»ÓÃÁ¿ */
+    /* å…ˆå¡«å……æ•´æ®µæ ˆï¼Œå†å»ºç«‹åˆå§‹æ ˆå¸§ï¼Œä¾¿äºåç»­ç»Ÿè®¡å³°å€¼æ ˆç”¨é‡ */
     arkrtos_task_stack_fill(stack_bottom, stack_size);
     #endif
 
@@ -165,7 +165,7 @@ void arkrtos_task_stack_init(arkrtos_task_t *p_task, void (*entry)(void),
     p_task->stack_top    = stack_top;
 
     #if (ARKRTOS_USE_STACK_USAGE == 1)
-    p_task->stack_peak_low = stack_top;     /* ·åÖµÍ³¼Æ»ù×¼£º³õÊ¼Î´Ê¹ÓÃ */
+    p_task->stack_peak_low = stack_top;     /* å³°å€¼ç»Ÿè®¡åŸºå‡†ï¼šåˆå§‹æœªä½¿ç”¨ */
     #endif
 
 

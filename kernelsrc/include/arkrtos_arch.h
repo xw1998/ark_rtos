@@ -1,18 +1,18 @@
 /**
-* @brief Ark RTOS �ܹ������ - �ܹ��� / ��������������������
-* @details ���ļ����ں������ָ�֮��ĵ�һ�����
-*          1) �á��ܹ��� + ������ġ���������Ŀ�� CPU��ȡ����һ ARKRTOS_CPU_ARCH ��ֵ
-*          2) �ɺ��������������꣨FPU / MPU / ��Ȩ�� / SVC ��λ���ȣ���
-*             �ں˾ݴ˾������ܿ��������ݽṹ������ֱ���ж�оƬ�ͺ�
-*          3) ����ܹ���صĹ����������ͣ�MPU �����ģ�
+* @brief Ark RTOS 架构抽象层 - 架构族 / 核心描述与派生能力宏
+* @details 本文件是内核与具体指令集之间的第一层抽象：
+*          1) 用「架构族 + 具体核心」两级描述目标 CPU，取代单一 ARKRTOS_CPU_ARCH 数值
+*          2) 由核心派生出能力宏（FPU / MPU / 特权级 / SVC 号位宽等），
+*             内核据此决定功能开关与数据结构，而非直接判断芯片型号
+*          3) 定义架构相关的公共数据类型（MPU 上下文）
 *
-*          �������ܹ��Ĳ��衿
-*          1. �ڱ��ļ����Ӽܹ�������ĺ꣬����ȫ����������֧
-*          2. �� kernelsrc/port/<��>/<����>/ ��ʵ�� arkrtos_hal.h ������ȫ���ӿ�
-*          3. �������л���ࡢϵͳ���ú���ȡ��MPU д���������ܹ�ǿ��ص�
-*          ��� kernelsrc/port/README.md
+*          【新增架构的步骤】
+*          1. 在本文件增加架构族与核心宏，并补全能力派生分支
+*          2. 在 kernelsrc/port/<族>/<核心>/ 下实现 arkrtos_hal.h 声明的全部接口
+*          3. 上下文切换汇编、系统调用号提取、MPU 写入是三个架构强相关点
+*          详见 kernelsrc/port/README.md
 *
-* @note ���ļ����ð����κ�оƬͷ�ļ�������ֱ�Ӳ����Ĵ�����
+* @note 本文件不得包含任何芯片头文件，不得直接操作寄存器。
 */
 
 #ifndef __ARKRTOS_ARCH_H__
@@ -21,32 +21,32 @@
 #include "arkrtos_types.h"
 
 /* ============================================================
- * �ܹ���
- * @brief ָ��壬����ϵͳ���û��ơ���Ȩģ�͡��ڴ汣����������̬
+ * 架构族
+ * @brief 指令集族，决定系统调用机制、特权模型、内存保护的总体形态
  * ============================================================ */
-#define ARKRTOS_ARCH_FAMILY_ARM        (1)    /* ARM Cortex-M ϵ��          */
-#define ARKRTOS_ARCH_FAMILY_RISCV      (2)    /* RISC-V��RV32/RV64��        */
-#define ARKRTOS_ARCH_FAMILY_LOONGARCH  (3)    /* ��о LoongArch��LA32/LA64��*/
+#define ARKRTOS_ARCH_FAMILY_ARM        (1)    /* ARM Cortex-M 系列          */
+#define ARKRTOS_ARCH_FAMILY_RISCV      (2)    /* RISC-V（RV32/RV64）        */
+#define ARKRTOS_ARCH_FAMILY_LOONGARCH  (3)    /* 龙芯 LoongArch（LA32/LA64）*/
 
 /* ============================================================
- * �������
- * @brief ������򣺸�λ�ֽ�Ϊ�ܹ��壬��λ��ʶ�������
+ * 具体核心
+ * @brief 编码规则：高位字节为架构族，低位标识具体核心
  * ============================================================ */
 #define ARKRTOS_CPU_CORE_CORTEX_M3     (0x0101)
 #define ARKRTOS_CPU_CORE_CORTEX_M4     (0x0102)
 #define ARKRTOS_CPU_CORE_CORTEX_M7     (0x0103)
 
-#define ARKRTOS_CPU_CORE_RV32IMAC      (0x0201)   /* 32 λ RISC-V������/�û�ģʽ */
-#define ARKRTOS_CPU_CORE_RV64GC        (0x0202)   /* 64 λ RISC-V                 */
+#define ARKRTOS_CPU_CORE_RV32IMAC      (0x0201)   /* 32 位 RISC-V，机器/用户模式 */
+#define ARKRTOS_CPU_CORE_RV64GC        (0x0202)   /* 64 位 RISC-V                 */
 
-#define ARKRTOS_CPU_CORE_LA32          (0x0301)   /* 32 λ LoongArch              */
-#define ARKRTOS_CPU_CORE_LA64          (0x0302)   /* 64 λ LoongArch              */
+#define ARKRTOS_CPU_CORE_LA32          (0x0301)   /* 32 位 LoongArch              */
+#define ARKRTOS_CPU_CORE_LA64          (0x0302)   /* 64 位 LoongArch              */
 
 /* ============================================================
- * ���ݾɰ����ã�ARKRTOS_CPU_ARCH ȡֵ
- * @brief ��ʷ������弶����ʹ�� 0/1/2 ѡ�� Cortex-M ���ģ�
- *        �˴�����ԭ���壬ӳ�䵽����ĺ��ı��롣
- *        �¹��̿�ֱ�Ӷ��� ARKRTOS_ARCH_CORE ����ѡ��
+ * 兼容旧版配置：ARKRTOS_CPU_ARCH 取值
+ * @brief 历史工程与板级配置使用 0/1/2 选择 Cortex-M 核心，
+ *        此处保留原语义，映射到上面的核心编码。
+ *        新工程可直接定义 ARKRTOS_ARCH_CORE 进行选择。
  * ============================================================ */
 #define ARKRTOS_ARCH_CORTEX_M3         (0)
 #define ARKRTOS_ARCH_CORTEX_M4         (1)
@@ -57,8 +57,8 @@
 #endif
 
 /* ============================================================
- * Ŀ������Ƶ�
- * @brief ����ʹ�� ARKRTOS_ARCH_CORE��δ����ʱ���ɰ� ARKRTOS_CPU_ARCH �Ƶ�
+ * 目标核心推导
+ * @brief 优先使用 ARKRTOS_ARCH_CORE；未定义时按旧版 ARKRTOS_CPU_ARCH 推导
  * ============================================================ */
 #ifndef ARKRTOS_ARCH_CORE
 #if (ARKRTOS_CPU_ARCH == ARKRTOS_ARCH_CORTEX_M3)
@@ -68,12 +68,12 @@
 #elif (ARKRTOS_CPU_ARCH == ARKRTOS_ARCH_CORTEX_M7)
 #define ARKRTOS_ARCH_CORE              ARKRTOS_CPU_CORE_CORTEX_M7
 #else
-#error "ARKRTOS_CPU_ARCH ȡֵ�Ƿ�����֧�� 0/1/2��������ֱ�Ӷ��� ARKRTOS_ARCH_CORE"
+#error "ARKRTOS_CPU_ARCH 取值非法（仅支持 0/1/2），或请直接定义 ARKRTOS_ARCH_CORE"
 #endif
 #endif
 
 /* ============================================================
- * �ܹ����Ƶ�
+ * 架构族推导
  * ============================================================ */
 #define ARKRTOS_ARCH_FAMILY_OF(core)   ((core) >> 8)
 
@@ -95,65 +95,65 @@
 #define ARKRTOS_ARCH_NAME              "loongarch"
 #define ARKRTOS_ARCH_LITTLE_ENDIAN     (1)
 #else
-#error "δ֪�ܹ��壬���� arkrtos_arch.h �в���"
+#error "未知架构族，请在 arkrtos_arch.h 中补充"
 #endif
 
 /* ============================================================
- * ��������
- * @brief �ں�ͨ�����к�������ܿ��ص�Ĭ��ֵ��
- *        �弶�����Կ���ʽ���ǣ�#undef �����¶��壩��
+ * 能力派生
+ * @brief 内核通过下列宏决定功能开关的默认值，
+ *        板级配置仍可显式覆盖（#undef 后重新定义）。
  * ============================================================ */
 #if (ARKRTOS_ARCH_CORE == ARKRTOS_CPU_CORE_CORTEX_M3)
 #define ARKRTOS_ARCH_HAS_FPU           (0)
 #define ARKRTOS_ARCH_HAS_MPU           (1)
 #define ARKRTOS_ARCH_HAS_PRIV          (1)
-#define ARKRTOS_ARCH_HAS_PAGING        (0)     /* ARMv7-M ��ҳ���������� MPU �ṩ */
-#define ARKRTOS_ARCH_HAS_PAGING_HW     (0)     /* Ӳ��������ARMv7-M �� TLB/ҳ�� */
-#define ARKRTOS_ARCH_SVC_NUM_BITS      (8)     /* SVC ָ��Я�� 8 λ������ */
+#define ARKRTOS_ARCH_HAS_PAGING        (0)     /* ARMv7-M 无页表，隔离由 MPU 提供 */
+#define ARKRTOS_ARCH_HAS_PAGING_HW     (0)     /* 硬件能力：ARMv7-M 无 TLB/页表 */
+#define ARKRTOS_ARCH_SVC_NUM_BITS      (8)     /* SVC 指令携带 8 位立即数 */
 #elif (ARKRTOS_ARCH_CORE == ARKRTOS_CPU_CORE_CORTEX_M4)
 #define ARKRTOS_ARCH_HAS_FPU           (1)
 #define ARKRTOS_ARCH_HAS_MPU           (1)
 #define ARKRTOS_ARCH_HAS_PRIV          (1)
-#define ARKRTOS_ARCH_HAS_PAGING        (0)     /* ARMv7-M ��ҳ���������� MPU �ṩ */
-#define ARKRTOS_ARCH_HAS_PAGING_HW     (0)     /* Ӳ��������ARMv7-M �� TLB/ҳ�� */
+#define ARKRTOS_ARCH_HAS_PAGING        (0)     /* ARMv7-M 无页表，隔离由 MPU 提供 */
+#define ARKRTOS_ARCH_HAS_PAGING_HW     (0)     /* 硬件能力：ARMv7-M 无 TLB/页表 */
 #define ARKRTOS_ARCH_SVC_NUM_BITS      (8)
 #elif (ARKRTOS_ARCH_CORE == ARKRTOS_CPU_CORE_CORTEX_M7)
 #define ARKRTOS_ARCH_HAS_FPU           (1)
 #define ARKRTOS_ARCH_HAS_MPU           (1)
 #define ARKRTOS_ARCH_HAS_PRIV          (1)
-#define ARKRTOS_ARCH_HAS_PAGING        (0)     /* ARMv7-M ��ҳ���������� MPU �ṩ */
-#define ARKRTOS_ARCH_HAS_PAGING_HW     (0)     /* Ӳ��������ARMv7-M �� TLB/ҳ�� */
+#define ARKRTOS_ARCH_HAS_PAGING        (0)     /* ARMv7-M 无页表，隔离由 MPU 提供 */
+#define ARKRTOS_ARCH_HAS_PAGING_HW     (0)     /* 硬件能力：ARMv7-M 无 TLB/页表 */
 #define ARKRTOS_ARCH_SVC_NUM_BITS      (8)
 #elif (ARKRTOS_ARCH_CORE == ARKRTOS_CPU_CORE_RV32IMAC)
 #define ARKRTOS_ARCH_HAS_FPU           (0)
-#define ARKRTOS_ARCH_HAS_MPU           (1)     /* �� PMP �ṩ�����ڴ汣�� */
+#define ARKRTOS_ARCH_HAS_MPU           (1)     /* 由 PMP 提供物理内存保护 */
 #define ARKRTOS_ARCH_HAS_PRIV          (1)
-#define ARKRTOS_ARCH_HAS_PAGING        (0)     /* �� port ���÷�ҳ�������� PMP �����ṩ */
-#define ARKRTOS_ARCH_HAS_PAGING_HW     (0)     /* RV32IMAC �� MCU ������ MMU */
-#define ARKRTOS_ARCH_SVC_NUM_BITS      (-1)    /* ecall �������������ɼĴ������� */
+#define ARKRTOS_ARCH_HAS_PAGING        (0)     /* 本 port 不用分页，隔离由 PMP 窗口提供 */
+#define ARKRTOS_ARCH_HAS_PAGING_HW     (0)     /* RV32IMAC 属 MCU 档，无 MMU */
+#define ARKRTOS_ARCH_SVC_NUM_BITS      (-1)    /* ecall 无立即数，号由寄存器传递 */
 #elif (ARKRTOS_ARCH_CORE == ARKRTOS_CPU_CORE_RV64GC)
 #define ARKRTOS_ARCH_HAS_FPU           (1)
 #define ARKRTOS_ARCH_HAS_MPU           (1)
 #define ARKRTOS_ARCH_HAS_PRIV          (1)
-#define ARKRTOS_ARCH_HAS_PAGING        (0)     /* �� port ��δ���÷�ҳ���Ǽ�ΪǷ�ˣ� */
-#define ARKRTOS_ARCH_HAS_PAGING_HW     (1)     /* RV64GC ���� Sv39/Sv48��MMU ��Ӳ����ʵ */
+#define ARKRTOS_ARCH_HAS_PAGING        (0)     /* 本 port 尚未启用分页（登记为欠账） */
+#define ARKRTOS_ARCH_HAS_PAGING_HW     (1)     /* RV64GC 标配 Sv39/Sv48：MMU 是硬件事实 */
 #define ARKRTOS_ARCH_SVC_NUM_BITS      (-1)
 #elif (ARKRTOS_ARCH_CORE == ARKRTOS_CPU_CORE_LA32)
 #define ARKRTOS_ARCH_HAS_FPU           (0)
-#define ARKRTOS_ARCH_HAS_MPU           (1)     /* ��ҳ�� / ��ַ�����ṩ���� */
+#define ARKRTOS_ARCH_HAS_MPU           (1)     /* 由页表 / 地址窗口提供隔离 */
 #define ARKRTOS_ARCH_HAS_PRIV          (1)
-#define ARKRTOS_ARCH_HAS_PAGING        (1)     /* LoongArch �Դ� TLB/ҳ�������뿿��ҳ + PLV */
+#define ARKRTOS_ARCH_HAS_PAGING        (1)     /* LoongArch 自带 TLB/页表，隔离靠分页 + PLV */
 #define ARKRTOS_ARCH_HAS_PAGING_HW     (1)
-#define ARKRTOS_ARCH_SVC_NUM_BITS      (15)    /* syscall ָ��Я�� 15 λ code */
+#define ARKRTOS_ARCH_SVC_NUM_BITS      (15)    /* syscall 指令携带 15 位 code */
 #elif (ARKRTOS_ARCH_CORE == ARKRTOS_CPU_CORE_LA64)
 #define ARKRTOS_ARCH_HAS_FPU           (1)
 #define ARKRTOS_ARCH_HAS_MPU           (1)
 #define ARKRTOS_ARCH_HAS_PRIV          (1)
-#define ARKRTOS_ARCH_HAS_PAGING        (1)     /* LoongArch �Դ� TLB/ҳ�������뿿��ҳ + PLV */
+#define ARKRTOS_ARCH_HAS_PAGING        (1)     /* LoongArch 自带 TLB/页表，隔离靠分页 + PLV */
 #define ARKRTOS_ARCH_HAS_PAGING_HW     (1)
 #define ARKRTOS_ARCH_SVC_NUM_BITS      (15)
 #else
-#error "δ֪ CPU ���ģ����� arkrtos_arch.h �в�����������"
+#error "未知 CPU 核心，请在 arkrtos_arch.h 中补充能力派生"
 #endif
 
 /* ARKRTOS_ARCH_HAS_PAGING_HW is the hardware fact: does this core have a
@@ -163,16 +163,16 @@
  * ARKRTOS_ARCH_HAS_PAGING keeps its historical meaning for existing code.
  */
 
-/* ϵͳ���ò����������ޣ�a0~a3 / r0~r3�����ں˰���Լ����ȡ */
+/* 系统调用参数个数上限（a0~a3 / r0~r3），内核按此约定存取 */
 #define ARKRTOS_ARCH_SVC_ARG_MAX       (4)
 
 /* ============================================================
- * MPU �ڴ汣�������������ܹ��޹ص�������������
- * @brief �ں� TCB �а����񱣴�һ�ݣ������л�ʱ�� port ��д��Ӳ����
- *        ��ͬ�ܹ�ֻ��Լ��������Ĵ��������壺
- *        - region_base�������ַ / ��ַ�Ĵ�����ARM: RBAR��RISC-V: pmpaddr��
- *        - region_attr���������� / ���üĴ�����ARM: RASR��RISC-V: pmpcfg��
- *        ��������� ARKRTOS_MPU_REGION_MAX �������ɱ��弶���ø��ǡ�
+ * MPU 内存保护区域描述（架构无关的上下文容器）
+ * @brief 内核 TCB 中按任务保存一份，任务切换时由 port 层写回硬件。
+ *        不同架构只需约定这两组寄存器的语义：
+ *        - region_base：区域基址 / 地址寄存器（ARM: RBAR，RISC-V: pmpaddr）
+ *        - region_attr：区域属性 / 配置寄存器（ARM: RASR，RISC-V: pmpcfg）
+ *        查表数量由 ARKRTOS_MPU_REGION_MAX 决定，可被板级配置覆盖。
  * ============================================================ */
 #ifndef ARKRTOS_MPU_REGION_MAX
 #define ARKRTOS_MPU_REGION_MAX         (8)

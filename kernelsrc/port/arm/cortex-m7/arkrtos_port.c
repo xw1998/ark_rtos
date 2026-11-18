@@ -1,9 +1,9 @@
 /**
-* @brief Ark RTOS Cortex-M7 ÒÆÖ²²ãÊµÏÖ
-* @details ÊµÏÖ arkrtos_hal.h ÖĞÉùÃ÷µÄËùÓĞÓ²¼ş³éÏó½Ó¿Ú£¬°üÀ¨£º
-*          CPU ¿ØÖÆ¡¢ÖĞ¶Ï¿ª¹Ø¡¢¼Ä´æÆ÷·ÃÎÊ¡¢ÈÎÎñÕ»Ö¡³õÊ¼»¯¡¢
-*          ÏµÍ³Ê±ÖÓÓëÎ¢ÃëÑÓÊ±¡¢MPU ÅäÖÃµÈ¡£
-*          ½öÒÀÀµ CMSIS ÄÚºËÍ·ÎÄ¼ş£¬²»ÒÀÀµÈÎºÎĞ¾Æ¬³§ÉÌµÄ HAL ¿â¡£
+* @brief Ark RTOS Cortex-M7 ç§»æ¤å±‚å®ç°
+* @details å®ç° arkrtos_hal.h ä¸­å£°æ˜çš„æ‰€æœ‰ç¡¬ä»¶æŠ½è±¡æ¥å£ï¼ŒåŒ…æ‹¬ï¼š
+*          CPU æ§åˆ¶ã€ä¸­æ–­å¼€å…³ã€å¯„å­˜å™¨è®¿é—®ã€ä»»åŠ¡æ ˆå¸§åˆå§‹åŒ–ã€
+*          ç³»ç»Ÿæ—¶é’Ÿä¸å¾®ç§’å»¶æ—¶ã€MPU é…ç½®ç­‰ã€‚
+*          ä»…ä¾èµ– CMSIS å†…æ ¸å¤´æ–‡ä»¶ï¼Œä¸ä¾èµ–ä»»ä½•èŠ¯ç‰‡å‚å•†çš„ HAL åº“ã€‚
 * @author xw
 * @date 2026.05.03
 */
@@ -21,7 +21,7 @@
 #endif
 
 /* ============================================================
- * CPU ¿ØÖÆ
+ * CPU æ§åˆ¶
  * ============================================================ */
 void arkrtos_port_wfi(void)  { __WFI(); }
 void arkrtos_port_wfe(void)  { __WFE(); }
@@ -31,19 +31,19 @@ void arkrtos_port_dsb(void)  { __DSB(); }
 void arkrtos_port_dmb(void)  { __DMB(); }
 
 /* ============================================================
- * Ô­×Ó²Ù×÷Óë¶àºËÖ§³Ö£¨×ÔĞıËøµ×²ãÔ­Óï£©
- * @brief Cortex-M3/M4/M7 Ê¹ÓÃ LDREX/STREX ¶ÀÕ¼·ÃÎÊÊµÏÖÔ­×Ó CAS¡£
- *        µ¥ºËÏµÍ³ CPU ID ºãÎª 0£»×ÔĞıÌáÊ¾ÓÃ NOP ½µµÍ×ÜÏßÑ¹Á¦¡£
- *        ÒÆÖ²µ½ RISC-V / LoongArch Ê±£¬ÇëÓÃ AMO / LR-SC / LL-SC
- *        Ö¸ÁîÖØĞ´±¾×é½Ó¿Ú£¬ÄÚºËÓë×ÔĞıËøÊµÏÖÎŞĞèÈÎºÎ¸Ä¶¯¡£
+ * åŸå­æ“ä½œä¸å¤šæ ¸æ”¯æŒï¼ˆè‡ªæ—‹é”åº•å±‚åŸè¯­ï¼‰
+ * @brief Cortex-M3/M4/M7 ä½¿ç”¨ LDREX/STREX ç‹¬å è®¿é—®å®ç°åŸå­ CASã€‚
+ *        å•æ ¸ç³»ç»Ÿ CPU ID æ’ä¸º 0ï¼›è‡ªæ—‹æç¤ºç”¨ NOP é™ä½æ€»çº¿å‹åŠ›ã€‚
+ *        ç§»æ¤åˆ° RISC-V / LoongArch æ—¶ï¼Œè¯·ç”¨ AMO / LR-SC / LL-SC
+ *        æŒ‡ä»¤é‡å†™æœ¬ç»„æ¥å£ï¼Œå†…æ ¸ä¸è‡ªæ—‹é”å®ç°æ— éœ€ä»»ä½•æ”¹åŠ¨ã€‚
  * ============================================================ */
 
 /**
-* @brief ±È½Ï²¢½»»»£¨Ô­×Ó²Ù×÷£©
-* @param p_addr    Ä¿±êµØÖ·£¨4 ×Ö½Ú¶ÔÆë£©
-* @param expect    ÆÚÍûÖµ
-* @param new_value ÆÚÍû³ÉÁ¢Ê±Ğ´ÈëµÄĞÂÖµ
-* @return 1=³É¹¦£¬0=µ±Ç°Öµ²»ÊÇ expect£¨Î´ĞŞ¸Ä£©
+* @brief æ¯”è¾ƒå¹¶äº¤æ¢ï¼ˆåŸå­æ“ä½œï¼‰
+* @param p_addr    ç›®æ ‡åœ°å€ï¼ˆ4 å­—èŠ‚å¯¹é½ï¼‰
+* @param expect    æœŸæœ›å€¼
+* @param new_value æœŸæœ›æˆç«‹æ—¶å†™å…¥çš„æ–°å€¼
+* @return 1=æˆåŠŸï¼Œ0=å½“å‰å€¼ä¸æ˜¯ expectï¼ˆæœªä¿®æ”¹ï¼‰
 */
 uint32 arkrtos_port_atomic_cas(volatile uint32 *p_addr, uint32 expect, uint32 new_value)
 {
@@ -63,8 +63,8 @@ uint32 arkrtos_port_atomic_cas(volatile uint32 *p_addr, uint32 expect, uint32 ne
 }
 
 /**
-* @brief »ñÈ¡µ±Ç° CPU ±àºÅ
-* @return µ¥ºË MCU ¹Ì¶¨·µ»Ø 0£¬¶àºËÒÆÖ²Ê±·µ»ØÓ²¼şºËºÅ
+* @brief è·å–å½“å‰ CPU ç¼–å·
+* @return å•æ ¸ MCU å›ºå®šè¿”å› 0ï¼Œå¤šæ ¸ç§»æ¤æ—¶è¿”å›ç¡¬ä»¶æ ¸å·
 */
 uint32 arkrtos_port_cpu_id(void)
 {
@@ -72,8 +72,8 @@ uint32 arkrtos_port_cpu_id(void)
 }
 
 /**
-* @brief ×ÔĞıµÈ´ıÌáÊ¾
-* @note µ¥ºËÎŞ×ÜÏßÕùÓÃ£¬ÓÃ NOP ¼´¿É£»¶àºË¿É¸ÄÎª __WFE() ½µµÍ¹¦ºÄÓëÕùÓÃ¡£
+* @brief è‡ªæ—‹ç­‰å¾…æç¤º
+* @note å•æ ¸æ— æ€»çº¿äº‰ç”¨ï¼Œç”¨ NOP å³å¯ï¼›å¤šæ ¸å¯æ”¹ä¸º __WFE() é™ä½åŠŸè€—ä¸äº‰ç”¨ã€‚
 */
 void arkrtos_port_spin_hint(void)
 {
@@ -104,7 +104,7 @@ int32 arkrtos_port_send_ipi(uint32 cpu)
 
 
 /* ============================================================
- * ÖĞ¶Ï¿ª¹Ø
+ * ä¸­æ–­å¼€å…³
  * ============================================================ */
 uint8 arkrtos_port_in_isr(void)
 {
@@ -113,12 +113,12 @@ uint8 arkrtos_port_in_isr(void)
 
 uint32 arkrtos_port_syscall_num(void *p_exc_ctx)
 {
-    /* Cortex-M: SVC Ö¸Áî´ø 8 Î»Á¢¼´Êı×÷ÎªÏµÍ³µ÷ÓÃºÅ£¬
-     * Î»ÓÚÓ²¼şÑ¹Õ»µÄÕ»Ö¡·µ»ØµØÖ· PC Ö®Ç° 1 ×Ö½Ú¡£
-     * ¶ÔÓ¦ ARKRTOS_ARCH_SVC_NUM_BITS = 8¡£ */
+    /* Cortex-M: SVC æŒ‡ä»¤å¸¦ 8 ä½ç«‹å³æ•°ä½œä¸ºç³»ç»Ÿè°ƒç”¨å·ï¼Œ
+     * ä½äºç¡¬ä»¶å‹æ ˆçš„æ ˆå¸§è¿”å›åœ°å€ PC ä¹‹å‰ 1 å­—èŠ‚ã€‚
+     * å¯¹åº” ARKRTOS_ARCH_SVC_NUM_BITS = 8ã€‚ */
     uint32 *p_frame = (uint32 *)p_exc_ctx;
-    /* Õ»Ö¡ÖĞ PC Î»ÓÚË÷Òı 6£¨R0,R1,R2,R3,R12,LR,PC,xPSR£©£¬
-     * SVC Ö¸ÁîµÄµÍ 8 Î»Á¢¼´ÊıÎ»ÓÚ PC Ö®Ç° 1 ×Ö½Ú¡£ */
+    /* æ ˆå¸§ä¸­ PC ä½äºç´¢å¼• 6ï¼ˆR0,R1,R2,R3,R12,LR,PC,xPSRï¼‰ï¼Œ
+     * SVC æŒ‡ä»¤çš„ä½ 8 ä½ç«‹å³æ•°ä½äº PC ä¹‹å‰ 1 å­—èŠ‚ã€‚ */
     return (uint32)((char *)p_frame[6])[-2];
 }
 
@@ -133,8 +133,8 @@ void arkrtos_port_enable_irq(void)
 }
 
 /**
-* @brief ½øÈëÁÙ½çÇø£¬±£´æ PRIMASK ²¢¹ØÖĞ¶Ï
-* @return ½øÈëÇ°µÄÖĞ¶Ï×´Ì¬
+* @brief è¿›å…¥ä¸´ç•ŒåŒºï¼Œä¿å­˜ PRIMASK å¹¶å…³ä¸­æ–­
+* @return è¿›å…¥å‰çš„ä¸­æ–­çŠ¶æ€
 */
 uint32 arkrtos_port_enter_critical(void)
 {
@@ -147,7 +147,7 @@ uint32 arkrtos_port_enter_critical(void)
 }
 
 /**
-* @brief ÍË³öÁÙ½çÇø£¬»Ö¸´½øÈëÇ°µÄÖĞ¶Ï×´Ì¬
+* @brief é€€å‡ºä¸´ç•ŒåŒºï¼Œæ¢å¤è¿›å…¥å‰çš„ä¸­æ–­çŠ¶æ€
 */
 void arkrtos_port_exit_critical(uint32 state)
 {
@@ -158,9 +158,9 @@ void arkrtos_port_exit_critical(uint32 state)
 }
 
 /**
-* @brief ¶ÁÈ¡ÏµÍ³µ÷ÓÃ²ÎÊı£¨0~3£¬¶ÔÓ¦ R0~R3£©
-* @details Cortex-M Ó²¼şÑ¹Õ»Ë³ĞòÎª R0,R1,R2,R3,R12,LR,PC,xPSR£¬
-*          Ê¹ÓÃÕ»Ö¡Ö¸ÕëÖ±½ÓË÷Òı¼´¿É¡£
+* @brief è¯»å–ç³»ç»Ÿè°ƒç”¨å‚æ•°ï¼ˆ0~3ï¼Œå¯¹åº” R0~R3ï¼‰
+* @details Cortex-M ç¡¬ä»¶å‹æ ˆé¡ºåºä¸º R0,R1,R2,R3,R12,LR,PC,xPSRï¼Œ
+*          ä½¿ç”¨æ ˆå¸§æŒ‡é’ˆç›´æ¥ç´¢å¼•å³å¯ã€‚
 */
 uint32 arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx)
 {
@@ -168,7 +168,7 @@ uint32 arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx)
 }
 
 /**
-* @brief Ğ´»ØÏµÍ³µ÷ÓÃ·µ»ØÖµ£¨R0£©
+* @brief å†™å›ç³»ç»Ÿè°ƒç”¨è¿”å›å€¼ï¼ˆR0ï¼‰
 */
 void arkrtos_port_svc_set_ret(void *p_exc_ctx, uint32 value)
 {
@@ -199,7 +199,7 @@ void arkrtos_port_switch_enable(void)
 }
 
 /* ============================================================
- * ¼Ä´æÆ÷·ÃÎÊ
+ * å¯„å­˜å™¨è®¿é—®
  * ============================================================ */
 void arkrtos_port_set_psp(uint32 val)
 {
@@ -222,7 +222,7 @@ uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void))
 
     p_sp = (uint32 *)stack_top;
 
-    *(--p_sp) = 0x01000000;        /* xPSR: Thumb ¦Ë */
+    *(--p_sp) = 0x01000000;        /* xPSR: Thumb Î» */
     /* The hardware pushes/loads the frame PC without its thumb bit. */
     *(--p_sp) = (uint32)entry & ~1u;  /* PC */
     *(--p_sp) = 0;                 /* LR */
@@ -232,9 +232,9 @@ uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void))
     *(--p_sp) = 0;                 /* R1 */
     *(--p_sp) = 0;                 /* R0 */
 
-    /* µÚ¶ş²¿·Ö£ºÉÏÏÂÎÄÇĞ»»Ê±ÊÖ¶¯±£´æ/»Ö¸´µÄ R4-R11 + EXC_RETURN(LR)
-     * EXC_RETURN = 0xFFFFFFFD: Òì³£·µ»Øµ½ Thread Ä£Ê½¡¢Ê¹ÓÃ PSP¡¢ÇÒÎŞ FPU À©Õ¹Ö¡¡£
-     * PendSV ÇĞ»»Ê±Í¨¹ı LR µÄ bit4 ÅĞ¶ÏÊÇ·ñĞèÒª±£´æ/»Ö¸´ S16-S31¡£ */
+    /* ç¬¬äºŒéƒ¨åˆ†ï¼šä¸Šä¸‹æ–‡åˆ‡æ¢æ—¶æ‰‹åŠ¨ä¿å­˜/æ¢å¤çš„ R4-R11 + EXC_RETURN(LR)
+     * EXC_RETURN = 0xFFFFFFFD: å¼‚å¸¸è¿”å›åˆ° Thread æ¨¡å¼ã€ä½¿ç”¨ PSPã€ä¸”æ—  FPU æ‰©å±•å¸§ã€‚
+     * PendSV åˆ‡æ¢æ—¶é€šè¿‡ LR çš„ bit4 åˆ¤æ–­æ˜¯å¦éœ€è¦ä¿å­˜/æ¢å¤ S16-S31ã€‚ */
     *(--p_sp) = 0xFFFFFFFD;        /* LR (EXC_RETURN) */
     *(--p_sp) = 0;                 /* R11 */
     *(--p_sp) = 0;                 /* R10 */
@@ -287,7 +287,7 @@ void arkrtos_port_set_thread_priv(uint32 is_priv)
 }
 
 /* ============================================================
- * ÏµÍ³Ê±ÖÓÓëÑÓÊ±
+ * ç³»ç»Ÿæ—¶é’Ÿä¸å»¶æ—¶
  * ============================================================ */
 uint32 arkrtos_port_get_system_clock(void)
 {
@@ -305,13 +305,13 @@ uint32 arkrtos_port_get_timer_reload(void)
 }
 
 /* ============================================================
- * ÖÜÆÚ¼¶Ê±¼ä»ù×¼ (DWT CYCCNT)
+ * å‘¨æœŸçº§æ—¶é—´åŸºå‡† (DWT CYCCNT)
  * ------------------------------------------------------------
- * Ö»¸øÊµÊ±ĞÔ¶ÈÁ¿Ä£¿é (arkrtos_rt.c) ÓÃ: Ìá¹© 1 ¸ö CPU ÖÜÆÚµÄ
- * ·Ö±æÂÊ, ÓÃÀ´Á¿ tick/»½ĞÑ/ÇÀÕ¼/ÁÙ½çÇøµÄÕæÊµºÄÊ±¡£
- * ¹Øµô ARKRTOS_USE_RTSTAT Ê±ÏÂÃæÁ½¸öº¯ÊıÊÇËÀ´úÂë¡£
- * Èô°å¼¶Ò²¿ªÁË DWT ×·×Ù (mdk_trace), Á½±ß¶¼Ö»ÊÇÖÃ DEMCR µÄ
- * TRCENA Î»Óë CYCCNT Ê¹ÄÜÎ», ÊôÃİµÈ²Ù×÷, »¥²»Ó°Ïì¡£
+ * åªç»™å®æ—¶æ€§åº¦é‡æ¨¡å— (arkrtos_rt.c) ç”¨: æä¾› 1 ä¸ª CPU å‘¨æœŸçš„
+ * åˆ†è¾¨ç‡, ç”¨æ¥é‡ tick/å”¤é†’/æŠ¢å /ä¸´ç•ŒåŒºçš„çœŸå®è€—æ—¶ã€‚
+ * å…³æ‰ ARKRTOS_USE_RTSTAT æ—¶ä¸‹é¢ä¸¤ä¸ªå‡½æ•°æ˜¯æ­»ä»£ç ã€‚
+ * è‹¥æ¿çº§ä¹Ÿå¼€äº† DWT è¿½è¸ª (mdk_trace), ä¸¤è¾¹éƒ½åªæ˜¯ç½® DEMCR çš„
+ * TRCENA ä½ä¸ CYCCNT ä½¿èƒ½ä½, å±å¹‚ç­‰æ“ä½œ, äº’ä¸å½±å“ã€‚
  * ============================================================ */
 #if (ARKRTOS_USE_RTSTAT == 1)
 #define ARKRTOS_PORT_DEMCR      (*(volatile uint32 *)0xE000EDFCu)
@@ -319,9 +319,9 @@ uint32 arkrtos_port_get_timer_reload(void)
 #define ARKRTOS_PORT_DWT_CYCCNT (*(volatile uint32 *)0xE0001004u)
 
 /**
-* @brief Ê¹ÄÜ DWT ÖÜÆÚ¼ÆÊıÆ÷£¨²»ÇåÁã£ºËüÊÇ×ÔÓÉÔËĞĞ¼ÆÊıÆ÷£¬
-*        ÇåÁã»áÈÃÁíÒ»´¦ÕıÔÚ¼ÆÊ±µÄÊ±¼ä´ÁÍ»È»¶Ô²»ÉÏ£©
-* @return 0 ³É¹¦
+* @brief ä½¿èƒ½ DWT å‘¨æœŸè®¡æ•°å™¨ï¼ˆä¸æ¸…é›¶ï¼šå®ƒæ˜¯è‡ªç”±è¿è¡Œè®¡æ•°å™¨ï¼Œ
+*        æ¸…é›¶ä¼šè®©å¦ä¸€å¤„æ­£åœ¨è®¡æ—¶çš„æ—¶é—´æˆ³çªç„¶å¯¹ä¸ä¸Šï¼‰
+* @return 0 æˆåŠŸ
 */
 int32 arkrtos_port_cyccnt_init(void)
 {
@@ -331,8 +331,8 @@ int32 arkrtos_port_cyccnt_init(void)
 }
 
 /**
-* @brief ¶Á DWT ÖÜÆÚ¼ÆÊıÆ÷ (×ÔÈ»»ØÈÆ)
-* @return µ±Ç°ÖÜÆÚ¼ÆÊı
+* @brief è¯» DWT å‘¨æœŸè®¡æ•°å™¨ (è‡ªç„¶å›ç»•)
+* @return å½“å‰å‘¨æœŸè®¡æ•°
 */
 uint32 arkrtos_port_get_cyccnt(void)
 {
@@ -349,11 +349,11 @@ void arkrtos_port_start_timer(uint32 tick_period_us)
         ticks = 1u;
     }
 
-    /* ²»ÄÜÊ¹ÓÃ SysTick_Config()£ºËü»á°Ñ SysTick ÓÅÏÈ¼¶Ğ´³É×îµÍÖµ£¬
-     * ¸²¸Ç±¾ÒÆÖ²²ã arkrtos_port_irq_init() Éè¶¨µÄ¡°SysTick ×î¸ß¡¢PendSV ×îµÍ¡±
-     * ²ßÂÔ¡£ÓÅÏÈ¼¶Ò»µ©±»Ñ¹µÍ£¬tick ¾Í¿ÉÄÜ±»ÆäËüÖĞ¶Ï³¤Ê±¼äÑ¹ÖÆ£¬
-     * ÈÎÎñ½ÚÅÄÓëËùÓĞ³¬Ê±È«²¿Ê§Õæ¡£ÕâÀïÖ»ÅäÖÃ¼ÆÊıÓëÊ¹ÄÜ£¬
-     * ÓÅÏÈ¼¶Í³Ò»ÓÉ arkrtos_port_irq_init() Éè¶¨¡£ */
+    /* ä¸èƒ½ä½¿ç”¨ SysTick_Config()ï¼šå®ƒä¼šæŠŠ SysTick ä¼˜å…ˆçº§å†™æˆæœ€ä½å€¼ï¼Œ
+     * è¦†ç›–æœ¬ç§»æ¤å±‚ arkrtos_port_irq_init() è®¾å®šçš„â€œSysTick æœ€é«˜ã€PendSV æœ€ä½â€
+     * ç­–ç•¥ã€‚ä¼˜å…ˆçº§ä¸€æ—¦è¢«å‹ä½ï¼Œtick å°±å¯èƒ½è¢«å…¶å®ƒä¸­æ–­é•¿æ—¶é—´å‹åˆ¶ï¼Œ
+     * ä»»åŠ¡èŠ‚æ‹ä¸æ‰€æœ‰è¶…æ—¶å…¨éƒ¨å¤±çœŸã€‚è¿™é‡Œåªé…ç½®è®¡æ•°ä¸ä½¿èƒ½ï¼Œ
+     * ä¼˜å…ˆçº§ç»Ÿä¸€ç”± arkrtos_port_irq_init() è®¾å®šã€‚ */
     SysTick->LOAD = ticks - 1u;
     SysTick->VAL  = 0u;
     SysTick->CTRL = SysTick_CTRL_CLKSOURCE_Msk |
@@ -410,7 +410,7 @@ void arkrtos_port_delay_us(uint32 us)
 }
 
 /* ============================================================
- * °å¼¶³õÊ¼»¯Ä¬ÈÏÊµÏÖ£¬¿É±» board ²ã¸²¸Ç
+ * æ¿çº§åˆå§‹åŒ–é»˜è®¤å®ç°ï¼Œå¯è¢« board å±‚è¦†ç›–
  * ============================================================ */
 __weak void arkrtos_port_board_init(void)
 {
@@ -439,14 +439,14 @@ __weak void arkrtos_port_set_idle_mpu(uint32 task_func, uint32 stack_addr, uint3
 }
 
 /* ============================================================
- * MPU ÅäÖÃ
+ * MPU é…ç½®
  * ============================================================ */
 #if (ARKRTOS_USE_MPU == 1)
 
 #if (ARKRTOS_USE_MPU_APPLY_CACHE == 1)
-/* ÒÑÉúĞ§µÄÇøÓò¿ìÕÕ¡£ÇĞ»»Ê±¾ø´ó¶àÊıÇé¿öÇøÓò¼¯Ã»±ä£¨Í¬Ò» App ÄÚµÄ¶à¸öÈÎÎñ¡¢
- * ÄÚºËÈÎÎñÖ®¼ä¡¢ÒÔ¼°ÖØ¸´ÇĞ»ØÍ¬Ò»¸öÈÎÎñ£©£¬ÖØ¸´Ğ´ 24 ´Î¼Ä´æÆ÷ + ¹Ø/¿ª MPU +
- * Á½¸öÆÁÕÏ´¿ÊôÀË·Ñ¡£init()/reset() »á°ÑÓ²¼şÇå¿Õ£¬ÄÇÀï±ØĞë×÷·Ï¿ìÕÕ¡£ */
+/* å·²ç”Ÿæ•ˆçš„åŒºåŸŸå¿«ç…§ã€‚åˆ‡æ¢æ—¶ç»å¤§å¤šæ•°æƒ…å†µåŒºåŸŸé›†æ²¡å˜ï¼ˆåŒä¸€ App å†…çš„å¤šä¸ªä»»åŠ¡ã€
+ * å†…æ ¸ä»»åŠ¡ä¹‹é—´ã€ä»¥åŠé‡å¤åˆ‡å›åŒä¸€ä¸ªä»»åŠ¡ï¼‰ï¼Œé‡å¤å†™ 24 æ¬¡å¯„å­˜å™¨ + å…³/å¼€ MPU +
+ * ä¸¤ä¸ªå±éšœçº¯å±æµªè´¹ã€‚init()/reset() ä¼šæŠŠç¡¬ä»¶æ¸…ç©ºï¼Œé‚£é‡Œå¿…é¡»ä½œåºŸå¿«ç…§ã€‚ */
 static arkrtos_arch_mpu_t arkrtos_mpu_applied;
 static uint8 arkrtos_mpu_applied_ok = 0u;
 #endif
@@ -466,7 +466,7 @@ void arkrtos_port_mpu_init(void)
     int32 i;
 
     #if (ARKRTOS_USE_MPU_APPLY_CACHE == 1)
-    arkrtos_mpu_applied_ok = 0u;      /* Ó²¼şÒÑ±»Çå¿Õ£¬¿ìÕÕ×÷·Ï */
+    arkrtos_mpu_applied_ok = 0u;      /* ç¡¬ä»¶å·²è¢«æ¸…ç©ºï¼Œå¿«ç…§ä½œåºŸ */
     #endif
 
     if(MPU->TYPE == 0)
@@ -602,7 +602,7 @@ int32 arkrtos_port_mpu_encode(arkrtos_arch_mpu_t *p_mpu, uint32 idx, uint32 base
              * would need two power-of-two aligned MPU regions and waste up
              * to half of the block, which is exactly what a load-to-RAM
              * MiniApp cannot afford. The block is private to the MiniApp and
-             * released when it exits (see docs/Ğ¡³ÌĞòÉè¼Æ.md). */
+             * released when it exits (see docs/å°ç¨‹åºè®¾è®¡.md). */
             attr = 0x03020001u;     /* AP=0b011: read-write, XN=0, S=0, Normal NC */
             break;
 
@@ -654,9 +654,9 @@ void arkrtos_port_mpu_set_region(uint32 rom_addr, uint32 rom_size, uint32 ram_ad
 
     (void)arkrtos_port_mpu_encode(&arkrtos_mpu_idle_ctx, 0u, rom_addr, rom_size, ARKRTOS_MPU_MEM_ROM);
     (void)arkrtos_port_mpu_encode(&arkrtos_mpu_idle_ctx, 1u, ram_addr, ram_size, ARKRTOS_MPU_MEM_RAM);
-    /* ÍâÖÃ RAM ÊÇÄÚºËÌ¬Ò²ÒªÓÃµÄÄÚ´æ£¨±àÒëÆ÷µÄ .ark_buf¡¢ramfs µÄ .extram£©£¬
-     * ¶øÇÒÃ¿´ÎÇĞ»Ø¿ÕÏĞÈÎÎñ¶¼»áÖØĞ´È«²¿ÇøÓò¼Ä´æÆ÷£º²»¸øËüÒ»ÌõÇøÓò£¬
-     * ÇĞ»Ø¿ÕÏĞÖ®ºóÕâ¿éÄÚ´æ¾Í±ä³ÉÁË¡¸Î´Ó³Éä¡¹¡£ */
+    /* å¤–ç½® RAM æ˜¯å†…æ ¸æ€ä¹Ÿè¦ç”¨çš„å†…å­˜ï¼ˆç¼–è¯‘å™¨çš„ .ark_bufã€ramfs çš„ .extramï¼‰ï¼Œ
+     * è€Œä¸”æ¯æ¬¡åˆ‡å›ç©ºé—²ä»»åŠ¡éƒ½ä¼šé‡å†™å…¨éƒ¨åŒºåŸŸå¯„å­˜å™¨ï¼šä¸ç»™å®ƒä¸€æ¡åŒºåŸŸï¼Œ
+     * åˆ‡å›ç©ºé—²ä¹‹åè¿™å—å†…å­˜å°±å˜æˆäº†ã€Œæœªæ˜ å°„ã€ã€‚ */
     #if (ARKRTOS_MPU_EXTRAM_SIZE != 0)
     (void)arkrtos_port_mpu_encode(&arkrtos_mpu_idle_ctx, ARKRTOS_MPU_RGN_EXTRAM,
                                   ARKRTOS_MPU_EXTRAM_BASE, ARKRTOS_MPU_EXTRAM_SIZE,
@@ -674,7 +674,7 @@ void arkrtos_port_mpu_set_idle(void)
 void arkrtos_port_mpu_set_app(const arkrtos_arch_mpu_t *p_mpu)
 {
     #if (ARKRTOS_USE_MPU_APPLY_CACHE == 0)
-    /* ¾ÉĞĞÎª£ºÕû¸ö¹Øµô MPU¡¢ÖØĞ´È«²¿ 8 ¸öÇøÓò¡¢ÔÙ¿ª MPU + Á½¸öÆÁÕÏ¡£ */
+    /* æ—§è¡Œä¸ºï¼šæ•´ä¸ªå…³æ‰ MPUã€é‡å†™å…¨éƒ¨ 8 ä¸ªåŒºåŸŸã€å†å¼€ MPU + ä¸¤ä¸ªå±éšœã€‚ */
     int32 rnr = 0;
 
     ARKRTOS_DMB();
@@ -703,12 +703,12 @@ void arkrtos_port_mpu_set_app(const arkrtos_arch_mpu_t *p_mpu)
     ARKRTOS_DSB();
     ARKRTOS_ISB();
     #else
-    /* ĞÂĞĞÎª£ºÖ»Ğ´ÕæÕı±äÁËµÄÄÇ¼¸¸öÇøÓò£¬¶¼Ğ´Íê²Å×öÒ»´ÎÆÁÕÏ¡£
-     * ²»ÔÙÕû¸ö¹Øµô MPU£ºÒì³£´¦ÀíÀïÅÜµÄÊÇÌØÈ¨Ì¬£¬PRIVDEFENA=1 ÏÂÌØÈ¨·ÃÎÊ×ß
-     * Ä¬ÈÏ´æ´¢Æ÷Ó³Éä£¬ÖØÅäÆÚ¼äÃ»ÓĞÈÎºÎ·ÇÌØÈ¨´úÂëÔÚÅÜ£¬ËùÒÔ¾ÍµØ¸üĞÂÊÇ°²È«µÄ£»
-     * ¸ÄĞ´Ò»¸öÒÑÊ¹ÄÜÇøÓòÖ®Ç°£¬°´ÌåÏµ½á¹¹ÒªÇóÏÈĞ´ RASR=0 °ÑËü¹Øµô¡£
-     * ÉÏÏÂÎÄÓëÒÑÉúĞ§µÄÍêÈ«Ò»ÖÂÊ±£¨Í¬Ò» App ÄÚµÄ¶à¸öÈÎÎñ¡¢ÄÚºËÈÎÎñÖ®¼ä¡¢
-     * ·´¸´ÇĞ»ØÍ¬Ò»¸öÈÎÎñ£©£¬Á¬Ò»¸ö¼Ä´æÆ÷¶¼²»ÓÃÅö¡£ */
+    /* æ–°è¡Œä¸ºï¼šåªå†™çœŸæ­£å˜äº†çš„é‚£å‡ ä¸ªåŒºåŸŸï¼Œéƒ½å†™å®Œæ‰åšä¸€æ¬¡å±éšœã€‚
+     * ä¸å†æ•´ä¸ªå…³æ‰ MPUï¼šå¼‚å¸¸å¤„ç†é‡Œè·‘çš„æ˜¯ç‰¹æƒæ€ï¼ŒPRIVDEFENA=1 ä¸‹ç‰¹æƒè®¿é—®èµ°
+     * é»˜è®¤å­˜å‚¨å™¨æ˜ å°„ï¼Œé‡é…æœŸé—´æ²¡æœ‰ä»»ä½•éç‰¹æƒä»£ç åœ¨è·‘ï¼Œæ‰€ä»¥å°±åœ°æ›´æ–°æ˜¯å®‰å…¨çš„ï¼›
+     * æ”¹å†™ä¸€ä¸ªå·²ä½¿èƒ½åŒºåŸŸä¹‹å‰ï¼ŒæŒ‰ä½“ç³»ç»“æ„è¦æ±‚å…ˆå†™ RASR=0 æŠŠå®ƒå…³æ‰ã€‚
+     * ä¸Šä¸‹æ–‡ä¸å·²ç”Ÿæ•ˆçš„å®Œå…¨ä¸€è‡´æ—¶ï¼ˆåŒä¸€ App å†…çš„å¤šä¸ªä»»åŠ¡ã€å†…æ ¸ä»»åŠ¡ä¹‹é—´ã€
+     * åå¤åˆ‡å›åŒä¸€ä¸ªä»»åŠ¡ï¼‰ï¼Œè¿ä¸€ä¸ªå¯„å­˜å™¨éƒ½ä¸ç”¨ç¢°ã€‚ */
     int32 rnr = 0;
     uint8 dirty = 0u;
 
@@ -780,7 +780,7 @@ void arkrtos_port_mpu_reset(void)
     int32 rnr = 0;
 
     #if (ARKRTOS_USE_MPU_APPLY_CACHE == 1)
-    arkrtos_mpu_applied_ok = 0u;      /* Ó²¼şÒÑ±»Çå¿Õ£¬¿ìÕÕ×÷·Ï */
+    arkrtos_mpu_applied_ok = 0u;      /* ç¡¬ä»¶å·²è¢«æ¸…ç©ºï¼Œå¿«ç…§ä½œåºŸ */
     #endif
 
     ARKRTOS_DMB();

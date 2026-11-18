@@ -76,7 +76,13 @@ VENDOR_MARKERS = ("/components/arkc/src/", "/components/arkc/include/",
 # and kernelsrc/include are deliberately absent here.
 APP_SIDE_MARKERS = ("kernelsrc/sdk/", "/app_sdk/", "/driver_sdk/")
 
-ALLOWED_ENCODINGS = ("utf-8", "gbk")
+# Own sources are UTF-8 only since 2026-11-18 (see check_encoding_eol).
+ALLOWED_ENCODINGS = ("utf-8",)
+
+# Vendored trees keep whatever their upstream repo ships: converting them
+# would break byte-compatibility with the sync scripts (cm_backtrace ships a
+# GBK zh-CN language header).  Only this prefix may still decode as GBK.
+VENDORED_GBK_PREFIX = "kernelsrc/components/"
 
 SKIP_DIRS = {".git", "build", "docs", "_nova", "RTE", "DebugConfig",
              "Objects", "Listings"}
@@ -168,8 +174,9 @@ def own_sources():
 def strip_comments_bytes(raw):
     """Byte level C comment stripper.
 
-    Works on bytes, not text: these files are GBK/UTF-8 mixed, so decoding with
-    'replace' before scanning can shift what is left.  Handles // line comments,
+    Works on bytes, not text: even though every own source is UTF-8 since
+    2026-11-18, the vendored trees still carry GBK, so decoding with 'replace'
+    before scanning can shift what is left.  Handles // line comments,
     /* */ block comments including the multi-line form whose continuation lines
     start with '*', and skips string / char literals so that a '/*' inside a
     string does not swallow the rest of the line (which would hide a real hit).
@@ -307,21 +314,47 @@ def check_single_address_source():
 
 # ---------------------------------------------------------------- check 3
 def check_encoding_eol():
-    """Every source decodes as one allowed encoding; no blob mixes CRLF and LF.
+    """Every own source is UTF-8; no blob mixes CRLF and LF.
 
     Mixed endings are a failure, not a note: they are what turned a real
     153-line change into a 5739-line diff that nobody could review.
 
     Scanned on the index blob (see stored_bytes) - the working tree is
     autocrlf-rewritten and says nothing about what would be committed.
+
+    Encoding used to accept GBK so the old sources could stay as they were.
+    On 2026-11-18 all 51 GBK own sources were transcoded to UTF-8 (one commit,
+    no logic touched: every Chinese character sits in a comment or in an
+    #error text, so the LA64 image stayed byte-identical, sha256 fbd1094e...).
+    Since then UTF-8 is the only accepted encoding for own sources, and a GBK
+    file fails here instead of being silently tolerated.  Vendored trees
+    (kernelsrc/components/) are exempt: they are byte-compatible with their
+    own repositories and one of them ships a GBK zh-CN header.
     """
+    # 自检：这一项的全部判断力就在"哪种编码能解"，先证明它分得清。
+    # 拿一个 UTF-8 解不开、GBK 解得开的两字节样本：任何一边失效，这一项都会
+    # 变成永远通过（假绿），所以宁可直接判失败。
+    try:
+        b"\xd6\xd0".decode("utf-8")
+        fail("encoding", "self-check: a GBK sample decoded as UTF-8 (check is blind)")
+        return
+    except UnicodeDecodeError:
+        pass
+    if b"\xd6\xd0".decode("gbk") != "\u4e2d":
+        fail("encoding", "self-check: decoder mismatch (check is blind)")
+        return
+
     bad, mixed = [], []
+    gbk_ok = 0
     for rel, path in own_sources():
         raw = stored_bytes(rel, path)
         if not raw:
             continue
+        allowed = ALLOWED_ENCODINGS
+        if rel.startswith(VENDORED_GBK_PREFIX):
+            allowed = ALLOWED_ENCODINGS + ("gbk",)
         decoded = None
-        for enc in ALLOWED_ENCODINGS:
+        for enc in allowed:
             try:
                 raw.decode(enc)
                 decoded = enc
@@ -331,15 +364,20 @@ def check_encoding_eol():
         if decoded is None:
             bad.append(rel)
             continue
+        if decoded == "gbk":
+            gbk_ok += 1
         crlf = raw.count(b"\r\n")
         lf = raw.count(b"\n") - crlf
         if crlf and lf:
             mixed.append("%s (crlf=%d lf=%d)" % (rel, crlf, lf))
     if bad:
-        fail("encoding", "%d file(s) decode as neither utf-8 nor gbk: %s"
+        fail("encoding", "%d own source(s) are not UTF-8: %s"
              % (len(bad), ", ".join(bad[:5])))
     else:
-        ok("encoding", "all own sources decode")
+        detail = "all own sources decode as utf-8"
+        if gbk_ok:
+            detail += " (%d vendored file(s) still GBK)" % gbk_ok
+        ok("encoding", detail)
     if mixed:
         fail("mixed-eol", "%d file(s): %s" % (len(mixed), ", ".join(mixed[:6])))
     else:
@@ -351,9 +389,9 @@ def check_format_baseline():
     """格式基线（.editorconfig 里声明的四条）必须真被判到，且门禁自己不失明。
 
     这几条是纯字节判断（无制表符 / 无行尾空白 / 文件以换行结尾 / 无 UTF-8 BOM），
-    不解码、不转码，所以对仓库里 22 个 GBK 旧文件同样成立 —— 这也是选了这四条、
-    而不是上 clang-format 的原因：这台机器没有 clang-format，网络也装不了，而整
-    文件重排版会把 GBK 字节改坏。
+    不解码、不转码 —— 这也是选了这四条、而不是上 clang-format 的原因：这台机器
+    没有 clang-format，网络也装不了，而整文件重排版会顺手改写不属于本次改动的
+    字节（转码前那些文件是 GBK，任何重排版都会把它们改坏）。
 
     它抓到的第一件真事就够本：`kernelsrc/src/arkrtos_task.c` 里 1143 行、加上
     `arkrtos_shell.h` 1 行，行尾是 `\r\r\n`（多一个 CR）。这种文件在编译器眼里

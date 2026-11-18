@@ -1,21 +1,21 @@
 /**
-* @brief Ark RTOS �ں˼��������ļ�
-* @details ��� RT-Thread �� rtconfig.h ˼·�����ں����пɲü����ɵ����������ڴ˹�����
-*          �弶���ÿ�ͨ�� ARKRTOS_BOARD_CONFIG ��ָ���ͷ�ļ����������Ĭ��ֵ��
-*          ���ǹ��򣺱��ļ���**���пɲü�������ɵ�����**�������� #ifndef ��ס��
-*          ����弶�����ض���ʱ�ᱨ���ض��壬���ڸ��ǲ��ˣ�
-*          ����Щ�������������ĺ꣨�� ARKRTOS_MS_TO_TICK�������������������
-* @note ���ļ��������κ�оƬ���ͷ�ļ���Ҳ��ֱ�Ӳ����κ�Ӳ���Ĵ�����
+* @brief Ark RTOS 内核集中配置文件
+* @details 借鉴 RT-Thread 的 rtconfig.h 思路，把内核所有可裁剪、可调参数集中在此管理。
+*          板级配置可通过 ARKRTOS_BOARD_CONFIG 宏指向的头文件覆盖这里的默认值。
+*          覆盖规则：本文件里**所有可裁剪开关与可调参数**都必须用 #ifndef 包住，
+*          否则板级配置重定义时会报宏重定义，等于覆盖不了；
+*          由这些参数派生出来的宏（如 ARKRTOS_MS_TO_TICK）不包，它不是配置项。
+* @note 本文件不包含任何芯片相关头文件，也不直接操作任何硬件寄存器。
 */
 
 #ifndef __ARKRTOS_CONFIG_H__
 #define __ARKRTOS_CONFIG_H__
 
 /* ============================================================
- * �弶�������ȼ���
- * @brief �弶���ÿɸ��� ARKRTOS_CPU_ARCH / ARKRTOS_ARCH_CORE����Ƶ��
- *        �ڴ��ַ�Ȳ�������˱����ڼܹ�������Ĭ��ֵ֮ǰ���ء�
- *        ͨ������ѡ�� -DARKRTOS_BOARD_CONFIG=<chip_header.h> ָ����
+ * 板级配置优先加载
+ * @brief 板级配置可覆盖 ARKRTOS_CPU_ARCH / ARKRTOS_ARCH_CORE、主频、
+ *        内存地址等参数，因此必须在架构派生与默认值之前加载。
+ *        通过编译选项 -DARKRTOS_BOARD_CONFIG=<chip_header.h> 指定。
  * ============================================================ */
 #ifdef ARKRTOS_BOARD_CONFIG
 #include ARKRTOS_BOARD_CONFIG
@@ -40,45 +40,45 @@
 #include "arkrtos_arch.h"
 
 /* ============================================================
- * ����ѡ�����feature gates��
- * @brief ����"��ι���Ҫ��Щ����"�� ARKRTOS_USE_* ���ض�������
- *        arkrtos_features.h�����ļ�ֻ�����������ף�FPU/MPU/PRIV��
- *        ����ֵ�������弶�����Ѿ������� ARKRTOS_BOARD_CONFIG �﷢����
- *        ���� features.h ��� #ifndef Ĭ��ֵ���Ա��弶��д��
+ * 功能选配表（feature gates）
+ * @brief 所有"这次构建要哪些功能"的 ARKRTOS_USE_* 开关都集中在
+ *        arkrtos_features.h；本文件只保留能力兜底（FPU/MPU/PRIV）
+ *        与数值参数。板级覆盖已经在上面 ARKRTOS_BOARD_CONFIG 里发生，
+ *        所以 features.h 里的 #ifndef 默认值可以被板级改写。
  * ============================================================ */
 #include "arkrtos_features.h"
 
 /* ============================================================
- * CPU �ܹ�ѡ�񣨼ܹ�����㣩
- * @brief �ܹ��� / ������� / ������ͳһ�� arkrtos_arch.h �ṩ��
- *        ���ļ�ֻ����ݴ������ں˹��ܿ��ص�Ĭ��ֵ��
- *        ѡ��ʽ����ѡһ���弶���û����ѡ����ɣ���
- *          1) ARKRTOS_ARCH_CORE = ARKRTOS_CPU_CORE_xxx���Ƽ���֧�� ARM/RISC-V/LoongArch��
- *          2) ARKRTOS_CPU_ARCH  = 0/1/2�����ݾɹ��̣��� Cortex-M3/M4/M7��
- *        �¼ܹ�ʵ�ַ��� kernelsrc/port/<��>/<����>/����� port/README.md
+ * CPU 架构选择（架构抽象层）
+ * @brief 架构族 / 具体核心 / 能力宏统一由 arkrtos_arch.h 提供，
+ *        本文件只负责据此派生内核功能开关的默认值。
+ *        选择方式（二选一，板级配置或编译选项均可）：
+ *          1) ARKRTOS_ARCH_CORE = ARKRTOS_CPU_CORE_xxx（推荐，支持 ARM/RISC-V/LoongArch）
+ *          2) ARKRTOS_CPU_ARCH  = 0/1/2（兼容旧工程，仅 Cortex-M3/M4/M7）
+ *        新架构实现放在 kernelsrc/port/<族>/<核心>/，详见 port/README.md
  * ============================================================ */
 
 /* ============================================================
- * FPU ���㵥Ԫʹ��
- * @brief �Ƿ����ø��㵥Ԫ��Ӱ���������л�ʱ�Ƿ񱣴渡��Ĵ�����
- *        ����Ŀ�� CPU ʵ��Ӳ��һ�£�M4F/M7 �� FPU��M3 �� FPU��
+ * FPU 浮点单元使能
+ * @brief 是否启用浮点单元，影响上下文切换时是否保存浮点寄存器。
+ *        需与目标 CPU 实际硬件一致；M4F/M7 有 FPU，M3 无 FPU。
  * ============================================================ */
 #ifndef ARKRTOS_USE_FPU
 #define ARKRTOS_USE_FPU             ARKRTOS_ARCH_HAS_FPU
 #endif
 
 /* ============================================================
- * MPU �ڴ汣����Ԫʹ��
- * @brief �Ƿ����� MPU��ʵ������� ROM/RAM �ռ���롣
- *        ����Ŀ�� CPU ʵ��Ӳ��һ�£����ú�ÿ���л������� MPU ����
+ * MPU 内存保护单元使能
+ * @brief 是否启用 MPU，实现任务间 ROM/RAM 空间隔离。
+ *        需与目标 CPU 实际硬件一致；启用后每次切换会重配 MPU 区域。
  * ============================================================ */
 #ifndef ARKRTOS_USE_MPU
 #define ARKRTOS_USE_MPU             ARKRTOS_ARCH_HAS_MPU
 #endif
 
 /* ============================================================
- * ��Ȩ������ʹ��
- * @note ���� MPU��δ���� MPU ʱ��Ȩ���������壬�Զ��رա�
+ * 特权级分离使能
+ * @note 依赖 MPU；未启用 MPU 时特权分离无意义，自动关闭。
  * ============================================================ */
 #ifndef ARKRTOS_USE_PRIV
 #if (ARKRTOS_USE_MPU == 1)
@@ -89,20 +89,20 @@
 #endif
 
 /* ============================================================
- * ������һ��������
- * @details �������ֻ��ѡһ�������ڣ�USE_MPU����ҳ����USE_PAGING����
- *          ���ﲻ���Զ��������κ�ì�����ö��ڱ����ڱ������������
- *          ��˵�Ƿ�ҳ������ʵ���� MPU ��û�����ļٰ�ȫ��
+ * 隔离后端一致性守卫
+ * @details 两个后端只能选一个：窗口（USE_MPU）或页表（USE_PAGING）。
+ *          这里不做自动降级：任何矛盾配置都在编译期报错，避免出现
+ *          「说是分页保护、实际连 MPU 都没开」的假安全。
  * ============================================================ */
 #if (ARKRTOS_USE_PAGING == 1)
 #if (ARKRTOS_ARCH_HAS_PAGING_HW != 1)
-#error "ARKRTOS_USE_PAGING=1 ��������û��ҳ��/TLB���� arkrtos_arch.h �� HAS_PAGING_HW��"
+#error "ARKRTOS_USE_PAGING=1 但本核心没有页表/TLB（见 arkrtos_arch.h 的 HAS_PAGING_HW）"
 #endif
 #if (ARKRTOS_USE_MPU == 1)
-#error "ARKRTOS_USE_PAGING=1 �� ARKRTOS_USE_MPU=1 ���⣺ͬһʱ��ֻ����һ��������"
+#error "ARKRTOS_USE_PAGING=1 与 ARKRTOS_USE_MPU=1 互斥：同一时刻只能有一个隔离后端"
 #endif
 #if (ARKRTOS_USE_PRIV != 1)
-#error "ARKRTOS_USE_PAGING=1 ��Ҫ ARKRTOS_USE_PRIV=1��ҳ�����뿿��Ȩ����PLV/U ̬�����"
+#error "ARKRTOS_USE_PAGING=1 需要 ARKRTOS_USE_PRIV=1：页表隔离靠特权级（PLV/U 态）落地"
 #endif
 #endif
 
@@ -142,7 +142,7 @@
 #endif
 
 /* ============================================================
- * �����������ز���
+ * 任务与调度相关参数
  * ============================================================ */
 /* Task capacity moved to config/arkrtos_partition.h:
  *   ARKRTOS_TASK_MAX_NUM        total task-table slots (static TCB array)
@@ -158,23 +158,23 @@
 #define ARKRTOS_MAX_EVENT_WAITERS   (4)
 #endif
 
-/* 32 λ�¼�����ARKRTOS_USE_ESET=1 ʱ�ű�������Ķ����������
- *   ARKRTOS_ESET_NUM          �¼���������
- *   ARKRTOS_MAX_ESET_WAITERS  ÿ���¼���ͬʱ�ɹҵĵȴ�����
- * ���Ǿ�̬�ģ��ص�����ʱ��ռ RAM�� */
+/* 32 位事件集（ARKRTOS_USE_ESET=1 时才编进来）的对象表容量：
+ *   ARKRTOS_ESET_NUM          事件集对象数
+ *   ARKRTOS_MAX_ESET_WAITERS  每个事件集同时可挂的等待者数
+ * 表是静态的，关掉开关时不占 RAM。 */
 #ifndef ARKRTOS_ESET_NUM
 #define ARKRTOS_ESET_NUM            (8)
 #endif
 #ifndef ARKRTOS_MAX_ESET_WAITERS
 #define ARKRTOS_MAX_ESET_WAITERS    (4)
 #endif
-/* ��������̽�⣨ARKRTOS_USE_WAITMULTI=1 �ű��������һ�����̽���������
- * ��������� 32 λ���������� 32�� */
+/* 多对象就绪探测（ARKRTOS_USE_WAITMULTI=1 才编进来）：一次最多探几个句柄。
+ * 结果掩码是 32 位，所以上限 32。 */
 #ifndef ARKRTOS_WAITMULTI_MAX_OBJS
 #define ARKRTOS_WAITMULTI_MAX_OBJS  (16)
 #endif
 
-/* �ź���������������ȴ������� */
+/* 信号量、互斥锁及其等待者数量 */
 /* Semaphore table capacity.  The table is kernel wide, so size it to the
  *   sum of every concurrent user, not to one user's peak.
  *   The POSIX layer alone takes 2 per live pthread (start gate + done)
@@ -193,17 +193,17 @@
 #define ARKRTOS_MAX_SYNC_WAITERS    (4)
 #endif
 
-/* ÿ������ĵȴ��߲�λ������ ARKRTOS_USE_WAIT_UNBOUNDED �����������겻
- * �� #ifndef ��������������������������������Ǹ����أ��� */
+/* 每个对象的等待者槽位数：由 ARKRTOS_USE_WAIT_UNBOUNDED 派生，派生宏不
+ * 用 #ifndef 包（它不是配置项本身，配置项是上面那个开关）。 */
 #if (ARKRTOS_USE_WAIT_UNBOUNDED == 1)
 #define ARKRTOS_WQ_SLOTS            (ARKRTOS_TASK_MAX_NUM)
 #else
 #define ARKRTOS_WQ_SLOTS            (ARKRTOS_MAX_SYNC_WAITERS)
 #endif
 
-/* SMP �Ǽܣ�ARKRTOS_USE_SMP=1 �ű�������ĺ�����1 = ���ˣ��Ǽܲ������κ�
- * ���롣�򿪺�ÿ��һ�� arkrtos_smp_cpu_t ״̬�飬���ߺ��� uint32 ������ˣ�
- * �������� 8���ٴ�����Ͳ������� 8 �������˹����˻����ö��� */
+/* SMP 骨架（ARKRTOS_USE_SMP=1 才编进来）的核数。1 = 单核，骨架不产生任何
+ * 代码。打开后每核一份 arkrtos_smp_cpu_t 状态块，在线核用 uint32 掩码记账，
+ * 所以上限 8：再大掩码就不够，且 8 核以内人工对账还做得动。 */
 #ifndef ARKRTOS_CPU_NUM
 #define ARKRTOS_CPU_NUM             (1)
 #endif
@@ -214,7 +214,7 @@
 #define ARKRTOS_MS_TO_TICK(ms)      ((ms) * 1000 / ARKRTOS_TICK_PERIOD_US)
 
 /* ============================================================
- * �豸�������豸��
+ * 设备框架最大设备数
  * ============================================================ */
 #ifndef ARKRTOS_DEV_MAX_NUM
 #define ARKRTOS_DEV_MAX_NUM         (8)
@@ -228,8 +228,8 @@
 #define ARKRTOS_MQ_NUM              (8)
 #endif
 
-/* �����������뻥�������ʹ�ã��ȴ�ʱԭ���ͷ������������»�ȡ����������
- * ����ͬ������ͬ������һ����͵ġ������� / �����ߡ������á� */
+/* 条件变量：与互斥量配对使用（等待时原子释放锁，醒来重新获取）。数量与
+ * 其它同步对象同级，够一组典型的“生产者 / 消费者”任务用。 */
 #ifndef ARKRTOS_COND_NUM
 #define ARKRTOS_COND_NUM            (8)
 #endif
@@ -240,17 +240,17 @@
 #define ARKRTOS_MQ_MSG_WORDS        (4)
 #endif
 
-/* ������ / ��Ϣ���壨SVC 0x1F����������뻺�嶼��̬פ����
- * һ������̶�ռ ARKRTOS_SBUF_BUF_SIZE �ֽڣ�û�ж�̬�ڴ档
- * ARKRTOS_SBUF_NUM * ARKRTOS_SBUF_BUF_SIZE ����������ȫ�� RAM ����
- * ��Ĭ�ϵ�����ʱ��ռ���� */
+/* 流缓冲 / 消息缓冲（SVC 0x1F）。对象表与缓冲都静态驻留：
+ * 一个对象固定占 ARKRTOS_SBUF_BUF_SIZE 字节，没有动态内存。
+ * ARKRTOS_SBUF_NUM * ARKRTOS_SBUF_BUF_SIZE 就是这块表的全部 RAM 代价
+ * （默认档关着时不占）。 */
 #ifndef ARKRTOS_SBUF_NUM
 #define ARKRTOS_SBUF_NUM            (4)
 #endif
 #ifndef ARKRTOS_SBUF_BUF_SIZE
 #define ARKRTOS_SBUF_BUF_SIZE       (256)
 #endif
-/* ��Ϣ����ĳ���ͷ�ֽ�����4 �ֽڹ�װ�����黺��ĳ��ȣ�����Ȼ 4 �ֽڶ��롣 */
+/* 消息缓冲的长度头字节数。4 字节够装下整块缓冲的长度，且天然 4 字节对齐。 */
 #ifndef ARKRTOS_MBUF_HDR_BYTES
 #define ARKRTOS_MBUF_HDR_BYTES      (4)
 #endif
@@ -270,13 +270,13 @@
 #endif
 
 /* ============================================================
- * ���Ȳ��������ر����� arkrtos_features.h��
+ * 调度参数（开关本身在 arkrtos_features.h）
  * ============================================================ */
 
-/* ͬ���ȼ�ʱ��Ƭ���ȣ�����������
- * ͬ���ȼ����������������ý��������ó����ף���ͬ���ȼ�����һ��������֣�
- * 0 = ����ת��ͬ���ȼ���ʼ��������������Ǹ����У���
- * 500us ������ 10 �� = 5ms����ռ��Ƭ���޹أ��������ȼ��������������ռ�� */
+/* 同优先级时间片长度（节拍数）。
+ * 同优先级任务连续运行满该节拍数后让出队首，由同优先级的下一个任务接手；
+ * 0 = 不轮转（同优先级内始终由最早就绪的那个运行）。
+ * 500us 节拍下 10 拍 = 5ms。抢占与片长无关：更高优先级任务就绪立即抢占。 */
 #ifndef ARKRTOS_TIME_SLICE_TICKS
 #define ARKRTOS_TIME_SLICE_TICKS       (10)
 #endif
@@ -285,20 +285,20 @@
 
 
 /* ============================================================
- * ջ�ױ�־ֵ��ջ�����⿪���� arkrtos_features.h��
+ * 栈底标志值（栈溢出检测开关在 arkrtos_features.h）
  * ============================================================ */
 #ifndef ARKRTOS_STACK_END_FLAG
 #define ARKRTOS_STACK_END_FLAG      (0xed01)
 #endif
 
 /* ============================================================
- * �����ڴ�����
- * @brief Ĭ��ֵ��ͨ���ɰ弶�����ļ� board/arkrtos_board_config.h
- *        ���ݾ���оƬ���ڴ沼�ָ��ǡ�
+ * 共享内存配置
+ * @brief 默认值，通常由板级配置文件 board/arkrtos_board_config.h
+ *        根据具体芯片的内存布局覆盖。
  * ============================================================ */
-/* ע��ARKRTOS_SHARE_MEM_ADDR / ARKRTOS_SHARE_MEM_SIZE ��ɾ����
- * �����ڴ�λ���� config/arkrtos_partition.h �� SHARE_RAM_BASE / SHARE_RAM_SIZE ������
- * �ں����û�̬��ֻ�������ڷ�������ȡ�������б����ڵ�ַ�ꡣ */
+/* 注：ARKRTOS_SHARE_MEM_ADDR / ARKRTOS_SHARE_MEM_SIZE 已删除。
+ * 共享内存位置由 config/arkrtos_partition.h 的 SHARE_RAM_BASE / SHARE_RAM_SIZE 决定，
+ * 内核与用户态都只从运行期分区表读取，不再有编译期地址宏。 */
 
 /* The system clock is not a compile-time macro any more.  The only
  * source is CMSIS SystemCoreClock, set by the board clock init, and
@@ -308,9 +308,9 @@
  * 96 MHz measured on the F427 board).  Removed on purpose. */
 
 /* ============================================================
- * �弶�����ļ����ص�
- * @brief ���������ļ���ͷ���ܹ�ѡ��֮ǰ�����أ�
- *        �Ա�弶�����ܸ��� ARKRTOS_ARCH_CORE ����������������
+ * 板级配置文件挂载点
+ * @brief 已移至本文件开头（架构选择之前）加载，
+ *        以便板级配置能覆盖 ARKRTOS_ARCH_CORE 并参与能力派生。
  * ============================================================ */
 
 #endif

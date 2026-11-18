@@ -1,9 +1,9 @@
 /**
-* @brief Ark RTOS Í¬²½Ô­Óï¶¨Òå£¨ÄÚºËÄÚ²¿Í·ÎÄ¼ş£©
-* @details ¶¨Òå¼ÆÊıĞÅºÅÁ¿Óë»¥³âËøµÄ¶ÔÏó½á¹¹¼°ÄÚºËÄÚ²¿½Ó¿Ú¡£
-*          ĞÅºÅÁ¿ÓÃÓÚ¿ØÖÆ¶ÔÓĞÏŞ×ÊÔ´µÄ·ÃÎÊ£¬»¥³âËøÓÃÓÚ»¥³â±£»¤²¢Ö§³ÖÓÅÏÈ¼¶¼Ì³Ğ¡£
-*          ¶şÕß¶¼Î¬»¤Ò»¸öµÈ´ıÕßÁĞ±í£¬ÊÍ·ÅÊ±ÓÅÏÈ»½ĞÑÓÅÏÈ¼¶×î¸ßµÄµÈ´ıÈÎÎñ¡£
-*          Ó¦ÓÃÒ»°ãÍ¨¹ı SDK »ò arkrtos.h Ê¹ÓÃ£¬²»Ö±½Ó°üº¬±¾ÎÄ¼ş¡£
+* @brief Ark RTOS åŒæ­¥åŸè¯­å®šä¹‰ï¼ˆå†…æ ¸å†…éƒ¨å¤´æ–‡ä»¶ï¼‰
+* @details å®šä¹‰è®¡æ•°ä¿¡å·é‡ä¸äº’æ–¥é”çš„å¯¹è±¡ç»“æ„åŠå†…æ ¸å†…éƒ¨æ¥å£ã€‚
+*          ä¿¡å·é‡ç”¨äºæ§åˆ¶å¯¹æœ‰é™èµ„æºçš„è®¿é—®ï¼Œäº’æ–¥é”ç”¨äºäº’æ–¥ä¿æŠ¤å¹¶æ”¯æŒä¼˜å…ˆçº§ç»§æ‰¿ã€‚
+*          äºŒè€…éƒ½ç»´æŠ¤ä¸€ä¸ªç­‰å¾…è€…åˆ—è¡¨ï¼Œé‡Šæ”¾æ—¶ä¼˜å…ˆå”¤é†’ä¼˜å…ˆçº§æœ€é«˜çš„ç­‰å¾…ä»»åŠ¡ã€‚
+*          åº”ç”¨ä¸€èˆ¬é€šè¿‡ SDK æˆ– arkrtos.h ä½¿ç”¨ï¼Œä¸ç›´æ¥åŒ…å«æœ¬æ–‡ä»¶ã€‚
 * @author xw
 * @date 2026.05.30
 */
@@ -15,45 +15,45 @@
 #include "arkrtos_task.h"
 #include "arkrtos_config.h"
 
-/* ·µ»ØÂë£ºÖµ²»µÃµ¥¶ÀĞŞ¸Ä£¨¶à¸öÃû×Ö¹²ÓÃ -1 ÊÇÓĞÒâµÄ£¬·ÖÃûÖ»Îª±íÒâ£©¡£
- * ×¢Òâ ARKRTOS_SYNC_ERR_TIMEOUT(-2) ÊÇµÈ´ı³¬Ê±£»WAITER_DUP(-2) ÊÇ
- * "ÒÑ¾­ÔÚµÈ´ı¶ÓÁĞÀï"µÄÍ¬Öµ²»Í¬ÒåÉÚ±ø¡£ */
-#define ARKRTOS_SYNC_ERR_PARAM     (-1)   /* ¾ä±ú/ÏÂ±ê/Êä³öÖ¸Õë·Ç·¨ */
-#define ARKRTOS_SYNC_ERR_HANDLE    (-1)   /* ¾ä±ú²»ÊÇ¸ÃÀàĞÍµÄ¶ÔÏó */
-#define ARKRTOS_SYNC_ERR_STATE     (-1)   /* ¶ÔÏóÎ´´´½¨ / ÒÑ±»É¾³ı */
-#define ARKRTOS_SYNC_ERR_CONTEXT   (-1)   /* µ±Ç°ÈÎÎñ²»¿ÉÓÃ / Î´ÄÜ½øÈë×èÈû */
-#define ARKRTOS_SYNC_ERR_NOSLOT    (-1)   /* ¶ÔÏó±íÒÑÂú */
-#define ARKRTOS_SYNC_ERR_NOSPACE   (-1)   /* µÈ´ı¶ÓÁĞÒÑÂú£¬µÇ¼Ç²»ÉÏµÈ´ıÕß */
-#define ARKRTOS_SYNC_ERR_NOTFOUND  (-1)   /* Õª³ıÊ±¸ÃÈÎÎñ²»ÔÚµÈ´ı¶ÓÁĞÀï */
-#define ARKRTOS_SYNC_ERR_RECURSIVE (-1)   /* Í¬Ò»ÈÎÎñÖØ¸´¼ÓËø£¨²»Ö§³Öµİ¹é£© */
-#define ARKRTOS_SYNC_ERR_OWNER     (-1)   /* ·Ç³ÖÓĞÕß½âËø */
-#define ARKRTOS_SYNC_WAITER_DUP    (-2)   /* Í¬Ò»ÈÎÎñÒÑÔÚµÈ´ı¶ÓÁĞÀï£¨µÈ¼ÛÓÚµÇ¼Ç³É¹¦£© */
+/* è¿”å›ç ï¼šå€¼ä¸å¾—å•ç‹¬ä¿®æ”¹ï¼ˆå¤šä¸ªåå­—å…±ç”¨ -1 æ˜¯æœ‰æ„çš„ï¼Œåˆ†ååªä¸ºè¡¨æ„ï¼‰ã€‚
+ * æ³¨æ„ ARKRTOS_SYNC_ERR_TIMEOUT(-2) æ˜¯ç­‰å¾…è¶…æ—¶ï¼›WAITER_DUP(-2) æ˜¯
+ * "å·²ç»åœ¨ç­‰å¾…é˜Ÿåˆ—é‡Œ"çš„åŒå€¼ä¸åŒä¹‰å“¨å…µã€‚ */
+#define ARKRTOS_SYNC_ERR_PARAM     (-1)   /* å¥æŸ„/ä¸‹æ ‡/è¾“å‡ºæŒ‡é’ˆéæ³• */
+#define ARKRTOS_SYNC_ERR_HANDLE    (-1)   /* å¥æŸ„ä¸æ˜¯è¯¥ç±»å‹çš„å¯¹è±¡ */
+#define ARKRTOS_SYNC_ERR_STATE     (-1)   /* å¯¹è±¡æœªåˆ›å»º / å·²è¢«åˆ é™¤ */
+#define ARKRTOS_SYNC_ERR_CONTEXT   (-1)   /* å½“å‰ä»»åŠ¡ä¸å¯ç”¨ / æœªèƒ½è¿›å…¥é˜»å¡ */
+#define ARKRTOS_SYNC_ERR_NOSLOT    (-1)   /* å¯¹è±¡è¡¨å·²æ»¡ */
+#define ARKRTOS_SYNC_ERR_NOSPACE   (-1)   /* ç­‰å¾…é˜Ÿåˆ—å·²æ»¡ï¼Œç™»è®°ä¸ä¸Šç­‰å¾…è€… */
+#define ARKRTOS_SYNC_ERR_NOTFOUND  (-1)   /* æ‘˜é™¤æ—¶è¯¥ä»»åŠ¡ä¸åœ¨ç­‰å¾…é˜Ÿåˆ—é‡Œ */
+#define ARKRTOS_SYNC_ERR_RECURSIVE (-1)   /* åŒä¸€ä»»åŠ¡é‡å¤åŠ é”ï¼ˆä¸æ”¯æŒé€’å½’ï¼‰ */
+#define ARKRTOS_SYNC_ERR_OWNER     (-1)   /* éæŒæœ‰è€…è§£é” */
+#define ARKRTOS_SYNC_WAITER_DUP    (-2)   /* åŒä¸€ä»»åŠ¡å·²åœ¨ç­‰å¾…é˜Ÿåˆ—é‡Œï¼ˆç­‰ä»·äºç™»è®°æˆåŠŸï¼‰ */
 
 
 typedef struct {
     char   name[8];
-    int32  count;                                       /* ¼ÆÊıÖµ£º>0 ±íÊ¾¿ÉÓÃ×ÊÔ´Êı£¬0 ±íÊ¾ĞèÅÅ¶ÓµÈ´ı */
-    uint8  used;                                        /* ¸Ã¶ÔÏóÊÇ·ñÒÑ±»Õ¼ÓÃ */
+    int32  count;                                       /* è®¡æ•°å€¼ï¼š>0 è¡¨ç¤ºå¯ç”¨èµ„æºæ•°ï¼Œ0 è¡¨ç¤ºéœ€æ’é˜Ÿç­‰å¾… */
+    uint8  used;                                        /* è¯¥å¯¹è±¡æ˜¯å¦å·²è¢«å ç”¨ */
     int32  creator_id;                                  /* creator task id; 0 = kernel. Dropped together with its creator's image */
-    arkrtos_task_t *waiters[ARKRTOS_WQ_SLOTS];      /* µÈ´ıÕßÁĞ±í */
+    arkrtos_task_t *waiters[ARKRTOS_WQ_SLOTS];      /* ç­‰å¾…è€…åˆ—è¡¨ */
 } arkrtos_sem_obj_t;
 
 typedef struct {
     char   name[8];
-    arkrtos_task_t *owner;                                /* µ±Ç°³ÖÓĞÕß£¬0 ±íÊ¾Î´ÉÏËø */
-    uint8  used;                                        /* ¸Ã¶ÔÏóÊÇ·ñÒÑ±»Õ¼ÓÃ */
-    uint8  orig_priority;                               /* ³ÖÓĞÕßÔ­Ê¼ÓÅÏÈ¼¶£¬ÓÃÓÚÓÅÏÈ¼¶¼Ì³Ğºó»Ö¸´ */
-    uint8  recursive;                                   /* 1 = µİ¹éËø£»Ö»ÓĞ ARKRTOS_USE_MTX_RECURSIVE=1 ²Å»á±»ÖÃÎ» */
-    uint8  nest;                                        /* µİ¹éÉî¶È£º0 = Î´ÉÏËø£¬1 = µÚÒ»´Î³ÖÓĞ */
+    arkrtos_task_t *owner;                                /* å½“å‰æŒæœ‰è€…ï¼Œ0 è¡¨ç¤ºæœªä¸Šé” */
+    uint8  used;                                        /* è¯¥å¯¹è±¡æ˜¯å¦å·²è¢«å ç”¨ */
+    uint8  orig_priority;                               /* æŒæœ‰è€…åŸå§‹ä¼˜å…ˆçº§ï¼Œç”¨äºä¼˜å…ˆçº§ç»§æ‰¿åæ¢å¤ */
+    uint8  recursive;                                   /* 1 = é€’å½’é”ï¼›åªæœ‰ ARKRTOS_USE_MTX_RECURSIVE=1 æ‰ä¼šè¢«ç½®ä½ */
+    uint8  nest;                                        /* é€’å½’æ·±åº¦ï¼š0 = æœªä¸Šé”ï¼Œ1 = ç¬¬ä¸€æ¬¡æŒæœ‰ */
     int32  creator_id;                                  /* creator task id; 0 = kernel. Dropped together with its creator's image */
-    arkrtos_task_t *waiters[ARKRTOS_WQ_SLOTS];      /* µÈ´ıÕßÁĞ±í */
+    arkrtos_task_t *waiters[ARKRTOS_WQ_SLOTS];      /* ç­‰å¾…è€…åˆ—è¡¨ */
 } arkrtos_mtx_obj_t;
 
 typedef struct {
     char   name[8];
-    uint8  used;                                        /* ¸Ã¶ÔÏóÊÇ·ñÒÑ±»Õ¼ÓÃ */
+    uint8  used;                                        /* è¯¥å¯¹è±¡æ˜¯å¦å·²è¢«å ç”¨ */
     int32  creator_id;                                  /* creator task id; 0 = kernel */
-    arkrtos_task_t *waiters[ARKRTOS_WQ_SLOTS];      /* µÈ´ıÕßÁĞ±í£¨signal °´ÓÅÏÈ¼¶ÌôÒ»¸ö£© */
+    arkrtos_task_t *waiters[ARKRTOS_WQ_SLOTS];      /* ç­‰å¾…è€…åˆ—è¡¨ï¼ˆsignal æŒ‰ä¼˜å…ˆçº§æŒ‘ä¸€ä¸ªï¼‰ */
 } arkrtos_cond_obj_t;
 
 void  arkrtos_sync_module_init(void);
@@ -65,8 +65,8 @@ int32 arkrtos_sem_delete_internal(int32 handle);
 
 int32 arkrtos_mtx_create_internal(char *name);
 #if (ARKRTOS_USE_MTX_RECURSIVE == 1)
-/* µİ¹é»¥³âËø£ºÍ¬Ò»ÈÎÎñ¿ÉÖØ¸´¼ÓËø£¬nest ¼ÆÊı£»½âËøµ½ nest==0 ²ÅÕæÕıÊÍ·Å¡£
- * ¿Éµİ¹éÊÇ´´½¨Ê±¾ö¶¨µÄÊôĞÔ¡ª¡ªÆÕÍ¨ËøÖØ¸´¼ÓËøÈÔÈ»·µ»Ø RECURSIVE(-1)¡£ */
+/* é€’å½’äº’æ–¥é”ï¼šåŒä¸€ä»»åŠ¡å¯é‡å¤åŠ é”ï¼Œnest è®¡æ•°ï¼›è§£é”åˆ° nest==0 æ‰çœŸæ­£é‡Šæ”¾ã€‚
+ * å¯é€’å½’æ˜¯åˆ›å»ºæ—¶å†³å®šçš„å±æ€§â€”â€”æ™®é€šé”é‡å¤åŠ é”ä»ç„¶è¿”å› RECURSIVE(-1)ã€‚ */
 int32 arkrtos_mtx_create_recursive_internal(char *name);
 #endif
 int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms);
@@ -74,8 +74,8 @@ int32 arkrtos_mtx_unlock_internal(int32 handle);
 int32 arkrtos_mtx_delete_internal(int32 handle);
 
 int32 arkrtos_cond_create_internal(char *name);
-/* timeout_ms == (uint32)-1 ±íÊ¾ÎŞÏŞµÈ´ı£»·µ»ØÖµ¼û ARKRTOS_SYNC_ERR_x¡£
- * Ô¼¶¨£ºµ÷ÓÃÕß±ØĞë³ÖÓĞ mtx£»º¯Êı·µ»ØÊ±£¨º¬³¬Ê±£©Ò»¶¨ÖØĞÂ³ÖÓĞËü¡£ */
+/* timeout_ms == (uint32)-1 è¡¨ç¤ºæ— é™ç­‰å¾…ï¼›è¿”å›å€¼è§ ARKRTOS_SYNC_ERR_xã€‚
+ * çº¦å®šï¼šè°ƒç”¨è€…å¿…é¡»æŒæœ‰ mtxï¼›å‡½æ•°è¿”å›æ—¶ï¼ˆå«è¶…æ—¶ï¼‰ä¸€å®šé‡æ–°æŒæœ‰å®ƒã€‚ */
 int32 arkrtos_cond_wait_internal(int32 cond_handle, int32 mtx_handle, int32 timeout_ms);
 int32 arkrtos_cond_signal_internal(int32 handle);
 int32 arkrtos_cond_broadcast_internal(int32 handle);
@@ -86,9 +86,9 @@ int32 arkrtos_cond_enqueue_internal(int32 cond_handle);
 int32 arkrtos_cond_poll_internal(int32 cond_handle);
 int32 arkrtos_cond_abort_internal(int32 cond_handle);
 
-/* ÈÎÎñÏÂÏßÊÕÊ¬£º°ÑÈÎÎñ´ÓËùÓĞĞÅºÅÁ¿/»¥³âËøµÄµÈ´ı¶ÓÁĞÕª³ı£¬
- * ²¢°ÑËü³ÖÓĞµÄ»¥³âËøÒÆ½»¸øÓÅÏÈ¼¶×î¸ßµÄµÈ´ıÕß£¨ÎŞµÈ´ıÕßÔòÊÍ·Å£©¡£
- * µ÷ÓÃ·½Ğè×ÔĞĞ±£Ö¤ÁÙ½çÇø£»Ò»°ã¾­ arkrtos_task_release_resources() µ÷ÓÃ¡£ */
+/* ä»»åŠ¡ä¸‹çº¿æ”¶å°¸ï¼šæŠŠä»»åŠ¡ä»æ‰€æœ‰ä¿¡å·é‡/äº’æ–¥é”çš„ç­‰å¾…é˜Ÿåˆ—æ‘˜é™¤ï¼Œ
+ * å¹¶æŠŠå®ƒæŒæœ‰çš„äº’æ–¥é”ç§»äº¤ç»™ä¼˜å…ˆçº§æœ€é«˜çš„ç­‰å¾…è€…ï¼ˆæ— ç­‰å¾…è€…åˆ™é‡Šæ”¾ï¼‰ã€‚
+ * è°ƒç”¨æ–¹éœ€è‡ªè¡Œä¿è¯ä¸´ç•ŒåŒºï¼›ä¸€èˆ¬ç» arkrtos_task_release_resources() è°ƒç”¨ã€‚ */
 void  arkrtos_sync_release_task(int32 task_id);
 
 /* Diagnostics for the token-conservation rules (defined in arkrtos_sync.c). */
@@ -138,10 +138,10 @@ uint32 arkrtos_sync_mtx_num(void);
 uint32 arkrtos_sync_cond_num(void);
 
 #if (ARKRTOS_USE_WAITMULTI == 1)
-/* ¶à¶ÔÏóÌ½²âÓÃµÄÖ»¶Á¡¸¾ÍĞ÷¡¹²éÑ¯£º1=¾ÍĞ÷ / 0=Î´¾ÍĞ÷ / -1=¾ä±ú²»¿ÉÓÃ¡£
- * ¶¼²»Ïû·ÑÁîÅÆ¡¢²»¸Ä¶ÔÏó×´Ì¬¡£ĞÅºÅÁ¿µÄ¾ÍĞ÷ÊÇ count>0£»»¥³âËøµÄ¾ÍĞ÷ÊÇ
- * owner==0£¨¼´¡¸ÏÖÔÚÄÜ¼ÓÉÏ¡¹£©¡£×¢Òâ£ºÓĞµÈ´ıÕßÅÅ¶ÓÊ±ÁîÅÆ/ËøÔÚÌ½²âÖ®ºó
- * ¿ÉÄÜÏÈ±»¶ÓÊ×ÄÃ×ß£¬Ì½²âÖ»´ú±í¡¸´Ë¿Ì¿ÉÂú×ã¡¹¡£ */
+/* å¤šå¯¹è±¡æ¢æµ‹ç”¨çš„åªè¯»ã€Œå°±ç»ªã€æŸ¥è¯¢ï¼š1=å°±ç»ª / 0=æœªå°±ç»ª / -1=å¥æŸ„ä¸å¯ç”¨ã€‚
+ * éƒ½ä¸æ¶ˆè´¹ä»¤ç‰Œã€ä¸æ”¹å¯¹è±¡çŠ¶æ€ã€‚ä¿¡å·é‡çš„å°±ç»ªæ˜¯ count>0ï¼›äº’æ–¥é”çš„å°±ç»ªæ˜¯
+ * owner==0ï¼ˆå³ã€Œç°åœ¨èƒ½åŠ ä¸Šã€ï¼‰ã€‚æ³¨æ„ï¼šæœ‰ç­‰å¾…è€…æ’é˜Ÿæ—¶ä»¤ç‰Œ/é”åœ¨æ¢æµ‹ä¹‹å
+ * å¯èƒ½å…ˆè¢«é˜Ÿé¦–æ‹¿èµ°ï¼Œæ¢æµ‹åªä»£è¡¨ã€Œæ­¤åˆ»å¯æ»¡è¶³ã€ã€‚ */
 int32 arkrtos_sem_ready_internal(int32 handle);
 int32 arkrtos_mtx_ready_internal(int32 handle);
 #endif /* ARKRTOS_USE_WAITMULTI == 1 */

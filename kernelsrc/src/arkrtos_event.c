@@ -1,6 +1,6 @@
 /**
-* @brief Ark RTOS ÊÂ¼şÄ£¿éÊµÏÖ
-* @details ÊµÏÖÊÂ¼şµÄ´´½¨¡¢µÈ´ıºÍÉèÖÃ¹¦ÄÜ
+* @brief Ark RTOS äº‹ä»¶æ¨¡å—å®ç°
+* @details å®ç°äº‹ä»¶çš„åˆ›å»ºã€ç­‰å¾…å’Œè®¾ç½®åŠŸèƒ½
 * @author xw
 * @date 2026.05.03
 */
@@ -66,7 +66,7 @@ void arkrtos_event_module_init(void)
     }
 }
 
-/* ÈÎÎñÏÂÏßÊÕÊ¬£º°ÑÈÎÎñ´ÓËùÓĞÊÂ¼şµÄµÈ´ı¶ÓÁĞÕª³ı£¨µ÷ÓÃ·½ĞèÒÑ³ÖÁÙ½çÇø£© */
+/* ä»»åŠ¡ä¸‹çº¿æ”¶å°¸ï¼šæŠŠä»»åŠ¡ä»æ‰€æœ‰äº‹ä»¶çš„ç­‰å¾…é˜Ÿåˆ—æ‘˜é™¤ï¼ˆè°ƒç”¨æ–¹éœ€å·²æŒä¸´ç•ŒåŒºï¼‰ */
 void arkrtos_event_release_task(int32 task_id)
 {
     arkrtos_task_t *p_tsk;
@@ -114,7 +114,7 @@ void arkrtos_event_release_task(int32 task_id)
 
 int32 arkrtos_event_set_from_isr(int32 event_handle)
 {
-    /* ÖĞ¶ÏÉÏÏÂÎÄ°²È«£ºset ÄÚ²¿²»×èÈû */
+    /* ä¸­æ–­ä¸Šä¸‹æ–‡å®‰å…¨ï¼šset å†…éƒ¨ä¸é˜»å¡ */
     arkrtos_event_set_internal(event_handle);
     return 0;
 }
@@ -177,7 +177,7 @@ int32 arkrtos_event_wait_internal(int32 event_handle, int32 timeout_ms)
 
     ARKRTOS_DISABLE_IRQ();
 
-    /* ÒÑ¾­ÖÃÎ»¹ı£ºÖ±½ÓÏû·Ñµô£¬²»×èÈû£¨·ñÔò¡°ÏÈ set ºó wait¡±»á¶ªµôÕâ´ÎÖÃÎ»£© */
+    /* å·²ç»ç½®ä½è¿‡ï¼šç›´æ¥æ¶ˆè´¹æ‰ï¼Œä¸é˜»å¡ï¼ˆå¦åˆ™â€œå…ˆ set å waitâ€ä¼šä¸¢æ‰è¿™æ¬¡ç½®ä½ï¼‰ */
     if(arkrtos_events[idx].flag != 0u)
     {
         arkrtos_events[idx].flag = 0u;
@@ -185,8 +185,8 @@ int32 arkrtos_event_wait_internal(int32 event_handle, int32 timeout_ms)
         return 0;
     }
 
-    /* timeout==0 ±íÊ¾¡°Ö»ÊÔÒ»´Î¡¢²»µÈ´ı¡±£ºµ±Ç°Î´ÖÃÎ»Á¢¼´±¨³¬Ê±£¬
-     * ²»µÇ¼ÇµÈ´ıÕß¡¢²»×èÈû¡£ */
+    /* timeout==0 è¡¨ç¤ºâ€œåªè¯•ä¸€æ¬¡ã€ä¸ç­‰å¾…â€ï¼šå½“å‰æœªç½®ä½ç«‹å³æŠ¥è¶…æ—¶ï¼Œ
+     * ä¸ç™»è®°ç­‰å¾…è€…ã€ä¸é˜»å¡ã€‚ */
     if(timeout_ms == 0)
     {
         /* Try once, and drop a leftover registration: event_set would
@@ -206,8 +206,8 @@ int32 arkrtos_event_wait_internal(int32 event_handle, int32 timeout_ms)
         return ARKRTOS_EVENT_ERR_CONTEXT;
     }
 
-    /* µÈ´ı¶ÓÁĞÂúÊ±±ØĞë±¨´í·µ»Ø£ºÔ­ÏÈÖ»Ìø¹ıµÇ¼ÇÈÔÈ»Ë¯ÏÂÈ¥£¬
-     * set Ê±±éÀú²»µ½Ëü£¬¸ÃÈÎÎñ»áÓÀ¾Ã×èÈû¡£ */
+    /* ç­‰å¾…é˜Ÿåˆ—æ»¡æ—¶å¿…é¡»æŠ¥é”™è¿”å›ï¼šåŸå…ˆåªè·³è¿‡ç™»è®°ä»ç„¶ç¡ä¸‹å»ï¼Œ
+     * set æ—¶éå†ä¸åˆ°å®ƒï¼Œè¯¥ä»»åŠ¡ä¼šæ°¸ä¹…é˜»å¡ã€‚ */
     {
         int32 added = arkrtos_event_waiter_add(arkrtos_events[idx].waiting_tasks, p_tsk);
 
@@ -229,7 +229,7 @@ int32 arkrtos_event_wait_internal(int32 event_handle, int32 timeout_ms)
         return ARKRTOS_SYNC_ERR_WOULDBLOCK;
     }
 
-    /* µÇ¼ÇÓëÖÃ WAIT Í¬´¦Ò»¸öÁÙ½çÇø£¨¹ØÖĞ¶Ï½øÈë¡¢¹ØÖĞ¶Ï·µ»Ø£©£¬Ïû³ı¶ª»½ĞÑ´°¿Ú */
+    /* ç™»è®°ä¸ç½® WAIT åŒå¤„ä¸€ä¸ªä¸´ç•ŒåŒºï¼ˆå…³ä¸­æ–­è¿›å…¥ã€å…³ä¸­æ–­è¿”å›ï¼‰ï¼Œæ¶ˆé™¤ä¸¢å”¤é†’çª—å£ */
     arkrtos_trace_wait_obj(MDK_TRACE_ARKRTOS_OBJ(MDK_TRACE_ARKRTOS_CLASS_EVENT, idx));
     reason = arkrtos_task_block_in_critical((uint32)timeout_ms);
 
@@ -278,7 +278,7 @@ void arkrtos_event_set_internal(int32 event_handle)
 
     ARKRTOS_DISABLE_IRQ();
 
-    /* ¼ÇÂ¼ÖÃÎ»£ºÃ»ÓĞµÈ´ıÕßÊ±Áô¸øÏÂÒ»´Î wait Ïû·Ñ£¬±ÜÃâ¡°ÏÈ set ºó wait¡±¶ªÊÂ¼ş */
+    /* è®°å½•ç½®ä½ï¼šæ²¡æœ‰ç­‰å¾…è€…æ—¶ç•™ç»™ä¸‹ä¸€æ¬¡ wait æ¶ˆè´¹ï¼Œé¿å…â€œå…ˆ set å waitâ€ä¸¢äº‹ä»¶ */
     arkrtos_events[idx].flag = 1u;
 
     for(j = 0; j < ARKRTOS_WQ_SLOTS; j++)
@@ -298,7 +298,7 @@ void arkrtos_event_set_internal(int32 event_handle)
 
     ARKRTOS_ENABLE_IRQ();
 
-    /* Ô­ÏÈÖ»ÖÃ READY ²»´¥·¢ÇĞ»»£¬±»»½ĞÑµÄÈÎÎñÒªµÈµ½ÏÂÒ»´Î tick ²ÅÔËĞĞ */
+    /* åŸå…ˆåªç½® READY ä¸è§¦å‘åˆ‡æ¢ï¼Œè¢«å”¤é†’çš„ä»»åŠ¡è¦ç­‰åˆ°ä¸‹ä¸€æ¬¡ tick æ‰è¿è¡Œ */
     ARKRTOS_SWITCH_TASK();
 }
 

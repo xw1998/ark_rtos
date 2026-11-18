@@ -1,7 +1,7 @@
 /**
-* @brief Ark RTOS ÈÎÎñÅäÖÃÓëÈÎÎñ±íÉùÃ÷
-* @details ÉùÃ÷È«¾ÖÈÎÎñ±í¡¢ÈÎÎñ¼ÆÊı£¬ÒÔ¼°ÈÎÎñÅäÖÃ¼ÓÔØÓëÈÎÎñÕ»³õÊ¼»¯½Ó¿Ú¡£
-*          arkrtos_cfg_load ÔÚÄÚºËÆô¶¯Ê±¼ÓÔØÈÎÎñÅäÖÃ£¬arkrtos_task_stack_init ³õÊ¼»¯ÈÎÎñÕ»Ö¡¡£
+* @brief Ark RTOS ä»»åŠ¡é…ç½®ä¸ä»»åŠ¡è¡¨å£°æ˜
+* @details å£°æ˜å…¨å±€ä»»åŠ¡è¡¨ã€ä»»åŠ¡è®¡æ•°ï¼Œä»¥åŠä»»åŠ¡é…ç½®åŠ è½½ä¸ä»»åŠ¡æ ˆåˆå§‹åŒ–æ¥å£ã€‚
+*          arkrtos_cfg_load åœ¨å†…æ ¸å¯åŠ¨æ—¶åŠ è½½ä»»åŠ¡é…ç½®ï¼Œarkrtos_task_stack_init åˆå§‹åŒ–ä»»åŠ¡æ ˆå¸§ã€‚
 */
 
 #ifndef __ARKRTOS_CFG_H__
@@ -11,9 +11,9 @@
 #include "arkrtos_task.h"
 #include "arkrtos_config.h"
 
-/* ·µ»ØÂë£ºÖµ²»µÃµ¥¶ÀĞŞ¸Ä¡£ */
-#define ARKRTOS_CFG_ERR_PARAM  (-1)   /* ²ÎÊı·Ç·¨ */
-#define ARKRTOS_CFG_ERR_NOSLOT (-1)   /* ÈÎÎñ±íÒÑÂú */
+/* è¿”å›ç ï¼šå€¼ä¸å¾—å•ç‹¬ä¿®æ”¹ã€‚ */
+#define ARKRTOS_CFG_ERR_PARAM  (-1)   /* å‚æ•°éæ³• */
+#define ARKRTOS_CFG_ERR_NOSLOT (-1)   /* ä»»åŠ¡è¡¨å·²æ»¡ */
 
 
 extern arkrtos_task_t arkrtos_task_table[ARKRTOS_TASK_MAX_NUM];
@@ -22,10 +22,10 @@ extern int32 arkrtos_task_count;
 void arkrtos_cfg_load(void);
 #if (ARKRTOS_USE_STACK_USAGE == 1)
 /**
-* @brief ÓÃÌî³äÍ¼°¸¸²¸ÇÕû¶ÎÈÎÎñÕ»£¨Õ»µ×±£»¤×Ö³ıÍâ£©
-* @param stack_bottom Õ»µ×µØÖ·
-* @param stack_size   Õ»´óĞ¡£¨×Ö½Ú£©
-* @note ½öÔÚÈÎÎñ´´½¨/ÖØ½¨Ê±µ÷ÓÃ£¬ÓÃÓÚºóĞøÍ³¼Æ·åÖµÕ»ÓÃÁ¿¡£
+* @brief ç”¨å¡«å……å›¾æ¡ˆè¦†ç›–æ•´æ®µä»»åŠ¡æ ˆï¼ˆæ ˆåº•ä¿æŠ¤å­—é™¤å¤–ï¼‰
+* @param stack_bottom æ ˆåº•åœ°å€
+* @param stack_size   æ ˆå¤§å°ï¼ˆå­—èŠ‚ï¼‰
+* @note ä»…åœ¨ä»»åŠ¡åˆ›å»º/é‡å»ºæ—¶è°ƒç”¨ï¼Œç”¨äºåç»­ç»Ÿè®¡å³°å€¼æ ˆç”¨é‡ã€‚
 */
 void arkrtos_task_stack_fill(uint32 *stack_bottom, uint32 stack_size);
 #endif

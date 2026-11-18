@@ -1,6 +1,6 @@
 /**
-* @brief �豸��������ģ�飨HAL��汾��
-* @details ʹ�� HAL ���ʼ�� UART���ж��շ�ʹ�üĴ���ֱ����
+* @brief 设备串口驱动模块（HAL库版本）
+* @details 使用 HAL 库初始化 UART，中断收发使用寄存器直操作
 * @author xw
 * @date 2026.05.03
 */

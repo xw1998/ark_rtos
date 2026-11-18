@@ -80,7 +80,7 @@ void NMI_Handler(void)
 
 /**
   * @brief This function handles Hard fault interrupt.
-  * @note  ÓÉ ARKRTOS ÄÚºË½Ó¹Ü£¨¼û arkrtos_board.c Í¬Ãûº¯Êı£©£¬´Ë´¦ÕûÌåÆÁ±Î
+  * @note  ç”± ARKRTOS å†…æ ¸æ¥ç®¡ï¼ˆè§ arkrtos_board.c åŒåå‡½æ•°ï¼‰ï¼Œæ­¤å¤„æ•´ä½“å±è”½
   */
 #if 0
 void HardFault_Handler(void)
@@ -98,8 +98,8 @@ void HardFault_Handler(void)
 
 /**
   * @brief This function handles Memory management fault.
-  * @note  ÓÉ ARKRTOS ½Ó¹Ü£¬ÊµÏÖÔÚ board/stm32f427/arkrtos_board.c£¬
-  *        ¾­ arkrtos_cpu_fault_handler() ×öÈÎÎñ¼¶¹ÊÕÏ»Ö¸´¡£
+  * @note  ç”± ARKRTOS æ¥ç®¡ï¼Œå®ç°åœ¨ board/stm32f427/arkrtos_board.cï¼Œ
+  *        ç» arkrtos_cpu_fault_handler() åšä»»åŠ¡çº§æ•…éšœæ¢å¤ã€‚
   */
 #if 0
 void MemManage_Handler(void)
@@ -117,8 +117,8 @@ void MemManage_Handler(void)
 
 /**
   * @brief This function handles Pre-fetch fault, memory access fault.
-  * @note  ÓÉ ARKRTOS ½Ó¹Ü£¬ÊµÏÖÔÚ board/stm32f427/arkrtos_board.c£¬
-  *        ¾­ arkrtos_cpu_fault_handler() ×öÈÎÎñ¼¶¹ÊÕÏ»Ö¸´¡£
+  * @note  ç”± ARKRTOS æ¥ç®¡ï¼Œå®ç°åœ¨ board/stm32f427/arkrtos_board.cï¼Œ
+  *        ç» arkrtos_cpu_fault_handler() åšä»»åŠ¡çº§æ•…éšœæ¢å¤ã€‚
   */
 #if 0
 void BusFault_Handler(void)
@@ -136,8 +136,8 @@ void BusFault_Handler(void)
 
 /**
   * @brief This function handles Undefined instruction or illegal state.
-  * @note  ÓÉ ARKRTOS ½Ó¹Ü£¬ÊµÏÖÔÚ board/stm32f427/arkrtos_board.c£¬
-  *        ¾­ arkrtos_cpu_fault_handler() ×öÈÎÎñ¼¶¹ÊÕÏ»Ö¸´¡£
+  * @note  ç”± ARKRTOS æ¥ç®¡ï¼Œå®ç°åœ¨ board/stm32f427/arkrtos_board.cï¼Œ
+  *        ç» arkrtos_cpu_fault_handler() åšä»»åŠ¡çº§æ•…éšœæ¢å¤ã€‚
   */
 #if 0
 void UsageFault_Handler(void)
@@ -155,7 +155,7 @@ void UsageFault_Handler(void)
 
 /**
   * @brief This function handles System service call via SWI instruction.
-  * @note  ÓÉ ARKRTOS ÄÚºË½Ó¹Ü£¨¶Ë¿Ú²ã»ã±àÊµÏÖ SVC_Handler£©£¬´Ë´¦ÕûÌåÆÁ±Î
+  * @note  ç”± ARKRTOS å†…æ ¸æ¥ç®¡ï¼ˆç«¯å£å±‚æ±‡ç¼–å®ç° SVC_Handlerï¼‰ï¼Œæ­¤å¤„æ•´ä½“å±è”½
   */
 #if 0
 void SVC_Handler(void)
@@ -184,7 +184,7 @@ void DebugMon_Handler(void)
 
 /**
   * @brief This function handles Pendable request for system service.
-  * @note  ÓÉ ARKRTOS ÄÚºË½Ó¹Ü£¨¶Ë¿Ú²ã»ã±àÊµÏÖ PendSV_Handler£©£¬´Ë´¦ÕûÌåÆÁ±Î
+  * @note  ç”± ARKRTOS å†…æ ¸æ¥ç®¡ï¼ˆç«¯å£å±‚æ±‡ç¼–å®ç° PendSV_Handlerï¼‰ï¼Œæ­¤å¤„æ•´ä½“å±è”½
   */
 #if 0
 void PendSV_Handler(void)
@@ -200,9 +200,9 @@ void PendSV_Handler(void)
 
 /**
   * @brief This function handles System tick timer.
-  * @note  ÓÉ ARKRTOS ÄÚºË½Ó¹Ü£¨¼û arkrtos_board.c Í¬Ãûº¯Êı£©£¬´Ë´¦ÕûÌåÆÁ±Î
-  *        ±¾º¯ÊıÀïµÄ HAL_IncTick() ËæÖ®Ò»²¢ÆÁ±Î£¬¸ÄÓÉ arkrtos_board.c µÄ
-  *        SysTick_Handler °´ÕûºÁÃë²¹µ÷£¨HAL_Delay/HAL_GetTick ÒÀÀµËü£©¡£
+  * @note  ç”± ARKRTOS å†…æ ¸æ¥ç®¡ï¼ˆè§ arkrtos_board.c åŒåå‡½æ•°ï¼‰ï¼Œæ­¤å¤„æ•´ä½“å±è”½
+  *        æœ¬å‡½æ•°é‡Œçš„ HAL_IncTick() éšä¹‹ä¸€å¹¶å±è”½ï¼Œæ”¹ç”± arkrtos_board.c çš„
+  *        SysTick_Handler æŒ‰æ•´æ¯«ç§’è¡¥è°ƒï¼ˆHAL_Delay/HAL_GetTick ä¾èµ–å®ƒï¼‰ã€‚
   */
 #if 0
 void SysTick_Handler(void)

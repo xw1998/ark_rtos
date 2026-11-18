@@ -1,20 +1,20 @@
 /**
-* @brief Ark RTOS Driver SDK Ê¾ÀıÇı¶¯ - ÎÂ¶È´«¸ĞÆ÷£¨Ä£Äâ£©
-* @details ÑİÊ¾¶ÀÁ¢Çı¶¯µÄ×îĞ¡ÊµÏÖ£ºarkrtos_dev_drv_t Îå¸ö½Ó¿Ú + DrvMain ×¢²á¡£
-*          ¿É±àÒëÎª¶ÀÁ¢ .bin ¹Ì¼ş£¬ÉÕÂ¼µ½Çı¶¯³Ø·ÖÇø£¨ÆğÊ¼ 0x08040000£©¡£
-*          Ó¦ÓÃ²àÓÃ arkrtos_dev_open("TEMP", 0) ¼´¿É°´Éè±¸Ãû·ÃÎÊ¡£
-*          ×¢²á¾­ SVC 0x14£¬ÓÉ arkrtos_driver_bridge.c ×ª·¢µ½ÄÚºË¡£
+* @brief Ark RTOS Driver SDK ç¤ºä¾‹é©±åŠ¨ - æ¸©åº¦ä¼ æ„Ÿå™¨ï¼ˆæ¨¡æ‹Ÿï¼‰
+* @details æ¼”ç¤ºç‹¬ç«‹é©±åŠ¨çš„æœ€å°å®ç°ï¼šarkrtos_dev_drv_t äº”ä¸ªæ¥å£ + DrvMain æ³¨å†Œã€‚
+*          å¯ç¼–è¯‘ä¸ºç‹¬ç«‹ .bin å›ºä»¶ï¼Œçƒ§å½•åˆ°é©±åŠ¨æ± åˆ†åŒºï¼ˆèµ·å§‹ 0x08040000ï¼‰ã€‚
+*          åº”ç”¨ä¾§ç”¨ arkrtos_dev_open("TEMP", 0) å³å¯æŒ‰è®¾å¤‡åè®¿é—®ã€‚
+*          æ³¨å†Œç» SVC 0x14ï¼Œç”± arkrtos_driver_bridge.c è½¬å‘åˆ°å†…æ ¸ã€‚
 */
 
 #include "arkrtos_driver_sdk.h"
 
-/* ¿ØÖÆÃüÁîÂë */
-#define TEMP_CTRL_SET_UNIT   (0x0100)   /* 0=ÉãÊÏ¶È£¬1=»ªÊÏ¶È */
+/* æ§åˆ¶å‘½ä»¤ç  */
+#define TEMP_CTRL_SET_UNIT   (0x0100)   /* 0=æ‘„æ°åº¦ï¼Œ1=åæ°åº¦ */
 
 typedef struct {
     arkrtos_dev_hdr_t hdr;
-    uint8   unit;           /* µ¥Î»£¨0=ÉãÊÏ¶È£¬1=»ªÊÏ¶È£© */
-    int16   last_temp;      /* ×î½üÒ»´Î¶ÁÊı£¬ÒÔ 0.1 ¶ÈÎªµ¥Î» */
+    uint8   unit;           /* å•ä½ï¼ˆ0=æ‘„æ°åº¦ï¼Œ1=åæ°åº¦ï¼‰ */
+    int16   last_temp;      /* æœ€è¿‘ä¸€æ¬¡è¯»æ•°ï¼Œä»¥ 0.1 åº¦ä¸ºå•ä½ */
     uint8   opened;
 } temp_dev_obj_t;
 
@@ -24,7 +24,7 @@ static arkrtos_dev_hdr_t *temp_drv_open(uint32 dev_id, uint32 param)
 {
     (void)dev_id; (void)param;
     temp_obj.unit           = 0;
-    temp_obj.last_temp      = 250;       /* 25.0 ¶È£¨ÒÔ 0.1 ¶ÈÎªµ¥Î»£© */
+    temp_obj.last_temp      = 250;       /* 25.0 åº¦ï¼ˆä»¥ 0.1 åº¦ä¸ºå•ä½ï¼‰ */
     temp_obj.hdr.block_size = 2;
     temp_obj.opened         = 1;
     return (arkrtos_dev_hdr_t *)&temp_obj;
@@ -49,7 +49,7 @@ static int32 temp_drv_read(arkrtos_dev_hdr_t *obj, uint8 *pdata, int32 len)
 
     v = p->last_temp;
     if(p->unit == 1)
-        v = (int16)(v * 9 / 5 + 320);   /* ÉãÊÏ¶È×ª»ªÊÏ¶È£¬Í¬Ñù°´ 0.1 ¶ÈµÄ¶¨µã±íÊ¾ */
+        v = (int16)(v * 9 / 5 + 320);   /* æ‘„æ°åº¦è½¬åæ°åº¦ï¼ŒåŒæ ·æŒ‰ 0.1 åº¦çš„å®šç‚¹è¡¨ç¤º */
 
     pdata[0] = (uint8)(v & 0xFF);
     pdata[1] = (uint8)((v >> 8) & 0xFF);
@@ -59,7 +59,7 @@ static int32 temp_drv_read(arkrtos_dev_hdr_t *obj, uint8 *pdata, int32 len)
 static int32 temp_drv_write(arkrtos_dev_hdr_t *obj, uint8 *pdata, int32 len)
 {
     (void)obj; (void)pdata; (void)len;
-    return ARKRTOS_DRV_ERROR;   /* ÎÂ¶ÈÖ»¶Á£¬²»Ö§³ÖĞ´Èë */
+    return ARKRTOS_DRV_ERROR;   /* æ¸©åº¦åªè¯»ï¼Œä¸æ”¯æŒå†™å…¥ */
 }
 
 static int32 temp_drv_ctrl(arkrtos_dev_hdr_t *obj, uint32 code, uint32 value)

@@ -1,7 +1,7 @@
 /**
-* @brief Ark RTOS �豸������ܣ��ں��ڲ���
-* @details �ṩͳһ���豸�����ӿںͶ�̬����ע�����
-*          ���ļ������ں��ڲ�ʹ�ã�Ӧ�ó���Ӧʹ�� arkrtos.h
+* @brief Ark RTOS 设备驱动框架（内核内部）
+* @details 提供统一的设备驱动接口和动态驱动注册机制
+*          此文件仅供内核内部使用，应用程序应使用 arkrtos.h
 */
 
 #ifndef __ARKRTOS_DEV_H__
@@ -9,17 +9,17 @@
 
 #include "arkrtos_def.h"
 #include "arkrtos_config.h"
-/* ����ֵԼ����0 �ɹ�����ֵʧ�ܡ�ԭ��ʧ�ܴ�һ��д�� -1/-2�������뿴����
- * ��Ϊʲôʧ�ܡ���������Щ���ְ�ԭ��д�����룬**ֵ���õ����޸�**
- * ��������ֹ���ͬһ��ֵ������ģ�����ֻΪ���⣩�� */
-#define ARKRTOS_DEV_ERR_PARAM    (-1)   /* ����/������/�������Ϊ�ջ򳤶ȷǷ� */
-#define ARKRTOS_DEV_ERR_ARG      (-2)   /* ע��ʱ���ֻ�����ָ��Ϊ�գ���ʷֵ�� -2�����øĳ� -1�� */
-#define ARKRTOS_DEV_ERR_EXIST    (-2)   /* ͬ���豸��ע�ᣨ��ʷֵ�� -2�����øĳ� -1�� */
-#define ARKRTOS_DEV_ERR_NOTFOUND (-1)   /* �豸����û��������� / ����ȱ��Ӧ��� */
-#define ARKRTOS_DEV_ERR_HANDLE   (-1)   /* ��������豸����־λ/��λ�±겻�ԣ� */
-#define ARKRTOS_DEV_ERR_STATE    (-1)   /* ��λ��ע�� / �豸��ǰû�д�ʵ�� */
-#define ARKRTOS_DEV_ERR_NOIMPL   (-1)   /* ����û��ʵ�� read/write/ctrl �е���һ�� */
-#define ARKRTOS_DEV_ERR_NOSLOT   (-1)   /* �豸��������ע�᲻��ȥ */
+/* 返回值约定：0 成功，负值失败。原先失败处一律写裸 -1/-2，读代码看不出
+ * 「为什么失败」；下面这些名字把原因写进代码，**值不得单独修改**
+ * （多个名字共用同一个值是有意的，分名只为表意）。 */
+#define ARKRTOS_DEV_ERR_PARAM    (-1)   /* 名字/描述符/输出缓冲为空或长度非法 */
+#define ARKRTOS_DEV_ERR_ARG      (-2)   /* 注册时名字或驱动指针为空（历史值是 -2，不得改成 -1） */
+#define ARKRTOS_DEV_ERR_EXIST    (-2)   /* 同名设备已注册（历史值是 -2，不得改成 -1） */
+#define ARKRTOS_DEV_ERR_NOTFOUND (-1)   /* 设备表里没有这个名字 / 驱动缺对应入口 */
+#define ARKRTOS_DEV_ERR_HANDLE   (-1)   /* 句柄不是设备（标志位/槽位下标不对） */
+#define ARKRTOS_DEV_ERR_STATE    (-1)   /* 槽位已注销 / 设备当前没有打开实例 */
+#define ARKRTOS_DEV_ERR_NOIMPL   (-1)   /* 驱动没有实现 read/write/ctrl 中的这一个 */
+#define ARKRTOS_DEV_ERR_NOSLOT   (-1)   /* 设备表已满，注册不进去 */
 
 typedef struct {
     uint32 block_size;
@@ -49,10 +49,10 @@ int32  arkrtos_dev_register(const char *name, arkrtos_dev_drv_t *drv, uint32 dev
 int32  arkrtos_dev_unregister(const char *name);
 int32  arkrtos_dev_get_count(void);
 
-/* ���豸����λ����ȡ�豸������ devfs ö���á�
- * idx  Ϊ��λ����(0 ~ ARKRTOS_DEV_MAX_NUM-1)���� open/close �� handle ͬһ�ױ�š�
- * �ղ�λ������Ƿ����� -1���� out[0]=0�������ֵ����
- * �ɹ�д������ 0�� */
+/* 按设备表槽位索引取设备名，供 devfs 枚举用。
+ * idx  为槽位索引(0 ~ ARKRTOS_DEV_MAX_NUM-1)，与 open/close 的 handle 同一套编号。
+ * 空槽位或参数非法返回 -1，且 out[0]=0（不填空值）。
+ * 成功写出返回 0。 */
 int32  arkrtos_dev_name_at(uint32 idx, char *out, uint32 max);
 
 int32  arkrtos_dev_open_internal(char *name, uint32 param);

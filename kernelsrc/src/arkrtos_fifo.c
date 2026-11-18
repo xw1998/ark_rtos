@@ -1,6 +1,6 @@
 /**
-* @brief Ark RTOS »·ĞÎ»º³åÇø£¨FIFO£©ÊµÏÖ
-* @details Ìá¹©ÓÃÓÚÄÚºËÓëÇı¶¯¼äÊı¾İ´«ÊäµÄ FIFO »·ĞÎ»º³åÇø¡£
+* @brief Ark RTOS ç¯å½¢ç¼“å†²åŒºï¼ˆFIFOï¼‰å®ç°
+* @details æä¾›ç”¨äºå†…æ ¸ä¸é©±åŠ¨é—´æ•°æ®ä¼ è¾“çš„ FIFO ç¯å½¢ç¼“å†²åŒºã€‚
 * @author xw
 * @date 2026.05.03
 */
@@ -58,9 +58,9 @@ arkrtos_fifo_t *arkrtos_fifo_create(uint8 *buff, int32 size)
     return fifo;
 }
 
-/* @return Êµ¼ÊĞ´ÈëµÄ×Ö½ÚÊı£¨FIFO ÂúÊ±¿ÉÄÜĞ¡ÓÚ len£©¡£
- * @note   ±¾º¯Êı²»×öÁÙ½çÇø±£»¤£¬°´µ¥Éú²úÕß-µ¥Ïû·ÑÕßÄ£ĞÍÊ¹ÓÃ£º
- *         ÒªÃ´Ö»ÔÚÈÎÎñÀïµ÷ÓÃ£¬ÒªÃ´Éú²úÕß¹Ì¶¨Îª ISR£»»ìÓÃÊ±ÓÉµ÷ÓÃ·½¼ÓËø¡£ */
+/* @return å®é™…å†™å…¥çš„å­—èŠ‚æ•°ï¼ˆFIFO æ»¡æ—¶å¯èƒ½å°äº lenï¼‰ã€‚
+ * @note   æœ¬å‡½æ•°ä¸åšä¸´ç•ŒåŒºä¿æŠ¤ï¼ŒæŒ‰å•ç”Ÿäº§è€…-å•æ¶ˆè´¹è€…æ¨¡å‹ä½¿ç”¨ï¼š
+ *         è¦ä¹ˆåªåœ¨ä»»åŠ¡é‡Œè°ƒç”¨ï¼Œè¦ä¹ˆç”Ÿäº§è€…å›ºå®šä¸º ISRï¼›æ··ç”¨æ—¶ç”±è°ƒç”¨æ–¹åŠ é”ã€‚ */
 /* Bytes a writer had to leave behind because the FIFO was full.  A short
  * count is legal for this API, so without a counter the loss is invisible
  * from the outside - which is how a shredded console line got read as a
@@ -87,7 +87,7 @@ int32 arkrtos_fifo_write(arkrtos_fifo_t *fifo, uint8 *pdata, int32 len)
         next = (fifo->wt_idx + 1) % fifo->size;
         if(next == fifo->rd_idx)
         {
-            break;          /* FIFO ÒÑÂú£¬Í£Ö¹Ğ´ÈëÒÔ±ÜÃâ¸²¸ÇÉĞÎ´¶ÁÈ¡µÄÊı¾İ */
+            break;          /* FIFO å·²æ»¡ï¼Œåœæ­¢å†™å…¥ä»¥é¿å…è¦†ç›–å°šæœªè¯»å–çš„æ•°æ® */
         }
         fifo->data[fifo->wt_idx] = pdata[cnt];
         fifo->wt_idx = next;
@@ -99,8 +99,8 @@ int32 arkrtos_fifo_write(arkrtos_fifo_t *fifo, uint8 *pdata, int32 len)
     return cnt;
 }
 
-/* @return Êµ¼Ê¶Á³öµÄ×Ö½ÚÊı£¨FIFO ¿ÕÊ±¿ÉÄÜĞ¡ÓÚ len£©¡£
- * @note   Í¬ arkrtos_fifo_write£ºµ¥Ïû·ÑÕßÄ£ĞÍ£¬²»ÄÚ½¨ÁÙ½çÇø¡£ */
+/* @return å®é™…è¯»å‡ºçš„å­—èŠ‚æ•°ï¼ˆFIFO ç©ºæ—¶å¯èƒ½å°äº lenï¼‰ã€‚
+ * @note   åŒ arkrtos_fifo_writeï¼šå•æ¶ˆè´¹è€…æ¨¡å‹ï¼Œä¸å†…å»ºä¸´ç•ŒåŒºã€‚ */
 int32 arkrtos_fifo_read(arkrtos_fifo_t *fifo, uint8 *pdata, int32 len)
 {
     int32 cnt;

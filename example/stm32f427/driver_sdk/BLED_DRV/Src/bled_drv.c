@@ -1,40 +1,40 @@
 /**
-* @brief Ark RTOS Driver SDK Ê¾Àı - À¶µÆ(PC2)ÓÃ»§Ì¬Çı¶¯
-* @details ÑİÊ¾Íâ²¿ÓÃ»§Ì¬Çı¶¯Ö±½Ó²Ù×÷Ó²¼ş£ºÍ¨¹ıÂã¼Ä´æÆ÷Çı¶¯ STM32F427 µÄ
-*          PC2£¨RGB µÆÖéÀ¶É«£©¡£Çı¶¯×¢²áÉè±¸Ãû "BLED"£¬Íâ²¿ App Í¨¹ı
-*          arkrtos_dev_open("BLED", 0) ¼´¿ÉÊ¹ÓÃ¡£
+* @brief Ark RTOS Driver SDK ç¤ºä¾‹ - è“ç¯(PC2)ç”¨æˆ·æ€é©±åŠ¨
+* @details æ¼”ç¤ºå¤–éƒ¨ç”¨æˆ·æ€é©±åŠ¨ç›´æ¥æ“ä½œç¡¬ä»¶ï¼šé€šè¿‡è£¸å¯„å­˜å™¨é©±åŠ¨ STM32F427 çš„
+*          PC2ï¼ˆRGB ç¯ç è“è‰²ï¼‰ã€‚é©±åŠ¨æ³¨å†Œè®¾å¤‡å "BLED"ï¼Œå¤–éƒ¨ App é€šè¿‡
+*          arkrtos_dev_open("BLED", 0) å³å¯ä½¿ç”¨ã€‚
 *
-*          ±àÒëÎª¶ÀÁ¢ .bin ¹Ì¼ş£¬ÉÕÂ¼µ½ ROM ·ÖÇø£¬DrvMain ÖĞÍ¨¹ı SVC 0x14
-*          ÏòÄÚºË×¢²áÇı¶¯¡£
+*          ç¼–è¯‘ä¸ºç‹¬ç«‹ .bin å›ºä»¶ï¼Œçƒ§å½•åˆ° ROM åˆ†åŒºï¼ŒDrvMain ä¸­é€šè¿‡ SVC 0x14
+*          å‘å†…æ ¸æ³¨å†Œé©±åŠ¨ã€‚
 *
-*          Ó²¼şËµÃ÷£ºPC2 µÍµçÆ½µãÁÁ£¨¹²Ñô RGB£©¡£±¾¹¤³Ì MPU=0£¬
-*          ÓÃ»§Ì¬¿ÉÖ±½Ó·ÃÎÊÍâÉè¼Ä´æÆ÷£»ÒÆÖ²µ½ MPU ¸ôÀë»·¾³Ê±£¬
-*          ĞèÍ¨¹ıÄÚºËÌ¬Çı¶¯»òÊÚÓèÍâÉèÇøÓò·ÃÎÊÈ¨ÏŞ¡£
+*          ç¡¬ä»¶è¯´æ˜ï¼šPC2 ä½ç”µå¹³ç‚¹äº®ï¼ˆå…±é˜³ RGBï¼‰ã€‚æœ¬å·¥ç¨‹ MPU=0ï¼Œ
+*          ç”¨æˆ·æ€å¯ç›´æ¥è®¿é—®å¤–è®¾å¯„å­˜å™¨ï¼›ç§»æ¤åˆ° MPU éš”ç¦»ç¯å¢ƒæ—¶ï¼Œ
+*          éœ€é€šè¿‡å†…æ ¸æ€é©±åŠ¨æˆ–æˆäºˆå¤–è®¾åŒºåŸŸè®¿é—®æƒé™ã€‚
 *
-* ¶ÁĞ´Ô¼¶¨£¨Óë°å¼¶ LED Çı¶¯Ò»ÖÂ£©£º
-*   write len>0  -> µãÁÁ
-*   write len==0 -> Ï¨Ãğ
-*   write len<0  -> ·­×ª
+* è¯»å†™çº¦å®šï¼ˆä¸æ¿çº§ LED é©±åŠ¨ä¸€è‡´ï¼‰ï¼š
+*   write len>0  -> ç‚¹äº®
+*   write len==0 -> ç†„ç­
+*   write len<0  -> ç¿»è½¬
 */
 
 #include "arkrtos_driver_sdk.h"
 
-/* ---- STM32F427 Âã¼Ä´æÆ÷µØÖ·£¨²»ÒÀÀµĞ¾Æ¬Í·ÎÄ¼ş£¬±£³Ö SDK ÁãÒÀÀµ£© ---- */
+/* ---- STM32F427 è£¸å¯„å­˜å™¨åœ°å€ï¼ˆä¸ä¾èµ–èŠ¯ç‰‡å¤´æ–‡ä»¶ï¼Œä¿æŒ SDK é›¶ä¾èµ–ï¼‰ ---- */
 #define RCC_AHB1ENR     (*(volatile uint32 *)0x40023830u)
 #define GPIOC_MODER     (*(volatile uint32 *)0x40020800u)
 #define GPIOC_OTYPER    (*(volatile uint32 *)0x40020804u)
 #define GPIOC_PUPDR     (*(volatile uint32 *)0x4002080Cu)
 #define GPIOC_BSRR      (*(volatile uint32 *)0x40020818u)
 
-#define GPIOC_EN_BIT    (1u << 2)        /* RCC AHB1ENR: GPIOC Ê±ÖÓ */
+#define GPIOC_EN_BIT    (1u << 2)        /* RCC AHB1ENR: GPIOC æ—¶é’Ÿ */
 #define BLUE_PIN        2                /* PC2 */
 
-/* ×Ô¶¨Òå¿ØÖÆÂë */
+/* è‡ªå®šä¹‰æ§åˆ¶ç  */
 #define BLED_CTRL_TOGGLE   (0x0100)
 
 typedef struct {
     arkrtos_dev_hdr_t hdr;
-    uint8   state;          /* 0=Ãğ 1=ÁÁ */
+    uint8   state;          /* 0=ç­ 1=äº® */
     uint8   opened;
 } bled_dev_obj_t;
 
@@ -43,28 +43,28 @@ static bled_dev_obj_t bled_obj;
 static void bled_set(uint8 on)
 {
     if(on)
-        GPIOC_BSRR = (1u << (16 + BLUE_PIN));   /* ¸´Î» PC2 ¡ú µÍµçÆ½ ¡ú À¶µÆÁÁ */
+        GPIOC_BSRR = (1u << (16 + BLUE_PIN));   /* å¤ä½ PC2 â†’ ä½ç”µå¹³ â†’ è“ç¯äº® */
     else
-        GPIOC_BSRR = (1u << BLUE_PIN);          /* ÖÃÎ» PC2 ¡ú ¸ßµçÆ½ ¡ú À¶µÆÃğ */
+        GPIOC_BSRR = (1u << BLUE_PIN);          /* ç½®ä½ PC2 â†’ é«˜ç”µå¹³ â†’ è“ç¯ç­ */
 }
 
 static arkrtos_dev_hdr_t *bled_drv_open(uint32 dev_id, uint32 param)
 {
     (void)dev_id; (void)param;
 
-    /* Ê¹ÄÜ GPIOC Ê±ÖÓ */
+    /* ä½¿èƒ½ GPIOC æ—¶é’Ÿ */
     RCC_AHB1ENR |= GPIOC_EN_BIT;
 
-    /* PC2 ÅäÎªÍ¨ÓÃÍÆÍìÊä³ö¡¢ÎŞÉÏÏÂÀ­ */
+    /* PC2 é…ä¸ºé€šç”¨æ¨æŒ½è¾“å‡ºã€æ— ä¸Šä¸‹æ‹‰ */
     GPIOC_MODER  &= ~(0x3u << (BLUE_PIN * 2));
-    GPIOC_MODER  |=  (0x1u << (BLUE_PIN * 2));   /* 01: Êä³ö */
-    GPIOC_OTYPER &= ~(0x1u << BLUE_PIN);         /* ÍÆÍì */
-    GPIOC_PUPDR  &= ~(0x3u << (BLUE_PIN * 2));   /* ÎŞÉÏÏÂÀ­ */
+    GPIOC_MODER  |=  (0x1u << (BLUE_PIN * 2));   /* 01: è¾“å‡º */
+    GPIOC_OTYPER &= ~(0x1u << BLUE_PIN);         /* æ¨æŒ½ */
+    GPIOC_PUPDR  &= ~(0x3u << (BLUE_PIN * 2));   /* æ— ä¸Šä¸‹æ‹‰ */
 
     bled_obj.state          = 0;
     bled_obj.opened         = 1;
     bled_obj.hdr.block_size = 1;
-    bled_set(0);                                  /* ³õÊ¼Ï¨Ãğ */
+    bled_set(0);                                  /* åˆå§‹ç†„ç­ */
 
     return (arkrtos_dev_hdr_t *)&bled_obj;
 }
@@ -137,8 +137,8 @@ static arkrtos_dev_drv_t bled_drv = {
 
 void DrvMain(void)
 {
-    /* ÏòÄÚºË×¢²áÀ¶µÆÉè±¸£¬×¢²áºóÍâ²¿ App ¿É open("BLED") Ê¹ÓÃ¡£
-     * Æô¶¯»ã±à¾­ __main Íê³É .data ¿½±´/.bss ÇåÁã£¬bled_drv º¯ÊıÖ¸Õë±íÒÑ¾ÍĞ÷¡£ */
+    /* å‘å†…æ ¸æ³¨å†Œè“ç¯è®¾å¤‡ï¼Œæ³¨å†Œåå¤–éƒ¨ App å¯ open("BLED") ä½¿ç”¨ã€‚
+     * å¯åŠ¨æ±‡ç¼–ç» __main å®Œæˆ .data æ‹·è´/.bss æ¸…é›¶ï¼Œbled_drv å‡½æ•°æŒ‡é’ˆè¡¨å·²å°±ç»ªã€‚ */
     arkrtos_drv_register("BLED", &bled_drv, 0);
 
     while(1)

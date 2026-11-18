@@ -103,7 +103,8 @@ def _pick(cands, given, what):
 
 
 def _text(raw):
-    """内核头文件是 GBK，gcc 把源里的中文原样回显，所以两种编码都要试一遍。"""
+    """gcc 把源里的中文原样回显；own 源已统一 UTF-8，vendored 树仍可能带 GBK，
+    所以两种编码都试一遍。"""
     if not raw:
         return ""
     for enc in ("utf-8", "gbk"):

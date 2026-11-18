@@ -1,18 +1,18 @@
 /**
-* @brief Ark RTOS �弶��ֲ�� - STM32F427
-* @details ʵ�� port ��Ҫ��弶�ṩ�Ļ������ã�
-*          - FPU ʹ�ܣ�CPACR + FPCCR��
-*          - NVIC ���ȼ��������ں��쳣���ȼ�
-*          - �����豸ע�ᣨttyS0 / led0 / led1��
-*          - CPU �쳣������ϵͳ�������
-*          ���� CPU ���ʵ��ȫ���� port/arm/cortex-m4/��
-*          board/ ֻ�е�оƬ��صĲ��졣
+* @brief Ark RTOS 板级移植层 - STM32F427
+* @details 实现 port 层要求板级提供的基础配置：
+*          - FPU 使能（CPACR + FPCCR）
+*          - NVIC 优先级分组与内核异常优先级
+*          - 板载设备注册（ttyS0 / led0 / led1）
+*          - CPU 异常向量与系统节拍入口
+*          其余 CPU 相关实现全部在 port/arm/cortex-m4/，
+*          board/ 只承担芯片相关的差异。
 * @author xw
 * @date 2026.05.03
 */
 
 #include "stm32f4xx.h"
-#include "stm32f4xx_hal.h"   /* HAL_IncTick(): �弶�� HAL ����ʱ�� */
+#include "stm32f4xx_hal.h"   /* HAL_IncTick(): 板级补 HAL 毫秒时基 */
 #include "arkrtos_hal.h"
 #include "arkrtos_dev.h"
 #include "arkrtos_task.h"
@@ -28,7 +28,7 @@
 #endif
 
 /* ============================================================
- * �弶��ʼ�� - ʵ�� port ��弶�ӿ�
+ * 板级初始化 - 实现 port 层板级接口
  * ============================================================ */
 void arkrtos_port_board_init(void)
 {
@@ -45,7 +45,7 @@ void arkrtos_port_board_init(void)
 }
 
 /* ============================================================
- * �ж����ȼ���ʼ�� - ʵ�� port ��弶�ӿ�
+ * 中断优先级初始化 - 实现 port 层板级接口
  * ============================================================ */
 void arkrtos_port_irq_init(void)
 {
@@ -54,10 +54,10 @@ void arkrtos_port_irq_init(void)
     NVIC_SetPriority(SysTick_IRQn, 0x00);
     NVIC_SetPriority(SVCall_IRQn,  0x01);
 
-    /* ʹ�� MemManage/BusFault/UsageFault��
-     * Cortex-M ��λ���������쳣Ĭ�Ϲرգ���ʹ�ܵĻ� MPU ԽȨ���Ƿ����ʡ�
-     * δ����ָ��һ�������� HardFault�����������޷����֣�
-     * stm32f4xx_it.c ��Ķ�Ӧ��������Ҳ��Զ���ᱻ���á� */
+    /* 使能 MemManage/BusFault/UsageFault：
+     * Cortex-M 复位后这三个异常默认关闭，不使能的话 MPU 越权、非法访问、
+     * 未定义指令一律升级成 HardFault，故障类型无法区分，
+     * stm32f4xx_it.c 里的对应处理函数也永远不会被调用。 */
     SCB->SHCSR |= SCB_SHCSR_MEMFAULTENA_Msk |
                   SCB_SHCSR_BUSFAULTENA_Msk |
                   SCB_SHCSR_USGFAULTENA_Msk;
@@ -65,7 +65,7 @@ void arkrtos_port_irq_init(void)
 
 
 /* ============================================================
- * �������� MPU ���� - ʵ�� port ��弶�ӿ�
+ * 空闲任务 MPU 配置 - 实现 port 层板级接口
  * ============================================================ */
 void arkrtos_port_set_idle_mpu(uint32 task_func, uint32 stack_addr, uint32 stack_size)
 {
@@ -79,7 +79,7 @@ void arkrtos_port_set_idle_mpu(uint32 task_func, uint32 stack_addr, uint32 stack
 }
 
 /* ============================================================
- * �����豸ע��
+ * 板载设备注册
  * ============================================================ */
 extern arkrtos_dev_drv_t usart_drv;
 extern arkrtos_dev_drv_t led_drv;
@@ -114,21 +114,21 @@ void arkrtos_dev_board_init(void)
 }
 
 /* ============================================================
- * �ں��쳣���������
- * @brief Cortex-M �����쳣�����İ弶����
- *          Ӳ����/�ڴ����/����/�÷��쳣ͳһ���ں˹��ϴ�����
- *          �����жϽ��ں� tick ��������ͬ���ƽ� HAL �����׼��
+ * 内核异常与节拍向量
+ * @brief Cortex-M 核内异常向量的板级接线
+ *          硬故障/内存管理/总线/用法异常统一交内核故障处理，
+ *          节拍中断交内核 tick 处理，并同步推进 HAL 毫秒基准。
  * ============================================================ */
 void SysTick_Handler(void)
 {
-    /* HAL �ĺ����׼��������ں˽���һ���ߡ�
-     * CubeMX ���ɵ��Ǹ� SysTick_Handler���ں� HAL_IncTick()������
-     * stm32f4xx_it.c ���� #if 0 �������Σ�ȫ�������޵ڶ������� ����
-     * HAL_GetTick() ��Զ���� 0���κ��� HAL_Delay() �������������ȡ�
-     * �ں˽��������� ARKRTOS_TICK_PERIOD_US������ 500us���� 2kHz����
-     * �� HAL ʱ���� 1ms��1kHz��������ÿ 2 ���ں˽��Ĳ�һ�� HAL_IncTick()�� */
+    /* HAL 的毫秒基准必须跟着内核节拍一起走。
+     * CubeMX 生成的那个 SysTick_Handler（内含 HAL_IncTick()）已在
+     * stm32f4xx_it.c 里用 #if 0 整体屏蔽，全工程再无第二处调用 ——
+     * HAL_GetTick() 永远返回 0，任何用 HAL_Delay() 的驱动都会死等。
+     * 内核节拍周期是 ARKRTOS_TICK_PERIOD_US（本板 500us，即 2kHz），
+     * 而 HAL 时基是 1ms（1kHz），所以每 2 个内核节拍补一次 HAL_IncTick()。 */
     #if ((1000 % ARKRTOS_TICK_PERIOD_US) != 0)
-    #error "ARKRTOS_TICK_PERIOD_US ���������� 1000us�������޷���������Ϊ HAL ʱ���� tick"
+    #error "ARKRTOS_TICK_PERIOD_US 必须能整除 1000us，否则无法按整毫秒为 HAL 时基补 tick"
     #endif
 
     if((arkrtos_kernel_get_tick() % (1000u / ARKRTOS_TICK_PERIOD_US)) == 0u)
@@ -140,26 +140,26 @@ void SysTick_Handler(void)
 }
 
 /* ============================================================
- * �쳣�������
- * @brief �� C ������֮ǰ���Ȱ��쳣�ֳ����� trace
- * @details Ҫ�ɵ��� EXC_RETURN��LR����MSP��PSP�����ұ������κ� C ���֮ǰ
- *          ��ɡ�Keil ARMCC 5��AC5���� C ����������� LR������������಻
- *          ���� lr/r14 �����������ѱ����� "lr" �ֻᱻ��������Ĭ������ͨ
- *          �Ĵ�����ʵ������ STR r0�������� MOV r0, lr������ ������������ջ��
- *          PC ȫ�Ǳ�ġ������⼸�������Ƕ���ຯ��д���˿� lr ��ľ���
- *          EXC_RETURN��AC6/armclang �� ARKRTOS_TRACE_FAULT_CAPTURE() �ꡣ
- *          PUSH/POP ����� r0-r3��r4��lr ��Ϊ�˶���ջ����ס�쳣�����õ�
- *          lr���������߼�һ��δ�ģ�ֻ�Ǹ������֡�
+ * 异常向量入口
+ * @brief 进 C 处理体之前，先把异常现场交给 trace
+ * @details 要采的是 EXC_RETURN（LR）、MSP、PSP，而且必须在任何 C 语句之前
+ *          完成。Keil ARMCC 5（AC5）在 C 里根本读不到 LR：它的内联汇编不
+ *          接受 lr/r14 作操作数，把变量绑到 "lr" 又会被编译器静默换成普通
+ *          寄存器（实测生成 STR r0，而不是 MOV r0, lr）—— 那样记下来的栈和
+ *          PC 全是编的。所以这几个入口用嵌入汇编函数写：此刻 lr 真的就是
+ *          EXC_RETURN。AC6/armclang 走 ARKRTOS_TRACE_FAULT_CAPTURE() 宏。
+ *          PUSH/POP 里带上 r0-r3、r4、lr 是为了对齐栈并保住异常返回用的
+ *          lr；处理体逻辑一字未改，只是改了名字。
  * ============================================================ */
 void arkrtos_board_hardfault_body(void);
 void arkrtos_board_memmanage_body(void);
 void arkrtos_board_busfault_body(void);
 void arkrtos_board_usgfault_body(void);
 
-/* AC5 �������������ֱ�� IMPORT/BL mdk_trace_fault_capture���������ֻ��
- * MDK_TRACE ����ʱ�Ŵ��ڡ����عص�ʱ�����˻������ C �汾����ʱ
- * ARKRTOS_TRACE_FAULT_CAPTURE() �ǿպ꣩������ص����������ڱ�
- * L6218E: Undefined symbol mdk_trace_fault_capture�� */
+/* AC5 的内联汇编向量直接 IMPORT/BL mdk_trace_fault_capture：这个符号只有
+ * MDK_TRACE 编入时才存在。开关关掉时必须退回下面的 C 版本（那时
+ * ARKRTOS_TRACE_FAULT_CAPTURE() 是空宏），否则关档构建链接期报
+ * L6218E: Undefined symbol mdk_trace_fault_capture。 */
 #if defined(__CC_ARM) && !defined(__clang__) && (ARKRTOS_USE_MDK_TRACE == 1)
 
 __asm void HardFault_Handler(void)
@@ -252,14 +252,14 @@ void arkrtos_board_hardfault_body(void)
 
     (void)hfsr; (void)cfsr; (void)mmfar; (void)bfar;
 
-    /* ���뽻���ں˹��ϴ��������񼶻ָ����ؽ�ջ֡���������񣩣�
-     * �������ϴﵽ APP_CRASH_RESTART_MAX ʱ�� arkrtos_loader_on_fault() ���ø� App��
-     * ��ǰ����ֱ�� while(1)����������Χ������ʵӲ������Զ����ִ�С� */
+    /* 必须交给内核故障处理：任务级恢复（重建栈帧重启该任务），
+     * 连续故障达到 APP_CRASH_RESTART_MAX 时由 arkrtos_loader_on_fault() 禁用该 App。
+     * 此前这里直接 while(1)，导致上述围栏在真实硬件上永远不会执行。 */
     sp = arkrtos_hardfault_handler();
 
     if(sp != 0u)
     {
-        /* �ں���ѡ�����������񲢷�����ջָ�룺ֱ�ӻָ����쳣���أ������������أ� */
+        /* 内核已选出可运行任务并返回其栈指针：直接恢复并异常返回（本函数不返回） */
         arkrtos_port_resume_task(sp);
     }
 
@@ -267,12 +267,12 @@ void arkrtos_board_hardfault_body(void)
 }
 
 /* ============================================================
- * ���� CPU �쳣����
- * @brief ͳһ�����ں˹��ϴ������� arkrtos_cpu_fault_handler��
- * @details stm32f4xx_it.c �� CubeMX ���ɵ�ͬ����������Դ������ #if 0 ���Ρ�
- *          ��Щ�����Ĵ����߼��뱾�ļ� HardFault_Handler һ�£�
- *          �ں˷��ؿɻָ�������ջָ��ʱ��ֱ�ӻָ������������Ĳ��쳣���أ�
- *          ���� 0���ں�/�ж������Ĺ��ϣ�ʱ��� while(1)��ͣ���ȵ������ӹܡ�
+ * 其余 CPU 异常向量
+ * @brief 统一交给内核故障处理（见 arkrtos_cpu_fault_handler）
+ * @details stm32f4xx_it.c 中 CubeMX 生成的同名函数已在源码内用 #if 0 屏蔽。
+ *          这些向量的处理逻辑与本文件 HardFault_Handler 一致：
+ *          内核返回可恢复的任务栈指针时，直接恢复该任务上下文并异常返回；
+ *          返回 0（内核/中断上下文故障）时落回 while(1)，停机等调试器接管。
  * ============================================================ */
 void arkrtos_board_memmanage_body(void)
 {
@@ -280,7 +280,7 @@ void arkrtos_board_memmanage_body(void)
 
     if(sp != 0u)
     {
-        /* ͬ�ϣ����ϻָ�·�������� PendSV��ֱ�ӻָ�Ŀ������������ */
+        /* 同上：故障恢复路径不依赖 PendSV，直接恢复目标任务上下文 */
         arkrtos_port_resume_task(sp);
     }
 
@@ -293,7 +293,7 @@ void arkrtos_board_busfault_body(void)
 
     if(sp != 0u)
     {
-        /* ͬ�ϣ����ϻָ�·�������� PendSV��ֱ�ӻָ�Ŀ������������ */
+        /* 同上：故障恢复路径不依赖 PendSV，直接恢复目标任务上下文 */
         arkrtos_port_resume_task(sp);
     }
 
@@ -306,7 +306,7 @@ void arkrtos_board_usgfault_body(void)
 
     if(sp != 0u)
     {
-        /* ͬ�ϣ����ϻָ�·�������� PendSV��ֱ�ӻָ�Ŀ������������ */
+        /* 同上：故障恢复路径不依赖 PendSV，直接恢复目标任务上下文 */
         arkrtos_port_resume_task(sp);
     }
 

@@ -1,15 +1,15 @@
 /**
-* @brief Ark RTOS Driver SDK - ÓÃ»§Ì¬Çı¶¯OS½Ó¿Ú·â×°
-* @details ÓÃ»§Ì¬Çı¶¯Í¨¹ıSVCÖ¸Áîµ÷ÓÃÄÚºË·şÎñ
-*          Ìá¹©ÈÎÎñµÈ´ı¡¢ÊÂ¼ş²Ù×÷µÈAPI
-*          ½öÔÚ ARKRTOS_DRV_USER_MODE ¶¨ÒåÊ±Ê¹ÓÃ
+* @brief Ark RTOS Driver SDK - ç”¨æˆ·æ€é©±åŠ¨OSæ¥å£å°è£…
+* @details ç”¨æˆ·æ€é©±åŠ¨é€šè¿‡SVCæŒ‡ä»¤è°ƒç”¨å†…æ ¸æœåŠ¡
+*          æä¾›ä»»åŠ¡ç­‰å¾…ã€äº‹ä»¶æ“ä½œç­‰API
+*          ä»…åœ¨ ARKRTOS_DRV_USER_MODE å®šä¹‰æ—¶ä½¿ç”¨
 */
 
 #include "arkrtos_driver_sdk.h"
 #include "arkrtos_ulog.h"
 #include "arkrtos_svc_call.h"
 #include "arkrtos_features.h"
-#include "arkrtos_svc_abi.h"   /* SVC ×ÓÃüÁîºÅ£ºÓëÄÚºËÍ¬Ò»ÕÅ±í */
+#include "arkrtos_svc_abi.h"   /* SVC å­å‘½ä»¤å·ï¼šä¸å†…æ ¸åŒä¸€å¼ è¡¨ */
 
 ARKRTOS_SVC_DECL_1(int32, 0x10, arkrtos_call_dev_io, uint32 *);
 ARKRTOS_SVC_DECL_V2(0x11, arkrtos_call_task_ctrl, uint32, uint32);

@@ -3155,7 +3155,7 @@ void arkrtos_port_set_psp(uint32 val);
 ```
 
 **设置进程栈指针PSP**
-- `val`：PSPֵ
+- `val`：PSP值
 
 ### `uint32 arkrtos_port_get_control(void);`
 

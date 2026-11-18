@@ -16,9 +16,9 @@
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
-/* ×¢Òâ£º±¾ÎÄ¼şµÄ°å¼¶ LED ÈÎÎñÊÇÄÚºË²àÈÎÎñ£¬Ö±½Óµ÷ÓÃ _internal ½Ó¿Ú£¬
- * ²»×ß SVC ÓÃ»§Ì¬·â×°£¨arkrtos_dev_open µÈ£©¡£ÓÃ»§Ì¬·â×°Ö»ÊôÓÚ App/Çı¶¯ SDK£¬
- * ÔçÆÚ¿¿ kernelsrc/app/oslib.c ÖØ¸´¸±±¾Ìá¹©µÄ×ö·¨ÒÑ·ÏÆú¡£ */
+/* æ³¨æ„ï¼šæœ¬æ–‡ä»¶çš„æ¿çº§ LED ä»»åŠ¡æ˜¯å†…æ ¸ä¾§ä»»åŠ¡ï¼Œç›´æ¥è°ƒç”¨ _internal æ¥å£ï¼Œ
+ * ä¸èµ° SVC ç”¨æˆ·æ€å°è£…ï¼ˆarkrtos_dev_open ç­‰ï¼‰ã€‚ç”¨æˆ·æ€å°è£…åªå±äº App/é©±åŠ¨ SDKï¼Œ
+ * æ—©æœŸé  kernelsrc/app/oslib.c é‡å¤å‰¯æœ¬æä¾›çš„åšæ³•å·²åºŸå¼ƒã€‚ */
 /* USER CODE BEGIN Includes */
 #include "arkrtos.h"
 #include "arkrtos_hal.h"
@@ -74,16 +74,16 @@
 #define ARKRTOS_LED_STACK_WORDS     1024
 #define ARKRTOS_LED2_STACK_WORDS    1024
 
-/* ×¢Òâ£ºÍâ²¿·ÖÇø¹Ì¼ş£¨Çı¶¯ / App£©²»ÔÙÔÚÕâÀï¾²Ì¬×¢²áÈÎÎñ¡£
- * ËüÃÇµÄÈë¿ÚµØÖ·ÓëÕ»ÓÉÄÚºË¼ÓÔØÆ÷°´ config/arkrtos_partition.h ÍÆµ¼£º
- *   arkrtos_loader_scan_driver()/start_driver()¡¢arkrtos_loader_scan()/start()
- * ÕâÑù¡°¹Ì¶¨µØÖ·ÉÕÂ¼µ÷ÊÔ¡±Óë¡°´®¿Ú°²×°¡±Á½ÌõÂ·¾¶¹²ÓÃÍ¬Ò»Ì×Æô¶¯Âß¼­¡£ */
+/* æ³¨æ„ï¼šå¤–éƒ¨åˆ†åŒºå›ºä»¶ï¼ˆé©±åŠ¨ / Appï¼‰ä¸å†åœ¨è¿™é‡Œé™æ€æ³¨å†Œä»»åŠ¡ã€‚
+ * å®ƒä»¬çš„å…¥å£åœ°å€ä¸æ ˆç”±å†…æ ¸åŠ è½½å™¨æŒ‰ config/arkrtos_partition.h æ¨å¯¼ï¼š
+ *   arkrtos_loader_scan_driver()/start_driver()ã€arkrtos_loader_scan()/start()
+ * è¿™æ ·â€œå›ºå®šåœ°å€çƒ§å½•è°ƒè¯•â€ä¸â€œä¸²å£å®‰è£…â€ä¸¤æ¡è·¯å¾„å…±ç”¨åŒä¸€å¥—å¯åŠ¨é€»è¾‘ã€‚ */
 
 static uint32 arkrtos_idle_stack[ARKRTOS_IDLE_STACK_WORDS];
 static uint32 led_task_stack[ARKRTOS_LED_STACK_WORDS];
 static uint32 led2_task_stack[ARKRTOS_LED2_STACK_WORDS];
 
-/* Á½¸ö LED ÈÎÎñ¹²ÓÃÒ»°Ñ»¥³âËø£¬±£»¤¶Ô LED Éè±¸µÄĞ´Èë */
+/* ä¸¤ä¸ª LED ä»»åŠ¡å…±ç”¨ä¸€æŠŠäº’æ–¥é”ï¼Œä¿æŠ¤å¯¹ LED è®¾å¤‡çš„å†™å…¥ */
 static int32 g_led_mutex = -1;
 /* USER CODE END PV */
 
@@ -217,14 +217,14 @@ static void led_blink_task(void)
 
     while(1)
     {
-        /* ¼ÓËøºóĞ´Éè±¸£ºlen>0 µãÁÁ¡¢len==0 Ï¨Ãğ£¨Ô¼¶¨¼û°å¼¶ drvled£© */
-        arkrtos_mtx_lock_internal(g_led_mutex, -1);   /* -1 = ÓÀ¾ÃµÈ´ı */
-        arkrtos_dev_write_internal(led, &on, 1);      /* µãÁÁ */
+        /* åŠ é”åå†™è®¾å¤‡ï¼šlen>0 ç‚¹äº®ã€len==0 ç†„ç­ï¼ˆçº¦å®šè§æ¿çº§ drvledï¼‰ */
+        arkrtos_mtx_lock_internal(g_led_mutex, -1);   /* -1 = æ°¸ä¹…ç­‰å¾… */
+        arkrtos_dev_write_internal(led, &on, 1);      /* ç‚¹äº® */
         arkrtos_mtx_unlock_internal(g_led_mutex);
         arkrtos_task_wait_internal(1000);
 
-        arkrtos_mtx_lock_internal(g_led_mutex, -1);   /* -1 = ÓÀ¾ÃµÈ´ı */
-        arkrtos_dev_write_internal(led, &on, 0);      /* Ï¨Ãğ */
+        arkrtos_mtx_lock_internal(g_led_mutex, -1);   /* -1 = æ°¸ä¹…ç­‰å¾… */
+        arkrtos_dev_write_internal(led, &on, 0);      /* ç†„ç­ */
         arkrtos_mtx_unlock_internal(g_led_mutex);
         arkrtos_task_wait_internal(1000);
     }
@@ -237,14 +237,14 @@ static void led2_blink_task(void)
 
     while(1)
     {
-        /* µÚ¶ş¸ö LED£ºÏÈÃğºóÁÁ£¬Óë led_blink_task ÏàÎ»Ïà·´ */
-        arkrtos_mtx_lock_internal(g_led_mutex, -1);   /* -1 = ÓÀ¾ÃµÈ´ı */
-        arkrtos_dev_write_internal(led, &on, 0);      /* Ï¨Ãğ */
+        /* ç¬¬äºŒä¸ª LEDï¼šå…ˆç­åäº®ï¼Œä¸ led_blink_task ç›¸ä½ç›¸å */
+        arkrtos_mtx_lock_internal(g_led_mutex, -1);   /* -1 = æ°¸ä¹…ç­‰å¾… */
+        arkrtos_dev_write_internal(led, &on, 0);      /* ç†„ç­ */
         arkrtos_mtx_unlock_internal(g_led_mutex);
         arkrtos_task_wait_internal(1000);
 
-        arkrtos_mtx_lock_internal(g_led_mutex, -1);   /* -1 = ÓÀ¾ÃµÈ´ı */
-        arkrtos_dev_write_internal(led, &on, 1);      /* µãÁÁ */
+        arkrtos_mtx_lock_internal(g_led_mutex, -1);   /* -1 = æ°¸ä¹…ç­‰å¾… */
+        arkrtos_dev_write_internal(led, &on, 1);      /* ç‚¹äº® */
         arkrtos_mtx_unlock_internal(g_led_mutex);
         arkrtos_task_wait_internal(1000);
     }
@@ -264,7 +264,7 @@ static void arkrtos_register_tasks(void)
     p_task->rom_size    = 0;
     p_task->period      = ARKRTOS_MS_TO_TICK(1000);
     p_task->priority    = 10;
-    p_task->base_priority = 10;         /* ¼Ì³Ğ³·ÏúµÄ»Ö¸´ÒÀ¾İ£ºÈ±ÁË»á±»Ìáµ½ÓÅÏÈ¼¶ 0 */
+    p_task->base_priority = 10;         /* ç»§æ‰¿æ’¤é”€çš„æ¢å¤ä¾æ®ï¼šç¼ºäº†ä¼šè¢«æåˆ°ä¼˜å…ˆçº§ 0 */
     p_task->shm_attri   = 0;
     p_task->status      = ARKRTOS_TASK_READY;
     p_task->period_time = p_task->period;
@@ -285,7 +285,7 @@ static void arkrtos_register_tasks(void)
                           led_task_stack, sizeof(led_task_stack));
 
     arkrtos_task_count++;
-    arkrtos_ready_add(arkrtos_task_count - 1);   /* ÊÖ¹¤µÇ¼Ç TCB Ò²±ØĞë¹Ò¾ÍĞ÷Á´ */
+    arkrtos_ready_add(arkrtos_task_count - 1);   /* æ‰‹å·¥ç™»è®° TCB ä¹Ÿå¿…é¡»æŒ‚å°±ç»ªé“¾ */
 
     led2_task_stack[0] = ARKRTOS_STACK_END_FLAG_VAL;
 
@@ -297,7 +297,7 @@ static void arkrtos_register_tasks(void)
     p_task->rom_size    = 0;
     p_task->period      = ARKRTOS_MS_TO_TICK(1000);
     p_task->priority    = 10;
-    p_task->base_priority = 10;         /* ¼Ì³Ğ³·ÏúµÄ»Ö¸´ÒÀ¾İ£ºÈ±ÁË»á±»Ìáµ½ÓÅÏÈ¼¶ 0 */
+    p_task->base_priority = 10;         /* ç»§æ‰¿æ’¤é”€çš„æ¢å¤ä¾æ®ï¼šç¼ºäº†ä¼šè¢«æåˆ°ä¼˜å…ˆçº§ 0 */
     p_task->shm_attri   = 0;
     p_task->status      = ARKRTOS_TASK_READY;
     p_task->period_time = p_task->period;
@@ -318,15 +318,15 @@ static void arkrtos_register_tasks(void)
                           led2_task_stack, sizeof(led2_task_stack));
 
     arkrtos_task_count++;
-    arkrtos_ready_add(arkrtos_task_count - 1);   /* ÊÖ¹¤µÇ¼Ç TCB Ò²±ØĞë¹Ò¾ÍĞ÷Á´ */
+    arkrtos_ready_add(arkrtos_task_count - 1);   /* æ‰‹å·¥ç™»è®° TCB ä¹Ÿå¿…é¡»æŒ‚å°±ç»ªé“¾ */
 }
 
 static void arkrtos_kernel_init(void)
 {
-    /* Ë³ĞòÓëÄÚºËÄ¬ÈÏÈë¿Ú kernelsrc/src/arkrtos_init.c Ò»ÖÂ£º
-     * ÏÈ³õÊ¼»¯¸÷ÄÚºËÄ£¿é£¬ÔÙÈÏ¶¨/Æô¶¯Íâ²¿Ó³Ïñ£¬×îºó×¢²á°²×°ÈÎÎñ¡£
-     * £¨È±Ä£¿é³õÊ¼»¯»òË³Ğòµßµ¹»áµ¼ÖÂÄÚºËÎŞ·¨Õı³£Æô¶¯£© */
-    /* ¸÷ÄÚºËÄ£¿é + ÄÚÖÃ·şÎñÈÎÎñ£ºÍ³Ò»×ß¹«¹²³õÊ¼»¯£¬±ÜÃâÓëÄÚºËÄ¬ÈÏÈë¿ÚÆ¯ÒÆ */
+    /* é¡ºåºä¸å†…æ ¸é»˜è®¤å…¥å£ kernelsrc/src/arkrtos_init.c ä¸€è‡´ï¼š
+     * å…ˆåˆå§‹åŒ–å„å†…æ ¸æ¨¡å—ï¼Œå†è®¤å®š/å¯åŠ¨å¤–éƒ¨æ˜ åƒï¼Œæœ€åæ³¨å†Œå®‰è£…ä»»åŠ¡ã€‚
+     * ï¼ˆç¼ºæ¨¡å—åˆå§‹åŒ–æˆ–é¡ºåºé¢ å€’ä¼šå¯¼è‡´å†…æ ¸æ— æ³•æ­£å¸¸å¯åŠ¨ï¼‰ */
+    /* å„å†…æ ¸æ¨¡å— + å†…ç½®æœåŠ¡ä»»åŠ¡ï¼šç»Ÿä¸€èµ°å…¬å…±åˆå§‹åŒ–ï¼Œé¿å…ä¸å†…æ ¸é»˜è®¤å…¥å£æ¼‚ç§» */
     arkrtos_kernel_module_init();
 
     /* Log first: everything after this point can leave a trace on the
@@ -335,10 +335,10 @@ static void arkrtos_kernel_init(void)
     ARKRTOS_LOGI("BOOT", "Ark RTOS kernel starting, build %s %s",
                __DATE__, __TIME__);
 
-    /* ÄÚºËÄÚÖÃ LED ÈÎÎñ¹²ÓÃµÄ»¥³âÁ¿ */
+    /* å†…æ ¸å†…ç½® LED ä»»åŠ¡å…±ç”¨çš„äº’æ–¥é‡ */
     g_led_mutex = arkrtos_mtx_create_internal("ledmtx");
 
-    /* ---- ·ÖÇø±íÓëÍâ²¿Ó³Ïñ ---- */
+    /* ---- åˆ†åŒºè¡¨ä¸å¤–éƒ¨æ˜ åƒ ---- */
     arkrtos_ptable_init();
 
     /* Cross-reset crash bookkeeping. init() only validates or starts the
@@ -508,7 +508,7 @@ static void arkrtos_start_idle(void)
     while(1)
     {
     #if (ARKRTOS_USE_TICKLESS == 1)
-        /* Ã»ÓĞÈÎÎñÒªÅÜ£º°´"ÏÂÒ»¸öÊÂ¼ş"Ë¯Õû¶Î£¬ĞÑÀ´Ò»´Î²¹Æë½ÚÅÄ */
+        /* æ²¡æœ‰ä»»åŠ¡è¦è·‘ï¼šæŒ‰"ä¸‹ä¸€ä¸ªäº‹ä»¶"ç¡æ•´æ®µï¼Œé†’æ¥ä¸€æ¬¡è¡¥é½èŠ‚æ‹ */
         arkrtos_tickless_idle();
     #else
         ARKRTOS_WFI();

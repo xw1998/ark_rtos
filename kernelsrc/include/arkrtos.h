@@ -1,11 +1,11 @@
 /**
 * @file arkrtos.h
-* @brief Ark RTOS Ӧ�� API ͷ�ļ����û�̬Ψһ��Ҫ������ͷ�ļ���
-* @details Ӧ�ó����û�̬���������ļ�����ʹ��ȫ������ϵͳ�ӿڡ�
-*          ���е�������ͨ�� SVC ָ�������ں�ִ̬�У����û�͸����
-*          �÷�����ͨ����һ�¡�
-* @note ���ļ�ֻ��������ʵ�ֱַ�λ�� kernelsrc/app/oslib.c���ں˹�����Ӧ�ã�
-*       �� kernelsrc/sdk/app_sdk/arkrtos_oslib.c������Ӧ�ù̼�����
+* @brief Ark RTOS 应用 API 头文件（用户态唯一需要包含的头文件）
+* @details 应用程序（用户态）包含本文件即可使用全部操作系统接口。
+*          所有调用最终通过 SVC 指令陷入内核态执行，对用户透明，
+*          用法与普通函数一致。
+* @note 本文件只含声明；实现分别位于 kernelsrc/app/oslib.c（内核工程内应用）
+*       与 kernelsrc/sdk/app_sdk/arkrtos_oslib.c（独立应用固件）。
 * @author xw
 * @date 2026.05.03
 */
@@ -14,16 +14,16 @@
 #define __ARKRTOS_H__
 
 #include "arkrtos_types.h"
-#include "arkrtos_features.h"   /* ���Կ��أ�������ſص������ݴ˲ü� */
+#include "arkrtos_features.h"   /* 特性开关：下面带门控的声明据此裁剪 */
 #include "arkrtos_ulog.h"
 #include "arkrtos_version.h"
 
-/** @defgroup sync_ret ͬ��ԭ�ﷵ����
+/** @defgroup sync_ret 同步原语返回码
  *  @{
- *  ���ں� arkrtos_def.h ����ͬһ����ֵ���ں�ͷ�ļ���Ӧ�ò��ɼ���
- *  ����Щ��ֵ�ǽӿ���Լ��һ���֣����÷�Ҫ�ݴ��жϡ�����û�õ���Դ������
- *  �����������ٸ�һ�ݣ������ĵ����ᵽ��������Ӧ�ò��ò�����
- *  �ں˱��뵥Ԫ��ͬʱ��������ͷ�ļ���#ifndef ��֤�����ض��塣
+ *  与内核 arkrtos_def.h 保持同一组数值。内核头文件对应用不可见，
+ *  而这些数值是接口契约的一部分（调用方要据此判断“本次没拿到资源”），
+ *  所以在这里再给一份，避免文档里提到的名字在应用侧拿不到。
+ *  内核编译单元会同时包含两个头文件，#ifndef 保证不会重定义。
  */
 #ifndef ARKRTOS_SYNC_OK
 #define ARKRTOS_SYNC_OK             (0)
@@ -42,222 +42,222 @@
 #endif
 /** @} */
 
-/** @defgroup task �������
+/** @defgroup task 任务管理
  *  @{ */
 
 /**
-* @brief ��ǰ����˯��ָ�����루�������ȣ�
-* @param ms ˯��ʱ�䣬��λ����
-* @note ˯���ڼ�����״̬Ϊ�ȴ���CPU ����������������
+* @brief 当前任务睡眠指定毫秒（阻塞调度）
+* @param ms 睡眠时间，单位毫秒
+* @note 睡眠期间任务状态为等待，CPU 交给其他就绪任务。
 */
 void   arkrtos_task_wait(uint32 ms);
 
 /**
-* @brief �ȴ���ǰ��������ڽ�������������ͬ���ã�
-* @note �����������ñ������������ڣ�δ���ڼ������������Զ����ѡ�
+* @brief 等待当前任务的周期结束（周期任务同步用）
+* @note 任务须在配置表中设置了周期；未到期即阻塞，到期自动唤醒。
 */
 void   arkrtos_task_wait_period(void);
 
 /**
-* @brief ΢�뼶æ����ʱ�������������л���
-* @param us ��ʱʱ�䣬��λ΢��
-* @note ռ�� CPU��ֻ�ʺϼ�����ʱ��������ʱ�򣩣�����ʱӦʹ�� arkrtos_task_wait��
+* @brief 微秒级忙等延时（不引起任务切换）
+* @param us 延时时间，单位微秒
+* @note 占用 CPU，只适合极短延时（如外设时序），长延时应使用 arkrtos_task_wait。
 */
 void   arkrtos_task_delay(uint32 us);
 
 /**
-* @brief ��ֹ��ǰ����
-* @note ������ֹ�����������λתΪ INVALID���ɾ� arkrtos_task_recover_req �ָ���
+* @brief 终止当前任务
+* @note 仅能终止自身；任务槽位转为 INVALID，可经 arkrtos_task_recover_req 恢复。
 */
 void   arkrtos_task_kill(void);
 /** @} */
 
-/** @defgroup sysinfo ϵͳ��Ϣ
+/** @defgroup sysinfo 系统信息
  *  @{ */
 
 /**
-* @brief ��ȡϵͳ����ʱ��
-* @return ���ں����������ĺ�����
+* @brief 获取系统运行时间
+* @return 自内核启动以来的毫秒数
 */
 uint32 arkrtos_get_time_ms(void);
 
 /**
-* @brief ��ȡ CPU ������
-* @return �����ʣ��ٷֱ� 0~100��
-* @note �迪�� ARKRTOS_USE_CPU_LOAD ���á�
+* @brief 获取 CPU 空闲率
+* @return 空闲率（百分比 0~100）
+* @note 需开启 ARKRTOS_USE_CPU_LOAD 配置。
 */
 uint32 arkrtos_get_cpu_usage(void);
 /** @} */
 
-/** @defgroup event �¼�
+/** @defgroup event 事件
  *  @{ */
 
 /**
-* @brief ���������¼�
-* @param name �¼������ַ�����
-* @return �¼������ʧ�ܷ��ظ�ֵ
+* @brief 创建命名事件
+* @param name 事件名（字符串）
+* @return 事件句柄，失败返回负值
 */
 int32  arkrtos_event_create(char *name);
 
 /**
-* @brief �ȴ��¼�����
-* @param handle  �¼����
-* @param timeout ��ʱʱ�䣨ms����0 ��ʾ���ȴ�����ֵ��ʾ���õȴ�
+* @brief 等待事件触发
+* @param handle  事件句柄
+* @param timeout 超时时间（ms），0 表示不等待，负值表示永久等待
 */
 int32  arkrtos_event_wait(int32 handle, int32 timeout);
 
 /**
-* @brief �����¼����������еȴ����¼�������
-* @param handle �¼����
+* @brief 触发事件，唤醒所有等待该事件的任务
+* @param handle 事件句柄
 */
 void   arkrtos_event_set(int32 handle);
 /** @} */
 
-/* 32 λ�¼�����ARKRTOS_USE_ESET=1 ���У��������"�¼�"�����ײ�ͬ���壬
- * �� docs/ͬ��ԭ���������غ�.md �ķֹ�������
- *   �¼�   = ����־ + �㲥 + �Զ���λ��set �������еȴ��ߣ�
- *   �¼��� = 32 ������λ + ������ȴ���OR / AND��+ ��ѡ���к������ */
+/* 32 位事件集（ARKRTOS_USE_ESET=1 才有；与上面的"事件"是两套不同语义，
+ * 见 docs/同步原语与令牌守恒.md 的分工表）：
+ *   事件   = 单标志 + 广播 + 自动复位，set 唤醒所有等待者；
+ *   事件集 = 32 个独立位 + 按掩码等待（OR / AND）+ 可选命中后清除。 */
 #if (ARKRTOS_USE_ESET == 1)
-/** @defgroup eset 32 λ�¼���
+/** @defgroup eset 32 位事件集
  *  @{
  */
 
-/* �ȴ�ѡ�OR �� AND �����ѡһ��CLEAR �ɵ��ӡ���ֵ�ǽӿ���Լ��һ���֡� */
-#define ARKRTOS_ESET_OPT_OR         (0x01u)   /* ��������һλ���������� */
-#define ARKRTOS_ESET_OPT_AND        (0x02u)   /* ����������λ�������ŷ��� */
-#define ARKRTOS_ESET_OPT_CLEAR      (0x04u)   /* ���к�������е�λ */
+/* 等待选项：OR 与 AND 必须二选一，CLEAR 可叠加。数值是接口契约的一部分。 */
+#define ARKRTOS_ESET_OPT_OR         (0x01u)   /* 掩码内任一位成立即返回 */
+#define ARKRTOS_ESET_OPT_AND        (0x02u)   /* 掩码内所有位都成立才返回 */
+#define ARKRTOS_ESET_OPT_CLEAR      (0x04u)   /* 命中后清除命中的位 */
 
 /**
-* @brief ���������¼�����32 λ��
-* @param name �¼��������ַ�����
-* @return �¼��������ʧ�ܷ��ظ�ֵ
+* @brief 创建命名事件集（32 位）
+* @param name 事件集名（字符串）
+* @return 事件集句柄，失败返回负值
 */
 int32  arkrtos_eset_create(char *name);
 
 /**
-* @brief �ȴ��¼������һ��λ
-* @param handle  �¼������
-* @param mask    Ҫ�ȵ�λ���� 0��
-* @param opt     ARKRTOS_ESET_OPT_OR / _AND ��ѡһ���� | ARKRTOS_ESET_OPT_CLEAR
-* @param p_got   �ɹ�ʱд�뱾���õ���λ�����÷����壩
-* @param timeout ��ʱ��ms����0 = ֻ��һ�Σ���ֵ = ���õȴ�
-* @return 0 = �õ�λ���� *p_got����ARKRTOS_SYNC_ERR_TIMEOUT = ��ʱ��
-*         ARKRTOS_SYNC_ERR_DELETED = �ȴ��ڼ����ɾ������ֵ = ����/�������
-* @note AND ����ʱ *p_got ���� mask��OR ����ʱֻ����ʱ��������Щλ��
-*       �� CLEAR ʱ���������÷���λͬʱ�Ӷ������������ֻ����һ���ȴ��ߡ�
+* @brief 等待事件集里的一组位
+* @param handle  事件集句柄
+* @param mask    要等的位（非 0）
+* @param opt     ARKRTOS_ESET_OPT_OR / _AND 二选一，可 | ARKRTOS_ESET_OPT_CLEAR
+* @param p_got   成功时写入本次拿到的位（调用方缓冲）
+* @param timeout 超时（ms）：0 = 只试一次，负值 = 永久等待
+* @return 0 = 拿到位（见 *p_got）；ARKRTOS_SYNC_ERR_TIMEOUT = 超时；
+*         ARKRTOS_SYNC_ERR_DELETED = 等待期间对象被删除；负值 = 参数/句柄错误
+* @note AND 命中时 *p_got 等于 mask；OR 命中时只含当时成立的那些位。
+*       带 CLEAR 时，交给调用方的位同时从对象里清掉，且只交给一个等待者。
 */
 int32  arkrtos_eset_wait(int32 handle, uint32 mask, uint32 opt,
                          uint32 *p_got, int32 timeout);
 
 /**
-* @brief ��λ�����ۼӣ���flags |= mask
-* @param handle �¼������
-* @param mask   Ҫ�õ�λ���� 0��
-* @return 0 �ɹ�����ֵʧ��
-* @note û�еȴ���ʱλ���ڶ������һ�� wait ֱ�����У����ᶪ�¼���
+* @brief 置位（可累加）：flags |= mask
+* @param handle 事件集句柄
+* @param mask   要置的位（非 0）
+* @return 0 成功，负值失败
+* @note 没有等待者时位留在对象里，下一次 wait 直接命中，不会丢事件。
 */
 int32  arkrtos_eset_set(int32 handle, uint32 mask);
 
 /**
-* @brief �ж�����λ�������� arkrtos_eset_set ��ͬ��
-* @param handle �¼������
-* @param mask   Ҫ�õ�λ���� 0��
-* @return 0 �ɹ�����ֵʧ��
+* @brief 中断中置位（语义与 arkrtos_eset_set 相同）
+* @param handle 事件集句柄
+* @param mask   要置的位（非 0）
+* @return 0 成功，负值失败
 */
 int32  arkrtos_eset_set_from_isr(int32 handle, uint32 mask);
 
 /**
-* @brief �������λ��flags &= ~mask
-* @param handle �¼������
-* @param mask   Ҫ���λ
-* @return 0 �ɹ�����ֵʧ��
+* @brief 清除若干位：flags &= ~mask
+* @param handle 事件集句柄
+* @param mask   要清的位
+* @return 0 成功，负值失败
 */
 int32  arkrtos_eset_clear(int32 handle, uint32 mask);
 
 /**
-* @brief ��ѯ��ǰ��λ���
-* @param handle  �¼������
-* @param p_flags �������ǰ 32 λ����
-* @return 0 �ɹ�����ֵʧ��
+* @brief 查询当前置位情况
+* @param handle  事件集句柄
+* @param p_flags 输出：当前 32 位掩码
+* @return 0 成功，负值失败
 */
 int32  arkrtos_eset_get(int32 handle, uint32 *p_flags);
 
 /**
-* @brief ɾ���¼������ȴ����� ARKRTOS_SYNC_ERR_DELETED ���ߣ�
-* @param handle �¼������
-* @return 0 �ɹ�����ֵʧ��
+* @brief 删除事件集（等待者以 ARKRTOS_SYNC_ERR_DELETED 放走）
+* @param handle 事件集句柄
+* @return 0 成功，负值失败
 */
 int32  arkrtos_eset_delete(int32 handle);
 /** @} */
 #endif /* ARKRTOS_USE_ESET == 1 */
 
-/** @defgroup sem �ź���
+/** @defgroup sem 信号量
  *  @{ */
 
 /**
-* @brief ���������ź���
-* @param name       �ź�����
-* @param init_count ��ʼ����ֵ
-* @return �ź��������ʧ�ܷ��ظ�ֵ
+* @brief 创建计数信号量
+* @param name       信号量名
+* @param init_count 初始计数值
+* @return 信号量句柄，失败返回负值
 */
 int32  arkrtos_sem_create(char *name, int32 init_count);
 
 /**
-* @brief �ȴ��ź�����������һ������Ϊ 0 ʱ������
-* @param handle  �ź������
-* @param timeout ��ʱʱ�䣨ms����0 ��ʾ���ȴ�����ֵ��ʾ���õȴ�
-* @return 0=�ɹ���ARKRTOS_SYNC_ERR_TIMEOUT(-2)=�ȴ���ʱ��δ�����Դ����������ֵ=��������
+* @brief 等待信号量（计数减一，计数为 0 时阻塞）
+* @param handle  信号量句柄
+* @param timeout 超时时间（ms），0 表示不等待，负值表示永久等待
+* @return 0=成功；ARKRTOS_SYNC_ERR_TIMEOUT(-2)=等待超时（未获得资源）；其它负值=参数错误
 */
 int32  arkrtos_sem_wait(int32 handle, int32 timeout);
 
 /**
-* @brief �ͷ��ź��������ѵȴ��߻������һ��
-* @param handle �ź������
-* @return 0=�ɹ�����ֵ=ʧ��
+* @brief 释放信号量（唤醒等待者或计数加一）
+* @param handle 信号量句柄
+* @return 0=成功，负值=失败
 */
 int32  arkrtos_sem_post(int32 handle);
 
 /**
-* @brief ɾ���ź���
-* @param handle �ź������
-* @return 0=�ɹ�����ֵ=ʧ��
+* @brief 删除信号量
+* @param handle 信号量句柄
+* @return 0=成功，负值=失败
 */
 int32  arkrtos_sem_delete(int32 handle);
 /** @} */
 
-/** @defgroup mutex ������
+/** @defgroup mutex 互斥锁
  *  @{ */
 
 /**
-* @brief �����������������ȼ��̳У���ֹ���ȼ���ת��
-* @param name ��������
-* @return �����������ʧ�ܷ��ظ�ֵ
+* @brief 创建互斥锁（带优先级继承，防止优先级反转）
+* @param name 互斥锁名
+* @return 互斥锁句柄，失败返回负值
 */
 int32  arkrtos_mutex_create(char *name);
 
 #if (ARKRTOS_USE_MTX_RECURSIVE == 1)
 /**
-* @brief �����ݹ黥������ͬһ������ظ������������������������ƽ��
-* @param name ��������
-* @return �����������ʧ�ܷ��ظ�ֵ
-* @note ��ͨ arkrtos_mutex_create ���������Բ��ɵݹ飬�ظ��������� -1��
+* @brief 创建递归互斥锁（同一任务可重复加锁，解锁需与加锁次数配平）
+* @param name 互斥锁名
+* @return 互斥锁句柄，失败返回负值
+* @note 普通 arkrtos_mutex_create 创建的锁仍不可递归，重复加锁返回 -1。
 */
 int32  arkrtos_mutex_create_recursive(char *name);
 #endif
 #if (ARKRTOS_USE_WAITMULTI == 1)
-/** @defgroup waitmulti �����ͬʱ�ȴ�
+/** @defgroup waitmulti 多对象同时等待
  *  @{ */
 /**
-* @brief ̽��һ��������Щ�Ѿ��������������ƣ�
-* @param handles     ������飨�ź��� / ������ / ��Ϣ���� / �¼����þ��ɣ�
-* @param n           ���������1..ARKRTOS_WAITMULTI_MAX_OBJS
-* @param opt         ARKRTOS_WM_OPT_ANY������һ���������� ARKRTOS_WM_OPT_ALL
-* @param timeout_ms  ��ʱ��0=ֻ̽һ�Σ�>0=������ô����룻<0=һֱ��
-* @param ready_mask �����bit i ��Ӧ handles[i]��1=�������ݲ�����ʱҲ�ɶ���
-* @return 0=����������-1=����/����Ƿ���-2=��ʱ��δ����
-* @note ���ƻ��ԣ������Ķ��󲻻ᱻȡ�ߣ����÷����Ҫ�ø��Ե� timeout=0
-*       �ӿ�ȥȡ������ʱ�ĵȴ�����ѯʵ�֣������ӳ�������һ����ѯ���ڣ�
-*       32 λ�¼�����Ҫÿ��Ŀ�����룬���ӿڲ�֧�֡�
+* @brief 探测一组句柄里哪些已就绪（不消费令牌）
+* @param handles     句柄数组（信号量 / 互斥锁 / 消息队列 / 事件混用均可）
+* @param n           句柄个数，1..ARKRTOS_WAITMULTI_MAX_OBJS
+* @param opt         ARKRTOS_WM_OPT_ANY（任意一个就绪）或 ARKRTOS_WM_OPT_ALL
+* @param timeout_ms  超时：0=只探一次；>0=最多等这么多毫秒；<0=一直等
+* @param ready_mask 输出：bit i 对应 handles[i]，1=就绪（暂不满足时也可读）
+* @return 0=满足条件；-1=参数/句柄非法；-2=超时仍未满足
+* @note 非破坏性：就绪的对象不会被取走，调用方随后要用各自的 timeout=0
+*       接口去取。带超时的等待是轮询实现，唤醒延迟上限是一个轮询周期；
+*       32 位事件集需要每条目带掩码，本接口不支持。
 */
 int32  arkrtos_wait_multi(const uint32 *handles, uint32 n, uint32 opt,
                           int32 timeout_ms, uint32 *ready_mask);
@@ -265,527 +265,527 @@ int32  arkrtos_wait_multi(const uint32 *handles, uint32 n, uint32 opt,
 #endif
 
 /**
-* @brief ����
-* @param handle  ���������
-* @param timeout ��ʱʱ�䣨ms����0 ��ʾ���ȴ�����ֵ��ʾ���õȴ�
-* @return 0=�ɹ���ARKRTOS_SYNC_ERR_TIMEOUT(-2)=�ȴ���ʱ��δ�����Դ����������ֵ=��������
+* @brief 加锁
+* @param handle  互斥锁句柄
+* @param timeout 超时时间（ms），0 表示不等待，负值表示永久等待
+* @return 0=成功；ARKRTOS_SYNC_ERR_TIMEOUT(-2)=等待超时（未获得资源）；其它负值=参数错误
 */
 int32  arkrtos_mutex_lock(int32 handle, int32 timeout);
 
 /**
-* @brief �������������߿ɽ�����
-* @param handle ���������
-* @return 0=�ɹ�����ֵ=ʧ��
+* @brief 解锁（仅持有者可解锁）
+* @param handle 互斥锁句柄
+* @return 0=成功，负值=失败
 */
 int32  arkrtos_mutex_unlock(int32 handle);
 
 /**
-* @brief ɾ��������
-* @param handle ���������
-* @return 0=�ɹ�����ֵ=ʧ��
+* @brief 删除互斥锁
+* @param handle 互斥锁句柄
+* @return 0=成功，负值=失败
 */
 int32  arkrtos_mutex_delete(int32 handle);
 /** @} */
 
-/** @defgroup cond ��������
+/** @defgroup cond 条件变量
  *  @{ */
 
 /**
-* @brief ������������
-* @param name ������������� 7 ���ַ���
-* @return �������������ʧ�ܷ��ظ�ֵ
+* @brief 创建条件变量
+* @param name 条件变量名（最长 7 个字符）
+* @return 条件变量句柄，失败返回负值
 */
 int32  arkrtos_cond_create(char *name);
 
 /**
-* @brief �ȴ�������ԭ�ӵ��ͷŻ��������������������³��л�������
-* @param cond_handle  �����������
-* @param mutex_handle ��ǰ�����ѳ��еĻ��������
-* @param timeout      ��ʱʱ�䣨ms������ֵ��ʾ���õȴ���0 ��֧��
-*                     �������������롰�ͷŻ�������ȴ������� 0 ֻ��õ�һ����������
-* @return 0=�� signal/broadcast ���ѣ�ARKRTOS_SYNC_ERR_TIMEOUT(-2)=��ʱ��
-*         ARKRTOS_SYNC_ERR_DELETED(-3)=�ȴ��ڼ����ɾ����������ֵ=��������
-* @note ���۷���ʲô������ʱ�������³��� mutex_handle��POSIX ��Լ����
-* @note ����ǰ�����ȳ��� mutex_handle�����򷵻ز�������
-*       �ͷ�������ȴ��������ں��ڲ�һ�����꣬���ᶪʧ signal��
+* @brief 等待条件（原子地释放互斥锁并挂起，醒来后重新持有互斥锁）
+* @param cond_handle  条件变量句柄
+* @param mutex_handle 当前任务已持有的互斥锁句柄
+* @param timeout      超时时间（ms），负值表示永久等待；0 不支持
+*                     （条件变量必须“释放互斥量后等待”，给 0 只会得到一个参数错误）
+* @return 0=被 signal/broadcast 唤醒；ARKRTOS_SYNC_ERR_TIMEOUT(-2)=超时；
+*         ARKRTOS_SYNC_ERR_DELETED(-3)=等待期间对象被删除；其它负值=参数错误
+* @note 无论返回什么，返回时都已重新持有 mutex_handle（POSIX 契约）。
+* @note 调用前必须先持有 mutex_handle，否则返回参数错误；
+*       释放锁与入等待队列在内核内部一次做完，不会丢失 signal。
 */
 int32  arkrtos_cond_wait(int32 cond_handle, int32 mutex_handle, int32 timeout);
 
 /**
-* @brief ����һ���ȴ��ߣ�û�еȴ���ʱ�������
-* @param handle �����������
-* @return 0=�ɹ�����ֵ=ʧ��
+* @brief 唤醒一个等待者（没有等待者时不算错误）
+* @param handle 条件变量句柄
+* @return 0=成功，负值=失败
 */
 int32  arkrtos_cond_signal(int32 handle);
 
 /**
-* @brief ����ȫ���ȴ���
-* @param handle �����������
-* @return 0=�ɹ�����ֵ=ʧ��
+* @brief 唤醒全部等待者
+* @param handle 条件变量句柄
+* @return 0=成功，负值=失败
 */
 int32  arkrtos_cond_broadcast(int32 handle);
 
 /**
-* @brief ɾ����������������ȫ���ȴ��߲���֪������ɾ����
-* @param handle �����������
-* @return 0=�ɹ�����ֵ=ʧ��
+* @brief 删除条件变量（唤醒全部等待者并告知对象已删除）
+* @param handle 条件变量句柄
+* @return 0=成功，负值=失败
 */
 int32  arkrtos_cond_delete(int32 handle);
 /** @} */
 
-/** @defgroup dev �豸 IO
+/** @defgroup dev 设备 IO
  *  @{ */
 
 /**
-* @brief ���豸
-* @param name  �豸���������������������ע������֣�
-* @param param �豸��ز��������������ͣ��޲����� 0��
-* @return �豸�����ʧ�ܷ��ظ�ֵ
+* @brief 打开设备
+* @param name  设备名（内置驱动或独立驱动注册的名字）
+* @param param 设备相关参数（由驱动解释，无参数填 0）
+* @return 设备句柄，失败返回负值
 */
 int32  arkrtos_dev_open(char *name, uint32 param);
 
 /**
-* @brief �ر��豸
-* @param handle �豸���
-* @return 0=�ɹ�����ֵ=ʧ��
+* @brief 关闭设备
+* @param handle 设备句柄
+* @return 0=成功，负值=失败
 */
 int32  arkrtos_dev_close(int32 handle);
 
 /**
-* @brief ���豸��ȡ����
-* @param handle �豸���
-* @param pdata  ���ջ�����
-* @param len    ������ȡ���ȣ��ֽڣ�
-* @return ʵ�ʶ�ȡ���ȣ���ֵ��ʾ����
+* @brief 从设备读取数据
+* @param handle 设备句柄
+* @param pdata  接收缓冲区
+* @param len    期望读取长度（字节）
+* @return 实际读取长度，负值表示错误
 */
 int32  arkrtos_dev_read(int32 handle, void *pdata, int32 len);
 
 /**
-* @brief ���豸д������
-* @param handle �豸���
-* @param pdata  ���ͻ�����
-* @param len    д�볤�ȣ��ֽڣ�
-* @return ʵ��д�볤�ȣ���ֵ��ʾ����
+* @brief 向设备写入数据
+* @param handle 设备句柄
+* @param pdata  发送缓冲区
+* @param len    写入长度（字节）
+* @return 实际写入长度，负值表示错误
 */
 int32  arkrtos_dev_write(int32 handle, void *pdata, int32 len);
 
 /**
-* @brief �豸��������
-* @param handle �豸���
-* @param code   ���������루���������壩
-* @param value  �������
-* @return 0 ����ֵ=�ɹ�����ֵ=ʧ��
+* @brief 设备控制命令
+* @param handle 设备句柄
+* @param code   控制命令码（由驱动定义）
+* @param value  命令参数
+* @return 0 或正值=成功，负值=失败
 */
 int32  arkrtos_dev_ctrl(int32 handle, uint32 code, uint32 value);
 
 /**
-* @brief �����������ĳ�豸�ı���"����"��Ӳ����ȫ̬��
-* @param dev_name �豸��������������� open �����������ں˾ܾ���
-* @param cmd      �����豸�����Ŀ���������
-* @param val      �������
-* @return 0=�ɹ���-1=������δ���и��豸��-2=�����Ƿ�
-* @note ����������������/��ɱ/���ϻָ���ʱ�����ںˣ����Ǳ� App���Ը��豸ִ��
-*       drv_ctrl(cmd,val)����ֹ App ��������/����/��е�۵�Ӳ��ʧ�ء�
-*       ���ں� ARKRTOS_HW_SAFE=1�����򷵻� -1��
+* @brief 声明本任务对某设备的崩溃"遗言"（硬件安全态）
+* @param dev_name 设备名（本任务必须先 open 过它，否则内核拒绝）
+* @param cmd      传给设备驱动的控制命令码
+* @param val      命令参数
+* @return 0=成功；-1=本任务并未持有该设备；-2=参数非法
+* @note 本任务死亡（自退/被杀/故障恢复）时，由内核（不是本 App）对该设备执行
+*       drv_ctrl(cmd,val)，防止 App 崩溃后电机/机床/机械臂等硬件失控。
+*       需内核 ARKRTOS_HW_SAFE=1，否则返回 -1。
 */
 int32  arkrtos_dev_set_will(const char *dev_name, int32 cmd, int32 val);
 /** @} */
 
-/** @defgroup mq ��Ϣ����
+/** @defgroup mq 消息队列
  *  @{ */
 
 /**
-* @brief ������Ϣ����
-* @param name ������
-* @return ��Ϣ���о����ʧ�ܷ��ظ�ֵ
-* @note ��������뵥����Ϣ������ ARKRTOS_MQ_DEPTH / ARKRTOS_MQ_MSG_WORDS ���á�
+* @brief 创建消息队列
+* @param name 队列名
+* @return 消息队列句柄，失败返回负值
+* @note 队列深度与单条消息长度由 ARKRTOS_MQ_DEPTH / ARKRTOS_MQ_MSG_WORDS 配置。
 */
 int32  arkrtos_mq_create(char *name);
 
 /**
-* @brief ������Ϣ����Ϣ���ֿ�����ӣ�
-* @param handle    ��Ϣ���о��
-* @param buf       ��Ϣ������
-* @param len_words ��Ϣ���ȣ��� 32 λ��Ϊ��λ��
-* @param timeout   ������ʱ�ĵȴ�ʱ�䣨ms����0 ��ʾ���ȴ�����ֵ��ʾ���õȴ�
-* @return 0=�ɹ�����ֵ=ʧ��
+* @brief 发送消息（消息按字拷贝入队）
+* @param handle    消息队列句柄
+* @param buf       消息缓冲区
+* @param len_words 消息长度（以 32 位字为单位）
+* @param timeout   队列满时的等待时间（ms），0 表示不等待，负值表示永久等待
+* @return 0=成功，负值=失败
 */
 int32  arkrtos_mq_send(int32 handle, void *buf, int32 len_words, int32 timeout);
 
 /**
-* @brief ������Ϣ������ʽ��
-* @param handle    ��Ϣ���о��
-* @param buf       ���ջ�����
-* @param len_words �����������ɵ�����
-* @param timeout   ��ʱʱ�䣨ms����0 ��ʾ���ȴ�����ֵ��ʾ���õȴ�
-* @return ʵ���յ�����������ֵ=��ʱ�����
+* @brief 接收消息（阻塞式）
+* @param handle    消息队列句柄
+* @param buf       接收缓冲区
+* @param len_words 缓冲区可容纳的字数
+* @param timeout   超时时间（ms），0 表示不等待，负值表示永久等待
+* @return 实际收到的字数，负值=超时或错误
 */
 int32  arkrtos_mq_recv(int32 handle, void *buf, int32 len_words, int32 timeout);
 
 /**
-* @brief ɾ����Ϣ����
-* @param handle ��Ϣ���о��
-* @return 0=�ɹ�����ֵ=ʧ��
+* @brief 删除消息队列
+* @param handle 消息队列句柄
+* @return 0=成功，负值=失败
 */
 int32  arkrtos_mq_delete(int32 handle);
 /** @} */
 
 #if (ARKRTOS_USE_SBUF == 1)
-/** @defgroup sbuf ������ / ��Ϣ����
+/** @defgroup sbuf 流缓冲 / 消息缓冲
  *  @{ */
 
 /**
-* @brief ����������
-* @param name ��������� 7 �ֽڣ�
-* @return �����ʧ�ܷ��ظ�ֵ
-* @note ÿ������̶�ռ�� ARKRTOS_SBUF_BUF_SIZE �ֽھ�̬���壬û�ж�̬�ڴ档
-*       ͬһ�黺��ȿ��԰��ֽ�����arkrtos_sbuf_*���ã�Ҳ���԰���Ϣ
-*       ��arkrtos_mbuf_*���ã������߲�Ҫ���ã���Ϣ������ͷ���磬
-*       �������ֽ����󳤶�ͷ�ʹ�λ�ˡ�
+* @brief 创建流缓冲
+* @param name 缓冲名（最长 7 字节）
+* @return 句柄，失败返回负值
+* @note 每个对象固定占用 ARKRTOS_SBUF_BUF_SIZE 字节静态缓冲，没有动态内存。
+*       同一块缓冲既可以按字节流（arkrtos_sbuf_*）用，也可以按消息
+*       （arkrtos_mbuf_*）用，但两者不要混用：消息靠长度头定界，
+*       掺进裸字节流后长度头就错位了。
 */
 int32  arkrtos_sbuf_create(char *name);
 
 /**
-* @brief д���ֽ���
-* @param handle     ��������
-* @param buf        ����
-* @param len        �ֽ��������ó��� ARKRTOS_SBUF_BUF_SIZE��
-* @param timeout_ms 0=���ȴ�����ֵ=���õȴ�
-* @return ʵ��д����ֽ�����>0������С�� len������ֵΪ������
-* @note ������ RTOS ��������һ�£��ռ䲻��ʱ��д����д���٣�
-*       ����ʵ���������÷��ݴ��ƽ�ƫ�ƺ���дʣ�µĲ��֡�
+* @brief 写入字节流
+* @param handle     流缓冲句柄
+* @param buf        数据
+* @param len        字节数（不得超过 ARKRTOS_SBUF_BUF_SIZE）
+* @param timeout_ms 0=不等待，负值=永久等待
+* @return 实际写入的字节数（>0，可能小于 len）；负值为错误码
+* @note 与其他 RTOS 的流缓冲一致：空间不够时能写多少写多少，
+*       返回实际量，调用方据此推进偏移后再写剩下的部分。
 */
 int32  arkrtos_sbuf_send(int32 handle, const void *buf, int32 len, int32 timeout_ms);
 
 /**
-* @brief ��ȡ�ֽ���
-* @return ʵ�ʶ������ֽ�����>0������ֵΪ��ʱ/��������
+* @brief 读取字节流
+* @return 实际读出的字节数（>0）；负值为超时/参数错误
 */
 int32  arkrtos_sbuf_recv(int32 handle, void *buf, int32 len, int32 timeout_ms);
 
 /**
-* @brief �ж�������д�루�����������˷��ظ�ֵ��
-* @return ʵ��д����ֽ���
+* @brief 中断上下文写入（不阻塞：满了返回负值）
+* @return 实际写入的字节数
 */
 int32  arkrtos_sbuf_send_from_isr(int32 handle, const void *buf, int32 len);
 
-/** @brief ��ǰ�Ѵ��ֽ�������ֵ=����Ƿ� */
+/** @brief 当前已存字节数，负值=句柄非法 */
 int32  arkrtos_sbuf_used(int32 handle);
-/** @brief ��ǰʣ��ռ��ֽ�������ֵ=����Ƿ� */
+/** @brief 当前剩余空间字节数，负值=句柄非法 */
 int32  arkrtos_sbuf_free(int32 handle);
-/** @brief ��ջ��壨���ѵȴ��ռ��д�ߣ� */
+/** @brief 清空缓冲（唤醒等待空间的写者） */
 int32  arkrtos_sbuf_reset(int32 handle);
-/** @brief ɾ�����壨�ȴ����յ�"������ɾ��"������˯����ʱ�� */
+/** @brief 删除缓冲（等待者收到"对象已删除"，不会睡到超时） */
 int32  arkrtos_sbuf_delete(int32 handle);
 
 /**
-* @brief ����һ��������ͷ����Ϣ������ԭ�ӣ�
-* @return 0=����д�룻��ֵ=��ʱ/NOSPC(�����黺�廹��)/��������
+* @brief 发送一条带长度头的消息（整条原子）
+* @return 0=整条写入；负值=超时/NOSPC(比整块缓冲还大)/参数错误
 */
 int32  arkrtos_mbuf_send(int32 handle, const void *buf, int32 len, int32 timeout_ms);
 
 /**
-* @brief ����һ����Ϣ
-* @param buf ���ջ��壻����ϢСʱ�������������� ARKRTOS_SBUF_ERR_TOO_SMALL
-* @return ��Ϣ���ȣ�>0������ֵΪ������
+* @brief 接收一条消息
+* @param buf 接收缓冲；比消息小时整条丢弃并返回 ARKRTOS_SBUF_ERR_TOO_SMALL
+* @return 消息长度（>0）；负值为错误码
 */
 int32  arkrtos_mbuf_recv(int32 handle, void *buf, int32 len, int32 timeout_ms);
 
-/** @brief �ж������ķ�����Ϣ������д�룬�Ų��·��ظ�ֵ�� */
+/** @brief 中断上下文发送消息（整条写入，放不下返回负值） */
 int32  arkrtos_mbuf_send_from_isr(int32 handle, const void *buf, int32 len);
 
-/** @brief ��һ��������Ϣ�ĳ��ȣ�û��������Ϣ���ظ�ֵ�������ʳ�����׼�����壩 */
+/** @brief 下一条完整消息的长度；没有完整消息返回负值（可先问长度再准备缓冲） */
 int32  arkrtos_mbuf_peek_len(int32 handle);
 /** @} */
 #endif /* ARKRTOS_USE_SBUF */
 
 #if (ARKRTOS_USE_MEMPOOL == 1)
-/** @defgroup mpool �̶����ڴ��
+/** @defgroup mpool 固定块内存池
  *  @{ */
 
-/* ���ں�ͷ�ļ� arkrtos_mempool.h ����ͬһ�鶨�壺Ӧ�ò࿴�����ں�ͷ�ļ���
-   ��������������ֶ��ǽӿ���Լ��������Ӧ�ò��ٸ�һ�ݡ�
-   �ֶ�˳�� SVC ����˳�򣬸Ķ���������ͬʱ�ġ� */
+/* 与内核头文件 arkrtos_mempool.h 保持同一组定义：应用侧看不到内核头文件，
+   池名长度与快照字段是接口契约，所以在应用侧再给一份。
+   字段顺序即 SVC 回填顺序，改动必须两侧同时改。 */
 #ifndef ARKRTOS_MPOOL_NAME_MAX
 #define ARKRTOS_MPOOL_NAME_MAX   (8)
 #endif
 
-/** @brief �ص�ֻ������ */
+/** @brief 池的只读快照 */
 typedef struct {
     char     name[ARKRTOS_MPOOL_NAME_MAX];
-    uint32   block_size;      /* ÿ���ֽ��� */
-    uint32   block_count;     /* �ܿ��� */
-    uint32   free_count;      /* ��ǰ���п��� */
-    uint32   alloc_ok;        /* �ۼƷ���ɹ����� */
-    uint32   alloc_fail;      /* �ۼƷ���ʧ�ܴ��� */
-    uint32   free_bad;        /* �ۼƷǷ��ͷţ����ܾ������� */
-    uint32   peak_used;       /* ��ʷ���ͬʱռ�ÿ��� */
+    uint32   block_size;      /* 每块字节数 */
+    uint32   block_count;     /* 总块数 */
+    uint32   free_count;      /* 当前空闲块数 */
+    uint32   alloc_ok;        /* 累计分配成功次数 */
+    uint32   alloc_fail;      /* 累计分配失败次数 */
+    uint32   free_bad;        /* 累计非法释放（被拒绝）次数 */
+    uint32   peak_used;       /* 历史最大同时占用块数 */
 } arkrtos_mpool_stat_t;
 
 /**
-* @brief �ڵ������ṩ���ڴ����ϴ����̶����
-* @param name        �������ǿգ����� < ARKRTOS_MPOOL_NAME_MAX��
-* @param pool        �ڴ����׵�ַ�������������ڱ�����Ŀɼ� RAM ��
-* @param block_size  ÿ���ֽ��������� >= ָ������Ұ�ָ����ȶ���
-* @param block_count ���������� > 0
-* @return >=0 �������ֵ=�����Ƿ�/�����ظ�/���������/�ڴ������ڿɼ� RAM
-* @note �ز�����Ҳ���������������ͷŶ��ڼ����ٽ�������ɣ����Ա��жϵ���
-*       ��ǰ����ͬһ�ز����ж�����������ͬʱ�ͷ�ͬһ���飨�Ǳ������Ǵ��ã���
-*       ��������ʱ�������񴴽��ĳػᱻ�ں��Զ����գ��ڴ���������ߣ������ͷţ���
+* @brief 在调用者提供的内存区上创建固定块池
+* @param name        池名（非空，长度 < ARKRTOS_MPOOL_NAME_MAX）
+* @param pool        内存区首地址，必须整段落在本任务的可见 RAM 内
+* @param block_size  每块字节数，必须 >= 指针宽度且按指针宽度对齐
+* @param block_count 块数，必须 > 0
+* @return >=0 句柄；负值=参数非法/名字重复/对象表已满/内存区不在可见 RAM
+* @note 池不加锁也不阻塞：分配与释放都在极短临界区内完成，可以被中断调用
+*       的前提是同一池不在中断里与任务里同时释放同一个块（那本来就是错用）。
+*       任务下线时，该任务创建的池会被内核自动回收（内存区归调用者，不会释放）。
 */
 int32  arkrtos_mpool_create(char *name, void *pool, uint32 block_size, uint32 block_count);
 
 /**
-* @brief ȡһ�飨��������
-* @return ���ַ��0 ��ʾ��ǰû�п��п�����Ƿ�
+* @brief 取一块（不阻塞）
+* @return 块地址；0 表示当前没有空闲块或句柄非法
 */
 void  *arkrtos_mpool_alloc(int32 handle);
 
 /**
-* @brief �黹һ��
-* @return 0=�ɹ�����ֵ=����Ƿ���ָ�벻���ڱ��أ���״̬���ֲ��䣩
+* @brief 归还一块
+* @return 0=成功；负值=句柄非法或指针不属于本池（池状态保持不变）
 */
 int32  arkrtos_mpool_free(int32 handle, void *p);
 
-/** @brief ȡ�ؿ��� @return 0=�ɹ�����ֵ=����Ƿ�����������ڿɼ� RAM */
+/** @brief 取池快照 @return 0=成功；负值=句柄非法或输出区不在可见 RAM */
 int32  arkrtos_mpool_query(int32 handle, arkrtos_mpool_stat_t *out);
 
-/** @brief ���ٳأ�ֻ�ͷŶ������������ṩ���ڴ�������Ӱ�죩 */
+/** @brief 销毁池（只释放对象表项，调用者提供的内存区不受影响） */
 int32  arkrtos_mpool_delete(int32 handle);
 /** @} */
 #endif /* ARKRTOS_USE_MEMPOOL */
 
 
-/** @defgroup timer ����ʱ��
+/** @defgroup timer 软定时器
  *  @{ */
 
 /**
-* @brief ��������ʱ��
-* @param name ��ʱ����
-* @return ��ʱ�������ʧ�ܷ��ظ�ֵ
+* @brief 创建软定时器
+* @param name 定时器名
+* @return 定时器句柄，失败返回负值
 */
 int32  arkrtos_timer_create(char *name);
 
 /**
-* @brief ������ʱ��
-* @param handle   ��ʱ�����
-* @param period_ms ��ʱ���ڣ�ms��
-* @param mode     0=���δ�����1=���ڴ�����ARKRTOS_TIMER_MODE_x��
-* @param cb       ���ڻص�����
-* @param arg      �ص�����
-* @return 0=�ɹ�����ֵ=ʧ��
-* @note �ص���ר�ö�ʱ��������������ִ�У������ж������У�
-*       ��˻ص��п��԰�ȫ��������ϵͳ���á�
+* @brief 启动定时器
+* @param handle   定时器句柄
+* @param period_ms 定时周期（ms）
+* @param mode     0=单次触发，1=周期触发（ARKRTOS_TIMER_MODE_x）
+* @param cb       到期回调函数
+* @param arg      回调参数
+* @return 0=成功，负值=失败
+* @note 回调在专用定时器任务上下文中执行，不在中断内运行，
+*       因此回调中可以安全调用其它系统调用。
 */
 int32  arkrtos_timer_start(int32 handle, uint32 period_ms, uint32 mode,
                          void (*cb)(void *), void *arg);
 
 /**
-* @brief ֹͣ��ʱ��
-* @param handle ��ʱ�����
-* @return 0=�ɹ�����ֵ=ʧ��
+* @brief 停止定时器
+* @param handle 定时器句柄
+* @return 0=成功，负值=失败
 */
 int32  arkrtos_timer_stop(int32 handle);
 
 /**
-* @brief ɾ����ʱ��
-* @param handle ��ʱ�����
-* @return 0=�ɹ�����ֵ=ʧ��
+* @brief 删除定时器
+* @param handle 定时器句柄
+* @return 0=成功，负值=失败
 */
 int32  arkrtos_timer_delete(int32 handle);
 /** @} */
 
-/** @defgroup diag ����״̬��������
+/** @defgroup diag 任务状态与故障诊断
  *  @{ */
 
 /**
-* @brief ��ѯ����״̬
-* @param task_id ����ţ��� 1 ��ʼ��
-* @return ����״̬ö��ֵ��arkrtos_task_status_t����-1 ��ʾ����ŷǷ�
+* @brief 查询任务状态
+* @param task_id 任务号（从 1 开始）
+* @return 任务状态枚举值（arkrtos_task_status_t），-1 表示任务号非法
 */
 int32  arkrtos_task_status_get(int32 task_id);
 
 /**
-* @brief ����ָ���������ָ������
-* @param task_id ����ţ��� 1 ��ʼ��
-* @return 0=�ɹ���-1=�����Ƿ�
-* @note �ؽ�����ջ֡�����µ��ȣ��������񼶹��ϻָ���
+* @brief 请求恢复（重启）指定任务
+* @param task_id 任务号（从 1 开始）
+* @return 0=成功，-1=参数非法
+* @note 重建任务栈帧并重新调度，用于任务级故障恢复。
 */
 int32  arkrtos_task_recover_req(int32 task_id);
 
 /**
-* @brief ��ȡ���ϼ�¼����
-* @return ��ǰ���λ��������Ѽ�¼�Ĺ�������
+* @brief 获取故障记录条数
+* @return 当前环形缓冲区中已记录的故障条数
 */
 int32  arkrtos_fault_record_count(void);
 
 /**
-* @brief ��ȡһ�����ϼ�¼
-* @param index ��¼��ţ��� 0 ��ʼ��
-* @param out3  �û���������3 ���֣���[0]=�������ͣ�[1]=����ţ�[2]=����ʱ�� tick
-* @return 0=�ɹ�����ֵ=ʧ��
+* @brief 读取一条故障记录
+* @param index 记录序号（从 0 开始）
+* @param out3  用户缓冲区（3 个字）：[0]=故障类型，[1]=任务号，[2]=发生时刻 tick
+* @return 0=成功，负值=失败
 */
 int32  arkrtos_fault_record_read(int32 index, uint32 *out3);
 /** @} */
 
-/** @defgroup isr �жϰ�ȫ API�������жϷ������/��Ȩ̬���ã�
+/** @defgroup isr 中断安全 API（仅限中断服务程序/特权态调用）
  *  @{ */
 
 /**
-* @brief �ж����ͷ��ź��������������������л���
-* @param handle �ź������
-* @return 0=�ɹ�����ֵ=ʧ��
-* @note �ýӿ�ֱ�����ں�ִ̬�У����� SVC��ֻ�����жϷ��������á�
+* @brief 中断中释放信号量（不阻塞、不引起切换）
+* @param handle 信号量句柄
+* @return 0=成功，负值=失败
+* @note 该接口直接在内核态执行，不经 SVC，只允许中断服务程序调用。
 */
 int32  arkrtos_sem_post_from_isr(int32 handle);
 
 /**
-* @brief �ж��д����¼�
-* @param handle �¼����
-* @return 0=�ɹ�����ֵ=ʧ��
+* @brief 中断中触发事件
+* @param handle 事件句柄
+* @return 0=成功，负值=失败
 */
 int32  arkrtos_event_set_from_isr(int32 handle);
 
 /**
-* @brief �ж��з�����Ϣ
-* @param handle    ��Ϣ���о��
-* @param buf       ��Ϣ������
-* @param len_words ��Ϣ���ȣ��֣�
-* @return 0=�ɹ�����ֵ=ʧ��
+* @brief 中断中发送消息
+* @param handle    消息队列句柄
+* @param buf       消息缓冲区
+* @param len_words 消息长度（字）
+* @return 0=成功，负值=失败
 */
 int32  arkrtos_mq_send_from_isr(int32 handle, void *buf, int32 len_words);
 
 /**
-* @brief �ж���ֱ�Ӵ���Ϣ����ȡһ����Ϣ
-* @param handle    ��Ϣ���о��
-* @param buf       ���ջ�����
-* @param len_words �������������֣�
-* @return >0=ʵ��ȡ������������ֵ=���п�/���������ն��в��Ǽǡ����ȴ���
-* @note �� send ��Գƣ����ѵķ�����ֻ�� READY���л�������һ�ε��ȡ�
-*       ��������ISR �����١��ñ�־ -> �����߳� -> �߳� recv������һ����
+* @brief 中断中直接从消息队列取一条消息
+* @param handle    消息队列句柄
+* @param buf       接收缓冲区
+* @param len_words 缓冲区容量（字）
+* @return >0=实际取到的字数；负值=队列空/参数错（空队列不登记、不等待）
+* @note 与 send 版对称：唤醒的发送者只置 READY，切换交给下一次调度。
+*       有了它，ISR 不必再「置标志 -> 唤醒线程 -> 线程 recv」多绕一跳。
 */
 int32  arkrtos_mq_recv_from_isr(int32 handle, void *buf, int32 len_words);
 /** @} */
 
-/** @defgroup crit �����������û�̬�ٽ�����
+/** @defgroup crit 调度器锁（用户态临界区）
  *  @{ */
 
 /**
-* @brief �����ٽ�������ֹ�����л������ر��жϣ�
-* @details �൱�� RT-Thread �� rt_enter_critical��֧��Ƕ�׵��á�
-*          �����ڱ����ϳ��Ĺ������ݷ��ʣ�����С�ڹ��жϡ�
-* @note �ٽ����ڽ�ֹ���������ӿڣ��� wait/sem_wait����
-*       ������������ᱻ���Բ���¼һ�� ARKRTOS_FAULT_SCHEDLOCK ���ϼ�¼��
+* @brief 进入临界区（禁止任务切换，不关闭中断）
+* @details 相当于 RT-Thread 的 rt_enter_critical，支持嵌套调用。
+*          适用于保护较长的共享数据访问，开销小于关中断。
+* @note 临界区内禁止调用阻塞接口（如 wait/sem_wait），
+*       否则阻塞请求会被忽略并记录一条 ARKRTOS_FAULT_SCHEDLOCK 故障记录。
 */
 void   arkrtos_sched_lock(void);
 
 /**
-* @brief �˳��ٽ���
-* @note ���� arkrtos_sched_lock �ɶԵ��ã���������ʱ�ָ������л���
+* @brief 退出临界区
+* @note 须与 arkrtos_sched_lock 成对调用；计数归零时恢复任务切换。
 */
 void   arkrtos_sched_unlock(void);
 
 /**
-* @brief ��ѯ��������Ƕ�ײ���
-* @return ��ǰǶ�ײ�����0 ��ʾδ�����ٽ�����
+* @brief 查询调度器锁嵌套层数
+* @return 当前嵌套层数（0 表示未处于临界区）
 */
 int32  arkrtos_sched_lock_count(void);
 /** @} */
 
-/** @defgroup stack ����ջʹ��������
+/** @defgroup stack 任务栈使用量分析
  *  @{ */
 
 /**
-* @brief ��ѯ����ջʹ�÷�ֵ
-* @param task_id ����ţ��� 1 ��ʼ��
-* @param out3    �û���������3 ���֣���
-*                [0]=ջ���ֽ�����[1]=��ֵ�����ֽ�����[2]=ʣ���ֽ���
-* @return 0=�ɹ���-1=�����Ƿ�
-* @details ���������ֶβ�ȡ�ϴ�ֵ��ջ���ͼ��ɨ�� + �������л����ջָ���¼��
-*          ���鰴��ֵ�������� 30% ���������ټ�С����ջ���á�
-* @note �迪�� ARKRTOS_USE_STACK_USAGE ���á�
+* @brief 查询任务栈使用峰值
+* @param task_id 任务号（从 1 开始）
+* @param out3    用户缓冲区（3 个字）：
+*                [0]=栈总字节数，[1]=峰值已用字节数，[2]=剩余字节数
+* @return 0=成功，-1=参数非法
+* @details 采用两种手段并取较大值：栈填充图案扫描 + 上下文切换最低栈指针记录。
+*          建议按峰值用量保留 30% 以上余量再减小任务栈配置。
+* @note 需开启 ARKRTOS_USE_STACK_USAGE 配置。
 */
 int32  arkrtos_task_stack_info(int32 task_id, uint32 *out3);
 /** @} */
 
-/** @defgroup appmgr App �������������
+/** @defgroup appmgr App 镜像与分区管理
  *  @{ */
 
 /**
-* @brief ���豸���� App ���񵽿��в�λ
-* @param dev       �Ѵ򿪵��豸��������ݴӾ���ͷ��ʼ��
-* @param image_len ���������ܳ�����ͷ������ 0 ��ʾ�ɾ���ͷ����
-* @return �ɹ����ز�λ��(>=0)��ʧ�ܷ��ظ������루�� arkrtos_loader.h��
-* @note ������Ȳ���д���� CRC �ض�У�顣
+* @brief 从设备加载 App 镜像到空闲槽位
+* @param dev       已打开的设备句柄（数据从镜像头开始）
+* @param image_len 期望镜像总长（含头），传 0 表示由镜像头决定
+* @return 成功返回槽位号(>=0)，失败返回负错误码（见 arkrtos_loader.h）
+* @note 镜像会先擦后写并做 CRC 回读校验。
 */
 int32  arkrtos_app_load(int32 dev, uint32 image_len);
 
 /**
-* @brief ������λ�е� App
-* @param slot ��λ��
-* @return �ɹ����������(>0)��ʧ�ܷ��ظ�������
+* @brief 启动槽位中的 App
+* @param slot 槽位号
+* @return 成功返回任务号(>0)，失败返回负错误码
 */
 int32  arkrtos_app_start(uint32 slot);
 
 /**
-* @brief ֹͣ��λ�е� App���������� Flash��
-* @param slot ��λ��
-* @return 0=�ɹ�����ֵΪ������
+* @brief 停止槽位中的 App（镜像保留在 Flash）
+* @param slot 槽位号
+* @return 0=成功，负值为错误码
 */
 int32  arkrtos_app_stop(uint32 slot);
 
 /**
-* @brief ��ѯ��λ״̬
-* @param slot ��λ��
-* @return 0=�գ�EMPTY��,1=�Ѽ��أ�LOADED��,2=�����У�RUNNING����
-*         ��λ�Ƿ����� 0xffffffff
+* @brief 查询槽位状态
+* @param slot 槽位号
+* @return 0=空（EMPTY）,1=已加载（LOADED）,2=运行中（RUNNING）；
+*         槽位非法返回 0xffffffff
 */
 uint32 arkrtos_app_status(uint32 slot);
 
 /**
-* @brief ���豸��װ��������������
-* @param dev       �Ѵ򿪵��豸��������ݴӾ���ͷ��ʼ��
-* @param image_len ���������ܳ�����ͷ������ 0 ��ʾ�ɾ���ͷ����
-* @return �ɹ�����������λ�ţ�>=0������ֵΪ�����루�� arkrtos_loader.h��
-* @note ����ͷ�� type ����Ϊ������ARKRTOS_APP_TYPE_DRIVER����
-*       ����ͷ�� load_addr �������ĳ��������λ��ַ��д��ǰֻ�����ò����䡣
+* @brief 从设备安装驱动镜像到驱动区
+* @param dev       已打开的设备句柄（数据从镜像头开始）
+* @param image_len 期望镜像总长（含头），传 0 表示由镜像头决定
+* @return 成功返回驱动槽位号（>=0），负值为错误码（见 arkrtos_loader.h）
+* @note 镜像头的 type 必须为驱动（ARKRTOS_APP_TYPE_DRIVER）；
+*       镜像头的 load_addr 必须等于某个驱动槽位基址，写入前只擦除该槽区间。
 */
 int32  arkrtos_driver_load(int32 dev, uint32 image_len);
 
-/** @defgroup thread �û�̬�̷߳���SVC 0x1B��
+/** @defgroup thread 用户态线程服务（SVC 0x1B）
  *  @{
  */
 
 /**
-* @brief �ڵ�ǰ App/������ RAM �ﴴ��һ���߳�
-* @param entry      �߳���ڣ�����λ�ڵ������Լ��Ĺ̼�������
-* @param stack      ջ�׵�ַ������ջ����λ�ڵ������Լ��� RAM ������
-* @param stack_size ջ�ֽ�������С 128��
-* @param priority   �ں����ȼ���1~254����ֵԽСԽ�ߣ�255 �ǵ������ڱ����ᱻ�ܾ���
-* @param period_ms  0 = �¼�������Ĭ�ϣ����� 0 = ��������
-* @return ����ţ�>0����ʧ�ܷ��ظ�ֵ
-* @note �ں�ֻ����"�������Լ���"�����ջ�����ܽ���˵� RAM ��ջ��
-*       Ҳ���ܰ����ָ���ں˻��� App ��ȥ��
+* @brief 在当前 App/驱动的 RAM 里创建一个线程
+* @param entry      线程入口，必须位于调用者自己的固件窗口内
+* @param stack      栈底地址，整段栈必须位于调用者自己的 RAM 窗口内
+* @param stack_size 栈字节数（最小 128）
+* @param priority   内核优先级（1~254，数值越小越高；255 是调度器哨兵，会被拒绝）
+* @param period_ms  0 = 事件驱动（默认）；非 0 = 周期任务
+* @return 任务号（>0），失败返回负值
+* @note 内核只接受"调用者自己的"入口与栈：不能借别人的 RAM 建栈，
+*       也不能把入口指到内核或别的 App 里去。
 */
 int32  arkrtos_thread_create(void (*entry)(void), void *stack, uint32 stack_size,
                            uint32 priority, uint32 period_ms);
 
 /**
-* @brief ȡ��ǰ�̵߳��ں������
-* @return ����ţ�>0�������ں��Դ������Ϸ��� 0
+* @brief 取当前线程的内核任务号
+* @return 任务号（>0）；在内核自带任务上返回 0
 */
 int32  arkrtos_thread_self(void);
 
 /**
-* @brief ������ǰ�̣߳����ٷ���
+* @brief 结束当前线程，不再返回
 */
 void   arkrtos_thread_exit(void);
 
 /**
-* @brief ���˳��������ǰ�̣߳�U-8�������ٷ���
-* @param code �˳��룻shell �� exec ������������exit code N��
-* @note ֻ��������·�����пɶ����˳��룻arkrtos_thread_exit() ��д�룬
-*       ���շ��ݴ����֡������ˡ��롸�� 0 ������
+* @brief 带退出码结束当前线程（U-8），不再返回
+* @param code 退出码；shell 的 exec 会把它打出来（exit code N）
+* @note 只有走这条路径才有可读的退出码；arkrtos_thread_exit() 不写码，
+*       接收方据此区分「结束了」与「以 0 结束」
 */
 void   arkrtos_thread_exit_code(int32 code);
 /** @} */
@@ -793,7 +793,7 @@ void   arkrtos_thread_exit_code(int32 code);
 /** @} */
 
 
-/** @defgroup file �ļ�����SVC 0x1C��
+/** @defgroup file 文件服务（SVC 0x1C）
  *  @{ */
 
 /*

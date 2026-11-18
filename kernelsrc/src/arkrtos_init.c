@@ -1,25 +1,25 @@
 /**
-* @brief Ark RTOS ÄÚºËÆô¶¯Óë³õÊ¼»¯£¨µ¥Ò»È¨ÍşÊµÏÖ£©
-* @details ±¾ÎÄ¼şÖ»Ìá¹© arkrtos_kernel_module_init()£ºÄÚºË¸÷Ä£¿éµÄ³õÊ¼»¯Ë³ĞòÔÚ´ËÎ¨Ò»È·¶¨¡£
-*          ÄÚºË¡¾²»Ìá¹© main() Èë¿Ú¡¿£¬Èë¿ÚÒ»ÂÉÓÉ¹¤³Ì²à main() Ìá¹©¡ª¡ª
-*          Í¬Ò»¸öÓ³ÏñÀï´æÔÚÁ½¸ö main Ê±£¬AC6 »áÒò¸¨Öú·ûºÅ __ARM_use_no_argv
-*          ÖØ¸´¶¨Òå¶øÁ´½ÓÊ§°Ü£¨L6200E: by arkrtos_init.o and main.o£©£¬
-*          ¼´¡°Èõ main ¿É±»¹¤³Ì main ¸²¸Ç¡±ÔÚ AC6 ÏÂ²¢²»³ÉÁ¢¡£
+* @brief Ark RTOS å†…æ ¸å¯åŠ¨ä¸åˆå§‹åŒ–ï¼ˆå•ä¸€æƒå¨å®ç°ï¼‰
+* @details æœ¬æ–‡ä»¶åªæä¾› arkrtos_kernel_module_init()ï¼šå†…æ ¸å„æ¨¡å—çš„åˆå§‹åŒ–é¡ºåºåœ¨æ­¤å”¯ä¸€ç¡®å®šã€‚
+*          å†…æ ¸ã€ä¸æä¾› main() å…¥å£ã€‘ï¼Œå…¥å£ä¸€å¾‹ç”±å·¥ç¨‹ä¾§ main() æä¾›â€”â€”
+*          åŒä¸€ä¸ªæ˜ åƒé‡Œå­˜åœ¨ä¸¤ä¸ª main æ—¶ï¼ŒAC6 ä¼šå› è¾…åŠ©ç¬¦å· __ARM_use_no_argv
+*          é‡å¤å®šä¹‰è€Œé“¾æ¥å¤±è´¥ï¼ˆL6200E: by arkrtos_init.o and main.oï¼‰ï¼Œ
+*          å³â€œå¼± main å¯è¢«å·¥ç¨‹ main è¦†ç›–â€åœ¨ AC6 ä¸‹å¹¶ä¸æˆç«‹ã€‚
 *
-*          Ó¦ÓÃ×Ô¶¨Òå main() Ê±½¨Òé×ñÑ­ÒÔÏÂÆô¶¯Ë³Ğò£º
-*          1) HAL ³õÊ¼»¯ + Ê±ÖÓÅäÖÃ + ÍâÉè³õÊ¼»¯£¨CubeMX Éú³É²¿·Ö£©
+*          åº”ç”¨è‡ªå®šä¹‰ main() æ—¶å»ºè®®éµå¾ªä»¥ä¸‹å¯åŠ¨é¡ºåºï¼š
+*          1) HAL åˆå§‹åŒ– + æ—¶é’Ÿé…ç½® + å¤–è®¾åˆå§‹åŒ–ï¼ˆCubeMX ç”Ÿæˆéƒ¨åˆ†ï¼‰
 *          2) arkrtos_port_board_init()
 *          3) arkrtos_cfg_load()
 *          4) arkrtos_port_irq_init()
-*          5) arkrtos_kernel_module_init()   ¸÷ÄÚºËÄ£¿é + °å¼¶Éè±¸ + ÄÚÖÃ·şÎñÈÎÎñ
-*                                          £¨Î¨Ò»È¨ÍşË³ĞòÊµÏÖ£¬¼û±¾ÎÄ¼şÏÂ·½£©
-*          6) ×¢²áÓ¦ÓÃ/Çı¶¯ÈÎÎñ£¨arkrtos_task_register µÈ£¬±ØĞëÔÚµ÷¶ÈÆô¶¯Ç°Íê³É£©
-*          7) arkrtos_start_idle()£¨½øÈë¿ÕÏĞÈÎÎñ£¬Æô¶¯µ÷¶È£©
+*          5) arkrtos_kernel_module_init()   å„å†…æ ¸æ¨¡å— + æ¿çº§è®¾å¤‡ + å†…ç½®æœåŠ¡ä»»åŠ¡
+*                                          ï¼ˆå”¯ä¸€æƒå¨é¡ºåºå®ç°ï¼Œè§æœ¬æ–‡ä»¶ä¸‹æ–¹ï¼‰
+*          6) æ³¨å†Œåº”ç”¨/é©±åŠ¨ä»»åŠ¡ï¼ˆarkrtos_task_register ç­‰ï¼Œå¿…é¡»åœ¨è°ƒåº¦å¯åŠ¨å‰å®Œæˆï¼‰
+*          7) arkrtos_start_idle()ï¼ˆè¿›å…¥ç©ºé—²ä»»åŠ¡ï¼Œå¯åŠ¨è°ƒåº¦ï¼‰
 *
-*          ĞèÒª¡°Éè±¸×Ô°²×°¡±ÄÜÁ¦µÄ¹¤³Ì£¬ÔÚµÚ 5 ²½Ö®ºó×·¼Ó£º
-*          arkrtos_ptable_init() ¡ú arkrtos_loader_scan_driver()/arkrtos_loader_start_driver()
-*          ¡ú arkrtos_loader_scan()/arkrtos_loader_start() ¡ú arkrtos_installer_init()
-*          £¨²Î¿¼ÊµÏÖ£ºexample/stm32f427/kernel/ARKRTOS_TEST/Core/Src/main.c µÄ arkrtos_kernel_init£©
+*          éœ€è¦â€œè®¾å¤‡è‡ªå®‰è£…â€èƒ½åŠ›çš„å·¥ç¨‹ï¼Œåœ¨ç¬¬ 5 æ­¥ä¹‹åè¿½åŠ ï¼š
+*          arkrtos_ptable_init() â†’ arkrtos_loader_scan_driver()/arkrtos_loader_start_driver()
+*          â†’ arkrtos_loader_scan()/arkrtos_loader_start() â†’ arkrtos_installer_init()
+*          ï¼ˆå‚è€ƒå®ç°ï¼šexample/stm32f427/kernel/ARKRTOS_TEST/Core/Src/main.c çš„ arkrtos_kernel_initï¼‰
 *
 * @author xw
 * @date 2026.05.03
@@ -43,7 +43,7 @@
 #include "arkrtos_smp.h"
 #include "arkrtos_init.h"
 
-/* ÄÚºËÄ£¿é³õÊ¼»¯£ºÎ¨Ò»È¨ÍşË³ĞòÊµÏÖ£¨ÈÎºÎ¹¤³ÌµÄ main ¶¼Ö»µ÷ÓÃËü£© */
+/* å†…æ ¸æ¨¡å—åˆå§‹åŒ–ï¼šå”¯ä¸€æƒå¨é¡ºåºå®ç°ï¼ˆä»»ä½•å·¥ç¨‹çš„ main éƒ½åªè°ƒç”¨å®ƒï¼‰ */
 void arkrtos_kernel_module_init(void)
 {
     arkrtos_event_module_init();
@@ -68,7 +68,7 @@ void arkrtos_kernel_module_init(void)
     arkrtos_dev_module_init();
     arkrtos_dev_board_init();
 
-    /* ÄÚÖÃ¶¨Ê±Æ÷·şÎñÈÎÎñ£ºĞëÔÚ cfg_load Ö®ºó¡¢µ÷¶ÈÆô¶¯Ö®Ç°×¢²á */
+    /* å†…ç½®å®šæ—¶å™¨æœåŠ¡ä»»åŠ¡ï¼šé¡»åœ¨ cfg_load ä¹‹åã€è°ƒåº¦å¯åŠ¨ä¹‹å‰æ³¨å†Œ */
     arkrtos_timer_task_install();
 
     #if (ARKRTOS_USE_MPU == 1)

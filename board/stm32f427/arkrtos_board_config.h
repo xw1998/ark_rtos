@@ -1,8 +1,8 @@
 /**
-* @brief Ark RTOS �弶���� - STM32F427
-* @details �����ں�Ĭ�����ã����� STM32F427 Ӳ������
-*          ͨ������ѡ�� -DARKRTOS_BOARD_CONFIG=\"arkrtos_board_config.h\" ����
-*          ���ļ�ͬʱ����CMSIS�豸ͷ�ļ�����port��ʹ�üĴ�������
+* @brief Ark RTOS 板级配置 - STM32F427
+* @details 覆盖内核默认配置，适配 STM32F427 硬件特性
+*          通过编译选项 -DARKRTOS_BOARD_CONFIG=\"arkrtos_board_config.h\" 包含
+*          此文件同时包含CMSIS设备头文件，供port层使用寄存器定义
 */
 
 #ifndef __ARKRTOS_BOARD_CONFIG_H__

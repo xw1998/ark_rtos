@@ -1,13 +1,13 @@
 /**
-* @brief Ark RTOS Í¬²½Ô­ÓïÊµÏÖ£¨ĞÅºÅÁ¿Óë»¥³âËø£©
-* @details ÊµÏÖ¼ÆÊıĞÅºÅÁ¿ºÍ´øÓÅÏÈ¼¶¼Ì³ĞµÄ»¥³âËø£º
-*          - ĞÅºÅÁ¿£ºcount>0 Ê± wait Ö±½Ó¼õ 1 Í¨¹ı£¬·ñÔòÈÎÎñ¹ÒÆğµÈ´ı£»post »½ĞÑµÈ´ıÕß»òÔö¼Ó¼ÆÊı¡£
-*          - »¥³âËø£º¼ÇÂ¼ owner£¬¼ÓËøÊ±Èô±»Õ¼ÓÃÔò¹ÒÆğ£»Îª±ÜÃâÓÅÏÈ¼¶·´×ª£¬µ±¸ßÓÅÏÈ¼¶ÈÎÎñµÈ´ıÊ±£¬
-*            ÁÙÊ±°Ñ³ÖÓĞÕßÓÅÏÈ¼¶ÌáÉıµ½ÓëµÈ´ıÕßÒ»ÖÂ£¨ÓÅÏÈ¼¶¼Ì³Ğ£©£¬½âËøºó»Ö¸´¡£
-*          ×èÈûµÈ´ı¸´ÓÃ arkrtos_task_wait_internal/arkrtos_task_block_internal ÊµÏÖÈÎÎñ¹ÒÆğÓëÇĞ»»¡£
- *          ×èÈû·µ»ØºóÍ¨¹ı task->wake_reason Çø·Ö»½ĞÑÔ­Òò£¨0=±» post/unlock »½ĞÑ£¬
- *          1=µÈ´ı³¬Ê±£©£¬³¬Ê±»á°Ñ×Ô¼º´ÓµÈ´ı¶ÓÁĞÕª³ı²¢·µ»Ø¸ºÖµ´íÎóÂë£¬
- *          ¾ø²»°Ñ¡°³¬Ê±¡±µ±³É¡°ÒÑ»ñµÃ×ÊÔ´¡±¡£
+* @brief Ark RTOS åŒæ­¥åŸè¯­å®ç°ï¼ˆä¿¡å·é‡ä¸äº’æ–¥é”ï¼‰
+* @details å®ç°è®¡æ•°ä¿¡å·é‡å’Œå¸¦ä¼˜å…ˆçº§ç»§æ‰¿çš„äº’æ–¥é”ï¼š
+*          - ä¿¡å·é‡ï¼šcount>0 æ—¶ wait ç›´æ¥å‡ 1 é€šè¿‡ï¼Œå¦åˆ™ä»»åŠ¡æŒ‚èµ·ç­‰å¾…ï¼›post å”¤é†’ç­‰å¾…è€…æˆ–å¢åŠ è®¡æ•°ã€‚
+*          - äº’æ–¥é”ï¼šè®°å½• ownerï¼ŒåŠ é”æ—¶è‹¥è¢«å ç”¨åˆ™æŒ‚èµ·ï¼›ä¸ºé¿å…ä¼˜å…ˆçº§åè½¬ï¼Œå½“é«˜ä¼˜å…ˆçº§ä»»åŠ¡ç­‰å¾…æ—¶ï¼Œ
+*            ä¸´æ—¶æŠŠæŒæœ‰è€…ä¼˜å…ˆçº§æå‡åˆ°ä¸ç­‰å¾…è€…ä¸€è‡´ï¼ˆä¼˜å…ˆçº§ç»§æ‰¿ï¼‰ï¼Œè§£é”åæ¢å¤ã€‚
+*          é˜»å¡ç­‰å¾…å¤ç”¨ arkrtos_task_wait_internal/arkrtos_task_block_internal å®ç°ä»»åŠ¡æŒ‚èµ·ä¸åˆ‡æ¢ã€‚
+ *          é˜»å¡è¿”å›åé€šè¿‡ task->wake_reason åŒºåˆ†å”¤é†’åŸå› ï¼ˆ0=è¢« post/unlock å”¤é†’ï¼Œ
+ *          1=ç­‰å¾…è¶…æ—¶ï¼‰ï¼Œè¶…æ—¶ä¼šæŠŠè‡ªå·±ä»ç­‰å¾…é˜Ÿåˆ—æ‘˜é™¤å¹¶è¿”å›è´Ÿå€¼é”™è¯¯ç ï¼Œ
+ *          ç»ä¸æŠŠâ€œè¶…æ—¶â€å½“æˆâ€œå·²è·å¾—èµ„æºâ€ã€‚
 * @author xw
 * @date 2026.05.30
 */
@@ -18,7 +18,7 @@
 #include "arkrtos_trace.h"     /* kernel auto hooks: object waits/wakes as sync records */
 
 #if defined(ARKRTOS_SYNC_HOST_TEST)
-#define ARKRTOS_SYNC_STATIC        /* ËŞÖ÷²âÊÔÒªÖ±½Ó°ÚµÈ´ı¹ØÏµ£¬²»²Ø¶ÔÏó±í */
+#define ARKRTOS_SYNC_STATIC        /* å®¿ä¸»æµ‹è¯•è¦ç›´æ¥æ‘†ç­‰å¾…å…³ç³»ï¼Œä¸è—å¯¹è±¡è¡¨ */
 #else
 #define ARKRTOS_SYNC_STATIC static
 #endif
@@ -283,7 +283,7 @@ static int32 arkrtos_waiters_add(arkrtos_task_t **waiters, arkrtos_task_t *p_tsk
     return ARKRTOS_SYNC_ERR_NOSPACE;
 }
 
-/* ´ÓµÈ´ıÕßÁĞ±íÖĞÈ¡³öÓÅÏÈ¼¶×î¸ß£¨priority ÊıÖµ×îĞ¡£©µÄÈÎÎñ²¢ÒÆ³ı */
+/* ä»ç­‰å¾…è€…åˆ—è¡¨ä¸­å–å‡ºä¼˜å…ˆçº§æœ€é«˜ï¼ˆpriority æ•°å€¼æœ€å°ï¼‰çš„ä»»åŠ¡å¹¶ç§»é™¤ */
 static arkrtos_task_t *arkrtos_waiters_pop_highest(arkrtos_task_t **waiters)
 {
     int32 j;
@@ -336,7 +336,7 @@ static arkrtos_task_t *arkrtos_waiters_peek(arkrtos_task_t **waiters, uint8 only
     return (best < 0) ? 0 : waiters[best];
 }
 
-/* ´ÓµÈ´ıÕßÁĞ±íÒÆ³ıÖ¸¶¨ÈÎÎñ£¨³¬Ê±ÍË³öÊ±Ê¹ÓÃ£©£¬·µ»Ø 0=ÒÑÒÆ³ı£¬-1=²»ÔÚÁĞ±íÖĞ */
+/* ä»ç­‰å¾…è€…åˆ—è¡¨ç§»é™¤æŒ‡å®šä»»åŠ¡ï¼ˆè¶…æ—¶é€€å‡ºæ—¶ä½¿ç”¨ï¼‰ï¼Œè¿”å› 0=å·²ç§»é™¤ï¼Œ-1=ä¸åœ¨åˆ—è¡¨ä¸­ */
 static int32 arkrtos_waiters_remove(arkrtos_task_t **waiters, arkrtos_task_t *p_tsk)
 {
     int32 j;
@@ -352,10 +352,10 @@ static int32 arkrtos_waiters_remove(arkrtos_task_t **waiters, arkrtos_task_t *p_
 }
 
 
-/* °´¡°»ù×¼ÓÅÏÈ¼¶ + ¸ÃÈÎÎñ³ÖÓĞµÄËùÓĞ»¥³âËøµÄµÈ´ıÕß¡±ÖØËãÓĞĞ§ÓÅÏÈ¼¶¡£
- * »ù×¼ÓÅÏÈ¼¶£¨base_priority£©ÔÚÈÎÎñ´´½¨ºó²»ÔÙ±ä»¯£¬Òò´Ë²»»á³öÏÖ
- * ¡°°Ñ±»ÌáÉıºóµÄÖµµ±³ÉÔ­Ê¼Öµ¡±µ¼ÖÂÓÀ¾ÃÌáÈ¨µÄÎÊÌâ£»
- * ±éÀú¸ÃÈÎÎñ³ÖÓĞµÄËùÓĞËø£¬Ò²ĞŞµôÁË¶àËø³¡¾°ÏÂ°´µ¥°ÑËø¿ìÕÕ»Ö¸´µÄ´íÂÒ¡£ */
+/* æŒ‰â€œåŸºå‡†ä¼˜å…ˆçº§ + è¯¥ä»»åŠ¡æŒæœ‰çš„æ‰€æœ‰äº’æ–¥é”çš„ç­‰å¾…è€…â€é‡ç®—æœ‰æ•ˆä¼˜å…ˆçº§ã€‚
+ * åŸºå‡†ä¼˜å…ˆçº§ï¼ˆbase_priorityï¼‰åœ¨ä»»åŠ¡åˆ›å»ºåä¸å†å˜åŒ–ï¼Œå› æ­¤ä¸ä¼šå‡ºç°
+ * â€œæŠŠè¢«æå‡åçš„å€¼å½“æˆåŸå§‹å€¼â€å¯¼è‡´æ°¸ä¹…ææƒçš„é—®é¢˜ï¼›
+ * éå†è¯¥ä»»åŠ¡æŒæœ‰çš„æ‰€æœ‰é”ï¼Œä¹Ÿä¿®æ‰äº†å¤šé”åœºæ™¯ä¸‹æŒ‰å•æŠŠé”å¿«ç…§æ¢å¤çš„é”™ä¹±ã€‚ */
 static void arkrtos_mtx_recalc_task_priority(arkrtos_task_t *p_tsk)
 {
     uint8 pri;
@@ -395,10 +395,10 @@ static void arkrtos_mtx_recalc_task_priority(arkrtos_task_t *p_tsk)
     }
 }
 
-/* ÓÅÏÈ¼¶¼Ì³ĞµÄÁ´Ê½´«²¥£º
- * A(¸ß) µÈ B ³ÖÓĞµÄËø£¬¶ø B ÓÖÔÚµÈ C ³ÖÓĞµÄËøÊ±£¬C Ò²±ØĞë¼Ì³Ğ A µÄÓÅÏÈ¼¶£¬
- * ·ñÔò¡°ÓÅÏÈ¼¶·´×ª¡±Ö»±»ÏûµôÒ»²ã¡£¶àÂÖµü´úÖ±µ½²»ÔÙ±ä»¯¼´ÊÕÁ²
- * £¨ÓÅÏÈ¼¶Ö»»áÏò¸ü¸ß´¦µ¥µ÷ÊÕÁ²£¬µÈ´ı¹ØÏµÓĞÏŞ£¬±ØÈ»ÖÕÖ¹£©¡£ */
+/* ä¼˜å…ˆçº§ç»§æ‰¿çš„é“¾å¼ä¼ æ’­ï¼š
+ * A(é«˜) ç­‰ B æŒæœ‰çš„é”ï¼Œè€Œ B åˆåœ¨ç­‰ C æŒæœ‰çš„é”æ—¶ï¼ŒC ä¹Ÿå¿…é¡»ç»§æ‰¿ A çš„ä¼˜å…ˆçº§ï¼Œ
+ * å¦åˆ™â€œä¼˜å…ˆçº§åè½¬â€åªè¢«æ¶ˆæ‰ä¸€å±‚ã€‚å¤šè½®è¿­ä»£ç›´åˆ°ä¸å†å˜åŒ–å³æ”¶æ•›
+ * ï¼ˆä¼˜å…ˆçº§åªä¼šå‘æ›´é«˜å¤„å•è°ƒæ”¶æ•›ï¼Œç­‰å¾…å…³ç³»æœ‰é™ï¼Œå¿…ç„¶ç»ˆæ­¢ï¼‰ã€‚ */
 ARKRTOS_SYNC_STATIC void arkrtos_mtx_propagate(void)
 {
     int32 round, i, j, changed;
@@ -444,16 +444,16 @@ ARKRTOS_SYNC_STATIC void arkrtos_mtx_propagate(void)
     }
 }
 
-/* µÈ´ıÕßÍË³ö£¨³¬Ê±/²ÎÊı´íÎó/±»É±£©ºó»ØÊÕÓÅÏÈ¼¶¼Ì³Ğ¡£
- * ÕâÀï±ØĞë¡°È«Á¿ÖØËãËùÓĞ owner + ÖØĞÂ´«²¥¡±£¬²»ÄÜÖ»ÖØËã¸ÃËøµÄÖ±½Ó owner£º
- * Á´Ê½ÌáÉı»á°ÑÓÅÏÈ¼¶´«µİ¸øÁ´ÉÏµÄÖĞ¼ä³ÖÓĞÕß£¨T1 µÈ T2 µÄ M1¡¢T2 ÓÖÔÚµÈ
- * T3 µÄ M2 Ê± T3 Ò²»á±»ÌáÉı£©£¬Ö»ÖØËã T2 »áÈÃ T3 ÓÀ¾ÃÖÍÁôÔÚ±»ÌáÉıµÄÓÅÏÈ¼¶¡£
- * È«Á¿ÖØËãÏÈ°ÑËùÓĞÈËÀ­»Ø»ù×¼£¬ÔÙ°´µ±Ç°µÈ´ı¹ØÏµÖØĞÂ½¨Á¢ºÏ·¨µÄ¼Ì³Ğ¡£ */
+/* ç­‰å¾…è€…é€€å‡ºï¼ˆè¶…æ—¶/å‚æ•°é”™è¯¯/è¢«æ€ï¼‰åå›æ”¶ä¼˜å…ˆçº§ç»§æ‰¿ã€‚
+ * è¿™é‡Œå¿…é¡»â€œå…¨é‡é‡ç®—æ‰€æœ‰ owner + é‡æ–°ä¼ æ’­â€ï¼Œä¸èƒ½åªé‡ç®—è¯¥é”çš„ç›´æ¥ ownerï¼š
+ * é“¾å¼æå‡ä¼šæŠŠä¼˜å…ˆçº§ä¼ é€’ç»™é“¾ä¸Šçš„ä¸­é—´æŒæœ‰è€…ï¼ˆT1 ç­‰ T2 çš„ M1ã€T2 åˆåœ¨ç­‰
+ * T3 çš„ M2 æ—¶ T3 ä¹Ÿä¼šè¢«æå‡ï¼‰ï¼Œåªé‡ç®— T2 ä¼šè®© T3 æ°¸ä¹…æ»ç•™åœ¨è¢«æå‡çš„ä¼˜å…ˆçº§ã€‚
+ * å…¨é‡é‡ç®—å…ˆæŠŠæ‰€æœ‰äººæ‹‰å›åŸºå‡†ï¼Œå†æŒ‰å½“å‰ç­‰å¾…å…³ç³»é‡æ–°å»ºç«‹åˆæ³•çš„ç»§æ‰¿ã€‚ */
 ARKRTOS_SYNC_STATIC void arkrtos_mtx_recalc_priority(int32 idx)
 {
     int32 i;
 
-    (void)idx;                          /* È«Á¿»ØÊÕ£¬²»ÒÀÀµ¾ßÌåÊÇÄÄ°ÑËø */
+    (void)idx;                          /* å…¨é‡å›æ”¶ï¼Œä¸ä¾èµ–å…·ä½“æ˜¯å“ªæŠŠé” */
 
     for(i = 0; i < ARKRTOS_MTX_NUM; i++)
     {
@@ -466,9 +466,9 @@ ARKRTOS_SYNC_STATIC void arkrtos_mtx_recalc_priority(int32 idx)
     arkrtos_mtx_propagate();
 }
 
-/* °ÑµÈ´ı¶ÓÁĞÀïµÄÈÎÎñÈ«²¿»½ĞÑ£¨ÓÃÓÚ¶ÔÏó±»É¾³ıµÈ¡°µÈ´ıÄ¿±êÒÑÏûÊ§¡±µÄ³¡¾°£©¡£
- * reason ÖÃÎª ARKRTOS_WAKE_OBJ_DELETED£¬µÈ´ıÕß¾İ´Ë·µ»Ø´íÎóÂë£¬
- * ¶ø²»ÊÇÓÀÔ¶Ë¯ÏÂÈ¥£¨¶ÔÏóÉ¾³ıºó¶ÓÁĞ±»Çå¿Õ£¬Ë­Ò²»½²»ĞÑËüÃÇ£©¡£ */
+/* æŠŠç­‰å¾…é˜Ÿåˆ—é‡Œçš„ä»»åŠ¡å…¨éƒ¨å”¤é†’ï¼ˆç”¨äºå¯¹è±¡è¢«åˆ é™¤ç­‰â€œç­‰å¾…ç›®æ ‡å·²æ¶ˆå¤±â€çš„åœºæ™¯ï¼‰ã€‚
+ * reason ç½®ä¸º ARKRTOS_WAKE_OBJ_DELETEDï¼Œç­‰å¾…è€…æ®æ­¤è¿”å›é”™è¯¯ç ï¼Œ
+ * è€Œä¸æ˜¯æ°¸è¿œç¡ä¸‹å»ï¼ˆå¯¹è±¡åˆ é™¤åé˜Ÿåˆ—è¢«æ¸…ç©ºï¼Œè°ä¹Ÿå”¤ä¸é†’å®ƒä»¬ï¼‰ã€‚ */
 static void arkrtos_waiters_wake_all(arkrtos_task_t **waiters, int32 reason)
 {
     int32 j;
@@ -494,10 +494,10 @@ static void arkrtos_waiters_wake_all(arkrtos_task_t **waiters, int32 reason)
     }
 }
 
-/* ÈÎÎñÏÂÏßÊÕÊ¬£º°Ñ task_id ´ÓËùÓĞÍ¬²½¶ÔÏóµÄµÈ´ı¶ÓÁĞÕª³ı£»
- * ÈôËüÕı³ÖÓĞÄ³°Ñ»¥³âËø£¬Ôò°ÑËøÒÆ½»¸øµÈ´ıÕßÖĞÓÅÏÈ¼¶×î¸ßÕß²¢»½ĞÑËü£¬
- * Ã»ÓĞµÈ´ıÕßÔòÖ±½ÓÊÍ·Å¡£
- * µ÷ÓÃ·½Ğè×ÔĞĞ±£Ö¤ÁÙ½çÇø£¨±¾º¯Êı²»¿ª¹ØÖĞ¶Ï£©¡£ */
+/* ä»»åŠ¡ä¸‹çº¿æ”¶å°¸ï¼šæŠŠ task_id ä»æ‰€æœ‰åŒæ­¥å¯¹è±¡çš„ç­‰å¾…é˜Ÿåˆ—æ‘˜é™¤ï¼›
+ * è‹¥å®ƒæ­£æŒæœ‰æŸæŠŠäº’æ–¥é”ï¼Œåˆ™æŠŠé”ç§»äº¤ç»™ç­‰å¾…è€…ä¸­ä¼˜å…ˆçº§æœ€é«˜è€…å¹¶å”¤é†’å®ƒï¼Œ
+ * æ²¡æœ‰ç­‰å¾…è€…åˆ™ç›´æ¥é‡Šæ”¾ã€‚
+ * è°ƒç”¨æ–¹éœ€è‡ªè¡Œä¿è¯ä¸´ç•ŒåŒºï¼ˆæœ¬å‡½æ•°ä¸å¼€å…³ä¸­æ–­ï¼‰ã€‚ */
 void arkrtos_sync_release_task(int32 task_id)
 {
     arkrtos_task_t *p_tsk;
@@ -641,7 +641,7 @@ void arkrtos_sync_release_task(int32 task_id)
 }
 
 /* ============================================================
- * ĞÅºÅÁ¿
+ * ä¿¡å·é‡
  * ============================================================ */
 int32 arkrtos_sem_create_internal(char *name, int32 init_count)
 {
@@ -707,8 +707,8 @@ int32 arkrtos_sem_wait_internal(int32 handle, int32 timeout_ms)
         }
     }
 
-    /* timeout==0 ±íÊ¾¡°Ö»ÊÔÒ»´Î¡¢²»µÈ´ı¡±£º¼ÆÊıÎª 0 Á¢¼´±¨³¬Ê±£¬
-     * ²»µÇ¼ÇµÈ´ıÕß¡¢²»×èÈû£¨0 ²»ÔÙ±»½âÊÍ³ÉÓÀ¾ÃµÈ´ı£©¡£ */
+    /* timeout==0 è¡¨ç¤ºâ€œåªè¯•ä¸€æ¬¡ã€ä¸ç­‰å¾…â€ï¼šè®¡æ•°ä¸º 0 ç«‹å³æŠ¥è¶…æ—¶ï¼Œ
+     * ä¸ç™»è®°ç­‰å¾…è€…ã€ä¸é˜»å¡ï¼ˆ0 ä¸å†è¢«è§£é‡Šæˆæ°¸ä¹…ç­‰å¾…ï¼‰ã€‚ */
     if(timeout_ms == 0)
     {
         /* Try once, and drop a leftover registration of our own: otherwise a
@@ -753,27 +753,27 @@ int32 arkrtos_sem_wait_internal(int32 handle, int32 timeout_ms)
         return ARKRTOS_SYNC_ERR_WOULDBLOCK;
     }
 
-    /* Èë¶ÓÓëÖÃ WAIT ±ØĞëÔÚÍ¬Ò»ÁÙ½çÇøÄÚÍê³É£ºÖĞ¼äÒ»µ©¿ªÖĞ¶Ï£¬ISR ÀïµÄ post
-     * ¾Í»á°Ñ»½ĞÑÍ¶¸øÒ»¸ö»¹Ã»Ë¯ÏÂµÄÈÎÎñ£¬»½ĞÑËæÖ®¶ªÊ§£¨¼û task.c µÄËµÃ÷£©¡£ */
+    /* å…¥é˜Ÿä¸ç½® WAIT å¿…é¡»åœ¨åŒä¸€ä¸´ç•ŒåŒºå†…å®Œæˆï¼šä¸­é—´ä¸€æ—¦å¼€ä¸­æ–­ï¼ŒISR é‡Œçš„ post
+     * å°±ä¼šæŠŠå”¤é†’æŠ•ç»™ä¸€ä¸ªè¿˜æ²¡ç¡ä¸‹çš„ä»»åŠ¡ï¼Œå”¤é†’éšä¹‹ä¸¢å¤±ï¼ˆè§ task.c çš„è¯´æ˜ï¼‰ã€‚ */
     arkrtos_trace_wait_obj(MDK_TRACE_ARKRTOS_OBJ(MDK_TRACE_ARKRTOS_CLASS_SEM, idx));
-    reason = arkrtos_task_block_in_critical((uint32)timeout_ms);   /* ¹ØÖĞ¶Ï·µ»Ø */
+    reason = arkrtos_task_block_in_critical((uint32)timeout_ms);   /* å…³ä¸­æ–­è¿”å› */
 
     if(reason < 0)
     {
-        /* Î´ÄÜ½øÈë×èÈû£¨ÄÚºËÉÏÏÂÎÄ / µ÷¶ÈÆ÷Ëø¶¨£©£º³·ÏúÈë¶Ó²¢±¨´í */
+        /* æœªèƒ½è¿›å…¥é˜»å¡ï¼ˆå†…æ ¸ä¸Šä¸‹æ–‡ / è°ƒåº¦å™¨é”å®šï¼‰ï¼šæ’¤é”€å…¥é˜Ÿå¹¶æŠ¥é”™ */
         (void)arkrtos_waiters_remove(arkrtos_sems[idx].waiters, p_tsk);
         ARKRTOS_ENABLE_IRQ();
         return ARKRTOS_SYNC_ERR_PARAM;
     }
 
-    /* reason: 0=±» post ÏÔÊ½»½ĞÑ£¨ÄÃµ½ĞÅºÅÁ¿£©£¬1=µÈ´ı³¬Ê±£¨Î´ÄÃµ½£©¡£
-     * ³¬Ê±±ØĞë·µ»Ø¸ºÖµ²¢°Ñ×Ô¼º´ÓµÈ´ı¶ÓÁĞÕªµô£º
-     *   - ²»·µ»Ø´íÎó£ºµ÷ÓÃÕß»áÒÔÎªÄÃµ½ÁËĞÅºÅÁ¿£¬µ«¼ÆÊı²¢Ã»ÓĞ¼õ£»
-     *   - ²»Õª³ı£ºÖ®ºó post »á°ÑÒ»¸öÔçÒÑËÕĞÑ¡¢ÕıÔÚÖ´ĞĞÆäËü´úÂëµÄÈÎÎñ
-     *     µ±×÷µÈ´ıÕßµ¯³ö²¢ÖÃ READY£¨Ğé¼Ù»½ĞÑ£©¡£ */
+    /* reason: 0=è¢« post æ˜¾å¼å”¤é†’ï¼ˆæ‹¿åˆ°ä¿¡å·é‡ï¼‰ï¼Œ1=ç­‰å¾…è¶…æ—¶ï¼ˆæœªæ‹¿åˆ°ï¼‰ã€‚
+     * è¶…æ—¶å¿…é¡»è¿”å›è´Ÿå€¼å¹¶æŠŠè‡ªå·±ä»ç­‰å¾…é˜Ÿåˆ—æ‘˜æ‰ï¼š
+     *   - ä¸è¿”å›é”™è¯¯ï¼šè°ƒç”¨è€…ä¼šä»¥ä¸ºæ‹¿åˆ°äº†ä¿¡å·é‡ï¼Œä½†è®¡æ•°å¹¶æ²¡æœ‰å‡ï¼›
+     *   - ä¸æ‘˜é™¤ï¼šä¹‹å post ä¼šæŠŠä¸€ä¸ªæ—©å·²è‹é†’ã€æ­£åœ¨æ‰§è¡Œå…¶å®ƒä»£ç çš„ä»»åŠ¡
+     *     å½“ä½œç­‰å¾…è€…å¼¹å‡ºå¹¶ç½® READYï¼ˆè™šå‡å”¤é†’ï¼‰ã€‚ */
     if(reason == ARKRTOS_WAKE_OBJ_DELETED)
     {
-        /* µÈ´ıÆÚ¼äĞÅºÅÁ¿±»É¾³ı£º¶ÓÁĞÒÑ±»É¾³ı·½Çå¿Õ£¬²»ÒªÔÙ¶¯¶ÓÁĞ */
+        /* ç­‰å¾…æœŸé—´ä¿¡å·é‡è¢«åˆ é™¤ï¼šé˜Ÿåˆ—å·²è¢«åˆ é™¤æ–¹æ¸…ç©ºï¼Œä¸è¦å†åŠ¨é˜Ÿåˆ— */
         ARKRTOS_ENABLE_IRQ();
         return ARKRTOS_SYNC_ERR_DELETED;
     }
@@ -860,7 +860,7 @@ int32 arkrtos_sem_post_internal(int32 handle)
 
 int32 arkrtos_sem_post_from_isr(int32 handle)
 {
-    /* ÖĞ¶ÏÉÏÏÂÎÄ°²È«£ºpost ÄÚ²¿²»×èÈû£¬½ö¹ØÖĞ¶ÏĞŞ¸Ä×´Ì¬²¢´¥·¢ÇĞ»» */
+    /* ä¸­æ–­ä¸Šä¸‹æ–‡å®‰å…¨ï¼špost å†…éƒ¨ä¸é˜»å¡ï¼Œä»…å…³ä¸­æ–­ä¿®æ”¹çŠ¶æ€å¹¶è§¦å‘åˆ‡æ¢ */
     return arkrtos_sem_post_internal(handle);
 }
 
@@ -874,15 +874,15 @@ int32 arkrtos_sem_delete_internal(int32 handle)
         return ARKRTOS_SYNC_ERR_HANDLE;
 
     ARKRTOS_DISABLE_IRQ();
-    /* ²é used£º°ÑÒ»¸öÒÑ¾­²»´æÔÚµÄ¶ÔÏó±¨³É¡°É¾µôÁË¡±ÊÇ´í´ğ°¸£»
-     * Óë¶ÔÍ¬Ò»¶ÔÏóµÄÆäËû½Ó¿Ú¶Ô used µÄÅĞ¶¨±£³ÖÒ»ÖÂ¡£ */
+    /* æŸ¥ usedï¼šæŠŠä¸€ä¸ªå·²ç»ä¸å­˜åœ¨çš„å¯¹è±¡æŠ¥æˆâ€œåˆ æ‰äº†â€æ˜¯é”™ç­”æ¡ˆï¼›
+     * ä¸å¯¹åŒä¸€å¯¹è±¡çš„å…¶ä»–æ¥å£å¯¹ used çš„åˆ¤å®šä¿æŒä¸€è‡´ã€‚ */
     if(arkrtos_sems[idx].used == 0)
     {
         ARKRTOS_ENABLE_IRQ();
         return ARKRTOS_SYNC_ERR_STATE;
     }
-    /* ÏÈ»½ĞÑÈ«²¿µÈ´ıÕß£¨Ô­Òò=¶ÔÏóÒÑÉ¾³ı£©£¬·ñÔòËüÃÇ»áÓÀÔ¶×èÈû£º
-     * ¶ÔÏóÉ¾³ıºóµÈ´ı¶ÓÁĞ±»Çå¿Õ£¬ÔÙÒ²Ã»ÓĞ post À´»½ĞÑËüÃÇ¡£ */
+    /* å…ˆå”¤é†’å…¨éƒ¨ç­‰å¾…è€…ï¼ˆåŸå› =å¯¹è±¡å·²åˆ é™¤ï¼‰ï¼Œå¦åˆ™å®ƒä»¬ä¼šæ°¸è¿œé˜»å¡ï¼š
+     * å¯¹è±¡åˆ é™¤åç­‰å¾…é˜Ÿåˆ—è¢«æ¸…ç©ºï¼Œå†ä¹Ÿæ²¡æœ‰ post æ¥å”¤é†’å®ƒä»¬ã€‚ */
     arkrtos_waiters_wake_all(arkrtos_sems[idx].waiters, ARKRTOS_WAKE_OBJ_DELETED);
     arkrtos_sems[idx].used       = 0;
     arkrtos_sems[idx].name[0]    = 0;
@@ -894,7 +894,7 @@ int32 arkrtos_sem_delete_internal(int32 handle)
 }
 
 /* ============================================================
- * »¥³âËø
+ * äº’æ–¥é”
  * ============================================================ */
 int32 arkrtos_mtx_create_internal(char *name)
 {
@@ -908,7 +908,7 @@ int32 arkrtos_mtx_create_internal(char *name)
             arkrtos_mtxs[i].owner = 0;
             arkrtos_mtxs[i].used  = 1;
 #if (ARKRTOS_USE_MTX_RECURSIVE == 1)
-            arkrtos_mtxs[i].recursive = 0;   /* ÆÕÍ¨Ëø£º²»¿Éµİ¹é */
+            arkrtos_mtxs[i].recursive = 0;   /* æ™®é€šé”ï¼šä¸å¯é€’å½’ */
             arkrtos_mtxs[i].nest      = 0;
 #endif
             /* See arkrtos_sem_create_internal: the queue starts empty. */
@@ -988,7 +988,7 @@ int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms)
             arkrtos_mtxs[idx].owner         = p_tsk;
             arkrtos_mtxs[idx].orig_priority = p_tsk->priority;
 #if (ARKRTOS_USE_MTX_RECURSIVE == 1)
-            arkrtos_mtxs[idx].nest          = 1;   /* µÚÒ»´Î³ÖÓĞ */
+            arkrtos_mtxs[idx].nest          = 1;   /* ç¬¬ä¸€æ¬¡æŒæœ‰ */
 #endif
             ARKRTOS_ENABLE_IRQ();
             return 0;
@@ -998,8 +998,8 @@ int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms)
 #if (ARKRTOS_USE_MTX_RECURSIVE == 1)
     if(arkrtos_mtxs[idx].owner == p_tsk)
     {
-        /* µİ¹éËø£ºÍ¬Ò»ÈÎÎñÔÙ´Î¼ÓËøÖ»¼ÓÉî¼ÆÊı£¬²»Åö owner / ¼Ì³Ğ¡£
-         * ¿Éµİ¹éÊÇ´´½¨Ê±¾ö¶¨µÄÊôĞÔ£¬²»ÊÇ¼ÓËøÊ±²Â³öÀ´µÄ¡£ */
+        /* é€’å½’é”ï¼šåŒä¸€ä»»åŠ¡å†æ¬¡åŠ é”åªåŠ æ·±è®¡æ•°ï¼Œä¸ç¢° owner / ç»§æ‰¿ã€‚
+         * å¯é€’å½’æ˜¯åˆ›å»ºæ—¶å†³å®šçš„å±æ€§ï¼Œä¸æ˜¯åŠ é”æ—¶çŒœå‡ºæ¥çš„ã€‚ */
         if(arkrtos_mtxs[idx].recursive != 0u)
         {
             arkrtos_mtxs[idx].nest++;
@@ -1012,14 +1012,14 @@ int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms)
 #else
     if(arkrtos_mtxs[idx].owner == p_tsk)
     {
-        /* Í¬Ò»ÈÎÎñÖØ¸´¼ÓËø£¬²»Ö§³Öµİ¹é£¬·µ»Ø´íÎó */
+        /* åŒä¸€ä»»åŠ¡é‡å¤åŠ é”ï¼Œä¸æ”¯æŒé€’å½’ï¼Œè¿”å›é”™è¯¯ */
         ARKRTOS_ENABLE_IRQ();
         return ARKRTOS_SYNC_ERR_RECURSIVE;
     }
 #endif
 
-    /* timeout==0 ±íÊ¾¡°Ö»ÊÔÒ»´Î¡¢²»µÈ´ı¡±£ºËøÒÑ±»ËûÈË³ÖÓĞÁ¢¼´±¨³¬Ê±¡£
-     * ÕâÀï²»µÇ¼ÇµÈ´ıÕß¡¢Ò²²»×öÓÅÏÈ¼¶¼Ì³Ğ¡ª¡ªÃ»½¨Á¢µÈ´ı¹ØÏµ¾Í²»¸ÃÌáÈ¨¡£ */
+    /* timeout==0 è¡¨ç¤ºâ€œåªè¯•ä¸€æ¬¡ã€ä¸ç­‰å¾…â€ï¼šé”å·²è¢«ä»–äººæŒæœ‰ç«‹å³æŠ¥è¶…æ—¶ã€‚
+     * è¿™é‡Œä¸ç™»è®°ç­‰å¾…è€…ã€ä¹Ÿä¸åšä¼˜å…ˆçº§ç»§æ‰¿â€”â€”æ²¡å»ºç«‹ç­‰å¾…å…³ç³»å°±ä¸è¯¥ææƒã€‚ */
     if(timeout_ms == 0)
     {
         /* Non-blocking try.  Drop a leftover registration of our own:
@@ -1034,7 +1034,7 @@ int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms)
         return ARKRTOS_SYNC_ERR_TIMEOUT;
     }
 
-    /* ÓÅÏÈ¼¶¼Ì³Ğ£ºÈô³ÖÓĞÕßÓÅÏÈ¼¶µÍÓÚµ±Ç°µÈ´ıÕß£¬ÁÙÊ±ÌáÉı³ÖÓĞÕßÓÅÏÈ¼¶ÒÔ±ÜÃâÓÅÏÈ¼¶·´×ª */
+    /* ä¼˜å…ˆçº§ç»§æ‰¿ï¼šè‹¥æŒæœ‰è€…ä¼˜å…ˆçº§ä½äºå½“å‰ç­‰å¾…è€…ï¼Œä¸´æ—¶æå‡æŒæœ‰è€…ä¼˜å…ˆçº§ä»¥é¿å…ä¼˜å…ˆçº§åè½¬ */
     if(arkrtos_mtxs[idx].owner->priority > p_tsk->priority)
     {
         uint8 old_pri = arkrtos_mtxs[idx].owner->priority;
@@ -1060,12 +1060,12 @@ int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms)
         return ARKRTOS_SYNC_ERR_WOULDBLOCK;
     }
 
-    /* Á´Ê½´«²¥£º±»ÌáÉıµÄ³ÖÓĞÕßÈô×Ô¼ºÒ²ÔÚµÈ±ğµÄËø£¬ÄÇ°ÑËøµÄ³ÖÓĞÕßÍ¬ÑùÒªÌáÉı */
+    /* é“¾å¼ä¼ æ’­ï¼šè¢«æå‡çš„æŒæœ‰è€…è‹¥è‡ªå·±ä¹Ÿåœ¨ç­‰åˆ«çš„é”ï¼Œé‚£æŠŠé”çš„æŒæœ‰è€…åŒæ ·è¦æå‡ */
     arkrtos_mtx_propagate();
 
-    /* Í¬ sem_wait£ºÈë¶ÓÓëÖÃ WAIT ·ÅÔÚÍ¬Ò»ÁÙ½çÇøÄÚ£¬Ïû³ı»½ĞÑ¶ªÊ§´°¿Ú */
+    /* åŒ sem_waitï¼šå…¥é˜Ÿä¸ç½® WAIT æ”¾åœ¨åŒä¸€ä¸´ç•ŒåŒºå†…ï¼Œæ¶ˆé™¤å”¤é†’ä¸¢å¤±çª—å£ */
     arkrtos_trace_wait_obj(MDK_TRACE_ARKRTOS_OBJ(MDK_TRACE_ARKRTOS_CLASS_MUTEX, idx));
-    reason = arkrtos_task_block_in_critical((uint32)timeout_ms);   /* ¹ØÖĞ¶Ï·µ»Ø */
+    reason = arkrtos_task_block_in_critical((uint32)timeout_ms);   /* å…³ä¸­æ–­è¿”å› */
 
     if(reason < 0)
     {
@@ -1077,7 +1077,7 @@ int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms)
 
     if(reason == ARKRTOS_WAKE_OBJ_DELETED)
     {
-        /* µÈ´ıÆÚ¼ä»¥³âËø±»É¾³ı£º¶ÓÁĞÒÑ±»É¾³ı·½Çå¿Õ£¬Ö»Ğè³·ÏúÓÅÏÈ¼¶¼Ì³Ğ */
+        /* ç­‰å¾…æœŸé—´äº’æ–¥é”è¢«åˆ é™¤ï¼šé˜Ÿåˆ—å·²è¢«åˆ é™¤æ–¹æ¸…ç©ºï¼Œåªéœ€æ’¤é”€ä¼˜å…ˆçº§ç»§æ‰¿ */
         arkrtos_mtx_recalc_priority(idx);
         ARKRTOS_ENABLE_IRQ();
         return ARKRTOS_SYNC_ERR_DELETED;
@@ -1085,16 +1085,16 @@ int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms)
 
     if(reason == 1)
     {
-        /* ¾ºÌ¬£ºµÈ´ı³¬Ê±Óë unlock µÄ¡°×ª½»¡±¼¸ºõÍ¬Ê±·¢Éú£¬unlock ÒÑ¾­°Ñ
-         * owner ¸Ä³É±¾ÈÎÎñ¡£´ËÊ±ËøÈ·Êµ¹é±¾ÈÎÎñËùÓĞ£¬°´³É¹¦´¦Àí£»
-         * ÈôÈÔ°´³¬Ê±·µ»Ø£¬Õâ°ÑËø½«ÓÀÔ¶Ã»ÓĞ owner£¨ËøĞ¹Â©£©¡£ */
+        /* ç«æ€ï¼šç­‰å¾…è¶…æ—¶ä¸ unlock çš„â€œè½¬äº¤â€å‡ ä¹åŒæ—¶å‘ç”Ÿï¼Œunlock å·²ç»æŠŠ
+         * owner æ”¹æˆæœ¬ä»»åŠ¡ã€‚æ­¤æ—¶é”ç¡®å®å½’æœ¬ä»»åŠ¡æ‰€æœ‰ï¼ŒæŒ‰æˆåŠŸå¤„ç†ï¼›
+         * è‹¥ä»æŒ‰è¶…æ—¶è¿”å›ï¼Œè¿™æŠŠé”å°†æ°¸è¿œæ²¡æœ‰ ownerï¼ˆé”æ³„æ¼ï¼‰ã€‚ */
         if(arkrtos_mtxs[idx].owner == p_tsk)
         {
             ARKRTOS_ENABLE_IRQ();
             return ARKRTOS_SYNC_OK;
         }
 
-        /* Î´»ñµÃËø£ºÕª³ıµÈ´ıÕß²¢³·ÏúÓÅÏÈ¼¶¼Ì³ĞÌáÉı */
+        /* æœªè·å¾—é”ï¼šæ‘˜é™¤ç­‰å¾…è€…å¹¶æ’¤é”€ä¼˜å…ˆçº§ç»§æ‰¿æå‡ */
         (void)arkrtos_waiters_remove(arkrtos_mtxs[idx].waiters, p_tsk);
         arkrtos_mtx_recalc_priority(idx);
         ARKRTOS_ENABLE_IRQ();
@@ -1138,14 +1138,14 @@ int32 arkrtos_mtx_unlock_internal(int32 handle)
     p_tsk = arkrtos_task_get_current();
     if(p_tsk == 0 || arkrtos_mtxs[idx].owner != p_tsk)
     {
-        /* ·Ç³ÖÓĞÕß²»ÄÜ½âËø */
+        /* éæŒæœ‰è€…ä¸èƒ½è§£é” */
         ARKRTOS_ENABLE_IRQ();
         return ARKRTOS_SYNC_ERR_OWNER;
     }
 
 #if (ARKRTOS_USE_MTX_RECURSIVE == 1)
-    /* µİ¹éËøÖ»ÍËÒ»²ã£ºÕæÕıÊÍ·ÅÒªµÈ nest ¹éÁã¡£ÕâÀïÌáÇ°·µ»Ø£¬
-     * ¼È²»¸Ä owner Ò²²»¶¯¼Ì³Ğ£¨Ëø»¹ÔÚ×Ô¼ºÊÖÉÏ£©¡£ */
+    /* é€’å½’é”åªé€€ä¸€å±‚ï¼šçœŸæ­£é‡Šæ”¾è¦ç­‰ nest å½’é›¶ã€‚è¿™é‡Œæå‰è¿”å›ï¼Œ
+     * æ—¢ä¸æ”¹ owner ä¹Ÿä¸åŠ¨ç»§æ‰¿ï¼ˆé”è¿˜åœ¨è‡ªå·±æ‰‹ä¸Šï¼‰ã€‚ */
     if((arkrtos_mtxs[idx].recursive != 0u) && (arkrtos_mtxs[idx].nest > 1u))
     {
         arkrtos_mtxs[idx].nest--;
@@ -1154,8 +1154,8 @@ int32 arkrtos_mtx_unlock_internal(int32 handle)
     }
 #endif
 
-    /* ÏÈ°ÑËø½»³öÈ¥£¬ÔÙÖØËãÓÅÏÈ¼¶£º
-     * Ë³Ğò·´ÁË»á°Ñ¡°¼´½«×ª½»µÄµÈ´ıÕß¡±Ò²Ëã½ø×Ô¼ºµÄ¼Ì³ĞÀ´Ô´¡£ */
+    /* å…ˆæŠŠé”äº¤å‡ºå»ï¼Œå†é‡ç®—ä¼˜å…ˆçº§ï¼š
+     * é¡ºåºåäº†ä¼šæŠŠâ€œå³å°†è½¬äº¤çš„ç­‰å¾…è€…â€ä¹Ÿç®—è¿›è‡ªå·±çš„ç»§æ‰¿æ¥æºã€‚ */
     p_next = arkrtos_waiters_peek(arkrtos_mtxs[idx].waiters, 1u);
     if(p_next != 0)
     {
@@ -1164,7 +1164,7 @@ int32 arkrtos_mtx_unlock_internal(int32 handle)
         arkrtos_mtxs[idx].owner         = p_next;
         arkrtos_mtxs[idx].orig_priority = p_next->priority;
 #if (ARKRTOS_USE_MTX_RECURSIVE == 1)
-        arkrtos_mtxs[idx].nest          = 1;   /* ×ª½»¼´µÚÒ»´Î³ÖÓĞ */
+        arkrtos_mtxs[idx].nest          = 1;   /* è½¬äº¤å³ç¬¬ä¸€æ¬¡æŒæœ‰ */
 #endif
         p_next->wait_time = 0;
         p_next->wake_reason = ARKRTOS_WAKE_HANDOFF;
@@ -1183,8 +1183,8 @@ int32 arkrtos_mtx_unlock_internal(int32 handle)
         mdk_trace_arkrtos_mutex_release((uint16)idx);
     }
 
-    /* ³·ÏúÓÅÏÈ¼¶¼Ì³Ğ£º°´»ù×¼ÓÅÏÈ¼¶ + ÈÔÔÚ³ÖÓĞµÄÆäËüËøÖØËã
-     * £¨²»ÔÙÓÃ¼ÓËøÊ±µÄ¿ìÕÕ»Ö¸´£¬¶àËø³¡¾°Ò²²»»á´íÂÒ£© */
+    /* æ’¤é”€ä¼˜å…ˆçº§ç»§æ‰¿ï¼šæŒ‰åŸºå‡†ä¼˜å…ˆçº§ + ä»åœ¨æŒæœ‰çš„å…¶å®ƒé”é‡ç®—
+     * ï¼ˆä¸å†ç”¨åŠ é”æ—¶çš„å¿«ç…§æ¢å¤ï¼Œå¤šé”åœºæ™¯ä¹Ÿä¸ä¼šé”™ä¹±ï¼‰ */
     arkrtos_mtx_recalc_task_priority(p_tsk);
     arkrtos_mtx_propagate();
 
@@ -1203,15 +1203,15 @@ int32 arkrtos_mtx_delete_internal(int32 handle)
         return ARKRTOS_SYNC_ERR_HANDLE;
 
     ARKRTOS_DISABLE_IRQ();
-    /* ²é used£º°ÑÒ»¸öÒÑ¾­²»´æÔÚµÄ¶ÔÏó±¨³É¡°É¾µôÁË¡±ÊÇ´í´ğ°¸£»
-     * Óë¶ÔÍ¬Ò»¶ÔÏóµÄÆäËû½Ó¿Ú¶Ô used µÄÅĞ¶¨±£³ÖÒ»ÖÂ¡£ */
+    /* æŸ¥ usedï¼šæŠŠä¸€ä¸ªå·²ç»ä¸å­˜åœ¨çš„å¯¹è±¡æŠ¥æˆâ€œåˆ æ‰äº†â€æ˜¯é”™ç­”æ¡ˆï¼›
+     * ä¸å¯¹åŒä¸€å¯¹è±¡çš„å…¶ä»–æ¥å£å¯¹ used çš„åˆ¤å®šä¿æŒä¸€è‡´ã€‚ */
     if(arkrtos_mtxs[idx].used == 0)
     {
         ARKRTOS_ENABLE_IRQ();
         return ARKRTOS_SYNC_ERR_STATE;
     }
-    /* É¾³ıËøÏàµ±ÓÚÊÍ·ÅËü£º³ÖÓĞÕß°´»ù×¼ÓÅÏÈ¼¶£¨¼°ÈÔ³ÖÓĞµÄÆäËüËø£©ÖØËã£¬
-     * ²»ÔÙÒÀÀµ¼ÓËøÊ±µÄ¿ìÕÕ¡£ */
+    /* åˆ é™¤é”ç›¸å½“äºé‡Šæ”¾å®ƒï¼šæŒæœ‰è€…æŒ‰åŸºå‡†ä¼˜å…ˆçº§ï¼ˆåŠä»æŒæœ‰çš„å…¶å®ƒé”ï¼‰é‡ç®—ï¼Œ
+     * ä¸å†ä¾èµ–åŠ é”æ—¶çš„å¿«ç…§ã€‚ */
     if(arkrtos_mtxs[idx].owner != 0)
     {
         arkrtos_task_t *p_owner = arkrtos_mtxs[idx].owner;
@@ -1232,16 +1232,16 @@ int32 arkrtos_mtx_delete_internal(int32 handle)
 
 
 /* ============================================================
- * Ìõ¼ş±äÁ¿
+ * æ¡ä»¶å˜é‡
  * ============================================================ */
 
-/* ÔÚ¡¸ÖĞ¶ÏÒÑ¹Ø¡¹µÄÁÙ½çÇøÀï°Ñ»¥³âÁ¿½»³öÈ¥¡£
+/* åœ¨ã€Œä¸­æ–­å·²å…³ã€çš„ä¸´ç•ŒåŒºé‡ŒæŠŠäº’æ–¥é‡äº¤å‡ºå»ã€‚
  *
- * Ìõ¼ş±äÁ¿µÈ´ı±ØĞëÏÈÊÍ·ÅËøÔÙÈë¶Ó£¬¶øÇÒÕâÁ½²½²»ÄÜ±»´ò¶Ï£ºsignal Ö»ÒªÂä½ø
- * ÖĞ¼äÄÇ¸ö´°¿Ú£¬µÈ´ıÕß¾Í»áË¯ÔÚÒ»¸öÒÑ¾­·¢Éú¹ıµÄÊÂ¼şºóÃæ£¨ÓÀ¾Ã×èÈû£©¡£
- * arkrtos_mtx_unlock_internal() ÔÚÕâÀï²»ÄÜÓÃ ¡ª¡ª Ëü×Ô¼º»á¿ªÖĞ¶Ï¡¢»¹»áÇĞÈÎÎñ£¬
- * ¶ø´Ë¿Ìµ÷ÓÃ·½ÕıÄÃ×ÅÁÙ½çÇø¡£ËùÒÔÕâÀïÖ»Òª¡¸½»³öËø + ÖØËãÓÅÏÈ¼¶¡¹ÕâÒ»¶Î£¬
- * ÁÙ½çÇøÓëÈÎÎñÇĞ»»¶¼Áô¸øµ÷ÓÃ·½¡£
+ * æ¡ä»¶å˜é‡ç­‰å¾…å¿…é¡»å…ˆé‡Šæ”¾é”å†å…¥é˜Ÿï¼Œè€Œä¸”è¿™ä¸¤æ­¥ä¸èƒ½è¢«æ‰“æ–­ï¼šsignal åªè¦è½è¿›
+ * ä¸­é—´é‚£ä¸ªçª—å£ï¼Œç­‰å¾…è€…å°±ä¼šç¡åœ¨ä¸€ä¸ªå·²ç»å‘ç”Ÿè¿‡çš„äº‹ä»¶åé¢ï¼ˆæ°¸ä¹…é˜»å¡ï¼‰ã€‚
+ * arkrtos_mtx_unlock_internal() åœ¨è¿™é‡Œä¸èƒ½ç”¨ â€”â€” å®ƒè‡ªå·±ä¼šå¼€ä¸­æ–­ã€è¿˜ä¼šåˆ‡ä»»åŠ¡ï¼Œ
+ * è€Œæ­¤åˆ»è°ƒç”¨æ–¹æ­£æ‹¿ç€ä¸´ç•ŒåŒºã€‚æ‰€ä»¥è¿™é‡Œåªè¦ã€Œäº¤å‡ºé” + é‡ç®—ä¼˜å…ˆçº§ã€è¿™ä¸€æ®µï¼Œ
+ * ä¸´ç•ŒåŒºä¸ä»»åŠ¡åˆ‡æ¢éƒ½ç•™ç»™è°ƒç”¨æ–¹ã€‚
  */
 static void arkrtos_mtx_release_locked(int32 idx, arkrtos_task_t *p_owner)
 {
@@ -1263,7 +1263,7 @@ static void arkrtos_mtx_release_locked(int32 idx, arkrtos_task_t *p_owner)
     else
     {
 #if (ARKRTOS_USE_MTX_RECURSIVE == 1)
-        arkrtos_mtxs[idx].nest  = 0;   /* Õû·İ½»³ö£ºµÈ´ıÆÚ¼ä²»Õ¼µİ¹éÉî¶È */
+        arkrtos_mtxs[idx].nest  = 0;   /* æ•´ä»½äº¤å‡ºï¼šç­‰å¾…æœŸé—´ä¸å é€’å½’æ·±åº¦ */
 #endif
         arkrtos_mtxs[idx].owner = 0;
         mdk_trace_arkrtos_mutex_release((uint16)idx);
@@ -1294,12 +1294,12 @@ int32 arkrtos_cond_create_internal(char *name)
         }
     }
     ARKRTOS_ENABLE_IRQ();
-    return ARKRTOS_SYNC_ERR_NOSLOT;                  /* ¶ÔÏó±íÂú£ºÃ÷È·Ê§°Ü£¬²»¾²Ä¬¸´ÓÃ */
+    return ARKRTOS_SYNC_ERR_NOSLOT;                  /* å¯¹è±¡è¡¨æ»¡ï¼šæ˜ç¡®å¤±è´¥ï¼Œä¸é™é»˜å¤ç”¨ */
 }
 
-/* µÈ´ı£ºÔ­×ÓµØ¡¸ÊÍ·Å mtx + Èë¶Ó + ¹ÒÆğ¡¹£¬ĞÑÀ´ºóÖØĞÂ»ñÈ¡ mtx¡£
- * ·µ»ØÖµ 0 = ±» signal/broadcast »½ĞÑ£¬ARKRTOS_SYNC_ERR_TIMEOUT = ³¬Ê±¡£
- * Á½ÖÖÇé¿ö·µ»ØÊ±¶¼Ò»¶¨³ÖÓĞ mtx£¨ÕâÊÇ POSIX µÄÆõÔ¼£¬µ÷ÓÃ·½¾İ´ËĞ´ÁÙ½çÇø£©¡£ */
+/* ç­‰å¾…ï¼šåŸå­åœ°ã€Œé‡Šæ”¾ mtx + å…¥é˜Ÿ + æŒ‚èµ·ã€ï¼Œé†’æ¥åé‡æ–°è·å– mtxã€‚
+ * è¿”å›å€¼ 0 = è¢« signal/broadcast å”¤é†’ï¼ŒARKRTOS_SYNC_ERR_TIMEOUT = è¶…æ—¶ã€‚
+ * ä¸¤ç§æƒ…å†µè¿”å›æ—¶éƒ½ä¸€å®šæŒæœ‰ mtxï¼ˆè¿™æ˜¯ POSIX çš„å¥‘çº¦ï¼Œè°ƒç”¨æ–¹æ®æ­¤å†™ä¸´ç•ŒåŒºï¼‰ã€‚ */
 int32 arkrtos_cond_wait_internal(int32 cond_handle, int32 mtx_handle, int32 timeout_ms)
 {
     int32 ci = cond_handle & ARKRTOS_HANDLE_RELMASK;
@@ -1315,9 +1315,9 @@ int32 arkrtos_cond_wait_internal(int32 cond_handle, int32 mtx_handle, int32 time
         return ARKRTOS_SYNC_ERR_PARAM;
     if(mi >= ARKRTOS_MTX_NUM || arkrtos_mtxs[mi].used == 0)
         return ARKRTOS_SYNC_ERR_PARAM;
-    /* timeout 0 ²»ÄÜµ±¡°²»µÈ´ı¡±ÓÃ£ºblock_in_critical »á°Ñ 0 µ±×÷ÓÀ¾ÃµÈ´ı£¬
-     * ¶øÌõ¼ş±äÁ¿Ò²Ã»·¨ÕæµÄ¡°²»µÈ´ı¡±£¨ÊÍ·ÅËøÓëÈë¶Ó±ØĞëÒ»²½×öÍê£©¡£
-     * ÕâÀïÀ¬»øÊäÈë¾Í±¨´í£¬²»²Âµ÷ÓÃ·½µÄÒâÍ¼¡£ */
+    /* timeout 0 ä¸èƒ½å½“â€œä¸ç­‰å¾…â€ç”¨ï¼šblock_in_critical ä¼šæŠŠ 0 å½“ä½œæ°¸ä¹…ç­‰å¾…ï¼Œ
+     * è€Œæ¡ä»¶å˜é‡ä¹Ÿæ²¡æ³•çœŸçš„â€œä¸ç­‰å¾…â€ï¼ˆé‡Šæ”¾é”ä¸å…¥é˜Ÿå¿…é¡»ä¸€æ­¥åšå®Œï¼‰ã€‚
+     * è¿™é‡Œåƒåœ¾è¾“å…¥å°±æŠ¥é”™ï¼Œä¸çŒœè°ƒç”¨æ–¹çš„æ„å›¾ã€‚ */
     if(timeout_ms == 0)
         return ARKRTOS_SYNC_ERR_PARAM;
 
@@ -1335,8 +1335,8 @@ int32 arkrtos_cond_wait_internal(int32 cond_handle, int32 mtx_handle, int32 time
 
     ARKRTOS_DISABLE_IRQ();
 
-    /* µ÷ÓÃÕß±ØĞë³ÖÓĞ¸Ã»¥³âÁ¿£ºPOSIX ÒªÇóÈç´Ë£¬¶øÇÒ¡¸ÓÉµÈ´ı·½½»³öÈ¥¡¹
-     * ÕıÊÇÌõ¼ş±äÁ¿´æÔÚµÄÒâÒå¡£²»³ÖÓĞ¾ÍÖ±½Ó±¨´í£¬²»²Âµ÷ÓÃÕßµÄÒâÍ¼¡£ */
+    /* è°ƒç”¨è€…å¿…é¡»æŒæœ‰è¯¥äº’æ–¥é‡ï¼šPOSIX è¦æ±‚å¦‚æ­¤ï¼Œè€Œä¸”ã€Œç”±ç­‰å¾…æ–¹äº¤å‡ºå»ã€
+     * æ­£æ˜¯æ¡ä»¶å˜é‡å­˜åœ¨çš„æ„ä¹‰ã€‚ä¸æŒæœ‰å°±ç›´æ¥æŠ¥é”™ï¼Œä¸çŒœè°ƒç”¨è€…çš„æ„å›¾ã€‚ */
     if(arkrtos_mtxs[mi].owner != p_tsk)
     {
         ARKRTOS_ENABLE_IRQ();
@@ -1350,24 +1350,24 @@ int32 arkrtos_cond_wait_internal(int32 cond_handle, int32 mtx_handle, int32 time
         if((added < 0) && (added != -2))
         {
             ARKRTOS_ENABLE_IRQ();
-            return ARKRTOS_SYNC_ERR_PARAM;    /* µÈ´ıÕß±íÂú */
+            return ARKRTOS_SYNC_ERR_PARAM;    /* ç­‰å¾…è€…è¡¨æ»¡ */
         }
     }
 
 #if (ARKRTOS_USE_MTX_RECURSIVE == 1)
-    /* µİ¹éËø£ºµÈ´ıÆÚ¼äÕû·İÊÍ·Å£¬ĞÑÀ´Òª°Ñ¼ÓËø´ÎÊı»Ö¸´»ØÀ´£¬
-     * ·ñÔòÇ¶Ì×Éî¶È±» cond_wait ÍÌµô£¬ºóĞø unlock »áÌáÇ°·ÅÊÖ¡£ */
+    /* é€’å½’é”ï¼šç­‰å¾…æœŸé—´æ•´ä»½é‡Šæ”¾ï¼Œé†’æ¥è¦æŠŠåŠ é”æ¬¡æ•°æ¢å¤å›æ¥ï¼Œ
+     * å¦åˆ™åµŒå¥—æ·±åº¦è¢« cond_wait åæ‰ï¼Œåç»­ unlock ä¼šæå‰æ”¾æ‰‹ã€‚ */
     uint8 saved_nest = arkrtos_mtxs[mi].nest;
 #endif
 
-    /* ¹Ø¼üµÄÒ»²½£º½»³öËø + Ë¯ÏÂ£¬È«³ÌÖĞ¶Ï¹Ø±Õ */
+    /* å…³é”®çš„ä¸€æ­¥ï¼šäº¤å‡ºé” + ç¡ä¸‹ï¼Œå…¨ç¨‹ä¸­æ–­å…³é—­ */
     arkrtos_trace_wait_obj(MDK_TRACE_ARKRTOS_OBJ(MDK_TRACE_ARKRTOS_CLASS_COND, ci));
     arkrtos_mtx_release_locked(mi, p_tsk);
     reason = arkrtos_task_block_in_critical((uint32)timeout_ms);
 
     if(reason < 0)
     {
-        /* ÄÚºËÉÏÏÂÎÄ / µ÷¶ÈÆ÷Ëø¶¨£º³·ÏúÈë¶Ó£¬²¢°ÑËøÖØĞÂÄÃ»ØÀ´£¨ÆõÔ¼Îª×¼£© */
+        /* å†…æ ¸ä¸Šä¸‹æ–‡ / è°ƒåº¦å™¨é”å®šï¼šæ’¤é”€å…¥é˜Ÿï¼Œå¹¶æŠŠé”é‡æ–°æ‹¿å›æ¥ï¼ˆå¥‘çº¦ä¸ºå‡†ï¼‰ */
         (void)arkrtos_waiters_remove(arkrtos_conds[ci].waiters, p_tsk);
         ARKRTOS_ENABLE_IRQ();
         (void)arkrtos_mtx_lock_internal(mtx_handle, (int32)(uint32)-1);
@@ -1387,7 +1387,7 @@ int32 arkrtos_cond_wait_internal(int32 cond_handle, int32 mtx_handle, int32 time
 
     ARKRTOS_ENABLE_IRQ();
 
-    /* ÎŞÂÛ±»»½ĞÑ¡¢³¬Ê±»¹ÊÇ¶ÔÏó±»É¾£¬·µ»ØÇ°¶¼ÒªÖØĞÂ³ÖÓĞ»¥³âÁ¿£¨ÆõÔ¼£©¡£
+    /* æ— è®ºè¢«å”¤é†’ã€è¶…æ—¶è¿˜æ˜¯å¯¹è±¡è¢«åˆ ï¼Œè¿”å›å‰éƒ½è¦é‡æ–°æŒæœ‰äº’æ–¥é‡ï¼ˆå¥‘çº¦ï¼‰ã€‚
      * The re-lock result must not be swallowed: if the mutex cannot be taken
      * back, the contract is broken and the waiter would continue believing it
      * owns the lock, which corrupts ownership for everyone after it. */
@@ -1523,8 +1523,8 @@ int32 arkrtos_cond_signal_internal(int32 handle)
     }
     ARKRTOS_ENABLE_IRQ();
 
-    /* Ã»ÓĞÈËµÈ×Å²»ÊÇ´íÎó£¨POSIX ÓïÒå£©£ºsignal Ö»ÊÇ¡¸Èç¹ûÓĞÈËÔÚµÈ¾Í½ĞĞÑ
-     * Ò»¸ö¡¹£¬²»¼Æ·Ö¡¢²»±£Áô¡£ */
+    /* æ²¡æœ‰äººç­‰ç€ä¸æ˜¯é”™è¯¯ï¼ˆPOSIX è¯­ä¹‰ï¼‰ï¼šsignal åªæ˜¯ã€Œå¦‚æœæœ‰äººåœ¨ç­‰å°±å«é†’
+     * ä¸€ä¸ªã€ï¼Œä¸è®¡åˆ†ã€ä¸ä¿ç•™ã€‚ */
     if(p_tsk != 0)
     {
         ARKRTOS_SWITCH_TASK();
@@ -1578,8 +1578,8 @@ int32 arkrtos_cond_delete_internal(int32 handle)
         return ARKRTOS_SYNC_ERR_HANDLE;
 
     ARKRTOS_DISABLE_IRQ();
-    /* »½ĞÑÈ«²¿µÈ´ıÕß²¢¸æËßËüÃÇ¡¸¶ÔÏóÃ»ÁË¡¹£º²»ÄÜÈÃËüÃÇÁôÔÚ¶ÓÁĞÀïµÈÒ»¸ö
-     * ÔÙÒ²²»»áÓĞÈË signal µÄÌõ¼ş±äÁ¿¡£ */
+    /* å”¤é†’å…¨éƒ¨ç­‰å¾…è€…å¹¶å‘Šè¯‰å®ƒä»¬ã€Œå¯¹è±¡æ²¡äº†ã€ï¼šä¸èƒ½è®©å®ƒä»¬ç•™åœ¨é˜Ÿåˆ—é‡Œç­‰ä¸€ä¸ª
+     * å†ä¹Ÿä¸ä¼šæœ‰äºº signal çš„æ¡ä»¶å˜é‡ã€‚ */
     arkrtos_waiters_wake_all(arkrtos_conds[idx].waiters, ARKRTOS_WAKE_OBJ_DELETED);
     arkrtos_conds[idx].used       = 0;
     arkrtos_conds[idx].name[0]    = 0;
@@ -1590,7 +1590,7 @@ int32 arkrtos_cond_delete_internal(int32 handle)
 
 
 /* ============================================================
- * ¶à¶ÔÏóÌ½²âÓÃµÄÖ»¶Á¾ÍĞ÷²éÑ¯
+ * å¤šå¯¹è±¡æ¢æµ‹ç”¨çš„åªè¯»å°±ç»ªæŸ¥è¯¢
  * ============================================================ */
 #if (ARKRTOS_USE_WAITMULTI == 1)
 int32 arkrtos_sem_ready_internal(int32 handle)
@@ -1614,9 +1614,9 @@ int32 arkrtos_mtx_ready_internal(int32 handle)
     if(idx >= ARKRTOS_MTX_NUM || arkrtos_mtxs[idx].used == 0)
         return -1;
 
-    /* Ö»¶Á owner£¬²»¸ÄÓÅÏÈ¼¶¼Ì³Ğ£ºÌ½²â²»ÊÇ¼ÓËø£¬²»½¨Á¢ĞÂµÄÒÀÀµ¹ØÏµ¡£
-     * µİ¹éËø±»µ±Ç°ÈÎÎñ×Ô¼º³ÖÓĞÊ± owner!=0£¬Ì½²â±¨¡¸Î´¾ÍĞ÷¡¹¡ª¡ª±¾½Ó¿Ú²»
-     * Ìæµ÷ÓÃ·½ÅĞ¶ÏÖØÈë¡£ */
+    /* åªè¯» ownerï¼Œä¸æ”¹ä¼˜å…ˆçº§ç»§æ‰¿ï¼šæ¢æµ‹ä¸æ˜¯åŠ é”ï¼Œä¸å»ºç«‹æ–°çš„ä¾èµ–å…³ç³»ã€‚
+     * é€’å½’é”è¢«å½“å‰ä»»åŠ¡è‡ªå·±æŒæœ‰æ—¶ owner!=0ï¼Œæ¢æµ‹æŠ¥ã€Œæœªå°±ç»ªã€â€”â€”æœ¬æ¥å£ä¸
+     * æ›¿è°ƒç”¨æ–¹åˆ¤æ–­é‡å…¥ã€‚ */
     return (arkrtos_mtxs[idx].owner == 0) ? 1 : 0;
 }
 #endif /* ARKRTOS_USE_WAITMULTI == 1 */

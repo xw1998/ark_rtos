@@ -5,7 +5,9 @@
 Two questions get asked every time the debt page is refreshed:
 
   funcs - which kernel functions are long enough to be worth splitting?
-  enc   - how many files in each tree still decode as GBK?
+  enc   - how many files in each tree still decode as GBK? Own sources are
+          UTF-8 only since 2026-11-18, so only kernelsrc/components/ should
+          still show up here.
 
 Both are reporting-only on purpose: they never gate anything and never fail on a
 count.  The point is to print the same numbers the page claims, so a stale
