@@ -9,9 +9,11 @@
 *            已验证：创建/存活探测、变长消息按声明长度收发、接收缓冲更小时截断
 *                    （不串下一条）、队列满时非阻塞发送失败、清空后再写（头尾回绕）、
 *                    send_from_isr 的满/不满两态、删除后句柄失效、非法句柄被拒。
-*            未验证：阻塞与唤醒（队列满时睡下、被 recv 唤醒、超时、删除时唤醒等待者）
-*                    需要真实调度器与真实节拍，这里 task_get_current() 恒返回 0，
-*                    timeout>0 的分支走不到——那部分只有上板用例能证明。
+*                    阻塞发送与阻塞接收的登记、唤醒后重排队、腾出空间/取到消息、
+*                    超时用尽、等待对象被删除、用户态轮询六类收尾（可编程桩，
+*                    第 10/11 段）。
+*            未验证：真睡下与真被 ISR 唤醒、真节拍推进、真超时——桩只回答「唤醒原因
+*                    给成这样时代码走哪条路」，不回答「调度器会不会按时唤醒它」。
 * @note 用法：由 tools/mq_host_gate.py 编译并运行，输出 MQ-HOST OK。
 */
 
@@ -37,13 +39,14 @@ uint32 arkrtos_port_enter_critical(void) { return 0u; }
 void arkrtos_port_exit_critical(uint32 state) { (void)state; }
 
 /* 可编程的阻塞桩。默认值与拆分前逐字一致（当前任务为 0、阻塞恒失败），
- * 因此前面八段用例的路径完全不变；只有第 10 段才临时打开 g_block_mode。
+ * 因此前面八段用例的路径完全不变；只有第 10/11 段才临时打开 g_block_mode。
  *   mode 0 = 恒失败（默认）
  *   mode 2 = 第一次"令牌交接"、第二次超时
  *   mode 3 = 先从 g_block_free_handle 收走一条腾出空间，再返回"令牌交接"
  *   mode 4 = 返回"令牌交接"前把节拍推过超时上限
  *   mode 5 = 返回"等待对象被删除"
- *   mode 6 = 由 g_in_handler 声明"处在用户态轮询里" */
+ *   mode 6 = 由 g_in_handler 声明"处在用户态轮询里"
+ *   mode 7 = 阻塞期间往 g_block_free_handle 投一条消息，再返回"令牌交接" */
 static arkrtos_task_t  g_fake_task;
 static arkrtos_task_t *g_cur_task         = 0;
 static int32  g_block_mode       = 0;
@@ -78,6 +81,12 @@ int32 arkrtos_task_block_in_critical(uint32 timeout_ms)
     {
         return ARKRTOS_WAKE_OBJ_DELETED;
     }
+    if(g_block_mode == 7)
+    {
+        /* 模拟"发送者在阻塞期间投进一条消息" */
+        (void)arkrtos_mq_send_internal(g_block_free_handle, g_block_free_out, 1, 0);
+        return ARKRTOS_WAKE_HANDOFF;
+    }
     return -1;
 }
 void  arkrtos_ready_add(int32 task_idx) { (void)task_idx; }
@@ -110,6 +119,7 @@ int main(void)
     int32 h;
     int32 h2;
     int32 h3;
+    int32 h4;
     uint32 in[ARKRTOS_MQ_MSG_WORDS + 2];
     uint32 out[ARKRTOS_MQ_MSG_WORDS + 2];
     int32 i;
@@ -304,6 +314,79 @@ int main(void)
     g_block_steps = 0;
     n = arkrtos_mq_delete_internal(h3);
     check(n == 0, "the blocking-path queue deletes cleanly");
+
+    /* ---- 11. 阻塞接收：登记、重排队、消息到达、超时用尽、对象删除、用户态轮询 ---- */
+    h4 = arkrtos_mq_create_internal("mq4");
+    check(h4 >= 0, "a fourth queue is created for the blocking receive paths");
+
+    /* A0. 队列空且不等：走「瞬时失败」分支（当前任务为 0，没有可撤的登记） */
+    n = arkrtos_mq_recv_internal(h4, out, 1, 0);
+    check(n == ARKRTOS_MQ_ERR_EMPTY, "an empty queue refuses a non-blocking receive");
+
+    /* A1. timeout>0 但没有当前任务：按上下文错误收尾 */
+    n = arkrtos_mq_recv_internal(h4, out, 1, 100);
+    check(n == ARKRTOS_MQ_ERR_CONTEXT, "a receive without a current task is refused");
+
+    /* B. 有任务但进不了阻塞（block 返回负值）：撤销登记、按上下文错误收尾。
+     *    连做 5 次都必须是同一结论——若登记没被撤销，第二次起会撞上重复登记。 */
+    g_cur_task    = &g_fake_task;
+    g_block_mode  = 0;
+    g_block_steps = 0;
+    for(i = 0; i < 5; i++)
+    {
+        n = arkrtos_mq_recv_internal(h4, out, 1, 100);
+        check(n == ARKRTOS_MQ_ERR_CONTEXT, "a receive that cannot block is refused");
+    }
+    check(g_block_steps == 5, "every receive attempt really reached the blocking call");
+    check(arkrtos_mq_send_internal(h4, in, 1, 0) == 0,
+          "the refused receives left the queue usable");
+    check(arkrtos_mq_recv_internal(h4, out, 1, 0) == 1,
+          "the message put in afterwards comes straight back out");
+
+    /* C. 被唤醒时仍然没有消息：按剩余时间重新排队，最终超时 */
+    g_block_mode  = 2;
+    g_block_steps = 0;
+    n = arkrtos_mq_recv_internal(h4, out, 1, 100);
+    check(n == ARKRTOS_SYNC_ERR_TIMEOUT, "a wake-up that finds no message times out");
+    check(g_block_steps == 2, "the receiver re-queued itself exactly once");
+
+    /* D. 被唤醒时消息已到：取走它，且只睡了一次 */
+    g_block_mode        = 7;
+    g_block_steps       = 0;
+    g_block_free_handle = h4;
+    g_block_free_out[0] = 0x8888u;
+    n = arkrtos_mq_recv_internal(h4, out, 1, 100);
+    check((n == 1) && (out[0] == 0x8888u),
+          "a wake-up with a message takes that message");
+    check(g_block_steps == 1, "the receiver blocked exactly once");
+    g_block_free_handle = -1;
+
+    /* E. 剩余时间已用尽：不再排队，直接报超时 */
+    g_block_mode  = 4;
+    g_block_steps = 0;
+    n = arkrtos_mq_recv_internal(h4, out, 1, 100);
+    check(n == ARKRTOS_SYNC_ERR_TIMEOUT, "an exhausted deadline ends the receive retry loop");
+    check(g_block_steps == 1, "no second block happens once the receive deadline is gone");
+    arkrtos_kernel_tick = 0u;
+
+    /* F. 等待期间队列被删除 */
+    g_block_mode  = 5;
+    g_block_steps = 0;
+    n = arkrtos_mq_recv_internal(h4, out, 1, 100);
+    check(n == ARKRTOS_MQ_ERR_DELETED, "a queue deleted while waiting fails the receive");
+
+    /* G. 用户态轮询（处在 handler 里）：只登记不睡，报 would-block */
+    g_block_mode = 6;
+    g_in_handler = 1u;
+    n = arkrtos_mq_recv_internal(h4, out, 1, 100);
+    check(n == ARKRTOS_SYNC_ERR_WOULDBLOCK, "a user-mode receive reports would-block");
+    g_in_handler = 0u;
+
+    g_cur_task    = 0;
+    g_block_mode  = 0;
+    g_block_steps = 0;
+    n = arkrtos_mq_delete_internal(h4);
+    check(n == 0, "the blocking-receive queue deletes cleanly");
 
     if(g_fail != 0)
     {

@@ -4861,7 +4861,7 @@ sha256**）；`arkrtos_sync.c` 告警 0 条与拆分前同数。
 宿主用例只覆盖加锁/等信号量，不驱动任务下线收尸），所以「谁被移交到锁」这类结论仍只有上板或专门的
 宿主夹具才能证明，本轮不声称。
 
-## 6. LoongArch32 移植#### 5.30.30 第二十五笔：`arkrtos_crash_scan_apply()` 按「认领槽 / 清扫无主 / 发布并扣留」分三段（2026-11-18）
+#### 5.30.30 第二十五笔：`arkrtos_crash_scan_apply()` 按「认领槽 / 清扫无主 / 发布并扣留」分三段（2026-11-18）
 
 `kernelsrc/src/arkrtos_crash.c` 的 `arkrtos_crash_scan_apply()`（141 行）是开机时对跨复位崩溃日志做的一次性
 对账：分区表每次复位都会按池地址重排下标，日志却按上一次的下标记着账，所以要先「把每条账认领到名下地址真
@@ -4903,7 +4903,70 @@ QEMU 端到端 PASS，未上板。** 这一笔**没有新增运行读数**：`sc
 这一轮分区表下标漂移」，QEMU 上正常启动时日志全空、三段都空转，所以「认领 / 清扫 / 扣留各命中几条」这类
 结论本轮不声称；要造出来得先让镜像崩一次再改池布局，属另一件事。
 
-（仅编译通过；上游有 LA32 模拟器，本机不能执行）
+#### 5.30.31 第二十六笔：`arkrtos_mq_recv_internal()` 按「取走 / 不等待 / 登记 / 阻塞后分类」分四段，并补上宿主阻塞接收用例（2026-11-18）
+
+`kernelsrc/src/arkrtos_mq.c` 的 `arkrtos_mq_recv_internal()`（139 行）与上一笔的 `mq_send_internal()` 是镜像：
+校验 → 关中断 → 有消息就取走 → 空队列且不等待就报空 → 登记等待者 → 用户态轮询检查 → 阻塞 → 按唤醒原因分类
+→ 消息被别的接收者抢走就按剩余时间重排队。整段读下来，「取走」在两处各有一份**逐字相同**的拷贝，改错一份没有任何提示。
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `mq_recv_take()` | `get` → 叫醒一个发送者 → trace → 开中断 → 切任务 → 返回取到的字数（**快路径与「等到消息」的收尾共用这一份，属设计内去重**） | 10 |
+| `mq_recv_no_wait()` | 空队列且不等：顺手撤掉自己可能留下的过期登记（用户态轮询用 `timeout 0` 收尾，一条过期登记会把接收等待表的一格永久占住）→ 开中断 → `EMPTY` | 9 |
+| `mq_recv_waiter_push()` | 登记接收等待者；`waiter_add` 返回 `-2`（已登记过）照旧往下，真满才 `NOSPACE` | 10 |
+| `mq_recv_after_block()` | 第一次阻塞之后的分类：`reason<0` → 撤登记 + `CONTEXT`；`OBJ_DELETED` → **不撤**（对象已删，等待表随它作废）+ `DELETED`；`WAKE_TIMEOUT` → 撤 + `TIMEOUT`；其余返回 1 = 「被唤醒，可以再判一次队列」 | 28 |
+| `arkrtos_mq_recv_internal()` 自己 | 校验 → 关中断 → 取走 / 不等待 / 取当前任务 → 记起始节拍与超时上限 → 登记 → `in_handler` 检查 → 阻塞 → 分类 → `while (count <= 0)` 重排队 → 取走 | **97**（原 139） |
+
+口径四条：① 取走段只有一份（原来「进阻塞前的即时取走」与「被 `WAKE_HANDOFF` 唤醒后的取走」是两段逐字相同的代码）；
+② 每个 helper 自己开中断再返回、入口不补开 —— 但「登记 + `block_in_critical` 必须同处一个临界区」这条没被拆散，
+`arkrtos_trace_wait_obj()` 与 `block_in_critical()` 仍在同一段临界区里；③ `OBJ_DELETED` 那条故意不撤登记；
+④ `in_handler` 检查留在入口而不是搬进 helper —— 它判的是「这段话该不该往下走」，不是「阻塞之后怎么了」，
+搬走会让「登记了却不睡」这件事看不出落在哪。
+
+等价性归一化比对：**only-OLD 13 行**，逐条可归因 —— `int32 got = 0;`（1）、`got = arkrtos_mq_get(...)`
+（2 行里 1 行是第二份重复取走）、`wake_one` / `mdk_trace` / `ENABLE_IRQ` / `SWITCH_TASK` / `return got`
+各 1（第二份重复取走）、`int32 added = ...` 与 `if((added < 0) && (added != -2))` 各 1（第二份重复登记）、
+`return CONTEXT` / `return DELETED` / `return SYNC_ERR_TIMEOUT` 各 1（改写成出参 `*p_ret`）。only-NEW 31 行
+全是四个签名、三组花括号、`return 0|1`、`*p_ret = ...`、两处 `return mq_recv_take(...)`、
+`return mq_recv_no_wait(...)`、`if(reason != 0) return reason;` 与入口的调用。
+
+体积：这一笔**去重真的省了代码**。text `367640 → 367432`（**−208 B**），`data` 440 / `bss` 767508 / 镜像总长
+31,462,512 B 不变；sha256 `3d6a3c84…` → `9caa8220238bda251737efeae12c51e8e61a78f0d280a72a1e256adb50d1d9b3`，
+四个独立构建（`build/_mqrecv_repro`、`build/_mqrecv_doc`、`build/_mqrecv_new2` 与重编的
+`build/qemu_loongarch64`）在 `SOURCE_DATE_EPOCH=1600000000` 下 sha256 全等于这一串。为把「−208 B 是哪来的」
+说清楚，另用 `git show HEAD:kernelsrc/src/arkrtos_mq.c` 把上一版源码换进树里单独编了一次
+（`build/_mqrecv_base`，编完立刻换回并核 sha256）：那一次 text = 367640 / sha256 = `3d6a3c84…`，与本笔之前
+一致 ⇒ 差额全部来自这一笔。全量构建告警 **270 条 = 拆分前 270 条**（168 条 `int-to-pointer` + 99 条
+`pointer-to-int`，全在 `arkrtos_shell_image.c` / `arkrtos_shell_misc.c` 的既有 LA64 指针宽度转换，另 3 条
+既有未使用变量/函数），`arkrtos_mq.c` 本身 **0 条**。
+
+**`coverage-host` 先红后绿，也是靠补真用例不是改阈值。** 拆完第一次跑：FAIL `arkrtos_mq 62.80% < 基线
+63.51%`。手工 gcov 复现（`build/_mqcov2/`，口径同 `tools/coverage_gate.py` 头注释：只量被宿主用例链接的那一个
+`.c`）：新 379 行 / 执行 238，旧 370 行 / 执行 235 ⇒ **执行行 +3、分母 +9**，纯口径效应。核查未覆盖行时发现
+真正的问题不在百分比：**整个阻塞接收路径（`arkrtos_mq.c:581` 起）在宿主上是 0 覆盖**，
+`mq_recv_waiter_push()` 与 `mq_recv_after_block()` 一行都没跑过 —— 上一笔给 `test_mq_host.c` 装的可编程桩只被
+「阻塞发送」用上，「阻塞接收」还是空白。
+
+于是给 `kernelsrc/tests/test_mq_host.c` 补第 11 段「阻塞接收」，复用已有桩（新增 `mode 7`：阻塞期间往
+`g_block_free_handle` 投一条消息再返回 `WAKE_HANDOFF`），八个场景：空队列不等待 / `timeout>0` 但没有当前任务 /
+有任务却进不了阻塞（连做 5 次同结论，登记确实每次都撤掉了）/ 醒来仍无消息 → 重排队一次后超时 / 醒来消息已到
+→ 取走且只睡一次 / 剩余时间用尽 → 不再排队 / 等待期间队列被删 / 用户态轮询 → `WOULDBLOCK`。用例 **88 → 108**
+（`MQ-HOST OK (108 checks)`），随后 `--update` 把 `arkrtos_mq` 由基线 63.51% 抬到实测 **74.67%**（其余 9 个模块
+不降，diff 只动这一行）。
+
+门禁：`coverage-host` 10 个模块均不低于基线、`sec-crc` 8 pin 全过、`format_gate` 361 个自有文件干净、
+`doc_audit.py funcs` 超过 120 行的函数 **8 → 7**（最长换成 `arkrtos_mini_swap_at()` 139）、
+`example/qemu_loongarch64/shell_check.py` **PASS**、`ci_gate` **47 passed / 0 failed**。
+
+**结论分档：宿主用例实跑（108 checks，含 8 条阻塞接收场景）+ 编译通过 + 告警同数 + 四次构建 sha256 一致
++ 与拆分前的 −208 B 用 HEAD 源码构建对账 + QEMU 端到端 PASS，未上板。** 阻塞接收的运行证据来自宿主（可编程桩
++ 返回值 + 队列状态判据），真睡下 / 真被 ISR 唤醒 / 真超时推进仍只有上板用例能证明。
+
+**顺带修掉上一笔留下的一处文档结构缺陷**：`## 6. LoongArch32 移植` 与 `#### 5.30.30 …` 被写在了同一行，且
+§5.30.30 的正文落在了第六节标题与它自己的引言之间；中英文两份文档同样症状。本轮把标题拆回两行、把
+§5.30.30 与 §5.30.31 放回第五节尾部，第六节恢复「标题 → 6.1 …」的原结构。
+
+## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行
 

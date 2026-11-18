@@ -2639,7 +2639,7 @@ reading: exercising it needs a real task exit plus real waiter queues (the `sync
 lock / semaphore waits and does not drive task teardown), so conclusions such as "who the lock was handed
 to" still need hardware or a dedicated host fixture and are not claimed here.
 
-## 6. LoongArch32 port (compiles, never executed)#### 5.30.30 Twenty-fifth one: `arkrtos_crash_scan_apply()` split into claim-slot / sweep-unclaimed / publish-and-hold (2026-11-18)
+#### 5.30.30 Twenty-fifth one: `arkrtos_crash_scan_apply()` split into claim-slot / sweep-unclaimed / publish-and-hold (2026-11-18)
 
 `arkrtos_crash_scan_apply()` in `kernelsrc/src/arkrtos_crash.c` (141 lines) is the one-shot reconciliation of
 the cross-reset crash journal at boot: the partition table is re-sorted by pool address on every reset while
@@ -2690,6 +2690,83 @@ through nothing, so "how many entries were claimed / swept / held" is not claime
 mean crashing an image on purpose and then changing the pool layout, which is a separate job.
 
 
+
+#### 5.30.31 Twenty-sixth one: `arkrtos_mq_recv_internal()` split into take / no-wait / register / classify-after-block, plus host tests for the blocking receive path (2026-11-18)
+
+`arkrtos_mq_recv_internal()` in `kernelsrc/src/arkrtos_mq.c` (139 lines) mirrors the send side split in the
+previous commit: validate -> disable IRQ -> take when a message is there -> report empty when the caller will not
+wait -> register a waiter -> user-mode poll check -> block -> classify the wake reason -> re-queue on the
+remaining budget when another receiver took the message. Read as one block, "take" existed twice as two
+byte-identical copies, and getting one of them wrong produces no diagnostic at all.
+
+| function | what it owns | lines |
+|---|---|---|
+| `mq_recv_take()` | `get` -> wake one sender -> trace -> enable IRQ -> switch task -> return the word count. **The fast path and the "woken up with a message" tail share this one copy; that is deliberate de-duplication.** | 10 |
+| `mq_recv_no_wait()` | empty queue and no wait: drop any stale registration of our own (a user-mode poll ends with `timeout 0`, and one stale entry keeps a slot of the receive waiter table forever) -> enable IRQ -> `EMPTY` | 9 |
+| `mq_recv_waiter_push()` | register the receiver; `waiter_add` returning `-2` ("already registered") is not a failure, only a genuinely full table is `NOSPACE` | 10 |
+| `mq_recv_after_block()` | classification after the first block: `reason < 0` -> drop registration + `CONTEXT`; `OBJ_DELETED` -> **keep** it (the object is gone and the table dies with it) + `DELETED`; `WAKE_TIMEOUT` -> drop + `TIMEOUT`; anything else returns 1 = "woken, judge the queue once more" | 28 |
+| `arkrtos_mq_recv_internal()` itself | validate -> disable IRQ -> take / no-wait / fetch current task -> record start tick and deadline -> register -> `in_handler` check -> block -> classify -> `while (count <= 0)` re-queue -> take | **97** (was 139) |
+
+Four rules: (1) there is exactly one take segment; (2) every helper enables IRQ itself and returns, the entry
+point never patches it up -- but "register + `block_in_critical` must stay in one critical section" is not
+broken, and `arkrtos_trace_wait_obj()` still sits in that same section; (3) the `OBJ_DELETED` arm deliberately
+keeps the registration; (4) the `in_handler` check stays in the entry point because it answers "should this call
+proceed at all", not "what happened after blocking", and moving it would hide where "registered but never slept"
+lives.
+
+Normalised equivalence: **only-OLD 13 lines**, every one attributable -- `int32 got = 0;` (1),
+`got = arkrtos_mq_get(...)` (one of the two lines is the second take copy), `wake_one` / `mdk_trace` /
+`ENABLE_IRQ` / `SWITCH_TASK` / `return got` (one each, second take copy), `int32 added = ...` and
+`if((added < 0) && (added != -2))` (second registration copy), and `return CONTEXT` / `return DELETED` /
+`return SYNC_ERR_TIMEOUT` rewritten as the `*p_ret` out-parameter. only-NEW is 31 lines of four signatures,
+three brace groups, `return 0|1`, `*p_ret = ...`, `return mq_recv_take(...)` twice, `return mq_recv_no_wait(...)`,
+`if(reason != 0) return reason;` and the entry-point calls.
+
+Size: this one **really did save code**. text `367640 -> 367432` (**-208 B**), `data` 440 / `bss` 767508 and the
+31,462,512 B image length unchanged; sha256 `3d6a3c84...` -> `9caa8220238bda251737efeae12c51e8e61a78f0d280a72a1e256adb50d1d9b3`.
+Four independent builds (`build/_mqrecv_repro`, `build/_mqrecv_doc`, `build/_mqrecv_new2` and the rebuilt
+`build/qemu_loongarch64`) all hash to that value under `SOURCE_DATE_EPOCH=1600000000`. To prove where the -208 B
+came from, the pre-split source was rebuilt once from `git show HEAD:kernelsrc/src/arkrtos_mq.c`
+(`build/_mqrecv_base`, restored immediately afterwards with the sha256 re-checked): text 367640 / sha256
+`3d6a3c84...`, i.e. exactly the pre-split value. Full-build warnings **270 = 270 before the split** (168
+`int-to-pointer` + 99 `pointer-to-int`, all in the pre-existing LA64 code of `arkrtos_shell_image.c` /
+`arkrtos_shell_misc.c`, plus 3 pre-existing unused-variable/function ones); `arkrtos_mq.c` itself has **0**.
+
+**`coverage-host` went red first and green only after real tests were added -- the baseline was not cut.**
+First run after the split: FAIL `arkrtos_mq 62.80% < baseline 63.51%`. A manual gcov reproduction
+(`build/_mqcov2/`, same scope as the note at the top of `tools/coverage_gate.py`: only the single `.c` linked
+into the host test) gave 379 lines / 238 executed against 370 / 235 for the old file -- **+3 executed, +9 in the
+denominator**, a pure scope effect. Reading the uncovered lines showed the real problem was not the percentage:
+**the whole blocking receive path (from `arkrtos_mq.c:581`) had zero coverage on the host**, and
+`mq_recv_waiter_push()` / `mq_recv_after_block()` never ran -- the programmable stubs added for the send side in
+the previous commit had no receive-side counterpart.
+
+So section 11 "blocking receive" was added to `kernelsrc/tests/test_mq_host.c`, reusing those stubs (plus
+`mode 7`: post one message to `g_block_free_handle` during the block, then return `WAKE_HANDOFF`): empty queue
+without waiting / `timeout > 0` with no current task / a task that cannot block (five attempts, same verdict,
+proving the registration is dropped each time) / woken with no message -> re-queue once then time out / woken
+with the message -> take it, blocking exactly once / deadline used up -> no second block / queue deleted while
+waiting / user-mode poll -> `WOULDBLOCK`. Checks went **88 -> 108** (`MQ-HOST OK (108 checks)`), then `--update`
+raised the `arkrtos_mq` baseline from 63.51% to the measured **74.67%** (the other nine modules unchanged, the
+diff touches exactly one line).
+
+Gates: `coverage-host` all 10 modules at or above baseline, `sec-crc` 8 pins, `format_gate` 361 own files clean,
+`doc_audit.py funcs` **8 -> 7** functions over 120 lines (the longest is now `arkrtos_mini_swap_at()` at 139),
+`example/qemu_loongarch64/shell_check.py` **PASS**, `ci_gate` **47 passed / 0 failed**.
+
+**Tier: host tests really executed (108 checks, 8 of them on the blocking receive path) + compiles + same warning
+count + four builds with one sha256 + the -208 B reconciled against a HEAD-source build + QEMU end-to-end PASS,
+not run on hardware.** The runtime evidence for the receive path comes from the host (programmable stubs, return
+codes and queue state); really sleeping, really being woken by an ISR and really advancing a deadline still need
+an on-board test.
+
+**One documentation defect left by the previous commit is fixed here as well**: the `## 6. LoongArch32 ...`
+heading and `#### 5.30.30 ...` had ended up on the same line, with the 5.30.30 body wedged between the section
+heading and its own section content -- in both the Chinese and the English file. Both are restored (heading
+split back into two lines, 5.30.30/5.30.31 back at the tail of section 5, section 6 back to
+heading -> 6.1).
+
+## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine
 

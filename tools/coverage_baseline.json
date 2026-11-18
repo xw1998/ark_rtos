@@ -4,7 +4,7 @@
   "arkrtos_fifo": 100.0,
   "arkrtos_loader": 45.77,
   "arkrtos_mempool": 95.65,
-  "arkrtos_mq": 63.51,
+  "arkrtos_mq": 74.67,
   "arkrtos_sbuf": 46.69,
   "arkrtos_sync": 50.07,
   "arkrtos_utest": 83.65,
