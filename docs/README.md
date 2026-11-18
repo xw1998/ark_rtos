@@ -65,6 +65,7 @@
 | 查某一版到底改了什么、哪些还没验证 | [Release-0.0.3-preview.1.md](Release-0.0.3-preview.1.md)（构建与配置变更、能力与真机证据、体积账本、复现命令、兼容注意、未验证项清单） |
 | 查 API 签名与参数 | [api/Ark RTOS_API参考.md](api/Ark RTOS_API参考.md) |
 | 想知道它和 Linux 比还差什么、哪些是欠账哪些是定位差 | [与Linux差距盘点.md](与Linux差距盘点.md) |
+| Read the same Linux gap inventory in English | [与Linux差距盘点.en.md](与Linux差距盘点.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 想知道它和 FreeRTOS / RT-Thread / Zephyr 比还缺什么 | [与成熟RTOS对比.md](与成熟RTOS对比.md)（逐维度矩阵 + 缺口分档 + 明确不做的） |
 | 让设备之间互相发现、发事件、远程调用、传数据（软总线） | [软总线接入.md](软总线接入.md)（ark_softbus 同步副本、三钩子端口、MCU 档与 RAM 实测、`bus` 命令与上板自检） |
 | 不用 Keil，想用 GNU Make + arm-none-eabi-gcc 编 F427 例程 | [GCC构建指南.md](GCC构建指南.md)（工程位置、工具链、make 用法、与 Keil 的对应、GCC 侧三个坑、验证状态） |
@@ -137,6 +138,8 @@ docs/
 ├── 格式基线.md                              # 【设计说明】`.editorconfig` + `tools/format_gate.py`：四条纯字节规则（无制表符/无行尾空白/文件以换行结尾/无 BOM）、vendored 豁免表、喂毒自检、`\r\r\n` 致 `__LINE__` 偏移 1143 的取证
 ├── 远程CI与门禁裁剪.md                      # 【设计说明】Gitee Go 远程档：为什么裁 17 项（缺 Keil/交叉编译器）、skip 不等于 pass、NOT VERIFIED 清单、工作流本身与 runner 读数均未验证的口径
 ├── 与Linux差距盘点.md                      # 【设计说明】与 Linux 逐维度差距表 + 欠账排序 + 明确不做的取舍
+├── 与Linux差距盘点.en.md                    # 【English】浓缩英文版：三类口径（取舍/欠账/生态）、九维度差距表、欠账排序与不做的清单；中文页 normative
+
 ├── 与成熟RTOS对比.md                       # 【设计说明】对 FreeRTOS/RT-Thread/Zephyr 的逐维度矩阵 + 缺口分档
 ├── 硬件耦合审计.md                          # 【设计说明】内核硬件耦合点清单与处置、移植要动的范围
 ├── 软总线接入.md                            # 【设计说明】ark_softbus 组件同步副本、板级三钩子、MCU 档位与 RAM 实测、`bus` 命令与上板自检

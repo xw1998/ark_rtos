@@ -1,5 +1,7 @@
 # 与 Linux 的差距盘点
 
+**[简体中文](与Linux差距盘点.md) | English([与Linux差距盘点.en.md](与Linux差距盘点.en.md))**
+
 **这份文档回答一个问题：把 Ark RTOS 和 Linux 摆在一起，App 侧与内核侧还差什么？**
 
 先说清口径，免得把两种东西的差异当成"缺陷"：
