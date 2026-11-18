@@ -82,6 +82,7 @@
 | 不用 Keil，想用 GNU Make + arm-none-eabi-gcc 编 F427 例程 | [GCC构建指南.md](GCC构建指南.md)（工程位置、工具链、make 用法、与 Keil 的对应、GCC 侧三个坑、验证状态） |
 | 在板上跑单元测试、加自己的用例 | [单元测试框架.md](单元测试框架.md)（用例自动注册、断言宏、`utest` 命令、宿主自测门禁、用例清单） |
 | 换芯片前想知道内核耦合了哪些硬件 | [硬件耦合审计.md](硬件耦合审计.md)（耦合点清单与处置、移植要动的范围） |
+| Read the hardware-coupling audit in English | [硬件耦合审计.en.md](硬件耦合审计.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 想让门禁在 Gitee 上自动跑、并看清哪些项没跑 | [远程CI与门禁裁剪.md](远程CI与门禁裁剪.md)（`ci_gate --remote` 远程档、裁掉的 17 项及其工具链、skip 不等于 pass、未验证部分写死） |
 | Read the remote-CI page in English | [远程CI与门禁裁剪.en.md](远程CI与门禁裁剪.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 想让空白/制表符/行尾这类"风格问题"被机器判而不是靠人 | [格式基线.md](格式基线.md)（只判四条纯字节规则：无制表符、无行尾空白、文件以换行结尾、无 BOM；豁免 vendored 树；`\r\n` 让 `__LINE__` 偏移 1143 的实证） |
@@ -171,6 +172,7 @@ docs/
 
 ├── 与成熟RTOS对比.md                       # 【设计说明】对 FreeRTOS/RT-Thread/Zephyr 的逐维度矩阵 + 缺口分档
 ├── 硬件耦合审计.md                          # 【设计说明】内核硬件耦合点清单与处置、移植要动的范围
+├── 硬件耦合审计.en.md                       # 【English】浓缩英文版：达标/待修/结构性解耦三档结论、八方向依赖矩阵、内核里 HAL 令牌扫描命中表、三条待修（guard 反向 include、死宏 168 MHz 对实测 96 MHz、F401 借用 F427 HAL 目录）、四层耦合原则（capability/feature/contract/layout）、ark_vfs 切分形态与 12 个 include 分区头的文件里唯一例外；中文页 normative
 ├── 软总线接入.md                            # 【设计说明】ark_softbus 组件同步副本、板级三钩子、MCU 档位与 RAM 实测、`bus` 命令与上板自检
 ├── GCC构建指南.md                           # 【操作手册】GNU Make + arm-none-eabi-gcc 的 F427 例程：工具链、用法、与 Keil 的对应、GCC 侧三个坑、验证状态
 ├── QEMU模拟器移植与验证.md                  # 【实机记录】QEMU 上的 port 层验证：环境与依赖 DLL 坑、RV32 单 M 模式 port（trap 帧/a7/CLINT）、LA64 单核端口（256 B 帧/就地切换/PRMD 位序/TCFG-RDTIME 标定）、LA32 参考目标（128 B 帧，仅编译/链接；载体现状见 §6.1）、SMP 结论（§9）、构建与链接约束、串口实录、已知限制、monitor telnet 调试
