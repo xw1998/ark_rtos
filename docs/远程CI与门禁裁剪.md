@@ -8,13 +8,14 @@
 
 ## 1. 为什么需要裁剪
 
-`ci_gate` 的四十几项里有 14 项要驱动**只存在于开发机上的工具链**：
+`ci_gate` 的四十几项里有 17 项要驱动**只存在于开发机上的工具链**：
 
 | 工具链 | 谁在要它 | 用在哪 |
 |---|---|---|
 | Keil `armclang` | `tickless` `rtstat` `eset-syntax` `waitmulti-syntax` `waitq` `smp` `seccheck` `swap` | 用 `-fsyntax-only` 编「开关打开档」的 TU |
 | `arm-none-eabi-gcc` | `arkmake` | 板上 make 的语法档 |
 | LoongArch64 / RISC-V 交叉 gcc | `paging` `elf` `modld` `payload-sign` `stack-guard` | `paging_gate.py` / `elf_gate.py` / `modld_gate.py` 等真编两套 TU、跑负向用例 |
+| RV32 交叉 gcc（要 GCC 10+，`-fanalyzer`） | `analyzer` | 逐 TU 跑路径敏感静态分析（48 个 TU + 两条喂毒自检） |
 
 Gitee Go 的 runner 上这些一个都没有。三种糊弄法都不接受：
 
@@ -40,12 +41,13 @@ python3 tools/ci_gate.py --remote
 skip tickless                   needs armclang (Keil MDK) (not on the runner)
 ...
 skip stack-guard                needs LA64 / RV32 cross gcc (not on the runner)
-ok   remote-ci                  workflow calls the gate with --remote; 16 skipped check(s) all named in the table
+skip analyzer                   needs RV32 cross gcc with -fanalyzer (GCC 10+) (not on the runner)
+ok   remote-ci                  workflow calls the gate with --remote; 17 skipped check(s) all named in the table
 
-30 check(s) passed, 0 failed, 16 skipped (remote profile)
-NOT VERIFIED on this run: tickless, arkmake, rtstat, eset-syntax, waitmulti-syntax,
-waitq, smp, seccheck, swap, paging, elf, shell-auth, modld, payload-sign,
-stack-guard, sec-crc
+30 check(s) passed, 0 failed, 17 skipped (remote profile)
+NOT VERIFIED on this run: analyzer, tickless, arkmake, rtstat, eset-syntax,
+waitmulti-syntax, waitq, smp, seccheck, swap, paging, elf, shell-auth, modld,
+payload-sign, stack-guard, sec-crc
 ```
 
 三条口径：
@@ -65,6 +67,10 @@ API 新鲜度、布局、无分区头、Kconfig 生成物、DTS 生成物、发�
 同步头）+ 宿主编译与运行类（utest/sdk-stdio/sbuf/mempool/mq/sync/eset/waitmulti/
 loader/fifo/fault/coverage/warn-clean/sign-host）+ `remote-ci` 自身。
 
+注意 `warn-clean` 用的是宿主 gcc（`-Wall -Wextra -Wshadow`），runner 上有；
+`analyzer` 要的是带 `-fanalyzer` 的 **GCC 10+**，本机只有交叉编译器那一份，
+所以远程档跳过它——这和 `warn-clean` 是两件事，别混读。
+
 **没跑的四类，各自的替代取证在哪**：
 
 | 没跑 | 替代取证 |
@@ -72,6 +78,7 @@ loader/fifo/fault/coverage/warn-clean/sign-host）+ `remote-ci` 自身。
 | Keil 语法档（tickless/rtstat/eset/waitmulti/waitq/smp/seccheck/swap/sec-crc） | 开发机上 `python tools/ci_gate.py` 全量跑；判据是那一行的 `ok`/`FAIL` |
 | `arkmake` | 同上 |
 | 分页 / ELF / shell-auth / modld / 栈守卫 / 尾部签名（LA64 + RV32） | 同上；另有 QEMU 实跑读数（见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md)） |
+| 静态分析（`analyzer`，RV32 + `-fanalyzer`） | 同上；判据是 `tools/analyzer_gate.py` 的 `ANALYZER-GATE OK (48 TU, 0 diagnostic, 2 self-check probes fired)` |
 | Keil 工程构建（`--build`，本来就不在远程档） | 开发机 `--build` + 真机回归 |
 
 ## 4. 本文件的状态（未验证部分写死）
@@ -83,7 +90,7 @@ loader/fifo/fault/coverage/warn-clean/sign-host）+ `remote-ci` 自身。
   `displayName` / `strategy` / `trigger` / `steps[].step: build@python` /
   `pythonVersion` / `commands`。
 * **runner 上的读数未验证**：`--remote` 的**本机**行为已有读数（上一篇引用的
-  30/0/16），但「runner 上 Python 3.9 + 系统 gcc 能不能让 30 项全过」没跑过。
+  30/0/17），但「runner 上 Python 3.9 + 系统 gcc 能不能让 30 项全过」没跑过。
   已知的两处风险：`coverage-host` 需要 `gcov`；`api-doc` 需要
   `git diff` 在工作区可读（Gitee Go 检出是普通 clone，应当满足）。
 * 因此**不得把「远程档存在」读成「门禁已经离开本机」**：它只是多了一条在别处
@@ -96,5 +103,6 @@ loader/fifo/fault/coverage/warn-clean/sign-host）+ `remote-ci` 自身。
 2. 想让 Keil 那半边也上云，需要自建 runner（装 MDK）或者把语法档改写成
    `arm-none-eabi-gcc` 能编的形态——后者会改动「用哪个编译器代表板上答案」这个
    口径，得先定。
-3. **真静态分析**仍未接（本机无 cppcheck / clang-tidy，GCC 4.8 无 `-fanalyzer`），
-   与远程 CI 是两条独立的欠账，见 [欠账盘点](欠账盘点.md)。
+3. **真静态分析已接**（2026-11-18）：`analyzer` 项用本机交叉工具链的 GCC 10
+   `-fanalyzer` 跑 48 个 TU，判据与边界写在 [欠账盘点](欠账盘点.md) 的静态分析行。
+   它和远程 CI 在这一点上分道：分析只在有工具链的机器上跑，runner 上显式 skip。

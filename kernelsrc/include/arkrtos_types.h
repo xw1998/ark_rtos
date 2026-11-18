@@ -41,5 +41,14 @@ typedef signed   char  int8;
 #else
 #define ARKRTOS_WEAK __attribute__((weak))
 #endif
+/* ARMCC-only "put it in the ZI class" attribute. GCC and armclang do not know
+ * zero_init and report it as an ignored directive, so it is compiled out
+ * there; the cross-reset guarantee for the crash journal comes from the
+ * .noinit region being NOLOAD / UNINIT in the linker script, not from this. */
+#if defined(__CC_ARM)
+#define ARKRTOS_ZERO_INIT __attribute__((zero_init))
+#else
+#define ARKRTOS_ZERO_INIT
+#endif
 
 #endif

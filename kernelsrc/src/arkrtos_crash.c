@@ -46,7 +46,7 @@ uint32 arkrtos_crash_hash_path(const char *path)
  * It is not `static`: the linker places the section by name, and a file-local
  * symbol an optimizing compiler may drop is a bad bet for something whose
  * entire purpose is to have been written by an earlier run of the program. */
-__attribute__((section(".noinit"), zero_init))
+__attribute__((section(".noinit"))) ARKRTOS_ZERO_INIT
 arkrtos_crash_journal_t arkrtos_crash_journal;
 
 /* Sizing is a build-time question, not a runtime surprise: if the struct ever

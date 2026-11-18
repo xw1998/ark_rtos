@@ -1498,11 +1498,12 @@ def check_coverage_host():
 def check_warn_host():
     """-Wall -Wextra must be silent on every host-compilable translation unit.
 
-    This is the only "look at the code without running it" step this machine
-    can actually do: there is no cppcheck / MISRA / clang-tidy, and GCC 4.8 has
-    no -fanalyzer. It is NOT static analysis, and must never be reported as
-    "static analysis done" -- it is the compiler's own semantic pass turned up
-    from its defaults.
+    This is NOT static analysis and must never be reported as such: it is the
+    compiler's own semantic pass turned up from its defaults, one TU at a time,
+    with no path exploration. Real path-sensitive analysis lives in the
+    "analyzer" check (tools/analyzer_gate.py, GCC -fanalyzer on the RV32 target),
+    which was added on 2026-11-18 once this machine's toolchain list was
+    re-checked and riscv64-unknown-elf-gcc-10.2.0 turned up.
 
     Scope is honest and narrow: the 10 host test files, the 10 kernel modules
     they link, and the SDK stdio test. Everything else in kernelsrc/ needs an
@@ -1532,6 +1533,30 @@ def check_warn_host():
     else:
         fail("warn-clean", "gate failed: %s" % txt.strip()[-400:])
 
+def check_analyzer():
+    """GCC -fanalyzer over every kernel TU that compiles stand-alone.
+
+    This is the real static analysis the debt page asked for. It runs the
+    riscv64-unknown-elf-gcc-10.2.0 that ships with the Luban-Lite toolchain in
+    RV32 mode (-march=rv32imac -mabi=ilp32), so pointer width matches the MCU
+    targets; in RV64 mode the same code produces hundreds of
+    -Wint-to-pointer-cast lines that are architecture noise, not defects.
+
+    The gate does its own blind check: two deliberately broken probes
+    (double-free, null-dereference) must each be reported, otherwise it fails
+    instead of printing a clean number. Scope is printed too - TU count, skip
+    list with reasons, and how many vendored diagnostics were seen and not
+    judged - because "0 findings" over an unknown set is not a reading.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "analyzer_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "ANALYZER-GATE OK" in txt:
+        head = [l for l in txt.splitlines() if l.startswith("analyzer:")]
+        ok("analyzer", (head[0] if head else "kernel TU sweep") +
+           " / 0 diagnostic / self-check probes fired")
+    else:
+        fail("analyzer", "gate failed: %s" % txt.strip()[-400:])
+
 # ---------------------------------------------------------------- 远程档
 #
 # 这些检查的 gate 脚本会去驱动「只存在于开发机上的工具链」：Keil 的 armclang /
@@ -1557,6 +1582,7 @@ LOCAL_TOOLCHAIN = {
     "payload-sign": "LA64 cross gcc",
     "stack-guard": "LA64 / RV32 cross gcc",
     "sec-crc": "armclang (Keil MDK)",
+    "analyzer": "RV32 cross gcc with -fanalyzer (GCC 10+)",
 }
 
 # (打印名, 函数)。名字只用于 skip 行与自检，真正的读数由
@@ -1588,6 +1614,7 @@ CHECK_TABLE = (
     ("fault-host", check_fault_host),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),
+    ("analyzer", check_analyzer),
     ("tickless", check_tickless),
     ("arkmake", check_arkmake_syntax),
     ("rtstat", check_rtstat_syntax),

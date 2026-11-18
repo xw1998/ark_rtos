@@ -4,11 +4,12 @@
 
 为什么需要这一项
 ----------------
-这台机器上没有 cppcheck / MISRA / clang-tidy，GCC 4.8 也没有 -fanalyzer
-（GCC 10 才有），所以"静态分析"这条欠账没法照抄现成工具。能做的最强的一步
-是把编译器自己的语义分析开到满：-Wall -Wextra -Wshadow 覆盖未初始化、隐式声明、
-有符号/无符号混用、返回值未用、数组越界初判、内外层变量同名遮蔽等。它
-**不等于静态分析**，只是比默认告警多看一眼。
+这台机器上没有 cppcheck / MISRA / clang-tidy，宿主那份 GCC 4.8 也没有 -fanalyzer
+（GCC 10 才有）。真正能跑路径敏感分析的是本机交叉工具链自带的
+riscv64-unknown-elf-gcc-10.2.0，那条线是独立的 tools/analyzer_gate.py（ci_gate 的
+analyzer 项，2026-11-18 接）。本脚本只做更小的那一半：把编译器自己的语义分析开到满，
+-Wall -Wextra -Wshadow 覆盖未初始化、隐式声明、有符号/无符号混用、返回值未用、
+数组越界初判、内外层变量同名遮蔽等。它**不等于静态分析**，只是比默认告警多看一眼。
 
 更重的告警集为什么不一起开（2026-11-17 实测计数，21 个 TU）：
 -Wconversion 33 条、-Wsign-conversion 27 条、-Wmissing-prototypes 一类 25 条。
