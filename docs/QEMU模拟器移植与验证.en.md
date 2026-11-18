@@ -3028,6 +3028,81 @@ always fails, which made `test_move_slot_e2e` report SKIP. The first is fixed by
 increasing slot index) only when `g_scan_on` is set; the second by short-circuiting `map_pool_at()` when the
 pool is already mapped.
 
+#### 5.30.36 Split #31: `arkrtos_loader_crc_recheck()` split into head validation, per-entry back-calculation and the loop-and-compare tail (2026-11-18)
+
+`arkrtos_loader_crc_recheck()` (133 lines, `kernelsrc/src/arkrtos_loader.c`) is the core of SEC-G17: it
+turns an image in **as-written form** (absolute addresses in the payload already carry the install-time
+delta) back into **nominal form** entry by entry, recomputes CRC over header + relocation table + payload,
+and compares it with `hdr.crc32`. It used to hold parameter checks, header validation, both delta formulas,
+the entry loop, the tail and the comparison all in one body -- the second-longest function in the file.
+
+| Unit | Responsibility | Lines |
+|---|---|---|
+| `loader_crc_ctx_t` | Intermediate state: `hdr` / `p_rel` / `total` / `delta_rom` / `delta_ram` / `crc` / `pos`. Used only by the two statics below and the entry, **not exported, not persisted** | 11 (typedef) |
+| `loader_crc_begin()` | First half: null-check `p_img` -> byte-copy the header (never dereference an unaligned pointer) -> `check_header` (pool flavour) -> `total` vs `cap` -> `runtime_ram_base == 0` means "cannot compute" -> both delta formulas -> header CRC -> fold the relocation table in. Returns 0 or an error code the caller can propagate as-is | 60 |
+| `loader_crc_entry()` | One table entry: copy the 4-byte entry -> derive `kind`/`off`/`need` -> **`off < pos` returns `RELOC`** (going backwards would count a span twice) -> fold the gap when `off > pos` -> pick `delta_ram`/`delta_rom` by kind -> copy into an aligned buffer and subtract (`MOVW` goes through `arkrtos_loader_reloc_movw(word, 0u - delta)`) -> fold into CRC and advance `pos` | 54 |
+| `arkrtos_loader_crc_recheck()` itself | Null-check `p_got` -> zero it -> `begin` -> per-entry `entry` -> tail `pos < total` -> `*p_got = crc` -> compare with `hdr.crc32` | **36** (was 133) |
+
+Four rules: (1) **validation exists once**: header check, `cap` check, `runtime_ram_base` check and both
+delta formulas all live in `begin`, and the entry repeats none of them -- the whole point of this function
+is "rather report cannot-compute than derive a wrong delta and report a mismatch", and having that in two
+places would be two rules. (2) The `p_got` null-check and zeroing stay in the entry (they are the calling
+contract, not validation); the `p_img` null-check sits in `begin` (it is validation). (3) Each entry's
+`need`/`delta` selection, aligned buffer and "subtract delta = add `0 - delta`" moved verbatim. (4)
+`off < pos` still returns **immediately** instead of recording and continuing -- it is the only guard
+against a backwards entry.
+
+Normalised-equivalence diff: **only-OLD 29 lines / 29 distinct texts**, all falling under three mechanical
+mappings: (a) variables became ctx members -- `hdr` -> `c->hdr`, `p_rel` -> `c->p_rel`, and
+`total`/`delta_rom`/`delta_ram`/`crc`/`pos` -> `c->...` (17 lines, e.g.
+`crc = arkrtos_crc32(p_img + pos, off - pos, crc);` -> `c->crc = arkrtos_crc32(p_img + c->pos, off - c->pos, c->crc);`);
+(b) declarations moved -- `uint32 rt_len;` moved from the top into the `if` block (1 line) and
+`if(rt_len != 0u)` became `if(c->hdr.reloc_count != 0u)` (1 line); (c) shape changes -- the
+`if(p_got != 0) { *p_got = 0u; }` and `if((p_img == 0) || (p_got == 0))` pair became "entry checks
+`p_got`, `begin` checks `p_img`" (2 lines), `*p_got = crc` -> `*p_got = c.crc` (1 line), the final ternary
+now reads `c.crc` (1 line) and the `for` condition reads `c.hdr.reloc_count` (1 line). Everything else --
+six long comments, both the `MOVW` and the `uint32` branch, three `arkrtos_crc32` calls -- is textually and
+semantically unchanged. only-NEW is 53 lines (43 distinct texts): the typedef, two signatures, six brace
+groups, `return 0|ret|ERR_*` and three call sites in the entry.
+
+Size: **default profile text stays at 367512 (+-0 B)**, with `data` 440 / `bss` 767508 / total image
+31,462,512 B all unchanged, but sha256 moves from `dc72606e...` to
+**`d8a3afb0d1cdf75775bae29ca9890029843491e86921973406cf6e0df8f4eca0`**. This time the **cause was
+established rather than assumed**: in one build directory with the same `SOURCE_DATE_EPOCH=1600000000`,
+baseline and new revision were each built once and `cmp -l` shows only **21 differing bytes at 7
+locations**, every one an immediate -- `addi.w $r6,$r0,1528` -> `1566`, `1458` -> `1496`,
+`ori $r6,$r0,0x973` -> `0x999`, `1121` -> `1159`, ... **all exactly +38**, and the replacement block is
+exactly 38 lines longer than the original function. Those seven sites are `__LINE__` constants inside log
+and assert calls, **not behaviour**: instruction count, section layout and total length are untouched. So
+"byte-identical" holds for the **code** and does not hold for the **line-number constants** -- both halves
+have to be stated.
+
+**Switched-on build (false-green guard)**: the whole implementation sits inside
+`#if (ARKRTOS_USE_IMAGE_CRC_RECHECK == 1)` and the default profile never compiles it, so it needs its own
+build. armclang on the F427 target with `-O2 -c` and `-DARKRTOS_USE_IMAGE_CRC_RECHECK=1`, same include
+paths and defines for baseline and new revision: **0 warnings = 0 warnings**, and `fromelf -z` gives Code
+**15852 -> 16196 (+344 B)** with RO Data 721 / RW Data 4 / ZI Data 521 unchanged. **+344 B is the real
+cost of the split** (one extra call layer plus a 28-byte stack context that `-O2` did not inline back), not
+a de-duplication win. `tools/sec_crc_gate.py` (8 pins each with a mutation self-check plus two-TU syntax
+compiles in both modes) still reports `SEC-CRC-GATE OK (8 pin + 4 TU ...)`.
+
+Gates: `doc_audit.py funcs` **3 -> 2** (the longest is now `arkrtos_loader_check_header` at 125),
+`format_gate` 361 own files, `coverage_gate` ten modules OK (`arkrtos_loader` **52.31% -> 52.78%**,
+baseline raised to 52.78 by `--update`, raise only), `mq_host_gate` 108 checks,
+`example/qemu_loongarch64/shell_check.py` **PASS**, `ci_gate` **47 passed / 0 failed**.
+
+**Evidence tier: host tests actually executed + default-profile size unchanged (except line-number
+constants) + switched-on armclang F427 build clean + QEMU end-to-end PASS, not run on hardware.** The
+runtime evidence for `arkrtos_loader_crc_recheck()` comes from the host: `test_crc_recheck()` in
+`test_loader_host.c` builds an image whose landing address is not its nominal base and covers (1) the
+positive case (back-calculation reproduces the packer's `crc32`), (2) one flipped payload byte reporting
+`ERR_CRC`, (3) null `p_img` / null `p_got` each reporting `ERR_PARAM`, (4) `cap` four bytes short reporting
+`ERR_SIZE` rather than "mismatch", (5) `runtime_ram_base == 0` reporting `ERR_PARAM` ("cannot compute" is
+not "correct"), and (6) a backwards entry reporting `ERR_RELOC`; `loader-host` is **107 passed / 0 failed /
+0 SKIP**. **Not covered**: running this check against a real pool image at QEMU boot (the switch is `n` in
+the default profile) and real Flash bit-flips -- those remain the manual `utest run
+loader_crc_recheck_pool_e2e` path with the switch on, outside this change's evidence.
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine

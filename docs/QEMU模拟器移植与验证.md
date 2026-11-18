@@ -5197,6 +5197,71 @@ POSIX `mmap MAP_FIXED`，**长度用 `IMAGE_POOL_SIZE` 而不是 `USABLE_SIZE`**
 后者给 `map_pool_at()` 加了「已映射就直接返回」的短路。这两条都是**用例的问题，不是被测代码的问题**，
 但把它们留在里面会让门禁时红时绿。
 
+#### 5.30.36 第三十一笔：`arkrtos_loader_crc_recheck()` 按「前置校验 / 单表项回算 / 串联与比对」拆成三段（2026-11-18）
+
+`arkrtos_loader_crc_recheck()`（133 行，`kernelsrc/src/arkrtos_loader.c`）是 SEC-G17 的核心：
+把**落盘形态**的镜像（负载里那些绝对地址已按装载时的增量打过补丁）逐表项减回**标称形态**，
+再按「头 + 重定位表 + 负载」重算一遍 CRC，与 `hdr.crc32` 比。它一次性把参数校验、头部校验、
+两个增量的推导、表项遍历、尾段与比较全塞在一个函数里，是本文件当时第二长的函数。
+
+| 单元 | 管什么 | 行数 |
+|---|---|---|
+| `loader_crc_ctx_t` | 中间状态：`hdr` / `p_rel` / `total` / `delta_rom` / `delta_ram` / `crc` / `pos`。只在下面两个 static 与入口之间用，**不对外、不进任何持久结构** | 11（typedef） |
+| `loader_crc_begin()` | 前半段：`p_img` 空判 → 按字节拷头（不对齐指针不解引用）→ `check_header`（池口径）→ `total` 与 `cap` → `runtime_ram_base == 0` 报「算不出来」→ 两个增量公式 → 头部 CRC → 表体折进 CRC。返回 0 或一个可直接上抛的错误码 | 60 |
+| `loader_crc_entry()` | 一个表项：拷 4 字节表项 → 算 `kind`/`off`/`need` → **`off < pos` 报 `RELOC`**（往回退会让同一段被重复计入）→ `off > pos` 的间隙先折进 CRC → 按 `kind` 选 `delta_ram`/`delta_rom` → 拷进对齐缓冲再减（`MOVW` 走 `arkrtos_loader_reloc_movw(word, 0u - delta)`）→ 折进 CRC 并推进 `pos` | 54 |
+| `arkrtos_loader_crc_recheck()` 自己 | `p_got` 空判 → 清零 → `begin` → 逐表项 `entry` → 尾段 `pos < total` → `*p_got = crc` → 与 `hdr.crc32` 比 | **36**（原 133） |
+
+口径四条：① **校验只留一份**：头部校验、`cap` 判断、`runtime_ram_base` 判断、两个增量公式
+全在 `begin` 里，入口一行校验都不重复 —— 这条函数的意义就是「宁可报算不出来，也不拿错的
+delta 硬算出一个不匹配」，把这句话摊在两处就等于给两种口径。② `p_got` 的空判与清零留在
+入口（它是调用契约，不是校验），`p_img` 的空判在 `begin`（它属于校验）。③ 每个表项的
+`need`/`delta` 选择、对齐缓冲、「减 delta = 加 `0 - delta`」全部原样搬走，一个字没改。④
+`off < pos` 仍然**立刻返回**而不是记账继续 —— 这是「表项往回退」唯一的挡口。
+
+等价性归一化比对：**only-OLD 29 行 / 29 个不同文本**，全部落在三条机械映射上，逐条可归因：
+① 变量成为 `ctx` 成员：`hdr` → `c->hdr`、`p_rel` → `c->p_rel`、`total`/`delta_rom`/`delta_ram`/
+`crc`/`pos` → `c->…`（共 17 行，如 `crc = arkrtos_crc32(p_img + pos, off - pos, crc);` →
+`c->crc = arkrtos_crc32(p_img + c->pos, off - c->pos, c->crc);`）；② 声明搬家：`uint32 rt_len;`
+从函数顶部挪进 `if` 块内（1 行），`if(rt_len != 0u)` → `if(c->hdr.reloc_count != 0u)`（1 行）；
+③ 结构形变：`if(p_got != 0) { *p_got = 0u; }` 与 `if((p_img == 0) || (p_got == 0))` 两条合并判断
+拆成「入口判 `p_got`、`begin` 判 `p_img`」（2 行）、`*p_got = crc` → `*p_got = c.crc`（1 行）、
+`return (crc == hdr.crc32) ? 0 : ERR_CRC` → 同样比较但取自 `c.crc`（1 行）、`for(i = 0u; i < hdr.reloc_count; i++)`
+→ `i < c.hdr.reloc_count`（1 行）。其余语句（含六段长注释、`MOVW` 与 `uint32` 两条分支、
+四处 `arkrtos_crc32` 调用）语义与文本未变。only-NEW 53 行（43 个不同文本）是 typedef、两个
+签名、六组花括号、`return 0|ret|ERR_*` 与入口的三处调用。
+
+体积：**默认档 text 仍是 367512（±0 B）**，`data` 440 / `bss` 767508 / 镜像总长 31,462,512 B
+全部不变，但 sha256 由 `dc72606e…` 变成 **`d8a3afb0d1cdf75775bae29ca9890029843491e86921973406cf6e0df8f4eca0`**。
+这次**把「为什么变了」查清楚了**才写结论：同一构建目录、同一 `SOURCE_DATE_EPOCH=1600000000`，
+基线与新版各构建一次，`cmp -l` 只有 **21 个字节、7 处**不同，逐处都是立即数：`addi.w $r6,$r0,1528`
+→ `1566`、`1458` → `1496`、`ori $r6,$r0,0x973` → `0x999`、`1121` → `1159` …… **全部恰好 +38**，
+而替换块比原函数长 38 行。所以这 7 处是日志/断言里的 `__LINE__` 常量，**不是行为变化**：
+指令条数、段布局、总长一个都没动。换句话说，这一笔的「逐字节不变」只对**代码**成立，对
+**带行号的常量**不成立 —— 两种说法都不能省。
+
+**编入档（防假绿）**：这一整段实现被 `#if (ARKRTOS_USE_IMAGE_CRC_RECHECK == 1)` 包着，默认档
+一个编译器都不经过它，所以必须单独编。用 armclang 对 F427 板级做 `-O2 -c` 真编译，
+`-DARKRTOS_USE_IMAGE_CRC_RECHECK=1`，同一套头路径与宏编基线/新版各一次：**告警 0 条 = 0 条**，
+`fromelf -z` 得 Code **15852 → 16196（+344 B）**、RO Data 721 / RW Data 4 / ZI Data 521 不变。
+**+344 B 是切分的真实代价**（多了一层调用与一个 28 字节的栈上 ctx，`-O2` 也没有把它内联回去），
+不是去重收益。`tools/sec_crc_gate.py`（8 条 pin 各带变异自检 + 两个 TU 两档语法编译）仍
+`SEC-CRC-GATE OK (8 pin + 4 TU 两档)`。
+
+门禁：`doc_audit.py funcs` **3 → 2**（最长变 `arkrtos_loader_check_header` 125）、
+`format_gate` 361 个自有文件、`coverage_gate` 十模块 OK（`arkrtos_loader` **52.31% → 52.78%**，
+`--update` 把基线抬到 52.78，只抬不降）、`mq_host_gate` 108 checks、
+`example/qemu_loongarch64/shell_check.py` **PASS**、`ci_gate` **47 passed / 0 failed**。
+
+**结论分档：宿主用例实跑 + 默认档体积不变（行号常量除外）+ 编入档（armclang F427）编译通过且零告警
++ QEMU 端到端 PASS，未上板。** `arkrtos_loader_crc_recheck()` 的运行证据来自宿主：
+`test_loader_host.c` 的 `test_crc_recheck()` 真造了一份「落点不等于标称基址」的镜像，覆盖
+①正向（反算回标称形态后与打包工具有同一个 `crc32`）②负载改一个字节报 `ERR_CRC`
+③`p_img`/`p_got` 为空各报 `ERR_PARAM` ④`cap` 少 4 字节报 `ERR_SIZE`（不是「不一致」）
+⑤`runtime_ram_base == 0` 报 `ERR_PARAM`（「算不出来」不是「对」）⑥表项往回退报 `ERR_RELOC`，
+`loader-host` **107 passed / 0 failed / 0 SKIP**。**没有的读数**：QEMU 开机后在真池镜像上跑这条
+复核（默认档开关是 `n`，QEMU 档不开），以及真 Flash 的电离位翻转 —— 这两条仍然只有
+`utest run loader_crc_recheck_pool_e2e` 那条需要开档的手工路径，不在本笔证据范围内。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行
