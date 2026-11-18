@@ -1,5 +1,7 @@
 # arkvim 编辑器显示约定
 
+**[简体中文](arkvim编辑器显示约定.md) | English([arkvim编辑器显示约定.en.md](arkvim编辑器显示约定.en.md))**
+
 `vim` 命令背后是 `kernelsrc/components/arkvim`，它是上游仓库
 `D:/工作/git_project/arkvim`（gitee：`xw19981010/ark-vim`）的 vendored 副本。
 

@@ -45,6 +45,7 @@
 | 板上一份工程描述把几份 `.c` 打成一个能跑的镜像（`make`） | [ark make-板上构建工具.md](ark make-板上构建工具.md)（为什么不是 GNU make、五个键、四遍打包的三条硬约束、失败阶段怎么翻成错误码、关掉时零体积、这一轮抓到的两个真缺陷） |
 | 从 NOR 上的工程目录 `make` 出一个**标准 C** 的 hello world（`<stdio.h>` + `printf` + `int main`），再 `mini run` 跑起来 | [arkc板上直跑-M4-hello演示.md](arkc板上直跑-M4-hello演示.md)（SDK 两源三头、`cd /mnt/nor/hello && make && mini run` 实录、`printf` 的 `__asm` 取参桩怎么绕开"没有 va_list"、七条硬限制、两条回归用例与 printf 宿主门禁） |
 | 编辑器屏幕上的排版不对（`:q` 显示成 `::q`、光标狂闪、行被撕开） | [arkvim编辑器显示约定.md](arkvim编辑器显示约定.md)（五条显示约定的判据、host 三道门禁、板上 rawcap 取证的读法、改这个组件只能走上游） |
+| Read the arkvim display-convention page in English | [arkvim编辑器显示约定.en.md](arkvim编辑器显示约定.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 加一个"放在文件系统里、想跑就跑"的小程序（不安装、不占槽位） | [小程序设计.md](小程序设计.md)（两块内存模型 + 装载六步 + 体积上限 + 多实例/崩溃禁用/开机自启清单 + 已知限制） |
 | 用英文读同一份小程序设计 | [小程序设计.en.md](小程序设计.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 让两个小程序交接控制权、不停机换版本 | [无缝升级例程.md](无缝升级例程.md)（状态记录 + 请求记录两个文件、三条硬规则、SEAMLESS_V1/V2 实测） |
@@ -86,7 +87,8 @@
 | Read the hardware-coupling audit in English | [硬件耦合审计.en.md](硬件耦合审计.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 想让门禁在 Gitee 上自动跑、并看清哪些项没跑 | [远程CI与门禁裁剪.md](远程CI与门禁裁剪.md)（`ci_gate --remote` 远程档、裁掉的 17 项及其工具链、skip 不等于 pass、未验证部分写死） |
 | Read the remote-CI page in English | [远程CI与门禁裁剪.en.md](远程CI与门禁裁剪.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
-| 想让空白/制表符/行尾这类"风格问题"被机器判而不是靠人 | [格式基线.md](格式基线.md)（只判四条纯字节规则：无制表符、无行尾空白、文件以换行结尾、无 BOM；豁免 vendored 树；`\r\n` 让 `__LINE__` 偏移 1143 的实证） |
+| 想让空白/制表符/行尾这类"风格问题"被机器判而不是靠人 | [格式基线.md](格式基线.md)（只判四条纯字节规则：无制表符、无行尾空白、文件以换行结尾、无 BOM；豁免 vendored 树；`
+\r\n` 让 `__LINE__` 偏移 1143 的实证） |
 | Read the format-baseline page in English | [格式基线.en.md](格式基线.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 手上没有板子，想在 PC 上真跑一遍 port 层（trap 入口/上下文切换/SVC 通路/定时器） | [QEMU模拟器移植与验证.md](QEMU模拟器移植与验证.md)（QEMU 9.2.3 环境与依赖 DLL 补丁、RV32 单 M 模式 port、LA64 单核 port、**LA32 只到编译/链接（载体 `la32r-QEMU` / `loongson-community/qemu:la32-user-exp` 都存在，但只有 Linux 发行包或源码，本机不能执行，见 §6.1.1）**、**SMP 可仿真但内核侧一步未做（§9）**、trap 帧与取号、无 libgcc/libc 约束、**PRMD 位序坑**、串口实录、已知限制、monitor telnet 调试手法、**三目标功能矩阵与逐开关实录（audit / crash_log / mdk_trace / seccheck / softbus / image_sign / hw_safe / kernel_guard）**） |
 | 用英文读同一份限制清单（哪些是取舍、哪些是欠账） | [已知限制.en.md](已知限制.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
@@ -136,6 +138,7 @@ docs/
 ├── arkc板上直跑-M3b-QSPI持久化.md       # 【实机记录】QSPI NOR 持久化：引脚/AF 取证、位敲数据面取舍、noent 内核缺陷、全链路实录、速度账与欠账
 ├── arkc板上直跑-M4-hello演示.md      # 【实机记录】标准 C 的 printf/main 小程序：SDK 与工程分目录放 NOR、`make` + `mini run`、printf 取参桩、七条硬限制、回归与宿主门禁
 ├── arkvim编辑器显示约定.md            # 【约定】屏幕布局、五条显示约定与判据、已知限制、host 门禁与板上取证、vendored 同步流程
+├── arkvim编辑器显示约定.en.md               # 【English】arkvim 编辑器显示约定的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── stm32h743-external-memory.md             # 【实机记录】H743 外置 SDRAM/FMC：FMCEN 总闸门、32 MB 读写验证、编译器池与 ramfs 落 SDRAM
 ├── 功能开关.md                              # 【设计说明】三层开关、逐项"关掉后"语义、依赖约束、真能关的验证方法
 ├── 功能开关.en.md                           # 【English】功能开关页的浓缩英文版（中文页 normative；不新增主张与读数）
