@@ -24,6 +24,10 @@
 static char g_con[4096];
 static int  g_con_n;
 
+/* 控制台捕获桩：真声明在 arkrtos_log.h，本 TU 不引那个头，就地给一份同签名
+ * 原型（桩也是接口，-Wmissing-prototypes 要求定义前先有原型）。 */
+int arkrtos_shell_print(const char *msg);
+
 int arkrtos_shell_print(const char *msg)
 {
     if (msg == 0)

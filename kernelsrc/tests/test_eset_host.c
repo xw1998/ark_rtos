@@ -71,6 +71,9 @@ int32 arkrtos_task_block_in_critical(uint32 timeout_ms)
 void arkrtos_ready_add(int32 task_idx) { (void)task_idx; g_ready_calls++; }
 void arkrtos_ready_reprio(int32 task_idx, uint8 old_prio) { (void)task_idx; (void)old_prio; }
 
+/* trace 桩也是接口：先声明后定义。 */
+void arkrtos_trace_wait_obj(uint16 obj13);
+void mdk_trace_arkrtos_obj_signal(uint16 obj, uint8 cls);
 void arkrtos_trace_wait_obj(uint16 obj13) { (void)obj13; }
 void mdk_trace_arkrtos_obj_signal(uint16 obj, uint8 cls) { (void)obj; (void)cls; }
 

@@ -92,6 +92,10 @@ int32 arkrtos_task_block_in_critical(uint32 timeout_ms)
 void  arkrtos_ready_add(int32 task_idx) { (void)task_idx; }
 uint8 arkrtos_sync_in_handler(void) { return g_in_handler; }
 
+/* 桩也是接口：先声明后定义，-Wmissing-prototypes 才看得见原型。 */
+void arkrtos_trace_wait_obj(uint16 obj13);
+void arkrtos_trace_wait(uint8 task_id);
+void mdk_trace_arkrtos_obj_signal(uint16 obj, uint8 cls);
 void arkrtos_trace_wait_obj(uint16 obj13) { (void)obj13; }
 void arkrtos_trace_wait(uint8 task_id) { (void)task_id; }
 void mdk_trace_arkrtos_obj_signal(uint16 obj, uint8 cls) { (void)obj; (void)cls; }

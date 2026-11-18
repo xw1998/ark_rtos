@@ -68,6 +68,12 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
 int32 arkrtos_mq_recv_internal(int32 handle, uint32 *buf, int32 len_words, int32 timeout_ms);
 int32 arkrtos_mq_delete_internal(int32 handle);
 
+/* 公开的中断侧入口。arkrtos.h 里一直有这两条声明，可本模块头只声明了
+ * *_internal，于是定义它们的 TU 自己看不见公开原型（-Wmissing-prototypes）。
+ * 补在模块头里，include 本头就能同时看到内部实现与公开入口。 */
+int32 arkrtos_mq_send_from_isr(int32 handle, void *buf, int32 len_words);
+int32 arkrtos_mq_recv_from_isr(int32 handle, void *buf, int32 len_words);
+
 int32 arkrtos_mq_send_from_isr_internal(int32 handle, void *buf, int32 len_words);
 /* 中断里直接收：队列空返回 ARKRTOS_MQ_ERR_EMPTY，否则返回实际取到的字数。
  * 不登记等待者、不阻塞；取走后会叫醒一个等发的人（只置 READY）。 */

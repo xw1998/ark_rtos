@@ -11,11 +11,22 @@ analyzer 项，2026-11-18 接）。本脚本只做更小的那一半：把编译
 -Wall -Wextra -Wshadow 覆盖未初始化、隐式声明、有符号/无符号混用、返回值未用、
 数组越界初判、内外层变量同名遮蔽等。它**不等于静态分析**，只是比默认告警多看一眼。
 
-更重的告警集为什么不一起开（2026-11-17 实测计数，21 个 TU）：
--Wconversion 33 条、-Wsign-conversion 27 条、-Wmissing-prototypes 一类 25 条。
-这些是类型收窄/接口暴露的风格问题，逐条改等于改内核 API 与数据通路，风险
-远大于收益，要动必须先单独定口径。所以本门禁只钉住「编译器能确定是错的」
-那一档，并把上面这三个数字登记在 docs/欠账盘点.md 里。
+2026-11-18 起把「接口暴露」这一类也收进来了（-Wmissing-prototypes
+-Wstrict-prototypes -Wold-style-definition）。此前 21 个 TU 上这三条共 25 条，
+全部是 -Wmissing-prototypes，分两族：
+  * 内核 5 条 —— arkrtos_mq_send_from_isr / arkrtos_mq_recv_from_isr 与
+    arkrtos_sem_post_from_isr 在 arkrtos.h 里有声明，但定义它们的 TU 只
+    include 模块头，模块头里没有原型 ⇒ 定义点看不见原型；外加宿主档
+    （ARKRTOS_SYNC_HOST_TEST）里不是 static 的 arkrtos_mtx_propagate /
+    arkrtos_mtx_recalc_priority。修法是把原型补进各自的模块头（mq.h / sync.h）
+    与宿主档分支，不制造新的公共 API。
+  * 测试桩 20 条 —— 测试文件就地替掉内核函数（trace 钩子 12、端口开关 2、
+    四个 ready 查询 4、arkrtos_fault_record 与 arkrtos_shell_print 各 1），
+    桩定义前没有原型。修法是「先声明后定义」。
+-Wstrict-prototypes / -Wold-style-definition 这次一条都没报（全仓签名都带原型），
+一并钉住是为防止以后退化成 K&R 风格。
+-Wconversion 33 条、-Wsign-conversion 27 条仍然不开：那是类型收窄，逐条改等于
+改数据通路，风险远大于收益，要动必须先单独定口径。数字登记在 docs/欠账盘点.md。
 
 它抓到过真东西：2026-11-17 它在 arkrtos_sync.c 上翻出 arkrtos_sync_release_task()
 里的 p_tsk 声明了却从未赋值 —— 死任务的锁永远不会移交、等待队列永远摘不干净。
@@ -32,7 +43,8 @@ riscv64 工具链）编，那是另一件事，本门禁不声称覆盖它们。
 判据与边界
 ----------
 * 判据 = 每一条 TU 编译成功且输出里没有 "warning:"。有任何一条告警就红。
-* 选项集固定为 -Wall -Wextra -Wshadow；加选项要先在宿主 21 个 TU 上跑成零告警。
+* 选项集固定为 WARN_FLAGS（-Wall -Wextra -Wshadow + 三条接口暴露告警）；
+  加选项要先在宿主 21 个 TU 上跑成零告警，并在 docstring 里写清口径。
 * 这里只证明"编译器在这个配置下没话说"，不证明没有逻辑缺陷；也不是 MISRA /
   认证意义上的静态分析。别拿它当"静态分析已完成"。
 * 宏组合与 tools/ci_gate.py 里对应的 *-host 检查逐条一致；改那边要同步这里。
@@ -57,6 +69,11 @@ sys.path.insert(0, HERE)
 
 from coverage_gate import CASES, COMMON_INC, find_cc, mingw_prefix  # noqa: E402
 
+# 固定选项集：前三条问「编译器能确定是错的吗」，后三条问「接口有没有露在暗处」。
+# 加选项必须先跑成零告警再改这里，否则门禁会先红一次。
+WARN_FLAGS = ["-Wall", "-Wextra", "-Wshadow",
+              "-Wmissing-prototypes", "-Wstrict-prototypes", "-Wold-style-definition"]
+
 # 与 CASES 同源的补一条：SDK stdio 的宿主用例（对应 ci_gate 的 sdk-stdio-host）。
 EXTRA = [("sdk-stdio", "kernelsrc/sdk/app_sdk/tests/test_stdio_host.c", [], [])]
 
@@ -72,7 +89,7 @@ def _dec(b):
 
 def compile_one(cc, src, defs):
     cmd = ([cc] + mingw_prefix(cc) +
-           ["-std=gnu11", "-O0", "-Wall", "-Wextra", "-Wshadow", "-c", "-o", os.devnull,
+           ["-std=gnu11", "-O0"] + WARN_FLAGS + ["-c", "-o", os.devnull,
             src] + list(defs) + COMMON_INC)
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True)
     out = _dec(r.stdout) + _dec(r.stderr)
@@ -106,6 +123,19 @@ def main():
                 print("WARN-GATE selfcheck FAIL: 故意写坏的 TU 一条告警都没报")
                 return 1
             print("selfcheck ok: 故意写坏的 TU 被报出 %d 条告警" % len(warn))
+
+            # 第二条探针专测接口暴露那三条：没有原型的非 static 函数必须被报出
+            # -Wmissing-prototypes。-Wall/-Wextra 对它是沉默的，所以这一条同时
+            # 证明「新加的三个选项真的在命令行上」。
+            miss_c = os.path.join(td, "deliberate_missing_proto.c")
+            with open(miss_c, "w", encoding="utf-8") as f:
+                f.write("int probe_no_proto(int v)\n{\n    return v;\n}\n")
+            _rc2, warn2, _err2 = compile_one(cc, miss_c, [])
+            hit = [l for l in warn2 if "missing-prototypes" in l]
+            if not hit:
+                print("WARN-GATE selfcheck FAIL: 没有原型的函数没被 -Wmissing-prototypes 报出")
+                return 1
+            print("selfcheck ok: 无原型探针被报出 %d 条" % len(hit))
         return 0
 
     tus = []
@@ -139,8 +169,9 @@ def main():
     if bad:
         print("WARN-GATE FAIL: %d 个 TU 有问题（共 %d 条告警）" % (bad, total))
         return 1
-    print("WARN-GATE OK  (%d 个宿主可编 TU，-Wall -Wextra -Wshadow 零告警；"
-          "这不是静态分析，内核其余文件由各自工具链编)" % len(tus))
+    print("WARN-GATE OK  (%d 个宿主可编 TU，%s 零告警；"
+          "这不是静态分析，内核其余文件由各自工具链编)"
+          % (len(tus), " ".join(WARN_FLAGS)))
     return 0
 
 

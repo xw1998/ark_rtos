@@ -61,6 +61,9 @@ void  arkrtos_sync_module_init(void);
 int32 arkrtos_sem_create_internal(char *name, int32 init_count);
 int32 arkrtos_sem_wait_internal(int32 handle, int32 timeout_ms);
 int32 arkrtos_sem_post_internal(int32 handle);
+/* 中断侧 post：实现就是 post_internal（不阻塞、不切任务）。arkrtos.h 里有
+ * 声明，模块头此前漏了，定义它的 TU 因此看不见原型。 */
+int32 arkrtos_sem_post_from_isr(int32 handle);
 int32 arkrtos_sem_delete_internal(int32 handle);
 
 int32 arkrtos_mtx_create_internal(char *name);

@@ -43,6 +43,9 @@ static void ck(int cond, const char *what)
 }
 
 /* 关中断/开中断：本模块只在探测期间短暂进临界区，宿主上无意义 */
+/* 桩也是接口：先声明后定义。 */
+void arkrtos_port_disable_irq(void);
+void arkrtos_port_enable_irq(void);
 void arkrtos_port_disable_irq(void) { }
 void arkrtos_port_enable_irq(void)  { }
 
@@ -93,6 +96,12 @@ static int stub_lookup(const int32 *tab, int32 handle)
     }
     return (int)tab[idx];
 }
+
+/* 四条 ready 桩同样是接口：先声明后定义。 */
+int32 arkrtos_sem_ready_internal(int32 handle);
+int32 arkrtos_mtx_ready_internal(int32 handle);
+int32 arkrtos_mq_ready_internal(int32 handle);
+int32 arkrtos_event_ready_internal(int32 handle);
 
 int32 arkrtos_sem_ready_internal(int32 handle)
 {

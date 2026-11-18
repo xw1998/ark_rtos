@@ -112,6 +112,7 @@ uint32 arkrtos_crash_fault(uint32 slot, uint32 reason) { (void)slot; (void)reaso
 uint32 arkrtos_crash_disabled(uint32 slot)             { (void)slot; return 0u; }
 void   arkrtos_crash_forget(uint32 slot)               { (void)slot; }
 const char *arkrtos_crash_reason_name(uint32 reason)   { (void)reason; return "stub"; }
+void   arkrtos_fault_record(uint32 type, int32 task_id);
 void   arkrtos_fault_record(uint32 type, int32 task_id) { (void)type; (void)task_id; }
 
 int32 arkrtos_mini_on_fault(int32 task_id) { (void)task_id; return 0; }

@@ -42,6 +42,10 @@ void  arkrtos_ready_add(int32 task_idx) { (void)task_idx; }
 uint8 arkrtos_sync_in_handler(void) { return 0u; }
 
 /* trace 模块：宿主上没有这条链路 */
+/* 桩也是接口：先声明后定义，-Wmissing-prototypes 才看得见原型。 */
+void arkrtos_trace_wait_obj(uint16 obj13);
+void arkrtos_trace_wait(uint8 task_id);
+void mdk_trace_arkrtos_obj_signal(uint16 obj, uint8 cls);
 void arkrtos_trace_wait_obj(uint16 obj13) { (void)obj13; }
 void arkrtos_trace_wait(uint8 task_id) { (void)task_id; }
 void mdk_trace_arkrtos_obj_signal(uint16 obj, uint8 cls) { (void)obj; (void)cls; }

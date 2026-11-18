@@ -19,6 +19,10 @@
 
 #if defined(ARKRTOS_SYNC_HOST_TEST)
 #define ARKRTOS_SYNC_STATIC        /* 宿主测试要直接摆等待关系，不藏对象表 */
+/* 这两条内部函数在宿主档里不是 static（上层用例直接调），所以先给原型：
+ * 只是「不藏起来」，不是新的公共 API。 */
+void arkrtos_mtx_propagate(void);
+void arkrtos_mtx_recalc_priority(int32 idx);
 #else
 #define ARKRTOS_SYNC_STATIC static
 #endif
