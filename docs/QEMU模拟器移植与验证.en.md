@@ -1627,6 +1627,54 @@ after   text 367336 / data 440 / bss 767508   sha256 b0ad6a91...   31,462,512 B
 pointer-width casts; the new code adds none). `doc_audit.py funcs`: functions over 120 lines
 **30 -> 29**, and the longest is now `arkrtos_mini_load_image()` (229 lines).
 
+#### 5.30.10 Fifth one: `arkrtos_mini_load_image()` split by stage, stream and finish (2026-11-18)
+
+`arkrtos_mini_load_image()` in `kernelsrc/src/arkrtos_mini.c` (229 lines) did three things: read the
+image header and relocation table, borrow two blocks sized from what the header declares, and stream
+the payload from the file into RAM while accumulating a CRC, then fix up the entry. It is now two
+`static` helpers plus a short entry point:
+
+| Function | Responsibility | Lines |
+|---|---|---|
+| `mini_load_stage()` | read header, `arkrtos_loader_check_header(p_hdr, 0, MASK_MINI)`, read the relocation table, check again, compute `code_size` / `code_span` / `ram_size_hdr` / `code_want`, the wrap-around self check, the `max_block` and stack-floor tests, then `arkrtos_ptable_mini_alloc()`; fills `pt_index` / `code_base` / `code_block` / `code_size` / `ram_base` / `ram_block` / `ram_size` on `p_img` | 92 |
+| `mini_load_stream()` | `while(cur < total)` reads a chunk, copies it straight into `p_img->code_base` / `p_img->ram_base`, updates the CRC; `yield_credits` stays inside `#if (ARKRTOS_MINI_YIELD_CHUNKS > 0)`; one output `*p_crc` | 93 |
+| `arkrtos_mini_load_image()` itself | environment test (`ARKRTOS_MINI_READ_VFS`), take the scheduler lock, call both helpers, compare the CRC, compute the entry (set the Thumb bit on ARM), unlock, fill `entry` / `crc`; each stage failure rolls back what that stage owns | **61** (was 229) |
+
+Quantities that only exist once something has been counted (`payload_off`, `total`, `delta_rom`,
+`delta_ram`) are not passed out as parameters; `mini_load_stream()` recomputes them from `p_hdr` /
+`p_img`, otherwise the second helper would take seven or eight arguments. `free_out` / `unlock_out`
+stay in the entry point only, and both helpers report failures with `return <code>`. Equivalence was
+again argued with the normalised line multiset: only-OLD contains only the deliberately rewritten
+statements (9 of `ret = X; goto unlock_out;` / `goto free_out;`, plus locals moved to their
+declaration point), **no statement was lost**.
+
+**This split caught two real errors that the default build cannot see at all.** `ARKRTOS_USE_MINIAPP`
+defaults to 0 in every board header, so the whole translation unit is compiled away in the default
+build (`size -A` on `arkrtos_mini.o` shows `.text 0`) and a plain `make` passing proves nothing. A
+shim header (`#include` the board header, then `#undef` + `#define ARKRTOS_USE_MINIAPP 1`, placed
+first on the `-I` list with `-include arkrtos_board_config.h`) forced the switch on for a `-c` build,
+which immediately reported `code_base` undeclared in three places: it used to be a local of the main
+function and does not exist inside `mini_load_stream()`. Those three uses (copy target, CRC range,
+end test) became `p_img->code_base`, and `entry = code_base + ...` in the entry point became
+`p_img->code_base + ...`. After the fix the `MINIAPP=1` build exits 0 with **5 warnings, the same 5
+as the HEAD baseline**, and `nm` shows the 18 `T` symbols.
+
+Readings:
+
+```
+before  text 367336 / data 440 / bss 767508   sha256 b0ad6a91...   31,462,512 B
+after   text 367336 / data 440 / bss 767508   sha256 b0ad6a91...   31,462,512 B
+```
+
+**The default image is byte-identical**, but not because the split left no trace: with
+`ARKRTOS_USE_MINIAPP=0` the translation unit is an empty object, so editing it cannot change a single
+byte of the default build. It is the same shape as `apppack` in 5.30.8 and **must not be written as an
+"minus N bytes" result**. `shell_check.py` still reports `PASS`, but it never enters this path in the
+default build, so that reads as "the default build was not broken" and **not** as behavioural evidence
+for this split. Verdict level: compiles (including the forced-switch shim build); **behaviour not
+verified**. `doc_audit.py funcs`: functions over 120 lines **29 -> 28**, and the longest is now
+`arkrtos_mod_load()` (220 lines).
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine

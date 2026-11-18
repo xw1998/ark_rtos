@@ -272,53 +272,28 @@ typedef struct {
 /* 读镜像 -> 借两块 -> 打补丁 -> 校 CRC，**不注册任务**。
  * 成功时 p_img 有效且两块已借到（归还由调用者负责）；失败时不留下任何借出的块。
  * 进入时调用者必须已经占好实例项、并置了 g_mini_busy。 */
-static int32 arkrtos_mini_load_image(const char *path, uint32 max_block,
-                                     arkrtos_mini_image_t *p_img)
+/* 第一段：读镜像头与重定位表、校两次、算尺寸并借两块。
+ * 全部在调用者的调度器锁内完成；失败时不留下任何借出的块；
+ * 成功时 p_img 的块与尺寸七项已填好，入口与 CRC 由后两段补。 */
+static int32 mini_load_stage(const char *path, uint32 max_block,
+                             arkrtos_app_header_t *p_hdr,
+                             arkrtos_mini_image_t *p_img)
 {
-    arkrtos_app_header_t *p_hdr = (arkrtos_app_header_t *)(void *)g_mini_hdr;
     uint32 code_size;
     uint32 code_span;
     uint32 ram_size_hdr;
+    uint32 code_want;
+    uint32 pt_index = 0u;
     uint32 code_base = 0u;
     uint32 code_block = 0u;
-    uint32 code_want;
     uint32 ram_base = 0u;
     uint32 ram_block = 0u;
-    uint32 pt_index = 0u;
-    uint32 entry;
-    uint32 total;
-    uint32 cur;
-    uint32 crc_done;
-    uint32 idx = 0u;
-    uint32 crc = 0u;
-    uint32 delta_rom;
-    uint32 delta_ram;
-#if (ARKRTOS_MINI_YIELD_CHUNKS > 0)
-    uint32 yield_credits = 0u;      /* 装载循环里的分块计数 */
-#endif
     int32  ret;
-
-#if (ARKRTOS_MINI_READ_VFS == 1)
-    if(arkrtos_vfs_ready() == 0u)
-    {
-        return ARKRTOS_MINI_ERR_FS;
-    }
-#else
-    if(arkrtos_fs_mounted() == 0u)
-    {
-        return ARKRTOS_MINI_ERR_FS;
-    }
-#endif
-
-    /* 文件系统只有一份缓存，读镜像的整个过程不能与别的任务的读写交错：
-     * 与 SVC 层访问文件系统用同一套约定（调度器锁）。 */
-    arkrtos_sched_lock_internal();
 
     if(arkrtos_mini_read_exact(path, (uint8 *)(void *)g_mini_hdr,
                              ARKRTOS_APP_HEADER_SIZE, 0u) != 0)
     {
-        ret = ARKRTOS_MINI_ERR_FS;
-        goto unlock_out;
+        return ARKRTOS_MINI_ERR_FS;
     }
 
     /* 先只校字段：此刻重定位表还没读进来，p_rel 传 0。
@@ -327,15 +302,14 @@ static int32 arkrtos_mini_load_image(const char *path, uint32 max_block,
     ret = arkrtos_loader_check_header(p_hdr, 0, ARKRTOS_APP_TYPE_MASK_MINI);
     if(ret != 0)
     {
-        goto unlock_out;
+    return ret;
     }
 
     if(arkrtos_mini_read_exact(path, (uint8 *)(void *)g_mini_reloc,
                              p_hdr->reloc_count * ARKRTOS_APP_RELOC_SIZE,
                              ARKRTOS_APP_RELOC_OFFSET) != 0)
     {
-        ret = ARKRTOS_MINI_ERR_FS;
-        goto unlock_out;
+        return ARKRTOS_MINI_ERR_FS;
     }
 
     /* 表体到手再校一次：字段自洽不等于表合法。越界/乱序/未对齐的表会让
@@ -343,7 +317,7 @@ static int32 arkrtos_mini_load_image(const char *path, uint32 max_block,
     ret = arkrtos_loader_check_header(p_hdr, g_mini_reloc, ARKRTOS_APP_TYPE_MASK_MINI);
     if(ret != 0)
     {
-        goto unlock_out;
+    return ret;
     }
 
     code_size    = p_hdr->image_size;
@@ -356,8 +330,7 @@ static int32 arkrtos_mini_load_image(const char *path, uint32 max_block,
      * ——那时块会小于负载，后面的分段读取会写到块外。宁可在这里报 SIZE。 */
     if(code_want < code_span)
     {
-        ret = ARKRTOS_LOADER_ERR_SIZE;
-        goto unlock_out;
+        return ARKRTOS_LOADER_ERR_SIZE;
     }
 
     /* 代码块与 RAM 块各自取 2 的幂（池的分配粒度），各自超过上限就明确报错：
@@ -367,8 +340,7 @@ static int32 arkrtos_mini_load_image(const char *path, uint32 max_block,
     if((code_want > max_block) || (ram_size_hdr > max_block) ||
        (ram_size_hdr < APP_TASK_STACK_SIZE))
     {
-        ret = ARKRTOS_LOADER_ERR_SIZE;
-        goto unlock_out;
+        return ARKRTOS_LOADER_ERR_SIZE;
     }
 
     /* 两块一起借（同一把锁、同生同死）：借代码块、再借 RAM 块，任一步失败都
@@ -378,16 +350,40 @@ static int32 arkrtos_mini_load_image(const char *path, uint32 max_block,
                                &code_base, &code_block,
                                &ram_base, &ram_block) != 0)
     {
-        ret = ARKRTOS_LOADER_ERR_NOSPACE;
-        goto unlock_out;
+        return ARKRTOS_LOADER_ERR_NOSPACE;
     }
 
     /* 增量就是「运行时地址 − 标称链接地址」：负载落在代码块基址，RAM 区就是
      * RAM 块本身。两个 delta 里的 payload_offset 都已抵消——标称链接基址
      * nominal_base 就是负载自己的链接基址（pack_app 写的是 payload_link_base），
      * 而 nominal_ram_base 就是镜像链接 RW/ZI 时用的 RAM 起点。 */
-    delta_rom = code_base - p_hdr->nominal_base;
-    delta_ram = ram_base - p_hdr->nominal_ram_base;
+
+    p_img->pt_index   = pt_index;
+    p_img->code_base  = code_base;
+    p_img->code_block = code_block;
+    p_img->code_size  = code_size;
+    p_img->ram_base   = ram_base;
+    p_img->ram_block  = ram_block;
+    p_img->ram_size   = ram_size_hdr;
+    return 0;
+}
+
+/* 第二段：按块把负载读进来，边走边算标称 CRC、边打重定位补丁。
+ * 仍在调用者的调度器锁内（分块让出时会短暂放开，见循环里的说明）。 */
+static int32 mini_load_stream(const char *path, arkrtos_app_header_t *p_hdr,
+                              arkrtos_mini_image_t *p_img, uint32 *p_crc)
+{
+    uint32 delta_rom = p_img->code_base - p_hdr->nominal_base;
+    uint32 delta_ram = p_img->ram_base - p_hdr->nominal_ram_base;
+    uint32 total     = ARKRTOS_APP_TOTAL_LEN(p_hdr);
+    uint32 cur       = p_hdr->payload_offset;
+    uint32 crc_done  = cur;
+    uint32 idx       = 0u;
+    uint32 crc;
+#if (ARKRTOS_MINI_YIELD_CHUNKS > 0)
+    uint32 yield_credits = 0u;      /* 装载循环里的分块计数 */
+#endif
+
 
     crc = arkrtos_loader_crc_header(p_hdr);
     if(p_hdr->reloc_count != 0u)
@@ -395,10 +391,6 @@ static int32 arkrtos_mini_load_image(const char *path, uint32 max_block,
         crc = arkrtos_crc32((const void *)g_mini_reloc,
                           p_hdr->reloc_count * ARKRTOS_APP_RELOC_SIZE, crc);
     }
-
-    total    = ARKRTOS_APP_TOTAL_LEN(p_hdr);
-    cur      = p_hdr->payload_offset;
-    crc_done = cur;
 
     while(cur < total)
     {
@@ -414,11 +406,10 @@ static int32 arkrtos_mini_load_image(const char *path, uint32 max_block,
         /* 负载直接读进它在块里的最终位置（镜像偏移 X 的字节 = 块地址
          * code_base + (X - payload_offset)），因此没有中转缓冲。 */
         if(arkrtos_mini_read_exact(path,
-                                 (uint8 *)(void *)(code_base + (cur - p_hdr->payload_offset)),
+                                 (uint8 *)(void *)(p_img->code_base + (cur - p_hdr->payload_offset)),
                                  n, cur) != 0)
         {
-            ret = ARKRTOS_MINI_ERR_FS;
-            goto free_out;
+            return ARKRTOS_MINI_ERR_FS;
         }
 
         /* CRC 只算「标称形态」（打包工具算的那个）：一段字节刚读进来、还没打
@@ -428,13 +419,13 @@ static int32 arkrtos_mini_load_image(const char *path, uint32 max_block,
         {
             uint32 from = (cur > crc_done) ? cur : crc_done;
 
-            crc = arkrtos_crc32((const void *)(code_base + (from - p_hdr->payload_offset)),
+            crc = arkrtos_crc32((const void *)(p_img->code_base + (from - p_hdr->payload_offset)),
                               (cur + n) - from, crc);
             crc_done = cur + n;
         }
 
         /* 补丁缓冲的基点要满足「镜像偏移 X 的字节在 buf[X - buf_off]」 */
-        submit = arkrtos_loader_reloc_apply((uint8 *)(void *)(code_base + (cur - p_hdr->payload_offset)),
+        submit = arkrtos_loader_reloc_apply((uint8 *)(void *)(p_img->code_base + (cur - p_hdr->payload_offset)),
                                           cur, n, p_hdr, g_mini_reloc, &idx,
                                           delta_rom, delta_ram);
 
@@ -444,8 +435,7 @@ static int32 arkrtos_mini_load_image(const char *path, uint32 max_block,
         {
             /* 表体校验保证每条表项完整落在负载内，正常走不到这里。真到了就报错：
              * 带着"少打了一次补丁"的镜像去执行，比装载失败危险得多。 */
-            ret = ARKRTOS_LOADER_ERR_RELOC;
-            goto free_out;
+            return ARKRTOS_LOADER_ERR_RELOC;
         }
 
         /* 段尾切开了一条 8 字节指令类表项：回退到该表项起点重读一次（<= 8 字节），
@@ -469,13 +459,57 @@ static int32 arkrtos_mini_load_image(const char *path, uint32 max_block,
 #endif
     }
 
+
+    *p_crc = crc;
+    return 0;
+}
+
+/* 读镜像 -> 借两块 -> 打补丁 -> 校 CRC，**不注册任务**。
+ * 成功时 p_img 有效且两块已借到（归还由调用者负责）；失败时不留下任何借出的块。
+ * 进入时调用者必须已经占好实例项、并置了 g_mini_busy。 */
+static int32 arkrtos_mini_load_image(const char *path, uint32 max_block,
+                                     arkrtos_mini_image_t *p_img)
+{
+    arkrtos_app_header_t *p_hdr = (arkrtos_app_header_t *)(void *)g_mini_hdr;
+    uint32 entry;
+    uint32 crc = 0u;
+    int32  ret;
+
+#if (ARKRTOS_MINI_READ_VFS == 1)
+    if(arkrtos_vfs_ready() == 0u)
+    {
+        return ARKRTOS_MINI_ERR_FS;
+    }
+#else
+    if(arkrtos_fs_mounted() == 0u)
+    {
+        return ARKRTOS_MINI_ERR_FS;
+    }
+#endif
+
+    /* 文件系统只有一份缓存，读镜像的整个过程不能与别的任务的读写交错：
+     * 与 SVC 层访问文件系统用同一套约定（调度器锁）。 */
+    arkrtos_sched_lock_internal();
+
+    ret = mini_load_stage(path, max_block, p_hdr, p_img);
+    if(ret != 0)
+    {
+        goto unlock_out;
+    }
+
+    ret = mini_load_stream(path, p_hdr, p_img, &crc);
+    if(ret != 0)
+    {
+        goto free_out;
+    }
+
     if(crc != p_hdr->crc32)
     {
         ret = ARKRTOS_LOADER_ERR_CRC;
         goto free_out;
     }
 
-    entry = code_base + p_hdr->entry_offset;    /* 入口偏移是相对「负载起始」的 */
+    entry = p_img->code_base + p_hdr->entry_offset;    /* 入口偏移是相对「负载起始」的 */
     #if (ARKRTOS_ARCH_IS_ARM == 1)
     entry |= 1u;                            /* Cortex-M：Thumb 指令集标志位 */
     #endif
@@ -484,19 +518,12 @@ static int32 arkrtos_mini_load_image(const char *path, uint32 max_block,
      * 那两步都不该在锁里做。 */
     arkrtos_sched_unlock_internal();
 
-    p_img->pt_index   = pt_index;
-    p_img->code_base  = code_base;
-    p_img->code_block = code_block;
-    p_img->code_size  = code_size;
-    p_img->ram_base   = ram_base;
-    p_img->ram_block  = ram_block;
-    p_img->ram_size   = ram_size_hdr;
     p_img->entry      = entry;
     p_img->crc        = crc;
     return 0;
 
 free_out:
-    (void)arkrtos_ptable_mini_free(pt_index);     /* 两块还在我们手里，原样还回去 */
+    (void)arkrtos_ptable_mini_free(p_img->pt_index);     /* 两块还在我们手里，原样还回去 */
 unlock_out:
     arkrtos_sched_unlock_internal();
     return ret;

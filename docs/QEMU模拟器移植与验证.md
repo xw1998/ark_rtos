@@ -3984,6 +3984,49 @@ after   text 367336 / data 440 / bss 767508   sha256 b0ad6a91…   31,462,512 B
 新增代码零新增告警）。`doc_audit.py funcs`：超过 120 行的函数 **30 → 29**，
 最长换成 `arkrtos_mini_load_image()`（229 行）。
 
+#### 5.30.10 第五笔：`arkrtos_mini_load_image()` 按「阶段 / 流 / 收尾」分开（2026-11-18）
+
+`kernelsrc/src/arkrtos_mini.c` 的 `arkrtos_mini_load_image()`（229 行）实际做三件事：读镜像头与
+重定位表、按头里声明的尺寸借内存、把负载从文件流式搬进 RAM 并逐段累 CRC，最后定入口。按这三件事
+拆成两段 `static` + 一个收尾很短的入口：
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `mini_load_stage()` | 读头 → `arkrtos_loader_check_header(p_hdr, 0, MASK_MINI)` → 读重定位表 → 再校一次 → 算 `code_size` / `code_span` / `ram_size_hdr` / `code_want`、回绕自证、`max_block` 与栈下限判据 → `arkrtos_ptable_mini_alloc()`，末尾回填 `pt_index` / `code_base` / `code_block` / `code_size` / `ram_base` / `ram_block` / `ram_size` | 92 |
+| `mini_load_stream()` | `while(cur < total)` 逐段读文件、就地搬进 `p_img->code_base` / `p_img->ram_base`、累 CRC；`yield_credits` 仍在 `#if (ARKRTOS_MINI_YIELD_CHUNKS > 0)` 里，只在出参上多交一个 `*p_crc` | 93 |
+| `arkrtos_mini_load_image()` 自己 | 环境判据（`ARKRTOS_MINI_READ_VFS`）→ 加调度锁 → 调两段 → CRC 比对 → 算入口（ARM 置 Thumb 位）→ 解锁 → 回填 `entry` / `crc`；失败按阶段分别回滚 | **61**（原 229） |
+
+`payload_off` / `total` / `delta_rom` / `delta_ram` 这类「数出来才算得出」的量没有做成出参，而是在
+`mini_load_stream()` 里就地从 `p_hdr` / `p_img` 重算 —— 否则第二段要接七八个入参。`free_out` /
+`unlock_out` 只留在入口函数，两段内部一律 `return <错误码>` 上交。等价性仍用归一化行多重集比对：
+only-OLD 只剩被有意改写的语句（`ret = X; goto unlock_out;` / `goto free_out;` 共 9 条，以及挪到
+声明处的局部量），**没有语句丢失**。
+
+**这一笔抓到两个默认档根本看不见的真错**，如实记下。`ARKRTOS_USE_MINIAPP` 在所有板级头里默认是
+0，该 TU 在默认档被 `#if` 整段吃掉（`size -A build/mini_split2/kernelsrc/src/arkrtos_mini.o` 的
+`.text` 为 0），所以普通 `make` 通过什么也证明不了。用 `build/_mini_chk/arkrtos_board_config.h`
+（`#include` 板级头后 `#undef` + `#define ARKRTOS_USE_MINIAPP 1`，`-I` 排第一、配
+`-include arkrtos_board_config.h`）强制打开开关做 `-c` 编译，第一次就报 `code_base` 未声明
+（3 处）：它原来是主函数的局部量，搬进 `mini_load_stream()` 后不存在，改成 `p_img->code_base`
+（拷贝目标、CRC 段、终点判断三处）；入口里 `entry = code_base + ...` 同样改成
+`p_img->code_base + ...`。修后 `MINIAPP=1` 编译 `exit=0`、**5 条告警，与 HEAD 基线同为 5 条**、
+`nm` 见 18 个 `T` 符号（`arkrtos_mini_run` / `_info` / `_stop` / `_running` / `_forget` /
+`_on_fault` / `_on_task_exit` / `_autostart_*` 等）。
+
+读数：
+
+```
+before  text 367336 / data 440 / bss 767508   sha256 b0ad6a91…   31,462,512 B
+after   text 367336 / data 440 / bss 767508   sha256 b0ad6a91…   31,462,512 B
+```
+
+**默认档逐字节不变**，但原因不是「拆得干净」，而是 `ARKRTOS_USE_MINIAPP=0` 时这个 TU 是空目标，
+改它不可能改变默认档一个字节 —— 与 §5.30.8 的 `apppack` 同型，**不能套用 −N B 的句式**。
+`shell_check.py` 仍 `PASS`，但它不经过这条路径（默认档没有 MINIAPP 可跑），所以只能读成
+「默认档没被破坏」，**不能读成这笔拆分的行为证据**。结论档位：编译面通过（含强制开开关的 shim
+编译），**行为未验证**。`doc_audit.py funcs`：超过 120 行的函数 **29 → 28**，最长换成
+`arkrtos_mod_load()`（220 行）。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行
