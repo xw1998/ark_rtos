@@ -2342,129 +2342,162 @@ static void arkrtos_loader_claim_dev_slots(void)
 }
 #endif
 
+/* 扫描前置：只做一次，并且先把槽位表清空。
+ * 共享 RAM 掉电不清，旧记录必须先全部丢弃；但只清槽位表，不能重新种布整张
+ * 分区表 —— 它里还有 arkrtos_layout_init() 从设备端配置区得出的安装模式与
+ * 槽表，本扫描就要按它分流。
+ * 返回 0 = 之前已经扫过（本次什么也没做）；返回 1 = 本次由调用方扫，pt 已带出。 */
+static int32 loader_scan_begin(arkrtos_partition_table_t **p_pt)
+{
+    if(arkrtos_loader_scan_done != 0u)
+    {
+        return 0;
+    }
+    arkrtos_loader_scan_done = 1u;
+
+    arkrtos_ptable_clear_slots();
+    *p_pt = arkrtos_ptable_get();
+
+    arkrtos_loader_scan_apps    = 0u;
+    arkrtos_loader_scan_drivers = 0u;
+    return 1;
+}
+
+/* 这个地址是否已被裸镜像（ptable 里登记的区间）占用。占用就把下一站的地址
+ * 带出去，整段跳过 —— 裸镜像的头部内容不是镜像头，逐单位扫下去只会白扫。 */
+static int32 loader_scan_skip_raw(uint32 addr, uint32 *p_next)
+{
+    uint32 r_base = 0u;
+    uint32 r_size = 0u;
+
+    if(arkrtos_ptable_find_addr(addr, &r_base, &r_size) < 0)
+    {
+        return 0;
+    }
+    if(r_base > addr)
+    {
+        addr = r_base;
+    }
+    addr += r_size;
+    *p_next = addr;
+    return 1;
+}
+
+/* 给刚登记的槽位要点回 RAM 块。
+ * 镜像头声明的 RAM 需求必须在这里重新绑定：RAM 分配结果不落盘，重启后只能
+ * 靠镜像头重建（块基址由分配器重算，镜像内的 RAM 绝对地址在装载时就按同一个
+ * 块打过补丁，因此必须按「同样的分配顺序」重建才能对上）。由于分配顺序 =
+ * 池内地址升序，而扫描正是按地址升序进行的，重建结果与装载时一致。 */
+static void loader_scan_rebind_ram(int32 slot, const arkrtos_app_header_t *p_hdr)
+{
+    uint32 ram_base = 0u;
+    uint32 ram_size = 0u;
+    uint32 fixed = p_hdr->runtime_ram_base;
+
+    if(fixed != 0u)
+    {
+        /* 镜像里已经固定了这个块：它才是镜像内 RAM 绝对地址的基准，必须原样
+         * 要回来。要不到（越界 / 已被别人占用）就说明这台设备上的布局变了 ——
+         * 此时宁可让该镜像暂时没有 RAM 块（start 会明确报错、要求重装），也
+         * 不能换一个地址把它跑起来，那必然一执行就 MemManage。
+         * （宁可报错，不给看似权威的错答案） */
+        for(ram_size = SLOT_RAM_MIN_BLOCK;
+            ram_size < p_hdr->ram_size;
+            ram_size <<= 1u)
+        {
+            /* 取不小于 ram_size 的最小 2 的幂 */
+        }
+
+        if(arkrtos_ptable_ram_reserve(fixed, ram_size) == 0)
+        {
+            (void)arkrtos_ptable_ram_bind((uint32)slot, fixed, ram_size);
+        }
+        else
+        {
+            ARKRTOS_LOGE("LOADER", "slot %d: fixed RAM 0x%08X is not available"
+                       " any more - reinstall the image",
+                       (int)slot, (unsigned)fixed);
+        }
+    }
+    else if(arkrtos_ptable_ram_alloc(p_hdr->ram_size, &ram_base, &ram_size) == 0)
+    {
+        (void)arkrtos_ptable_ram_bind((uint32)slot, ram_base, ram_size);
+    }
+}
+
+/* 按镜像头认领一个地址。返回 1 表示这个地址归带头镜像管（*p_step 是下一站
+ * 的步长，正常是 total，异常是 1 个分配单位）；返回 0 表示这里不是镜像头，
+ * 步长由调用方按 1 个分配单位给。
+ * 不能用的带头内容（CRC 不符 / 未提交 / 重复副本）不登记，交给 reclaim 按
+ * 物理 0xFF 判定后擦除。 */
+static int32 loader_scan_accept(uint32 addr, arkrtos_partition_table_t *pt, uint32 *p_step)
+{
+    const arkrtos_app_header_t *p_hdr = (const arkrtos_app_header_t *)addr;
+    uint32 total = 0u;
+    uint32 entry = 0u;
+    uint32 autostart = 0u;
+
+    if(p_hdr->magic != ARKRTOS_APP_MAGIC)
+    {
+        return 0;
+    }
+
+    if(arkrtos_loader_accept(addr, &total, &entry, &autostart) == 0)
+    {
+        int32 slot = arkrtos_ptable_alloc(p_hdr->type, addr, total);
+
+        if(slot >= 0)
+        {
+            arkrtos_ptable_set_slot((uint32)slot, ARKRTOS_APP_SLOT_LOADED, entry, 0u);
+            /* scan 在调度启动之前单线程执行，此处直接写共享字段即可 */
+            pt->slot_autostart[slot] = autostart;
+
+            loader_scan_rebind_ram(slot, p_hdr);
+
+            if(p_hdr->type == ARKRTOS_APP_TYPE_DRIVER)
+            {
+                arkrtos_loader_scan_drivers++;
+            }
+            else
+            {
+                arkrtos_loader_scan_apps++;
+            }
+        }
+    }
+
+    *p_step = (total != 0u) ? total : ARKRTOS_POOL_ALLOC_UNIT;
+    return 1;
+}
+
+/* 池扫描：开机时把池里所有带头镜像重新登记回槽位表，再让开发槽位里的裸镜像
+ * 认领自己的区间。只扫一次（scan_done 闸门），因为槽位表只该被重建一次。 */
 static void arkrtos_loader_scan_pool(void)
 
 {
     arkrtos_partition_table_t *pt;
-    uint32 addr;
+    uint32 addr = IMAGE_POOL_BASE;
+    uint32 step;
+    uint32 next;
 
-    if(arkrtos_loader_scan_done != 0u)
+    if(loader_scan_begin(&pt) == 0)
     {
         return;
     }
-    arkrtos_loader_scan_done = 1u;
-
-    /* 扫描前清空槽位表：共享 RAM 掉电不清，旧记录必须先全部丢弃。
-     * 只清槽位表，不能重新种布整张分区表：它里
-     * 还有 arkrtos_layout_init() 从设备端配置区得出的安装模式与
-     * 槽表，本扫描就要按它分流。 */
-    arkrtos_ptable_clear_slots();
-    pt = arkrtos_ptable_get();
-
-    arkrtos_loader_scan_apps    = 0u;
-    arkrtos_loader_scan_drivers = 0u;
-
-    addr = IMAGE_POOL_BASE;
 
     while(addr < (IMAGE_POOL_BASE + IMAGE_POOL_USABLE_SIZE))
     {
-        const arkrtos_app_header_t *p_hdr = (const arkrtos_app_header_t *)addr;
-        uint32 total = 0u;
-        uint32 entry = 0u;
-        uint32 autostart = 0u;
-
         /* 已被裸镜像占用的区间：整段跳过 */
+        if(loader_scan_skip_raw(addr, &next) != 0)
         {
-            uint32 r_base = 0u;
-            uint32 r_size = 0u;
-
-            if(arkrtos_ptable_find_addr(addr, &r_base, &r_size) >= 0)
-            {
-                if(r_base > addr)
-                {
-                    addr = r_base;
-                }
-                addr += r_size;
-                continue;
-            }
-        }
-
-        if(p_hdr->magic == ARKRTOS_APP_MAGIC)
-        {
-            if(arkrtos_loader_accept(addr, &total, &entry, &autostart) == 0)
-            {
-                int32 slot = arkrtos_ptable_alloc(p_hdr->type, addr, total);
-
-                if(slot >= 0)
-                {
-                    arkrtos_ptable_set_slot((uint32)slot, ARKRTOS_APP_SLOT_LOADED, entry, 0u);
-                    /* scan 在调度启动之前单线程执行，此处直接写共享字段即可 */
-                    pt->slot_autostart[slot] = autostart;
-
-                    /* 镜像头声明的 RAM 需求要在这里重新绑定：RAM 分配结果
-                     * 不落盘，重启后必须靠镜像头重建（块基址由分配器重算，
-                     * 镜像内的 RAM 绝对地址在装载时就按同一个块打过补丁，
-                     * 因此必须按「同样的分配顺序」重建才能对上）。
-                     * 由于分配顺序 = 池内地址升序，而扫描正是按地址升序进行的，
-                     * 重建结果与装载时一致。 */
-                    {
-                        uint32 ram_base = 0u;
-                        uint32 ram_size = 0u;
-                        uint32 fixed = p_hdr->runtime_ram_base;
-
-                        if(fixed != 0u)
-                        {
-                            /* 镜像里已经固定了这个块：它才是镜像内 RAM 绝对地址
-                             * 的基准，必须原样要回来。要不到（越界 / 已被别人
-                             * 占用）就说明这台设备上的布局变了 —— 此时宁可让该
-                             * 镜像暂时没有 RAM 块（start 会明确报错、要求重装），
-                             * 也不能换一个地址把它跑起来，那必然一执行就
-                             * MemManage。（宁可报错，不给看似权威的错答案） */
-                            for(ram_size = SLOT_RAM_MIN_BLOCK;
-                                ram_size < p_hdr->ram_size;
-                                ram_size <<= 1u)
-                            {
-                                /* 取不小于 ram_size 的最小 2 的幂 */
-                            }
-
-                            if(arkrtos_ptable_ram_reserve(fixed, ram_size) == 0)
-                            {
-                                (void)arkrtos_ptable_ram_bind((uint32)slot, fixed, ram_size);
-                            }
-                            else
-                            {
-                                ARKRTOS_LOGE("LOADER", "slot %d: fixed RAM 0x%08X is not available"
-                                           " any more - reinstall the image",
-                                           (int)slot, (unsigned)fixed);
-                            }
-                        }
-                        else if(arkrtos_ptable_ram_alloc(p_hdr->ram_size, &ram_base, &ram_size) == 0)
-                        {
-                            (void)arkrtos_ptable_ram_bind((uint32)slot, ram_base, ram_size);
-                        }
-                    }
-
-                    if(p_hdr->type == ARKRTOS_APP_TYPE_DRIVER)
-                    {
-                        arkrtos_loader_scan_drivers++;
-                    }
-                    else
-                    {
-                        arkrtos_loader_scan_apps++;
-                    }
-                }
-
-                addr += total;
-                continue;
-            }
-
-            /* 不能用的带头内容（CRC 不符 / 未提交 / 重复副本）：
-             * 不登记，交给 reclaim 按物理 0xFF 判定后擦除 */
-            addr += (total != 0u) ? total : ARKRTOS_POOL_ALLOC_UNIT;
+            addr = next;
             continue;
         }
 
-        addr += ARKRTOS_POOL_ALLOC_UNIT;
+        if(loader_scan_accept(addr, pt, &step) == 0)
+        {
+            step = ARKRTOS_POOL_ALLOC_UNIT;
+        }
+        addr += step;
     }
 
     /* 带头镜像先认得，开发槽位里的裸镜像再认领。

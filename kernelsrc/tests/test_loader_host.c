@@ -134,17 +134,65 @@ int32 arkrtos_dev_write_internal(int32 handle, uint8 *pdata, int32 len)
 static arkrtos_partition_table_t g_pt;
 
 
+/* 扫描用例要的三面旗子：一段"已被裸镜像占用"的区间、RAM 块分配是否成功、
+ * 固定 RAM 块是否还留着。默认全关 —— 前面所有用例走的仍是拆分前那套桩。 */
+static int    g_scan_on       = 0;
+static uint32 g_raw_base      = 0u;
+static uint32 g_raw_size      = 0u;
+static int    g_ram_alloc_ok  = 0;
+static int    g_ram_reserve_ok = 0;
+static uint32 g_ram_reserve_fail_base = 0u;
+static uint32 g_bind_n        = 0u;
+static uint32 g_bind_base     = 0u;
+static uint32 g_bind_size     = 0u;
+
 arkrtos_partition_table_t *arkrtos_ptable_get(void) { return &g_pt; }
-void arkrtos_ptable_clear_slots(void) {}
+
+/* 真实的 clear_slots 会清空整张槽位表（开机扫描的第一件事就是丢弃共享 RAM
+ * 里掉电没清掉的旧记录）。桩也照做，否则"扫描前清表"这一步在宿主上测不出。 */
+void arkrtos_ptable_clear_slots(void)
+{
+    uint32 i;
+
+    for(i = 0u; i < (uint32)ARKRTOS_SLOT_ARRAY_MAX; i++)
+    {
+        g_pt.slot_type[i]      = 0u;
+        g_pt.slot_state[i]     = 0u;
+        g_pt.slot_base[i]      = 0u;
+        g_pt.slot_size[i]      = 0u;
+        g_pt.slot_ram_base[i]  = 0u;
+        g_pt.slot_ram_size[i]  = 0u;
+        g_pt.slot_entry[i]     = 0u;
+        g_pt.slot_task_id[i]   = 0u;
+        g_pt.slot_crash_cnt[i] = 0u;
+        g_pt.slot_autostart[i] = 0u;
+    }
+}
+
 int32 arkrtos_ptable_alloc(uint32 type, uint32 base, uint32 size)
 {
+    int32 slot = 0;
+
     if(!g_layout_on)
     {
         return -1;
     }
-    (void)type; (void)base; (void)size;
+    /* 真实的分配器总是返回下一个空槽、并把几何写进槽位表；宿主上的默认桩
+     * 固定返 0 且不记账（前面那些用例的断言就是按这个口径写的）。
+     * 扫描用例要核"登记到的是哪个地址"，只有 g_scan_on 打开时才照真分配器
+     * 的行为来：返回递增槽号并记下 base/size/type。 */
+    if(g_scan_on)
+    {
+        slot = (int32)g_alloc_n;
+        if((uint32)slot < (uint32)ARKRTOS_SLOT_ARRAY_MAX)
+        {
+            g_pt.slot_base[slot] = base;
+            g_pt.slot_size[slot] = size;
+            g_pt.slot_type[slot] = type;
+        }
+    }
     g_alloc_n++;
-    return 0;
+    return slot;
 }
 void arkrtos_ptable_free(uint32 slot) { (void)slot; g_free_n++; }
 int32 arkrtos_ptable_move(uint32 slot, uint32 new_base)
@@ -158,6 +206,13 @@ int32 arkrtos_ptable_move(uint32 slot, uint32 new_base)
 }
 int32 arkrtos_ptable_find_addr(uint32 addr, uint32 *p_base, uint32 *p_size)
 {
+    if(g_scan_on && (g_raw_size != 0u) &&
+       (addr >= g_raw_base) && (addr < (g_raw_base + g_raw_size)))
+    {
+        *p_base = g_raw_base;
+        *p_size = g_raw_size;
+        return 0;
+    }
     (void)addr; (void)p_base; (void)p_size; return -1;
 }
 int32 arkrtos_ptable_find_task(uint32 task_id) { (void)task_id; return -1; }
@@ -178,12 +233,37 @@ int32 arkrtos_ptable_get_slot(uint32 slot, uint32 *p_state, uint32 *p_entry, uin
 }
 int32 arkrtos_ptable_ram_alloc(uint32 bytes, uint32 *p_base, uint32 *p_size)
 {
-    (void)bytes; (void)p_base; (void)p_size; return -1;
+    if(!g_ram_alloc_ok)
+    {
+        (void)bytes; (void)p_base; (void)p_size; return -1;
+    }
+    *p_base = (uint32)0x20010000u;
+    *p_size = bytes;
+    return 0;
 }
-int32 arkrtos_ptable_ram_reserve(uint32 base, uint32 size) { (void)base; (void)size; return -1; }
+int32 arkrtos_ptable_ram_reserve(uint32 base, uint32 size)
+{
+    if(!g_ram_reserve_ok || (base == g_ram_reserve_fail_base))
+    {
+        (void)base; (void)size; return -1;
+    }
+    return 0;
+}
 int32 arkrtos_ptable_ram_bind(uint32 slot, uint32 base, uint32 size)
 {
-    (void)slot; (void)base; (void)size; return -1;
+    if(!g_ram_reserve_ok && !g_ram_alloc_ok)
+    {
+        (void)slot; (void)base; (void)size; return -1;
+    }
+    g_bind_n++;
+    g_bind_base = base;
+    g_bind_size = size;
+    if(slot < (uint32)ARKRTOS_SLOT_ARRAY_MAX)
+    {
+        g_pt.slot_ram_base[slot] = base;
+        g_pt.slot_ram_size[slot] = size;
+    }
+    return 0;
 }
 int32 arkrtos_ptable_ram_info(uint32 slot, uint32 *p_base, uint32 *p_size)
 {
@@ -717,8 +797,15 @@ static void test_load_buffer_e2e(void)
 /* 搬移（move_slot）：把镜像池 map 到真实绝对地址后，跑一次 compress     */
 /* ------------------------------------------------------------------ */
 
+static int g_pool_mapped = 0;
+
 static void *map_pool_at(uint32 addr, uint32 size)
 {
+    if(g_pool_mapped)
+    {
+        return (void *)(uintptr_t)addr;   /* 同一进程只能映射一次，第二次必然失败 */
+    }
+    g_pool_mapped = 1;
 #if defined(_WIN32)
     return VirtualAlloc((void *)(uintptr_t)addr, (SIZE_T)size,
                         MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
@@ -728,6 +815,138 @@ static void *map_pool_at(uint32 addr, uint32 size)
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
     return (p == MAP_FAILED) ? (void *)0 : p;
 #endif
+}
+
+/* ------------------------------------------------------------------ */
+/* 池扫描（scan_pool）：开机把池里的带头镜像重新登记回槽位表            */
+/* ------------------------------------------------------------------ */
+
+/* 把一个"合法镜像头"写进池里：只填 scan 会读的字段（magic / hw / 类型 /
+ * 尺寸 / 状态 / RAM 需求），表与负载都不需要 —— arkrtos_loader_accept() 只
+ * 校验头字段、总长与 state，不比 crc（落盘形态的 CRC 与标称形态对不上，
+ * 这是设计，见 accept 的注释）。 */
+static void scan_put_image(uint32 base, uint32 type, uint32 ram_size,
+                           uint32 fixed_ram, uint32 autostart)
+{
+    arkrtos_app_header_t h;
+
+    hdr_init(&h);
+    h.type              = type;
+    h.state             = ARKRTOS_APP_STATE_VALID;
+    h.image_size        = 64u;
+    h.ram_size          = ram_size;
+    h.runtime_ram_base  = fixed_ram;
+    h.flags             = autostart ? (uint32)ARKRTOS_APP_FLAG_AUTOSTART : 0u;
+    h.payload_offset    = ARKRTOS_APP_PAYLOAD_OFFSET(&h);
+    memcpy((void *)(uintptr_t)base, &h, sizeof(h));
+}
+
+/* 这一条覆盖拆分后的 loader_scan_begin / skip_raw / accept / rebind_ram 与
+ * 入口的循环。为什么要真映射：扫描写死按 IMAGE_POOL_BASE 线性遍历绝对地址，
+ * 宿主上不映射就是读未映射内存，只能测到 0 行。映射不上明说 SKIP。 */
+static void test_scan_pool_e2e(void)
+{
+    uint32 pool   = (uint32)IMAGE_POOL_BASE;
+    uint32 base_a = pool;                                   /* 落在裸镜像区间里 */
+    uint32 base_b = pool + (uint32)IMAGE_POOL_SECTOR;       /* 固定 RAM，要得到 */
+    uint32 base_c = base_b + (uint32)ARKRTOS_POOL_ALLOC_UNIT; /* 普通 App */
+    uint32 base_d = base_c + (uint32)ARKRTOS_POOL_ALLOC_UNIT; /* 驱动 + 固定 RAM 要不到 */
+    uint32 i;
+    uint32 hit = 0u;
+
+    if(map_pool_at(pool, (uint32)IMAGE_POOL_SIZE) == (void *)0)
+    {
+        printf("SKIP test_scan_pool_e2e: cannot map image pool at 0x%08X\n",
+               (unsigned)pool);
+        return;
+    }
+
+    memset((void *)(uintptr_t)pool, 0xFF, (size_t)IMAGE_POOL_SIZE);
+
+    scan_put_image(base_a, ARKRTOS_APP_TYPE_APP, 4096u, 0u, 0u);
+    scan_put_image(base_b, ARKRTOS_APP_TYPE_APP, 4096u, (uint32)0x20008000u, 1u);
+    scan_put_image(base_c, ARKRTOS_APP_TYPE_APP, 8192u, 0u, 0u);
+    scan_put_image(base_d, ARKRTOS_APP_TYPE_DRIVER, 4096u, (uint32)0x20009000u, 0u);
+
+    memset(&g_pt, 0, sizeof(g_pt));
+    g_pt.layout_mode = (uint32)ARKRTOS_LAYOUT_MODE_AUTO;
+    g_pt.pool_base   = pool;
+    g_pt.pool_sector = (uint32)IMAGE_POOL_SECTOR;
+    g_pt.pool_units  = (uint32)IMAGE_POOL_UNITS;
+    g_pt.pool_size   = (uint32)IMAGE_POOL_USABLE_SIZE;
+    g_pt.slot_max    = (uint32)ARKRTOS_SLOT_ARRAY_MAX;
+
+    /* 共享 RAM 里的旧记录：扫描必须先把它清掉，不能被它骗过去 */
+    g_pt.slot_state[0] = (uint32)ARKRTOS_APP_SLOT_LOADED;
+    g_pt.slot_base[0]  = 0x12340000u;
+    g_pt.slot_size[0]  = 0x400u;
+
+    /* 裸镜像区间盖住 base_a 那一个扇区；base_b/c/d 都在外面 */
+    g_scan_on        = 1;
+    g_raw_base       = pool;
+    g_raw_size       = (uint32)IMAGE_POOL_SECTOR;
+    g_layout_on      = 1;
+    g_ram_alloc_ok   = 1;
+    g_ram_reserve_ok = 1;
+    g_ram_reserve_fail_base = (uint32)0x20009000u;         /* 只让 d 的固定块要不到 */
+    g_alloc_n        = 0u;
+    g_free_n         = 0u;
+    g_bind_n         = 0u;
+
+    /* 正向：只有 b/c/d 三个被登记，a 整段跳过 */
+    CHECK(arkrtos_loader_scan() == 2u);                    /* 两个 App（b、c） */
+    CHECK(arkrtos_loader_scan_driver() == 1u);             /* 一个驱动（d） */
+    CHECK(g_alloc_n == 3u);
+
+    /* b / c / d 的落点都在，a 的落点不在（被裸镜像区间跳过） */
+    for(i = 0u; i < (uint32)ARKRTOS_SLOT_ARRAY_MAX; i++)
+    {
+        if(g_pt.slot_base[i] == pool)
+        {
+            hit |= 1u;
+        }
+        if(g_pt.slot_base[i] == base_b)
+        {
+            hit |= 2u;
+        }
+        if(g_pt.slot_base[i] == base_c)
+        {
+            hit |= 4u;
+        }
+        if(g_pt.slot_base[i] == base_d)
+        {
+            hit |= 8u;
+        }
+    }
+    CHECK((hit & 1u) == 0u);                               /* 裸镜像区间里的没登记 */
+    CHECK((hit & 2u) != 0u);
+    CHECK((hit & 4u) != 0u);
+    CHECK((hit & 8u) != 0u);
+
+    /* 三者的状态都必须是 LOADED（扫描只登记，不启动） */
+    CHECK(g_pt.slot_state[0] == (uint32)ARKRTOS_APP_SLOT_LOADED);
+    CHECK(g_pt.slot_state[1] == (uint32)ARKRTOS_APP_SLOT_LOADED);
+    CHECK(g_pt.slot_state[2] == (uint32)ARKRTOS_APP_SLOT_LOADED);
+    CHECK(g_pt.slot_autostart[0] == 1u);                   /* b 的 autostart 位 */
+
+    /* RAM 重绑：b 走固定块（要得到）、c 走分配、d 的固定块要不到 → 不绑 */
+    CHECK(g_bind_n == 2u);
+    CHECK(g_pt.slot_ram_base[0] == (uint32)0x20008000u);   /* b：固定块要得到 */
+    CHECK(g_pt.slot_ram_size[0] == 4096u);
+    CHECK(g_pt.slot_ram_base[1] == (uint32)0x20010000u);   /* c：走分配 */
+    CHECK(g_pt.slot_ram_size[1] == 8192u);
+    CHECK(g_pt.slot_ram_base[2] == 0u);                    /* d：固定块要不到 → 不绑 */
+
+    /* 闸门：扫过一次就不再扫，否则同一批镜像会被重复登记 */
+    g_alloc_n = 0u;
+    CHECK(arkrtos_loader_scan() == 2u);
+    CHECK(g_alloc_n == 0u);
+
+    g_scan_on        = 0;
+    g_ram_alloc_ok   = 0;
+    g_ram_reserve_ok = 0;
+    g_ram_reserve_fail_base = 0u;
+    g_layout_on      = 0;
 }
 
 /* arkrtos_loader_move_slot() 只能通过 arkrtos_loader_reclaim() 的压实路径到达。
@@ -843,6 +1062,7 @@ int main(void)
     test_crc_recheck();
     test_load_buffer_e2e();
 #endif
+    test_scan_pool_e2e();
     test_move_slot_e2e();
 
     printf("loader-host: %d passed, %d failed\n", g_pass, g_fail);

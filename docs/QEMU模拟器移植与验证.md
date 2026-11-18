@@ -5128,6 +5128,75 @@ QEMU 的 `utest` 里 `sem_token_flow` / `sem_reject_bad_handle` 真跑了「快�
 所以 `sem_wait_enqueue()` 与 `sem_wait_classify()` 的「登不上」「真超时」「假醒」分支在本轮**没有运行证据**，
 只有编译期正确性。
 
+#### 5.30.35 第三十笔：`arkrtos_loader_scan_pool()` 按「扫描前置 / 跳过裸镜像 / 重建 RAM 块 / 认领镜像头」拆成四段，并补上池扫描的宿主端到端用例（2026-11-18）
+
+`kernelsrc/src/arkrtos_loader.c` 的 `arkrtos_loader_scan_pool()`（134 行）是开机重建槽位表的唯一入口：
+`scan_done` 闸门 → 清空槽位表 → 按 1 个分配单位遍历池的可用区间 → 命中裸镜像登记区间就整段跳过 →
+命中镜像头就交给 `arkrtos_loader_accept()` 认领、登记槽位、写 autostart、按镜像头重建 RAM 绑定 →
+扫完若运行期允许裸镜像，再让开发槽位里的裸镜像认领自己的区间。它原来是本文件里最长的一段，
+里面还套着「固定 RAM 要不到就报错、绝不等价换址」这一条硬约束。
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `loader_scan_begin()` | `scan_done` 闸门：已扫过就返回 0；否则置位、`ptable_clear_slots()`、`ptable_get()` 带出、两个计数器清零、返回 1。只清槽位表，**不重种整张分区表** | 15 |
+| `loader_scan_skip_raw()` | 这个地址是否落在已登记的裸镜像区间里：是则把 `addr` 抬到区间尾（`r_base > addr` 时先取 `r_base`），带出下一站地址并返回 1；否则返回 0 | 17 |
+| `loader_scan_rebind_ram()` | 按镜像头重建 RAM 绑定。`runtime_ram_base != 0`：`ram_size` 向上取最小 2 的幂 → `ptable_ram_reserve` 成功才 `ram_bind`，失败打 `"fixed RAM 0x%08X is not available any more - reinstall the image"`（**不改址**）；否则 `ptable_ram_alloc` + `ram_bind` | 36 |
+| `loader_scan_accept()` | `magic` 不对返回 0；`arkrtos_loader_accept()` 通过则 `ptable_alloc` → `set_slot(LOADED)` → 写 `pt->slot_autostart[slot]` → `rebind_ram` → 按 type 计 app/driver；末尾 `*p_step = (total != 0u) ? total : ARKRTOS_POOL_ALLOC_UNIT;` 返回 1 | 38 |
+| `arkrtos_loader_scan_pool()` 自己 | 前置 → `while(addr < BASE+USABLE)`：跳过裸镜像 / 认领镜像头 / 步进 → 扫完按需 `claim_dev_slots()` | **38**（原 134） |
+
+口径四条：① 「跳过」与「认领」都用返回值表达，入口只负责步进 —— `skip_raw` 返回 1 表示
+「这个地址不管了、`next` 已算好」，`accept` 返回 0 表示「不是镜像头、按 1 个单位步进」，
+两处原来分散在循环体里的 `continue` 与三元步长都被收进 helper，循环里只剩一条主线。②
+`rebind_ram` 里那段「取不小于 `ram_size` 的最小 2 的幂」的空循环连同它的三段注释原样搬走，
+一个字没改 —— 它表达的是「固定 RAM 要按装载时同一个块要回来」，属于语义而非优化。③
+`accept` 里 `magic` 判断放在最前面并且**不推进计数器**，与原来 `if(p_hdr->magic == ARKRTOS_APP_MAGIC) { … }`
+等价；差异只是从「包住整段」改成「早退」，缩进少一层。④ 末尾的裸镜像认领仍留在入口，
+因为它不属于「一个地址」的处理，而是整轮扫描之后的第二道工序。
+
+等价性归一化比对：**only-OLD 10 行 / 9 个不同文本**，逐条可归因 —— `addr += (total != 0u) ? total : ARKRTOS_POOL_ALLOC_UNIT;`
+与 `addr += ARKRTOS_POOL_ALLOC_UNIT;`、`addr += total;` 三行（三种步长各自搬进 helper 或落成 `*p_step`）、
+`addr = IMAGE_POOL_BASE;`（改成声明处初始化）、两个 `continue;`（改成 `next` / 返回值控制）、
+`if(ptable_find_addr(...) >= 0)` 与 `if(p_hdr->magic == ARKRTOS_APP_MAGIC)`（各自变成 helper 的早退条件）、
+`pt = ptable_get();`（搬进 `loader_scan_begin`）、`uint32 addr;`（改成声明处初始化）。
+其余语句（含 `ARKRTOS_LOGE` 的两行拼接字符串、幂次循环、三个计数器）原样落在新位置。
+only-NEW 35 行（23 个不同文本）是四个签名、六组花括号、四段注释归位与入口的四处调用。
+
+体积：这一笔在 LA64 默认档 **text 与上一笔完全相同** —— `367512 → 367512`（±0 B），
+`data` 440 / `bss` 767508 / 镜像总长 31,462,512 B 全部不变；但 sha256 由 `204d38d1…` 变成
+**`dc72606e826c338e3f21506c6021cd36ca2f263ed207e6e91b5130c4b856f3ce`** ——
+**总长相同不等于字节相同**，切分改变了指令排布，这里如实报「代码字节不同、总长相同」。
+`arkrtos_loader.c` 告警 **21 = 21**，整档 `warning:` 计数 **270 = 270**。
+
+门禁：`doc_audit.py funcs` **4 → 3**（`arkrtos_loader.c` 里两笔都消失，最长变
+`arkrtos_loader_crc_recheck` 133）、`format_gate` 361 个自有文件、`sec_crc_gate` 8 pin + 4 TU 两档、
+`mq_host_gate` 108 checks、`example/qemu_loongarch64/shell_check.py` **PASS**、`ci_gate` **47 passed / 0 failed**。
+
+覆盖率这一项本轮**先是红的**：`coverage_gate` 报 `arkrtos_loader 45.15% < 基线 45.77%`。
+诊断（`cg.find_cc` + `cg.measure` 对拆分前后各编一次）显示 **执行行数 498 → 498 一行没少，分母 1088 → 1103
+多了 15 行** —— 新增的正是四个 helper 的签名与参数检查行。这与第㉒笔（`arkrtos_mq_send_internal`）
+同型，处置也同型：**不下调基线**，补真用例。`kernelsrc/tests/test_loader_host.c` 新增
+`test_scan_pool_e2e()`：把镜像池真正映射到 `IMAGE_POOL_BASE`（`map_pool_at`，Windows `VirtualAlloc` /
+POSIX `mmap MAP_FIXED`，**长度用 `IMAGE_POOL_SIZE` 而不是 `USABLE_SIZE`**），在池里摆四个位置 ——
+裸镜像区（必须不被登记）、固定 RAM 的 app、走分配的 app、固定 RAM 已被别人占用的 driver ——
+然后真调 `arkrtos_loader_scan()` 与 `arkrtos_loader_scan_driver()`。为了让这条用例能观察内部动作，
+测试桩加了四个**默认全关**的可编程开关（`g_scan_on` / `g_raw_base,size` / `g_ram_alloc_ok` /
+`g_ram_reserve_ok` / `g_ram_reserve_fail_base`），关掉时既有 88 条断言口径一字未动
+（已用 `git show HEAD:kernelsrc/tests/test_loader_host.c` 配新 loader 跑出 **88 passed / 0 failed** 交叉验证）。
+补完之后 `loader-host` 由 **88 → 107 passed，0 failed，0 SKIP**，`arkrtos_loader` 覆盖率
+**45.77% → 52.31%**（分母 1103），用 `--update` 把基线抬到实测 52.31（只抬不降；同一次
+`--update` 也把上一笔遗留的 `arkrtos_sync` 50.07 → 50.39 记进基线），十模块 `COVERAGE-GATE OK`。
+
+**结论分档：宿主用例实跑 + 编译通过 + 告警同数 + 可复现构建 + QEMU 端到端 PASS，未上板。**
+这一档要说清依据：`arkrtos_loader_scan_pool()` 的**运行证据来自宿主，不是 QEMU 也不是板子** ——
+宿主的池是内存里的假 Flash，由 `map_pool_at()` 映射到真实绝对地址后直接 `memcpy` 假镜像头，
+镜像头不带 CRC（`accept` 不比 CRC），所以「QEMU 开机扫池」这条真路径本轮**没有**新读数；
+映射不上时用例打 SKIP 而不是假装跑过。另外补用例过程中修掉两处真实缺陷：一是桩的 `ptable_alloc`
+原来无条件记槽位、导致前一个安装用例的槽位表残留让 `loader_fixed_slot_detach` 多 free 一次
+（`g_free_n` 由 1 变 2），二是同一进程对同一地址第二次 `VirtualAlloc` 必失败导致
+`test_move_slot_e2e` 被误判 SKIP —— 前者改成只在 `g_scan_on` 打开时才记账并返回递增槽号，
+后者给 `map_pool_at()` 加了「已映射就直接返回」的短路。这两条都是**用例的问题，不是被测代码的问题**，
+但把它们留在里面会让门禁时红时绿。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

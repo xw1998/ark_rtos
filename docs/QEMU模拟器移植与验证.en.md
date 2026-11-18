@@ -2948,6 +2948,86 @@ timeout form — but that case normally takes the token immediately, so the "cou
 "spurious wake" arms of `sem_wait_enqueue()` / `sem_wait_classify()` have **no runtime evidence** this round, only
 compile-time correctness.
 
+#### 5.30.35 Split #30: `arkrtos_loader_scan_pool()` split into scan prologue, raw-image skip, RAM rebind and header acceptance, plus a host end-to-end test for the pool scan (2026-11-18)
+
+`arkrtos_loader_scan_pool()` in `kernelsrc/src/arkrtos_loader.c` (134 lines) is the only entry point that
+rebuilds the slot table at boot: `scan_done` gate -> clear the slot table -> walk the pool's usable range in
+allocation units -> skip whole regions already claimed by a raw (headerless) image -> hand every real image
+header to `arkrtos_loader_accept()`, register the slot, store autostart, and rebind the RAM block from the
+header -> after the walk, if raw images are allowed at runtime, let the dev slots claim their own ranges.
+It used to be the longest function in this file, and it carried the hard constraint "a fixed RAM block that
+cannot be reserved again is an error, never silently relocated".
+
+| Function | Responsibility | Lines |
+|---|---|---|
+| `loader_scan_begin()` | The `scan_done` gate: already scanned returns 0; otherwise set it, `ptable_clear_slots()`, hand out `ptable_get()`, zero both counters, return 1. It clears slots only, **never re-seeds the whole partition table** | 15 |
+| `loader_scan_skip_raw()` | Is this address inside a region already registered to a raw image: if so raise `addr` to the region end (taking `r_base` first when `r_base > addr`), hand out the next address, return 1; otherwise 0 | 17 |
+| `loader_scan_rebind_ram()` | Rebuild the RAM binding from the header. With `runtime_ram_base != 0`: round `ram_size` up to the next power of two -> only `ram_bind` when `ptable_ram_reserve` succeeds, otherwise log `"fixed RAM 0x%08X is not available any more - reinstall the image"` (**never relocate**); otherwise `ptable_ram_alloc` + `ram_bind` | 36 |
+| `loader_scan_accept()` | Bad `magic` returns 0; otherwise `arkrtos_loader_accept()` -> `ptable_alloc` -> `set_slot(LOADED)` -> write `pt->slot_autostart[slot]` -> `rebind_ram` -> count app/driver by type; then `*p_step = (total != 0u) ? total : ARKRTOS_POOL_ALLOC_UNIT;` and return 1 | 38 |
+| `arkrtos_loader_scan_pool()` itself | Prologue -> `while(addr < BASE+USABLE)`: skip raw / accept header / step -> `claim_dev_slots()` when allowed | **38** (was 134) |
+
+Four rules of the split: (1) both "skip" and "accept" express their outcome through return values, so the
+entry only has to step -- `skip_raw` returning 1 means "this address is done, `next` is computed", `accept`
+returning 0 means "not a header, step one allocation unit"; the two `continue`s and the ternary step that
+used to live in the loop body now live in helpers. (2) The power-of-two rounding loop inside `rebind_ram`
+moved verbatim together with its three comment blocks -- it encodes "a fixed RAM block must come back as the
+same block it was at install time", which is semantics, not an optimisation. (3) The `magic` check in
+`accept` stays first and **does not advance any counter**, equivalent to the original
+`if(p_hdr->magic == ARKRTOS_APP_MAGIC) { ... }`; only the shape changed from wrapping to early-return. (4) The
+final raw-image claim stays in the entry, because it is not about one address but a second pass over the
+whole pool.
+
+Normalised-equivalence diff: **only-OLD 10 lines / 9 distinct texts**, each attributable --
+`addr += (total != 0u) ? total : ARKRTOS_POOL_ALLOC_UNIT;` plus `addr += ARKRTOS_POOL_ALLOC_UNIT;` and
+`addr += total;` (three step forms now in helpers or folded into `*p_step`), `addr = IMAGE_POOL_BASE;` (moved
+to the declaration), two `continue;` (now `next` / return-value control), `if(ptable_find_addr(...) >= 0)` and
+`if(p_hdr->magic == ARKRTOS_APP_MAGIC)` (now the helpers' early exits), `pt = ptable_get();` (moved into
+`loader_scan_begin`), and `uint32 addr;` (initialised at the declaration). Everything else -- including the
+two-line concatenated `ARKRTOS_LOGE` string, the power loop and the three counters -- sits in its new place
+unchanged. only-NEW is 35 lines (23 distinct texts): four signatures, six brace groups, four relocated
+comment blocks and four call sites in the entry.
+
+Size: in the default LA64 profile this change leaves text **exactly where it was** -- `367512 -> 367512`
+(+-0 B) -- with `data` 440 / `bss` 767508 / total image 31,462,512 B all unchanged; but sha256 moved from
+`204d38d1...` to **`dc72606e826c338e3f21506c6021cd36ca2f263ed207e6e91b5130c4b856f3ce`**.
+**Same total length is not the same bytes**: the split changes instruction layout, and this record says so
+plainly. Warnings in `arkrtos_loader.c` are **21 = 21**, the whole profile stays at **270 = 270**.
+
+Gates: `doc_audit.py funcs` **4 -> 3** (both loader splits are gone; the longest is now
+`arkrtos_loader_crc_recheck` at 133), `format_gate` 361 own files, `sec_crc_gate` 8 pin + 4 TU in two modes,
+`mq_host_gate` 108 checks, `example/qemu_loongarch64/shell_check.py` **PASS**, `ci_gate` **47 passed / 0 failed**.
+
+Coverage went **red first** this round: `coverage_gate` reported `arkrtos_loader 45.15% < baseline 45.77%`.
+Diagnosis (compiling both revisions through `cg.find_cc` + `cg.measure`) showed the **executed line count was
+498 -> 498, unchanged, while the denominator grew 1088 -> 1103 by 15 lines** -- exactly the four helper
+signatures and their parameter checks. This is the same shape as split #22 (`arkrtos_mq_send_internal`), and
+the handling is the same: **do not lower the baseline**, add real tests instead. `kernelsrc/tests/test_loader_host.c`
+gained `test_scan_pool_e2e()`: it maps the image pool at the real `IMAGE_POOL_BASE` (`map_pool_at`, Windows
+`VirtualAlloc` / POSIX `mmap MAP_FIXED`, **with `IMAGE_POOL_SIZE`, not `USABLE_SIZE`**), places four spots in
+the pool -- a raw-image region (must not be registered), an app with fixed RAM, an app that goes through
+allocation, and a driver whose fixed RAM is already taken by someone else -- and then really calls
+`arkrtos_loader_scan()` and `arkrtos_loader_scan_driver()`. To observe internal actions the test stubs gained
+four **default-off** programmable switches (`g_scan_on` / `g_raw_base,size` / `g_ram_alloc_ok` /
+`g_ram_reserve_ok` / `g_ram_reserve_fail_base`); with them off the pre-existing 88 assertions are unchanged,
+verified by running `git show HEAD:kernelsrc/tests/test_loader_host.c` against the new loader for
+**88 passed / 0 failed**. After the addition `loader-host` goes **88 -> 107 passed, 0 failed, 0 SKIP**, and
+`arkrtos_loader` coverage goes **45.77% -> 52.31%** (denominator 1103); `--update` raises the baseline to the
+measured 52.31 (raise only; the same `--update` also records the previous round's `arkrtos_sync` 50.07 -> 50.39),
+and all ten modules report `COVERAGE-GATE OK`.
+
+**Evidence tier: host tests actually executed + compiles + warnings unchanged + reproducible build + QEMU
+end-to-end PASS, not run on hardware.** The basis has to be stated: the **runtime evidence for
+`arkrtos_loader_scan_pool()` comes from the host, not QEMU and not a board** -- the host pool is fake Flash in
+memory mapped to the real absolute address, header structs are `memcpy`-ed in without CRC (`accept` does not
+compare CRC), so "QEMU scans the pool at boot" produced **no new reading** this round; when the mapping fails
+the test SKIPs instead of pretending to have run. Two real defects were fixed while adding the test, both in
+the test harness rather than the code under test: the stub's `ptable_alloc` used to book a slot
+unconditionally, leaving a stale entry from the previous install test that made `loader_fixed_slot_detach`
+free one extra block (`g_free_n` 1 -> 2); and a second `VirtualAlloc` of the same address in one process
+always fails, which made `test_move_slot_e2e` report SKIP. The first is fixed by booking (and returning an
+increasing slot index) only when `g_scan_on` is set; the second by short-circuiting `map_pool_at()` when the
+pool is already mapped.
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine
