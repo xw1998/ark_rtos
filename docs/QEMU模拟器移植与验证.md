@@ -4544,6 +4544,45 @@ only-NEW 20 行全是两个签名、`return 0;`、`*p_ret = …; return 1;`、`m
 这一笔不新增用例：`mbuf_recv_wait()` 的每条分支都要真任务表、真阻塞唤醒与真超时推进，宿主上只能堆桩；
 `utest` 与 `shell` 跑到的是它的调用点，不是分支。
 
+#### 5.30.23 第十八笔：`audit_partition()` 按「身份+Flash / 池几何 / 配置区 / RAM / 崩溃日志 / 镜像池」分六组（2026-11-18）
+
+`kernelsrc/src/arkrtos_audit.c` 的 `audit_partition()`（152 行）是一条**平铺的断言清单**：每一组
+都在查同一张分区表的另一种不变量，全部用同一个 `audit_fail(p, ARKRTOS_AUDIT_PARTITION, INDEX_NONE)`。
+平铺看不出「哪些组互不相关」也看不出「哪一组之后必须停」：
+
+| 函数 | 查什么 | 行数 |
+|---|---|---|
+| `audit_part_basic()` | `p->checks++`；身份三件（magic / version / `hw_compat_id`）不符就**返回 0** 让入口收工（表都不是这张表，后面的字段读了没意义）；Flash 里 kernel 与 pool 各自存在且在片内、两者不重叠。返回 1 表示可以继续查 | 31 |
+| `audit_part_pool()` | 池几何：扇区对齐、`pool_units` 与 `size/sector` 自洽、`reserve <= units`、`usable_size` 与 reserve 恰好扣一次、`alloc_unit` 是 2 的幂且落在 `[4, sector]` | 26 |
+| `audit_part_config()` | 配置区：要么整段缺席（两个字段都是 0），要么是片内的真区间且不与 kernel / pool 重叠 | 20 |
+| `audit_part_ram()` | RAM 三区（share / kernel / image）各自非空、在片内、两两不重叠 | 29 |
+| `audit_part_crash()` | 崩溃日志几何（落在 share RAM 尾部且 4 字节对齐）；`ARKRTOS_USE_CRASH_LOG` 打开时再比一次「宏 vs `arkrtos_crash_area_base()/size()` 与 journal 大小」 | 29 |
+| `audit_part_image()` | 镜像池形状：min/max 块都是 2 的幂、min ≤ max、总长与基址都按 min 块对齐 | 12 |
+| `audit_partition()` 自己 | 取表 → 空表即报 → 算 `flash_end`/`ram_end` → `basic()` 不通就收工 → 其余五组按原顺序调用 | **25**（原 152） |
+
+口径三条：① **唯一会改变控制流的是身份组**（原代码在这里 `return`，其余组失败只是累积 `mask`），
+所以只有 `basic()` 有返回值，`0` = 别再读了；② 六组之间**没有共享可变状态**，都只读表、只写
+`p->mask/index/checks`，顺序除了「身份先于一切」之外与原代码逐条一致；③ `p->checks++` 仍只在
+`basic()` 与 `crash()` 的 `#if` 内各一次 —— 原代码的两处自增搬到了各自的新位置，**没有多也没有少**
+（`checks` 是「真的比对过几条」的分子，位置不能随手挪）。
+
+等价性归一化比对：**only-OLD 为空**（0 行）—— 原函数里每一条语句都原样活在新位置，连缩进都没动；
+only-NEW 37 行全是六个签名、七对花括号、`return 0;` / `return 1;` 与入口的六次调用。
+这是本轮拆到现在第一笔**一个语句都没丢、也没有改名**的。
+
+体积：text `367752 → 367752`（**±0 B**，六个 helper 都单调用点，`-O2` 全部内联回去），`data` 440 /
+`bss` 767508 / 镜像总长 31,462,512 B 不变；`SOURCE_DATE_EPOCH=1600000000` 下 `BUILD=build/audit_split`
+与重建后的默认档两份 `.bin` **sha256 逐字节相同**（`ae8aee71…`）。`arkrtos_audit.c` 告警 **0 条**。
+
+门禁：`coverage-host` 10 个模块全部不低于基线（本文件不在覆盖对象里，未动基线）；`sec-crc` 8 pin 全过；
+`format_gate` 361 个自有文件干净；`example/qemu_loongarch64/shell_check.py` **PASS**。
+
+`doc_audit.py funcs`：超过 120 行的函数 **16 → 15**；最长换成 `arkrtos_loader_reserve_fixed()`（148）。
+
+**结论分档：编译通过 + 告警同数 + 两份可复现构建 sha256 相同 + only-OLD 为空 + QEMU 端到端 PASS，未上板。**
+这一笔不新增用例：六组判据全部吃真实分区表（`arkrtos_ptable_get()` 的全局表 + 板级宏），宿主上要伪造
+整张表才能让某一条断言变红，而伪造出来的「红」只证明断言写对了、不证明真实布局对。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

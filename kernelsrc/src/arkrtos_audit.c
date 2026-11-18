@@ -60,31 +60,21 @@ static void audit_fail(arkrtos_audit_result_t *p, uint32 bit, uint32 index)
 /* partition table: identity and geometry                              */
 /* ------------------------------------------------------------------ */
 
-static void audit_partition(arkrtos_audit_result_t *p)
+/* Identity and Flash geometry. A table that does not claim to be this table
+ * is not read any further -- its fields would be meaningless. Returns 0 when
+ * the table has to be abandoned, 1 when the other groups can be checked. */
+static int32 audit_part_basic(arkrtos_audit_result_t *p,
+                              const arkrtos_partition_table_t *t,
+                              uint32 flash_end)
 {
-    const arkrtos_partition_table_t *t = arkrtos_ptable_get();
-    uint32 flash_end;
-    uint32 ram_end;
-
-    if(t == 0)
-    {
-        audit_fail(p, ARKRTOS_AUDIT_PARTITION, ARKRTOS_AUDIT_INDEX_NONE);
-        return;
-    }
-
-    flash_end = CHIP_FLASH_BASE + CHIP_FLASH_SIZE;
-    ram_end   = CHIP_RAM_BASE + CHIP_RAM_SIZE;
-
     p->checks++;
 
-    /* Identity: a table that does not claim to be this table is not read
-     * any further -- its fields would be meaningless. */
     if((t->magic != ARKRTOS_PARTITION_MAGIC) ||
        (t->version != ARKRTOS_PARTITION_VERSION) ||
        (t->hw_compat_id == 0u))
     {
         audit_fail(p, ARKRTOS_AUDIT_PARTITION, ARKRTOS_AUDIT_INDEX_NONE);
-        return;
+        return 0;
     }
 
     /* Flash: kernel and pool must exist and fit in the chip. */
@@ -102,9 +92,14 @@ static void audit_partition(arkrtos_audit_result_t *p)
     {
         audit_fail(p, ARKRTOS_AUDIT_PARTITION, ARKRTOS_AUDIT_INDEX_NONE);
     }
+    return 1;
+}
 
-    /* Pool geometry: sector-aligned, self-consistent, with the reserve
-     * accounted for exactly once. */
+/* Pool geometry: sector-aligned, self-consistent, with the reserve
+ * accounted for exactly once. */
+static void audit_part_pool(arkrtos_audit_result_t *p,
+                            const arkrtos_partition_table_t *t)
+{
     if((t->pool_sector == 0u) || ((t->pool_base % t->pool_sector) != 0u) ||
        ((t->pool_size % t->pool_sector) != 0u))
     {
@@ -127,9 +122,14 @@ static void audit_partition(arkrtos_audit_result_t *p)
     {
         audit_fail(p, ARKRTOS_AUDIT_PARTITION, ARKRTOS_AUDIT_INDEX_NONE);
     }
+}
 
-    /* Device config region: either absent (both fields 0) or a real range
-     * that fits in Flash and does not sit on top of kernel or pool. */
+/* Device config region: either absent (both fields 0) or a real range
+ * that fits in Flash and does not sit on top of kernel or pool. */
+static void audit_part_config(arkrtos_audit_result_t *p,
+                              const arkrtos_partition_table_t *t,
+                              uint32 flash_end)
+{
     if((t->config_size != 0u) && (t->config_base == 0u))
     {
         audit_fail(p, ARKRTOS_AUDIT_PARTITION, ARKRTOS_AUDIT_INDEX_NONE);
@@ -145,8 +145,13 @@ static void audit_partition(arkrtos_audit_result_t *p)
     {
         audit_fail(p, ARKRTOS_AUDIT_PARTITION, ARKRTOS_AUDIT_INDEX_NONE);
     }
+}
 
-    /* RAM: three regions that must not touch, all inside the chip. */
+/* RAM: three regions that must not touch, all inside the chip. */
+static void audit_part_ram(arkrtos_audit_result_t *p,
+                           const arkrtos_partition_table_t *t,
+                           uint32 ram_end)
+{
     if((t->share_ram_size == 0u) || (t->share_ram_base < CHIP_RAM_BASE) ||
        ((t->share_ram_base + t->share_ram_size) > ram_end))
     {
@@ -171,10 +176,14 @@ static void audit_partition(arkrtos_audit_result_t *p)
     {
         audit_fail(p, ARKRTOS_AUDIT_PARTITION, ARKRTOS_AUDIT_INDEX_NONE);
     }
+}
 
-    /* Cross-reset crash journal: it sits in the tail of shared RAM, so it has
-     * to stay inside it and stay word-aligned. This statement is about the
-     * macros alone, so it holds whether or not the journal is compiled in. */
+/* Cross-reset crash journal: it sits in the tail of shared RAM, so it has
+ * to stay inside it and stay word-aligned. This statement is about the
+ * macros alone, so it holds whether or not the journal is compiled in. */
+static void audit_part_crash(arkrtos_audit_result_t *p,
+                             const arkrtos_partition_table_t *t)
+{
     if((CRASH_LOG_BASE < t->share_ram_base) ||
        ((CRASH_LOG_BASE + CRASH_LOG_SIZE) > (t->share_ram_base + t->share_ram_size)) ||
        ((CRASH_LOG_BASE % 4u) != 0u))
@@ -200,9 +209,13 @@ static void audit_partition(arkrtos_audit_result_t *p)
         audit_fail(p, ARKRTOS_AUDIT_PARTITION, ARKRTOS_AUDIT_INDEX_NONE);
     }
 #endif /* ARKRTOS_USE_CRASH_LOG */
+}
 
-    /* Image RAM pool shape: buddy allocation needs powers of two, and the
-     * pool must be able to hold at least one smallest block. */
+/* Image RAM pool shape: buddy allocation needs powers of two, and the
+ * pool must be able to hold at least one smallest block. */
+static void audit_part_image(arkrtos_audit_result_t *p,
+                             const arkrtos_partition_table_t *t)
+{
     if((audit_is_pow2(t->image_ram_min_block) == 0u) ||
        (audit_is_pow2(t->image_ram_max_block) == 0u) ||
        (t->image_ram_min_block > t->image_ram_max_block) ||
@@ -211,6 +224,32 @@ static void audit_partition(arkrtos_audit_result_t *p)
     {
         audit_fail(p, ARKRTOS_AUDIT_PARTITION, ARKRTOS_AUDIT_INDEX_NONE);
     }
+}
+
+static void audit_partition(arkrtos_audit_result_t *p)
+{
+    const arkrtos_partition_table_t *t = arkrtos_ptable_get();
+    uint32 flash_end;
+    uint32 ram_end;
+
+    if(t == 0)
+    {
+        audit_fail(p, ARKRTOS_AUDIT_PARTITION, ARKRTOS_AUDIT_INDEX_NONE);
+        return;
+    }
+
+    flash_end = CHIP_FLASH_BASE + CHIP_FLASH_SIZE;
+    ram_end   = CHIP_RAM_BASE + CHIP_RAM_SIZE;
+
+    if(audit_part_basic(p, t, flash_end) == 0)
+    {
+        return;
+    }
+    audit_part_pool(p, t);
+    audit_part_config(p, t, flash_end);
+    audit_part_ram(p, t, ram_end);
+    audit_part_crash(p, t);
+    audit_part_image(p, t);
 }
 
 /* ------------------------------------------------------------------ */

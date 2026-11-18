@@ -2271,6 +2271,53 @@ the pre-split image + QEMU end-to-end PASS; not verified on board.** No new test
 of `mbuf_recv_wait()` needs a real task table, a real blocking wake and a real timeout advance; on a host that is
 stubs. `utest` and `shell` exercise the call site, not the branches.
 
+#### 5.30.23 Eighteenth one: `audit_partition()` split into identity+Flash / pool / config / RAM / crash journal / image pool (2026-11-18)
+
+`audit_partition()` in `kernelsrc/src/arkrtos_audit.c` (152 lines) was a **flat list of assertions**: every
+group checked a different invariant of the same partition table, all reporting through the same
+`audit_fail(p, ARKRTOS_AUDIT_PARTITION, INDEX_NONE)`. Flat, it hides both "which groups are independent" and
+"after which group the function must stop":
+
+| Function | Checks | Lines |
+|---|---|---|
+| `audit_part_basic()` | `p->checks++`; the three identity fields (magic / version / `hw_compat_id`) - if any is wrong it **returns 0** so the caller stops (a table that is not this table has meaningless fields); kernel and pool both exist inside Flash and do not overlap. Returning 1 means the rest can be checked | 31 |
+| `audit_part_pool()` | pool geometry: sector alignment, `pool_units` matches `size/sector`, `reserve <= units`, `usable_size` deducts the reserve exactly once, `alloc_unit` is a power of two within `[4, sector]` | 26 |
+| `audit_part_config()` | device config region: either wholly absent (both fields 0) or a real in-Flash range that overlaps neither kernel nor pool | 20 |
+| `audit_part_ram()` | the three RAM regions (share / kernel / image): each non-empty, inside the chip, pairwise disjoint | 29 |
+| `audit_part_crash()` | crash journal geometry (tail of share RAM, word-aligned); with `ARKRTOS_USE_CRASH_LOG` on it also compares the macros against `arkrtos_crash_area_base()/size()` and the journal size | 29 |
+| `audit_part_image()` | image pool shape: min/max block are powers of two, min <= max, total size and base are both aligned to the min block | 12 |
+| `audit_partition()` itself | fetch the table -> fail on a null table -> compute `flash_end`/`ram_end` -> stop when `basic()` returns 0 -> call the other five in the original order | **25** (was 152) |
+
+Three conventions: (1) **only the identity group changes control flow** (the original `return`ed there; the
+other groups only accumulate `mask`), so only `basic()` has a return value and 0 means "stop reading";
+(2) the six groups share no mutable state - they read the table and write `p->mask/index/checks` only, and their
+order is identical to the original except that identity comes first; (3) `p->checks++` still happens exactly
+twice - once in `basic()` and once inside the `#if` of `crash()` - **no more, no fewer** (`checks` counts "how
+many comparisons really ran"; its position cannot be moved casually).
+
+Normalised equivalence check: **only-OLD is empty (0 lines)** - every statement of the original lives unchanged
+in its new place, indentation included; only-NEW's 37 lines are the six signatures, seven brace pairs,
+`return 0;` / `return 1;` and the six calls from the entry. This is the first split so far with **nothing
+dropped and nothing renamed**.
+
+Size: text `367752 -> 367752` (**+/-0 B**; all six helpers have a single call site and `-O2` inlines them back),
+`data` 440 / `bss` 767508 / image length 31,462,512 B unchanged; under `SOURCE_DATE_EPOCH=1600000000` the `.bin`
+from `BUILD=build/audit_split` and the rebuild in the default directory are **sha256-identical**
+(`ae8aee71...`). `arkrtos_audit.c` has **0** warnings.
+
+Gates: `coverage-host` keeps all 10 modules at or above baseline (this file is not a measured target, baseline
+untouched); `sec-crc` 8 pins; `format_gate` 361 own files clean; the LA64
+`example/qemu_loongarch64/shell_check.py` run **PASSES**.
+
+`doc_audit.py funcs`: functions over 120 lines **16 -> 15**; the longest is now `arkrtos_loader_reserve_fixed()`
+(148).
+
+**Evidence tier: compiles + same warning count + two reproducible builds with identical sha256 + only-OLD empty
++ QEMU end-to-end PASS; not verified on board.** No new test came with this one: all six groups read the real
+partition table (`arkrtos_ptable_get()` plus board macros); making one assertion red on a host would mean
+faking a whole table, and a faked red only proves the assertion is written correctly, not that the real layout
+is right.
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine
