@@ -4822,6 +4822,45 @@ helper 里，条件不成立时那一段连符号都不生成（无分页档 `el
 **结论分档：编译通过 + 告警同数 + 两次独立可复现构建 sha256 相同 + only-OLD 4 行逐条可归因 +
 QEMU 端到端 PASS（第二次），未上板。**
 
+#### 5.30.29 第二十四笔：`arkrtos_sync_release_task()` 按「摘等待 / 移交锁 / 收自己的对象」分五段（2026-11-18）
+
+`kernelsrc/src/arkrtos_sync.c` 的 `arkrtos_sync_release_task()`（141 行）是任务下线时的收尸：先把自己的
+appq 标记清掉，再从条件变量 / 信号量 / 互斥锁三类对象的等待表里摘掉自己，然后处理「我正持有的锁」——
+有等待者就移交给优先级最高者并唤醒，没有就释放，不持有则重算该锁主人的有效优先级；最后把自己建出来的
+对象一起带走。三段摘等待的循环**逐字相同**，中间夹着一段锁移交，读起来很容易把「摘」和「交」看成一件事：
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `sync_wipe_conds()` | 从所有 `used` 的条件变量等待表里清掉自己 | 19 |
+| `sync_wipe_sems()` | 信号量同样 | 19 |
+| `sync_wipe_mtxs()` | 先摘自己，再看自己是不是 owner：是则 `waiters_pop_highest` 移交（带 `HANDOFF` 语义、递归档把 `nest` 置 1）或直接释放（`nest` 清 0）；不是则 `mtx_recalc_priority` | 49 |
+| `sync_drop_own_sems()` | `creator_id == task_id` 的信号量整条作废（等待表清空、`used`/`name`/`count`/`creator_id` 归零） | 19 |
+| `sync_drop_own_mtxs()` | `creator_id == task_id` 的互斥锁整条作废；**优先级继承的回滚故意不做**（主人通常就是正在被拆的这个任务，它已被摘出就绪环，再去动环会把调度器搞坏） | 29 |
+| `arkrtos_sync_release_task()` 自己 | 清 appq 标记 → 取本任务槽 → 三段摘等待 → 两段收对象 | **26**（原 141） |
+
+口径三条：① **本函数仍不开关中断，调用方负责临界区**（函数头那条注释原样保留在入口）；② 三段摘等待
+仍是「清空所有命中槽」而不是「摘第一个就返回」——虽然 `waiters_add` 保证一个任务只占一个槽，但这里
+保留原来的防御性写法不动，语义零变化；③ 锁移交与释放在 `sync_wipe_mtxs()` 内部完成，`HANDOFF` 的
+`wake_reason`、递归档的 `nest`、`ready_add` 的顺序全部原样。
+
+等价性归一化比对：**only-OLD 为 0 行**（一条语句都没丢、没改名、没改缩进），only-NEW 24 行全是五个签名、
+花括号与入口的两次注释 + 五次调用。
+
+体积：这一笔**逐字节不变** —— text `367640 → 367640`（±0 B，五个 helper 全被 `-O2` 内联回去），
+`data` 440 / `bss` 767508 / 镜像总长 31,462,512 B 不变，`SOURCE_DATE_EPOCH=1600000000` 下的 `.bin`
+sha256 仍是 `1b6982cceaf26da927284bfaf3ff7fdefabbe53ba06727d3d9774f871b21b7a3`（**与拆分前同一个
+sha256**）；`arkrtos_sync.c` 告警 0 条与拆分前同数。
+
+门禁：`coverage-host` 里 `arkrtos_sync` **49.05% → 50.07%**（执行行数增加、分母基本不变，按惯例
+`--update` 抬到实测，未下调），其余 9 个模块不低于基线；`sec-crc` 8 pin 全过；`format_gate` 361 个
+自有文件干净；`doc_audit.py funcs` 超过 120 行的函数 **10 → 9**（最长换成 `arkrtos_crash_scan_apply()`
+141）；`example/qemu_loongarch64/shell_check.py` **PASS**；`ci_gate` **47 passed / 0 failed**。
+
+**结论分档：编译通过 + 告警同数 + 可复现构建 sha256 与拆分前相同 + only-OLD 为空 + QEMU 端到端 PASS，
+未上板。** 收尸路径本身没有新增运行读数：要走通它需要真任务退出 + 真等待者队列（`sync-host` 那套
+宿主用例只覆盖加锁/等信号量，不驱动任务下线收尸），所以「谁被移交到锁」这类结论仍只有上板或专门的
+宿主夹具才能证明，本轮不声称。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

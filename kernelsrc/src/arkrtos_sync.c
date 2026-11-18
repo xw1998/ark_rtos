@@ -498,23 +498,10 @@ static void arkrtos_waiters_wake_all(arkrtos_task_t **waiters, int32 reason)
  * 若它正持有某把互斥锁，则把锁移交给等待者中优先级最高者并唤醒它，
  * 没有等待者则直接释放。
  * 调用方需自行保证临界区（本函数不开关中断）。 */
-void arkrtos_sync_release_task(int32 task_id)
+/* 从条件变量的等待表里摘掉这个任务。 */
+static void sync_wipe_conds(arkrtos_task_t *p_tsk)
 {
-    arkrtos_task_t *p_tsk;
     int32 i, j;
-
-    /* A dead task can never come back to poll: the marker has to go with it,
-     * or posters keep skipping a slot nobody will ever serve again. */
-    arkrtos_appq_set(&arkrtos_task_table[task_id - 1], 0u);
-
-    /* -Wall caught a real one here: p_tsk was declared and never
-     * assigned, so the cond / sem / mtx sweeps below compared every
-     * waiter against a garbage pointer (undefined behaviour, and in
-     * practice the dead task was never removed from any waiting queue,
-     * and a mutex it owned was never handed over). It is this task's
-     * slot, and the appq_set above already assumes task_id is valid. */
-    p_tsk = &arkrtos_task_table[task_id - 1];
-
 
     for(i = 0; i < ARKRTOS_COND_NUM; i++)
     {
@@ -530,6 +517,12 @@ void arkrtos_sync_release_task(int32 task_id)
             }
         }
     }
+}
+
+/* 从信号量的等待表里摘掉这个任务。 */
+static void sync_wipe_sems(arkrtos_task_t *p_tsk)
+{
+    int32 i, j;
 
     for(i = 0; i < ARKRTOS_SEM_NUM; i++)
     {
@@ -545,6 +538,14 @@ void arkrtos_sync_release_task(int32 task_id)
             }
         }
     }
+}
+
+/* 从互斥锁的等待表里摘掉这个任务；若它正持有某把锁，就把锁移交给
+ * 等待者里优先级最高者并唤醒它，没有等待者则直接释放；不持有则
+ * 只是重算该锁主人的有效优先级（它可能刚少了一个等待者）。 */
+static void sync_wipe_mtxs(arkrtos_task_t *p_tsk)
+{
+    int32 i, j;
 
     for(i = 0; i < ARKRTOS_MTX_NUM; i++)
     {
@@ -590,15 +591,15 @@ void arkrtos_sync_release_task(int32 task_id)
             arkrtos_mtx_recalc_priority(i);
         }
     }
+}
 
-    /* Objects the dead task created go away with it. Without this an App
-     * that creates a mutex (or semaphore) per run leaves it used forever,
-     * and a handful of start / stop cycles exhausts the table so the next
-     * start cannot create anything. Objects created by the kernel carry
-     * id 0 and are left alone. Waiters are only detached, never re-queued:
-     * this runs while tasks are being torn down, and putting a task back
-     * on the ready ring from here would fight the teardown itself. The
-     * tasks that could wait on an App object are that App's own. */
+/* 这个任务建出来的信号量随它一起消失（内核自建的 id 为 0，不动）。
+ * 等待者只摘除、绝不重排：本函数运行在任务正被拆掉的时候，从这里把
+ * 任务放回就绪环会和拆解本身打架。 */
+static void sync_drop_own_sems(int32 task_id)
+{
+    int32 i, j;
+
     for(i = 0; i < ARKRTOS_SEM_NUM; i++)
     {
         if((arkrtos_sems[i].used != 0) && (arkrtos_sems[i].creator_id == task_id))
@@ -613,6 +614,14 @@ void arkrtos_sync_release_task(int32 task_id)
             arkrtos_sems[i].creator_id = 0;
         }
     }
+}
+
+/* 这个任务建出来的互斥锁同理。锁直接丢掉，优先级继承的回滚**故意不做**：
+ * 主人通常就是正在被拆掉的那个任务，它已经被从就绪环里摘走了，再去动
+ * 它的就绪环只会把调度器搞坏。 */
+static void sync_drop_own_mtxs(int32 task_id)
+{
+    int32 i, j;
 
     for(i = 0; i < ARKRTOS_MTX_NUM; i++)
     {
@@ -638,6 +647,33 @@ void arkrtos_sync_release_task(int32 task_id)
             arkrtos_mtxs[i].creator_id = 0;
         }
     }
+}
+
+void arkrtos_sync_release_task(int32 task_id)
+{
+    arkrtos_task_t *p_tsk;
+
+    /* A dead task can never come back to poll: the marker has to go with it,
+     * or posters keep skipping a slot nobody will ever serve again. */
+    arkrtos_appq_set(&arkrtos_task_table[task_id - 1], 0u);
+
+    /* -Wall caught a real one here: p_tsk was declared and never
+     * assigned, so the cond / sem / mtx sweeps below compared every
+     * waiter against a garbage pointer (undefined behaviour, and in
+     * practice the dead task was never removed from any waiting queue,
+     * and a mutex it owned was never handed over). It is this task's
+     * slot, and the appq_set above already assumes task_id is valid. */
+    p_tsk = &arkrtos_task_table[task_id - 1];
+
+    /* 一、从三类同步对象的等待表里摘掉自己；互斥锁还要移交或释放。 */
+    sync_wipe_conds(p_tsk);
+    sync_wipe_sems(p_tsk);
+    sync_wipe_mtxs(p_tsk);
+
+    /* 二、自己建的对象随自己一起消失，否则 App 每跑一次漏一个，
+     * 跑几轮就把表耗尽、下一次再也建不出来。 */
+    sync_drop_own_sems(task_id);
+    sync_drop_own_mtxs(task_id);
 }
 
 /* ============================================================

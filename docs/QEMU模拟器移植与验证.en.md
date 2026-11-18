@@ -2593,6 +2593,52 @@ still open under the §5.13.4 debt and was not touched this round.
 **Verdict class: compiles + same warning count + two independent reproducible builds with the same sha256 +
 only-OLD 4 lines all attributable + QEMU end-to-end PASS (second run), never run on hardware.**
 
+#### 5.30.29 Twenty-fourth one: `arkrtos_sync_release_task()` split into detach-waiters / hand-over-lock / drop-own-objects (2026-11-18)
+
+`arkrtos_sync_release_task()` in `kernelsrc/src/arkrtos_sync.c` (141 lines) is the reaper for a task going
+offline: clear its appq marker, detach it from the waiter tables of conditions, semaphores and mutexes, then
+handle "the lock I am holding" -- hand it to the highest-priority waiter and wake it, release it when there is
+none, or recompute the lock owner's effective priority when the dead task is not the owner; finally take the
+objects it created with it. The three detach loops are **verbatim copies of one another**, with a lock
+hand-over wedged in the middle, which makes "detach" and "hand over" easy to read as one thing:
+
+| Function | What it owns | Lines |
+|---|---|---|
+| `sync_wipe_conds()` | clear this task out of every used condition's waiter table | 19 |
+| `sync_wipe_sems()` | the same for semaphores | 19 |
+| `sync_wipe_mtxs()` | detach first, then check ownership: as owner, `waiters_pop_highest` hands the lock over (with `HANDOFF` semantics and `nest` set to 1 in the recursive profile) or releases it (`nest` cleared); otherwise `mtx_recalc_priority` | 49 |
+| `sync_drop_own_sems()` | every semaphore with `creator_id == task_id` is dropped whole (waiters cleared, `used`/`name`/`count`/`creator_id` zeroed) | 19 |
+| `sync_drop_own_mtxs()` | the same for mutexes; the **priority-inheritance rollback is deliberately not run** (the owner is usually the very task being torn down, already off the ready ring, and touching the ring for it again corrupts the scheduler) | 29 |
+| `arkrtos_sync_release_task()` itself | clear the appq marker -> take this task's slot -> three detach calls -> two drop calls | **26** (was 141) |
+
+Three rules: (1) **the function still does not touch interrupts; the caller owns the critical section** (the
+original header comment stays at the entry point); (2) the three detach loops still clear **every** matching
+slot instead of returning after the first hit -- `waiters_add` guarantees one slot per task, but the
+defensive form is kept unchanged, so the semantics are identical; (3) the hand-over and the release both
+happen inside `sync_wipe_mtxs()`, with the `wake_reason` of `HANDOFF`, the recursive-profile `nest` and the
+ordering of `ready_add` all preserved.
+
+Normalised equivalence: **only-OLD is 0 lines** (not a single statement was dropped, renamed or re-indented),
+only-NEW is 24 lines of five signatures, braces and the entry point's two comments plus five calls.
+
+Size: this one is **byte-identical** -- text `367640 -> 367640` (+-0 B, all five helpers inlined back by
+`-O2`), `data` 440 / `bss` 767508 / image total 31,462,512 B unchanged, and the `.bin` sha256 under
+`SOURCE_DATE_EPOCH=1600000000` is still
+`1b6982cceaf26da927284bfaf3ff7fdefabbe53ba06727d3d9774f871b21b7a3` (**the same hash as before the split**);
+`arkrtos_sync.c` warnings 0 = 0 before the split.
+
+Gates: `coverage-host` shows `arkrtos_sync` at **49.05% -> 50.07%** (more executed lines, denominator almost
+unchanged; raised to the measured value with `--update` as usual, never lowered) with the other nine modules
+at or above baseline; `sec-crc` 8 pins; `format_gate` 361 own files clean; `doc_audit.py funcs` functions
+over 120 lines **10 -> 9** (the longest is now `arkrtos_crash_scan_apply()` at 141); `shell_check.py`
+**PASS**; `ci_gate` **47 passed / 0 failed**.
+
+**Verdict class: compiles + same warning count + reproducible build with the same sha256 as before the split
++ only-OLD empty + QEMU end-to-end PASS, never run on hardware.** The reaping path itself gained no runtime
+reading: exercising it needs a real task exit plus real waiter queues (the `sync-host` suite only covers
+lock / semaphore waits and does not drive task teardown), so conclusions such as "who the lock was handed
+to" still need hardware or a dedicated host fixture and are not claimed here.
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine
