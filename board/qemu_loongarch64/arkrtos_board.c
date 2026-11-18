@@ -7,6 +7,10 @@
 *          3) 提供 Flash / 看门狗的空桩 —— 注意是「明确返回失败」的空桩，
 *             不是假装成功的桩：QEMU 上没有片内 Flash，也没有 IWDG，
 *             声称擦写成功会让上层以为它真写进去了。
+*             唯一的例外是**镜像池那一段**：它用 RAM 模拟 Flash（擦除写
+*             0xFF、编程按字节覆盖，见下面的 arkrtos_qemu_pool_*），因为
+*             池内安装这条路要真跑才能验证；池以外（内核代码区、配置区）
+*             仍然一律明确失败。
 *
 * @note 异常入口（EENTRY）与 CRMD.IE 的配置留在 port 层的默认实现里：
 *       它是 LoongArch 架构的固定动作，不是板级知识。
@@ -121,6 +125,96 @@ void arkrtos_board_puthex(uint32 value)
 }
 
 /* ============================================================
+ * 镜像池的 Flash 模拟（只覆盖池那一段）
+ * @details 本板的 "Flash"（CHIP_FLASH_BASE 起 1 MB）与 DRAM 是同一片内存
+ *          的两段，QEMU 按普通 RAM 映射。真 Flash 空白态是 0xFF，DRAM 上电
+ *          是 0x00 —— 差这一条，装载器的 find_clean（只认 0xFF 连续段）在
+ *          模拟器上永远找不到已擦除空间，池内安装恒为 ERR_NOSPACE，于是
+ *          「安装 → 落盘形态 → 开机 CRC 复核」这条链路一次都没在 QEMU 上
+ *          真跑过（只有 RAM 里的等价构造能测）。
+ *
+ *          语义边界（写清楚是为了别被读成「QEMU 有 Flash 了」）：
+ *          ① 只有 [IMAGE_POOL_BASE, IMAGE_POOL_END) 可擦可写，池以外一律
+ *             返回 -1 —— 内核正在代码区跑，允许写等于允许自己改坏自己。
+ *          ② 擦除不做「必须先擦后写」的位检查：真 Flash 把 0 写回 1 会失败，
+ *             这里不模拟这一点（上层自己按擦—写顺序调用）。
+ *          ③ RAM 不保持：每次复位都会把整池重新擦成 0xFF，所以「复位后镜像
+ *             还在不在」只有真机才验证得到。
+ * ============================================================ */
+#define QEMU_POOL_FLASH_BEGIN   (IMAGE_POOL_BASE)
+#define QEMU_POOL_FLASH_END     (IMAGE_POOL_END)
+
+/* 区间校验：0 = 落在池内且不越界/不回绕 */
+static int32 arkrtos_qemu_pool_range(uint32 addr, uint32 size)
+{
+    if(size == 0u)
+    {
+        return -1;
+    }
+    if(addr < QEMU_POOL_FLASH_BEGIN)
+    {
+        return -1;
+    }
+    if((addr + size) < addr)                  /* 32 位回绕 */
+    {
+        return -1;
+    }
+    if((addr + size) > QEMU_POOL_FLASH_END)
+    {
+        return -1;
+    }
+    return 0;
+}
+
+int32 arkrtos_port_flash_erase(uint32 addr, uint32 size)
+{
+    volatile uint8 *p = (volatile uint8 *)(unsigned long)addr;
+    uint32 i;
+
+    if(arkrtos_qemu_pool_range(addr, size) != 0)
+    {
+        return -1;
+    }
+
+    for(i = 0u; i < size; i++)
+    {
+        p[i] = 0xFFu;
+    }
+    return 0;
+}
+
+int32 arkrtos_port_flash_write(uint32 addr, const uint8 *data, uint32 len)
+{
+    volatile uint8 *p = (volatile uint8 *)(unsigned long)addr;
+    uint32 i;
+
+    if(data == 0)
+    {
+        return -1;
+    }
+    if(arkrtos_qemu_pool_range(addr, len) != 0)
+    {
+        return -1;
+    }
+
+    for(i = 0u; i < len; i++)
+    {
+        p[i] = data[i];
+    }
+    return 0;
+}
+
+/* 池的物理擦除单位（与分区头的 IMAGE_POOL_SECTOR 同源），池外报 0（无扇区） */
+uint32 arkrtos_port_flash_sector_size(uint32 addr)
+{
+    if((addr >= QEMU_POOL_FLASH_BEGIN) && (addr < QEMU_POOL_FLASH_END))
+    {
+        return (uint32)IMAGE_POOL_SECTOR;
+    }
+    return 0u;
+}
+
+/* ============================================================
  * 板级初始化（覆盖 port 层的弱实现）
  * ============================================================ */
 void arkrtos_port_board_init(void)
@@ -137,6 +231,13 @@ void arkrtos_port_board_init(void)
     arkrtos_board_puts("Hz rdtime=");
     arkrtos_board_putu(ARKRTOS_PORT_RDTIME_HZ);
     arkrtos_board_puts("Hz\n");
+
+    /* 镜像池上电态：擦成 0xFF。真 Flash 空白就是 0xFF，而 QEMU 这片 DRAM
+     * 上电是 0x00 —— 不抹一次，池内安装在模拟器上永远找不到「干净空间」。
+     * 每次复位都重来（RAM 不保持），这是本板口径的一部分，不是缺陷。 */
+    (void)arkrtos_port_flash_erase((uint32)QEMU_POOL_FLASH_BEGIN,
+                                   (uint32)(QEMU_POOL_FLASH_END -
+                                            QEMU_POOL_FLASH_BEGIN));
 
     /* 追踪组件与板子一起起来，而不是等谁敲一条 shell 命令：复位之后那一段
      * 恰恰是「复现不了」的那一段。环是静态的（QEMU 目标用 BUFF 后端，环在

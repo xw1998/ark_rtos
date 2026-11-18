@@ -53,6 +53,12 @@
 #include "arkrtos_loader.h"
 #endif
 
+#if (ARKRTOS_USE_IMAGE_CRC_RECHECK == 1)
+#include "arkrtos_app_image.h"    /* 容器格式 + arkrtos_crc32 */
+#include "arkrtos_loader.h"       /* arkrtos_loader_crc_recheck / reloc_apply */
+#include "arkrtos_sec.h"          /* 池内端到端用例要跑一遍 sec 自检 */
+#endif
+
 /* ============================================================
  * 固定块内存池
  * ============================================================ */
@@ -1019,5 +1025,295 @@ UTEST_CASE(sign_hmac_and_loader_gate)
 }
 
 #endif /* ARKRTOS_USE_IMAGE_SIGN */
+
+
+/* ============================================================
+ * 开机复核镜像 CRC（SEC-G17）：把「落盘形态」反算回标称形态
+ * 覆盖：打过重定位补丁的字节能被反算回去并通过校验；负载翻一个字节必须
+ *       变成 ERR_CRC（不是 PASS，也不是"算不出来"）；runtime_ram_base
+ *       还没固化时必须报 ERR_PARAM——那是"算不出来"，不能算成 PASS。
+ * 不覆盖：真 Flash 上的电离位翻转（这里在 RAM 里造等价形态）。
+ *
+ * 两个前提写死在这里，免得后来的读者误读：
+ *   ① 这个函数只对「已经装了」的形态成立。它总是把 delta 减掉，所以拿一份
+ *      没装过的标称镜像去调它，等于把 delta 多减一次——那不是 bug，是它的
+ *      语义（"Flash 上躺的是打过补丁的字节"）。
+ *   ② 因此用例必须先 install 再判，并且**断言 install 真的改了字节**：
+ *      否则 delta 一旦意外为 0，这条用例就会变成"恒真"的假绿。
+ * ============================================================ */
+#if (ARKRTOS_USE_IMAGE_CRC_RECHECK == 1)
+
+#define CRCRC_TEST_PAYLOAD   (64u)
+#define CRCRC_TEST_RECNT     (2u)
+#define CRCRC_TEST_BASE      (0x80300000u)
+#define CRCRC_TEST_NOM_RAM   (0x80400000u)
+#define CRCRC_TEST_RT_RAM    (0x80400200u)
+#define CRCRC_TEST_PAYOFF    (ARKRTOS_APP_HEADER_SIZE + CRCRC_TEST_RECNT * \
+                              ARKRTOS_APP_RELOC_SIZE)
+#define CRCRC_TEST_IMGLEN    (CRCRC_TEST_PAYOFF + CRCRC_TEST_PAYLOAD)
+
+/* 按字声明：头里有 uint32 字段，用 uint8 数组再强转不保证 4 字节对齐，
+ * LA64/ARM 开了 strict-align 就会在第一次解引用时直接异常。 */
+static uint32 s_crcrc_words[(CRCRC_TEST_IMGLEN + 3u) / 4u];
+#define s_crcrc_img ((uint8 *)s_crcrc_words)
+
+/* 按打包工具的公式封口：头（三字段按 0）+ 重定位表 + 负载。
+ * 签名写进头之后必须再调一次——签名在头里，头参与 CRC。 */
+static void utest_crcrc_seal(arkrtos_app_header_t *h)
+{
+    uint32 c;
+
+    c = arkrtos_loader_crc_header(h);
+    c = arkrtos_crc32(s_crcrc_img + ARKRTOS_APP_RELOC_OFFSET,
+                      CRCRC_TEST_RECNT * ARKRTOS_APP_RELOC_SIZE, c);
+    c = arkrtos_crc32(s_crcrc_img + CRCRC_TEST_PAYOFF, CRCRC_TEST_PAYLOAD, c);
+    h->crc32 = c;
+}
+
+/* 构造一份标称形态镜像并算好 crc32。
+ * zero_delta=1 时把两个标称基址设成「落点恰好等于标称基址」，
+ * 用于验证"反算量退化为 0"时函数也自洽（那时标称形态与落盘形态相同）。 */
+static arkrtos_app_header_t *utest_crcrc_build(int zero_delta)
+{
+    arkrtos_app_header_t *h = (arkrtos_app_header_t *)s_crcrc_img;
+    uint32 *p_rel = (uint32 *)(s_crcrc_img + ARKRTOS_APP_RELOC_OFFSET);
+    uint32 *p_pay = (uint32 *)(s_crcrc_img + CRCRC_TEST_PAYOFF);
+    uint32 i;
+
+    for(i = 0u; i < ((CRCRC_TEST_IMGLEN + 3u) / 4u); i++)
+    {
+        s_crcrc_words[i] = 0u;
+    }
+
+    h->magic          = ARKRTOS_APP_MAGIC;
+    h->type           = ARKRTOS_APP_TYPE_DRIVER;
+    h->hw_compat_id   = ARKRTOS_HW_COMPAT_ID;
+    h->image_size     = CRCRC_TEST_PAYLOAD;
+    h->entry_offset   = 0u;
+    h->reloc_offset   = ARKRTOS_APP_RELOC_OFFSET;
+    h->reloc_count    = CRCRC_TEST_RECNT;
+    h->reloc_kind     = ARKRTOS_APP_RELOC_KIND_CUR;
+    h->payload_offset = CRCRC_TEST_PAYOFF;
+    h->ram_size       = 1024u;
+
+    /* ROM 增量 = (落点 + payload_offset) - nominal_base，
+     * RAM 增量 = runtime_ram_base - nominal_ram_base */
+    h->nominal_base     = zero_delta ? (CRCRC_TEST_BASE + CRCRC_TEST_PAYOFF)
+                                     : CRCRC_TEST_BASE;
+    h->nominal_ram_base = zero_delta ? CRCRC_TEST_RT_RAM : CRCRC_TEST_NOM_RAM;
+    h->runtime_ram_base = CRCRC_TEST_RT_RAM;
+
+    /* 一条 ROM 类、一条 RAM 类：两类增量不同，只测其中一类就分不出
+     * 「两个 delta 有没有串用」。 */
+    p_rel[0] = ARKRTOS_APP_RELOC_ENTRY(CRCRC_TEST_PAYOFF, ARKRTOS_APP_RELOC_KIND_ROM);
+    p_rel[1] = ARKRTOS_APP_RELOC_ENTRY(CRCRC_TEST_PAYOFF + 4u, ARKRTOS_APP_RELOC_KIND_RAM);
+
+    /* 标称形态里这两个字装的是**链接期地址**，安装时会被加上 delta。 */
+    p_pay[0] = 0x80001000u;
+    p_pay[1] = 0x80400040u;
+    for(i = 2u; i < (CRCRC_TEST_PAYLOAD / 4u); i++)
+    {
+        p_pay[i] = 0xA5A50000u + i;
+    }
+
+    utest_crcrc_seal(h);
+
+    return h;
+}
+
+/* 把标称形态变成「落盘形态」：与安装期完全相同的两个增量公式。 */
+static void utest_crcrc_install(arkrtos_app_header_t *h)
+{
+    uint32 *p_rel = (uint32 *)(s_crcrc_img + ARKRTOS_APP_RELOC_OFFSET);
+    uint32 idx = 0u;
+    uint32 delta_rom = (CRCRC_TEST_BASE + CRCRC_TEST_PAYOFF) - h->nominal_base;
+    uint32 delta_ram = h->runtime_ram_base - h->nominal_ram_base;
+
+    (void)arkrtos_loader_reloc_apply(s_crcrc_img + CRCRC_TEST_PAYOFF,
+                                     CRCRC_TEST_PAYOFF, CRCRC_TEST_PAYLOAD,
+                                     h, p_rel, &idx, delta_rom, delta_ram);
+}
+
+UTEST_CASE(loader_crc_recheck_relocated)
+{
+    arkrtos_app_header_t *h = utest_crcrc_build(0);
+    uint32 *p_pay = (uint32 *)(s_crcrc_img + CRCRC_TEST_PAYOFF);
+    uint32 nominal_crc = h->crc32;
+    uint32 word0_before = p_pay[0];
+    uint32 word1_before = p_pay[1];
+    uint32 got = 0u;
+    int32 rc;
+
+    /* 先证明这份镜像真的处在"落盘形态"：两个类别的字各被加上了不同的增量。
+     * 少了这一步，delta 意外为 0 时整条用例会静默变成恒真。 */
+    utest_crcrc_install(h);
+    UTEST_CHECK(p_pay[0] != word0_before);
+    UTEST_CHECK(p_pay[1] != word1_before);
+    UTEST_CHECK_EQ((long)(p_pay[0] - word0_before), (long)CRCRC_TEST_PAYOFF);
+    UTEST_CHECK_EQ((long)(p_pay[1] - word1_before),
+                   (long)(CRCRC_TEST_RT_RAM - CRCRC_TEST_NOM_RAM));
+
+    /* 主角：落盘形态（打过补丁）必须能反算回标称形态并判 0。 */
+    rc = arkrtos_loader_crc_recheck(s_crcrc_img, CRCRC_TEST_BASE,
+                                    CRCRC_TEST_IMGLEN, &got);
+    UTEST_CHECK_EQ((long)rc, 0L);
+    UTEST_CHECK_EQ((long)got, (long)nominal_crc);
+
+    /* 负对照①：翻一个**表项覆盖不到**的负载字节 ⇒ ERR_CRC。 */
+    s_crcrc_img[CRCRC_TEST_PAYOFF + 8u] ^= 0x01u;
+    rc = arkrtos_loader_crc_recheck(s_crcrc_img, CRCRC_TEST_BASE,
+                                    CRCRC_TEST_IMGLEN, &got);
+    UTEST_CHECK_EQ((long)rc, (long)ARKRTOS_LOADER_ERR_CRC);
+    s_crcrc_img[CRCRC_TEST_PAYOFF + 8u] ^= 0x01u;
+
+    /* 负对照②：翻一个**表项覆盖**的字（反算要对它做减法）。
+     * 这一条才真正证明"反算"参与校验，而不是恰好把这段跳过了。 */
+    s_crcrc_img[CRCRC_TEST_PAYOFF + 1u] ^= 0x01u;
+    rc = arkrtos_loader_crc_recheck(s_crcrc_img, CRCRC_TEST_BASE,
+                                    CRCRC_TEST_IMGLEN, &got);
+    UTEST_CHECK_EQ((long)rc, (long)ARKRTOS_LOADER_ERR_CRC);
+    s_crcrc_img[CRCRC_TEST_PAYOFF + 1u] ^= 0x01u;
+
+    /* 负对照③：容量给少了 ⇒ 是"看不全"，必须单独一种失败码，
+     * 不能悄悄只算前一段然后报 PASS。 */
+    UTEST_CHECK_EQ((long)arkrtos_loader_crc_recheck(s_crcrc_img, CRCRC_TEST_BASE,
+                                                   CRCRC_TEST_IMGLEN - 4u, &got),
+                   (long)ARKRTOS_LOADER_ERR_SIZE);
+
+    /* 收尾：改回来之后必须重新判 0（证明上面的翻位都真的复原了） */
+    UTEST_CHECK_EQ((long)arkrtos_loader_crc_recheck(s_crcrc_img, CRCRC_TEST_BASE,
+                                                   CRCRC_TEST_IMGLEN, &got), 0L);
+}
+
+UTEST_CASE(loader_crc_recheck_zero_delta)
+{
+    arkrtos_app_header_t *h = utest_crcrc_build(1);
+    uint32 *p_pay = (uint32 *)(s_crcrc_img + CRCRC_TEST_PAYOFF);
+    uint32 word0_before = p_pay[0];
+    uint32 word1_before = p_pay[1];
+    uint32 got = 0u;
+
+    /* 落点恰好等于标称基址：两个增量都是 0，标称形态与落盘形态相同。
+     * 这是**巧合成立**的那一条路径，函数也必须给出 PASS。 */
+    utest_crcrc_install(h);
+    UTEST_CHECK_EQ((long)p_pay[0], (long)word0_before);
+    UTEST_CHECK_EQ((long)p_pay[1], (long)word1_before);
+    UTEST_CHECK_EQ((long)arkrtos_loader_crc_recheck(s_crcrc_img, CRCRC_TEST_BASE,
+                                                   CRCRC_TEST_IMGLEN, &got), 0L);
+    UTEST_CHECK_EQ((long)got, (long)h->crc32);
+
+    /* 反面对照：把落点往后再挪一个字（增量不再为 0），同一份字节立刻不再是
+     * 标称形态 ⇒ 必须判 ERR_CRC。若这里仍然 PASS，说明 delta 根本没参与运算。 */
+    UTEST_CHECK_EQ((long)arkrtos_loader_crc_recheck(s_crcrc_img, CRCRC_TEST_BASE + 4u,
+                                                   CRCRC_TEST_IMGLEN, &got),
+                   (long)ARKRTOS_LOADER_ERR_CRC);
+}
+
+UTEST_CASE(loader_crc_recheck_unknown_ram_base)
+{
+    arkrtos_app_header_t *h = utest_crcrc_build(0);
+
+    utest_crcrc_install(h);
+
+    /* runtime_ram_base 还没固化（打包/传输中的形态）：RAM 类增量算不出来。
+     * 这时必须报 ERR_PARAM（"算不出来"），绝不能因为 ROM 类还能算就报 PASS——
+     * 那正是"看着权威的错答案"。 */
+    h->runtime_ram_base = 0u;
+    UTEST_CHECK_EQ((long)arkrtos_loader_crc_recheck(s_crcrc_img, CRCRC_TEST_BASE,
+                                                   CRCRC_TEST_IMGLEN, (uint32 *)0),
+                   (long)ARKRTOS_LOADER_ERR_PARAM);
+
+    /* 出参指针为 0 也是参数错：能算出 CRC 却不能交出去，等于白算。 */
+    h->runtime_ram_base = CRCRC_TEST_RT_RAM;
+    UTEST_CHECK_EQ((long)arkrtos_loader_crc_recheck(s_crcrc_img, CRCRC_TEST_BASE,
+                                                   CRCRC_TEST_IMGLEN, (uint32 *)0),
+                   (long)ARKRTOS_LOADER_ERR_PARAM);
+}
+
+
+/* 池内端到端：真装一份镜像进池，再跑一遍 sec，看这条自检项真的给出 PASS。
+ * 这一步覆盖的是「安装期写进去的 runtime_ram_base 与落盘字节是否自洽」——
+ * RAM 里的等价构造测不到这一点，因为那里的 runtime_ram_base 是我自己填的。 */
+#if (ARKRTOS_USE_SECCHECK == 1)
+
+static const arkrtos_sec_item_t *utest_sec_find(const arkrtos_sec_report_t *r,
+                                                const char *name)
+{
+    uint32 i;
+
+    for(i = 0u; i < r->count; i++)
+    {
+        const char *a = r->item[i].name;
+        const char *b = name;
+
+        while((*a != '\0') && (*a == *b))
+        {
+            a++;
+            b++;
+        }
+        if((*a == '\0') && (*b == '\0'))
+        {
+            return &r->item[i];
+        }
+    }
+    return 0;
+}
+
+UTEST_CASE(loader_crc_recheck_pool_e2e)
+{
+    arkrtos_app_header_t *h = utest_crcrc_build(0);
+    arkrtos_sec_report_t rep;
+    const arkrtos_sec_item_t *it;
+    int32 slot;
+
+#if (ARKRTOS_USE_IMAGE_SIGN == 1)
+    /* 开关开时安装路径要过签名门；签名落在头里，头参与 CRC ⇒ 签完必须重封口 */
+    arkrtos_sign_image(s_crcrc_img, h, h->signature);
+    utest_crcrc_seal(h);
+#endif
+
+    slot = arkrtos_loader_load_buffer(s_crcrc_img, CRCRC_TEST_IMGLEN);
+    if(slot < 0)
+    {
+        /* 装不进去时必须说清是哪一类原因：环境问题（没空间）该跳过，
+         * 构造/算法问题该报出来——两者混成一个"跳过"就等于把 bug 藏进跳过里。 */
+        const char *why = "pool refused the image";
+
+        if(slot == ARKRTOS_LOADER_ERR_SIGN)
+        {
+            why = "signature gate rejected the test image";
+        }
+        else if(slot == ARKRTOS_LOADER_ERR_CRC)
+        {
+            why = "crc mismatch on the constructed image";
+        }
+        else if((slot == ARKRTOS_LOADER_ERR_SIZE) ||
+                (slot == ARKRTOS_LOADER_ERR_NOSPACE) ||
+                (slot == ARKRTOS_LOADER_ERR_NO_SLOT))
+        {
+            why = "no space/slot for the test image";
+        }
+
+        ark_utest_skip(why);
+        return;
+    }
+
+    (void)arkrtos_sec_run(&rep);
+    it = utest_sec_find(&rep, "images.crc_recheck");
+    UTEST_CHECK(it != 0);
+    if(it != 0)
+    {
+        UTEST_CHECK_EQ((long)it->state, (long)ARKRTOS_SEC_PASS);
+        UTEST_CHECK_EQ((long)it->v[0], 1L);     /* checked */
+        UTEST_CHECK_EQ((long)it->v[1], 0L);     /* bad    */
+        UTEST_CHECK_EQ((long)it->v[2], 0L);     /* unknown*/
+    }
+
+    (void)arkrtos_loader_uninstall((uint32)slot);
+}
+
+#endif /* ARKRTOS_USE_SECCHECK */
+
+#endif /* ARKRTOS_USE_IMAGE_CRC_RECHECK */
 
 #endif /* ARKRTOS_USE_UTEST */

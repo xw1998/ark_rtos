@@ -5,7 +5,12 @@
 * 只覆盖两个纯函数：
 *   - arkrtos_loader_check_header()：镜像头的每一条拒绝理由；
 *   - arkrtos_loader_reloc_apply()：整字 / MOVW+MOVT 两类表项的补丁、跨块切断时
-*     的可提交长度与前进指针。
+*     的可提交长度与前进指针；
+*   - arkrtos_loader_crc_recheck()（SEC-G17，随
+*     -DARKRTOS_USE_IMAGE_CRC_RECHECK=1 编入）：把落盘形态反算回标称形态再比
+*     crc32 —— 正向（打过 ROM 补丁的镜像判 0）、负向（改坏一个字节判 -5、
+*     runtime_ram_base 未固化 / 参数为空判 -1、cap 不足判 -4、表项回退判 -13）。
+*     这一条盯的正是"安装完再复核"整条链里唯一能在宿主上跑的那一步。
 *
 * 为什么这两个值得在宿主上钉死：重定位错一位不会报错，只会让镜像在板上跑到
 * 别的地址上，现象是"偶发 HardFault"或"读到错常量"。四遍差分的产物是否正确
@@ -431,12 +436,127 @@ static void test_reloc_offsets(void)
     CHECK(*(uint32 *)(buf + 32) == 0x13u);
 }
 
+#if (ARKRTOS_USE_IMAGE_CRC_RECHECK == 1)
+/* 按打包工具的同一口径算「标称形态」的 CRC：头（crc32/state/ram_base 按 0 代入）
+ * 然后逐段表体 + 负载。测试侧自己拼起来，是为了不借内核的实现互相证明。 */
+static uint32 nominal_crc(const uint8 *img, const arkrtos_app_header_t *h)
+{
+    uint32 crc = arkrtos_loader_crc_header(h);
+    uint32 rt_len = h->reloc_count * ARKRTOS_APP_RELOC_SIZE;
+
+    if(rt_len != 0u)
+    {
+        crc = arkrtos_crc32(img + ARKRTOS_APP_RELOC_OFFSET, rt_len, crc);
+    }
+    return arkrtos_crc32(img + ARKRTOS_APP_PAYLOAD_OFFSET(h), h->image_size, crc);
+}
+
+static void test_crc_recheck(void)
+{
+    uint8 img[512];
+    arkrtos_app_header_t h;
+    arkrtos_app_header_t saved;
+    uint32 rel[2];
+    uint32 got;
+    uint32 nominal_base = 0x80300000u;
+    uint32 base         = 0x80305000u;
+    uint32 delta_rom;
+    uint32 total;
+    uint32 pay_off;
+    uint32 w0_off;
+    uint32 w1_off;
+    uint32 i;
+
+    memset(img, 0, sizeof(img));
+    hdr_init(&h);
+    h.type           = ARKRTOS_APP_TYPE_APP;  /* 池只收 APP/DRIVER，0 会被 check_header 判 PARAM */
+    h.image_size     = 64u;
+    h.reloc_count    = 2u;
+    h.nominal_base   = nominal_base;
+    h.nominal_ram_base = 0x20000000u;
+    h.runtime_ram_base = 0x20001000u;
+    h.payload_offset = ARKRTOS_APP_PAYLOAD_OFFSET(&h);
+    pay_off = h.payload_offset;
+    total   = ARKRTOS_APP_TOTAL_LEN(&h);
+    delta_rom = (base + pay_off) - nominal_base;
+
+    /* 负载：两处放"标称形态的绝对地址"，其余填固定花样 */
+    for(i = 0u; i < h.image_size; i++)
+    {
+        img[pay_off + i] = (uint8)(0xA0u + i);
+    }
+    w0_off = pay_off;
+    w1_off = pay_off + 16u;
+    *(uint32 *)(img + w0_off) = nominal_base + 0x100u;
+    *(uint32 *)(img + w1_off) = nominal_base + 0x200u;
+
+    /* 表项按升序、偏移按半字存放 */
+    rel[0] = ARKRTOS_APP_RELOC_ENTRY(w0_off, ARKRTOS_APP_RELOC_KIND_ROM);
+    rel[1] = ARKRTOS_APP_RELOC_ENTRY(w1_off, ARKRTOS_APP_RELOC_KIND_ROM);
+
+    /* 表体先落进 img：标称形态的 CRC 覆盖的是"头 + 表 + 负载"，
+     * 表区若还是 memset 的 0，算出来的就不是同一个镜像了。 */
+    memcpy(img + ARKRTOS_APP_RELOC_OFFSET, rel, sizeof(rel));
+
+    /* 标称形态的 CRC（此时头部除 crc32 外都已填好） */
+    h.crc32 = 0u;
+    memcpy(&saved, &h, sizeof(h));
+    h.crc32 = nominal_crc(img, &h);
+    memcpy(&saved, &h, sizeof(h));
+
+    /* 落盘形态：表体原样 + 负载里那两处加上 ROM 增量 */
+    *(uint32 *)(img + w0_off) += delta_rom;
+    *(uint32 *)(img + w1_off) += delta_rom;
+    memcpy(img, &saved, sizeof(saved));
+
+    /* 正向：落点不是标称基址，但反算回去应当一致 */
+    got = 0xDEADBEEFu;
+    CHECK(arkrtos_loader_crc_recheck(img, base, total, &got) == 0);
+    CHECK(got == saved.crc32);
+
+    /* 负向 1：改坏负载里一个字节 —— 这正是"装好之后被改坏" */
+    img[pay_off + 5u] ^= 0xFFu;
+    CHECK(arkrtos_loader_crc_recheck(img, base, total, &got) ==
+          (int32)ARKRTOS_LOADER_ERR_CRC);
+    img[pay_off + 5u] ^= 0xFFu;
+    CHECK(arkrtos_loader_crc_recheck(img, base, total, &got) == 0);
+
+    /* 负向 2：参数为空 */
+    CHECK(arkrtos_loader_crc_recheck((const uint8 *)0, base, total, &got) ==
+          (int32)ARKRTOS_LOADER_ERR_PARAM);
+    CHECK(arkrtos_loader_crc_recheck(img, base, total, (uint32 *)0) ==
+          (int32)ARKRTOS_LOADER_ERR_PARAM);
+
+    /* 负向 3：cap 比镜像总长少 4 -> 没资格复核，必须报 SIZE 而不是"不一致" */
+    CHECK(arkrtos_loader_crc_recheck(img, base, total - 4u, &got) ==
+          (int32)ARKRTOS_LOADER_ERR_SIZE);
+
+    /* 负向 4：runtime_ram_base 未固化 -> "算不出来"，不是"对"
+     * （池里真出现过这种镜像：装到一半断电时头还没固化） */
+    memcpy(&saved, &h, sizeof(h));
+    saved.runtime_ram_base = 0u;
+    memcpy(img, &saved, sizeof(saved));
+    CHECK(arkrtos_loader_crc_recheck(img, base, total, &got) ==
+          (int32)ARKRTOS_LOADER_ERR_PARAM);
+    memcpy(img, &h, sizeof(h));
+
+    /* 负向 5：表项往回退（同一偏移出现两次）-> RELOC，不是拿重复段算 CRC */
+    rel[1] = rel[0];
+    memcpy(img + ARKRTOS_APP_RELOC_OFFSET, rel, sizeof(rel));
+    CHECK(arkrtos_loader_crc_recheck(img, base, total, &got) ==
+          (int32)ARKRTOS_LOADER_ERR_RELOC);
+}
+#endif /* ARKRTOS_USE_IMAGE_CRC_RECHECK */
+
 int main(void)
 {
     test_check_header();
     test_reloc_words();
     test_reloc_movw();
     test_reloc_offsets();
+#if (ARKRTOS_USE_IMAGE_CRC_RECHECK == 1)
+    test_crc_recheck();
+#endif
 
     printf("loader-host: %d passed, %d failed\n", g_pass, g_fail);
     if(g_fail == 0)

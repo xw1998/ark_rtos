@@ -878,4 +878,26 @@ config ARKRTOS_USE_SECCHECK
 	  (the default) compiles the module and the `sec` command out: zero
 	  size change and the shell command table is unchanged.
 
+config ARKRTOS_USE_IMAGE_CRC_RECHECK
+	bool "Recheck image CRC after relocation, at boot (SEC-G17)"
+	default n
+	depends on ARKRTOS_USE_SECCHECK
+	help
+	  Flash holds the image AFTER the relocation patches were applied, while
+	  the crc32 in the image header covers the nominal (as-packed) form.  So
+	  reading the bytes back and comparing them with the header value can
+	  never match once delta is non-zero - which is why the sec item
+	  images.crc_recheck used to report SKIP.
+
+	  This option makes it observable without touching the 256-byte header
+	  ABI: both deltas are recomputable from the header (nominal_base,
+	  nominal_ram_base, runtime_ram_base) and the slot base, so every
+	  relocation entry can be subtracted back out, and the CRC recomputed
+	  over the reconstructed nominal form.  A single flipped byte anywhere in
+	  header / relocation table / payload then shows up as FAIL.
+
+	  Cost: one extra pass over each pool image, only when `sec` runs (not at
+	  boot).  Off (the default) compiles the recheck out, and the sec item
+	  keeps reporting SKIP with a reason that says so.
+
 endmenu

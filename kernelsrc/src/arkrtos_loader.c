@@ -828,6 +828,173 @@ uint32 arkrtos_loader_crc_header(const arkrtos_app_header_t *p_hdr)
     return crc;
 }
 
+/* ============================================================
+ * 开机复核镜像 CRC（SEC-G17）
+ * ============================================================ */
+#if (ARKRTOS_USE_IMAGE_CRC_RECHECK == 1)
+/* 把「落盘形态」反算回「标称形态」再算 CRC。
+ *
+ * Flash 上躺着的是**打过重定位补丁**的字节，而头里的 crc32 是打包工具对
+ * 标称形态算的。要让开机复核真的能看见"Flash 里被改坏了一个字节"，只有两条路：
+ *   1) 安装时另存一份「落盘形态 CRC」——但头 256 字节已经排满（reserved 区被
+ *      镜像清单占了，runtime_ram_base 固定在末尾），加字段就是改 ABI；
+ *   2) 把补丁反过来减掉：两个 delta 都能从头部字段与当前落点算出来。
+ * 这里走第二条。反算只依赖「在 32 位机上加法与减法互逆」和打包工具已经证明过的
+ * 一条性质（表项按偏移升序、互不重叠），不需要任何额外记账。
+ *
+ * 为什么不能直接拿 arkrtos_loader_image_crc() 比 hdr.crc32：那个函数是对的，
+ * 但它算的是**落盘形态**，只有在「本次落点恰好等于标称基址」时才与 hdr.crc32
+ * 相等；那是巧合，不是判据。
+ */
+/* 字节拷贝的小助手：本文件是 -ffreestanding 构建，没有 <string.h>，
+ * 直接用 memcpy 会拿到一个隐式声明（返回 int、按参数个数猜原型），
+ * 在 LP64 上把指针截断——那是"能编过、但结果错"的典型形态。
+ * 这里只做一件事：按字节前向拷贝，长度由调用方保证不越界。 */
+static void arkrtos_loader_copy_bytes(uint8 *p_dst, const uint8 *p_src, uint32 len)
+{
+    uint32 i;
+
+    for(i = 0u; i < len; i++)
+    {
+        p_dst[i] = p_src[i];
+    }
+}
+
+int32 arkrtos_loader_crc_recheck(const uint8 *p_img, uint32 base, uint32 cap, uint32 *p_got)
+{
+    arkrtos_app_header_t hdr;
+    const uint32 *p_rel;
+    uint32 total;
+    uint32 rt_len;
+    uint32 delta_rom;
+    uint32 delta_ram;
+    uint32 crc;
+    uint32 pos;
+    uint32 i;
+    int32 chk;
+
+    if(p_got != 0)
+    {
+        *p_got = 0u;
+    }
+
+    if((p_img == 0) || (p_got == 0))
+    {
+        return ARKRTOS_LOADER_ERR_PARAM;
+    }
+
+    /* Flash 是内存映射的，但镜像是按 4 字节对齐落的、结构体却不保证这个假设：
+     * 先按字节拷一份头，避免对不齐指针解引用（M0/M3 上直接 HardFault）。 */
+    arkrtos_loader_copy_bytes((uint8 *)&hdr, p_img, (uint32)sizeof(hdr));
+
+    /* 表体就在头后面：这份内存里它是连续的，所以可以直接把地址交给 check_header。
+     * 头里那些字段如果被改坏（魔数、类型、表项越界……），它自己会先挡住。 */
+    p_rel = (const uint32 *)(p_img + ARKRTOS_APP_RELOC_OFFSET);
+
+    chk = arkrtos_loader_check_header(&hdr, p_rel, ARKRTOS_APP_TYPE_MASK_POOL);
+    if(chk != 0)
+    {
+        return chk;
+    }
+
+    total = ARKRTOS_APP_TOTAL_LEN(&hdr);
+    if((cap != 0u) && (total > cap))
+    {
+        return ARKRTOS_LOADER_ERR_SIZE;
+    }
+
+    /* 没有固化的 RAM 基址就没法把 RAM 类表项减回去：镜像里的 RAM 绝对地址是
+     * 按安装时分配到的块打的补丁，那个基址不写进头就永远找不回来
+     * （见 arkrtos_app_image.h 的 runtime_ram_base 字段说明）。此时唯一诚实的
+     * 做法是报"算不出来"，而不是拿一个错的 delta 硬算出一个"不匹配"。 */
+    if(hdr.runtime_ram_base == 0u)
+    {
+        return ARKRTOS_LOADER_ERR_PARAM;
+    }
+
+    rt_len = hdr.reloc_count * ARKRTOS_APP_RELOC_SIZE;
+
+    /* 与安装期完全相同的两个增量公式（见 arkrtos_loader_load_dev_hdr）：
+     * ROM 增量还要加上「表体把负载往后推的那一段」，RAM 增量是块基址之差。 */
+    delta_rom = (base + hdr.payload_offset) - hdr.nominal_base;
+    delta_ram = hdr.runtime_ram_base - hdr.nominal_ram_base;
+
+    /* 头部：crc32 / state / runtime_ram_base 三个字段按 0 代入 —— 这条公式只有
+     * 一份（arkrtos_loader_crc_header），重写一份就迟早会与打包工具分叉。 */
+    crc = arkrtos_loader_crc_header(&hdr);
+    pos = ARKRTOS_APP_RELOC_OFFSET;
+
+    /* 重定位表原样参与（安装时它就是原样落盘的） */
+    if(rt_len != 0u)
+    {
+        crc = arkrtos_crc32(p_img + pos, rt_len, crc);
+        pos += rt_len;
+    }
+
+    for(i = 0u; i < hdr.reloc_count; i++)
+    {
+        uint32 entry;
+        uint32 kind;
+        uint32 off;
+        uint32 need;
+        uint32 delta;
+        uint32 word[2];
+
+        arkrtos_loader_copy_bytes((uint8 *)&entry, (const uint8 *)(p_rel + i), 4u);
+
+        kind = ARKRTOS_APP_RELOC_KIND(entry);
+        off  = ARKRTOS_APP_RELOC_OFF(entry);
+
+        need = ((kind == ARKRTOS_APP_RELOC_KIND_ROM_MOVW) ||
+                (kind == ARKRTOS_APP_RELOC_KIND_RAM_MOVW))
+             ? (uint32)ARKRTOS_APP_RELOC_MOV_SIZE : (uint32)ARKRTOS_APP_RELOC_SIZE;
+
+        /* check_header 已经验过「落在负载内、按升序」，但它允许两个表项指向
+         * 同一偏移；这里把「往回退」也挡掉，否则 pos..off 那段会被重复计入 CRC，
+         * 静默算出一个与打包工具不同的值（那就是一句看着权威的错话）。 */
+        if(off < pos)
+        {
+            return ARKRTOS_LOADER_ERR_RELOC;
+        }
+
+        if(off > pos)
+        {
+            crc = arkrtos_crc32(p_img + pos, off - pos, crc);
+        }
+
+        delta = ((kind == ARKRTOS_APP_RELOC_KIND_RAM) ||
+                 (kind == ARKRTOS_APP_RELOC_KIND_RAM_MOVW)) ? delta_ram : delta_rom;
+
+        /* 先拷到自己的对齐缓冲里再改：Flash 映射区不能就地写，而且 MOVW 表项
+         * 只保证半字对齐，直接按 uint32 解引用会在严格对齐的核上炸。 */
+        arkrtos_loader_copy_bytes((uint8 *)word, p_img + off, need);
+
+        if(need == (uint32)ARKRTOS_APP_RELOC_MOV_SIZE)
+        {
+            /* 减 delta 就是「加 (0 - delta)」：解码/编码那一套只留一份实现，
+             * 另写一套逆运算等于给同一件事两个可能分叉的写法。 */
+            arkrtos_loader_reloc_movw((uint8 *)word, 0u - delta);
+        }
+        else
+        {
+            word[0] -= delta;
+        }
+
+        crc = arkrtos_crc32(word, need, crc);
+        pos = off + need;
+    }
+
+    if(pos < total)
+    {
+        crc = arkrtos_crc32(p_img + pos, total - pos, crc);
+    }
+
+    *p_got = crc;
+
+    return (crc == hdr.crc32) ? 0 : ARKRTOS_LOADER_ERR_CRC;
+}
+#endif /* ARKRTOS_USE_IMAGE_CRC_RECHECK */
+
 /* 把已接收的镜像尾部（重定位表 + 负载）流式落盘，并在落盘前打补丁。
  * 返回 0 或 ARKRTOS_LOADER_ERR_x。
  *
@@ -1661,16 +1828,27 @@ int32 arkrtos_loader_load_buffer(const uint8 *image, uint32 image_len)
 
     crc_written = arkrtos_loader_crc_header(&hdr);
 
-    /* 重定位表原样落盘 */
+    /* 重定位表原样落盘，**并且要进 crc_written**：下面的回读复核比的是
+     * arkrtos_loader_image_crc()，那个函数从镜像头一直算到总长，中间这段
+     * 表体当然也在内。漏掉它，任何 reloc_count > 0 的镜像回读都恒不匹配
+     * （报 ERR_CRC），而且会在池里留下一份 UNCOMMITTED 残片。
+     * 流式安装路径（arkrtos_loader_stream_image）一直是把表算进去的，两条
+     * 路径必须同一口径。 */
     {
         uint32 rt_len = p_src->reloc_count * ARKRTOS_APP_RELOC_SIZE;
 
-        if((rt_len != 0u) &&
-           (arkrtos_port_flash_write(base + ARKRTOS_APP_RELOC_OFFSET,
-                                   image + ARKRTOS_APP_RELOC_OFFSET, rt_len) != 0))
+        if(rt_len != 0u)
         {
-            arkrtos_ptable_free((uint32)slot);
-            return ARKRTOS_LOADER_ERR_FLASH;
+            crc_written = arkrtos_crc32(image + ARKRTOS_APP_RELOC_OFFSET,
+                                        rt_len, crc_written);
+
+            if(arkrtos_port_flash_write(base + ARKRTOS_APP_RELOC_OFFSET,
+                                        image + ARKRTOS_APP_RELOC_OFFSET,
+                                        rt_len) != 0)
+            {
+                arkrtos_ptable_free((uint32)slot);
+                return ARKRTOS_LOADER_ERR_FLASH;
+            }
         }
     }
 

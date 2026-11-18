@@ -3674,6 +3674,127 @@ pmap asidinval: OP3 IGNORES ASID - clearing one space also drops every space ent
 - `space_release` 的「切 ASID → 按 VA 撤 → 切回 → 补铺」不能省：op=3 连带
   清掉别的空间同 VA 条目已由 5.29.2 实测确认。
 
+### 5.30 镜像池的 Flash 后端与 SEC-G17 开机 CRC 复核（2026-11-18）
+
+#### 5.30.1 先修载体：QEMU 的镜像池原来写不进去
+
+QEMU 的 Flash 区就是普通 DRAM，上电全 `0x00`，而真 Flash 擦除后是 `0xFF`。
+`arkrtos_loader` 找空位（`find_clean`）判的是「这段是不是全 `0xFF`」，于是：
+
+```
+pool free : 0 B
+[LOADER] install returned -14 (ERR_NOSPACE)
+```
+
+⇒ 在这个模拟器上，「把镜像装进池再开机复核」这条路**一次都没真跑过**，唯一的读数是
+`sec` 那行 SKIP。修法只在板级、只覆盖池：
+
+| 位置 | 内容 |
+|---|---|
+| `board/qemu_loongarch64/arkrtos_board.c` | `QEMU_POOL_FLASH_BEGIN/END` = `IMAGE_POOL_BASE..IMAGE_POOL_END`；`arkrtos_qemu_pool_range()` 判范围（不回绕、不越界） |
+| `arkrtos_port_flash_erase(addr,size)` | 范围内写 `0xFF`，否则 `-1` |
+| `arkrtos_port_flash_write(addr,data,len)` | 范围内按字节覆盖，否则 `-1` |
+| `arkrtos_port_flash_sector_size(addr)` | 池内返回 `IMAGE_POOL_SECTOR`，池外 `0` |
+| `arkrtos_port_board_init()` | 在 `arkrtos_trace_init()` 之前把整池擦成 `0xFF` |
+
+池以外（代码区 `0x00200000..0x00260000`、配置区，内核正在那儿跑）仍然明确失败，
+不做「假装能写」。改完后 `pool free : 524288 B (512K)`（正好 usable）。
+
+**边界**：RAM 后端不模拟位翻转、不要求写前先擦、复位即重擦（内容不跨复位/掉电）。
+这条只解决「能不能装」，不等于「Flash 行为像真片」。见 [已知限制](已知限制.md)。
+
+#### 5.30.2 装得进去之后立刻抓到一条真缺陷
+
+`utest run loader_crc_recheck_pool_e2e` 第一次真装就报 `-5`。逐步定位（临时
+`ARKRTOS_LOGE` 取证，取证后已撤干净）：
+
+```
+DIAG readback crc mismatch
+DIAG got=f2a5e2fa want=56821d7f base=260000 total=148
+```
+
+根因：`arkrtos_loader_load_buffer()` 把重定位表写进池之后，**没有把表那一段折进
+`crc_written`**；而回读复核比的是 `arkrtos_loader_image_crc()`（头 + 表 + 负载）⇒ 任何
+`reloc_count > 0` 的镜像经这条路径装完**恒报 CRC 错**，还在池里留一份 UNCOMMITTED 残片。
+流式路径 `arkrtos_loader_stream_image()` 一直是折进去的，所以只有 buffer 路径中招。
+
+修法（`kernelsrc/src/arkrtos_loader.c`）：
+
+```c
+crc_written = arkrtos_loader_crc_header(&hdr);
+{ uint32 rt_len = p_src->reloc_count * ARKRTOS_APP_RELOC_SIZE;
+  if(rt_len != 0u) {
+      crc_written = arkrtos_crc32(image + ARKRTOS_APP_RELOC_OFFSET, rt_len, crc_written);
+      if(arkrtos_port_flash_write(base + ARKRTOS_APP_RELOC_OFFSET,
+                                  image + ARKRTOS_APP_RELOC_OFFSET, rt_len) != 0) { /* ERR_FLASH */ }
+  } }
+```
+
+**这条修复在默认档（开关关着）也生效**，所以默认档镜像是真实行为变化：sha256 由
+`6bbcda8b…` 变为 `fbd1094e…`，`text` `367264 → 367536`（+272）。不得声称「逐字节不变」。
+
+#### 5.30.3 SEC-G17 的读数
+
+开关档（`EXTRA_CFLAGS="-DARKRTOS_USE_IMAGE_CRC_RECHECK=1"`）：
+
+```
+PASS  loader_crc_recheck_relocated
+PASS  loader_crc_recheck_zero_delta
+PASS  loader_crc_recheck_unknown_ram_base
+PASS  loader_crc_recheck_pool_e2e
+utest: 17 matched, 17 passed, 0 failed, 0 skipped; assertions 155 run / 0 failed
+```
+
+只跑池内那一条、并临时保留镜像让 `sec` 看得见（取证后已恢复 `uninstall`）：
+
+```
+RUN   loader_crc_recheck_pool_e2e
+PASS  loader_crc_recheck_pool_e2e
+utest: 1 matched, 1 passed, 0 failed, 0 skipped; assertions 5 run / 0 failed
+  [PASS] images.crc_recheck checked=1 bad=0 unknown=0 first=0
+pool free : 523960 B (511K)
+```
+
+池空着的时候（同一镜像直接 `sec`）：
+
+```
+  [SKIP] images.crc_recheck no pool image to recheck
+```
+
+默认档（不带 `EXTRA_CFLAGS`）：
+
+```
+utest: 13 matched, 13 passed, 0 failed, 0 skipped; assertions 133 run / 0 failed
+sec: 12 checks - pass 7, fail 0, finding 2, skip 3
+  [SKIP] images.crc_recheck flash holds relocated bytes; header crc32 covers the nominal form
+```
+
+最后一行文案与改动前**逐字相同**（默认档 SKIP 口径不变），`tools/sec_crc_gate.py` 按源码钉住
+并带变异自检。
+
+#### 5.30.4 复现命令
+
+```sh
+# 默认档
+SOURCE_DATE_EPOCH=1600000000 make -f example/qemu_loongarch64/Makefile BUILD=build/crc_zero -j8
+env -u PYTHONHOME -u PYTHONPATH py -3 tools/qemu_shell_drive.py \
+    --elf "$(pwd -W)/build/crc_zero/ark_qemu_la64.elf" --boot 90 --timeout 45 --port 45795 \
+    --cmd "utest run"      # 期望 13/13
+
+# 开关档
+SOURCE_DATE_EPOCH=1600000000 make -f example/qemu_loongarch64/Makefile BUILD=build/crcrc \
+    EXTRA_CFLAGS="-DARKRTOS_USE_IMAGE_CRC_RECHECK=1" -j8
+env -u PYTHONHOME -u PYTHONPATH py -3 tools/qemu_shell_drive.py \
+    --elf "$(pwd -W)/build/crcrc/ark_qemu_la64.elf" --boot 90 --timeout 45 --port 45793 \
+    --cmd "utest run"      # 期望 17/17、assertions 155
+
+# 门禁（真 armclang，两档各编两个 TU + 8 条 pin 的变异自检）
+env -u PYTHONHOME -u PYTHONPATH py -3 tools/sec_crc_gate.py   # SEC-CRC-GATE OK (8 pin + 4 TU 两档)
+```
+
+端口每次换新；`qemu_shell_drive.py` 偶发「90 s 内没等到 shell 提示符」，同参数换端口重试即可
+（已确认与代码无关）。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

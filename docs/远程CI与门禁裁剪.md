@@ -33,18 +33,19 @@ Gitee Go 的 runner 上这些一个都没有。三种糊弄法都不接受：
 python3 tools/ci_gate.py --remote
 ```
 
-日志末尾长这样（下面是本机 2026-11-17 用 `--remote` 跑出来的实际读数，runner 上
+日志末尾长这样（下面是本机 2026-11-18 用 `--remote` 跑出来的实际读数，runner 上
 应当一致）：
 
 ```
 skip tickless                   needs armclang (Keil MDK) (not on the runner)
 ...
 skip stack-guard                needs LA64 / RV32 cross gcc (not on the runner)
-ok   remote-ci                  workflow calls the gate with --remote; 14 skipped check(s) all named in the table
+ok   remote-ci                  workflow calls the gate with --remote; 16 skipped check(s) all named in the table
 
-29 check(s) passed, 0 failed, 14 skipped (remote profile)
+30 check(s) passed, 0 failed, 16 skipped (remote profile)
 NOT VERIFIED on this run: tickless, arkmake, rtstat, eset-syntax, waitmulti-syntax,
-waitq, smp, seccheck, swap, paging, elf, modld, payload-sign, stack-guard
+waitq, smp, seccheck, swap, paging, elf, shell-auth, modld, payload-sign,
+stack-guard, sec-crc
 ```
 
 三条口径：
@@ -68,9 +69,9 @@ loader/fifo/fault/coverage/warn-clean/sign-host）+ `remote-ci` 自身。
 
 | 没跑 | 替代取证 |
 |---|---|
-| Keil 语法档（tickless/rtstat/eset/waitmulti/waitq/smp/seccheck/swap） | 开发机上 `python tools/ci_gate.py` 全量跑；判据是那一行的 `ok`/`FAIL` |
+| Keil 语法档（tickless/rtstat/eset/waitmulti/waitq/smp/seccheck/swap/sec-crc） | 开发机上 `python tools/ci_gate.py` 全量跑；判据是那一行的 `ok`/`FAIL` |
 | `arkmake` | 同上 |
-| 分页 / ELF / modld / 栈守卫 / 尾部签名（LA64 + RV32） | 同上；另有 QEMU 实跑读数（见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md)） |
+| 分页 / ELF / shell-auth / modld / 栈守卫 / 尾部签名（LA64 + RV32） | 同上；另有 QEMU 实跑读数（见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md)） |
 | Keil 工程构建（`--build`，本来就不在远程档） | 开发机 `--build` + 真机回归 |
 
 ## 4. 本文件的状态（未验证部分写死）
@@ -82,7 +83,7 @@ loader/fifo/fault/coverage/warn-clean/sign-host）+ `remote-ci` 自身。
   `displayName` / `strategy` / `trigger` / `steps[].step: build@python` /
   `pythonVersion` / `commands`。
 * **runner 上的读数未验证**：`--remote` 的**本机**行为已有读数（上一篇引用的
-  29/0/14），但「runner 上 Python 3.9 + 系统 gcc 能不能让 29 项全过」没跑过。
+  30/0/16），但「runner 上 Python 3.9 + 系统 gcc 能不能让 30 项全过」没跑过。
   已知的两处风险：`coverage-host` 需要 `gcov`；`api-doc` 需要
   `git diff` 在工作区可读（Gitee Go 检出是普通 clone，应当满足）。
 * 因此**不得把「远程档存在」读成「门禁已经离开本机」**：它只是多了一条在别处

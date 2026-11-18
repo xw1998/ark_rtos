@@ -829,11 +829,15 @@ def check_loader_host():
     entries add delta_rom / delta_ram separately, MOVW+MOVT decode-recode
     keeps the instruction bits, a table entry cut by the chunk end returns
     its start and leaves idx alone, entries before buf_off are skipped but
-    still consume an index).
+    still consume an index), and - with -DARKRTOS_USE_IMAGE_CRC_RECHECK=1 -
+    crc_recheck on a relocated image in both directions (nominal crc matched
+    after the two deltas are undone, plus ERR_CRC / ERR_PARAM / ERR_SIZE /
+    ERR_RELOC rejections).
 
     NOT covered: load_image, streaming install, flash erase/program, pool
-    relocation, unload, signature check, CRC, crash accounting, and any real
-    start-up. Nothing here has run on a board, so this gate must not be read
+    relocation, unload, signature check, crash accounting, and any real
+    start-up. The CRC recheck is verified on host only for the pure function;
+    install-then-recheck still needs a board or QEMU. Nothing here has run on a board, so this gate must not be read
     as "the install path is verified". A missing host compiler is a FAIL.
     """
     import tempfile
@@ -846,7 +850,10 @@ def check_loader_host():
         cmd = [cc]
         if "mingw" in cc.replace("\\", "/").lower():
             cmd.append("-B" + os.path.dirname(cc))
+        # 与 tools/coverage_gate.py 的 CASES loader 项保持一致：
+        # 编入 -DARKRTOS_USE_IMAGE_CRC_RECHECK=1 才能覆盖 crc_recheck 的正/负向。
         cmd += ["-std=gnu11", "-fno-asynchronous-unwind-tables",
+                "-DARKRTOS_USE_IMAGE_CRC_RECHECK=1",
                 "-Ikernelsrc/include", "-Ikernelsrc/components/mdk_trace",
                 "-Iboard/stm32f427", "-Iconfig", "-o", exe,
                 "kernelsrc/tests/test_loader_host.c", "kernelsrc/src/arkrtos_loader.c"]
@@ -1314,6 +1321,30 @@ def check_stack_guard():
         fail("stack-guard", txt[-260:])
 
 
+def check_sec_crc():
+    """镜像 CRC 开机复核（SEC-G17 / ARKRTOS_USE_IMAGE_CRC_RECHECK）必须两档都对。
+
+    和 rtstat / seccheck 一样是"默认关 = 没人编译"的假绿形态：开关关着时
+    arkrtos_loader_crc_recheck() 与 sec 里调它的那一支一个编译器都不经过，
+    被改成永远返回 PASS 也照样全绿。tools/sec_crc_gate.py 用真 armclang 编
+    两个 TU 的两档，并钉八条只靠编译发现不了的约定（开关默认 n / 实现在
+    #if 内 / load_buffer 把重定位表折进 crc_written / 全 unknown 走 SKIP /
+    默认档 SKIP 文案逐字未变 / autoconf 默认 0），每条都带变异自检。
+
+    不覆盖：真实的安装与复位后复核，那是 QEMU 的
+    `utest run loader_crc_recheck_pool_e2e` 读数；真 Flash 的电离位翻转也
+    不在本门禁能力范围内（见 docs/安全认证准备.md 的 SEC-G17 一节）。
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "sec_crc_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "SEC-CRC-GATE OK" in txt:
+        ok("sec-crc",
+           "two builds compile (on/off) / 8 pins with mutation self-check "
+           "(default off, table folded into crc_written, all-unknown is SKIP, "
+           "legacy SKIP text unchanged)")
+    else:
+        fail("sec-crc", txt[-260:])
+
 def check_modld():
     """VxWorks-style downloadable modules (ARKRTOS_USE_MODLOAD) must be wired.
 
@@ -1487,6 +1518,7 @@ LOCAL_TOOLCHAIN = {
     "modld": "LA64 / RV32 / LA32 cross gcc",
     "payload-sign": "LA64 cross gcc",
     "stack-guard": "LA64 / RV32 cross gcc",
+    "sec-crc": "armclang (Keil MDK)",
 }
 
 # (打印名, 函数)。名字只用于 skip 行与自检，真正的读数由
@@ -1534,6 +1566,7 @@ CHECK_TABLE = (
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),
+    ("sec-crc", check_sec_crc),
 )
 
 def check_remote_ci():

@@ -25,7 +25,7 @@
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
 - [kernelsrc/include/arkrtos_layout.h](#kernelsrcincludearkrtos_layouth)（11 项）
 - [kernelsrc/include/arkrtos_layout_def.h](#kernelsrcincludearkrtos_layout_defh)（2 项）
-- [kernelsrc/include/arkrtos_loader.h](#kernelsrcincludearkrtos_loaderh)（31 项）
+- [kernelsrc/include/arkrtos_loader.h](#kernelsrcincludearkrtos_loaderh)（32 项）
 - [kernelsrc/include/arkrtos_log.h](#kernelsrcincludearkrtos_logh)（16 项）
 - [kernelsrc/include/arkrtos_mempool.h](#kernelsrcincludearkrtos_mempoolh)（9 项）
 - [kernelsrc/include/arkrtos_mini.h](#kernelsrcincludearkrtos_minih)（20 项）
@@ -4366,6 +4366,30 @@ uint32 arkrtos_loader_crc_header(const arkrtos_app_header_t *p_hdr);
 小程序的负载是边读边落 RAM、边打补丁的，所以只能在收到字节的那一刻
 算 CRC，不能在打完补丁之后再回读——回读的是 relocation 之后的形态，
 与打包工具算的标称形态必然不同。
+
+### `#if (ARKRTOS_USE_IMAGE_CRC_RECHECK == 1) int32 arkrtos_loader_crc_rech`
+
+```c
+#if (ARKRTOS_USE_IMAGE_CRC_RECHECK == 1) int32 arkrtos_loader_crc_recheck(const uint8 *p_img, uint32 base, uint32 cap, uint32 *p_got);
+```
+
+**反算标称形态后复核镜像 CRC（开机/巡检用，SEC-G17）**
+- `p_img`：镜像在 Flash 中的起始地址（必须等于 base）
+- `base`：镜像落点（槽位基址），用于反算 ROM 类表项的增量
+- `cap`：该槽位可读字节数（0 = 不检查）；小于镜像总长时返回 ERR_SIZE
+- `p_got`：出参：按标称形态重算出来的 CRC（失败时也会被写，便于报数）
+**返回**：0 = 与头里的 crc32 一致；ARKRTOS_LOADER_ERR_CRC = 不一致（真被改坏）；
+其他负值为"算不出来"（头字段不成立 / runtime_ram_base 未固化 / 表项退化）
+Flash 上躺着的是**打过重定位补丁**的字节，而头里的 crc32 覆盖的是
+打包时的标称形态。本函数把两个增量（ROM 与 RAM）从头部字段与当前落点
+反算出来，逐表项减回去，再按与打包工具同一套公式重算 CRC 并与头里的
+值比对。因此它能在**安装之后**发现静默损坏，而不只是在安装期。
+> 说明：返回 ERR_CRC 才是"不合格"；返回其他负值说明这一份镜像当前
+无法复核（例如 runtime_ram_base 尚未固化），调用方必须把它
+报成"没看到"而不是 PASS —— 两者混同就是假绿。
+> 说明：反算沿用打包工具已证明的性质（表项升序、互不重叠）与 32 位
+加减互逆，不需要任何额外的落盘记账，因此不改镜像头 ABI。
+> 说明：只有 ARKRTOS_USE_IMAGE_CRC_RECHECK 打开时才编入（默认关）。
 
 ### `void arkrtos_loader_halt_image(uint32 task_id);`
 

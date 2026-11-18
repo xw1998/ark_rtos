@@ -420,6 +420,30 @@ uint32 arkrtos_loader_reloc_apply(uint8 *buf, uint32 buf_off, uint32 len,
 uint32 arkrtos_loader_crc_header(const arkrtos_app_header_t *p_hdr);
 
 /**
+* @brief 反算标称形态后复核镜像 CRC（开机/巡检用，SEC-G17）
+* @param p_img 镜像在 Flash 中的起始地址（必须等于 base）
+* @param base  镜像落点（槽位基址），用于反算 ROM 类表项的增量
+* @param cap   该槽位可读字节数（0 = 不检查）；小于镜像总长时返回 ERR_SIZE
+* @param p_got 出参：按标称形态重算出来的 CRC（失败时也会被写，便于报数）
+* @return 0 = 与头里的 crc32 一致；ARKRTOS_LOADER_ERR_CRC = 不一致（真被改坏）；
+*         其他负值为"算不出来"（头字段不成立 / runtime_ram_base 未固化 / 表项退化）
+* @details Flash 上躺着的是**打过重定位补丁**的字节，而头里的 crc32 覆盖的是
+*          打包时的标称形态。本函数把两个增量（ROM 与 RAM）从头部字段与当前落点
+*          反算出来，逐表项减回去，再按与打包工具同一套公式重算 CRC 并与头里的
+*          值比对。因此它能在**安装之后**发现静默损坏，而不只是在安装期。
+*
+*          @note 返回 ERR_CRC 才是"不合格"；返回其他负值说明这一份镜像当前
+*                无法复核（例如 runtime_ram_base 尚未固化），调用方必须把它
+*                报成"没看到"而不是 PASS —— 两者混同就是假绿。
+*          @note 反算沿用打包工具已证明的性质（表项升序、互不重叠）与 32 位
+*                加减互逆，不需要任何额外的落盘记账，因此不改镜像头 ABI。
+*          @note 只有 ARKRTOS_USE_IMAGE_CRC_RECHECK 打开时才编入（默认关）。
+*/
+#if (ARKRTOS_USE_IMAGE_CRC_RECHECK == 1)
+int32 arkrtos_loader_crc_recheck(const uint8 *p_img, uint32 base, uint32 cap, uint32 *p_got);
+#endif /* ARKRTOS_USE_IMAGE_CRC_RECHECK */
+
+/**
 * @brief 硬停同一 RAM 窗口内的所有任务（镜像级停止）
 * @param task_id 该镜像的主任务号（1 起）
 * @note RAM 窗口就是归属判据：镜像的代码块/数据块由装载方交给主任务，

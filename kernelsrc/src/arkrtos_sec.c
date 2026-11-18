@@ -242,14 +242,88 @@ static void sec_check_headers(arkrtos_sec_report_t *p_rep)
             total, bad, first, first_err);
 }
 
-/* 5. 开机复核镜像 CRC：做不到，且原因必须写清楚，不能报个 PASS 蒙过去。
- *    Flash 上躺的是**打过重定位补丁**的字节，而头里的 crc32 是对标称形态算的；
- *    要复核就得先把 delta 反算回去，那是另一套工作量（当前只在安装时做回读复核）。*/
+/* 5. 开机复核镜像 CRC。
+ *    Flash 上躺的是**打过重定位补丁**的字节，而头里的 crc32 是对标称形态算的，
+ *    所以不能直接拿落盘字节比。arkrtos_loader_crc_recheck() 把两个增量从头部
+ *    字段与当前落点反算出来、逐表项减回去再重算，于是"装好之后被改坏一个字节"
+ *    这件事在开机时就能看见，而不只是安装期那一次回读。
+ *
+ *    三档要分开报，不能混：0 = 一致（PASS）、ERR_CRC = 真不一致（FAIL）、
+ *    其他负值 = 这一份现在算不出来（不计入 PASS，也不计入 FAIL —— 报成
+ *    "没看到"才诚实，例如 runtime_ram_base 还没固化）。 */
 static void sec_check_crc(arkrtos_sec_report_t *p_rep)
 {
+#if (ARKRTOS_USE_IMAGE_CRC_RECHECK == 1)
+    const arkrtos_partition_table_t *p_pt = arkrtos_ptable_get();
+    uint32 checked = 0u;
+    uint32 bad = 0u;
+    uint32 unknown = 0u;
+    uint32 first_bad = 0u;
+    uint32 i;
+
+    for(i = 0u; (i < p_pt->slot_max) && (i < (uint32)ARKRTOS_SLOT_ARRAY_MAX); i++)
+    {
+        uint32 got = 0u;
+        int32 rc;
+
+        if((p_pt->slot_type[i] == (uint32)ARKRTOS_SLOT_FREE) || (p_pt->slot_base[i] == 0u))
+        {
+            continue;
+        }
+
+        rc = arkrtos_loader_crc_recheck((const uint8 *)p_pt->slot_base[i],
+                                        p_pt->slot_base[i], p_pt->slot_size[i], &got);
+
+        if((rc == 0) || (rc == (int32)ARKRTOS_LOADER_ERR_CRC))
+        {
+            checked++;
+
+            if(rc != 0)
+            {
+                if(bad == 0u)
+                {
+                    first_bad = i;
+                }
+                bad++;
+            }
+        }
+        else
+        {
+            /* 算不出来 ≠ 对得上：不计入 PASS，也不计入 FAIL */
+            unknown++;
+        }
+    }
+
+    if(checked == 0u)
+    {
+        if(unknown == 0u)
+        {
+            /* 池里一个镜像都没有：这不是"通过"，是"没有可看的对象" */
+            sec_add(p_rep, "images.crc_recheck", (uint32)ARKRTOS_SEC_SKIP,
+                    "no pool image to recheck", 0u, 0u, 0u, 0u);
+        }
+        else
+        {
+            /* 有镜像、但一份都算不出来（例如 runtime_ram_base 还没固化）。
+             * 这必须报 SKIP 而不是 PASS：一份都没真验过就报通过，是假绿。 */
+            sec_add(p_rep, "images.crc_recheck", (uint32)ARKRTOS_SEC_SKIP,
+                    "checked=0 unknown=%u: no image could be rechecked",
+                    unknown, 0u, 0u, 0u);
+        }
+        return;
+    }
+
+    sec_add(p_rep, "images.crc_recheck",
+            (bad == 0u) ? (uint32)ARKRTOS_SEC_PASS : (uint32)ARKRTOS_SEC_FAIL,
+            "checked=%u bad=%u unknown=%u first=%u",
+            checked, bad, unknown, first_bad);
+#else
+    /* 开关关着时这一行必须与改动前逐字相同：默认档的行为与镜像都要零变化。
+     * "本开关没编进来"这件事由文档交代，不能拿它去改默认档的字节。 */
     sec_add(p_rep, "images.crc_recheck", (uint32)ARKRTOS_SEC_SKIP,
             "flash holds relocated bytes; header crc32 covers the nominal form",
             0u, 0u, 0u, 0u);
+#endif
 }
 
 /* 6. 镜像签名：编进来就是安装期强制，没编就是"任何拿到串口的人都能装自己的代码" */
