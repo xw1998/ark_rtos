@@ -1,5 +1,7 @@
 # GCC 构建指南（GNU Make + arm-none-eabi-gcc）
 
+**[简体中文](GCC构建指南.md) | English([GCC构建指南.en.md](GCC构建指南.en.md))**
+
 Ark RTOS 除了 Keil MDK（AC5/AC6）工程之外，为 **STM32F427** 例程提供了一套
 **GNU Make + arm-none-eabi-gcc** 工程，用于「不想装 MDK / 想在 CI 里编译 /
 想用命令行 + 开源工具链」的场景。

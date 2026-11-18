@@ -98,6 +98,7 @@
 | 让设备之间互相发现、发事件、远程调用、传数据（软总线） | [软总线接入.md](软总线接入.md)（ark_softbus 同步副本、三钩子端口、MCU 档与 RAM 实测、`bus` 命令与上板自检） |
 | Read the softbus integration page in English | [软总线接入.en.md](软总线接入.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 不用 Keil，想用 GNU Make + arm-none-eabi-gcc 编 F427 例程 | [GCC构建指南.md](GCC构建指南.md)（工程位置、工具链、make 用法、与 Keil 的对应、GCC 侧三个坑、验证状态） |
+| Read the same page in English | [GCC构建指南.en.md](GCC构建指南.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 在板上跑单元测试、加自己的用例 | [单元测试框架.md](单元测试框架.md)（用例自动注册、断言宏、`utest` 命令、宿主自测门禁、用例清单） |
 | Read the same page in English | [单元测试框架.en.md](单元测试框架.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 换芯片前想知道内核耦合了哪些硬件 | [硬件耦合审计.md](硬件耦合审计.md)（耦合点清单与处置、移植要动的范围） |
@@ -210,6 +211,7 @@ docs/
 ├── 软总线接入.md                            # 【设计说明】ark_softbus 组件同步副本、板级三钩子、MCU 档位与 RAM 实测、`bus` 命令与上板自检
 ├── 软总线接入.en.md                         # 【English】软总线接入页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── GCC构建指南.md                           # 【操作手册】GNU Make + arm-none-eabi-gcc 的 F427 例程：工具链、用法、与 Keil 的对应、GCC 侧三个坑、验证状态
+├── GCC构建指南.en.md                        # 【English】GCC构建指南页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── QEMU模拟器移植与验证.md                  # 【实机记录】QEMU 上的 port 层验证：环境与依赖 DLL 坑、RV32 单 M 模式 port（trap 帧/a7/CLINT）、LA64 单核端口（256 B 帧/就地切换/PRMD 位序/TCFG-RDTIME 标定）、LA32 参考目标（128 B 帧，仅编译/链接；载体现状见 §6.1）、SMP 结论（§9）、构建与链接约束、串口实录、已知限制、monitor telnet 调试
 ├── 发行版与版本策略.md                       # 【设计说明】版本号规则与三处一致、发布物清单、ABI 升版判据、预览版/正式版/1.0 判据、发版六步、明确不做的
 ├── 发行版与版本策略.en.md                   # 【English】浓缩英文版：发布=一个 tag + 一份发布说明、三段版本号何时动、-preview 只在 tag 上、四处一致与 release_check 六项、发布物清单、三个 ABI 编号、预览/正式/1.0 五条判据、发版六步顺序、四条不做；中文页 normative
