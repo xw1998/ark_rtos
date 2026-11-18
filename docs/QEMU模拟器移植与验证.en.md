@@ -2226,6 +2226,51 @@ mean a pile of stubs whose readings say nothing about "should the watchdog be fe
 exercise its call site, not its branches, so "ran once without crashing" is not written up as "branches
 verified".
 
+#### 5.30.22 Seventeenth one: `arkrtos_mbuf_recv_internal()` split into take-one / wait-one, dropping a verbatim copy (2026-11-18)
+
+In `arkrtos_mbuf_recv_internal()` (`kernelsrc/src/arkrtos_sbuf.c`, 153 lines) the block that answers "has a
+whole message arrived, and if so take it" appeared **twice, character for character**: once as the immediate
+attempt before blocking, once as the retry after `ARKRTOS_WAKE_HANDOFF`. Editing one copy and not the other
+would never be noticed:
+
+| Function | Scope | Lines |
+|---|---|---|
+| `mbuf_recv_try_take()` | one "has it arrived" probe: returns 0 when incomplete (IRQ still off, caller decides); when complete it finishes the whole job - drop the message if `buf` is too small and hand back `TOO_SMALL`, otherwise skip the header, copy the payload, `wake_one`, trace, enable IRQ, switch task, hand back the length | 46 |
+| `mbuf_recv_wait()` | known-incomplete and the caller is willing to wait: each round `waiter_add` -> handler check -> remaining time -> `trace_wait_obj` -> `task_block_in_critical`; without `WAKE_HANDOFF` it returns param error / timeout by `reason`, with it it retries `try_take()` and keeps looping if still incomplete | 52 |
+| `arkrtos_mbuf_recv_internal()` itself | argument and handle checks -> disable IRQ -> immediate `try_take()` -> `timeout_ms == 0` immediate timeout -> `get_current` context check -> compute `start_tick` / `deadline` -> `mbuf_recv_wait()` | **47** (was 153) |
+
+Three conventions: (1) the `mlen` test order and thresholds are unchanged - `(mlen <= 0) || (p_sb->count < ...)`
+is exactly the negation of the old `(mlen > 0) && (p_sb->count >= ...)`, not a new condition; (2) "too small
+means drop the whole message" stays inside the helper rather than being handed to the caller as an error code -
+dropping is part of taking, and it must stay atomic with `wake_one` / IRQ enable / task switch; (3) every return
+path still enables IRQ itself, and the only exit that does not is `try_take()` returning 0, because the caller is
+still inside the critical section.
+
+Normalised equivalence check: only-OLD **26 lines reduce to two things** - the second verbatim copy of the take
+block (drop path and normal path, 19 lines), and `return ret_len;` / `return ARKRTOS_SBUF_ERR_TOO_SMALL;` being
+rewritten as "write `*p_ret` then `return 1;`". only-NEW's 20 lines are the two signatures, `return 0;`,
+`*p_ret = ...; return 1;`, the `mbuf_recv_wait()` loop and the three calls from the entry. **No condition, error
+code, trace call, IRQ-enable or task-switch timing was changed.**
+
+Size: text `367752 -> 367752` (**+/-0 B**), `data` 440 / `bss` 767508 / image length 31,462,512 B unchanged;
+under `SOURCE_DATE_EPOCH=1600000000` the `.bin` from `BUILD=build/sbuf_split` and the rebuild in the default
+directory are **sha256-identical** (`783c394d0acfa98e694bcec1effecffb19fe34a61aa3a738c75ccce24330a0cd`), and it is
+the **same hash as the pre-split image** - the compiler had already merged the duplicate block, so this one buys
+readability, not bytes. `arkrtos_sbuf.c` has **0** warnings.
+
+Gates: `coverage-host` moves this file **44.85% -> 46.69%** (the second copy is never reached from the host flow,
+so removing it removes permanently-unexecuted lines from the denominator; the baseline is raised with `--update`
+to the measured **46.69**, **never lowered**), the other 9 modules stay at or above baseline; `sec-crc` 8 pins;
+`format_gate` 361 own files clean; the LA64 `example/qemu_loongarch64/shell_check.py` run **PASSES** (`mbuf`
+send/recv is really exercised by `utest`).
+
+`doc_audit.py funcs`: functions over 120 lines **17 -> 16**; the longest is now `audit_partition()` (152).
+
+**Evidence tier: compiles + same warning count + two reproducible builds sha256-identical to each other and to
+the pre-split image + QEMU end-to-end PASS; not verified on board.** No new test came with this one: every branch
+of `mbuf_recv_wait()` needs a real task table, a real blocking wake and a real timeout advance; on a host that is
+stubs. `utest` and `shell` exercise the call site, not the branches.
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine

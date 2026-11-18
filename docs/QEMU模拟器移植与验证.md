@@ -4504,6 +4504,46 @@ text `367576 → 367672`（**+96 B**，多出来的部分是三个 helper 的栈
 宿主上只能靠大量桩，读数说明不了「看门狗该不该喂」；`utest` 与 `shell` 覆盖的是它的调用点而不是它的分支，
 所以这里不把「跑过一遍没崩」写成「分支已验」。
 
+#### 5.30.22 第十七笔：`arkrtos_mbuf_recv_internal()` 把「取整条 / 等整条」拆开，去掉第二份逐字重复的取走代码（2026-11-18）
+
+`kernelsrc/src/arkrtos_sbuf.c` 的 `arkrtos_mbuf_recv_internal()`（153 行）里，「一条消息到齐了没有、
+到齐就整条取走」这段代码**逐字出现了两次**：一次在进阻塞之前的即时尝试，一次在被 `ARKRTOS_WAKE_HANDOFF`
+唤醒之后的重试。两份一模一样，改错一份不会有任何提示：
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `mbuf_recv_try_take()` | 一次「到齐了吗」判定：没到齐 `return 0`（中断仍关，交回调用方）；到齐就整条处理完——`buf` 放不下则整条丢弃并交出 `TOO_SMALL`，否则跳头取载荷、`wake_one`、trace、开中断、切任务、交出长度 | 46 |
+| `mbuf_recv_wait()` | 已确认没到齐且调用方愿意等：每轮 `waiter_add` → 中断上下文检测 → 剩余时间 → `trace_wait_obj` → `task_block_in_critical`；没带 `WAKE_HANDOFF` 按 `reason` 返回参数错 / 超时，带了就调 `try_take()` 重试，取不到继续下一轮 | 52 |
+| `arkrtos_mbuf_recv_internal()` 自己 | 参数与句柄校验 → 关中断 → `try_take()` 即时尝试 → `timeout_ms == 0` 立刻超时 → `get_current` 判上下文 → 算 `start_tick` / `deadline` → `mbuf_recv_wait()` | **47**（原 153） |
+
+口径三条：① `mlen` 判定顺序与阈值一字未改 —— helper 里写的 `(mlen <= 0) || (p_sb->count < …)` 就是原来
+`(mlen > 0) && (p_sb->count >= …)` 的取反，没有新条件；② 「放不下就整条丢掉」留在 helper 里而不是把错误码
+抛给调用方去丢 —— 丢掉是「取走」的一部分，必须与 `wake_one` / 开中断 / 切任务原子地一起做完；
+③ 每条返回路径仍自己 `ARKRTOS_ENABLE_IRQ()`，唯一不开中断的出口是 `try_take()` 返回 0，因为调用方还在
+临界区里继续等。
+
+等价性归一化比对（剥注释、逐行去空白、取多重集差）：only-OLD **26 行全部可归到两件事**——
+第二份逐字重复的取整条代码（丢弃路径与正常路径各一份，共 19 行），以及 `return ret_len;` /
+`return ARKRTOS_SBUF_ERR_TOO_SMALL;` 改成「写 `*p_ret` + `return 1;`」的形态改写；
+only-NEW 20 行全是两个签名、`return 0;`、`*p_ret = …; return 1;`、`mbuf_recv_wait()` 的循环与入口三处调用。
+**判断条件、错误码、trace 调用、开中断与切任务的时机一处未改。**
+
+体积：text `367752 → 367752`（**±0 B**），`data` 440 / `bss` 767508 / 镜像总长 31,462,512 B 不变；
+`SOURCE_DATE_EPOCH=1600000000` 下 `BUILD=build/sbuf_split` 与重建后的默认档两份 `.bin` **sha256 逐字节相同**
+（`783c394d0acfa98e694bcec1effecffb19fe34a61aa3a738c75ccce24330a0cd`），且与拆分前那一笔的镜像**也是同一个 sha256**
+—— 编译器本来就把第二份重复代码合并了，所以这一笔的收益在可读性而不是体积。`arkrtos_sbuf.c` 告警 **0 条**。
+
+门禁：`coverage-host` 里本文件 **44.85% → 46.69%**（重复的第二份代码在宿主流上走不到，去掉它等于把分母里
+永远不执行的整段删掉，比值自然上升；按惯例 `--update` 把基线抬到实测值 **46.69**，**未下调**），其余 9 个模块
+均不低于基线；`sec-crc` 8 pin 全过；`format_gate` 361 个自有文件干净；`example/qemu_loongarch64/shell_check.py`
+**PASS**（`mbuf` 收发在 shell 的 `utest` 里被真跑过）。
+
+`doc_audit.py funcs`：超过 120 行的函数 **17 → 16**；最长换成 `audit_partition()`（152）。
+
+**结论分档：编译通过 + 告警同数 + 两份可复现构建 sha256 相同且与拆分前逐字节相同 + QEMU 端到端 PASS，未上板。**
+这一笔不新增用例：`mbuf_recv_wait()` 的每条分支都要真任务表、真阻塞唤醒与真超时推进，宿主上只能堆桩；
+`utest` 与 `shell` 跑到的是它的调用点，不是分支。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

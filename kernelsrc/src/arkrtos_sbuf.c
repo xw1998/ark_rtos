@@ -941,85 +941,65 @@ int32 arkrtos_mbuf_peek_len_internal(int32 handle)
     return len;
 }
 
-int32 arkrtos_mbuf_recv_internal(int32 handle, void *buf, int32 len, int32 timeout_ms)
+/* 一条消息是否已经整条到齐。到齐就整条取走（buf 放不下则整条丢弃），
+ * 返回 1 表示已经处理完、中断已开、任务已切，*p_ret 就是最终返回码；
+ * 返回 0 表示还没到齐，中断仍关着，由调用方决定继续等还是放弃。 */
+static int32 mbuf_recv_try_take(arkrtos_sbuf_obj_t *p_sb, void *buf, int32 len,
+                                int32 handle, int32 *p_ret)
 {
-    arkrtos_sbuf_obj_t *p_sb;
-    arkrtos_task_t *p_tsk;
-    uint32 start_tick;
-    uint32 deadline;
-    int32 remain;
-    int32 ret;
     int32 mlen;
+    int32 ret_len;
     uint8 hdr[ARKRTOS_MBUF_HDR_BYTES];
 
-    if(buf == 0 || len <= 0)
-    {
-        return ARKRTOS_SBUF_ERR_PARAM;
-    }
-    p_sb = arkrtos_sbuf_get(handle);
-    if(p_sb == 0)
-    {
-        return ARKRTOS_SBUF_ERR_PARAM;
-    }
-
-    ARKRTOS_DISABLE_IRQ();
     mlen = arkrtos_mbuf_hdr_peek(p_sb);
-    if((mlen > 0) && (p_sb->count >= ((uint32)mlen + ARKRTOS_MBUF_HDR)))
+    if((mlen <= 0) || (p_sb->count < ((uint32)mlen + ARKRTOS_MBUF_HDR)))
     {
-        int32 ret_len;
+        return 0;
+    }
 
-        if(mlen > len)
+    if(mlen > len)
+    {
+        /* 放不下：整条丢掉。留一半会让下一次 recv 把剩下的半个身子
+         * 当成长度头来读，从此整条流都错位。 */
+        uint8 scratch[16];
+        uint32 left = (uint32)mlen + ARKRTOS_MBUF_HDR;
+
+        while(left > 0u)
         {
-            /* 放不下：整条丢掉。留一半会让下一次 recv 把剩下的半个身子
-             * 当成长度头来读，从此整条流都错位。 */
-            uint8 scratch[16];
-            uint32 left = (uint32)mlen + ARKRTOS_MBUF_HDR;
+            uint32 n = (left > sizeof(scratch)) ? (uint32)sizeof(scratch) : left;
 
-            while(left > 0u)
-            {
-                uint32 n = (left > sizeof(scratch)) ? (uint32)sizeof(scratch) : left;
-
-                arkrtos_sbuf_get_bytes(p_sb, scratch, n);
-                left -= n;
-            }
-            arkrtos_sbuf_wake_one(p_sb->send_waiters);
-            ARKRTOS_ENABLE_IRQ();
-            ARKRTOS_SWITCH_TASK();
-            return ARKRTOS_SBUF_ERR_TOO_SMALL;
+            arkrtos_sbuf_get_bytes(p_sb, scratch, n);
+            left -= n;
         }
-
-        /* 正常取整条：跳过长度头，再取载荷 */
-        arkrtos_sbuf_get_bytes(p_sb, hdr, ARKRTOS_MBUF_HDR);
-        ret_len = (int32)arkrtos_mbuf_get_hdr(hdr);
-        arkrtos_sbuf_get_bytes(p_sb, (uint8 *)buf, (uint32)ret_len);
         arkrtos_sbuf_wake_one(p_sb->send_waiters);
-        mdk_trace_arkrtos_obj_signal((uint16)(handle & ARKRTOS_HANDLE_RELMASK),
-                                     (uint8)MDK_TRACE_ARKRTOS_CLASS_QUEUE);
         ARKRTOS_ENABLE_IRQ();
         ARKRTOS_SWITCH_TASK();
-        return ret_len;
+        *p_ret = ARKRTOS_SBUF_ERR_TOO_SMALL;
+        return 1;
     }
 
-    if(timeout_ms == 0)
-    {
-        p_tsk = arkrtos_task_get_current();
-        if(p_tsk != 0)
-        {
-            arkrtos_sbuf_waiter_remove(p_sb->recv_waiters, p_tsk);
-        }
-        ARKRTOS_ENABLE_IRQ();
-        return ARKRTOS_SBUF_ERR_TIMEOUT;
-    }
+    /* 正常取整条：跳过长度头，再取载荷 */
+    arkrtos_sbuf_get_bytes(p_sb, hdr, ARKRTOS_MBUF_HDR);
+    ret_len = (int32)arkrtos_mbuf_get_hdr(hdr);
+    arkrtos_sbuf_get_bytes(p_sb, (uint8 *)buf, (uint32)ret_len);
+    arkrtos_sbuf_wake_one(p_sb->send_waiters);
+    mdk_trace_arkrtos_obj_signal((uint16)(handle & ARKRTOS_HANDLE_RELMASK),
+                                 (uint8)MDK_TRACE_ARKRTOS_CLASS_QUEUE);
+    ARKRTOS_ENABLE_IRQ();
+    ARKRTOS_SWITCH_TASK();
+    *p_ret = ret_len;
+    return 1;
+}
 
-    p_tsk = arkrtos_task_get_current();
-    if(p_tsk == 0)
-    {
-        ARKRTOS_ENABLE_IRQ();
-        return ARKRTOS_SBUF_ERR_PARAM;
-    }
-
-    start_tick = arkrtos_kernel_tick;
-    deadline   = (timeout_ms > 0) ? ARKRTOS_MS_TO_TICK((uint32)timeout_ms) : 0u;
+/* 已经确认「还没到齐」并且调用方愿意等，进来时中断是关的。
+ * 每一轮先登记等待者，再阻塞让出 CPU；被唤醒后重试取整条。 */
+static int32 mbuf_recv_wait(arkrtos_sbuf_obj_t *p_sb, void *buf, int32 len,
+                            int32 handle, arkrtos_task_t *p_tsk,
+                            uint32 start_tick, uint32 deadline)
+{
+    int32 remain;
+    int32 ret;
+    int32 out;
 
     for(;;)
     {
@@ -1059,40 +1039,59 @@ int32 arkrtos_mbuf_recv_internal(int32 handle, void *buf, int32 len, int32 timeo
             return ARKRTOS_SBUF_ERR_PARAM;
         }
 
-        mlen = arkrtos_mbuf_hdr_peek(p_sb);
-        if((mlen > 0) && (p_sb->count >= ((uint32)mlen + ARKRTOS_MBUF_HDR)))
+        if(mbuf_recv_try_take(p_sb, buf, len, handle, &out) != 0)
         {
-            int32 ret_len;
-
-            if(mlen > len)
-            {
-                uint8 scratch[16];
-                uint32 left = (uint32)mlen + ARKRTOS_MBUF_HDR;
-
-                while(left > 0u)
-                {
-                    uint32 n = (left > sizeof(scratch)) ? (uint32)sizeof(scratch) : left;
-
-                    arkrtos_sbuf_get_bytes(p_sb, scratch, n);
-                    left -= n;
-                }
-                arkrtos_sbuf_wake_one(p_sb->send_waiters);
-                ARKRTOS_ENABLE_IRQ();
-                ARKRTOS_SWITCH_TASK();
-                return ARKRTOS_SBUF_ERR_TOO_SMALL;
-            }
-
-            arkrtos_sbuf_get_bytes(p_sb, hdr, ARKRTOS_MBUF_HDR);
-            ret_len = (int32)arkrtos_mbuf_get_hdr(hdr);
-            arkrtos_sbuf_get_bytes(p_sb, (uint8 *)buf, (uint32)ret_len);
-            arkrtos_sbuf_wake_one(p_sb->send_waiters);
-            mdk_trace_arkrtos_obj_signal((uint16)(handle & ARKRTOS_HANDLE_RELMASK),
-                                         (uint8)MDK_TRACE_ARKRTOS_CLASS_QUEUE);
-            ARKRTOS_ENABLE_IRQ();
-            ARKRTOS_SWITCH_TASK();
-            return ret_len;
+            return out;
         }
     }
+}
+
+int32 arkrtos_mbuf_recv_internal(int32 handle, void *buf, int32 len, int32 timeout_ms)
+{
+    arkrtos_sbuf_obj_t *p_sb;
+    arkrtos_task_t *p_tsk;
+    uint32 start_tick;
+    uint32 deadline;
+    int32 ret;
+
+    if(buf == 0 || len <= 0)
+    {
+        return ARKRTOS_SBUF_ERR_PARAM;
+    }
+    p_sb = arkrtos_sbuf_get(handle);
+    if(p_sb == 0)
+    {
+        return ARKRTOS_SBUF_ERR_PARAM;
+    }
+
+    ARKRTOS_DISABLE_IRQ();
+    if(mbuf_recv_try_take(p_sb, buf, len, handle, &ret) != 0)
+    {
+        return ret;
+    }
+
+    if(timeout_ms == 0)
+    {
+        p_tsk = arkrtos_task_get_current();
+        if(p_tsk != 0)
+        {
+            arkrtos_sbuf_waiter_remove(p_sb->recv_waiters, p_tsk);
+        }
+        ARKRTOS_ENABLE_IRQ();
+        return ARKRTOS_SBUF_ERR_TIMEOUT;
+    }
+
+    p_tsk = arkrtos_task_get_current();
+    if(p_tsk == 0)
+    {
+        ARKRTOS_ENABLE_IRQ();
+        return ARKRTOS_SBUF_ERR_PARAM;
+    }
+
+    start_tick = arkrtos_kernel_tick;
+    deadline   = (timeout_ms > 0) ? ARKRTOS_MS_TO_TICK((uint32)timeout_ms) : 0u;
+
+    return mbuf_recv_wait(p_sb, buf, len, handle, p_tsk, start_tick, deadline);
 }
 
 int32 arkrtos_mbuf_send_from_isr_internal(int32 handle, const void *buf, int32 len)
