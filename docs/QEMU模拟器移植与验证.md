@@ -3825,6 +3825,36 @@ after   text 367584 / data 440 / bss 767508   sha256 66a09c13…   31,462,512 B
 `python example/qemu_loongarch64/shell_check.py` 仍 `PASS`（横幅/help/uname/dt/ls/cat/
 stack/utest 九组全部通过），`stack` 报 `9 task(s)`、`0 unmeasured`、`0 at/over 90%`。
 
+#### 5.30.6 再整理一次：`elf_load()` 拆成三个阶段（2026-11-18）
+
+紧接着上一节，`kernelsrc/src/arkrtos_elf.c` 的 `elf_load()`（278 行）按它自己注释里已经
+写明的三段——**第一遍只校验 / 第二遍真写 / 注册任务并降权**——拆成三个 `static` 函数：
+
+| 函数 | 位置 | 职责 |
+|---|---|---|
+| `elf_check_segments()` | `arkrtos_elf.c:558` | 只遍历程序头做校验（拒绝 `PT_INTERP`、拒绝 `p_filesz > p_memsz`、用减法写的窗口范围判据），一个字节都不写，返回可见 `PT_LOAD` 段数 |
+| `elf_write_segments()` | `arkrtos_elf.c:621` | 真写：`filesz` 段拷贝 + `memsz - filesz` 清零（BSS）；分页档走 `elf_copy_to_window()` / `elf_zero_window()`，非分页档走 `elf_read_exact()` / `elf_memzero()` |
+| `elf_start_task()` | `arkrtos_elf.c:694` | `注册 → 降权 → MPU 窗口写回 → 绑帧`整段（`ARKRTOS_ENTER_CRITICAL()` 到 `ARKRTOS_EXIT_CRITICAL()`），返回任务 id |
+
+`elf_load()` 本身从 278 行降到 **143 行**，只剩「参数检查 + 读 ELF 头 + 入口判据 +
+三次阶段调用 + 填 `p_info`」。等价性仍用归一化行多重集比对：差异只允许是新增的函数骨架、
+`*p_segs` / `*p_bytes` / `return id` 三处收尾语句、三次调用，以及把 `win_base` 在
+`elf_start_task()` 里换成 `(uint32)ARKRTOS_ELF_WINDOW_BASE`（该函数不再收这个参数）。
+
+同口径读数（`SOURCE_DATE_EPOCH=1600000000`、`objcopy -O binary`）：
+
+```
+before  text 367584 / data 440 / bss 767508   sha256 66a09c13…   31,462,512 B
+after   text 367600 / data 440 / bss 767508   sha256 2968c36e…   31,462,512 B
+```
+
+`text` +16 B，`data` / `bss` 与镜像总长不变；**同样不得声称逐字节不变**。
+行为判据是 `example/qemu_loongarch64/shell_check.py` 仍 `PASS`（横幅/help/uname/dt/ls/cat/
+stack/utest 九组全部通过，`[ELF]`/`[MOD]` 两条 tamper check 也在其中）。
+
+拆完之后 `doc_audit.py funcs` 的最长函数换成 `arkrtos_modld.c` 的 `mod_one_rela()`
+（252 行），`elf_load` 退出最前列。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

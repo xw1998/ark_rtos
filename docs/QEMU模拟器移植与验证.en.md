@@ -1449,6 +1449,39 @@ change, only the behaviour did not. The behavioural criterion is that
 `python example/qemu_loongarch64/shell_check.py` still prints `PASS` (all nine groups),
 with `stack` reporting `9 task(s)`, `0 unmeasured`, `0 at/over 90%`.
 
+#### 5.30.6 One more cleanup: `elf_load()` split into three stages (2026-11-18)
+
+Directly on top of the previous subsection, `elf_load()` in `kernelsrc/src/arkrtos_elf.c`
+(278 lines) was split along the three stages its own comment already named - **pass 1 validate,
+pass 2 write, then register and drop privilege** - into three `static` functions:
+
+| Function | Location | Responsibility |
+|---|---|---|
+| `elf_check_segments()` | `arkrtos_elf.c:558` | Walks the program headers for validation only (rejects `PT_INTERP`, rejects `p_filesz > p_memsz`, uses the subtraction form of the window range test); writes nothing; returns the visible `PT_LOAD` segment count |
+| `elf_write_segments()` | `arkrtos_elf.c:621` | Does the actual writing: copy the `filesz` part, then zero `memsz - filesz` (BSS); paging builds go through `elf_copy_to_window()` / `elf_zero_window()`, non-paging builds through `elf_read_exact()` / `elf_memzero()` |
+| `elf_start_task()` | `arkrtos_elf.c:694` | The whole `register -> drop privilege -> write back MPU window -> bind frames` sequence (`ARKRTOS_ENTER_CRITICAL()` through `ARKRTOS_EXIT_CRITICAL()`), returning the task id |
+
+`elf_load()` itself drops from 278 to **143 lines**, keeping only argument checks, reading the
+ELF header, the entry-point test, the three stage calls and filling `p_info`. Equivalence was
+again argued with the normalised line multiset: the only permitted differences are the new
+function skeletons, the `*p_segs` / `*p_bytes` / `return id` tails, the three calls, and
+`win_base` becoming `(uint32)ARKRTOS_ELF_WINDOW_BASE` inside `elf_start_task()` (that function
+no longer takes the parameter).
+
+Same criterion (`SOURCE_DATE_EPOCH=1600000000`, `objcopy -O binary`):
+
+```
+before  text 367584 / data 440 / bss 767508   sha256 66a09c13...   31,462,512 B
+after   text 367600 / data 440 / bss 767508   sha256 2968c36e...   31,462,512 B
+```
+
+`text` +16 B, `data` / `bss` and the image length unchanged; **again do not claim
+byte-identical**. The behavioural criterion is that `example/qemu_loongarch64/shell_check.py`
+still prints `PASS` (all nine groups, including the `[ELF]` / `[MOD]` tamper checks).
+
+After the split the longest function reported by `doc_audit.py funcs` is `mod_one_rela()` in
+`arkrtos_modld.c` (252 lines); `elf_load` leaves the front of the list.
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine

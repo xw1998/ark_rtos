@@ -550,6 +550,199 @@ static int32 elf_build_stack(uint32 win_top, uint32 argv_start,
 
 /* ---------------------------------------------------------------- 对外 */
 
+/* ---------------------------------------------- 装载的三个阶段 */
+
+/* 第一遍：只校验。任何一段不合法都在**写坏字节之前**返回，
+ * 否则一个坏镜像会留下半个程序，下一次装载读到的是混合内容。
+ * 返回可见的 PT_LOAD 段数（0 段由调用方判成格式错误）。 */
+static int32 elf_check_segments(const char *path, uint32 phoff, uint16 phnum,
+                                uint16 phentsize, uint32 win_base,
+                                uint32 stack_bottom, uint32 *p_segs)
+{
+    uint8 phdr[ELF_PHDR_SIZE];
+    uint32 segs = 0u;
+    uint32 i;
+    int32 rc;
+
+    for(i = 0u; i < (uint32)phnum; i++)
+    {
+        elf_word_t p_type;
+        elf_word_t p_vaddr;
+        elf_word_t p_filesz;
+        elf_word_t p_memsz;
+
+        rc = elf_read_exact(path, phdr, ELF_PHDR_SIZE,
+                            (uint32)phoff + (i * (uint32)phentsize));
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return rc;
+        }
+
+        p_type   = (elf_word_t)elf_rd32(phdr + 0);
+        p_vaddr  = elf_rdword(phdr + ELF_PH_VADDR);
+        p_filesz = elf_rdword(phdr + ELF_PH_FILESZ);
+        p_memsz  = elf_rdword(phdr + ELF_PH_MEMSZ);
+
+        if(p_type == (unsigned long)ELF_PT_INTERP)
+        {
+            /* 有解释器 = 动态链接。没有 ld.so，跑起来只会跳到 PLT 桩。 */
+            return ARKRTOS_ELF_ERR_FORMAT;
+        }
+        if(p_type != (unsigned long)ELF_PT_LOAD)
+        {
+            continue;
+        }
+        if(p_filesz > p_memsz)
+        {
+            return ARKRTOS_ELF_ERR_LAYOUT;
+        }
+        /* 用减法写这个判据，不用 p_vaddr + p_memsz：32 位 port 上那个加法
+         * 会在 0xFFFFFFxx 处回绕，一段"跨过 4 GB 边界"的坏镜像就能通过。 */
+        if((p_vaddr < (elf_word_t)win_base) ||
+           (p_vaddr > (elf_word_t)stack_bottom) ||
+           (p_memsz > ((elf_word_t)stack_bottom - p_vaddr)))
+        {
+            return ARKRTOS_ELF_ERR_LAYOUT;
+        }
+        segs++;
+    }
+
+    if(segs == 0u)
+    {
+        /* 没有 PT_LOAD 的 ELF 是合法的（目标文件/调试信息），但没有东西可跑。 */
+        return ARKRTOS_ELF_ERR_FORMAT;
+    }
+
+    *p_segs = segs;
+    return ARKRTOS_ELF_OK;
+}
+
+/* 第二遍：真写。先 filesz 拷数据，再 memsz-filesz 清零（BSS）。
+ * 顺序不能反：清零写在拷贝之前会被后面的数据覆盖，写在之后才是对的。 */
+static int32 elf_write_segments(const char *path, uint32 space, uint32 phoff,
+                                uint16 phnum, uint16 phentsize,
+                                uint32 *p_bytes)
+{
+    uint8 phdr[ELF_PHDR_SIZE];
+    uint32 bytes = 0u;
+    uint32 i;
+    int32 rc;
+
+    bytes = 0u;
+    for(i = 0u; i < (uint32)phnum; i++)
+    {
+        elf_word_t p_type;
+        elf_word_t p_offset;
+        elf_word_t p_vaddr;
+        elf_word_t p_filesz;
+        elf_word_t p_memsz;
+        uint8 *dst;
+
+        rc = elf_read_exact(path, phdr, ELF_PHDR_SIZE,
+                            (uint32)phoff + (i * (uint32)phentsize));
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return rc;
+        }
+
+        p_type   = elf_rd32(phdr + 0);
+        if(p_type != (unsigned long)ELF_PT_LOAD)
+        {
+            continue;
+        }
+        p_offset = elf_rdword(phdr + ELF_PH_OFFSET);
+        p_vaddr  = elf_rdword(phdr + ELF_PH_VADDR);
+        p_filesz = elf_rdword(phdr + ELF_PH_FILESZ);
+        p_memsz  = elf_rdword(phdr + ELF_PH_MEMSZ);
+        dst      = (uint8 *)(unsigned long)p_vaddr;
+#if (ARKRTOS_USE_PAGING == 1)
+        (void)dst;   /* 分页档不直接用窗口指针：统一走 elf_copy_to_window() */
+#endif
+
+        if(p_filesz > 0ul)
+        {
+#if (ARKRTOS_USE_PAGING == 1)
+            /* 这一段必须落在 space 的那块帧里：elf_copy_to_window() 每写
+             * 4 KB 之前重装一次空间，抢占把窗口换走也不会写错帧。 */
+            rc = elf_copy_to_window(space, path, (uint32)p_vaddr,
+                                    (uint32)p_filesz, (uint32)p_offset);
+#else
+            rc = elf_read_exact(path, dst, (uint32)p_filesz, (uint32)p_offset);
+#endif
+            if(rc != ARKRTOS_ELF_OK)
+            {
+                return rc;
+            }
+            bytes += (uint32)p_filesz;
+        }
+        if(p_memsz > p_filesz)
+        {
+#if (ARKRTOS_USE_PAGING == 1)
+            elf_zero_window(space, (uint32)p_vaddr + (uint32)p_filesz,
+                            (uint32)(p_memsz - p_filesz));
+#else
+            elf_memzero(dst + p_filesz, (uint32)(p_memsz - p_filesz));
+#endif
+        }
+    }
+
+    *p_bytes = bytes;
+    return ARKRTOS_ELF_OK;
+}
+
+/* 第三阶段：注册任务、降权、写回窗口、绑帧，整段做成原子段。
+ * 只在这一处做，是因为这四步之间被 tick 切走就会露出半配置状态
+ * （5 连跑 2 败的间歇签名，见 §5.25）。返回任务 id 或负错误码。 */
+static int32 elf_start_task(elf_word_t entry, uint32 stack_bottom,
+                            uint32 stack_bytes, uint32 space)
+{
+    uint32 crit;
+    int32 id;
+
+    crit = ARKRTOS_ENTER_CRITICAL();
+    id = arkrtos_task_register((void (*)(void))(unsigned long)entry,
+                               (uint32 *)(unsigned long)stack_bottom,
+                               stack_bytes,
+                               (uint8)ARKRTOS_ELF_TASK_PRIORITY, 0u);
+    if(id <= 0)
+    {
+        ARKRTOS_EXIT_CRITICAL(crit);
+        return ARKRTOS_ELF_ERR_NOMEM;
+    }
+
+    /* 注册出来的任务默认是特权任务；ELF 程序必须降权，否则隔离为空。 */
+    arkrtos_task_table[id - 1].is_priv = 0u;
+
+#if (ARKRTOS_USE_MPU == 1)
+    /* 无分页档（RV32 的 PMP）：U 模式任务能碰的只有 TCB 记的这几个窗口。
+     * 装载器必须把「代码窗口 = 数据窗口 = 这一块可执行 RAM」写回 TCB，
+     * 再重建区域集 —— 否则任务拿着内核默认窗口起跑：轻则一取指就 fault，
+     * 重则整块内核 RAM 对它可读可写，隔离等于没开。 */
+    {
+        arkrtos_task_t *p_task = &arkrtos_task_table[id - 1];
+
+        p_task->rom_start = (uint32)ARKRTOS_ELF_WINDOW_BASE;
+        p_task->rom_size  = (uint32)ARKRTOS_ELF_WINDOW_SIZE;
+        p_task->ram_start = (uint32)ARKRTOS_ELF_WINDOW_BASE;
+        p_task->ram_size  = (uint32)ARKRTOS_ELF_WINDOW_SIZE;
+        arkrtos_mpu_build_task(p_task);
+    }
+#endif
+
+#if (ARKRTOS_USE_PAGING == 1)
+    /* 任务必须绑到「段被写进去的那个空间」：否则写的是 frame A、跑的是
+     * frame B —— 程序一取指就落进别人的帧。绑定只记一个号，真正切换
+     * 发生在下一次调度到它的时候。 */
+    (void)arkrtos_paging_bind_task(&arkrtos_task_table[id - 1], space);
+#endif
+
+    /* 原子段落在这里收口：此后任务已降权、窗口已写回、帧已绑定，
+     * 无论调度器在下一条指令切进来，看到的都是一个完整可跑的上下文。 */
+    ARKRTOS_EXIT_CRITICAL(crit);
+
+    return id;
+}
+
 /**
 * @brief 把一份 ELF64 装进指定地址空间并起一个降权任务
 * @param space   目标地址空间（0 .. 空间数-1）；窗口 VA 在每个空间里相同
@@ -561,7 +754,6 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
                       char *argv[], arkrtos_elf_info_t *p_info)
 {
     uint8 hdr[ELF_EHDR_SIZE];
-    uint8 phdr[ELF_PHDR_SIZE];
     elf_word_t entry = 0;
     elf_word_t phoff = 0;
     uint16 phnum = 0u;
@@ -577,7 +769,6 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
     uint32 i;
     int32 rc;
     int32 id;
-    uint32 crit;
     char *argv_auto[1];
 
     if((path == 0) || (path[0] == '\0'))
@@ -641,10 +832,8 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
         return rc;
     }
 
-
-    /* 入口必须落在窗口内且 4 字节对齐：LoongArch 的指令永远是 4 字节。 */
-/* 入口必须落在窗口内且 4 字节对齐：RV32 与 LoongArch 的指令都是 4 字节
- * （RV32 的压缩扩展只让指令可能变短，不会让入口变半字对齐）。 */
+    /* 入口必须落在窗口内且 4 字节对齐：RV32 与 LoongArch 的指令都是 4 字节
+     * （RV32 的压缩扩展只让指令可能变短，不会让入口变半字对齐）。 */
     if((entry < (elf_word_t)win_base) ||
        (entry > ((elf_word_t)stack_bottom - 4u)) ||
        ((entry & 3u) != 0u))
@@ -652,115 +841,19 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
         return ARKRTOS_ELF_ERR_LAYOUT;
     }
 
-    /* 第一遍：只校验。任何一段不合法都在**写坏字节之前**返回，
-     * 否则一个坏镜像会留下半个程序，下一次装载读到的是混合内容。 */
-    for(i = 0u; i < (uint32)phnum; i++)
+    rc = elf_check_segments(path, (uint32)phoff, phnum, phentsize,
+                            win_base, stack_bottom, &segs);
+    if(rc != ARKRTOS_ELF_OK)
     {
-        elf_word_t p_type;
-        elf_word_t p_vaddr;
-        elf_word_t p_filesz;
-        elf_word_t p_memsz;
-
-        rc = elf_read_exact(path, phdr, ELF_PHDR_SIZE,
-                            (uint32)phoff + (i * (uint32)phentsize));
-        if(rc != ARKRTOS_ELF_OK)
-        {
-            return rc;
-        }
-
-        p_type   = (elf_word_t)elf_rd32(phdr + 0);
-        p_vaddr  = elf_rdword(phdr + ELF_PH_VADDR);
-        p_filesz = elf_rdword(phdr + ELF_PH_FILESZ);
-        p_memsz  = elf_rdword(phdr + ELF_PH_MEMSZ);
-
-        if(p_type == (unsigned long)ELF_PT_INTERP)
-        {
-            /* 有解释器 = 动态链接。没有 ld.so，跑起来只会跳到 PLT 桩。 */
-            return ARKRTOS_ELF_ERR_FORMAT;
-        }
-        if(p_type != (unsigned long)ELF_PT_LOAD)
-        {
-            continue;
-        }
-        if(p_filesz > p_memsz)
-        {
-            return ARKRTOS_ELF_ERR_LAYOUT;
-        }
-        /* 用减法写这个判据，不用 p_vaddr + p_memsz：32 位 port 上那个加法
-         * 会在 0xFFFFFFxx 处回绕，一段"跨过 4 GB 边界"的坏镜像就能通过。 */
-        if((p_vaddr < (elf_word_t)win_base) ||
-           (p_vaddr > (elf_word_t)stack_bottom) ||
-           (p_memsz > ((elf_word_t)stack_bottom - p_vaddr)))
-        {
-            return ARKRTOS_ELF_ERR_LAYOUT;
-        }
-        segs++;
+        return rc;
     }
 
-    if(segs == 0u)
+
+    rc = elf_write_segments(path, space, (uint32)phoff, phnum, phentsize,
+                            &bytes);
+    if(rc != ARKRTOS_ELF_OK)
     {
-        /* 没有 PT_LOAD 的 ELF 是合法的（目标文件/调试信息），但没有东西可跑。 */
-        return ARKRTOS_ELF_ERR_FORMAT;
-    }
-
-    /* 第二遍：真写。先 filesz 拷数据，再 memsz-filesz 清零（BSS）。
-     * 顺序不能反：清零写在拷贝之前会被后面的数据覆盖，写在之后才是对的。 */
-    bytes = 0u;
-    for(i = 0u; i < (uint32)phnum; i++)
-    {
-        elf_word_t p_type;
-        elf_word_t p_offset;
-        elf_word_t p_vaddr;
-        elf_word_t p_filesz;
-        elf_word_t p_memsz;
-        uint8 *dst;
-
-        rc = elf_read_exact(path, phdr, ELF_PHDR_SIZE,
-                            (uint32)phoff + (i * (uint32)phentsize));
-        if(rc != ARKRTOS_ELF_OK)
-        {
-            return rc;
-        }
-
-        p_type   = elf_rd32(phdr + 0);
-        if(p_type != (unsigned long)ELF_PT_LOAD)
-        {
-            continue;
-        }
-        p_offset = elf_rdword(phdr + ELF_PH_OFFSET);
-        p_vaddr  = elf_rdword(phdr + ELF_PH_VADDR);
-        p_filesz = elf_rdword(phdr + ELF_PH_FILESZ);
-        p_memsz  = elf_rdword(phdr + ELF_PH_MEMSZ);
-        dst      = (uint8 *)(unsigned long)p_vaddr;
-#if (ARKRTOS_USE_PAGING == 1)
-        (void)dst;   /* 分页档不直接用窗口指针：统一走 elf_copy_to_window() */
-#endif
-
-        if(p_filesz > 0ul)
-        {
-#if (ARKRTOS_USE_PAGING == 1)
-            /* 这一段必须落在 space 的那块帧里：elf_copy_to_window() 每写
-             * 4 KB 之前重装一次空间，抢占把窗口换走也不会写错帧。 */
-            rc = elf_copy_to_window(space, path, (uint32)p_vaddr,
-                                    (uint32)p_filesz, (uint32)p_offset);
-#else
-            rc = elf_read_exact(path, dst, (uint32)p_filesz, (uint32)p_offset);
-#endif
-            if(rc != ARKRTOS_ELF_OK)
-            {
-                return rc;
-            }
-            bytes += (uint32)p_filesz;
-        }
-        if(p_memsz > p_filesz)
-        {
-#if (ARKRTOS_USE_PAGING == 1)
-            elf_zero_window(space, (uint32)p_vaddr + (uint32)p_filesz,
-                            (uint32)(p_memsz - p_filesz));
-#else
-            elf_memzero(dst + p_filesz, (uint32)(p_memsz - p_filesz));
-#endif
-        }
+        return rc;
     }
 
 #if (ARKRTOS_USE_PAGING == 1)
@@ -784,46 +877,11 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
      * 若在这中间被 tick 切走，任务会以半配置状态被切进：跑在 M 模式看到的是
      * 特权，降权后窗口未写回看到的就是 mcause=1 mtval=0x02000000 的取指 fault
      * （5 连跑 2 败的间歇签名）。因此把 注册 → 降权 → MPU 写回 整段做成原子段。 */
-    crit = ARKRTOS_ENTER_CRITICAL();
-    id = arkrtos_task_register((void (*)(void))(unsigned long)entry,
-                               (uint32 *)(unsigned long)stack_bottom,
-                               stack_bytes,
-                               (uint8)ARKRTOS_ELF_TASK_PRIORITY, 0u);
+    id = elf_start_task(entry, stack_bottom, stack_bytes, space);
     if(id <= 0)
     {
-        ARKRTOS_EXIT_CRITICAL(crit);
-        return ARKRTOS_ELF_ERR_NOMEM;
+        return id;
     }
-
-    /* 注册出来的任务默认是特权任务；ELF 程序必须降权，否则隔离为空。 */
-    arkrtos_task_table[id - 1].is_priv = 0u;
-
-#if (ARKRTOS_USE_MPU == 1)
-    /* 无分页档（RV32 的 PMP）：U 模式任务能碰的只有 TCB 记的这几个窗口。
-     * 装载器必须把「代码窗口 = 数据窗口 = 这一块可执行 RAM」写回 TCB，
-     * 再重建区域集 —— 否则任务拿着内核默认窗口起跑：轻则一取指就 fault，
-     * 重则整块内核 RAM 对它可读可写，隔离等于没开。 */
-    {
-        arkrtos_task_t *p_task = &arkrtos_task_table[id - 1];
-
-        p_task->rom_start = win_base;
-        p_task->rom_size  = (uint32)ARKRTOS_ELF_WINDOW_SIZE;
-        p_task->ram_start = win_base;
-        p_task->ram_size  = (uint32)ARKRTOS_ELF_WINDOW_SIZE;
-        arkrtos_mpu_build_task(p_task);
-    }
-#endif
-
-#if (ARKRTOS_USE_PAGING == 1)
-    /* 任务必须绑到「段被写进去的那个空间」：否则写的是 frame A、跑的是
-     * frame B —— 程序一取指就落进别人的帧。绑定只记一个号，真正切换
-     * 发生在下一次调度到它的时候。 */
-    (void)arkrtos_paging_bind_task(&arkrtos_task_table[id - 1], space);
-#endif
-
-    /* 原子段落在这里收口：此后任务已降权、窗口已写回、帧已绑定，
-     * 无论调度器在下一条指令切进来，看到的都是一个完整可跑的上下文。 */
-    ARKRTOS_EXIT_CRITICAL(crit);
 
     p_info->entry      = (uint32)entry;
     p_info->bytes      = bytes;
