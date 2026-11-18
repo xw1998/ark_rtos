@@ -83,6 +83,7 @@
 | 想让门禁在 Gitee 上自动跑、并看清哪些项没跑 | [远程CI与门禁裁剪.md](远程CI与门禁裁剪.md)（`ci_gate --remote` 远程档、裁掉的 17 项及其工具链、skip 不等于 pass、未验证部分写死） |
 | Read the remote-CI page in English | [远程CI与门禁裁剪.en.md](远程CI与门禁裁剪.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 想让空白/制表符/行尾这类"风格问题"被机器判而不是靠人 | [格式基线.md](格式基线.md)（只判四条纯字节规则：无制表符、无行尾空白、文件以换行结尾、无 BOM；豁免 vendored 树；`\r\n` 让 `__LINE__` 偏移 1143 的实证） |
+| Read the format-baseline page in English | [格式基线.en.md](格式基线.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 手上没有板子，想在 PC 上真跑一遍 port 层（trap 入口/上下文切换/SVC 通路/定时器） | [QEMU模拟器移植与验证.md](QEMU模拟器移植与验证.md)（QEMU 9.2.3 环境与依赖 DLL 补丁、RV32 单 M 模式 port、LA64 单核 port、**LA32 只到编译/链接（载体 `la32r-QEMU` / `loongson-community/qemu:la32-user-exp` 都存在，但只有 Linux 发行包或源码，本机不能执行，见 §6.1.1）**、**SMP 可仿真但内核侧一步未做（§9）**、trap 帧与取号、无 libgcc/libc 约束、**PRMD 位序坑**、串口实录、已知限制、monitor telnet 调试手法、**三目标功能矩阵与逐开关实录（audit / crash_log / mdk_trace / seccheck / softbus / image_sign / hw_safe / kernel_guard）**） |
 | 用英文读同一份限制清单（哪些是取舍、哪些是欠账） | [已知限制.en.md](已知限制.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 
@@ -158,6 +159,7 @@ docs/
 
 ├── 欠账盘点.md                              # 【清单】功能/工程能力/易读性/文档四类欠账，每条带核对命令与判据、优先级与维护规则
 ├── 格式基线.md                              # 【设计说明】`.editorconfig` + `tools/format_gate.py`：四条纯字节规则（无制表符/无行尾空白/文件以换行结尾/无 BOM）、vendored 豁免表、喂毒自检、`\r\r\n` 致 `__LINE__` 偏移 1143 的取证
+├── 格式基线.en.md                           # 【English】浓缩英文版：为什么只判四条纯字节规则（本机无 clang-format、GBK 与 UTF-8 并存）、F1-F4 判据、积极豁免的 vendored 树、喂毒自检是门禁一半、1143 行多余 CR 让 __LINE__ 偏移 4779 对 3636 的取证与 58 字节镜像差、.gitattributes 两个 -text 例外、加新规则的顺序、四条不许读成什么；中文页 normative
 ├── 远程CI与门禁裁剪.md                      # 【设计说明】Gitee Go 远程档：为什么裁 17 项（缺 Keil/交叉编译器）、skip 不等于 pass、NOT VERIFIED 清单、工作流本身与 runner 读数均未验证的口径
 ├── 远程CI与门禁裁剪.en.md                   # 【English】浓缩英文版：17 项要开发机工具链所以远程档裁掉、三种糊弄法为何都不接受、skip 不是 pass 的三条口径、30/0/17 读数与 NOT VERIFIED 清单、哪些真跑哪些靠本机替代取证、工作流与 runner 读数均未验证、之后还剩三步；中文页 normative
 ├── 与Linux差距盘点.md                      # 【设计说明】与 Linux 逐维度差距表 + 欠账排序 + 明确不做的取舍
