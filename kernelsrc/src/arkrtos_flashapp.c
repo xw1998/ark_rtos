@@ -210,17 +210,178 @@ static int32 flashapp_check_shape(uint32 len, uint32 sp, uint32 vec, uint16 pro)
     return 0;
 }
 
-int32 arkrtos_flashapp_write(const char *path, uint32 *p_len)
+/* 单实例闸门：占位（写入中）。返回 0 表示占到，调用方必须配一次
+ * flashapp_busy_release()；返回 ERR_BUSY 时没占，什么也不用收。 */
+static int32 flashapp_busy_claim(void)
 {
     uint32 irq;
+
+    arkrtos_spin_lock_irqsave(&g_flashapp_lock, &irq);
+    if(g_flashapp_task != 0u)
+    {
+        arkrtos_spin_unlock_irqrestore(&g_flashapp_lock, irq);
+        return ARKRTOS_FLASHAPP_ERR_BUSY;
+    }
+    g_flashapp_task = 0xFFFFFFFFu;          /* 占位：写入中 */
+    arkrtos_spin_unlock_irqrestore(&g_flashapp_lock, irq);
+
+    return 0;
+}
+
+/* 放掉单实例闸门。任何返回路径都必须走到这里。 */
+static void flashapp_busy_release(void)
+{
+    uint32 irq;
+
+    arkrtos_spin_lock_irqsave(&g_flashapp_lock, &irq);
+    g_flashapp_task = 0u;
+    arkrtos_spin_unlock_irqrestore(&g_flashapp_lock, irq);
+}
+
+/* 第三步：分块读 + 写。源缓冲 32 字节对齐、且同一次写入内按顺序单调
+ * 推进——H7 的 flash word 编程是读-改-写，同一 32 字节块只能编程一次。
+ * 调用方须已持调度锁、已擦区。 */
+static int32 flashapp_program(const char *path, uint32 len)
+{
+    int32  fd;
+    int32  n;
+    uint32 total = 0u;
+
+    fd = arkrtos_vfs_open_read(path);
+    if(fd < 0)
+    {
+        return ARKRTOS_MINI_ERR_FS;
+    }
+
+    while(total < len)
+    {
+        uint32 want = len - total;
+
+        if(want > FLASHAPP_IO_CHUNK)
+        {
+            want = FLASHAPP_IO_CHUNK;
+        }
+
+        n = arkrtos_vfs_read(fd, g_flashapp_io, want);
+        if(n <= 0)
+        {
+            /* 前面刚扫过一遍都读得通，这里读不到说明文件被改了或被卸了卷。
+             * 区已经被擦，没有回滚——如实报「写入失败、区里现在是空的」。 */
+            (void)arkrtos_vfs_close(fd);
+            return ARKRTOS_MINI_ERR_FS;
+        }
+
+        if(arkrtos_port_flash_write((uint32)ARKRTOS_FLASHAPP_BASE + total,
+                                    g_flashapp_io, (uint32)n) != 0)
+        {
+            (void)arkrtos_vfs_close(fd);
+            return ARKRTOS_FLASHAPP_ERR_FLASH;
+        }
+
+        total += (uint32)n;
+    }
+
+    (void)arkrtos_vfs_close(fd);
+
+    return 0;
+}
+
+/* 第四步：回读逐字节比对。写入返回 0 只说明「下发成功」，不说明
+ * 「落进去的是这些字节」——这一步才是「写对了」的唯一证据。
+ * 调用方须已持调度锁。 */
+static int32 flashapp_verify(const char *path, uint32 len)
+{
+    int32  fd;
+    int32  n;
+    uint32 total = 0u;
+
+    fd = arkrtos_vfs_open_read(path);
+    if(fd < 0)
+    {
+        return ARKRTOS_MINI_ERR_FS;
+    }
+
+    while(total < len)
+    {
+        uint32 want = len - total;
+        uint32 i;
+
+        if(want > FLASHAPP_IO_CHUNK)
+        {
+            want = FLASHAPP_IO_CHUNK;
+        }
+
+        n = arkrtos_vfs_read(fd, g_flashapp_io, want);
+        if(n <= 0)
+        {
+            (void)arkrtos_vfs_close(fd);
+            return ARKRTOS_MINI_ERR_FS;
+        }
+
+        for(i = 0u; i < (uint32)n; i++)
+        {
+            if(g_flashapp_io[i] !=
+               *(volatile const uint8 *)((uint32)ARKRTOS_FLASHAPP_BASE + total + i))
+            {
+                (void)arkrtos_vfs_close(fd);
+                return ARKRTOS_FLASHAPP_ERR_VERIFY;
+            }
+        }
+
+        total += (uint32)n;
+    }
+
+    (void)arkrtos_vfs_close(fd);
+
+    return 0;
+}
+
+/* 第五步：写元数据（区尾固定 32 字节）并回读。放在最后：中途掉电时元数据
+ * 缺失 ⇒ info 判「这里没有产物」，而不是让一份半截镜像看起来能跑。
+ * 调用方须已持调度锁。 */
+static int32 flashapp_write_meta(uint32 len, uint32 crc)
+{
+    static flashapp_meta_t meta __attribute__((aligned(32)));
+    uint32 i;
+
+    meta.magic   = (uint32)ARKRTOS_FLASHAPP_MAGIC;
+    meta.len     = len;
+    meta.crc     = crc;
+    meta.version = (uint32)ARKRTOS_FLASHAPP_VERSION;
+    for(i = 0u; i < 4u; i++)
+    {
+        meta.rsv[i] = 0xFFFFFFFFu;
+    }
+
+    if(arkrtos_port_flash_write((uint32)ARKRTOS_FLASHAPP_META_BASE,
+                                (const uint8 *)(const void *)&meta,
+                                (uint32)sizeof(meta)) != 0)
+    {
+        return ARKRTOS_FLASHAPP_ERR_FLASH;
+    }
+
+    /* 元数据也要回读：写接口返回 0 不等于落进去的是这 32 字节。 */
+    for(i = 0u; i < (uint32)sizeof(meta); i++)
+    {
+        if(((const volatile uint8 *)(const void *)&meta)[i] !=
+           *(volatile const uint8 *)((uint32)ARKRTOS_FLASHAPP_META_BASE + i))
+        {
+            return ARKRTOS_FLASHAPP_ERR_VERIFY;
+        }
+    }
+
+    return 0;
+}
+
+/* 写路径：先整份验 → 再擦 → 分块写 → 回读比对 → 写元数据。
+ * 五步各自一个函数，本函数只负责闸门、调度锁与错误码收口。 */
+int32 arkrtos_flashapp_write(const char *path, uint32 *p_len)
+{
     uint32 len  = 0u;
     uint32 crc  = 0u;
     uint32 sp   = 0u;
     uint32 vec  = 0u;
     uint16 pro  = 0u;
-    uint32 total;
-    int32  fd;
-    int32  n;
     int32  ret;
 
     if(path == 0)
@@ -236,14 +397,11 @@ int32 arkrtos_flashapp_write(const char *path, uint32 *p_len)
     /* 单实例：正在跑的那份代码就在这条路径要擦的区里，边跑边擦等于把
      * 正在取指的扇区抹掉。这里直接读状态字，不走 arkrtos_flashapp_task_id()
      * ——后者内部要取同一把锁，在已持锁的上下文里会自死锁。 */
-    arkrtos_spin_lock_irqsave(&g_flashapp_lock, &irq);
-    if(g_flashapp_task != 0u)
+    ret = flashapp_busy_claim();
+    if(ret != 0)
     {
-        arkrtos_spin_unlock_irqrestore(&g_flashapp_lock, irq);
-        return ARKRTOS_FLASHAPP_ERR_BUSY;
+        return ret;
     }
-    g_flashapp_task = 0xFFFFFFFFu;          /* 占位：写入中 */
-    arkrtos_spin_unlock_irqrestore(&g_flashapp_lock, irq);
 
     /* 第一步：整份验。验不过就原地返回，区里那份还能跑的程序分毫未动。 */
     ret = flashapp_scan(path, &len, &crc, &sp, &vec, &pro);
@@ -265,159 +423,48 @@ int32 arkrtos_flashapp_write(const char *path, uint32 *p_len)
     if(arkrtos_port_flash_erase((uint32)ARKRTOS_FLASHAPP_BASE,
                                 (uint32)ARKRTOS_FLASHAPP_SIZE) != 0)
     {
-        arkrtos_sched_unlock_internal();
         ret = ARKRTOS_FLASHAPP_ERR_FLASH;
-        goto out_busy;
+        goto out_unlock;
     }
 
-    /* 第三步：分块读 + 写。源缓冲 32 字节对齐、且同一次写入内按顺序单调
-     * 推进——H7 的 flash word 编程是读-改-写，同一 32 字节块只能编程一次。 */
-    fd = arkrtos_vfs_open_read(path);
-    if(fd < 0)
+    ret = flashapp_program(path, len);
+    if(ret != 0)
     {
-        arkrtos_sched_unlock_internal();
-        ret = ARKRTOS_MINI_ERR_FS;
-        goto out_busy;
+        goto out_unlock;
     }
 
-    total = 0u;
-    while(total < len)
+    ret = flashapp_verify(path, len);
+    if(ret != 0)
     {
-        uint32 want = len - total;
-
-        if(want > FLASHAPP_IO_CHUNK)
-        {
-            want = FLASHAPP_IO_CHUNK;
-        }
-
-        n = arkrtos_vfs_read(fd, g_flashapp_io, want);
-        if(n <= 0)
-        {
-            /* 前面刚扫过一遍都读得通，这里读不到说明文件被改了或被卸了卷。
-             * 区已经被擦，没有回滚——如实报「写入失败、区里现在是空的」。 */
-            (void)arkrtos_vfs_close(fd);
-            arkrtos_sched_unlock_internal();
-            ret = ARKRTOS_MINI_ERR_FS;
-            goto out_busy;
-        }
-
-        if(arkrtos_port_flash_write((uint32)ARKRTOS_FLASHAPP_BASE + total,
-                                    g_flashapp_io, (uint32)n) != 0)
-        {
-            (void)arkrtos_vfs_close(fd);
-            arkrtos_sched_unlock_internal();
-            ret = ARKRTOS_FLASHAPP_ERR_FLASH;
-            goto out_busy;
-        }
-
-        total += (uint32)n;
+        goto out_unlock;
     }
 
-    (void)arkrtos_vfs_close(fd);
-
-    /* 第四步：回读逐字节比对。写入返回 0 只说明「下发成功」，不说明
-     * 「落进去的是这些字节」——这一步才是「写对了」的唯一证据。
-     * 顺带重算 CRC，与扫描时那一份比较。 */
-    fd = arkrtos_vfs_open_read(path);
-    if(fd < 0)
+    ret = flashapp_write_meta(len, crc);
+    if(ret != 0)
     {
-        arkrtos_sched_unlock_internal();
-        ret = ARKRTOS_MINI_ERR_FS;
-        goto out_busy;
+        goto out_unlock;
     }
-
-    total = 0u;
-    while(total < len)
-    {
-        uint32 want = len - total;
-        uint32 i;
-
-        if(want > FLASHAPP_IO_CHUNK)
-        {
-            want = FLASHAPP_IO_CHUNK;
-        }
-
-        n = arkrtos_vfs_read(fd, g_flashapp_io, want);
-        if(n <= 0)
-        {
-            (void)arkrtos_vfs_close(fd);
-            arkrtos_sched_unlock_internal();
-            ret = ARKRTOS_MINI_ERR_FS;
-            goto out_busy;
-        }
-
-        for(i = 0u; i < (uint32)n; i++)
-        {
-            if(g_flashapp_io[i] !=
-               *(volatile const uint8 *)((uint32)ARKRTOS_FLASHAPP_BASE + total + i))
-            {
-                (void)arkrtos_vfs_close(fd);
-                arkrtos_sched_unlock_internal();
-                ret = ARKRTOS_FLASHAPP_ERR_VERIFY;
-                goto out_busy;
-            }
-        }
-
-        total += (uint32)n;
-    }
-
-    (void)arkrtos_vfs_close(fd);
-
-    /* 第五步：写元数据（区尾固定 32 字节）。放在最后：中途掉电时元数据
-     * 缺失 ⇒ info 判「这里没有产物」，而不是让一份半截镜像看起来能跑。 */
-    {
-        static flashapp_meta_t meta __attribute__((aligned(32)));
-        uint32 i;
-
-        meta.magic   = (uint32)ARKRTOS_FLASHAPP_MAGIC;
-        meta.len     = len;
-        meta.crc     = crc;
-        meta.version = (uint32)ARKRTOS_FLASHAPP_VERSION;
-        for(i = 0u; i < 4u; i++)
-        {
-            meta.rsv[i] = 0xFFFFFFFFu;
-        }
-
-        if(arkrtos_port_flash_write((uint32)ARKRTOS_FLASHAPP_META_BASE,
-                                    (const uint8 *)(const void *)&meta,
-                                    (uint32)sizeof(meta)) != 0)
-        {
-            arkrtos_sched_unlock_internal();
-            ret = ARKRTOS_FLASHAPP_ERR_FLASH;
-            goto out_busy;
-        }
-
-        /* 元数据也要回读：写接口返回 0 不等于落进去的是这 32 字节。 */
-        for(i = 0u; i < (uint32)sizeof(meta); i++)
-        {
-            if(((const volatile uint8 *)(const void *)&meta)[i] !=
-               *(volatile const uint8 *)((uint32)ARKRTOS_FLASHAPP_META_BASE + i))
-            {
-                arkrtos_sched_unlock_internal();
-                ret = ARKRTOS_FLASHAPP_ERR_VERIFY;
-                goto out_busy;
-            }
-        }
-    }
-
-    arkrtos_sched_unlock_internal();
-
-    if(p_len != 0)
-    {
-        *p_len = len;
-    }
-
-    ARKRTOS_LOGI("FLASHAPP", "%s: %u B, crc 0x%08X -> 0x%08X..0x%08X (verified)",
-                 path, (unsigned)len, (unsigned)crc,
-                 (unsigned)ARKRTOS_FLASHAPP_BASE,
-                 (unsigned)((uint32)ARKRTOS_FLASHAPP_BASE + len));
 
     ret = 0;
 
+out_unlock:
+    arkrtos_sched_unlock_internal();
+
+    if(ret == 0)
+    {
+        if(p_len != 0)
+        {
+            *p_len = len;
+        }
+
+        ARKRTOS_LOGI("FLASHAPP", "%s: %u B, crc 0x%08X -> 0x%08X..0x%08X (verified)",
+                     path, (unsigned)len, (unsigned)crc,
+                     (unsigned)ARKRTOS_FLASHAPP_BASE,
+                     (unsigned)((uint32)ARKRTOS_FLASHAPP_BASE + len));
+    }
+
 out_busy:
-    arkrtos_spin_lock_irqsave(&g_flashapp_lock, &irq);
-    g_flashapp_task = 0u;
-    arkrtos_spin_unlock_irqrestore(&g_flashapp_lock, irq);
+    flashapp_busy_release();
 
     return ret;
 }

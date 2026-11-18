@@ -4116,6 +4116,54 @@ after   text 367384 / data 440 / bss 767508   sha256 660b94c9…   31,462,512 B
 （既有的指针宽度转换告警，新增代码零新增告警）。`shell_check.py` `PASS`。`doc_audit.py funcs`：
 超过 120 行的函数 **27 → 26**，最长换成 `arkrtos_flashapp_write()`（211 行）。
 
+#### 5.30.13 第八笔：`arkrtos_flashapp_write()` 按「闸门 / 擦 / 写 / 回读 / 元数据」分开（2026-11-18）
+
+`kernelsrc/src/arkrtos_flashapp.c` 的 `arkrtos_flashapp_write()`（211 行）是「产物烧进片内 Flash
+应用区」的写路径，原本五步全挤在一个函数里、共用 9 处提前返回。这一笔把每一步抽成一个 `static`，
+主函数只剩闸门、调度锁与错误码收口：
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `flashapp_busy_claim()` | 取单实例闸门：读状态字，有人占用就 `ERR_BUSY`，没有就写 `0xFFFFFFFF` 占位。**故意不走 `arkrtos_flashapp_task_id()`**——那支内部取同一把锁，在持锁上下文里自死锁 | 15 |
+| `flashapp_busy_release()` | 清状态字。任何返回路径都要走到 | 8 |
+| `flashapp_program()` | 第三步：开文件、按 `FLASHAPP_IO_CHUNK` 分块读、写 Flash 应用区，块内偏移单调推进（H7 flash word 是读-改-写，同一 32 字节块只能编程一次） | 44 |
+| `flashapp_verify()` | 第四步：重开文件、回读 Flash 逐字节比对。写接口返回 0 只说明「下发成功」 | 46 |
+| `flashapp_write_meta()` | 第五步：区尾 32 字节元数据（魔数/长度/CRC/版本）写入 + 回读。放最后是掉电语义：元数据缺失 ⇒ 判「没有产物」 | 33 |
+| `arkrtos_flashapp_write()` 自己 | 参数与 VFS 就绪检查、占闸门、跑 scan + check_shape、持调度锁、串四步、`out_unlock` 统一放锁、`out_busy` 统一放闸门 | **93**（原 211） |
+
+等价性用归一化行多重集比对（剥注释、逐行去空白、比 Counter）：only-OLD 是 9 条 `goto out_busy`、
+9 条内联的 `arkrtos_sched_unlock_internal()`、以及被搬进 helper 后变成 `return` 的那些
+`ret = ARKRTOS_FLASHAPP_ERR_FLASH / ARKRTOS_MINI_ERR_FS / ARKRTOS_FLASHAPP_ERR_VERIFY`；
+only-NEW 是 5 个新函数签名、`goto out_unlock`、`out_unlock:` 标签、`ret = flashapp_*(...)` 调用与
+`return` 语句。**没有语句丢失**：每一步的分支条件、返回码、错误码一条未改；`*p_len` 与成功日志
+仍在放锁之后、且只在 `ret == 0` 时执行。
+
+编译口径（这一笔没有可跑的行为证据，如实写清）：
+
+* **LA64 QEMU 默认档根本不编这个 TU**——`example/qemu_loongarch64/Makefile` 用 `filter-out`
+  把它剔掉了（理由是这套目标没有 Flash 控制器）。所以「默认档逐字节不变」在这里是**因为没编**，
+  不是因为编了以后一样：`text 367384 / sha256 660b94c9… / 31,462,512 B` 与上一笔逐字节相同。
+* **STM32H743 侧默认 `ARKRTOS_USE_FLASHAPP=0`**，整个 TU 被 `#if` 包成空目标：armclang
+  `-c` 出来的目标 `Code/RO/RW/ZI` 全为 0（`fromelf -z` 实测）。
+* 强制打开（`-DARKRTOS_USE_FLASHAPP=1 -DARKRTOS_USE_APPRUN=1 -DARKRTOS_USE_VFS=1`，H743 配置）
+  后 `armclang -fsyntax-only` **exit=0**，告警 **2 条**（`code_base` / `code_size` set but not used，
+  第 558 行的 `arkrtos_flashapp_run()` 里，改动前后同数同位置）。目标体积 `Code 3822 → 3818`
+  （−4 B）、`RO Data 423 → 447`（+24 B）、`RW/ZI` 不变。
+
+**结论分档：仅编译通过，未上板。** 这台 QEMU 目标没有 Flash 控制器、`flashapp` 也不被 LA64
+Makefile 编译；H743 真板本轮没有跑这条路径。不得把本笔读成「烧写路径已验证」。
+
+读数：
+
+```
+默认档（LA64）  text 367384 / data 440 / bss 767508   sha256 660b94c9…   31,462,512 B   （与上一笔逐字节相同）
+H743 ON 目标    Code 3818 / RO 447 / RW 12 / ZI 1064   （基线 Code 3822 / RO 423）
+H743 OFF 目标   Code 0 / RO 0 / RW 0 / ZI 0            （空 TU）
+```
+
+`shell_check.py` `PASS`（LA64 默认档不受影响）。`doc_audit.py funcs`：超过 120 行的函数
+**26 → 25**，最长换成 `arkrtos_layout_validate()`（199 行）。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

@@ -1775,6 +1775,60 @@ after   text 367384 / data 440 / bss 767508   sha256 660b94c9...   31,462,512 B
 same **21** warnings before and after. `shell_check.py` `PASS`. `doc_audit.py funcs`: functions over
 120 lines **27 -> 26**, and the longest is now `arkrtos_flashapp_write()` (211 lines).
 
+#### 5.30.13 Eighth one: `arkrtos_flashapp_write()` split by gate, erase, program, verify and metadata (2026-11-18)
+
+`arkrtos_flashapp_write()` in `kernelsrc/src/arkrtos_flashapp.c` (211 lines) is the write path that
+burns a product into the on-chip flash application region. All five stages plus nine early returns
+used to live in one function; each stage is now a `static` helper and the entry point only does the
+gate, the scheduler lock and the error-code routing:
+
+| Function | Responsibility | Lines |
+|---|---|---|
+| `flashapp_busy_claim()` | take the single-instance gate: read the state word, return `ERR_BUSY` if taken, otherwise write the `0xFFFFFFFF` placeholder. It deliberately does **not** call `arkrtos_flashapp_task_id()` (that helper takes the same lock and would self-deadlock) | 15 |
+| `flashapp_busy_release()` | clear the state word; every return path goes through it | 8 |
+| `flashapp_program()` | stage three: open the file, read `FLASHAPP_IO_CHUNK` at a time, program the application region with a monotonically advancing offset (H7 flash-word programming is read-modify-write, so one 32-byte block may only be programmed once) | 44 |
+| `flashapp_verify()` | stage four: reopen the file, read flash back and compare byte by byte; a zero return from the write call only means "the request was accepted" | 46 |
+| `flashapp_write_meta()` | stage five: write the 32-byte metadata at the region tail and read it back. It runs last so a power loss leaves no metadata and `info` reports "nothing here" instead of a half image that looks runnable | 33 |
+| `arkrtos_flashapp_write()` itself | argument and VFS readiness checks, take the gate, run `flashapp_scan()` + `flashapp_check_shape()`, take the scheduler lock, chain the four stages, release the lock at `out_unlock`, release the gate at `out_busy` | **93** (was 211) |
+
+Equivalence was argued with the normalised line multiset (comments stripped, whitespace removed,
+counters compared): only-OLD is nine `goto out_busy` lines, nine inlined
+`arkrtos_sched_unlock_internal()` calls, and the `ret = ...ERR_FLASH / ...MINI_ERR_FS /
+...ERR_VERIFY` assignments that became `return` statements inside the helpers; only-NEW is the five
+new signatures, `goto out_unlock`, the `out_unlock:` label, the `ret = flashapp_*(...)` calls and the
+`return` statements. **No statement was lost**: every condition, return code and error code is
+untouched, and `*p_len` plus the success log still run after the lock is released, only when
+`ret == 0`.
+
+Compilation evidence, stated plainly because this change has no runnable behaviour evidence:
+
+* **The LA64 QEMU default profile never compiles this TU at all** — the `example/qemu_loongarch64`
+  Makefile `filter-out`s it because that target has no flash controller. "Byte-identical default
+  profile" here therefore means *not compiled*, not *compiled to the same bytes*:
+  `text 367384 / sha256 660b94c9... / 31,462,512 B`, byte-identical to the previous commit.
+* **On STM32H743 the switch defaults to `ARKRTOS_USE_FLASHAPP=0`**, so the whole TU is an empty
+  object: armclang `-c` yields `Code/RO/RW/ZI` all zero (`fromelf -z` measured).
+* With the switch forced on (`-DARKRTOS_USE_FLASHAPP=1 -DARKRTOS_USE_APPRUN=1
+  -DARKRTOS_USE_VFS=1`, H743 configuration) `armclang -fsyntax-only` returns **exit=0** with the
+  same **2** warnings (`code_base` / `code_size` set but not used, inside `arkrtos_flashapp_run()`,
+  same count and location before and after). Object size `Code 3822 -> 3818` (-4 B),
+  `RO Data 423 -> 447` (+24 B), `RW/ZI` unchanged.
+
+**Verdict: compile only, never executed.** This QEMU target has no flash controller and does not
+build `flashapp`; no H743 board was used for this path in this round. It must not be read as
+"the programming path is verified".
+
+Readings:
+
+```
+LA64 default    text 367384 / data 440 / bss 767508   sha256 660b94c9...   31,462,512 B   (identical to the previous commit)
+H743 ON object  Code 3818 / RO 447 / RW 12 / ZI 1064   (baseline Code 3822 / RO 423)
+H743 OFF object Code 0 / RO 0 / RW 0 / ZI 0            (empty TU)
+```
+
+`shell_check.py` `PASS` (the LA64 default profile is unaffected). `doc_audit.py funcs`: functions
+over 120 lines **26 -> 25**, and the longest is now `arkrtos_layout_validate()` (199 lines).
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine
