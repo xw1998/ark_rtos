@@ -58,6 +58,7 @@
 | App 崩溃了，它控制过的硬件（电机/继电器）怎么被带离危险态 | [App崩溃硬件安全与遗言机制.md](App崩溃硬件安全与遗言机制.md)（遗言通道 A/B、两阶段中和、计划内交接 handover、`hwsafe` 命令） |
 | Read the same page in English | [App崩溃硬件安全与遗言机制.en.md](App崩溃硬件安全与遗言机制.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 决定编什么功能、把上限改大改小 | [Kconfig配置系统.md](Kconfig配置系统.md)（符号名=宏名、依赖约束、零行为变化迁移） |
+| Read the same page in English | [Kconfig配置系统.en.md](Kconfig配置系统.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 改一个上限 / 开一个功能 / 挪一段地址，到底该动哪个头 | [配置头导航.md](配置头导航.md)（七个配置头的职责边界、包含顺序、五条规则、四条门禁怎么盯住） |
 | Read the configuration-header map in English | [配置头导航.en.md](配置头导航.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 6244 行的 shell 单文件该怎么拆、拆完怎么验 | [Shell命令拆分方案.md](Shell命令拆分方案.md)（只读盘点：命令族行段、跨族共享符号清单、三条硬约束、五步迁移、不做的理由） |
@@ -165,6 +166,7 @@ docs/
 ├── 安全基线自检.en.md                       # 【English】浓缩英文版：四档结论与 FINDING/SKIP 为何必须分开、12 条检查逐条判据、iso 三值（0 无后端 / 1 窗口 / 2 页表）与不用 MPU 当唯一判据的理由、F427 上板逐字读数与 76 us 交叉核对、只读与 static 报告结构、三条边界、开关零变化与 +2056/+668 B 体积账、复现三条命令；中文页 normative
 ├── 安全认证准备.md                          # 【设计说明】资产与信任边界、STRIDE 威胁模型、五个标准差距表、17 条缺口寄存器、本地用例矩阵、P0–P3 路线
 ├── Kconfig配置系统.md                       # 【设计说明】Kconfig 菜单、纯 Python 工具链、符号=宏名、注入点、依赖关系、数量限制迁移
+├── Kconfig配置系统.en.md                    # 【English】Kconfig配置系统页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── 配置头导航.md                            # 【导航】七个配置头各管什么、包含顺序（顺序本身是契约）、五条规则、门禁与典型症状落点
 ├── 配置头导航.en.md                         # 【English】浓缩英文版：改什么动哪个头、包含顺序、七个头的边界、五条规则、五道门禁、三种改法命令；中文页 normative
 

@@ -1,5 +1,7 @@
 # Kconfig 配置系统
 
+**[简体中文](Kconfig配置系统.md) | English([Kconfig配置系统.en.md](Kconfig配置系统.en.md))**
+
 Ark RTOS 把"编什么、编多大"从散落在头文件里的 `#define` 收拢成一套和 Linux 同形的
 Kconfig 菜单。它不引入任何第三方依赖：解析器、生成器、菜单编辑器都是本仓库
 `tools/kconfig/` 下的纯 Python，随便一台装了 Python 3 的机器就能跑。
