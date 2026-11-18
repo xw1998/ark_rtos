@@ -110,6 +110,7 @@
 \r\n` 让 `__LINE__` 偏移 1143 的实证） |
 | Read the format-baseline page in English | [格式基线.en.md](格式基线.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 手上没有板子，想在 PC 上真跑一遍 port 层（trap 入口/上下文切换/SVC 通路/定时器） | [QEMU模拟器移植与验证.md](QEMU模拟器移植与验证.md)（QEMU 9.2.3 环境与依赖 DLL 补丁、RV32 单 M 模式 port、LA64 单核 port、**LA32 只到编译/链接（载体 `la32r-QEMU` / `loongson-community/qemu:la32-user-exp` 都存在，但只有 Linux 发行包或源码，本机不能执行，见 §6.1.1）**、**SMP 可仿真但内核侧一步未做（§9）**、trap 帧与取号、无 libgcc/libc 约束、**PRMD 位序坑**、串口实录、已知限制、monitor telnet 调试手法、**三目标功能矩阵与逐开关实录（audit / crash_log / mdk_trace / seccheck / softbus / image_sign / hw_safe / kernel_guard）**） |
+| Read the same page in English | [QEMU模拟器移植与验证.en.md](QEMU模拟器移植与验证.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 用英文读同一份限制清单（哪些是取舍、哪些是欠账） | [已知限制.en.md](已知限制.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 
 ## 目录结构
@@ -214,6 +215,7 @@ docs/
 ├── GCC构建指南.md                           # 【操作手册】GNU Make + arm-none-eabi-gcc 的 F427 例程：工具链、用法、与 Keil 的对应、GCC 侧三个坑、验证状态
 ├── GCC构建指南.en.md                        # 【English】GCC构建指南页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── QEMU模拟器移植与验证.md                  # 【实机记录】QEMU 上的 port 层验证：环境与依赖 DLL 坑、RV32 单 M 模式 port（trap 帧/a7/CLINT）、LA64 单核端口（256 B 帧/就地切换/PRMD 位序/TCFG-RDTIME 标定）、LA32 参考目标（128 B 帧，仅编译/链接；载体现状见 §6.1）、SMP 结论（§9）、构建与链接约束、串口实录、已知限制、monitor telnet 调试
+├── QEMU模拟器移植与验证.en.md               # 【English】QEMU模拟器移植与验证页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── 发行版与版本策略.md                       # 【设计说明】版本号规则与三处一致、发布物清单、ABI 升版判据、预览版/正式版/1.0 判据、发版六步、明确不做的
 ├── 发行版与版本策略.en.md                   # 【English】浓缩英文版：发布=一个 tag + 一份发布说明、三段版本号何时动、-preview 只在 tag 上、四处一致与 release_check 六项、发布物清单、三个 ABI 编号、预览/正式/1.0 五条判据、发版六步顺序、四条不做；中文页 normative
 ├── Release-0.0.3-preview.1.md               # 【发布说明】0.0.3 预览版：变更、体积账本、复现命令、兼容注意、未验证项
