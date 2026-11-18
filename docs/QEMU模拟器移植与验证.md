@@ -5080,6 +5080,54 @@ QEMU 端到端 PASS，未上板。** 这一笔**没有新增运行读数**：`sc
 这一笔**没有新增运行读数**：跑 Flash 应用要有真 Flash 里的产物与一次真的调度切换，QEMU 档既无 Flash
 控制器也不编这段代码。
 
+#### 5.30.34 第二十九笔：`arkrtos_sem_wait_internal()` 按「句柄 / 快路径 / 不等待 / 登记 / 唤醒分类」拆成五段（2026-11-18）
+
+`kernelsrc/src/arkrtos_sync.c` 的 `arkrtos_sem_wait_internal()`（138 行）是信号量 P 操作的全部逻辑：
+句柄三查 → 计数大于 0 时按「队首优先、队首是自己才能取」的规矩取走 → `timeout==0` 只试一次 →
+登记等待者 → 用户态等待者只登记不阻塞（`WOULDBLOCK`）→ 内核态在同一临界区里入队并睡下 →
+醒来后按 `reason` 分类（参数错 / 对象被删 / 超时 / 假醒 / 真拿到）。十条返回路径各自带一次开中断。
+
+| 函数 | 管什么 | 行数 |
+|---|---|---|
+| `sem_wait_check()` | 类型位 + 下标范围 + 槽在用三条，成功把下标带出；全在关中断之前，不碰任何队列 | 12 |
+| `sem_wait_take()` | 快路径：计数 `<=0` 让路；有人排队且队首不是自己也让路；否则 `count--`、撤自己登记、`appq_set(0)`、记 `dbg_sem_takes`、开中断、返回 1 | 25 |
+| `sem_wait_try_once()` | `timeout==0`：顺手撤掉自己可能留下的过期登记（否则 poster 会把 token 停在一个永远没人取的计数上），开中断、报 `ERR_TIMEOUT` | 10 |
+| `sem_wait_enqueue()` | `arkrtos_waiters_add`；真满（`<0 && != -2`）报 `ERR_NOSPACE` 且**不开中断**（交回调用方）；新增登记成功记两个 `dbg_sem_*` | 15 |
+| `sem_wait_classify()` | 阻塞归来后五路分类：`reason<0` 撤登记报 `PARAM`；`OBJ_DELETED` **不撤**队列（删除方已清空）报 `DELETED`；`1` 撤登记报 `TIMEOUT`；无 `WAKE_HANDOFF` 记 ghost（`arkrtos_diag_sync_ghost++` 与三个 `dbg_sem_ghost_*`）后撤登记报 `TIMEOUT`；其余撤登记报 `OK` | 54 |
+| `arkrtos_sem_wait_internal()` 自己 | 句柄 → 取当前任务 → 关中断 → 快路径 → 不等待 → 上下文 → 登记 → 用户态 → trace + `block_in_critical` → 分类 | **56**（原 138） |
+
+口径四条：① 快路径的两种结局靠返回值区分 —— `sem_wait_take()` 返回 1 表示「已取到、中断已开」，入口直接
+`return 0`；返回 0 表示「这次不取、中断仍关着」，控制权回入口继续往下走。原来是
+`if(count>0){ peek; if(top==0||top==p_tsk){ …; return 0; } }` 的嵌套，改成「不够就让路」的早退等形变体，
+判断条件取反，语义与优先级规则一处未动。② **每条出口自己开中断**，入口不再补开 —— 与第十五笔
+`arkrtos_mtx_lock_internal` 同一口径，一次失败一次开中断，不重不漏。③ 三处「撤掉自己的登记」不合并
+（`try_once` / `classify` 的 `1` 与假醒）：它们是三种不同的「这个等待者不算数」的原因，合并会把
+「对象已删就不要动队列」这条前提藏进共享代码里。④ 登记与 `block_in_critical` 仍落在入口的同一临界区内
+（中间没有开中断），这是「唤醒不会投给一个还没睡下的任务」的前提，没有被拆段破坏。
+
+等价性归一化比对：**only-OLD 3 行**，逐条可归因 —— `if(arkrtos_sems[idx].count > 0)` 一行（改成
+`<= 0` 早退）、`arkrtos_task_t *p_top = arkrtos_waiters_peek(…)` 一行（声明与初始化拆开，早退分支用不到
+`p_top`）、`if((p_top == 0) || (p_top == p_tsk))` 一行（改成 `(p_top != 0) && (p_top != p_tsk)` 让路）。
+其余语句（含四段长注释、十个错误码、四处 ghost 记账）原样落在新位置。only-NEW 38 行（23 个不同文本）
+是五个签名、六组花括号、`return 0|1|ret` 与入口的六处调用。
+
+体积：这个 TU 在 LA64 默认档**真的被编进去**（QEMU 的 Shell 与 utest 都走信号量），所以这一笔
+**不是**逐字节不变：text **367432 → 367512（+80 B）**，`data` 440 / `bss` 767508 / 镜像总长 31,462,512 B
+不变，`SOURCE_DATE_EPOCH=1600000000` 下 sha256 由 `9caa8220…` 变成 **`204d38d1…`**（一次构建，
+`build/_semwait_repro`）。`arkrtos_sync.c` 本身告警 **0 条**，整档 `warning:` 计数 **270 = 270**。
+**+80 B 是切分的真实代价，不是去重收益。**
+
+门禁：`doc_audit.py funcs` **5 → 4**（最长变 `arkrtos_loader_scan_pool` 134）、`format_gate` 361 个自有文件、
+`sec_crc_gate` 8 pin + 4 TU 两档、`coverage_gate` 十模块不降（`arkrtos_sync` **50.07% → 50.39%**，按惯例
+只抬不降，本轮未改基线文件）、`mq_host_gate` 108 checks、`example/qemu_loongarch64/shell_check.py` **PASS**、
+`ci_gate` **47 passed / 0 failed**。
+
+**结论分档：编译通过 + 告警同数 + 可复现构建 + QEMU 端到端 PASS，未上板。** 上板这一档要说清：
+QEMU 的 `utest` 里 `sem_token_flow` / `sem_reject_bad_handle` 真跑了「快路径 / 不等待 / 句柄拒绝」三条，
+`sem_pi_*` 里 `sem_wait_internal(…, 500)` 也真调用了带超时的形态 —— 但那条用例通常当场拿到令牌，
+所以 `sem_wait_enqueue()` 与 `sem_wait_classify()` 的「登不上」「真超时」「假醒」分支在本轮**没有运行证据**，
+只有编译期正确性。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

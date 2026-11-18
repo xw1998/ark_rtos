@@ -2892,6 +2892,62 @@ QEMU end-to-end PASS, not run on hardware.** This commit **adds no new runtime m
 application needs a real artifact in flash plus a real scheduler switch, and the QEMU profile has neither a flash
 controller nor this code compiled in.
 
+#### 5.30.34 Split #29: `arkrtos_sem_wait_internal()` split into handle check, fast path, try-once, enqueue and wake classification (2026-11-18)
+
+`arkrtos_sem_wait_internal()` in `kernelsrc/src/arkrtos_sync.c` (138 lines) is the whole of a semaphore P operation:
+three handle checks, the count-positive fast path (token belongs to the queue head, and the caller may only take it
+when it *is* the head), the `timeout==0` try-once path, registering a waiter, the user-mode waiter that registers and
+returns `WOULDBLOCK`, the kernel-mode waiter that enqueues and sleeps inside one critical section, and finally the
+classification of the wake reason (bad parameter / object deleted / timeout / spurious wake / genuine handoff).
+Ten return paths each opened interrupts on their own.
+
+| Function | Responsibility | Lines |
+|---|---|---|
+| `sem_wait_check()` | Type bits, index range and slot-in-use; hands out the index. All before interrupts are disabled, touches no queue | 12 |
+| `sem_wait_take()` | Fast path: yield when the count is `<=0`; yield when somebody is queued and the head is not the caller; otherwise `count--`, drop own registration, `appq_set(0)`, bump `dbg_sem_takes`, enable interrupts, return 1 | 25 |
+| `sem_wait_try_once()` | `timeout==0`: drop a leftover registration of our own (a poster would otherwise park the token on a count nobody takes), enable interrupts, report `ERR_TIMEOUT` | 10 |
+| `sem_wait_enqueue()` | `arkrtos_waiters_add`; genuinely full (`<0 && != -2`) reports `ERR_NOSPACE` with **interrupts left disabled** (handed back to the caller); a fresh registration bumps two `dbg_sem_*` | 15 |
+| `sem_wait_classify()` | Five-way classification after blocking: `reason<0` drops the registration and reports `PARAM`; `OBJ_DELETED` **leaves the queue alone** (the deleter already emptied it) and reports `DELETED`; `1` drops and reports `TIMEOUT`; a wake without `WAKE_HANDOFF` books a ghost (`arkrtos_diag_sync_ghost++` plus three `dbg_sem_ghost_*`), drops and reports `TIMEOUT`; anything else drops and reports `OK` | 54 |
+| `arkrtos_sem_wait_internal()` itself | Handle, current task, disable interrupts, fast path, try-once, context, enqueue, user mode, trace + `block_in_critical`, classify | **56** (was 138) |
+
+Four rules: (1) the fast path reports its two outcomes through the return value — `sem_wait_take()` returning 1 means
+"token taken, interrupts enabled" and the entry returns 0 immediately; returning 0 means "not taking it this time,
+interrupts still disabled" and the entry continues. The original nested
+`if(count>0){ peek; if(top==0||top==p_tsk){ ...; return 0; } }` became an early-exit variant with the condition
+negated; the priority rule itself is untouched. (2) **Every exit enables interrupts itself** and the entry never
+compensates — the same rule as split #15 (`arkrtos_mtx_lock_internal`), one failure one enable, nothing doubled or
+missed. (3) The three "drop my own registration" sites are not merged (`try_once`, and the `1` and spurious-wake arms
+of `classify`): they are three different reasons why a waiter does not count, and merging them would hide the
+"object deleted means do not touch the queue" premise inside shared code. (4) Registering the waiter and calling
+`block_in_critical` still happen inside the same critical section in the entry (no interrupt enable in between),
+which is what keeps a wake from being delivered to a task that has not slept yet.
+
+Normalized equivalence: **only-OLD 3 lines**, all attributable — `if(arkrtos_sems[idx].count > 0)` (now `<= 0` with
+an early return), `arkrtos_task_t *p_top = arkrtos_waiters_peek(...)` (declaration and initialisation split, since the
+early-exit arm does not need `p_top`), and `if((p_top == 0) || (p_top == p_tsk))` (now `(p_top != 0) && (p_top !=
+p_tsk)` yields). Everything else — four long comments, ten error codes, four ghost bookkeeping lines — landed in the
+new positions verbatim. only-NEW 38 lines (23 distinct) are five signatures, six brace groups, `return 0|1|ret` and
+the six calls in the entry.
+
+Size: the LA64 default profile **does compile this TU** (both the QEMU shell and the utest suite go through
+semaphores), so this commit is **not** byte-identical: text **367432 -> 367512 (+80 B)**, `data` 440 / `bss` 767508 /
+total 31,462,512 B unchanged, and under `SOURCE_DATE_EPOCH=1600000000` the sha256 moves from `9caa8220…` to
+**`204d38d1…`** (one build, `build/_semwait_repro`). `arkrtos_sync.c` itself emits **0 warnings**; the whole build
+stays at **270 = 270** `warning:` lines. **The +80 B is the real cost of splitting, not a code reduction.**
+
+Gates: `doc_audit.py funcs` **5 -> 4** (longest is now `arkrtos_loader_scan_pool` at 134), `format_gate` 361 own
+files, `sec_crc_gate` 8 pins + 4 TUs in both profiles, `coverage_gate` ten modules not below baseline
+(`arkrtos_sync` **50.07% -> 50.39%**, raised not lowered; the baseline file was not edited this round),
+`mq_host_gate` 108 checks, `example/qemu_loongarch64/shell_check.py` **PASS**, `ci_gate`
+**47 passed / 0 failed**.
+
+**Confidence tier: compiles, warnings unchanged, reproducible build, QEMU end-to-end PASS, not run on hardware.**
+On that last point: the QEMU `utest` cases `sem_token_flow` / `sem_reject_bad_handle` really do exercise the fast
+path, the try-once path and the bad-handle rejection, and `sem_pi_*` calls `sem_wait_internal(..., 500)`, i.e. the
+timeout form — but that case normally takes the token immediately, so the "could not enqueue", "really timed out" and
+"spurious wake" arms of `sem_wait_enqueue()` / `sem_wait_classify()` have **no runtime evidence** this round, only
+compile-time correctness.
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine

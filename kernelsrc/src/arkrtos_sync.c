@@ -708,92 +708,88 @@ int32 arkrtos_sem_create_internal(char *name, int32 init_count)
     return ARKRTOS_SYNC_ERR_NOSLOT;
 }
 
-int32 arkrtos_sem_wait_internal(int32 handle, int32 timeout_ms)
+/* 句柄校验：类型位 + 下标范围 + 槽在用。成功时把下标带出去。
+ * 这三条都在开中断之前判，不碰任何等待队列。 */
+static int32 sem_wait_check(int32 handle, int32 *p_idx)
 {
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
-    arkrtos_task_t *p_tsk;
-    int32 reason;
 
     if(ARKRTOS_SEM_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_SYNC_ERR_HANDLE;
     if(idx >= ARKRTOS_SEM_NUM || arkrtos_sems[idx].used == 0)
         return ARKRTOS_SYNC_ERR_HANDLE;
 
-    p_tsk = arkrtos_task_get_current();
+    *p_idx = idx;
+    return 0;
+}
 
-    ARKRTOS_DISABLE_IRQ();
-    if(arkrtos_sems[idx].count > 0)
+/* 快路径：计数大于 0。有人排队时 token 属于队首；队首是自己（用户态等待者
+ * 回来取自己那份）才允许取走，否则让给排在前面的那个。
+ * 调用前必须已关中断。返回 1 = 已取到（本函数已开中断，调用方直接 return 0）；
+ * 返回 0 = 这次不取（中断仍关着，调用方继续往下走）。 */
+static int32 sem_wait_take(int32 idx, arkrtos_task_t *p_tsk)
+{
+    arkrtos_task_t *p_top;
+
+    if(arkrtos_sems[idx].count <= 0)
     {
-        /* Somebody is queued: the token belongs to the queue head.  When the
-         * head is the caller itself (a user-mode waiter coming back for it),
-         * take it and drop the own registration. */
-        arkrtos_task_t *p_top = arkrtos_waiters_peek(arkrtos_sems[idx].waiters, 0u);
-
-        if((p_top == 0) || (p_top == p_tsk))
-        {
-            arkrtos_sems[idx].count--;
-            if(p_tsk != 0)
-            {
-                (void)arkrtos_waiters_remove(arkrtos_sems[idx].waiters, p_tsk);
-                arkrtos_appq_set(p_tsk, 0u);
-            }
-            dbg_sem_takes[idx]++;
-            ARKRTOS_ENABLE_IRQ();
-            return 0;
-        }
+        return 0;
     }
 
-    /* timeout==0 表示“只试一次、不等待”：计数为 0 立即报超时，
-     * 不登记等待者、不阻塞（0 不再被解释成永久等待）。 */
-    if(timeout_ms == 0)
+    p_top = arkrtos_waiters_peek(arkrtos_sems[idx].waiters, 0u);
+    if((p_top != 0) && (p_top != p_tsk))
     {
-        /* Try once, and drop a leftover registration of our own: otherwise a
-         * poster parks the token in a count nobody will ever take. */
-        if(p_tsk != 0)
-        {
-            (void)arkrtos_waiters_remove(arkrtos_sems[idx].waiters, p_tsk);
-            arkrtos_appq_set(p_tsk, 0u);
-        }
-        ARKRTOS_ENABLE_IRQ();
-        return ARKRTOS_SYNC_ERR_TIMEOUT;
+        return 0;
     }
 
-    if(p_tsk == 0)
+    arkrtos_sems[idx].count--;
+    if(p_tsk != 0)
     {
-        ARKRTOS_ENABLE_IRQ();
-        return ARKRTOS_SYNC_ERR_CONTEXT;
+        (void)arkrtos_waiters_remove(arkrtos_sems[idx].waiters, p_tsk);
+        arkrtos_appq_set(p_tsk, 0u);
     }
+    dbg_sem_takes[idx]++;
+    ARKRTOS_ENABLE_IRQ();
+    return 1;
+}
 
+/* timeout==0：只试一次、不等待。顺手撤掉自己可能留下的过期登记，否则
+ * poster 会把 token 停在一个永远没人取的计数上。
+ * 调用前必须已关中断；中断由本函数打开。 */
+static int32 sem_wait_try_once(int32 idx, arkrtos_task_t *p_tsk)
+{
+    if(p_tsk != 0)
     {
-        int32 added = arkrtos_waiters_add(arkrtos_sems[idx].waiters, p_tsk);
-
-        if((added < 0) && (added != -2))
-        {
-            ARKRTOS_ENABLE_IRQ();
-            return ARKRTOS_SYNC_ERR_NOSPACE;                      /* waiter queue is full */
-        }
-        if(added == 0)
-        {
-            dbg_sem_queued[idx]++;
-            dbg_sem_last_waiter[idx] = (uint32)arkrtos_current_task_id;
-        }
+        (void)arkrtos_waiters_remove(arkrtos_sems[idx].waiters, p_tsk);
+        arkrtos_appq_set(p_tsk, 0u);
     }
+    ARKRTOS_ENABLE_IRQ();
+    return ARKRTOS_SYNC_ERR_TIMEOUT;
+}
 
-    /* User-mode waiter: register, then return.  The yielding happens in the
-     * user-mode wrapper (see the block comment above). */
-    if(arkrtos_sync_in_handler() != 0u)
+/* 登记等待者。调用前必须已关中断且 p_tsk 非 0。
+ * 返回 0 = 已登记（含「早就登记过」的 -2）；否则返回要报给调用方的错误码，
+ * 中断仍由调用方负责打开。 */
+static int32 sem_wait_enqueue(int32 idx, arkrtos_task_t *p_tsk)
+{
+    int32 added = arkrtos_waiters_add(arkrtos_sems[idx].waiters, p_tsk);
+
+    if((added < 0) && (added != -2))
     {
-        arkrtos_appq_set(p_tsk, 1u);
-        dbg_sem_appq_hit++;
-        ARKRTOS_ENABLE_IRQ();
-        return ARKRTOS_SYNC_ERR_WOULDBLOCK;
+        return ARKRTOS_SYNC_ERR_NOSPACE;                      /* waiter queue is full */
     }
+    if(added == 0)
+    {
+        dbg_sem_queued[idx]++;
+        dbg_sem_last_waiter[idx] = (uint32)arkrtos_current_task_id;
+    }
+    return 0;
+}
 
-    /* 入队与置 WAIT 必须在同一临界区内完成：中间一旦开中断，ISR 里的 post
-     * 就会把唤醒投给一个还没睡下的任务，唤醒随之丢失（见 task.c 的说明）。 */
-    arkrtos_trace_wait_obj(MDK_TRACE_ARKRTOS_OBJ(MDK_TRACE_ARKRTOS_CLASS_SEM, idx));
-    reason = arkrtos_task_block_in_critical((uint32)timeout_ms);   /* 关中断返回 */
-
+/* 阻塞之后按唤醒原因分类。调用时已关中断（block_in_critical 关中断返回），
+ * 每条出口都自己开中断，返回的就是调用方该返回的东西。 */
+static int32 sem_wait_classify(int32 idx, arkrtos_task_t *p_tsk, int32 reason)
+{
     if(reason < 0)
     {
         /* 未能进入阻塞（内核上下文 / 调度器锁定）：撤销入队并报错 */
@@ -845,6 +841,63 @@ int32 arkrtos_sem_wait_internal(int32 handle, int32 timeout_ms)
 
     ARKRTOS_ENABLE_IRQ();
     return ARKRTOS_SYNC_OK;
+}
+
+int32 arkrtos_sem_wait_internal(int32 handle, int32 timeout_ms)
+{
+    int32 idx = 0;
+    arkrtos_task_t *p_tsk;
+    int32 reason;
+    int32 ret;
+
+    ret = sem_wait_check(handle, &idx);
+    if(ret != 0)
+        return ret;
+
+    p_tsk = arkrtos_task_get_current();
+
+    ARKRTOS_DISABLE_IRQ();
+    if(sem_wait_take(idx, p_tsk) != 0)
+    {
+        return 0;
+    }
+
+    /* timeout==0 表示“只试一次、不等待”：计数为 0 立即报超时，
+     * 不登记等待者、不阻塞（0 不再被解释成永久等待）。 */
+    if(timeout_ms == 0)
+    {
+        return sem_wait_try_once(idx, p_tsk);
+    }
+
+    if(p_tsk == 0)
+    {
+        ARKRTOS_ENABLE_IRQ();
+        return ARKRTOS_SYNC_ERR_CONTEXT;
+    }
+
+    ret = sem_wait_enqueue(idx, p_tsk);
+    if(ret != 0)
+    {
+        ARKRTOS_ENABLE_IRQ();
+        return ret;
+    }
+
+    /* User-mode waiter: register, then return.  The yielding happens in the
+     * user-mode wrapper (see the block comment above). */
+    if(arkrtos_sync_in_handler() != 0u)
+    {
+        arkrtos_appq_set(p_tsk, 1u);
+        dbg_sem_appq_hit++;
+        ARKRTOS_ENABLE_IRQ();
+        return ARKRTOS_SYNC_ERR_WOULDBLOCK;
+    }
+
+    /* 入队与置 WAIT 必须在同一临界区内完成：中间一旦开中断，ISR 里的 post
+     * 就会把唤醒投给一个还没睡下的任务，唤醒随之丢失（见 task.c 的说明）。 */
+    arkrtos_trace_wait_obj(MDK_TRACE_ARKRTOS_OBJ(MDK_TRACE_ARKRTOS_CLASS_SEM, idx));
+    reason = arkrtos_task_block_in_critical((uint32)timeout_ms);   /* 关中断返回 */
+
+    return sem_wait_classify(idx, p_tsk, reason);
 }
 
 int32 arkrtos_sem_post_internal(int32 handle)
