@@ -90,6 +90,7 @@
 | Read the softbus integration page in English | [软总线接入.en.md](软总线接入.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 不用 Keil，想用 GNU Make + arm-none-eabi-gcc 编 F427 例程 | [GCC构建指南.md](GCC构建指南.md)（工程位置、工具链、make 用法、与 Keil 的对应、GCC 侧三个坑、验证状态） |
 | 在板上跑单元测试、加自己的用例 | [单元测试框架.md](单元测试框架.md)（用例自动注册、断言宏、`utest` 命令、宿主自测门禁、用例清单） |
+| Read the same page in English | [单元测试框架.en.md](单元测试框架.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 换芯片前想知道内核耦合了哪些硬件 | [硬件耦合审计.md](硬件耦合审计.md)（耦合点清单与处置、移植要动的范围） |
 | Read the hardware-coupling audit in English | [硬件耦合审计.en.md](硬件耦合审计.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 想让门禁在 Gitee 上自动跑、并看清哪些项没跑 | [远程CI与门禁裁剪.md](远程CI与门禁裁剪.md)（`ci_gate --remote` 远程档、裁掉的 17 项及其工具链、skip 不等于 pass、未验证部分写死） |
@@ -144,6 +145,7 @@ docs/
 
 ├── 无缝升级-双缓冲热切换.md                  # 【设计说明】A/B 双缓冲热切换：异常栈帧改写四步、arm/take、三条拒绝边界、数据段不重置、默认关与 +48 B
 ├── 单元测试框架.md                          # 【设计说明】板端 utest：用例自动注册、断言宏、`utest` 命令、宿主自测门禁与用例清单
+├── 单元测试框架.en.md                       # 【English】单元测试框架页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── arkc板上直跑-M3b-QSPI持久化.md       # 【实机记录】QSPI NOR 持久化：引脚/AF 取证、位敲数据面取舍、noent 内核缺陷、全链路实录、速度账与欠账
 ├── arkc板上直跑-M4-hello演示.md      # 【实机记录】标准 C 的 printf/main 小程序：SDK 与工程分目录放 NOR、`make` + `mini run`、printf 取参桩、七条硬限制、回归与宿主门禁
 ├── arkvim编辑器显示约定.md            # 【约定】屏幕布局、五条显示约定与判据、已知限制、host 门禁与板上取证、vendored 同步流程
