@@ -3495,7 +3495,9 @@ every other site copies it into a fixed array, so this is a pure signature relax
 casts in `test_eset_host.c` were removed too. **Lesson: `-Wcast-qual` and
 `-Wwrite-strings` are coupled** -- with only `-Wcast-qual` the literal is still `char[N]`
 and none of the 14 is reported, so "cast-qual alone reports 0" is not evidence that the
-casts were fixed. `-Wpointer-arith` / `-Wundef` / `-Wbad-function-cast` report 0 each.
+casts were fixed. `-Wpointer-arith` / `-Wundef` / `-Wbad-function-cast` were enabled in the
+same pass (0 each, no source change, purely to pin against regressions), bringing the option
+set to twelve.
 
 **Verdict tiers: 21 host TUs clean on seven options + default LA64 image byte-identical
 (`cmp -l` 0) + switch-on build (armclang F427, five TUs) clean with unchanged sizes; not

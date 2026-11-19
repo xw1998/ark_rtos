@@ -42,9 +42,9 @@ test_eset_host.c；2026-11-19 在同一批 21 个 TU 上复核为 0 条 —— �
 早就不成立了**。
 
 -Wwrite-strings 同日也开了，代价是把 create/open 的 name 入参改成 const char*：
-sbuf/mq/sync/eset/dev/event/timer/mpool 的 56 处签名（公开头 arkrtos.h 十一处、
-模块头八处、内核定义十四处、app/driver 两个 oslib 十三处、四个 copy_name helper 的
-src 参数），外加 test_eset_host.c 里 14 处已经多余的 (char *)"..." 转型。这条改动是
+共 57 处 —— 53 处 name 形参（公开头 23 = arkrtos.h 11 + 七个模块头 12；内核定义 16；
+SDK 14 = app_sdk 11 + driver_sdk 2 + driver_sdk.h 1），加 4 处 copy_name helper 的
+src 参数，外加 test_eset_host.c 里 14 处已经多余的 (char *)"..." 转型。这条改动是
 纯签名放宽：内核侧每一处都把 name 拷进定长数组，没有任何地方保存指针（写之前 grep
 过 name = name 一类的赋值，只有 rt/sec 两处链式只读，而它们本来就是 const 入参），
 所以调用方传 char* 照样编过，ABI 与指令都不变；先例是 arkrtos_mempool_create_internal
@@ -55,7 +55,13 @@ src 参数），外加 test_eset_host.c 里 14 处已经多余的 (char *)"..." 
 const char[]，同一批转型立刻变成"丢弃限定符"。两个选项是耦合的，只开一个会得到
 "0 条"的假安全读数 —— 这一条本身就是开档顺序的教训。
 
--Wpointer-arith / -Wundef / -Wbad-function-cast 各 0 条。数字登记在 docs/欠账盘点.md。
+-Wpointer-arith / -Wundef / -Wbad-function-cast 同日也一并打开（2026-11-19 复核各 0 条，
+源码零改动）。它们不是"抓到过东西"的选项，开着只为钉住防退化：一旦有人往
+指针算术里塞不该有的假设、写 #if 时不带 defined、或把函数返回值强转成另一种类型，
+门禁立刻红。数字登记在 docs/欠账盘点.md。
+
+至此这批 TU 上的选项集是十二条，全部零告警 —— 但**零告警不等于零缺陷**：它只说明
+这批 TU 在这十二条规则下没露破口，逻辑问题要靠 analyzer 那一档与用例。
 
 它抓到过真东西：2026-11-17 它在 arkrtos_sync.c 上翻出 arkrtos_sync_release_task()
 里的 p_tsk 声明了却从未赋值 —— 死任务的锁永远不会移交、等待队列永远摘不干净。
@@ -99,11 +105,14 @@ sys.path.insert(0, HERE)
 
 from coverage_gate import CASES, COMMON_INC, find_cc, mingw_prefix  # noqa: E402
 
-# 固定选项集：前三条问「编译器能确定是错的吗」，后三条问「接口有没有露在暗处」。
+# 固定选项集，共十二条：前三条问「编译器能确定是错的吗」，接下来三条问「接口有没有
+# 露在暗处」，conversion / cast-qual / write-strings 问「类型意图有没有被隐式丢掉」，
+# 最后三条（pointer-arith / undef / bad-function-cast）零告警、纯钉住防退化。
 # 加选项必须先跑成零告警再改这里，否则门禁会先红一次。
 WARN_FLAGS = ["-Wall", "-Wextra", "-Wshadow",
               "-Wmissing-prototypes", "-Wstrict-prototypes", "-Wold-style-definition",
-              "-Wconversion", "-Wcast-qual", "-Wwrite-strings"]
+              "-Wconversion", "-Wcast-qual", "-Wwrite-strings",
+              "-Wpointer-arith", "-Wundef", "-Wbad-function-cast"]
 
 # 与 CASES 同源的补一条：SDK stdio 的宿主用例（对应 ci_gate 的 sdk-stdio-host）。
 EXTRA = [("sdk-stdio", "kernelsrc/sdk/app_sdk/tests/test_stdio_host.c", [], [])]

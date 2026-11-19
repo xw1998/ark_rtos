@@ -6484,8 +6484,8 @@ Code / RO / RW / ZI 逐项相同：`mq` 3932/128/0/1568、`sync` 9726/288/4/2248
 照样编过，ABI 与指令不变），并删掉 `test_eset_host.c` 里 14 处多余转型。
 **教训：`-Wcast-qual` 与 `-Wwrite-strings` 是耦合的** —— 单开 `-Wcast-qual` 时字面量还是
 `char[N]`，那 14 条一条都不报；「单开 cast-qual 得 0 条」不能读成「转型已改掉」。
-`-Wpointer-arith` / `-Wundef` / `-Wbad-function-cast` 各 0 条。
+`-Wpointer-arith` / `-Wundef` / `-Wbad-function-cast` 同日也一并打开（复核各 0 条、源码零改动，纯钉住防退化），选项集至此十二条。
 
-**结论分档：宿主 21 个 TU 九条选项零告警 + 默认档 LA64 镜像逐字节不变（`cmp -l` 0 处）
+**结论分档：宿主 21 个 TU 十二条选项零告警 + 默认档 LA64 镜像逐字节不变（`cmp -l` 0 处）
 + 编入档（armclang F427 九个 TU，含 driver SDK 的 drv_oslib）零告警且尺寸逐项不变，未上板。** 这一笔只改类型标注，
 没有新增可上板的行为，上板不会带来新的信息 —— 不假装有第四个档。
