@@ -6,7 +6,32 @@
 
 **简体中文 | [English](readme_en.md)**
 
-Ark RTOS 是一个面向 ARM Cortex-M 系列微控制器的安全实时操作系统（RTOS），采用 SVC（Supervisor Call）实现特权级隔离，利用 MPU 进行内存保护，支持多任务分区调度和统一设备驱动框架。
+Ark RTOS 是一个**多指令集**的安全实时操作系统（RTOS）：ARM Cortex-M3/M4/M7、RISC-V RV32、
+LoongArch32/64 共用同一份内核。服务入口在 ARM 侧是 SVC，在 RISC-V / LoongArch 侧是 `ecall`
+（服务号经 `a7`），服务号表只有一份（`0x10..0x22`，见 [SVC服务号与子命令表](docs/SVC服务号与子命令表.md)）；
+内存保护按硬件能力落地——Cortex-M 用 MPU、RV32 用 PMP + U 模式、LoongArch64 用 MMU 页表 + PLV3；
+之上是多任务分区调度与统一设备驱动框架。
+
+**贯穿所有架构的两条主线：**
+
+- **可装可卸**：应用与驱动以同一类 `.svcapp` 镜像装进统一镜像池（安装时用 `--type` 区分），
+  各自独立升级，内核不重编。
+- **遗言机制（硬件安全态）**：App 控制硬件时崩溃，由**内核**在任务收尸时执行驱动注册的"中和"
+  回调或 App 生前声明的遗言，把电机 / 继电器带回安全态。它不绑定某个指令集——靠的只是
+  "内核能收尸 + 有设备所有权台账"这两件内核设施，因此随 `ARKRTOS_HW_SAFE` 打到每个目标上：
+  QEMU 上的 RV32 与 LoongArch64 全功能档已实跑自检（`hwsafe_death_neutralizes`、
+  `sec: hwsafe.deadman`），Cortex-M 在 STM32F427 真机验证过（`hwsafe` 报
+  `neutralized=6 last_owner=12`，LED 目视由亮转灭）；LA32 目前只到编译档；QEMU 的 Cortex-M4
+  最小档为先把启动链跑通而显式关掉（详见 [App崩溃硬件安全与遗言机制](docs/App崩溃硬件安全与遗言机制.md)）。
+
+**正在推进的目标：带 MMU 的目标上直接跑 Linux 可执行文件。** 现状分两档，不要混着读——
+**已经能跑**的是静态链接的原生 ELF 可执行文件：LoongArch64 走页表 + PLV3 窗口、RV32 走 PMP +
+U 模式，装载器按 `PT_LOAD` 落段、按 Linux 入口约定把 `sp` 指向 `argc/argv`，QEMU 上 `exec`
+反复跑过（[MMU进程模型与ELF装载](docs/MMU进程模型与ELF装载.md)）；**还不能跑**的是现成 Linux
+发行版里的二进制，缺的正是系统调用 ABI 这一层：`ecall` 目前带的是 Ark 自己的服务号（不是
+Linux 的 `write=64` / `exit=93`），没有 `brk` / `mmap` / `open` 这组号，也没有 fd 继承、管道与
+信号，动态链接（`PT_INTERP` / `ld.so`）在装载器里被明确拒绝。这条差距按验收条款登记在
+[欠账盘点](docs/欠账盘点.md)，不写成"已经支持 Linux 程序"。
 
 **它对外的承诺只有一条：让 MCU 像手机一样安装、升级、卸载应用与驱动。**
 不写死地址、不重编内核、不整机重烧——应用与驱动以 `.svcapp` 镜像装进 Flash 上的统一镜像池，
@@ -76,8 +101,10 @@ Ark RTOS 把这件事拆成五层，每层各拦一种失败，且每一层的"�
 
 ## 核心特性
 
-- **SVC 特权隔离**：用户任务通过 SVC 系统调用进入内核态，内核态代码受硬件保护，用户任务无法直接访问
-- **MPU 内存保护**：利用 Cortex-M MPU 实现任务间 ROM/RAM 空间隔离，防止越界访问
+- **SVC / `ecall` 特权隔离**：ARM 侧用户任务经 SVC 进入内核，RISC-V / LoongArch 侧经 `ecall`（服务号经 `a7`），
+  门只有一道，用户任务无法直接触碰内核代码
+- **内存保护按硬件落地**：Cortex-M 用 MPU 做每任务 ROM/RAM 隔离；RV32 用 PMP + U 模式；LoongArch64 用 MMU 页表
+  + PLV3（每空间 ASID），越权访问由硬件当场拦下
 - **优先级 + 时间片调度**：支持多优先级抢占和同优先级时间片轮转
 - **事件驱动机制**：轻量级事件同步原语，支持超时等待
 - **信号量与互斥锁**：计数信号量 + 带优先级继承的互斥锁，防止优先级反转

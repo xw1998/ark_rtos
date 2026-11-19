@@ -4,6 +4,8 @@
 
 **这份文档回答一个问题：把 Ark RTOS 和 Linux 摆在一起，App 侧与内核侧还差什么？**
 
+> **2026-11-19 修订**：本页最早写成于 ELF 装载、页帧分配、ASID、SMP 之前，下面「进程与执行模型」「内存管理」两节以及文末「不打算做的」清单已按今天的事实改写：**静态链接的原生 ELF 已经能 `exec`**（LA64 页表 + PLV3、RV32 PMP + U 模式，读数见 [MMU进程模型与ELF装载](MMU进程模型与ELF装载.md) §9 / [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.25），**根因是缺一层 Linux 系统调用 ABI 转译**——`ecall` 带的是 Ark 自己的服务号 `0x10..0x22`，不是 Linux 的 `write=64` / `exit=93`，且没有 `brk` / `mmap` / `open` 这组号、没有 fd 继承与信号、动态链接（`PT_INTERP` / `ld.so`）在装载器里被明确拒绝。这条差距已按验收条款登记进[欠账盘点](欠账盘点.md)。
+
 先说清口径，免得把两种东西的差异当成"缺陷"：
 
 - Ark RTOS 的目标**不是**做一个 Linux，而是让 MCU "像手机一样安装、升级、卸载应用与驱动"。
@@ -53,10 +55,10 @@
 
 | Linux 有 | Ark RTOS | 归类 |
 |---------|---------|------|
-| 进程（独立地址空间）+ `fork` / `exec` / `waitpid` | 无进程模型：**一个 App = 一个地址空间 + 若干线程**；`fork` / `exec*` 明确不提供 | 取舍 |
+| 进程（独立地址空间）+ `fork` / `exec` / `waitpid` | 没有 fork 语义：**一个 App = 一个地址空间 + 若干线程**，`fork` / `waitpid` 不提供。`exec` **有**，但它是内核 shell 命令（装载一个新 ELF 到新任务上跑），不是「替换当前进程映像」的系统调用；被装载的程序按 Linux 入口约定拿到 `sp -> argc/argv` | 取舍（fork）+ 已做（静态 ELF 装载） |
 | `getpid` / `getppid` / PID 命名空间 | 只有内核任务号（任务表索引），`getpid` 只有桩 | 取舍 |
-| 动态链接、`.so` 共享库、ELF 加载器 | 镜像是自有 `.svcapp` 容器，装载即整体复制到 RAM；**无 ELF、无动态链接、无共享库** | 取舍 |
-| `argv` / `argc` / 环境变量 | App 入口是 `main(void)`，无 argv、无 `environ` | 取舍 |
+| 动态链接、`.so` 共享库、ELF 加载器 | 两类输入并存：装应用的 `.svcapp` 容器（整体复制到 RAM），以及**静态链接的原生 ELF**（`exec`/`ld`，LA64 与 RV32 实跑；64 位/32 位字段表按 `__SIZEOF_LONG__` 选）。ELF 装载器只认 `PT_LOAD` + `e_entry`：`PT_INTERP`（动态链接）明确拒绝（`ERR_FORMAT`），**无 `.so`、无重定位后的共享库、无 Linux 系统调用 ABI**（`ecall` 走 Ark 的 `0x10..0x22`） | 取舍（动态链接、共享库）+ 欠账（Linux syscall ABI，见 [欠账盘点](欠账盘点.md)） |
+| `argv` / `argc` / 环境变量 | `.svcapp` 的 App 入口仍是 `main(void)`，没有 argv；**被 `exec` 装载的 ELF 程序按 Linux 入口约定拿到 `sp -> argc/argv`**（实测 `argc=4`、`argv[0..3]` 逐字对上），但**无 `environ`** | 取舍（`.svcapp`）+ 已做（ELF 的 argv） |
 | 信号（`signal` / `sigaction` / `kill`） | **无 Unix 信号**；进程间/线程间同步用事件组、信号量、互斥量、消息队列、条件变量 | 取舍 |
 | `pipe` / `FIFO` / Unix domain socket | 无；等价物是消息队列 + socket（回环） | 取舍 |
 | System V / POSIX 共享内存 `shm` | 无 `shmget`/`shm_open`；只有 MPU 的共享窗口（用于小程序交接，不对外当通用 IPC） | 取舍 |
@@ -66,15 +68,16 @@
 
 | Linux 有 | Ark RTOS | 归类 |
 |---------|---------|------|
-| MMU 虚拟内存、地址翻译、按需分页、swap | **窗口档**（Cortex-M / RV32）：只有 MPU/PMP 分段保护，没有地址翻译。**页表档**（LoongArch64）：有页表和地址翻译；每 App 地址空间机制已有（切 App 时重写 App 窗口那条 PS=20 条目，空间号即帧号），但 ASID 恒 0、没有并发多实例、没有页帧分配器、没有按需分页与 swap | 两档分别看：窗口档是取舍（硬件前提）；页表档的并发/分配器/缺页是欠账（[MMU进程模型与ELF装载](MMU进程模型与ELF装载.md) §6 U-1..U-7，读数见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.17） |
+| MMU 虚拟内存、地址翻译、按需分页、swap | **窗口档**（Cortex-M / RV32）：只有 MPU/PMP 分段保护，没有地址翻译。**页表档**（LoongArch64）：页表 + PLV3 已实跑，且有每 App 地址空间（同 VA 多实例）、每空间 ASID、4 KB 页帧分配器、按需缺页、页替换（swap），读数见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.21–§5.29；**仍缺** TLB shootdown（改映射后按 ASID 定向失效，多核要 IPI）与真实硬件验证 | 窗口档是取舍（硬件前提）；页表档的 shootdown 是欠账（[欠账盘点](欠账盘点.md) 的 U-7 剩余半条） |
 | `mmap` / `munmap` / `brk` / `sbrk` | 无；App 内存来自槽位 RAM 窗口 + App 侧 arena（`arkrtos_posix_malloc`，默认 1 KB） | 取舍 |
 | 内核统一管理物理内存 | 内核不是分配器：地址在 `config/arkrtos_partition.h` 定义一次，槽位窗口在安装时绑定 | 取舍 |
 | 内存超售 / OOM killer | 无。越界由 MPU/PMP 或 TLB 条目当场拦；**栈哨兵只写入没人检查**（`stack_bottom[0]` 写 `0xed01`，全仓没有读它，见 [欠账盘点](欠账盘点.md) 的 U-13） | 取舍 + 欠账（栈哨兵） |
 
 > 这一块在 Cortex-M 上是架构性的：没有 MMU 就没有虚拟内存，也就没有 `fork` 的
 > COW 基础——这不是"没做完"，是硬件前提决定的。
-> 但在 LoongArch64 上硬件前提已经具备（页表 + PLV3 已实跑），剩下的差距是
-> 软件没做（每进程页表、缺页、ASID），档案性质从"取舍"变成"欠账"。
+> 但在 LoongArch64 上硬件前提已经具备（页表 + PLV3 已实跑），软件侧也已补上每空间 ASID、
+> 页帧分配器、按需缺页与页替换；**剩下的欠账只有 TLB shootdown 与真实硬件验证**
+> （`stack_bottom[0]` 哨兵那一行是另一条独立欠账，见 [欠账盘点](欠账盘点.md)）。
 
 ### 3. 文件系统 / VFS（口径内欠账较集中的一块）
 
@@ -166,8 +169,9 @@
 | 低 | `/sys` 风格可写内核属性面 | 无（`/proc` 只读） | 有需要再做 |
 
 **不打算做的**（第一类取舍，这里明确写下以免反复被当成"还没做"）：
-进程模型（fork/exec）、虚拟内存/MMU、动态链接/ELF、多用户/uid-gid、SMP、电源管理、
-ASLR、内核模块、包管理器、信号（Unix signal）、共享内存 IPC、`/sys`+热插拔。
+进程模型（`fork` / `waitpid`、COW）、动态链接与 `.so` 共享库、多用户 / uid-gid、电源管理、
+ASLR、内核模块、包管理器、Unix signal、共享内存 IPC、`/sys`+热插拔、对称多核自动负载均衡
+（SMP 已有 AMP 分核与显式任务迁移；**静态 ELF 装载与 Linux 入口约定已经做了，不在此列**）。
 
 ---
 

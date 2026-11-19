@@ -6,6 +6,15 @@
 > copied from it as of 2026-11-18, but if the two disagree, the Chinese page wins. This page adds no
 > new claim and no new measurement.
 
+> **Revised 2026-11-19.** The process/execution-model and memory-management rows below, and the
+> "not planned" list at the end, were rewritten against today's facts: **a statically linked native
+> ELF executable can already be `exec`ed** (LoongArch64 page table + PLV3, RV32 PMP + U mode; see
+> [MMU进程模型与ELF装载](MMU进程模型与ELF装载.md) section 9 and section 5.25 of the QEMU page). What
+> is still missing for a real Linux binary is the **system-call ABI**: `ecall` carries Ark's own
+> service numbers `0x10..0x22`, not Linux `write=64` / `exit=93`, there are no `brk` / `mmap` /
+> `open` numbers, no fd inheritance and no signals, and dynamic linking (`PT_INTERP` / `ld.so`) is
+> rejected by the loader. That gap is registered as an acceptance item in [欠账盘点](欠账盘点.md).
+
 One question: put Ark RTOS and Linux side by side — what is still missing on the App side and on the
 kernel side?
 
@@ -61,10 +70,10 @@ In one line: **the "behaves like Linux" main line works**; what follows is what 
 
 | Linux has | Ark RTOS | Class |
 |---|---|---|
-| Process (own address space) + `fork` / `exec` / `waitpid` | No process model: **one App = one address space + several threads**; `fork` / `exec*` explicitly not provided | Trade-off |
+| Process (own address space) + `fork` / `exec` / `waitpid` | No `fork` semantics: **one App = one address space + several threads**; `fork` / `waitpid` are not provided. `exec` **does** exist, but as a kernel shell command (load a new ELF onto a new task), not as a "replace the current process image" system call; the loaded program receives `sp -> argc/argv` per the Linux entry convention | Trade-off (fork) + done (static ELF loading) |
 | `getpid` / `getppid` / PID namespace | Only a kernel task id (task-table index); `getpid` is a stub only | Trade-off |
-| Dynamic linking, `.so` shared libraries, ELF loader | The image is the project's own `.svcapp` container, copied whole into RAM at load; **no ELF, no dynamic linking, no shared libraries** | Trade-off |
-| `argv` / `argc` / environment variables | App entry is `main(void)`; no argv, no `environ` | Trade-off |
+| Dynamic linking, `.so` shared libraries, ELF loader | Two kinds of input coexist: the `.svcapp` container (copied whole into RAM) and a **statically linked native ELF** (`exec` / `ld`, running on LA64 and RV32; 32/64-bit field tables chosen by `__SIZEOF_LONG__`). The ELF loader accepts only `PT_LOAD` + `e_entry`: `PT_INTERP` (dynamic linking) is explicitly rejected (`ERR_FORMAT`); **no `.so`, no relocated shared libraries, no Linux system-call ABI** (`ecall` carries Ark's `0x10..0x22`) | Trade-off (dynamic linking, shared libraries) + debit (Linux syscall ABI, see [欠账盘点](欠账盘点.md)) |
+| `argv` / `argc` / environment variables | A `.svcapp` App still enters at `main(void)` with no argv; an **ELF program loaded by `exec` receives `sp -> argc/argv` per the Linux entry convention** (measured `argc=4` and `argv[0..3]` matching exactly), but there is **no `environ`** | Trade-off (`.svcapp`) + done (ELF argv) |
 | Signals (`signal` / `sigaction` / `kill`) | **No Unix signals**; inter-task synchronisation uses event sets, semaphores, mutexes, message queues, condition variables | Trade-off |
 | `pipe` / `FIFO` / Unix domain socket | None; the equivalents are message queues plus socket (loopback) | Trade-off |
 | System V / POSIX shared memory `shm` | No `shmget`/`shm_open`; only the MPU shared window (used for MiniApp handover, not exposed as general IPC) | Trade-off |
@@ -74,16 +83,17 @@ In one line: **the "behaves like Linux" main line works**; what follows is what 
 
 | Linux has | Ark RTOS | Class |
 |---|---|---|
-| MMU virtual memory, address translation, demand paging, swap | **Window profile** (Cortex-M / RV32): only MPU/PMP range protection, no translation. **Page-table profile** (LoongArch64): page tables and translation exist; the per-App address-space mechanism exists (switching an App rewrites the App window's PS=20 entry, space number = frame number), but ASID is always 0, no concurrent multi-instance, no frame allocator, no demand paging and no swap | Read per profile: the window profile is a trade-off (hardware premise); the page-table profile's concurrency/allocator/faulting are debits (U-1..U-7 in §6 of [MMU进程模型与ELF装载](MMU进程模型与ELF装载.md), readings in §5.17 of the QEMU page) |
+| MMU virtual memory, address translation, demand paging, swap | **Window profile** (Cortex-M / RV32): only MPU/PMP range protection, no translation. **Page-table profile** (LoongArch64): page tables + PLV3 run, with per-App address spaces (same VA, several instances), per-space ASID, a 4 KB frame allocator, demand paging and page replacement (swap); readings in sections 5.21-5.29 of the QEMU page. **Still missing**: TLB shootdown (targeted invalidation by ASID, IPI on multicore) and real-hardware verification | The window profile is a trade-off (hardware premise); the page-table profile's shootdown is a debit (the remaining half of U-7 in [欠账盘点](欠账盘点.md)) |
 | `mmap` / `munmap` / `brk` / `sbrk` | None; App memory comes from the slot RAM window plus an App-side arena (`arkrtos_posix_malloc`, default 1 KB) | Trade-off |
 | Kernel manages physical memory centrally | The kernel is not an allocator: addresses are defined once in `config/arkrtos_partition.h`, slot windows are bound at install time | Trade-off |
 | Memory overcommit / OOM killer | None. An overreach is stopped on the spot by MPU/PMP or the TLB entry; **the stack sentinel is only written, never checked** (`stack_bottom[0]` gets `0xed01`, nothing in the repo reads it — U-13 in [欠账盘点](欠账盘点.md)) | Trade-off + debit (stack sentinel) |
 
 > On Cortex-M this is architectural: without an MMU there is no virtual memory, hence no COW basis
 > for `fork` — not "unfinished", decided by the hardware premise. On LoongArch64 the hardware
-> premise is already present (page tables + PLV3 actually run); what remains is software that has not
-> been written (per-process page tables, faulting, ASID), so the nature changes from "trade-off" to
-> "debit".
+> premise is already present (page tables + PLV3 actually run), and the software side now has
+> per-space ASID, a frame allocator, demand paging and page replacement; **the only remaining debits
+> are TLB shootdown and real-hardware verification** (the `stack_bottom[0]` sentinel is a separate
+> debit, see [欠账盘点](欠账盘点.md)).
 
 ### 2.3 File system / VFS (where in-scope debits concentrate)
 
@@ -176,9 +186,11 @@ whether it is worth fixing:
 | Low | A writable `/sys`-style kernel attribute surface | None (`/proc` is read-only) | Do it when needed |
 
 **Not planned** (class 1 trade-offs, written down so they are not repeatedly mistaken for "not done
-yet"): process model (fork/exec), virtual memory/MMU, dynamic linking/ELF, multi-user/uid-gid, SMP,
-power management, ASLR, kernel modules, package manager, Unix signals, shared-memory IPC,
-`/sys` + hotplug.
+yet"): process model (`fork` / `waitpid`, COW), dynamic linking and `.so` shared libraries,
+multi-user / uid-gid, power management, ASLR, kernel modules, package manager, Unix signals,
+shared-memory IPC, `/sys` + hotplug, symmetric-multicore automatic load balancing (SMP already has
+AMP core partitioning and explicit task migration; **static ELF loading with the Linux entry
+convention is done and is not on this list**).
 
 ## 4. One-line conclusion
 

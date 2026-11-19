@@ -6,9 +6,40 @@
 
 **[简体中文](readme.md) | English**
 
-Ark RTOS is a secure real-time operating system for ARM Cortex-M microcontrollers. It uses SVC
-(Supervisor Call) for privilege separation, the MPU for memory protection, and ships a partitioned
-scheduler plus a unified device driver framework.
+Ark RTOS is a **multi-ISA** secure real-time operating system (RTOS): ARM Cortex-M3/M4/M7,
+RISC-V RV32 and LoongArch32/64 share one kernel. The service entry is SVC on ARM and `ecall`
+(service number in `a7`) on RISC-V / LoongArch, with a single service-number table (`0x10..0x22`,
+see [docs/SVC服务号与子命令表.md](docs/SVC服务号与子命令表.md)). Memory protection follows what the
+hardware offers - MPU on Cortex-M, PMP + U mode on RV32, MMU page tables + PLV3 on LoongArch64 -
+with a partitioned scheduler and a unified device driver framework on top.
+
+**Two threads run through every architecture:**
+
+- **Installable, removable images**: applications and drivers ship as the same kind of `.svcapp`
+  image into one on-chip pool (`--type` tells them apart at install time) and are upgraded
+  independently, without rebuilding the kernel.
+- **Last will (hardware safe state)**: when an app that drives hardware crashes, the **kernel** - not
+  the dead app - runs the driver-registered neutralise callback or the will the app left behind, and
+  brings the motor / relay back to a safe state. It is not tied to an instruction set: it only needs
+  two kernel facilities (the kernel reaps the task, and it keeps a device ownership ledger), so it
+  ships with `ARKRTOS_HW_SAFE` on every target. On QEMU it self-tests on the full-feature RV32 and
+  LoongArch64 builds (`hwsafe_death_neutralizes`, `sec: hwsafe.deadman`); on Cortex-M it is verified
+  on STM32F427 hardware (`hwsafe` reports `neutralized=6 last_owner=12`, the LED visibly goes off);
+  LA32 is build-only for now; the QEMU Cortex-M4 minimal target switches it off explicitly because
+  that target exists to bring up the boot chain first (see
+  [docs/App崩溃硬件安全与遗言机制.md](docs/App崩溃硬件安全与遗言机制.md)).
+
+**Goal in progress: run Linux executables directly on MMU-capable targets.** Two different states,
+do not read them as one - **what already runs** is a statically linked native ELF executable:
+LoongArch64 through the page-table + PLV3 window, RV32 through PMP + U mode; the loader maps
+`PT_LOAD` segments and lays out `sp -> argc/argv` per the Linux entry convention, and `exec` has
+been run repeatedly on QEMU ([docs/MMU进程模型与ELF装载.md](docs/MMU进程模型与ELF装载.md)). **What
+does not run yet** is a binary taken from a Linux distribution: the missing piece is the system-call
+ABI - `ecall` currently carries Ark's own service numbers (not Linux `write=64` / `exit=93`), there
+are no `brk` / `mmap` / `open` numbers, no fd inheritance, pipes or signals, and dynamic linking
+(`PT_INTERP` / `ld.so`) is explicitly rejected by the loader. That gap is tracked as an acceptance
+item in [docs/欠账盘点.md](docs/欠账盘点.md); this README never claims "Linux programs are
+supported".
 
 **It makes exactly one promise: an MCU can install, upgrade and uninstall applications and drivers
 the way a phone does.**
@@ -88,9 +119,12 @@ per item.
 
 ## Highlights
 
-- **SVC privilege separation**: user tasks enter kernel mode through SVC; kernel code is protected by
-  hardware and cannot be touched directly from a user task
-- **MPU memory protection**: per-task ROM/RAM isolation on Cortex-M MPU, blocking out-of-bounds access
+- **SVC / `ecall` privilege separation**: on ARM a user task enters the kernel through SVC, on RISC-V /
+  LoongArch through `ecall` (service number in `a7`); there is exactly one door, and a user task can
+  never touch kernel code directly
+- **Memory protection per hardware**: per-task ROM/RAM isolation through the Cortex-M MPU; PMP + U mode
+  on RV32; MMU page tables + PLV3 (per-space ASID) on LoongArch64 - an out-of-bounds access is stopped by
+  the hardware on the spot
 - **Priority plus time-slice scheduling**: multi-priority preemption and round-robin within a priority
 - **Event primitives**: lightweight event synchronisation with timeout waits
 - **Semaphores and mutexes**: counting semaphores plus mutexes with priority inheritance against
