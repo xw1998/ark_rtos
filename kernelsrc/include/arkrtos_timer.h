@@ -49,7 +49,7 @@ void  arkrtos_timer_tick_handler(void);
 uint32 arkrtos_timer_next_ticks(void);
 #endif
 
-int32 arkrtos_timer_create_internal(char *name);
+int32 arkrtos_timer_create_internal(const char *name);
 int32 arkrtos_timer_start_internal(int32 handle, uint32 period_ms, uint8 mode,
                                  void (*cb)(void *), void *arg);
 int32 arkrtos_timer_stop_internal(int32 handle);

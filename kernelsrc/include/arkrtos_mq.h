@@ -52,13 +52,13 @@ typedef struct {
 
 void  arkrtos_mq_module_init(void);
 
-int32 arkrtos_mq_create_internal(char *name);
+int32 arkrtos_mq_create_internal(const char *name);
 
 /* Kernel owned queue: the creator id is pinned to 0, so
  * arkrtos_mq_release_task() never collects it when some task goes away.
  * Use it for queues the kernel itself owns and that must outlive every
  * task (the socket request queue is one). */
-int32 arkrtos_mq_create_kernel_internal(char *name);
+int32 arkrtos_mq_create_kernel_internal(const char *name);
 
 /* 1 = the handle still names a live queue object, not merely an in-range
  * index. A stored handle keeps passing the plain range checks after the

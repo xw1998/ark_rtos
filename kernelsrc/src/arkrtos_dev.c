@@ -172,7 +172,7 @@ int32 arkrtos_dev_name_at(uint32 idx, char *out, uint32 max)
     return 0;
 }
 
-int32 arkrtos_dev_open_internal(char *name, uint32 param)
+int32 arkrtos_dev_open_internal(const char *name, uint32 param)
 {
     int32 i;
     /* 槽位可能不连续（注销留下的空槽位），必须遍历整个表 */

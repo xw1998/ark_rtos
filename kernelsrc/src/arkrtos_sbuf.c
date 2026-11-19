@@ -62,7 +62,7 @@ void arkrtos_sbuf_module_init(void)
     }
 }
 
-static void arkrtos_sbuf_copy_name(char *dst, char *src)
+static void arkrtos_sbuf_copy_name(char *dst, const char *src)
 {
     int32 i;
 
@@ -88,7 +88,7 @@ static void arkrtos_sbuf_clear_waiters(arkrtos_sbuf_obj_t *p_sb)
     }
 }
 
-static int32 arkrtos_sbuf_alloc(char *name, int32 creator_id)
+static int32 arkrtos_sbuf_alloc(const char *name, int32 creator_id)
 {
     int32 i;
     int32 handle = -1;
@@ -113,7 +113,7 @@ static int32 arkrtos_sbuf_alloc(char *name, int32 creator_id)
     return handle;
 }
 
-int32 arkrtos_sbuf_create_internal(char *name)
+int32 arkrtos_sbuf_create_internal(const char *name)
 {
     if(name == 0)
     {
@@ -123,7 +123,7 @@ int32 arkrtos_sbuf_create_internal(char *name)
                                     ? arkrtos_current_task_id : 0);
 }
 
-int32 arkrtos_sbuf_create_kernel_internal(char *name)
+int32 arkrtos_sbuf_create_kernel_internal(const char *name)
 {
     if(name == 0)
     {

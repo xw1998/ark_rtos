@@ -97,7 +97,7 @@ uint32 arkrtos_get_cpu_usage(void);
 * @param name 事件名（字符串）
 * @return 事件句柄，失败返回负值
 */
-int32  arkrtos_event_create(char *name);
+int32  arkrtos_event_create(const char *name);
 
 /**
 * @brief 等待事件触发
@@ -132,7 +132,7 @@ void   arkrtos_event_set(int32 handle);
 * @param name 事件集名（字符串）
 * @return 事件集句柄，失败返回负值
 */
-int32  arkrtos_eset_create(char *name);
+int32  arkrtos_eset_create(const char *name);
 
 /**
 * @brief 等待事件集里的一组位
@@ -200,7 +200,7 @@ int32  arkrtos_eset_delete(int32 handle);
 * @param init_count 初始计数值
 * @return 信号量句柄，失败返回负值
 */
-int32  arkrtos_sem_create(char *name, int32 init_count);
+int32  arkrtos_sem_create(const char *name, int32 init_count);
 
 /**
 * @brief 等待信号量（计数减一，计数为 0 时阻塞）
@@ -233,7 +233,7 @@ int32  arkrtos_sem_delete(int32 handle);
 * @param name 互斥锁名
 * @return 互斥锁句柄，失败返回负值
 */
-int32  arkrtos_mutex_create(char *name);
+int32  arkrtos_mutex_create(const char *name);
 
 #if (ARKRTOS_USE_MTX_RECURSIVE == 1)
 /**
@@ -242,7 +242,7 @@ int32  arkrtos_mutex_create(char *name);
 * @return 互斥锁句柄，失败返回负值
 * @note 普通 arkrtos_mutex_create 创建的锁仍不可递归，重复加锁返回 -1。
 */
-int32  arkrtos_mutex_create_recursive(char *name);
+int32  arkrtos_mutex_create_recursive(const char *name);
 #endif
 #if (ARKRTOS_USE_WAITMULTI == 1)
 /** @defgroup waitmulti 多对象同时等待
@@ -295,7 +295,7 @@ int32  arkrtos_mutex_delete(int32 handle);
 * @param name 条件变量名（最长 7 个字符）
 * @return 条件变量句柄，失败返回负值
 */
-int32  arkrtos_cond_create(char *name);
+int32  arkrtos_cond_create(const char *name);
 
 /**
 * @brief 等待条件（原子地释放互斥锁并挂起，醒来后重新持有互斥锁）
@@ -342,7 +342,7 @@ int32  arkrtos_cond_delete(int32 handle);
 * @param param 设备相关参数（由驱动解释，无参数填 0）
 * @return 设备句柄，失败返回负值
 */
-int32  arkrtos_dev_open(char *name, uint32 param);
+int32  arkrtos_dev_open(const char *name, uint32 param);
 
 /**
 * @brief 关闭设备
@@ -400,7 +400,7 @@ int32  arkrtos_dev_set_will(const char *dev_name, int32 cmd, int32 val);
 * @return 消息队列句柄，失败返回负值
 * @note 队列深度与单条消息长度由 ARKRTOS_MQ_DEPTH / ARKRTOS_MQ_MSG_WORDS 配置。
 */
-int32  arkrtos_mq_create(char *name);
+int32  arkrtos_mq_create(const char *name);
 
 /**
 * @brief 发送消息（消息按字拷贝入队）
@@ -443,7 +443,7 @@ int32  arkrtos_mq_delete(int32 handle);
 *       （arkrtos_mbuf_*）用，但两者不要混用：消息靠长度头定界，
 *       掺进裸字节流后长度头就错位了。
 */
-int32  arkrtos_sbuf_create(char *name);
+int32  arkrtos_sbuf_create(const char *name);
 
 /**
 * @brief 写入字节流
@@ -533,7 +533,7 @@ typedef struct {
 *       的前提是同一池不在中断里与任务里同时释放同一个块（那本来就是错用）。
 *       任务下线时，该任务创建的池会被内核自动回收（内存区归调用者，不会释放）。
 */
-int32  arkrtos_mpool_create(char *name, void *pool, uint32 block_size, uint32 block_count);
+int32  arkrtos_mpool_create(const char *name, void *pool, uint32 block_size, uint32 block_count);
 
 /**
 * @brief 取一块（不阻塞）
@@ -564,7 +564,7 @@ int32  arkrtos_mpool_delete(int32 handle);
 * @param name 定时器名
 * @return 定时器句柄，失败返回负值
 */
-int32  arkrtos_timer_create(char *name);
+int32  arkrtos_timer_create(const char *name);
 
 /**
 * @brief 启动定时器

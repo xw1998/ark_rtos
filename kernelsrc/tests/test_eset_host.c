@@ -185,11 +185,11 @@ static void t02_noslot(void)
     table_reset();
     for(i = 0; i < ARKRTOS_ESET_NUM; i++)
     {
-        last = arkrtos_eset_create_internal((char *)"x");
+        last = arkrtos_eset_create_internal("x");
         check(last > 0, "create while slots remain");
     }
     check(ARKRTOS_ESET_NUM == i, "all slots consumed");
-    check(arkrtos_eset_create_internal((char *)"y") == ARKRTOS_ESET_ERR_NOSLOT,
+    check(arkrtos_eset_create_internal("y") == ARKRTOS_ESET_ERR_NOSLOT,
           "the table full case reports NOSLOT");
     check(last > 0, "last handle is still valid");
 }
@@ -200,7 +200,7 @@ static void t03_set_get_clear(void)
     uint32 got = 0u;
 
     table_reset();
-    h = arkrtos_eset_create_internal((char *)"s");
+    h = arkrtos_eset_create_internal("s");
     check(arkrtos_eset_set_internal(h, 0x1u) == 0, "set one bit");
     check(arkrtos_eset_set_internal(h, 0x4u) == 0, "set accumulates");
     check(arkrtos_eset_get_internal(h, &got) == 0, "get returns status 0");
@@ -222,7 +222,7 @@ static void t04_try(void)
 
     table_reset();
     use_task(0);
-    h = arkrtos_eset_create_internal((char *)"t");
+    h = arkrtos_eset_create_internal("t");
 
     /* 未置位、timeout 0：只试一次 */
     check(arkrtos_eset_wait_internal(h, 0x2u, ARKRTOS_ESET_OPT_OR, &got, 0)
@@ -256,7 +256,7 @@ static void t05_and_or(void)
 
     table_reset();
     use_task(0);
-    h = arkrtos_eset_create_internal((char *)"ao");
+    h = arkrtos_eset_create_internal("ao");
 
     /* AND：只置一半，不应命中 */
     (void)arkrtos_eset_set_internal(h, 0x1u);
@@ -281,7 +281,7 @@ static void t06_opt_validation(void)
 
     table_reset();
     use_task(0);
-    h = arkrtos_eset_create_internal((char *)"v");
+    h = arkrtos_eset_create_internal("v");
 
     check(arkrtos_eset_wait_internal(h, 0x1u, 0u, &got, 0) == ARKRTOS_ESET_ERR_OPT,
           "neither OR nor AND is rejected");
@@ -313,7 +313,7 @@ static void t07_handoff_snapshot(void)
 
     table_reset();
     use_task(0);
-    h = arkrtos_eset_create_internal((char *)"snap");
+    h = arkrtos_eset_create_internal("snap");
 
     /* 睡下后先置 0x1，再置 0x2：交班值必须是"交接那一刻"的 0x1，
      * 而不是醒来时重算的 0x3。 */
@@ -337,7 +337,7 @@ static void t08_timeout_cleans(void)
 
     table_reset();
     use_task(0);
-    h = arkrtos_eset_create_internal((char *)"to");
+    h = arkrtos_eset_create_internal("to");
 
     /* 睡下后没有人 set：钩子回超时。登记必须被摘掉。 */
     g_hook_handle  = h;
@@ -367,7 +367,7 @@ static void t09_two_waiters_clear(void)
     table_reset();
     a = use_task(0);
     b = use_task(1);
-    h = arkrtos_eset_create_internal((char *)"two");
+    h = arkrtos_eset_create_internal("two");
     idx = h & ARKRTOS_HANDLE_RELMASK;
 
     /* 直接摆两个等待槽：A 要 0x1，B 要 0x1|0x2 且 AND —— 同一位加 CLEAR',
@@ -404,7 +404,7 @@ static void t10_delete(void)
 
     table_reset();
     a = use_task(0);
-    h = arkrtos_eset_create_internal((char *)"del");
+    h = arkrtos_eset_create_internal("del");
     idx = h & ARKRTOS_HANDLE_RELMASK;
 
     arkrtos_esets[idx].waiters[0].task = a;
@@ -440,11 +440,11 @@ static void t11_release_task(void)
     other = use_task(1);
 
     arkrtos_current_task_id = 1;            /* 1 号任务创建 h1 */
-    h1 = arkrtos_eset_create_internal((char *)"mine");
+    h1 = arkrtos_eset_create_internal("mine");
     idx1 = h1 & ARKRTOS_HANDLE_RELMASK;
 
     arkrtos_current_task_id = 0;            /* 内核创建 h2，应随镜像存活 */
-    h2 = arkrtos_eset_create_internal((char *)"kernel");
+    h2 = arkrtos_eset_create_internal("kernel");
     idx2 = h2 & ARKRTOS_HANDLE_RELMASK;
 
     /* dead 挂在 h2 上；other 挂在 h1 上 */
@@ -461,7 +461,7 @@ static void t11_release_task(void)
     check(arkrtos_esets[idx2].used == 1u, "kernel object survives the teardown");
     check(arkrtos_esets[idx1].used == 0u, "object created by the dead task is released");
     check(waiter_count(idx1) == 0, "its waiters are flushed");
-    check(arkrtos_eset_create_internal((char *)"after") > 0,
+    check(arkrtos_eset_create_internal("after") > 0,
           "the freed slot can be reused after teardown");
 }
 
@@ -473,7 +473,7 @@ static void t12_nospace(void)
     uint32 got = 0u;
 
     table_reset();
-    h = arkrtos_eset_create_internal((char *)"full");
+    h = arkrtos_eset_create_internal("full");
     idx = h & ARKRTOS_HANDLE_RELMASK;
 
     /* 用别的任务把等待槽占满 */

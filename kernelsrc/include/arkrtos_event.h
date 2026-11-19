@@ -34,7 +34,7 @@ typedef struct {
 } arkrtos_event_obj_t;
 
 void arkrtos_event_module_init(void);
-int32 arkrtos_event_create_internal(char *name);
+int32 arkrtos_event_create_internal(const char *name);
 int32 arkrtos_event_wait_internal(int32 handle, int32 timeout_ms);
 void arkrtos_event_set_internal(int32 handle);
 

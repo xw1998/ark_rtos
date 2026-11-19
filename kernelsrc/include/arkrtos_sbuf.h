@@ -59,9 +59,9 @@ typedef struct {
 
 void  arkrtos_sbuf_module_init(void);
 
-int32 arkrtos_sbuf_create_internal(char *name);          /* 创建者 = 当前任务 */
+int32 arkrtos_sbuf_create_internal(const char *name);          /* 创建者 = 当前任务 */
 /* 内核自建变体：creator_id 固定为 0，任何任务下线都不会把它收走 */
-int32 arkrtos_sbuf_create_kernel_internal(char *name);
+int32 arkrtos_sbuf_create_kernel_internal(const char *name);
 
 /* 句柄是否仍然指向一个活着的对象（光看范围检查挡不住槽位复用） */
 int32 arkrtos_sbuf_is_alive(int32 handle);

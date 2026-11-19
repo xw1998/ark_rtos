@@ -55,7 +55,7 @@ int32  arkrtos_dev_get_count(void);
  * 成功写出返回 0。 */
 int32  arkrtos_dev_name_at(uint32 idx, char *out, uint32 max);
 
-int32  arkrtos_dev_open_internal(char *name, uint32 param);
+int32  arkrtos_dev_open_internal(const char *name, uint32 param);
 int32  arkrtos_dev_close_internal(int32 handle);
 int32  arkrtos_dev_read_internal(int32 handle, uint8 *pdata, int32 len);
 int32  arkrtos_dev_write_internal(int32 handle, uint8 *pdata, int32 len);

@@ -58,7 +58,7 @@ typedef struct {
 
 void  arkrtos_sync_module_init(void);
 
-int32 arkrtos_sem_create_internal(char *name, int32 init_count);
+int32 arkrtos_sem_create_internal(const char *name, int32 init_count);
 int32 arkrtos_sem_wait_internal(int32 handle, int32 timeout_ms);
 int32 arkrtos_sem_post_internal(int32 handle);
 /* 中断侧 post：实现就是 post_internal（不阻塞、不切任务）。arkrtos.h 里有
@@ -66,17 +66,17 @@ int32 arkrtos_sem_post_internal(int32 handle);
 int32 arkrtos_sem_post_from_isr(int32 handle);
 int32 arkrtos_sem_delete_internal(int32 handle);
 
-int32 arkrtos_mtx_create_internal(char *name);
+int32 arkrtos_mtx_create_internal(const char *name);
 #if (ARKRTOS_USE_MTX_RECURSIVE == 1)
 /* 递归互斥锁：同一任务可重复加锁，nest 计数；解锁到 nest==0 才真正释放。
  * 可递归是创建时决定的属性——普通锁重复加锁仍然返回 RECURSIVE(-1)。 */
-int32 arkrtos_mtx_create_recursive_internal(char *name);
+int32 arkrtos_mtx_create_recursive_internal(const char *name);
 #endif
 int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms);
 int32 arkrtos_mtx_unlock_internal(int32 handle);
 int32 arkrtos_mtx_delete_internal(int32 handle);
 
-int32 arkrtos_cond_create_internal(char *name);
+int32 arkrtos_cond_create_internal(const char *name);
 /* timeout_ms == (uint32)-1 表示无限等待；返回值见 ARKRTOS_SYNC_ERR_x。
  * 约定：调用者必须持有 mtx；函数返回时（含超时）一定重新持有它。 */
 int32 arkrtos_cond_wait_internal(int32 cond_handle, int32 mtx_handle, int32 timeout_ms);

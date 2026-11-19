@@ -41,12 +41,21 @@ test_eset_host.c；2026-11-19 在同一批 21 个 TU 上复核为 0 条 —— �
 特意先数一遍而不是照旧数字写口径：**照旧数字开档会让门禁先红一次，而"14 条"其实
 早就不成立了**。
 
-仍未开：-Wwrite-strings（20 条，全部是 create("literal") 传字面量给 char* 形参：
-test_sbuf_host 6 / test_sync_host 10 / test_mq_host 4）。修法不是改测试，而是把
-sbuf/mq/sync/eset/dev/event/mpool 的 create/open 接口形参改成 const char* ——
-内核侧全是拷进定长数组、没有任何一处保存指针，所以这是纯签名放宽（调用方传 char*
-照样编过，ABI 与指令都不变），但牵动公开头文件与 API 参考，属另一件事；-Wpointer-arith /
--Wundef / -Wbad-function-cast 各 0 条。数字登记在 docs/欠账盘点.md。
+-Wwrite-strings 同日也开了，代价是把 create/open 的 name 入参改成 const char*：
+sbuf/mq/sync/eset/dev/event/timer/mpool 的 56 处签名（公开头 arkrtos.h 十一处、
+模块头八处、内核定义十四处、app/driver 两个 oslib 十三处、四个 copy_name helper 的
+src 参数），外加 test_eset_host.c 里 14 处已经多余的 (char *)"..." 转型。这条改动是
+纯签名放宽：内核侧每一处都把 name 拷进定长数组，没有任何地方保存指针（写之前 grep
+过 name = name 一类的赋值，只有 rt/sec 两处链式只读，而它们本来就是 const 入参），
+所以调用方传 char* 照样编过，ABI 与指令都不变；先例是 arkrtos_mempool_create_internal
+本来就收 const char*。
+
+为什么先开 -Wcast-qual 再看 -Wwrite-strings：单独开 -Wcast-qual 时这 14 条一条都不报，
+因为 (char *)"literal" 里的字面量此时还是 char[N]；一旦 -Wwrite-strings 把字面量变成
+const char[]，同一批转型立刻变成"丢弃限定符"。两个选项是耦合的，只开一个会得到
+"0 条"的假安全读数 —— 这一条本身就是开档顺序的教训。
+
+-Wpointer-arith / -Wundef / -Wbad-function-cast 各 0 条。数字登记在 docs/欠账盘点.md。
 
 它抓到过真东西：2026-11-17 它在 arkrtos_sync.c 上翻出 arkrtos_sync_release_task()
 里的 p_tsk 声明了却从未赋值 —— 死任务的锁永远不会移交、等待队列永远摘不干净。
@@ -64,7 +73,7 @@ riscv64 工具链）编，那是另一件事，本门禁不声称覆盖它们。
 ----------
 * 判据 = 每一条 TU 编译成功且输出里没有 "warning:"。有任何一条告警就红。
 * 选项集固定为 WARN_FLAGS（-Wall -Wextra -Wshadow + 三条接口暴露告警
-  + -Wconversion + -Wcast-qual，共八条）；
+  + -Wconversion + -Wcast-qual + -Wwrite-strings，共九条）；
   加选项要先在宿主 21 个 TU 上跑成零告警，并在 docstring 里写清口径。
 * 这里只证明"编译器在这个配置下没话说"，不证明没有逻辑缺陷；也不是 MISRA /
   认证意义上的静态分析。别拿它当"静态分析已完成"。
@@ -94,7 +103,7 @@ from coverage_gate import CASES, COMMON_INC, find_cc, mingw_prefix  # noqa: E402
 # 加选项必须先跑成零告警再改这里，否则门禁会先红一次。
 WARN_FLAGS = ["-Wall", "-Wextra", "-Wshadow",
               "-Wmissing-prototypes", "-Wstrict-prototypes", "-Wold-style-definition",
-              "-Wconversion", "-Wcast-qual"]
+              "-Wconversion", "-Wcast-qual", "-Wwrite-strings"]
 
 # 与 CASES 同源的补一条：SDK stdio 的宿主用例（对应 ci_gate 的 sdk-stdio-host）。
 EXTRA = [("sdk-stdio", "kernelsrc/sdk/app_sdk/tests/test_stdio_host.c", [], [])]

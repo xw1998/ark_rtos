@@ -6476,11 +6476,16 @@ Code / RO / RW / ZI 逐项相同：`mq` 3932/128/0/1568、`sync` 9726/288/4/2248
 **源码零改动**，镜像不可能变化；开档前重新数一遍而不是照旧数字写口径，是因为照旧数字开档
 只会让门禁先红一次。
 
-仍未开：`-Wwrite-strings` 20 条，全部是 `create(name)` 传字面量给 `char*` 形参
-（`sbuf` 6 / `sync` 10 / `mq` 4）。修法是把 `create`/`open` 的形参改成 `const char *` ——
-内核侧全拷进定长数组、不保存指针，属纯签名放宽，但牵动公开头文件与 API 参考，另立一笔；
+同日再开 `-Wwrite-strings`：20 条全部是 `create(name)` 传字面量给 `char*` 形参
+（`sbuf` 6 / `sync` 10 / `mq` 4）。修法是把 `create`/`open` 的 `name` 形参 53 处
+（公开头 23 / 内核定义 16 / SDK 14）加 4 处内部 `copy_name` 的 `src` 改成 `const char *` ——
+改前 grep 过 `name = name` 一类赋值，只有 `arkrtos_rt.c` / `arkrtos_sec.c` 保存名字、
+形参本来就是 `const char *`，其余全拷进定长数组，所以是纯签名放宽（调用方传 `char *`
+照样编过，ABI 与指令不变），并删掉 `test_eset_host.c` 里 14 处多余转型。
+**教训：`-Wcast-qual` 与 `-Wwrite-strings` 是耦合的** —— 单开 `-Wcast-qual` 时字面量还是
+`char[N]`，那 14 条一条都不报；「单开 cast-qual 得 0 条」不能读成「转型已改掉」。
 `-Wpointer-arith` / `-Wundef` / `-Wbad-function-cast` 各 0 条。
 
-**结论分档：宿主 21 个 TU 七条选项零告警 + 默认档 LA64 镜像逐字节不变（`cmp -l` 0 处）
-+ 编入档（armclang F427 五个 TU）零告警且尺寸逐项不变，未上板。** 这一笔只改类型标注，
+**结论分档：宿主 21 个 TU 九条选项零告警 + 默认档 LA64 镜像逐字节不变（`cmp -l` 0 处）
++ 编入档（armclang F427 九个 TU，含 driver SDK 的 drv_oslib）零告警且尺寸逐项不变，未上板。** 这一笔只改类型标注，
 没有新增可上板的行为，上板不会带来新的信息 —— 不假装有第四个档。

@@ -80,7 +80,7 @@ typedef struct {
 } arkrtos_eset_obj_t;
 
 void  arkrtos_eset_module_init(void);
-int32 arkrtos_eset_create_internal(char *name);
+int32 arkrtos_eset_create_internal(const char *name);
 int32 arkrtos_eset_wait_internal(int32 handle, uint32 mask, uint32 opt,
                                  uint32 *p_got, int32 timeout_ms);
 int32 arkrtos_eset_set_internal(int32 handle, uint32 mask);

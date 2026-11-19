@@ -194,7 +194,7 @@ void arkrtos_sync_module_init(void)
     }
 }
 
-static void arkrtos_sync_copy_name(char *dst, char *src)
+static void arkrtos_sync_copy_name(char *dst, const char *src)
 {
     int32 i;
     for(i = 0; i < 7; i++)
@@ -683,7 +683,7 @@ void arkrtos_sync_release_task(int32 task_id)
 /* ============================================================
  * 信号量
  * ============================================================ */
-int32 arkrtos_sem_create_internal(char *name, int32 init_count)
+int32 arkrtos_sem_create_internal(const char *name, int32 init_count)
 {
     int32 i, j;
     ARKRTOS_DISABLE_IRQ();
@@ -989,7 +989,7 @@ int32 arkrtos_sem_delete_internal(int32 handle)
 /* ============================================================
  * 互斥锁
  * ============================================================ */
-int32 arkrtos_mtx_create_internal(char *name)
+int32 arkrtos_mtx_create_internal(const char *name)
 {
     int32 i, j;
     ARKRTOS_DISABLE_IRQ();
@@ -1020,7 +1020,7 @@ int32 arkrtos_mtx_create_internal(char *name)
 }
 
 #if (ARKRTOS_USE_MTX_RECURSIVE == 1)
-int32 arkrtos_mtx_create_recursive_internal(char *name)
+int32 arkrtos_mtx_create_recursive_internal(const char *name)
 {
     int32 i, j;
     ARKRTOS_DISABLE_IRQ();
@@ -1404,7 +1404,7 @@ static void arkrtos_mtx_release_locked(int32 idx, arkrtos_task_t *p_owner)
     arkrtos_mtx_propagate();
 }
 
-int32 arkrtos_cond_create_internal(char *name)
+int32 arkrtos_cond_create_internal(const char *name)
 {
     int32 i, j;
 

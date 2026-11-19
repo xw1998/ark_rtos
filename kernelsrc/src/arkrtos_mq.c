@@ -43,7 +43,7 @@ void arkrtos_mq_module_init(void)
     }
 }
 
-static void arkrtos_mq_copy_name(char *dst, char *src)
+static void arkrtos_mq_copy_name(char *dst, const char *src)
 {
     int32 i;
     for(i = 0; i < 7; i++)
@@ -238,7 +238,7 @@ void arkrtos_mq_release_task(int32 task_id)
     }
 }
 
-int32 arkrtos_mq_create_internal(char *name)
+int32 arkrtos_mq_create_internal(const char *name)
 {
     int32 i;
     ARKRTOS_DISABLE_IRQ();
@@ -265,7 +265,7 @@ int32 arkrtos_mq_create_internal(char *name)
  * handle form, but the creator id is pinned to 0 ("kernel") instead of the
  * current task. Queues made here survive every task teardown, which is what
  * a kernel service needs - its queue is not a task's property. */
-int32 arkrtos_mq_create_kernel_internal(char *name)
+int32 arkrtos_mq_create_kernel_internal(const char *name)
 {
     int32 i;
     ARKRTOS_DISABLE_IRQ();
@@ -799,7 +799,7 @@ void arkrtos_mq_module_init(void)
 {
 }
 
-int32 arkrtos_mq_create_internal(char *name)
+int32 arkrtos_mq_create_internal(const char *name)
 {
     (void)name;
     return ARKRTOS_MQ_ERR_DISABLED;
@@ -831,7 +831,7 @@ int32 arkrtos_mq_delete_internal(int32 handle)
     return ARKRTOS_MQ_ERR_DISABLED;
 }
 
-int32 arkrtos_mq_create_kernel_internal(char *name)
+int32 arkrtos_mq_create_kernel_internal(const char *name)
 {
     (void)name;
     return ARKRTOS_MQ_ERR_DISABLED;

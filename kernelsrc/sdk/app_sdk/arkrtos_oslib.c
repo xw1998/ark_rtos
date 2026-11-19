@@ -22,7 +22,7 @@ ARKRTOS_SVC_DECL_1(int32, ARKRTOS_SVC_WAITMULTI_CTRL, arkrtos_call_wm_ctrl, uint
 #endif
 ARKRTOS_SVC_DECL_1(int32, ARKRTOS_SVC_SYNC_CTRL, arkrtos_call_sync_ctrl, uint32 *);
 
-int32 arkrtos_dev_open(char *name, uint32 param)
+int32 arkrtos_dev_open(const char *name, uint32 param)
 {
     uint32 parameters[4];
     parameters[0] = ARKRTOS_DEV_SUB_OPEN;
@@ -140,7 +140,7 @@ static int32 arkrtos_sync_wait_expired(uint32 start_ms, int32 timeout)
 }
 
 
-int32 arkrtos_event_create(char *name)
+int32 arkrtos_event_create(const char *name)
 {
     uint32 p[3];
     p[0] = ARKRTOS_EVENT_SUB_CREATE;
@@ -197,7 +197,7 @@ void arkrtos_event_set(int32 handle)
  * 让出一毫秒再问一次，直到拿到位、超时或对象报错。timeout <= 0
  * 表示永久等待。
  * ------------------------------------------------------------------ */
-int32 arkrtos_eset_create(char *name)
+int32 arkrtos_eset_create(const char *name)
 {
     uint32 p[3];
     p[0] = ARKRTOS_ESET_SUB_CREATE;
@@ -326,7 +326,7 @@ int32 arkrtos_wait_multi(const uint32 *handles, uint32 n, uint32 opt,
 }
 #endif /* ARKRTOS_USE_WAITMULTI == 1 */
 
-int32 arkrtos_sem_create(char *name, int32 init_count)
+int32 arkrtos_sem_create(const char *name, int32 init_count)
 {
     uint32 p[3];
     p[0] = ARKRTOS_SYNC_SUB_SEM_CREATE;
@@ -381,7 +381,7 @@ int32 arkrtos_sem_delete(int32 handle)
     return arkrtos_call_sync_ctrl(p);
 }
 
-int32 arkrtos_mutex_create(char *name)
+int32 arkrtos_mutex_create(const char *name)
 {
     uint32 p[3];
     p[0] = ARKRTOS_SYNC_SUB_MTX_CREATE;
@@ -392,7 +392,7 @@ int32 arkrtos_mutex_create(char *name)
 #if (ARKRTOS_USE_MTX_RECURSIVE == 1)
 /* 递归互斥锁：同一任务可重复加锁，解锁到计数归零才真正释放。
  * 可递归是创建时决定的属性，普通 arkrtos_mutex_create 仍不可递归。 */
-int32 arkrtos_mutex_create_recursive(char *name)
+int32 arkrtos_mutex_create_recursive(const char *name)
 {
     uint32 p[3];
     p[0] = ARKRTOS_SYNC_SUB_MTX_CREATE_RECURSIVE;
@@ -454,7 +454,7 @@ int32 arkrtos_mutex_delete(int32 handle)
  * （子命令 + cond + mutex + timeout），所以数组开到 p[4]
  * —— 内核方会读 p[3]，开 p[3] 是越界。
  * ============================================================ */
-int32 arkrtos_cond_create(char *name)
+int32 arkrtos_cond_create(const char *name)
 {
     uint32 p[4];
     p[0] = ARKRTOS_SYNC_SUB_COND_CREATE;
@@ -579,7 +579,7 @@ ARKRTOS_SVC_DECL_1(int32, ARKRTOS_SVC_TIMER_CTRL, arkrtos_call_timer_ctrl, uint3
 ARKRTOS_SVC_DECL_2(int32, ARKRTOS_SVC_TASK_CTRL, arkrtos_call_task_ctrl_ret, uint32, uint32);
 ARKRTOS_SVC_DECL_3(uint32, ARKRTOS_SVC_SYS_INFO, arkrtos_call_sys_info_ext, uint32, uint32, uint32);
 
-int32 arkrtos_mq_create(char *name)
+int32 arkrtos_mq_create(const char *name)
 {
     uint32 p[6];
     p[0] = ARKRTOS_MQ_SUB_CREATE; p[1] = (uint32)name; p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
@@ -654,7 +654,7 @@ int32 arkrtos_mq_delete(int32 handle)
  * 阻塞语义与消息队列一致：内核在 SVC 里只登记，真正让出 CPU 由这里的
  * 轮询做（WOULDBLOCK -> 等 1 ms -> 重问 -> 直到超时）。
  * ============================================================ */
-int32 arkrtos_sbuf_create(char *name)
+int32 arkrtos_sbuf_create(const char *name)
 {
     uint32 p[6];
     p[0] = ARKRTOS_SBUF_SUB_CREATE; p[1] = (uint32)name; p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
@@ -813,7 +813,7 @@ int32 arkrtos_mbuf_peek_len(int32 handle)
     return arkrtos_call_sbuf_ctrl(p);
 }
 
-int32 arkrtos_timer_create(char *name)
+int32 arkrtos_timer_create(const char *name)
 {
     uint32 p[6];
     p[0] = ARKRTOS_TIMER_SUB_CREATE; p[1] = (uint32)name; p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
@@ -1301,7 +1301,7 @@ int32 arkrtos_path_ftruncate(int32 handle, uint32 size)
  * 池的内存区由调用者提供（必须在本任务可见 RAM 内，内核会校验整段范围），
  * 所以这里不需要任何内核侧的动态内存；分配/释放都不阻塞。
  * ============================================================ */
-int32 arkrtos_mpool_create(char *name, void *pool, uint32 block_size, uint32 block_count)
+int32 arkrtos_mpool_create(const char *name, void *pool, uint32 block_size, uint32 block_count)
 {
     uint32 p[6];
     p[0] = ARKRTOS_MPOOL_SUB_CREATE; p[1] = (uint32)name; p[2] = (uint32)pool;

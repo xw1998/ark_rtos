@@ -159,10 +159,10 @@ uint32 arkrtos_get_cpu_usage(void);
 **返回**：空闲率（百分比 0~100）
 > 说明：需开启 ARKRTOS_USE_CPU_LOAD 配置。
 
-### `int32  arkrtos_event_create(char *name);`
+### `int32  arkrtos_event_create(const char *name);`
 
 ```c
-int32  arkrtos_event_create(char *name);
+int32  arkrtos_event_create(const char *name);
 ```
 
 **创建命名事件**
@@ -188,10 +188,10 @@ void   arkrtos_event_set(int32 handle);
 **触发事件，唤醒所有等待该事件的任务**
 - `handle`：事件句柄
 
-### `int32  arkrtos_eset_create(char *name);`
+### `int32  arkrtos_eset_create(const char *name);`
 
 ```c
-int32  arkrtos_eset_create(char *name);
+int32  arkrtos_eset_create(const char *name);
 ```
 
 **创建命名事件集（32 位）**
@@ -270,10 +270,10 @@ int32  arkrtos_eset_delete(int32 handle);
 - `handle`：事件集句柄
 **返回**：0 成功，负值失败
 
-### `int32  arkrtos_sem_create(char *name, int32 init_count);`
+### `int32  arkrtos_sem_create(const char *name, int32 init_count);`
 
 ```c
-int32  arkrtos_sem_create(char *name, int32 init_count);
+int32  arkrtos_sem_create(const char *name, int32 init_count);
 ```
 
 **创建计数信号量**
@@ -312,20 +312,20 @@ int32  arkrtos_sem_delete(int32 handle);
 - `handle`：信号量句柄
 **返回**：0=成功，负值=失败
 
-### `int32  arkrtos_mutex_create(char *name);`
+### `int32  arkrtos_mutex_create(const char *name);`
 
 ```c
-int32  arkrtos_mutex_create(char *name);
+int32  arkrtos_mutex_create(const char *name);
 ```
 
 **创建互斥锁（带优先级继承，防止优先级反转）**
 - `name`：互斥锁名
 **返回**：互斥锁句柄，失败返回负值
 
-### `int32  arkrtos_mutex_create_recursive(char *name);`
+### `int32  arkrtos_mutex_create_recursive(const char *name);`
 
 ```c
-int32  arkrtos_mutex_create_recursive(char *name);
+int32  arkrtos_mutex_create_recursive(const char *name);
 ```
 
 **创建递归互斥锁（同一任务可重复加锁，解锁需与加锁次数配平）**
@@ -381,10 +381,10 @@ int32  arkrtos_mutex_delete(int32 handle);
 - `handle`：互斥锁句柄
 **返回**：0=成功，负值=失败
 
-### `int32  arkrtos_cond_create(char *name);`
+### `int32  arkrtos_cond_create(const char *name);`
 
 ```c
-int32  arkrtos_cond_create(char *name);
+int32  arkrtos_cond_create(const char *name);
 ```
 
 **创建条件变量**
@@ -438,10 +438,10 @@ int32  arkrtos_cond_delete(int32 handle);
 - `handle`：条件变量句柄
 **返回**：0=成功，负值=失败
 
-### `int32  arkrtos_dev_open(char *name, uint32 param);`
+### `int32  arkrtos_dev_open(const char *name, uint32 param);`
 
 ```c
-int32  arkrtos_dev_open(char *name, uint32 param);
+int32  arkrtos_dev_open(const char *name, uint32 param);
 ```
 
 **打开设备**
@@ -510,10 +510,10 @@ int32  arkrtos_dev_set_will(const char *dev_name, int32 cmd, int32 val);
 drv_ctrl(cmd,val)，防止 App 崩溃后电机/机床/机械臂等硬件失控。
 需内核 ARKRTOS_HW_SAFE=1，否则返回 -1。
 
-### `int32  arkrtos_mq_create(char *name);`
+### `int32  arkrtos_mq_create(const char *name);`
 
 ```c
-int32  arkrtos_mq_create(char *name);
+int32  arkrtos_mq_create(const char *name);
 ```
 
 **创建消息队列**
@@ -563,10 +563,10 @@ int32  arkrtos_mq_delete(int32 handle);
 #if (ARKRTOS_USE_SBUF == 1)
 ```
 
-### `int32  arkrtos_sbuf_create(char *name);`
+### `int32  arkrtos_sbuf_create(const char *name);`
 
 ```c
-int32  arkrtos_sbuf_create(char *name);
+int32  arkrtos_sbuf_create(const char *name);
 ```
 
 **创建流缓冲**
@@ -685,10 +685,10 @@ typedef struct {
 
 **池的只读快照 */**
 
-### `int32  arkrtos_mpool_create(char *name, void *pool, uint32 block_size,`
+### `int32  arkrtos_mpool_create(const char *name, void *pool, uint32 block`
 
 ```c
-int32  arkrtos_mpool_create(char *name, void *pool, uint32 block_size, uint32 block_count);
+int32  arkrtos_mpool_create(const char *name, void *pool, uint32 block_size, uint32 block_count);
 ```
 
 **在调用者提供的内存区上创建固定块池**
@@ -735,10 +735,10 @@ int32  arkrtos_mpool_delete(int32 handle);
 
 **销毁池（只释放对象表项，调用者提供的内存区不受影响） */**
 
-### `int32  arkrtos_timer_create(char *name);`
+### `int32  arkrtos_timer_create(const char *name);`
 
 ```c
-int32  arkrtos_timer_create(char *name);
+int32  arkrtos_timer_create(const char *name);
 ```
 
 **创建软定时器**

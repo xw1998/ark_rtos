@@ -39,7 +39,7 @@ uint32 arkrtos_get_time_ms(void)
     return arkrtos_call_sys_info(1);
 }
 
-int32 arkrtos_event_create(char *name)
+int32 arkrtos_event_create(const char *name)
 {
     uint32 p[3];
     p[0] = 1;
@@ -109,7 +109,7 @@ void arkrtos_event_set(int32 handle)
  * An event set keeps its bits (flags |= mask), so a user-mode waiter needs
  * no registration at all: every poll judges the condition itself and takes
  * the bits when it holds.  timeout <= 0 means "wait forever". */
-int32 arkrtos_eset_create(char *name)
+int32 arkrtos_eset_create(const char *name)
 {
     uint32 p[3];
     p[0] = ARKRTOS_ESET_SUB_CREATE;

@@ -78,7 +78,7 @@ void   arkrtos_task_wait(uint32 ms);
 void   arkrtos_task_wait_period(void);
 void   arkrtos_task_delay(uint32 us);
 uint32 arkrtos_get_time_ms(void);
-int32  arkrtos_event_create(char *name);
+int32  arkrtos_event_create(const char *name);
 int32  arkrtos_event_wait(int32 handle, int32 timeout);
 
 /* Wait results, same values as the kernel headers (arkrtos_def.h).  The

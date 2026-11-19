@@ -176,7 +176,7 @@ void arkrtos_eset_release_task(int32 task_id)
     }
 }
 
-int32 arkrtos_eset_create_internal(char *name)
+int32 arkrtos_eset_create_internal(const char *name)
 {
     int32 i;
     int32 idx = -1;

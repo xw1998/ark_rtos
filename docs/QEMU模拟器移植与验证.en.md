@@ -3485,11 +3485,17 @@ Gates: `warn_gate.py` -> `WARN-GATE OK (21 host TUs ... -Wconversion clean)`;
 so enabling it required **no source change** and the image cannot have moved. The count was
 redone before writing the policy into the gate rather than trusting the old number.
 
-Still not enabled: `-Wwrite-strings`, 20 items, all `create(name)` passing a literal to a
-`char*` parameter (`sbuf` 6 / `sync` 10 / `mq` 4). The fix is changing `create`/`open`
-parameters to `const char *` -- the kernel copies every name and never stores a pointer, so
-it is a pure signature relaxation, but it touches public headers and the API reference and
-gets its own commit. `-Wpointer-arith` / `-Wundef` / `-Wbad-function-cast` report 0 each.
+`-Wwrite-strings` was enabled in the same pass: 20 items, all `create(name)` passing a
+literal to a `char *` parameter (`sbuf` 6 / `sync` 10 / `mq` 4). The 53 `name` parameters
+(23 public headers / 16 kernel definitions / 14 SDK) plus the 4 internal `copy_name` `src`
+parameters became `const char *`. The tree was grepped for `name = name` assignments first:
+only `arkrtos_rt.c` / `arkrtos_sec.c` keep the name and both already took `const char *`;
+every other site copies it into a fixed array, so this is a pure signature relaxation
+(callers passing `char *` still compile, ABI and instructions unchanged). The 14 redundant
+casts in `test_eset_host.c` were removed too. **Lesson: `-Wcast-qual` and
+`-Wwrite-strings` are coupled** -- with only `-Wcast-qual` the literal is still `char[N]`
+and none of the 14 is reported, so "cast-qual alone reports 0" is not evidence that the
+casts were fixed. `-Wpointer-arith` / `-Wundef` / `-Wbad-function-cast` report 0 each.
 
 **Verdict tiers: 21 host TUs clean on seven options + default LA64 image byte-identical
 (`cmp -l` 0) + switch-on build (armclang F427, five TUs) clean with unchanged sizes; not

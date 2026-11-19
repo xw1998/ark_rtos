@@ -174,7 +174,7 @@ uint32 arkrtos_timer_next_ticks(void)
 }
 #endif
 
-static void arkrtos_timer_copy_name(char *dst, char *src)
+static void arkrtos_timer_copy_name(char *dst, const char *src)
 {
     int32 i;
     for(i = 0; i < 7; i++)
@@ -186,7 +186,7 @@ static void arkrtos_timer_copy_name(char *dst, char *src)
     dst[7] = 0;
 }
 
-int32 arkrtos_timer_create_internal(char *name)
+int32 arkrtos_timer_create_internal(const char *name)
 {
     int32 i;
     ARKRTOS_DISABLE_IRQ();
@@ -292,7 +292,7 @@ void arkrtos_timer_tick_handler(void)
 {
 }
 
-int32 arkrtos_timer_create_internal(char *name)
+int32 arkrtos_timer_create_internal(const char *name)
 {
     (void)name;
     return ARKRTOS_TIMER_ERR_DISABLED;

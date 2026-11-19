@@ -119,7 +119,7 @@ int32 arkrtos_event_set_from_isr(int32 event_handle)
     return 0;
 }
 
-int32 arkrtos_event_create_internal(char *name)
+int32 arkrtos_event_create_internal(const char *name)
 {
     int32 i;
     int32 idx = -1;
