@@ -49,7 +49,7 @@ arkrtos_fifo_t *arkrtos_fifo_create(uint8 *buff, int32 size)
         fifo->magic = ARKRTOS_FIFO_MAGIC;
         fifo->rd_idx = 0;
         fifo->wt_idx = 0;
-        fifo->size = size - 8;
+        fifo->size = (uint16)(size - 8);
     }
     else
     {
@@ -84,7 +84,7 @@ int32 arkrtos_fifo_write(arkrtos_fifo_t *fifo, uint8 *pdata, int32 len)
     }
     for(cnt = 0; cnt < len; cnt++)
     {
-        next = (fifo->wt_idx + 1) % fifo->size;
+        next = (uint16)((fifo->wt_idx + 1) % fifo->size);
         if(next == fifo->rd_idx)
         {
             break;          /* FIFO 已满，停止写入以避免覆盖尚未读取的数据 */
@@ -114,7 +114,7 @@ int32 arkrtos_fifo_read(arkrtos_fifo_t *fifo, uint8 *pdata, int32 len)
         if(fifo->rd_idx != fifo->wt_idx)
         {
             pdata[cnt] = fifo->data[fifo->rd_idx];
-            fifo->rd_idx = (fifo->rd_idx + 1) % fifo->size;
+            fifo->rd_idx = (uint16)((fifo->rd_idx + 1) % fifo->size);
         }
         else
         {

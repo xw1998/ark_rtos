@@ -25,8 +25,20 @@ analyzer 项，2026-11-18 接）。本脚本只做更小的那一半：把编译
     桩定义前没有原型。修法是「先声明后定义」。
 -Wstrict-prototypes / -Wold-style-definition 这次一条都没报（全仓签名都带原型），
 一并钉住是为防止以后退化成 K&R 风格。
--Wconversion 33 条、-Wsign-conversion 27 条仍然不开：那是类型收窄，逐条改等于
-改数据通路，风险远大于收益，要动必须先单独定口径。数字登记在 docs/欠账盘点.md。
+-Wconversion（含它隐含的 -Wsign-conversion）2026-11-19 起打开。此前 21 个 TU 上共
+33 条（6 条窄化 + 27 条符号），当时的判断是"逐条改等于改数据通路，风险大于收益，
+要动必须先定口径"。这次定的口径只有两条：
+
+  1. 只加**显式转换**，不改变量类型、不改比较语义、不改算法。窄化处写 (uint8) /
+     (uint16)，把原来隐式发生的截断写明；句柄掩码比较写成 ((uint32)handle & MASK)，
+     位模式与原来逐位相同（int32 -> uint32 是保值转换）。
+  2. 判据不是"编译过了"，而是**默认档 LA64 镜像逐字节不变**：转换只该改变编译器
+     看到的意图，不该改变生成的指令与数据。
+
+仍未开：-Wcast-qual（14 条，全在 test_eset_host.c，把字符串字面量的 const 丢掉）、
+-Wwrite-strings（会额外暴露 20 条同型问题：create(name) 形参是 char* 而不是
+const char*，修它要动 API 签名，属于另一件事）、-Wpointer-arith / -Wundef /
+-Wbad-function-cast 各 0 条。数字登记在 docs/欠账盘点.md。
 
 它抓到过真东西：2026-11-17 它在 arkrtos_sync.c 上翻出 arkrtos_sync_release_task()
 里的 p_tsk 声明了却从未赋值 —— 死任务的锁永远不会移交、等待队列永远摘不干净。
@@ -72,7 +84,8 @@ from coverage_gate import CASES, COMMON_INC, find_cc, mingw_prefix  # noqa: E402
 # 固定选项集：前三条问「编译器能确定是错的吗」，后三条问「接口有没有露在暗处」。
 # 加选项必须先跑成零告警再改这里，否则门禁会先红一次。
 WARN_FLAGS = ["-Wall", "-Wextra", "-Wshadow",
-              "-Wmissing-prototypes", "-Wstrict-prototypes", "-Wold-style-definition"]
+              "-Wmissing-prototypes", "-Wstrict-prototypes", "-Wold-style-definition",
+              "-Wconversion"]
 
 # 与 CASES 同源的补一条：SDK stdio 的宿主用例（对应 ci_gate 的 sdk-stdio-host）。
 EXTRA = [("sdk-stdio", "kernelsrc/sdk/app_sdk/tests/test_stdio_host.c", [], [])]

@@ -6434,3 +6434,47 @@ utest: 13 matched, 13 passed, 0 failed, 0 skipped; assertions 133 run / 0 failed
 （`CORE_BUF_20`）写入一个 C 入口地址，再对 `CORE_EN_OFF` 发 IPI；次核从
 `slave_boot_code` 跳出后进该入口，并自己建栈与 TLB 映射。那已经是 §9.3 第 ③ 条
 的工作量，须另行批准。
+
+## 10. `-Wconversion` 开档（2026-11-19）：默认档镜像逐字节不变
+
+`tools/warn_gate.py` 的选项集从六条扩到七条，新加 `-Wconversion`（GCC 隐含同开
+`-Wsign-conversion`）。此前 21 个宿主可编 TU 上共 33 条：6 条窄化 + 27 条符号，当时的判断是
+「逐条改等于改数据通路，要动必须先定口径」。这次按两条口径改完：
+
+1. **只加显式转换**，不改类型、不改比较语义、不改算法。窄化处写 `(uint8)` / `(uint16)`，
+   把原本隐式发生的截断写明；句柄掩码比较写 `((uint32)handle & MASK)` —— int32→uint32
+   是保值转换，位模式逐位相同。
+2. **判据是默认档 LA64 镜像逐字节不变**，不是「编译过了」。
+
+33 处分布：`arkrtos_sync.c` 15（含 `cond_handle` / `mtx_handle` 两族）、`arkrtos_mq.c` 7、
+`arkrtos_eset.c` 5、`arkrtos_fifo.c` 3（`fifo->size` 与 `rd_idx`/`wt_idx` 取模后显式截到
+`uint16`）、`arkrtos_sbuf.c` 2（默认档该 TU 编成空目标，由 armclang 开档那一次覆盖）、
+`kernelsrc/tests/test_eset_host.c` 1。
+
+同口径读数（`SOURCE_DATE_EPOCH=1600000000`、`objcopy -O binary`）：
+
+    before  text 367512 / data 440 / bss 767508   sha256 9e59d693…   31,462,512 B
+    after   text 367512 / data 440 / bss 767508   sha256 9e59d693…   31,462,512 B
+
+`cmp -l` **0 处不同**。这不是「编了以后一样」的巧合：`arkrtos_mq.c` 等源文件的补丁时间
+（09:03:00）早于目标文件与 ELF 的重建时间（09:03:20），新镜像确实是改后代码编出来的。
+结论：**显式转换对 LA64 的 codegen 完全没有影响**——转换只改变编译器看到的意图，
+不改变生成的指令与数据，这正是这条口径要证明的事。
+
+**编入档（防假绿）**：默认档 `arkrtos_sbuf.c` 是空目标，所以另用 armclang F427 做
+`-O2 -c` 单 TU 真编译，HEAD 与工作区各一次，五个 TU（`mq` / `sync` / `fifo` / `eset` /
+`sbuf`，后者带 `-DARKRTOS_USE_SBUF=1`）**告警 0 条 = 0 条**，`fromelf -z` 的
+Code / RO / RW / ZI 逐项相同：`mq` 3932/128/0/1568、`sync` 9726/288/4/2248、
+`fifo` 300/48/0/12、`eset` 2504/72/0/432、`sbuf` 9290/184/0/1264。
+
+门禁：`warn_gate.py` → `WARN-GATE OK (21 个宿主可编 TU … -Wconversion 零告警 …)`；
+`ci_gate.py` 全量 **47 passed / 0 failed / 0 skipped**（`MQ-HOST` / `SBUF-HOST` 回归
+照旧全过，证明显式转换没改行为）。
+
+仍未开：`-Wcast-qual` 14 条（全在 `kernelsrc/tests/test_eset_host.c`）、`-Wwrite-strings`
+会额外暴露 20 条同型（`create(name)` 形参 `char*` 应为 `const char*`，动 API 签名）、
+`-Wpointer-arith` / `-Wundef` / `-Wbad-function-cast` 各 0 条。
+
+**结论分档：宿主 21 个 TU 七条选项零告警 + 默认档 LA64 镜像逐字节不变（`cmp -l` 0 处）
++ 编入档（armclang F427 五个 TU）零告警且尺寸逐项不变，未上板。** 这一笔只改类型标注，
+没有新增可上板的行为，上板不会带来新的信息 —— 不假装有第四个档。

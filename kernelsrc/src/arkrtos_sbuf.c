@@ -139,7 +139,7 @@ static arkrtos_sbuf_obj_t *arkrtos_sbuf_get(int32 handle)
 {
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
-    if((handle & ARKRTOS_HANDLE_MASK) != ARKRTOS_SBUF_HANDLE_FLAG)
+    if(((uint32)handle & ARKRTOS_HANDLE_MASK) != ARKRTOS_SBUF_HANDLE_FLAG)
     {
         return 0;
     }
@@ -233,7 +233,7 @@ static void arkrtos_sbuf_wake_all(arkrtos_task_t **waiters, int32 reason)
             if(waiters[j]->status != ARKRTOS_TASK_INVALID)
             {
                 waiters[j]->wait_time   = 0;
-                waiters[j]->wake_reason = reason;
+                waiters[j]->wake_reason = (uint8)reason;
                 waiters[j]->status      = ARKRTOS_TASK_READY;
                 arkrtos_ready_add(ARKRTOS_TASK_IDX(waiters[j]));
             }

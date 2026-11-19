@@ -169,7 +169,7 @@ static void arkrtos_mq_wake_all(arkrtos_task_t **waiters, int32 reason)
                 continue;
             }
             waiters[j]->wait_time   = 0;
-            waiters[j]->wake_reason = reason;
+            waiters[j]->wake_reason = (uint8)reason;
             waiters[j]->status      = ARKRTOS_TASK_READY;
             arkrtos_ready_add(ARKRTOS_TASK_IDX(waiters[j]));
             waiters[j]              = 0;
@@ -396,7 +396,7 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
 
     if(buf == 0 || len_words <= 0 || len_words > ARKRTOS_MQ_MSG_WORDS)
         return ARKRTOS_MQ_ERR_PARAM;
-    if(ARKRTOS_MQ_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_MQ_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_MQ_ERR_HANDLE;
     if(idx >= ARKRTOS_MQ_NUM || arkrtos_mqs[idx].used == 0)
         return ARKRTOS_MQ_ERR_STATE;
@@ -560,7 +560,7 @@ int32 arkrtos_mq_recv_internal(int32 handle, uint32 *buf, int32 len_words, int32
 
     if(buf == 0 || len_words <= 0 || len_words > ARKRTOS_MQ_MSG_WORDS)
         return ARKRTOS_MQ_ERR_PARAM;
-    if(ARKRTOS_MQ_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_MQ_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_MQ_ERR_HANDLE;
     if(idx >= ARKRTOS_MQ_NUM || arkrtos_mqs[idx].used == 0)
         return ARKRTOS_MQ_ERR_STATE;
@@ -652,7 +652,7 @@ int32 arkrtos_mq_send_from_isr_internal(int32 handle, void *buf, int32 len_words
 
     if(buf == 0 || len_words <= 0 || len_words > ARKRTOS_MQ_MSG_WORDS)
         return ARKRTOS_MQ_ERR_PARAM;
-    if(ARKRTOS_MQ_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_MQ_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_MQ_ERR_HANDLE;
     if(idx >= ARKRTOS_MQ_NUM || arkrtos_mqs[idx].used == 0)
         return ARKRTOS_MQ_ERR_STATE;
@@ -691,7 +691,7 @@ int32 arkrtos_mq_recv_from_isr_internal(int32 handle, uint32 *buf, int32 len_wor
 
     if(buf == 0 || len_words <= 0 || len_words > ARKRTOS_MQ_MSG_WORDS)
         return ARKRTOS_MQ_ERR_PARAM;
-    if(ARKRTOS_MQ_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_MQ_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_MQ_ERR_HANDLE;
     if(idx >= ARKRTOS_MQ_NUM || arkrtos_mqs[idx].used == 0)
         return ARKRTOS_MQ_ERR_STATE;
@@ -728,7 +728,7 @@ int32 arkrtos_mq_delete_internal(int32 handle)
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
     int32 i;
 
-    if(ARKRTOS_MQ_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_MQ_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_MQ_ERR_HANDLE;
     if(idx >= ARKRTOS_MQ_NUM)
         return ARKRTOS_MQ_ERR_HANDLE;
@@ -768,7 +768,7 @@ int32 arkrtos_mq_is_alive(int32 handle)
 {
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
-    if(ARKRTOS_MQ_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_MQ_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return 0;
     if(idx >= ARKRTOS_MQ_NUM)
         return 0;

@@ -490,7 +490,7 @@ static void arkrtos_waiters_wake_all(arkrtos_task_t **waiters, int32 reason)
                 continue;
             }
             waiters[j]->wait_time   = 0;
-            waiters[j]->wake_reason = reason;
+            waiters[j]->wake_reason = (uint8)reason;
             waiters[j]->status      = ARKRTOS_TASK_READY;
             arkrtos_ready_add(ARKRTOS_TASK_IDX(waiters[j]));
             waiters[j]              = 0;
@@ -718,7 +718,7 @@ static int32 sem_wait_check(int32 handle, int32 *p_idx)
 {
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
-    if(ARKRTOS_SEM_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_SEM_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_SYNC_ERR_HANDLE;
     if(idx >= ARKRTOS_SEM_NUM || arkrtos_sems[idx].used == 0)
         return ARKRTOS_SYNC_ERR_HANDLE;
@@ -909,7 +909,7 @@ int32 arkrtos_sem_post_internal(int32 handle)
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
     arkrtos_task_t *p_wake;
 
-    if(ARKRTOS_SEM_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_SEM_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_SYNC_ERR_HANDLE;
     if(idx >= ARKRTOS_SEM_NUM || arkrtos_sems[idx].used == 0)
         return ARKRTOS_SYNC_ERR_HANDLE;
@@ -961,7 +961,7 @@ int32 arkrtos_sem_delete_internal(int32 handle)
 {
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
-    if(ARKRTOS_SEM_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_SEM_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_SYNC_ERR_HANDLE;
     if(idx >= ARKRTOS_SEM_NUM)
         return ARKRTOS_SYNC_ERR_HANDLE;
@@ -1234,7 +1234,7 @@ int32 arkrtos_mtx_lock_internal(int32 handle, int32 timeout_ms)
     arkrtos_task_t *p_tsk;
     int32 ret;
 
-    if(ARKRTOS_MTX_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_MTX_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_SYNC_ERR_HANDLE;
     if(idx >= ARKRTOS_MTX_NUM || arkrtos_mtxs[idx].used == 0)
         return ARKRTOS_SYNC_ERR_HANDLE;
@@ -1260,7 +1260,7 @@ int32 arkrtos_mtx_unlock_internal(int32 handle)
     arkrtos_task_t *p_tsk;
     arkrtos_task_t *p_next;
 
-    if(ARKRTOS_MTX_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_MTX_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_SYNC_ERR_HANDLE;
     if(idx >= ARKRTOS_MTX_NUM || arkrtos_mtxs[idx].used == 0)
         return ARKRTOS_SYNC_ERR_HANDLE;
@@ -1328,7 +1328,7 @@ int32 arkrtos_mtx_delete_internal(int32 handle)
 {
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
-    if(ARKRTOS_MTX_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_MTX_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_SYNC_ERR_HANDLE;
     if(idx >= ARKRTOS_MTX_NUM)
         return ARKRTOS_SYNC_ERR_HANDLE;
@@ -1438,9 +1438,9 @@ int32 arkrtos_cond_wait_internal(int32 cond_handle, int32 mtx_handle, int32 time
     arkrtos_task_t *p_tsk;
     int32 reason;
 
-    if(ARKRTOS_COND_HANDLE_FLAG != (cond_handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_COND_HANDLE_FLAG != ((uint32)cond_handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_SYNC_ERR_PARAM;
-    if(ARKRTOS_MTX_HANDLE_FLAG != (mtx_handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_MTX_HANDLE_FLAG != ((uint32)mtx_handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_SYNC_ERR_PARAM;
     if(ci >= ARKRTOS_COND_NUM || arkrtos_conds[ci].used == 0)
         return ARKRTOS_SYNC_ERR_PARAM;
@@ -1556,7 +1556,7 @@ int32 arkrtos_cond_enqueue_internal(int32 cond_handle)
     arkrtos_task_t *p_tsk;
     int32 added;
 
-    if(ARKRTOS_COND_HANDLE_FLAG != (cond_handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_COND_HANDLE_FLAG != ((uint32)cond_handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_SYNC_ERR_PARAM;
     if(idx >= ARKRTOS_COND_NUM || arkrtos_conds[idx].used == 0)
         return ARKRTOS_SYNC_ERR_PARAM;
@@ -1584,7 +1584,7 @@ int32 arkrtos_cond_poll_internal(int32 cond_handle)
     int32 j;
     int32 found = 0;
 
-    if(ARKRTOS_COND_HANDLE_FLAG != (cond_handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_COND_HANDLE_FLAG != ((uint32)cond_handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_SYNC_ERR_PARAM;
     if(idx >= ARKRTOS_COND_NUM || arkrtos_conds[idx].used == 0)
         return ARKRTOS_SYNC_ERR_PARAM;
@@ -1616,7 +1616,7 @@ int32 arkrtos_cond_abort_internal(int32 cond_handle)
     int32 idx = cond_handle & ARKRTOS_HANDLE_RELMASK;
     arkrtos_task_t *p_tsk;
 
-    if(ARKRTOS_COND_HANDLE_FLAG != (cond_handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_COND_HANDLE_FLAG != ((uint32)cond_handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_SYNC_ERR_PARAM;
     if(idx >= ARKRTOS_COND_NUM || arkrtos_conds[idx].used == 0)
         return ARKRTOS_SYNC_ERR_PARAM;
@@ -1637,7 +1637,7 @@ int32 arkrtos_cond_signal_internal(int32 handle)
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
     arkrtos_task_t *p_tsk;
 
-    if(ARKRTOS_COND_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_COND_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_SYNC_ERR_HANDLE;
     if(idx >= ARKRTOS_COND_NUM || arkrtos_conds[idx].used == 0)
         return ARKRTOS_SYNC_ERR_HANDLE;
@@ -1669,7 +1669,7 @@ int32 arkrtos_cond_broadcast_internal(int32 handle)
     int32 j;
     int32 woke = 0;
 
-    if(ARKRTOS_COND_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_COND_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_SYNC_ERR_HANDLE;
     if(idx >= ARKRTOS_COND_NUM || arkrtos_conds[idx].used == 0)
         return ARKRTOS_SYNC_ERR_HANDLE;
@@ -1703,7 +1703,7 @@ int32 arkrtos_cond_delete_internal(int32 handle)
 {
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
-    if(ARKRTOS_COND_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_COND_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_SYNC_ERR_HANDLE;
     if(idx >= ARKRTOS_COND_NUM || arkrtos_conds[idx].used == 0)
         return ARKRTOS_SYNC_ERR_HANDLE;

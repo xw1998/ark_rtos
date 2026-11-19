@@ -3443,3 +3443,48 @@ idle  0
 ```
 
 Cross-check: `027dcf53...6114b`, 460264 B, byte-identical across the three trees.
+
+## 10. Enabling `-Wconversion` (2026-11-19): default image byte-identical
+
+`tools/warn_gate.py` goes from six options to seven; the new one is `-Wconversion`, which in
+GCC also implies `-Wsign-conversion`. The 21 host-compilable TUs reported 33 items (6
+narrowing + 27 sign), long filed as "fixing them means touching data paths, so agree on a
+policy first". Two policy lines, now satisfied:
+
+1. Add **explicit casts only** -- no type changes, no comparison-semantics changes, no
+   algorithm changes. Narrowing sites get `(uint8)` / `(uint16)` so the implicit truncation is
+   written down; handle-mask comparisons become `((uint32)handle & MASK)`, which is
+   value-preserving int32 to uint32 with an identical bit pattern.
+2. The criterion is **the default LA64 image being byte-identical**, not "it compiled".
+
+The 33: `arkrtos_sync.c` 15, `arkrtos_mq.c` 7, `arkrtos_eset.c` 5, `arkrtos_fifo.c` 3,
+`arkrtos_sbuf.c` 2 (empty object in the default profile; covered by the armclang switch-on
+build), `kernelsrc/tests/test_eset_host.c` 1.
+
+Same caliber (`SOURCE_DATE_EPOCH=1600000000`, `objcopy -O binary`):
+
+    before  text 367512 / data 440 / bss 767508   sha256 9e59d693...   31,462,512 B
+    after   text 367512 / data 440 / bss 767508   sha256 9e59d693...   31,462,512 B
+
+`cmp -l` reports **0 bytes**. This is not "it compiled the same by accident": the sources were
+patched at 09:03:00 and the objects/ELF were rebuilt at 09:03:20, so the new image really is
+built from the changed code. Explicit casts change what the compiler is told, not the
+instructions or data it emits.
+
+**Switch-on build (anti-false-green)**: `arkrtos_sbuf.c` is an empty object in the default
+profile, so all five TUs were also compiled with armclang F427 at `-O2 -c`, once at HEAD and
+once from the working tree: **0 warnings in both**, and identical Code / RO / RW / ZI
+(`mq` 3932/128/0/1568, `sync` 9726/288/4/2248, `fifo` 300/48/0/12, `eset` 2504/72/0/432,
+`sbuf` 9290/184/0/1264 with `-DARKRTOS_USE_SBUF=1`).
+
+Gates: `warn_gate.py` -> `WARN-GATE OK (21 host TUs ... -Wconversion clean)`;
+`ci_gate.py` -> **47 passed / 0 failed / 0 skipped**.
+
+Still not enabled: `-Wcast-qual` 14 (all in `test_eset_host.c`), `-Wwrite-strings` would
+expose 20 more of the same shape (`create(name)` taking `char*` instead of `const char*`,
+i.e. API signatures), and `-Wpointer-arith` / `-Wundef` / `-Wbad-function-cast` at 0 each.
+
+**Verdict tiers: 21 host TUs clean on seven options + default LA64 image byte-identical
+(`cmp -l` 0) + switch-on build (armclang F427, five TUs) clean with unchanged sizes; not
+on-board.** This commit only adds type annotations with no new on-board behaviour, so an
+on-board run would add no information -- no fourth tier is claimed.

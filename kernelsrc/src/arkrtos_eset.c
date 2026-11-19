@@ -232,7 +232,7 @@ int32 arkrtos_eset_wait_internal(int32 handle, uint32 mask, uint32 opt,
     int32 reason;
     uint32 got;
 
-    if(ARKRTOS_ESET_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_ESET_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_ESET_ERR_HANDLE;
     if(idx >= ARKRTOS_ESET_NUM || arkrtos_esets[idx].used == 0)
         return ARKRTOS_ESET_ERR_STATE;
@@ -349,7 +349,7 @@ int32 arkrtos_eset_set_internal(int32 handle, uint32 mask)
     int32 j;
     int32 woke = 0;
 
-    if(ARKRTOS_ESET_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_ESET_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_ESET_ERR_HANDLE;
     if(idx >= ARKRTOS_ESET_NUM || arkrtos_esets[idx].used == 0)
         return ARKRTOS_ESET_ERR_STATE;
@@ -403,7 +403,7 @@ int32 arkrtos_eset_clear_internal(int32 handle, uint32 mask)
 {
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
-    if(ARKRTOS_ESET_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_ESET_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_ESET_ERR_HANDLE;
     if(idx >= ARKRTOS_ESET_NUM || arkrtos_esets[idx].used == 0)
         return ARKRTOS_ESET_ERR_STATE;
@@ -418,7 +418,7 @@ int32 arkrtos_eset_get_internal(int32 handle, uint32 *p_flags)
 {
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
-    if(ARKRTOS_ESET_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_ESET_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_ESET_ERR_HANDLE;
     if(idx >= ARKRTOS_ESET_NUM || arkrtos_esets[idx].used == 0)
         return ARKRTOS_ESET_ERR_STATE;
@@ -437,7 +437,7 @@ int32 arkrtos_eset_delete_internal(int32 handle)
     int32 j;
     int32 woke = 0;
 
-    if(ARKRTOS_ESET_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_ESET_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_ESET_ERR_HANDLE;
     if(idx >= ARKRTOS_ESET_NUM || arkrtos_esets[idx].used == 0)
         return ARKRTOS_ESET_ERR_STATE;

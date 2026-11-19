@@ -169,7 +169,7 @@ static void t01_create(void)
 
     h = arkrtos_eset_create_internal(name);
     check(h > 0, "create returns a positive handle");
-    check((h & ARKRTOS_HANDLE_MASK) == ARKRTOS_ESET_HANDLE_FLAG,
+    check(((uint32)h & ARKRTOS_HANDLE_MASK) == ARKRTOS_ESET_HANDLE_FLAG,
           "create stamps the event-set handle flag");
     check(arkrtos_esets[h & ARKRTOS_HANDLE_RELMASK].used == 1u, "slot is marked used");
     check(strcmp(arkrtos_esets[h & ARKRTOS_HANDLE_RELMASK].name, "ready") == 0,
