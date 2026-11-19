@@ -1414,6 +1414,30 @@ def check_stack_guard():
         fail("stack-guard", txt[-260:])
 
 
+def check_linux_abi():
+    """Linux 系统调用 ABI（ARKRTOS_USE_LINUX_ABI）必须两头都是读数。
+
+    这一档最容易出的假绿是「默认关 = 没人编译」：开关关着时
+    arkrtos_linux_abi.c 整文件、port 里的号判定、内核钩子一个编译器都不经过，
+    写错了也全绿。tools/linux_abi_gate.py 双向编（关档 .o 符号表必须全空 /
+    开档五个 TU 必须编过）、逐条对 15 个 asm-generic 号、钉两个 ABI 的分界，
+    并在 QEMU 上真跑一份纯 Linux ABI 的静态程序（13 条 check + PASS + exit 7），
+    而且解析器要能把自己喂进去的四种坏日志判红。
+
+    不覆盖：动态链接（PT_INTERP）、fork/execve、信号、socket、futex、真 mmap
+    语义——这些是**不支持**，不是欠验，见 docs/Linux可执行文件兼容-系统调用ABI.md。
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "linux_abi_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "LINUX-ABI-GATE OK" in txt:
+        ok("linux-abi",
+           "default off zero symbols / LA64 ON 5 TU compile / 15 syscall numbers "
+           "match asm-generic / LA64 instr!=0 is Ark, RV32 0x10..0x22 is Ark / "
+           "QEMU 13 checks + exit 7 / parser self-check 4/4")
+    else:
+        fail("linux-abi", txt[-320:])
+
+
 def check_sec_crc():
     """镜像 CRC 开机复核（SEC-G17 / ARKRTOS_USE_IMAGE_CRC_RECHECK）必须两档都对。
 
@@ -1634,6 +1658,7 @@ LOCAL_TOOLCHAIN = {
     "paging": "LA64 / RV32 cross gcc",
     "shell-auth": "LA64 cross gcc",
     "elf": "LA64 / RV32 cross gcc",
+    "linux-abi": "LA64 / RV32 cross gcc + qemu-system-loongarch64",
     "modld": "LA64 / RV32 / LA32 cross gcc",
     "payload-sign": "LA64 cross gcc",
     "stack-guard": "LA64 / RV32 cross gcc",
@@ -1684,6 +1709,7 @@ CHECK_TABLE = (
     ("swap", check_swap_syntax),
     ("paging", check_paging_switch),
     ("elf", check_elf_loader),
+    ("linux-abi", check_linux_abi),
     ("shell-auth", check_shell_auth),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),

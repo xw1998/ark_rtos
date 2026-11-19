@@ -32,6 +32,7 @@
 #include "arkrtos_elf.h"
 #include "arkrtos_task.h"
 #include "arkrtos_cfg.h"
+#include "arkrtos_linux_abi.h"
 #include "arkrtos_vfs.h"
 #if (ARKRTOS_USE_EXEC_SIGN == 1)
 #include "arkrtos_sign.h"
@@ -713,11 +714,14 @@ static int32 elf_start_task(elf_word_t entry, uint32 stack_bottom,
     /* 注册出来的任务默认是特权任务；ELF 程序必须降权，否则隔离为空。 */
     arkrtos_task_table[id - 1].is_priv = 0u;
 
-#if (ARKRTOS_USE_MPU == 1)
-    /* 无分页档（RV32 的 PMP）：U 模式任务能碰的只有 TCB 记的这几个窗口。
-     * 装载器必须把「代码窗口 = 数据窗口 = 这一块可执行 RAM」写回 TCB，
-     * 再重建区域集 —— 否则任务拿着内核默认窗口起跑：轻则一取指就 fault，
-     * 重则整块内核 RAM 对它可读可写，隔离等于没开。 */
+    /* 代码窗口 = 数据窗口 = 这一块可执行 RAM，**两个档位都要写回 TCB**：
+     *   - 无分页档（RV32 的 PMP）：U 模式任务能碰的只有 TCB 记的这几个
+     *     窗口，漏写就是拿着内核默认窗口（= 自己那 32 KB 栈）起跑；
+     *   - 分页档（LA64 等）：arkrtos_copy_from_user / _to_user 用的就是
+     *     这一对窗口，漏写时每个用户地址都被判越界 —— 程序照跑，但所有
+     *     write() 都回 -EFAULT。这条不是纸面推理：2026-11-19 在 QEMU
+     *     LoongArch64 上抓到的读数是 rom=0x0 / ram=0x021f4000(32 KB 栈)，
+     *     于是 linux_hello 的控制台输出整段丢失、退出码也不对。 */
     {
         arkrtos_task_t *p_task = &arkrtos_task_table[id - 1];
 
@@ -725,9 +729,10 @@ static int32 elf_start_task(elf_word_t entry, uint32 stack_bottom,
         p_task->rom_size  = (uint32)ARKRTOS_ELF_WINDOW_SIZE;
         p_task->ram_start = (uint32)ARKRTOS_ELF_WINDOW_BASE;
         p_task->ram_size  = (uint32)ARKRTOS_ELF_WINDOW_SIZE;
+#if (ARKRTOS_USE_MPU == 1)
         arkrtos_mpu_build_task(p_task);
-    }
 #endif
+    }
 
 #if (ARKRTOS_USE_PAGING == 1)
     /* 任务必须绑到「段被写进去的那个空间」：否则写的是 frame A、跑的是
@@ -1073,6 +1078,12 @@ int32 arkrtos_elf_exec_space(const char *path, int32 argc, char *argv[],
     {
         *p_space = space;
     }
+
+#if (ARKRTOS_USE_LINUX_ABI == 1)
+    /* 新程序起跑前清空上一个程序留下的 fd 表与堆游标：兼容层的状态是
+     * 内核全局的（一次只跑一个程序），不该被下一次 exec 继承。 */
+    arkrtos_linux_abi_reset();
+#endif
 
     return ARKRTOS_ELF_OK;
 }

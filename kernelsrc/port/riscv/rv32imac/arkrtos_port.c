@@ -537,6 +537,32 @@ void arkrtos_port_svc_set_ret(void *p_exc_ctx, uint32 value)
     ((uint32 *)p_exc_ctx)[RV_FR_A0] = value;
 }
 
+#if (ARKRTOS_USE_LINUX_ABI == 1)
+/**
+* @brief Linux/RISC-V ABI 的系统调用号（a7）
+* @details 本移植的 Ark 服务号本来就走 a7。两个 ABI 共用同一寄存器与同一条
+*          `ecall`，只能按号段让位：0x10..0x22 是 Ark 自己的服务号
+*          （ARKRTOS_SVC_LOG .. ARKRTOS_SVC_WAITMULTI_CTRL），永远归 Ark；
+*          其余号交给 Linux 表，不认识的由兼容层回 -ENOSYS，不会静默当成功。
+*/
+uint32 arkrtos_port_linux_syscall_num(void *p_exc_ctx)
+{
+    uint32 num = ((uint32 *)p_exc_ctx)[RV_FR_A7];
+
+    if((num >= 0x10u) && (num <= 0x22u))
+    {
+        return 0xFFFFFFFFu;
+    }
+
+    return num;
+}
+
+void arkrtos_port_svc_set_ret_signed(void *p_exc_ctx, int32 value)
+{
+    ((uint32 *)p_exc_ctx)[RV_FR_A0] = (uint32)value;
+}
+#endif
+
 void arkrtos_port_disable_irq(void)
 {
     __asm__ volatile("csrci mstatus, 8" ::: "memory");

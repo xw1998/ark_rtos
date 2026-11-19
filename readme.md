@@ -24,13 +24,17 @@ LoongArch32/64 共用同一份内核。服务入口在 ARM 侧是 SVC，在 RISC
   `neutralized=6 last_owner=12`，LED 目视由亮转灭）；LA32 目前只到编译档；QEMU 的 Cortex-M4
   最小档为先把启动链跑通而显式关掉（详见 [App崩溃硬件安全与遗言机制](docs/App崩溃硬件安全与遗言机制.md)）。
 
-**正在推进的目标：带 MMU 的目标上直接跑 Linux 可执行文件。** 现状分两档，不要混着读——
+**正在推进的目标：带 MMU 的目标上直接跑 Linux 可执行文件。** 现状分三档，不要混着读——
 **已经能跑**的是静态链接的原生 ELF 可执行文件：LoongArch64 走页表 + PLV3 窗口、RV32 走 PMP +
 U 模式，装载器按 `PT_LOAD` 落段、按 Linux 入口约定把 `sp` 指向 `argc/argv`，QEMU 上 `exec`
-反复跑过（[MMU进程模型与ELF装载](docs/MMU进程模型与ELF装载.md)）；**还不能跑**的是现成 Linux
-发行版里的二进制，缺的正是系统调用 ABI 这一层：`ecall` 目前带的是 Ark 自己的服务号（不是
-Linux 的 `write=64` / `exit=93`），没有 `brk` / `mmap` / `open` 这组号，也没有 fd 继承、管道与
-信号，动态链接（`PT_INTERP` / `ld.so`）在装载器里被明确拒绝。这条差距按验收条款登记在
+反复跑过（[MMU进程模型与ELF装载](docs/MMU进程模型与ELF装载.md)）；**已经能按 Linux 的号说话**
+的是系统调用 ABI（`ARKRTOS_USE_LINUX_ABI`，默认关）：asm-generic 15 个号（`openat`/`close`/
+`read`/`write`/`exit`/`exit_group`/`set_tid_address`/`clock_gettime`/`uname`/`getpid`/`getuid`/
+`geteuid`/`brk`/`munmap`/`mmap`），QEMU LA64 上跑通一份只发 `syscall 0` 的静态程序，13 条 check
+全过、`exit code 7` 被读到（[Linux可执行文件兼容-系统调用ABI](docs/Linux可执行文件兼容-系统调用ABI.md)）；
+**还不能跑**的是现成 Linux 发行版里的二进制：动态链接（`PT_INTERP` / `ld.so`）在装载器里仍被
+明确拒绝，`fork`/`clone`、Unix 信号、fd 继承与管道、`socket`/`select`、`futex`、真 `mmap` 语义
+都没有——这些是**不支持**，不是还没测。这条差距按验收条款登记在
 [欠账盘点](docs/欠账盘点.md)，不写成"已经支持 Linux 程序"。
 
 **它对外的承诺只有一条：让 MCU 像手机一样安装、升级、卸载应用与驱动。**
@@ -827,6 +831,7 @@ STM32F427VGTx @96 MHz，DAPLink（SWD 两线，无 SWO）经 mdkdebug 的 SWD tr
 | 看调度器怎么实现、实测代价账怎么算 | [调度器说明](docs/调度器说明.md) |
 | 看内存保护怎么起效、App 越权会怎样 | [内存保护与App越权验证](docs/内存保护与App越权验证.md) |
 | 把 Linux / Windows 上的 C 程序搬过来 | [POSIX与Windows兼容层说明](docs/POSIX与Windows兼容层说明.md) |
+| 在 MMU 档上跑 Linux 的静态可执行文件（只发 Linux 系统调用号） | [Linux可执行文件兼容-系统调用ABI](docs/Linux可执行文件兼容-系统调用ABI.md)（15 个 asm-generic 号的实测读数、两个 ABI 的分界、明确不支持项、门禁 13 项） |
 | 想知道它和 Linux 比还差什么 | [与Linux差距盘点](docs/与Linux差距盘点.md) |
 | 写 socket / select 程序 | [socket与select兼容层](docs/socket与select兼容层.md) |
 | 加一个「放在文件系统里、想跑就跑」的小程序 | [小程序设计](docs/小程序设计.md) |

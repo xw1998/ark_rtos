@@ -226,6 +226,9 @@
 #ifndef ARKRTOS_USE_KERNEL_GUARD
 #define ARKRTOS_USE_KERNEL_GUARD 1
 #endif
+#ifndef ARKRTOS_USE_LINUX_ABI
+#define ARKRTOS_USE_LINUX_ABI 0
+#endif
 #ifndef ARKRTOS_USE_LOG
 #define ARKRTOS_USE_LOG 1
 #endif

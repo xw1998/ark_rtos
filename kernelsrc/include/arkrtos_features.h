@@ -137,6 +137,31 @@
 #define ARKRTOS_USE_ELF                 0
 #endif
 
+/* Linux 系统调用 ABI（带 MMU / MPU 目标上的兼容入口，ARKRTOS_USE_LINUX_ABI）。
+ * 打开后，ELF 程序可以用 Linux 的调用约定发起请求：RISC-V 上仍是 `ecall`，
+ * 但号放在 a7（本移植本来就这么干，因此按号段让位给 Ark 的 0x10..0x22）；
+ * LoongArch64 上用 `syscall 0` 并把号放在 $a7（Ark 自己的号写在指令立即数
+ * 里，"立即数为 0" 就是两个 ABI 的分界）。号命中 Linux 表就按 Linux 语义
+ * 处理，不命中则原样交给 Ark 的 SVC 号表。
+ *
+ * 这是**兼容层**，不是 Linux 内核：只覆盖静态链接程序启动所需的最小集合
+ * （openat/close/read/write/exit/exit_group/set_tid_address/clock_gettime/
+ * uname/getpid/getuid/geteuid/brk/mmap/munmap），其余一律返回 -ENOSYS 并
+ * 计数，绝不静默当成功。动态链接（PT_INTERP）、fork、信号、fd 继承、真
+ * mmap 语义（页级映射与权限）明确不支持，逐条写在
+ * docs/Linux可执行文件兼容-系统调用ABI.md 里。
+ *
+ * 默认关：关档时 arkrtos_linux_abi.c 整文件不参与编译，port 层的两个新
+ * 接口也不编译，镜像体积与行为与本开关引入前逐字节相同。
+ * 由 Kconfig 选择（config ARKRTOS_USE_LINUX_ABI）。 */
+#ifndef ARKRTOS_USE_LINUX_ABI
+#define ARKRTOS_USE_LINUX_ABI           0
+#endif
+#if (ARKRTOS_USE_LINUX_ABI == 1) && (ARKRTOS_USE_ELF != 1)
+#error "ARKRTOS_USE_LINUX_ABI=1 requires ARKRTOS_USE_ELF=1 (only ELF user tasks are routed)"
+#endif
+
+
 /* 退出码通道（U-8）：0 = 关（TCB 无字段、SVC 子 4 不认、shell 不打印，
  * 整个功能不占一个字节），1 = 任务可以用 EXIT_CODE 子命令上报 int32
  * 退出码，装载器在任务变 INVALID 时取走，exec 打印 exit code N。

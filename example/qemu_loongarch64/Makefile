@@ -226,6 +226,30 @@ $(HELLO_BAD_H): $(HELLO_TAMPERED) example/qemu_loongarch64/elf_blob.py
 
 $(BUILD)/example/qemu_loongarch64/elf_demo.o: $(HELLO_H) $(HELLO_BAD_H)
 
+# Linux 系统调用 ABI 示例（linux_hello.elf）：与 hello.elf 走完全相同的
+# 装载路径（写文件 -> exec -> 降权任务），区别只在程序内部：它只发 Linux
+# 号（a7），没有一行 Ark SDK 调用。签名链路同样是"先签名再转 blob"。
+LXHELLO_SRC := example/qemu_loongarch64/elf/linux_hello.c
+LXHELLO_ELF := $(BUILD)/linux_hello.elf
+LXHELLO_SIGNED := $(BUILD)/linux_hello.signed.elf
+LXHELLO_H   := $(BUILD)/linux_hello_blob.h
+
+$(LXHELLO_ELF): $(LXHELLO_SRC)
+	@mkdir -p $(BUILD)
+	$(CC) $(ARCH_FLAGS) -O2 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
+	      -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	      -Wl,-Ttext=0x02000000 -Wl,-e,_start -Wl,--strip-all \
+	      -Wl,-z,max-page-size=4096 -o $@ $< ;
+
+$(LXHELLO_SIGNED): $(LXHELLO_ELF) tools/sign_payload.py
+	python tools/sign_payload.py sign $(LXHELLO_ELF) --out $@ ;
+
+$(LXHELLO_H): $(LXHELLO_SIGNED) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(LXHELLO_SIGNED) \
+	       --output $@ --name ark_example_linux_hello ;
+
+$(BUILD)/example/qemu_loongarch64/elf_demo.o: $(LXHELLO_H)
+
 # VxWorks 式示例模块（modhello.o）：这里**只编译不链接**——它就该是一个
 # ET_REL 目标文件，地址留给板上装载器去填。所以规则里没有 -Ttext，也没有
 # 任何链接步骤；如果哪天有人给它加了链接，这个示例就证明不了"装载期

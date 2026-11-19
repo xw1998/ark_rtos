@@ -2868,6 +2868,42 @@ void arkrtos_port_svc_set_ret(void *p_exc_ctx, uint32 value)
     ((la_frame_word *)p_exc_ctx)[LA_FR_A0] = (la_frame_word)value;
 }
 
+#if (ARKRTOS_USE_LINUX_ABI == 1)
+/**
+* @brief Linux/LoongArch ABI 的系统调用号（syscall 0 + $a7）
+* @details Ark 自己的服务号写在 `syscall` 的 15 位立即数里，Linux 用
+*          `syscall 0` 并把号放进 $a7。因此「立即数是否为 0」就是分界，
+*          不需要按号段猜，两边也不会撞号。
+*/
+uint32 arkrtos_port_linux_syscall_num(void *p_exc_ctx)
+{
+    la_frame_word *frame = (la_frame_word *)p_exc_ctx;
+    uint32 pc;
+    uint32 insn;
+
+    pc   = frame[LA_FR_ERA];
+    insn = *(volatile uint32 *)(unsigned long)(pc - 4u);
+
+    if((insn & 0xFFFF8000u) != LA_INSN_SYSCALL_OP)
+    {
+        return 0xFFFFFFFFu;
+    }
+    if((insn & LA_INSN_SYSCALL_NUM) != 0u)
+    {
+        return 0xFFFFFFFFu;
+    }
+
+    return (uint32)frame[LA_FR_A0 + 7u];   /* $a7 = a0 + 7 */
+}
+
+void arkrtos_port_svc_set_ret_signed(void *p_exc_ctx, int32 value)
+{
+    /* 负 errno 必须符号扩展到 64 位：只写低 32 位时程序会把
+     * 0x00000000FFFFFFEA 读成一个正数（"成功的假象"）。 */
+    ((la_frame_word *)p_exc_ctx)[LA_FR_A0] = (la_frame_word)value;
+}
+#endif
+
 void arkrtos_port_disable_irq(void)
 {
     uint32 mask = LA_CRMD_IE;

@@ -6,7 +6,7 @@
 |---|---|
 | 把 App/驱动调试起来、装到板子上、处理崩溃 | **[Ark RTOS应用安装与调试指南.md](Ark RTOS应用安装与调试指南.md)**（操作手册，先读这份） |
 | Read the same page in English | [Ark RTOS应用安装与调试指南.en.md](Ark RTOS应用安装与调试指南.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
-| 用英文读这份文档索引（按主题找页） | [README.en.md](README.en.md)（同一组 52 个主题的英文索引；描述是浓缩版，中文页 normative，不新增主张与读数） |
+| 用英文读这份文档索引（按主题找页） | [README.en.md](README.en.md)（同一组 54 个主题的英文索引；描述是浓缩版，中文页 normative，不新增主张与读数） |
 | 搞懂安装策略、设备端配置区、槽位与 RAM 窗口 | [配置区与安装策略.md](配置区与安装策略.md)（配置记录格式 + 两种安装策略） |
 | 用英文读同一份配置区与安装策略 | [配置区与安装策略.en.md](配置区与安装策略.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 把为 Linux/Windows 写的 C 程序搬到 Ark RTOS 上跑 | [POSIX与Windows兼容层说明.md](POSIX与Windows兼容层说明.md)（能力表 + 不支持项及原因） |
@@ -23,6 +23,8 @@
 | 用英文读同一份内存保护说明 | [内存保护与App越权验证.en.md](内存保护与App越权验证.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 带 MMU 的平台上想**像 Linux 那样直接执行可执行文件**（`exec /mnt/ram/hello a b` 或直接敲路径） | [MMU进程模型与ELF装载.md](MMU进程模型与ELF装载.md)（ELF64/ELF32 两遍法装载、`sp→argc` 入口约定、与 PLV3 探针抢同一页的取舍、**M1 只到「文件即程序」不是「进程」**、软定时器栈装不下陷阱帧的完整根因、RV32 无 MMU 档的 PMP 窗口装载（§9）、M2 欠账表） |
 | 用英文读同一份 MMU/ELF 装载说明 | [MMU进程模型与ELF装载.en.md](MMU进程模型与ELF装载.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
+| 想在 MMU 档上**跑 Linux 的静态可执行文件**（只发 Linux 系统调用号） | [Linux可执行文件兼容-系统调用ABI.md](Linux可执行文件兼容-系统调用ABI.md)（asm-generic 15 个号的实测读数、两个 ABI 的分界判据、**明确不支持**（动态链接/fork/信号/socket/futex）、fd 表与窗口堆的降级实现、QEMU 13 条 check 与 `exit code 7`、门禁 13 项） |
+| 用英文读同一份 Linux 系统调用 ABI 说明 | [Linux可执行文件兼容-系统调用ABI.en.md](Linux可执行文件兼容-系统调用ABI.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 想**像 VxWorks 那样把可下载模块装进已跑着的系统**（`ld /mnt/ram/modhello.o a b`、`lkup`、`modules`、`unld`） | [MMU平台可下载模块-VxWorks式.md](MMU平台可下载模块-VxWorks式.md)（`ET_REL` 现场链接、内核符号导出表、支持的重定位类型、PLV0 取舍、**与 ELF 是并列的两种模型不是替代**、装载器要 4 KB 栈这个真 bug） |
 | Read the same page in English | [MMU平台可下载模块-VxWorks式.en.md](MMU平台可下载模块-VxWorks式.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 搞懂文件路径怎么解析、挂载点怎么设、`/dev` 与 `/mnt` 从哪来 | [VFS路径命名空间.md](VFS路径命名空间.md)（挂载点、路径解析、根目录约定、设备与持久卷的位置） |
@@ -119,7 +121,7 @@
 ```
 docs/
 ├── README.md                              # 本文件（文档索引 + API 文档生成说明）
-├── README.en.md                           # 【English】本索引的英文版（同一组 52 个主题；描述浓缩，页面集合由 doc-index 门禁逐名核对）
+├── README.en.md                           # 【English】本索引的英文版（同一组 54 个主题；描述浓缩，页面集合由 doc-index 门禁逐名核对）
 ├── Ark RTOS应用安装与调试指南.md             # 【操作手册】开发调试/串口安装/启动流程/故障处理/排错
 ├── Ark RTOS应用安装与调试指南.en.md         # 【English】Ark RTOS应用安装与调试指南页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── 配置区与安装策略.md                      # 【设计说明】分区/池粒度/槽位与 RAM 窗口/配置记录格式/安装策略
@@ -143,6 +145,8 @@ docs/
 ├── 内存保护与App越权验证.en.md               # 【English】内存保护页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── MMU进程模型与ELF装载.md                  # 【实机记录+设计说明】ELF 装载：页表后端 ELF64（LA64）与无 MMU 档 ELF32（RV32/PMP）；开关/窗口/互斥、两遍法、`sp→argc`、QEMU 实跑读数、`KERNEL refill` 根因、M2 欠账 U-1..U-13
 ├── MMU进程模型与ELF装载.en.md               # 【English】MMU/ELF 装载页的浓缩英文版（中文页 normative；不新增主张与读数）
+├── Linux可执行文件兼容-系统调用ABI.md       # 【实机记录+设计说明】Linux 系统调用 ABI：asm-generic 15 个号、两个 ABI 的分界、明确不支持项、降级实现、QEMU 读数与门禁
+├── Linux可执行文件兼容-系统调用ABI.en.md    # 【English】Linux 系统调用 ABI 页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── MMU平台可下载模块-VxWorks式.md          # 【实机记录+设计说明】VxWorks 式可重定位模块：ET_REL 现场链接、导出表白名单、SOP 重定位、ld/lkup/modules/unld、PLV0 取舍、与 ELF 的 2x2 并存、QEMU 实测读数、三个真 bug
 ├── MMU平台可下载模块-VxWorks式.en.md        # 【English】MMU平台可下载模块-VxWorks式页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── VFS路径命名空间.md                       # 【设计说明】VFS 挂载点、路径解析、根目录约定、/dev 与 /mnt

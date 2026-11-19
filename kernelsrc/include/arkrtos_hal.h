@@ -80,6 +80,32 @@ uint32 arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx);
 */
 void   arkrtos_port_svc_set_ret(void *p_exc_ctx, uint32 value);
 
+#if (ARKRTOS_USE_LINUX_ABI == 1)
+/**
+* @brief 本次异常是否是 Linux ABI 系统调用，是则返回它的系统调用号
+* @param p_exc_ctx 系统调用入口传给内核的上下文指针
+* @return Linux 系统调用号；不是 Linux ABI 调用时返回 0xFFFFFFFF
+* @details 两个 ABI 在同一颗核上用同一条陷入指令，只有号的位置不同：
+*          - LoongArch：Ark 的号在 `syscall` 立即数里（非 0），Linux 用
+*            `syscall 0` + $a7，因此「立即数为 0」是分界；
+*          - RISC-V：两边都经 a7，只能按号段让位（0x10..0x22 归 Ark）。
+*          - Cortex-M / LA32：恒返回 0xFFFFFFFF（没有 Linux ABI 载体）。
+*          由 port 层判定，内核不感知任何寄存器布局。
+*/
+uint32 arkrtos_port_linux_syscall_num(void *p_exc_ctx);
+
+/**
+* @brief 按 Linux 约定写回返回值（第 0 个参数寄存器，带符号扩展）
+* @param p_exc_ctx 系统调用上下文指针
+* @param value     返回值；负值表示 -errno
+* @details 与 arkrtos_port_svc_set_ret 的区别只有符号扩展：Linux 的错误
+*          是负数，64 位下若只写低 32 位，程序会把 0x00000000FFFFFFEA
+*          读成一个很大的正数。宁可让返回值正确，也不给看似成功的错答案。
+*/
+void   arkrtos_port_svc_set_ret_signed(void *p_exc_ctx, int32 value);
+#endif
+
+
 /* 系统调用上下文统一访问宏：内核代码只使用这三个宏 */
 #define ARKRTOS_SVC_ARG(p_ctx, idx)    arkrtos_port_svc_get_arg((void *)(p_ctx), (uint32)(idx))
 #define ARKRTOS_SVC_RET(p_ctx, val)    arkrtos_port_svc_set_ret((void *)(p_ctx), (uint32)(val))

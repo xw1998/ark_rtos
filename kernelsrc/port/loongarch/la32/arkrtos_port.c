@@ -380,6 +380,25 @@ void arkrtos_port_svc_set_ret(void *p_exc_ctx, uint32 value)
     ((la_frame_word *)p_exc_ctx)[LA_FR_A0] = (la_frame_word)value;
 }
 
+#if (ARKRTOS_USE_LINUX_ABI == 1)
+/**
+* @brief LA32 没有 Linux ABI 的载体
+* @details Linux/LoongArch 只有 64 位；LA32 上不存在可供兼容的 Linux 用户
+*          态 ABI，因此返回「不是 Linux 调用」，由 Ark 自己的号表继续处理。
+*          这里不猜一个号，也不假装支持。
+*/
+uint32 arkrtos_port_linux_syscall_num(void *p_exc_ctx)
+{
+    (void)p_exc_ctx;
+    return 0xFFFFFFFFu;
+}
+
+void arkrtos_port_svc_set_ret_signed(void *p_exc_ctx, int32 value)
+{
+    ((la_frame_word *)p_exc_ctx)[LA_FR_A0] = (la_frame_word)value;
+}
+#endif
+
 void arkrtos_port_disable_irq(void)
 {
     uint32 mask = LA_CRMD_IE;

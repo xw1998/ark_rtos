@@ -437,6 +437,35 @@ config ARKRTOS_USE_ELF
 	  segment is rejected as a format error rather than faulting later on an
 	  unresolved PLT slot.
 
+config ARKRTOS_USE_LINUX_ABI
+	bool "Linux syscall ABI for ELF user tasks"
+	depends on ARKRTOS_USE_ELF
+	help
+	  Route the Linux system call ABI to the kernel for ELF user tasks, so a
+	  statically linked Linux binary written against the asm-generic numbers
+	  (openat 56, close 57, read 63, write 64, exit 93, clock_gettime 113,
+	  uname 160, getpid 172, brk 214, munmap 215, mmap 222, ...) runs on a
+	  target with an MMU / MPU without relinking against the Ark SDK.
+
+	  Architecture split, both decided in the port layer:
+
+	    - RISC-V: `ecall` already carries the number in a7; numbers
+	      0x10..0x22 stay Ark's own services, everything else is offered to
+	      the Linux table.
+	    - LoongArch64: Ark writes its number as the `syscall` immediate,
+	      Linux writes 0 and puts the number in $a7, so the two cannot
+	      collide.
+
+	  This is a compatibility layer, not a Linux kernel. Unsupported numbers
+	  answer -ENOSYS and are counted; nothing is silently accepted. Dynamic
+	  linking (PT_INTERP), fork, signals, inherited file descriptors and
+	  real mmap semantics (page granularity, protection, file mapping) are
+	  NOT provided -- see docs/Linux可执行文件兼容-系统调用ABI.md.
+
+	  Off (default) compiles nothing: arkrtos_linux_abi.c is not built and
+	  the two port entry points are not compiled, so the image is
+	  byte-for-byte what it was before this option existed.
+
 config ARKRTOS_USE_MODLOAD
 	bool "VxWorks-style downloadable modules (ld / lkup / modules / unld)"
 	depends on ARKRTOS_USE_VFS && ARKRTOS_USE_PRIV

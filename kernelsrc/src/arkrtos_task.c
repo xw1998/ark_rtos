@@ -29,6 +29,7 @@
 #include "arkrtos_fault.h"
 #include "arkrtos_ptable.h"
 #include "arkrtos_mpu.h"
+#include "arkrtos_linux_abi.h"
 #include "arkrtos_loader.h"
 #include "arkrtos_kernel_check.h"   /* shared SVC pointer checks */
 #include "arkrtos_net.h"            /* SVC 0x1E network service */
@@ -2457,6 +2458,17 @@ void SVC_Server(void *p_svc_ctx)
 
     /* Free liveness evidence: this task called into the kernel. */
     arkrtos_guard_svc(arkrtos_current_task_id);
+
+#if (ARKRTOS_USE_LINUX_ABI == 1)
+    /* Linux ABI 兼容层：号命中 Linux 表就按 Linux 语义处理（返回值已写回
+     * a0）；不是 Linux 调用则原样落到下面 Ark 自己的号表。两个 ABI 的
+     * 号放在哪里由 port 层判定，内核不感知寄存器布局。 */
+    if(arkrtos_linux_abi_try(p_svc_ctx) != 0)
+    {
+        arkrtos_trace_isr(ARKRTOS_TR_IRQ_SVC, ARKRTOS_TR_ISR_EXIT);
+        return;
+    }
+#endif
 
     /* Each handler keeps its case body verbatim; this switch is only the
      call-number -> entry mapping, so a new SVC adds one line here. */

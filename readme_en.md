@@ -29,17 +29,21 @@ with a partitioned scheduler and a unified device driver framework on top.
   that target exists to bring up the boot chain first (see
   [docs/App崩溃硬件安全与遗言机制.md](docs/App崩溃硬件安全与遗言机制.md)).
 
-**Goal in progress: run Linux executables directly on MMU-capable targets.** Two different states,
-do not read them as one - **what already runs** is a statically linked native ELF executable:
-LoongArch64 through the page-table + PLV3 window, RV32 through PMP + U mode; the loader maps
-`PT_LOAD` segments and lays out `sp -> argc/argv` per the Linux entry convention, and `exec` has
-been run repeatedly on QEMU ([docs/MMU进程模型与ELF装载.md](docs/MMU进程模型与ELF装载.md)). **What
-does not run yet** is a binary taken from a Linux distribution: the missing piece is the system-call
-ABI - `ecall` currently carries Ark's own service numbers (not Linux `write=64` / `exit=93`), there
-are no `brk` / `mmap` / `open` numbers, no fd inheritance, pipes or signals, and dynamic linking
-(`PT_INTERP` / `ld.so`) is explicitly rejected by the loader. That gap is tracked as an acceptance
-item in [docs/欠账盘点.md](docs/欠账盘点.md); this README never claims "Linux programs are
-supported".
+**Goal in progress: run Linux executables directly on MMU-capable targets.** Three states, do not
+read them as one - **what already runs** is a statically linked native ELF executable: LoongArch64
+through the page-table + PLV3 window, RV32 through PMP + U mode; the loader maps `PT_LOAD` segments
+and lays out `sp -> argc/argv` per the Linux entry convention, and `exec` has been run repeatedly on
+QEMU ([docs/MMU进程模型与ELF装载.md](docs/MMU进程模型与ELF装载.md)). **What already speaks Linux
+numbers** is the syscall ABI (`ARKRTOS_USE_LINUX_ABI`, default off): 15 asm-generic numbers
+(`openat`/`close`/`read`/`write`/`exit`/`exit_group`/`set_tid_address`/`clock_gettime`/`uname`/
+`getpid`/`getuid`/`geteuid`/`brk`/`munmap`/`mmap`), exercised on QEMU LA64 by a static program that
+issues nothing but `syscall 0`: 13 checks pass and `exit code 7` comes back
+([docs/Linux可执行文件兼容-系统调用ABI.md](docs/Linux可执行文件兼容-系统调用ABI.md)). **What does
+not run yet** is a binary taken from a Linux distribution: dynamic linking (`PT_INTERP` / `ld.so`)
+is still explicitly rejected by the loader, and `fork`/`clone`, Unix signals, fd inheritance and
+pipes, `socket`/`select`, `futex` and real `mmap` semantics do not exist - those are *unsupported*,
+not merely untested. That gap is tracked as an acceptance item in
+[docs/欠账盘点.md](docs/欠账盘点.md); this README never claims "Linux programs are supported".
 
 **It makes exactly one promise: an MCU can install, upgrade and uninstall applications and drivers
 the way a phone does.**

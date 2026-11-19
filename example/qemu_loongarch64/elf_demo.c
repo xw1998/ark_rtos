@@ -22,6 +22,9 @@
 #include "arkrtos_elf.h"
 #include "arkrtos_board.h"
 #include "hello_blob.h"
+#if (ARKRTOS_USE_LINUX_ABI == 1)
+#include "linux_hello_blob.h"
+#endif
 #if (ARKRTOS_USE_EXEC_SIGN == 1)
 #include "hello_bad_blob.h"
 #endif
@@ -29,6 +32,9 @@
 #if (ARKRTOS_USE_ELF == 1)
 
 #define DEMO_PATH           "/mnt/ram/hello"
+#if (ARKRTOS_USE_LINUX_ABI == 1)
+#define LX_DEMO_PATH        "/mnt/ram/linux_hello"
+#endif
 #if (ARKRTOS_USE_EXEC_SIGN == 1)
 /* 反例文件：与 hello 同一份内容，只是末尾 tag 的最后一个字节被翻过。 */
 #define DEMO_BAD_PATH       "/mnt/ram/hello_tampered"
@@ -47,6 +53,19 @@ static void demo_puts(const char *s)
 static void demo_putu(uint32 v)
 {
     arkrtos_board_putu(v);
+}
+
+/* 一行读数必须一次写完：否则刚起来的用户任务会在半行处抢走 CPU，日志里
+ * 就剩半个 "[l"，判据会把「输出被打断」误读成「没打印」。锁只包住打印
+ * 本身（UART 轮询），不包装载/等待那些长路径。 */
+static void demo_lock(void)
+{
+    arkrtos_sched_lock_internal();
+}
+
+static void demo_unlock(void)
+{
+    (void)arkrtos_sched_unlock_internal();
 }
 
 static void task_elf_demo(void)
@@ -92,6 +111,7 @@ static void task_elf_demo(void)
 
     rc = arkrtos_elf_exec(DEMO_PATH, 3, argv);
 
+    demo_lock();
     demo_puts("[ELF] exec rc=");
     demo_putu((uint32)rc);
     if (rc != ARKRTOS_ELF_OK)
@@ -99,12 +119,14 @@ static void task_elf_demo(void)
         demo_puts(" (");
         demo_puts(arkrtos_elf_error_name(rc));
         demo_puts(")\n");
+        demo_unlock();
         for (;;)
         {
             arkrtos_task_wait_internal(1000u);
         }
     }
     demo_puts("\n");
+    demo_unlock();
 
     while (arkrtos_elf_running() != 0)
     {
@@ -153,6 +175,74 @@ static void task_elf_demo(void)
             demo_puts("[ELF] tamper check FAIL (exec accepted a bad tag, rc=");
             demo_putu((uint32)rc);
             demo_puts(")\n");
+        }
+    }
+#endif
+
+#if (ARKRTOS_USE_LINUX_ABI == 1)
+    /* Linux 系统调用 ABI 的现场证据：同一台板、同一条装载路径，换一个只发
+     * Linux 号的程序。三行读数缺一不可——写文件成功、exec 起跑、程序自己
+     * 打印 PASS 并带回 exit code 7。 */
+    {
+        arkrtos_elf_info_t info;
+
+        for(tries = 0u; tries < 100u; tries++)
+        {
+            rc = arkrtos_vfs_write_file(LX_DEMO_PATH, ark_example_linux_hello,
+                                        (uint32)ARK_EXAMPLE_LINUX_HELLO_LEN);
+            if(rc >= 0)
+            {
+                break;
+            }
+            arkrtos_task_wait_internal(100u);
+        }
+
+        demo_puts("[linux] write ");
+        demo_puts(LX_DEMO_PATH);
+        demo_puts(" rc=");
+        demo_putu((uint32)rc);
+        demo_puts("\n");
+
+        if(rc >= 0)
+        {
+            argv[0] = "linux_hello";
+            rc = arkrtos_elf_exec(LX_DEMO_PATH, 1, argv);
+
+            demo_lock();
+            demo_puts("[linux] exec rc=");
+            demo_putu((uint32)rc);
+            demo_puts("\n");
+            demo_unlock();
+
+            if(rc == ARKRTOS_ELF_OK)
+            {
+                waited = 0u;
+                while((arkrtos_elf_running() != 0) && (waited < DEMO_WAIT_MS))
+                {
+                    arkrtos_task_wait_internal(DEMO_POLL_MS);
+                    waited += DEMO_POLL_MS;
+                }
+
+                demo_lock();
+                demo_puts("[linux] finished after ");
+                demo_putu(waited);
+                demo_puts(" ms, exit code ");
+                #if (ARKRTOS_USE_EXIT_CODE == 1)
+                if((arkrtos_elf_info(&info) == ARKRTOS_ELF_OK) &&
+                   (info.exit_code_set != 0u))
+                {
+                    demo_putu((uint32)info.exit_code);
+                }
+                else
+                {
+                    demo_puts("(not reported)");
+                }
+                #else
+                demo_puts("(exit code channel off)");
+                #endif
+                demo_puts("\n");
+                demo_unlock();
+            }
         }
     }
 #endif

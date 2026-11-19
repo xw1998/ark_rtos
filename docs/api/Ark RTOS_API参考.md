@@ -19,12 +19,13 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（56 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（58 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
 - [kernelsrc/include/arkrtos_layout.h](#kernelsrcincludearkrtos_layouth)（11 项）
 - [kernelsrc/include/arkrtos_layout_def.h](#kernelsrcincludearkrtos_layout_defh)（2 项）
+- [kernelsrc/include/arkrtos_linux_abi.h](#kernelsrcincludearkrtos_linux_abih)（3 项）
 - [kernelsrc/include/arkrtos_loader.h](#kernelsrcincludearkrtos_loaderh)（32 项）
 - [kernelsrc/include/arkrtos_log.h](#kernelsrcincludearkrtos_logh)（16 项）
 - [kernelsrc/include/arkrtos_mempool.h](#kernelsrcincludearkrtos_mempoolh)（9 项）
@@ -55,9 +56,9 @@
 - [kernelsrc/port/arm/cortex-m3/arkrtos_port.c](#kernelsrcportarmcortex-m3arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
-- [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（11 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（75 项）
-- [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（17 项）
+- [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（12 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（76 项）
+- [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（18 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
 - [kernelsrc/sdk/app_sdk/tests/test_stdio_host.c](#kernelsrcsdkapp_sdkteststest_stdio_hostc)（2 项）
@@ -86,6 +87,7 @@
 - [kernelsrc/src/arkrtos_fs.c](#kernelsrcsrcarkrtos_fsc)（1 项）
 - [kernelsrc/src/arkrtos_guard.c](#kernelsrcsrcarkrtos_guardc)（1 项）
 - [kernelsrc/src/arkrtos_installer.c](#kernelsrcsrcarkrtos_installerc)（1 项）
+- [kernelsrc/src/arkrtos_linux_abi.c](#kernelsrcsrcarkrtos_linux_abic)（1 项）
 - [kernelsrc/src/arkrtos_loader.c](#kernelsrcsrcarkrtos_loaderc)（6 项）
 - [kernelsrc/src/arkrtos_log.c](#kernelsrcsrcarkrtos_logc)（1 项）
 - [kernelsrc/src/arkrtos_mini.c](#kernelsrcsrcarkrtos_minic)（1 项）
@@ -3090,6 +3092,35 @@ void   arkrtos_port_svc_set_ret(void *p_exc_ctx, uint32 value);
 - `p_exc_ctx`：系统调用上下文指针
 - `value`：返回值
 
+### `uint32 arkrtos_port_linux_syscall_num(void *p_exc_ctx);`
+
+```c
+uint32 arkrtos_port_linux_syscall_num(void *p_exc_ctx);
+```
+
+**本次异常是否是 Linux ABI 系统调用，是则返回它的系统调用号**
+- `p_exc_ctx`：系统调用入口传给内核的上下文指针
+**返回**：Linux 系统调用号；不是 Linux ABI 调用时返回 0xFFFFFFFF
+两个 ABI 在同一颗核上用同一条陷入指令，只有号的位置不同：
+- LoongArch：Ark 的号在 `syscall` 立即数里（非 0），Linux 用
+`syscall 0` + $a7，因此「立即数为 0」是分界；
+- RISC-V：两边都经 a7，只能按号段让位（0x10..0x22 归 Ark）。
+- Cortex-M / LA32：恒返回 0xFFFFFFFF（没有 Linux ABI 载体）。
+由 port 层判定，内核不感知任何寄存器布局。
+
+### `void   arkrtos_port_svc_set_ret_signed(void *p_exc_ctx, int32 value);`
+
+```c
+void   arkrtos_port_svc_set_ret_signed(void *p_exc_ctx, int32 value);
+```
+
+**按 Linux 约定写回返回值（第 0 个参数寄存器，带符号扩展）**
+- `p_exc_ctx`：系统调用上下文指针
+- `value`：返回值；负值表示 -errno
+与 arkrtos_port_svc_set_ret 的区别只有符号扩展：Linux 的错误
+是负数，64 位下若只写低 32 位，程序会把 0x00000000FFFFFFEA
+读成一个很大的正数。宁可让返回值正确，也不给看似成功的错答案。
+
 ### `uint32 arkrtos_port_enter_critical(void);`
 
 ```c
@@ -3972,6 +4003,46 @@ typedef struct {
 ```
 
 **The persistent layout + runtime configuration record (512 bytes, no padding). */**
+
+## kernelsrc/include/arkrtos_linux_abi.h
+
+**Linux 系统调用 ABI 兼容层（带 MMU / MPU 目标上的静态 ELF 程序）**
+这里只回答一个问题：一个按 Linux 约定发起系统调用的**静态链接**
+可执行文件，能不能在 Ark 的 ELF 用户任务里跑起来。答案是"能跑
+一个最小集合"，不是"支持 Linux"：
+
+### `int32 arkrtos_linux_abi_try(void *p_svc_ctx);`
+
+```c
+int32 arkrtos_linux_abi_try(void *p_svc_ctx);
+```
+
+**在 SVC 入口尝试按 Linux ABI 处理本次调用**
+- `p_svc_ctx`：系统调用上下文（SVC_Server 收到的那一个）
+**返回**：1 = 已处理（返回值已写回 a0）；0 = 不是 Linux 调用，交给 Ark 号表
+必须在 Ark 自己的 switch 之前调用。判定完全由 port 层给出，
+内核不感知寄存器布局；本函数也不会把 Ark 的 0x10..0x22 吃掉。
+
+### `uint32 arkrtos_linux_abi_stat(uint32 which);`
+
+```c
+uint32 arkrtos_linux_abi_stat(uint32 which);
+```
+
+**读计数器（内核 / shell 用）**
+- `which`：0 = 已处理，1 = 未知号（-ENOSYS），2 = 用户指针被拒，
+3 = 其它失败
+**返回**：计数值
+
+### `void arkrtos_linux_abi_reset(void);`
+
+```c
+void arkrtos_linux_abi_reset(void);
+```
+
+**清空每次 exec 都必须重置的状态（fd 表与堆游标）**
+由 ELF 装载器在起跑前调用：fd 表是内核全局的（一次只跑一个
+程序），上一次留下的句柄不该被下一次继承。
 
 ## kernelsrc/include/arkrtos_loader.h
 
@@ -8065,6 +8136,17 @@ syscall 在 ERA - 4 处。两条路径（谁先谁后）在文件头注释里写
 解出的指令若不是 syscall 形式，返回 0xFFFFFFFF：调用方会落到
 default 分支拒绝这次服务，而不是拿一个看似合法的号去执行。
 
+### `uint32 arkrtos_port_linux_syscall_num(void *p_exc_ctx) {`
+
+```c
+uint32 arkrtos_port_linux_syscall_num(void *p_exc_ctx) {
+```
+
+**LA32 没有 Linux ABI 的载体**
+Linux/LoongArch 只有 64 位；LA32 上不存在可供兼容的 Linux 用户
+态 ABI，因此返回「不是 Linux 调用」，由 Ark 自己的号表继续处理。
+这里不猜一个号，也不假装支持。
+
 ### `uint32 arkrtos_port_enter_critical(void) {`
 
 ```c
@@ -8860,6 +8942,17 @@ syscall 在 ERA - 4 处。两条路径（谁先谁后）在文件头注释里写
 解出的指令若不是 syscall 形式，返回 0xFFFFFFFF：调用方会落到
 default 分支拒绝这次服务，而不是拿一个看似合法的号去执行。
 
+### `uint32 arkrtos_port_linux_syscall_num(void *p_exc_ctx) {`
+
+```c
+uint32 arkrtos_port_linux_syscall_num(void *p_exc_ctx) {
+```
+
+**Linux/LoongArch ABI 的系统调用号（syscall 0 + $a7）**
+Ark 自己的服务号写在 `syscall` 的 15 位立即数里，Linux 用
+`syscall 0` 并把号放进 $a7。因此「立即数是否为 0」就是分界，
+不需要按号段猜，两边也不会撞号。
+
 ### `uint32 arkrtos_port_enter_critical(void) {`
 
 ```c
@@ -9159,6 +9252,18 @@ uint32 arkrtos_port_syscall_num(void *p_exc_ctx) {
 **从 trap 帧里取系统调用号**
 RISC-V 的 `ecall` 没有立即数字段（ARKRTOS_ARCH_SVC_NUM_BITS = -1），
 号由约定寄存器携带：本移植用 a7，与 Linux/RISC-V 的习惯一致。
+
+### `uint32 arkrtos_port_linux_syscall_num(void *p_exc_ctx) {`
+
+```c
+uint32 arkrtos_port_linux_syscall_num(void *p_exc_ctx) {
+```
+
+**Linux/RISC-V ABI 的系统调用号（a7）**
+本移植的 Ark 服务号本来就走 a7。两个 ABI 共用同一寄存器与同一条
+`ecall`，只能按号段让位：0x10..0x22 是 Ark 自己的服务号
+（ARKRTOS_SVC_LOG .. ARKRTOS_SVC_WAITMULTI_CTRL），永远归 Ark；
+其余号交给 Linux 表，不认识的由兼容层回 -ENOSYS，不会静默当成功。
 
 ### `uint32 arkrtos_port_enter_critical(void) {`
 
@@ -10229,6 +10334,24 @@ static int32 arkrtos_installer_pump(int32 dev) {
 先用 4 字节窗口匹配魔数，不匹配则逐字节左移继续找，
 因此串口上混杂的杂散字节会被自动跳过。
 达到空转上限时**保留已收字节**直接返回，由调用方让出 CPU 后继续。
+
+## kernelsrc/src/arkrtos_linux_abi.c
+
+**Linux 系统调用 ABI 兼容层（静态 ELF 用户任务）**
+目标只有一个：让按 Linux 约定写成的**静态链接**程序在 Ark 的
+PLV3 / U 模式任务里跑起来，而不是让 Ark 变成 Linux。
+实现原则（与全仓其它模块一致）：
+
+### `static int32 lx_copy_path(void *p_ctx, uint32 idx, char *out, uint32 o`
+
+```c
+static int32 lx_copy_path(void *p_ctx, uint32 idx, char *out, uint32 out_size) {
+```
+
+**从用户地址拷一个以 NUL 结尾的路径**
+**返回**：0 成功；-EFAULT 指针非法；-ENAMETOOLONG 没有 NUL
+逐字节过 copy_from_user：它会对每一个字节核对是否落在调用者的
+窗口内，既不会越界读，也不会把内核地址当用户地址用。
 
 ## kernelsrc/src/arkrtos_loader.c
 

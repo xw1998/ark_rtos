@@ -175,6 +175,21 @@ void arkrtos_port_svc_set_ret(void *p_exc_ctx, uint32 value)
     ((uint32 *)p_exc_ctx)[0] = value;
 }
 
+#if (ARKRTOS_USE_LINUX_ABI == 1)
+/* Cortex-M 上是 SVC 立即数 + AAPCS 参数，没有 Linux ABI 的载体：
+ * 明确回答"不是 Linux 调用"，不猜号。 */
+uint32 arkrtos_port_linux_syscall_num(void *p_exc_ctx)
+{
+    (void)p_exc_ctx;
+    return 0xFFFFFFFFu;
+}
+
+void arkrtos_port_svc_set_ret_signed(void *p_exc_ctx, int32 value)
+{
+    ((uint32 *)p_exc_ctx)[0] = (uint32)value;
+}
+#endif
+
 /* Task switching stays latched off until the board has moved the CPU to
  * the idle PSP context (arkrtos_port_enter_idle) and calls
  * arkrtos_port_switch_enable(). A switch requested before that runs while

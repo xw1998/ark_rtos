@@ -165,6 +165,13 @@
 #undef  ARKRTOS_USE_ELF
 #define ARKRTOS_USE_ELF              1
 
+/* Linux 系统调用 ABI：这块板有 MMU、有 PLV3 用户态，是兼容层的第一个
+ * 载体。打开后 ELF 程序可以用 `syscall 0` + $a7 的 Linux 约定发请求
+ * （Ark 自己的号仍在指令立即数里，两边不冲突）。它是兼容层不是内核：
+ * 支持集合与明确不支持的项见 docs/Linux可执行文件兼容-系统调用ABI.md。 */
+#undef  ARKRTOS_USE_LINUX_ABI
+#define ARKRTOS_USE_LINUX_ABI        1
+
 /* U-8：本板打开退出码通道（hello.elf 用 argc 当退出码，exec 打印的读数
  * 与程序自己打印的 argc 互为对证）。 */
 #undef  ARKRTOS_USE_EXIT_CODE
