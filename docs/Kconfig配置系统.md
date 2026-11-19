@@ -33,15 +33,18 @@ config/kconfig/
     Kconfig.capacity           # 各类静态容量上限
     Kconfig.posix              # POSIX 层容量
     Kconfig.net                # lwIP 端口容量
+    board/Kconfig.qemu_loongarch64  # MMU 档板级层：几何 / 时钟 / 能力（只给 genboard.py 读）
 config/arkrtos_defconfig       # 共享头的来源（= F427 例程配置，Keil 工程用它）
 config/stm32h743_defconfig     # H743 GCC 工程的 per-build 基座
 config/stm32f427_gcc_defconfig # F427 GCC 工程的 per-build 基座（只差 RTSTAT/SECCHECK=n）
 config/minimal_defconfig       # 实测最小档（每个选配都关；体积读数见 [功能开关](功能开关.md)）
 config/minimal_noshell_defconfig # 最小档 + 关掉 Shell（≈37.8 KB 那一行）
+config/qemu_loongarch64_defconfig # MMU 档板级取值（→ board/qemu_loongarch64/arkrtos_board_config.h）
 kernelsrc/include/arkrtos_autoconf.h   # 生成产物（入库）
 tools/kconfig/
     kconfig.py                 # tokenizer + 递归下降求值 + 定点求解
     genconfig.py               # 生成 autoconf.h，兼 --check
+    genboard.py                # 生成 MMU 档板级头，兼 --check（§9）
     menuconfig.py              # 行式配置编辑器（--script 可测）
 ```
 
@@ -312,3 +315,80 @@ example/stm32f427/.../main.c:49: fatal error: 'lwip_port.h' file not found
 
 养这条约束的收益是门禁变真了：改共享头里任何一个开关的默认值，先在这里
 撞一次，而不是等上板才发现「工程里还挂着一条 `-D` 把值压回去了」。
+
+
+## 9. 板级层：MMU 档生成板级头，MCU + MDK 档保持手写（2026-11-19）
+
+前面八节讲的都是"编什么"。**"这块板有什么"** 一直到 2026-11-19 都还是
+`board/<chip>/arkrtos_board_config.h` 里手写的一堆 `#define`：几何、时钟、
+分页窗口、能力开关混在一起，改一个地址既要改头文件、又要在文档里对一遍，
+两边不同步没有任何东西会红。
+
+带 MMU 的那一档现在按真项目的样子做：**菜单 + defconfig + 生成物 + 门禁**。
+MCU + MDK 那一档**故意不跟**，理由写在 §9.3。
+
+### 9.1 三个来源，一个产物
+
+| 角色 | 文件 | 谁读 |
+|---|---|---|
+| 这块板**有什么** | `config/kconfig/board/Kconfig.<board>` | `menuconfig`、`genboard.py` |
+| 这次构建要**什么值** | `config/<board>_defconfig` | `genboard.py` |
+| 内核功能开关的**取值** | 顶层 `Kconfig`（`config/kconfig/Kconfig.*`） | `genboard.py`（与 `genconfig.py` 同一棵树） |
+| 产物 | `board/<board>/arkrtos_board_config.h` | 编译器（`-DARKRTOS_BOARD_CONFIG=...`） |
+
+生成器是 `tools/kconfig/genboard.py`：
+
+```
+py -3 tools/kconfig/genboard.py --board qemu_loongarch64        # 生成
+py -3 tools/kconfig/genboard.py --board qemu_loongarch64 --check # 校验
+```
+
+板级片段**不从顶层 `Kconfig` source 进来**。顶层树只有一个产物
+`arkrtos_autoconf.h`，它是所有板（含 Keil 的 MCU 工程）共享的；把
+`CHIP_FLASH_BASE` 这种 QEMU 几何塞进去，等于给 STM32F427 编进一份
+LoongArch 的地址。所以 `genboard.py` 在内存里把两棵树合起来用：板级符号来自
+`config/kconfig/board/`，功能符号来自顶层树，合并前先断言两边没有同名符号。
+
+### 9.2 生成器自己会拒绝的两种情形
+
+生成物在没有生成器的时候也必须能编（仓库里入库了一份），所以"看起来对了"
+很容易：值被 `depends on` 悄悄吃掉、或者 `defconfig` 里的名字根本没人声明。
+两种情况在 `genboard.py` 里都是硬失败，不是警告：
+
+1. **`defconfig` 请求的值必须原样活到解析结果**。逐条比对 `user` 与
+   `values`，不一致就打印「defconfig asks X, Kconfig resolved Y」并退出 1。
+   没有这一条，一个 `depends on` 写错就会让板上少一项能力，而生成的头上
+   只是少了几个 `1`。
+2. **渲染器要的每个符号必须存在**。名字拼错、或者板级片段漏了一个
+   `config`，报的是符号名，不是一句 KeyError。
+
+`tools/ci_gate.py` 的 `board-config-generated` 项就是拿 `--check` 跑的：
+手改生成物、或者改了 `defconfig` 忘了重新生成，都在门禁里红。
+
+### 9.3 MCU + MDK 档是**降级档**，不是欠账
+
+`board/stm32f401` / `stm32f427` / `stm32h743` / 两块 QEMU MCU 板继续用手写
+`arkrtos_board_config.h`，理由是实的：
+
+* uVision 直接读这个头（`<Define>` 里的 `ARKRTOS_BOARD_CONFIG`），中间再加
+  一层生成物等于每次改配置都要先跑 Python，且 Keil 侧没有 make 依赖；
+* MCU 侧的能力集合由芯片钉死（FPU/MPU/PRIV/时钟），改动的频率远低于
+  MMU 档的窗口与帧池几何；
+* 手写头里的长注释是 bring-up 的标定记录（"InitVal=2,000,000 时 10 s 内
+  125 次中断"这类），生成器给不出同等密度的上下文。
+
+代价写在明处：**这两档不存在"改了一处另一处会红"的保护**，只有 §8.3 那套
+"门禁镜像工程环境"在兜底。
+
+### 9.4 当前覆盖范围
+
+| 板 | 档 | 板级头 |
+|---|---|---|
+| `qemu_loongarch64` | MMU（LA64，页表 + PLV3） | **生成**（`Kconfig.qemu_loongarch64` + `qemu_loongarch64_defconfig`） |
+| `la32_generic` | 有分页硬件、无运行载体 | 手写（降级档） |
+| `stm32f401` / `stm32f427` / `stm32h743` | MCU + MPU / MDK | 手写（降级档） |
+| `qemu_riscv32` / `qemu_mps2_an386` | QEMU MCU | 手写（降级档） |
+
+新增一块 MMU 档的板，就是加两个文件（`Kconfig.<board>` 与
+`<board>_defconfig`）再跑一次 `--board <board>`；门禁的板列表是从
+`config/kconfig/board/` 目录扫出来的，不需要再改代码。

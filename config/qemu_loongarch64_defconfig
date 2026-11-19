@@ -1,0 +1,92 @@
+# Board defconfig for the MMU tier: QEMU LoongArch64 `virt`.
+#
+# Read by tools/kconfig/genboard.py together with
+# config/kconfig/board/Kconfig.qemu_loongarch64 (board-owned symbols) and the
+# top-level Kconfig tree (feature values).  One file, one board, one generated
+# header: board/qemu_loongarch64/arkrtos_board_config.h.
+#
+# Format: NAME=value, one per line, same as every other defconfig here.
+
+# ---------------------------------------------------------------- CPU
+ARKRTOS_ARCH_CORE=0x0302
+
+# ------------------------------------------------------------- geometry
+CHIP_FLASH_BASE=0x00200000
+CHIP_FLASH_SIZE=1048576
+CHIP_RAM_BASE=0x00300000
+CHIP_RAM_SIZE=8388608
+CHIP_CCM_BASE=0
+CHIP_CCM_SIZE=0
+
+# ---------------------------------------------------- platform constants
+ARKRTOS_PORT_TIMER_HZ=25000000
+ARKRTOS_PORT_RDTIME_HZ=100000000
+ARKRTOS_QEMU_UART_BASE=0x1FE001E0
+ARKRTOS_QEMU_UART_REG_SHIFT=0
+
+# -------------------------------------------------- paging / user window
+ARKRTOS_QEMU_APP_BASE=0x02000000
+ARKRTOS_QEMU_APP_SIZE=2097152
+ARKRTOS_QEMU_APP_UART=0x022021E0
+ARKRTOS_PAGING_APPS_MAX=2
+ARKRTOS_QEMU_FRAME_BASE=0x04000000
+ARKRTOS_QEMU_FRAME_COUNT=2048
+ARKRTOS_USE_PAGING=y
+ARKRTOS_USE_PAGING_FRAMES=y
+ARKRTOS_USE_PAGING_PAGES=y
+ARKRTOS_USE_PAGING_DEMAND=n
+ARKRTOS_USE_PAGING_ASID=n
+ARKRTOS_USE_PRIV=y
+
+# ------------------------------------------------------ board capability
+ARKRTOS_USE_FPU=n
+ARKRTOS_USE_MPU=n
+ARKRTOS_MOD_AREA_SIZE=65536
+ARKRTOS_PLATFORM_REBOOT_PORT=y
+ARKRTOS_USE_KERNEL_GUARD=y
+ARKRTOS_WDG_ENABLE=n
+ARKRTOS_SHELL_STACK_SIZE=8192
+ARKRTOS_SMP_SEC_STACK_SIZE=8192
+ARKRTOS_USE_SMP=n
+
+# -------------------------------------------------------- executables
+ARKRTOS_USE_ELF=y
+ARKRTOS_USE_LINUX_ABI=y
+ARKRTOS_USE_EXIT_CODE=y
+ARKRTOS_USE_MODLOAD=y
+ARKRTOS_USE_APPPACK=n
+ARKRTOS_USE_APPRUN=n
+ARKRTOS_USE_FLASHAPP=n
+ARKRTOS_USE_IMAGE_SIGN=y
+ARKRTOS_USE_EXEC_SIGN=y
+
+# ------------------------------------------------------------- storage
+ARKRTOS_USE_BLK=y
+ARKRTOS_USE_FS=y
+ARKRTOS_USE_VFS=y
+ARKRTOS_USE_VFS_LFS=y
+ARKRTOS_USE_PROCFS=y
+ARKRTOS_USE_QSPI=n
+ARKRTOS_AUTOMOUNT_NOR=n
+
+# ------------------------------------------------------------- services
+ARKRTOS_USE_LOG=y
+ARKRTOS_USE_LOG_RING=y
+ARKRTOS_USE_SHELL=y
+ARKRTOS_USE_SOFTBUS=y
+ARKRTOS_USE_MINIAPP=n
+ARKRTOS_USE_POSIX=n
+ARKRTOS_USE_LWIP=n
+
+# ----------------------------------------------------------- reliability
+ARKRTOS_USE_STACK_GUARD=y
+ARKRTOS_USE_RTSTAT=n
+ARKRTOS_USE_SCHED_STAT=n
+ARKRTOS_USE_MDK_TRACE=y
+ARKRTOS_USE_CM_BACKTRACE=n
+ARKRTOS_USE_CRASH_LOG=y
+ARKRTOS_USE_AUDIT=y
+ARKRTOS_USE_UTEST=y
+ARKRTOS_USE_SECCHECK=y
+ARKRTOS_HW_SAFE=y
+ARKRTOS_TIMER_TASK_STACK_WORDS=512

@@ -1,230 +1,188 @@
-/**
-* @file arkrtos_board_config.h
-* @brief Ark RTOS 板级配置 - QEMU `virt` 机器（LoongArch64，单核，PLV0）
-* @details 这一份配置同时承担两件事：
-*
-*          1) **芯片几何**：QEMU loongarch `virt` 把 DRAM 放在 0x0 起 128 MB，
-*             但**低 1 MB 被固件的启动信息占用**，直接往 0 处链接会跑飞
-*             （实测：链接基址 0 时第一条指令就异常）。所以内核镜像区间从
-*             2 MB 开始，静态数据区间从 3 MB 开始。实测几何：
-*                 DRAM   base 0x00000000  size 128 MB（低 1 MB 归 boot_info）
-*                 UART   ns16550a @ 0x1FE001E0
-*                 EENTRY 异常入口（CSR 0xC），无独立向量表基址
-*                 rdtime 100 MHz / 定时器 TCFG 计数 25 MHz（均为实测标定）
-*
-*          2) **功能裁剪**：QEMU 上没有 Flash 控制器、没有看门狗、没有
-*             文件系统介质。凡是需要真实硬件的功能一律关掉，让第一次
-*             bring-up 的编译面尽量小。
-*
-* @note 本文件先于 config/arkrtos_partition.h 被包含（见 arkrtos_config.h
-*       的加载顺序），所以这里定义的 CHIP_* 就是最终值——分区头里的同名
-*       宏都带 #ifndef 守卫。
-* @author xw
-*/
+/*
+ * @file arkrtos_board_config.h
+ * @brief Ark RTOS 板级配置 - QEMU virt（LoongArch64，MMU 档）
+ *
+ * 本文件由 tools/kconfig/genboard.py 生成，不要手改 —— 改了下次
+ * --check 就会判过期。要改一项配置，改下面这三个来源之一：
+ *
+ *   board symbols   config/kconfig/board/Kconfig.qemu_loongarch64
+ *   values          config/qemu_loongarch64_defconfig
+ *   feature values  顶层 Kconfig（config/kconfig/Kconfig.*）
+ *
+ * 重新生成：
+ *   py -3 tools/kconfig/genboard.py --board qemu_loongarch64
+ * 校验：
+ *   py -3 tools/kconfig/genboard.py --board qemu_loongarch64 --check
+ *   （tools/ci_gate.py 的 board-config-generated 项做的就是这一句）
+ *
+ * 每一段的长说明写在 Kconfig 的 help 里：menuconfig 里看得见，这里给
+ * 简版。MCU + MDK 档不走这套生成器，保留手写头，见
+ * docs/Kconfig配置系统.md §9。
+ *
+ * @note 本文件先于 config/arkrtos_partition.h 被包含（见 arkrtos_config.h
+ *       的加载顺序），所以这里定义的 CHIP_* 就是最终值 —— 分区头里的
+ *       同名宏都带 #ifndef 守卫。
+ * @author xw（生成器；版式由 tools/kconfig/genboard.py 决定）
+ */
 
 #ifndef __ARKRTOS_BOARD_CONFIG_H__
 #define __ARKRTOS_BOARD_CONFIG_H__
 
 /* ============================================================
  * 一、架构选择
- * @brief 必须在 arkrtos_arch.h 被包含之前定义 ARKRTOS_ARCH_CORE，否则
- *        arch.h 会按未定义的 ARKRTOS_CPU_ARCH 走 #error 分支。
- *        这里不能写 ARKRTOS_CPU_CORE_LA64（那个宏此刻还不存在），
- *        只能写它的字面值 0x0302，注释标明来源。
+ * 必须在 arkrtos_arch.h 被包含之前定义 ARKRTOS_ARCH_CORE，否则 arch.h
+ * 会按未定义的 ARKRTOS_CPU_ARCH 走 #error 分支。这里写的是
+ * ARKRTOS_CPU_CORE_LA64 的字面值，因为此刻那个宏还不存在。
  * ============================================================ */
 #undef  ARKRTOS_ARCH_CORE
-#define ARKRTOS_ARCH_CORE           0x0302u   /* = ARKRTOS_CPU_CORE_LA64 */
+#define ARKRTOS_ARCH_CORE            0x00000302u
 
 /* ============================================================
  * 二、芯片几何（QEMU virt / LoongArch64）
+ * 内核镜像区间：QEMU 的 ELF 装载器把 PT_LOAD 段直接拷到这里。基址 2 MB
+ * 是硬要求：低 1 MB 被 boot_info 占着。
+ *
+ * 静态数据 / 内核 RAM 池区间从镜像区间之上开始。
+ * KERNEL_RAM_BASE = CHIP_RAM_BASE + SHARE_RAM_SIZE（见分区头的推导）。
+ *
+ * 没有 CCM / TCM。填 0 让分区头不派生 CCM 段，链接脚本也就不生成它。
  * ============================================================ */
-
-/* 内核镜像区间：QEMU 的 ELF 装载器把 PT_LOAD 段直接拷到这里。
- * 基址 2 MB 是硬要求：低 1 MB 被 boot_info 占着。1 MB 足够装下内核 + 示例。 */
 #define CHIP_FLASH_BASE              0x00200000u
-#define CHIP_FLASH_SIZE              (1024 * 1024)
-
-/* 静态数据 / 内核 RAM 池区间：从内核镜像区间之上开始，8 MB。
- * KERNEL_RAM_BASE = CHIP_RAM_BASE + SHARE_RAM_SIZE（见分区头的推导）。 */
+#define CHIP_FLASH_SIZE              (1 * 1024 * 1024)
 #define CHIP_RAM_BASE                0x00300000u
 #define CHIP_RAM_SIZE                (8 * 1024 * 1024)
-
-/* 没有 CCM / TCM。填 0 让分区头不派生 CCM 段，链接脚本也就不生成它。 */
 #define CHIP_CCM_BASE                0u
 #define CHIP_CCM_SIZE                0u
 
 /* ============================================================
  * 三、平台常量（供 port 与板级代码使用）
+ * TCFG 定时器与 rdtime 的计数时钟都由实测标定，标定过程写在 Kconfig 的
+ * help 里：InitVal = 2,000,000 时 10 s 内 125 次中断（80 ms/次），
+ * rdtime.d 走 1e9 ticks 约 10.0 s。改这两个数之前先重做那次标定。
+ *
+ * ns16550a 寄存器按字节寻址，与 16550 布局一致。
  * ============================================================ */
-
-/* TCFG 定时器的计数时钟。实测标定：InitVal = 2,000,000 时 10 s 内进入
- * 125 次中断（80 ms/次），折合 25 MHz；InitVal = 1,000,000 测得 245 次，
- * 略低于线性预期，以 2M 那组为准。 */
 #define ARKRTOS_PORT_TIMER_HZ        25000000u
-
-/* rdtime 的计数时钟。实测：rdtime.d 走 1e9 ticks 用掉约 10.0 s 主机时间
- * （含启动约 10.19 s），折合 100 MHz。delay_us 与 get_timer_counter 用它。 */
 #define ARKRTOS_PORT_RDTIME_HZ       100000000u
-
-/* ns16550a（控制台）。寄存器按字节寻址，与 16550 布局一致。 */
 #define ARKRTOS_QEMU_UART_BASE       0x1FE001E0u
 #define ARKRTOS_QEMU_UART_REG_SHIFT  0u
 
-/* PLV3 探针页（App 的代码/数据/栈）。
- * 选址依据：DRAM 128 MB，内核占 0x00200000~0x00B00000（镜像 1 MB + RAM 8 MB），
- * 所以 16 MB 以上是空地。取 0x02000000（16 MB 处、2 MB 对齐，正好满足
- * PS=20 条目要求的 2^(20+1)=2 MB 对齐）。
- * App 的 UART 是同页 VA 别名：一页 4 KB 的 PLV3 条目把 0x02200000 页内的
- * 0x1E0 偏移映射到 PA 0x1FE001E0，所以 App 写的就是 APP_UART 这个完整地址。 */
+/* ============================================================
+ * 四、分页与用户态窗口
+ * PLV3 探针页（App 的代码/数据/栈）。DRAM 128 MB，内核占
+ * 0x00200000~0x00B00000（镜像 1 MB + RAM 8 MB），16 MB 以上是空地。
+ * 取 0x02000000 同时满足 PS=20 条目要求的 2^(20+1) = 2 MB 对齐。
+ *
+ * App 的 UART 是同页 VA 别名：一页 4 KB 的 PLV3 条目把本页内 0x1E0
+ * 偏移映射到 PA 0x1FE001E0。取 0x02202000 而不是 0x02200000 的原因：
+ * STLB 组号是 (VA >> 13) & 0xFF，0x02200000 与内核 UART 0x1FE00000
+ * 是同一组，两条 4 KB 条目挤在一组里靠随机路号分家（1/8 概率互相
+ * 覆盖）。挪一页就换到另一组。
+ *
+ * 每 App 地址空间的帧数（U-1）：space n 的物理帧 = APP_BASE + n * APP_SIZE。
+ * 取 2 只为在 QEMU 上把「同一 VA 映到不同 PA」跑出读数；帧是固定数组，
+ * 没有页帧分配器（欠账 U-3）。
+ *
+ * 4 KB 页帧池（U-3）：避开 App 区、内核区与 pmap test 的 0x03000000 测试
+ * VA；8 MB 对齐（PS=22 条目要求 2^(22+1) = 8 MB），port 给它单独补一条
+ * 恒等映射；2048 帧正好是 ARKRTOS_USE_PAGING_FRAMES 的编译期上限。
+ * ============================================================ */
 #define ARKRTOS_QEMU_APP_BASE        0x02000000u
 #define ARKRTOS_QEMU_APP_SIZE        (2u * 1024u * 1024u)
-/* App 的 UART 别名页取 0x02202000 而不是 0x02200000：STLB 的组号是
- * (VA >> 13) & 0xFF，0x02200000 与内核 UART（0x1FE00000）算出来是同一组，
- * 两条 4 KB 条目挤在一组里靠随机路号分家（1/8 概率互相覆盖）。挪一页就换到
- * 另一组，彻底没有这个风险。页内 0x1E0 仍对应 PA 0x1FE001E0。 */
 #define ARKRTOS_QEMU_APP_UART        0x022021E0u
-
-/* 每 App 地址空间的帧数（U-1）。space n 的物理帧 = APP_BASE + n * APP_SIZE，
- * 所以 space 0 = 0x02000000（QEMU 装 .appprobe 的地方，也是 ELF 装载器一直
- * 用的那块，行为不变）、space 1 = 0x02200000。取 2 只为在 QEMU 上把「同一
- * VA 映到不同 PA」跑出读数；帧是固定数组，没有页帧分配器（欠账 U-3）。
- * QEMU 的 DRAM 有 128 MB，0x02200000~0x02400000 是 .appprobe 之后的空地。 */
 #define ARKRTOS_PAGING_APPS_MAX      2u
-
-/* 4 KB 页帧池（U-3）。取 0x04000000（64 MB）起 8 MB = 2048 帧：
- *   - 避开 App 区 0x02000000~0x02400000、内核 0~0x00B00000，以及
- *     `pmap test` 用的那块测试 VA 0x03000000（那是动态映射的靶子，
- *     和帧池共用同一段会变成两条条目抢同一个 VA）；
- *   - QEMU virt 的 DRAM 到 128 MB，0x04000000 之后是空地；
- *   - 8 MB 对齐（满足 PS=22 条目要求的 2^(22+1)=8 MB 对齐），
- *     port 会给它单独补一条恒等映射，内核才能在分页模式下直接读写帧；
- *   - 2048 帧正好是 ARKRTOS_USE_PAGING_FRAMES 的编译期上限，
- *     位图就是 64 个 uint32。 */
 #define ARKRTOS_QEMU_FRAME_BASE      0x04000000u
 #define ARKRTOS_QEMU_FRAME_COUNT     2048u
-
 #undef  ARKRTOS_USE_PAGING_FRAMES
 #define ARKRTOS_USE_PAGING_FRAMES    1
-
-/* U-3 第二阶：窗口按 4 KB 页映射，帧从上面的池里按空间整块分配（512 帧
- * = 2 MB）。打开它时 space 0 的帧不再固定是 0x02000000，而是池分配出来
- * 的那一块（首个空间 = 0x04000000）；窗口 VA 仍是 0x02000000。 */
 #undef  ARKRTOS_USE_PAGING_PAGES
 #define ARKRTOS_USE_PAGING_PAGES     1
-
-/* U-3 第三阶（按需缺页）**默认不打开**：基线镜像的行为与读数（§5.22 的
- * used=512）因此逐字节不变。验证时单独出一份镜像：
- *   make -f example/qemu_loongarch64/Makefile BUILD=build/qemu_la64_demand \
- *        EXTRA_CFLAGS=-DARKRTOS_USE_PAGING_DEMAND=1
- * 用 #ifndef 而不是 #undef/#define，就是为了让这条 -D 能进来。 */
 #ifndef ARKRTOS_USE_PAGING_DEMAND
 #define ARKRTOS_USE_PAGING_DEMAND    0
 #endif
-
-/* U-7（ASID）同样默认关：ASID 恒 0 的那份镜像与上面几档逐字节相同。验证时
- * 单独出一份镜像：
- *   make -f example/qemu_loongarch64/Makefile BUILD=build/qemu_la64_asid \
- *        EXTRA_CFLAGS=-DARKRTOS_USE_PAGING_ASID=1
- * 开档后每个空间一个 ASID（space s -> s+1）并独占一路 STLB（way s % 8），
- * 切空间只写一次 CSR.ASID，不再整段 invtlb / 重铺 256 条。 */
 #ifndef ARKRTOS_USE_PAGING_ASID
 #define ARKRTOS_USE_PAGING_ASID      0
 #endif
 
 /* ============================================================
- * 四、能力开关
- * @details LA64 硬件有 FPU，但这一版没有启用 FPU 上下文保存（任务切换不存
- *          FPR/ FCCR），所以 FPU 开关必须关掉：打开却没有上下文管理，
- *          多任务共用浮点寄存器会静默算错。
- *          特权分离打开：port 里建立静态 TLB 映射并打开 CRMD.PG（见
- *          arkrtos_port.c 的「分页与 TLB」一节），内核页 PLV0、App 页 PLV3。
- *          MPU 仍然关掉——LoongArch 没有 MPU，保护走的是分页 + 条目 PLV，
- *          这条开关对本架构没有对应实体。
+ * 五、能力开关
+ * LA64 硬件有 FPU，但这一版没有启用 FPU 上下文保存（任务切换不存
+ * FPR/FCCR），所以 FPU 开关必须关掉：打开却没有上下文管理，多任务共用
+ * 浮点寄存器会静默算错。
+ *
+ * 特权分离打开：port 里建立静态 TLB 映射并打开 CRMD.PG，内核页 PLV0、
+ * App 页 PLV3。MPU 仍然关掉 —— LoongArch 没有 MPU。
+ *
+ * 隔离后端选「页表」（MMU）而不是「窗口」：打开后 arkrtos_mpu_* 这套
+ * 契约由 arkrtos_paging.c 实现，五个受限窗口变成「静态映射 + PLV」+
+ * 装载期跨度审计。与 ARKRTOS_USE_MPU=1 互斥，arkrtos_config.h 里以
+ * #error 拦下。
  * ============================================================ */
 #undef  ARKRTOS_USE_FPU
 #define ARKRTOS_USE_FPU              0
 #undef  ARKRTOS_USE_MPU
 #define ARKRTOS_USE_MPU              0
-/* 隔离后端选「页表」（MMU）而不是「窗口」：本核有 TLB/页表
- * （ARKRTOS_ARCH_HAS_PAGING_HW=1），LoongArch 也没有 ARM 意义上的 MPU。
- * 打开后 arkrtos_mpu_* 这套契约由 arkrtos_paging.c 实现，五个受限窗口
- * 变成「静态映射 + PLV」+ 装载期跨度审计。与 ARKRTOS_USE_MPU=1 互斥，
- * arkrtos_config.h 里以 #error 拦下。 */
 #undef  ARKRTOS_USE_PAGING
 #define ARKRTOS_USE_PAGING           1
 #undef  ARKRTOS_USE_PRIV
 #define ARKRTOS_USE_PRIV             1
 
-/* ELF 装载器：打开后 shell 能直接把 ELF64 可执行文件当命令跑
- * （`exec /bin/hello world`，或者直接敲 /bin/hello）。窗口就用 PLV3 探针
- * 那 2 MB（硬件映射已经由 port 建好，装载器只往里拷），所以两个宏直接
- * 指向 QEMU_APP_BASE/SIZE，不另立地址。
- * 注意：M1 是单实例 + 共享地址空间，同一个窗口里同时只能跑一个程序；
- * 每进程页表 / 同 VA 多实例 / 缺页都是 M2 的欠账，见
- * docs/MMU进程模型与ELF装载.md。 */
+/* ============================================================
+ * 六、可执行文件
+ * ELF 装载器：打开后 shell 能直接把 ELF64 可执行文件当命令跑
+ * （exec /bin/hello world）。窗口就用 PLV3 探针那 2 MB（硬件映射已由
+ * port 建好，装载器只往里拷），所以两个宏直接指向 APP_BASE/SIZE。
+ * M1 是单实例 + 共享地址空间；每进程页表是 M2 的欠账。
+ *
+ * Linux 系统调用 ABI：这块板有 MMU、有 PLV3 用户态，是兼容层的第一个
+ * 载体。打开后 ELF 程序可以用 syscall 0 + $a7 的 Linux 约定发请求。
+ *
+ * U-8：本板打开退出码通道（hello.elf 用 argc 当退出码，exec 打印的读数
+ * 与程序自己打印的 argc 互为对证）。
+ *
+ * VxWorks 式可下载模块与上面的 ELF 装载器并列，不是替代关系。模块区是
+ * 内核 .bss 里的一块静态缓冲，不用 heap；地址由链接器决定。代价写清楚：
+ * 模块跑 PLV0，等于放弃 PLV3 隔离。
+ * ============================================================ */
 #undef  ARKRTOS_USE_ELF
 #define ARKRTOS_USE_ELF              1
-
-/* Linux 系统调用 ABI：这块板有 MMU、有 PLV3 用户态，是兼容层的第一个
- * 载体。打开后 ELF 程序可以用 `syscall 0` + $a7 的 Linux 约定发请求
- * （Ark 自己的号仍在指令立即数里，两边不冲突）。它是兼容层不是内核：
- * 支持集合与明确不支持的项见 docs/Linux可执行文件兼容-系统调用ABI.md。 */
 #undef  ARKRTOS_USE_LINUX_ABI
 #define ARKRTOS_USE_LINUX_ABI        1
-
-/* U-8：本板打开退出码通道（hello.elf 用 argc 当退出码，exec 打印的读数
- * 与程序自己打印的 argc 互为对证）。 */
 #undef  ARKRTOS_USE_EXIT_CODE
 #define ARKRTOS_USE_EXIT_CODE        1
 #define ARKRTOS_ELF_WINDOW_BASE      ARKRTOS_QEMU_APP_BASE
 #define ARKRTOS_ELF_WINDOW_SIZE      ARKRTOS_QEMU_APP_SIZE
-
-/* VxWorks 式可下载模块：与上面的 ELF 装载器**并列**，不是替代关系。
- * 本示例板把两者都钉成 1，为的是 QEMU 里一次把两条路径都跑通：
- *   exec /bin/hello           Linux 式（PLV3，地址链接期定死）
- *   ld /mnt/ram/modhello.o    VxWorks 式（PLV0，装载期链接）
- * 别的目标要不要开由 Kconfig（ARKRTOS_USE_MODLOAD）决定。
- *
- * 模块区是内核里的一块静态缓冲（.bss 里的 s_mod_pool），不用 heap：64 KB
- * 分 4 槽，每槽 16 KB。它的地址由链接器决定，不再由宏钉死 —— 早先这里写过
- * ARKRTOS_MOD_AREA_BASE 0x00600000，装载器却把模块拷进 .bss 的池子，于是
- * 任务跳进 0x600000 抓到全 0 指令（INE 致命异常）。现在只需要给大小。
- * 池子落在内核 .bss 里，已被 port 里「内核低 16 MB」那条 PS=22 的 TLB 条目
- * 覆盖（PLV0 可读可写可执行），不需要另建映射。
- *
- * 代价写清楚：模块跑 PLV0，等于放弃 PLV3 隔离；它能直接按名字调内核函数，
- * 也就同样能直接改内核内存。这是 VxWorks 5.x 的老模型。 */
 #undef  ARKRTOS_USE_MODLOAD
 #define ARKRTOS_USE_MODLOAD          1
 #define ARKRTOS_MOD_AREA_SIZE        (64u * 1024u)
-
-/* 本板没有 Cortex-M 的 AIRCR，复位由板级 arkrtos_board_reboot() 接管
- * （loongarch virt 也没有复位设备，那里只能明确报"做不到"）。 */
 #define ARKRTOS_PLATFORM_REBOOT_PORT 1
 
-/* 心跳合同：QEMU 没有看门狗，守卫真咬人的前提不存在，直接关掉。 */
+/* ============================================================
+ * 七、可靠性
+ * 本板没有 Cortex-M 的 AIRCR，复位由板级 arkrtos_board_reboot() 接管
+ * （loongarch virt 也没有复位设备，那里只能明确报「做不到」）。
+ *
+ * 心跳合同：QEMU 没有看门狗，守卫真咬人的前提不存在，直接关掉。
+ * ============================================================ */
 #undef  ARKRTOS_USE_KERNEL_GUARD
 #define ARKRTOS_USE_KERNEL_GUARD     1
 #undef  ARKRTOS_WDG_ENABLE
 #define ARKRTOS_WDG_ENABLE           0
 
 /* ============================================================
- * 五、功能裁剪（把需要真实硬件 / 需要 libc 格式化的模块全部关掉）
+ * 八、功能裁剪（把需要真实硬件 / 需要 libc 格式化的模块全部关掉）
+ * 日志：控制台已经有一条可用的输出通路（ns16550a 轮询），日志走它。
+ * LOG_RING 打开后 log show / 崩溃转储能从环形缓冲里翻历史。
+ *
+ * 存储栈：QEMU 上没有真实 NOR / eMMC，但可以用板级 RAM 介质把 blk 以上
+ * 的整条软件栈（blk -> littlefs -> VFS -> procfs）真的跑起来。诚实边界：
+ * 介质本身（编程时序、忙等待、掉电中间态）没有验证，那是 drvnor.c /
+ * drvflash.c 的事。
  * ============================================================ */
-
-/* 日志：控制台已经有一条可用的输出通路（ns16550a 轮询），日志走它。
- * LOG_RING 打开后 `log show` / 崩溃转储能从环形缓冲里翻历史，是 shell
- * 之外第二条可核对的口径，代价只有几十字节。 */
 #undef  ARKRTOS_USE_LOG
 #define ARKRTOS_USE_LOG              1
 #undef  ARKRTOS_USE_LOG_RING
 #define ARKRTOS_USE_LOG_RING         1
-
-/* 存储栈：QEMU 上没有真实 NOR / eMMC，但可以用板级 RAM 介质把 blk 以上
- * 的整条软件栈（blk -> littlefs -> VFS -> procfs）真的跑起来，见
- * board/qemu_loongarch64/drvblk.c：擦除单位 4 KB、擦完全 0xFF、写只能
- * 落在已擦除字节。诚实边界：**介质本身**（编程时序、忙等待、掉电中间态）
- * 没有验证，那是 drvnor.c / drvflash.c 的事。 */
 #undef  ARKRTOS_USE_BLK
 #define ARKRTOS_USE_BLK              1
 #undef  ARKRTOS_USE_FS
@@ -235,8 +193,6 @@
 #define ARKRTOS_USE_VFS_LFS          1
 #undef  ARKRTOS_USE_PROCFS
 #define ARKRTOS_USE_PROCFS           1
-
-/* 动态装载 / MiniApp / POSIX / 网络：都不是这次要验证的东西 */
 #undef  ARKRTOS_USE_MINIAPP
 #define ARKRTOS_USE_MINIAPP          0
 #undef  ARKRTOS_USE_POSIX
@@ -245,8 +201,6 @@
 #define ARKRTOS_USE_LWIP             0
 #undef  ARKRTOS_USE_SOFTBUS
 #define ARKRTOS_USE_SOFTBUS          1
-/* Shell：`ttyS0` 由 board/qemu_loongarch64/drvuart.c 注册进设备表，
- * 收发都是 16550 轮询（本移植没有接外部中断控制器，见该文件头）。 */
 #undef  ARKRTOS_USE_SHELL
 #define ARKRTOS_USE_SHELL            1
 #undef  ARKRTOS_USE_APPPACK
@@ -257,27 +211,22 @@
 #define ARKRTOS_USE_FLASHAPP         0
 #undef  ARKRTOS_USE_IMAGE_SIGN
 #define ARKRTOS_USE_IMAGE_SIGN       1
-/* exec/ld 的签名门：本板的 hello.elf 与 modhello.o 在 Makefile 里签过，
- * 演示任务另外用一份「tag 被翻掉」的副本证明装载器真的会拒。 */
 #undef  ARKRTOS_USE_EXEC_SIGN
 #define ARKRTOS_USE_EXEC_SIGN        1
-/* 栈底守卫字：本板的 QEMU 示例里有一个专门踩自己栈底的任务，
- * 用来证明「切换时读保护字」这条路径真的会咬人（见 main.c）。 */
 #undef  ARKRTOS_USE_STACK_GUARD
 #define ARKRTOS_USE_STACK_GUARD      1
-
-/* 控制台任务栈：SHELL_TASK_STACK_SIZE 的默认 3 KB 是按 32 位端口定的。
- * LA64 上一帧陷阱 256 B，`ld` 要在这条栈上跑完「读文件 + 链接 + 打印」，
- * 实测被用到 3072/3072 = 100%（栈底保护字被写穿，见 §5.15）——这里给 8 KB。 */
 #define ARKRTOS_SHELL_STACK_SIZE     (1024 * 8)
 #undef  ARKRTOS_USE_QSPI
 #define ARKRTOS_USE_QSPI             0
 #undef  ARKRTOS_AUTOMOUNT_NOR
 #define ARKRTOS_AUTOMOUNT_NOR        0
 
-/* 调试 / 度量 / 自检：RTSTAT 需要周期计数器（本 port 明确返回 -1），
- * SCHED_STAT 量的是 DWT CYCCNT（本 port 明确返回 0），开着只会得到
- * "每次切换都是 0 周期" 的假读数，所以一并关掉。 */
+/* ============================================================
+ * 九、读数与可观测性
+ * RTSTAT 与 SCHED_STAT 关：LA64 没有周期级计数器，
+ * arkrtos_port_cyccnt_init() 明确返回 -1，打开也只会如实报不可用。
+ * 这条边界写在 docs/跨架构机制矩阵.md 的「实时性：仪表」一行。
+ * ============================================================ */
 #undef  ARKRTOS_USE_RTSTAT
 #define ARKRTOS_USE_RTSTAT           0
 #undef  ARKRTOS_USE_SCHED_STAT
@@ -290,42 +239,27 @@
 #define ARKRTOS_USE_CRASH_LOG        1
 #undef  ARKRTOS_USE_AUDIT
 #define ARKRTOS_USE_AUDIT            1
-/* 板端单元测试：shell 的 `utest` 命令跑全量用例，判据只看汇总行的
- * "0 failed"，不绑用例名 —— 用例表随功能开关变。 */
 #undef  ARKRTOS_USE_UTEST
 #define ARKRTOS_USE_UTEST            1
 #undef  ARKRTOS_USE_SECCHECK
 #define ARKRTOS_USE_SECCHECK         1
+
+/* ============================================================
+ * 十、遗言与栈
+ * 遗言机制（ARKRTOS_HW_SAFE）：机制与架构无关，本板打开。这块 QEMU 板上
+ * 没有驱动登记安全回调，所以整机 devs=0，机制按契约工作由 UTEST 自带的
+ * 回调取证（见 docs/跨架构机制矩阵.md §2.2）。
+ *
+ * SMP 的次核栈用 #ifndef：默认档下它是「定义了但没用」的一个数，
+ * 打开 SMP 时工程可以用 -D 覆盖，不必改本文件。
+ * ============================================================ */
 #undef  ARKRTOS_HW_SAFE
 #define ARKRTOS_HW_SAFE              1
-
-/* 软定时器服务任务的栈（字）。必须覆盖「最深 sp + 一整个陷阱帧 + 异常处理链」：
- * 本 port 的陷阱帧直接压在被中断任务的栈上，一帧 256 B，C 处理链每层序言 128 B。
- * 实测（2026-11-16，QEMU la64）：任务 5 = 软定时器服务任务，栈 0x304C30..0x304DB0
- * （96 字 = 384 B），`task` 报 peak/low = 0x304C60，即休眠前已用掉 336 B、只剩 48 B；
- * 它一旦被调度回来，第一个 tick 中断把帧写到 sp-256 = 0x304B60，帧内第 18 个字
- * 正好落在 0x304BA8 = g_hwsafe_dev_n，把它写成了一个 trace 返回地址（0x0021BCA8），
- * 之后 hwsafe_find_fn 拿它当循环上界，一路走到未映射的 0x01000000 触发 KERNEL refill
- * ——表现为「第 2 次 exec /mnt/ram/hello 必崩」，与 ELF 装载器本身无关。
- * 512 字 = 2 KB：把峰值 336 B、一帧 256 B、四层处理链（4x128 B）全部装下仍有余量。
- * 换 64 位新端口时同样要给足，32 位端口（帧 128 B）保持 96 字以免改既有镜像基线。 */
 #undef  ARKRTOS_TIMER_TASK_STACK_WORDS
 #define ARKRTOS_TIMER_TASK_STACK_WORDS (512)
-
-/* 单核：SMP 关掉（QEMU 能给多核，后续做 SMP 验证时再开）。
- * 用 #ifndef 而不是 #undef：SMP 档要靠 EXTRA_CFLAGS=-DARKRTOS_USE_SMP=1 出
- * 独立镜像，无条件的 #undef 会把命令行定义吃掉（症状是"编出来了但一字节
- * 没变"）。默认档没有这个 -D，取到的仍是 0。 */
 #ifndef ARKRTOS_USE_SMP
 #define ARKRTOS_USE_SMP              0
 #endif
-
-/* 次核自己的栈（SMP 档才用）：x 号核用第 x 块，0 号块留空。
- * 次核只跑「上线标记 → 中断 → idle 空转」，但 IPI 处理链要走一次 C 调用，
- * 8 KB 给足余量（相对主栈 64 KB 可以忽略）。
- * 这个数同时被 arkrtos_smp.c（定义数组）与 arkrtos_context.S（算栈顶）使用：
- * 汇编侧看不到 kernelsrc/include/arkrtos_config.h，所以常量放在这里，
- * 两边都只认这一处定义。 */
 #ifndef ARKRTOS_SMP_SEC_STACK_SIZE
 #define ARKRTOS_SMP_SEC_STACK_SIZE   8192
 #endif

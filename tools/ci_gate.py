@@ -653,6 +653,43 @@ def check_devicetree_generated():
     else:
         ok("devicetree-generated", "%d board(s) match their DTS" % len(boards))
 
+def check_board_config_generated():
+    """Every generated board header must be the genboard.py output.
+
+    The MMU tier describes its machine in a Kconfig fragment plus a defconfig
+    and derives board/<board>/arkrtos_board_config.h from them.  The header is
+    committed so a clone can build without running the generator, which only
+    holds if it is regenerated whenever a value changes.  This check also
+    catches a defconfig value that a depends-on silently eats: genboard
+    refuses to write in that case, so the check fails with the offending
+    symbol instead of producing a quietly smaller board.
+
+    Boards that keep a hand-written header (the MCU + MDK tier, see
+    docs/Kconfig配置系统.md section 9) are not in this list on purpose.
+    """
+    boards = []
+    frag_dir = os.path.join(ROOT, "config", "kconfig", "board")
+    if os.path.isdir(frag_dir):
+        for f in sorted(os.listdir(frag_dir)):
+            if f.startswith("Kconfig."):
+                boards.append(f.split(".", 1)[1])
+    if not boards:
+        fail("board-config-generated", "no config/kconfig/board/Kconfig.* found")
+        return
+    bad = []
+    for bd in boards:
+        r = _run_check([sys.executable, "tools/kconfig/genboard.py",
+                        "--board", bd, "--check"])
+        if r.returncode != 0:
+            bad.append(bd)
+    if bad:
+        fail("board-config-generated",
+             "stale board header for: %s" % ", ".join(bad))
+    else:
+        ok("board-config-generated",
+           "%d generated board header(s) match their Kconfig + defconfig"
+           % len(boards))
+
 
 # ---------------------------------------------------------------- check 8
 HOST_CC_CANDIDATES = (
@@ -1683,6 +1720,7 @@ CHECK_TABLE = (
     ("features-switches", check_features_switches),
     ("softbus-sync", check_softbus_sync_header),
     ("devicetree-generated", check_devicetree_generated),
+    ("board-config-generated", check_board_config_generated),
     ("release-consistency", check_release_consistency),
     ("utest-host", check_utest_host),
     ("sdk-stdio-host", check_sdk_stdio_host),

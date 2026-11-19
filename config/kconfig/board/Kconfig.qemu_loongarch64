@@ -1,0 +1,207 @@
+# Board layer for the MMU tier: QEMU LoongArch64 `virt`.
+#
+# Why this file is NOT sourced from the top-level Kconfig
+# ------------------------------------------------------
+# The top-level tree describes WHAT the build contains, and its single
+# generated artifact (kernelsrc/include/arkrtos_autoconf.h) is shared by every
+# board - including the Keil/MDK MCU projects.  Geometry is per board, so
+# merging it into that tree would put CHIP_FLASH_BASE of the LoongArch QEMU
+# machine into an STM32F427 build.  This fragment therefore belongs to its own
+# small tree, read only by tools/kconfig/genboard.py, and it produces exactly
+# one file: board/qemu_loongarch64/arkrtos_board_config.h.
+#
+# MCU + MDK tier (the degraded tier, by design)
+# ---------------------------------------------
+# The Cortex-M boards keep a hand-written arkrtos_board_config.h.  Their
+# capability set is small, fixed by the chip, and read by uVision; a generator
+# would add a build step without removing any hand editing that matters.  That
+# is the documented degraded path, not an oversight: see
+# docs/Kconfig配置系统.md section 9.
+#
+# Every symbol here is named exactly like the macro it produces, same rule as
+# the top-level tree: one name, one meaning, no CONFIG_ prefix.
+
+mainmenu "Ark RTOS board: QEMU LoongArch64 virt"
+
+menu "CPU"
+
+config ARKRTOS_ARCH_CORE
+	hex "Core selector written to ARKRTOS_ARCH_CORE"
+	default 0x0302
+	help
+	  必须在 arkrtos_arch.h 之前定义，否则 arch.h 按未定义的
+	  ARKRTOS_CPU_ARCH 走 #error。0x0302 = ARKRTOS_CPU_CORE_LA64，
+	  这里写的是它的字面值：此时那个宏还不存在。
+
+endmenu
+
+menu "Chip geometry (QEMU virt / LoongArch64)"
+
+config CHIP_FLASH_BASE
+	hex "Kernel image base (CHIP_FLASH_BASE)"
+	default 0x00200000
+	help
+	  内核镜像区间起点。QEMU loongarch virt 把 DRAM 放在 0x0 起 128 MB，
+	  但低 1 MB 被固件的启动信息占用 —— 实测链接基址为 0 时第一条指令
+	  就异常。所以镜像从 2 MB 开始。
+
+config CHIP_FLASH_SIZE
+	int "Kernel image size in bytes"
+	default 1048576
+
+config CHIP_RAM_BASE
+	hex "Static data / kernel RAM pool base"
+	default 0x00300000
+	help
+	  从镜像区间之上开始。KERNEL_RAM_BASE = CHIP_RAM_BASE + SHARE_RAM_SIZE
+	  （推导在 config/arkrtos_partition.h）。
+
+config CHIP_RAM_SIZE
+	int "Kernel RAM pool size in bytes"
+	default 8388608
+
+config CHIP_CCM_BASE
+	hex "CCM/TCM base (0 = none)"
+	default 0
+
+config CHIP_CCM_SIZE
+	int "CCM/TCM size (0 = none)"
+	default 0
+
+endmenu
+
+menu "Platform constants"
+
+config ARKRTOS_PORT_TIMER_HZ
+	int "TCFG timer clock in Hz"
+	default 25000000
+	help
+	  实测标定：InitVal = 2,000,000 时 10 s 内进入 125 次中断（80 ms/次），
+	  折合 25 MHz；InitVal = 1,000,000 测得 245 次，略低于线性预期，
+	  以 2M 那组为准。
+
+config ARKRTOS_PORT_RDTIME_HZ
+	int "rdtime clock in Hz"
+	default 100000000
+	help
+	  实测：rdtime.d 走 1e9 ticks 用掉约 10.0 s 主机时间（含启动约
+	  10.19 s），折合 100 MHz。delay_us 与 get_timer_counter 用它。
+
+config ARKRTOS_QEMU_UART_BASE
+	hex "ns16550a console base"
+	default 0x1FE001E0
+
+config ARKRTOS_QEMU_UART_REG_SHIFT
+	int "ns16550a register shift"
+	default 0
+	help
+	  寄存器按字节寻址，与 16550 布局一致，所以移位是 0。
+
+endmenu
+
+menu "Paging / user-mode probe window"
+
+config ARKRTOS_QEMU_APP_BASE
+	hex "PLV3 probe window base"
+	default 0x02000000
+	help
+	  App 的代码/数据/栈。选址依据：DRAM 128 MB，内核占
+	  0x00200000~0x00B00000（镜像 1 MB + RAM 8 MB），所以 16 MB 以上是
+	  空地。取 0x02000000（2 MB 对齐，正好满足 PS=20 条目要求的
+	  2^(20+1) = 2 MB 对齐）。
+
+config ARKRTOS_QEMU_APP_SIZE
+	int "PLV3 probe window size in bytes"
+	default 2097152
+
+config ARKRTOS_QEMU_APP_UART
+	hex "App-visible UART alias address"
+	default 0x022021E0
+	help
+	  App 的 UART 是同页 VA 别名：一页 4 KB 的 PLV3 条目把本页内 0x1E0
+	  偏移映射到 PA 0x1FE001E0。取 0x02202000 而不是 0x02200000 的原因：
+	  STLB 的组号是 (VA >> 13) & 0xFF，0x02200000 与内核 UART
+	  0x1FE00000 算出来是同一组，两条 4 KB 条目挤在一组里靠随机路号
+	  分家（1/8 概率互相覆盖）。挪一页就换到另一组。
+
+config ARKRTOS_PAGING_APPS_MAX
+	int "Number of user address spaces (fixed frames)"
+	default 2
+	help
+	  space n 的物理帧 = APP_BASE + n * APP_SIZE。取 2 只为在 QEMU 上把
+	  「同一 VA 映到不同 PA」跑出读数；帧是固定数组，没有页帧分配器。
+
+config ARKRTOS_QEMU_FRAME_BASE
+	hex "4 KB frame pool base"
+	default 0x04000000
+	help
+	  避开 App 区 0x02000000~0x02400000、内核 0~0x00B00000，以及
+	  pmap test 用的 0x03000000 测试 VA。8 MB 对齐（满足 PS=22 条目要求
+	  的 2^(22+1) = 8 MB 对齐），port 会给它单独补一条恒等映射。
+
+config ARKRTOS_QEMU_FRAME_COUNT
+	int "4 KB frames in the pool"
+	default 2048
+	help
+	  2048 帧正好是 ARKRTOS_USE_PAGING_FRAMES 的编译期上限，位图就是
+	  64 个 uint32。
+
+endmenu
+
+menu "Board capability"
+
+config ARKRTOS_USE_FPU
+	bool "FPU context switching"
+	default n
+	help
+	  LA64 硬件有 FPU，但这一版没有启用 FPU 上下文保存（任务切换不存
+	  FPR/FCCR）。打开却没有上下文管理，多任务共用浮点寄存器会静默算错，
+	  所以这一档必须是 n。
+
+config ARKRTOS_USE_MPU
+	bool "ARM MPU"
+	default n
+	help
+	  LoongArch 没有 ARM 意义上的 MPU，保护走分页 + 条目 PLV。这条开关
+	  对本架构没有对应实体。
+
+config ARKRTOS_USE_PRIV
+	bool "Privilege separation (PLV0 kernel / PLV3 app)"
+	default y
+
+config ARKRTOS_MOD_AREA_SIZE
+	int "Module load area size in bytes (ARKRTOS_USE_MODLOAD)"
+	default 65536
+	help
+	  内核里的一块静态缓冲（.bss 里的 s_mod_pool），64 KB 分 4 槽，
+	  每槽 16 KB。不用 heap：早先钉死过 ARKRTOS_MOD_AREA_BASE
+	  0x00600000，装载器却把模块拷进 .bss 的池子，于是任务跳进 0x600000
+	  抓到全 0 指令（INE 致命异常）。
+
+config ARKRTOS_WDG_ENABLE
+	bool "Watchdog feeding (ARKRTOS_USE_KERNEL_GUARD)"
+	default n
+	help
+	  QEMU virt 没有看门狗设备，喂狗链没有对象可咬，这一档必须是 n。
+	  打开它只会让内核去摸一个不存在的寄存器。
+
+config ARKRTOS_PLATFORM_REBOOT_PORT
+	bool "Board-provided reboot hook"
+	default y
+	help
+	  本板没有 Cortex-M 的 AIRCR，复位由板级 arkrtos_board_reboot() 接管
+	  （loongarch virt 也没有复位设备，那里只能明确报"做不到"）。
+
+endmenu
+
+menu "Stack sizes"
+
+config ARKRTOS_SHELL_STACK_SIZE
+	int "Shell task stack bytes"
+	default 8192
+
+config ARKRTOS_SMP_SEC_STACK_SIZE
+	int "Secondary-core stack bytes (ARKRTOS_USE_SMP)"
+	default 8192
+
+endmenu

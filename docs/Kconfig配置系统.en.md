@@ -34,15 +34,18 @@ config/kconfig/
     Kconfig.capacity           # static capacity limits
     Kconfig.posix              # POSIX layer capacity
     Kconfig.net                # lwIP port capacity
+    board/Kconfig.qemu_loongarch64  # MMU-tier board layer: geometry / clocks / capability (read only by genboard.py)
 config/arkrtos_defconfig       # source of the shared header (= F427 example config, used by the Keil project)
 config/stm32h743_defconfig     # per-build base for the H743 GCC project
 config/stm32f427_gcc_defconfig # per-build base for the F427 GCC project (differs only in RTSTAT/SECCHECK=n)
 config/minimal_defconfig       # measured minimum profile (every optional feature off; sizes in the feature-switch page)
 config/minimal_noshell_defconfig # minimum + Shell off (the ≈37.8 KB row)
+config/qemu_loongarch64_defconfig # MMU-tier board values (-> board/qemu_loongarch64/arkrtos_board_config.h)
 kernelsrc/include/arkrtos_autoconf.h   # generated artifact (committed)
 tools/kconfig/
     kconfig.py                 # tokenizer + recursive-descent evaluation + fixed-point solve
     genconfig.py               # generates autoconf.h, doubles as --check
+    genboard.py                # generates the MMU-tier board header, doubles as --check (section 9)
     menuconfig.py              # line-oriented config editor (testable via --script)
 ```
 
@@ -343,3 +346,86 @@ goes red again.
 The payoff of keeping this constraint is that the gates became real: changing the
 default of any switch in the shared header now trips here first, instead of being
 discovered on the board as "a stray `-D` in the project pushed the value back".
+
+
+## 9. The board layer: generated header on the MMU tier, hand-written on MCU + MDK (2026-11-19)
+
+Everything up to here is about *what the build contains*. **What the board has**
+was, until 2026-11-19, a pile of hand-written `#define`s in
+`board/<chip>/arkrtos_board_config.h`: geometry, clocks, paging windows and
+capability switches in one file. Changing an address meant editing the header and
+the prose that describes it, with nothing to go red when the two drifted.
+
+The MMU tier now follows the normal-project shape: **menu + defconfig + generated
+artifact + gate**. The MCU + MDK tier deliberately does not follow, see 9.3.
+
+### 9.1 Three sources, one artifact
+
+| Role | File | Read by |
+|---|---|---|
+| what this board **has** | `config/kconfig/board/Kconfig.<board>` | `menuconfig`, `genboard.py` |
+| what this build **asks for** | `config/<board>_defconfig` | `genboard.py` |
+| kernel feature **values** | the top-level `Kconfig` (`config/kconfig/Kconfig.*`) | `genboard.py` (same tree as `genconfig.py`) |
+| artifact | `board/<board>/arkrtos_board_config.h` | the compiler (`-DARKRTOS_BOARD_CONFIG=...`) |
+
+The generator is `tools/kconfig/genboard.py`:
+
+```
+py -3 tools/kconfig/genboard.py --board qemu_loongarch64         # generate
+py -3 tools/kconfig/genboard.py --board qemu_loongarch64 --check # verify
+```
+
+The board fragment is **not** sourced from the top-level `Kconfig`. That tree has
+exactly one artifact, `arkrtos_autoconf.h`, shared by every board including the
+Keil MCU projects; putting something like `CHIP_FLASH_BASE` into it would compile a
+LoongArch address into an STM32F427. `genboard.py` therefore merges both trees in
+memory - board symbols from `config/kconfig/board/`, feature symbols from the
+top-level tree - and asserts the two do not declare the same name before merging.
+
+### 9.2 Two things the generator refuses to do
+
+The artifact is committed so a clone builds without running the generator, which
+makes "it looks right" cheap: a value can be silently eaten by a `depends on`, or a
+name in the defconfig can be declared by nobody. Both are hard failures in
+`genboard.py`, not warnings:
+
+1. **Every value the defconfig asks for must survive resolution unchanged.** It
+   compares `user` against `values` line by line and exits 1 with
+   "defconfig asks X, Kconfig resolved Y". Without this, one wrong `depends on`
+   removes a board capability and the generated header merely has a few fewer 1s.
+2. **Every symbol the renderer needs must exist.** A typo, or a board fragment
+   missing a `config`, reports the symbol name instead of a KeyError.
+
+The `board-config-generated` item in `tools/ci_gate.py` runs `--check`: a
+hand-edited artifact, or a defconfig change without regeneration, goes red here.
+
+### 9.3 MCU + MDK is a **degraded tier**, not a debt
+
+`board/stm32f401` / `stm32f427` / `stm32h743` and the two QEMU MCU boards keep a
+hand-written header, for concrete reasons:
+
+* uVision reads that header directly (`ARKRTOS_BOARD_CONFIG` in `<Define>`); adding
+  a generated layer means running Python before every configuration change, with no
+  make-level dependency to hang it on;
+* the MCU capability set is fixed by the chip (FPU/MPU/PRIV/clock) and changes far
+  less often than the MMU tier's window and frame-pool geometry;
+* the long comments in the hand-written headers are bring-up calibration records
+  ("125 interrupts in 10 s at InitVal = 2,000,000"), and a generator cannot produce
+  that density of context.
+
+The cost is stated plainly: **these tiers have no "change one place and the other
+goes red" protection**; only the mirrored-project-environment gates of 8.3 backstop
+them.
+
+### 9.4 Current coverage
+
+| Board | Tier | Board header |
+|---|---|---|
+| `qemu_loongarch64` | MMU (LA64, page table + PLV3) | **generated** (`Kconfig.qemu_loongarch64` + `qemu_loongarch64_defconfig`) |
+| `la32_generic` | has paging hardware, no runtime carrier | hand-written (degraded) |
+| `stm32f401` / `stm32f427` / `stm32h743` | MCU + MPU / MDK | hand-written (degraded) |
+| `qemu_riscv32` / `qemu_mps2_an386` | QEMU MCU | hand-written (degraded) |
+
+Adding a new MMU-tier board means two files (`Kconfig.<board>` and
+`<board>_defconfig`) plus one `--board <board>` run; the gate's board list is
+scanned from `config/kconfig/board/`, so no code changes.
