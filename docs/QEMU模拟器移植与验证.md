@@ -1522,6 +1522,104 @@ if (arkrtos_current_task_id == id && arkrtos_port_in_isr() == 0u) { ... }
 **注意这只关掉了「误报」这条路，不等于 §5.13.4 那个 `era=0` 的间歇异常被解释了**
 ——那是入口函数真的返回，根因仍未定，欠账照旧。
 
+#### 5.13.4 追加（2026-11-19）：命中一族现场，根因收窄到「启动/idle 栈溢出，写坏正下方相邻任务的初始帧」
+
+**结论分档**：机制已由**两向因果实验**证实（QEMU 实跑）；**修法尚未实施**，待裁定；
+§5.13.4 最初那例（`s_pi_chain_stack_mid`）本轮没有再取样核对，只见「同形状」，见文末。
+
+**本轮新增的诊断（默认档，只在崩溃转储里体现）**
+
+- switch-log 由 6 字扩到 8 字：新增「目标帧的 ERA 槽 / SP 槽」，在 `LA_PRIV_APPLY` 之前采集；
+- fatal 转储新增帧归属判定
+  `frame owner=task N bottom=.. top=.. is_init_slot=? ra0=? sp_is_top=?`
+  （帧不属于任何任务栈时打印 `frame owner=none (outside every task stack)`）；
+- 任务表每行追加 `guard=<stack_bottom[0]>`（正常值 `0xed01`）。
+
+体积影响（LA64 默认档，`SOURCE_DATE_EPOCH=1600000000`）：
+`text 367512 -> 368024`（+512 B），`data 440 / bss 767508` 不变，
+ELF `2585608 -> 2586816 B`，sha256 `1ff448e6... -> 7b7929f6...`。
+RV32 / LA32 本轮没有重编复核。
+
+**现场（3 次命中，形状完全一致）**
+
+```
+[Ark RTOS] FATAL: estat=0x000d0000 ecode=0x0000000d era=0x00000041 badv=0x00000041
+                   badi=0x00000000 crmd=0x00000010
+ frame@0x003b5710
+  [0x00000000] 0x00000000 0x00000000 0x003b5810 0x00000000
+  [0x000000e0] 0x00323fe8 0x003240f0 0x00000041 0x00000040
+ frame owner=task 4 bottom=0x003b5010 top=0x003b5810
+        is_init_slot=0x00000001 ra0=0x00000001 sp_is_top=0x00000001
+ ...
+ switch-log 最后一条（next frame new_sp cur st rd target-era target-sp）：
+  0x00000004 0x003ba890 0x003b5710 0x00000004 st=0x1 rd=0x3
+             target-era=0x00000041 target-sp=0x003b5810
+```
+
+三条读数：
+
+1. `is_init_slot=1` —— 这一帧就是 `arkrtos_port_stack_init()` 写下的那一格
+   （`栈顶 - 0x100`），**不是一次现场保存**。
+2. `target-era=0x41`、`target-sp=0x3b5810`（= 栈顶）—— **目标帧在切换之前就已经是坏的**，
+   所以不是 resume 时算错，也不是调度器挑错了任务。
+3. `ertn` 恢复出 `PC=0x41`（另两例是 `0x8` / `0x0`）、`PRMD` 也被写成 `0x40`
+   ⇒ 取指非法 ⇒ `ecode=0x0d (INE)`。
+
+**修订既有读法：`ra=0` + `sp==栈顶` 不能读成「入口函数返回了」**
+
+这两个值**正是 `arkrtos_port_stack_init()` 写出来的形状**（写 `ra=0 / sp=栈顶 /
+ERA=entry / PRMD=4`）。在本例里恰好相反：这一帧**一次都没被用过**，是被外来写覆盖的。
+§5.13.4 正文里「入口函数真的返回了」的第二层推断，对那一例是否有独立证据，需要单独复核。
+
+**谁写坏的：正下方的 idle / 启动栈溢出**
+
+- `s_stack_guard_demo` 占 `0x3b5010..0x3b5810`（512 字），初始帧槽在 `0x3b5710`；
+  **紧贴它上方**就是 `s_idle_stack`（`0x3b5820`，`IDLE_STACK_WORDS=256u` ⇒ 1 KB）。
+- `arkrtos_port_enter_idle()` 只是 `move sp, a0`（`arkrtos_context.S`），`main()`
+  之后只剩 WFI 循环，所以**启动上下文此后就住在 idle 栈上**。
+- `eentry` 在 `bl la_trap_c` 时**仍然用被打断者的 sp**（换到 `la_switch_stack_top`
+  发生在 `la_trap_c` 返回之后）⇒ **在启动/idle 上下文里被 tick 打断时，整条内核陷阱链
+  （tick handler + guard + timer + 调度扫描）都跑在 idle 栈上**。与 §5.14 的软定时器栈
+  是同一个形状。
+- 溢出顺序正好对得上：`0x3b5818(s_a_loops) → 0x3b5814(s_b_loops) → 0x3b5810(s_fs_ok)
+  → 0x3b5808(frame[31] = PRMD) → 0x3b5800(frame[30] = ERA)`，**只改最后两格、
+  其余 30 字仍是初始帧的 0**，与现场一致。
+
+**水位实测（HMP `xp` 直接读物理内存）**
+
+未写过的字是 `0`（`s_idle_stack` 是 `main.c` 的 `static` 数组，在 `.bss`，
+不走 `0xcdcdcdcd` 预填）。用 4 KB 的对照镜像（`IDLE_STACK_WORDS=1024u`）跑完一次
+`utest` 后读 `0x3b5820..0x3b6820`：最低被写字 = `0x3b5840` ⇒ **峰值 960 B / 4096 B**。
+换回默认 1 KB 栈，同一峰值 ⇒ **只剩 64 B 兜底**，而踩到 `frame[31]` / `frame[30]`
+只需再深 24 B / 32 B。这就解释了「偶发」：绝大多数 tick 的链路深度一样（960 B），
+偶尔多一层就越界，且越界写进去的总是同一段深链路的同一批局部量 ——
+与「每次两个坏值都相同」一致。
+
+**两向因果实验**（同一份源码，只改 `example/qemu_loongarch64/main.c` 的 `IDLE_STACK_WORDS`）
+
+| `IDLE_STACK_WORDS` | 栈大小 | 本轮实跑 | 结果 |
+| --- | --- | --- | --- |
+| `128u` | 512 B | 5 次 boot | **5/5 崩**。3 例是上面那条完全一致的形状；另 2 例溢出更深、踩到了别的 `.bss`（一例把 `sp` 变成 `&s_next_pplv`、PC 落在 `arkrtos_dev_handles`）⇒ 溢出深度决定踩坏什么 |
+| `256u`（默认） | 1 KB | 8 次 boot × 3 轮 `utest` | 0 崩（与既有的约 1/15 相符；**0 复现不等于已修**） |
+| `1024u` | 4 KB | 12 次 boot × 3 轮 `utest` | **12/12 干净，13/13/0 `utest`** |
+
+两向都成立 ⇒「idle 栈溢出写坏相邻任务的初始帧」这条因果链成立，不是相关。
+
+**修法（未实施，三候选，待裁定）**
+
+1. **加高 idle 栈**：`IDLE_STACK_WORDS 256u -> 1024u`（示例层一行，本轮已实测足够）。
+   代价：`.bss +3 KB`；只是把余量从 64 B 拉到 3.1 KB，**没有把真实需求（960 B）表达出来**。
+2. **栈底隔离带 + 自检**：`arkrtos_port_stack_init()` 不清零底部若干字，或每块栈底预留
+   16~32 B 隔离区，并在 tick 路径里比对。能把「已经越界」当场变成可读的数，而不是等崩。
+3. **架构层**：让 idle/启动上下文不进陷阱链 —— 即 `eentry` 在 `bl la_trap_c` 之前就换到
+   静态陷阱栈。但「帧存在任务栈上」正是 resume 的载体，改动面最大。
+
+推荐 1 + 2：先按实测给足（1 KB → 4 KB），再用隔离带/自检把余量变成读数。
+
+**仍未解释**：§5.13.4 最初那例（`frame@0x003071d0`、`s_pi_chain_stack_mid`）
+本轮没有再取样核对，只确认它与本例**共享同一个形状**（初始帧槽 + 垃圾 ERA）。
+它是否同一根因，需要单独复跑判定；在那之前，欠账不能整体销账。
+
 ### 5.14 软定时器栈装不下陷阱帧：KERNEL refill 的真根因（已修）
 
 **现象**：接上 ELF 装载器后，第 2 次 `exec /mnt/ram/hello` 必崩：

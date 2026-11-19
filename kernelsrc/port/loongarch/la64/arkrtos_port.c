@@ -3148,11 +3148,14 @@ extern volatile uint32 arkrtos_ready_heal_bit;
 extern volatile uint32 arkrtos_ready_heal_head;
 extern volatile uint32 arkrtos_ready_heal_total;
 
-/* 每条 6 个字：next / 旧帧 / 新帧 / 切换后 cur_id / 目标切换前 status /
- * 目标切换前 ready_next。后两个字段是「死任务被重新调度」这类脱钩现场
- * 唯一能自证的证据：只看 next 分不出「它是可运行任务」还是「它已经
- * INVALID、只是就绪集里还留着位」。 */
-#define LA_SWP_FIELDS   6u
+/* 每条 8 个字：next / 旧帧 / 新帧 / 切换后 cur_id / 目标切换前 status /
+ * 目标切换前 ready_next / 目标帧里的 ERA 槽 / 目标帧里的 SP 槽。
+ * 前六个字段是「死任务被重新调度」这类脱钩现场的自证材料；后两个是给
+ * 「resume 之后跳到一个非代码地址」这条致命异常准备的：只要目标帧的
+ * ERA 槽不是一个代码地址（或者 SP 槽等于该任务的栈顶 —— 那是
+ * arkrtos_port_stack_init 才会写的形状），就能当场认出「resume 用的不是
+ * 一份真正的保存帧」。 */
+#define LA_SWP_FIELDS   8u
 uint32 s_swp_log[LA_SWP_FIELDS * 16u];
 /* 任务表是内核全局对象（arkrtos_cfg.h），port 层就地声明，
  * 不为一条诊断日志给公共头文件拉依赖。 */
@@ -3245,6 +3248,12 @@ la_frame_word *la_switch_inline(la_frame_word *frame)
         {
             la_frame_word *next_frame = (la_frame_word *)(unsigned long)next_sp;
 
+            /* 诊断：记下目标帧的 ERA / SP 槽。这一帧马上要被 ertn 恢复，
+             * 这两格是「恢复之后到底跳到哪、用谁的 sp」的直接来源。 */
+            uint32 j = (uint32)((s_swp_pos - 1u) & 15u) * LA_SWP_FIELDS;
+            s_swp_log[j + 6u] = (uint32)next_frame[LA_FR_ERA];
+            s_swp_log[j + 7u] = (uint32)next_frame[LA_FR_SP];
+
             /* 真正的切换点：把目标任务的 PLV 写进它的帧，再 ertn 过去。
              * 不切换（next_sp == 0）时不动自己的帧：那时 s_next_pplv 是
              * 别处的残留值，套到自己头上会把自己的特权级改掉。 */
@@ -3286,6 +3295,43 @@ static void la_fatal_dump(la_frame_word *frame)
         arkrtos_board_puts((i & 3u) == 3u ? "\n" : " ");
     }
 
+    /* 故障帧归属判定：这一帧是不是某个任务的「初始帧槽」（栈顶 - 0x100）？
+     * 只有 arkrtos_port_stack_init() 会造出 sp 槽 == 栈顶、ra 槽 == 0 的帧。
+     * 命中这两个条件就说明「被 resume 的是一份初始帧 / 被当成初始帧用的
+     * 旧内存」，而不是一次真正的现场保存。 */
+    {
+        int32 t;
+        uint32 fa = (uint32)(unsigned long)frame;
+
+        for(t = 0; t < arkrtos_task_count; t++)
+        {
+            uint32 bot = (uint32)(unsigned long)arkrtos_task_table[t].stack_bottom;
+            uint32 top = arkrtos_task_table[t].stack_top;
+
+            if((fa >= bot) && (fa < top))
+            {
+                arkrtos_board_puts(" frame owner=task ");
+                arkrtos_board_putu((uint32)t + 1u);
+                arkrtos_board_puts(" bottom=");
+                arkrtos_board_puthex(bot);
+                arkrtos_board_puts(" top=");
+                arkrtos_board_puthex(top);
+                arkrtos_board_puts(" is_init_slot=");
+                arkrtos_board_puthex((fa == (top - 0x100u)) ? 1u : 0u);
+                arkrtos_board_puts(" ra0=");
+                arkrtos_board_puthex((frame[LA_FR_RA] == 0u) ? 1u : 0u);
+                arkrtos_board_puts(" sp_is_top=");
+                arkrtos_board_puthex((frame[LA_FR_SP] == top) ? 1u : 0u);
+                arkrtos_board_puts("\n");
+                break;
+            }
+        }
+        if(t >= arkrtos_task_count)
+        {
+            arkrtos_board_puts(" frame owner=none (outside every task stack)\n");
+        }
+    }
+
     /* 最近若干次切换：next / 旧帧 / 返回的新帧 / 切换后的当前任务 id。
      * next_sp == 0xffffffff 表示调度器交回一个非法栈指针。 */
     arkrtos_board_puts(" enter=");
@@ -3294,7 +3340,7 @@ static void la_fatal_dump(la_frame_word *frame)
     arkrtos_board_puthex(s_swp_exit);
     arkrtos_board_puts(" pos=");
     arkrtos_board_puthex(s_swp_pos);
-    arkrtos_board_puts("\n switch-log (next frame new_sp cur_id st rd, newest last):\n");
+    arkrtos_board_puts("\n switch-log (next frame new_sp cur_id st rd target-era target-sp, newest last):\n");
     {
         uint32 k;
 
@@ -3317,6 +3363,10 @@ static void la_fatal_dump(la_frame_word *frame)
             arkrtos_board_puthex(s_swp_log[i + 4u]);
             arkrtos_board_puts(" rd=");
             arkrtos_board_puthex(s_swp_log[i + 5u]);
+            arkrtos_board_puts(" era=");
+            arkrtos_board_puthex(s_swp_log[i + 6u]);
+            arkrtos_board_puts(" sp=");
+            arkrtos_board_puthex(s_swp_log[i + 7u]);
             arkrtos_board_puts("\n");
         }
     }
@@ -3361,6 +3411,12 @@ static void la_fatal_dump(la_frame_word *frame)
             arkrtos_board_puthex((uint32)(unsigned long)arkrtos_task_table[t].entry);
             arkrtos_board_puts(" ");
             arkrtos_board_puthex(arkrtos_task_table[t].stack_ptr);
+            /* 栈底守卫字：不是 0xed01 就说明有东西冲到这块栈底以下（或它自己
+             * 故意写坏了，比如 stack guard 演示任务）。相邻栈是 .bss 里紧挨着
+             * 分配的，所以「谁的守卫坏了」直接指认越界者。 */
+            arkrtos_board_puts(" guard=");
+            arkrtos_board_puthex((uint32)(unsigned long)
+                                 arkrtos_task_table[t].stack_bottom[0]);
             arkrtos_board_puts("\n");
         }
     }

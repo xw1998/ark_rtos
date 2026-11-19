@@ -289,6 +289,37 @@ Readings: `utest: 9 matched, 9 passed, 0 failed, 0 skipped; assertions 90 run / 
 
 §5.13.4, unresolved: a 1-in-12 intermittent `ecode=0x0d era=0 badv=0x0` (stack fully unwound ⇒ an entry function returned). The switch log's six fields showed every non-idle target at `st=0x1`; `heal=6`. After adding `kill_ret` diagnostics, 48 sessions produced 0 reproductions. Later closure: that diagnostic is a false positive under `in_isr`, so an `arkrtos_port_in_isr() == 0u` gate was added, `text +12 B`, RV32 image `2012876 -> 2012924 B`. **The root cause is still undetermined.**
 
+**2026-11-19 addendum to 5.13.4 - one family of this fault is now explained by causal experiment.**
+New diagnostics in the default build: the switch log grew from 6 to 8 words (it now records the
+target frame's ERA and SP slots, sampled before `LA_PRIV_APPLY`), the fatal dump prints a frame
+ownership line (`frame owner=task N ... is_init_slot=? ra0=? sp_is_top=?`, or `frame owner=none`),
+and each task-table row carries `guard=<stack_bottom[0]>` (normally `0xed01`). Cost on LA64
+default: `text 367512 -> 368024` (+512 B), `data`/`bss` unchanged, ELF `2585608 -> 2586816 B`,
+sha256 `1ff448e6... -> 7b7929f6...`. RV32/LA32 were not rebuilt this round.
+
+The captured site is always the same: `frame@0x003b5710`, `is_init_slot=1 ra0=1 sp_is_top=1`,
+i.e. task 4's *initial* frame slot (`stack_top - 0x100`) - a frame that was never used - and the
+switch log's last line shows the target frame already corrupt *before* the switch
+(`target-era=0x00000041`, `target-sp=0x003b5810`). So `ra=0` plus `sp == stack top` is what
+`arkrtos_port_stack_init()` writes, and must not be read as "the entry function returned".
+
+The writer is the idle/boot stack that sits immediately above it: `arkrtos_port_enter_idle()` only
+does `move sp, a0`, `main()` then loops on WFI, and `eentry` still runs `la_trap_c` on the
+interrupted context's stack (the switch to `la_switch_stack_top` happens after it returns). So every
+tick taken in the boot/idle context executes the whole kernel trap chain on the 1 KB idle stack -
+the same shape as 5.14. Measured with HMP `xp` on a 4 KB control build: the high-water mark is
+**960 B**, leaving 64 B below, while clobbering `frame[31]`/`frame[30]` needs only 24 B/32 B more.
+
+Causal check, same sources, only `IDLE_STACK_WORDS` changed: `128u` (512 B) crashed **5/5 boots**
+with exactly this signature (two further boots overflowed deeper and hit other `.bss`);
+`256u` (1 KB, the default) gave 0 crashes in 8 boots x 3 `utest` (consistent with the known ~1/15);
+`1024u` (4 KB) gave **12/12 clean boots, 13/13/0 `utest`**. Both directions hold, so the chain is
+causal, not correlational. **The fix is not implemented yet**; three candidates are on the table
+(raise the idle stack to 1024 words; add a stack-bottom isolation band plus a tick-path check; or
+move the trap chain off the interrupted stack). The original 5.13.4 instance
+(`frame@0x003071d0`, `s_pi_chain_stack_mid`) was not re-sampled this round - only its shape matches -
+so that debt is not closed.
+
 ### 5.14 Soft-timer stack could not hold a trap frame
 
 96 words = 384 B, `peak/low=0x00304C60`, 48 B left. A 256-byte frame written to `sp-256` put its 18th word on top of `g_hwsafe_dev_n`, so `devs=2210696` and the kernel touched unmapped `0x01000000` (`KERNEL refill`). Blowing the stack up 8× did not crash. Fix: board-level `ARKRTOS_TIMER_TASK_STACK_WORDS (512)`, 256 on LA32. After the fix, 10 `exec` runs had zero FATAL, `hwsafe: enabled, devs=0 owners=2 neutralized=8 last_owner=7`. RV32 still uses 96 words with 200 B left and only ~72 B in the handling chain, registered as U-12 and not fixed.
