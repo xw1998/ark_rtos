@@ -32,6 +32,7 @@ page. Each row below links both.
 | 内存保护与App越权验证 | How MPU regions isolate an App task, and how a privilege violation is actually demonstrated (APP_BAD). | [内存保护与App越权验证.en.md](内存保护与App越权验证.en.md) | [内存保护与App越权验证.md](内存保护与App越权验证.md) |
 | MMU进程模型与ELF装载 | Executing an ELF file directly on an MMU platform: ELF64/ELF32 two-pass loading, the sp-to-argc entry convention, the trade-off with the PLV3 probe page, why M1 is file-is-a-program and not a process, the soft-timer stack root cause, RV32 PMP window loading, the M2 debt table. | [MMU进程模型与ELF装载.en.md](MMU进程模型与ELF装载.en.md) | [MMU进程模型与ELF装载.md](MMU进程模型与ELF装载.md) |
 | Linux可执行文件兼容-系统调用ABI | Running an unmodified Linux static executable on the MMU profile: the 15 asm-generic syscalls with measured QEMU readouts, how the Ark and Linux ABIs are told apart per architecture, the explicit non-support list (dynamic linking, fork, signals, socket, futex, real mmap), the deliberate fd-table and window-heap degradations, the 13-item gate, and the two real bugs found on the way. | [Linux可执行文件兼容-系统调用ABI.en.md](Linux可执行文件兼容-系统调用ABI.en.md) | [Linux可执行文件兼容-系统调用ABI.md](Linux可执行文件兼容-系统调用ABI.md) |
+| 跨架构机制矩阵 | How far last words, seamless hand-off and real-time have actually got on each class of hardware: three states per cell (reading / compile surface / refused at compile time), M4 on-board readings, RV32 and LA64 QEMU ledgers, and why non-ARM hand-off is a compile-time error rather than an untested path. | [跨架构机制矩阵.en.md](跨架构机制矩阵.en.md) | [跨架构机制矩阵.md](跨架构机制矩阵.md) |
 | MMU平台可下载模块-VxWorks式 | Downloadable modules the VxWorks way: on-the-fly ET_REL linking, the exported-symbol whitelist, supported relocation types, the PLV0 trade-off, why this is parallel to ELF rather than a replacement, and the 4 KB loader stack bug. | [MMU平台可下载模块-VxWorks式.en.md](MMU平台可下载模块-VxWorks式.en.md) | [MMU平台可下载模块-VxWorks式.md](MMU平台可下载模块-VxWorks式.md) |
 | VFS路径命名空间 | Mount points, path resolution, root conventions, where /dev and /mnt come from. | [VFS路径命名空间.en.md](VFS路径命名空间.en.md) | [VFS路径命名空间.md](VFS路径命名空间.md) |
 | 设备树 | The DTS subset and dtc_lite, the arkrtos_dt query API, generation and checking, the dt command, verification status. | [设备树.en.md](设备树.en.md) | [设备树.md](设备树.md) |
@@ -104,8 +105,8 @@ tools/gen_api_doc.py; the comments themselves are in Chinese |
 ```
 docs/
 ├── README.md                             # the index of record (Chinese)
-├── README.en.md                          # this file (English index of the same 52 topics)
-├── <topic>.md  /  <topic>.en.md          # 52 topics in both editions; 欠账盘点.md is Chinese only
+├── README.en.md                          # this file (English index of the same 54 topics)
+├── <topic>.md  /  <topic>.en.md          # 54 topics in both editions; 欠账盘点.md is Chinese only
 ├── 欠账盘点.md                            # debt ledger (Chinese only)
 ├── img/                                  # measured figures referenced by the root README
 └── api/

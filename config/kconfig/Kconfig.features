@@ -598,6 +598,12 @@ config ARKRTOS_USE_TASK_SWAP
 	  match), and a task whose stacked frame is the FPU-extended one is refused
 	  rather than guessed at.  Adds `mini swap <path>` and `app swap <slot>`
 	  only when enabled.
+	  
+	  This is a Cortex-M mechanism: the frame it rewrites is the ARM exception
+	  frame (r0-r3/r12/lr/pc/xpsr) and the PSP it moves exists only there.
+	  Selecting it on RISC-V or LoongArch is a compile-time error, not a
+	  silently different behaviour - the same code would rewrite a0 as r0
+	  and send the task fetching from a wrong address.
 
 config ARKRTOS_USE_POSIX
 	bool "POSIX / Windows compatibility layer"

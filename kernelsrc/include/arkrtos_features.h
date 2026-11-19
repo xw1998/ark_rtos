@@ -531,6 +531,10 @@
 #define ARKRTOS_USE_TASK_SWAP           0
 #endif
 
+#if (ARKRTOS_USE_TASK_SWAP == 1) && !(ARKRTOS_ARCH_IS_ARM)
+#error "ARKRTOS_USE_TASK_SWAP=1 is implemented for Cortex-M only: it rewrites an ARM exception frame (r0-r3/r12/lr/pc/xpsr) and moves the PSP. RISC-V / LoongArch frames are different; enabling it there would rewrite a0 as r0. See docs: cross-architecture mechanism matrix."
+#endif
+
 
 /* POSIX / Windows 兼容层（kernelsrc/sdk/posix）。关掉后 App 只能用
  * 原生 oslib，不能 include <pthread.h> 那一套 */

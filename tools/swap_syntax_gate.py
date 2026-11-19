@@ -33,6 +33,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 import shell_src
 
@@ -45,6 +46,33 @@ ARMCLANG_FALLBACKS = [
     r"D:\Keil_v5\ARM\ARMCLANG\bin\armclang.exe",
     r"C:\Keil_v5\ARM\ARMCLANG\bin\armclang.exe",
 ]
+
+# 跨架构那一向：非 ARM 打开这个开关必须是编译期报错，不是静默改写 a0。
+LA64_FALLBACKS = [
+    "D:/LoongIDE/la64-tool/bin/loongarch64-newlib-elf-gcc.exe",
+]
+RV32_FALLBACKS = [
+    "D:/Artchip/luban-lite-master/toolchain/bin/riscv64-unknown-elf-gcc.exe",
+]
+CROSS_ARCH_REFUSAL_MARKER = "is implemented for Cortex-M only"
+
+CROSS_ARCH_INCLUDES = [
+    "kernelsrc/include",
+    "config",
+    "kernelsrc/components/mdk_trace",
+    "kernelsrc/shell",
+    "kernelsrc/shell/ark_shell",
+    "kernelsrc/components/ark_vfs/include",
+    "kernelsrc/fs",
+    "kernelsrc/fs/littlefs",
+]
+
+# 只为让 features.h 的「有签名开关就必须有密钥」那条 #error 过关。
+CROSS_SIGN_HEADER = """#ifndef ARKRTOS_SIGN_KEY_LOCAL_H
+#define ARKRTOS_SIGN_KEY_LOCAL_H
+#define ARKRTOS_IMAGE_SIGN_KEY { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F }
+#endif
+"""
 
 INCLUDES = [
     "kernelsrc/include",
@@ -102,6 +130,76 @@ def find_armclang(explicit):
     return shutil.which("armclang")
 
 
+def _find(paths):
+    for cand in paths:
+        if os.path.exists(cand):
+            return cand
+    return None
+
+
+def _cross_compile(cc, arch, board, port, key_dir, on):
+    flags = [cc] + arch + [
+        "-O2", "-ffreestanding", "-fno-common", "-nostdlib", "-nostartfiles",
+        "-fno-builtin", "-fsyntax-only", "-DARKRTOS_SIGN_KEY_LOCAL=1",
+        '-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',
+        "-include", "arkrtos_board_config.h", "-I" + key_dir,
+    ]
+    flags += ["-I" + os.path.join(ROOT, sub) for sub in CROSS_ARCH_INCLUDES]
+    flags += [
+        "-I" + os.path.join(ROOT, "board", board),
+        "-I" + os.path.join(ROOT, "kernelsrc", "port", port),
+    ]
+    if on:
+        flags.append("-DARKRTOS_USE_TASK_SWAP=1")
+    r = subprocess.run(flags + [os.path.join(ROOT, "kernelsrc/src/arkrtos_task.c")],
+                       capture_output=True, encoding="utf-8", errors="replace")
+    return r.returncode, ((r.stdout or "") + (r.stderr or ""))
+
+
+def check_cross_arch_refusal():
+    """非 ARM 架构：开档必须被 #error 拒绝，关档必须编得过。
+
+    为什么需要这一向：swap 的本体是「按 ARM 异常帧布局改写 r0-r3/r12/lr/pc/xpsr
+    并挪 PSP」。在 RISC-V / LoongArch 上帧完全不同，打开它不会链接失败，而是
+    把 a0 当 r0 改写——任务在错误地址上取指，是最坏的静默错答案。所以这里要求
+    两个真实交叉编译器各给一次读数：ON 必须非零退出且命中拒绝文案，OFF 必须 0。
+    """
+    la64 = _find(LA64_FALLBACKS) or shutil.which("loongarch64-newlib-elf-gcc")
+    rv32 = _find(RV32_FALLBACKS) or shutil.which("riscv64-unknown-elf-gcc")
+    if not la64:
+        print("SWAP-GATE FAIL: LA64 cross gcc not found (a skip would be a false green)")
+        return 1
+    if not rv32:
+        print("SWAP-GATE FAIL: RV32 cross gcc not found (a skip would be a false green)")
+        return 1
+
+    key_dir = tempfile.mkdtemp(prefix="ark_swap_key_")
+    with open(os.path.join(key_dir, "arkrtos_sign_key_local.h"), "w", encoding="utf-8") as f:
+        f.write(CROSS_SIGN_HEADER)
+
+    cases = [
+        ("LA64", la64, ["-march=loongarch64", "-mabi=lp64d", "-mstrict-align"],
+         "qemu_loongarch64", "loongarch/la64"),
+        ("RV32", rv32, ["-march=rv32imac", "-mabi=ilp32", "-mcmodel=medany", "-mno-relax"],
+         "qemu_riscv32", "riscv/rv32imac"),
+    ]
+    bad = 0
+    for name, cc, arch, board, port in cases:
+        rc_on, out_on = _cross_compile(cc, arch, board, port, key_dir, True)
+        if rc_on == 0 or CROSS_ARCH_REFUSAL_MARKER not in out_on:
+            bad += 1
+            print("SWAP-GATE FAIL: %s ON was not refused (rc=%d)" % (name, rc_on))
+            print(out_on[-800:])
+        rc_off, out_off = _cross_compile(cc, arch, board, port, key_dir, False)
+        if rc_off != 0:
+            bad += 1
+            print("SWAP-GATE FAIL: %s OFF does not compile" % name)
+            print(out_off[-800:])
+        if rc_on != 0 and rc_off == 0 and CROSS_ARCH_REFUSAL_MARKER in out_on:
+            print("ok: %s ON refused / OFF compiles" % name)
+    return bad
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--armclang", default=None)
@@ -129,9 +227,12 @@ def main():
         else:
             print("ok: %s (-mcpu=%s)" % (rel, cpu))
 
+    bad += check_cross_arch_refusal()
+
     if bad:
         return 1
-    print("SWAP-GATE OK (%d files, USE_TASK_SWAP=1)" % len(TARGETS))
+    print("SWAP-GATE OK (%d files, USE_TASK_SWAP=1; LA64/RV32 refused when ON, clean when OFF)"
+          % len(TARGETS))
     return 0
 
 
