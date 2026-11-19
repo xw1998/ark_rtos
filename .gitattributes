@@ -18,3 +18,4 @@ kernelsrc/include/arkrtos_shell.h -text
 *.elf binary
 *.axf binary
 *.o   binary
+*.dtb binary

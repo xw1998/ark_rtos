@@ -653,6 +653,25 @@ def check_devicetree_generated():
     else:
         ok("devicetree-generated", "%d board(s) match their DTS" % len(boards))
 
+def check_devicetree_dtb():
+    """Every dts/*.dts must produce a spec-valid flattened blob.
+
+    The MMU tier boots a .dtb (see docs/设备树.md), so the DTS has to be
+    encodable as a standard flattened device tree, not only as the C table
+    the MCU tier links.  The verifier here is a separate reader-side
+    implementation on purpose: reusing the writer's own helpers would let a
+    byte-order or padding mistake corroborate itself, and this check would
+    then pass while the blob was still wrong.
+    """
+    r = _run_check([sys.executable, "tools/dts/dtb_verify.py", "--all"])
+    if r.returncode == 0:
+        out = (r.stdout or "").strip().splitlines()
+        n = len([ln for ln in out if ln.endswith(" OK")])
+        ok("devicetree-dtb", "%d board(s) produce spec-valid DTB" % n)
+    else:
+        fail("devicetree-dtb",
+             ((r.stdout or "") + (r.stderr or "")).strip()[:300])
+
 def check_board_config_generated():
     """Every generated board header must be the genboard.py output.
 
@@ -1720,6 +1739,7 @@ CHECK_TABLE = (
     ("features-switches", check_features_switches),
     ("softbus-sync", check_softbus_sync_header),
     ("devicetree-generated", check_devicetree_generated),
+    ("devicetree-dtb", check_devicetree_dtb),
     ("board-config-generated", check_board_config_generated),
     ("release-consistency", check_release_consistency),
     ("utest-host", check_utest_host),

@@ -38,6 +38,7 @@ that a phandle reference always resolves.
 import argparse
 import os
 import re
+import struct
 import sys
 
 
@@ -641,6 +642,98 @@ def _gen_api(a):
 
 
 # --------------------------------------------------------------------------
+# flattened device tree (DTB)
+#
+# Why a second output format
+# --------------------------
+# The C table is the MCU answer: no parser, no RAM, a const array the linker
+# places in flash.  The MMU tier is the other case - a Linux-shaped project
+# carries a .dtb blob in the image and parses it at boot, so the same DTS must
+# be able to produce the standard binary.  Both outputs come from the same
+# parse, which is what keeps them from disagreeing.
+#
+# Layout follows the Devicetree Specification v0.4: 40-byte big-endian header,
+# an (empty) memory reservation block, the structure block, the strings block.
+# version 17 / last_comp_version 16 is what dtc emits and what Linux expects.
+# --------------------------------------------------------------------------
+FDT_MAGIC = 0xd00dfeed
+FDT_BEGIN_NODE = 1
+FDT_END_NODE = 2
+FDT_PROP = 3
+FDT_NOP = 4
+FDT_END = 9
+FDT_VERSION = 17
+FDT_LAST_COMP_VERSION = 16
+
+
+def _pad4(buf):
+    while len(buf) % 4:
+        buf.append(0)
+
+
+def _encode_prop(kind, vals):
+    """Property value in DTB encoding: strings NUL-joined, cells big-endian."""
+    if kind == STR:
+        return b"".join(s.encode("utf-8") + b"\0" for s in vals)
+    if kind == CELLS:
+        return b"".join(struct.pack(">I", v & 0xffffffff) for v in vals)
+    if kind == BYTES:
+        return bytes(vals)
+    # A property written without "=" (kind None) is a zero-length property:
+    # that is exactly how the spec encodes a boolean.
+    return b""
+
+
+def gen_dtb(root, model=""):
+    strings = bytearray()
+    name_off = {}
+
+    def string_off(name):
+        if name not in name_off:
+            name_off[name] = len(strings)
+            strings.extend(name.encode("utf-8"))
+            strings.append(0)
+        return name_off[name]
+
+    struct_block = bytearray()
+
+    def emit(node, node_name):
+        struct_block.extend(struct.pack(">I", FDT_BEGIN_NODE))
+        struct_block.extend(node_name.encode("utf-8"))
+        struct_block.append(0)
+        _pad4(struct_block)
+        for pname in node.prop_order:
+            kind, vals = node.props[pname]
+            val = _encode_prop(kind, vals)
+            struct_block.extend(struct.pack(">III", FDT_PROP, len(val),
+                                            string_off(pname)))
+            struct_block.extend(val)
+            _pad4(struct_block)
+        for child in node.children:
+            emit(child, child.full_name)
+        struct_block.extend(struct.pack(">I", FDT_END_NODE))
+
+    emit(root, "")
+    struct_block.extend(struct.pack(">I", FDT_END))
+
+    # The memory reservation block is one (address, size) pair of zeros: the
+    # terminator.  /memreserve/ lines are accepted and ignored by this
+    # compiler (documented at the top of the file), so there is nothing to
+    # emit before it.
+    rsvmap = struct.pack(">QQ", 0, 0)
+
+    off_rsv = 40
+    off_struct = off_rsv + len(rsvmap)
+    off_strings = off_struct + len(struct_block)
+    total = off_strings + len(strings)
+
+    header = struct.pack(">10I", FDT_MAGIC, total, off_struct, off_strings,
+                         off_rsv, FDT_VERSION, FDT_LAST_COMP_VERSION, 0,
+                         len(strings), len(struct_block))
+    return bytes(header) + rsvmap + bytes(struct_block) + bytes(strings)
+
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 def build(dts_path):
@@ -657,8 +750,11 @@ def main(argv):
     ap.add_argument("--out")
     ap.add_argument("--board", help="board name (default: dts file stem)")
     ap.add_argument("--dump", action="store_true", help="print the tree, no code")
+    ap.add_argument("--format", choices=("c", "dtb"), default="c",
+                    help="c = the const table the MCU tier links (default); "
+                         "dtb = the standard flattened blob the MMU tier boots")
     ap.add_argument("--check", action="store_true",
-                    help="fail if --out differs from the generated text")
+                    help="fail if --out differs from the generated output")
     args = ap.parse_args(argv)
 
     root = build(args.dts)
@@ -673,23 +769,34 @@ def main(argv):
         return 0
 
     src = os.path.relpath(args.dts).replace("\\", "/")
-    text = gen_c(root, board, src)
+    if args.format == "dtb":
+        blob = gen_dtb(root)
+    else:
+        blob = gen_c(root, board, src).encode("utf-8")
 
     if not args.out:
-        sys.stdout.write(text)
+        if args.format == "dtb":
+            sys.stdout.buffer.write(blob)
+        else:
+            sys.stdout.write(blob.decode("utf-8"))
         return 0
     if args.check:
-        old = ""
+        old = b""
         if os.path.exists(args.out):
-            old = open(args.out, "r", encoding="utf-8").read()
-        if old == text:
+            old = open(args.out, "rb").read()
+        if old == blob:
             print("dts: %s is up to date" % args.out)
             return 0
         print("dts: %s is STALE - regenerate it" % args.out, file=sys.stderr)
         return 1
-    with open(args.out, "w", encoding="utf-8", newline="\n") as f:
-        f.write(text)
-    print("dtc_lite: %s -> %s" % (args.dts, args.out))
+    mode = "wb" if args.format == "dtb" else "w"
+    if mode == "wb":
+        with open(args.out, "wb") as f:
+            f.write(blob)
+    else:
+        with open(args.out, "w", encoding="utf-8", newline="\n") as f:
+            f.write(blob.decode("utf-8"))
+    print("dtc_lite: %s -> %s (%s)" % (args.dts, args.out, args.format))
     return 0
 
 
