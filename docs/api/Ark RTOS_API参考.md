@@ -41,6 +41,7 @@
 - [kernelsrc/include/arkrtos_shell_auth.h](#kernelsrcincludearkrtos_shell_authh)（5 项）
 - [kernelsrc/include/arkrtos_sign.h](#kernelsrcincludearkrtos_signh)（10 项）
 - [kernelsrc/include/arkrtos_smp.h](#kernelsrcincludearkrtos_smph)（11 项）
+- [kernelsrc/include/arkrtos_smp_sched.h](#kernelsrcincludearkrtos_smp_schedh)（10 项）
 - [kernelsrc/include/arkrtos_softbus.h](#kernelsrcincludearkrtos_softbush)（5 项）
 - [kernelsrc/include/arkrtos_spin.h](#kernelsrcincludearkrtos_spinh)（10 项）
 - [kernelsrc/include/arkrtos_svc_call.h](#kernelsrcincludearkrtos_svc_callh)（20 项）
@@ -55,7 +56,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（11 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（73 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（75 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（17 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -6340,6 +6341,131 @@ void arkrtos_smp_idle_loop(void);
 > 说明：默认次核循环就是它；将来接每核调度器时，把这一步换成 idle 任务的
 调度入口。
 
+## kernelsrc/include/arkrtos_smp_sched.h
+
+**调度分核（AMP）：次核自己的运行队列 + 显式任务迁移（默认关）**
+先把边界说清楚，免得被读成"支持对称多核"：
+**全局调度器没有改**。arkrtos_current_task_id、就绪位图、延时链
+仍然是 CPU0 那一份，单核行为逐字节不变。本模块只做一件事：
+
+### `#define ARKRTOS_SMP_SCHED_NIL           (-1)`
+
+```c
+#define ARKRTOS_SMP_SCHED_NIL           (-1)
+```
+
+**"本核空闲"的哨兵值（队列里/当前任务号都用它表示没有任务） */**
+
+### `void arkrtos_smp_sched_enter(uint32 cpu);`
+
+```c
+void arkrtos_smp_sched_enter(uint32 cpu);
+```
+
+**次核进入调度域（不返回）**
+- `cpu`：硬件核号（必须 1..ARKRTOS_CPU_NUM-1）
+由 arkrtos_smp_secondary_main() 调用：本核节拍定时器起来后，
+在 WFI 循环里等第一拍——第一拍把空闲帧存进本核的 idle 槽，
+之后的每一拍都从这里换到（或被换回）任务帧。
+> 说明：第一次节拍之前本核不跑任何任务。本核栈由汇编入口
+(arkrtos_smp_secondary_entry) 设好，这里不再动 sp。
+
+### `int32 arkrtos_smp_sched_task_to(int32 task_id, uint32 cpu);`
+
+```c
+int32 arkrtos_smp_sched_task_to(int32 task_id, uint32 cpu);
+```
+
+**把任务迁到指定次核**
+- `task_id`：任务号（1..task_count）
+- `cpu`：目标核号（1..ARKRTOS_CPU_NUM-1；0 不走这里）
+**返回**：0=已入次核运行队列；-1=任务号/核号非法；-2=目标核是 0（应调
+arkrtos_smp_sched_task_back）；-3=任务不是 READY（RUNNING/WAIT/
+DELAY/INVALID 一律拒绝）；-4=任务已归别的核；-5=目标队列满
+> 说明：只在本核（CPU0）调用：它会摘 CPU0 的就绪链，那是全局结构。
+
+### `int32 arkrtos_smp_sched_task_back(int32 task_id);`
+
+```c
+int32 arkrtos_smp_sched_task_back(int32 task_id);
+```
+
+**把迁出去的任务要回 CPU0**
+- `task_id`：任务号
+**返回**：0=请求已登记（下一拍生效）；-1=任务号非法；-4=该任务本来就在 CPU0
+只是置请求位，不搬任何链表：次核在下一次节拍里把任务摘出来、
+置回 CPU0 归属并登记归还；CPU0 每拍 arkrtos_smp_sched_poll()
+把它重新挂回就绪链。请求登记后重复调用是幂等的。
+
+### `uint32 arkrtos_smp_sched_switch(uint32 cpu, uint32 frame);`
+
+```c
+uint32 arkrtos_smp_sched_switch(uint32 cpu, uint32 frame);
+```
+
+**次核节拍上下文里的调度决策**
+- `cpu`：本核号
+- `frame`：本次异常压在被中断上下文栈上的帧指针
+**返回**：要 ertn 回去的帧指针（可能已换成另一个任务，或换回本核空闲帧）
+> 说明：只在次核的异常入口调用，且调用时中断已关（在异常里）。它自己
+用本核自旋锁与 CPU0 的迁移/回收动作互斥。
+
+### `void arkrtos_smp_sched_tick(uint32 cpu);`
+
+```c
+void arkrtos_smp_sched_tick(uint32 cpu);
+```
+
+**次核记一拍（由次核的定时器中断调用） */**
+
+### `void arkrtos_smp_sched_poll(void);`
+
+```c
+void arkrtos_smp_sched_poll(void);
+```
+
+**CPU0 每拍回收"要回来"的任务**
+> 说明：由 arkrtos_kernel_tick_handler 的节拍体调用（仅在开关打开时编译）。
+没有待回收任务时是一次常数级判断。
+
+### `int32 arkrtos_smp_sched_cur(uint32 cpu);`
+
+```c
+int32 arkrtos_smp_sched_cur(uint32 cpu);
+```
+
+**当前在指定核上运行的任务下标**
+**返回**：-1=该核空闲（或核号非法）
+
+### `uint8 arkrtos_smp_sched_owned_by_other(int32 task_idx);`
+
+```c
+uint8 arkrtos_smp_sched_owned_by_other(int32 task_idx);
+```
+
+**该任务是否归别的核**
+- `task_idx`：任务下标（0 起）
+**返回**：1=归次核（CPU0 的就绪集/自检必须跳过它），0=归 CPU0
+> 说明：开关关着时不存在这个符号；CPU0 侧的调用点都在同一开关内。
+
+### `int32 arkrtos_smp_sched_selftest(uint32 *out);`
+
+```c
+int32 arkrtos_smp_sched_selftest(uint32 *out);
+```
+
+**读数快照（给自测/串口打印用）**
+- `out`：至少 8 个字的数组，依次写：
+[0] 次核当前任务下标（-1=idle 转成 0xFFFFFFFF 报）
+[1] 次核运行队列长度
+[2] 次核切换次数
+[3] 迁入次数
+[4] 迁出次数
+[5] 次核节拍计数
+[6] 待回收队列非空标志
+[7] 次核归属任务数（全表统计）
+**返回**：0=成功；-1=out 为空或没有次核
+
 ## kernelsrc/include/arkrtos_softbus.h
 
 **软总线（ark_softbus）在内核里的接入面**
@@ -8919,6 +9045,34 @@ la_frame_word *la_trap_c(la_frame_word *frame) {
 - 其余 Ecode 一律按致命异常处理（报 Ecode/ESTAT/ERA 后停机，
 不做假恢复）。
 出口处结算 s_switch_pending：这是「没有软中断」的补偿点。
+
+### `static void la_smp_ipi_clear(void) {`
+
+```c
+static void la_smp_ipi_clear(void) {
+```
+
+**清本核的 IPI 挂起位（IOCSR 0x1000 状态 → 0x100C 清除）**
+> 说明：这段序列原来是 arkrtos_context.S 里 la_smp_trap_entry 的内联拷贝，
+打开调度分核后汇编不再自己清，两处只剩这一份。
+
+### `la_frame_word *la_smp_trap_c(la_frame_word *frame, uint32 cpu) {`
+
+```c
+la_frame_word *la_smp_trap_c(la_frame_word *frame, uint32 cpu) {
+```
+
+**次核异常的统一 C 入口（只在调度分核打开时存在）**
+- `frame`：次核入口在被打断上下文栈上压好的 256 字节帧
+- `cpu`：本核号（汇编按 CSR.TID 传入）
+**返回**：要 ertn 回去的帧指针（定时器路径可能换成另一个任务的帧）
+三条路径，全都只用"本核"状态：
+- 定时器中断：清 TICLR → 本核计一拍 → 调度器决定下一个帧；
+- IPI：清挂起 → 默认处理函数（计数，应用可覆盖强符号）；
+- 其余一律致命：次核不许发 SVC（对象表/文件系统/同步对象都没有
+跨核保护），也不做 App 故障恢复（那套页表与窗口逻辑属于 CPU0）。
+绝不把次核的 SYS 静默放行——放过去就是数据竞争，报错停机是唯一
+诚实的处理。
 
 ### `ARKRTOS_WEAK void arkrtos_port_irq_init(void) {`
 

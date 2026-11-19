@@ -3706,6 +3706,209 @@ Sixth reading that is **not** permitted: `-accel tcg,thread=single` must not be
 presented as a working recipe -- it does not stop the crash and it keeps the
 secondary hart permanently offline.
 
+### 9.7 RV32 side of ②③: ACLINT `msip` (2026-11-19, QEMU RV32 `-smp 2` executed)
+
+LA64 uses the IOCSR mailbox; RISC-V uses a completely different mechanism: **one `msip`
+word per hart**, and writing 1 to it pends a machine software interrupt on that hart.
+QEMU 9.2's `virt` machine instantiates the aclint device
+(`hw/intc/riscv_aclint.c`) with CLINT-compatible offsets; `msip[1]` was measured to
+bring up the secondary hart.
+
+The decisive difference from LA64: **on RV32 the secondary hart really does execute
+our `start.S`** (LA64 goes through pflash firmware), so the start protocol lives in
+the assembly entry:
+
+1. First instruction is `csrr t0, mhartid`; any hart other than 0 branches away;
+2. The secondary hart parks by **polling `mip.MSIP` with CSR reads only** — it touches
+   zero bytes of memory, which avoids the race with CPU0 still clearing `.bss`;
+3. After CPU0 writes `msip[cpu]=1`, it clears its own `msip`, switches to its own
+   static stack (its slot in `arkrtos_smp_stacks`), installs `mtvec`, enables
+   `MIE`/`MSIE`, and enters `arkrtos_smp_secondary_main(mhartid)`, never returning.
+
+Kernel-side landing points:
+
+- `kernelsrc/port/riscv/rv32imac/arkrtos_port.c`: per-hart `msip` addressing
+  (`base + 4*cpu`, where `cpu` is `mhartid`), `rv_clint_msip_write()`, real
+  implementations of `arkrtos_port_cpu_start()` / `arkrtos_port_send_ipi()`, and
+  `arkrtos_port_cpu_id()` actually reading `mhartid`;
+- `kernelsrc/port/riscv/rv32imac/arkrtos_context.S`: dedicated secondary-hart
+  `rv_smp_trap_entry` / `rv_smp_trap_c` that **only accept machine software
+  interrupts** (clear the pending bit, then count); every other `mcause` prints a
+  fatal report and halts;
+- board layer: `ARKRTOS_USE_SMP` changed from `#undef` to `#ifndef` (the old `#undef`
+  swallowed the command-line `-D`), default for `ARKRTOS_SMP_SEC_STACK_SIZE` added,
+  banner reports the hart count for the active tier;
+- `example/qemu_riscv32/Makefile`: `ASFLAGS` also `-include` the board header,
+  otherwise the `.S` files cannot see the SMP macros.
+
+**Reading** (`qemu-system-riscv32 -machine virt -smp 2`):
+
+```
+[smp] cpus=2 mask=0x00000003 sent=1 ipi1=5 result=ok
+```
+
+The `-smp 1` control run prints `result=FAIL(secondary offline)`. That failure is more
+important than the success: it proves the success line is not the self-test reporting
+itself, but a real second hart coming online and answering five IPI round trips.
+
+**No change in the default tier**: the allocatable sections of `port`, `context`,
+`start`, `main` and `board` objects are byte-identical (`objcopy -O binary` sha256),
+and a full default rebuild has 0 warnings (this also fixed the `guard` / `audit`
+`-Wformat` hits where `uint32` is `unsigned long` on RV32).
+
+Verdict: **`smp_rv32_msip_ok_on_qemu`**. Boundaries: ④ per-core scheduling landed on
+LA64 only in this round (see §9.8); the RV32 secondary hart still spins in
+`arkrtos_smp_idle_loop()`. The `msip` set/clear semantics come from QEMU's aclint
+model; whether a real ACLINT behaves the same, or needs extra fences, is unverified.
+
+### 9.8 ④ Per-core scheduling / task migration: AMP, not symmetric scheduling (2026-11-19, QEMU LA64 `-smp 2` executed)
+
+#### 9.8.1 Why AMP
+
+Splitting the global scheduler into one copy per core would touch the body of
+`arkrtos_task.c`: current task id, ready bitmap, delay list, statics — every one of
+them becomes a per-core array, every one needs locking, and a single missed spot is a
+silent data race. The blast radius is far larger than one session can verify.
+
+So this round implements **AMP**: **the global scheduler is untouched**, the secondary
+core gets its own run queue, and tasks are moved there and back **explicitly by the
+caller**. This is neither symmetric multiprocessing nor load balancing; it is a route
+with a verifiable, clearly stated boundary. Switch `ARKRTOS_USE_SMP_SCHED` (default 0)
+with two `#error`s requiring `ARKRTOS_USE_SMP=1` and `ARKRTOS_CPU_NUM>=2` (placed in
+`arkrtos_config.h`, the only place that sees `ARKRTOS_CPU_NUM`).
+
+#### 9.8.2 The new module: `arkrtos_smp_sched.c` / `.h`
+
+All per-core state lives in one module: current task (-1 = idle), idle frame pointer,
+slice remainder, per-core ticks, switch count, migration-in/out counters, the per-core
+run queue (`s_q[cpu][TASK_MAX]`, pick the smallest priority, FIFO rotation within a
+priority), per-core spinlock, plus the CPU0 → secondary hand-back request and the
+secondary → CPU0 released flag.
+
+Public surface is five things:
+
+| API | Meaning |
+|---|---|
+| `arkrtos_smp_sched_enter(cpu)` | Secondary core joins its scheduling domain: starts its own tick and waits in WFI for a task (does not return) |
+| `arkrtos_smp_sched_task_to(id, cpu)` | Migrate a task to a core. `-2` core 0, `-3` not READY, `-4` already owned elsewhere, `-5` queue full |
+| `arkrtos_smp_sched_task_back(id)` | Ask for the task to come back to CPU0 (request, reclaimed next tick) |
+| `arkrtos_smp_sched_cur(cpu)` / `_selftest(out[8])` | Readings and self-test |
+| `_poll()` / `_switch()` / `_tick()` / `_owned_by_other()` | Internal hooks used by the kernel and the port |
+
+Four boundaries, written into the header (they are not "not implemented yet"):
+
+1. **The secondary core must not issue SVC or call kernel APIs**: the object table,
+   file system and device table have no cross-core protection. `la_smp_trap_c` treats
+   any `SYS` as fatal (report + halt) and **never lets it through silently** — letting
+   it through is a data race, and a loud stop is the only honest answer;
+2. **Only READY tasks may be migrated**: migrating `RUNNING` needs an insertion point
+   in the source core's switch path, and migrating `WAIT`/`DELAY` breaks wait
+   semantics; both are rejected with `-3`;
+3. **Secondary ticks do not advance the global tick**: otherwise the delay list and
+   time base would run twice;
+4. **Migration is "request + poll each tick"**: worst-case latency one tick (500 µs).
+   Scheduling directly inside the IPI would risk re-entrancy between the IPI and the
+   timer paths.
+
+Ownership uses the module-private `s_owner[]` rather than a new TCB field: the TCB is
+layout-sensitive, and adding a field would change sizes in the default (off) tier,
+which directly conflicts with "zero change when off".
+
+#### 9.8.3 Landing points (five)
+
+| File | Change |
+|---|---|
+| `kernelsrc/src/arkrtos_smp_sched.c` / `include/arkrtos_smp_sched.h` | New module (empty translation unit when off) |
+| `kernelsrc/src/arkrtos_smp.c` | `secondary_main()` calls `arkrtos_smp_sched_enter(cpu)` when on |
+| `kernelsrc/src/arkrtos_task.c` | `poll()` in the tick body; `ready_rebuild`, `sched_check` (two loops) and the linear best-task scan skip tasks owned by another core |
+| `kernelsrc/port/loongarch/la64/arkrtos_port.c` | `la_smp_trap_c()`: timer → clear TICLR + tick + swap frame; IPI → clear pending + default handler; `SYS` and anything else → fatal |
+| `kernelsrc/port/loongarch/la64/arkrtos_context.S` | when on, `la_smp_trap_entry` hands the frame and `CSR.TID` to `la_smp_trap_c` and resumes from the frame it returns |
+
+The third point deserves its own sentence: a migrated task is still `READY` (meaning
+"runnable"). Without the skips, one migration would make `schedcheck` report an
+inconsistency and make `ready_rebuild` re-link the task onto CPU0's ready list — two
+cores touching the same frame.
+
+#### 9.8.4 Readings
+
+On tier: `EXTRA_CFLAGS="-DARKRTOS_USE_SMP=1 -DARKRTOS_CPU_NUM=2 -DARKRTOS_USE_SMP_SCHED=1"`,
+`qemu-system-loongarch64 -machine virt -smp 2 -kernel ark_qemu_la64.elf -nographic`:
+
+```
+[smp] cores=2 mask=0x00000003 sent=1 ipi1=5 result=ok
+[sched] to cpu1 rc=0
+[sched] r=1 cur1=0x00000004 q=1 sw=1 in=1 out=0 t=2042 owned=1 loops=+4452
+[sched] r=2 cur1=0x00000004 q=1 sw=1 in=1 out=0 t=4054 owned=1 loops=+3693
+[sched] r=3 cur1=0x00000004 q=1 sw=1 in=1 out=0 t=6058 owned=1 loops=+3184
+[sched] back rc=0
+[sched] r=4 cur1=0xffffffff q=0 sw=2 in=1 out=1 t=8062 owned=0 loops=+3395
+[sched] r=5 cur1=0xffffffff q=0 sw=2 in=1 out=1 t=10066 owned=0 loops=+4760
+[sched] r=6 cur1=0xffffffff q=0 sw=2 in=1 out=1 t=12092 owned=0 loops=+4056
+```
+
+How to read it: `cur1=0x4` is the task id (`s_id_w`); `q=1` means it is still in the
+queue (a switched-out task is pushed back to the tail); `owned=1` means the private
+ownership table says the secondary core owns it. `loops` grows by three thousand-plus
+every 2 s, which means the task **is actually executing on the secondary core** rather
+than "linked but never run". After `back rc=0`, `cur1=0xffffffff`, `q=0`, `out=1`
+(hand-back counter) and `owned=0`: the secondary core is idle again. All pre-existing
+functionality is unchanged: `[A]/[B]` ticks with `svc_ok`, `[FS] PASS`, `exec rc=0`,
+`[MOD] ld rc=0`, both tamper checks, the expected `[STK] task 4` stack-guard demo, and
+the shell.
+
+#### 9.8.5 A reading defect found and fixed in this round: idle→idle counted as a switch
+
+In the first run, `sw` jumped from 8 to 1010 → 2011 → 3011 after the task was handed
+back and the secondary core was purely idle, which looks like "switching wildly every
+tick". Root cause: the switch function unconditionally incremented `s_switch_cnt[cpu]`
+at the end; every idle tick entered the switch path and picked idle again, counting a
+switch with no task change.
+
+The fix is an early return after the "pick next" step: when `handed == 0` and both
+`next` and `cur` are NIL, the frame was already saved into `s_idle_sp[cpu]`, so return
+it in place without counting. Restricting it to `handed == 0` matters: on the hand-back
+path `cur` has just become NIL, but `frame` belongs to the task being handed back, so
+that path must fall through to the `else` branch and fetch `s_idle_sp`. After the fix
+the readings are `sw=1` (switched into the task) → `sw=2` (switched back to idle after
+the hand-back) and stop growing; every other reading is unchanged.
+
+#### 9.8.6 Zero change in the default tier (two independent pieces of evidence)
+
+1. In the default tier `arkrtos_smp_sched.o` has `text/data/bss` all zero (`elf-size`),
+   i.e. the new file contributes no allocatable content when the switch is off;
+2. Compared against the baseline (`58ab9d6`) built the same way in a separate
+   worktree, an instruction-by-instruction disassembly diff (mnemonic + operands +
+   relocation names) over `arkrtos_task.o` (11072 lines), `arkrtos_port.o` (5323),
+   `arkrtos_context.o` (338) and `main.o` (3487) shows **exactly two differences**,
+   both `ori $r6,$r0,0x<line>` — the `__LINE__` constants fed to log calls (the source
+   file moved 34 lines because of this round's insertions). Instruction streams,
+   symbol sets and section sizes are identical. The linked image (`objcopy -O binary`,
+   31 462 512 B) differs in 3 bytes, all inside that same function and both `ori`
+   constants.
+
+**Do not read this as "the default image is byte-identical"**: those two log line
+numbers did change; that is recorded honestly.
+
+#### 9.8.7 Verdict and four things this is not
+
+Verdict: **`smp_amp_sched_ok_on_qemu`** — on LA64 / QEMU `-smp 2` a task can be
+migrated to the secondary core, really runs there (`loops` grows), and can be taken
+back by CPU0, with all pre-existing functionality unchanged; the RV32 side and real
+hardware are **unverified**.
+
+1. **This is not "symmetric multi-core scheduling"**: the global scheduler is still a
+   single-core copy, there is no automatic load balancing, tasks must be migrated
+   explicitly by the caller, and tasks on the secondary core must not call kernel APIs.
+2. **`loops=+4452` is not "two cores computing in parallel"**: a task runs on exactly
+   one core at a time; migration moves it, it does not duplicate it. `owned=1` on the
+   secondary side and the `owned_by_other()` skips on the CPU0 side are two faces of
+   the same fact.
+3. **`sw=1/2` is not a scheduler-performance reading**: it counts switches on the
+   secondary core, measured from the moment that core entered its scheduling domain.
+4. **This is not "works on real hardware"**: the timer/IPI decoding in `la_smp_trap_c`
+   depends on QEMU's `ESTAT` encoding and `TICLR` semantics, and the IOCSR mailbox byte
+   masks come from QEMU 9.2.3 sources; real firmware and silicon are unverified.
+
 ## 10. Enabling `-Wconversion` (2026-11-19): default image byte-identical
 
 `tools/warn_gate.py` goes from six options to seven; the new one is `-Wconversion`, which in

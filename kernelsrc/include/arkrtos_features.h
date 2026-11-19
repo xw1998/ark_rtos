@@ -62,6 +62,25 @@
 #define ARKRTOS_USE_SMP                 0
 #endif
 
+/* 调度分核（AMP）：次核上跑一个**自己的**小调度器，任务可显式迁移到次核
+ * 执行（arkrtos_smp_sched_task_to），迁回由 CPU0 每拍回收。
+ * 它与 ARKRTOS_USE_SMP 是两层：USE_SMP 给地基（每核状态、次核启动、IPI），
+ * USE_SMP_SCHED 才让次核真的跑任务。依赖（SMP=1、CPU_NUM>=2）在
+ * arkrtos_config.h 里用 #error 拦下——那里才看得到 ARKRTOS_CPU_NUM。
+ *
+ * 为什么是 AMP 而不是对称调度：内核的当前任务号 / 就绪位图 / 延时链都是
+ * 全局一份，改成每核一份要动调度器主体，风险与验证量都远超一次交付。
+ * AMP 只新增每核运行队列，全局调度器一行不改，单核行为逐位不变。
+ *
+ * 次核上的任务受三条限制（文档写死，代码里按致命处理，不静默跑错）：
+ *   1) 不得发 SVC、不得调用内核 API（同步对象/文件/设备表都没有并发保护）；
+ *   2) 不支持延时/阻塞：迁移只接受 READY 任务，次核没有延时链；
+ *   3) 次核节拍只累加本核计数，不推进全局 arkrtos_kernel_tick。
+ */
+#ifndef ARKRTOS_USE_SMP_SCHED
+#define ARKRTOS_USE_SMP_SCHED           0
+#endif
+
 /* 任务栈用量统计：填充图案 + 最低栈指针双手段，算每任务峰值 */
 #ifndef ARKRTOS_USE_STACK_USAGE
 #define ARKRTOS_USE_STACK_USAGE         1

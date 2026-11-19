@@ -190,7 +190,8 @@ eentry:
  *          (la_switch_stack_top)、s_in_trap 都是单核假设，两核同时进
  *          la_trap_c 会互相踩。这里只做两件事 —— 清 IPI 挂起、交给默认
  *          处理函数 —— 然后原样 ertn。帧格式与主路径一致（便于对照），
- *          但不调用任何调度代码。
+ *          打开 USE_SMP_SCHED 后整段交给 la_smp_trap_c：由它分派定时器/IPI/致命异常，
+ *          并可能返回另一个任务的帧（次核自己的运行队列在这里落地）。
  * ============================================================ */
 la_smp_trap_entry:
     st.d    $ra, $sp, 0
@@ -230,6 +231,17 @@ la_smp_trap_entry:
     csrrd   $t1, 0x1                /* PRMD */
     st.d    $t1, $sp, 248
 
+#if (ARKRTOS_USE_SMP_SCHED == 1)
+    /* 调度分核：定时器中断、IPI、以及不该出现的 SYS 全交给 C 侧分派
+     * （la_smp_trap_c）。它返回的帧**可能已经是另一个任务的帧**——次核
+     * 在定时器里换任务就是靠这一手，所以先把 sp 换成返回的帧，下面的
+     * 恢复序列才会从正确的帧里取寄存器。 */
+    move    $a0, $sp
+    csrrd   $a1, 0x40
+    andi    $a1, $a1, 0x3ff
+    bl      la_smp_trap_c
+    move    $sp, $a0
+#else
     /* 清 IPI 挂起：读 STATUS(0x1000) → 写 CLEAR(0x100C)。
      * 写 1 的位被清；不清的话 ertn 回去立刻再进一次，变成中断风暴。 */
     lu12i.w $t2, 1
@@ -238,7 +250,7 @@ la_smp_trap_entry:
     iocsrwr.w $t1, $t2
 
     bl      arkrtos_smp_ipi_handler  /* 默认实现：本核 ipi_count++ */
-
+#endif
     ld.d    $t1, $sp, 240
     csrwr   $t1, 0x6
     ld.d    $t1, $sp, 248

@@ -38,6 +38,9 @@
 #include "arkrtos_shell.h"     /* arkrtos_shell_init()：内核 Shell 控制台 */
 #include "arkrtos_blk.h"
 #include "arkrtos_smp.h"       /* SMP 自检：每核状态 / 在线掩码 / IPI（默认关时空头） */
+#if (ARKRTOS_USE_SMP_SCHED == 1)
+#include "arkrtos_smp_sched.h" /* 调度分核自检：次核运行队列 / 显式迁移（默认关时空头） */
+#endif
 #include "arkrtos_ptable.h"    /* 分区表：崩溃日志按槽位记账，必须先于它初始化 */
 #include "arkrtos_crash.h"
 #include "arkrtos_guard.h"   /* 心跳窗口守卫（ARKRTOS_USE_KERNEL_GUARD） */     /* 跨复位崩溃日志（ARKRTOS_USE_CRASH_LOG） */
@@ -80,6 +83,9 @@ static uint32 s_stack_b[TASK_STACK_WORDS];
  * 栈不够的后果不是"变慢"，是回到别处的一个随机指针，所以按实测留余量。 */
 static uint32 s_stack_fs[FS_STACK_WORDS];
 static uint32 s_idle_stack[IDLE_STACK_WORDS];
+#if (ARKRTOS_USE_SMP_SCHED == 1)
+static uint32 s_stack_chk[TASK_STACK_WORDS];
+#endif
 
 static int32 s_sem = -1;
 
@@ -745,6 +751,82 @@ static void arkrtos_smp_self_test(void)
 }
 #endif /* ARKRTOS_USE_SMP == 1 */
 
+#if (ARKRTOS_USE_SMP_SCHED == 1)
+/* ============================================================
+ * 调度分核自检（只在 ARKRTOS_USE_SMP_SCHED=1 的镜像里编进来）
+ * @details 判据同样是**串口上的原始读数**，不是"编过了"：
+ *          1) 把一个纯计算任务迁到次核（arkrtos_smp_sched_task_to）；
+ *          2) 在 CPU0 上读它的循环计数——它只可能由次核推进，因为 CPU0
+ *             的就绪链里已经没有它了；
+ *          3) 读次核的 cur/切换/迁入迁出计数，确认它真的挂在次核上；
+ *          4) 要回 CPU0（arkrtos_smp_sched_task_back），确认归属回到 0、
+ *             次核空闲、计数继续涨（这次是 CPU0 在跑它）。
+ *
+ *          **这个任务不调任何内核 API**：次核没有跨核保护，同步对象 /
+ *          文件系统 / 设备表都不能碰；它只累加自己的计数，延时用
+ *          arkrtos_port_delay_us（纯 rdtime 忙等，不碰全局结构）。
+ * ============================================================ */
+
+static volatile uint32 s_w_loops = 0u;
+static uint32 s_stack_w[TASK_STACK_WORDS];
+static int32  s_id_w = -1;
+
+static void task_w(void)
+{
+    for(;;)
+    {
+        s_w_loops++;
+        arkrtos_port_delay_us(200u);
+    }
+}
+
+static void task_smp_chk(void)
+{
+    uint32 out[8];
+    uint32 prev;
+    uint32 round;
+
+    for(round = 1u; round <= 6u; round++)
+    {
+        arkrtos_task_wait_internal(300u);
+
+        prev = s_w_loops;
+        arkrtos_task_wait_internal(200u);
+
+        (void)arkrtos_smp_sched_selftest(out);
+
+        arkrtos_board_puts("[sched] r=");
+        arkrtos_board_putu(round);
+        arkrtos_board_puts(" cur1=");
+        arkrtos_board_puthex(out[0]);
+        arkrtos_board_puts(" q=");
+        arkrtos_board_putu(out[1]);
+        arkrtos_board_puts(" sw=");
+        arkrtos_board_putu(out[2]);
+        arkrtos_board_puts(" in=");
+        arkrtos_board_putu(out[3]);
+        arkrtos_board_puts(" out=");
+        arkrtos_board_putu(out[4]);
+        arkrtos_board_puts(" t=");
+        arkrtos_board_putu(out[5]);
+        arkrtos_board_puts(" owned=");
+        arkrtos_board_putu(out[7]);
+        arkrtos_board_puts(" loops=+");
+        arkrtos_board_putu(s_w_loops - prev);
+        arkrtos_board_puts("\n");
+
+        if(round == 3u)
+        {
+            int32 rc = arkrtos_smp_sched_task_back(s_id_w);
+
+            arkrtos_board_puts("[sched] back rc=");
+            arkrtos_board_putu((uint32)rc);
+            arkrtos_board_puts("\n");
+        }
+    }
+}
+#endif /* ARKRTOS_USE_SMP_SCHED == 1 */
+
 static void arkrtos_start_idle(void)
 {
     uint32 sp = (uint32)(unsigned long)(&s_idle_stack[IDLE_STACK_WORDS]);
@@ -809,6 +891,14 @@ int main(void)
     }
     #endif
 
+    #if (ARKRTOS_USE_SMP_SCHED == 1)
+    /* 调度分核演示：一个纯计算任务 + 一个 CPU0 侧的观测任务。
+     * worker 优先级 16（低于 A/B/存储/ELF），迁走之后 CPU0 上谁也不会
+     * 因为它的优先级而受影响。 */
+    s_id_w = arkrtos_task_register(task_w, s_stack_w, sizeof(s_stack_w), 16u, 0u);
+    (void)arkrtos_task_register(task_smp_chk, s_stack_chk, sizeof(s_stack_chk), 9u, 0u);
+    #endif
+
     #if (ARKRTOS_USE_ELF == 1)
     /* ELF 装载演示：优先级 14（比存储任务 13 低），等 ramfs 挂上再写文件。 */
     (void)arkrtos_elf_demo_register();
@@ -827,6 +917,19 @@ int main(void)
     /* 次核是在 kernel_module_init() 里拉起来的，这里等它上线并发 IPI 验证。
      * 放在任何任务注册/启动之前：失败就在串口上一行看清，不埋在后续输出里。 */
     arkrtos_smp_self_test();
+#endif
+
+#if (ARKRTOS_USE_SMP_SCHED == 1)
+    /* 把 worker 迁到 1 号核。此刻 worker 还是 READY（调度尚未启动），
+     * 是迁移 API 唯一接受的形态；迁完之后 CPU0 的就绪链里没有它。 */
+    if(s_id_w > 0)
+    {
+        int32 rc = arkrtos_smp_sched_task_to(s_id_w, 1u);
+
+        arkrtos_board_puts("[sched] to cpu1 rc=");
+        arkrtos_board_putu((uint32)rc);
+        arkrtos_board_puts("\n");
+    }
 #endif
 
     /* 分区表 + 跨复位崩溃日志。

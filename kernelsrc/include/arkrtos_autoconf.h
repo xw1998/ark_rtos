@@ -310,6 +310,9 @@
 #ifndef ARKRTOS_USE_SMP
 #define ARKRTOS_USE_SMP 0
 #endif
+#ifndef ARKRTOS_USE_SMP_SCHED
+#define ARKRTOS_USE_SMP_SCHED 0
+#endif
 #ifndef ARKRTOS_USE_SOFTBUS
 #define ARKRTOS_USE_SOFTBUS 1
 #endif

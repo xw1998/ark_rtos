@@ -10,13 +10,14 @@
 *          **2026-11-19 现状**：② 次核启动 与 ③ IPI 通路在 QEMU LA64 上
 *          已经真跑通（port 层写 IOCSR mailbox 拉起次核、IPI 双向可达，
 *          串口有实测读数，见 docs/QEMU模拟器移植与验证.md 的 SMP 一节）。
-*          ④ 调度分核仍然**没有做**，也不在本文件范围：调度表/就绪位图/
-*          延时链都是全局一份，次核上线后只空转。
+*          ④ 调度分核由独立模块 arkrtos_smp_sched.c 承担（开关
+*          ARKRTOS_USE_SMP_SCHED，默认关）：次核有自己的运行队列，任务
+*          可显式迁移过去再迁回。**全局调度器仍是单核的**——本文件不参与
+*          调度，只负责把次核拉起来并交棒给那个模块。
 *
-*          **不在这里做**：多核调度、每核运行队列、核间任务迁移、
-*          全局时钟同步、对象表的每核分区。这些都需要把调度器拆成每核
-*          一份，属于另一件事；本文件不假装完成，也不给"看起来能并行"
-*          的接口。
+*          **不在这里做**：对称调度（自动负载均衡）、全局时钟同步、
+*          对象表的每核分区。这些都需要把全局调度器拆成每核一份，属于
+*          另一件事；本文件不假装完成，也不给"看起来能并行"的接口。
 *
 * @note 开关默认 0：关档下本文件是一个空翻译单元，不产生任何符号与代码。
 */
@@ -26,6 +27,9 @@
 #if (ARKRTOS_USE_SMP == 1)
 
 #include "arkrtos_hal.h"
+#if (ARKRTOS_USE_SMP_SCHED == 1)
+#include "arkrtos_smp_sched.h"
+#endif
 
 /* 弱符号：armclang / armcc 认 __weak，GCC 认 __attribute__((weak))。
  * 宿主（MinGW）上弱定义会被老 ld 当成 .eh_frame 的坏重定位而链接失败，
@@ -161,11 +165,17 @@ void arkrtos_smp_secondary_main(uint32 cpu)
      * 别的 port 复用。 */
     arkrtos_port_enable_irq();
 
+    #if (ARKRTOS_USE_SMP_SCHED == 1)
+    /* 调度分核：进本核的调度域（起本核节拍，然后在 WFI 里等任务被迁过来）。
+     * 全局调度器仍然只归 CPU0；次核跑的是 arkrtos_smp_sched 的每核队列。 */
+    arkrtos_smp_sched_enter(cpu);
+    #else
     /* 次核目前只空转：调度器还是单核的，这里没有可跑的任务队列。 */
     for(;;)
     {
         arkrtos_smp_idle_loop();
     }
+    #endif
 }
 
 arkrtos_smp_cpu_t *arkrtos_smp_cpu_self(void)

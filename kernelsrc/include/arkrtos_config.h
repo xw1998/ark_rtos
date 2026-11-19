@@ -211,6 +211,16 @@
 #error "ARKRTOS_CPU_NUM must be within 1..8 (online mask is a uint32, and more cores cannot be verified by hand)."
 #endif
 
+/* 调度分核（ARKRTOS_USE_SMP_SCHED）的两条依赖。开关本身定义在
+ * arkrtos_features.h（那里也在本文件第 49 行被包含），这里才看得到
+ * ARKRTOS_CPU_NUM，所以 #error 放这里而不是那边。 */
+#if (ARKRTOS_USE_SMP_SCHED == 1) && (ARKRTOS_USE_SMP != 1)
+#error "ARKRTOS_USE_SMP_SCHED requires ARKRTOS_USE_SMP=1: per-core state and secondary start are its foundation."
+#endif
+#if (ARKRTOS_USE_SMP_SCHED == 1) && (ARKRTOS_CPU_NUM < 2)
+#error "ARKRTOS_USE_SMP_SCHED requires ARKRTOS_CPU_NUM >= 2: there is no secondary core to schedule onto."
+#endif
+
 #define ARKRTOS_MS_TO_TICK(ms)      ((ms) * 1000 / ARKRTOS_TICK_PERIOD_US)
 
 /* ============================================================

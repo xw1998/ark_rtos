@@ -6844,8 +6844,8 @@ sha256sum build/_def_img.bin
 #### 9.6.9 判词与五条不许读法
 
 判词：**`smp_bringup_ok_on_qemu`** —— LA64 / QEMU `-smp 2` 上，② 次核启动与
-③ IPI 通路**实跑通过**（掩码 `0x3`、5 次 IPI 往返全收到）；④ 调度分核**未做**
-（设计边界）；真实硬件**未验证**；RV32 / LA32 侧未动。
+③ IPI 通路**实跑通过**（掩码 `0x3`、5 次 IPI 往返全收到）；④ 调度分核当时**未做**
+（设计边界，2026-11-19 晚已由 §9.8 的 AMP 模块补上）；真实硬件**未验证**；RV32 / LA32 侧未动。
 
 不许读法：
 
@@ -6861,7 +6861,8 @@ sha256sum build/_def_img.bin
    `slave_boot_code` 的行为都来自 QEMU 9.2.3 源码；真实固件是否同样写 mailbox、
    同一套偏移，未验证。
 5. **不能把本轮读成「RV32 也能了」**：RISC-V 那套是 ACLINT/CLINT `msip`，与 IOCSR
-   完全不同；RV32 侧既没实现也没实跑。
+   完全不同。RV32 侧的 ②③ 是另一轮做的（2026-11-19，见 §9.7），本节读数与本条判词
+   都不覆盖它。
 
 附注（环境坑，复现时会撞上）：`-monitor none -display none -serial null`
 与 `-D`/`-serial file:` 组合会让 QEMU 直接 rc=1 且目标文件不生成（表现为
@@ -6970,6 +6971,176 @@ qemu-system-loongarch64.exe -M virt -m 128M -smp 2 -display none \
 6. **不能把 `-accel tcg,thread=single` 当推荐配方**：它并不修掉崩溃（SMP 镜像
    1/10 仍崩），并且会让次核**永远上不了线**（`mask=0x1`，10/10）。任何拿它当
    「稳定跑法」的说法都是错答案。
+
+### 9.7 RV32 侧 ②③：ACLINT `msip`（2026-11-19，QEMU RV32 `-smp 2` 实跑）
+
+LA64 走的是 IOCSR mailbox，RISC-V 完全另一套：**每 hart 一个 `msip` 字**，
+往它写 1 就是给那个 hart 挂一个机器软件中断。QEMU 9.2 的 `virt` 用 aclint 设备
+（`hw/intc/riscv_aclint.c`），偏移与经典 CLINT 一致，实测 `msip[1]` 能拉起次核。
+
+与 LA64 最关键的区别：**RV32 的次核会真的执行我们的 `start.S`**（LA64 走 pflash 固件），
+所以启动协议写在汇编入口里：
+
+1. 入口第一件事 `csrr t0, mhartid`，非 0 号 hart 直接分叉；
+2. 次核**只用 CSR 轮询** `mip.MSIP` 停靠（`csrr` 循环，一个字节内存都不碰）——
+   这样避开「CPU0 还在清 `.bss`，次核却已经在用 `.bss` 里的变量」的竞态；
+3. 被 CPU0 写 `msip[cpu]=1` 唤醒后，才清自己的 `msip`、换到自己的静态栈
+   （`arkrtos_smp_stacks` 里第 `hart` 份）、装 `mtvec`、开 `MIE`/`MSIE`，
+   进 `arkrtos_smp_secondary_main(mhartid)`，永不返回。
+
+内核侧落地点：
+
+- `kernelsrc/port/riscv/rv32imac/arkrtos_port.c`：每 hart 的 `msip` 取址
+  （`base + 4*cpu`，`cpu` 就是 `mhartid`）、`rv_clint_msip_write()`、
+  `arkrtos_port_cpu_start()` / `arkrtos_port_send_ipi()` 的真实现；
+  `arkrtos_port_cpu_id()` 真读 `mhartid`；
+- `kernelsrc/port/riscv/rv32imac/arkrtos_context.S`：次核专用 `rv_smp_trap_entry` /
+  `rv_smp_trap_c`，**只认机器软件中断**（清了挂起再计数），其余 `mcause` 一律致命打印停机；
+- 板级：`ARKRTOS_USE_SMP` 从 `#undef` 改 `#ifndef`（原来的 `#undef` 会吃掉命令行 `-D`），
+  补 `ARKRTOS_SMP_SEC_STACK_SIZE` 默认值，banner 按档位报 hart 数；
+- `example/qemu_riscv32/Makefile`：`ASFLAGS` 也 `-include` 板级头（否则 `.S` 看不到 SMP 宏）。
+
+**实跑读数**（`qemu-system-riscv32 -machine virt -smp 2`）：
+
+```
+[smp] cpus=2 mask=0x00000003 sent=1 ipi1=5 result=ok
+```
+
+`-smp 1` 对照：`result=FAIL(secondary offline)`——**这条比成功那条更重要**：
+它证明成功读数不是「自检自己报自己」，而是真的有一个次 hart 上线并回了 5 次 IPI 往返。
+
+**默认档零变化**：`port` / `context` / `start` / `main` / `board` 五个对象的可分配段
+逐字节相同（`objcopy -O binary` 后 sha256 对比），默认档全量重建 0 warning
+（顺带修掉 `guard` / `audit` 在 RV32 上 `uint32` 是 `unsigned long` 引起的 `-Wformat`）。
+
+判词：**`smp_rv32_msip_ok_on_qemu`**。边界：④ 调度分核这一轮**只落在 LA64**
+（见 §9.8），RV32 次核上线后仍是 `arkrtos_smp_idle_loop()` 空转；`msip` 的
+置位/清位语义来自 QEMU 的 aclint 模型，真实硬件的 ACLINT 是否同样写、是否需要
+额外的 fence，未验证。
+
+### 9.8 ④ 调度分核 / 任务迁移：选 AMP，不选对称调度（2026-11-19，QEMU LA64 `-smp 2` 实跑）
+
+#### 9.8.1 为什么是 AMP
+
+把全局调度器拆成「每核一份」要动的是 `arkrtos_task.c` 的主体：当前任务号、
+就绪位图、延时链、静态量，每一处都要改成每核数组、每一处都要加锁，任何一处漏了
+就是静默的数据竞争。这个改动的爆炸半径远大于一次会话能验证的范围。
+
+所以选 **AMP**：**全局调度器一行不改**，次核拿一份自己的运行队列，任务由调用方
+**显式迁过去、显式要回来**。这不是「对称多核」，也不是「负载均衡」——它是一条
+能被验证的、边界清楚的路。开关 `ARKRTOS_USE_SMP_SCHED`（默认 0），
+两条 `#error` 要求 `ARKRTOS_USE_SMP=1` 且 `ARKRTOS_CPU_NUM>=2`（放在
+`arkrtos_config.h`，因为只有那里看得到 `ARKRTOS_CPU_NUM`）。
+
+#### 9.8.2 新模块：`arkrtos_smp_sched.c` / `.h`
+
+每核状态全在一个模块里：当前任务（-1 = idle）、idle 帧指针、时间片余量、本核拍数、
+切换计数、迁入/迁出计数、本核运行队列（`s_q[cpu][TASK_MAX]`，按最小 priority 选、
+同优先级 FIFO 轮转）、每核自旋锁；CPU0 → 次核的交还请求与次核 → CPU0 的归还标记。
+
+对外只有五件事：
+
+| 接口 | 语义 |
+|---|---|
+| `arkrtos_smp_sched_enter(cpu)` | 次核进自己的调度域：起本核节拍，然后 WFI 等任务被迁过来（不返回） |
+| `arkrtos_smp_sched_task_to(id, cpu)` | 把任务迁到某核。`-2` 目标核 0、`-3` 不是 READY、`-4` 已归别核、`-5` 队列满 |
+| `arkrtos_smp_sched_task_back(id)` | 把任务要回 CPU0（请求 + 下一拍回收） |
+| `arkrtos_smp_sched_cur(cpu)` / `_selftest(out[8])` | 读数与自检 |
+| `_poll()` / `_switch()` / `_tick()` / `_owned_by_other()` | 内核与 port 用的内部钩子 |
+
+四条边界（写死在头文件里，不是「暂未实现」）：
+
+1. **次核不许发 SVC、不许调内核 API**：对象表、文件系统、设备表都没有跨核保护。
+   `la_smp_trap_c` 遇到 `SYS` 一律致命打印 + 停机，**绝不静默放行**——放过去就是
+   数据竞争，报错停机是唯一诚实的处理；
+2. **只接受 READY 任务迁移**：`RUNNING` 迁移要在源核的切换点插入逻辑，`WAIT`/`DELAY`
+   迁移会破坏等待语义，两样都直接拒绝（`-3`）；
+3. **次核节拍不推进全局 tick**：`tick` 仍只由 CPU0 推进，否则延时链与时基会跑两遍；
+4. **迁移是「请求 + 每拍轮询」**：延迟上限 1 拍（500 µs）。不在 IPI 里直接做调度，
+   避免 IPI 与定时器两条路径重入。
+
+归属用模块私有的 `s_owner[]` 而**不是** TCB 新字段：TCB 是布局敏感结构，加字段会让
+默认关档的尺寸也变，与「关档逐位不变」直接冲突。
+
+#### 9.8.3 落地点（五处）
+
+| 文件 | 改动 |
+|---|---|
+| `kernelsrc/src/arkrtos_smp_sched.c` / `include/arkrtos_smp_sched.h` | 新模块（未开档时是空翻译单元） |
+| `kernelsrc/src/arkrtos_smp.c` | `secondary_main()` 在开档时改调 `arkrtos_smp_sched_enter(cpu)` |
+| `kernelsrc/src/arkrtos_task.c` | tick 体里加 `poll()`；`ready_rebuild` / `sched_check`（两处循环）/ 线性优选扫描都按 `owned_by_other()` 跳过次核任务 |
+| `kernelsrc/port/loongarch/la64/arkrtos_port.c` | `la_smp_trap_c()`：定时器 → 清 TICLR + 计拍 + 换帧；IPI → 清挂起 + 默认处理；`SYS` 与其它 → 致命 |
+| `kernelsrc/port/loongarch/la64/arkrtos_context.S` | `la_smp_trap_entry` 在开档时把帧与 `CSR.TID` 交给 `la_smp_trap_c`，并用它返回的帧继续恢复 |
+
+第三条值得单独说：迁到次核的任务 `status` 仍是 `READY`（语义是「可运行」），
+不跳过的话，只要迁出一个任务，`schedcheck` 就**必然**报不一致、`ready_rebuild`
+会把它重新挂回 CPU0 就绪链——等于两个核同时动同一份帧。
+
+#### 9.8.4 实跑读数
+
+开启档：`EXTRA_CFLAGS="-DARKRTOS_USE_SMP=1 -DARKRTOS_CPU_NUM=2 -DARKRTOS_USE_SMP_SCHED=1"`，
+`qemu-system-loongarch64 -machine virt -smp 2 -kernel ark_qemu_la64.elf -nographic`：
+
+```
+[smp] cores=2 mask=0x00000003 sent=1 ipi1=5 result=ok
+[sched] to cpu1 rc=0
+[sched] r=1 cur1=0x00000004 q=1 sw=1 in=1 out=0 t=2042 owned=1 loops=+4452
+[sched] r=2 cur1=0x00000004 q=1 sw=1 in=1 out=0 t=4054 owned=1 loops=+3693
+[sched] r=3 cur1=0x00000004 q=1 sw=1 in=1 out=0 t=6058 owned=1 loops=+3184
+[sched] back rc=0
+[sched] r=4 cur1=0xffffffff q=0 sw=2 in=1 out=1 t=8062 owned=0 loops=+3395
+[sched] r=5 cur1=0xffffffff q=0 sw=2 in=1 out=1 t=10066 owned=0 loops=+4760
+[sched] r=6 cur1=0xffffffff q=0 sw=2 in=1 out=1 t=12092 owned=0 loops=+4056
+```
+
+读法：`cur1=0x4` 是任务 id（`s_id_w`），`q=1`（队列里还剩它自己，因为被切下时会排回队尾）、
+`owned=1`（模块私有归属表说是次核的）；`loops` 每 2 s 涨三千多，说明**任务真的在次核上
+执行**而不是「挂上了没人跑」；`back rc=0` 之后 `cur1=0xffffffff`、`q=0`、`out=1`
+（交还计数 +1）、`owned=0`，次核回到空闲。既有功能全部照旧：`[A]/[B]` 节拍与
+`svc_ok`、`[FS] PASS`、`exec rc=0`、`[MOD] ld rc=0`、两处 tamper check、
+`[STK] task 4: stack bottom flag overwritten`（栈守卫演示，预期）、shell 正常。
+
+#### 9.8.5 本轮抓到并修掉的一个读数缺陷：空闲→空闲也被计成一次切换
+
+第一版实跑时 `sw` 在任务交还、次核只剩空闲后从 8 跳到 1010 → 2011 → 3011，
+看着像「每拍都在疯狂切换」。真因是切换函数的末尾无条件 `s_switch_cnt[cpu]++`：
+次核每一拍都从 idle 进 switch、又选回 idle，明明没换任务也记了一次。
+
+修法是在「选下一个」之后加一条早返回：`handed == 0` 且 `next` 与 `cur` 都是 NIL 时，
+帧已在前面存进 `s_idle_sp[cpu]`，直接原地返回、不计数。限定 `handed == 0` 是必须的：
+交还那一路 `cur` 刚被置成 NIL，但 `frame` 属于被交还的任务，必须走 else 分支把
+`s_idle_sp` 取回来。修后读数变成 `sw=1`（切入任务一次）→ `sw=2`（交还后切回空闲一次），
+此后不再增长，其余读数一个没变。
+
+#### 9.8.6 默认档零变化（两条独立证据）
+
+1. 默认档 `arkrtos_smp_sched.o` 的 `text/data/bss` **全为 0**（`elf-size` 读数），
+   即关档下这个新文件不产生任何可分配内容；
+2. 与基线（`58ab9d6`）在独立 worktree 同口径构建，逐对象反汇编对拍（mnemonic +
+   操作数 + 重定位名）：`arkrtos_task.o` 11072 行、`arkrtos_port.o` 5323 行、
+   `arkrtos_context.o` 338 行、`main.o` 3487 行**只有两条不同**，都是
+   `ori $r6,$r0,0x<line>` ——日志里的 `__LINE__` 常量（源文件因本轮插入共前移 34 行）。
+   指令流、符号集合、段大小完全一致。整镜像 `objcopy -O binary` 后 31 462 512 B 中
+   只有 3 个字节不同，全部落在同一函数里的这两条 `ori` 上。
+
+**不许读成「默认档逐字节不变」**：那 2 条日志里的行号确实变了，如实记账。
+
+#### 9.8.7 判词与四条不许读法
+
+判词：**`smp_amp_sched_ok_on_qemu`** —— LA64 / QEMU `-smp 2` 上，任务能迁到次核、
+在次核上真跑（`loops` 增长）、能被要回 CPU0，既有功能全部照旧；RV32 侧与真实硬件
+**未验证**。
+
+1. **不能读成「支持对称多核调度」**：全局调度器仍是单核一份，没有自动负载均衡，
+   任务必须由调用方显式迁移；次核上的任务不能调内核 API。
+2. **不能把 `loops=+4452` 读成「两个核在并行算」**：同一个任务在某一刻只在一个核上跑，
+   迁移是「搬走」不是「复制」；读数里 `owned=1` 与 CPU0 侧 `owned_by_other()` 跳过
+   是同一件事的两面。
+3. **不能把 `sw=1/2` 读成「只切换了两次」的调度器性能读数**：这是次核的切换计数，
+   起点是次核刚进调度域，不是整机切换次数。
+4. **不能读成真板可用**：`la_smp_trap_c` 里定时器/IPI 的解析依赖 QEMU 的 `ESTAT`
+   编码与 `TICLR` 语义，IOCSR mailbox 的字节掩码同样来自 QEMU 9.2.3 源码；真实
+   固件与硬件未验证。
 
 ## 10. `-Wconversion` 开档（2026-11-19）：默认档镜像逐字节不变
 

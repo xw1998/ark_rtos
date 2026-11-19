@@ -26,8 +26,25 @@ config ARKRTOS_USE_SMP
 	  每核状态块 + 次核启动入口 + 核间中断通路 + 在线核掩码。
 	  默认关，也必须说清楚它不是什么：本内核的调度器是单核设计
 	  （全局当前任务号、全局就绪位图、全局延迟队列），打开这个开关
-	  不会把调度器变成多核。打开后次核只跑 WFI 空转，不参与调度。
+	  不会把调度器变成多核。只打开它时，次核仍然只跑 WFI 空转、
+	  不参与调度；要让次核跑任务，还要再打开 ARKRTOS_USE_SMP_SCHED。
 	  关档下类型与符号都不存在，体积与行为逐位不变。
+
+config ARKRTOS_USE_SMP_SCHED
+	bool "Per-core scheduling (AMP): explicit task migration to a secondary core"
+	default n
+	depends on ARKRTOS_USE_SMP
+	help
+	  次核上跑一份**自己的**小调度器（每核运行队列 + idle 帧 + 时间片），
+	  任务由调用方 arkrtos_smp_sched_task_to() 显式迁过去、
+	  arkrtos_smp_sched_task_back() 显式要回。
+
+	  这不是对称多核：全局当前任务号 / 就绪位图 / 延时链仍然只有 CPU0
+	  一份，没有自动负载均衡。四条限制由代码强制（不是"暂未实现"）：
+	  次核不许发 SVC 或调内核 API（遇 SYS 一律致命停机）、只接受 READY
+	  任务迁移、次核节拍不推进全局 tick、迁移是「请求 + 每拍轮询」
+	  故延迟上限 1 拍。要求 ARKRTOS_CPU_NUM >= 2（不满足直接 #error）。
+	  关档下模块编成空目标，体积与行为不变。
 
 config ARKRTOS_USE_STACK_USAGE
 	bool "Task stack usage statistics"

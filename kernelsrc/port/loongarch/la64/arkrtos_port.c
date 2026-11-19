@@ -65,6 +65,12 @@ extern void arkrtos_board_puts(const char *s);
 extern void arkrtos_board_putu(uint32 val);
 extern void arkrtos_board_puthex(uint32 val);
 #include "arkrtos_config.h"
+#if (ARKRTOS_USE_SMP == 1)
+#include "arkrtos_smp.h"
+#endif
+#if (ARKRTOS_USE_SMP_SCHED == 1)
+#include "arkrtos_smp_sched.h"
+#endif
 
 #if (ARKRTOS_USE_RTSTAT == 1)
 #include "arkrtos_rt.h"
@@ -416,9 +422,11 @@ void arkrtos_port_spin_hint(void)
  *          入口地址必须是**物理地址**：次核从 pflash 跳过来时 CRMD.DA=1，
  *          不做地址翻译。本镜像链接在 0x00200000 且恒等映射，直接取符号地址。
  *
- *          本轮范围：② 次核启动 ③ IPI 通路。④ 调度分核**仍然不做**——
- *          调度表/就绪位图/延时链都是全局一份（见 arkrtos_smp.h 文件头），
- *          次核上线后只空转，不参与调度。这两件事不能混着说。
+ *          2026-11-19 范围：② 次核启动 ③ IPI 通路 已跑通；④ 调度分核由
+ *          独立模块 arkrtos_smp_sched.c 承担（ARKRTOS_USE_SMP_SCHED，默认
+ *          关）。打开后次核有自己的运行队列与节拍，任务由调用方显式迁移；
+ *          **全局调度表/就绪位图/延时链仍然只有 CPU0 一份**，所以这不是
+ *          对称多核，两件事不能混着说。
  * ------------------------------------------------------------ */
 #define LA_IOCSR_IPI_STATUS     0x1000u
 #define LA_IOCSR_IPI_CLEAR      0x100Cu
@@ -3741,6 +3749,73 @@ la_frame_word *la_trap_c(la_frame_word *frame)
 
     return frame;
 }
+
+#if (ARKRTOS_USE_SMP == 1) && (ARKRTOS_USE_SMP_SCHED == 1)
+/**
+* @brief 清本核的 IPI 挂起位（IOCSR 0x1000 状态 → 0x100C 清除）
+* @note 这段序列原来是 arkrtos_context.S 里 la_smp_trap_entry 的内联拷贝，
+*       打开调度分核后汇编不再自己清，两处只剩这一份。
+*/
+static void la_smp_ipi_clear(void)
+{
+    uint32 st = 0u;
+
+    __asm__ volatile("iocsrrd.w %0, %1" : "=r"(st) : "r"(LA_IOCSR_IPI_STATUS));
+    la_iocsr_write_w(LA_IOCSR_IPI_CLEAR, st);
+}
+
+/**
+* @brief 次核异常的统一 C 入口（只在调度分核打开时存在）
+* @param frame 次核入口在被打断上下文栈上压好的 256 字节帧
+* @param cpu   本核号（汇编按 CSR.TID 传入）
+* @return 要 ertn 回去的帧指针（定时器路径可能换成另一个任务的帧）
+* @details 三条路径，全都只用"本核"状态：
+*          - 定时器中断：清 TICLR → 本核计一拍 → 调度器决定下一个帧；
+*          - IPI：清挂起 → 默认处理函数（计数，应用可覆盖强符号）；
+*          - 其余一律致命：次核不许发 SVC（对象表/文件系统/同步对象都没有
+*            跨核保护），也不做 App 故障恢复（那套页表与窗口逻辑属于 CPU0）。
+*          绝不把次核的 SYS 静默放行——放过去就是数据竞争，报错停机是唯一
+*          诚实的处理。
+*/
+la_frame_word *la_smp_trap_c(la_frame_word *frame, uint32 cpu)
+{
+    uint32 estat = la_estat_read();
+    uint32 ecode = (estat >> 16) & 0x3Fu;
+
+    if(ecode == LA_ESTAT_ECODE_INT)
+    {
+        if((estat & LA_ESTAT_IS_TIMER) != 0u)
+        {
+            la_ticlr_clear();
+            arkrtos_smp_sched_tick(cpu);
+            return (la_frame_word *)(unsigned long)
+                   arkrtos_smp_sched_switch(cpu, (uint32)(unsigned long)frame);
+        }
+
+        la_smp_ipi_clear();
+        arkrtos_smp_ipi_handler();
+        return frame;
+    }
+
+    if(ecode == LA_ESTAT_ECODE_SYS)
+    {
+        /* 次核任务的 SYS = 配置错误（次核不许调内核 API）。 */
+        arkrtos_port_fatal_report(estat);
+        la_fatal_dump(frame);
+        for(;;)
+        {
+            __asm__ volatile("idle 0" ::: "memory");
+        }
+    }
+
+    arkrtos_port_fatal_report(estat);
+    la_fatal_dump(frame);
+    for(;;)
+    {
+        __asm__ volatile("idle 0" ::: "memory");
+    }
+}
+#endif /* ARKRTOS_USE_SMP && ARKRTOS_USE_SMP_SCHED */
 
 /* ============================================================
  * 板级初始化默认实现（board 层可覆盖）

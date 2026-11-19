@@ -32,6 +32,9 @@
 #include "arkrtos_loader.h"
 #include "arkrtos_kernel_check.h"   /* shared SVC pointer checks */
 #include "arkrtos_net.h"            /* SVC 0x1E network service */
+#if (ARKRTOS_USE_SMP_SCHED == 1)
+#include "arkrtos_smp_sched.h"     /* 调度分核：CPU0 侧回收与一致性跳过 */
+#endif
 #include "arkrtos_eset.h"           /* SVC 0x21 32-bit event set */
 #include "arkrtos_waitmulti.h"      /* SVC 0x22 multi-object probe */
 #include "arkrtos_fs.h"    /* SVC 0x1C user file service */
@@ -517,6 +520,13 @@ void arkrtos_kernel_tick_handler(void)
             arkrtos_ready_rotate(arkrtos_current_task_id - 1);
         }
     }
+    #endif
+
+    #if (ARKRTOS_USE_SMP_SCHED == 1)
+    /* 调度分核：把次核这一拍已经交还的任务重新挂回 CPU0 就绪链。
+     * 放在时间片结算之后、切换决策之前：本拍就能被选中，与唤醒同拍
+     * 就绪的语义一致。没有待回收任务时只是一次常数判断。 */
+    arkrtos_smp_sched_poll();
     #endif
 
     #if (ARKRTOS_USE_SCHED_LOCK == 1)
@@ -3446,6 +3456,14 @@ void arkrtos_ready_rebuild(void)
 
     for(i = 0; i < arkrtos_task_count; i++)
     {
+        #if (ARKRTOS_USE_SMP_SCHED == 1)
+        /* 迁到次核的任务 status 仍是 READY（语义是"可运行"），但它跑在
+         * 次核的队列上。把它挂进 CPU0 的就绪链等于让两个核都去动它的帧。 */
+        if(arkrtos_smp_sched_owned_by_other(i) != 0u)
+        {
+            continue;
+        }
+        #endif
         if((arkrtos_task_table[i].status == ARKRTOS_TASK_READY) ||
            (arkrtos_task_table[i].status == ARKRTOS_TASK_RUNNING))
         {
@@ -3473,6 +3491,15 @@ int32 arkrtos_sched_check(void)
         uint8 on = (p->ready_next != ARKRTOS_TASK_NIL) ? 1u : 0u;
         uint8 should = ((p->status == ARKRTOS_TASK_READY) ||
                         (p->status == ARKRTOS_TASK_RUNNING)) ? 1u : 0u;
+
+        #if (ARKRTOS_USE_SMP_SCHED == 1)
+        /* 次核上的任务不在 CPU0 就绪链上，这是设计而不是不一致：
+         * 不跳过的话，只要迁出一个任务，schedcheck 就必然报 bad。 */
+        if(arkrtos_smp_sched_owned_by_other(idx) != 0u)
+        {
+            continue;
+        }
+        #endif
 
         if(on != should)
         {
@@ -3533,6 +3560,13 @@ int32 arkrtos_sched_check(void)
     {
         arkrtos_task_t *p = &arkrtos_task_table[idx];
 
+        #if (ARKRTOS_USE_SMP_SCHED == 1)
+        /* 线性优选只对 CPU0 的任务表子集：次核任务的优先级不参与本核决策。 */
+        if(arkrtos_smp_sched_owned_by_other(idx) != 0u)
+        {
+            continue;
+        }
+        #endif
         if((p->status == ARKRTOS_TASK_READY) || (p->status == ARKRTOS_TASK_RUNNING))
         {
             if(p->priority < bp)
