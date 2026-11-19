@@ -249,4 +249,10 @@
 #undef  ARKRTOS_TIMER_TASK_STACK_WORDS
 #define ARKRTOS_TIMER_TASK_STACK_WORDS (256)
 
+/* 启动/idle 上下文栈守卫：与 qemu_loongarch64 同档打开，否则这一档就拿不到
+ * 实测余量读数（见 docs/QEMU模拟器移植与验证.md 5.13.4）。 */
+#undef  ARKRTOS_USE_STACK_GUARD
+#define ARKRTOS_USE_STACK_GUARD      1
+
+
 #endif /* __ARKRTOS_BOARD_CONFIG_H__ */

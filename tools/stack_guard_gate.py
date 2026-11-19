@@ -32,8 +32,13 @@ U-13 的原状是「标志字写了，但从来没有人读过」——`arkrtos_
      控制台栈大小有一个板级钩子、本板确实放大过（守卫的第一个真阳性：
      shell 的 3 KB 栈在 `ld` 期间被用到 100%，见 §5.15.1）。
 
+另一种假绿（②，启动/idle 上下文）：
+  任务栈有 `stack_guard_armed` 旗标，但**启动阶段的 idle 栈不是任务槽位**，
+  `current_task_id > 0` 的前置条件让它从来没被检查过。现在的做法是布防整段
+  [bottom, top) 填图案、每拍逐字找最低的非图案字，并把读数打到 `stack ctx:`。
+
 不覆盖：运行期读数。QEMU 实测见 docs/QEMU模拟器移植与验证.md 的栈守卫一节
-（`[STK] task 4` + `fault` 里的 STACKOVF）。
+（`[STK] task 4` + `fault` 里的 STACKOVF，以及 `stack ctx:` 的 used/free）。
 
 用法
 ----
@@ -194,6 +199,11 @@ def main():
         if "stack_guard" in out:
             failures.append("C LA64 OFF：预处理结果里仍有 stack_guard"
                             "（字段/原型/调用没被 #if 包住，关档体积会变）")
+        if "s_ctx_guard" in out:
+            failures.append("C LA64 OFF：预处理结果里仍有 s_ctx_guard"
+                            "（② 的静态量与扫描没被 #if 包住，关档体积会变）")
+        if "context stack" in out:
+            failures.append("C LA64 OFF：预处理结果里仍有 context stack 那行读数")
 
     # --- D. RV32 ON：32 位端口也接上，且编得过 ---------------------------
     rv32_port = RV32_ARCH + base + [
@@ -212,6 +222,8 @@ def main():
     task_h = _read(os.path.join(ROOT, "kernelsrc/include/arkrtos_task.h"))
     feats = _read(os.path.join(ROOT, "kernelsrc/include/arkrtos_features.h"))
     kcfg = _read(os.path.join(ROOT, "config/kconfig/Kconfig.features"))
+    cfg_c2 = _read(os.path.join(ROOT, "kernelsrc/include/arkrtos_config.h"))
+    diag_c = _read(os.path.join(ROOT, "kernelsrc/shell/arkrtos_shell_diag.c"))
 
     pins = [
         (task_c, "p_task->stack_bottom[0] == (uint32)ARKRTOS_STACK_END_FLAG_VAL",
@@ -226,6 +238,25 @@ def main():
          "TCB 必须有布防位（关档时整段不编入）"),
         (feats, "#define ARKRTOS_USE_STACK_GUARD         0",
          "features.h 的回退默认必须是 0"),
+        # --- ② 启动/idle 上下文水位 ---------------------------------------
+        (task_h, "arkrtos_stack_guard_watch_context",
+         "② 必须有布防入口（否则 idle 栈永远不在检查面内）"),
+        (task_h, "arkrtos_stack_guard_context_info",
+         "② 必须有读数出口（否则 shell 里看不到 used/free）"),
+        (task_c, "void arkrtos_stack_guard_watch_context(uint32 stack_bottom",
+         "② 布防实现必须在 task.c（而不是某个 port 里）"),
+        (task_c, "s_ctx_guard_low    = stack_top;",
+         "② 水位初值必须是 top（布防后尚未写过任何字）"),
+        (task_c, "(uint32)ARKRTOS_STACK_FILL_PATTERN)",
+         "② 判据必须是「这个字还是不是填充图案」"),
+        (task_c, "arkrtos_stack_guard_check_context();",
+         "② 节拍体里必须真的调扫描，否则读数永远停在初值"),
+        (cfg_c2, "ARKRTOS_STACK_GUARD_CTX_MARGIN",
+         "② 告警门限必须有宏（默认 64 B，可板级覆盖）"),
+        (diag_c, "stack ctx: idle/boot",
+         "② shell 必须有一行汇总读数"),
+        (diag_c, "stack ctx: not armed",
+         "② 布防被拒时必须说出来（静默失败比没有守卫更坏）"),
     ]
     for src, need, why in pins:
         if need not in src:
@@ -250,6 +281,21 @@ def main():
         failures.append("F 示例：main.c 里没有踩栈底的演示任务"
                         "（上板时就没有可观察的命中）")
 
+    # ② 的布防必须在 enter_idle 之前（之后这块栈已经在用了，填图案等于自毁）
+    for rel in ("example/qemu_loongarch64/main.c",
+                "example/la32_generic/main.c",
+                "example/qemu_riscv32/main.c"):
+        src = _read(os.path.join(ROOT, rel))
+        i_arm = src.find("arkrtos_stack_guard_watch_context")
+        i_ent = src.find("arkrtos_port_enter_idle(sp")
+        if i_arm < 0:
+            failures.append("F 示例：%s 没有布防 idle 栈（② 空转）" % rel)
+        elif i_ent < 0 or i_arm > i_ent:
+            failures.append("F 示例：%s 的布防没在 enter_idle 之前" % rel)
+        if not re.search(r"^#define\s+IDLE_STACK_WORDS\s+1024u", src, re.M):
+            failures.append("F 示例：%s 的 IDLE_STACK_WORDS 不是 1024u"
+                            "（实测深度 984 B，1 KB 只剩 28 B）" % rel)
+
     # 守卫的第一个真阳性：控制台任务栈 3 KB 在 `ld` 期间被用到 100%，
     # 溢出静默写坏装载器静态区。修法是给栈大小留一个板级钩子并在本板放大。
     shell_c = _read(os.path.join(ROOT, "kernelsrc/shell/arkrtos_shell.c"))
@@ -270,7 +316,8 @@ def main():
 
     print("STACK-GUARD-GATE OK: 默认档=0 / LA64 开档有检查(记录+任务号) / "
           "关档零符号 / RV32 端口开档编得过 / 守卫与摘除未拆 / "
-          "Kconfig 与两块板级接线在 / 示例有踩栈底任务 / 控制台栈钩子与放大在")
+          "Kconfig 与两块板级接线在 / 示例有踩栈底任务 / 控制台栈钩子与放大在 / "
+          "② idle 上下文布防在读(三档都在 enter_idle 前、idle 栈 1024u)")
     return 0
 
 

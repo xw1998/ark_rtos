@@ -475,6 +475,11 @@ void arkrtos_kernel_tick_handler(void)
      * fed. Placed before the scheduler work so the evidence describes the
      * context that was preempted, not the one that is about to run. */
     arkrtos_guard_tick();
+    #if (ARKRTOS_USE_STACK_GUARD == 1)
+    /* 启动/idle 上下文不是任务槽位，走不了 per-task 守卫；它同样在跑内核
+     * 陷阱链（见 arkrtos_task.h 的 watch_context 注释），所以单独守。 */
+    arkrtos_stack_guard_check_context();
+    #endif
     #if (ARKRTOS_USE_CPU_LOAD == 1)
     /* sample the preempted context BEFORE switching tasks: count this tick */
     /* as busy only when a real task was on the CPU (idle = task id 0) */
@@ -2680,6 +2685,171 @@ void arkrtos_stack_guard_check_current(void)
     {
         (void)arkrtos_stack_guard_check(arkrtos_current_task_id - 1);
     }
+}
+
+/* ---------------- 启动/idle 上下文的栈守卫 ----------------
+ * 这块栈不属于任何任务槽位，走不了 arkrtos_task_table；水位用「图案扫描」
+ * 量：布防时把 [bottom, top) 填 ARKRTOS_STACK_FILL_PATTERN，之后「最低的
+ * 非图案字」就是峰值水位。每拍只从已知水位往下探，代价 O(新增深度)，稳态
+ * 通常 0 次比较。
+ *
+ * 为什么不用 arkrtos_idle_stack_ptr：它记的是**陷阱帧基址**（sp - 256），
+ * 而 la_trap_c 与它下面整条链才是真正吃栈的部分 —— 实测 1 KB 的 idle 栈
+ * 里，帧基址以上只有 256 B，链本身吃到 896 B。拿帧基址当水位会把整段用量
+ * 读成「没用」，正好把要抓的那次溢出读没。 */
+static uint32 s_ctx_guard_bottom = 0u;
+static uint32 s_ctx_guard_top    = 0u;
+static uint32 s_ctx_guard_low    = 0u;   /* 已知最低的「已写」字地址 */
+static uint8  s_ctx_guard_armed  = 0u;
+static uint8  s_ctx_guard_reported = 0u;
+
+static void arkrtos_guard_putu(uint32 v)
+{
+    char num[12];
+    uint32 nd = 0u;
+
+    if(v == 0u)
+    {
+        (void)arkrtos_console_write((const uint8 *)"0", 1u);
+        return;
+    }
+    while((v > 0u) && (nd < 11u))
+    {
+        num[nd++] = (char)('0' + (v % 10u));
+        v /= 10u;
+    }
+    while(nd > 0u)
+    {
+        nd--;
+        (void)arkrtos_console_write((const uint8 *)&num[nd], 1u);
+    }
+}
+
+void arkrtos_stack_guard_watch_context(uint32 stack_bottom, uint32 stack_size,
+                                       uint32 stack_top)
+{
+    uint32 *p;
+    uint32 i;
+
+    s_ctx_guard_armed    = 0u;
+    s_ctx_guard_reported = 0u;
+    s_ctx_guard_bottom   = 0u;
+    s_ctx_guard_top      = 0u;
+    s_ctx_guard_low      = 0u;
+
+    /* 参数不成立就干脆不布防 —— 半截守卫比没有守卫更坏（它会给出「余量很
+     * 足」的假读数）。 */
+    /* 只要求「字对齐」：扫描与填图案都是按 32 位字做的。早先按 16 字节判定，
+     * 结果 rv32 的 s_idle_stack 落在 0x...00c（4 字节对齐、非 16 对齐）时布防
+     * 被静默拒绝，shell 连一行读数都不打——这比布防失败本身更难发现。 */
+    if((stack_size < 256u) || ((stack_bottom & 0x3u) != 0u) ||
+       ((stack_top & 0x3u) != 0u) || (stack_top <= stack_bottom) ||
+       ((stack_top - stack_bottom) > stack_size))
+    {
+        return;
+    }
+
+    /* 只填 [bottom, top)：top 是调用方马上要送进 enter_idle 的栈指针，它以上
+     * 没有属于这块栈的活帧；填整段会连调用者自己的活帧一起冲掉。 */
+    p = (uint32 *)(unsigned long)stack_bottom;
+    for(i = 0u; i < ((stack_top - stack_bottom) / 4u); i++)
+    {
+        p[i] = (uint32)ARKRTOS_STACK_FILL_PATTERN;
+    }
+
+    s_ctx_guard_bottom = stack_bottom;
+    s_ctx_guard_top    = stack_top;
+    s_ctx_guard_low    = stack_top;
+    s_ctx_guard_armed  = 1u;
+}
+
+void arkrtos_stack_guard_check_context(void)
+{
+    uint32 low;
+    uint32 margin;
+
+    if(s_ctx_guard_armed == 0u)
+    {
+        return;
+    }
+
+    /* 逐字找「最低的非图案字」。**不能**一碰到图案就停：实测 rv32 的陷阱帧
+     * 顶部 8 字节就是没被写过的图案（0x801993f8/fc），从 top 往下走两步就撞上，
+     * 于是 low 停在 top、used 报 0——既低报了用量，也会让真正触底时一声不响。
+     * 全区间扫描的代价是每拍至多 stack_words 次 32 位读，1 KB 栈即 256 次。*/
+    low = s_ctx_guard_low;
+    {
+        uint32 a = low;
+
+        while(a > s_ctx_guard_bottom)
+        {
+            a -= 4u;
+            if(((const uint32 *)(unsigned long)a)[0] !=
+               (uint32)ARKRTOS_STACK_FILL_PATTERN)
+            {
+                low = a;
+            }
+        }
+    }
+    s_ctx_guard_low = low;
+
+    margin = ((low > s_ctx_guard_bottom) ? (low - s_ctx_guard_bottom) : 0u);
+    if((low > s_ctx_guard_bottom) &&
+       (margin >= (uint32)ARKRTOS_STACK_GUARD_CTX_MARGIN))
+    {
+        return;
+    }
+
+    if(s_ctx_guard_reported == 0u)
+    {
+        s_ctx_guard_reported = 1u;
+        arkrtos_fault_record(ARKRTOS_FAULT_STACKOVF, 0);
+
+        (void)arkrtos_console_write((const uint8 *)"[STK] context stack ",
+                                    (uint32)(sizeof("[STK] context stack ") - 1u));
+        if(low <= s_ctx_guard_bottom)
+        {
+            (void)arkrtos_console_write((const uint8 *)"overflow",
+                                        (uint32)(sizeof("overflow") - 1u));
+        }
+        else
+        {
+            (void)arkrtos_console_write((const uint8 *)"low margin",
+                                        (uint32)(sizeof("low margin") - 1u));
+        }
+        (void)arkrtos_console_write((const uint8 *)" low=0x",
+                                    (uint32)(sizeof(" low=0x") - 1u));
+        {
+            /* 十六进制打印：低 32 位足够（这块栈在 4 GB 内的普通 RAM 上） */
+            static const char hex[] = "0123456789abcdef";
+            int32 sh;
+            for(sh = 28; sh >= 0; sh -= 4)
+            {
+                char c = hex[(low >> (uint32)sh) & 0xFu];
+                (void)arkrtos_console_write((const uint8 *)&c, 1u);
+            }
+        }
+        (void)arkrtos_console_write((const uint8 *)" margin=",
+                                    (uint32)(sizeof(" margin=") - 1u));
+        arkrtos_guard_putu(margin);
+        (void)arkrtos_console_write((const uint8 *)"B\n",
+                                    (uint32)(sizeof("B\n") - 1u));
+    }
+}
+
+int32 arkrtos_stack_guard_context_info(uint32 out[4])
+{
+    if(s_ctx_guard_armed == 0u)
+    {
+        return -1;
+    }
+
+    out[0] = s_ctx_guard_bottom;
+    out[1] = s_ctx_guard_top;
+    out[2] = s_ctx_guard_low;
+    out[3] = ((s_ctx_guard_low > s_ctx_guard_bottom)
+              ? (s_ctx_guard_low - s_ctx_guard_bottom) : 0u);
+    return 0;
 }
 #endif /* ARKRTOS_USE_STACK_GUARD */
 

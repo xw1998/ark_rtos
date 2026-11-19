@@ -48,7 +48,11 @@
 /* 任务栈：RISC-V 没有硬件压栈，只有软件帧，512 字（2 KB）很宽裕。
  * 栈必须是静态的（QEMU 上也没有堆分配器可用）。 */
 #define TASK_STACK_WORDS     512u
-#define IDLE_STACK_WORDS     256u
+/* 本目标实测深度 504 B（1 KB 与 4 KB 两档读数一致，说明不是被截断的），
+ * 仍与 la64 同取 1024 字 = 4 KB：三个示例的 idle 栈尺寸保持一致，避免
+ * 「换个目标就换一套余量」的隐性口径漂移。见 docs/QEMU模拟器移植与验证.md
+ * §5.13.4 复核。 */
+#define IDLE_STACK_WORDS     1024u
 #define FS_STACK_WORDS       1024u   /* 存储链路实测最深的栈（见 s_stack_fs） */
 
 static uint32 s_stack_a[TASK_STACK_WORDS];
@@ -607,6 +611,13 @@ static void arkrtos_start_idle(void)
     uint32 sp = (uint32)(&s_idle_stack[IDLE_STACK_WORDS]);
 
     sp &= ~0xFu;      /* RISC-V 栈 16 字节对齐（ABI 硬要求） */
+
+    #if (ARKRTOS_USE_STACK_GUARD == 1)
+    /* 必须在 enter_idle 之前布防：这一刻 idle 栈还没被当作栈用，整段填图案
+     * 是安全的；进入之后 main 的活帧就搬到这块栈上了。 */
+    arkrtos_stack_guard_watch_context((uint32)(unsigned long)&s_idle_stack[0],
+                                      (uint32)sizeof(s_idle_stack), sp);
+    #endif
 
     arkrtos_port_enter_idle(sp, 1u);
 

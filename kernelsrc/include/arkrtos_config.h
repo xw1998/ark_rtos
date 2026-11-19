@@ -292,6 +292,19 @@
 #endif
 
 /* ============================================================
+ * 启动/idle 上下文栈的警戒带（字节）
+ * @brief 陷阱链是在被打断者的栈上跑的（eentry 先建帧并直接调 la_trap_c，
+ *        换到静态陷阱栈发生在它返回之后），所以启动/idle 上下文同样会被
+ *        节拍链踩穿。底部这一段当作警戒带：历史最低水位进到带里就算
+ *        「余量不足」，报一次（见 arkrtos_task.h 的
+ *        arkrtos_stack_guard_watch_context）。只在
+ *        ARKRTOS_USE_STACK_GUARD == 1 时才编入。
+ * ============================================================ */
+#ifndef ARKRTOS_STACK_GUARD_CTX_MARGIN
+#define ARKRTOS_STACK_GUARD_CTX_MARGIN  (64u)
+#endif
+
+/* ============================================================
  * 共享内存配置
  * @brief 默认值，通常由板级配置文件 board/arkrtos_board_config.h
  *        根据具体芯片的内存布局覆盖。

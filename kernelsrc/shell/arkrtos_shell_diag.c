@@ -250,6 +250,29 @@ int cmd_stack(int argc, char *argv[])
         }
     }
 
+    #if (ARKRTOS_USE_STACK_GUARD == 1)
+    /* 启动/idle 上下文：不是任务槽位，单独一行。水位口径是「布防时整段填
+     * 图案、之后最低的非图案字」，所以 used 是一个真读数，不是估算。 */
+    {
+        uint32 ctx[4];
+
+        if(arkrtos_stack_guard_context_info(ctx) == 0)
+        {
+            ark_shell_printf("stack ctx: idle/boot 0x%x..0x%x low=0x%x "
+                             "used=%u free=%u\r\n",
+                             (unsigned)ctx[0], (unsigned)ctx[1],
+                             (unsigned)ctx[2],
+                             (unsigned)(ctx[1] - ctx[2]),
+                             (unsigned)ctx[3]);
+        }
+        else
+        {
+            /* 布防被拒时不留一行空输出：拿不到读数本身是个事实，要说出来。 */
+            ark_shell_printf("stack ctx: not armed (watch_context refused: "
+                             "alignment/size/top/bottom)\r\n");
+        }
+    }
+    #endif
     ark_shell_printf("stack: %d task(s), worst %u%% (task %d), "
                      "%u unmeasured, %u at/over %u%%  (accounting on)\r\n",
                      (int)arkrtos_task_count, (unsigned)worst_pct, (int)worst_id,

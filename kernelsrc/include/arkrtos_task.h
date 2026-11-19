@@ -261,6 +261,24 @@ int32 arkrtos_task_swap_pending(void);
  * 首次发现时记一条 ARKRTOS_FAULT_STACKOVF 并打一行控制台，之后只返回 1。 */
 int32 arkrtos_stack_guard_check(int32 slot);
 void  arkrtos_stack_guard_check_current(void);
+
+/* 启动/idle 上下文的栈守卫（这块栈不属于任何任务槽位）。
+ * 对象：arkrtos_current_task_id == 0 时用的那块栈 —— 示例里是
+ *       arkrtos_port_enter_idle() 之前由启动代码装的 idle 栈。
+ * 为什么它也要守：eentry 在换到静态陷阱栈之前就用被打断者的 sp 建帧并
+ *       直接调 la_trap_c，所以节拍链（守卫 + 软定时器 + 调度扫描）整段跑在
+ *       这块栈上；它和任务栈一样会被踩穿，而它下面紧邻的往往是另一块栈或
+ *       .bss（实测：踩穿后写坏相邻任务的初始帧，ertn 到垃圾 PC）。
+ * 做不到什么：只在这块栈**被用到更低**之后才看得见，每拍从已知最低水位
+ *       往下探几格，代价 O(新增深度)，不是硬件保护。
+ * 布防时机：必须在 arkrtos_port_enter_idle() 之前（此时这块栈还没被当作
+ *       栈用）；stack_top 传马上要交给 enter_idle 的 sp，函数只填
+ *       [stack_bottom, stack_top)，不会碰调用者的活帧。 */
+void   arkrtos_stack_guard_watch_context(uint32 stack_bottom, uint32 stack_size,
+                                        uint32 stack_top);
+void   arkrtos_stack_guard_check_context(void);
+/* out = { bottom, top, low, margin }，四格都写；未布防返回 -1 且不写。 */
+int32  arkrtos_stack_guard_context_info(uint32 out[4]);
 #endif
 
 int32 arkrtos_sched_is_switching(void);

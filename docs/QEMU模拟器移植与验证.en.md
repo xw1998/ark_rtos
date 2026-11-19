@@ -314,11 +314,90 @@ Causal check, same sources, only `IDLE_STACK_WORDS` changed: `128u` (512 B) cras
 with exactly this signature (two further boots overflowed deeper and hit other `.bss`);
 `256u` (1 KB, the default) gave 0 crashes in 8 boots x 3 `utest` (consistent with the known ~1/15);
 `1024u` (4 KB) gave **12/12 clean boots, 13/13/0 `utest`**. Both directions hold, so the chain is
-causal, not correlational. **The fix is not implemented yet**; three candidates are on the table
-(raise the idle stack to 1024 words; add a stack-bottom isolation band plus a tick-path check; or
-move the trap chain off the interrupted stack). The original 5.13.4 instance
-(`frame@0x003071d0`, `s_pi_chain_stack_mid`) was not re-sampled this round - only its shape matches -
-so that debt is not closed.
+causal, not correlational. The fix is implemented as candidates 1 + 2 (see the recheck below).
+The original 5.13.4 instance (`frame@0x003071d0`, `s_pi_chain_stack_mid`) was not re-sampled this
+round - only its shape matches - so that debt is not closed.
+
+**Recheck (2026-11-19, evening): the "108 B only" reading is withdrawn; 1 and 2 are both landed.**
+
+While landing 1 + 2 a live high-water readout (`stack ctx:`) was added, and it reported that the
+idle stack used only 108 B and never overflowed, with a request to drop candidate 1. **That reading
+was wrong; the water-mark scanner itself was the bug.** Corrected, candidate 1 stands again. Three
+corrections, so the wrong number is not reused later:
+
+1. **The scan stopped at the first pattern word.** The old code walked down from `top` and stopped at
+   the first `0xcdcdcdcd`. On rv32 the trap frame happens to leave the top 8 bytes unwritten
+   (`0x801993f8/fc` still `0xcdcdcdcd`), so `low` stuck at `top` and `used` read 0 - both
+   under-reporting usage and, worse, staying silent if the stack ever did bottom out. The new code
+   scans the whole `[bottom, low)` region and takes the lowest non-pattern word (at most
+   `stack_words` 32-bit reads per tick, i.e. 256 for a 1 KB stack).
+2. **Arming required 16-byte alignment**, but rv32's `s_idle_stack` sits at `0x8019900c` (4-byte
+   aligned), so `watch_context` refused to arm **silently** and the shell printed no line at all.
+   The requirement is now word alignment (filling and scanning are word-wise anyway), and a refused
+   arming prints `stack ctx: not armed (watch_context refused: ...)` - a silent failure is worse than
+   no guard.
+3. The previous "108 B" table and the "candidate 1 has no basis" conclusion drawn from it are void.
+
+**Corrected measurements** (`stack ctx:` kernel readout and QEMU monitor `xp`, byte-identical):
+
+| target | `IDLE_STACK_WORDS` | capacity | used | free |
+| --- | --- | --- | --- | --- |
+| LA64 qemu | `256u` | 1012 B | 824 B | 200 B |
+| LA64 qemu | `1024u` (**adopted**) | 4088 B | **904 / 984 B** | 3192 / 3112 B |
+| RV32 qemu | `256u` | 1012 B | 504 B | 508 B |
+| RV32 qemu | `1024u` (**adopted**) | 4088 B | 504 B | 3580 B |
+| LA64 qemu | `128u` | 512 B | **overflow** | 0 |
+
+- LA64's true depth is **904-984 B** over two different boots, consistent with the 960 B HMP
+  reading taken on the 4 KB control build above. The 824 B at `256u` is a reading **clipped by the
+  1 KB stack**, not the real depth.
+- With the corrected scanner the `128u` build makes the guard fire at once:
+  `[STK] context stack overflow low=0x003b5820 margin=0B`, so the guard is not a paper switch.
+- RV32 reads the same 504 B at both sizes, so its depth is real, not clipped.
+
+**What 2 looks like** (compiled only under `ARKRTOS_USE_STACK_GUARD == 1`; the default build is
+still 0 and byte-identical):
+
+- `arkrtos_stack_guard_watch_context(bottom, size, top)` is called **before** `enter_idle()`
+  (that is the moment the region is not a stack yet) and fills `[bottom, top)` with
+  `ARKRTOS_STACK_FILL_PATTERN`; it refuses to arm when the size is < 256 B, either end is not
+  word-aligned, `top <= bottom`, or the span exceeds `size`.
+- `arkrtos_stack_guard_check_context()` runs once per tick from the tick body and reports **once**
+  when the margin drops below `ARKRTOS_STACK_GUARD_CTX_MARGIN` (default 64 B, board-overridable) or
+  the low word reaches the bottom: `arkrtos_fault_record(ARKRTOS_FAULT_STACKOVF, 0)` plus the line
+  `[STK] context stack low margin|overflow low=0x... margin=NB`.
+- `stack` gains one summary line: `stack ctx: idle/boot 0x<b>..0x<t> low=0x<l> used=N free=M`.
+- All three examples arm before `enter_idle()`; la32 and rv32 boards now set
+  `ARKRTOS_USE_STACK_GUARD 1`, otherwise there would be no readout.
+
+**Candidate 1 landed**: all three examples use `IDLE_STACK_WORDS 1024u` (4 KB), because the measured
+need is 904-984 B: 1 KB leaves 28 B and 512 B was measured overflowing. There is no usable la32
+system emulator (QEMU 9.2.3 ships none), so la32 takes the la64 size and is marked **not measured**.
+
+**Size accounting (LA64, `SOURCE_DATE_EPOCH=1600000000`)**
+
+| configuration | text | data | bss |
+| --- | --- | --- | --- |
+| `ARKRTOS_USE_STACK_GUARD=0` (board off) | 367320 | 440 | 768532 |
+| `=1` (current board, 2 + `stack ctx`) | 369216 | 440 | 770580 |
+
+The delta `text +1896 / bss +2048` includes the board's stack-guard demo task
+(`s_stack_guard_demo`, 512 words) - feature 2 itself adds only five statics
+(`s_ctx_guard_{armed,reported,bottom,top,low}`, 14 B, rounded up). The off build contains neither
+`s_ctx_guard` nor `context stack` (pinned by gate step C), and its `stack` output is unchanged
+(checked on hardware: 8 tasks, no `stack ctx` line).
+
+**Verdict after the correction**
+
+- The verdict of this addendum - the boot/idle stack overflow clobbered the neighbouring task's
+  initial frame - **holds**: the two-way causal experiment and the 904-984 B depth support each
+  other. The "108 B only" withdrawal is itself withdrawn and that number is now recorded as an
+  under-report caused by a scanner defect.
+- **One family is still open**: this recheck reproduced
+  `[LA64U] KERNEL refill (plv0) badv=0xffffff00 era=0x00244d84` (the `eentry` frame built with
+  `sp=0`, `addi.d sp, sp, -256` giving `0xffffff00`) even on the 4 KB build, which is a different
+  shape from a clobbered initial frame. So only one family of the 5.13.4 debt is closed; the
+  "is `sp` valid on the switch path" question stays open.
 
 ### 5.14 Soft-timer stack could not hold a trap frame
 

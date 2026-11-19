@@ -61,7 +61,10 @@
  * （帧 128 字节，见 port 文件头），512 字（2 KB）；与 la64 同构留足余量。
  * 栈必须是静态的（本目标同样没有堆分配器可用）。 */
 #define TASK_STACK_WORDS     512u
-#define IDLE_STACK_WORDS     256u
+/* la32 没有可用的系统模拟器（QEMU 9.2.3 不提供 la32），本目标无法实测，
+ * 取与 la64 同一档：la64 实测深度 984 B，1024 字 = 4 KB 留 3 KB 余量
+ * （docs/QEMU模拟器移植与验证.md §5.13.4 复核）。 */
+#define IDLE_STACK_WORDS     1024u
 #define FS_STACK_WORDS       1024u   /* 存储链路实测最深的栈（见 s_stack_fs） */
 
 static uint32 s_stack_a[TASK_STACK_WORDS];
@@ -384,6 +387,13 @@ static void arkrtos_start_idle(void)
     uint32 sp = (uint32)(unsigned long)(&s_idle_stack[IDLE_STACK_WORDS]);
 
     sp &= ~0xFu;      /* LoongArch 栈 16 字节对齐（ABI 硬要求） */
+
+    #if (ARKRTOS_USE_STACK_GUARD == 1)
+    /* 必须在 enter_idle 之前布防：这一刻 idle 栈还没被当作栈用，整段填图案
+     * 是安全的；进入之后 main 的活帧就搬到这块栈上了。 */
+    arkrtos_stack_guard_watch_context((uint32)(unsigned long)&s_idle_stack[0],
+                                      (uint32)sizeof(s_idle_stack), sp);
+    #endif
 
     arkrtos_port_enter_idle(sp, 1u);
 

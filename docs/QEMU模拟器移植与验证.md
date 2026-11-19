@@ -1605,7 +1605,7 @@ ERA=entry / PRMD=4`）。在本例里恰好相反：这一帧**一次都没被�
 
 两向都成立 ⇒「idle 栈溢出写坏相邻任务的初始帧」这条因果链成立，不是相关。
 
-**修法（未实施，三候选，待裁定）**
+**修法（当时三候选；复核后落地为 1 + 2，见本节末尾「复核」）**
 
 1. **加高 idle 栈**：`IDLE_STACK_WORDS 256u -> 1024u`（示例层一行，本轮已实测足够）。
    代价：`.bss +3 KB`；只是把余量从 64 B 拉到 3.1 KB，**没有把真实需求（960 B）表达出来**。
@@ -1619,6 +1619,81 @@ ERA=entry / PRMD=4`）。在本例里恰好相反：这一帧**一次都没被�
 **仍未解释**：§5.13.4 最初那例（`frame@0x003071d0`、`s_pi_chain_stack_mid`）
 本轮没有再取样核对，只确认它与本例**共享同一个形状**（初始帧槽 + 垃圾 ERA）。
 它是否同一根因，需要单独复跑判定；在那之前，欠账不能整体销账。
+
+**复核（2026-11-19 晚）：撤回「idle 栈只用了 108 B」，① 与 ② 同时落地**
+
+上一轮实施 ①+② 时顺带加了一条在线水位读数 `stack ctx:`，据此报出「idle 栈实测
+只用 108 B、从未溢出」并请求撤回 ①。**该读数是错的，错在水位扫描算法本身**；
+修正后 ① 重新成立。三处一并更正，免得以后拿错数做决定：
+
+1. **扫描停在第一个图案字**。旧实现从 `top` 向下逐字探，碰到第一个
+   `0xcdcdcdcd` 就停。实测 rv32 的陷阱帧顶部恰好留 8 字节没写过
+   （`0x801993f8/fc` 仍是 `0xcdcdcdcd`），于是 `low` 停在 `top`、`used` 报 0——
+   既低报用量，也会让真正触底时**一声不响**。新实现扫完 `[bottom, low)` 全段、
+   取最低的非图案字（每拍至多 `stack_words` 次 32 位读，1 KB 栈即 256 次）。
+2. **布防要求 16 字节对齐**，而 rv32 的 `s_idle_stack` 落在 `0x8019900c`
+   （4 字节对齐），`watch_context` 于是**静默拒绝布防**，shell 里连一行读数都没有。
+   现在放宽为字对齐（填图案与扫描本就按字做），且布防被拒时 shell 显式打
+   `stack ctx: not armed (watch_context refused: ...)`——静默失败比没有守卫更坏。
+3. 因此上一轮那张「108 B」读数表、以及基于它的「① 失去依据」结论**全部作废**。
+
+**修正后的实测**（`stack ctx:` 内核读数 + QEMU monitor `xp` 直读双通道，逐字节一致）
+
+| 目标 | `IDLE_STACK_WORDS` | 栈容量 | used | free |
+| --- | --- | --- | --- | --- |
+| LA64 qemu | `256u` | 1012 B | 824 B | 200 B |
+| LA64 qemu | `1024u`（**采用**） | 4088 B | **904 / 984 B** | 3192 / 3112 B |
+| RV32 qemu | `256u` | 1012 B | 504 B | 508 B |
+| RV32 qemu | `1024u`（**采用**） | 4088 B | 504 B | 3580 B |
+| LA64 qemu | `128u` | 512 B | **溢出** | 0 |
+
+- LA64 真深度在 **904~984 B**（两次不同 boot），与本段上一版「4 KB 对照镜像 HMP
+  读 960 B」互相印证；`256u` 那个 824 B 是**被 1 KB 截断的读数**，不是真深度。
+- `128u` 一档在修正后的扫描下由守卫当场报出
+  `[STK] context stack overflow low=0x003b5820 margin=0B` ⇒ ② 会响，不是纸面开关。
+- RV32 两档读数完全一致（504 B），说明它与栈大小无关，不是截断值。
+
+**② 的实现**（`ARKRTOS_USE_STACK_GUARD == 1` 才编入；默认档仍是 0，逐字节不变）
+
+- `arkrtos_stack_guard_watch_context(bottom, size, top)`：在 `enter_idle()` **之前**
+  调用（那一刻这块栈还没被当栈用），把 `[bottom, top)` 整段填
+  `ARKRTOS_STACK_FILL_PATTERN`；参数不成立（尺寸 < 256 B / 非字对齐 /
+  `top <= bottom` / 跨度大于 size）就不布防。
+- `arkrtos_stack_guard_check_context()`：节拍体里每拍扫一次；余量低于
+  `ARKRTOS_STACK_GUARD_CTX_MARGIN`（默认 64 B，可板级覆盖）或触底时**只报一次**
+  （`arkrtos_fault_record(ARKRTOS_FAULT_STACKOVF, 0)` + 串口
+  `[STK] context stack low margin|overflow low=0x... margin=NB`）。
+- `stack` 命令新增一行汇总：`stack ctx: idle/boot 0x<b>..0x<t> low=0x<l>
+  used=N free=M`。
+- 三档示例（la64 / la32 / rv32）都在 `enter_idle()` 前布防；la32 与 rv32 的板级
+  配置本轮把 `ARKRTOS_USE_STACK_GUARD` 置 1，否则拿不到读数。
+
+**① 的落地**：三档 `IDLE_STACK_WORDS` 统一 `1024u`（4 KB）。依据是实测需求
+904~984 B：1 KB 只剩 28 B，512 B 已实测溢出。LA32 没有可用的系统模拟器
+（QEMU 9.2.3 不提供 la32），取与 la64 同档，如实标注**未实测**。
+
+**体积记账（LA64，`SOURCE_DATE_EPOCH=1600000000`）**
+
+| 配置 | text | data | bss |
+| --- | --- | --- | --- |
+| `ARKRTOS_USE_STACK_GUARD=0`（板级关档） | 367320 | 440 | 768532 |
+| `=1`（本板现状，含 ② 与 `stack ctx`） | 369216 | 440 | 770580 |
+
+差额 `text +1896 / bss +2048`，其中 2 KB 是板级栈守卫演示任务
+（`s_stack_guard_demo`，512 字）——② 自身新增的静态量只有 5 个字
+（`s_ctx_guard_{armed,reported,bottom,top,low}`，14 B，按对齐取整）。
+关档镜像里 `s_ctx_guard` 与 `context stack` 一个字都不出现（门禁 C 段钉死），
+`stack` 命令输出与改动前一致（实跑核对：8 个任务、无 `stack ctx` 行）。
+
+**判词（更正后）**
+
+- 本节原判词「启动/idle 栈溢出写坏紧邻任务的初始帧」**成立**：两向因果实验与
+  904~984 B 的实测深度互相支持。「只用了 108 B」的撤回**撤销**，该读数定性为
+  「水位扫描缺陷造成的低报」，不再引用。
+- 但**另一族现场仍在**：本次复核在 4 KB 档上也复现了一次
+  `[LA64U] KERNEL refill (plv0) badv=0xffffff00 era=0x00244d84`（`eentry` 建帧时
+  `sp=0`，`addi.d sp, sp, -256` 得 `0xffffff00`），形状与「初始帧被写坏」不同。
+  因此 §5.13.4 的欠账**只销掉一族**，「切换路径上的 sp 有效性」继续挂着。
 
 ### 5.14 软定时器栈装不下陷阱帧：KERNEL refill 的真根因（已修）
 
