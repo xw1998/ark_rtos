@@ -5700,6 +5700,56 @@ $ wsl -l -v
 留存。** 不装 MSYS2、不换 WSL/Linux 宿主；LA32 port 保持「只到编译/链接」这一档，
 哪天有了 LA32 载体再按 §6.8.5 首跑，判词与核对命令原样留在这里当入口。
 
+#### 6.1.3 外部载体再核查（2026-11-19）：判词不变
+
+§6.1.2 记的是「这台机器今天能不能跑」，本节记的是「上游这半年有没有多出载体」。
+三条新事实全部是 2026-11-19 现查的，不是凭记忆：
+
+1. **上游 QEMU master 仍然没有 LA32 目标。** GitLab API 列 `target/loongarch/`
+   目录共 23 项，没有 `loongarch32` 相关文件；同一目录下的 `Kconfig` 全文只有
+
+   ```
+   config LOONGARCH64
+       bool
+   ```
+
+   一条。核对命令：
+
+   ```bash
+   $ curl -s "https://gitlab.com/api/v4/projects/11167699/repository/tree?path=target/loongarch"
+   # 23 项：kvm tcg Kconfig README arch_dump.c cpu-csr.h cpu-mmu.h cpu-param.h ... vec.h
+   $ curl -s "https://gitlab.com/qemu-project/qemu/-/raw/master/target/loongarch/Kconfig"
+   config LOONGARCH64
+       bool
+   ```
+
+   推论：新版 QEMU 发行说明里「补全 LoongArch TCG 指令」补的是 **LA64 指令集**，
+   不是新增 32 位目标。不要把发行说明读成「上游已经有 LA32 了」。
+
+2. **`la32r-QEMU` 的最新发行物仍然只有 Linux/Mac。** gitee API 查 releases：
+
+   | 发行 | 资产 |
+   |---|---|
+   | v0.0.2（2024-05-10） | `la32r-QEMU-x86_64-ubuntu-22.04.tar`、`la32r-QEMU-aarch64-ubuntu-22.04.tar` |
+   | v0.0.1-alpha（2022-04-15） | `qemu-system-loongarch32_{MAC_arm64,debian_la64,centos_la64,centos_x86_64,debian_x86_64}`、`loongarch32r-linux-gnusf-gdb` |
+
+   全是 ELF/Linux 可执行文件，没有一个 PE。仓库状态：默认分支 `la32_debug`，
+   另有一支 `la32_release`，最后一次更新 2025-12-26，GPL-2.0，7 star。
+
+3. **本机仍然只有一个 WSL 壳。** `wsl.exe -l -v` 返回的是「没有已安装的分发版」
+   引导文案（提示 `wsl.exe --list --online` 与 `wsl.exe --install <Distro>`），
+   不是发行版列表；`wsl.exe` 本身在 `C:/Windows/system32/` 里，但没有任何
+   Linux 环境。这与 §6.1.2 第五行一致，今天只是再确认一次。
+
+再补一条正面事实（避免把「跑不了」读成「什么都没有」）：**编译侧是齐的**。
+`D:/LoongIDE/la32-tool/bin/loongarch32-newlib-elf-gcc.exe`（GCC 8.3.0）在，
+`example/la32_generic` 的产物能出；缺的只有执行载体这一件东西。
+
+**判词不变：`la32_execution_carrier` = `carrier_unavailable_on_this_machine`
+（2026-11-19 复核，无新载体）。** 三条不许读法照旧：不等于 LA32 port 的代码
+有问题；不等于上游永远不会有 LA32 目标；不等于「这台机器上跑不了」这件事
+可以用换 RTOS / 换编译器绕过。
+
 ### 6.2 工具链与产物
 
 `D:/LoongIDE/la32-tool/bin/loongarch32-newlib-elf-gcc.exe`（GCC 8.3.0）。
@@ -7310,3 +7360,117 @@ LoongArch 的 `CRMD` 位序是 `PLV[1:0]`（bit0/1）、**`IE`（bit2）**、`DA
   §三 欠账盘点里的 SMP 行按读数更新，不当结论用。
 - 原始 §5.13.4 那例（`frame@0x003071d0`、`s_pi_chain_stack_mid`、`ra=0`）是
   「中途任务从入口返回」，与本节两族**不同源**，仍按上一节的判词处理。
+
+## 11. 开源 CPU 模拟器选型：ARM / RISC-V / LoongArch，带 MMU 与带 MPU（2026-11-19）
+
+本节要回答的问题不是「哪个模拟器最好」，而是两个更窄的问题：**这台 Windows
+机器今天能开哪些机型**，以及**为了让我们再跑一个 ISA 家族，要付多少成本**。
+证据按三档写，混着读会被当成同一种证据：
+
+- **本机实测**：命令在今天这台机器上跑过，输出可复现；
+- **仓库/文档事实**：读了上游仓库文件或发布页 API，没有在本机执行；
+- **未核实**：只登记候选，不当证据用。
+
+### 11.1 本机实测：QEMU 9.2.3 能开什么
+
+```bash
+$ ls D:/env/tools/qemu/qemu9/mingw64/bin/qemu-system-*.exe | wc -l
+58
+$ D:/env/tools/qemu/qemu9/mingw64/bin/qemu-system-arm.exe -M help
+lm3s6965evb          Stellaris LM3S6965EVB (Cortex-M3)
+lm3s811evb           Stellaris LM3S811EVB (Cortex-M3)
+microbit             BBC micro:bit (Cortex-M0)
+mps2-an385           ARM MPS2 with AN385 FPGA image for Cortex-M3
+mps2-an386           ARM MPS2 with AN386 FPGA image for Cortex-M4
+mps2-an500           ARM MPS2 with AN500 FPGA image for Cortex-M7
+mps2-an505           ARM MPS2 with AN505 FPGA image for Cortex-M33
+mps2-an511           ARM MPS2 with AN511 DesignStart FPGA image for Cortex-M3
+mps2-an521           ARM MPS2 with AN521 FPGA image for dual Cortex-M33
+musca-a / musca-b1   ARM Musca-A/B1 board (dual Cortex-M33)
+netduino2            Netduino 2 Machine (Cortex-M3)
+netduinoplus2        Netduino Plus 2 Machine (Cortex-M4)
+olimex-stm32-h405    Olimex STM32-H405 (Cortex-M4)
+stm32vldiscovery     ST STM32VLDISCOVERY (Cortex-M3)
+versatileab / pb     ARM Versatile/AB, /PB (ARM926EJ-S)
+vexpress-a9          ARM Versatile Express for Cortex-A9
+vexpress-a15         ARM Versatile Express for Cortex-A15
+virt-*               ARM Virtual Machine（含当前版本）
+```
+
+```bash
+$ qemu-system-aarch64.exe -M help      # mps3-an524/an536/an547, sbsa-ref, virt, raspi0..4b, vexpress-a9/a15
+$ qemu-system-riscv32.exe -M help      # none, opentitan, sifive_e, sifive_u, spike, virt
+$ qemu-system-loongarch64.exe -M help  # none, virt
+$ qemu-system-loongarch64.exe -cpu help# la132, la464, max
+$ qemu-system-riscv32.exe -cpu help    # lowrisc-ibex, rv32, rv32e, rv32i, sifive-e31, sifive-e34, sifive-u34
+$ qemu-system-arm.exe -accel help      # tcg
+```
+
+两个直接结论：
+
+1. **Windows 官方构建只有 TCG**（`-accel help` 只列 `tcg`），所以全部机型都是
+   解释执行，「哪个更快」不该成为选型主因。
+2. **ARM 侧机型密度最高**：Cortex-M0/M3/M4/M7/M33 与 Cortex-A9/A15 都在，
+   而我们 `kernelsrc/port/arm/` 下已经有 cortex-m3 / cortex-m4 / cortex-m7
+   三套 port（含 SysTick、PendSV、SVC、MPU 分支），却**没有一个 QEMU 目标**
+   —— `example/` 下只有 `qemu_riscv32` 与 `qemu_loongarch64`。
+
+### 11.2 MMU 与 MPU 分别落在哪些机型上
+
+| 机制 | 本机存在的机型 | 与我们代码的关系 |
+|---|---|---|
+| MPU（PMSAv7，8 区域） | `mps2-an385/an386/an500/an505`、`netduino2/plus2`、`stm32vldiscovery`、`lm3s6965evb/811evb`、`olimex-stm32-h405` | `port/arm/cortex-m3` 与 `cortex-m4/m7` 里已有 `ARKRTOS_USE_MPU` 分支（区域配置 + idle 上下文），但从未在模拟器上执行过 |
+| MMU（VMSA，两级页表） | `vexpress-a9`(Cortex-A9)、`vexpress-a15`、`aarch64 virt`、`sbsa-ref` | 需要异常级切换、页表遍历、TLB 维护，工作量是 MPU 的数倍；本仓库 LA64 侧已有 SVC 0x18 取布局的 MMU 证据，ARM 侧没有 |
+| RISC-V MMU（Sv32/Sv39/Sv48） | `riscv32 virt`、`riscv64 virt`、`sifive_u` | rv32 已实跑（无 MMU 路径）；rv64 需要 64 位 `long` 与 `-mcmodel` 调整 |
+| RISC-V PMP | 全部 riscv 机型（PMP 在 CPU 模型里）；`sifive_e`(E31) 无 MMU | 可作为「无 MMU 但有物理保护」的对照 |
+| LoongArch 软 TLB | `loongarch64 virt`（la464 / la132） | 已实跑，含进程模型与 ELF 装载 |
+
+### 11.3 候选模拟器清单
+
+| 项目 | 许可 | Windows 可跑 | MMU | MPU | 对本仓库的适配成本 | 证据等级 |
+|---|---|---|---|---|---|---|
+| QEMU 9.2.3（已装） | GPL-2.0 | 官方 w64 构建，已在用 | 有 | 有 | 0：只缺板级 | 本机实测 |
+| 上游 QEMU master/11.x 自建 | GPL-2.0 | 需 MSYS2 或 Linux 宿主 | 有 | 有 | 高（整套宿主编译环境） | 仓库事实（`target/loongarch/Kconfig` 只有 LOONGARCH64） |
+| `la32r-QEMU`（loongson-edu） | GPL-2.0 | 发行物只有 Linux/Mac | 无（LA32R 无 MMU） | 无 | 中（需 Linux/WSL 宿主） | 仓库事实（releases API） |
+| Renode（Antmicro） | Apache-2.0 | 有 Windows 安装包 | 有（外部 MMU 模型） | 有（Cortex-M 模型） | 中：要写 `.repl` 平台描述与 UART 外设映射 | 上游文档，未在本机安装 |
+| TinyEMU（Bellard） | MIT（仓库 `MIT-LICENSE.txt`） | 源码可 mingw 编译；官方发行物以 Linux + 在线 JS 为主 | 有（RV32/64） | 无 | 无 ARM；只覆盖 RISC-V | 未核实 Windows 二进制 |
+| rv32emu（sysprog21） | MIT | 需自行 make（MSYS2/mingw），未核实 | 有（Sv32，系统模式） | 无 | 中：RV32IMAFC + virtio，但外设与我们不同 | 未核实 |
+| mini-rv32ima（cnlohr） | 宽松（单头文件） | 单头文件，任何 C 编译器可编 | **无**（作者明确说明无 MMU） | 无 | 低，但撑不起 app 隔离 | 未核实 |
+| Spike（riscv-isa-sim） | BSD | 以 Linux 为主 | 有 | 无 | 参考 ISS，无外设生态 | 未核实 |
+| SkyEye | GPL-2.0 | 有 Windows 版 | 有（ARM 等） | 部分 | 代码老、接口陌生 | 未核实 |
+| Unicorn | GPL-2.0 | Windows wheel 有 | 有（CPU 内） | 有（CPU 内） | **只有 CPU 核，无整机外设**，不能直接跑镜像 | 未核实 |
+
+这张表的用法要写死一句：**「支持某架构」不等于「能跑我们的镜像」**。我们要的是
+具体外设（CMSDK APB UART、CLINT/ACLINT、PLIC、16550），以及确定的加载地址与
+启动约定；只实现指令集的模拟器（Spike、Unicorn、mini-rv32ima）能跑纯计算，
+跑不了带串口输出的内核。
+
+### 11.4 推荐顺序（按「已有 port × 成本」排，不是按「名气」排）
+
+1. **`mps2-an385`（Cortex-M3 + MPU）** —— 最短路径：`port/arm/cortex-m3` 已把
+   SysTick、PendSV、SVC、MPU 写完，缺的只有 board（CMSDK APB UART0 在
+   `0x40004000`）、startup 与 linker script。做成以后，本仓库第一次有
+   **第三个 ISA 家族**在模拟器上跑，也是 MPU 保护机制唯一能在模拟器里验证的地方。
+2. **`riscv64 virt`（Sv39）** —— rv32imac 已实跑，rv64 主要是 `long`/指针宽度、
+   `-mcmodel=medany` 与页表三处改动，工作量中等。
+3. **`aarch64 virt`（EL1/EL0 MMU）** —— 收益是「MMU 进程隔离」能在两个 ISA 上
+   对拍，但要写异常级、GIC、页表，成本最高，排在 LA64 已有 MMU 证据之后。
+4. **LA32** —— 无载体（§6.1.3），不动。
+
+### 11.5 判词与不许读法
+
+- `sim_machine_matrix_local`（本机 58 个 system 模拟器的机型清单）= **实测**，
+  表在 §11.1；
+- `arm_sim_target_missing`（ARM 有 port、无 QEMU 目标）= **实测**：`example/` 下
+  只有 `qemu_riscv32`、`qemu_loongarch64`、`la32_generic` 与三个 stm32 实机板；
+- `next_sim_target_is_mps2_an385` = **建议**，不是结论，也不代表已完成。
+
+三条不许读法：
+
+1. 不许把「Renode/TinyEMU 支持 RISC-V」读成「我们的镜像能在上面跑」——外设模型
+   对不上就是跑不起来；
+2. 不许把「带 MMU 的模拟器很多」读成「我们的 MMU 代码已经验证过」——验证是
+   在具体机型上跑出具体读数才成立的；
+3. 本节除 QEMU 9.2.3 的机型清单外，**没有在 Renode / TinyEMU / rv32emu /
+   mini-rv32ima / Spike / SkyEye / Unicorn 上执行过任何东西**，这些行只能当
+   候选清单读。

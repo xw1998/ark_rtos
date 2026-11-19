@@ -3380,6 +3380,55 @@ The only candidate is the `la32r-QEMU` fork. Its machine is `ls3a5k32`, `max_cpu
 
 The user ruled on 2026-11-17 to **close this line as-is** rather than keep shopping for a carrier. The port therefore stays at "compiles, never executed", and that classification must not be softened.
 
+### 6.1.3 Carrier re-check (2026-11-19): verdict unchanged
+
+§6.1.2 recorded whether *this machine* could run LA32 today. This subsection records
+whether the upstream world grew a carrier since then. Three facts, all looked up on
+2026-11-19 rather than recalled:
+
+1. **Upstream QEMU master still has no LA32 target.** The GitLab API listing of
+   `target/loongarch/` returns 23 entries and none of them is loongarch32-specific;
+   the `Kconfig` in that directory contains exactly one symbol:
+
+   ```
+   config LOONGARCH64
+       bool
+   ```
+
+   Checked with:
+
+   ```bash
+   $ curl -s "https://gitlab.com/api/v4/projects/11167699/repository/tree?path=target/loongarch"
+   $ curl -s "https://gitlab.com/qemu-project/qemu/-/raw/master/target/loongarch/Kconfig"
+   ```
+
+   Consequence: release notes saying "LoongArch TCG got more instructions" mean the
+   **LA64** instruction set, not a new 32-bit target. Do not read them as "upstream
+   has LA32 now".
+
+2. **The `la32r-QEMU` fork still ships Linux binaries only.** The gitee releases API
+   lists v0.0.2 (2024-05-10) with `la32r-QEMU-x86_64-ubuntu-22.04.tar` and
+   `aarch64-ubuntu-22.04.tar`, and v0.0.1-alpha (2022-04-15) with MAC/debian/centos
+   binaries plus a cross gdb. Every asset is an ELF/Linux executable; none is a PE.
+   Repo state: default branch `la32_debug`, second branch `la32_release`, last push
+   2025-12-26, GPL-2.0.
+
+3. **This machine still has only the WSL stub.** `wsl.exe -l -v` prints the
+   "no distribution installed" guidance (`wsl.exe --list --online`,
+   `wsl.exe --install <Distro>`), not a list of distributions. `wsl.exe` exists in
+   `C:/Windows/system32/`, but there is no Linux environment behind it -- consistent
+   with §6.1.2, re-confirmed today.
+
+One positive fact, so that "cannot run" is not read as "nothing exists": the
+**compile side is complete**. `D:/LoongIDE/la32-tool/bin/loongarch32-newlib-elf-gcc.exe`
+(GCC 8.3.0) is present and `example/la32_generic` builds; only the execution carrier
+is missing.
+
+**Verdict unchanged: `la32_execution_carrier` = `carrier_unavailable_on_this_machine`
+(re-checked 2026-11-19, no new carrier).** The three forbidden readings still stand:
+this is not a defect in the LA32 port, not a claim that upstream will never have an
+LA32 target, and not something a different RTOS or a different compiler can route around.
+
 ### 6.2 Toolchain
 
 `D:/LoongIDE/la32-tool/bin/loongarch32-newlib-elf-*`, with `-march=loongarch32 -mabi=ilp32d`.
@@ -4096,3 +4145,97 @@ An instance of "do not fix a downstream symptom as if it were an independent bug
 - The original §5.13.4 instance (`frame@0x003071d0`, `s_pi_chain_stack_mid`, `ra=0`) is a
   mid task returning from its entry function -- a different family from the two above and
   still governed by the previous section's verdict.
+
+## 11. Open-source CPU simulators: ARM / RISC-V / LoongArch, with MMU and with MPU (2026-11-19)
+
+This section does not rank simulators by reputation. It answers two narrower questions:
+which machines can *this Windows box* start today, and what does it cost to run a
+**third ISA family**. Evidence is graded three ways and the grades must not be mixed:
+
+- **local measurement**: a command was run on this machine today, output reproducible;
+- **repo / release-page fact**: an upstream file or API was read, nothing executed;
+- **unverified**: candidate only, not evidence.
+
+### 11.1 Local measurement: what QEMU 9.2.3 can start
+
+```bash
+$ ls D:/env/tools/qemu/qemu9/mingw64/bin/qemu-system-*.exe | wc -l
+58
+$ qemu-system-arm.exe -M help
+lm3s6965evb / lm3s811evb   Stellaris boards (Cortex-M3)
+microbit                   BBC micro:bit (Cortex-M0)
+mps2-an385/an386/an500     ARM MPS2: Cortex-M3 / M4 / M7
+mps2-an505/an511/an521     Cortex-M33 / DesignStart M3 / dual Cortex-M33
+musca-a, musca-b1          dual Cortex-M33
+netduino2, netduinoplus2   Cortex-M3 / M4
+olimex-stm32-h405          Cortex-M4
+stm32vldiscovery           Cortex-M3
+versatileab, versatilepb   ARM926EJ-S
+vexpress-a9, vexpress-a15  Cortex-A9 / A15
+virt-*                     ARM Virtual Machine
+$ qemu-system-aarch64.exe -M help   # mps3-an524/an536/an547, sbsa-ref, virt, raspi0..4b, vexpress-a9/a15
+$ qemu-system-riscv32.exe -M help   # opentitan, sifive_e, sifive_u, spike, virt
+$ qemu-system-loongarch64.exe -M help  # virt only
+$ qemu-system-arm.exe -accel help   # tcg
+```
+
+Two direct conclusions:
+
+1. **Windows official builds are TCG-only** (`-accel help` lists only `tcg`), so host
+   speed is not a selection criterion.
+2. **ARM has by far the densest machine list**, and `kernelsrc/port/arm/` already holds
+   cortex-m3 / cortex-m4 / cortex-m7 ports (SysTick, PendSV, SVC, MPU branches) —
+   yet `example/` has **no** QEMU ARM target, only `qemu_riscv32`, `qemu_loongarch64`,
+   `la32_generic` and three STM32 hardware boards.
+
+### 11.2 Where MMU and MPU actually live
+
+| Mechanism | Machines present locally | Relation to our code |
+|---|---|---|
+| MPU (PMSAv7) | `mps2-an385/an386/an500/an505`, `netduino2/plus2`, `stm32vldiscovery`, `lm3s*` | `ARKRTOS_USE_MPU` code already written in the Cortex-M ports, never executed in a simulator |
+| MMU (VMSA) | `vexpress-a9`, `vexpress-a15`, `aarch64 virt`, `sbsa-ref` | Needs exception levels, page tables, TLB maintenance; several times the MPU effort |
+| RISC-V MMU (Sv32/39/48) | `riscv32/64 virt`, `sifive_u` | rv32 already runs (no-MMU path); rv64 needs 64-bit `long` |
+| RISC-V PMP | every RISC-V machine (`sifive_e` has no MMU) | usable as a "physical protection without MMU" control |
+| LoongArch software TLB | `loongarch64 virt` (la464 / la132) | already runs, process model and ELF loading included |
+
+### 11.3 Candidate list
+
+| Project | License | Windows | MMU | MPU | Cost for this repo | Evidence |
+|---|---|---|---|---|---|---|
+| QEMU 9.2.3 (installed) | GPL-2.0 | official w64 build, in use | yes | yes | 0, board only | local measurement |
+| Upstream QEMU master / 11.x built locally | GPL-2.0 | needs MSYS2 or a Linux host | yes | yes | high (whole host toolchain) | repo fact: `target/loongarch/Kconfig` has LOONGARCH64 only |
+| `la32r-QEMU` | GPL-2.0 | Linux/Mac assets only | no | no | medium (needs Linux/WSL) | release API |
+| Renode | Apache-2.0 | Windows installer | yes (external models) | yes (Cortex-M) | medium: `.repl` platform + UART mapping | upstream docs, not installed here |
+| TinyEMU | MIT | source builds with mingw; official assets Linux/JS | yes (RV32/64) | no | RISC-V only | Windows binary unverified |
+| rv32emu | MIT | build from source (MSYS2/mingw) | yes (Sv32) | no | medium: RV32IMAFC + virtio | unverified |
+| mini-rv32ima | permissive, single header | any C compiler | **no** | no | low, but cannot isolate apps | unverified |
+| Spike | BSD | mainly Linux | yes | no | reference ISS, no peripherals | unverified |
+| SkyEye | GPL-2.0 | Windows build exists | yes | partial | old code base | unverified |
+| Unicorn | GPL-2.0 | Windows wheels | yes (CPU) | yes (CPU) | **CPU core only, no board** | unverified |
+
+Hard rule for reading this table: **"supports architecture X" is not "runs our image".**
+We need specific peripherals (CMSDK APB UART, CLINT/ACLINT, PLIC, 16550) plus fixed load
+addresses and boot conventions; instruction-set-only simulators run computation, not a
+kernel that prints.
+
+### 11.4 Recommended order (by existing port times cost, not by fame)
+
+1. **`mps2-an385` (Cortex-M3 + MPU)** — shortest path: the port is already written;
+   what is missing is a board (CMSDK APB UART0 at `0x40004000`), a startup file and a
+   linker script. It gives the repo its first **third ISA family** under simulation and
+   the only place where the MPU protection paths can be exercised.
+2. **`riscv64 virt` (Sv39)** — rv32imac already runs; rv64 is mostly `long`/pointer
+   width, `-mcmodel=medany` and page tables.
+3. **`aarch64 virt` (EL1/EL0)** — highest payoff for MMU isolation cross-checks, highest cost.
+4. **LA32** — no carrier (§6.1.3), untouched.
+
+### 11.5 Verdicts and forbidden readings
+
+- `sim_machine_matrix_local` (the 58-emulator machine list) = **measured**, §11.1;
+- `arm_sim_target_missing` (ARM port exists, no QEMU target) = **measured**;
+- `next_sim_target_is_mps2_an385` = **a recommendation**, not a result, and not "done".
+
+Forbidden readings: (1) "Renode/TinyEMU support RISC-V" does not mean our image boots
+there; (2) "many simulators have an MMU" does not mean our MMU code is verified;
+(3) nothing in this section was executed on Renode, TinyEMU, rv32emu, mini-rv32ima,
+Spike, SkyEye or Unicorn — those rows are candidates only.
