@@ -35,10 +35,18 @@ analyzer 项，2026-11-18 接）。本脚本只做更小的那一半：把编译
   2. 判据不是"编译过了"，而是**默认档 LA64 镜像逐字节不变**：转换只该改变编译器
      看到的意图，不该改变生成的指令与数据。
 
-仍未开：-Wcast-qual（14 条，全在 test_eset_host.c，把字符串字面量的 const 丢掉）、
--Wwrite-strings（会额外暴露 20 条同型问题：create(name) 形参是 char* 而不是
-const char*，修它要动 API 签名，属于另一件事）、-Wpointer-arith / -Wundef /
--Wbad-function-cast 各 0 条。数字登记在 docs/欠账盘点.md。
+-Wcast-qual 2026-11-19 也一并打开。2026-11-17 记的是 14 条、全在
+test_eset_host.c；2026-11-19 在同一批 21 个 TU 上复核为 0 条 —— 那 14 条已经被中间
+几笔改掉了（丢 const 都在测试桩里，随桩声明一起整理），哈希与行为都没变。开档时
+特意先数一遍而不是照旧数字写口径：**照旧数字开档会让门禁先红一次，而"14 条"其实
+早就不成立了**。
+
+仍未开：-Wwrite-strings（20 条，全部是 create("literal") 传字面量给 char* 形参：
+test_sbuf_host 6 / test_sync_host 10 / test_mq_host 4）。修法不是改测试，而是把
+sbuf/mq/sync/eset/dev/event/mpool 的 create/open 接口形参改成 const char* ——
+内核侧全是拷进定长数组、没有任何一处保存指针，所以这是纯签名放宽（调用方传 char*
+照样编过，ABI 与指令都不变），但牵动公开头文件与 API 参考，属另一件事；-Wpointer-arith /
+-Wundef / -Wbad-function-cast 各 0 条。数字登记在 docs/欠账盘点.md。
 
 它抓到过真东西：2026-11-17 它在 arkrtos_sync.c 上翻出 arkrtos_sync_release_task()
 里的 p_tsk 声明了却从未赋值 —— 死任务的锁永远不会移交、等待队列永远摘不干净。
@@ -55,7 +63,8 @@ riscv64 工具链）编，那是另一件事，本门禁不声称覆盖它们。
 判据与边界
 ----------
 * 判据 = 每一条 TU 编译成功且输出里没有 "warning:"。有任何一条告警就红。
-* 选项集固定为 WARN_FLAGS（-Wall -Wextra -Wshadow + 三条接口暴露告警）；
+* 选项集固定为 WARN_FLAGS（-Wall -Wextra -Wshadow + 三条接口暴露告警
+  + -Wconversion + -Wcast-qual，共八条）；
   加选项要先在宿主 21 个 TU 上跑成零告警，并在 docstring 里写清口径。
 * 这里只证明"编译器在这个配置下没话说"，不证明没有逻辑缺陷；也不是 MISRA /
   认证意义上的静态分析。别拿它当"静态分析已完成"。
@@ -85,7 +94,7 @@ from coverage_gate import CASES, COMMON_INC, find_cc, mingw_prefix  # noqa: E402
 # 加选项必须先跑成零告警再改这里，否则门禁会先红一次。
 WARN_FLAGS = ["-Wall", "-Wextra", "-Wshadow",
               "-Wmissing-prototypes", "-Wstrict-prototypes", "-Wold-style-definition",
-              "-Wconversion"]
+              "-Wconversion", "-Wcast-qual"]
 
 # 与 CASES 同源的补一条：SDK stdio 的宿主用例（对应 ci_gate 的 sdk-stdio-host）。
 EXTRA = [("sdk-stdio", "kernelsrc/sdk/app_sdk/tests/test_stdio_host.c", [], [])]

@@ -3480,9 +3480,16 @@ once from the working tree: **0 warnings in both**, and identical Code / RO / RW
 Gates: `warn_gate.py` -> `WARN-GATE OK (21 host TUs ... -Wconversion clean)`;
 `ci_gate.py` -> **47 passed / 0 failed / 0 skipped**.
 
-Still not enabled: `-Wcast-qual` 14 (all in `test_eset_host.c`), `-Wwrite-strings` would
-expose 20 more of the same shape (`create(name)` taking `char*` instead of `const char*`,
-i.e. API signatures), and `-Wpointer-arith` / `-Wundef` / `-Wbad-function-cast` at 0 each.
+`-Wcast-qual` was enabled in the same pass: the 2026-11-17 count of 14 (all in
+`kernelsrc/tests/test_eset_host.c`) had already dropped to **0** by the intervening commits,
+so enabling it required **no source change** and the image cannot have moved. The count was
+redone before writing the policy into the gate rather than trusting the old number.
+
+Still not enabled: `-Wwrite-strings`, 20 items, all `create(name)` passing a literal to a
+`char*` parameter (`sbuf` 6 / `sync` 10 / `mq` 4). The fix is changing `create`/`open`
+parameters to `const char *` -- the kernel copies every name and never stores a pointer, so
+it is a pure signature relaxation, but it touches public headers and the API reference and
+gets its own commit. `-Wpointer-arith` / `-Wundef` / `-Wbad-function-cast` report 0 each.
 
 **Verdict tiers: 21 host TUs clean on seven options + default LA64 image byte-identical
 (`cmp -l` 0) + switch-on build (armclang F427, five TUs) clean with unchanged sizes; not

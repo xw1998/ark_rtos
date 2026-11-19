@@ -6471,8 +6471,14 @@ Code / RO / RW / ZI 逐项相同：`mq` 3932/128/0/1568、`sync` 9726/288/4/2248
 `ci_gate.py` 全量 **47 passed / 0 failed / 0 skipped**（`MQ-HOST` / `SBUF-HOST` 回归
 照旧全过，证明显式转换没改行为）。
 
-仍未开：`-Wcast-qual` 14 条（全在 `kernelsrc/tests/test_eset_host.c`）、`-Wwrite-strings`
-会额外暴露 20 条同型（`create(name)` 形参 `char*` 应为 `const char*`，动 API 签名）、
+同日另开 `-Wcast-qual`：2026-11-17 记的 14 条（全在 `kernelsrc/tests/test_eset_host.c`）
+在同一天的复核里已经是 **0 条**（中间几笔把测试桩里的 `const` 丢法改掉了），所以这次开档
+**源码零改动**，镜像不可能变化；开档前重新数一遍而不是照旧数字写口径，是因为照旧数字开档
+只会让门禁先红一次。
+
+仍未开：`-Wwrite-strings` 20 条，全部是 `create(name)` 传字面量给 `char*` 形参
+（`sbuf` 6 / `sync` 10 / `mq` 4）。修法是把 `create`/`open` 的形参改成 `const char *` ——
+内核侧全拷进定长数组、不保存指针，属纯签名放宽，但牵动公开头文件与 API 参考，另立一笔；
 `-Wpointer-arith` / `-Wundef` / `-Wbad-function-cast` 各 0 条。
 
 **结论分档：宿主 21 个 TU 七条选项零告警 + 默认档 LA64 镜像逐字节不变（`cmp -l` 0 处）
