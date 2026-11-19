@@ -298,7 +298,13 @@ void arkrtos_port_board_init(void)
 {
     arkrtos_board_console_init();
 
+#if (ARKRTOS_USE_SMP == 1)
+    /* 开 SMP 时这行不能再写 "1 hart"\uff1a镜像里 ARKRTOS_CPU_NUM 个核都会起。
+     * 关档仍走原字符串，保证默认镜像逐字节不变。 */
+    arkrtos_board_puts("\n[Ark RTOS] board: qemu_riscv32 (virt, rv32imac, smp)\n");
+#else
     arkrtos_board_puts("\n[Ark RTOS] board: qemu_riscv32 (virt, rv32imac, 1 hart)\n");
+#endif
     arkrtos_board_puts("[Ark RTOS] arch=");
     arkrtos_board_puts(ARKRTOS_ARCH_NAME);
     arkrtos_board_puts(" clint=");

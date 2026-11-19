@@ -236,9 +236,19 @@
 #undef  ARKRTOS_HW_SAFE
 #define ARKRTOS_HW_SAFE              1
 
-/* 单 hart：SMP 关掉（QEMU 能给多 hart，后续做 SMP 验证时再开） */
-#undef  ARKRTOS_USE_SMP
+/* SMP 开关：生产档默认 0（单 hart）。为了让命令行
+ * -DARKRTOS_USE_SMP=1 能真正生效，这里必须用 #ifndef 而不是 #undef；
+ * 与 board/qemu_loongarch64 同一套写法。 */
+#ifndef ARKRTOS_USE_SMP
 #define ARKRTOS_USE_SMP              0
+#endif
+
+/* 次核专用堆栈（字节）。arkrtos_smp.c 与两份 .S（start.S /
+ * arkrtos_context.S）共用这个宏；汇编侧看不到 arkrtos_config.h，所以在板级
+ * 头里落默认值。QEMU RV32 下次核只做 IPI 与 idle，8192 B 富余。 */
+#ifndef ARKRTOS_SMP_SEC_STACK_SIZE
+#define ARKRTOS_SMP_SEC_STACK_SIZE   8192
+#endif
 
 /* 软定时器服务任务的栈（字）。默认 96 字 = 384 B 在 RV32 上实测不够：
  * 2026-11-17 QEMU 实测（`stack raw`，fill 扫描取大值），跑过

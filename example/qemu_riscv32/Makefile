@@ -80,7 +80,11 @@ CFLAGS := $(ARCH_FLAGS) -g -O2 -ffreestanding -fno-common -nostdlib -nostartfile
           $(EXTRA_CFLAGS)
 # 汇编侧同样收 EXTRA_CFLAGS：.S 里也有按开关分叉的段（SMP 档的次核停靠），
 # 只给 CFLAGS 会让"镜像编出来了但 .S 那一半没变"。
-ASFLAGS := $(ARCH_FLAGS) -g $(EXTRA_CFLAGS)
+# .S 也要吃板级配置头：SMP 档的次核停靠段用 #if (ARKRTOS_USE_SMP == 1)
+# 分叉，而 ARKRTOS_SMP_SEC_STACK_SIZE 只在板级头里定义一处（见 LA64 那份
+# Makefile 的同名字段）。与 CFLAGS 一样用 -include，不用 -D 逐个复制。
+ASFLAGS := $(ARCH_FLAGS) -g -DARKRTOS_BOARD_CONFIG='"arkrtos_board_config.h"' \
+           -include arkrtos_board_config.h $(EXTRA_CFLAGS)
 
 # 内核源：显式清单（不用通配，避免默认编入本平台用不到的功能模块）
 # 通配全部内核源，再剔除本平台没有任何介质/驱动依赖的模块：

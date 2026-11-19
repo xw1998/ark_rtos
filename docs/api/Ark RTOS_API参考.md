@@ -56,7 +56,7 @@
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（11 项）
 - [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（73 项）
-- [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（16 项）
+- [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（17 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
 - [kernelsrc/sdk/app_sdk/tests/test_stdio_host.c](#kernelsrcsdkapp_sdkteststest_stdio_hostc)（2 项）
@@ -8982,6 +8982,19 @@ uint32 arkrtos_port_atomic_cas(volatile uint32 *p_addr, uint32 expect, uint32 ne
 QEMU 的 rv32 带 A 扩展，`lr.w` / `sc.w` 是真原子指令，不需要
 退化成「关中断近似」。单核下关中断也算正确，但这套写法在 SMP
 上同样成立，将来换多 hart 时不用重写。
+
+### `void rv_smp_trap_c(uint32 mcause) {`
+
+```c
+void rv_smp_trap_c(uint32 mcause) {
+```
+
+**次核异常入口的 C 部分（由 arkrtos_context.S 的 rv_smp_trap_entry 调用）**
+次核只认一种来源：机器软件中断（msip = IPI）。其余原因一律按
+致命异常处理并停机——次核没有可用的内核状态（共享的 s_in_trap、
+g_rv_next_mpp、中断栈都是主核一份），把它放进完整 trap 分派
+只会在别人的状态上乱写。
+> 说明：次核不开机器定时器中断（mie.MTIE 保持 0），所以不会有「次核 tick」。
 
 ### `uint32 arkrtos_port_syscall_num(void *p_exc_ctx) {`
 

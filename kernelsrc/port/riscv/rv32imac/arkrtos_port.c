@@ -52,6 +52,10 @@
 #include "arkrtos_config.h"
 #include "arkrtos_fault.h"   /* ARKRTOS_FAULT_MEMFAULT */
 
+#if (ARKRTOS_USE_SMP == 1)
+#include "arkrtos_smp.h"     /* arkrtos_smp_ipi_handler() */
+#endif
+
 #if (ARKRTOS_USE_RTSTAT == 1)
 #include "arkrtos_rt.h"
 #endif
@@ -73,6 +77,27 @@
 #define RV_CLINT_MSIP        (*(volatile uint32 *)(ARKRTOS_PORT_CLINT_BASE + 0x0000u))
 #define RV_CLINT_MTIMECMP_LO (*(volatile uint32 *)(ARKRTOS_PORT_CLINT_BASE + 0x4000u))
 #define RV_CLINT_MTIMECMP_HI (*(volatile uint32 *)(ARKRTOS_PORT_CLINT_BASE + 0x4004u))
+
+/* 每 hart 的 msip / mtimecmp 取址（ACLINT = 经典 CLINT 的偏移）：
+ *   msip[cpu]       = base + 4  * cpu
+ *   mtimecmp[cpu]   = base + 0x4000 + 8 * cpu
+ * cpu 就是 mhartid。QEMU 9.2 的 virt 用 aclint 设备，偏移与 CLINT 一致
+ * （hw/intc/riscv_aclint.c，实测 -smp 2 下 msip[1] 能拉起次核）。
+ * 单 hart 档 hart0 的两个地址与上面的 RV_CLINT_MSIP / RV_CLINT_MTIMECMP_LO
+ * 逐字节相同，所以默认镜像不受影响。 */
+#define RV_CLINT_MSIP_ADDR(cpu)         (ARKRTOS_PORT_CLINT_BASE + 4u * (uint32)(cpu))
+#define RV_CLINT_MTIMECMP_LO_ADDR(cpu)  (ARKRTOS_PORT_CLINT_BASE + 0x4000u + 8u * (uint32)(cpu))
+
+#if (ARKRTOS_USE_SMP == 1)
+/* 写某个 hart 的 msip：1 = 给它挂一个机器软件中断，0 = 清掉。
+ * 这是 RISC-V 里唯一一条跨 hart 的「敲门」通路（IPI 与 PendSV 共用）。
+ * 关档下不编进来：单 hart 的 msip 由 RV_CLINT_MSIP 宏直接读写，
+ * 留着它会多一条 -Wunused-function。 */
+static void rv_clint_msip_write(uint32 cpu, uint32 val)
+{
+    *(volatile uint32 *)RV_CLINT_MSIP_ADDR(cpu) = val;
+}
+#endif /* ARKRTOS_USE_SMP == 1 */
 #define RV_CLINT_MTIME_LO    (*(volatile uint32 *)(ARKRTOS_PORT_CLINT_BASE + 0xBFF8u))
 #define RV_CLINT_MTIME_HI    (*(volatile uint32 *)(ARKRTOS_PORT_CLINT_BASE + 0xBFFCu))
 
@@ -395,7 +420,16 @@ uint32 arkrtos_port_atomic_cas(volatile uint32 *p_addr, uint32 expect, uint32 ne
 
 uint32 arkrtos_port_cpu_id(void)
 {
+#if (ARKRTOS_USE_SMP == 1)
+    /* mhartid 是只读 CSR，不需要任何内存，次核一进来就能读。
+     * 关档（默认）仍返回常量 0：默认镜像的指令不许因为这一条变化。 */
+    uint32 hart;
+
+    __asm__ volatile("csrr %0, mhartid" : "=r"(hart) : : "memory");
+    return hart;
+#else
     return 0u;
+#endif
 }
 
 void arkrtos_port_spin_hint(void)
@@ -404,17 +438,69 @@ void arkrtos_port_spin_hint(void)
 }
 
 #if (ARKRTOS_USE_SMP == 1)
-/* 单 hart 移植：没有第二核可启动，也没有跨核 IPI 通路。 */
+/* ------------------------------------------------------------
+ * SMP：次核启动与核间中断（RISC-V ACLINT / CLINT msip）
+ *
+ * @details 与 LA64 的 IOCSR mailbox 完全不同的一套协议，别混着读：
+ *          QEMU `virt` 的 `-kernel` 直启会把**所有 hart 的复位 PC 都设成
+ *          ELF 入口**（不同于 LoongArch，那里次核跑的是 pflash 固件）。
+ *          所以次核会真的执行我们的 start.S，靠 mhartid 在入口处分叉：
+ *          非 0 号 hart 进 start.S 的 park 循环，只用 CSR 轮询
+ *          mip.MSIP（那一刻 .bss 可能还没被 CPU0 清完，碰内存就是竞态），
+ *          等 CPU0 写 msip[cpu]=1 才换自己的栈、装 mtvec、开 MSIE 进 C。
+ *
+ *          因此「启动次核」= 一次 CLINT 写，不涉及 mailbox，也不涉及
+ *          任何共享内存标志。
+ * ------------------------------------------------------------ */
 int32 arkrtos_port_cpu_start(uint32 cpu)
 {
-    (void)cpu;
-    return -1;
+    if((cpu == 0u) || (cpu >= (uint32)ARKRTOS_CPU_NUM))
+    {
+        return -1;
+    }
+
+    rv_clint_msip_write(cpu, 1u);
+    return 0;
 }
 
 int32 arkrtos_port_send_ipi(uint32 cpu)
 {
-    (void)cpu;
-    return -1;
+    if((cpu == 0u) || (cpu >= (uint32)ARKRTOS_CPU_NUM))
+    {
+        /* 核 0 的 msip 是 PendSV 的挂起位（arkrtos_port_switch_task 用它），
+         * 拿它当 IPI 会把「切换」和「IPI」两个语义搅在一起，所以拒绝自投。 */
+        return -1;
+    }
+
+    rv_clint_msip_write(cpu, 1u);
+    return 0;
+}
+
+/**
+* @brief 次核异常入口的 C 部分（由 arkrtos_context.S 的 rv_smp_trap_entry 调用）
+* @details 次核只认一种来源：机器软件中断（msip = IPI）。其余原因一律按
+*          致命异常处理并停机——次核没有可用的内核状态（共享的 s_in_trap、
+*          g_rv_next_mpp、中断栈都是主核一份），把它放进完整 trap 分派
+*          只会在别人的状态上乱写。
+* @note 次核不开机器定时器中断（mie.MTIE 保持 0），所以不会有「次核 tick」。
+*/
+void rv_smp_trap_c(uint32 mcause)
+{
+    uint32 cpu = arkrtos_port_cpu_id();
+
+    if(((mcause & RV_MCAUSE_IRQ_FLAG) != 0u) &&
+       ((mcause & ~RV_MCAUSE_IRQ_FLAG) == RV_MCAUSE_IRQ_SFT))
+    {
+        rv_clint_msip_write(cpu, 0u);      /* 先清挂起，再计数 */
+        arkrtos_smp_ipi_handler();
+        return;
+    }
+
+    arkrtos_port_fatal_report(mcause);
+    for(;;)
+    {
+        __asm__ volatile("wfi" ::: "memory");
+    }
 }
 #endif /* ARKRTOS_USE_SMP == 1 */
 

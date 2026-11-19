@@ -23,6 +23,15 @@
     .globl  _start
     .align  2
 _start:
+#if (ARKRTOS_USE_SMP == 1)
+    /* QEMU `virt` 的 -kernel 直启把**所有 hart 的复位 PC** 都设成 ELF 入口，
+     * 于是次核也会跑到这里。第一件事就是按 mhartid 分叉：非 0 号 hart
+     * 立刻进停靠循环（只用 CSR，不碰内存 —— 此刻 CPU0 可能还没清完 .bss，
+     * 次核若先写自己的栈，等 CPU0 清 .bss 时会把正在用的帧清成 0）。 */
+    csrr    t0, mhartid
+    bnez    t0, rv_secondary_park
+#endif
+
     .option push
     .option norelax
     la      gp, __global_pointer$
@@ -60,3 +69,52 @@ _start:
 
 3:
     j       3b
+
+#if (ARKRTOS_USE_SMP == 1)
+/* 次核停靠（SMP 档）
+ * @details 轮询 mip.MSIP 等 CPU0 敲门；CPU0 的 arkrtos_port_cpu_start()
+ *          写 msip[hart]=1 就是全部的「启动协议」（见 port.c 的 SMP 注释）。
+ *          醒来后：清自己的 msip → 换到自己的静态栈 → 装 mtvec/mie/MIE
+ *          → 进 C 的 arkrtos_smp_secondary_main(mhartid)，永不返回。 */
+rv_secondary_park:
+    mv      s0, t0                  /* s0 = 本核 hart 号（跨调用保持不变） */
+1:
+    csrr    t1, mip
+    andi    t1, t1, 8               /* MIP.MSIP = bit3 */
+    beqz    t1, 1b
+
+    /* 清自己的 msip：地址 = CLINT_BASE + 4 * hart */
+    li      t1, 4
+    mul     t1, s0, t1
+    li      t2, 0x02000000
+    add     t1, t1, t2
+    sw      zero, 0(t1)
+
+    /* 次核也要自己的 gp：C 代码里有 gp 相对寻址（小数据），
+     * 而 CPU0 设的那个 gp 只是它自己的。 */
+    .option push
+    .option norelax
+    la      gp, __global_pointer$
+    .option pop
+
+    /* sp = arkrtos_smp_stacks + (hart + 1) * ARKRTOS_SMP_SEC_STACK_SIZE
+     * 0 号块不用（留给引导核的既有栈）；越界 hart 交给 C 侧判，
+     * 那边会把非法核号一律空转。 */
+    la      t1, arkrtos_smp_stacks
+    li      t2, ARKRTOS_SMP_SEC_STACK_SIZE
+    addi    t3, s0, 1
+    mul     t3, t3, t2
+    add     sp, t1, t3
+    andi    sp, sp, -16             /* ABI 要求 16 字节对齐 */
+
+    la      t1, rv_smp_trap_entry
+    csrw    mtvec, t1               /* 次核异常只走这一条入口 */
+    li      t1, 8                   /* mie.MSIE = bit3（IPI） */
+    csrs    mie, t1
+    csrsi   mstatus, 8              /* mstatus.MIE = 1 */
+
+    mv      a0, s0
+    call    arkrtos_smp_secondary_main
+2:
+    j       2b
+#endif /* ARKRTOS_USE_SMP == 1 */

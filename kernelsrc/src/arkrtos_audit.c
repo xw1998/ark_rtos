@@ -521,12 +521,13 @@ uint32 arkrtos_audit_boot(void)
         /* The report says which structure and which index; it does not say
          * why. The why is a job for the debugger, on that exact field. */
         ARKRTOS_LOGE("AUDIT", "self-check failed: mask 0x%08X, first index %u, checks %u",
-                   (uint32)r.mask, (uint32)r.index, (uint32)r.checks);
+                   (unsigned int)r.mask, (unsigned int)r.index,
+                   (unsigned int)r.checks);
         arkrtos_fault_record(ARKRTOS_FAULT_AUDITFAIL, 0);
     }
     else
     {
-        ARKRTOS_LOGI("AUDIT", "self-check clean (%u checks)", (uint32)r.checks);
+        ARKRTOS_LOGI("AUDIT", "self-check clean (%u checks)", (unsigned int)r.checks);
     }
 
     return r.mask;

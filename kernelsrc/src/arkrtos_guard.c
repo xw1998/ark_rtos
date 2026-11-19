@@ -322,8 +322,8 @@ static void guard_starve_charge(uint32 now)
         arkrtos_fault_record(ARKRTOS_FAULT_GUARDHB, 0);
     }
     ARKRTOS_LOGE("GUARD", "not feeding: verdict 0x%X (audit 0x%X, violating %u)",
-               (uint32)g_status.verdict, (uint32)g_status.audit_mask,
-               (uint32)g_status.violating);
+               (unsigned int)g_status.verdict, (unsigned int)g_status.audit_mask,
+               (unsigned int)g_status.violating);
 }
 
 void arkrtos_guard_tick(void)

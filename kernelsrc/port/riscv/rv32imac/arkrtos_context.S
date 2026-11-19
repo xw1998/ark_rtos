@@ -235,3 +235,53 @@ rv_fault_enter:
 arkrtos_port_enter_idle:
     mv      sp, a0
     ret
+
+#if (ARKRTOS_USE_SMP == 1)
+/* ============================================================
+ * 次核异常入口（SMP 档）
+ * @details 次核**不走** trap_entry：那条路会进 riscv_trap_c，而
+ *          s_in_trap / g_rv_next_mpp / 内核分派全是主核一份的全局状态。
+ *          这里只做三件事：存下被中断处的 caller-saved 寄存器、
+ *          按 mcause 调 rv_smp_trap_c（清 msip + 计数，或致命停机）、
+ *          恢复后 mret。
+ *          次核目前只跑 idle 循环，所以帧里不必保存 callee-saved：
+ *          被中断的只有 arkrtos_smp_idle_loop 的循环变量，而那是
+ *          caller-saved 之外的东西……为稳妥起见把 s0/s1 也存了。
+ *          48 字节帧，16 字节对齐（ABI 要求）。
+ * ============================================================ */
+    .section .text.rv_smp_trap_entry, "ax"
+    .globl  rv_smp_trap_entry
+    .align  2
+rv_smp_trap_entry:
+    addi    sp, sp, -48
+    sw      ra,   0(sp)
+    sw      t0,   4(sp)
+    sw      t1,   8(sp)
+    sw      t2,  12(sp)
+    sw      a0,  16(sp)
+    sw      a1,  20(sp)
+    sw      a2,  24(sp)
+    sw      a3,  28(sp)
+    sw      a4,  32(sp)
+    sw      a5,  36(sp)
+    sw      s0,  40(sp)
+    sw      s1,  44(sp)
+
+    csrr    a0, mcause
+    call    rv_smp_trap_c            /* 清 msip 并计数，或致命停机（不返回） */
+
+    lw      ra,   0(sp)
+    lw      t0,   4(sp)
+    lw      t1,   8(sp)
+    lw      t2,  12(sp)
+    lw      a0,  16(sp)
+    lw      a1,  20(sp)
+    lw      a2,  24(sp)
+    lw      a3,  28(sp)
+    lw      a4,  32(sp)
+    lw      a5,  36(sp)
+    lw      s0,  40(sp)
+    lw      s1,  44(sp)
+    addi    sp, sp, 48
+    mret
+#endif /* ARKRTOS_USE_SMP == 1 */
