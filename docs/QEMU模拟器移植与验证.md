@@ -1694,6 +1694,7 @@ ERA=entry / PRMD=4`）。在本例里恰好相反：这一帧**一次都没被�
   `[LA64U] KERNEL refill (plv0) badv=0xffffff00 era=0x00244d84`（`eentry` 建帧时
   `sp=0`，`addi.d sp, sp, -256` 得 `0xffffff00`），形状与「初始帧被写坏」不同。
   因此 §5.13.4 的欠账**只销掉一族**，「切换路径上的 sp 有效性」继续挂着。
+  **2026-11-19 晚补记**：这另一族的真根因已定位并修好（恢复序列的关中断 `csrxchg` 掩码写成 1，清的是 `CRMD.PLV` 而不是 bit2 的 `CRMD.IE`），QEMU 实跑 0/48 fatal；详见本章末「[5.13.4 收口（2026-11-19 晚）](#5134-收口2026-11-19-晚kernel-refill-plv0-badv0xffffff00-的真根因是关中断掩码写错)」。
 
 ### 5.14 软定时器栈装不下陷阱帧：KERNEL refill 的真根因（已修）
 
@@ -7024,3 +7025,117 @@ Code / RO / RW / ZI 逐项相同：`mq` 3932/128/0/1568、`sync` 9726/288/4/2248
 **结论分档：宿主 21 个 TU 十二条选项零告警 + 默认档 LA64 镜像逐字节不变（`cmp -l` 0 处）
 + 编入档（armclang F427 九个 TU，含 driver SDK 的 drv_oslib）零告警且尺寸逐项不变，未上板。** 这一笔只改类型标注，
 没有新增可上板的行为，上板不会带来新的信息 —— 不假装有第四个档。
+
+## 5.13.4 收口（2026-11-19 晚）：`KERNEL refill (plv0) badv=0xffffff00` 的真根因是「关中断掩码写错」
+
+**这一节销掉的是上一节写「另一族现场仍在」的那一族**（`badv=0xffffff00 era=0x00244d84`，
+`eentry` 建帧时 `sp=0`），并一并销掉同源的另两种现场：
+
+| 形态 | 现场 | 说明 |
+| --- | --- | --- |
+| A' | `[LA64U] KERNEL refill (plv0) badv=0xffffff00 era=0x00244d84` | `eentry` 的 `st.d $ra,$sp,0` 用 `sp=0` 算出 `0xffffffffffffff00` |
+| A  | `badv=0x154548f8 era=0x00215a20` | `arkrtos_sched_activate` 里 `st.w` 写野地址（`$r24` 已是别处的值） |
+| B  | `ecode=0x0d era=0x9` | 从被写坏的上下文里取指/访存 |
+
+### 一、取证手段：`-d int`，零代码改动
+
+之前的诊断都是往热路径里塞快照（`g_r24_pre/in/post`、refill 入口寄存器快照），
+这本身有海森堡效应（v4 快照 80 例 0 次形态 A，干净基线 2/16）。本轮改用 QEMU 自带的
+异常跟踪，**一个字节都不改**：
+
+```
+cd build/qemu_loongarch64
+qemu-system-loongarch64.exe -M virt -m 128M -display none \
+  -serial file:ser.txt -kernel ark_qemu_la64.elf -d int -D int.log
+```
+
+命中一例后的关键序列（167 MB / 340 万行日志里读出来的）：
+
+```
+loongarch_cpu_do_interrupt: PC 0000000000244d80 ERA 000000000023e458 cause 0
+helper_ertn: ERA 000000000023e458
+loongarch_cpu_do_interrupt: PC 0000000000244d80 ERA 0000000000245000 cause 0   <-- tick 落在恢复序列里
+helper_ertn: ERA 0000000000245000                                              <-- 反复 ertn 回 0x245000
+...（约 250 次）
+loongarch_cpu_do_interrupt enter: pc 0000000000244d84 ERA 0000000000245000 TLBRERA 1
+                                    exception: 2 (Page invalid exception for store)
+```
+
+`0x245000` 位于 `arkrtos_port_switch_task_inline` 的 **GPR 恢复序列中段**（恢复 ERA/PRMD
+之后、`ertn` 之前）。那里本来应该有两条「关中断」指令，写的是：
+
+```asm
+ori     $t1, $zero, 1
+csrxchg $zero, $t1, 0x0
+```
+
+### 二、根因：`csrxchg` 的掩码 `1` 清的是 CRMD.PLV，不是 CRMD.IE
+
+LoongArch 的 `CRMD` 位序是 `PLV[1:0]`（bit0/1）、**`IE`（bit2）**、`DA`（bit3）、`PG`（bit4）。
+`csrxchg rd, rj, csr` 用 **`rj` 当掩码**，所以掩码写 `1` 只动 bit0（PLV），
+**IE 一直开着** —— 注释写着「存档之后立刻关中断」，实际一条也没关掉。
+
+旁证两条，互相独立：
+
+1. C 侧 `arkrtos_port_enable_irq()` 用的是 `addi.w $r12,$r0,4` + `csrxchg $r12,$r12,0x0`
+   （掩码 4 = bit2），它确实能让节拍进来；同一文件里 SMP 次核入口那句
+   `ori $t1,$zero,0x4 /* CRMD.IE */` 也是 4。只有「关中断」那几处写成 1。
+2. 修好掩码之后，`-d int` 采到的 **36 971 次中断里，落在三个恢复窗口的 ERA 为 0 次**
+   （窗口：`0x244e44..0x244ed0`、`0x244fa4..0x24502c`、`0x245038..0x245068`）。
+
+于是因果链是完整的：
+
+1. tick 在 `0x245000` 把 CPU 拿走（IE 根本没关）；
+2. 硬件的 `ERA = 0x245000` 存进新帧，恢复后 `ertn` 回到 `0x245000`；
+3. `0x245000..0x24502c` 之间没有任何一条写 `CSR.ERA` 的指令 ⇒ **`ertn` 跳回自己**，
+   每轮都用上一轮的 `$r23` 当帧基址，`sp` 槽被逐轮读成别的值，最终变 0；
+4. `sp=0` 时再来一次 tick ⇒ `eentry` 的 `st.d $ra,$sp,0` 打在 `0xffffffffffffff00`
+   ⇒ 就是 `badv=0xffffff00 era=0x00244d84`。
+
+形态 A 是同一根因的另一半：中断落在恢复序列里 ⇒ 恢复出的 `$r24` 属于别的上下文
+⇒ `arkrtos_sched_activate` 里 `mul.d` 放大成野地址 ⇒ `st.w` 崩溃。
+
+> 口径提醒（本轮踩过）：`[Ark RTOS] FATAL:` 那一行的 `era/badv/crmd` 是**陈旧值**。
+> LoongArch 的 TLB 重填只写 `TLBRERA/TLBRPRMD/TLBRBADV`，不写 `ERA/PRMD/BADV`。
+> 只有 `[LA64U] KERNEL refill (plv0) badv=… era=…` 这一行（从重填镜像 CSR 取）在现场。
+
+### 三、修法
+
+`kernelsrc/port/loongarch/la64/arkrtos_context.S`，四处「关中断」的掩码 `1` → `0x4`：
+
+- `arkrtos_port_switch_task_inline` 存档后的那一处（原有，一直是空操作）；
+- `eentry`、`arkrtos_port_switch_task_inline`、`arkrtos_port_resume_task` 三处恢复序列
+  起点前**新增**的同一句（`la_switch_inline` / `la_switch_prepare` 的临界区退出会把
+  IE 恢复回进入时的值，恢复序列因此需要自己再关一次）。
+
+`ertn` 按 `PRMD.PIE` 恢复 IE，所以关掉不改变语义。代价只有新增的 3×2 条指令：
+链接后 `text 369216 -> 369240`（**+24 B**）、`data/bss` 不变（掩码那 4 处是等长替换）。
+
+### 四、读数（判据都是「实跑」，不是「编译过」）
+
+基线（`77c0470`，干净 worktree）：`_parboot.py` 16 例 × 12 s 曾 4/16、5/16 fatal。
+
+修复后（同一台机、同一 QEMU、同一命令 `utest`）：
+
+| 批 | 规模 | 结果 |
+| --- | --- | --- |
+| 1 | 16 例 × 15 s，`utest` | **0 / 16 fatal**，`PASS audit_structures_consistent` 16/16，`FAIL` 0 条 |
+| 2 | 16 例 × 30 s，`utest` | **0 / 16 fatal**，`PASS` 15 条 / 例，`FAIL` 0 |
+| 3 | 16 例 × 30 s，无命令（纯 boot + demo + 节拍） | **0 / 16 fatal** |
+| 4 | `-d int` 单例 × 60 s（36 971 次中断） | 恢复窗口内 ERA **0 次**，无 `KERNEL refill`，无 `ertn` 自环 |
+| 5 | `-smp 2` 8 例 × 30 s + `utest` | **0 / 8 fatal** |
+
+`tools/ci_gate.py`：**47 passed / 0 failed / 0 skipped**（与修复前一致）。
+
+**任务 B（`audit_structures_consistent` 报 `r.mask == 0x40`）同源收口**：修复后
+`utest` 三批共 48 例全部 `PASS audit_structures_consistent`，不需要再改
+`arkrtos_sched_check()` —— 那个 `0x40`（`ARKRTOS_AUDIT_SCHED`）是 `.bss` 被野写的结果，
+不是调度判据本身的缺陷。这是「别把下游症状当独立缺陷修」的一次实例。
+
+### 五、边界（不许读过头）
+
+- 本轮只做了 **QEMU LA64**；真实硬件（loongson）上 `csrxchg` 语义相同，但**未上板**。
+- `-smp 2` 的 8 例只是 0/8，**没有冻结判据**，不构成「SMP 间歇停机已证明修好」；
+  §三 欠账盘点里的 SMP 行按读数更新，不当结论用。
+- 原始 §5.13.4 那例（`frame@0x003071d0`、`s_pi_chain_stack_mid`、`ra=0`）是
+  「中途任务从入口返回」，与本节两族**不同源**，仍按上一节的判词处理。

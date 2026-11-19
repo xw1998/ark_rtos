@@ -398,6 +398,10 @@ The delta `text +1896 / bss +2048` includes the board's stack-guard demo task
   `sp=0`, `addi.d sp, sp, -256` giving `0xffffff00`) even on the 4 KB build, which is a different
   shape from a clobbered initial frame. So only one family of the 5.13.4 debt is closed; the
   "is `sp` valid on the switch path" question stays open.
+  **Addendum (2026-11-19 evening)**: the root cause of that other family is now found and fixed
+  (the interrupt-disable `csrxchg` mask in the restore sequences was written as 1, which clears
+  `CRMD.PLV`, not `CRMD.IE` at bit 2); QEMU runs give 0/48 fatal. See the closing section at the
+  end of this chapter.
 
 ### 5.14 Soft-timer stack could not hold a trap frame
 
@@ -3761,3 +3765,131 @@ set to twelve.
 (`cmp -l` 0) + switch-on build (armclang F427, five TUs) clean with unchanged sizes; not
 on-board.** This commit only adds type annotations with no new on-board behaviour, so an
 on-board run would add no information -- no fourth tier is claimed.
+
+## 5.13.4 closed (2026-11-19 evening): the `KERNEL refill (plv0) badv=0xffffff00` family was caused by a wrong `csrxchg` mask
+
+This closes the family the previous section left open ("another family is still alive":
+`badv=0xffffff00 era=0x00244d84`, `eentry` building a frame with `sp=0`), plus the two
+sibling shapes with the same cause:
+
+| shape | signature | what it means |
+| --- | --- | --- |
+| A' | `KERNEL refill (plv0) badv=0xffffff00 era=0x00244d84` | `eentry`'s `st.d $ra,$sp,0` with `sp=0` hits `0xffffffffffffff00` |
+| A  | `badv=0x154548f8 era=0x00215a20` | `st.w` inside `arkrtos_sched_activate` writes a wild address (`$r24` came from another context) |
+| B  | `ecode=0x0d era=0x9` | fetch/fault from an already-corrupted context |
+
+### 1. Instrumentation: `-d int`, zero code change
+
+Earlier rounds bolted snapshots onto the hot path (`g_r24_pre/in/post`, a register snapshot at
+the refill entry), which is a Heisenberg problem of its own (the v4 snapshot gave 0/80 shape-A
+hits while the clean baseline gave 2/16). This round used QEMU's own exception tracing and
+changed no source at all:
+
+```
+cd build/qemu_loongarch64
+qemu-system-loongarch64.exe -M virt -m 128M -display none \
+  -serial file:ser.txt -kernel ark_qemu_la64.elf -d int -D int.log
+```
+
+The decisive sequence, read out of a 167 MB / 3.4 M-line log:
+
+```
+loongarch_cpu_do_interrupt: PC 0000000000244d80 ERA 000000000023e458 cause 0
+helper_ertn: ERA 000000000023e458
+loongarch_cpu_do_interrupt: PC 0000000000244d80 ERA 0000000000245000 cause 0   <-- tick inside the restore sequence
+helper_ertn: ERA 0000000000245000                                              <-- ertn jumps back to itself
+... (about 250 times)
+loongarch_cpu_do_interrupt enter: pc 0000000000244d84 ERA 0000000000245000 TLBRERA 1
+                                    exception: 2 (Page invalid exception for store)
+```
+
+`0x245000` sits in the middle of the GPR restore sequence of
+`arkrtos_port_switch_task_inline` (after ERA/PRMD are written, before `ertn`). The two
+"disable interrupts" instructions there read:
+
+```asm
+ori     $t1, $zero, 1
+csrxchg $zero, $t1, 0x0
+```
+
+### 2. Root cause: mask `1` clears CRMD.PLV, not CRMD.IE
+
+`CRMD` is `PLV[1:0]` (bits 0/1), **`IE` (bit 2)**, `DA` (bit 3), `PG` (bit 4). `csrxchg rd, rj, csr`
+takes **`rj` as the mask**, so mask `1` only touches bit 0 (PLV) and **IE stayed on** -- the
+comment claimed the restore sequence was protected, but nothing was ever disabled.
+
+Two independent cross-checks:
+
+1. The C side `arkrtos_port_enable_irq()` uses `addi.w $r12,$r0,4` + `csrxchg $r12,$r12,0x0`
+   (mask 4 = bit 2) and it does let ticks in; the SMP secondary-core entry in the same `.S`
+   also uses `ori $t1,$zero,0x4 /* CRMD.IE */`. Only the "disable" sites had 1.
+2. After fixing the mask, `-d int` recorded **36 971 interrupts in 60 s with 0 having an ERA
+   inside any of the three restore windows** (`0x244e44..0x244ed0`, `0x244fa4..0x24502c`,
+   `0x245038..0x245068`).
+
+The chain is therefore complete:
+
+1. a tick takes the CPU at `0x245000` (IE was never cleared);
+2. hardware stores `ERA = 0x245000` into the new frame, so `ertn` returns to `0x245000`;
+3. nothing between `0x245000` and `0x24502c` writes `CSR.ERA` => **`ertn` loops on itself**,
+   each pass using the previous `$r23` as the frame base, so the `sp` slot is re-read from
+   random memory until it becomes 0;
+4. with `sp=0` the next tick makes `eentry`'s `st.d $ra,$sp,0` land on
+   `0xffffffffffffff00` -- exactly `badv=0xffffff00 era=0x00244d84`.
+
+Shape A is the other half of the same cause: a tick inside the restore sequence restores an
+`$r24` that belongs to another context, `mul.d` in `arkrtos_sched_activate` magnifies it and
+`st.w` faults.
+
+> Caveat learned this round: the `era/badv/crmd` fields of the `[Ark RTOS] FATAL:` line are
+> **stale**. A LoongArch TLB refill only writes `TLBRERA/TLBRPRMD/TLBRBADV`, never
+> `ERA/PRMD/BADV`. Only `[LA64U] KERNEL refill (plv0) badv=... era=...` (read from the
+> refill mirror CSRs) is a real scene.
+
+### 3. Fix
+
+`kernelsrc/port/loongarch/la64/arkrtos_context.S`: four sites change the mask from `1` to `0x4`:
+
+- the existing one after the frame is saved in `arkrtos_port_switch_task_inline` (it had been
+  a no-op all along);
+- three **new** copies at the head of each restore sequence (`eentry`,
+  `arkrtos_port_switch_task_inline`, `arkrtos_port_resume_task`), because
+  `la_switch_inline` / `la_switch_prepare` restore IE to its entry value when they leave their
+  critical sections, so the restore sequence must disable it again itself.
+
+`ertn` re-enables IE from `PRMD.PIE`, so this does not change semantics. Cost is just the
+3x2 new instructions: linked `text 369216 -> 369240` (**+24 B**), `data`/`bss` unchanged
+(the four mask edits are equal-length replacements).
+
+### 4. Readings (all tiered "actually ran", not "it compiles")
+
+Baseline (`77c0470`, clean worktree): `_parboot.py` 16 instances x 12 s used to hit 4/16 and
+5/16 fatal.
+
+After the fix (same machine, same QEMU, same `utest` command):
+
+| batch | scale | result |
+| --- | --- | --- |
+| 1 | 16 x 15 s, `utest` | **0 / 16 fatal**; `PASS audit_structures_consistent` 16/16, `FAIL` 0 |
+| 2 | 16 x 30 s, `utest` | **0 / 16 fatal**; 15 `PASS` per instance, `FAIL` 0 |
+| 3 | 16 x 30 s, no command (boot + demo + tick only) | **0 / 16 fatal** |
+| 4 | single `-d int` run x 60 s (36 971 interrupts) | 0 ERAs inside the restore windows, no `KERNEL refill`, no `ertn` self-loop |
+| 5 | `-smp 2`, 8 x 30 s + `utest` | **0 / 8 fatal** |
+
+`tools/ci_gate.py`: **47 passed / 0 failed / 0 skipped** (unchanged).
+
+**Task B (`audit_structures_consistent` reporting `r.mask == 0x40`) closed by the same fix**:
+48 instances of `utest` across the three batches all print `PASS audit_structures_consistent`,
+so `arkrtos_sched_check()` needed no change -- that `0x40` (`ARKRTOS_AUDIT_SCHED`) was a
+downstream symptom of a wild write into `.bss`, not a defect in the scheduling predicate.
+An instance of "do not fix a downstream symptom as if it were an independent bug".
+
+### 5. Boundaries (do not over-read)
+
+- Only **QEMU LA64** was exercised. `csrxchg` semantics are the same on real Loongson
+  hardware, but nothing was run on board.
+- The `-smp 2` batch is only 0/8 with **no frozen criterion**; it is not proof that the SMP
+  intermittent halt is fixed. The debt table records the reading, not a conclusion.
+- The original §5.13.4 instance (`frame@0x003071d0`, `s_pi_chain_stack_mid`, `ra=0`) is a
+  mid task returning from its entry function -- a different family from the two above and
+  still governed by the previous section's verdict.

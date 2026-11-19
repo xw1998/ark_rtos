@@ -131,6 +131,16 @@ eentry:
     move    $a1, $s1
     bl      la_switch_prepare
 
+    /* 恢复窗口重新关中断（第 381 行起那条理由在这里更致命）：
+     * la_switch_prepare 的临界区退出会把 CRMD.IE 恢复成进入时的值，
+     * 于是上面那句关中断只覆盖了「决定切给谁」这一段，恢复序列本身又
+     * 变成可被 tick 打断的窗口——实测（QEMU -d int）中断就落在下面的 GPR 恢复
+     * 中段，硬件把 ERA 改写成恢复序列里的地址；帧里没有这条地址，ertn
+     * 于是反复跳回自己，逐轮把 sp 读成 0，最后在 eentry+4 上溢出致命。
+     * 这里再关一次：ertn 会按 PRMD.PIE 恢复 IE，语义不变。 */
+    ori     $t1, $zero, 0x4         /* CRMD.IE 是 bit2 */
+    csrxchg $zero, $t1, 0x0
+
     /* ERA / PRMD 与通用寄存器都从这里恢复；sp / tp / s0 最后取，
      * 因为在这一步之前 s0 还是帧指针。 */
     ld.d    $t0, $s0, 240
@@ -384,7 +394,7 @@ arkrtos_port_switch_task_inline:
      * 返回后 ertn 于是落进恢复序列中间，带着半套寄存器继续跑，最终跳到
      * 非法地址（实测表现为 ld.d 拿一个代码地址当帧指针、撞 ADEM 停机）。
      * 关中断不影响语义：ertn 会按 PRMD.PIE（上面已从 CRMD 存好）恢复 IE。 */
-    ori     $t1, $zero, 1
+    ori     $t1, $zero, 0x4         /* CRMD.IE 是 bit2 */
     csrxchg $zero, $t1, 0x0
 
     move    $s1, $s0                /* 本任务的帧：用来判「到底切没切」 */
@@ -398,6 +408,13 @@ arkrtos_port_switch_task_inline:
     move    $a0, $s0
     move    $a1, $s1
     bl      la_switch_prepare
+
+    /* 同 eentry：上面那段关中断只覆盖到 la_switch_prepare 为止，它的临界区
+     * 退出会把 IE 恢复回来。恢复序列（写 ERA/PRMD + GPR + ertn）必须不可打断：
+     * 一旦被 tick 分走，ERA 会被改写成恢复序列里的地址，ertn 反复跳回自己。
+     * 关中断不影响语义：ertn 按 PRMD.PIE 恢复 IE。 */
+    ori     $t1, $zero, 0x4         /* CRMD.IE 是 bit2 */
+    csrxchg $zero, $t1, 0x0
 
     ld.d    $t0, $s0, 240
     csrwr   $t0, 0x6
@@ -445,6 +462,11 @@ arkrtos_port_switch_task_inline:
     .align  2
 arkrtos_port_resume_task:
     move    $s0, $a0
+    /* 同前：恢复序列必须在关中断状态下执行。异常现场进来时 IE
+     * 本就是关的，但这里显式再关一次不依赖调用方；ertn 按 PRMD.PIE
+     * 恢复 IE，语义不变。 */
+    ori     $t1, $zero, 0x4         /* CRMD.IE 是 bit2 */
+    csrxchg $zero, $t1, 0x0
     ld.d    $t0, $s0, 240
     csrwr   $t0, 0x6
     ld.d    $t0, $s0, 248
