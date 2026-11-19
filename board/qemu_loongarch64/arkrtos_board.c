@@ -221,7 +221,14 @@ void arkrtos_port_board_init(void)
 {
     arkrtos_board_console_init();
 
+#if (ARKRTOS_USE_SMP == 1) && (ARKRTOS_CPU_NUM > 1)
+    /* SMP 镜像不许再自称 1 core：这条自述行是上板后第一个读数。 */
+    arkrtos_board_puts("\n[Ark RTOS] board: qemu_loongarch64 (virt, la64, ");
+    arkrtos_board_putu((uint32)ARKRTOS_CPU_NUM);
+    arkrtos_board_puts(" cores)\n");
+#else
     arkrtos_board_puts("\n[Ark RTOS] board: qemu_loongarch64 (virt, la64, 1 core)\n");
+#endif
     arkrtos_board_puts("[Ark RTOS] arch=");
     arkrtos_board_puts(ARKRTOS_ARCH_NAME);
     arkrtos_board_puts(" uart=");

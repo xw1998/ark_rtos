@@ -37,6 +37,7 @@
 #include "arkrtos_board.h"
 #include "arkrtos_shell.h"     /* arkrtos_shell_init()：内核 Shell 控制台 */
 #include "arkrtos_blk.h"
+#include "arkrtos_smp.h"       /* SMP 自检：每核状态 / 在线掩码 / IPI（默认关时空头） */
 #include "arkrtos_ptable.h"    /* 分区表：崩溃日志按槽位记账，必须先于它初始化 */
 #include "arkrtos_crash.h"
 #include "arkrtos_guard.h"   /* 心跳窗口守卫（ARKRTOS_USE_KERNEL_GUARD） */     /* 跨复位崩溃日志（ARKRTOS_USE_CRASH_LOG） */
@@ -631,6 +632,115 @@ static void task_stack_guard_demo(void)
 }
 #endif
 
+#if (ARKRTOS_USE_SMP == 1)
+/* ============================================================
+ * SMP 自检（只在 ARKRTOS_USE_SMP=1 的镜像里编进来）
+ * @details 判据是**串口上的原始读数**，不是"编过了"：
+ *            1) 等在线掩码长成"每核一位"（有界自旋，超时如实报 FAIL）；
+ *            2) 给每个非引导核发 5 次 IPI，等它的 ipi_count 涨到 5。
+ *          自旋里不用 WFI：此刻定时器还没启动，idle 下去没人唤醒。
+ *          用 arkrtos_port_spin_hint()（nop）让 QEMU 的另一个 vCPU 线程
+ *          有机会被调度。
+ * ============================================================ */
+#define SMP_SELF_TEST_IPI     5u
+#define SMP_SELF_TEST_SPIN    20000000u
+
+static void arkrtos_smp_self_test(void)
+{
+    uint32 cpu;
+    uint32 i;
+    uint32 full;
+    uint32 online = 0u;
+    uint32 sent_ok = 1u;
+    uint32 spin;
+
+#if (ARKRTOS_CPU_NUM < 2)
+    arkrtos_board_puts("[smp] cores=1 ipi=0 result=skip(no secondary)\n");
+    return;
+#else
+    full = ((uint32)1u << (uint32)ARKRTOS_CPU_NUM) - 1u;
+
+    for(i = 0u; i < SMP_SELF_TEST_SPIN; i++)
+    {
+        online = arkrtos_smp_online_mask_get();
+        if(online == full)
+        {
+            break;
+        }
+        arkrtos_port_spin_hint();
+    }
+
+    arkrtos_board_puts("[smp] cores=");
+    arkrtos_board_putu((uint32)ARKRTOS_CPU_NUM);
+    arkrtos_board_puts(" mask=");
+    arkrtos_board_puthex(online);
+    if(online != full)
+    {
+        arkrtos_board_puts(" ipi=0 result=FAIL(secondary offline)\n");
+        return;
+    }
+
+    /* 一发一等地发：连续用同一个向量号发多次，硬件会把它们合并成一次
+     * 中断（QEMU 与真机同语义：status 只置一位），5 发只数到 1 次会被
+     * 误读成"通路坏了"。逐个发、逐个等计数涨上去，才是真的 5 次往返。 */
+    for(cpu = 1u; cpu < (uint32)ARKRTOS_CPU_NUM; cpu++)
+    {
+        for(i = 1u; i <= SMP_SELF_TEST_IPI; i++)
+        {
+            if(arkrtos_smp_send_ipi(cpu) != 0)
+            {
+                sent_ok = 0u;
+                break;
+            }
+            for(spin = 0u; spin < SMP_SELF_TEST_SPIN; spin++)
+            {
+                if(arkrtos_smp_cpu[cpu].ipi_count >= i)
+                {
+                    break;
+                }
+                arkrtos_port_spin_hint();
+            }
+            if(arkrtos_smp_cpu[cpu].ipi_count < i)
+            {
+                break;                    /* 这一发没到，不再追后面的 */
+            }
+        }
+    }
+
+    arkrtos_board_puts(" sent=");
+    arkrtos_board_putu(sent_ok);
+    for(cpu = 1u; cpu < (uint32)ARKRTOS_CPU_NUM; cpu++)
+    {
+        arkrtos_board_puts(" ipi");
+        arkrtos_board_putu(cpu);
+        arkrtos_board_puts("=");
+        arkrtos_board_putu(arkrtos_smp_cpu[cpu].ipi_count);
+    }
+
+    if(sent_ok != 0u)
+    {
+        for(cpu = 1u; cpu < (uint32)ARKRTOS_CPU_NUM; cpu++)
+        {
+            if(arkrtos_smp_cpu[cpu].ipi_count < SMP_SELF_TEST_IPI)
+            {
+                sent_ok = 0u;
+                break;
+            }
+        }
+    }
+
+    if(sent_ok != 0u)
+    {
+        arkrtos_board_puts(" result=ok\n");
+    }
+    else
+    {
+        arkrtos_board_puts(" result=FAIL(ipi not received)\n");
+    }
+#endif
+}
+#endif /* ARKRTOS_USE_SMP == 1 */
+
 static void arkrtos_start_idle(void)
 {
     uint32 sp = (uint32)(unsigned long)(&s_idle_stack[IDLE_STACK_WORDS]);
@@ -701,6 +811,12 @@ int main(void)
     arkrtos_port_irq_init();
 
     arkrtos_kernel_module_init();
+
+#if (ARKRTOS_USE_SMP == 1)
+    /* 次核是在 kernel_module_init() 里拉起来的，这里等它上线并发 IPI 验证。
+     * 放在任何任务注册/启动之前：失败就在串口上一行看清，不埋在后续输出里。 */
+    arkrtos_smp_self_test();
+#endif
 
     /* 分区表 + 跨复位崩溃日志。
      * 顺序与 STM32 工程一致（见 example/stm32f427 的 arkrtos_kernel_init）：

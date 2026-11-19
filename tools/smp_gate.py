@@ -25,9 +25,19 @@
      arkrtos_smp.c / arkrtos_init.c / 三个 Cortex-M 移植层，确认 ON 档与
      两个新 port 钩子在三份 port 里都编得过。
 
-不覆盖（这个骨架本身也没有）：多核调度、每核运行队列、核间任务迁移、
-真实 IPI 投递与延迟、多核板上的次核启动。本仓库当前没有任何多核板，
-所以这一道的结论只能是"骨架自洽且编得过"，不是"支持多核"。
+三、四段（LA64 / QEMU）：
+  3. pin U：start.S 的次核停靠分支（真汇编 + 反汇编断言 + 改坏副本自检）；
+     以及 port 层真核号（SMP 档读 CSR.TID，关档仍是常量 0）。
+  4. pin V：arkrtos_context.S 的 arkrtos_smp_secondary_entry（次核启动入口）
+     与 port 层三条 IOCSR 地址（MAIL_SEND / IPI_SEND / IPI_CLEAR）。SMP=1
+     真汇编后反汇编必须有 iocsrwr / ertn / 该符号；同一文件 SMP=0 汇编时
+     三者必须都不在（否则说明标记钉在了无条件代码上）。
+
+不覆盖：**多核调度**（每核运行队列、核间任务迁移、全局时钟同步），这是设计
+边界不是欠账；**真实硬件**上的次核启动与 IPI 延迟（本仓库没有任何多核板；
+QEMU LA64 上的 ②③ 已实跑通过，见 docs/QEMU模拟器移植与验证.md §9.6）；
+RV32/LA32 侧的 IPI（各自寄存器模型不同，另有做法）。所以这一道的结论是
+"骨架自洽 + LA64 的 ②③ 在 QEMU 上跑得起来 + ④ 明确没做"，不是"通用多核"。
 
 用法
 ----
@@ -71,6 +81,12 @@ ARMCLANG_FALLBACKS = [
 # LA64 那一档（pin U）：start.S 的次核停靠分支 + port 层真核号。
 LA64_ASM  = "example/qemu_loongarch64/start.S"
 LA64_PORT = "kernelsrc/port/loongarch/la64/arkrtos_port.c"
+LA64_CTX  = "kernelsrc/port/loongarch/la64/arkrtos_context.S"
+
+# pin V：次核启动入口与 IPI 通路（②③）。这些指令只在 ARKRTOS_USE_SMP=1 下
+# 才编出来，默认档一个编译器都不经过 —— 与上面 pin U 同源。
+CTX_MARKERS = ["arkrtos_smp_secondary_entry", "iocsrwr", "ertn"]
+PORT_MARKERS = ["LA_IOCSR_MAIL_SEND", "LA_IOCSR_IPI_SEND", "LA_IOCSR_IPI_CLEAR"]
 
 LA64_INCLUDES = [
     "kernelsrc/include",
@@ -325,6 +341,109 @@ def run_la64(cc):
     shutil.rmtree(td, ignore_errors=True)
     return bad == 0
 
+def run_la64_pin_v(cc):
+    """pin V：② 次核启动入口 + ③ IPI 通路（真汇编 + 文本标记 + 关档自检）。
+
+    pin U 钉的是「次核停靠分支存在」，但那条分支在 QEMU -kernel 直启下根本
+    不可达（次核 PC 是 pflash 的 slave_boot_code）。真正把次核拉起来的是
+    arkrtos_context.S 里的 arkrtos_smp_secondary_entry（由 firmware 经
+    mailbox 跳进来）和 port 层的两个 IOCSR 写。这里把这两处钉住：
+
+      1) context.S 以 SMP=1 真汇编，反汇编里必须出现 iocsrwr / ertn 与
+         secondary_entry 符号；
+      2) 自检：同一份文件以 SMP=0 汇编，上述标记必须**消失** —— 否则说明
+         标记来自无条件代码，钉错了地方；
+      3) port.c 文本里三条 IOCSR 宏必须都在；自检：抠掉一条必须判缺失。
+    """
+    od = cc.replace("gcc", "objdump")
+    if not os.path.exists(od):
+        print("SMP-GATE FAIL: no LA64 objdump next to %s" % cc)
+        return False
+
+    td = tempfile.mkdtemp(prefix="arkrtos-smp-la64v-")
+    bad = 0
+    src = os.path.join(ROOT, LA64_CTX)
+
+    key = os.path.join(td, "arkrtos_sign_key_local.h")
+    with open(key, "w", encoding="utf-8") as f:
+        f.write("#ifndef ARKRTOS_SIGN_KEY_LOCAL_H\n"
+                "#define ARKRTOS_SIGN_KEY_LOCAL_H\n"
+                "#define ARKRTOS_IMAGE_SIGN_KEY { " +
+                ", ".join("0x%02X" % i for i in range(32)) + " }\n"
+                "#endif\n")
+
+    base_defs = ["-DARKRTOS_SIGN_KEY_LOCAL=1",
+                 "-DARKRTOS_BOARD_CONFIG=\"arkrtos_board_config.h\""]
+    inc = ["-I" + td]
+    inc += ["-I" + os.path.join(ROOT, x) for x in LA64_INCLUDES]
+
+    def assemble(tag, smp):
+        obj = os.path.join(td, tag + ".o")
+        cmd = [cc, "-march=loongarch64", "-mabi=lp64d", "-c", src, "-o", obj,
+               "-include", "arkrtos_board_config.h"] + base_defs + inc
+        cmd += ["-DARKRTOS_USE_SMP=1", "-DARKRTOS_CPU_NUM=2"] if smp else \
+               ["-DARKRTOS_USE_SMP=0"]
+        r = subprocess.run(cmd, cwd=ROOT, capture_output=True,
+                           encoding="utf-8", errors="replace")
+        out = ((r.stdout or "") + (r.stderr or "")).strip()
+        if r.returncode != 0:
+            print("SMP-GATE FAIL: LA64 %s does not assemble (SMP=%d)" % (tag, int(smp)))
+            print(out[-900:])
+            return None
+        d = subprocess.run([od, "-d", obj], capture_output=True,
+                           encoding="utf-8", errors="replace")
+        return (d.stdout or "") + (d.stderr or "")
+
+    on = assemble("smpon", True)
+    if on is None:
+        bad += 1
+    else:
+        missing = [m for m in CTX_MARKERS if m not in on]
+        if missing:
+            print("SMP-GATE FAIL: %s missing from the SMP=1 object" %
+                  ", ".join(missing))
+            bad += 1
+        else:
+            print("ok: LA64 context.S SMP=1 has secondary entry + iocsr + ertn")
+
+    off = assemble("smpoff", False)
+    if off is None:
+        bad += 1
+    else:
+        leaked = [m for m in ("iocsrwr", "arkrtos_smp_secondary_entry")
+                  if m in off]
+        if leaked:
+            print("SMP-GATE FAIL: %s still in the SMP=0 object (pin V is in the "
+                  "wrong place)" % ", ".join(leaked))
+            bad += 1
+        else:
+            print("ok: LA64 self-check (SMP=0 object has no SMP markers)")
+
+    def missing_markers(text):
+        return [m for m in PORT_MARKERS if m not in text]
+
+    try:
+        port = open(os.path.join(ROOT, LA64_PORT), encoding="utf-8",
+                    errors="replace").read()
+    except OSError:
+        port = ""
+    missing = missing_markers(port)
+    if missing:
+        print("SMP-GATE FAIL: %s missing from %s" % (", ".join(missing), LA64_PORT))
+        bad += 1
+    else:
+        print("ok: LA64 port keeps the three IOCSR addresses")
+
+    # 自检：抠掉一条宏名，同一个判据必须报出来（否则这道 pin 是假绿）
+    if missing_markers(port.replace(PORT_MARKERS[0], "")):
+        print("ok: LA64 port self-check (a removed IOCSR name is detected)")
+    else:
+        print("SMP-GATE FAIL: port marker self-check missed a removed name")
+        bad += 1
+
+    shutil.rmtree(td, ignore_errors=True)
+    return bad == 0
+
 
 def main():
     ap = argparse.ArgumentParser(description="Host + syntax gate for the SMP scaffolding")
@@ -354,8 +473,10 @@ def main():
         return 1
     if not run_la64(la):
         return 1
+    if not run_la64_pin_v(la):
+        return 1
 
-    print("SMP-GATE OK (host accounting + %d ARM ON-path files + LA64 pin U, CPU_NUM=4/2)" %
+    print("SMP-GATE OK (host accounting + %d ARM ON-path files + LA64 pin U/V, CPU_NUM=4/2)" %
           len(TARGETS))
     return 0
 

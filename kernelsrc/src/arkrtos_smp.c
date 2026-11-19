@@ -7,6 +7,12 @@
 *            3) 次核入口：标记上线 → 开中断 → 空转（不参与调度）；
 *            4) 核间中断的发起与默认处理。
 *
+*          **2026-11-19 现状**：② 次核启动 与 ③ IPI 通路在 QEMU LA64 上
+*          已经真跑通（port 层写 IOCSR mailbox 拉起次核、IPI 双向可达，
+*          串口有实测读数，见 docs/QEMU模拟器移植与验证.md 的 SMP 一节）。
+*          ④ 调度分核仍然**没有做**，也不在本文件范围：调度表/就绪位图/
+*          延时链都是全局一份，次核上线后只空转。
+*
 *          **不在这里做**：多核调度、每核运行队列、核间任务迁移、
 *          全局时钟同步、对象表的每核分区。这些都需要把调度器拆成每核
 *          一份，属于另一件事；本文件不假装完成，也不给"看起来能并行"
@@ -39,6 +45,13 @@ arkrtos_smp_cpu_t arkrtos_smp_cpu[ARKRTOS_CPU_NUM];
 
 /* 在线核掩码：bit n = 核 n 已上线 */
 volatile uint32 arkrtos_smp_online_mask = 0u;
+
+/* 每核栈：x 号核用第 x 块（0 号块不用，留给引导核的既有栈）。
+ * arkrtos_context.S 的 arkrtos_smp_secondary_entry 按 CSR.TID 算栈顶，
+ * 所以大小必须与那边用的是同一个宏（板级配置里的
+ * ARKRTOS_SMP_SEC_STACK_SIZE）。放 .bss：不占镜像体积。 */
+uint8 arkrtos_smp_stacks[ARKRTOS_CPU_NUM][ARKRTOS_SMP_SEC_STACK_SIZE]
+    __attribute__((aligned(16)));
 
 /* ============================================================
  * 内部工具
@@ -141,6 +154,11 @@ void arkrtos_smp_secondary_main(uint32 cpu)
     }
 
     arkrtos_smp_cpu_online(cpu);
+
+    /* LA64 的 arkrtos_smp_secondary_entry 进 C 之前已经开过 CRMD.IE
+     * （那里不能过 arkrtos_port_enable_irq()：它的 s_in_trap 是全局变量，
+     * 主核正在 trap 时会被静默跳过）。这里再调一次是幂等的，留给将来
+     * 别的 port 复用。 */
     arkrtos_port_enable_irq();
 
     /* 次核目前只空转：调度器还是单核的，这里没有可跑的任务队列。 */

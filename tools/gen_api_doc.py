@@ -58,6 +58,15 @@ def decode_text(raw):
 
 
 def build_utf8_tree():
+    """把仓库源码按 UTF-8 复制到临时树。
+
+    注意写入必须用 newline=""：本函数逐行保留原始行尾（CRLF 文件的行里已经
+    带着 '\r'），若用默认的文本模式，Windows 会把 '\n' 再翻成 '\r\n'，
+    临时树里每行变成 '\r\r\n'；读回时通用换行把 '\r\r\n' 解析成两段，
+    于是每行后面凭空多一个空行，collect_decl() 在第一行就断掉，生成的 API
+    参考会静默丢掉声明里的左花括号、甚至整段（arkrtos_log.c 就这样消失过）。
+    2026-11-19 修复，改后同一份源码的生成结果与跨平台生成的一致。
+    """
     count = 0
     for rel in SRC_DIRS:
         src = os.path.join(ROOT, rel)
@@ -74,7 +83,7 @@ def build_utf8_tree():
                     os.makedirs(parent)
                 with open(sp, "rb") as f:
                     text = decode_text(f.read())
-                with open(dp, "w", encoding="utf-8") as f:
+                with open(dp, "w", encoding="utf-8", newline="") as f:
                     f.write(text)
                 count += 1
     for rel in SRC_DOCS:
@@ -86,7 +95,7 @@ def build_utf8_tree():
             os.makedirs(os.path.dirname(dp))
         with open(sp, "rb") as f:
             text = decode_text(f.read())
-        with open(dp, "w", encoding="utf-8") as f:
+        with open(dp, "w", encoding="utf-8", newline="") as f:
             f.write(text)
         count += 1
     print("[1/2] 已转换 %d 个文件到 UTF-8 临时树: %s" % (count, GEN))

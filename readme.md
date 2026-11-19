@@ -138,6 +138,12 @@ Ark RTOS 把这件事拆成五层，每层各拦一种失败，且每一层的"�
 > 但本机没有可执行载体——龙芯教育维护的 LA32 QEMU 分支
 > `https://gitee.com/loongson-edu/la32r-QEMU.git`（machine `ls3a5k32`）只发布 Linux 二进制，
 > 本机既无 WSL 发行版也无 MSYS2，细节与该分支机器参数见该文档 §6.1。
+>
+> **SMP（LA64）**：② 次核启动与 ③ IPI 通路已在 QEMU `-smp 2` 上实跑通过（判词
+> `smp_bringup_ok_on_qemu`，读数 `[smp] cores=2 mask=0x00000003 sent=1 ipi1=5 result=ok`）。
+> ④ 调度分核**仍是单核设计**——次核只上线、计数、idle，不跑任务，所以这条不等于
+> 「支持多核调度」。另外 `-smp 2` 下有约 10% 概率的间歇停机（**与 SMP 代码无关**：默认
+> 镜像 `-smp 2` 同样复现），已按未解决登记在该文档 §9.6.10。
 
 ### 架构抽象层
 

@@ -33,6 +33,16 @@
 
 #if (ARKRTOS_USE_SMP == 1)
 
+/* 次核栈大小（每核一块，下标即硬件核号）。
+ * 真正的取值在板级头 board/<板>/arkrtos_board_config.h：
+ * 汇编侧 arkrtos_context.S 看不到内核配置头，只能认板级头那一处。
+ * 这里的 #ifndef 是兜底：宿主用例（tools/smp_gate.py 编
+ * kernelsrc/tests/test_smp_host.c）不带板级头，没有它就编不过。
+ * 两边默认值必须一致：改一处就得改两处。 */
+#ifndef ARKRTOS_SMP_SEC_STACK_SIZE
+#define ARKRTOS_SMP_SEC_STACK_SIZE   8192
+#endif
+
 /**
 * @brief 单核状态块
 * @details online 由次核自己在启动入口里置位（CPU0 由 init 置位）；

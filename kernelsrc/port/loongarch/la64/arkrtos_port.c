@@ -315,7 +315,6 @@ uint32 arkrtos_port_atomic_cas(volatile uint32 *p_addr, uint32 expect, uint32 ne
 {
     uint32 old;
     uint32 fail;
-
     do
     {
         __asm__ volatile("ll.w %0, %1, 0"
@@ -325,18 +324,42 @@ uint32 arkrtos_port_atomic_cas(volatile uint32 *p_addr, uint32 expect, uint32 ne
 
         if(old != expect)
         {
-            /* 撤销保留：写一次 sc.w 并丢弃结果即可。 */
-            __asm__ volatile("sc.w $zero, %0, 0" : : "r"(p_addr) : "memory");
+            /* 值已被别人改过：直接放弃，不写回。
+             * 不要用 "sc.w $zero, addr, 0" 撤销保留——sc.w 若成功会把 0
+             * 真的写进 *p_addr（本仓库踩过：在线掩码被静默清零，表现为
+             * 次核明明上线却一直读到 mask=0）。ll 的保留由本核下一次
+             * ll/sc 或 ertn 自然失效。 */
             return 0u;
         }
 
-        __asm__ volatile("sc.w %0, %2, 0"
+        /* sc.w rd, rj, si14：rd 既是"要写的值"也是"成功标志"（0=成功）。
+         * 所以必须先用 or 把 new_value 放进 rd，再用 p_addr 当地址。
+         * 写成 "sc.w %0, %2, 0"（rd 是输出、rj 是 new_value）会把
+         * new_value 当地址、把 rd 里的垃圾当数据写出去——不报错，静默
+         * 错答案：CAS 返回成功但目标内存一个字都没改。 */
+        __asm__ volatile("or   %0, %2, $zero\n\t"
+                         "sc.w %0, %1, 0"
                          : "=&r"(fail)
                          : "r"(p_addr), "r"(new_value)
                          : "memory");
-    } while(fail != 0u);
-
-    return 1u;
+        if(fail == 0u)
+        {
+            return 1u;                    /* 手册语义：rd=0 表示成功 */
+        }
+        /* QEMU 的 LoongArch 后端把 SC 的「成功」编码成 rd=1（与手册相反）：
+         * 实测 sc.w 明明把 0x123 写进了内存，rd 却读到 1。只看 rd 就会把
+         * 「已经写成功」判成失败，重试时 ll 读到自己刚写的值又走
+         * old != expect 分支返回 0 —— 锁字被置 1 却没有持有者，单核上直接
+         * 死等（表现为整机停摆：lock=1 / owner=0xffffffff / nest=0）。
+         * 所以加第二判据：回读内存，值已经是 new_value 就认定成功。
+         * 锁字 0->1 这种一次性迁移下该判据不会误判；理论上的 ABA（别人把
+         * 同一个 new_value 写回去）要求对手已经赢下这次 CAS，且只影响多核
+         * 同时抢同一把锁的场景。 */
+        if(*(volatile uint32 *)p_addr == new_value)
+        {
+            return 1u;
+        }
+    } while(1);
 }
 
 uint32 arkrtos_port_cpu_id(void)
@@ -364,24 +387,88 @@ void arkrtos_port_spin_hint(void)
 }
 
 #if (ARKRTOS_USE_SMP == 1)
-/* 单核移植：没有第二核可启动，也没有跨核 IPI 通路（CSR.IPI 只发给其他核，
- * 单核上无对端可发）。
+/* ------------------------------------------------------------
+ * SMP：次核启动与核间中断（QEMU virt / Loongson IPI）
  *
- * 2026-11-17 补一条实测事实：QEMU LoongArch 的 -kernel 直启模式里，次核
- * 的复位 PC 被 hw/loongarch/boot.c 设到 VIRT_FLASH0_BASE（pflash 里的
- * slave_boot_code），次核在那边 idle 等 IOCSR mailbox 与 IPI，**根本不经过
- * 我们 ELF 的 _start**。所以"启动次核"在 QEMU 上等价于"往 mailbox 写入口
- * 地址再发 IPI"，那是 IPI 通路那条欠账（§9.3 第 ③ 条），本轮不做。 */
+ * @details 2026-11-19 从 QEMU 9.2.3 源码 + 实跑确认的协议：
+ *          -kernel 直启模式下，CPU0 的复位 PC 是内核入口，**其余核**的复位
+ *          PC 是 VIRT_FLASH0_BASE，那里烧着 hw/loongarch/boot.c 的
+ *          slave_boot_code。这段固件做四件事：把 EENTRY 清零、清 CRMD.IE、
+ *          打开 ECFG 的 IPI 位并把本核 CORE_EN 写 0xfff，然后在
+ *          `idle 0` 里轮询自己的 IOCSR mailbox(0x1020)；mailbox 非 0 就
+ *          读它当入口地址跳过去。所以「启动次核」= 写 mailbox + 发一个 IPI。
+ *          **次核根本不经过我们 ELF 的 _start**，它的第一段我方代码是
+ *          arkrtos_context.S 里的 arkrtos_smp_secondary_entry。
+ *
+ *          IOCSR 窗口（include/hw/intc/loongson_ipi_common.h，
+ *          SMP_IPI_MAILBOX = 0x1000，不是 0x10000）：
+ *            0x1000 STATUS    读：本核挂起的 IPI 向量位图
+ *            0x1004 EN        读写：本核使能的向量位图
+ *            0x100C CLEAR     写：清挂起（写 1 的位被清）
+ *            0x1020 BUF0      次核入口地址（mailbox 槽 0）
+ *            0x1040 IPI_SEND  写 32 位：(目标核号 << 16) | 向量号(0..31)
+ *            0x1048 MAIL_SEND 写 64 位：(地址 << 32) | (核号 << 16)，只认 8 字节访问
+ *
+ *          MAIL_SEND 的 bit27..30 是**保留原值的字节掩码**（QEMU 里 mask=0
+ *          表示四个字节全用新值；写 0xF 反而一个字节也写不进去），所以这里
+ *          只给核号、掩码位保持 0。
+ *
+ *          入口地址必须是**物理地址**：次核从 pflash 跳过来时 CRMD.DA=1，
+ *          不做地址翻译。本镜像链接在 0x00200000 且恒等映射，直接取符号地址。
+ *
+ *          本轮范围：② 次核启动 ③ IPI 通路。④ 调度分核**仍然不做**——
+ *          调度表/就绪位图/延时链都是全局一份（见 arkrtos_smp.h 文件头），
+ *          次核上线后只空转，不参与调度。这两件事不能混着说。
+ * ------------------------------------------------------------ */
+#define LA_IOCSR_IPI_STATUS     0x1000u
+#define LA_IOCSR_IPI_CLEAR      0x100Cu
+#define LA_IOCSR_IPI_SEND       0x1040u
+#define LA_IOCSR_MAIL_SEND      0x1048u
+
+/* 次核入口（arkrtos_context.S）：读 CSR.TID 选自己的栈、装 EENTRY/ECFG/
+ * CORE_EN、开 IE，然后进 arkrtos_smp_secondary_main()。 */
+extern void arkrtos_smp_secondary_entry(void);
+
+static void la_iocsr_write_w(uint32 addr, uint32 val)
+{
+    /* GNU as 语法：iocsrwr.w rd, rj —— 把 rd 写进 rj 指向的 IOCSR。 */
+    __asm__ volatile("iocsrwr.w %0, %1" : : "r"(val), "r"(addr) : "memory");
+}
+
+static void la_iocsr_write_d(uint32 addr, unsigned long val)
+{
+    __asm__ volatile("iocsrwr.d %0, %1" : : "r"(val), "r"(addr) : "memory");
+}
+
 int32 arkrtos_port_cpu_start(uint32 cpu)
 {
-    (void)cpu;
-    return -1;
+    unsigned long entry = (unsigned long)&arkrtos_smp_secondary_entry;
+
+    if((cpu == 0u) || (cpu >= (uint32)ARKRTOS_CPU_NUM))
+    {
+        return -1;
+    }
+
+    /* 先放入口地址、再发 IPI：反过来的话次核可能从 mailbox 读到 0 直接跳 0。 */
+    la_iocsr_write_d(LA_IOCSR_MAIL_SEND,
+                     (entry << 32) | ((unsigned long)cpu << 16));
+
+    la_iocsr_write_w(LA_IOCSR_IPI_SEND, (cpu << 16) | 1u);
+    return 0;
 }
 
 int32 arkrtos_port_send_ipi(uint32 cpu)
 {
-    (void)cpu;
-    return -1;
+    if((cpu == 0u) || (cpu >= (uint32)ARKRTOS_CPU_NUM))
+    {
+        /* 核 0 是引导核：本移植没有给主核装 IPI 处理路径（它一进异常就落到
+         * la_trap_c 的通用链路），所以拒绝自投，明确报 -1，而不是让主核
+         * 掉进一个没处理过的中断里。 */
+        return -1;
+    }
+
+    la_iocsr_write_w(LA_IOCSR_IPI_SEND, (cpu << 16) | 1u);
+    return 0;
 }
 #endif /* ARKRTOS_USE_SMP == 1 */
 
@@ -3095,6 +3182,7 @@ la_frame_word *la_switch_inline(la_frame_word *frame)
 {
     int32 next;
     uint32 next_sp;
+
 #if (ARKRTOS_USE_PRIV == 1)
     /* 本任务的 PLV：activate() 会把 s_next_pplv 改成「目标任务」的值，
      * 而不切换（或切换被闸门拦下）时活在 ARM 上的仍然是本任务本身，

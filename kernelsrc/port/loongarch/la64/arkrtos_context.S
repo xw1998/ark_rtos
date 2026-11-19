@@ -60,6 +60,18 @@
     .globl  eentry
     .align  2
 eentry:
+#if (ARKRTOS_USE_SMP == 1)
+    /* 次核分流。硬约束：**在确认核号之前不能破坏任何活寄存器**（被中断的
+     * 线程可能正拿 t0 当循环指针）。所以先按最终帧大小开 256 字节、把 t0
+     * 存进它自己的槽（88），再借 t0 读 CSR.TID；确认是核 0 就把帧撤掉、
+     * 原样落回下面的单核路径（指令与关档逐条相同）。 */
+    addi.d  $sp, $sp, -256
+    st.d    $t0, $sp, 88
+    csrrd   $t0, 0x40
+    bnez    $t0, la_smp_trap_entry
+    ld.d    $t0, $sp, 88
+    addi.d  $sp, $sp, 256
+#endif
     addi.d  $sp, $sp, -256
     st.d    $ra, $sp, 0
     st.d    $tp, $sp, 8
@@ -157,6 +169,153 @@ eentry:
     ld.d    $tp, $s0, 8
     ld.d    $s0, $s0, 168
     ertn
+
+#if (ARKRTOS_USE_SMP == 1)
+/* ============================================================
+ * 次核异常入口（SMP）
+ * @details 从 eentry 的分流处进来时：sp 已经开好 256 字节帧，t0 槽(88)
+ *          里存着被打断的原值，t0 当前是本核号。
+ *
+ *          次核**不能**走 la_trap_c()：全局调度表、全局切换栈
+ *          (la_switch_stack_top)、s_in_trap 都是单核假设，两核同时进
+ *          la_trap_c 会互相踩。这里只做两件事 —— 清 IPI 挂起、交给默认
+ *          处理函数 —— 然后原样 ertn。帧格式与主路径一致（便于对照），
+ *          但不调用任何调度代码。
+ * ============================================================ */
+la_smp_trap_entry:
+    st.d    $ra, $sp, 0
+    st.d    $tp, $sp, 8
+    st.d    $t1, $sp, 96
+    addi.d  $t1, $sp, 256
+    st.d    $t1, $sp, 16           /* 帧里的 sp 槽 = 被打断时的原始 sp */
+    st.d    $a0, $sp, 24
+    st.d    $a1, $sp, 32
+    st.d    $a2, $sp, 40
+    st.d    $a3, $sp, 48
+    st.d    $a4, $sp, 56
+    st.d    $a5, $sp, 64
+    st.d    $a6, $sp, 72
+    st.d    $a7, $sp, 80
+    /* t0 槽已在分流处存过；t0 现在还是本核号，最后才恢复 */
+    st.d    $t2, $sp, 104
+    st.d    $t3, $sp, 112
+    st.d    $t4, $sp, 120
+    st.d    $t5, $sp, 128
+    st.d    $t6, $sp, 136
+    st.d    $t7, $sp, 144
+    st.d    $t8, $sp, 152
+    st.d    $fp, $sp, 160
+    st.d    $s0, $sp, 168
+    st.d    $s1, $sp, 176
+    st.d    $s2, $sp, 184
+    st.d    $s3, $sp, 192
+    st.d    $s4, $sp, 200
+    st.d    $s5, $sp, 208
+    st.d    $s6, $sp, 216
+    st.d    $s7, $sp, 224
+    st.d    $s8, $sp, 232
+
+    csrrd   $t1, 0x6                /* ERA  */
+    st.d    $t1, $sp, 240
+    csrrd   $t1, 0x1                /* PRMD */
+    st.d    $t1, $sp, 248
+
+    /* 清 IPI 挂起：读 STATUS(0x1000) → 写 CLEAR(0x100C)。
+     * 写 1 的位被清；不清的话 ertn 回去立刻再进一次，变成中断风暴。 */
+    lu12i.w $t2, 1
+    iocsrrd.w $t1, $t2
+    ori     $t2, $t2, 0x0c
+    iocsrwr.w $t1, $t2
+
+    bl      arkrtos_smp_ipi_handler  /* 默认实现：本核 ipi_count++ */
+
+    ld.d    $t1, $sp, 240
+    csrwr   $t1, 0x6
+    ld.d    $t1, $sp, 248
+    csrwr   $t1, 0x1
+
+    ld.d    $ra, $sp, 0
+    ld.d    $a0, $sp, 24
+    ld.d    $a1, $sp, 32
+    ld.d    $a2, $sp, 40
+    ld.d    $a3, $sp, 48
+    ld.d    $a4, $sp, 56
+    ld.d    $a5, $sp, 64
+    ld.d    $a6, $sp, 72
+    ld.d    $a7, $sp, 80
+    ld.d    $t1, $sp, 96
+    ld.d    $t2, $sp, 104
+    ld.d    $t3, $sp, 112
+    ld.d    $t4, $sp, 120
+    ld.d    $t5, $sp, 128
+    ld.d    $t6, $sp, 136
+    ld.d    $t7, $sp, 144
+    ld.d    $t8, $sp, 152
+    ld.d    $fp, $sp, 160
+    ld.d    $s0, $sp, 168
+    ld.d    $s1, $sp, 176
+    ld.d    $s2, $sp, 184
+    ld.d    $s3, $sp, 192
+    ld.d    $s4, $sp, 200
+    ld.d    $s5, $sp, 208
+    ld.d    $s6, $sp, 216
+    ld.d    $s7, $sp, 224
+    ld.d    $s8, $sp, 232
+    ld.d    $tp, $sp, 8
+    ld.d    $t0, $sp, 88
+    ld.d    $sp, $sp, 16
+    ertn
+
+/* ============================================================
+ * 次核启动入口（SMP）
+ * @details 由 pflash 里的 slave_boot_code 跳进来：CRMD.DA=1、CRMD.IE=0，
+ *          sp 是固件留下的值（不可用），EENTRY 被固件清成 0。这里做四件事：
+ *            1) 换到自己的静态栈（arkrtos_smp_stacks 的第 tid 块）；
+ *            2) 装 EENTRY = eentry；
+ *            3) 打开 ECFG 的 IPI 位（bit12）与本核 CORE_EN（固件已开过，
+ *               重复一次无副作用 —— 不依赖固件实现细节）；
+ *            4) 开 CRMD.IE，进 C 的 arkrtos_smp_secondary_main()。
+ *          这里**不**调 arkrtos_port_irq_init()：那会建页表、清定时器状态，
+ *          而且它的开中断要过全局 s_in_trap（主核正在 trap 时会被静默跳过，
+ *          次核就永远收不到 IPI）。
+ * ============================================================ */
+    .section .text.arkrtos_smp_secondary_entry, "ax"
+    .globl  arkrtos_smp_secondary_entry
+    .align  2
+arkrtos_smp_secondary_entry:
+    /* sp = arkrtos_smp_stacks + (tid + 1) * ARKRTOS_SMP_SEC_STACK_SIZE
+     * 栈向下长，所以取第 tid 块的顶端。核号越界不在这里判：C 侧
+     * arkrtos_smp_secondary_main() 会把非法核号一律空转，不碰状态表。 */
+    csrrd   $t0, 0x40
+    andi    $t0, $t0, 0x3ff
+    la.abs  $sp, arkrtos_smp_stacks
+    li.d    $t2, ARKRTOS_SMP_SEC_STACK_SIZE
+    mul.d   $t1, $t0, $t2
+    add.d   $sp, $sp, $t1
+    add.d   $sp, $sp, $t2           /* 指向本块顶端（栈向下生长） */
+
+    la.abs  $t1, eentry
+    csrwr   $t1, 0xC                /* EENTRY */
+
+    lu12i.w $t1, 1                  /* 0x1000 = ECFG.LIE[12]：核间中断。
+                                     * 不能用 ori：它的立即数是 12 位无符号，
+                                     * 0x1000 会报 Immediate overflow。 */
+    move    $t2, $t1
+    csrxchg $t2, $t1, 0x4
+
+    lu12i.w $t1, 1                  /* 0x1000 */
+    ori     $t1, $t1, 0x4           /* CORE_EN */
+    ori     $t2, $zero, 0xfff
+    iocsrwr.w $t2, $t1
+
+    ori     $t1, $zero, 0x4         /* CRMD.IE */
+    csrxchg $t1, $t1, 0x0
+
+    move    $a0, $t0
+    bl      arkrtos_smp_secondary_main
+1:
+    b       1b
+#endif /* ARKRTOS_USE_SMP == 1 */
 
 /* ============================================================
  * 任务上下文里的「立即切换」

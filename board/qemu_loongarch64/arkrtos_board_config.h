@@ -313,4 +313,14 @@
 #define ARKRTOS_USE_SMP              0
 #endif
 
+/* 次核自己的栈（SMP 档才用）：x 号核用第 x 块，0 号块留空。
+ * 次核只跑「上线标记 → 中断 → idle 空转」，但 IPI 处理链要走一次 C 调用，
+ * 8 KB 给足余量（相对主栈 64 KB 可以忽略）。
+ * 这个数同时被 arkrtos_smp.c（定义数组）与 arkrtos_context.S（算栈顶）使用：
+ * 汇编侧看不到 kernelsrc/include/arkrtos_config.h，所以常量放在这里，
+ * 两边都只认这一处定义。 */
+#ifndef ARKRTOS_SMP_SEC_STACK_SIZE
+#define ARKRTOS_SMP_SEC_STACK_SIZE   8192
+#endif
+
 #endif /* __ARKRTOS_BOARD_CONFIG_H__ */

@@ -3444,6 +3444,154 @@ idle  0
 
 Cross-check: `027dcf53...6114b`, 460264 B, byte-identical across the three trees.
 
+### 9.6 Bring-up landed (2026-11-19, QEMU LA64 executed): `smp_bringup_ok_on_qemu`
+
+> Scope (user's words: "do SMP with the simulator"): make §9.3 items ② (secondary
+> bring-up) and ③ (IPI path) real and show serial evidence; **④ (per-core
+> scheduling) is explicitly not done** -- a design boundary, not a pending task.
+
+**The only path that works under `-kernel` boot.** §9.5.1 found that secondary harts
+start in the pflash `slave_boot_code`. Reading that firmware (QEMU 9.2.3
+`hw/loongarch/boot.c`) shows it: clears EENTRY, clears `CRMD.IE`, clears mailbox
+`0x1020`, sets `ECFG` bit12 and `CORE_EN=0xfff`, then idles until `0x1020` is non-zero,
+then reads `0x1000`, writes `0x100C`, and `jirl`s to the address taken from `0x1020`.
+So bringing a secondary core up is exactly two writes from CPU0:
+
+```
+MAIL_SEND (0x1048, 64-bit): (entry << 32) | (cpu << 16) | byte mask   (0 = write all 4 bytes)
+IPI_SEND  (0x1040, 32-bit): (cpu << 16) | vector
+```
+
+The secondary core never executes `start.S`; it enters with `CRMD.DA=1`, `IE=0`, a
+garbage `sp`, `EENTRY=0`, and must build its own stack / install EENTRY / open
+ECFG+CORE_EN+IE. `IPI_SEND` only sets `status |= BIT(vector)` -- **repeating the same
+vector is coalesced**, so the self-test has to send one and wait for that one.
+
+**What was landed (all under `ARKRTOS_USE_SMP == 1`)**
+
+| file | what |
+|---|---|
+| `port/loongarch/la64/arkrtos_port.c` | IOCSR macros + `la_iocsr_write_w/d`; `cpu_start` (MAIL_SEND then IPI_SEND), `send_ipi` |
+| `port/loongarch/la64/arkrtos_context.S` | `eentry` branches on `CSR.TID` (0x40); `la_smp_trap_entry` (status read, clear, handler, `ertn`); `arkrtos_smp_secondary_entry` |
+| `src/arkrtos_smp.c` | `arkrtos_smp_stacks[CPU_NUM][SEC_STACK_SIZE]` in `.bss` |
+| `board/qemu_loongarch64/arkrtos_board_config.h` | `ARKRTOS_SMP_SEC_STACK_SIZE` (8192), shared by C and `.S` |
+| `example/qemu_loongarch64/main.c` | `arkrtos_smp_self_test()` after module init |
+
+The secondary core deliberately does **not** call `la_trap_c` or
+`arkrtos_port_irq_init()`: `la_switch_stack_top`, `s_in_trap`, the ready bitmap and
+the delay queue are all single-core globals. It only clears its pending bit, bumps
+`ipi_count`, and returns to idle.
+
+**A real bug found on the way: `atomic_cas` wrote to the wrong address.** With the
+bring-up working, the secondary core came online (`online/started/idle_count` all
+visible from CPU0 -- plain stores are fine) but `arkrtos_smp_online_mask` stayed 0.
+The old inline asm was `sc.w %0, %2, 0`, i.e. rd = output, rj = `new_value`; but
+`sc.w rd, rj, si14` takes the value from **rd** and reports failure in rd. So the
+CAS used `new_value` as the address, wrote garbage, returned "success", and left the
+target untouched; the failure branch (`sc.w $zero, %0, 0`) actually wrote 0 into the
+target. Fixed by `or %0, %2, $zero` + `sc.w %0, %1, 0` and returning without a write
+when the compare fails.
+
+**Readings**
+
+```
+[smp] cores=2 mask=0x00000003 sent=1 ipi1=5 result=ok
+```
+
+`-d in_asm` shows the secondary hart's trail: `0x1c000000` -> `0x1c000038` (idle) ->
+`0x1c000048` (mailbox non-zero, `beqz` not taken) -> `arkrtos_smp_secondary_main` ->
+`smp_mask_set`.
+
+`-smp 2` still passes `[FS] PASS`; the SMP build does not disturb the single-core
+baseline.
+
+**Gate:** `tools/smp_gate.py` gained pin **V** -- assemble `arkrtos_context.S` with
+SMP=1 and require `arkrtos_smp_secondary_entry` / `iocsrwr` / `ertn` in the
+disassembly, then assemble the same file with SMP=0 and require all of them to be
+absent (otherwise the markers were pinned on unconditional code); plus the three
+IOCSR macro names in `arkrtos_port.c` with a removal self-check.
+`ci_gate.py`: 47 passed / 0 failed / 0 skipped.
+
+**Default image is NOT byte-identical this time.** `objcopy -O binary` stays
+31,462,512 B but sha256 moved `9e59d693...` -> `69919f39...fedc6c3`; `cmp -l` shows
+27 differing bytes, all inside `arkrtos_port_atomic_cas` (0x23D495..0x23D4BB, checked
+with nm/objdump). The cause is the CAS fix, not the SMP switch -- and the only way to
+restore "zero change" would be to keep a broken CAS.
+
+**Verdict: `smp_bringup_ok_on_qemu`.** ②③ executed on LA64/QEMU `-smp 2`; ④ not done;
+real hardware not verified; RV32/LA32 untouched.
+
+Five readings that are **not** permitted:
+
+1. Not "SMP is supported": the scheduler is still one global copy; secondaries only
+   come online, count, and idle.
+2. Not "the secondary ran `start.S`": it entered through the firmware's mailbox path.
+3. Not "vector 1 fired five interrupts": it is five send-and-wait round trips.
+4. Not "works on real boards": every IOCSR/mailbox fact comes from QEMU source.
+5. Not "RV32 can do it now": RISC-V uses ACLINT/CLINT `msip`, a different mechanism,
+   not implemented here.
+
+
+**Unresolved: ~10% intermittent halt under `-smp 2` (registered, not fixed)**
+
+Four distinct crash signatures were captured on disk: (1) `KERNEL refill (plv0)
+badv=0x1648cf48 era=0x00215920` with `era` inside `arkrtos_sched_activate`; (2)
+`ecode=0x0d era=0x0021f080 badv=0x0021f080 badi=0x00000001 crmd=0x10` where
+`0x21f080` is `mdk_trace_send.part.0+0x180`, the instruction being `jirl $r0,$r1,0`
+(a function return); (3) `ecode=0x0d era=0x8 badv=0x8 badi=0x0 crmd=0x10` with
+`frame@0x003b5710`, the initial frame of task 4 whose PRMD slot holds
+`0x00323fdc` (`arkrtos_ready_heal_g`) and whose ERA slot holds `8`; (4)
+`KERNEL refill (plv0) badv=0xffffff04 era=0x00244894` (a second exception inside
+EENTRY `0x244890`), right after the shell prompt appears.
+
+Signature 3 belongs to the same family as the unresolved §5.13.4 case
+(`ecode=0x0d era=0 badv=0 badi=0 crmd=0x10`, frame at stack top minus 0x100). The
+multi-core readings add samples to that family; they do not explain it.
+
+Same image, same command line, only `-smp` and `-accel` changed:
+
+| Configuration | Crashes | Note |
+|---|---|---|
+| default image, `-smp 1` | 0 / 6 | baseline |
+| SMP image, `-smp 1` | 0 / 24 | every run `mask=0x1 result=FAIL(secondary offline)` |
+| SMP image, `-smp 2` (MTTCG) | 3 / 20 | other 17 runs `result=ok` |
+| SMP image, `-smp 2`, `SMP_DBG_NO_IPI=1` | 1 / 20 | IPI is not a required trigger |
+| default image, `-smp 2` (MTTCG) | 2 / 20 | SMP code was never compiled in |
+| default image, `-smp 2`, `-accel tcg,thread=single` | 0 / 20 | |
+| SMP image, `-smp 2`, `-accel tcg,thread=single` | 1 / 10 | all 10 runs `FAIL(secondary offline)` |
+
+Two decisive readings. First, the default image (`ARKRTOS_USE_SMP=0`) also crashes
+with `-smp 2` (2/20), so the crash cannot have been introduced by this round's SMP
+code. Second, `thread=single` is not a remedy: it still crashes 1/10 on the SMP image
+and, worse, starves the secondary hart -- 10/10 runs report `secondary offline`,
+because with one TCG thread CPU1 never gets scheduled while CPU0 spins. SMP bring-up
+therefore depends on real concurrency, and real concurrency (MTTCG) is exactly what
+carries the ~10% halt.
+
+What the secondary hart is actually doing was measured, not inferred. On the default
+image with `-smp 2`, HMP `info registers -a` shows `CPU#1 PC=0x1C00003C`,
+`CRMD=0x8` (IE=0), `EENTRY=0`, `GPR12=0xffffffffffffffff`, `GPR13=0x1020`, with the PC
+and all GPRs bit-identical across three samples. `0x1c000000` is `virt.flash0`
+(confirmed by `info mtree -f`); `xp /32wx 0x1c000000` contains `0x06488000` (`idle 0`)
+and `0x43fff59f` (the `beq` back-edge) -- the firmware's `slave_boot_code` parking
+loop from 9.6.1. So under the default image CPU#1 never executes kernel code and
+never writes guest RAM; the "the secondary hart ran kernel code and crashed" path is
+excluded by measurement.
+
+A stronger observation: the default image also halts with a **single vCPU**. During
+wrap-up, the default build (`ARKRTOS_USE_SMP=0`, no `-smp` on the command line) ran
+`utest` three times and one run died with
+`FATAL: estat=0x000d0000 ecode=0x0000000d era=0x00000008 badv=0x00000008 crmd=0x10`;
+the other two printed `utest: 13 matched, 13 passed, 0 failed, 0 skipped`.
+That signature belongs to the same family as the unresolved 5.13.4 case and matches
+signature 3 above, so the intermittent halt needs neither two vCPUs, nor MTTCG, nor
+any SMP code. It is an older, independent defect that this round merely ran into more
+often under `-smp 2`.
+
+Sixth reading that is **not** permitted: `-accel tcg,thread=single` must not be
+presented as a working recipe -- it does not stop the crash and it keeps the
+secondary hart permanently offline.
+
 ## 10. Enabling `-Wconversion` (2026-11-19): default image byte-identical
 
 `tools/warn_gate.py` goes from six options to seven; the new one is `-Wconversion`, which in

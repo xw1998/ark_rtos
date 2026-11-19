@@ -6435,6 +6435,368 @@ utest: 13 matched, 13 passed, 0 failed, 0 skipped; assertions 133 run / 0 failed
 `slave_boot_code` 跳出后进该入口，并自己建栈与 TLB 映射。那已经是 §9.3 第 ③ 条
 的工作量，须另行批准。
 
+### 9.6 ②③ 做实（2026-11-19，QEMU LA64 实跑）：判 `smp_bringup_ok_on_qemu`
+
+> 用户原文：「**SMP用模拟的做掉啊**」。范围写死：§9.3 的 ② 次核启动与 ③ IPI 通路
+> 做实并给出串口证据；**④ 调度分核明确不做**（设计边界，不是没做完）。
+
+#### 9.6.1 决定性事实：QEMU `-kernel` 直启下把次核拉起来的唯一路径
+
+§9.5.1 已经查明次核的 PC 是 pflash 里的 `slave_boot_code`，不是我们的 entry。
+本轮把那段固件代码逐条读完（`hw/loongarch/boot.c`，QEMU 9.2.3），它做的事是：
+
+1. `csrwr $t0, EENTRY`：把 EENTRY 写成 0（即 TLB refill 入口全指向 0）；
+2. 清 `CRMD.IE`；
+3. 清自己的 mailbox：`iocsrwr.d $zero, 0x1020`；
+4. 开 IPI：`ECFG` 置 bit12（`LIE[12] = IPI`），并往 `0x1004 CORE_EN` 写 `0xfff`；
+5. 循环：`idle 0` → 读 `0x1020` → 为 0 就继续 idle；
+6. mailbox 非 0 时：读 `0x1000` status → 写 `0x100C` clear → 关 `ECFG` bit12 →
+   从 `0x1020` 取入口地址 → `jirl $zero, $ra, 0` **直接跳进去**。
+
+所以「拉起次核」在内核侧只有两步，**与 `start.S` 无关**：
+
+```
+往 0x1048（MAIL_SEND，64 位）写  (入口地址 << 32) | (核号 << 16) | 字节掩码
+往 0x1040（IPI_SEND， 32 位）写  (核号 << 16) | 向量号
+```
+
+次核跳进我们的入口时 `CRMD.DA = 1`（地址翻译关）、`CRMD.IE = 0`，`sp` 是固件
+留下的垃圾值、`EENTRY` 是 0、`.bss` 与 `.data` 已由 CPU0 初始化好。入口因此必须
+**自己建栈、自己装 EENTRY、自己开 ECFG/CORE_EN/CRMD.IE**，且地址必须是物理地址。
+
+#### 9.6.2 IOCSR 地址与两个写的语义（以 QEMU 头文件为准）
+
+`include/hw/intc/loongson_ipi_common.h` / `hw/intc/loongson_ipi.c`：
+
+| IOCSR 偏移 | 名字 | 宽度 | 语义 |
+|---|---|---|---|
+| `0x1000` | `CORE_STATUS` | 32 | 读：本核挂起位图（bit n = 向量 n 待处理） |
+| `0x1004` | `CORE_EN` | 32 | 写：允许哪些向量拉中断（本核） |
+| `0x1008` | `CORE_SET` | 32 | 写：软件置挂起位（不走中断） |
+| `0x100C` | `CORE_CLEAR` | 32 | 写：清挂起位（EOI 等价物） |
+| `0x1020` | `CORE_BUF_20` | 32/64 | 次核启动 mailbox（固件读它取入口） |
+| `0x1040` | `IPI_SEND` | 32 | 写：给目标核置 `BIT(向量)`，该核 `CORE_EN` 命中则拉中断 |
+| `0x1048` | `MAIL_SEND` | 64 | 写：`(数据 << 32) \| (核号 << 16) \| (bit27..30 字节掩码)` |
+
+两条容易踩的语义：
+
+- **`IPI_SEND` 只置位、不计数**：同一向量连发 N 次，目标核只看到一次
+  （`status \|= BIT(vector)`，位已经为 1 就不再有新动作）。所以「发 5 次收到 1 次」
+  是硬件语义，不是通路故障。要数往返，必须一发一等。
+- **`MAIL_SEND` 的 bit27..30 是「保留旧值的字节掩码」**，全 0 才是四个字节全写新值。
+  本 port 传 0，即整 32 位入口地址一次写进去。
+
+`iocsrrd/rd.w|d`、`iocsrwr.w|d` 的寄存器约定是 **rd = 值、rj = 地址**（helper 分别
+走 `address_space_ld*/st*`）。`iocsrwr.d` 在 `0x1048` 上落成一次 8 字节写。
+
+#### 9.6.3 落地（五处，全部在 `ARKRTOS_USE_SMP == 1` 下）
+
+1. **`kernelsrc/port/loongarch/la64/arkrtos_port.c`**
+   - 宏 `LA_IOCSR_IPI_STATUS/CLEAR/SEND`（0x1000/0x100C/0x1040）与
+     `LA_IOCSR_MAIL_SEND`（0x1048），加 `la_iocsr_write_w/d` 两个内联封装；
+   - `arkrtos_port_cpu_start(cpu)`：先 `MAIL_SEND` 写入
+     `(arkrtos_smp_secondary_entry << 32) | (cpu << 16)`，再 `IPI_SEND`
+     写 `(cpu << 16) | 1`（向量 1 专用于「启动」）；
+   - `arkrtos_port_send_ipi(cpu)`：`cpu == 0` 或越界返回 -1，否则同样写 `IPI_SEND`。
+   两个函数的原 `return -1` 桩删除（SMP 档下）。
+2. **`kernelsrc/port/loongarch/la64/arkrtos_context.S`**
+   - `eentry:` 开头插入分流：存 `$t0` → `csrrd $t0, 0x40` → 非 0 跳
+     `la_smp_trap_entry`，是 0 则走原有单核路径（这条分支对默认档不存在）；
+   - `la_smp_trap_entry`：同样的 256 字节帧（全 GPR + ERA + PRMD），但**不**调
+     `la_trap_c`——读 `0x1000` status → 写 `0x100C` clear → `bl
+     arkrtos_smp_ipi_handler` → 全量恢复 `ertn`；
+   - `arkrtos_smp_secondary_entry`：`csrrd 0x40` 取核号 → `sp = arkrtos_smp_stacks
+     + (tid+1) * ARKRTOS_SMP_SEC_STACK_SIZE` → `csrwr eentry, 0xC`（EENTRY）→
+     `csrxchg` 置 ECFG bit12 → `iocsrwr.w 0xfff, 0x1004`（CORE_EN）→
+     `csrxchg` 置 CRMD.IE → `bl arkrtos_smp_secondary_main` → 死循环。
+3. **`kernelsrc/src/arkrtos_smp.c`**：`arkrtos_smp_stacks[ARKRTOS_CPU_NUM]
+   [ARKRTOS_SMP_SEC_STACK_SIZE]`（.bss，不占镜像体积）。
+4. **`board/qemu_loongarch64/arkrtos_board_config.h`**：`ARKRTOS_SMP_SEC_STACK_SIZE`
+   = 8192（C 与 `.S` 共用的唯一位置）；`arkrtos_smp.h` 里补一个同样的 `#ifndef`
+   兜底，只为让不带板级头的宿主用例编得过（两边必须一致）。
+5. **`example/qemu_loongarch64/main.c`**：`arkrtos_kernel_module_init()` 之后
+   `#if (ARKRTOS_USE_SMP == 1)` 跑一次 `arkrtos_smp_self_test()`。
+
+**为什么次核不走 `la_trap_c`、也不调 `arkrtos_port_irq_init()`**：`la_switch_stack_top`
+与 `s_in_trap` 都是**全局唯一**（`port.c:172`），调度表和就绪位图也是单核一份。
+次核一旦进 `la_trap_c`，就会在「共享的中断栈 + 共享的 in_trap 计数」上和 CPU0
+打架；而 `arkrtos_port_irq_init()` 会开 `CRMD.IE` 且要过 `s_in_trap`，CPU0 恰好在
+trap 里时次核就永远收不到 IPI。所以次核只做「清挂起 → 计数 → 回到 idle」。
+
+#### 9.6.4 本轮的真缺陷：`atomic_cas` 汇编写错，CAS 返回成功但内存没变
+
+现象（修好启动链路之后才暴露）：次核确实上线了，`arkrtos_smp_cpu[1].online == 1`、
+`started == 1`、`idle_count` 在涨（**普通 store 次核写、主核读得到**），但
+`arkrtos_smp_online_mask` 恒为 0，于是自检打印
+`cores=2 mask=0x00000000 result=FAIL(secondary offline)`。
+
+根因在 `arkrtos_port_atomic_cas()`：原实现
+
+```c
+__asm__ volatile("sc.w %0, %2, 0" : "=&r"(fail) : "r"(p_addr), "r"(new_value));
+```
+
+`sc.w rd, rj, si14` 的 **rd 既是待写值、也是成功标志**（成功写 0、失败写 1）。
+这里 rd 填的是输出变量、rj 填的是 `new_value`，于是 **把 `new_value` 当地址**、
+把 rd 里的垃圾当数据写出去；内存原封不动，函数却返回「成功」。失败分支更糟：
+`sc.w $zero, %0, 0` 会真的把 0 写进 `*p_addr`。
+
+修法（两处）：
+
+```c
+if (old != expect)
+{
+    return 0u;   /* 不写回；ll 的保留由本核下一次 ll/sc 或 ertn 自然失效 */
+}
+__asm__ volatile("or   %0, %2, $zero\n\t"
+                 "sc.w %0, %1, 0"
+                 : "=&r"(fail) : "r"(p_addr), "r"(new_value) : "memory");
+```
+
+新汇编逐条核过：`ll.w r12,r4,0` → `bne` → `move r12,r6` → `sc.w r12,r4,0` →
+`bnez r12,retry`。
+
+**代价必须写明**：这个修复落在 `kernelsrc/port/loongarch/la64/arkrtos_port.c` 的
+公共代码上，**默认档镜像因此不再是逐字节不变**（见 §9.6.8）。这不是 SMP 开关
+带来的差异，而是一个本来就坏的函数被修好了——`atomic_cas` 在默认档也会被
+`mempool`/`sync` 一类路径用到，只是此前没人靠它的返回值决定正确性。
+
+#### 9.6.5 自检脚本为什么是「一发一等」
+
+`arkrtos_smp_self_test()` 对每个次核、每个向量 1..5：发一次 → 有界自旋等
+`ipi_count` 涨到这一格 → 再发下一次。原因见 §9.6.2 第一条：同向量连发会被
+合并成一次中断，「连发 5 次收到 1 次」不是故障。等待有上限
+（`SMP_SELF_TEST_SPIN = 20000000` 次 `pause` 语义的 spin hint），超时即判
+`FAIL(ipi not received)`，不会挂死。
+
+打印一行：`[smp] cores=N mask=0x%08x sent=%u ipi1=%u result=ok|FAIL(...)`。
+
+#### 9.6.6 实跑读数
+
+构建（`SOURCE_DATE_EPOCH` 固定时间戳，便于对拍）：
+
+```bash
+make -f example/qemu_loongarch64/Makefile BUILD=build/qemu_la64_smp \
+     EXTRA_CFLAGS="-DARKRTOS_USE_SMP=1 -DARKRTOS_CPU_NUM=2" -j8
+```
+
+运行（必须 `-nographic`，否则 `-serial file:` 与 `-D` 会莫名失败，见 §9.6.9 附注）：
+
+```bash
+timeout 25 "D:/env/tools/qemu/qemu9/mingw64/bin/qemu-system-loongarch64.exe" \
+  -M virt -m 128M -smp 2 -nographic -display none \
+  -serial file:build/_smp_run9.txt -kernel build/qemu_la64_smp/ark_qemu_la64.elf
+```
+
+串口原文（第 6 行）：
+
+```
+[smp] cores=2 mask=0x00000003 sent=1 ipi1=5 result=ok
+```
+
+同一份镜像带 `utest` 交互跑（`-smp 2`）：`[FS] PASS` 与
+`utest: 13 matched, 13 passed, 0 failed, 0 skipped; assertions 133 run / 0 failed`
+照旧（SMP 档没有破坏单核基线）。
+
+**次核到底有没有跑到我们的代码**：`-d in_asm -D build/_asm2.log` 抓 TB 记录，
+日志里出现这一串（`-d in_asm` 不打印 CPU 号，靠符号名与地址区分）：
+
+```
+IN: 0x1c000000            <- pflash slave_boot_code 复位入口
+IN: 0x1c000038            <- idle 0（pollloop）
+IN: 0x1c000048            <- mailbox 非 0 后的分支（跳过 beqz 才算真收到）
+IN: arkrtos_smp_secondary_main
+IN: 0x00244f1c            <- arkrtos_smp_secondary_entry 之后
+...
+IN: smp_mask_set
+```
+
+镜像符号（`build/qemu_la64_smp/ark_qemu_la64.elf`，nm）：
+
+```
+0x00244c90 T eentry
+0x00244df4 t la_smp_trap_entry
+0x00244f1c T arkrtos_smp_secondary_entry
+0x00210390 T arkrtos_smp_secondary_main
+0x00210200 T arkrtos_smp_init
+0x00320d60 B arkrtos_smp_stacks
+0x00324d60 B arkrtos_smp_online_mask
+0x0023d6d0 T arkrtos_port_atomic_cas
+```
+
+#### 9.6.7 门禁：`tools/smp_gate.py` 新增 pin V
+
+pin U（§9.5.5）钉的是「次核停靠分支存在」，但那条分支在 `-kernel` 直启下不可达。
+pin **V** 钉本轮真正起作用的两处：
+
+1. `kernelsrc/port/loongarch/la64/arkrtos_context.S` 以
+   `-DARKRTOS_USE_SMP=1 -DARKRTOS_CPU_NUM=2` **真汇编**，反汇编里必须同时有
+   `arkrtos_smp_secondary_entry`、`iocsrwr`、`ertn`；
+2. **自检**：同一份文件以 `-DARKRTOS_USE_SMP=0` 汇编，上述标记必须**全都不在**
+   ——否则说明标记来自无条件代码，钉错了地方；
+3. `arkrtos_port.c` 文本里 `LA_IOCSR_MAIL_SEND` / `LA_IOCSR_IPI_SEND` /
+   `LA_IOCSR_IPI_CLEAR` 三个宏名必须在；**自检**：同一个判据把其中一条抠掉后
+   必须报缺失（第一次写这条自检时用 `replace(..., 1)` 只删一处，而
+   `LA_IOCSR_MAIL_SEND` 在文件里出现两次，自检因此「没报」——当场被自己抓到）。
+
+`py -3 tools/smp_gate.py` 全过；`tools/ci_gate.py` **47 项 0 失败 0 跳过**，
+其中 `smp` 项现在是「44 条宿主断言 + 5 个 ARM 文件 + LA64 pin U/V」。
+
+#### 9.6.8 默认档镜像：这次**不是**逐字节不变（如实记账）
+
+| 版本 | `objcopy -O binary` | sha256 |
+|---|---|---|
+| 本轮之前（`980d3f9`） | 31,462,512 B | `9e59d693…` |
+| 本轮之后（默认档，无 SMP 宏） | 31,462,512 B | `69919f39…fedc6c3` |
+
+`cmp -l` 共 27 个字节不同，**全部落在 `0x23D495..0x23D4BB`**，即
+`arkrtos_port_atomic_cas` 函数体内部（nm/objdump 核过地址）。结论：
+
+- 「默认关时体积与行为零变化」这条**本轮不成立**，原因是修了 `atomic_cas` 的真
+  缺陷，不是 SMP 开关引入的差异；
+- 体积（31,462,512 B）与段布局都没变，变化只在那个函数自己的指令编码上；
+- 想回到「零变化」只有一条路：让 `atomic_cas` 继续保持坏着——不做。
+
+复现（两次连续构建得到同一个 sha256，可重复）：
+
+```bash
+SOURCE_DATE_EPOCH=1600000000 make -f example/qemu_loongarch64/Makefile \
+  BUILD=build/qemu_loongarch64 -j8
+D:/LoongIDE/la64-tool/bin/loongarch64-newlib-elf-objcopy -O binary \
+  build/qemu_loongarch64/ark_qemu_la64.elf build/_def_img.bin
+sha256sum build/_def_img.bin
+```
+
+#### 9.6.9 判词与五条不许读法
+
+判词：**`smp_bringup_ok_on_qemu`** —— LA64 / QEMU `-smp 2` 上，② 次核启动与
+③ IPI 通路**实跑通过**（掩码 `0x3`、5 次 IPI 往返全收到）；④ 调度分核**未做**
+（设计边界）；真实硬件**未验证**；RV32 / LA32 侧未动。
+
+不许读法：
+
+1. **不能读成「支持 SMP 多核」**：调度器仍是全局单核一份（当前任务号、就绪位图、
+   延迟队列、`la_switch_stack_top`、`s_in_trap`），次核只做「上线 + 计数 + idle」，
+   不碰对象表、不跑任务。上线掩码非 0 不等于两个核在并行干活。
+2. **不能把 `mask=0x3` 读成「次核跑过 `start.S`」**：它没有。次核走的是固件的
+   `slave_boot_code` → `arkrtos_smp_secondary_entry`，`start.S` 里的停靠分支在这条
+   路径上依然不可达（pin U 只是防止它被删掉）。
+3. **不能把 `ipi1=5` 读成「向量 1 发了 5 次中断」**：是「一发一等」的发 5 个往返；
+   同向量连发会被硬件合并。
+4. **不能读成真板可用**：IOCSR 的 `MAIL_SEND` 字节掩码、`IPI_SEND` 的置位语义、
+   `slave_boot_code` 的行为都来自 QEMU 9.2.3 源码；真实固件是否同样写 mailbox、
+   同一套偏移，未验证。
+5. **不能把本轮读成「RV32 也能了」**：RISC-V 那套是 ACLINT/CLINT `msip`，与 IOCSR
+   完全不同；RV32 侧既没实现也没实跑。
+
+附注（环境坑，复现时会撞上）：`-monitor none -display none -serial null`
+与 `-D`/`-serial file:` 组合会让 QEMU 直接 rc=1 且目标文件不生成（表现为
+`mv: cannot stat`），同样参数换成 `-nographic` 就正常——所有实跑统一用
+`-nographic -display none -serial file:...`。另外本机
+`loongarch64-newlib-elf-gdb.exe` 缺 DLL 跑不起来（rc=127），HMP 的 `cpu N`
+也切不动核，所以「次核有没有跑」只能靠 `-d in_asm` 的 TB 符号名 + 代码里打读数。
+
+
+#### 9.6.10 未解决：`-smp 2` 下约 10% 的间歇停机（已登记，不是已修复）
+
+这一节记的是**本轮没能修掉的东西**，以及证明它不属于 SMP 实现的证据。结论是
+「与 SMP 代码无关，但也没有定论到 QEMU 侧 bug」，按未解决登记。
+
+**失败签名（四类，全部有落盘日志）**
+
+| # | 现场 | 读法 |
+|---|---|---|
+| 1 | `[LA64U] KERNEL refill (plv0) badv=0x1648cf48 era=0x00215920` | `era` 落在 `arkrtos_sched_activate+0x80` 的 `st.w table[tid].status` 附近 |
+| 2 | `estat=0x000d0000 ecode=0x0d(INE) era=0x0021f080 badv=0x0021f080 badi=0x00000001 crmd=0x00000010` | `0x21f080 = mdk_trace_send.part.0+0x180`，指令是 `4c000020 jirl $r0,$r1,0`（函数返回） |
+| 3 | `ecode=0x0d era=0x00000008 badv=0x00000008 badi=0x0 crmd=0x10`，`frame@0x003b5710` | 任务 4 的初始帧槽；帧里 PRMD 槽 = `0x00323fdc`（即 `arkrtos_ready_heal_g` 的地址）、ERA 槽 = `8` |
+| 4 | `[LA64U] KERNEL refill (plv0) badv=0xffffff04 era=0x00244894`，随后 `ecode=0x0d era=0x00000100 badi=0x29c00061 crmd=0x08` | `era` 在 EENTRY `0x244890` 里 ⇒ 异常入口中二次异常；发生在 shell 提示符刚出、任何命令之前 |
+
+第 3 类与 §5.13.4 那条 `ecode=0x0d era=0 badv=0 badi=0 crmd=0x10` 是同一家族
+（帧在栈顶下 `0x100` 的初始帧、ERA 槽是垃圾值、返回目标无效）。§5.13.4 的根因
+至今未定，本轮的多核读数只是给那一族多添了几个样本，**没有把它解释掉**。
+
+**对照表（同一镜像、同一命令行，只换 `-smp` 与 `-accel`）**
+
+| 构型 | 崩溃 | 备注 |
+|---|---|---|
+| 默认镜像 `-smp 1` | 0 / 6 | 基线 |
+| SMP 镜像 `-smp 1` | 0 / 24 | 每轮 `mask=0x1 result=FAIL(secondary offline)`，无次核可用 |
+| SMP 镜像 `-smp 2`（MTTCG） | **3 / 20** | 另 17 次 `result=ok` |
+| SMP 镜像 `-smp 2` + `SMP_DBG_NO_IPI=1` | 1 / 20 | IPI 不是必要诱因 |
+| **默认镜像 `-smp 2`（MTTCG）** | **2 / 20** | **SMP 代码根本没编进去** |
+| 默认镜像 `-smp 2` + `-accel tcg,thread=single` | 0 / 20 | |
+| SMP 镜像 `-smp 2` + `-accel tcg,thread=single` | **1 / 10** | 且 10 / 10 全是 `mask=0x1 result=FAIL(secondary offline)` |
+
+两个决定性的读数：
+
+1. **默认镜像（`ARKRTOS_USE_SMP=0`）在 `-smp 2` 下同样会崩（2/20）** ⇒ 崩溃不可能
+   由本轮 SMP 代码引入。
+2. **`-accel tcg,thread=single` 不是解药**：默认镜像上它 20 轮不崩，但换到 SMP
+   镜像上仍然 1/10 崩，而且 **10 轮全部 `secondary offline`**——单线程 TCG 下
+   CPU0 自旋等次核时 CPU1 得不到调度，次核永远上不了线。即：SMP 上线**依赖真并发**，
+   而真并发（MTTCG）才带那 ~10% 的间歇停机，两者不可兼得。
+
+**更能说明问题的一条：默认镜像在单核下也会崩。** 收尾阶段用默认档镜像
+（`ARKRTOS_USE_SMP=0`，命令行**没有** `-smp`，即单 vCPU）跑 `utest`，三次里命中一次：
+
+```
+[Ark RTOS] FATAL: estat=0x000d0000 ecode=0x0000000d era=0x00000008 badv=0x00000008 badi=0x00000000 crmd=0x00000010
+```
+
+同一条命令另外两次是 `utest: 13 matched, 13 passed, 0 failed, 0 skipped; assertions 133 run / 0 failed`。这个签名（`ecode=0x0d`、`era=8`、`badv=8`）与
+§5.13.4 那条 `era=0` 的家族同源，也与本节的第 3 类完全一致 ⇒ **间歇停机既不需要
+两个 vCPU、也不需要 MTTCG、更不需要 SMP 代码**。它是一条独立的、早就存在的老缺陷，
+本轮只是把它在多核场景下多撞了几次。凡把 `-smp 2` 的崩溃算到 SMP 头上、或反过来
+拿单核「跑通一次」证明 SMP 稳定的说法，都被这条读数否掉。
+
+（本条是对本轮中途一次短读数的修正：先跑的前几轮曾读出「SMP 镜像 + `thread=single`
+不崩」，10 轮跑满后是 1/10，与 MTTCG 下的 3/20 同一量级，属抽样波动。）
+
+**次核到底在跑什么——HMP 实测，不是推断**
+
+默认镜像 + `-smp 2`，起到 `ark@arkrtos` 提示符后用 HMP `info registers -a` 连读三组：
+
+```
+CPU#0  PC=0x0023d464  CRMD=0x14(IE=1)  ESTAT=0x800(TI)  EENTRY=0x00244890  TICLR/TCFG=0xc353
+CPU#1  PC=0x1C00003C  CRMD=0x8(PLV0,DA=1,IE=0)  EENTRY=0x0  ESTAT=0x0  TCFG=0x0  TVAL=0x0
+       GPR12=0xffffffffffffffff  GPR13=0x0000000000001020
+```
+
+三组采样里 CPU#1 的 PC 与全部 32 个 GPR **逐位不变**。`0x1c000000` 是
+`virt.flash0`（romd，16 MB，`info mtree -f` 核过），`xp /32wx 0x1c000000` 读出：
+
+```
+0x0400302c 0x0380100c 0x04000180 0x1400002d  0x038081ad 0x06481da0 0x1400002c 0x0400118c
+0x02fffc0c 0x1400002d 0x038011ad 0x064819ac  0x1400002d 0x038081ad 0x06488000 0x03400000
+0x064809ac 0x43fff59f ...
+```
+
+`0x06488000` 是 `idle 0`、`0x43fff59f` 是回跳 `beq`，`r13=0x1020` 正是
+`loongson_ipi_iocsr` 的 mailbox 端口 ⇒ **CPU#1 停在 §9.6.1 抄录的那段
+`slave_boot_code` 停放循环里**（`EENTRY=0`、`IE=0` 与固件做的事逐条吻合）。
+
+结论：**默认镜像下 CPU#1 从未执行我们的内核代码，也不写客户机 RAM**（ROM 只读 +
+读 IOCSR）。所以「崩溃来自次核执行内核代码」这条路被实测排除了；SMP 镜像下它才被
+mailbox 拉进 `arkrtos_smp_secondary_entry`（§9.6.6 的 `-d in_asm` 符号序列）。
+
+**复现**
+
+```bash
+qemu-system-loongarch64.exe -M virt -m 128M -smp 2 -display none \
+  -serial tcp:127.0.0.1:5501,server=on,wait=on \
+  -monitor tcp:127.0.0.1:6501,server=on,wait=off \
+  -kernel build/qemu_loongarch64/ark_qemu_la64.elf
+```
+
+看提示符出来后连 HMP `6501`，敲 `info registers -a` 即可读到上表的 CPU#1 状态。
+`-accel tcg,thread=single` 加在 `-M` 之前即可复现最后一行。
+
+**新增一条不许读法**
+
+6. **不能把 `-accel tcg,thread=single` 当推荐配方**：它并不修掉崩溃（SMP 镜像
+   1/10 仍崩），并且会让次核**永远上不了线**（`mask=0x1`，10/10）。任何拿它当
+   「稳定跑法」的说法都是错答案。
+
 ## 10. `-Wconversion` 开档（2026-11-19）：默认档镜像逐字节不变
 
 `tools/warn_gate.py` 的选项集从六条扩到七条，新加 `-Wconversion`（GCC 隐含同开
