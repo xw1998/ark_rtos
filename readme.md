@@ -134,7 +134,11 @@ Ark RTOS 把这件事拆成五层，每层各拦一种失败，且每一层的"�
 | LoongArch32 | 按核心 | TLB / 地址窗口 | 已实现（编译面与 LA64 对齐，**本机没有可执行载体**：龙芯教育 `la32r-QEMU` 只发 Linux 二进制，见 `docs/QEMU模拟器移植与验证.md` §6.1） |
 
 > **没有板子时**：RV32 与 LA64 两个移植可以直接在 QEMU 上跑通全功能档（命令与实测读数见
-> [`docs/QEMU模拟器移植与验证.md`](docs/QEMU模拟器移植与验证.md)）。LA32 的移植已与 LA64 对齐编译面，
+> [`docs/QEMU模拟器移植与验证.md`](docs/QEMU模拟器移植与验证.md)）。ARM 家族也已上模拟器：
+> `mps2-an386`（Cortex-M4）能跑出节拍、任务切换、SVC 读数与信号量同步四条链路的读数
+> （判词 `arm_cortex_m4_runs_on_qemu`，见该文档 §12），但那是**最小档**——FPU / MPU / 特权级
+> 以及 FS / SHELL / LOG / SMP 全部显式关闭，所以它**不是** MPU 保护机制的验证，也不与 RV32/LA64
+> 的全功能档可比。Cortex-M3 未被验证：它的上下文切换只有 Keil 汇编版，本机这条链路上没有 armclang。LA32 的移植已与 LA64 对齐编译面，
 > 但本机没有可执行载体——龙芯教育维护的 LA32 QEMU 分支
 > `https://gitee.com/loongson-edu/la32r-QEMU.git`（machine `ls3a5k32`）只发布 Linux 二进制，
 > 本机既无 WSL 发行版也无 MSYS2，细节与该分支机器参数见该文档 §6.1。

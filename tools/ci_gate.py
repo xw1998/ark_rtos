@@ -1225,6 +1225,27 @@ def check_smp():
     else:
         fail("smp", txt[-260:])
 
+def check_mps2_m4():
+    """MPS2-AN386（Cortex-M4）镜像要真在 QEMU 里跑出读数。
+
+    本档不参与任何 Keil 工程，`--build` 也编不到它，所以它的退化只能是
+    「谁都没注意」。这道检查编一次、跑 20 秒、判串口读数（节拍增量、延时
+    增量、SVC 与节拍换算、信号量唤醒）四条口径互相印证，外加镜像头
+    8 字节的 Cortex-M 复位向量与解析器自检。缺 arm-none-eabi-gcc / QEMU /
+    make 一律 FAIL——跳过会把「没验」写成「通过」。
+
+    边界：FPU/MPU/PRIV 在本档显式关闭（板级头里写明理由），所以这道门禁
+    不构成任何 MPU 保护机制的验证；它验的是节拍、任务切换、SVC 读数、
+    信号量同步四条链路在 QEMU 的 mps2-an386 模型上成立。
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "qemu_m4_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "QEMU-M4-GATE OK" in txt:
+        ok("mps2-m4", "linker pin + image head + QEMU run + parser self-check")
+    else:
+        fail("mps2-m4", txt[-320:])
+
+
 def check_seccheck_syntax():
     """SECCHECK (security baseline self-check) must compile with the switch ON.
 
@@ -1609,6 +1630,7 @@ LOCAL_TOOLCHAIN = {
     "smp": "armclang (Keil MDK)",
     "seccheck": "armclang (Keil MDK)",
     "swap": "armclang (Keil MDK)",
+    "mps2-m4": "arm-none-eabi-gcc + qemu-system-arm + make",
     "paging": "LA64 / RV32 cross gcc",
     "shell-auth": "LA64 cross gcc",
     "elf": "LA64 / RV32 cross gcc",
@@ -1656,6 +1678,7 @@ CHECK_TABLE = (
     ("waitmulti-syntax", check_waitmulti_syntax),
     ("waitq", check_waitq),
     ("smp", check_smp),
+    ("mps2-m4", check_mps2_m4),
     ("seccheck", check_seccheck_syntax),
     ("sign-host", check_sign_host),
     ("swap", check_swap_syntax),

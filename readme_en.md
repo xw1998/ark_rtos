@@ -176,7 +176,12 @@ board self-test:
 | LoongArch32 | Per core | TLB / address windows | Implemented (build surface aligned with LA64, **no runnable carrier on this host**: the Loongson-Edu `la32r-QEMU` fork only ships Linux binaries, see docs/QEMU模拟器移植与验证.md section 6.1) |
 
 > **No board at hand?** The RV32 and LA64 ports run the full feature set on QEMU (commands and
-> measured readings: docs/QEMU模拟器移植与验证.md). The LA32 port is aligned with LA64 on the build
+> measured readings: docs/QEMU模拟器移植与验证.md). The ARM family is on a simulator too: `mps2-an386`
+> (Cortex-M4) produces readings for tick, task switching, SVC time and semaphore hand-off (verdict
+> `arm_cortex_m4_runs_on_qemu`, section 12 of that document), but that is the **minimal tier** --
+> FPU / MPU / privilege levels and FS / SHELL / LOG / SMP are all explicitly off, so it is **not** a
+> verification of the MPU, and it is not comparable to the RV32/LA64 full builds. Cortex-M3 is not
+> verified: its context switch exists only in Keil assembly and no armclang is involved on that path here. The LA32 port is aligned with LA64 on the build
 > surface, but this host cannot execute it: the Loongson-Edu LA32 QEMU fork
 > https://gitee.com/loongson-edu/la32r-QEMU.git (machine ls3a5k32) ships Linux binaries only, and this
 > host has neither a WSL distro nor MSYS2. Section 6.1 of that document lists the machine parameters.

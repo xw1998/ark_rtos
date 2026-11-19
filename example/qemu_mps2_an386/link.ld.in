@@ -1,0 +1,103 @@
+/*
+ * Ark RTOS - QEMU `mps2-an386`（Cortex-M4）链接脚本模板
+ *
+ * 本文件由 C 预处理器展开，包含的是 gen_ldconsts.py 生成的一份"只有数值
+ * #define"的头文件（build/.../ldconsts.h）——那些数值来自
+ * config/arkrtos_partition.h 与板级配置头，与内核其它部分同源（分区头是
+ * 唯一允许出现物理地址的地方）。不直接 #include 分区头，是因为它含有 C 的
+ * 编译期断言，会被原样搬进 ld 脚本导致 `syntax error`。
+ *
+ * 内存模型（QEMU hw/arm/mps2.c，M-profile 分支）：
+ *   SSRAM1  0x00000000..0x003FFFFF  4 MB —— 镜像区（向量表必须在最前面）
+ *   SSRAM23 0x20000000..0x203FFFFF  4 MB —— 数据区
+ * 两段都是 RAM，.data 的 LMA 与 VMA 相同，不需要运行期搬运。
+ */
+
+#include "ldconsts.h"
+
+ENTRY(Reset_Handler)
+
+/* 主栈（复位后到调度启动之间用）预留 16 KB，紧贴 RAM 顶端向低地址生长 */
+__ram_end       = (CHIP_RAM_BASE + CHIP_RAM_SIZE);
+__stack_reserve = (16 * 1024);
+
+SECTIONS
+{
+    /* ---- 向量表、代码与只读数据：镜像区 ---- */
+    .text CHIP_FLASH_BASE :
+    {
+        KEEP(*(.text.start))          /* 向量表 + 复位入口必须落在分区首地址 */
+
+        *(.text .text.*)
+        *(.gnu.linkonce.t.*)
+
+        /* 构造函数表：utest 用例靠 __attribute__((constructor)) 自注册，
+         * 这一段不收就会被 --gc-sections 丢掉。 */
+        . = ALIGN(4);
+        __init_array_start = .;
+        KEEP(*(.ctors))
+        KEEP(*(.ctors.*))
+        KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*)))
+        KEEP(*(.init_array))
+        . = ALIGN(4);
+        __init_array_end = .;
+
+        *(.rodata .rodata.*)
+        *(.gnu.linkonce.r.*)
+    }
+
+    . = ALIGN(16);
+    __text_end = .;
+
+    /* ---- 跨复位崩溃日志（UNINIT） ---- */
+    /* 与 STM32 工程里 gen_scatter.py 生成的 UNINIT 段同义：这块内存既不在
+     * .data 也不在 .bss 里，启动代码不会碰它，于是它的内容能活过一次复位。
+     * 本档 ARKRTOS_USE_CRASH_LOG = 0，段长度为 0，保留它只为让链接脚本契约
+     * 与其它 QEMU 目标保持一致。NOLOAD：不占 ELF 文件体积。 */
+    .noinit CRASH_LOG_BASE (NOLOAD) :
+    {
+        __noinit_start = .;
+        KEEP(*(.noinit .noinit.*))
+        . = ALIGN(4);
+        __noinit_end = .;
+    }
+    ASSERT(__noinit_end <= (CRASH_LOG_BASE + CRASH_LOG_SIZE),
+           "crash journal overlaps the rest of shared RAM")
+
+    /* ---- 已初始化数据：内核 RAM 区间 ---- */
+    . = KERNEL_RAM_BASE;
+    .data : ALIGN(16)
+    {
+        __data_start = .;
+        *(.data .data.*)
+        *(.gnu.linkonce.d.*)
+        . = ALIGN(16);
+        __data_end = .;
+    }
+
+    /* ---- 未初始化数据（NOLOAD，由 start.S 清零） ---- */
+    .bss (NOLOAD) : ALIGN(16)
+    {
+        __bss_start = .;
+        *(.bss .bss.*)
+        *(COMMON)
+        . = ALIGN(16);
+        __bss_end = .;
+    }
+
+    /* 主栈顶：RAM 末端 */
+    _stack_top = __ram_end;
+
+    /* 静态数据 + 主栈不得越过 RAM 末端 */
+    ASSERT(__bss_end + __stack_reserve <= __ram_end, "RAM overflow: .bss + stack exceeds CHIP_RAM")
+    /* 静态数据不得越过内核 RAM 分区（后面是 SLOT_RAM 镜像池） */
+    ASSERT(__bss_end <= (KERNEL_RAM_BASE + KERNEL_RAM_SIZE), "kernel RAM overflow: .bss exceeds KERNEL_RAM")
+
+    /DISCARD/ :
+    {
+        *(.comment)
+        *(.note*)
+        *(.eh_frame*)
+        *(.ARM.exidx*)
+    }
+}

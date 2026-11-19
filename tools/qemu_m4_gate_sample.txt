@@ -1,0 +1,26 @@
+[ark] mps2-an386 cortex-m4 bring-up
+[ark] task_a=1 task_b=2 sem=19922944 sysclk=25000000 tick_us=500
+[A] round=0 tick=6 d_tick=6 ms=3 d_ms=3 ms_svc=5 svc_ok
+[B] woke, round=1 tick=16
+[A] round=1 tick=1013 d_tick=1007 ms=506 d_ms=503 ms_svc=506 svc_ok
+[B] woke, round=2 tick=1016
+[A] round=2 tick=2015 d_tick=1002 ms=1007 d_ms=501 ms_svc=1007 svc_ok
+[B] woke, round=3 tick=2016
+[A] round=3 tick=3016 d_tick=1001 ms=1508 d_ms=501 ms_svc=1508 svc_ok
+[B] woke, round=4 tick=3017
+[A] round=4 tick=4017 d_tick=1001 ms=2008 d_ms=500 ms_svc=2008 svc_ok
+[B] woke, round=5 tick=4019
+[A] round=5 tick=5018 d_tick=1001 ms=2509 d_ms=501 ms_svc=2509 svc_ok
+[B] woke, round=6 tick=5018
+[A] round=6 tick=6018 d_tick=1000 ms=3009 d_ms=500 ms_svc=3009 svc_ok
+[B] woke, round=7 tick=6019
+[A] round=7 tick=7018 d_tick=1000 ms=3509 d_ms=500 ms_svc=3509 svc_ok
+[B] woke, round=8 tick=7018
+[A] round=8 tick=8018 d_tick=1000 ms=4009 d_ms=500 ms_svc=4009 svc_ok
+[B] woke, round=9 tick=8018
+[A] round=9 tick=9018 d_tick=1000 ms=4509 d_ms=500 ms_svc=4509 svc_ok
+[B] woke, round=10 tick=9018
+[A] round=10 tick=10018 d_tick=1000 ms=5009 d_ms=500 ms_svc=5009 svc_ok
+[B] woke, round=11 tick=10019
+[A] round=11 tick=11018 d_tick=1000 ms=5509 d_ms=500 ms_svc=5509 svc_ok
+[B] woke, round=12 tick=11018

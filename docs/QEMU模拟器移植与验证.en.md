@@ -3518,6 +3518,26 @@ Expected result: **0**.
 
 Windows quirk: file locks during parallel builds surface as `Invalid argument`.
 
+### 7.4 ARM Cortex-M4 (MPS2-AN386)
+
+```
+make -f example/qemu_mps2_an386/Makefile -j4
+
+cd build/qemu_mps2_an386
+"D:/env/tools/qemu/qemu9/mingw64/bin/qemu-system-arm.exe" \
+  -M mps2-an386 -cpu cortex-m4 -nographic \
+  -kernel ark_qemu_m4.elf -serial file:out.txt
+```
+
+`-kernel` takes a bare file name only: the repository path contains non-ASCII
+characters and QEMU opens this argument with the narrow-character API, so an
+absolute path fails (same trap as the RV32/LA64 `run` targets).
+
+```
+python tools/qemu_m4_gate.py            # pins + build + 20 s run + self-check
+python tools/qemu_m4_gate.py --no-build # reuse the existing ELF
+```
+
 ## 8. Three-target feature matrix
 
 ### 8.1 Measured
@@ -4239,3 +4259,136 @@ Forbidden readings: (1) "Renode/TinyEMU support RISC-V" does not mean our image 
 there; (2) "many simulators have an MMU" does not mean our MMU code is verified;
 (3) nothing in this section was executed on Renode, TinyEMU, rv32emu, mini-rv32ima,
 Spike, SkyEye or Unicorn — those rows are candidates only.
+
+## 12. ARM Cortex-M4 bring-up (MPS2-AN386, 2026-11-19, executed on QEMU)
+
+This lands item 1 of the recommendation in §11.4. The result first:
+
+**the image runs on QEMU's `mps2-an386` model and produces readings for four
+independent paths -- tick, task switch, SVC time, semaphore hand-off.** And in the
+same breath: **this build does not verify the MPU**, because the MPU is explicitly
+disabled here (why: §12.3). The two sentences belong together.
+
+### 12.1 Why an386 rather than the an385 named in §11.4
+
+§11.4 said `mps2-an385` (Cortex-M3 + MPU) because "`port/arm/cortex-m3` already has
+SysTick, PendSV, SVC and MPU written". Reality stopped one step earlier:
+
+| Target | Context-switch assembly | Compilable with `arm-none-eabi-gcc` |
+|--------|-------------------------|-------------------------------------|
+| `cortex-m3` | only `arkrtos_context.S` (Keil `AREA`/`PROC`) | no |
+| `cortex-m4` | `arkrtos_context.S` + **`arkrtos_context_gcc.s`** (GNU as) | yes |
+| `cortex-m7` | Keil only, like M3 | no |
+
+The GNU toolchain does not accept Keil assembly syntax, so the M3 target could not
+be brought up "with zero porting work": either write a GNU-as context switch for M3
+(a new port file, i.e. a different task) or take M4. M4 is identical to M3 in
+SysTick / PendSV / SVC / NVIC and is a superset of it instruction-wise, so **these
+readings hold for the M3 boot chain as well, except for MPU and FPU.**
+
+### 12.2 Machine facts (from QEMU 9.2.3 `hw/arm/mps2.c`)
+
+| Item | Value |
+|------|-------|
+| SYSCLK | 25 MHz (also the UART `pclk`) |
+| Image region | `0x00000000..0x003FFFFF` (4 MB), aliased at `0x00400000` |
+| Data region | `0x20000000..0x203FFFFF` (4 MB) |
+| Console | CMSDK APB UART0 @ `0x40004000` (`DATA 0x00`, `STATE 0x04` bit0 TXFULL, `CTRL 0x08`, `BAUDDIV 0x10`) |
+| Timers | CMSDK timer0..3 @ `0x40000000 + i*0x1000`, IRQ 8..11 (unused; SysTick is used) |
+| Load limit | `armv7m_load_kernel(cpu, kernel, 0, 0x400000)` |
+
+**Do not pick the AN511 variant**: it puts ssram1 at `0x00400000` with 8 MB, so the
+vector table would not land at address 0.
+
+Cortex-M boot semantics differ from both RV32 and LA64: the hardware ignores
+`ENTRY()` and reads the initial SP from `0x0` and the reset PC from `0x4`. The vector
+table therefore has to sit *physically* first in the image, which is why the first
+line of `.text` is `KEEP(*(.text.start))`. Without that KEEP, `--gc-sections` drops
+the whole table as unreferenced and the linker reports nothing.
+
+### 12.3 Why MPU / FPU are off in this build
+
+`board/qemu_mps2_an386/arkrtos_board_config.h` writes FPU / MPU / PRIV as an
+explicit 0. That is required, not laziness:
+
+- `ARKRTOS_USE_FPU` / `ARKRTOS_USE_MPU` default to `ARKRTOS_ARCH_HAS_FPU` /
+  `ARKRTOS_ARCH_HAS_MPU`, and both are 1 on M4. **Omitting the line turns them on**
+  -- the "the default happens to match the intent" false-green shape this repo has
+  already been bitten by once.
+- This build uses `-mfloat-abi=soft`; enabling the FPU would only add a context save
+  nobody uses.
+- The MPU needs its own criteria (trigger an illegal access, prove it lands in
+  MemManage), which is separate work. **So "it runs" here does not include the MPU.**
+
+FS / VFS / SHELL / LOG / BLK / MINIAPP / POSIX / SOFTBUS / IMAGE_SIGN / SMP are off
+too; only "tick + tasks + SVC + console" remains.
+
+### 12.4 Readings and the four criteria
+
+Excerpt of a 20-second run:
+
+```
+[ark] mps2-an386 cortex-m4 bring-up
+[ark] task_a=1 task_b=2 sem=19922944 sysclk=25000000 tick_us=500
+[A] round=0 tick=7 d_tick=7 ms=3 d_ms=3 ms_svc=5 svc_ok
+[B] woke, round=1 tick=18
+[A] round=1 tick=1014 d_tick=1007 ms=507 d_ms=504 ms_svc=507 svc_ok
+...
+[A] round=11 tick=11018 d_tick=1000 ms=5509 d_ms=500 ms_svc=5509 svc_ok
+[B] woke, round=12 tick=11018
+```
+
+Size: `text 34304 / data 48 / bss 17072`.
+
+1. **Tick**: steady-state `d_tick` in 990..1010. With `tick_us=500` and a 500 ms
+   delay the expectation is 1000 ticks; measured 1000..1002.
+2. **Delay**: steady-state `d_ms` in 490..515; measured 500..504.
+3. **SVC reading**: `arkrtos_get_time_ms()` (via `svc #imm` and the kernel-side
+   conversion) versus the caller-side `tick*500/1000`, sampled at the same instant,
+   tolerance +-1 ms. Zero mismatches in 13 rounds, and `ms == tick*500/1000` holds
+   every round -- the two conversions agree, rather than both being wrong together.
+4. **Semaphore hand-off**: every wake of task B matches a round of task A, in order
+   and without repeats -- PendSV context switching and the wait queue really work.
+
+Plus one criterion only this family has: **the first 8 bytes of the image** must be
+`SP=0x20400000` (top of RAM) and a reset PC inside the image region with the Thumb
+bit set. That is what proves "the vector table is really at address 0", a boot
+contract unique to M-profile (RV32/LA64 get this from the ELF entry point and simply
+do not have this failure mode).
+
+### 12.5 Verdict and boundaries
+
+- `arm_cortex_m4_runs_on_qemu` = **executed on QEMU**. Evidence: the four criteria in
+  §12.4, the image header, and `tools/qemu_m4_gate.py` green (13 checks).
+- MPU / FPU / PRIV are off, so this is **not** a verification of either.
+- QEMU is not silicon: timing, UART FIFO behaviour and post-reset peripheral defaults
+  are QEMU's model. Do not write "runs on M4 hardware".
+- No FS / SHELL here: the flash/shell stubs in
+  `example/qemu_mps2_an386/kernel_stubs.c` return -1 by design, and the filesystem
+  comes from the `ARKRTOS_USE_FS == 0` facade inside `kernelsrc/src/arkrtos_fs.c`
+  (one implementation shared by every board without storage). The stubs carry
+  compile-time guards: flipping the corresponding switch makes the build `#error`,
+  so "switch on, implementation still a stub" cannot go green.
+
+Forbidden readings:
+
+1. "ARM family runs" is **not** "all three ISA families are verified in full-feature
+   mode" -- this is the *minimal* tier, FS/SHELL/LOG/SMP all off, not comparable to
+   the RV32/LA64 full builds;
+2. "Cortex-M4 runs" is **not** "Cortex-M3 was verified" -- the M3 context switch
+   exists only in Keil assembly and nothing on that path was compiled here (§12.1);
+3. "runs on QEMU" is **not** "ready to flash an STM32" -- the board header carries
+   `mps2-an386` values (UART at `0x40004000`, `SystemCoreClock` 25 MHz).
+
+### 12.6 Traps hit this round (ordered by cost)
+
+| Trap | Shape | Fix |
+|------|-------|-----|
+| `IRQn_Type` undefined | CMSIS `core_cm4.h` expects the device header to define it first; direct include explodes within 30 lines | define the full enum in our own device header before including |
+| `SystemCoreClock` undeclared | this CMSIS version does not declare it; three references in the port layer fail | `extern` in the device header, define in the board C file |
+| `__weak` undefined | this version only provides `__WEAK`; `__weak` used to come from the vendor HAL header | `#define __weak __attribute__((weak))` in the device header |
+| lowercase `.s` skips the preprocessor | `arkrtos_context_gcc.s` contains `#if`; raw assembly treats it as a comment | compile with `-x assembler-with-cpp` |
+| no libc under `-nostdlib` | no `snprintf` / `memcpy` | ship a minimal `libc_shim.c` (same source as RV32/LA64) |
+| `arkrtos_dev_board_init` missing | `arkrtos_kernel_module_init()` calls it unconditionally | explicit empty stub in the board C file, with a comment saying "no registerable device in this tier" |
+| `-kernel` rejects absolute paths | the repo path has Chinese characters and QEMU uses the narrow API | `cd` into the build dir and pass the file name only |
+| the fs facade was `filter-out`ed | the Makefile copied RV32's exclusion of `arkrtos_fs.c`, which is exactly the symbol source when FS=0 | add it back to `SRCS_C` explicitly, plus the `-DLFS_NO_*` switches the littlefs config header asserts |

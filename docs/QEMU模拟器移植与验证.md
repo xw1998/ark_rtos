@@ -6075,6 +6075,34 @@ D:/LoongIDE/la32-tool/bin/loongarch32-newlib-elf-objdump.exe -d \
 > 重链接前要确保没有 QEMU 进程占着 ELF，否则 `ld` 报
 > `cannot open output file ...: Invalid argument`（Windows 文件锁，不是链接脚本问题）。
 
+### 7.4 ARM Cortex-M4（MPS2-AN386）
+
+```bash
+cd "D:/工作/git_project/ark rtos"          # 必须在仓库根目录
+make -f example/qemu_mps2_an386/Makefile -j4
+make -f example/qemu_mps2_an386/Makefile size
+
+cd build/qemu_mps2_an386
+"D:/env/tools/qemu/qemu9/mingw64/bin/qemu-system-arm.exe" \
+  -M mps2-an386 -cpu cortex-m4 -nographic \
+  -kernel ark_qemu_m4.elf -serial file:out.txt
+```
+
+`-kernel` 只能传**裸文件名**，且必须先 `cd build/qemu_mps2_an386`：本机仓库
+路径含非 ASCII 字符，QEMU 在这个参数上用的是窄字符 API，绝对路径直接失败
+（与 RV32/LA64 的 `run` 目标同一条坑）。
+
+一道门禁把上面这些全做完：
+
+```bash
+python tools/qemu_m4_gate.py            # 静态 pin + 编译 + 20 s QEMU + 自检
+python tools/qemu_m4_gate.py --no-build # 复用已有 ELF
+```
+
+判据不是「有输出就算过」：镜像头 8 字节必须是 Cortex-M 复位向量，串口读数
+要四条口径互相印证（见 §12.4），外加自检——把 7 种合成坏日志喂给同一个
+解析函数，每一种都必须判 FAIL。
+
 ## 8. 三目标功能矩阵（档位、开关与缺口）
 
 > 这一节只做一件事：把「哪些功能在哪三个目标上**真的跑过**」摊开。
@@ -7474,3 +7502,133 @@ $ qemu-system-arm.exe -accel help      # tcg
 3. 本节除 QEMU 9.2.3 的机型清单外，**没有在 Renode / TinyEMU / rv32emu /
    mini-rv32ima / Spike / SkyEye / Unicorn 上执行过任何东西**，这些行只能当
    候选清单读。
+
+## 12. ARM Cortex-M4 上板（MPS2-AN386，2026-11-19，QEMU 实跑）
+
+这一节是 §11.4 推荐顺序的第 1 条落地。先写结论：**镜像在 QEMU 的
+`mps2-an386` 模型上跑起来了，节拍、任务切换、SVC 读数、信号量同步四条链路
+都有读数**；同时**这一档没有验证 MPU 保护机制**，因为 MPU 在本档是显式关闭
+的（理由见 §12.3）。这两句必须一起读。
+
+### 12.1 为什么是 an386 而不是 §11.4 写的 an385
+
+§11.4 写的是 `mps2-an385`（Cortex-M3 + MPU），理由是「`port/arm/cortex-m3`
+已把 SysTick、PendSV、SVC、MPU 写完」。实际动手时卡在一个更靠前的位置：
+
+| 目标 | 上下文切换汇编 | 能否用 `arm-none-eabi-gcc` 编 |
+|------|----------------|-------------------------------|
+| `cortex-m3` | 只有 `arkrtos_context.S`（Keil `AREA`/`PROC` 语法） | 不能 |
+| `cortex-m4` | `arkrtos_context.S` + **`arkrtos_context_gcc.s`**（GNU as 版） | 能 |
+| `cortex-m7` | 同 M3，只有 Keil 版 | 不能 |
+
+GPT 版 GCC 工具链不认 Keil 汇编语法，所以 M3 目标这一轮做不了「零改动」上板：
+要么先写一份 M3 的 GNU as 上下文切换（等于新建一个 port 文件，属另一件事），
+要么选 M4。M4 与 M3 在 SysTick / PendSV / SVC / NVIC 上完全同构，指令集是
+M3 的超集，所以**这一档的读数对 M3 的启动链同样有效，只差 MPU 与 FPU 两处**。
+
+### 12.2 机器事实（来自 QEMU 9.2.3 `hw/arm/mps2.c`）
+
+| 项 | 值 | 说明 |
+|----|----|------|
+| SYSCLK | 25 MHz | `SYSCLK_FRQ 25000000`，同时是 UART 的 `pclk` |
+| 镜像区 | `0x00000000..0x003FFFFF`（4 MB） | SSRAM1；`0x00400000` 是同一块的别名 |
+| 数据区 | `0x20000000..0x203FFFFF`（4 MB） | SSRAM23 |
+| 串口 | CMSDK APB UART0 @ `0x40004000` | `DATA 0x00` / `STATE 0x04`（bit0 TXFULL）/ `CTRL 0x08` / `BAUDDIV 0x10` |
+| 定时器 | CMSDK timer0..3 @ `0x40000000 + i*0x1000` | IRQ 8..11；本档用 SysTick，不碰它们 |
+| 装载上限 | `armv7m_load_kernel(cpu, kernel, 0, 0x400000)` | 4 MB 以内 |
+
+**不要选 AN511 分支**：那个变体把 ssram1 放在 `0x00400000`、大小 8 MB，
+与 an386 的布局不同，混用会让向量表落不到地址 0。
+
+Cortex-M 的启动语义与 RV32/LA64 都不同：硬件不读 `ENTRY()`，而是复位后从
+`0x0` 取初始 SP、从 `0x4` 取复位 PC。所以向量表必须**物理**落在镜像最前，
+链接脚本的 `.text` 第一条因此写成 `KEEP(*(.text.start))`——少了这个 KEEP，
+`--gc-sections` 会把整个向量表当没人引用的段删掉，而链接器不会报任何错。
+
+### 12.3 板级档位：为什么 MPU / FPU 是关的
+
+`board/qemu_mps2_an386/arkrtos_board_config.h` 里 FPU / MPU / PRIV 全部
+**显式写 0**。这一步是必须的，不是省事：
+
+- `ARKRTOS_USE_FPU` / `ARKRTOS_USE_MPU` 的默认值取自
+  `ARKRTOS_ARCH_HAS_FPU` / `ARKRTOS_ARCH_HAS_MPU`，而 M4 的这两个宏都是 1。
+  **不显式关就等于打开**——「默认值恰好等于想法」这种假绿形态在此前已经
+  踩过一次（见 `docs/欠账盘点.md`）。
+- 本档用 `-mfloat-abi=soft` 编，开 FPU 只多一份没人用的上下文保存；
+- MPU 保护机制要单独的越权访问判据（造一次非法访问、看是否进 MemManage），
+  那是独立的一轮工作，本次不做。**因此这一档的「跑通了」不包含 MPU。**
+
+同时关掉的还有 FS / VFS / SHELL / LOG / BLK / MINIAPP / POSIX / SOFTBUS /
+IMAGE_SIGN / SMP 等一整套，只留「节拍 + 任务 + SVC + 串口」。
+
+### 12.4 实跑读数与四条判据
+
+`build/qemu_mps2_an386` 下 20 秒实跑的串口（节选）：
+
+```
+[ark] mps2-an386 cortex-m4 bring-up
+[ark] task_a=1 task_b=2 sem=19922944 sysclk=25000000 tick_us=500
+[A] round=0 tick=7 d_tick=7 ms=3 d_ms=3 ms_svc=5 svc_ok
+[B] woke, round=1 tick=18
+[A] round=1 tick=1014 d_tick=1007 ms=507 d_ms=504 ms_svc=507 svc_ok
+[B] woke, round=2 tick=1019
+[A] round=2 tick=2017 d_tick=1003 ms=1008 d_ms=501 ms_svc=1009 svc_ok
+...
+[A] round=11 tick=11018 d_tick=1000 ms=5509 d_ms=500 ms_svc=5509 svc_ok
+[B] woke, round=12 tick=11018
+```
+
+体积（`arm-none-eabi-size`）：`text 34304 / data 48 / bss 17072`。
+
+四条判据（`tools/qemu_m4_gate.py` 逐条判，任一条不成立即 FAIL）：
+
+1. **节拍**：稳态 `d_tick` 落在 990..1010。`tick_us=500` 且延时 500 ms，
+   期望 1000 个节拍；实测 1000~1002（±2 个节拍 = ±1 ms 的 UART 打印抖动）。
+2. **延时**：稳态 `d_ms` 落在 490..515，实测 500~504。
+3. **SVC 读数**：`arkrtos_get_time_ms()`（走 `svc #imm` 与内核侧换算）与
+   用户侧 `tick*500/1000` 在**同一时刻**取值，容差 ±1 ms。13 轮里零失配，
+   且 `ms == tick*500/1000` 逐轮成立——两侧换算口径一致，不是「都对但都错」。
+4. **信号量同步**：任务 B 每次唤醒都能对上一个 A 的轮次，轮次单调、无重复，
+   说明 PendSV 上下文切换与等待队列都是真的在工作，不是打印骗人。
+
+外加一条只有该家族才有的判据：**镜像头 8 字节**必须是
+`SP=0x20400000`（RAM 尾）+ 复位 PC 落在镜像区且 Thumb 位为 1。这条判的是
+「向量表真的在地址 0」，是 M-profile 独有的启动契约（RV32/LA64 由 ELF 入口
+保证，不存在这个失效面）。
+
+### 12.5 判词与边界
+
+- `arm_cortex_m4_runs_on_qemu` = **QEMU 实跑**。证据是 §12.4 的四条读数
+  + 镜像头 + `tools/qemu_m4_gate.py` 全绿（13 项）。
+- 本档 **MPU / FPU / PRIV 全关**，所以这次不构成 MPU 或 FPU 的验证。
+- QEMU 不是真硅：时序、UART FIFO、复位后外设默认值都只代表 QEMU 的模型。
+  这一档的结论不能写成「在 M4 硬件上跑通」。
+- 本档不含 FS / SHELL：`example/qemu_mps2_an386/kernel_stubs.c` 里的
+  flash / shell 桩一律 `return -1`，文件系统用的是
+  `kernelsrc/src/arkrtos_fs.c` 在 `ARKRTOS_USE_FS == 0` 分支里的 facade
+  （同一份代码在所有没有存储的板子上共用）。这些桩带编译期护栏：一旦把
+  对应开关打开，构建会 `#error`，不允许「开关开了但实现还是桩」的假绿。
+
+三条不许读法：
+
+1. 不许把「ARM 家族跑通了」读成「三个 ISA 家族的全功能档都验证过」——本档
+   是**最小档**，FS/SHELL/LOG/SMP 全关，与 RV32/LA64 的全功能档不可比；
+2. 不许把「Cortex-M4 跑通」读成「Cortex-M3 也验过」——M3 的上下文切换只有
+   Keil 版汇编，本机没有 armclang 参与这条链路，所以 M3 侧未验证（见 §12.1）；
+3. 不许把「QEMU 上跑通」读成「可以烧 STM32 了」——本档的板级头是给
+   `mps2-an386` 写的，串口基址 `0x40004000`、`SystemCoreClock` 25 MHz 都是
+   这台机型的值。
+
+### 12.6 这一轮踩到的坑（按代价排）
+
+| 坑 | 形态 | 修法 |
+|----|------|------|
+| `IRQn_Type` 未定义 | CMSIS `core_cm4.h` 假设设备头先给这个枚举，直接 include 会在 30 行内炸 6 处 | 自建设备头里先定义完整枚举，再 include |
+| `SystemCoreClock` 未声明 | 该版 CMSIS 不声明它，port 层三处引用编译失败 | 设备头 `extern`，板级 C 里定义 |
+| `__weak` 未定义 | 该版只给 `__WEAK`，`__weak` 原本由厂商 HAL 头提供 | 设备头里补 `#define __weak __attribute__((weak))` |
+| `.s` 小写扩展名不走预处理 | `arkrtos_context_gcc.s` 里有 `#if`，直接汇编会把它当注释 | 汇编规则加 `-x assembler-with-cpp` |
+| 链接缺 libc | `-nostdlib` 下没有 `snprintf`/`memcpy` | 自带最小 `libc_shim.c`（与 RV32/LA64 各一份同源） |
+| 链接缺 `arkrtos_dev_board_init` | `arkrtos_kernel_module_init()` 无条件调它 | 板级 C 里明确空桩 + 注释说明「本档没有可注册设备」 |
+| `-kernel` 吃不了绝对路径 | 仓库路径含中文，QEMU 用窄字符 API，直接失败 | `cd build/qemu_mps2_an386` 后只传文件名 |
+| `ArkRTOS` 的 fs facade 被 `filter-out` 掉了 | Makefile 照抄 RV32 剔除了 `arkrtos_fs.c`，而 FS=0 时它才是符号来源 | 显式加回 `SRCS_C`，并补 `-DLFS_NO_*`（littlefs 配置头会断言的开关） |
+
