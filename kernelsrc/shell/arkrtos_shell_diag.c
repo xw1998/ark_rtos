@@ -683,6 +683,61 @@ int cmd_dt(int argc, char *argv[])
 }
 
 
+#if (ARKRTOS_USE_FDT == 1)
+/* fdt: dump the tree parsed from the image .dtb.
+ *
+ * 与 dt 打同一套字段、同一个顺序：一份来自生成的 C 平表，一份来自启动时
+ * 解析的标准 blob。两条独立数据通路打出同样的行，才能拿来做对账；如果
+ * 格式各自一套，"看起来差不多"就没法变成判据。 */
+int cmd_fdt(int argc, char *argv[])
+{
+    arkrtos_fdt_iter_t it;
+    arkrtos_fdt_node_t n;
+    const char *model;
+    int32 rc;
+    uint32 total = 0u;
+
+    (void)argc;
+    (void)argv;
+
+    if(arkrtos_fdt_ready() == 0)
+    {
+        sh_out("fdt: no device tree blob parsed at boot\r\n");
+        return 1;
+    }
+    model = arkrtos_fdt_model();
+    ark_shell_printf("\r\nmodel=%s nodes=%u\r\n",
+                     (model != 0) ? model : "(none)",
+                     (uint32)arkrtos_fdt_node_count());
+    (void)arkrtos_fdt_iter_init(&it);
+    while((rc = arkrtos_fdt_next(&it, &n)) == 1)
+    {
+        const char *compat = arkrtos_fdt_prop_str(&n, "compatible");
+        uint32 reg0 = 0u;
+        uint32 reg1 = 0u;
+
+        (void)arkrtos_fdt_prop_u32(&n, "reg", 0u, &reg0);
+        (void)arkrtos_fdt_prop_u32(&n, "reg", 1u, &reg1);
+        /* 与 dt 相同的过滤口径：只报设备节点（有 compatible 的）。 */
+        if(compat == 0)
+        {
+            continue;
+        }
+        ark_shell_printf("  %s compat=%s reg=0x%x/0x%x %s\r\n",
+                         n.name, compat, (uint32)reg0, (uint32)reg1,
+                         (arkrtos_fdt_node_enabled(&n) != 0) ? "okay" : "disabled");
+        total++;
+    }
+    if(rc < 0)
+    {
+        ark_shell_printf("fdt: walk stopped by error %d\r\n", (int)rc);
+        return 1;
+    }
+    (void)total;
+    return 0;
+}
+#endif /* ARKRTOS_USE_FDT */
+
 /* ============================================================
  * fault：故障记录
  * ============================================================ */

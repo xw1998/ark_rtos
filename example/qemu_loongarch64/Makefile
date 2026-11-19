@@ -159,6 +159,7 @@ SRCS_C := $(KERNEL_SRCS) \
 	$(SOFTBUS_SRCS) \
 	board/qemu_loongarch64/arkrtos_board.c \
 	board/qemu_loongarch64/arkrtos_dt.c \
+	board/qemu_loongarch64/arkrtos_dt_blob.c \
 	board/qemu_loongarch64/drvblk.c \
 	board/qemu_loongarch64/drvuart.c \
 	board/qemu_loongarch64/arkrtos_bus_port.c \
@@ -223,6 +224,24 @@ $(HELLO_H): $(HELLO_SIGNED) example/qemu_loongarch64/elf_blob.py
 $(HELLO_BAD_H): $(HELLO_TAMPERED) example/qemu_loongarch64/elf_blob.py
 	python example/qemu_loongarch64/elf_blob.py --input $(HELLO_TAMPERED) \
 	       --output $@ --name ark_example_hello_tampered ;
+
+# 设备树（MMU 档）：dtc_lite.py 的第二个出口。
+# MCU 档 link 的是 board/<b>/arkrtos_dt.c 那张 const 平表；MMU 档按正常项目
+# 的做法把标准 .dtb 放进镜像、启动时解析。两者来自同一份 dts，所以不会
+# 互相矛盾——这一点由 tools/fdt_gate.py 在 QEMU 上拿 dt 与 fdt 的输出对账。
+FDT_DTB := $(BUILD)/arkrtos.dtb
+FDT_H   := $(BUILD)/arkrtos_dt_blob.h
+
+$(FDT_DTB): dts/qemu_loongarch64.dts tools/dts/dtc_lite.py
+	@mkdir -p $(BUILD)
+	python tools/dts/dtc_lite.py --dts dts/qemu_loongarch64.dts \
+	       --out $@ --format dtb ;
+
+$(FDT_H): $(FDT_DTB) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(FDT_DTB) \
+	       --output $@ --name ark_qemu_dtb ;
+
+$(BUILD)/board/qemu_loongarch64/arkrtos_dt_blob.o: $(FDT_H)
 
 $(BUILD)/example/qemu_loongarch64/elf_demo.o: $(HELLO_H) $(HELLO_BAD_H)
 

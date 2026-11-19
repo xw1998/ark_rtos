@@ -10,6 +10,7 @@
 #define __ARKRTOS_BOARD_H__
 
 #include "arkrtos_types.h"
+#include "arkrtos_features.h"
 
 /**
 * @brief 初始化控制台 UART（ns16550a，8N1，轮询发送）
@@ -43,6 +44,17 @@ void arkrtos_board_puthex(uint32 value);
 * @return 0 成功；负值失败（同名 / 表满 / 描述符缺项）
 */
 int32 arkrtos_board_uart_dev_register(void);
+
+#if (ARKRTOS_USE_FDT == 1)
+/**
+* @brief 编进镜像的标准设备树 blob（.dtb）与它的字节数
+* @details MMU 档不 link MCU 那张 const C 平表：镜像里放的是一块标准
+*          .dtb（tools/dts/dtc_lite.py --format dtb），由启动代码交给
+*          arkrtos_fdt_init() 解析。返回的指针指向只读数据，生命周期与
+*          镜像相同。
+*/
+const void *arkrtos_board_dtb(uint32 *size);
+#endif
 
 /**
 * @brief 整机复位

@@ -198,7 +198,8 @@ static int register_kernel_commands(void)
              + (ARKRTOS_USE_SECCHECK ? 1 : 0)
              + (ARKRTOS_USE_PAGING ? 1 : 0)
              + ((ARKRTOS_USE_EXIT_CODE == 1) ? 1 : 0)
-             + ((ARKRTOS_USE_SHELL_AUTH == 1) ? 2 : 0);
+             + ((ARKRTOS_USE_SHELL_AUTH == 1) ? 2 : 0)
+             + (ARKRTOS_USE_FDT ? 1 : 0);
 
     if((idx + need) > ARK_SHELL_MAX_COMMANDS)
     {
@@ -231,6 +232,10 @@ static int register_kernel_commands(void)
         "Driver slots: drv [list | start <slot> | stop <slot> | uninstall <slot>]", 4);
     g_cmd_table[idx++] = ARK_SHELL_CMD("dt", cmd_dt,
         "Dump the compiled device tree (model, nodes, compatible, reg)", 1);
+#if (ARKRTOS_USE_FDT == 1)
+    g_cmd_table[idx++] = ARK_SHELL_CMD("fdt", cmd_fdt,
+        "Dump the device tree parsed from the image .dtb (same format as dt)", 1);
+#endif
     g_cmd_table[idx++] = ARK_SHELL_CMD("task", cmd_task,
         "List kernel tasks, or dump one task frame: task <id> (ids start at 1)", 3);
     g_cmd_table[idx++] = ARK_SHELL_CMD("stack", cmd_stack,

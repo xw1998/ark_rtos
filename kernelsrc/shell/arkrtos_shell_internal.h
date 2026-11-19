@@ -76,6 +76,9 @@
 #include "arkrtos_sec.h"
 #endif
 #include "arkrtos_dt.h"
+#if (ARKRTOS_USE_FDT == 1)
+#include "arkrtos_fdt.h"
+#endif
 
 #if (ARKRTOS_USE_ARKVIM == 1)
 #include "arkvim_shell_cmd.h"
@@ -147,6 +150,9 @@ int cmd_df(int argc, char *argv[]);
 int cmd_dmesg(int argc, char *argv[]);
 int cmd_drv(int argc, char *argv[]);
 int cmd_dt(int argc, char *argv[]);
+#if (ARKRTOS_USE_FDT == 1)
+int cmd_fdt(int argc, char *argv[]);
+#endif
 int cmd_exec(int argc, char *argv[]);
 int cmd_fault(int argc, char *argv[]);
 int cmd_free(int argc, char *argv[]);

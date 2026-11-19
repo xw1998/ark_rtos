@@ -672,6 +672,32 @@ def check_devicetree_dtb():
         fail("devicetree-dtb",
              ((r.stdout or "") + (r.stderr or "")).strip()[:300])
 
+def check_fdt():
+    """内核侧 FDT 解析器（ARKRTOS_USE_FDT）必须两头都是读数。
+
+    阶段 1 只证明「DTS 能编出 spec-valid 的 dtb」，那是文件层面的事实：内核
+    里有没有人读这棵树、读得对不对、读错时会不会拿默认值凑一棵树，一件都
+    没测。而这个开关默认关，关着的时候 arkrtos_fdt.c 整文件不经过编译器，
+    写错也全绿。
+
+    tools/fdt_gate.py 把四件事钉住：关档 .o 符号表全空；六块板的 dtb 与生成的
+    C 平表逐节点对账且变异会被抓；LA64 整镜像编得过并真跑一遍（开机
+    `[fdt] blob=<n> rc=0 model=... nodes=<k>`，n 必须等于 build 里那个 .dtb 的
+    字节数）；同一次启动里 dt（C 平表）与 fdt（解析出的 blob）输出逐行相同。
+    两个读数的判据各自喂坏样本，必须被判红。
+
+    不覆盖：dtb 动态加载、/chosen 与 stdout-path 的消费、overlay。
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "fdt_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "FDT-GATE OK" in txt:
+        ok("fdt",
+           "default off zero symbols / 6 boards dtb-vs-C-table + 6 mutation caught / "
+           "LA64 build / boot blob==dtb size, nodes=7 / dt==fdt line by line / "
+           "8 self-check")
+    else:
+        fail("fdt", txt[-320:])
+
 def check_board_config_generated():
     """Every generated board header must be the genboard.py output.
 
@@ -1717,6 +1743,7 @@ LOCAL_TOOLCHAIN = {
     "shell-auth": "LA64 cross gcc",
     "elf": "LA64 / RV32 cross gcc",
     "linux-abi": "LA64 / RV32 cross gcc + qemu-system-loongarch64",
+    "fdt": "RV32 cross gcc + LA64 cross gcc + qemu-system-loongarch64",
     "modld": "LA64 / RV32 / LA32 cross gcc",
     "payload-sign": "LA64 cross gcc",
     "stack-guard": "LA64 / RV32 cross gcc",
@@ -1740,6 +1767,7 @@ CHECK_TABLE = (
     ("softbus-sync", check_softbus_sync_header),
     ("devicetree-generated", check_devicetree_generated),
     ("devicetree-dtb", check_devicetree_dtb),
+    ("fdt", check_fdt),
     ("board-config-generated", check_board_config_generated),
     ("release-consistency", check_release_consistency),
     ("utest-host", check_utest_host),

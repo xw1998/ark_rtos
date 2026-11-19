@@ -16,6 +16,7 @@
 - [kernelsrc/include/arkrtos_dt.h](#kernelsrcincludearkrtos_dth)（11 项）
 - [kernelsrc/include/arkrtos_elf.h](#kernelsrcincludearkrtos_elfh)（10 项）
 - [kernelsrc/include/arkrtos_export.h](#kernelsrcincludearkrtos_exporth)（3 项）
+- [kernelsrc/include/arkrtos_fdt.h](#kernelsrcincludearkrtos_fdth)（12 项）
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
@@ -2546,6 +2547,113 @@ const arkrtos_export_t *arkrtos_export_table(uint32 *p_count);
 - `p_count`：收表项个数；可为 0
 **返回**：表首地址；关闭档返回 0
 > 说明：`lkup` 就是照着这张表打印的，不另存一份清单。
+
+## kernelsrc/include/arkrtos_fdt.h
+
+**Ark RTOS flattened device tree (DTB) reader.**
+The MCU tier links a const C table generated from the DTS
+(arkrtos_dt.h).  The MMU tier is the other shape: a standard
+flattened blob sits in the image and is parsed at boot, exactly
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**One node, as a view into the blob (no copy, no allocation). */**
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**Walk cursor.  Treat the fields as private. */**
+
+### `int arkrtos_fdt_init(const void *blob, uint32 size);`
+
+```c
+int arkrtos_fdt_init(const void *blob, uint32 size);
+```
+
+**Parse and validate the header; compute the node count. */**
+
+### `int arkrtos_fdt_ready(void);`
+
+```c
+int arkrtos_fdt_ready(void);
+```
+
+**1 when the last init succeeded. */**
+
+### `uint32 arkrtos_fdt_node_count(void);`
+
+```c
+uint32 arkrtos_fdt_node_count(void);
+```
+
+**Number of nodes, root excluded (matches arkrtos_dt_count()). */**
+
+### `const char *arkrtos_fdt_model(void);`
+
+```c
+const char *arkrtos_fdt_model(void);
+```
+
+**The root "model" string, or 0 when the DTS has none. */**
+
+### `int arkrtos_fdt_iter_init(arkrtos_fdt_iter_t *it);`
+
+```c
+int arkrtos_fdt_iter_init(arkrtos_fdt_iter_t *it);
+```
+
+**Start a depth-first walk.  Returns ARKRTOS_FDT_ERR_NOT_INIT if not ready. */**
+
+### `int arkrtos_fdt_next(arkrtos_fdt_iter_t *it, arkrtos_fdt_node_t *out);`
+
+```c
+int arkrtos_fdt_next(arkrtos_fdt_iter_t *it, arkrtos_fdt_node_t *out);
+```
+
+**Next node in depth-first order.**
+**返回**：1 and fill *out for a node, 0 at the end of the tree,
+a negative ARKRTOS_FDT_ERR_* for a malformed blob.
+
+### `const void *arkrtos_fdt_prop(const arkrtos_fdt_node_t *node, const cha`
+
+```c
+const void *arkrtos_fdt_prop(const arkrtos_fdt_node_t *node, const char *name, uint32 *len);
+```
+
+**Property value inside the blob.**
+- `len`：Receives the byte length (may be 0 for a valueless property).
+**返回**：The value pointer, or 0 when the node has no such property.
+
+### `const char *arkrtos_fdt_prop_str(const arkrtos_fdt_node_t *node, const`
+
+```c
+const char *arkrtos_fdt_prop_str(const arkrtos_fdt_node_t *node, const char *name);
+```
+
+**First string of a string-list property, or 0. */**
+
+### `int32 arkrtos_fdt_prop_u32(const arkrtos_fdt_node_t *node, const char `
+
+```c
+int32 arkrtos_fdt_prop_u32(const arkrtos_fdt_node_t *node, const char *name, uint32 idx, uint32 *out);
+```
+
+**The idx-th 32-bit cell of a property.  Returns -1 on any mismatch. */**
+
+### `int arkrtos_fdt_node_enabled(const arkrtos_fdt_node_t *node);`
+
+```c
+int arkrtos_fdt_node_enabled(const arkrtos_fdt_node_t *node);
+```
+
+**1 when status is absent or "okay" - same rule as the C table. */**
 
 ## kernelsrc/include/arkrtos_flashapp.h
 

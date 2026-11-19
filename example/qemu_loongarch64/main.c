@@ -48,6 +48,9 @@
 #include "arkrtos_vfs.h"
 #include "arkrtos_elf.h"       /* ARKRTOS_USE_ELF：ELF64 装载器（M1） */
 #include "drvblk.h"
+#if (ARKRTOS_USE_FDT == 1)
+#include "arkrtos_fdt.h"       /* MMU 档：启动时解析镜像里的标准 .dtb */
+#endif
 
 /* PLV3 探针与 ELF 装载器抢同一块 2 MB 窗口（0x02000000）：
  * 探针的代码/栈全在 .appprobe 里，而装载器要往同一页拷程序，先跑探针再
@@ -912,6 +915,44 @@ int main(void)
     arkrtos_port_irq_init();
 
     arkrtos_kernel_module_init();
+
+#if (ARKRTOS_USE_FDT == 1)
+    /* 设备树：MMU 档按正常项目的做法，镜像里带一块标准 .dtb，启动时解析。
+     * 解不出来就打印真实错误码并继续（不拿 C 平表凑一棵"看起来对"的树）——
+     * 把"dtb 坏了"变成"设备悄悄少了一个"是更坏的失败方式。 */
+    {
+        uint32 dtb_len = 0u;
+        const void *dtb = arkrtos_board_dtb(&dtb_len);
+        int32 rc = arkrtos_fdt_init(dtb, dtb_len);
+
+        arkrtos_board_puts("[fdt] blob=");
+        arkrtos_board_putu(dtb_len);
+        arkrtos_board_puts(" rc=");
+        if(rc < 0)
+        {
+            arkrtos_board_puts("-");
+            arkrtos_board_putu((uint32)(0 - rc));
+        }
+        else
+        {
+            arkrtos_board_putu((uint32)rc);
+        }
+        if(rc == ARKRTOS_FDT_OK)
+        {
+            const char *model = arkrtos_fdt_model();
+
+            arkrtos_board_puts(" model=");
+            arkrtos_board_puts((model != 0) ? model : "(none)");
+            arkrtos_board_puts(" nodes=");
+            arkrtos_board_putu(arkrtos_fdt_node_count());
+        }
+        else
+        {
+            arkrtos_board_puts(" (blob refused, tree NOT parsed)");
+        }
+        arkrtos_board_puts("\n");
+    }
+#endif
 
 #if (ARKRTOS_USE_SMP == 1)
     /* 次核是在 kernel_module_init() 里拉起来的，这里等它上线并发 IPI 验证。

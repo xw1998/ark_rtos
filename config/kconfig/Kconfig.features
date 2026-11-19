@@ -930,6 +930,21 @@ config ARKRTOS_USE_SECCHECK
 	  (the default) compiles the module and the `sec` command out: zero
 	  size change and the shell command table is unchanged.
 
+config ARKRTOS_USE_FDT
+	bool "Flattened device tree reader (MMU tier)"
+	default n
+	help
+	  Parse a standard flattened device tree (.dtb) at runtime: the shape a
+	  Linux-style project has, where the blob sits in the image and the
+	  kernel reads it at boot.  The MCU tier does not need this - for the
+	  MCU the generator emits a const C table and there is nothing to parse.
+
+	  Both descriptions come from the same DTS (tools/dts/dtc_lite.py has a
+	  C output and a dtb output), so the two tiers cannot disagree.
+
+	  Off (default) compiles arkrtos_fdt.c to nothing: no symbols, no shell
+	  command, image byte-for-byte unchanged.
+
 config ARKRTOS_USE_IMAGE_CRC_RECHECK
 	bool "Recheck image CRC after relocation, at boot (SEC-G17)"
 	default n

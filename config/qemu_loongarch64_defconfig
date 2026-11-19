@@ -49,6 +49,10 @@ ARKRTOS_SHELL_STACK_SIZE=8192
 ARKRTOS_SMP_SEC_STACK_SIZE=8192
 ARKRTOS_USE_SMP=n
 
+# ----------------------------------------------------------------- dts
+# MMU tier: a standard .dtb in the image, parsed at boot (see docs/设备树.md).
+ARKRTOS_USE_FDT=y
+
 # -------------------------------------------------------- executables
 ARKRTOS_USE_ELF=y
 ARKRTOS_USE_LINUX_ABI=y
