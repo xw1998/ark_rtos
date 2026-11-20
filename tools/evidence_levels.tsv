@@ -1,0 +1,35 @@
+# Ark RTOS 验证台账：每条主张一行，载体写清楚，级别不许含糊。
+#
+# 列（制表符分隔，5 列，顺序固定）：
+#   claim     主张（机制 / 功能的名字，与文档用词一致）
+#   arch      架构或具体机型
+#   level     L0 无载体 / L1 编译面 / L2 QEMU 运行 / L3 真机
+#   carrier   L2 必须写 qemu_ 开头的板级目录名；L3 必须写真实板级目录名；
+#             L1 / L0 没有运行载体时写 none
+#   evidence  L2 / L3 必须带一个本仓库历史里真实存在的提交号（7..40 位十六进制）；
+#             L1 写 gate:<门禁脚本名> 或提交号
+#
+# 规则由 tools/evidence_gate.py 机械校验，判据写在 docs/验证载体分级.md。
+# 新增一条 L3 必须同时改 evidence_gate.py 里的 L3_FROZEN（那是刻意的动作：
+# 硅片读数只能靠人把板子上的串口日志抄回来，不能靠改代码"长"出来）。
+claim	arch	level	carrier	evidence
+遗言（ARKRTOS_HW_SAFE）	Cortex-M4 / STM32F427	L3	stm32f427	c021168 真机 devs=3 owners=6 neutralized=6 last_owner=12
+遗言（ARKRTOS_HW_SAFE）	Cortex-M7 / STM32H743	L1	stm32h743	gate:swap_syntax_gate 编过；H743 工程默认关档，无读数
+遗言（ARKRTOS_HW_SAFE）	RV32IMAC / QEMU virt	L2	qemu_riscv32	77cc0da QEMU 台账 owners=2 neutralized=8 last_owner=7（devs=0）
+遗言（ARKRTOS_HW_SAFE）	LA64 / QEMU virt	L2	qemu_loongarch64	77cc0da QEMU 台账 devs=0 owners=2 neutralized=0
+遗言（ARKRTOS_HW_SAFE）	Cortex-M3	L0	none	无板级工程，无载体
+无缝衔接（ARKRTOS_USE_TASK_SWAP）	Cortex-M4 / STM32F427	L3	stm32f427	77cc0da 真机落地延迟 108 / 233 / 58 ms
+无缝衔接（ARKRTOS_USE_TASK_SWAP）	Cortex-M3	L1	none	gate:swap_syntax_gate armclang 编过 15 个 TU
+无缝衔接（ARKRTOS_USE_TASK_SWAP）	Cortex-M7 / STM32H743	L1	stm32h743	gate:swap_syntax_gate 编过；H743 工程默认关档
+无缝衔接（ARKRTOS_USE_TASK_SWAP）	RV32IMAC / QEMU virt	L2	qemu_riscv32	77cc0da 内核自检 swap: PASS 5/5（a0..a7 / sp / mepc / mstatus）
+无缝衔接（ARKRTOS_USE_TASK_SWAP）	LA64 / QEMU virt	L2	qemu_loongarch64	77cc0da 内核自检 swap: PASS 3/3（a0..a7 / sp / ERA / PRMD）
+无缝衔接（ARKRTOS_USE_TASK_SWAP）	LA32 / RV64GC	L0	none	编译期 #error 拒绝（不给错答案，不是"没测"）
+实时性：结构（节拍 / 优先级 / 关中断）	Cortex-M4 / STM32F427	L3	stm32f427	c021168 switch 744 cyc=7.75us、tick.isr 6.3us avg / 71.6us max
+实时性：仪表（ARKRTOS_USE_RTSTAT）	Cortex-M4 / STM32F427	L3	stm32f427	c021168 全仓库唯一有周期级计数的档
+实时性：结构	RV32IMAC / QEMU virt	L2	qemu_riscv32	77cc0da CLINT 节拍 + PMP 窗口跑通；仪表不可用（-1 分支）
+实时性：结构	LA64 / QEMU virt	L2	qemu_loongarch64	2e2ec25 分页 + PLV 用户态跑通；仪表不可用（-1 分支）
+内核 FDT 解析（ARKRTOS_USE_FDT）	LA64 / QEMU virt	L2	qemu_loongarch64	77cc0da [fdt] blob=924 rc=0 model=QEMU virt loongarch64 nodes=8
+FDT overlay（ARKRTOS_USE_FDT_OVERLAY）	LA64 / QEMU virt	L2	qemu_loongarch64	2e2ec25 fdt overlay bytes=1039 nodes=9 (was 8) model=fdt-overlay-demo
+Linux 系统调用 ABI（ARKRTOS_USE_LINUX_ABI）	LA64 / QEMU virt	L2	qemu_loongarch64	45a4889 13 条 check 全 ok，exit code 7
+ELF 装载（ARKRTOS_USE_ELF）	RV32IMAC / QEMU virt	L2	qemu_riscv32	77cc0da exec hello32 5/5 无 mcause=1 越权 fault
+ELF 装载（ARKRTOS_USE_ELF）	LA64 / QEMU virt	L2	qemu_loongarch64	77cc0da exec 反复跑过（页表 + PLV3）

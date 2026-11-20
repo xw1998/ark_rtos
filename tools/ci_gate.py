@@ -472,6 +472,27 @@ def check_doc_index(dry_run=None):
        % len(pages))
 
 
+def check_evidence_levels():
+    """每条读数都要写明载体级别，级别不允许被自我抬高。
+
+    这个仓库的读数有三种量级：编得过、跑在 QEMU 上、真机串口日志。散文里
+    三者长得一样，于是"A QEMU run counts as a board run"很容易被读成"上板了"。
+    tools/evidence_levels.tsv 把每条主张压成一行（级别 / 载体 / 出处提交号），
+    tools/evidence_gate.py 机械校验：L2 的载体必须是存在的 board/qemu_* 目录、
+    L3 的载体不能是 qemu_*、证据里必须有能在 git 历史里查到的提交号、
+    L3 行数冻结（真机读数只能靠人抄回来，不能靠改代码长出来）。
+
+    不覆盖：散文里有没有偷偷把 L2 说成 L3；证据内容与主张是否一致。
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "evidence_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "PASS  evidence-levels" in txt:
+        ok("evidence-levels", txt.splitlines()[-1].replace("PASS  evidence-levels", "").strip()
+           or "ledger is self-consistent")
+    else:
+        fail("evidence-levels", txt[-320:])
+
+
 def check_api_doc_fresh():
     """docs/api/Ark RTOS_API参考.md must match what the generator produces today.
 
@@ -1772,6 +1793,7 @@ CHECK_TABLE = (
     ("format", check_format_baseline),
     ("doc-index", check_doc_index),
     ("api-doc", check_api_doc_fresh),
+    ("evidence-levels", check_evidence_levels),
     ("layout-check", check_layout_and_scatter),
     ("no-app-partition-include", check_no_partition_include_in_app),
     ("config-generated", check_config_generated),

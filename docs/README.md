@@ -27,6 +27,8 @@
 | 用英文读同一份 Linux 系统调用 ABI 说明 | [Linux可执行文件兼容-系统调用ABI.en.md](Linux可执行文件兼容-系统调用ABI.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 想知道遗言 / 无缝衔接 / 实时性在三类硬件上各到了哪一步 | [跨架构机制矩阵.md](跨架构机制矩阵.md)（每格三档：真机/QEMU 读数、编译面、编译期拒绝；M4 真机读数、RV32/LA64 QEMU 台账、非 ARM 无缝衔接到 2026-11-19 是 #error） |
 | Read the cross-architecture matrix in English | [跨架构机制矩阵.en.md](跨架构机制矩阵.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
+| 想分清**一条读数到底是编得过、跑在 QEMU 上、还是真机**（"QEMU 算上板，不是真机"） | [验证载体分级.md](验证载体分级.md)（L0/L1/L2/L3 四档定义、台账 `tools/evidence_levels.tsv` 是唯一来源、QEMU 升不成 L3 的三条实证、每档升到真机最少要做什么、门禁 `evidence-levels`） |
+| Read the verification-carrier page in English | [验证载体分级.en.md](验证载体分级.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 想**像 VxWorks 那样把可下载模块装进已跑着的系统**（`ld /mnt/ram/modhello.o a b`、`lkup`、`modules`、`unld`） | [MMU平台可下载模块-VxWorks式.md](MMU平台可下载模块-VxWorks式.md)（`ET_REL` 现场链接、内核符号导出表、支持的重定位类型、PLV0 取舍、**与 ELF 是并列的两种模型不是替代**、装载器要 4 KB 栈这个真 bug） |
 | Read the same page in English | [MMU平台可下载模块-VxWorks式.en.md](MMU平台可下载模块-VxWorks式.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 搞懂文件路径怎么解析、挂载点怎么设、`/dev` 与 `/mnt` 从哪来 | [VFS路径命名空间.md](VFS路径命名空间.md)（挂载点、路径解析、根目录约定、设备与持久卷的位置） |
@@ -151,6 +153,8 @@ docs/
 ├── Linux可执行文件兼容-系统调用ABI.en.md    # 【English】Linux 系统调用 ABI 页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── 跨架构机制矩阵.md                        # 【矩阵+证据】遗言 / 无缝衔接 / 实时性 × M3/M7、M4、RV32、LA64、LA32：每格标读数 / 编译面 / 编译期拒绝，含非 ARM swap 的 #error 与 cyccnt 不可用
 ├── 跨架构机制矩阵.en.md                     # 【English】跨架构矩阵页的浓缩英文版（中文页 normative；不新增主张与读数）
+├── 验证载体分级.md                          # 【口径+台账】L0/L1/L2/L3 四档、tools/evidence_levels.tsv 唯一来源、QEMU 升不成 L3 的三条实证、升级到真机的最小动作、门禁 evidence-levels
+├── 验证载体分级.en.md                       # 【English】验证载体分级页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── MMU平台可下载模块-VxWorks式.md          # 【实机记录+设计说明】VxWorks 式可重定位模块：ET_REL 现场链接、导出表白名单、SOP 重定位、ld/lkup/modules/unld、PLV0 取舍、与 ELF 的 2x2 并存、QEMU 实测读数、三个真 bug
 ├── MMU平台可下载模块-VxWorks式.en.md        # 【English】MMU平台可下载模块-VxWorks式页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── VFS路径命名空间.md                       # 【设计说明】VFS 挂载点、路径解析、根目录约定、/dev 与 /mnt
