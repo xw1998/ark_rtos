@@ -274,6 +274,19 @@ void arkrtos_port_set_thread_priv(uint32 is_priv);
 */
 uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void));
 
+#if (ARKRTOS_USE_ELF_TLS == 1)
+/**
+* @brief 把初始栈帧里的线程指针（TLS 用）写成指定值
+* @param stack_ptr arkrtos_port_stack_init() 返回的帧指针
+* @param tp        TLS 块起始地址
+* @details 只有实现了「TP 写入」的端口才有这个函数（目前是 LoongArch64，
+*          写的是帧里 $r2 的槽）。装载器在 ARKRTOS_USE_ELF_TLS=1 且镜像带
+*          PT_TLS 时调用它；关档时这个声明与实现都不存在，端口体积不变。
+*          其它端口打开 ARKRTOS_USE_ELF_TLS 是编译期错误，不是空操作。
+*/
+void arkrtos_port_task_set_tp(uint32 stack_ptr, unsigned long tp);
+#endif
+
 /**
 * @brief 切换到空闲任务上下文
 * @details 设置PSP/CONTROL寄存器，切换到PSP栈模式

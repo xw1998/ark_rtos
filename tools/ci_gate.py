@@ -1490,7 +1490,8 @@ def check_elf_loader():
     r = _run_check([sys.executable, os.path.join("tools", "elf_gate.py")])
     txt = ((r.stdout or "") + (r.stderr or "")).strip()
     if r.returncode == 0 and "ELF-GATE OK" in txt:
-        ok("elf", "default off + LA64 ON compiles (2 TUs) + 2 negative cases refused")
+        ok("elf", "default off + LA64 ON compiles (2 TUs) + 2 negative cases refused"
+                 + " + TLS: LA64 compiles, RV32 refused by #error")
     else:
         fail("elf", txt[-260:])
 

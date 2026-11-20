@@ -127,8 +127,10 @@ glibc rc1.4 / gcc 8.3.0，与发行版同源），**不下载 Alpine/Debian 镜�
 
 静态是**离得最近的一档**：没有动态标签、没有重定位、没有依赖链，只剩
 「地址」与「TLS」两道。它的 623 728 B 从 2026-11-20 起已经装得进
-`/mnt/ram`（卷从 512 KiB 扩到 4 MiB，见 §5 第 6 条），但装载器仍然只会
-把它判成 `[address]` 与 `[tls]` 两条 blocker。
+`/mnt/ram`（卷从 512 KiB 扩到 4 MiB，见 §5 第 6 条），但探针仍然报
+`[address]` 与 `[tls]` 两条 blocker（`[tls]` 是静态描述：装载器在开着
+`ARKRTOS_USE_ELF_TLS` 时已经能把 TLS 段铺进任务空间，见 §5.2，真正拦住它的
+是 `[address]`）。
 
 ---
 
@@ -138,7 +140,7 @@ glibc rc1.4 / gcc 8.3.0，与发行版同源），**不下载 Alpine/Debian 镜�
 | --- | --- | --- | --- | --- | --- |
 | 1 | 地址空间 | `[0x120000000, 0x120008080)`（动态）/ `[0x120000000, 0x12008bb38)`（静态） | 固定窗口 `[0x02000000, 0x02200000)`，2 MB；装载器把 `p_vaddr > 0xFFFFFFFF` 直接判 `ERR_LAYOUT`（32 位地址上限） | 按 ELF 自己要的 VA 装：**先把装载器的地址宽度升到 64 位**（判据、窗口切分、port 的 TLB 入口三层），再做每进程独立 VA 空间 + 运行期建页表 | `[address]` |
 | 2 | 解释器 | `PT_INTERP = /lib64/ld.so.1` | 默认档直接拒（`ERR_FORMAT`）；开 `ARKRTOS_USE_DYNLOAD` 后能装**本仓** `ld-ark.so`（`/mnt/ram/ld-ark.so`） | 真 glibc `ld.so` 的能力面（见 §7） | `[interp-path]` |
-| 3 | TLS | `PT_TLS`（动态继承自 libc：16/144；静态：32/96）+ 17 条 `R_LARCH_TLS_TPREL64` + `set_tid_address` | `arkrtos_elf.c` **完全不读 `PT_TLS`** | 建 TCB、铺 tdata/tbss、把 TP 指过去、`set_tid_address` 与线程指针语义 | `[tls]` |
+| 3 | TLS | `PT_TLS`（动态继承自 libc：16/144；静态：32/96）+ 17 条 `R_LARCH_TLS_TPREL64` + `set_tid_address` | 默认档 `arkrtos_elf.c` **完全不读 `PT_TLS`**；开着 `ARKRTOS_USE_ELF_TLS` 时读段、铺 `tdata`、清 `tbss`、把 `$r2` 指过去（2026-11-20，静态 local-exec，见 §5.2） | 真 libc 的 TCB 布局、`R_LARCH_TLS_TPREL64` 重定位、`set_tid_address` 语义 | `[tls]` |
 | 4 | 动态段标签 | `INIT_ARRAY`/`FINI_ARRAY`、`GNU_HASH`、`VERSYM`/`VERNEED`/`VERDEF`、`RELACOUNT`、`FLAGS` | `ld-ark.so` 只处理 `NEEDED/STRTAB/SYMTAB/RELA/RELASZ/RELAENT/STRSZ/SYMENT/JMPREL/HASH` 这几项 | 构造函数执行、符号版本匹配、GNU 哈希、`DF_1_NOW` 语义 | `[dynamic-tags]` |
 | 5 | 重定位 | `RELATIVE`、`64`、`JUMP_SLOT`、`IRELATIVE`(IFUNC)、`TLS_TPREL64` | 只做 `R_LARCH_64 / RELATIVE / JUMP_SLOT`（`ARK_SUPPORTED_RELOC`，门禁与 `ldso.c` 双向对齐） | IFUNC 解析器（装载期跑用户代码）+ TLS 重定位 | `[relocations]` |
 | 6 | 依赖链与存储 | `libc.so.6` 1 571 208 B；静态 hello 623 728 B | `/mnt/ram` 是 **4 MiB** 的 RAM 块设备上的 littlefs（`ARKRTOS_QEMU_BLK_SIZE = 4 * 1024 * 1024`，2026-11-20 由 512 KiB 扩上来）；`CHIP_FLASH_SIZE` 2 MB、`CHIP_RAM_SIZE` 8 MB。**容量这道已实测通过**：开机写 640 KiB 文件再读回逐字节一致 | 只剩下依赖递归（`DT_NEEDED` 链的解析与装载） | `[needed]` |
@@ -165,8 +167,40 @@ glibc rc1.4 / gcc 8.3.0，与发行版同源），**不下载 Alpine/Debian 镜�
 640 KiB 的容量文件比旧**整卷**还大，所以这条读数证明的是「卷真的能装下
 比过去整卷更大的东西」，而不只是念了一遍容量宏。
 
-**没有因此变绿的东西**：地址与 TLS 两道原样未动，静态 hello 仍然跑不起来。
-存储只从「连门都进不去」变成「装得进去、装载器明确拒绝并给理由」。
+**没有因此变绿的东西**：这一轮（存储）没有让任何一道门槛变绿——地址这道原样
+未动，静态 hello 仍然跑不起来；存储只从「连门都进不去」变成「装得进去、装载器
+明确拒绝并给理由」。TLS 是下一轮单独做的（§5.2）。
+
+### 5.2 TLS 这一道的实测读数（2026-11-20）
+
+这一轮把第 3 道从「完全不读 `PT_TLS`」推进到「静态 TLS 通路跑通、有 QEMU 读数」，
+但**没有**做 TCB，所以它仍然不等于「发行版二进制能跑」。
+
+| 项 | 读数 |
+| --- | --- |
+| 开关 | `ARKRTOS_USE_ELF_TLS`（默认 0，`depends on ARKRTOS_USE_ELF`；非 LoongArch 端口开档是编译期 `#error`） |
+| 约定 | **静态 local-exec**：`TP = PT_TLS.p_vaddr + bias`，TPREL 偏移非负 |
+| 约定怎么来的 | 两份互相独立的工具链（本仓 newlib 交叉 gcc、龙芯 8.3 glibc `loongarch64-linux-gnu-gcc`）各编同一份「两变量 TLS」夹具，反汇编都是 `lu12i/ori/lu32i/lu52i + add.d $r12,$r12,$r2`，偏移 **0**（`.tdata`）与 **4**（`.tbss`） |
+| 装载器动作 | 读 `p_type=7`；校验（`filesz<=memsz`、对齐、出现第二个 `PT_TLS` 直接拒）；把 `filesz` 字节搬进任务空间；`memsz-filesz` 清零；`hi` 扩到 TLS 末尾；`tls_va` 作为 `tp` 传给 `elf_start_task`，在**降权之后**写进任务帧 `LA_FR_TP`（帧偏移 8 字节 = `$r2`） |
+| 夹具 | `example/qemu_loongarch64/elf/tls_main.c` → 5008 B 带签名 ELF，退出码自带语义：9 = `.tdata` 模板/TP 不对，10 = `.tbss` 没清零，11 = `write` 返回值不对，**3 = 两格都过** |
+| QEMU 读数 | `[tls] write /mnt/ram/tls_main rc=0 size=5008` / `[tls] exec rc=0` / 控制台 `TLSOK` / `[tls] finished after 0 ms, exit code 3` |
+| 体积（默认 → 开档） | 镜像 `414208/448/5112340` → `420272/448/5112340`（+6064 B text）；其中 `arkrtos_elf.o` `5019` → `5563`（+544）、`arkrtos_port.o` `11630` → `11678`（+48），余下是 5008 B 夹具 blob 与演示打印串 |
+| 门禁 | `tools/elf_gate.py` 新增 H：LA64 开档两个 TU 必须编得过；RV32 开档必须编不过且错误点名 `ARKRTOS_USE_ELF_TLS`（实测命中）；`ELF_PT_TLS=7` 与「读段 → 搬模板 → 清 tbss → 写帧」四段 pin，配一次变异自检 |
+
+**为什么夹具里两个 `__thread` 变量都带 `volatile`**：第一版没带，`-O1` 把 TLS
+访问折成了常量，链接产物**连 `PT_TLS` 都不剩**——那是「测了但什么也没测」的假夹具。
+这条与「闸门必须自带防假绿自检」是同一条纪律。
+
+**这一道仍然没做的（写死，不许读成别的东西）**：
+
+1. **没有 TCB**。实现的是「TP 指向 TLS 块」，不是 glibc 的 TCB 布局
+   （`tcbhead_t`、`dtv`、自指指针、静态 TLS 的模块偏移都在 glibc 那边定义）。
+   真 libc 仍然起不来。
+2. **没有 TLS 重定位**。真实样本里的 17 条 `R_LARCH_TLS_TPREL64` 仍然不处理。
+3. **没有 `set_tid_address` 语义**（线程指针与 TCB 的自指关系不在这一层）。
+4. **只解决静态 local-exec**。`initial-exec` / `local-dynamic` 与动态 TLS 一字未动。
+5. 探针的 `[tls]` 标签仍是**静态描述**（「这个文件有 `PT_TLS`」），不代表装载器
+   装不了；真正拦住真实静态 hello 的是第 1 道 `[address]`。
 
 ---
 
@@ -332,8 +366,10 @@ py -3 tools/realbin_gate.py        # 7 项，全过打印 REALBIN-GATE OK
 
 1. 真实发行版**跑不起来**（六道门槛一道未过）——本轮交付的是账本与仪器。
 2. 存储已经不是拦路的那一道（4 MiB 卷 + 640 KiB 文件往返核对），但静态
-   hello 与 `libc.so.6` 仍然跑不起来：卡在**地址**（装载器 32 位 VA 上限）
-   与 **TLS** 两道，与容量无关。
+   hello 与 `libc.so.6` 仍然跑不起来：卡在**地址**（装载器 32 位 VA 上限）。
+   TLS 的**静态通路**已在 2026-11-20 打通（§5.2），但 TCB、TLS 重定位与
+   `set_tid_address` 未做，所以这道只是从「完全没读」变成「读得进、能跑我们
+   自己编的夹具」，不是「真二进制能起来」。
 3. `[lxstat]` 的读数是**合成触发**的 11 个号，不是真实分布（见 §8）。
 4. 探针不解析 `PT_NOTE`、不读 `.gnu.attributes`（ABI 标记）、不判 `RELRO`
    到「能否强制」这一层——`RELRO=True` 只是描述，不构成 blocker。
@@ -342,13 +378,15 @@ py -3 tools/realbin_gate.py        # 7 项，全过打印 REALBIN-GATE OK
 6. 没有真实 `ld.so` 的兼容面测试，也没有任何「按 glibc 契约跑起来」的实验
    （§7 说明为什么这条路不立项）。
 
-**下一步的最小一步**（如果继续推进）：先做第 1 道的一半——把装载链的
-**地址宽度升到 64 位**。这一步不能省：`arkrtos_elf.c` 现在对
-`p_vaddr > 0xFFFFFFFF` 直接返回 `ERR_LAYOUT`，窗口切分与 port 的 TLB
-入口（`uint32 va`）也都是 32 位，所以「把窗口从 2 MB 挪到 0x120000000」
-这句话在现有代码里根本表达不出来。顺序是：判据 → 窗口切分 → port 的
-窗口 VA 与 TLB 入口 → 再谈每进程 VA 空间。
+**下一步的最小一步**（如果继续推进）：把装载链的**地址宽度升到 64 位**。
+这一步不能省：`arkrtos_elf.c` 现在对 `p_vaddr > 0xFFFFFFFF` 直接返回
+`ERR_LAYOUT`，窗口切分与 port 的 TLB 入口（`uint32 va`）也都是 32 位，所以
+「把窗口从 2 MB 挪到 0x120000000」这句话在现有代码里根本表达不出来。顺序是：
+判据 → 窗口切分 → port 的窗口 VA 与 TLB 入口 → 再谈每进程 VA 空间。
 
-之后才是 `PT_TLS`：建 TCB、铺 tdata/tbss、把 TP 指过去、补
-`R_LARCH_TLS_TPREL64` 与 `set_tid_address` 语义。两件事各自都能用 QEMU
-读数钉住，而且它们是后面每一档的公共前置。
+**顺序说明（与早先版本不同，是有意的）**：这一段原来写的是「先 64 位地址、
+再 TLS」。本轮反了过来，先做 TLS 的静态部分，理由是：两道互不依赖，而 TLS
+不碰地址模型（只读一个段、铺一次模板、写一个寄存器），一次 QEMU 读数就能闭环；
+地址宽度要同时动判据、窗口切分与 port 三层，半途动风险高得多。所以现在的实际
+状态是「TLS 静态部分已完成并有读数（§5.2），剩下 TCB/动态 TLS 恰好依赖
+地址 + 重定位，自然排在地址宽度之后」。

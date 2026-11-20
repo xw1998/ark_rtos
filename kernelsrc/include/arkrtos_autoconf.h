@@ -202,6 +202,9 @@
 #ifndef ARKRTOS_USE_ELF
 #define ARKRTOS_USE_ELF 0
 #endif
+#ifndef ARKRTOS_USE_ELF_TLS
+#define ARKRTOS_USE_ELF_TLS 0
+#endif
 #ifndef ARKRTOS_USE_ESET
 #define ARKRTOS_USE_ESET 0
 #endif

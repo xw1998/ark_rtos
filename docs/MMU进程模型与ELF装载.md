@@ -24,6 +24,9 @@ M1 交付的是「**文件即程序**」+ Linux 入口约定（`sp→argc/argv`�
 `wait()`：无父子、无僵尸队列）。ASID（U-7）也于同日补上（`ARKRTOS_USE_PAGING_ASID`，
 缺省关；开档后每个空间一个 ASID + 一条独立 STLB way，切空间只写一次 `CSR.ASID`），
 见 §6 欠账表与 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.28。
+PT_TLS（静态线程指针，U-17）的**静态通路**也于 2026-11-20 补上：开关
+`ARKRTOS_USE_ELF_TLS`（缺省关），装载器读段、铺 `tdata`、清 `tbss`、把 `$r2`
+指过去，QEMU 读数 `exit code 3`；**没有** TCB、没有 TLS 重定位，见 §10。
 **不得把「能并发跑两个实例」说成「Ark 有完整进程模型了」。**
 
 适用范围写死：
@@ -301,6 +304,7 @@ QEMU LA64 实测（2026-11-17，同一次开机）：
 | U-14 | 控制台任务栈的 32 位侧复核 | **RV32 已测（2026-11-17），但 LA64 那个用例在 RV32 上不存在**：RV32 shell 的 `help` 里没有 `ld` / `modules` / `lkup`（`modld` 在 32 位档被 64 位守卫拒绝）⇒ LA64 那个「3 KB 被 `ld` 用到 100%」的场景在 RV32 上无法复现。只能给「已跑命令集」的读数：3 KB 栈跑 `help` + `fs ls /` 峰值 2120 B（69%），跑 `utest run` + `sec all` + `audit` + `dmesg` 峰值 2172 B（70%），距 90% 门限有余量。**这不是「3 KB 在 RV32 上够用」的证明**，只是「已跑过的这些命令不越界」 | LA32 / STM32 侧仍没测（前者无执行载体，后者需上板）；RV32 侧剩下的风险是「还没跑到的命令」而不是「`ld`」 | **RV32 部分收口（限定为已测命令集）；LA32 / STM32 仍欠** |
 | U-15 | 撤销 / 回收映射（unmap） | **已做完（2026-11-17，QEMU LA64 实跑）**：`arkrtos_paging_unmap_span(va, size)` + port `arkrtos_port_paging_unalias(va)`，拒绝码 -1 未对齐 / -2 静态跨度 / -4 没登记过；槽位只在 8 KB 对两半都空时回收，`arkrtos_paging_dyn_used()` 给占用量。**实测推翻原设计**：只重写 MTLB 不够（STLB 与 QEMU softmmu 留着旧翻译 ⇒ `look` 报 no entry 却仍读到旧页），修法是先 `invtlb` 两半再 `tlbwr` | 动态映射现在可撤销、槽位可回收；`pmap test` 串成 map/unmap/rebind/unmap；撤销后访问该 VA 触发 refill（负向证据）；`flush()` 整表 flush 仍空操作 | **已收**（细节见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.18） |
 | U-13 | 栈溢出 / 陷阱帧越界的检测 | **已做完（2026-11-17）**：开关 `ARKRTOS_USE_STACK_GUARD`（默认 n），判据是读 `stack_bottom[0]` 是否仍为 `0xed01`（不是比 PSP，陷阱帧/野指针改栈底而 PSP 仍在上方），落点在调度切换与 LA64/RV32 的 C trap 入口 | 命中记 `ARKRTOS_FAULT_STACKOVF` + `[STK] task N` + 摘任务；QEMU 实跑与门禁见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.15 | 已收 |
+| U-17 | PT_TLS（静态线程指针） | **静态通路已做（2026-11-20，QEMU LA64 实跑）**：开关 `ARKRTOS_USE_ELF_TLS`（缺省 0，`depends on ARKRTOS_USE_ELF`；非 LoongArch 端口开档是编译期 `#error`）。`elf_measure_image()` 读 `p_type=7` 并校验（`filesz<=memsz`、对齐、第二个 `PT_TLS` 拒绝），`tls_va = bias+p_vaddr` 记进 `elf_image_t`，窗口上限 `hi` 推到 TLS 末尾（`.tbss` 常在最后一个 `PT_LOAD` 之外）；`elf_write_tls()` 搬 `filesz` 字节再清 `memsz-filesz`；`elf_start_task()` 多一个 `tp`，降权后 `arkrtos_port_task_set_tp()` 写 `frame[LA_FR_TP]`（帧偏移 8 B = `$r2`，`.S` 恢复路径本来就有 `ld.d $tp`）。约定取自实测：两份独立工具链编同一份夹具，反汇编都是 `add.d $r12,$r12,$r2`，TPREL 偏移 0/4 ⇒ **TP = p_vaddr + bias** | **仍缺**：TCB 布局（`tcbhead_t`/`dtv`/自指指针）、`R_LARCH_TLS_TPREL64` 重定位（真实样本 17 条）、`set_tid_address` 语义、`initial-exec`/`local-dynamic`/动态 TLS；只有 LA64 有 set-tp 原语 | 已收静态部分（QEMU LA64 实跑，见 §10；门禁 = `tools/elf_gate.py` H1/H2/H3） |
 
 ---
 
@@ -442,3 +446,92 @@ Makefile 的 `hello32` blob 依赖是 `$(if $(findstring ARKRTOS_USE_ELF=1,…),
 * 故障诊断：ELF 任务的陷阱帧在 `0x80A…` 窗口里，`arkrtos_port_fault_detail()`
   的 `[FRAME]` 打印范围仍是内核 RAM（`0x801…`），ELF 任务出陷阱时只打
   `mcause/mepc/ra`，不打 GPR。为了不让默认档字节变化，这条**没有**改。
+
+---
+
+## 10 PT_TLS：静态线程指针（U-17，2026-11-20，QEMU 实跑）
+
+### 10.1 做了什么
+
+开关 `ARKRTOS_USE_ELF_TLS`（默认 0）。打开后三处改动：
+
+1. **测量**：`elf_measure_image()` 扫段表时认 `p_type == 7`（`ELF_PT_TLS`），校验
+   `filesz <= memsz`、`p_align` 是 0/1/2 的幂且 `bias+p_vaddr` 真对齐、只允许一个
+   `PT_TLS`；把 `tls_va = bias + p_vaddr` 与大小记进 `elf_image_t`，并把窗口上限
+   `hi` 推到 `tls_va + memsz`——**`.tbss` 常常落在最后一个 `PT_LOAD` 之外**，
+   不推这一下就会漏掉一段该清零的内存。
+2. **铺段**：`elf_write_tls()` 在普通段搬完之后把 `filesz` 字节从文件搬到 `tls_va`
+   （分页档经 4 KB 暂存窗口，非分页档直接读），再把 `memsz - filesz` 清零。
+3. **写 TP**：`elf_start_task()` 多一个 `tp` 参数，在**降权之后**调
+   `arkrtos_port_task_set_tp(stack_ptr, tp)`；LA64 实现是 `frame[LA_FR_TP] = tp`
+   （`LA_FR_TP = 1`，帧偏移 8 字节 = `$r2`）。`arkrtos_context.S` 的恢复路径本来就有
+   `st.d $tp, $sp, 8` / `ld.d $tp, $s0, 8`，所以汇编一行没动。
+
+非 LA64 端口开这个档是**编译期 `#error`**，不做空操作（RV32 已实测命中那条错误）：
+`arkrtos_port_stack_init()` 造的帧所有槽都是 0，没有 set-tp 原语就会得到
+「TP=0 但自称支持 TLS」的错答案。
+
+### 10.2 约定：TP = PT_TLS.p_vaddr + bias
+
+不猜 psABI，而是用两份**互相独立**的工具链（本仓 newlib 交叉 gcc、龙芯 8.3 glibc
+`loongarch64-linux-gnu-gcc`）各编同一份「两变量 TLS」夹具，反汇编读出来：
+
+```
+lu12i.w / ori / lu32i.d / lu52i.d   ; 拼出 TLS 变量的绝对地址
+add.d   $r12, $r12, $r2             ; 加上线程指针
+```
+
+偏移是 **0**（`.tdata` 变量）与 **4**（`.tbss` 变量），即 **TP 指向 TLS 块首**、
+TPREL 非负。这就是静态 local-exec 的形态。
+
+**写死的边界**：这不是 glibc 的 TCB 布局（`tcbhead_t`、`dtv`、自指指针、静态 TLS
+的模块偏移都在 glibc 那边定义）。「TP 指向一块 TLS」与「glibc 能起来」是两件事。
+
+### 10.3 读数
+
+夹具 `example/qemu_loongarch64/elf/tls_main.c`（5008 B，带签名 tag）退出码即判据：
+**9** = `.tdata` 模板/TP 不对，**10** = `.tbss` 没清零，**11** = `write` 返回值不对，
+**3** = 两格都过。
+
+```
+[tls] write /mnt/ram/tls_main rc=0 size=5008
+[tls] exec rc=0
+TLSOK
+[tls] finished after 0 ms, exit code 3
+```
+
+**夹具必须带 `volatile`**：第一版两个 `__thread` 变量没写 `volatile`，`-O1` 把 TLS
+访问折成常量，链接产物**连 `PT_TLS` 都不剩**——那是「测了但什么也没测」的假夹具。
+
+### 10.4 默认档零变化
+
+| 口径 | 默认档（`ARKRTOS_USE_ELF_TLS=0`） | 开档 |
+| --- | --- | --- |
+| 镜像 text/data/bss | `414208 / 448 / 5112340` | `420272 / 448 / 5112340`（+6064 B） |
+| `arkrtos_elf.o` | `5019 / 4 / 4200` | `5563 / 4 / 4200`（+544） |
+| `arkrtos_port.o` | `11630 / 4 / 1157` | `11678 / 4 / 1157`（+48） |
+| `elf_demo.o` | `22278 / 0 / 4096` | `27830 / 0 / 4096`（+5552，含 5008 B 夹具 blob） |
+
+默认档的 414208 与加 TLS 之前逐字节同值：关档时 PT_TLS 一个字节都不读。
+
+### 10.5 门禁
+
+`tools/elf_gate.py` 新增 H 段：
+
+* **H1** LA64 开 `-DARKRTOS_USE_ELF_TLS=1`，`arkrtos_elf.c` 与 la64 port 两个 TU
+  必须编得过；
+* **H2** RV32 开 `-DARKRTOS_USE_ELF=1 -DARKRTOS_USE_ELF_TLS=1` 必须**编不过**，
+  且错误文本点名 `ARKRTOS_USE_ELF_TLS`；
+* **H3** 接线 pin：`ELF_PT_TLS (7u)`、`tls_va`、`elf_write_tls(`、`tls_memsz`、
+  `arkrtos_port_task_set_tp(` 与 `frame[LA_FR_TP] = tp;` 六处都在，并配一次变异
+  自检（把写帧改成写 0，pin 必须报错）。
+
+---
+
+## 11 这一道的边界（不许读成更多）
+
+1. **不是「发行版二进制能跑」**：真实静态 hello 仍卡在第 1 道——`p_vaddr > 0xFFFFFFFF`
+   直接 `ERR_LAYOUT`，窗口切分与 port 的 TLB 入口都还是 32 位。
+2. **没有 TCB**、**没有 `R_LARCH_TLS_TPREL64` 重定位**、**没有 `set_tid_address`**、
+   **没有动态 TLS**。这一道只覆盖静态 local-exec。
+3. 所有读数来自 `qemu-system-loongarch64`，**不是真机**。

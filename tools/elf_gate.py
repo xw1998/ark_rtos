@@ -31,6 +31,9 @@
      对账、`arkrtos_mpu_rom_window()` 里的 ELF 窗口分支、装载期「注册→降权→
      写回」是否真在同一临界区内、以及 `hello32` 的退出兜底。每条都配一次变异
      自检（把被 pin 的字串改坏，pin 必须报错），防止 pin 空转。
+  H. TLS（PT_TLS）：LA64 开着 `ARKRTOS_USE_ELF_TLS=1` 必须编得过，RV32 开着
+     必须被 `#error` 拒（非 LA64 端口没有 set-tp 原语，空操作会得到 TP=0 的
+     错答案），并 pin 住「读段 -> 搬模板 -> 清 tbss -> 写 $tp」四段接线。
   E. 口径 pin：`arkrtos_elf.c` 里两个线上格式常量必须还是
      `ELF_MACHINE_LOONGARCH (258u)` 与 `ELF_TYPE_EXEC (2u)`，并且 `ELF_PT_INTERP`
      仍在（动态链接必须是拒绝，不是忽略）。改了这两个值就等于改了「什么算可执行
@@ -435,6 +438,59 @@ def main():
                       text_mpu, text_board, text_mk, text_hello32):
             failures.append("G 自检2：把装载期临界区改坏后 pin 仍然通过（空转）")
 
+    # --- H. TLS（PT_TLS / set-tp，2026-11-20）------------------------------
+    # 开关是 ARKRTOS_USE_ELF_TLS（默认 0）。三处最容易假绿：开着却没编过
+    # （默认档整个 TU 不参与构建）、非 LA64 端口悄悄当空操作（结果是"支持 TLS"
+    # 但 $r2 仍是 0）、装载器读了 PT_TLS 却没真把 TP 写进任务帧。所以：
+    #   H1 LA64 开 TLS 必须编得过（elf.c + la64 port 两个 TU）；
+    #   H2 RV32 开 TLS 必须编不过，且错误必须点名 ARKRTOS_USE_ELF_TLS
+    #      （宁可报错，也不给 TP=0 的错答案）；
+    #   H3 接线 pin：ELF_PT_TLS=7、测量值落 tls_va、模板搬运、tbss 清零、
+    #      写帧 $tp 槽，四段都在；对 pin 本身做一次变异自检。
+    la64_tls = la64_flags() + ["-DARKRTOS_USE_ELF_TLS=1"]
+    for rel in ("kernelsrc/src/arkrtos_elf.c",
+                "kernelsrc/port/loongarch/la64/arkrtos_port.c"):
+        rc, out = _run(la64, la64_tls + [rel])
+        if rc != 0:
+            failures.append("H1 LA64 开 TLS 编不过 %s：\n%s" % (rel, out[-600:]))
+
+    rc, out = _run(rv32, rv32_flags + [
+        "-DARKRTOS_USE_ELF=1",
+        "-DARKRTOS_USE_ELF_TLS=1",
+        "kernelsrc/src/arkrtos_elf.c",
+    ])
+    if rc == 0:
+        failures.append("H2 RV32 开 TLS 竟然编过了（非 LA64 端口必须有 #error，"
+                        "否则得到 TP=0 的错答案）")
+    elif "ARKRTOS_USE_ELF_TLS" not in out:
+        failures.append("H2 RV32 开 TLS 编不过但不是那条 #error：\n%s" % out[-500:])
+
+    text_port64 = _read("kernelsrc/port/loongarch/la64/arkrtos_port.c")
+
+    def h_pins(elfc, portc):
+        bad = []
+        if not _re.search(r"#define\s+ELF_PT_TLS\s+\(7u\)", elfc):
+            bad.append("H3: ELF_PT_TLS 不是 (7u)（改了它就读不到 TLS 段）")
+        for name, why in (
+            ("tls_va", "测量结果没有落到 tls_va（TP 就无从取值）"),
+            ("elf_write_tls(", "没有把 TLS 模板搬进任务空间"),
+            ("tls_memsz", "tbss 清零没有用到 tls_memsz"),
+            ("arkrtos_port_task_set_tp(", "装载器没有把 TP 写进任务帧"),
+        ):
+            if name not in elfc:
+                bad.append("H3: arkrtos_elf.c 里找不到 %r（%s）" % (name, why))
+        if "void arkrtos_port_task_set_tp(uint32 stack_ptr, unsigned long tp)" not in portc:
+            bad.append("H3: la64 port 没有 arkrtos_port_task_set_tp 的实现")
+        if "frame[LA_FR_TP] = tp;" not in portc:
+            bad.append("H3: set_tp 没有写帧里的 $tp 槽（LA_FR_TP）")
+        return bad
+
+    got = h_pins(text_elfc, text_port64)
+    failures.extend(got)
+    if not got and not h_pins(text_elfc, text_port64.replace(
+            "frame[LA_FR_TP] = tp;", "frame[LA_FR_TP] = 0u;", 1)):
+        failures.append("H 自检：把 set_tp 的写帧改坏后 pin 仍然通过（空转）")
+
     shutil.rmtree(tmp, ignore_errors=True)
 
     if failures:
@@ -444,7 +500,7 @@ def main():
 
     print("ELF-GATE OK: 默认档=0 / LA64 打开编得过(2 TU) / RV32 打开也编得过(U-4) / "
           "缺窗口宏被拒 / 线上格式常量未漂 / U-8 退出码通道 F pin 与 F2/F2b（wait / App·小程序 SDK / 模块）成立且自检有效 / "
-          "U-4 接线 G pin 成立且两项变异自检有效")
+          "U-4 接线 G pin 成立且两项变异自检有效 / TLS H1 两 TU 编得过·H2 RV32 被拒·H3 接线与自检成立")
     return 0
 
 

@@ -23,7 +23,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（66 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（67 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -61,7 +61,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（12 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（76 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（77 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（18 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -85,7 +85,7 @@
 - [kernelsrc/src/arkrtos_apppack.c](#kernelsrcsrcarkrtos_apppackc)（1 项）
 - [kernelsrc/src/arkrtos_cfg.c](#kernelsrcsrcarkrtos_cfgc)（1 项）
 - [kernelsrc/src/arkrtos_dev.c](#kernelsrcsrcarkrtos_devc)（1 项）
-- [kernelsrc/src/arkrtos_elf.c](#kernelsrcsrcarkrtos_elfc)（8 项）
+- [kernelsrc/src/arkrtos_elf.c](#kernelsrcsrcarkrtos_elfc)（9 项）
 - [kernelsrc/src/arkrtos_eset.c](#kernelsrcsrcarkrtos_esetc)（1 项）
 - [kernelsrc/src/arkrtos_exports.c](#kernelsrcsrcarkrtos_exportsc)（1 项）
 - [kernelsrc/src/arkrtos_fs.c](#kernelsrcsrcarkrtos_fsc)（1 项）
@@ -3594,6 +3594,20 @@ uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void));
 - ARM Cortex-M: 压入xPSR/PC/LR/R12/R3-R0(硬件) + R4-R11(软件)
 - RISC-V: 压入mepc/mstatus/x1-x31
 此函数由port层实现，内核无需关心具体布局
+
+### `void arkrtos_port_task_set_tp(uint32 stack_ptr, unsigned long tp);`
+
+```c
+void arkrtos_port_task_set_tp(uint32 stack_ptr, unsigned long tp);
+```
+
+**把初始栈帧里的线程指针（TLS 用）写成指定值**
+- `stack_ptr`：arkrtos_port_stack_init() 返回的帧指针
+- `tp`：TLS 块起始地址
+只有实现了「TP 写入」的端口才有这个函数（目前是 LoongArch64，
+写的是帧里 $r2 的槽）。装载器在 ARKRTOS_USE_ELF_TLS=1 且镜像带
+PT_TLS 时调用它；关档时这个声明与实现都不存在，端口体积不变。
+其它端口打开 ARKRTOS_USE_ELF_TLS 是编译期错误，不是空操作。
 
 ### `void arkrtos_port_enter_idle(uint32 stack_ptr, uint32 use_priv);`
 
@@ -9459,6 +9473,21 @@ sp←stack_top，然后 ertn 跳进任务，此时 CRMD.IE 已经打开。
 ra 置 0：任务函数返回就等于跳到 0 取指，会立刻进致命异常，
 与 Cortex-M 版（LR=0）同一处理口径。
 
+### `void arkrtos_port_task_set_tp(uint32 stack_ptr, unsigned long tp) {`
+
+```c
+void arkrtos_port_task_set_tp(uint32 stack_ptr, unsigned long tp) {
+```
+
+**把初始栈帧里的 TP（$r2）写成给定值**
+- `stack_ptr`：arkrtos_port_stack_init() 返回的帧指针
+- `tp`：TLS 块起始地址
+帧偏移 8 就是上下文里保存 $tp 的那一格（见
+arkrtos_context.S 顶上的帧表）；第一次 ertn 进用户态时由
+`ld.d $tp, ...` 还原。装载器在 PT_TLS 存在时调用这里，于是
+程序第一句就可能读到的 __thread 变量已经是真值。
+关档时本函数整段不编译：默认镜像与符号表逐字节不变。
+
 ### `void arkrtos_port_start_timer(uint32 tick_period_us) {`
 
 ```c
@@ -10668,6 +10697,21 @@ static int32 elf_check_range(const elf_image_t *p_img, uint32 lo_limit, uint32 h
 ```
 
 **镜像必须整段落在 [lo_limit, hi_limit) 里（含端点判据用减法写） */**
+
+### `static int32 elf_write_tls(const char *path, uint32 space, elf_word_t `
+
+```c
+static int32 elf_write_tls(const char *path, uint32 space, elf_word_t phoff, uint16 phnum, uint16 phentsize, uint32 bias) {
+```
+
+**把 PT_TLS 模板铺进窗口，并把 tbss 清零**
+只做两件事：把文件里 p_offset 处的 p_filesz 字节搬到 TLS 块的
+装入地址（.tdata），再把后面的 p_memsz - p_filesz 字节清零
+（.tbss）。刻意不复用 elf_write_image 的 PT_LOAD 循环：TLS 段
+**不一定**被某个 PT_LOAD 盖住（夹具里 .tbss 就落在最后一个
+LOAD 之后），按 PT_LOAD 处理会漏掉这一段，读到的就是窗口里
+上一份内容留下的字节。
+**返回**：ARKRTOS_ELF_OK / 负错误码（读文件失败时原样透出）
 
 ### `static int32 elf_find_interp(const char *path, elf_word_t phoff, uint1`
 

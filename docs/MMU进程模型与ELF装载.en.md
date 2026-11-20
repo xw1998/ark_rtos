@@ -337,6 +337,8 @@ Condensed, as of 2026-11-18:
 | U-15 | unmap / release mappings | **done (2026-11-17)**: `arkrtos_paging_unmap_span(va, size)` with refusal codes -1 unaligned / -2 static span / -4 never registered; measurement **overturned the original design** - rewriting the MTLB alone is not enough (STLB and QEMU softmmu keep the old translation, so `look` says no entry while reads still return the old page); the fix is `invtlb` both halves first, then `tlbwr` |
 | U-16 | page replacement | **done (2026-11-17)**, `ARKRTOS_USE_PAGING_SWAP`, default 0: with an empty pool, evict one 8 KB pair and retry |
 
+| U-17 | PT_TLS (static thread pointer) | **static path done (2026-11-20, QEMU LA64)**: `ARKRTOS_USE_ELF_TLS` (default 0; a non-LoongArch port turns it on as a compile-time `#error`). `elf_measure_image()` reads `p_type=7` and validates it (`filesz<=memsz`, alignment, a second `PT_TLS` refused), records `tls_va = bias+p_vaddr`, and extends the window limit `hi` to the TLS end (`.tbss` usually sits past the last `PT_LOAD`); `elf_write_tls()` copies `filesz` bytes and zeroes `memsz-filesz`; `elf_start_task()` takes a `tp` and writes it after the privilege drop via `arkrtos_port_task_set_tp()` -> `frame[LA_FR_TP]` (frame offset 8 B = `$r2`; `.S` already restores `$tp`). Convention measured, not guessed: two independent toolchains both emit `add.d $r12,$r12,$r2` with TPREL 0/4, so **TP = p_vaddr + bias**. Missing: TCB layout, `R_LARCH_TLS_TPREL64` relocations (17 in the real sample), `set_tid_address`, `initial-exec`/`local-dynamic`/dynamic TLS; only LA64 has a set-tp primitive | static part accepted, see §10; gate = `tools/elf_gate.py` H1/H2/H3 |
+
 ## 7. Reproduction
 
 ```bash
@@ -489,3 +491,102 @@ same `SOURCE_DATE_EPOCH`, `objcopy --strip-debug` and compare sha256 against a H
   `arkrtos_port_fault_detail()`'s `[FRAME]` dump still covers kernel RAM (`0x801...`), so
   an ELF task faulting only prints `mcause/mepc/ra`, not the GPRs. To keep the default
   profile byte-identical this was **not** changed.
+
+---
+
+## 10. PT_TLS: static thread pointer (U-17, 2026-11-20, QEMU run)
+
+### 10.1 What was done
+
+`ARKRTOS_USE_ELF_TLS` (default 0) adds three changes:
+
+1. **measure**: `elf_measure_image()` recognises `p_type == 7` (`ELF_PT_TLS`),
+   validates `filesz <= memsz`, a `p_align` of 0/1/a power of two with
+   `bias+p_vaddr` actually aligned, and refuses a second `PT_TLS`; it records
+   `tls_va = bias + p_vaddr` plus the sizes in `elf_image_t` and pushes the window
+   limit `hi` to `tls_va + memsz` — **`.tbss` usually sits past the last
+   `PT_LOAD`**, so without that push the bytes that must be zeroed are not even
+   declared to be in the window;
+2. **lay down**: `elf_write_tls()` copies `filesz` bytes from the file to
+   `tls_va` after the normal segments (through the 4 KB staging window in the
+   paging tier, a direct read otherwise) and zeroes `memsz - filesz`;
+3. **write TP**: `elf_start_task()` takes a `tp` and, **after** the privilege
+   drop, calls `arkrtos_port_task_set_tp(stack_ptr, tp)`; on LA64 that is
+   `frame[LA_FR_TP] = tp` (`LA_FR_TP = 1`, frame offset 8 bytes = `$r2`). The
+   restore path in `arkrtos_context.S` already had `st.d $tp, $sp, 8` /
+   `ld.d $tp, $s0, 8`, so no assembly changed.
+
+On a non-LoongArch port the switch is a compile-time `#error`, not a no-op (RV32
+was compiled to prove that error fires): `arkrtos_port_stack_init()` zeroes every
+frame slot, so without a set-tp primitive the honest outcome would be "TP=0 while
+claiming TLS support", i.e. a wrong answer.
+
+### 10.2 Convention: TP = PT_TLS.p_vaddr + bias
+
+Not guessed from the psABI but read off two **independent** toolchains (this
+repo's newlib cross gcc and Loongson's 8.3 glibc `loongarch64-linux-gnu-gcc`)
+compiling the same two-variable TLS fixture; both disassemblies are
+
+```
+lu12i.w / ori / lu32i.d / lu52i.d   ; absolute address of the TLS variable
+add.d   $r12, $r12, $r2             ; plus the thread pointer
+```
+
+with offsets **0** (`.tdata`) and **4** (`.tbss`), i.e. **TP points at the start
+of the TLS block** and TPREL is non-negative. That is the static local-exec shape.
+
+**Stated boundary**: this is not glibc's TCB layout (`tcbhead_t`, `dtv`, the self
+pointer, per-module offsets are all defined on glibc's side). "TP points at a TLS
+block" and "glibc starts" are different claims.
+
+### 10.3 Readout
+
+The fixture `example/qemu_loongarch64/elf/tls_main.c` (5008 B, signed) reports
+through its exit code: **9** = `.tdata` template/TP wrong, **10** = `.tbss` not
+zeroed, **11** = `write` return wrong, **3** = both cells pass.
+
+```
+[tls] write /mnt/ram/tls_main rc=0 size=5008
+[tls] exec rc=0
+TLSOK
+[tls] finished after 0 ms, exit code 3
+```
+
+**The fixture must use `volatile`**: the first version did not, `-O1` folded the
+TLS accesses into constants and the linked output had **no `PT_TLS` at all** — a
+fixture that measures nothing while looking green.
+
+### 10.4 Default profile unchanged
+
+| Reading | default (`ARKRTOS_USE_ELF_TLS=0`) | switch on |
+| --- | --- | --- |
+| image text/data/bss | `414208 / 448 / 5112340` | `420272 / 448 / 5112340` (+6064 B) |
+| `arkrtos_elf.o` | `5019 / 4 / 4200` | `5563 / 4 / 4200` (+544) |
+| `arkrtos_port.o` | `11630 / 4 / 1157` | `11678 / 4 / 1157` (+48) |
+| `elf_demo.o` | `22278 / 0 / 4096` | `27830 / 0 / 4096` (+5552, incl. the 5008 B fixture blob) |
+
+The default 414208 is byte-for-byte the value before TLS existed: with the switch
+off, `PT_TLS` is not read at all.
+
+### 10.5 Gate
+
+`tools/elf_gate.py` section H:
+
+* **H1** LA64 with `-DARKRTOS_USE_ELF_TLS=1` must compile both `arkrtos_elf.c`
+  and the la64 port;
+* **H2** RV32 with `-DARKRTOS_USE_ELF=1 -DARKRTOS_USE_ELF_TLS=1` must **fail**,
+  naming `ARKRTOS_USE_ELF_TLS`;
+* **H3** wiring pins: `ELF_PT_TLS (7u)`, `tls_va`, `elf_write_tls(`,
+  `tls_memsz`, `arkrtos_port_task_set_tp(` and `frame[LA_FR_TP] = tp;`, plus one
+  mutation self-check (writing 0 into the frame must make the pin fail).
+
+---
+
+## 11. Boundaries (do not read as more)
+
+1. **Not "a distribution binary runs"**: the real static hello is still stopped by
+   gate 1 — `p_vaddr > 0xFFFFFFFF` is `ERR_LAYOUT`, and both the window split and
+   the port TLB entry are still 32-bit.
+2. **No TCB**, **no `R_LARCH_TLS_TPREL64` relocations**, **no `set_tid_address`**,
+   **no dynamic TLS**. This covers static local-exec only.
+3. Every reading comes from `qemu-system-loongarch64`, **not real hardware**.

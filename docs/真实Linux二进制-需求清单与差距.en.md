@@ -119,8 +119,10 @@ blockers (2, dependency order):
 
 Static is **the closest tier**: no dynamic tags, no relocations, no dependency
 chain — only address and TLS. Since 2026-11-20 its 623 728 B does fit in
-`/mnt/ram` (the volume grew from 512 KiB to 4 MiB, see gate 6), but the loader
-still reports exactly the `[address]` and `[tls]` blockers.
+`/mnt/ram` (the volume grew from 512 KiB to 4 MiB, see gate 6), but the probe
+still reports the `[address]` and `[tls]` blockers. `[tls]` is descriptive:
+with `ARKRTOS_USE_ELF_TLS` on, the loader does lay the TLS segment down (§5.1);
+what still stops this file is `[address]`.
 
 ---
 
@@ -130,10 +132,43 @@ still reports exactly the `[address]` and `[tls]` blockers.
 | --- | --- | --- | --- | --- | --- |
 | 1 | Address space | `[0x120000000, …)` | fixed 2 MB window `[0x02000000, 0x02200000)`; the loader rejects `p_vaddr > 0xFFFFFFFF` as `ERR_LAYOUT` (32-bit ceiling) | load at the VA the ELF asks for: **widen the loader chain to 64-bit addresses first** (checks, window split, the port TLB entry), then per-process space + page tables built at run time | `[address]` |
 | 2 | Interpreter | `PT_INTERP=/lib64/ld.so.1` | default: rejected (`ERR_FORMAT`); with `ARKRTOS_USE_DYNLOAD`: loads this repo's `ld-ark.so` only | the real glibc `ld.so` capability surface (§7) | `[interp-path]` |
-| 3 | TLS | `PT_TLS` (16/144 inherited from libc; 32/96 static) + 17 `R_LARCH_TLS_TPREL64` + `set_tid_address` | `arkrtos_elf.c` **never reads `PT_TLS`** | build the TCB, lay out tdata/tbss, point TP at it | `[tls]` |
+| 3 | TLS | `PT_TLS` (16/144 inherited from libc; 32/96 static) + 17 `R_LARCH_TLS_TPREL64` + `set_tid_address` | default build: `arkrtos_elf.c` **never reads `PT_TLS`**. With `ARKRTOS_USE_ELF_TLS` on it reads the segment, lays down `tdata`, zeroes `tbss` and points `$r2` at it (2026-11-20, static local-exec, see §5.1) | a real libc's TCB layout, `R_LARCH_TLS_TPREL64` relocations, `set_tid_address` semantics | `[tls]` |
 | 4 | Dynamic tags | `INIT_ARRAY`/`FINI_ARRAY`, `GNU_HASH`, `VERSYM`/`VERNEED`/`VERDEF`, `RELACOUNT`, `FLAGS` | `ld-ark.so` handles only `NEEDED/STRTAB/SYMTAB/RELA/RELASZ/RELAENT/STRSZ/SYMENT/JMPREL/HASH` | run constructors, match symbol versions, GNU hash, `DF_1_NOW` | `[dynamic-tags]` |
 | 5 | Relocations | `RELATIVE`, `64`, `JUMP_SLOT`, `IRELATIVE` (IFUNC), `TLS_TPREL64` | only `R_LARCH_64 / RELATIVE / JUMP_SLOT` (both-aligned with `ldso.c` by the gate) | an IFUNC resolver (user code at load time) and TLS relocations | `[relocations]` |
 | 6 | Dependency chain and storage | `libc.so.6` 1 571 208 B; static hello 623 728 B | `/mnt/ram` is a littlefs on a **4 MiB** RAM block device (`ARKRTOS_QEMU_BLK_SIZE = 4 * 1024 * 1024`, raised from 512 KiB on 2026-11-20); flash 2 MB, RAM 8 MB. **Capacity itself is now measured**: a 640 KiB file is written and read back byte-identical at boot | only dependency recursion (`DT_NEEDED` chain) is left | `[needed]` |
+
+### 5.1 TLS path readings (2026-11-20)
+
+This round moves gate 3 from "never reads `PT_TLS`" to "the static TLS path runs
+and has a QEMU readout". It does **not** build a TCB, so it is still not the
+same thing as "a distribution binary runs".
+
+| Item | Reading |
+| --- | --- |
+| Switch | `ARKRTOS_USE_ELF_TLS` (default 0, `depends on ARKRTOS_USE_ELF`; on any non-LoongArch port turning it on is a compile-time `#error`) |
+| Convention | **static local-exec**: `TP = PT_TLS.p_vaddr + bias`, non-negative TPREL |
+| How the convention was established | two independent toolchains (this repo's newlib cross gcc and Loongson's 8.3 glibc `loongarch64-linux-gnu-gcc`) compiled the same two-variable TLS fixture; both disassemblies are `lu12i/ori/lu32i/lu52i + add.d $r12,$r12,$r2` with offsets **0** (`.tdata`) and **4** (`.tbss`) |
+| What the loader does | reads `p_type=7`; validates (`filesz<=memsz`, alignment, a second `PT_TLS` is refused); copies `filesz` bytes into the task space; zeroes `memsz-filesz`; extends `hi` to the TLS end; passes `tls_va` as `tp` to `elf_start_task`, which writes it into the task frame slot `LA_FR_TP` (frame offset 8 = `$r2`) **after** the privilege drop |
+| Fixture | `example/qemu_loongarch64/elf/tls_main.c` -> a signed 5008 B ELF whose exit code carries the verdict: 9 = `.tdata` template/TP wrong, 10 = `.tbss` not zeroed, 11 = `write` return wrong, **3 = both cells pass** |
+| QEMU readout | `[tls] write /mnt/ram/tls_main rc=0 size=5008` / `[tls] exec rc=0` / `TLSOK` on the console / `[tls] finished after 0 ms, exit code 3` |
+| Size (default -> on) | image `414208/448/5112340` -> `420272/448/5112340` (+6064 B text): `arkrtos_elf.o` `5019` -> `5563` (+544), `arkrtos_port.o` `11630` -> `11678` (+48), the rest is the 5008 B fixture blob and the demo prints |
+| Gate | `tools/elf_gate.py` section H: LA64 with the switch on must compile both TUs; RV32 with it on must **fail** and the error must name `ARKRTOS_USE_ELF_TLS` (measured); `ELF_PT_TLS=7` plus the four wiring points (read segment -> copy template -> zero tbss -> write frame) are pinned, with one mutation self-check |
+
+**Why both `__thread` variables in the fixture are `volatile`**: the first version
+was not, `-O1` folded the TLS accesses into constants, and the linked output had
+**no `PT_TLS` at all** — a fixture that measures nothing while looking green.
+
+**What this does not do (do not read it as more)**:
+
+1. **No TCB.** TP points at the TLS block; that is not glibc's TCB layout
+   (`tcbhead_t`, `dtv`, the self pointer, module offsets all live on glibc's side).
+2. **No TLS relocations.** The 17 `R_LARCH_TLS_TPREL64` in the real samples are
+   still unhandled.
+3. **No `set_tid_address` semantics.**
+4. **Static local-exec only.** `initial-exec` / `local-dynamic` and dynamic TLS
+   are untouched.
+5. The probe's `[tls]` tag stays descriptive; what still stops the real static
+   hello is gate 1 (`[address]`).
 
 Two readings to keep straight:
 
@@ -298,7 +333,10 @@ check compiles to 2736 B of text instead of 2792 B. Kernel side 0 B,
    and the instrument, not the capability.
 2. Storage is no longer the blocker (4 MiB volume, 640 KiB round-trip checked),
    yet static hello and `libc.so.6` still do not run: they are stopped by
-   **address** (32-bit VA ceiling in the loader) and **TLS**, not by capacity.
+   **address** (32-bit VA ceiling in the loader). The **static TLS path** was
+   wired on 2026-11-20 (§5.1), but the TCB, TLS relocations and
+   `set_tid_address` are not done, so that gate moved from "never read" to
+   "reads the segment and runs our own fixture" — not to "a real binary starts".
 3. The `[lxstat]` numbers are **synthetic** (11 numbers), not a real profile.
 4. The probe does not parse `PT_NOTE` or `.gnu.attributes` (ABI flags), and the
    `RELRO=True` field is descriptive, not a blocker.
@@ -307,14 +345,18 @@ check compiles to 2736 B of text instead of 2792 B. Kernel side 0 B,
 6. No compatibility testing against a real `ld.so`, and no experiment aimed at
    satisfying glibc's contract (§7 explains why that is not a work item).
 
-**The smallest next step**, if this continues: half of gate 1 — **widen the
-loader chain to 64-bit addresses**. It cannot be skipped: `arkrtos_elf.c`
-currently returns `ERR_LAYOUT` for any `p_vaddr > 0xFFFFFFFF`, and both the
-window split and the port TLB entry (`uint32 va`) are 32-bit, so "move the
-window to 0x120000000" is not even expressible today. Order: checks → window
-split → port window VA and TLB entry → then per-process VA spaces.
+**The smallest next step**, if this continues: **widen the loader chain to
+64-bit addresses**. It cannot be skipped: `arkrtos_elf.c` currently returns
+`ERR_LAYOUT` for any `p_vaddr > 0xFFFFFFFF`, and both the window split and the
+port TLB entry (`uint32 va`) are 32-bit, so "move the window to 0x120000000" is
+not even expressible today. Order: checks -> window split -> port window VA and
+TLB entry -> then per-process VA spaces.
 
-Only after that comes `PT_TLS`: build the TCB, lay out tdata/tbss, point TP at
-it, and add `R_LARCH_TLS_TPREL64` plus `set_tid_address` semantics. Both can be
-pinned by QEMU readouts, and both are shared prerequisites for every later
-tier.
+**Why the order changed (deliberately)**: this paragraph used to say "64-bit
+addresses first, then TLS". This round did the static half of TLS first, because
+the two are independent and TLS does not touch the address model (read one
+segment, copy one template, write one register), so a single QEMU run closes the
+loop; widening the address model touches checks, window split and port at once.
+The state now is: static TLS is done with a readout (§5.1); the remaining
+TCB/dynamic TLS work depends on addresses plus relocations and therefore lines
+up after the 64-bit work.

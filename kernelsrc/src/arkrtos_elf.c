@@ -79,6 +79,7 @@
 #define ELF_MACHINE_RISCV           (243u)
 #define ELF_PT_LOAD                 (1u)
 #define ELF_PT_INTERP               (3u)
+#define ELF_PT_TLS                  (7u)
 #define ELF_TYPE_DYN                (3u)
 
 /* auxv 类型（Linux UAPI）。动态链接器靠这几个数找到主程序的段表与入口。 */
@@ -106,6 +107,13 @@
 #endif
 #endif
 
+/* PT_TLS 目前只在 LoongArch64 上成立：装载器要把 $tp（$r2）写成 TLS 块
+ * 起始地址，而写这个槽的原语只有 la64 端口有。其它端口若被打开这一档，
+ * 必须是编译期拒绝——「读得到 PT_TLS 但没人写 TP」比不支持更难查。 */
+#if (ARKRTOS_USE_ELF_TLS == 1) && !defined(__loongarch__)
+#error "ARKRTOS_USE_ELF_TLS=1 目前只有 LoongArch64 端口实现了 set-tp（$r2）；其它端口必须先补这个原语"
+#endif
+
 /* 解释器路径缓冲：两档都用同一个上限。关档只用来判"有没有 PT_INTERP"，
  * 打开时才是真正的路径。 */
 #define ARKRTOS_ELF_INTERP_PATH_MAX (64u)
@@ -127,6 +135,13 @@ typedef struct
     uint32 segs;        /* PT_LOAD 段数 */
     uint16 phnum;       /* 段表条目数 */
     uint16 phentsize;   /* 每条大小 */
+#if (ARKRTOS_USE_ELF_TLS == 1)
+    /* PT_TLS（静态 TLS 模板）。没有 PT_TLS 时四个字段全 0。 */
+    uint32 tls_va;      /* 模板装入地址 = PT_TLS p_vaddr + bias */
+    uint32 tls_filesz;  /* 模板字节数（tdata） */
+    uint32 tls_memsz;   /* 块总大小（tdata + tbss） */
+    uint32 tls_align;   /* 段声明的对齐 */
+#endif
 } elf_image_t;
 
 /* ---- 字段宽度随 class 变，语义不变 ----
@@ -151,6 +166,7 @@ typedef unsigned long elf_word_t;
 #define ELF_PH_VADDR                (16u)
 #define ELF_PH_FILESZ               (32u)
 #define ELF_PH_MEMSZ                (40u)
+#define ELF_PH_ALIGN                (48u)
 #else
 #define ELF_HOST_64                 (0)
 typedef uint32 elf_word_t;
@@ -165,6 +181,7 @@ typedef uint32 elf_word_t;
 #define ELF_PH_VADDR                (8u)
 #define ELF_PH_FILESZ               (16u)
 #define ELF_PH_MEMSZ                (20u)
+#define ELF_PH_ALIGN                (28u)
 #endif
 
 /* 期望的机器号。32 位的 LoongArch（LA32）是 258 号 + 32 位 class，
@@ -583,6 +600,12 @@ static int32 elf_measure_image(const char *path, elf_word_t phoff,
     uint32 ph_begin = (uint32)phoff;
     uint32 ph_end;
     uint32 i;
+#if (ARKRTOS_USE_ELF_TLS == 1)
+    uint32 tls_va = 0u;
+    uint32 tls_filesz = 0u;
+    uint32 tls_memsz = 0u;
+    uint32 tls_align = 0u;
+#endif
     int32 rc;
 
     if(phnum == 0u)
@@ -598,6 +621,9 @@ static int32 elf_measure_image(const char *path, elf_word_t phoff,
         elf_word_t p_vaddr;
         elf_word_t p_filesz;
         elf_word_t p_memsz;
+#if (ARKRTOS_USE_ELF_TLS == 1)
+        elf_word_t p_align;
+#endif
         uint32 a0;
         uint32 a1;
 
@@ -607,15 +633,71 @@ static int32 elf_measure_image(const char *path, elf_word_t phoff,
         {
             return rc;
         }
-        p_type = (elf_word_t)elf_rd32(phdr + 0);
-        if(p_type != (unsigned long)ELF_PT_LOAD)
-        {
-            continue;
-        }
+        p_type   = (elf_word_t)elf_rd32(phdr + 0);
         p_offset = elf_rdword(phdr + ELF_PH_OFFSET);
         p_vaddr  = elf_rdword(phdr + ELF_PH_VADDR);
         p_filesz = elf_rdword(phdr + ELF_PH_FILESZ);
         p_memsz  = elf_rdword(phdr + ELF_PH_MEMSZ);
+
+#if (ARKRTOS_USE_ELF_TLS == 1)
+        if(p_type == (elf_word_t)ELF_PT_TLS)
+        {
+            /* PT_TLS 的四个字段语义与 PT_LOAD 不同：p_filesz 是模板字节数、
+             * p_memsz 是含 tbss 的整块大小。它**不一定**被某个 PT_LOAD 盖住
+             * （夹具里 .tbss 就在最后一个 LOAD 之外），所以尺寸判据要自己做，
+             * 并且要把 hi 推到 TLS 块末尾，否则区间判据放过的是一段没有
+             * 落位的地址。 */
+            uint32 t = 0u;
+
+            if(p_filesz > p_memsz)
+            {
+                return ARKRTOS_ELF_ERR_LAYOUT;
+            }
+            if((p_vaddr > (elf_word_t)0xFFFFFFFFu) ||
+               ((uint32)p_vaddr > (0xFFFFFFFFu - bias)))
+            {
+                return ARKRTOS_ELF_ERR_LAYOUT;
+            }
+            /* p_align 必须是 0/1 或 2 的幂，且 p_vaddr 真的对齐：错位的 TLS
+             * 块读出来的是别人的字节，而 AP 不会当场报错。 */
+            p_align = elf_rdword(phdr + ELF_PH_ALIGN);
+            t = (uint32)p_align;
+            if(t > 1u)
+            {
+                if((t & (t - 1u)) != 0u)
+                {
+                    return ARKRTOS_ELF_ERR_LAYOUT;
+                }
+                if(((bias + (uint32)p_vaddr) & (t - 1u)) != 0u)
+                {
+                    return ARKRTOS_ELF_ERR_LAYOUT;
+                }
+            }
+            if(tls_memsz != 0u)
+            {
+                /* ELF 只允许一个 PT_TLS；两个就是格式错误，不能挑一个用。 */
+                return ARKRTOS_ELF_ERR_LAYOUT;
+            }
+            tls_va     = bias + (uint32)p_vaddr;
+            if((uint32)p_memsz > (0xFFFFFFFFu - tls_va))
+            {
+                return ARKRTOS_ELF_ERR_LAYOUT;
+            }
+            tls_filesz = (uint32)p_filesz;
+            tls_memsz  = (uint32)p_memsz;
+            tls_align  = t;
+            if((tls_va + tls_memsz) > hi)
+            {
+                hi = tls_va + tls_memsz;
+            }
+            continue;
+        }
+#endif
+
+        if(p_type != (unsigned long)ELF_PT_LOAD)
+        {
+            continue;
+        }
 
         if(p_filesz > p_memsz)
         {
@@ -658,6 +740,13 @@ static int32 elf_measure_image(const char *path, elf_word_t phoff,
         return ARKRTOS_ELF_ERR_FORMAT;
     }
 
+#if (ARKRTOS_USE_ELF_TLS == 1)
+    p_img->tls_va     = tls_va;
+    p_img->tls_filesz = tls_filesz;
+    p_img->tls_memsz  = tls_memsz;
+    p_img->tls_align  = tls_align;
+#endif
+
     p_img->lo        = lo;
     p_img->hi        = hi;
     p_img->entry     = bias + (uint32)entry;
@@ -678,6 +767,87 @@ static int32 elf_check_range(const elf_image_t *p_img, uint32 lo_limit,
     }
     return ARKRTOS_ELF_OK;
 }
+
+#if (ARKRTOS_USE_ELF_TLS == 1)
+/**
+* @brief 把 PT_TLS 模板铺进窗口，并把 tbss 清零
+* @details 只做两件事：把文件里 p_offset 处的 p_filesz 字节搬到 TLS 块的
+*          装入地址（.tdata），再把后面的 p_memsz - p_filesz 字节清零
+*          （.tbss）。刻意不复用 elf_write_image 的 PT_LOAD 循环：TLS 段
+*          **不一定**被某个 PT_LOAD 盖住（夹具里 .tbss 就落在最后一个
+*          LOAD 之后），按 PT_LOAD 处理会漏掉这一段，读到的就是窗口里
+*          上一份内容留下的字节。
+* @return ARKRTOS_ELF_OK / 负错误码（读文件失败时原样透出）
+*/
+static int32 elf_write_tls(const char *path, uint32 space, elf_word_t phoff,
+                           uint16 phnum, uint16 phentsize, uint32 bias)
+{
+    uint8 phdr[ELF_PHDR_SIZE];
+    uint32 i;
+    int32 rc;
+
+    for(i = 0u; i < (uint32)phnum; i++)
+    {
+        elf_word_t p_type;
+        elf_word_t p_offset;
+        elf_word_t p_vaddr;
+        elf_word_t p_filesz;
+        elf_word_t p_memsz;
+        uint8 *dst;
+        uint32 va;
+
+        rc = elf_read_exact(path, phdr, ELF_PHDR_SIZE,
+                            (uint32)phoff + (i * (uint32)phentsize));
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return rc;
+        }
+        p_type = (elf_word_t)elf_rd32(phdr + 0);
+        if(p_type != (elf_word_t)ELF_PT_TLS)
+        {
+            continue;
+        }
+
+        p_offset = elf_rdword(phdr + ELF_PH_OFFSET);
+        p_vaddr  = elf_rdword(phdr + ELF_PH_VADDR);
+        p_filesz = elf_rdword(phdr + ELF_PH_FILESZ);
+        p_memsz  = elf_rdword(phdr + ELF_PH_MEMSZ);
+        va       = bias + (uint32)p_vaddr;
+        dst      = (uint8 *)(unsigned long)va;
+#if (ARKRTOS_USE_PAGING == 1)
+        (void)dst;
+#endif
+
+        if(p_filesz != 0ul)
+        {
+#if (ARKRTOS_USE_PAGING == 1)
+            rc = elf_copy_to_window(space, path, va, (uint32)p_filesz,
+                                    (uint32)p_offset);
+#else
+            rc = elf_read_exact(path, dst, (uint32)p_filesz,
+                                (uint32)p_offset);
+#endif
+            if(rc != ARKRTOS_ELF_OK)
+            {
+                return rc;
+            }
+        }
+        if(p_memsz > p_filesz)
+        {
+#if (ARKRTOS_USE_PAGING == 1)
+            elf_zero_window(space, va + (uint32)p_filesz,
+                            (uint32)(p_memsz - p_filesz));
+#else
+            elf_memzero(dst + (uint32)p_filesz,
+                        (uint32)(p_memsz - p_filesz));
+#endif
+        }
+        return ARKRTOS_ELF_OK;
+    }
+
+    return ARKRTOS_ELF_OK;
+}
+#endif /* ARKRTOS_USE_ELF_TLS */
 
 /* 第二遍：真写。先 filesz 拷数据，再 memsz-filesz 清零（BSS）。
  * 顺序不能反：清零写在拷贝之前会被后面的数据覆盖，写在之后才是对的。 */
@@ -748,6 +918,17 @@ static int32 elf_write_image(const char *path, uint32 space, elf_word_t phoff,
 #endif
         }
     }
+
+#if (ARKRTOS_USE_ELF_TLS == 1)
+    /* 段写完之后再铺 TLS：.tbss 可能在最后一个 LOAD 之外，必须先有段
+     * 内容摆好，再往它后面写零，否则「先清零再贴段」两个顺序都会被
+     * 后面的动作覆盖掉。 */
+    rc = elf_write_tls(path, space, phoff, phnum, phentsize, bias);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return rc;
+    }
+#endif
 
     *p_bytes = bytes;
     return ARKRTOS_ELF_OK;
@@ -905,7 +1086,7 @@ static int32 elf_build_stack(uint32 win_top, uint32 argv_start,
  * 只在这一处做，是因为这四步之间被 tick 切走就会露出半配置状态
  * （5 连跑 2 败的间歇签名，见 §5.25）。返回任务 id 或负错误码。 */
 static int32 elf_start_task(elf_word_t entry, uint32 stack_bottom,
-                            uint32 stack_bytes, uint32 space)
+                            uint32 stack_bytes, uint32 space, uint32 tp)
 {
     uint32 crit;
     int32 id;
@@ -923,6 +1104,21 @@ static int32 elf_start_task(elf_word_t entry, uint32 stack_bottom,
 
     /* 注册出来的任务默认是特权任务；ELF 程序必须降权，否则隔离为空。 */
     arkrtos_task_table[id - 1].is_priv = 0u;
+
+#if (ARKRTOS_USE_ELF_TLS == 1)
+    /* TLS 块已经铺进窗口，但任务第一句代码就可能读 __thread 变量，
+     * 所以 TP 必须在**降权之后、放进就绪集可见之前**这一段里写好：
+     * 帧里的 $tp 槽（偏移 8）是 ertn 时 ld.d 还原的那一格。 */
+    if(tp != 0u)
+    {
+        arkrtos_port_task_set_tp(arkrtos_task_table[id - 1].stack_ptr,
+                                 (unsigned long)tp);
+    }
+#else
+    /* 关档时这个参数不参与任何判据：签名保持不变是为了让两档共用一条
+     * 调用路径，不出现「开档多一个分支」。 */
+    (void)tp;
+#endif
 
     /* 代码窗口 = 数据窗口 = 这一块可执行 RAM，**两个档位都要写回 TCB**：
      *   - 无分页档（RV32 的 PMP）：U 模式任务能碰的只有 TCB 记的这几个
@@ -1123,6 +1319,7 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
 #endif
     uint32 bytes = 0u;
     uint32 segs = 0u;
+    uint32 tp = 0u;
     elf_aux_t aux[ARKRTOS_ELF_AUX_MAX];
     uint32 auxn = 0u;
     elf_image_t img;
@@ -1213,6 +1410,10 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
             /* ET_DYN 但最低段不在 0：装载基址就不是 win_base 了。 */
             return ARKRTOS_ELF_ERR_LAYOUT;
         }
+#if (ARKRTOS_USE_ELF_TLS == 1)
+        /* 主程序的 TLS 块（没有 PT_TLS 时是 0，与以前完全一样）。 */
+        tp = img.tls_va;
+#endif
         rc = elf_check_entry((elf_word_t)img.entry, win_base, stack_bottom);
         if(rc != ARKRTOS_ELF_OK)
         {
@@ -1325,6 +1526,9 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
         {
             return rc;
         }
+#if (ARKRTOS_USE_ELF_TLS == 1)
+        tp = img.tls_va;
+#endif
         rc = elf_write_image(path, space, phoff, phnum, phentsize, 0u, &bytes);
         if(rc != ARKRTOS_ELF_OK)
         {
@@ -1363,7 +1567,7 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
      * 若在这中间被 tick 切走，任务会以半配置状态被切进：跑在 M 模式看到的是
      * 特权，降权后窗口未写回看到的就是 mcause=1 mtval=0x02000000 的取指 fault
      * （5 连跑 2 败的间歇签名）。因此把 注册 → 降权 → MPU 写回 整段做成原子段。 */
-    id = elf_start_task(task_entry, stack_bottom, stack_bytes, space);
+    id = elf_start_task(task_entry, stack_bottom, stack_bytes, space, tp);
     if(id <= 0)
     {
         return id;

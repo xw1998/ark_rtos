@@ -467,6 +467,31 @@ config ARKRTOS_USE_DYNLOAD
 	  (futex, rseq, TLS, file-backed mmap).  See
 	  docs/动态链接与PT_INTERP.md.
 
+config ARKRTOS_USE_ELF_TLS
+	bool "PT_TLS for ELF user tasks (static thread pointer)"
+	depends on ARKRTOS_USE_ELF
+	help
+	  Read PT_TLS out of the loaded image, copy the template (p_filesz
+	  bytes) to its p_vaddr, zero the rest of p_memsz (tbss), and point
+	  the task thread pointer ($r2 on LoongArch64) at the TLS block
+	  before the task first runs.  Without this the loader ignores
+	  PT_TLS entirely, so a program that touches a __thread variable
+	  reads whatever $tp happens to be -- 0 on a freshly built frame.
+
+	  The convention implemented is the one static local-exec linking
+	  actually emits: TPREL offsets are non-negative from the TLS
+	  segment start, so TP = (PT_TLS p_vaddr + load bias).  Measured on
+	  both the in-repo newlib toolchain and the Loongson 8.3 glibc
+	  toolchain (offsets 0 and 4 for tdata/tbss of a two-variable
+	  fixture).  A binary that assumes glibc's TCB layout will not be
+	  served by this alone; a real libc still has to set up its own TCB.
+
+	  LoongArch64 only for now: the set-tp hook lives in the LA64 port
+	  and any other port that turns this on is a #error, not a silent
+	  no-op.  Off (default) means PT_TLS is not even read: the loader,
+	  the port and the image are byte-for-byte what they were before
+	  this option existed.
+
 config ARKRTOS_USE_LINUX_ABI
 	bool "Linux syscall ABI for ELF user tasks"
 	depends on ARKRTOS_USE_ELF

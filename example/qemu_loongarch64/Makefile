@@ -285,6 +285,40 @@ $(LXHELLO_H): $(LXHELLO_SIGNED) example/qemu_loongarch64/elf_blob.py
 	       --output $@ --name ark_example_linux_hello ;
 
 $(BUILD)/example/qemu_loongarch64/elf_demo.o: $(LXHELLO_H)
+
+# ---------------------------------------------------------------------------
+# PT_TLS 示例（tls_main.elf）：装载器读 PT_TLS、把模板铺进窗口、把 $tp 指过去。
+#
+# 和 dynload 一样的做法：只有 EXTRA_CFLAGS 里显式开 ARKRTOS_USE_ELF_TLS=1
+# 才构建这一份夹具，默认档一条命令都不多、镜像里一个字节都不多。
+#
+# 链接基址沿用 hello 的 0x02000000（窗口内），所以它测的只有 TLS 这一道；
+# 地址那道门槛（真实发行版二进制的 0x120000000）仍由探针工具单独报告。
+# ---------------------------------------------------------------------------
+ARK_ELFTLS_ON := $(findstring ARKRTOS_USE_ELF_TLS=1,$(EXTRA_CFLAGS))
+
+ifneq ($(ARK_ELFTLS_ON),)
+TLS_SRC    := example/qemu_loongarch64/elf/tls_main.c
+TLS_ELF    := $(BUILD)/tls_main.elf
+TLS_SIGNED := $(BUILD)/tls_main.signed.elf
+TLS_H      := $(BUILD)/tls_main_blob.h
+
+$(TLS_ELF): $(TLS_SRC)
+	@mkdir -p $(BUILD)
+	$(CC) $(ARCH_FLAGS) -O2 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
+	      -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	      -Wl,-Ttext=0x02000000 -Wl,-e,_start -Wl,--strip-all \
+	      -Wl,-z,max-page-size=4096 -o $@ $< ;
+
+$(TLS_SIGNED): $(TLS_ELF) tools/sign_payload.py
+	python tools/sign_payload.py sign $(TLS_ELF) --out $@ ;
+
+$(TLS_H): $(TLS_SIGNED) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(TLS_SIGNED) \
+	       --output $@ --name ark_example_tls_main ;
+
+$(BUILD)/example/qemu_loongarch64/elf_demo.o: $(TLS_H)
+endif
 # ---------------------------------------------------------------------------
 # Linux 动态链接示例（PT_INTERP + 自研 ld.so）：dynmain / dynmain_exec /
 # libanswer.so / ld-ark.so。

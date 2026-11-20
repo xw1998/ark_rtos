@@ -231,6 +231,7 @@ BLOCKS = [
         ("override", "ARKRTOS_USE_ELF", "bool"),
         ("override", "ARKRTOS_USE_LINUX_ABI", "bool"),
         ("guard", "ARKRTOS_LINUX_ABI_SYSSTAT", "bool"),
+        ("guard", "ARKRTOS_USE_ELF_TLS", "bool"),
         ("override", "ARKRTOS_USE_EXIT_CODE", "bool"),
         ("plain", "ARKRTOS_ELF_WINDOW_BASE", "alias:ARKRTOS_QEMU_APP_BASE"),
         ("plain", "ARKRTOS_ELF_WINDOW_SIZE", "alias:ARKRTOS_QEMU_APP_SIZE"),

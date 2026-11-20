@@ -3150,6 +3150,30 @@ uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void))
     return (uint32)(unsigned long)frame;
 }
 
+#if (ARKRTOS_USE_ELF_TLS == 1)
+/**
+* @brief 把初始栈帧里的 TP（$r2）写成给定值
+* @param stack_ptr arkrtos_port_stack_init() 返回的帧指针
+* @param tp        TLS 块起始地址
+* @details 帧偏移 8 就是上下文里保存 $tp 的那一格（见
+*          arkrtos_context.S 顶上的帧表）；第一次 ertn 进用户态时由
+*          `ld.d $tp, ...` 还原。装载器在 PT_TLS 存在时调用这里，于是
+*          程序第一句就可能读到的 __thread 变量已经是真值。
+*          关档时本函数整段不编译：默认镜像与符号表逐字节不变。
+*/
+void arkrtos_port_task_set_tp(uint32 stack_ptr, unsigned long tp)
+{
+    la_frame_word *frame = (la_frame_word *)(unsigned long)stack_ptr;
+
+    if(frame == 0)
+    {
+        return;
+    }
+
+    frame[LA_FR_TP] = tp;
+}
+#endif /* ARKRTOS_USE_ELF_TLS */
+
 /* ============================================================
  * 定时器层
  * ============================================================ */

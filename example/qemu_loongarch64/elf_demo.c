@@ -26,6 +26,9 @@
 #include "linux_hello_blob.h"
 #include "arkrtos_linux_abi.h"
 #endif
+#if (ARKRTOS_USE_ELF_TLS == 1)
+#include "tls_main_blob.h"
+#endif
 #if (ARKRTOS_USE_EXEC_SIGN == 1)
 #include "hello_bad_blob.h"
 #endif
@@ -42,6 +45,9 @@
 #define DEMO_PATH           "/mnt/ram/hello"
 #if (ARKRTOS_USE_LINUX_ABI == 1)
 #define LX_DEMO_PATH        "/mnt/ram/linux_hello"
+#endif
+#if (ARKRTOS_USE_ELF_TLS == 1)
+#define TLS_DEMO_PATH       "/mnt/ram/tls_main"
 #endif
 #if (ARKRTOS_USE_EXEC_SIGN == 1)
 /* 反例文件：与 hello 同一份内容，只是末尾 tag 的最后一个字节被翻过。 */
@@ -342,6 +348,80 @@ static void task_elf_demo(void)
 
                 demo_lock();
                 demo_puts("[linux] finished after ");
+                demo_putu(waited);
+                demo_puts(" ms, exit code ");
+                #if (ARKRTOS_USE_EXIT_CODE == 1)
+                if((arkrtos_elf_info(&info) == ARKRTOS_ELF_OK) &&
+                   (info.exit_code_set != 0u))
+                {
+                    demo_putu((uint32)info.exit_code);
+                }
+                else
+                {
+                    demo_puts("(not reported)");
+                }
+                #else
+                demo_puts("(exit code channel off)");
+                #endif
+                demo_puts("\n");
+                demo_unlock();
+            }
+        }
+    }
+#endif
+
+#if (ARKRTOS_USE_ELF_TLS == 1) && (ARKRTOS_USE_LINUX_ABI == 1)
+    /* PT_TLS 的现场证据：同一台板、同一条装载路径，换一个带 __thread 变量的
+     * 程序。它自己只用两个 syscall（write 64 / exit 93），所以配 Linux ABI
+     * 档一起跑；两档都在时才有这一行读数。
+     *
+     * 判据是退出码 3：程序读 .tdata（0x5A5A）与写读 .tbss（0x11）都成功。
+     * 这两件事都要求装载器把 $tp 指到 TLS 块起始地址——TP 还是 0 的话，
+     * 第一条 TLS 访问就落在未映射地址上，根本到不了 exit 3。 */
+    {
+        arkrtos_elf_info_t info;
+
+        for(tries = 0u; tries < 100u; tries++)
+        {
+            rc = arkrtos_vfs_write_file(TLS_DEMO_PATH, ark_example_tls_main,
+                                        (uint32)ARK_EXAMPLE_TLS_MAIN_LEN);
+            if(rc >= 0)
+            {
+                break;
+            }
+            arkrtos_task_wait_internal(100u);
+        }
+
+        demo_puts("[tls] write ");
+        demo_puts(TLS_DEMO_PATH);
+        demo_puts(" rc=");
+        demo_putu((uint32)rc);
+        demo_puts(" size=");
+        demo_putu((uint32)ARK_EXAMPLE_TLS_MAIN_LEN);
+        demo_puts("\n");
+
+        if(rc >= 0)
+        {
+            argv[0] = "tls_main";
+            rc = arkrtos_elf_exec(TLS_DEMO_PATH, 1, argv);
+
+            demo_lock();
+            demo_puts("[tls] exec rc=");
+            demo_putu((uint32)rc);
+            demo_puts("\n");
+            demo_unlock();
+
+            if(rc == ARKRTOS_ELF_OK)
+            {
+                waited = 0u;
+                while((arkrtos_elf_running() != 0) && (waited < DEMO_WAIT_MS))
+                {
+                    arkrtos_task_wait_internal(DEMO_POLL_MS);
+                    waited += DEMO_POLL_MS;
+                }
+
+                demo_lock();
+                demo_puts("[tls] finished after ");
                 demo_putu(waited);
                 demo_puts(" ms, exit code ");
                 #if (ARKRTOS_USE_EXIT_CODE == 1)
