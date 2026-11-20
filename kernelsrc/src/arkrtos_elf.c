@@ -776,22 +776,177 @@ static int32 elf_check_range(const elf_image_t *p_img, unsigned long lo_limit,
 }
 
 #if (ARKRTOS_USE_ELF_TLS == 1)
+#define ELF_TLS_SPAN_MAX    (8u)
+
+/** @brief 一段「文件真的带着字节」的地址区间 [lo, hi) */
+typedef struct
+{
+    unsigned long lo;
+    unsigned long hi;
+} elf_span_t;
+
 /**
-* @brief 把 PT_TLS 模板铺进窗口，并把 tbss 清零
-* @details 只做两件事：把文件里 p_offset 处的 p_filesz 字节搬到 TLS 块的
-*          装入地址（.tdata），再把后面的 p_memsz - p_filesz 字节清零
-*          （.tbss）。刻意不复用 elf_write_image 的 PT_LOAD 循环：TLS 段
-*          **不一定**被某个 PT_LOAD 盖住（夹具里 .tbss 就落在最后一个
-*          LOAD 之后），按 PT_LOAD 处理会漏掉这一段，读到的就是窗口里
-*          上一份内容留下的字节。
+* @brief 收集 PT_LOAD 里「文件背书」的那部分地址区间
+* @return 区间条数（>=0）；读段表失败或条数超过 ELF_TLS_SPAN_MAX 时返回 -1
+* @details 「这段字节镜像里已经有了吗」只能按 p_filesz 判，**不能按 p_memsz**：
+*          .tbss 是 NOBITS，它在运行地址上会与后面的 .init_array/.data 重叠
+*          （真实 glibc 静态二进制实测：.tbss 0x120083638+0x50 与 .init_array
+*          同地址）。按 p_memsz 清零就是把构造表抹成 0，程序随后从空指针
+*          call 出去 —— 那正是 2026-11-20 那条 PPI(pc=0) 死循环的根因。
+*/
+static int32 elf_load_file_spans(const char *path, elf_word_t phoff,
+                                 uint16 phnum, uint16 phentsize,
+                                 unsigned long bias, elf_span_t *spans,
+                                 uint32 cap)
+{
+    uint8 phdr[ELF_PHDR_SIZE];
+    uint32 n = 0u;
+    uint32 i;
+
+    for(i = 0u; i < (uint32)phnum; i++)
+    {
+        elf_word_t p_type;
+        elf_word_t p_vaddr;
+        elf_word_t p_filesz;
+
+        if(elf_read_exact(path, phdr, ELF_PHDR_SIZE,
+                          (uint32)phoff + (i * (uint32)phentsize))
+           != ARKRTOS_ELF_OK)
+        {
+            return -1;
+        }
+        p_type = (elf_word_t)elf_rd32(phdr + 0);
+        if(p_type != (unsigned long)ELF_PT_LOAD)
+        {
+            continue;
+        }
+        p_vaddr  = elf_rdword(phdr + ELF_PH_VADDR);
+        p_filesz = elf_rdword(phdr + ELF_PH_FILESZ);
+        if(p_filesz == 0ul)
+        {
+            continue;
+        }
+        if(n >= cap)
+        {
+            return -1;
+        }
+        spans[n].lo = bias + p_vaddr;
+        spans[n].hi = spans[n].lo + p_filesz;
+        n++;
+    }
+
+    return (int32)n;
+}
+
+/**
+* @brief 写（或清零）一段 TLS 字节，跳过镜像里已经文件背书的部分
+* @param zero     1 = 清零；0 = 从文件 file_off 处拷 len 字节
+* @param p_wrote  真写了至少一个字节就置 1（调用方据此决定要不要预置 TP）
+* @details TLS 段可能**半覆盖**：.tdata 在被 LOAD 背书的区段里（那几字节
+*          本来就等于文件内容，重抄一遍是空操作），.tbss 落在最后一个 LOAD
+*          之后（夹具就是这种形态）。所以按「有没有被某个 LOAD 的 file range
+*          盖住」逐段切，被盖住的直接跳过。
+*/
+static int32 elf_write_tls_piece(const char *path, uint32 space,
+                                 const elf_span_t *spans, uint32 n,
+                                 unsigned long va, uint32 len, uint32 file_off,
+                                 uint32 zero, uint32 *p_wrote)
+{
+    unsigned long a = va;
+    unsigned long b = va + (unsigned long)len;
+    int32 rc = ARKRTOS_ELF_OK;
+
+    (void)space;
+    while(a < b)
+    {
+        uint32 i;
+        uint32 covered = 0u;
+        unsigned long stop = b;
+
+        for(i = 0u; i < n; i++)
+        {
+            if((a >= spans[i].lo) && (a < spans[i].hi))
+            {
+                a = (spans[i].hi < b) ? spans[i].hi : b;
+                covered = 1u;
+                break;
+            }
+            if((spans[i].lo > a) && (spans[i].lo < stop))
+            {
+                stop = spans[i].lo;
+            }
+        }
+        if(covered != 0u)
+        {
+            continue;
+        }
+        if(zero != 0u)
+        {
+#if (ARKRTOS_USE_PAGING == 1)
+            elf_zero_window(space, a, (uint32)(stop - a));
+#else
+            elf_memzero((uint8 *)(unsigned long)a, (uint32)(stop - a));
+#endif
+        }
+        else
+        {
+#if (ARKRTOS_USE_PAGING == 1)
+            rc = elf_copy_to_window(space, path, a, (uint32)(stop - a),
+                                    file_off + (uint32)(a - va));
+#else
+            rc = elf_read_exact(path, (uint8 *)(unsigned long)a,
+                                (uint32)(stop - a),
+                                file_off + (uint32)(a - va));
+#endif
+            if(rc != ARKRTOS_ELF_OK)
+            {
+                return rc;
+            }
+        }
+        *p_wrote = 1u;
+        a = stop;
+    }
+
+    return ARKRTOS_ELF_OK;
+}
+
+/**
+* @brief 把 PT_TLS 模板里「镜像还没有」的那部分铺进窗口
+* @details 语义从「整块照抄 + 整块清零」收紧成「只补缺口」：
+*          一个字节如果已经被某个 PT_LOAD 的 file range 背书，就**一个字节
+*          都不动** —— 镜像里那份就是文件里那份。只有落在背书范围之外的
+*          部分（典型是最后一个 LOAD 之后的 .tbss）才清零/补数据。
+*          这样处理的原因是一条实测：真实 glibc 静态二进制的 .tbss 与
+*          .init_array 同地址（.tbss 是 NOBITS，文件里那个位置放的是
+*          .init_array 的字节），旧实现按 p_memsz 清零会把构造表抹成 0，
+*          程序在 __libc_csu_init 里 call 空指针，PLV3 取指 0x0 无限 PPI。
+* @param p_placed 出参：真往窗口写过字节置 1。**只有置 1 时才允许给任务
+*          预置 TP** —— 全程被镜像覆盖意味着那个地址上躺的是别的数据，
+*          TLS 块由程序自己的 C 运行时去建（glibc 就是这么干的）。
 * @return ARKRTOS_ELF_OK / 负错误码（读文件失败时原样透出）
 */
 static int32 elf_write_tls(const char *path, uint32 space, elf_word_t phoff,
-                           uint16 phnum, uint16 phentsize, unsigned long bias)
+                           uint16 phnum, uint16 phentsize, unsigned long bias,
+                           uint32 *p_placed)
 {
     uint8 phdr[ELF_PHDR_SIZE];
+    elf_span_t spans[ELF_TLS_SPAN_MAX];
+    int32 nspan;
     uint32 i;
     int32 rc;
+
+    if(p_placed != 0)
+    {
+        *p_placed = 0u;
+    }
+
+    nspan = elf_load_file_spans(path, phoff, phnum, phentsize, bias,
+                                spans, (uint32)ELF_TLS_SPAN_MAX);
+    if(nspan < 0)
+    {
+        /* 段表判不清就一个字节都不动：宁可 TLS 不生效，也不抹掉镜像内容。 */
+        return ARKRTOS_ELF_OK;
+    }
 
     for(i = 0u; i < (uint32)phnum; i++)
     {
@@ -821,19 +976,13 @@ static int32 elf_write_tls(const char *path, uint32 space, elf_word_t phoff,
         p_memsz  = elf_rdword(phdr + ELF_PH_MEMSZ);
         va       = bias + p_vaddr;
         dst      = (uint8 *)(unsigned long)va;
-#if (ARKRTOS_USE_PAGING == 1)
-        (void)dst;
-#endif
+        (void)dst;   /* 分页档统一走 elf_*_window()，这里只给非分页档留指针 */
 
         if(p_filesz != 0ul)
         {
-#if (ARKRTOS_USE_PAGING == 1)
-            rc = elf_copy_to_window(space, path, va, (uint32)p_filesz,
-                                    (uint32)p_offset);
-#else
-            rc = elf_read_exact(path, dst, (uint32)p_filesz,
-                                (uint32)p_offset);
-#endif
+            rc = elf_write_tls_piece(path, space, spans, (uint32)nspan, va,
+                                     (uint32)p_filesz, (uint32)p_offset, 0u,
+                                     p_placed);
             if(rc != ARKRTOS_ELF_OK)
             {
                 return rc;
@@ -841,13 +990,14 @@ static int32 elf_write_tls(const char *path, uint32 space, elf_word_t phoff,
         }
         if(p_memsz > p_filesz)
         {
-#if (ARKRTOS_USE_PAGING == 1)
-            elf_zero_window(space, va + (uint32)p_filesz,
-                            (uint32)(p_memsz - p_filesz));
-#else
-            elf_memzero(dst + (uint32)p_filesz,
-                        (uint32)(p_memsz - p_filesz));
-#endif
+            rc = elf_write_tls_piece(path, space, spans, (uint32)nspan,
+                                     va + (uint32)p_filesz,
+                                     (uint32)(p_memsz - p_filesz), 0u, 1u,
+                                     p_placed);
+            if(rc != ARKRTOS_ELF_OK)
+            {
+                return rc;
+            }
         }
         return ARKRTOS_ELF_OK;
     }
@@ -860,10 +1010,15 @@ static int32 elf_write_tls(const char *path, uint32 space, elf_word_t phoff,
  * 顺序不能反：清零写在拷贝之前会被后面的数据覆盖，写在之后才是对的。 */
 static int32 elf_write_image(const char *path, uint32 space, elf_word_t phoff,
                              uint16 phnum, uint16 phentsize, unsigned long bias,
-                             uint32 *p_bytes)
+                             uint32 *p_bytes, uint32 *p_tls_placed)
 {
     uint8 phdr[ELF_PHDR_SIZE];
     uint32 bytes = 0u;
+
+    if(p_tls_placed != 0)
+    {
+        *p_tls_placed = 0u;
+    }
     uint32 i;
     int32 rc;
 
@@ -930,7 +1085,8 @@ static int32 elf_write_image(const char *path, uint32 space, elf_word_t phoff,
     /* 段写完之后再铺 TLS：.tbss 可能在最后一个 LOAD 之外，必须先有段
      * 内容摆好，再往它后面写零，否则「先清零再贴段」两个顺序都会被
      * 后面的动作覆盖掉。 */
-    rc = elf_write_tls(path, space, phoff, phnum, phentsize, bias);
+    rc = elf_write_tls(path, space, phoff, phnum, phentsize, bias,
+                       p_tls_placed);
     if(rc != ARKRTOS_ELF_OK)
     {
         return rc;
@@ -1382,6 +1538,7 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
     uint32 bytes = 0u;
     uint32 segs = 0u;
     unsigned long tp = 0u;
+    uint32 tls_placed = 0u;
     elf_aux_t aux[ARKRTOS_ELF_AUX_MAX];
     uint32 auxn = 0u;
     elf_image_t img;
@@ -1472,10 +1629,6 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
             /* ET_DYN 但最低段不在 0：装载基址就不是 win_base 了。 */
             return ARKRTOS_ELF_ERR_LAYOUT;
         }
-#if (ARKRTOS_USE_ELF_TLS == 1)
-        /* 主程序的 TLS 块（没有 PT_TLS 时是 0，与以前完全一样）。 */
-        tp = img.tls_va;
-#endif
         rc = elf_check_entry((elf_word_t)img.entry, win_base, stack_bottom);
         if(rc != ARKRTOS_ELF_OK)
         {
@@ -1488,11 +1641,15 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
             return rc;
         }
         rc = elf_write_image(path, space, phoff, phnum, phentsize, bias,
-                             &bytes);
+                             &bytes, &tls_placed);
         if(rc != ARKRTOS_ELF_OK)
         {
             return rc;
         }
+#if (ARKRTOS_USE_ELF_TLS == 1)
+        /* 同静态档：只有真铺过块，img.tls_va 才是这个任务的 TLS 块地址。 */
+        tp = (tls_placed != 0u) ? img.tls_va : 0u;
+#endif
         segs = img.segs;
 
         /* 解释器：ET_DYN 装到板级基址，ET_EXEC 必须本来就链在那里
@@ -1535,8 +1692,9 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
         }
         {
             uint32 ibytes = 0u;
+            uint32 itls_placed = 0u;
             rc = elf_write_image(interp_path, space, iphoff, iphnum,
-                                 iphentsize, ibias, &ibytes);
+                                 iphentsize, ibias, &ibytes, &itls_placed);
             if(rc != ARKRTOS_ELF_OK)
             {
                 return ARKRTOS_ELF_ERR_INTERP;
@@ -1596,14 +1754,19 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
         {
             return rc;
         }
-#if (ARKRTOS_USE_ELF_TLS == 1)
-        tp = img.tls_va;
-#endif
-        rc = elf_write_image(path, space, phoff, phnum, phentsize, 0u, &bytes);
+        rc = elf_write_image(path, space, phoff, phnum, phentsize, 0u, &bytes,
+                             &tls_placed);
         if(rc != ARKRTOS_ELF_OK)
         {
             return rc;
         }
+#if (ARKRTOS_USE_ELF_TLS == 1)
+        /* 只有装载器真的往窗口里铺过 TLS 字节，那个地址才是「这个任务的
+         * TLS 块」。全程被镜像覆盖时它是别人的数据（真实 glibc 的 .tbss
+         * 就与 .init_array 同址），此时预置 TP 只会让程序读到别人的字节；
+         * 这种程序的 TLS 由它自己的 C 运行时建（glibc: __libc_setup_tls）。 */
+        tp = (tls_placed != 0u) ? img.tls_va : 0u;
+#endif
         segs = img.segs;
         task_entry = img.entry;
 

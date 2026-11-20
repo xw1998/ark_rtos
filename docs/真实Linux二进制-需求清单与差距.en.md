@@ -161,6 +161,16 @@ same thing as "a distribution binary runs".
 | Size (default -> on) | image `414896/448/5112340` -> `420944/448/5112340` (+6048 B text): `arkrtos_elf.o` `5003` -> `5531` (+528), `arkrtos_port.o` `11872` -> `11920` (+48), the rest is the 5008 B fixture blob and the demo prints. The default profile sits 688 B above the earliest 414208 baseline, from the 64-bit address arithmetic and the wide-VA diagnostics |
 | Gate | `tools/elf_gate.py` section H: LA64 with the switch on must compile both TUs; RV32 with it on must **fail** and the error must name `ARKRTOS_USE_ELF_TLS` (measured); `ELF_PT_TLS=7` plus the four wiring points (read segment -> copy template -> zero tbss -> write frame) are pinned, with one mutation self-check |
 
+**Amended 2026-11-20 (readings in §5.4)**: the row above that says "copies
+`filesz` bytes into the task space; zeroes `memsz-filesz`" is **wrong** for a
+real glibc static binary. Its `PT_TLS` `.tbss` is `NOBITS` and shares its address
+with `.init_array` (measured: both at `0x120083638`), so zeroing by `p_memsz`
+erases the constructor table. The rule is now "fill only the gaps": any byte
+already backed by some `PT_LOAD`'s `p_filesz` range is left untouched, and `TP`
+is preset **only when the loader actually wrote bytes** (when the block is fully
+image-backed, that address holds other data and the program's own C runtime owns
+the TLS block).
+
 **Why both `__thread` variables in the fixture are `volatile`**: the first version
 was not, `-O1` folded the TLS accesses into constants, and the linked output had
 **no `PT_TLS` at all** — a fixture that measures nothing while looking green.
@@ -255,6 +265,97 @@ instrument before trusting the instrument**.
    the serial console instead of "embedded into the image" because the 2 MB flash
    window / 512 KB kernel pool geometry cannot hold this binary (see the header of
    `tools/realbin_probe.py`).
+
+---
+
+### 5.4 `__thread` variables in a real glibc static binary (2026-11-20)
+
+The criterion is the one from §5.1: a **real** glibc static program that touches
+a `__thread` variable must read its own copy. Sample:
+`D:/tmp/realbin/tls_real.c` -> `tls_real.elf` (623 800 B, `ta=5 / tb=7 /
+tc[0]='x'`, `return 3` only when all three match). Two `readelf -l` lines:
+
+```
+LOAD  0x07f575 0x0000000120083575  filesz 0x6fdb  memsz 0x85c3  RW  align 0x4000
+TLS   0x07f610 0x0000000120083610  filesz 0x0028  memsz 0x0078  R   align 8
+```
+
+Readings (`WIN_VA=0x120000000`, QEMU, **not silicon**):
+
+| Profile | Reading |
+| --- | --- |
+| `ARKRTOS_USE_ELF_TLS=0` (default) | `tls-real a=5 b=7 c=x` + `[ELF] ... entry 0x00000001200009A0 ... exit code 3` |
+| switch on, **before the fix** | **silent**: not one byte after `exec`, even the `[A]/[B]` heartbeats stop |
+| switch on, **after the fix** | `tls-real a=5 b=7 c=x` + `exit code 3`, byte-identical to the default profile |
+
+**Read the default-profile row honestly**: that profile does not compile the
+`PT_TLS` code at all and the initial frame has `$tp=0`; glibc's own
+`__libc_setup_tls()` sets TP from `AT_PHDR/AT_PHNUM`. So it proves that glibc can
+start when nobody touches TLS — **not** that our TCB path works.
+
+**The hang before the fix**: `-d int -D` produced a 252 MB exception stream. The
+program had already executed several `Syscall`s (`SYS_NUM 214` = brk), then looped
+on `exception: 7 (Page Privilege error)` at `ERA 0x12001e7cc` with
+`enter: pc 0x0000000000000000` — a PLV3 fetch into the PLV0 page at `0x0`, i.e.
+an unbounded PPI loop. `0x12001e7cc` sits in `__init_misc`, right after
+`bl -> 0x120000610` (an IFUNC entry such as `strrchr`): the call went through a
+null pointer.
+
+**The cause is the zeroing, not TP.** `.tbss` is `NOBITS` and its run-time address
+overlaps `.init_array`:
+
+```
+[ 9] .tdata       PROGBITS    0x0000000120083610  off 0x7f610
+[10] .tbss        NOBITS      0x0000000120083638  off 0x7f638
+[11] .init_array  INIT_ARRAY  0x0000000120083638  off 0x7f638
+```
+
+The old code zeroed `0x120083638..0x120083688` (`p_memsz - p_filesz`), which is
+exactly `.init_array`; `__libc_csu_init` then called a null entry. The earlier
+"byte-identity" argument failed here: it only compared the 0x28 `.tdata` bytes
+(which are indeed identical) and never noticed that the 0x50 bytes being zeroed
+sit on a different section.
+
+**Two control runs separated "TP" from "zeroing"** (same binary, one switch at a
+time):
+
+1. `if(tp != 0u)` forced false (no TP write, nothing else changed) -> still hung
+   silently, so **TP was not the cause**.
+2. The built-in `tls_main` fixture disabled as well (without TP it faults and
+   blocks the shell) -> the real binary still hung, so the fixture was irrelevant.
+
+**The fix** (`kernelsrc/src/arkrtos_elf.c`):
+
+| Rule | Criterion |
+| --- | --- |
+| Collect every `PT_LOAD`'s `p_filesz` range first (`elf_load_file_spans()`) | unreadable segment table or more than 8 ranges -> write **nothing** (better no TLS than a damaged image) |
+| Copy `.tdata` and zero `.tbss` segment by segment, skipping image-backed bytes (`elf_write_tls_piece()`) | real glibc binary: block fully covered -> 0 bytes written; fixture: `.tbss` beyond the last LOAD -> only that part is zeroed |
+| Preset `TP` only when bytes were really written (`tls_placed`) | glibc binary gets `tp=0` (its C runtime builds the TCB); the fixture still gets TP and still exits 3 |
+| Gate H3 gained three pins plus one mutation self-check | renaming `elf_write_tls_piece(` turns the gate red (it did, once) |
+
+**Reading after the fix** (switch on, `WIN_VA=0x120000000`):
+
+```
+$ exec /mnt/ram/tlsreal
+tls-real a=5 b=7 c=x
+TASK:4009 task 4 exits (self kill)
+[ELF] /mnt/ram/tlsreal: 543527 B, 2 segment(s), entry 0x00000001200009A0,
+      sp 0x00000001201FC000, argc 1, task 4, space 0
+[ELF] /mnt/ram/tlsreal: finished after 0 ms (space 0, exit code 3)
+```
+
+The built-in fixture still passes in the same profile: `[tls] finished after
+0 ms, exit code 3`.
+
+**What this still does not do (write it down)**:
+
+1. What runs is the **static** `__thread` path, and TP is built by glibc.
+   `ARKRTOS_USE_ELF_TLS` implements the variant-I convention for programs
+   without libc initialisation (`TP = TLS block start`), **not** glibc's
+   `tcbhead_t`/`dtv` layout.
+2. `R_LARCH_TLS_TPREL64` relocations and `set_tid_address` are still absent.
+3. When the `PT_TLS` block is fully image-backed we do **not** build a TLS block
+   for the program; that is its own C runtime's job.
 
 ---
 

@@ -471,12 +471,22 @@ config ARKRTOS_USE_ELF_TLS
 	bool "PT_TLS for ELF user tasks (static thread pointer)"
 	depends on ARKRTOS_USE_ELF
 	help
-	  Read PT_TLS out of the loaded image, copy the template (p_filesz
-	  bytes) to its p_vaddr, zero the rest of p_memsz (tbss), and point
-	  the task thread pointer ($r2 on LoongArch64) at the TLS block
-	  before the task first runs.  Without this the loader ignores
-	  PT_TLS entirely, so a program that touches a __thread variable
-	  reads whatever $tp happens to be -- 0 on a freshly built frame.
+	  Read PT_TLS out of the loaded image and fill in only the bytes the
+	  image does not already contain: a byte backed by some PT_LOAD's
+	  p_filesz range is left untouched, the rest of p_memsz (tbss) is
+	  zeroed, and then the task thread pointer ($r2 on LoongArch64) is
+	  pointed at the TLS block before the task first runs.  The
+	  "image-backed bytes are skipped" rule is not an optimisation: in a
+	  real glibc static binary .tbss is NOBITS and shares its address with
+	  .init_array, so zeroing by p_memsz erases the constructor table and
+	  the program calls a null pointer (measured 2026-11-20).  TP is
+	  preset only when this loader actually wrote something; when the
+	  whole block is image-backed the address holds other data and the
+	  program's own C runtime owns the TLS block (glibc builds its TCB
+	  from AT_PHDR/AT_PHNUM and sets $tp itself).
+	  Without this option the loader ignores PT_TLS entirely, so a
+	  program that touches a __thread variable reads whatever $tp happens
+	  to be -- 0 on a freshly built frame.
 
 	  The convention implemented is the one static local-exec linking
 	  actually emits: TPREL offsets are non-negative from the TLS
@@ -485,6 +495,9 @@ config ARKRTOS_USE_ELF_TLS
 	  toolchain (offsets 0 and 4 for tdata/tbss of a two-variable
 	  fixture).  A binary that assumes glibc's TCB layout will not be
 	  served by this alone; a real libc still has to set up its own TCB.
+	  Measured: with this option on, a real glibc static binary that uses
+	  __thread runs to exit 3 while the loader writes zero TLS bytes and
+	  leaves TP at 0 (docs/真实Linux二进制-需求清单与差距.md section 5.4).
 
 	  LoongArch64 only for now: the set-tp hook lives in the LA64 port
 	  and any other port that turns this on is a #error, not a silent

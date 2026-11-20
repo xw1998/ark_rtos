@@ -192,6 +192,14 @@ glibc rc1.4 / gcc 8.3.0，与发行版同源），**不下载 Alpine/Debian 镜�
 | 体积（默认 → 开档） | 镜像 `414896/448/5112340` → `420944/448/5112340`（+6048 B text）；其中 `arkrtos_elf.o` `5003` → `5531`（+528）、`arkrtos_port.o` `11872` → `11920`（+48），余下是 5008 B 夹具 blob 与演示打印串。默认档比最早的 414208 基线多 688 B，来自 64 位地址运算与宽 VA 诊断 |
 | 门禁 | `tools/elf_gate.py` 新增 H：LA64 开档两个 TU 必须编得过；RV32 开档必须编不过且错误点名 `ARKRTOS_USE_ELF_TLS`（实测命中）；`ELF_PT_TLS=7` 与「读段 → 搬模板 → 清 tbss → 写帧」四段 pin，配一次变异自检 |
 
+**2026-11-20 补的一条（有读数，见 §5.4）**：上表「装载器动作」那行写的
+「把 `filesz` 字节搬进任务空间；`memsz-filesz` 清零」在真实 glibc 静态二进制上是
+**错的**——`PT_TLS` 的 `.tbss` 是 `NOBITS`，它与后面的 `.init_array` **同地址**
+（实测两段都在 `0x120083638`）。照 `p_memsz` 清零等于把构造表抹成 0。现在的规则是
+「只补缺口」：被某个 `PT_LOAD` 的 `p_filesz` 区间背书过的字节**一个都不动**，
+只有落在背书范围之外的部分才补数据/清零；而且**只有装载器真铺过字节时才预置
+`TP`**（全程被镜像覆盖时那个地址上躺的是别人的数据，TLS 块由程序自己的 C 运行时建）。
+
 **为什么夹具里两个 `__thread` 变量都带 `volatile`**：第一版没带，`-O1` 把 TLS
 访问折成了常量，链接产物**连 `PT_TLS` 都不剩**——那是「测了但什么也没测」的假夹具。
 这条与「闸门必须自带防假绿自检」是同一条纪律。
@@ -277,6 +285,87 @@ direct write ok
 5. 上传通道实测 2 151–2 240 B/s，623 760 B 要 278–339 s。走串口而不是「编进镜像」，
    是因为 2 MB Flash 窗口 / 512 KB 内核池的几何硬墙装不下这个二进制（§3 与
    `tools/realbin_probe.py` 文件头）。
+
+---
+
+### 5.4 真实 glibc 静态程序的 `__thread` 变量（2026-11-20）
+
+判据就是 §5.2 那条「一个用到 `__thread` 的真实 glibc 静态程序能读到自己的线程
+变量」。样本 `D:/tmp/realbin/tls_real.c` → `tls_real.elf`（623 800 B，
+`ta=5 / tb=7 / tc[0]='x'`，全对才 `return 3`）。`readelf -l` 的关键两行：
+
+```
+LOAD  0x07f575 0x0000000120083575  filesz 0x6fdb  memsz 0x85c3  RW  align 0x4000
+TLS   0x07f610 0x0000000120083610  filesz 0x0028  memsz 0x0078  R   align 8
+```
+
+读数（`WIN_VA=0x120000000`，QEMU，**不是真机**）：
+
+| 档 | 读数 |
+| --- | --- |
+| `ARKRTOS_USE_ELF_TLS=0`（默认） | `tls-real a=5 b=7 c=x` + `[ELF] ... entry 0x00000001200009A0 ... exit code 3` |
+| 开档，**修之前** | **全静默**：`exec` 之后一字节输出都没有，连 `[A]/[B]` 心跳都停 |
+| 开档，**修之后** | `tls-real a=5 b=7 c=x` + `exit code 3`，与默认档逐字相同 |
+
+**默认档这一行要诚实读**：这一档 `PT_TLS` 代码整段不编译，初始帧 `$tp=0`，
+TP 是 glibc 自己的 `__libc_setup_tls()` 按 `AT_PHDR/AT_PHNUM` 立的
+⇒ **它不证明我们的 TCB 路径在工作**，只证明「不碰 TLS 时 glibc 自己能起来」。
+
+**开档修之前的死循环（现场）**：`-d int -D` 落 252 MB 异常流。崩溃前程序已正常走过
+若干 `Syscall`（`SYS_NUM 214` = brk），随后在 `ERA 0x12001e7cc` 处反复
+`exception: 7 (Page Privilege error)`、`enter: pc 0x0000000000000000`
+——PLV3 取指跑到 `0x0` 的 PLV0 页，无限 PPI。`0x12001e7cc` 在 `__init_misc` 里，
+前一条是 `bl → 0x120000610`（`strrchr` 一类 IFUNC 入口），即**从空指针 call 出去**。
+
+**根因不是 TP，是清零**。`.tbss` 是 `NOBITS`，运行地址与 `.init_array` 重叠：
+
+```
+[ 9] .tdata       PROGBITS    0x0000000120083610  off 0x7f610
+[10] .tbss        NOBITS      0x0000000120083638  off 0x7f638
+[11] .init_array  INIT_ARRAY  0x0000000120083638  off 0x7f638
+```
+
+旧实现按 `p_memsz - p_filesz` 把 `0x120083638..0x120083688` 清零，正好把
+`.init_array` 整张表抹成 0 ⇒ `__libc_csu_init` 从表里 call 空指针。
+**先前那条「字节同一性」的纸面论证就错在这里**：它只比了 `.tdata` 那 0x28 字节
+（确实逐字节相同），没注意要清零的 0x50 字节压在别的节上。
+
+**两次对照实验把「是 TP 还是清零」分开**（同一份二进制，只切一个开关）：
+
+1. `if(tp != 0u)` 改成恒不成立（不写 TP，其余一字不动）→ 仍然静默死循环
+   ⇒ **TP 不是原因**。
+2. 连内置 `tls_main` 夹具也关掉（它不写 TP 就会自己 fault，把 shell 挡住），
+   再跑真实二进制 → 仍然静默 ⇒ 与夹具无关。
+
+**修法与判据**（`kernelsrc/src/arkrtos_elf.c`）：
+
+| 规则 | 判据 |
+| --- | --- |
+| 先收集所有 `PT_LOAD` 的 `p_filesz` 区间（`elf_load_file_spans()`） | 段表读不出或条数 > 8 时**一个字节都不写**（宁可 TLS 不生效，也不抹镜像） |
+| `.tdata` 抄写与 `.tbss` 清零都按「被背书就跳过」逐段切（`elf_write_tls_piece()`） | 真实 glibc 二进制整块被覆盖 ⇒ 写 0 字节；夹具的 `.tbss` 在最后一个 LOAD 之外 ⇒ 只清那一段 |
+| `TP` 只在真铺过字节时预置（`tls_placed`） | glibc 二进制 `tp=0`（TCB 由 glibc 自建）；夹具照旧拿到 TP，退出码仍是 3 |
+| 门禁 H3 加三条 pin + 一条变异自检 | 把 `elf_write_tls_piece(` 改名后 pin 必须变红（实测红过一次） |
+
+**修后同一条路径的读数**（开档，`WIN_VA=0x120000000`）：
+
+```
+$ exec /mnt/ram/tlsreal
+tls-real a=5 b=7 c=x
+TASK:4009 task 4 exits (self kill)
+[ELF] /mnt/ram/tlsreal: 543527 B, 2 segment(s), entry 0x00000001200009A0,
+      sp 0x00000001201FC000, argc 1, task 4, space 0
+[ELF] /mnt/ram/tlsreal: finished after 0 ms (space 0, exit code 3)
+```
+
+同一档的内置夹具仍然过：`[tls] finished after 0 ms, exit code 3`。
+
+**这一节仍然没做的（写死，不许读成别的）**：
+
+1. 跑通的是**静态**档的 `__thread`，且 TP 由 glibc 自建。`ARKRTOS_USE_ELF_TLS`
+   给的是「没有 libc 初始化的小程序」用的 variant I 约定（`TP = TLS 块起点`），
+   **不是** glibc 的 `tcbhead_t`/`dtv` 布局。
+2. `R_LARCH_TLS_TPREL64` 重定位与 `set_tid_address` 仍未做。
+3. `PT_TLS` 块被镜像背书时我们**不**替程序建 TLS 块——那是它自己的 C 运行时的事。
 
 ---
 
@@ -446,7 +535,8 @@ py -3 tools/realbin_gate.py        # 7 项，全过打印 REALBIN-GATE OK
    （2026-11-20，宽窗口档 QEMU 实跑通过）、`EUEN.FPE` + 528 字节帧（§5.3）。
    **真实静态 hello 已在宽窗口里跑完**。仍没做的是：每进程独立 VA 空间与运行期
    建页表、native SVC 参数块（还是 `uint32[]`，宽 VA 下 App 必须走 Linux ABI 传指针）、
-   TCB、`R_LARCH_TLS_TPREL64` 重定位与 `set_tid_address`。
+   glibc 形态的 TCB（`tcbhead_t`/`dtv`）、`R_LARCH_TLS_TPREL64` 重定位与
+   `set_tid_address`。静态 TLS 落位这一道本身已经有读数（§5.4）。
 3. `[lxstat]` 的读数是**合成触发**的 11 个号，不是真实分布（见 §8）。
 4. 探针不解析 `PT_NOTE`、不读 `.gnu.attributes`（ABI 标记）、不判 `RELRO`
    到「能否强制」这一层——`RELRO=True` 只是描述，不构成 blocker。
@@ -463,10 +553,15 @@ py -3 tools/realbin_gate.py        # 7 项，全过打印 REALBIN-GATE OK
 地址取指令——两处根因与反汇编证据见
 [MMU进程模型与ELF装载](MMU进程模型与ELF装载.md) §11。
 
-**下一步的最小一步**：给静态档补 TCB——glibc 的 `tcbhead_t` 布局（自指指针、`dtv`、
-静态 TLS 的模块偏移）与 `set_tid_address` 一起做，判据是「一个用到 `__thread` 的
-**真实** glibc 静态程序能读到自己的线程变量」。再往后才是
-`R_LARCH_TLS_TPREL64` 重定位与动态链接。
+**下一步的最小一步**：原来这条写的是「给静态档补 TCB，判据是一个用到 `__thread` 的
+真实 glibc 静态程序能读到自己的线程变量」——**这个判据 2026-11-20 已经达成**
+（§5.4：`tls-real a=5 b=7 c=x` + `exit code 3`），但达成方式是「glibc 自己立 TCB，
+装载器不碰 TP」，所以它不构成本仓 TCB 的支持证据。下一步因此分成两条，按代价排：
+
+1. **补 `set_tid_address` + `R_LARCH_TLS_TPREL64` 重定位**（中小）：让「程序自己立
+   TCB」这条路径上的号与重定位都收齐，判据仍是既有夹具 + 真实二进制不回归。
+2. **`PT_INTERP` + `ld.so` 动态档**（项目级，需单独立项）：带一套用户态动态装载器
+   与 libc 兼容面，不是补一个缺口（§7 说明为什么不自研 `ld.so` 去配 glibc）。
 
 **顺序说明（与早先版本不同，是有意的）**：这一段原来写的是「先 64 位地址、
 再 TLS」。本轮反了过来，先做 TLS 的静态部分，理由是：两道互不依赖，而 TLS

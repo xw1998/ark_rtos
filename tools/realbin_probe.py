@@ -44,6 +44,7 @@ mmap），要看它自己走到哪一步。工具本身只在上传没走完时�
 
 import argparse
 import os
+import shlex
 import socket
 import subprocess
 import sys
@@ -171,6 +172,10 @@ def run(a):
     argv = [qemu, "-machine", "virt", "-kernel", ELF_NAME,
             "-display", "none", "-monitor", "none",
             "-serial", "tcp:127.0.0.1:%d,server=on,wait=off" % a.port]
+    # 额外参数只为诊断：取证时用 -d int -D <文件> 把异常流落盘，
+    # 平时一个字节都不加（默认空串）。
+    if a.qemu_extra:
+        argv += shlex.split(a.qemu_extra)
     p = subprocess.Popen(argv, cwd=BUILD,
                          stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
     sock = None
@@ -292,6 +297,8 @@ def main():
     ap.add_argument("--chunk-timeout", type=float, default=6.0)
     ap.add_argument("--exec-wait", type=float, default=12.0)
     ap.add_argument("--qemu", default="")
+    ap.add_argument("--qemu-extra", default="",
+                    help="追加给 QEMU 的参数（诊断用，会切词；默认空）")
     a = ap.parse_args()
     if not a.vfs:
         a.vfs = a.vfs_dir.rstrip("/") + "/" + a.name

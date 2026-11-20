@@ -479,6 +479,11 @@ def main():
             ("tls_va", "测量结果没有落到 tls_va（TP 就无从取值）"),
             ("elf_write_tls(", "没有把 TLS 模板搬进任务空间"),
             ("tls_memsz", "tbss 清零没有用到 tls_memsz"),
+            ("elf_load_file_spans(", "TLS 没有先判「镜像里哪些字节是文件背书的」"
+             "（.tbss 与 .init_array 同址时会把构造表清零，程序 call 空指针）"),
+            ("elf_write_tls_piece(", "TLS 没有按「已背书就跳过」分段写"),
+            ("tls_placed", "TP 没有按「装载器真铺过块」决定（全程被镜像覆盖时"
+             "那个地址是别人的数据）"),
             ("arkrtos_port_task_set_tp(", "装载器没有把 TP 写进任务帧"),
         ):
             if name not in elfc:
@@ -494,6 +499,10 @@ def main():
     if not got and not h_pins(text_elfc, text_port64.replace(
             "frame[LA_FR_TP] = tp;", "frame[LA_FR_TP] = 0u;", 1)):
         failures.append("H 自检：把 set_tp 的写帧改坏后 pin 仍然通过（空转）")
+    if not got and not h_pins(
+            text_elfc.replace("elf_write_tls_piece(", "elf_write_tls_raw("),
+            text_port64):
+        failures.append("H 自检：把 TLS 分段写改坏后 pin 仍然通过（空转）")
 
     shutil.rmtree(tmp, ignore_errors=True)
 
