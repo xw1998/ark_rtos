@@ -248,7 +248,7 @@ void arkrtos_board_hardfault_body(void)
     volatile uint32 cfsr  = SCB->CFSR;
     volatile uint32 mmfar = SCB->MMFAR;
     volatile uint32 bfar  = SCB->BFAR;
-    uint32 sp;
+    unsigned long sp;
 
     (void)hfsr; (void)cfsr; (void)mmfar; (void)bfar;
 
@@ -276,7 +276,7 @@ void arkrtos_board_hardfault_body(void)
  * ============================================================ */
 void arkrtos_board_memmanage_body(void)
 {
-    uint32 sp = arkrtos_cpu_fault_handler(ARKRTOS_FAULT_MEMFAULT);
+    unsigned long sp = arkrtos_cpu_fault_handler(ARKRTOS_FAULT_MEMFAULT);
 
     if(sp != 0u)
     {
@@ -289,7 +289,7 @@ void arkrtos_board_memmanage_body(void)
 
 void arkrtos_board_busfault_body(void)
 {
-    uint32 sp = arkrtos_cpu_fault_handler(ARKRTOS_FAULT_BUSFAULT);
+    unsigned long sp = arkrtos_cpu_fault_handler(ARKRTOS_FAULT_BUSFAULT);
 
     if(sp != 0u)
     {
@@ -302,7 +302,7 @@ void arkrtos_board_busfault_body(void)
 
 void arkrtos_board_usgfault_body(void)
 {
-    uint32 sp = arkrtos_cpu_fault_handler(ARKRTOS_FAULT_USGFAULT);
+    unsigned long sp = arkrtos_cpu_fault_handler(ARKRTOS_FAULT_USGFAULT);
 
     if(sp != 0u)
     {

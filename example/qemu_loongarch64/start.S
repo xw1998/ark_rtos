@@ -25,6 +25,18 @@
     .globl  _start
     .align  2
 _start:
+#if (ARKRTOS_USE_FPU == 1)
+    /* EUEN.FPE（bit1）= 1，必须在任何 C 代码之前：内核按 lp64d（硬浮点 ABI）
+     * 编译，理论上任何 C 函数都可能被 gcc 塞进浮点指令，那时 FPE=0 就是
+     * ESTAT.Ecode=15 FPD。t0/t1 在这里还没用过（下一个用 t0 的是 SMP 分流）。
+     * 不开这一位，连 eentry 里存 FPR 的那条 fst.d 自己都会故障（实测：
+     * 第一次任务切换就地落进 INE/FPD 死循环）。 */
+    csrrd   $t0, 0x2
+    ori     $t1, $zero, 0x1
+    or      $t0, $t0, $t1
+    csrwr   $t0, 0x2
+#endif
+
 #if (ARKRTOS_USE_SMP == 1)
     /* 次核停靠：CSR.TID（0x40）是本核硬件号，QEMU 在 cpu reset 里直接填
      * env->CSR_TID = cpu_index（target/loongarch/cpu.c），所以读出来就是

@@ -192,9 +192,18 @@ config ARKRTOS_USE_FPU
 	bool "FPU context switching"
 	default n
 	help
-	  LA64 硬件有 FPU，但这一版没有启用 FPU 上下文保存（任务切换不存
-	  FPR/FCCR）。打开却没有上下文管理，多任务共用浮点寄存器会静默算错，
-	  所以这一档必须是 n。
+	  LA64 硬件有 FPU。打开后做两件事：启动时（start.S 的 _start，早于任何
+	  C 代码）置 EUEN.FPE=1（不开的话第一条 FP 指令就落 ESTAT.Ecode=15
+	  FPD），以及把 trap
+	  帧从 256 字节扩到 528 字节、按任务保存 $f0..$f31（eentry / 就地切换
+	  / resume_task 三处统一存取）。关掉则帧仍是 256 字节、不碰 EUEN，
+	  与打开前逐条指令相同。
+	
+	  已知边界：FCSR（舍入模式与异常标志）和 LSX/LASX 向量寄存器**不**保存。
+	  本工具链 binutils 8.3 不认识 movfcsr2gr/movgr2fcsr（实测 assembler
+	  no match insn），手写编码没有可信验证来源，按「宁可报错也不给不可靠
+	  的东西」不写。发行版基线二进制用不到 LSX，真用到会落 Ecode=13 INE，
+	  是显式故障而不是静默算错。
 
 config ARKRTOS_USE_MPU
 	bool "ARM MPU"

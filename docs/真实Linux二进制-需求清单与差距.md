@@ -8,10 +8,15 @@
 
 ## 1. 一句话结论
 
-**现成发行版二进制现在跑不起来，而且不是「补一个缺口」的差距。** 本轮交付的是
-**清单 + 仪器**：拿 Ark 当前装载器真正支持的东西，去对真实二进制**逐项**算账，
-把「要做什么」按依赖顺序排出来，并且让这张账本可以随时重算、并且有门禁盯着
-（探针自己出错会被判红）。
+**静态链接的发行版二进制已经能跑完（2026-11-20，QEMU 实跑）；动态链接的还不行。**
+后者不是「补一个缺口」的差距。这一页现在是**账本 + 仪器 + 第一份真读数**：清单与
+探针（怎么逐项算账、门禁怎么盯住探针自己）保留原样，新增的 §5.3 是第一次让
+**不是在 Ark 上编的**二进制从装载到退出整段跑完。
+
+跑通的是龙芯 glibc 工具链产出的**静态** `hello`（623 728 B，`printf` + `fflush` +
+`write(1,...)` + `return 3`），读数见 §5.3。**动态链接仍然不可运行**：`PT_INTERP`
+指向的 glibc `ld.so` 需要一整套用户态动态装载器与 libc 兼容面，属项目级工作量
+（§7 说明为什么这条路不立项）。
 
 差别不在体积，在于二进制**向内核要什么**：落在哪个地址、有没有 `PT_TLS`、
 动态段里有没有 `GNU_HASH` / 符号版本 / `INIT_ARRAY`、重定位里有没有 TLS 与
@@ -27,7 +32,7 @@
 | 「真实二进制要什么」的可复算清单 | **已交付** | 探针两份真样本实测，见 §4 |
 | 探针自身不会把坏输入判绿、不会和能力表各说各话 | **已交付** | 门禁 7 项全过，见 §9 |
 | 内核侧「哪些号真的被发出来」的按号直方图 | **已交付（开关默认关）** | QEMU 读数 11 个号，见 §8 |
-| 真实发行版二进制**能跑起来** | **没有** | 六道门槛一道未过，见 §5 |
+| 真实发行版二进制**能跑起来** | **静态档跑通了，动态档没有** | §5.3：glibc 静态 hello 装载→运行→退出整段跑完；动态链接仍无 `ld.so` 兼容面（§7） |
 | 某个具体发行版镜像的完整 syscall 分布 | **没有** | 二进制跑不起来就采不到，见 §8 边界 |
 
 分档口径照旧：**仅编译通过 / QEMU 实跑验证过 / 未验证**。本页所有数字都是
@@ -138,7 +143,7 @@ glibc rc1.4 / gcc 8.3.0，与发行版同源），**不下载 Alpine/Debian 镜�
 
 | # | 门槛 | 真实二进制要什么（实测） | Ark 现在 | 还差什么 | 判据（探针标签） |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 地址空间 | `[0x120000000, 0x120008080)`（动态）/ `[0x120000000, 0x12008bb38)`（静态） | **地址宽度已升到 64 位（2026-11-20）**：判据里不再有 `p_vaddr > 0xFFFFFFFF`，窗口 VA 与物理帧解耦（`make ... WIN_VA=0x120000000` 把窗口基址、内核链接基址与夹具基址一起抬）。宽窗口档 QEMU 实跑 `linux_hello` `PASS` + `exit 7`，无 fatal（见 §11 与 [MMU进程模型与ELF装载](MMU进程模型与ELF装载.md) §11） | 每进程独立 VA 空间 + 运行期建页表；以及**把真实静态 hello 真装进宽窗口跑一遍**（本轮还没有这个读数）；native SVC 参数块仍是 `uint32[]`，宽 VA 下 App 必须走 Linux ABI 传指针 | `[address]` |
+| 1 | 地址空间 | `[0x120000000, 0x120008080)`（动态）/ `[0x120000000, 0x12008bb38)`（静态） | **地址宽度已升到 64 位（2026-11-20）**：判据里不再有 `p_vaddr > 0xFFFFFFFF`，窗口 VA 与物理帧解耦（`make ... WIN_VA=0x120000000` 把窗口基址、内核链接基址与夹具基址一起抬）。宽窗口档 QEMU 实跑 `linux_hello` `PASS` + `exit 7`，无 fatal（见 §11 与 [MMU进程模型与ELF装载](MMU进程模型与ELF装载.md) §11） | 每进程独立 VA 空间 + 运行期建页表（**真实静态 hello 已经真装进宽窗口跑完**，2026-11-20，见 §5.3）；native SVC 参数块仍是 `uint32[]`，宽 VA 下 App 必须走 Linux ABI 传指针 | `[address]` |
 | 2 | 解释器 | `PT_INTERP = /lib64/ld.so.1` | 默认档直接拒（`ERR_FORMAT`）；开 `ARKRTOS_USE_DYNLOAD` 后能装**本仓** `ld-ark.so`（`/mnt/ram/ld-ark.so`） | 真 glibc `ld.so` 的能力面（见 §7） | `[interp-path]` |
 | 3 | TLS | `PT_TLS`（动态继承自 libc：16/144；静态：32/96）+ 17 条 `R_LARCH_TLS_TPREL64` + `set_tid_address` | 默认档 `arkrtos_elf.c` **完全不读 `PT_TLS`**；开着 `ARKRTOS_USE_ELF_TLS` 时读段、铺 `tdata`、清 `tbss`、把 `$r2` 指过去（2026-11-20，静态 local-exec，见 §5.2） | 真 libc 的 TCB 布局、`R_LARCH_TLS_TPREL64` 重定位、`set_tid_address` 语义 | `[tls]` |
 | 4 | 动态段标签 | `INIT_ARRAY`/`FINI_ARRAY`、`GNU_HASH`、`VERSYM`/`VERNEED`/`VERDEF`、`RELACOUNT`、`FLAGS` | `ld-ark.so` 只处理 `NEEDED/STRTAB/SYMTAB/RELA/RELASZ/RELAENT/STRSZ/SYMENT/JMPREL/HASH` 这几项 | 构造函数执行、符号版本匹配、GNU 哈希、`DF_1_NOW` 语义 | `[dynamic-tags]` |
@@ -200,7 +205,78 @@ glibc rc1.4 / gcc 8.3.0，与发行版同源），**不下载 Alpine/Debian 镜�
 3. **没有 `set_tid_address` 语义**（线程指针与 TCB 的自指关系不在这一层）。
 4. **只解决静态 local-exec**。`initial-exec` / `local-dynamic` 与动态 TLS 一字未动。
 5. 探针的 `[tls]` 标签仍是**静态描述**（「这个文件有 `PT_TLS`」），不代表装载器
-   装不了；真正拦住真实静态 hello 的是第 1 道 `[address]`。
+   装不了。这条写的时候第 1 道 `[address]` 还拦着真实静态 hello；到 §5.3 就通了。
+
+### 5.3 真实静态 glibc 二进制装上板跑完（2026-11-20）
+
+这是第一次让**不是在 Ark 上编的**二进制从装载到退出整段跑完。样本是龙芯 glibc
+工具链产出的 `hello_static.elf`：623 728 B，`e_entry=0x12000008E0`，无 `PT_INTERP`、
+无重定位、无 `DT_NEEDED`，`PT_TLS` 32/96。源码在 `D:/tmp/realbin/hello.c`
+（`printf` → `fflush` → `write(1, ...)` → `return 3`）。
+
+读数（QEMU，**不是真机**；上传走 `fs put`）：
+
+```
+$ exec /mnt/ram/realhello
+hello from real loongarch64 linux binary, argc=1
+direct write ok
+[  115.113] <6>TASK:4009 task 4 exits (self kill)
+[ELF] /mnt/ram/realhello: 543511 B, 2 segment(s), entry 0x00000001200008E0,
+      sp 0x00000001201FC000, argc 1, task 4, space 0
+[ELF] /mnt/ram/realhello: finished after 0 ms (space 0, exit code 3)
+```
+
+四件可对账的事，缺一件都不算「跑完」：
+
+| 项 | 为什么它能证明东西 |
+| --- | --- |
+| `hello from ... argc=1` | glibc 的 `printf` 走完了 `stdio` 缓冲 + `write` 到 fd 1；`argc=1` 说明栈上 `argc/argv` 布局与 Linux 约定一致 |
+| `direct write ok` | 直接 `write(1, ...)` 也通，不是「只有 printf 那条路碰巧对」 |
+| `task 4 exits (self kill)` | `exit_group` 走进了内核的 `arkrtos_task_kill_internal()`（`kernelsrc/src/arkrtos_task.c:4008` 那行），是程序自己退出，不是被杀 |
+| `entry 0x00000001200008E0` / `exit code 3` | 前者与 ELF 头 `e_entry` 逐位相同；后者就是源码里的 `return 3` |
+
+`543511 B` 是真正写进窗口的 `p_filesz` 之和，不等于文件大小 623 728 B（后者含
+调试节），两个数不是同一口径。
+
+**为这一刻改掉的三处**（每处都有独立判据，不是「一起改完就好了」）：
+
+| # | 改前现象 | 根因 | 改法 | 判据 |
+| --- | --- | --- | --- | --- |
+| 1 | 任务一降权就 `FPD` 死循环，连 eentry 自己都进不去 | LA64 用户态 FPU 没开（`EUEN.FPE` 是 **bit 0**，不是 bit 1），而内核按 `-mabi=lp64d` 编，任何 C 函数都可能被塞 FP 指令 | `example/qemu_loongarch64/start.S` 的 `_start` 里置 `EUEN.FPE`（必须早于任何 C 代码；板级 `board_init` 那条弱实现被本板 `arkrtos_board.c` 覆盖，是死代码） | QEMU `-d int`：`exception: 15 (Floating Point Disabled)`、`enter: pc 0x24cd98 ERA 0`，随后 `0x24cb44` 反复自陷；反汇编两处都是 `fst.d $f0,$r23,256`。改 bit0 后启动完整 |
+| 2 | 开了 FPU 之后任务切换会串浮点值 | 陷阱帧里没有 FPR（帧只有 32 个 GPR 槽） | 帧 256 → **528**：`LA_FP_SAVE/RESTORE` 各 32 条 `fst.d/fld.d $fN, base, 256+8*N`，eentry / SMP 分流 / 就地切换 / resume 六处；关档定义成空宏，零指令零体积 | 反汇编计数 `fst.d` 64 条（eentry + 就地切换各 32）、`fld.d` 96 条（+resume 32）；`[A]/[B]` 秒表 15 s 全绿 |
+| 3 | 程序在 `PT_TLS` 之前就崩在空指针上 | auxv 只有 `AT_PAGESZ/AT_ENTRY/AT_PHDR/...`，glibc 启动会立刻解引用 `AT_RANDOM` | 补 `AT_RANDOM`（16 B 弱随机区）+ `AT_SECURE/UID/EUID/GID/EGID/CLKTCK/HWCAP/EXECFN`，`ARKRTOS_ELF_AUX_MAX` 20 | 补前 `badv=0x1`；补后消失，程序走到自己的 `main` |
+
+开关是既有的能力层 `ARKRTOS_USE_FPU`（`config/kconfig/board/Kconfig.qemu_loongarch64`
+里 help 重写，`qemu_loongarch64_defconfig` 改 `=y`，板级头**由 `genboard.py` 重生成**，
+不手改——CI 有 `board-config-generated` 一项在盯）。两档体积（同一份源码，只切开关）：
+
+| 档 | 镜像 text | `arkrtos_context.o` | `arkrtos_port.o` |
+| --- | --- | --- | --- |
+| `ARKRTOS_USE_FPU=n` | 415552 | 896 | 11989 |
+| `ARKRTOS_USE_FPU=y` | 416280（+728） | 1536（+640，64 条 `fst.d/fld.d`） | 11989（不变） |
+
+关档时 `LA_FP_SAVE/RESTORE` 展开成空宏，帧回到 256 字节——**多出来的 640 B 全是
+开档才有的指令**，不是「先塞后删」。
+
+**一处必须单列的「错读数」**：`[ELF]` 那行原来用 `0x%08X` 打 `unsigned long`，
+而 `libc_shim.c` 的 `vsnprintf` 把长度修饰 `l` 丢掉、数值分支一律
+`__builtin_va_arg(ap, unsigned int)` ⇒ 真值 `0x12000008E0` 被打成 `0x200008E0`，
+**看上去像装载器把镜像放到了 `0x20000000`**。两处都修了（shell 侧换 `%016lX`
+并按 `unsigned long` 传参；`vsnprintf` 按长度修饰真取宽），同一批夹具随即打出
+`0x0000000120000000`，真实 hello 打出 `0x00000001200008E0`。
+这是「读数本身可以是错的」的现成例子：**先证明仪器，再相信仪器**。
+
+**这一节仍然没做的（写死，不许读成别的东西）**：
+
+1. 只覆盖**静态**档。`PT_INTERP` + glibc `ld.so` 那条路一字未动（§7）。
+2. 没有 TCB（`tcbhead_t` / `dtv` / 自指指针），没有 `R_LARCH_TLS_TPREL64` 重定位，
+   没有 `set_tid_address`。静态 hello 不碰这些，所以它跑通**不证明**这些面能用。
+3. `exit code 3` 是程序自己 `return 3`，不是「退出码通路有 bug」。
+4. FCSR 与 LSX/LASX 向量寄存器**不保存**（工具链 binutils 8.3 不认
+   `movfcsr2gr/movgr2fcsr`，编码未验证就不猜；真用到 LSX 会落 `Ecode=13 INE` 显式故障）。
+5. 上传通道实测 2 151–2 240 B/s，623 760 B 要 278–339 s。走串口而不是「编进镜像」，
+   是因为 2 MB Flash 窗口 / 512 KB 内核池的几何硬墙装不下这个二进制（§3 与
+   `tools/realbin_probe.py` 文件头）。
 
 ---
 
@@ -364,13 +440,13 @@ py -3 tools/realbin_gate.py        # 7 项，全过打印 REALBIN-GATE OK
 
 **本轮明确没有做的：**
 
-1. 真实发行版**跑不起来**（六道门槛一道未过）——本轮交付的是账本与仪器。
-2. 存储已经不是拦路的那一道（4 MiB 卷 + 640 KiB 文件往返核对）；**地址宽度**
-   也已从 32 位升到 64 位（2026-11-20，宽窗口档 QEMU 实跑通过，见下表与 §11），
-   所以「把窗口挪到 `0x120000000`」现在表达得出来了。但**真实静态 hello 还没有
-   装进宽窗口跑过**，每进程 VA 空间与运行期页表也仍没做；native SVC 参数块还是
-   `uint32[]`。TLS 的**静态通路**已在 2026-11-20 打通（§5.2），但 TCB、TLS 重定位
-   与 `set_tid_address` 未做。
+1. **动态链接的**真实发行版二进制仍跑不起来（`PT_INTERP` + glibc `ld.so` 的能力面
+   属项目级工作量）。静态档已经跑通，见 §5.3。
+2. 存储、地址宽度、FPU 上下文这三道都已经通了：4 MiB 卷（§5.1）、64 位地址宽度
+   （2026-11-20，宽窗口档 QEMU 实跑通过）、`EUEN.FPE` + 528 字节帧（§5.3）。
+   **真实静态 hello 已在宽窗口里跑完**。仍没做的是：每进程独立 VA 空间与运行期
+   建页表、native SVC 参数块（还是 `uint32[]`，宽 VA 下 App 必须走 Linux ABI 传指针）、
+   TCB、`R_LARCH_TLS_TPREL64` 重定位与 `set_tid_address`。
 3. `[lxstat]` 的读数是**合成触发**的 11 个号，不是真实分布（见 §8）。
 4. 探针不解析 `PT_NOTE`、不读 `.gnu.attributes`（ABI 标记）、不判 `RELRO`
    到「能否强制」这一层——`RELRO=True` 只是描述，不构成 blocker。
@@ -387,9 +463,10 @@ py -3 tools/realbin_gate.py        # 7 项，全过打印 REALBIN-GATE OK
 地址取指令——两处根因与反汇编证据见
 [MMU进程模型与ELF装载](MMU进程模型与ELF装载.md) §11。
 
-**下一步的最小一步**：把 `D:/tmp/realbin/hello_static.elf`（623 728 B，链在
-`0x120000000`）嵌进镜像，在 `WIN_VA=0x120000000` 档真装真跑，抓 `[elf]` /
-`[linux]` 读数与退出码；预期还会撞 `set_tid_address` / `brk` / TLS(TCB) 这些 ABI 面。
+**下一步的最小一步**：给静态档补 TCB——glibc 的 `tcbhead_t` 布局（自指指针、`dtv`、
+静态 TLS 的模块偏移）与 `set_tid_address` 一起做，判据是「一个用到 `__thread` 的
+**真实** glibc 静态程序能读到自己的线程变量」。再往后才是
+`R_LARCH_TLS_TPREL64` 重定位与动态链接。
 
 **顺序说明（与早先版本不同，是有意的）**：这一段原来写的是「先 64 位地址、
 再 TLS」。本轮反了过来，先做 TLS 的静态部分，理由是：两道互不依赖，而 TLS

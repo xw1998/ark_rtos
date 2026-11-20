@@ -2609,7 +2609,7 @@ void SVC_Server(void *p_svc_ctx)
  * @return 可用于恢复的任务栈指针（非 0 时板级层调用 arkrtos_port_resume_task 完成恢复）；
  *         0 表示不可恢复，板级层应停机等待调试器。
  * ============================================================ */
-uint32 arkrtos_cpu_fault_handler(uint32 fault_type)
+unsigned long arkrtos_cpu_fault_handler(uint32 fault_type)
 {
     if(arkrtos_current_task_id > 0)
     {
@@ -2653,7 +2653,7 @@ uint32 arkrtos_cpu_fault_handler(uint32 fault_type)
             next = 0;                       /* 无就绪任务：退回空闲 */
         }
 
-        return (uint32)arkrtos_sched_activate(next, 0u);
+        return (unsigned long)arkrtos_sched_activate(next, 0u);
     }
 
     /* 内核/中断上下文异常：没有可重启的任务，记录后停机等待调试器接管 */
@@ -2661,7 +2661,7 @@ uint32 arkrtos_cpu_fault_handler(uint32 fault_type)
     return 0u;
 }
 
-uint32 arkrtos_hardfault_handler(void)
+unsigned long arkrtos_hardfault_handler(void)
 {
     return arkrtos_cpu_fault_handler(ARKRTOS_FAULT_HARDFAULT);
 }

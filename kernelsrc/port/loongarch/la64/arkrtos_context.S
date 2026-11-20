@@ -39,6 +39,11 @@
 *
 *          r21 是 psABI 保留寄存器（TLS 用），编译器不分配，因此不进帧。
 *
+*          **帧长不是常量**：上面 256 字节是 GPR/ERA/PRMD 部分，一项不动；
+*          打开 ARKRTOS_USE_FPU 后在其上追加 32 个 FPR（256 + 8*i -> $f{i}），
+*          总长 528。所有「开帧 / 撤帧」的相对计算都走 LA_FRAME_BYTES，
+*          恢复路径靠 ld.d $sp,$s0,16 取栈指针，不依赖帧长常量。
+*
 *          **s0 在帧内被当作帧指针**：它是 callee-saved，跨 C 调用不会被改掉，
 *          所以「保存现场 → 调 C → 从返回的帧指针恢复」这条链不需要额外的
 *          全局变量（RISC-V 版用 tp，理由相同）。C 返回的帧指针可能已经换成
@@ -48,6 +53,98 @@
 *       $fp/$s0~$s8）。si12 偏移上限 +2047，本文件最大偏移 248，安全。
 * @author xw
 */
+
+/* ============================================================
+ * 帧大小与 FPU 存取（编译期；与 arkrtos_port.c 的 LA_FR_SIZE 必须一致）
+ * @details 前 256 字节是 GPR/ERA/PRMD（布局见文件头），一项不动；
+ *          ARKRTOS_USE_FPU=1 时在其上追加 32 个 FPR 的槽：
+ *              256 + 8*i  ->  $f{i}     (i = 0..31)
+ *              512        ->  FCSR 预留（当前不存，见 features/Kconfig 说明）
+ *          总长 528（16 字节对齐）。
+ *          关档时两个宏为空、帧仍是 256 —— 与改动前逐条指令相同。
+ * @note 基址用宏参数而不是固定寄存器：eentry 用 $s0，SMP 与 resume 用 $sp。
+ * ============================================================ */
+#if (ARKRTOS_USE_FPU == 1)
+#define LA_FRAME_BYTES          528
+
+.macro LA_FP_SAVE base
+    fst.d   $f0,  \base, 256
+    fst.d   $f1,  \base, 264
+    fst.d   $f2,  \base, 272
+    fst.d   $f3,  \base, 280
+    fst.d   $f4,  \base, 288
+    fst.d   $f5,  \base, 296
+    fst.d   $f6,  \base, 304
+    fst.d   $f7,  \base, 312
+    fst.d   $f8,  \base, 320
+    fst.d   $f9,  \base, 328
+    fst.d   $f10, \base, 336
+    fst.d   $f11, \base, 344
+    fst.d   $f12, \base, 352
+    fst.d   $f13, \base, 360
+    fst.d   $f14, \base, 368
+    fst.d   $f15, \base, 376
+    fst.d   $f16, \base, 384
+    fst.d   $f17, \base, 392
+    fst.d   $f18, \base, 400
+    fst.d   $f19, \base, 408
+    fst.d   $f20, \base, 416
+    fst.d   $f21, \base, 424
+    fst.d   $f22, \base, 432
+    fst.d   $f23, \base, 440
+    fst.d   $f24, \base, 448
+    fst.d   $f25, \base, 456
+    fst.d   $f26, \base, 464
+    fst.d   $f27, \base, 472
+    fst.d   $f28, \base, 480
+    fst.d   $f29, \base, 488
+    fst.d   $f30, \base, 496
+    fst.d   $f31, \base, 504
+.endm
+
+.macro LA_FP_RESTORE base
+    fld.d   $f0,  \base, 256
+    fld.d   $f1,  \base, 264
+    fld.d   $f2,  \base, 272
+    fld.d   $f3,  \base, 280
+    fld.d   $f4,  \base, 288
+    fld.d   $f5,  \base, 296
+    fld.d   $f6,  \base, 304
+    fld.d   $f7,  \base, 312
+    fld.d   $f8,  \base, 320
+    fld.d   $f9,  \base, 328
+    fld.d   $f10, \base, 336
+    fld.d   $f11, \base, 344
+    fld.d   $f12, \base, 352
+    fld.d   $f13, \base, 360
+    fld.d   $f14, \base, 368
+    fld.d   $f15, \base, 376
+    fld.d   $f16, \base, 384
+    fld.d   $f17, \base, 392
+    fld.d   $f18, \base, 400
+    fld.d   $f19, \base, 408
+    fld.d   $f20, \base, 416
+    fld.d   $f21, \base, 424
+    fld.d   $f22, \base, 432
+    fld.d   $f23, \base, 440
+    fld.d   $f24, \base, 448
+    fld.d   $f25, \base, 456
+    fld.d   $f26, \base, 464
+    fld.d   $f27, \base, 472
+    fld.d   $f28, \base, 480
+    fld.d   $f29, \base, 488
+    fld.d   $f30, \base, 496
+    fld.d   $f31, \base, 504
+.endm
+#else
+#define LA_FRAME_BYTES          256
+
+.macro LA_FP_SAVE base
+.endm
+
+.macro LA_FP_RESTORE base
+.endm
+#endif
 
 /* ============================================================
  * 唯一异常入口
@@ -65,14 +162,14 @@ eentry:
      * 线程可能正拿 t0 当循环指针）。所以先按最终帧大小开 256 字节、把 t0
      * 存进它自己的槽（88），再借 t0 读 CSR.TID；确认是核 0 就把帧撤掉、
      * 原样落回下面的单核路径（指令与关档逐条相同）。 */
-    addi.d  $sp, $sp, -256
+    addi.d  $sp, $sp, -LA_FRAME_BYTES
     st.d    $t0, $sp, 88
     csrrd   $t0, 0x40
     bnez    $t0, la_smp_trap_entry
     ld.d    $t0, $sp, 88
-    addi.d  $sp, $sp, 256
+    addi.d  $sp, $sp, LA_FRAME_BYTES
 #endif
-    addi.d  $sp, $sp, -256
+    addi.d  $sp, $sp, -LA_FRAME_BYTES
     st.d    $ra, $sp, 0
     st.d    $tp, $sp, 8
     /* t0 必须**先于**它被借用作临时寄存器存进帧：下面要用 t0 算「异常
@@ -81,7 +178,7 @@ eentry:
      * 活值放在 t0 里的循环（例如 blk 驱动整卷填 0xFF）会拿着错指针继续
      * 写，一路写到任务栈上。实测就是这样把栈整片写成 0xFF 后停机的。 */
     st.d    $t0, $sp, 88            /* 原始 t0，先存 */
-    addi.d  $t0, $sp, 256
+    addi.d  $t0, $sp, LA_FRAME_BYTES
     st.d    $t0, $sp, 16            /* 帧里的 sp 槽 = 异常发生时的原始 sp */
     st.d    $s0, $sp, 168           /* s0 即将被借用作帧指针，先存原值 */
     move    $s0, $sp                /* s0 = 帧指针 */
@@ -112,6 +209,10 @@ eentry:
     st.d    $s6, $s0, 216
     st.d    $s7, $s0, 224
     st.d    $s8, $s0, 232
+
+    /* FPU：必须在调用任何 C 代码之前存完（C 可能在 fp 寄存器里放活值）。
+     * 关档时是空宏，这一行不产生任何指令。 */
+    LA_FP_SAVE $s0
 
     csrrd   $t0, 0x6                /* ERA */
     st.d    $t0, $s0, 240
@@ -147,6 +248,9 @@ eentry:
     csrwr   $t0, 0x6
     ld.d    $t0, $s0, 248
     csrwr   $t0, 0x1
+
+    /* FPU 必须在 ertn 之前、且 s0 仍当帧指针时恢复。 */
+    LA_FP_RESTORE $s0
 
     ld.d    $ra, $s0, 0
     ld.d    $a0, $s0, 24
@@ -197,7 +301,7 @@ la_smp_trap_entry:
     st.d    $ra, $sp, 0
     st.d    $tp, $sp, 8
     st.d    $t1, $sp, 96
-    addi.d  $t1, $sp, 256
+    addi.d  $t1, $sp, LA_FRAME_BYTES
     st.d    $t1, $sp, 16           /* 帧里的 sp 槽 = 被打断时的原始 sp */
     st.d    $a0, $sp, 24
     st.d    $a1, $sp, 32
@@ -225,6 +329,8 @@ la_smp_trap_entry:
     st.d    $s6, $sp, 216
     st.d    $s7, $sp, 224
     st.d    $s8, $sp, 232
+
+    LA_FP_SAVE $sp
 
     csrrd   $t1, 0x6                /* ERA  */
     st.d    $t1, $sp, 240
@@ -255,6 +361,8 @@ la_smp_trap_entry:
     csrwr   $t1, 0x6
     ld.d    $t1, $sp, 248
     csrwr   $t1, 0x1
+
+    LA_FP_RESTORE $sp
 
     ld.d    $ra, $sp, 0
     ld.d    $a0, $sp, 24
@@ -355,11 +463,11 @@ arkrtos_smp_secondary_entry:
     .globl  arkrtos_port_switch_task_inline
     .align  2
 arkrtos_port_switch_task_inline:
-    addi.d  $sp, $sp, -256
+    addi.d  $sp, $sp, -LA_FRAME_BYTES
     st.d    $ra, $sp, 0
     st.d    $tp, $sp, 8
     st.d    $t0, $sp, 88            /* 原始 t0，理由同 eentry */
-    addi.d  $t0, $sp, 256
+    addi.d  $t0, $sp, LA_FRAME_BYTES
     st.d    $t0, $sp, 16
     st.d    $s0, $sp, 168
     move    $s0, $sp
@@ -390,6 +498,8 @@ arkrtos_port_switch_task_inline:
     st.d    $s6, $s0, 216
     st.d    $s7, $s0, 224
     st.d    $s8, $s0, 232
+
+    LA_FP_SAVE $s0
 
     st.d    $ra, $s0, 240           /* ERA = 本函数的返回地址 */
     /* PRMD 与 CRMD 的低 4 位**位序相同**：PPLV[1:0]、PIE[2]、PWE[3]。
@@ -432,6 +542,8 @@ arkrtos_port_switch_task_inline:
     csrwr   $t0, 0x6
     ld.d    $t0, $s0, 248
     csrwr   $t0, 0x1
+
+    LA_FP_RESTORE $s0
 
     ld.d    $ra, $s0, 0
     ld.d    $a0, $s0, 24
@@ -483,6 +595,8 @@ arkrtos_port_resume_task:
     csrwr   $t0, 0x6
     ld.d    $t0, $s0, 248
     csrwr   $t0, 0x1
+
+    LA_FP_RESTORE $s0
 
     ld.d    $ra, $s0, 0
     ld.d    $a0, $s0, 24

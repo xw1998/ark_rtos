@@ -85,6 +85,7 @@ extern void arkrtos_board_puthex(uint32 val);
  * ============================================================ */
 #define LA_CSR_CRMD         0x0
 #define LA_CSR_PRMD         0x1
+#define LA_CSR_EUEN         0x2         /* bit0 = FPE（浮点使能） */
 #define LA_CSR_ECFG         0x4
 #define LA_CSR_ESTAT        0x5
 #define LA_CSR_ERA          0x6
@@ -161,8 +162,19 @@ extern void arkrtos_board_puthex(uint32 val);
 #define LA_FR_A0            (3u)
 #define LA_FR_ERA           (30u)   /* 偏移 240 */
 #define LA_FR_PRMD          (31u)   /* 偏移 248 */
+
+/* 帧里的 GPR/ERA/PRMD 部分恒为前 32 个字：打印与清帧都只认这个数。
+ * 打开 ARKRTOS_USE_FPU 后帧在其上追加 32 个 FPR（256 + 8*i -> $f{i}），
+ * 布局与 arkrtos_context.S 的 LA_FP_SAVE/LA_FP_RESTORE 一一对应。 */
+#define LA_FR_GPR_WORDS     (32u)
+
+#if (ARKRTOS_USE_FPU == 1)
+#define LA_FR_WORDS         (66u)   /* 528 字节：32 GPR + ERA/PRMD + 32 FPR */
+#define LA_FR_SIZE          (528u)
+#else
 #define LA_FR_WORDS         (32u)   /* 256 字节 */
 #define LA_FR_SIZE          (256u)
+#endif
 
 /* 帧槽是 **8 字节**（LA64 的通用寄存器宽度），所以 C 侧绝不能用 uint32*
  * 去索引：uint32 在 LP64 下是 4 字节，frame[i] 只会走到真实槽位的低半部，
@@ -3528,7 +3540,7 @@ static void la_fatal_dump(la_frame_word *frame)
     arkrtos_board_puts(" frame@");
     arkrtos_board_puthex((uint32)(unsigned long)frame);
     arkrtos_board_puts("\n");
-    for(i = 0u; i < LA_FR_WORDS; i++)
+    for(i = 0u; i < LA_FR_GPR_WORDS; i++)
     {
         if((i & 3u) == 0u)
         {
@@ -3686,7 +3698,7 @@ static void la_fatal_dump(la_frame_word *frame)
 */
 static void la_fault_recover(void)
 {
-    uint32 next = arkrtos_cpu_fault_handler(ARKRTOS_FAULT_MEMFAULT);
+    unsigned long next = arkrtos_cpu_fault_handler(ARKRTOS_FAULT_MEMFAULT);
 
     if(next != 0u)
     {
@@ -3707,6 +3719,8 @@ static void la_fault_recover(void)
     }
 }
 
+static void la_puts_addr64(const char *tag, unsigned long v);
+
 /**
 * @brief 从 eentry 抓到的 App 故障（PPI / IPE / 其它）
 * @param frame eentry 压好的帧（在 App 自己的栈上）
@@ -3723,7 +3737,7 @@ void la_app_fault_c(la_frame_word *frame, uint32 ecode)
     unsigned long badv = 0ul;
     /* 先把要打的东西取成局部量：后面 arkrtos_cpu_fault_handler() 会重建
      * 本任务的整个栈（含这个帧所在的位置），事后再读 frame[...] 就是读垃圾。 */
-    uint32 era_val  = (uint32)frame[LA_FR_ERA];
+    unsigned long era_val = frame[LA_FR_ERA];
     uint32 pplv_val = (uint32)(frame[LA_FR_PRMD] & 3UL);
 
     LA_CSRR(LA_CSR_BADV, badv);
@@ -3748,10 +3762,22 @@ void la_app_fault_c(la_frame_word *frame, uint32 ecode)
     arkrtos_board_puts(") badv=");
     arkrtos_board_puthex((uint32)badv);
     arkrtos_board_puts(" era=");
-    arkrtos_board_puthex(era_val);
+    arkrtos_board_puthex((uint32)era_val);
     arkrtos_board_puts(" plv=");
     arkrtos_board_putu(pplv_val);
     arkrtos_board_puts("\n");
+
+    /* 宽 VA 诊断：puthex 只吃 uint32；高 32 位为 0 时不打，默认档输出不变。 */
+    if((badv >> 32) != 0ul)
+    {
+        la_puts_addr64("[LA64U]   full badv=", badv);
+        arkrtos_board_puts("\n");
+    }
+    if((era_val >> 32) != 0ul)
+    {
+        la_puts_addr64("[LA64U]   full era=", era_val);
+        arkrtos_board_puts("\n");
+    }
 
     la_fault_recover();
 }
@@ -3828,7 +3854,7 @@ void la_refill_c(void)
     s_switch_pending = 0u;
 
     {
-        uint32 next = arkrtos_cpu_fault_handler(ARKRTOS_FAULT_MEMFAULT);
+        unsigned long next = arkrtos_cpu_fault_handler(ARKRTOS_FAULT_MEMFAULT);
 
         if(next != 0u)
         {
@@ -3896,7 +3922,9 @@ static const char *la_ecode_name(uint32 ecode)
         case 8u:  return "ADEM:misalign";
         case 9u:  return "ALE:align";
         case 12u: return "BRK:breakpoint";
+        case 13u: return "INE:insn-not-exist";
         case 14u: return "IPE:privileged-insn";
+        case 15u: return "FPD:fpu-disabled";
         default:  return "other";
     }
 }
@@ -4086,7 +4114,9 @@ la_frame_word *la_smp_trap_c(la_frame_word *frame, uint32 cpu)
  * ============================================================ */
 ARKRTOS_WEAK void arkrtos_port_board_init(void)
 {
-    /* 无 FPU 需要使能，无时钟树需要配置：QEMU virt 起来就是这个状态。 */
+    /* 无 FPU 需要使能，无时钟树需要配置：QEMU virt 起来就是这个状态。
+     * 浮点使能（EUEN.FPE）不在这里做 —— 本板 board.c 覆盖了这个弱实现，
+     * 而且它必须早于任何 C 代码，落点是 example 的 start.S。 */
 }
 
 /**

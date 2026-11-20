@@ -47,10 +47,13 @@ static int shell_exec_file(const char *path, int argc, char *argv[])
 
     if (arkrtos_elf_info_space(space, &info) == 0)
     {
-        ark_shell_printf("\r\n[ELF] %s: %u B, %u segment(s), entry 0x%08X, "
-                         "sp 0x%08X, argc %u, task %d, space %u\r\n",
+        /* entry/sp 是 unsigned long：宽 VA 档的窗口基址在 0x1_2000_0000 以上，
+         * 用 %08X 会把它截成低 32 位（实测真值是 0x1200008E0，打出来却是
+         * 0x200008E0）——读数是假的，不是装载器装错了。这里按原生字宽打。*/
+        ark_shell_printf("\r\n[ELF] %s: %u B, %u segment(s), entry 0x%016lX, "
+                         "sp 0x%016lX, argc %u, task %d, space %u\r\n",
                          path, (unsigned)info.bytes, (unsigned)info.segs,
-                         (unsigned)info.entry, (unsigned)info.sp,
+                         (unsigned long)info.entry, (unsigned long)info.sp,
                          (unsigned)info.argc, (int)info.task, (unsigned)space);
     }
 

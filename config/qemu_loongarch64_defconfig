@@ -39,7 +39,7 @@ ARKRTOS_USE_PAGING_ASID=n
 ARKRTOS_USE_PRIV=y
 
 # ------------------------------------------------------ board capability
-ARKRTOS_USE_FPU=n
+ARKRTOS_USE_FPU=y
 ARKRTOS_USE_MPU=n
 ARKRTOS_MOD_AREA_SIZE=65536
 ARKRTOS_PLATFORM_REBOOT_PORT=y

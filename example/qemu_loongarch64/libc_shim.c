@@ -317,14 +317,20 @@ int vsnprintf(char *buf, unsigned long cap, const char *fmt, rv_va_list ap)
             }
         }
 
-        /* 长度修饰：本实现把 long / long long / size_t 归一成 unsigned long
-         * （ilp32 下都是 32 位），h/hh 也按 32 位处理 —— 由调用方自行截断。 */
+        /* 长度修饰：l / ll / z / t 都归一成"原生字宽"（long 与 size_t 在
+         * 32 位 port 上就是 32 位，在 LA64 上是 64 位），h/hh 仍按 32 位处理
+         * —— 由调用方自行截断。
+         *
+         * 这里曾经把 is_long 丢掉、数值分支一律 __builtin_va_arg(32 位)：
+         * 于是 %016lX 打 64 位地址时只打印低 32 位（实测把窗口内的
+         * 0x1200008E0 打成 0x200008E0，看上去像"装载器装错了地方"），
+         * 而且 va_arg 只前进 4 字节。这类"看起来成功"的读数正是本仓禁止的
+         * 错答案，所以按长度修饰真的取宽。 */
         while((*fmt == 'l') || (*fmt == 'h') || (*fmt == 'z') || (*fmt == 't'))
         {
             if(*fmt == 'l') { is_long = 1; }
             fmt++;
         }
-        (void)is_long;
 
         conv = *fmt;
         if(conv == '\0')
@@ -395,7 +401,8 @@ int vsnprintf(char *buf, unsigned long cap, const char *fmt, rv_va_list ap)
 
             if((conv == 'd') || (conv == 'i'))
             {
-                long sv = (long)__builtin_va_arg(ap, int);
+                long sv = (is_long != 0) ? __builtin_va_arg(ap, long)
+                                        : (long)__builtin_va_arg(ap, int);
                 if(sv < 0)
                 {
                     neg = 1;
@@ -413,7 +420,8 @@ int vsnprintf(char *buf, unsigned long cap, const char *fmt, rv_va_list ap)
             }
             else
             {
-                v = __builtin_va_arg(ap, unsigned int);
+                v = (is_long != 0) ? __builtin_va_arg(ap, unsigned long)
+                                   : (unsigned long)__builtin_va_arg(ap, unsigned int);
                 if(conv == 'x') { base = 16u; }
                 else if(conv == 'X') { base = 16u; upper = 1; }
                 else if(conv == 'o') { base = 8u; }

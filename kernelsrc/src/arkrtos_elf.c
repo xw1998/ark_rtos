@@ -93,8 +93,15 @@
 #define ELF_AT_ENTRY                (9u)
 #define ELF_AT_UID                  (11u)
 #define ELF_AT_EUID                 (12u)
+#define ELF_AT_GID                  (13u)
+#define ELF_AT_EGID                 (14u)
+#define ELF_AT_HWCAP                (16u)
+#define ELF_AT_CLKTCK               (17u)
+#define ELF_AT_SECURE               (23u)
+#define ELF_AT_RANDOM               (25u)
 #define ELF_AT_EXECFN               (31u)
-#define ARKRTOS_ELF_AUX_MAX         (10u)
+#define ARKRTOS_ELF_AUX_MAX         (20u)
+#define ELF_AT_RANDOM_BYTES         (16u)
 
 /* 动态装载（PT_INTERP）是独立开关：关着时下面这些代码整段不编译，
  * 行为与以前逐位一致（PT_INTERP 仍按格式错误拒绝）。 */
@@ -985,6 +992,33 @@ static int32 elf_find_interp(const char *path, elf_word_t phoff, uint16 phnum,
     return 0;
 }
 
+/* ---------------------------------------------------------------- 弱随机 */
+/* AT_RANDOM 要 16 字节。这里没有硬件熵源，也**不声称**密码学安全：
+ * glibc 只用它做栈保护 canary 与哈希种子；如果每次启动都相同，canary
+ * 就退化成常量，等于没有保护。所以至少混进启动后已经过去的 tick 与一个
+ * 自增计数，让两次启动、两次 exec 不产生同一串。
+ *
+ * 边界写死：这是**弱随机**（可预测）。要真随机必须由板级接熵源，
+ * 那属于新特性，不在这里假装。 */
+static uint32 s_elf_rand_seq = 0u;
+
+static void elf_fill_random(uint8 *out, uint32 n)
+{
+    uint32 x = (uint32)(unsigned long)out ^ arkrtos_kernel_tick ^ 0x9E3779B9u;
+    uint32 i;
+
+    s_elf_rand_seq++;
+    x ^= s_elf_rand_seq * 0x85EBCA6Bu;
+    for(i = 0u; i < n; i++)
+    {
+        /* xorshift32：只求「两次不一样」，不求「猜不到」。 */
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        out[i] = (uint8)(x >> 24);
+    }
+}
+
 static void elf_aux_add(elf_aux_t *aux, uint32 *p_n, uint32 type,
                         unsigned long value)
 {
@@ -1007,7 +1041,7 @@ static void elf_aux_add(elf_aux_t *aux, uint32 *p_n, uint32 type,
 */
 static int32 elf_build_stack(unsigned long win_top, unsigned long argv_start,
                              int32 argc, char *argv[],
-                             const elf_aux_t *aux, uint32 auxn,
+                             elf_aux_t *aux, uint32 auxn,
                              unsigned long *p_sp, unsigned long *p_execfn)
 {
     unsigned long str_low = win_top;
@@ -1016,6 +1050,7 @@ static int32 elf_build_stack(unsigned long win_top, unsigned long argv_start,
     uint32 i;
     uint8 *p_array;
     uint32 slot = 0u;
+    unsigned long rand_lo = 0ul;
 
     /* 先放字符串，并把每个字符串的最终地址记下来。
      * 不能事后用「win_top 减长度累加」重算：8 字节对齐会额外下移，
@@ -1035,6 +1070,16 @@ static int32 elf_build_stack(unsigned long win_top, unsigned long argv_start,
         elf_memcpy((uint8 *)(unsigned long)str_low, (const uint8 *)argv[i], n + 1u);
         addrs[i] = str_low;
     }
+
+    /* AT_RANDOM 的 16 字节：字符串之下、数组之上，16 字节对齐。
+     * 不铺它的话 glibc 的 __libc_start_main 会把 NULL 当 _dl_random，
+     * 紧接着 ld.bu [NULL+1] 就是 PPI（2026-11-20 QEMU LA64 实测
+     * badv=0x1 era=0x120000d18）。 */
+    str_low -= (unsigned long)ELF_AT_RANDOM_BYTES;
+    str_low &= ~0xFUL;
+    rand_lo = str_low;
+    elf_fill_random((uint8 *)(unsigned long)rand_lo,
+                    (uint32)ELF_AT_RANDOM_BYTES);
 
     /* 数组：argc + argv[argc] + envp[0] + auxv(2*auxn) + AT_NULL(2)。
      * 按本 class 的字宽算。 */
@@ -1060,9 +1105,20 @@ static int32 elf_build_stack(unsigned long win_top, unsigned long argv_start,
 
     for(i = 0u; i < auxn; i++)
     {
+        unsigned long v = aux[i].value;
+
+        /* 两个值只有到这里才知道：随机区落在哪、argv[0] 的最终地址。
+         * 调用方填 0 占位，这里按类型回填；其它项原样写。 */
+        if(aux[i].type == (uint32)ELF_AT_RANDOM)
+        {
+            v = rand_lo;
+        }
+        else if(aux[i].type == (uint32)ELF_AT_EXECFN)
+        {
+            v = (argc > 0) ? addrs[0] : 0UL;
+        }
         elf_wrword(p_array + (ELF_WORD_SIZE * slot), (elf_word_t)aux[i].type);
-        elf_wrword(p_array + (ELF_WORD_SIZE * (slot + 1u)),
-                   (elf_word_t)aux[i].value);
+        elf_wrword(p_array + (ELF_WORD_SIZE * (slot + 1u)), (elf_word_t)v);
         slot += 2u;
     }
     elf_wrword(p_array + (ELF_WORD_SIZE * slot), 0);            /* AT_NULL */
@@ -1260,7 +1316,7 @@ static int32 elf_check_entry(elf_word_t entry, unsigned long win_base,
 static int32 elf_stack_build(uint32 space, unsigned long win_top,
                              unsigned long argv_start,
                              int32 argc, char *argv[],
-                             const elf_aux_t *aux, uint32 auxn,
+                             elf_aux_t *aux, uint32 auxn,
                              unsigned long *p_sp, unsigned long *p_execfn)
 {
     unsigned long sp = 0u;
@@ -1506,6 +1562,14 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
         elf_aux_add(aux, &auxn, ELF_AT_UID, 0u);
         elf_aux_add(aux, &auxn, ELF_AT_EUID, 0u);
         elf_aux_add(aux, &auxn, ELF_AT_FLAGS, 0u);
+        /* 与静态档同一套（ld.so 也要 AT_RANDOM 做栈保护种子）。 */
+        elf_aux_add(aux, &auxn, ELF_AT_RANDOM, 0u);
+        elf_aux_add(aux, &auxn, ELF_AT_EXECFN, 0u);
+        elf_aux_add(aux, &auxn, ELF_AT_SECURE, 0u);
+        elf_aux_add(aux, &auxn, ELF_AT_GID,    0u);
+        elf_aux_add(aux, &auxn, ELF_AT_EGID,   0u);
+        elf_aux_add(aux, &auxn, ELF_AT_HWCAP,  0u);
+        elf_aux_add(aux, &auxn, ELF_AT_CLKTCK, 100u);
 
         task_entry = interp.entry;
         p_info->dynamic     = 1u;
@@ -1551,6 +1615,19 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
             elf_aux_add(aux, &auxn, ELF_AT_PHENT, (uint32)phentsize);
             elf_aux_add(aux, &auxn, ELF_AT_PHNUM, (uint32)phnum);
         }
+        /* 静态档也要给 glibc 那一套：AT_RANDOM 是它会立刻解引用的，
+         * 缺了就是空指针；AT_SECURE=0 才不会走 setuid 分支；uid/gid
+         * 全 0 与「root 起的程序」一致；AT_CLKTCK=100 是 Linux 惯例。
+         * AT_RANDOM / AT_EXECFN 的值由 elf_build_stack 回填。 */
+        elf_aux_add(aux, &auxn, ELF_AT_RANDOM, 0u);
+        elf_aux_add(aux, &auxn, ELF_AT_EXECFN, 0u);
+        elf_aux_add(aux, &auxn, ELF_AT_SECURE, 0u);
+        elf_aux_add(aux, &auxn, ELF_AT_UID,    0u);
+        elf_aux_add(aux, &auxn, ELF_AT_EUID,   0u);
+        elf_aux_add(aux, &auxn, ELF_AT_GID,    0u);
+        elf_aux_add(aux, &auxn, ELF_AT_EGID,   0u);
+        elf_aux_add(aux, &auxn, ELF_AT_HWCAP,  0u);
+        elf_aux_add(aux, &auxn, ELF_AT_CLKTCK, 100u);
         p_info->dynamic     = 0u;
         p_info->interp_base = 0u;
         p_info->interp_entry = 0u;

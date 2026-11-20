@@ -117,9 +117,10 @@
 
 /* ============================================================
  * 五、能力开关
- * LA64 硬件有 FPU，但这一版没有启用 FPU 上下文保存（任务切换不存
- * FPR/FCCR），所以 FPU 开关必须关掉：打开却没有上下文管理，多任务共用
- * 浮点寄存器会静默算错。
+ * LA64 硬件有 FPU。打开后做两件事：启动时（start.S）置 EUEN.FPE=1（不开就是
+ * PLV3 第一条 FP 指令落 ESTAT.Ecode=15 FPD），以及把 trap 帧 256 → 528
+ * 字节、按任务保存 $f0..$f31（eentry / 就地切换 / resume_task 三处统一
+ * 存取）。FCSR 与 LSX/LASX 仍不保存，理由见 Kconfig 的 help。
  *
  * 特权分离打开：port 里建立静态 TLB 映射并打开 CRMD.PG，内核页 PLV0、
  * App 页 PLV3。MPU 仍然关掉 —— LoongArch 没有 MPU。
@@ -130,7 +131,7 @@
  * #error 拦下。
  * ============================================================ */
 #undef  ARKRTOS_USE_FPU
-#define ARKRTOS_USE_FPU              0
+#define ARKRTOS_USE_FPU              1
 #undef  ARKRTOS_USE_MPU
 #define ARKRTOS_USE_MPU              0
 #undef  ARKRTOS_USE_PAGING

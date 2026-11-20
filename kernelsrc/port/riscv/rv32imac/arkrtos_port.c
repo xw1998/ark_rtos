@@ -197,7 +197,7 @@ uint32 * const rv_fault_stack_top_addr = &rv_fault_stack[ARKRTOS_RV32_FAULT_STAC
 
 void rv_fault_enter(uint32 mcause, uint32 from_priv);
 void arkrtos_port_fault_dispatch(uint32 mcause, uint32 from_priv);
-uint32 arkrtos_cpu_fault_handler(uint32 fault_type);
+unsigned long arkrtos_cpu_fault_handler(uint32 fault_type);
 
 /* ============================================================
  * CSR 小工具
@@ -1515,7 +1515,7 @@ ARKRTOS_WEAK void arkrtos_port_fault_detail(uint32 mcause, uint32 mtval, uint32 
 */
 void arkrtos_port_fault_dispatch(uint32 mcause, uint32 from_priv)
 {
-    uint32 resume_sp;
+    unsigned long resume_sp;
 
     arkrtos_port_fault_detail(mcause, rv_mtval_read(), from_priv);
 

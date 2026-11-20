@@ -9,10 +9,17 @@
 
 ## 1. The one-line conclusion
 
-**A stock distribution binary does not run today, and the gap is not "one more
-missing feature".** What this round delivers is a **ledger plus an instrument**:
-the probe prices a real ELF against what the loader actually supports and prints
-the blockers in dependency order, and a gate keeps that ledger honest.
+**A statically linked distribution binary now runs to completion (2026-11-20, under
+QEMU); a dynamically linked one does not.** The latter is not "one more missing
+feature". This page is now a **ledger + an instrument + a first real readout**: the
+ledger and the probe are unchanged, and the new §5.3 is the first time a binary
+**not built on Ark** went from load to exit in one piece.
+
+What runs is a **static** `hello` from the LoongArch glibc toolchain (623 728 B,
+`printf` + `fflush` + `write(1,...)` + `return 3`); readings are in §5.3.
+**Dynamic linking still does not work**: the glibc `ld.so` behind `PT_INTERP` needs
+a whole user-space dynamic loader plus a libc compatibility surface, which is a
+project-level effort (§7 explains why it is not on the work list).
 
 The difference is not size, it is **what the binary asks the kernel for**: which
 virtual address it wants, whether it has `PT_TLS`, whether its dynamic section
@@ -29,7 +36,7 @@ prints all of it, but `readelf` never tells you which of those Ark cannot do.
 | A recomputable list of "what a real binary needs" | **Delivered** | two real samples, §4 |
 | The probe cannot pass bad input and cannot disagree with `ldso.c` | **Delivered** | 7 gates green, §9 |
 | Per-number syscall histogram (which numbers really get issued) | **Delivered, switch defaults off** | QEMU readout, §8 |
-| A stock distribution binary **actually running** | **No** | none of the six gates is passed, §5 |
+| A stock distribution binary **actually running** | **Static yes, dynamic no** | §5.3: a glibc static hello loads, runs and exits; dynamic linking still has no `ld.so` surface (§7) |
 | The full syscall profile of one distribution image | **No** | cannot be sampled before the binary reaches `main`, §8 |
 
 Evidence grading is unchanged: *compiles only* / *verified under QEMU* /
@@ -130,7 +137,7 @@ what still stops this file is `[address]`.
 
 | # | Gate | What the real binary wants (measured) | Ark today | Missing | Probe tag |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Address space | `[0x120000000, …)` | **address width is 64-bit now (2026-11-20)**: no more `p_vaddr > 0xFFFFFFFF` rule, and the window VA is decoupled from physical frames (`make ... WIN_VA=0x120000000` lifts window base, kernel link base and fixture bases together). The wide-window profile runs `linux_hello` under QEMU: `PASS` + `exit 7`, no fatal (see [MMU进程模型与ELF装载](MMU进程模型与ELF装载.en.md) §11) | per-process VA space and runtime page tables; and **running the real static hello inside the wide window** (no reading for that yet); the native SVC parameter block is still `uint32[]`, so a wide-VA App must pass pointers through the Linux ABI | `[address]` |
+| 1 | Address space | `[0x120000000, …)` | **address width is 64-bit now (2026-11-20)**: no more `p_vaddr > 0xFFFFFFFF` rule, and the window VA is decoupled from physical frames (`make ... WIN_VA=0x120000000` lifts window base, kernel link base and fixture bases together). The wide-window profile runs `linux_hello` under QEMU: `PASS` + `exit 7`, no fatal (see [MMU进程模型与ELF装载](MMU进程模型与ELF装载.en.md) §11) | per-process VA space and runtime page tables (**the real static hello has already run inside the wide window**, 2026-11-20, §5.3); the native SVC parameter block is still `uint32[]`, so a wide-VA App must pass pointers through the Linux ABI | `[address]` |
 | 2 | Interpreter | `PT_INTERP=/lib64/ld.so.1` | default: rejected (`ERR_FORMAT`); with `ARKRTOS_USE_DYNLOAD`: loads this repo's `ld-ark.so` only | the real glibc `ld.so` capability surface (§7) | `[interp-path]` |
 | 3 | TLS | `PT_TLS` (16/144 inherited from libc; 32/96 static) + 17 `R_LARCH_TLS_TPREL64` + `set_tid_address` | default build: `arkrtos_elf.c` **never reads `PT_TLS`**. With `ARKRTOS_USE_ELF_TLS` on it reads the segment, lays down `tdata`, zeroes `tbss` and points `$r2` at it (2026-11-20, static local-exec, see §5.1) | a real libc's TCB layout, `R_LARCH_TLS_TPREL64` relocations, `set_tid_address` semantics | `[tls]` |
 | 4 | Dynamic tags | `INIT_ARRAY`/`FINI_ARRAY`, `GNU_HASH`, `VERSYM`/`VERNEED`/`VERDEF`, `RELACOUNT`, `FLAGS` | `ld-ark.so` handles only `NEEDED/STRTAB/SYMTAB/RELA/RELASZ/RELAENT/STRSZ/SYMENT/JMPREL/HASH` | run constructors, match symbol versions, GNU hash, `DF_1_NOW` | `[dynamic-tags]` |
@@ -177,6 +184,77 @@ Two readings to keep straight:
 - Gate 1 blocks the other five from being measured against a real distribution.
 - Until gate 1 is solved, the other five cannot be sampled on a real binary —
   which is exactly the root cause of the §8 boundary.
+
+### 5.3 A real static glibc binary loads and runs (2026-11-20)
+
+First time a binary **not built on Ark** went from load to exit in one piece. The
+sample is `hello_static.elf` from the LoongArch glibc toolchain: 623 728 B,
+`e_entry=0x12000008E0`, no `PT_INTERP`, no relocations, no `DT_NEEDED`,
+`PT_TLS` 32/96. The source is `D:/tmp/realbin/hello.c` (`printf` -> `fflush` ->
+`write(1, ...)` -> `return 3`).
+
+Readings (QEMU, **not silicon**; the image is uploaded with `fs put`):
+
+```
+$ exec /mnt/ram/realhello
+hello from real loongarch64 linux binary, argc=1
+direct write ok
+[  115.113] <6>TASK:4009 task 4 exits (self kill)
+[ELF] /mnt/ram/realhello: 543511 B, 2 segment(s), entry 0x00000001200008E0,
+      sp 0x00000001201FC000, argc 1, task 4, space 0
+[ELF] /mnt/ram/realhello: finished after 0 ms (space 0, exit code 3)
+```
+
+Four things have to line up before this counts as "ran":
+
+| Item | Why it proves something |
+| --- | --- |
+| `hello from ... argc=1` | glibc's `printf` went through the `stdio` buffer and `write` to fd 1; `argc=1` shows the on-stack `argc/argv` layout matches the Linux convention |
+| `direct write ok` | the direct `write(1, ...)` path works too, not just whatever `printf` happened to hit |
+| `task 4 exits (self kill)` | `exit_group` reached the kernel's `arkrtos_task_kill_internal()` (`kernelsrc/src/arkrtos_task.c:4008`) — the program exited itself, it was not killed |
+| `entry 0x00000001200008E0` / `exit code 3` | the former is bit-for-bit the ELF header's `e_entry`; the latter is the `return 3` in the source |
+
+`543511 B` is the sum of the `p_filesz` bytes actually written into the window, not
+the 623 728 B file size (which includes debug sections); the two are different
+measures on purpose.
+
+**Three changes that made this possible** (each with its own evidence):
+
+| # | Symptom before | Root cause | Fix | Evidence |
+| --- | --- | --- | --- | --- |
+| 1 | the task trapped in an `FPD` loop as soon as it dropped privilege, before eentry could even run | user-mode FPU was off on LA64 (`EUEN.FPE` is **bit 0**, not bit 1), and the kernel is compiled `-mabi=lp64d`, so any C function may contain FP instructions | set `EUEN.FPE` in `_start` of `example/qemu_loongarch64/start.S` (must be before any C code; the weak `board_init` hook in port.c is overridden by this board's `arkrtos_board.c` and is dead code) | QEMU `-d int`: `exception: 15 (Floating Point Disabled)`, `enter: pc 0x24cd98 ERA 0`, then `0x24cb44` trapping repeatedly; both disassemble to `fst.d $f0,$r23,256`. With bit 0 the boot completes |
+| 2 | with the FPU on, task switches leaked float state | the trap frame had no FPR slots (only 32 GPRs) | frame 256 -> **528**: `LA_FP_SAVE/RESTORE` with 32 `fst.d/fld.d $fN, base, 256+8*N` each, wired at eentry / SMP split / in-place switch / resume; the off build defines them as empty macros, zero instructions | disassembly counts: 64 `fst.d` (eentry + in-place switch, 32 each), 96 `fld.d` (+32 in resume); the `[A]/[B]` stopwatch stays green for 15 s |
+| 3 | the program died on a null pointer before reaching `PT_TLS` | auxv carried only `AT_PAGESZ/AT_ENTRY/AT_PHDR/...`; glibc dereferences `AT_RANDOM` immediately | add `AT_RANDOM` (16 B weak-random block) plus `AT_SECURE/UID/EUID/GID/EGID/CLKTCK/HWCAP/EXECFN`, `ARKRTOS_ELF_AUX_MAX` 20 | before: `badv=0x1`; after: gone, the program reaches its own `main` |
+
+The switch is the existing capability-layer `ARKRTOS_USE_FPU` (help text rewritten in
+`config/kconfig/board/Kconfig.qemu_loongarch64`, `qemu_loongarch64_defconfig` set to
+`=y`, and the board header **regenerated by `genboard.py`** rather than hand-edited —
+CI has a `board-config-generated` item watching it).
+
+**One wrong reading that deserves its own paragraph**: the `[ELF]` line used to print
+`unsigned long` with `0x%08X`, and `libc_shim.c`'s `vsnprintf` dropped the `l` length
+modifier and always did `__builtin_va_arg(ap, unsigned int)` — so the real
+`0x12000008E0` came out as `0x200008E0`, which **looks like the loader put the image
+at `0x20000000`**. Both were fixed (the shell side now uses `%016lX` and passes
+`unsigned long`; `vsnprintf` honours the length modifier). The same fixtures then
+print `0x0000000120000000`, and the real hello prints `0x00000001200008E0`.
+This is the standing example of "the reading itself can be wrong": **prove the
+instrument before trusting the instrument**.
+
+**What this does not cover** (do not read it as more):
+
+1. Only the **static** path. `PT_INTERP` + glibc `ld.so` is untouched (§7).
+2. No TCB (`tcbhead_t` / `dtv` / self pointer), no `R_LARCH_TLS_TPREL64` relocations,
+   no `set_tid_address`. The static hello touches none of them, so it running does
+   **not** prove those work.
+3. `exit code 3` is the program's own `return 3`, not a broken exit path.
+4. FCSR and LSX/LASX vector registers are **not saved** (binutils 8.3 does not
+   assemble `movfcsr2gr/movgr2fcsr`, and unverified encodings are not guessed; a real
+   LSX instruction would raise an explicit `Ecode=13 INE`).
+5. The upload path measures 2 151-2 240 B/s, so 623 760 B takes 278-339 s. It goes over
+   the serial console instead of "embedded into the image" because the 2 MB flash
+   window / 512 KB kernel pool geometry cannot hold this binary (see the header of
+   `tools/realbin_probe.py`).
 
 ---
 
@@ -329,15 +407,14 @@ check compiles to 2736 B of text instead of 2792 B. Kernel side 0 B,
 
 ## 10. Boundaries and what is not done
 
-1. Stock distribution binaries **do not run** — this round delivers the ledger
-   and the instrument, not the capability.
-2. Storage is no longer the blocker (4 MiB volume, 640 KiB round-trip checked) and
-   the **address width** is 64-bit now (2026-11-20, the wide-window profile runs
-   under QEMU), so "move the window to 0x120000000" is expressible. But the **real
-   static hello has not been loaded into the wide window yet**, per-process VA spaces
-   and runtime page tables are still missing, and the native SVC parameter block is
-   still `uint32[]`. The **static TLS path** was wired on 2026-11-20 (§5.1), but the
-   TCB, TLS relocations and `set_tid_address` are not done.
+1. **Dynamically linked** stock binaries still do not run (`PT_INTERP` + glibc
+   `ld.so` is a project-level effort). The static path runs, see §5.3.
+2. Storage, address width and FPU context are all passed now: 4 MiB volume (§5.1 in
+   the Chinese page), 64-bit address width (2026-11-20), `EUEN.FPE` + a 528-byte
+   frame (§5.3). **The real static hello has run inside the wide window.** Still
+   missing: per-process VA spaces and runtime page tables, the native SVC parameter
+   block (still `uint32[]`), the TCB, `R_LARCH_TLS_TPREL64` relocations and
+   `set_tid_address`.
 3. The `[lxstat]` numbers are **synthetic** (11 numbers), not a real profile.
 4. The probe does not parse `PT_NOTE` or `.gnu.attributes` (ABI flags), and the
    `RELRO=True` field is descriptive, not a blocker.
@@ -355,10 +432,11 @@ and `uint32 pc = frame[LA_FR_ERA]` in the port fetched the instruction from a
 truncated ERA; both root causes and the disassembly evidence are in
 [MMU进程模型与ELF装载](MMU进程模型与ELF装载.en.md) §11.
 
-**The new smallest next step**: embed `D:/tmp/realbin/hello_static.elf` (623 728 B,
-linked at `0x120000000`) into the image and really load and run it in the
-`WIN_VA=0x120000000` profile, capturing the `[elf]` / `[linux]` readings and the exit
-code; expect to hit `set_tid_address`, `brk` and TLS(TCB) next.
+**The new smallest next step**: give the static path a TCB — glibc's `tcbhead_t`
+layout (self pointer, `dtv`, static-TLS module offsets) together with
+`set_tid_address`; the criterion is "a **real** glibc static program that uses
+`__thread` can read its own thread variables". `R_LARCH_TLS_TPREL64` relocations and
+dynamic linking come after that.
 
 **Why the order changed (deliberately)**: this paragraph used to say "64-bit
 addresses first, then TLS". This round did the static half of TLS first, because
