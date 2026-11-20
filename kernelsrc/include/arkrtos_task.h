@@ -46,17 +46,21 @@ void SVC_Server(void *p_svc_ctx);
 *          保存其 PSP，切回时据此恢复现场；mpu 是该任务的 MPU 区域快照。
 */
 typedef struct {
-    uint32 ram_start;
+    /* 地址字段用 unsigned long：32 位端口上它就是 uint32（逐字节不变），
+     * LA64 上才装得下 32 位以上的窗口 VA（真实发行版静态二进制按
+     * 0x120000000 链接）。size 仍然是 uint32 —— 2 MB 窗口塞不进别的类型
+     * 才是问题。 */
+    unsigned long ram_start;
     uint32 ram_size;
     uint32 stack_size;
-    uint32 rom_start;
+    unsigned long rom_start;
     uint32 rom_size;
     int32  period;
     uint8  priority;                                /* 当前有效优先级（可被继承临时提升） */
     uint8  base_priority;                           /* 基准优先级：创建后不变，撤销继承用 */
     uint8  shm_attri;
 
-    uint32 stack_top;
+    unsigned long stack_top;
     uint32 *stack_bottom;
     #if (ARKRTOS_USE_MPU == 1)
     arkrtos_arch_mpu_t mpu;           /* 架构无关的 MPU 区域上下文（见 arkrtos_arch.h） */
@@ -66,7 +70,7 @@ typedef struct {
     int32  wait_time;
     uint32 tim_tick;
     uint32 touch_tick;
-    uint32 stack_ptr;
+    unsigned long stack_ptr;
     uint8  ready_next;                              /* 就绪链表后继（任务下标；ARKRTOS_TASK_NIL=无） */
     uint8  ready_prev;                              /* 就绪链表前驱（任务下标；ARKRTOS_TASK_NIL=无） */
     uint8  delay_next;                              /* 延时链表后继（任务下标；ARKRTOS_TASK_NIL=无） */
@@ -78,7 +82,7 @@ typedef struct {
     void (*entry)(void);                            /* 任务入口（恢复重建用） */
     uint8  wake_reason;                             /* 0=被唤醒 1=超时唤醒 */
     #if (ARKRTOS_USE_STACK_USAGE == 1)
-    uint32 stack_peak_low;                          /* 历史最低栈指针，用于峰值栈用量统计 */
+    unsigned long stack_peak_low;                   /* 历史最低栈指针，用于峰值栈用量统计 */
     #endif
     #if (ARKRTOS_USE_STACK_GUARD == 1)
     uint8  stack_guard_armed;                       /* 1 = 栈底保护字已由注册流程布防 */
@@ -250,8 +254,9 @@ void arkrtos_sched_activate_higher(uint8 ck_pri);
 #define ARKRTOS_SWAP_ERR_THREAD  (-4)   /* 还有同窗口的线程：它们会指着旧块，拒绝 */
 #define ARKRTOS_SWAP_ERR_FRAME   (-5)   /* 当前栈帧不是基本帧（用过 FPU），拒绝 */
 
-int32 arkrtos_task_swap_arm(int32 task_id, uint32 rom_start, uint32 rom_size,
-                            uint32 ram_start, uint32 ram_size, uint32 entry);
+int32 arkrtos_task_swap_arm(int32 task_id, unsigned long rom_start, uint32 rom_size,
+                            unsigned long ram_start, uint32 ram_size,
+                            unsigned long entry);
 int32 arkrtos_task_swap_take(void *p_exc_ctx, int32 task_id);
 int32 arkrtos_task_swap_cancel(int32 task_id);
 int32 arkrtos_task_swap_pending(void);
@@ -290,7 +295,7 @@ int32  arkrtos_stack_guard_context_info(uint32 out[4]);
 #endif
 
 int32 arkrtos_sched_is_switching(void);
-int32 arkrtos_sched_activate(int32 new_task, uint32 old_psp);
+unsigned long arkrtos_sched_activate(int32 new_task, unsigned long old_psp);
 
 void arkrtos_kernel_tick_handler(void);
 #if (ARKRTOS_USE_TICKLESS == 1)

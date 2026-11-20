@@ -178,8 +178,8 @@ volatile uint32 g_rv_ecall_m = 0u;
 
 /* 外部符号：异常入口与两个汇编入口 */
 extern void trap_entry(void);
-extern void arkrtos_port_resume_task(uint32 stack_ptr);
-extern void arkrtos_port_enter_idle(uint32 stack_ptr, uint32 use_priv);
+extern void arkrtos_port_resume_task(unsigned long stack_ptr);
+extern void arkrtos_port_enter_idle(unsigned long stack_ptr, uint32 use_priv);
 
 /* 板级可覆盖的故障报告（默认什么都不打，见文件末尾） */
 void arkrtos_port_fatal_report(uint32 mcause);
@@ -522,7 +522,7 @@ uint32 arkrtos_port_syscall_num(void *p_exc_ctx)
     return ((uint32 *)p_exc_ctx)[RV_FR_A7];
 }
 
-uint32 arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx)
+unsigned long arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx)
 {
     if(idx >= ARKRTOS_ARCH_SVC_ARG_MAX)
     {
@@ -532,7 +532,7 @@ uint32 arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx)
     return ((uint32 *)p_exc_ctx)[RV_FR_A0 + idx];
 }
 
-void arkrtos_port_svc_set_ret(void *p_exc_ctx, uint32 value)
+void arkrtos_port_svc_set_ret(void *p_exc_ctx, unsigned long value)
 {
     ((uint32 *)p_exc_ctx)[RV_FR_A0] = value;
 }
@@ -770,7 +770,7 @@ void arkrtos_port_set_thread_priv(uint32 is_priv)
 *          gp 取当前内核上下文里的值（start.S 设好了 __global_pointer$），
 *          否则链接器的 gp 相对松弛在小任务里会读到错误地址。
 */
-uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void))
+unsigned long arkrtos_port_stack_init(unsigned long stack_top, void (*entry)(void))
 {
     uint32 *frame;
     uint32 gp;

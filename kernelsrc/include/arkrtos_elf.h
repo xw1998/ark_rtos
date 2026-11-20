@@ -47,15 +47,15 @@
 
 /** @brief 一次装载的可读结果（全部是实测值，不是推算值） */
 typedef struct {
-    uint32 entry;           /* e_entry（按窗口内绝对地址） */
+    unsigned long entry;    /* e_entry（按窗口内绝对地址） */
     uint32 bytes;           /* 从文件读进窗口的字节数（不含 BSS 清零） */
     uint32 segs;            /* PT_LOAD 个数 */
     uint32 argc;            /* 铺进用户栈的参数个数 */
-    uint32 sp;              /* 用户栈初始 sp（指向 argc） */
+    unsigned long sp;       /* 用户栈初始 sp（指向 argc） */
     uint32 stack_size;      /* 分给该任务的栈字节数（argv 区不在其中） */
     int32  task;            /* 任务号；<=0 表示这次调用失败了 */
-    uint32 interp_base;     /* 解释器装载基址；0 = 没有解释器（静态档） */
-    uint32 interp_entry;    /* 解释器入口（实际起跑的任务入口）；0 = 静态档 */
+    unsigned long interp_base;  /* 解释器装载基址；0 = 没有解释器（静态档） */
+    unsigned long interp_entry; /* 解释器入口（实际起跑的任务入口）；0 = 静态档 */
     uint8  dynamic;         /* 1 = 这次装载走的是 PT_INTERP 动态路径 */
 #if (ARKRTOS_USE_EXIT_CODE == 1)
     int32  exit_code;       /* U-8：任务上报过的退出码（exit_code_set=0 时不作数） */

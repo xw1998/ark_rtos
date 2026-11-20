@@ -161,7 +161,7 @@ void arkrtos_port_exit_critical(uint32 state)
 * @details Cortex-M 硬件压栈顺序为 R0,R1,R2,R3,R12,LR,PC,xPSR，
 *          使用栈帧指针直接索引即可。
 */
-uint32 arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx)
+unsigned long arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx)
 {
     return ((uint32 *)p_exc_ctx)[idx];
 }
@@ -169,7 +169,7 @@ uint32 arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx)
 /**
 * @brief 写回系统调用返回值（R0）
 */
-void arkrtos_port_svc_set_ret(void *p_exc_ctx, uint32 value)
+void arkrtos_port_svc_set_ret(void *p_exc_ctx, unsigned long value)
 {
     ((uint32 *)p_exc_ctx)[0] = value;
 }
@@ -268,7 +268,7 @@ void arkrtos_port_set_control(uint32 val)
     __set_CONTROL(val);
 }
 
-uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void))
+unsigned long arkrtos_port_stack_init(unsigned long stack_top, void (*entry)(void))
 {
     uint32 *p_sp;
 
@@ -300,7 +300,7 @@ uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void))
  * The per-task privilege of every later switch comes from
  * arkrtos_port_set_thread_priv(), so this is only the privilege of the
  * idle context itself - kernel code, therefore privileged. */
-void arkrtos_port_enter_idle(uint32 stack_ptr, uint32 use_priv)
+void arkrtos_port_enter_idle(unsigned long stack_ptr, uint32 use_priv)
 {
     arkrtos_port_set_psp(stack_ptr);
 

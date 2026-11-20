@@ -265,7 +265,7 @@ uint32 arkrtos_paging_space_frame(uint32 space)
 *          （ARKRTOS_USE_PAGING_PAGES=1）下帧来自帧池，帧基址不再是 VA，
 *          所以按地址摸窗口的代码必须问这一条。
 */
-uint32 arkrtos_paging_window_va(void)
+unsigned long arkrtos_paging_window_va(void)
 {
     return arkrtos_port_paging_window_va();
 }
@@ -533,8 +533,8 @@ uint32 arkrtos_paging_dyn_used(void)
 *          末尾的指针会让拷贝循环走进未映射页，在内核态变成 refill 致命
 *          —— 那正是这条接口要消灭的「内核陪着 fault」。
 */
-static uint8 arkrtos_paging_span_has(uint32 base, uint32 size,
-                                     uint32 uva, uint32 len)
+static uint8 arkrtos_paging_span_has(unsigned long base, uint32 size,
+                                     unsigned long uva, uint32 len)
 {
     if((base == 0u) || (size == 0u) || ((base + size) < base))
     {
@@ -553,17 +553,17 @@ static uint8 arkrtos_paging_span_has(uint32 base, uint32 size,
 *          糟得多。判据全部在第一次 load/store 之前完成，因此拒绝一次非法
 *          指针不会在内核态产生任何异常。
 */
-int32 arkrtos_paging_user_copy(uint32 rom_start, uint32 rom_size,
-                               uint32 ram_start, uint32 ram_size,
+int32 arkrtos_paging_user_copy(unsigned long rom_start, uint32 rom_size,
+                               unsigned long ram_start, uint32 ram_size,
                                uint32 space, uint32 installed,
                                void *kern, const void *user, uint32 len,
                                uint8 write)
 {
-    uint32 uva = (uint32)(unsigned long)user;
+    unsigned long uva = (unsigned long)user;
     uint32 i;
 
     if((kern == 0) || (user == 0) || (len == 0u) ||
-       ((0xFFFFFFFFu - uva) < len))
+       ((~0UL - uva) < (unsigned long)len))
     {
         return -1;
     }

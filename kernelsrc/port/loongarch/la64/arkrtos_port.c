@@ -203,8 +203,8 @@ volatile uint32 la_cnt_other = 0u;
 
 /* 外部符号：异常入口与汇编入口 */
 extern void eentry(void);
-extern void arkrtos_port_resume_task(uint32 stack_ptr);
-extern void arkrtos_port_enter_idle(uint32 stack_ptr, uint32 use_priv);
+extern void arkrtos_port_resume_task(unsigned long stack_ptr);
+extern void arkrtos_port_enter_idle(unsigned long stack_ptr, uint32 use_priv);
 
 #if (ARKRTOS_USE_PRIV == 1)
 /* TLB 重填入口（arkrtos_context.S）。重填时硬件不保存任何通用寄存器，
@@ -521,6 +521,20 @@ int32 arkrtos_port_send_ipi(uint32 cpu)
 #define ARKRTOS_QEMU_APP_UART       0x022001E0u
 #endif
 
+/* App 窗口的**虚拟**地址。历史上 APP_BASE 同时当两件事：窗口 VA 和
+ * space 0 的物理帧基址。页级窗口（PAGING_PAGES=1）之后帧一律由帧池给出，
+ * 两者本来就已经分开 —— 这里把 VA 抽出来单独命名，好让窗口能落到 32 位
+ * 以上（真实发行版 LA64 静态二进制按 0x120000000 链接），物理帧仍然留在
+ * DRAM 低端。板级不给就退回 APP_BASE ⇒ 默认档编译结果与行为逐字节不变。 */
+#ifndef ARKRTOS_ELF_WINDOW_BASE
+#define ARKRTOS_ELF_WINDOW_BASE     ARKRTOS_QEMU_APP_BASE
+#endif
+#define LA_WIN_VA                   ((unsigned long)ARKRTOS_ELF_WINDOW_BASE)
+
+#if ((ARKRTOS_ELF_WINDOW_BASE) != (ARKRTOS_QEMU_APP_BASE)) && (ARKRTOS_USE_PAGING_PAGES != 1)
+#error "wide ELF window VA requires ARKRTOS_USE_PAGING_PAGES=1"
+#endif
+
 /* 页级窗口（U-3 第二阶）的几何。一条 PS=12 的条目管**相邻两页**
  * （TLBELO0 = vaddr、TLBELO1 = vaddr + 4 KB），所以 2 MB 窗口 = 512 页 =
  * 256 条条目，正好铺满 STLB 的一个路（256 组）：
@@ -579,8 +593,8 @@ int32 arkrtos_port_send_ipi(uint32 cpu)
 
 /* App 帧合法窗：App 任务的 trap 帧落在 App 页里（PLV3 页，内核可读写）。 */
 #define LA_FRAME_IN_APP(sp) \
-    ((((uint32)(sp)) >= ARKRTOS_QEMU_APP_BASE) && \
-     (((uint32)(sp)) < (ARKRTOS_QEMU_APP_BASE + ARKRTOS_QEMU_APP_SIZE)))
+    ((((unsigned long)(sp)) >= LA_WIN_VA) && \
+     (((unsigned long)(sp)) < (LA_WIN_VA + (unsigned long)ARKRTOS_QEMU_APP_SIZE)))
 
 #if (ARKRTOS_USE_PRIV == 1)
 
@@ -612,7 +626,8 @@ int32 arkrtos_port_send_ipi(uint32 cpu)
 #define LA_STLB_WAYS        8u
 #define LA_MTLB_INDEX       2048u
 #define LA_STLB_INDEX(va, way) \
-    ((((uint32)(way)) % LA_STLB_WAYS) * 256u + ((((uint32)(va)) >> 13) & 0xFFu))
+    ((((uint32)(way)) % LA_STLB_WAYS) * 256u + \
+     ((((unsigned long)(va)) >> 13) & 0xFFu))
 
 #define LA_STR_(x)          #x
 #define LA_STR(x)           LA_STR_(x)
@@ -642,12 +657,12 @@ int32 arkrtos_port_send_ipi(uint32 cpu)
 *          不上（症状是「地址明明有映射却一直报重填」）。tlbfill 替你
 *          选了正确的表，这是用它而不是手工写索引的唯一理由。
 */
-static void la_tlb_fill(uint32 vaddr, uint32 ps, uint32 index,
+static void la_tlb_fill(unsigned long vaddr, uint32 ps, uint32 index,
                         unsigned long lo0, unsigned long lo1)
 {
     /* TLBIDX = INDEX[23:0] | PS[29:24] | NE[31]（NE=0 ⇒ 写 INDEX 指定的条目） */
     LA_CSRW(LA_CSR_TLBIDX, ((unsigned long)ps << 24) | (unsigned long)(index & 0xFFFFFFu));
-    LA_CSRW(LA_CSR_TLBEHI, (unsigned long)(vaddr & ~0x1FFFu));
+    LA_CSRW(LA_CSR_TLBEHI, vaddr & ~0x1FFFUL);
     LA_CSRW(LA_CSR_TLBELO0, lo0);
     LA_CSRW(LA_CSR_TLBELO1, lo1);
 
@@ -687,11 +702,11 @@ static void la_tlb_fill(uint32 vaddr, uint32 ps, uint32 index,
 *          静态 4 KB 条目抢同一组的 8 路，也不需要知道 STLB 的 way 布局。
 *          代价是 MTLB 只有 64 条，所以动态表的上限由它决定（见 LA_PG_DYN_PAIRS）。
 */
-static void la_tlb_write(uint32 vaddr, uint32 ps, uint32 index,
+static void la_tlb_write(unsigned long vaddr, uint32 ps, uint32 index,
                          unsigned long lo0, unsigned long lo1)
 {
     LA_CSRW(LA_CSR_TLBIDX, ((unsigned long)ps << 24) | (unsigned long)(index & 0xFFFFFFu));
-    LA_CSRW(LA_CSR_TLBEHI, (unsigned long)(vaddr & ~0x1FFFu));
+    LA_CSRW(LA_CSR_TLBEHI, vaddr & ~0x1FFFUL);
     LA_CSRW(LA_CSR_TLBELO0, lo0);
     LA_CSRW(LA_CSR_TLBELO1, lo1);
     __asm__ volatile("tlbwr" ::: "memory");
@@ -743,9 +758,9 @@ static unsigned long la_asid_swap(unsigned long asid)
 *          硬件随机挑）：窗口里每个 8 KB 对占一个 STLB 组、一组 8 路只用 1
 *          路，所以随便落哪一路都不会与别的对撞。
 */
-static void la_tlb_fill_refill(uint32 vaddr, unsigned long lo0, unsigned long lo1)
+static void la_tlb_fill_refill(unsigned long vaddr, unsigned long lo0, unsigned long lo1)
 {
-    LA_CSRW(LA_CSR_TLBREHI, (unsigned long)(vaddr & ~0x1FFFu) | 12UL);
+    LA_CSRW(LA_CSR_TLBREHI, (vaddr & ~0x1FFFUL) | 12UL);
     LA_CSRW(LA_CSR_TLBRELO0, lo0);
     LA_CSRW(LA_CSR_TLBRELO1, lo1);
     __asm__ volatile("tlbfill" ::: "memory");
@@ -934,7 +949,7 @@ static void la_frame_apply_priv(la_frame_word *frame)
 #define LA_PG_BIT(m)            (1u << (uint32)(m))
 
 typedef struct {
-    uint32 base;
+    unsigned long base;
     uint32 size;
     uint32 mem;                 /* allowed arkrtos_mpu_mem_t kinds */
 } la_pg_span_t;
@@ -944,8 +959,9 @@ static const la_pg_span_t s_pg_spans[] = {
     { 0x00000000u, 16u * 1024u * 1024u,
       LA_PG_BIT(ARKRTOS_MPU_MEM_ROM) | LA_PG_BIT(ARKRTOS_MPU_MEM_RAM) },
 
-    /* App 页 0x02000000 + 2 MB：PLV3、RWX，App 的代码/数据/栈都在里面 */
-    { ARKRTOS_QEMU_APP_BASE, ARKRTOS_QEMU_APP_SIZE,
+    /* App 窗口 VA + 2 MB：PLV3、RWX，App 的代码/数据/栈都在里面。
+     * 基址是**虚拟**地址（可被 -D 挪到 32 位以上），物理帧由帧池另给。 */
+    { LA_WIN_VA, ARKRTOS_QEMU_APP_SIZE,
       LA_PG_BIT(ARKRTOS_MPU_MEM_ROM) | LA_PG_BIT(ARKRTOS_MPU_MEM_RAM) |
       LA_PG_BIT(ARKRTOS_MPU_MEM_RAMX) },
 
@@ -1083,7 +1099,7 @@ static uint32 la_pg_app_frame(uint32 space)
  * 于是「只清某个 ASID 的条目」在本载体上**做不到**：想只撤一个空间的
  * 窗口，只能先切到它的 ASID 再按 VA 撤（撤完把当前空间补铺回来），
  * 这就是 activate / space_release 现在走的那条路。 */
-static void la_tlb_inval_page(uint32 va)
+static void la_tlb_inval_page(unsigned long va)
 {
     __asm__ volatile("invtlb 3, $zero, %0"
                      :: "r"((unsigned long)va) : "memory");
@@ -1159,7 +1175,7 @@ static void la_pg_install_space(uint32 space)
 
         if(pa != 0u)
         {
-            uint32 va = ARKRTOS_QEMU_APP_BASE + (i * 0x2000u);
+            unsigned long va = LA_WIN_VA + (i * 0x2000u);
 
             la_tlb_write(va, 12u, LA_STLB_INDEX(va, LA_PG_WIN_WAY_OF(space)),
                          LA_PTE_APP(pa), LA_PTE_APP(pa + 0x1000u));
@@ -1170,7 +1186,7 @@ static void la_pg_install_space(uint32 space)
 
     for(i = 0u; i < LA_PG_WIN_ENTRIES; i++)
     {
-        uint32 va = ARKRTOS_QEMU_APP_BASE + (i * 0x2000u);
+        unsigned long va = LA_WIN_VA + (i * 0x2000u);
 
         la_tlb_write(va, 12u, LA_STLB_INDEX(va, LA_PG_WIN_WAY_OF(space)),
                      LA_PTE_APP(base + (i * 0x2000u)),
@@ -1189,7 +1205,7 @@ static void la_pg_drop_window(void)
 
     for(i = 0u; i < LA_PG_WIN_PAGES; i++)
     {
-        la_tlb_inval_page(ARKRTOS_QEMU_APP_BASE + (i * 0x1000u));
+        la_tlb_inval_page(LA_WIN_VA + (i * 0x1000u));
     }
 }
 
@@ -1356,7 +1372,7 @@ static int32 la_pg_swap_out_one(uint32 skip_space, uint32 skip_idx)
 
             if(space == s_pg_app_space)
             {
-                uint32 va = ARKRTOS_QEMU_APP_BASE + (idx * 0x2000u);
+                unsigned long va = LA_WIN_VA + (idx * 0x2000u);
 
                 la_tlb_inval_page(va);
                 la_tlb_inval_page(va + 0x1000u);
@@ -1460,24 +1476,24 @@ uint32 arkrtos_port_paging_swap_stat(uint32 which)
 *          没有帧就返回 0，让原来的路径去报错/杀任务 —— 这里绝不假装
 *          装好了（装一条 V=0 的条目会让 ertn 回到同一条指令上无限重填）。
 */
-static int32 la_pg_demand_fault(uint32 badv)
+static int32 la_pg_demand_fault(unsigned long badv)
 {
     uint32 space = s_pg_app_space;
     uint32 idx;
     uint32 pa;
 
-    if((badv < ARKRTOS_QEMU_APP_BASE) ||
-       (badv >= (ARKRTOS_QEMU_APP_BASE + ARKRTOS_QEMU_APP_SIZE)))
+    if((badv < LA_WIN_VA) ||
+       (badv >= (LA_WIN_VA + (unsigned long)ARKRTOS_QEMU_APP_SIZE)))
     {
         arkrtos_board_puts("[DBG] out-of-window badv=");
-        arkrtos_board_puthex(badv);
+        arkrtos_board_puthex((uint32)badv);
         arkrtos_board_puts(" faults=");
         arkrtos_board_putu(s_pg_demand_faults);
         arkrtos_board_puts("\n");
         return 0;
     }
 
-    idx = (badv - ARKRTOS_QEMU_APP_BASE) / 0x2000u;
+    idx = (uint32)((badv - LA_WIN_VA) / 0x2000u);
     if(idx >= LA_PG_WIN_ENTRIES)
     {
         return 0;
@@ -1548,7 +1564,7 @@ static int32 la_pg_demand_fault(uint32 badv)
     }
 
     {
-        uint32 va = ARKRTOS_QEMU_APP_BASE + (idx * 0x2000u);
+        unsigned long va = LA_WIN_VA + (idx * 0x2000u);
 
         /* 这里处在重填上下文里：必须走 TLBREHI/TLBRELO + tlbfill
          * （tlbwr/tlbfill 在 ISTLBR=1 时只认 TLBR* 那一组镜像 CSR）。 */
@@ -1653,7 +1669,7 @@ static uint32 la_pg_pair_expect(uint32 space, uint32 idx)
 /** 读回校验一对 8 KB：期望值为 0（这一档还没付费）时视为通过 */
 static int32 la_pg_pair_check(uint32 space, uint32 idx)
 {
-    uint32 va = ARKRTOS_QEMU_APP_BASE + (idx * 0x2000u);
+    unsigned long va = LA_WIN_VA + (idx * 0x2000u);
     uint32 expect = la_pg_pair_expect(space, idx);
     uint32 ppn = 0u;
     uint32 ps = 0u;
@@ -1751,7 +1767,7 @@ int32 arkrtos_port_paging_activate(uint32 space)
         uint32 probed = 0u;
         uint32 probed_ps = 0u;
 
-        if((arkrtos_port_paging_lookup(ARKRTOS_QEMU_APP_BASE, 0,
+        if((arkrtos_port_paging_lookup(LA_WIN_VA, 0,
                                        &probed, &probed_ps) != 0u) &&
            (probed == s_pg_space_base[space]) && (probed_ps == 12u))
         {
@@ -1763,11 +1779,11 @@ int32 arkrtos_port_paging_activate(uint32 space)
     la_pg_install_space(space);
 
     {
-        uint32 last_va = ARKRTOS_QEMU_APP_BASE + ARKRTOS_QEMU_APP_SIZE - 0x1000u;
+        unsigned long last_va = LA_WIN_VA + ARKRTOS_QEMU_APP_SIZE - 0x1000u;
         uint32 probed = 0u;
         uint32 probed_ps = 0u;
 
-        if((arkrtos_port_paging_lookup(ARKRTOS_QEMU_APP_BASE, 0, &probed, &probed_ps) == 0u) ||
+        if((arkrtos_port_paging_lookup(LA_WIN_VA, 0, &probed, &probed_ps) == 0u) ||
            (probed != s_pg_space_base[space]) || (probed_ps != 12u))
         {
             return -2;
@@ -1800,7 +1816,7 @@ int32 arkrtos_port_paging_activate(uint32 space)
          * 把它打掉（见 la_pg_assert_window）。读回来确认，对不上就重写。 */
         uint32 probed = 0u;
 
-        if((arkrtos_port_paging_lookup(ARKRTOS_QEMU_APP_BASE, 0, &probed, 0) != 0u) &&
+        if((arkrtos_port_paging_lookup(LA_WIN_VA, 0, &probed, 0) != 0u) &&
            (probed == la_pg_app_frame(space)))
         {
             return 0;
@@ -1822,7 +1838,7 @@ int32 arkrtos_port_paging_activate(uint32 space)
     {
         uint32 probed_ppn = 0u;
 
-        if((arkrtos_port_paging_lookup(ARKRTOS_QEMU_APP_BASE, 0, &probed_ppn, 0) == 0u) ||
+        if((arkrtos_port_paging_lookup(LA_WIN_VA, 0, &probed_ppn, 0) == 0u) ||
            (probed_ppn != pa))
         {
             return -2;
@@ -1849,9 +1865,8 @@ static uint32 la_sp_in_app_window(void)
 
     __asm__ volatile("move %0, $sp" : "=r"(sp) : : "memory");
 
-    return (((uint32)sp >= (uint32)ARKRTOS_QEMU_APP_BASE) &&
-            ((uint32)sp <  ((uint32)ARKRTOS_QEMU_APP_BASE +
-                            (uint32)ARKRTOS_QEMU_APP_SIZE))) ? 1u : 0u;
+    return ((sp >= LA_WIN_VA) &&
+            (sp <  (LA_WIN_VA + (unsigned long)ARKRTOS_QEMU_APP_SIZE))) ? 1u : 0u;
 }
 
 /**
@@ -2081,9 +2096,9 @@ uint32 arkrtos_port_paging_space_count(void)
 }
 
 /** App 窗口的 VA 基址：各空间共用同一个 VA，物理侧才按空间换 */
-uint32 arkrtos_port_paging_window_va(void)
+unsigned long arkrtos_port_paging_window_va(void)
 {
-    return ARKRTOS_QEMU_APP_BASE;
+    return LA_WIN_VA;
 }
 
 #if (ARKRTOS_USE_PAGING_ASID == 1)
@@ -2152,7 +2167,7 @@ unsigned long arkrtos_port_paging_asid_raw_swap(unsigned long asid)
 *          它不是给生产路径用的，而是给 pmap asidinval 做对照 —— 「op=6 是
 *          定向的」这句话只有跟 op=3 的连带行为摆在一起才算证据。
 */
-void arkrtos_port_paging_inval_va(uint32 va)
+void arkrtos_port_paging_inval_va(unsigned long va)
 {
     la_tlb_inval_page(va);
 }
@@ -2174,7 +2189,7 @@ void arkrtos_port_paging_inval_va(uint32 va)
 *          space 0 里读得到），就是靠它把「写进去了但没生效」和「生效了
 *          但命中另一条」分开的。
 */
-uint32 arkrtos_port_paging_lookup(uint32 va, uint32 *index, uint32 *ppn, uint32 *ps)
+uint32 arkrtos_port_paging_lookup(unsigned long va, uint32 *index, uint32 *ppn, uint32 *ps)
 {
 #if (ARKRTOS_USE_PRIV == 1)
     unsigned long idx = 0UL;
@@ -2564,12 +2579,12 @@ int32 arkrtos_port_paging_init(void)
 *          接受，因为调用方（TCB 窗口）本来就是单块连续内存，跨条目只可能
 *          是记录坏了 —— 那种情况下报 -1 才是诚实的。
 */
-int32 arkrtos_port_paging_check(uint32 base, uint32 size, arkrtos_mpu_mem_t mem)
+int32 arkrtos_port_paging_check(unsigned long base, uint32 size, arkrtos_mpu_mem_t mem)
 {
     uint32 i;
-    uint32 end;
+    unsigned long end;
 
-    if((size == 0u) || (base > (0xFFFFFFFFu - size)))
+    if((size == 0u) || (base > (~0UL - (unsigned long)size)))
     {
         return -1;
     }
@@ -2853,17 +2868,17 @@ uint32 arkrtos_port_syscall_num(void *p_exc_ctx)
     return num;
 }
 
-uint32 arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx)
+unsigned long arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx)
 {
     if(idx >= ARKRTOS_ARCH_SVC_ARG_MAX)
     {
-        return 0u;
+        return 0UL;
     }
 
-    return (uint32)((la_frame_word *)p_exc_ctx)[LA_FR_A0 + idx];
+    return (unsigned long)((la_frame_word *)p_exc_ctx)[LA_FR_A0 + idx];
 }
 
-void arkrtos_port_svc_set_ret(void *p_exc_ctx, uint32 value)
+void arkrtos_port_svc_set_ret(void *p_exc_ctx, unsigned long value)
 {
     ((la_frame_word *)p_exc_ctx)[LA_FR_A0] = (la_frame_word)value;
 }
@@ -3128,13 +3143,13 @@ void arkrtos_port_set_thread_priv(uint32 is_priv)
 *          ra 置 0：任务函数返回就等于跳到 0 取指，会立刻进致命异常，
 *          与 Cortex-M 版（LR=0）同一处理口径。
 */
-uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void))
+unsigned long arkrtos_port_stack_init(unsigned long stack_top, void (*entry)(void))
 {
     la_frame_word *frame;
     uint32 i;
-    uint32 top;
+    unsigned long top;
 
-    top   = stack_top & ~0xFu;
+    top   = stack_top & ~0xFUL;
     frame = (la_frame_word *)(unsigned long)(top - LA_FR_SIZE);
 
     for(i = 0u; i < LA_FR_WORDS; i++)
@@ -3144,10 +3159,10 @@ uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void))
 
     frame[LA_FR_RA]   = 0u;
     frame[LA_FR_SP]   = top;
-    frame[LA_FR_ERA]  = (uint32)(unsigned long)entry;
+    frame[LA_FR_ERA]  = (unsigned long)entry;
     frame[LA_FR_PRMD] = LA_PRMD_INIT;
 
-    return (uint32)(unsigned long)frame;
+    return (unsigned long)frame;
 }
 
 #if (ARKRTOS_USE_ELF_TLS == 1)
@@ -3161,9 +3176,9 @@ uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void))
 *          程序第一句就可能读到的 __thread 变量已经是真值。
 *          关档时本函数整段不编译：默认镜像与符号表逐字节不变。
 */
-void arkrtos_port_task_set_tp(uint32 stack_ptr, unsigned long tp)
+void arkrtos_port_task_set_tp(unsigned long stack_ptr, unsigned long tp)
 {
-    la_frame_word *frame = (la_frame_word *)(unsigned long)stack_ptr;
+    la_frame_word *frame = (la_frame_word *)stack_ptr;
 
     if(frame == 0)
     {
@@ -3414,7 +3429,7 @@ uint32 s_swp_bogus_cur = 0u;     /* 拦下时的当前任务号 */
 la_frame_word *la_switch_inline(la_frame_word *frame)
 {
     int32 next;
-    uint32 next_sp;
+    unsigned long next_sp;
 
 #if (ARKRTOS_USE_PRIV == 1)
     /* 本任务的 PLV：activate() 会把 s_next_pplv 改成「目标任务」的值，
@@ -3444,11 +3459,11 @@ la_frame_word *la_switch_inline(la_frame_word *frame)
             rd = (uint32)arkrtos_task_table[next - 1].ready_next;
         }
 
-        next_sp = arkrtos_sched_activate(next, (uint32)(unsigned long)frame);
+        next_sp = arkrtos_sched_activate(next, (unsigned long)frame);
 
         s_swp_log[i + 0u] = (uint32)next;
         s_swp_log[i + 1u] = (uint32)(unsigned long)frame;
-        s_swp_log[i + 2u] = next_sp;
+        s_swp_log[i + 2u] = (uint32)next_sp;
         s_swp_log[i + 3u] = (uint32)arkrtos_current_task_id;
         s_swp_log[i + 4u] = st;
         s_swp_log[i + 5u] = rd;
@@ -3468,7 +3483,7 @@ la_frame_word *la_switch_inline(la_frame_word *frame)
            ((next_sp & 0xFu) != 0u))
         {
             s_swp_bogus++;
-            s_swp_bogus_next = next_sp;
+            s_swp_bogus_next = (uint32)next_sp;
             s_swp_bogus_cur  = (uint32)arkrtos_current_task_id;
 #if (ARKRTOS_USE_PRIV == 1)
             s_next_pplv = self_pplv;       /* 没切走：恢复本任务的特权级 */
@@ -3839,7 +3854,7 @@ int32 la_refill_demand_c(void)
 
     LA_CSRR(LA_CSR_TLBRBADV, tlbrbadv);
 
-    if(la_pg_demand_fault((uint32)tlbrbadv) != 0)
+    if(la_pg_demand_fault(tlbrbadv) != 0)
     {
         return 1;
     }
@@ -3965,7 +3980,7 @@ la_frame_word *la_trap_c(la_frame_word *frame)
         next = arkrtos_sched_is_switching();
         if(next >= 0)
         {
-            uint32 next_sp = arkrtos_sched_activate(next, (uint32)(unsigned long)frame);
+            unsigned long next_sp = arkrtos_sched_activate(next, (unsigned long)frame);
 
             if(next_sp != 0u)
             {

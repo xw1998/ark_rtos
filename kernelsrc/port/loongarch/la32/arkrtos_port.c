@@ -153,8 +153,8 @@ static uint8 s_switch_ready = 0u;
 
 /* 外部符号：异常入口与汇编入口 */
 extern void eentry(void);
-extern void arkrtos_port_resume_task(uint32 stack_ptr);
-extern void arkrtos_port_enter_idle(uint32 stack_ptr, uint32 use_priv);
+extern void arkrtos_port_resume_task(unsigned long stack_ptr);
+extern void arkrtos_port_enter_idle(unsigned long stack_ptr, uint32 use_priv);
 
 /* 板级可覆盖的故障报告（默认什么都不打，见文件末尾） */
 void arkrtos_port_fatal_report(uint32 code);
@@ -365,7 +365,7 @@ uint32 arkrtos_port_syscall_num(void *p_exc_ctx)
     return num;
 }
 
-uint32 arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx)
+unsigned long arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx)
 {
     if(idx >= ARKRTOS_ARCH_SVC_ARG_MAX)
     {
@@ -375,7 +375,7 @@ uint32 arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx)
     return (uint32)((la_frame_word *)p_exc_ctx)[LA_FR_A0 + idx];
 }
 
-void arkrtos_port_svc_set_ret(void *p_exc_ctx, uint32 value)
+void arkrtos_port_svc_set_ret(void *p_exc_ctx, unsigned long value)
 {
     ((la_frame_word *)p_exc_ctx)[LA_FR_A0] = (la_frame_word)value;
 }
@@ -525,7 +525,7 @@ void arkrtos_port_set_thread_priv(uint32 is_priv)
 *          ra 置 0：任务函数返回就等于跳到 0 取指，会立刻进致命异常，
 *          与 Cortex-M 版（LR=0）同一处理口径。
 */
-uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void))
+unsigned long arkrtos_port_stack_init(unsigned long stack_top, void (*entry)(void))
 {
     la_frame_word *frame;
     uint32 i;

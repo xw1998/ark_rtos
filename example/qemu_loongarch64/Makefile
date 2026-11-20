@@ -91,20 +91,33 @@ $(SHELL_AUTH_HDR):
 # 额外的 -D（测试变体用，例如按需缺页单独出一份镜像）。缺省为空，基线不变。
 EXTRA_CFLAGS ?=
 
+# 窗口 VA 覆盖（WIN_VA=0x120000000）：真实发行版二进制就链在这一档，装载器
+# 必须能把「窗口 VA」与「物理帧」拆开（物理帧仍由帧池给，PAGING_PAGES=1）。
+# 非空时内核与夹具的链接基址一起抬到 WIN_VA；为空时与原来逐字节一致。
+WIN_VA ?=
+ifneq ($(WIN_VA),)
+WIN_VA_DEF   := -DARKRTOS_ELF_WINDOW_BASE=$(WIN_VA)u
+WIN_ELF_BASE := $(WIN_VA)
+else
+WIN_VA_DEF   :=
+WIN_ELF_BASE := 0x02000000
+endif
+
 CFLAGS := $(ARCH_FLAGS) -g -O2 -ffreestanding -fno-common -nostdlib -nostartfiles \
           -fno-builtin -ffunction-sections -fdata-sections -Wall -MMD -MP \
           -DARKRTOS_BOARD_CONFIG='"arkrtos_board_config.h"' \
           -include arkrtos_board_config.h \
           -DLFS_NO_MALLOC -DLFS_NO_ASSERT -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR \
           -DMDK_TRACE_ENABLE=1 -DMDK_TRACE_BACKEND_BUFF=1 -DMDK_TRACE_CPU_HZ=100000000u \
-          $(ARK_BUS_FLAGS) -DARKRTOS_SIGN_KEY_LOCAL=1 $(ARK_AUTH_FLAGS) $(EXTRA_CFLAGS)
+          $(ARK_BUS_FLAGS) -DARKRTOS_SIGN_KEY_LOCAL=1 $(ARK_AUTH_FLAGS) \
+          $(WIN_VA_DEF) $(EXTRA_CFLAGS)
 # 汇编走预处理器（.S 的大写后缀已经打开了 cpp），所以板级宏在 .S 里也可见 ——
 # 按需缺页要按开关决定「refill 入口是否保存通用寄存器」，只能这样做。
 # 「默认关时体积与行为零变化」已经实测过：把构建时间戳固定（SOURCE_DATE_EPOCH），
 # 关掉这一档之后与改动前的镜像**逐字节相同**（测试只比剔除调试信息后的镜像，
 # 因为 DWARF 行表会随源文件改动而变化）。这条 -include 本身不改任何默认档代码。
 ASFLAGS := $(ARCH_FLAGS) -g -DARKRTOS_BOARD_CONFIG='"arkrtos_board_config.h"' \
-           -include arkrtos_board_config.h $(EXTRA_CFLAGS)
+           -include arkrtos_board_config.h $(WIN_VA_DEF) $(EXTRA_CFLAGS)
 
 # 通配全部内核源，再剔除本平台没有任何介质/驱动依赖的模块：
 # 它们即使功能开关为 0 也在文件头无条件包含硬件头（drvflash.h / lfs.h），
@@ -209,7 +222,7 @@ $(HELLO_ELF): $(HELLO_SRC)
 	@mkdir -p $(BUILD)
 	$(CC) $(ARCH_FLAGS) -O2 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
 	      -ffunction-sections -fdata-sections -Wl,--gc-sections \
-	      -Wl,-Ttext=0x02000000 -Wl,-e,_start -Wl,--strip-all \
+	      -Wl,-Ttext=$(WIN_ELF_BASE) -Wl,-e,_start -Wl,--strip-all \
 	      -Wl,-z,max-page-size=4096 -o $@ $< ;
 
 $(HELLO_SIGNED): $(HELLO_ELF) tools/sign_payload.py
@@ -274,7 +287,7 @@ $(LXHELLO_ELF): $(LXHELLO_SRC)
 	@mkdir -p $(BUILD)
 	$(CC) $(ARCH_FLAGS) -O2 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
 	      -ffunction-sections -fdata-sections -Wl,--gc-sections \
-	      -Wl,-Ttext=0x02000000 -Wl,-e,_start -Wl,--strip-all \
+	      -Wl,-Ttext=$(WIN_ELF_BASE) -Wl,-e,_start -Wl,--strip-all \
 	      -Wl,-z,max-page-size=4096 -o $@ $< ;
 
 $(LXHELLO_SIGNED): $(LXHELLO_ELF) tools/sign_payload.py
@@ -307,7 +320,7 @@ $(TLS_ELF): $(TLS_SRC)
 	@mkdir -p $(BUILD)
 	$(CC) $(ARCH_FLAGS) -O2 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
 	      -ffunction-sections -fdata-sections -Wl,--gc-sections \
-	      -Wl,-Ttext=0x02000000 -Wl,-e,_start -Wl,--strip-all \
+	      -Wl,-Ttext=$(WIN_ELF_BASE) -Wl,-e,_start -Wl,--strip-all \
 	      -Wl,-z,max-page-size=4096 -o $@ $< ;
 
 $(TLS_SIGNED): $(TLS_ELF) tools/sign_payload.py

@@ -58,7 +58,7 @@ uint8 arkrtos_sync_in_handler(void);
 *          PendSV 不会被服务，必须由本函数直接完成恢复 + 异常返回。
 *          本函数不返回；stack_ptr 为 0 时调用方应自行停机，不要调用。
 */
-void arkrtos_port_resume_task(uint32 stack_ptr);
+void arkrtos_port_resume_task(unsigned long stack_ptr);
 
 uint8  arkrtos_port_in_isr(void);
 uint32 arkrtos_port_syscall_num(void *p_exc_ctx);
@@ -71,14 +71,14 @@ uint32 arkrtos_port_syscall_num(void *p_exc_ctx);
 * @details 各架构的栈帧/trap 帧布局不同，由 port 层负责解析，
 *          内核只通过本接口与上面的宏访问参数，不感知任何寄存器布局。
 */
-uint32 arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx);
+unsigned long arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx);
 
 /**
 * @brief 写回系统调用返回值（第 0 个参数寄存器）
 * @param p_exc_ctx 系统调用上下文指针
 * @param value     返回值
 */
-void   arkrtos_port_svc_set_ret(void *p_exc_ctx, uint32 value);
+void   arkrtos_port_svc_set_ret(void *p_exc_ctx, unsigned long value);
 
 #if (ARKRTOS_USE_LINUX_ABI == 1)
 /**
@@ -272,7 +272,7 @@ void arkrtos_port_set_thread_priv(uint32 is_priv);
 *          - RISC-V: 压入mepc/mstatus/x1-x31
 *          此函数由port层实现，内核无需关心具体布局
 */
-uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void));
+unsigned long arkrtos_port_stack_init(unsigned long stack_top, void (*entry)(void));
 
 #if (ARKRTOS_USE_ELF_TLS == 1)
 /**
@@ -284,7 +284,7 @@ uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void));
 *          PT_TLS 时调用它；关档时这个声明与实现都不存在，端口体积不变。
 *          其它端口打开 ARKRTOS_USE_ELF_TLS 是编译期错误，不是空操作。
 */
-void arkrtos_port_task_set_tp(uint32 stack_ptr, unsigned long tp);
+void arkrtos_port_task_set_tp(unsigned long stack_ptr, unsigned long tp);
 #endif
 
 /**
@@ -294,7 +294,7 @@ void arkrtos_port_task_set_tp(uint32 stack_ptr, unsigned long tp);
 * @param psp        空闲任务栈顶地址
 * @param use_priv   是否使用特权分离模式
 */
-void arkrtos_port_enter_idle(uint32 stack_ptr, uint32 use_priv);
+void arkrtos_port_enter_idle(unsigned long stack_ptr, uint32 use_priv);
 
 /**
 * @brief Enable task switching and request the first switch
@@ -538,7 +538,7 @@ int32 arkrtos_port_paging_init(void);
  *  @param size 字节数
  *  @param mem  期望的内存属性（取自 arkrtos_mpu_mem_t）
  *  @return 0 = 已映射且权限满足；-1 = 未映射 / 权限不足 / 该属性本 port 无对应窗口 */
-int32 arkrtos_port_paging_check(uint32 base, uint32 size, arkrtos_mpu_mem_t mem);
+int32 arkrtos_port_paging_check(unsigned long base, uint32 size, arkrtos_mpu_mem_t mem);
 
 /** @brief 追加一条动态映射（VA -> PA）
  *  @return 0 = 已建立；-1 = 本 port 未实现
@@ -615,7 +615,7 @@ int32 arkrtos_port_paging_space_release(uint32 space);
  *  @return 1 = 命中（index/ppn/ps 被写）；0 = 未命中（输出参数不动）
  *  @details 只读，不建映射。用于分辨「tlbwr 没生效」与「生效了但查找命中
  *           另一条陈旧条目」——地址空间切换静默失效时就靠它定位。 */
-uint32 arkrtos_port_paging_lookup(uint32 va, uint32 *index, uint32 *ppn, uint32 *ps);
+uint32 arkrtos_port_paging_lookup(unsigned long va, uint32 *index, uint32 *ppn, uint32 *ps);
 
 /** @brief Allocate a run of contiguous 4 KB page frames (U-3)
  *  @param count  frames wanted (> 0)
@@ -655,7 +655,7 @@ uint32 arkrtos_port_paging_swap_stat(uint32 which);
  *           that pokes the window must use this instead of the frame base:
  *           with ARKRTOS_USE_PAGING_PAGES=1 the frames come from the pool and
  *           no longer coincide with the window VA. */
-uint32 arkrtos_port_paging_window_va(void);
+unsigned long arkrtos_port_paging_window_va(void);
 
 /** @brief Hardware ASID currently in CSR.ASID (U-7); 0 when ASID is off
  *  @details 关档（ARKRTOS_USE_PAGING_ASID=0）时恒为 0：本 port 把每个 App 空间
@@ -679,7 +679,7 @@ unsigned long arkrtos_port_paging_asid_raw_swap(unsigned long asid);
  *  @param va 要失效的虚拟地址
  *  @details 留着它是为了做对照：op=6 的「定向」只有跟 op=3 的连带行为摆
  *           在一起才算证据。生产路径没有调用方。 */
-void arkrtos_port_paging_inval_va(uint32 va);
+void arkrtos_port_paging_inval_va(unsigned long va);
 #else
 /* 关档不出符号：一个「永远返回 0 的函数」会被读成「ASID 就是 0」，
  * 而真相是本 port 压根没有 ASID 概念（切换靠重写整组条目）。宏回 0

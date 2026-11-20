@@ -60,9 +60,10 @@
  *   固件窗口：IMAGE_POOL（用户代码与只读常量所在）
  * 内核 RAM（任务表、内核栈）与内核 Flash 一律拒绝。
  * ------------------------------------------------------------------ */
-static uint8 arkrtos_kernel_in_window(uint32 start, uint32 end, uint32 base, uint32 size)
+static uint8 arkrtos_kernel_in_window(unsigned long start, unsigned long end,
+                                     unsigned long base, unsigned long size)
 {
-    uint32 limit = base + size;
+    unsigned long limit = base + size;
 
     if(limit <= base)                   /* 分区宏异常时不要误放行 */
     {
@@ -77,8 +78,8 @@ uint32 arkrtos_kernel_ushell_active = 0;
 
 static uint8 arkrtos_kernel_ptr_ram_ok(const void *p, uint32 len)
 {
-    uint32 start = (uint32)p;
-    uint32 end   = start + len;
+    unsigned long start = (unsigned long)p;
+    unsigned long end   = start + (unsigned long)len;
 
     if(p == 0 || end < start)           /* 空指针或长度回绕 */
     {
@@ -118,8 +119,8 @@ static uint8 arkrtos_kernel_ptr_ram_ok(const void *p, uint32 len)
 
 static uint8 arkrtos_kernel_ptr_flash_ok(const void *p, uint32 len)
 {
-    uint32 start = (uint32)p;
-    uint32 end   = start + len;
+    unsigned long start = (unsigned long)p;
+    unsigned long end   = start + (unsigned long)len;
 
     if(p == 0 || end < start)
     {
@@ -417,7 +418,7 @@ uint16 arkrtos_cpu_busy_ticks = 0;   /* busy ticks of the last 1024-tick window 
 uint32 arkrtos_idle_ticks = 0;       /* cumulative ticks the idle task was on the CPU */
 #endif
 
-static uint32 arkrtos_idle_stack_ptr = 0;
+static unsigned long arkrtos_idle_stack_ptr = 0;
 
 static void arkrtos_sched_tick_sweep(void);
 static void arkrtos_task_recover_mark(int32 task_id);
@@ -2234,11 +2235,11 @@ static void svc_app_mgr(void *p_svc_ctx)
 
 typedef struct {
     int32  task_id;             /* 0 = 没有挂起的切换 */
-    uint32 new_rom_start;
+    unsigned long new_rom_start;
     uint32 new_rom_size;
-    uint32 new_ram_start;
+    unsigned long new_ram_start;
     uint32 new_ram_size;
-    uint32 new_entry;
+    unsigned long new_entry;
 } arkrtos_task_swap_t;
 
 static arkrtos_task_swap_t g_task_swap;
@@ -2252,8 +2253,9 @@ int32 arkrtos_task_swap_pending(void)
  * Thumb 位与 IPSR，RV32 看 mepc 对齐与 mstatus.MPP，LA64 看 ERA 对齐与
  * PRMD.PPLV。内核这里只说「这一帧能不能改」，不认识形状就拒绝。 */
 
-int32 arkrtos_task_swap_arm(int32 task_id, uint32 rom_start, uint32 rom_size,
-                            uint32 ram_start, uint32 ram_size, uint32 entry)
+int32 arkrtos_task_swap_arm(int32 task_id, unsigned long rom_start, uint32 rom_size,
+                            unsigned long ram_start, uint32 ram_size,
+                            unsigned long entry)
 {
     arkrtos_task_t *p_task;
     int32 i;
@@ -2402,7 +2404,7 @@ int32 arkrtos_task_swap_take(void *p_exc_ctx, int32 task_id)
     /* 恢复入口也指向新帧：RISC-V / LoongArch 的下一次切换是从 trap C 的
      * 返回值取帧的，这里同步一份，避免「切换落地」与「下一次切换」之间
      * TCB 里还指着旧块（旧块此刻马上就要被还回去）。 */
-    p_task->stack_ptr = (uint32)p_new;
+    p_task->stack_ptr = (unsigned long)p_new;
     #if (ARKRTOS_USE_STACK_USAGE == 1)
     p_task->stack_peak_low = p_task->stack_top;
     #endif
@@ -2912,7 +2914,7 @@ int32 arkrtos_stack_guard_context_info(uint32 out[4])
 }
 #endif /* ARKRTOS_USE_STACK_GUARD */
 
-int32 arkrtos_sched_activate(int32 new_task, uint32 old_psp)
+unsigned long arkrtos_sched_activate(int32 new_task, unsigned long old_psp)
 {
     int32 tid = arkrtos_current_task_id - 1;
 

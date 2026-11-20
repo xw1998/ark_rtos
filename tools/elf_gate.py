@@ -191,8 +191,12 @@ def main():
     src_board = os.path.join(ROOT, "board/qemu_loongarch64/arkrtos_board_config.h")
     with open(src_board, encoding="utf-8") as f:
         board_text = f.read()
-    win_lines = ("#define ARKRTOS_ELF_WINDOW_BASE      ARKRTOS_QEMU_APP_BASE\n"
-                 "#define ARKRTOS_ELF_WINDOW_SIZE      ARKRTOS_QEMU_APP_SIZE\n")
+    win_lines = ("#ifndef ARKRTOS_ELF_WINDOW_BASE\n"
+                 "#define ARKRTOS_ELF_WINDOW_BASE      ARKRTOS_QEMU_APP_BASE\n"
+                 "#endif\n"
+                 "#ifndef ARKRTOS_ELF_WINDOW_SIZE\n"
+                 "#define ARKRTOS_ELF_WINDOW_SIZE      ARKRTOS_QEMU_APP_SIZE\n"
+                 "#endif\n")
     if win_lines not in board_text:
         failures.append("D 缺窗口负向：板级里找不到两行窗口宏，判据已过期")
     else:
@@ -479,7 +483,7 @@ def main():
         ):
             if name not in elfc:
                 bad.append("H3: arkrtos_elf.c 里找不到 %r（%s）" % (name, why))
-        if "void arkrtos_port_task_set_tp(uint32 stack_ptr, unsigned long tp)" not in portc:
+        if "void arkrtos_port_task_set_tp(unsigned long stack_ptr, unsigned long tp)" not in portc:
             bad.append("H3: la64 port 没有 arkrtos_port_task_set_tp 的实现")
         if "frame[LA_FR_TP] = tp;" not in portc:
             bad.append("H3: set_tp 没有写帧里的 $tp 槽（LA_FR_TP）")

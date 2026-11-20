@@ -148,7 +148,7 @@ static int pmap_cu_rc(const char *label, int32 got, int32 want, int *p_fails)
 /* U-7b 探针：在某个空间的 ASID 下查一个 VA 的条目，查完换回来。
  * 这里刻意用 asid_raw_swap 而不是 activate —— activate 会把缺的条目当场
  * 补上，那样「被清掉了」永远读成「还在」。 */
-static uint32 pmap_asid_hit(uint32 space, uint32 va)
+static uint32 pmap_asid_hit(uint32 space, unsigned long va)
 {
     unsigned long prev;
     uint32 hit;
@@ -331,7 +331,7 @@ int cmd_pmap(int argc, char *argv[])
          *      即账本没有泄漏。
          * ------------------------------------------------------------ */
         uint32 space   = arkrtos_paging_space_current();
-        uint32 win     = arkrtos_paging_window_va();
+        unsigned long win = arkrtos_paging_window_va();
         uint32 total   = arkrtos_paging_frame_total();
         uint32 used0   = arkrtos_paging_frame_used();
         uint32 res0    = arkrtos_paging_swap_stat(4u);
@@ -774,7 +774,7 @@ int cmd_pmap(int argc, char *argv[])
     {
         uint32 op = 0u;
         uint32 asid;
-        uint32 va = arkrtos_port_paging_window_va();
+        unsigned long va = arkrtos_port_paging_window_va();
         unsigned long lo = 0UL;
         unsigned long hi = 0UL;
 
@@ -821,7 +821,7 @@ int cmd_pmap(int argc, char *argv[])
     if((argc >= 2) && (strcmp(argv[1], "asidinval") == 0))
     {
         uint32 count = arkrtos_paging_space_count();
-        uint32 va    = arkrtos_port_paging_window_va();
+        unsigned long va = arkrtos_port_paging_window_va();
         uint32 orig  = arkrtos_port_paging_space();
         uint32 a0;
         uint32 a1;
@@ -1016,7 +1016,7 @@ int cmd_pmap(int argc, char *argv[])
          * 正在窗口里跑：ELF 装载器与运行中的程序都在这个 2 MB 里。 */
         /* 窗口基址不写死板级宏：space 0 的帧就是窗口基址（这条对应关系由
          * port 建立），所以从它推。+1 MB 落在 2 MB 窗口的中段。 */
-        uint32 va = arkrtos_paging_window_va() + 0x100000u;
+        unsigned long va = arkrtos_paging_window_va() + 0x100000u;
         uint32 m0;
         uint32 m1;
         int fails = 0;
@@ -1145,7 +1145,7 @@ int cmd_pmap(int argc, char *argv[])
          * 其实只是前者已经退场。锁外那两个任务才开始跑。 */
         const char *path = (argc >= 3) ? argv[2] : "/mnt/ram/hello";
         char *uargv[1];
-        uint32 win;
+        unsigned long win;
         uint32 prev;
         uint32 s_first = 0u;
         uint32 s_second = 0u;
@@ -1343,8 +1343,8 @@ int cmd_pmap(int argc, char *argv[])
          * 带进 fault，这本身就是"不 fault 内核"的证据。
          * 用户侧那块内存取窗口里一段空地（与 pmap u1 同一位置，base+1 MB），
          * 先确认没有程序正在用窗口。 */
-        uint32 win  = arkrtos_paging_window_va();
-        uint32 uram = win + 0x100000u;
+        unsigned long win = arkrtos_paging_window_va();
+        unsigned long uram = win + 0x100000u;
         uint32 urom = uram + 0x800u;
         uint32 prev = arkrtos_paging_space_current();
         uint32 i;

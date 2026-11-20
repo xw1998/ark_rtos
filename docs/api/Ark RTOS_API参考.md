@@ -3372,10 +3372,10 @@ uint32 arkrtos_guard_task_slots(void);
 1) CPU指令层 - CPU核心指令封装（WFI/ISB/DSB等）
 2) 上下文层 - 任务上下文结构与栈帧初始化
 
-### `void arkrtos_port_resume_task(uint32 stack_ptr);`
+### `void arkrtos_port_resume_task(unsigned long stack_ptr);`
 
 ```c
-void arkrtos_port_resume_task(uint32 stack_ptr);
+void arkrtos_port_resume_task(unsigned long stack_ptr);
 ```
 
 **在异常处理程序内部直接恢复目标任务上下文并异常返回**
@@ -3385,10 +3385,10 @@ Cortex-M 上 HardFault 优先级高于 PendSV，故障处理程序活动期间
 PendSV 不会被服务，必须由本函数直接完成恢复 + 异常返回。
 本函数不返回；stack_ptr 为 0 时调用方应自行停机，不要调用。
 
-### `uint32 arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx);`
+### `unsigned long arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx);`
 
 ```c
-uint32 arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx);
+unsigned long arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx);
 ```
 
 **读取系统调用上下文中的第 idx 个参数（0~3）**
@@ -3398,10 +3398,10 @@ uint32 arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx);
 各架构的栈帧/trap 帧布局不同，由 port 层负责解析，
 内核只通过本接口与上面的宏访问参数，不感知任何寄存器布局。
 
-### `void   arkrtos_port_svc_set_ret(void *p_exc_ctx, uint32 value);`
+### `void   arkrtos_port_svc_set_ret(void *p_exc_ctx, unsigned long value);`
 
 ```c
-void   arkrtos_port_svc_set_ret(void *p_exc_ctx, uint32 value);
+void   arkrtos_port_svc_set_ret(void *p_exc_ctx, unsigned long value);
 ```
 
 **写回系统调用返回值（第 0 个参数寄存器）**
@@ -3580,10 +3580,10 @@ void arkrtos_port_set_control(uint32 val);
 **设置CONTROL寄存器值**
 - `val`：要写入的值
 
-### `uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void));`
+### `unsigned long arkrtos_port_stack_init(unsigned long stack_top, void (*`
 
 ```c
-uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void));
+unsigned long arkrtos_port_stack_init(unsigned long stack_top, void (*entry)(void));
 ```
 
 **初始化任务栈帧**
@@ -3595,10 +3595,10 @@ uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void));
 - RISC-V: 压入mepc/mstatus/x1-x31
 此函数由port层实现，内核无需关心具体布局
 
-### `void arkrtos_port_task_set_tp(uint32 stack_ptr, unsigned long tp);`
+### `void arkrtos_port_task_set_tp(unsigned long stack_ptr, unsigned long t`
 
 ```c
-void arkrtos_port_task_set_tp(uint32 stack_ptr, unsigned long tp);
+void arkrtos_port_task_set_tp(unsigned long stack_ptr, unsigned long tp);
 ```
 
 **把初始栈帧里的线程指针（TLS 用）写成指定值**
@@ -3609,10 +3609,10 @@ void arkrtos_port_task_set_tp(uint32 stack_ptr, unsigned long tp);
 PT_TLS 时调用它；关档时这个声明与实现都不存在，端口体积不变。
 其它端口打开 ARKRTOS_USE_ELF_TLS 是编译期错误，不是空操作。
 
-### `void arkrtos_port_enter_idle(uint32 stack_ptr, uint32 use_priv);`
+### `void arkrtos_port_enter_idle(unsigned long stack_ptr, uint32 use_priv)`
 
 ```c
-void arkrtos_port_enter_idle(uint32 stack_ptr, uint32 use_priv);
+void arkrtos_port_enter_idle(unsigned long stack_ptr, uint32 use_priv);
 ```
 
 **切换到空闲任务上下文**
@@ -3840,10 +3840,10 @@ int32 arkrtos_port_paging_init(void);
 LoongArch 的静态映射在 la_mmu_init() 里建好（开中断之前），
 本函数只报告那份映射是否已经生效，不重建它。 */
 
-### `int32 arkrtos_port_paging_check(uint32 base, uint32 size, arkrtos_mpu_`
+### `int32 arkrtos_port_paging_check(unsigned long base, uint32 size, arkrt`
 
 ```c
-int32 arkrtos_port_paging_check(uint32 base, uint32 size, arkrtos_mpu_mem_t mem);
+int32 arkrtos_port_paging_check(unsigned long base, uint32 size, arkrtos_mpu_mem_t mem);
 ```
 
 **审计一段地址跨度**
@@ -3973,10 +3973,10 @@ window; -3 = the caller is standing inside the window VA
 归还之后空间仍然存在（space_count 不变），下一次 activate() 会
 重新要帧 —— 语义是「这个空间空着」，不是「这个空间没了」。 */
 
-### `uint32 arkrtos_port_paging_lookup(uint32 va, uint32 *index, uint32 *pp`
+### `uint32 arkrtos_port_paging_lookup(unsigned long va, uint32 *index, uin`
 
 ```c
-uint32 arkrtos_port_paging_lookup(uint32 va, uint32 *index, uint32 *ppn, uint32 *ps);
+uint32 arkrtos_port_paging_lookup(unsigned long va, uint32 *index, uint32 *ppn, uint32 *ps);
 ```
 
 **读回一个 VA 当前由哪条 TLB 条目翻译（诊断用）**
@@ -4038,10 +4038,10 @@ uint32 arkrtos_port_paging_frame_used(void);
 关档时连符号都不给（宏在 arkrtos_mpu.h 里回 0）：一个「永远返回 0
 的统计函数」会被读成「一次都没换出过」，那是错答案。 */
 
-### `uint32 arkrtos_port_paging_window_va(void);`
+### `unsigned long arkrtos_port_paging_window_va(void);`
 
 ```c
-uint32 arkrtos_port_paging_window_va(void);
+unsigned long arkrtos_port_paging_window_va(void);
 ```
 
 **Virtual base of the App window (same VA for every address space)**
@@ -4077,10 +4077,10 @@ activate 会读回校验、缺什么补什么，所以拿它测「条目还在�
 测不出来。本函数只做一次 csrwr，不记账不补铺，调用方负责换回
 去。生产路径不该用它。 */
 
-### `void arkrtos_port_paging_inval_va(uint32 va);`
+### `void arkrtos_port_paging_inval_va(unsigned long va);`
 
 ```c
-void arkrtos_port_paging_inval_va(uint32 va);
+void arkrtos_port_paging_inval_va(unsigned long va);
 ```
 
 **按 VA 让翻译失效（invtlb op=3：不看 ASID，global 条目不动）**
@@ -5613,10 +5613,10 @@ instance. The caller must have installed that task's address
 space first; if it did not, the copy is refused with -4 instead
 of quietly reaching into whatever frame is installed. */
 
-### `int32 arkrtos_paging_user_copy(uint32 rom_start, uint32 rom_size, uint`
+### `int32 arkrtos_paging_user_copy(unsigned long rom_start, uint32 rom_siz`
 
 ```c
-int32 arkrtos_paging_user_copy(uint32 rom_start, uint32 rom_size, uint32 ram_start, uint32 ram_size, uint32 space, uint32 installed, void *kern, const void *user, uint32 len, uint8 write);
+int32 arkrtos_paging_user_copy(unsigned long rom_start, uint32 rom_size, unsigned long ram_start, uint32 ram_size, uint32 space, uint32 installed, void *kern, const void *user, uint32 len, uint8 write);
 ```
 
 **The check-and-copy body, with the task's windows passed as numbers**
@@ -5650,10 +5650,10 @@ uint32 arkrtos_paging_space_frame(uint32 space);
 
 **Physical frame base behind a space; 0 when the space does not exist */**
 
-### `uint32 arkrtos_paging_window_va(void);`
+### `unsigned long arkrtos_paging_window_va(void);`
 
 ```c
-uint32 arkrtos_paging_window_va(void);
+unsigned long arkrtos_paging_window_va(void);
 ```
 
 **Virtual base of the App window (the same VA for every space)**
@@ -8321,20 +8321,20 @@ void arkrtos_port_exit_critical(uint32 state) {
 
 **退出临界区，恢复进入前的中断状态**
 
-### `uint32 arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx) {`
+### `unsigned long arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx) {`
 
 ```c
-uint32 arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx) {
+unsigned long arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx) {
 ```
 
 **读取系统调用参数（0~3，对应 R0~R3）**
 Cortex-M 硬件压栈顺序为 R0,R1,R2,R3,R12,LR,PC,xPSR，
 使用栈帧指针直接索引即可。
 
-### `void arkrtos_port_svc_set_ret(void *p_exc_ctx, uint32 value) {`
+### `void arkrtos_port_svc_set_ret(void *p_exc_ctx, unsigned long value) {`
 
 ```c
-void arkrtos_port_svc_set_ret(void *p_exc_ctx, uint32 value) {
+void arkrtos_port_svc_set_ret(void *p_exc_ctx, unsigned long value) {
 ```
 
 **写回系统调用返回值（R0）**
@@ -8412,20 +8412,20 @@ void arkrtos_port_exit_critical(uint32 state) {
 
 **退出临界区，恢复进入前的中断状态**
 
-### `uint32 arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx) {`
+### `unsigned long arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx) {`
 
 ```c
-uint32 arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx) {
+unsigned long arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx) {
 ```
 
 **读取系统调用参数（0~3，对应 R0~R3）**
 Cortex-M 硬件压栈顺序为 R0,R1,R2,R3,R12,LR,PC,xPSR，
 使用栈帧指针直接索引即可。
 
-### `void arkrtos_port_svc_set_ret(void *p_exc_ctx, uint32 value) {`
+### `void arkrtos_port_svc_set_ret(void *p_exc_ctx, unsigned long value) {`
 
 ```c
-void arkrtos_port_svc_set_ret(void *p_exc_ctx, uint32 value) {
+void arkrtos_port_svc_set_ret(void *p_exc_ctx, unsigned long value) {
 ```
 
 **写回系统调用返回值（R0）**
@@ -8503,20 +8503,20 @@ void arkrtos_port_exit_critical(uint32 state) {
 
 **退出临界区，恢复进入前的中断状态**
 
-### `uint32 arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx) {`
+### `unsigned long arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx) {`
 
 ```c
-uint32 arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx) {
+unsigned long arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx) {
 ```
 
 **读取系统调用参数（0~3，对应 R0~R3）**
 Cortex-M 硬件压栈顺序为 R0,R1,R2,R3,R12,LR,PC,xPSR，
 使用栈帧指针直接索引即可。
 
-### `void arkrtos_port_svc_set_ret(void *p_exc_ctx, uint32 value) {`
+### `void arkrtos_port_svc_set_ret(void *p_exc_ctx, unsigned long value) {`
 
 ```c
-void arkrtos_port_svc_set_ret(void *p_exc_ctx, uint32 value) {
+void arkrtos_port_svc_set_ret(void *p_exc_ctx, unsigned long value) {
 ```
 
 **写回系统调用返回值（R0）**
@@ -8638,10 +8638,10 @@ trap）——绝不能在 trap 里就地 ertn 换栈，那会把异常处理程�
 ertn（见 arkrtos_context.S）。
 门闩未打开时两种落点都退化为「什么都不做」。
 
-### `uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void)) `
+### `unsigned long arkrtos_port_stack_init(unsigned long stack_top, void (*`
 
 ```c
-uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void)) {
+unsigned long arkrtos_port_stack_init(unsigned long stack_top, void (*entry)(void)) {
 ```
 
 **构造任务初始 trap 帧**
@@ -8739,10 +8739,10 @@ LoongArch 的 `ll.w` / `sc.w` 是真原子指令。单核下关中断也算
 > 说明：用 `.w` 而不是 `.d` 与内核的 uint32 宽度严格对应：内核的原子量
 是 32 位，用 64 位原子会读写到相邻字段。
 
-### `static void la_tlb_fill(uint32 vaddr, uint32 ps, uint32 index, unsigne`
+### `static void la_tlb_fill(unsigned long vaddr, uint32 ps, uint32 index, `
 
 ```c
-static void la_tlb_fill(uint32 vaddr, uint32 ps, uint32 index, unsigned long lo0, unsigned long lo1) {
+static void la_tlb_fill(unsigned long vaddr, uint32 ps, uint32 index, unsigned long lo0, unsigned long lo1) {
 ```
 
 **填一条 TLB 条目**
@@ -8757,10 +8757,10 @@ stlb_ps(12) 去比 VPPN，所以大页条目一旦被塞进 STLB 就永远匹配
 不上（症状是「地址明明有映射却一直报重填」）。tlbfill 替你
 选了正确的表，这是用它而不是手工写索引的唯一理由。
 
-### `static void la_tlb_write(uint32 vaddr, uint32 ps, uint32 index, unsign`
+### `static void la_tlb_write(unsigned long vaddr, uint32 ps, uint32 index,`
 
 ```c
-static void la_tlb_write(uint32 vaddr, uint32 ps, uint32 index, unsigned long lo0, unsigned long lo1) {
+static void la_tlb_write(unsigned long vaddr, uint32 ps, uint32 index, unsigned long lo0, unsigned long lo1) {
 ```
 
 **确定性写一条 TLB 条目（不经过 tlbfill 的随机选路）**
@@ -8797,10 +8797,10 @@ static unsigned long la_asid_swap(unsigned long asid) {
 `csrwr` 把旧值写回同一个寄存器，所以一次指令就够 —— 切换路径上
 每一次多余的 CSR 访问都是白花钱。
 
-### `static void la_tlb_fill_refill(uint32 vaddr, unsigned long lo0, unsign`
+### `static void la_tlb_fill_refill(unsigned long vaddr, unsigned long lo0,`
 
 ```c
-static void la_tlb_fill_refill(uint32 vaddr, unsigned long lo0, unsigned long lo1) {
+static void la_tlb_fill_refill(unsigned long vaddr, unsigned long lo0, unsigned long lo1) {
 ```
 
 **在 TLB 重填上下文里装一条 4 KB 对（只能在 refill 入口里用）**
@@ -8851,10 +8851,10 @@ static uint32 la_pg_app_frame(uint32 space) {
 
 空间号 -> 物理帧基址（2 MB 对齐，满足 PS=20 条目要求） */
 
-### `static void la_tlb_inval_page(uint32 va) {`
+### `static void la_tlb_inval_page(unsigned long va) {`
 
 ```c
-static void la_tlb_inval_page(uint32 va) {
+static void la_tlb_inval_page(unsigned long va) {
 ```
 
 **让某个 VA 的翻译失效（含 QEMU 的地址翻译缓存）**
@@ -8983,10 +8983,10 @@ uint32 arkrtos_port_paging_swap_stat(uint32 which) {
 4 = 驻留对数、5 = 槽总数
 **返回**：对应的读数；which 越界返回 0
 
-### `static int32 la_pg_demand_fault(uint32 badv) {`
+### `static int32 la_pg_demand_fault(unsigned long badv) {`
 
 ```c
-static int32 la_pg_demand_fault(uint32 badv) {
+static int32 la_pg_demand_fault(unsigned long badv) {
 ```
 
 **按需缺页：给 badv 所在的那一对 8 KB 拿帧并装条目**
@@ -9128,10 +9128,10 @@ uint32 arkrtos_port_paging_space_count(void) {
 
 板级给了几个地址空间（>= 1） */
 
-### `uint32 arkrtos_port_paging_window_va(void) {`
+### `unsigned long arkrtos_port_paging_window_va(void) {`
 
 ```c
-uint32 arkrtos_port_paging_window_va(void) {
+unsigned long arkrtos_port_paging_window_va(void) {
 ```
 
 App 窗口的 VA 基址：各空间共用同一个 VA，物理侧才按空间换 */
@@ -9184,10 +9184,10 @@ unsigned long arkrtos_port_paging_asid_raw_swap(unsigned long asid) {
 缺的补上。这个函数只做一次 csrwr：不记账、不补铺、不改
 s_pg_app_space，调用方负责换回去。生产路径不该用它。
 
-### `void arkrtos_port_paging_inval_va(uint32 va) {`
+### `void arkrtos_port_paging_inval_va(unsigned long va) {`
 
 ```c
-void arkrtos_port_paging_inval_va(uint32 va) {
+void arkrtos_port_paging_inval_va(unsigned long va) {
 ```
 
 **按 VA 让翻译失效：`invtlb` op=3，不看 ASID、global 条目不动**
@@ -9196,10 +9196,10 @@ void arkrtos_port_paging_inval_va(uint32 va) {
 它不是给生产路径用的，而是给 pmap asidinval 做对照 —— 「op=6 是
 定向的」这句话只有跟 op=3 的连带行为摆在一起才算证据。
 
-### `uint32 arkrtos_port_paging_lookup(uint32 va, uint32 *index, uint32 *pp`
+### `uint32 arkrtos_port_paging_lookup(unsigned long va, uint32 *index, uin`
 
 ```c
-uint32 arkrtos_port_paging_lookup(uint32 va, uint32 *index, uint32 *ppn, uint32 *ps) {
+uint32 arkrtos_port_paging_lookup(unsigned long va, uint32 *index, uint32 *ppn, uint32 *ps) {
 ```
 
 **读回一个 VA 当前由哪条 TLB 条目翻译（诊断用）**
@@ -9297,10 +9297,10 @@ int32 arkrtos_port_paging_init(void) {
 那不是这条接口要回答的问题。真正建映射失败时 la_mmu_init 之后的
 首条取指就会 refill 致命，不会静默。
 
-### `int32 arkrtos_port_paging_check(uint32 base, uint32 size, arkrtos_mpu_`
+### `int32 arkrtos_port_paging_check(unsigned long base, uint32 size, arkrt`
 
 ```c
-int32 arkrtos_port_paging_check(uint32 base, uint32 size, arkrtos_mpu_mem_t mem) {
+int32 arkrtos_port_paging_check(unsigned long base, uint32 size, arkrtos_mpu_mem_t mem) {
 ```
 
 **审计一段地址跨度是否被静态映射覆盖**
@@ -9456,10 +9456,10 @@ void arkrtos_port_set_thread_priv(uint32 is_priv) {
 调用，此刻还不知道要恢复哪个帧；而 ertn 恢复特权级只认帧里的
 PRMD.PPLV。所以只记下来，由拿帧的一方用 LA_PRIV_APPLY 补写。
 
-### `uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void)) `
+### `unsigned long arkrtos_port_stack_init(unsigned long stack_top, void (*`
 
 ```c
-uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void)) {
+unsigned long arkrtos_port_stack_init(unsigned long stack_top, void (*entry)(void)) {
 ```
 
 **构造任务初始 trap 帧**
@@ -9473,10 +9473,10 @@ sp←stack_top，然后 ertn 跳进任务，此时 CRMD.IE 已经打开。
 ra 置 0：任务函数返回就等于跳到 0 取指，会立刻进致命异常，
 与 Cortex-M 版（LR=0）同一处理口径。
 
-### `void arkrtos_port_task_set_tp(uint32 stack_ptr, unsigned long tp) {`
+### `void arkrtos_port_task_set_tp(unsigned long stack_ptr, unsigned long t`
 
 ```c
-void arkrtos_port_task_set_tp(uint32 stack_ptr, unsigned long tp) {
+void arkrtos_port_task_set_tp(unsigned long stack_ptr, unsigned long tp) {
 ```
 
 **把初始栈帧里的 TP（$r2）写成给定值**
@@ -9780,10 +9780,10 @@ void arkrtos_port_set_thread_priv(uint32 is_priv) {
 不在 C 里直接改帧的原因：arkrtos_sched_activate() 返回的帧指针
 要到它返回之后才拿到，而本函数是在它内部被调用的。
 
-### `uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void)) `
+### `unsigned long arkrtos_port_stack_init(unsigned long stack_top, void (*`
 
 ```c
-uint32 arkrtos_port_stack_init(uint32 stack_top, void (*entry)(void)) {
+unsigned long arkrtos_port_stack_init(unsigned long stack_top, void (*entry)(void)) {
 ```
 
 **构造任务初始 trap 帧**
@@ -10680,7 +10680,7 @@ static int32 elf_check_header(const uint8 *h, elf_word_t *p_entry, elf_word_t *p
 ### `static int32 elf_measure_image(const char *path, elf_word_t phoff, uin`
 
 ```c
-static int32 elf_measure_image(const char *path, elf_word_t phoff, uint16 phnum, uint16 phentsize, elf_word_t entry, uint32 bias, elf_image_t *p_img) {
+static int32 elf_measure_image(const char *path, elf_word_t phoff, uint16 phnum, uint16 phentsize, elf_word_t entry, unsigned long bias, elf_image_t *p_img) {
 ```
 
 **量一遍段表：装载会落在哪一段地址上**
@@ -10690,10 +10690,10 @@ static int32 elf_measure_image(const char *path, elf_word_t phoff, uint16 phnum,
 被某个 PT_LOAD 的 file range 盖住，这个地址才存在；否则留 0，
 由调用方决定是拒绝还是不给 AT_PHDR。
 
-### `static int32 elf_check_range(const elf_image_t *p_img, uint32 lo_limit`
+### `static int32 elf_check_range(const elf_image_t *p_img, unsigned long l`
 
 ```c
-static int32 elf_check_range(const elf_image_t *p_img, uint32 lo_limit, uint32 hi_limit) {
+static int32 elf_check_range(const elf_image_t *p_img, unsigned long lo_limit, unsigned long hi_limit) {
 ```
 
 **镜像必须整段落在 [lo_limit, hi_limit) 里（含端点判据用减法写） */**
@@ -10701,7 +10701,7 @@ static int32 elf_check_range(const elf_image_t *p_img, uint32 lo_limit, uint32 h
 ### `static int32 elf_write_tls(const char *path, uint32 space, elf_word_t `
 
 ```c
-static int32 elf_write_tls(const char *path, uint32 space, elf_word_t phoff, uint16 phnum, uint16 phentsize, uint32 bias) {
+static int32 elf_write_tls(const char *path, uint32 space, elf_word_t phoff, uint16 phnum, uint16 phentsize, unsigned long bias) {
 ```
 
 **把 PT_TLS 模板铺进窗口，并把 tbss 清零**
@@ -10725,10 +10725,10 @@ static int32 elf_find_interp(const char *path, elf_word_t phoff, uint16 phnum, u
 的 NUL：读到 p_filesz 个字节后强制补一个，超长直接拒绝——把
 截断的路径当成"另一个文件"去装是最难查的静默失败。
 
-### `static int32 elf_build_stack(uint32 win_top, uint32 argv_start, int32 `
+### `static int32 elf_build_stack(unsigned long win_top, unsigned long argv`
 
 ```c
-static int32 elf_build_stack(uint32 win_top, uint32 argv_start, int32 argc, char *argv[], const elf_aux_t *aux, uint32 auxn, uint32 *p_sp, uint32 *p_execfn) {
+static int32 elf_build_stack(unsigned long win_top, unsigned long argv_start, int32 argc, char *argv[], const elf_aux_t *aux, uint32 auxn, unsigned long *p_sp, unsigned long *p_execfn) {
 ```
 
 **把 argv 与 auxv 铺成 Linux 的形状，返回初始 sp**
@@ -11143,10 +11143,10 @@ uint32 arkrtos_paging_space_frame(uint32 space) {
 **Physical frame base behind an address space**
 **返回**：frame base, or 0 when the space does not exist (never a guess)
 
-### `uint32 arkrtos_paging_window_va(void) {`
+### `unsigned long arkrtos_paging_window_va(void) {`
 
 ```c
-uint32 arkrtos_paging_window_va(void) {
+unsigned long arkrtos_paging_window_va(void) {
 ```
 
 **Virtual base of the App window (the same VA for every space)**
@@ -11317,10 +11317,10 @@ This is the readout that was missing while maps could only be
 added: a driver that registered eight 4 KB pages had no way to see
 how close it was to the table being full.
 
-### `static uint8 arkrtos_paging_span_has(uint32 base, uint32 size, uint32 `
+### `static uint8 arkrtos_paging_span_has(unsigned long base, uint32 size, `
 
 ```c
-static uint8 arkrtos_paging_span_has(uint32 base, uint32 size, uint32 uva, uint32 len) {
+static uint8 arkrtos_paging_span_has(unsigned long base, uint32 size, unsigned long uva, uint32 len) {
 ```
 
 **整段是否落在给定窗口里**
@@ -11331,10 +11331,10 @@ static uint8 arkrtos_paging_span_has(uint32 base, uint32 size, uint32 uva, uint3
 末尾的指针会让拷贝循环走进未映射页，在内核态变成 refill 致命
 —— 那正是这条接口要消灭的「内核陪着 fault」。
 
-### `int32 arkrtos_paging_user_copy(uint32 rom_start, uint32 rom_size, uint`
+### `int32 arkrtos_paging_user_copy(unsigned long rom_start, uint32 rom_siz`
 
 ```c
-int32 arkrtos_paging_user_copy(uint32 rom_start, uint32 rom_size, uint32 ram_start, uint32 ram_size, uint32 space, uint32 installed, void *kern, const void *user, uint32 len, uint8 write) {
+int32 arkrtos_paging_user_copy(unsigned long rom_start, uint32 rom_size, unsigned long ram_start, uint32 ram_size, uint32 space, uint32 installed, void *kern, const void *user, uint32 len, uint8 write) {
 ```
 
 **受控访问用户地址的本体（读写两个方向共用一套判据）**

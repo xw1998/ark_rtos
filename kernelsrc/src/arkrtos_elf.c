@@ -122,22 +122,22 @@
 typedef struct
 {
     uint32 type;
-    uint32 value;
+    unsigned long value;
 } elf_aux_t;
 
 /* 一次镜像测量结果：装载会落在哪一段地址上（不含内容）。 */
 typedef struct
 {
-    uint32 lo;          /* 最低装入地址（含） */
-    uint32 hi;          /* 最高装入地址（不含） */
-    uint32 entry;       /* 加上 bias 之后的入口 */
-    uint32 phdr;        /* 程序头表在内存里的地址；0 = 表不在任何 PT_LOAD 里 */
+    unsigned long lo;   /* 最低装入地址（含） */
+    unsigned long hi;   /* 最高装入地址（不含） */
+    unsigned long entry;/* 加上 bias 之后的入口 */
+    unsigned long phdr; /* 程序头表在内存里的地址；0 = 表不在任何 PT_LOAD 里 */
     uint32 segs;        /* PT_LOAD 段数 */
     uint16 phnum;       /* 段表条目数 */
     uint16 phentsize;   /* 每条大小 */
 #if (ARKRTOS_USE_ELF_TLS == 1)
     /* PT_TLS（静态 TLS 模板）。没有 PT_TLS 时四个字段全 0。 */
-    uint32 tls_va;      /* 模板装入地址 = PT_TLS p_vaddr + bias */
+    unsigned long tls_va; /* 模板装入地址 = PT_TLS p_vaddr + bias */
     uint32 tls_filesz;  /* 模板字节数（tdata） */
     uint32 tls_memsz;   /* 块总大小（tdata + tbss） */
     uint32 tls_align;   /* 段声明的对齐 */
@@ -419,8 +419,8 @@ static int32 elf_read_exact(const char *path, uint8 *buf, uint32 len, uint32 off
 
 static uint8 s_elf_stage[ELF_COPY_CHUNK];
 
-static int32 elf_copy_to_window(uint32 space, const char *path, uint32 va,
-                                uint32 len, uint32 off)
+static int32 elf_copy_to_window(uint32 space, const char *path,
+                                unsigned long va, uint32 len, uint32 off)
 {
     uint32 done = 0u;
 
@@ -448,7 +448,7 @@ static int32 elf_copy_to_window(uint32 space, const char *path, uint32 va,
     return ARKRTOS_ELF_OK;
 }
 
-static void elf_zero_window(uint32 space, uint32 va, uint32 len)
+static void elf_zero_window(uint32 space, unsigned long va, uint32 len)
 {
     if(len == 0u)
     {
@@ -589,19 +589,19 @@ static int32 elf_check_header(const uint8 *h, elf_word_t *p_entry,
 */
 static int32 elf_measure_image(const char *path, elf_word_t phoff,
                                uint16 phnum, uint16 phentsize,
-                               elf_word_t entry, uint32 bias,
+                               elf_word_t entry, unsigned long bias,
                                elf_image_t *p_img)
 {
     uint8 phdr[ELF_PHDR_SIZE];
-    uint32 lo = 0xFFFFFFFFu;
-    uint32 hi = 0u;
+    unsigned long lo = ~0UL;
+    unsigned long hi = 0u;
     uint32 segs = 0u;
-    uint32 phdr_va = 0u;
+    unsigned long phdr_va = 0u;
     uint32 ph_begin = (uint32)phoff;
     uint32 ph_end;
     uint32 i;
 #if (ARKRTOS_USE_ELF_TLS == 1)
-    uint32 tls_va = 0u;
+    unsigned long tls_va = 0u;
     uint32 tls_filesz = 0u;
     uint32 tls_memsz = 0u;
     uint32 tls_align = 0u;
@@ -624,8 +624,8 @@ static int32 elf_measure_image(const char *path, elf_word_t phoff,
 #if (ARKRTOS_USE_ELF_TLS == 1)
         elf_word_t p_align;
 #endif
-        uint32 a0;
-        uint32 a1;
+        unsigned long a0;
+        unsigned long a1;
 
         rc = elf_read_exact(path, phdr, ELF_PHDR_SIZE,
                             (uint32)phoff + (i * (uint32)phentsize));
@@ -653,8 +653,7 @@ static int32 elf_measure_image(const char *path, elf_word_t phoff,
             {
                 return ARKRTOS_ELF_ERR_LAYOUT;
             }
-            if((p_vaddr > (elf_word_t)0xFFFFFFFFu) ||
-               ((uint32)p_vaddr > (0xFFFFFFFFu - bias)))
+            if(p_vaddr > (~0UL - bias))
             {
                 return ARKRTOS_ELF_ERR_LAYOUT;
             }
@@ -668,7 +667,7 @@ static int32 elf_measure_image(const char *path, elf_word_t phoff,
                 {
                     return ARKRTOS_ELF_ERR_LAYOUT;
                 }
-                if(((bias + (uint32)p_vaddr) & (t - 1u)) != 0u)
+                if(((bias + p_vaddr) & (t - 1u)) != 0u)
                 {
                     return ARKRTOS_ELF_ERR_LAYOUT;
                 }
@@ -678,8 +677,8 @@ static int32 elf_measure_image(const char *path, elf_word_t phoff,
                 /* ELF 只允许一个 PT_TLS；两个就是格式错误，不能挑一个用。 */
                 return ARKRTOS_ELF_ERR_LAYOUT;
             }
-            tls_va     = bias + (uint32)p_vaddr;
-            if((uint32)p_memsz > (0xFFFFFFFFu - tls_va))
+            tls_va     = bias + p_vaddr;
+            if(p_memsz > (~0UL - tls_va))
             {
                 return ARKRTOS_ELF_ERR_LAYOUT;
             }
@@ -703,19 +702,20 @@ static int32 elf_measure_image(const char *path, elf_word_t phoff,
         {
             return ARKRTOS_ELF_ERR_LAYOUT;
         }
-        /* 用减法写判据，不用 a0 + memsz：32 位 port 上那个加法会在
-         * 0xFFFFFFxx 处回绕。 */
-        if((p_vaddr > (elf_word_t)0xFFFFFFFFu) ||
-           ((uint32)p_vaddr > (0xFFFFFFFFu - bias)))
+        /* 用减法写判据，不用 a0 + memsz：地址类型在多宽都不会回绕。
+         * 这里退掉了原先的「p_vaddr 超过 32 位就拒绝」——真实发行版二进制
+         * 的装入地址就是 0x120000000 这一档，那一条正是把它们全挡在门外
+         * 的判据。32 位 port 上 ~0UL 就是 0xFFFFFFFF，行为逐位不变。 */
+        if(p_vaddr > (~0UL - bias))
         {
             return ARKRTOS_ELF_ERR_LAYOUT;
         }
-        a0 = bias + (uint32)p_vaddr;
-        if((uint32)p_memsz > (0xFFFFFFFFu - a0))
+        a0 = bias + p_vaddr;
+        if(p_memsz > (~0UL - a0))
         {
             return ARKRTOS_ELF_ERR_LAYOUT;
         }
-        a1 = a0 + (uint32)p_memsz;
+        a1 = a0 + p_memsz;
 
         if(a0 < lo)
         {
@@ -749,7 +749,7 @@ static int32 elf_measure_image(const char *path, elf_word_t phoff,
 
     p_img->lo        = lo;
     p_img->hi        = hi;
-    p_img->entry     = bias + (uint32)entry;
+    p_img->entry     = bias + entry;
     p_img->phdr      = phdr_va;
     p_img->segs      = segs;
     p_img->phnum     = phnum;
@@ -758,8 +758,8 @@ static int32 elf_measure_image(const char *path, elf_word_t phoff,
 }
 
 /** @brief 镜像必须整段落在 [lo_limit, hi_limit) 里（含端点判据用减法写） */
-static int32 elf_check_range(const elf_image_t *p_img, uint32 lo_limit,
-                             uint32 hi_limit)
+static int32 elf_check_range(const elf_image_t *p_img, unsigned long lo_limit,
+                             unsigned long hi_limit)
 {
     if((p_img->lo < lo_limit) || (p_img->hi > hi_limit))
     {
@@ -780,7 +780,7 @@ static int32 elf_check_range(const elf_image_t *p_img, uint32 lo_limit,
 * @return ARKRTOS_ELF_OK / 负错误码（读文件失败时原样透出）
 */
 static int32 elf_write_tls(const char *path, uint32 space, elf_word_t phoff,
-                           uint16 phnum, uint16 phentsize, uint32 bias)
+                           uint16 phnum, uint16 phentsize, unsigned long bias)
 {
     uint8 phdr[ELF_PHDR_SIZE];
     uint32 i;
@@ -794,7 +794,7 @@ static int32 elf_write_tls(const char *path, uint32 space, elf_word_t phoff,
         elf_word_t p_filesz;
         elf_word_t p_memsz;
         uint8 *dst;
-        uint32 va;
+        unsigned long va;
 
         rc = elf_read_exact(path, phdr, ELF_PHDR_SIZE,
                             (uint32)phoff + (i * (uint32)phentsize));
@@ -812,7 +812,7 @@ static int32 elf_write_tls(const char *path, uint32 space, elf_word_t phoff,
         p_vaddr  = elf_rdword(phdr + ELF_PH_VADDR);
         p_filesz = elf_rdword(phdr + ELF_PH_FILESZ);
         p_memsz  = elf_rdword(phdr + ELF_PH_MEMSZ);
-        va       = bias + (uint32)p_vaddr;
+        va       = bias + p_vaddr;
         dst      = (uint8 *)(unsigned long)va;
 #if (ARKRTOS_USE_PAGING == 1)
         (void)dst;
@@ -852,7 +852,7 @@ static int32 elf_write_tls(const char *path, uint32 space, elf_word_t phoff,
 /* 第二遍：真写。先 filesz 拷数据，再 memsz-filesz 清零（BSS）。
  * 顺序不能反：清零写在拷贝之前会被后面的数据覆盖，写在之后才是对的。 */
 static int32 elf_write_image(const char *path, uint32 space, elf_word_t phoff,
-                             uint16 phnum, uint16 phentsize, uint32 bias,
+                             uint16 phnum, uint16 phentsize, unsigned long bias,
                              uint32 *p_bytes)
 {
     uint8 phdr[ELF_PHDR_SIZE];
@@ -867,7 +867,7 @@ static int32 elf_write_image(const char *path, uint32 space, elf_word_t phoff,
         elf_word_t p_vaddr;
         elf_word_t p_filesz;
         elf_word_t p_memsz;
-        uint32 va;
+        unsigned long va;
         uint8 *dst;
 
         rc = elf_read_exact(path, phdr, ELF_PHDR_SIZE,
@@ -886,7 +886,7 @@ static int32 elf_write_image(const char *path, uint32 space, elf_word_t phoff,
         p_vaddr  = elf_rdword(phdr + ELF_PH_VADDR);
         p_filesz = elf_rdword(phdr + ELF_PH_FILESZ);
         p_memsz  = elf_rdword(phdr + ELF_PH_MEMSZ);
-        va       = bias + (uint32)p_vaddr;
+        va       = bias + p_vaddr;
         dst      = (uint8 *)(unsigned long)va;
 #if (ARKRTOS_USE_PAGING == 1)
         (void)dst;   /* 分页档不直接用窗口指针：统一走 elf_copy_to_window() */
@@ -985,7 +985,8 @@ static int32 elf_find_interp(const char *path, elf_word_t phoff, uint16 phnum,
     return 0;
 }
 
-static void elf_aux_add(elf_aux_t *aux, uint32 *p_n, uint32 type, uint32 value)
+static void elf_aux_add(elf_aux_t *aux, uint32 *p_n, uint32 type,
+                        unsigned long value)
 {
     if(*p_n < (uint32)ARKRTOS_ELF_AUX_MAX)
     {
@@ -1004,13 +1005,13 @@ static void elf_aux_add(elf_aux_t *aux, uint32 *p_n, uint32 type, uint32 value)
 *          字符串从窗口顶端往下写，数组紧贴在 argv_start 之上。
 * @return 0 = 成功（*p_sp / *p_execfn 有效）；否则为负错误码
 */
-static int32 elf_build_stack(uint32 win_top, uint32 argv_start,
+static int32 elf_build_stack(unsigned long win_top, unsigned long argv_start,
                              int32 argc, char *argv[],
                              const elf_aux_t *aux, uint32 auxn,
-                             uint32 *p_sp, uint32 *p_execfn)
+                             unsigned long *p_sp, unsigned long *p_execfn)
 {
-    uint32 str_low = win_top;
-    uint32 addrs[ARKRTOS_ELF_MAX_ARGS];
+    unsigned long str_low = win_top;
+    unsigned long addrs[ARKRTOS_ELF_MAX_ARGS];
     uint32 array_bytes;
     uint32 i;
     uint8 *p_array;
@@ -1067,7 +1068,7 @@ static int32 elf_build_stack(uint32 win_top, uint32 argv_start,
     elf_wrword(p_array + (ELF_WORD_SIZE * (slot + 1u)), 0);
 
     *p_sp = argv_start;
-    *p_execfn = (argc > 0) ? addrs[0] : 0u;
+    *p_execfn = (argc > 0) ? addrs[0] : 0UL;
     return ARKRTOS_ELF_OK;
 }
 
@@ -1085,8 +1086,8 @@ static int32 elf_build_stack(uint32 win_top, uint32 argv_start,
 /* 第三阶段：注册任务、降权、写回窗口、绑帧，整段做成原子段。
  * 只在这一处做，是因为这四步之间被 tick 切走就会露出半配置状态
  * （5 连跑 2 败的间歇签名，见 §5.25）。返回任务 id 或负错误码。 */
-static int32 elf_start_task(elf_word_t entry, uint32 stack_bottom,
-                            uint32 stack_bytes, uint32 space, uint32 tp)
+static int32 elf_start_task(elf_word_t entry, unsigned long stack_bottom,
+                            uint32 stack_bytes, uint32 space, unsigned long tp)
 {
     uint32 crit;
     int32 id;
@@ -1131,9 +1132,9 @@ static int32 elf_start_task(elf_word_t entry, uint32 stack_bottom,
     {
         arkrtos_task_t *p_task = &arkrtos_task_table[id - 1];
 
-        p_task->rom_start = (uint32)ARKRTOS_ELF_WINDOW_BASE;
+        p_task->rom_start = (unsigned long)ARKRTOS_ELF_WINDOW_BASE;
         p_task->rom_size  = (uint32)ARKRTOS_ELF_WINDOW_SIZE;
-        p_task->ram_start = (uint32)ARKRTOS_ELF_WINDOW_BASE;
+        p_task->ram_start = (unsigned long)ARKRTOS_ELF_WINDOW_BASE;
         p_task->ram_size  = (uint32)ARKRTOS_ELF_WINDOW_SIZE;
 #if (ARKRTOS_USE_MPU == 1)
         arkrtos_mpu_build_task(p_task);
@@ -1213,12 +1214,14 @@ static int32 elf_prepare_args(const char *path, int32 *p_argc, char ***p_argv,
 
 /* 窗口切分：顶部往下依次是 argv 区（16 字节对齐）与用户栈，剩下的是可执行区。
  * 三段一个都不能为空——窗口小到放不下属于板级配置错误，不是程序问题。 */
-static int32 elf_window_layout(uint32 win_base, uint32 *p_win_top,
-                               uint32 *p_argv_start, uint32 *p_stack_bottom)
+static int32 elf_window_layout(unsigned long win_base, unsigned long *p_win_top,
+                               unsigned long *p_argv_start,
+                               unsigned long *p_stack_bottom)
 {
-    uint32 win_top      = win_base + (uint32)ARKRTOS_ELF_WINDOW_SIZE;
-    uint32 argv_start   = (win_top - (uint32)ARKRTOS_ELF_ARGV_SIZE) & ~0xFu;
-    uint32 stack_bottom = argv_start - (uint32)ARKRTOS_ELF_STACK_SIZE;
+    unsigned long win_top = win_base + (uint32)ARKRTOS_ELF_WINDOW_SIZE;
+    unsigned long argv_start =
+        (win_top - (uint32)ARKRTOS_ELF_ARGV_SIZE) & ~0xFUL;
+    unsigned long stack_bottom = argv_start - (uint32)ARKRTOS_ELF_STACK_SIZE;
 
     if((stack_bottom <= win_base) ||
        (argv_start <= stack_bottom) ||
@@ -1235,7 +1238,8 @@ static int32 elf_window_layout(uint32 win_base, uint32 *p_win_top,
 }
 
 /* 入口回跳区：必须在可执行区里、且 4 字节对齐。 */
-static int32 elf_check_entry(elf_word_t entry, uint32 win_base, uint32 stack_bottom)
+static int32 elf_check_entry(elf_word_t entry, unsigned long win_base,
+                             unsigned long stack_bottom)
 {
     /* 入口必须落在窗口内且 4 字节对齐：RV32 与 LoongArch 的指令都是 4 字节
      * （RV32 的压缩扩展只让指令可能变短，不会让入口变半字对齐）。 */
@@ -1252,12 +1256,13 @@ static int32 elf_check_entry(elf_word_t entry, uint32 win_base, uint32 stack_bot
  * 校验不过就绝不在窗口里留下半份镜像。 */
 
 /* 栈关：用户栈与 argv 也在窗口里，铺之前先把地址空间装对。 */
-static int32 elf_stack_build(uint32 space, uint32 win_top, uint32 argv_start,
+static int32 elf_stack_build(uint32 space, unsigned long win_top,
+                             unsigned long argv_start,
                              int32 argc, char *argv[],
                              const elf_aux_t *aux, uint32 auxn,
-                             uint32 *p_sp, uint32 *p_execfn)
+                             unsigned long *p_sp, unsigned long *p_execfn)
 {
-    uint32 sp = 0u;
+    unsigned long sp = 0u;
     int32 rc;
 
 #if (ARKRTOS_USE_PAGING == 1)
@@ -1306,20 +1311,20 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
     uint16 phnum = 0u;
     uint16 phentsize = 0u;
     uint16 etype = 0u;
-    uint32 win_base = (uint32)ARKRTOS_ELF_WINDOW_BASE;
-    uint32 win_top;
-    uint32 argv_start;
-    uint32 stack_bottom;
+    unsigned long win_base = (unsigned long)ARKRTOS_ELF_WINDOW_BASE;
+    unsigned long win_top;
+    unsigned long argv_start;
+    unsigned long stack_bottom;
     uint32 stack_bytes;
-    uint32 sp = 0u;
-    uint32 execfn = 0u;
-    uint32 task_entry = 0u;
+    unsigned long sp = 0u;
+    unsigned long execfn = 0u;
+    unsigned long task_entry = 0u;
 #if (ARKRTOS_USE_DYNLOAD == 1)
-    uint32 bias = 0u;
+    unsigned long bias = 0u;
 #endif
     uint32 bytes = 0u;
     uint32 segs = 0u;
-    uint32 tp = 0u;
+    unsigned long tp = 0u;
     elf_aux_t aux[ARKRTOS_ELF_AUX_MAX];
     uint32 auxn = 0u;
     elf_image_t img;
@@ -1386,9 +1391,9 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
         uint16 iphnum = 0u;
         uint16 iphentsize = 0u;
         uint16 itype = 0u;
-        uint32 interp_lo = (uint32)ARKRTOS_ELF_INTERP_BASE;
-        uint32 interp_hi = interp_lo + (uint32)ARKRTOS_ELF_INTERP_SIZE;
-        uint32 ibias;
+        unsigned long interp_lo = (unsigned long)ARKRTOS_ELF_INTERP_BASE;
+        unsigned long interp_hi = interp_lo + (uint32)ARKRTOS_ELF_INTERP_SIZE;
+        unsigned long ibias;
         elf_image_t interp;
 
         /* ET_DYN 的主程序按窗口基址装载；它的最低 vaddr 必须是 0，

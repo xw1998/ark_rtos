@@ -138,13 +138,23 @@ static uint32       s_nr_overflow;
 
 /* 堆游标（brk / mmap 共用）。窗口是整块静态映射，所以这里的"分配"只是
  * 在窗口内划出一段不重叠的地址，不建立任何新映射。 */
-static uint32  s_heap_cur;
+static unsigned long s_heap_cur;
 
 /* ---------------------------------------------------------------- 小工具 */
 
 static void lx_ret(void *p_ctx, int32 value)
 {
     arkrtos_port_svc_set_ret_signed(p_ctx, value);
+}
+
+/* 地址类返回值（brk / mmap）必须是整字宽：走 int32 的那个出口在 64 位
+ * port 上会把 0x120000000 这类地址截成负数（"失败的假象"）。这两个
+ * 处理函数自己写回返回值，再返回 LX_RET_PTR_DONE 让分发器不覆盖。 */
+#define LX_RET_PTR_DONE     ((int32)0x7FFFFFFF)
+
+static void lx_ret_ptr(void *p_ctx, unsigned long value)
+{
+    arkrtos_port_svc_set_ret(p_ctx, value);
 }
 
 /**
@@ -155,7 +165,7 @@ static void lx_ret(void *p_ctx, int32 value)
 */
 static int32 lx_copy_path(void *p_ctx, uint32 idx, char *out, uint32 out_size)
 {
-    uint32 uaddr = ARKRTOS_SVC_ARG(p_ctx, idx);
+    unsigned long uaddr = ARKRTOS_SVC_ARG(p_ctx, idx);
     uint32 i;
 
     if((uaddr == 0u) || (out_size == 0u))
@@ -198,29 +208,31 @@ static void lx_copy_str(char *dst, uint32 cap, const char *src)
     dst[i] = 0;
 }
 
-static uint32 lx_heap_base(void)
+static unsigned long lx_heap_base(void)
 {
 #if (ARKRTOS_USE_DYNLOAD == 1)
     /* 动态档：窗口背面留给解释器，堆从解释器区之上开始，不与它重叠。 */
-    return (uint32)ARKRTOS_ELF_INTERP_BASE + (uint32)ARKRTOS_ELF_INTERP_SIZE;
+    return (unsigned long)ARKRTOS_ELF_INTERP_BASE +
+           (unsigned long)ARKRTOS_ELF_INTERP_SIZE;
 #else
-    return (uint32)ARKRTOS_ELF_WINDOW_BASE + ((uint32)ARKRTOS_ELF_WINDOW_SIZE / 2u);
+    return (unsigned long)ARKRTOS_ELF_WINDOW_BASE +
+           ((unsigned long)ARKRTOS_ELF_WINDOW_SIZE / 2u);
 #endif
 }
 
-static uint32 lx_heap_end(void)
+static unsigned long lx_heap_end(void)
 {
     /* 窗口顶端是装载器切的栈与参数区（默认 32K + 16K），这里再留 128K，
      * 不与之重叠。 */
-    return (uint32)ARKRTOS_ELF_WINDOW_BASE + ((uint32)ARKRTOS_ELF_WINDOW_SIZE
-                                              - (128u * 1024u));
+    return (unsigned long)ARKRTOS_ELF_WINDOW_BASE +
+           ((unsigned long)ARKRTOS_ELF_WINDOW_SIZE - (128u * 1024u));
 }
 
-static uint32 lx_align_up(uint32 v)
+static unsigned long lx_align_up(unsigned long v)
 {
-    uint32 mask = 4095u;
+    unsigned long mask = 4095u;
 
-    if(v > (0xFFFFFFFFu - mask))
+    if(v > (~0UL - mask))
     {
         return 0u;      /* 溢出：调用方据此回 -ENOMEM */
     }
@@ -334,7 +346,7 @@ static int32 lx_close(void *p_ctx)
 static int32 lx_read(void *p_ctx)
 {
     int32  fd   = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
-    uint32 ua   = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    unsigned long ua = ARKRTOS_SVC_ARG(p_ctx, 1u);
     uint32 want = ARKRTOS_SVC_ARG(p_ctx, 2u);
     uint8  buf[LX_IO_CHUNK];
     uint32 done = 0u;
@@ -398,7 +410,7 @@ static int32 lx_read(void *p_ctx)
 static int32 lx_write(void *p_ctx)
 {
     int32  fd   = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
-    uint32 ua   = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    unsigned long ua = ARKRTOS_SVC_ARG(p_ctx, 1u);
     uint32 want = ARKRTOS_SVC_ARG(p_ctx, 2u);
     uint8  buf[LX_IO_CHUNK];
     uint32 done = 0u;
@@ -439,7 +451,7 @@ static int32 lx_write(void *p_ctx)
 static int32 lx_clock_gettime(void *p_ctx)
 {
     uint32 clk = ARKRTOS_SVC_ARG(p_ctx, 0u);
-    uint32 ua  = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    unsigned long ua = ARKRTOS_SVC_ARG(p_ctx, 1u);
     uint32 ms  = 0u;
 
     if(ua == 0u)
@@ -479,7 +491,7 @@ static int32 lx_clock_gettime(void *p_ctx)
 
 static int32 lx_uname(void *p_ctx)
 {
-    uint32 ua = ARKRTOS_SVC_ARG(p_ctx, 0u);
+    unsigned long ua = ARKRTOS_SVC_ARG(p_ctx, 0u);
     struct
     {
         char sysname[65];
@@ -526,7 +538,7 @@ static int32 lx_uname(void *p_ctx)
 static int32 lx_pread64(void *p_ctx)
 {
     int32  fd   = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
-    uint32 ua   = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    unsigned long ua = ARKRTOS_SVC_ARG(p_ctx, 1u);
     uint32 want = ARKRTOS_SVC_ARG(p_ctx, 2u);
     uint32 pos  = ARKRTOS_SVC_ARG(p_ctx, 3u);
     uint8  buf[LX_IO_CHUNK];
@@ -587,10 +599,10 @@ static int32 lx_pread64(void *p_ctx)
  * 就是为了让"接受"与"强制"在读数时能分开，不冒充有页级保护。 */
 static int32 lx_mprotect(void *p_ctx)
 {
-    uint32 addr = ARKRTOS_SVC_ARG(p_ctx, 0u);
-    uint32 len  = ARKRTOS_SVC_ARG(p_ctx, 1u);
-    uint32 win_base = (uint32)ARKRTOS_ELF_WINDOW_BASE;
-    uint32 win_end  = win_base + (uint32)ARKRTOS_ELF_WINDOW_SIZE;
+    unsigned long addr = ARKRTOS_SVC_ARG(p_ctx, 0u);
+    unsigned long len  = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    unsigned long win_base = (unsigned long)ARKRTOS_ELF_WINDOW_BASE;
+    unsigned long win_end  = win_base + (uint32)ARKRTOS_ELF_WINDOW_SIZE;
 
     if((addr & 0xFFFu) != 0u)
     {
@@ -611,9 +623,9 @@ static int32 lx_mprotect(void *p_ctx)
 
 static int32 lx_brk(void *p_ctx)
 {
-    uint32 want  = ARKRTOS_SVC_ARG(p_ctx, 0u);
-    uint32 base  = lx_heap_base();
-    uint32 limit = lx_heap_end();
+    unsigned long want  = ARKRTOS_SVC_ARG(p_ctx, 0u);
+    unsigned long base  = lx_heap_base();
+    unsigned long limit = lx_heap_end();
 
     if(s_heap_cur == 0u)
     {
@@ -622,26 +634,29 @@ static int32 lx_brk(void *p_ctx)
 
     if(want == 0u)
     {
-        return (int32)s_heap_cur;
+        lx_ret_ptr(p_ctx, s_heap_cur);
+        return LX_RET_PTR_DONE;
     }
     if((want < base) || (want > limit))
     {
         /* Linux 的约定：失败时返回当前 break，不返回负值。 */
-        return (int32)s_heap_cur;
+        lx_ret_ptr(p_ctx, s_heap_cur);
+        return LX_RET_PTR_DONE;
     }
 
     s_heap_cur = want;
-    return (int32)s_heap_cur;
+    lx_ret_ptr(p_ctx, s_heap_cur);
+    return LX_RET_PTR_DONE;
 }
 
 static int32 lx_mmap(void *p_ctx)
 {
     uint32 len   = ARKRTOS_SVC_ARG(p_ctx, 1u);
     uint32 flags = ARKRTOS_SVC_ARG(p_ctx, 3u);
-    uint32 base  = lx_heap_base();
-    uint32 limit = lx_heap_end();
-    uint32 start;
-    uint32 end;
+    unsigned long base  = lx_heap_base();
+    unsigned long limit = lx_heap_end();
+    unsigned long start;
+    unsigned long end;
 
     if(len == 0u)
     {
@@ -672,12 +687,13 @@ static int32 lx_mmap(void *p_ctx)
     }
 
     s_heap_cur = end;
-    return (int32)start;
+    lx_ret_ptr(p_ctx, start);
+    return LX_RET_PTR_DONE;
 }
 
 static int32 lx_munmap(void *p_ctx)
 {
-    uint32 addr = ARKRTOS_SVC_ARG(p_ctx, 0u);
+    unsigned long addr = ARKRTOS_SVC_ARG(p_ctx, 0u);
 
     if(addr == 0u)
     {
@@ -795,6 +811,12 @@ int32 arkrtos_linux_abi_try(void *p_svc_ctx)
         return 1;
     }
 
+    if(rc == LX_RET_PTR_DONE)
+    {
+        /* 地址类返回值已由处理函数按整字宽写回，这里不许再覆盖。 */
+        s_stat[LX_STAT_HANDLED]++;
+        return 1;
+    }
     if(rc == -LX_EFAULT)
     {
         s_stat[LX_STAT_EFAULT]++;

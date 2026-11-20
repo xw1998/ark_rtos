@@ -233,10 +233,13 @@ BLOCKS = [
         ("guard", "ARKRTOS_LINUX_ABI_SYSSTAT", "bool"),
         ("guard", "ARKRTOS_USE_ELF_TLS", "bool"),
         ("override", "ARKRTOS_USE_EXIT_CODE", "bool"),
-        ("plain", "ARKRTOS_ELF_WINDOW_BASE", "alias:ARKRTOS_QEMU_APP_BASE"),
-        ("plain", "ARKRTOS_ELF_WINDOW_SIZE", "alias:ARKRTOS_QEMU_APP_SIZE"),
-        ("plain", "ARKRTOS_ELF_INTERP_BASE", "alias:(ARKRTOS_ELF_WINDOW_BASE + 0x00100000u)"),
-        ("plain", "ARKRTOS_ELF_INTERP_SIZE", "alias:(64u * 1024u)"),
+        # guard 而不是 plain：窗口 VA 要能被命令行 -D 覆盖（真实发行版
+        # LA64 静态二进制按 0x120000000 链接），默认值仍是 APP_BASE ⇒
+        # 不给 -D 时逐字节不变。2026-11-20。
+        ("guard", "ARKRTOS_ELF_WINDOW_BASE", "alias:ARKRTOS_QEMU_APP_BASE"),
+        ("guard", "ARKRTOS_ELF_WINDOW_SIZE", "alias:ARKRTOS_QEMU_APP_SIZE"),
+        ("guard", "ARKRTOS_ELF_INTERP_BASE", "alias:(ARKRTOS_ELF_WINDOW_BASE + 0x00100000u)"),
+        ("guard", "ARKRTOS_ELF_INTERP_SIZE", "alias:(64u * 1024u)"),
         ("override", "ARKRTOS_USE_MODLOAD", "bool"),
         ("plain", "ARKRTOS_MOD_AREA_SIZE", "size_u"),
         ("plain", "ARKRTOS_PLATFORM_REBOOT_PORT", "bool"),

@@ -152,7 +152,7 @@ void arkrtos_task_stack_fill(uint32 *stack_bottom, uint32 stack_size)
 void arkrtos_task_stack_init(arkrtos_task_t *p_task, void (*entry)(void),
                            uint32 *stack_bottom, uint32 stack_size)
 {
-    uint32 stack_top = (uint32)stack_bottom + stack_size;
+    unsigned long stack_top = (unsigned long)stack_bottom + stack_size;
 
     stack_top &= ~0x7u;
 

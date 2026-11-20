@@ -152,8 +152,8 @@ int32 arkrtos_copy_to_user_task(arkrtos_task_t *p_task, void *udst,
  *           without manufacturing a fake TCB: the guards are the same code
  *           the task-based entry points run, only the numbers arrive
  *           directly. Kernel internal; Apps never see it. */
-int32 arkrtos_paging_user_copy(uint32 rom_start, uint32 rom_size,
-                               uint32 ram_start, uint32 ram_size,
+int32 arkrtos_paging_user_copy(unsigned long rom_start, uint32 rom_size,
+                               unsigned long ram_start, uint32 ram_size,
                                uint32 space, uint32 installed,
                                void *kern, const void *user, uint32 len,
                                uint8 write);
@@ -183,7 +183,7 @@ uint32 arkrtos_paging_space_frame(uint32 space);
  *  @details Use this - not arkrtos_paging_space_frame() - when poking the
  *           window by address.  With ARKRTOS_USE_PAGING_PAGES=1 the frames come
  *           from the frame pool, so a frame base is no longer a VA. */
-uint32 arkrtos_paging_window_va(void);
+unsigned long arkrtos_paging_window_va(void);
 
 /** @brief Which space is currently installed in the App window */
 uint32 arkrtos_paging_space_current(void);
