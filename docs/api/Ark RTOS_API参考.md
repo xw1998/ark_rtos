@@ -14,7 +14,7 @@
 - [kernelsrc/include/arkrtos_cfg.h](#kernelsrcincludearkrtos_cfgh)（1 项）
 - [kernelsrc/include/arkrtos_crash.h](#kernelsrcincludearkrtos_crashh)（22 项）
 - [kernelsrc/include/arkrtos_dt.h](#kernelsrcincludearkrtos_dth)（11 项）
-- [kernelsrc/include/arkrtos_elf.h](#kernelsrcincludearkrtos_elfh)（10 项）
+- [kernelsrc/include/arkrtos_elf.h](#kernelsrcincludearkrtos_elfh)（11 项）
 - [kernelsrc/include/arkrtos_export.h](#kernelsrcincludearkrtos_exporth)（3 项）
 - [kernelsrc/include/arkrtos_fdt.h](#kernelsrcincludearkrtos_fdth)（22 项）
 - [kernelsrc/include/arkrtos_fdt_console.h](#kernelsrcincludearkrtos_fdt_consoleh)（4 项）
@@ -23,7 +23,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（67 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（68 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -61,7 +61,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（12 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（77 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（78 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（18 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -85,13 +85,13 @@
 - [kernelsrc/src/arkrtos_apppack.c](#kernelsrcsrcarkrtos_apppackc)（1 项）
 - [kernelsrc/src/arkrtos_cfg.c](#kernelsrcsrcarkrtos_cfgc)（1 项）
 - [kernelsrc/src/arkrtos_dev.c](#kernelsrcsrcarkrtos_devc)（1 项）
-- [kernelsrc/src/arkrtos_elf.c](#kernelsrcsrcarkrtos_elfc)（9 项）
+- [kernelsrc/src/arkrtos_elf.c](#kernelsrcsrcarkrtos_elfc)（13 项）
 - [kernelsrc/src/arkrtos_eset.c](#kernelsrcsrcarkrtos_esetc)（1 项）
 - [kernelsrc/src/arkrtos_exports.c](#kernelsrcsrcarkrtos_exportsc)（1 项）
 - [kernelsrc/src/arkrtos_fs.c](#kernelsrcsrcarkrtos_fsc)（1 项）
 - [kernelsrc/src/arkrtos_guard.c](#kernelsrcsrcarkrtos_guardc)（1 项）
 - [kernelsrc/src/arkrtos_installer.c](#kernelsrcsrcarkrtos_installerc)（1 项）
-- [kernelsrc/src/arkrtos_linux_abi.c](#kernelsrcsrcarkrtos_linux_abic)（1 项）
+- [kernelsrc/src/arkrtos_linux_abi.c](#kernelsrcsrcarkrtos_linux_abic)（2 项）
 - [kernelsrc/src/arkrtos_loader.c](#kernelsrcsrcarkrtos_loaderc)（6 项）
 - [kernelsrc/src/arkrtos_log.c](#kernelsrcsrcarkrtos_logc)（1 项）
 - [kernelsrc/src/arkrtos_mini.c](#kernelsrcsrcarkrtos_minic)（1 项）
@@ -2458,6 +2458,30 @@ int32 arkrtos_elf_exec_space(const char *path, int32 argc, char *argv[], uint32 
 > 说明：挑空间是装载器的决定，调用方只读结果。U-2（2026-11-17）起，
 "同一时间只能跑一个程序"变成"每个地址空间一个"。
 
+### `int32 arkrtos_elf_exec_replace(const char *path, int32 argc, char *arg`
+
+```c
+int32 arkrtos_elf_exec_replace(const char *path, int32 argc, char *argv[], arkrtos_elf_info_t *p_info, unsigned long *p_tp);
+```
+
+**把**当前任务自己**的镜像原地换掉（Linux execve 的内核落地）**
+- `path`：VFS 路径（内核侧命名空间路径）
+- `argc`：参数个数（含 argv[0]）；0 表示补成 path
+- `argv`：已由调用方从**旧镜像**拷出的内核侧字符串数组
+- `p_info`：成功时填装载读数（task 字段是调用者的任务号）
+- `p_tp`：成功时写回新镜像的 TLS 块地址（0 = 这份镜像没有预置 TLS）
+**返回**：0 / 负错误码
+语义与 Linux 的 execve 对齐到「同一个任务号继续跑新镜像」这一层：
+- 不起新任务、不换任务号（前后 getpid 相同）；
+- 旧镜像的段被新镜像覆盖，旧代码不再可达；
+- fd 表**不清空**：execve 不是「起一条新命令」，文件描述符属于
+任务而不是属于镜像；
+- 入口 / 栈指针 / TLS 由调用方写回当前任务的 trap 帧（port 层）。
+调用者必须**先把 argv 字符串拷进内核**：它们原本躺在旧镜像的
+参数区，装载一开始那块内存就归新镜像了。
+成功时不返回旧镜像（Linux 约定），失败返回负错误码、旧镜像继续跑。
+fork / 地址空间复制**不在**这条接口里。
+
 ### `int32 arkrtos_elf_info(arkrtos_elf_info_t *p_out);`
 
 ```c
@@ -3436,6 +3460,24 @@ void   arkrtos_port_svc_set_ret_signed(void *p_exc_ctx, int32 value);
 与 arkrtos_port_svc_set_ret 的区别只有符号扩展：Linux 的错误
 是负数，64 位下若只写低 32 位，程序会把 0x00000000FFFFFFEA
 读成一个很大的正数。宁可让返回值正确，也不给看似成功的错答案。
+
+### `int32  arkrtos_port_svc_exec_frame(void *p_exc_ctx, unsigned long entr`
+
+```c
+int32  arkrtos_port_svc_exec_frame(void *p_exc_ctx, unsigned long entry, unsigned long sp, unsigned long tp);
+```
+
+**把当前任务的 trap 帧改写成「新镜像的第一条指令」（execve 的落地）**
+- `p_exc_ctx`：当前系统调用的上下文指针
+- `entry`：新入口（必须在 App 窗口内、4 字节对齐）
+- `sp`：新用户栈指针（指向 argc）
+- `tp`：新镜像的 TLS 块地址（0 = 这份镜像没有预置 TLS）
+**返回**：0 = 帧已改写；-1 = 参数不可用（此时一个字节都不动）
+这张帧就是 ertn 要恢复的那一张：改完之后内核直接返回用户态，
+**不再回到旧镜像**。通用寄存器一律清零（Linux 在 execve 之后
+不保留任何寄存器），PRMD 只留 PPLV、把 PIE 置 1。
+port 没有「同任务换镜像」能力时（目前 RISC-V / Cortex-M / LA32），
+由 arkrtos_linux_abi.c 里的弱定义顶住，execve 回 -ENOSYS。
 
 ### `uint32 arkrtos_port_enter_critical(void);`
 
@@ -9416,6 +9458,24 @@ Ark 自己的服务号写在 `syscall` 的 15 位立即数里，Linux 用
 `syscall 0` 并把号放进 $a7。因此「立即数是否为 0」就是分界，
 不需要按号段猜，两边也不会撞号。
 
+### `int32 arkrtos_port_svc_exec_frame(void *p_exc_ctx, unsigned long entry`
+
+```c
+int32 arkrtos_port_svc_exec_frame(void *p_exc_ctx, unsigned long entry, unsigned long sp, unsigned long tp) {
+```
+
+**把当前任务的 trap 帧改写成「新镜像的第一条指令」（execve 落地）**
+帧布局见 arkrtos_context.S 文件头：ERA 在 [30]、PRMD 在 [31]、
+sp 在 [2]、tp 在 [1]、a0..a7 在 [3..10]。这张帧就是 la_trap_c
+返回给 eentry 恢复的那一张，所以改完之后 ertn 直接跳进新镜像，
+中间不再经过任何用户态代码。
+入口必须在 App 窗口内：窗口外的地址一恢复就会从别处取指，
+那是「跑起来了但跑的不是这个文件」——宁可拒绝。
+写代码之后必须 dbar + ibar：新镜像的指令刚刚由内核写进同一个
+VA（execve 是**就地覆盖**，这些地址的旧指令很可能还在 I-cache 里）。
+QEMU 会按页作废翻译块，看不出差别；真机上省掉这两条就是
+「跑了旧程序的半截」。
+
 ### `uint32 arkrtos_port_enter_critical(void) {`
 
 ```c
@@ -10698,19 +10758,60 @@ static int32 elf_check_range(const elf_image_t *p_img, unsigned long lo_limit, u
 
 **镜像必须整段落在 [lo_limit, hi_limit) 里（含端点判据用减法写） */**
 
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**一段「文件真的带着字节」的地址区间 [lo, hi) */**
+
+### `static int32 elf_load_file_spans(const char *path, elf_word_t phoff, u`
+
+```c
+static int32 elf_load_file_spans(const char *path, elf_word_t phoff, uint16 phnum, uint16 phentsize, unsigned long bias, elf_span_t *spans, uint32 cap) {
+```
+
+**收集 PT_LOAD 里「文件背书」的那部分地址区间**
+**返回**：区间条数（>=0）；读段表失败或条数超过 ELF_TLS_SPAN_MAX 时返回 -1
+「这段字节镜像里已经有了吗」只能按 p_filesz 判，**不能按 p_memsz**：
+.tbss 是 NOBITS，它在运行地址上会与后面的 .init_array/.data 重叠
+（真实 glibc 静态二进制实测：.tbss 0x120083638+0x50 与 .init_array
+同地址）。按 p_memsz 清零就是把构造表抹成 0，程序随后从空指针
+call 出去 —— 那正是 2026-11-20 那条 PPI(pc=0) 死循环的根因。
+
+### `static int32 elf_write_tls_piece(const char *path, uint32 space, const`
+
+```c
+static int32 elf_write_tls_piece(const char *path, uint32 space, const elf_span_t *spans, uint32 n, unsigned long va, uint32 len, uint32 file_off, uint32 zero, uint32 *p_wrote) {
+```
+
+**写（或清零）一段 TLS 字节，跳过镜像里已经文件背书的部分**
+- `zero`：1 = 清零；0 = 从文件 file_off 处拷 len 字节
+- `p_wrote`：真写了至少一个字节就置 1（调用方据此决定要不要预置 TP）
+TLS 段可能**半覆盖**：.tdata 在被 LOAD 背书的区段里（那几字节
+本来就等于文件内容，重抄一遍是空操作），.tbss 落在最后一个 LOAD
+之后（夹具就是这种形态）。所以按「有没有被某个 LOAD 的 file range
+盖住」逐段切，被盖住的直接跳过。
+
 ### `static int32 elf_write_tls(const char *path, uint32 space, elf_word_t `
 
 ```c
-static int32 elf_write_tls(const char *path, uint32 space, elf_word_t phoff, uint16 phnum, uint16 phentsize, unsigned long bias) {
+static int32 elf_write_tls(const char *path, uint32 space, elf_word_t phoff, uint16 phnum, uint16 phentsize, unsigned long bias, uint32 *p_placed) {
 ```
 
-**把 PT_TLS 模板铺进窗口，并把 tbss 清零**
-只做两件事：把文件里 p_offset 处的 p_filesz 字节搬到 TLS 块的
-装入地址（.tdata），再把后面的 p_memsz - p_filesz 字节清零
-（.tbss）。刻意不复用 elf_write_image 的 PT_LOAD 循环：TLS 段
-**不一定**被某个 PT_LOAD 盖住（夹具里 .tbss 就落在最后一个
-LOAD 之后），按 PT_LOAD 处理会漏掉这一段，读到的就是窗口里
-上一份内容留下的字节。
+**把 PT_TLS 模板里「镜像还没有」的那部分铺进窗口**
+语义从「整块照抄 + 整块清零」收紧成「只补缺口」：
+一个字节如果已经被某个 PT_LOAD 的 file range 背书，就**一个字节
+都不动** —— 镜像里那份就是文件里那份。只有落在背书范围之外的
+部分（典型是最后一个 LOAD 之后的 .tbss）才清零/补数据。
+这样处理的原因是一条实测：真实 glibc 静态二进制的 .tbss 与
+.init_array 同地址（.tbss 是 NOBITS，文件里那个位置放的是
+.init_array 的字节），旧实现按 p_memsz 清零会把构造表抹成 0，
+程序在 __libc_csu_init 里 call 空指针，PLV3 取指 0x0 无限 PPI。
+- `p_placed`：出参：真往窗口写过字节置 1。**只有置 1 时才允许给任务
+预置 TP** —— 全程被镜像覆盖意味着那个地址上躺的是别的数据，
+TLS 块由程序自己的 C 运行时去建（glibc 就是这么干的）。
 **返回**：ARKRTOS_ELF_OK / 负错误码（读文件失败时原样透出）
 
 ### `static int32 elf_find_interp(const char *path, elf_word_t phoff, uint1`
@@ -10742,12 +10843,17 @@ argv[argc-1..0]、argc  <- sp
 ### `static int32 elf_load(uint32 space, const char *path, int32 argc, char`
 
 ```c
-static int32 elf_load(uint32 space, const char *path, int32 argc, char *argv[], arkrtos_elf_info_t *p_info) {
+static int32 elf_load(uint32 space, const char *path, int32 argc, char *argv[], arkrtos_elf_info_t *p_info, uint32 start_task, unsigned long *p_tp) {
 ```
 
-**把一份 ELF 装进指定地址空间并起一个降权任务**
+**把一份 ELF 装进指定地址空间（可选择顺手起一个降权任务）**
 - `space`：目标地址空间（0 .. 空间数-1）；窗口 VA 在每个空间里相同
 - `p_info`：成功时填装载读数（不接收失败值）
+- `start_task`：1 = 起一个降权任务（exec / exec_space 这条老路）；
+0 = 一个任务都不起，只把入口/栈指针/TLS 交回给调用方
+（execve 要把**当前任务自己**的镜像换掉，见
+arkrtos_elf_exec_replace）
+- `p_tp`：可为 0；非 0 时写回新镜像的 TLS 块地址（0 = 没有预置）
 静态档与动态档的区别只在「要不要先装一个解释器、入口跳谁」：
 - 静态档：段按 e_vaddr 落位，入口就是 e_entry；
 - 动态档（PT_INTERP 存在，ARKRTOS_USE_DYNLOAD=1）：主程序照样落位，
@@ -10780,6 +10886,30 @@ int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[]) {
 ```
 
 **兼容入口：装一个 ELF 程序，不关心它落到哪个空间**
+
+### `int32 arkrtos_elf_exec_replace(const char *path, int32 argc, char *arg`
+
+```c
+int32 arkrtos_elf_exec_replace(const char *path, int32 argc, char *argv[], arkrtos_elf_info_t *p_info, unsigned long *p_tp) {
+```
+
+**把当前任务自己的镜像原地换掉（Linux execve 的内核落地）**
+三件事决定了它不能走 arkrtos_elf_exec_space()：
+1) 不起新任务——execve 换的是镜像，不是进程；任务号必须保持不变，
+否则程序里的 getpid() 前后不同，fd 与定时器也没了归属；
+2) 写的是**自己现在这块空间**：新镜像覆盖旧镜像的段。窗口 VA 在
+所有空间里相同，所以这一步不需要换页表；内核自己也跑在别的
+地址上（低 16 MB），覆盖 App 页不影响正在执行的代码；
+3) 旧镜像的用户栈只被**帧之外**的部分复用：新镜像的段必须落在
+stack_bottom 以下（elf_check_range 已经守住），而 trap 帧与
+内核 C 栈在 stack_bottom..argv_start 之间，一个字节都不重叠。
+这一步之后旧镜像的代码/数据已经不可用，所以调用者必须在调用**之前**
+把 argv 字符串拷到内核里（见 arkrtos_linux_abi.c 的 lx_execve）。
+失败时窗口里可能已经躺着半个新镜像（与 arkrtos_elf_exec_space 同一
+口径）：旧镜像的段若已被覆盖就回不去了，所以调用者要按 Linux 的
+语义返回错误——这条路径上「失败」意味着程序状态已不可信。实际
+顺序是：先只校验（elf_check_image）再写，校验不过时窗口一个字节
+未动，旧镜像继续跑。
 
 ## kernelsrc/src/arkrtos_eset.c
 
@@ -10874,16 +11004,32 @@ static int32 arkrtos_installer_pump(int32 dev) {
 PLV3 / U 模式任务里跑起来，而不是让 Ark 变成 Linux。
 实现原则（与全仓其它模块一致）：
 
-### `static int32 lx_copy_path(void *p_ctx, uint32 idx, char *out, uint32 o`
+### `static int32 lx_copy_user_str(unsigned long uaddr, char *out, uint32 c`
 
 ```c
-static int32 lx_copy_path(void *p_ctx, uint32 idx, char *out, uint32 out_size) {
+static int32 lx_copy_user_str(unsigned long uaddr, char *out, uint32 cap) {
 ```
 
-**从用户地址拷一个以 NUL 结尾的路径**
-**返回**：0 成功；-EFAULT 指针非法；-ENAMETOOLONG 没有 NUL
-逐字节过 copy_from_user：它会对每一个字节核对是否落在调用者的
-窗口内，既不会越界读，也不会把内核地址当用户地址用。
+**把用户地址上的 NUL 结尾串拷进内核缓冲**
+**返回**：0 成功；-EFAULT 指针非法；-ENAMETOOLONG 在 cap 内没有 NUL
+
+### `static int32 lx_execve(void *p_ctx) {`
+
+```c
+static int32 lx_execve(void *p_ctx) {
+```
+
+**execve(path, argv, envp)：把**当前任务自己**的镜像换掉**
+与 Linux 一致的部分：任务号不变、fd 保留、成功不返回、失败
+返回负 errno 且旧镜像继续跑。
+与 Linux 不一致的部分（都在文档里写死）：
+- envp 不消费：这台机器没有环境变量这一层，新镜像拿到的是
+和刚起跑时同一张空表；
+- 地址空间不复制（没有 fork），所以没有「父子」这回事；
+- 旧镜像的堆游标作废（新镜像的 brk/mmap 从零开始），但**已分配
+的地址不做任何回收声明**——旧镜像已经没了，没有谁还在用它们。
+参数纪律：path 与 argv 都在用户内存里，且马上要被新镜像覆盖，
+所以全部先拷进内核再装载。
 
 ## kernelsrc/src/arkrtos_loader.c
 
