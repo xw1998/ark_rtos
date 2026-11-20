@@ -145,9 +145,9 @@ glibc rc1.4 / gcc 8.3.0，与发行版同源），**不下载 Alpine/Debian 镜�
 | --- | --- | --- | --- | --- | --- |
 | 1 | 地址空间 | `[0x120000000, 0x120008080)`（动态）/ `[0x120000000, 0x12008bb38)`（静态） | **地址宽度已升到 64 位（2026-11-20）**：判据里不再有 `p_vaddr > 0xFFFFFFFF`，窗口 VA 与物理帧解耦（`make ... WIN_VA=0x120000000` 把窗口基址、内核链接基址与夹具基址一起抬）。宽窗口档 QEMU 实跑 `linux_hello` `PASS` + `exit 7`，无 fatal（见 §11 与 [MMU进程模型与ELF装载](MMU进程模型与ELF装载.md) §11） | 每进程独立 VA 空间 + 运行期建页表（**真实静态 hello 已经真装进宽窗口跑完**，2026-11-20，见 §5.3）；native SVC 参数块仍是 `uint32[]`，宽 VA 下 App 必须走 Linux ABI 传指针 | `[address]` |
 | 2 | 解释器 | `PT_INTERP = /lib64/ld.so.1` | 默认档直接拒（`ERR_FORMAT`）；开 `ARKRTOS_USE_DYNLOAD` 后能装**本仓** `ld-ark.so`（`/mnt/ram/ld-ark.so`） | 真 glibc `ld.so` 的能力面（见 §7） | `[interp-path]` |
-| 3 | TLS | `PT_TLS`（动态继承自 libc：16/144；静态：32/96）+ 17 条 `R_LARCH_TLS_TPREL64` + `set_tid_address` | 默认档 `arkrtos_elf.c` **完全不读 `PT_TLS`**；开着 `ARKRTOS_USE_ELF_TLS` 时读段、铺 `tdata`、清 `tbss`、把 `$r2` 指过去（2026-11-20，静态 local-exec，见 §5.2） | 真 libc 的 TCB 布局、`R_LARCH_TLS_TPREL64` 重定位、`set_tid_address` 语义 | `[tls]` |
+| 3 | TLS | `PT_TLS`（动态继承自 libc：16/144；静态：32/96）+ 17 条 `R_LARCH_TLS_TPREL64` + `set_tid_address` | 默认档 `arkrtos_elf.c` **完全不读 `PT_TLS`**；开着 `ARKRTOS_USE_ELF_TLS` 时读段、铺 `tdata`、清 `tbss`、把 `$r2` 指过去（2026-11-20，静态 local-exec，见 §5.2）；**自研 `ld-ark.so` 侧已经把 `PT_TLS` + `R_LARCH_TLS_TPREL64` 做成**（2026-11-21，见 §5.6） | 真 libc 的 TCB 布局（`tcbhead_t`/`dtv`）、`DTPMOD`/`DTPREL`、`set_tid_address` 语义 | `[tls]` |
 | 4 | 动态段标签 | `INIT_ARRAY`/`FINI_ARRAY`、`GNU_HASH`、`VERSYM`/`VERNEED`/`VERDEF`、`RELACOUNT`、`FLAGS` | `ld-ark.so` 只处理 `NEEDED/STRTAB/SYMTAB/RELA/RELASZ/RELAENT/STRSZ/SYMENT/JMPREL/HASH` 这几项 | 构造函数执行、符号版本匹配、GNU 哈希、`DF_1_NOW` 语义 | `[dynamic-tags]` |
-| 5 | 重定位 | `RELATIVE`、`64`、`JUMP_SLOT`、`IRELATIVE`(IFUNC)、`TLS_TPREL64` | 只做 `R_LARCH_64 / RELATIVE / JUMP_SLOT`（`ARK_SUPPORTED_RELOC`，门禁与 `ldso.c` 双向对齐） | IFUNC 解析器（装载期跑用户代码）+ TLS 重定位 | `[relocations]` |
+| 5 | 重定位 | `RELATIVE`、`64`、`JUMP_SLOT`、`IRELATIVE`(IFUNC)、`TLS_TPREL64` | 内核静态装载器只做 `R_LARCH_64 / RELATIVE / JUMP_SLOT`（`ARK_SUPPORTED_RELOC`，门禁与 `ldso.c` 双向对齐）；**自研 `ld-ark.so` 另做 `R_LARCH_TLS_TPREL64`**（2026-11-21，§5.6） | IFUNC 解析器（装载期跑用户代码）+ `DTPMOD`/`DTPREL` | `[relocations]` |
 | 6 | 依赖链与存储 | `libc.so.6` 1 571 208 B；静态 hello 623 728 B | `/mnt/ram` 是 **4 MiB** 的 RAM 块设备上的 littlefs（`ARKRTOS_QEMU_BLK_SIZE = 4 * 1024 * 1024`，2026-11-20 由 512 KiB 扩上来）；`CHIP_FLASH_SIZE` 2 MB、`CHIP_RAM_SIZE` 8 MB。**容量这道已实测通过**：开机写 640 KiB 文件再读回逐字节一致 | 只剩下依赖递归（`DT_NEEDED` 链的解析与装载） | `[needed]` |
 
 两条要写死的读法：
@@ -365,7 +365,8 @@ TASK:4009 task 4 exits (self kill)
 1. 跑通的是**静态**档的 `__thread`，且 TP 由 glibc 自建。`ARKRTOS_USE_ELF_TLS`
    给的是「没有 libc 初始化的小程序」用的 variant I 约定（`TP = TLS 块起点`），
    **不是** glibc 的 `tcbhead_t`/`dtv` 布局。
-2. `R_LARCH_TLS_TPREL64` 重定位仍未做。`set_tid_address`（96 号）**已实现**：
+2. 内核静态装载器仍不做 `R_LARCH_TLS_TPREL64`（静态 local-exec 不需要它）；
+   自研 `ld-ark.so` 侧已经在做（2026-11-21，§5.6）。`set_tid_address`（96 号）**已实现**：
    `arkrtos_linux_abi.c` 只回报本任务的 tid，不往用户内存写一个字（本内核没有
    futex，登记的指针没有消费者；替程序清 tid 变量是副作用）。
 3. `PT_TLS` 块被镜像背书时我们**不**替程序建 TLS 块——那是它自己的 C 运行时的事。
@@ -428,6 +429,44 @@ TASK:4009 task 4 exits (self kill)
 
 ---
 
+### 5.6 动态 TLS：装载器建线程块 + `R_LARCH_TLS_TPREL64`（2026-11-21）
+
+判据：走 `PT_INTERP` 动态路径的主程序用 `__thread`，它自己的线程变量与**库里**的
+线程变量都能读对；库那条必须经库自己的重定位槽拿到偏移，不能拿主程序的偏移凑。
+
+| 项 | 读数 / 规则 |
+| --- | --- |
+| 开关 | `ARKRTOS_USE_DYNLOAD`（默认 0）；夹具的 `PT_TLS` 由 `tools/elf/dynfixture.py` 从静态链接产物**原样搬出**，不手写模板 |
+| ld.so 动作 | 扫每个对象的 `PT_TLS`（`p_type=7`）；按装载顺序（主程序在前）16 B 对齐分配块内偏移；`mmap` 一块 RW 匿名内存并清零；主程序从**已装载的内存**抄模板，库用 `read_file` 从文件抄（输出布局里 `file offset == vaddr - base`）；跳回主程序前 `move $tp, <块起点>` |
+| 重定位 | `R_LARCH_TLS_TPREL64 = 11`，右值 = `S + A - TP`，即**相对 `$tp` 的带符号偏移**；槽里存的不是绝对地址，用户代码自己 `tp + off` 去解引用 |
+| 符号 | `STT_TLS = 6`。`.dynsym` 里 `st_value` 是**块内偏移**（实测 `m_tls=8`、`lib_tls=0`），所以 `lookup()` 必须跳过 `STT_TLS`——否则它会返回 `base + 偏移`，一个不是变量的地址，静默指错 |
+| QEMU 读数 | `[ldso] tls base=0x0000000002116000 size=32 objs=2 offs=0,16,`、`reloc libanswer.so: RELATIVE=1 64=1 JUMP_SLOT=0 TPREL64=1`、`reloc dynmain: ... TPREL64=1`；14 条 `check` 全 `ok`；`[dyn] PASS: RELATIVE + R_LARCH_64 + JUMP_SLOT + TLS all applied`；`exit code 105`，`dynmain`（ET_DYN）与 `dynmain_exec`（ET_EXEC，基址 `0x02000000`）各一次 |
+| 单开关对照 | 把 `apply_rela()` 里的 type 11 分支改成直接 `return 0`（槽保持 0），同一条路径立刻 `TPREL64=0`，并打出 `TPREL64 m_tls offset -> 0 FAIL (want 8)`、`TPREL64 offset nonzero -> 0 FAIL (want 1)`、`TLS lib value -> 4369 FAIL (want 4242)`（4369 = 0x1111，正是相邻的 `__thread` pad 值），`exit code 1` |
+| 门禁 | `tools/dynlink_gate.py`：新增 `fixture-tls`（PT_TLS 尺寸、`.rela` 里 type 11 条数、`.dynsym` 的 `STT_TLS` 值必须 `m_tls=8` / `lib_tls=0`）与报文 pin（`[ldso] tls base=` ×3、`TPREL64=1` 库 3 / 主 2、`m_tls offset -> 8` ×2、`TLS lib value -> 4242` ×2、`after write -> 4243` ×2）；自检坏样本从 4 种加到 7 种 |
+
+**反假绿的三个设计**（缺一个这条 PASS 就不可信）：
+
+1. `m_tls` 的块内偏移**故意非 0**：`m_tls_pad` 与它一起声明，按本仓 gcc 的
+   `.tdata` 排布调过顺序，实测 `st_value=8`。否则「重定位没做、槽还是 0、正好读到
+   偏移 0」会读到一个"看起来对"的值。
+2. 库那条**强制走库自己的 `got_libtls`**：`lib_tls_addr()` 返回 `$tp + 槽值`，主
+   程序拿它与 `lib_tls_off()`（库把槽值报回来）比，相等才说明符号解析是跨对象找到
+   库的 `tls_off`，不是拿主程序的偏移凑出来的。
+3. 再加一条隔离检查：写库的 TLS 之后，主程序的 `m_tls` 必须还是 77。
+
+**边界（写死，不许读成别的）**：
+
+1. 只做**静态块 + `TPREL64`**（initial-exec 形态）。`DTPMOD`/`DTPREL`（dlopen
+   之后才绑定）没做。
+2. **库里的 `local-exec` 代码不能直接用**：静态链接时它的 `$tp + 0` 是按「块起点
+   = 0」算死在机器码里的，装载器不修补指令立即数。只有排在线程块偏移 0 的主程序
+   成立；库必须经 `TPREL64` 槽访问（本仓夹具就是这么写的）。这是一条能力边界，
+   不是实现取巧。
+3. 这不是 glibc 的 TCB：`tcbhead_t`/`dtv`/自指指针仍然没有，真 `ld.so` 起不来
+   （§7）。
+
+---
+
 ## 6. 四档目标与代价
 
 由近到远。**「过关」指探针 0 blocker 且 QEMU 实跑有读数**，不是「编得过」。
@@ -461,7 +500,7 @@ TASK:4009 task 4 exits (self kill)
    会绑到老版本实现，那种错误不报错、只是算错——正是本项目明令禁止的
    「看似权威的错答案」。
 
-本仓的 `ld-ark.so` 是**配自研库**的极小装载器（三种重定位、无符号版本），
+本仓的 `ld-ark.so` 是**配自研库**的极小装载器（四种重定位、无符号版本），
 它证明的是「内核侧的 Linux 约定 + 重定位路径通了」（见
 [动态链接与PT_INTERP](动态链接与PT_INTERP.md)），**不是**「能配 glibc」。
 两件事不能混着读。

@@ -14,11 +14,18 @@
 *               每个库的 PT_LOAD 铺到匿名内存里（不用 MAP_FIXED——内核
 *               不支持，也不假装支持）；
 *            5) 做 R_LARCH_RELATIVE / R_LARCH_64 / R_LARCH_JUMP_SLOT；
-*            6) 打印一行行 [ldso] 读数，然后 jr 到 AT_ENTRY。
+*            6) 按 PT_TLS 分配一个线程块（variant I：$tp 指向块起点），
+*               把各对象的 tdata 模板拷进去，做 R_LARCH_TLS_TPREL64；
+*            7) 打印一行行 [ldso] 读数，然后设 $tp 并 jr 到 AT_ENTRY。
 *
 *          边界写在明处：
 *            - 只支持一级依赖（库的库不递归；遇到就明确报错）；
-*            - 只支持 LoongArch 的 3/2/5 三种重定位，其它类型直接失败；
+*            - 只支持 LoongArch 的 3/2/5/11 四种重定位，其它类型直接失败；
+*            - TLS 只做"静态块 + TPREL64"：块在装载时一次分好，$tp 指向块
+*              起点。DTPMOD/DTPREL（dlopen 后才绑定的那种）不在这里；
+*            - 对象自己的代码若是 local-exec（`$tp + 常量`），常量是静态链接
+*              时按"本对象块起点 = 0"算出来的，所以只有排在偏移 0 的主程序
+*              成立；库里的 TLS 必须经 TPREL64 槽访问（本仓夹具就是这么写的）。
 *            - 符号解析是"按名字线性扫 .dynsym"，不是 ELF 哈希；
 *            - 这不是 glibc 的 ld.so：真发行版二进制需要它 + 更大的系统
 *              调用面（futex/rseq/TLS/文件映射），这里不冒充。
@@ -50,6 +57,7 @@
 
 #define PT_LOAD             1
 #define PT_DYNAMIC          2
+#define PT_TLS              7
 #define ET_EXEC             2
 #define ET_DYN              3
 
@@ -69,6 +77,9 @@
 #define R_LARCH_64          2
 #define R_LARCH_RELATIVE    3
 #define R_LARCH_JUMP_SLOT   5
+#define R_LARCH_TLS_TPREL64 11
+
+#define STT_TLS             6
 
 typedef long lx_long;
 typedef unsigned long u64;
@@ -148,12 +159,22 @@ typedef struct
     u64 pltrelsz;
     u64 strsz;
     u64 syment;
+    int is_main;
+    int has_tls;
+    u64 tls_vaddr;      /* PT_TLS 的运行期地址（主程序已在内存里） */
+    u64 tls_foff;       /* PT_TLS 的文件偏移（库要用 pread 读模板） */
+    u64 tls_filesz;
+    u64 tls_memsz;
+    u64 tls_align;
+    u64 tls_off;        /* 在公共线程块里的起点 */
     char name[48];
+    char path[PATH_MAX];
 } obj_t;
 
 static obj_t s_obj[MAX_OBJ];
 static int   s_nobj;
 static u64   s_boot_sp;
+static u64   s_tp;
 
 /* ------------------------------------------------------------------ 系统调用 */
 static lx_long lx1(lx_long n, lx_long a0v)
@@ -364,6 +385,20 @@ static int parse_dynamic(obj_t *o, const phdr_t *ph, int nph)
         return -1;
     }
 
+    for (i = 0; i < nph; i++)
+    {
+        if (ph[i].p_type == PT_TLS)
+        {
+            o->has_tls = 1;
+            o->tls_vaddr = ph[i].p_vaddr;
+            o->tls_foff = ph[i].p_offset;
+            o->tls_filesz = ph[i].p_filesz;
+            o->tls_memsz = ph[i].p_memsz;
+            o->tls_align = (ph[i].p_align != 0u) ? ph[i].p_align : 8u;
+            break;
+        }
+    }
+
     o->syment = 24;
     {
         dyn_t *d = (dyn_t *)o->dyn;
@@ -434,6 +469,11 @@ static u64 lookup(const char *name)
             {
                 continue;
             }
+            /* TLS 符号的 st_value 是块内偏移，当绝对地址用会静默指到别处。 */
+            if ((s->st_info & 0xFu) == STT_TLS)
+            {
+                continue;
+            }
             if (str_eq(sym_name(o, s), name))
             {
                 return obj_addr(o, s->st_value);
@@ -441,6 +481,39 @@ static u64 lookup(const char *name)
         }
     }
     return 0;
+}
+
+/* 符号 -> (所属对象在公共块里的起点 + 块内偏移)。跨对象，所以逐对象扫。 */
+static int lookup_tls(const char *name, u64 *off_out)
+{
+    int k;
+
+    for (k = 0; k < s_nobj; k++)
+    {
+        obj_t *o = &s_obj[k];
+        u64 n = sym_count(o);
+        u64 i;
+
+        if ((o->used == 0) || (o->symtab == 0) || (o->has_tls == 0))
+        {
+            continue;
+        }
+        for (i = 1; i < n; i++)
+        {
+            sym_t *s = (sym_t *)(o->symtab + (i * o->syment));
+
+            if ((s->st_shndx == 0) || ((s->st_info & 0xFu) != STT_TLS))
+            {
+                continue;
+            }
+            if (str_eq(sym_name(o, s), name))
+            {
+                *off_out = o->tls_off + s->st_value;
+                return 0;
+            }
+        }
+    }
+    return -1;
 }
 
 static int apply_rela(obj_t *o, const rela_t *r, int is_plt, u32 *counts)
@@ -504,6 +577,38 @@ static int apply_rela(obj_t *o, const rela_t *r, int is_plt, u32 *counts)
         return 0;
     }
 
+    if (type == R_LARCH_TLS_TPREL64)
+    {
+        sym_t *s;
+        const char *nm;
+        u64 off;
+
+        if ((symidx == 0) || (o->symtab == 0))
+        {
+            return -1;
+        }
+        s = (sym_t *)(o->symtab + (symidx * o->syment));
+        nm = sym_name(o, s);
+        if ((s->st_info & 0xFu) != STT_TLS)
+        {
+            out("[ldso] FAIL: TPREL64 on non-TLS symbol ");
+            out(nm);
+            out("\n");
+            return -1;
+        }
+        if (lookup_tls(nm, &off) != 0)
+        {
+            out("[ldso] FAIL: unresolved TLS symbol ");
+            out(nm);
+            out("\n");
+            return -1;
+        }
+        /* S + A - TP，TP = 块起点 ⇒ 存的是相对 $tp 的偏移。 */
+        *(u64 *)loc = (u64)((long)off + r->r_addend);
+        counts[3]++;
+        return 0;
+    }
+
     out("[ldso] FAIL: unsupported relocation type ");
     out_dec(type);
     out("\n");
@@ -512,13 +617,14 @@ static int apply_rela(obj_t *o, const rela_t *r, int is_plt, u32 *counts)
 
 static int relocate(obj_t *o)
 {
-    u32 counts[3];
+    u32 counts[4];
     u64 n;
     u64 i;
 
     counts[0] = 0;
     counts[1] = 0;
     counts[2] = 0;
+    counts[3] = 0;
 
     if ((o->rela != 0) && (o->relasz != 0))
     {
@@ -553,6 +659,8 @@ static int relocate(obj_t *o)
     out_dec(counts[1]);
     out(" JUMP_SLOT=");
     out_dec(counts[2]);
+    out(" TPREL64=");
+    out_dec(counts[3]);
     out("\n");
     return 0;
 }
@@ -713,6 +821,7 @@ static int load_object(const char *name, u64 min_vaddr_hint)
     o->is_dyn = 1;
     o->bias = addr;
     str_copy(o->name, name, sizeof(o->name));
+    str_copy(o->path, path, sizeof(o->path));
 
     if (parse_dynamic(o, ph, nph) != 0)
     {
@@ -729,6 +838,100 @@ static int load_object(const char *name, u64 min_vaddr_hint)
     out_hex(addr);
     out(" size=");
     out_dec(total);
+    out("\n");
+    return 0;
+}
+
+/* ------------------------------------------------------------------ 线程块 */
+/*
+ * variant I：$tp 指向线程块起点，符号的 TPREL = 块内偏移。
+ * 布局按对象装载顺序（主程序先），各对象按自己的 p_align 对齐；
+ * 主程序的模板直接从已映射的内存里拷，库的模板从文件里 pread。
+ */
+static int setup_tls(void)
+{
+    u64 total = 0;
+    u64 base;
+    u64 nobj = 0;
+    int k;
+
+    for (k = 0; k < s_nobj; k++)
+    {
+        obj_t *o = &s_obj[k];
+
+        if (o->has_tls == 0)
+        {
+            o->tls_off = 0;
+            continue;
+        }
+        total = align_up(total, (o->tls_align != 0u) ? o->tls_align : 8u);
+        o->tls_off = total;
+        total += o->tls_memsz;
+        nobj++;
+    }
+    if (total == 0u)
+    {
+        return 0;   /* 没有 PT_TLS：$tp 保持内核给的值，行为不变 */
+    }
+    total = align_up(total, 16u);
+
+    base = (u64)lx4(LX_MMAP, 0, (lx_long)total, LX_PROT_RW,
+                    LX_MAP_PRIVATE | LX_MAP_ANONYMOUS);
+    if ((long)base < 0)
+    {
+        fail("mmap for the TLS block failed");
+    }
+    mem_zero((void *)base, total);
+
+    for (k = 0; k < s_nobj; k++)
+    {
+        obj_t *o = &s_obj[k];
+
+        if ((o->has_tls == 0) || (o->tls_filesz == 0u))
+        {
+            continue;
+        }
+        if (o->is_main != 0)
+        {
+            u8 *src = (u8 *)obj_addr(o, o->tls_vaddr);
+            u8 *dst = (u8 *)(base + o->tls_off);
+            u64 i;
+
+            for (i = 0; i < o->tls_filesz; i++)
+            {
+                dst[i] = src[i];
+            }
+        }
+        else
+        {
+            if (read_file(o->path, (void *)(base + o->tls_off),
+                          o->tls_filesz, o->tls_foff) != 0)
+            {
+                out("[ldso] FAIL: cannot read the TLS template of ");
+                out(o->name);
+                out("\n");
+                return -1;
+            }
+        }
+    }
+
+    s_tp = base;
+    out("[ldso] tls base=");
+    out_hex(base);
+    out(" size=");
+    out_dec(total);
+    out(" objs=");
+    out_dec(nobj);
+    out(" offs=");
+    for (k = 0; k < s_nobj; k++)
+    {
+        if (s_obj[k].has_tls == 0)
+        {
+            continue;
+        }
+        out_dec(s_obj[k].tls_off);
+        out(",");
+    }
     out("\n");
     return 0;
 }
@@ -860,6 +1063,7 @@ void ldso_main(u64 sp)
     main_obj = &s_obj[s_nobj];
     mem_zero(main_obj, sizeof(*main_obj));
     main_obj->used = 1;
+    main_obj->is_main = 1;
     main_obj->is_dyn = (eh->e_type == ET_DYN) ? 1 : 0;
     main_obj->bias = main_obj->is_dyn ? main_base : 0u;
     str_copy(main_obj->name, (argc > 0) ? *(char **)(sp + 8) : "main",
@@ -886,6 +1090,12 @@ void ldso_main(u64 sp)
         fail("could not load a DT_NEEDED object");
     }
 
+    /* 线程块必须在重定位之前分好：TPREL64 的右值要用到各对象的 tls_off。 */
+    if (setup_tls() != 0)
+    {
+        fail("TLS setup failed");
+    }
+
     /* 先做库的重定位，再做主程序：符号解析是全局按名扫描，
      * 两边都能找到对方。 */
     for (i = s_nobj - 1; i >= 0; i--)
@@ -904,6 +1114,12 @@ void ldso_main(u64 sp)
         register u64 r_sp __asm__("t0") = s_boot_sp;
         register u64 r_en __asm__("t1") = at_entry;
 
+        if (s_tp != 0u)
+        {
+            /* LoongArch 的 ABI 线程指针就是 $r2/$tp。只在有 PT_TLS 时才改，
+             * 没有 TLS 的镜像保持内核给的值。 */
+            __asm__ volatile("move $tp, %0" :: "r"(s_tp) : "memory");
+        }
         __asm__ volatile("move $sp, $t0\n\tjr $t1"
                          :: "r"(r_sp), "r"(r_en) : "memory");
     }

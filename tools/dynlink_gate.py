@@ -6,8 +6,9 @@
 ----------------
 `ARKRTOS_USE_DYNLOAD` 是一个默认关的开关：打开后内核按 Linux 约定装载
 `PT_INTERP` 指定的解释器、铺 auxv、把入口换成解释器；解释器是本仓自带的
-`example/qemu_loongarch64/elf/ldso.c`（ark ld.so），它自己 mmap 装库、做
-RELATIVE / R_LARCH_64 / JUMP_SLOT 三种重定位，再跳回主程序。
+`example/qemu_loongarch64/elf/ldso.c`（ark ld.so），它自己 mmap 装库、按
+各对象的 PT_TLS 建一个线程块（`$tp` 指向块起点）、做 RELATIVE /
+R_LARCH_64 / JUMP_SLOT / R_LARCH_TLS_TPREL64 四种重定位，再跳回主程序。
 
 这一类功能有三处典型的假绿：
 
@@ -39,7 +40,14 @@ RELATIVE / R_LARCH_64 / JUMP_SLOT 三种重定位，再跳回主程序。
      DT_NEEDED 条数、坏夹具里确实有 `no_such_symbol`、ld.so 自己的入口
      等于解释器基址。再加一条**重建确定性**：同一个 manifest 再跑一次
      `dynfixture.py`，产物必须与构建目录里的逐字节相同。
-  E. QEMU 真读数：两次 `[dyn] PASS` 且两次 `exit code 105`；坏夹具
+     D2. TLS 形状：三个带 `__thread` 的夹具都必须有 PT_TLS（主程序
+     filesz=memsz=16、库 8），`.rela` 里各有一条 type 11；`.dynsym` 里
+     `m_tls` 是 STT_TLS 且 st_value=8（**非 0**，这是"槽没被重定位、还是 0、
+     正好读到偏移 0"那把假绿的闸门）、`lib_tls` 是 STT_TLS 且 st_value=0。
+  E. QEMU 真读数：两次 `[dyn] PASS: ... + TLS all applied` 且两次
+     `exit code 105`；两次 `[ldso] tls base=` 与坏夹具那次共 3 条、每条
+     `TPREL64=1`（库与主程序各一，共 4 条）；`TPREL64 m_tls offset -> 8`
+     与 `TLS lib value -> 4242` / `after write -> 4243` 各两次；坏夹具
      `[ldso] FAIL: unresolved PLT symbol no_such_symbol` 且 `exit code 127`，
      并且**一次 PASS 都没有多出来**；`[dyn] info` 里 `interp_base=0x02100000`；
      同一次启动里 `[linux] PASS` / `[FS] PASS` 仍在（新功能不许搞坏别人）。
@@ -90,13 +98,20 @@ INTERP_BASE = 0x02100000
 PT_LOAD = 1
 PT_DYNAMIC = 2
 PT_INTERP = 3
+PT_TLS = 7
 ET_EXEC = 2
 ET_DYN = 3
 DT_NULL = 0
 DT_NEEDED = 1
+DT_HASH = 4
 DT_STRTAB = 5
+DT_SYMTAB = 6
+DT_RELA = 7
+DT_RELASZ = 8
 DT_SONAME = 14
+DT_SYMENT = 11
 DT_JMPREL = 23
+STT_TLS = 6
 
 FAILS = []
 PASSES = []
@@ -249,6 +264,53 @@ def vaddr_to_off(h, vaddr):
             return p["offset"] + (vaddr - p["vaddr"])
     return None
 
+
+def rela_list(h):
+    """返回 [(r_offset, type, symidx, addend)]；读不到返回 None。
+
+    对 ET_DYN 与 ET_EXEC 都一样：dynfixture 把 DT_RELA 写成绝对 vaddr，
+    ET_EXEC 时它已含窗口基址，所以 vaddr_to_off 直接能换。
+    """
+    ents = dyn_entries(h)
+    if ents is None:
+        return None
+    d = dict(ents)
+    if DT_RELA not in d:
+        return []
+    sz = d.get(DT_RELASZ, 0)
+    off = vaddr_to_off(h, d[DT_RELA])
+    if off is None:
+        return None
+    out = []
+    for i in range(sz // 24):
+        r_off, r_info, r_add = struct.unpack_from("<QQq", h["raw"], off + i * 24)
+        out.append((r_off, r_info & 0xFFFFFFFF, r_info >> 32, r_add))
+    return out
+
+def dyn_symbols(h):
+    """返回 [dict(name, info, shndx, value)]；条数取自 DT_HASH 的 nchain。"""
+    ents = dyn_entries(h)
+    if ents is None:
+        return None
+    d = dict(ents)
+    if DT_SYMTAB not in d or DT_STRTAB not in d or DT_HASH not in d:
+        return None
+    hash_off = vaddr_to_off(h, d[DT_HASH])
+    sym_off = vaddr_to_off(h, d[DT_SYMTAB])
+    str_off = vaddr_to_off(h, d[DT_STRTAB])
+    if hash_off is None or sym_off is None or str_off is None:
+        return None
+    _nb, nchain = struct.unpack_from("<II", h["raw"], hash_off)
+    syment = d.get(DT_SYMENT, 24)
+    rawb = h["raw"]
+    out = []
+    for i in range(nchain):
+        nameoff, info, _other, shndx, value, _size = struct.unpack_from(
+            "<IBBHQQ", rawb, sym_off + i * syment)
+        end = rawb.find(b"\0", str_off + nameoff)
+        name = rawb[str_off + nameoff:end].decode("utf-8", "replace")
+        out.append({"name": name, "info": info, "shndx": shndx, "value": value})
+    return out
 
 def dyn_count(h, tag):
     ents = dyn_entries(h)
@@ -558,6 +620,47 @@ def check_fixtures():
         return
     ok("fixture-shape", "4 个夹具 + ld.so 的头/phdr/PT_INTERP/DT_NEEDED/坏符号全对")
 
+    problems = []
+    tls_want = (("dynmain", 16), ("dynmain_exec", 16), ("libanswer.so", 8))
+    for label, want in tls_want:
+        h = elf_header(paths[label][0])
+        seg = phdr_of(h, PT_TLS)
+        if seg is None:
+            problems.append("%s 没有 PT_TLS（TLS 模板不会被装载器看到）" % label)
+            continue
+        if seg["filesz"] != want or seg["memsz"] != want:
+            problems.append("%s PT_TLS filesz=0x%x memsz=0x%x，应为 0x%x"
+                            % (label, seg["filesz"], seg["memsz"], want))
+        rel = rela_list(h)
+        if rel is None:
+            problems.append("%s 的 .rela 读不出来" % label)
+            continue
+        n11 = sum(1 for _o, t, _s, _a in rel if t == 11)
+        if n11 != 1:
+            problems.append("%s .rela 里 R_LARCH_TLS_TPREL64 有 %d 条，应为 1" % (label, n11))
+    # .dynsym 的 STT_TLS 值：主程序那条必须非 0（否则"槽没重定位"也能碰巧读对）
+    for label, sym, want_val in (("dynmain", "m_tls", 8),
+                                 ("libanswer.so", "lib_tls", 0)):
+        h = elf_header(paths[label][0])
+        syms = dyn_symbols(h)
+        if syms is None:
+            problems.append("%s 的 .dynsym 读不出来" % label)
+            continue
+        hit = [s for s in syms if s["name"] == sym]
+        if not hit:
+            problems.append("%s 的 .dynsym 里没有 %s" % (label, sym))
+            continue
+        s = hit[0]
+        if (s["info"] & 0xF) != STT_TLS:
+            problems.append("%s 的 %s 不是 STT_TLS（info=0x%02x）" % (label, sym, s["info"]))
+        if s["value"] != want_val:
+            problems.append("%s 的 %s st_value=0x%x，应为 0x%x"
+                            % (label, sym, s["value"], want_val))
+    if problems:
+        bad("fixture-tls", "；".join(problems[:4]))
+        return
+    ok("fixture-tls", "三个夹具的 PT_TLS 尺寸、type 11 条数、.dynsym 的 STT_TLS 值全对")
+
     # 重建确定性：同一 manifest 再跑一次，逐字节比。
     tmp = tempfile.mkdtemp(prefix="ark_dyn_rebuild_")
     again = os.path.join(tmp, "dynmain")
@@ -672,7 +775,8 @@ def judge(text):
         return sum(1 for ln in lines if pred(ln))
 
     writes = count(lambda s: s.startswith("[dyn] write /mnt/ram/") and " rc=0 size=" in s)
-    passes = count(lambda s: s.startswith("[dyn] PASS: RELATIVE + R_LARCH_64 + JUMP_SLOT all applied"))
+    passes = count(lambda s: s.startswith(
+        "[dyn] PASS: RELATIVE + R_LARCH_64 + JUMP_SLOT + TLS all applied"))
     e105 = count(lambda s: re.search(r"^\[dyn\] finished after \d+ ms, exit code 105$", s) is not None)
     e127 = count(lambda s: re.search(r"^\[dyn\] finished after \d+ ms, exit code 127$", s) is not None)
     ldso_fail = count(lambda s: s.startswith("[ldso] FAIL: unresolved PLT symbol no_such_symbol"))
@@ -682,6 +786,15 @@ def judge(text):
     staged_fail = count(lambda s: s.startswith("[dyn] FAIL:"))
     interp_ok = count(lambda s: "interp_base=34603008" in s and s.startswith("[dyn] info"))
     execs = count(lambda s: re.match(r"^\[dyn\] exec \S+ rc=0$", s) is not None)
+    tls_base = count(lambda s: s.startswith("[ldso] tls base="))
+    # 库在三次装载里都会被重定位（dynmain / dynmain_exec / 坏夹具），主程序两次。
+    tprel_lib = count(lambda s: s.startswith("[ldso] reloc libanswer.so:")
+                      and s.endswith("TPREL64=1"))
+    tprel_main = count(lambda s: s.startswith("[ldso] reloc dynmain")
+                       and s.endswith("TPREL64=1"))
+    tls_off8 = count(lambda s: s.startswith("[dyn] TPREL64 m_tls offset -> 8 ok"))
+    tls_lib = count(lambda s: s.startswith("[dyn] TLS lib value -> 4242 ok"))
+    tls_libw = count(lambda s: s.startswith("[dyn] TLS lib after write -> 4243 ok"))
 
     problems = []
     if writes != 5:
@@ -700,6 +813,18 @@ def judge(text):
         problems.append("ld.so 出现了期望之外的失败行")
     if staged_fail != 0:
         problems.append("夹具没送进 /mnt/ram/（[dyn] FAIL 出现了）")
+    if tls_base != 3:
+        problems.append("[ldso] tls base= 条数 %d != 3（两个主程序 + 坏夹具）" % tls_base)
+    if tprel_lib != 3:
+        problems.append("`reloc libanswer.so ... TPREL64=1` 条数 %d != 3" % tprel_lib)
+    if tprel_main != 2:
+        problems.append("`reloc dynmain* ... TPREL64=1` 条数 %d != 2" % tprel_main)
+    if tls_off8 != 2:
+        problems.append("`TPREL64 m_tls offset -> 8 ok` 条数 %d != 2（TLS 可能没真做）" % tls_off8)
+    if tls_lib != 2:
+        problems.append("`TLS lib value -> 4242 ok` 条数 %d != 2（跨对象 TLS 没读对）" % tls_lib)
+    if tls_libw != 2:
+        problems.append("`TLS lib after write -> 4243 ok` 条数 %d != 2" % tls_libw)
     if interp_ok != 3:
         problems.append("`[dyn] info ... interp_base=34603008`（0x02100000）出现 %d 次 != 3" % interp_ok)
     for tag, name in (("[linux] PASS", "Linux ABI 演示"),
@@ -716,11 +841,14 @@ def self_check(good_text):
     good = good_text.replace("\r\n", "\n")
     mutations = {
         "删一条 PASS": lambda s: s.replace(
-            "[dyn] PASS: RELATIVE + R_LARCH_64 + JUMP_SLOT all applied\n", "", 1),
+            "[dyn] PASS: RELATIVE + R_LARCH_64 + JUMP_SLOT + TLS all applied\n", "", 1),
         "坏夹具改判成功": lambda s: s.replace("exit code 127", "exit code 105"),
         "删掉 ldso 的 FAIL": lambda s: s.replace(
             "[ldso] FAIL: unresolved PLT symbol no_such_symbol\n", ""),
         "删一条 write": lambda s: re.sub(r"^\[dyn\] write /mnt/ram/libanswer\.so[^\n]*\n", "", s, count=1, flags=re.M),
+        "删一条 TLS 检查": lambda s: re.sub(r"^\[dyn\] TLS lib value -> 4242 ok\n", "", s, count=1, flags=re.M),
+        "抹掉 TPREL64 计数": lambda s: s.replace("TPREL64=1", "TPREL64=0"),
+        "删一行 tls base": lambda s: re.sub(r"^\[ldso\] tls base=[^\n]*\n", "", s, count=1, flags=re.M),
     }
     missed = []
     for name, fn in mutations.items():
@@ -741,7 +869,7 @@ def main(argv):
     ap.add_argument("--la64-gcc", default="")
     ap.add_argument("--qemu", default="")
     ap.add_argument("--no-build", action="store_true", help="复用已有产物")
-    ap.add_argument("--seconds", type=int, default=30)
+    ap.add_argument("--seconds", type=int, default=45)
     ap.add_argument("--keep", action="store_true", help="打印串口日志尾部")
     ap.add_argument("--keep-build", action="store_true",
                     help="收尾不恢复默认档（调试用；下次 make 会复用开档 .o）")
@@ -790,7 +918,7 @@ def main(argv):
                     if missed:
                         bad("parser-selfcheck", "这些坏样本没被判红：%s" % ", ".join(missed))
                     else:
-                        ok("parser-selfcheck", "4 种坏法（少 PASS / 坏夹具当成功 / 少 FAIL 行 / 少 write）全被判红")
+                        ok("parser-selfcheck", "7 种坏法（少 PASS / 坏夹具当成功 / 少 FAIL 行 / 少 write / 少 TLS 检查 / TPREL64 计数被抹 / 少 tls base 行）全被判红")
                 else:
                     bad("qemu-readout", "；".join(notes))
                     bad("parser-selfcheck", "读数没过，自检无从谈起")

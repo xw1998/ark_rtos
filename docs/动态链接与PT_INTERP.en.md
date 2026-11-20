@@ -14,11 +14,12 @@ With the switch on, the kernel accepts executables that carry `PT_INTERP`: it
 loads the interpreter into a board-provided region, builds the Linux `auxv`
 vector on the user stack, and starts at the interpreter entry. The interpreter
 is this repo's own minimal `ld.so` (`example/qemu_loongarch64/elf/ldso.c`); it
-maps the needed libraries, applies relocations and jumps back to the main
-program. It does **not** mean a stock distribution binary runs (see §6).
+maps the needed libraries, builds one TLS block, applies relocations and jumps
+back to the main program. It does **not** mean a stock distribution binary runs (see §6).
 
 With the switch off (default), `PT_INTERP` is still refused with
-`ARKRTOS_ELF_ERR_FORMAT (-9)`, and none of the fixture blobs is compiled in.
+`ARKRTOS_ELF_ERR_FORMAT (-3)` (`-9` is `ERR_INTERP`), and none of the fixture
+blobs is compiled in.
 
 ## 2 Kernel side
 
@@ -42,7 +43,9 @@ interpreter is measured and written separately (`ET_EXEC` must be linked at
 `INTERP_BASE`, `ET_DYN` is placed there); the two ranges must not intersect;
 `AT_PHDR` must be non-zero; `auxv` gets `AT_PHDR / AT_PHENT / AT_PHNUM /
 AT_PAGESZ(4096) / AT_BASE / AT_ENTRY / AT_UID / AT_EUID / AT_FLAGS`; the task
-entry becomes `interp.entry`.
+entry becomes `interp.entry`. A main program that carries `PT_TLS` still gets the
+static-profile block from the kernel, but in the dynamic profile that `$tp` is only
+the entry value — ld.so allocates its own unified block and rewrites `$tp`.
 
 Linux ABI additions (`kernelsrc/src/arkrtos_linux_abi.c`): `pread64 (67)`,
 `mprotect (226)` — **accepted, not enforced** (the window is one `PS=20` RWX
@@ -56,13 +59,19 @@ faked, so a library address is `mmap` result + `p_vaddr`.
 `e_phoff == 64` (otherwise it fails loudly rather than guessing); parses
 `PT_DYNAMIC`; resolves each `DT_NEEDED` under `/mnt/ram/` then `/lib/`, maps it
 anonymously and `pread64`s its `PT_LOAD`s (zeroing `.bss`); resolves symbols by
-a linear scan of `.dynsym`; applies `R_LARCH_RELATIVE(3)` / `R_LARCH_64(2)` /
-`R_LARCH_JUMP_SLOT(5)` (library first, then main program); prints `[ldso]` lines
-and jumps to `AT_ENTRY`.
+a linear scan of `.dynsym`; `setup_tls()` then gives every `PT_TLS` object a
+16-byte-aligned slot in **one** contiguous block (main program first) and prints
+`[ldso] tls base=... size=... objs=... offs=...`; applies `R_LARCH_RELATIVE(3)` /
+`R_LARCH_64(2)` / `R_LARCH_JUMP_SLOT(5)` / `R_LARCH_TLS_TPREL64(11)` (library
+first, then main program) — a TPREL64 slot holds the signed `S + A - TP` offset,
+not an absolute address; prints `[ldso]` lines, sets `$tp` (i.e. `$r2`) when a TLS
+block exists, and jumps to `AT_ENTRY`.
 
 Any failure prints `[ldso] FAIL: ...` and exits 127 — the loader is never
 allowed to "look successful". Limits: one level of dependencies only, at most 4
-objects / 16 program headers, no lazy binding, no TLS, no `.init_array`.
+objects / 16 program headers, no lazy binding, no `.init_array`. TLS is only the
+"static block + TPREL64" (initial-exec) form: `DTPMOD` / `DTPREL`,
+`DT_TLSDESC`, and library local-exec immediate offsets are not handled.
 
 ## 4 Fixtures
 
@@ -77,44 +86,69 @@ be broken on purpose.
 
 | File | Type | Notes |
 | --- | --- | --- |
-| `libanswer.so` | `ET_DYN` | exports `answer_add / lib_g_addr / g_base / g_ptr / abs_ptr / got_answer`; 1 RELATIVE + 1 `R_LARCH_64` |
-| `dynmain` | `ET_DYN` | needs `libanswer.so`; 1 RELATIVE + 2 `R_LARCH_64` + 2 JUMP_SLOT |
+| `libanswer.so` | `ET_DYN` | exports `answer_add / lib_g_addr / g_base / g_ptr / abs_ptr / got_answer / lib_tls_addr / lib_tls_read / lib_tls_write / lib_tls_off`; 1 RELATIVE + 1 `R_LARCH_64` + 1 TPREL64; `PT_TLS` 8 B (`lib_tls = 4242`) |
+| `dynmain` | `ET_DYN` | needs `libanswer.so`; 1 RELATIVE + 2 `R_LARCH_64` + 6 JUMP_SLOT + 1 TPREL64; `PT_TLS` 16 B (`m_tls`, `m_tls_pad`) |
 | `dynmain_exec` | `ET_EXEC` | same source, linked at `0x02001000` (other bias branch) |
 | `dynmain_bad` | `ET_DYN` | **anti-false-green**: JUMP_SLOT to `no_such_symbol`, which does not exist |
 
-## 5 Measured readout (QEMU, 2026-11-20)
+Sizes (measured this round): `ld-ark.link.elf` 27184 B, `libanswer.so` 21667 B,
+`dynmain` 23851 B (23883 B signed), `dynmain_exec` 23851 B (23883 B signed),
+`dynmain_bad` 23043 B (23075 B signed). Two deliberate TLS design choices make a
+false green impossible to miss: `m_tls` sits at offset **8** (this gcc lays
+`.tdata` out last-declared-first; `m_tls_pad` is declared after it), and the
+library's TLS is reachable only through libanswer's own `got_libtls` slot.
+
+## 5 Measured readout (QEMU, 2026-11-21)
 
 ```
-[ldso] main base=0x0000000002000000 type=3 entry=0x00000000020013a8 interp_base=0x0000000002100000
+[ldso] main base=0x0000000002000000 type=3 entry=0x00000000020014d0 interp_base=0x0000000002100000
 [ldso] need libanswer.so
 [ldso] lib libanswer.so base=0x0000000002110000 size=24576
-[ldso] reloc libanswer.so: RELATIVE=1 64=1 JUMP_SLOT=0
-[ldso] reloc dynmain: RELATIVE=1 64=2 JUMP_SLOT=2
-[dyn] PASS: RELATIVE + R_LARCH_64 + JUMP_SLOT all applied
-[dyn] info dynamic=1 interp_base=34603008 interp_entry=34608608
+[ldso] tls base=0x0000000002116000 size=32 objs=2 offs=0,16,
+[ldso] reloc libanswer.so: RELATIVE=1 64=1 JUMP_SLOT=0 TPREL64=1
+[ldso] reloc dynmain: RELATIVE=1 64=2 JUMP_SLOT=6 TPREL64=1
+[dyn] TPREL64 m_tls offset -> 8 ok
+[dyn] TPREL64 offset nonzero -> 1 ok
+[dyn] TLS main value -> 77 ok
+[dyn] TLS lib offset -> 16 ok
+[dyn] TLS lib distinct -> 1 ok
+[dyn] TLS lib value -> 4242 ok
+[dyn] TLS lib after write -> 4243 ok
+[dyn] TLS main untouched -> 77 ok
+[dyn] PASS: RELATIVE + R_LARCH_64 + JUMP_SLOT + TLS all applied
+[dyn] info dynamic=1 interp_base=34603008 interp_entry=34610336
 [dyn] finished after 0 ms, exit code 105
-... (dynmain_exec, type=2: same 6/6 ok, exit code 105)
+... (dynmain_exec, type=2: same 14/14 ok, exit code 105)
 [ldso] FAIL: unresolved PLT symbol no_such_symbol
 [dyn] finished after 0 ms, exit code 127
 ```
 
-Four conditions must hold together: both variants 6/6 ` ok` with `[dyn] PASS`
-and exit code 105; `interp_base = 0x02100000` in `[dyn] info`; the bad fixture
-fails with `unresolved PLT symbol no_such_symbol` and exit code 127 with **no
-extra PASS**; and `[linux] PASS` / `[FS] PASS` / `[ELF] tamper check PASS` from
-the same boot are still there.
+Five conditions must hold together: both variants 14/14 `ok` with `[dyn] PASS`
+and exit code 105; `interp_base = 0x02100000`; a `[ldso] tls base` line per load
+with `size=32` (16 + 8 + alignment), `objs=2`, `offs=0,16` — the two objects get
+**different** offsets, which is the per-object evidence; the bad fixture fails with
+`unresolved PLT symbol no_such_symbol` and exit code 127 with **no extra PASS**;
+and `[linux] PASS` / `[FS] PASS` / `[ELF] tamper check PASS` from the same boot
+are still there.
+
+Anti-false-green control: patching the `type 11` arm of `apply_rela()` to
+`return 0` (slot not written, nothing else touched) yields `TPREL64=0`,
+`TPREL64 m_tls offset -> 0 FAIL (want 8)` and `TLS lib value -> 4369 FAIL (want
+4242)` with exit code 1. `4369 = 0x1111` is exactly `m_tls_pad`, i.e. the code
+read the neighbouring variable because the slot was never written.
 
 ## 6 Gate and what is explicitly not supported
 
-`tools/dynlink_gate.py` (12 checks, registered in `ci_gate` as `dynlink`):
+`tools/dynlink_gate.py` (13 checks, registered in `ci_gate` as `dynlink`):
 default-off, Kconfig wiring, `#error` guards, board layout (macros expanded by
 the compiler, not parsed by hand), off/on symbol check on `elf_demo.o`, on-state
 compile of 5 translation units, a clean build (`make` does not track
 `EXTRA_CFLAGS`, so reusing old objects would fake "no dynamic demo"), fixture
 shape read byte-wise (`e_phoff == 64`, a `PT_LOAD` covering the phdr table,
-`PT_INTERP` string, `DT_NEEDED` count, the bad symbol, ld.so base), byte-equal
-fixture rebuild, the QEMU readout above, a parser self-check with four mutated
-logs, and a final restore of the default build.
+`PT_INTERP` string, `DT_NEEDED` count, the bad symbol, ld.so base), fixture TLS
+shape (`PT_TLS` sizes, one type-11 reloc per fixture, `STT_TLS` symbol values),
+byte-equal fixture rebuild, the QEMU readout above, a parser self-check with seven
+mutated logs, and a final restore of the default build.
 
 Default-profile size: `.text` 413752 B vs 411360 B on the pre-change baseline
 (+2392 B, +0.58%), from the shared measure/write refactor rather than from the
@@ -130,7 +164,8 @@ Not supported (do not read this as "Linux binaries run now"):
 2. glibc's ld.so needs `futex`, `rseq`, TLS, fd-backed `mmap`, signals, … none
    of which exist here;
 3. `mprotect` is accepted, not enforced; the window is RWX;
-4. no lazy binding, no `.init_array` / TLS initialisation;
+4. no lazy binding, no `.init_array`; TLS is only the static-block + TPREL64
+   (initial-exec) form — no `DT_TLSDESC` / `DTPMOD64` / `DTPREL64`;
 5. one dependency level, 4 objects, linear symbol scan;
 6. the interpreter itself is not signature-checked (this board has
    `ARKRTOS_USE_EXEC_SIGN` off);

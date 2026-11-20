@@ -139,9 +139,9 @@ what still stops this file is `[address]`.
 | --- | --- | --- | --- | --- | --- |
 | 1 | Address space | `[0x120000000, …)` | **address width is 64-bit now (2026-11-20)**: no more `p_vaddr > 0xFFFFFFFF` rule, and the window VA is decoupled from physical frames (`make ... WIN_VA=0x120000000` lifts window base, kernel link base and fixture bases together). The wide-window profile runs `linux_hello` under QEMU: `PASS` + `exit 7`, no fatal (see [MMU进程模型与ELF装载](MMU进程模型与ELF装载.en.md) §11) | per-process VA space and runtime page tables (**the real static hello has already run inside the wide window**, 2026-11-20, §5.3); the native SVC parameter block is still `uint32[]`, so a wide-VA App must pass pointers through the Linux ABI | `[address]` |
 | 2 | Interpreter | `PT_INTERP=/lib64/ld.so.1` | default: rejected (`ERR_FORMAT`); with `ARKRTOS_USE_DYNLOAD`: loads this repo's `ld-ark.so` only | the real glibc `ld.so` capability surface (§7) | `[interp-path]` |
-| 3 | TLS | `PT_TLS` (16/144 inherited from libc; 32/96 static) + 17 `R_LARCH_TLS_TPREL64` + `set_tid_address` | default build: `arkrtos_elf.c` **never reads `PT_TLS`**. With `ARKRTOS_USE_ELF_TLS` on it reads the segment, lays down `tdata`, zeroes `tbss` and points `$r2` at it (2026-11-20, static local-exec, see §5.1) | a real libc's TCB layout, `R_LARCH_TLS_TPREL64` relocations, `set_tid_address` semantics | `[tls]` |
+| 3 | TLS | `PT_TLS` (16/144 inherited from libc; 32/96 static) + 17 `R_LARCH_TLS_TPREL64` + `set_tid_address` | default build: `arkrtos_elf.c` **never reads `PT_TLS`**. With `ARKRTOS_USE_ELF_TLS` on it reads the segment, lays down `tdata`, zeroes `tbss` and points `$r2` at it (2026-11-20, static local-exec, see §5.1). **The repo's own `ld-ark.so` now does `PT_TLS` + `R_LARCH_TLS_TPREL64`** (2026-11-21, §5.6) | a real libc's TCB layout (`tcbhead_t`/`dtv`), `DTPMOD`/`DTPREL`, `set_tid_address` semantics | `[tls]` |
 | 4 | Dynamic tags | `INIT_ARRAY`/`FINI_ARRAY`, `GNU_HASH`, `VERSYM`/`VERNEED`/`VERDEF`, `RELACOUNT`, `FLAGS` | `ld-ark.so` handles only `NEEDED/STRTAB/SYMTAB/RELA/RELASZ/RELAENT/STRSZ/SYMENT/JMPREL/HASH` | run constructors, match symbol versions, GNU hash, `DF_1_NOW` | `[dynamic-tags]` |
-| 5 | Relocations | `RELATIVE`, `64`, `JUMP_SLOT`, `IRELATIVE` (IFUNC), `TLS_TPREL64` | only `R_LARCH_64 / RELATIVE / JUMP_SLOT` (both-aligned with `ldso.c` by the gate) | an IFUNC resolver (user code at load time) and TLS relocations | `[relocations]` |
+| 5 | Relocations | `RELATIVE`, `64`, `JUMP_SLOT`, `IRELATIVE` (IFUNC), `TLS_TPREL64` | the kernel's static loader does only `R_LARCH_64 / RELATIVE / JUMP_SLOT` (both-aligned with `ldso.c` by the gate); **`ld-ark.so` also does `R_LARCH_TLS_TPREL64`** (2026-11-21, §5.6) | an IFUNC resolver (user code at load time) and `DTPMOD`/`DTPREL` | `[relocations]` |
 | 6 | Dependency chain and storage | `libc.so.6` 1 571 208 B; static hello 623 728 B | `/mnt/ram` is a littlefs on a **4 MiB** RAM block device (`ARKRTOS_QEMU_BLK_SIZE = 4 * 1024 * 1024`, raised from 512 KiB on 2026-11-20); flash 2 MB, RAM 8 MB. **Capacity itself is now measured**: a 640 KiB file is written and read back byte-identical at boot | only dependency recursion (`DT_NEEDED` chain) is left | `[needed]` |
 
 ### 5.1 TLS path readings (2026-11-20)
@@ -354,7 +354,9 @@ The built-in fixture still passes in the same profile: `[tls] finished after
    `ARKRTOS_USE_ELF_TLS` implements the variant-I convention for programs
    without libc initialisation (`TP = TLS block start`), **not** glibc's
    `tcbhead_t`/`dtv` layout.
-2. `R_LARCH_TLS_TPREL64` relocations are still absent. `set_tid_address` (number
+2. `R_LARCH_TLS_TPREL64` is still absent from the kernel's static loader (the
+   static local-exec path does not need it); the repo's own `ld-ark.so` does it
+   now (2026-11-21, §5.6). `set_tid_address` (number
    96) **is implemented**: it only reports the caller's tid and writes nothing to
    user memory (no futex in this kernel, so the registered pointer has no consumer).
 3. When the `PT_TLS` block is fully image-backed we do **not** build a TLS block
@@ -430,6 +432,52 @@ an explicit fault, not a silent wrong answer.
 ---
 
 
+### 5.6 Dynamic TLS: the loader builds a thread block and applies `R_LARCH_TLS_TPREL64` (2026-11-21)
+
+Criterion: a main program on the `PT_INTERP` path uses `__thread`; both its own
+thread variable and the **library's** thread variable read back correctly, and
+the library's offset must come from the library's own relocation slot, not from
+the main program's offset.
+
+| Item | Reading / rule |
+| --- | --- |
+| Switch | `ARKRTOS_USE_DYNLOAD` (default 0). The fixture's `PT_TLS` is carried over **verbatim** from the statically linked image by `tools/elf/dynfixture.py` — no hand-written template |
+| What ld.so does | Scan every object's `PT_TLS` (`p_type=7`); assign block offsets in load order (main program first), 16 B aligned; `mmap` one RW anonymous block and zero it; the main program's template is copied from **mapped memory**, a library's from its file via `read_file` (in this output layout `file offset == vaddr - base`); before jumping back, `move $tp, <block base>` |
+| Relocation | `R_LARCH_TLS_TPREL64 = 11`, value `S + A - TP`, i.e. a **signed offset relative to `$tp`**. The slot does **not** hold an absolute address; user code dereferences `tp + off` itself |
+| Symbols | `STT_TLS = 6`. In `.dynsym` `st_value` is the **offset inside the block** (measured: `m_tls=8`, `lib_tls=0`), so `lookup()` must skip `STT_TLS` — otherwise it returns `base + offset`, an address that is not the variable, and points silently at the wrong place |
+| QEMU readout | `[ldso] tls base=0x0000000002116000 size=32 objs=2 offs=0,16,`; `reloc libanswer.so: RELATIVE=1 64=1 JUMP_SLOT=0 TPREL64=1`; `reloc dynmain: ... TPREL64=1`; all 14 `check` lines `ok`; `[dyn] PASS: RELATIVE + R_LARCH_64 + JUMP_SLOT + TLS all applied`; `exit code 105`, once for `dynmain` (ET_DYN) and once for `dynmain_exec` (ET_EXEC at `0x02000000`) |
+| Single-switch control | Make the type 11 branch in `apply_rela()` a bare `return 0` (slot stays 0): the same path immediately prints `TPREL64=0`, then `TPREL64 m_tls offset -> 0 FAIL (want 8)`, `TPREL64 offset nonzero -> 0 FAIL (want 1)` and `TLS lib value -> 4369 FAIL (want 4242)` (4369 = 0x1111, the neighbouring `__thread` pad), `exit code 1` |
+| Gate | `tools/dynlink_gate.py`: new `fixture-tls` (PT_TLS sizes, count of type 11 in `.rela`, `.dynsym` `STT_TLS` values must be `m_tls=8` / `lib_tls=0`) plus message pins (`[ldso] tls base=` ×3, `TPREL64=1` lib 3 / main 2, `m_tls offset -> 8` ×2, `TLS lib value -> 4242` ×2, `after write -> 4243` ×2); self-check bad samples grew from 4 to 7 |
+
+**Three anti-false-green design points** (drop one and this PASS is not credible):
+
+1. `m_tls`'s block offset is **deliberately non-zero**: declared next to
+   `m_tls_pad`, with the declaration order chosen against this repo's gcc
+   `.tdata` layout, measured `st_value=8`. Otherwise "relocation not done, slot
+   still 0, happens to read offset 0" would read a value that looks right.
+2. The library case **must go through the library's own `got_libtls`**:
+   `lib_tls_addr()` returns `$tp + slot`, and the main program compares it with
+   `lib_tls_off()` (the library reporting its own slot); equality is what proves
+   the symbol lookup is cross-object and found the library's `tls_off`, not a
+   made-up number.
+3. One isolation check on top: after writing the library's TLS, the main
+   program's `m_tls` must still be 77.
+
+**Boundaries (write them down; do not read them as anything else)**:
+
+1. Only the **static block + `TPREL64`** form (initial-exec) is done.
+   `DTPMOD`/`DTPREL` (bound after dlopen) are not.
+2. **`local-exec` code inside a library cannot be used directly**: at static link
+   time its `$tp + 0` is baked into the machine code assuming "block start = 0",
+   and a loader does not patch instruction immediates. It holds only for the main
+   program, which sits at offset 0; a library must go through its `TPREL64` slot
+   (that is how this repo's fixture is written). This is a capability boundary,
+   not a shortcut.
+3. This is not glibc's TCB: `tcbhead_t`/`dtv`/the self pointer are still absent,
+   so the real `ld.so` does not start (§7).
+
+---
+
 ## 6. Four tiers and what each costs
 
 Nearest first. "Passed" means the probe reports 0 blockers **and** QEMU produces
@@ -464,7 +512,7 @@ serves glibc. It fails on contract, not on effort:
    the old implementation, which fails silently and computes the wrong answer —
    exactly the "authoritative-looking wrong answer" this project forbids.
 
-`ld-ark.so` serves **this repo's own libraries** (three relocation kinds, no
+`ld-ark.so` serves **this repo's own libraries** (four relocation kinds, no
 symbol versions). It proves the kernel-side Linux convention and the relocation
 path work; it does **not** prove glibc compatibility. The two must not be read
 as the same thing.

@@ -17,6 +17,12 @@
 *          另一个 JUMP_SLOT：lib_g_addr 也不能直接 bl（本文件不与 libanswer.c
 *          一起静态链接，直接调用会在链接期报未定义符号），所以同样经
 *          got_gaddr 槽间接调用——这就是最小号的 PLT 等价物。
+*
+*          第 4 组检查动态 TLS（R_LARCH_TLS_TPREL64 + 装载器建线程块）：
+*            m_tls_pad / m_tls 两个 __thread 变量，m_tls 故意排在偏移非 0
+*            处——"重定位没做、槽还是 0、正好读到偏移 0"这种假绿必须被
+*            抓到；库里还有一个 lib_tls，只能经库自己的 TPREL64 槽访问，
+*            用来证明符号解析是跨对象找 tls_off 的，不是拿本对象的偏移凑。
 *          任一条不成立就打印 FAIL 并以 1 退出，全部成立以 105 退出。
 *
 * @note 这里没有一行 Ark SDK 调用，也没有 libc：只用 asm-generic 系统调用
@@ -139,9 +145,37 @@ long got_gptr = 0;      /* R_LARCH_64       -> g_ptr   */
 long m_base = 7;
 long m_rel = 0;         /* R_LARCH_RELATIVE -> &m_base */
 
+/* 线程变量：实测本仓 gcc 按"后声明者放前"排 .tdata，所以把 pad 写在后面，
+ * m_tls 的块内偏移就是 8 而不是 0——"槽没被重定位、还是 0、正好读到偏移 0"
+ * 这种假绿必须能被下面那条 check 抓到。 */
+__thread long m_tls = 77;
+__thread long m_tls_pad = 0x1111;
+long got_mtls = 0;      /* R_LARCH_TLS_TPREL64 -> m_tls（相对 $tp） */
+long got_libread = 0;   /* R_LARCH_JUMP_SLOT  -> lib_tls_read */
+long got_libwrite = 0;  /* R_LARCH_JUMP_SLOT  -> lib_tls_write */
+long got_libaddr = 0;   /* R_LARCH_JUMP_SLOT  -> lib_tls_addr */
+long got_liboff = 0;    /* R_LARCH_JUMP_SLOT  -> lib_tls_off  */
+
 /* libanswer.so 的导出：一律经重定位槽间接调用（不直接 bl，否则链接期未定义） */
 extern long answer_add(long x);
 extern long *lib_g_addr(void);
+extern long *lib_tls_addr(void);
+extern long lib_tls_off(void);
+extern long lib_tls_read(void);
+extern void lib_tls_write(long v);
+
+static unsigned long main_tp(void)
+{
+    unsigned long v;
+
+    __asm__ volatile("move %0, $tp" : "=r"(v));
+    return v;
+}
+
+static long *main_tls_addr(void)
+{
+    return &m_tls;
+}
 
 void dyn_main(unsigned long sp);
 
@@ -192,9 +226,32 @@ void dyn_main(unsigned long sp)
     check("g_ptr data",
           ((pa != (long *)0) && (*pa != 0)) ? *(long *)(*pa) : -1, 100);
 
+    /* 4) 动态 TLS：槽里存的是"相对 $tp 的偏移"，不是绝对地址 */
+    {
+        unsigned long tp = main_tp();
+        long moff = *(volatile long *)&got_mtls;
+        long *lib_addr;
+
+        check("TPREL64 m_tls offset", moff,
+              (long)((unsigned long)main_tls_addr() - tp));
+        check("TPREL64 offset nonzero", (moff != 0) ? 1 : 0, 1);
+        check("TLS main value", m_tls, 77);
+
+        lib_addr = ((long *(*)(void))(*(volatile long *)&got_libaddr))();
+        check("TLS lib offset", (long)((unsigned long)lib_addr - tp),
+              ((long (*)(void))(*(volatile long *)&got_liboff))());
+        check("TLS lib distinct", (lib_addr != main_tls_addr()) ? 1 : 0, 1);
+        check("TLS lib value",
+              ((long (*)(void))(*(volatile long *)&got_libread))(), 4242);
+        ((void (*)(long))(*(volatile long *)&got_libwrite))(4243);
+        check("TLS lib after write",
+              ((long (*)(void))(*(volatile long *)&got_libread))(), 4243);
+        check("TLS main untouched", m_tls, 77);
+    }
+
     if (g_fail == 0)
     {
-        out("[dyn] PASS: RELATIVE + R_LARCH_64 + JUMP_SLOT all applied\n");
+        out("[dyn] PASS: RELATIVE + R_LARCH_64 + JUMP_SLOT + TLS all applied\n");
     }
     else
     {

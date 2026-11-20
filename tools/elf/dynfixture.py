@@ -59,6 +59,7 @@ PT_LOAD = 1
 PT_DYNAMIC = 2
 PT_INTERP = 3
 PT_PHDR = 6
+PT_TLS = 7
 
 ET_EXEC = 2
 ET_DYN = 3
@@ -85,8 +86,12 @@ DT_JMPREL = 23
 R_LARCH_64 = 2
 R_LARCH_RELATIVE = 3
 R_LARCH_JUMP_SLOT = 5
+R_LARCH_TLS_TPREL64 = 11
 
-KIND_TO_TYPE = {"slot64": R_LARCH_64, "jumpslot": R_LARCH_JUMP_SLOT}
+KIND_TO_TYPE = {"slot64": R_LARCH_64, "jumpslot": R_LARCH_JUMP_SLOT,
+                "tprel64": R_LARCH_TLS_TPREL64}
+
+STT_TLS = 6
 
 PHDR = struct.Struct("<IIQQQQQQ")
 SHDR = struct.Struct("<IIQQQQIIQQ")
@@ -199,6 +204,18 @@ def build(input_path, manifest, output_path):
     if not loads:
         raise ValueError("input has no PT_LOAD segments")
 
+    # TLS 段原样搬到输出：本仓的 ld.so 要按 PT_TLS 建线程块，所以夹具必须
+    # 带着真实的 tdata 模板与 memsz，不能自己编。偏移按输出布局重算
+    # （输出里 PT_LOAD 的 file offset == vaddr - base）。
+    tls_seg = None
+    for p in e.phdrs:
+        if p["type"] == PT_TLS:
+            tls_seg = p
+            break
+    tls_exports = list(manifest.get("tls_exports", []))
+    if tls_exports and tls_seg is None:
+        raise ValueError("manifest lists tls_exports but the input has no PT_TLS")
+
     # The header table must sit in a PT_LOAD, otherwise AT_PHDR does not
     # exist.  When the linker put the first LOAD above the image base (very
     # common for exec images at 0x02000000), synthesize a read-only LOAD
@@ -222,6 +239,13 @@ def build(input_path, manifest, output_path):
     relocs = manifest.get("relocs", [])
     for r in relocs:
         name = r.get("sym")
+        if r.get("kind") == "tprel64":
+            # TLS 符号必须由清单显式声明（它的 st_value 是块内偏移，不是
+            # 绝对地址），不能走下面"看到定义就当普通导出"的默认路径。
+            if name not in tls_exports:
+                raise ValueError("tprel64 target %r must be listed in tls_exports"
+                                 % (name,))
+            continue
         if name and name not in exports and name not in imports:
             entry = e.symbols.get(name)
             if entry is not None and entry["shndx"] != SHN_UNDEF:
@@ -247,6 +271,17 @@ def build(input_path, manifest, output_path):
         off = dynstr.add(name)
         v = sym_value(name)
         dynsym.append((off, 0x12, 0, 1, v))  # GLOBAL FUNC; shndx 1 = defined
+        name_off[name] = len(dynsym) - 1
+    for name in tls_exports:
+        off = dynstr.add(name)
+        # STT_TLS 的 st_value 本身就是"相对 TLS 块起点的偏移"（实测本仓
+        # 工具链：lib_tls 的 st_value = 0，而 PT_TLS.p_vaddr = 0x5178），
+        # 不是绝对地址，所以这里不能减 p_vaddr。
+        v = sym_value(name)
+        if v < 0 or v >= tls_seg["memsz"]:
+            raise ValueError("TLS symbol %r (off 0x%x) is outside PT_TLS "
+                             "(memsz 0x%x)" % (name, v, tls_seg["memsz"]))
+        dynsym.append((off, 0x16, 0, 1, v))  # GLOBAL | STT_TLS
         name_off[name] = len(dynsym) - 1
     for name in imports:
         off = dynstr.add(name)
@@ -286,6 +321,10 @@ def build(input_path, manifest, output_path):
             rtype = KIND_TO_TYPE[kind]
             ent = (at, (idx << 32) | rtype, 0)
             (plt_entries if kind == "jumpslot" else rela_entries).append(ent)
+        elif kind == "tprel64":
+            idx = name_off[r["sym"]]
+            ent = (at, (idx << 32) | R_LARCH_TLS_TPREL64, 0)
+            rela_entries.append(ent)
         else:
             raise ValueError("unknown reloc kind %r" % kind)
 
@@ -344,6 +383,11 @@ def build(input_path, manifest, output_path):
                   "offset": extra_lo - base, "vaddr": extra_lo,
                   "filesz": extra_hi - extra_lo,
                   "memsz": extra_hi - extra_lo, "align": 0x1000})
+    if tls_seg is not None:
+        phdrs.append({"type": PT_TLS, "flags": 4,
+                      "offset": tls_seg["vaddr"] - base,
+                      "vaddr": tls_seg["vaddr"], "filesz": tls_seg["filesz"],
+                      "memsz": tls_seg["memsz"], "align": tls_seg["align"]})
     phdrs.append({"type": PT_DYNAMIC, "flags": 6,
                   "offset": dyn_addr - base, "vaddr": dyn_addr,
                   "filesz": len(dyntab) * DYN.size,
@@ -414,6 +458,7 @@ def build(input_path, manifest, output_path):
         "dynsym": len(dynsym),
         "rela": len(rela_entries),
         "jmprel": len(plt_entries),
+        "tls": len(tls_exports),
         "size": total,
     }
 

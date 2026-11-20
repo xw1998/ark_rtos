@@ -4,10 +4,13 @@
   "interp": "/mnt/ram/ld-ark.so",
   "soname": "libanswer.so",
   "needed": [],
-  "exports": ["answer_add", "lib_g_addr", "g_base", "g_ptr", "abs_ptr", "got_answer"],
+  "exports": ["answer_add", "lib_g_addr", "g_base", "g_ptr", "abs_ptr", "got_answer",
+              "lib_tls_addr", "lib_tls_read", "lib_tls_write", "lib_tls_off"],
   "imports": [],
+  "tls_exports": ["lib_tls"],
   "relocs": [
     {"kind": "relative", "at": "g_ptr", "addend_sym": "g_base"},
-    {"kind": "slot64", "at": "abs_ptr", "sym": "g_base"}
+    {"kind": "slot64", "at": "abs_ptr", "sym": "g_base"},
+    {"kind": "tprel64", "at": "got_libtls", "sym": "lib_tls"}
   ]
 }
