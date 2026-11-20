@@ -85,7 +85,7 @@
 - [kernelsrc/src/arkrtos_apppack.c](#kernelsrcsrcarkrtos_apppackc)（1 项）
 - [kernelsrc/src/arkrtos_cfg.c](#kernelsrcsrcarkrtos_cfgc)（1 项）
 - [kernelsrc/src/arkrtos_dev.c](#kernelsrcsrcarkrtos_devc)（1 项）
-- [kernelsrc/src/arkrtos_elf.c](#kernelsrcsrcarkrtos_elfc)（5 项）
+- [kernelsrc/src/arkrtos_elf.c](#kernelsrcsrcarkrtos_elfc)（8 项）
 - [kernelsrc/src/arkrtos_eset.c](#kernelsrcsrcarkrtos_esetc)（1 项）
 - [kernelsrc/src/arkrtos_exports.c](#kernelsrcsrcarkrtos_exportsc)（1 项）
 - [kernelsrc/src/arkrtos_fs.c](#kernelsrcsrcarkrtos_fsc)（1 项）
@@ -4417,7 +4417,7 @@ typedef struct {
 
 ## kernelsrc/include/arkrtos_linux_abi.h
 
-**Linux 系统调用 ABI 兼容层（带 MMU / MPU 目标上的静态 ELF 程序）**
+**Linux 系统调用 ABI 兼容层（带 MMU / MPU 目标上的 ELF 程序）**
 这里只回答一个问题：一个按 Linux 约定发起系统调用的**静态链接**
 可执行文件，能不能在 Ark 的 ELF 用户任务里跑起来。答案是"能跑
 一个最小集合"，不是"支持 Linux"：
@@ -4442,7 +4442,7 @@ uint32 arkrtos_linux_abi_stat(uint32 which);
 
 **读计数器（内核 / shell 用）**
 - `which`：0 = 已处理，1 = 未知号（-ENOSYS），2 = 用户指针被拒，
-3 = 其它失败
+3 = 其它失败，4 = mprotect 接受但未强制
 **返回**：计数值
 
 ### `void arkrtos_linux_abi_reset(void);`
@@ -10614,25 +10614,59 @@ void arkrtos_task_stack_fill(uint32 *stack_bottom, uint32 stack_size) {
 ### `static int32 elf_check_header(const uint8 *h, elf_word_t *p_entry, elf`
 
 ```c
-static int32 elf_check_header(const uint8 *h, elf_word_t *p_entry, elf_word_t *p_phoff, uint16 *p_phnum, uint16 *p_phentsize) {
+static int32 elf_check_header(const uint8 *h, elf_word_t *p_entry, elf_word_t *p_phoff, uint16 *p_phnum, uint16 *p_phentsize, uint16 *p_type) {
 ```
 
 **校验 ELF 头，把 entry / phoff / phnum / phentsize 取出来**
 > 说明：e_machine 单独返回 ERR_ARCH，是为了让「这是 x86 的 ELF」和
 「这不是 ELF」在日志里能分开——两者的修法完全不同。
 
+### `static int32 elf_measure_image(const char *path, elf_word_t phoff, uin`
+
+```c
+static int32 elf_measure_image(const char *path, elf_word_t phoff, uint16 phnum, uint16 phentsize, elf_word_t entry, uint32 bias, elf_image_t *p_img) {
+```
+
+**量一遍段表：装载会落在哪一段地址上**
+- `bias`：ET_DYN 的装载基址；ET_EXEC 传 0（vaddr 本身已经是绝对地址）
+这里只读不写，所以任何不合法都能在"写坏字节之前"拒绝。
+同时算出程序头表在内存里的地址（AT_PHDR 要它）：只有 phdr 真的
+被某个 PT_LOAD 的 file range 盖住，这个地址才存在；否则留 0，
+由调用方决定是拒绝还是不给 AT_PHDR。
+
+### `static int32 elf_check_range(const elf_image_t *p_img, uint32 lo_limit`
+
+```c
+static int32 elf_check_range(const elf_image_t *p_img, uint32 lo_limit, uint32 hi_limit) {
+```
+
+**镜像必须整段落在 [lo_limit, hi_limit) 里（含端点判据用减法写） */**
+
+### `static int32 elf_find_interp(const char *path, elf_word_t phoff, uint1`
+
+```c
+static int32 elf_find_interp(const char *path, elf_word_t phoff, uint16 phnum, uint16 phentsize, char *out, uint32 cap) {
+```
+
+**找 PT_INTERP，并把解释器路径拷出来**
+**返回**：1 = 有解释器（out 里是路径）；0 = 静态 ELF；负值 = 路径不合法
+路径按 Linux 约定是"文件里的字符串"，以 NUL 结尾。这里不信文件
+的 NUL：读到 p_filesz 个字节后强制补一个，超长直接拒绝——把
+截断的路径当成"另一个文件"去装是最难查的静默失败。
+
 ### `static int32 elf_build_stack(uint32 win_top, uint32 argv_start, int32 `
 
 ```c
-static int32 elf_build_stack(uint32 win_top, uint32 argv_start, int32 argc, char *argv[], uint32 *p_sp) {
+static int32 elf_build_stack(uint32 win_top, uint32 argv_start, int32 argc, char *argv[], const elf_aux_t *aux, uint32 auxn, uint32 *p_sp, uint32 *p_execfn) {
 ```
 
-**把 argv 铺成 Linux 的形状，返回初始 sp**
+**把 argv 与 auxv 铺成 Linux 的形状，返回初始 sp**
 布局（地址从高到低）：
 字符串区（argv[i] 的字节）
-NULL(envp)、NULL(argv 结束)、argv[argc-1..0]、argc  <- sp
+AT_NULL 的 0/0、auxv 键值对、NULL(envp)、NULL(argv 结束)、
+argv[argc-1..0]、argc  <- sp
 字符串从窗口顶端往下写，数组紧贴在 argv_start 之上。
-**返回**：0 = 成功（*p_sp 有效）；否则为负错误码
+**返回**：0 = 成功（*p_sp / *p_execfn 有效）；否则为负错误码
 
 ### `static int32 elf_load(uint32 space, const char *path, int32 argc, char`
 
@@ -10640,11 +10674,16 @@ NULL(envp)、NULL(argv 结束)、argv[argc-1..0]、argc  <- sp
 static int32 elf_load(uint32 space, const char *path, int32 argc, char *argv[], arkrtos_elf_info_t *p_info) {
 ```
 
-**把一份 ELF64 装进指定地址空间并起一个降权任务**
+**把一份 ELF 装进指定地址空间并起一个降权任务**
 - `space`：目标地址空间（0 .. 空间数-1）；窗口 VA 在每个空间里相同
 - `p_info`：成功时填装载读数（不接收失败值）
-空间选择、台账登记、以及"装载完把内核任务原来的视图装回去"
-都在 arkrtos_elf_exec_space() 里；这里只做"把这份文件装进这一块帧"。
+静态档与动态档的区别只在「要不要先装一个解释器、入口跳谁」：
+- 静态档：段按 e_vaddr 落位，入口就是 e_entry；
+- 动态档（PT_INTERP 存在，ARKRTOS_USE_DYNLOAD=1）：主程序照样落位，
+解释器装在板级给定的区间里，入口改成解释器的入口，并把
+AT_PHDR / AT_BASE / AT_ENTRY 等 auxv 铺在用户栈上——这正是
+Linux 传给 ld.so 的那一套。解释器自己负责加载共享库。
+没有解释器文件或解释器路径不合法时返回 ERR_INTERP，不半跑。
 
 ### `int32 arkrtos_elf_exec_space(const char *path, int32 argc, char *argv[`
 
