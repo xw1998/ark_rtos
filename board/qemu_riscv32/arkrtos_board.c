@@ -328,13 +328,150 @@ void arkrtos_port_board_init(void)
  *          注册失败不再沉默：返回值不为 0 就打到控制台，否则 shell 起来
  *          只会报"打不开串口"，看不出根因在注册这一步。
  * ============================================================ */
+#if (ARKRTOS_DEMO_HWSAFE == 1)
+static void hw_demo_dev_register(void);
+#endif
+
 void arkrtos_dev_board_init(void)
 {
     if(arkrtos_board_uart_dev_register() != 0)
     {
         arkrtos_board_puts("[board] dev register ttyS0 FAILED\n");
     }
+#if (ARKRTOS_DEMO_HWSAFE == 1)
+    /* A5 读数装置：三台板内虚拟设备 + 驱动安全态回调（实现见文件末尾）。 */
+    hw_demo_dev_register();
+#endif
 }
+/* ============================================================
+ * A5：遗言机制在「非 ARM」上的读数装置（ARKRTOS_DEMO_HWSAFE，默认关）
+ * @details 遗言机制（ARKRTOS_HW_SAFE）与架构无关，但在此之前这块 QEMU 板上
+ *          没有任何驱动登记安全态回调，整机 devs=0 —— 「机制在非 ARM 上也能在
+ *          有设备的情况下工作」只有 UTEST 的合成回调作证，没有一次「真实设备
+ *          + 真实任务死亡」的读数。
+ *
+ *          这里放三台**板内虚拟设备**（led0/led1/led2，纯 RAM 状态，不碰真
+ *          外设），由驱动声明安全态：属主死亡时把 level 强制归 0 并计一次
+ *          safe_hits。示例 main.c 的三个任务分别走三条通道：
+ *            led0 —— 留遗言（will 通道）
+ *            led1 —— 不留遗言（驱动回调通道）
+ *            led2 —— 一直活着（台账里始终有一条所有者）
+ *
+ *          默认关：关着时本段不进二进制，板级行为与加入本装置之前逐位一致。
+ * ============================================================ */
+#if (ARKRTOS_DEMO_HWSAFE == 1)
+#include "arkrtos_dev.h"
+#include "arkrtos_hwsafe.h"
+
+#define HW_DEMO_DEV_NUM   3u
+
+typedef struct
+{
+    arkrtos_dev_hdr_t hdr;
+    uint8             opened;
+    uint32            level;   /* 0 = 安全态，非 0 = 通电（纯 RAM 状态） */
+} hw_demo_dev_t;
+
+static hw_demo_dev_t s_hw_demo[HW_DEMO_DEV_NUM];
+static volatile uint32 s_hw_demo_safe_hits;
+
+static arkrtos_dev_hdr_t *hw_demo_open(uint32 dev_id, uint32 param)
+{
+    (void)param;
+    if(dev_id >= HW_DEMO_DEV_NUM)
+    {
+        return 0;
+    }
+    s_hw_demo[dev_id].hdr.block_size = sizeof(hw_demo_dev_t);
+    s_hw_demo[dev_id].opened = 1u;
+    s_hw_demo[dev_id].level  = 1u;   /* 打开即通电，与 STM32 的 led 演示同口径 */
+    return &s_hw_demo[dev_id].hdr;
+}
+
+static int32 hw_demo_close(arkrtos_dev_hdr_t *obj)
+{
+    hw_demo_dev_t *p_dev = (hw_demo_dev_t *)obj;
+
+    if((obj == 0) || (obj->block_size != sizeof(hw_demo_dev_t)))
+    {
+        return -1;
+    }
+    p_dev->opened = 0u;
+    return 0;
+}
+
+static int32 hw_demo_ctrl(arkrtos_dev_hdr_t *obj, uint32 code, uint32 value)
+{
+    hw_demo_dev_t *p_dev = (hw_demo_dev_t *)obj;
+
+    (void)value;
+    if((obj == 0) || (obj->block_size != sizeof(hw_demo_dev_t)))
+    {
+        return -1;
+    }
+    /* 只认 0 = 关（安全态）、1 = 开；其余命令一律拒绝 —— 免得「遗言执行了
+     * 但驱动其实什么都没做」看起来像成功。 */
+    if(code > 1u)
+    {
+        return -1;
+    }
+    p_dev->level = code;
+    return 0;
+}
+
+/* 安全态回调：属主死亡时把电平打到 0。非阻塞、不调 SVC、可重入（幂等）。 */
+static int32 hw_demo_safe(arkrtos_dev_hdr_t *obj, uint32 owner)
+{
+    hw_demo_dev_t *p_dev = (hw_demo_dev_t *)obj;
+
+    (void)owner;
+    if((obj == 0) || (obj->block_size != sizeof(hw_demo_dev_t)))
+    {
+        return -1;
+    }
+    p_dev->level = 0u;
+    s_hw_demo_safe_hits++;
+    return 0;
+}
+
+static arkrtos_dev_drv_t s_hw_demo_drv =
+{
+    hw_demo_open,
+    hw_demo_close,
+    0,          /* read  */
+    0,          /* write */
+    hw_demo_ctrl
+};
+
+/* 把三台设备挂上设备表并声明安全态（由 arkrtos_dev_board_init() 调用）。 */
+static void hw_demo_dev_register(void)
+{
+    (void)arkrtos_dev_register("led0", &s_hw_demo_drv, 0u);
+    (void)arkrtos_dev_register("led1", &s_hw_demo_drv, 1u);
+    (void)arkrtos_dev_register("led2", &s_hw_demo_drv, 2u);
+    (void)arkrtos_hwsafe_register("led0", hw_demo_safe);
+    (void)arkrtos_hwsafe_register("led1", hw_demo_safe);
+    (void)arkrtos_hwsafe_register("led2", hw_demo_safe);
+}
+
+/* 示例读数用：驱动安全态回调真正被执行了多少次。内核的 neutralized 只记账，
+ * 不证明驱动那段代码跑过，所以这里单独数一个。 */
+uint32 arkrtos_board_hw_demo_safe_hits(void)
+{
+    return s_hw_demo_safe_hits;
+}
+
+/* 示例读数用：第 idx 台设备当前电平；idx 越界返回 0xFFFFFFFF。 */
+uint32 arkrtos_board_hw_demo_level(uint32 idx)
+{
+    if(idx >= HW_DEMO_DEV_NUM)
+    {
+        return 0xFFFFFFFFu;
+    }
+    return s_hw_demo[idx].level;
+}
+#endif /* ARKRTOS_DEMO_HWSAFE */
+
 
 /* ============================================================
  * PMP 违规现场（覆盖 port 层的弱实现）

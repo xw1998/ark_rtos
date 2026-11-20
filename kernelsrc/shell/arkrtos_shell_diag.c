@@ -1289,34 +1289,40 @@ static int rt_show(void)
     int32  j_max = 0;
     uint32 j_n   = 0;
 
-    ark_shell_printf("\r\nreal-time measurement (DWT cycle counter)\r\n");
+    ark_shell_printf("\r\nreal-time measurement (hardware cycle counter)\r\n");
 
     if(per_tick == 0u)
     {
-        ark_shell_printf("  cycle counter unavailable (DWT) - no measurement possible\r\n");
+        ark_shell_printf("  cycle counter unavailable - no measurement possible\r\n");
         ark_shell_printf("  (nothing is estimated from the tick period on purpose)\r\n");
         return -1;
     }
 
     {
-        uint32 clk = arkrtos_port_get_system_clock();
+        uint32 clk = arkrtos_port_get_cycle_clock();
         uint32 tick_us;
 
-        tick_us = (clk != 0u) ?
-                  (uint32)(((unsigned long long)per_tick * 1000000ull) /
-                           (unsigned long long)clk) : 0u;
-        ark_shell_printf("  cycles per tick: %u  (clock %u Hz, tick %u us)\r\n",
-                         per_tick, clk, tick_us);
+        /* 走内核同一套换算（rv32imac 上 64 位除法链接不过）。 */
+        tick_us = arkrtos_rt_to_us(per_tick);
+        /* ARM 上这个频率就是内核时钟（同源常量）；RISC-V / LoongArch 上是
+         * 开机时用节拍时基量出来的。来源必须写清楚：一个是抄来的，一个是
+         * 量出来的，读数的可信度不同。 */
+        ark_shell_printf("  cycles per tick: %u  (cycle clock %u Hz %s, tick %u us)\r\n",
+                         per_tick, clk,
+                         (arkrtos_port_cycle_clock_measured() != 0) ? "[measured]" : "[board constant]",
+                         tick_us);
 
         /* 先证明计数器本身在走再谈读数。调试器断开时会把 DEMCR.TRCENA 清掉，
-         * 那之后 CYCCNT 就停在原地；这里重新武装一次并当场报出来。 */
-        if(arkrtos_rt_counter_alive() == 0)
+         * 那之后 CYCCNT 就停在原地；这里重新武装一次并当场报出来。
+         * （2026-11-20 修正：这里原来的判断写反了，alive == 0 时报的是
+         *   "running"——读数页上会给出恰好相反的结论。） */
+        if(arkrtos_rt_counter_alive() != 0)
         {
             ark_shell_printf("  counter: running\r\n");
         }
         else
         {
-            ark_shell_printf("  counter: NOT running (DWT CYCCNT does not advance)"
+            ark_shell_printf("  counter: NOT running (it does not advance)"
                              " - numbers below are stale\r\n");
         }
     }

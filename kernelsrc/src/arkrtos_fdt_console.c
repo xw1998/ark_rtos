@@ -77,6 +77,7 @@ int arkrtos_console_from_fdt(const arkrtos_console_expect_t *expect,
     out->path[0] = '\0';
     out->compatible[0] = '\0';
     out->reg_base = 0u;
+    out->clock_hz = 0u;
     out->baud = 0u;
     out->bits = 0u;
     out->parity = 0;
@@ -116,6 +117,10 @@ int arkrtos_console_from_fdt(const arkrtos_console_expect_t *expect,
     }
     (void)arkrtos_fdt_prop_u32(&n, "reg", 0u, &reg);
     out->reg_base = reg;
+    /* UART 的输入时钟也读出来：驱动按它算波特率分频，树说 25 MHz 而板级
+     * 按 100 MHz 分频，结果是"能打印但波特率错"——在串口上表现为乱码，
+     * 看上去像 UART 坏了。所以这一项与 reg 一样必须核对。 */
+    (void)arkrtos_fdt_prop_u32(&n, "clock-frequency", 0u, &out->clock_hz);
 
     if(out->enabled == 0u)
     {
@@ -140,6 +145,11 @@ int arkrtos_console_from_fdt(const arkrtos_console_expect_t *expect,
         {
             return ARKRTOS_CONSOLE_ADDR;
         }
+        if((expect->clock_hz != 0u) && (out->clock_hz != expect->clock_hz))
+        {
+            /* 缺失（0）也归到这里：期望一个确定值时不接受"没写"。 */
+            return ARKRTOS_CONSOLE_CLOCK;
+        }
     }
     return ARKRTOS_CONSOLE_OK;
 }
@@ -156,6 +166,7 @@ const char *arkrtos_console_reason(int rc)
         case ARKRTOS_CONSOLE_COMPAT:     return "compatible_mismatch";
         case ARKRTOS_CONSOLE_ADDR:       return "reg_mismatch";
         case ARKRTOS_CONSOLE_BAUD:       return "baud_conflict";
+        case ARKRTOS_CONSOLE_CLOCK:      return "clock_mismatch";
         default:                         return "?";
     }
 }

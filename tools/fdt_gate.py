@@ -35,17 +35,22 @@ D-2 阶段 1 只证明了「同一份 DTS 能编出 spec-valid 的 dtb」（离�
      `fdt phandle` 必须给出同一个节点；`fdt save` 落盘再 `fdt load` 回来，
      nodes 必须不变；再 load 一个空文件，必须拒绝并保留上一棵树。
   J. overlay（fragment 应用）：另起一次启动，先证明 `fdt path
-     /overlay-demo-node` 取不到（树里本来没这个节点），再 `fdt overlay` 应用
-     板级 fragment，随后 nodes 必须 +1、model 必须变成 fragment 里的那个、
-     `fdt get` 必须读出 fragment 写进去的两条属性、`fdt path` 必须能查到新
-     节点。四种坏法（错 nodes、错 model、错属性值、「应用前就有节点」）。
-     **应用前的「取不到」是这一组唯一的反假绿闸门**：只断言应用后的读数，
-     分不出「overlay 真写了」与「树里本来就有」。
+     /overlay-demo-node` 取不到（树里本来没这个节点）、`victim-child` 还在、
+     `victim-prop` 是 "before"、控制台是 115200；再 `fdt overlay` 应用板级
+     fragment。应用后：nodes 净变化 0（+1 新节点、-1 被删节点）、model 变成
+     fragment 里的那个、`fdt get` 读出 fragment 写进去的两条属性、
+     `current-speed` 115200→9600（fragment 用的是 target = <&uart0>，所以这条
+     读数证明 label 经 __fixups__ + __symbols__ 真的解析到了那个节点）、
+     `victim-child` 查不到、`victim-prop` 已删。
+     七种坏法（错 nodes、错 model、错属性值、「应用前就有节点」，以及
+     uart 没改 / 子节点没删 / 属性没删）都必须被判红。
+     **应用前的读数才是反假绿的关键**：只断言应用后的结果，分不出「overlay
+     真写了」与「树里本来就有」。
 
-不覆盖：带 `target=<&label>` / `__fixups__` / `__symbols__` / 删除语义的
-fragment（实现侧明确拒绝）、bootloader 传 dtb、镜像重定位。`fdt save/load`
-证明的是「RAM 副本 + 文件往返 + 坏 blob 回滚」，不是「bootloader 交树」。
-见 docs/设备树.md §5。
+不覆盖：bootloader 传 dtb、镜像重定位、`__local_fixups__`（实现侧明确
+拒绝）。`/delete-node/` 在 dtb 里的编码是本项目自定义的 `__delete` 标记，
+**不声称与 Linux dtbo 逐字节一致**。`fdt save/load` 证明的是「RAM 副本 +
+文件往返 + 坏 blob 回滚」，不是「bootloader 交树」。见 docs/设备树.md §5。
 
 用法
 ----
@@ -366,7 +371,9 @@ BOOT_RE = re.compile(r"^\[fdt\] blob=(\d+) rc=(-?\d+)(.*)$", re.M)
 
 CONSOLE_PATH = "/soc/serial@1fe001e0"
 CONSOLE_BAUD = "115200"
-CONSOLE_RE = re.compile(r"^\[fdt\] console path=(\S+) baud=(\d+) "
+
+CONSOLE_CLK = "25000000"   # ARKRTOS_QEMU_UART_CLK
+CONSOLE_RE = re.compile(r"^\[fdt\] console path=(\S+) baud=(\d+) clk=(\d+) "
                         r"reason=(\S+) match=(\d+)$", re.M)
 
 def judge_console(text):
@@ -374,19 +381,23 @@ def judge_console(text):
     hits = CONSOLE_RE.findall(text.replace("\r\n", "\n"))
     if len(hits) != 1:
         return False, "console 行出现 %d 次（必须恰好 1 次）" % len(hits)
-    path, baud, reason, match = hits[0]
+    path, baud, clk, reason, match = hits[0]
     problems = []
     if path != CONSOLE_PATH:
         problems.append("path=%s，期望 %s" % (path, CONSOLE_PATH))
     if baud != CONSOLE_BAUD:
         problems.append("baud=%s，期望 %s" % (baud, CONSOLE_BAUD))
+    # 树里写的 UART 输入时钟要和板级常量一致：不一致时驱动仍能打印，只是
+    # 波特率是错的，在串口上看起来像"UART 坏了"。
+    if clk != CONSOLE_CLK:
+        problems.append("clk=%s，期望 %s" % (clk, CONSOLE_CLK))
     if reason != "ok":
         problems.append("reason=%s，期望 ok" % reason)
     if match != "1":
         problems.append("match=%s，期望 1" % match)
     if problems:
         return False, "；".join(problems)
-    return True, "path=%s baud=%s reason=ok match=1" % (path, baud)
+    return True, "path=%s baud=%s clk=%s reason=ok match=1" % (path, baud, clk)
 
 def self_check_console(good_text):
     """四种坏法都必须被判红，否则 H 是空转。"""
@@ -457,9 +468,20 @@ def self_check_api(out, dtb_size, nodes):
 
 
 OVL_NODE = "/overlay-demo-node"
+OVL_VICTIM = "/overlay-victim"
+OVL_VICTIM_CHILD = "/overlay-victim/victim-child"
+OVL_CONSOLE = "/soc/serial@1fe001e0"
 
 def judge_overlay(pre, out, base_nodes):
-    """J：overlay 应用前取不到、应用后 nodes+1 且属性/路径都读得回来。"""
+    """J：target=<&label> 与删除语义。
+
+    应用前：树里没有 overlay-demo-node、victim-child 在、victim-prop 是
+    "before"、控制台 115200。
+    应用后：nodes 不变（+1 新节点、-1 被删的节点）、model 换成 fragment
+    写的那个、current-speed 变成 9600（这条证明 target=<&uart0> 真的解析
+    到了那个节点，而不是"看起来像成功"）、victim-child 查不到、
+    victim-prop 已删。
+    """
     problems = []
 
     pre_fdt = pre.get("fdt", "")
@@ -471,18 +493,34 @@ def judge_overlay(pre, out, base_nodes):
     if "path=" in pre_path:
         problems.append("应用前 `fdt path %s` 竟然查到了节点" % OVL_NODE)
 
+    # 应用前：要被改/被删的东西必须还在原位，否则"应用后没了"证明不了是
+    # overlay 干的。
+    pre_speed = pre.get("fdt get " + OVL_CONSOLE + " current-speed", "")
+    if "cells=0x1c200" not in pre_speed:
+        problems.append("应用前 %s current-speed 不是 0x1c200（115200）：%r"
+                        % (OVL_CONSOLE, pre_speed.strip()[:80]))
+    pre_vc = pre.get("fdt path " + OVL_VICTIM_CHILD, "")
+    if "path=" not in pre_vc or "depth=2" not in pre_vc:
+        problems.append("应用前 `fdt path %s` 没查到 depth=2 的节点：%r"
+                        % (OVL_VICTIM_CHILD, pre_vc.strip()[:80]))
+    pre_vp = pre.get("fdt get " + OVL_VICTIM + " victim-prop", "")
+    if 'str="before"' not in pre_vp:
+        problems.append("应用前 %s victim-prop 不是 \"before\"：%r"
+                        % (OVL_VICTIM, pre_vp.strip()[:80]))
+
     ovl = out.get("fdt overlay", "")
     if "overlay ok" not in ovl:
         problems.append("`fdt overlay` 没报 overlay ok：%r" % ovl.strip()[:120])
-    want = "nodes=%d (was %d)" % (base_nodes + 1, base_nodes)
+    want = "nodes=%d (was %d)" % (base_nodes, base_nodes)
     if want not in ovl:
-        problems.append("`fdt overlay` 里没有 %r" % want)
+        problems.append("`fdt overlay` 里没有 %r（这次 fragment +1 新节点、"
+                        "-1 被删节点，净变化是 0）" % want)
     if "model=fdt-overlay-demo" not in ovl:
         problems.append("`fdt overlay` 里的 model 不是 fragment 写的那个")
 
     after = out.get("fdt", "")
-    if "nodes=%d" % (base_nodes + 1) not in after:
-        problems.append("应用后的 `fdt` 不是 nodes=%d" % (base_nodes + 1))
+    if "nodes=%d" % base_nodes not in after:
+        problems.append("应用后的 `fdt` 不是 nodes=%d" % base_nodes)
     if "model=fdt-overlay-demo" not in after:
         problems.append("应用后的 `fdt` model 不是 fdt-overlay-demo")
     if "overlay-demo-node compat=ark-overlay-demo" not in after:
@@ -498,24 +536,59 @@ def judge_overlay(pre, out, base_nodes):
     if "depth=1" not in pth or "props=2" not in pth:
         problems.append("应用后 `fdt path %s` 不是 depth=1 props=2" % OVL_NODE)
 
+    # target=<&uart0>：9600 只可能来自 overlay（树里写的是 115200）。
+    speed = out.get("fdt get " + OVL_CONSOLE + " current-speed", "")
+    if "cells=0x2580" not in speed:
+        problems.append("应用后 %s current-speed 不是 0x2580（9600）：%r"
+                        % (OVL_CONSOLE, speed.strip()[:80]))
+
+    # 删除语义：节点查不到（失败必须是"查不到"，不是别的错）、属性已删。
+    vc = out.get("fdt path " + OVL_VICTIM_CHILD, "")
+    if "path=" in vc:
+        problems.append("应用后 `fdt path %s` 仍然查得到（删除没生效）"
+                        % OVL_VICTIM_CHILD)
+    elif "rc=" not in vc:
+        problems.append("应用后 `fdt path %s` 既没路径也没错误码：%r"
+                        % (OVL_VICTIM_CHILD, vc.strip()[:80]))
+    vp = out.get("fdt get " + OVL_VICTIM + " victim-prop", "")
+    if "has no property" not in vp:
+        problems.append("应用后 %s victim-prop 还在：%r"
+                        % (OVL_VICTIM, vp.strip()[:80]))
+    still = out.get("fdt path " + OVL_VICTIM, "")
+    if "path=" not in still:
+        problems.append("应用后 %s 本身查不到了（fragment 只该删属性与子节点）"
+                        % OVL_VICTIM)
+
     if problems:
         return False, "；".join(problems)
-    return True, ("应用前取不到 → 应用后 nodes %d→%d、model=fdt-overlay-demo，"
-                  "overlay-value=0x2a / compatible=ark-overlay-demo 都读得回"
-                  % (base_nodes, base_nodes + 1))
+    return True, ("应用前：无 overlay-demo-node、victim-child 在、victim-prop="
+                  "before、控制台 115200 → 应用后 nodes %d→%d、"
+                  "model=fdt-overlay-demo、current-speed 115200→9600、"
+                  "victim-child 查不到、victim-prop 已删"
+                  % (base_nodes, base_nodes))
 
 def self_check_overlay(pre, out, base_nodes):
-    """四种坏法：错 nodes、错 model、错属性值、应用前就有节点。"""
+    """七种坏法：错 nodes、错 model、错属性值、应用前就有节点，
+    外加三条本轮新增判据各自的反假绿（uart 没改、节点没删、属性没删）。"""
     o = "fdt overlay"
+    speed_cmd = "fdt get " + OVL_CONSOLE + " current-speed"
+    vc_cmd = "fdt path " + OVL_VICTIM_CHILD
+    vp_cmd = "fdt get " + OVL_VICTIM + " victim-prop"
     mutations = {
-        "overlay 行 nodes 改错": (out, o, "nodes=%d (was %d)" % (base_nodes + 1, base_nodes),
-                                 "nodes=%d (was %d)" % (base_nodes, base_nodes)),
+        "overlay 行 nodes 改错": (out, o, "nodes=%d (was %d)" % (base_nodes, base_nodes),
+                                 "nodes=%d (was %d)" % (base_nodes + 1, base_nodes)),
         "应用后 model 改错": (out, "fdt", "model=fdt-overlay-demo",
                               "model=QEMU virt loongarch64"),
         "overlay-value 改错": (out, "fdt get " + OVL_NODE + " overlay-value",
                                "cells=0x2a", "cells=0x2b"),
         "应用前就有节点（反假绿）": (pre, "fdt", "model=",
                                     "  overlay-demo-node compat=ark-overlay-demo reg=0x0/0x0 okay\nmodel="),
+        "uart 频率没变（label 没解析到）": (out, speed_cmd,
+                                          "cells=0x2580", "cells=0x1c200"),
+        "子节点没删掉": (out, vc_cmd, "rc=-9",
+                        "path=" + OVL_VICTIM_CHILD + " name=victim-child depth=2 props=1 okay"),
+        "属性没删掉": (out, vp_cmd, "has no property",
+                      'str="before"'),
     }
     missed = []
     for name, (src, cmd, old, new) in mutations.items():
@@ -867,12 +940,22 @@ def main(argv):
 
                 # J：overlay。必须另起一次启动量「应用前」，否则拿不到
                 # 「这个节点本来不存在」这条读数的可信版本。
-                pre_cmds = ["fdt", "fdt path " + OVL_NODE]
+                # 应用前也要量「改/删的目标还在原位」：只量应用后的结果，
+                # 分不出「overlay 改掉了」与「本来就没有」。
+                pre_cmds = ["fdt",
+                            "fdt path " + OVL_NODE,
+                            "fdt get " + OVL_CONSOLE + " current-speed",
+                            "fdt path " + OVL_VICTIM_CHILD,
+                            "fdt get " + OVL_VICTIM + " victim-prop"]
                 ovl_cmds = ["fdt overlay",
                             "fdt",
                             "fdt get " + OVL_NODE + " overlay-value",
                             "fdt get " + OVL_NODE + " compatible",
-                            "fdt path " + OVL_NODE]
+                            "fdt path " + OVL_NODE,
+                            "fdt get " + OVL_CONSOLE + " current-speed",
+                            "fdt path " + OVL_VICTIM_CHILD,
+                            "fdt get " + OVL_VICTIM + " victim-prop",
+                            "fdt path " + OVL_VICTIM]
                 pre_out, pre_err = run_qemu_shell(qemu, a.port, a.boot,
                                                   a.per_cmd, pre_cmds)
                 ovl_out, ovl_err = (None, pre_err) if pre_out is None else \
@@ -909,7 +992,7 @@ def main(argv):
                                 "这些坏样本没被判红：%s" % ", ".join(missed))
                         else:
                             ok("overlay-selfcheck",
-                               "4 种坏法（错 nodes / 错 model / 错属性值 / 应用前就有节点）全被判红")
+                               "7 种坏法（错 nodes / 错 model / 错属性值 / 应用前就有节点 / uart 没改 / 子节点没删 / 属性没删）全被判红")
                     else:
                         bad("qemu-overlay", detail_j)
                         bad("overlay-selfcheck", "读数没过，自检无从谈起")

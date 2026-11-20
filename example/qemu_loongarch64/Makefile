@@ -249,9 +249,9 @@ $(BUILD)/board/qemu_loongarch64/arkrtos_dt_blob.o: $(FDT_H)
 OVL_DTB := $(BUILD)/arkrtos_fdt_overlay_demo.dtb
 OVL_H   := $(BUILD)/arkrtos_fdt_overlay_demo_blob.h
 
-$(OVL_DTB): tools/dts/overlay/demo.dts tools/dts/dtc_lite.py
+$(OVL_DTB): tools/dts/overlay/demo_label.dts tools/dts/dtc_lite.py
 	@mkdir -p $(BUILD)
-	python tools/dts/dtc_lite.py --dts tools/dts/overlay/demo.dts \
+	python tools/dts/dtc_lite.py --dts tools/dts/overlay/demo_label.dts \
 	       --out $@ --format dtb ;
 
 $(OVL_H): $(OVL_DTB) example/qemu_loongarch64/elf_blob.py

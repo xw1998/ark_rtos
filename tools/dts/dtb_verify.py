@@ -181,6 +181,10 @@ def parse_struct(blob, h):
 def model_from_dts(dts_path):
     """The same tree as the DTS describes, encoded by an independent writer."""
     root = dtc_lite.build(dts_path)
+    # dtc_lite only adds __symbols__/__fixups__ on the dtb output path; the
+    # model must include them or the comparison below reports them as
+    # 'node only in DTB'.
+    dtc_lite.add_meta_nodes(root)
     tree = {}
     order = []
 
@@ -231,6 +235,7 @@ def verify(dts_path, dtb_path=None):
     """Return (ok, messages). Raises nothing: a gate wants every problem at once."""
     msgs = []
     root = dtc_lite.build(dts_path)
+    dtc_lite.add_meta_nodes(root)
     blob = dtc_lite.gen_dtb(root) if dtb_path is None else open(dtb_path, "rb").read()
     try:
         h = parse_header(blob)

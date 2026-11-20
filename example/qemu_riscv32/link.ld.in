@@ -46,6 +46,13 @@ SECTIONS
     . = ALIGN(16);
     __text_end = .;
 
+    /* 镜像不得越过镜像池基址（IMAGE_POOL_BASE = CHIP_FLASH_BASE +
+     * KERNEL_SIZE + CONFIG_SIZE）。本板现在没有 Flash 擦除后端，池擦不成
+     * 0xFF，但这条线是布局契约：越界意味着内核占用了别人（配置区/池）的
+     * 地址段，换个后端就会变成开机抹掉自己。 */
+    ASSERT(__text_end <= IMAGE_POOL_BASE,
+           "kernel image overruns KERNEL_SIZE: .text end is past IMAGE_POOL_BASE")
+
     /* ---- 跨复位崩溃日志（UNINIT） ---- */
     /* 与 STM32 工程里 gen_scatter.py 生成的 UNINIT 段同义：这块内存既不在
      * .data 也不在 .bss 里，启动代码不会碰它，于是它的内容能活过一次复位，

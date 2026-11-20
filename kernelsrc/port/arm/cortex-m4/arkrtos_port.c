@@ -409,6 +409,20 @@ uint32 arkrtos_port_get_cyccnt(void)
 {
     return ARKRTOS_PORT_DWT_CYCCNT;
 }
+
+/* DWT CYCCNT 与内核时钟同源：一个周期一个计数，频率就是系统主频。
+ * 不在运行期实测：ARM 上主频由时钟树决定，改主频会同时改掉 SysTick，
+ * 两者一起变，比值反而多一层噪声。这个 0 值（板级常量）让上层能把
+ * "常量来源"与 RISC-V / LoongArch 的"实测来源"分开报。 */
+uint32 arkrtos_port_get_cycle_clock(void)
+{
+    return arkrtos_port_get_system_clock();
+}
+
+int32 arkrtos_port_cycle_clock_measured(void)
+{
+    return 0;
+}
 #endif /* ARKRTOS_USE_RTSTAT */
 
 void arkrtos_port_start_timer(uint32 tick_period_us)
@@ -460,6 +474,31 @@ uint32 arkrtos_port_timer_countflag_take(void)
 
     return ((ctrl & SysTick_CTRL_COUNTFLAG_Msk) != 0u) ? 1u : 0u;
 }
+
+#if (ARKRTOS_USE_TICKLESS == 1)
+/* SysTick 是 24 位递减计数器：超过这个值的编程值会被截断。 */
+uint32 arkrtos_port_timer_sleep_max(void)
+{
+    return 0x00FFFFFFu;
+}
+
+/* 读序固定：读 CTRL 清 COUNTFLAG，所以先取标志再取 VAL，两次读必须来自
+ * 同一次结账；否则"回卷了没有"与"回卷后走了多远"会来自不同时刻。 */
+uint32 arkrtos_port_timer_elapsed_counts(uint32 programmed)
+{
+    uint32 flag = arkrtos_port_timer_countflag_take();
+    uint32 val  = arkrtos_port_get_timer_counter() & 0x00FFFFFFu;
+
+    if(flag != 0u)
+    {
+        uint32 since_wrap = (programmed > 0u) ? (programmed - 1u - val) : 0u;
+
+        return programmed + since_wrap;
+    }
+
+    return (programmed > val) ? (programmed - val) : 1u;
+}
+#endif /* ARKRTOS_USE_TICKLESS */
 
 void arkrtos_port_delay_us(uint32 us)
 {

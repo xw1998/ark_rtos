@@ -815,8 +815,109 @@ uint32 arkrtos_port_get_timer_reload(void)
     return 0xFFFFFFFFu;
 }
 
-/* 没有周期级计数器（DWT 的对应物）。返回 -1 是「这个核给不了这个读数」，
- * 调用方必须按「不可用」上报，不得编一个粗三个数量级的分辨率出来。 */
+/* ============================================================
+ * 周期级时间基准（mcycle / mcycleh）
+ * ------------------------------------------------------------
+ * RISC-V 的 mcycle（CSR 0xB00）是自由运行的周期计数器，与 ARM 的 DWT
+ * CYCCNT 是同一类东西。过去这里写着「没有周期级计数器」—— 那句话是错的：
+ * 真缺的不是计数器，而是「计数器不等于校准过的时间基准」。mcycle 按核频
+ * 走，mtime 按 10 MHz 走，两者不同源，所以频率只能实测。
+ *
+ * 做法：开机时用 mtime 当尺子，量 10 ms 里 mcycle 走了多少，得出每秒
+ * 多少个周期。量不出来（mtime 不走 / mcycle 不走 / 结果荒唐）就返回 -1，
+ * 让上层如实报「不可用」，不拿 10 MHz 冒充核频。
+ *
+ * RTSTAT 关闭时这一段不产生任何代码，与引入之前逐字节一致。
+ * ============================================================ */
+#if (ARKRTOS_USE_RTSTAT == 1)
+
+static uint32 s_cycle_hz;              /* 实测的 mcycle 频率；0 = 未校准 */
+
+static uint32 rv_mcycle_read(void)
+{
+    uint32 v;
+
+    /* RV32 上 mcycle 是一条 32 位只读 CSR，高位在 mcycleh（0xB80）。
+     * 单次校准窗口只有 10 ms，1 秒内不会回绕（> 4 GHz 才会），32 位够用。 */
+    __asm__ volatile("csrr %0, 0xb00" : "=r"(v) : : "memory");
+    return v;
+}
+
+int32 arkrtos_port_cyccnt_init(void)
+{
+    uint32 t0;
+    uint32 c0;
+    uint32 t1;
+    uint32 span;
+    uint32 elapsed;
+    uint32 guard;
+    uint32 dc;
+
+    /* 频率在运行期不变：量到一次就够。重复校准只会把好数字换成第二次的
+     * 噪声，而且后面每一拍都拿它折算，一旦变了读数就前后不可比。 */
+    if(s_cycle_hz != 0u)
+    {
+        return 0;
+    }
+
+    /* 取 100 ms 的 mtime 计数当窗口，于是"每秒周期数 = 窗口内周期数 * 10"，
+     * 整段不需要除法：RV32 工具链没有 libgcc 多库，64 位除法（__udivdi3）
+     * 链接不过，而这个比值只要窗口准确就够了。窗口内的相对误差来自
+     * "轮询越界"的那几条指令，实测 < 0.01%。 */
+    span = ARKRTOS_MACHINE_TIMER_HZ / 10u;
+    if(span == 0u)
+    {
+        span = 1u;
+    }
+
+    t0 = rv_mtime_read();
+    c0 = rv_mcycle_read();
+    guard = 0u;
+    for(;;)
+    {
+        t1 = rv_mtime_read();
+        elapsed = (uint32)(t1 - t0);
+        if(elapsed >= span)
+        {
+            break;
+        }
+        /* mtime 不走 = 这个核没有可用时基：报错，不在这里死等。 */
+        if(++guard > 20000000u)
+        {
+            return -1;
+        }
+    }
+
+    dc = (uint32)(rv_mcycle_read() - c0);
+
+    /* 0 = mcycle 没动（被 mcountinhibit 停了 / 核不实现）；超过 4e8 说明
+     * 窗口内就走了 8 个参考时钟，对应 8 GHz 以上，不是本档的核。 */
+    if((dc == 0u) || (dc > 400000000u))
+    {
+        return -1;
+    }
+
+    s_cycle_hz = dc * 10u;
+    return 0;
+}
+
+uint32 arkrtos_port_get_cyccnt(void)
+{
+    return rv_mcycle_read();
+}
+
+uint32 arkrtos_port_get_cycle_clock(void)
+{
+    return s_cycle_hz;
+}
+
+int32 arkrtos_port_cycle_clock_measured(void)
+{
+    return 1;
+}
+
+#else  /* RTSTAT == 0：保留原来的「不可用」桩，零体积 */
+
 int32 arkrtos_port_cyccnt_init(void)
 {
     return -1;
@@ -826,6 +927,29 @@ uint32 arkrtos_port_get_cyccnt(void)
 {
     return 0u;
 }
+
+#endif /* ARKRTOS_USE_RTSTAT */
+
+#if (ARKRTOS_USE_TICKLESS == 1)
+/* mtimecmp 是「比较值」，没有 COUNTFLAG：编程时留一个 mtime 快照，
+ * 用 32 位差值算实际经过了多少计数（回绕也被减法吃掉）。 */
+static uint32 s_sleep_start;
+
+uint32 arkrtos_port_timer_sleep_max(void)
+{
+    /* mtime 是 64 位、这里是 32 位视图：取一半，避免"编程时还没睡完就已经
+     * 跨过 2^31"这种分不清前后的情况。 */
+    return 0x7FFFFFFFu;
+}
+
+uint32 arkrtos_port_timer_elapsed_counts(uint32 programmed)
+{
+    uint32 d = (uint32)(rv_mtime_read() - s_sleep_start);
+
+    (void)programmed;
+    return (d == 0u) ? 1u : d;
+}
+#endif /* ARKRTOS_USE_TICKLESS */
 
 /**
 * @brief 启动节拍定时器
@@ -851,7 +975,15 @@ void arkrtos_port_start_timer_counts(uint32 counts)
     }
 
     s_tick_counts = counts;
-    rv_mtimecmp_write(rv_mtime_read() + counts);
+    {
+        uint32 base = rv_mtime_read();
+
+#if (ARKRTOS_USE_TICKLESS == 1)
+        /* tickless 结账用的快照：必须与写进 mtimecmp 的是同一次读数。 */
+        s_sleep_start = base;
+#endif
+        rv_mtimecmp_write(base + counts);
+    }
     __asm__ volatile("csrs mie, %0" : : "r"((uint32)RV_MIE_MTIE) : "memory");
 }
 

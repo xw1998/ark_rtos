@@ -409,6 +409,20 @@ uint32 arkrtos_port_get_cyccnt(void)
 {
     return ARKRTOS_PORT_DWT_CYCCNT;
 }
+
+/* DWT CYCCNT 与内核时钟同源：一个周期一个计数，频率就是系统主频。
+ * 不在运行期实测：ARM 上主频由时钟树决定，改主频会同时改掉 SysTick，
+ * 两者一起变，比值反而多一层噪声。这个 0 值（板级常量）让上层能把
+ * "常量来源"与 RISC-V / LoongArch 的"实测来源"分开报。 */
+uint32 arkrtos_port_get_cycle_clock(void)
+{
+    return arkrtos_port_get_system_clock();
+}
+
+int32 arkrtos_port_cycle_clock_measured(void)
+{
+    return 0;
+}
 #endif /* ARKRTOS_USE_RTSTAT */
 
 void arkrtos_port_start_timer(uint32 tick_period_us)

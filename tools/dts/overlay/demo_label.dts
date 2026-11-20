@@ -1,0 +1,61 @@
+/dts-v1/;
+/plugin/;
+
+/*
+ * Superset of demo.dts used by the QEMU LoongArch64 image only.
+ *
+ * demo.dts stays board-agnostic because tools/dts/test_fdt.py feeds it to six
+ * different boards; a label reference there would fail on every board whose
+ * tree does not define that label.  This file is instead embedded in exactly
+ * one image (example/qemu_loongarch64), whose base tree does define uart0 and
+ * victim.
+ *
+ * What it exercises, beyond demo.dts:
+ *
+ *   fragment@2  target = <&uart0>   - label form, resolved through
+ *                                     __fixups__ (overlay) + __symbols__ (base);
+ *                                     overrides current-speed.
+ *   fragment@3  target = <&victim>  - deletes a property (zero-length property
+ *                                     in __overlay__) and a child node (the
+ *                                     project's __delete marker; see
+ *                                     docs/设备树.md, not claimed to be
+ *                                     byte-identical to a Linux dtbo).
+ */
+
+/ {
+    fragment@0 {
+        target-path = "/";
+        __overlay__ {
+            overlay-demo = "yes";
+
+            overlay-demo-node {
+                compatible = "ark-overlay-demo";
+                overlay-value = <0x2a>;
+            };
+        };
+    };
+
+    fragment@1 {
+        target-path = "/";
+        __overlay__ {
+            model = "fdt-overlay-demo";
+        };
+    };
+
+    fragment@2 {
+        target = <&uart0>;
+        __overlay__ {
+            current-speed = <9600>;
+        };
+    };
+
+    fragment@3 {
+        target = <&victim>;
+        __overlay__ {
+            victim-prop;
+            victim-child {
+                __delete;
+            };
+        };
+    };
+};

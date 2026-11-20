@@ -786,7 +786,7 @@ static void la_mmu_init(void)
 
     /* 内核低 16 MB 恒等映射。两条 PS=22：
      *   0x00000000 → 覆盖 0x000000~0x7FFFFF（镜像 0x200000~、静态区 0x302000~）
-     *   0x00800000 → 覆盖 0x800000~0xFFFFFF（主栈顶 0xB00000 在这里） */
+     *   0x00800000 → 覆盖 0x800000~0xFFFFFF（主栈顶 0xC00000 在这里） */
     /* 大页必须落在 MTLB（绝对索引 2048 起，共 64 条）：STLB 的条目没有自己
      * 的 PS 字段，查找一律按 STLBPS(12) 比，塞进去的大页永远匹配不上。
      * 4 KB 页落 STLB，组号由 tlbfill 按 VA 自己算，index 参数对它们无效。 */
@@ -3168,8 +3168,65 @@ uint32 arkrtos_port_get_timer_reload(void)
     return 0xFFFFFFFFu;
 }
 
-/* 没有周期级计数器（DWT 的对应物）。返回 -1 是「这个核给不了这个读数」，
- * 调用方必须按「不可用」上报，不得编一个粗三个数量级的分辨率出来。 */
+/* ============================================================
+ * 周期级时间基准（rdtime）
+ * ------------------------------------------------------------
+ * LoongArch 上「周期计数器」只有一个来源：rdtime（读的就是 CSR 0x40 =
+ * TID，稳定计数器低 32 位）。所谓 rdcntvl.w 是它的助记符别名，**不是**另
+ * 一条按核频走的 TSC —— 所以这里没有「两条不同源的计数」可校准，频率就是
+ * 板级常量 ARKRTOS_PORT_RDTIME_HZ（QEMU virt 实测 100 MHz）。
+ *
+ * 两个实测踩到的坑，写在这里免得下次重踩：
+ *   ① 本工具链的 binutils 不认 rdcntvl.w 助记符（"no match insn"），
+ *      只能写 rdtime.d（或用同样编码的 csrrd rd, 0x40）；
+ *   ② csrrd rd, 0x40 在 QEMU 上读回来**不动**（实测：两次读之间夹 200 次
+ *      加法，值不变），于是 arkrtos_rt_counter_alive() 判「计数器不走」，
+ *      rt show 只会报"cycle counter unavailable"。改成 rdtime.d 之后
+ *      同一条判活立刻就过了 —— 内核其它地方本来就用 rdtime，保持同源。
+ *
+ * 所以 cyccnt_init() 不做校准（没有第二个源可对），只把频率置成常量；
+ * cycle_clock_measured() 返回 0，读数页据此标 [board constant]。
+ * RTSTAT 关闭时本段不产生任何代码。
+ * ============================================================ */
+#if (ARKRTOS_USE_RTSTAT == 1)
+
+static uint32 s_cycle_hz;              /* 实测的 TSC 频率；0 = 未校准 */
+
+static uint32 la_tsc_read(void)
+{
+    /* 直接复用内核那一条 rdtime 读数：同一条计数器，同一个 32 位截断口径。
+     * 不走 csrrd 0x40 的原因见上面 ① ② 两条实测。 */
+    return la_rdtime();
+}
+
+int32 arkrtos_port_cyccnt_init(void)
+{
+    /* LoongArch 只有一条稳定计数器：rdtime 读的就是它（CSR 0x40 = TID），
+     * 频率是板级常量 ARKRTOS_PORT_RDTIME_HZ（QEMU virt 实测 100 MHz）。
+     * 不存在「核频计数与已知时基不同源」的问题，所以不需要校准，也就
+     * 不用在开机时空转 10 ms、不用 64 位除法。 */
+    s_cycle_hz = ARKRTOS_PORT_RDTIME_HZ;
+    return 0;
+}
+
+uint32 arkrtos_port_get_cyccnt(void)
+{
+    return la_tsc_read();
+}
+
+uint32 arkrtos_port_get_cycle_clock(void)
+{
+    return s_cycle_hz;
+}
+
+int32 arkrtos_port_cycle_clock_measured(void)
+{
+    /* 频率来自板级常量（rdtime 的固定频率），不是量出来的。 */
+    return 0;
+}
+
+#else  /* RTSTAT == 0：保留原来的「不可用」桩，零体积 */
+
 int32 arkrtos_port_cyccnt_init(void)
 {
     return -1;
@@ -3179,6 +3236,38 @@ uint32 arkrtos_port_get_cyccnt(void)
 {
     return 0u;
 }
+
+#endif /* ARKRTOS_USE_RTSTAT */
+
+#if (ARKRTOS_USE_TICKLESS == 1)
+/* TCFG 是周期定时器，TVAL 会重载，单看它分不清"睡满"与"刚重载"。
+ * 所以编程时留一个 rdtime 快照，按两个时钟的频率比把经过的时间折成
+ * TCFG 计数。rdtime 与 TCFG 都是板级常量频率，比值是整数。 */
+static uint32 s_sleep_time;
+
+uint32 arkrtos_port_timer_sleep_max(void)
+{
+    /* TCFG.InitVal 只有 [31:2] 共 30 位可用。 */
+    return 0x3FFFFFFFu;
+}
+
+uint32 arkrtos_port_timer_elapsed_counts(uint32 programmed)
+{
+    uint32 dt = (uint32)(la_rdtime() - s_sleep_time);
+    unsigned long long c;
+
+    if(dt == 0u)
+    {
+        return 1u;
+    }
+
+    c = ((unsigned long long)dt * (unsigned long long)ARKRTOS_PORT_TIMER_HZ) /
+        (unsigned long long)ARKRTOS_PORT_RDTIME_HZ;
+
+    (void)programmed;
+    return (c == 0ull) ? 1u : (uint32)c;
+}
+#endif /* ARKRTOS_USE_TICKLESS */
 
 /**
 * @brief 启动节拍定时器
@@ -3208,6 +3297,10 @@ void arkrtos_port_start_timer_counts(uint32 counts)
         counts = 1u;
     }
 
+#if (ARKRTOS_USE_TICKLESS == 1)
+    /* 与 la_tcfg_write 紧挨着取快照：两者之间只差几条指令。 */
+    s_sleep_time = la_rdtime();
+#endif
     la_tcfg_write(counts);
 
     {

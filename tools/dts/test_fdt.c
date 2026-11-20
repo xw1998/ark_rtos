@@ -516,6 +516,9 @@ int main(int argc, char **argv)
 
             check(arkrtos_fdt_node_by_path(cc.path, &cn) == ARKRTOS_FDT_OK,
                   "console node is reachable for the bind check");
+            /* 结构体新增字段时这里不会编译报错，只会读到栈上的垃圾值：
+             * 所以先整体清零（0 = 这一项不检查），再填要比的三项。 */
+            memset(&exp, 0, sizeof(exp));
             exp.compatible = arkrtos_fdt_prop_str(&cn, "compatible");
             (void)arkrtos_fdt_prop_u32(&cn, "reg", 0u, &reg0);
             exp.reg_base = reg0;

@@ -2,7 +2,7 @@
  *
  * Source : dts/qemu_loongarch64.dts
  * Board  : qemu_loongarch64
- * Nodes  : 8
+ * Nodes  : 10
  *
  * Regenerate with:
  *   py -3 tools/dts/dtc_lite.py --dts dts/qemu_loongarch64.dts \
@@ -17,6 +17,8 @@ static const char *const dt_s4[] = {"cpu", "loongarch", "okay", 0};
 static const char *const dt_s5[] = {"simple-bus", 0};
 static const char *const dt_s6[] = {"ns16550a", "okay", 0};
 static const char *const dt_s7[] = {"ark,ram-blk", "okay", 0};
+static const char *const dt_s8[] = {"before", 0};
+static const char *const dt_s9[] = {"delete me", 0};
 
 static const uint32 dt_u1_0[] = {0x1u};
 static const uint32 dt_u2_1[] = {0x0u, 0x8000000u};
@@ -32,6 +34,7 @@ static const uint32 dt_u6_3[] = {0x1c200u};
 static const uint32 dt_u6_5[] = {0x1u};
 static const uint32 dt_u7_1[] = {0x0u, 0x80000u};
 static const uint32 dt_u7_2[] = {0x1000u};
+static const uint32 dt_u8_1[] = {0x2u};
 
 static const arkrtos_dt_prop_t dt_p0[] = {
     { "stdout-path", ARKRTOS_DT_PROP_STR, 1, 0, dt_s0 + 0 },
@@ -74,6 +77,13 @@ static const arkrtos_dt_prop_t dt_p7[] = {
     { "erase-size", ARKRTOS_DT_PROP_U32, 1, dt_u7_2, 0 },
     { "status", ARKRTOS_DT_PROP_STR, 1, 0, dt_s7 + 1 },
 };
+static const arkrtos_dt_prop_t dt_p8[] = {
+    { "victim-prop", ARKRTOS_DT_PROP_STR, 1, 0, dt_s8 + 0 },
+    { "phandle", ARKRTOS_DT_PROP_U32, 1, dt_u8_1, 0 },
+};
+static const arkrtos_dt_prop_t dt_p9[] = {
+    { "note", ARKRTOS_DT_PROP_STR, 1, 0, dt_s9 + 0 },
+};
 
 static const arkrtos_dt_node_t dt_nodes[] = {
     { "chosen", 0, 0x0u, 0x0u, 0, 65535, 2, 1, 0, dt_p0 },
@@ -84,6 +94,8 @@ static const arkrtos_dt_node_t dt_nodes[] = {
     { "soc", "simple-bus", 0x0u, 0x0u, 0, 65535, 3, 1, 1, dt_p5 },
     { "serial@1fe001e0", "ns16550a", 0x1fe001e0u, 0x100u, 1, 5, 6, 1, 1, dt_p6 },
     { "ramdisk@0", "ark,ram-blk", 0x0u, 0x80000u, 0, 5, 4, 1, 1, dt_p7 },
+    { "overlay-victim", 0, 0x0u, 0x0u, 2, 65535, 2, 1, 0, dt_p8 },
+    { "victim-child", 0, 0x0u, 0x0u, 0, 8, 1, 1, 0, dt_p9 },
 };
 
 static const char dt_model[] = "QEMU virt loongarch64";

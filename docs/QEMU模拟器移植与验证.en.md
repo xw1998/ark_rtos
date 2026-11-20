@@ -2149,7 +2149,8 @@ bad signature and the serial log shows `LOADER:452 signature mismatch: image rej
 the second call restores the signature, but the assertion only requires "not `ERR_SIGN`", so the summary line
 cannot say how far it got. A temporary probe (one log line after `loader_commit_slot` succeeds) built into
 `build/_probe` produced `LOADER:2022 probe: load_buffer committed slot 0 base 0x00260000` — all three phases
-ran and a slot was really committed. The probe was rolled back whole-file (`probe:` count 0, line endings
+ran and a slot was really committed (that reading is from the 2026-11-17 layout; on 2026-11-20 the image pool
+base moved to `0x002A0000`, so slot 0 moved with it — the mechanism is unchanged). The probe was rolled back whole-file (`probe:` count 0, line endings
 still `crlf 3483 / lf 3483`) and is not part of the commit. `shell_check.py` `PASS`
 (`build/shell_check_loadbuf.log`, `13 matched, 13 passed, 133 assertions`).
 

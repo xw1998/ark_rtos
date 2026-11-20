@@ -47,14 +47,42 @@ config CHIP_FLASH_BASE
 
 config CHIP_FLASH_SIZE
 	int "Kernel image size in bytes"
-	default 1048576
+	default 2097152
+	help
+	  镜像区间上限（同时也是「Flash」区的总长）。原来是 1 MB，而 1 MB
+	  里要塞内核 + 配置区 + 镜像池：KERNEL_SIZE 涨到 512 KB 之后池只剩
+	  384 KB = 3 个扇区单元，撞上分区头的开发槽位表检查
+	  （arkrtos_dev_slot_check 要求 UNIT+UNITS <= IMAGE_POOL_UNITS，表里
+	  用到 0..3 四个单元）—— 编译期就报负数组。所以这一档同时放到 2 MB，
+	  池回到 1.375 MB / 11 个单元，比原来（5 个）还宽。
+
+config KERNEL_SIZE
+	int "Kernel region size in bytes (KERNEL_SIZE)"
+	default 524288
+	help
+	  内核镜像在 Flash 区里占的区间。配置区（CONFIG_SIZE）与镜像池紧跟
+	  在它后面，所以这个值同时决定 IMAGE_POOL_BASE。
+
+	  512 KB 的依据是实测，不是留白：打开实时性仪表
+	  （EXTRA_CFLAGS=-DARKRTOS_USE_RTSTAT=1）后 -O2 的内核 .text 到
+	  0x00264840（412 KB），256 KB 装不下。而装不下的后果**不是链接
+	  报错**：板级 arkrtos_port_board_init() 每次复位都把镜像池
+	  [IMAGE_POOL_BASE, IMAGE_POOL_END) 擦成 0xFF，池基址原先正好是
+	  0x00260000，于是擦除把内核自己的尾巴抹成 0xFF —— 串口从
+	  [MOD] 那行之后开始狂刷 0xFF，PC 卡在打印循环里（2026-11-20 实测）。
+
+	  现在这条线有双层兜底：链接脚本 ASSERT(__text_end <= IMAGE_POOL_BASE)
+	  让越界成为**编译期错误**；板级初始化再核一次，真越界就拒绝擦除并
+	  打印 FATAL，而不是静默抹掉代码。
 
 config CHIP_RAM_BASE
 	hex "Static data / kernel RAM pool base"
-	default 0x00300000
+	default 0x00400000
 	help
 	  从镜像区间之上开始。KERNEL_RAM_BASE = CHIP_RAM_BASE + SHARE_RAM_SIZE
-	  （推导在 config/arkrtos_partition.h）。
+	  （推导在 config/arkrtos_partition.h）。Flash 区放到 2 MB 之后，这里
+	  跟着从 0x00300000 挪到 0x00400000，两者仍然首尾相接、没有空洞。
+	  仍落在 port 那两条 PS=22 恒等映射（0~16 MB）里面。
 
 config CHIP_RAM_SIZE
 	int "Kernel RAM pool size in bytes"
@@ -91,6 +119,16 @@ config ARKRTOS_QEMU_UART_BASE
 	hex "ns16550a console base"
 	default 0x1FE001E0
 
+config ARKRTOS_QEMU_UART_CLK
+	int "ns16550a input clock in Hz (device-tree cross-check)"
+	default 25000000
+	help
+	  QEMU loongarch virt 给 ns16550a 的输入时钟，与 dts 里 uart 节点的
+	  clock-frequency 是同一个事实。本移植轮询发送、**不编程分频**，所以这个
+	  数不参与任何硬件动作 —— 它存在的唯一目的是让「树说多少、板级按多少算」
+	  这一条可以被核对：两边不一致时报 clock_mismatch，而不是等串口出乱码
+	  再回头猜。
+
 config ARKRTOS_QEMU_UART_REG_SHIFT
 	int "ns16550a register shift"
 	default 0
@@ -106,7 +144,7 @@ config ARKRTOS_QEMU_APP_BASE
 	default 0x02000000
 	help
 	  App 的代码/数据/栈。选址依据：DRAM 128 MB，内核占
-	  0x00200000~0x00B00000（镜像 1 MB + RAM 8 MB），所以 16 MB 以上是
+	  0x00200000~0x00C00000（Flash 2 MB + RAM 8 MB），所以 16 MB 以上是
 	  空地。取 0x02000000（2 MB 对齐，正好满足 PS=20 条目要求的
 	  2^(20+1) = 2 MB 对齐）。
 
@@ -135,7 +173,7 @@ config ARKRTOS_QEMU_FRAME_BASE
 	hex "4 KB frame pool base"
 	default 0x04000000
 	help
-	  避开 App 区 0x02000000~0x02400000、内核 0~0x00B00000，以及
+	  避开 App 区 0x02000000~0x02400000、内核 0~0x00C00000，以及
 	  pmap test 用的 0x03000000 测试 VA。8 MB 对齐（满足 PS=22 条目要求
 	  的 2^(22+1) = 8 MB 对齐），port 会给它单独补一条恒等映射。
 
@@ -193,6 +231,20 @@ config ARKRTOS_PLATFORM_REBOOT_PORT
 	  （loongarch virt 也没有复位设备，那里只能明确报"做不到"）。
 
 endmenu
+
+config ARKRTOS_DEMO_HWSAFE
+	bool "Demo: hardware safe-state with real devices (ARKRTOS_DEMO_HWSAFE)"
+	default n
+	help
+	  遗言机制（ARKRTOS_HW_SAFE）本身与架构无关，但在此之前这块板上没有任何
+	  驱动登记安全态回调，整机 devs=0 —— 「机制在非 ARM 上也能在有设备的情况下
+	  工作」只有 UTEST 的合成回调作证，没有一次真实设备 + 真实任务死亡的读数。
+
+	  打开后板级挂三台**板内虚拟设备**（led0/led1/led2，纯 RAM 状态，不碰真
+	  外设）并声明安全态回调，示例 main 里用三个任务的死亡/存活形态走完三条
+	  通道：遗言、驱动回调、以及「还活着所以不该被动」。
+
+	  默认 n：关着时这一段不进二进制，板级行为与加入本装置之前逐位一致。
 
 menu "Stack sizes"
 

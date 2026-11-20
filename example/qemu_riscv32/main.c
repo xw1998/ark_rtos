@@ -694,6 +694,106 @@ static void arkrtos_smp_self_test(void)
 *             第一个任务在这一步之后才开始运行；
 *          4) 之后进入 WFI 循环，CPU 只在有中断时醒来。
 */
+#if (ARKRTOS_DEMO_HWSAFE == 1)
+/* ============================================================
+ * A5：遗言机制在非 ARM 上的三条通道（QEMU 算上板，不是真机）
+ * @details 三个任务的生死形态各不相同，因此三条通道互不顶替：
+ *            task_hw_dead_will —— 开 led0、留遗言（ctrl 0 = 关），正常退出；
+ *            task_hw_dead_cb   —— 开 led1、**不留遗言**，正常退出
+ *                                 （内核必须退回驱动注册的安全态回调）；
+ *            task_hw_hold      —— 开 led2 并一直活着（台账里始终有所有者，
+ *                                 证明中和只针对死者）。
+ *          读完应看到 hwsafe: devs=3 owners=1 neutralized=2 (will=1 cb=1)，
+ *          以及 led0=0 led1=0 led2=1。
+ * ============================================================ */
+#include "arkrtos_hwsafe.h"
+#include "arkrtos_dev.h"   /* 内核侧 *_internal：演示任务跑在内核态 */
+
+extern uint32 arkrtos_board_hw_demo_safe_hits(void);
+extern uint32 arkrtos_board_hw_demo_level(uint32 idx);
+
+static uint32 s_hw_stack_dead_will[TASK_STACK_WORDS];
+static uint32 s_hw_stack_dead_cb[TASK_STACK_WORDS];
+static uint32 s_hw_stack_hold[TASK_STACK_WORDS];
+
+static void task_hw_dead_will(void)
+{
+    /* 这三个演示任务是**内核任务**，名字/参数块都在内核 Flash 里，走 App 侧
+     * （SVC）的 arkrtos_dev_open() 会被 arkrtos_kernel_user_name_ok() 按
+     * 「不在用户 RAM / 固件窗口内」拒掉。所以这里用内核侧 *_internal 入口，
+     * 与 task_fs / shell 打开 ttyS0 的方式一致。 */
+    int32 h = arkrtos_dev_open_internal("led0", 0u);
+    int32 rc = arkrtos_hwsafe_set_will("led0", arkrtos_current_task_id, 0, 0);
+
+    arkrtos_board_puts("[hwsafe] task ");
+    arkrtos_board_putu((uint32)arkrtos_current_task_id);
+    arkrtos_board_puts(" opened led0 level=");
+    arkrtos_board_putu(arkrtos_board_hw_demo_level(0u));
+    arkrtos_board_puts(" will_rc=");
+    arkrtos_board_putu((uint32)rc);
+    arkrtos_board_puts(" handle=");
+    arkrtos_board_putu((uint32)h);
+    arkrtos_board_puts(" -> exits normally\n");
+
+    arkrtos_task_kill_internal();
+    for(;;)
+    {
+    }
+}
+
+static void task_hw_dead_cb(void)
+{
+    int32 h = arkrtos_dev_open_internal("led1", 0u);
+
+    arkrtos_board_puts("[hwsafe] task ");
+    arkrtos_board_putu((uint32)arkrtos_current_task_id);
+    arkrtos_board_puts(" opened led1 level=");
+    arkrtos_board_putu(arkrtos_board_hw_demo_level(1u));
+    arkrtos_board_puts(" no will, handle=");
+    arkrtos_board_putu((uint32)h);
+    arkrtos_board_puts(" -> exits normally\n");
+
+    arkrtos_task_kill_internal();
+    for(;;)
+    {
+    }
+}
+
+static void task_hw_hold(void)
+{
+    int32 h = arkrtos_dev_open_internal("led2", 0u);
+
+    arkrtos_board_puts("[hwsafe] task ");
+    arkrtos_board_putu((uint32)arkrtos_current_task_id);
+    arkrtos_board_puts(" holds led2 (live owner), handle=");
+    arkrtos_board_putu((uint32)h);
+    arkrtos_board_puts("\n");
+
+    arkrtos_task_wait_internal(500u);
+
+    arkrtos_board_puts("[hwsafe] after deaths: devs=");
+    arkrtos_board_putu((uint32)arkrtos_hwsafe_dev_count());
+    arkrtos_board_puts(" owners=");
+    arkrtos_board_putu((uint32)arkrtos_hwsafe_owner_count());
+    arkrtos_board_puts(" neutralized=");
+    arkrtos_board_putu(arkrtos_hwsafe_neutralized_count());
+    arkrtos_board_puts(" safe_hits=");
+    arkrtos_board_putu(arkrtos_board_hw_demo_safe_hits());
+    arkrtos_board_puts(" led0=");
+    arkrtos_board_putu(arkrtos_board_hw_demo_level(0u));
+    arkrtos_board_puts(" led1=");
+    arkrtos_board_putu(arkrtos_board_hw_demo_level(1u));
+    arkrtos_board_puts(" led2=");
+    arkrtos_board_putu(arkrtos_board_hw_demo_level(2u));
+    arkrtos_board_puts("\n");
+
+    for(;;)
+    {
+        arkrtos_task_wait_internal(1000u);
+    }
+}
+#endif /* ARKRTOS_DEMO_HWSAFE */
+
 static void arkrtos_start_idle(void)
 {
     uint32 sp = (uint32)(&s_idle_stack[IDLE_STACK_WORDS]);
@@ -715,7 +815,14 @@ static void arkrtos_start_idle(void)
 
     for(;;)
     {
+#if (ARKRTOS_USE_TICKLESS == 1)
+        /* 没有任务要跑：按"下一个事件"睡整段，醒来一次补齐节拍。
+         * 与 ARM 三个例程同一入口；本 port 的 start_timer_counts 用
+         * CLINT mtimecmp 做一次性比较，正好是 tickless 要的形状。 */
+        (void)arkrtos_tickless_idle();
+#else
         ARKRTOS_WFI();
+#endif
     }
 }
 
@@ -852,6 +959,17 @@ int main(void)
     /* 块设备驱动在这里先注册（只登记描述符，不碰介质）；真正 init 交给
      * task_fs —— 让“注册”和“起来”两件事各有一次可读的打印。 */
     (void)arkrtos_board_blk_init();
+
+#if (ARKRTOS_DEMO_HWSAFE == 1)
+    /* A5 读数装置：三个生死形态不同的任务（优先级比所有自检都低，
+     * 只在别人跑完之后依次上演，不干扰节拍/切换读数）。 */
+    (void)arkrtos_task_register(task_hw_dead_will, s_hw_stack_dead_will,
+                                sizeof(s_hw_stack_dead_will), 20u, 0u);
+    (void)arkrtos_task_register(task_hw_dead_cb, s_hw_stack_dead_cb,
+                                sizeof(s_hw_stack_dead_cb), 21u, 0u);
+    (void)arkrtos_task_register(task_hw_hold, s_hw_stack_hold,
+                                sizeof(s_hw_stack_hold), 22u, 0u);
+#endif
 
     if((id_a < 0) || (id_b < 0) || (id_u < 0) || (id_fs < 0))
     {

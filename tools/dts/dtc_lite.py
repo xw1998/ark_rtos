@@ -128,6 +128,8 @@ class Parser(object):
     def __init__(self, base_dir):
         self.base_dir = base_dir
         self.labels = {}         # label -> Node
+        self.plugin = 0          # /plugin/; -> overlay source (labels may dangle)
+        self.fixups = []         # (label, node path, prop, byte offset)
         self.root = Node("/")
         self.toks = []
         self.pos = 0
@@ -214,7 +216,14 @@ class Parser(object):
         # these keywords are written with a trailing slash: /include/, /memreserve/
         if self._is("/"):
             self._next()
-        if what in ("dts-v1", "plugin"):
+        if what == "dts-v1":
+            self._expect_punct(";")
+            return
+        if what == "plugin":
+            # /plugin/; 说明"这份 dts 是 overlay 源"：允许引用本文件里没有的
+            # 标签（它们由基树提供）。引用点登记进 fixups，编 dtb 时写成
+            # __fixups__ 节点，与 Linux dtc 的写法一致。
+            self.plugin = 1
             self._expect_punct(";")
             return
         if what == "include":
@@ -362,8 +371,22 @@ def _num(s):
 # --------------------------------------------------------------------------
 # phandles + flatten
 # --------------------------------------------------------------------------
-def assign_phandles(root):
-    """Every labelled node gets a phandle; refs in cells become that number."""
+def node_path(node):
+    """Absolute path of a node, "/" for the root."""
+    segs = []
+    while node is not None and node.parent is not None:
+        segs.append(node.full_name)
+        node = node.parent
+    return "/" + "/".join(reversed(segs))
+
+def assign_phandles(root, plugin=0):
+    """Every labelled node gets a phandle; refs in cells become that number.
+
+    In a /plugin/ tree a reference may point at a label that only exists in the
+    base tree.  Those cells stay at the dtc placeholder 0xffffffff and the
+    reference site is recorded in root.fixups so gen_dtb() can emit the
+    __fixups__ node.  Everything else about numbering is unchanged.
+    """
     n = [0]
 
     def walk(node):
@@ -374,6 +397,8 @@ def assign_phandles(root):
                 c.phandle = n[0]
 
     walk(root)
+    root.fixups = []
+    root.is_plugin = 1 if plugin else 0
     # resolve
     def resolve(node):
         for name in node.prop_order:
@@ -381,12 +406,18 @@ def assign_phandles(root):
             if kind != CELLS:
                 continue
             out = []
-            for v in vals:
+            for idx, v in enumerate(vals):
                 if isinstance(v, tuple) and v[0] == "ref":
                     tn = _find_label(root, v[1])
                     if tn is None:
-                        raise DtsError("reference to unknown label &%s" % v[1])
-                    out.append(tn.phandle)
+                        if plugin:
+                            out.append(0xffffffff)
+                            root.fixups.append((v[1], node_path(node), name,
+                                                idx * 4))
+                        else:
+                            raise DtsError("reference to unknown label &%s" % v[1])
+                    else:
+                        out.append(tn.phandle)
                 else:
                     out.append(v)
             node.props[name] = (CELLS, out)
@@ -526,6 +557,42 @@ def gen_c(root, board_name, source):
     _gen_api(a)
     return "\n".join(lines) + "\n"
 
+
+def add_meta_nodes(root):
+    """Emit __symbols__ (base) or __fixups__ (plugin) as a normal child node.
+
+    __symbols__ is the base tree's label -> path table; the runtime overlay
+    applier needs it to turn target = <&label> into a node path.
+    __fixups__ is the overlay's "this cell is a label reference" table, written
+    in the dtc form "<label> = /fragment@N:target:0".
+    """
+    if getattr(root, "is_plugin", 0) and root.fixups:
+        if root.child("__fixups__") is None:
+            fx = Node("__fixups__", parent=root)
+            groups = {}
+            order = []
+            for label, path, prop, off in root.fixups:
+                s = "%s:%s:%d" % (path, prop, off)
+                if label not in groups:
+                    groups[label] = []
+                    order.append(label)
+                groups[label].append(s)
+            for label in order:
+                fx.set_prop(label, STR, groups[label])
+            root.children.append(fx)
+        return
+    pairs = []
+    def walk(node):
+        for c in node.children:
+            for lab in c.labels:
+                pairs.append((lab, node_path(c)))
+            walk(c)
+    walk(root)
+    if pairs and root.child("__symbols__") is None:
+        sy = Node("__symbols__", parent=root)
+        for lab, path in pairs:
+            sy.set_prop(lab, STR, [path])
+        root.children.append(sy)
 
 def _reg_first(node):
     reg = node.get("reg")
@@ -752,7 +819,7 @@ def build(dts_path):
     base = os.path.dirname(os.path.abspath(dts_path))
     p = Parser(base)
     p.parse_file(dts_path)
-    assign_phandles(p.root)
+    assign_phandles(p.root, p.plugin)
     return p.root
 
 
@@ -782,6 +849,7 @@ def main(argv):
 
     src = os.path.relpath(args.dts).replace("\\", "/")
     if args.format == "dtb":
+        add_meta_nodes(root)
         blob = gen_dtb(root)
     else:
         blob = gen_c(root, board, src).encode("utf-8")

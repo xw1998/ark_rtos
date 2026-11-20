@@ -324,6 +324,24 @@ int32  arkrtos_port_cyccnt_init(void);
 uint32 arkrtos_port_get_cyccnt(void);
 
 /**
+* @brief 周期计数器的频率（Hz），用来把周期差折算成时间
+* @return 每秒多少个 get_cyccnt() 计数；0 = 未知（调用方必须报"不可用"）
+* @details ARM 上 DWT CYCCNT 与内核时钟同源，返回 get_system_clock()；
+*          RISC-V / LoongArch 上 mcycle / TSC 与节拍时基（mtime / rdtime）
+*          不同源，频率由 cyccnt_init() 在开机时用已知时基实测校准，
+*          所以这里返回的是"量出来的比值"，不是抄一个常数。
+*          0 是合法返回值：校准失败就报不可用，不得拿节拍频率顶替
+*          （两者差一个数量级，会把所有微秒读数算错）。
+*/
+uint32 arkrtos_port_get_cycle_clock(void);
+
+/**
+* @brief 周期计数器频率的来源
+* @return 0 = 板级常量（ARM：与内核时钟同源）；1 = 运行期实测校准
+*/
+int32  arkrtos_port_cycle_clock_measured(void);
+
+/**
 * @brief 获取系统节拍定时器重载值（计数上限）
 * @return 重载值
 * @details ARM 为 SysTick->LOAD，其他架构为等效周期值。
@@ -355,6 +373,28 @@ void arkrtos_port_start_timer_counts(uint32 counts);
 *          "提前唤醒"处理（结果仍然正确，只是少省一次）。
 */
 uint32 arkrtos_port_timer_countflag_take(void);
+
+/**
+* @brief 一次 tickless 睡眠最多能编程多少个计数
+* @return 定时器位宽允许的上限（ARM SysTick = 24 位，RISC-V mtimecmp 用
+*          32 位的一半，LoongArch TCFG = 30 位）
+* @details tickless 用它夹住睡眠长度。把上限放在 port 层，是因为"计数器
+*          位宽"和"有没有回卷标志"都是 port 的私事；内核那边只关心
+*          "这次能睡多长"。
+*/
+uint32 arkrtos_port_timer_sleep_max(void);
+
+/**
+* @brief 自上次 arkrtos_port_start_timer_counts() 以来实际走过了多少个计数
+* @param programmed 当时编程下去的计数值
+* @return 已走过的计数（>= 1）；计数器不动时返回 1
+* @details ARM 用 SysTick 的 COUNTFLAG + VAL（24 位）；RISC-V 的 mtimecmp
+*          是"比较值"、没有回卷标志，所以 port 在编程时留一个时基快照，
+*          用差值算；LoongArch 的 TCFG 是周期定时器，同理用 rdtime 快照
+*          按两个时钟的频率比折算成 TCFG 计数。返回值允许超过 programmed
+*          （被拖得太久），调用方按整拍补。
+*/
+uint32 arkrtos_port_timer_elapsed_counts(uint32 programmed);
 
 
 /**

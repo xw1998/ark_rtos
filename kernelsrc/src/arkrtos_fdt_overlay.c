@@ -5,9 +5,9 @@
 *
 *          做法是"两遍扫描 + 重拼"：
 *            第一遍（measure）只算字节数，不写 dst：struct 段长度与 strings
-*            段的上界（不去重，是上界）。任何拒绝条件（同名子节点、句柄
-*            形式 target、__fixups__ 等）都在这一遍暴露，于是 dst 一个字节
-*            都不会被写过；
+*            段的上界（不去重，是上界）。任何拒绝条件（同名子节点、无法还
+*            原的句柄 target、删除目标不存在等）都在这一遍暴露，于是 dst
+*            一个字节都不会被写过；
 *            第二遍（write）按第一遍算出的布局真正落笔，strings 顺带去重。
 *          两遍之后核对"写出来的 struct 长度 == 第一遍算的"，不一致就报错
 *          返回——宁可报错，也不给一个长度对不上的 blob。
@@ -63,6 +63,11 @@
 /* 一块 fragment blob 里最多认几个 fragment@N 节点：真实板子上 1~3 个，
  * 8 是"够用且能在一个循环里比完"的数；超了明确拒绝，不猜。 */
 #define OVL_MAX_FRAGS           8u
+
+/* 删子节点的标记属性：__overlay__ 里与目标同名的子节点上放一条长度 0 的
+ * 本属性。Linux 侧 dtc 对 /delete-node/ 的编码本仓库没有对拍，因此这里
+ * 用自己的一套编码，并在文档里写清"不声称与 Linux dtbo 逐字节一致"。 */
+#define OVL_DEL_PROP            "__delete"
 
 /* ---------------------------------------------------------------- 类型 */
 
@@ -171,7 +176,14 @@ static int ovl_name_eq(const char *name, const char *seg, uint32 seglen)
     return (name[seglen] == '\0') ? 1 : 0;
 }
 
-/* 这三段是 overlay 的标签解析机制；本子集不支持，见到就拒绝（-15） */
+/* 标签段：__fixups__ 由 fragment 侧使用（target=<&label>），__symbols__ 由
+ * 基树侧使用（label -> 路径）。位图在 ovl_blob_scan 里累加：
+ *   bit0 = __fixups__，bit1 = __symbols__，bit2 = __local_fixups__。
+ * __local_fixups__ 仍一律拒绝（见头文件）。 */
+#define OVL_TAG_FIXUPS          1u
+#define OVL_TAG_SYMBOLS         2u
+#define OVL_TAG_LOCAL           4u
+
 static int ovl_is_tag_node(const char *name)
 {
     if(ovl_streq(name, "__fixups__") != 0)
@@ -495,6 +507,23 @@ static int ovl_skip_node(const ovl_blob_t *bl, uint32 *off, uint32 depth)
 }
 
 /* 整块结构校验：严格嵌套、恰好以 FDT_END 收在块尾。顺带报"有没有标签段"。 */
+static uint32 ovl_tag_bit(const char *name)
+{
+    if(ovl_streq(name, "__fixups__") != 0)
+    {
+        return OVL_TAG_FIXUPS;
+    }
+    if(ovl_streq(name, "__symbols__") != 0)
+    {
+        return OVL_TAG_SYMBOLS;
+    }
+    if(ovl_streq(name, "__local_fixups__") != 0)
+    {
+        return OVL_TAG_LOCAL;
+    }
+    return 0u;
+}
+
 static int ovl_blob_scan(const ovl_blob_t *bl, uint32 *tag_found)
 {
     uint32 off = bl->off_struct;
@@ -568,9 +597,9 @@ static int ovl_blob_scan(const ovl_blob_t *bl, uint32 *tag_found)
             {
                 return ARKRTOS_FDT_ERR_DEPTH;
             }
-            if((tag_found != 0) && (ovl_is_tag_node(nm) != 0))
+            if(tag_found != 0)
             {
-                *tag_found = 1u;
+                *tag_found |= ovl_tag_bit(nm);
             }
             continue;
         }
@@ -797,15 +826,477 @@ static int ovl_node_has_prop(const ovl_blob_t *bl, uint32 props_off, uint32 end,
     return 0;
 }
 
+/* ------------------------------------------- 标签还原与删除语义（A4） */
+
+/* 找一个直接子节点并返回它的内容起点（名字之后）。1=有 0=没有 负=坏 blob */
+static int ovl_find_child_body(const ovl_blob_t *bl, uint32 body,
+                               const char *name, uint32 *child_body)
+{
+    uint32 pos = body;
+    uint32 end = ovl_struct_end(bl);
+
+    while((pos + 4u) <= end)
+    {
+        uint32 tok = ovl_rd32(bl->b + pos);
+
+        if(tok == OVL_TOK_NOP)
+        {
+            pos += 4u;
+            continue;
+        }
+        if(tok == OVL_TOK_PROP)
+        {
+            uint32 len;
+            const char *pn;
+            int rc;
+
+            pos += 4u;
+            rc = ovl_prop_head(bl, &pos, &len, &pn);
+            if(rc != ARKRTOS_FDT_OK)
+            {
+                return rc;
+            }
+            pos += ovl_pad4(len);
+            if(pos > end)
+            {
+                return ARKRTOS_FDT_ERR_FORMAT;
+            }
+            continue;
+        }
+        if(tok == OVL_TOK_BEGIN_NODE)
+        {
+            const char *cn;
+            int rc;
+
+            pos += 4u;
+            rc = ovl_node_name(bl, &pos, &cn);
+            if(rc != ARKRTOS_FDT_OK)
+            {
+                return rc;
+            }
+            if(ovl_streq(cn, name) != 0)
+            {
+                *child_body = pos;
+                return 1;
+            }
+            rc = ovl_skip_node(bl, &pos, 0u);
+            if(rc != ARKRTOS_FDT_OK)
+            {
+                return rc;
+            }
+            continue;
+        }
+        if(tok == OVL_TOK_END_NODE)
+        {
+            return 0;
+        }
+        return ARKRTOS_FDT_ERR_FORMAT;
+    }
+    return ARKRTOS_FDT_ERR_FORMAT;
+}
+
+/* 根节点的内容起点（名字必须是空串） */
+static int ovl_root_body(const ovl_blob_t *bl, uint32 *body)
+{
+    uint32 pos;
+    const char *nm;
+    int rc;
+
+    if((bl->off_struct + 4u) > ovl_struct_end(bl))
+    {
+        return ARKRTOS_FDT_ERR_FORMAT;
+    }
+    if(ovl_rd32(bl->b + bl->off_struct) != OVL_TOK_BEGIN_NODE)
+    {
+        return ARKRTOS_FDT_ERR_FORMAT;
+    }
+    pos = bl->off_struct + 4u;
+    rc = ovl_node_name(bl, &pos, &nm);
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        return rc;
+    }
+    if(nm[0] != '\0')
+    {
+        return ARKRTOS_FDT_ERR_FORMAT;
+    }
+    *body = pos;
+    return ARKRTOS_FDT_OK;
+}
+
+/* 基树 __symbols__：label -> 绝对路径。1=找到 0=没有 负=坏 blob */
+static int ovl_symbol_path(const ovl_blob_t *bl, const char *label,
+                           char *out, uint32 cap)
+{
+    uint32 rb;
+    uint32 sb = 0u;
+    uint32 pos;
+    uint32 end = ovl_struct_end(bl);
+    int rc;
+
+    rc = ovl_root_body(bl, &rb);
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        return rc;
+    }
+    rc = ovl_find_child_body(bl, rb, "__symbols__", &sb);
+    if(rc != 1)
+    {
+        return (rc == 0) ? 0 : rc;
+    }
+    pos = sb;
+    while((pos + 4u) <= end)
+    {
+        uint32 len;
+        const char *pn;
+        int32 seen;
+
+        if(ovl_rd32(bl->b + pos) != OVL_TOK_PROP)
+        {
+            break;
+        }
+        pos += 4u;
+        rc = ovl_prop_head(bl, &pos, &len, &pn);
+        if(rc != ARKRTOS_FDT_OK)
+        {
+            return rc;
+        }
+        seen = ovl_streq(pn, label);
+        if((seen != 0) && (len >= 1u) &&
+           (bl->b[pos + len - 1u] == 0u) && (len <= cap))
+        {
+            uint32 i;
+
+            for(i = 0u; i < len; i++)
+            {
+                out[i] = (char)bl->b[pos + i];
+            }
+            return 1;
+        }
+        pos += ovl_pad4(len);
+        if(pos > end)
+        {
+            return ARKRTOS_FDT_ERR_FORMAT;
+        }
+    }
+    return 0;
+}
+
+/* 前缀段比较（不要求 a 在那一位是 NUL） */
+static int ovl_seg_eq(const char *a, const char *b, uint32 n)
+{
+    uint32 i;
+
+    for(i = 0u; i < n; i++)
+    {
+        if(a[i] != b[i])
+        {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* fragment 的 __fixups__：找 "<label> = /fragment@N:target:0" 里的 label。
+ * 1=找到 0=没有 负=坏 blob。 */
+static int ovl_fixup_target_label(const ovl_blob_t *bl, const char *fragname,
+                                  char *out, uint32 cap)
+{
+    uint32 rb;
+    uint32 fb = 0u;
+    uint32 pos;
+    uint32 end = ovl_struct_end(bl);
+    uint32 flen = ovl_strlen(fragname);
+    int rc;
+
+    rc = ovl_root_body(bl, &rb);
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        return rc;
+    }
+    rc = ovl_find_child_body(bl, rb, "__fixups__", &fb);
+    if(rc != 1)
+    {
+        return (rc == 0) ? 0 : rc;
+    }
+    pos = fb;
+    while((pos + 4u) <= end)
+    {
+        uint32 len;
+        const char *pn;
+        uint32 v;
+
+        if(ovl_rd32(bl->b + pos) != OVL_TOK_PROP)
+        {
+            break;
+        }
+        pos += 4u;
+        rc = ovl_prop_head(bl, &pos, &len, &pn);
+        if(rc != ARKRTOS_FDT_OK)
+        {
+            return rc;
+        }
+        for(v = 0u; v < len; )
+        {
+            const char *s = (const char *)(bl->b + pos + v);
+            uint32 sl = 0u;
+            uint32 c1 = 0u;
+            uint32 c2 = 0u;
+            uint32 o = 0u;
+            uint32 k;
+
+            while(((v + sl) < len) && (s[sl] != '\0'))
+            {
+                sl++;
+            }
+            if((v + sl) >= len)
+            {
+                break;                       /* 没有结尾 NUL：坏 blob */
+            }
+            while((c1 < sl) && (s[c1] != ':'))
+            {
+                c1++;
+            }
+            if(c1 < sl)
+            {
+                k = c1 + 1u;
+                while((k < sl) && (s[k] != ':'))
+                {
+                    k++;
+                }
+                c2 = k;
+            }
+            /* dtc 写的值是 "/fragment@N:target:0"，路径带前导 '/'；fragname
+             * 是节点名本身（"fragment@N"）。所以从第一个非 '/' 字符开始比较。 */
+            o = (s[0] == '/') ? 1u : 0u;
+            if((s[0] == '/') && ((c1 - o) == flen) && (c2 > c1) && (c2 < sl) &&
+               (ovl_seg_eq(s + o, fragname, flen) != 0) &&
+               (ovl_seg_eq(s + c1 + 1u, "target", c2 - c1 - 1u) != 0))
+            {
+                uint32 n = ovl_strlen(pn);
+
+                if((n + 1u) > cap)
+                {
+                    return ARKRTOS_FDT_ERR_OVERLAY_TARGET;
+                }
+                for(k = 0u; k < n; k++)
+                {
+                    out[k] = pn[k];
+                }
+                out[n] = '\0';
+                return 1;
+            }
+            v += sl + 1u;
+        }
+        pos += ovl_pad4(len);
+        if(pos > end)
+        {
+            return ARKRTOS_FDT_ERR_FORMAT;
+        }
+    }
+    return 0;
+}
+
+/* fragment 里 name 这条属性的长度（1=有，写进 *len；0=没有）。
+ * 长度 0 的那条就是"删属性"的标记。 */
+static uint32 ovl_frag_prop_len(const ovl_ctx_t *c, const uint32 *mi, uint32 nm,
+                                const char *name, uint32 *len)
+{
+    uint32 a;
+
+    for(a = 0u; a < nm; a++)
+    {
+        const ovl_frag_t *f = &c->frags[mi[a]];
+        uint32 pos = f->props_off;
+        uint32 end = f->end_off;
+
+        while((pos + 4u) <= end)
+        {
+            uint32 l;
+            const char *pn;
+            int rc;
+
+            if(ovl_rd32(c->frag->b + pos) != OVL_TOK_PROP)
+            {
+                break;
+            }
+            pos += 4u;
+            rc = ovl_prop_head(c->frag, &pos, &l, &pn);
+            if(rc != ARKRTOS_FDT_OK)
+            {
+                return 0u;
+            }
+            if(ovl_streq(pn, name) != 0)
+            {
+                *len = l;
+                return 1u;
+            }
+            pos += ovl_pad4(l);
+        }
+    }
+    return 0u;
+}
+
+/* name 这个子节点在 fragment 里是不是"删子节点"的标记（1=是）。
+ * 只认一条形状：子节点里恰好一个长度 0 的 __delete 属性、没有别的属性、
+ * 也没有子节点。任一不满足就当普通新节点处理（同名会被判重复）。 */
+static uint32 ovl_is_delete_marker(const ovl_ctx_t *c, const uint32 *mi,
+                                   uint32 nm, const char *name)
+{
+    uint32 a;
+
+    for(a = 0u; a < nm; a++)
+    {
+        const ovl_frag_t *f = &c->frags[mi[a]];
+        uint32 pos = f->props_off;
+        uint32 end = f->end_off;
+
+        while(((pos + 4u) <= end) &&
+              (ovl_rd32(c->frag->b + pos) == OVL_TOK_PROP))
+        {
+            uint32 l;
+            const char *pn;
+
+            pos += 4u;
+            if(ovl_prop_head(c->frag, &pos, &l, &pn) != ARKRTOS_FDT_OK)
+            {
+                return 0u;
+            }
+            pos += ovl_pad4(l);
+        }
+        while(((pos + 4u) <= end) &&
+              (ovl_rd32(c->frag->b + pos) == OVL_TOK_BEGIN_NODE))
+        {
+            const char *cn;
+            uint32 body;
+            uint32 k;
+            uint32 nprops = 0u;
+            uint32 marker = 0u;
+            uint32 clean = 1u;
+
+            pos += 4u;
+            if(ovl_node_name(c->frag, &pos, &cn) != ARKRTOS_FDT_OK)
+            {
+                return 0u;
+            }
+            body = pos;
+            k = body;
+            while(((k + 4u) <= end) &&
+                  (ovl_rd32(c->frag->b + k) == OVL_TOK_PROP))
+            {
+                uint32 l;
+                const char *pn;
+
+                k += 4u;
+                if(ovl_prop_head(c->frag, &k, &l, &pn) != ARKRTOS_FDT_OK)
+                {
+                    return 0u;
+                }
+                nprops++;
+                if((ovl_streq(pn, OVL_DEL_PROP) != 0) && (l == 0u))
+                {
+                    marker = 1u;
+                }
+                else
+                {
+                    clean = 0u;
+                }
+                k += ovl_pad4(l);
+            }
+            /* 标记节点里不许再有子节点：属性区之后必须直接是 END_NODE */
+            if(((k + 4u) > end) || (ovl_rd32(c->frag->b + k) != OVL_TOK_END_NODE))
+            {
+                clean = 0u;
+            }
+            if((ovl_streq(cn, name) != 0) && (nprops == 1u) &&
+               (marker != 0u) && (clean != 0u))
+            {
+                return 1u;
+            }
+            if(ovl_skip_node(c->frag, &pos, 0u) != ARKRTOS_FDT_OK)
+            {
+                return 0u;
+            }
+        }
+    }
+    return 0u;
+}
+
+/* 删除必须落在真目标上：要删的属性/子节点在基树里不存在就报 -16 */
+static int ovl_check_deletions(const ovl_ctx_t *c, const uint32 *mi, uint32 nm,
+                               const ovl_blob_t *base, uint32 node_body)
+{
+    uint32 a;
+    int rc;
+
+    for(a = 0u; a < nm; a++)
+    {
+        const ovl_frag_t *f = &c->frags[mi[a]];
+        uint32 pos = f->props_off;
+        uint32 end = f->end_off;
+
+        while((pos + 4u) <= end)
+        {
+            uint32 len;
+            const char *pn;
+
+            if(ovl_rd32(c->frag->b + pos) != OVL_TOK_PROP)
+            {
+                break;
+            }
+            pos += 4u;
+            rc = ovl_prop_head(c->frag, &pos, &len, &pn);
+            if(rc != ARKRTOS_FDT_OK)
+            {
+                return rc;
+            }
+            if((len == 0u) &&
+               (ovl_node_has_prop(base, node_body, ovl_struct_end(base), pn) == 0))
+            {
+                return ARKRTOS_FDT_ERR_OVERLAY_DEL;
+            }
+            pos += ovl_pad4(len);
+        }
+        while(((pos + 4u) <= end) &&
+              (ovl_rd32(c->frag->b + pos) == OVL_TOK_BEGIN_NODE))
+        {
+            const char *cn;
+            int found;
+
+            pos += 4u;
+            rc = ovl_node_name(c->frag, &pos, &cn);
+            if(rc != ARKRTOS_FDT_OK)
+            {
+                return rc;
+            }
+            if(ovl_is_delete_marker(c, mi + a, 1u, cn) != 0u)
+            {
+                found = ovl_find_child(base, node_body, cn);
+                if(found != 1)
+                {
+                    return (found < 0) ? found : ARKRTOS_FDT_ERR_OVERLAY_DEL;
+                }
+            }
+            rc = ovl_skip_node(c->frag, &pos, 0u);
+            if(rc != ARKRTOS_FDT_OK)
+            {
+                return rc;
+            }
+        }
+    }
+    return ARKRTOS_FDT_OK;
+}
+
 /* ------------------------------------------------------------ fragment */
 
-/* 读一个 fragment 节点的 target-path 与 __overlay__ 区间 */
+/* 读一个 fragment 节点的 target-path / target=<&label> 与 __overlay__ 区间 */
 static int ovl_collect_one(const ovl_blob_t *fb, const ovl_blob_t *bb,
-                           uint32 body, ovl_frag_t *out, uint32 max,
-                           uint32 *n_io)
+                           uint32 body, const char *fragname,
+                           ovl_frag_t *out, uint32 max, uint32 *n_io)
 {
     uint32 pos = body;
     uint32 end = ovl_struct_end(fb);
+    char target_buf[ARKRTOS_FDT_PATH_MAX];
     const char *target_path = 0;
     uint32 ovl_body = 0u;
     uint32 ovl_end = 0u;
@@ -837,8 +1328,30 @@ static int ovl_collect_one(const ovl_blob_t *fb, const ovl_blob_t *bb,
         }
         if(ovl_streq(pn, "target") != 0)
         {
-            /* target = <&label>：要解析 __fixups__，不在本子集里 */
-            return ARKRTOS_FDT_ERR_OVERLAY_TARGET;
+            /* target = <&label>：dtc 写的是 0xffffffff 占位值，真正的标签在
+             * fragment 的 __fixups__ 里；再用基树 __symbols__ 换成路径。
+             * 占位值不是 0xffffffff 就说明这是一个已经解析过的 phandle ——
+             * 本模块不做 phandle 反查，拒绝而不是猜它指向哪个节点。 */
+            char label[64];
+            int hit;
+
+            if((len != 4u) || (ovl_rd32(fb->b + pos) != 0xffffffffu))
+            {
+                return ARKRTOS_FDT_ERR_OVERLAY_TARGET;
+            }
+            hit = ovl_fixup_target_label(fb, fragname, label, sizeof(label));
+            if(hit != 1)
+            {
+                return (hit < 0) ? hit : ARKRTOS_FDT_ERR_OVERLAY_TARGET;
+            }
+            hit = ovl_symbol_path(bb, label, target_buf, sizeof(target_buf));
+            if(hit != 1)
+            {
+                return (hit < 0) ? hit : ARKRTOS_FDT_ERR_OVERLAY_TARGET;
+            }
+            target_path = target_buf;
+            pos += ovl_pad4(len);
+            continue;
         }
         if(ovl_streq(pn, "target-path") != 0)
         {
@@ -1026,12 +1539,22 @@ static int ovl_collect_frags(const ovl_blob_t *fb, const ovl_blob_t *bb,
             {
                 return rc;
             }
+            if(ovl_streq(fname, "__fixups__") != 0)
+            {
+                /* fragment 侧的标签表：collect_one 会按需查它，这里整棵跳过 */
+                rc = ovl_skip_node(fb, &pos, 0u);
+                if(rc != ARKRTOS_FDT_OK)
+                {
+                    return rc;
+                }
+                continue;
+            }
             if(ovl_is_tag_node(fname) != 0)
             {
                 return ARKRTOS_FDT_ERR_OVERLAY_TAG;
             }
             body = pos;
-            rc = ovl_collect_one(fb, bb, body, out, max, &n);
+            rc = ovl_collect_one(fb, bb, body, fname, out, max, &n);
             if(rc != ARKRTOS_FDT_OK)
             {
                 return rc;
@@ -1087,7 +1610,8 @@ static uint32 ovl_child_count_in_frags(const ovl_ctx_t *c, const uint32 *mi,
             {
                 return cnt;
             }
-            if(ovl_streq(cn, name) != 0)
+            if((ovl_streq(cn, name) != 0) &&
+               (ovl_is_delete_marker(c, mi, nm, name) == 0u))
             {
                 cnt++;
             }
@@ -1221,6 +1745,12 @@ static int ovl_emit_frag_props(ovl_ctx_t *c, const uint32 *mi, uint32 nm)
             {
                 return rc;
             }
+            if(len == 0u)
+            {
+                /* 长度 0 = 删属性：基树那条已经在重拼时被跳过，这里也不写 */
+                pos += ovl_pad4(len);
+                continue;
+            }
             for(b = a + 1u; b < nm; b++)
             {
                 const ovl_frag_t *g = &c->frags[mi[b]];
@@ -1289,6 +1819,16 @@ static int ovl_emit_frag_children(ovl_ctx_t *c, const uint32 *mi, uint32 nm,
             if(rc != ARKRTOS_FDT_OK)
             {
                 return rc;
+            }
+            if(ovl_is_delete_marker(c, mi, nm, cn) != 0u)
+            {
+                /* 删子节点标记：基树里那个子节点已在重拼时被跳过 */
+                rc = ovl_skip_node(c->frag, &pos, 0u);
+                if(rc != ARKRTOS_FDT_OK)
+                {
+                    return rc;
+                }
+                continue;
             }
             if(ovl_find_child(base, node_body, cn) > 0)
             {
@@ -1380,6 +1920,16 @@ static int ovl_emit_node(ovl_ctx_t *c, const ovl_blob_t *bl, uint32 *off,
     ovl_put_bytes(c, (const uint8 *)name, n + 1u);
     ovl_align4(c);
 
+    if(nm != 0u)
+    {
+        /* 删除必须落在真目标上：先验，后写——写了一半再报错会留下半个 blob */
+        rc = ovl_check_deletions(c, mi, nm, bl, node_body);
+        if(rc != ARKRTOS_FDT_OK)
+        {
+            return rc;
+        }
+    }
+
     pos = node_body;
     for(;;)
     {
@@ -1402,7 +1952,7 @@ static int ovl_emit_node(ovl_ctx_t *c, const ovl_blob_t *bl, uint32 *off,
             uint32 nameoff;
             const char *pn;
             uint32 overridden = 0u;
-            uint32 m;
+            uint32 flen = 0u;
 
             pos += 4u;
             rc = ovl_prop_head(bl, &pos, &len, &pn);
@@ -1410,15 +1960,11 @@ static int ovl_emit_node(ovl_ctx_t *c, const ovl_blob_t *bl, uint32 *off,
             {
                 return rc;
             }
-            for(m = 0u; m < nm; m++)
+            if(ovl_frag_prop_len(c, mi, nm, pn, &flen) != 0u)
             {
-                const ovl_frag_t *f = &c->frags[mi[m]];
-
-                if(ovl_node_has_prop(c->frag, f->props_off, f->end_off, pn) != 0)
-                {
-                    overridden = 1u;
-                    break;
-                }
+                /* 长度 0 的那条是"删属性"：基树这条不输出，fragment 侧也不会
+                 * 把它写出来（ovl_emit_frag_props 跳过长度 0）。 */
+                overridden = (flen == 0u) ? 2u : 1u;
             }
             if(overridden == 0u)
             {
@@ -1460,6 +2006,15 @@ static int ovl_emit_node(ovl_ctx_t *c, const ovl_blob_t *bl, uint32 *off,
             if(rc != ARKRTOS_FDT_OK)
             {
                 return rc;
+            }
+            if((nm != 0u) && (ovl_is_delete_marker(c, mi, nm, cn) != 0u))
+            {
+                rc = ovl_skip_node(bl, &pos, 0u);
+                if(rc != ARKRTOS_FDT_OK)
+                {
+                    return rc;
+                }
+                continue;
             }
             rc = ovl_emit_node(c, bl, &pos, path, path_len, cn, depth + 1u);
             if(rc != ARKRTOS_FDT_OK)
@@ -1591,7 +2146,9 @@ int arkrtos_fdt_overlay(void *dst, uint32 cap,
     {
         return rc;
     }
-    if(tag != 0u)
+    /* fragment 侧只允许 __fixups__（target=<&label>）；__symbols__ 与
+     * __local_fixups__ 都不接受。 */
+    if((tag & (OVL_TAG_SYMBOLS | OVL_TAG_LOCAL)) != 0u)
     {
         return ARKRTOS_FDT_ERR_OVERLAY_TAG;
     }
@@ -1743,6 +2300,8 @@ const char *arkrtos_fdt_overlay_reason(int rc)
             return "fragment child duplicates an existing node";
         case ARKRTOS_FDT_ERR_OVERLAY_SIZE:
             return "output arena too small";
+        case ARKRTOS_FDT_ERR_OVERLAY_DEL:
+            return "delete target not found";
         case ARKRTOS_FDT_ERR_OVERLAY_TAG:
             return "__fixups__/__symbols__ not supported";
         default:

@@ -3881,8 +3881,10 @@ pool free : 0 B
 | `arkrtos_port_flash_sector_size(addr)` | 池内返回 `IMAGE_POOL_SECTOR`，池外 `0` |
 | `arkrtos_port_board_init()` | 在 `arkrtos_trace_init()` 之前把整池擦成 `0xFF` |
 
-池以外（代码区 `0x00200000..0x00260000`、配置区，内核正在那儿跑）仍然明确失败，
-不做「假装能写」。改完后 `pool free : 524288 B (512K)`（正好 usable）。
+池以外（代码区 `0x00200000..0x00280000`、配置区 `0x00280000..0x002A0000`，内核正在那儿跑）
+仍然明确失败，不做「假装能写」。当时代码区还是 256 KB，改完后 `pool free : 524288 B (512K)`（正好 usable）；
+2026-11-20 内核区扩到 512 KB（LA64 的 RTSTAT 镜像放不下原布局，见 §5.30 末的布局表），镜像池随之变成
+`0x002A0000..0x00400000`（1408 K / usable 1280 K，11 个 128 K 扇区），实测 `pool free : 1310720 B (1280K)`。
 
 **边界**：RAM 后端不模拟位翻转、不要求写前先擦、复位即重擦（内容不跨复位/掉电）。
 这条只解决「能不能装」，不等于「Flash 行为像真片」。见 [已知限制](已知限制.md)。
@@ -4519,7 +4521,8 @@ text `367528 → 367576`（**+48 B**），`data` 440 / `bss` 767508 / 镜像总�
 `LOADER:452 signature mismatch: image rejected`（第一段的分支）；第二次把签名改回来，而用例只断言
 「不是 `ERR_SIGN`」，停在哪一段从汇总行看不出来。于是在本文件里临时插一行探针（`loader_commit_slot`
 成功之后打印槽号与 base），单独构建 `build/_probe` 跑一次 `utest`，得到
-`LOADER:2022 probe: load_buffer committed slot 0 base 0x00260000` ⇒ **三段全部走通、真装成了一槽**。
+`LOADER:2022 probe: load_buffer committed slot 0 base 0x00260000` ⇒ **三段全部走通、真装成了一槽**
+（这条读数取自 2026-11-17 的布局；2026-11-20 镜像池基址改为 `0x002A0000`，槽 0 随之移动，机制不变）。
 探针随后整文件回滚（回滚后 `probe:` 计数 0、行尾仍是 `crlf 3483 / lf 3483`），提交里不含探针。
 `shell_check.py` `PASS`（`build/shell_check_loadbuf.log`，`13 matched, 13 passed, 133 assertions`）。
 

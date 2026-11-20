@@ -92,7 +92,7 @@
 | Read the security baseline self-check in English | [安全基线自检.en.md](安全基线自检.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 要过安全认证：资产、威胁模型、标准差距、缺口清单 | [安全认证准备.md](安全认证准备.md)（11 类资产与五条信任边界、STRIDE、62443-4-2/303 645/PSA/等保2.0/61508 差距表、17 条缺口寄存器、12 个本地用例、P0–P3 路线） |
 | Read the same page in English | [安全认证准备.en.md](安全认证准备.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
-| 说清板子上有什么硬件、驱动按 compatible 找设备 | [设备树.md](设备树.md)（DTS 子集、dtc_lite、arkrtos_dt API、`dt` 命令） |
+| 说清板子上有什么硬件、驱动按 compatible 找设备 | [设备树.md](设备树.md)（DTS 子集、dtc_lite、arkrtos_dt API、`dt` 命令；运行时读镜像里的 dtb、`fdt load` 换树、overlay 的 `target=<&label>` 与删除语义） |
 | Read the device tree page in English | [设备树.en.md](设备树.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 想发一个版本，要说清「这版能当正式版吗」 | [发行版与版本策略.md](发行版与版本策略.md)（版本号规则与三处一致、发布物清单与变更控制、ABI 三编号与升版判据、预览版/正式版/1.0 判据、发版六步、明确不做的四条） |
 | Read the release and version-policy page in English | [发行版与版本策略.en.md](发行版与版本策略.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |

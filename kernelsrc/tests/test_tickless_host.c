@@ -56,6 +56,29 @@ uint32 arkrtos_port_timer_countflag_take(void)
     return v;
 }
 
+/* 位宽与"从编程值算走了多少计数"这两件事由 port 回答。这里照 Cortex-M4
+ * SysTick 的形态桩一个 24 位、带回卷标志的版本：上面几个假硬件原语已经
+ * 把 f_val / f_flag 摆好了，所以这两个函数可以直接读它们。 */
+uint32 arkrtos_port_timer_sleep_max(void)
+{
+    return 0x00FFFFFFu;
+}
+
+uint32 arkrtos_port_timer_elapsed_counts(uint32 programmed)
+{
+    uint32 flag = arkrtos_port_timer_countflag_take();
+    uint32 val  = arkrtos_port_get_timer_counter() & 0x00FFFFFFu;
+
+    if(flag != 0u)
+    {
+        uint32 since_wrap = (programmed > 0u) ? (programmed - 1u - val) : 0u;
+
+        return programmed + since_wrap;
+    }
+
+    return (programmed > val) ? (programmed - val) : 1u;
+}
+
 uint32 arkrtos_port_get_timer_counter(void)
 {
     return f_val;

@@ -116,6 +116,22 @@ static uint32 fdt_struct_end(void)
     return s_fdt.off_struct + s_fdt.size_struct;
 }
 
+/* __symbols__ / __fixups__ / __local_fixups__ 是 dtc 的标签表，不是树里的
+ * 节点：它们只服务于 overlay 的 target=<&label>，在 dt 平表里没有对应项。
+ * node_count 把它们排除，是为了让"dt（C 平表）与 fdt（blob）两条读路径
+ * 打出同样的 nodes=" 这个对账关系继续成立；它们本身仍留在 blob 里，
+ * fdt path /__symbols__ 之类的查询照样能查到。 */
+static int fdt_is_meta_name(const char *name)
+{
+    if((fdt_streq(name, "__symbols__") != 0) ||
+       (fdt_streq(name, "__fixups__") != 0) ||
+       (fdt_streq(name, "__local_fixups__") != 0))
+    {
+        return 1;
+    }
+    return 0;
+}
+
 /* strings 段里的第 off 字节起必须是一个以 NUL 结尾的名字；越界或没有
  * NUL 都是坏 blob，返回 0。 */
 static const char *fdt_string(uint32 off)
@@ -337,7 +353,10 @@ static int fdt_scan(uint32 *count_out)
                 s_fdt.model = fdt_find_model(off);
                 continue;
             }
-            count++;
+            if(fdt_is_meta_name(name) == 0)
+            {
+                count++;
+            }
             continue;
         }
         return ARKRTOS_FDT_ERR_FORMAT;
@@ -440,6 +459,65 @@ const char *arkrtos_fdt_model(void)
     return s_fdt.model;
 }
 
+/* 跳过一个节点的整个子树（调用时游标已越过该节点的名字与 BEGIN_NODE，
+ * 即"该节点自身"已经被计入）。只用在 fdt_is_meta_name() 认出的标签表节点上，
+ * 目的是让迭代器的节点集与 node_count 的口径一致。 */
+static int fdt_skip_node(uint32 *off)
+{
+    uint32 end = fdt_struct_end();
+    uint32 d = 1u;
+
+    while(d != 0u)
+    {
+        uint32 tok;
+
+        if(*off >= end)
+        {
+            return ARKRTOS_FDT_ERR_FORMAT;
+        }
+        tok = fdt_rd32(s_fdt.blob + *off);
+        *off += 4u;
+        if(tok == FDT_TOK_NOP)
+        {
+            continue;
+        }
+        if(tok == FDT_TOK_BEGIN_NODE)
+        {
+            const char *nm;
+
+            if(fdt_node_name(off, &nm) != ARKRTOS_FDT_OK)
+            {
+                return ARKRTOS_FDT_ERR_FORMAT;
+            }
+            d++;
+            continue;
+        }
+        if(tok == FDT_TOK_END_NODE)
+        {
+            d--;
+            continue;
+        }
+        if(tok == FDT_TOK_PROP)
+        {
+            uint32 len;
+            const char *pn;
+
+            if(fdt_prop_head(off, &len, &pn) != ARKRTOS_FDT_OK)
+            {
+                return ARKRTOS_FDT_ERR_FORMAT;
+            }
+            *off += fdt_pad4(len);
+            if(*off > end)
+            {
+                return ARKRTOS_FDT_ERR_FORMAT;
+            }
+            continue;
+        }
+        return ARKRTOS_FDT_ERR_FORMAT;
+    }
+    return ARKRTOS_FDT_OK;
+}
+
 int arkrtos_fdt_iter_init(arkrtos_fdt_iter_t *it)
 {
     if((s_fdt.ready == 0u) || (it == 0))
@@ -525,6 +603,17 @@ int arkrtos_fdt_next(arkrtos_fdt_iter_t *it, arkrtos_fdt_node_t *out)
             if(it->depth == 1u)
             {
                 continue;       /* 根节点不报，与 arkrtos_dt_count() 口径一致 */
+            }
+            if((it->depth == 2u) && (fdt_is_meta_name(name) != 0))
+            {
+                /* 标签表节点（__symbols__ / __fixups__ / __local_fixups__）：
+                 * 连同子树一起跳过，与 node_count 的口径保持一致。 */
+                if(fdt_skip_node(&it->off) != ARKRTOS_FDT_OK)
+                {
+                    return ARKRTOS_FDT_ERR_FORMAT;
+                }
+                it->depth--;
+                continue;
             }
             out->name = name;
             out->depth = it->depth - 1u;

@@ -2,17 +2,25 @@
 * @file arkrtos_fdt_overlay.h
 * @brief 最小子集的 dtb overlay：把一段 fragment 合并进一棵树，产出新的 blob
 * @details 设备树的 overlay 在 Linux 上是一族语法：target-path / target 句柄、
-*          __overlay__ 容器、__fixups__ / __symbols__ / __local_fixups__ 三段
-*          标签解析、加上"删属性/删节点"。**这里只做其中一支，并且明确拒绝
-*          其余部分**：
+*          __overlay__ 容器、__fixups__ / __symbols__ 两段标签解析、加上
+*          "删属性/删节点"。**这里只做其中一支，并且明确拒绝其余部分**：
 *
-*            - 只认 target-path（绝对路径）。target = <&label> 需要先解析
-*              __fixups__，那是另一套机制，不在本子集里；
+*            - target-path（绝对路径）与 target = <&label> 两种都认：后者按
+*              Linux 的同一套机制还原——fragment 想引用的标签写在它的
+*              __fixups__ 节点里（"<label> = /fragment@N:target:0"），基树用
+*              __symbols__ 节点给出 label -> 绝对路径。占位值必须是
+*              0xffffffff（dtc 的写法），否则按"已解析的 phandle"拒绝：
+*              本模块不做 phandle 反查，也不猜一个数字指向哪个节点；
+*            - __local_fixups__ 仍拒绝（它管的是 fragment 自身的局部 phandle
+*              重编号，本子集的 fragment 里不产生这种引用）；
 *            - __overlay__ 里的属性覆盖同名属性、新属性追加到节点；
+*            - 长度 0 的属性就是"删这个属性"（Linux overlay 的同一约定）。
+*              要删的目标不存在时返回 -16，不静默跳过：删除没落地也是错；
 *            - __overlay__ 里的子节点作为新子节点追加，**同名子节点直接拒绝**
 *              （"合并两棵子树"是另一个语义，这里不猜）；
-*            - 任何 __fixups__ / __symbols__ / __local_fixups__ 节点一律拒绝；
-*            - 没有删除语义：删属性 / 删节点在这里做不到，也不假装做到。
+*            - 删子节点：在 __overlay__ 里写一个与目标同名的子节点，里面只放
+*              一条长度 0 的 __delete 属性（本项目编码，见 docs/设备树.md）。
+*              目标不存在同样返回 -16；该子节点不得再带别的属性或子节点。
 *
 *          实现方式是把整棵树**重新拼一遍**：解析仍复用内核那套只读视图，
 *          overlay 只负责"读基树 + 读 fragment + 写出新的 struct/strings 段"。
@@ -38,7 +46,8 @@
 #define ARKRTOS_FDT_ERR_OVERLAY_TARGET (-12) /* target-path 不存在 / 用了句柄形式 */
 #define ARKRTOS_FDT_ERR_OVERLAY_DUP    (-13) /* 新子节点与已有子节点同名 */
 #define ARKRTOS_FDT_ERR_OVERLAY_SIZE   (-14) /* 输出 arena 不够大 */
-#define ARKRTOS_FDT_ERR_OVERLAY_TAG    (-15) /* 出现 __fixups__ / __symbols__ 等标签段 */
+#define ARKRTOS_FDT_ERR_OVERLAY_TAG    (-15) /* 出现本子集不接受的标签段 */
+#define ARKRTOS_FDT_ERR_OVERLAY_DEL    (-16) /* 删除目标在基树里不存在 */
 
 /* 输出 arena 至少要能放下：基树 struct + fragment struct + 两边 strings */
 #define ARKRTOS_FDT_OVERLAY_MIN_ARENA  4096u

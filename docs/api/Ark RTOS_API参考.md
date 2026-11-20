@@ -1,11 +1,9 @@
 # Ark RTOS API 参考
 
 > 由 `tools/gen_api_doc.py` 自动生成，请勿手工修改。
-> 安装 [Doxygen](https://www.doxygen.nl/) 后重新运行脚本，可得到带交叉引用与调用关系的 HTML 版本。
-
-## 目录
-
-- [kernelsrc/include/arkrtos.h](#kernelsrcincludearkrtosh)（110 项）
+> 安装 [2/2] 已生成 Markdown API 参考: docs\api\Ark RTOS_API参考.md
+完成。临时 UTF-8 树位于系统临时目录，可随时删除：C:\Users\14905\AppData\Local\Temp\arkrtos_api_gen
+)（110 项）
 - [kernelsrc/include/arkrtos_app_image.h](#kernelsrcincludearkrtos_app_imageh)（38 项）
 - [kernelsrc/include/arkrtos_apppack.h](#kernelsrcincludearkrtos_apppackh)（9 项）
 - [kernelsrc/include/arkrtos_apprun.h](#kernelsrcincludearkrtos_apprunh)（6 项）
@@ -19,10 +17,11 @@
 - [kernelsrc/include/arkrtos_fdt.h](#kernelsrcincludearkrtos_fdth)（22 项）
 - [kernelsrc/include/arkrtos_fdt_console.h](#kernelsrcincludearkrtos_fdt_consoleh)（4 项）
 - [kernelsrc/include/arkrtos_fdt_overlay.h](#kernelsrcincludearkrtos_fdt_overlayh)（2 项）
+- [kernelsrc/include/arkrtos_fdt_res.h](#kernelsrcincludearkrtos_fdt_resh)（4 项）
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（62 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（66 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -37,7 +36,7 @@
 - [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（21 项）
 - [kernelsrc/include/arkrtos_net.h](#kernelsrcincludearkrtos_neth)（6 项）
 - [kernelsrc/include/arkrtos_ptable.h](#kernelsrcincludearkrtos_ptableh)（23 项）
-- [kernelsrc/include/arkrtos_rt.h](#kernelsrcincludearkrtos_rth)（13 项）
+- [kernelsrc/include/arkrtos_rt.h](#kernelsrcincludearkrtos_rth)（14 项）
 - [kernelsrc/include/arkrtos_sec.h](#kernelsrcincludearkrtos_sech)（8 项）
 - [kernelsrc/include/arkrtos_sha256.h](#kernelsrcincludearkrtos_sha256h)（3 项）
 - [kernelsrc/include/arkrtos_share.h](#kernelsrcincludearkrtos_shareh)（7 项）
@@ -2791,8 +2790,8 @@ const char *arkrtos_console_reason(int rc);
 
 **最小子集的 dtb overlay：把一段 fragment 合并进一棵树，产出新的 blob**
 设备树的 overlay 在 Linux 上是一族语法：target-path / target 句柄、
-__overlay__ 容器、__fixups__ / __symbols__ / __local_fixups__ 三段
-标签解析、加上"删属性/删节点"。**这里只做其中一支，并且明确拒绝
+__overlay__ 容器、__fixups__ / __symbols__ 两段标签解析、加上
+"删属性/删节点"。**这里只做其中一支，并且明确拒绝其余部分**：
 
 ### `int arkrtos_fdt_overlay(void *dst, uint32 cap, const void *base, uint3`
 
@@ -2818,6 +2817,49 @@ const char *arkrtos_fdt_overlay_reason(int rc);
 ```
 
 **错误码的文字解释（只用于日志，不参与判定）。 */**
+
+## kernelsrc/include/arkrtos_fdt_res.h
+
+**把设备树当**驱动配置源**用：定时器与计数时基的口径核对**
+这一层回答的问题是「内核按什么频率在跑定时器」，而这个数字有两个
+可能的来源：
+1) 板级常量（编译进 port 的 ARKRTOS_PORT_TIMER_HZ 等）；
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**板级期望。字段为 0 表示"这一项不检查"。 */**
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**树里读出来的资源。has_* 区分「没写」与「值为 0」。 */**
+
+### `int arkrtos_fdt_res_check(const arkrtos_fdt_res_expect_t *expect, arkr`
+
+```c
+int arkrtos_fdt_res_check(const arkrtos_fdt_res_expect_t *expect, arkrtos_fdt_res_t *out);
+```
+
+**读取并核对定时器 / 时基资源。**
+- `expect`：期望（不可为 0；字段置 0 表示不检查那一项）
+- `out`：读到的值（失败时也尽量填满，便于打印）
+**返回**：ARKRTOS_RES_OK 或上面某个负码
+> 说明：只读。
+
+### `const char *arkrtos_fdt_res_reason(int rc);`
+
+```c
+const char *arkrtos_fdt_res_reason(int rc);
+```
+
+**原因码的稳定短名（用于日志），未知码返回 "?"。 */**
 
 ## kernelsrc/include/arkrtos_flashapp.h
 
@@ -3598,6 +3640,30 @@ uint32 arkrtos_port_get_timer_counter(void);
 ARM 为 SysTick->VAL，RISC-V 可为 mtime 低 32 位，
 LoongArch 可为恒定频率定时器计数，由 port 层映射。
 
+### `uint32 arkrtos_port_get_cycle_clock(void);`
+
+```c
+uint32 arkrtos_port_get_cycle_clock(void);
+```
+
+**周期计数器的频率（Hz），用来把周期差折算成时间**
+**返回**：每秒多少个 get_cyccnt() 计数；0 = 未知（调用方必须报"不可用"）
+ARM 上 DWT CYCCNT 与内核时钟同源，返回 get_system_clock()；
+RISC-V / LoongArch 上 mcycle / TSC 与节拍时基（mtime / rdtime）
+不同源，频率由 cyccnt_init() 在开机时用已知时基实测校准，
+所以这里返回的是"量出来的比值"，不是抄一个常数。
+0 是合法返回值：校准失败就报不可用，不得拿节拍频率顶替
+（两者差一个数量级，会把所有微秒读数算错）。
+
+### `int32  arkrtos_port_cycle_clock_measured(void);`
+
+```c
+int32  arkrtos_port_cycle_clock_measured(void);
+```
+
+**周期计数器频率的来源**
+**返回**：0 = 板级常量（ARM：与内核时钟同源）；1 = 运行期实测校准
+
 ### `uint32 arkrtos_port_get_timer_reload(void);`
 
 ```c
@@ -3642,6 +3708,34 @@ ARM 上是 SysTick->CTRL 的 COUNTFLAG（读 CTRL 会顺带清它）。
 tickless 用它区分"睡满了整段"和"被别的中断提前叫醒"：前者
 计数器已经回卷，后者没有。没有这个位的架构返回 0，调用方按
 "提前唤醒"处理（结果仍然正确，只是少省一次）。
+
+### `uint32 arkrtos_port_timer_sleep_max(void);`
+
+```c
+uint32 arkrtos_port_timer_sleep_max(void);
+```
+
+**一次 tickless 睡眠最多能编程多少个计数**
+**返回**：定时器位宽允许的上限（ARM SysTick = 24 位，RISC-V mtimecmp 用
+32 位的一半，LoongArch TCFG = 30 位）
+tickless 用它夹住睡眠长度。把上限放在 port 层，是因为"计数器
+位宽"和"有没有回卷标志"都是 port 的私事；内核那边只关心
+"这次能睡多长"。
+
+### `uint32 arkrtos_port_timer_elapsed_counts(uint32 programmed);`
+
+```c
+uint32 arkrtos_port_timer_elapsed_counts(uint32 programmed);
+```
+
+**自上次 arkrtos_port_start_timer_counts() 以来实际走过了多少个计数**
+- `programmed`：当时编程下去的计数值
+**返回**：已走过的计数（>= 1）；计数器不动时返回 1
+ARM 用 SysTick 的 COUNTFLAG + VAL（24 位）；RISC-V 的 mtimecmp
+是"比较值"、没有回卷标志，所以 port 在编程时留一个时基快照，
+用差值算；LoongArch 的 TCFG 是周期定时器，同理用 rdtime 快照
+按两个时钟的频率比折算成 TCFG 计数。返回值允许超过 programmed
+（被拖得太久），调用方按整拍补。
 
 ### `void arkrtos_port_delay_us(uint32 us);`
 
@@ -6110,6 +6204,17 @@ uint32 arkrtos_rt_cycles_per_tick(void);
 ```
 
 **一个节拍标称多少 CPU 周期（0 = 周期计数器不可用） */**
+
+### `uint32 arkrtos_rt_to_us(uint32 c);`
+
+```c
+uint32 arkrtos_rt_to_us(uint32 c);
+```
+
+**周期数 -> 微秒（与读数行同一套换算，shell 也用这个）**
+- `c`：周期数
+**返回**：微秒；时钟未知时返回 0
+内部按千赫拆开，不调用 64 位除法（RV32 没有 libgcc 那条）。
 
 ### `int32  arkrtos_rt_last_error(void);`
 

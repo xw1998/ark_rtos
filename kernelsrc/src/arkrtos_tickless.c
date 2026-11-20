@@ -29,8 +29,9 @@
 
 #if (ARKRTOS_USE_TICKLESS == 1)
 
-/* SysTick 是 24 位递减计数器：超过这个值的编程值会被截断。 */
-#define ARKRTOS_TL_COUNT_MAX    0x00FFFFFFu
+/* 睡眠上限不是内核常量：SysTick 是 24 位，mtimecmp 是 32 位，TCFG 是 30 位。
+ * 位宽与"有没有回卷标志"都由 port 回答（arkrtos_port_timer_sleep_max /
+ * arkrtos_port_timer_elapsed_counts），内核只关心"这次能睡多长"。 */
 
 /* 长节拍状态。只在 idle 与 tick 中断两个上下文之间传递，都在内核态，
  * 所以不需要临界区；用 volatile 是因为编译器看不见中断里的写入。 */
@@ -52,7 +53,13 @@ static volatile uint32 s_tl_sleeps;     /* 进过长睡眠的次数             
 static uint32 arkrtos_tl_counts_per_tick(void)
 {
     uint32 clk = arkrtos_port_get_system_clock();
-    uint32 cpt = (uint32)(((unsigned long long)clk * ARKRTOS_TICK_PERIOD_US) / 1000000u);
+    uint32 cpt;
+
+    /* 与 arkrtos_port_start_timer() 同一算式，但不用 64 位除法：RV32 工具链
+     * 没有 libgcc 的 __udivdi3。拆成整兆赫与千赫余数两项，都在 32 位内，
+     * 对本仓库所有主频逐位精确。 */
+    cpt = ((clk / 1000000u) * ARKRTOS_TICK_PERIOD_US)
+        + (((clk % 1000000u) / 1000u) * ARKRTOS_TICK_PERIOD_US) / 1000u;
 
     return (cpt == 0u) ? 1u : cpt;
 }
@@ -117,9 +124,13 @@ static void arkrtos_tl_program(uint32 counts, uint8 is_short)
     {
         counts = 1u;
     }
-    if(counts > ARKRTOS_TL_COUNT_MAX)
     {
-        counts = ARKRTOS_TL_COUNT_MAX;
+        uint32 maxc = arkrtos_port_timer_sleep_max();
+
+        if((maxc != 0u) && (counts > maxc))
+        {
+            counts = maxc;
+        }
     }
     s_tl_short = is_short;
     arkrtos_port_start_timer_counts(counts);
@@ -144,8 +155,6 @@ static void arkrtos_tl_rearm_normal(uint32 cpt, uint32 remain)
 */
 static uint32 arkrtos_tl_settle(void)
 {
-    uint32 flag;
-    uint32 val;
     uint32 counts;
     uint32 elapsed;
     uint32 cpt;
@@ -166,23 +175,15 @@ static uint32 arkrtos_tl_settle(void)
         return 0u;
     }
 
-    /* 读序固定：读 CTRL 会清 COUNTFLAG，所以先取标志再取计数值。 */
-    flag   = arkrtos_port_timer_countflag_take();
-    val    = arkrtos_port_get_timer_counter() & ARKRTOS_TL_COUNT_MAX;
+    /* 读序与位宽都是 port 的私事：ARM 用 COUNTFLAG + VAL（24 位），
+     * RISC-V 的 mtimecmp 与 LoongArch 的 TCFG 没有回卷位，由 port 用编程时
+     * 留下的时基快照算差值。上层只拿"实际走过多少计数"这一个数。 */
     counts = s_tl_counts;
     s_tl_armed = 0u;
-
-    if(flag != 0u)
+    elapsed = arkrtos_port_timer_elapsed_counts(counts);
+    if(elapsed == 0u)
     {
-        /* 已经回卷：整段 + 回卷后走过的部分（LOAD = counts - 1）。 */
-        uint32 since_wrap = (counts > 0u) ? (counts - 1u - val) : 0u;
-
-        elapsed = counts + since_wrap;
-    }
-    else
-    {
-        /* 提前唤醒：计数器还在第一段里，剩下的就是还没走的部分。 */
-        elapsed = (counts > val) ? (counts - val) : 1u;
+        elapsed = 1u;
     }
 
     cpt   = s_tl_cpt;
@@ -238,11 +239,15 @@ uint32 arkrtos_tickless_idle(void)
         counts = 1u;
     }
 
-    /* 24 位计数器装不下就不睡那么久：截到装得下的上限。
+    /* 定时器位宽装不下就不睡那么久：截到 port 报的上限。
      * 截短只会让我们早醒（早醒按提前唤醒结账），不会让节拍变快。 */
-    if(counts > ARKRTOS_TL_COUNT_MAX)
     {
-        counts = ARKRTOS_TL_COUNT_MAX;
+        uint32 maxc = arkrtos_port_timer_sleep_max();
+
+        if((maxc != 0u) && (counts > maxc))
+        {
+            counts = maxc;
+        }
     }
 
     /* 省不下一次中断就别跳：不如老老实实 WFI 到下一拍。 */

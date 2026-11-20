@@ -107,14 +107,26 @@ static void rt_acc_clear(rt_acc_t *p_acc)
     p_acc->sum_c = 0u;
 }
 
-static uint32 rt_to_us(uint32 c)
+uint32 arkrtos_rt_to_us(uint32 c)
 {
-    unsigned long long v;
+    uint32 khz;
+    uint32 sec;
+    uint32 rem;
+
     if(g_rt.clk == 0u) { return 0u; }
 
-    /* c * 1e6 / clk，用 64 位中间值避免 c 稍大就溢出。 */
-    v = ((unsigned long long)c * 1000000ull) / (unsigned long long)g_rt.clk;
-    return (uint32)v;
+    /* c * 1e6 / clk，但不写 64 位除法：RV32 工具链没有 libgcc 多库，
+     * 那条式子在 rv32imac 上链接不过（undefined reference __udivdi3）。
+     * 按「千赫」拆开：c/clk 的整数秒部分直接乘 1e6，余数部分换到毫秒再除，
+     * 后一项的乘数 < khz <= 4e6，乘 1000 仍在 32 位内。
+     * 精度代价：clk 不是 1000 的整数倍时误差 < 0.1%，比"编一个分辨率"好得多，
+     * 而且这一点在读数页上标了来源（measured / board constant）。 */
+    khz = g_rt.clk / 1000u;
+    if(khz == 0u) { return 0u; }
+
+    sec = c / khz;
+    rem = c - (sec * khz);
+    return sec * 1000u + (rem * 1000u) / khz;
 }
 
 int32 arkrtos_rt_counter_alive(void)
@@ -136,7 +148,7 @@ int32 arkrtos_rt_counter_alive(void)
 
 void arkrtos_rt_init(void)
 {
-    unsigned long long pt;
+    uint32 pt;
 
     g_rt.ready = 0u;
     g_rt.crit_depth = 0u;
@@ -156,7 +168,6 @@ void arkrtos_rt_init(void)
      * 再清零计数器，中间已经有一拍把时间戳记进了 last_tick_cyc，清零后下
      * 一拍就会算出一个巨大的负数抖动。ready = 0 期间 tick 钩子不记账。 */
     g_rt.ready = 0u;
-    g_rt.clk = arkrtos_port_get_system_clock();
     if(arkrtos_rt_counter_alive() == 0)
     {
         /* 没有周期计数器（或者它转不动）：所有测量项保持 n = 0，shell 如实
@@ -173,8 +184,23 @@ void arkrtos_rt_init(void)
 
     arkrtos_rt_reset();
 
-    pt = ((unsigned long long)g_rt.clk * (unsigned long long)ARKRTOS_TICK_PERIOD_US) / 1000000ull;
-    g_rt.per_tick = (uint32)pt;
+    /* 周期计数器的频率必须问 port，不能拿节拍时基顶替：ARM 上两者同源，
+     * RISC-V / LoongArch 上 mcycle / TSC 与 mtime / rdtime 差一个数量级，
+     * 用节拍频率折算会把所有微秒读数算错。返回 0 = 校准失败，如实报不可用。 */
+    g_rt.clk = arkrtos_port_get_cycle_clock();
+    if(g_rt.clk == 0u)
+    {
+        g_rt.per_tick = 0u;
+        g_rt.ready = 0u;
+        return;
+    }
+
+    /* per_tick = clk * TICK_US / 1e6，同样不写 64 位除法（见 arkrtos_rt_to_us）。
+     * 拆成「整兆赫部分 + 千赫余数部分」，两项都在 32 位内，且对本仓库所有
+     * 主频（10 / 96 / 100 / 25 MHz…）逐位精确。 */
+    pt = ((g_rt.clk / 1000000u) * ARKRTOS_TICK_PERIOD_US)
+       + (((g_rt.clk % 1000000u) / 1000u) * ARKRTOS_TICK_PERIOD_US) / 1000u;
+    g_rt.per_tick = (pt == 0u) ? 1u : pt;
     g_rt.ready = 1u;
 }
 
@@ -418,9 +444,9 @@ static void rt_fill_row(arkrtos_rt_row_t *p_row, const char *name, uint32 idx)
     p_row->min_c = p_acc->min_c;
     p_row->max_c = p_acc->max_c;
     p_row->avg_c = p_acc->sum_c / p_acc->n;
-    p_row->min_us = rt_to_us(p_acc->min_c);
-    p_row->max_us = rt_to_us(p_acc->max_c);
-    p_row->avg_us = rt_to_us(p_row->avg_c);
+    p_row->min_us = arkrtos_rt_to_us(p_acc->min_c);
+    p_row->max_us = arkrtos_rt_to_us(p_acc->max_c);
+    p_row->avg_us = arkrtos_rt_to_us(p_row->avg_c);
 }
 
 uint32 arkrtos_rt_snapshot(arkrtos_rt_row_t *rows, uint32 max_rows)

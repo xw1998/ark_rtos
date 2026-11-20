@@ -32,12 +32,14 @@
 #define ARKRTOS_CONSOLE_COMPAT     (-5)  /* compatible 与板级控制台不同 */
 #define ARKRTOS_CONSOLE_ADDR       (-6)  /* reg 首单元与板级控制台窗口不同 */
 #define ARKRTOS_CONSOLE_BAUD       (-7)  /* stdout-path 的选项与节点 current-speed 冲突 */
+#define ARKRTOS_CONSOLE_CLOCK      (-8)  /* clock-frequency 缺失或与板级 UART 时钟不同 */
 
 /** @brief 板级期望：控制台应该是什么。字段为 0/NULL 表示"这一项不检查"。 */
 typedef struct
 {
     const char *compatible;   /* 例如 "ns16550a" */
     uint32      reg_base;     /* 例如 UART 窗口基址；0 = 不检查 */
+    uint32      clock_hz;     /* 例如 UART 输入时钟；0 = 不检查 */
 } arkrtos_console_expect_t;
 
 /** @brief 树里读出来、并与板级核对过的结果。 */
@@ -46,6 +48,7 @@ typedef struct
     char   path[ARKRTOS_FDT_PATH_MAX];
     char   compatible[32];
     uint32 reg_base;
+    uint32 clock_hz;  /* 0 = 节点没写 clock-frequency */
     uint32 baud;      /* 0 = stdout-path 没写 */
     uint32 bits;      /* 0 = 没写 */
     char   parity;    /* 0 = 没写 */

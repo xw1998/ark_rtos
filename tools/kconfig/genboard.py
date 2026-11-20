@@ -124,9 +124,15 @@ BLOCKS = [
         "KERNEL_RAM_BASE = CHIP_RAM_BASE + SHARE_RAM_SIZE（见分区头的推导）。",
         "",
         "没有 CCM / TCM。填 0 让分区头不派生 CCM 段，链接脚本也就不生成它。",
+        "",
+        "KERNEL_SIZE 是内核镜像在 Flash 区里占的长度，配置区与镜像池紧跟在",
+        "它后面（分区头里 IMAGE_POOL_BASE = CHIP_FLASH_BASE + KERNEL_SIZE +",
+        "CONFIG_SIZE 就是这么推的）。这条必须够大：板级每次复位会把镜像池",
+        "擦成 0xFF，镜像一旦越界，擦除就是在抹自己的代码。",
     ], [
         ("plain", "CHIP_FLASH_BASE", "hexu"),
         ("plain", "CHIP_FLASH_SIZE", "size"),
+        ("guard", "KERNEL_SIZE", "size"),
         ("plain", "CHIP_RAM_BASE", "hexu"),
         ("plain", "CHIP_RAM_SIZE", "size"),
         ("plain", "CHIP_CCM_BASE", "hexu"),
@@ -143,12 +149,13 @@ BLOCKS = [
         ("plain", "ARKRTOS_PORT_TIMER_HZ", "u"),
         ("plain", "ARKRTOS_PORT_RDTIME_HZ", "u"),
         ("plain", "ARKRTOS_QEMU_UART_BASE", "hexu"),
+        ("guard", "ARKRTOS_QEMU_UART_CLK", "u"),
         ("plain", "ARKRTOS_QEMU_UART_REG_SHIFT", "u"),
     ]),
 
     ("四、分页与用户态窗口", [
         "PLV3 探针页（App 的代码/数据/栈）。DRAM 128 MB，内核占",
-        "0x00200000~0x00B00000（镜像 1 MB + RAM 8 MB），16 MB 以上是空地。",
+        "0x00200000~0x00C00000（镜像 2 MB + RAM 8 MB），16 MB 以上是空地。",
         "取 0x02000000 同时满足 PS=20 条目要求的 2^(20+1) = 2 MB 对齐。",
         "",
         "App 的 UART 是同页 VA 别名：一页 4 KB 的 PLV3 条目把本页内 0x1E0",
@@ -233,6 +240,9 @@ BLOCKS = [
     ], [
         ("override", "ARKRTOS_USE_FDT", "bool"),
         ("override", "ARKRTOS_USE_FDT_CONSOLE", "bool"),
+        # guard 而不是 override：这一档默认关（0），要开必须能被命令行 -D 打开；
+        # 写成 #undef + #define 0 会让 -D 静默失效（2026-11-20 同 RTSTAT 踩过）。
+        ("guard", "ARKRTOS_USE_FDT_RES", "bool"),
         ("override", "ARKRTOS_USE_FDT_OVERLAY", "bool"),
     ]),
 
@@ -279,12 +289,15 @@ BLOCKS = [
     ]),
 
     ("十、读数与可观测性", [
-        "RTSTAT 与 SCHED_STAT 关：LA64 没有周期级计数器，",
-        "arkrtos_port_cyccnt_init() 明确返回 -1，打开也只会如实报不可用。",
-        "这条边界写在 docs/跨架构机制矩阵.md 的「实时性：仪表」一行。",
+        "RTSTAT 与 SCHED_STAT 默认关（关着时体积与行为零变化），但写成",
+        "#ifndef 而不是 #undef + #define 0：本板有周期级计数器",
+        "（rdtime / csrrd 0x40，100 MHz 板级常量，见 port 的",
+        "arkrtos_port_cyccnt_init），要在命令行打开一份带仪表的构建：",
+        "    EXTRA_CFLAGS=-DARKRTOS_USE_RTSTAT=1",
+        "写成 #undef 会让这条 -D 静默失效（2026-11-20 实测踩过）。",
     ], [
-        ("override", "ARKRTOS_USE_RTSTAT", "bool"),
-        ("override", "ARKRTOS_USE_SCHED_STAT", "bool"),
+        ("guard", "ARKRTOS_USE_RTSTAT", "bool"),
+        ("guard", "ARKRTOS_USE_SCHED_STAT", "bool"),
         ("override", "ARKRTOS_USE_MDK_TRACE", "bool"),
         ("override", "ARKRTOS_USE_CM_BACKTRACE", "bool"),
         ("override", "ARKRTOS_USE_CRASH_LOG", "bool"),
@@ -294,14 +307,17 @@ BLOCKS = [
     ]),
 
     ("十一、遗言与栈", [
-        "遗言机制（ARKRTOS_HW_SAFE）：机制与架构无关，本板打开。这块 QEMU 板上",
-        "没有驱动登记安全回调，所以整机 devs=0，机制按契约工作由 UTEST 自带的",
-        "回调取证（见 docs/跨架构机制矩阵.md §2.2）。",
+        "遗言机制（ARKRTOS_HW_SAFE）：机制与架构无关，本板打开。默认档下这块",
+        "QEMU 板上没有驱动登记安全回调（devs=0），机制按契约工作由 UTEST 的合成",
+        "回调取证；打开 ARKRTOS_DEMO_HWSAFE 后板级挂三台板内虚拟设备（led0/1/2）",
+        "并声明安全态回调，示例任务走完「遗言 / 驱动回调 / 活着不被中和」三条通道",
+        "（见 docs/跨架构机制矩阵.md §2.2 与 §2.3）。",
         "",
         "SMP 的次核栈用 #ifndef：默认档下它是「定义了但没用」的一个数，",
         "打开 SMP 时工程可以用 -D 覆盖，不必改本文件。",
     ], [
         ("override", "ARKRTOS_HW_SAFE", "bool"),
+        ("guard", "ARKRTOS_DEMO_HWSAFE", "bool"),
         ("override", "ARKRTOS_TIMER_TASK_STACK_WORDS", "paren"),
         ("guard", "ARKRTOS_USE_SMP", "bool"),
         ("guard", "ARKRTOS_SMP_SEC_STACK_SIZE", "dec"),

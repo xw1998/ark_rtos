@@ -80,4 +80,14 @@
 			status = "okay";
 		};
 	};
+
+	/* A4（overlay 的 target=<&label> 与删除语义）需要一个"可以删的东西"。
+	 * 它不是硬件、也不被任何驱动绑定：只是树里的一个描述项，删它不改任何
+	 * 运行行为。工具链侧的 fragment 通过 victim 这个标签找到它。 */
+	victim: overlay-victim {
+		victim-prop = "before";
+		victim-child {
+			note = "delete me";
+		};
+	};
 };

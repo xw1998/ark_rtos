@@ -49,6 +49,15 @@ SECTIONS
     . = ALIGN(16);
     __text_end = .;
 
+    /* 镜像不得越过镜像池基址（IMAGE_POOL_BASE = CHIP_FLASH_BASE +
+     * KERNEL_SIZE + CONFIG_SIZE，值由分区头推出来）。板级
+     * arkrtos_port_board_init() 每次复位都把镜像池擦成 0xFF，越过这条线
+     * 等于开机就把自己的代码抹掉 —— 实测过一次：-O2 + RTSTAT 的 .text
+     * 到 0x00264840，而池基址还是 0x00260000，串口从 0x00260000 起读到
+     * 全 0xFF。要放更大的内核就调板级 Kconfig 的 KERNEL_SIZE。 */
+    ASSERT(__text_end <= IMAGE_POOL_BASE,
+           "kernel image overruns KERNEL_SIZE: .text end is past IMAGE_POOL_BASE")
+
     /* ---- 跨复位崩溃日志（UNINIT 区）----
      * 与 STM32 工程里 gen_scatter.py 生成的 UNINIT 段同义：这块内存既不在
      * .data 也不在 .bss 里，启动代码不会碰它，于是它的内容能活过一次复位

@@ -116,6 +116,14 @@ void   arkrtos_rt_reset(void);
 uint32 arkrtos_rt_cycles_per_tick(void);
 
 /**
+* @brief 周期数 -> 微秒（与读数行同一套换算，shell 也用这个）
+* @param c 周期数
+* @return 微秒；时钟未知时返回 0
+* @details 内部按千赫拆开，不调用 64 位除法（RV32 没有 libgcc 那条）。
+*/
+uint32 arkrtos_rt_to_us(uint32 c);
+
+/**
 * @brief 上一次准备失败的原因码（0 = 没失败）
 * @details 1/2 = 两个信号量创建失败（多半是信号量池满）；
 *          5 = 辅助任务登记失败（返回值 -1，窗口/优先级校验不过）；

@@ -962,6 +962,24 @@ config ARKRTOS_USE_FDT_CONSOLE
 
 	  Off (the default) compiles arkrtos_fdt_console.c to nothing.
 
+config ARKRTOS_USE_FDT_RES
+	bool "Use the device tree as the driver config source (timer / timebase)"
+	default n
+	depends on ARKRTOS_USE_FDT
+	help
+	  Read /cpus/timebase-frequency and the timer node (found by compatible)
+	  and compare reg / clock-frequency with the board constants the port
+	  was compiled with.  A match is reported as such; an absent property
+	  and a disagreeing value are DIFFERENT reasons (a tree that leaves the
+	  internal timer undescribed is incomplete, a tree that says 10 MHz
+	  while the port ticks on 25 MHz is a configuration error).
+
+	  Read-only: it never reprograms the timer.  Changing the tick rate at
+	  run time would invalidate the counts already accumulated, i.e. it
+	  would turn the real-time readings into fake evidence.
+
+	  Off (the default) compiles arkrtos_fdt_res.c to nothing.
+
 config ARKRTOS_USE_FDT_OVERLAY
 	bool "Merge a dtb fragment into the tree (minimal overlay subset)"
 	default n

@@ -40,6 +40,9 @@ BOARD = os.path.join(HERE, "..", "..", "board", "qemu_riscv32",
 WANTED = [
     "CHIP_FLASH_BASE",
     "CHIP_FLASH_SIZE",
+    # 镜像池基址：链接脚本用它兜住「内核镜像越过 KERNEL_SIZE」这条线。
+    # 板级每次复位都会把池擦成 0xFF，越界等于开机抹掉自己的代码。
+    "IMAGE_POOL_BASE",
     "CHIP_RAM_BASE",
     "CHIP_RAM_SIZE",
     "SHARE_RAM_BASE",

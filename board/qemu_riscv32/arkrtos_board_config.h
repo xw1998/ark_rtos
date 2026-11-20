@@ -211,16 +211,23 @@
 #undef  ARKRTOS_AUTOMOUNT_NOR
 #define ARKRTOS_AUTOMOUNT_NOR        0
 
-/* 调试 / 度量 / 自检：RTSTAT 需要周期计数器（本 port 明确返回 -1），
- * 其余几项要么依赖 CMSIS，要么依赖字符串格式化，全部关掉。 */
-#undef  ARKRTOS_USE_RTSTAT
+/* 调试 / 度量 / 自检。
+ *
+ * 2026-11-20 起本 port 有真正的周期计数器：mcycle（CSR 0xB00），频率在
+ * 开机时用 mtime 实测校准（见 arkrtos_port_cyccnt_init），因此 RTSTAT 不再
+ * 是"打不开的档"。默认仍关（默认档体积与读数保持原样），但用 #ifndef 而
+ * 不是 #undef，让命令行 -DARKRTOS_USE_RTSTAT=1 能真正生效：
+ *   make -f example/qemu_riscv32/Makefile BUILD=build/rv32_rt \
+ *        EXTRA_CFLAGS=-DARKRTOS_USE_RTSTAT=1
+ * 与 SMP 那条同一写法。 */
+#ifndef ARKRTOS_USE_RTSTAT
 #define ARKRTOS_USE_RTSTAT           0
-/* 调度器统计（ARKRTOS_USE_SCHED_STAT）默认是 1，但它量的是 DWT CYCCNT：
- * 本 port 的 arkrtos_port_get_cyccnt() 返回 0、cyccnt_init() 返回 -1，
- * 开着只会得到 "每次切换都是 0 周期" 的假读数。所以这里关掉 —— 关掉是
- * "这个计数器在本平台不存在"，不是"统计不重要"。 */
-#undef  ARKRTOS_USE_SCHED_STAT
+#endif
+/* 调度器统计量的是同一个周期计数器，口径与上面一致：默认关，
+ * 需要时由 -DARKRTOS_USE_SCHED_STAT=1 打开。 */
+#ifndef ARKRTOS_USE_SCHED_STAT
 #define ARKRTOS_USE_SCHED_STAT       0
+#endif
 #undef  ARKRTOS_USE_MDK_TRACE
 #define ARKRTOS_USE_MDK_TRACE        1
 #undef  ARKRTOS_USE_CM_BACKTRACE
@@ -235,6 +242,15 @@
 #define ARKRTOS_USE_SECCHECK         1
 #undef  ARKRTOS_HW_SAFE
 #define ARKRTOS_HW_SAFE              1
+
+/* A5 读数装置（默认关）：打开后板级挂三台板内虚拟设备 led0/led1/led2 并声明
+ * 安全态回调，示例 main.c 里三个任务走完「遗言 / 驱动回调 / 活着不被中和」
+ * 三条通道。用 #ifndef 是为了能让命令行 -DARKRTOS_DEMO_HWSAFE=1 生效；关着
+ * 时这一段不进二进制，板级行为与加入本装置之前逐位一致。
+ * （board/qemu_loongarch64 的同一开关由 tools/kconfig/genboard.py 生成。） */
+#ifndef ARKRTOS_DEMO_HWSAFE
+#define ARKRTOS_DEMO_HWSAFE          0
+#endif
 
 /* SMP 开关：生产档默认 0（单 hart）。为了让命令行
  * -DARKRTOS_USE_SMP=1 能真正生效，这里必须用 #ifndef 而不是 #undef；

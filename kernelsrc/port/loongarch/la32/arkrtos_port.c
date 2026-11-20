@@ -565,8 +565,55 @@ uint32 arkrtos_port_get_timer_reload(void)
     return 0xFFFFFFFFu;
 }
 
-/* 没有周期级计数器（DWT 的对应物）。返回 -1 是「这个核给不了这个读数」，
- * 调用方必须按「不可用」上报，不得编一个粗三个数量级的分辨率出来。 */
+/* ============================================================
+ * 周期级时间基准（rdcntvl.w）
+ * ------------------------------------------------------------
+ * 与 la64 同一套机制：TSC 按核频走，rdtime 按固定频率走，频率开机实测。
+ * 本档没有执行载体（见 docs/验证载体分级.md），这段只在编译期成立，
+ * 没有任何 QEMU / 真机读数 —— 不因为"写了"就当成可用。
+ * ============================================================ */
+#if (ARKRTOS_USE_RTSTAT == 1)
+
+static uint32 s_cycle_hz;
+
+static uint32 la_tsc_read(void)
+{
+    uint32 lo;
+
+    /* 本工具链的 binutils 不认 rdcntvl.w 助记符（实测 "no match insn"），
+     * 所以直接写它的编码形式 csrrd rd, 0x40（TID = 稳定计数器低 32 位）。 */
+    __asm__ volatile("csrrd %0, 0x40" : "=r"(lo) : : "memory");
+    return lo;
+}
+
+int32 arkrtos_port_cyccnt_init(void)
+{
+    /* LoongArch 只有一条稳定计数器：rdtime 读的就是它（CSR 0x40 = TID），
+     * 频率是板级常量 ARKRTOS_PORT_RDTIME_HZ（QEMU virt 实测 100 MHz）。
+     * 不存在「核频计数与已知时基不同源」的问题，所以不需要校准，也就
+     * 不用在开机时空转 10 ms、不用 64 位除法。 */
+    s_cycle_hz = ARKRTOS_PORT_RDTIME_HZ;
+    return 0;
+}
+
+uint32 arkrtos_port_get_cyccnt(void)
+{
+    return la_tsc_read();
+}
+
+uint32 arkrtos_port_get_cycle_clock(void)
+{
+    return s_cycle_hz;
+}
+
+int32 arkrtos_port_cycle_clock_measured(void)
+{
+    /* 频率来自板级常量（rdtime 的固定频率），不是量出来的。 */
+    return 0;
+}
+
+#else
+
 int32 arkrtos_port_cyccnt_init(void)
 {
     return -1;
@@ -576,6 +623,8 @@ uint32 arkrtos_port_get_cyccnt(void)
 {
     return 0u;
 }
+
+#endif /* ARKRTOS_USE_RTSTAT */
 
 /**
 * @brief 启动节拍定时器
