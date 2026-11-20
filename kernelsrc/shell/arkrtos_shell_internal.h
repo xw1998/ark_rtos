@@ -177,6 +177,9 @@ int cmd_rt(int argc, char *argv[]);
 int cmd_sched(int argc, char *argv[]);
 int cmd_sec(int argc, char *argv[]);
 int cmd_stack(int argc, char *argv[]);
+#if (ARKRTOS_USE_TASK_SWAP == 1)
+int cmd_swap(int argc, char *argv[]);
+#endif
 int cmd_syncinfo(int argc, char *argv[]);
 int cmd_task(int argc, char *argv[]);
 int cmd_uname(int argc, char *argv[]);

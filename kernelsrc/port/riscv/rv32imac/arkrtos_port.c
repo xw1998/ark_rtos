@@ -659,6 +659,80 @@ void arkrtos_port_set_psp(uint32 val)
     (void)val;
 }
 
+#if (ARKRTOS_USE_TASK_SWAP == 1)
+/* ---- 任务热切换的端口层（RV32IMAC） ---------------------------------
+ * 帧格式见本文件的 RV_FR_*（144 字节 / 36 字），trap 入口把 tp 当帧指针。
+ * 恢复路径是「riscv_trap_c 的返回值」——没有 PSP 可挪，所以 activate 把新帧
+ * 记在 s_rv32_swap_frame 里，由 riscv_trap_c 在 SVC_Server 返回之后取走。
+ *
+ * 帧里必须改的四个位置：
+ *   mepc    <- 新入口
+ *   sp      <- 新块里的栈顶（不能留旧值：整块拷贝后 sp 槽里还是旧块地址）
+ *   ra      <- 0（新 main 返回即跳 0，与新建任务同一口径）
+ *   mstatus <- 只保留 MPP，置 MPIE（mret 用 MPIE 恢复 MIE）
+ * a0..a7 清零；gp 保留（同一镜像内 gp 有效），其它 callee-saved 保留原值。
+ * mstatus.MPP 真正生效还要过 g_rv_next_mpp（汇编恢复时覆盖），这里保留原值
+ * 即「本次 trap 的来源特权」，切换与否由内核决定。
+ * ------------------------------------------------------------------- */
+static uint32 *s_rv32_swap_frame = 0;
+
+int32 arkrtos_port_swap_frame_ok(const void *p_exc_ctx)
+{
+    const uint32 *p_frame = (const uint32 *)p_exc_ctx;
+    uint32 mepc;
+    uint32 mpp;
+
+    if(p_frame == 0)
+    {
+        return 0;
+    }
+    mepc = p_frame[RV_FR_MEPC];
+    mpp  = (p_frame[RV_FR_MSTATUS] >> RV_MSTATUS_MPP_SHIFT) & 3u;
+    /* 对齐只要求 2 字节：本 port 编的是 RV32**IMAC**，C 扩展让指令可以
+     * 落在 2 mod 4 的地址上——ecall 本身是 32 位，但它前面可以是一条
+     * 16 位压缩指令。按 4 字节判会把这种建法的 ecall 帧判成"坏帧"，
+     * 表现为「swap 命令随机 FAIL（v1 一直涨、v2 一直是 0）」，且只与
+     * 链接后的指令落点有关（实测 mepc=0x8002B80E）。 */
+    if((mepc == 0u) || ((mepc & 1u) != 0u))
+    {
+        return 0;
+    }
+    if((mpp != RV_PRIV_U) && (mpp != RV_PRIV_M))
+    {
+        return 0;
+    }
+    return 1;
+}
+
+uint32 arkrtos_port_swap_frame_bytes(void)
+{
+    return RV_FR_SIZE;
+}
+
+void arkrtos_port_swap_rewrite(void *p_exc_ctx, uint32 entry)
+{
+    uint32 *p_frame = (uint32 *)p_exc_ctx;
+    uint32 i;
+
+    for(i = RV_FR_A0; i <= RV_FR_A7; i++)
+    {
+        p_frame[i] = 0u;
+    }
+
+    p_frame[RV_FR_RA]  = 0u;
+    p_frame[RV_FR_SP]  = (uint32)p_frame + RV_FR_SIZE;
+    p_frame[RV_FR_MEPC] = entry & ~1u;   /* 同上：C 扩展下入口只需 2 字节对齐 */
+    p_frame[RV_FR_MSTATUS] = (p_frame[RV_FR_MSTATUS] & RV_MSTATUS_MPP_M) |
+                             RV_MSTATUS_MPIE;
+}
+
+void arkrtos_port_swap_activate(void *p_old_ctx, void *p_new_ctx)
+{
+    (void)p_old_ctx;
+    s_rv32_swap_frame = (uint32 *)p_new_ctx;
+}
+#endif /* ARKRTOS_USE_TASK_SWAP == 1 */
+
 uint32 arkrtos_port_get_control(void)
 {
     return 0u;
@@ -898,6 +972,16 @@ uint32 *riscv_trap_c(uint32 *frame)
             }
             frame[RV_FR_MEPC] += 4u;
             SVC_Server((void *)frame);
+            #if (ARKRTOS_USE_TASK_SWAP == 1)
+            /* 热切换：端口层把改写好的新帧记在 s_rv32_swap_frame 里。
+             * 恢复帧是本函数的返回值，所以这里必须把它换掉，否则返回的
+             * 还是旧块里那一帧（旧块马上就要被还回去了）。 */
+            if(s_rv32_swap_frame != 0)
+            {
+                frame = s_rv32_swap_frame;
+                s_rv32_swap_frame = 0;
+            }
+            #endif
         }
         else if((mcause == RV_MCAUSE_STORE_FAULT) ||
                 (mcause == RV_MCAUSE_LOAD_FAULT)  ||

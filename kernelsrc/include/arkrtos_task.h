@@ -256,6 +256,14 @@ int32 arkrtos_task_swap_take(void *p_exc_ctx, int32 task_id);
 int32 arkrtos_task_swap_cancel(int32 task_id);
 int32 arkrtos_task_swap_pending(void);
 
+#if (ARKRTOS_USE_TASK_SWAP == 1)
+/* 内核自检（swap 命令）的直连钩子：arm 之后，目标任务的下一次 SVC 由
+ * SVC_Server 直接走内核这套 take，不经过 mini/loader 的在途账。
+ * 不 arm 时两个函数一个字都不做。 */
+void  arkrtos_task_swap_selftest_arm(int32 task_id);
+int32 arkrtos_task_swap_selftest_take(void *p_exc_ctx);
+#endif
+
 #if (ARKRTOS_USE_STACK_GUARD == 1)
 /* 栈底守卫字检查：slot 是 0 基槽位。0 = 正常或未布防，1 = 被踩。
  * 首次发现时记一条 ARKRTOS_FAULT_STACKOVF 并打一行控制台，之后只返回 1。 */

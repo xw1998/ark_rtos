@@ -196,6 +196,51 @@ int32  arkrtos_port_send_ipi(uint32 cpu);
 */
 void arkrtos_port_set_psp(uint32 val);
 
+/* ============================================================
+ * 任务热切换（A/B 双缓冲）的端口层
+ * @brief 内核只认这四个入口，帧形状与恢复路径按架构各自实现
+ * @details 热切换做的就是「改写一份硬件栈帧，让异常返回落到新入口」。而
+ *          「栈帧长什么样、从哪恢复到哪」是每个架构自己的事——Cortex-M 是
+ *          PSP 上 8 个字的基本帧，RISC-V 是 mepc/mstatus 收尾的一段，
+ *          LoongArch 是 ERA/PRMD 收尾的一段。内核只调下面四个函数，内核里
+ *          不出现任何「按架构改寄存器」的分支。
+ *          声明与定义都只在 ARKRTOS_USE_TASK_SWAP == 1 时存在。
+ * ============================================================ */
+#if (ARKRTOS_USE_TASK_SWAP == 1)
+
+/**
+* @brief 判断当前异常帧是不是本架构认可的「可改写帧」
+* @param p_exc_ctx SVC/trap 的帧指针
+* @return 1 = 可以改写；0 = 形状不认识（拒绝而不是猜）
+*/
+int32 arkrtos_port_swap_frame_ok(const void *p_exc_ctx);
+
+/**
+* @brief 本架构一帧占多少字节（用于「帧是否整块落在旧栈里」的边界检查）
+* @return 32（Cortex-M）/ 144（RV32IMAC）/ 256（LA64）
+*/
+uint32 arkrtos_port_swap_frame_bytes(void);
+
+/**
+* @brief 把帧就地改写成「新镜像入口的第一行」
+* @param p_exc_ctx 帧指针（已经在新的数据块里）
+* @param entry     新入口地址
+* @details 只改与「从哪里取指、用哪段栈、以什么特权级返回」有关的那些字，
+*          其余寄存器按架构语义保留或清零，见各端口的实现注释。
+*/
+void arkrtos_port_swap_rewrite(void *p_exc_ctx, uint32 entry);
+
+/**
+* @brief 让「本次异常返回」用新帧
+* @param p_old_ctx 旧帧（换下来的那一份）
+* @param p_new_ctx 新帧（改写好的那一份）
+* @details Cortex-M 把 PSP 挪过去；RISC-V / LoongArch 的恢复帧是 trap C 入口
+*          的返回值，端口在这里记账，由各自的 trap 出口取走。
+*/
+void arkrtos_port_swap_activate(void *p_old_ctx, void *p_new_ctx);
+
+#endif /* ARKRTOS_USE_TASK_SWAP == 1 */
+
 /**
 * @brief 获取CONTROL寄存器值
 * @return CONTROL寄存器当前值

@@ -2248,24 +2248,9 @@ int32 arkrtos_task_swap_pending(void)
     return g_task_swap.task_id;
 }
 
-/* 基本异常帧判据：Thumb 位必须是 1，IPSR 必须是 0（Thread 模式）。
- * 扩展帧（用过 FPU 的任务）的 [7] 是 S6，不是 xPSR；命中概率近乎为零，
- * 所以这里能可靠地把「不是基本帧」认出来，而不是靠运气。 */
-static int arkrtos_task_swap_basic_frame(const uint32 *p_frame)
-{
-    uint32 xpsr = p_frame[7];
-
-    if((xpsr & 0x01000000u) == 0u)
-    {
-        return 0;
-    }
-    if((xpsr & 0x000001FFu) != 0u)
-    {
-        return 0;
-    }
-
-    return 1;
-}
+/* 帧形状的判据在端口层（arkrtos_port_swap_frame_ok）：Cortex-M 看 xPSR 的
+ * Thumb 位与 IPSR，RV32 看 mepc 对齐与 mstatus.MPP，LA64 看 ERA 对齐与
+ * PRMD.PPLV。内核这里只说「这一帧能不能改」，不认识形状就拒绝。 */
 
 int32 arkrtos_task_swap_arm(int32 task_id, uint32 rom_start, uint32 rom_size,
                             uint32 ram_start, uint32 ram_size, uint32 entry)
@@ -2375,12 +2360,12 @@ int32 arkrtos_task_swap_take(void *p_exc_ctx, int32 task_id)
      * （例如中断上下文里发的 SVC 走的是 MSP）——那就等它自己再发一次，
      * 不在这里猜。 */
     if(((uint32)p_frame < old_ram) ||
-       (((uint32)p_frame + 32u) > (old_ram + blk)))
+       (((uint32)p_frame + arkrtos_port_swap_frame_bytes()) > (old_ram + blk)))
     {
         return 0;
     }
 
-    if(arkrtos_task_swap_basic_frame(p_frame) == 0)
+    if(arkrtos_port_swap_frame_ok(p_frame) == 0)
     {
         g_task_swap.task_id = 0;
         return ARKRTOS_SWAP_ERR_FRAME;
@@ -2397,18 +2382,14 @@ int32 arkrtos_task_swap_take(void *p_exc_ctx, int32 task_id)
         ((uint32 *)(void *)g_task_swap.new_ram_start)[i] = p_old[i];
     }
 
-    /* 2) 把新块里这一帧改成「新 main() 的第一行」。 */
-    p_new[0] = 0u;                  /* R0 */
-    p_new[1] = 0u;                  /* R1 */
-    p_new[2] = 0u;                  /* R2 */
-    p_new[3] = 0u;                  /* R3 */
-    p_new[4] = 0u;                  /* R12 */
-    p_new[5] = 0u;                  /* LR：main 若返回则落到 0（与新建任务的栈帧一致） */
-    p_new[6] = g_task_swap.new_entry & ~1u;   /* 硬件按约定忽略 Thumb 位 */
-    p_new[7] = 0x01000000u;                   /* xPSR：只留 Thumb 位 */
+    /* 2) 把新块里这一帧改成「新镜像入口的第一行」。寄存器怎么摆是端口层
+     *    的事（ARM 的 8 字基本帧 / RV32 的 mepc 帧 / LA64 的 ERA 帧各有
+     *    各的改法），内核只说「从哪个入口继续跑」。 */
+    arkrtos_port_swap_rewrite(p_new, g_task_swap.new_entry);
 
-    /* 3) 异常返回从 PSP 弹帧：把它挪到新块里的同一个偏移。 */
-    arkrtos_port_set_psp((uint32)p_new);
+    /* 3) 让本次异常返回用新帧：ARM 挪 PSP；RISC-V / LoongArch 把新帧记在
+     *    端口层，由各自的 trap C 出口换掉返回值。 */
+    arkrtos_port_swap_activate(p_frame, p_new);
 
     /* 4) 窗口与 MPU 上下文跟上，并立刻写进硬件。 */
     p_task->rom_start = g_task_swap.new_rom_start;
@@ -2418,6 +2399,10 @@ int32 arkrtos_task_swap_take(void *p_exc_ctx, int32 task_id)
     p_task->stack_top = g_task_swap.new_ram_start + g_task_swap.new_ram_size;
     p_task->stack_bottom = (uint32 *)(void *)(p_task->stack_top - p_task->stack_size);
     p_task->entry = (void (*)(void))g_task_swap.new_entry;
+    /* 恢复入口也指向新帧：RISC-V / LoongArch 的下一次切换是从 trap C 的
+     * 返回值取帧的，这里同步一份，避免「切换落地」与「下一次切换」之间
+     * TCB 里还指着旧块（旧块此刻马上就要被还回去）。 */
+    p_task->stack_ptr = (uint32)p_new;
     #if (ARKRTOS_USE_STACK_USAGE == 1)
     p_task->stack_peak_low = p_task->stack_top;
     #endif
@@ -2432,6 +2417,46 @@ int32 arkrtos_task_swap_take(void *p_exc_ctx, int32 task_id)
 
     return 1;
 }
+
+/* ---- 内核自检用的直连钩子 --------------------------------------------
+ * swap 命令要验证的是「内核这四步 + 端口层帧改写」，不是小程序/App 装载器，
+ * 所以它不能借用 mini/loader 那两个 take：它们各有一本在途账（槽位、缓冲
+ * 归属），自检混进去会污染账本，也会被它们的槽位判定挡下。这里给自检一条
+ * 直连路径：只有 swap 命令 arm 过之后这个钩子才认账，平时立即返回 0。
+ * ------------------------------------------------------------------- */
+static int32 g_swap_selftest_task  = 0;
+static int32 g_swap_selftest_armed = 0;
+
+void arkrtos_task_swap_selftest_arm(int32 task_id)
+{
+    g_swap_selftest_task  = task_id;
+    g_swap_selftest_armed = 1;
+}
+
+int32 arkrtos_task_swap_selftest_take(void *p_exc_ctx)
+{
+    int32 rc;
+
+    if((g_swap_selftest_armed == 0) ||
+       (g_swap_selftest_task != arkrtos_current_task_id))
+    {
+        return 0;
+    }
+
+    rc = arkrtos_task_swap_take(p_exc_ctx, g_swap_selftest_task);
+
+    /* 只有「这一帧真的被换掉了」才注销：arm 与 swap_arm 是两次调用，中间
+     * 目标任务的 SVC 完全可能先到（它的优先级比 shell 高，一次 tick 就能
+     * 被调度）。那种时候 swap_take 返回 0（挂起项还没立起来），如果在这里
+     * 无条件注销，后面真正立起来的挂起项就再也没有钩子来接——实测表现为
+     * 「v1 一直涨、v2 一直是 0」的 FAIL，而且只在某些时序下出现。
+     * 负值是「已拒绝并清账」，那也是终局，同样注销。 */
+    if(rc != 0)
+    {
+        g_swap_selftest_armed = 0;
+    }
+    return rc;
+}
 #endif /* ARKRTOS_USE_TASK_SWAP */
 
 void SVC_Server(void *p_svc_ctx)
@@ -2440,15 +2465,27 @@ void SVC_Server(void *p_svc_ctx)
     uint32 svc_num = ARKRTOS_SVC_NUM(p_svc_ctx);
 
 #if (ARKRTOS_USE_TASK_SWAP == 1)
+    /* 内核自检（swap 命令）的落地钩子：排在 mini/loader 之前，让自检不经过
+     * 那两个消费者、不碰它们的在途账本。不 arm 时立即返回 0。 */
+    if(arkrtos_task_swap_selftest_take(p_svc_ctx) > 0)
+    {
+        arkrtos_trace_isr(ARKRTOS_TR_IRQ_SVC, ARKRTOS_TR_ISR_EXIT);
+        return;
+    }
     /* 热切换的落地钩子必须在「活体证据」之前：换成功之后这一帧已经是新镜像的
      * main()，本次系统调用不该再被记到旧镜像头上。两个消费者各查自己的在途账
      * （小程序 / App 槽位），内核那侧只挂一份，所以至多一个返回「已切换」；
      * 返回值 <0 的拒绝已经在各自的 take 里清账并打过日志，这里不重复报。 */
+#if (ARKRTOS_USE_MINIAPP == 1)
+    /* 小程序这条消费者只在编入小程序时才存在：arkrtos_mini.c 的整段实现挂在
+     * ARKRTOS_USE_MINIAPP 之内，未编入时连符号都没有（不是空实现），所以
+     * 这里必须与它同门——否则关掉小程序的板上会链接失败。 */
     if(arkrtos_mini_swap_take(p_svc_ctx, arkrtos_current_task_id) > 0)
     {
         arkrtos_trace_isr(ARKRTOS_TR_IRQ_SVC, ARKRTOS_TR_ISR_EXIT);
         return;
     }
+#endif
     if(arkrtos_loader_swap_take(p_svc_ctx, arkrtos_current_task_id) > 0)
     {
         arkrtos_trace_isr(ARKRTOS_TR_IRQ_SVC, ARKRTOS_TR_ISR_EXIT);

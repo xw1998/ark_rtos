@@ -325,6 +325,11 @@ static int register_kernel_commands(void)
         "Hardware safe-state (will) ledger: owners, registered devices, neutralized count", 1);
 #endif /* ARKRTOS_HW_SAFE */
 
+#if (ARKRTOS_USE_TASK_SWAP == 1)
+    g_cmd_table[idx++] = ARK_SHELL_CMD("swap", cmd_swap,
+        "Task hot-swap self-test: frame check / block move / frame rewrite / resume path", 3);
+#endif /* ARKRTOS_USE_TASK_SWAP */
+
 #if ARKRTOS_USE_CRASH_LOG
     g_cmd_table[idx++] = ARK_SHELL_CMD("crash", cmd_crash,
         "Cross-reset crash journal: boots, per-slot fault counts, held slots and"

@@ -221,6 +221,62 @@ void arkrtos_port_set_psp(uint32 val)
     __set_PSP(val);
 }
 
+#if (ARKRTOS_USE_TASK_SWAP == 1)
+/* ---- 任务热切换的端口层（Cortex-M） ----------------------------------
+ * 帧形状就是 SVC 入口那一刻硬件压出来的基本帧，8 个字：
+ *   [0]=R0 [1]=R1 [2]=R2 [3]=R3 [4]=R12 [5]=LR [6]=PC [7]=xPSR
+ * 恢复路径是「异常返回从 PSP 弹帧」，所以 activate 只需要挪 PSP。
+ * ------------------------------------------------------------------- */
+int32 arkrtos_port_swap_frame_ok(const void *p_exc_ctx)
+{
+    const uint32 *p_frame = (const uint32 *)p_exc_ctx;
+    uint32 xpsr;
+
+    if(p_frame == 0)
+    {
+        return 0;
+    }
+    xpsr = p_frame[7];
+    /* Thumb 位必须是 1，IPSR 必须是 0（Thread 模式）。扩展帧（用过 FPU 的
+     * 任务）的 [7] 是 S6 而不是 xPSR，命中这两条的概率近乎为零，所以这里
+     * 能可靠地把「不是基本帧」认出来，而不是靠运气。 */
+    if((xpsr & 0x01000000u) == 0u)
+    {
+        return 0;
+    }
+    if((xpsr & 0x000001FFu) != 0u)
+    {
+        return 0;
+    }
+    return 1;
+}
+
+uint32 arkrtos_port_swap_frame_bytes(void)
+{
+    return 32u;
+}
+
+void arkrtos_port_swap_rewrite(void *p_exc_ctx, uint32 entry)
+{
+    uint32 *p_frame = (uint32 *)p_exc_ctx;
+
+    p_frame[0] = 0u;                 /* R0 */
+    p_frame[1] = 0u;                 /* R1 */
+    p_frame[2] = 0u;                 /* R2 */
+    p_frame[3] = 0u;                 /* R3 */
+    p_frame[4] = 0u;                 /* R12 */
+    p_frame[5] = 0u;                 /* LR：新 main 若返回则落到 0（与新建任务一致） */
+    p_frame[6] = entry & ~1u;        /* PC：硬件按约定忽略 Thumb 位 */
+    p_frame[7] = 0x01000000u;        /* xPSR：只留 Thumb 位 */
+}
+
+void arkrtos_port_swap_activate(void *p_old_ctx, void *p_new_ctx)
+{
+    (void)p_old_ctx;
+    arkrtos_port_set_psp((uint32)p_new_ctx);
+}
+#endif /* ARKRTOS_USE_TASK_SWAP == 1 */
+
 uint32 arkrtos_port_get_control(void)
 {
     return __get_CONTROL();

@@ -20,7 +20,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（58 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（62 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -3310,6 +3310,49 @@ void arkrtos_port_set_psp(uint32 val);
 
 **设置进程栈指针PSP**
 - `val`：PSP值
+
+### `int32 arkrtos_port_swap_frame_ok(const void *p_exc_ctx);`
+
+```c
+int32 arkrtos_port_swap_frame_ok(const void *p_exc_ctx);
+```
+
+**判断当前异常帧是不是本架构认可的「可改写帧」**
+- `p_exc_ctx`：SVC/trap 的帧指针
+**返回**：1 = 可以改写；0 = 形状不认识（拒绝而不是猜）
+
+### `uint32 arkrtos_port_swap_frame_bytes(void);`
+
+```c
+uint32 arkrtos_port_swap_frame_bytes(void);
+```
+
+**本架构一帧占多少字节（用于「帧是否整块落在旧栈里」的边界检查）**
+**返回**：32（Cortex-M）/ 144（RV32IMAC）/ 256（LA64）
+
+### `void arkrtos_port_swap_rewrite(void *p_exc_ctx, uint32 entry);`
+
+```c
+void arkrtos_port_swap_rewrite(void *p_exc_ctx, uint32 entry);
+```
+
+**把帧就地改写成「新镜像入口的第一行」**
+- `p_exc_ctx`：帧指针（已经在新的数据块里）
+- `entry`：新入口地址
+只改与「从哪里取指、用哪段栈、以什么特权级返回」有关的那些字，
+其余寄存器按架构语义保留或清零，见各端口的实现注释。
+
+### `void arkrtos_port_swap_activate(void *p_old_ctx, void *p_new_ctx);`
+
+```c
+void arkrtos_port_swap_activate(void *p_old_ctx, void *p_new_ctx);
+```
+
+**让「本次异常返回」用新帧**
+- `p_old_ctx`：旧帧（换下来的那一份）
+- `p_new_ctx`：新帧（改写好的那一份）
+Cortex-M 把 PSP 挪过去；RISC-V / LoongArch 的恢复帧是 trap C 入口
+的返回值，端口在这里记账，由各自的 trap 出口取走。
 
 ### `uint32 arkrtos_port_get_control(void);`
 

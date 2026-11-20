@@ -40,6 +40,22 @@ QEMU_FALLBACKS = [
     "D:/env/tools/qemu/qemu9/mingw64/bin/qemu-system-loongarch64.exe",
 ]
 
+# 多架构：同一套「TCP 串口 + 敲回车」的驱动手法对每个 qemu-system-* 都成立，
+# 差别只在机器名、CPU 型号与是否需要 -bios none。缺省仍是 loongarch64，
+# 所以不带 --arch 的老命令行逐字不变。
+_QEMU_BIN = "D:/env/tools/qemu/qemu9/mingw64/bin/"
+ARCH_QEMU = {
+    "loongarch64": QEMU_FALLBACKS,
+    "riscv32": [_QEMU_BIN + "qemu-system-riscv32.exe"],
+    "m4": [_QEMU_BIN + "qemu-system-arm.exe"],
+}
+# (默认 elf 相对路径, 机器名, CPU 型号或 "", 是否要 -bios none)
+ARCH_DEFAULT = {
+    "loongarch64": ("build/qemu_loongarch64/ark_qemu_la64.elf", "virt", "", False),
+    "riscv32": ("build/qemu_riscv32/ark_qemu_rv32.elf", "virt", "rv32", True),
+    "m4": ("build/qemu_mps2_an386/ark_qemu_m4.elf", "mps2-an386", "cortex-m4", False),
+}
+
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 # --modld-check 的序列：(命令, [必须出现的子串...])
@@ -90,15 +106,33 @@ SWAP_CHECK = [
     ("pmap frame", ["pmap: frames total="]),
 ]
 
+def make_qemu_argv(qemu, machine, cpu, need_bios, elf, port):
+    """按架构拼 QEMU 命令行：只有 CPU/BIOS 两项随架构不同（-machine 差在名字）。"""
+    argv = [qemu, "-machine", machine]
+    if cpu:
+        argv += ["-cpu", cpu]
+    if need_bios:
+        argv += ["-bios", "none"]
+    argv += ["-kernel", os.path.basename(elf),
+             "-display", "none", "-monitor", "none",
+             # wait=off：QEMU 立刻起跑，不等客户端。代价是连上之前的开机输出
+             # （含第一条提示符）会丢，所以下面用"敲回车再看有没有提示符"来判就绪。
+             # 实测 wait=on 在这版 QEMU 上接上之后命令不进 shell，故不采用。
+             "-serial", "tcp:127.0.0.1:%d,server=on,wait=off" % port]
+    return argv
+
 def _strip(s):
     return ANSI.sub("", s)
 
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--arch", default="loongarch64",
+                    choices=["loongarch64", "riscv32", "m4"],
+                    help="选哪一份 qemu-system-* 与默认机器/CPU（默认 loongarch64）")
     ap.add_argument("--qemu", default="")
     ap.add_argument("--elf", default="",
-                    help="默认 <repo>/build/qemu_loongarch64/ark_qemu_la64.elf")
+                    help="默认按 --arch 取 <repo>/build/... 下的 elf")
     ap.add_argument("--port", type=int, default=45553)
     ap.add_argument("--boot", type=float, default=30.0,
                     help="等 shell 提示符的最长秒数")
@@ -119,7 +153,7 @@ def main():
     root = os.path.dirname(here)
     qemu = a.qemu
     if not qemu:
-        for c in QEMU_FALLBACKS:
+        for c in ARCH_QEMU[a.arch]:
             if os.path.isfile(c):
                 qemu = c
                 break
@@ -127,22 +161,18 @@ def main():
         print("FAIL: 找不到 QEMU（缺工具是 FAIL，不是跳过）")
         return 1
 
-    elf = a.elf or os.path.join(root, "build", "qemu_loongarch64",
-                                "ark_qemu_la64.elf")
+    dflt_elf, machine, cpu, need_bios = ARCH_DEFAULT[a.arch]
+    elf = a.elf or os.path.join(root, *dflt_elf.split("/"))
     if not os.path.isfile(elf):
-        print("FAIL: 找不到 %s（先 make -f example/qemu_loongarch64/Makefile）" % elf)
+        print("FAIL: 找不到 %s（--arch %s：先按对应 Makefile 构建）"
+              % (elf, a.arch))
         return 1
 
     # QEMU 在 Windows 上打不开带非 ASCII 字符的路径（实测 "could not load
     # kernel ... Failed to load ELF"），所以切到 elf 所在目录、只用文件名。
     build_dir = os.path.dirname(os.path.abspath(elf))
     p = subprocess.Popen(
-        [qemu, "-machine", "virt", "-kernel", os.path.basename(elf),
-         "-display", "none", "-monitor", "none",
-         # wait=off：QEMU 立刻起跑，不等客户端。代价是连上之前的开机输出
-         # （含第一条提示符）会丢，所以下面用"敲回车再看有没有提示符"来判就绪。
-         # 实测 wait=on 在这版 QEMU 上接上之后命令不进 shell，故不采用。
-         "-serial", "tcp:127.0.0.1:%d,server=on,wait=off" % a.port],
+        make_qemu_argv(qemu, machine, cpu, need_bios, elf, a.port),
         cwd=build_dir, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
 
     try:

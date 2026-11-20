@@ -1379,15 +1379,18 @@ def check_swap_syntax():
     and misbehaves only on a board, which is the worst possible place to find
     it.  This runs armclang -fsyntax-only with the switch forced to 1 over the
     affected translation units; a missing armclang is a FAIL, not a
-    skip.  It also proves the other direction with two real cross compilers:
-    LA64 and RV32 must refuse the switch at compile time (the body rewrites an
-    ARM frame, so enabling it there would rewrite a0 as r0).  Syntax only -- whether the hand-off is actually seamless still needs
-    a board (docs/无缝升级-双缓冲热切换.md §6).
+    skip.  It also drives three real cross compilers as a two-way contract:
+    LA64 and RV32IMAC must now COMPILE with the switch on (each port rewrites
+    its own trap frame: mepc / ERA), while LA32 must still be REFUSED at
+    compile time (that frame layout is not implemented; enabling it there
+    would rewrite the wrong registers, which is the worst kind of silent
+    wrong answer).  Syntax only -- whether the hand-off is actually seamless
+    is measured on QEMU (docs/无缝升级-双缓冲热切换.md §5/§6).
     """
     r = _run_check([sys.executable, os.path.join("tools", "swap_syntax_gate.py")])
     txt = ((r.stdout or "") + (r.stderr or "")).strip()
     if r.returncode == 0 and "SWAP-GATE OK" in txt:
-        ok("swap", "ON-path compile verified (15 files) + LA64/RV32 refuse when ON")
+        ok("swap", "ON-path compile verified (15 files) + LA64/RV32 compile both ways + LA32 still refused when ON")
     else:
         fail("swap", txt[-260:])
 

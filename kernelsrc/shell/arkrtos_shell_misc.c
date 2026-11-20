@@ -1,6 +1,7 @@
 /**
 * @file arkrtos_shell_misc.c
-* @brief 杂项：history / uname / free / ps / which / man / dmesg / hwsafe。
+* @brief 杂项：history / uname / free / ps / which / man / dmesg / hwsafe /
+*        swap（任务热切换自检，仅 ARKRTOS_USE_TASK_SWAP=1 时存在）。
 *          共同点是只读、且输出直接来自别的模块的公开读数。
 * @note 本文件属于内核特权态代码；由 arkrtos_shell.c 按命令族拆出，
 *       只做搬运，命令逻辑与拆分前逐字相同。
@@ -314,5 +315,147 @@ int cmd_hwsafe(int argc, char *argv[])
     return 0;
 }
 #endif /* ARKRTOS_HW_SAFE */
+
+#if (ARKRTOS_USE_TASK_SWAP == 1)
+/* ============================================================
+ * swap：任务热切换的内核自检（A/B 双缓冲）
+ *
+ * 这条命令验证的是内核那四步（帧判据 / 整块搬迁 / 帧改写 / 恢复路径换帧）
+ * 在**当前架构**上真的成立，而不是「开关能编过」。
+ *
+ * 做法：注册一个循环桩 v1 跑在静态块 A 上；等它真的跑起来（计数上涨）后，
+ * 把「换到块 B、入口 v2」挂上；v1 的下一次 SVC（它自己那一次 wait）落地切换。
+ * 判据只有两条：
+ *   - v1 的计数在切换后不再变化（旧镜像真的停住了）；
+ *   - v2 的计数开始上涨（新入口真的在跑）。
+ *
+ * 诚实边界：两个入口都在内核镜像里，所以这条读数证明的是「帧层面换得动、
+ * 整块搬得动、恢复路径认得新帧」，**不是**「镜像被重定位」。PIC / 装载属于
+ * mini/app 装载器，已由 ARM 上板读数覆盖，与架构无关。
+ *
+ * 每个启动只跑一次：本内核没有「按任务号杀任务」的接口，v2 会一直跑着。
+ * ============================================================ */
+#include <string.h>
+
+#define SWAP_TEST_BLOCK_BYTES   4096u
+
+#if defined(__CC_ARM)
+#define SWAP_TEST_ALIGN(n)      __align(n)
+#else
+#define SWAP_TEST_ALIGN(n)      __attribute__((aligned(n)))
+#endif
+
+/* 两块的地址与大小都要满足 swap 的前提：2 的幂且按自身对齐。 */
+static SWAP_TEST_ALIGN(4096) uint8 g_swap_blk_a[SWAP_TEST_BLOCK_BYTES];
+static SWAP_TEST_ALIGN(4096) uint8 g_swap_blk_b[SWAP_TEST_BLOCK_BYTES];
+
+static volatile uint32 g_swap_v1_loops = 0u;
+static volatile uint32 g_swap_v2_loops = 0u;
+static int32  g_swap_test_task = 0;
+static uint32 g_swap_test_done = 0u;
+static uint32 g_swap_test_pass = 0u;
+
+/* 自检桩必须走一次真正的 SVC（热切换只在 SVC 帧上落地），所以用 oslib 的
+ * 公开入口，而不是内核内部的 arkrtos_task_wait_internal()。 */
+void arkrtos_task_wait(uint32 ms);
+
+static void swap_test_v1(void)
+{
+    for(;;)
+    {
+        g_swap_v1_loops++;
+        arkrtos_task_wait(2u);
+    }
+}
+
+static void swap_test_v2(void)
+{
+    for(;;)
+    {
+        g_swap_v2_loops++;
+        arkrtos_task_wait(2u);
+    }
+}
+
+int cmd_swap(int argc, char *argv[])
+{
+    uint32 i;
+    uint32 a1;
+    uint32 a2;
+    uint32 b;
+    int32  rc;
+
+    if((argc >= 2) && (strcmp(argv[1], "stat") == 0))
+    {
+        ark_shell_printf("swap: pending=%d task=%d v1=%u v2=%u done=%u pass=%u\r\n",
+                         (int)arkrtos_task_swap_pending(), (int)g_swap_test_task,
+                         (unsigned)g_swap_v1_loops, (unsigned)g_swap_v2_loops,
+                         (unsigned)g_swap_test_done, (unsigned)g_swap_test_pass);
+        return 0;
+    }
+
+    if(g_swap_test_done != 0u)
+    {
+        sh_out("swap: self-test already ran this boot (reboot to run it again)\r\n");
+        return 1;
+    }
+
+    g_swap_v1_loops = 0u;
+    g_swap_v2_loops = 0u;
+    (void)arkrtos_task_swap_cancel(0);
+
+    g_swap_test_task = arkrtos_task_register(swap_test_v1,
+                                             (uint32 *)(void *)g_swap_blk_a,
+                                             SWAP_TEST_BLOCK_BYTES, 8u, 0u);
+    if(g_swap_test_task <= 0)
+    {
+        g_swap_test_task = 0;
+        sh_out("swap: cannot register the test task\r\n");
+        return 1;
+    }
+
+    /* 等 v1 真的跑起来：注册只让它进就绪队列，计数上不来就是任务没起来。 */
+    for(i = 0u; (i < 100u) && (g_swap_v1_loops == 0u); i++)
+    {
+        arkrtos_task_wait_internal(10u);
+    }
+    if(g_swap_v1_loops == 0u)
+    {
+        sh_out("swap: test task did not start\r\n");
+        return 1;
+    }
+
+    arkrtos_task_swap_selftest_arm(g_swap_test_task);
+    rc = arkrtos_task_swap_arm(g_swap_test_task, (uint32)CHIP_FLASH_BASE,
+                               SWAP_TEST_BLOCK_BYTES,
+                               (uint32)(void *)g_swap_blk_b, SWAP_TEST_BLOCK_BYTES,
+                               (uint32)(void *)swap_test_v2);
+    if(rc != 0)
+    {
+        ark_shell_printf("swap: arm rc=%d\r\n", (int)rc);
+        return 1;
+    }
+
+    /* 切换落在 v1 的下一次 SVC 上（它每 2 ms 一次 wait，很快就到）。 */
+    arkrtos_task_wait_internal(100u);
+    a1 = g_swap_v1_loops;
+    arkrtos_task_wait_internal(100u);
+    a2 = g_swap_v1_loops;
+    b  = g_swap_v2_loops;
+
+    g_swap_test_done = 1u;
+    g_swap_test_pass = ((a1 == a2) && (b > 0u)) ? 1u : 0u;
+
+    ark_shell_printf("swap: v1=%u -> %u  v2=%u\r\n",
+                     (unsigned)a1, (unsigned)a2, (unsigned)b);
+    if(g_swap_test_pass != 0u)
+    {
+        sh_out("swap: PASS (old image stopped, new entry running)\r\n");
+        return 0;
+    }
+    sh_out("swap: FAIL (see counters above)\r\n");
+    return 1;
+}
+#endif /* ARKRTOS_USE_TASK_SWAP == 1 */
 
 #endif /* SHELL_ENABLE */

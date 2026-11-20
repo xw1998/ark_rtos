@@ -20,6 +20,15 @@
 三个移植层各用自己那一档 `-mcpu`。不覆盖：链接、栈帧改写之后在板上的实际行为、
 `mini swap` / `app swap` 的读数——这些只有上板才知道。
 
+跨架构那一向原本要求「非 ARM 打开就 #error」。RV32IMAC 与 LA64 现在各自在
+端口层改写自己的 trap 帧（mepc / ERA），所以契约改成两向三档：
+
+    LA64 / RV32IMAC   开档必须编得过（并且不许再出现拒绝文案），关档也要编得过
+    LA32              开档必须仍被 #error 拒绝（帧布局没实现，静默改写就是错答案）
+
+第二条是防假绿的负对照：如果哪天有人把 #error 整段删掉，正向两档照样全绿，
+只有 LA32 这一条会把「没实现却编过了」抓出来。
+
 用法
 ----
     python tools/swap_syntax_gate.py
@@ -54,7 +63,9 @@ LA64_FALLBACKS = [
 RV32_FALLBACKS = [
     "D:/Artchip/luban-lite-master/toolchain/bin/riscv64-unknown-elf-gcc.exe",
 ]
-CROSS_ARCH_REFUSAL_MARKER = "is implemented for Cortex-M only"
+# 拒绝文案的稳定片段：RV32IMAC / LA64 现在是「实现了」，只有 RV64GC / LA32
+# 还留在「帧没实现」那一侧。
+CROSS_ARCH_REFUSAL_MARKER = "frames are not implemented"
 
 CROSS_ARCH_INCLUDES = [
     "kernelsrc/include",
@@ -156,13 +167,17 @@ def _cross_compile(cc, arch, board, port, key_dir, on):
     return r.returncode, ((r.stdout or "") + (r.stderr or ""))
 
 
-def check_cross_arch_refusal():
-    """非 ARM 架构：开档必须被 #error 拒绝，关档必须编得过。
+def check_cross_arch():
+    """非 ARM 的三档：两档实现（必须编得过）、一档仍未实现（必须被 #error 拒）。
 
-    为什么需要这一向：swap 的本体是「按 ARM 异常帧布局改写 r0-r3/r12/lr/pc/xpsr
-    并挪 PSP」。在 RISC-V / LoongArch 上帧完全不同，打开它不会链接失败，而是
-    把 a0 当 r0 改写——任务在错误地址上取指，是最坏的静默错答案。所以这里要求
-    两个真实交叉编译器各给一次读数：ON 必须非零退出且命中拒绝文案，OFF 必须 0。
+    正向（LA64 / RV32IMAC）：swap 的帧改写已经下沉到端口层，内核里没有按架构
+    写的分支，所以这两个板档在 ON 与 OFF 下都必须编得过；再额外断言 ON 的输出里
+    不出现拒绝文案（防止「靠一条 #error 编过了」这种假读数）。
+    负向（LA32）：帧布局没有实现，ON 必须非零退出且命中拒绝文案——这是负对照，
+    保证那条 #error 还在。
+
+    这里只做 `-fsyntax-only`：链接与真机行为由上板读数负责（RV32 / LA64 各一次
+    `swap` 自检，见 docs/无缝升级-双缓冲热切换.md §5）。
     """
     la64 = _find(LA64_FALLBACKS) or shutil.which("loongarch64-newlib-elf-gcc")
     rv32 = _find(RV32_FALLBACKS) or shutil.which("riscv64-unknown-elf-gcc")
@@ -177,28 +192,42 @@ def check_cross_arch_refusal():
     with open(os.path.join(key_dir, "arkrtos_sign_key_local.h"), "w", encoding="utf-8") as f:
         f.write(CROSS_SIGN_HEADER)
 
+    rv32_arch = ["-march=rv32imac", "-mabi=ilp32", "-mcmodel=medany", "-mno-relax"]
+    la_arch = ["-march=loongarch64", "-mabi=lp64d", "-mstrict-align"]
+
+    # (名字, 编译器, 架构参数, 板级目录, 端口目录, 开档期望)
+    # 期望 "compile" = ON 必须编过；"refuse" = ON 必须被 #error 拒。
     cases = [
-        ("LA64", la64, ["-march=loongarch64", "-mabi=lp64d", "-mstrict-align"],
-         "qemu_loongarch64", "loongarch/la64"),
-        ("RV32", rv32, ["-march=rv32imac", "-mabi=ilp32", "-mcmodel=medany", "-mno-relax"],
-         "qemu_riscv32", "riscv/rv32imac"),
+        ("LA64", la64, la_arch, "qemu_loongarch64", "loongarch/la64", "compile"),
+        ("RV32", rv32, rv32_arch, "qemu_riscv32", "riscv/rv32imac", "compile"),
+        ("LA32", la64, la_arch, "la32_generic", "loongarch/la64", "refuse"),
     ]
     bad = 0
-    for name, cc, arch, board, port in cases:
+    for name, cc, arch, board, port, want in cases:
         rc_on, out_on = _cross_compile(cc, arch, board, port, key_dir, True)
-        if rc_on == 0 or CROSS_ARCH_REFUSAL_MARKER not in out_on:
-            bad += 1
-            print("SWAP-GATE FAIL: %s ON was not refused (rc=%d)" % (name, rc_on))
-            print(out_on[-800:])
         rc_off, out_off = _cross_compile(cc, arch, board, port, key_dir, False)
+
+        if want == "compile":
+            if rc_on != 0:
+                bad += 1
+                print("SWAP-GATE FAIL: %s ON does not compile" % name)
+                print(out_on[-1200:])
+            elif CROSS_ARCH_REFUSAL_MARKER in out_on:
+                bad += 1
+                print("SWAP-GATE FAIL: %s ON still refuses (message survived)" % name)
+        else:
+            if (rc_on == 0) or (CROSS_ARCH_REFUSAL_MARKER not in out_on):
+                bad += 1
+                print("SWAP-GATE FAIL: %s ON was not refused (rc=%d)" % (name, rc_on))
+                print(out_on[-800:])
+
         if rc_off != 0:
             bad += 1
             print("SWAP-GATE FAIL: %s OFF does not compile" % name)
             print(out_off[-800:])
-        if rc_on != 0 and rc_off == 0 and CROSS_ARCH_REFUSAL_MARKER in out_on:
-            print("ok: %s ON refused / OFF compiles" % name)
+        if bad == 0:
+            print("ok: %s %s / OFF compiles" % (name, "ON compiles" if want == "compile" else "ON refused"))
     return bad
-
 
 def main():
     ap = argparse.ArgumentParser()
@@ -227,12 +256,12 @@ def main():
         else:
             print("ok: %s (-mcpu=%s)" % (rel, cpu))
 
-    bad += check_cross_arch_refusal()
+    bad += check_cross_arch()
 
     if bad:
         return 1
-    print("SWAP-GATE OK (%d files, USE_TASK_SWAP=1; LA64/RV32 refused when ON, clean when OFF)"
-          % len(TARGETS))
+    print("SWAP-GATE OK (%d files, USE_TASK_SWAP=1; LA64/RV32 compile both ways, "
+          "LA32 still refused when ON)" % len(TARGETS))
     return 0
 
 

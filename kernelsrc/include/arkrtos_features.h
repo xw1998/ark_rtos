@@ -540,8 +540,21 @@
 #define ARKRTOS_USE_TASK_SWAP           0
 #endif
 
-#if (ARKRTOS_USE_TASK_SWAP == 1) && !(ARKRTOS_ARCH_IS_ARM)
-#error "ARKRTOS_USE_TASK_SWAP=1 is implemented for Cortex-M only: it rewrites an ARM exception frame (r0-r3/r12/lr/pc/xpsr) and moves the PSP. RISC-V / LoongArch frames are different; enabling it there would rewrite a0 as r0. See docs: cross-architecture mechanism matrix."
+/* 架构判定要用到核心编码（ARKRTOS_CPU_CORE_*）：本文件可能被单个 .c 直接
+ * include，那时 arkrtos_arch.h 还没进来，未定义的宏在 #if 里是 0，会把
+ * 每个档都判成「不支持」。arch.h 自带包含守卫、只依赖 types，重复包含无
+ * 代价；板级头由 -include 强制先于一切，核心推导不会走错。 */
+#include "arkrtos_arch.h"
+
+/* 三档有实现：Cortex-M 的 PSP 基本帧、RV32IMAC 的 mepc/mstatus 帧、
+ * LA64 的 ERA/PRMD 帧。三者各自改自己那份帧，全部沉在 port 层
+ * （arkrtos_port_swap_*），内核不出现架构分支。
+ * RV64GC / LA32 的帧形状没有实现：在那里开档会改错寄存器，所以编译期
+ * 拒绝，而不是给一个编得过但语义错的假答案。 */
+#if (ARKRTOS_USE_TASK_SWAP == 1) && !(ARKRTOS_ARCH_IS_ARM) && \
+    (ARKRTOS_ARCH_CORE != ARKRTOS_CPU_CORE_RV32IMAC) && \
+    (ARKRTOS_ARCH_CORE != ARKRTOS_CPU_CORE_LA64)
+#error "ARKRTOS_USE_TASK_SWAP=1 is implemented for Cortex-M, RV32IMAC (0x0201) and LA64 (0x0302) only: each one rewrites its own trap frame through the port layer. RV64GC / LA32 frames are not implemented; enabling it there would rewrite the wrong registers. See docs: cross-architecture mechanism matrix."
 #endif
 
 

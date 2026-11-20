@@ -3021,6 +3021,75 @@ void arkrtos_port_set_psp(uint32 val)
     (void)val;
 }
 
+#if (ARKRTOS_USE_TASK_SWAP == 1)
+/* ---- 任务热切换的端口层（LA64） -------------------------------------
+ * 帧格式见 la64/arkrtos_context.S 的文件头（256 字节 / 32 个 64 位字），
+ * ERA 在 [30]、PRMD 在 [31]，a0..a7 在 [3..10]。恢复路径是
+ * 「la_trap_c 的返回值」——没有 PSP 可挪，所以 activate 把新帧记在
+ * s_la_swap_frame 里，由 la_trap_c 在 SVC_Server 返回之后取走。
+ *
+ * 帧里必须改的四个位置：
+ *   ERA  <- 新入口
+ *   SP   <- 新块里的栈顶（不能留旧值：整块拷贝后 sp 槽里还是旧块地址）
+ *   RA   <- 0（新 main 返回即跳 0，与新建任务同一口径）
+ *   PRMD <- 保留 PPLV[1:0]（回到哪个特权级），置 PIE[2]（ertn 后 IE=1）
+ * a0..a7 清零；tp/fp/s0-s8 保留原值。
+ * ------------------------------------------------------------------- */
+static la_frame_word *s_la_swap_frame = 0;
+
+int32 arkrtos_port_swap_frame_ok(const void *p_exc_ctx)
+{
+    const la_frame_word *p_frame = (const la_frame_word *)p_exc_ctx;
+    unsigned long era;
+    unsigned long plv;
+
+    if(p_frame == 0)
+    {
+        return 0;
+    }
+    era = p_frame[LA_FR_ERA];
+    plv = p_frame[LA_FR_PRMD] & 3UL;
+    if((era == 0UL) || ((era & 3UL) != 0UL))
+    {
+        return 0;
+    }
+    /* PRMD.PPLV 只能是 0（PLV0 内核）或 3（PLV3 App）：其余值说明这不是一份
+     * ertn 能用的帧，拒绝而不是猜。 */
+    if((plv != 0UL) && (plv != 3UL))
+    {
+        return 0;
+    }
+    return 1;
+}
+
+uint32 arkrtos_port_swap_frame_bytes(void)
+{
+    return LA_FR_SIZE;
+}
+
+void arkrtos_port_swap_rewrite(void *p_exc_ctx, uint32 entry)
+{
+    la_frame_word *p_frame = (la_frame_word *)p_exc_ctx;
+    uint32 i;
+
+    for(i = LA_FR_A0; i < (LA_FR_A0 + 8u); i++)
+    {
+        p_frame[i] = 0UL;
+    }
+
+    p_frame[LA_FR_RA]   = 0UL;
+    p_frame[LA_FR_SP]   = (unsigned long)p_frame + (unsigned long)LA_FR_SIZE;
+    p_frame[LA_FR_ERA]  = (unsigned long)entry;
+    p_frame[LA_FR_PRMD] = (p_frame[LA_FR_PRMD] & 3UL) | (unsigned long)LA_PRMD_INIT;
+}
+
+void arkrtos_port_swap_activate(void *p_old_ctx, void *p_new_ctx)
+{
+    (void)p_old_ctx;
+    s_la_swap_frame = (la_frame_word *)p_new_ctx;
+}
+#endif /* ARKRTOS_USE_TASK_SWAP == 1 */
+
 uint32 arkrtos_port_get_control(void)
 {
     return 0u;
@@ -3736,6 +3805,15 @@ la_frame_word *la_trap_c(la_frame_word *frame)
          * 从 ERA - 4 取指令字（两处约定必须同步）。 */
         frame[LA_FR_ERA] += 4u;
         SVC_Server((void *)frame);
+        #if (ARKRTOS_USE_TASK_SWAP == 1)
+        /* 热切换：端口层把改写好的新帧记在 s_la_swap_frame 里。恢复帧是
+         * 本函数的返回值，所以这里必须换掉，否则返回的还是旧块里那一帧。 */
+        if(s_la_swap_frame != 0)
+        {
+            frame = s_la_swap_frame;
+            s_la_swap_frame = 0;
+        }
+        #endif
     }
     else
     {
