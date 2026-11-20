@@ -1,0 +1,13 @@
+{
+  "type": "dyn",
+  "base": 0,
+  "interp": "/mnt/ram/ld-ark.so",
+  "soname": "libanswer.so",
+  "needed": [],
+  "exports": ["answer_add", "lib_g_addr", "g_base", "g_ptr", "abs_ptr", "got_answer"],
+  "imports": [],
+  "relocs": [
+    {"kind": "relative", "at": "g_ptr", "addend_sym": "g_base"},
+    {"kind": "slot64", "at": "abs_ptr", "sym": "g_base"}
+  ]
+}

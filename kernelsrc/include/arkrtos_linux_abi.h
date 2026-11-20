@@ -1,18 +1,21 @@
 /**
 * @file arkrtos_linux_abi.h
-* @brief Linux 系统调用 ABI 兼容层（带 MMU / MPU 目标上的静态 ELF 程序）
+* @brief Linux 系统调用 ABI 兼容层（带 MMU / MPU 目标上的 ELF 程序）
 * @details 这里只回答一个问题：一个按 Linux 约定发起系统调用的**静态链接**
 *          可执行文件，能不能在 Ark 的 ELF 用户任务里跑起来。答案是"能跑
 *          一个最小集合"，不是"支持 Linux"：
 *
 *            - 支持（asm-generic 号）：openat 56 / close 57 / read 63 /
-*              write 64 / exit 93 / exit_group 94 / set_tid_address 96 /
-*              clock_gettime 113 / uname 160 / getpid 172 / getuid 174 /
-*              geteuid 175 / brk 214 / munmap 215 / mmap 222。
-*            - 不支持：动态链接（装载器在 PT_INTERP 处就拒绝）、fork / execve、
-*              信号、进程组、fd 继承与管道、socket、真 mmap 语义（页级映射、
-*              文件映射、权限位）、futex。未知号一律返回 -ENOSYS 并计数，
-*              绝不静默当成功。
+*              write 64 / pread64 67 / exit 93 / exit_group 94 /
+*              set_tid_address 96 / clock_gettime 113 / uname 160 /
+*              getpid 172 / getuid 174 / geteuid 175 / brk 214 / munmap 215 /
+*              mmap 222 / mprotect 226。
+*            - 不支持：fork / execve、信号、进程组、fd 继承与管道、socket、
+*              真 mmap 语义（页级映射、文件映射、权限位）、futex。未知号一律
+*              返回 -ENOSYS 并计数，绝不静默当成功。
+*            - mprotect 只做区间校验并返回 0，**不强制**：整窗是一块 PS=20 的
+*              RWX 映射。它单独计数（arkrtos_linux_abi_stat(4)），读数时能
+*              把"接受"与"强制"分开。
 *
 *          布局差异只在 port 层：LoongArch64 用 `syscall 0` + $a7，RISC-V 用
 *          `ecall` + a7；Cortex-M 与 LA32 没有这条 ABI 的载体，端口层直接
@@ -42,7 +45,7 @@ int32 arkrtos_linux_abi_try(void *p_svc_ctx);
 /**
 * @brief 读计数器（内核 / shell 用）
 * @param which 0 = 已处理，1 = 未知号（-ENOSYS），2 = 用户指针被拒，
-*              3 = 其它失败
+*              3 = 其它失败，4 = mprotect 接受但未强制
 * @return 计数值
 */
 uint32 arkrtos_linux_abi_stat(uint32 which);

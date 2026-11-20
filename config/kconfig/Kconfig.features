@@ -433,9 +433,39 @@ config ARKRTOS_USE_ELF
 	  ERR_BUSY instead of queueing.  Per-process page tables, the same
 	  virtual address running twice, a page-frame allocator, ASID switching,
 	  demand paging and copy_from_user are the next milestone, written down
-	  in docs/MMU进程模型与ELF装载.md.  No dynamic linking: a PT_INTERP
-	  segment is rejected as a format error rather than faulting later on an
-	  unresolved PLT slot.
+	  in docs/MMU进程模型与ELF装载.md.
+
+	  Dynamic linking is a separate switch (ARKRTOS_USE_DYNLOAD, off by
+	  default).  With it off, a PT_INTERP segment is still rejected as a
+	  format error rather than faulting later on an unresolved PLT slot.
+
+config ARKRTOS_USE_DYNLOAD
+	bool "Dynamic linking (PT_INTERP interpreter) for ELF user tasks"
+	depends on ARKRTOS_USE_ELF
+	help
+	  Accept ET_EXEC / ET_DYN programs that carry PT_INTERP: load the
+	  main image, load the interpreter into a board-provided region, put
+	  the Linux auxv vector (AT_PHDR / AT_PHENT / AT_PHNUM / AT_PAGESZ /
+	  AT_BASE / AT_ENTRY / AT_UID / AT_EUID / AT_FLAGS) on the user stack
+	  and start at the interpreter entry.  The interpreter itself is a
+	  user-mode program (this repo ships a minimal one in
+	  example/qemu_loongarch64/elf/ldso.c), not part of the kernel.
+
+	  Requires ARKRTOS_ELF_INTERP_BASE and ARKRTOS_ELF_INTERP_SIZE from
+	  the board header; missing either is a #error, not a guessed address.
+	  The main image and the interpreter are checked against disjoint
+	  address ranges before a single byte is written.
+
+	  Off (default) compiles the dynamic branch out: PT_INTERP is still
+	  rejected as a format error and the image is byte-for-byte what it
+	  was before this option existed.
+
+	  Honest boundary: this is the kernel-side Linux convention plus a
+	  minimal loader that resolves RELATIVE / 64 / JUMP_SLOT relocations.
+	  It does NOT make a stock glibc binary run: that needs glibc's
+	  ld-linux-loongarch-lp64d.so.1 and a much larger syscall surface
+	  (futex, rseq, TLS, file-backed mmap).  See
+	  docs/动态链接与PT_INTERP.md.
 
 config ARKRTOS_USE_LINUX_ABI
 	bool "Linux syscall ABI for ELF user tasks"
@@ -457,10 +487,13 @@ config ARKRTOS_USE_LINUX_ABI
 	      collide.
 
 	  This is a compatibility layer, not a Linux kernel. Unsupported numbers
-	  answer -ENOSYS and are counted; nothing is silently accepted. Dynamic
-	  linking (PT_INTERP), fork, signals, inherited file descriptors and
-	  real mmap semantics (page granularity, protection, file mapping) are
-	  NOT provided -- see docs/Linux可执行文件兼容-系统调用ABI.md.
+	  answer -ENOSYS and are counted; nothing is silently accepted. fork,
+	  signals, inherited file descriptors and real mmap semantics (page
+	  granularity, protection, file mapping) are NOT provided; pread64 and
+	  mprotect exist but mprotect is accepted-not-enforced on the single
+	  PS=20 RWX window -- see docs/Linux可执行文件兼容-系统调用ABI.md.
+	  Dynamic linking (PT_INTERP) is provided separately by
+	  ARKRTOS_USE_DYNLOAD.
 
 	  Off (default) compiles nothing: arkrtos_linux_abi.c is not built and
 	  the two port entry points are not compiled, so the image is

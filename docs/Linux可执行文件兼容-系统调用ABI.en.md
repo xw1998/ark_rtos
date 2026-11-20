@@ -82,12 +82,17 @@ return value is a separate port primitive
 
 ## 3 Explicitly unsupported
 
-Dynamic linking (`PT_INTERP`), `fork`/`clone`/`execve`, signals, fd inheritance
-/ pipes / redirection, `socket`/`select`, `futex`, real `mmap` semantics
-(file-backed, shared, `MAP_FIXED`, permission bits), and threads. Each of these
-needs an object (a process, a user-side signal frame, a shared-memory wait
-queue) that Ark RTOS does not have; faking them would produce silently wrong
-answers. See the Chinese page for the reasoning per row.
+`fork`/`clone`/`execve`, signals, fd inheritance / pipes / redirection,
+`socket`/`select`, `futex`, real `mmap` semantics (file-backed, shared,
+`MAP_FIXED`, permission bits), and threads. Each of these needs an object (a
+process, a user-side signal frame, a shared-memory wait queue) that Ark RTOS
+does not have; faking them would produce silently wrong answers. See the Chinese
+page for the reasoning per row.
+
+Dynamic linking no longer belongs in this list: with `ARKRTOS_USE_DYNLOAD` on,
+the kernel loads a `PT_INTERP` interpreter and ships a minimal in-tree
+`ld-ark.so` (2026-11-20, QEMU LA64). That is not glibc support - see
+[动态链接与PT_INTERP](动态链接与PT_INTERP.en.md).
 
 ## 4 Deliberate degradations
 
@@ -146,7 +151,9 @@ broken logs must each be rejected).
 ## 8 Boundaries
 
 This is the minimal syscall set that lets a static program run, not a Linux
-compatibility layer: no ptrace, no ELF interpreter, no Linux `/proc`. The
+compatibility layer: no ptrace, no Linux `/proc`. The
 real-time behaviour is unchanged — every Linux-ABI path completes synchronously
 inside the SVC with no extra thread, no blocking point. Going further requires a
-process object (for dynamic linking and signal frames) before anything else.
+process object (for signal frames and a real libc surface) before anything
+else. Dynamic linking itself has its own switch (`ARKRTOS_USE_DYNLOAD`) and a
+minimal in-tree loader, but running glibc binaries is still out of reach.

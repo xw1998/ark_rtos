@@ -41,9 +41,10 @@
   G. 解析器自检：把合成坏日志喂给同一个判据（去掉 PASS、把退出码改成 3、
      插一行 FAIL、少一条 check），每种坏法都必须被判红。
 
-不覆盖：动态链接（PT_INTERP）、fork/execve、信号、fd 继承与管道、socket、
-futex、真 mmap 语义（mmap/brk 只在 ELF 窗口内单调分配）。这些是明确不支持，
-文档 `docs/Linux可执行文件兼容-系统调用ABI.md` 里逐条写着；本门禁不为它们背书。
+不覆盖：fork/execve、信号、fd 继承与管道、socket、
+futex、真 mmap 语义（mmap/brk 只在 ELF 窗口内单调分配）。动态链接（PT_INTERP）
+另有专门门禁 tools/dynlink_gate.py。以上各项是明确不支持，文档
+`docs/Linux可执行文件兼容-系统调用ABI.md` 里逐条写着；本门禁不为它们背书。
 
 用法
 ----

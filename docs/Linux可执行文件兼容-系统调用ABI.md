@@ -83,7 +83,7 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 
 | 项 | 现状 | 为什么 |
 |---|---|---|
-| 动态链接（`PT_INTERP` / `.so`） | 装载器直接拒 | 需要 ld.so、符号解析、重定位时机、GOT/PLT 全链路；不是「补几个系统调用」 |
+| 动态链接（`PT_INTERP` / `.so`） | **默认档仍拒**；打开 `ARKRTOS_USE_DYNLOAD` 后已支持（2026-11-20，QEMU LA64 实跑） | 内核按 Linux 约定装载解释器、铺 auxv、入口跳解释器，配一套自研 `ld-ark.so`；见 [动态链接与PT_INTERP](动态链接与PT_INTERP.md)。范围是「自研装载器 + 一级依赖 + 立即重定位」：现成发行版二进制仍跑不了（`ld.so` 是 glibc 的，仓里没有） |
 | `fork` / `clone` / `execve` | 无 | 没有进程、没有父子、没有地址空间复制；`exec` 由内核装载路径提供（shell 的 `exec` 命令），不是 `execve` 语义 |
 | 信号（`rt_sigaction`/`kill`/`sigreturn`） | 无 | 需要用户栈上的信号帧与返回路径，Ark 的陷阱帧模型是另一套 |
 | `fd` 继承、管道、重定向 | 无 | fd 表是内核全局（§4），`exec` 时清零；没有父子可继承 |
@@ -171,9 +171,14 @@ rodata 失败，因为栈窗口（32 KB）被单独设过，而代码窗口没�
 ## 8 边界
 
 - 这一层的定位是「**能跑通静态程序的最小系统调用集合**」，不是 Linux 兼容层
-  的完整实现。没有 ptrace、没有 `/proc`（Ark 自己的 procfs 另算）、没有 ELF
-  interpreter。
+  的完整实现。没有 ptrace、没有 `/proc`（Ark 自己的 procfs 另算）。ELF interpreter
+  另有一档：`ARKRTOS_USE_DYNLOAD` 打开后走自研 `ld-ark.so`（见
+  [动态链接与PT_INTERP](动态链接与PT_INTERP.md)），但那是「能跑自研夹具」，不是
+  「能跑 glibc 产物」。
 - Real-time 语义不因兼容层改变：Linux ABI 的路径全部在 SVC 里同步完成，
   不额外开线程、不加锁、不引入阻塞点（`read`/`write` 都是到 ramfs 的同步搬运）。
-- 下一步（若要用真正的 Linux 工具链产物）：先解决动态链接与用户栈上的信号帧，
-  两者都要求先有「进程」这个对象；在那之前，静态程序 + 这 15 个号就是诚实上限。
+- 下一步（若要用真正的 Linux 工具链产物）：动态链接的内核侧与自研装载器已落地
+  （2026-11-20，见 [动态链接与PT_INTERP](动态链接与PT_INTERP.md)），但**离 glibc
+  还差整条 libc 兼容面**——futex、rseq、TLS 初始化、文件映射、`mprotect` 真落实。
+  剩下的大头是用户栈上的信号帧与「进程」这个对象；在那之前，静态程序 + 这 15 个
+  号就是诚实上限。

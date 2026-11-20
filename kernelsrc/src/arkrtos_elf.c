@@ -13,8 +13,10 @@
 *          这样任何按 Linux crt 写的静态程序都不用为 Ark 改一行。
 *
 *          三条边界写死在这里，不做「尽力而为」：
-*            1. 只收 ET_EXEC 静态 ELF64（PT_INTERP 一律拒绝：本仓没有动态链接器，
-*               半跑起来的动态程序会在第一条 PLT 指令上给一个看不懂的 refill）；
+*            1. 静态档只收 ET_EXEC（无 PT_INTERP）；动态档（ARKRTOS_USE_DYNLOAD）
+*               收 ET_EXEC / ET_DYN + PT_INTERP，按 Linux 的约定先装解释器、
+*               把 AT_PHDR/AT_BASE/AT_ENTRY 等 auxv 铺在用户栈上、入口跳解释器。
+*               没有解释器文件时明确拒绝（ERR_INTERP），不半跑；
 *            2. 段必须整段落在 [window_base, stack_bottom)：越过栈底就是覆盖
 *               自己的栈，那不是一个可以「再想想」的情况；
 *            3. p_filesz > p_memsz 直接拒绝——按 memsz 清零会把文件外的字节
@@ -77,6 +79,55 @@
 #define ELF_MACHINE_RISCV           (243u)
 #define ELF_PT_LOAD                 (1u)
 #define ELF_PT_INTERP               (3u)
+#define ELF_TYPE_DYN                (3u)
+
+/* auxv 类型（Linux UAPI）。动态链接器靠这几个数找到主程序的段表与入口。 */
+#define ELF_AT_NULL                 (0u)
+#define ELF_AT_PHDR                 (3u)
+#define ELF_AT_PHENT                (4u)
+#define ELF_AT_PHNUM                (5u)
+#define ELF_AT_PAGESZ               (6u)
+#define ELF_AT_BASE                 (7u)
+#define ELF_AT_FLAGS                (8u)
+#define ELF_AT_ENTRY                (9u)
+#define ELF_AT_UID                  (11u)
+#define ELF_AT_EUID                 (12u)
+#define ELF_AT_EXECFN               (31u)
+#define ARKRTOS_ELF_AUX_MAX         (10u)
+
+/* 动态装载（PT_INTERP）是独立开关：关着时下面这些代码整段不编译，
+ * 行为与以前逐位一致（PT_INTERP 仍按格式错误拒绝）。 */
+#if (ARKRTOS_USE_DYNLOAD == 1)
+#ifndef ARKRTOS_ELF_INTERP_BASE
+#error "ARKRTOS_USE_DYNLOAD=1 需要板级给出 ARKRTOS_ELF_INTERP_BASE（解释器装载基址）"
+#endif
+#ifndef ARKRTOS_ELF_INTERP_SIZE
+#error "ARKRTOS_USE_DYNLOAD=1 需要板级给出 ARKRTOS_ELF_INTERP_SIZE（解释器可用区间）"
+#endif
+#endif
+
+/* 解释器路径缓冲：两档都用同一个上限。关档只用来判"有没有 PT_INTERP"，
+ * 打开时才是真正的路径。 */
+#define ARKRTOS_ELF_INTERP_PATH_MAX (64u)
+
+/* 一组 auxv 键值对。用 elf_word_t 存值：32 位 port 上就是 4 字节。 */
+typedef struct
+{
+    uint32 type;
+    uint32 value;
+} elf_aux_t;
+
+/* 一次镜像测量结果：装载会落在哪一段地址上（不含内容）。 */
+typedef struct
+{
+    uint32 lo;          /* 最低装入地址（含） */
+    uint32 hi;          /* 最高装入地址（不含） */
+    uint32 entry;       /* 加上 bias 之后的入口 */
+    uint32 phdr;        /* 程序头表在内存里的地址；0 = 表不在任何 PT_LOAD 里 */
+    uint32 segs;        /* PT_LOAD 段数 */
+    uint16 phnum;       /* 段表条目数 */
+    uint16 phentsize;   /* 每条大小 */
+} elf_image_t;
 
 /* ---- 字段宽度随 class 变，语义不变 ----
  *
@@ -456,8 +507,10 @@ static int32 elf_verify_signature(const char *path)
 */
 static int32 elf_check_header(const uint8 *h, elf_word_t *p_entry,
                               elf_word_t *p_phoff, uint16 *p_phnum,
-                              uint16 *p_phentsize)
+                              uint16 *p_phentsize, uint16 *p_type)
 {
+    uint16 type;
+
     if((h[0] != 0x7Fu) || (h[1] != 'E') || (h[2] != 'L') || (h[3] != 'F'))
     {
         return ARKRTOS_ELF_ERR_FORMAT;
@@ -472,10 +525,15 @@ static int32 elf_check_header(const uint8 *h, elf_word_t *p_entry,
     {
         return ARKRTOS_ELF_ERR_ARCH;
     }
-    if(elf_rd16(h + 16) != (uint16)ELF_TYPE_EXEC)
+
+    /* ET_EXEC 与 ET_DYN 都收：前者是固定地址可执行文件，后者是被装载到
+     * 选定基址的 PIE / 共享库。PT_INTERP 的存在与否由调用方单独判，
+     * 这里不做"看到 dyn 就拒绝"的事。 */
+    type = elf_rd16(h + 16);
+    if((type != (uint16)ELF_TYPE_EXEC) && (type != (uint16)ELF_TYPE_DYN))
     {
-        /* ET_DYN 需要按加载基址重定位所有绝对地址，本仓没有重定位器；
-         * 混进来只能得到一堆指向 0 的调用。 */
+        /* ET_REL（目标文件）与 ET_CORE 没有可执行入口，混进来只能得到
+         * 一堆指向 0 的调用。 */
         return ARKRTOS_ELF_ERR_FORMAT;
     }
 
@@ -483,6 +541,7 @@ static int32 elf_check_header(const uint8 *h, elf_word_t *p_entry,
     *p_phoff     = elf_rdword(h + ELF_EH_PHOFF);
     *p_phentsize = elf_rd16(h + ELF_EH_PHENTSIZE);
     *p_phnum     = elf_rd16(h + ELF_EH_PHNUM);
+    *p_type      = type;
 
     if((*p_phentsize != (uint16)ELF_PHDR_SIZE) ||
        (*p_phnum == 0u) || (*p_phnum > (uint16)ARKRTOS_ELF_MAX_PHNUM))
@@ -500,14 +559,281 @@ static int32 elf_check_header(const uint8 *h, elf_word_t *p_entry,
 *          字符串从窗口顶端往下写，数组紧贴在 argv_start 之上。
 * @return 0 = 成功（*p_sp 有效）；否则为负错误码
 */
+
+/* ------------------------------------------------------------ 镜像 */
+
+/**
+* @brief 量一遍段表：装载会落在哪一段地址上
+* @param bias  ET_DYN 的装载基址；ET_EXEC 传 0（vaddr 本身已经是绝对地址）
+* @details 这里只读不写，所以任何不合法都能在"写坏字节之前"拒绝。
+*          同时算出程序头表在内存里的地址（AT_PHDR 要它）：只有 phdr 真的
+*          被某个 PT_LOAD 的 file range 盖住，这个地址才存在；否则留 0，
+*          由调用方决定是拒绝还是不给 AT_PHDR。
+*/
+static int32 elf_measure_image(const char *path, elf_word_t phoff,
+                               uint16 phnum, uint16 phentsize,
+                               elf_word_t entry, uint32 bias,
+                               elf_image_t *p_img)
+{
+    uint8 phdr[ELF_PHDR_SIZE];
+    uint32 lo = 0xFFFFFFFFu;
+    uint32 hi = 0u;
+    uint32 segs = 0u;
+    uint32 phdr_va = 0u;
+    uint32 ph_begin = (uint32)phoff;
+    uint32 ph_end;
+    uint32 i;
+    int32 rc;
+
+    if(phnum == 0u)
+    {
+        return ARKRTOS_ELF_ERR_FORMAT;
+    }
+    ph_end = ph_begin + ((uint32)phnum * (uint32)phentsize);
+
+    for(i = 0u; i < (uint32)phnum; i++)
+    {
+        elf_word_t p_type;
+        elf_word_t p_offset;
+        elf_word_t p_vaddr;
+        elf_word_t p_filesz;
+        elf_word_t p_memsz;
+        uint32 a0;
+        uint32 a1;
+
+        rc = elf_read_exact(path, phdr, ELF_PHDR_SIZE,
+                            (uint32)phoff + (i * (uint32)phentsize));
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return rc;
+        }
+        p_type = (elf_word_t)elf_rd32(phdr + 0);
+        if(p_type != (unsigned long)ELF_PT_LOAD)
+        {
+            continue;
+        }
+        p_offset = elf_rdword(phdr + ELF_PH_OFFSET);
+        p_vaddr  = elf_rdword(phdr + ELF_PH_VADDR);
+        p_filesz = elf_rdword(phdr + ELF_PH_FILESZ);
+        p_memsz  = elf_rdword(phdr + ELF_PH_MEMSZ);
+
+        if(p_filesz > p_memsz)
+        {
+            return ARKRTOS_ELF_ERR_LAYOUT;
+        }
+        /* 用减法写判据，不用 a0 + memsz：32 位 port 上那个加法会在
+         * 0xFFFFFFxx 处回绕。 */
+        if((p_vaddr > (elf_word_t)0xFFFFFFFFu) ||
+           ((uint32)p_vaddr > (0xFFFFFFFFu - bias)))
+        {
+            return ARKRTOS_ELF_ERR_LAYOUT;
+        }
+        a0 = bias + (uint32)p_vaddr;
+        if((uint32)p_memsz > (0xFFFFFFFFu - a0))
+        {
+            return ARKRTOS_ELF_ERR_LAYOUT;
+        }
+        a1 = a0 + (uint32)p_memsz;
+
+        if(a0 < lo)
+        {
+            lo = a0;
+        }
+        if(a1 > hi)
+        {
+            hi = a1;
+        }
+
+        /* phdr 必须在某一段的 file range 里，AT_PHDR 才有对应内存。 */
+        if((ph_begin >= (uint32)p_offset) &&
+           (ph_end <= ((uint32)p_offset + (uint32)p_filesz)))
+        {
+            phdr_va = a0 + (ph_begin - (uint32)p_offset);
+        }
+        segs++;
+    }
+
+    if((segs == 0u) || (hi <= lo))
+    {
+        return ARKRTOS_ELF_ERR_FORMAT;
+    }
+
+    p_img->lo        = lo;
+    p_img->hi        = hi;
+    p_img->entry     = bias + (uint32)entry;
+    p_img->phdr      = phdr_va;
+    p_img->segs      = segs;
+    p_img->phnum     = phnum;
+    p_img->phentsize = phentsize;
+    return ARKRTOS_ELF_OK;
+}
+
+/** @brief 镜像必须整段落在 [lo_limit, hi_limit) 里（含端点判据用减法写） */
+static int32 elf_check_range(const elf_image_t *p_img, uint32 lo_limit,
+                             uint32 hi_limit)
+{
+    if((p_img->lo < lo_limit) || (p_img->hi > hi_limit))
+    {
+        return ARKRTOS_ELF_ERR_LAYOUT;
+    }
+    return ARKRTOS_ELF_OK;
+}
+
+/* 第二遍：真写。先 filesz 拷数据，再 memsz-filesz 清零（BSS）。
+ * 顺序不能反：清零写在拷贝之前会被后面的数据覆盖，写在之后才是对的。 */
+static int32 elf_write_image(const char *path, uint32 space, elf_word_t phoff,
+                             uint16 phnum, uint16 phentsize, uint32 bias,
+                             uint32 *p_bytes)
+{
+    uint8 phdr[ELF_PHDR_SIZE];
+    uint32 bytes = 0u;
+    uint32 i;
+    int32 rc;
+
+    for(i = 0u; i < (uint32)phnum; i++)
+    {
+        elf_word_t p_type;
+        elf_word_t p_offset;
+        elf_word_t p_vaddr;
+        elf_word_t p_filesz;
+        elf_word_t p_memsz;
+        uint32 va;
+        uint8 *dst;
+
+        rc = elf_read_exact(path, phdr, ELF_PHDR_SIZE,
+                            (uint32)phoff + (i * (uint32)phentsize));
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return rc;
+        }
+
+        p_type = (elf_word_t)elf_rd32(phdr + 0);
+        if(p_type != (unsigned long)ELF_PT_LOAD)
+        {
+            continue;
+        }
+        p_offset = elf_rdword(phdr + ELF_PH_OFFSET);
+        p_vaddr  = elf_rdword(phdr + ELF_PH_VADDR);
+        p_filesz = elf_rdword(phdr + ELF_PH_FILESZ);
+        p_memsz  = elf_rdword(phdr + ELF_PH_MEMSZ);
+        va       = bias + (uint32)p_vaddr;
+        dst      = (uint8 *)(unsigned long)va;
+#if (ARKRTOS_USE_PAGING == 1)
+        (void)dst;   /* 分页档不直接用窗口指针：统一走 elf_copy_to_window() */
+#endif
+
+        if(p_filesz > 0ul)
+        {
+#if (ARKRTOS_USE_PAGING == 1)
+            /* 这一段必须落在 space 的那块帧里：elf_copy_to_window() 每写
+             * 4 KB 之前重装一次空间，抢占把窗口换走也不会写错帧。 */
+            rc = elf_copy_to_window(space, path, va,
+                                    (uint32)p_filesz, (uint32)p_offset);
+#else
+            rc = elf_read_exact(path, dst, (uint32)p_filesz, (uint32)p_offset);
+#endif
+            if(rc != ARKRTOS_ELF_OK)
+            {
+                return rc;
+            }
+            bytes += (uint32)p_filesz;
+        }
+        if(p_memsz > p_filesz)
+        {
+#if (ARKRTOS_USE_PAGING == 1)
+            elf_zero_window(space, va + (uint32)p_filesz,
+                            (uint32)(p_memsz - p_filesz));
+#else
+            elf_memzero(dst + p_filesz, (uint32)(p_memsz - p_filesz));
+#endif
+        }
+    }
+
+    *p_bytes = bytes;
+    return ARKRTOS_ELF_OK;
+}
+
+/**
+* @brief 找 PT_INTERP，并把解释器路径拷出来
+* @return 1 = 有解释器（out 里是路径）；0 = 静态 ELF；负值 = 路径不合法
+* @details 路径按 Linux 约定是"文件里的字符串"，以 NUL 结尾。这里不信文件
+*          的 NUL：读到 p_filesz 个字节后强制补一个，超长直接拒绝——把
+*          截断的路径当成"另一个文件"去装是最难查的静默失败。
+*/
+static int32 elf_find_interp(const char *path, elf_word_t phoff, uint16 phnum,
+                             uint16 phentsize, char *out, uint32 cap)
+{
+    uint8 phdr[ELF_PHDR_SIZE];
+    uint32 i;
+
+    for(i = 0u; i < (uint32)phnum; i++)
+    {
+        elf_word_t p_type;
+        elf_word_t p_offset;
+        elf_word_t p_filesz;
+        int32 rc;
+
+        rc = elf_read_exact(path, phdr, ELF_PHDR_SIZE,
+                            (uint32)phoff + (i * (uint32)phentsize));
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return rc;
+        }
+        p_type = (elf_word_t)elf_rd32(phdr + 0);
+        if(p_type != (unsigned long)ELF_PT_INTERP)
+        {
+            continue;
+        }
+        p_offset = elf_rdword(phdr + ELF_PH_OFFSET);
+        p_filesz = elf_rdword(phdr + ELF_PH_FILESZ);
+        if((cap < 2u) || (p_filesz < 2ul) ||
+           (p_filesz > (elf_word_t)(cap - 1u)) ||
+           ((uint32)p_filesz > 0x00FFFFFFu))
+        {
+            return ARKRTOS_ELF_ERR_INTERP;
+        }
+        rc = elf_read_exact(path, (uint8 *)out, (uint32)p_filesz,
+                            (uint32)p_offset);
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return rc;
+        }
+        out[(uint32)p_filesz - 1u] = '\0';
+        return 1;
+    }
+    return 0;
+}
+
+static void elf_aux_add(elf_aux_t *aux, uint32 *p_n, uint32 type, uint32 value)
+{
+    if(*p_n < (uint32)ARKRTOS_ELF_AUX_MAX)
+    {
+        aux[*p_n].type  = type;
+        aux[*p_n].value = value;
+        (*p_n)++;
+    }
+}
+
+/**
+* @brief 把 argv 与 auxv 铺成 Linux 的形状，返回初始 sp
+* @details 布局（地址从高到低）：
+*            字符串区（argv[i] 的字节）
+*            AT_NULL 的 0/0、auxv 键值对、NULL(envp)、NULL(argv 结束)、
+*            argv[argc-1..0]、argc  <- sp
+*          字符串从窗口顶端往下写，数组紧贴在 argv_start 之上。
+* @return 0 = 成功（*p_sp / *p_execfn 有效）；否则为负错误码
+*/
 static int32 elf_build_stack(uint32 win_top, uint32 argv_start,
-                             int32 argc, char *argv[], uint32 *p_sp)
+                             int32 argc, char *argv[],
+                             const elf_aux_t *aux, uint32 auxn,
+                             uint32 *p_sp, uint32 *p_execfn)
 {
     uint32 str_low = win_top;
     uint32 addrs[ARKRTOS_ELF_MAX_ARGS];
     uint32 array_bytes;
     uint32 i;
     uint8 *p_array;
+    uint32 slot = 0u;
 
     /* 先放字符串，并把每个字符串的最终地址记下来。
      * 不能事后用「win_top 减长度累加」重算：8 字节对齐会额外下移，
@@ -527,8 +853,10 @@ static int32 elf_build_stack(uint32 win_top, uint32 argv_start,
         addrs[i] = str_low;
     }
 
-    /* 数组：argc + argv[argc] + envp[0] + 一个冗余槽，按本 class 的字宽。 */
-    array_bytes = (uint32)ELF_WORD_SIZE * ((uint32)argc + 3u);
+    /* 数组：argc + argv[argc] + envp[0] + auxv(2*auxn) + AT_NULL(2)。
+     * 按本 class 的字宽算。 */
+    array_bytes = (uint32)ELF_WORD_SIZE *
+                  ((uint32)argc + 3u + (2u * auxn) + 2u);
     if((argv_start + array_bytes) > str_low)
     {
         return ARKRTOS_ELF_ERR_LAYOUT;
@@ -541,11 +869,24 @@ static int32 elf_build_stack(uint32 win_top, uint32 argv_start,
         elf_wrword(p_array + ELF_WORD_SIZE + ((uint32)ELF_WORD_SIZE * i),
                    (elf_word_t)addrs[i]);
     }
-    elf_wrword(p_array + ELF_WORD_SIZE + ((uint32)ELF_WORD_SIZE * (uint32)argc), 0);
-    elf_wrword(p_array + ELF_WORD_SIZE +
-               ((uint32)ELF_WORD_SIZE * ((uint32)argc + 1u)), 0);
+    slot = (uint32)argc + 1u;
+    elf_wrword(p_array + (ELF_WORD_SIZE * slot), 0);            /* argv 结束 */
+    slot++;
+    elf_wrword(p_array + (ELF_WORD_SIZE * slot), 0);            /* envp 结束 */
+    slot++;
+
+    for(i = 0u; i < auxn; i++)
+    {
+        elf_wrword(p_array + (ELF_WORD_SIZE * slot), (elf_word_t)aux[i].type);
+        elf_wrword(p_array + (ELF_WORD_SIZE * (slot + 1u)),
+                   (elf_word_t)aux[i].value);
+        slot += 2u;
+    }
+    elf_wrword(p_array + (ELF_WORD_SIZE * slot), 0);            /* AT_NULL */
+    elf_wrword(p_array + (ELF_WORD_SIZE * (slot + 1u)), 0);
 
     *p_sp = argv_start;
+    *p_execfn = (argc > 0) ? addrs[0] : 0u;
     return ARKRTOS_ELF_OK;
 }
 
@@ -556,140 +897,9 @@ static int32 elf_build_stack(uint32 win_top, uint32 argv_start,
 /* 第一遍：只校验。任何一段不合法都在**写坏字节之前**返回，
  * 否则一个坏镜像会留下半个程序，下一次装载读到的是混合内容。
  * 返回可见的 PT_LOAD 段数（0 段由调用方判成格式错误）。 */
-static int32 elf_check_segments(const char *path, uint32 phoff, uint16 phnum,
-                                uint16 phentsize, uint32 win_base,
-                                uint32 stack_bottom, uint32 *p_segs)
-{
-    uint8 phdr[ELF_PHDR_SIZE];
-    uint32 segs = 0u;
-    uint32 i;
-    int32 rc;
-
-    for(i = 0u; i < (uint32)phnum; i++)
-    {
-        elf_word_t p_type;
-        elf_word_t p_vaddr;
-        elf_word_t p_filesz;
-        elf_word_t p_memsz;
-
-        rc = elf_read_exact(path, phdr, ELF_PHDR_SIZE,
-                            (uint32)phoff + (i * (uint32)phentsize));
-        if(rc != ARKRTOS_ELF_OK)
-        {
-            return rc;
-        }
-
-        p_type   = (elf_word_t)elf_rd32(phdr + 0);
-        p_vaddr  = elf_rdword(phdr + ELF_PH_VADDR);
-        p_filesz = elf_rdword(phdr + ELF_PH_FILESZ);
-        p_memsz  = elf_rdword(phdr + ELF_PH_MEMSZ);
-
-        if(p_type == (unsigned long)ELF_PT_INTERP)
-        {
-            /* 有解释器 = 动态链接。没有 ld.so，跑起来只会跳到 PLT 桩。 */
-            return ARKRTOS_ELF_ERR_FORMAT;
-        }
-        if(p_type != (unsigned long)ELF_PT_LOAD)
-        {
-            continue;
-        }
-        if(p_filesz > p_memsz)
-        {
-            return ARKRTOS_ELF_ERR_LAYOUT;
-        }
-        /* 用减法写这个判据，不用 p_vaddr + p_memsz：32 位 port 上那个加法
-         * 会在 0xFFFFFFxx 处回绕，一段"跨过 4 GB 边界"的坏镜像就能通过。 */
-        if((p_vaddr < (elf_word_t)win_base) ||
-           (p_vaddr > (elf_word_t)stack_bottom) ||
-           (p_memsz > ((elf_word_t)stack_bottom - p_vaddr)))
-        {
-            return ARKRTOS_ELF_ERR_LAYOUT;
-        }
-        segs++;
-    }
-
-    if(segs == 0u)
-    {
-        /* 没有 PT_LOAD 的 ELF 是合法的（目标文件/调试信息），但没有东西可跑。 */
-        return ARKRTOS_ELF_ERR_FORMAT;
-    }
-
-    *p_segs = segs;
-    return ARKRTOS_ELF_OK;
-}
 
 /* 第二遍：真写。先 filesz 拷数据，再 memsz-filesz 清零（BSS）。
  * 顺序不能反：清零写在拷贝之前会被后面的数据覆盖，写在之后才是对的。 */
-static int32 elf_write_segments(const char *path, uint32 space, uint32 phoff,
-                                uint16 phnum, uint16 phentsize,
-                                uint32 *p_bytes)
-{
-    uint8 phdr[ELF_PHDR_SIZE];
-    uint32 bytes = 0u;
-    uint32 i;
-    int32 rc;
-
-    bytes = 0u;
-    for(i = 0u; i < (uint32)phnum; i++)
-    {
-        elf_word_t p_type;
-        elf_word_t p_offset;
-        elf_word_t p_vaddr;
-        elf_word_t p_filesz;
-        elf_word_t p_memsz;
-        uint8 *dst;
-
-        rc = elf_read_exact(path, phdr, ELF_PHDR_SIZE,
-                            (uint32)phoff + (i * (uint32)phentsize));
-        if(rc != ARKRTOS_ELF_OK)
-        {
-            return rc;
-        }
-
-        p_type   = elf_rd32(phdr + 0);
-        if(p_type != (unsigned long)ELF_PT_LOAD)
-        {
-            continue;
-        }
-        p_offset = elf_rdword(phdr + ELF_PH_OFFSET);
-        p_vaddr  = elf_rdword(phdr + ELF_PH_VADDR);
-        p_filesz = elf_rdword(phdr + ELF_PH_FILESZ);
-        p_memsz  = elf_rdword(phdr + ELF_PH_MEMSZ);
-        dst      = (uint8 *)(unsigned long)p_vaddr;
-#if (ARKRTOS_USE_PAGING == 1)
-        (void)dst;   /* 分页档不直接用窗口指针：统一走 elf_copy_to_window() */
-#endif
-
-        if(p_filesz > 0ul)
-        {
-#if (ARKRTOS_USE_PAGING == 1)
-            /* 这一段必须落在 space 的那块帧里：elf_copy_to_window() 每写
-             * 4 KB 之前重装一次空间，抢占把窗口换走也不会写错帧。 */
-            rc = elf_copy_to_window(space, path, (uint32)p_vaddr,
-                                    (uint32)p_filesz, (uint32)p_offset);
-#else
-            rc = elf_read_exact(path, dst, (uint32)p_filesz, (uint32)p_offset);
-#endif
-            if(rc != ARKRTOS_ELF_OK)
-            {
-                return rc;
-            }
-            bytes += (uint32)p_filesz;
-        }
-        if(p_memsz > p_filesz)
-        {
-#if (ARKRTOS_USE_PAGING == 1)
-            elf_zero_window(space, (uint32)p_vaddr + (uint32)p_filesz,
-                            (uint32)(p_memsz - p_filesz));
-#else
-            elf_memzero(dst + p_filesz, (uint32)(p_memsz - p_filesz));
-#endif
-        }
-    }
-
-    *p_bytes = bytes;
-    return ARKRTOS_ELF_OK;
-}
 
 /* 第三阶段：注册任务、降权、写回窗口、绑帧，整段做成原子段。
  * 只在这一处做，是因为这四步之间被 tick 切走就会露出半配置状态
@@ -844,37 +1054,12 @@ static int32 elf_check_entry(elf_word_t entry, uint32 win_base, uint32 stack_bot
 
 /* 段关：先只校验（一个字节都不写），通过了才真写。两遍读同一张段表，
  * 校验不过就绝不在窗口里留下半份镜像。 */
-static int32 elf_load_segments(const char *path, uint32 space, uint32 phoff,
-                               uint16 phnum, uint16 phentsize,
-                               uint32 win_base, uint32 stack_bottom,
-                               uint32 *p_segs, uint32 *p_bytes)
-{
-    uint32 segs = 0u;
-    uint32 bytes = 0u;
-    int32 rc;
-
-    rc = elf_check_segments(path, (uint32)phoff, phnum, phentsize,
-                            win_base, stack_bottom, &segs);
-    if(rc != ARKRTOS_ELF_OK)
-    {
-        return rc;
-    }
-
-    rc = elf_write_segments(path, space, (uint32)phoff, phnum, phentsize,
-                            &bytes);
-    if(rc != ARKRTOS_ELF_OK)
-    {
-        return rc;
-    }
-
-    *p_segs  = segs;
-    *p_bytes = bytes;
-    return ARKRTOS_ELF_OK;
-}
 
 /* 栈关：用户栈与 argv 也在窗口里，铺之前先把地址空间装对。 */
 static int32 elf_stack_build(uint32 space, uint32 win_top, uint32 argv_start,
-                             int32 argc, char *argv[], uint32 *p_sp)
+                             int32 argc, char *argv[],
+                             const elf_aux_t *aux, uint32 auxn,
+                             uint32 *p_sp, uint32 *p_execfn)
 {
     uint32 sp = 0u;
     int32 rc;
@@ -886,7 +1071,8 @@ static int32 elf_stack_build(uint32 space, uint32 win_top, uint32 argv_start,
 #else
     (void)space;
 #endif
-    rc = elf_build_stack(win_top, argv_start, argc, argv, &sp);
+    rc = elf_build_stack(win_top, argv_start, argc, argv, aux, auxn, &sp,
+                         p_execfn);
     if(rc != ARKRTOS_ELF_OK)
     {
         return rc;
@@ -903,6 +1089,18 @@ static int32 elf_stack_build(uint32 space, uint32 win_top, uint32 argv_start,
 * @details 空间选择、台账登记、以及"装载完把内核任务原来的视图装回去"
 *          都在 arkrtos_elf_exec_space() 里；这里只做"把这份文件装进这一块帧"。
 */
+/**
+* @brief 把一份 ELF 装进指定地址空间并起一个降权任务
+* @param space   目标地址空间（0 .. 空间数-1）；窗口 VA 在每个空间里相同
+* @param p_info  成功时填装载读数（不接收失败值）
+* @details 静态档与动态档的区别只在「要不要先装一个解释器、入口跳谁」：
+*          - 静态档：段按 e_vaddr 落位，入口就是 e_entry；
+*          - 动态档（PT_INTERP 存在，ARKRTOS_USE_DYNLOAD=1）：主程序照样落位，
+*            解释器装在板级给定的区间里，入口改成解释器的入口，并把
+*            AT_PHDR / AT_BASE / AT_ENTRY 等 auxv 铺在用户栈上——这正是
+*            Linux 传给 ld.so 的那一套。解释器自己负责加载共享库。
+*          没有解释器文件或解释器路径不合法时返回 ERR_INTERP，不半跑。
+*/
 static int32 elf_load(uint32 space, const char *path, int32 argc,
                       char *argv[], arkrtos_elf_info_t *p_info)
 {
@@ -911,17 +1109,30 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
     elf_word_t phoff = 0;
     uint16 phnum = 0u;
     uint16 phentsize = 0u;
+    uint16 etype = 0u;
     uint32 win_base = (uint32)ARKRTOS_ELF_WINDOW_BASE;
     uint32 win_top;
     uint32 argv_start;
     uint32 stack_bottom;
     uint32 stack_bytes;
+    uint32 sp = 0u;
+    uint32 execfn = 0u;
+    uint32 task_entry = 0u;
+#if (ARKRTOS_USE_DYNLOAD == 1)
+    uint32 bias = 0u;
+#endif
     uint32 bytes = 0u;
     uint32 segs = 0u;
-    uint32 sp = 0u;
+    elf_aux_t aux[ARKRTOS_ELF_AUX_MAX];
+    uint32 auxn = 0u;
+    elf_image_t img;
     int32 rc;
     int32 id;
     char *argv_auto[1];
+    char interp_path[ARKRTOS_ELF_INTERP_PATH_MAX];
+#if (ARKRTOS_USE_DYNLOAD == 1)
+    int32 has_interp = 0;
+#endif
 
     rc = elf_prepare_args(path, &argc, &argv, argv_auto);
     if(rc != ARKRTOS_ELF_OK)
@@ -940,26 +1151,203 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
     {
         return rc;
     }
-    rc = elf_check_header(hdr, &entry, &phoff, &phnum, &phentsize);
+    rc = elf_check_header(hdr, &entry, &phoff, &phnum, &phentsize, &etype);
     if(rc != ARKRTOS_ELF_OK)
     {
         return rc;
     }
 
-    rc = elf_check_entry(entry, win_base, stack_bottom);
-    if(rc != ARKRTOS_ELF_OK)
+#if (ARKRTOS_USE_DYNLOAD == 1)
+    /* 先判 PT_INTERP：动态档才有后面的"装解释器 + 铺 auxv"。 */
+    rc = elf_find_interp(path, phoff, phnum, phentsize, interp_path,
+                         (uint32)sizeof(interp_path));
+    if(rc < 0)
     {
         return rc;
     }
-
-    rc = elf_load_segments(path, space, (uint32)phoff, phnum, phentsize,
-                           win_base, stack_bottom, &segs, &bytes);
-    if(rc != ARKRTOS_ELF_OK)
+    has_interp = (rc == 1) ? 1 : 0;
+#else
+    /* 动态链接没编进内核：明确拒绝，不半跑。 */
+    rc = elf_find_interp(path, phoff, phnum, phentsize, interp_path,
+                         (uint32)sizeof(interp_path));
+    if(rc < 0)
     {
         return rc;
     }
+    if(rc == 1)
+    {
+        return ARKRTOS_ELF_ERR_FORMAT;
+    }
+#endif
 
-    rc = elf_stack_build(space, win_top, argv_start, argc, argv, &sp);
+#if (ARKRTOS_USE_DYNLOAD == 1)
+    if(has_interp != 0)
+    {
+        uint8 ihdr[ELF_EHDR_SIZE];
+        elf_word_t ientry = 0;
+        elf_word_t iphoff = 0;
+        uint16 iphnum = 0u;
+        uint16 iphentsize = 0u;
+        uint16 itype = 0u;
+        uint32 interp_lo = (uint32)ARKRTOS_ELF_INTERP_BASE;
+        uint32 interp_hi = interp_lo + (uint32)ARKRTOS_ELF_INTERP_SIZE;
+        uint32 ibias;
+        elf_image_t interp;
+
+        /* ET_DYN 的主程序按窗口基址装载；它的最低 vaddr 必须是 0，
+         * 否则"基址"与"vaddr"两个说法就对不上了（明确拒绝，不猜）。 */
+        if(etype == (uint16)ELF_TYPE_DYN)
+        {
+            bias = win_base;
+        }
+
+        /* 先量：ET_DYN 的 e_entry 是相对偏移，必须加过 bias 才能判入口。 */
+        rc = elf_measure_image(path, phoff, phnum, phentsize, entry, bias,
+                               &img);
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return rc;
+        }
+        if((etype == (uint16)ELF_TYPE_DYN) && (img.lo != win_base))
+        {
+            /* ET_DYN 但最低段不在 0：装载基址就不是 win_base 了。 */
+            return ARKRTOS_ELF_ERR_LAYOUT;
+        }
+        rc = elf_check_entry((elf_word_t)img.entry, win_base, stack_bottom);
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return rc;
+        }
+        /* 主程序不许越进解释器区：越过去就是把两个镜像叠在一起。 */
+        rc = elf_check_range(&img, win_base, interp_lo);
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return rc;
+        }
+        rc = elf_write_image(path, space, phoff, phnum, phentsize, bias,
+                             &bytes);
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return rc;
+        }
+        segs = img.segs;
+
+        /* 解释器：ET_DYN 装到板级基址，ET_EXEC 必须本来就链在那里
+         * （它的 vaddr 是绝对的，装到别处等于让它跳进空地址）。 */
+        rc = elf_read_exact(interp_path, ihdr, ELF_EHDR_SIZE, 0u);
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return ARKRTOS_ELF_ERR_INTERP;
+        }
+        rc = elf_check_header(ihdr, &ientry, &iphoff, &iphnum, &iphentsize,
+                              &itype);
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return ARKRTOS_ELF_ERR_INTERP;
+        }
+        ibias = (itype == (uint16)ELF_TYPE_DYN) ? interp_lo : 0u;
+
+        rc = elf_measure_image(interp_path, iphoff, iphnum, iphentsize,
+                               ientry, ibias, &interp);
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return ARKRTOS_ELF_ERR_INTERP;
+        }
+        if((itype == (uint16)ELF_TYPE_EXEC) && (interp.lo != interp_lo))
+        {
+            /* ET_EXEC 解释器没链在板级给的地址上：装载会落在别处，
+             * 入口却还是它自己的绝对地址 —— 这种"看起来装上了"的状态
+             * 比拒绝更难查。 */
+            return ARKRTOS_ELF_ERR_INTERP;
+        }
+        rc = elf_check_entry((elf_word_t)interp.entry, interp_lo, interp_hi);
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return ARKRTOS_ELF_ERR_INTERP;
+        }
+        rc = elf_check_range(&interp, interp_lo, interp_hi);
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return ARKRTOS_ELF_ERR_INTERP;
+        }
+        {
+            uint32 ibytes = 0u;
+            rc = elf_write_image(interp_path, space, iphoff, iphnum,
+                                 iphentsize, ibias, &ibytes);
+            if(rc != ARKRTOS_ELF_OK)
+            {
+                return ARKRTOS_ELF_ERR_INTERP;
+            }
+            bytes += ibytes;
+        }
+        if((img.hi > interp.lo) && (interp.hi > img.lo))
+        {
+            return ARKRTOS_ELF_ERR_LAYOUT;
+        }
+
+        /* auxv：Linux 传给 ld.so 的那一套。AT_PHDR 必须真的存在。 */
+        if(img.phdr == 0u)
+        {
+            return ARKRTOS_ELF_ERR_LAYOUT;
+        }
+        elf_aux_add(aux, &auxn, ELF_AT_PHDR, img.phdr);
+        elf_aux_add(aux, &auxn, ELF_AT_PHENT, (uint32)phentsize);
+        elf_aux_add(aux, &auxn, ELF_AT_PHNUM, (uint32)phnum);
+        elf_aux_add(aux, &auxn, ELF_AT_PAGESZ, 4096u);
+        elf_aux_add(aux, &auxn, ELF_AT_BASE, interp.lo);
+        elf_aux_add(aux, &auxn, ELF_AT_ENTRY, img.entry);
+        elf_aux_add(aux, &auxn, ELF_AT_UID, 0u);
+        elf_aux_add(aux, &auxn, ELF_AT_EUID, 0u);
+        elf_aux_add(aux, &auxn, ELF_AT_FLAGS, 0u);
+
+        task_entry = interp.entry;
+        p_info->dynamic     = 1u;
+        p_info->interp_base = interp.lo;
+        p_info->interp_entry = interp.entry;
+    }
+    else
+#endif /* ARKRTOS_USE_DYNLOAD */
+    {
+        /* 静态档：行为与 DYNLOAD 之前逐位一致。 */
+        rc = elf_check_entry(entry, win_base, stack_bottom);
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return rc;
+        }
+
+        rc = elf_measure_image(path, phoff, phnum, phentsize, entry, 0u, &img);
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return rc;
+        }
+        rc = elf_check_range(&img, win_base, stack_bottom);
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return rc;
+        }
+        rc = elf_write_image(path, space, phoff, phnum, phentsize, 0u, &bytes);
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return rc;
+        }
+        segs = img.segs;
+        task_entry = img.entry;
+
+        elf_aux_add(aux, &auxn, ELF_AT_PAGESZ, 4096u);
+        elf_aux_add(aux, &auxn, ELF_AT_ENTRY, img.entry);
+        if(img.phdr != 0u)
+        {
+            elf_aux_add(aux, &auxn, ELF_AT_PHDR, img.phdr);
+            elf_aux_add(aux, &auxn, ELF_AT_PHENT, (uint32)phentsize);
+            elf_aux_add(aux, &auxn, ELF_AT_PHNUM, (uint32)phnum);
+        }
+        p_info->dynamic     = 0u;
+        p_info->interp_base = 0u;
+        p_info->interp_entry = 0u;
+    }
+
+    rc = elf_stack_build(space, win_top, argv_start, argc, argv, aux, auxn,
+                         &sp, &execfn);
     if(rc != ARKRTOS_ELF_OK)
     {
         return rc;
@@ -975,13 +1363,13 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
      * 若在这中间被 tick 切走，任务会以半配置状态被切进：跑在 M 模式看到的是
      * 特权，降权后窗口未写回看到的就是 mcause=1 mtval=0x02000000 的取指 fault
      * （5 连跑 2 败的间歇签名）。因此把 注册 → 降权 → MPU 写回 整段做成原子段。 */
-    id = elf_start_task(entry, stack_bottom, stack_bytes, space);
+    id = elf_start_task(task_entry, stack_bottom, stack_bytes, space);
     if(id <= 0)
     {
         return id;
     }
 
-    p_info->entry      = (uint32)entry;
+    p_info->entry      = task_entry;
     p_info->bytes      = bytes;
     p_info->segs       = segs;
     p_info->argc       = (uint32)argc;
@@ -1038,6 +1426,9 @@ int32 arkrtos_elf_exec_space(const char *path, int32 argc, char *argv[],
     info.sp         = 0u;
     info.stack_size = 0u;
     info.task       = 0;
+    info.dynamic    = 0u;
+    info.interp_base = 0u;
+    info.interp_entry = 0u;
 #if (ARKRTOS_USE_EXIT_CODE == 1)
     info.exit_code  = 0;
     info.exit_code_set = 0u;
@@ -1170,6 +1561,7 @@ const char *arkrtos_elf_error_name(int32 rc)
     case ARKRTOS_ELF_ERR_NOMEM:     return "no task slot for the program";
     case ARKRTOS_ELF_ERR_BUSY:      return "exec window already in use";
     case ARKRTOS_ELF_ERR_SIGN:      return "missing or wrong signature tag (see tools/sign_payload.py)";
+    case ARKRTOS_ELF_ERR_INTERP:    return "dynamic interpreter missing or unusable (PT_INTERP)";
     default:                        return "unknown";
     }
 }

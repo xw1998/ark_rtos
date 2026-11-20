@@ -5,6 +5,11 @@
 *          ELF64、把 PT_LOAD 段读进 App 窗口、按 Linux 的约定铺好用户栈
 *          （sp 指向 argc），再以降到非特权的任务把它跑起来。
 *
+*          动态链接（PT_INTERP）由 ARKRTOS_USE_DYNLOAD 单独控制：打开后
+*          按 Linux 的约定先装解释器、把 AT_PHDR/AT_BASE/AT_ENTRY 等 auxv
+*          铺在用户栈上、入口跳解释器；关闭时 PT_INTERP 仍按格式错误拒绝。
+*          解释器本身（ld.so）是仓库外/示例里的用户态程序，不是内核的一部分。
+*
 *          **与 Linux 的差别必须写在标题上**：M1 用的是一个静态窗口，
 *          同一时刻只有一个程序在跑，且所有程序共用同一个地址空间。
 *          「每进程一份页表 / 同 VA 多实例 / 缺页」是 M2 的欠账，见
@@ -38,6 +43,7 @@
 #define ARKRTOS_ELF_ERR_NOMEM       (-6)    /* 任务表满 / 栈参数不合法 */
 #define ARKRTOS_ELF_ERR_BUSY        (-7)    /* M1：窗口是单实例，上一个还在跑 */
 #define ARKRTOS_ELF_ERR_SIGN        (-8)    /* 缺尾部签名 tag / tag 不匹配（EXEC_SIGN 档） */
+#define ARKRTOS_ELF_ERR_INTERP      (-9)    /* PT_INTERP 解释器缺失/不可用（DYNLOAD 档） */
 
 /** @brief 一次装载的可读结果（全部是实测值，不是推算值） */
 typedef struct {
@@ -48,6 +54,9 @@ typedef struct {
     uint32 sp;              /* 用户栈初始 sp（指向 argc） */
     uint32 stack_size;      /* 分给该任务的栈字节数（argv 区不在其中） */
     int32  task;            /* 任务号；<=0 表示这次调用失败了 */
+    uint32 interp_base;     /* 解释器装载基址；0 = 没有解释器（静态档） */
+    uint32 interp_entry;    /* 解释器入口（实际起跑的任务入口）；0 = 静态档 */
+    uint8  dynamic;         /* 1 = 这次装载走的是 PT_INTERP 动态路径 */
 #if (ARKRTOS_USE_EXIT_CODE == 1)
     int32  exit_code;       /* U-8：任务上报过的退出码（exit_code_set=0 时不作数） */
     uint8  exit_code_set;   /* 1 = 该实例用 EXIT_CODE 子命令结束过，exit_code 有效 */

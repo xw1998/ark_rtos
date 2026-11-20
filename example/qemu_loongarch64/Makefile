@@ -285,6 +285,124 @@ $(LXHELLO_H): $(LXHELLO_SIGNED) example/qemu_loongarch64/elf_blob.py
 	       --output $@ --name ark_example_linux_hello ;
 
 $(BUILD)/example/qemu_loongarch64/elf_demo.o: $(LXHELLO_H)
+# ---------------------------------------------------------------------------
+# Linux 动态链接示例（PT_INTERP + 自研 ld.so）：dynmain / dynmain_exec /
+# libanswer.so / ld-ark.so。
+#
+# 为什么多一步 dynfixture：本机 ld 2.31.1 不支持 -shared / -pie（gcc -shared
+# 会静默产出静态 ET_EXEC）。所以三个输入先按静态 ELF 链接（需要 .symtab 里的
+# 链接期地址），再由 tools/elf/dynfixture.py 按 manifest 重写成带 PT_INTERP /
+# PT_DYNAMIC / .dynsym / .rela 的动态镜像。重定位是 manifest 写明的，不是
+# 链接器算出来的 —— 这样每条重定位路径都能单独被门禁打断。
+#
+# 只有 EXTRA_CFLAGS 里显式开 ARKRTOS_USE_DYNLOAD=1 才构建这些产物：默认档
+# 一条命令都不多、镜像里一个字节都不多。
+ARK_DYN_ON := $(findstring ARKRTOS_USE_DYNLOAD=1,$(EXTRA_CFLAGS))
+
+ifneq ($(ARK_DYN_ON),)
+DYN_SRC     := example/qemu_loongarch64/elf
+DYN_MAN     := $(DYN_SRC)/dyn
+DYNFIXTURE  := tools/elf/dynfixture.py
+
+DYN_LIB_LINK   := $(BUILD)/libanswer.link.elf
+DYN_MAIN_LINK  := $(BUILD)/dynmain.link.elf
+DYN_EXEC_LINK  := $(BUILD)/dynmain_exec.link.elf
+DYN_LDSO_LINK  := $(BUILD)/ld-ark.link.elf
+
+DYN_LIB_SO   := $(BUILD)/libanswer.so
+DYN_MAIN_BIN := $(BUILD)/dynmain
+DYN_EXEC_BIN := $(BUILD)/dynmain_exec
+DYN_BAD_BIN  := $(BUILD)/dynmain_bad
+DYN_MAIN_SIGN := $(BUILD)/dynmain.signed
+DYN_EXEC_SIGN := $(BUILD)/dynmain_exec.signed
+DYN_BAD_SIGN := $(BUILD)/dynmain_bad.signed
+
+DYN_LDSO_H := $(BUILD)/ld_ark_blob.h
+DYN_LIB_H  := $(BUILD)/libanswer_blob.h
+DYN_MAIN_H := $(BUILD)/dynmain_blob.h
+DYN_EXEC_H := $(BUILD)/dynmain_exec_blob.h
+DYN_BAD_H  := $(BUILD)/dynmain_bad_blob.h
+
+# 三个 go 文件的链接基址各有含义：
+#   库/主程序 ET_DYN  → 0x1000（vaddr 0 被头部占住，代码从 0x1000 起；
+#                       运行时整体平移到窗口/ mmap 基址，只能有 PC 相对寻址）
+#   主程序 ET_EXEC    → 0x02001000（.text 从 0x02001000 起，首个 LOAD
+#                        仍是 0x02000000 —— 头部正好被它覆盖）
+#   ld.so  ET_EXEC    → 0x02100000 == 板级 ARKRTOS_ELF_INTERP_BASE
+$(DYN_LIB_LINK): $(DYN_SRC)/libanswer.c
+	@mkdir -p $(BUILD)
+	$(CC) $(ARCH_FLAGS) -O1 -nostdlib -nostartfiles -ffreestanding -fno-builtin \
+	      -Wl,-Ttext=0x1000 -Wl,-e,answer_add -o $@ $< ;
+
+$(DYN_MAIN_LINK): $(DYN_SRC)/dynmain.c
+	@mkdir -p $(BUILD)
+	$(CC) $(ARCH_FLAGS) -O1 -nostdlib -nostartfiles -ffreestanding -fno-builtin \
+	      -Wl,-Ttext=0x1000 -Wl,-e,_start -o $@ $< ;
+
+$(DYN_EXEC_LINK): $(DYN_SRC)/dynmain.c
+	@mkdir -p $(BUILD)
+	$(CC) $(ARCH_FLAGS) -O1 -nostdlib -nostartfiles -ffreestanding -fno-builtin \
+	      -Wl,-Ttext=0x02001000 -Wl,-e,_start -o $@ $< ;
+
+$(DYN_LDSO_LINK): $(DYN_SRC)/ldso.c
+	@mkdir -p $(BUILD)
+	$(CC) $(ARCH_FLAGS) -O2 -nostdlib -nostartfiles -ffreestanding -fno-builtin \
+	      -Wl,-Ttext=0x02100000 -Wl,-e,_start -o $@ $< ;
+
+# 夹具生成：输入要有 .symtab（所以上面都没有 --strip-all）。
+$(DYN_LIB_SO): $(DYN_LIB_LINK) $(DYN_MAN)/libanswer.json $(DYNFIXTURE)
+	python $(DYNFIXTURE) --input $(DYN_LIB_LINK) \
+	       --manifest $(DYN_MAN)/libanswer.json --output $@ ;
+
+$(DYN_MAIN_BIN): $(DYN_MAIN_LINK) $(DYN_MAN)/dynmain.json $(DYNFIXTURE)
+	python $(DYNFIXTURE) --input $(DYN_MAIN_LINK) \
+	       --manifest $(DYN_MAN)/dynmain.json --output $@ ;
+
+$(DYN_EXEC_BIN): $(DYN_EXEC_LINK) $(DYN_MAN)/dynmain_exec.json $(DYNFIXTURE)
+	python $(DYNFIXTURE) --input $(DYN_EXEC_LINK) \
+	       --manifest $(DYN_MAN)/dynmain_exec.json --output $@ ;
+
+# 反假绿用的坏夹具：同一份主程序，只把 JUMP_SLOT 的目标换成一个谁都没定义的
+# 符号。ld.so 必须在重定位阶段就喊出来（[ldso] FAIL: unresolved PLT symbol）
+# 并以 127 退出——"装载器看着成功、其实把槽写成了 0" 正是要防的那种假绿。
+$(DYN_BAD_BIN): $(DYN_MAIN_LINK) $(DYN_MAN)/dynmain_bad.json $(DYNFIXTURE)
+	python $(DYNFIXTURE) --input $(DYN_MAIN_LINK) \
+	       --manifest $(DYN_MAN)/dynmain_bad.json --output $@ ;
+
+# 签名门开着时 exec 只收带尾 tag 的文件；和 hello 一样"先签名再转 blob"。
+$(DYN_MAIN_SIGN): $(DYN_MAIN_BIN) tools/sign_payload.py
+	python tools/sign_payload.py sign $(DYN_MAIN_BIN) --out $@ ;
+
+$(DYN_EXEC_SIGN): $(DYN_EXEC_BIN) tools/sign_payload.py
+	python tools/sign_payload.py sign $(DYN_EXEC_BIN) --out $@ ;
+
+$(DYN_BAD_SIGN): $(DYN_BAD_BIN) tools/sign_payload.py
+	python tools/sign_payload.py sign $(DYN_BAD_BIN) --out $@ ;
+
+$(DYN_LDSO_H): $(DYN_LDSO_LINK) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(DYN_LDSO_LINK) \
+	       --output $@ --name ark_example_ld_ark ;
+
+$(DYN_LIB_H): $(DYN_LIB_SO) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(DYN_LIB_SO) \
+	       --output $@ --name ark_example_dynlib ;
+
+$(DYN_MAIN_H): $(DYN_MAIN_SIGN) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(DYN_MAIN_SIGN) \
+	       --output $@ --name ark_example_dynmain ;
+
+$(DYN_EXEC_H): $(DYN_EXEC_SIGN) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(DYN_EXEC_SIGN) \
+	       --output $@ --name ark_example_dynmain_exec ;
+
+$(DYN_BAD_H): $(DYN_BAD_SIGN) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(DYN_BAD_SIGN) \
+	       --output $@ --name ark_example_dynmain_bad ;
+
+$(BUILD)/example/qemu_loongarch64/elf_demo.o: $(DYN_LDSO_H) $(DYN_LIB_H) \
+                                             $(DYN_MAIN_H) $(DYN_EXEC_H) $(DYN_BAD_H)
+endif
+
 
 # VxWorks 式示例模块（modhello.o）：这里**只编译不链接**——它就该是一个
 # ET_REL 目标文件，地址留给板上装载器去填。所以规则里没有 -Ttext，也没有

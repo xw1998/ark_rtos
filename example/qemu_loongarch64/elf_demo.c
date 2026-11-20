@@ -28,6 +28,13 @@
 #if (ARKRTOS_USE_EXEC_SIGN == 1)
 #include "hello_bad_blob.h"
 #endif
+#if (ARKRTOS_USE_DYNLOAD == 1)
+#include "ld_ark_blob.h"
+#include "libanswer_blob.h"
+#include "dynmain_blob.h"
+#include "dynmain_exec_blob.h"
+#include "dynmain_bad_blob.h"
+#endif
 
 #if (ARKRTOS_USE_ELF == 1)
 
@@ -38,6 +45,17 @@
 #if (ARKRTOS_USE_EXEC_SIGN == 1)
 /* 反例文件：与 hello 同一份内容，只是末尾 tag 的最后一个字节被翻过。 */
 #define DEMO_BAD_PATH       "/mnt/ram/hello_tampered"
+#endif
+#if (ARKRTOS_USE_DYNLOAD == 1)
+/* 动态链接这一组的四个文件：ld.so 与库是 ld.so 自己去 /mnt/ram/ 读的，
+ * 主程序才是内核 exec 的那个（它的 PT_INTERP 指向 /mnt/ram/ld-ark.so）。 */
+#define DYN_LDSO_PATH       "/mnt/ram/ld-ark.so"
+#define DYN_LIB_PATH        "/mnt/ram/libanswer.so"
+#define DYN_MAIN_PATH       "/mnt/ram/dynmain"
+#define DYN_EXEC_PATH       "/mnt/ram/dynmain_exec"
+/* 反假绿夹具：它的 JUMP_SLOT 指向库里根本不存在的 no_such_symbol，
+ * 要求 ld.so 明确失败并以 127 退出，不允许跑到 PASS。 */
+#define DYN_BAD_PATH        "/mnt/ram/dynmain_bad"
 #endif
 #define DEMO_STACK_WORDS    1024u
 #define DEMO_WAIT_MS        3000u
@@ -67,6 +85,104 @@ static void demo_unlock(void)
 {
     (void)arkrtos_sched_unlock_internal();
 }
+
+#if (ARKRTOS_USE_DYNLOAD == 1)
+/* 写一个动态链接夹具文件。与 hello 那条路同一个 VFS 写口，同样退让重试，
+ * 失败就明确报"没等到"，不静默跳过。 */
+static int32 dyn_write(const char *path, const unsigned char *blob, uint32 len)
+{
+    int32 rc = -1;
+    uint32 tries;
+
+    for (tries = 0u; tries < 100u; tries++)
+    {
+        rc = arkrtos_vfs_write_file(path, blob, len);
+        if (rc >= 0)
+        {
+            break;
+        }
+        arkrtos_task_wait_internal(100u);
+    }
+
+    demo_lock();
+    demo_puts("[dyn] write ");
+    demo_puts(path);
+    demo_puts(" rc=");
+    demo_putu((uint32)rc);
+    demo_puts(" size=");
+    demo_putu(len);
+    demo_puts("\n");
+    demo_unlock();
+
+    return (rc >= 0) ? 0 : -1;
+}
+
+/* exec 一个动态链接程序，等它跑完，再把内核侧的读数与退出码打出来。
+ * 期望退出码 105 是 dynmain.c 里"三种重定位全部成立"的约定值。 */
+static void dyn_run(const char *path, const char *name)
+{
+    arkrtos_elf_info_t info;
+    char *argv[2];
+    uint32 waited = 0u;
+    int32  rc;
+
+    argv[0] = (char *)name;
+    argv[1] = (char *)0;
+
+    rc = arkrtos_elf_exec(path, 1, argv);
+
+    demo_lock();
+    demo_puts("[dyn] exec ");
+    demo_puts(name);
+    demo_puts(" rc=");
+    demo_putu((uint32)rc);
+    demo_puts("\n");
+    demo_unlock();
+    if (rc != ARKRTOS_ELF_OK)
+    {
+        return;
+    }
+
+    if (arkrtos_elf_info(&info) == ARKRTOS_ELF_OK)
+    {
+        demo_lock();
+        demo_puts("[dyn] info dynamic=");
+        demo_putu(info.dynamic);
+        demo_puts(" interp_base=");
+        demo_putu(info.interp_base);
+        demo_puts(" interp_entry=");
+        demo_putu(info.interp_entry);
+        demo_puts("\n");
+        demo_unlock();
+    }
+
+    while ((arkrtos_elf_running() != 0) && (waited < DEMO_WAIT_MS))
+    {
+        arkrtos_task_wait_internal(DEMO_POLL_MS);
+        waited += DEMO_POLL_MS;
+    }
+
+    demo_lock();
+    demo_puts("[dyn] finished after ");
+    demo_putu(waited);
+    demo_puts(" ms, exit code ");
+#if (ARKRTOS_USE_EXIT_CODE == 1)
+    if ((arkrtos_elf_info(&info) == ARKRTOS_ELF_OK) &&
+        (info.exit_code_set != 0u))
+    {
+        demo_putu((uint32)info.exit_code);
+    }
+    else
+    {
+        demo_puts("(not reported)");
+    }
+#else
+    demo_puts("(exit code channel off)");
+#endif
+    demo_puts("\n");
+    demo_unlock();
+}
+#endif /* ARKRTOS_USE_DYNLOAD */
 
 static void task_elf_demo(void)
 {
@@ -244,6 +360,45 @@ static void task_elf_demo(void)
                 demo_unlock();
             }
         }
+    }
+#endif
+
+#if (ARKRTOS_USE_DYNLOAD == 1)
+    /* Linux 动态链接（PT_INTERP + ld.so）的现场证据：同一台板、同一条装载
+     * 路径，exec 一个 PT_INTERP 指向 /mnt/ram/ld-ark.so 的程序。内核应该
+     * 先把解释器装到 0x02100000、把入口换成 ld.so，ld.so 再自己 mmap 装库、
+     * 做三种重定位，最后跳回主程序。四行读数缺一不可：
+     *   write 四个文件成功 / info 里 dynamic=1 且 interp_base=0x02100000 /
+     *   ld.so 自己打的 [ldso] 行 / 程序退出码 105。
+     * 两个变体各跑一遍：dynmain 是 ET_DYN（装载基址 0x02000000），
+     * dynmain_exec 是 ET_EXEC（vaddr 就是绝对地址，走另一条 bias 分支）。 */
+    if ((dyn_write(DYN_LDSO_PATH, ark_example_ld_ark,
+                   (uint32)ARK_EXAMPLE_LD_ARK_LEN) == 0) &&
+        (dyn_write(DYN_LIB_PATH, ark_example_dynlib,
+                   (uint32)ARK_EXAMPLE_DYNLIB_LEN) == 0) &&
+        (dyn_write(DYN_MAIN_PATH, ark_example_dynmain,
+                   (uint32)ARK_EXAMPLE_DYNMAIN_LEN) == 0) &&
+        (dyn_write(DYN_EXEC_PATH, ark_example_dynmain_exec,
+                   (uint32)ARK_EXAMPLE_DYNMAIN_EXEC_LEN) == 0))
+    {
+        dyn_run(DYN_MAIN_PATH, "dynmain");
+        dyn_run(DYN_EXEC_PATH, "dynmain_exec");
+        /* 反假绿：故意把 JUMP_SLOT 指向库里没有的符号，期望
+         * [ldso] FAIL: unresolved PLT symbol no_such_symbol + 退出码 127，
+         * 且绝不出现 [dyn] PASS。 */
+        if (dyn_write(DYN_BAD_PATH, ark_example_dynmain_bad,
+                      (uint32)ARK_EXAMPLE_DYNMAIN_BAD_LEN) == 0)
+        {
+            dyn_run(DYN_BAD_PATH, "dynmain_bad");
+        }
+        else
+        {
+            demo_puts("[dyn] FAIL: cannot stage dynmain_bad\n");
+        }
+    }
+    else
+    {
+        demo_puts("[dyn] FAIL: cannot stage the fixtures in /mnt/ram/\n");
     }
 #endif
 

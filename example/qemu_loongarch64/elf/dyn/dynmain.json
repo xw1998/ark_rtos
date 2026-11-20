@@ -1,0 +1,16 @@
+{
+  "type": "dyn",
+  "base": 0,
+  "interp": "/mnt/ram/ld-ark.so",
+  "soname": null,
+  "needed": ["libanswer.so"],
+  "exports": ["m_base", "m_rel", "got_answer", "got_absptr", "got_gptr", "got_gaddr"],
+  "imports": ["answer_add", "lib_g_addr", "g_ptr", "abs_ptr"],
+  "relocs": [
+    {"kind": "relative", "at": "m_rel", "addend_sym": "m_base"},
+    {"kind": "slot64", "at": "got_absptr", "sym": "abs_ptr"},
+    {"kind": "slot64", "at": "got_gptr", "sym": "g_ptr"},
+    {"kind": "jumpslot", "at": "got_answer", "sym": "answer_add"},
+    {"kind": "jumpslot", "at": "got_gaddr", "sym": "lib_g_addr"}
+  ]
+}

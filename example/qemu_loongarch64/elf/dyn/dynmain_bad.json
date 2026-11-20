@@ -1,0 +1,13 @@
+{
+  "type": "dyn",
+  "base": 0,
+  "interp": "/mnt/ram/ld-ark.so",
+  "soname": null,
+  "needed": ["libanswer.so"],
+  "exports": ["m_base", "m_rel", "got_answer"],
+  "imports": ["no_such_symbol"],
+  "relocs": [
+    {"kind": "relative", "at": "m_rel", "addend_sym": "m_base"},
+    {"kind": "jumpslot", "at": "got_answer", "sym": "no_such_symbol"}
+  ]
+}

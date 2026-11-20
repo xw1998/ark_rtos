@@ -1555,6 +1555,32 @@ def check_linux_abi():
         fail("linux-abi", txt[-320:])
 
 
+def check_dynlink():
+    """Linux 动态链接（PT_INTERP + 自研 ld.so）必须是开档有读数、关档零符号。
+
+    这一档比 Linux ABI 更难测：静态语法检查看不出 ld.so 有没有真的做重定位，
+    而"跑通了"也可能是夹具碰巧对——比如 JUMP_SLOT 指向一个本来就存在的地址。
+    所以 tools/dynlink_gate.py 除了两条正常路径（ET_DYN / ET_EXEC 主程序，
+    都要求 [dyn] PASS + exit 105），还必须有一个故意坏掉的夹具：JUMP_SLOT
+    指向库里没有的 no_such_symbol，要求 ld.so 打
+    `[ldso] FAIL: unresolved PLT symbol no_such_symbol` 并以 127 退出，且
+    不许出现 PASS。再加上"关档不编 blob / 开档编"的双向符号检查、
+    AT_PHDR = base + 64 的 PT_LOAD 覆盖检查、夹具重建的逐字节确定性、
+    以及解析器自检（四种坏日志必须判红）。
+
+    不覆盖：真实发行版二进制（PT_INTERP 指向 glibc 的 ld.so，仓里没有；
+    它还要 futex/rseq/TLS 等一大片 syscall）。见 docs/动态链接与PT_INTERP.md。
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "dynlink_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "DYNLINK-GATE OK" in txt:
+        ok("dynlink",
+           "default off + no fixture blobs / LA64 ON 5 TU compile / fixture shape "
+           "(PT_INTERP, AT_PHDR=base+64, DT_NEEDED, bad symbol, rebuild byte-equal) / "
+           "QEMU 2x PASS + exit 105 and bad fixture exit 127 / parser self-check 4/4")
+    else:
+        fail("dynlink", txt[-320:])
+
 def check_sec_crc():
     """镜像 CRC 开机复核（SEC-G17 / ARKRTOS_USE_IMAGE_CRC_RECHECK）必须两档都对。
 
@@ -1780,6 +1806,7 @@ LOCAL_TOOLCHAIN = {
     "modld": "LA64 / RV32 / LA32 cross gcc",
     "payload-sign": "LA64 cross gcc",
     "stack-guard": "LA64 / RV32 cross gcc",
+    "dynlink": "LA64 cross gcc + qemu-system-loongarch64",
     "sec-crc": "armclang (Keil MDK)",
     "analyzer": "RV32 cross gcc with -fanalyzer (GCC 10+)",
 }
@@ -1836,6 +1863,7 @@ CHECK_TABLE = (
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),
+    ("dynlink", check_dynlink),
     ("sec-crc", check_sec_crc),
 )
 

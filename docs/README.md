@@ -23,8 +23,10 @@
 | 用英文读同一份内存保护说明 | [内存保护与App越权验证.en.md](内存保护与App越权验证.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 带 MMU 的平台上想**像 Linux 那样直接执行可执行文件**（`exec /mnt/ram/hello a b` 或直接敲路径） | [MMU进程模型与ELF装载.md](MMU进程模型与ELF装载.md)（ELF64/ELF32 两遍法装载、`sp→argc` 入口约定、与 PLV3 探针抢同一页的取舍、**M1 只到「文件即程序」不是「进程」**、软定时器栈装不下陷阱帧的完整根因、RV32 无 MMU 档的 PMP 窗口装载（§9）、M2 欠账表） |
 | 用英文读同一份 MMU/ELF 装载说明 | [MMU进程模型与ELF装载.en.md](MMU进程模型与ELF装载.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
-| 想在 MMU 档上**跑 Linux 的静态可执行文件**（只发 Linux 系统调用号） | [Linux可执行文件兼容-系统调用ABI.md](Linux可执行文件兼容-系统调用ABI.md)（asm-generic 15 个号的实测读数、两个 ABI 的分界判据、**明确不支持**（动态链接/fork/信号/socket/futex）、fd 表与窗口堆的降级实现、QEMU 13 条 check 与 `exit code 7`、门禁 13 项） |
+| 想在 MMU 档上**跑 Linux 的静态可执行文件**（只发 Linux 系统调用号） | [Linux可执行文件兼容-系统调用ABI.md](Linux可执行文件兼容-系统调用ABI.md)（asm-generic 15 个号的实测读数、两个 ABI 的分界判据、**明确不支持**（fork/信号/socket/futex，动态链接另有开关）、fd 表与窗口堆的降级实现、QEMU 13 条 check 与 `exit code 7`、门禁 13 项） |
 | 用英文读同一份 Linux 系统调用 ABI 说明 | [Linux可执行文件兼容-系统调用ABI.en.md](Linux可执行文件兼容-系统调用ABI.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
+| 想跑**动态链接**的 ELF（`PT_INTERP` + `ld.so`） | [动态链接与PT_INTERP.md](动态链接与PT_INTERP.md)（开关 `ARKRTOS_USE_DYNLOAD` 缺省关、内核按 Linux 约定装载解释器并铺 9 项 auxv、自研 `ld-ark.so` 只做三种重定位、夹具为何不是编 `.so`（ld 2.31.1 不支持 `-shared`）、QEMU 读数 2×`PASS`+`exit 105` 与坏夹具 `exit 127`、门禁 12 项、关档 `+2392 B` 与 8 条不支持项） |
+| Read the dynamic-linking page in English | [动态链接与PT_INTERP.en.md](动态链接与PT_INTERP.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 想知道遗言 / 无缝衔接 / 实时性在三类硬件上各到了哪一步 | [跨架构机制矩阵.md](跨架构机制矩阵.md)（每格三档：真机/QEMU 读数、编译面、编译期拒绝；M4 真机读数、RV32/LA64 QEMU 台账、非 ARM 无缝衔接自 2026-11-20 起有 QEMU 读数（RV32 5/5、LA64 3/3 次 swap: PASS），只剩 LA32 / RV64GC 是 #error） |
 | Read the cross-architecture matrix in English | [跨架构机制矩阵.en.md](跨架构机制矩阵.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 想分清**一条读数到底是编得过、跑在 QEMU 上、还是真机**（"QEMU 算上板，不是真机"） | [验证载体分级.md](验证载体分级.md)（L0/L1/L2/L3 四档定义、台账 `tools/evidence_levels.tsv` 是唯一来源、QEMU 升不成 L3 的三条实证、每档升到真机最少要做什么、门禁 `evidence-levels`） |
@@ -151,6 +153,8 @@ docs/
 ├── MMU进程模型与ELF装载.en.md               # 【English】MMU/ELF 装载页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── Linux可执行文件兼容-系统调用ABI.md       # 【实机记录+设计说明】Linux 系统调用 ABI：asm-generic 15 个号、两个 ABI 的分界、明确不支持项、降级实现、QEMU 读数与门禁
 ├── Linux可执行文件兼容-系统调用ABI.en.md    # 【English】Linux 系统调用 ABI 页的浓缩英文版（中文页 normative；不新增主张与读数）
+├── 动态链接与PT_INTERP.md                  # 【实机记录+设计说明】Linux 动态链接：内核 PT_INTERP 装载 + 自研 ld.so、三种重定位、坏夹具反假绿、QEMU 读数、门禁 12 项、8 条不支持
+├── 动态链接与PT_INTERP.en.md               # 【English】动态链接页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── 跨架构机制矩阵.md                        # 【矩阵+证据】遗言 / 无缝衔接 / 实时性 × M3/M7、M4、RV32、LA64、LA32：每格标读数 / 编译面 / 编译期拒绝；非 ARM swap 的帧改写（RV32 mepc / LA64 ERA）已有 QEMU 读数，LA32 / RV64GC 仍 #error；含 cyccnt 不可用
 ├── 跨架构机制矩阵.en.md                     # 【English】跨架构矩阵页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── 验证载体分级.md                          # 【口径+台账】L0/L1/L2/L3 四档、tools/evidence_levels.tsv 唯一来源、QEMU 升不成 L3 的三条实证、升级到真机的最小动作、门禁 evidence-levels

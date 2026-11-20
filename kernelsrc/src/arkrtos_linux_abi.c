@@ -11,8 +11,11 @@
 *            3) 错误以负 errno 返回，并在 64 位端口上做符号扩展
 *               （见 arkrtos_port_svc_set_ret_signed）。
 *
-*          明确不做的事（文档里逐条列出）：动态链接、fork/execve、信号、
-*          fd 继承与管道、socket、futex，以及真 mmap 语义。mmap/brk 只是
+*          明确不做的事（文档里逐条列出）：fork/execve、信号、fd 继承与
+*          管道、socket、futex，以及真 mmap 语义。动态链接的**内核侧**
+*          （PT_INTERP + auxv）由 ARKRTOS_USE_DYNLOAD 单独提供，解释器
+*          本身是用户态程序；mprotect 接受但不强制（整窗 RWX，单独计数）。
+*          mmap/brk 只是
 *          在 ELF 窗口内部单调分配（窗口本身是整块静态映射），munmap 只
 *          记账不还页——这不是 Linux 的 mmap，程序若依赖页级语义会失败，
 *          而不是"看起来成功"。
@@ -40,6 +43,7 @@
 #define LX_SYS_CLOSE                (57u)
 #define LX_SYS_READ                 (63u)
 #define LX_SYS_WRITE                (64u)
+#define LX_SYS_PREAD64              (67u)
 #define LX_SYS_EXIT                 (93u)
 #define LX_SYS_EXIT_GROUP           (94u)
 #define LX_SYS_SET_TID_ADDRESS      (96u)
@@ -51,6 +55,7 @@
 #define LX_SYS_BRK                  (214u)
 #define LX_SYS_MUNMAP               (215u)
 #define LX_SYS_MMAP                 (222u)
+#define LX_SYS_MPROTECT             (226u)
 
 /* errno（asm-generic 编号，程序侧读到的是 -errno） */
 #define LX_EPERM                    (1)
@@ -92,6 +97,8 @@
 #define LX_STAT_ENOSYS              (1u)
 #define LX_STAT_EFAULT              (2u)
 #define LX_STAT_OTHER               (3u)
+#define LX_STAT_MPROTECT            (4u)    /* mprotect 接受但未强制（整窗 RWX） */
+#define LX_STAT_MAX                 (5u)
 
 /* ---------------------------------------------------------------- 状态 */
 
@@ -106,7 +113,7 @@ typedef struct
 /* fd 表是内核全局的：本版本的 ELF 装载器一次只跑一个程序，装载器在
  * 每次起跑前调用 arkrtos_linux_abi_reset() 把它清空。 */
 static lx_fd_t s_fd[LX_MAX_FD];
-static uint32  s_stat[4];
+static uint32  s_stat[LX_STAT_MAX];
 
 /* 堆游标（brk / mmap 共用）。窗口是整块静态映射，所以这里的"分配"只是
  * 在窗口内划出一段不重叠的地址，不建立任何新映射。 */
@@ -172,7 +179,12 @@ static void lx_copy_str(char *dst, uint32 cap, const char *src)
 
 static uint32 lx_heap_base(void)
 {
+#if (ARKRTOS_USE_DYNLOAD == 1)
+    /* 动态档：窗口背面留给解释器，堆从解释器区之上开始，不与它重叠。 */
+    return (uint32)ARKRTOS_ELF_INTERP_BASE + (uint32)ARKRTOS_ELF_INTERP_SIZE;
+#else
     return (uint32)ARKRTOS_ELF_WINDOW_BASE + ((uint32)ARKRTOS_ELF_WINDOW_SIZE / 2u);
+#endif
 }
 
 static uint32 lx_heap_end(void)
@@ -488,6 +500,94 @@ static int32 lx_uname(void *p_ctx)
     return 0;
 }
 
+/* pread64(fd, buf, count, pos)：从指定偏移读，不改 fd 的读游标。
+ * 这正是 ld.so 铺共享库段要用的：它按段表随机访问同一个文件。 */
+static int32 lx_pread64(void *p_ctx)
+{
+    int32  fd   = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
+    uint32 ua   = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    uint32 want = ARKRTOS_SVC_ARG(p_ctx, 2u);
+    uint32 pos  = ARKRTOS_SVC_ARG(p_ctx, 3u);
+    uint8  buf[LX_IO_CHUNK];
+    uint32 done = 0u;
+    int32  idx;
+
+    idx = lx_fd_find(fd);
+    if(idx < 0)
+    {
+        return -LX_EBADF;
+    }
+    if(want == 0u)
+    {
+        return 0;
+    }
+    if(ua == 0u)
+    {
+        return -LX_EFAULT;
+    }
+
+    while(done < want)
+    {
+        uint32 n = want - done;
+        uint32 got = 0u;
+
+        if(n > LX_IO_CHUNK)
+        {
+            n = LX_IO_CHUNK;
+        }
+        if(pos > (0xFFFFFFFFu - done))
+        {
+            return (done > 0u) ? (int32)done : -LX_EINVAL;
+        }
+        if(arkrtos_vfs_read_at(s_fd[idx].path, buf, n, pos + done, &got) < 0)
+        {
+            return (done > 0u) ? (int32)done : -LX_EIO;
+        }
+        if(got == 0u)
+        {
+            break;
+        }
+        if(arkrtos_copy_to_user((void *)(unsigned long)(ua + done), buf, got) != 0)
+        {
+            return (done > 0u) ? (int32)done : -LX_EFAULT;
+        }
+        done += got;
+        if(got < n)
+        {
+            break;
+        }
+    }
+
+    return (int32)done;
+}
+
+/* mprotect(addr, len, prot)：整窗是一块 PS=20 的 RWX 映射，硬件上拆不出
+ * 只读/不可执行页。这里**接受并记账**（返回 0），但保护不生效——单独计数
+ * 就是为了让"接受"与"强制"在读数时能分开，不冒充有页级保护。 */
+static int32 lx_mprotect(void *p_ctx)
+{
+    uint32 addr = ARKRTOS_SVC_ARG(p_ctx, 0u);
+    uint32 len  = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    uint32 win_base = (uint32)ARKRTOS_ELF_WINDOW_BASE;
+    uint32 win_end  = win_base + (uint32)ARKRTOS_ELF_WINDOW_SIZE;
+
+    if((addr & 0xFFFu) != 0u)
+    {
+        return -LX_EINVAL;
+    }
+    if(len == 0u)
+    {
+        return 0;
+    }
+    /* 减法写法：len 很大时加法会回绕。 */
+    if((addr < win_base) || (len > (win_end - addr)))
+    {
+        return -LX_ENOMEM;
+    }
+    s_stat[LX_STAT_MPROTECT]++;
+    return 0;
+}
+
 static int32 lx_brk(void *p_ctx)
 {
     uint32 want  = ARKRTOS_SVC_ARG(p_ctx, 0u);
@@ -595,6 +695,12 @@ int32 arkrtos_linux_abi_try(void *p_svc_ctx)
     case LX_SYS_WRITE:
         rc = lx_write(p_svc_ctx);
         break;
+    case LX_SYS_PREAD64:
+        rc = lx_pread64(p_svc_ctx);
+        break;
+    case LX_SYS_MPROTECT:
+        rc = lx_mprotect(p_svc_ctx);
+        break;
     case LX_SYS_CLOCK_GETTIME:
         rc = lx_clock_gettime(p_svc_ctx);
         break;
@@ -658,7 +764,7 @@ int32 arkrtos_linux_abi_try(void *p_svc_ctx)
 
 uint32 arkrtos_linux_abi_stat(uint32 which)
 {
-    if(which >= 4u)
+    if(which >= (uint32)LX_STAT_MAX)
     {
         return 0u;
     }

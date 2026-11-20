@@ -105,8 +105,11 @@ both can be present (probe in one process, ELF program in another).
 1. **Read the header**: `vfs_read_at` reads the 64 B `Ehdr`; `elf_check_header()` checks
    magic / `EI_CLASS=2` (64-bit) / `EI_DATA=1` (little endian) / `e_machine=258`
    (LoongArch) / `e_type=2` (`ET_EXEC`) / `e_phentsize=56` / `1<=e_phnum<=16`. Any
-   `PT_INTERP` (dynamic linking) is `ERR_FORMAT` - M1 does not support an interpreter
-   chain.
+   `PT_INTERP` (dynamic linking) is `ERR_FORMAT` in the default build - M1 does not
+   support an interpreter chain. With `ARKRTOS_USE_DYNLOAD` on, the loader takes the
+   interpreter path instead (2026-11-20, QEMU LA64: two `PASS` runs + `exit 105`,
+   broken fixture `exit 127`); see
+   [动态链接与PT_INTERP](动态链接与PT_INTERP.en.md).
 2. **Pass one: validate only, write nothing.** For each `PT_LOAD` check `p_memsz>=p_filesz`,
    that `[p_vaddr, p_vaddr+p_memsz)` lies wholly inside the window, and at most 16
    segments. The point is **all or nothing** (the window may still hold the previous
@@ -326,7 +329,7 @@ Condensed, as of 2026-11-18:
 | U-7 | ASID / batched TLB invalidation | **ASID profile done (2026-11-17)**, default 0; measured `pmap look 0x02000000` hits `entry=0` in space 0 and `entry=256` in space 1; steady-state switch 34.35 us with readback verification; TLB shootdown for SMP still not done |
 | U-8 | exit code channel | **done (2026-11-17)**: `THREAD_CTRL` sub 4, code stored in the TCB, taken by the loader when it observes the task turn `INVALID`; `wait <task id>` polls on the shell side; default off, RV32 image byte-identical when off |
 | U-9 | `fork` / a real self-replacing `exec` | not done: `exec` starts a task and waits for it; the difference from POSIX is stated in the shell help |
-| U-10 | dynamic linking (`PT_INTERP`, `ld.so`) | explicitly refused (`ERR_FORMAT`): statically linked programs only |
+| U-10 | dynamic linking (`PT_INTERP`, `ld.so`) | **done (2026-11-20, QEMU LA64)**: with `ARKRTOS_USE_DYNLOAD` on, the kernel loads the interpreter the Linux way (both `ET_EXEC` and `ET_DYN` mains), lays down 9 auxv entries and enters at the interpreter; ships a minimal in-tree `ld-ark.so` (`ET_EXEC` pinned at `0x02100000`, three relocation kinds). Two `PASS` runs + `exit 105`; broken fixture `exit 127`. Default build still `ERR_FORMAT` (checked before the PT_LOAD scan). **Still cannot run** distro binaries: `PT_INTERP` names glibc's `ld-linux-loongarch-lp64d.so.1`, which is not in the tree, and glibc also needs futex/rseq/TLS/file mappings | scope is one-level dependencies and immediate relocation only: no lazy binding, no `.init_array`, `mprotect` is accepted-not-enforced (one RWX window), `ld.so` is not signed, and the libc surface is 6 syscalls | M3 (partial) |
 | U-11 | fd inheritance / pipes / signals | none: single process, self-contained |
 | U-12 | 32-bit side review of the soft-timer stack | **measured and fixed (2026-11-17, QEMU RV32)**: 96 words = 384 B used 372 B (fill scan, 96%), leaving 12 B, and the RV32 trap frame is 128 B, so any interrupt landing there walks out; RV32 board raised to 256 words (1 KB), same criterion now 372/1024 = 36%, `utest` 13/13 unchanged, text unchanged (`.bss` only). **Also corrects a reading**: the old "peak 184 B, 200 B left" was the psp single path (47%); only the fill scan gives 372 |
 | U-13 | stack overflow / trap-frame overrun detection | **done (2026-11-17)**: `ARKRTOS_USE_STACK_GUARD` (default n) checks that `stack_bottom[0]` is still `0xed01` (not a PSP comparison, because a trap frame or wild pointer moves the stack bottom while PSP stays above) |
