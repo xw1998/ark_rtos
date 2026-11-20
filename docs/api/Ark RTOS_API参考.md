@@ -18,6 +18,7 @@
 - [kernelsrc/include/arkrtos_export.h](#kernelsrcincludearkrtos_exporth)（3 项）
 - [kernelsrc/include/arkrtos_fdt.h](#kernelsrcincludearkrtos_fdth)（22 项）
 - [kernelsrc/include/arkrtos_fdt_console.h](#kernelsrcincludearkrtos_fdt_consoleh)（4 项）
+- [kernelsrc/include/arkrtos_fdt_overlay.h](#kernelsrcincludearkrtos_fdt_overlayh)（2 项）
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
@@ -2785,6 +2786,38 @@ const char *arkrtos_console_reason(int rc);
 ```
 
 **原因码的稳定短名（用于日志），未知码返回 "?"。 */**
+
+## kernelsrc/include/arkrtos_fdt_overlay.h
+
+**最小子集的 dtb overlay：把一段 fragment 合并进一棵树，产出新的 blob**
+设备树的 overlay 在 Linux 上是一族语法：target-path / target 句柄、
+__overlay__ 容器、__fixups__ / __symbols__ / __local_fixups__ 三段
+标签解析、加上"删属性/删节点"。**这里只做其中一支，并且明确拒绝
+
+### `int arkrtos_fdt_overlay(void *dst, uint32 cap, const void *base, uint3`
+
+```c
+int arkrtos_fdt_overlay(void *dst, uint32 cap, const void *base, uint32 base_len, const void *frag, uint32 frag_len, uint32 *out_len);
+```
+
+**把 fragment 合并进 base，写出一个新的 flattened blob。**
+- `dst`：输出缓冲区（4 字节对齐，容量 cap）
+- `cap`：输出缓冲区字节数
+- `base`：基树 blob（含 magic 的完整 dtb）
+- `base_len`：基树字节数
+- `frag`：fragment blob（同上）
+- `frag_len`：fragment 字节数
+- `out_len`：成功时写入新 blob 的字节数（含 header）
+**返回**：ARKRTOS_FDT_OK / -1..-10（基树或 fragment 本身不合法）/
+-11..-15（overlay 语义不支持，见上面的错误码）
+
+### `const char *arkrtos_fdt_overlay_reason(int rc);`
+
+```c
+const char *arkrtos_fdt_overlay_reason(int rc);
+```
+
+**错误码的文字解释（只用于日志，不参与判定）。 */**
 
 ## kernelsrc/include/arkrtos_flashapp.h
 

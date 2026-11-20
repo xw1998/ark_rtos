@@ -34,8 +34,16 @@ D-2 阶段 1 只证明了「同一份 DTS 能编出 spec-valid 的 dtb」（离�
   I. 路径 / phandle / 别名 / 换树：同一次启动里 `fdt chosen`、`fdt path`、
      `fdt phandle` 必须给出同一个节点；`fdt save` 落盘再 `fdt load` 回来，
      nodes 必须不变；再 load 一个空文件，必须拒绝并保留上一棵树。
+  J. overlay（fragment 应用）：另起一次启动，先证明 `fdt path
+     /overlay-demo-node` 取不到（树里本来没这个节点），再 `fdt overlay` 应用
+     板级 fragment，随后 nodes 必须 +1、model 必须变成 fragment 里的那个、
+     `fdt get` 必须读出 fragment 写进去的两条属性、`fdt path` 必须能查到新
+     节点。四种坏法（错 nodes、错 model、错属性值、「应用前就有节点」）。
+     **应用前的「取不到」是这一组唯一的反假绿闸门**：只断言应用后的读数，
+     分不出「overlay 真写了」与「树里本来就有」。
 
-不覆盖：overlay（1c 未做）、bootloader 传 dtb、镜像重定位。`fdt save/load`
+不覆盖：带 `target=<&label>` / `__fixups__` / `__symbols__` / 删除语义的
+fragment（实现侧明确拒绝）、bootloader 传 dtb、镜像重定位。`fdt save/load`
 证明的是「RAM 副本 + 文件往返 + 坏 blob 回滚」，不是「bootloader 交树」。
 见 docs/设备树.md §5。
 
@@ -233,42 +241,70 @@ def check_default_off():
     if '"override", "ARKRTOS_USE_FDT", "bool"' not in gb:
         problems.append("genboard.py 没有 ARKRTOS_USE_FDT 的 override 条目（板级头不是生成的）")
 
+    # overlay 是同一族的第二个开关，五处落地一字不差地也要在关档里。
+    m = re.search(r"^#define\s+ARKRTOS_USE_FDT_OVERLAY\s+(\d+)\s*$", ac, re.M)
+    if not m:
+        problems.append("arkrtos_autoconf.h 里没有 ARKRTOS_USE_FDT_OVERLAY")
+    elif m.group(1) != "0":
+        problems.append("默认档 ARKRTOS_USE_FDT_OVERLAY=%s（必须是 0）" % m.group(1))
+    if "config ARKRTOS_USE_FDT_OVERLAY" not in kc:
+        problems.append("Kconfig.features 里没有 config ARKRTOS_USE_FDT_OVERLAY")
+    elif not re.search(r"config\s+ARKRTOS_USE_FDT_OVERLAY\b[^\n]*\n(?:[ \t]+[^\n]*\n)*?[ \t]+default\s+n\b",
+                       kc):
+        problems.append("Kconfig 的 overlay 项没有 default n")
+    if not re.search(r"#ifndef\s+ARKRTOS_USE_FDT_OVERLAY\s*\r?\n\s*#define\s+ARKRTOS_USE_FDT_OVERLAY\s+0",
+                     fh):
+        problems.append("features.h 缺 `#ifndef ARKRTOS_USE_FDT_OVERLAY / #define 0` 默认值")
+    if not re.search(r"^#define\s+ARKRTOS_USE_FDT_OVERLAY\s+1\s*$", bc, re.M):
+        problems.append("QEMU LA64 板级没有把 ARKRTOS_USE_FDT_OVERLAY 置 1")
+    if not re.search(r"^ARKRTOS_USE_FDT_OVERLAY=y\s*$", dc, re.M):
+        problems.append("qemu_loongarch64_defconfig 没有请求 ARKRTOS_USE_FDT_OVERLAY=y")
+    if '"override", "ARKRTOS_USE_FDT_OVERLAY", "bool"' not in gb:
+        problems.append("genboard.py 没有 ARKRTOS_USE_FDT_OVERLAY 的 override 条目")
+
     if problems:
         bad("default-off", "；".join(problems))
     else:
         ok("default-off",
-           "autoconf 0 / Kconfig default n / features.h 默认 0 / LA64 板级 1 + defconfig=y / genboard override")
+           "autoconf 0 / Kconfig default n / features.h 默认 0 / LA64 板级 1 + defconfig=y / "
+           "genboard override（FDT 与 OVERLAY 各五处）")
 
 
 # ---------------------------------------------------------------- C 关档零符号
 
 def check_off_zero_symbols(rv32, nm, key_dir):
     tmp = tempfile.mkdtemp(prefix="ark_fdt_off_")
-    obj = os.path.join(tmp, "fdt_off.o")
-    flags = RV32_ARCH + [
-        "-c", "-o", obj,
-        "-DARKRTOS_SIGN_KEY_LOCAL=1",
-        "-DARKRTOS_BOARD_CONFIG=\"arkrtos_board_config.h\"",
-        "-include", "arkrtos_board_config.h",
-        "-I" + key_dir,
-    ] + includes("qemu_riscv32", "riscv/rv32imac")
-    rc, out = run(rv32, flags + ["kernelsrc/src/arkrtos_fdt.c"])
-    if rc != 0:
-        bad("off-zero-symbols", "关档把 arkrtos_fdt.c 编成 .o 失败：\n%s" % out[-500:])
-        return
-    if not os.path.isfile(obj):
-        bad("off-zero-symbols", "关档编译没产出 .o")
-        return
-    r = subprocess.run([nm, obj], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    text = read_text_bytes((r.stdout or b"") + (r.stderr or b""))
-    defs = [ln for ln in text.splitlines() if re.search(r"\s[TtDdBbRr]\s", ln)]
-    undef = [ln for ln in text.splitlines() if re.search(r"^\s+U\s", ln)]
-    if defs or undef:
-        bad("off-zero-symbols",
-            "关档仍有 %d 个定义符号 / %d 个未定义引用（第一行：%r）"
-            % (len(defs), len(undef), (defs + undef)[0].strip()))
+    problems = []
+    for src in ("kernelsrc/src/arkrtos_fdt.c",
+                "kernelsrc/src/arkrtos_fdt_overlay.c"):
+        name = os.path.basename(src)
+        obj = os.path.join(tmp, name.replace(".c", ".o"))
+        flags = RV32_ARCH + [
+            "-c", "-o", obj,
+            "-DARKRTOS_SIGN_KEY_LOCAL=1",
+            "-DARKRTOS_BOARD_CONFIG=\"arkrtos_board_config.h\"",
+            "-include", "arkrtos_board_config.h",
+            "-I" + key_dir,
+        ] + includes("qemu_riscv32", "riscv/rv32imac")
+        rc, out = run(rv32, flags + [src])
+        if rc != 0:
+            problems.append("关档把 %s 编成 .o 失败：\n%s" % (name, out[-400:]))
+            continue
+        if not os.path.isfile(obj):
+            problems.append("关档编译 %s 没产出 .o" % name)
+            continue
+        r = subprocess.run([nm, obj], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        text = read_text_bytes((r.stdout or b"") + (r.stderr or b""))
+        defs = [ln for ln in text.splitlines() if re.search(r"\s[TtDdBbRr]\s", ln)]
+        undef = [ln for ln in text.splitlines() if re.search(r"^\s+U\s", ln)]
+        if defs or undef:
+            problems.append("%s 关档仍有 %d 个定义符号 / %d 个未定义引用（第一行：%r）"
+                            % (name, len(defs), len(undef), (defs + undef)[0].strip()))
+    if problems:
+        bad("off-zero-symbols", "；".join(problems))
     else:
-        ok("off-zero-symbols", "关档 .o 符号表全空（零体积，不是「没测」）")
+        ok("off-zero-symbols",
+           "关档两个 .o 符号表全空（arkrtos_fdt.c + arkrtos_fdt_overlay.c，零体积，不是「没测」）")
 
 
 # ---------------------------------------------------------------- D 开档构建
@@ -419,6 +455,81 @@ def self_check_api(out, dtb_size, nodes):
             missed.append(name)
     return missed
 
+
+OVL_NODE = "/overlay-demo-node"
+
+def judge_overlay(pre, out, base_nodes):
+    """J：overlay 应用前取不到、应用后 nodes+1 且属性/路径都读得回来。"""
+    problems = []
+
+    pre_fdt = pre.get("fdt", "")
+    if "nodes=%d" % base_nodes not in pre_fdt:
+        problems.append("应用前的 `fdt` 不是 nodes=%d" % base_nodes)
+    if "overlay-demo-node" in pre_fdt:
+        problems.append("应用前的树里已经有 overlay-demo-node（那后面的读数证明不了任何事）")
+    pre_path = pre.get("fdt path " + OVL_NODE, "")
+    if "path=" in pre_path:
+        problems.append("应用前 `fdt path %s` 竟然查到了节点" % OVL_NODE)
+
+    ovl = out.get("fdt overlay", "")
+    if "overlay ok" not in ovl:
+        problems.append("`fdt overlay` 没报 overlay ok：%r" % ovl.strip()[:120])
+    want = "nodes=%d (was %d)" % (base_nodes + 1, base_nodes)
+    if want not in ovl:
+        problems.append("`fdt overlay` 里没有 %r" % want)
+    if "model=fdt-overlay-demo" not in ovl:
+        problems.append("`fdt overlay` 里的 model 不是 fragment 写的那个")
+
+    after = out.get("fdt", "")
+    if "nodes=%d" % (base_nodes + 1) not in after:
+        problems.append("应用后的 `fdt` 不是 nodes=%d" % (base_nodes + 1))
+    if "model=fdt-overlay-demo" not in after:
+        problems.append("应用后的 `fdt` model 不是 fdt-overlay-demo")
+    if "overlay-demo-node compat=ark-overlay-demo" not in after:
+        problems.append("应用后的 `fdt` 里没有 overlay-demo-node 那一行")
+
+    if "cells=0x2a" not in out.get("fdt get " + OVL_NODE + " overlay-value", ""):
+        problems.append("`fdt get %s overlay-value` 不是 0x2a" % OVL_NODE)
+    if 'str="ark-overlay-demo"' not in out.get(
+            "fdt get " + OVL_NODE + " compatible", ""):
+        problems.append("`fdt get %s compatible` 不是 ark-overlay-demo" % OVL_NODE)
+
+    pth = out.get("fdt path " + OVL_NODE, "")
+    if "depth=1" not in pth or "props=2" not in pth:
+        problems.append("应用后 `fdt path %s` 不是 depth=1 props=2" % OVL_NODE)
+
+    if problems:
+        return False, "；".join(problems)
+    return True, ("应用前取不到 → 应用后 nodes %d→%d、model=fdt-overlay-demo，"
+                  "overlay-value=0x2a / compatible=ark-overlay-demo 都读得回"
+                  % (base_nodes, base_nodes + 1))
+
+def self_check_overlay(pre, out, base_nodes):
+    """四种坏法：错 nodes、错 model、错属性值、应用前就有节点。"""
+    o = "fdt overlay"
+    mutations = {
+        "overlay 行 nodes 改错": (out, o, "nodes=%d (was %d)" % (base_nodes + 1, base_nodes),
+                                 "nodes=%d (was %d)" % (base_nodes, base_nodes)),
+        "应用后 model 改错": (out, "fdt", "model=fdt-overlay-demo",
+                              "model=QEMU virt loongarch64"),
+        "overlay-value 改错": (out, "fdt get " + OVL_NODE + " overlay-value",
+                               "cells=0x2a", "cells=0x2b"),
+        "应用前就有节点（反假绿）": (pre, "fdt", "model=",
+                                    "  overlay-demo-node compat=ark-overlay-demo reg=0x0/0x0 okay\nmodel="),
+    }
+    missed = []
+    for name, (src, cmd, old, new) in mutations.items():
+        bad_pre = dict(pre)
+        bad_out = dict(out)
+        tgt = bad_pre if src is pre else bad_out
+        if old not in src.get(cmd, ""):
+            missed.append("%s（坏样本没改到东西）" % name)
+            continue
+        tgt[cmd] = src.get(cmd, "").replace(old, new, 1)
+        passed, _ = judge_overlay(bad_pre, bad_out, base_nodes)
+        if passed:
+            missed.append(name)
+    return missed
 
 def judge_boot(text, dtb_size):
     """返回 (是否通过, 说明, nodes)。判据全按行首锚点，不用子串猜。"""
@@ -753,6 +864,59 @@ def main(argv):
                 if a.keep:
                     for c in cmds:
                         print("\n---- %s ----\n%s" % (c, api_out.get(c, "").rstrip()))
+
+                # J：overlay。必须另起一次启动量「应用前」，否则拿不到
+                # 「这个节点本来不存在」这条读数的可信版本。
+                pre_cmds = ["fdt", "fdt path " + OVL_NODE]
+                ovl_cmds = ["fdt overlay",
+                            "fdt",
+                            "fdt get " + OVL_NODE + " overlay-value",
+                            "fdt get " + OVL_NODE + " compatible",
+                            "fdt path " + OVL_NODE]
+                pre_out, pre_err = run_qemu_shell(qemu, a.port, a.boot,
+                                                  a.per_cmd, pre_cmds)
+                ovl_out, ovl_err = (None, pre_err) if pre_out is None else \
+                    run_qemu_shell(qemu, a.port, a.boot, a.per_cmd, ovl_cmds)
+                attempt_j = 1
+                if ovl_out is None:
+                    passed_j, detail_j = False, ovl_err
+                else:
+                    passed_j, detail_j = judge_overlay(pre_out, ovl_out, nodes)
+                while (not passed_j) and (attempt_j < 3):
+                    attempt_j += 1
+                    pre_out, pre_err = run_qemu_shell(qemu, a.port, a.boot,
+                                                      a.per_cmd, pre_cmds)
+                    if pre_out is None:
+                        detail_j = pre_err
+                        continue
+                    ovl_out, ovl_err = run_qemu_shell(qemu, a.port, a.boot,
+                                                      a.per_cmd, ovl_cmds)
+                    if ovl_out is None:
+                        detail_j = ovl_err
+                        continue
+                    passed_j, detail_j = judge_overlay(pre_out, ovl_out, nodes)
+                if ovl_out is None or pre_out is None:
+                    bad("qemu-overlay", detail_j)
+                    bad("overlay-selfcheck", "读数没过，自检无从谈起")
+                else:
+                    if passed_j:
+                        if attempt_j > 1:
+                            detail_j = "%s（第 %d 次读数；前一次截断）" % (detail_j, attempt_j)
+                        ok("qemu-overlay", detail_j)
+                        missed = self_check_overlay(pre_out, ovl_out, nodes)
+                        if missed:
+                            bad("overlay-selfcheck",
+                                "这些坏样本没被判红：%s" % ", ".join(missed))
+                        else:
+                            ok("overlay-selfcheck",
+                               "4 种坏法（错 nodes / 错 model / 错属性值 / 应用前就有节点）全被判红")
+                    else:
+                        bad("qemu-overlay", detail_j)
+                        bad("overlay-selfcheck", "读数没过，自检无从谈起")
+                if a.keep:
+                    for c in pre_cmds + ovl_cmds:
+                        print("\n---- %s ----\n%s"
+                              % (c, (pre_out or {}).get(c, (ovl_out or {}).get(c, "")).rstrip()))
 
                 if a.keep:
                     print("\n---- dt ----\n%s" % out.get("dt", "").rstrip())

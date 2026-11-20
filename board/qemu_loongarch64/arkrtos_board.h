@@ -56,6 +56,16 @@ int32 arkrtos_board_uart_dev_register(void);
 const void *arkrtos_board_dtb(uint32 *size);
 #endif
 
+#if (ARKRTOS_USE_FDT_OVERLAY == 1)
+/**
+* @brief 编进镜像的 overlay demo fragment（一块普通 .dtb）
+* @details 只给 `fdt overlay` 命令用：合并进当前树之后，shell 会把结果装
+*          成新的树；这块 fragment 本身不参与启动。返回只读数据，生命
+*          周期与镜像相同。
+*/
+const void *arkrtos_board_fdt_overlay_demo(uint32 *size);
+#endif
+
 /**
 * @brief 整机复位
 * @note QEMU loongarch `virt` 没有 sifive_test 那种复位设备（RISC-V virt 才有），

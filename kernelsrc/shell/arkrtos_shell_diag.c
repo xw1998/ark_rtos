@@ -684,6 +684,9 @@ int cmd_dt(int argc, char *argv[])
 
 
 #if (ARKRTOS_USE_FDT == 1)
+#if (ARKRTOS_USE_FDT_OVERLAY == 1)
+#include "arkrtos_fdt_overlay.h"
+#endif
 /* fdt: dump the tree parsed from the image .dtb.
  *
  * 与 dt 打同一套字段、同一个顺序：一份来自生成的 C 平表，一份来自启动时
@@ -699,6 +702,8 @@ int cmd_dt(int argc, char *argv[])
  *   fdt path <p>        按绝对路径查一个节点
  *   fdt phandle <n>     phandle -> 路径
  *   fdt chosen          /chosen/stdout-path 原文 + 解析结果
+ *   fdt get <p> <prop>  打印一个属性的值（字符串 / 32 位单元）
+ *   fdt overlay         把编进镜像的 demo fragment 合并进当前树
  *   fdt save <file>     把当前 blob 写成文件
  *   fdt load <file>     从文件读回一块 dtb 并换树（失败保留上一棵树）
  */
@@ -855,6 +860,129 @@ static int fdt_load_from(const char *path)
 }
 #endif /* ARKRTOS_USE_VFS */
 
+
+/* fdt get <path> <prop>：把一个属性的**值**打出来。
+ * 这是 overlay 之后"属性真的变了"的唯一读数——树 dump 只报设备节点，
+ * 而 overlay 改的往往是 model / 自定义属性这种不是设备的东西。 */
+static int fdt_show_prop(const char *path, const char *prop)
+{
+    arkrtos_fdt_node_t n;
+    const void *v;
+    uint32 len = 0u;
+    uint32 i;
+    int32 rc = arkrtos_fdt_node_by_path(path, &n);
+
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        ark_shell_printf("fdt: path %s rc=%d\r\n", path, (int)rc);
+        return 1;
+    }
+    v = arkrtos_fdt_prop(&n, prop, &len);
+    if(v == 0)
+    {
+        ark_shell_printf("fdt: %s has no property '%s'\r\n", path, prop);
+        return 1;
+    }
+    ark_shell_printf("%s %s len=%u ", path, prop, (uint32)len);
+
+    /* 字符串形态：以 NUL 收尾，且中间没有不可打印字节。
+     * string list 逐段打印——两段之间用 "," 分开，不合并成一个长串。 */
+    {
+        const char *s = (const char *)v;
+        uint32 k;
+        uint32 printable = 1u;
+
+        if((len == 0u) || (s[len - 1u] != '\0'))
+        {
+            printable = 0u;
+        }
+        for(k = 0u; (printable != 0u) && (k < len); k++)
+        {
+            uint8 c = (uint8)s[k];
+
+            if((c != 0u) && ((c < 0x20u) || (c > 0x7eu)))
+            {
+                printable = 0u;
+            }
+        }
+        if(printable != 0u)
+        {
+            ark_shell_printf("str=\"");
+            for(k = 0u; k < len; )
+            {
+                sh_out(&s[k]);
+                k += (uint32)strlen(&s[k]) + 1u;
+                if(k < len)
+                {
+                    ark_shell_printf("\",\"");
+                }
+            }
+            ark_shell_printf("\"\r\n");
+            return 0;
+        }
+    }
+
+    ark_shell_printf("cells=");
+    for(i = 0u; ((i + 1u) * 4u) <= len; i++)
+    {
+        uint32 u = 0u;
+
+        (void)arkrtos_fdt_prop_u32(&n, prop, i, &u);
+        ark_shell_printf("%s0x%x", (i == 0u) ? "" : " ", (uint32)u);
+    }
+    if((len & 3u) != 0u)
+    {
+        ark_shell_printf(" (tail %u byte(s) not cells)", (uint32)(len & 3u));
+    }
+    ark_shell_printf("\r\n");
+    return 0;
+}
+
+#if (ARKRTOS_USE_FDT_OVERLAY == 1)
+/* 合并后的树放在这里：overlay 不碰当前树，只有成功后 load 才换树。
+ * 8 KB 是 demo fragment 的两级余量；小了会明确报 OVERLAY_SIZE。 */
+static uint8 s_fdt_ovl[8192] __attribute__((aligned(8)));
+
+static int fdt_overlay_apply(void)
+{
+    uint32 frag_len = 0u;
+    uint32 out_len = 0u;
+    uint32 before = arkrtos_fdt_node_count();
+    const void *blob = arkrtos_fdt_blob();
+    uint32 blob_len = arkrtos_fdt_size();
+    const void *frag = arkrtos_board_fdt_overlay_demo(&frag_len);
+    int32 rc;
+
+    if((frag == 0) || (frag_len == 0u))
+    {
+        sh_out("fdt: overlay demo fragment is not built into this image\r\n");
+        return 1;
+    }
+    rc = arkrtos_fdt_overlay(s_fdt_ovl, (uint32)sizeof(s_fdt_ovl),
+                             blob, blob_len, frag, frag_len, &out_len);
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        /* 拒绝时把"哪一类不支持"说清楚；这棵树没被动过。 */
+        ark_shell_printf("fdt: overlay rc=%d (%s) -> refused, tree kept (nodes=%u)\r\n",
+                         (int)rc, arkrtos_fdt_overlay_reason(rc), (uint32)before);
+        return 1;
+    }
+    rc = arkrtos_fdt_load(s_fdt_ovl, (uint32)sizeof(s_fdt_ovl),
+                          s_fdt_ovl, out_len);
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        ark_shell_printf("fdt: overlay merged %u bytes but init rc=%d -> tree kept\r\n",
+                         (uint32)out_len, (int)rc);
+        return 1;
+    }
+    ark_shell_printf("fdt: overlay ok bytes=%u nodes=%u (was %u) model=%s\r\n",
+                     (uint32)out_len, (uint32)arkrtos_fdt_node_count(),
+                     (uint32)before,
+                     (arkrtos_fdt_model() != 0) ? arkrtos_fdt_model() : "(none)");
+    return 0;
+}
+#endif /* ARKRTOS_USE_FDT_OVERLAY */
+
 int cmd_fdt(int argc, char *argv[])
 {
     if(arkrtos_fdt_ready() == 0)
@@ -899,6 +1027,21 @@ int cmd_fdt(int argc, char *argv[])
     {
         return fdt_show_chosen();
     }
+    if(strcmp(argv[1], "get") == 0)
+    {
+        if(argc < 4)
+        {
+            sh_out("fdt get <absolute path> <property>\r\n");
+            return 1;
+        }
+        return fdt_show_prop(argv[2], argv[3]);
+    }
+#if (ARKRTOS_USE_FDT_OVERLAY == 1)
+    if(strcmp(argv[1], "overlay") == 0)
+    {
+        return fdt_overlay_apply();
+    }
+#endif
 #if (ARKRTOS_USE_VFS == 1)
     if(strcmp(argv[1], "save") == 0)
     {
@@ -919,7 +1062,7 @@ int cmd_fdt(int argc, char *argv[])
         return fdt_load_from(argv[2]);
     }
 #endif
-    sh_out("fdt: unknown subcommand (path|phandle|chosen|save|load)\r\n");
+    sh_out("fdt: unknown subcommand (path|phandle|chosen|get|overlay|save|load)\r\n");
     return 1;
 }
 #endif /* ARKRTOS_USE_FDT */

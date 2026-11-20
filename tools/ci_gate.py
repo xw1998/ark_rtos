@@ -687,9 +687,12 @@ def check_fdt():
     两个读数的判据各自喂坏样本，必须被判红。同一次启动里还要证明
     `/chosen/stdout-path` 被消费（[fdt] console ... reason=ok match=1）、
     路径 / 别名 / phandle 指向同一个节点、fdt save+load 往返 nodes 不变、
-    空文件被拒且旧树保留。
+    空文件被拒且旧树保留。最后另起一次启动做 overlay：应用前
+    `fdt path /overlay-demo-node` 必须取不到，应用后 nodes 8→9、
+    model=fdt-overlay-demo、fragment 写进去的两条属性都读得回。
 
-    不覆盖：dtb overlay（1c 未做）、bootloader 交 dtb、镜像重定位。
+    不覆盖：带 target=<&label> / __fixups__ / __symbols__ / 删除语义的
+    fragment（实现侧明确拒绝）、bootloader 交 dtb、镜像重定位。
     """
     r = _run_check([sys.executable, os.path.join("tools", "fdt_gate.py")])
     txt = ((r.stdout or "") + (r.stderr or "")).strip()
@@ -699,7 +702,8 @@ def check_fdt():
            "LA64 build / boot blob==dtb size, nodes=8 / dt==fdt line by line / "
            "console path+baud match / fdt chosen+path+phandle same node / "
            "save+load nodes unchanged, empty file refused and old tree kept / "
-           "4 self-check groups")
+           "overlay absent-before -> nodes 8->9 + model/props read back / "
+           "5 self-check groups")
     else:
         fail("fdt", txt[-320:])
 

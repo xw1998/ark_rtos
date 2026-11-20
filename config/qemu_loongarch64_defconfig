@@ -55,6 +55,9 @@ ARKRTOS_USE_FDT=y
 # 设备树的第二件事：把 /chosen/stdout-path 变成"控制台绑到哪"的判断，
 # 不一致时明确拒绝（保留板级默认），不静默改建。
 ARKRTOS_USE_FDT_CONSOLE=y
+# overlay：最小子集（target-path + __overlay__），属性覆盖/新子节点追加，
+# 句柄形式 target 与删除语义明确不支持。
+ARKRTOS_USE_FDT_OVERLAY=y
 
 # -------------------------------------------------------- executables
 ARKRTOS_USE_ELF=y

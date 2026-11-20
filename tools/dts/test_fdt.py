@@ -6,10 +6,14 @@ Steps, per board under dts/:
   1. compile the DTS to a flattened blob (dtc_lite.py --format dtb);
   2. build tools/dts/test_fdt.c against that board's generated C table
      (board/<board>/arkrtos_dt.c) and the FDT reader;
-  3. run it: node for node, name / compatible / reg / enabled / property
-     count must agree with the table, the node order must agree, and damaged
+  3. compile the overlay demo fragment (tools/dts/overlay/demo.dts) into a
+     second blob and pass it as argv[2];
+  4. run it: node for node, name / compatible / reg / enabled / property
+     count must agree with the table, the node order must agree, damaged
      blobs (bad magic, oversized totalsize, truncated struct block) must be
-     refused with the specific error code.
+     refused with the specific error code, and the overlay merge (F-1c) must
+     both succeed on the demo fragment and refuse every unsupported shape with
+     its own error code.
 
 Why both outputs are linked into one binary: they come from the same parse,
 but they are produced by two different code paths (C table emitter vs DTB
@@ -88,6 +92,18 @@ def main():
     os.makedirs(os.path.join(ROOT, BUILD), exist_ok=True)
     bad = []
 
+    # Overlay demo fragment: compiled once, handed to every board's binary.
+    # It lives under tools/dts/overlay/ because boards() treats every
+    # dts/*.dts as a board description.
+    frag = os.path.join(BUILD, "overlay_demo.dtb")
+    r = run(py + [DTC, "--dts", os.path.join("tools", "dts", "overlay",
+                                             "demo.dts"),
+                  "--out", frag, "--format", "dtb"])
+    if r.returncode != 0:
+        print("test_fdt: dtc_lite failed for the overlay fragment\n%s"
+              % r.stderr)
+        return 1
+
     for b in boards():
         dtb = os.path.join(BUILD, "%s.dtb" % b)
         r = run(py + [DTC, "--dts", "dts/%s.dts" % b,
@@ -100,16 +116,18 @@ def main():
         exe = os.path.join(ROOT, BUILD, "%s.exe" % b)
         cc = [gcc, "-std=c99", "-Wall", "-Wextra", "-Werror",
               "-DARKRTOS_USE_FDT=1", "-DARKRTOS_USE_FDT_CONSOLE=1",
+              "-DARKRTOS_USE_FDT_OVERLAY=1",
               "-I", HOST_INC, "-I", KINC]
         r = run(cc + ["-o", exe, "tools/dts/test_fdt.c",
                       "kernelsrc/src/arkrtos_fdt.c",
                       "kernelsrc/src/arkrtos_fdt_console.c",
+                      "kernelsrc/src/arkrtos_fdt_overlay.c",
                       "board/%s/arkrtos_dt.c" % b])
         if r.returncode != 0:
             print("test_fdt: %s build failed\n%s" % (b, r.stderr))
             bad.append(b)
             continue
-        r = run([exe, dtb])
+        r = run([exe, dtb, frag])
         if r.returncode != 0:
             print("test_fdt: %s self-test failed\n%s%s" % (b, r.stdout, r.stderr))
             bad.append(b)

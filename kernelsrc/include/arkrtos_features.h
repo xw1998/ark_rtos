@@ -366,6 +366,13 @@
 #define ARKRTOS_USE_FDT_CONSOLE         0
 #endif
 
+/* 设备树的第三件事：dtb overlay（最小子集）。只认 target-path + __overlay__，
+ * 属性覆盖 / 新子节点追加；target = <&label>、__fixups__、删除语义一律拒绝。
+ * 默认 0：关档时 arkrtos_fdt_overlay.c 整文件不产生符号。 */
+#ifndef ARKRTOS_USE_FDT_OVERLAY
+#define ARKRTOS_USE_FDT_OVERLAY         0
+#endif
+
 /* ============================================================
  * 三、服务与组件
  * ============================================================ */

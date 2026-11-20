@@ -160,6 +160,7 @@ SRCS_C := $(KERNEL_SRCS) \
 	board/qemu_loongarch64/arkrtos_board.c \
 	board/qemu_loongarch64/arkrtos_dt.c \
 	board/qemu_loongarch64/arkrtos_dt_blob.c \
+	board/qemu_loongarch64/arkrtos_fdt_overlay_blob.c \
 	board/qemu_loongarch64/drvblk.c \
 	board/qemu_loongarch64/drvuart.c \
 	board/qemu_loongarch64/arkrtos_bus_port.c \
@@ -242,6 +243,22 @@ $(FDT_H): $(FDT_DTB) example/qemu_loongarch64/elf_blob.py
 	       --output $@ --name ark_qemu_dtb ;
 
 $(BUILD)/board/qemu_loongarch64/arkrtos_dt_blob.o: $(FDT_H)
+
+# overlay demo fragment（F-1c）：与整棵树走同一条"dts -> dtb -> 数组"链路。
+# 它只被 `fdt overlay` 命令用到，所以单独成一个 blob，不和基树混在一起。
+OVL_DTB := $(BUILD)/arkrtos_fdt_overlay_demo.dtb
+OVL_H   := $(BUILD)/arkrtos_fdt_overlay_demo_blob.h
+
+$(OVL_DTB): tools/dts/overlay/demo.dts tools/dts/dtc_lite.py
+	@mkdir -p $(BUILD)
+	python tools/dts/dtc_lite.py --dts tools/dts/overlay/demo.dts \
+	       --out $@ --format dtb ;
+
+$(OVL_H): $(OVL_DTB) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(OVL_DTB) \
+	       --output $@ --name ark_overlay_demo_dtb ;
+
+$(BUILD)/board/qemu_loongarch64/arkrtos_fdt_overlay_blob.o: $(OVL_H)
 
 $(BUILD)/example/qemu_loongarch64/elf_demo.o: $(HELLO_H) $(HELLO_BAD_H)
 

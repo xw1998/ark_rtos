@@ -1,0 +1,36 @@
+/dts-v1/;
+
+/*
+ * Minimal overlay fragment used by tools/dts/test_fdt.c and by the
+ * "fdt overlay" shell command.  It exercises exactly the part of the overlay
+ * language this project implements:
+ *
+ *   - target-path with an absolute path (no <&label> handle form);
+ *   - properties inside __overlay__ that override same-named ones (model);
+ *   - one brand new property (overlay-demo);
+ *   - one brand new child node with its own properties.
+ *
+ * Node and property names here carry no comma: dtc_lite's tokenizer does not
+ * accept vendor-prefixed names, and the overlay subset does not need them.
+ */
+
+/ {
+    fragment@0 {
+        target-path = "/";
+        __overlay__ {
+            overlay-demo = "yes";
+
+            overlay-demo-node {
+                compatible = "ark-overlay-demo";
+                overlay-value = <0x2a>;
+            };
+        };
+    };
+
+    fragment@1 {
+        target-path = "/";
+        __overlay__ {
+            model = "fdt-overlay-demo";
+        };
+    };
+};

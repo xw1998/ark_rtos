@@ -962,6 +962,32 @@ config ARKRTOS_USE_FDT_CONSOLE
 
 	  Off (the default) compiles arkrtos_fdt_console.c to nothing.
 
+config ARKRTOS_USE_FDT_OVERLAY
+	bool "Merge a dtb fragment into the tree (minimal overlay subset)"
+	default n
+	depends on ARKRTOS_USE_FDT
+	help
+	  Apply a fragment blob to the current tree and produce a new blob in a
+	  caller-provided arena.  The subset is deliberately narrow, because a
+	  half-understood overlay silently produces a tree that parses but says
+	  the wrong thing:
+
+	    - only target-path (absolute) is honoured; target = <&label> needs
+	      __fixups__ label resolution and is refused;
+	    - fragment properties override same-named properties, new ones are
+	      appended;
+	    - fragment child nodes are appended as new children; a child whose
+	      name already exists is REFUSED (merging two subtrees is another
+	      semantic, not guessed at here);
+	    - __fixups__ / __symbols__ / __local_fixups__ are refused outright;
+	    - there is no delete semantics: removing a property or a node is not
+	      something this code can do, and it does not pretend to.
+
+	  The output is a standalone blob: feed it to arkrtos_fdt_load() when it
+	  validates.  Nothing is written into the tree in place.
+
+	  Off (the default) compiles arkrtos_fdt_overlay.c to nothing.
+
 config ARKRTOS_USE_IMAGE_CRC_RECHECK
 	bool "Recheck image CRC after relocation, at boot (SEC-G17)"
 	default n

@@ -22,6 +22,10 @@
 #include "arkrtos_dt.h"
 #include "arkrtos_fdt.h"
 #include "arkrtos_fdt_console.h"
+#include "arkrtos_features.h"
+#if (ARKRTOS_USE_FDT_OVERLAY == 1)
+#include "arkrtos_fdt_overlay.h"
+#endif
 
 static int g_fail;
 
@@ -75,6 +79,187 @@ static int same(const char *a, const char *b)
     }
     return (strcmp(a, b) == 0) ? 1 : 0;
 }
+
+
+#if (ARKRTOS_USE_FDT_OVERLAY == 1)
+/* ============================ F-1c: overlay ============================
+ * 这一段的读数是"把 fragment 合并进一棵真树，产出的新 blob 能被解析器
+ * 完整读回来"。它不是"overlay 语法全支持"的证明：本子集只认
+ * target-path、只做属性覆盖与子节点追加，其余一律拒绝。所以下面既验
+ * 成功路径，也逐条验拒绝路径必须报出**具体**错误码，而不是"随便失败"。
+ *
+ * 负面用例用这里的小构造器现造 blob，而不是再加 dts 文件：要覆盖的
+ * 形状（target = <&label>、__symbols__、同名子节点、坏魔数）在 DTS 里
+ * 要么写不出来（dtc_lite 会替我们整理成另一种形状），要么写出来也不
+ * 保证是我们想要的字节。
+ */
+
+#define BLD_SD 1024u
+#define BLD_ST 512u
+#define BLD_OUT 2048u
+
+typedef struct
+{
+    unsigned char sd[BLD_SD];
+    unsigned      sn;
+    char          st[BLD_ST];
+    unsigned      stn;
+    unsigned char out[BLD_OUT];
+} bld_t;
+
+static void bld_init(bld_t *b)
+{
+    memset(b, 0, sizeof(*b));
+    b->st[0] = '\0';
+    b->stn = 1u;
+}
+
+static void bld_o32(unsigned char *p, uint32 v)
+{
+    p[0] = (unsigned char)(v >> 24);
+    p[1] = (unsigned char)(v >> 16);
+    p[2] = (unsigned char)(v >> 8);
+    p[3] = (unsigned char)v;
+}
+
+static void bld_w32(bld_t *b, uint32 v)
+{
+    bld_o32(b->sd + b->sn, v);
+    b->sn += 4u;
+}
+
+static void bld_align(bld_t *b)
+{
+    while((b->sn & 3u) != 0u)
+    {
+        b->sd[b->sn++] = 0u;
+    }
+}
+
+static uint32 bld_str(bld_t *b, const char *s)
+{
+    unsigned i = 0u;
+    size_t n = strlen(s);
+
+    while(i < b->stn)
+    {
+        if(strcmp(b->st + i, s) == 0)
+        {
+            return (uint32)i;
+        }
+        i += (unsigned)strlen(b->st + i) + 1u;
+    }
+    if((b->stn + n + 1u) > BLD_ST)
+    {
+        return 0u;
+    }
+    memcpy(b->st + b->stn, s, n + 1u);
+    i = b->stn;
+    b->stn += (unsigned)n + 1u;
+    return (uint32)i;
+}
+
+static void bld_begin(bld_t *b, const char *name)
+{
+    size_t n = strlen(name);
+
+    bld_w32(b, 1u);
+    memcpy(b->sd + b->sn, name, n + 1u);
+    b->sn += (unsigned)n + 1u;
+    bld_align(b);
+}
+
+static void bld_end(bld_t *b)
+{
+    bld_w32(b, 2u);
+}
+
+static void bld_prop(bld_t *b, const char *name, const void *val, uint32 len)
+{
+    bld_w32(b, 3u);
+    bld_w32(b, len);
+    bld_w32(b, bld_str(b, name));
+    memcpy(b->sd + b->sn, val, len);
+    b->sn += len;
+    bld_align(b);
+}
+
+static void bld_pstr(bld_t *b, const char *name, const char *val)
+{
+    bld_prop(b, name, val, (uint32)strlen(val) + 1u);
+}
+
+static void bld_pu32(bld_t *b, const char *name, uint32 v)
+{
+    unsigned char c[4];
+
+    bld_o32(c, v);
+    bld_prop(b, name, c, 4u);
+}
+
+static uint32 bld_finish(bld_t *b)
+{
+    uint32 off_struct = 56u;                 /* header 40 + rsvmap 16 */
+    uint32 off_strings;
+    uint32 total;
+
+    bld_w32(b, 9u);                          /* FDT_END */
+    off_strings = off_struct + b->sn;
+    total = off_strings + b->stn;
+    if(total > BLD_OUT)
+    {
+        return 0u;
+    }
+    memset(b->out, 0, (size_t)total);
+    bld_o32(b->out + 0u, 0xd00dfeedu);
+    bld_o32(b->out + 4u, total);
+    bld_o32(b->out + 8u, off_struct);
+    bld_o32(b->out + 12u, off_strings);
+    bld_o32(b->out + 16u, 40u);              /* off_mem_rsvmap */
+    bld_o32(b->out + 20u, 17u);              /* version */
+    bld_o32(b->out + 24u, 16u);              /* last_comp_version */
+    bld_o32(b->out + 28u, 0u);               /* boot_cpuid_phys */
+    bld_o32(b->out + 32u, b->stn);           /* size_dt_strings */
+    bld_o32(b->out + 36u, b->sn);            /* size_dt_struct */
+    memcpy(b->out + off_struct, b->sd, b->sn);
+    memcpy(b->out + off_strings, b->st, b->stn);
+    return total;
+}
+
+/* 一个 fragment@0：target-path + __overlay__ { 一个属性, 可选一个子节点 }
+ * 负面用例只换其中一个参数——这样"报错"就能归因到那一处不同。 */
+static uint32 bld_frag(bld_t *b, const char *target_path,
+                       const char *prop_name, const char *prop_val,
+                       const char *child_name, int with_symbols)
+{
+    bld_init(b);
+    bld_begin(b, "");
+    bld_begin(b, "fragment@0");
+    bld_pstr(b, "target-path", target_path);
+    bld_begin(b, "__overlay__");
+    if(prop_name != NULL)
+    {
+        bld_pstr(b, prop_name, prop_val);
+    }
+    if(child_name != NULL)
+    {
+        bld_begin(b, child_name);
+        bld_pstr(b, "compatible", "ark-overlay-demo");
+        bld_pu32(b, "overlay-value", 0x2au);
+        bld_end(b);
+    }
+    bld_end(b);                              /* __overlay__ */
+    bld_end(b);                              /* fragment@0 */
+    if(with_symbols != 0)
+    {
+        bld_begin(b, "__symbols__");
+        bld_pstr(b, "demo", "/");
+        bld_end(b);
+    }
+    bld_end(b);                              /* root */
+    return bld_finish(b);
+}
+#endif /* ARKRTOS_USE_FDT_OVERLAY */
 
 int main(int argc, char **argv)
 {
@@ -284,6 +469,10 @@ int main(int argc, char **argv)
                   "previous tree kept its node count");
             check(same(arkrtos_fdt_model(), model_before),
                   "previous tree kept its model");
+            /* load() 换的是全局视图：这里必须换回来，否则视图指向的
+             * 内存马上被 free，后面任何读取都是读已释放的堆。 */
+            check(arkrtos_fdt_init(blob, (uint32)len) == ARKRTOS_FDT_OK,
+                  "base tree restored after the load test");
             free(copy2);
         }
     }
@@ -349,6 +538,179 @@ int main(int argc, char **argv)
         check(arkrtos_console_reason(-99) != NULL,
               "unknown reason code still yields text");
     }
+
+
+#if (ARKRTOS_USE_FDT_OVERLAY == 1)
+    /* ---- F-1c: overlay 最小子集 ----
+     * 用命令行给的 fragment dtb（tools/dts/overlay/demo.dts 编出来的），
+     * 合并进真树，然后把新 blob 交给解析器读回来——只看返回值不够，
+     * 必须让第二个实现（解析器）重新走一遍这棵树。
+     */
+    {
+        unsigned char *arena;
+        uint32 base_nodes = arkrtos_fdt_node_count();
+        char base_model_buf[128];
+        uint32 out_len = 0u;
+        bld_t b;
+        uint32 flen;
+        int rc2;
+
+        strncpy(base_model_buf, arkrtos_fdt_model() ? arkrtos_fdt_model() : "",
+                sizeof(base_model_buf) - 1u);
+        base_model_buf[sizeof(base_model_buf) - 1u] = '\0';
+
+        arena = (unsigned char *)malloc(65536u);
+        check(arena != NULL, "overlay arena allocated");
+        if(arena != NULL)
+        {
+            const unsigned char *frag = NULL;
+            long frag_len = 0;
+
+            if(argc >= 3)
+            {
+                frag = load(argv[2], &frag_len);
+            }
+            check(frag != NULL, "fragment dtb given as argv[2]");
+
+            if(frag != NULL)
+            {
+                /* --- 1. 成功路径 --- */
+                rc2 = arkrtos_fdt_overlay(arena, 65536u, blob, (uint32)len,
+                                         frag, (uint32)frag_len, &out_len);
+                check(rc2 == ARKRTOS_FDT_OK, "overlay of the demo fragment succeeds");
+                check(out_len > 0u, "overlay reports a non-zero output length");
+
+                if(rc2 == ARKRTOS_FDT_OK)
+                {
+                    arkrtos_fdt_node_t n;
+                    uint32 u = 0u;
+
+                    /* 换树：新 blob 必须能被解析器完整接受 */
+                    check(arkrtos_fdt_init(arena, out_len) == ARKRTOS_FDT_OK,
+                          "merged blob parses");
+                    check(arkrtos_fdt_node_count() == base_nodes + 1u,
+                          "merged tree has exactly one new node");
+                    check(same(arkrtos_fdt_model(), "fdt-overlay-demo"),
+                          "model was overridden by the later fragment");
+
+                    check(arkrtos_fdt_node_by_path("/overlay-demo-node", &n)
+                          == ARKRTOS_FDT_OK,
+                          "new child node is reachable by path");
+                    check(same(arkrtos_fdt_prop_str(&n, "compatible"),
+                               "ark-overlay-demo"),
+                          "new child keeps its compatible");
+                    check(arkrtos_fdt_prop_u32(&n, "overlay-value", 0u, &u)
+                          == ARKRTOS_FDT_OK, "new child keeps its u32 property");
+                    check(u == 0x2au, "new child property value is 0x2a");
+
+                    /* 根上的新属性也得在 */
+                    check(arkrtos_fdt_node_by_path("/", &n) == ARKRTOS_FDT_OK,
+                          "root reachable in the merged tree");
+                    check(same(arkrtos_fdt_prop_str(&n, "overlay-demo"), "yes"),
+                          "root gained the overlay-demo property");
+
+                    /* 基树原有的节点没有被改动：随便挑一个必须还在 */
+                    check(arkrtos_fdt_node_count() == base_nodes + 1u,
+                          "no base node was lost");
+
+                    /* 恢复基树，后面的用例与最终报表都基于它 */
+                    check(arkrtos_fdt_init(blob, (uint32)len) == ARKRTOS_FDT_OK,
+                          "base tree restored after the overlay test");
+                }
+
+                /* --- 2. 拒绝路径：每一条必须报它自己的错误码 --- */
+                flen = bld_frag(&b, "/no-such-node", "overlay-demo", "yes",
+                                "overlay-new", 0);
+                check(flen > 0u, "bad-target fragment built");
+                check(arkrtos_fdt_overlay(arena, 65536u, blob, (uint32)len,
+                                         b.out, flen, &out_len)
+                      == ARKRTOS_FDT_ERR_OVERLAY_TARGET,
+                      "unknown target-path -> OVERLAY_TARGET");
+                check(arkrtos_fdt_node_count() == base_nodes,
+                      "base node count unchanged after a refused target");
+                check(same(arkrtos_fdt_model(), base_model_buf),
+                      "base model unchanged after a refused target");
+
+                /* target = <&label>：句柄形式，本子集不支持 */
+                bld_init(&b);
+                bld_begin(&b, "");
+                bld_begin(&b, "fragment@0");
+                bld_pu32(&b, "target", 0x1234u);
+                bld_begin(&b, "__overlay__");
+                bld_pstr(&b, "overlay-demo", "yes");
+                bld_end(&b);
+                bld_end(&b);
+                bld_end(&b);
+                flen = bld_finish(&b);
+                check(flen > 0u, "handle-target fragment built");
+                check(arkrtos_fdt_overlay(arena, 65536u, blob, (uint32)len,
+                                         b.out, flen, &out_len)
+                      == ARKRTOS_FDT_ERR_OVERLAY_TARGET,
+                      "target = <phandle> -> OVERLAY_TARGET");
+
+                /* 同名子节点：拿基树根的第一个直接子节点名 */
+                {
+                    arkrtos_fdt_iter_t it2;
+                    arkrtos_fdt_node_t n2;
+                    char dup_name[64];
+
+                    dup_name[0] = '\0';
+                    if(arkrtos_fdt_iter_init(&it2) == ARKRTOS_FDT_OK &&
+                       arkrtos_fdt_next(&it2, &n2) == 1)
+                    {
+                        strncpy(dup_name, n2.name, sizeof(dup_name) - 1u);
+                        dup_name[sizeof(dup_name) - 1u] = '\0';
+                    }
+                    check(dup_name[0] != '\0', "found an existing child name");
+
+                    flen = bld_frag(&b, "/", "overlay-demo", "yes", dup_name, 0);
+                    check(flen > 0u, "duplicate-child fragment built");
+                    check(arkrtos_fdt_overlay(arena, 65536u, blob, (uint32)len,
+                                             b.out, flen, &out_len)
+                          == ARKRTOS_FDT_ERR_OVERLAY_DUP,
+                          "duplicate child name -> OVERLAY_DUP");
+                    check(arkrtos_fdt_node_count() == base_nodes,
+                          "base node count unchanged after a duplicate child");
+                }
+
+                /* __symbols__：标签段，一律拒绝 */
+                flen = bld_frag(&b, "/", "overlay-demo", "yes", NULL, 1);
+                check(flen > 0u, "__symbols__ fragment built");
+                check(arkrtos_fdt_overlay(arena, 65536u, blob, (uint32)len,
+                                         b.out, flen, &out_len)
+                      == ARKRTOS_FDT_ERR_OVERLAY_TAG,
+                      "__symbols__ -> OVERLAY_TAG");
+
+                /* arena 太小 */
+                flen = bld_frag(&b, "/", "overlay-demo", "yes", NULL, 0);
+                check(flen > 0u, "size fragment built");
+                check(arkrtos_fdt_overlay(arena, 64u, blob, (uint32)len,
+                                         b.out, flen, &out_len)
+                      == ARKRTOS_FDT_ERR_OVERLAY_SIZE,
+                      "tiny arena -> OVERLAY_SIZE");
+                check(out_len == 0u, "out_len stays 0 when the arena is too small");
+
+                /* 坏魔数：报解析器的 MAGIC，不是 overlay 的码 */
+                flen = bld_frag(&b, "/", "overlay-demo", "yes", NULL, 0);
+                check(flen > 0u, "magic fragment built");
+                b.out[0] ^= 0xffu;
+                check(arkrtos_fdt_overlay(arena, 65536u, blob, (uint32)len,
+                                         b.out, flen, &out_len)
+                      == ARKRTOS_FDT_ERR_MAGIC,
+                      "bad fragment magic -> FDT_ERR_MAGIC");
+
+                /* 每个错误码都要有文字说明 */
+                check(arkrtos_fdt_overlay_reason(ARKRTOS_FDT_ERR_OVERLAY) != NULL,
+                      "overlay reason text exists");
+                check(arkrtos_fdt_overlay_reason(-99) != NULL,
+                      "unknown overlay code still yields text");
+
+                free((void *)frag);
+            }
+            free(arena);
+        }
+    }
+#endif /* ARKRTOS_USE_FDT_OVERLAY */
 
     free(blob);
     if(g_fail != 0)

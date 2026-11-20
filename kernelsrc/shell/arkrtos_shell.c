@@ -235,7 +235,8 @@ static int register_kernel_commands(void)
 #if (ARKRTOS_USE_FDT == 1)
     g_cmd_table[idx++] = ARK_SHELL_CMD("fdt", cmd_fdt,
         "Device tree: fdt | fdt path <abs> | fdt phandle <n> | fdt chosen | "
-        "fdt save <file> | fdt load <file>", 3);
+        "fdt get <path> <prop> | fdt overlay | fdt save <file> | "
+        "fdt load <file>", 4);
 #endif
     g_cmd_table[idx++] = ARK_SHELL_CMD("task", cmd_task,
         "List kernel tasks, or dump one task frame: task <id> (ids start at 1)", 3);

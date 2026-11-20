@@ -233,6 +233,7 @@ BLOCKS = [
     ], [
         ("override", "ARKRTOS_USE_FDT", "bool"),
         ("override", "ARKRTOS_USE_FDT_CONSOLE", "bool"),
+        ("override", "ARKRTOS_USE_FDT_OVERLAY", "bool"),
     ]),
 
     ("八、可靠性", [
