@@ -1504,9 +1504,14 @@ static int32 elf_stack_build(uint32 space, unsigned long win_top,
 *          都在 arkrtos_elf_exec_space() 里；这里只做"把这份文件装进这一块帧"。
 */
 /**
-* @brief 把一份 ELF 装进指定地址空间并起一个降权任务
-* @param space   目标地址空间（0 .. 空间数-1）；窗口 VA 在每个空间里相同
-* @param p_info  成功时填装载读数（不接收失败值）
+* @brief 把一份 ELF 装进指定地址空间（可选择顺手起一个降权任务）
+* @param space      目标地址空间（0 .. 空间数-1）；窗口 VA 在每个空间里相同
+* @param p_info     成功时填装载读数（不接收失败值）
+* @param start_task 1 = 起一个降权任务（exec / exec_space 这条老路）；
+*                   0 = 一个任务都不起，只把入口/栈指针/TLS 交回给调用方
+*                   （execve 要把**当前任务自己**的镜像换掉，见
+*                   arkrtos_elf_exec_replace）
+* @param p_tp       可为 0；非 0 时写回新镜像的 TLS 块地址（0 = 没有预置）
 * @details 静态档与动态档的区别只在「要不要先装一个解释器、入口跳谁」：
 *          - 静态档：段按 e_vaddr 落位，入口就是 e_entry；
 *          - 动态档（PT_INTERP 存在，ARKRTOS_USE_DYNLOAD=1）：主程序照样落位，
@@ -1516,7 +1521,8 @@ static int32 elf_stack_build(uint32 space, unsigned long win_top,
 *          没有解释器文件或解释器路径不合法时返回 ERR_INTERP，不半跑。
 */
 static int32 elf_load(uint32 space, const char *path, int32 argc,
-                      char *argv[], arkrtos_elf_info_t *p_info)
+                      char *argv[], arkrtos_elf_info_t *p_info,
+                      uint32 start_task, unsigned long *p_tp)
 {
     uint8 hdr[ELF_EHDR_SIZE];
     elf_word_t entry = 0;
@@ -1808,6 +1814,25 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
     /* 关键一步：stack_size 取到 argv 区起点，初始 sp 就会落在 argc 上。
      * 这里若改成「传栈大小 32 KB 再多给 16 KB」，sp 会指向参数数组中段，
      * 程序读到的 argc 是某个字符串的字节——一个只在运行期才暴露的错答案。 */
+    p_info->entry      = task_entry;
+    p_info->bytes      = bytes;
+    p_info->segs       = segs;
+    p_info->argc       = (uint32)argc;
+    p_info->sp         = sp;
+    p_info->stack_size = stack_bytes;
+    p_info->task       = 0;
+    if(p_tp != 0)
+    {
+        *p_tp = tp;
+    }
+
+    /* execve：镜像已经铺进调用者自己的空间，这里一个任务都不起。
+     * 入口/栈/TLS 三个值交给上层写回**当前任务的 trap 帧**。 */
+    if(start_task == 0u)
+    {
+        return ARKRTOS_ELF_OK;
+    }
+
     /* 装配期竞态（本轮实测根因之一）：arkrtos_task_register() 内部会把任务
      * 直接挂进就绪集，而「降权」与「MPU 窗口写回」是它之后才发生的两步。
      * 若在这中间被 tick 切走，任务会以半配置状态被切进：跑在 M 模式看到的是
@@ -1819,13 +1844,7 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
         return id;
     }
 
-    p_info->entry      = task_entry;
-    p_info->bytes      = bytes;
-    p_info->segs       = segs;
-    p_info->argc       = (uint32)argc;
-    p_info->sp         = sp;
-    p_info->stack_size = stack_bytes;
-    p_info->task       = id;
+    p_info->task = id;
 
     return ARKRTOS_ELF_OK;
 }
@@ -1896,7 +1915,7 @@ int32 arkrtos_elf_exec_space(const char *path, int32 argc, char *argv[],
     (void)arkrtos_paging_space_activate(space);
 #endif
 
-    rc = elf_load(space, path, argc, argv, &info);
+    rc = elf_load(space, path, argc, argv, &info, 1u, 0);
 
 #if (ARKRTOS_USE_PAGING == 1)
     (void)arkrtos_paging_space_activate(prev);
@@ -1935,6 +1954,81 @@ int32 arkrtos_elf_exec_space(const char *path, int32 argc, char *argv[],
 int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[])
 {
     return arkrtos_elf_exec_space(path, argc, argv, 0);
+}
+
+/**
+* @brief 把当前任务自己的镜像原地换掉（Linux execve 的内核落地）
+* @details 三件事决定了它不能走 arkrtos_elf_exec_space()：
+*          1) 不起新任务——execve 换的是镜像，不是进程；任务号必须保持不变，
+*             否则程序里的 getpid() 前后不同，fd 与定时器也没了归属；
+*          2) 写的是**自己现在这块空间**：新镜像覆盖旧镜像的段。窗口 VA 在
+*             所有空间里相同，所以这一步不需要换页表；内核自己也跑在别的
+*             地址上（低 16 MB），覆盖 App 页不影响正在执行的代码；
+*          3) 旧镜像的用户栈只被**帧之外**的部分复用：新镜像的段必须落在
+*             stack_bottom 以下（elf_check_range 已经守住），而 trap 帧与
+*             内核 C 栈在 stack_bottom..argv_start 之间，一个字节都不重叠。
+*          这一步之后旧镜像的代码/数据已经不可用，所以调用者必须在调用**之前**
+*          把 argv 字符串拷到内核里（见 arkrtos_linux_abi.c 的 lx_execve）。
+*          失败时窗口里可能已经躺着半个新镜像（与 arkrtos_elf_exec_space 同一
+*          口径）：旧镜像的段若已被覆盖就回不去了，所以调用者要按 Linux 的
+*          语义返回错误——这条路径上「失败」意味着程序状态已不可信。实际
+*          顺序是：先只校验（elf_check_image）再写，校验不过时窗口一个字节
+*          未动，旧镜像继续跑。
+*/
+int32 arkrtos_elf_exec_replace(const char *path, int32 argc, char *argv[],
+                               arkrtos_elf_info_t *p_info,
+                               unsigned long *p_tp)
+{
+    arkrtos_elf_info_t info;
+    uint32 space = 0u;
+    unsigned long tp = 0u;
+    int32 id;
+    int32 rc;
+
+    if((p_info == 0) || (p_tp == 0))
+    {
+        return ARKRTOS_ELF_ERR_PARAM;
+    }
+    id = (int32)arkrtos_current_task_id;
+    if(id <= 0)
+    {
+        return ARKRTOS_ELF_ERR_PARAM;
+    }
+#if (ARKRTOS_USE_PAGING == 1)
+    /* 自己绑在哪块空间就装到哪块空间：这里不挑空间、也不换页表。 */
+    space = arkrtos_paging_space_of(&arkrtos_task_table[id - 1]);
+#endif
+
+    info.entry      = 0u;
+    info.bytes      = 0u;
+    info.segs       = 0u;
+    info.argc       = 0u;
+    info.sp         = 0u;
+    info.stack_size = 0u;
+    info.task       = 0;
+    info.dynamic    = 0u;
+    info.interp_base = 0u;
+    info.interp_entry = 0u;
+#if (ARKRTOS_USE_EXIT_CODE == 1)
+    info.exit_code  = 0;
+    info.exit_code_set = 0u;
+#endif
+
+    rc = elf_load(space, path, argc, argv, &info, 0u, &tp);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return rc;
+    }
+
+    /* 台账跟着执行流走：这块空间的活实例还是同一个任务号，只是读数换了。 */
+    info.task         = id;
+    s_elf_task[space] = id;
+    s_elf_info[space] = info;
+    s_elf_last        = (int32)space;
+
+    *p_info = info;
+    *p_tp   = tp;
+    return ARKRTOS_ELF_OK;
 }
 
 int32 arkrtos_elf_running_in(uint32 space)

@@ -40,7 +40,7 @@ a purely Linux-ABI static binary with its own `_start`):
 **"A static program runs" is not "Linux is supported".** Section 3 lists what is
 explicitly unsupported.
 
-## 1 Supported syscalls (15, all measured)
+## 1 Supported syscalls (16, all measured)
 
 Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 
@@ -60,6 +60,7 @@ Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 | 175 | `geteuid` | always 0 | same path |
 | 214 | `brk` | monotonic allocation inside the ELF window | `brk(0)>0` / `brk(+4096) -> 34607104 ok` |
 | 215 | `munmap` | returns 0 only, **does not give the address back** | same path |
+| 221 | `execve` | replace the image of the **calling task**: load segments into its own window, write entry/`sp`/`tp` back into the trap frame; does not return on success | `stage2 pid==stage1 pid -> 11 ok` / `image reloaded (.data marker) -> 1 ok` / `fd 3 survived -> 1 ok` / `heap cursor reset -> 34668544 ok` / `exit code 42` (section 5) |
 | 222 | `mmap` | only `MAP_PRIVATE|MAP_ANONYMOUS`; `MAP_FIXED` refused | `mmap>0 -> 1 ok` / `mmap write/read -> 1 ok` |
 
 Unknown numbers return `-ENOSYS` (38) and are counted. Nothing is guessed.
@@ -82,12 +83,17 @@ return value is a separate port primitive
 
 ## 3 Explicitly unsupported
 
-`fork`/`clone`/`execve`, signals, fd inheritance / pipes / redirection,
+`fork`/`clone`, signals, fd inheritance / pipes / redirection,
 `socket`/`select`, `futex`, real `mmap` semantics (file-backed, shared,
 `MAP_FIXED`, permission bits), and threads. Each of these needs an object (a
 process, a user-side signal frame, a shared-memory wait queue) that Ark RTOS
 does not have; faking them would produce silently wrong answers. See the Chinese
 page for the reasoning per row.
+
+`execve` is no longer unsupported either: it replaces the image of the current
+task in place (section 5). What is still missing is the *process* object - there
+is no `fork`/`clone`, no address-space copy, and therefore no parent/child
+relation to inherit anything through.
 
 Dynamic linking no longer belongs in this list: with `ARKRTOS_USE_DYNLOAD` on,
 the kernel loads a `PT_INTERP` interpreter and ships a minimal in-tree
@@ -97,17 +103,96 @@ the kernel loads a `PT_INTERP` interpreter and ships a minimal in-tree
 ## 4 Deliberate degradations
 
 - **fd table** is kernel-global (`lx_fd_t s_fd[8]`, path + offset) and is reset
-  on every successful `exec`. There are no parents, so inheritance cannot be
-  faked.
+  by the shell's `exec` (which starts a *new* task). `execve` keeps the fds
+  opened before the call, as Linux does. There are no parents, so inheritance
+  still cannot be faked.
 - **heap**: `brk` and `mmap` share one monotonic region inside the 2 MB ELF
-  window (`0x02000000`), leaving 128 KB of stack below the top.
+  window (`0x02000000`), leaving 128 KB of stack below the top. A successful
+  `execve` resets the cursor: the old cursor's address meaning belongs to the
+  old image.
 - **`munmap` returns 0 without reclaiming**: pretending to free would leave the
   program using memory another task may own — a silently wrong answer.
 - **user pointers are never dereferenced directly**: everything goes through
   `arkrtos_copy_from_user()` / `arkrtos_copy_to_user()`, which judge legality by
   the task's four TCB window fields (`rom_start/rom_size/ram_start/ram_size`).
 
-## 5 Switch and zero footprint
+## 5 execve (221): replacing the image of the same task (2026-11-21, QEMU LA64)
+
+Linux `execve` replaces the current process image and does not return on
+success. Ark's window model (one static window per task, with the trap frame
+sitting in the user stack) lets it implement the **real** semantics instead of
+"start a new task and pretend it was an exec":
+
+- `elf_load()` gained a `start_task` switch: with 0 it only lays the segments
+  into the **caller's own window**, builds the user stack and returns
+  entry / `sp` / `tp` - no task is created;
+- `arkrtos_port_svc_exec_frame()` writes those three values into the **current
+  trap frame** (`ERA` / `SP` / `TP`, clears `a0..a7` and `ra`, keeps only the
+  PLV bits of `PRMD`) and ends with `dbar 0` + `ibar 0`. Overwriting the same
+  VAs without an icache sync is "run half of the old program"; QEMU cannot see
+  the difference, real hardware can;
+- why the in-place overwrite is safe: `elf_check_range()` confines segment
+  writes below `stack_bottom`, while the live stack, trap frame and kernel C
+  stack live in `[stack_bottom, argv_start)` and the new argc/argv are written
+  above `argv_start`.
+
+Three differences that stay in the title:
+
+1. `envp` is not consumed (this machine has no environment layer; the new image
+   receives the same empty table);
+2. the **fd table is preserved** (same as Linux, unlike the shell's `exec`,
+   which starts a new task and resets it);
+3. the old image's heap cursor is void; already-allocated addresses are not
+   reclaimed in any way (the old image is gone).
+
+Argument discipline: `path` and `argv` live in user memory and are overwritten
+as soon as loading starts, so they are copied into the kernel first (16 x 256
+byte static staging; over the limit returns `-E2BIG`).
+
+### Measured readout (`[execve]` lines, QEMU LA64)
+
+```
+[execve] stage1 pid=11
+[execve] stage1 fd=3
+[execve] stage1 brk(0)=34668544
+[execve] stage1 brk(+8192) -> 34676736 ok
+[execve] execve(missing) == -ENOENT -> -2 ok
+[execve] stage1 calling execve(/mnt/ram/linux_execve)
+[execve] stage2 pid=11
+[execve] stage2 pid==stage1 pid -> 11 ok
+[execve] image reloaded (.data marker) -> 1 ok
+[execve] fd 3 survived (ELF magic) -> 1 ok
+[execve] stage2 brk(0)=34668544
+[execve] heap cursor reset -> 34668544 ok
+[execve] PASS: same task, image reloaded, fd kept, heap reset
+[execve] finished after 0 ms, exit code 42
+```
+
+Each of the four criteria rules out one "looks right" implementation: equal
+`pid` rules out "a new task was started"; the `.data` marker returning to its
+file initial value rules out "only the trap frame was patched, PT_LOAD was not
+rewritten"; fd 3 still reading the ELF magic rules out "the fd table was reset
+along the way"; `brk(0)` returning to the base rules out "the old heap cursor
+was reused".
+
+**Anti-false-green (measured)**: turning `arkrtos_port_svc_exec_frame()` into
+"validate, then `return 0` without touching the frame" flips the readout to
+`[execve] FAIL: execve returned 35651560 (success must not return)` + `exit
+code 1`. The fixture carries its own second control: it first calls
+`execve("/mnt/ram/nope")` and expects `-ENOENT`, after which the program must
+keep running - failure is the returnable path.
+
+### Boundaries
+
+- No `fork` / `clone`: that needs address-space copying, and without it there
+  is no "who waits for whom" after `execve`.
+- No `execveat`, no `FEAT_EXECFD`; the argument limit is Ark's own 16 x 256,
+  not Linux `MAX_ARG_STRLEN` semantics.
+- Other ports (RV32 / Cortex-M / LA32) have no
+  `arkrtos_port_svc_exec_frame`; the weak definition in `hal.h` keeps them
+  linking and `execve` returns `-ENOSYS` at run time instead of pretending.
+
+## 6 Switch and zero footprint
 
 `ARKRTOS_USE_LINUX_ABI` (features header + Kconfig), default **0**, and
 `depends on ARKRTOS_USE_ELF`. With the switch off the whole
@@ -116,7 +201,7 @@ the kernel loads a `PT_INTERP` interpreter and ships a minimal in-tree
 gate measures this in both directions (the off-profile `.o` must have an empty
 symbol table).
 
-## 6 Gate
+## 7 Gate
 
 ```
 env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py [--no-build]
@@ -124,13 +209,13 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py [--no-build]
 
 13 items; prints `LINUX-ABI-GATE OK` when all pass and is invoked from
 `tools/ci_gate.py` as `linux-abi`: default-off, kconfig-wired, features-guard,
-board-switch, off-zero-symbols, port-wiring (two directions), compile-on (5 TUs
-under the real LA64 board), syscall-table (15 numbers vs asm-generic),
+board-switch, off-zero-symbols, port-wiring (two directions), compile-on (6 TUs
+under the real LA64 board), syscall-table (16 numbers vs asm-generic),
 abi-split-la64, abi-split-rv32, build, qemu-readout (14 checks + PASS + exit 7
 + the unrelated demos still intact), and parser-selfcheck (four deliberately
 broken logs must each be rejected).
 
-## 7 Two real bugs and one readout trap found on the way
+## 8 Two real bugs and one readout trap found on the way
 
 1. **Every user pointer returned `-EFAULT`**: `arkrtos_elf.c` wrote the task's
    rom/ram window fields inside `#if (ARKRTOS_USE_MPU == 1)`, but QEMU LA64 is
@@ -148,7 +233,7 @@ broken logs must each be rejected).
    traps were fixed too: killing on the marker prefix truncates `exit code 7`,
    and `-serial file:` drops the last sub-4 KB block on kill.
 
-## 8 Boundaries
+## 9 Boundaries
 
 This is the minimal syscall set that lets a static program run, not a Linux
 compatibility layer: no ptrace, no Linux `/proc`. The
@@ -157,3 +242,7 @@ inside the SVC with no extra thread, no blocking point. Going further requires a
 process object (for signal frames and a real libc surface) before anything
 else. Dynamic linking itself has its own switch (`ARKRTOS_USE_DYNLOAD`) and a
 minimal in-tree loader, but running glibc binaries is still out of reach.
+
+`execve` gives "replace this task's image", not "this system has processes":
+without `fork` there is no second task, and without an address-space copy there
+is no parent/child isolation. Do not read it as "Ark has processes now".

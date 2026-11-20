@@ -55,7 +55,7 @@
 
 | Linux 有 | Ark RTOS | 归类 |
 |---------|---------|------|
-| 进程（独立地址空间）+ `fork` / `exec` / `waitpid` | 没有 fork 语义：**一个 App = 一个地址空间 + 若干线程**，`fork` / `waitpid` 不提供。`exec` **有**，但它是内核 shell 命令（装载一个新 ELF 到新任务上跑），不是「替换当前进程映像」的系统调用；被装载的程序按 Linux 入口约定拿到 `sp -> argc/argv` | 取舍（fork）+ 已做（静态 ELF 装载） |
+| 进程（独立地址空间）+ `fork` / `exec` / `waitpid` | 没有 fork 语义：**一个 App = 一个地址空间 + 若干线程**，`fork` / `waitpid` 不提供。`exec` **有**两种形态：shell 的 `exec` 是内核命令（装载一个新 ELF 到新任务上跑），`execve`（Linux ABI 号 221，2026-11-21，QEMU LA64 实跑）是**真的替换当前任务映像**（任务号不变、fd 保留、成功不返回）；被装载的程序按 Linux 入口约定拿到 `sp -> argc/argv`。没有 `fork` 就没有父子，所以 `execve` 之后也没有 `wait` 与 fd 继承 | 取舍（fork）+ 已做（静态 ELF 装载与同任务 `execve`） |
 | `getpid` / `getppid` / PID 命名空间 | 只有内核任务号（任务表索引），`getpid` 只有桩 | 取舍 |
 | 动态链接、`.so` 共享库、ELF 加载器 | 两类输入并存：装应用的 `.svcapp` 容器（整体复制到 RAM），以及**静态链接的原生 ELF**（`exec`/`ld`，LA64 与 RV32 实跑；64 位/32 位字段表按 `__SIZEOF_LONG__` 选）。ELF 装载器只认 `PT_LOAD` + `e_entry`：`PT_INTERP`（动态链接）明确拒绝（`ERR_FORMAT`），**无 `.so`、无重定位后的共享库、无 Linux 系统调用 ABI**（`ecall` 走 Ark 的 `0x10..0x22`） | 取舍（动态链接、共享库）+ 欠账（Linux syscall ABI，见 [欠账盘点](欠账盘点.md)） |
 | `argv` / `argc` / 环境变量 | `.svcapp` 的 App 入口仍是 `main(void)`，没有 argv；**被 `exec` 装载的 ELF 程序按 Linux 入口约定拿到 `sp -> argc/argv`**（实测 `argc=4`、`argv[0..3]` 逐字对上），但**无 `environ`** | 取舍（`.svcapp`）+ 已做（ELF 的 argv） |

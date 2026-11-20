@@ -2929,6 +2929,52 @@ void arkrtos_port_svc_set_ret_signed(void *p_exc_ctx, int32 value)
      * 0x00000000FFFFFFEA 读成一个正数（"成功的假象"）。 */
     ((la_frame_word *)p_exc_ctx)[LA_FR_A0] = (la_frame_word)value;
 }
+
+/**
+* @brief 把当前任务的 trap 帧改写成「新镜像的第一条指令」（execve 落地）
+* @details 帧布局见 arkrtos_context.S 文件头：ERA 在 [30]、PRMD 在 [31]、
+*          sp 在 [2]、tp 在 [1]、a0..a7 在 [3..10]。这张帧就是 la_trap_c
+*          返回给 eentry 恢复的那一张，所以改完之后 ertn 直接跳进新镜像，
+*          中间不再经过任何用户态代码。
+*
+*          入口必须在 App 窗口内：窗口外的地址一恢复就会从别处取指，
+*          那是「跑起来了但跑的不是这个文件」——宁可拒绝。
+*
+*          写代码之后必须 dbar + ibar：新镜像的指令刚刚由内核写进同一个
+*          VA（execve 是**就地覆盖**，这些地址的旧指令很可能还在 I-cache 里）。
+*          QEMU 会按页作废翻译块，看不出差别；真机上省掉这两条就是
+*          「跑了旧程序的半截」。
+*/
+int32 arkrtos_port_svc_exec_frame(void *p_exc_ctx, unsigned long entry,
+                                  unsigned long sp, unsigned long tp)
+{
+    la_frame_word *frame = (la_frame_word *)p_exc_ctx;
+    uint32 i;
+
+    if((frame == 0) || (entry == 0UL) || ((entry & 3UL) != 0UL) || (sp == 0UL))
+    {
+        return -1;
+    }
+    if((entry < LA_WIN_VA) ||
+       (entry >= (LA_WIN_VA + (unsigned long)ARKRTOS_QEMU_APP_SIZE)))
+    {
+        return -1;
+    }
+
+    for(i = LA_FR_A0; i < (LA_FR_A0 + 8u); i++)
+    {
+        frame[i] = 0UL;
+    }
+    frame[LA_FR_RA]   = 0UL;
+    frame[LA_FR_SP]   = (la_frame_word)sp;
+    frame[LA_FR_TP]   = (la_frame_word)tp;
+    frame[LA_FR_ERA]  = (la_frame_word)entry;
+    frame[LA_FR_PRMD] = (frame[LA_FR_PRMD] & 3UL) | (unsigned long)LA_PRMD_INIT;
+
+    __asm__ volatile("dbar 0" ::: "memory");
+    __asm__ volatile("ibar 0" ::: "memory");
+    return 0;
+}
 #endif
 
 void arkrtos_port_disable_irq(void)

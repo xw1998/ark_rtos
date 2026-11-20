@@ -299,6 +299,29 @@ $(LXHELLO_H): $(LXHELLO_SIGNED) example/qemu_loongarch64/elf_blob.py
 
 $(BUILD)/example/qemu_loongarch64/elf_demo.o: $(LXHELLO_H)
 
+# execve 夹具（linux_execve.elf）：同一份文件里的两段代码，stage1 用
+# execve(221) 把自己换成新镜像、stage2 验任务号/fd/堆/.data 初值。
+LXEXEC_SRC := example/qemu_loongarch64/elf/linux_execve.c
+LXEXEC_ELF := $(BUILD)/linux_execve.elf
+LXEXEC_SIGNED := $(BUILD)/linux_execve.signed.elf
+LXEXEC_H   := $(BUILD)/linux_execve_blob.h
+
+$(LXEXEC_ELF): $(LXEXEC_SRC)
+	@mkdir -p $(BUILD)
+	$(CC) $(ARCH_FLAGS) -O2 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
+	      -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	      -Wl,-Ttext=$(WIN_ELF_BASE) -Wl,-e,_start -Wl,--strip-all \
+	      -Wl,-z,max-page-size=4096 -o $@ $< ;
+
+$(LXEXEC_SIGNED): $(LXEXEC_ELF) tools/sign_payload.py
+	python tools/sign_payload.py sign $(LXEXEC_ELF) --out $@ ;
+
+$(LXEXEC_H): $(LXEXEC_SIGNED) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(LXEXEC_SIGNED) \
+	       --output $@ --name ark_example_linux_execve ;
+
+$(BUILD)/example/qemu_loongarch64/elf_demo.o: $(LXEXEC_H)
+
 # ---------------------------------------------------------------------------
 # PT_TLS 示例（tls_main.elf）：装载器读 PT_TLS、把模板铺进窗口、把 $tp 指过去。
 #

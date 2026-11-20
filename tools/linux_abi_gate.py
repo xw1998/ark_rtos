@@ -118,6 +118,7 @@ EXPECT_SYS = {
     "GETEUID": 175,
     "BRK": 214,
     "MUNMAP": 215,
+    "EXECVE": 221,
     "MMAP": 222,
 }
 
@@ -368,13 +369,14 @@ def check_compile_on(la64, key_dir):
         "-O2", "-Wall", "-ffreestanding", "-fno-common",
         "-nostdlib", "-nostartfiles", "-fno-builtin", "-fsyntax-only",
         "example/qemu_loongarch64/elf/linux_hello.c",
+        "example/qemu_loongarch64/elf/linux_execve.c",
     ])
     if prog[0] != 0:
         bads.append("elf/linux_hello.c：\n%s" % prog[1][-400:])
     if bads:
         bad("compile-on", "开档编不过 —— " + bads[0])
     else:
-        ok("compile-on", "5 个 TU 在 LA64 真板级下全编过（含用户程序本身）")
+        ok("compile-on", "6 个 TU 在 LA64 真板级下全编过（含两个用户程序本身）")
 
 
 # ---------------------------------------------------------------- E 号表
@@ -393,7 +395,7 @@ def check_syscall_table():
     if problems:
         bad("syscall-table", "；".join(problems))
     else:
-        ok("syscall-table", "15 条号与 asm-generic 逐条相等")
+        ok("syscall-table", "16 条号与 asm-generic 逐条相等")
 
     la = read_text(os.path.join(ROOT, "kernelsrc/port/loongarch/la64/arkrtos_port.c"))
     rv = read_text(os.path.join(ROOT, "kernelsrc/port/riscv/rv32imac/arkrtos_port.c"))

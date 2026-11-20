@@ -37,7 +37,7 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 
 **「静态程序能跑」≠「支持 Linux」。** 第 3 节列的是明确不支持项，一条不含糊。
 
-## 1 支持的系统调用（15 个，全部有实测读数）
+## 1 支持的系统调用（16 个，全部有实测读数）
 
 编号取 `asm-generic`（LoongArch / RISC-V / ARM64 共用这一套）：
 
@@ -57,6 +57,7 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 | 175 | `geteuid` | 恒 0 | 走同一返回路径 |
 | 214 | `brk` | 窗口内单调分配（见 §4） | `brk(0)>0` / `brk(+4096) -> 34607104 ok` |
 | 215 | `munmap` | 只返 0，**不归还地址** | 走同一返回路径 |
+| 221 | `execve` | 同任务换镜像：铺段进调用者自己的空间、把入口/`sp`/`tp` 写回 trap 帧；成功不返回 | `stage2 pid==stage1 pid -> 11 ok` / `image reloaded (.data marker) -> 1 ok` / `fd 3 survived -> 1 ok` / `heap cursor reset -> 34668544 ok` / `exit code 42`（§5） |
 | 222 | `mmap` | 只认 `MAP_PRIVATE|MAP_ANONYMOUS`；拒 `MAP_FIXED` | `mmap>0 -> 1 ok` / `mmap write/read -> 1 ok` |
 
 未知号一律 `-ENOSYS`（38），并计数；**不猜**。
@@ -84,9 +85,9 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 | 项 | 现状 | 为什么 |
 |---|---|---|
 | 动态链接（`PT_INTERP` / `.so`） | **默认档仍拒**；打开 `ARKRTOS_USE_DYNLOAD` 后已支持（2026-11-20，QEMU LA64 实跑） | 内核按 Linux 约定装载解释器、铺 auxv、入口跳解释器，配一套自研 `ld-ark.so`；见 [动态链接与PT_INTERP](动态链接与PT_INTERP.md)。范围是「自研装载器 + 一级依赖 + 立即重定位」：现成发行版二进制仍跑不了（`ld.so` 是 glibc 的，仓里没有） |
-| `fork` / `clone` / `execve` | 无 | 没有进程、没有父子、没有地址空间复制；`exec` 由内核装载路径提供（shell 的 `exec` 命令），不是 `execve` 语义 |
+| `fork` / `clone` | 无 | 没有进程、没有父子；地址空间复制与「一个任务一块静态窗口」不是同一级工作量（`execve` 已支持同任务换镜像，见 §5） |
 | 信号（`rt_sigaction`/`kill`/`sigreturn`） | 无 | 需要用户栈上的信号帧与返回路径，Ark 的陷阱帧模型是另一套 |
-| `fd` 继承、管道、重定向 | 无 | fd 表是内核全局（§4），`exec` 时清零；没有父子可继承 |
+| `fd` 继承、管道、重定向 | 无 | fd 表是内核全局（§4），shell 的 `exec` 起新任务并清零；`execve` 保留 fd，但没有父子可继承 |
 | `socket` / `select` | 无（Ark 自己有一套 socket 兼容层，但**不在** Linux ABI 号表里） | 两套编号与阻塞语义不同，混在一个号表里只会给出错答案 |
 | `futex` | 无 | 没有共享内存与等待队列语义 |
 | 真 `mmap` 语义（文件映射/共享/`MAP_FIXED`/权限位） | 只做匿名私有分配，`RWX` 权限不区分 | 窗口式分配器（§4），兑现真语义需要页级权限与文件后端 |
@@ -94,10 +95,12 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 
 ## 4 降级实现，以及为什么这么降
 
-- **fd 表**：内核全局 `lx_fd_t s_fd[8]`（路径 + 偏移），`exec` 成功时 `reset`。
-  没有父子，所以不需要「每个进程一张表」；反过来，**不能**假装继承。
+- **fd 表**：内核全局 `lx_fd_t s_fd[8]`（路径 + 偏移），shell 的 `exec`（起新任务）
+  成功时 `reset`；`execve`（同任务换镜像）**保留** `execve` 之前的 fd，与 Linux
+  一致。没有父子，所以仍然谈不上「继承」。
 - **堆**：`brk` / `mmap` 共用 ELF 窗口内的一段（窗口 `0x02000000`，2 MB；堆从
-  窗口一半起，末尾留 128 KB 给栈）。单调向上分配，不回收。
+  窗口一半起，末尾留 128 KB 给栈）。单调向上分配，不回收；`execve` 成功时游标
+  归零（旧游标的地址语义属于旧镜像）。
 - **`munmap` 只返 0、不归还地址**：这是有意的。若「假装还了」，程序会认为那块
   内存仍可用而实际已被别的东西占用——那是**静默错答案**，比 `-ENOSYS` 坏得多。
 - **用户指针纪律**：兼容层**不直接解引用用户指针**，一律走
@@ -105,7 +108,71 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
   `rom_start/rom_size/ram_start/ram_size` 四个窗口字段）。越界返 `-EFAULT`。
   这条纪律是 2026-11-19 那个 bug 的直接产物（§7）。
 
-## 5 开关与零体积
+## 5 execve（221）：同任务换镜像（2026-11-21，QEMU LA64 实跑）
+
+Linux 的 `execve` 是「把当前进程的镜像换掉，成功后不返回」。Ark 的窗口模型
+（一个任务一块静态窗口、trap 帧就压在用户栈上）恰好让它能做到**真语义**，而不是
+「起一个新任务假装是 exec」：
+
+- 装载器 `elf_load()` 多了一个 `start_task` 开关：为 0 时只把段铺进**调用者
+  自己的空间**、铺好用户栈、把入口 / `sp` / `tp` 交回来，一个任务都不起；
+- port 层 `arkrtos_port_svc_exec_frame()` 把这三个值写回**当前 trap 帧**
+  （`ERA` / `SP` / `TP`、清 `a0..a7` 与 `ra`、`PRMD` 只留 PLV 位），末尾补
+  `dbar 0` + `ibar 0`：就地覆盖同一段 VA，不做 icache 同步就是「跑旧程序半截」，
+  QEMU 看不出差别，真机会。
+- 为什么能就地覆盖：段写入被 `elf_check_range()` 限制在 `stack_bottom` 以下，
+  而活栈/trap 帧/内核 C 栈都在 `[stack_bottom, argv_start)` 里，新 argc/argv 写在
+  `argv_start` 以上 ⇒ 覆盖的只是旧镜像的代码与数据，不碰马上要用的栈。
+
+三处必须写在标题上的不一致：
+
+1. `envp` 不消费：这台机器没有环境变量这一层，新镜像拿到同一张空表；
+2. **fd 表保留**（与 Linux 一致，但与 shell 的 `exec` 不同——后者起新任务、会 reset）；
+3. 旧镜像的堆游标作废，已分配的地址不做任何回收声明（旧镜像已经没了）。
+
+参数纪律：`path` 与 `argv` 都在用户内存里，且装载一开始就被覆盖，所以先全部拷进
+内核（16 × 256 字节静态暂存，越界回 `-E2BIG`）。
+
+### 实测读数（`[execve]` 行，QEMU LA64）
+
+```
+[execve] stage1 pid=11
+[execve] stage1 fd=3
+[execve] stage1 brk(0)=34668544
+[execve] stage1 brk(+8192) -> 34676736 ok
+[execve] execve(missing) == -ENOENT -> -2 ok
+[execve] stage1 calling execve(/mnt/ram/linux_execve)
+[execve] stage2 pid=11
+[execve] stage2 pid==stage1 pid -> 11 ok
+[execve] image reloaded (.data marker) -> 1 ok
+[execve] fd 3 survived (ELF magic) -> 1 ok
+[execve] stage2 brk(0)=34668544
+[execve] heap cursor reset -> 34668544 ok
+[execve] PASS: same task, image reloaded, fd kept, heap reset
+[execve] finished after 0 ms, exit code 42
+```
+
+四条判据各自排掉一种「看起来对」的实现：`pid` 相同排掉「起了新任务」；
+`.data` 标记回到文件初值排掉「只改 trap 帧、不重写 PT_LOAD」；`fd 3` 还能读出
+ELF 魔数排掉「顺手 reset 了 fd 表」；`brk(0)` 回到基点排掉「沿用旧堆游标」。
+
+**反假绿（实测）**：把 `arkrtos_port_svc_exec_frame()` 改成「校验完直接
+`return 0`、不改帧」，重编再跑，读数立刻变成
+`[execve] FAIL: execve returned 35651560 (success must not return)` + `exit code 1`。
+夹具内部还有一条独立的反假绿：先 `execve("/mnt/ram/nope")` 期望 `-ENOENT`，程序
+必须还能继续往下跑——失败是可返回的那条路径。
+
+### 边界
+
+- 没有 `fork` / `clone`：需要地址空间复制；也没有父子，所以 `execve` 之后没有
+  「谁等谁」。
+- 没有 `execveat`，没有 `FEAT_EXECFD`；参数上限是 Ark 自己的 16 × 256，不是
+  Linux 的 `MAX_ARG_STRLEN` 语义。
+- 其它 port（RV32 / Cortex-M / LA32）没有 `arkrtos_port_svc_exec_frame`，`hal.h`
+  里的弱定义让它们照样链接，运行期 `execve` 明确回 `-ENOSYS`——不把「没做」
+  说成「成功」。
+
+## 6 开关与零体积
 
 - `ARKRTOS_USE_LINUX_ABI`（`kernelsrc/include/arkrtos_features.h`、
   `config/kconfig/Kconfig.features`），默认 **0**，且 `depends on ARKRTOS_USE_ELF`
@@ -116,7 +183,7 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 - `arkrtos_autoconf.h` 由 `tools/kconfig/genconfig.py` 从 `config/arkrtos_defconfig`
   生成，新增 Kconfig 项后必须重跑一次，否则默认档读数里看不到这个开关。
 
-## 6 门禁：`tools/linux_abi_gate.py`
+## 7 门禁：`tools/linux_abi_gate.py`
 
 ```
 env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py        # 含 make
@@ -134,8 +201,8 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py --no-build
 | `board-switch` | QEMU LA64 板级显式置 1 |
 | `off-zero-symbols` | 关档 `.o` 符号表**全空**（不是「没测」） |
 | `port-wiring` | 关档无 `arkrtos_port_linux_syscall_num` / 开档有（两向） |
-| `compile-on` | LA64 真板级下 5 个 TU 全编过（含用户程序本身） |
-| `syscall-table` | 15 个号与 `asm-generic` 逐条相等 |
+| `compile-on` | LA64 真板级下 6 个 TU 全编过（含两个用户程序本身） |
+| `syscall-table` | 16 个号与 `asm-generic` 逐条相等 |
 | `abi-split-la64` | 立即数 == 0 是 Linux、!= 0 是 Ark |
 | `abi-split-rv32` | `0x10..0x22` 归 Ark，Linux 最小号 56 不撞 |
 | `build` | `make -f example/qemu_loongarch64/Makefile` 通过 |
@@ -145,7 +212,7 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py --no-build
 `parser-selfcheck` 是防「绿得没有信息量」的：去掉 PASS 行、退出码改 3、插一条
 FAIL、少一条 check，四种都必须被判红。
 
-## 7 本轮踩到的两个真 bug 与一个读数坑
+## 8 本轮踩到的两个真 bug 与一个读数坑
 
 **① 用户指针全部 `-EFAULT`：ELF 任务的窗口没写回。**
 现象是程序几乎不打印，`exec rc=0` 之后没有正文。根因：`arkrtos_elf.c` 里把
@@ -168,7 +235,7 @@ rodata 失败，因为栈窗口（32 KB）被单独设过，而代码窗口没�
 读到 marker 前缀就 kill 会把 `exit code 7` 截掉（加 0.5 s 宽限）；`-serial file:`
 后端在进程被 kill 时丢不满 4 KB 的尾块（改管道）。
 
-## 8 边界
+## 9 边界
 
 - 这一层的定位是「**能跑通静态程序的最小系统调用集合**」，不是 Linux 兼容层
   的完整实现。没有 ptrace、没有 `/proc`（Ark 自己的 procfs 另算）。ELF interpreter
@@ -180,5 +247,7 @@ rodata 失败，因为栈窗口（32 KB）被单独设过，而代码窗口没�
 - 下一步（若要用真正的 Linux 工具链产物）：动态链接的内核侧与自研装载器已落地
   （2026-11-20，见 [动态链接与PT_INTERP](动态链接与PT_INTERP.md)），但**离 glibc
   还差整条 libc 兼容面**——futex、rseq、TLS 初始化、文件映射、`mprotect` 真落实。
-  剩下的大头是用户栈上的信号帧与「进程」这个对象；在那之前，静态程序 + 这 15 个
+  剩下的大头是用户栈上的信号帧与「进程」这个对象；在那之前，静态程序 + 这 16 个
   号就是诚实上限。
+- `execve` 已有的是「同任务换镜像」，不是「有进程」：没有 `fork` 就没有第二个
+  任务，没有地址空间复制就没有父子隔离。这一条不要读成「Ark 有进程了」。

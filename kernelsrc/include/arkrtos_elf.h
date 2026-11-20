@@ -84,6 +84,30 @@ int32 arkrtos_elf_exec_space(const char *path, int32 argc, char *argv[],
                              uint32 *p_space);
 
 /** @brief 上一次成功装载的读数（最近一次的那个空间）；没有过成功装载时返回 ARKRTOS_ELF_ERR_PARAM */
+/**
+* @brief 把**当前任务自己**的镜像原地换掉（Linux execve 的内核落地）
+* @param path   VFS 路径（内核侧命名空间路径）
+* @param argc   参数个数（含 argv[0]）；0 表示补成 path
+* @param argv   已由调用方从**旧镜像**拷出的内核侧字符串数组
+* @param p_info 成功时填装载读数（task 字段是调用者的任务号）
+* @param p_tp   成功时写回新镜像的 TLS 块地址（0 = 这份镜像没有预置 TLS）
+* @return 0 / 负错误码
+* @details 语义与 Linux 的 execve 对齐到「同一个任务号继续跑新镜像」这一层：
+*          - 不起新任务、不换任务号（前后 getpid 相同）；
+*          - 旧镜像的段被新镜像覆盖，旧代码不再可达；
+*          - fd 表**不清空**：execve 不是「起一条新命令」，文件描述符属于
+*            任务而不是属于镜像；
+*          - 入口 / 栈指针 / TLS 由调用方写回当前任务的 trap 帧（port 层）。
+*          调用者必须**先把 argv 字符串拷进内核**：它们原本躺在旧镜像的
+*          参数区，装载一开始那块内存就归新镜像了。
+*          成功时不返回旧镜像（Linux 约定），失败返回负错误码、旧镜像继续跑。
+*          fork / 地址空间复制**不在**这条接口里。
+*/
+int32 arkrtos_elf_exec_replace(const char *path, int32 argc, char *argv[],
+                               arkrtos_elf_info_t *p_info,
+                               unsigned long *p_tp);
+
+/** @brief 上一次成功装载的读数（最近一次的那个空间）；没有过成功装载时返回 ARKRTOS_ELF_ERR_PARAM */
 int32 arkrtos_elf_info(arkrtos_elf_info_t *p_out);
 
 /** @brief 指定空间的那次装载读数 */
@@ -113,6 +137,7 @@ const char *arkrtos_elf_error_name(int32 rc);
 #define arkrtos_elf_running_in(space)           ((int32)0)
 #define arkrtos_elf_space_count()               ((int32)1)
 #define arkrtos_elf_last_space()                ((int32)(-1))
+#define arkrtos_elf_exec_replace(p, c, v, i, t)  ((int32)(-1))
 #define arkrtos_elf_info(out)                   ((int32)(-1))
 #define arkrtos_elf_info_space(space, out)      ((int32)(-1))
 #define arkrtos_elf_error_name(rc)              ("elf support not compiled in")

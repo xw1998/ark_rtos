@@ -103,6 +103,22 @@ uint32 arkrtos_port_linux_syscall_num(void *p_exc_ctx);
 *          读成一个很大的正数。宁可让返回值正确，也不给看似成功的错答案。
 */
 void   arkrtos_port_svc_set_ret_signed(void *p_exc_ctx, int32 value);
+
+/**
+* @brief 把当前任务的 trap 帧改写成「新镜像的第一条指令」（execve 的落地）
+* @param p_exc_ctx 当前系统调用的上下文指针
+* @param entry     新入口（必须在 App 窗口内、4 字节对齐）
+* @param sp        新用户栈指针（指向 argc）
+* @param tp        新镜像的 TLS 块地址（0 = 这份镜像没有预置 TLS）
+* @return 0 = 帧已改写；-1 = 参数不可用（此时一个字节都不动）
+* @details 这张帧就是 ertn 要恢复的那一张：改完之后内核直接返回用户态，
+*          **不再回到旧镜像**。通用寄存器一律清零（Linux 在 execve 之后
+*          不保留任何寄存器），PRMD 只留 PPLV、把 PIE 置 1。
+*          port 没有「同任务换镜像」能力时（目前 RISC-V / Cortex-M / LA32），
+*          由 arkrtos_linux_abi.c 里的弱定义顶住，execve 回 -ENOSYS。
+*/
+int32  arkrtos_port_svc_exec_frame(void *p_exc_ctx, unsigned long entry,
+                                   unsigned long sp, unsigned long tp);
 #endif
 
 

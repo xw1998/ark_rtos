@@ -11,7 +11,11 @@
 *            3) 错误以负 errno 返回，并在 64 位端口上做符号扩展
 *               （见 arkrtos_port_svc_set_ret_signed）。
 *
-*          明确不做的事（文档里逐条列出）：fork/execve、信号、fd 继承与
+*          做了一半的事：execve（221）已支持**同任务换镜像**（不起新任务、
+*          任务号不变、fd 表保留、堆游标归零）；fork / clone 仍然没有——
+*          那需要地址空间复制，与「一个任务一块窗口」的模型不是同一级工作量，
+*          假装支持只会给出错答案。
+*          明确不做的事（文档里逐条列出）：fork/clone、信号、父子 fd 继承与
 *          管道、socket、futex，以及真 mmap 语义。动态链接的**内核侧**
 *          （PT_INTERP + auxv）由 ARKRTOS_USE_DYNLOAD 单独提供，解释器
 *          本身是用户态程序；mprotect 接受但不强制（整窗 RWX，单独计数）。
@@ -35,6 +39,7 @@
 #include "arkrtos_fs.h"
 #include "arkrtos_vfs.h"
 #include "arkrtos_board.h"
+#include "arkrtos_elf.h"   /* execve：装载器接口与 ARKRTOS_ELF_ERR_* */
 
 /* ---------------------------------------------------------------- 常量 */
 
@@ -54,6 +59,7 @@
 #define LX_SYS_GETEUID              (175u)
 #define LX_SYS_BRK                  (214u)
 #define LX_SYS_MUNMAP               (215u)
+#define LX_SYS_EXECVE               (221u)
 #define LX_SYS_MMAP                 (222u)
 #define LX_SYS_MPROTECT             (226u)
 
@@ -61,7 +67,10 @@
 #define LX_EPERM                    (1)
 #define LX_ENOENT                   (2)
 #define LX_EIO                      (5)
+#define LX_E2BIG                    (7)
+#define LX_ENOEXEC                  (8)
 #define LX_EBADF                    (9)
+#define LX_EACCES                   (13)
 #define LX_ENOMEM                   (12)
 #define LX_EFAULT                   (14)
 #define LX_EBUSY                    (16)
@@ -76,6 +85,13 @@
 #define LX_MAX_FD                   (8u)
 #define LX_PATH_MAX                 (64u)
 #define LX_IO_CHUNK                 (128u)
+
+/* execve 的暂存区：旧镜像一旦被覆盖，用户地址上的 argv 就没了，所以
+ * 这些字符串必须在装载**之前**落进内核。16 个参数 × 256 字节与装载器
+ * 自己的上限（ARKRTOS_ELF_MAX_ARGS / MAX_ARG_LEN）同档，超了回 -E2BIG。 */
+#define LX_EXEC_ARGV_MAX            (16u)
+#define LX_EXEC_ARG_LEN             (256u)
+#define LX_EXEC_ARGV_BYTES          ((uint32)LX_EXEC_ARGV_MAX * (uint32)LX_EXEC_ARG_LEN)
 
 /* openat 标志位（asm-generic） */
 #define LX_O_ACCMODE                (0x3u)
@@ -152,6 +168,11 @@ static void lx_ret(void *p_ctx, int32 value)
  * 处理函数自己写回返回值，再返回 LX_RET_PTR_DONE 让分发器不覆盖。 */
 #define LX_RET_PTR_DONE     ((int32)0x7FFFFFFF)
 
+/* execve 成功：帧已经被改成新镜像的入口，这一路没有任何返回值要写。
+ * 用另一个哨兵而不用 0，是为了让「成功但不返回」与「返回 0」在分发器里
+ * 看得出区别。 */
+#define LX_RET_EXEC_DONE    ((int32)0x7FFFFF00)
+
 static void lx_ret_ptr(void *p_ctx, unsigned long value)
 {
     arkrtos_port_svc_set_ret(p_ctx, value);
@@ -163,17 +184,20 @@ static void lx_ret_ptr(void *p_ctx, unsigned long value)
 * @details 逐字节过 copy_from_user：它会对每一个字节核对是否落在调用者的
 *          窗口内，既不会越界读，也不会把内核地址当用户地址用。
 */
-static int32 lx_copy_path(void *p_ctx, uint32 idx, char *out, uint32 out_size)
+/**
+* @brief 把用户地址上的 NUL 结尾串拷进内核缓冲
+* @return 0 成功；-EFAULT 指针非法；-ENAMETOOLONG 在 cap 内没有 NUL
+*/
+static int32 lx_copy_user_str(unsigned long uaddr, char *out, uint32 cap)
 {
-    unsigned long uaddr = ARKRTOS_SVC_ARG(p_ctx, idx);
     uint32 i;
 
-    if((uaddr == 0u) || (out_size == 0u))
+    if((uaddr == 0u) || (out == 0) || (cap == 0u))
     {
         return -LX_EFAULT;
     }
 
-    for(i = 0u; i < out_size; i++)
+    for(i = 0u; i < cap; i++)
     {
         uint8 c = 0u;
 
@@ -190,6 +214,11 @@ static int32 lx_copy_path(void *p_ctx, uint32 idx, char *out, uint32 out_size)
     }
 
     return -LX_ENAMETOOLONG;
+}
+
+static int32 lx_copy_path(void *p_ctx, uint32 idx, char *out, uint32 out_size)
+{
+    return lx_copy_user_str(ARKRTOS_SVC_ARG(p_ctx, idx), out, out_size);
 }
 
 static void lx_copy_str(char *dst, uint32 cap, const char *src)
@@ -706,6 +735,133 @@ static int32 lx_munmap(void *p_ctx)
     return 0;
 }
 
+/* ------------------------------------------------ execve（同任务换镜像） */
+
+/* 没有「同任务换镜像」落地能力的 port（RISC-V / Cortex-M / LA32）不提供
+ * 这条符号：弱定义让那些构建照样链接，运行期 execve 明确回 -ENOSYS，
+ * 而不是把一个可信的 0 交给程序。 */
+__attribute__((weak)) int32
+arkrtos_port_svc_exec_frame(void *p_exc_ctx, unsigned long entry,
+                            unsigned long sp, unsigned long tp)
+{
+    (void)p_exc_ctx;
+    (void)entry;
+    (void)sp;
+    (void)tp;
+    return -1;
+}
+
+static int32 lx_exec_errno(int32 rc)
+{
+    switch(rc)
+    {
+    case ARKRTOS_ELF_ERR_FS:
+        return -LX_ENOENT;
+    case ARKRTOS_ELF_ERR_FORMAT:
+    case ARKRTOS_ELF_ERR_ARCH:
+    case ARKRTOS_ELF_ERR_LAYOUT:
+        return -LX_ENOEXEC;
+    case ARKRTOS_ELF_ERR_NOMEM:
+        return -LX_ENOMEM;
+    case ARKRTOS_ELF_ERR_BUSY:
+        return -LX_EBUSY;
+    case ARKRTOS_ELF_ERR_SIGN:
+        return -LX_EACCES;
+    case ARKRTOS_ELF_ERR_INTERP:
+        return -LX_ENOENT;
+    default:
+        return -LX_EINVAL;
+    }
+}
+
+/**
+* @brief execve(path, argv, envp)：把**当前任务自己**的镜像换掉
+* @details 与 Linux 一致的部分：任务号不变、fd 保留、成功不返回、失败
+*          返回负 errno 且旧镜像继续跑。
+*          与 Linux 不一致的部分（都在文档里写死）：
+*            - envp 不消费：这台机器没有环境变量这一层，新镜像拿到的是
+*              和刚起跑时同一张空表；
+*            - 地址空间不复制（没有 fork），所以没有「父子」这回事；
+*            - 旧镜像的堆游标作废（新镜像的 brk/mmap 从零开始），但**已分配
+*              的地址不做任何回收声明**——旧镜像已经没了，没有谁还在用它们。
+*          参数纪律：path 与 argv 都在用户内存里，且马上要被新镜像覆盖，
+*          所以全部先拷进内核再装载。
+*/
+static int32 lx_execve(void *p_ctx)
+{
+    static char argv_buf[LX_EXEC_ARGV_BYTES];
+    char  *argv[LX_EXEC_ARGV_MAX];
+    char   path[LX_PATH_MAX];
+    arkrtos_elf_info_t info;
+    unsigned long tp = 0ul;
+    unsigned long uargv;
+    uint32 used = 0u;
+    int32  argc = 0;
+    int32  rc;
+
+    rc = lx_copy_path(p_ctx, 0u, path, (uint32)sizeof(path));
+    if(rc != 0)
+    {
+        return rc;
+    }
+
+    uargv = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    if(uargv != 0u)
+    {
+        for(;;)
+        {
+            unsigned long up = 0ul;
+
+            if(argc >= (int32)LX_EXEC_ARGV_MAX)
+            {
+                return -LX_E2BIG;
+            }
+            if(arkrtos_copy_from_user(&up,
+                    (const void *)(unsigned long)(uargv +
+                        (unsigned long)(8u * (uint32)argc)), 8u) != 0)
+            {
+                return -LX_EFAULT;
+            }
+            if(up == 0ul)
+            {
+                break;
+            }
+            if((used + LX_EXEC_ARG_LEN) > LX_EXEC_ARGV_BYTES)
+            {
+                return -LX_E2BIG;
+            }
+            argv[argc] = &argv_buf[used];
+            rc = lx_copy_user_str(up, &argv_buf[used], LX_EXEC_ARG_LEN);
+            if(rc != 0)
+            {
+                return rc;
+            }
+            used += LX_EXEC_ARG_LEN;
+            argc++;
+        }
+    }
+    rc = arkrtos_elf_exec_replace(path, argc, argv, &info, &tp);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        /* 校验阶段就拒绝（格式/架构/布局/签名）：窗口一个字节没动，
+         * 旧镜像照常跑。这条路径上的失败是**可返回**的。 */
+        return lx_exec_errno(rc);
+    }
+
+    /* 到这里旧镜像已经被覆盖：帧一改就再也回不去了。所以下面这一步
+     * 不允许失败——port 只在「帧指针为空」或「入口不在窗口内」时拒绝，
+     * 而入口已经在装载器里校验过（elf_check_entry / 解释器区间）。 */
+    if(arkrtos_port_svc_exec_frame(p_ctx, info.entry, info.sp, tp) != 0)
+    {
+        return -LX_ENOSYS;
+    }
+
+    /* 新镜像的 brk/mmap 从窗口内那块堆的起点重新开始；旧游标属于旧镜像。 */
+    s_heap_cur = 0ul;
+
+    return LX_RET_EXEC_DONE;
+}
+
 /* ---------------------------------------------------------------- 入口 */
 
 int32 arkrtos_linux_abi_try(void *p_svc_ctx)
@@ -776,6 +932,9 @@ int32 arkrtos_linux_abi_try(void *p_svc_ctx)
     case LX_SYS_BRK:
         rc = lx_brk(p_svc_ctx);
         break;
+    case LX_SYS_EXECVE:
+        rc = lx_execve(p_svc_ctx);
+        break;
     case LX_SYS_MMAP:
         rc = lx_mmap(p_svc_ctx);
         break;
@@ -814,6 +973,12 @@ int32 arkrtos_linux_abi_try(void *p_svc_ctx)
     if(rc == LX_RET_PTR_DONE)
     {
         /* 地址类返回值已由处理函数按整字宽写回，这里不许再覆盖。 */
+        s_stat[LX_STAT_HANDLED]++;
+        return 1;
+    }
+    if(rc == LX_RET_EXEC_DONE)
+    {
+        /* execve 成功：帧已经是新镜像的入口，没有返回值可写（Linux 语义）。 */
         s_stat[LX_STAT_HANDLED]++;
         return 1;
     }

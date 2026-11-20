@@ -24,6 +24,7 @@
 #include "hello_blob.h"
 #if (ARKRTOS_USE_LINUX_ABI == 1)
 #include "linux_hello_blob.h"
+#include "linux_execve_blob.h"
 #include "arkrtos_linux_abi.h"
 #endif
 #if (ARKRTOS_USE_ELF_TLS == 1)
@@ -45,6 +46,7 @@
 #define DEMO_PATH           "/mnt/ram/hello"
 #if (ARKRTOS_USE_LINUX_ABI == 1)
 #define LX_DEMO_PATH        "/mnt/ram/linux_hello"
+#define LX_EXEC_PATH        "/mnt/ram/linux_execve"
 #endif
 #if (ARKRTOS_USE_ELF_TLS == 1)
 #define TLS_DEMO_PATH       "/mnt/ram/tls_main"
@@ -348,6 +350,81 @@ static void task_elf_demo(void)
 
                 demo_lock();
                 demo_puts("[linux] finished after ");
+                demo_putu(waited);
+                demo_puts(" ms, exit code ");
+                #if (ARKRTOS_USE_EXIT_CODE == 1)
+                if((arkrtos_elf_info(&info) == ARKRTOS_ELF_OK) &&
+                   (info.exit_code_set != 0u))
+                {
+                    demo_putu((uint32)info.exit_code);
+                }
+                else
+                {
+                    demo_puts("(not reported)");
+                }
+                #else
+                demo_puts("(exit code channel off)");
+                #endif
+                demo_puts("\n");
+                demo_unlock();
+            }
+        }
+    }
+#endif
+
+#if (ARKRTOS_USE_LINUX_ABI == 1)
+    /* execve 的现场证据：linux_execve 的 stage1 用 execve(221) 把**自己**换成
+     * 同一份文件的 stage2，然后验证四件事——任务号不变、fd 保留、堆游标归零、
+     * .data 回到文件初值。判据是退出码 42；任何一格不对都是 1。
+     * 反假绿在夹具内部：stage1 先 execve 一个不存在的路径，必须回 -ENOENT
+     * 且程序继续跑——失败是可返回的，这条路径上"看起来成功"会立刻把 42
+     * 变成 1（之后 stage1 打印 FAIL 并 exit 1）。 */
+    {
+        arkrtos_elf_info_t info;
+        char *xargv[1];
+
+        for(tries = 0u; tries < 100u; tries++)
+        {
+            rc = arkrtos_vfs_write_file(LX_EXEC_PATH, ark_example_linux_execve,
+                                        (uint32)ARK_EXAMPLE_LINUX_EXECVE_LEN);
+            if(rc >= 0)
+            {
+                break;
+            }
+            arkrtos_task_wait_internal(100u);
+        }
+
+        demo_puts("[execve] write ");
+        demo_puts(LX_EXEC_PATH);
+        demo_puts(" rc=");
+        demo_putu((uint32)rc);
+        demo_puts(" size=");
+        demo_putu((uint32)ARK_EXAMPLE_LINUX_EXECVE_LEN);
+        demo_puts("\n");
+
+        if(rc >= 0)
+        {
+            /* argv[0] 必须是真路径：夹具用它 openat 拿 fd，也用它 execve 自己。 */
+            xargv[0] = (char *)LX_EXEC_PATH;
+            rc = arkrtos_elf_exec(LX_EXEC_PATH, 1, xargv);
+
+            demo_lock();
+            demo_puts("[execve] exec rc=");
+            demo_putu((uint32)rc);
+            demo_puts("\n");
+            demo_unlock();
+
+            if(rc == ARKRTOS_ELF_OK)
+            {
+                waited = 0u;
+                while((arkrtos_elf_running() != 0) && (waited < DEMO_WAIT_MS))
+                {
+                    arkrtos_task_wait_internal(DEMO_POLL_MS);
+                    waited += DEMO_POLL_MS;
+                }
+
+                demo_lock();
+                demo_puts("[execve] finished after ");
                 demo_putu(waited);
                 demo_puts(" ms, exit code ");
                 #if (ARKRTOS_USE_EXIT_CODE == 1)
