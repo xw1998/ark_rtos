@@ -154,6 +154,15 @@
  * VxWorks 式可下载模块与上面的 ELF 装载器并列，不是替代关系。模块区是
  * 内核 .bss 里的一块静态缓冲，不用 heap；地址由链接器决定。代价写清楚：
  * 模块跑 PLV0，等于放弃 PLV3 隔离。
+ *
+ * 动态链接（PT_INTERP）的解释器区：2 MB 窗口从中间劈开——
+ *   主程序  [APP_BASE + 0x000000, APP_BASE + 0x100000)  1 MB
+ *   解释器  [APP_BASE + 0x100000, APP_BASE + 0x110000)  64 KB
+ *   堆/库   [APP_BASE + 0x110000, APP_BASE + 0x1E0000)
+ *   栈      [.., APP_BASE + 0x1F4000)
+ *   argv/auxv 区 [APP_BASE + 0x1F4000, APP_BASE + 0x200000)
+ * 解释器区与主程序区不重叠，装载器对两者都做区间判据；这两个宏只在
+ * ARKRTOS_USE_DYNLOAD=1 时才被读（关档零变化）。
  * ============================================================ */
 #undef  ARKRTOS_USE_ELF
 #define ARKRTOS_USE_ELF              1
@@ -163,15 +172,6 @@
 #define ARKRTOS_USE_EXIT_CODE        1
 #define ARKRTOS_ELF_WINDOW_BASE      ARKRTOS_QEMU_APP_BASE
 #define ARKRTOS_ELF_WINDOW_SIZE      ARKRTOS_QEMU_APP_SIZE
-
-/* 动态链接（PT_INTERP）的解释器区：2 MB 窗口从中间劈开。
- *   主程序  [APP_BASE + 0x000000, APP_BASE + 0x100000)  1 MB
- *   解释器  [APP_BASE + 0x100000, APP_BASE + 0x110000) 64 KB
- *   堆/库   [APP_BASE + 0x110000, APP_BASE + 0x1E0000)
- *   栈      [.., APP_BASE + 0x1F4000)
- *   argv/auxv 区 [APP_BASE + 0x1F4000, APP_BASE + 0x200000)
- * 解释器区与主程序区不重叠，装载器对两者都做区间判据；
- * 这两个宏只在 ARKRTOS_USE_DYNLOAD=1 时才被读（关档零变化）。 */
 #define ARKRTOS_ELF_INTERP_BASE      (ARKRTOS_ELF_WINDOW_BASE + 0x00100000u)
 #define ARKRTOS_ELF_INTERP_SIZE      (64u * 1024u)
 #undef  ARKRTOS_USE_MODLOAD
