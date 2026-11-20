@@ -89,6 +89,12 @@ static uint32 s_stack_b[TASK_STACK_WORDS];
 /* 存储任务单独给 4 KB：littlefs + VFS 这条链是本示例里最深的调用栈。
  * 栈不够的后果不是"变慢"，是回到别处的一个随机指针，所以按实测留余量。 */
 static uint32 s_stack_fs[FS_STACK_WORDS];
+
+/* 容量读数用的静态缓冲：640 KiB 正好比**旧整卷**（512 KiB）大，也大于
+ * 真实发行版静态 hello 的 623728 B。任务栈只有 4 KB，所以缓冲必须是静态的；
+ * 内容按偏移现算、读回来现比，不在内存里留第二份"原文"。 */
+#define FS_CAP_BYTES           (640u * 1024u)
+static uint8 s_cap_buf[FS_CAP_BYTES];
 static uint32 s_idle_stack[IDLE_STACK_WORDS];
 #if (ARKRTOS_USE_SMP_SCHED == 1)
 static uint32 s_stack_chk[TASK_STACK_WORDS];
@@ -190,7 +196,7 @@ static void task_b(void)
  *          全都只是文档上的话。四道读数：
 *
 *          1) 块设备：ram0 注册成功且能起得来（见 board/qemu_loongarch64/drvblk.c）；
-*          2) littlefs：format 一个 512 KB 的卷，再 mount 上去（挂载不格式化，
+*          2) littlefs：format 一个 4 MB 的卷，再 mount 上去（挂载不格式化，
 *             所以必须先 format，这是它自己的契约）；
 *          3) VFS：把同一个卷挂到 /mnt/ram，按路径写一个文件再读回来逐字节对比；
 *          4) procfs：读 /proc/version，证明 VFS 的另一个驱动也在岗。
@@ -324,6 +330,67 @@ static void task_fs(void)
         {
             ok = 0u;
             arkrtos_board_puts(" -> MISMATCH");
+        }
+        else
+        {
+            arkrtos_board_puts(" -> match");
+        }
+        arkrtos_board_puts("\n");
+    }
+
+    /* ---- 3b2) 容量：写一个比旧整卷还大的文件，读回来逐字节核对 ----
+     * 这条读数存在的理由很具体：真实发行版二进制（本机龙芯 glibc 工具链
+     * 编出的静态 hello 623728 B、它依赖的 libc.so.6 1571208 B）根本塞不进
+     * 旧卷。这里不看容量宏说什么，只看"真的写进去、真的读回来、字节对得上"。
+     * 负对照：长度或内容任一不符都判 FAIL，不给"差不多"的结论。 */
+    if(ok != 0u)
+    {
+        uint32 ncap = 0u;
+        uint32 bad  = 0u;
+        uint32 rcw;
+
+        for(i = 0u; i < FS_CAP_BYTES; i++)
+        {
+            s_cap_buf[i] = (uint8)((i * 31u + 7u) & 0xFFu);
+        }
+        rcw = (uint32)arkrtos_vfs_write_file("/mnt/ram/cap.bin", s_cap_buf,
+                                             (uint32)FS_CAP_BYTES);
+        arkrtos_board_puts("[FS] cap write rc=");
+        arkrtos_board_putu(rcw);
+        arkrtos_board_puts(" bytes=");
+        arkrtos_board_putu((uint32)FS_CAP_BYTES);
+
+        for(i = 0u; i < FS_CAP_BYTES; i++)
+        {
+            s_cap_buf[i] = 0u;
+        }
+        if(rcw == 0u)
+        {
+            (void)arkrtos_vfs_read_file("/mnt/ram/cap.bin", s_cap_buf,
+                                        (uint32)FS_CAP_BYTES, &ncap);
+        }
+        arkrtos_board_puts(" read len=");
+        arkrtos_board_putu(ncap);
+
+        if((rcw != 0u) || (ncap != (uint32)FS_CAP_BYTES))
+        {
+            bad = 1u;
+        }
+        else
+        {
+            for(i = 0u; i < FS_CAP_BYTES; i++)
+            {
+                if(s_cap_buf[i] != (uint8)((i * 31u + 7u) & 0xFFu))
+                {
+                    bad = 1u;
+                    break;
+                }
+            }
+        }
+        if(bad != 0u)
+        {
+            ok = 0u;
+            arkrtos_board_puts(" -> CAP MISMATCH");
         }
         else
         {

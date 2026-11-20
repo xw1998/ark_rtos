@@ -126,8 +126,9 @@ glibc rc1.4 / gcc 8.3.0，与发行版同源），**不下载 Alpine/Debian 镜�
 ```
 
 静态是**离得最近的一档**：没有动态标签、没有重定位、没有依赖链，只剩
-「地址」与「TLS」两道。但它 623 728 B，**比 `/mnt/ram` 的整个容量还大**
-（见 §5 第 6 条）。
+「地址」与「TLS」两道。它的 623 728 B 从 2026-11-20 起已经装得进
+`/mnt/ram`（卷从 512 KiB 扩到 4 MiB，见 §5 第 6 条），但装载器仍然只会
+把它判成 `[address]` 与 `[tls]` 两条 blocker。
 
 ---
 
@@ -135,17 +136,37 @@ glibc rc1.4 / gcc 8.3.0，与发行版同源），**不下载 Alpine/Debian 镜�
 
 | # | 门槛 | 真实二进制要什么（实测） | Ark 现在 | 还差什么 | 判据（探针标签） |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 地址空间 | `[0x120000000, 0x120008080)`（动态）/ `[0x120000000, 0x12008bb38)`（静态） | 固定窗口 `[0x02000000, 0x02200000)`，2 MB | 按 ELF 自己要的 VA 装：每进程独立 VA 空间 + 运行期建页表 | `[address]` |
+| 1 | 地址空间 | `[0x120000000, 0x120008080)`（动态）/ `[0x120000000, 0x12008bb38)`（静态） | 固定窗口 `[0x02000000, 0x02200000)`，2 MB；装载器把 `p_vaddr > 0xFFFFFFFF` 直接判 `ERR_LAYOUT`（32 位地址上限） | 按 ELF 自己要的 VA 装：**先把装载器的地址宽度升到 64 位**（判据、窗口切分、port 的 TLB 入口三层），再做每进程独立 VA 空间 + 运行期建页表 | `[address]` |
 | 2 | 解释器 | `PT_INTERP = /lib64/ld.so.1` | 默认档直接拒（`ERR_FORMAT`）；开 `ARKRTOS_USE_DYNLOAD` 后能装**本仓** `ld-ark.so`（`/mnt/ram/ld-ark.so`） | 真 glibc `ld.so` 的能力面（见 §7） | `[interp-path]` |
 | 3 | TLS | `PT_TLS`（动态继承自 libc：16/144；静态：32/96）+ 17 条 `R_LARCH_TLS_TPREL64` + `set_tid_address` | `arkrtos_elf.c` **完全不读 `PT_TLS`** | 建 TCB、铺 tdata/tbss、把 TP 指过去、`set_tid_address` 与线程指针语义 | `[tls]` |
 | 4 | 动态段标签 | `INIT_ARRAY`/`FINI_ARRAY`、`GNU_HASH`、`VERSYM`/`VERNEED`/`VERDEF`、`RELACOUNT`、`FLAGS` | `ld-ark.so` 只处理 `NEEDED/STRTAB/SYMTAB/RELA/RELASZ/RELAENT/STRSZ/SYMENT/JMPREL/HASH` 这几项 | 构造函数执行、符号版本匹配、GNU 哈希、`DF_1_NOW` 语义 | `[dynamic-tags]` |
 | 5 | 重定位 | `RELATIVE`、`64`、`JUMP_SLOT`、`IRELATIVE`(IFUNC)、`TLS_TPREL64` | 只做 `R_LARCH_64 / RELATIVE / JUMP_SLOT`（`ARK_SUPPORTED_RELOC`，门禁与 `ldso.c` 双向对齐） | IFUNC 解析器（装载期跑用户代码）+ TLS 重定位 | `[relocations]` |
-| 6 | 依赖链与存储 | `libc.so.6` 1 571 208 B；静态 hello 623 728 B | `/mnt/ram` 是 512 KiB 的 RAM 块设备上的 littlefs（`ARKRTOS_QEMU_BLK_SIZE = 512 * 1024`）；`CHIP_FLASH_SIZE` 2 MB、`CHIP_RAM_SIZE` 8 MB | 存储侧先得能放下（更大卷 / 直接从 flash 映射），再谈依赖递归 | `[needed]` + 容量 |
+| 6 | 依赖链与存储 | `libc.so.6` 1 571 208 B；静态 hello 623 728 B | `/mnt/ram` 是 **4 MiB** 的 RAM 块设备上的 littlefs（`ARKRTOS_QEMU_BLK_SIZE = 4 * 1024 * 1024`，2026-11-20 由 512 KiB 扩上来）；`CHIP_FLASH_SIZE` 2 MB、`CHIP_RAM_SIZE` 8 MB。**容量这道已实测通过**：开机写 640 KiB 文件再读回逐字节一致 | 只剩下依赖递归（`DT_NEEDED` 链的解析与装载） | `[needed]` |
 
 两条要写死的读法：
 
 - 第 6 条是**先决条件**，不是「顺便优化」。放不下就没得测，谈能力没意义。
+  它在 2026-11-20 已经过一次实测（见下）。
 - 第 1 条不解决，后面五条都采不到真实分布——这也是 §8 那句边界的根因。
+
+### 5.1 存储这一道的实测读数（2026-11-20）
+
+改的是板级一个常量与一处自检，不是「把窗口搬了」：
+
+| 项 | 改前 | 改后 |
+| --- | --- | --- |
+| `ARKRTOS_QEMU_BLK_SIZE` | 512 KiB | **4 MiB** |
+| 容量读数 | 无（只有 `size=524288` 一行） | 开机写 `/mnt/ram/cap.bin` 655 360 B 再读回，逐字节比对 |
+| QEMU 输出 | — | `[FS] cap write rc=0 bytes=655360 read len=655360 -> match` |
+| 镜像 `.bss` | 786 964 B | 5 112 340 B（+4 MiB 介质 +640 KiB 缓冲） |
+
+为什么取 4 MiB：本机龙芯 glibc 工具链的静态 hello 623 728 B 与它依赖的
+`libc.so.6` 1 571 208 B 加起来 2.19 MB，旧卷（512 KiB）连一份都放不下。
+640 KiB 的容量文件比旧**整卷**还大，所以这条读数证明的是「卷真的能装下
+比过去整卷更大的东西」，而不只是念了一遍容量宏。
+
+**没有因此变绿的东西**：地址与 TLS 两道原样未动，静态 hello 仍然跑不起来。
+存储只从「连门都进不去」变成「装得进去、装载器明确拒绝并给理由」。
 
 ---
 
@@ -310,8 +331,9 @@ py -3 tools/realbin_gate.py        # 7 项，全过打印 REALBIN-GATE OK
 **本轮明确没有做的：**
 
 1. 真实发行版**跑不起来**（六道门槛一道未过）——本轮交付的是账本与仪器。
-2. 静态 hello 623 728 B 与 `libc.so.6` 1 571 208 B **都超过 `/mnt/ram` 的
-   512 KiB**，所以「把库拷进 /mnt/ram 试试」这条捷径现在连门都进不去。
+2. 存储已经不是拦路的那一道（4 MiB 卷 + 640 KiB 文件往返核对），但静态
+   hello 与 `libc.so.6` 仍然跑不起来：卡在**地址**（装载器 32 位 VA 上限）
+   与 **TLS** 两道，与容量无关。
 3. `[lxstat]` 的读数是**合成触发**的 11 个号，不是真实分布（见 §8）。
 4. 探针不解析 `PT_NOTE`、不读 `.gnu.attributes`（ABI 标记）、不判 `RELRO`
    到「能否强制」这一层——`RELRO=True` 只是描述，不构成 blocker。
@@ -320,6 +342,13 @@ py -3 tools/realbin_gate.py        # 7 项，全过打印 REALBIN-GATE OK
 6. 没有真实 `ld.so` 的兼容面测试，也没有任何「按 glibc 契约跑起来」的实验
    （§7 说明为什么这条路不立项）。
 
-**下一步的最小一步**（如果继续推进）：做第 1 档——装载器从「固定 2 MB 窗口」
-改成「按 `PT_LOAD` 的 VA 装 + 运行期建页表」，再把 `PT_TLS` 读进来建 TCB。
-这两件事各自都能用 QEMU 读数判据钉住，而且它们是后面每一档的公共前置。
+**下一步的最小一步**（如果继续推进）：先做第 1 道的一半——把装载链的
+**地址宽度升到 64 位**。这一步不能省：`arkrtos_elf.c` 现在对
+`p_vaddr > 0xFFFFFFFF` 直接返回 `ERR_LAYOUT`，窗口切分与 port 的 TLB
+入口（`uint32 va`）也都是 32 位，所以「把窗口从 2 MB 挪到 0x120000000」
+这句话在现有代码里根本表达不出来。顺序是：判据 → 窗口切分 → port 的
+窗口 VA 与 TLB 入口 → 再谈每进程 VA 空间。
+
+之后才是 `PT_TLS`：建 TCB、铺 tdata/tbss、把 TP 指过去、补
+`R_LARCH_TLS_TPREL64` 与 `set_tid_address` 语义。两件事各自都能用 QEMU
+读数钉住，而且它们是后面每一档的公共前置。

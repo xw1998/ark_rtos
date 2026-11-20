@@ -29,8 +29,14 @@
 /** 注册名（文件系统卷挂在它上面） */
 #define ARKRTOS_QEMU_BLK_NAME        "ram0"
 
-/** 容量 */
-#define ARKRTOS_QEMU_BLK_SIZE        (512u * 1024u)
+/** 容量
+ *  @note 4 MiB 不是为了"越大越好"，而是为了让**真实发行版二进制装得下**：
+ *        本地龙芯 glibc 工具链编出来的静态 hello 是 623728 B、它依赖的
+ *        libc.so.6 是 1571208 B，两样加起来 2.1 MB 已经超过旧卷（512 KiB）
+ *        的四倍。卷再大就要动内核 RAM 预算（本板 RAM 8 MB、.bss 现约
+ *        0.8 MB），所以取"够放下一份真实静态二进制 + 一份 libc"的最小值。
+ */
+#define ARKRTOS_QEMU_BLK_SIZE        (4u * 1024u * 1024u)
 
 /** 擦除单位（与 littlefs 的 block size 一致） */
 #define ARKRTOS_QEMU_BLK_ERASE       (4096u)

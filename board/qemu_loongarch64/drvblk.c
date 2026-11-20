@@ -3,7 +3,7 @@
 * @brief QEMU `virt`（LoongArch64）板级块设备：RAM 里模拟 NOR 语义的一卷存储
 * @details 设计边界写在 drvblk.h 顶部。这里只强调实现上的三个决定：
 *
-*          1) **存储放在 .bss**（512 KB）。QEMU 的 DRAM 有 128 MB，内核 RAM
+*          1) **存储放在 .bss**（4 MB）。QEMU 的 DRAM 有 128 MB，内核 RAM
 *             段 8 MB，链接脚本末尾有 ASSERT 兜住溢出——所以"够不够放"由链接期
 *             回答，不在运行期猜。
 *          2) **写只允许 1→0**：和 NOR 一样，任何一个目标字节不是 0xFF 就整笔
@@ -22,7 +22,9 @@
 #include "arkrtos_blk.h"
 #include "drvblk.h"
 
-/* 512 KB 的"介质"。对齐到擦除单位，便于将来换成 DMA 直连的窗口。 */
+/* 4 MB 的"介质"。对齐到擦除单位，便于将来换成 DMA 直连的窗口。
+ * 尺寸按"装得下一份真实静态二进制（623728 B）+ 一份 libc（1571208 B）"
+ * 定，不是随手取的圆整值。 */
 static uint8 s_ram_nor[ARKRTOS_QEMU_BLK_SIZE]
     __attribute__((aligned(ARKRTOS_QEMU_BLK_ERASE)));
 

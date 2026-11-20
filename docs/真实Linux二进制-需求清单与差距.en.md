@@ -118,8 +118,9 @@ blockers (2, dependency order):
 ```
 
 Static is **the closest tier**: no dynamic tags, no relocations, no dependency
-chain — only address and TLS. But 623 728 B is **larger than all of `/mnt/ram`**
-(see gate 6).
+chain — only address and TLS. Since 2026-11-20 its 623 728 B does fit in
+`/mnt/ram` (the volume grew from 512 KiB to 4 MiB, see gate 6), but the loader
+still reports exactly the `[address]` and `[tls]` blockers.
 
 ---
 
@@ -127,17 +128,18 @@ chain — only address and TLS. But 623 728 B is **larger than all of `/mnt/ram`
 
 | # | Gate | What the real binary wants (measured) | Ark today | Missing | Probe tag |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Address space | `[0x120000000, …)` | fixed 2 MB window `[0x02000000, 0x02200000)` | load at the VA the ELF asks for: per-process space + page tables built at run time | `[address]` |
+| 1 | Address space | `[0x120000000, …)` | fixed 2 MB window `[0x02000000, 0x02200000)`; the loader rejects `p_vaddr > 0xFFFFFFFF` as `ERR_LAYOUT` (32-bit ceiling) | load at the VA the ELF asks for: **widen the loader chain to 64-bit addresses first** (checks, window split, the port TLB entry), then per-process space + page tables built at run time | `[address]` |
 | 2 | Interpreter | `PT_INTERP=/lib64/ld.so.1` | default: rejected (`ERR_FORMAT`); with `ARKRTOS_USE_DYNLOAD`: loads this repo's `ld-ark.so` only | the real glibc `ld.so` capability surface (§7) | `[interp-path]` |
 | 3 | TLS | `PT_TLS` (16/144 inherited from libc; 32/96 static) + 17 `R_LARCH_TLS_TPREL64` + `set_tid_address` | `arkrtos_elf.c` **never reads `PT_TLS`** | build the TCB, lay out tdata/tbss, point TP at it | `[tls]` |
 | 4 | Dynamic tags | `INIT_ARRAY`/`FINI_ARRAY`, `GNU_HASH`, `VERSYM`/`VERNEED`/`VERDEF`, `RELACOUNT`, `FLAGS` | `ld-ark.so` handles only `NEEDED/STRTAB/SYMTAB/RELA/RELASZ/RELAENT/STRSZ/SYMENT/JMPREL/HASH` | run constructors, match symbol versions, GNU hash, `DF_1_NOW` | `[dynamic-tags]` |
 | 5 | Relocations | `RELATIVE`, `64`, `JUMP_SLOT`, `IRELATIVE` (IFUNC), `TLS_TPREL64` | only `R_LARCH_64 / RELATIVE / JUMP_SLOT` (both-aligned with `ldso.c` by the gate) | an IFUNC resolver (user code at load time) and TLS relocations | `[relocations]` |
-| 6 | Dependency chain and storage | `libc.so.6` 1 571 208 B; static hello 623 728 B | `/mnt/ram` is a littlefs on a 512 KiB RAM block device (`ARKRTOS_QEMU_BLK_SIZE = 512 * 1024`); flash 2 MB, RAM 8 MB | storage first (bigger volume, or map straight from flash), then dependency recursion | `[needed]` + capacity |
+| 6 | Dependency chain and storage | `libc.so.6` 1 571 208 B; static hello 623 728 B | `/mnt/ram` is a littlefs on a **4 MiB** RAM block device (`ARKRTOS_QEMU_BLK_SIZE = 4 * 1024 * 1024`, raised from 512 KiB on 2026-11-20); flash 2 MB, RAM 8 MB. **Capacity itself is now measured**: a 640 KiB file is written and read back byte-identical at boot | only dependency recursion (`DT_NEEDED` chain) is left | `[needed]` |
 
 Two readings to keep straight:
 
 - Gate 6 is a **precondition**, not an optimisation. If it does not fit, there is
-  nothing to measure.
+  nothing to measure. It was measured once on 2026-11-20 (below).
+- Gate 1 blocks the other five from being measured against a real distribution.
 - Until gate 1 is solved, the other five cannot be sampled on a real binary —
   which is exactly the root cause of the §8 boundary.
 
@@ -294,8 +296,9 @@ check compiles to 2736 B of text instead of 2792 B. Kernel side 0 B,
 
 1. Stock distribution binaries **do not run** — this round delivers the ledger
    and the instrument, not the capability.
-2. Static hello 623 728 B and `libc.so.6` 1 571 208 B **both exceed the 512 KiB
-   `/mnt/ram` volume**, so "just copy the library in and try" cannot even start.
+2. Storage is no longer the blocker (4 MiB volume, 640 KiB round-trip checked),
+   yet static hello and `libc.so.6` still do not run: they are stopped by
+   **address** (32-bit VA ceiling in the loader) and **TLS**, not by capacity.
 3. The `[lxstat]` numbers are **synthetic** (11 numbers), not a real profile.
 4. The probe does not parse `PT_NOTE` or `.gnu.attributes` (ABI flags), and the
    `RELRO=True` field is descriptive, not a blocker.
@@ -304,7 +307,14 @@ check compiles to 2736 B of text instead of 2792 B. Kernel side 0 B,
 6. No compatibility testing against a real `ld.so`, and no experiment aimed at
    satisfying glibc's contract (§7 explains why that is not a work item).
 
-**The smallest next step**, if this continues: tier 1 — make the loader place
-segments at the VA the ELF asks for (per-process space, page tables built at run
-time), then read `PT_TLS` and build the TCB. Both can be pinned by QEMU
-readouts, and both are shared prerequisites for every later tier.
+**The smallest next step**, if this continues: half of gate 1 — **widen the
+loader chain to 64-bit addresses**. It cannot be skipped: `arkrtos_elf.c`
+currently returns `ERR_LAYOUT` for any `p_vaddr > 0xFFFFFFFF`, and both the
+window split and the port TLB entry (`uint32 va`) are 32-bit, so "move the
+window to 0x120000000" is not even expressible today. Order: checks → window
+split → port window VA and TLB entry → then per-process VA spaces.
+
+Only after that comes `PT_TLS`: build the TCB, lay out tdata/tbss, point TP at
+it, and add `R_LARCH_TLS_TPREL64` plus `set_tid_address` semantics. Both can be
+pinned by QEMU readouts, and both are shared prerequisites for every later
+tier.

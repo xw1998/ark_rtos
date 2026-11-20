@@ -5910,6 +5910,10 @@ make -f example/la32_generic/Makefile size
 - 与最小档（text 52280 / bss 15968）相比，text +161 KB、bss +562 KB
   （其中 512 KB 是 `drvblk.c` 的 RAM 介质）。链接脚本的 ASSERT 没有被触发，
   即该镜像仍落在参考映射的 8 MB 内核 RAM 段内。
+  > 这是 2026-11-16 的读数。2026-11-20 起 LA64 板的 RAM 介质已从 512 KiB
+  > 扩到 4 MiB（为了让真实发行版二进制装得下），所以「512 KB 介质」这句只
+  > 描述当时；现在的 `.bss` 是 5 112 340 B（4 MiB 介质 + 640 KiB 容量缓冲），
+  > 仍在 8 MB 内核 RAM 段内。
 - 干净重建全量编译告警 **1 条**：`arkrtos_sync.c:518 'p_tsk' may be used
   uninitialized` —— 内核既有告警，la64 上同样存在，与本轮改动无关。
   （最小档曾出现 14 条 `variably modified 'arkrtos_app_off_*_check'`，
