@@ -684,17 +684,22 @@ def check_fdt():
     C 平表逐节点对账且变异会被抓；LA64 整镜像编得过并真跑一遍（开机
     `[fdt] blob=<n> rc=0 model=... nodes=<k>`，n 必须等于 build 里那个 .dtb 的
     字节数）；同一次启动里 dt（C 平表）与 fdt（解析出的 blob）输出逐行相同。
-    两个读数的判据各自喂坏样本，必须被判红。
+    两个读数的判据各自喂坏样本，必须被判红。同一次启动里还要证明
+    `/chosen/stdout-path` 被消费（[fdt] console ... reason=ok match=1）、
+    路径 / 别名 / phandle 指向同一个节点、fdt save+load 往返 nodes 不变、
+    空文件被拒且旧树保留。
 
-    不覆盖：dtb 动态加载、/chosen 与 stdout-path 的消费、overlay。
+    不覆盖：dtb overlay（1c 未做）、bootloader 交 dtb、镜像重定位。
     """
     r = _run_check([sys.executable, os.path.join("tools", "fdt_gate.py")])
     txt = ((r.stdout or "") + (r.stderr or "")).strip()
     if r.returncode == 0 and "FDT-GATE OK" in txt:
         ok("fdt",
            "default off zero symbols / 6 boards dtb-vs-C-table + 6 mutation caught / "
-           "LA64 build / boot blob==dtb size, nodes=7 / dt==fdt line by line / "
-           "8 self-check")
+           "LA64 build / boot blob==dtb size, nodes=8 / dt==fdt line by line / "
+           "console path+baud match / fdt chosen+path+phandle same node / "
+           "save+load nodes unchanged, empty file refused and old tree kept / "
+           "4 self-check groups")
     else:
         fail("fdt", txt[-320:])
 
