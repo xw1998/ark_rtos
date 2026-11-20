@@ -192,18 +192,20 @@ config ARKRTOS_USE_FPU
 	bool "FPU context switching"
 	default n
 	help
-	  LA64 硬件有 FPU。打开后做两件事：启动时（start.S 的 _start，早于任何
+	  LA64 硬件有 FPU。打开后做三件事：启动时（start.S 的 _start，早于任何
 	  C 代码）置 EUEN.FPE=1（不开的话第一条 FP 指令就落 ESTAT.Ecode=15
-	  FPD），以及把 trap
-	  帧从 256 字节扩到 528 字节、按任务保存 $f0..$f31（eentry / 就地切换
-	  / resume_task 三处统一存取）。关掉则帧仍是 256 字节、不碰 EUEN，
-	  与打开前逐条指令相同。
+	  FPD）；把 trap 帧从 256 字节扩到 528 字节、按任务保存 $f0..$f31（eentry /
+	  就地切换 / 次核入口三处存，resume_task 只恢复）；以及在帧偏移 512 保存 FCSR。
+	  关掉则帧仍是 256 字节、不碰 EUEN，与打开前逐条指令相同。
 	
-	  已知边界：FCSR（舍入模式与异常标志）和 LSX/LASX 向量寄存器**不**保存。
-	  本工具链 binutils 8.3 不认识 movfcsr2gr/movgr2fcsr（实测 assembler
-	  no match insn），手写编码没有可信验证来源，按「宁可报错也不给不可靠
-	  的东西」不写。发行版基线二进制用不到 LSX，真用到会落 Ecode=13 INE，
-	  是显式故障而不是静默算错。
+	  FCSR（舍入模式 / 异常使能）也按任务保存，槽位在帧偏移 512（帧长仍是
+	  528，不增加任何栈预算）。本工具链 binutils 2.31 的 as 不认识
+	  movfcsr2gr/movgr2fcsr，所以 arkrtos_context.S 里写的是字面编码；编码来自真
+	  glibc 静态二进制 fe.elf 里生产使用的指令，经同一套 objdump 反汇编
+	  确认，并用 .word 往返 assembler/objdump 验证一致。
+
+	  已知边界：LSX/LASX 向量寄存器**不**保存。发行版基线二进制用
+	  不到 LSX，真用到会落 Ecode=13 INE，是显式故障而不是静默算错。
 
 config ARKRTOS_USE_MPU
 	bool "ARM MPU"

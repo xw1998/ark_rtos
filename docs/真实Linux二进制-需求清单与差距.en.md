@@ -258,9 +258,10 @@ instrument before trusting the instrument**.
    no `set_tid_address`. The static hello touches none of them, so it running does
    **not** prove those work.
 3. `exit code 3` is the program's own `return 3`, not a broken exit path.
-4. FCSR and LSX/LASX vector registers are **not saved** (binutils 8.3 does not
-   assemble `movfcsr2gr/movgr2fcsr`, and unverified encodings are not guessed; a real
-   LSX instruction would raise an explicit `Ecode=13 INE`).
+4. FCSR (rounding mode and exception-enable bits) **is saved per task now** (§5.5:
+   QEMU PASS plus a control run with the save/restore lines removed that prints
+   FAIL). LSX/LASX vector registers are still **not saved**; a real LSX instruction
+   raises an explicit `Ecode=13 INE`.
 5. The upload path measures 2 151-2 240 B/s, so 623 760 B takes 278-339 s. It goes over
    the serial console instead of "embedded into the image" because the 2 MB flash
    window / 512 KB kernel pool geometry cannot hold this binary (see the header of
@@ -353,11 +354,81 @@ The built-in fixture still passes in the same profile: `[tls] finished after
    `ARKRTOS_USE_ELF_TLS` implements the variant-I convention for programs
    without libc initialisation (`TP = TLS block start`), **not** glibc's
    `tcbhead_t`/`dtv` layout.
-2. `R_LARCH_TLS_TPREL64` relocations and `set_tid_address` are still absent.
+2. `R_LARCH_TLS_TPREL64` relocations are still absent. `set_tid_address` (number
+   96) **is implemented**: it only reports the caller's tid and writes nothing to
+   user memory (no futex in this kernel, so the registered pointer has no consumer).
 3. When the `PT_TLS` block is fully image-backed we do **not** build a TLS block
    for the program; that is its own C runtime's job.
 
 ---
+
+### 5.5 FCSR as thread context (2026-11-20)
+
+Criterion: two tasks each pin one rounding mode and run 50 rounds of "set RM ->
+compute `2^24+1` -> sleep 1 ms (guaranteed preemption) -> read RM back and compute
+again". `2^24+1` is not representable in single precision: RZ rounds it to
+16777216, RP to 16777218. So "the read-back RM is mine" and "the computed value is
+mine" are two independent pieces of evidence.
+
+Reading (`qemu_loongarch64`, default profile `ARKRTOS_USE_FPU=1`, **QEMU, not
+silicon**):
+
+```
+[fcsr] A rm=1 bad=0 rounds=50 | B rm=2 bad=0 rounds=50 -> PASS (FCSR per task across switches)
+```
+
+Single-switch control: delete the two lines that save/restore FCSR inside
+`LA_FP_SAVE/LA_FP_RESTORE`, change nothing else, and the same path becomes
+
+```
+[fcsr] A rm=1 bad=98 rounds=50 | B rm=2 bad=0 rounds=50 -> FAIL (FCSR leaked between tasks)
+```
+
+=> the PASS is not "nothing was ever switched" (otherwise the control could not
+fail).
+
+**Why the literals instead of mnemonics**: the binutils 2.31 `as` in this toolchain
+does not accept `movfcsr2gr`/`movgr2fcsr` (`Fatal error: no match insn`; tried
+`$fcsr0`/`$fcsr`/`$FCSR0`/`$0`/`0`/swapped operands; both mnemonics are present in
+`strings as.exe`, so the register class is simply not wired). The `.S` therefore
+carries **literal encodings**, and they were not guessed:
+
+1. Build `fe.elf` with the real glibc toolchain (`fesetround`/`fegetround`, static,
+   623 744 B); it really contains both instructions;
+2. Disassemble it with **the same** `loongarch64-newlib-elf-objdump -d` and read the
+   encodings production code uses: `0114c804 movfcsr2gr $r4,$r0`,
+   `0114c080 movgr2fcsr $r0,$r4`, `0114c80c movfcsr2gr $r12,$r0`,
+   `0114c180 movgr2fcsr $r0,$r12`;
+3. Feed `.word 0x0114c804 / 0x0114c080 / 0x0114c80c / 0x0114c180` back to `as.exe`,
+   reassemble and dump: every one decodes to the original mnemonic and registers
+   (round trip consistent).
+
+Shapes: `movfcsr2gr rd,fcsr = 0x0114C800 | (fcsr<<5) | rd`,
+`movgr2fcsr fcsr,rj = 0x0114C000 | (rj<<5) | fcsr`.
+
+**Where it lives** (`kernelsrc/port/loongarch/la64/arkrtos_context.S`):
+
+| Site | Action |
+| --- | --- |
+| `LA_FP_SAVE` | `.word 0x0114C80C` (`movfcsr2gr $t0,$fcsr0`) + `st.d $t0, base, 512` |
+| `LA_FP_RESTORE` | `ld.d $t0, base, 512` + `.word 0x0114C180` (`movgr2fcsr $fcsr0,$t0`), done last so exception enables never precede the FPR reload |
+| `arkrtos_port_fcsr_get/set` | `$a0`-based primitives for the C side (used by the self-test); placed in `.text.arkrtos_port_fcsr` |
+
+**Frame size does not change**: the slot at offset 512 has existed since the 528-byte
+frame was defined (the old comment said "reserved, not saved yet"), so this step
+touches **no stack budget**. New tasks get a fully zeroed frame from
+`arkrtos_port_stack_init()`, so their FCSR slot starts at 0 (RN, no exception
+enables); `$t0` is borrowed only after its live value is stored into slot 88 at every
+save/restore site. The three save sites (eentry / inline switch / secondary-core
+entry) and the one restore-only site (`arkrtos_port_resume_task`, which never saves)
+were each verified in the disassembly.
+
+**Still not done**: LSX/LASX vector registers (`$vr0..$vr31`, `$xr0..$xr31`). Stock
+baseline binaries do not touch them; a real LSX instruction raises `Ecode=13 INE` —
+an explicit fault, not a silent wrong answer.
+
+---
+
 
 ## 6. Four tiers and what each costs
 
@@ -514,8 +585,9 @@ check compiles to 2736 B of text instead of 2792 B. Kernel side 0 B,
    the Chinese page), 64-bit address width (2026-11-20), `EUEN.FPE` + a 528-byte
    frame (§5.3). **The real static hello has run inside the wide window.** Still
    missing: per-process VA spaces and runtime page tables, the native SVC parameter
-   block (still `uint32[]`), the TCB, `R_LARCH_TLS_TPREL64` relocations and
-   `set_tid_address`.
+   block (still `uint32[]`), the TCB and `R_LARCH_TLS_TPREL64` relocations.
+   Static TLS placement (§5.4) and FCSR (§5.5) both have readings now; LSX/LASX
+   vector registers are still not saved.
 3. The `[lxstat]` numbers are **synthetic** (11 numbers), not a real profile.
 4. The probe does not parse `PT_NOTE` or `.gnu.attributes` (ABI flags), and the
    `RELRO=True` field is descriptive, not a blocker.

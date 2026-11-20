@@ -59,7 +59,8 @@
  * @details 前 256 字节是 GPR/ERA/PRMD（布局见文件头），一项不动；
  *          ARKRTOS_USE_FPU=1 时在其上追加 32 个 FPR 的槽：
  *              256 + 8*i  ->  $f{i}     (i = 0..31)
- *              512        ->  FCSR 预留（当前不存，见 features/Kconfig 说明）
+ *              512        ->  FCSR（舍入模式 / 异常使能；三个调用点都
+ *                              先把 t0 存进 88 槽，借用它搬运）
  *          总长 528（16 字节对齐）。
  *          关档时两个宏为空、帧仍是 256 —— 与改动前逐条指令相同。
  * @note 基址用宏参数而不是固定寄存器：eentry 用 $s0，SMP 与 resume 用 $sp。
@@ -100,6 +101,21 @@
     fst.d   $f29, \base, 488
     fst.d   $f30, \base, 496
     fst.d   $f31, \base, 504
+    /* FCSR 也是线程上下文：舍入模式（RM，bit[9:8]）决定同一条 FP 指令
+     * 算出的结果，异常使能位决定 FP 异常是否陷进来。槽位一直预留在
+     * 512，所以打开 FPU 后帧长仍是 528 —— 存它不改变任何栈预算。
+     * $t0 在三个调用点（eentry / 次核入口 / 立即切换）都是「原值已存
+     * 进 88 槽、之后才从帧里重新装回」，所以这里借用它不伤任何活值。 */
+    /* 本工具链 binutils 2.31 的 as 不认识 movfcsr2gr/movgr2fcsr 这两个
+     * 助记符（实测 no match insn，寄存器类没接线），所以这里写字面编码。
+     * 编码出处：真 glibc 静态二进制 fe.elf（fesetround/fegetround）里
+     * 生产使用的指令，用同一套 objdump 反汇编确认；再用 .word 往返
+     * assembler/objdump 验证解回同一条指令。指令形状：
+     *     movfcsr2gr rd, fcsr  = 0x0114C800 | (fcsr << 5) | rd
+     *     movgr2fcsr fcsr, rj  = 0x0114C000 | (rj   << 5) | fcsr
+     * 行尾注释保留助记符写法，免得后来者看不出这是哪条指令。 */
+    .word   0x0114C80C                  /* movfcsr2gr $t0, $fcsr0 */
+    st.d    $t0, \base, 512
 .endm
 
 .macro LA_FP_RESTORE base
@@ -135,6 +151,10 @@
     fld.d   $f29, \base, 488
     fld.d   $f30, \base, 496
     fld.d   $f31, \base, 504
+    /* FCSR 最后恢复：先让 32 个 FPR 落位，再切舍入/异常使能，
+     * 免得「异常使能已打开、FPR 还没装完」这种中间态。 */
+    ld.d    $t0, \base, 512
+    .word   0x0114C180                  /* movgr2fcsr $fcsr0, $t0 */
 .endm
 #else
 #define LA_FRAME_BYTES          256
@@ -811,3 +831,31 @@ la_fault_stack_bottom:
     .space  4096
     .globl  la_fault_stack_top
 la_fault_stack_top:
+
+
+/* ============================================================
+ * FCSR 存取原语（给 C 侧调用）
+ * @details 为什么单独放两个函数、而不让 C 写内联汇编：
+ *          这两条指令在本工具链的 as 里没有可用助记符，只能写字面编码，
+ *          而字面编码里 rd/rj 的位段是固定的 —— 交给 .S 写死 $a0，
+ *          C 侧只做一次函数调用，就不存在「编译器分配了别的寄存器、
+ *          编码却按 $a0 算」这种错。
+ *          get: movfcsr2gr $a0, $fcsr0  -> 0x0114C804
+ *          set: movgr2fcsr $fcsr0, $a0  -> 0x0114C080
+ *          仅在 ARKRTOS_USE_FPU=1 时提供（关档时没有帧内 FCSR 槽，
+ *          这两个原语也不该被任何人调用）。
+ * ============================================================ */
+#if (ARKRTOS_USE_FPU == 1)
+    .section .text.arkrtos_port_fcsr, "ax"
+    .align  2
+    .globl  arkrtos_port_fcsr_get
+arkrtos_port_fcsr_get:
+    .word   0x0114C804                  /* movfcsr2gr $a0, $fcsr0 */
+    jr      $ra
+
+    .align  2
+    .globl  arkrtos_port_fcsr_set
+arkrtos_port_fcsr_set:
+    .word   0x0114C080                  /* movgr2fcsr $fcsr0, $a0 */
+    jr      $ra
+#endif

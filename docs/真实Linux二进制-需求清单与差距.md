@@ -280,8 +280,9 @@ direct write ok
 2. 没有 TCB（`tcbhead_t` / `dtv` / 自指指针），没有 `R_LARCH_TLS_TPREL64` 重定位，
    没有 `set_tid_address`。静态 hello 不碰这些，所以它跑通**不证明**这些面能用。
 3. `exit code 3` 是程序自己 `return 3`，不是「退出码通路有 bug」。
-4. FCSR 与 LSX/LASX 向量寄存器**不保存**（工具链 binutils 8.3 不认
-   `movfcsr2gr/movgr2fcsr`，编码未验证就不猜；真用到 LSX 会落 `Ecode=13 INE` 显式故障）。
+4. FCSR（舍入模式与异常使能位）**已经按任务保存**（§5.5：QEMU 实跑 PASS，加上
+   「去掉存取两行」的对照跑 FAIL）；LSX/LASX 向量寄存器仍**不保存**，真用到会落
+   `Ecode=13 INE` 显式故障。
 5. 上传通道实测 2 151–2 240 B/s，623 760 B 要 278–339 s。走串口而不是「编进镜像」，
    是因为 2 MB Flash 窗口 / 512 KB 内核池的几何硬墙装不下这个二进制（§3 与
    `tools/realbin_probe.py` 文件头）。
@@ -364,8 +365,66 @@ TASK:4009 task 4 exits (self kill)
 1. 跑通的是**静态**档的 `__thread`，且 TP 由 glibc 自建。`ARKRTOS_USE_ELF_TLS`
    给的是「没有 libc 初始化的小程序」用的 variant I 约定（`TP = TLS 块起点`），
    **不是** glibc 的 `tcbhead_t`/`dtv` 布局。
-2. `R_LARCH_TLS_TPREL64` 重定位与 `set_tid_address` 仍未做。
+2. `R_LARCH_TLS_TPREL64` 重定位仍未做。`set_tid_address`（96 号）**已实现**：
+   `arkrtos_linux_abi.c` 只回报本任务的 tid，不往用户内存写一个字（本内核没有
+   futex，登记的指针没有消费者；替程序清 tid 变量是副作用）。
 3. `PT_TLS` 块被镜像背书时我们**不**替程序建 TLS 块——那是它自己的 C 运行时的事。
+
+---
+
+### 5.5 FCSR 作为线程上下文（2026-11-20）
+
+判据：两个任务各锁一种舍入模式，每轮「设 RM → 实算一次 `2^24+1` → 睡 1 ms（一定被
+切走）→ 读回 RM 再算一次」，跑满 50 轮。`2^24+1` 在单精度里不可表示，RZ 舍成
+16777216、RP 舍成 16777218，所以「读回的 RM 对」与「实算结果对」是两条独立证据。
+
+读数（`qemu_loongarch64`，默认档 `ARKRTOS_USE_FPU=1`，**QEMU 不是真机**）：
+
+```
+[fcsr] A rm=1 bad=0 rounds=50 | B rm=2 bad=0 rounds=50 -> PASS (FCSR per task across switches)
+```
+
+单开关对照：把 `LA_FP_SAVE/LA_FP_RESTORE` 里存/取 FCSR 的那两行去掉，其余一字不动，
+同一条路径立刻变成
+
+```
+[fcsr] A rm=1 bad=98 rounds=50 | B rm=2 bad=0 rounds=50 -> FAIL (FCSR leaked between tasks)
+```
+
+⇒ 这个 PASS 不是「本来就没切换」的假绿（否则对照跑也不会 FAIL）。
+
+**为什么不写助记符**：本工具链 binutils 2.31 的 `as` 不认识 `movfcsr2gr`/`movgr2fcsr`
+（`Fatal error: no match insn`；`$fcsr0`/`$fcsr`/`$FCSR0`/`$0`/`0`/反序全试过，
+`strings as.exe` 里两个助记符都在，属寄存器类没接线）。所以 `.S` 里写的是**字面编码**，
+出处不是猜的：
+
+1. 用真 glibc 工具链编一份 `fe.elf`（`fesetround`/`fegetround`，静态 623 744 B），
+   里面确实含这两条指令；
+2. 用**同一套** `loongarch64-newlib-elf-objdump -d` 反汇编，读出生产使用的编码：
+   `0114c804 movfcsr2gr $r4,$r0`、`0114c080 movgr2fcsr $r0,$r4`、
+   `0114c80c movfcsr2gr $r12,$r0`、`0114c180 movgr2fcsr $r0,$r12`；
+3. 反过来把 `.word 0x0114c804 / 0x0114c080 / 0x0114c80c / 0x0114c180` 交给 `as.exe`
+   汇编、再 `objdump -d`，逐条解回原助记符与寄存器（往返一致）。
+
+形状：`movfcsr2gr rd,fcsr = 0x0114C800 | (fcsr<<5) | rd`，
+`movgr2fcsr fcsr,rj = 0x0114C000 | (rj<<5) | fcsr`。
+
+**落点**（`kernelsrc/port/loongarch/la64/arkrtos_context.S`）：
+
+| 位置 | 动作 |
+| --- | --- |
+| `LA_FP_SAVE` | `.word 0x0114C80C`（`movfcsr2gr $t0,$fcsr0`）+ `st.d $t0, base, 512` |
+| `LA_FP_RESTORE` | `ld.d $t0, base, 512` + `.word 0x0114C180`（`movgr2fcsr $fcsr0,$t0`），放在最后，避免「异常使能已开、FPR 还没装完」的中间态 |
+| `arkrtos_port_fcsr_get/set` | `$a0` 入参/返回的原语，给 C 侧读改写（自检用）；函数名进 `.text.arkrtos_port_fcsr` |
+
+**帧长不变**：帧偏移 512 那个槽在 528 字节帧定下来时就预留着（原注释写「预留，当前
+不存」），所以这一步**不动任何栈预算**。新建任务的帧由 `arkrtos_port_stack_init()`
+整体清零，FCSR 槽初值是 0（RN、无异常使能）；`$t0` 在存/取点都先把原值存进 88 槽
+才借用，不伤活值。开档时的三处存点（eentry / 就地切换 / 次核入口）与一处只恢复
+（`arkrtos_port_resume_task`，它从不由自己保存）在反汇编里逐条核过。
+
+**仍然没做的**：LSX/LASX 向量寄存器（`$vr0..$vr31`、`$xr0..$xr31`）不保存。发行版
+基线二进制用不到它们，真用到会落 `Ecode=13 INE`——显式故障，不是静默算错。
 
 ---
 
@@ -535,8 +594,8 @@ py -3 tools/realbin_gate.py        # 7 项，全过打印 REALBIN-GATE OK
    （2026-11-20，宽窗口档 QEMU 实跑通过）、`EUEN.FPE` + 528 字节帧（§5.3）。
    **真实静态 hello 已在宽窗口里跑完**。仍没做的是：每进程独立 VA 空间与运行期
    建页表、native SVC 参数块（还是 `uint32[]`，宽 VA 下 App 必须走 Linux ABI 传指针）、
-   glibc 形态的 TCB（`tcbhead_t`/`dtv`）、`R_LARCH_TLS_TPREL64` 重定位与
-   `set_tid_address`。静态 TLS 落位这一道本身已经有读数（§5.4）。
+   glibc 形态的 TCB（`tcbhead_t`/`dtv`）、`R_LARCH_TLS_TPREL64` 重定位。
+   静态 TLS 落位（§5.4）与 FCSR（§5.5）都已有读数；LSX/LASX 向量寄存器仍不保存。
 3. `[lxstat]` 的读数是**合成触发**的 11 个号，不是真实分布（见 §8）。
 4. 探针不解析 `PT_NOTE`、不读 `.gnu.attributes`（ABI 标记）、不判 `RELRO`
    到「能否强制」这一层——`RELRO=True` 只是描述，不构成 blocker。
@@ -558,8 +617,10 @@ py -3 tools/realbin_gate.py        # 7 项，全过打印 REALBIN-GATE OK
 （§5.4：`tls-real a=5 b=7 c=x` + `exit code 3`），但达成方式是「glibc 自己立 TCB，
 装载器不碰 TP」，所以它不构成本仓 TCB 的支持证据。下一步因此分成两条，按代价排：
 
-1. **补 `set_tid_address` + `R_LARCH_TLS_TPREL64` 重定位**（中小）：让「程序自己立
-   TCB」这条路径上的号与重定位都收齐，判据仍是既有夹具 + 真实二进制不回归。
+1. **补 `R_LARCH_TLS_TPREL64` 重定位**（中小）：让「程序自己立 TCB」这条路径上的
+   重定位收齐，判据仍是既有夹具 + 真实二进制不回归。（`set_tid_address` 原来列在
+   这里，现已实现，只剩「不写用户内存」这条明确语义；robust futex 清理除外，本内核
+   没有 futex。）
 2. **`PT_INTERP` + `ld.so` 动态档**（项目级，需单独立项）：带一套用户态动态装载器
    与 libc 兼容面，不是补一个缺口（§7 说明为什么不自研 `ld.so` 去配 glibc）。
 

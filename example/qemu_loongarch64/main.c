@@ -190,6 +190,129 @@ static void task_b(void)
 }
 
 /* ============================================================
+ * FPU 上下文自检：FCSR（舍入模式 / 异常使能）是不是按任务保存
+ * @details 32 个 FPR 从加上 FPU 档起就在 trap 帧里，但 FCSR 一直只是
+ *          「预留 8 字节、没人存」。FCSR 的 RM[9:8] 会改同一条 FP 指令
+ *          算出的结果（2^24 + 1 在 RZ 下舍成 2^24，在 RP 下舍成 2^24+2），
+ *          异常使能位还会决定 FP 异常陷不陷进来 —— 它是线程上下文，
+ *          不是全局设置。
+ *
+ *          两个任务各锁一种舍入模式，跑 50 轮「设 → 睡 1 ms → 读回 +
+ *          实算一次」，睡下去一定被切走。判据三条：
+ *            a) 读回的 RM 每轮都是自己那种；
+ *            b) 实算的 2^24+1 每轮都符合自己那种舍入；
+ *            c) 两个任务都跑满 50 轮（否则「都成功」可能只是没跑）。
+ *          B 等 A 收工后再打一行总判决，避免两行交错读不清。
+ * ============================================================ */
+#if (ARKRTOS_USE_FPU == 1)
+#define FCSR_ROUNDS  (50u)
+#define FCSR_RZ      (1u)
+#define FCSR_RP      (2u)
+
+static uint32 s_fcsr_stack_a[512];
+static uint32 s_fcsr_stack_b[512];
+static volatile uint32 s_fcsr_a_bad;
+static volatile uint32 s_fcsr_b_bad;
+static volatile uint32 s_fcsr_a_rounds;
+static volatile uint32 s_fcsr_b_rounds;
+static volatile uint32 s_fcsr_a_done;
+
+/* FCSR 的读写由 port 层提供（arkrtos_context.S 的 .text.arkrtos_port_fcsr）。
+ * 不在 C 里写内联汇编：这两条指令在本工具链的 as 里没有可用助记符，只能
+ * 写字面编码，而编码里寄存器号是写死的（$a0），交给汇编原语才不会错位。 */
+extern unsigned long arkrtos_port_fcsr_get(void);
+extern void arkrtos_port_fcsr_set(unsigned long value);
+
+static unsigned long fcsr_self_read(void)
+{
+    return arkrtos_port_fcsr_get();
+}
+
+static void fcsr_self_set_rm(unsigned long rm)
+{
+    unsigned long v = fcsr_self_read();
+
+    v = (v & ~(0x3UL << 8)) | ((rm & 0x3UL) << 8);
+    arkrtos_port_fcsr_set(v);
+}
+
+/* 2^24 + 1 在单精度里不可表示：RN/RZ 舍到 2^24，RP 舍到 2^24+2。
+ * volatile 是必须的，否则 -O2 会把整条表达式折成常量，测的就不是 FCSR。 */
+static uint32 fcsr_self_add_probe(void)
+{
+    volatile float big = 16777216.0f;
+    volatile float one = 1.0f;
+
+    return (uint32)(big + one);
+}
+
+static void fcsr_self_loop(volatile uint32 *p_bad, volatile uint32 *p_rounds,
+                           unsigned long rm, uint32 expect)
+{
+    uint32 i;
+
+    fcsr_self_set_rm(rm);
+    for(i = 0u; i < FCSR_ROUNDS; i++)
+    {
+        if(((fcsr_self_read() >> 8) & 0x3UL) != rm)
+        {
+            (*p_bad)++;
+        }
+        if(fcsr_self_add_probe() != expect)
+        {
+            (*p_bad)++;
+        }
+        (*p_rounds)++;
+        arkrtos_task_wait_internal(1u);       /* 1 ms，一定被切走 */
+    }
+}
+
+static void task_fcsr_a(void)
+{
+    fcsr_self_loop(&s_fcsr_a_bad, &s_fcsr_a_rounds, FCSR_RZ, 16777216u);
+    s_fcsr_a_done = 1u;
+    for(;;)
+    {
+        arkrtos_task_wait_internal(1000u);
+    }
+}
+
+static void task_fcsr_b(void)
+{
+    uint32 guard;
+
+    fcsr_self_loop(&s_fcsr_b_bad, &s_fcsr_b_rounds, FCSR_RP, 16777218u);
+    for(guard = 0u; (s_fcsr_a_done == 0u) && (guard < 500u); guard++)
+    {
+        arkrtos_task_wait_internal(1u);
+    }
+
+    arkrtos_board_puts("[fcsr] A rm=1 bad=");
+    arkrtos_board_putu(s_fcsr_a_bad);
+    arkrtos_board_puts(" rounds=");
+    arkrtos_board_putu(s_fcsr_a_rounds);
+    arkrtos_board_puts(" | B rm=2 bad=");
+    arkrtos_board_putu(s_fcsr_b_bad);
+    arkrtos_board_puts(" rounds=");
+    arkrtos_board_putu(s_fcsr_b_rounds);
+    if((s_fcsr_a_bad == 0u) && (s_fcsr_b_bad == 0u) &&
+       (s_fcsr_a_rounds == FCSR_ROUNDS) && (s_fcsr_b_rounds == FCSR_ROUNDS))
+    {
+        arkrtos_board_puts(" -> PASS (FCSR per task across switches)\n");
+    }
+    else
+    {
+        arkrtos_board_puts(" -> FAIL (FCSR leaked between tasks)\n");
+    }
+
+    for(;;)
+    {
+        arkrtos_task_wait_internal(1000u);
+    }
+}
+#endif /* ARKRTOS_USE_FPU */
+
+/* ============================================================
  * 任务 D：存储栈自检（块设备 → littlefs → VFS → procfs）
  * @details 这一条链路是「全功能」考题里最容易被跳过的一段：不做它，示例里
  *          只剩调度器与两个同步原语，"文件系统能挂载、能读写、路径能解析"
@@ -1052,6 +1175,15 @@ int main(void)
     id_b = arkrtos_task_register(task_b, s_stack_b, sizeof(s_stack_b), 11u, 0u);
     /* 存储任务优先级低于 A/B：它是自检，不该抢占节拍/切换观测 */
     id_fs = arkrtos_task_register(task_fs, s_stack_fs, sizeof(s_stack_fs), 13u, 0u);
+    #if (ARKRTOS_USE_FPU == 1)
+    /* FPU 上下文自检（FCSR）：两个任务各占一种舍入模式，切换后必须各归各。
+     * 优先级 17：低于存储/ELF 演示，不与它们的读数抢顺序。 */
+    (void)arkrtos_task_register(task_fcsr_a, s_fcsr_stack_a,
+                                sizeof(s_fcsr_stack_a), 17u, 0u);
+    (void)arkrtos_task_register(task_fcsr_b, s_fcsr_stack_b,
+                                sizeof(s_fcsr_stack_b), 17u, 0u);
+    #endif
+
 
     #if (ARKRTOS_USE_STACK_GUARD == 1)
     /* 栈底守卫演示任务：优先级最低，只在 A/B/存储/装载都跑过之后踩自己的栈底。 */
