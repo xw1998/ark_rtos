@@ -25,7 +25,7 @@
 | 用英文读同一份 MMU/ELF 装载说明 | [MMU进程模型与ELF装载.en.md](MMU进程模型与ELF装载.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 想在 MMU 档上**跑 Linux 的静态可执行文件**（只发 Linux 系统调用号） | [Linux可执行文件兼容-系统调用ABI.md](Linux可执行文件兼容-系统调用ABI.md)（asm-generic 15 个号的实测读数、两个 ABI 的分界判据、**明确不支持**（动态链接/fork/信号/socket/futex）、fd 表与窗口堆的降级实现、QEMU 13 条 check 与 `exit code 7`、门禁 13 项） |
 | 用英文读同一份 Linux 系统调用 ABI 说明 | [Linux可执行文件兼容-系统调用ABI.en.md](Linux可执行文件兼容-系统调用ABI.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
-| 想知道遗言 / 无缝衔接 / 实时性在三类硬件上各到了哪一步 | [跨架构机制矩阵.md](跨架构机制矩阵.md)（每格三档：真机/QEMU 读数、编译面、编译期拒绝；M4 真机读数、RV32/LA64 QEMU 台账、非 ARM 无缝衔接到 2026-11-19 是 #error） |
+| 想知道遗言 / 无缝衔接 / 实时性在三类硬件上各到了哪一步 | [跨架构机制矩阵.md](跨架构机制矩阵.md)（每格三档：真机/QEMU 读数、编译面、编译期拒绝；M4 真机读数、RV32/LA64 QEMU 台账、非 ARM 无缝衔接自 2026-11-20 起有 QEMU 读数（RV32 5/5、LA64 3/3 次 swap: PASS），只剩 LA32 / RV64GC 是 #error） |
 | Read the cross-architecture matrix in English | [跨架构机制矩阵.en.md](跨架构机制矩阵.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 想分清**一条读数到底是编得过、跑在 QEMU 上、还是真机**（"QEMU 算上板，不是真机"） | [验证载体分级.md](验证载体分级.md)（L0/L1/L2/L3 四档定义、台账 `tools/evidence_levels.tsv` 是唯一来源、QEMU 升不成 L3 的三条实证、每档升到真机最少要做什么、门禁 `evidence-levels`） |
 | Read the verification-carrier page in English | [验证载体分级.en.md](验证载体分级.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
@@ -151,7 +151,7 @@ docs/
 ├── MMU进程模型与ELF装载.en.md               # 【English】MMU/ELF 装载页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── Linux可执行文件兼容-系统调用ABI.md       # 【实机记录+设计说明】Linux 系统调用 ABI：asm-generic 15 个号、两个 ABI 的分界、明确不支持项、降级实现、QEMU 读数与门禁
 ├── Linux可执行文件兼容-系统调用ABI.en.md    # 【English】Linux 系统调用 ABI 页的浓缩英文版（中文页 normative；不新增主张与读数）
-├── 跨架构机制矩阵.md                        # 【矩阵+证据】遗言 / 无缝衔接 / 实时性 × M3/M7、M4、RV32、LA64、LA32：每格标读数 / 编译面 / 编译期拒绝，含非 ARM swap 的 #error 与 cyccnt 不可用
+├── 跨架构机制矩阵.md                        # 【矩阵+证据】遗言 / 无缝衔接 / 实时性 × M3/M7、M4、RV32、LA64、LA32：每格标读数 / 编译面 / 编译期拒绝；非 ARM swap 的帧改写（RV32 mepc / LA64 ERA）已有 QEMU 读数，LA32 / RV64GC 仍 #error；含 cyccnt 不可用
 ├── 跨架构机制矩阵.en.md                     # 【English】跨架构矩阵页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── 验证载体分级.md                          # 【口径+台账】L0/L1/L2/L3 四档、tools/evidence_levels.tsv 唯一来源、QEMU 升不成 L3 的三条实证、升级到真机的最小动作、门禁 evidence-levels
 ├── 验证载体分级.en.md                       # 【English】验证载体分级页的浓缩英文版（中文页 normative；不新增主张与读数）
