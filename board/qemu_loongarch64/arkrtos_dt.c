@@ -2,7 +2,7 @@
  *
  * Source : dts/qemu_loongarch64.dts
  * Board  : qemu_loongarch64
- * Nodes  : 7
+ * Nodes  : 8
  *
  * Regenerate with:
  *   py -3 tools/dts/dtc_lite.py --dts dts/qemu_loongarch64.dts \
@@ -11,73 +11,79 @@
 
 #include "arkrtos_dt.h"
 
-static const char *const dt_s0[] = {"console=ttyS0", 0};
-static const char *const dt_s1[] = {"memory", 0};
-static const char *const dt_s3[] = {"cpu", "loongarch", "okay", 0};
-static const char *const dt_s4[] = {"simple-bus", 0};
-static const char *const dt_s5[] = {"ns16550a", "okay", 0};
-static const char *const dt_s6[] = {"ark,ram-blk", "okay", 0};
+static const char *const dt_s0[] = {"serial0:115200n8", "console=ttyS0", 0};
+static const char *const dt_s2[] = {"memory", 0};
+static const char *const dt_s4[] = {"cpu", "loongarch", "okay", 0};
+static const char *const dt_s5[] = {"simple-bus", 0};
+static const char *const dt_s6[] = {"ns16550a", "okay", 0};
+static const char *const dt_s7[] = {"ark,ram-blk", "okay", 0};
 
-static const uint32 dt_u0_0[] = {0x1u};
-static const uint32 dt_u1_1[] = {0x0u, 0x8000000u};
-static const uint32 dt_u2_0[] = {0x1u};
-static const uint32 dt_u2_1[] = {0x0u};
-static const uint32 dt_u2_2[] = {0x5f5e100u};
-static const uint32 dt_u3_2[] = {0x0u};
-static const uint32 dt_u4_0[] = {0x1u};
-static const uint32 dt_u4_1[] = {0x1u};
-static const uint32 dt_u5_1[] = {0x1fe001e0u, 0x100u};
-static const uint32 dt_u5_2[] = {0x17d7840u};
-static const uint32 dt_u5_3[] = {0x1c200u};
-static const uint32 dt_u6_1[] = {0x0u, 0x80000u};
-static const uint32 dt_u6_2[] = {0x1000u};
+static const uint32 dt_u1_0[] = {0x1u};
+static const uint32 dt_u2_1[] = {0x0u, 0x8000000u};
+static const uint32 dt_u3_0[] = {0x1u};
+static const uint32 dt_u3_1[] = {0x0u};
+static const uint32 dt_u3_2[] = {0x5f5e100u};
+static const uint32 dt_u4_2[] = {0x0u};
+static const uint32 dt_u5_0[] = {0x1u};
+static const uint32 dt_u5_1[] = {0x1u};
+static const uint32 dt_u6_1[] = {0x1fe001e0u, 0x100u};
+static const uint32 dt_u6_2[] = {0x17d7840u};
+static const uint32 dt_u6_3[] = {0x1c200u};
+static const uint32 dt_u6_5[] = {0x1u};
+static const uint32 dt_u7_1[] = {0x0u, 0x80000u};
+static const uint32 dt_u7_2[] = {0x1000u};
 
 static const arkrtos_dt_prop_t dt_p0[] = {
-    { "stdout-path", ARKRTOS_DT_PROP_U32, 1, dt_u0_0, 0 },
-    { "bootargs", ARKRTOS_DT_PROP_STR, 1, 0, dt_s0 + 0 },
+    { "stdout-path", ARKRTOS_DT_PROP_STR, 1, 0, dt_s0 + 0 },
+    { "bootargs", ARKRTOS_DT_PROP_STR, 1, 0, dt_s0 + 1 },
 };
 static const arkrtos_dt_prop_t dt_p1[] = {
-    { "device_type", ARKRTOS_DT_PROP_STR, 1, 0, dt_s1 + 0 },
-    { "reg", ARKRTOS_DT_PROP_U32, 2, dt_u1_1, 0 },
+    { "serial0", ARKRTOS_DT_PROP_U32, 1, dt_u1_0, 0 },
 };
 static const arkrtos_dt_prop_t dt_p2[] = {
-    { "#address-cells", ARKRTOS_DT_PROP_U32, 1, dt_u2_0, 0 },
-    { "#size-cells", ARKRTOS_DT_PROP_U32, 1, dt_u2_1, 0 },
-    { "timebase-frequency", ARKRTOS_DT_PROP_U32, 1, dt_u2_2, 0 },
+    { "device_type", ARKRTOS_DT_PROP_STR, 1, 0, dt_s2 + 0 },
+    { "reg", ARKRTOS_DT_PROP_U32, 2, dt_u2_1, 0 },
 };
 static const arkrtos_dt_prop_t dt_p3[] = {
-    { "device_type", ARKRTOS_DT_PROP_STR, 1, 0, dt_s3 + 0 },
-    { "compatible", ARKRTOS_DT_PROP_STR, 1, 0, dt_s3 + 1 },
-    { "reg", ARKRTOS_DT_PROP_U32, 1, dt_u3_2, 0 },
-    { "status", ARKRTOS_DT_PROP_STR, 1, 0, dt_s3 + 2 },
+    { "#address-cells", ARKRTOS_DT_PROP_U32, 1, dt_u3_0, 0 },
+    { "#size-cells", ARKRTOS_DT_PROP_U32, 1, dt_u3_1, 0 },
+    { "timebase-frequency", ARKRTOS_DT_PROP_U32, 1, dt_u3_2, 0 },
 };
 static const arkrtos_dt_prop_t dt_p4[] = {
-    { "#address-cells", ARKRTOS_DT_PROP_U32, 1, dt_u4_0, 0 },
-    { "#size-cells", ARKRTOS_DT_PROP_U32, 1, dt_u4_1, 0 },
-    { "compatible", ARKRTOS_DT_PROP_STR, 1, 0, dt_s4 + 0 },
+    { "device_type", ARKRTOS_DT_PROP_STR, 1, 0, dt_s4 + 0 },
+    { "compatible", ARKRTOS_DT_PROP_STR, 1, 0, dt_s4 + 1 },
+    { "reg", ARKRTOS_DT_PROP_U32, 1, dt_u4_2, 0 },
+    { "status", ARKRTOS_DT_PROP_STR, 1, 0, dt_s4 + 2 },
 };
 static const arkrtos_dt_prop_t dt_p5[] = {
+    { "#address-cells", ARKRTOS_DT_PROP_U32, 1, dt_u5_0, 0 },
+    { "#size-cells", ARKRTOS_DT_PROP_U32, 1, dt_u5_1, 0 },
     { "compatible", ARKRTOS_DT_PROP_STR, 1, 0, dt_s5 + 0 },
-    { "reg", ARKRTOS_DT_PROP_U32, 2, dt_u5_1, 0 },
-    { "clock-frequency", ARKRTOS_DT_PROP_U32, 1, dt_u5_2, 0 },
-    { "current-speed", ARKRTOS_DT_PROP_U32, 1, dt_u5_3, 0 },
-    { "status", ARKRTOS_DT_PROP_STR, 1, 0, dt_s5 + 1 },
 };
 static const arkrtos_dt_prop_t dt_p6[] = {
     { "compatible", ARKRTOS_DT_PROP_STR, 1, 0, dt_s6 + 0 },
     { "reg", ARKRTOS_DT_PROP_U32, 2, dt_u6_1, 0 },
-    { "erase-size", ARKRTOS_DT_PROP_U32, 1, dt_u6_2, 0 },
+    { "clock-frequency", ARKRTOS_DT_PROP_U32, 1, dt_u6_2, 0 },
+    { "current-speed", ARKRTOS_DT_PROP_U32, 1, dt_u6_3, 0 },
     { "status", ARKRTOS_DT_PROP_STR, 1, 0, dt_s6 + 1 },
+    { "phandle", ARKRTOS_DT_PROP_U32, 1, dt_u6_5, 0 },
+};
+static const arkrtos_dt_prop_t dt_p7[] = {
+    { "compatible", ARKRTOS_DT_PROP_STR, 1, 0, dt_s7 + 0 },
+    { "reg", ARKRTOS_DT_PROP_U32, 2, dt_u7_1, 0 },
+    { "erase-size", ARKRTOS_DT_PROP_U32, 1, dt_u7_2, 0 },
+    { "status", ARKRTOS_DT_PROP_STR, 1, 0, dt_s7 + 1 },
 };
 
 static const arkrtos_dt_node_t dt_nodes[] = {
     { "chosen", 0, 0x0u, 0x0u, 0, 65535, 2, 1, 0, dt_p0 },
-    { "memory@0", 0, 0x0u, 0x8000000u, 0, 65535, 2, 1, 0, dt_p1 },
-    { "cpus", 0, 0x0u, 0x0u, 0, 65535, 3, 1, 0, dt_p2 },
-    { "cpu@0", "loongarch", 0x0u, 0x0u, 0, 2, 4, 1, 1, dt_p3 },
-    { "soc", "simple-bus", 0x0u, 0x0u, 0, 65535, 3, 1, 1, dt_p4 },
-    { "serial@1fe001e0", "ns16550a", 0x1fe001e0u, 0x100u, 1, 4, 5, 1, 1, dt_p5 },
-    { "ramdisk@0", "ark,ram-blk", 0x0u, 0x80000u, 0, 4, 4, 1, 1, dt_p6 },
+    { "aliases", 0, 0x0u, 0x0u, 0, 65535, 1, 1, 0, dt_p1 },
+    { "memory@0", 0, 0x0u, 0x8000000u, 0, 65535, 2, 1, 0, dt_p2 },
+    { "cpus", 0, 0x0u, 0x0u, 0, 65535, 3, 1, 0, dt_p3 },
+    { "cpu@0", "loongarch", 0x0u, 0x0u, 0, 3, 4, 1, 1, dt_p4 },
+    { "soc", "simple-bus", 0x0u, 0x0u, 0, 65535, 3, 1, 1, dt_p5 },
+    { "serial@1fe001e0", "ns16550a", 0x1fe001e0u, 0x100u, 1, 5, 6, 1, 1, dt_p6 },
+    { "ramdisk@0", "ark,ram-blk", 0x0u, 0x80000u, 0, 5, 4, 1, 1, dt_p7 },
 };
 
 static const char dt_model[] = "QEMU virt loongarch64";

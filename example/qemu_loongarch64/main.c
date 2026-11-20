@@ -51,6 +51,9 @@
 #if (ARKRTOS_USE_FDT == 1)
 #include "arkrtos_fdt.h"       /* MMU 档：启动时解析镜像里的标准 .dtb */
 #endif
+#if (ARKRTOS_USE_FDT_CONSOLE == 1)
+#include "arkrtos_fdt_console.h" /* 消费 /chosen/stdout-path */
+#endif
 
 /* PLV3 探针与 ELF 装载器抢同一块 2 MB 窗口（0x02000000）：
  * 探针的代码/栈全在 .appprobe 里，而装载器要往同一页拷程序，先跑探针再
@@ -950,6 +953,30 @@ int main(void)
         {
             arkrtos_board_puts(" (blob refused, tree NOT parsed)");
         }
+        arkrtos_board_puts("\n");
+    }
+#endif
+
+#if (ARKRTOS_USE_FDT_CONSOLE == 1)
+    /* 消费 /chosen/stdout-path：树说控制台是哪个设备，这里核对它是否就是
+     * 镜像按板级常量起来的这一个。一致才叫绑上；不一致保留板级默认并打出
+     * 原因码——树与板级矛盾是配置错误，不能悄悄挑一个继续。 */
+    {
+        arkrtos_console_expect_t exp;
+        arkrtos_console_bind_t   bind;
+        int32 crc;
+
+        exp.compatible = "ns16550a";
+        exp.reg_base = ARKRTOS_QEMU_UART_BASE;
+        crc = arkrtos_console_from_fdt(&exp, &bind);
+        arkrtos_board_puts("[fdt] console path=");
+        arkrtos_board_puts((bind.path[0] != 0) ? bind.path : "(none)");
+        arkrtos_board_puts(" baud=");
+        arkrtos_board_putu(bind.baud);
+        arkrtos_board_puts(" reason=");
+        arkrtos_board_puts(arkrtos_console_reason(crc));
+        arkrtos_board_puts(" match=");
+        arkrtos_board_putu((crc == ARKRTOS_CONSOLE_OK) ? 1u : 0u);
         arkrtos_board_puts("\n");
     }
 #endif

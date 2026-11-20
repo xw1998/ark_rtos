@@ -214,6 +214,9 @@
 #ifndef ARKRTOS_USE_FDT
 #define ARKRTOS_USE_FDT 0
 #endif
+#ifndef ARKRTOS_USE_FDT_CONSOLE
+#define ARKRTOS_USE_FDT_CONSOLE 0
+#endif
 #ifndef ARKRTOS_USE_FLASHAPP
 #define ARKRTOS_USE_FLASHAPP 0
 #endif

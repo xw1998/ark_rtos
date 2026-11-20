@@ -232,6 +232,7 @@ BLOCKS = [
         "这正是 MCU 档的默认状态。",
     ], [
         ("override", "ARKRTOS_USE_FDT", "bool"),
+        ("override", "ARKRTOS_USE_FDT_CONSOLE", "bool"),
     ]),
 
     ("八、可靠性", [

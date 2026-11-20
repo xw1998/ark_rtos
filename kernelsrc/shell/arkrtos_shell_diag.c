@@ -689,22 +689,34 @@ int cmd_dt(int argc, char *argv[])
  * 与 dt 打同一套字段、同一个顺序：一份来自生成的 C 平表，一份来自启动时
  * 解析的标准 blob。两条独立数据通路打出同样的行，才能拿来做对账；如果
  * 格式各自一套，"看起来差不多"就没法变成判据。 */
-int cmd_fdt(int argc, char *argv[])
+/* fdt: 打印启动时解析出来的那棵树，并给出若干运行期入口。
+ *
+ * 为什么要有子命令：这一版之前 fdt 只能"把整棵树打出来"，于是"路径查询、
+ * /chosen 的消费、运行期换树"三件事各自只有编译面，没有读数。现在它们
+ * 都能在同一台机器上被看到，且失败时说清是哪一步失败。
+ *
+ *   fdt                 整棵树（与 dt 逐行同格式）
+ *   fdt path <p>        按绝对路径查一个节点
+ *   fdt phandle <n>     phandle -> 路径
+ *   fdt chosen          /chosen/stdout-path 原文 + 解析结果
+ *   fdt save <file>     把当前 blob 写成文件
+ *   fdt load <file>     从文件读回一块 dtb 并换树（失败保留上一棵树）
+ */
+#if (ARKRTOS_USE_VFS == 1)
+/* 动态装载的落地区：一块静态 RAM 加一块"文件原样"缓冲。
+ * 4 KB 远大于任何一块真实板子的 dtb；超了 arkrtos_fdt_load 会拒绝，
+ * 不会截断。 */
+static uint8 s_fdt_arena[4096] __attribute__((aligned(8)));
+static uint8 s_fdt_file[4096] __attribute__((aligned(8)));
+#endif
+
+static int fdt_dump(void)
 {
     arkrtos_fdt_iter_t it;
     arkrtos_fdt_node_t n;
     const char *model;
     int32 rc;
-    uint32 total = 0u;
 
-    (void)argc;
-    (void)argv;
-
-    if(arkrtos_fdt_ready() == 0)
-    {
-        sh_out("fdt: no device tree blob parsed at boot\r\n");
-        return 1;
-    }
     model = arkrtos_fdt_model();
     ark_shell_printf("\r\nmodel=%s nodes=%u\r\n",
                      (model != 0) ? model : "(none)",
@@ -726,15 +738,189 @@ int cmd_fdt(int argc, char *argv[])
         ark_shell_printf("  %s compat=%s reg=0x%x/0x%x %s\r\n",
                          n.name, compat, (uint32)reg0, (uint32)reg1,
                          (arkrtos_fdt_node_enabled(&n) != 0) ? "okay" : "disabled");
-        total++;
     }
     if(rc < 0)
     {
         ark_shell_printf("fdt: walk stopped by error %d\r\n", (int)rc);
         return 1;
     }
-    (void)total;
     return 0;
+}
+
+static int fdt_show_path(const char *path)
+{
+    arkrtos_fdt_node_t n;
+    const char *compat;
+    uint32 reg0 = 0u;
+    uint32 reg1 = 0u;
+    int32 rc = arkrtos_fdt_node_by_path(path, &n);
+
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        ark_shell_printf("fdt: path %s rc=%d\r\n", path, (int)rc);
+        return 1;
+    }
+    compat = arkrtos_fdt_prop_str(&n, "compatible");
+    (void)arkrtos_fdt_prop_u32(&n, "reg", 0u, &reg0);
+    (void)arkrtos_fdt_prop_u32(&n, "reg", 1u, &reg1);
+    ark_shell_printf("path=%s name=%s depth=%u props=%u %s\r\n",
+                     path, n.name, (uint32)n.depth, (uint32)n.n_props,
+                     (arkrtos_fdt_node_enabled(&n) != 0) ? "okay" : "disabled");
+    ark_shell_printf("  compat=%s reg=0x%x/0x%x\r\n",
+                     (compat != 0) ? compat : "(none)",
+                     (uint32)reg0, (uint32)reg1);
+    return 0;
+}
+
+static int fdt_show_chosen(void)
+{
+    arkrtos_fdt_console_t c;
+    const char *raw = arkrtos_fdt_stdout_path();
+    uint32 len = 0u;
+    const void *v = arkrtos_fdt_stdout_raw(&len);
+    int32 rc = arkrtos_fdt_stdout_resolve(&c);
+
+    if(v == 0)
+    {
+        ark_shell_printf("\r\nchosen stdout-path=(absent)\r\n");
+        return 1;
+    }
+    if(raw != 0)
+    {
+        ark_shell_printf("\r\nchosen stdout-path=\"%s\"\r\n", raw);
+    }
+    else
+    {
+        /* 非字符串（句柄形态）：原文不能当字符串打，打长度。 */
+        ark_shell_printf("\r\nchosen stdout-path=<%u byte cell>\r\n",
+                         (uint32)len);
+    }
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        /* 解析失败要明说"没有用它"，不能让读者以为控制台已经按它改了。 */
+        ark_shell_printf("  resolve rc=%d -> NOT applied, board default kept\r\n",
+                         (int)rc);
+        return 1;
+    }
+    ark_shell_printf("  path=%s baud=%u bits=%u parity=%c alias=%u\r\n",
+                     c.path, (uint32)c.baud, (uint32)c.bits,
+                     (c.parity != 0) ? c.parity : '-', (uint32)c.from_alias);
+    return 0;
+}
+
+#if (ARKRTOS_USE_VFS == 1)
+static int fdt_save_to(const char *path)
+{
+    const void *blob = arkrtos_fdt_blob();
+    uint32 size = arkrtos_fdt_size();
+    int32 rc;
+
+    if((blob == 0) || (size == 0u))
+    {
+        sh_out("fdt: no tree parsed, nothing to save\r\n");
+        return 1;
+    }
+    rc = arkrtos_vfs_write_file(path, (const uint8 *)blob, size);
+    ark_shell_printf("fdt: save %s rc=%d bytes=%u\r\n",
+                     path, (int)rc, (uint32)size);
+    return (rc == 0) ? 0 : 1;
+}
+
+static int fdt_load_from(const char *path)
+{
+    uint32 before = arkrtos_fdt_node_count();
+    uint32 n = 0u;
+    uint32 cap = (uint32)sizeof(s_fdt_arena);
+    int32 rc;
+    int32 frc;
+
+    frc = arkrtos_vfs_read_file(path, s_fdt_file, (uint32)sizeof(s_fdt_file), &n);
+    if(frc != 0)
+    {
+        ark_shell_printf("fdt: load %s read rc=%d (tree untouched, nodes=%u)\r\n",
+                         path, (int)frc, (uint32)before);
+        return 1;
+    }
+    rc = arkrtos_fdt_load(s_fdt_arena, cap, s_fdt_file, n);
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        /* 事务性：拒绝新 blob 时上一棵树还在，这里正是那条语义的读数。 */
+        ark_shell_printf("fdt: load %s rc=%d bytes=%u -> refused, previous tree kept (nodes=%u)\r\n",
+                         path, (int)rc, (uint32)n, (uint32)arkrtos_fdt_node_count());
+        return 1;
+    }
+    ark_shell_printf("fdt: load %s rc=0 bytes=%u nodes=%u (was %u)\r\n",
+                     path, (uint32)n, (uint32)arkrtos_fdt_node_count(), (uint32)before);
+    return 0;
+}
+#endif /* ARKRTOS_USE_VFS */
+
+int cmd_fdt(int argc, char *argv[])
+{
+    if(arkrtos_fdt_ready() == 0)
+    {
+        sh_out("fdt: no device tree blob parsed at boot\r\n");
+        return 1;
+    }
+    if(argc < 2)
+    {
+        return fdt_dump();
+    }
+    if(strcmp(argv[1], "path") == 0)
+    {
+        if(argc < 3)
+        {
+            sh_out("fdt path <absolute path>\r\n");
+            return 1;
+        }
+        return fdt_show_path(argv[2]);
+    }
+    if(strcmp(argv[1], "phandle") == 0)
+    {
+        char  buf[ARKRTOS_FDT_PATH_MAX];
+        uint32 ph = 0u;
+        int32 rc;
+
+        if((argc < 3) || (parse_u32(argv[2], &ph) != 0))
+        {
+            sh_out("fdt phandle <decimal>\r\n");
+            return 1;
+        }
+        rc = arkrtos_fdt_path_of_phandle(ph, buf, (uint32)sizeof(buf));
+        if(rc != ARKRTOS_FDT_OK)
+        {
+            ark_shell_printf("fdt: phandle %u rc=%d\r\n", (uint32)ph, (int)rc);
+            return 1;
+        }
+        ark_shell_printf("phandle %u -> %s\r\n", (uint32)ph, buf);
+        return 0;
+    }
+    if(strcmp(argv[1], "chosen") == 0)
+    {
+        return fdt_show_chosen();
+    }
+#if (ARKRTOS_USE_VFS == 1)
+    if(strcmp(argv[1], "save") == 0)
+    {
+        if(argc < 3)
+        {
+            sh_out("fdt save <path>\r\n");
+            return 1;
+        }
+        return fdt_save_to(argv[2]);
+    }
+    if(strcmp(argv[1], "load") == 0)
+    {
+        if(argc < 3)
+        {
+            sh_out("fdt load <path>\r\n");
+            return 1;
+        }
+        return fdt_load_from(argv[2]);
+    }
+#endif
+    sh_out("fdt: unknown subcommand (path|phandle|chosen|save|load)\r\n");
+    return 1;
 }
 #endif /* ARKRTOS_USE_FDT */
 
@@ -813,7 +999,7 @@ int cmd_syncinfo(int argc, char *argv[])
 
     for(i = 0; i < (int32)arkrtos_sync_sem_num(); i++)
     {
-        if(arkrtos_sync_sem_debug(i, &row) != 0)
+        if(arkrtos_sync_sem_debug(i, &row) == 0)
         {
             break;
         }
@@ -821,7 +1007,7 @@ int cmd_syncinfo(int argc, char *argv[])
     }
     for(i = 0; i < (int32)arkrtos_sync_mtx_num(); i++)
     {
-        if(arkrtos_sync_mtx_debug(i, &row) != 0)
+        if(arkrtos_sync_mtx_debug(i, &row) == 0)
         {
             break;
         }
@@ -829,7 +1015,7 @@ int cmd_syncinfo(int argc, char *argv[])
     }
     for(i = 0; i < (int32)arkrtos_sync_cond_num(); i++)
     {
-        if(arkrtos_sync_cond_debug(i, &row) != 0)
+        if(arkrtos_sync_cond_debug(i, &row) == 0)
         {
             break;
         }
@@ -841,7 +1027,7 @@ int cmd_syncinfo(int argc, char *argv[])
         uint32 woke = 0u, reason = 0u, also = 0u;
         uint32 qbefore = 0u;
 
-        if(arkrtos_sync_sem_debug(i, &row) != 0)
+        if(arkrtos_sync_sem_debug(i, &row) == 0)
         {
             break;
         }
@@ -880,7 +1066,7 @@ int cmd_log(int argc, char *argv[])
     {
         uint32 lvl;
 
-        if((parse_u32(argv[1], &lvl) != 0) || (lvl > (uint32)ARKRTOS_LOG_DEBUG))
+        if((parse_u32(argv[1], &lvl) == 0) || (lvl > (uint32)ARKRTOS_LOG_DEBUG))
         {
             sh_out("usage: log <0..4>   (0=off 1=error 2=warn 3=info 4=debug)\r\n");
             return -1;
@@ -981,7 +1167,7 @@ static int rt_show(void)
 
         /* 先证明计数器本身在走再谈读数。调试器断开时会把 DEMCR.TRCENA 清掉，
          * 那之后 CYCCNT 就停在原地；这里重新武装一次并当场报出来。 */
-        if(arkrtos_rt_counter_alive() != 0)
+        if(arkrtos_rt_counter_alive() == 0)
         {
             ark_shell_printf("  counter: running\r\n");
         }
@@ -1062,7 +1248,7 @@ int cmd_rt(int argc, char *argv[])
     {
         if(argc >= 3)
         {
-            if((parse_u32(argv[2], &n) != 0) || (n < 1u) || (n > 5000u))
+            if((parse_u32(argv[2], &n) == 0) || (n < 1u) || (n > 5000u))
             {
                 ark_shell_printf("usage: rt run [n]   (1 <= n <= 5000)\r\n");
                 return -1;

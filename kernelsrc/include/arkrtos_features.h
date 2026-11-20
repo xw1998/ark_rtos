@@ -360,6 +360,12 @@
 #define ARKRTOS_USE_FDT                 0
 #endif
 
+/* 设备树的第二件事：消费 /chosen/stdout-path。默认 0，关档时
+ * arkrtos_fdt_console.c 整文件不产生符号、启动日志一行不多。 */
+#ifndef ARKRTOS_USE_FDT_CONSOLE
+#define ARKRTOS_USE_FDT_CONSOLE         0
+#endif
+
 /* ============================================================
  * 三、服务与组件
  * ============================================================ */

@@ -234,7 +234,8 @@ static int register_kernel_commands(void)
         "Dump the compiled device tree (model, nodes, compatible, reg)", 1);
 #if (ARKRTOS_USE_FDT == 1)
     g_cmd_table[idx++] = ARK_SHELL_CMD("fdt", cmd_fdt,
-        "Dump the device tree parsed from the image .dtb (same format as dt)", 1);
+        "Device tree: fdt | fdt path <abs> | fdt phandle <n> | fdt chosen | "
+        "fdt save <file> | fdt load <file>", 3);
 #endif
     g_cmd_table[idx++] = ARK_SHELL_CMD("task", cmd_task,
         "List kernel tasks, or dump one task frame: task <id> (ids start at 1)", 3);

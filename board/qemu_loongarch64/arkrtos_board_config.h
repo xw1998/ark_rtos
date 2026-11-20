@@ -169,6 +169,8 @@
  * ============================================================ */
 #undef  ARKRTOS_USE_FDT
 #define ARKRTOS_USE_FDT              1
+#undef  ARKRTOS_USE_FDT_CONSOLE
+#define ARKRTOS_USE_FDT_CONSOLE      1
 
 /* ============================================================
  * 八、可靠性

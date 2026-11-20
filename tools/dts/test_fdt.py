@@ -99,10 +99,11 @@ def main():
 
         exe = os.path.join(ROOT, BUILD, "%s.exe" % b)
         cc = [gcc, "-std=c99", "-Wall", "-Wextra", "-Werror",
-              "-DARKRTOS_USE_FDT=1",
+              "-DARKRTOS_USE_FDT=1", "-DARKRTOS_USE_FDT_CONSOLE=1",
               "-I", HOST_INC, "-I", KINC]
         r = run(cc + ["-o", exe, "tools/dts/test_fdt.c",
                       "kernelsrc/src/arkrtos_fdt.c",
+                      "kernelsrc/src/arkrtos_fdt_console.c",
                       "board/%s/arkrtos_dt.c" % b])
         if r.returncode != 0:
             print("test_fdt: %s build failed\n%s" % (b, r.stderr))

@@ -395,6 +395,18 @@ def assign_phandles(root):
 
     resolve(root)
 
+    # 规范要求：被引用（有标签）的节点要在树里带着自己的 phandle 属性，
+    # 读侧才可能从“一个数”还原出“哪个节点”。以前这里只把 phandle 当作
+    # 内部编号、没写进树里，于是 /aliases 与 Linux 的
+    # of_find_node_by_phandle 在这个 blob 上都无法工作。两个出口都写。
+    def stamp(node):
+        for c in node.children:
+            stamp(c)
+            if c.labels and "phandle" not in c.props:
+                c.set_prop("phandle", CELLS, [c.phandle])
+
+    stamp(root)
+
 
 def _find_label(root, label):
     stack = [root]

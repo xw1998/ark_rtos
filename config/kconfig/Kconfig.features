@@ -945,6 +945,23 @@ config ARKRTOS_USE_FDT
 	  Off (default) compiles arkrtos_fdt.c to nothing: no symbols, no shell
 	  command, image byte-for-byte unchanged.
 
+config ARKRTOS_USE_FDT_CONSOLE
+	bool "Consume /chosen/stdout-path (device tree console binding)"
+	default n
+	depends on ARKRTOS_USE_FDT
+	help
+	  Read /chosen/stdout-path, resolve aliases and options, and decide
+	  whether the console the image was built for is the device the tree
+	  names.  A match is reported as such; a mismatch is reported with the
+	  exact reason (compatible / reg window / status / baud conflict) and
+	  the board default is kept - a tree that disagrees with the board is a
+	  configuration error, not something to paper over at run time.
+
+	  Read-only: it never reprograms the UART and never moves the console,
+	  because the console is what prints the answer.
+
+	  Off (the default) compiles arkrtos_fdt_console.c to nothing.
+
 config ARKRTOS_USE_IMAGE_CRC_RECHECK
 	bool "Recheck image CRC after relocation, at boot (SEC-G17)"
 	default n

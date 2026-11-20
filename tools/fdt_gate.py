@@ -28,9 +28,16 @@ D-2 阶段 1 只证明了「同一份 DTS 能编出 spec-valid 的 dtb」（离�
      enabled 不同，就说明两条读路径至少有一条在猜。
   G. 解析器自检：E/F 两个判据各自喂四种坏样本（错 rc、错长度、改一节点、
      改节点数），每种都必须被判红，否则判据是空转。
+  H. /chosen 与 stdout-path 的消费：开机行里的 `[fdt] console path=... baud=
+     ... reason=ok match=1` 必须与这棵树的实际内容一致；四种坏法（路径错、
+     reason 不是 ok、match=0、缺行）都必须被判红。
+  I. 路径 / phandle / 别名 / 换树：同一次启动里 `fdt chosen`、`fdt path`、
+     `fdt phandle` 必须给出同一个节点；`fdt save` 落盘再 `fdt load` 回来，
+     nodes 必须不变；再 load 一个空文件，必须拒绝并保留上一棵树。
 
-不覆盖：dtb 的动态加载（现在只解析编进镜像的那一份）、/chosen 与
-stdout-path 的消费、overlay。见 docs/设备树.md §5。
+不覆盖：overlay（1c 未做）、bootloader 传 dtb、镜像重定位。`fdt save/load`
+证明的是「RAM 副本 + 文件往返 + 坏 blob 回滚」，不是「bootloader 交树」。
+见 docs/设备树.md §5。
 
 用法
 ----
@@ -321,6 +328,97 @@ def run_qemu_boot(qemu, seconds):
 
 BOOT_RE = re.compile(r"^\[fdt\] blob=(\d+) rc=(-?\d+)(.*)$", re.M)
 
+CONSOLE_PATH = "/soc/serial@1fe001e0"
+CONSOLE_BAUD = "115200"
+CONSOLE_RE = re.compile(r"^\[fdt\] console path=(\S+) baud=(\d+) "
+                        r"reason=(\S+) match=(\d+)$", re.M)
+
+def judge_console(text):
+    """H：开机行必须说「这棵树把自己绑到哪个控制台」，且与树一致。"""
+    hits = CONSOLE_RE.findall(text.replace("\r\n", "\n"))
+    if len(hits) != 1:
+        return False, "console 行出现 %d 次（必须恰好 1 次）" % len(hits)
+    path, baud, reason, match = hits[0]
+    problems = []
+    if path != CONSOLE_PATH:
+        problems.append("path=%s，期望 %s" % (path, CONSOLE_PATH))
+    if baud != CONSOLE_BAUD:
+        problems.append("baud=%s，期望 %s" % (baud, CONSOLE_BAUD))
+    if reason != "ok":
+        problems.append("reason=%s，期望 ok" % reason)
+    if match != "1":
+        problems.append("match=%s，期望 1" % match)
+    if problems:
+        return False, "；".join(problems)
+    return True, "path=%s baud=%s reason=ok match=1" % (path, baud)
+
+def self_check_console(good_text):
+    """四种坏法都必须被判红，否则 H 是空转。"""
+    good_text = good_text.replace("\r\n", "\n")
+    mutations = {
+        "路径改成别处": lambda s: s.replace("path=/soc/serial@1fe001e0",
+                                            "path=/soc/serial@dead", 1),
+        "reason 改成 baud_conflict": lambda s: re.sub(r"reason=\S+",
+                                                      "reason=baud_conflict", s, count=1),
+        "match 改成 0": lambda s: s.replace("match=1", "match=0", 1),
+        "整行删掉": lambda s: re.sub(r"^\[fdt\] console .*$\n?", "", s, count=1,
+                                     flags=re.M),
+    }
+    missed = []
+    for name, fn in mutations.items():
+        passed, _ = judge_console(fn(good_text))
+        if passed:
+            missed.append(name)
+    return missed
+
+def judge_api(out, dtb_size, nodes):
+    """I：路径 / phandle / 别名 / 换树必须在同一次启动里自洽。"""
+    problems = []
+
+    def need(cmd, subs):
+        text = out.get(cmd, "")
+        for s in subs:
+            if s not in text:
+                problems.append("%s 输出里没有 %r" % (cmd, s))
+
+    need("fdt chosen", ["path=" + CONSOLE_PATH, "baud=" + CONSOLE_BAUD,
+                        "bits=8", "parity=n", "alias=1"])
+    need("fdt path " + CONSOLE_PATH, ["name=serial@1fe001e0", "depth=2",
+                                      "compat=ns16550a",
+                                      "reg=0x1fe001e0/0x100"])
+    need("fdt phandle 1", ["phandle 1 -> " + CONSOLE_PATH])
+    need("fdt save /mnt/ram/fdt_gate.dtb", ["rc=0 bytes=%d" % dtb_size])
+    need("fdt load /mnt/ram/fdt_gate.dtb",
+         ["rc=0 bytes=%d nodes=%d (was %d)" % (dtb_size, nodes, nodes)])
+    need("fdt load /mnt/ram/fdt_gate_empty.bin",
+         ["refused, previous tree kept (nodes=%d)" % nodes])
+    # 坏 blob 之后树必须还是那棵
+    need("fdt path " + CONSOLE_PATH, ["reg=0x1fe001e0/0x100"])
+    if problems:
+        return False, "；".join(problems)
+    return True, ("chosen/path/phandle 同一节点，save+load 往返 nodes=%d 不变，"
+                  "空文件被拒且旧树保留" % nodes)
+
+def self_check_api(out, dtb_size, nodes):
+    """四种坏法：改 alias、改深度、改 nodes、删掉回滚读数。"""
+    mutations = {
+        "alias=1 改 0": ("fdt chosen", "alias=1", "alias=0"),
+        "depth=2 改 3": ("fdt path " + CONSOLE_PATH, "depth=2", "depth=3"),
+        "load nodes 改错": ("fdt load /mnt/ram/fdt_gate.dtb",
+                            "nodes=%d (was %d)" % (nodes, nodes),
+                            "nodes=%d (was %d)" % (nodes + 1, nodes)),
+        "删掉回滚读数": ("fdt load /mnt/ram/fdt_gate_empty.bin",
+                         "previous tree kept", ""),
+    }
+    missed = []
+    for name, (cmd, old, new) in mutations.items():
+        bad_out = dict(out)
+        bad_out[cmd] = out.get(cmd, "").replace(old, new, 1)
+        passed, _ = judge_api(bad_out, dtb_size, nodes)
+        if passed:
+            missed.append(name)
+    return missed
+
 
 def judge_boot(text, dtb_size):
     """返回 (是否通过, 说明, nodes)。判据全按行首锚点，不用子串猜。"""
@@ -558,6 +656,18 @@ def main(argv):
             else:
                 bad("qemu-boot", detail)
                 bad("boot-selfcheck", "读数没过，自检无从谈起")
+            passed_c, detail_c = judge_console(boot_text)
+            if passed_c:
+                ok("qemu-console", detail_c)
+                missed = self_check_console(boot_text)
+                if missed:
+                    bad("console-selfcheck", "这些坏样本没被判红：%s" % ", ".join(missed))
+                else:
+                    ok("console-selfcheck", "4 种坏法（路径 / reason / match / 缺行）全被判红")
+            else:
+                bad("qemu-console", detail_c)
+                bad("console-selfcheck", "读数没过，自检无从谈起")
+
             if a.keep:
                 print("\n---- 开机串口末尾 ----\n%s\n----------------------"
                       % "\n".join(boot_text.splitlines()[-25:]))
@@ -581,6 +691,39 @@ def main(argv):
                 else:
                     bad("qemu-shell", detail)
                     bad("shell-selfcheck", "读数没过，自检无从谈起")
+                # I：路径 / phandle / 别名 / 换树。命令顺序有意义：
+                # 先用空文件把树逼到"拒绝并回滚"，再从同一棵树上取读数。
+                cmds = ["fdt chosen",
+                        "fdt path " + CONSOLE_PATH,
+                        "fdt phandle 1",
+                        "fdt save /mnt/ram/fdt_gate.dtb",
+                        "fdt load /mnt/ram/fdt_gate.dtb",
+                        "touch /mnt/ram/fdt_gate_empty.bin",
+                        "fdt load /mnt/ram/fdt_gate_empty.bin",
+                        "fdt path " + CONSOLE_PATH]
+                api_out, api_err = run_qemu_shell(qemu, a.port, a.boot,
+                                                  a.per_cmd, cmds)
+                if api_out is None:
+                    bad("qemu-fdt-api", api_err)
+                    bad("api-selfcheck", "读数没过，自检无从谈起")
+                else:
+                    passed_i, detail_i = judge_api(api_out, dtb_size, nodes)
+                    if passed_i:
+                        ok("qemu-fdt-api", detail_i)
+                        missed = self_check_api(api_out, dtb_size, nodes)
+                        if missed:
+                            bad("api-selfcheck",
+                                "这些坏样本没被判红：%s" % ", ".join(missed))
+                        else:
+                            ok("api-selfcheck",
+                               "4 种坏法（alias / depth / nodes / 回滚读数）全被判红")
+                    else:
+                        bad("qemu-fdt-api", detail_i)
+                        bad("api-selfcheck", "读数没过，自检无从谈起")
+                if a.keep:
+                    for c in cmds:
+                        print("\n---- %s ----\n%s" % (c, api_out.get(c, "").rstrip()))
+
                 if a.keep:
                     print("\n---- dt ----\n%s" % out.get("dt", "").rstrip())
                     print("\n---- fdt ----\n%s\n------------" % out.get("fdt", "").rstrip())

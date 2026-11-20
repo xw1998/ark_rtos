@@ -29,6 +29,7 @@ static const uint32 dt_u4_1[] = {0x1u};
 static const uint32 dt_u5_1[] = {0x1fe001e0u, 0x100u};
 static const uint32 dt_u5_2[] = {0x17d7840u};
 static const uint32 dt_u5_3[] = {0x1c200u};
+static const uint32 dt_u5_5[] = {0x1u};
 static const uint32 dt_u6_1[] = {0x0u, 0x80000u};
 static const uint32 dt_u6_2[] = {0x1000u};
 
@@ -62,6 +63,7 @@ static const arkrtos_dt_prop_t dt_p5[] = {
     { "clock-frequency", ARKRTOS_DT_PROP_U32, 1, dt_u5_2, 0 },
     { "current-speed", ARKRTOS_DT_PROP_U32, 1, dt_u5_3, 0 },
     { "status", ARKRTOS_DT_PROP_STR, 1, 0, dt_s5 + 1 },
+    { "phandle", ARKRTOS_DT_PROP_U32, 1, dt_u5_5, 0 },
 };
 static const arkrtos_dt_prop_t dt_p6[] = {
     { "compatible", ARKRTOS_DT_PROP_STR, 1, 0, dt_s6 + 0 },
@@ -76,7 +78,7 @@ static const arkrtos_dt_node_t dt_nodes[] = {
     { "cpus", 0, 0x0u, 0x0u, 0, 65535, 3, 1, 0, dt_p2 },
     { "cpu@0", "loongarch", 0x0u, 0x0u, 0, 2, 4, 1, 1, dt_p3 },
     { "soc", "simple-bus", 0x0u, 0x0u, 0, 65535, 3, 1, 1, dt_p4 },
-    { "serial@1fe001e0", "ns16550a", 0x1fe001e0u, 0x100u, 1, 4, 5, 1, 1, dt_p5 },
+    { "serial@1fe001e0", "ns16550a", 0x1fe001e0u, 0x100u, 1, 4, 6, 1, 1, dt_p5 },
     { "ramdisk@0", "ark,ram-blk", 0x0u, 0x80000u, 0, 4, 4, 1, 1, dt_p6 },
 };
 

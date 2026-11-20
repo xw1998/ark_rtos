@@ -37,29 +37,42 @@ static const uint32 dt_u2_2[] = {0x1u};
 static const uint32 dt_u3_1[] = {0x40011000u, 0x400u};
 static const uint32 dt_u3_3[] = {0x1c200u};
 static const uint32 dt_u3_4[] = {0x9u, 0xau};
+static const uint32 dt_u3_5[] = {0x1u};
 static const uint32 dt_u4_1[] = {0x40004400u, 0x400u};
+static const uint32 dt_u4_3[] = {0x2u};
 static const uint32 dt_u5_1[] = {0x40004800u, 0x400u};
+static const uint32 dt_u5_3[] = {0x3u};
 static const uint32 dt_u6_1[] = {0x52005000u, 0x100u};
 static const uint32 dt_u6_2[] = {0x1u};
 static const uint32 dt_u6_3[] = {0x0u};
+static const uint32 dt_u6_5[] = {0x5u};
 static const uint32 dt_u7_1[] = {0x0u, 0x800000u};
 static const uint32 dt_u7_2[] = {0x6u, 0xau, 0x8u, 0x9u, 0x7u, 0x6u};
+static const uint32 dt_u7_3[] = {0x4u};
 static const uint32 dt_u8_1[] = {0x58020000u, 0x400u};
 static const uint32 dt_u8_3[] = {0x2u};
+static const uint32 dt_u8_5[] = {0x6u};
 static const uint32 dt_u9_1[] = {0x58020400u, 0x400u};
 static const uint32 dt_u9_3[] = {0x2u};
+static const uint32 dt_u9_5[] = {0x7u};
 static const uint32 dt_u10_1[] = {0x58020800u, 0x400u};
 static const uint32 dt_u10_3[] = {0x2u};
+static const uint32 dt_u10_5[] = {0x8u};
 static const uint32 dt_u11_1[] = {0x58020c00u, 0x400u};
 static const uint32 dt_u11_3[] = {0x2u};
+static const uint32 dt_u11_5[] = {0x9u};
 static const uint32 dt_u12_1[] = {0x58021000u, 0x400u};
 static const uint32 dt_u12_3[] = {0x2u};
+static const uint32 dt_u12_5[] = {0xau};
 static const uint32 dt_u13_1[] = {0x58021400u, 0x400u};
 static const uint32 dt_u13_3[] = {0x2u};
+static const uint32 dt_u13_5[] = {0xbu};
 static const uint32 dt_u14_1[] = {0x58021800u, 0x400u};
 static const uint32 dt_u14_3[] = {0x2u};
+static const uint32 dt_u14_5[] = {0xcu};
 static const uint32 dt_u15_1[] = {0x58004800u, 0x400u};
 static const uint32 dt_u15_3[] = {0xfa0u};
+static const uint32 dt_u15_4[] = {0xdu};
 static const uint32 dt_u16_0[] = {0x1u};
 static const uint32 dt_u18_1[] = {0x8u, 0xdu, 0x1u};
 
@@ -82,16 +95,19 @@ static const arkrtos_dt_prop_t dt_p3[] = {
     { "status", ARKRTOS_DT_PROP_STR, 1, 0, dt_s3 + 1 },
     { "current-speed", ARKRTOS_DT_PROP_U32, 1, dt_u3_3, 0 },
     { "pinctrl-0", ARKRTOS_DT_PROP_U32, 2, dt_u3_4, 0 },
+    { "phandle", ARKRTOS_DT_PROP_U32, 1, dt_u3_5, 0 },
 };
 static const arkrtos_dt_prop_t dt_p4[] = {
     { "compatible", ARKRTOS_DT_PROP_STR, 1, 0, dt_s4 + 0 },
     { "reg", ARKRTOS_DT_PROP_U32, 2, dt_u4_1, 0 },
     { "status", ARKRTOS_DT_PROP_STR, 1, 0, dt_s4 + 1 },
+    { "phandle", ARKRTOS_DT_PROP_U32, 1, dt_u4_3, 0 },
 };
 static const arkrtos_dt_prop_t dt_p5[] = {
     { "compatible", ARKRTOS_DT_PROP_STR, 1, 0, dt_s5 + 0 },
     { "reg", ARKRTOS_DT_PROP_U32, 2, dt_u5_1, 0 },
     { "status", ARKRTOS_DT_PROP_STR, 1, 0, dt_s5 + 1 },
+    { "phandle", ARKRTOS_DT_PROP_U32, 1, dt_u5_3, 0 },
 };
 static const arkrtos_dt_prop_t dt_p6[] = {
     { "compatible", ARKRTOS_DT_PROP_STR, 1, 0, dt_s6 + 0 },
@@ -99,11 +115,13 @@ static const arkrtos_dt_prop_t dt_p6[] = {
     { "#address-cells", ARKRTOS_DT_PROP_U32, 1, dt_u6_2, 0 },
     { "#size-cells", ARKRTOS_DT_PROP_U32, 1, dt_u6_3, 0 },
     { "status", ARKRTOS_DT_PROP_STR, 1, 0, dt_s6 + 1 },
+    { "phandle", ARKRTOS_DT_PROP_U32, 1, dt_u6_5, 0 },
 };
 static const arkrtos_dt_prop_t dt_p7[] = {
     { "compatible", ARKRTOS_DT_PROP_STR, 1, 0, dt_s7 + 0 },
     { "reg", ARKRTOS_DT_PROP_U32, 2, dt_u7_1, 0 },
     { "pinctrl-0", ARKRTOS_DT_PROP_U32, 6, dt_u7_2, 0 },
+    { "phandle", ARKRTOS_DT_PROP_U32, 1, dt_u7_3, 0 },
 };
 static const arkrtos_dt_prop_t dt_p8[] = {
     { "compatible", ARKRTOS_DT_PROP_STR, 1, 0, dt_s8 + 0 },
@@ -111,6 +129,7 @@ static const arkrtos_dt_prop_t dt_p8[] = {
     { "gpio-controller", ARKRTOS_DT_PROP_BYTES, 0, 0, 0 },
     { "#gpio-cells", ARKRTOS_DT_PROP_U32, 1, dt_u8_3, 0 },
     { "status", ARKRTOS_DT_PROP_STR, 1, 0, dt_s8 + 1 },
+    { "phandle", ARKRTOS_DT_PROP_U32, 1, dt_u8_5, 0 },
 };
 static const arkrtos_dt_prop_t dt_p9[] = {
     { "compatible", ARKRTOS_DT_PROP_STR, 1, 0, dt_s9 + 0 },
@@ -118,6 +137,7 @@ static const arkrtos_dt_prop_t dt_p9[] = {
     { "gpio-controller", ARKRTOS_DT_PROP_BYTES, 0, 0, 0 },
     { "#gpio-cells", ARKRTOS_DT_PROP_U32, 1, dt_u9_3, 0 },
     { "status", ARKRTOS_DT_PROP_STR, 1, 0, dt_s9 + 1 },
+    { "phandle", ARKRTOS_DT_PROP_U32, 1, dt_u9_5, 0 },
 };
 static const arkrtos_dt_prop_t dt_p10[] = {
     { "compatible", ARKRTOS_DT_PROP_STR, 1, 0, dt_s10 + 0 },
@@ -125,6 +145,7 @@ static const arkrtos_dt_prop_t dt_p10[] = {
     { "gpio-controller", ARKRTOS_DT_PROP_BYTES, 0, 0, 0 },
     { "#gpio-cells", ARKRTOS_DT_PROP_U32, 1, dt_u10_3, 0 },
     { "status", ARKRTOS_DT_PROP_STR, 1, 0, dt_s10 + 1 },
+    { "phandle", ARKRTOS_DT_PROP_U32, 1, dt_u10_5, 0 },
 };
 static const arkrtos_dt_prop_t dt_p11[] = {
     { "compatible", ARKRTOS_DT_PROP_STR, 1, 0, dt_s11 + 0 },
@@ -132,6 +153,7 @@ static const arkrtos_dt_prop_t dt_p11[] = {
     { "gpio-controller", ARKRTOS_DT_PROP_BYTES, 0, 0, 0 },
     { "#gpio-cells", ARKRTOS_DT_PROP_U32, 1, dt_u11_3, 0 },
     { "status", ARKRTOS_DT_PROP_STR, 1, 0, dt_s11 + 1 },
+    { "phandle", ARKRTOS_DT_PROP_U32, 1, dt_u11_5, 0 },
 };
 static const arkrtos_dt_prop_t dt_p12[] = {
     { "compatible", ARKRTOS_DT_PROP_STR, 1, 0, dt_s12 + 0 },
@@ -139,6 +161,7 @@ static const arkrtos_dt_prop_t dt_p12[] = {
     { "gpio-controller", ARKRTOS_DT_PROP_BYTES, 0, 0, 0 },
     { "#gpio-cells", ARKRTOS_DT_PROP_U32, 1, dt_u12_3, 0 },
     { "status", ARKRTOS_DT_PROP_STR, 1, 0, dt_s12 + 1 },
+    { "phandle", ARKRTOS_DT_PROP_U32, 1, dt_u12_5, 0 },
 };
 static const arkrtos_dt_prop_t dt_p13[] = {
     { "compatible", ARKRTOS_DT_PROP_STR, 1, 0, dt_s13 + 0 },
@@ -146,6 +169,7 @@ static const arkrtos_dt_prop_t dt_p13[] = {
     { "gpio-controller", ARKRTOS_DT_PROP_BYTES, 0, 0, 0 },
     { "#gpio-cells", ARKRTOS_DT_PROP_U32, 1, dt_u13_3, 0 },
     { "status", ARKRTOS_DT_PROP_STR, 1, 0, dt_s13 + 1 },
+    { "phandle", ARKRTOS_DT_PROP_U32, 1, dt_u13_5, 0 },
 };
 static const arkrtos_dt_prop_t dt_p14[] = {
     { "compatible", ARKRTOS_DT_PROP_STR, 1, 0, dt_s14 + 0 },
@@ -153,12 +177,14 @@ static const arkrtos_dt_prop_t dt_p14[] = {
     { "gpio-controller", ARKRTOS_DT_PROP_BYTES, 0, 0, 0 },
     { "#gpio-cells", ARKRTOS_DT_PROP_U32, 1, dt_u14_3, 0 },
     { "status", ARKRTOS_DT_PROP_STR, 1, 0, dt_s14 + 1 },
+    { "phandle", ARKRTOS_DT_PROP_U32, 1, dt_u14_5, 0 },
 };
 static const arkrtos_dt_prop_t dt_p15[] = {
     { "compatible", ARKRTOS_DT_PROP_STR, 1, 0, dt_s15 + 0 },
     { "reg", ARKRTOS_DT_PROP_U32, 2, dt_u15_1, 0 },
     { "status", ARKRTOS_DT_PROP_STR, 1, 0, dt_s15 + 1 },
     { "timeout-ms", ARKRTOS_DT_PROP_U32, 1, dt_u15_3, 0 },
+    { "phandle", ARKRTOS_DT_PROP_U32, 1, dt_u15_4, 0 },
 };
 static const arkrtos_dt_prop_t dt_p16[] = {
     { "stdout-path", ARKRTOS_DT_PROP_U32, 1, dt_u16_0, 0 },
@@ -175,19 +201,19 @@ static const arkrtos_dt_node_t dt_nodes[] = {
     { "cpus", 0, 0x0u, 0x0u, 0, 65535, 2, 1, 0, dt_p0 },
     { "cpu@0", "arm,cortex-m7", 0x0u, 0x0u, 0, 0, 2, 1, 1, dt_p1 },
     { "soc", "simple-bus", 0x0u, 0x0u, 0, 65535, 3, 1, 1, dt_p2 },
-    { "serial@40011000", "st,stm32-usart", 0x40011000u, 0x400u, 1, 2, 5, 1, 1, dt_p3 },
-    { "serial@40004400", "st,stm32-usart", 0x40004400u, 0x400u, 2, 2, 3, 0, 1, dt_p4 },
-    { "serial@40004800", "st,stm32-usart", 0x40004800u, 0x400u, 3, 2, 3, 0, 1, dt_p5 },
-    { "spi@52005000", "st,stm32-quadspi", 0x52005000u, 0x100u, 5, 2, 5, 0, 1, dt_p6 },
-    { "flash@0", "winbond,w25q64", 0x0u, 0x800000u, 4, 6, 3, 1, 1, dt_p7 },
-    { "gpio@58020000", "st,stm32-gpio", 0x58020000u, 0x400u, 6, 2, 5, 1, 1, dt_p8 },
-    { "gpio@58020400", "st,stm32-gpio", 0x58020400u, 0x400u, 7, 2, 5, 0, 1, dt_p9 },
-    { "gpio@58020800", "st,stm32-gpio", 0x58020800u, 0x400u, 8, 2, 5, 1, 1, dt_p10 },
-    { "gpio@58020c00", "st,stm32-gpio", 0x58020c00u, 0x400u, 9, 2, 5, 0, 1, dt_p11 },
-    { "gpio@58021000", "st,stm32-gpio", 0x58021000u, 0x400u, 10, 2, 5, 0, 1, dt_p12 },
-    { "gpio@58021400", "st,stm32-gpio", 0x58021400u, 0x400u, 11, 2, 5, 0, 1, dt_p13 },
-    { "gpio@58021800", "st,stm32-gpio", 0x58021800u, 0x400u, 12, 2, 5, 0, 1, dt_p14 },
-    { "watchdog@58004800", "st,stm32-iwdg", 0x58004800u, 0x400u, 13, 2, 4, 1, 1, dt_p15 },
+    { "serial@40011000", "st,stm32-usart", 0x40011000u, 0x400u, 1, 2, 6, 1, 1, dt_p3 },
+    { "serial@40004400", "st,stm32-usart", 0x40004400u, 0x400u, 2, 2, 4, 0, 1, dt_p4 },
+    { "serial@40004800", "st,stm32-usart", 0x40004800u, 0x400u, 3, 2, 4, 0, 1, dt_p5 },
+    { "spi@52005000", "st,stm32-quadspi", 0x52005000u, 0x100u, 5, 2, 6, 0, 1, dt_p6 },
+    { "flash@0", "winbond,w25q64", 0x0u, 0x800000u, 4, 6, 4, 1, 1, dt_p7 },
+    { "gpio@58020000", "st,stm32-gpio", 0x58020000u, 0x400u, 6, 2, 6, 1, 1, dt_p8 },
+    { "gpio@58020400", "st,stm32-gpio", 0x58020400u, 0x400u, 7, 2, 6, 0, 1, dt_p9 },
+    { "gpio@58020800", "st,stm32-gpio", 0x58020800u, 0x400u, 8, 2, 6, 1, 1, dt_p10 },
+    { "gpio@58020c00", "st,stm32-gpio", 0x58020c00u, 0x400u, 9, 2, 6, 0, 1, dt_p11 },
+    { "gpio@58021000", "st,stm32-gpio", 0x58021000u, 0x400u, 10, 2, 6, 0, 1, dt_p12 },
+    { "gpio@58021400", "st,stm32-gpio", 0x58021400u, 0x400u, 11, 2, 6, 0, 1, dt_p13 },
+    { "gpio@58021800", "st,stm32-gpio", 0x58021800u, 0x400u, 12, 2, 6, 0, 1, dt_p14 },
+    { "watchdog@58004800", "st,stm32-iwdg", 0x58004800u, 0x400u, 13, 2, 5, 1, 1, dt_p15 },
     { "chosen", 0, 0x0u, 0x0u, 0, 65535, 1, 1, 0, dt_p16 },
     { "leds", "gpio-leds", 0x0u, 0x0u, 0, 65535, 1, 1, 1, dt_p17 },
     { "led0", 0, 0x0u, 0x0u, 0, 17, 2, 1, 0, dt_p18 },

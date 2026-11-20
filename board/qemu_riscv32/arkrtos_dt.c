@@ -28,6 +28,7 @@ static const uint32 dt_u2_2[] = {0x989680u};
 static const uint32 dt_u3_2[] = {0x0u};
 static const uint32 dt_u4_1[] = {0x2000000u, 0x10000u};
 static const uint32 dt_u5_1[] = {0xc000000u, 0x400000u};
+static const uint32 dt_u5_2[] = {0x1u};
 static const uint32 dt_u6_0[] = {0x1u};
 static const uint32 dt_u6_1[] = {0x1u};
 static const uint32 dt_u7_1[] = {0x10000000u, 0x100u};
@@ -35,6 +36,7 @@ static const uint32 dt_u7_2[] = {0x1u};
 static const uint32 dt_u7_3[] = {0xau};
 static const uint32 dt_u7_4[] = {0x384000u};
 static const uint32 dt_u7_5[] = {0x1c200u};
+static const uint32 dt_u7_7[] = {0x2u};
 static const uint32 dt_u8_1[] = {0x100000u, 0x1000u};
 
 static const arkrtos_dt_prop_t dt_p0[] = {
@@ -63,6 +65,7 @@ static const arkrtos_dt_prop_t dt_p4[] = {
 static const arkrtos_dt_prop_t dt_p5[] = {
     { "compatible", ARKRTOS_DT_PROP_STR, 1, 0, dt_s5 + 0 },
     { "reg", ARKRTOS_DT_PROP_U32, 2, dt_u5_1, 0 },
+    { "phandle", ARKRTOS_DT_PROP_U32, 1, dt_u5_2, 0 },
 };
 static const arkrtos_dt_prop_t dt_p6[] = {
     { "#address-cells", ARKRTOS_DT_PROP_U32, 1, dt_u6_0, 0 },
@@ -77,6 +80,7 @@ static const arkrtos_dt_prop_t dt_p7[] = {
     { "clock-frequency", ARKRTOS_DT_PROP_U32, 1, dt_u7_4, 0 },
     { "current-speed", ARKRTOS_DT_PROP_U32, 1, dt_u7_5, 0 },
     { "status", ARKRTOS_DT_PROP_STR, 1, 0, dt_s7 + 1 },
+    { "phandle", ARKRTOS_DT_PROP_U32, 1, dt_u7_7, 0 },
 };
 static const arkrtos_dt_prop_t dt_p8[] = {
     { "compatible", ARKRTOS_DT_PROP_STR, 1, 0, dt_s8 + 0 },
@@ -89,9 +93,9 @@ static const arkrtos_dt_node_t dt_nodes[] = {
     { "cpus", 0, 0x0u, 0x0u, 0, 65535, 3, 1, 0, dt_p2 },
     { "cpu@0", "riscv", 0x0u, 0x0u, 0, 2, 4, 1, 1, dt_p3 },
     { "clint@2000000", "riscv,clint0", 0x2000000u, 0x10000u, 0, 65535, 2, 1, 1, dt_p4 },
-    { "plic@c000000", "riscv,plic0", 0xc000000u, 0x400000u, 1, 65535, 2, 1, 1, dt_p5 },
+    { "plic@c000000", "riscv,plic0", 0xc000000u, 0x400000u, 1, 65535, 3, 1, 1, dt_p5 },
     { "soc", "simple-bus", 0x0u, 0x0u, 0, 65535, 3, 1, 1, dt_p6 },
-    { "serial@10000000", "ns16550a", 0x10000000u, 0x100u, 2, 6, 7, 1, 1, dt_p7 },
+    { "serial@10000000", "ns16550a", 0x10000000u, 0x100u, 2, 6, 8, 1, 1, dt_p7 },
     { "test@100000", "sifive,test0", 0x100000u, 0x1000u, 0, 6, 2, 1, 1, dt_p8 },
 };
 

@@ -16,7 +16,8 @@
 - [kernelsrc/include/arkrtos_dt.h](#kernelsrcincludearkrtos_dth)（11 项）
 - [kernelsrc/include/arkrtos_elf.h](#kernelsrcincludearkrtos_elfh)（10 项）
 - [kernelsrc/include/arkrtos_export.h](#kernelsrcincludearkrtos_exporth)（3 项）
-- [kernelsrc/include/arkrtos_fdt.h](#kernelsrcincludearkrtos_fdth)（12 项）
+- [kernelsrc/include/arkrtos_fdt.h](#kernelsrcincludearkrtos_fdth)（22 项）
+- [kernelsrc/include/arkrtos_fdt_console.h](#kernelsrcincludearkrtos_fdt_consoleh)（4 项）
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
@@ -2654,6 +2655,136 @@ int arkrtos_fdt_node_enabled(const arkrtos_fdt_node_t *node);
 ```
 
 **1 when status is absent or "okay" - same rule as the C table. */**
+
+### `const void *arkrtos_fdt_blob(void);`
+
+```c
+const void *arkrtos_fdt_blob(void);
+```
+
+**当前正在被解析的 blob 与它的字节数（未 init 时返回 0）。 */**
+
+### `int arkrtos_fdt_load(void *dst, uint32 cap, const void *src, uint32 le`
+
+```c
+int arkrtos_fdt_load(void *dst, uint32 cap, const void *src, uint32 len);
+```
+
+**把 blob 复制进调用方 RAM 再解析——动态装载的落地形态。**
+- `dst`：目标缓冲区（4 字节对齐，容量 >= len）
+- `cap`：目标缓冲区字节数；len > cap 直接拒绝，不是截断
+失败时**保持上一棵树可用**：解析是事务性的，坏 blob 只换来一个
+错误码，不会让这台机器"突然一个设备都没有"。
+**返回**：ARKRTOS_FDT_OK 或负的错误码（ERR_ARG 含容量不足）
+
+### `int arkrtos_fdt_node_by_path(const char *path, arkrtos_fdt_node_t *out`
+
+```c
+int arkrtos_fdt_node_by_path(const char *path, arkrtos_fdt_node_t *out);
+```
+
+**按绝对路径取节点（"/soc/serial@1fe001e0"；"/" 是根节点）。 */**
+
+### `int arkrtos_fdt_alias(const char *name, char *buf, uint32 cap);`
+
+```c
+int arkrtos_fdt_alias(const char *name, char *buf, uint32 cap);
+```
+
+**/aliases/<name> 指向的路径，拷进 buf（含 NUL）。 */**
+
+### `const char *arkrtos_fdt_stdout_path(void);`
+
+```c
+const char *arkrtos_fdt_stdout_path(void);
+```
+
+**/chosen/stdout-path 的原始字符串；没有这个节点或属性就是 0。 */**
+
+### `const void *arkrtos_fdt_stdout_raw(uint32 *len);`
+
+```c
+const void *arkrtos_fdt_stdout_raw(uint32 *len);
+```
+
+**/chosen/stdout-path 的原始字节与长度（可能是字符串，也可能是句柄）。 */**
+
+### `int arkrtos_fdt_node_by_phandle(uint32 ph, arkrtos_fdt_node_t *out);`
+
+```c
+int arkrtos_fdt_node_by_phandle(uint32 ph, arkrtos_fdt_node_t *out);
+```
+
+**按 phandle 取节点（phandle / linux,phandle 两种属性都认）。 */**
+
+### `int arkrtos_fdt_path_of_phandle(uint32 ph, char *buf, uint32 cap);`
+
+```c
+int arkrtos_fdt_path_of_phandle(uint32 ph, char *buf, uint32 cap);
+```
+
+**把一个 phandle 还原成绝对路径，拷进 buf（含 NUL）。 */**
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**stdout-path 的解析结果（路径 + 选项）。 */**
+
+### `int arkrtos_fdt_stdout_resolve(arkrtos_fdt_console_t *out);`
+
+```c
+int arkrtos_fdt_stdout_resolve(arkrtos_fdt_console_t *out);
+```
+
+**解析 /chosen/stdout-path（"serial0:115200n8" 或绝对路径形式）。**
+**返回**：OK；ERR_NOT_INIT / ERR_NOT_FOUND（别名/路径不存在）/
+ERR_PATH（选项写法不认识——不猜一个默认波特率）
+
+## kernelsrc/include/arkrtos_fdt_console.h
+
+**把 /chosen/stdout-path 变成"控制台绑到哪个设备"的判断**
+设备树里说"控制台是这个设备"的字段是 /chosen/stdout-path。读了
+它不等于消费它：消费的意思是拿它去决定控制台绑到哪儿，并且在不
+一致时**明确拒绝**——把 DTS 与板级常量对不上的事静默吞掉，等于
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**板级期望：控制台应该是什么。字段为 0/NULL 表示"这一项不检查"。 */**
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**树里读出来、并与板级核对过的结果。 */**
+
+### `int arkrtos_console_from_fdt(const arkrtos_console_expect_t *expect, a`
+
+```c
+int arkrtos_console_from_fdt(const arkrtos_console_expect_t *expect, arkrtos_console_bind_t *out);
+```
+
+**解析 /chosen/stdout-path 并与板级期望核对。**
+- `expect`：期望（可为 0，表示只解析不核对）
+- `out`：解析结果，失败时也尽量填（便于把"读到了什么"打出来）
+**返回**：ARKRTOS_CONSOLE_OK 或上面某个负码
+> 说明：只读：不改变控制台，也不碰硬件。
+
+### `const char *arkrtos_console_reason(int rc);`
+
+```c
+const char *arkrtos_console_reason(int rc);
+```
+
+**原因码的稳定短名（用于日志），未知码返回 "?"。 */**
 
 ## kernelsrc/include/arkrtos_flashapp.h
 

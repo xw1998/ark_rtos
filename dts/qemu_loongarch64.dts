@@ -22,8 +22,17 @@
 	compatible = "qemu,virt";
 
 	chosen {
-		stdout-path = &uart0;
+		/* 标准写法：一个字符串，前半是设备（别名最常用），冒号后是
+		 * 选项 <波特率>[<校验>][<数据位>]。内核按它决定控制台绑到哪个
+		 * 设备；写错了要报错，不能悄悄退回默认值。 */
+		stdout-path = "serial0:115200n8";
 		bootargs = "console=ttyS0";
+	};
+
+	/* 别名表：dtc 会把 serial0 = &uart0 编成一个 phandle 单元，
+	 * 所以读侧必须先有 phandle 属性才可能还原路径。 */
+	aliases {
+		serial0 = &uart0;
 	};
 
 	/* DRAM 从 0 起 128 MB，但低 1 MB 被固件的启动信息占用（见板级配置），

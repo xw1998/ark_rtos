@@ -106,4 +106,67 @@ int32 arkrtos_fdt_prop_u32(const arkrtos_fdt_node_t *node, const char *name,
 /** @brief 1 when status is absent or "okay" - same rule as the C table. */
 int arkrtos_fdt_node_enabled(const arkrtos_fdt_node_t *node);
 
+/* --------------------------------------------------- 动态装载与换树 */
+/* 解析器是一个只读视图：blob 在哪儿（镜像里的 const 数据、RAM 里的副本、
+ * bootloader 交过来的地址）它不关心，只关心字节流是否合规。所以"动态加载"
+ * 在这里只是一件小事——把 blob 拷进调用方的 RAM，再 init 它；换树失败
+ * 不毁掉上一棵树。
+ */
+
+#define ARKRTOS_FDT_ERR_NOT_FOUND (-9)  /* 路径 / 别名 / 属性不存在 */
+#define ARKRTOS_FDT_ERR_PATH      (-10) /* 路径或 stdout-path 格式不认识 */
+
+/* 路径与字符串缓冲区上限。超了就是错误，不截断。 */
+#define ARKRTOS_FDT_PATH_MAX      128u
+
+/** @brief 当前正在被解析的 blob 与它的字节数（未 init 时返回 0）。 */
+const void *arkrtos_fdt_blob(void);
+uint32 arkrtos_fdt_size(void);
+
+/**
+* @brief 把 blob 复制进调用方 RAM 再解析——动态装载的落地形态。
+* @param dst 目标缓冲区（4 字节对齐，容量 >= len）
+* @param cap 目标缓冲区字节数；len > cap 直接拒绝，不是截断
+* @details 失败时**保持上一棵树可用**：解析是事务性的，坏 blob 只换来一个
+*          错误码，不会让这台机器"突然一个设备都没有"。
+* @return ARKRTOS_FDT_OK 或负的错误码（ERR_ARG 含容量不足）
+*/
+int arkrtos_fdt_load(void *dst, uint32 cap, const void *src, uint32 len);
+
+/** @brief 按绝对路径取节点（"/soc/serial@1fe001e0"；"/" 是根节点）。 */
+int arkrtos_fdt_node_by_path(const char *path, arkrtos_fdt_node_t *out);
+
+/** @brief /aliases/<name> 指向的路径，拷进 buf（含 NUL）。 */
+int arkrtos_fdt_alias(const char *name, char *buf, uint32 cap);
+
+/** @brief /chosen/stdout-path 的原始字符串；没有这个节点或属性就是 0。 */
+const char *arkrtos_fdt_stdout_path(void);
+
+/** @brief /chosen/stdout-path 的原始字节与长度（可能是字符串，也可能是句柄）。 */
+const void *arkrtos_fdt_stdout_raw(uint32 *len);
+
+/** @brief 按 phandle 取节点（phandle / linux,phandle 两种属性都认）。 */
+int arkrtos_fdt_node_by_phandle(uint32 ph, arkrtos_fdt_node_t *out);
+
+/** @brief 把一个 phandle 还原成绝对路径，拷进 buf（含 NUL）。 */
+int arkrtos_fdt_path_of_phandle(uint32 ph, char *buf, uint32 cap);
+
+/** @brief stdout-path 的解析结果（路径 + 选项）。 */
+typedef struct
+{
+    char   path[ARKRTOS_FDT_PATH_MAX]; /* 解析后的绝对路径 */
+    uint32 baud;                        /* 0 = 没写 */
+    uint32 bits;                        /* 0 = 没写 */
+    uint32 stop;                        /* 0 = 没写 */
+    char   parity;                      /* 0 = 没写，否则 'n' / 'o' / 'e' */
+    uint8  from_alias;                  /* 1 = 原值经由 /aliases 解析而来 */
+} arkrtos_fdt_console_t;
+
+/**
+* @brief 解析 /chosen/stdout-path（"serial0:115200n8" 或绝对路径形式）。
+* @return OK；ERR_NOT_INIT / ERR_NOT_FOUND（别名/路径不存在）/
+*         ERR_PATH（选项写法不认识——不猜一个默认波特率）
+*/
+int arkrtos_fdt_stdout_resolve(arkrtos_fdt_console_t *out);
+
 #endif /* __ARKRTOS_FDT_H__ */
