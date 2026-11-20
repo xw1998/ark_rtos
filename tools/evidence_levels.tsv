@@ -40,3 +40,4 @@ ELF 装载（ARKRTOS_USE_ELF）	RV32IMAC / QEMU virt	L2	qemu_riscv32	77cc0da exe
 ELF 装载（ARKRTOS_USE_ELF）	LA64 / QEMU virt	L2	qemu_loongarch64	77cc0da exec 反复跑过（页表 + PLV3）
 Linux 动态链接（PT_INTERP + ld.so，ARKRTOS_USE_DYNLOAD）	LA64 / QEMU virt	L2	qemu_loongarch64	cfa783b dynmain 两个变体（ET_EXEC / ET_DYN）各一次 PASS 且 exit code 105；坏夹具（PT_DYNAMIC 内未解析 PLT 符号）-> ldso FAIL unresolved PLT symbol + exit code 127；5 次 write rc=0、3 次 exec；RELATIVE / 64 / JUMP_SLOT 三种重定位全部 applied；interp_base=0x2100000；默认档同构建逐行一致，text 411360 变 413752 B
 真实 Linux 二进制差距清单（探针 + realbin 门禁）	LA64 / QEMU virt	L2	qemu_loongarch64	420ac78 realbin 门禁 7 项全过（静态样本窗口内 0 blocker / 远基址恰好 1 条 address / 坏输入 4 种全判红 / DT 与重定位表同 ldso.c 双向一致 / 重定位名同 readelf 逐项一致 1239 条 RELATIVE、68 条 64、20 条 IRELATIVE、17 条 TLS_TPREL64、9 条 JUMP_SLOT）；[lxstat] slots=11 overflow=0（合成触发，非真实分布）；真实发行版二进制目前仍跑不起来
+存储容量（RAM 介质 4 MiB）	LA64 / QEMU virt	L2	qemu_loongarch64	7301ab7 卷扩到 4 MiB；cap.bin 写 655360 B 读回按长度与逐字节双判一致；bss 786964 -> 约 5.1 MB（默认档真实 RAM 代价）
