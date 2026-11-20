@@ -66,7 +66,11 @@
  * @note 基址用宏参数而不是固定寄存器：eentry 用 $s0，SMP 与 resume 用 $sp。
  * ============================================================ */
 #if (ARKRTOS_USE_FPU == 1)
+#if (ARKRTOS_USE_LSX == 1)
+#define LA_FRAME_BYTES          1040
+#else
 #define LA_FRAME_BYTES          528
+#endif
 
 .macro LA_FP_SAVE base
     fst.d   $f0,  \base, 256
@@ -101,6 +105,42 @@
     fst.d   $f29, \base, 488
     fst.d   $f30, \base, 496
     fst.d   $f31, \base, 504
+    /* LSX：$vr0 占 16 字节，落在 528 + 16*i（528 = 33*16，16 字节对齐；
+     * 帧基址与 wi 都保持 16 字节对齐，vst 不会落 ALE）。关档时整块不产生指令。 */
+#if (ARKRTOS_USE_LSX == 1)
+    vst     $vr0, \base, 528
+    vst     $vr1, \base, 544
+    vst     $vr2, \base, 560
+    vst     $vr3, \base, 576
+    vst     $vr4, \base, 592
+    vst     $vr5, \base, 608
+    vst     $vr6, \base, 624
+    vst     $vr7, \base, 640
+    vst     $vr8, \base, 656
+    vst     $vr9, \base, 672
+    vst     $vr10, \base, 688
+    vst     $vr11, \base, 704
+    vst     $vr12, \base, 720
+    vst     $vr13, \base, 736
+    vst     $vr14, \base, 752
+    vst     $vr15, \base, 768
+    vst     $vr16, \base, 784
+    vst     $vr17, \base, 800
+    vst     $vr18, \base, 816
+    vst     $vr19, \base, 832
+    vst     $vr20, \base, 848
+    vst     $vr21, \base, 864
+    vst     $vr22, \base, 880
+    vst     $vr23, \base, 896
+    vst     $vr24, \base, 912
+    vst     $vr25, \base, 928
+    vst     $vr26, \base, 944
+    vst     $vr27, \base, 960
+    vst     $vr28, \base, 976
+    vst     $vr29, \base, 992
+    vst     $vr30, \base, 1008
+    vst     $vr31, \base, 1024
+#endif
     /* FCSR 也是线程上下文：舍入模式（RM，bit[9:8]）决定同一条 FP 指令
      * 算出的结果，异常使能位决定 FP 异常是否陷进来。槽位一直预留在
      * 512，所以打开 FPU 后帧长仍是 528 —— 存它不改变任何栈预算。
@@ -151,8 +191,42 @@
     fld.d   $f29, \base, 488
     fld.d   $f30, \base, 496
     fld.d   $f31, \base, 504
-    /* FCSR 最后恢复：先让 32 个 FPR 落位，再切舍入/异常使能，
-     * 免得「异常使能已打开、FPR 还没装完」这种中间态。 */
+#if (ARKRTOS_USE_LSX == 1)
+    vld     $vr0, \base, 528
+    vld     $vr1, \base, 544
+    vld     $vr2, \base, 560
+    vld     $vr3, \base, 576
+    vld     $vr4, \base, 592
+    vld     $vr5, \base, 608
+    vld     $vr6, \base, 624
+    vld     $vr7, \base, 640
+    vld     $vr8, \base, 656
+    vld     $vr9, \base, 672
+    vld     $vr10, \base, 688
+    vld     $vr11, \base, 704
+    vld     $vr12, \base, 720
+    vld     $vr13, \base, 736
+    vld     $vr14, \base, 752
+    vld     $vr15, \base, 768
+    vld     $vr16, \base, 784
+    vld     $vr17, \base, 800
+    vld     $vr18, \base, 816
+    vld     $vr19, \base, 832
+    vld     $vr20, \base, 848
+    vld     $vr21, \base, 864
+    vld     $vr22, \base, 880
+    vld     $vr23, \base, 896
+    vld     $vr24, \base, 912
+    vld     $vr25, \base, 928
+    vld     $vr26, \base, 944
+    vld     $vr27, \base, 960
+    vld     $vr28, \base, 976
+    vld     $vr29, \base, 992
+    vld     $vr30, \base, 1008
+    vld     $vr31, \base, 1024
+#endif
+    /* FCSR 最后恢复：先让 32 个 FPR（与 32 个向量寄存器）落位，再切
+     * 舍入/异常使能，免得「异常使能已打开、FPR 还没装完」这种中间态。 */
     ld.d    $t0, \base, 512
     .word   0x0114C180                  /* movgr2fcsr $fcsr0, $t0 */
 .endm

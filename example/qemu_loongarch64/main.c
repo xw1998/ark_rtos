@@ -313,6 +313,232 @@ static void task_fcsr_b(void)
 #endif /* ARKRTOS_USE_FPU */
 
 /* ============================================================
+ * LSX 上下文自检：$vr0..$vr31 是不是按任务保存（U-19）
+ * @details FPU 档只存 32 个 $f（低 64 位）与 FCSR，向量寄存器的高 64 位
+ *          （$vr 是 128 位）一直是「没开 SXE、用到就落 Ecode=13 INE」的
+ *          显式故障。打开 ARKRTOS_USE_LSX 后帧追加 512 字节向量区，
+ *          本自检就是这条路径的现场证据：
+ *            两个任务各拿一份 512 字节图案（32 x 16 字节），
+ *            每轮 vld 全量装进 $vr0..$vr31 -> 睡 1 ms（一定被切走）->
+ *            vst 全量存回 -> 与自己的图案逐字比对。
+ *          没保存的后果只有一种：对方任务装进去的图案盖在自己身上，
+ *          存回来就与自己的图案不符。判据三条：两边 bad 都为 0；
+ *          两边 rounds 都跑满；两边图案互不相同（否则"都相同"会是假绿）。
+ * ============================================================ */
+#if (ARKRTOS_USE_LSX == 1)
+#define LSX_ROUNDS      (50u)
+#define LSX_WORDS       (128u)          /* 32 个寄存器 x 4 个 32 位字 */
+
+static uint32 s_lsx_stack_a[512];
+static uint32 s_lsx_stack_b[512];
+static volatile uint32 s_lsx_a_bad;
+static volatile uint32 s_lsx_b_bad;
+static volatile uint32 s_lsx_a_rounds;
+static volatile uint32 s_lsx_b_rounds;
+static volatile uint32 s_lsx_a_done;
+
+/* 16 字节对齐是 vld/vst 的硬要求（不对齐落 ALE，不是静默偏移）。 */
+static uint32 s_lsx_pat_a[LSX_WORDS] __attribute__((aligned(16)));
+static uint32 s_lsx_pat_b[LSX_WORDS] __attribute__((aligned(16)));
+static uint32 s_lsx_out_a[LSX_WORDS] __attribute__((aligned(16)));
+static uint32 s_lsx_out_b[LSX_WORDS] __attribute__((aligned(16)));
+
+/* 一次装/存 32 个向量寄存器。只借 $t0 当基址（它在帧的 88 槽里有原值，
+ * 跨这个 asm 块也由编译器负责保存），不改任何别的 GPR。 */
+static void lsx_load_all(const void *base)
+{
+    __asm__ volatile(
+    "vld $vr0, %0, 0\n"
+    "vld $vr1, %0, 16\n"
+    "vld $vr2, %0, 32\n"
+    "vld $vr3, %0, 48\n"
+    "vld $vr4, %0, 64\n"
+    "vld $vr5, %0, 80\n"
+    "vld $vr6, %0, 96\n"
+    "vld $vr7, %0, 112\n"
+    "vld $vr8, %0, 128\n"
+    "vld $vr9, %0, 144\n"
+    "vld $vr10, %0, 160\n"
+    "vld $vr11, %0, 176\n"
+    "vld $vr12, %0, 192\n"
+    "vld $vr13, %0, 208\n"
+    "vld $vr14, %0, 224\n"
+    "vld $vr15, %0, 240\n"
+    "vld $vr16, %0, 256\n"
+    "vld $vr17, %0, 272\n"
+    "vld $vr18, %0, 288\n"
+    "vld $vr19, %0, 304\n"
+    "vld $vr20, %0, 320\n"
+    "vld $vr21, %0, 336\n"
+    "vld $vr22, %0, 352\n"
+    "vld $vr23, %0, 368\n"
+    "vld $vr24, %0, 384\n"
+    "vld $vr25, %0, 400\n"
+    "vld $vr26, %0, 416\n"
+    "vld $vr27, %0, 432\n"
+    "vld $vr28, %0, 448\n"
+    "vld $vr29, %0, 464\n"
+    "vld $vr30, %0, 480\n"
+    "vld $vr31, %0, 496\n"
+        : : "r"(base) : "memory");
+}
+
+static void lsx_store_all(void *base)
+{
+    __asm__ volatile(
+    "vst $vr0, %0, 0\n"
+    "vst $vr1, %0, 16\n"
+    "vst $vr2, %0, 32\n"
+    "vst $vr3, %0, 48\n"
+    "vst $vr4, %0, 64\n"
+    "vst $vr5, %0, 80\n"
+    "vst $vr6, %0, 96\n"
+    "vst $vr7, %0, 112\n"
+    "vst $vr8, %0, 128\n"
+    "vst $vr9, %0, 144\n"
+    "vst $vr10, %0, 160\n"
+    "vst $vr11, %0, 176\n"
+    "vst $vr12, %0, 192\n"
+    "vst $vr13, %0, 208\n"
+    "vst $vr14, %0, 224\n"
+    "vst $vr15, %0, 240\n"
+    "vst $vr16, %0, 256\n"
+    "vst $vr17, %0, 272\n"
+    "vst $vr18, %0, 288\n"
+    "vst $vr19, %0, 304\n"
+    "vst $vr20, %0, 320\n"
+    "vst $vr21, %0, 336\n"
+    "vst $vr22, %0, 352\n"
+    "vst $vr23, %0, 368\n"
+    "vst $vr24, %0, 384\n"
+    "vst $vr25, %0, 400\n"
+    "vst $vr26, %0, 416\n"
+    "vst $vr27, %0, 432\n"
+    "vst $vr28, %0, 448\n"
+    "vst $vr29, %0, 464\n"
+    "vst $vr30, %0, 480\n"
+    "vst $vr31, %0, 496\n"
+        : : "r"(base) : "memory");
+}
+
+static void lsx_fill_pattern(uint32 *p, uint32 seed)
+{
+    uint32 i;
+
+    for(i = 0u; i < LSX_WORDS; i++)
+    {
+        p[i] = seed ^ (i * 0x01010101u);
+    }
+}
+
+static void lsx_self_loop(const uint32 *pat, uint32 *out,
+                          volatile uint32 *p_bad, volatile uint32 *p_rounds)
+{
+    uint32 i;
+    uint32 k;
+    uint32 diff;
+
+    /* 前置对照：同一条路径上「装完立刻存」，中间不经过任何任务切换。
+     * 它排掉的是「vld/vst 本身写错、或 SXE 没开」这一类原因 —— 那种情况下
+     * 下面那条跨切换的读数会一直失败，而修法完全不同。实测这一行 bad=0
+     * 之后，跨切换那行仍是 bad=50 的那一轮就是向量区没存（见反假绿）。 */
+    for(k = 0u; k < LSX_WORDS; k++)
+    {
+        out[k] = 0u;
+    }
+    lsx_load_all(pat);
+    lsx_store_all(out);
+    diff = 0u;
+    for(k = 0u; k < LSX_WORDS; k++)
+    {
+        if(out[k] != pat[k])
+        {
+            diff++;
+        }
+    }
+    arkrtos_board_puts("[lsx] pre bad=");
+    arkrtos_board_putu(diff);
+    arkrtos_board_puts(" out0=");
+    arkrtos_board_putu((uint32)out[0]);
+    arkrtos_board_puts(" pat0=");
+    arkrtos_board_putu((uint32)pat[0]);
+    arkrtos_board_puts(" out16=");
+    arkrtos_board_putu((uint32)out[16]);
+    arkrtos_board_puts(" pat16=");
+    arkrtos_board_putu((uint32)pat[16]);
+    arkrtos_board_puts("\n");
+
+    for(i = 0u; i < LSX_ROUNDS; i++)
+    {
+        for(k = 0u; k < LSX_WORDS; k++)
+        {
+            out[k] = 0u;
+        }
+        lsx_load_all(pat);
+        arkrtos_task_wait_internal(1u);        /* 1 ms，一定被切走 */
+        lsx_store_all(out);
+        diff = 0u;
+        for(k = 0u; k < LSX_WORDS; k++)
+        {
+            if(out[k] != pat[k])
+            {
+                diff++;
+            }
+        }
+        if(diff != 0u)
+        {
+            (*p_bad)++;
+        }
+        (*p_rounds)++;
+    }
+}
+
+static void task_lsx_a(void)
+{
+    lsx_self_loop(s_lsx_pat_a, s_lsx_out_a, &s_lsx_a_bad, &s_lsx_a_rounds);
+    s_lsx_a_done = 1u;
+    for(;;)
+    {
+        arkrtos_task_wait_internal(1000u);
+    }
+}
+
+static void task_lsx_b(void)
+{
+    uint32 guard;
+
+    lsx_self_loop(s_lsx_pat_b, s_lsx_out_b, &s_lsx_b_bad, &s_lsx_b_rounds);
+    for(guard = 0u; (s_lsx_a_done == 0u) && (guard < 500u); guard++)
+    {
+        arkrtos_task_wait_internal(1u);
+    }
+
+    arkrtos_board_puts("[lsx] A bad=");
+    arkrtos_board_putu(s_lsx_a_bad);
+    arkrtos_board_puts(" rounds=");
+    arkrtos_board_putu(s_lsx_a_rounds);
+    arkrtos_board_puts(" | B bad=");
+    arkrtos_board_putu(s_lsx_b_bad);
+    arkrtos_board_puts(" rounds=");
+    arkrtos_board_putu(s_lsx_b_rounds);
+    if((s_lsx_a_bad == 0u) && (s_lsx_b_bad == 0u) &&
+       (s_lsx_a_rounds == LSX_ROUNDS) && (s_lsx_b_rounds == LSX_ROUNDS))
+    {
+        arkrtos_board_puts(" -> PASS (vr0..vr31 per task across switches)\n");
+    }
+    else
+    {
+        arkrtos_board_puts(" -> FAIL (vector regs leaked between tasks)\n");
+    }
+
+    for(;;)
+    {
+        arkrtos_task_wait_internal(1000u);
+    }
+}
+#endif /* ARKRTOS_USE_LSX */
+
+/* ============================================================
  * 任务 D：存储栈自检（块设备 → littlefs → VFS → procfs）
  * @details 这一条链路是「全功能」考题里最容易被跳过的一段：不做它，示例里
  *          只剩调度器与两个同步原语，"文件系统能挂载、能读写、路径能解析"
@@ -1184,8 +1410,18 @@ int main(void)
                                 sizeof(s_fcsr_stack_b), 17u, 0u);
     #endif
 
+    #if (ARKRTOS_USE_LSX == 1)
+    /* LSX 上下文自检（$vr0..$vr31）：两份不同图案交替装填，切换后各归各。
+     * 图案必须先填好，再注册任务（任务一开跑就可能读）。优先级 17。 */
+    lsx_fill_pattern(s_lsx_pat_a, 0xA5A50000u);
+    lsx_fill_pattern(s_lsx_pat_b, 0x5A5A0000u);
+    (void)arkrtos_task_register(task_lsx_a, s_lsx_stack_a,
+                                sizeof(s_lsx_stack_a), 17u, 0u);
+    (void)arkrtos_task_register(task_lsx_b, s_lsx_stack_b,
+                                sizeof(s_lsx_stack_b), 17u, 0u);
+    #endif
 
-    #if (ARKRTOS_USE_STACK_GUARD == 1)
+#if (ARKRTOS_USE_STACK_GUARD == 1)
     /* 栈底守卫演示任务：优先级最低，只在 A/B/存储/装载都跑过之后踩自己的栈底。 */
     (void)arkrtos_task_register(task_stack_guard_demo, s_stack_guard_demo,
                                 sizeof(s_stack_guard_demo), 18u, 0u);

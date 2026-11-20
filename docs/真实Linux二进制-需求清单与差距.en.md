@@ -260,8 +260,9 @@ instrument before trusting the instrument**.
 3. `exit code 3` is the program's own `return 3`, not a broken exit path.
 4. FCSR (rounding mode and exception-enable bits) **is saved per task now** (§5.5:
    QEMU PASS plus a control run with the save/restore lines removed that prints
-   FAIL). LSX/LASX vector registers are still **not saved**; a real LSX instruction
-   raises an explicit `Ecode=13 INE`.
+   FAIL). **LSX (`$vr0..$vr31`) is saved per task since 2026-11-21** (§5.7, switch
+   `ARKRTOS_USE_LSX`, default 0, frame 528 -> 1040); LASX (`$xr0..$xr31`) is still
+   **not saved** and a real LSX instruction raises an explicit `Ecode=13 INE`.
 5. The upload path measures 2 151-2 240 B/s, so 623 760 B takes 278-339 s. It goes over
    the serial console instead of "embedded into the image" because the 2 MB flash
    window / 512 KB kernel pool geometry cannot hold this binary (see the header of
@@ -425,9 +426,10 @@ save/restore site. The three save sites (eentry / inline switch / secondary-core
 entry) and the one restore-only site (`arkrtos_port_resume_task`, which never saves)
 were each verified in the disassembly.
 
-**Still not done**: LSX/LASX vector registers (`$vr0..$vr31`, `$xr0..$xr31`). Stock
-baseline binaries do not touch them; a real LSX instruction raises `Ecode=13 INE` —
-an explicit fault, not a silent wrong answer.
+**LSX landed on 2026-11-21** (§5.7): `$vr0..$vr31` are saved per task, switch
+`ARKRTOS_USE_LSX`, default 0, frame 528 -> 1040. **Still not done** is LASX
+(`$xr0..$xr31`): `EUEN.ASXE` is deliberately left 0, so a real LASX instruction
+raises `Ecode=13 INE` — an explicit fault, not a silent wrong answer.
 
 ---
 
@@ -475,6 +477,30 @@ the main program's offset.
    not a shortcut.
 3. This is not glibc's TCB: `tcbhead_t`/`dtv`/the self pointer are still absent,
    so the real `ld.so` does not start (§7).
+
+---
+
+### 5.7 LSX vector register context (2026-11-21)
+
+Criterion: two tasks each hold a 32 x 16 B pattern; every round loads all 32 `$vr`
+with `vld`, gets switched away, stores them back with `vst` and compares word by word
+against its own pattern. After 50 rounds both sides report `bad == 0`.
+
+| Item | Reading / rule |
+| --- | --- |
+| Switch | `ARKRTOS_USE_LSX` (default 0, requires `ARKRTOS_USE_FPU=1`; otherwise a compile-time `#error`) |
+| Frame layout | GPR/ERA/PRMD `0..255`; FPR `256..511` + FCSR@512; vector area **`528 + 16*i` -> `$vr{i}`**, frame length **1040** |
+| `EUEN` | bit0 FPE (already set) + **bit1 SXE = 1**; bit2 **ASXE deliberately 0** |
+| QEMU reading | two `[lsx] pre bad=0 ...` lines (control: load and store immediately, no switch) + `[lsx] A bad=0 rounds=50 \| B bad=0 rounds=50 -> PASS (vr0..vr31 per task across switches)` |
+| Negative control | flipping both `#if (ARKRTOS_USE_LSX == 1)` to `#if 0` gives `bad=50` / `bad=49` FAIL while `pre` stays `bad=0` (the failure is exactly the switch path); reverted afterwards |
+| Default profile | with a fixed `SOURCE_DATE_EPOCH` and `--strip-debug` the sha256 equals the pre-change tree (`3e6858e8...`), i.e. **byte-identical** |
+| Gate | `tools/lsx_gate.py`, six checks (`switch-default` / `frame-size` / `euen` / `parser-selfcheck` / `default-build` / `lsx-build`) |
+
+**Boundaries**: LASX is still not saved (`ASXE = 0`; a real `xv` instruction raises
+`Ecode=13 INE`, and `xvst` needs 32-byte alignment while the frame base only
+guarantees 16); every task stack grows by 512 bytes, judged by the caller's headroom;
+the readings come from QEMU, not silicon. Details in
+[QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.31 (Chinese page).
 
 ---
 
@@ -634,8 +660,8 @@ check compiles to 2736 B of text instead of 2792 B. Kernel side 0 B,
    frame (§5.3). **The real static hello has run inside the wide window.** Still
    missing: per-process VA spaces and runtime page tables, the native SVC parameter
    block (still `uint32[]`), the TCB and `R_LARCH_TLS_TPREL64` relocations.
-   Static TLS placement (§5.4) and FCSR (§5.5) both have readings now; LSX/LASX
-   vector registers are still not saved.
+   Static TLS placement (§5.4), FCSR (§5.5) and LSX vector registers (§5.7) all have
+   readings now; only LASX (`$xr0..$xr31`) is still unsaved, raising `Ecode=13 INE`.
 3. The `[lxstat]` numbers are **synthetic** (11 numbers), not a real profile.
 4. The probe does not parse `PT_NOTE` or `.gnu.attributes` (ABI flags), and the
    `RELRO=True` field is descriptive, not a blocker.

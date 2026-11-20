@@ -169,8 +169,15 @@ extern void arkrtos_board_puthex(uint32 val);
 #define LA_FR_GPR_WORDS     (32u)
 
 #if (ARKRTOS_USE_FPU == 1)
+#if (ARKRTOS_USE_LSX == 1)
+/* 528 字节（32 GPR + ERA/PRMD + 32 FPR + FCSR）+ 512 字节向量区
+ * （528 + 16*i -> $vr{i}）。C 侧只用到 SIZE，向量区不进字索引。 */
+#define LA_FR_WORDS         (130u)  /* 1040 字节 = 130 * 8 */
+#define LA_FR_SIZE          (1040u)
+#else
 #define LA_FR_WORDS         (66u)   /* 528 字节：32 GPR + ERA/PRMD + 32 FPR */
 #define LA_FR_SIZE          (528u)
+#endif
 #else
 #define LA_FR_WORDS         (32u)   /* 256 字节 */
 #define LA_FR_SIZE          (256u)

@@ -37,6 +37,18 @@ _start:
     csrwr   $t0, 0x2
 #endif
 
+#if (ARKRTOS_USE_LSX == 1)
+    /* EUEN.SXE（bit1）= 1：向量指令开关。必须在任何用户代码之前打开，
+     * 同时**只开 SXE、不开 ASXE（bit2）** —— 帧里只保存 128 位的 $vr，
+     * 打开 LASX 却不保存 $xr 会变成跨任务静默算错；不开这一位，
+     * 用到 LASX 的代码落 Ecode=13 INE，是显式故障。
+     * 依赖 ARKRTOS_USE_FPU（FPE 同一条 CSR，上面那段已先行设置）。 */
+    csrrd   $t0, 0x2
+    ori     $t1, $zero, 0x2
+    or      $t0, $t0, $t1
+    csrwr   $t0, 0x2
+#endif
+
 #if (ARKRTOS_USE_SMP == 1)
     /* 次核停靠：CSR.TID（0x40）是本核硬件号，QEMU 在 cpu reset 里直接填
      * env->CSR_TID = cpu_index（target/loongarch/cpu.c），所以读出来就是

@@ -5563,6 +5563,102 @@ ZI 1264 不变。**+64 B 是这一笔在 ARM 上的真实代价**（多了一层
 > [单元测试框架](单元测试框架.md) 的「`sbuf` 阻塞路径：可编程桩」一节。真睡、真 ISR 交接、
 > 真节拍推进下的超时仍只有上板能证明。
 
+### 5.31 LSX 向量寄存器上下文（U-19，2026-11-21）
+
+#### 5.31.1 缺口：FPU 档只存了一半的浮点上下文
+
+`ARKRTOS_USE_FPU=1` 的 trap 帧存 32 个 `$f`（每个 64 位）与 FCSR，而向量寄存器
+`$vr0..$vr31` 是 **128** 位——每个 `$vr` 是 `$f`（低 64 位）加上后面 64 位。所以
+「浮点上下文按任务保存」这句话此前只对其中一半成立：任何一条 LSX 指令
+（`vld` / `vst` / `vadd.b` …）都会在两个任务之间串味。
+
+真正的坑不在「忘了存」，而在 `EUEN`（CSR 0x2）的三位：
+
+| 位 | 名字 | 管什么 | 本档取值 |
+|---|---|---|---|
+| 0 | FPE | 浮点单元 | 1（`start.S` 早就置了） |
+| 1 | SXE | 128 位向量（LSX） | **1（本轮置；关档不置）** |
+| 2 | ASXE | 256 位向量（LASX） | **故意 0** |
+
+不置 SXE 时向量指令不落错答案，而是落显式故障（`Ecode=13 INE`）。置了 SXE 却不
+保存，就是**跨任务静默算错**。这两条只能二选一，不能「开着好看」。
+
+#### 5.31.2 帧布局
+
+| 偏移 | 内容 | 何时存在 |
+|---|---|---|
+| 0..255 | 32 个 GPR（8 B 槽）+ ERA / PRMD | 总是 |
+| 256..511 | `$f0..$f31`（`256 + 8*i`） | `USE_FPU=1` |
+| 512..519 | FCSR | `USE_FPU=1` |
+| **528..1039** | **`$vr0..$vr31`（`528 + 16*i`，16 字节对齐）** | **`USE_LSX=1`** |
+
+帧长：默认 256 / FPU 档 528 / **LSX 档 1040**。1040 = 65 x 16，而帧基址本来就在
+16 字节对齐的栈顶上，于是 `vst`/`vld` 的「16 字节对齐」与 `si12` 偏移上限（最大
+偏移 1024 < 2047）同时满足，一个字节的对齐填充都不用加。C 侧只跟着改
+`LA_FR_SIZE` / `LA_FR_WORDS`（1040 / 130）：`arkrtos_port_swap_frame_bytes()` 是
+`return LA_FR_SIZE`，所以内核的栈预算检查自动跟随，没有第二处要改。
+
+#### 5.31.3 自检与读数
+
+自检写在内核例程 `example/qemu_loongarch64/main.c` 的 `[lsx]` 块里（照 `[fcsr]`
+自检的样子）：两个任务各持一份 512 字节图案（`0xA5A50000 ^ i*0x01010101` 与
+`0x5A5A0000 ^ i*0x01010101`），每轮 `vld` 全量装 32 个 `$vr` ->
+`arkrtos_task_wait_internal(1)`（**必然被切走**）-> `vst` 全量存回 -> 与自己的图案
+逐字比对，跑 50 轮。另有一条**前置对照**：装完立刻存、不经切换，它证明「指令与
+开关本身是对的」，这样后面的失败才能归因到「没保存」这一件事上。
+
+```bash
+make -f example/qemu_loongarch64/Makefile clean
+EXTRA_CFLAGS="-DARKRTOS_USE_LSX=1" make -f example/qemu_loongarch64/Makefile -j8
+cd build/qemu_loongarch64
+timeout 20 "D:/env/tools/qemu/qemu9/mingw64/bin/qemu-system-loongarch64.exe" \
+    -machine virt -kernel ark_qemu_la64.elf -nographic -monitor none -serial file:out.txt
+```
+
+读数（`out.txt`，节选）：
+
+```
+[lsx] pre bad=0 out0=2779054080 pat0=2779054080 out16=3048542224 pat16=3048542224
+[lsx] pre bad=0 out0=1515847680 pat0=1515847680 out16=1246367760 pat16=1246367760
+[fcsr] A rm=1 bad=0 rounds=50 | B rm=2 bad=0 rounds=50 -> PASS (FCSR per task across switches)
+[lsx] A bad=0 rounds=50 | B bad=0 rounds=50 -> PASS (vr0..vr31 per task across switches)
+```
+
+`[fcsr]` 那一行**不是顺手贴的**：它证明这一档没有把邻居搞坏（FPR 与 FCSR 仍在），
+否则「向量区存对了」很可能只是「整个 FPU 区都不再存」。
+
+**反假绿**：把 `arkrtos_context.S` 里两处 `#if (ARKRTOS_USE_LSX == 1)` 临时改成
+`#if 0 /* NEGCTRL-LSX */` 后重编重跑，`[lsx] pre bad=0` 两条**仍在**（指令与开关
+没问题），但判决行立刻变：
+
+```
+[lsx] A bad=50 rounds=50 | B bad=49 rounds=50 -> FAIL (vector regs leaked between tasks)
+```
+
+改回后 `grep -c NEGCTRL-LSX` 为 0。这条对照说明判据真的能红，而不是「本来就红
+不了」。
+
+**默认档逐字节不变**：`git worktree add /d/tmp/ark_base HEAD` 拉一份基线，两边都
+`make clean` 后以 `SOURCE_DATE_EPOCH=1700000000` 构建，再 `objcopy --strip-debug`，
+新树与基线树的 sha256 前 24 位都是 `3e6858e8be2816dfafef1b10`。
+
+**门禁**：`tools/lsx_gate.py` 六项（`switch-default` / `frame-size` / `euen` /
+`parser-selfcheck` / `default-build` / `lsx-build`），实测 `6 passed, 0 failed` /
+`LSX-GATE OK`；`--no-build` 只跑现成镜像，`parser-selfcheck` 用四种坏日志变异证明
+解析器不是恒绿。
+
+#### 5.31.4 边界（不许读成更多）
+
+1. 读数来自 `qemu-system-loongarch64`，**不是真机**。16 字节对齐落 ALE 的语义、
+   真片上的 icache/dcache 一致性都要真机能证；这一档自检里没有 `dbar`/`ibar`，
+   因为切任务走的是 `ertn` 路径而不是自改代码。
+2. **LASX 不保存**：`EUEN.ASXE` 故意保持 0，用到 `xvst`/`xvld` 落 `Ecode=13 INE`，
+   是显式故障而不是静默算错。真要做得先改开帧路径（`xvst` 要 32 字节对齐，现在
+   帧基址只保证 16 字节），属另一轮工作量。
+3. 每个任务的栈预算 +512 字节。板级 `*_TASK_STACK_WORDS` 常量没有自动加，开档时
+   由使用者按余量判断（QEMU 板的栈本来就宽裕）。
+4. 只有 LA64 port 消费这个宏；LA32 / RV32 / ARM 档不产生任何指令，镜像不变。
+
 ## 6. LoongArch32 移植（仅编译通过；上游有 LA32 模拟器，本机不能执行）
 
 ### 6.1 载体现状：上游有 LA32 模拟器，本机不能执行

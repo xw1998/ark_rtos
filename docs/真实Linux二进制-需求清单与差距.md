@@ -281,8 +281,9 @@ direct write ok
    没有 `set_tid_address`。静态 hello 不碰这些，所以它跑通**不证明**这些面能用。
 3. `exit code 3` 是程序自己 `return 3`，不是「退出码通路有 bug」。
 4. FCSR（舍入模式与异常使能位）**已经按任务保存**（§5.5：QEMU 实跑 PASS，加上
-   「去掉存取两行」的对照跑 FAIL）；LSX/LASX 向量寄存器仍**不保存**，真用到会落
-   `Ecode=13 INE` 显式故障。
+   「去掉存取两行」的对照跑 FAIL）；**LSX（`$vr0..$vr31`）已于 2026-11-21 按任务保存**
+   （§5.7，开关 `ARKRTOS_USE_LSX` 缺省 0，帧 528 -> 1040）；LASX（`$xr0..$xr31`）
+   仍**不保存**，真用到会落 `Ecode=13 INE` 显式故障。
 5. 上传通道实测 2 151–2 240 B/s，623 760 B 要 278–339 s。走串口而不是「编进镜像」，
    是因为 2 MB Flash 窗口 / 512 KB 内核池的几何硬墙装不下这个二进制（§3 与
    `tools/realbin_probe.py` 文件头）。
@@ -424,8 +425,10 @@ TASK:4009 task 4 exits (self kill)
 才借用，不伤活值。开档时的三处存点（eentry / 就地切换 / 次核入口）与一处只恢复
 （`arkrtos_port_resume_task`，它从不由自己保存）在反汇编里逐条核过。
 
-**仍然没做的**：LSX/LASX 向量寄存器（`$vr0..$vr31`、`$xr0..$xr31`）不保存。发行版
-基线二进制用不到它们，真用到会落 `Ecode=13 INE`——显式故障，不是静默算错。
+**LSX 已于 2026-11-21 补上**（§5.7）：`$vr0..$vr31` 按任务保存，开关
+`ARKRTOS_USE_LSX` 缺省 0，帧 528 -> 1040。**仍然没做的**是 LASX
+（`$xr0..$xr31`）：`EUEN.ASXE` 故意保持 0，用到会落 `Ecode=13 INE`——显式故障，
+不是静默算错。
 
 ---
 
@@ -464,6 +467,28 @@ TASK:4009 task 4 exits (self kill)
    不是实现取巧。
 3. 这不是 glibc 的 TCB：`tcbhead_t`/`dtv`/自指指针仍然没有，真 `ld.so` 起不来
    （§7）。
+
+---
+
+### 5.7 LSX 向量寄存器上下文（2026-11-21）
+
+判据：两个任务各持一份 32 x 16 B 的图案，每轮 `vld` 全量装 `$vr0..$vr31`、被切走、
+再 `vst` 存回并与自己的图案逐字比对，50 轮后两边 `bad` 都是 0。
+
+| 项 | 读数 / 规则 |
+| --- | --- |
+| 开关 | `ARKRTOS_USE_LSX`（默认 0，依赖 `ARKRTOS_USE_FPU=1`，不满足是编译期 `#error`） |
+| 帧布局 | GPR/ERA/PRMD `0..255`；FPR `256..511` + FCSR@512；向量区 **`528 + 16*i` -> `$vr{i}`**，帧长 **1040** |
+| `EUEN` | bit0 FPE（已有）+ **bit1 SXE = 1**；bit2 **ASXE 故意 0** |
+| QEMU 读数 | `[lsx] pre bad=0 ...` 两条（前置对照：装完立刻存、不经切换）+ `[lsx] A bad=0 rounds=50 \| B bad=0 rounds=50 -> PASS (vr0..vr31 per task across switches)` |
+| 反假绿 | 两处 `#if (ARKRTOS_USE_LSX == 1)` 改 `#if 0` => `bad=50` / `bad=49` FAIL，而 `pre` 仍 `bad=0`（失败只出在跨切换那一步）；已还原 |
+| 默认档 | 固定 `SOURCE_DATE_EPOCH` + `--strip-debug` 后与打开前同 sha256（`3e6858e8…`），即**逐字节不变** |
+| 门禁 | `tools/lsx_gate.py` 六项（`switch-default` / `frame-size` / `euen` / `parser-selfcheck` / `default-build` / `lsx-build`） |
+
+**边界**：LASX 仍不保存（`ASXE = 0`，用到落 `Ecode=13 INE` 显式故障；`xvst` 要
+32 字节对齐而帧基址只保证 16 字节）；每个任务栈 +512 字节由使用者按余量判断；
+读数来自 QEMU，不是真机。细节见
+[QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.31。
 
 ---
 
@@ -634,7 +659,8 @@ py -3 tools/realbin_gate.py        # 7 项，全过打印 REALBIN-GATE OK
    **真实静态 hello 已在宽窗口里跑完**。仍没做的是：每进程独立 VA 空间与运行期
    建页表、native SVC 参数块（还是 `uint32[]`，宽 VA 下 App 必须走 Linux ABI 传指针）、
    glibc 形态的 TCB（`tcbhead_t`/`dtv`）、`R_LARCH_TLS_TPREL64` 重定位。
-   静态 TLS 落位（§5.4）与 FCSR（§5.5）都已有读数；LSX/LASX 向量寄存器仍不保存。
+   静态 TLS 落位（§5.4）、FCSR（§5.5）与 LSX 向量寄存器（§5.7）都已有读数；
+   只剩 LASX（`$xr0..$xr31`）不保存，用到落 `Ecode=13 INE`。
 3. `[lxstat]` 的读数是**合成触发**的 11 个号，不是真实分布（见 §8）。
 4. 探针不解析 `PT_NOTE`、不读 `.gnu.attributes`（ABI 标记）、不判 `RELRO`
    到「能否强制」这一层——`RELRO=True` 只是描述，不构成 blocker。
