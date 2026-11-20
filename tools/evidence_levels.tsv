@@ -38,3 +38,4 @@ FDT overlay（ARKRTOS_USE_FDT_OVERLAY）	LA64 / QEMU virt	L2	qemu_loongarch64	44
 Linux 系统调用 ABI（ARKRTOS_USE_LINUX_ABI）	LA64 / QEMU virt	L2	qemu_loongarch64	45a4889 13 条 check 全 ok，exit code 7
 ELF 装载（ARKRTOS_USE_ELF）	RV32IMAC / QEMU virt	L2	qemu_riscv32	77cc0da exec hello32 5/5 无 mcause=1 越权 fault
 ELF 装载（ARKRTOS_USE_ELF）	LA64 / QEMU virt	L2	qemu_loongarch64	77cc0da exec 反复跑过（页表 + PLV3）
+Linux 动态链接（PT_INTERP + ld.so，ARKRTOS_USE_DYNLOAD）	LA64 / QEMU virt	L2	qemu_loongarch64	cfa783b dynmain 两个变体（ET_EXEC / ET_DYN）各一次 PASS 且 exit code 105；坏夹具（PT_DYNAMIC 内未解析 PLT 符号）-> ldso FAIL unresolved PLT symbol + exit code 127；5 次 write rc=0、3 次 exec；RELATIVE / 64 / JUMP_SLOT 三种重定位全部 applied；interp_base=0x2100000；默认档同构建逐行一致，text 411360 变 413752 B
