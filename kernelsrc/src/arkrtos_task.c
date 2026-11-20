@@ -769,6 +769,22 @@ static void svc_task_ctrl(void *p_svc_ctx)
     }
 }
 
+/* 宽 VA 诊断：DEV_IO 的参数块是 32 位字数组（协议形状见 arkrtos_svc_abi.h），
+ * 块里的指针字段在窗口落于 4 GB 以上时会被 App 截断，于是这里的校验失败。
+ * 历史上失败是静默的（只回 -1），表现成「程序跑了但一个字都没打印」——
+ * 第一次拒绝时说一句，避免把协议边界的拒绝误读成内核丢了输出。 */
+static void svc_dev_io_warn_once(const char *what)
+{
+    static uint32 s_warned = 0u;
+
+    if(s_warned == 0u)
+    {
+        s_warned = 1u;
+        ARKRTOS_LOGI("SVC", "dev_io %s: user pointer rejected (32-bit param block; "
+                     "wide-VA app must use the Linux ABI for pointers)", what);
+    }
+}
+
 /* ARKRTOS_SVC_DEV_IO: argument check + inner dispatch only; the dispatch table is SVC_Server. */
 static void svc_dev_io(void *p_svc_ctx)
 {
@@ -786,6 +802,7 @@ static void svc_dev_io(void *p_svc_ctx)
         case ARKRTOS_DEV_SUB_OPEN:
             if(arkrtos_kernel_user_name_ok((const void *)p[1], 8u) == 0u)
             {
+                svc_dev_io_warn_once("open");
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
                 break;
             }
@@ -809,6 +826,7 @@ static void svc_dev_io(void *p_svc_ctx)
             if(((int32)p[3] > 0) &&
                (arkrtos_kernel_user_ro_ok((const void *)p[2], (uint32)p[3]) == 0u))
             {
+                svc_dev_io_warn_once("write");
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
                 break;
             }

@@ -138,7 +138,7 @@ glibc rc1.4 / gcc 8.3.0，与发行版同源），**不下载 Alpine/Debian 镜�
 
 | # | 门槛 | 真实二进制要什么（实测） | Ark 现在 | 还差什么 | 判据（探针标签） |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 地址空间 | `[0x120000000, 0x120008080)`（动态）/ `[0x120000000, 0x12008bb38)`（静态） | 固定窗口 `[0x02000000, 0x02200000)`，2 MB；装载器把 `p_vaddr > 0xFFFFFFFF` 直接判 `ERR_LAYOUT`（32 位地址上限） | 按 ELF 自己要的 VA 装：**先把装载器的地址宽度升到 64 位**（判据、窗口切分、port 的 TLB 入口三层），再做每进程独立 VA 空间 + 运行期建页表 | `[address]` |
+| 1 | 地址空间 | `[0x120000000, 0x120008080)`（动态）/ `[0x120000000, 0x12008bb38)`（静态） | **地址宽度已升到 64 位（2026-11-20）**：判据里不再有 `p_vaddr > 0xFFFFFFFF`，窗口 VA 与物理帧解耦（`make ... WIN_VA=0x120000000` 把窗口基址、内核链接基址与夹具基址一起抬）。宽窗口档 QEMU 实跑 `linux_hello` `PASS` + `exit 7`，无 fatal（见 §11 与 [MMU进程模型与ELF装载](MMU进程模型与ELF装载.md) §11） | 每进程独立 VA 空间 + 运行期建页表；以及**把真实静态 hello 真装进宽窗口跑一遍**（本轮还没有这个读数）；native SVC 参数块仍是 `uint32[]`，宽 VA 下 App 必须走 Linux ABI 传指针 | `[address]` |
 | 2 | 解释器 | `PT_INTERP = /lib64/ld.so.1` | 默认档直接拒（`ERR_FORMAT`）；开 `ARKRTOS_USE_DYNLOAD` 后能装**本仓** `ld-ark.so`（`/mnt/ram/ld-ark.so`） | 真 glibc `ld.so` 的能力面（见 §7） | `[interp-path]` |
 | 3 | TLS | `PT_TLS`（动态继承自 libc：16/144；静态：32/96）+ 17 条 `R_LARCH_TLS_TPREL64` + `set_tid_address` | 默认档 `arkrtos_elf.c` **完全不读 `PT_TLS`**；开着 `ARKRTOS_USE_ELF_TLS` 时读段、铺 `tdata`、清 `tbss`、把 `$r2` 指过去（2026-11-20，静态 local-exec，见 §5.2） | 真 libc 的 TCB 布局、`R_LARCH_TLS_TPREL64` 重定位、`set_tid_address` 语义 | `[tls]` |
 | 4 | 动态段标签 | `INIT_ARRAY`/`FINI_ARRAY`、`GNU_HASH`、`VERSYM`/`VERNEED`/`VERDEF`、`RELACOUNT`、`FLAGS` | `ld-ark.so` 只处理 `NEEDED/STRTAB/SYMTAB/RELA/RELASZ/RELAENT/STRSZ/SYMENT/JMPREL/HASH` 这几项 | 构造函数执行、符号版本匹配、GNU 哈希、`DF_1_NOW` 语义 | `[dynamic-tags]` |
@@ -184,7 +184,7 @@ glibc rc1.4 / gcc 8.3.0，与发行版同源），**不下载 Alpine/Debian 镜�
 | 装载器动作 | 读 `p_type=7`；校验（`filesz<=memsz`、对齐、出现第二个 `PT_TLS` 直接拒）；把 `filesz` 字节搬进任务空间；`memsz-filesz` 清零；`hi` 扩到 TLS 末尾；`tls_va` 作为 `tp` 传给 `elf_start_task`，在**降权之后**写进任务帧 `LA_FR_TP`（帧偏移 8 字节 = `$r2`） |
 | 夹具 | `example/qemu_loongarch64/elf/tls_main.c` → 5008 B 带签名 ELF，退出码自带语义：9 = `.tdata` 模板/TP 不对，10 = `.tbss` 没清零，11 = `write` 返回值不对，**3 = 两格都过** |
 | QEMU 读数 | `[tls] write /mnt/ram/tls_main rc=0 size=5008` / `[tls] exec rc=0` / 控制台 `TLSOK` / `[tls] finished after 0 ms, exit code 3` |
-| 体积（默认 → 开档） | 镜像 `414208/448/5112340` → `420272/448/5112340`（+6064 B text）；其中 `arkrtos_elf.o` `5019` → `5563`（+544）、`arkrtos_port.o` `11630` → `11678`（+48），余下是 5008 B 夹具 blob 与演示打印串 |
+| 体积（默认 → 开档） | 镜像 `414896/448/5112340` → `420944/448/5112340`（+6048 B text）；其中 `arkrtos_elf.o` `5003` → `5531`（+528）、`arkrtos_port.o` `11872` → `11920`（+48），余下是 5008 B 夹具 blob 与演示打印串。默认档比最早的 414208 基线多 688 B，来自 64 位地址运算与宽 VA 诊断 |
 | 门禁 | `tools/elf_gate.py` 新增 H：LA64 开档两个 TU 必须编得过；RV32 开档必须编不过且错误点名 `ARKRTOS_USE_ELF_TLS`（实测命中）；`ELF_PT_TLS=7` 与「读段 → 搬模板 → 清 tbss → 写帧」四段 pin，配一次变异自检 |
 
 **为什么夹具里两个 `__thread` 变量都带 `volatile`**：第一版没带，`-O1` 把 TLS
@@ -365,11 +365,12 @@ py -3 tools/realbin_gate.py        # 7 项，全过打印 REALBIN-GATE OK
 **本轮明确没有做的：**
 
 1. 真实发行版**跑不起来**（六道门槛一道未过）——本轮交付的是账本与仪器。
-2. 存储已经不是拦路的那一道（4 MiB 卷 + 640 KiB 文件往返核对），但静态
-   hello 与 `libc.so.6` 仍然跑不起来：卡在**地址**（装载器 32 位 VA 上限）。
-   TLS 的**静态通路**已在 2026-11-20 打通（§5.2），但 TCB、TLS 重定位与
-   `set_tid_address` 未做，所以这道只是从「完全没读」变成「读得进、能跑我们
-   自己编的夹具」，不是「真二进制能起来」。
+2. 存储已经不是拦路的那一道（4 MiB 卷 + 640 KiB 文件往返核对）；**地址宽度**
+   也已从 32 位升到 64 位（2026-11-20，宽窗口档 QEMU 实跑通过，见下表与 §11），
+   所以「把窗口挪到 `0x120000000`」现在表达得出来了。但**真实静态 hello 还没有
+   装进宽窗口跑过**，每进程 VA 空间与运行期页表也仍没做；native SVC 参数块还是
+   `uint32[]`。TLS 的**静态通路**已在 2026-11-20 打通（§5.2），但 TCB、TLS 重定位
+   与 `set_tid_address` 未做。
 3. `[lxstat]` 的读数是**合成触发**的 11 个号，不是真实分布（见 §8）。
 4. 探针不解析 `PT_NOTE`、不读 `.gnu.attributes`（ABI 标记）、不判 `RELRO`
    到「能否强制」这一层——`RELRO=True` 只是描述，不构成 blocker。
@@ -378,11 +379,17 @@ py -3 tools/realbin_gate.py        # 7 项，全过打印 REALBIN-GATE OK
 6. 没有真实 `ld.so` 的兼容面测试，也没有任何「按 glibc 契约跑起来」的实验
    （§7 说明为什么这条路不立项）。
 
-**下一步的最小一步**（如果继续推进）：把装载链的**地址宽度升到 64 位**。
-这一步不能省：`arkrtos_elf.c` 现在对 `p_vaddr > 0xFFFFFFFF` 直接返回
-`ERR_LAYOUT`，窗口切分与 port 的 TLB 入口（`uint32 va`）也都是 32 位，所以
-「把窗口从 2 MB 挪到 0x120000000」这句话在现有代码里根本表达不出来。顺序是：
-判据 → 窗口切分 → port 的窗口 VA 与 TLB 入口 → 再谈每进程 VA 空间。
+**已完成的一步（2026-11-20）**：装载链的**地址宽度升到了 64 位**，窗口 VA 与物理帧
+解耦（`WIN_VA=` 构建开关）。宽窗口档 QEMU 读数：`linux_hello`（Linux ABI）
+`[linux] PASS` + `brk(+4096) -> 4832890880` + `exit code 7`，`[MOD]` / `[FS]` 全 PASS，
+无 fatal。路径上真踩到两处 32 位截断——`elf_build_stack()` 的 `~0x7u` 掩码把 64 位
+地址截成 `0x0201FFFF8`，以及 port 里 `uint32 pc = frame[LA_FR_ERA]` 把 ERA 截断后按错
+地址取指令——两处根因与反汇编证据见
+[MMU进程模型与ELF装载](MMU进程模型与ELF装载.md) §11。
+
+**下一步的最小一步**：把 `D:/tmp/realbin/hello_static.elf`（623 728 B，链在
+`0x120000000`）嵌进镜像，在 `WIN_VA=0x120000000` 档真装真跑，抓 `[elf]` /
+`[linux]` 读数与退出码；预期还会撞 `set_tid_address` / `brk` / TLS(TCB) 这些 ABI 面。
 
 **顺序说明（与早先版本不同，是有意的）**：这一段原来写的是「先 64 位地址、
 再 TLS」。本轮反了过来，先做 TLS 的静态部分，理由是：两道互不依赖，而 TLS

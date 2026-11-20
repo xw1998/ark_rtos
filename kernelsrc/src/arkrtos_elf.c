@@ -1030,7 +1030,8 @@ static int32 elf_build_stack(unsigned long win_top, unsigned long argv_start,
             return ARKRTOS_ELF_ERR_PARAM;
         }
         str_low -= (n + 1u);
-        str_low &= ~0x7u;
+        str_low &= ~0x7UL;   /* 必须是 64 位掩码：~0x7u 是 uint32，
+                                 * & 到 unsigned long 上会把高 32 位清零 */
         elf_memcpy((uint8 *)(unsigned long)str_low, (const uint8 *)argv[i], n + 1u);
         addrs[i] = str_low;
     }

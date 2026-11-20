@@ -67,6 +67,7 @@ PT_TLS（静态线程指针，U-17）的**静态通路**也于 2026-11-20 补上
 | 依赖 | `ARKRTOS_USE_VFS=1` 且 `ARKRTOS_USE_PRIV=1`，否则 `#error` | `arkrtos_elf.c` |
 | 窗口 | `ARKRTOS_ELF_WINDOW_BASE` / `_SIZE`，缺失任一 `#error` | 板级配置文件 |
 | LA64 QEMU 实测取值 | `0x02000000` / 2 MB（= `ARKRTOS_QEMU_APP_BASE` / `APP_SIZE`） | `board/qemu_loongarch64/arkrtos_board_config.h` |
+| 宽 VA 档（2026-11-20） | 构建时 `make ... WIN_VA=0x120000000` 覆盖 `ARKRTOS_ELF_WINDOW_BASE`（板级是 `#ifndef` 兜底），内核链接基址与夹具基址一起抬；不传 `WIN_VA` 时镜像与行为一个字节都不变 | `example/qemu_loongarch64/Makefile` |
 
 关档时：`arkrtos_elf.c` 整体编成空目标（`#if (ARKRTOS_USE_ELF == 1)` 包整文件），
 `arkrtos_elf.h` 的每个接口返回 `-1`/`0`，shell 的 `exec` 命令与
@@ -305,6 +306,7 @@ QEMU LA64 实测（2026-11-17，同一次开机）：
 | U-15 | 撤销 / 回收映射（unmap） | **已做完（2026-11-17，QEMU LA64 实跑）**：`arkrtos_paging_unmap_span(va, size)` + port `arkrtos_port_paging_unalias(va)`，拒绝码 -1 未对齐 / -2 静态跨度 / -4 没登记过；槽位只在 8 KB 对两半都空时回收，`arkrtos_paging_dyn_used()` 给占用量。**实测推翻原设计**：只重写 MTLB 不够（STLB 与 QEMU softmmu 留着旧翻译 ⇒ `look` 报 no entry 却仍读到旧页），修法是先 `invtlb` 两半再 `tlbwr` | 动态映射现在可撤销、槽位可回收；`pmap test` 串成 map/unmap/rebind/unmap；撤销后访问该 VA 触发 refill（负向证据）；`flush()` 整表 flush 仍空操作 | **已收**（细节见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.18） |
 | U-13 | 栈溢出 / 陷阱帧越界的检测 | **已做完（2026-11-17）**：开关 `ARKRTOS_USE_STACK_GUARD`（默认 n），判据是读 `stack_bottom[0]` 是否仍为 `0xed01`（不是比 PSP，陷阱帧/野指针改栈底而 PSP 仍在上方），落点在调度切换与 LA64/RV32 的 C trap 入口 | 命中记 `ARKRTOS_FAULT_STACKOVF` + `[STK] task N` + 摘任务；QEMU 实跑与门禁见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.15 | 已收 |
 | U-17 | PT_TLS（静态线程指针） | **静态通路已做（2026-11-20，QEMU LA64 实跑）**：开关 `ARKRTOS_USE_ELF_TLS`（缺省 0，`depends on ARKRTOS_USE_ELF`；非 LoongArch 端口开档是编译期 `#error`）。`elf_measure_image()` 读 `p_type=7` 并校验（`filesz<=memsz`、对齐、第二个 `PT_TLS` 拒绝），`tls_va = bias+p_vaddr` 记进 `elf_image_t`，窗口上限 `hi` 推到 TLS 末尾（`.tbss` 常在最后一个 `PT_LOAD` 之外）；`elf_write_tls()` 搬 `filesz` 字节再清 `memsz-filesz`；`elf_start_task()` 多一个 `tp`，降权后 `arkrtos_port_task_set_tp()` 写 `frame[LA_FR_TP]`（帧偏移 8 B = `$r2`，`.S` 恢复路径本来就有 `ld.d $tp`）。约定取自实测：两份独立工具链编同一份夹具，反汇编都是 `add.d $r12,$r12,$r2`，TPREL 偏移 0/4 ⇒ **TP = p_vaddr + bias** | **仍缺**：TCB 布局（`tcbhead_t`/`dtv`/自指指针）、`R_LARCH_TLS_TPREL64` 重定位（真实样本 17 条）、`set_tid_address` 语义、`initial-exec`/`local-dynamic`/动态 TLS；只有 LA64 有 set-tp 原语 | 已收静态部分（QEMU LA64 实跑，见 §10；门禁 = `tools/elf_gate.py` H1/H2/H3） |
+| U-18 | 装载器地址宽度 / 宽 VA 窗口 | **已做（2026-11-20，QEMU LA64 实跑）**：全链地址都是 `unsigned long`（判据不再有 `p_vaddr > 0xFFFFFFFF`、`elf_build_stack()` 的栈对齐掩码、port 两处取 ERA 指令的 `pc`）；窗口 VA 与物理帧解耦，`WIN_VA=` 构建开关把窗口基址、内核链接基址与夹具基址一起抬。读数：`WIN_VA=0x120000000` 档 `linux_hello`（Linux ABI，指针走 64 位寄存器）`[linux] PASS` + `brk(+4096) -> 4832890880` + `exit code 7`，`[MOD]` / `[FS]` 全 PASS，无 fatal | **仍缺**：每进程独立 VA 空间（现在仍是单一窗口）与运行期建页表；native SVC（`DEV_IO`/`DRV_MGR`/oslib）参数块仍是 `uint32[]`，宽 VA 下 App 传指针会被 `user_ro_ok` 拒绝（现在打一次性诊断 `dev_io ... user pointer rejected`）⇒ 宽 VA 档的 App 必须走 Linux ABI 传指针 | 已收地址宽度（QEMU LA64 实跑，见 §11；门禁 = `tools/elf_gate.py` / `tools/ci_gate.py`） |
 
 ---
 
@@ -507,12 +509,12 @@ TLSOK
 
 | 口径 | 默认档（`ARKRTOS_USE_ELF_TLS=0`） | 开档 |
 | --- | --- | --- |
-| 镜像 text/data/bss | `414208 / 448 / 5112340` | `420272 / 448 / 5112340`（+6064 B） |
-| `arkrtos_elf.o` | `5019 / 4 / 4200` | `5563 / 4 / 4200`（+544） |
-| `arkrtos_port.o` | `11630 / 4 / 1157` | `11678 / 4 / 1157`（+48） |
+| 镜像 text/data/bss | `414896 / 448 / 5112340` | `420944 / 448 / 5112340`（+6048 B） |
+| `arkrtos_elf.o` | `5003 / 4 / 4248` | `5531 / 4 / 4248`（+528） |
+| `arkrtos_port.o` | `11872 / 4 / 1157` | `11920 / 4 / 1157`（+48） |
 | `elf_demo.o` | `22278 / 0 / 4096` | `27830 / 0 / 4096`（+5552，含 5008 B 夹具 blob） |
 
-默认档的 414208 与加 TLS 之前逐字节同值：关档时 PT_TLS 一个字节都不读。
+默认档体积已由 414208 变成 **414896（+688 B）**：多出来的是 64 位地址运算（§11）与宽 VA 诊断，行为经 QEMU 读数一致。关档时 PT_TLS 仍然一个字节都不读——`arkrtos_elf.o` 的 text 反而少了 16 B，因为栈对齐掩码从 32 位常量换成了 `~0x7UL`。
 
 ### 10.5 门禁
 
@@ -528,10 +530,62 @@ TLSOK
 
 ---
 
-## 11 这一道的边界（不许读成更多）
+## 11 地址宽度与宽 VA 窗口（2026-11-20，QEMU 实跑）
 
-1. **不是「发行版二进制能跑」**：真实静态 hello 仍卡在第 1 道——`p_vaddr > 0xFFFFFFFF`
-   直接 `ERR_LAYOUT`，窗口切分与 port 的 TLB 入口都还是 32 位。
+真实发行版二进制链在 `0x120000000`，第一道拦路的是**地址宽度**：装载器的判据、
+窗口切分、`elf_build_stack()` 与 port 的 TLB 入口原来都按 32 位算。
+
+### 11.1 做了什么
+
+* 全链地址改成 `unsigned long`：`elf_measure_image()` 不再有 `p_vaddr > 0xFFFFFFFF`
+  这一条判据，`elf_build_stack()` 的栈对齐与 port 两个 `*_syscall_num()` 取指令的
+  `pc` 都是 64 位。
+* 窗口 VA 与物理帧解耦：窗口基址就取 `ARKRTOS_ELF_WINDOW_BASE`，构建时
+  `WIN_VA=0x120000000` 把它和内核/夹具的链接基址一起抬上去（不传则逐字节不变，
+  `make` 不跟踪 `WIN_VA` ⇒ 切档必须先 `clean`）。
+* 诊断：`arkrtos_board_puthex()` 只吃 `uint32`，所以 fatal 行后面补一行全宽
+  `[LA64U] full badv=… / full era=…`，且只在高 32 位非 0 时打 ⇒ 默认档输出不变。
+
+### 11.2 两处真的踩到的 32 位截断
+
+1. `elf_build_stack()` 的 `str_low &= ~0x7u;`：`~0x7u` 是 **uint32** 常量，提升到
+   `unsigned long` 后高 32 位是 0，`&` 一下就把地址截成 `0x0201FFFF8`（反汇编证据是
+   `lu32i.d $r14,0` 之后的 `and`）。改成 `~0x7UL`；`arkrtos_cfg.c` 里
+   `arkrtos_task_stack_init()` 的 `stack_top` 是同一处同型。
+2. `arkrtos_port_syscall_num()` / `arkrtos_port_linux_syscall_num()` 里的
+   `uint32 pc = frame[LA_FR_ERA];`：ERA 是 `0x120000218`，截成 `0x20000218` 后
+   `*(volatile uint32 *)(pc - 4)` 直接 `KERNEL refill` fatal。改成 `unsigned long`。
+
+### 11.3 读数（`WIN_VA=0x120000000` 档）
+
+```
+[linux] PASS: every syscall answered as specified
+[linux] brk(+4096) -> 4832890880
+[linux] finished after 0 ms, exit code 7
+[MOD] tamper check PASS
+[FS] PASS
+```
+
+即 **Linux ABI 路径（指针走 64 位寄存器）在宽窗口下真能跑**，无 fatal。
+native `hello` 在宽 VA 档下**没有输出**：它的 `DEV_IO` 参数块是 `uint32[]`，指针被
+截断后内核 `arkrtos_kernel_user_ro_ok()` 拒绝。这条路现在会打一次显式诊断
+（`SVC:… dev_io open: user pointer rejected (32-bit param block; wide-VA app must use
+the Linux ABI for pointers)`），不再静默。
+
+### 11.4 门禁与体积
+
+`tools/elf_gate.py` 的 pin 与 `tools/ci_gate.py` 的 `elf` / `linux-abi` / `realbin`
+三处覆盖编译与夹具形状。默认档镜像 `414896 / 448 / 5112340`（比原基线多 688 B：
+64 位地址运算与宽 VA 诊断），TLS 开档 `420944 / 448 / 5112340`（见 §10.4）。
+
+---
+
+## 12 这一道的边界（不许读成更多）
+
+1. **不是「发行版二进制能跑」**：地址宽度已经不是拦路的那一道（见 §11，宽窗口档
+   QEMU 实跑通过），但**每进程独立 VA 空间与运行期建页表**仍没做，且 native SVC 的
+   参数块是 `uint32[]`——宽 VA 下 App 不能经 `DEV_IO`/`DRV_MGR` 传 64 位指针。
 2. **没有 TCB**、**没有 `R_LARCH_TLS_TPREL64` 重定位**、**没有 `set_tid_address`**、
    **没有动态 TLS**。这一道只覆盖静态 local-exec。
-3. 所有读数来自 `qemu-system-loongarch64`，**不是真机**。
+3. 宽 VA 档的读数来自 `qemu-system-loongarch64`，**不是真机**；两处 32 位截断是靠
+   QEMU 上的 fatal 地址反查出来的，换端口要重新做一遍同类检查。

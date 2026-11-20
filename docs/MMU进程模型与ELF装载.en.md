@@ -78,6 +78,7 @@ space, not format.**
 | Dependencies | `ARKRTOS_USE_VFS=1` and `ARKRTOS_USE_PRIV=1`, otherwise `#error` | `arkrtos_elf.c` |
 | Window | `ARKRTOS_ELF_WINDOW_BASE` / `_SIZE`, either missing is `#error` | board config file |
 | LA64 QEMU values | `0x02000000` / 2 MB (= `ARKRTOS_QEMU_APP_BASE` / `APP_SIZE`) | `board/qemu_loongarch64/arkrtos_board_config.h` |
+| Wide-VA profile (2026-11-20) | `make ... WIN_VA=0x120000000` overrides `ARKRTOS_ELF_WINDOW_BASE` (the board header keeps an `#ifndef` fallback) and lifts the kernel link base and the fixture bases with it; without `WIN_VA` the image and behaviour are byte-identical to before | `example/qemu_loongarch64/Makefile` |
 
 When off: `arkrtos_elf.c` compiles to an empty object (the whole file is inside
 `#if (ARKRTOS_USE_ELF == 1)`), every interface in `arkrtos_elf.h` returns `-1`/`0`, and
@@ -338,6 +339,7 @@ Condensed, as of 2026-11-18:
 | U-16 | page replacement | **done (2026-11-17)**, `ARKRTOS_USE_PAGING_SWAP`, default 0: with an empty pool, evict one 8 KB pair and retry |
 
 | U-17 | PT_TLS (static thread pointer) | **static path done (2026-11-20, QEMU LA64)**: `ARKRTOS_USE_ELF_TLS` (default 0; a non-LoongArch port turns it on as a compile-time `#error`). `elf_measure_image()` reads `p_type=7` and validates it (`filesz<=memsz`, alignment, a second `PT_TLS` refused), records `tls_va = bias+p_vaddr`, and extends the window limit `hi` to the TLS end (`.tbss` usually sits past the last `PT_LOAD`); `elf_write_tls()` copies `filesz` bytes and zeroes `memsz-filesz`; `elf_start_task()` takes a `tp` and writes it after the privilege drop via `arkrtos_port_task_set_tp()` -> `frame[LA_FR_TP]` (frame offset 8 B = `$r2`; `.S` already restores `$tp`). Convention measured, not guessed: two independent toolchains both emit `add.d $r12,$r12,$r2` with TPREL 0/4, so **TP = p_vaddr + bias**. Missing: TCB layout, `R_LARCH_TLS_TPREL64` relocations (17 in the real sample), `set_tid_address`, `initial-exec`/`local-dynamic`/dynamic TLS; only LA64 has a set-tp primitive | static part accepted, see §10; gate = `tools/elf_gate.py` H1/H2/H3 |
+| U-18 | Loader address width / wide VA window | **Done (2026-11-20, QEMU LA64)**: the whole chain uses `unsigned long` (no more `p_vaddr > 0xFFFFFFFF` judgement, 64-bit stack alignment in `elf_build_stack()`, 64-bit `pc` in both port `*_syscall_num()`); the window VA is decoupled from physical frames and `WIN_VA=` lifts window base, kernel link base and fixture bases together. Readings on `WIN_VA=0x120000000`: `linux_hello` (Linux ABI, pointers in 64-bit registers) `[linux] PASS` + `brk(+4096) -> 4832890880` + `exit code 7`, `[MOD]` / `[FS]` PASS, no fatal | **Still missing**: per-process VA space (still a single window) and runtime page-table construction; the native SVC (`DEV_IO`/`DRV_MGR`/oslib) parameter block is still `uint32[]`, so under a wide VA an App pointer is refused by `user_ro_ok` (now with a one-shot `dev_io ... user pointer rejected` diagnostic) - a wide-VA App must pass pointers through the Linux ABI | address width accepted (QEMU LA64, see §11; gates = `tools/elf_gate.py` / `tools/ci_gate.py`) |
 
 ## 7. Reproduction
 
@@ -560,13 +562,16 @@ fixture that measures nothing while looking green.
 
 | Reading | default (`ARKRTOS_USE_ELF_TLS=0`) | switch on |
 | --- | --- | --- |
-| image text/data/bss | `414208 / 448 / 5112340` | `420272 / 448 / 5112340` (+6064 B) |
-| `arkrtos_elf.o` | `5019 / 4 / 4200` | `5563 / 4 / 4200` (+544) |
-| `arkrtos_port.o` | `11630 / 4 / 1157` | `11678 / 4 / 1157` (+48) |
+| image text/data/bss | `414896 / 448 / 5112340` | `420944 / 448 / 5112340` (+6048 B) |
+| `arkrtos_elf.o` | `5003 / 4 / 4248` | `5531 / 4 / 4248` (+528) |
+| `arkrtos_port.o` | `11872 / 4 / 1157` | `11920 / 4 / 1157` (+48) |
 | `elf_demo.o` | `22278 / 0 / 4096` | `27830 / 0 / 4096` (+5552, incl. the 5008 B fixture blob) |
 
-The default 414208 is byte-for-byte the value before TLS existed: with the switch
-off, `PT_TLS` is not read at all.
+The default profile is now **414896 (+688 B)** instead of 414208: the extra bytes are
+the 64-bit address arithmetic (§11) and the wide-VA diagnostics, and behaviour is
+unchanged per the QEMU readings. With the switch off, `PT_TLS` is still not read at
+all - `arkrtos_elf.o` text actually shrank by 16 B because the stack-alignment mask
+became `~0x7UL`.
 
 ### 10.5 Gate
 
@@ -582,11 +587,72 @@ off, `PT_TLS` is not read at all.
 
 ---
 
-## 11. Boundaries (do not read as more)
+## 11. Address width and the wide VA window (2026-11-20, QEMU runs)
 
-1. **Not "a distribution binary runs"**: the real static hello is still stopped by
-   gate 1 — `p_vaddr > 0xFFFFFFFF` is `ERR_LAYOUT`, and both the window split and
-   the port TLB entry are still 32-bit.
+A real distribution binary links at `0x120000000`, and the first thing in the way was
+**address width**: the loader's judgement, the window split, `elf_build_stack()` and
+the port TLB entries were all computed in 32 bits.
+
+### 11.1 What was done
+
+* The whole chain uses `unsigned long`: `elf_measure_image()` no longer has a
+  `p_vaddr > 0xFFFFFFFF` rule, and both the stack alignment in `elf_build_stack()`
+  and the `pc` used by the two port `*_syscall_num()` helpers are 64-bit.
+* Window VA is decoupled from physical frames: the window base is just
+  `ARKRTOS_ELF_WINDOW_BASE`, and `WIN_VA=0x120000000` lifts it together with the
+  kernel and fixture link bases (without it everything is byte-identical; `make`
+  does not track `WIN_VA`, so switching profiles requires `clean`).
+* Diagnostics: `arkrtos_board_puthex()` only takes `uint32`, so a fatal line is
+  followed by a full-width `[LA64U] full badv=... / full era=...`, printed only when
+  the high 32 bits are non-zero, which keeps the default output identical.
+
+### 11.2 The two 32-bit truncations that actually bit
+
+1. `str_low &= ~0x7u;` in `elf_build_stack()`: `~0x7u` is a **uint32** constant, so
+   after integer promotion the high 32 bits are zero and the `&` truncates the address
+   to `0x0201FFFF8` (the disassembly shows `lu32i.d $r14,0` followed by `and`). Fixed
+   with `~0x7UL`; `stack_top` in `arkrtos_task_stack_init()` (`arkrtos_cfg.c`) is the
+   same shape.
+2. `uint32 pc = frame[LA_FR_ERA];` in `arkrtos_port_syscall_num()` /
+   `arkrtos_port_linux_syscall_num()`: an ERA of `0x120000218` became `0x20000218`, so
+   `*(volatile uint32 *)(pc - 4)` took a `KERNEL refill` fatal. Fixed with
+   `unsigned long`.
+
+### 11.3 Readings (`WIN_VA=0x120000000`)
+
+```
+[linux] PASS: every syscall answered as specified
+[linux] brk(+4096) -> 4832890880
+[linux] finished after 0 ms, exit code 7
+[MOD] tamper check PASS
+[FS] PASS
+```
+
+That is, **the Linux ABI path (pointers in 64-bit registers) really runs in a wide
+window**, with no fatal. The native `hello` prints **nothing** in that profile: its
+`DEV_IO` parameter block is `uint32[]`, so the truncated pointer is refused by
+`arkrtos_kernel_user_ro_ok()`. That path now emits a one-shot diagnostic
+(`SVC:... dev_io open: user pointer rejected (32-bit param block; wide-VA app must use
+the Linux ABI for pointers)`) instead of failing silently.
+
+### 11.4 Gates and size
+
+The pins in `tools/elf_gate.py` plus the `elf` / `linux-abi` / `realbin` checks in
+`tools/ci_gate.py` cover compilation and fixture shape. Default image is
+`414896 / 448 / 5112340` (+688 B over the old baseline: 64-bit address arithmetic and
+the wide-VA diagnostics); TLS-on is `420944 / 448 / 5112340` (see §10.4).
+
+---
+
+## 12. Boundaries (do not read as more)
+
+1. **Not "a distribution binary runs"**: address width is no longer the blocker
+   (see §11, the wide-window profile runs under QEMU), but there is still **no
+   per-process VA space and no runtime page-table construction**, and the native SVC
+   parameter block is `uint32[]` - under a wide VA an App cannot pass 64-bit pointers
+   through `DEV_IO`/`DRV_MGR`.
 2. **No TCB**, **no `R_LARCH_TLS_TPREL64` relocations**, **no `set_tid_address`**,
    **no dynamic TLS**. This covers static local-exec only.
-3. Every reading comes from `qemu-system-loongarch64`, **not real hardware**.
+3. The wide-VA readings come from `qemu-system-loongarch64`, **not real hardware**;
+   both 32-bit truncations were found by tracing fatal addresses on QEMU, so a new
+   port needs the same audit again.

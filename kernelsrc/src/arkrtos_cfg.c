@@ -154,7 +154,7 @@ void arkrtos_task_stack_init(arkrtos_task_t *p_task, void (*entry)(void),
 {
     unsigned long stack_top = (unsigned long)stack_bottom + stack_size;
 
-    stack_top &= ~0x7u;
+    stack_top &= ~0x7UL;   /* 同上：地址已加宽，掩码也必须 64 位 */
 
     #if (ARKRTOS_USE_STACK_USAGE == 1)
     /* 先填充整段栈，再建立初始栈帧，便于后续统计峰值栈用量 */

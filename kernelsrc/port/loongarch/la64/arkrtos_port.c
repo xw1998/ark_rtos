@@ -2851,7 +2851,7 @@ uint8 arkrtos_port_in_isr(void)
 uint32 arkrtos_port_syscall_num(void *p_exc_ctx)
 {
     la_frame_word *frame = (la_frame_word *)p_exc_ctx;
-    uint32 pc;
+    unsigned long pc;   /* 宽 VA：ERA 可能超过 32 位，截断后按错的地址取指令 */
     uint32 insn;
     uint32 num;
 
@@ -2893,7 +2893,7 @@ void arkrtos_port_svc_set_ret(void *p_exc_ctx, unsigned long value)
 uint32 arkrtos_port_linux_syscall_num(void *p_exc_ctx)
 {
     la_frame_word *frame = (la_frame_word *)p_exc_ctx;
-    uint32 pc;
+    unsigned long pc;   /* 宽 VA：ERA 可能超过 32 位，截断后按错的地址取指令 */
     uint32 insn;
 
     pc   = frame[LA_FR_ERA];
@@ -3756,6 +3756,20 @@ void la_app_fault_c(la_frame_word *frame, uint32 ecode)
     la_fault_recover();
 }
 
+/* 宽 VA 诊断：puthex 只吃 uint32，地址超过 32 位时补一行全宽读数。
+ * 高 32 位为 0 时什么都不打 ⇒ 默认档输出与以前逐字符相同。 */
+static void la_puts_addr64(const char *tag, unsigned long v)
+{
+    if((v >> 32) == 0ul)
+    {
+        return;
+    }
+    arkrtos_board_puts(tag);
+    arkrtos_board_puthex((uint32)(v >> 32));
+    arkrtos_board_puts("_");
+    arkrtos_board_puthex((uint32)v);
+}
+
 /**
 * @brief TLB 重填的处理（由 arkrtos_context.S 的 tlb_refill_entry 调入）
 * @details 硬件进这条入口时：不保存任何通用寄存器、CRMD.DA=1、PG=0、
@@ -3788,6 +3802,10 @@ void la_refill_c(void)
         arkrtos_board_puts(" era=");
         arkrtos_board_puthex((uint32)(tlbrera & ~3UL));
         arkrtos_board_puts(" -> fatal\n");
+        la_puts_addr64("[LA64U]   full badv=", tlbrbadv);
+        arkrtos_board_puts("\n");
+        la_puts_addr64("[LA64U]   full era=", tlbrera & ~3UL);
+        arkrtos_board_puts("\n");
         arkrtos_port_fatal_report((uint32)tlbrbadv);
         for(;;)
         {

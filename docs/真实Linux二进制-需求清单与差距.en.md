@@ -130,7 +130,7 @@ what still stops this file is `[address]`.
 
 | # | Gate | What the real binary wants (measured) | Ark today | Missing | Probe tag |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Address space | `[0x120000000, …)` | fixed 2 MB window `[0x02000000, 0x02200000)`; the loader rejects `p_vaddr > 0xFFFFFFFF` as `ERR_LAYOUT` (32-bit ceiling) | load at the VA the ELF asks for: **widen the loader chain to 64-bit addresses first** (checks, window split, the port TLB entry), then per-process space + page tables built at run time | `[address]` |
+| 1 | Address space | `[0x120000000, …)` | **address width is 64-bit now (2026-11-20)**: no more `p_vaddr > 0xFFFFFFFF` rule, and the window VA is decoupled from physical frames (`make ... WIN_VA=0x120000000` lifts window base, kernel link base and fixture bases together). The wide-window profile runs `linux_hello` under QEMU: `PASS` + `exit 7`, no fatal (see [MMU进程模型与ELF装载](MMU进程模型与ELF装载.en.md) §11) | per-process VA space and runtime page tables; and **running the real static hello inside the wide window** (no reading for that yet); the native SVC parameter block is still `uint32[]`, so a wide-VA App must pass pointers through the Linux ABI | `[address]` |
 | 2 | Interpreter | `PT_INTERP=/lib64/ld.so.1` | default: rejected (`ERR_FORMAT`); with `ARKRTOS_USE_DYNLOAD`: loads this repo's `ld-ark.so` only | the real glibc `ld.so` capability surface (§7) | `[interp-path]` |
 | 3 | TLS | `PT_TLS` (16/144 inherited from libc; 32/96 static) + 17 `R_LARCH_TLS_TPREL64` + `set_tid_address` | default build: `arkrtos_elf.c` **never reads `PT_TLS`**. With `ARKRTOS_USE_ELF_TLS` on it reads the segment, lays down `tdata`, zeroes `tbss` and points `$r2` at it (2026-11-20, static local-exec, see §5.1) | a real libc's TCB layout, `R_LARCH_TLS_TPREL64` relocations, `set_tid_address` semantics | `[tls]` |
 | 4 | Dynamic tags | `INIT_ARRAY`/`FINI_ARRAY`, `GNU_HASH`, `VERSYM`/`VERNEED`/`VERDEF`, `RELACOUNT`, `FLAGS` | `ld-ark.so` handles only `NEEDED/STRTAB/SYMTAB/RELA/RELASZ/RELAENT/STRSZ/SYMENT/JMPREL/HASH` | run constructors, match symbol versions, GNU hash, `DF_1_NOW` | `[dynamic-tags]` |
@@ -151,7 +151,7 @@ same thing as "a distribution binary runs".
 | What the loader does | reads `p_type=7`; validates (`filesz<=memsz`, alignment, a second `PT_TLS` is refused); copies `filesz` bytes into the task space; zeroes `memsz-filesz`; extends `hi` to the TLS end; passes `tls_va` as `tp` to `elf_start_task`, which writes it into the task frame slot `LA_FR_TP` (frame offset 8 = `$r2`) **after** the privilege drop |
 | Fixture | `example/qemu_loongarch64/elf/tls_main.c` -> a signed 5008 B ELF whose exit code carries the verdict: 9 = `.tdata` template/TP wrong, 10 = `.tbss` not zeroed, 11 = `write` return wrong, **3 = both cells pass** |
 | QEMU readout | `[tls] write /mnt/ram/tls_main rc=0 size=5008` / `[tls] exec rc=0` / `TLSOK` on the console / `[tls] finished after 0 ms, exit code 3` |
-| Size (default -> on) | image `414208/448/5112340` -> `420272/448/5112340` (+6064 B text): `arkrtos_elf.o` `5019` -> `5563` (+544), `arkrtos_port.o` `11630` -> `11678` (+48), the rest is the 5008 B fixture blob and the demo prints |
+| Size (default -> on) | image `414896/448/5112340` -> `420944/448/5112340` (+6048 B text): `arkrtos_elf.o` `5003` -> `5531` (+528), `arkrtos_port.o` `11872` -> `11920` (+48), the rest is the 5008 B fixture blob and the demo prints. The default profile sits 688 B above the earliest 414208 baseline, from the 64-bit address arithmetic and the wide-VA diagnostics |
 | Gate | `tools/elf_gate.py` section H: LA64 with the switch on must compile both TUs; RV32 with it on must **fail** and the error must name `ARKRTOS_USE_ELF_TLS` (measured); `ELF_PT_TLS=7` plus the four wiring points (read segment -> copy template -> zero tbss -> write frame) are pinned, with one mutation self-check |
 
 **Why both `__thread` variables in the fixture are `volatile`**: the first version
@@ -331,12 +331,13 @@ check compiles to 2736 B of text instead of 2792 B. Kernel side 0 B,
 
 1. Stock distribution binaries **do not run** — this round delivers the ledger
    and the instrument, not the capability.
-2. Storage is no longer the blocker (4 MiB volume, 640 KiB round-trip checked),
-   yet static hello and `libc.so.6` still do not run: they are stopped by
-   **address** (32-bit VA ceiling in the loader). The **static TLS path** was
-   wired on 2026-11-20 (§5.1), but the TCB, TLS relocations and
-   `set_tid_address` are not done, so that gate moved from "never read" to
-   "reads the segment and runs our own fixture" — not to "a real binary starts".
+2. Storage is no longer the blocker (4 MiB volume, 640 KiB round-trip checked) and
+   the **address width** is 64-bit now (2026-11-20, the wide-window profile runs
+   under QEMU), so "move the window to 0x120000000" is expressible. But the **real
+   static hello has not been loaded into the wide window yet**, per-process VA spaces
+   and runtime page tables are still missing, and the native SVC parameter block is
+   still `uint32[]`. The **static TLS path** was wired on 2026-11-20 (§5.1), but the
+   TCB, TLS relocations and `set_tid_address` are not done.
 3. The `[lxstat]` numbers are **synthetic** (11 numbers), not a real profile.
 4. The probe does not parse `PT_NOTE` or `.gnu.attributes` (ABI flags), and the
    `RELRO=True` field is descriptive, not a blocker.
@@ -345,12 +346,19 @@ check compiles to 2736 B of text instead of 2792 B. Kernel side 0 B,
 6. No compatibility testing against a real `ld.so`, and no experiment aimed at
    satisfying glibc's contract (§7 explains why that is not a work item).
 
-**The smallest next step**, if this continues: **widen the loader chain to
-64-bit addresses**. It cannot be skipped: `arkrtos_elf.c` currently returns
-`ERR_LAYOUT` for any `p_vaddr > 0xFFFFFFFF`, and both the window split and the
-port TLB entry (`uint32 va`) are 32-bit, so "move the window to 0x120000000" is
-not even expressible today. Order: checks -> window split -> port window VA and
-TLB entry -> then per-process VA spaces.
+**Done (2026-11-20)**: the loader chain works in **64-bit addresses** and the window
+VA is decoupled from physical frames (the `WIN_VA=` build knob). Wide-window QEMU
+readings: `linux_hello` (Linux ABI) `[linux] PASS` + `brk(+4096) -> 4832890880` +
+`exit code 7`, `[MOD]` / `[FS]` PASS, no fatal. Two real 32-bit truncations sat on
+that path - the `~0x7u` mask in `elf_build_stack()` cut the address to `0x0201FFFF8`,
+and `uint32 pc = frame[LA_FR_ERA]` in the port fetched the instruction from a
+truncated ERA; both root causes and the disassembly evidence are in
+[MMU进程模型与ELF装载](MMU进程模型与ELF装载.en.md) §11.
+
+**The new smallest next step**: embed `D:/tmp/realbin/hello_static.elf` (623 728 B,
+linked at `0x120000000`) into the image and really load and run it in the
+`WIN_VA=0x120000000` profile, capturing the `[elf]` / `[linux]` readings and the exit
+code; expect to hit `set_tid_address`, `brk` and TLS(TCB) next.
 
 **Why the order changed (deliberately)**: this paragraph used to say "64-bit
 addresses first, then TLS". This round did the static half of TLS first, because
