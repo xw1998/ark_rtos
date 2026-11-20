@@ -15,8 +15,8 @@
 claim	arch	level	carrier	evidence
 遗言（ARKRTOS_HW_SAFE）	Cortex-M4 / STM32F427	L3	stm32f427	c021168 真机 devs=3 owners=6 neutralized=6 last_owner=12
 遗言（ARKRTOS_HW_SAFE）	Cortex-M7 / STM32H743	L1	stm32h743	gate:swap_syntax_gate 编过；H743 工程默认关档，无读数
-遗言（ARKRTOS_HW_SAFE）	RV32IMAC / QEMU virt	L2	qemu_riscv32	77cc0da QEMU 台账 owners=2 neutralized=8 last_owner=7（devs=0）
-遗言（ARKRTOS_HW_SAFE）	LA64 / QEMU virt	L2	qemu_loongarch64	77cc0da QEMU 台账 devs=0 owners=2 neutralized=0
+遗言（ARKRTOS_HW_SAFE）	RV32IMAC / QEMU virt	L2	qemu_riscv32	4491918 devs=3 owners=3 neutralized=2 (will=1 cb=1 none=0) last_owner=9；死亡后 safe_hits=1 led2=1
+遗言（ARKRTOS_HW_SAFE）	LA64 / QEMU virt	L2	qemu_loongarch64	4491918 devs=3 owners=3 neutralized=3 (will=1 cb=1 none=1)；死亡后 safe_hits=1 led2=1
 遗言（ARKRTOS_HW_SAFE）	Cortex-M3	L0	none	无板级工程，无载体
 无缝衔接（ARKRTOS_USE_TASK_SWAP）	Cortex-M4 / STM32F427	L3	stm32f427	77cc0da 真机落地延迟 108 / 233 / 58 ms
 无缝衔接（ARKRTOS_USE_TASK_SWAP）	Cortex-M3	L1	none	gate:swap_syntax_gate armclang 编过 15 个 TU
@@ -26,10 +26,15 @@ claim	arch	level	carrier	evidence
 无缝衔接（ARKRTOS_USE_TASK_SWAP）	LA32 / RV64GC	L0	none	编译期 #error 拒绝（不给错答案，不是"没测"）
 实时性：结构（节拍 / 优先级 / 关中断）	Cortex-M4 / STM32F427	L3	stm32f427	c021168 switch 744 cyc=7.75us、tick.isr 6.3us avg / 71.6us max
 实时性：仪表（ARKRTOS_USE_RTSTAT）	Cortex-M4 / STM32F427	L3	stm32f427	c021168 全仓库唯一有周期级计数的档
-实时性：结构	RV32IMAC / QEMU virt	L2	qemu_riscv32	77cc0da CLINT 节拍 + PMP 窗口跑通；仪表不可用（-1 分支）
-实时性：结构	LA64 / QEMU virt	L2	qemu_loongarch64	2e2ec25 分页 + PLV 用户态跑通；仪表不可用（-1 分支）
-内核 FDT 解析（ARKRTOS_USE_FDT）	LA64 / QEMU virt	L2	qemu_loongarch64	77cc0da [fdt] blob=924 rc=0 model=QEMU virt loongarch64 nodes=8
-FDT overlay（ARKRTOS_USE_FDT_OVERLAY）	LA64 / QEMU virt	L2	qemu_loongarch64	2e2ec25 fdt overlay bytes=1039 nodes=9 (was 8) model=fdt-overlay-demo
+实时性：结构	RV32IMAC / QEMU virt	L2	qemu_riscv32	77cc0da CLINT 节拍 + PMP 窗口跑通；仪表见下一行
+实时性：仪表（ARKRTOS_USE_RTSTAT）	RV32IMAC / QEMU virt	L2	qemu_riscv32	4491918 cycles per tick 约 1.55M；频率是模拟器内部量出的名义值（不是硅片频率）；tick.isr N=805 AVG 38us MAX 7714us
+实时性：结构	LA64 / QEMU virt	L2	qemu_loongarch64	2e2ec25 分页 + PLV 用户态跑通；仪表见下一行
+实时性：仪表（ARKRTOS_USE_RTSTAT）	LA64 / QEMU virt	L2	qemu_loongarch64	4491918 cycles per tick = 50000（分母是板级常量 1e8 Hz，只作同档相对值）；tick.isr 908 ... 3227；crit.max 571 ... 3563；jitter n=912 min=-34290 max=868110
+tickless（ARKRTOS_USE_TICKLESS）	RV32IMAC / QEMU virt	L2	qemu_riscv32	4491918 tickless isr=557 sleeps=351 skipped=2319 of 2876 tick(s) cap=8（CLINT mtimecmp）
+tickless（ARKRTOS_USE_TICKLESS）	LA64 / QEMU virt	L2	qemu_loongarch64	4491918 tickless isr=381 sleeps=126 skipped=376 of 757 tick(s) cap=8（TCFG）
+内核 FDT 解析（ARKRTOS_USE_FDT）	LA64 / QEMU virt	L2	qemu_loongarch64	4491918 [fdt] blob=1146 rc=0 model=QEMU virt loongarch64 nodes=10（__symbols__ 等标签表不计入 nodes）
+设备树当驱动配置源（ARKRTOS_USE_FDT_RES）	LA64 / QEMU virt	L2	qemu_loongarch64	4491918 console ... clk=25MHz reason=ok match=1；res timebase=1e8 Hz expect=1e8 Hz timer=(none described) rc=ok
+FDT overlay（ARKRTOS_USE_FDT_OVERLAY）	LA64 / QEMU virt	L2	qemu_loongarch64	4491918 target=<&label> + 零长属性删属性 + __delete 删子节点：overlay ok bytes=1176 nodes=10 (was 10)；current-speed 0x1c200->0x2580；victim-child rc=-9；victim-prop has no property；反假绿改名 -> -16 refused, tree kept
 Linux 系统调用 ABI（ARKRTOS_USE_LINUX_ABI）	LA64 / QEMU virt	L2	qemu_loongarch64	45a4889 13 条 check 全 ok，exit code 7
 ELF 装载（ARKRTOS_USE_ELF）	RV32IMAC / QEMU virt	L2	qemu_riscv32	77cc0da exec hello32 5/5 无 mcause=1 越权 fault
 ELF 装载（ARKRTOS_USE_ELF）	LA64 / QEMU virt	L2	qemu_loongarch64	77cc0da exec 反复跑过（页表 + PLV3）

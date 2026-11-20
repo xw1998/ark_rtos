@@ -1,9 +1,11 @@
 # Ark RTOS API 参考
 
 > 由 `tools/gen_api_doc.py` 自动生成，请勿手工修改。
-> 安装 [2/2] 已生成 Markdown API 参考: docs\api\Ark RTOS_API参考.md
-完成。临时 UTF-8 树位于系统临时目录，可随时删除：C:\Users\14905\AppData\Local\Temp\arkrtos_api_gen
-)（110 项）
+> 安装 [Doxygen](https://www.doxygen.nl/) 后重新运行脚本，可得到带交叉引用与调用关系的 HTML 版本。
+
+## 目录
+
+- [kernelsrc/include/arkrtos.h](#kernelsrcincludearkrtosh)（110 项）
 - [kernelsrc/include/arkrtos_app_image.h](#kernelsrcincludearkrtos_app_imageh)（38 项）
 - [kernelsrc/include/arkrtos_apppack.h](#kernelsrcincludearkrtos_apppackh)（9 项）
 - [kernelsrc/include/arkrtos_apprun.h](#kernelsrcincludearkrtos_apprunh)（6 项）
