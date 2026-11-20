@@ -35,7 +35,7 @@
      `arkrtos_elf.c` / la64 port / `elf/linux_hello.c` 全编得过。
   E. 号表对账：源里的 `LX_SYS_*` 与 asm-generic 的 Linux UAPI 号逐条相等；
      LA64 的分界是「`syscall` 立即数 == 0」，RV32 的分界是 0x10..0x22 留给 Ark。
-  F. QEMU 真读数：`[linux]` 的 13 条 check 全 ` ok`（一条 FAIL 都不许）、
+  F. QEMU 真读数：`[linux]` 的 14 条 check 全 ` ok`（一条 FAIL 都不许）、
      `PASS: every syscall answered as specified`、`exit code 7`；并且同一次
      启动里 hello/modhello/FS 的读数仍在（兼容层不许把别人的演示搞坏）。
   G. 解析器自检：把合成坏日志喂给同一个判据（去掉 PASS、把退出码改成 3、
@@ -122,7 +122,7 @@ EXPECT_SYS = {
 }
 
 # 程序自己打印的检查条数（linux_hello.c 里每一个 check() 一行）
-EXPECT_CHECKS = 13
+EXPECT_CHECKS = 14
 
 FAILS = []
 PASSES = []
@@ -519,7 +519,7 @@ def judge(text):
         for p in problems:
             notes.append(p)
         return False, notes
-    return True, ["13 条 check 全 ok、PASS 行与 exit code 7 都在，旁路演示未受影响"]
+    return True, ["14 条 check 全 ok、PASS 行与 exit code 7 都在，旁路演示未受影响"]
 
 
 def self_check(good_text):

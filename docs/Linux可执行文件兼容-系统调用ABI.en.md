@@ -126,7 +126,7 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py [--no-build]
 `tools/ci_gate.py` as `linux-abi`: default-off, kconfig-wired, features-guard,
 board-switch, off-zero-symbols, port-wiring (two directions), compile-on (5 TUs
 under the real LA64 board), syscall-table (15 numbers vs asm-generic),
-abi-split-la64, abi-split-rv32, build, qemu-readout (13 checks + PASS + exit 7
+abi-split-la64, abi-split-rv32, build, qemu-readout (14 checks + PASS + exit 7
 + the unrelated demos still intact), and parser-selfcheck (four deliberately
 broken logs must each be rejected).
 

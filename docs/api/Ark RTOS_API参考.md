@@ -29,7 +29,7 @@
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
 - [kernelsrc/include/arkrtos_layout.h](#kernelsrcincludearkrtos_layouth)（11 项）
 - [kernelsrc/include/arkrtos_layout_def.h](#kernelsrcincludearkrtos_layout_defh)（2 项）
-- [kernelsrc/include/arkrtos_linux_abi.h](#kernelsrcincludearkrtos_linux_abih)（3 项）
+- [kernelsrc/include/arkrtos_linux_abi.h](#kernelsrcincludearkrtos_linux_abih)（6 项）
 - [kernelsrc/include/arkrtos_loader.h](#kernelsrcincludearkrtos_loaderh)（32 项）
 - [kernelsrc/include/arkrtos_log.h](#kernelsrcincludearkrtos_logh)（16 项）
 - [kernelsrc/include/arkrtos_mempool.h](#kernelsrcincludearkrtos_mempoolh)（9 项）
@@ -4444,6 +4444,33 @@ uint32 arkrtos_linux_abi_stat(uint32 which);
 - `which`：0 = 已处理，1 = 未知号（-ENOSYS），2 = 用户指针被拒，
 3 = 其它失败，4 = mprotect 接受但未强制
 **返回**：计数值
+
+### `uint32 arkrtos_linux_abi_nr_slots(void);`
+
+```c
+uint32 arkrtos_linux_abi_nr_slots(void);
+```
+
+**已用槽数（前缀 [0, 返回值) 有效，按首次出现顺序）**
+
+### `uint32 arkrtos_linux_abi_nr_slot(uint32 idx, uint32 *p_nr);`
+
+```c
+uint32 arkrtos_linux_abi_nr_slot(uint32 idx, uint32 *p_nr);
+```
+
+**读第 idx 个槽**
+- `idx`：槽下标
+- `p_nr`：出参：系统调用号（可为 NULL）
+**返回**：该号的调用次数；越界返回 0
+
+### `uint32 arkrtos_linux_abi_nr_overflow(void);`
+
+```c
+uint32 arkrtos_linux_abi_nr_overflow(void);
+```
+
+**槽用满之后未记名的调用次数（不静默丢）**
 
 ### `void arkrtos_linux_abi_reset(void);`
 

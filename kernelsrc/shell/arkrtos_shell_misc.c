@@ -9,6 +9,10 @@
 
 #include "arkrtos_shell_internal.h"
 
+#if (ARKRTOS_USE_LINUX_ABI == 1) && (ARKRTOS_LINUX_ABI_SYSSTAT == 1)
+#include "arkrtos_linux_abi.h"
+#endif
+
 #if (SHELL_ENABLE == 1)
 
 /* ============================================================
@@ -457,5 +461,100 @@ int cmd_swap(int argc, char *argv[])
     return 1;
 }
 #endif /* ARKRTOS_USE_TASK_SWAP == 1 */
+
+#if (ARKRTOS_USE_LINUX_ABI == 1) && (ARKRTOS_LINUX_ABI_SYSSTAT == 1)
+/* ============================================================
+ * lxstat：Linux ABI 计数 + 按号直方图
+ *
+ * 名字表只为了好读：号是权威，名字是注解。表里的号都是从 Linux
+ * UAPI 抄的，与 arkrtos_linux_abi.c 里的 LX_SYS_* 同源；这里不复用
+ * 那些宏，是因为直方图里也会出现**没实现**的号（那才是要看的），
+ * 而那些号在内核里没有宏。
+ * ============================================================ */
+typedef struct
+{
+    uint32      nr;
+    const char *name;
+} lxstat_name_t;
+
+static const lxstat_name_t g_lxstat_names[] =
+{
+    {  56u, "openat"          },
+    {  57u, "close"           },
+    {  63u, "read"            },
+    {  64u, "write"           },
+    {  67u, "pread64"         },
+    {  93u, "exit"            },
+    {  94u, "exit_group"      },
+    {  96u, "set_tid_address" },
+    {  98u, "futex"           },
+    { 113u, "clock_gettime"   },
+    { 160u, "uname"           },
+    { 172u, "getpid"          },
+    { 174u, "getuid"          },
+    { 175u, "geteuid"         },
+    { 178u, "gettid"          },
+    { 214u, "brk"             },
+    { 215u, "munmap"          },
+    { 222u, "mmap"            },
+    { 226u, "mprotect"        },
+    { 233u, "madvise"         },
+    { 261u, "prlimit64"       },
+    { 278u, "getrandom"       },
+    { 293u, "rseq"            },
+};
+
+static const char *lxstat_name(uint32 nr)
+{
+    uint32 i;
+    for(i = 0u; i < (uint32)(sizeof(g_lxstat_names) / sizeof(g_lxstat_names[0])); i++)
+    {
+        if(g_lxstat_names[i].nr == nr)
+        {
+            return g_lxstat_names[i].name;
+        }
+    }
+    return "?";
+}
+
+int cmd_lxstat(int argc, char *argv[])
+{
+    uint32 i;
+    uint32 slots;
+
+    (void)argc;
+    (void)argv;
+
+    ark_shell_printf("lxstat: handled=%u enosys=%u efault=%u other=%u mprotect=%u\r\n",
+                     (unsigned)arkrtos_linux_abi_stat(0u),
+                     (unsigned)arkrtos_linux_abi_stat(1u),
+                     (unsigned)arkrtos_linux_abi_stat(2u),
+                     (unsigned)arkrtos_linux_abi_stat(3u),
+                     (unsigned)arkrtos_linux_abi_stat(4u));
+
+    slots = arkrtos_linux_abi_nr_slots();
+    if(slots == 0u)
+    {
+        sh_out("lxstat: no Linux syscall seen since the last exec\r\n");
+        return 0;
+    }
+
+    for(i = 0u; i < slots; i++)
+    {
+        uint32 nr = 0u;
+        uint32 hits = arkrtos_linux_abi_nr_slot(i, &nr);
+        ark_shell_printf("  nr %3u %-16s x%u\r\n",
+                         (unsigned)nr, lxstat_name(nr), (unsigned)hits);
+    }
+
+    if(arkrtos_linux_abi_nr_overflow() != 0u)
+    {
+        ark_shell_printf("  (+%u calls on numbers past the %u-slot table)\r\n",
+                         (unsigned)arkrtos_linux_abi_nr_overflow(),
+                         (unsigned)slots);
+    }
+    return 0;
+}
+#endif /* ARKRTOS_USE_LINUX_ABI == 1 && ARKRTOS_LINUX_ABI_SYSSTAT == 1 */
 
 #endif /* SHELL_ENABLE */

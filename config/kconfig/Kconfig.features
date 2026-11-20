@@ -499,6 +499,25 @@ config ARKRTOS_USE_LINUX_ABI
 	  the two port entry points are not compiled, so the image is
 	  byte-for-byte what it was before this option existed.
 
+config ARKRTOS_LINUX_ABI_SYSSTAT
+	bool "Per-number syscall histogram for the Linux ABI (lxstat)"
+	depends on ARKRTOS_USE_LINUX_ABI
+	help
+	  Keep a 16-slot sparse histogram of the Linux syscall numbers ELF user
+	  tasks actually issue, so the shell can answer "which calls does this
+	  binary really need" instead of guessing from an ABI table.
+
+	      lxstat          print totals and the per-number table
+
+	  Why it exists: the open question for running stock distribution
+	  binaries is not "which calls are missing" but "which calls are actually
+	  reached", and those two lists are different.  The totals already count
+	  -ENOSYS; this table adds the number that produced it.  Slots that run
+	  out are counted as overflow, never silently dropped.
+
+	  Off (default) costs nothing: no table, no shell command, and
+	  arkrtos_linux_abi.c is what it was before this option existed.
+
 config ARKRTOS_USE_MODLOAD
 	bool "VxWorks-style downloadable modules (ld / lkup / modules / unld)"
 	depends on ARKRTOS_USE_VFS && ARKRTOS_USE_PRIV

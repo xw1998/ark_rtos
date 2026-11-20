@@ -100,6 +100,13 @@
 #define LX_STAT_MPROTECT            (4u)    /* mprotect 接受但未强制（整窗 RWX） */
 #define LX_STAT_MAX                 (5u)
 
+#if (ARKRTOS_LINUX_ABI_SYSSTAT == 1)
+/* 按号直方图的槽数。16 个不同号已经足够描出一个 hello 世界级别的
+ * 程序要什么（glibc 的 hello 会用到 10 个上下，动态装载器多几个）；
+ * 超出只计溢出，不静默丢。 */
+#define LX_NR_SLOTS                 (16u)
+#endif
+
 /* ---------------------------------------------------------------- 状态 */
 
 typedef struct
@@ -114,6 +121,20 @@ typedef struct
  * 每次起跑前调用 arkrtos_linux_abi_reset() 把它清空。 */
 static lx_fd_t s_fd[LX_MAX_FD];
 static uint32  s_stat[LX_STAT_MAX];
+
+#if (ARKRTOS_LINUX_ABI_SYSSTAT == 1)
+typedef struct
+{
+    uint32 nr;
+    uint32 hits;
+} lx_nr_slot_t;
+
+/* 稀疏表，不是 512 项数组：本内核的可执行文件最多用到十几个号，一张
+ * 512×4 的表对 RAM 池是白付的体积。前缀 [0, s_nr_used) 有效。 */
+static lx_nr_slot_t s_nr[LX_NR_SLOTS];
+static uint32       s_nr_used;
+static uint32       s_nr_overflow;
+#endif
 
 /* 堆游标（brk / mmap 共用）。窗口是整块静态映射，所以这里的"分配"只是
  * 在窗口内划出一段不重叠的地址，不建立任何新映射。 */
@@ -681,6 +702,35 @@ int32 arkrtos_linux_abi_try(void *p_svc_ctx)
         return 0;       /* 不是 Linux ABI 调用，交回 Ark 号表 */
     }
 
+#if (ARKRTOS_LINUX_ABI_SYSSTAT == 1)
+    /* 在分发之前记：走到 default 的 -ENOSYS 与 exit 提前返回的调用
+     * 也要进直方图，否则「程序卡在哪一号」恰好在最关键的那几号上
+     * 看不见。 */
+    {
+        uint32 i;
+        for(i = 0u; i < s_nr_used; i++)
+        {
+            if(s_nr[i].nr == num)
+            {
+                s_nr[i].hits++;
+                break;
+            }
+        }
+        if(i == s_nr_used)
+        {
+            if(s_nr_used < (uint32)LX_NR_SLOTS)
+            {
+                s_nr[s_nr_used].nr   = num;
+                s_nr[s_nr_used].hits = 1u;
+                s_nr_used++;
+            }
+            else
+            {
+                s_nr_overflow++;
+            }
+        }
+    }
+#endif
     switch(num)
     {
     case LX_SYS_OPENAT:
@@ -771,10 +821,53 @@ uint32 arkrtos_linux_abi_stat(uint32 which)
     return s_stat[which];
 }
 
+#if (ARKRTOS_LINUX_ABI_SYSSTAT == 1)
+/* 三个读数函数只在开关打开时才有实体：默认档（SYSSTAT 0）连这三个
+ * 恒返回 0 的空壳都不该存在——「默认关 = 体积与行为零变化」是实测过的
+ * 契约，空壳会让默认档多出上百字节代码。调用点本来就全在
+ * `#if SYSSTAT == 1` 里，头文件在关档时也不声明它们。 */
+
+uint32 arkrtos_linux_abi_nr_slots(void)
+{
+    return s_nr_used;
+}
+
+uint32 arkrtos_linux_abi_nr_slot(uint32 idx, uint32 *p_nr)
+{
+    if(idx >= s_nr_used)
+    {
+        if(p_nr != 0)
+        {
+            *p_nr = 0u;
+        }
+        return 0u;
+    }
+    if(p_nr != 0)
+    {
+        *p_nr = s_nr[idx].nr;
+    }
+    return s_nr[idx].hits;
+}
+
+uint32 arkrtos_linux_abi_nr_overflow(void)
+{
+    return s_nr_overflow;
+}
+#endif /* ARKRTOS_LINUX_ABI_SYSSTAT */
+
 void arkrtos_linux_abi_reset(void)
 {
     uint32 i;
 
+#if (ARKRTOS_LINUX_ABI_SYSSTAT == 1)
+    for(i = 0u; i < (uint32)LX_NR_SLOTS; i++)
+    {
+        s_nr[i].nr   = 0u;
+        s_nr[i].hits = 0u;
+    }
+    s_nr_used     = 0u;
+    s_nr_overflow = 0u;
+#endif
     for(i = 0u; i < LX_MAX_FD; i++)
     {
         s_fd[i].used = 0u;

@@ -50,6 +50,35 @@ int32 arkrtos_linux_abi_try(void *p_svc_ctx);
 */
 uint32 arkrtos_linux_abi_stat(uint32 which);
 
+#if (ARKRTOS_LINUX_ABI_SYSSTAT == 1)
+/* 按号直方图的读数口（只在 ARKRTOS_LINUX_ABI_SYSSTAT=1 时存在）。
+ *
+ * 它回答的是「这个二进制真正调了什么」，与「我们支持什么」是两个问题：
+ * 真实发行版二进制卡住的地方，常常是一个我们没实现的号，要先把号拿到，
+ * 才轮得上谈实现。
+ *
+ * 为什么整块放进 #if 而不是「关档时返回 0 的空壳」：空壳也是体积，
+ * 默认档因此会多出上百字节目标码，与「默认关 = 零变化」的契约冲突。 */
+
+/**
+* @brief 已用槽数（前缀 [0, 返回值) 有效，按首次出现顺序）
+*/
+uint32 arkrtos_linux_abi_nr_slots(void);
+
+/**
+* @brief 读第 idx 个槽
+* @param idx   槽下标
+* @param p_nr  出参：系统调用号（可为 NULL）
+* @return 该号的调用次数；越界返回 0
+*/
+uint32 arkrtos_linux_abi_nr_slot(uint32 idx, uint32 *p_nr);
+
+/**
+* @brief 槽用满之后未记名的调用次数（不静默丢）
+*/
+uint32 arkrtos_linux_abi_nr_overflow(void);
+#endif /* ARKRTOS_LINUX_ABI_SYSSTAT */
+
 /**
 * @brief 清空每次 exec 都必须重置的状态（fd 表与堆游标）
 * @details 由 ELF 装载器在起跑前调用：fd 表是内核全局的（一次只跑一个
@@ -61,6 +90,9 @@ void arkrtos_linux_abi_reset(void);
 
 #define arkrtos_linux_abi_try(p_ctx)     (0)
 #define arkrtos_linux_abi_stat(which)    (0u)
+#define arkrtos_linux_abi_nr_slots()     (0u)
+#define arkrtos_linux_abi_nr_slot(i, p)  (0u)
+#define arkrtos_linux_abi_nr_overflow()  (0u)
 #define arkrtos_linux_abi_reset()        ((void)0)
 
 #endif /* ARKRTOS_USE_LINUX_ABI */

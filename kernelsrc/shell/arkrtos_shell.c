@@ -197,6 +197,7 @@ static int register_kernel_commands(void)
              + (ARKRTOS_USE_MODLOAD ? 4 : 0)
              + (ARKRTOS_USE_SECCHECK ? 1 : 0)
              + (ARKRTOS_USE_PAGING ? 1 : 0)
+             + (((ARKRTOS_USE_LINUX_ABI == 1) && (ARKRTOS_LINUX_ABI_SYSSTAT == 1)) ? 1 : 0)
              + ((ARKRTOS_USE_EXIT_CODE == 1) ? 1 : 0)
              + ((ARKRTOS_USE_SHELL_AUTH == 1) ? 2 : 0)
              + (ARKRTOS_USE_FDT ? 1 : 0);
@@ -375,6 +376,10 @@ static int register_kernel_commands(void)
         "Show the command history", 1);
     g_cmd_table[idx++] = ARK_SHELL_CMD("uname", cmd_uname,
         "System and build information: uname [-a]", 2);
+#if (ARKRTOS_USE_LINUX_ABI == 1) && (ARKRTOS_LINUX_ABI_SYSSTAT == 1)
+    g_cmd_table[idx++] = ARK_SHELL_CMD("lxstat", cmd_lxstat,
+        "Linux ABI: totals + which syscall numbers were actually issued", 1);
+#endif
     g_cmd_table[idx++] = ARK_SHELL_CMD("free", cmd_free,
         "Memory summary (kernel image pool + kernel RAM window)", 1);
     g_cmd_table[idx++] = ARK_SHELL_CMD("which", cmd_which,

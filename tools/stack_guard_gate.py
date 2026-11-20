@@ -170,8 +170,11 @@ def main():
     failures = []
 
     # --- A. 默认档必须是 0 ------------------------------------------------
+    # 行尾要容忍 CRLF：index 里的 blob 是 LF，但 core.autocrlf=true 会把工作区
+    # 检出成 CRLF（见 .gitattributes 的头注释）。判据盯的是「值是不是 0」，
+    # 不是「检出用哪种行尾」——用 `0$` 会让一次干净 checkout 直接假红。
     autoconf = _read(os.path.join(ROOT, "kernelsrc/include/arkrtos_autoconf.h"))
-    if not re.search(r"^#define\s+ARKRTOS_USE_STACK_GUARD\s+0$", autoconf, re.M):
+    if not re.search(r"^#define\s+ARKRTOS_USE_STACK_GUARD\s+0\r?$", autoconf, re.M):
         failures.append("A 默认档：arkrtos_autoconf.h 里 ARKRTOS_USE_STACK_GUARD 不是 0")
 
     # --- B. LA64 ON：预处理结果里必须有检查函数 --------------------------

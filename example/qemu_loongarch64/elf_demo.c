@@ -24,6 +24,7 @@
 #include "hello_blob.h"
 #if (ARKRTOS_USE_LINUX_ABI == 1)
 #include "linux_hello_blob.h"
+#include "arkrtos_linux_abi.h"
 #endif
 #if (ARKRTOS_USE_EXEC_SIGN == 1)
 #include "hello_bad_blob.h"
@@ -360,6 +361,36 @@ static void task_elf_demo(void)
                 demo_unlock();
             }
         }
+    }
+#endif
+
+#if (ARKRTOS_USE_LINUX_ABI == 1) && (ARKRTOS_LINUX_ABI_SYSSTAT == 1)
+    /* 按号直方图的现场读数。为什么打在演示里而不是只在 shell 里：
+     * 这个板的读数全是「启动后被自己跑一遍」拿到的，没有交互式输入；
+     * 直方图如果不落进串口，就只是一个没人验过的函数。
+     * 行格式刻意做成机器可读：`[lxstat] nr <号> x<次数>`。 */
+    {
+        uint32 i;
+        uint32 slots = arkrtos_linux_abi_nr_slots();
+
+        demo_lock();
+        demo_puts("[lxstat] slots=");
+        demo_putu(slots);
+        demo_puts(" overflow=");
+        demo_putu(arkrtos_linux_abi_nr_overflow());
+        demo_puts("\n");
+        for(i = 0u; i < slots; i++)
+        {
+            uint32 nr = 0u;
+            uint32 hits = arkrtos_linux_abi_nr_slot(i, &nr);
+
+            demo_puts("[lxstat] nr ");
+            demo_putu(nr);
+            demo_puts(" x");
+            demo_putu(hits);
+            demo_puts("\n");
+        }
+        demo_unlock();
     }
 #endif
 

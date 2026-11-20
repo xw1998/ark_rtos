@@ -139,7 +139,7 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py --no-build
 | `abi-split-la64` | 立即数 == 0 是 Linux、!= 0 是 Ark |
 | `abi-split-rv32` | `0x10..0x22` 归 Ark，Linux 最小号 56 不撞 |
 | `build` | `make -f example/qemu_loongarch64/Makefile` 通过 |
-| `qemu-readout` | 13 条 check 全 ok + PASS 行 + `exit code 7` + 旁路演示未受影响 |
+| `qemu-readout` | 14 条 check 全 ok + PASS 行 + `exit code 7` + 旁路演示未受影响 |
 | `parser-selfcheck` | 把 4 种坏日志喂回判据，必须全判红 |
 
 `parser-selfcheck` 是防「绿得没有信息量」的：去掉 PASS 行、退出码改 3、插一条

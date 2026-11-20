@@ -1538,7 +1538,7 @@ def check_linux_abi():
     arkrtos_linux_abi.c 整文件、port 里的号判定、内核钩子一个编译器都不经过，
     写错了也全绿。tools/linux_abi_gate.py 双向编（关档 .o 符号表必须全空 /
     开档五个 TU 必须编过）、逐条对 15 个 asm-generic 号、钉两个 ABI 的分界，
-    并在 QEMU 上真跑一份纯 Linux ABI 的静态程序（13 条 check + PASS + exit 7），
+    并在 QEMU 上真跑一份纯 Linux ABI 的静态程序（14 条 check + PASS + exit 7），
     而且解析器要能把自己喂进去的四种坏日志判红。
 
     不覆盖：动态链接（PT_INTERP）、fork/execve、信号、socket、futex、真 mmap
@@ -1550,7 +1550,7 @@ def check_linux_abi():
         ok("linux-abi",
            "default off zero symbols / LA64 ON 5 TU compile / 15 syscall numbers "
            "match asm-generic / LA64 instr!=0 is Ark, RV32 0x10..0x22 is Ark / "
-           "QEMU 13 checks + exit 7 / parser self-check 4/4")
+           "QEMU 14 checks + exit 7 / parser self-check 4/4")
     else:
         fail("linux-abi", txt[-320:])
 
@@ -1580,6 +1580,37 @@ def check_dynlink():
            "QEMU 2x PASS + exit 105 and bad fixture exit 127 / parser self-check 4/4")
     else:
         fail("dynlink", txt[-320:])
+
+def check_realbin():
+    """真实发行版 LA64 二进制「差在哪」必须有可复算的清单。
+
+    这一档交付的不是「能跑」，是**仪器**：tools/elf/realbin_probe.py 纯 struct
+    解析真实 ELF（不 shell 出去调 readelf），按依赖顺序列出 blockers 并按退出码
+    表达结果（0 = 无 blocker，1 = 有 blocker，1 是正常结果不是失败）。
+    最容易出的假绿是「探针把什么都判绿」或「跟 binutils 的名字表各说各话」，
+    所以 tools/realbin_gate.py 必须同时有：
+      A. 正例：窗口内的静态夹具 0 blocker（退出码 0）；
+      B. 负例：远基址 0x120000000 恰好 1 条 address blocker（退出码 1）；
+      C. 动态夹具：interp 指向仓内自研 ld.so 时不误判成 interp-path；
+      D. 探针自身的坏输入（非 ELF / ELF32 / e_phentsize=40 / e_phoff 越界）
+         必须判红并说原因——这条在实现时真抓出了探针的崩溃缺陷；
+      E. 能力表与 ldso.c 的 #define / case 双向对齐（防「文档说支持、实现没做」）；
+      F. 重定位名字与条数和 binutils readelf 逐项一致（缺工具则 SKIP 并说原因）。
+
+    不覆盖：真实二进制能不能真跑起来（现在一定跑不起来，地址窗口 2 MB 与
+    glibc 1.5 MB 就是硬墙），也不覆盖 syscall 分布——见
+    docs/真实Linux二进制-需求清单与差距.md。
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "realbin_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "REALBIN-GATE OK" in txt:
+        ok("realbin",
+           "probe exit-code semantics (0 clean / 1 with blockers) / static in-window "
+           "0 blocker vs far-base exactly 1 address blocker / dyn fixture interp ok / "
+           "4 bad inputs judged red with reasons / DT+reloc tables match ldso.c both "
+           "ways / reloc names match readelf (SKIP if toolchain absent)")
+    else:
+        fail("realbin", txt[-320:])
 
 def check_sec_crc():
     """镜像 CRC 开机复核（SEC-G17 / ARKRTOS_USE_IMAGE_CRC_RECHECK）必须两档都对。
@@ -1807,6 +1838,7 @@ LOCAL_TOOLCHAIN = {
     "payload-sign": "LA64 cross gcc",
     "stack-guard": "LA64 / RV32 cross gcc",
     "dynlink": "LA64 cross gcc + qemu-system-loongarch64",
+    "realbin": "LA64 cross gcc (+ loongarch64-linux-gnu-readelf for one check)",
     "sec-crc": "armclang (Keil MDK)",
     "analyzer": "RV32 cross gcc with -fanalyzer (GCC 10+)",
 }
@@ -1864,6 +1896,7 @@ CHECK_TABLE = (
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),
     ("dynlink", check_dynlink),
+    ("realbin", check_realbin),
     ("sec-crc", check_sec_crc),
 )
 

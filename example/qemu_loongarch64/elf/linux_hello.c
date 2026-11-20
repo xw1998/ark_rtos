@@ -11,6 +11,8 @@
 *            2) uname(&buf)          -> 内核能往用户缓冲区写结构化数据；
 *            3) clock_gettime       -> CLOCK_MONOTONIC 有读数、
 *                                      CLOCK_REALTIME 明确回 -ENOSYS；
+*             3b) getrandom 278 -------> 未实现的号必须明确回 -ENOSYS，
+*                                      不认识的号不许看起来成功；
 *            4) getpid              -> 非 0；
 *            5) brk(0) / brk(+4096) -> 窗口内堆可增长；
 *            6) mmap(匿名 4096)     -> 返回窗口内地址、可读写；
@@ -35,6 +37,7 @@
 #define LX_GETPID           172
 #define LX_BRK              214
 #define LX_MMAP             222
+#define LX_GETRANDOM        278     /* 本内核没实现：用来验「未知号」这一格 */
 
 #define LX_EINVAL           22
 #define LX_ENOSYS           38
@@ -241,6 +244,11 @@ void linux_main(unsigned long sp)
     }
     got = lx3(LX_CLOCK_GETTIME, 0, (lx_long)(unsigned long)ts, 0);
     check("clock_gettime(REALTIME)", got, -LX_ENOSYS);
+
+    /* 3b) 一个**根本没实现**的号（getrandom 278）。这一格验的是「未知号
+     * 必须明确回 -ENOSYS」，而它也是按号直方图（lxstat）存在的理由：
+     * 真实发行版二进制卡住的地方就在这类号上，要先把号拿到才谈得上实现。 */
+    check("getrandom(unknown nr)", lx3(LX_GETRANDOM, 0, 8, 0), -LX_ENOSYS);
 
     /* 4) getpid */
     pid = lx1(LX_GETPID, 0);

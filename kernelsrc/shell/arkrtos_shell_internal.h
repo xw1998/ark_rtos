@@ -165,6 +165,9 @@ int cmd_install(int argc, char *argv[]);
 int cmd_ld(int argc, char *argv[]);
 int cmd_lkup(int argc, char *argv[]);
 int cmd_log(int argc, char *argv[]);
+#if (ARKRTOS_USE_LINUX_ABI == 1) && (ARKRTOS_LINUX_ABI_SYSSTAT == 1)
+int cmd_lxstat(int argc, char *argv[]);
+#endif
 int cmd_man(int argc, char *argv[]);
 int cmd_mini(int argc, char *argv[]);
 int cmd_modules(int argc, char *argv[]);
