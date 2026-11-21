@@ -66,7 +66,13 @@
  * 要求 ld.so 明确失败并以 127 退出，不允许跑到 PASS。 */
 #define DYN_BAD_PATH        "/mnt/ram/dynmain_bad"
 #endif
-#define DEMO_STACK_WORDS    1024u
+/* 演示任务的栈：它自己就是跑装载器的那个任务 —— exec 一次要把 ELF 头、
+ * 段表、interp 路径与整段 23 KB 的夹具文件写穿 VFS/littlefs，峰值栈用量
+ * 实测（图案扫描，2026-11-21，QEMU LA64）：默认档 3980 B、dyn 演示档
+ * 4172 B。原来给 4 KB 时只剩不到 120 B 余量，dyn 档多出来的那几个调用
+ * 直接把栈底保护字踩掉（[STK] task 7），任务被守卫摘掉、后两轮 dyn 演示
+ * 不再执行。8 KB 留一倍余量。改大小之前先量一遍，别按感觉调。 */
+#define DEMO_STACK_WORDS    2048u
 #define DEMO_WAIT_MS        3000u
 #define DEMO_POLL_MS        20u
 
