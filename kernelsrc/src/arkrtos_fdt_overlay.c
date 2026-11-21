@@ -1851,6 +1851,133 @@ static int ovl_emit_frag_children(ovl_ctx_t *c, const uint32 *mi, uint32 nm,
     return ARKRTOS_FDT_OK;
 }
 
+/* 下面四个 helper 里 ovl_emit_base_child 会递归回调 ovl_emit_node，
+ * 而后者定义在它们之后，所以先声明。 */
+static int ovl_emit_node(ovl_ctx_t *c, const ovl_blob_t *bl, uint32 *off,
+                         char *path, uint32 path_len, const char *name,
+                         uint32 depth);
+
+/* 把 name 接到父路径后面（就地写，父路径字节不动）：根的一级子节点写成
+ * "/name"，其余写成 "父/name"。越界只报错不截断——截断出来的路径会和
+ * 别的节点撞名，而撞名的后果是"删错了人"。*p_len 交出新的路径长度。 */
+static int ovl_path_push(char *path, uint32 path_len, const char *name,
+                         uint32 *p_len)
+{
+    uint32 n = ovl_strlen(name);
+    uint32 k;
+
+    if((path_len == 1u) && (path[0] == '/'))
+    {
+        if((1u + n + 1u) > ARKRTOS_FDT_PATH_MAX)  /* "/" + name + NUL */
+        {
+            return ARKRTOS_FDT_ERR_PATH;
+        }
+        for(k = 0u; k < n; k++)
+        {
+            path[1u + k] = name[k];
+        }
+        path[1u + n] = '\0';
+        *p_len = 1u + n;
+        return ARKRTOS_FDT_OK;
+    }
+    if((path_len + n + 2u) > ARKRTOS_FDT_PATH_MAX)
+    {
+        return ARKRTOS_FDT_ERR_PATH;
+    }
+    path[path_len] = '/';
+    for(k = 0u; k < n; k++)
+    {
+        path[path_len + 1u + k] = name[k];
+    }
+    path[path_len + 1u + n] = '\0';
+    *p_len = path_len + 1u + n;
+    return ARKRTOS_FDT_OK;
+}
+
+/* 一条基树属性：被 fragment 覆盖过（含"删属性"那条长度 0）就不输出。
+ * *pos 进来时指在 TOK_PROP 之后的负载起点，出去时指在该属性末尾之后。 */
+static int ovl_emit_base_prop(ovl_ctx_t *c, const ovl_blob_t *bl,
+                              const uint32 *mi, uint32 nm, uint32 end,
+                              uint32 *pos)
+{
+    uint32 len;
+    uint32 nameoff;
+    const char *pn;
+    uint32 overridden = 0u;
+    uint32 flen = 0u;
+    int rc;
+
+    rc = ovl_prop_head(bl, pos, &len, &pn);
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        return rc;
+    }
+    if(ovl_frag_prop_len(c, mi, nm, pn, &flen) != 0u)
+    {
+        /* 长度 0 的那条是"删属性"：基树这条不输出，fragment 侧也不会
+         * 把它写出来（ovl_emit_frag_props 跳过长度 0）。 */
+        overridden = (flen == 0u) ? 2u : 1u;
+    }
+    if(overridden == 0u)
+    {
+        ovl_put32(c, OVL_TOK_PROP);
+        ovl_put32(c, len);
+        nameoff = ovl_str(c, pn);
+        ovl_put32(c, nameoff);
+        ovl_put_bytes(c, bl->b + *pos, len);
+        ovl_align4(c);
+    }
+    *pos += ovl_pad4(len);
+    if(*pos > end)
+    {
+        return ARKRTOS_FDT_ERR_FORMAT;
+    }
+    return ARKRTOS_FDT_OK;
+}
+
+/* 一条基树子节点：命中"删子节点"标记就整段跳过，否则递归重拼。
+ * 两种情形的调用方都是"继续读下一条 token"，所以成功时统一返回 OK。 */
+static int ovl_emit_base_child(ovl_ctx_t *c, const ovl_blob_t *bl, uint32 *pos,
+                               char *path, uint32 path_len, const uint32 *mi,
+                               uint32 nm, uint32 depth)
+{
+    const char *cn;
+    int rc;
+
+    rc = ovl_node_name(bl, pos, &cn);
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        return rc;
+    }
+    if((nm != 0u) && (ovl_is_delete_marker(c, mi, nm, cn) != 0u))
+    {
+        return ovl_skip_node(bl, pos, 0u);
+    }
+    return ovl_emit_node(c, bl, pos, path, path_len, cn, depth + 1u);
+}
+
+/* 收尾：先把 fragment 自己的子节点补上（它们必须排在基树子节点之后、
+ * END_NODE 之前），再写 END_NODE 并把游标交回调用方。 */
+static int ovl_emit_node_end(ovl_ctx_t *c, const ovl_blob_t *bl,
+                             const uint32 *mi, uint32 nm, uint32 node_body,
+                             uint32 *pos, uint32 *off)
+{
+    int rc;
+
+    if(nm != 0u)
+    {
+        rc = ovl_emit_frag_children(c, mi, nm, bl, node_body);
+        if(rc != ARKRTOS_FDT_OK)
+        {
+            return rc;
+        }
+    }
+    *pos += 4u;
+    *off = *pos;
+    ovl_put32(c, OVL_TOK_END_NODE);
+    return ARKRTOS_FDT_OK;
+}
+
 /* 重拼一个节点：*off 指向内容起点，name 是已读出的节点名，
  * path 是父路径（就地拼接，避免每层一份栈上路径缓冲） */
 static int ovl_emit_node(ovl_ctx_t *c, const ovl_blob_t *bl, uint32 *off,
@@ -1864,7 +1991,6 @@ static int ovl_emit_node(ovl_ctx_t *c, const ovl_blob_t *bl, uint32 *off,
     uint32 pos;
     uint32 end = ovl_struct_end(bl);
     uint32 k;
-    uint32 n;
     int rc;
 
     if(depth > ARKRTOS_FDT_MAX_DEPTH)
@@ -1873,33 +1999,10 @@ static int ovl_emit_node(ovl_ctx_t *c, const ovl_blob_t *bl, uint32 *off,
     }
 
     /* 路径就地拼接：只写在 path_len 之后，父路径字节不动 */
-    n = ovl_strlen(name);
-    if((path_len == 1u) && (path[0] == '/'))
+    rc = ovl_path_push(path, path_len, name, &path_len);
+    if(rc != ARKRTOS_FDT_OK)
     {
-        if((1u + n + 1u) > ARKRTOS_FDT_PATH_MAX)  /* "/" + name + NUL */
-        {
-            return ARKRTOS_FDT_ERR_PATH;
-        }
-        for(k = 0u; k < n; k++)
-        {
-            path[1u + k] = name[k];
-        }
-        path[1u + n] = '\0';
-        path_len = 1u + n;
-    }
-    else
-    {
-        if((path_len + n + 2u) > ARKRTOS_FDT_PATH_MAX)
-        {
-            return ARKRTOS_FDT_ERR_PATH;
-        }
-        path[path_len] = '/';
-        for(k = 0u; k < n; k++)
-        {
-            path[path_len + 1u + k] = name[k];
-        }
-        path[path_len + 1u + n] = '\0';
-        path_len = path_len + 1u + n;
+        return rc;
     }
 
     /* 找命中的 fragment */
@@ -1917,7 +2020,7 @@ static int ovl_emit_node(ovl_ctx_t *c, const ovl_blob_t *bl, uint32 *off,
     }
 
     ovl_put32(c, OVL_TOK_BEGIN_NODE);
-    ovl_put_bytes(c, (const uint8 *)name, n + 1u);
+    ovl_put_bytes(c, (const uint8 *)name, ovl_strlen(name) + 1u);
     ovl_align4(c);
 
     if(nm != 0u)
@@ -1948,37 +2051,11 @@ static int ovl_emit_node(ovl_ctx_t *c, const ovl_blob_t *bl, uint32 *off,
         }
         if(tok == OVL_TOK_PROP)
         {
-            uint32 len;
-            uint32 nameoff;
-            const char *pn;
-            uint32 overridden = 0u;
-            uint32 flen = 0u;
-
             pos += 4u;
-            rc = ovl_prop_head(bl, &pos, &len, &pn);
+            rc = ovl_emit_base_prop(c, bl, mi, nm, end, &pos);
             if(rc != ARKRTOS_FDT_OK)
             {
                 return rc;
-            }
-            if(ovl_frag_prop_len(c, mi, nm, pn, &flen) != 0u)
-            {
-                /* 长度 0 的那条是"删属性"：基树这条不输出，fragment 侧也不会
-                 * 把它写出来（ovl_emit_frag_props 跳过长度 0）。 */
-                overridden = (flen == 0u) ? 2u : 1u;
-            }
-            if(overridden == 0u)
-            {
-                ovl_put32(c, OVL_TOK_PROP);
-                ovl_put32(c, len);
-                nameoff = ovl_str(c, pn);
-                ovl_put32(c, nameoff);
-                ovl_put_bytes(c, bl->b + pos, len);
-                ovl_align4(c);
-            }
-            pos += ovl_pad4(len);
-            if(pos > end)
-            {
-                return ARKRTOS_FDT_ERR_FORMAT;
             }
             continue;
         }
@@ -1999,24 +2076,9 @@ static int ovl_emit_node(ovl_ctx_t *c, const ovl_blob_t *bl, uint32 *off,
 
         if(tok == OVL_TOK_BEGIN_NODE)
         {
-            const char *cn;
-
             pos += 4u;
-            rc = ovl_node_name(bl, &pos, &cn);
-            if(rc != ARKRTOS_FDT_OK)
-            {
-                return rc;
-            }
-            if((nm != 0u) && (ovl_is_delete_marker(c, mi, nm, cn) != 0u))
-            {
-                rc = ovl_skip_node(bl, &pos, 0u);
-                if(rc != ARKRTOS_FDT_OK)
-                {
-                    return rc;
-                }
-                continue;
-            }
-            rc = ovl_emit_node(c, bl, &pos, path, path_len, cn, depth + 1u);
+            rc = ovl_emit_base_child(c, bl, &pos, path, path_len, mi, nm,
+                                     depth);
             if(rc != ARKRTOS_FDT_OK)
             {
                 return rc;
@@ -2026,18 +2088,7 @@ static int ovl_emit_node(ovl_ctx_t *c, const ovl_blob_t *bl, uint32 *off,
 
         if(tok == OVL_TOK_END_NODE)
         {
-            if(nm != 0u)
-            {
-                rc = ovl_emit_frag_children(c, mi, nm, bl, node_body);
-                if(rc != ARKRTOS_FDT_OK)
-                {
-                    return rc;
-                }
-            }
-            pos += 4u;
-            *off = pos;
-            ovl_put32(c, OVL_TOK_END_NODE);
-            return ARKRTOS_FDT_OK;
+            return ovl_emit_node_end(c, bl, mi, nm, node_body, &pos, off);
         }
         return ARKRTOS_FDT_ERR_FORMAT;
     }

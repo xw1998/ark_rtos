@@ -5704,6 +5704,40 @@ git 里的那一份，所以它必须在提交之后才会转绿**（提交后�
 （动态链接两条 PASS + `exit 105`、坏夹具 `exit 127`），未上板。**
 `pmap`/页表相关的默认档读数不受影响（这一笔只动 `elf_load` 一个函数）。
 
+#### 5.30.40 第三十五笔：`ovl_emit_node()` 按「路径 / 属性 / 子节点 / 收尾」拆成四段（2026-11-21）
+
+`kernelsrc/src/arkrtos_fdt_overlay.c` 的 `ovl_emit_node()`（**189 行**，拆分后全仓最长的一个）
+是 overlay 重拼的单节点主循环：拼路径 → 找命中的 fragment → 写 `BEGIN_NODE` → 逐 token 走基树
+的属性和子节点、期间把 fragment 的覆盖插进去 → 写 `END_NODE`。四件事的边界在原代码里就是清楚的
+（每一段都有自己的注释），所以这一笔是纯分段。
+
+| 单元 | 管什么 | 行数 |
+|---|---|---|
+| `ovl_path_push()` | 把节点名接到父路径后面（就地写，父路径字节不动）：根的一级子节点写成 `/name`，其余写成 `父/name`；越界只报 `ERR_PATH` 不截断 —— 截断出来的路径会和别的节点撞名，撞名的后果是「删错了人」 | 33 |
+| `ovl_emit_base_prop()` | 一条基树属性：被 fragment 覆盖过（含「删属性」那条长度 0）就不输出；`*pos` 进出都指在属性负载上，出函数时已越过 `ovl_pad4(len)` 并做越界检查 | 38 |
+| `ovl_emit_base_child()` | 一条基树子节点：命中「删子节点」标记就 `ovl_skip_node()` 整段跳过，否则递归回调 `ovl_emit_node()`；两种情形调用方都只是「继续读下一条 token」，所以成功统一返回 `OK` | 18 |
+| `ovl_emit_node_end()` | 收尾：先把 fragment 自己的子节点补上（必须排在基树子节点之后、`END_NODE` 之前），再写 `END_NODE` 并把游标交回调用方 | 19 |
+| `ovl_emit_node()` 自己 | 深度闸门 → 拼路径 → 扫 fragment 取 `mi[]` → 写 `BEGIN_NODE`+名字 → 有 fragment 就先 `ovl_check_deletions()`（**先验后写**：写了一半再报错会留下半个 blob）→ 逐 token 分派（`NOP` / `PROP` / `BEGIN_NODE` / `END_NODE` / 其它报 `ERR_FORMAT`） | **40**（原 189） |
+
+口径三条：① 「删子节点」和「递归重拼」都保留在同一个 helper 里，因为它们只差一个分支、
+返回的又都是「继续循环」；把跳过那条单独拆出去会多一层、而判据是同一个 `ovl_is_delete_marker()`。
+② 四个 helper 都是 `static` 且单调用点，`-O2` 全部内联回去，拆分不改变调用深度。
+③ `ovl_emit_base_child()` 会递归回调 `ovl_emit_node()`，后者定义在它之后 ⇒ 加了一条前向声明
+（第一次编译就是在这里报 `implicit declaration` + `static declaration follows non-static`，
+不是「编译通过后才发现」）。
+
+等价性：`default` 档两遍**同配置** clean 构建 —— text **448664 → 448632（−32 B）**、
+`data` 448 / `bss` 5,128,740 / 镜像总长 31,462,512 B 全不变，两份 `.bin` 的 sha256 分别是
+`06612070…`（拆前）/ `a36f19ad…`（拆后），**不是逐字节不变**；`arkrtos_fdt_overlay.c` 在该档
+**0 条告警**（全量构建的 242 条来自其它既有文件）。
+
+门禁：`tools/ci_gate.py` **57 passed / 0 failed / 0 skipped**，其中 `fdt` 项把 overlay 真跑了一遍
+（`overlay absent-before → nodes 8→9 + model/props read back`、6 个板的 dtb 与 C 表逐行比、
+`save+load nodes unchanged`、5 组自检），`devicetree-dtb` 6 个板全过；`tools/format_gate.py` OK 392。
+`doc_audit funcs` **14 → 13**。
+
+**结论分档：编译通过 + 告警 0 + QEMU 端到端 PASS（overlay 真拼出 9 个节点并读回），未上板。**
+
 ### 5.31 LSX 向量寄存器上下文（U-19，2026-11-21）
 
 #### 5.31.1 缺口：FPU 档只存了一半的浮点上下文
