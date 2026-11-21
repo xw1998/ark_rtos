@@ -86,7 +86,7 @@
 - [kernelsrc/src/arkrtos_apppack.c](#kernelsrcsrcarkrtos_apppackc)（1 项）
 - [kernelsrc/src/arkrtos_cfg.c](#kernelsrcsrcarkrtos_cfgc)（1 项）
 - [kernelsrc/src/arkrtos_dev.c](#kernelsrcsrcarkrtos_devc)（1 项）
-- [kernelsrc/src/arkrtos_elf.c](#kernelsrcsrcarkrtos_elfc)（13 项）
+- [kernelsrc/src/arkrtos_elf.c](#kernelsrcsrcarkrtos_elfc)（17 项）
 - [kernelsrc/src/arkrtos_eset.c](#kernelsrcsrcarkrtos_esetc)（1 项）
 - [kernelsrc/src/arkrtos_exports.c](#kernelsrcsrcarkrtos_exportsc)（1 项）
 - [kernelsrc/src/arkrtos_fs.c](#kernelsrcsrcarkrtos_fsc)（1 项）
@@ -11070,6 +11070,61 @@ AT_NULL 的 0/0、auxv 键值对、NULL(envp)、NULL(argv 结束)、
 argv[argc-1..0]、argc  <- sp
 字符串从窗口顶端往下写，数组紧贴在 argv_start 之上。
 **返回**：0 = 成功（*p_sp / *p_execfn 有效）；否则为负错误码
+
+### `static int32 elf_load_interp(elf_load_state_t *st, const char *interp_`
+
+```c
+static int32 elf_load_interp(elf_load_state_t *st, const char *interp_path, unsigned long interp_lo, unsigned long interp_hi, elf_image_t *p_interp) {
+```
+
+**把解释器（ld.so）装进板级给定的区间，并做完全部越界检查**
+- `st`：交接块；只读 space，累加 bytes
+- `interp_path`：PT_INTERP 解析出的解释器路径
+- `interp_lo`：板级给定的解释器区间下界（ET_DYN 的装载基址）
+- `interp_hi`：板级给定的解释器区间上界
+- `p_interp`：成功时写回解释器的镜像账（lo/hi/entry/phdr）
+**返回**：ARKRTOS_ELF_OK 或错误码；失败一律折成 ERR_INTERP，
+因为对调用方而言「主程序没问题、解释器装不上」就是同一个结果
+ET_DYN 解释器装到 interp_lo；ET_EXEC 解释器必须本来就链在那里
+（它的 vaddr 是绝对的，装到别处等于让它跳进空地址）。
+与主程序分开写成一份：两边共用的只有 elf_measure_image /
+elf_check_range，而拒绝码不同（主程序给 ERR_LAYOUT，解释器给
+ERR_INTERP），混在一起最容易把两种失败报成一种。
+
+### `static int32 elf_load_dynamic(elf_load_state_t *st, const char *interp`
+
+```c
+static int32 elf_load_dynamic(elf_load_state_t *st, const char *interp_path) {
+```
+
+**动态档分支：装主程序、装解释器、铺 Linux 那套 auxv**
+- `st`：交接块；img / bytes / segs / tp / task_entry / auxn 在这里落地
+- `interp_path`：PT_INTERP 解析出的解释器路径
+**返回**：ARKRTOS_ELF_OK 或错误码；写镜像之前的所有拒绝都发生在动窗口之前
+
+### `static int32 elf_load_static(elf_load_state_t *st) {`
+
+```c
+static int32 elf_load_static(elf_load_state_t *st) {
+```
+
+**静态档分支：主程序按 e_vaddr 落位，入口就是 e_entry**
+- `st`：交接块；字段含义同 elf_load_dynamic
+行为与引入 DYNLOAD 之前逐位一致：判入口、量镜像、查范围、写段、
+记 tp/segs，再铺一份含 AT_RANDOM / AT_CLKTCK 的 auxv。
+
+### `static int32 elf_load_finish(elf_load_state_t *st) {`
+
+```c
+static int32 elf_load_finish(elf_load_state_t *st) {
+```
+
+**收尾：铺用户栈与 argv/auxv，填装载信息，按需起任务**
+- `st`：交接块；两个装载分支已经写好 img / bytes / segs / tp / task_entry / auxn
+**返回**：ARKRTOS_ELF_OK 或错误码
+execve 档（start_task == 0）一个任务都不起，只把入口 / 栈指针 / TLS
+交回调用方；起任务档里「清兼容层状态 → 注册 → 降权 → MPU 写回」
+必须是原子段（理由见函数内注释）。
 
 ### `static int32 elf_load(uint32 space, const char *path, int32 argc, char`
 

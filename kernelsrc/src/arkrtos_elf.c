@@ -1496,6 +1496,372 @@ static int32 elf_stack_build(uint32 space, unsigned long win_top,
     return ARKRTOS_ELF_OK;
 }
 
+/* elf_load 的三个分支块（动态档 / 静态档 / 收尾）共用这块交接状态。抽出来的
+* 原因：两个装载分支原先各写一遍「量 → 查范围 → 写镜像 → 记 tp/segs/bytes」，
+* elf_load 一路长到 338 行，读的时候很难确认两档用的是不是同一套判据；抽出之后
+* elf_load 只剩「准备参数 → 选分支 → 收尾」，两档的差别在各自 helper 里逐行
+* 可读，共用的收尾只有一份。*/
+typedef struct
+{
+    const char *path;
+    uint32 space;
+    elf_word_t phoff;
+    uint16 phnum;
+    uint16 phentsize;
+    elf_word_t entry;
+    uint16 etype;
+    unsigned long win_base;
+    unsigned long stack_bottom;
+    elf_image_t img;
+    uint32 bytes;
+    uint32 segs;
+    unsigned long tp;
+    unsigned long task_entry;
+    elf_aux_t *aux;
+    uint32 auxn;
+    arkrtos_elf_info_t *p_info;
+    unsigned long win_top;
+    unsigned long argv_start;
+    int32 argc;
+    char **argv;
+    uint32 start_task;
+    unsigned long *p_tp;
+} elf_load_state_t;
+
+#if (ARKRTOS_USE_DYNLOAD == 1)
+/**
+* @brief 把解释器（ld.so）装进板级给定的区间，并做完全部越界检查
+* @param st          交接块；只读 space，累加 bytes
+* @param interp_path PT_INTERP 解析出的解释器路径
+* @param interp_lo   板级给定的解释器区间下界（ET_DYN 的装载基址）
+* @param interp_hi   板级给定的解释器区间上界
+* @param p_interp    成功时写回解释器的镜像账（lo/hi/entry/phdr）
+* @return ARKRTOS_ELF_OK 或错误码；失败一律折成 ERR_INTERP，
+*         因为对调用方而言「主程序没问题、解释器装不上」就是同一个结果
+* @details ET_DYN 解释器装到 interp_lo；ET_EXEC 解释器必须本来就链在那里
+*          （它的 vaddr 是绝对的，装到别处等于让它跳进空地址）。
+*          与主程序分开写成一份：两边共用的只有 elf_measure_image /
+*          elf_check_range，而拒绝码不同（主程序给 ERR_LAYOUT，解释器给
+*          ERR_INTERP），混在一起最容易把两种失败报成一种。
+*/
+static int32 elf_load_interp(elf_load_state_t *st, const char *interp_path,
+                             unsigned long interp_lo, unsigned long interp_hi,
+                             elf_image_t *p_interp)
+{
+    uint8 ihdr[ELF_EHDR_SIZE];
+    elf_word_t ientry = 0;
+    elf_word_t iphoff = 0;
+    uint16 iphnum = 0u;
+    uint16 iphentsize = 0u;
+    uint16 itype = 0u;
+    unsigned long ibias;
+    int32 rc;
+
+    /* ET_DYN 装到板级基址；ET_EXEC 必须本来就链在那里
+     * （它的 vaddr 是绝对的，装到别处等于让它跳进空地址）。 */
+    rc = elf_read_exact(interp_path, ihdr, ELF_EHDR_SIZE, 0u);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return ARKRTOS_ELF_ERR_INTERP;
+    }
+    rc = elf_check_header(ihdr, &ientry, &iphoff, &iphnum, &iphentsize,
+                          &itype);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return ARKRTOS_ELF_ERR_INTERP;
+    }
+    ibias = (itype == (uint16)ELF_TYPE_DYN) ? interp_lo : 0u;
+
+    rc = elf_measure_image(interp_path, iphoff, iphnum, iphentsize,
+                           ientry, ibias, p_interp);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return ARKRTOS_ELF_ERR_INTERP;
+    }
+    if((itype == (uint16)ELF_TYPE_EXEC) && (p_interp->lo != interp_lo))
+    {
+        /* ET_EXEC 解释器没链在板级给的地址上：装载会落在别处，
+         * 入口却还是它自己的绝对地址 —— 这种「看起来装上了」的状态
+         * 比拒绝更难查。 */
+        return ARKRTOS_ELF_ERR_INTERP;
+    }
+    rc = elf_check_entry((elf_word_t)p_interp->entry, interp_lo, interp_hi);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return ARKRTOS_ELF_ERR_INTERP;
+    }
+    rc = elf_check_range(p_interp, interp_lo, interp_hi);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return ARKRTOS_ELF_ERR_INTERP;
+    }
+    {
+        uint32 ibytes = 0u;
+        uint32 itls_placed = 0u;
+        rc = elf_write_image(interp_path, st->space, iphoff, iphnum,
+                             iphentsize, ibias, &ibytes, &itls_placed);
+        if(rc != ARKRTOS_ELF_OK)
+        {
+            return ARKRTOS_ELF_ERR_INTERP;
+        }
+        st->bytes += ibytes;
+    }
+    if((st->img.hi > p_interp->lo) && (p_interp->hi > st->img.lo))
+    {
+        return ARKRTOS_ELF_ERR_LAYOUT;
+    }
+    return ARKRTOS_ELF_OK;
+}
+
+/**
+* @brief 动态档分支：装主程序、装解释器、铺 Linux 那套 auxv
+* @param st          交接块；img / bytes / segs / tp / task_entry / auxn 在这里落地
+* @param interp_path PT_INTERP 解析出的解释器路径
+* @return ARKRTOS_ELF_OK 或错误码；写镜像之前的所有拒绝都发生在动窗口之前
+*/
+static int32 elf_load_dynamic(elf_load_state_t *st, const char *interp_path)
+{
+    unsigned long bias = 0u;
+    uint32 tls_placed = 0u;
+    int32 rc;
+
+    uint8 ihdr[ELF_EHDR_SIZE];
+    elf_word_t ientry = 0;
+    elf_word_t iphoff = 0;
+    uint16 iphnum = 0u;
+    uint16 iphentsize = 0u;
+    uint16 itype = 0u;
+    unsigned long interp_lo = (unsigned long)ARKRTOS_ELF_INTERP_BASE;
+    unsigned long interp_hi = interp_lo + (uint32)ARKRTOS_ELF_INTERP_SIZE;
+    unsigned long ibias;
+    elf_image_t interp;
+
+    /* ET_DYN 的主程序按窗口基址装载；它的最低 vaddr 必须是 0，
+     * 否则"基址"与"vaddr"两个说法就对不上了（明确拒绝，不猜）。 */
+    if(st->etype == (uint16)ELF_TYPE_DYN)
+    {
+        bias = st->win_base;
+    }
+
+    /* 先量：ET_DYN 的 e_entry 是相对偏移，必须加过 bias 才能判入口。 */
+    rc = elf_measure_image(st->path, st->phoff, st->phnum, st->phentsize,
+                           st->entry, bias, &st->img);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return rc;
+    }
+    if((st->etype == (uint16)ELF_TYPE_DYN) && (st->img.lo != st->win_base))
+    {
+        /* ET_DYN 但最低段不在 0：装载基址就不是 st->win_base 了。 */
+        return ARKRTOS_ELF_ERR_LAYOUT;
+    }
+    rc = elf_check_entry((elf_word_t)st->img.entry, st->win_base, st->stack_bottom);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return rc;
+    }
+    /* 主程序不许越进解释器区：越过去就是把两个镜像叠在一起。 */
+    rc = elf_check_range(&st->img, st->win_base, interp_lo);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return rc;
+    }
+    rc = elf_write_image(st->path, st->space, st->phoff, st->phnum, st->phentsize, bias,
+                         &st->bytes, &tls_placed);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return rc;
+    }
+#if (ARKRTOS_USE_ELF_TLS == 1)
+    /* 同静态档：只有真铺过块，st->img.tls_va 才是这个任务的 TLS 块地址。 */
+    st->tp = (tls_placed != 0u) ? st->img.tls_va : 0u;
+#endif
+    st->segs = st->img.segs;
+
+    rc = elf_load_interp(st, interp_path, interp_lo, interp_hi, &interp);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return rc;
+    }
+
+    /* auxv：Linux 传给 ld.so 的那一套。AT_PHDR 必须真的存在。 */
+    if(st->img.phdr == 0u)
+    {
+        return ARKRTOS_ELF_ERR_LAYOUT;
+    }
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_PHDR, st->img.phdr);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_PHENT, (uint32)st->phentsize);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_PHNUM, (uint32)st->phnum);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_PAGESZ, 4096u);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_BASE, interp.lo);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_ENTRY, st->img.entry);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_UID, 0u);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_EUID, 0u);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_FLAGS, 0u);
+    /* 与静态档同一套（ld.so 也要 AT_RANDOM 做栈保护种子）。 */
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_RANDOM, 0u);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_EXECFN, 0u);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_SECURE, 0u);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_GID,    0u);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_EGID,   0u);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_HWCAP,  0u);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_CLKTCK, 100u);
+
+    st->task_entry = interp.entry;
+    st->p_info->dynamic     = 1u;
+    st->p_info->interp_base = interp.lo;
+    st->p_info->interp_entry = interp.entry;
+    return ARKRTOS_ELF_OK;
+}
+#endif /* ARKRTOS_USE_DYNLOAD == 1 */
+
+/**
+* @brief 静态档分支：主程序按 e_vaddr 落位，入口就是 e_entry
+* @param st 交接块；字段含义同 elf_load_dynamic
+* @details 行为与引入 DYNLOAD 之前逐位一致：判入口、量镜像、查范围、写段、
+*          记 tp/segs，再铺一份含 AT_RANDOM / AT_CLKTCK 的 auxv。
+*/
+static int32 elf_load_static(elf_load_state_t *st)
+{
+    uint32 tls_placed = 0u;
+    int32 rc;
+
+    /* 静态档：行为与 DYNLOAD 之前逐位一致。 */
+    rc = elf_check_entry(st->entry, st->win_base, st->stack_bottom);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return rc;
+    }
+
+    rc = elf_measure_image(st->path, st->phoff, st->phnum, st->phentsize,
+                           st->entry, 0u, &st->img);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return rc;
+    }
+    rc = elf_check_range(&st->img, st->win_base, st->stack_bottom);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return rc;
+    }
+    rc = elf_write_image(st->path, st->space, st->phoff, st->phnum,
+                         st->phentsize, 0u, &st->bytes,
+                         &tls_placed);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return rc;
+    }
+#if (ARKRTOS_USE_ELF_TLS == 1)
+    /* 只有装载器真的往窗口里铺过 TLS 字节，那个地址才是「这个任务的
+     * TLS 块」。全程被镜像覆盖时它是别人的数据（真实 glibc 的 .tbss
+     * 就与 .init_array 同址），此时预置 TP 只会让程序读到别人的字节；
+     * 这种程序的 TLS 由它自己的 C 运行时建（glibc: __libc_setup_tls）。 */
+    st->tp = (tls_placed != 0u) ? st->img.tls_va : 0u;
+#endif
+    st->segs = st->img.segs;
+    st->task_entry = st->img.entry;
+
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_PAGESZ, 4096u);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_ENTRY, st->img.entry);
+    if(st->img.phdr != 0u)
+    {
+        elf_aux_add(st->aux, &st->auxn, ELF_AT_PHDR, st->img.phdr);
+        elf_aux_add(st->aux, &st->auxn, ELF_AT_PHENT, (uint32)st->phentsize);
+        elf_aux_add(st->aux, &st->auxn, ELF_AT_PHNUM, (uint32)st->phnum);
+    }
+    /* 静态档也要给 glibc 那一套：AT_RANDOM 是它会立刻解引用的，
+     * 缺了就是空指针；AT_SECURE=0 才不会走 setuid 分支；uid/gid
+     * 全 0 与「root 起的程序」一致；AT_CLKTCK=100 是 Linux 惯例。
+     * AT_RANDOM / AT_EXECFN 的值由 elf_build_stack 回填。 */
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_RANDOM, 0u);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_EXECFN, 0u);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_SECURE, 0u);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_UID,    0u);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_EUID,   0u);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_GID,    0u);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_EGID,   0u);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_HWCAP,  0u);
+    elf_aux_add(st->aux, &st->auxn, ELF_AT_CLKTCK, 100u);
+    st->p_info->dynamic     = 0u;
+    st->p_info->interp_base = 0u;
+    st->p_info->interp_entry = 0u;
+    return ARKRTOS_ELF_OK;
+}
+
+/**
+* @brief 收尾：铺用户栈与 argv/auxv，填装载信息，按需起任务
+* @param st 交接块；两个装载分支已经写好 img / bytes / segs / tp / task_entry / auxn
+* @return ARKRTOS_ELF_OK 或错误码
+* @details execve 档（start_task == 0）一个任务都不起，只把入口 / 栈指针 / TLS
+*          交回调用方；起任务档里「清兼容层状态 → 注册 → 降权 → MPU 写回」
+*          必须是原子段（理由见函数内注释）。
+*/
+static int32 elf_load_finish(elf_load_state_t *st)
+{
+    unsigned long sp = 0u;
+    unsigned long execfn = 0u;
+    uint32 stack_bytes;
+    int32 rc;
+    int32 id;
+
+    rc = elf_stack_build(st->space, st->win_top, st->argv_start, st->argc,
+                         st->argv, st->aux, st->auxn, &sp, &execfn);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return rc;
+    }
+
+    stack_bytes = st->argv_start - st->stack_bottom;
+
+    /* 关键一步：stack_size 取到 argv 区起点，初始 sp 就会落在 argc 上。
+     * 这里若改成「传栈大小 32 KB 再多给 16 KB」，sp 会指向参数数组中段，
+     * 程序读到的 argc 是某个字符串的字节——一个只在运行期才暴露的错答案。 */
+    st->p_info->entry      = st->task_entry;
+    st->p_info->bytes      = st->bytes;
+    st->p_info->segs       = st->segs;
+    st->p_info->argc       = (uint32)st->argc;
+    st->p_info->sp         = sp;
+    st->p_info->stack_size = stack_bytes;
+    st->p_info->task       = 0;
+    if(st->p_tp != 0)
+    {
+        *st->p_tp = st->tp;
+    }
+
+    /* execve：镜像已经铺进调用者自己的空间，这里一个任务都不起。
+     * 入口/栈/TLS 三个值交给上层写回**当前任务的 trap 帧**。 */
+    if(st->start_task == 0u)
+    {
+        return ARKRTOS_ELF_OK;
+    }
+
+    /* 装配期竞态（本轮实测根因之一）：arkrtos_task_register() 内部会把任务
+     * 直接挂进就绪集，而「降权」与「MPU 窗口写回」是它之后才发生的两步。
+     * 若在这中间被 tick 切走，任务会以半配置状态被切进：跑在 M 模式看到的是
+     * 特权，降权后窗口未写回看到的就是 mcause=1 mtval=0x02000000 的取指 fault
+     * （5 连跑 2 败的间歇签名）。因此把 注册 → 降权 → MPU 写回 整段做成原子段。 */
+#if (ARKRTOS_USE_LINUX_ABI == 1)
+    /* 兼容层状态（fd 表、堆游标、信号表）是**内核全局**的，只能属于「正在跑
+     * 的那一个程序」。它必须在**新任务被挂进就绪集之前**清空：任务一旦进就绪
+     * 集就可能立刻被切进去，第一次 brk/mmap 就会读到上一个程序留下的游标。
+     * 实测证据：把清空留在 arkrtos_elf_exec_space 的尾部时，fixture 的 stage1
+     * brk(0) 比窗口堆基点高 8192（正是上一个程序 brk+mmap 推掉的量），
+     * 「堆游标归零」这条判据随代码布局时红时绿；挪到这里后稳定为基点。 */
+    arkrtos_linux_abi_reset();
+#endif
+
+    id = elf_start_task(st->task_entry, st->stack_bottom, stack_bytes,
+                        st->space, st->tp);
+    if(id <= 0)
+    {
+        return id;
+    }
+
+    st->p_info->task = id;
+
+    return ARKRTOS_ELF_OK;
+}
+
 /**
 * @brief 把一份 ELF64 装进指定地址空间并起一个降权任务
 * @param space   目标地址空间（0 .. 空间数-1）；窗口 VA 在每个空间里相同
@@ -1534,22 +1900,9 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
     unsigned long win_top;
     unsigned long argv_start;
     unsigned long stack_bottom;
-    uint32 stack_bytes;
-    unsigned long sp = 0u;
-    unsigned long execfn = 0u;
-    unsigned long task_entry = 0u;
-#if (ARKRTOS_USE_DYNLOAD == 1)
-    unsigned long bias = 0u;
-#endif
-    uint32 bytes = 0u;
-    uint32 segs = 0u;
-    unsigned long tp = 0u;
-    uint32 tls_placed = 0u;
     elf_aux_t aux[ARKRTOS_ELF_AUX_MAX];
-    uint32 auxn = 0u;
-    elf_image_t img;
+    elf_load_state_t st;
     int32 rc;
-    int32 id;
     char *argv_auto[1];
     char interp_path[ARKRTOS_ELF_INTERP_PATH_MAX];
 #if (ARKRTOS_USE_DYNLOAD == 1)
@@ -1602,262 +1955,48 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
     }
 #endif
 
+    /* 交接块：两个分支都往这里写结果，收尾（铺栈、起任务）只有一份。 */
+    st.path = path;
+    st.space = space;
+    st.phoff = phoff;
+    st.phnum = phnum;
+    st.phentsize = phentsize;
+    st.entry = entry;
+    st.etype = etype;
+    st.win_base = win_base;
+    st.stack_bottom = stack_bottom;
+    st.bytes = 0u;
+    st.segs = 0u;
+    st.tp = 0u;
+    st.task_entry = 0u;
+    st.aux = aux;
+    st.auxn = 0u;
+    st.p_info = p_info;
+    st.win_top = win_top;
+    st.argv_start = argv_start;
+    st.argc = argc;
+    st.argv = argv;
+    st.start_task = start_task;
+    st.p_tp = p_tp;
+
 #if (ARKRTOS_USE_DYNLOAD == 1)
     if(has_interp != 0)
     {
-        uint8 ihdr[ELF_EHDR_SIZE];
-        elf_word_t ientry = 0;
-        elf_word_t iphoff = 0;
-        uint16 iphnum = 0u;
-        uint16 iphentsize = 0u;
-        uint16 itype = 0u;
-        unsigned long interp_lo = (unsigned long)ARKRTOS_ELF_INTERP_BASE;
-        unsigned long interp_hi = interp_lo + (uint32)ARKRTOS_ELF_INTERP_SIZE;
-        unsigned long ibias;
-        elf_image_t interp;
-
-        /* ET_DYN 的主程序按窗口基址装载；它的最低 vaddr 必须是 0，
-         * 否则"基址"与"vaddr"两个说法就对不上了（明确拒绝，不猜）。 */
-        if(etype == (uint16)ELF_TYPE_DYN)
-        {
-            bias = win_base;
-        }
-
-        /* 先量：ET_DYN 的 e_entry 是相对偏移，必须加过 bias 才能判入口。 */
-        rc = elf_measure_image(path, phoff, phnum, phentsize, entry, bias,
-                               &img);
-        if(rc != ARKRTOS_ELF_OK)
-        {
-            return rc;
-        }
-        if((etype == (uint16)ELF_TYPE_DYN) && (img.lo != win_base))
-        {
-            /* ET_DYN 但最低段不在 0：装载基址就不是 win_base 了。 */
-            return ARKRTOS_ELF_ERR_LAYOUT;
-        }
-        rc = elf_check_entry((elf_word_t)img.entry, win_base, stack_bottom);
-        if(rc != ARKRTOS_ELF_OK)
-        {
-            return rc;
-        }
-        /* 主程序不许越进解释器区：越过去就是把两个镜像叠在一起。 */
-        rc = elf_check_range(&img, win_base, interp_lo);
-        if(rc != ARKRTOS_ELF_OK)
-        {
-            return rc;
-        }
-        rc = elf_write_image(path, space, phoff, phnum, phentsize, bias,
-                             &bytes, &tls_placed);
-        if(rc != ARKRTOS_ELF_OK)
-        {
-            return rc;
-        }
-#if (ARKRTOS_USE_ELF_TLS == 1)
-        /* 同静态档：只有真铺过块，img.tls_va 才是这个任务的 TLS 块地址。 */
-        tp = (tls_placed != 0u) ? img.tls_va : 0u;
-#endif
-        segs = img.segs;
-
-        /* 解释器：ET_DYN 装到板级基址，ET_EXEC 必须本来就链在那里
-         * （它的 vaddr 是绝对的，装到别处等于让它跳进空地址）。 */
-        rc = elf_read_exact(interp_path, ihdr, ELF_EHDR_SIZE, 0u);
-        if(rc != ARKRTOS_ELF_OK)
-        {
-            return ARKRTOS_ELF_ERR_INTERP;
-        }
-        rc = elf_check_header(ihdr, &ientry, &iphoff, &iphnum, &iphentsize,
-                              &itype);
-        if(rc != ARKRTOS_ELF_OK)
-        {
-            return ARKRTOS_ELF_ERR_INTERP;
-        }
-        ibias = (itype == (uint16)ELF_TYPE_DYN) ? interp_lo : 0u;
-
-        rc = elf_measure_image(interp_path, iphoff, iphnum, iphentsize,
-                               ientry, ibias, &interp);
-        if(rc != ARKRTOS_ELF_OK)
-        {
-            return ARKRTOS_ELF_ERR_INTERP;
-        }
-        if((itype == (uint16)ELF_TYPE_EXEC) && (interp.lo != interp_lo))
-        {
-            /* ET_EXEC 解释器没链在板级给的地址上：装载会落在别处，
-             * 入口却还是它自己的绝对地址 —— 这种"看起来装上了"的状态
-             * 比拒绝更难查。 */
-            return ARKRTOS_ELF_ERR_INTERP;
-        }
-        rc = elf_check_entry((elf_word_t)interp.entry, interp_lo, interp_hi);
-        if(rc != ARKRTOS_ELF_OK)
-        {
-            return ARKRTOS_ELF_ERR_INTERP;
-        }
-        rc = elf_check_range(&interp, interp_lo, interp_hi);
-        if(rc != ARKRTOS_ELF_OK)
-        {
-            return ARKRTOS_ELF_ERR_INTERP;
-        }
-        {
-            uint32 ibytes = 0u;
-            uint32 itls_placed = 0u;
-            rc = elf_write_image(interp_path, space, iphoff, iphnum,
-                                 iphentsize, ibias, &ibytes, &itls_placed);
-            if(rc != ARKRTOS_ELF_OK)
-            {
-                return ARKRTOS_ELF_ERR_INTERP;
-            }
-            bytes += ibytes;
-        }
-        if((img.hi > interp.lo) && (interp.hi > img.lo))
-        {
-            return ARKRTOS_ELF_ERR_LAYOUT;
-        }
-
-        /* auxv：Linux 传给 ld.so 的那一套。AT_PHDR 必须真的存在。 */
-        if(img.phdr == 0u)
-        {
-            return ARKRTOS_ELF_ERR_LAYOUT;
-        }
-        elf_aux_add(aux, &auxn, ELF_AT_PHDR, img.phdr);
-        elf_aux_add(aux, &auxn, ELF_AT_PHENT, (uint32)phentsize);
-        elf_aux_add(aux, &auxn, ELF_AT_PHNUM, (uint32)phnum);
-        elf_aux_add(aux, &auxn, ELF_AT_PAGESZ, 4096u);
-        elf_aux_add(aux, &auxn, ELF_AT_BASE, interp.lo);
-        elf_aux_add(aux, &auxn, ELF_AT_ENTRY, img.entry);
-        elf_aux_add(aux, &auxn, ELF_AT_UID, 0u);
-        elf_aux_add(aux, &auxn, ELF_AT_EUID, 0u);
-        elf_aux_add(aux, &auxn, ELF_AT_FLAGS, 0u);
-        /* 与静态档同一套（ld.so 也要 AT_RANDOM 做栈保护种子）。 */
-        elf_aux_add(aux, &auxn, ELF_AT_RANDOM, 0u);
-        elf_aux_add(aux, &auxn, ELF_AT_EXECFN, 0u);
-        elf_aux_add(aux, &auxn, ELF_AT_SECURE, 0u);
-        elf_aux_add(aux, &auxn, ELF_AT_GID,    0u);
-        elf_aux_add(aux, &auxn, ELF_AT_EGID,   0u);
-        elf_aux_add(aux, &auxn, ELF_AT_HWCAP,  0u);
-        elf_aux_add(aux, &auxn, ELF_AT_CLKTCK, 100u);
-
-        task_entry = interp.entry;
-        p_info->dynamic     = 1u;
-        p_info->interp_base = interp.lo;
-        p_info->interp_entry = interp.entry;
+        rc = elf_load_dynamic(&st, interp_path);
     }
     else
 #endif /* ARKRTOS_USE_DYNLOAD */
     {
-        /* 静态档：行为与 DYNLOAD 之前逐位一致。 */
-        rc = elf_check_entry(entry, win_base, stack_bottom);
-        if(rc != ARKRTOS_ELF_OK)
-        {
-            return rc;
-        }
-
-        rc = elf_measure_image(path, phoff, phnum, phentsize, entry, 0u, &img);
-        if(rc != ARKRTOS_ELF_OK)
-        {
-            return rc;
-        }
-        rc = elf_check_range(&img, win_base, stack_bottom);
-        if(rc != ARKRTOS_ELF_OK)
-        {
-            return rc;
-        }
-        rc = elf_write_image(path, space, phoff, phnum, phentsize, 0u, &bytes,
-                             &tls_placed);
-        if(rc != ARKRTOS_ELF_OK)
-        {
-            return rc;
-        }
-#if (ARKRTOS_USE_ELF_TLS == 1)
-        /* 只有装载器真的往窗口里铺过 TLS 字节，那个地址才是「这个任务的
-         * TLS 块」。全程被镜像覆盖时它是别人的数据（真实 glibc 的 .tbss
-         * 就与 .init_array 同址），此时预置 TP 只会让程序读到别人的字节；
-         * 这种程序的 TLS 由它自己的 C 运行时建（glibc: __libc_setup_tls）。 */
-        tp = (tls_placed != 0u) ? img.tls_va : 0u;
-#endif
-        segs = img.segs;
-        task_entry = img.entry;
-
-        elf_aux_add(aux, &auxn, ELF_AT_PAGESZ, 4096u);
-        elf_aux_add(aux, &auxn, ELF_AT_ENTRY, img.entry);
-        if(img.phdr != 0u)
-        {
-            elf_aux_add(aux, &auxn, ELF_AT_PHDR, img.phdr);
-            elf_aux_add(aux, &auxn, ELF_AT_PHENT, (uint32)phentsize);
-            elf_aux_add(aux, &auxn, ELF_AT_PHNUM, (uint32)phnum);
-        }
-        /* 静态档也要给 glibc 那一套：AT_RANDOM 是它会立刻解引用的，
-         * 缺了就是空指针；AT_SECURE=0 才不会走 setuid 分支；uid/gid
-         * 全 0 与「root 起的程序」一致；AT_CLKTCK=100 是 Linux 惯例。
-         * AT_RANDOM / AT_EXECFN 的值由 elf_build_stack 回填。 */
-        elf_aux_add(aux, &auxn, ELF_AT_RANDOM, 0u);
-        elf_aux_add(aux, &auxn, ELF_AT_EXECFN, 0u);
-        elf_aux_add(aux, &auxn, ELF_AT_SECURE, 0u);
-        elf_aux_add(aux, &auxn, ELF_AT_UID,    0u);
-        elf_aux_add(aux, &auxn, ELF_AT_EUID,   0u);
-        elf_aux_add(aux, &auxn, ELF_AT_GID,    0u);
-        elf_aux_add(aux, &auxn, ELF_AT_EGID,   0u);
-        elf_aux_add(aux, &auxn, ELF_AT_HWCAP,  0u);
-        elf_aux_add(aux, &auxn, ELF_AT_CLKTCK, 100u);
-        p_info->dynamic     = 0u;
-        p_info->interp_base = 0u;
-        p_info->interp_entry = 0u;
+        rc = elf_load_static(&st);
     }
-
-    rc = elf_stack_build(space, win_top, argv_start, argc, argv, aux, auxn,
-                         &sp, &execfn);
     if(rc != ARKRTOS_ELF_OK)
     {
         return rc;
     }
 
-    stack_bytes = argv_start - stack_bottom;
-
-    /* 关键一步：stack_size 取到 argv 区起点，初始 sp 就会落在 argc 上。
-     * 这里若改成「传栈大小 32 KB 再多给 16 KB」，sp 会指向参数数组中段，
-     * 程序读到的 argc 是某个字符串的字节——一个只在运行期才暴露的错答案。 */
-    p_info->entry      = task_entry;
-    p_info->bytes      = bytes;
-    p_info->segs       = segs;
-    p_info->argc       = (uint32)argc;
-    p_info->sp         = sp;
-    p_info->stack_size = stack_bytes;
-    p_info->task       = 0;
-    if(p_tp != 0)
-    {
-        *p_tp = tp;
-    }
-
-    /* execve：镜像已经铺进调用者自己的空间，这里一个任务都不起。
-     * 入口/栈/TLS 三个值交给上层写回**当前任务的 trap 帧**。 */
-    if(start_task == 0u)
-    {
-        return ARKRTOS_ELF_OK;
-    }
-
-    /* 装配期竞态（本轮实测根因之一）：arkrtos_task_register() 内部会把任务
-     * 直接挂进就绪集，而「降权」与「MPU 窗口写回」是它之后才发生的两步。
-     * 若在这中间被 tick 切走，任务会以半配置状态被切进：跑在 M 模式看到的是
-     * 特权，降权后窗口未写回看到的就是 mcause=1 mtval=0x02000000 的取指 fault
-     * （5 连跑 2 败的间歇签名）。因此把 注册 → 降权 → MPU 写回 整段做成原子段。 */
-#if (ARKRTOS_USE_LINUX_ABI == 1)
-    /* 兼容层状态（fd 表、堆游标、信号表）是**内核全局**的，只能属于「正在跑
-     * 的那一个程序」。它必须在**新任务被挂进就绪集之前**清空：任务一旦进就绪
-     * 集就可能立刻被切进去，第一次 brk/mmap 就会读到上一个程序留下的游标。
-     * 实测证据：把清空留在 arkrtos_elf_exec_space 的尾部时，fixture 的 stage1
-     * brk(0) 比窗口堆基点高 8192（正是上一个程序 brk+mmap 推掉的量），
-     * 「堆游标归零」这条判据随代码布局时红时绿；挪到这里后稳定为基点。 */
-    arkrtos_linux_abi_reset();
-#endif
-
-    id = elf_start_task(task_entry, stack_bottom, stack_bytes, space, tp);
-    if(id <= 0)
-    {
-        return id;
-    }
-
-    p_info->task = id;
-
-    return ARKRTOS_ELF_OK;
+    return elf_load_finish(&st);
 }
+
 
 /**
 * @brief 装一个 ELF 程序，返回它落到哪个地址空间

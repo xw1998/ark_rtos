@@ -5655,6 +5655,55 @@ ZI 1264 不变。**+64 B 是这一笔在 ARM 上的真实代价**（多了一层
 > [单元测试框架](单元测试框架.md) 的「`sbuf` 阻塞路径：可编程桩」一节。真睡、真 ISR 交接、
 > 真节拍推进下的超时仍只有上板能证明。
 
+#### 5.30.39 第三十四笔：`elf_load()` 拆成「交接块 + 两档分支 + 收尾」，并暴露默认档的死代码盲区（2026-11-21）
+
+第三十三笔之后 `doc_audit funcs` 的清单**并没有清零**（当时的「已清零」是拿另一份构建量出来的读数，
+见 [欠账盘点](欠账盘点.md) 的更订）：2026-11-21 实测 `kernelsrc/src/arkrtos_elf.c` 的 `elf_load()`
+**338 行**，是全仓最长的一个。它把两档装载的全部流水线（判参数 → 切窗口 → 读头 → 查 PT_INTERP →
+量镜像 → 查范围 → 写段 → 装解释器 → 铺 auxv → 铺栈 → 起任务 → 填 `p_info`）写在一个函数里，
+**两个分支各写了一遍「量 → 查范围 → 写镜像 → 记 tp/segs/bytes」**，读的时候没法确认两档用的是不是同一套判据。
+
+| 单元 | 管什么 | 行数 |
+|---|---|---|
+| `elf_load_state_t` | 交接块（24 个字段）：`path`/`space`/`phoff`/`phnum`/`phentsize`/`entry`/`etype`/`win_base`/`stack_bottom`/`img`/`bytes`/`segs`/`tp`/`task_entry`/`aux`/`auxn`/`p_info`/`win_top`/`argv_start`/`argc`/`argv`/`start_task`/`p_tp`。两档往同一块里写结果，收尾只有一份 | — |
+| `elf_load_dynamic()` | 动态档：ET_DYN 主程序按窗口基址 `bias` 装载、量、判入口、查范围（不许越进解释器区）、写段、记 `tp`/`segs`，再调 `elf_load_interp()`，最后铺 `AT_PHDR`/`AT_BASE`/`AT_ENTRY`… 十七项 auxv 并填 `p_info->dynamic`/`interp_*` | **94**（原 142） |
+| `elf_load_interp()` | 解释器单独一份：读头 → `ibias`（ET_DYN 用板级基址、ET_EXEC 必须本来就在那儿）→ 量 → 判入口 → 查范围 → 写段（`bytes` 累加）→ 与主程序镜像不许重叠。**失败一律折成 `ERR_INTERP`** | 68 |
+| `elf_load_static()` | 静态档：按 `e_vaddr` 落位，入口就是 `e_entry`，铺含 `AT_RANDOM`/`AT_CLKTCK` 的 auxv；行为与引入 DYNLOAD 之前逐位一致 | 66 |
+| `elf_load_finish()` | 收尾：`elf_stack_build()` 铺栈 + 填 `p_info` 七项 + `arkrtos_linux_abi_reset()` + `elf_start_task()`（整段原子，理由见函数内注释） | 65 |
+| `elf_load()` 自己 | 参数 → 窗口切分 → 读头 → 查 PT_INTERP（默认档把「有 PT_INTERP」直接判 `ERR_FORMAT`，不半跑）→ 填交接块 → 按 `has_interp` 派发 → `elf_load_finish()` | **110**（原 338） |
+
+口径三条：① **两档共用的判据只有 `elf_measure_image` / `elf_check_range` / `elf_check_entry`**，
+拒绝码不同（主程序越界给 `ERR_LAYOUT`、解释器任何失败给 `ERR_INTERP`），所以解释器那一整段没有并进
+`elf_load_dynamic()` 的尾巴，而是独立成 `elf_load_interp()`。② `has_interp` 仍只在 `#if (ARKRTOS_USE_DYNLOAD == 1)`
+里存在，默认档与开档的派发结构靠 `#if / #else / #endif` 包住同一个 `{ rc = elf_load_static(&st); }` 块，
+两种档编出来都只有一条路径。③ 原来写在函数中段的两段「必须整段原子」的注释跟着各自代码进了
+`elf_load_finish()` / `elf_start_task()`，没有留在入口处当装饰。
+
+**这一笔真正的收获不是行数，是抓到了默认档看不见的缺陷。** `ARKRTOS_USE_DYNLOAD` 默认是 0，
+所以 `elf_load_dynamic` / `elf_load_interp` 在默认档**整段被预处理掉**：拆分后我第一次只跑了默认档
+`make`，`exit=0`、告警只剩 5 条未用变量（`bytes`/`segs`/`tp`/`task_entry`/`auxn` 留在入口没删）。
+带着 `-DARKRTOS_USE_DYNLOAD=1` 编译（`tools/dynlink_gate.py` 做的就是这件事）才现形两处**默认档
+永远看不到**的错：`elf_measure_image(...)` 调用后面**多留了一行 `&st->img);`**（抽取函数体时重复了一段），
+以及 `elf_write_image(..., &st->bytes, &tls_placed)` 用到的 `tls_placed` **在动态档里没有声明**
+（它只声明在静态档的局部）。两处都是「默认档编译通过、开档编不过」——结论：**拆默认关的分支时，
+「默认档 make 过」不能算验证**，必须拿开档门禁编一遍；这与本仓 `paging_gate` 那次「门禁死代码假绿」
+（见本文 §5.33）是同一类错误，只是发生在被测物而不是门禁上。
+
+等价性：`default` 档两遍**同配置**构建（`make clean` 之后各跑一次，`make` 不跟踪 `-D`，不清就量到别人的 `.o`）——
+text **448680 → 448664（−16 B）**、`data` 448 / `bss` 5,128,740 / 镜像总长 **31,462,512 B** 全不变，
+两份 `.bin` 的 sha256 分别是 `c2630b80…` / `0d02542b…`（**不是逐字节不变**，代码真的短了 16 B）；
+`arkrtos_elf.c` 在默认档全量构建里 **0 条告警**。
+
+门禁：`tools/dynlink_gate.py` **13 passed / 0 failed**（其中 `compile-on` 开档编 5 个 TU、`build` 开档全链、
+`qemu-readout` 两条 PASS + `exit 105`、坏夹具 `exit 127`、`fixture-rebuild` 逐字节相同、`restore-default` 收尾），
+`tools/format_gate.py` **OK（392 个自研文件）**，`tools/ci_gate.py` **56 passed / 1 failed**——唯一红的是
+`api-doc`（新增 4 个函数条目后参考文档过期），已用 `tools/gen_api_doc.py --md` 重生成，**因为该检查比对的是
+git 里的那一份，所以它必须在提交之后才会转绿**（提交后复跑为 0 failed）；`doc_audit funcs` **15 → 14**。
+
+**结论分档：默认档 + 开档（`-DARKRTOS_USE_DYNLOAD=1`）都编译通过、告警 0、QEMU 端到端 PASS
+（动态链接两条 PASS + `exit 105`、坏夹具 `exit 127`），未上板。**
+`pmap`/页表相关的默认档读数不受影响（这一笔只动 `elf_load` 一个函数）。
+
 ### 5.31 LSX 向量寄存器上下文（U-19，2026-11-21）
 
 #### 5.31.1 缺口：FPU 档只存了一半的浮点上下文
