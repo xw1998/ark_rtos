@@ -40,21 +40,6 @@
  * 不会出现「A 的行里混进 B 的字」那种更难查的形态。 */
 static char s_mod_printf_buf[4][ARKRTOS_MOD_PRINTF_BUF];
 
-static uint32 mod_strlen(const char *s)
-{
-    uint32 n = 0u;
-
-    if(s == 0)
-    {
-        return 0u;
-    }
-    while(s[n] != '\0')
-    {
-        n++;
-    }
-    return n;
-}
-
 static uint32 mod_puts(char *dst, uint32 cap, uint32 at, const char *s)
 {
     uint32 i = 0u;
@@ -109,7 +94,6 @@ int32 arkrtos_mod_printf(const char *fmt, ...);
 
 int32 arkrtos_mod_printf(const char *fmt, ...)
 {
-    char buf[ARKRTOS_MOD_PRINTF_BUF];
     char *out;
     uint32 at = 0u;
     uint32 i = 0u;

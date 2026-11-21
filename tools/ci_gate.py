@@ -2158,6 +2158,73 @@ def check_cfg_host():
     ok("cfg-host", "task table on host (%s / %s / %s)"
        % (lines[0], lines[1], lines[2]))
 
+def check_export_host():
+    """The kernel symbol export table: what a downloaded module may call.
+
+    arkrtos_exports.c had no host case until 2026-11-21. It holds two things
+    that both fail quietly:
+      * the name lookup -- a prefix or case-insensitive match would hand a
+        module the address of a symbol it did not name, and the normal path
+        (module spells the name right) would still work, so nothing shows;
+      * the module printf -- it is the only output channel a module has, so
+        a null %s, a trailing %, and an oversized line must all have a
+        defined answer instead of reading past the buffer.
+
+    Two configurations are built and run:
+      * MODLOAD=1: the whole module. The table's addresses are the stubs in
+        the case, which is exactly what the assertions check (name -> which
+        function), and the console is captured so the formatted bytes are
+        compared, not merely the return value.
+      * MODLOAD=0: the file is an empty object with zero symbols. The case
+        proves the switch is really off and that the header macros answer
+        "no such thing" without dragging in any undefined reference.
+    A missing host compiler is a FAIL, not a skip.
+    """
+    import tempfile
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("export-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    want = (("export", "EXPORT-HOST OK"),
+            ("export-off", "EXPORT-HOST OFF OK"))
+    names = [w[0] for w in want]
+    picked = {}
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name in names:
+            picked[name] = (test, mods, defs, incs)
+    for name, _marker in want:
+        if name not in picked:
+            fail("export-host", "case %s missing from coverage_gate.CASES" % name)
+            return
+
+    lines = []
+    with tempfile.TemporaryDirectory() as td:
+        for name, marker in want:
+            test, mods, defs, incs = picked[name]
+            exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+                fail("export-host", "%s did not build: %s" % (name, tail[:200]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            if r.returncode != 0 or marker not in txt:
+                fail("export-host", "%s failed: %s" % (name, txt.strip()[:220]))
+                return
+            lines.append(txt.strip().splitlines()[-1])
+    ok("export-host", "kernel export table on host (%s / %s)"
+       % (lines[0], lines[1]))
+
 def check_coverage_host():
     """Line coverage of the modules the host tests actually link.
 
@@ -2195,9 +2262,9 @@ def check_warn_host():
     re-checked and riscv64-unknown-elf-gcc-10.2.0 turned up.
 
     Scope is honest and narrow: every TU the cases in coverage_gate.CASES
-    compile -- 26 case configurations (test + module each) plus the SDK stdio
-    test, 53 TUs in total, because a few modules are built once per
-    configuration (sign, blk, dev and event twice; timer three times: default,
+    compile -- 28 case configurations (test + module each) plus the SDK stdio
+    test, 57 TUs in total, because a few modules are built once per
+    configuration (sign, blk, dev, event and export twice; timer three times: default,
     tickless and USE_TIMER=0; cfg three times: default, STACK_GUARD=1 and
     STACK_USAGE=0). Everything else in kernelsrc/ needs an
     architecture toolchain (armcc/armclang, loongarch64, riscv64) to compile at
@@ -2323,6 +2390,7 @@ CHECK_TABLE = (
     ("event-host", check_event_host),
     ("timer-host", check_timer_host),
     ("cfg-host", check_cfg_host),
+    ("export-host", check_export_host),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),
     ("analyzer", check_analyzer),

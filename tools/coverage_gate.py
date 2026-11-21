@@ -213,6 +213,14 @@ CASES = [
     ("cfg-nousage", "kernelsrc/tests/test_cfg_host.c",
      ["kernelsrc/src/arkrtos_cfg.c"], ["-DARKRTOS_USE_STACK_USAGE=0"],
      "CFG-HOST NOUSAGE OK"),
+    # --- 2026-11-21 新增：内核符号导出表（MODLOAD 开/关是两段代码）-------
+    # 关档时 exports.c 是空目标（零体积零符号），只有开档能走打印与查表。
+    ("export", "kernelsrc/tests/test_export_host.c",
+     ["kernelsrc/src/arkrtos_exports.c"],
+     ["-DARKRTOS_USE_MODLOAD=1"], "EXPORT-HOST OK"),
+    ("export-off", "kernelsrc/tests/test_export_host.c",
+     ["kernelsrc/src/arkrtos_exports.c"],
+     ["-DARKRTOS_USE_MODLOAD=0"], "EXPORT-HOST OFF OK"),
 ]
 
 
@@ -306,6 +314,30 @@ def parse_gcov_sets(path):
                 ex.add(n)
     return ex, inst
 
+def _object_is_empty(cc, obj):
+    """目标里除了 .text/.data/.bss 这类段标记之外还有没有符号。
+
+    nm 对空目标输出形如 "00000000 t .text" 的几行段标记（符号名以点开头）。
+    只要出现任何一条真符号——已定义或未定义都算——就不是"空编译"，那时
+    gcov 的 "no functions found" 属于测量故障，必须抛出去而不是记成 0 行。
+    """
+    nm = os.path.join(os.path.dirname(cc), "nm.exe" if os.name == "nt" else "nm")
+    if not os.path.isfile(nm):
+        hit = shutil.which("nm")
+        if not hit:
+            raise RuntimeError("找不到 nm（应与 gcc 同目录）")
+        nm = hit
+    rc, out, err = _run([nm, obj])
+    if rc != 0:
+        raise RuntimeError("nm 读不了 %s: %s" % (obj, (err or out).strip()[-200:]))
+    for line in (out or "").splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        if not parts[-1].startswith("."):
+            return False
+    return True
+
 def pct_of(ex, inst):
     """行覆盖率 = 跑过的行 / 编进去的行。分母为 0 时返回 0（不造假）。"""
     return (100.0 * len(ex) / len(inst)) if inst else 0.0
@@ -324,6 +356,7 @@ def measure(cc, name, test, mods, defs, markers, incs=(), argv=()):
                 + defs + incs + COMMON_INC)
     with tempfile.TemporaryDirectory() as td:
         objs = []
+        objmap = {}
         for src in [test] + mods:
             obj = os.path.join(td, os.path.basename(src)[:-2] + ".o")
             cmd = base_cmd + ["-c", "-o", obj, os.path.abspath(src)]
@@ -331,6 +364,7 @@ def measure(cc, name, test, mods, defs, markers, incs=(), argv=()):
             if rc != 0:
                 raise RuntimeError("编译失败 %s: %s" % (src, err.strip()[-300:]))
             objs.append(obj)
+            objmap[os.path.basename(src)[:-2]] = obj
         exe = os.path.join(td, "cov_" + name + (".exe" if os.name == "nt" else ""))
         cmd = [cc] + mingw_prefix(cc) + ["--coverage", "-o", exe] + objs
         rc, _out, err = _run(cmd, cwd=ROOT)
@@ -359,7 +393,18 @@ def measure(cc, name, test, mods, defs, markers, incs=(), argv=()):
             txt = out + err
             pct = parse_lines_executed(txt, os.path.basename(m))
             if pct is None:
-                raise RuntimeError("gcov 没给出覆盖率 %s: %s" % (base, txt.strip()[-300:]))
+                # 有两种完全不同的原因会让 gcov 说 "no functions found"：
+                # 一是这一档真的把模块编成了空目标（特性关掉、文件里一个函数
+                # 都不剩，export-off 就是这种），那不是"没跑到"，是"0 行编入"；
+                # 二是测量本身出了问题（目标里有符号但 gcov 读不出来），那种
+                # 必须报错。所以先用 nm 自己核一遍目标是不是真的空的，核过才
+                # 记 0 行；核不过照旧抛。空档不会假装 100%，模块的覆盖率由
+                # 开档那份供，main() 里的行号并集照算。
+                if not _object_is_empty(cc, objmap[base]):
+                    raise RuntimeError("gcov 没给出覆盖率 %s（目标非空，属测量故障）: %s"
+                                       % (base, txt.strip()[-300:]))
+                res[base] = (None, set(), set())
+                continue
             gcovfile = os.path.join(td, os.path.basename(m) + ".gcov")
             if os.path.isfile(gcovfile):
                 ex, inst = parse_gcov_sets(gcovfile)
@@ -413,7 +458,10 @@ def main():
             slot[0] |= ex
             slot[1] |= inst
             # 单档读数只作参考行，不参与判（判的是下面的并集）
-            print("case %-24s %6.2f%%  [%s]" % (base, pct, name))
+            if pct is None:
+                print("case %-24s  空目标（特性关掉，0 行编入）  [%s]" % (base, name))
+            else:
+                print("case %-24s %6.2f%%  [%s]" % (base, pct, name))
 
     measured = {}
     for base, (ex, inst) in sorted(merged.items()):
