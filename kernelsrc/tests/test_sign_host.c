@@ -68,6 +68,46 @@ int main(int argc, char **argv)
     memset(mac, 0, sizeof(mac));
     arkrtos_sign_image(buf, p_hdr, mac);
 
+    /* --- 流式入口与整幅入口必须同源 ------------------------------ *
+     * 安装器是分帧喂签名的（头一次、重定位表与负载分多次），所以流式那条
+     * 必须与一次算完整幅的入口给出同一个 MAC。若两条路算出不同的值，
+     * 症状就是"同一份镜像，看它是从哪条路进来的才决定能不能装上"。 */
+    memset(p_hdr->signature, 0, sizeof(p_hdr->signature));
+    arkrtos_sign_stream_begin(buf);
+    arkrtos_sign_stream_update(buf + T_HDR, T_RELOC_LEN + T_PAYLOAD);
+    if(arkrtos_sign_stream_end(p_hdr) != -1)
+    {
+        fprintf(stderr, "FAIL: a signature of all zeroes was accepted\n");
+        return 1;
+    }
+    memcpy(p_hdr->signature, mac, ARKRTOS_SIGN_LEN);
+    arkrtos_sign_stream_begin(buf);
+    arkrtos_sign_stream_update(buf + T_HDR, T_RELOC_LEN + T_PAYLOAD);
+    if(arkrtos_sign_stream_end(p_hdr) != 0)
+    {
+        fprintf(stderr, "FAIL: streaming MAC differs from the one-shot MAC\n");
+        return 1;
+    }
+
+    /* --- 校验入口：同一个 MAC 必须被认，改一个字节必须被拒 -------- */
+    if(arkrtos_sign_verify(buf, p_hdr) != 0)
+    {
+        fprintf(stderr, "FAIL: verify rejected the MAC sign_image produced\n");
+        return 1;
+    }
+    buf[T_TOTAL - 1u] = (unsigned char)(buf[T_TOTAL - 1u] ^ 0xFFu);
+    if(arkrtos_sign_verify(buf, p_hdr) == 0)
+    {
+        fprintf(stderr, "FAIL: verify accepted a tampered image\n");
+        return 1;
+    }
+    buf[T_TOTAL - 1u] = (unsigned char)(buf[T_TOTAL - 1u] ^ 0xFFu);
+    if(arkrtos_sign_verify(buf, p_hdr) != 0)
+    {
+        fprintf(stderr, "FAIL: verify stopped working after the tamper was undone\n");
+        return 1;
+    }
+
     f = fopen(argv[1], "wb");
     if(f == NULL)
     {

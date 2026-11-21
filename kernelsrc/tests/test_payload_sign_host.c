@@ -53,6 +53,7 @@ int main(void)
     unsigned i;
     int rc_ok;
     int rc_bad;
+    int rc_unopened;
 
     for(i = 0u; i < T_LEN; i++)
     {
@@ -75,10 +76,17 @@ int main(void)
     for(i = 0u; i < ARKRTOS_SIGN_LEN; i++) { wrong[i] = (unsigned char)(mac_once[i] ^ 0xFFu); }
     rc_bad = arkrtos_sign_payload_check(buf, T_LEN, wrong);
 
+    /* 没 begin 就 update / end 是调用方的错：update 必须被静默吞掉，
+     * end 必须报 -1。静默算出一个"只覆盖后半段却照样能对上"的 MAC 会是
+     * 一条假绿，所以这两条分支各自要有一条读数。 */
+    arkrtos_sign_payload_update(buf, 16u);
+    rc_unopened = arkrtos_sign_payload_end(mac_once);
+
     print_hex("PAYLOAD", mac_once, ARKRTOS_SIGN_LEN);
     print_hex("SHIFTED", mac_stream, ARKRTOS_SIGN_LEN);
     printf("STREAM_MATCH %d\n", (rc_ok == 0) ? 1 : 0);
     printf("WRONG_TAG_REFUSED %d\n", (rc_bad != 0) ? 1 : 0);
+    printf("UNOPENED_REFUSED %d\n", (rc_unopened != 0) ? 1 : 0);
     printf("LEN %u\n", (unsigned)T_LEN);
     return 0;
 }

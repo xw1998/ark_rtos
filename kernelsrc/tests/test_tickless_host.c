@@ -35,6 +35,11 @@ static uint32 f_timer_next;     /* arkrtos_timer_next_ticks() 的返回值      
 static uint32 f_programmed;     /* 最近一次编程下去的计数（门禁用）         */
 static uint32 f_delivered;      /* 实际补发出的整拍数                       */
 static uint32 f_early;          /* 0 = 睡满；>0 = 提前醒了这么多计数        */
+static uint32 f_sleep_max;      /* port 报的"一次最多能睡多少计数"         */
+static uint32 f_elapsed_zero;   /* 1 = port 把走过的计数报成 0（防御分支）  */
+static uint32 f_reenter;        /* 1 = 在 WFI 里再调一次 idle（重入分支）    */
+static uint32 f_reenter_rc;     /* 重入那次 idle 的返回值                    */
+static uint32 f_sleep_max_late; /* >0 = 睡下去之后 port 报的上限变成这个值   */
 
 void arkrtos_port_start_timer_counts(uint32 counts)
 {
@@ -61,13 +66,20 @@ uint32 arkrtos_port_timer_countflag_take(void)
  * 把 f_val / f_flag 摆好了，所以这两个函数可以直接读它们。 */
 uint32 arkrtos_port_timer_sleep_max(void)
 {
-    return 0x00FFFFFFu;
+    return f_sleep_max;
 }
 
 uint32 arkrtos_port_timer_elapsed_counts(uint32 programmed)
 {
-    uint32 flag = arkrtos_port_timer_countflag_take();
-    uint32 val  = arkrtos_port_get_timer_counter() & 0x00FFFFFFu;
+    uint32 flag;
+    uint32 val;
+
+    if(f_elapsed_zero != 0u)
+    {
+        return 0u;                  /* port 什么都没量到：调用方必须自己兜底 */
+    }
+    flag = arkrtos_port_timer_countflag_take();
+    val  = arkrtos_port_get_timer_counter() & 0x00FFFFFFu;
 
     if(flag != 0u)
     {
@@ -91,6 +103,19 @@ uint32 arkrtos_port_get_system_clock(void)
 
 void arkrtos_port_wfi(void)
 {
+    if(f_reenter != 0u)
+    {
+        /* 模拟"睡下去之后又在 WFI 里被叫了一次 idle"：真实触发是另一个
+         * 上下文的误用，这里只证明那一支会立刻返回且不改任何状态。 */
+        f_reenter = 0u;
+        f_reenter_rc = arkrtos_tickless_idle();
+    }
+    if(f_sleep_max_late != 0u)
+    {
+        /* 睡下去之后 port 报的上限变小（真实形态是主频切换后位宽不够）。 */
+        f_sleep_max = f_sleep_max_late;
+        f_sleep_max_late = 0u;
+    }
     if(f_early == 0u)
     {
         /* 睡满：计数器回卷、COUNTFLAG 置位，SysTick 中断抢在 WFI 退出前跑。 */
@@ -182,6 +207,11 @@ static void reset_sim(uint32 clk, uint32 cpt)
     f_programmed = 0u;
     f_delivered = 0u;
     f_early = 0u;
+    f_sleep_max = 0x00FFFFFFu;
+    f_elapsed_zero = 0u;
+    f_reenter = 0u;
+    f_reenter_rc = 0xFFFFFFFFu;
+    f_sleep_max_late = 0u;
 }
 
 /* ------------------------------------------------------------------
@@ -330,12 +360,173 @@ static void test_early_wake(void)
     }
 }
 
+/* ------------------------------------------------------------------
+ * 4) 累计读数：两个指针各写各的，空指针不许写
+ * ------------------------------------------------------------------ */
+static void test_stats(void)
+{
+    uint32 isrs   = 0xdeadbeefu;
+    uint32 sleeps = 0xdeadbeefu;
+
+    reset_sim(2000000u, 1000u);
+    arkrtos_tickless_stats(0, 0);           /* 两个空指针都不许被写 */
+
+    arkrtos_tickless_stats(&isrs, 0);
+    CHECK(isrs != 0xdeadbeefu, "the isr counter is readable");
+
+    arkrtos_tickless_stats(0, &sleeps);
+    CHECK(sleeps != 0xdeadbeefu, "the sleep counter is readable");
+
+    /* 真睡一次：sleeps 必须 +1，isrs 由中断路径加（这里 preempt 了中断） */
+    {
+        uint32 before = sleeps;
+        uint32 before_isrs = isrs;
+
+        f_delay_next = 5u;
+        (void)arkrtos_tickless_idle();
+        arkrtos_tickless_stats(&isrs, &sleeps);
+        CHECK_EQ(sleeps, before + 1u, "one long sleep increments the sleep counter");
+        CHECK_EQ(isrs, before_isrs + 1u, "one tick interrupt increments the isr counter");
+    }
+}
+
+/* ------------------------------------------------------------------
+ * 5) port 报的睡眠上限：装不下就截短，不许溢出计数器
+ * ------------------------------------------------------------------ */
+static void test_sleep_max_clamp(void)
+{
+    uint32 got;
+
+    reset_sim(84000000u, 42000u);
+    f_sleep_max = 100u;                 /* 比一个节拍还小 */
+    f_delay_next = 5u;
+
+    got = arkrtos_tickless_idle();
+    CHECK_EQ(got, 0u, "a clamp below one tick falls back to plain WFI");
+    CHECK_EQ(f_programmed, 0u,
+             "no long period is programmed when the port cannot hold it");
+    CHECK_EQ(f_delivered, 1u, "the plain WFI still waits for the normal tick");
+}
+
+/* ------------------------------------------------------------------
+ * 6) port 报"没走过计数"：防御分支，按 1 个计数算，不许把相位卡死
+ * ------------------------------------------------------------------ */
+static void test_zero_elapsed(void)
+{
+    uint32 got;
+
+    reset_sim(2000000u, 1000u);
+    /* 计划量必须远大于"s_tl_phase 可能跨用例残留"的上限（上一段可能是
+     * 42000 计数/拍，最多留 41999），否则这里会走进普通 WFI 分支。 */
+    f_delay_next = 50u;
+    f_early = 1500u;
+    f_elapsed_zero = 1u;
+    got = arkrtos_tickless_idle();
+    CHECK_EQ(got, 0u, "a zero elapsed reading is not rounded up to a tick");
+    CHECK_EQ(f_programmed, 999u,
+             "one count is charged to the phase, so the next period is one short");
+}
+
+/* ------------------------------------------------------------------
+ * 7) 重入：已经睡下去又被叫一次 idle，必须原样返回
+ * ------------------------------------------------------------------ */
+static void test_reenter(void)
+{
+    uint32 got;
+    uint32 sleeps_before;
+
+    reset_sim(2000000u, 1000u);
+    f_delay_next = 6u;
+    f_reenter = 1u;
+
+    got = arkrtos_tickless_idle();
+    CHECK_EQ(f_reenter_rc, 0u, "a reentrant idle returns without settling");
+    CHECK(got <= 6u, "the outer sleep still accounts its own ticks");
+
+    /* 重入那一次不许再编程一次（sleeps 只该 +1） */
+    reset_sim(2000000u, 1000u);
+    arkrtos_tickless_stats(0, &sleeps_before);
+    f_delay_next = 6u;
+    f_reenter = 1u;
+    (void)arkrtos_tickless_idle();
+    {
+        uint32 sleeps_after = 0u;
+
+        arkrtos_tickless_stats(0, &sleeps_after);
+        CHECK_EQ(sleeps_after, sleeps_before + 1u,
+                 "a reentrant idle does not count a second sleep");
+    }
+}
+
+/* ------------------------------------------------------------------
+ * 7) 两条只在"状态跨档变化"时才到的防御分支
+ * ------------------------------------------------------------------ */
+
+/* 把模块静态的相位清成 0：先提前醒一次（硬件会被摆成"补相位"的短周期），
+ * 再让那一次短周期到点——s_tl_short 那条分支自己把相位归零。相位是模块
+ * 静态量、会跨用例残留，不先清就对不出确定的读数。 */
+static void zero_phase(void)
+{
+    reset_sim(84000000u, 42000u);
+    f_delay_next = 4u;
+    f_early = 1u;
+    (void)arkrtos_tickless_idle();
+    (void)arkrtos_tickless_wake_ticks();
+}
+
+/* 结账补相位时，port 现报的上限比一整拍还小：必须截到上限再写硬件，
+ * 不能把一个装不下的周期塞进去。 */
+static void test_rearm_clamp(void)
+{
+    zero_phase();
+
+    /* 计划睡 4 拍（= 168000 个计数），武装时上限还很宽。 */
+    reset_sim(84000000u, 42000u);
+    f_delay_next = 4u;
+    f_sleep_max_late = 1000u;       /* 睡下去之后 port 报的上限变小了 */
+
+    CHECK_EQ(arkrtos_tickless_idle(), 4u,
+             "a full sleep still reports the planned ticks");
+    CHECK_EQ(f_delivered, 4u, "the four planned ticks are all delivered");
+    CHECK_EQ(f_programmed, 1000u,
+             "the rearm clamps the normal period to the port's limit");
+}
+
+/* 主频切换后，相位比新的一整段计划还大：计划量减不出正数，不许下溢。 */
+static void test_stale_phase(void)
+{
+    zero_phase();                   /* 相位 = 0 */
+
+    /* 提前醒、走过 30000 个计数：没满一拍，这 30000 全留在相位里。 */
+    reset_sim(84000000u, 42000u);
+    f_delay_next = 4u;
+    f_early = 30000u;
+    CHECK_EQ(arkrtos_tickless_idle(), 0u,
+             "a sub-tick wake settles no whole tick");
+
+    /* 主频降到 2 MHz：新的一拍只有 1000 个计数，相位却还有 30000。 */
+    reset_sim(2000000u, 1000u);
+    f_delay_next = 1u;
+    f_early = 100u;
+    CHECK_EQ(arkrtos_tickless_idle(), 0u,
+             "a plan shorter than the stale phase degrades to plain WFI");
+    CHECK_EQ(f_programmed, 0u, "an unusable plan programs nothing");
+
+    zero_phase();                   /* 收尾：把相位清回去，别留给后来的用例 */
+}
+
 int main(void)
 {
     test_plan();
     test_split();
     test_full_sleep();
     test_early_wake();
+    test_stats();
+    test_sleep_max_clamp();
+    test_zero_elapsed();
+    test_reenter();
+    test_rearm_clamp();
+    test_stale_phase();
 
     if(g_fails != 0)
     {

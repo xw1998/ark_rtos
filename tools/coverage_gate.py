@@ -4,7 +4,7 @@
 
 为什么需要这一项
 ----------------
-ci_gate 里那 9 条 *-host 检查只回答"用例过了没有"。用例过了但只走到模块的
+ci_gate 里那一排 *-host 检查只回答"用例过了没有"。用例过了但只走到模块的
 三成代码，与走了八成代码，在这套门禁里长得一模一样。覆盖率把这件事变成一行
 可比的数字，并且可以设一条"不许低于当前值"的下限——回归时掉下去就红。
 
@@ -58,8 +58,65 @@ COMMON_INC = [
     "-Iconfig",
 ]
 
-# (名字, 测试源, 被量的内核源, 额外宏, 成功标记)
+# F427 工程那一套补充环境（lwIP / 软总线的头与档位宏）。原样借
+# tools/arkrtos_f427_env.py，不在这里抄第二份：那份表改了，四道门禁一起跟上。
+from arkrtos_f427_env import EXTRA_INCLUDES, SOFTBUS_TIER_DEFS
+
+F427_INCS = [
+    "-Ikernelsrc/shell",
+    "-Ikernelsrc/shell/ark_shell",
+    "-Ikernelsrc/fs",
+    "-Ikernelsrc/fs/littlefs",
+    "-Ikernelsrc/components/ark_vfs/include",
+    "-Ikernelsrc/components/arkc/include",
+    "-Ikernelsrc/components/arkmake/include",
+    "-Ikernelsrc/sdk",
+    "-Iconfig/stm32f427",
+    "-Iexample/stm32f427/kernel/ARKRTOS_TEST/Core/Inc",
+    "-Iexample/stm32f427/kernel/ARKRTOS_TEST/Drivers/STM32F4xx_HAL_Driver/Inc",
+    "-Iexample/stm32f427/kernel/ARKRTOS_TEST/Drivers/CMSIS/Device/ST/STM32F4xx/Include",
+    "-Iexample/stm32f427/kernel/ARKRTOS_TEST/Drivers/CMSIS/Core/Include",
+] + ["-I" + p for p in EXTRA_INCLUDES]
+
+F427_DEFS = [
+    '-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',
+    "-DSTM32F427xx",
+    "-DUSE_HAL_DRIVER",
+] + ["-D" + d for d in SOFTBUS_TIER_DEFS]
+
+# 签名链的 32 字节密钥（0x00..0x1F）。与 test_sign_host.c /
+# test_payload_sign_host.c 里的 static 表一致，改一处要三处一起改。
+SIGN_KEY_DEF = "-DARKRTOS_IMAGE_SIGN_KEY={" + ",".join(
+    "0x%02X" % b for b in range(32)) + "}"
+
+# 关掉块层时它上层的三个消费者也必须一起关（features.h 有 #error 守着，
+# 这不是本门禁的额外要求，而是仓库自己的依赖规则）。
+BLK_OFF_DEFS = [
+    "-DARKRTOS_USE_BLK=0",
+    "-DARKRTOS_USE_FS=0",
+    "-DARKRTOS_USE_VFS=0",
+    "-DARKRTOS_USE_VFS_LFS=0",
+    "-DARKRTOS_USE_MINIAPP=0",
+    "-DARKRTOS_USE_PROCFS=0",
+]
+
+# (名字, 测试源, 被量的内核源, 额外宏, 成功标记[, 可选 dict])
 # 宏与标记逐条对齐 tools/ci_gate.py 里对应的 *-host 检查，改那边要同步这里。
+#
+# 可选 dict 的两个键：
+#   incs —— 这个用例额外要的头文件搜索路径（F427 工程那套）
+#   argv —— 传给用例的实参（例如签名用例把镜像写到哪里）
+#   markers —— 覆盖掉第 5 项，要求多条输出同时出现才算过
+#
+# 同一个 .c 出现在多个用例里（blk 的开档 / 关档）时，百分比按**行号并集**算：
+# 两档编出来的是不同的代码（#else 那一半只在关档时存在），而覆盖率问的是
+# "这行代码有没有被执行过"。所以每档交出自己的"执行行集 / 编入行集"，
+# main() 按模块求并集再除。单档百分比会以 case 行打印出来，只作参考不参与判。
+#
+# 为什么 sign 用的是 test_payload_sign_host.c 而不是 test_sign_host.c：
+# 后者把 MAC 打到 stdout 交给 tools/sign_host_gate.py 与打包器比对，自己
+# 不做判定；前者自带手算 tag 对拍 + 篡改必拒 + 流式/一次性一致，宿主上
+# 失败会自己返回非 0。覆盖面也更宽（多跑了流式入口）。
 CASES = [
     ("utest", "tools/utest_host_selftest.c",
      ["kernelsrc/src/arkrtos_utest.c"], [], "HOST-SELFTEST OK"),
@@ -90,6 +147,34 @@ CASES = [
     ("waitmulti", "kernelsrc/tests/test_waitmulti_host.c",
      ["kernelsrc/src/arkrtos_waitmulti.c"],
      ["-DARKRTOS_USE_WAITMULTI=1"], "WM-HOST OK"),
+    # --- 2026-11-21：把已有宿主用例但没进覆盖率账的模块补上 -------------
+    ("smp", "kernelsrc/tests/test_smp_host.c",
+     ["kernelsrc/src/arkrtos_smp.c"],
+     ["-DARKRTOS_USE_SMP=1", "-DARKRTOS_CPU_NUM=4"] + F427_DEFS,
+     "SMP-HOST OK", {"incs": F427_INCS}),
+    ("sign", "kernelsrc/tests/test_payload_sign_host.c",
+     ["kernelsrc/src/arkrtos_sign.c"],
+     ["-DARKRTOS_USE_IMAGE_SIGN=1", "-DARKRTOS_USE_EXEC_SIGN=1",
+      "-Wno-variably-modified", SIGN_KEY_DEF],
+     ["STREAM_MATCH 1", "WRONG_TAG_REFUSED 1"]),
+    # 镜像侧入口（sign_image / stream_* / verify）由 test_sign_host.c 走：
+    # 它把镜像写到 argv[1]，所以这里给一个相对文件名（工作目录就是临时目录）。
+    # 与上面的 sign 用例按行号并集合并到同一个模块（arkrtos_sign）。
+    ("sign-image", "kernelsrc/tests/test_sign_host.c",
+     ["kernelsrc/src/arkrtos_sign.c"],
+     ["-DARKRTOS_USE_IMAGE_SIGN=1", "-Wno-variably-modified", SIGN_KEY_DEF],
+     ["MAC ", "IMAGE "], {"argv": ["image.bin"]}),
+    ("tickless", "kernelsrc/tests/test_tickless_host.c",
+     ["kernelsrc/src/arkrtos_tickless.c"],
+     ["-DARKRTOS_USE_TICKLESS=1", "-DARKRTOS_USE_TIMER=1"],
+     "TICKLESS-HOST OK", {"incs": F427_INCS}),
+    # --- 2026-11-21 新增：块设备注册表（此前没有任何宿主用例）---------
+    ("blk", "kernelsrc/tests/test_blk_host.c",
+     ["kernelsrc/src/arkrtos_blk.c"],
+     ["-DARKRTOS_USE_BLK=1"], "BLK-HOST OK"),
+    ("blk-off", "kernelsrc/tests/test_blk_host.c",
+     ["kernelsrc/src/arkrtos_blk.c"],
+     BLK_OFF_DEFS, "BLK-HOST OFF OK"),
 ]
 
 
@@ -150,9 +235,55 @@ def parse_lines_executed(txt, src_base):
     return None
 
 
-def measure(cc, name, test, mods, defs, marker):
+def parse_gcov_sets(path):
+    """从 .gcov 里取两套行号：被执行过的，与该档编进去的。
+
+    gcov 的文本格式：<count>:<行号>:<源行>，count 为数字表示执行过，
+    "#####" 表示没执行，"-" 表示这一行不生成代码。branch / function
+    行不是这种格式，会被两个 try/int 自然过滤掉。
+
+    为什么要行号而不直接拿百分比：同一个 .c 在不同宏档下编出来的是不同的
+    代码（#if 的一半只在某一档存在，blk 就是如此）。单个用例的百分比只回答
+    "这一档走了多少"，而问题问的是"这行代码有没有被跑过"。所以这里把行号
+    集交出去，由 main() 按模块求并集再算百分比。
+    """
+    ex   = set()
+    inst = set()
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            parts = line.split(":", 2)
+            if len(parts) < 3:
+                continue
+            head = parts[0].strip()
+            try:
+                n = int(parts[1])
+            except ValueError:
+                continue
+            if head == "-":
+                continue
+            if head == "#####":
+                inst.add(n)
+            elif head.isdigit() or head.endswith("*"):
+                inst.add(n)
+                ex.add(n)
+    return ex, inst
+
+def pct_of(ex, inst):
+    """行覆盖率 = 跑过的行 / 编进去的行。分母为 0 时返回 0（不造假）。"""
+    return (100.0 * len(ex) / len(inst)) if inst else 0.0
+
+def _case(case):
+    """把 CASES 里的一行摊平成 (name, test, mods, defs, markers, incs, argv)。"""
+    name, test, mods, defs, marker = case[:5]
+    extra = case[5] if len(case) > 5 else {}
+    markers = [marker] if isinstance(marker, str) else list(marker)
+    return (name, test, mods, defs, markers,
+            list(extra.get("incs", [])), list(extra.get("argv", [])))
+
+def measure(cc, name, test, mods, defs, markers, incs=(), argv=()):
     """编 + 跑 + gcov，返回 {模块基名: 行覆盖率}；失败抛 RuntimeError。"""
-    base_cmd = [cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0", "--coverage"] + defs + COMMON_INC
+    base_cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0", "--coverage"]
+                + defs + incs + COMMON_INC)
     with tempfile.TemporaryDirectory() as td:
         objs = []
         for src in [test] + mods:
@@ -168,10 +299,12 @@ def measure(cc, name, test, mods, defs, marker):
         if rc != 0:
             raise RuntimeError("链接失败 %s: %s" % (name, err.strip()[-300:]))
         # 在临时目录里跑，.gcda 才会落在能读到的地方
-        rc, out, err = _run([exe], cwd=td)
+        rc, out, err = _run([exe] + [str(a) for a in argv], cwd=td)
         out = out + err
-        if rc != 0 or marker not in out:
-            raise RuntimeError("用例没通过 %s: %s" % (name, out.strip()[-300:]))
+        missing = [m for m in markers if m not in out]
+        if rc != 0 or missing:
+            raise RuntimeError("用例没通过 %s（缺 %s）: %s"
+                               % (name, ",".join(missing), out.strip()[-300:]))
 
         gcov = os.path.join(os.path.dirname(cc),
                             "gcov.exe" if os.name == "nt" else "gcov")
@@ -189,7 +322,12 @@ def measure(cc, name, test, mods, defs, marker):
             pct = parse_lines_executed(txt, os.path.basename(m))
             if pct is None:
                 raise RuntimeError("gcov 没给出覆盖率 %s: %s" % (base, txt.strip()[-300:]))
-            res[base] = pct
+            gcovfile = os.path.join(td, os.path.basename(m) + ".gcov")
+            if os.path.isfile(gcovfile):
+                ex, inst = parse_gcov_sets(gcovfile)
+            else:
+                ex, inst = set(), set()
+            res[base] = (pct, ex, inst)
         return res
 
 
@@ -201,8 +339,11 @@ def load_baseline():
 
 
 def save_baseline(data):
+    # 钉两位小数：门禁判据带 0.005 的容差，多留的全精度会让"基线文件里的值"
+    # 看起来比之前低一点点（例如 92.02 -> 92.01680），读起来像偷偷降了门槛。
+    pinned = {k: round(v + 1e-9, 2) for k, v in data.items()}
     with open(BASELINE, "w", encoding="utf-8", newline="\n") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
+        json.dump(pinned, f, ensure_ascii=False, indent=2, sort_keys=True)
         f.write("\n")
 
 
@@ -219,25 +360,35 @@ def main():
         return 1
 
     baseline = load_baseline()
-    measured = {}
+    merged = {}         # 模块基名 -> [被执行行集, 编进去的行集]
     bad = 0
-    for name, test, mods, defs, marker in CASES:
+    for case in CASES:
+        name, test, mods, defs, markers, incs, argv = _case(case)
         try:
-            res = measure(cc, name, test, mods, defs, marker)
+            res = measure(cc, name, test, mods, defs, markers, incs, argv)
         except RuntimeError as exc:
             print("FAIL %-10s %s" % (name, exc))
             bad += 1
             continue
-        for base, pct in sorted(res.items()):
-            measured[base] = pct
-            floor = baseline.get(base)
-            if args.update or floor is None:
-                print("new  %-24s %6.2f%%  (无基线，本次记下)" % (base, pct))
-            elif pct + 0.005 < floor:
-                print("FAIL %-24s %6.2f%%  < 基线 %.2f%%" % (base, pct, floor))
-                bad += 1
-            else:
-                print("ok   %-24s %6.2f%%  (基线 %.2f%%)" % (base, pct, floor))
+        for base, (pct, ex, inst) in sorted(res.items()):
+            slot = merged.setdefault(base, [set(), set()])
+            slot[0] |= ex
+            slot[1] |= inst
+            # 单档读数只作参考行，不参与判（判的是下面的并集）
+            print("case %-24s %6.2f%%  [%s]" % (base, pct, name))
+
+    measured = {}
+    for base, (ex, inst) in sorted(merged.items()):
+        pct = pct_of(ex, inst)
+        measured[base] = pct
+        floor = baseline.get(base)
+        if args.update or floor is None:
+            print("new  %-24s %6.2f%%  (无基线，本次记下)" % (base, pct))
+        elif pct + 0.005 < floor:
+            print("FAIL %-24s %6.2f%%  < 基线 %.2f%%" % (base, pct, floor))
+            bad += 1
+        else:
+            print("ok   %-24s %6.2f%%  (基线 %.2f%%)" % (base, pct, floor))
 
     if args.update:
         save_baseline(measured)

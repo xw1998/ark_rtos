@@ -59,6 +59,17 @@ static uint32 g_ipi_last     = 0u;
 static int    g_wfi_calls    = 0;
 static int    g_irq_enables  = 0;
 
+/* 这几个 port 原语在真实构建里由 arkrtos_hal.h 声明；本文件用桩替代，
+ * 仍按同一组原型先声明一遍，好让 -Wmissing-prototypes 对它们是沉默的
+ * （门禁口径：桩不许在暗处扩接口）。 */
+uint32 arkrtos_port_cpu_id(void);
+int32  arkrtos_port_cpu_start(uint32 cpu);
+int32  arkrtos_port_send_ipi(uint32 cpu);
+void   arkrtos_port_wfi(void);
+void   arkrtos_port_enable_irq(void);
+void   arkrtos_port_disable_irq(void);
+uint32 arkrtos_port_atomic_cas(volatile uint32 *p_addr, uint32 expect, uint32 new_value);
+
 uint32 arkrtos_port_cpu_id(void)
 {
     return g_cpu_id;
@@ -219,6 +230,18 @@ int main(void)
     ck(arkrtos_smp_cpu[1].started == 0u, "a refused core does not record started");
     ck(arkrtos_smp_cpu[2].started == 1u, "an accepted core does record started");
     ck(arkrtos_smp_online_mask_get() == 0x1u, "accepted-but-not-running cores stay offline");
+
+    /* --- 9. port 报一个越界核号：收敛到 0，不许写越界 ------------- *
+     * 真硬件上「我在几号核」来自 port（LA64 是 CSR.TID）。读错的后果不是
+     * 少记一笔账，而是往 arkrtos_smp_cpu[ARKRTOS_CPU_NUM] 上写——一个
+     * 静态数组越界，症状要到很久以后才出现。 */
+    stub_reset();
+    g_cpu_id = (uint32)ARKRTOS_CPU_NUM + 3u;
+    n = arkrtos_smp_init();
+    ck(n == 4, "an out-of-range self id does not change the accepted count");
+    ck(arkrtos_smp_cpu[0].started == 1u, "an out-of-range self id converges to CPU0");
+    ck(arkrtos_smp_cpu[0].online == 1u, "the fallback core marks itself online");
+    ck(arkrtos_smp_online_mask_get() == 0x1u, "the mask keeps only the fallback core");
 
     drain();
     return 0;

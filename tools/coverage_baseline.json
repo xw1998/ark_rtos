@@ -1,4 +1,5 @@
 {
+  "arkrtos_blk": 100.0,
   "arkrtos_eset": 92.02,
   "arkrtos_fault": 100.0,
   "arkrtos_fifo": 100.0,
@@ -6,7 +7,10 @@
   "arkrtos_mempool": 95.65,
   "arkrtos_mq": 100.0,
   "arkrtos_sbuf": 80.57,
+  "arkrtos_sign": 100.0,
+  "arkrtos_smp": 89.19,
   "arkrtos_sync": 99.22,
+  "arkrtos_tickless": 98.97,
   "arkrtos_utest": 83.65,
   "arkrtos_waitmulti": 100.0
 }

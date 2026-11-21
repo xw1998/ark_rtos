@@ -1822,6 +1822,68 @@ def check_softbus_sync_header():
         ok("softbus-sync", "header commit matches VENDOR.md (%s)"
            % h.group(1)[:12])
 
+def check_blk_host():
+    """Block-device table: registration, guards, and the compiled-out build.
+
+    arkrtos_blk.c had no host case at all until 2026-11-21. It is a pure table
+    front end (four slots, name match, ready/desc/size/range/align/check
+    guards) over a bringup/read/write/erase hook, so its whole decision surface
+    is reachable on the host with a recording fake backend.
+
+    Two configurations are built and run, because they are different code:
+      * ON  (-DARKRTOS_USE_BLK=1): register/reject/find/init/size/guard/table-full
+      * OFF (-DARKRTOS_USE_BLK=0): every entry point must answer
+        ERR_DISABLED / 0 / NULL and never touch the backend -- that is the
+        "off means zero footprint, not just unused" claim, and it is a separate
+        #else branch that the ON build never compiles.
+
+    Read it for what it is: a fake backend on the host. Media timing, erase
+    timeouts, DMA and power-fail windows are NOT covered; only a board proves
+    those. A missing host compiler is a FAIL, not a skip.
+    """
+    import tempfile
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("blk-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    want = (("blk", "BLK-HOST OK"), ("blk-off", "BLK-HOST OFF OK"))
+    picked = {}
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name in [w[0] for w in want]:
+            picked[name] = (test, mods, defs, incs)
+    for name, _marker in want:
+        if name not in picked:
+            fail("blk-host", "case %s missing from coverage_gate.CASES" % name)
+            return
+
+    lines = []
+    with tempfile.TemporaryDirectory() as td:
+        for name, marker in want:
+            test, mods, defs, incs = picked[name]
+            exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+                fail("blk-host", "%s did not build: %s" % (name, tail[:200]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            if r.returncode != 0 or marker not in txt:
+                fail("blk-host", "%s failed: %s" % (name, txt.strip()[:220]))
+                return
+            lines.append(txt.strip().splitlines()[-1])
+    ok("blk-host", "device table + guards on host (%s / %s)"
+       % (lines[0], lines[1]))
+
 def check_coverage_host():
     """Line coverage of the modules the host tests actually link.
 
@@ -1858,8 +1920,9 @@ def check_warn_host():
     which was added on 2026-11-18 once this machine's toolchain list was
     re-checked and riscv64-unknown-elf-gcc-10.2.0 turned up.
 
-    Scope is honest and narrow: the 10 host test files, the 10 kernel modules
-    they link, and the SDK stdio test. Everything else in kernelsrc/ needs an
+    Scope is honest and narrow: the 16 host test cases, the 16 kernel modules
+    they link, and the SDK stdio test (33 TUs; sign and blk are built twice,
+    once per configuration). Everything else in kernelsrc/ needs an
     architecture toolchain (armcc/armclang, loongarch64, riscv64) to compile at
     all, so it is out of reach here.
 
@@ -1881,8 +1944,10 @@ def check_warn_host():
     r = _run_check([sys.executable, os.path.join("tools", "warn_gate.py")])
     txt = ((r.stdout or "") + (r.stderr or "")).strip()
     if r.returncode == 0 and "WARN-GATE OK" in txt:
+        head = [l for l in txt.splitlines() if l.startswith("WARN-GATE OK")]
         ok("warn-clean",
-           "21 host-compilable TU(s) build with zero -Wall -Wextra -Wshadow warnings (compiler pass, not static analysis)")
+           "%s (compiler pass, not static analysis)"
+           % (head[0][len("WARN-GATE OK  ("):].split("，")[0] if head else "host TU sweep"))
     else:
         fail("warn-clean", "gate failed: %s" % txt.strip()[-400:])
 
@@ -1976,6 +2041,7 @@ CHECK_TABLE = (
     ("loader-host", check_loader_host),
     ("fifo-host", check_fifo_host),
     ("fault-host", check_fault_host),
+    ("blk-host", check_blk_host),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),
     ("analyzer", check_analyzer),
