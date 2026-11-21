@@ -1,5 +1,6 @@
 {
   "arkrtos_blk": 100.0,
+  "arkrtos_dev": 100.0,
   "arkrtos_eset": 92.02,
   "arkrtos_fault": 100.0,
   "arkrtos_fifo": 100.0,

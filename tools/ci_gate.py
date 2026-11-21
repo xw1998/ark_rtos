@@ -1884,6 +1884,71 @@ def check_blk_host():
     ok("blk-host", "device table + guards on host (%s / %s)"
        % (lines[0], lines[1]))
 
+def check_dev_host():
+    """Device framework: slots, refcount, guards, and the ownership ledger.
+
+    arkrtos_dev.c had no host case at all until 2026-11-21. It is a pure table
+    front end (name -> slot -> instance) plus a per-slot refcount, so its whole
+    decision surface is reachable on the host with a recording fake driver.
+
+    Two configurations are built and run, because they are different code:
+      * HW_SAFE=1: every open/close also writes the App-crash ownership ledger
+        (claim/release), ctrl_obj() looks a device up by instance pointer, and
+        unregister drops the ledger entry.
+      * HW_SAFE=0: exactly the pre-ledger behaviour -- that half is never
+        compiled in the ON build, so it needs its own run.
+
+    Both builds also pin the tombstone semantics (unregister clears the slot in
+    place so an already-issued handle cannot slide onto another device) and the
+    refcount ceiling. Read it for what it is: fake driver on the host. Real
+    hardware timing and concurrent open/close from two tasks are NOT covered; a
+    board and the real scheduler prove those. A missing host compiler is a
+    FAIL, not a skip.
+    """
+    import tempfile
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("dev-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    want = (("dev", "DEV-HOST OK"), ("dev-nosafe", "DEV-HOST NOSAFE OK"))
+    picked = {}
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name in [w[0] for w in want]:
+            picked[name] = (test, mods, defs, incs)
+    for name, _marker in want:
+        if name not in picked:
+            fail("dev-host", "case %s missing from coverage_gate.CASES" % name)
+            return
+
+    lines = []
+    with tempfile.TemporaryDirectory() as td:
+        for name, marker in want:
+            test, mods, defs, incs = picked[name]
+            exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+                fail("dev-host", "%s did not build: %s" % (name, tail[:200]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            if r.returncode != 0 or marker not in txt:
+                fail("dev-host", "%s failed: %s" % (name, txt.strip()[:220]))
+                return
+            lines.append(txt.strip().splitlines()[-1])
+    ok("dev-host", "device framework on host (%s / %s)"
+       % (lines[0], lines[1]))
+
+
 def check_coverage_host():
     """Line coverage of the modules the host tests actually link.
 
@@ -1920,9 +1985,9 @@ def check_warn_host():
     which was added on 2026-11-18 once this machine's toolchain list was
     re-checked and riscv64-unknown-elf-gcc-10.2.0 turned up.
 
-    Scope is honest and narrow: the 16 host test cases, the 16 kernel modules
-    they link, and the SDK stdio test (33 TUs; sign and blk are built twice,
-    once per configuration). Everything else in kernelsrc/ needs an
+    Scope is honest and narrow: the 17 host test cases, the 17 kernel modules
+    they link, and the SDK stdio test (37 TUs; sign, blk and dev are built
+    twice, once per configuration). Everything else in kernelsrc/ needs an
     architecture toolchain (armcc/armclang, loongarch64, riscv64) to compile at
     all, so it is out of reach here.
 
@@ -2042,6 +2107,7 @@ CHECK_TABLE = (
     ("fifo-host", check_fifo_host),
     ("fault-host", check_fault_host),
     ("blk-host", check_blk_host),
+    ("dev-host", check_dev_host),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),
     ("analyzer", check_analyzer),

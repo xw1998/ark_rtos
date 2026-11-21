@@ -236,7 +236,7 @@ int32 arkrtos_dev_close_internal(int32 handle)
 {
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
-    if(ARKRTOS_DEV_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_DEV_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_DEV_ERR_HANDLE;
     /* 句柄是槽位下标：合法范围是整个设备表，而不是当前在用数量 */
     if(idx < 0 || idx >= ARKRTOS_DEV_MAX_NUM)
@@ -273,7 +273,7 @@ int32 arkrtos_dev_read_internal(int32 handle, uint8 *pdata, int32 len)
 {
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
-    if(ARKRTOS_DEV_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_DEV_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_DEV_ERR_HANDLE;
     /* 句柄是槽位下标：合法范围是整个设备表，而不是当前在用数量 */
     if(idx < 0 || idx >= ARKRTOS_DEV_MAX_NUM)
@@ -292,7 +292,7 @@ int32 arkrtos_dev_write_internal(int32 handle, uint8 *pdata, int32 len)
 {
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
-    if(ARKRTOS_DEV_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_DEV_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_DEV_ERR_HANDLE;
     /* 句柄是槽位下标：合法范围是整个设备表，而不是当前在用数量 */
     if(idx < 0 || idx >= ARKRTOS_DEV_MAX_NUM)
@@ -311,7 +311,7 @@ int32 arkrtos_dev_ctrl_internal(int32 handle, uint32 code, uint32 value)
 {
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
-    if(ARKRTOS_DEV_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_DEV_HANDLE_FLAG != ((uint32)handle & ARKRTOS_HANDLE_MASK))
         return ARKRTOS_DEV_ERR_HANDLE;
     /* 句柄是槽位下标：合法范围是整个设备表，而不是当前在用数量 */
     if(idx < 0 || idx >= ARKRTOS_DEV_MAX_NUM)

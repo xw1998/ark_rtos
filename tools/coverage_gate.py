@@ -175,6 +175,14 @@ CASES = [
     ("blk-off", "kernelsrc/tests/test_blk_host.c",
      ["kernelsrc/src/arkrtos_blk.c"],
      BLK_OFF_DEFS, "BLK-HOST OFF OK"),
+    # --- 2026-11-21 新增：设备框架（此前没有任何宿主用例）---------------
+    # HW_SAFE 开/关是两段代码（所有权台账 claim/release），按行号并集合并。
+    ("dev", "kernelsrc/tests/test_dev_host.c",
+     ["kernelsrc/src/arkrtos_dev.c"],
+     ["-DARKRTOS_HW_SAFE=1"], "DEV-HOST OK"),
+    ("dev-nosafe", "kernelsrc/tests/test_dev_host.c",
+     ["kernelsrc/src/arkrtos_dev.c"],
+     ["-DARKRTOS_HW_SAFE=0"], "DEV-HOST NOSAFE OK"),
 ]
 
 
