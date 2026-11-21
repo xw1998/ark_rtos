@@ -998,7 +998,7 @@ def check_mq_host():
         cmd = [cc]
         if "mingw" in cc.replace("\\", "/").lower():
             cmd.append("-B" + os.path.dirname(cc))
-        cmd += ["-std=gnu11", "-DARKRTOS_USE_MQ=1",
+        cmd += ["-std=gnu11", "-DARKRTOS_USE_MQ=1", "-DARKRTOS_MQ_HOST_TEST",
                 "-Ikernelsrc/include", "-Ikernelsrc/components/mdk_trace",
                 "-Iboard/stm32f427", "-Iconfig", "-o", exe,
                 "kernelsrc/tests/test_mq_host.c", "kernelsrc/src/arkrtos_mq.c"]

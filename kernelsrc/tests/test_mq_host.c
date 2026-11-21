@@ -24,6 +24,10 @@
 #include <stdio.h>
 #include <string.h>
 
+/* 宿主档里对象表不做 static（源里由 ARKRTOS_MQ_HOST_TEST 打开）：
+ * 清盘与防御分支只有摆得出等待表与任务状态才够得到。 */
+extern arkrtos_mq_obj_t arkrtos_mqs[ARKRTOS_MQ_NUM];
+
 /* ------------------------------------------------------------------
  * 内核桩：只提供链接所需的符号，行为尽量"什么都不做"
  * ------------------------------------------------------------------ */
@@ -54,11 +58,14 @@ static int32  g_block_steps      = 0;
 static int32  g_block_free_handle = -1;
 static uint8  g_in_handler        = 0u;
 static uint32 g_block_free_out[ARKRTOS_MQ_MSG_WORDS];
+static arkrtos_mq_obj_t *g_block_mq = 0;   /* 重试窗口里要摆等待表的对象 */
 
 arkrtos_task_t *arkrtos_task_get_current(void) { return g_cur_task; }
 
 int32 arkrtos_task_block_in_critical(uint32 timeout_ms)
 {
+    int32 i;
+
     (void)timeout_ms;
     g_block_steps++;
 
@@ -87,9 +94,43 @@ int32 arkrtos_task_block_in_critical(uint32 timeout_ms)
         (void)arkrtos_mq_send_internal(g_block_free_handle, g_block_free_out, 1, 0);
         return ARKRTOS_WAKE_HANDOFF;
     }
+    if(g_block_mode == 8)
+    {
+        /* 第一次交接但不腾空间，第二次超时 */
+        return (g_block_steps == 1) ? ARKRTOS_WAKE_HANDOFF : ARKRTOS_WAKE_TIMEOUT;
+    }
+    if(g_block_mode == 9)
+    {
+        /* 第一次交接，第二次"没能睡下" */
+        return (g_block_steps == 1) ? ARKRTOS_WAKE_HANDOFF : -1;
+    }
+    if(g_block_mode == 10)
+    {
+        /* 第一次就超时 */
+        return ARKRTOS_WAKE_TIMEOUT;
+    }
+    if(g_block_mode == 11)
+    {
+        /* 交接时把发送等待表塞满别的任务 */
+        for(i = 0; i < ARKRTOS_WQ_SLOTS; i++)
+        {
+            g_block_mq->send_waiters[i] = &arkrtos_task_table[10 + i];
+        }
+        return ARKRTOS_WAKE_HANDOFF;
+    }
+    if(g_block_mode == 12)
+    {
+        /* 同上，接收等待表 */
+        for(i = 0; i < ARKRTOS_WQ_SLOTS; i++)
+        {
+            g_block_mq->recv_waiters[i] = &arkrtos_task_table[10 + i];
+        }
+        return ARKRTOS_WAKE_HANDOFF;
+    }
     return -1;
 }
-void  arkrtos_ready_add(int32 task_idx) { (void)task_idx; }
+static int32 g_ready_calls = 0;
+void  arkrtos_ready_add(int32 task_idx) { (void)task_idx; g_ready_calls++; }
 uint8 arkrtos_sync_in_handler(void) { return g_in_handler; }
 
 /* 桩也是接口：先声明后定义，-Wmissing-prototypes 才看得见原型。 */
@@ -392,6 +433,238 @@ int main(void)
     n = arkrtos_mq_delete_internal(h4);
     check(n == 0, "the blocking-receive queue deletes cleanly");
 
+
+    /* ---- 12..23 \u7b2c\u4e8c\u6279\uff1a\u6a21\u5757\u521d\u59cb\u5316\u3001\u4e0b\u7ebf\u6536\u5c38\u3001\u53e5\u67c4\u95f8\u95e8\u4e0e\u91cd\u8bd5\u5faa\u73af\u7684\u9632\u5fa1\u5206\u652f ---- */
+    {
+        int32 hq;
+        int32 hk;
+        int32 he;
+        int32 hs[ARKRTOS_MQ_NUM];
+        int32 j;
+
+        /* 12. \u6a21\u5757\u521d\u59cb\u5316\uff1a\u6574\u5f20\u8868\u56de\u5230\u521d\u6001 */
+        hq = arkrtos_mq_create_internal("reinit");
+        check(hq >= 0, "a queue is created before re-initialising the module");
+        check(arkrtos_mq_send_internal(hq, in, 1, 0) == 0,
+              "the queue holds one message before init");
+        arkrtos_mq_module_init();
+        check(arkrtos_mq_is_alive(hq) == 0, "module init clears every queue slot");
+        hq = arkrtos_mq_create_internal("reinit2");
+        check(hq == (0 | ARKRTOS_MQ_HANDLE_FLAG),
+              "after init the lowest slot is free again");
+        (void)arkrtos_mq_delete_internal(hq);
+
+        /* 13. \u5185\u6838\u961f\u5217\u4e0d\u968f\u521b\u5efa\u8005\u4e0b\u7ebf\u6d88\u5931\uff1b\u666e\u901a\u961f\u5217\u968f\u4e4b\u4e0b\u7ebf */
+        arkrtos_task_count      = 6;
+        arkrtos_current_task_id = 2;
+        hq = arkrtos_mq_create_internal("taskq");
+        hk = arkrtos_mq_create_kernel_internal("kernq");
+        check((hq >= 0) && (hk >= 0) && (hq != hk),
+              "a task queue and a kernel queue live side by side");
+        check(arkrtos_mqs[hq & (int32)ARKRTOS_HANDLE_RELMASK].creator_id == 2,
+              "the task queue remembers its creator");
+        check(arkrtos_mqs[hk & (int32)ARKRTOS_HANDLE_RELMASK].creator_id == 0,
+              "the kernel queue belongs to the kernel");
+        arkrtos_mqs[hq & (int32)ARKRTOS_HANDLE_RELMASK].send_waiters[0] =
+            &arkrtos_task_table[1];
+        arkrtos_mqs[hk & (int32)ARKRTOS_HANDLE_RELMASK].recv_waiters[0] =
+            &arkrtos_task_table[1];
+        arkrtos_mq_release_task(2);
+        check(arkrtos_mq_is_alive(hq) == 0, "the dead task's queue is collected");
+        check(arkrtos_mq_is_alive(hk) == 1, "the kernel queue survives the teardown");
+        check(arkrtos_mqs[hk & (int32)ARKRTOS_HANDLE_RELMASK].recv_waiters[0] == 0,
+              "the dead task is detached from the live queue's wait list");
+
+        /* 14. \u574f\u4efb\u52a1\u53f7\u76f4\u63a5\u8fd4\u56de\uff1b\u4e0b\u7ebf\u9014\u4e2d\u7684\u4efb\u52a1\u4e0d\u56de\u5c31\u7eea\u961f\u5217 */
+        arkrtos_mq_release_task(0);
+        arkrtos_mq_release_task(arkrtos_task_count + 1);
+        check(arkrtos_mq_is_alive(hk) == 1, "an out-of-range task id is ignored");
+        arkrtos_task_table[3].status = ARKRTOS_TASK_INVALID;
+        arkrtos_mqs[hk & (int32)ARKRTOS_HANDLE_RELMASK].send_waiters[0] =
+            &arkrtos_task_table[3];
+        j = g_ready_calls;
+        check(arkrtos_mq_delete_internal(hk) == 0, "deleting the kernel queue succeeds");
+        check(arkrtos_task_table[3].status == ARKRTOS_TASK_INVALID,
+              "a task being torn down is not re-queued by wake_all");
+        check(g_ready_calls == j,
+              "wake_all dropped the invalid waiter instead of waking it");
+        arkrtos_task_table[3].status = ARKRTOS_TASK_READY;
+        arkrtos_task_count      = 0;
+        arkrtos_current_task_id = 0;
+
+        /* 15. \u53e5\u67c4\u95f8\u95e8\uff1aISR \u4e24\u4e2a\u5165\u53e3\u3001\u516c\u5f00\u5305\u88c5\u3001delete\u3001is_alive\u3001recv */
+        hq = arkrtos_mq_create_internal("gates");
+        check(hq >= 0, "a queue is created for the handle gates");
+        check(arkrtos_mq_send_from_isr_internal(hq + 0x00100000, in, 1) == -1,
+              "send_from_isr rejects a wrong type flag");
+        check(arkrtos_mq_send_from_isr_internal(hq + (int32)ARKRTOS_MQ_NUM, in, 1) == -1,
+              "send_from_isr rejects an out-of-range index");
+        check(arkrtos_mq_send_from_isr_internal(hq, 0, 1) == -1,
+              "send_from_isr rejects a null buffer");
+        check(arkrtos_mq_send_from_isr_internal(hq, in, 0) == -1,
+              "send_from_isr rejects a zero length");
+        check(arkrtos_mq_recv_from_isr_internal(hq + 0x00100000, out, 1) == -1,
+              "recv_from_isr rejects a wrong type flag");
+        check(arkrtos_mq_recv_from_isr_internal(hq + (int32)ARKRTOS_MQ_NUM, out, 1) == -1,
+              "recv_from_isr rejects an out-of-range index");
+        check(arkrtos_mq_recv_from_isr_internal(hq, 0, 1) == -1,
+              "recv_from_isr rejects a null buffer");
+        check(arkrtos_mq_recv_from_isr_internal(hq, out, 0) == -1,
+              "recv_from_isr rejects a zero length");
+        check(arkrtos_mq_send_from_isr(hq, in, 1) == 0,
+              "the public ISR send wrapper delivers");
+        check(arkrtos_mq_recv_from_isr(hq, out, 1) == 1,
+              "the public ISR receive wrapper takes it back");
+        check(arkrtos_mq_recv_internal(hq + 0x00100000, out, 1, 0) == -1,
+              "recv rejects a wrong type flag");
+        check(arkrtos_mq_delete_internal(hq + 0x00100000) == -1,
+              "delete rejects a wrong type flag");
+        check(arkrtos_mq_delete_internal(hq + (int32)ARKRTOS_MQ_NUM) == -1,
+              "delete rejects an out-of-range index");
+        check(arkrtos_mq_is_alive(hq + 0x00100000) == 0,
+              "is_alive rejects a wrong type flag");
+        check(arkrtos_mq_is_alive(hq + (int32)ARKRTOS_MQ_NUM) == 0,
+              "is_alive rejects an out-of-range index");
+
+        /* 16. \u7b49\u5f85\u8868\u6ee1\uff1a\u7b2c\u4e00\u6b21\u767b\u8bb0\u5c31\u62a5 NOSPACE\uff0c\u4e0d\u7761 */
+        for(j = 0; j < (int32)ARKRTOS_MQ_DEPTH; j++)
+        {
+            in[0] = 0x9100u + (uint32)j;
+            check(arkrtos_mq_send_internal(hq, in, 1, 0) == 0, "the gate queue is filled");
+        }
+        g_cur_task    = &g_fake_task;
+        g_block_mode  = 0;
+        g_block_steps = 0;
+        for(j = 0; j < (int32)ARKRTOS_WQ_SLOTS; j++)
+        {
+            arkrtos_mqs[hq & (int32)ARKRTOS_HANDLE_RELMASK].send_waiters[j] =
+                &arkrtos_task_table[10 + j];
+        }
+        check(arkrtos_mq_send_internal(hq, in, 1, 100) == ARKRTOS_MQ_ERR_NOSPACE,
+              "a full send-waiter table is reported as NOSPACE");
+        check(g_block_steps == 0, "a send that cannot register never blocks");
+        for(j = 0; j < (int32)ARKRTOS_WQ_SLOTS; j++)
+        {
+            arkrtos_mqs[hq & (int32)ARKRTOS_HANDLE_RELMASK].send_waiters[j] = 0;
+        }
+
+        he = arkrtos_mq_create_internal("emptyq");
+        check(he >= 0, "an empty queue is created for the receive paths");
+        g_block_steps = 0;
+        for(j = 0; j < (int32)ARKRTOS_WQ_SLOTS; j++)
+        {
+            arkrtos_mqs[he & (int32)ARKRTOS_HANDLE_RELMASK].recv_waiters[j] =
+                &arkrtos_task_table[10 + j];
+        }
+        check(arkrtos_mq_recv_internal(he, out, 1, 100) == ARKRTOS_MQ_ERR_NOSPACE,
+              "a full recv-waiter table is reported as NOSPACE");
+        check(g_block_steps == 0, "a receive that cannot register never blocks");
+        for(j = 0; j < (int32)ARKRTOS_WQ_SLOTS; j++)
+        {
+            arkrtos_mqs[he & (int32)ARKRTOS_HANDLE_RELMASK].recv_waiters[j] = 0;
+        }
+
+        /* 17. \u6ee1\u961f\u5217 + \u65e0\u5f53\u524d\u4efb\u52a1\uff1aCONTEXT\uff08\u4e0d\u767b\u8bb0\u3001\u4e0d\u7761\uff09 */
+        g_cur_task = 0;
+        check(arkrtos_mq_send_internal(hq, in, 1, 100) == ARKRTOS_MQ_ERR_CONTEXT,
+              "a blocking send without a current task is refused");
+
+        /* 18. \u7b2c\u4e00\u6b21\u963b\u585e\u5c31\u8d85\u65f6\uff1a\u76f4\u63a5\u6536\u5c3e */
+        g_cur_task    = &g_fake_task;
+        g_block_mode  = 10;
+        g_block_steps = 0;
+        check(arkrtos_mq_send_internal(hq, in, 1, 100) == ARKRTOS_MQ_ERR_TIMEOUT,
+              "a first-block timeout ends the send");
+        check(g_block_steps == 1, "the timeout is classified right after the first block");
+        check(arkrtos_mq_recv_internal(he, out, 1, 100) == ARKRTOS_SYNC_ERR_TIMEOUT,
+              "a first-block timeout ends the receive");
+
+        /* 19. \u65e0\u9650\u7b49\u5f85\uff08timeout<0\uff09\u5728\u91cd\u8bd5\u5faa\u73af\u91cc\u62ff\u4e0d\u5230\u7a7a\u95f4/\u6d88\u606f */
+        g_block_mode  = 8;
+        g_block_steps = 0;
+        check(arkrtos_mq_send_internal(hq, in, 1, -1) == ARKRTOS_MQ_ERR_TIMEOUT,
+              "an infinite send gives up when the second wake-up is a timeout");
+        check(g_block_steps == 2, "the infinite send re-queued itself once");
+        g_block_steps = 0;
+        check(arkrtos_mq_recv_internal(he, out, 1, -1) == ARKRTOS_SYNC_ERR_TIMEOUT,
+              "an infinite receive gives up when the second wake-up is a timeout");
+        check(g_block_steps == 2, "the infinite receive re-queued itself once");
+
+        /* 20. \u91cd\u8bd5\u7a97\u53e3\u91cc"\u6ca1\u80fd\u7761\u4e0b"\uff1a\u6309\u5bf9\u8c61\u6d88\u5931\u6536\u5c3e */
+        g_block_mode  = 9;
+        g_block_steps = 0;
+        check(arkrtos_mq_send_internal(hq, in, 1, 100) == ARKRTOS_MQ_ERR_DELETED,
+              "a send retry that cannot block ends as deleted");
+        g_block_steps = 0;
+        check(arkrtos_mq_recv_internal(he, out, 1, 100) == ARKRTOS_MQ_ERR_DELETED,
+              "a receive retry that cannot block ends as deleted");
+
+        /* 21. \u91cd\u8bd5\u7a97\u53e3\u91cc\u7b49\u5f85\u8868\u88ab\u522b\u4eba\u5360\u6ee1\uff1aNOSPACE */
+        g_block_mode  = 11;
+        g_block_steps = 0;
+        g_block_mq    = &arkrtos_mqs[hq & (int32)ARKRTOS_HANDLE_RELMASK];
+        check(arkrtos_mq_send_internal(hq, in, 1, 100) == ARKRTOS_MQ_ERR_NOSPACE,
+              "a send retry that finds the waiter table full reports NOSPACE");
+        check(g_block_steps == 1, "the NOSPACE is decided before the second block");
+        for(j = 0; j < (int32)ARKRTOS_WQ_SLOTS; j++)
+        {
+            arkrtos_mqs[hq & (int32)ARKRTOS_HANDLE_RELMASK].send_waiters[j] = 0;
+        }
+        g_block_mode  = 12;
+        g_block_steps = 0;
+        g_block_mq    = &arkrtos_mqs[he & (int32)ARKRTOS_HANDLE_RELMASK];
+        check(arkrtos_mq_recv_internal(he, out, 1, 100) == ARKRTOS_MQ_ERR_NOSPACE,
+              "a receive retry that finds the waiter table full reports NOSPACE");
+        for(j = 0; j < (int32)ARKRTOS_WQ_SLOTS; j++)
+        {
+            arkrtos_mqs[he & (int32)ARKRTOS_HANDLE_RELMASK].recv_waiters[j] = 0;
+        }
+
+        /* 22. \u7528\u6237\u6001\u8f6e\u8be2\u7559\u4e0b\u7684\u767b\u8bb0\uff0c\u88ab timeout 0 \u7684\u6536\u5c3e\u64a4\u6389 */
+        g_block_mode  = 6;
+        g_block_steps = 0;
+        g_block_mq    = 0;
+        g_in_handler  = 1u;
+        check(arkrtos_mq_send_internal(hq, in, 1, 100) == ARKRTOS_SYNC_ERR_WOULDBLOCK,
+              "a user-mode send poll reports would-block");
+        check(arkrtos_mqs[hq & (int32)ARKRTOS_HANDLE_RELMASK].send_waiters[0] == &g_fake_task,
+              "the send poll left its registration behind");
+        check(arkrtos_mq_send_internal(hq, in, 1, 0) == ARKRTOS_MQ_ERR_FULL,
+              "the non-blocking send reports the queue is full");
+        check(arkrtos_mqs[hq & (int32)ARKRTOS_HANDLE_RELMASK].send_waiters[0] == 0,
+              "the non-blocking send removed its stale registration");
+        g_block_steps = 0;
+        check(arkrtos_mq_recv_internal(he, out, 1, 100) == ARKRTOS_SYNC_ERR_WOULDBLOCK,
+              "a user-mode receive poll reports would-block");
+        check(arkrtos_mqs[he & (int32)ARKRTOS_HANDLE_RELMASK].recv_waiters[0] == &g_fake_task,
+              "the receive poll left its registration behind");
+        check(arkrtos_mq_recv_internal(he, out, 1, 0) == ARKRTOS_MQ_ERR_EMPTY,
+              "the non-blocking receive reports the queue is empty");
+        check(arkrtos_mqs[he & (int32)ARKRTOS_HANDLE_RELMASK].recv_waiters[0] == 0,
+              "the non-blocking receive removed its stale registration");
+        g_in_handler  = 0u;
+        g_cur_task    = 0;
+        g_block_mode  = 0;
+        g_block_steps = 0;
+
+        check(arkrtos_mq_delete_internal(hq) == 0, "the gate queue deletes cleanly");
+        check(arkrtos_mq_delete_internal(he) == 0, "the empty queue deletes cleanly");
+
+        /* 23. \u961f\u5217\u8868\u6ee1\uff1a\u4e24\u4e2a\u521b\u5efa\u5165\u53e3\u90fd\u62a5 NOSLOT */
+        for(j = 0; j < (int32)ARKRTOS_MQ_NUM; j++)
+        {
+            hs[j] = arkrtos_mq_create_internal("fill");
+            check(hs[j] >= 0, "the queue table fills up");
+        }
+        check(arkrtos_mq_create_internal("over") == ARKRTOS_MQ_ERR_NOSLOT,
+              "creating past the table size reports NOSLOT");
+        check(arkrtos_mq_create_kernel_internal("over") == ARKRTOS_MQ_ERR_NOSLOT,
+              "the kernel create entry reports NOSLOT too");
+        for(j = 0; j < (int32)ARKRTOS_MQ_NUM; j++)
+        {
+            (void)arkrtos_mq_delete_internal(hs[j]);
+        }
+    }
     if(g_fail != 0)
     {
         printf("MQ-HOST FAIL: %d of %d checks failed\n", g_fail, g_checks);

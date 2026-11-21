@@ -82,7 +82,7 @@ def main():
     cmd = [cc]
     if "mingw" in cc.replace("\\", "/").lower():
         cmd.append("-B" + os.path.dirname(cc))
-    cmd += ["-std=gnu11", "-DARKRTOS_USE_MQ=1"]
+    cmd += ["-std=gnu11", "-DARKRTOS_USE_MQ=1", "-DARKRTOS_MQ_HOST_TEST"]
     cmd += ["-I" + p for p in INCLUDES]
     cmd += ["-o", exe, TEST_C, MQ_C]
 

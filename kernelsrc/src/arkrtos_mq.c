@@ -18,7 +18,17 @@
 
 #if (ARKRTOS_USE_MQ == 1)
 
-static arkrtos_mq_obj_t arkrtos_mqs[ARKRTOS_MQ_NUM];
+#if defined(ARKRTOS_MQ_HOST_TEST)
+/* Host test needs to arrange wait lists and table states directly; keeping
+ * the table static would make half of the teardown/defensive paths
+ * unreachable from the host. Default builds keep it static, so the image
+ * and the symbol set do not change. */
+#define ARKRTOS_MQ_STATIC
+#else
+#define ARKRTOS_MQ_STATIC static
+#endif
+
+ARKRTOS_MQ_STATIC arkrtos_mq_obj_t arkrtos_mqs[ARKRTOS_MQ_NUM];
 
 void arkrtos_mq_module_init(void)
 {
@@ -464,7 +474,9 @@ int32 arkrtos_mq_send_internal(int32 handle, uint32 *buf, int32 len_words, int32
         arkrtos_trace_wait_obj(MDK_TRACE_ARKRTOS_OBJ(MDK_TRACE_ARKRTOS_CLASS_QUEUE, idx));
         ret = arkrtos_task_block_in_critical((uint32)remain);     /* 关中断返回 */
 
-        if((ret & ARKRTOS_WAKE_HANDOFF) == 0)
+        /* ret < 0 = 没能睡下去，它每一位都是 1，单看交接位会被当成
+         * “已接手”⟹重试无限循环。与 sbuf 同一收尾口径。 */
+        if((ret < 0) || ((ret & ARKRTOS_WAKE_HANDOFF) == 0))
         {
             arkrtos_mq_waiter_remove(p_mq->send_waiters, p_tsk);
             ARKRTOS_ENABLE_IRQ();
@@ -631,7 +643,8 @@ int32 arkrtos_mq_recv_internal(int32 handle, uint32 *buf, int32 len_words, int32
     arkrtos_trace_wait_obj(MDK_TRACE_ARKRTOS_OBJ(MDK_TRACE_ARKRTOS_CLASS_QUEUE, idx));
         reason = arkrtos_task_block_in_critical((uint32)remain);  /* 关中断返回 */
 
-        if((reason & ARKRTOS_WAKE_HANDOFF) == 0)
+        /* 同 mq_send：reason < 0 是“没能睡下去”，每一位都是 1。 */
+        if((reason < 0) || ((reason & ARKRTOS_WAKE_HANDOFF) == 0))
         {
             arkrtos_mq_waiter_remove(p_mq->recv_waiters, p_tsk);
             ARKRTOS_ENABLE_IRQ();
