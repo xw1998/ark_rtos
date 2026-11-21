@@ -273,8 +273,12 @@ def main():
             bad.append("F: shell 的 exec 不打印退出码")
         if "arkrtos_thread_exit_code(int32 code);" not in text_user:
             bad.append("F: 用户 API 头里没有 arkrtos_thread_exit_code")
-        if "ARK_THREAD_SUB_EXIT_CODE" not in text_hello or \
-           "params[1] = (ark_u32)argc;" not in text_hello:
+        # 宽参 ABI（ARKRTOS_USE_WIDE_SVC_ARGS）落地后 hello.c 的槽类型是
+        # ark_arg（窄档即 unsigned int、宽档 unsigned long），所以这里认两种
+        # 强制类型写法，别把「换了槽类型」当成「退出码没了」。
+        if "ARK_THREAD_SUB_EXIT_CODE" not in text_hello or not (
+                "params[1] = (ark_arg)argc;" in text_hello or
+                "params[1] = (ark_u32)argc;" in text_hello):
             bad.append("F: hello.elf 不再带退出码（QEMU 那轮的读数就失去对证）")
         return bad
 

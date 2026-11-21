@@ -15,6 +15,7 @@
 #include "arkrtos_types.h"
 #include "arkrtos_ulog.h"
 #include "arkrtos_svc_call.h"
+#include "arkrtos_svc_abi.h"   /* arkrtos_svc_arg_t: SVC 参数块槽（字宽随开关变） */
 
 #define ARKRTOS_DEV_CTRL_OPEN          (0x0001)
 #define ARKRTOS_DEV_CTRL_CLOSE         (0x0002)

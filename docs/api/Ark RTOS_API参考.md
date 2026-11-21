@@ -23,7 +23,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（68 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（74 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -49,6 +49,7 @@
 - [kernelsrc/include/arkrtos_smp_sched.h](#kernelsrcincludearkrtos_smp_schedh)（10 项）
 - [kernelsrc/include/arkrtos_softbus.h](#kernelsrcincludearkrtos_softbush)（5 项）
 - [kernelsrc/include/arkrtos_spin.h](#kernelsrcincludearkrtos_spinh)（10 项）
+- [kernelsrc/include/arkrtos_svc_abi.h](#kernelsrcincludearkrtos_svc_abih)（4 项）
 - [kernelsrc/include/arkrtos_svc_call.h](#kernelsrcincludearkrtos_svc_callh)（20 项）
 - [kernelsrc/include/arkrtos_task.h](#kernelsrcincludearkrtos_taskh)（5 项）
 - [kernelsrc/include/arkrtos_tickless.h](#kernelsrcincludearkrtos_ticklessh)（6 项）
@@ -61,7 +62,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（12 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（78 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（80 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（18 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -3460,6 +3461,88 @@ void   arkrtos_port_svc_set_ret_signed(void *p_exc_ctx, int32 value);
 与 arkrtos_port_svc_set_ret 的区别只有符号扩展：Linux 的错误
 是负数，64 位下若只写低 32 位，程序会把 0x00000000FFFFFFEA
 读成一个很大的正数。宁可让返回值正确，也不给看似成功的错答案。
+
+### `unsigned long arkrtos_port_svc_user_reg(void *p_exc_ctx, uint32 id);`
+
+```c
+unsigned long arkrtos_port_svc_user_reg(void *p_exc_ctx, uint32 id);
+```
+
+**读取用户态 trap 帧里的一个寄存器（信号帧保存/恢复用）**
+- `p_exc_ctx`：系统调用入口传给内核的上下文指针
+- `id`：寄存器编号：0 = 返回地址（era / pc）、1 = 栈指针、
+2 = 链接寄存器（ra / lr）、3 = 线程指针（tp）
+**返回**：寄存器当前值；框架不认识该编号时返回 0
+与 ARKRTOS_SVC_ARG 同一口径：寄存器布局只在 port 层解析，
+内核只按语义编号取值。信号投递要在用户栈上铺一帧、把
+「被打断的位置」原样存下来，这一对原语就是那条缝。
+
+### `int32 arkrtos_port_svc_set_user_reg(void *p_exc_ctx, uint32 id, unsign`
+
+```c
+int32 arkrtos_port_svc_set_user_reg(void *p_exc_ctx, uint32 id, unsigned long value);
+```
+
+**写回用户态 trap 帧里的一个寄存器（信号投递/返回用）**
+- `p_exc_ctx`：系统调用上下文指针
+- `id`：寄存器编号，同 arkrtos_port_svc_user_reg
+- `value`：新值
+**返回**：0 = 已写入；-1 = 编号不可用或端口没有这个能力（一个字节都不动）
+端口没有该能力时由 arkrtos_linux_abi.c 里的弱定义顶住，
+信号相关的号一律回 -ENOSYS，不假装投递成功。
+
+### `uint32 arkrtos_port_svc_frame_bytes(void);`
+
+```c
+uint32 arkrtos_port_svc_frame_bytes(void);
+```
+
+**trap 帧在内存里的字节数（信号快照用）**
+**返回**：帧长；含 FPU 时是 528，LSX 档 1040，默认档 256
+信号要「原样保存被打断的现场」，而现场不止四个寄存器：把
+帧整块存进用户栈，返回时整块装回去，才不会被处理函数打断
+一半的调用约定（$t0 一类的临时寄存器）害死。
+
+### `unsigned long arkrtos_port_svc_frame_reserve(void *p_exc_ctx, uint32 b`
+
+```c
+unsigned long arkrtos_port_svc_frame_reserve(void *p_exc_ctx, uint32 bytes);
+```
+
+**在用户栈上给信号帧找一块**不和 trap 帧重叠**的地方**
+- `p_exc_ctx`：系统调用上下文指针
+- `bytes`：这一帧要多少字节（头 + 快照）
+**返回**：帧基址（16 字节对齐）；栈不够放时返回 0
+内核的 trap 帧就铺在用户 sp 下面 LA_FR_SIZE 字节处，这一块
+是内核的、不是用户栈的「空闲区」。信号帧若从 sp 直接往下放
+就会整块盖在 trap 帧上——实测症状是返回时 frame 里的 $t5 变成
+了信号 magic，随后一条 ret 跳到 0x210（= 帧长 528）。所以
+让端口算这个地址：帧长、对齐、保留区都只在端口里出现一次。
+
+### `void arkrtos_port_svc_frame_export(void *p_exc_ctx, void *p_dst);`
+
+```c
+void arkrtos_port_svc_frame_export(void *p_exc_ctx, void *p_dst);
+```
+
+**把整份 trap 帧拷进内核缓冲（信号投递用）**
+- `p_exc_ctx`：系统调用上下文指针
+- `p_dst`：目标缓冲，至少 arkrtos_port_svc_frame_bytes() 字节
+只做整块拷贝，不改帧。
+
+### `int32 arkrtos_port_svc_frame_import(void *p_exc_ctx, const void *p_src`
+
+```c
+int32 arkrtos_port_svc_frame_import(void *p_exc_ctx, const void *p_src);
+```
+
+**把内核缓冲里的帧整块装回当前上下文（rt_sigreturn 用）**
+- `p_exc_ctx`：系统调用上下文指针
+- `p_src`：源缓冲，至少 arkrtos_port_svc_frame_bytes() 字节
+**返回**：0 = 已装回；-1 = 端口没有这个能力
+唯一被丢弃的字段是 PRMD 的特权级两位：特权级由当前上下文
+决定，用户写在栈上的快照不许把它抬高（否则一个用户程序可以
+自己铺一帧 PRMD=PLV0 再 sigreturn）。
 
 ### `int32  arkrtos_port_svc_exec_frame(void *p_exc_ctx, unsigned long entr`
 
@@ -7207,6 +7290,45 @@ static inline int32 arkrtos_spin_is_locked(arkrtos_spinlock_t *p_lock) {
 - `p_lock`：锁对象指针
 **返回**：1=已持有，0=空闲
 
+## kernelsrc/include/arkrtos_svc_abi.h
+
+**SVC sub-command numbers: one table per service, shared by both sides.**
+An SVC call carries a service number in the instruction immediate
+(ARKRTOS_SVC_* in arkrtos_def.h) and, for every service that has
+more than one operation, a sub-command in p[0] / parameters[0].
+
+### `typedef unsigned long arkrtos_svc_arg_t;`
+
+```c
+typedef unsigned long arkrtos_svc_arg_t;
+```
+
+**参数块里的一个字：原生指针宽度（宽档 = 8 字节）。 */**
+
+### `#define ARKRTOS_SVC_SUB(sub)            ((arkrtos_svc_arg_t)((unsigned`
+
+```c
+#define ARKRTOS_SVC_SUB(sub)            ((arkrtos_svc_arg_t)((unsigned long)(sub) | ARKRTOS_SVC_SUB_WORD))
+```
+
+**宽档写子命令字：置位标记，窄档内核据此拒绝而不是误读。 */**
+
+### `#define ARKRTOS_SVC_SUB_OF(w)           ((unsigned long)(w) & ~ARKRTOS`
+
+```c
+#define ARKRTOS_SVC_SUB_OF(w)           ((unsigned long)(w) & ~ARKRTOS_SVC_SUB_WORD)
+```
+
+**从子命令字取回子命令号（两档都能用）。 */**
+
+### `#define ARKRTOS_SVC_ARG_BYTES(n)        ((unsigned long)(n) * (sizeof(`
+
+```c
+#define ARKRTOS_SVC_ARG_BYTES(n)        ((unsigned long)(n) * (sizeof(arkrtos_svc_arg_t) / 4u)) #else typedef unsigned int arkrtos_svc_arg_t;
+```
+
+**参数块里 n 个 32 位字对应的字节数：窄档 n，宽档 2n。 */**
+
 ## kernelsrc/include/arkrtos_svc_call.h
 
 **Toolchain-independent SVC entry helpers for the App / Driver SDK.**
@@ -9457,6 +9579,32 @@ uint32 arkrtos_port_linux_syscall_num(void *p_exc_ctx) {
 Ark 自己的服务号写在 `syscall` 的 15 位立即数里，Linux 用
 `syscall 0` 并把号放进 $a7。因此「立即数是否为 0」就是分界，
 不需要按号段猜，两边也不会撞号。
+
+### `uint32 arkrtos_port_svc_frame_bytes(void) {`
+
+```c
+uint32 arkrtos_port_svc_frame_bytes(void) {
+```
+
+**整份 trap 帧的字节数与整块存取（信号快照用）**
+信号不能只存 era/sp/ra/tp：处理函数是普通 C 函数，会把
+$t0 一类的临时寄存器改成自己的东西，返回后被打断的调用
+约定就断了（实测症状是恢复后 ld.w 用了一个已经变成 2 的
+基址）。所以快照必须是整帧。
+import 唯一不认的是 PRMD 的特权级两位：那一层由当前上下文
+决定，用户铺的帧不许抬高特权级。
+
+### `#define LA_UREG_ERA         (0u) #define LA_UREG_SP          (1u) #def`
+
+```c
+#define LA_UREG_ERA         (0u) #define LA_UREG_SP          (1u) #define LA_UREG_RA          (2u) #define LA_UREG_TP          (3u)
+```
+
+**读写用户态 trap 帧里的寄存器（信号帧保存/恢复用）**
+帧布局见 arkrtos_context.S：era 在 [30]、sp 在 [2]、tp 在 [1]、
+a0..a7 在 [3..10]；ra 就是 [0] 那格（`.S` 的恢复路径 `ld.d $ra`）。
+语义编号只有四个：0 = era、1 = sp、2 = ra、3 = tp。写 era 不改
+PRMD：信号处理程序与被打断的代码同处 PLV3，特权级不该被这一层动。
 
 ### `int32 arkrtos_port_svc_exec_frame(void *p_exc_ctx, unsigned long entry`
 

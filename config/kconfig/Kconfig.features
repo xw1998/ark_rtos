@@ -537,6 +537,32 @@ config ARKRTOS_USE_LINUX_ABI
 	  the two port entry points are not compiled, so the image is
 	  byte-for-byte what it was before this option existed.
 
+config ARKRTOS_USE_WIDE_SVC_ARGS
+	bool "Native-width SVC parameter block (wide-argument ABI, U-18)"
+	help
+	  Widen every native SVC parameter block from uint32 slots to the
+	  target's native word width (unsigned long), so an App under a wide
+	  VA window can pass pointers above 4 GB.  The subcommand number stays
+	  in p[0] and is tagged with ARKRTOS_SVC_SUB_WORD (0x80000000) in the
+	  wide build; block validation goes through ARKRTOS_SVC_ARG_BYTES().
+	  All 30 kernel svc_*() handlers verify "block in user RAM and marker
+	  set" with SVC_WIDE_GUARD(), so a kernel and an App built with
+	  different settings cannot silently agree on a wrong layout: the
+	  wide kernel prints a one-shot log line and rejects the call.
+
+	  This is a compile-time switch, not adaptive -- kernel and App must
+	  be built with the same value.  On 32-bit targets (ARM, RV32, LA32)
+	  the option is a no-op by construction: ARKRTOS_SVC_WIDE_ARGS also
+	  requires __SIZEOF_LONG__ > 4.  Off (default) changes nothing on any
+	  target: the slot type, the block bytes and the dispatcher are
+	  byte-for-byte what they were before this option existed.
+
+	  Not covered: kernelsrc/sdk/mini_sdk/arkc stays u32-based (it is
+	  compiled separately from arkc's deployment manifest and never sees
+	  these headers).  The SVC return register is only 32 bits, so in the
+	  wide build a mempool block above 4 GB yields 0 plus a one-shot log
+	  line rather than a truncated address.
+
 config ARKRTOS_LINUX_ABI_SYSSTAT
 	bool "Per-number syscall histogram for the Linux ABI (lxstat)"
 	depends on ARKRTOS_USE_LINUX_ABI
