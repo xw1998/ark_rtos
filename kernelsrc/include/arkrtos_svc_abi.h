@@ -33,6 +33,55 @@
 #ifndef __ARKRTOS_SVC_ABI_H__
 #define __ARKRTOS_SVC_ABI_H__
 
+/* ------------------------------------------------------------------
+ * 参数块字宽（U-18 剩余项：native SVC 的参数块）
+ * @brief 历史上 native SVC 的参数块固定是 32 位字数组（内核按 uint32*
+ *        解引用，SDK 用 uint32 parameters[]），于是窗口 VA 高于 4 GB 时
+ *        App 放进块里的指针必被截断，内核的 user_ro_ok 一校验就拒——
+ *        宽 VA 只通到了装载器与 Linux ABI，native SVC 这一半还卡在 32 位。
+ *
+ *        打开 ARKRTOS_USE_WIDE_SVC_ARGS 后参数块改成「原生字宽」数组：
+ *          - 64 位目标：每个字 8 字节，指针字段不再截断；
+ *          - 32 位目标：unsigned long 本身就是 4 字节，与原来逐字节相同
+ *            （所以这个开关在 32 位目标上是空的）。
+ *
+ *        字宽变了必须能被认出来，否则窄档内核会把 8 字节块按 4 字节解，
+ *        读出一组「看着合理」的错参数。因此宽档把子命令字置上 bit31：
+ *          - 宽档内核读到没有标记的块 -> 拒绝并打一行一次性日志；
+ *          - 窄档内核读到带标记的块 -> 子命令号不匹配任何 case，落到
+ *            default，调用失败而不是碰巧成功。
+ *        两种构建混用会失败，不会给出看似权威的错答案；但混用仍然是
+ *        配置错误：内核与 App 必须用同一个开关编译（SDK 头跟着变）。
+ *
+ *        默认 0：默认档的代码、体积与行为零变化。
+ * ------------------------------------------------------------------ */
+#ifndef ARKRTOS_USE_WIDE_SVC_ARGS
+#define ARKRTOS_USE_WIDE_SVC_ARGS       0
+#endif
+
+#if (ARKRTOS_USE_WIDE_SVC_ARGS == 1) && defined(__SIZEOF_LONG__) && (__SIZEOF_LONG__ > 4)
+#define ARKRTOS_SVC_WIDE_ARGS           1
+#else
+#define ARKRTOS_SVC_WIDE_ARGS           0
+#endif
+
+#if (ARKRTOS_SVC_WIDE_ARGS == 1)
+/** @brief 参数块里的一个字：原生指针宽度（宽档 = 8 字节）。 */
+typedef unsigned long arkrtos_svc_arg_t;
+#define ARKRTOS_SVC_SUB_WORD            (0x80000000UL)
+/** @brief 宽档写子命令字：置位标记，窄档内核据此拒绝而不是误读。 */
+#define ARKRTOS_SVC_SUB(sub)            ((arkrtos_svc_arg_t)((unsigned long)(sub) | ARKRTOS_SVC_SUB_WORD))
+/** @brief 从子命令字取回子命令号（两档都能用）。 */
+#define ARKRTOS_SVC_SUB_OF(w)           ((unsigned long)(w) & ~ARKRTOS_SVC_SUB_WORD)
+/** @brief 参数块里 n 个 32 位字对应的字节数：窄档 n，宽档 2n。 */
+#define ARKRTOS_SVC_ARG_BYTES(n)        ((unsigned long)(n) * (sizeof(arkrtos_svc_arg_t) / 4u))
+#else
+typedef unsigned int arkrtos_svc_arg_t;
+#define ARKRTOS_SVC_SUB(sub)            ((arkrtos_svc_arg_t)(sub))
+#define ARKRTOS_SVC_SUB_OF(w)           ((unsigned long)(w))
+#define ARKRTOS_SVC_ARG_BYTES(n)        ((unsigned long)(n))
+#endif
+
 /* ARKRTOS_SVC_DEV_IO (0x10) - device open / read / write / ctrl / close */
 #define ARKRTOS_DEV_SUB_OPEN                 (1u)
 #define ARKRTOS_DEV_SUB_READ                 (2u)

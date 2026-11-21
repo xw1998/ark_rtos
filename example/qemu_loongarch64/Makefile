@@ -206,6 +206,14 @@ endif
 HELLO_SRC := example/qemu_loongarch64/elf/hello.c
 HELLO_ELF := $(BUILD)/hello.elf
 
+# 宽参 ABI（U-18 剩余项）的夹具侧开关：非空时 hello.elf 按原生字宽填参数块，
+# 子命令字置 bit31。内核侧同一档用 EXTRA_CFLAGS=-DARKRTOS_USE_WIDE_SVC_ARGS=1
+# 打开；两边必须是同一档，否则内核会拒绝窄块并打一行一次性日志。
+WIDE_SVC ?=
+ifneq ($(WIDE_SVC),)
+HELLO_WIDE_DEF := -DARK_WIDE_ARGS=1
+endif
+
 # 签名门（ARKRTOS_USE_EXEC_SIGN）：签名必须在**生成 blob 之前**做完。
 # 先转数组后签名，镜像里装的就是未签名的副本，板端会拒绝自己刚写进去的
 # 程序——这种假红最容易让人以为是装载器坏了。所以链路固定成
@@ -221,7 +229,7 @@ HELLO_BAD_H    := $(BUILD)/hello_bad_blob.h
 $(HELLO_ELF): $(HELLO_SRC)
 	@mkdir -p $(BUILD)
 	$(CC) $(ARCH_FLAGS) -O2 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
-	      -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	      -ffunction-sections -fdata-sections $(HELLO_WIDE_DEF) -Wl,--gc-sections \
 	      -Wl,-Ttext=$(WIN_ELF_BASE) -Wl,-e,_start -Wl,--strip-all \
 	      -Wl,-z,max-page-size=4096 -o $@ $< ;
 

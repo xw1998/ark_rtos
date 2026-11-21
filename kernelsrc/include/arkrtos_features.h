@@ -171,6 +171,19 @@
 #define ARKRTOS_USE_EXIT_CODE           0
 #endif
 
+/* native SVC 参数块字宽（U-18 剩余项）：0 = 参数块仍是 32 位字数组
+ * （默认档，指针字段在窗口 VA 高于 4 GB 时会被截断，宽 VA 的 App 必须
+ * 走 Linux ABI 传指针），1 = 参数块改成原生字宽（64 位目标上每字 8
+ * 字节）并给子命令字置 bit31，宽 VA 的 App 可以用 native SVC 传指针。
+ * 32 位目标上 unsigned long 就是 4 字节，开关为空档。
+ * 内核与 App 必须用同一个开关编译：混用时调用会**失败**（宽档内核拒绝
+ * 没有标记的块并打一行日志，窄档内核认不出带标记的子命令），不会给出
+ * 看似权威的错答案。协议形状见 arkrtos_svc_abi.h。
+ * 默认关：默认档的代码、体积与行为零变化。 */
+#ifndef ARKRTOS_USE_WIDE_SVC_ARGS
+#define ARKRTOS_USE_WIDE_SVC_ARGS       0
+#endif
+
 /* 分页帧池（U-3）：0 = 关（port 不定义帧池、四个接口退化成返回 -1/0），
  * 1 = port 在板级给定的物理区间里维护一个 4 KB 页帧位图，提供
  * alloc/free/total/used 四个接口，并在 la_mmu_init() 里给帧池补一条

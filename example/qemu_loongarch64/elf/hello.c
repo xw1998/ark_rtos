@@ -35,13 +35,23 @@
 #define ARK_DEV_SUB_WRITE       3u
 #define ARK_THREAD_SUB_EXIT_CODE 4u
 
-/* 参数块是 **32 位字** 的数组，这是内核 SVC 协议的既有形状（内核侧按
- * uint32* 解引用），不是本程序的偏好：64 位程序的指针也必须以 32 位字传。
- * 用户窗口在 0x02000000，栈也在其中，所以截到 32 位不丢信息——但这是
- * 一条真实的边界，写在这里免得后来者以为可以塞 64 位地址。 */
-typedef unsigned int ark_u32;
+/* 参数块的字宽有两种档，编译期定死（U-18 剩余项）：
+ *  - 默认档：32 位字，内核按 uint32* 解引用，用户窗口在 0x02000000，
+ *    截到 32 位不丢信息——但这是真实的边界，写在这里免得后来者以为
+ *    可以塞 64 位地址；
+ *  - ARK_WIDE_ARGS（配合内核的 ARKRTOS_USE_WIDE_SVC_ARGS=1）：原生字宽，
+ *    每字 8 字节，指针字段原样传，窗口 VA 高于 4 GB 也装得下。
+ * 宽档还必须把子命令字置 bit31：内核据此认出「这是 8 字节块」，
+ * 否则窄档内核会把 8 字节块按 4 字节解、读出一组看着合理的错参数。 */
+#if defined(ARK_WIDE_ARGS)
+typedef unsigned long ark_arg;
+#define ARK_SUB(s)   ((ark_arg)((unsigned long)(s) | 0x80000000UL))
+#else
+typedef unsigned int  ark_arg;
+#define ARK_SUB(s)   ((ark_arg)(s))
+#endif
 
-static int ark_svc_dev_io(ark_u32 *params)
+static int ark_svc_dev_io(ark_arg *params)
 {
     register unsigned long a0 __asm__("a0") = (unsigned long)params;
 
@@ -49,7 +59,7 @@ static int ark_svc_dev_io(ark_u32 *params)
     return (int)a0;
 }
 
-static int ark_svc_thread_ctrl(ark_u32 *params)
+static int ark_svc_thread_ctrl(ark_arg *params)
 {
     register unsigned long a0 __asm__("a0") = (unsigned long)params;
 
@@ -75,16 +85,16 @@ static int g_console = -1;
 
 static void out(const char *s)
 {
-    ark_u32 params[4];
+    ark_arg params[4];
 
     if ((g_console < 0) || (s == 0))
     {
         return;
     }
-    params[0] = ARK_DEV_SUB_WRITE;
-    params[1] = (ark_u32)g_console;
-    params[2] = (ark_u32)(unsigned long)s;
-    params[3] = (ark_u32)str_len(s);
+    params[0] = ARK_SUB(ARK_DEV_SUB_WRITE);
+    params[1] = (ark_arg)g_console;
+    params[2] = (ark_arg)(unsigned long)s;
+    params[3] = (ark_arg)str_len(s);
     (void)ark_svc_dev_io(params);
 }
 
@@ -127,11 +137,11 @@ static void out_num(long v)
 
 static void open_console(void)
 {
-    ark_u32 params[4];
+    ark_arg params[4];
     static char dev_name[] = "ttyS0";
 
-    params[0] = ARK_DEV_SUB_OPEN;
-    params[1] = (ark_u32)(unsigned long)dev_name;
+    params[0] = ARK_SUB(ARK_DEV_SUB_OPEN);
+    params[1] = (ark_arg)(unsigned long)dev_name;
     params[2] = 0u;
     params[3] = 0u;
     g_console = ark_svc_dev_io(params);
@@ -200,10 +210,10 @@ void hello_main(unsigned long sp)
      * U-8：退出码就是 argc，于是 exec 打印的 exit code 与上面打印的 argc
      * 是同一个数，两个读数能互相对证。 */
     {
-        ark_u32 params[6];
+        ark_arg params[6];
 
-        params[0] = ARK_THREAD_SUB_EXIT_CODE;
-        params[1] = (ark_u32)argc;
+        params[0] = ARK_SUB(ARK_THREAD_SUB_EXIT_CODE);
+        params[1] = (ark_arg)argc;
         params[2] = 0u;
         params[3] = 0u;
         params[4] = 0u;

@@ -2422,7 +2422,7 @@ int arkrtos_win_snprintf_s(char *dst, uint32 dst_size, const char *fmt, ...)
  * layer can guess at.
  * ========================================================================== */
 
-ARKRTOS_SVC_DECL_1(int32, 0x1E, arkrtos_call_net, uint32 *);
+ARKRTOS_SVC_DECL_1(int32, 0x1E, arkrtos_call_net, arkrtos_svc_arg_t *);
 
 /* Budget for a call that waits on the service task rather than on the
  * network. The reply is a scheduling delay; a whole second is already far
@@ -2508,10 +2508,10 @@ static int arkrtos_posix_net_ctl(uint32 *p, int32 *out)
  * Zero ready bits is a valid answer, not an error. */
 static int32 arkrtos_posix_net_bits(uint32 handle, uint32 flags)
 {
-    uint32 p[ARKRTOS_NET_ARG_WORDS] = {0u};
+    arkrtos_svc_arg_t p[ARKRTOS_NET_ARG_WORDS] = {0u};
     int32  r;
 
-    p[0] = ARKRTOS_NET_SUB_POLL;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_NET_SUB_POLL);
     p[1] = handle;
     p[2] = flags;
     r = arkrtos_posix_net_req(p, ARKRTOS_POSIX_NET_CMD_BUDGET_MS);
@@ -2569,10 +2569,10 @@ static arkrtos_posix_fd_t *arkrtos_posix_sock_slot(int fd)
  * has, so cleanup must not overwrite it. */
 static void arkrtos_posix_sock_return(int32 handle)
 {
-    uint32 p[ARKRTOS_NET_ARG_WORDS] = {0u};
+    arkrtos_svc_arg_t p[ARKRTOS_NET_ARG_WORDS] = {0u};
     int    saved = errno;
 
-    p[0] = ARKRTOS_NET_SUB_CLOSE;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_NET_SUB_CLOSE);
     p[1] = (uint32)handle;
     (void)arkrtos_posix_net_req(p, ARKRTOS_POSIX_NET_CMD_BUDGET_MS);
     errno = saved;
@@ -2583,10 +2583,10 @@ static void arkrtos_posix_sock_return(int32 handle)
  * used again. Returns the kernel's verdict so the caller can report it. */
 static int arkrtos_posix_sock_close(arkrtos_posix_fd_t *e)
 {
-    uint32 p[ARKRTOS_NET_ARG_WORDS] = {0u};
+    arkrtos_svc_arg_t p[ARKRTOS_NET_ARG_WORDS] = {0u};
     int32  dummy;
 
-    p[0] = ARKRTOS_NET_SUB_CLOSE;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_NET_SUB_CLOSE);
     p[1] = (uint32)e->handle;
     e->used   = 0u;
     e->kind   = ARKRTOS_POSIX_FD_FREE;
@@ -2837,7 +2837,7 @@ const char *arkrtos_posix_inet_ntop(int af, const void *src, char *dst,
 
 int arkrtos_posix_socket(int domain, int type, int protocol)
 {
-    uint32 p[ARKRTOS_NET_ARG_WORDS] = {0u};
+    arkrtos_svc_arg_t p[ARKRTOS_NET_ARG_WORDS] = {0u};
     arkrtos_posix_fd_t *e;
     int32  h;
     int    fd;
@@ -2858,7 +2858,7 @@ int arkrtos_posix_socket(int domain, int type, int protocol)
         return -1;
     }
 
-    p[0] = ARKRTOS_NET_SUB_SOCKET;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_NET_SUB_SOCKET);
     p[1] = (uint32)type;
     if(arkrtos_posix_net_ctl(p, &h) < 0)
     {
@@ -2884,7 +2884,7 @@ int arkrtos_posix_socket(int domain, int type, int protocol)
 int arkrtos_posix_bind(int fd, const struct sockaddr *addr, socklen_t len)
 {
     arkrtos_posix_fd_t *e = arkrtos_posix_sock_slot(fd);
-    uint32 p[ARKRTOS_NET_ARG_WORDS] = {0u};
+    arkrtos_svc_arg_t p[ARKRTOS_NET_ARG_WORDS] = {0u};
     uint32 ip = 0u;
     uint32 port = 0u;
     int32  r;
@@ -2897,7 +2897,7 @@ int arkrtos_posix_bind(int fd, const struct sockaddr *addr, socklen_t len)
     {
         return -1;
     }
-    p[0] = ARKRTOS_NET_SUB_BIND;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_NET_SUB_BIND);
     p[1] = (uint32)e->handle;
     p[2] = ip;
     p[3] = port;
@@ -2907,7 +2907,7 @@ int arkrtos_posix_bind(int fd, const struct sockaddr *addr, socklen_t len)
 int arkrtos_posix_listen(int fd, int backlog)
 {
     arkrtos_posix_fd_t *e = arkrtos_posix_sock_slot(fd);
-    uint32 p[ARKRTOS_NET_ARG_WORDS] = {0u};
+    arkrtos_svc_arg_t p[ARKRTOS_NET_ARG_WORDS] = {0u};
     int32  r;
 
     if(e == 0)
@@ -2921,7 +2921,7 @@ int arkrtos_posix_listen(int fd, int backlog)
         errno = EINVAL;
         return -1;
     }
-    p[0] = ARKRTOS_NET_SUB_LISTEN;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_NET_SUB_LISTEN);
     p[1] = (uint32)e->handle;
     p[2] = (uint32)backlog;
     return arkrtos_posix_net_ctl(p, &r);
@@ -2930,7 +2930,7 @@ int arkrtos_posix_listen(int fd, int backlog)
 int arkrtos_posix_accept(int fd, struct sockaddr *addr, socklen_t *len)
 {
     arkrtos_posix_fd_t *e = arkrtos_posix_sock_slot(fd);
-    uint32 p[ARKRTOS_NET_ARG_WORDS] = {0u};
+    arkrtos_svc_arg_t p[ARKRTOS_NET_ARG_WORDS] = {0u};
     arkrtos_posix_fd_t *n;
     int32  h  = 0;
     int32  r  = 0;
@@ -2941,7 +2941,7 @@ int arkrtos_posix_accept(int fd, struct sockaddr *addr, socklen_t *len)
         return -1;
     }
 
-    p[0] = ARKRTOS_NET_SUB_ACCEPT;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_NET_SUB_ACCEPT);
     p[1] = (uint32)e->handle;
 
     for(;;)
@@ -2991,17 +2991,17 @@ int arkrtos_posix_accept(int fd, struct sockaddr *addr, socklen_t *len)
 
     if((addr != 0) && (len != 0))
     {
-        uint32 q[ARKRTOS_NET_ARG_WORDS] = {0u};
+        arkrtos_svc_arg_t q[ARKRTOS_NET_ARG_WORDS] = {0u};
         uint32 ip = 0u;
         uint32 port = 0u;
 
         /* ACCEPT's reply carries no address, so ask for it separately. If that
          * fails the descriptor is still good: report "no address" by a zero
          * length instead of leaving whatever happened to be in the buffer. */
-        q[0] = ARKRTOS_NET_SUB_GETPEERNAME;
+        q[0] = ARKRTOS_SVC_SUB(ARKRTOS_NET_SUB_GETPEERNAME);
         q[1] = (uint32)h;
-        q[2] = (uint32)&ip;
-        q[3] = (uint32)&port;
+        q[2] = (arkrtos_svc_arg_t)&ip;
+        q[3] = (arkrtos_svc_arg_t)&port;
         if(arkrtos_posix_net_ctl(q, &r) < 0)
         {
             *len = 0;
@@ -3017,7 +3017,7 @@ int arkrtos_posix_accept(int fd, struct sockaddr *addr, socklen_t *len)
 int arkrtos_posix_connect(int fd, const struct sockaddr *addr, socklen_t len)
 {
     arkrtos_posix_fd_t *e = arkrtos_posix_sock_slot(fd);
-    uint32 p[ARKRTOS_NET_ARG_WORDS] = {0u};
+    arkrtos_svc_arg_t p[ARKRTOS_NET_ARG_WORDS] = {0u};
     uint32 ip = 0u;
     uint32 port = 0u;
     int32  r;
@@ -3031,7 +3031,7 @@ int arkrtos_posix_connect(int fd, const struct sockaddr *addr, socklen_t len)
         return -1;
     }
 
-    p[0] = ARKRTOS_NET_SUB_CONNECT;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_NET_SUB_CONNECT);
     p[1] = (uint32)e->handle;
     p[2] = ip;
     p[3] = port;
@@ -3068,13 +3068,13 @@ int arkrtos_posix_connect(int fd, const struct sockaddr *addr, socklen_t len)
     /* Writable means the attempt finished - not that it worked. The outcome
      * only exists in SO_ERROR, so read it rather than assume. */
     {
-        uint32 q[ARKRTOS_NET_ARG_WORDS] = {0u};
+        arkrtos_svc_arg_t q[ARKRTOS_NET_ARG_WORDS] = {0u};
         uint32 so = 0u;
 
-        q[0] = ARKRTOS_NET_SUB_GETSOCKOPT;
+        q[0] = ARKRTOS_SVC_SUB(ARKRTOS_NET_SUB_GETSOCKOPT);
         q[1] = (uint32)e->handle;
         q[2] = ARKRTOS_NET_SO_ERROR;
-        q[3] = (uint32)&so;
+        q[3] = (arkrtos_svc_arg_t)&so;
         if(arkrtos_posix_net_ctl(q, &r) < 0)
         {
             return -1;
@@ -3091,7 +3091,7 @@ int arkrtos_posix_connect(int fd, const struct sockaddr *addr, socklen_t len)
 arkrtos_ssize_t arkrtos_posix_send(int fd, const void *buf, uint32 len, int flags)
 {
     arkrtos_posix_fd_t *e = arkrtos_posix_sock_slot(fd);
-    uint32 p[ARKRTOS_NET_ARG_WORDS] = {0u};
+    arkrtos_svc_arg_t p[ARKRTOS_NET_ARG_WORDS] = {0u};
     int32  r;
 
     if(e == 0)
@@ -3103,9 +3103,9 @@ arkrtos_ssize_t arkrtos_posix_send(int fd, const void *buf, uint32 len, int flag
         return 0;               /* POSIX: nothing to send, nothing to report */
     }
 
-    p[0] = ARKRTOS_NET_SUB_SEND;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_NET_SUB_SEND);
     p[1] = (uint32)e->handle;
-    p[2] = (uint32)buf;
+    p[2] = (arkrtos_svc_arg_t)buf;
     p[3] = len;
     p[4] = (uint32)flags;
 
@@ -3143,7 +3143,7 @@ arkrtos_ssize_t arkrtos_posix_send(int fd, const void *buf, uint32 len, int flag
 arkrtos_ssize_t arkrtos_posix_recv(int fd, void *buf, uint32 len, int flags)
 {
     arkrtos_posix_fd_t *e = arkrtos_posix_sock_slot(fd);
-    uint32 p[ARKRTOS_NET_ARG_WORDS] = {0u};
+    arkrtos_svc_arg_t p[ARKRTOS_NET_ARG_WORDS] = {0u};
     int32  r;
 
     if(e == 0)
@@ -3155,9 +3155,9 @@ arkrtos_ssize_t arkrtos_posix_recv(int fd, void *buf, uint32 len, int flags)
         return 0;
     }
 
-    p[0] = ARKRTOS_NET_SUB_RECV;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_NET_SUB_RECV);
     p[1] = (uint32)e->handle;
-    p[2] = (uint32)buf;
+    p[2] = (arkrtos_svc_arg_t)buf;
     p[3] = len;
     p[4] = (uint32)flags;
 
@@ -3196,7 +3196,7 @@ arkrtos_ssize_t arkrtos_posix_sendto(int fd, const void *buf, uint32 len, int fl
                                  const struct sockaddr *addr, socklen_t addrlen)
 {
     arkrtos_posix_fd_t *e = arkrtos_posix_sock_slot(fd);
-    uint32 p[ARKRTOS_NET_ARG_WORDS] = {0u};
+    arkrtos_svc_arg_t p[ARKRTOS_NET_ARG_WORDS] = {0u};
     uint32 ip = 0u;
     uint32 port = 0u;
     int32  r;
@@ -3214,9 +3214,9 @@ arkrtos_ssize_t arkrtos_posix_sendto(int fd, const void *buf, uint32 len, int fl
         return -1;
     }
 
-    p[0] = ARKRTOS_NET_SUB_SENDTO;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_NET_SUB_SENDTO);
     p[1] = (uint32)e->handle;
-    p[2] = (uint32)buf;
+    p[2] = (arkrtos_svc_arg_t)buf;
     p[3] = len;
     p[4] = ip;
     p[5] = port;
@@ -3259,7 +3259,7 @@ arkrtos_ssize_t arkrtos_posix_recvfrom(int fd, void *buf, uint32 len, int flags,
                                    struct sockaddr *addr, socklen_t *addrlen)
 {
     arkrtos_posix_fd_t *e = arkrtos_posix_sock_slot(fd);
-    uint32 p[ARKRTOS_NET_ARG_WORDS] = {0u};
+    arkrtos_svc_arg_t p[ARKRTOS_NET_ARG_WORDS] = {0u};
     uint32 ip = 0u;
     uint32 port = 0u;
     int32  r;
@@ -3273,12 +3273,12 @@ arkrtos_ssize_t arkrtos_posix_recvfrom(int fd, void *buf, uint32 len, int flags,
         return 0;
     }
 
-    p[0] = ARKRTOS_NET_SUB_RECVFROM;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_NET_SUB_RECVFROM);
     p[1] = (uint32)e->handle;
-    p[2] = (uint32)buf;
+    p[2] = (arkrtos_svc_arg_t)buf;
     p[3] = len;
-    p[4] = (uint32)&ip;
-    p[5] = (uint32)&port;
+    p[4] = (arkrtos_svc_arg_t)&ip;
+    p[5] = (arkrtos_svc_arg_t)&port;
 
     for(;;)
     {
@@ -3321,7 +3321,7 @@ int arkrtos_posix_setsockopt(int fd, int level, int optname,
                            const void *optval, socklen_t optlen)
 {
     arkrtos_posix_fd_t *e = arkrtos_posix_sock_slot(fd);
-    uint32 p[ARKRTOS_NET_ARG_WORDS] = {0u};
+    arkrtos_svc_arg_t p[ARKRTOS_NET_ARG_WORDS] = {0u};
     int32  r;
 
     if(e == 0)
@@ -3396,7 +3396,7 @@ int arkrtos_posix_setsockopt(int fd, int level, int optname,
         {
             wire = ARKRTOS_NET_SO_SNDBUF;
         }
-        p[0] = ARKRTOS_NET_SUB_SETSOCKOPT;
+        p[0] = ARKRTOS_SVC_SUB(ARKRTOS_NET_SUB_SETSOCKOPT);
         p[1] = (uint32)e->handle;
         p[2] = wire;
         p[3] = (uint32)v;
@@ -3444,7 +3444,7 @@ int arkrtos_posix_getsockopt(int fd, int level, int optname,
 
     if(optname == SO_ERROR)
     {
-        uint32 q[ARKRTOS_NET_ARG_WORDS] = {0u};
+        arkrtos_svc_arg_t q[ARKRTOS_NET_ARG_WORDS] = {0u};
         uint32 so = 0u;
 
         if(*optlen < (socklen_t)sizeof(int))
@@ -3452,10 +3452,10 @@ int arkrtos_posix_getsockopt(int fd, int level, int optname,
             errno = EINVAL;
             return -1;
         }
-        q[0] = ARKRTOS_NET_SUB_GETSOCKOPT;
+        q[0] = ARKRTOS_SVC_SUB(ARKRTOS_NET_SUB_GETSOCKOPT);
         q[1] = (uint32)e->handle;
         q[2] = ARKRTOS_NET_SO_ERROR;
-        q[3] = (uint32)&so;
+        q[3] = (arkrtos_svc_arg_t)&so;
         if(arkrtos_posix_net_ctl(q, &r) < 0)
         {
             return -1;
@@ -3500,7 +3500,7 @@ static int arkrtos_posix_sock_name(int fd, struct sockaddr *addr, socklen_t *len
                                  uint32 sub)
 {
     arkrtos_posix_fd_t *e = arkrtos_posix_sock_slot(fd);
-    uint32 p[ARKRTOS_NET_ARG_WORDS] = {0u};
+    arkrtos_svc_arg_t p[ARKRTOS_NET_ARG_WORDS] = {0u};
     uint32 ip = 0u;
     uint32 port = 0u;
     int32  r;
@@ -3514,10 +3514,10 @@ static int arkrtos_posix_sock_name(int fd, struct sockaddr *addr, socklen_t *len
         errno = EFAULT;
         return -1;
     }
-    p[0] = sub;
+    p[0] = ARKRTOS_SVC_SUB(sub);
     p[1] = (uint32)e->handle;
-    p[2] = (uint32)&ip;
-    p[3] = (uint32)&port;
+    p[2] = (arkrtos_svc_arg_t)&ip;
+    p[3] = (arkrtos_svc_arg_t)&port;
     if(arkrtos_posix_net_ctl(p, &r) < 0)
     {
         return -1;
@@ -3539,7 +3539,7 @@ int arkrtos_posix_getpeername(int fd, struct sockaddr *addr, socklen_t *len)
 int arkrtos_posix_shutdown(int fd, int how)
 {
     arkrtos_posix_fd_t *e = arkrtos_posix_sock_slot(fd);
-    uint32 p[ARKRTOS_NET_ARG_WORDS] = {0u};
+    arkrtos_svc_arg_t p[ARKRTOS_NET_ARG_WORDS] = {0u};
     int32  r;
 
     if(e == 0)
@@ -3551,7 +3551,7 @@ int arkrtos_posix_shutdown(int fd, int how)
         errno = EINVAL;
         return -1;
     }
-    p[0] = ARKRTOS_NET_SUB_SHUTDOWN;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_NET_SUB_SHUTDOWN);
     p[1] = (uint32)e->handle;
     p[2] = (uint32)how;
     return arkrtos_posix_net_ctl(p, &r);

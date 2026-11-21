@@ -71,7 +71,7 @@ int32 arkrtos_drv_hwsafe_unregister(const char *dev_name);
 
 #define ARKRTOS_SVC_DRV_MGR           (0x14)
 
-ARKRTOS_SVC_DECL_1(int32, ARKRTOS_SVC_DRV_MGR, arkrtos_call_drv_mgr, uint32 *);
+ARKRTOS_SVC_DECL_1(int32, ARKRTOS_SVC_DRV_MGR, arkrtos_call_drv_mgr, arkrtos_svc_arg_t *);
 
 /* 以下任务/事件接口由 arkrtos_drv_oslib.c 提供 SVC 封装 */
 void   arkrtos_task_wait(uint32 ms);

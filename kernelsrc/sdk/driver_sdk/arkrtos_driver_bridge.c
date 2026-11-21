@@ -17,44 +17,44 @@
 
 int32 arkrtos_drv_register(const char *name, arkrtos_dev_drv_t *drv, uint32 dev_num)
 {
-    uint32 p[4];
-    p[0] = ARKRTOS_DRV_SUB_REGISTER;
-    p[1] = (uint32)name;
-    p[2] = (uint32)drv;
+    arkrtos_svc_arg_t p[4];
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_DRV_SUB_REGISTER);
+    p[1] = (arkrtos_svc_arg_t)name;
+    p[2] = (arkrtos_svc_arg_t)drv;
     p[3] = dev_num;
     return arkrtos_call_drv_mgr(p);
 }
 
 int32 arkrtos_drv_unregister(const char *name)
 {
-    uint32 p[4];
-    p[0] = ARKRTOS_DRV_SUB_UNREGISTER;
-    p[1] = (uint32)name;
+    arkrtos_svc_arg_t p[4];
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_DRV_SUB_UNREGISTER);
+    p[1] = (arkrtos_svc_arg_t)name;
     return arkrtos_call_drv_mgr(p);
 }
 
 int32 arkrtos_drv_get_count(void)
 {
-    uint32 p[4];
-    p[0] = ARKRTOS_DRV_SUB_COUNT;
+    arkrtos_svc_arg_t p[4];
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_DRV_SUB_COUNT);
     return arkrtos_call_drv_mgr(p);
 }
 
 int32 arkrtos_drv_hwsafe_register(const char *dev_name, arkrtos_hwsafe_fn fn)
 {
-    uint32 p[4];
-    p[0] = ARKRTOS_DRV_SUB_HSAFE_REGISTER;
-    p[1] = (uint32)dev_name;
-    p[2] = (uint32)fn;
+    arkrtos_svc_arg_t p[4];
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_DRV_SUB_HSAFE_REGISTER);
+    p[1] = (arkrtos_svc_arg_t)dev_name;
+    p[2] = (arkrtos_svc_arg_t)fn;
     p[3] = 0;
     return arkrtos_call_drv_mgr(p);
 }
 
 int32 arkrtos_drv_hwsafe_unregister(const char *dev_name)
 {
-    uint32 p[4];
-    p[0] = ARKRTOS_DRV_SUB_HSAFE_UNREGISTER;
-    p[1] = (uint32)dev_name;
+    arkrtos_svc_arg_t p[4];
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_DRV_SUB_HSAFE_UNREGISTER);
+    p[1] = (arkrtos_svc_arg_t)dev_name;
     return arkrtos_call_drv_mgr(p);
 }
 

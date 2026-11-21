@@ -11,12 +11,12 @@
 #include "arkrtos_features.h"
 #include "arkrtos_svc_abi.h"   /* SVC 子命令号：与内核同一张表 */
 
-ARKRTOS_SVC_DECL_1(int32, 0x10, arkrtos_call_dev_io, uint32 *);
+ARKRTOS_SVC_DECL_1(int32, 0x10, arkrtos_call_dev_io, arkrtos_svc_arg_t *);
 ARKRTOS_SVC_DECL_V2(0x11, arkrtos_call_task_ctrl, uint32, uint32);
 ARKRTOS_SVC_DECL_1(uint32, 0x12, arkrtos_call_sys_info, uint32);
-ARKRTOS_SVC_DECL_1(int32, 0x13, arkrtos_call_event_ctrl, uint32 *);
+ARKRTOS_SVC_DECL_1(int32, 0x13, arkrtos_call_event_ctrl, arkrtos_svc_arg_t *);
 #if (ARKRTOS_USE_ESET == 1)
-ARKRTOS_SVC_DECL_1(int32, ARKRTOS_SVC_ESET_CTRL, arkrtos_call_eset_ctrl, uint32 *);
+ARKRTOS_SVC_DECL_1(int32, ARKRTOS_SVC_ESET_CTRL, arkrtos_call_eset_ctrl, arkrtos_svc_arg_t *);
 #endif
 
 void arkrtos_task_wait(uint32 ms)
@@ -41,9 +41,9 @@ uint32 arkrtos_get_time_ms(void)
 
 int32 arkrtos_event_create(const char *name)
 {
-    uint32 p[3];
-    p[0] = 1;
-    p[1] = (uint32)name;
+    arkrtos_svc_arg_t p[3];
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_EVENT_SUB_CREATE);
+    p[1] = (arkrtos_svc_arg_t)name;
     return arkrtos_call_event_ctrl(p);
 }
 
@@ -64,8 +64,8 @@ static int32 arkrtos_drv_wait_expired(uint32 start_ms, int32 timeout)
 
 static int32 arkrtos_event_wait_raw(int32 handle, int32 timeout)
 {
-    uint32 p[3];
-    p[0] = 2;
+    arkrtos_svc_arg_t p[3];
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_EVENT_SUB_WAIT);
     p[1] = handle;
     p[2] = timeout;
     return (int32)arkrtos_call_event_ctrl(p);
@@ -96,8 +96,8 @@ int32 arkrtos_event_wait(int32 handle, int32 timeout)
 
 void arkrtos_event_set(int32 handle)
 {
-    uint32 p[3];
-    p[0] = 3;
+    arkrtos_svc_arg_t p[3];
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_EVENT_SUB_SET);
     p[1] = handle;
     arkrtos_call_event_ctrl(p);
 }
@@ -111,8 +111,8 @@ void arkrtos_event_set(int32 handle)
  * the bits when it holds.  timeout <= 0 means "wait forever". */
 int32 arkrtos_eset_create(const char *name)
 {
-    uint32 p[3];
-    p[0] = ARKRTOS_ESET_SUB_CREATE;
+    arkrtos_svc_arg_t p[3];
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_ESET_SUB_CREATE);
     p[1] = (uint32)name;
     return arkrtos_call_eset_ctrl(p);
 }
@@ -120,12 +120,12 @@ int32 arkrtos_eset_create(const char *name)
 static int32 arkrtos_drv_eset_wait_raw(int32 handle, uint32 mask, uint32 opt,
                                        uint32 *p_got, int32 timeout)
 {
-    uint32 p[6];
-    p[0] = ARKRTOS_ESET_SUB_WAIT;
+    arkrtos_svc_arg_t p[6];
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_ESET_SUB_WAIT);
     p[1] = (uint32)handle;
     p[2] = mask;
     p[3] = opt;
-    p[4] = (uint32)p_got;
+    p[4] = (arkrtos_svc_arg_t)p_got;
     p[5] = (uint32)timeout;
     return arkrtos_call_eset_ctrl(p);
 }
@@ -153,8 +153,8 @@ int32 arkrtos_eset_wait(int32 handle, uint32 mask, uint32 opt, uint32 *p_got, in
 
 int32 arkrtos_eset_set(int32 handle, uint32 mask)
 {
-    uint32 p[3];
-    p[0] = ARKRTOS_ESET_SUB_SET;
+    arkrtos_svc_arg_t p[3];
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_ESET_SUB_SET);
     p[1] = (uint32)handle;
     p[2] = mask;
     return arkrtos_call_eset_ctrl(p);
@@ -167,8 +167,8 @@ int32 arkrtos_eset_set_from_isr(int32 handle, uint32 mask)
 
 int32 arkrtos_eset_clear(int32 handle, uint32 mask)
 {
-    uint32 p[3];
-    p[0] = ARKRTOS_ESET_SUB_CLEAR;
+    arkrtos_svc_arg_t p[3];
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_ESET_SUB_CLEAR);
     p[1] = (uint32)handle;
     p[2] = mask;
     return arkrtos_call_eset_ctrl(p);
@@ -176,17 +176,17 @@ int32 arkrtos_eset_clear(int32 handle, uint32 mask)
 
 int32 arkrtos_eset_get(int32 handle, uint32 *p_flags)
 {
-    uint32 p[3];
-    p[0] = ARKRTOS_ESET_SUB_GET;
+    arkrtos_svc_arg_t p[3];
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_ESET_SUB_GET);
     p[1] = (uint32)handle;
-    p[2] = (uint32)p_flags;
+    p[2] = (arkrtos_svc_arg_t)p_flags;
     return arkrtos_call_eset_ctrl(p);
 }
 
 int32 arkrtos_eset_delete(int32 handle)
 {
-    uint32 p[3];
-    p[0] = ARKRTOS_ESET_SUB_DELETE;
+    arkrtos_svc_arg_t p[3];
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_ESET_SUB_DELETE);
     p[1] = (uint32)handle;
     return arkrtos_call_eset_ctrl(p);
 }
@@ -199,32 +199,32 @@ int32 arkrtos_eset_delete(int32 handle)
  * kernel only has to filter by level and push the bytes out. One level
  * setting therefore applies to the kernel and to every App / driver.
  * ============================================================ */
-ARKRTOS_SVC_DECL_3(int32, 0x19, arkrtos_call_log, uint32, uint32, uint32);
-ARKRTOS_SVC_DECL_1(int32, 0x1A, arkrtos_call_shell_svc, uint32 *);
+ARKRTOS_SVC_DECL_3(int32, 0x19, arkrtos_call_log, arkrtos_svc_arg_t, arkrtos_svc_arg_t, arkrtos_svc_arg_t);
+ARKRTOS_SVC_DECL_1(int32, 0x1A, arkrtos_call_shell_svc, arkrtos_svc_arg_t *);
 
 int32 arkrtos_log_print(uint32 level, const char *tag, const char *msg)
 {
-    return arkrtos_call_log(level, (uint32)tag, (uint32)msg);
+    return arkrtos_call_log(level, (arkrtos_svc_arg_t)tag, (arkrtos_svc_arg_t)msg);
 }
 
 int32 arkrtos_shell_cmd_register(const arkrtos_ushell_cmd_t *cmd)
 {
-    uint32 p[3];
-    p[0] = 1; p[1] = (uint32)cmd; p[2] = 0;
+    arkrtos_svc_arg_t p[3];
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SHELL_SUB_REGISTER); p[1] = (arkrtos_svc_arg_t)cmd; p[2] = 0;
     return arkrtos_call_shell_svc(p);
 }
 
 int32 arkrtos_shell_cmd_unregister(const char *name)
 {
-    uint32 p[3];
-    p[0] = 2; p[1] = (uint32)name; p[2] = 0;
+    arkrtos_svc_arg_t p[3];
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SHELL_SUB_UNREGISTER); p[1] = (arkrtos_svc_arg_t)name; p[2] = 0;
     return arkrtos_call_shell_svc(p);
 }
 
 int32 arkrtos_shell_print(const char *msg)
 {
-    uint32 p[3];
-    p[0] = 3; p[1] = (uint32)msg; p[2] = 0;
+    arkrtos_svc_arg_t p[3];
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SHELL_SUB_PRINT); p[1] = (arkrtos_svc_arg_t)msg; p[2] = 0;
     return arkrtos_call_shell_svc(p);
 }
 
@@ -235,27 +235,27 @@ int32 arkrtos_shell_print(const char *msg)
  * asked for across the SVC boundary. The entry point and the stack window are
  * validated kernel side against the caller's own regions.
  * ============================================================ */
-ARKRTOS_SVC_DECL_1(int32, 0x1B, arkrtos_call_thread_ctrl, uint32 *);
+ARKRTOS_SVC_DECL_1(int32, 0x1B, arkrtos_call_thread_ctrl, arkrtos_svc_arg_t *);
 
 int32 arkrtos_thread_create(void (*entry)(void), void *stack, uint32 stack_size,
                           uint32 priority, uint32 period_ms)
 {
-    uint32 p[6];
-    p[0] = 1; p[1] = (uint32)entry; p[2] = (uint32)stack;
+    arkrtos_svc_arg_t p[6];
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_THREAD_SUB_CREATE); p[1] = (arkrtos_svc_arg_t)entry; p[2] = (arkrtos_svc_arg_t)stack;
     p[3] = stack_size; p[4] = priority; p[5] = period_ms;
     return arkrtos_call_thread_ctrl(p);
 }
 
 int32 arkrtos_thread_self(void)
 {
-    uint32 p[6];
-    p[0] = 2; p[1] = 0; p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
+    arkrtos_svc_arg_t p[6];
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_THREAD_SUB_SELF); p[1] = 0; p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
     return arkrtos_call_thread_ctrl(p);
 }
 
 void arkrtos_thread_exit(void)
 {
-    uint32 p[6];
-    p[0] = 3; p[1] = 0; p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
+    arkrtos_svc_arg_t p[6];
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_THREAD_SUB_EXIT); p[1] = 0; p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
     (void)arkrtos_call_thread_ctrl(p);
 }

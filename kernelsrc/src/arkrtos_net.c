@@ -86,7 +86,8 @@ typedef char arkrtos_net_sock_rows_must_match_init[ARKRTOS_NET_MAX_SOCKETS == 4 
 static volatile uint32 g_net_req_state;
 static int32  g_net_req_owner;
 static volatile int32 g_net_req_result;
-static uint32 g_net_req_arg[ARKRTOS_NET_ARG_WORDS];
+/* 请求槽：参数块按字宽存放（宽档每字 8 字节），见 arkrtos_svc_abi.h。 */
+static arkrtos_svc_arg_t g_net_req_arg[ARKRTOS_NET_ARG_WORDS];
 
 static int32  g_net_mq = -1;
 static uint32 g_net_task_stack[ARKRTOS_NET_TASK_STACK_WORDS];
@@ -305,7 +306,7 @@ static int32 arkrtos_net_do_connect(int32 owner, uint32 handle, uint32 ip, uint3
     return 0;
 }
 
-static int32 arkrtos_net_do_send(int32 owner, uint32 handle, uint32 buf,
+static int32 arkrtos_net_do_send(int32 owner, uint32 handle, arkrtos_svc_arg_t buf,
                                uint32 len, uint32 flags)
 {
     arkrtos_net_sock_t *s = arkrtos_net_own(handle, owner);
@@ -323,7 +324,7 @@ static int32 arkrtos_net_do_send(int32 owner, uint32 handle, uint32 buf,
     return r;
 }
 
-static int32 arkrtos_net_do_recv(int32 owner, uint32 handle, uint32 buf,
+static int32 arkrtos_net_do_recv(int32 owner, uint32 handle, arkrtos_svc_arg_t buf,
                                uint32 len, uint32 flags)
 {
     arkrtos_net_sock_t *s = arkrtos_net_own(handle, owner);
@@ -341,7 +342,7 @@ static int32 arkrtos_net_do_recv(int32 owner, uint32 handle, uint32 buf,
     return r;
 }
 
-static int32 arkrtos_net_do_sendto(int32 owner, uint32 handle, uint32 buf,
+static int32 arkrtos_net_do_sendto(int32 owner, uint32 handle, arkrtos_svc_arg_t buf,
                                  uint32 len, uint32 ip, uint32 port)
 {
     arkrtos_net_sock_t *s = arkrtos_net_own(handle, owner);
@@ -363,8 +364,10 @@ static int32 arkrtos_net_do_sendto(int32 owner, uint32 handle, uint32 buf,
     return r;
 }
 
-static int32 arkrtos_net_do_recvfrom(int32 owner, uint32 handle, uint32 buf,
-                                   uint32 len, uint32 ip_out, uint32 port_out)
+static int32 arkrtos_net_do_recvfrom(int32 owner, uint32 handle,
+                                   arkrtos_svc_arg_t buf, uint32 len,
+                                   arkrtos_svc_arg_t ip_out,
+                                   arkrtos_svc_arg_t port_out)
 {
     arkrtos_net_sock_t *s = arkrtos_net_own(handle, owner);
     struct sockaddr_in from;
@@ -447,7 +450,7 @@ static int32 arkrtos_net_do_setsockopt(int32 owner, uint32 handle,
 }
 
 static int32 arkrtos_net_do_getsockopt(int32 owner, uint32 handle,
-                                     uint32 opt, uint32 value_out)
+                                     uint32 opt, arkrtos_svc_arg_t value_out)
 {
     arkrtos_net_sock_t *s = arkrtos_net_own(handle, owner);
     int  v = 0;
@@ -472,8 +475,9 @@ static int32 arkrtos_net_do_getsockopt(int32 owner, uint32 handle,
     return 0;
 }
 
-static int32 arkrtos_net_do_name(int32 owner, uint32 handle, uint32 ip_out,
-                               uint32 port_out, uint8 peer)
+static int32 arkrtos_net_do_name(int32 owner, uint32 handle,
+                               arkrtos_svc_arg_t ip_out,
+                               arkrtos_svc_arg_t port_out, uint8 peer)
 {
     arkrtos_net_sock_t *s = arkrtos_net_own(handle, owner);
     struct sockaddr_in sa;
@@ -571,10 +575,10 @@ static int32 arkrtos_net_do_poll(int32 owner, uint32 handle, uint32 flags)
 
 static int32 arkrtos_net_exec(void)
 {
-    uint32 *p     = g_net_req_arg;
+    arkrtos_svc_arg_t *p = g_net_req_arg;
     int32   owner = g_net_req_owner;
 
-    switch(p[0])
+    switch(ARKRTOS_SVC_SUB_OF(p[0]))
     {
     case ARKRTOS_NET_SUB_SOCKET:
         return arkrtos_net_do_socket(owner, p[1]);
@@ -676,13 +680,13 @@ uint8 arkrtos_net_ready(void)
 
 /* Every sub command whose only requirement is "the handle belongs to the
  * caller". */
-static int32 net_validate_own(const uint32 *p)
+static int32 net_validate_own(const arkrtos_svc_arg_t *p)
 {
     return (arkrtos_net_own(p[1], arkrtos_current_task_id) != 0)
            ? 0 : ARKRTOS_NET_EINVAL;
 }
 
-static int32 net_validate_listen(const uint32 *p)
+static int32 net_validate_listen(const arkrtos_svc_arg_t *p)
 {
     if(net_validate_own(p) != 0)
     {
@@ -694,7 +698,7 @@ static int32 net_validate_listen(const uint32 *p)
 /* send() and sendto(): the payload is read out of the caller's buffer, so it
  * has to be a readable user range whenever there is anything to read. Both
  * sub commands carry the same argument shape, so one check serves both. */
-static int32 net_validate_send(const uint32 *p)
+static int32 net_validate_send(const arkrtos_svc_arg_t *p)
 {
     if((net_validate_own(p) != 0) || (p[3] > 0xFFFFu))
     {
@@ -710,7 +714,7 @@ static int32 net_validate_send(const uint32 *p)
 
 /* recv(): the payload is written into the caller's buffer, and a zero length
  * would be a call that can never make progress. */
-static int32 net_validate_recv(const uint32 *p)
+static int32 net_validate_recv(const arkrtos_svc_arg_t *p)
 {
     if((net_validate_own(p) != 0) ||
        (p[3] == 0u) || (p[3] > 0xFFFFu))
@@ -726,7 +730,7 @@ static int32 net_validate_recv(const uint32 *p)
 
 /* recvfrom(): the recv() contract plus two optional 4-byte outputs for the
  * peer address and port. */
-static int32 net_validate_recvfrom(const uint32 *p)
+static int32 net_validate_recvfrom(const arkrtos_svc_arg_t *p)
 {
     if(net_validate_recv(p) != 0)
     {
@@ -743,7 +747,7 @@ static int32 net_validate_recvfrom(const uint32 *p)
 }
 
 /* getsockopt(): one optional 4-byte output. */
-static int32 net_validate_getsockopt(const uint32 *p)
+static int32 net_validate_getsockopt(const arkrtos_svc_arg_t *p)
 {
     if(net_validate_own(p) != 0)
     {
@@ -758,7 +762,7 @@ static int32 net_validate_getsockopt(const uint32 *p)
 }
 
 /* getsockname() and getpeername(): two optional 4-byte outputs. */
-static int32 net_validate_name(const uint32 *p)
+static int32 net_validate_name(const arkrtos_svc_arg_t *p)
 {
     if(net_validate_own(p) != 0)
     {
@@ -774,7 +778,7 @@ static int32 net_validate_name(const uint32 *p)
     return 0;
 }
 
-static int32 net_validate_shutdown(const uint32 *p)
+static int32 net_validate_shutdown(const arkrtos_svc_arg_t *p)
 {
     if(net_validate_own(p) != 0)
     {
@@ -783,7 +787,7 @@ static int32 net_validate_shutdown(const uint32 *p)
     return (p[2] <= (uint32)ARKRTOS_NET_SHUT_RDWR) ? 0 : ARKRTOS_NET_EINVAL;
 }
 
-static int32 net_validate_poll(const uint32 *p)
+static int32 net_validate_poll(const arkrtos_svc_arg_t *p)
 {
     if(net_validate_own(p) != 0)
     {
@@ -801,9 +805,9 @@ static int32 net_validate_poll(const uint32 *p)
 /* Everything the kernel is about to dereference gets checked here, in the
  * caller's own context (the window checks read the current task). The switch
  * only routes each sub command to the check for its argument shape. */
-static int32 arkrtos_net_validate(const uint32 *p)
+static int32 arkrtos_net_validate(const arkrtos_svc_arg_t *p)
 {
-    switch(p[0])
+    switch(ARKRTOS_SVC_SUB_OF(p[0]))
     {
     case ARKRTOS_NET_SUB_SOCKET:
         if((p[1] != (uint32)ARKRTOS_NET_SOCK_STREAM) &&
@@ -855,7 +859,7 @@ static int32 arkrtos_net_validate(const uint32 *p)
  * block is compared, not just the sub command: two different sockets in two
  * send() calls are two different requests, and handing one the other's reply
  * would be a wrong answer that looks like a right one. */
-static uint8 arkrtos_net_same_args(const uint32 *p)
+static uint8 arkrtos_net_same_args(const arkrtos_svc_arg_t *p)
 {
     uint32 i;
 
@@ -871,19 +875,25 @@ static uint8 arkrtos_net_same_args(const uint32 *p)
 
 int32 arkrtos_net_svc(void *p_svc_ctx)
 {
-    uint32 *p;
+    arkrtos_svc_arg_t *p;
     uint32  op;
     uint32  msg;
     uint32  i;
     int32   r;
 
-    p = (uint32 *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
-    if(arkrtos_kernel_svc_args_ok(p, (uint32)(ARKRTOS_NET_ARG_WORDS * 4u)) == 0u)
+    p = (arkrtos_svc_arg_t *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+#if (ARKRTOS_SVC_WIDE_ARGS == 1)
+    if(arkrtos_kernel_svc_wide_ok(p) == 0u)
+    {
+        return ARKRTOS_NET_EINVAL;
+    }
+#endif
+    if(arkrtos_kernel_svc_args_ok(p, (uint32)ARKRTOS_SVC_ARG_BYTES(ARKRTOS_NET_ARG_WORDS * 4u)) == 0u)
     {
         return ARKRTOS_NET_EINVAL;
     }
 
-    op = p[0];
+    op = (uint32)ARKRTOS_SVC_SUB_OF(p[0]);
 
     if(op == ARKRTOS_NET_SUB_QUERY)
     {

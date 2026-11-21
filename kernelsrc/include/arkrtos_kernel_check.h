@@ -37,4 +37,28 @@ uint8 arkrtos_kernel_user_ro_ok(const void *p, uint32 len);
  * caller's own firmware window (string literals). */
 uint8 arkrtos_kernel_user_name_ok(const void *p, uint32 len);
 
+/* 参数块字宽（U-18 剩余项，协议形状见 arkrtos_svc_abi.h）。
+ *
+ * 宽档（ARKRTOS_SVC_WIDE_ARGS == 1）内核只认带 ARKRTOS_SVC_SUB_WORD 标记的
+ * 参数块：窄档 App 的 32 位块若按 8 字节解，每个参数都会混进下一个参数的
+ * 高半截，读出一组「看着合理」的错参数。第一次拒绝打一行日志，
+ * 1 = 块可用，0 = 拒绝（调用方回负值，不做任何解引用）。 */
+#if (ARKRTOS_SVC_WIDE_ARGS == 1)
+uint8 arkrtos_kernel_svc_wide_ok(const void *p_blk);
+
+/* 取到参数块之后立刻过一遍字宽守卫：拒绝就回 -1 并返回。 */
+#define SVC_WIDE_GUARD(p_svc_ctx, p)                                       \
+    do                                                                     \
+    {                                                                      \
+        if(arkrtos_kernel_svc_wide_ok(p) == 0u)                            \
+        {                                                                  \
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));                      \
+            return;                                                        \
+        }                                                                  \
+    } while(0)
+#else
+/* 窄档没有字宽可判：块本来就是 32 位字，这一句展开成空语句。 */
+#define SVC_WIDE_GUARD(p_svc_ctx, p)   do { } while(0)
+#endif
+
 #endif /* __ARKRTOS_KERNEL_CHECK_H__ */
