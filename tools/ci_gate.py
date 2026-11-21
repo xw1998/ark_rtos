@@ -1532,6 +1532,28 @@ def check_stack_guard():
         fail("stack-guard", txt[-260:])
 
 
+def check_svc_wide():
+    """宽参 ABI（ARKRTOS_USE_WIDE_SVC_ARGS）的拒绝路径与清空顺序都必须有读数。
+
+    宽内核 + 窄 App 时，旧实现只回 -1，App 在用户态继续跑、每条 SVC 都读错
+    参数，串口上看起来就是"卡住"——与"内核没收到调用"不可区分。现在拒绝路径
+    必须终止调用任务，这样 exec/wait 才能观察到「干净失败」。
+    tools/svc_wide_gate.py 钉住四件事：守卫真的调了 reject、reject 真的杀了任务、
+    15 个取参数块的 svc_* 入口都过守卫、Linux 兼容层状态在新任务起跑前清空；
+    并且带 6 条变异自检（破坏任一条断言必须报红）。
+
+    不覆盖：宽档运行期读数本身（QEMU 三档取证见 docs/SVC服务号与子命令表.md）。
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "svc_wide_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "SVC-WIDE-GATE OK" in txt:
+        ok("svc-wide",
+           "reject kills the caller / 15 guard sites / linux abi state reset "
+           "before elf_start_task / 6 mutation self-checks")
+    else:
+        fail("svc-wide", txt[-260:])
+
+
 def check_linux_abi():
     """Linux 系统调用 ABI（ARKRTOS_USE_LINUX_ABI）必须两头都是读数。
 
@@ -1838,6 +1860,7 @@ LOCAL_TOOLCHAIN = {
     "modld": "LA64 / RV32 / LA32 cross gcc",
     "payload-sign": "LA64 cross gcc",
     "stack-guard": "LA64 / RV32 cross gcc",
+    "svc-wide": "pure python (source assertions)",
     "dynlink": "LA64 cross gcc + qemu-system-loongarch64",
     "realbin": "LA64 cross gcc (+ loongarch64-linux-gnu-readelf for one check)",
     "sec-crc": "armclang (Keil MDK)",
@@ -1896,6 +1919,7 @@ CHECK_TABLE = (
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),
+    ("svc-wide", check_svc_wide),
     ("dynlink", check_dynlink),
     ("realbin", check_realbin),
     ("sec-crc", check_sec_crc),

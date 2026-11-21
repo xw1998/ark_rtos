@@ -41,18 +41,27 @@ uint8 arkrtos_kernel_user_name_ok(const void *p, uint32 len);
  *
  * 宽档（ARKRTOS_SVC_WIDE_ARGS == 1）内核只认带 ARKRTOS_SVC_SUB_WORD 标记的
  * 参数块：窄档 App 的 32 位块若按 8 字节解，每个参数都会混进下一个参数的
- * 高半截，读出一组「看着合理」的错参数。第一次拒绝打一行日志，
+ * 高半截，读出一组「看着合理」的错参数。
+ *
+ * 字宽不符不是「这一次调用参数不对」，而是两边根本不是同一档 ABI：同一个
+ * App 后面每一个 SVC 都会读错。所以拒绝路径不只回负值，还要终止调用任务
+ * （arkrtos_kernel_svc_wide_reject）：让 exec/wait 能观察到它结束、装载器
+ * 能记账，而不是把「内核拒绝」表现成「App 卡住」。
  * 1 = 块可用，0 = 拒绝（调用方回负值，不做任何解引用）。 */
 #if (ARKRTOS_SVC_WIDE_ARGS == 1)
 uint8 arkrtos_kernel_svc_wide_ok(const void *p_blk);
 
-/* 取到参数块之后立刻过一遍字宽守卫：拒绝就回 -1 并返回。 */
+/* 诊断 + 终止当前任务（内部调 arkrtos_task_kill_internal，不返回）。 */
+void arkrtos_kernel_svc_wide_reject(void);
+
+/* 取到参数块之后立刻过一遍字宽守卫：不符就终止调用任务（回 -1 后不返回）。 */
 #define SVC_WIDE_GUARD(p_svc_ctx, p)                                       \
     do                                                                     \
     {                                                                      \
         if(arkrtos_kernel_svc_wide_ok(p) == 0u)                            \
         {                                                                  \
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));                      \
+            arkrtos_kernel_svc_wide_reject();                              \
             return;                                                        \
         }                                                                  \
     } while(0)

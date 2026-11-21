@@ -1838,6 +1838,16 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
      * 若在这中间被 tick 切走，任务会以半配置状态被切进：跑在 M 模式看到的是
      * 特权，降权后窗口未写回看到的就是 mcause=1 mtval=0x02000000 的取指 fault
      * （5 连跑 2 败的间歇签名）。因此把 注册 → 降权 → MPU 写回 整段做成原子段。 */
+#if (ARKRTOS_USE_LINUX_ABI == 1)
+    /* 兼容层状态（fd 表、堆游标、信号表）是**内核全局**的，只能属于「正在跑
+     * 的那一个程序」。它必须在**新任务被挂进就绪集之前**清空：任务一旦进就绪
+     * 集就可能立刻被切进去，第一次 brk/mmap 就会读到上一个程序留下的游标。
+     * 实测证据：把清空留在 arkrtos_elf_exec_space 的尾部时，fixture 的 stage1
+     * brk(0) 比窗口堆基点高 8192（正是上一个程序 brk+mmap 推掉的量），
+     * 「堆游标归零」这条判据随代码布局时红时绿；挪到这里后稳定为基点。 */
+    arkrtos_linux_abi_reset();
+#endif
+
     id = elf_start_task(task_entry, stack_bottom, stack_bytes, space, tp);
     if(id <= 0)
     {
@@ -1939,11 +1949,8 @@ int32 arkrtos_elf_exec_space(const char *path, int32 argc, char *argv[],
         *p_space = space;
     }
 
-#if (ARKRTOS_USE_LINUX_ABI == 1)
-    /* 新程序起跑前清空上一个程序留下的 fd 表与堆游标：兼容层的状态是
-     * 内核全局的（一次只跑一个程序），不该被下一次 exec 继承。 */
-    arkrtos_linux_abi_reset();
-#endif
+    /* Linux 兼容层状态的清空在 elf_load 里、新任务入就绪集之前做完了
+     * （见那里的注释：放在这里会让新任务先跑一步）。 */
 
     return ARKRTOS_ELF_OK;
 }

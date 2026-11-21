@@ -571,20 +571,31 @@ void arkrtos_kernel_tick_handler(void)
  * 宽档：块里每个字都是指针宽度，子命令字带 ARKRTOS_SVC_SUB_WORD 标记。
  * 宽档内核只认带标记的块 —— 窄档 App 的 32 位块若被按 8 字节解，读出来的
  * 每个参数都混进了下一个参数的高半截，是一组「看着合理」的错参数，那是
- * 最难查的一类错答案。第一次拒绝时打一行日志，避免把配置错误误读成
- * 「内核丢了调用」。
+ * 最难查的一类错答案。
+ *
+ * 拒绝路径分两步：ok() 只回答「这块能不能按宽档解」；reject() 负责留诊断
+ * 并终止调用任务。字宽不符是整档 ABI 不匹配，后面每一个 SVC 都会读错，
+ * 所以不能只回 -1 让 App 在用户态死循环（那在串口上看起来就是"卡住"，
+ * 和"内核没收到调用"长得一样）。终止之后 exec/wait 能观察到它结束、
+ * 装载器台账能记一笔，失败是干净的。
  */
 #if (ARKRTOS_SVC_WIDE_ARGS == 1)
 uint8 arkrtos_kernel_svc_wide_ok(const void *p_blk)
 {
     const arkrtos_svc_arg_t *p = (const arkrtos_svc_arg_t *)p_blk;
-    static uint32 s_warned = 0u;
 
     if((arkrtos_kernel_user_ro_ok((const void *)p, (uint32)sizeof(arkrtos_svc_arg_t)) != 0u) &&
        (((unsigned long)p[0] & ARKRTOS_SVC_SUB_WORD) != 0u))
     {
         return 1u;
     }
+    return 0u;
+}
+
+void arkrtos_kernel_svc_wide_reject(void)
+{
+    static uint32 s_warned = 0u;
+
     if(s_warned == 0u)
     {
         s_warned = 1u;
@@ -592,7 +603,14 @@ uint8 arkrtos_kernel_svc_wide_ok(const void *p_blk)
                      "and app must be built with the same "
                      "ARKRTOS_USE_WIDE_SVC_ARGS");
     }
-    return 0u;
+    ARKRTOS_LOGI("SVC", "wide-args ABI mismatch: task %d terminated "
+                 "(it would read wrong arguments on every SVC)",
+                 (int)arkrtos_current_task_id);
+    if(arkrtos_current_task_id > 0)
+    {
+        /* 与 THREAD_SUB_KILL 同一条路径：置 INVALID、收尸、切走。 */
+        arkrtos_task_kill_internal();
+    }
 }
 
 #endif
