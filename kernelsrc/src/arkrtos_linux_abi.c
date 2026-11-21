@@ -834,17 +834,15 @@ static int32 lx_tgkill(void *p_ctx)
     return lx_sig_send(tid, sig);
 }
 
-/* 信号帧：头（magic / signo / blocked / 快照字节数）+ 整份 trap 帧。
- * 投递成功返回 0；返回 1 表示任务已被默认动作结束（调用方不要再动上下文）。 */
-static uint32 lx_signal_deliver(void *p_ctx)
+/* 从 pending 里挑一个可投递信号，并按 action 处理「忽略 / 默认忽略 / 默认停止 /
+ * 默认结束」这几种不需要铺帧的情形。
+ * 返回：0 = 无需投递（或被忽略、或没有可投递信号），调用方直接返回 0；
+ *       1 = 任务已被默认动作结束，调用方返回 1；
+ *     >1 = 选中信号号（pending 位已清，sa 经出参带出）。 */
+static uint32 lx_sig_pick(lx_sigaction_t **p_sa)
 {
     uint32 sig;
     uint32 ready;
-    uint32 fbytes;
-    uint32 total;
-    uint32 saved_blocked;
-    unsigned long fsp;
-    unsigned long insn;
     lx_sigaction_t *sa;
 
     ready = s_sig_pending & ~s_sig_blocked;
@@ -893,6 +891,21 @@ static uint32 lx_signal_deliver(void *p_ctx)
         return 1u;
     }
 
+    *p_sa = sa;
+    return sig;
+}
+
+/* 把整帧铺到用户栈上（头 + 被打断点快照）。
+ * 返回 0 = 铺好（帧址经出参带出）；1 = 本次不投递（pending 位已放回，调用方返回 0）。 */
+static uint32 lx_sig_build_frame(void *p_ctx, uint32 sig, unsigned long *p_fsp)
+{
+    uint32 fbytes;
+    uint32 total;
+    uint32 saved_blocked;
+    unsigned long fsp;
+    unsigned long insn;
+    lx_sigaction_t *sa = &s_sig[sig];
+
     /* 整帧快照：端口报不出帧长（或报得比缓冲还大）就不投递，pending 位
      * 留着，下一次系统调用返回时再试——绝不截断快照。 */
     fbytes = arkrtos_port_svc_frame_bytes();
@@ -900,7 +913,7 @@ static uint32 lx_signal_deliver(void *p_ctx)
     {
         s_sig_refused++;
         s_sig_pending |= lx_sig_bit(sig);
-        return 0u;
+        return 1u;
     }
     total = LX_SIGFRAME_HDR_BYTES + fbytes;
 
@@ -911,7 +924,7 @@ static uint32 lx_signal_deliver(void *p_ctx)
         /* handler 取不到指令：不投递，pending 位放回去，
          * 绝不把 era 指向一个读不出来的地址。 */
         s_sig_pending |= lx_sig_bit(sig);
-        return 0u;
+        return 1u;
     }
 
     /* 帧址由端口给：本 port 没有独立的异常处理栈，系统调用处理链就跑在
@@ -921,7 +934,7 @@ static uint32 lx_signal_deliver(void *p_ctx)
     if(fsp == 0UL)
     {
         s_sig_pending |= lx_sig_bit(sig);   /* 栈不够：留着，下次再试 */
-        return 0u;
+        return 1u;
     }
     saved_blocked = s_sig_blocked;
 
@@ -938,8 +951,20 @@ static uint32 lx_signal_deliver(void *p_ctx)
                             total) != 0)
     {
         s_sig_pending |= lx_sig_bit(sig);
-        return 0u;
+        return 1u;
     }
+
+    *p_fsp = fsp;
+    return 0u;
+}
+
+/* 改上下文进 handler：屏蔽字加上本信号与 sa->mask（永远不含 KILL/STOP）。
+ * 任一处 set_user_reg 失败就回滚屏蔽字并还回 pending 位。
+ * 返回 0 = 已进入 handler，1 = 没进去（调用方返回 0）。 */
+static uint32 lx_sig_install(void *p_ctx, uint32 sig, lx_sigaction_t *sa,
+                             unsigned long fsp)
+{
+    uint32 saved_blocked = s_sig_blocked;
 
     s_sig_blocked |= lx_sig_bit(sig) | (uint32)(sa->mask & 0x7FFFFFFFUL);
     s_sig_blocked &= ~(lx_sig_bit((uint32)LX_SIGKILL) |
@@ -951,11 +976,36 @@ static uint32 lx_signal_deliver(void *p_ctx)
     {
         s_sig_blocked = saved_blocked;
         s_sig_pending |= lx_sig_bit(sig);
-        return 0u;
+        return 1u;
     }
 
     ARKRTOS_SVC_RET(p_ctx, (uint32)sig);    /* handler 的第一个参数是信号号 */
     s_sig_delivered++;
+    return 0u;
+}
+
+/* 信号帧：头（magic / signo / blocked / 快照字节数）+ 整份 trap 帧。
+ * 投递成功返回 0；返回 1 表示任务已被默认动作结束（调用方不要再动上下文）。 */
+static uint32 lx_signal_deliver(void *p_ctx)
+{
+    uint32 sig;
+    unsigned long fsp;
+    lx_sigaction_t *sa;
+
+    /* 0 = 无事可做，1 = 已被默认动作结束；这两种都要原样交回调用方
+     * （返回 1 时调用方不能再去动上下文）。 */
+    sig = lx_sig_pick(&sa);
+    if(sig <= 1u)
+    {
+        return sig;
+    }
+
+    if(lx_sig_build_frame(p_ctx, sig, &fsp) != 0u)
+    {
+        return 0u;
+    }
+
+    (void)lx_sig_install(p_ctx, sig, sa, fsp);
     return 0u;
 }
 

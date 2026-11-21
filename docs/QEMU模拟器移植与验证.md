@@ -6157,6 +6157,52 @@ audit | audit: all structures self-consistent
 
 > 门禁偶发（如实记录）：本笔有一次 `ci_gate` 在 `fdt` 组报了 `overlay-selfcheck` 的「坏样本没改到东西」（13 passed / 1 failed）；单跑 `tools/fdt_gate.py` 为 **14 passed / 0 failed / FDT-GATE OK**，紧接复跑 `ci_gate` 恢复 **57 / 0 / 0**。该组是 QEMU 串口时序相关的既有偶发，与本笔改动（`arkrtos_task.c`）无因果关系，未做任何代码改动。
 
+#### 5.30.51 第四十六笔：`lx_signal_deliver()` 拆成选信号 / 铺帧 / 装上下文三段（2026-11-21）
+
+`kernelsrc/src/arkrtos_linux_abi.c` 的 `lx_signal_deliver()`（**122 行**）在每次系统调用返回前
+把待投递信号落成 Linux 风格的信号帧。一条链是三件事：**选哪个信号并按 action 处理「忽略 /
+默认动作」**、**把整帧铺到用户栈**、**把 trap 帧的 era/sp/ra 改成进 handler**。中间每一步都有
+「这次不投递、pending 位放回去、下次再试」的出口，所以原函数有十几条 `return`。
+
+| 单元 | 干什么 | 行数 |
+|---|---|---|
+| `lx_sig_pick()` | `pending & ~blocked` → 选最低号 → 清 pending 位 → `SIG_IGN` / `SIG_DFL`+默认忽略 / 默认停止 直接记数返回；其余默认动作结束任务（`128 + signo`），返回 1 | 55 |
+| `lx_sig_build_frame()` | 端口帧长非法 → 拒（`refused`）；handler 取不到指令 → 拒；端口给不出帧址 → 拒；否则填头（magic / signo / blocked / fbytes）→ **先导出被打断点快照** → `copy_to_user` 整帧。任一处失败都还回 pending 位 | 60 |
+| `lx_sig_install()` | 屏蔽字 |= 本信号 + `sa->mask`（再剔掉 KILL/STOP）→ 三次 `set_user_reg`（ERA / SP / RA）→ `SVC_RET(sig)` + `delivered++`；`set_user_reg` 任一失败回滚屏蔽字并还 pending 位 | 22 |
+| `lx_signal_deliver()` 自己 | `lx_sig_pick` → `sig <= 1` 原样返给调用方 → `lx_sig_build_frame` 失败返 0 → `lx_sig_install`（返回值丢弃，失败已自回滚）→ 返 0 | **22**（原 122） |
+
+三条口径：
+
+Ⓐ **`sig <= 1u` 的两种语义必须原样交回调用方**：0 = 无事可做（含被忽略、默认忽略、默认停止），
+1 = **任务已被默认动作结束**。返回 1 时调用方（`arkrtos_linux_abi_try`）不许再碰上下文——它已经
+退掉了。所以 `lx_sig_pick` 用「0 / 1 / 信号号(>1)」三态返回值，**不能压成布尔**。
+Ⓑ **铺帧顺序不能调换**：必须先 `frame_export`（把被打断点的现场存进内核缓冲）**再**写
+`era/sp/ra`。反过来存下来的是处理函数的现场，`sigreturn` 就回不到被打断点。这条注释从原函数
+整段搬进 `lx_sig_build_frame`，一个字没删。
+Ⓒ **三个 helper 全部「失败就自己回滚」**：pending 位与屏蔽字都由出错的那一层还原，主函数不再
+判断——所以主函数里 `(void)lx_sig_install(...)` 丢弃返回值是安全的，不是漏判。原函数里也有
+同样三条「还 pending 位」的路径，只是散在一个函数里。
+
+体积（`default` 档，`loongarch64-newlib-elf-size`，两遍同配置 `make clean` 构建）：
+
+- 改前 `text 449064 / data 448 / bss 5,128,740`
+- 改后 `text 449048 / data 448 / bss 5,128,740`
+- **−16 B**，全量告警 242 条前后一致、本文件 0 告警。
+
+端到端（**这一笔的覆盖是这一串里最强的**）：`tools/linux_abi_gate.py` 的 `qemu-readout` 项会在
+QEMU 里跑信号夹具 `example/qemu_loongarch64/elf/linux_signal.c`，判 `[sig]` 块 **31 条 check
+全部 ok**、`[sig] PASS: sigaction installed` 在、退出码 **138**（= 128 + SIGUSR1，正是
+`lx_sig_pick` 里「其余默认动作结束任务」那条路径）。31 条覆盖：动作与旧动作、kill 返回值跨处理
+函数、hits/signo、嵌套 hits/depth/rc、block/query/unblock、sigsetsize、SIGKILL、无 restorer、
+被拒动作未装上、别的 pid、sig=99、tgkill，以及 `rt_sigreturn` 之后恢复。读数 `14 条 pipe +
+31 条 sig` 全 ok，旁路演示未受影响，门禁 **13 passed / 0 failed / LINUX-ABI-GATE OK**。
+
+门禁：`tools/ci_gate.py` **57 passed / 0 failed / 0 skipped**；`tools/format_gate.py` OK 392；
+`doc_audit funcs` **3 → 2**。
+
+结论分档：**编译通过（0 告警）+ QEMU 端到端 PASS（信号夹具 31 条 check + 退出码 138）+ 静态门禁
+全绿，未上板**（QEMU 算上板，不是真机）。
+
 ### 5.31 LSX 向量寄存器上下文（U-19，2026-11-21）
 
 #### 5.31.1 缺口：FPU 档只存了一半的浮点上下文
