@@ -6203,6 +6203,50 @@ QEMU 里跑信号夹具 `example/qemu_loongarch64/elf/linux_signal.c`，判 `[si
 结论分档：**编译通过（0 告警）+ QEMU 端到端 PASS（信号夹具 31 条 check + 退出码 138）+ 静态门禁
 全绿，未上板**（QEMU 算上板，不是真机）。
 
+#### 5.30.52 第四十七笔：`ovl_find_path()` 拆成定位根 / 找子节点两段（2026-11-21）
+
+`kernelsrc/src/arkrtos_fdt_overlay.c` 的 `ovl_find_path()`（**121 行**）按绝对路径在基树里找
+节点：校验开头、定位根、然后逐段「在本层找一个名字全等的子节点、把当前位置推进到它的内容起点」。
+拆成三段：定位根、找直接子节点、逐段推进。
+
+| 单元 | 干什么 | 行数 |
+|---|---|---|
+| `ovl_root_begin()` | `path` 为空或不以 `/` 开头 → `PATH`；`off_struct + 4 > end` 或该处不是 `BEGIN_NODE` → `FORMAT`；读根节点名；`p++` 跳过前导 `/`。`/` 就是根节点时 `*pp` 指向 `'\0'`，由调用方收尾 | 31 |
+| `ovl_locate_child()` | 在 `[pos, end)` 里跨过 NOP / 属性 / 非目标子节点，按 `seg/seglen` 全等匹配；命中把子节点内容起点经出参带回并返回 `OK`；走到 `END_NODE` 或区耗尽返回 `NOT_FOUND` | 63 |
+| `ovl_find_path()` 自己 | 定位根 → `/` 直接收 → 逐段切（`//` 与尾随 `/` 都报 `PATH`）→ 调 `ovl_locate_child` 推进 → 收尾写 `*body` | **49**（原 121） |
+
+三条口径：
+
+Ⓐ **和同文件的 `ovl_find_child()` 是两件事，不能合并**：既有那个只回答「有没有」，返回 1/0、
+不给出子节点位置；`ovl_find_path` 要走多层，**必须拿到子节点内容起点**才能继续深入，所以新函数
+叫 `ovl_locate_child` 并在注释里写明分工。（第一版直接叫 `ovl_find_child` 撞了既有名字，
+编译期 `Wint-conversion` + `defined but not used` 报出来才发现——这正是「拆分参数搬运类函数编译器
+抓不到少传参数」那条旧教训的镜像：**命名冲突编译器抓得到，语义串味它抓不到**，所以名字与注释都
+必须自己写清。）
+Ⓑ **错误码语义原样保留**：`//` 与尾随 `/` 报 `ARKRTOS_FDT_ERR_PATH`（「不认，不猜」），
+区耗尽报 `NOT_FOUND` 而不是 `FORMAT`——这一点与既有 `ovl_find_child`（耗尽报 `FORMAT`）不同，
+**没有统一**，因为两者用途不同：这里「路径不存在」是正常结果，那里「内容区坏」才是异常。
+Ⓒ **`end` 只算一次**：`ovl_struct_end(bl)` 在主函数算一次，作为参数传进两段，避免两段各算一次
+（那是同一个值，但会让「树被改过」的时序问题多一个观测点）。
+
+体积（`default` 档，`loongarch64-newlib-elf-size`，两遍同配置 `make clean` 构建）：
+
+- 改前 `text 449048 / data 448 / bss 5,128,740`
+- 改后 `text 449096 / data 448 / bss 5,128,740`
+- **+48 B**（多出的两层函数调用没被完全内联），全量告警 242 条前后一致、本文件 0 告警。
+
+端到端：`tools/fdt_gate.py` 的 `qemu-overlay` 项在 QEMU 里应用一份 overlay，路径解析走的正是
+`ovl_find_path` 逐段下钻——应用前无 `overlay-demo-node`、`victim-child` 在、`victim-prop=before`、
+控制台 115200；应用后 `nodes 10→10`、`model=fdt-overlay-demo`、`current-speed 115200→9600`、
+`victim-child` 查不到、`victim-prop` 已删。7 种坏法（错 nodes / 错 model / 错属性值 / 应用前就有
+节点 / uart 没改 / 子节点没删 / 属性没删）全部被判红。门禁 **14 passed / 0 failed / FDT-GATE OK**。
+
+门禁：`tools/ci_gate.py` **57 passed / 0 failed / 0 skipped**；`tools/format_gate.py` OK 392；
+`doc_audit funcs` **2 → 1**。
+
+结论分档：**编译通过（0 告警）+ QEMU 端到端 PASS（overlay 应用路径解析）+ 静态门禁全绿，未上板**
+（QEMU 算上板，不是真机）。
+
 ### 5.31 LSX 向量寄存器上下文（U-19，2026-11-21）
 
 #### 5.31.1 缺口：FPU 档只存了一半的浮点上下文

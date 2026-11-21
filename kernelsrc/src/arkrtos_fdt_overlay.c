@@ -672,11 +672,13 @@ static int ovl_find_child(const ovl_blob_t *bl, uint32 body, const char *name)
     return ARKRTOS_FDT_ERR_FORMAT;
 }
 
-/* 按绝对路径在基树里找节点，返回它的内容起点 */
-static int ovl_find_path(const ovl_blob_t *bl, const char *path, uint32 *body)
+/* 定位根节点的内容起点：path 必须以 '/' 开头，off_struct 处必须是 BEGIN_NODE，
+ * 读出根节点名并把 p 推到前导 '/' 之后。path 恰为 "/" 时 *pp 指向 '\0'，由调用方
+ * 决定直接收根节点。 */
+static int ovl_root_begin(const ovl_blob_t *bl, const char *path, uint32 end,
+                          const char **pp, uint32 *body)
 {
     uint32 pos;
-    uint32 end = ovl_struct_end(bl);
     const char *p = path;
     const char *rootname;
     int rc;
@@ -700,6 +702,92 @@ static int ovl_find_path(const ovl_blob_t *bl, const char *path, uint32 *body)
         return rc;
     }
     p++;                                   /* 跳过前导 '/' */
+    *pp = p;
+    *body = pos;
+    return ARKRTOS_FDT_OK;
+}
+
+/* 在 pos 起始的节点内容区里按名字找直接子节点并**返回它的内容起点**（供继续深入）。
+ * 与上面那个 ovl_find_child 分工不同：那个只回答「有没有」，返回 1/0，不给出位置；
+ * 路径解析要走多层，必须拿到子节点内容起点，所以这里是另一个函数。
+ * 找遍整个区（跨过属性与非目标子节点）都没有就报 NOT_FOUND。 */
+static int ovl_locate_child(const ovl_blob_t *bl, uint32 pos, uint32 end,
+                          const char *seg, uint32 seglen, uint32 *p_next)
+{
+    uint32 cp = pos;
+    int rc;
+
+    while((cp + 4u) <= end)
+    {
+        uint32 tok = ovl_rd32(bl->b + cp);
+
+        if(tok == OVL_TOK_NOP)
+        {
+            cp += 4u;
+            continue;
+        }
+        if(tok == OVL_TOK_PROP)
+        {
+            uint32 len;
+            const char *pn;
+
+            cp += 4u;
+            rc = ovl_prop_head(bl, &cp, &len, &pn);
+            if(rc != ARKRTOS_FDT_OK)
+            {
+                return rc;
+            }
+            cp += ovl_pad4(len);
+            if(cp > end)
+            {
+                return ARKRTOS_FDT_ERR_FORMAT;
+            }
+            continue;
+        }
+        if(tok == OVL_TOK_BEGIN_NODE)
+        {
+            const char *cn;
+
+            cp += 4u;
+            rc = ovl_node_name(bl, &cp, &cn);
+            if(rc != ARKRTOS_FDT_OK)
+            {
+                return rc;
+            }
+            if(ovl_name_eq(cn, seg, seglen) != 0)
+            {
+                *p_next = cp;
+                return ARKRTOS_FDT_OK;
+            }
+            rc = ovl_skip_node(bl, &cp, 0u);
+            if(rc != ARKRTOS_FDT_OK)
+            {
+                return rc;
+            }
+            continue;
+        }
+        if(tok == OVL_TOK_END_NODE)
+        {
+            break;
+        }
+        return ARKRTOS_FDT_ERR_FORMAT;
+    }
+    return ARKRTOS_FDT_ERR_NOT_FOUND;
+}
+
+/* 按绝对路径在基树里找节点，返回它的内容起点 */
+static int ovl_find_path(const ovl_blob_t *bl, const char *path, uint32 *body)
+{
+    uint32 pos;
+    uint32 end = ovl_struct_end(bl);
+    const char *p;
+    int rc;
+
+    rc = ovl_root_begin(bl, path, end, &p, &pos);
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        return rc;
+    }
     if(*p == '\0')
     {
         *body = pos;                       /* "/" 就是根节点 */
@@ -710,8 +798,6 @@ static int ovl_find_path(const ovl_blob_t *bl, const char *path, uint32 *body)
     {
         const char *seg = p;
         uint32 seglen = 0u;
-        uint32 cp = pos;
-        uint32 found = 0u;
 
         while((p[seglen] != '\0') && (p[seglen] != '/'))
         {
@@ -721,65 +807,10 @@ static int ovl_find_path(const ovl_blob_t *bl, const char *path, uint32 *body)
         {
             return ARKRTOS_FDT_ERR_PATH;    /* "//" 不认，不猜 */
         }
-        while((cp + 4u) <= end)
+        rc = ovl_locate_child(bl, pos, end, seg, seglen, &pos);
+        if(rc != ARKRTOS_FDT_OK)
         {
-            uint32 tok = ovl_rd32(bl->b + cp);
-
-            if(tok == OVL_TOK_NOP)
-            {
-                cp += 4u;
-                continue;
-            }
-            if(tok == OVL_TOK_PROP)
-            {
-                uint32 len;
-                const char *pn;
-
-                cp += 4u;
-                rc = ovl_prop_head(bl, &cp, &len, &pn);
-                if(rc != ARKRTOS_FDT_OK)
-                {
-                    return rc;
-                }
-                cp += ovl_pad4(len);
-                if(cp > end)
-                {
-                    return ARKRTOS_FDT_ERR_FORMAT;
-                }
-                continue;
-            }
-            if(tok == OVL_TOK_BEGIN_NODE)
-            {
-                const char *cn;
-
-                cp += 4u;
-                rc = ovl_node_name(bl, &cp, &cn);
-                if(rc != ARKRTOS_FDT_OK)
-                {
-                    return rc;
-                }
-                if(ovl_name_eq(cn, seg, seglen) != 0)
-                {
-                    pos = cp;
-                    found = 1u;
-                    break;
-                }
-                rc = ovl_skip_node(bl, &cp, 0u);
-                if(rc != ARKRTOS_FDT_OK)
-                {
-                    return rc;
-                }
-                continue;
-            }
-            if(tok == OVL_TOK_END_NODE)
-            {
-                break;
-            }
-            return ARKRTOS_FDT_ERR_FORMAT;
-        }
-        if(found == 0u)
-        {
-            return ARKRTOS_FDT_ERR_NOT_FOUND;
+            return rc;
         }
         p += seglen;
         if(*p == '/')
