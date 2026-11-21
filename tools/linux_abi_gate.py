@@ -36,14 +36,17 @@
   E. 号表对账：源里的 `LX_SYS_*` 与 asm-generic 的 Linux UAPI 号逐条相等；
      LA64 的分界是「`syscall` 立即数 == 0」，RV32 的分界是 0x10..0x22 留给 Ark。
   F. QEMU 真读数：`[linux]` 的 14 条 check 全 ` ok`（一条 FAIL 都不许）、
-     `PASS: every syscall answered as specified`、`exit code 7`；并且同一次
+     `PASS: every syscall answered as specified`、`exit code 7`；`[pipe]` 的
+     14 条、`[sig]` 的 29 条同理（PASS 行 + 退出码 55 / 138）；并且同一次
      启动里 hello/modhello/FS 的读数仍在（兼容层不许把别人的演示搞坏）。
   G. 解析器自检：把合成坏日志喂给同一个判据（去掉 PASS、把退出码改成 3、
      插一行 FAIL、少一条 check），每种坏法都必须被判红。
 
-不覆盖：fork/clone、信号、父子 fd 继承（没有 fork 就没有第二个
-进程）、socket、futex、真 mmap 语义；管道（pipe2，非阻塞）已做，读数在
-`[pipe]` 块里，本门禁按行首锚点判它，不靠 [linux] 的行数（mmap/brk 只在 ELF 窗口内单调分配）。动态链接（PT_INTERP）
+不覆盖：fork/clone、父子 fd 继承（没有 fork 就没有第二个进程）、socket、
+futex、真 mmap 语义；管道（pipe2，非阻塞）已做，读数在 `[pipe]` 块；信号
+（同一任务自我投递的最小一档：rt_sigaction/rt_sigprocmask/kill/tkill/tgkill/
+rt_sigreturn）已做，读数在 `[sig]` 块。两块都按行首锚点判，不靠 [linux] 的
+行数（mmap/brk 只在 ELF 窗口内单调分配）。动态链接（PT_INTERP）
 另有专门门禁 tools/dynlink_gate.py。以上各项是明确不支持，文档
 `docs/Linux可执行文件兼容-系统调用ABI.md` 里逐条写着；本门禁不为它们背书。
 
@@ -122,6 +125,14 @@ EXPECT_SYS = {
     "MUNMAP": 215,
     "EXECVE": 221,
     "MMAP": 222,
+    "MPROTECT": 226,
+    "PREAD64": 67,
+    "KILL": 129,
+    "TKILL": 130,
+    "TGKILL": 131,
+    "RT_SIGACTION": 134,
+    "RT_SIGPROCMASK": 135,
+    "RT_SIGRETURN": 139,
 }
 
 # 程序自己打印的检查条数（linux_hello.c 里每一个 check() 一行）
@@ -130,6 +141,11 @@ EXPECT_CHECKS = 14
 # 读 5 字节 / 内容逐字节 / 空读 -EAGAIN / 关写端 / 读回 EOF / O_CLOEXEC 被拒 /
 # 第二条 pipe2 / 满时短写 / 读回 256 / 排空后再写 / 读端关掉 -EPIPE = 14 条。
 EXPECT_PIPE_CHECKS = 14
+# 信号夹具（linux_signal.c）的 check 条数：动作/旧动作、kill 返回值跨处理
+# 函数、hits/signo、嵌套 hits/depth/rc、block/query/unblock、sigsetsize、
+# SIGKILL、无 restorer、被拒动作未装上、别的 pid、sig=99、tgkill 的
+# tgid!=tid、SIG_IGN 静音、还原 SIG_DFL = 29 条。
+EXPECT_SIG_CHECKS = 29
 
 FAILS = []
 PASSES = []
@@ -376,13 +392,15 @@ def check_compile_on(la64, key_dir):
         "-nostdlib", "-nostartfiles", "-fno-builtin", "-fsyntax-only",
         "example/qemu_loongarch64/elf/linux_hello.c",
         "example/qemu_loongarch64/elf/linux_execve.c",
+        "example/qemu_loongarch64/elf/linux_pipe.c",
+        "example/qemu_loongarch64/elf/linux_signal.c",
     ])
     if prog[0] != 0:
         bads.append("elf/linux_hello.c：\n%s" % prog[1][-400:])
     if bads:
         bad("compile-on", "开档编不过 —— " + bads[0])
     else:
-        ok("compile-on", "6 个 TU 在 LA64 真板级下全编过（含两个用户程序本身）")
+        ok("compile-on", "8 个 TU 在 LA64 真板级下全编过（含四个用户程序本身）")
 
 
 # ---------------------------------------------------------------- E 号表
@@ -465,9 +483,9 @@ def run_qemu(qemu, seconds):
     th.daemon = True
     th.start()
 
-    # 取最后一块的 marker：[linux] 之后还有 execve 与 pipe 两块，等的若是
-    # [linux] finished，后面两块会被 kill 截掉（实测过）。
-    marker = b"[pipe] finished after"
+    # 取最后一块的 marker：[linux] 之后还有 pipe 与 sig 两块，等的若是
+    # [linux] finished 或 [pipe] finished，后面那一块会被 kill 截掉（实测过）。
+    marker = b"[sig] finished after"
     deadline = time.time() + seconds
     while time.time() < deadline:
         if marker in b"".join(chunks):
@@ -505,6 +523,13 @@ def judge(text):
     pipe_pass = count(lambda s: s.startswith("[pipe] PASS: pipe2 two fds"))
     pipe_exit = count(lambda s: re.search(
         r"^\[pipe\] finished after \d+ ms, exit code 55$", s) is not None)
+    sig_fail = count(lambda s: s.startswith("[sig] ") and "FAIL" in s)
+    sig_ok = count(lambda s: s.startswith("[sig] ") and s.rstrip().endswith(" ok"))
+    sig_pass = count(lambda s: s.startswith("[sig] PASS: sigaction installed"))
+    sig_exit = count(lambda s: re.search(
+        r"^\[sig\] finished after \d+ ms, exit code 138$", s) is not None)
+    sig_werr = count(lambda s: s.startswith("[sig] write /mnt/ram/linux_signal rc=0"))
+    sig_xerr = count(lambda s: s.startswith("[sig] exec rc=0"))
     werr = count(lambda s: s.startswith("[linux] write /mnt/ram/linux_hello rc=0"))
     xerr = count(lambda s: s.startswith("[linux] exec rc=0"))
 
@@ -532,6 +557,21 @@ def judge(text):
     if pipe_pass != 1:
         problems.append("缺 `[pipe] PASS: pipe2 two fds ...`")
 
+    # 信号那一块：29 条 check 一条 FAIL 都不许，PASS 行与退出码 138
+    # （默认动作是「结束任务」，内核用 128+10 表达）。
+    if sig_werr != 1:
+        problems.append("缺 `[sig] write /mnt/ram/linux_signal rc=0`（信号夹具没送进去）")
+    if sig_xerr != 1:
+        problems.append("缺 `[sig] exec rc=0`（装载器没接受信号夹具）")
+    if sig_fail != 0:
+        problems.append("信号夹具里有 %d 条 FAIL" % sig_fail)
+    if sig_ok != EXPECT_SIG_CHECKS:
+        problems.append("[sig] check 通过条数 %d != %d" % (sig_ok, EXPECT_SIG_CHECKS))
+    if sig_pass != 1:
+        problems.append("缺 `[sig] PASS: sigaction installed ...`")
+    if sig_exit != 1:
+        problems.append("缺 `[sig] finished after <ms>, exit code 138`（默认动作不是 128+signo）")
+
     # 兼容层不许把别人的演示搞坏：同一次启动里这三条必须在
     # 这些读数在 Linux 块之前一定出现（同一次启动），所以「缺了」只可能是
     # 兼容层把别人的演示搞坏了，不可能是调度顺序。
@@ -545,8 +585,8 @@ def judge(text):
         for p in problems:
             notes.append(p)
         return False, notes
-    return True, ["%d 条 check 全 ok、PASS 行与 exit code 7 都在，管道 %d 条 check 全 ok、退出码 55，旁路演示未受影响"
-                  % (EXPECT_CHECKS, EXPECT_PIPE_CHECKS)]
+    return True, ["%d 条 check 全 ok、PASS 行与 exit code 7 都在，管道 %d 条、信号 %d 条 check 全 ok（退出码 55 / 138），旁路演示未受影响"
+                  % (EXPECT_CHECKS, EXPECT_PIPE_CHECKS, EXPECT_SIG_CHECKS)]
 
 
 def self_check(good_text):
@@ -565,6 +605,10 @@ def self_check(good_text):
             "[pipe] PASS: pipe2 two fds", "[pipe] (quiet) pipe2 two fds"),
         "管道退出码改成 1": lambda s: s.replace(
             "exit code 55", "exit code 1"),
+        "去掉信号 PASS 行": lambda s: s.replace(
+            "[sig] PASS: sigaction installed", "[sig] (quiet) sigaction installed"),
+        "信号退出码改成 1": lambda s: s.replace(
+            "exit code 138", "exit code 1"),
     }
     missed = []
     for name, fn in mutations.items():
@@ -632,7 +676,7 @@ def main(argv):
                     else:
                         ok("parser-selfcheck",
                            "%d 种坏法（Linux 块缺 PASS / 错退出码 / 多 FAIL / 少 check，"
-                           "管道块去 PASS 行 / 改退出码）全被判红" % 6)
+                           "管道与信号块各去 PASS 行 / 各改退出码）全被判红" % 8)
                 else:
                     bad("qemu-readout", "；".join(notes))
                     bad("parser-selfcheck", "读数没过，自检无从谈起")

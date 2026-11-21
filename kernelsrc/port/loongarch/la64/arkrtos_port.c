@@ -2938,6 +2938,146 @@ void arkrtos_port_svc_set_ret_signed(void *p_exc_ctx, int32 value)
 }
 
 /**
+* @brief 整份 trap 帧的字节数与整块存取（信号快照用）
+* @details 信号不能只存 era/sp/ra/tp：处理函数是普通 C 函数，会把
+*          $t0 一类的临时寄存器改成自己的东西，返回后被打断的调用
+*          约定就断了（实测症状是恢复后 ld.w 用了一个已经变成 2 的
+*          基址）。所以快照必须是整帧。
+*          import 唯一不认的是 PRMD 的特权级两位：那一层由当前上下文
+*          决定，用户铺的帧不许抬高特权级。
+*/
+uint32 arkrtos_port_svc_frame_bytes(void)
+{
+    return (uint32)LA_FR_SIZE;
+}
+
+unsigned long arkrtos_port_svc_frame_reserve(void *p_exc_ctx, uint32 bytes)
+{
+    unsigned long sp_cur;
+    unsigned long need = (unsigned long)bytes + 128UL;
+    unsigned long fsp;
+    uint32 t;
+
+    /* 任务表是内核全局对象（arkrtos_cfg.h）；本文件在故障转储处已就
+     * 地声明过一份，这里同样就地声明，避免为了一个越界检查调整包含层。 */
+    extern arkrtos_task_t arkrtos_task_table[];
+    extern int32 arkrtos_task_count;
+
+    (void)p_exc_ctx;
+
+    /* 基准必须是**当前内核 sp**，不是帧里存着的那个用户 sp。
+     * 本 port 没有独立的异常处理栈：系统调用处理链就跑在用户栈下面，
+     * 帧里的 sp 往下 LA_FR_SIZE 是 trap 帧，再往下**正是当下这条调用链
+     * 正在用的栈**。按用户 sp 算出来的位置会把自己（以及本函数调用者）
+     * 的返回地址一起盖掉——实测症状是「复制刚刚走完，PC 就变成 0」，
+     * 报 INE 致命异常，且故障帧里的通用寄存器还是复制循环的中间值。
+     * 128 字节是返回链上剩余几次调用还会往下推的余量。 */
+    __asm__ volatile("move %0, $sp" : "=r"(sp_cur));
+
+    if((sp_cur == 0UL) || (sp_cur <= need))
+    {
+        return 0UL;     /* 栈上连「这一帧 + 余量」都放不下 */
+    }
+    fsp = (sp_cur - need) & ~15UL;
+
+    /* 不越过当前任务栈底：越过去就是踩栈底保护字 / 别人的内存。
+     * 找不到归属（内核栈、静态栈）时不额外限制。 */
+    for(t = 0u; t < (uint32)arkrtos_task_count; t++)
+    {
+        unsigned long bot = (unsigned long)arkrtos_task_table[t].stack_bottom;
+        unsigned long top = (unsigned long)arkrtos_task_table[t].stack_top;
+
+        if((sp_cur >= bot) && (sp_cur < top))
+        {
+            if(fsp < (bot + 64UL))
+            {
+                return 0UL;
+            }
+            break;
+        }
+    }
+
+    return fsp;
+}
+
+void arkrtos_port_svc_frame_export(void *p_exc_ctx, void *p_dst)
+{
+    la_frame_word *src = (la_frame_word *)p_exc_ctx;
+    unsigned long *dst = (unsigned long *)p_dst;
+    uint32 i;
+
+    for(i = 0u; i < LA_FR_WORDS; i++)
+    {
+        dst[i] = (unsigned long)src[i];
+    }
+}
+
+int32 arkrtos_port_svc_frame_import(void *p_exc_ctx, const void *p_src)
+{
+    la_frame_word *dst = (la_frame_word *)p_exc_ctx;
+    const unsigned long *src = (const unsigned long *)p_src;
+    la_frame_word keep_plv;
+    uint32 i;
+
+    keep_plv = dst[LA_FR_PRMD] & 3UL;
+    for(i = 0u; i < LA_FR_WORDS; i++)
+    {
+        dst[i] = (la_frame_word)src[i];
+    }
+    dst[LA_FR_PRMD] = (dst[LA_FR_PRMD] & ~3UL) | keep_plv;
+    return 0;
+}
+
+/**
+* @brief 读写用户态 trap 帧里的寄存器（信号帧保存/恢复用）
+* @details 帧布局见 arkrtos_context.S：era 在 [30]、sp 在 [2]、tp 在 [1]、
+*          a0..a7 在 [3..10]；ra 就是 [0] 那格（`.S` 的恢复路径 `ld.d $ra`）。
+*          语义编号只有四个：0 = era、1 = sp、2 = ra、3 = tp。写 era 不改
+*          PRMD：信号处理程序与被打断的代码同处 PLV3，特权级不该被这一层动。
+*/
+#define LA_UREG_ERA         (0u)
+#define LA_UREG_SP          (1u)
+#define LA_UREG_RA          (2u)
+#define LA_UREG_TP          (3u)
+
+unsigned long arkrtos_port_svc_user_reg(void *p_exc_ctx, uint32 id)
+{
+    la_frame_word *frame = (la_frame_word *)p_exc_ctx;
+
+    if(frame == 0)
+    {
+        return 0UL;
+    }
+    switch(id)
+    {
+    case LA_UREG_ERA: return (unsigned long)frame[LA_FR_ERA];
+    case LA_UREG_SP:  return (unsigned long)frame[LA_FR_SP];
+    case LA_UREG_RA:  return (unsigned long)frame[LA_FR_RA];
+    case LA_UREG_TP:  return (unsigned long)frame[LA_FR_TP];
+    default:          return 0UL;
+    }
+}
+
+int32 arkrtos_port_svc_set_user_reg(void *p_exc_ctx, uint32 id,
+                                    unsigned long value)
+{
+    la_frame_word *frame = (la_frame_word *)p_exc_ctx;
+
+    if(frame == 0)
+    {
+        return -1;
+    }
+    switch(id)
+    {
+    case LA_UREG_ERA: frame[LA_FR_ERA] = (la_frame_word)value; return 0;
+    case LA_UREG_SP:  frame[LA_FR_SP]  = (la_frame_word)value; return 0;
+    case LA_UREG_RA:  frame[LA_FR_RA]  = (la_frame_word)value; return 0;
+    case LA_UREG_TP:  frame[LA_FR_TP]  = (la_frame_word)value; return 0;
+    default:          return -1;
+    }
+}
+
+/**
 * @brief 把当前任务的 trap 帧改写成「新镜像的第一条指令」（execve 落地）
 * @details 帧布局见 arkrtos_context.S 文件头：ERA 在 [30]、PRMD 在 [31]、
 *          sp 在 [2]、tp 在 [1]、a0..a7 在 [3..10]。这张帧就是 la_trap_c

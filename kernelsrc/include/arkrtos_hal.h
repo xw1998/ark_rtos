@@ -105,6 +105,71 @@ uint32 arkrtos_port_linux_syscall_num(void *p_exc_ctx);
 void   arkrtos_port_svc_set_ret_signed(void *p_exc_ctx, int32 value);
 
 /**
+* @brief 读取用户态 trap 帧里的一个寄存器（信号帧保存/恢复用）
+* @param p_exc_ctx 系统调用入口传给内核的上下文指针
+* @param id        寄存器编号：0 = 返回地址（era / pc）、1 = 栈指针、
+*                  2 = 链接寄存器（ra / lr）、3 = 线程指针（tp）
+* @return 寄存器当前值；框架不认识该编号时返回 0
+* @details 与 ARKRTOS_SVC_ARG 同一口径：寄存器布局只在 port 层解析，
+*          内核只按语义编号取值。信号投递要在用户栈上铺一帧、把
+*          「被打断的位置」原样存下来，这一对原语就是那条缝。
+*/
+unsigned long arkrtos_port_svc_user_reg(void *p_exc_ctx, uint32 id);
+
+/**
+* @brief 写回用户态 trap 帧里的一个寄存器（信号投递/返回用）
+* @param p_exc_ctx 系统调用上下文指针
+* @param id        寄存器编号，同 arkrtos_port_svc_user_reg
+* @param value     新值
+* @return 0 = 已写入；-1 = 编号不可用或端口没有这个能力（一个字节都不动）
+* @details 端口没有该能力时由 arkrtos_linux_abi.c 里的弱定义顶住，
+*          信号相关的号一律回 -ENOSYS，不假装投递成功。
+*/
+int32 arkrtos_port_svc_set_user_reg(void *p_exc_ctx, uint32 id,
+                                    unsigned long value);
+
+/**
+* @brief trap 帧在内存里的字节数（信号快照用）
+* @return 帧长；含 FPU 时是 528，LSX 档 1040，默认档 256
+* @details 信号要「原样保存被打断的现场」，而现场不止四个寄存器：把
+*          帧整块存进用户栈，返回时整块装回去，才不会被处理函数打断
+*          一半的调用约定（$t0 一类的临时寄存器）害死。
+*/
+uint32 arkrtos_port_svc_frame_bytes(void);
+
+/**
+* @brief 在用户栈上给信号帧找一块**不和 trap 帧重叠**的地方
+* @param p_exc_ctx 系统调用上下文指针
+* @param bytes     这一帧要多少字节（头 + 快照）
+* @return 帧基址（16 字节对齐）；栈不够放时返回 0
+* @details 内核的 trap 帧就铺在用户 sp 下面 LA_FR_SIZE 字节处，这一块
+*          是内核的、不是用户栈的「空闲区」。信号帧若从 sp 直接往下放
+*          就会整块盖在 trap 帧上——实测症状是返回时 frame 里的 $t5 变成
+*          了信号 magic，随后一条 ret 跳到 0x210（= 帧长 528）。所以
+*          让端口算这个地址：帧长、对齐、保留区都只在端口里出现一次。
+*/
+unsigned long arkrtos_port_svc_frame_reserve(void *p_exc_ctx, uint32 bytes);
+
+/**
+* @brief 把整份 trap 帧拷进内核缓冲（信号投递用）
+* @param p_exc_ctx 系统调用上下文指针
+* @param p_dst     目标缓冲，至少 arkrtos_port_svc_frame_bytes() 字节
+* @details 只做整块拷贝，不改帧。
+*/
+void arkrtos_port_svc_frame_export(void *p_exc_ctx, void *p_dst);
+
+/**
+* @brief 把内核缓冲里的帧整块装回当前上下文（rt_sigreturn 用）
+* @param p_exc_ctx 系统调用上下文指针
+* @param p_src     源缓冲，至少 arkrtos_port_svc_frame_bytes() 字节
+* @return 0 = 已装回；-1 = 端口没有这个能力
+* @details 唯一被丢弃的字段是 PRMD 的特权级两位：特权级由当前上下文
+*          决定，用户写在栈上的快照不许把它抬高（否则一个用户程序可以
+*          自己铺一帧 PRMD=PLV0 再 sigreturn）。
+*/
+int32 arkrtos_port_svc_frame_import(void *p_exc_ctx, const void *p_src);
+
+/**
 * @brief 把当前任务的 trap 帧改写成「新镜像的第一条指令」（execve 的落地）
 * @param p_exc_ctx 当前系统调用的上下文指针
 * @param entry     新入口（必须在 App 窗口内、4 字节对齐）

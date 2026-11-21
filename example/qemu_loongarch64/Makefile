@@ -346,6 +346,30 @@ $(LXPIPE_H): $(LXPIPE_SIGNED) example/qemu_loongarch64/elf_blob.py
 
 $(BUILD)/example/qemu_loongarch64/elf_demo.o: $(LXPIPE_H)
 
+# 信号夹具（linux_signal.elf）：rt_sigaction / rt_sigprocmask / kill / tkill /
+# tgkill / rt_sigreturn 的八组行为（装动作与旧动作、投递点、a0 跨处理函数保留、
+# 嵌套、屏蔽与解除、非法参数、SIG_IGN、SIG_DFL 退出码 138）。
+LXSIG_SRC := example/qemu_loongarch64/elf/linux_signal.c
+LXSIG_ELF := $(BUILD)/linux_signal.elf
+LXSIG_SIGNED := $(BUILD)/linux_signal.signed.elf
+LXSIG_H   := $(BUILD)/linux_signal_blob.h
+
+$(LXSIG_ELF): $(LXSIG_SRC)
+	@mkdir -p $(BUILD)
+	$(CC) $(ARCH_FLAGS) -O2 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
+	      -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	      -Wl,-Ttext=$(WIN_ELF_BASE) -Wl,-e,_start -Wl,--strip-all \
+	      -Wl,-z,max-page-size=4096 -o $@ $< ;
+
+$(LXSIG_SIGNED): $(LXSIG_ELF) tools/sign_payload.py
+	python tools/sign_payload.py sign $(LXSIG_ELF) --out $@ ;
+
+$(LXSIG_H): $(LXSIG_SIGNED) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(LXSIG_SIGNED) \
+	       --output $@ --name ark_example_linux_signal ;
+
+$(BUILD)/example/qemu_loongarch64/elf_demo.o: $(LXSIG_H)
+
 # ---------------------------------------------------------------------------
 # PT_TLS 示例（tls_main.elf）：装载器读 PT_TLS、把模板铺进窗口、把 $tp 指过去。
 #

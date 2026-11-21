@@ -19,9 +19,15 @@
 *          管道；读空回 -EAGAIN、写满回 -EAGAIN、读端全关写回 -EPIPE、写端
 *          全关读回 EOF。**不实现阻塞**——没有 fork、fd 表全局单份，两端通常
 *          在同一个任务里，阻塞就是自死锁。
-*          明确不做的事（文档里逐条列出）：fork/clone、信号、父子 fd 继承
-*          （没有 fork 就没有第二个进程可继承）、socket、futex，以及真 mmap
-*          语义。动态链接的**内核侧**
+*          信号（signal）已做**同一任务自我投递**的最小一档：rt_sigaction /
+*          rt_sigprocmask / kill / tkill / tgkill / rt_sigreturn，处理函数在
+*          用户栈上拿一份**整份 trap 帧快照**（32 B 头 + 256/528/1040 B，
+*          帧长由端口报），返回地址指向程序自己给的 restorer；
+*          不做跨任务投递、不做实时信号、不做作业控制（SIGSTOP 一类按忽略
+*          处理并单独计数）、没有 SIGPIPE 的默认动作。
+*          明确不做的事（文档里逐条列出）：fork/clone、跨任务信号、父子 fd
+*          继承（没有 fork 就没有第二个进程可继承）、socket、futex，以及真
+*          mmap 语义。动态链接的**内核侧**
 *          （PT_INTERP + auxv）由 ARKRTOS_USE_DYNLOAD 单独提供，解释器
 *          本身是用户态程序；mprotect 接受但不强制（整窗 RWX，单独计数）。
 *          mmap/brk 只是
@@ -69,8 +75,19 @@
 #define LX_SYS_MMAP                 (222u)
 #define LX_SYS_MPROTECT             (226u)
 
+/* 信号相关的号：rt_sigaction / rt_sigprocmask / kill / tkill / tgkill /
+ * rt_sigreturn。asm-generic 编号，LoongArch 与 RISC-V 共用。 */
+#define LX_SYS_KILL                 (129u)
+#define LX_SYS_TKILL                (130u)
+#define LX_SYS_TGKILL               (131u)
+#define LX_SYS_RT_SIGACTION         (134u)
+#define LX_SYS_RT_SIGPROCMASK       (135u)
+#define LX_SYS_RT_SIGRETURN         (139u)
+
 /* errno（asm-generic 编号，程序侧读到的是 -errno） */
 #define LX_EPERM                    (1)
+#define LX_ESRCH                    (3)
+#define LX_EINTR                    (4)
 #define LX_ENOENT                   (2)
 #define LX_EIO                      (5)
 #define LX_E2BIG                    (7)
@@ -107,6 +124,40 @@
  * 一律回 -EAGAIN，读程序必须自己重试（这与 Linux 的阻塞语义不同，文档里写死）。 */
 #define LX_PIPE_MAX                 (2u)
 #define LX_PIPE_BUF                 (256u)
+
+/* ---------------------------------------------------------------- 信号 */
+
+/* 支持 1..31 号（bit n-1 对应信号 n）。Linux 的实时信号 32..64 不做。 */
+#define LX_NSIG                     (32u)
+#define LX_SIGKILL                  (9u)
+#define LX_SIGSTOP                  (19u)
+#define LX_SIG_DFL                  (0UL)
+#define LX_SIG_IGN                  (1UL)
+#define LX_SIG_BLOCK                (0u)
+#define LX_SIG_UNBLOCK              (1u)
+#define LX_SIG_SETMASK              (2u)
+#define LX_SIGSET_BYTES             (8u)
+
+/* 信号帧铺在用户栈上：4 个 8 字节字的头 + **整份 trap 帧**的快照，16 字节
+ * 对齐。magic 是第一道校验：rt_sigreturn 只认自己铺的帧，栈被改坏就回
+ * -EFAULT。头里第三个字是帧长，第四个是快照字节数——帧长随 port 变
+ * （带 FPU 528、LSX 1040），所以不能在两头各写一个常量。
+ *
+ * 为什么快照是整帧而不只是 era/sp/ra/tp：处理函数是普通 C 函数，会把
+ * $t0 一类的临时寄存器改成自己的东西；只恢复四个寄存器的话，被打断的
+ * 调用约定就断了（实测过：恢复后一条 ld.w 用了一个已经变成 2 的基址）。 */
+#define LX_SIGFRAME_MAGIC           (0x53494746524D4532UL)   /* "SIGFRME2" */
+#define LX_SIGFRAME_HDR_WORDS       (4u)
+#define LX_SIGFRAME_HDR_BYTES       ((uint32)LX_SIGFRAME_HDR_WORDS * 8u)
+/* 快照缓冲的上限（字）：LSX 档 130 字 = 1040 字节是当前最大的一档。
+ * 端口报出比它还大的帧时**不投递**并把 pending 位留着，绝不截断快照。 */
+#define LX_SIGFRAME_MAX_WORDS       (130u)
+
+/* port 原语里语义编号：0 = era、1 = sp、2 = ra、3 = tp。 */
+#define LX_UREG_ERA                 (0u)
+#define LX_UREG_SP                  (1u)
+#define LX_UREG_RA                  (2u)
+#define LX_UREG_TP                  (3u)
 
 /* execve 的暂存区：旧镜像一旦被覆盖，用户地址上的 argv 就没了，所以
  * 这些字符串必须在装载**之前**落进内核。16 个参数 × 256 字节与装载器
@@ -175,6 +226,30 @@ static lx_fd_t s_fd[LX_MAX_FD];
 /* 管道对象独立于 fd 表：一条管道被两个 fd 引用，fd 关掉一半时管道还要在。 */
 static lx_pipe_t s_pipe[LX_PIPE_MAX];
 static uint32  s_stat[LX_STAT_MAX];
+
+/* ------------------------------------------------------------- 信号状态 */
+
+typedef struct
+{
+    unsigned long handler;      /* SIG_DFL(0) / SIG_IGN(1) / 用户函数地址 */
+    unsigned long flags;        /* 原样保存，本实现只做「处理期间屏蔽」 */
+    unsigned long restorer;     /* 必须非 0：没有 restorer 就没有返回路径 */
+    unsigned long mask;         /* 处理期间附加的屏蔽位 */
+} lx_sigaction_t;
+
+/* 32 项动作表：1..31 有效，0 号不用。一个任务一份（fd 表也是这个口径：
+ * 本版本一次只跑一个 ELF 程序）。 */
+static lx_sigaction_t s_sig[LX_NSIG];
+static uint32 s_sig_pending;        /* 已收未投递 */
+static uint32 s_sig_blocked;        /* 当前屏蔽字 */
+static uint32 s_sig_delivered;      /* 真投递进处理函数的次数 */
+static uint32 s_sig_ignored;        /* SIG_IGN 或默认忽略 */
+static uint32 s_sig_refused;        /* kill 的目标不是自己 */
+static uint32 s_sig_no_restorer;    /* 装处理函数时没给 restorer */
+static uint32 s_sig_stop_ignored;   /* 默认动作是「挂起」但本内核没有作业控制 */
+/* 信号帧的暂存（头 + 整帧快照）。投递路径在内核里不嵌套（一次只有一条
+ * 系统调用在返回），所以一块静态缓冲就够，不在内核栈上开 1 KB。 */
+static unsigned long s_sigframe[LX_SIGFRAME_HDR_WORDS + LX_SIGFRAME_MAX_WORDS];
 
 #if (ARKRTOS_LINUX_ABI_SYSSTAT == 1)
 typedef struct
@@ -543,6 +618,379 @@ static int32 lx_pipe2(void *p_ctx)
     }
 
     return 0;
+}
+
+/* ---------------------------------------------------------------- 信号 */
+
+/* 这一档只做**同一任务自我投递**：kill / tkill / tgkill 指向别人一律
+ * -ESRCH（没有第二个进程可投），投递点只在系统调用返回用户态之前——所以
+ * 「被打断的代码」必然停在一条 syscall 之后，寄存器里活着的就是 trap 帧
+ * 保存的那一份，不需要在任意时刻抢占用户态。
+ *
+ * 信号帧铺在用户栈上，返回地址指向程序自己给的 restorer；restorer 发
+ * rt_sigreturn，内核把帧里的 era/sp/ra/tp/a0 与屏蔽字原样装回去。没有
+ * restorer 就不投递（装处理函数时直接 -EINVAL）——不假装能回到被打断处。
+ *
+ * 明确不做：实时信号（32..64）、跨任务投递、信号处理期间的自动重入保护
+ * 之外的语义（SA_NODEFER 只按字面记 flags，不实现）、作业控制（SIGSTOP
+ * 一类默认动作是挂起，这里按忽略处理并单独计数）、SIGPIPE 的默认动作
+ * （管道写已经直接回 -EPIPE，不发信号）。
+ */
+
+static uint32 lx_sig_bit(uint32 sig)
+{
+    return (uint32)1u << (sig - 1u);
+}
+
+/* Linux 里默认动作是「忽略」的几个。 */
+static uint32 lx_sig_default_ignored(uint32 sig)
+{
+    if((sig == 17u) || (sig == 18u) || (sig == 23u) || (sig == 28u))
+    {
+        return 1u;
+    }
+    return 0u;
+}
+
+/* 默认动作是「挂起」的几个：本内核没有作业控制，停不了任务，按忽略处理
+ * 并单独计数——不把「没法实现」说成「已经处理」。 */
+static uint32 lx_sig_default_stops(uint32 sig)
+{
+    if((sig == 19u) || (sig == 20u) || (sig == 21u) || (sig == 22u))
+    {
+        return 1u;
+    }
+    return 0u;
+}
+
+/* 装/查动作。用户结构按 UAPI loongarch64 的 32 字节布局读：
+ * { handler, flags, restorer, mask(8 B) }，sigsetsize 必须是 8。 */
+static int32 lx_rt_sigaction(void *p_ctx)
+{
+    uint32 sig   = ARKRTOS_SVC_ARG(p_ctx, 0u);
+    unsigned long u_act = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    unsigned long u_old = ARKRTOS_SVC_ARG(p_ctx, 2u);
+    uint32 setsz = ARKRTOS_SVC_ARG(p_ctx, 3u);
+    unsigned long act[4];
+    unsigned long old[4];
+
+    if(setsz != (uint32)LX_SIGSET_BYTES)
+    {
+        return -LX_EINVAL;
+    }
+    if((sig == 0u) || (sig >= (uint32)LX_NSIG) ||
+       (sig == (uint32)LX_SIGKILL) || (sig == (uint32)LX_SIGSTOP))
+    {
+        return -LX_EINVAL;      /* SIGKILL / SIGSTOP 不可捕获，与 Linux 一致 */
+    }
+
+    /* 端口能力探测：没有「读写用户 trap 帧」的 port 直接回 -ENOSYS，
+     * 而不是让程序装上一个永远投递不到的处理函数。写回的是读到的原值，
+     * 这一步不改任何寄存器。 */
+    if(arkrtos_port_svc_set_user_reg(p_ctx, LX_UREG_ERA,
+            arkrtos_port_svc_user_reg(p_ctx, LX_UREG_ERA)) != 0)
+    {
+        return -LX_ENOSYS;
+    }
+
+    if(u_act != 0UL)
+    {
+        if(arkrtos_copy_from_user(act, (const void *)(unsigned long)u_act,
+                                  (uint32)sizeof(act)) != 0)
+        {
+            return -LX_EFAULT;
+        }
+        if((act[0] != LX_SIG_DFL) && (act[0] != LX_SIG_IGN) && (act[2] == 0UL))
+        {
+            /* 没有 restorer 就没有「处理完回到哪」：拒绝，不猜一个地址。 */
+            s_sig_no_restorer++;
+            return -LX_EINVAL;
+        }
+    }
+
+    if(u_old != 0UL)
+    {
+        old[0] = s_sig[sig].handler;
+        old[1] = s_sig[sig].flags;
+        old[2] = s_sig[sig].restorer;
+        old[3] = s_sig[sig].mask;
+        if(arkrtos_copy_to_user((void *)(unsigned long)u_old, old,
+                                (uint32)sizeof(old)) != 0)
+        {
+            return -LX_EFAULT;
+        }
+    }
+
+    if(u_act != 0UL)
+    {
+        s_sig[sig].handler  = act[0];
+        s_sig[sig].flags    = act[1];
+        s_sig[sig].restorer = act[2];
+        s_sig[sig].mask     = act[3];
+    }
+    return 0;
+}
+
+/* 屏蔽字的查询与修改。SIGKILL / SIGSTOP 永远屏蔽不了（Linux 同样如此）。 */
+static int32 lx_rt_sigprocmask(void *p_ctx)
+{
+    uint32 how       = ARKRTOS_SVC_ARG(p_ctx, 0u);
+    unsigned long u_set = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    unsigned long u_old = ARKRTOS_SVC_ARG(p_ctx, 2u);
+    uint32 setsz     = ARKRTOS_SVC_ARG(p_ctx, 3u);
+    uint32 old = s_sig_blocked;
+    unsigned long v;
+    uint32 m;
+
+    if(setsz != (uint32)LX_SIGSET_BYTES)
+    {
+        return -LX_EINVAL;
+    }
+    if(how > (uint32)LX_SIG_SETMASK)
+    {
+        return -LX_EINVAL;
+    }
+
+    if(u_old != 0UL)
+    {
+        v = (unsigned long)old;
+        if(arkrtos_copy_to_user((void *)(unsigned long)u_old, &v,
+                                (uint32)sizeof(v)) != 0)
+        {
+            return -LX_EFAULT;
+        }
+    }
+
+    if(u_set != 0UL)
+    {
+        if(arkrtos_copy_from_user(&v, (const void *)(unsigned long)u_set,
+                                  (uint32)sizeof(v)) != 0)
+        {
+            return -LX_EFAULT;
+        }
+        m = (uint32)(v) & 0x7FFFFFFFu;
+        if(how == (uint32)LX_SIG_BLOCK)
+        {
+            s_sig_blocked |= m;
+        }
+        else if(how == (uint32)LX_SIG_UNBLOCK)
+        {
+            s_sig_blocked &= ~m;
+        }
+        else
+        {
+            s_sig_blocked = m;
+        }
+        s_sig_blocked &= ~(lx_sig_bit((uint32)LX_SIGKILL) |
+                           lx_sig_bit((uint32)LX_SIGSTOP));
+    }
+    return 0;
+}
+
+/* kill / tkill / tgkill 共用一个实体：本内核只有一个可投递的对象——自己。 */
+static int32 lx_sig_send(int32 pid, uint32 sig)
+{
+    if(pid != (int32)arkrtos_current_task_id)
+    {
+        s_sig_refused++;
+        return -LX_ESRCH;
+    }
+    if(sig == 0u)
+    {
+        return 0;       /* 只做存在性探测，与 Linux 一致 */
+    }
+    if(sig >= (uint32)LX_NSIG)
+    {
+        return -LX_EINVAL;
+    }
+    s_sig_pending |= lx_sig_bit(sig);
+    return 0;
+}
+
+static int32 lx_kill(void *p_ctx)
+{
+    return lx_sig_send((int32)ARKRTOS_SVC_ARG(p_ctx, 0u),
+                       (uint32)ARKRTOS_SVC_ARG(p_ctx, 1u));
+}
+
+static int32 lx_tkill(void *p_ctx)
+{
+    return lx_sig_send((int32)ARKRTOS_SVC_ARG(p_ctx, 0u),
+                       (uint32)ARKRTOS_SVC_ARG(p_ctx, 1u));
+}
+
+/* tgkill(tgid, tid, sig)：两个号都必须是自己；只有一个任务，两者相等。 */
+static int32 lx_tgkill(void *p_ctx)
+{
+    int32 tgid = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
+    int32 tid  = (int32)ARKRTOS_SVC_ARG(p_ctx, 1u);
+    uint32 sig = (uint32)ARKRTOS_SVC_ARG(p_ctx, 2u);
+
+    if(tgid != tid)
+    {
+        s_sig_refused++;
+        return -LX_ESRCH;
+    }
+    return lx_sig_send(tid, sig);
+}
+
+/* 信号帧：头（magic / signo / blocked / 快照字节数）+ 整份 trap 帧。
+ * 投递成功返回 0；返回 1 表示任务已被默认动作结束（调用方不要再动上下文）。 */
+static uint32 lx_signal_deliver(void *p_ctx)
+{
+    uint32 sig;
+    uint32 ready;
+    uint32 fbytes;
+    uint32 total;
+    uint32 saved_blocked;
+    unsigned long fsp;
+    unsigned long insn;
+    lx_sigaction_t *sa;
+
+    ready = s_sig_pending & ~s_sig_blocked;
+    if(ready == 0u)
+    {
+        return 0u;
+    }
+    for(sig = 1u; sig < (uint32)LX_NSIG; sig++)
+    {
+        if((ready & lx_sig_bit(sig)) != 0u)
+        {
+            break;
+        }
+    }
+    if(sig >= (uint32)LX_NSIG)
+    {
+        return 0u;
+    }
+    sa = &s_sig[sig];
+    s_sig_pending &= ~lx_sig_bit(sig);
+
+    if(sa->handler == LX_SIG_IGN)
+    {
+        s_sig_ignored++;
+        return 0u;
+    }
+    if(sa->handler == LX_SIG_DFL)
+    {
+        if(lx_sig_default_ignored(sig) != 0u)
+        {
+            s_sig_ignored++;
+            return 0u;
+        }
+        if(lx_sig_default_stops(sig) != 0u)
+        {
+            s_sig_stop_ignored++;
+            return 0u;
+        }
+        /* 其余默认动作是「结束任务」。内核里唯一能表达这件事的是退出码
+         * 128 + signo（Linux 把它写进 wait 状态，这里没有 wait 状态）。 */
+        #if (ARKRTOS_USE_EXIT_CODE == 1)
+        arkrtos_thread_exit_code_internal((int32)(128u + sig));
+        #else
+        arkrtos_thread_exit_internal();
+        #endif
+        return 1u;
+    }
+
+    /* 整帧快照：端口报不出帧长（或报得比缓冲还大）就不投递，pending 位
+     * 留着，下一次系统调用返回时再试——绝不截断快照。 */
+    fbytes = arkrtos_port_svc_frame_bytes();
+    if((fbytes == 0u) || (fbytes > (uint32)(LX_SIGFRAME_MAX_WORDS * 8u)))
+    {
+        s_sig_refused++;
+        s_sig_pending |= lx_sig_bit(sig);
+        return 0u;
+    }
+    total = LX_SIGFRAME_HDR_BYTES + fbytes;
+
+    if(((sa->handler & 3UL) != 0UL) ||
+       (arkrtos_copy_from_user(&insn, (const void *)(unsigned long)sa->handler,
+                               4u) != 0))
+    {
+        /* handler 取不到指令：不投递，pending 位放回去，
+         * 绝不把 era 指向一个读不出来的地址。 */
+        s_sig_pending |= lx_sig_bit(sig);
+        return 0u;
+    }
+
+    /* 帧址由端口给：本 port 没有独立的异常处理栈，系统调用处理链就跑在
+     * 用户栈下面，位置算错会把内核自己的返回地址盖掉（实测症状是复制完
+     * 之后 PC 变 0）。具体怎么让开由端口负责，这一层不自己算地址。 */
+    fsp = arkrtos_port_svc_frame_reserve(p_ctx, total);
+    if(fsp == 0UL)
+    {
+        s_sig_pending |= lx_sig_bit(sig);   /* 栈不够：留着，下次再试 */
+        return 0u;
+    }
+    saved_blocked = s_sig_blocked;
+
+    /* 先把**被打断的整帧**存进内核缓冲，再把它和头一起铺到用户栈上。
+     * 顺序不能反过来：写 era/sp/ra 之后再导出，存下来的就是处理函数的
+     * 现场而不是被打断点的现场。 */
+    s_sigframe[0] = LX_SIGFRAME_MAGIC;
+    s_sigframe[1] = (unsigned long)sig;
+    s_sigframe[2] = (unsigned long)saved_blocked;
+    s_sigframe[3] = (unsigned long)fbytes;
+    arkrtos_port_svc_frame_export(p_ctx, &s_sigframe[LX_SIGFRAME_HDR_WORDS]);
+
+    if(arkrtos_copy_to_user((void *)(unsigned long)fsp, s_sigframe,
+                            total) != 0)
+    {
+        s_sig_pending |= lx_sig_bit(sig);
+        return 0u;
+    }
+
+    s_sig_blocked |= lx_sig_bit(sig) | (uint32)(sa->mask & 0x7FFFFFFFUL);
+    s_sig_blocked &= ~(lx_sig_bit((uint32)LX_SIGKILL) |
+                       lx_sig_bit((uint32)LX_SIGSTOP));
+
+    if((arkrtos_port_svc_set_user_reg(p_ctx, LX_UREG_ERA, sa->handler) != 0) ||
+       (arkrtos_port_svc_set_user_reg(p_ctx, LX_UREG_SP, fsp) != 0) ||
+       (arkrtos_port_svc_set_user_reg(p_ctx, LX_UREG_RA, sa->restorer) != 0))
+    {
+        s_sig_blocked = saved_blocked;
+        s_sig_pending |= lx_sig_bit(sig);
+        return 0u;
+    }
+
+    ARKRTOS_SVC_RET(p_ctx, (uint32)sig);    /* handler 的第一个参数是信号号 */
+    s_sig_delivered++;
+    return 0u;
+}
+
+/* rt_sigreturn：把整帧快照原样装回去。帧地址就是进入本次系统调用时的
+ * 用户 sp（restorer 里没有任何压栈），所以不需要额外的寄存器传参。 */
+static int32 lx_rt_sigreturn(void *p_ctx)
+{
+    uint32 fbytes = arkrtos_port_svc_frame_bytes();
+    uint32 total;
+    unsigned long sp = arkrtos_port_svc_user_reg(p_ctx, LX_UREG_SP);
+
+
+    if((fbytes == 0u) || (fbytes > (uint32)(LX_SIGFRAME_MAX_WORDS * 8u)))
+    {
+        return -LX_ENOSYS;
+    }
+    total = LX_SIGFRAME_HDR_BYTES + fbytes;
+    if((sp == 0UL) ||
+       (arkrtos_copy_from_user(s_sigframe, (const void *)(unsigned long)sp,
+                               total) != 0))
+    {
+        return -LX_EFAULT;
+    }
+    if((s_sigframe[0] != LX_SIGFRAME_MAGIC) ||
+       (s_sigframe[3] != (unsigned long)fbytes))
+    {
+        return -LX_EFAULT;      /* 不是我们铺的帧：不按它恢复现场 */
+    }
+    if(arkrtos_port_svc_frame_import(p_ctx,
+            &s_sigframe[LX_SIGFRAME_HDR_WORDS]) != 0)
+    {
+        return -LX_ENOSYS;
+    }
+    s_sig_blocked = (uint32)s_sigframe[2];
+    return LX_RET_PTR_DONE;     /* 现场（含 a0 的返回值）已由快照装回 */
 }
 
 /* ---------------------------------------------------------------- 调用 */
@@ -1229,6 +1677,24 @@ int32 arkrtos_linux_abi_try(void *p_svc_ctx)
     case LX_SYS_PIPE2:
         rc = lx_pipe2(p_svc_ctx);
         break;
+    case LX_SYS_KILL:
+        rc = lx_kill(p_svc_ctx);
+        break;
+    case LX_SYS_TKILL:
+        rc = lx_tkill(p_svc_ctx);
+        break;
+    case LX_SYS_TGKILL:
+        rc = lx_tgkill(p_svc_ctx);
+        break;
+    case LX_SYS_RT_SIGACTION:
+        rc = lx_rt_sigaction(p_svc_ctx);
+        break;
+    case LX_SYS_RT_SIGPROCMASK:
+        rc = lx_rt_sigprocmask(p_svc_ctx);
+        break;
+    case LX_SYS_RT_SIGRETURN:
+        rc = lx_rt_sigreturn(p_svc_ctx);
+        break;
     case LX_SYS_MPROTECT:
         rc = lx_mprotect(p_svc_ctx);
         break;
@@ -1305,6 +1771,9 @@ int32 arkrtos_linux_abi_try(void *p_svc_ctx)
     }
 
     lx_ret(p_svc_ctx, rc);
+    /* 投递点：系统调用返回用户态之前。此时 a0 已经是本次调用的返回值，
+     * 所以信号帧把它一并存下来，rt_sigreturn 再装回去。 */
+    (void)lx_signal_deliver(p_svc_ctx);
     return 1;
 }
 
@@ -1383,6 +1852,23 @@ void arkrtos_linux_abi_reset(void)
         s_pipe[i].tail    = 0u;
         s_pipe[i].count   = 0u;
     }
+
+    /* 信号：动作表、pending、屏蔽字全部回到默认。新程序不该继承上一个
+     * 程序的信号处理函数（那是一个已经不存在的代码地址）。 */
+    for(i = 0u; i < (uint32)LX_NSIG; i++)
+    {
+        s_sig[i].handler  = LX_SIG_DFL;
+        s_sig[i].flags    = 0UL;
+        s_sig[i].restorer = 0UL;
+        s_sig[i].mask     = 0UL;
+    }
+    s_sig_pending = 0u;
+    s_sig_blocked = 0u;
+    s_sig_delivered = 0u;
+    s_sig_ignored = 0u;
+    s_sig_refused = 0u;
+    s_sig_no_restorer = 0u;
+    s_sig_stop_ignored = 0u;
 
     s_heap_cur = 0u;
 }

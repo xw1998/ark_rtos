@@ -26,6 +26,7 @@
 #include "linux_hello_blob.h"
 #include "linux_execve_blob.h"
 #include "linux_pipe_blob.h"
+#include "linux_signal_blob.h"
 #include "arkrtos_linux_abi.h"
 #endif
 #if (ARKRTOS_USE_ELF_TLS == 1)
@@ -49,6 +50,7 @@
 #define LX_DEMO_PATH        "/mnt/ram/linux_hello"
 #define LX_EXEC_PATH        "/mnt/ram/linux_execve"
 #define LX_PIPE_PATH        "/mnt/ram/linux_pipe"
+#define LX_SIG_PATH         "/mnt/ram/linux_signal"
 #endif
 #if (ARKRTOS_USE_ELF_TLS == 1)
 #define TLS_DEMO_PATH       "/mnt/ram/tls_main"
@@ -503,6 +505,79 @@ static void task_elf_demo(void)
 
                 demo_lock();
                 demo_puts("[pipe] finished after ");
+                demo_putu(waited);
+                demo_puts(" ms, exit code ");
+                #if (ARKRTOS_USE_EXIT_CODE == 1)
+                if((arkrtos_elf_info(&info) == ARKRTOS_ELF_OK) &&
+                   (info.exit_code_set != 0u))
+                {
+                    demo_putu((uint32)info.exit_code);
+                }
+                else
+                {
+                    demo_puts("(not reported)");
+                }
+                #else
+                demo_puts("(exit code channel off)");
+                #endif
+                demo_puts("\n");
+                demo_unlock();
+            }
+        }
+    }
+#endif
+
+#if (ARKRTOS_USE_LINUX_ABI == 1)
+    /* 信号的现场证据：linux_signal 自己装处理函数、kill 自己、看处理函数有没有
+     * 在系统调用返回前跑、sigreturn 有没有把 kill 的返回值装回 a0、能不能嵌套、
+     * 屏蔽期间不投递而解除后立即投递、六种非法参数各回什么、SIG_IGN 是否真静音。
+     * 最后它把 SIGUSR1 还原成 SIG_DFL 再 kill 自己，所以**正常收尾的退出码是
+     * 138**（128 + 10），不是 0；夹具自检失败则走 exit 1。 */
+    {
+        arkrtos_elf_info_t info;
+        char *pargv[1];
+
+        for(tries = 0u; tries < 100u; tries++)
+        {
+            rc = arkrtos_vfs_write_file(LX_SIG_PATH, ark_example_linux_signal,
+                                        (uint32)ARK_EXAMPLE_LINUX_SIGNAL_LEN);
+            if(rc >= 0)
+            {
+                break;
+            }
+            arkrtos_task_wait_internal(100u);
+        }
+
+        demo_puts("[sig] write ");
+        demo_puts(LX_SIG_PATH);
+        demo_puts(" rc=");
+        demo_putu((uint32)rc);
+        demo_puts(" size=");
+        demo_putu((uint32)ARK_EXAMPLE_LINUX_SIGNAL_LEN);
+        demo_puts("\n");
+
+        if(rc >= 0)
+        {
+            pargv[0] = "linux_signal";
+            rc = arkrtos_elf_exec(LX_SIG_PATH, 1, pargv);
+
+            demo_lock();
+            demo_puts("[sig] exec rc=");
+            demo_putu((uint32)rc);
+            demo_puts("\n");
+            demo_unlock();
+
+            if(rc == ARKRTOS_ELF_OK)
+            {
+                waited = 0u;
+                while((arkrtos_elf_running() != 0) && (waited < DEMO_WAIT_MS))
+                {
+                    arkrtos_task_wait_internal(DEMO_POLL_MS);
+                    waited += DEMO_POLL_MS;
+                }
+
+                demo_lock();
+                demo_puts("[sig] finished after ");
                 demo_putu(waited);
                 demo_puts(" ms, exit code ");
                 #if (ARKRTOS_USE_EXIT_CODE == 1)
