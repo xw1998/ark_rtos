@@ -5738,6 +5738,33 @@ git 里的那一份，所以它必须在提交之后才会转绿**（提交后�
 
 **结论分档：编译通过 + 告警 0 + QEMU 端到端 PASS（overlay 真拼出 9 个节点并读回），未上板。**
 
+#### 5.30.41 第三十六笔：`arkrtos_fdt_overlay()` 按「前置 / 保留区 / 头 / 两遍」拆成五段（2026-11-21）
+
+`kernelsrc/src/arkrtos_fdt_overlay.c` 的 `arkrtos_fdt_overlay()`（**174 行**）是 overlay 对外入口：
+两块 blob 的解析与扫描 → 收 fragment → 量保留区 → 第一遍只算长度 → 写头 → 第二遍落笔并对账。
+拆成五个 `static` 单调用点 helper，主函数只剩 71 行。
+
+| 单元 | 干什么 | 行数 |
+|---|---|---|
+| `ovl_prepare()` | 两块的 `ovl_blob_parse` + `ovl_blob_scan`；`tag` 只从 fragment 侧取，`__symbols__` / `__local_fixups__` 在这里就拒（`ERR_OVERLAY_TAG`）。放一起是因为「两次 parse 两次 scan、只有第二块要 tag」这条顺序本身就是契约 | 36 |
+| `ovl_rsvmap_len()` | 基树 memory reserve map 的长度扫描（16 字节/项到全零结束项，越界 `ERR_RANGE`）；注释随函数搬走 | 23 |
+| `ovl_write_head()` | 前导区清零 + 九个头字段逐项写（`totalsize` / `size_strings` 留 0 尾部回填）+ 搬 reserve map | 30 |
+| `ovl_measure()` | 第一遍：`buf=0`、`write=0`，只把 `sp` / `str_used` 读出来做成 `struct_bytes` / `str_upper` | 22 |
+| `ovl_write()` | 第二遍：落笔 + `overflow` 判红 + 两遍一致性对账（`sp` 必须等于 `off_struct + struct_bytes`、`str_used` 不得超过上界），不一致报 `ERR_OVERLAY` 而**不是**交一块长度对不上的 blob | 29 |
+| `arkrtos_fdt_overlay()` 自己 | 参数/对齐检查 → `cap` 下限 → `ovl_prepare` → `ovl_collect_frags` → `nf==0` 判红 → 量保留区 → 算 `off_struct` → 填 `ovl_ctx_t` 的固定字段 → 两次 pass → 长度溢出/越 `cap` 两条 `ERR_OVERLAY_SIZE` → 回填 `totalsize` 与 `size_strings` → `*out_len` | **71**（原 174） |
+
+三条口径：
+
+Ⓐ 两次 pass 的「进 pass 前把 ctx 摆成哪一档」全在 helper 里，主函数不再直接碰 `buf` / `write` / `sp` / `str_base` / `str_used` / `overflow` —— 也就是说「两遍必须同构」这件事从「调用处小心翼翼」变成「只能通过 `ovl_measure` / `ovl_write` 进」。
+Ⓑ 对账逻辑跟着第二遍走：`overflow` 与「两遍不一致」都是写档才可能发生的事，放回主函数会让人以为第一遍也可能触发。
+Ⓒ 五个 helper 全是 `static` + 单调用点，`-O2` 全内联，拆分不改调用深度；这次 **text 反而涨了 288 B**（见下），不做「零成本」的假设。
+
+等价性：`default` 档两遍同配置 clean 构建 text **448632 → 448920（+288 B）**、`data` 448 / `bss` 5,128,740 / 总量 31,462,512 B 不变；**`.bin` 的 sha256 在这里不能当等价证据**：镜像里 `kernelsrc/components/arkc/arkc_port_arkrtos.c` 把 C99 `__DATE__`/`__TIME__` 编进了数据（板级没有 RTC，它就当构建时间用），同一份源码连做两次 clean 构建 就有 8 字节不同（`cmp -l` 看下来差异全是 ASCII 数字）。所以本轮只报 `text`/`data`/`bss` 与 QEMU 读回，**text 涨了 288 B**，不报 sha；该文件 0 告警（全量 clean 构建的 242 条告警逐条比对前后完全一致，全部来自既有代码，与本次改动无关）。
+
+门禁：`tools/ci_gate.py` **57 passed / 0 failed / 0 skipped**；其中 `fdt` 项真跑 overlay（`tools/fdt_gate.py` 14 passed，overlay 一条读到「应用前无 overlay-demo-node / victim-child 在 / victim-prop=before / 控制台 115200 → 应用后 nodes 10→10、model=fdt-overlay-demo、current-speed 115200→9600、victim-child 查不到、victim-prop 已删」，另有 7 种坏法自检全判红）。`tools/format_gate.py` OK 392；`doc_audit funcs` **13 → 12**。
+
+结论分档：**编译通过 + 告警 0 + QEMU 端到端 PASS（overlay 真被应用并逐项读回），未上板**。
+
 ### 5.31 LSX 向量寄存器上下文（U-19，2026-11-21）
 
 #### 5.31.1 缺口：FPU 档只存了一半的浮点上下文

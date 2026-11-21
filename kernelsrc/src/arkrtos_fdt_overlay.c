@@ -2140,59 +2140,29 @@ static int ovl_emit_tree(ovl_ctx_t *c)
     return ARKRTOS_FDT_OK;
 }
 
-/* ---------------------------------------------------------------- API */
-
-int arkrtos_fdt_overlay(void *dst, uint32 cap,
-                        const void *base, uint32 base_len,
-                        const void *frag, uint32 frag_len,
-                        uint32 *out_len)
+static int ovl_prepare(const void *base, uint32 base_len,
+                       const void *frag, uint32 frag_len,
+                       ovl_blob_t *bb, ovl_blob_t *fb)
 {
-    ovl_blob_t bb;
-    ovl_blob_t fb;
-    ovl_frag_t frags[OVL_MAX_FRAGS];
-    ovl_ctx_t c;
-    uint32 nf = 0u;
-    uint32 rsvmap_len;
-    uint32 off_struct;
-    uint32 off_strings;
-    uint32 struct_bytes;
-    uint32 str_upper;
-    uint32 totalsize;
     uint32 tag = 0u;
-    uint8 *d = (uint8 *)dst;
-    uint32 i;
     int rc;
 
-    if(out_len != 0)
-    {
-        *out_len = 0u;
-    }
-    if((dst == 0) || (out_len == 0) ||
-       (((uint32)(unsigned long)dst & 3u) != 0u))
-    {
-        return ARKRTOS_FDT_ERR_ARG;
-    }
-    if(cap < ARKRTOS_FDT_OVERLAY_MIN_ARENA)
-    {
-        return ARKRTOS_FDT_ERR_OVERLAY_SIZE;
-    }
-
-    rc = ovl_blob_parse(base, base_len, &bb);
+    rc = ovl_blob_parse(base, base_len, bb);
     if(rc != ARKRTOS_FDT_OK)
     {
         return rc;
     }
-    rc = ovl_blob_scan(&bb, 0);
+    rc = ovl_blob_scan(bb, 0);
     if(rc != ARKRTOS_FDT_OK)
     {
         return rc;
     }
-    rc = ovl_blob_parse(frag, frag_len, &fb);
+    rc = ovl_blob_parse(frag, frag_len, fb);
     if(rc != ARKRTOS_FDT_OK)
     {
         return rc;
     }
-    rc = ovl_blob_scan(&fb, &tag);
+    rc = ovl_blob_scan(fb, &tag);
     if(rc != ARKRTOS_FDT_OK)
     {
         return rc;
@@ -2203,71 +2173,38 @@ int arkrtos_fdt_overlay(void *dst, uint32 cap,
     {
         return ARKRTOS_FDT_ERR_OVERLAY_TAG;
     }
+    return ARKRTOS_FDT_OK;
+}
 
-    rc = ovl_collect_frags(&fb, &bb, frags, OVL_MAX_FRAGS, &nf);
-    if(rc != ARKRTOS_FDT_OK)
-    {
-        return rc;
-    }
-    if(nf == 0u)
-    {
-        return ARKRTOS_FDT_ERR_OVERLAY;      /* 一个 fragment 都没有，不算 overlay */
-    }
+/* 基树的 memory reserve map 原样搬走：那块描述的是"给固件留的洞"，
+ * overlay 无权修改。长度按 16 字节/项数到全零结束项为止。 */
+static int ovl_rsvmap_len(const ovl_blob_t *bb, uint32 *p_len)
+{
+    uint32 p = bb->off_rsvmap;
 
-    /* 基树的 memory reserve map 原样搬走：那块描述的是"给固件留的洞"，
-     * overlay 无权修改。长度按 16 字节/项数到全零结束项为止。 */
-    rsvmap_len = 0u;
+    for(;;)
     {
-        uint32 p = bb.off_rsvmap;
-
-        for(;;)
+        if((p + 16u) > bb->total)
         {
-            if((p + 16u) > bb.total)
-            {
-                return ARKRTOS_FDT_ERR_RANGE;
-            }
-            if((ovl_rd32(bb.b + p) == 0u) && (ovl_rd32(bb.b + p + 4u) == 0u) &&
-               (ovl_rd32(bb.b + p + 8u) == 0u) && (ovl_rd32(bb.b + p + 12u) == 0u))
-            {
-                rsvmap_len = (p - bb.off_rsvmap) + 16u;
-                break;
-            }
-            p += 16u;
+            return ARKRTOS_FDT_ERR_RANGE;
         }
+        if((ovl_rd32(bb->b + p) == 0u) && (ovl_rd32(bb->b + p + 4u) == 0u) &&
+           (ovl_rd32(bb->b + p + 8u) == 0u) && (ovl_rd32(bb->b + p + 12u) == 0u))
+        {
+            *p_len = (p - bb->off_rsvmap) + 16u;
+            break;
+        }
+        p += 16u;
     }
-    off_struct = ovl_pad4(OVL_HEADER_SIZE + rsvmap_len);
+    return ARKRTOS_FDT_OK;
+}
 
-    /* ---- 第一遍：只算长度，不写 dst ---- */
-    c.base = &bb;
-    c.frag = &fb;
-    c.frags = frags;
-    c.nfrags = nf;
-    c.buf = 0;
-    c.cap = cap;
-    c.write = 0u;
-    c.sp = 0u;
-    c.str_base = 0u;
-    c.str_used = 0u;
-    c.overflow = 0u;
-    rc = ovl_emit_tree(&c);
-    if(rc != ARKRTOS_FDT_OK)
-    {
-        return rc;
-    }
-    struct_bytes = c.sp;
-    str_upper = c.str_used;                  /* strings 上界（未去重） */
+static void ovl_write_head(uint8 *d, const ovl_blob_t *bb,
+                           uint32 off_struct, uint32 off_strings,
+                           uint32 struct_bytes, uint32 rsvmap_len)
+{
+    uint32 i;
 
-    off_strings = off_struct + struct_bytes;
-    if((off_strings < off_struct) || ((off_strings + str_upper) < off_strings))
-    {
-        return ARKRTOS_FDT_ERR_OVERLAY_SIZE; /* 相加溢出 */
-    }
-    if((off_strings + str_upper) > cap)
-    {
-        return ARKRTOS_FDT_ERR_OVERLAY_SIZE;
-    }
-
-    /* ---- 写 header 与保留区 ---- */
     for(i = 0u; i < off_struct; i++)
     {
         d[i] = 0u;
@@ -2284,30 +2221,148 @@ int arkrtos_fdt_overlay(void *dst, uint32 cap,
     ovl_wr32(d + H_SIZE_STRUCT, struct_bytes);
     for(i = 0u; i < rsvmap_len; i++)
     {
-        d[OVL_HEADER_SIZE + i] = bb.b[bb.off_rsvmap + i];
+        d[OVL_HEADER_SIZE + i] = bb->b[bb->off_rsvmap + i];
     }
+}
 
-    /* ---- 第二遍：真正落笔 ---- */
-    c.buf = d;
-    c.write = 1u;
-    c.sp = off_struct;
-    c.str_base = off_strings;
-    c.str_used = 0u;
-    c.overflow = 0u;
-    rc = ovl_emit_tree(&c);
+/* ---- 第一遍：只算长度，不写 dst ---- */
+static int ovl_measure(ovl_ctx_t *c, uint32 *p_struct_bytes, uint32 *p_str_upper)
+{
+    int rc;
+
+    c->buf = 0;
+    c->write = 0u;
+    c->sp = 0u;
+    c->str_base = 0u;
+    c->str_used = 0u;
+    c->overflow = 0u;
+    rc = ovl_emit_tree(c);
     if(rc != ARKRTOS_FDT_OK)
     {
         return rc;
     }
-    if(c.overflow != 0u)
+    *p_struct_bytes = c->sp;
+    *p_str_upper = c->str_used;              /* strings 上界（未去重） */
+    return ARKRTOS_FDT_OK;
+}
+
+/* ---- 第二遍：真正落笔，并与第一遍对账 ---- */
+static int ovl_write(ovl_ctx_t *c, uint8 *d,
+                     uint32 off_struct, uint32 off_strings,
+                     uint32 struct_bytes, uint32 str_upper)
+{
+    int rc;
+
+    c->buf = d;
+    c->write = 1u;
+    c->sp = off_struct;
+    c->str_base = off_strings;
+    c->str_used = 0u;
+    c->overflow = 0u;
+    rc = ovl_emit_tree(c);
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        return rc;
+    }
+    if(c->overflow != 0u)
     {
         return ARKRTOS_FDT_ERR_OVERLAY_SIZE;
     }
-    if((c.sp != (off_struct + struct_bytes)) || (c.str_used > str_upper))
+    if((c->sp != (off_struct + struct_bytes)) || (c->str_used > str_upper))
     {
         /* 两遍不一致：说明遍历逻辑里有依赖输出状态的分支。
          * 与其交一块长度对不上的 blob，不如报错。 */
         return ARKRTOS_FDT_ERR_OVERLAY;
+    }
+    return ARKRTOS_FDT_OK;
+}
+
+/* ---------------------------------------------------------------- API */
+
+int arkrtos_fdt_overlay(void *dst, uint32 cap,
+                        const void *base, uint32 base_len,
+                        const void *frag, uint32 frag_len,
+                        uint32 *out_len)
+{
+    ovl_blob_t bb;
+    ovl_blob_t fb;
+    ovl_frag_t frags[OVL_MAX_FRAGS];
+    ovl_ctx_t c;
+    uint32 nf = 0u;
+    uint32 rsvmap_len = 0u;
+    uint32 off_struct;
+    uint32 off_strings;
+    uint32 struct_bytes;
+    uint32 str_upper;
+    uint32 totalsize;
+    uint8 *d = (uint8 *)dst;
+    int rc;
+
+    if(out_len != 0)
+    {
+        *out_len = 0u;
+    }
+    if((dst == 0) || (out_len == 0) ||
+       (((uint32)(unsigned long)dst & 3u) != 0u))
+    {
+        return ARKRTOS_FDT_ERR_ARG;
+    }
+    if(cap < ARKRTOS_FDT_OVERLAY_MIN_ARENA)
+    {
+        return ARKRTOS_FDT_ERR_OVERLAY_SIZE;
+    }
+
+    rc = ovl_prepare(base, base_len, frag, frag_len, &bb, &fb);
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        return rc;
+    }
+
+    rc = ovl_collect_frags(&fb, &bb, frags, OVL_MAX_FRAGS, &nf);
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        return rc;
+    }
+    if(nf == 0u)
+    {
+        return ARKRTOS_FDT_ERR_OVERLAY;      /* 一个 fragment 都没有，不算 overlay */
+    }
+
+    rc = ovl_rsvmap_len(&bb, &rsvmap_len);
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        return rc;
+    }
+    off_struct = ovl_pad4(OVL_HEADER_SIZE + rsvmap_len);
+
+    c.base = &bb;
+    c.frag = &fb;
+    c.frags = frags;
+    c.nfrags = nf;
+    c.cap = cap;
+
+    rc = ovl_measure(&c, &struct_bytes, &str_upper);
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        return rc;
+    }
+
+    off_strings = off_struct + struct_bytes;
+    if((off_strings < off_struct) || ((off_strings + str_upper) < off_strings))
+    {
+        return ARKRTOS_FDT_ERR_OVERLAY_SIZE; /* 相加溢出 */
+    }
+    if((off_strings + str_upper) > cap)
+    {
+        return ARKRTOS_FDT_ERR_OVERLAY_SIZE;
+    }
+
+    ovl_write_head(d, &bb, off_struct, off_strings, struct_bytes, rsvmap_len);
+
+    rc = ovl_write(&c, d, off_struct, off_strings, struct_bytes, str_upper);
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        return rc;
     }
 
     totalsize = off_strings + c.str_used;
