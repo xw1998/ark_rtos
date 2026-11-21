@@ -1480,6 +1480,90 @@ uint32 arkrtos_port_paging_swap_stat(uint32 which)
 }
 #endif /* ARKRTOS_USE_PAGING_SWAP == 1 */
 
+/* 细粒度读数（pmap pairs）不属于页替换档：没有 SWAP 也要能回答
+ * 「这个空间挂着哪几对」，所以这三条放在 SWAP 条件块之外。 */
+/**
+* @brief 窗口由多少对 8 KB 组成（细粒度读数）
+* @details 一条 PS=12 条目管相邻两页，所以窗口的记账单位是「对」而不是
+*          「页」；对每个空间是同一个数（VA 侧不动）。没有页级窗口的档
+*          如实回 0，而不是把「一对 4 KB」这种不存在的粒度编出来。
+*/
+uint32 arkrtos_port_paging_pair_total(void)
+{
+#if (ARKRTOS_USE_PAGING_PAGES == 1)
+    return (uint32)LA_PG_WIN_ENTRIES;
+#else
+    return 0u;
+#endif
+}
+
+/**
+* @brief 某个空间现在挂着几对 8 KB
+* @return 对数；空间号越界（或这一档没有页级窗口）返回 0
+* @details 按需档数的是**真的付过费**（拿了两帧并装了条目）的对；页级档
+*          下装过的空间是整块 512 帧铺满窗口，所以等于总对数。
+*/
+uint32 arkrtos_port_paging_pair_count(uint32 space)
+{
+#if (ARKRTOS_USE_PAGING_PAGES == 1)
+    if(space >= (uint32)ARKRTOS_PAGING_APPS_MAX)
+    {
+        return 0u;
+    }
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
+    {
+        uint32 i;
+        uint32 n = 0u;
+
+        for(i = 0u; i < LA_PG_WIN_ENTRIES; i++)
+        {
+            if(s_pg_pair_pa[space][i] != 0u)
+            {
+                n++;
+            }
+        }
+        return n;
+    }
+#else
+    return (s_pg_space_base[space] != 0u) ? (uint32)LA_PG_WIN_ENTRIES : 0u;
+#endif
+#else
+    (void)space;
+    return 0u;
+#endif
+}
+
+/**
+* @brief 某一对的物理基址；0 = 这一对没挂着
+* @param space 空间号
+* @param idx   对号（0 .. pair_total()-1）
+* @details 只读：按需档下它不会替调用方把这一对缺进来 —— 问「现在挂着
+*          什么」不能改变答案。没挂的对如实回 0，不编一个地址。
+*/
+uint32 arkrtos_port_paging_pair_pa(uint32 space, uint32 idx)
+{
+#if (ARKRTOS_USE_PAGING_PAGES == 1)
+    if((space >= (uint32)ARKRTOS_PAGING_APPS_MAX) || (idx >= LA_PG_WIN_ENTRIES))
+    {
+        return 0u;
+    }
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
+    return s_pg_pair_pa[space][idx];
+#else
+    if(s_pg_space_base[space] == 0u)
+    {
+        return 0u;
+    }
+    return s_pg_space_base[space] + (idx * 0x2000u);
+#endif
+#else
+    (void)space;
+    (void)idx;
+    return 0u;
+#endif
+}
+
+
 #if (ARKRTOS_USE_PAGING_DEMAND == 1)
 /**
 * @brief 按需缺页：给 badv 所在的那一对 8 KB 拿帧并装条目

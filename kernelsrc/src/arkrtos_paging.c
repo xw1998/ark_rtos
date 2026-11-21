@@ -400,6 +400,25 @@ uint32 arkrtos_paging_frame_used(void)
     return arkrtos_port_paging_frame_used();
 }
 
+/** @brief Pair-level window readout: forwards to the port's ledger
+ *  @details This layer adds no arithmetic on purpose. "Which pairs are
+ *           mapped" is a property of the port's TLB/ledger, and a second
+ *           copy of that truth here is exactly how the two drift apart. */
+uint32 arkrtos_paging_pair_total(void)
+{
+    return arkrtos_port_paging_pair_total();
+}
+
+uint32 arkrtos_paging_pair_count(uint32 space)
+{
+    return arkrtos_port_paging_pair_count(space);
+}
+
+uint32 arkrtos_paging_pair_pa(uint32 space, uint32 idx)
+{
+    return arkrtos_port_paging_pair_pa(space, idx);
+}
+
 #if (ARKRTOS_USE_PAGING_SWAP == 1)
 /** @brief Page replacement readout (U-16): forwards to the port's ledger */
 uint32 arkrtos_paging_swap_stat(uint32 which)

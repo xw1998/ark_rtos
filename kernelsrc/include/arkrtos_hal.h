@@ -719,6 +719,27 @@ uint32 arkrtos_port_paging_frame_total(void);
 /** @brief Frames currently allocated from the board pool */
 uint32 arkrtos_port_paging_frame_used(void);
 
+/** @brief How many 8 KB pairs the App window is made of (0 = no window)
+ *  @details One PS=12 TLB entry covers two adjacent 4 KB pages, so the
+ *           window's accounting unit is a pair, not a page. The number is
+ *           the same for every space (the VA side never moves). */
+uint32 arkrtos_port_paging_pair_total(void);
+
+/** @brief How many of those pairs a space currently has mapped
+ *  @return pair count; 0 for a bad space or a space that was never installed
+ *  @details In the demand build this counts the pairs whose two frames have
+ *           actually been paid for; in the page-level build an installed
+ *           space owns the whole 2 MB run, so it is every pair. */
+uint32 arkrtos_port_paging_pair_count(uint32 space);
+
+/** @brief Physical base of one pair; 0 = that pair is not mapped
+ *  @param space address space
+ *  @param idx   0 .. arkrtos_port_paging_pair_total()-1
+ *  @details Read-only: it never faults a pair in, so asking "what is
+ *           mapped" cannot change the answer. A pair that has not been
+ *           touched yet reports 0 instead of a made-up address. */
+uint32 arkrtos_port_paging_pair_pa(uint32 space, uint32 idx);
+
 /** @brief Page replacement readout (U-16) - only exists when the swap switch is on
  *  @param which 0 = swap-outs, 1 = swap-ins, 2 = slots in use, 3 = failures,
  *               4 = resident pairs, 5 = slot count
@@ -789,6 +810,9 @@ void arkrtos_port_paging_inval_va(unsigned long va);
 #define arkrtos_port_paging_frame_free(base, count)     (-1)
 #define arkrtos_port_paging_frame_total()               (0u)
 #define arkrtos_port_paging_frame_used()                (0u)
+#define arkrtos_port_paging_pair_total()                (0u)
+#define arkrtos_port_paging_pair_count(space)           (0u)
+#define arkrtos_port_paging_pair_pa(space, idx)         (0u)
 #define arkrtos_port_paging_window_va()                 (0u)
 #define arkrtos_port_paging_asid_current()              (0UL)
 #define arkrtos_port_paging_asid_of(space)              (0u)

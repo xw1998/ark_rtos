@@ -23,7 +23,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（74 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（77 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -35,7 +35,7 @@
 - [kernelsrc/include/arkrtos_mempool.h](#kernelsrcincludearkrtos_mempoolh)（9 项）
 - [kernelsrc/include/arkrtos_mini.h](#kernelsrcincludearkrtos_minih)（20 项）
 - [kernelsrc/include/arkrtos_modld.h](#kernelsrcincludearkrtos_modldh)（8 项）
-- [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（21 项）
+- [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（22 项）
 - [kernelsrc/include/arkrtos_net.h](#kernelsrcincludearkrtos_neth)（6 项）
 - [kernelsrc/include/arkrtos_ptable.h](#kernelsrcincludearkrtos_ptableh)（23 项）
 - [kernelsrc/include/arkrtos_rt.h](#kernelsrcincludearkrtos_rth)（14 项）
@@ -62,7 +62,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（12 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（80 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（83 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（18 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -98,7 +98,7 @@
 - [kernelsrc/src/arkrtos_mini.c](#kernelsrcsrcarkrtos_minic)（1 项）
 - [kernelsrc/src/arkrtos_modld.c](#kernelsrcsrcarkrtos_modldc)（5 项）
 - [kernelsrc/src/arkrtos_mpu.c](#kernelsrcsrcarkrtos_mpuc)（1 项）
-- [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（25 项）
+- [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（26 项）
 - [kernelsrc/src/arkrtos_smp.c](#kernelsrcsrcarkrtos_smpc)（1 项）
 - [kernelsrc/src/arkrtos_task.c](#kernelsrcsrcarkrtos_taskc)（5 项）
 - [kernelsrc/src/arkrtos_tickless.c](#kernelsrcsrcarkrtos_ticklessc)（1 项）
@@ -4150,6 +4150,42 @@ uint32 arkrtos_port_paging_frame_used(void);
 
 **Frames currently allocated from the board pool */**
 
+### `uint32 arkrtos_port_paging_pair_total(void);`
+
+```c
+uint32 arkrtos_port_paging_pair_total(void);
+```
+
+**How many 8 KB pairs the App window is made of (0 = no window)**
+One PS=12 TLB entry covers two adjacent 4 KB pages, so the
+window's accounting unit is a pair, not a page. The number is
+the same for every space (the VA side never moves). */
+
+### `uint32 arkrtos_port_paging_pair_count(uint32 space);`
+
+```c
+uint32 arkrtos_port_paging_pair_count(uint32 space);
+```
+
+**How many of those pairs a space currently has mapped**
+**返回**：pair count; 0 for a bad space or a space that was never installed
+In the demand build this counts the pairs whose two frames have
+actually been paid for; in the page-level build an installed
+space owns the whole 2 MB run, so it is every pair. */
+
+### `uint32 arkrtos_port_paging_pair_pa(uint32 space, uint32 idx);`
+
+```c
+uint32 arkrtos_port_paging_pair_pa(uint32 space, uint32 idx);
+```
+
+**Physical base of one pair; 0 = that pair is not mapped**
+- `space`：address space
+- `idx`：0 .. arkrtos_port_paging_pair_total()-1
+Read-only: it never faults a pair in, so asking "what is
+mapped" cannot change the answer. A pair that has not been
+touched yet reports 0 instead of a made-up address. */
+
 ### `#if (ARKRTOS_USE_PAGING_SWAP == 1) uint32 arkrtos_port_paging_swap_sta`
 
 ```c
@@ -5876,6 +5912,19 @@ uint32 arkrtos_paging_frame_used(void);
 ```
 
 **Frames currently allocated from the board pool */**
+
+### `uint32 arkrtos_paging_pair_total(void);`
+
+```c
+uint32 arkrtos_paging_pair_total(void);
+```
+
+**Pair-level window readout (fine-grained demand-paging view)**
+The window is accounted in 8 KB pairs because one PS=12 entry
+covers two 4 KB pages. Read-only: asking what is mapped never
+faults anything in. total() is 0 on a build without a paged
+window; count()/pa() answer 0 for a space that is not installed
+(or for a pair that has not been paid for yet). */
 
 ### `#if (ARKRTOS_USE_PAGING_SWAP == 1) uint32 arkrtos_paging_swap_stat(uin`
 
@@ -9147,6 +9196,40 @@ uint32 arkrtos_port_paging_swap_stat(uint32 which) {
 4 = 驻留对数、5 = 槽总数
 **返回**：对应的读数；which 越界返回 0
 
+### `uint32 arkrtos_port_paging_pair_total(void) {`
+
+```c
+uint32 arkrtos_port_paging_pair_total(void) {
+```
+
+**窗口由多少对 8 KB 组成（细粒度读数）**
+一条 PS=12 条目管相邻两页，所以窗口的记账单位是「对」而不是
+「页」；对每个空间是同一个数（VA 侧不动）。没有页级窗口的档
+如实回 0，而不是把「一对 4 KB」这种不存在的粒度编出来。
+
+### `uint32 arkrtos_port_paging_pair_count(uint32 space) {`
+
+```c
+uint32 arkrtos_port_paging_pair_count(uint32 space) {
+```
+
+**某个空间现在挂着几对 8 KB**
+**返回**：对数；空间号越界（或这一档没有页级窗口）返回 0
+按需档数的是**真的付过费**（拿了两帧并装了条目）的对；页级档
+下装过的空间是整块 512 帧铺满窗口，所以等于总对数。
+
+### `uint32 arkrtos_port_paging_pair_pa(uint32 space, uint32 idx) {`
+
+```c
+uint32 arkrtos_port_paging_pair_pa(uint32 space, uint32 idx) {
+```
+
+**某一对的物理基址；0 = 这一对没挂着**
+- `space`：空间号
+- `idx`：对号（0 .. pair_total()-1）
+只读：按需档下它不会替调用方把这一对缺进来 —— 问「现在挂着
+什么」不能改变答案。没挂的对如实回 0，不编一个地址。
+
 ### `static int32 la_pg_demand_fault(unsigned long badv) {`
 
 ```c
@@ -11539,6 +11622,17 @@ uint32 arkrtos_paging_frame_used(void) {
 ```
 
 **Frames currently allocated from the board pool */**
+
+### `uint32 arkrtos_paging_pair_total(void) {`
+
+```c
+uint32 arkrtos_paging_pair_total(void) {
+```
+
+**Pair-level window readout: forwards to the port's ledger**
+This layer adds no arithmetic on purpose. "Which pairs are
+mapped" is a property of the port's TLB/ledger, and a second
+copy of that truth here is exactly how the two drift apart. */
 
 ### `uint32 arkrtos_paging_swap_stat(uint32 which) {`
 

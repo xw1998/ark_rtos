@@ -412,6 +412,61 @@ def check_format_baseline():
         fail("format", txt.strip()[-400:])
 
 # ---------------------------------------------------------------- check 4
+def check_gate_scripts_live():
+    """门禁脚本里不许有「终止语句之后的死代码」。
+
+    真事（U-16 那笔，提交 09e8036）：tools/paging_gate.py 把 13 条源码 pin 的
+    汇总循环连同它们的自检一起挪到了 pin_v 的 `return bad` 之后 —— 那段永远
+    不执行，而门禁照样打印「…pin 成立且自检有效」，一路绿了好几个提交。实测
+    把 hal.h 里的一条关档回退改坏，门禁仍然全绿，这就是假绿。
+
+    这种缺陷靠人看不出来（脚本语法合法、输出漂亮），只能用结构判据钉住：
+    return / raise / continue / break 之后，同一个块里不许再有条目。
+    """
+    import ast
+
+    def scan(path, src):
+        try:
+            tree = ast.parse(src)
+        except SyntaxError as e:
+            return ["%s: 语法错 %s" % (path, e)]
+        out = []
+        for n in ast.walk(tree):
+            body = getattr(n, "body", None)
+            if not isinstance(body, list):
+                continue
+            for i, st in enumerate(body):
+                if isinstance(st, (ast.Return, ast.Raise, ast.Continue, ast.Break)) \
+                        and (i + 1 < len(body)):
+                    out.append("%s: %s() 第 %d 行之后还有 %d 条不可达语句"
+                               % (path, getattr(n, "name", "<module>"),
+                                  st.lineno, len(body) - i - 1))
+        return out
+
+    bad = []
+    tdir = os.path.join(ROOT, "tools")
+    n_scan = 0
+    for rel in sorted(os.listdir(tdir)):
+        if not rel.endswith(".py"):
+            continue
+        n_scan += 1
+        bad.extend(scan("tools/" + rel,
+                        read(os.path.join(tdir, rel)).decode("utf-8", "replace")))
+
+    # 自检：同一套判据喂两段合成源码，一段有死代码、一段是合法的多出口
+    sel_bad = scan("<selftest>", "def f():\n    return 1\n    x = 2\n")
+    sel_ok = scan("<selftest>", "def f():\n    if True:\n        return 1\n    return 2\n")
+    if (len(sel_bad) != 1) or sel_ok:
+        bad.append("自检：判据在合成源码上没按预期回答（有死代码=%r，正常=%r）"
+                   % (sel_bad, sel_ok))
+
+    if bad:
+        fail("gate-live", "; ".join(bad[:4]))
+    else:
+        ok("gate-live",
+           "%d tool script(s) have no unreachable statement after return/raise/break/continue"
+           % n_scan)
+
 def check_doc_index(dry_run=None):
     """Every docs/*.md page must be reachable from docs/README.md.
 
@@ -1874,6 +1929,7 @@ CHECK_TABLE = (
     ("single-address-source", check_single_address_source),
     ("encoding", check_encoding_eol),
     ("format", check_format_baseline),
+    ("gate-live", check_gate_scripts_live),
     ("doc-index", check_doc_index),
     ("api-doc", check_api_doc_fresh),
     ("evidence-levels", check_evidence_levels),

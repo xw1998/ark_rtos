@@ -245,6 +245,16 @@ uint32 arkrtos_paging_frame_total(void);
 /** @brief Frames currently allocated from the board pool */
 uint32 arkrtos_paging_frame_used(void);
 
+/** @brief Pair-level window readout (fine-grained demand-paging view)
+ *  @details The window is accounted in 8 KB pairs because one PS=12 entry
+ *           covers two 4 KB pages. Read-only: asking what is mapped never
+ *           faults anything in. total() is 0 on a build without a paged
+ *           window; count()/pa() answer 0 for a space that is not installed
+ *           (or for a pair that has not been paid for yet). */
+uint32 arkrtos_paging_pair_total(void);
+uint32 arkrtos_paging_pair_count(uint32 space);
+uint32 arkrtos_paging_pair_pa(uint32 space, uint32 idx);
+
 /** @brief Page replacement readout (U-16)
  *  @param which 0 = swap-outs, 1 = swap-ins, 2 = slots in use, 3 = failures,
  *               4 = resident pairs, 5 = slot count
@@ -280,6 +290,9 @@ uint32 arkrtos_paging_swap_stat(uint32 which);
 #define arkrtos_paging_frame_free(base, count)               (-1)
 #define arkrtos_paging_frame_total()                         (0u)
 #define arkrtos_paging_frame_used()                          (0u)
+#define arkrtos_paging_pair_total()                          (0u)
+#define arkrtos_paging_pair_count(space)                     (0u)
+#define arkrtos_paging_pair_pa(space, idx)                   (0u)
 #define arkrtos_paging_swap_stat(which)                      (0u)
 
 #endif

@@ -981,6 +981,70 @@ int cmd_pmap(int argc, char *argv[])
         return 0;
     }
 
+    if((argc >= 2) && (strcmp(argv[1], "pairs") == 0))
+    {
+        uint32 space = arkrtos_paging_space_current();
+        uint32 total = arkrtos_paging_pair_total();
+        uint32 mapped;
+        uint32 shown = 0u;
+        uint32 i;
+        unsigned long base = arkrtos_paging_window_va();
+
+        if(argc >= 3)
+        {
+            if(pmap_hex(argv[2], &space) != 0)
+            {
+                sh_out("usage: pmap pairs [space]\r\n");
+                return -1;
+            }
+        }
+
+        if(total == 0u)
+        {
+            ark_shell_printf("pmap pairs: this build has no paged window "
+                             "(total=0 spaces=%u)\r\n",
+                             (unsigned)arkrtos_paging_space_count());
+            return 1;
+        }
+
+        if(space >= arkrtos_paging_space_count())
+        {
+            /* 越界与「没有窗口」不是同一件事：一个是我问错了空间号，
+             * 一个是这一档根本没这个读数。混成一句话会被读成后者。 */
+            ark_shell_printf("pmap pairs: space %u out of range "
+                             "(spaces=%u)\r\n",
+                             (unsigned)space,
+                             (unsigned)arkrtos_paging_space_count());
+            return 1;
+        }
+
+        mapped = arkrtos_paging_pair_count(space);
+        ark_shell_printf("pmap pairs: space %u mapped=%u/%u pair(s) of "
+                         "8 KB (%u KB) va=0x%08X\r\n",
+                         (unsigned)space, (unsigned)mapped, (unsigned)total,
+                         (unsigned)(mapped * 8u), (unsigned)base);
+        for(i = 0u; (i < total) && (shown < 8u); i++)
+        {
+            uint32 pa = arkrtos_paging_pair_pa(space, i);
+
+            if(pa == 0u)
+            {
+                continue;
+            }
+            ark_shell_printf("  pair %u: va=0x%08X pa=0x%08X\r\n",
+                             (unsigned)i,
+                             (unsigned)(base + (unsigned long)(i * 0x2000u)),
+                             (unsigned)pa);
+            shown++;
+        }
+        if(mapped > shown)
+        {
+            ark_shell_printf("  ... %u more pair(s) not shown\r\n",
+                             (unsigned)(mapped - shown));
+        }
+        return 0;
+    }
+
     if((argc >= 2) && (strcmp(argv[1], "look") == 0))
     {
         uint32 va = 0u;
