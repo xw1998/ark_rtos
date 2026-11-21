@@ -242,6 +242,13 @@ CASES = [
      ["-DARKRTOS_USE_LOG=0"], "LOG-HOST OFF OK"),
     ("ptable", "kernelsrc/tests/test_ptable_host.c",
      ["kernelsrc/src/arkrtos_ptable.c"], [], "PTABLE-HOST OK"),
+    # --- 2026-11-22 新增：硬件安全态 / 遗言（HW_SAFE 开/关是两段代码）---
+    ("hwsafe", "kernelsrc/tests/test_hwsafe_host.c",
+     ["kernelsrc/src/arkrtos_hwsafe.c"],
+     ["-DARKRTOS_HW_SAFE=1"], "HWSAFE-HOST OK"),
+    ("hwsafe-off", "kernelsrc/tests/test_hwsafe_host.c",
+     ["kernelsrc/src/arkrtos_hwsafe.c"],
+     ["-DARKRTOS_HW_SAFE=0"], "HWSAFE-HOST OFF OK"),
 ]
 
 

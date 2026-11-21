@@ -2436,6 +2436,72 @@ def check_ptable_host():
            "partition table + slot allocator + two mini allocators (%s)"
            % txt.strip().splitlines()[-1])
 
+def check_hwsafe_host():
+    """HW_SAFE on/off: who gets driven at the moment a task dies, and on what.
+
+    arkrtos_hwsafe.c is the "last words" ledger. When an owner dies, the kernel
+    must still drive that owner's device to a safe state, hand the hardware to
+    the next owner, or deliberately drop the ledger -- and it must never report
+    a failed drive as a success. The failures that matter here are quiet:
+
+      * a driver that answers non-zero (hardware did NOT reach safe state) being
+        counted with the ones that did;
+      * a death that is only marked, but never run, leaving the device live;
+      * the entry that gets moved into a removed slot never being processed;
+      * the monotonic counters being read as per-scenario numbers.
+
+    Two builds are checked: HW_SAFE=1 (the real code) and HW_SAFE=0, where the
+    module is an empty translation unit and only the "OFF OK" marker exists.
+    NOTE: the counters are monotonic across arkrtos_hwsafe_reset() by design,
+    so the test asserts increments, not absolute values.
+    """
+    import tempfile
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("hwsafe-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    picks = {}
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name in ("hwsafe", "hwsafe-off"):
+            picks[name] = (test, mods, defs, incs)
+    for need in ("hwsafe", "hwsafe-off"):
+        if need not in picks:
+            fail("hwsafe-host", "case %s missing from coverage_gate.CASES" % need)
+            return
+
+    results = []
+    for case_name, marker in (("hwsafe", "HWSAFE-HOST OK"),
+                              ("hwsafe-off", "HWSAFE-HOST OFF OK")):
+        test, mods, defs, incs = picks[case_name]
+        with tempfile.TemporaryDirectory() as td:
+            exe = os.path.join(td, case_name + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+                fail("hwsafe-host",
+                     "%s did not build: %s" % (case_name, tail[:200]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            if r.returncode != 0 or marker not in txt:
+                fail("hwsafe-host",
+                     "%s failed: %s" % (case_name, txt.strip()[:220]))
+                return
+            results.append(txt.strip().splitlines()[-1])
+    ok("hwsafe-host",
+       "safe-state will / hand-over / death ledger: %s | %s"
+       % (results[0], results[1]))
+
+
 def check_coverage_host():
     """Line coverage of the modules the host tests actually link.
 
@@ -2473,9 +2539,9 @@ def check_warn_host():
     re-checked and riscv64-unknown-elf-gcc-10.2.0 turned up.
 
     Scope is honest and narrow: every TU the cases in coverage_gate.CASES
-    compile -- 34 case configurations (test + module each) plus the SDK stdio
-    test, 69 TUs in total, because a few modules are built once per
-    configuration (sign, blk, dev, event, export and init twice; log three
+    compile -- 36 case configurations (test + module each) plus the SDK stdio
+    test, 73 TUs in total, because a few modules are built once per
+    configuration (sign, blk, dev, event, export, init and hwsafe twice; log three
     times: default, USE_LOG_RING=0 and USE_LOG=0; timer three times: default,
     tickless and USE_TIMER=0; cfg three times: default, STACK_GUARD=1 and
     STACK_USAGE=0). Everything else in kernelsrc/ needs an
@@ -2606,6 +2672,7 @@ CHECK_TABLE = (
     ("init-host", check_init_host),
     ("log-host", check_log_host),
     ("ptable-host", check_ptable_host),
+    ("hwsafe-host", check_hwsafe_host),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),
     ("analyzer", check_analyzer),
