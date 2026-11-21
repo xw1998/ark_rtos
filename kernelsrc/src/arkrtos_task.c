@@ -3626,18 +3626,14 @@ void arkrtos_ready_rebuild(void)
     }
 }
 
-/* 一致性自检：把「位图/链表」与「任务表真实状态」对照一遍，
- * 再和一次全表扫描选出的最优任务比对。返回不一致的条目数，0 = 一致。
- * 供 shell 的 schedcheck 命令调用；正常运行时不需要它。 */
-int32 arkrtos_sched_check(void)
+/* 逐任务对照：就绪链标记（on）与任务状态（should）是否一致、
+ * 声称在延时链上的任务能不能在链头找到，并顺带数出就绪任务数。
+ * 次核上的任务不在 CPU0 就绪链上，这是设计而不是不一致，必须跳过。 */
+static int32 sc_task_list(uint32 *p_cnt)
 {
     int32 bad = 0;
     uint32 cnt = 0u;
     int32 idx;
-    int32 scan;
-    uint8 bp;
-    uint32 bt;
-    int32 top;
 
     for(idx = 0; idx < arkrtos_task_count; idx++)
     {
@@ -3669,6 +3665,16 @@ int32 arkrtos_sched_check(void)
             bad++;                              /* 声称在延时链上却找不到它 */
         }
     }
+
+    *p_cnt = cnt;
+    return bad;
+}
+
+/* 字位图 / 组位图 / 桶头三方对照：三处任意一处说有、另一处说没有就是不一致。 */
+static int32 sc_bitmap(void)
+{
+    int32 bad = 0;
+    int32 idx;
 
     for(idx = 0; idx < 8; idx++)
     {
@@ -3702,14 +3708,19 @@ int32 arkrtos_sched_check(void)
         }
     }
 
-    if(cnt != arkrtos_ready_total)
-    {
-        bad++;
-    }
+    return bad;
+}
 
-    scan = -1;
-    bp = 255u;
-    bt = 0xFFFFFFFFu;
+/* 全表线性扫描选最优任务：优先级号小者胜，同优先级按 touch_tick 早者胜。
+ * 只对 CPU0 的任务表子集生效（次核任务的优先级不参与本核决策）。
+ * 返回任务号，没有任何就绪任务返回 -1。 */
+static int32 sc_scan_best(void)
+{
+    int32 idx;
+    int32 scan = -1;
+    uint8 bp = 255u;
+    uint32 bt = 0xFFFFFFFFu;
+
     for(idx = 0; idx < arkrtos_task_count; idx++)
     {
         arkrtos_task_t *p = &arkrtos_task_table[idx];
@@ -3740,6 +3751,30 @@ int32 arkrtos_sched_check(void)
         }
     }
 
+    return scan;
+}
+
+/* 一致性自检：把「位图/链表」与「任务表真实状态」对照一遍，
+ * 再和一次全表扫描选出的最优任务比对。返回不一致的条目数，0 = 一致。
+ * 供 shell 的 schedcheck 命令调用；正常运行时不需要它。 */
+int32 arkrtos_sched_check(void)
+{
+    int32 bad;
+    uint32 cnt = 0u;
+    int32 scan;
+    int32 top;
+
+    bad = sc_task_list(&cnt);
+    bad += sc_bitmap();
+
+    if(cnt != arkrtos_ready_total)
+    {
+        bad++;
+    }
+
+    /* 位图/桶自洽之后，再把「全表扫描选出的最优」与「位图选出的最优」比一次：
+     * 只有两者都非空且优先级不同才算真不一致（一侧为空已在上面两边判过）。 */
+    scan = sc_scan_best();
     top = arkrtos_ready_top();
     if(((scan < 0) && (top >= 0)) || ((scan >= 0) && (top < 0)))
     {

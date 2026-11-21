@@ -6098,6 +6098,65 @@ F1–F4 不管缩进，所以它一直没红）。这段整体搬进 `fdt_build_
 门禁：`tools/ci_gate.py` **57 passed / 0 failed / 0 skipped**；`tools/format_gate.py` OK 392；
 `doc_audit funcs` **5 → 4**（`arkrtos_mbuf_send_internal` 125 从清单消失）。
 
+#### 5.30.50 第四十五笔：`arkrtos_sched_check()` 拆成任务表 / 位图 / 扫描三段（2026-11-21）
+
+`kernelsrc/src/arkrtos_task.c` 的 `arkrtos_sched_check()`（**123 行**）是调度器的一致性自检：
+把「就绪位图 / 就绪桶链表」这份第二副本与任务表真实状态比一遍，再由一次全表线性扫描选出最优
+任务，与位图选出的最优比一次；返回不一致条目数（0 = 一致）。三段各自成函数。
+
+| 单元 | 干什么 | 行数 |
+|---|---|---|
+| `sc_task_list()` | 逐任务比「就绪链标记 `ready_next != NIL`」与「状态 READY/RUNNING」，顺带查「声称在延时链上却不在链头」，并把就绪任务数经 `*p_cnt` 带出 | 40 |
+| `sc_bitmap()` | `ready_map[8]` / `ready_group` / `ready_head[]` 三方对照（字位图非空但组位未标、组位说有但字位图为空、位图说有但桶空、桶头任务优先级对不上） | 39 |
+| `sc_scan_best()` | 全表线性扫描选最优（优先级号小者胜、同优先级按 `touch_tick` 早者胜），返回任务号，无就绪返回 −1 | 39 |
+| `arkrtos_sched_check()` 自己 | `sc_task_list` → `sc_bitmap` → `cnt != ready_total` 加一 → `sc_scan_best` 与 `ready_top()` 比对（一侧为空 / 优先级不同） | **30**（原 123） |
+
+三条口径：
+
+Ⓐ **SMP 跳过逻辑在两段里都必须原样保留**：`arkrtos_smp_sched_owned_by_other()` 的 `continue`
+同时出现在 `sc_task_list` 与 `sc_scan_best` 里，而且**两处语义不同**——前者是「次核任务不在
+CPU0 就绪链上，这是设计不是不一致」，后者是「次核任务的优先级不参与本核决策」。少任一处都会
+在迁出一个任务后立刻报 bad。注释也随代码一起搬，没有合并成一句。
+Ⓑ **返回值是「不一致条目数」不是布尔**：三段各自累加，主函数用 `bad = …; bad += …;` 相加。
+shell 的 `sched` 命令把它当计数打印（`%d mismatch(es)`），`audit` 只判 `!= 0`。拆函数时如果
+把任一段改成返回 0/1，计数信息就丢了，shell 上的「几处不一致」会退化成「有不一致」。
+Ⓒ **`cnt` 用出参而不是全局**：`sc_task_list(&cnt)` 把就绪任务数带出来，主函数再与
+`arkrtos_ready_total` 比。这里不引入任何新的静态变量——`arkrtos_sched_check` 本身是可以被
+并发调用的自检（`arkrtos_audit` 会调），一旦有全局中间态就多一条竞态。
+
+体积（`default` 档，`loongarch64-newlib-elf-size`，两遍同配置 `make clean` 构建）：
+
+- 改前 `text 449064 / data 448 / bss 5,128,740`
+- 改后 `text 449064 / data 448 / bss 5,128,740`
+- **0 B 差异**，全量告警 242 条前后一致。纯拆分、编译器内联后形状相同，符合预期——但 **0 B
+  不代表行为等价**，真正的等价证据在下一段。
+
+端到端（QEMU，`tools/qemu_shell_drive.py` 走 TCP 串口喂命令）：
+
+```
+sched | sched: consistent
+audit | audit: all structures self-consistent
+```
+
+实跑输出：
+
+- `sched` → `ready=1 top=9` + `sched: consistent (bitmap/links == task table)`
+- `audit` → 32 项检查里 `tasks: ok` / `sched: ok`，`checks=32 bad_groups=0 mask=0x00000000
+  first_offender=4294967295`，`audit: all structures self-consistent`
+- 驱动脚本收尾 `SHELL-DRIVE OK: 2 条命令全部符合预期`（退出码 0）
+
+也就是说这条自检在真跑起来的调度器上确实返回 0，且两处 SMP 跳过在单核 QEMU 上空转不误报。
+**未覆盖**：`sc_bitmap` 的四种 bad 分支与 `sc_scan_best` 的次优先级分支都只在「结构真被破坏」
+时才走到，本次没有造破坏去触发它们（要故意改位图/桶头才触发），如实登记为未验证。
+
+门禁：`tools/ci_gate.py` **57 passed / 0 failed / 0 skipped**；`tools/format_gate.py` OK 392；
+`doc_audit funcs` **4 → 3**。
+
+结论分档：**编译通过（0 告警新增）+ QEMU 端到端 PASS（`sched` / `audit` 双命令）+ 静态门禁全绿，
+未上板**（QEMU 算上板，不是真机）。
+
+> 门禁偶发（如实记录）：本笔有一次 `ci_gate` 在 `fdt` 组报了 `overlay-selfcheck` 的「坏样本没改到东西」（13 passed / 1 failed）；单跑 `tools/fdt_gate.py` 为 **14 passed / 0 failed / FDT-GATE OK**，紧接复跑 `ci_gate` 恢复 **57 / 0 / 0**。该组是 QEMU 串口时序相关的既有偶发，与本笔改动（`arkrtos_task.c`）无因果关系，未做任何代码改动。
+
 ### 5.31 LSX 向量寄存器上下文（U-19，2026-11-21）
 
 #### 5.31.1 缺口：FPU 档只存了一半的浮点上下文
