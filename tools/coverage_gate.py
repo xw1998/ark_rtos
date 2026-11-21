@@ -249,6 +249,16 @@ CASES = [
     ("hwsafe-off", "kernelsrc/tests/test_hwsafe_host.c",
      ["kernelsrc/src/arkrtos_hwsafe.c"],
      ["-DARKRTOS_HW_SAFE=0"], "HWSAFE-HOST OFF OK"),
+    # --- 2026-11-22 新增：内核自检（USE_AUDIT 开/关是两段代码）---
+    # ON 档链接真实的 ptable.c：audit 读的就是那张表，不替它做桩。
+    # ptable 的分母在这一档只走到一个入口，
+    # 但并集只加不减，ptable 自己那条 case 的覆盖不会被拉低。
+    ("audit", "kernelsrc/tests/test_audit_host.c",
+     ["kernelsrc/src/arkrtos_audit.c", "kernelsrc/src/arkrtos_ptable.c"],
+     ["-DARKRTOS_USE_AUDIT=1"], "AUDIT-HOST OK"),
+    ("audit-off", "kernelsrc/tests/test_audit_host.c",
+     ["kernelsrc/src/arkrtos_audit.c"],
+     ["-DARKRTOS_USE_AUDIT=0"], "AUDIT-HOST OFF OK"),
 ]
 
 

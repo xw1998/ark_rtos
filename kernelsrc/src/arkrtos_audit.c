@@ -105,7 +105,10 @@ static void audit_part_pool(arkrtos_audit_result_t *p,
     {
         audit_fail(p, ARKRTOS_AUDIT_PARTITION, ARKRTOS_AUDIT_INDEX_NONE);
     }
-    if(t->pool_units != (t->pool_size / t->pool_sector))
+    /* pool_sector == 0 已经在上面报过；这里再除一次会把自己除崩，
+     * 而自检的第一职责是「表坏得要命时仍然能给出结论」。 */
+    if((t->pool_sector != 0u) &&
+       (t->pool_units != (t->pool_size / t->pool_sector)))
     {
         audit_fail(p, ARKRTOS_AUDIT_PARTITION, ARKRTOS_AUDIT_INDEX_NONE);
     }
@@ -347,8 +350,11 @@ static void audit_slots(arkrtos_audit_result_t *p)
         {
             audit_fail(p, ARKRTOS_AUDIT_SLOTS, i);
         }
+        /* alloc_unit == 0 由分区那一组报（同一张表），这里跳过对齐检查；
+         * 不跳过就是一次除零——自检不能被它正在审计的坏字段打死。 */
         if((t->slot_base[i] < t->pool_base) ||
-           (((t->slot_base[i] - t->pool_base) % t->pool_alloc_unit) != 0u) ||
+           ((t->pool_alloc_unit != 0u) &&
+            (((t->slot_base[i] - t->pool_base) % t->pool_alloc_unit) != 0u)) ||
            (((t->slot_base[i] - t->pool_base) + t->slot_size[i]) > t->pool_usable_size))
         {
             audit_fail(p, ARKRTOS_AUDIT_SLOTS, i);

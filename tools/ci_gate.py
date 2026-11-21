@@ -2502,6 +2502,76 @@ def check_hwsafe_host():
        % (results[0], results[1]))
 
 
+def check_audit_host():
+    """The kernel's own structural self-check, on host, at both grades.
+
+    arkrtos_audit.c is read-only: it walks the partition table, the slot
+    records and the task table and answers one question per group -- do their
+    fields still satisfy the invariants the rest of the kernel assumes? The
+    bug class it exists for shows up much later (scheduler picks a non-runnable
+    task, pool hands out overlapping ranges), so a silent false "clean" is the
+    worst possible outcome. The host case therefore builds a clean table, then
+    breaks ONE field at a time and asserts exactly that group lights up with
+    the right index and nothing else; then restores and asserts green again.
+
+    Two builds are checked: USE_AUDIT=1 (the real checks; links the real
+    ptable because the audit reads the actual table at SHARE_RAM_BASE) and
+    USE_AUDIT=0, where every entry point must honestly answer "no check was
+    done" (mask 0, last_mask 0, boot 0, name == "audit disabled") instead of
+    faking a clean bill of health.
+
+    The case also found two real divide-by-zero defects in the audit itself
+    (pool_sector == 0 and pool_alloc_unit == 0): a self-check that crashes on
+    the very corruption it is auditing answers nothing, so both got a
+    short-circuit guard on 2026-11-22.
+    """
+    import tempfile
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("audit-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    picks = {}
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name in ("audit", "audit-off"):
+            picks[name] = (test, mods, defs, incs)
+    for need in ("audit", "audit-off"):
+        if need not in picks:
+            fail("audit-host", "case %s missing from coverage_gate.CASES" % need)
+            return
+
+    results = []
+    for case_name, marker in (("audit", "AUDIT-HOST OK"),
+                              ("audit-off", "AUDIT-HOST OFF OK")):
+        test, mods, defs, incs = picks[case_name]
+        with tempfile.TemporaryDirectory() as td:
+            exe = os.path.join(td, case_name + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+                fail("audit-host",
+                     "%s did not build: %s" % (case_name, tail[:200]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            if r.returncode != 0 or marker not in txt:
+                fail("audit-host",
+                     "%s failed: %s" % (case_name, txt.strip()[:220]))
+                return
+            results.append(txt.strip().splitlines()[-1])
+    ok("audit-host",
+       "structural self-check (one group broken at a time): %s | %s"
+       % (results[0], results[1]))
+
+
 def check_coverage_host():
     """Line coverage of the modules the host tests actually link.
 
@@ -2539,9 +2609,9 @@ def check_warn_host():
     re-checked and riscv64-unknown-elf-gcc-10.2.0 turned up.
 
     Scope is honest and narrow: every TU the cases in coverage_gate.CASES
-    compile -- 36 case configurations (test + module each) plus the SDK stdio
-    test, 73 TUs in total, because a few modules are built once per
-    configuration (sign, blk, dev, event, export, init and hwsafe twice; log three
+    compile -- 38 case configurations (test + module each) plus the SDK stdio
+    test, 78 TUs in total, because a few modules are built once per
+    configuration (sign, blk, dev, event, export, init, hwsafe and audit twice; log three
     times: default, USE_LOG_RING=0 and USE_LOG=0; timer three times: default,
     tickless and USE_TIMER=0; cfg three times: default, STACK_GUARD=1 and
     STACK_USAGE=0). Everything else in kernelsrc/ needs an
@@ -2673,6 +2743,7 @@ CHECK_TABLE = (
     ("log-host", check_log_host),
     ("ptable-host", check_ptable_host),
     ("hwsafe-host", check_hwsafe_host),
+    ("audit-host", check_audit_host),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),
     ("analyzer", check_analyzer),
