@@ -11,6 +11,7 @@
   "arkrtos_loader": 98.41,
   "arkrtos_log": 98.88,
   "arkrtos_mempool": 95.65,
+  "arkrtos_ptable": 99.05,
   "arkrtos_mq": 100.0,
   "arkrtos_sbuf": 80.57,
   "arkrtos_sign": 100.0,

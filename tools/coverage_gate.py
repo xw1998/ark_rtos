@@ -240,6 +240,8 @@ CASES = [
     ("log-off", "kernelsrc/tests/test_log_host.c",
      ["kernelsrc/src/arkrtos_log.c"],
      ["-DARKRTOS_USE_LOG=0"], "LOG-HOST OFF OK"),
+    ("ptable", "kernelsrc/tests/test_ptable_host.c",
+     ["kernelsrc/src/arkrtos_ptable.c"], [], "PTABLE-HOST OK"),
 ]
 
 

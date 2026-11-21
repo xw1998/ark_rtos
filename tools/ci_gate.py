@@ -2372,6 +2372,70 @@ def check_log_host():
     ok("log-host", "kernel log on host (%s / %s / %s)"
        % (lines[0], lines[1], lines[2]))
 
+def check_ptable_host():
+    """The partition table: layout init, slot alloc/free, two mini allocators.
+
+    arkrtos_ptable.c is what the loader stands on: it decides which address an
+    image or a driver may occupy, and every way of getting that wrong hands out
+    memory that is already in use. The failures are quiet ones:
+
+      * an allocation that reuses a range already recorded as in use -- the two
+        owners then corrupt each other and nothing reports an error;
+      * a gap search that only looks at the aligned landing spot and gives up
+        instead of falling back to the gap start, or one that walks past the
+        pool end;
+      * the two mini-app blocks (code + RAM, not tied to a slot) both handing
+        out the same block, or a block freed with its slot still counted as
+        used;
+      * the layout header rewritten on every arkrtos_ptable_get() once the
+        table lives in shared RAM (magic/version/hw_compat must survive).
+
+    The module works on absolute addresses (IMAGE_POOL_BASE, SLOT_RAM_BASE,
+    SHARE_RAM_BASE from config/arkrtos_partition.h), so the host test reserves
+    both the RAM window and the flash window for real with VirtualAlloc/mmap
+    before any assertion, and returns non-zero (FAIL) when the mapping fails
+    rather than running assertions against a null pointer.
+    """
+    import tempfile
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("ptable-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    picked = None
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name == "ptable":
+            picked = (test, mods, defs, incs)
+            break
+    if picked is None:
+        fail("ptable-host", "case ptable missing from coverage_gate.CASES")
+        return
+
+    test, mods, defs, incs = picked
+    with tempfile.TemporaryDirectory() as td:
+        exe = os.path.join(td, "ptable" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+            fail("ptable-host", "ptable did not build: %s" % tail[:200])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or "PTABLE-HOST OK" not in txt:
+            fail("ptable-host", "ptable failed: %s" % txt.strip()[:220])
+            return
+        ok("ptable-host",
+           "partition table + slot allocator + two mini allocators (%s)"
+           % txt.strip().splitlines()[-1])
+
 def check_coverage_host():
     """Line coverage of the modules the host tests actually link.
 
@@ -2409,8 +2473,8 @@ def check_warn_host():
     re-checked and riscv64-unknown-elf-gcc-10.2.0 turned up.
 
     Scope is honest and narrow: every TU the cases in coverage_gate.CASES
-    compile -- 33 case configurations (test + module each) plus the SDK stdio
-    test, 67 TUs in total, because a few modules are built once per
+    compile -- 34 case configurations (test + module each) plus the SDK stdio
+    test, 69 TUs in total, because a few modules are built once per
     configuration (sign, blk, dev, event, export and init twice; log three
     times: default, USE_LOG_RING=0 and USE_LOG=0; timer three times: default,
     tickless and USE_TIMER=0; cfg three times: default, STACK_GUARD=1 and
@@ -2541,6 +2605,7 @@ CHECK_TABLE = (
     ("export-host", check_export_host),
     ("init-host", check_init_host),
     ("log-host", check_log_host),
+    ("ptable-host", check_ptable_host),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),
     ("analyzer", check_analyzer),
