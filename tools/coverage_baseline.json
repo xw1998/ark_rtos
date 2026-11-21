@@ -14,6 +14,7 @@
   "arkrtos_mempool": 95.65,
   "arkrtos_hwsafe": 99.58,
   "arkrtos_ptable": 99.05,
+  "arkrtos_mpu": 100.0,
   "arkrtos_mq": 100.0,
   "arkrtos_sbuf": 80.57,
   "arkrtos_sign": 100.0,

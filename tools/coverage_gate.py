@@ -259,6 +259,14 @@ CASES = [
     ("audit-off", "kernelsrc/tests/test_audit_host.c",
      ["kernelsrc/src/arkrtos_audit.c"],
      ["-DARKRTOS_USE_AUDIT=0"], "AUDIT-HOST OFF OK"),
+    # --- 2026-11-22 新增：MPU 窗口构建（USE_MPU 开/关是两段代码）---
+    # 关档是空目标，覆盖率只由开档供给。
+    ("mpu", "kernelsrc/tests/test_mpu_host.c",
+     ["kernelsrc/src/arkrtos_mpu.c"],
+     ["-DARKRTOS_USE_MPU=1"], "MPU-HOST OK"),
+    ("mpu-off", "kernelsrc/tests/test_mpu_host.c",
+     ["kernelsrc/src/arkrtos_mpu.c"],
+     ["-DARKRTOS_USE_MPU=0"], "MPU-HOST OFF OK"),
 ]
 
 

@@ -2572,6 +2572,82 @@ def check_audit_host():
        % (results[0], results[1]))
 
 
+def check_mpu_host():
+    """MPU window construction, on host, at both grades.
+
+    arkrtos_mpu.c never touches MPU registers: it decides which address
+    windows a task may reach and fills the architecture-independent context
+    in the TCB; the port encodes that into hardware. So the host case stubs
+    the five port entry points and pins the geometry and attribute of every
+    window that would reach the port, plus the fail-closed decisions:
+
+      * a kernel task gets the kernel flash window and a chip-RAM fallback
+        (shared RAM is already covered, so no separate share region);
+      * an App's code window is the smallest aligned power-of-two region
+        containing the image; a tight landing expands downward but never
+        across the pool end (that case falls back instead);
+      * a RAM window inside the pool with a bad shape (not power of two,
+        misaligned, wrong size range, crossing the pool end) is REFUSED with
+        the region left disabled -- never widened into chip RAM, which would
+        expose every other task's stack;
+      * a MiniApp's code is in RAM, so region 0 must be executable RAM (RAMX),
+        not read-only flash; a data window that IS the code window must keep
+        execute permission too;
+      * every build clears the whole region set first, so a refused encode or
+        a previous context cannot linger.
+
+    Two builds: USE_MPU=1 (the real code) and USE_MPU=0, where the module is
+    an empty translation unit and the header collapses the five entry points
+    to empty macros. The OFF case proves the call sites still compile and do
+    nothing; it is not a claim that any window was built.
+    """
+    import tempfile
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("mpu-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    picks = {}
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name in ("mpu", "mpu-off"):
+            picks[name] = (test, mods, defs, incs)
+    for need in ("mpu", "mpu-off"):
+        if need not in picks:
+            fail("mpu-host", "case %s missing from coverage_gate.CASES" % need)
+            return
+
+    results = []
+    for case_name, marker in (("mpu", "MPU-HOST OK"),
+                              ("mpu-off", "MPU-HOST OFF OK")):
+        test, mods, defs, incs = picks[case_name]
+        with tempfile.TemporaryDirectory() as td:
+            exe = os.path.join(td, case_name + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+                fail("mpu-host",
+                     "%s did not build: %s" % (case_name, tail[:200]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            if r.returncode != 0 or marker not in txt:
+                fail("mpu-host",
+                     "%s failed: %s" % (case_name, txt.strip()[:220]))
+                return
+            results.append(txt.strip().splitlines()[-1])
+    ok("mpu-host",
+       "task window geometry (fail-closed on bad shapes): %s | %s"
+       % (results[0], results[1]))
+
+
 def check_coverage_host():
     """Line coverage of the modules the host tests actually link.
 
@@ -2609,9 +2685,9 @@ def check_warn_host():
     re-checked and riscv64-unknown-elf-gcc-10.2.0 turned up.
 
     Scope is honest and narrow: every TU the cases in coverage_gate.CASES
-    compile -- 38 case configurations (test + module each) plus the SDK stdio
-    test, 78 TUs in total, because a few modules are built once per
-    configuration (sign, blk, dev, event, export, init, hwsafe and audit twice; log three
+    compile -- 40 case configurations (test + module each) plus the SDK stdio
+    test, 82 TUs in total, because a few modules are built once per
+    configuration (sign, blk, dev, event, export, init, hwsafe, audit and mpu twice; log three
     times: default, USE_LOG_RING=0 and USE_LOG=0; timer three times: default,
     tickless and USE_TIMER=0; cfg three times: default, STACK_GUARD=1 and
     STACK_USAGE=0). Everything else in kernelsrc/ needs an
@@ -2744,6 +2820,7 @@ CHECK_TABLE = (
     ("ptable-host", check_ptable_host),
     ("hwsafe-host", check_hwsafe_host),
     ("audit-host", check_audit_host),
+    ("mpu-host", check_mpu_host),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),
     ("analyzer", check_analyzer),
