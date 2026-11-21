@@ -811,6 +811,62 @@ static int fdt_split_path(const char *path, char *buf, uint32 cap,
 
 /* 沿树走一遍、按组件逐层比对；只有整条路径都对上才写 *out。
  * stack 记的是"当前打开的每一层节点名"，所以同时也就有了祖先路径。 */
+
+static int fdt_build_path(const char *const *stack, uint32 depth,
+                          char *pathbuf, uint32 pathcap);
+
+/* BEGIN_NODE 分支：节点名入栈、判深度上限，再比一次完整路径。
+ * 返回 OK 表示这一支没出错（*p_hit 说有没有对上、对上时 *out / pathbuf 已写），
+ * 负数就是错误码。拆出来是为了让主循环只剩「读 tok → 分派」。 */
+static int fdt_walk_begin(const char *comp[], int n, const char *stack[],
+                          uint32 *p_depth, uint32 off, const char *name,
+                          arkrtos_fdt_node_t *out, char *pathbuf, uint32 pathcap,
+                          int *p_hit)
+{
+    uint32 depth = *p_depth;
+    uint32 i;
+
+    *p_hit = 0;
+
+    if(depth > (ARKRTOS_FDT_MAX_DEPTH + 1u))
+    {
+        return ARKRTOS_FDT_ERR_DEPTH;
+    }
+    stack[depth] = name;
+    depth++;
+    *p_depth = depth;
+
+    /* stack[0] 是根节点名（""），路径第 k 个组件对应 stack[k]。 */
+    if((int)depth == (n + 1))
+    {
+        for(i = 0u; (int)i < n; i++)
+        {
+            if(fdt_streq(comp[i], stack[i + 1u]) == 0)
+            {
+                return ARKRTOS_FDT_OK;      /* 这一层对不上，继续扫 */
+            }
+        }
+        if(out != 0)
+        {
+            out->name = name;
+            out->depth = depth - 1u;
+            out->props_off = off;
+            out->n_props = fdt_count_props(off);
+        }
+        if(pathbuf != 0)
+        {
+            int rc = fdt_build_path(stack, depth, pathbuf, pathcap);
+
+            if(rc != ARKRTOS_FDT_OK)
+            {
+                return rc;
+            }
+        }
+        *p_hit = 1;
+    }
+    return ARKRTOS_FDT_OK;
+}
+
 static int fdt_walk_path(const char *path, arkrtos_fdt_node_t *out,
                          char *pathbuf, uint32 pathcap)
 {
@@ -820,8 +876,8 @@ static int fdt_walk_path(const char *path, arkrtos_fdt_node_t *out,
     uint32      off;
     uint32      end;
     uint32      depth = 0u;
-    uint32      i;
     int         n;
+    int         rc;
 
     if(s_fdt.ready == 0u)
     {
@@ -887,72 +943,21 @@ static int fdt_walk_path(const char *path, arkrtos_fdt_node_t *out,
         if(tok == FDT_TOK_BEGIN_NODE)
         {
             const char *name;
+            int hit = 0;
 
             if(fdt_node_name(&off, &name) != ARKRTOS_FDT_OK)
             {
                 return ARKRTOS_FDT_ERR_FORMAT;
             }
-            if(depth > (ARKRTOS_FDT_MAX_DEPTH + 1u))
+            rc = fdt_walk_begin(comp, n, stack, &depth, off, name, out,
+                                pathbuf, pathcap, &hit);
+            if(rc != ARKRTOS_FDT_OK)
             {
-                return ARKRTOS_FDT_ERR_DEPTH;
+                return rc;
             }
-            stack[depth] = name;
-            depth++;
-
-            /* stack[0] 是根节点名（""），路径第 k 个组件对应 stack[k]。 */
-            if((int)depth == (n + 1))
+            if(hit != 0)
             {
-                int hit = 1;
-
-                for(i = 0u; (int)i < n; i++)
-                {
-                    if(fdt_streq(comp[i], stack[i + 1u]) == 0)
-                    {
-                        hit = 0;
-                        break;
-                    }
-                }
-                if(hit != 0)
-                {
-                    if(out != 0)
-                    {
-                        out->name = name;
-                        out->depth = depth - 1u;
-                        out->props_off = off;
-                        out->n_props = fdt_count_props(off);
-                    }
-                    if(pathbuf != 0)
-                    {
-                        uint32 w = 0u;
-                        uint32 k;
-
-                        /* k=1 是根节点（名字为空），不产生路径组件；从 k=2 起才是子节点。 */
-    for(k = 2u; k <= depth; k++)
-                        {
-                            const char *nm = stack[k - 1u];
-                            uint32 c = 0u;
-
-                            if(w >= (pathcap - 1u))
-                            {
-                                return ARKRTOS_FDT_ERR_ARG;
-                            }
-                            pathbuf[w] = '/';
-                            w++;
-                            while((nm[c] != '\0') && (w < (pathcap - 1u)))
-                            {
-                                pathbuf[w] = nm[c];
-                                w++;
-                                c++;
-                            }
-                            if(nm[c] != '\0')
-                            {
-                                return ARKRTOS_FDT_ERR_ARG;
-                            }
-                        }
-                        pathbuf[w] = '\0';
-                    }
-                    return ARKRTOS_FDT_OK;
-                }
+                return ARKRTOS_FDT_OK;
             }
             continue;
         }

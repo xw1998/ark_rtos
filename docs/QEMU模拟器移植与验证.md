@@ -5916,6 +5916,46 @@ ON-path 文件 + LA64 pin U/V/W + RV32 pin X）；`tools/smp_gate.py` **SMP-GATE
 
 结论分档：**编译通过 + 告警 0 + QEMU 端到端 PASS，未上板**（QEMU 算上板，不是真机）。
 
+#### 5.30.46 第四十一笔：`fdt_walk_path()` 拆出 BEGIN_NODE 分支，并复用既有的 `fdt_build_path()`（2026-11-21）
+
+`kernelsrc/src/arkrtos_fdt.c` 的 `fdt_walk_path()`（**148 行**）沿 structure block 走一遍，
+按 `BEGIN_NODE` 累栈、`END_NODE` 退栈，到「深度正好是路径组件数 + 1」那一层逐段比名字，
+对上就写 `*out` 与绝对路径。循环体里最长的一支是 `BEGIN_NODE`（近 70 行），抽成函数后
+主循环只剩「读 tok → 分派」。
+
+| 单元 | 干什么 | 行数 |
+|---|---|---|
+| `fdt_walk_begin()` | 判深度上限（`> MAX_DEPTH + 1` 报 `ERR_DEPTH`）→ 名字入栈、`*p_depth` 回写 → 深度不等于 `n + 1` 就返回继续 → 逐段 `fdt_streq` 比名字 → 对上则填 `*out`（`name` / `depth - 1` / `props_off` / `n_props`）与路径，`*p_hit = 1` | 49 |
+| `fdt_walk_path()` 自己 | 初始化 + `fdt_split_path` + 主循环（5 个 tok 分支，`BEGIN_NODE` 只剩 9 行调用）+ 5 处 `return ERR_FORMAT` | **97**（原 148） |
+
+三条口径：
+
+Ⓐ 路径拼装**不再复制一份**，改为调用文件里早就有、语义相同的 `fdt_build_path()`（原本只被
+`fdt_walk_match` 用）。两段逻辑逐条对得上：`k` 从 2 起跳过根节点（名字为空）、每次先写 `/`、
+名字逐字符搬、容量不够返回 `ERR_ARG`。差别只有一处：`fdt_build_path` 入口有
+`if((pathbuf == 0) || (pathcap < 2u)) return ARKRTOS_FDT_ERR_ARG;`，而原来的内联版没有这条
+——`pathcap == 0` 时 `pathcap - 1u` 会回绕成 `0xFFFFFFFF`，判断永不成立，然后往 `pathbuf[0]`
+写。所以这次复用是**收紧**（不再有那条越界路径），不是放宽；现有调用点一个是
+`arkrtos_fdt_node_by_path` 传 `(0, 0u)`（走不到这段），另一个传的是真实缓冲与容量。
+`fdt_build_path` 定义在 `fdt_walk_path` 之后，因此加了一行前置声明，函数体未动。
+Ⓑ `*p_hit` 而不是「返回 1 表示找到」：`ARKRTOS_FDT_ERR_*` 全是负数，用返回值区分
+「找到了」和「错误」也能写，但那会把 `OK(0)` 同时当成「没找到、继续」——`fdt_walk_begin`
+的绝大多数返回都是这个 0。用独立的出参让「没出错」和「对上了」在调用点各是一个判断。
+Ⓒ 顺带修掉一处缩进：原内联块里 `    for(k = 2u; ...)` 少了 4 格缩进（`format_gate` 的
+F1–F4 不管缩进，所以它一直没红）。这段整体搬进 `fdt_build_path` 后自然消失。
+
+等价性：`default` 档两遍同配置 clean 构建 text **449128 → 449112（−16 B，唯一一处降）**、
+`data` 448 / `bss` 5,128,740 / 总量 31,462,512 B 全不变；该文件 0 告警（全量 clean 构建 242 条
+告警前后逐条一致）。`-16 B` 来自删掉一份重复的路径拼装，但仍然保留了一层不内联的调用。
+
+门禁：`tools/ci_gate.py` **57 passed / 0 failed / 0 skipped**；`tools/fdt_gate.py`
+**14 passed / 0 failed**（含 `qemu-overlay` 真跑：应用前无 `overlay-demo-node`、`victim-child`
+在、`victim-prop=before`、控制台 115200；应用后 nodes 10→10、`model=fdt-overlay-demo`、
+`current-speed` 115200→9600、`victim-child` 查不到、`victim-prop` 已删；另含 7 种坏法自检全红）；
+`tools/format_gate.py` OK 392；`doc_audit funcs` **8 → 7**。
+
+结论分档：**编译通过 + 告警 0 + QEMU 端到端 PASS，未上板**（QEMU 算上板，不是真机）。
+
 ### 5.31 LSX 向量寄存器上下文（U-19，2026-11-21）
 
 #### 5.31.1 缺口：FPU 档只存了一半的浮点上下文
