@@ -37,17 +37,82 @@ typedef unsigned int u32;
  * arkrtos_def.h（服务号）逐位相同。这里不 include 那两个头 —— 本文件要被
  * arkc（只吃部署清单里的文件）和宿主 gcc 门禁（不带 -I）各编一遍，两边都
  * 拿不到头文件搜索路径。副本只在这两处，值一旦改动这里必须同时改。 */
-#define ARKRTOS_SVC_SHELL            (0x1A)
-#define ARKRTOS_SVC_THREAD_CTRL      (0x1B)
+/* 这两个值不要加括号：arkc 的 __svc 只认字面量，`__svc((0x1A))` 会在
+ * 汇编期报 "expected declaration at top level"（上游 arkcc 0.9.0 实测，
+ * 16 条错误，全指向展开后的括号）。去掉括号后整份文件能被 arkc 编过。 */
+#define ARKRTOS_SVC_SHELL            0x1A
+#define ARKRTOS_SVC_THREAD_CTRL      0x1B
 #define ARKRTOS_SHELL_SUB_PRINT      (3u)
 #define ARKRTOS_THREAD_SUB_EXIT      (3u)
 
-#if defined(__ARK_CC__)
-int __svc(ARKRTOS_SVC_SHELL) arkrtos_call_shell_svc(u32 *p);
-int __svc(ARKRTOS_SVC_THREAD_CTRL) arkrtos_call_thread_ctrl(u32 *p);
+/* ------------------------------------------------------------------
+ * 参数块字宽：与 kernelsrc/include/arkrtos_svc_abi.h 同一条规则
+ *
+ * 为什么在这里再写一份：本文件要被 arkc（只吃部署清单里的文件）与宿主
+ * gcc 门禁（不带 -I）各编一遍，两边都拿不到头文件搜索路径，所以「权威
+ * 那一份」include 不进来。规则本身只有几行，复制是唯一可行做法；改的
+ * 时候两处必须同时改（另一处是 arkrtos_svc_abi.h 的 ARKRTOS_SVC_WIDE_ARGS）。
+ *
+ * 定档看**指针宽度**（`__SIZEOF_POINTER__`），不看他山之石：
+ *   1. 开关为 0             -> 32 位槽（默认档，与历史逐字节相同）；
+ *   2. 开关为 1 且指针 4 字节 -> 32 位槽（32 位目标上这个开关本来就是空档）；
+ *   3. 开关为 1 且指针 8 字节 -> 64 位槽 + p[0] 带 bit31 标记；
+ *   4. 开关为 1 但指针宽度不明 -> #error。arkc 从不定义 __SIZEOF_POINTER__，
+ *      而它的目标（ARM Thumb-2 / RV32I）都是 32 位：这时**不能**按 4 字节
+ *      默默走过去 —— 万一哪天出现 64 位目标，小程序会递上去一个内核按 8
+ *      字节解的块，读出一组「看着合理」的错参数。宁可编不过。
+ *
+ *   为什么不用 __SIZEOF_LONG__：内核那一侧确实按 long 判（64 位目标都是
+ *   LP64，long 与指针同宽，两者等价），但宿主 Windows 是 LLP64 —— long
+ *   4 字节、指针 8 字节。用 long 判会让宽档在宿主门禁上悄悄变成窄档，
+ *   门禁就变成「编了但没测」。槽类型也取 8 字节的 unsigned long long
+ *   （LP64 上与内核的 unsigned long 同宽同布局：块只由字节数和标记说话）。
+ * ------------------------------------------------------------------ */
+#ifndef ARKRTOS_USE_WIDE_SVC_ARGS
+#define ARKRTOS_USE_WIDE_SVC_ARGS       0
+#endif
+
+#if (ARKRTOS_USE_WIDE_SVC_ARGS == 1)
+#  if defined(__SIZEOF_POINTER__) && (__SIZEOF_POINTER__ > 4)
+#    define MINI_SVC_WIDE               1
+#  elif defined(__SIZEOF_POINTER__)
+#    define MINI_SVC_WIDE               0
+#  elif defined(__ARK_CC__)
+#    error "ARKRTOS_USE_WIDE_SVC_ARGS=1 but arkc does not report the pointer width and every arkc target (ARM Thumb-2 / RV32I) is 32-bit: the mini app can only use 32-bit param blocks. Build the mini app with a 64-bit toolchain, or keep the switch at 0."
+#  else
+#    error "ARKRTOS_USE_WIDE_SVC_ARGS=1 but this toolchain does not define __SIZEOF_POINTER__; pass -D__SIZEOF_POINTER__=<4|8> so the param block width is not guessed."
+#  endif
 #else
-int arkrtos_call_shell_svc(u32 *p);
-int arkrtos_call_thread_ctrl(u32 *p);
+#  define MINI_SVC_WIDE                 0
+#endif
+
+#if (MINI_SVC_WIDE == 1)
+/* 参数块里的一个字：64 位目标上是 8 字节（与内核的 unsigned long 同布局）。 */
+typedef unsigned long long mini_svc_arg_t;
+/* 宽档填 p[0]：子命令号 + bit31，窄档内核据此拒绝而不是误读。 */
+#define MINI_SVC_SUB(sub)               ((mini_svc_arg_t)((unsigned long)(sub) | 0x80000000UL))
+#else
+/* 参数块里的一个字：32 位槽（默认档 / 32 位目标）。 */
+typedef unsigned int mini_svc_arg_t;
+/* 窄档填 p[0]：就是子命令号本身。 */
+#define MINI_SVC_SUB(sub)               ((mini_svc_arg_t)(sub))
+#endif
+
+/* 块固定 3 个字，且字宽必须与档位一致：内核按 ARKRTOS_SVC_ARG_BYTES(3) 校验
+ * 长度，块被对齐撑长会先被拒（这是对的）；但类型若悄悄换了宽度，长度校验
+ * 能过、内容却错位。这里用一条 typedef 钉死，不留「跑起来才发现」。 */
+#if (MINI_SVC_WIDE == 1)
+typedef char mini_svc_arg_size_ok[(sizeof(mini_svc_arg_t) == 8u) ? 1 : -1];
+#else
+typedef char mini_svc_arg_size_ok[(sizeof(mini_svc_arg_t) == 4u) ? 1 : -1];
+#endif
+
+#if defined(__ARK_CC__)
+int __svc(ARKRTOS_SVC_SHELL) arkrtos_call_shell_svc(mini_svc_arg_t *p);
+int __svc(ARKRTOS_SVC_THREAD_CTRL) arkrtos_call_thread_ctrl(mini_svc_arg_t *p);
+#else
+int arkrtos_call_shell_svc(mini_svc_arg_t *p);
+int arkrtos_call_thread_ctrl(mini_svc_arg_t *p);
 #endif
 
 /* 一次拷多少字节进缓冲。控制台是给人看的，96 字节够一行；大块输出会被
@@ -65,9 +130,9 @@ static char g_chunk[MINI_RT_CHUNK];
 */
 int write(int fd, const void *buf, unsigned int len)
 {
-    const char  *p    = (const char *)buf;
-    unsigned int done = 0u;
-    u32          q[3];
+    const char    *p    = (const char *)buf;
+    unsigned int   done = 0u;
+    mini_svc_arg_t q[3];
 
     if ((fd != 1) && (fd != 2))
     {
@@ -93,7 +158,9 @@ int write(int fd, const void *buf, unsigned int len)
         }
         g_chunk[n] = 0;
 
-        q[0] = ARKRTOS_SHELL_SUB_PRINT; q[1] = (u32)g_chunk; q[2] = 0u;
+        q[0] = MINI_SVC_SUB(ARKRTOS_SHELL_SUB_PRINT);
+        q[1] = (mini_svc_arg_t)g_chunk;
+        q[2] = (mini_svc_arg_t)0u;
         (void)arkrtos_call_shell_svc(q);
 
         done += n;
@@ -109,10 +176,12 @@ int write(int fd, const void *buf, unsigned int len)
 */
 void _exit(int code)
 {
-    u32 q[3];
+    mini_svc_arg_t q[3];
 
     (void)code;
-    q[0] = ARKRTOS_THREAD_SUB_EXIT; q[1] = 0u; q[2] = 0u;
+    q[0] = MINI_SVC_SUB(ARKRTOS_THREAD_SUB_EXIT);
+    q[1] = (mini_svc_arg_t)0u;
+    q[2] = (mini_svc_arg_t)0u;
     (void)arkrtos_call_thread_ctrl(q);
 
     /* 内核不会再调度这个任务；真回来了就停住，不往前跑到别人的代码上。 */

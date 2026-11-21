@@ -1609,6 +1609,28 @@ def check_svc_wide():
         fail("svc-wide", txt[-260:])
 
 
+def check_svc_args_mini():
+    """小程序 SDK 的参数块字宽不能靠猜：窄档 / 宽档 / 空档 / 拒绝四条都要有读数。
+
+    kernelsrc/sdk/mini_sdk/arkc/arkrtos_mini_rt_arkc.c 拿不到 arkrtos_svc_abi.h
+    （arkc 只吃部署清单里的文件，宿主门禁也不带 -I），所以字宽规则在那边落了
+    一份镜像。镜像最容易出的错是「悄悄按 4 字节走」——块长了一倍却按 4 字节解，
+    板子上只表现为控制台没输出，与「内核没收到调用」不可区分。
+    tools/mini_svc_args_gate.py 钉四条：默认 12 字节块无标记；32 位目标上开档
+    与不开档输出逐字相同（开关是空档）；喂进 8 字节指针宽度时块 24 字节且
+    p[0] 带 0x80000000；工具链不报指针宽度时必须编不过而不是默默窄化。另有
+    一条源码断言钉 _exit() 的标记（它最后是死循环，宿主上调不回来）。
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "mini_svc_args_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "MINI-SVC-ARGS-GATE OK" in txt:
+        ok("svc-args-mini",
+           "narrow 12B / 32-bit switch-on is a no-op / wide 24B + bit31 / "
+           "unknown pointer width refused / _exit marker pinned")
+    else:
+        fail("svc-args-mini", txt[-320:])
+
+
 def check_linux_abi():
     """Linux 系统调用 ABI（ARKRTOS_USE_LINUX_ABI）必须两头都是读数。
 
@@ -1976,6 +1998,7 @@ CHECK_TABLE = (
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),
     ("svc-wide", check_svc_wide),
+    ("svc-args-mini", check_svc_args_mini),
     ("dynlink", check_dynlink),
     ("realbin", check_realbin),
     ("sec-crc", check_sec_crc),

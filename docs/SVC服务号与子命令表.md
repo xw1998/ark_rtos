@@ -104,8 +104,39 @@ reject、reject 真的杀了任务（少任何一环就退回静默空转）；�
 `brk(0)` 比窗口堆基点高 8192，且随代码布局时红时绿。变异自检 6 条（guard-reject /
 guard-ret / narrow-empty / kill / subword / reset-order）每条都要能把门禁弄红。
 
-未覆盖：`kernelsrc/sdk/mini_sdk/arkc/` 仍是 `u32` 基（小程序运行时按 arkc 的
-部署清单独立编译，拿不到这套头文件），宽 VA 下不在本机制范围内。
+### 小程序运行时（`kernelsrc/sdk/mini_sdk/arkc/`）的参数块
+
+那份运行时按 arkc 的部署清单独立编译，**拿不到**这套头文件（arkc 只吃部署清单
+里的文件，宿主门禁也不带 `-I`），所以字宽规则在 `arkrtos_mini_rt_arkc.c` 里落了
+一份自包含镜像。镜像不是照抄，三处必须与内核那条规则等价：
+
+| 项 | 内核（`arkrtos_svc_abi.h`） | 小程序运行时 |
+|---|---|---|
+| 定档依据 | `ARKRTOS_USE_WIDE_SVC_ARGS` + `__SIZEOF_LONG__ > 4` | 同一个开关 + `__SIZEOF_POINTER__ > 4` |
+| 槽类型 | `unsigned long`（LP64 上是 8 字节） | `unsigned long long`（8 字节，同宽同布局） |
+| 子命令标记 | `ARKRTOS_SVC_SUB()` 置 `0x80000000` | `MINI_SVC_SUB()`，同一个常量 |
+| 字宽不明 | 开关不生效（退成 32 位槽） | **`#error`**（不猜） |
+
+为什么定档看指针宽度而不是 `long`：内核那一侧只跑在 64 位 LP64 目标上（long 与
+指针同宽，两种判据等价），但宿主 Windows 是 LLP64（long 4 字节、指针 8 字节）。
+用 `long` 判会让宽档在宿主门禁上悄悄退化成窄档——「编了但没测」。
+
+`arkc` 从不定义 `__SIZEOF_POINTER__`，而它的目标（ARM Thumb-2 / RV32I）都是
+32 位：所以 arkc 档打开这个开关会直接 `#error`，而不是默默按 4 字节走过去。这是
+**明确取舍**（arkc 侧没有 64 位目标），不是「没做」。
+
+门禁 `tools/mini_svc_args_gate.py`（`ci_gate` 的 `svc-args-mini`）编跑四个用例：
+默认 12 字节块无标记 / 32 位目标上开档与不开档输出**逐字相同**（开关是空档）/
+喂进 8 字节指针宽度时块 24 字节且 `p[0]` 带 `0x80000000` / 工具链不报指针宽度时
+必须编不过。另有一条源码断言钉 `_exit()` 的标记（它最后是死循环，宿主上调不回
+来）。四条变异（去标记 / 槽改 4 字节 / 删 `#error` / 删 `_exit` 标记）实测都能
+把门禁弄红；其中「去标记」第一次是**绿的**（断言两边都跟着同一个宏变），改成写
+字面量之后才红——这条已写进测试文件注释。
+
+同轮还修掉一个既有缺陷：`__svc` 的服务号原来写成 `(0x1A)` / `(0x1B)`，arkc 的
+`__svc` 只认字面量，展开后报 `expected declaration at top level`（上游 arkcc
+0.9.0 实测 16 条错误，全指向括号）。去掉括号后整份文件能被 arkc 编过，且窄档
+对象与改前**逐字节相同**（`6341 B`，md5 `82fed31e29a90ea9fd85fd1e82752181`）。
 
 ## 与小程序 SDK 的关系
 
