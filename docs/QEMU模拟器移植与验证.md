@@ -5765,6 +5765,40 @@ git 里的那一份，所以它必须在提交之后才会转绿**（提交后�
 
 结论分档：**编译通过 + 告警 0 + QEMU 端到端 PASS（overlay 真被应用并逐项读回），未上板**。
 
+#### 5.30.42 第三十七笔：`ovl_collect_one()` 拆成「目标 / __overlay__ / 落表」三段，并记一次被门禁抓到的真回归（2026-11-21）
+
+`kernelsrc/src/arkrtos_fdt_overlay.c` 的 `ovl_collect_one()`（**169 行**）读一个 fragment 节点的
+`target` / `target-path` 与 `__overlay__` 区间，再抄进 `frags[]`。拆成三段，主函数只剩 24 行。
+
+| 单元 | 干什么 | 行数 |
+|---|---|---|
+| `ovl_frag_target()` | fragment 自己的属性：`target = <&label>`（占位值必须 `0xffffffff`，标签经 `__fixups__` + 基树 `__symbols__` 换成路径）与 `target-path = "/abs/path"`；同时把游标交给调用方 | 84 |
+| `ovl_frag_overlay()` | 子节点必须**恰好一个** `__overlay__`，其余一律拒绝；返回它的属性区起点与 `END_NODE` 令牌偏移 | 63 |
+| `ovl_frag_store()` | 目标必须在基树里真的存在（不在不是「以后再补」而是错），再把路径与两处偏移抄进 `out[]` | 34 |
+| `ovl_collect_one()` 自己 | 三段依次调用 | **24**（原 169） |
+
+**这一笔的重点不是行数，是一次真回归。** 第一版把 `ovl_symbol_path(bb, ...)` 写成了
+`ovl_symbol_path(fb, ...)` —— `bb` 是基树、`fb` 是 fragment，标签表在 fragment 侧，
+但「标签 → 路径」要查的是基树的 `__symbols__`。编译零告警、`default` 档体积逐字节相同，
+**只有 QEMU 里真去应用 overlay 才现形**：`fdt overlay` 报 `rc=-12 (target-path missing or not found)`，
+后面十条读数全红（`tools/fdt_gate.py` 12 passed / 2 failed）。改成把 `bb` 一起传进
+`ovl_frag_target()` 之后，`fdt overlay` 恢复 `overlay ok bytes=1176 nodes=10 (was 10) model=fdt-overlay-demo`。
+
+口径：**拆「参数搬运」类函数时，编译器抓不到少传一个参数**（两个参数同类型 `const ovl_blob_t *`，
+类型系统完全看不出区别），体积读数也抓不到（改前改后 text 一模一样）。这类拆分唯一的验收手段是
+「带真实输入的端到端读数」，行数与体积都不是证据。
+
+等价性：`default` 档两遍同配置 clean 构建 text **448920 → 448920（0 B）**、`data` 448 /
+`bss` 5,128,740 / 总量 31,462,512 B 全不变；该文件 0 告警（全量 clean 构建 242 条告警前后逐条一致）。
+**体积不变不能当等价证据**（见上），只说明没引入新代码。
+
+门禁：`tools/ci_gate.py` **57 passed / 0 failed / 0 skipped**；`tools/fdt_gate.py` **14 passed**
+（overlay 一条：应用前无 `overlay-demo-node` / `victim-child` 在 / `victim-prop=before` / 控制台 115200
+→ 应用后 nodes 10→10、`model=fdt-overlay-demo`、`current-speed` 115200→9600、`victim-child` 查不到、
+`victim-prop` 已删；7 种坏法自检全红）。`tools/format_gate.py` OK 392；`doc_audit funcs` **12 → 11**。
+
+结论分档：**编译通过 + 告警 0 + QEMU 端到端 PASS（其中一次真回归就是它抓出来的），未上板**。
+
 ### 5.31 LSX 向量寄存器上下文（U-19，2026-11-21）
 
 #### 5.31.1 缺口：FPU 档只存了一半的浮点上下文

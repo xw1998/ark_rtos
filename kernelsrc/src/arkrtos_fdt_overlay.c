@@ -1290,21 +1290,19 @@ static int ovl_check_deletions(const ovl_ctx_t *c, const uint32 *mi, uint32 nm,
 /* ------------------------------------------------------------ fragment */
 
 /* 读一个 fragment 节点的 target-path / target=<&label> 与 __overlay__ 区间 */
-static int ovl_collect_one(const ovl_blob_t *fb, const ovl_blob_t *bb,
+/* fragment 自己的属性：target = <&label>（经 __fixups__ + __symbols__ 换成路径）
+ * 或 target-path = "/abs/path"。返回时 *p_pos 停在属性区之后，
+ * *p_target 指向 target_buf 或 fb 里的字符串。 */
+static int ovl_frag_target(const ovl_blob_t *fb, const ovl_blob_t *bb,
                            uint32 body, const char *fragname,
-                           ovl_frag_t *out, uint32 max, uint32 *n_io)
+                           char *target_buf, uint32 buf_size,
+                           const char **p_target, uint32 *p_pos)
 {
     uint32 pos = body;
     uint32 end = ovl_struct_end(fb);
-    char target_buf[ARKRTOS_FDT_PATH_MAX];
     const char *target_path = 0;
-    uint32 ovl_body = 0u;
-    uint32 ovl_end = 0u;
-    uint32 have_ovl = 0u;
-    uint32 i;
     int rc;
 
-    /* fragment 节点自己的属性 */
     while((pos + 4u) <= end)
     {
         uint32 tok = ovl_rd32(fb->b + pos);
@@ -1344,7 +1342,7 @@ static int ovl_collect_one(const ovl_blob_t *fb, const ovl_blob_t *bb,
             {
                 return (hit < 0) ? hit : ARKRTOS_FDT_ERR_OVERLAY_TARGET;
             }
-            hit = ovl_symbol_path(bb, label, target_buf, sizeof(target_buf));
+            hit = ovl_symbol_path(bb, label, target_buf, buf_size);
             if(hit != 1)
             {
                 return (hit < 0) ? hit : ARKRTOS_FDT_ERR_OVERLAY_TARGET;
@@ -1375,8 +1373,22 @@ static int ovl_collect_one(const ovl_blob_t *fb, const ovl_blob_t *bb,
     {
         return ARKRTOS_FDT_ERR_OVERLAY_TARGET;
     }
+    *p_target = target_path;
+    *p_pos = pos;
+    return ARKRTOS_FDT_OK;
+}
 
-    /* 子节点：必须恰好有一个 __overlay__；别的一律拒绝（不猜它的意思） */
+/* 子节点：必须恰好有一个 __overlay__；别的一律拒绝（不猜它的意思）。
+ * 返回 __overlay__ 的属性区起点与它 END_NODE 令牌的偏移。 */
+static int ovl_frag_overlay(const ovl_blob_t *fb, uint32 pos,
+                            uint32 *p_body, uint32 *p_end)
+{
+    uint32 end = ovl_struct_end(fb);
+    uint32 ovl_body = 0u;
+    uint32 ovl_end = 0u;
+    uint32 have_ovl = 0u;
+    int rc;
+
     while((pos + 4u) <= end)
     {
         uint32 tok = ovl_rd32(fb->b + pos);
@@ -1427,16 +1439,25 @@ static int ovl_collect_one(const ovl_blob_t *fb, const ovl_blob_t *bb,
     {
         return ARKRTOS_FDT_ERR_OVERLAY;
     }
+    *p_body = ovl_body;
+    *p_end = ovl_end;
+    return ARKRTOS_FDT_OK;
+}
 
-    /* 目标节点必须真的存在：写在不存在的地方不是"以后再补"，是错 */
+/* 目标节点必须真的存在（写在不存在的地方不是"以后再补"，是错），
+ * 然后把路径与区间抄进 out[]。 */
+static int ovl_frag_store(const ovl_blob_t *bb, const char *target_path,
+                          uint32 ovl_body, uint32 ovl_end,
+                          ovl_frag_t *out, uint32 max, uint32 *n_io)
+{
+    uint32 tb;
+    uint32 i;
+    int rc;
+
+    rc = ovl_find_path(bb, target_path, &tb);
+    if(rc != ARKRTOS_FDT_OK)
     {
-        uint32 tb;
-
-        rc = ovl_find_path(bb, target_path, &tb);
-        if(rc != ARKRTOS_FDT_OK)
-        {
-            return ARKRTOS_FDT_ERR_OVERLAY_TARGET;
-        }
+        return ARKRTOS_FDT_ERR_OVERLAY_TARGET;
     }
 
     if(*n_io >= max)
@@ -1458,6 +1479,31 @@ static int ovl_collect_one(const ovl_blob_t *fb, const ovl_blob_t *bb,
     out[*n_io].end_off = ovl_end;
     (*n_io)++;
     return ARKRTOS_FDT_OK;
+}
+
+static int ovl_collect_one(const ovl_blob_t *fb, const ovl_blob_t *bb,
+                           uint32 body, const char *fragname,
+                           ovl_frag_t *out, uint32 max, uint32 *n_io)
+{
+    char target_buf[ARKRTOS_FDT_PATH_MAX];
+    const char *target_path = 0;
+    uint32 ovl_body = 0u;
+    uint32 ovl_end = 0u;
+    uint32 pos = body;
+    int rc;
+
+    rc = ovl_frag_target(fb, bb, body, fragname,
+                         target_buf, sizeof(target_buf), &target_path, &pos);
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        return rc;
+    }
+    rc = ovl_frag_overlay(fb, pos, &ovl_body, &ovl_end);
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        return rc;
+    }
+    return ovl_frag_store(bb, target_path, ovl_body, ovl_end, out, max, n_io);
 }
 
 /* 扫 fragment blob 的根节点，逐个 fragment 收集 */
