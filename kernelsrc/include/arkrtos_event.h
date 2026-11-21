@@ -37,6 +37,8 @@ void arkrtos_event_module_init(void);
 int32 arkrtos_event_create_internal(const char *name);
 int32 arkrtos_event_wait_internal(int32 handle, int32 timeout_ms);
 void arkrtos_event_set_internal(int32 handle);
+/* 中断上下文：内部实现是 set，始终不阻塞。 */
+int32 arkrtos_event_set_from_isr(int32 event_handle);
 
 /* 任务下线收尸：把任务从所有事件的等待队列中摘除。
  * 调用方需自行保证临界区；一般经 arkrtos_task_release_resources() 调用。 */

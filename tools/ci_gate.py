@@ -1949,6 +1949,70 @@ def check_dev_host():
        % (lines[0], lines[1]))
 
 
+def check_event_host():
+    """Event objects: auto-reset flag, waiter queue, and task teardown.
+
+    arkrtos_event.c had no host case until 2026-11-21. It is a small table of
+    objects plus a waiter queue and one auto-reset flag, and its expensive
+    failure is silent: a task that registers but never reaches the blocking
+    path (or the reverse) is simply never woken by set -- a permanent hang that
+    no board log would explain.
+
+    Two configurations are built and run, because they are different code:
+      * WAITMULTI=0: the default build; ready_internal() is not compiled in.
+      * WAITMULTI=1: adds the read-only "is this event set" probe used by
+        multi-object waits, which must not consume the flag.
+
+    The blocking path is driven by a programmable host stub, so what is proven
+    is the state machine and the accounting (register/remove, handoff bit,
+    timeout, deletion, spurious wake, full queue, creator teardown). Real
+    scheduler timing and two tasks truly blocking at once are NOT covered; a
+    board proves those. A missing host compiler is a FAIL, not a skip.
+    """
+    import tempfile
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("event-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    want = (("event", "EVENT-HOST OK"),
+            ("event-multi", "EVENT-HOST MULTI OK"))
+    picked = {}
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name in [w[0] for w in want]:
+            picked[name] = (test, mods, defs, incs)
+    for name, _marker in want:
+        if name not in picked:
+            fail("event-host", "case %s missing from coverage_gate.CASES" % name)
+            return
+
+    lines = []
+    with tempfile.TemporaryDirectory() as td:
+        for name, marker in want:
+            test, mods, defs, incs = picked[name]
+            exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+                fail("event-host", "%s did not build: %s" % (name, tail[:200]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            if r.returncode != 0 or marker not in txt:
+                fail("event-host", "%s failed: %s" % (name, txt.strip()[:220]))
+                return
+            lines.append(txt.strip().splitlines()[-1])
+    ok("event-host", "event objects on host (%s / %s)"
+       % (lines[0], lines[1]))
+
 def check_coverage_host():
     """Line coverage of the modules the host tests actually link.
 
@@ -1985,8 +2049,8 @@ def check_warn_host():
     which was added on 2026-11-18 once this machine's toolchain list was
     re-checked and riscv64-unknown-elf-gcc-10.2.0 turned up.
 
-    Scope is honest and narrow: the 17 host test cases, the 17 kernel modules
-    they link, and the SDK stdio test (37 TUs; sign, blk and dev are built
+    Scope is honest and narrow: the 18 host test cases, the 18 kernel modules
+    they link, and the SDK stdio test (41 TUs; sign, blk, dev and event are built
     twice, once per configuration). Everything else in kernelsrc/ needs an
     architecture toolchain (armcc/armclang, loongarch64, riscv64) to compile at
     all, so it is out of reach here.
@@ -2108,6 +2172,7 @@ CHECK_TABLE = (
     ("fault-host", check_fault_host),
     ("blk-host", check_blk_host),
     ("dev-host", check_dev_host),
+    ("event-host", check_event_host),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),
     ("analyzer", check_analyzer),

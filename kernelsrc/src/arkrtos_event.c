@@ -170,7 +170,7 @@ int32 arkrtos_event_wait_internal(int32 event_handle, int32 timeout_ms)
     arkrtos_task_t *p_tsk = arkrtos_task_get_current();
     int32 reason;
 
-    if(ARKRTOS_EVENT_HANDLE_FLAG != (event_handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_EVENT_HANDLE_FLAG != ((uint32)event_handle & (uint32)ARKRTOS_HANDLE_MASK))
         return ARKRTOS_EVENT_ERR_HANDLE;
     if(idx >= ARKRTOS_EVENT_NUM || arkrtos_events[idx].used == 0)
         return ARKRTOS_EVENT_ERR_STATE;
@@ -271,7 +271,7 @@ void arkrtos_event_set_internal(int32 event_handle)
     int32 idx = event_handle & ARKRTOS_HANDLE_RELMASK;
     int32 j;
 
-    if(ARKRTOS_EVENT_HANDLE_FLAG != (event_handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_EVENT_HANDLE_FLAG != ((uint32)event_handle & (uint32)ARKRTOS_HANDLE_MASK))
         return;
     if(idx >= ARKRTOS_EVENT_NUM || arkrtos_events[idx].used == 0)
         return;
@@ -308,7 +308,7 @@ int32 arkrtos_event_ready_internal(int32 handle)
 {
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
-    if(ARKRTOS_EVENT_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_EVENT_HANDLE_FLAG != ((uint32)handle & (uint32)ARKRTOS_HANDLE_MASK))
         return -1;
     if(idx >= ARKRTOS_EVENT_NUM || arkrtos_events[idx].used == 0)
         return -1;

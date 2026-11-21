@@ -183,6 +183,13 @@ CASES = [
     ("dev-nosafe", "kernelsrc/tests/test_dev_host.c",
      ["kernelsrc/src/arkrtos_dev.c"],
      ["-DARKRTOS_HW_SAFE=0"], "DEV-HOST NOSAFE OK"),
+    # --- 2026-11-21 新增：事件对象（WAITMULTI 开/关是两段代码）-------
+    ("event", "kernelsrc/tests/test_event_host.c",
+     ["kernelsrc/src/arkrtos_event.c"],
+     ["-DARKRTOS_USE_WAITMULTI=0"], "EVENT-HOST OK"),
+    ("event-multi", "kernelsrc/tests/test_event_host.c",
+     ["kernelsrc/src/arkrtos_event.c"],
+     ["-DARKRTOS_USE_WAITMULTI=1"], "EVENT-HOST MULTI OK"),
 ]
 
 
