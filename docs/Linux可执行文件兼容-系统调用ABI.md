@@ -37,14 +37,15 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 
 **「静态程序能跑」≠「支持 Linux」。** 第 3 节列的是明确不支持项，一条不含糊。
 
-## 1 支持的系统调用（16 个，全部有实测读数）
+## 1 支持的系统调用（17 个，全部有实测读数）
 
 编号取 `asm-generic`（LoongArch / RISC-V / ARM64 共用这一套）：
 
 | 号 | 名字 | Ark 侧兑现方式 | 实测读数 |
 |---:|---|---|---|
 | 56 | `openat` | `arkrtos_vfs_app_stat()` 查命名空间；目录返 `-EISDIR` | `openat>0 -> 1 ok` |
-| 57 | `close` | 释放 fd 槽，返 0 | `close -> 0 ok` |
+| 57 | `close` | 释放 fd 槽，返 0；管道端会减引用计数 | `close -> 0 ok` |
+| 59 | `pipe2` | 环形缓冲管道 + 两端引用计数；**非阻塞**（见 §6） | `pipe2 rc = 0` / `read empty -> -EAGAIN = -11` / `write with reader closed -> -EPIPE = -32` / `exit code 55` |
 | 63 | `read` | `arkrtos_vfs_read_at()` 按 fd 的偏移读 | `read 4 bytes -> 4 ok`（读到 ELF magic） |
 | 64 | `write` | 逐 128 字节 `arkrtos_board_putc` | `hello from the Linux syscall ABI` 正文 |
 | 93 | `exit` | `arkrtos_thread_exit_code_internal()` | `exit code 7` |
@@ -87,7 +88,7 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 | 动态链接（`PT_INTERP` / `.so`） | **默认档仍拒**；打开 `ARKRTOS_USE_DYNLOAD` 后已支持（2026-11-20，QEMU LA64 实跑） | 内核按 Linux 约定装载解释器、铺 auxv、入口跳解释器，配一套自研 `ld-ark.so`；见 [动态链接与PT_INTERP](动态链接与PT_INTERP.md)。范围是「自研装载器 + 一级依赖 + 立即重定位」：现成发行版二进制仍跑不了（`ld.so` 是 glibc 的，仓里没有） |
 | `fork` / `clone` | 无 | 没有进程、没有父子；地址空间复制与「一个任务一块静态窗口」不是同一级工作量（`execve` 已支持同任务换镜像，见 §5） |
 | 信号（`rt_sigaction`/`kill`/`sigreturn`） | 无 | 需要用户栈上的信号帧与返回路径，Ark 的陷阱帧模型是另一套 |
-| `fd` 继承、管道、重定向 | 无 | fd 表是内核全局（§4），shell 的 `exec` 起新任务并清零；`execve` 保留 fd，但没有父子可继承 |
+| `fd` 继承、重定向 | 无 | fd 表是内核全局（§4），shell 的 `exec` 起新任务并清零；`execve` 保留 fd，但没有父子可继承（管道已做，见 §6） |
 | `socket` / `select` | 无（Ark 自己有一套 socket 兼容层，但**不在** Linux ABI 号表里） | 两套编号与阻塞语义不同，混在一个号表里只会给出错答案 |
 | `futex` | 无 | 没有共享内存与等待队列语义 |
 | 真 `mmap` 语义（文件映射/共享/`MAP_FIXED`/权限位） | 只做匿名私有分配，`RWX` 权限不区分 | 窗口式分配器（§4），兑现真语义需要页级权限与文件后端 |
@@ -106,7 +107,7 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 - **用户指针纪律**：兼容层**不直接解引用用户指针**，一律走
   `arkrtos_copy_from_user()` / `arkrtos_copy_to_user()`（判据是任务 TCB 的
   `rom_start/rom_size/ram_start/ram_size` 四个窗口字段）。越界返 `-EFAULT`。
-  这条纪律是 2026-11-19 那个 bug 的直接产物（§7）。
+  这条纪律是 2026-11-19 那个 bug 的直接产物（§9）。
 
 ## 5 execve（221）：同任务换镜像（2026-11-21，QEMU LA64 实跑）
 
@@ -172,7 +173,79 @@ ELF 魔数排掉「顺手 reset 了 fd 表」；`brk(0)` 回到基点排掉「�
   里的弱定义让它们照样链接，运行期 `execve` 明确回 `-ENOSYS`——不把「没做」
   说成「成功」。
 
-## 6 开关与零体积
+## 6 pipe2（59）：非阻塞管道（2026-11-21，QEMU LA64 实跑）
+
+程序侧看到的就是 Linux 的 `int pipe2(int fds[2], int flags)`：分配两个 fd（读端在先）、
+把号写回用户给的 `int[2]`。Ark 的实现是「两个 fd 各记一个引用 + 一条环形缓冲」：
+
+- `lx_pipe_t` 静态表 `s_pipe[2]`（`LX_PIPE_MAX 2`），每条缓冲 256 字节（`LX_PIPE_BUF`），
+  `readers` / `writers` 两个引用计数；
+- `lx_fd_t` 加 `kind` 字段（普通文件 / 读端 / 写端）与 `pipe` 下标，`read` / `write` /
+  `close` 全部分派到位；`execve` 换镜像时 fd 表照旧保留 ⇒ **管道跨 `execve` 存活**
+  （与 Linux 一致）；
+- 读写都是内核内同步搬运环形缓冲，数据不经 ramfs，也不开线程。
+
+### 语义（与原版 Linux 的差别写在明面上）
+
+| 事件 | Ark | Linux | 为什么不一样 |
+|---|---|---|---|
+| 读空缓冲、写端还在 | `-EAGAIN`（11） | 阻塞 | 没有 `fork`，fd 表全局单份，管道两端通常落在**同一个任务**里；阻塞就是自己等自己 |
+| 读空缓冲、写端全关 | 返回 `0`（EOF） | 返回 0 | 与 Linux 一致；**绝不用 0 冒充「暂时没数据」** |
+| 写满缓冲 | 短写（返回实际字节数） | 阻塞到能写 | 同上，不阻塞；短写本来就是 Linux 允许的返回形状 |
+| 缓冲全满、一个字节都写不进 | `-EAGAIN` | 阻塞 | 同上 |
+| 读端全关还写 | `-EPIPE`（32） | `SIGPIPE` / `-EPIPE` | 没有信号，只能返回 `-EPIPE`；`SIGPIPE` 不会来 |
+| `flags` 带 `O_CLOEXEC` | `-EINVAL` | 接受 | 本内核没有 `exec` 时的关闭语义，接受该位等于给一个不成立的承诺 |
+| `flags` 带 `O_NONBLOCK` | 接受（本实现本来就非阻塞） | 置非阻塞位 | 语义相同 |
+
+上限：`LX_MAX_FD 8` 个 fd 槽 ⇒ 最多两条管道（4 槽）再加 4 个普通文件；管道或 fd 槽
+不够时 `-ENFILE`。用户地址写不进 `fds[2]`（`copy_to_user` 失败）时整条管道回滚并返
+`-EFAULT`——不留半条泄漏的管道。
+
+### 实测读数（`[pipe]` 行，QEMU LA64）
+
+```
+[pipe] write /mnt/ram/linux_pipe rc=0 size=7200
+[pipe] pipe2 rc = 0 ok
+[pipe] fds = 3 4
+[pipe] fds are two increasing numbers = 1 ok
+[pipe] write 5 bytes = 5 ok
+[pipe] read 5 bytes = 5 ok
+[pipe] content matches = 1 ok
+[pipe] read empty -> -EAGAIN = -11 ok
+[pipe] close write end = 0 ok
+[pipe] read after writer closed -> EOF = 0 ok
+[pipe] pipe2(O_CLOEXEC) -> -EINVAL = -22 ok
+[pipe] second pipe2 rc = 0 ok
+[pipe] write 400 into 256 buffer -> short write = 256 ok
+[pipe] read back what fits = 256 ok
+[pipe] write again after drain = 256 ok
+[pipe] write with reader closed -> -EPIPE = -32 ok
+[pipe] PASS: pipe2 two fds, data round trip, EAGAIN on empty, EOF on writer close, EINVAL on O_CLOEXEC, short write and EPIPE
+[pipe] exec rc=0
+[pipe] finished after 0 ms, exit code 55
+```
+
+14 条 `check()`（夹具 `example/qemu_loongarch64/elf/linux_pipe.c`，纯 Linux ABI 静态
+程序，自带 `_start`）覆盖：两个 fd 都合法且递增、数据往返逐字节、空读 `-EAGAIN`、
+关写端后读回 EOF、`O_CLOEXEC` 被拒、第二条管道能开、400 字节写进 256 缓冲得到 256
+短写、排空后还能再写、读端关掉后写得到 `-EPIPE`。全过才打 PASS 行、`exit code 55`。
+
+**反假绿（实测）**：对内核做两处变异——① 空读改成 `return 0`；② 去掉写侧的读端检查。
+重编再跑，读数立刻变成 `read empty -> -EAGAIN = 0 FAIL` 与
+`write with reader closed -> -EPIPE = -11 FAIL`，`exit code 1`；还原后复验 14/14 ok、
+`exit code 55`。门禁的 `parser-selfcheck` 另有两条管道专用坏样本（去掉管道 PASS 行、
+把退出码改成 1），两者都必须被判红。
+
+### 边界
+
+- **非阻塞语义与 Linux 不同**：任何「写满/读空就自旋等」的程序在这套管道上会拿到
+  `-EAGAIN` 而死循环。这是有意选择，不是没做完——理由见上表。
+- 缓冲 256 字节、`LX_PIPE_MAX 2` 条、fd 槽 8 个。
+- 没有 `fork` / `clone`，所以**没有 fd 继承**：管道能在同一任务里用、能跨 `execve`
+  存活，但没法「父进程建管道、子进程继承一端」。
+- 没有 `SIGPIPE`：读端关掉后的写只是返回 `-EPIPE`。
+
+## 7 开关与零体积
 
 - `ARKRTOS_USE_LINUX_ABI`（`kernelsrc/include/arkrtos_features.h`、
   `config/kconfig/Kconfig.features`），默认 **0**，且 `depends on ARKRTOS_USE_ELF`
@@ -183,7 +256,7 @@ ELF 魔数排掉「顺手 reset 了 fd 表」；`brk(0)` 回到基点排掉「�
 - `arkrtos_autoconf.h` 由 `tools/kconfig/genconfig.py` 从 `config/arkrtos_defconfig`
   生成，新增 Kconfig 项后必须重跑一次，否则默认档读数里看不到这个开关。
 
-## 7 门禁：`tools/linux_abi_gate.py`
+## 8 门禁：`tools/linux_abi_gate.py`
 
 ```
 env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py        # 含 make
@@ -202,17 +275,17 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py --no-build
 | `off-zero-symbols` | 关档 `.o` 符号表**全空**（不是「没测」） |
 | `port-wiring` | 关档无 `arkrtos_port_linux_syscall_num` / 开档有（两向） |
 | `compile-on` | LA64 真板级下 6 个 TU 全编过（含两个用户程序本身） |
-| `syscall-table` | 16 个号与 `asm-generic` 逐条相等 |
+| `syscall-table` | 17 个号与 `asm-generic` 逐条相等 |
 | `abi-split-la64` | 立即数 == 0 是 Linux、!= 0 是 Ark |
 | `abi-split-rv32` | `0x10..0x22` 归 Ark，Linux 最小号 56 不撞 |
 | `build` | `make -f example/qemu_loongarch64/Makefile` 通过 |
-| `qemu-readout` | 14 条 check 全 ok + PASS 行 + `exit code 7` + 旁路演示未受影响 |
-| `parser-selfcheck` | 把 4 种坏日志喂回判据，必须全判红 |
+| `qemu-readout` | Linux 块 14 条 check 全 ok + PASS 行 + `exit code 7`；管道块 14 条 check 全 ok + PASS 行 + `exit code 55`；旁路演示未受影响 |
+| `parser-selfcheck` | 把 6 种坏日志喂回判据，必须全判红 |
 
-`parser-selfcheck` 是防「绿得没有信息量」的：去掉 PASS 行、退出码改 3、插一条
-FAIL、少一条 check，四种都必须被判红。
+`parser-selfcheck` 是防「绿得没有信息量」的：Linux 块去掉 PASS 行、退出码改 3、
+插一条 FAIL、少一条 check，管道块去掉 PASS 行、退出码改成 1，六种都必须被判红。
 
-## 8 本轮踩到的两个真 bug 与一个读数坑
+## 9 本轮踩到的两个真 bug 与一个读数坑
 
 **① 用户指针全部 `-EFAULT`：ELF 任务的窗口没写回。**
 现象是程序几乎不打印，`exec rc=0` 之后没有正文。根因：`arkrtos_elf.c` 里把
@@ -235,7 +308,7 @@ rodata 失败，因为栈窗口（32 KB）被单独设过，而代码窗口没�
 读到 marker 前缀就 kill 会把 `exit code 7` 截掉（加 0.5 s 宽限）；`-serial file:`
 后端在进程被 kill 时丢不满 4 KB 的尾块（改管道）。
 
-## 9 边界
+## 10 边界
 
 - 这一层的定位是「**能跑通静态程序的最小系统调用集合**」，不是 Linux 兼容层
   的完整实现。没有 ptrace、没有 `/proc`（Ark 自己的 procfs 另算）。ELF interpreter
@@ -243,11 +316,12 @@ rodata 失败，因为栈窗口（32 KB）被单独设过，而代码窗口没�
   [动态链接与PT_INTERP](动态链接与PT_INTERP.md)），但那是「能跑自研夹具」，不是
   「能跑 glibc 产物」。
 - Real-time 语义不因兼容层改变：Linux ABI 的路径全部在 SVC 里同步完成，
-  不额外开线程、不加锁、不引入阻塞点（`read`/`write` 都是到 ramfs 的同步搬运）。
+  不额外开线程、不加锁、不引入阻塞点（`read`/`write` 到 ramfs 或管道都是同步
+  搬运；管道还刻意不做阻塞，见 §6）。
 - 下一步（若要用真正的 Linux 工具链产物）：动态链接的内核侧与自研装载器已落地
   （2026-11-20，见 [动态链接与PT_INTERP](动态链接与PT_INTERP.md)），但**离 glibc
   还差整条 libc 兼容面**——futex、rseq、TLS 初始化、文件映射、`mprotect` 真落实。
-  剩下的大头是用户栈上的信号帧与「进程」这个对象；在那之前，静态程序 + 这 16 个
+  剩下的大头是用户栈上的信号帧与「进程」这个对象；在那之前，静态程序 + 这 17 个
   号就是诚实上限。
 - `execve` 已有的是「同任务换镜像」，不是「有进程」：没有 `fork` 就没有第二个
   任务，没有地址空间复制就没有父子隔离。这一条不要读成「Ark 有进程了」。

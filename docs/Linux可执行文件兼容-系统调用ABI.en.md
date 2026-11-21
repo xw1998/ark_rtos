@@ -40,14 +40,15 @@ a purely Linux-ABI static binary with its own `_start`):
 **"A static program runs" is not "Linux is supported".** Section 3 lists what is
 explicitly unsupported.
 
-## 1 Supported syscalls (16, all measured)
+## 1 Supported syscalls (17, all measured)
 
 Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 
 | nr | name | how Ark fulfils it | measured |
 |---:|---|---|---|
 | 56 | `openat` | `arkrtos_vfs_app_stat()` on the VFS namespace; directories return `-EISDIR` | `openat>0 -> 1 ok` |
-| 57 | `close` | release the fd slot, return 0 | `close -> 0 ok` |
+| 57 | `close` | release the fd slot, return 0 (a pipe end drops its reference count) | `close -> 0 ok` |
+| 59 | `pipe2` | ring-buffer pipe with per-end reference counts; **non-blocking** (section 6) | `pipe2 rc = 0` / `read empty -> -EAGAIN = -11` / `write with reader closed -> -EPIPE = -32` / `exit code 55` |
 | 63 | `read` | `arkrtos_vfs_read_at()` at the fd offset | `read 4 bytes -> 4 ok` |
 | 64 | `write` | 128-byte chunks through `arkrtos_board_putc` | the program's own text |
 | 93 | `exit` | `arkrtos_thread_exit_code_internal()` | `exit code 7` |
@@ -83,7 +84,7 @@ return value is a separate port primitive
 
 ## 3 Explicitly unsupported
 
-`fork`/`clone`, signals, fd inheritance / pipes / redirection,
+`fork`/`clone`, signals, fd inheritance / redirection,
 `socket`/`select`, `futex`, real `mmap` semantics (file-backed, shared,
 `MAP_FIXED`, permission bits), and threads. Each of these needs an object (a
 process, a user-side signal frame, a shared-memory wait queue) that Ark RTOS
@@ -192,7 +193,57 @@ keep running - failure is the returnable path.
   `arkrtos_port_svc_exec_frame`; the weak definition in `hal.h` keeps them
   linking and `execve` returns `-ENOSYS` at run time instead of pretending.
 
-## 6 Switch and zero footprint
+## 6 pipe2 (59): non-blocking pipes (2026-11-21, QEMU LA64)
+
+Programs see Linux's `int pipe2(int fds[2], int flags)`: two fds (read end first)
+written back into the user `int[2]`. Ark keeps one reference count per end plus a
+ring buffer: a static table `s_pipe[2]` (`LX_PIPE_MAX 2`), 256 bytes each
+(`LX_PIPE_BUF`), with `readers` / `writers` counters. `lx_fd_t` gained a `kind`
+field (file / read end / write end) and a `pipe` index, so `read` / `write` /
+`close` dispatch correctly; `execve` keeps the fd table, so **pipes survive
+`execve`** as on Linux. All transfers are synchronous inside the SVC - the data
+never touches ramfs and no thread is created.
+
+Semantics differ from Linux on one axis, deliberately (the Chinese page has the
+full table): reading an empty buffer with a live writer returns `-EAGAIN` (11)
+instead of blocking; reading an empty buffer with all writers closed returns 0
+(EOF, same as Linux); writing into a full buffer returns a **short write**;
+writing with every reader closed returns `-EPIPE` (32) because there is no
+`SIGPIPE`; `O_CLOEXEC` is refused with `-EINVAL` because this kernel has no
+close-on-exec semantics to promise; `O_NONBLOCK` is accepted. Exhausting the 8
+fd slots or the 2 pipes returns `-ENFILE`; a failed `copy_to_user` of `fds[2]`
+rolls the whole pipe back (`-EFAULT`).
+
+Why no blocking: there is no `fork` and the fd table is kernel-global, so both
+ends usually live in the **same task** - blocking would be waiting on itself.
+
+Measured readout (14 `check()` calls in
+`example/qemu_loongarch64/elf/linux_pipe.c`, `exit code 55`):
+
+```
+[pipe] pipe2 rc = 0 ok
+[pipe] fds = 3 4
+[pipe] write 5 bytes = 5 ok
+[pipe] read 5 bytes = 5 ok
+[pipe] read empty -> -EAGAIN = -11 ok
+[pipe] read after writer closed -> EOF = 0 ok
+[pipe] pipe2(O_CLOEXEC) -> -EINVAL = -22 ok
+[pipe] write 400 into 256 buffer -> short write = 256 ok
+[pipe] write with reader closed -> -EPIPE = -32 ok
+[pipe] finished after 0 ms, exit code 55
+```
+
+Anti-false-green (measured): making an empty read return 0 and dropping the
+reader check on the write side flips the readout to
+`read empty -> -EAGAIN = 0 FAIL` plus `write with reader closed -> -EPIPE =
+-11 FAIL` and `exit code 1`. The gate's `parser-selfcheck` feeds two more
+pipe-specific broken logs back into the judge; both must be rejected.
+
+Boundaries: non-blocking semantics (a spinning reader/writer gets `-EAGAIN`),
+256-byte buffer, at most 2 pipes, 8 fd slots, no fd inheritance (no `fork`), no
+`SIGPIPE`.
+
+## 7 Switch and zero footprint
 
 `ARKRTOS_USE_LINUX_ABI` (features header + Kconfig), default **0**, and
 `depends on ARKRTOS_USE_ELF`. With the switch off the whole
@@ -201,7 +252,7 @@ keep running - failure is the returnable path.
 gate measures this in both directions (the off-profile `.o` must have an empty
 symbol table).
 
-## 7 Gate
+## 8 Gate
 
 ```
 env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py [--no-build]
@@ -210,12 +261,12 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py [--no-build]
 13 items; prints `LINUX-ABI-GATE OK` when all pass and is invoked from
 `tools/ci_gate.py` as `linux-abi`: default-off, kconfig-wired, features-guard,
 board-switch, off-zero-symbols, port-wiring (two directions), compile-on (6 TUs
-under the real LA64 board), syscall-table (16 numbers vs asm-generic),
-abi-split-la64, abi-split-rv32, build, qemu-readout (14 checks + PASS + exit 7
-+ the unrelated demos still intact), and parser-selfcheck (four deliberately
-broken logs must each be rejected).
+under the real LA64 board), syscall-table (17 numbers vs asm-generic),
+abi-split-la64, abi-split-rv32, build, qemu-readout (14 Linux checks + PASS + exit 7,
+14 pipe checks + PASS + exit 55, the unrelated demos still intact), and
+parser-selfcheck (six deliberately broken logs must each be rejected).
 
-## 8 Two real bugs and one readout trap found on the way
+## 9 Two real bugs and one readout trap found on the way
 
 1. **Every user pointer returned `-EFAULT`**: `arkrtos_elf.c` wrote the task's
    rom/ram window fields inside `#if (ARKRTOS_USE_MPU == 1)`, but QEMU LA64 is
@@ -233,10 +284,11 @@ broken logs must each be rejected).
    traps were fixed too: killing on the marker prefix truncates `exit code 7`,
    and `-serial file:` drops the last sub-4 KB block on kill.
 
-## 9 Boundaries
+## 10 Boundaries
 
 This is the minimal syscall set that lets a static program run, not a Linux
-compatibility layer: no ptrace, no Linux `/proc`. The
+compatibility layer: no ptrace, no Linux `/proc`. Pipes exist but are
+non-blocking (section 6), which is a different contract from Linux. The
 real-time behaviour is unchanged — every Linux-ABI path completes synchronously
 inside the SVC with no extra thread, no blocking point. Going further requires a
 process object (for signal frames and a real libc surface) before anything
