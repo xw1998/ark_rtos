@@ -6048,6 +6048,56 @@ F1–F4 不管缩进，所以它一直没红）。这段整体搬进 `fdt_build_
 结论分档：**编译通过（含开档）+ 告警 0 + QEMU 端到端 PASS（timer 分支用临时改配置覆盖后已还原），
 未上板**（QEMU 算上板，不是真机）。
 
+#### 5.30.49 第四十四笔：`arkrtos_mbuf_send_internal()` 拆出整条写入与阻塞重试（2026-11-21）
+
+`kernelsrc/src/arkrtos_sbuf.c` 的 `arkrtos_mbuf_send_internal()`（**125 行**）是消息缓冲的发送口：
+先做参数与容量上限检查，再走「空间够就直接写 / 不够就阻塞重试」两条路。两条路里**同一段写入代码
+出现了两次**（写长度头 → 写正文 → 唤醒一个读者 → 打 trace），阻塞重试那半边还塞着一个带
+`for(;;)` 的多出口循环，每条出口各自恢复中断。这次把这两块各抽出来。
+
+| 单元 | 干什么 | 行数 |
+|---|---|---|
+| `mbuf_write()` | 一次写完整条：`put_bytes(hdr)` → `put_bytes(buf)` → `wake_one(recv_waiters)` → `mdk_trace_arkrtos_obj_signal` | 12 |
+| `mbuf_wait_put()` | 阻塞重试循环：空间不足则 `waiter_add` → 核处理器上下文（报 `WOULDBLOCK`）→ 按剩余超时算 `remain`（0 则摘等待者报 `TIMEOUT`）→ `trace_wait_obj` + `task_block_in_critical` 睡下 → 醒来判令牌位与错误码 → 复核空间，够就 `mbuf_write` 后 `SWITCH_TASK` 返回 `OK`，不够就整条重来 | 65 |
+| `arkrtos_mbuf_send_internal()` 自己 | 空指针 / `len <= 0` 报 `PARAM` → `sbuf_get` → `need > ARKRTOS_SBUF_SIZE` 立刻报 `NOSPC`（不是重试）→ `put_hdr` → `DISABLE_IRQ` → 快速路径 `mbuf_write` 后 `ENABLE_IRQ` + `SWITCH_TASK` → `timeout_ms == 0` 报 `TIMEOUT` → 无当前任务报 `PARAM` → 算 `start_tick` / `deadline` → 交给 `mbuf_wait_put` | **62**（原 125） |
+
+三条口径：
+
+Ⓐ **`mbuf_write` 抽出来是为了去掉重复，不是为了减行数**：两处写入逐字相同（顺序也是语义的一部分——
+先头后体，读者看到头就一定能读到完整正文）。把「先写头再写体」这两句挤到一个函数里，改动后
+再有人动其中一处也不会出现一边写了头一边没写头的分叉。
+Ⓑ **`mbuf_wait_put` 的每条返回路径自己恢复中断**，这是原代码的约定：调用进来时已 `DISABLE_IRQ`
+且已持临界区，所以这个函数里**没有一条 `return` 可以不 `ARKRTOS_ENABLE_IRQ()`**。抽函数时这条
+最容易漏——因为编译器不会报「少恢复一次中断」，它只会变成某个偶发的死机。本函数 6 条出口全部
+带 `ARKRTOS_ENABLE_IRQ()`，逐条对照过。
+Ⓒ **`ret < 0` 必须排在「令牌位检查」之前**：`arkrtos_task_block_in_critical` 的 −1（睡不下）
+在二进制上每一位都是 1，单看 `ARKRTOS_WAKE_HANDOFF` 位会被判成「拿到了交接」，于是原地重睡到死。
+原代码这里就是 `if((ret < 0) || ((ret & ARKRTOS_WAKE_HANDOFF) == 0))`，拆函数时**顺序原样搬**，
+并补了一句注释说清为什么不能调换。
+
+体积（`default` 档，`loongarch64-newlib-elf-size`，两遍同配置 `make clean` 构建）：
+
+- 改前 `text 449064 / data 448 / bss 5,128,740`
+- 改后 `text 449064 / data 448 / bss 5,128,740`
+- **0 B 差异**。这次是纯拆分 + 复用合并（把两处重复写入合成一处），编译器把内联后的结果优化成
+  同样的形状，符合预期；**0 B 不能反过来当作「代码等价」的证明**（见下一条）。
+- 全量告警 242 条前后一致，`arkrtos_sbuf.c` 0 告警。
+- `.bin` sha256 **不可**作等价证据（`arkc_port_arkrtos.c` 里内嵌 `__DATE__` / `__TIME__`）。
+
+端到端：**本笔没有任何功能级覆盖**，这一点必须写死。
+
+- `example/qemu_loongarch64/main.c` **不调用 mbuf API**，QEMU 启动链路走不到这段代码；
+- `tools/sbuf_host_gate.py`（169 checks）**完全不含 mbuf 字样**（`grep mbuf` 命中 0 条），它覆盖的是
+  流式 `put` / `get` / 等待者与超时，不覆盖「整条消息 + 长度头」这条路径；
+- `tools/mq_host_gate.py`（108 checks）是消息队列的宿主测试，与 mbuf 无关；
+- 唯二调用点是 SVC 分派（`arkrtos_task.c`）与用户态 API。
+
+所以本笔结论分档为：**编译通过（0 告警）+ 静态门禁（`sbuf_host_gate` 169 / `mq_host_gate` 108 /
+`ci_gate` 57 / `format_gate` 392 全绿），行为未验证**。不得写成「行为等价」或「端到端通过」。
+
+门禁：`tools/ci_gate.py` **57 passed / 0 failed / 0 skipped**；`tools/format_gate.py` OK 392；
+`doc_audit funcs` **5 → 4**（`arkrtos_mbuf_send_internal` 125 从清单消失）。
+
 ### 5.31 LSX 向量寄存器上下文（U-19，2026-11-21）
 
 #### 5.31.1 缺口：FPU 档只存了一半的浮点上下文

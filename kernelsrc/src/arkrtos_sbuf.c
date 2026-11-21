@@ -799,69 +799,27 @@ static uint32 arkrtos_mbuf_get_hdr(const uint8 *src)
     return len;
 }
 
-int32 arkrtos_mbuf_send_internal(int32 handle, const void *buf, int32 len, int32 timeout_ms)
+/* 整条消息一次写进环形缓冲并唤醒一个读者。调用方持临界区。 */
+static void mbuf_write(arkrtos_sbuf_obj_t *p_sb, int32 handle,
+                       const uint8 *hdr, const uint8 *buf, uint32 len)
 {
-    arkrtos_sbuf_obj_t *p_sb;
-    arkrtos_task_t *p_tsk;
-    uint32 need;
-    uint32 start_tick;
-    uint32 deadline;
+    arkrtos_sbuf_put_bytes(p_sb, hdr, ARKRTOS_MBUF_HDR);
+    arkrtos_sbuf_put_bytes(p_sb, buf, len);
+    arkrtos_sbuf_wake_one(p_sb->recv_waiters);
+    mdk_trace_arkrtos_obj_signal((uint16)(handle & ARKRTOS_HANDLE_RELMASK),
+                                 (uint8)MDK_TRACE_ARKRTOS_CLASS_QUEUE);
+}
+
+/* 空间不够时的阻塞重试：挂等待者 → 核上下文 → 按剩余超时睡下 → 醒来复核
+ * 空间，够就整条写入。进入时已持临界区且已关中断，**每条返回路径自己恢复
+ * 中断**；返回值直接就是调用方的返回值。 */
+static int32 mbuf_wait_put(arkrtos_sbuf_obj_t *p_sb, int32 handle,
+                           const uint8 *hdr, const uint8 *buf, uint32 len,
+                           uint32 need, arkrtos_task_t *p_tsk,
+                           uint32 start_tick, uint32 deadline)
+{
     int32 remain;
     int32 ret;
-    uint8 hdr[ARKRTOS_MBUF_HDR_BYTES];
-
-    if(buf == 0 || len <= 0)
-    {
-        return ARKRTOS_SBUF_ERR_PARAM;
-    }
-    p_sb = arkrtos_sbuf_get(handle);
-    if(p_sb == 0)
-    {
-        return ARKRTOS_SBUF_ERR_PARAM;
-    }
-
-    need = (uint32)len + ARKRTOS_MBUF_HDR;
-    if(need > ARKRTOS_SBUF_SIZE)
-    {
-        /* 消息比整块缓冲还大：等多久都放不下，立刻报错而不是无限重试 */
-        return ARKRTOS_SBUF_ERR_NOSPC;
-    }
-
-    arkrtos_mbuf_put_hdr(hdr, (uint32)len);
-
-    ARKRTOS_DISABLE_IRQ();
-    if(arkrtos_sbuf_room(p_sb) >= need)
-    {
-        arkrtos_sbuf_put_bytes(p_sb, hdr, ARKRTOS_MBUF_HDR);
-        arkrtos_sbuf_put_bytes(p_sb, (const uint8 *)buf, (uint32)len);
-        arkrtos_sbuf_wake_one(p_sb->recv_waiters);
-        mdk_trace_arkrtos_obj_signal((uint16)(handle & ARKRTOS_HANDLE_RELMASK),
-                                     (uint8)MDK_TRACE_ARKRTOS_CLASS_QUEUE);
-        ARKRTOS_ENABLE_IRQ();
-        ARKRTOS_SWITCH_TASK();
-        return ARKRTOS_SBUF_OK;
-    }
-
-    if(timeout_ms == 0)
-    {
-        p_tsk = arkrtos_task_get_current();
-        if(p_tsk != 0)
-        {
-            arkrtos_sbuf_waiter_remove(p_sb->send_waiters, p_tsk);
-        }
-        ARKRTOS_ENABLE_IRQ();
-        return ARKRTOS_SBUF_ERR_TIMEOUT;
-    }
-
-    p_tsk = arkrtos_task_get_current();
-    if(p_tsk == 0)
-    {
-        ARKRTOS_ENABLE_IRQ();
-        return ARKRTOS_SBUF_ERR_PARAM;
-    }
-
-    start_tick = arkrtos_kernel_tick;
-    deadline   = (timeout_ms > 0) ? ARKRTOS_MS_TO_TICK((uint32)timeout_ms) : 0u;
 
     for(;;)
     {
@@ -912,17 +870,75 @@ int32 arkrtos_mbuf_send_internal(int32 handle, const void *buf, int32 len, int32
 
         if(arkrtos_sbuf_room(p_sb) >= need)
         {
-            arkrtos_sbuf_put_bytes(p_sb, hdr, ARKRTOS_MBUF_HDR);
-            arkrtos_sbuf_put_bytes(p_sb, (const uint8 *)buf, (uint32)len);
-            arkrtos_sbuf_wake_one(p_sb->recv_waiters);
-            mdk_trace_arkrtos_obj_signal((uint16)(handle & ARKRTOS_HANDLE_RELMASK),
-                                         (uint8)MDK_TRACE_ARKRTOS_CLASS_QUEUE);
+            mbuf_write(p_sb, handle, hdr, buf, len);
             ARKRTOS_ENABLE_IRQ();
             ARKRTOS_SWITCH_TASK();
             return ARKRTOS_SBUF_OK;
         }
         /* 空间被别人抢走：整条还没写入一个字节，按剩余超时重试 */
     }
+}
+
+int32 arkrtos_mbuf_send_internal(int32 handle, const void *buf, int32 len, int32 timeout_ms)
+{
+    arkrtos_sbuf_obj_t *p_sb;
+    arkrtos_task_t *p_tsk;
+    uint32 need;
+    uint32 start_tick;
+    uint32 deadline;
+    uint8 hdr[ARKRTOS_MBUF_HDR_BYTES];
+
+    if(buf == 0 || len <= 0)
+    {
+        return ARKRTOS_SBUF_ERR_PARAM;
+    }
+    p_sb = arkrtos_sbuf_get(handle);
+    if(p_sb == 0)
+    {
+        return ARKRTOS_SBUF_ERR_PARAM;
+    }
+
+    need = (uint32)len + ARKRTOS_MBUF_HDR;
+    if(need > ARKRTOS_SBUF_SIZE)
+    {
+        /* 消息比整块缓冲还大：等多久都放不下，立刻报错而不是无限重试 */
+        return ARKRTOS_SBUF_ERR_NOSPC;
+    }
+
+    arkrtos_mbuf_put_hdr(hdr, (uint32)len);
+
+    ARKRTOS_DISABLE_IRQ();
+    if(arkrtos_sbuf_room(p_sb) >= need)
+    {
+        mbuf_write(p_sb, handle, hdr, (const uint8 *)buf, (uint32)len);
+        ARKRTOS_ENABLE_IRQ();
+        ARKRTOS_SWITCH_TASK();
+        return ARKRTOS_SBUF_OK;
+    }
+
+    if(timeout_ms == 0)
+    {
+        p_tsk = arkrtos_task_get_current();
+        if(p_tsk != 0)
+        {
+            arkrtos_sbuf_waiter_remove(p_sb->send_waiters, p_tsk);
+        }
+        ARKRTOS_ENABLE_IRQ();
+        return ARKRTOS_SBUF_ERR_TIMEOUT;
+    }
+
+    p_tsk = arkrtos_task_get_current();
+    if(p_tsk == 0)
+    {
+        ARKRTOS_ENABLE_IRQ();
+        return ARKRTOS_SBUF_ERR_PARAM;
+    }
+
+    start_tick = arkrtos_kernel_tick;
+    deadline   = (timeout_ms > 0) ? ARKRTOS_MS_TO_TICK((uint32)timeout_ms) : 0u;
+
+    return mbuf_wait_put(p_sb, handle, hdr, (const uint8 *)buf, (uint32)len,
+                         need, p_tsk, start_tick, deadline);
 }
 
 /* 下一条完整消息的长度（不消费）；没有完整消息返回负值。
