@@ -60,37 +60,13 @@ static void res_copy(char *dst, uint32 cap, const char *src)
     dst[i] = '\0';
 }
 
-int arkrtos_fdt_res_check(const arkrtos_fdt_res_expect_t *expect,
-                          arkrtos_fdt_res_t *out)
+/* ---- 1) /cpus/timebase-frequency ---- */
+static int res_check_timebase(const arkrtos_fdt_res_expect_t *expect,
+                              arkrtos_fdt_res_t *out)
 {
     arkrtos_fdt_node_t cpus;
-    arkrtos_fdt_iter_t it;
-    arkrtos_fdt_node_t cur;
     uint32             v = 0u;
-    int                found = 0;
-    int                rc;
 
-    if((expect == 0) || (out == 0))
-    {
-        return ARKRTOS_RES_NO_CPUS;
-    }
-
-    out->timebase = 0u;
-    out->has_timebase = 0u;
-    out->timer_node[0] = '\0';
-    out->timer_compat[0] = '\0';
-    out->timer_reg = 0u;
-    out->timer_hz = 0u;
-    out->has_timer = 0u;
-    out->has_timer_reg = 0u;
-    out->has_timer_hz = 0u;
-
-    if(arkrtos_fdt_ready() == 0)
-    {
-        return ARKRTOS_RES_NO_CPUS;
-    }
-
-    /* ---- 1) /cpus/timebase-frequency ---- */
     if(arkrtos_fdt_node_by_path("/cpus", &cpus) != ARKRTOS_FDT_OK)
     {
         return ARKRTOS_RES_NO_CPUS;
@@ -111,12 +87,16 @@ int arkrtos_fdt_res_check(const arkrtos_fdt_res_expect_t *expect,
             return ARKRTOS_RES_TIMEBASE_DIFF;
         }
     }
+    return ARKRTOS_RES_OK;
+}
 
-    /* ---- 2) 定时器节点（按 compatible 找，不假设路径） ---- */
-    if(expect->timer_compat == 0)
-    {
-        return ARKRTOS_RES_OK;   /* 调用方不要求核对定时器节点 */
-    }
+/* ---- 2) 定时器节点（按 compatible 找，不假设路径） ---- */
+static int res_find_timer(const char *compat, arkrtos_fdt_node_t *cur)
+{
+    arkrtos_fdt_iter_t it;
+    int                found = 0;
+    int                rc;
+
     if(arkrtos_fdt_iter_init(&it) != ARKRTOS_FDT_OK)
     {
         return ARKRTOS_RES_NO_TIMER;
@@ -125,42 +105,45 @@ int arkrtos_fdt_res_check(const arkrtos_fdt_res_expect_t *expect,
     {
         const char *cp;
 
-        rc = arkrtos_fdt_next(&it, &cur);
+        rc = arkrtos_fdt_next(&it, cur);
         if(rc <= 0)
         {
             break;
         }
-        if(arkrtos_fdt_node_enabled(&cur) == 0)
+        if(arkrtos_fdt_node_enabled(cur) == 0)
         {
             continue;
         }
-        cp = arkrtos_fdt_prop_str(&cur, "compatible");
-        if(res_str_eq(cp, expect->timer_compat) != 0)
+        cp = arkrtos_fdt_prop_str(cur, "compatible");
+        if(res_str_eq(cp, compat) != 0)
         {
             found = 1;
             break;
         }
     }
-    if(found == 0)
-    {
-        return ARKRTOS_RES_NO_TIMER;
-    }
+    return (found != 0) ? ARKRTOS_RES_OK : ARKRTOS_RES_NO_TIMER;
+}
+
+/* ---- 3) 把找到的节点抄进 out，再按 expect 核对 reg / clock-frequency ---- */
+static int res_check_timer(const arkrtos_fdt_res_expect_t *expect,
+                           arkrtos_fdt_res_t *out,
+                           const arkrtos_fdt_node_t *cur)
+{
+    const char *cp;
+    uint32      v = 0u;
 
     out->has_timer = 1u;
     res_copy(out->timer_node, (uint32)sizeof(out->timer_node),
-             (cur.name != 0) ? cur.name : "");
-    {
-        const char *cp = arkrtos_fdt_prop_str(&cur, "compatible");
-
-        res_copy(out->timer_compat, (uint32)sizeof(out->timer_compat),
-                 (cp != 0) ? cp : "");
-    }
-    if(arkrtos_fdt_prop_u32(&cur, "reg", 0u, &v) == 0)
+             (cur->name != 0) ? cur->name : "");
+    cp = arkrtos_fdt_prop_str(cur, "compatible");
+    res_copy(out->timer_compat, (uint32)sizeof(out->timer_compat),
+             (cp != 0) ? cp : "");
+    if(arkrtos_fdt_prop_u32(cur, "reg", 0u, &v) == 0)
     {
         out->timer_reg = v;
         out->has_timer_reg = 1u;
     }
-    if(arkrtos_fdt_prop_u32(&cur, "clock-frequency", 0u, &v) == 0)
+    if(arkrtos_fdt_prop_u32(cur, "clock-frequency", 0u, &v) == 0)
     {
         out->timer_hz = v;
         out->has_timer_hz = 1u;
@@ -189,6 +172,51 @@ int arkrtos_fdt_res_check(const arkrtos_fdt_res_expect_t *expect,
         }
     }
     return ARKRTOS_RES_OK;
+}
+
+int arkrtos_fdt_res_check(const arkrtos_fdt_res_expect_t *expect,
+                          arkrtos_fdt_res_t *out)
+{
+    arkrtos_fdt_node_t cur;
+    int                rc;
+
+    if((expect == 0) || (out == 0))
+    {
+        return ARKRTOS_RES_NO_CPUS;
+    }
+
+    out->timebase = 0u;
+    out->has_timebase = 0u;
+    out->timer_node[0] = '\0';
+    out->timer_compat[0] = '\0';
+    out->timer_reg = 0u;
+    out->timer_hz = 0u;
+    out->has_timer = 0u;
+    out->has_timer_reg = 0u;
+    out->has_timer_hz = 0u;
+
+    if(arkrtos_fdt_ready() == 0)
+    {
+        return ARKRTOS_RES_NO_CPUS;
+    }
+
+    rc = res_check_timebase(expect, out);
+    if(rc != ARKRTOS_RES_OK)
+    {
+        return rc;
+    }
+
+    if(expect->timer_compat == 0)
+    {
+        return ARKRTOS_RES_OK;   /* 调用方不要求核对定时器节点 */
+    }
+
+    rc = res_find_timer(expect->timer_compat, &cur);
+    if(rc != ARKRTOS_RES_OK)
+    {
+        return rc;
+    }
+    return res_check_timer(expect, out, &cur);
 }
 
 const char *arkrtos_fdt_res_reason(int rc)

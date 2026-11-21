@@ -5996,6 +5996,58 @@ F1–F4 不管缩进，所以它一直没红）。这段整体搬进 `fdt_build_
 
 结论分档：**编译通过 + 告警 0 + QEMU 端到端 PASS，未上板**（QEMU 算上板，不是真机）。
 
+#### 5.30.48 第四十三笔：`arkrtos_fdt_res_check()` 拆成 timebase / 找定时器 / 核对定时器三段（2026-11-21）
+
+`kernelsrc/src/arkrtos_fdt_res.c` 的 `arkrtos_fdt_res_check()`（**130 行**）做三件事：
+读 `/cpus/timebase-frequency` 并与期望比、按 `compatible` 在全树里找定时器节点、
+把找到的节点抄进 `out` 再核对 `reg` / `clock-frequency`。三段各自成函数。
+
+| 单元 | 干什么 | 行数 |
+|---|---|---|
+| `res_check_timebase()` | 取 `/cpus` → 读 `timebase-frequency` 填 `out->timebase` / `has_timebase` → 只在调用方期望非 0 时核对，缺属性报 `NO_TIMEBASE`、不等报 `TIMEBASE_DIFF` | 29 |
+| `res_find_timer()` | `iter_init` → 逐节点跳过 `disabled` → 读 `compatible` 比串 → 命中置 `found` 跳出；返回 `OK` / `NO_TIMER` | 33 |
+| `res_check_timer()` | 填 `has_timer` / `timer_node` / `timer_compat` / `timer_reg` / `timer_hz`，再按期望核对 `reg` 与 `clock-frequency`（各分「缺属性」与「值不等」两种原因码） | 48 |
+| `arkrtos_fdt_res_check()` 自己 | 空指针检查 → 九个字段清零 → `fdt_ready` → 三段顺序调用，`timer_compat == 0` 时在第 2 段之前就返回 | **44**（原 130） |
+
+两条口径：
+
+Ⓐ 三段之间**不是**「返回 0/1」的链路，而是 `ARKRTOS_RES_*` 原因码的直传：主函数只做
+`rc != ARKRTOS_RES_OK` 就返回。这一点比拆法本身重要——`arkrtos_fdt_res_reason()` 就是把这些码
+翻成串口上的 `timebase_mismatch` / `timer_reg_absent` 之类，中间任何一段把码合成布尔值，串口上
+就只剩「有一项不对」。
+Ⓑ `expect->timer_compat == 0` 的提前返回**必须在第 1 段之后、第 2 段之前**：调用方只要
+「核 timebase、不核定时器」时（本板就是这种），第 2、3 段一次都不能跑。抽函数时这条位置不变，
+否则 `has_timer` 会被错误置位。
+
+等价性（**这一条要特别说明**）：
+
+- 该文件默认档不编入：`ARKRTOS_USE_FDT_RES` 默认 **0**（`board/qemu_loongarch64/arkrtos_board_config.h`），
+  所以 `default` 档两遍同配置 clean 构建 text **449064 → 449064（0 B）**、`data` 448 /
+  `bss` 5,128,740 全等——**0 B 不代表代码对**，它只说明这段没进镜像。
+- 因此另做**开档**读数：`make ... EXTRA_CFLAGS=-DARKRTOS_USE_FDT_RES=1`（换档必须 `make clean`，
+  构建系统不跟踪 `EXTRA_CFLAGS`），两遍 clean 构建 text **450344 → 450328（−16 B）**，
+  该文件 0 告警、全量告警 242 条前后一致。
+- `.bin` sha256 仍不可作等价证据（`__DATE__` / `__TIME__`）。
+
+端到端（**开档**）：
+
+- 默认调用形态（`timer_compat = 0`）：串口 `[fdt] res timebase=100000000 expect=100000000
+  timer=(none described) rc=ok` —— 第 1 段走通并核对成功。
+- 为了覆盖第 2、3 段，临时把 `example/qemu_loongarch64/main.c` 的 `rexp.timer_compat` 从 `0`
+  改成 `"ns16550a"`（树里 `uart0` 的 compatible）跑一次，得
+  `[fdt] res timebase=100000000 expect=100000000 timer=serial@1fe001e0 rc=ok`：
+  遍历、跳过 disabled、比串、填 `timer_node` 全通。**该临时改动已还原（字节级写回，CRLF 1707 不变），
+  未进本次提交**。
+- 未覆盖：`expect_timer_reg` / `expect_timer_hz` 非 0 的两条「值不等」分支，以及 `NO_TIMER` 与
+  `TIMER_NO_REG` / `TIMER_NO_HZ` 的报错路径（要造缺属性或缺节点的树才触发）。这一段是简单比较，
+  风险低，但**如实登记为未验证**。
+
+门禁：`tools/ci_gate.py` **57 passed / 0 failed / 0 skipped**；`tools/format_gate.py` OK 392；
+`doc_audit funcs` **6 → 5**。
+
+结论分档：**编译通过（含开档）+ 告警 0 + QEMU 端到端 PASS（timer 分支用临时改配置覆盖后已还原），
+未上板**（QEMU 算上板，不是真机）。
+
 ### 5.31 LSX 向量寄存器上下文（U-19，2026-11-21）
 
 #### 5.31.1 缺口：FPU 档只存了一半的浮点上下文
