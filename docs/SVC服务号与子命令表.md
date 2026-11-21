@@ -86,12 +86,23 @@ bit31）、`ARKRTOS_SVC_SUB_OF(w)` 取出子命令号、`ARKRTOS_SVC_ARG_BYTES(n
 1. **宽参是编译开关，不是自适应**。内核与 App 必须用同一个 `ARKRTOS_USE_WIDE_SVC_ARGS`
    编译。宽内核 + 窄 App：内核打一行一次性日志
    `wide-args kernel got a 32-bit param block; kernel and app must be built with the same ARKRTOS_USE_WIDE_SVC_ARGS`
-   并拒绝该调用；窄内核 + 宽 App：调用被拒，不误成功。
+   并**终止调用任务**（`arkrtos_kernel_svc_wide_reject()` 走 `arkrtos_task_kill_internal`，
+   与 `THREAD_SUB_KILL` 同一条路）：字宽不符是整档 ABI 不匹配，后面每一条 SVC 都会
+   读错，只回 -1 会让 App 在用户态空转，串口上跟「内核没收到调用」长得一样；终止之后
+   `exec` / `wait` 能看到它结束、装载器台账能记一笔，失败是干净的；窄内核 + 宽 App：
+   调用被拒，不误成功。
 2. **32 位目标（ARM / RV32 / LA32）上宽档是空档**：`ARKRTOS_SVC_WIDE_ARGS` 要求
    `__SIZEOF_LONG__ > 4`，开关打开也还是 32 位槽，体积与行为不变。默认档（开关
    为 0）在 64 位目标上同样零变化。
 3. **SVC 返回寄存器只有 32 位**：宽档下若 mempool 分配到的块地址高于 4 GB，内核
    返回 0 并打一行一次性日志，**不返回截断地址**。
+
+门禁 `tools/svc_wide_gate.py`（`ci_gate` 的 `svc-wide` 一项）钉住三件事：守卫真的调了
+reject、reject 真的杀了任务（少任何一环就退回静默空转）；窄档里 `SVC_WIDE_GUARD`
+展开成空语句；Linux 兼容层状态（fd 表、堆游标、信号表）的清空必须在新任务挂进
+就绪集之前（`elf_start_task()` 之前），位置错了直接红——实测签名是夹具 stage1 的
+`brk(0)` 比窗口堆基点高 8192，且随代码布局时红时绿。变异自检 6 条（guard-reject /
+guard-ret / narrow-empty / kill / subword / reset-order）每条都要能把门禁弄红。
 
 未覆盖：`kernelsrc/sdk/mini_sdk/arkc/` 仍是 `u32` 基（小程序运行时按 arkc 的
 部署清单独立编译，拿不到这套头文件），宽 VA 下不在本机制范围内。
