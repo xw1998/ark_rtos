@@ -3167,6 +3167,7 @@ sha256sum <head>/stripped.elf <now>/stripped.elf
 - **只在 LA64 板级实测**：RV32 侧只有「关档零变化」这一条读数。
 - **`pmap u1/u2` 的帧号显示 0x0**：这一档的账本在 `s_pg_pair_pa`，shell 没有
   按需档专用的读数（要看清每一对，得加新命令，登记为可选）。
+  **已由 §5.33 补上**（`pmap pairs [space]`，逐对只读打印 VA/PA）。
 
 ### 5.24 空间回收（U-3 遗留，2026-11-17）
 
@@ -3302,9 +3303,100 @@ bss 628228`。
 - ~~**页替换**~~：**已由 §5.26 补上**（缺省关；开档后池空改为换出一对 8 KB）；
 - **ASID / TLB shootdown**（U-7）：这一档切空间仍是整段 `invtlb`，回收也没有按
   ASID 定向；ASID 档见 §5.28（仍无 shootdown）；
-- **按需档的细粒度读数**：`pmap rel` 只报整池 `used` 前后值，没有「这个空间
-  现在挂着哪几对」的命令；
+- ~~**按需档的细粒度读数**~~：`pmap rel` 只报整池 `used` 前后值，没有「这个空间
+  现在挂着哪几对」的命令；**已由 §5.33 补上**（`pmap pairs [space]`）；
 - **App 侧自回收**：`-3` 分支就是为它留的门，但当前没有这个调用者。
+
+### 5.33 按需档细粒度读数（`pmap pairs`，2026-11-21）
+
+§5.23 的按需档把真账放在 `s_pg_pair_pa[space][256]`：空间激活后窗口是空的，
+第一次摸到某一对 8 KB 才在 refill 里拿两帧。但 shell 只能通过 `pmap rel` 看
+整池 `used` 的前后差值，回答不了「这个空间现在挂着哪几对、各在哪个物理页」。
+这一格不需要新硬件、不涉及 TLB 语义，属于 U-3 的收尾，本轮补上。
+
+#### 5.33.1 三条只读接口（port / 门面 / 头文件）
+
+| 接口 | 语义 |
+| --- | --- |
+| `arkrtos_port_paging_pair_total()` | 这一档共有多少对。`PAGING_PAGES == 1` 时恒 `LA_PG_WIN_ENTRIES`（256），否则 0 |
+| `arkrtos_port_paging_pair_count(space)` | 已挂对数。越界返回 0；按需档扫 `s_pg_pair_pa[space][i] != 0u`；页级档为 `(s_pg_space_base[space] != 0u) ? 256 : 0` |
+| `arkrtos_port_paging_pair_pa(space, idx)` | 第 `idx` 对的物理基址。越界返回 0；按需档直读 `s_pg_pair_pa[space][idx]`；页级档 `s_pg_space_base[space] + idx * 0x2000`（基址 0 时回 0） |
+
+三条都是**纯只读**：绝不申请帧、绝不触发缺页（按需档下读一个还没被摸过的
+空间只会得到 0 对，而不是把帧拉进来）。门面 `arkrtos_paging.c` 只做转发，
+故意不加任何算术（越界判据留在 port，两档语义差也只在那一层）。
+
+一个必须记住的落点：这三条**放在 `#if (ARKRTOS_USE_PAGING_SWAP == 1)` 块之外**。
+最初它们被写进 SWAP 条件块里，默认档（`PAGING=1, SWAP=0`）链接直接报
+`undefined reference to arkrtos_port_paging_pair_count/pair_pa` —— 细粒度读数
+是架构读数，不该被页替换档绑死。
+
+#### 5.33.2 shell：`pmap pairs [space]`
+
+不给空间号时用 `arkrtos_paging_space_current()`。三种输出刻意分开：
+
+```
+pmap pairs: space 1 mapped=1/256 pair(s) of 8 KB (8 KB) va=0x02000000
+  pair 128: va=0x02100000 pa=0x04010000
+```
+
+- 逐对最多打 8 条，余下报 `... N more pair(s) not shown`；
+- `total == 0`（这一档没有页级窗口）报
+  `pmap pairs: this build has no paged window (total=0 spaces=N)`；
+- 空间号越界报 `pmap pairs: space N out of range (spaces=M)`。
+
+「问错空间号」与「这一档没这个读数」是两件不同的事，混成一句会被读成后者，
+所以分成两条文案（宁可报错也不给看似权威的错答案）。
+
+#### 5.33.3 QEMU LA64 实跑读数（两档都跑）
+
+按需档（`EXTRA_CFLAGS=-DARKRTOS_USE_PAGING_DEMAND=1`，`qemu_shell_drive.py
+--script`，`--boot 40 --timeout 6`）：
+
+1. `pmap pairs 1`（开工前）→ `space 1 mapped=0/256 pair(s) of 8 KB (0 KB) va=0x02000000`；
+2. `pmap u1` 之后 `pmap pairs 1` → `mapped=1/256 ... pair 128: va=0x02100000 pa=0x04010000`
+   —— 只摸了一对就只报一对，PA 是 refill 里实际拿到的帧；
+3. `pmap pairs 0` → `mapped=8/256 pair(s) of 8 KB (64 KB)`，逐对
+   `pair 0 pa=0x04000000`、`pair 128 pa=0x0400E000`、`pair 250..255`
+   各指向不同的 8 KB 帧（启动期已按需摸过 8 对）；
+4. `pmap pairs 9` → `space 9 out of range (spaces=2)`；
+5. `pmap frame` → `frames total=2048 used=18 free=2030`；
+6. 同一次驱动 `SHELL-DRIVE OK: 7 条命令全部符合预期`。
+
+默认档（页级窗口，`PAGES=1, DEMAND=0`）：
+
+1. `pmap pairs 0` → `space 0 mapped=256/256 pair(s) of 8 KB (2048 KB)`，
+   `pair 0 pa=0x04000000`、`pair 1 pa=0x04002000` …… 连续铺满（与 §5.22 的
+   512 帧整块、256 条 PS=12 一致）；
+2. `pmap pairs 1` → `mapped=0/256`（这个空间没装过）；
+3. `pmap pairs`（无参）= 当前空间 0 ⇒ 256/256；
+4. `pmap pairs 7` → `space 7 out of range (spaces=2)`；`pmap pairs x` →
+   `usage: pmap pairs [space]`；
+5. `pmap frame` → `frames total=2048 used=512 free=1536`。
+
+#### 5.33.4 门禁：`paging_gate.py` 的 pin X
+
+沿用 R/S/T/U/V 的约定（不新增 `ci_gate.py` 项），新增 `pin_x()`：钉住 port
+三条落在真实账本（`PAGES` 判 256 / 扫 `s_pg_pair_pa` / 页级档按 `0x2000` 步进）、
+hal 与 mpu 的声明与关档回退宏（`(0u)`）、`arkrtos_paging.c` 的三条转发、
+shell 的 `pmap pairs` 三条文案（`mapped=%u/%u pair(s)`、`has no paged window`、
+`out of range`）。
+
+两条防假绿自检：把 `pair_count` 的签名改坏、把 shell 的
+`arkrtos_paging_pair_pa(space, i)` 改成 `(space, 0u)`，pin X 都必须报错。
+`PAGING-GATE OK` 末段含
+`按需档细粒度读数 X pin 成立且自检有效（pair_total/count/pa 与 pmap pairs）`。
+
+**本轮同时修掉的门禁假绿**：`paging_gate.py` 自提交 09e8036 起把 pin 汇总循环
+吞进了 `pin_v` 的 `return bad` 之后（AST 可查：`pin_v` 里 `return` 之后还有
+100+ 行可达代码），13 条源码 pin（E–W）与其自检从未执行，门禁却报「成立」。
+把 `arkrtos_hal.h` 的 `paging_alias` 关档回退从 `(-1)` 改成 `(0)`（正是自检 G
+的变异体）门禁仍 `exit=0`，即为复现证据；修好后同一处破坏立刻 `exit=1`。
+同时修掉 8 类 pin 漂移（`_src()` 不归一化 CRLF、`_body()` 命中前向声明、
+64 位回绕判据、`activate` 多 `#if` 分支、per-space way、`unsigned long` VA、
+shell 拆文件后 ASID 块判定、三条空转自检）。`ci_gate.py` 新增结构性判据
+`gate-live`（AST 扫 `tools/*.py`，报「`return`/`raise`/`break`/`continue`
+之后同块仍有语句」），当前全仓 0 处死代码。
 
 ### 5.25 RV32 上的 ELF32 装载（U-4，2026-11-17）
 
