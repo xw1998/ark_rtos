@@ -5799,6 +5799,42 @@ git 里的那一份，所以它必须在提交之后才会转绿**（提交后�
 
 结论分档：**编译通过 + 告警 0 + QEMU 端到端 PASS（其中一次真回归就是它抓出来的），未上板**。
 
+#### 5.30.43 第三十八笔：`elf_measure_image()` 拆出 TLS 分支与 PT_LOAD 分支，并记一次 API 文档生成器的口径（2026-11-21）
+
+`kernelsrc/src/arkrtos_elf.c` 的 `elf_measure_image()`（**169 行**）逐条读程序头，把 TLS 尺寸、
+装载区间 `[lo, hi)`、`segs`、`AT_PHDR` 地址一次算出来。两个分支各自成函数，主函数只剩遍历与装配。
+
+| 单元 | 干什么 | 行数 |
+|---|---|---|
+| `elf_tls_t` | 量到的静态 TLS 模板四字段（`va` / `filesz` / `memsz` / `align`），只在 `ARKRTOS_USE_ELF_TLS=1` 时存在 | typedef |
+| `elf_measure_tls()` | PT_TLS 分支：`filesz > memsz` 拒、`vaddr + bias` 回绕拒、`p_align` 必须是 0/1 或 2 的幂且 `vaddr` 真对齐、**第二个 PT_TLS 直接拒**（"只允许一个"是格式约束，不能挑一个用），并把 `hi` 推到 TLS 块末尾 | 56 |
+| `elf_measure_load()` | 一个 PT_LOAD：算出 `[a0, a1)`、收窄 `lo/hi`、判 phdr 是否落在这段的 file range 里（这才让 `AT_PHDR` 有对应的内存）、`segs++`；回绕全用减法写 | 47 |
+| `elf_measure_image()` 自己 | 参数检查 → 循环读 phdr → 按 `p_type` 分派 → `segs==0 || hi<=lo` 判红 → 装配 `p_img` | **97**（原 169） |
+
+两条口径：
+
+Ⓐ TLS 的「只允许一个」判据靠 `elf_tls_t` 的 `memsz` 是否已非 0 —— 调用方进来前把四个字段清零，
+所以读到非 0 就是"已经见过一个"，不需要额外传 `seen` 标志。
+Ⓑ TLS 分支整体在 `#if (ARKRTOS_USE_ELF_TLS == 1)` 里，默认档编不到它；验收只能靠 `tools/elf_gate.py`
+的 H1 两项（LA64 两 TU 带 `-DARKRTOS_USE_ELF_TLS=1` 编得过、RV32 带着必须被 `#error` 拒）。
+这与第三十四笔的教训同源：**默认档 `make` 过不等于这段代码编过。**
+
+顺带记一条 API 文档生成器的口径：`tools/gen_api_doc.py --md` 是把**紧挨着函数定义的那段文档注释**
+认成该函数的说明。第一版把 `/** @brief 量一遍段表… */` 留在了 `elf_tls_t` 的 `#if` 上方，
+生成出来的标题就变成了 `#if (ARKRTOS_USE_ELF_TLS == 1)`，而 `elf_measure_image` 的说明整段丢失
+（`ci_gate` 立刻报 `FAIL api-doc reference is stale`）。正确位置是**文档注释紧贴函数签名**，
+类型与 helper 都插在这段注释之前。
+
+等价性：`default` 档两遍同配置 clean 构建 text **448920 → 448920（0 B）**、`data` 448 /
+`bss` 5,128,740 / 总量 31,462,512 B 全不变；该文件 0 告警（全量 clean 构建 242 条告警前后逐条一致）。
+
+门禁：`tools/ci_gate.py` **57 passed / 0 failed / 0 skipped**（含 `elf` 项的默认档零符号 +
+LA64 开档 + TLS 两项、`dynlink` 项的 QEMU 两条 PASS 与坏夹具 `exit 127`、`realbin` 项的探针语义）；
+`tools/elf_gate.py` **ELF-GATE OK**（TLS H1 两 TU 编得过 / H2 RV32 被拒 / H3 接线与自检）；
+`tools/format_gate.py` OK 392；`doc_audit funcs` **11 → 10**。
+
+结论分档：**编译通过（含 TLS 开档）+ 告警 0 + QEMU 端到端 PASS，未上板**。
+
 ### 5.31 LSX 向量寄存器上下文（U-19，2026-11-21）
 
 #### 5.31.1 缺口：FPU 档只存了一半的浮点上下文

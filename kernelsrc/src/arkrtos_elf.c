@@ -586,6 +586,131 @@ static int32 elf_check_header(const uint8 *h, elf_word_t *p_entry,
 
 /* ------------------------------------------------------------ 镜像 */
 
+#if (ARKRTOS_USE_ELF_TLS == 1)
+/* 量到的静态 TLS 模板尺寸（只在 elf_measure_image 这一族里用）。 */
+typedef struct
+{
+    unsigned long va;      /* 模板装入地址 = PT_TLS p_vaddr + bias */
+    uint32        filesz;  /* 模板字节数（tdata） */
+    uint32        memsz;   /* 块总大小（tdata + tbss） */
+    uint32        align;   /* 段声明的对齐 */
+} elf_tls_t;
+#endif
+
+#if (ARKRTOS_USE_ELF_TLS == 1)
+/* PT_TLS 的四个字段语义与 PT_LOAD 不同：p_filesz 是模板字节数、
+ * p_memsz 是含 tbss 的整块大小。它**不一定**被某个 PT_LOAD 盖住
+ * （夹具里 .tbss 就在最后一个 LOAD 之外），所以尺寸判据要自己做，
+ * 并且要把 hi 推到 TLS 块末尾，否则区间判据放过的是一段没有
+ * 落位的地址。 */
+static int32 elf_measure_tls(const uint8 *phdr, unsigned long bias,
+                             elf_word_t p_vaddr, elf_word_t p_filesz,
+                             elf_word_t p_memsz,
+                             unsigned long *p_hi, elf_tls_t *p_tls)
+{
+    elf_word_t p_align;
+    unsigned long tls_va;
+    uint32 t;
+    uint32 tf;
+
+    if(p_filesz > p_memsz)
+    {
+        return ARKRTOS_ELF_ERR_LAYOUT;
+    }
+    if(p_vaddr > (~0UL - bias))
+    {
+        return ARKRTOS_ELF_ERR_LAYOUT;
+    }
+    /* p_align 必须是 0/1 或 2 的幂，且 p_vaddr 真的对齐：错位的 TLS
+     * 块读出来的是别人的字节，而 AP 不会当场报错。 */
+    p_align = elf_rdword(phdr + ELF_PH_ALIGN);
+    t = (uint32)p_align;
+    if(t > 1u)
+    {
+        if((t & (t - 1u)) != 0u)
+        {
+            return ARKRTOS_ELF_ERR_LAYOUT;
+        }
+        if(((bias + p_vaddr) & (t - 1u)) != 0u)
+        {
+            return ARKRTOS_ELF_ERR_LAYOUT;
+        }
+    }
+    if(p_tls->memsz != 0u)
+    {
+        /* ELF 只允许一个 PT_TLS；两个就是格式错误，不能挑一个用。
+         * （调用方进来前把 tls 四个字段清零，所以这里读到非 0 就是"已经
+         * 见过一个"。） */
+        return ARKRTOS_ELF_ERR_LAYOUT;
+    }
+    tls_va = bias + p_vaddr;
+    if(p_memsz > (~0UL - tls_va))
+    {
+        return ARKRTOS_ELF_ERR_LAYOUT;
+    }
+    tf = (uint32)p_filesz;
+    p_tls->va     = tls_va;
+    p_tls->filesz = tf;
+    p_tls->memsz  = (uint32)p_memsz;
+    p_tls->align  = t;
+    if((tls_va + p_tls->memsz) > *p_hi)
+    {
+        *p_hi = tls_va + p_tls->memsz;
+    }
+    return ARKRTOS_ELF_OK;
+}
+#endif
+
+/* 一个 PT_LOAD 段：算出 [a0, a1)，收窄 lo/hi，判 phdr 是否落在这段的
+ * file range 里（AT_PHDR 只有这时才有对应内存），然后计一段。 */
+static int32 elf_measure_load(unsigned long bias, elf_word_t p_offset,
+                              elf_word_t p_vaddr, elf_word_t p_filesz,
+                              elf_word_t p_memsz,
+                              uint32 ph_begin, uint32 ph_end,
+                              unsigned long *p_lo, unsigned long *p_hi,
+                              unsigned long *p_phdr_va, uint32 *p_segs)
+{
+    unsigned long a0;
+    unsigned long a1;
+
+    if(p_filesz > p_memsz)
+    {
+        return ARKRTOS_ELF_ERR_LAYOUT;
+    }
+    /* 用减法写判据，不用 a0 + memsz：地址类型在多宽都不会回绕。
+     * 这里退掉了原先的「p_vaddr 超过 32 位就拒绝」——真实发行版二进制
+     * 的装入地址就是 0x120000000 这一档，那一条正是把它们全挡在门外
+     * 的判据。32 位 port 上 ~0UL 就是 0xFFFFFFFF，行为逐位不变。 */
+    if(p_vaddr > (~0UL - bias))
+    {
+        return ARKRTOS_ELF_ERR_LAYOUT;
+    }
+    a0 = bias + p_vaddr;
+    if(p_memsz > (~0UL - a0))
+    {
+        return ARKRTOS_ELF_ERR_LAYOUT;
+    }
+    a1 = a0 + p_memsz;
+
+    if(a0 < *p_lo)
+    {
+        *p_lo = a0;
+    }
+    if(a1 > *p_hi)
+    {
+        *p_hi = a1;
+    }
+
+    /* phdr 必须在某一段的 file range 里，AT_PHDR 才有对应内存。 */
+    if((ph_begin >= (uint32)p_offset) &&
+       (ph_end <= ((uint32)p_offset + (uint32)p_filesz)))
+    {
+        *p_phdr_va = a0 + (ph_begin - (uint32)p_offset);
+    }
+    (*p_segs)++;
+    return ARKRTOS_ELF_OK;
+}
+
 /**
 * @brief 量一遍段表：装载会落在哪一段地址上
 * @param bias  ET_DYN 的装载基址；ET_EXEC 传 0（vaddr 本身已经是绝对地址）
@@ -608,10 +733,7 @@ static int32 elf_measure_image(const char *path, elf_word_t phoff,
     uint32 ph_end;
     uint32 i;
 #if (ARKRTOS_USE_ELF_TLS == 1)
-    unsigned long tls_va = 0u;
-    uint32 tls_filesz = 0u;
-    uint32 tls_memsz = 0u;
-    uint32 tls_align = 0u;
+    elf_tls_t tls;
 #endif
     int32 rc;
 
@@ -621,6 +743,13 @@ static int32 elf_measure_image(const char *path, elf_word_t phoff,
     }
     ph_end = ph_begin + ((uint32)phnum * (uint32)phentsize);
 
+#if (ARKRTOS_USE_ELF_TLS == 1)
+    tls.va     = 0u;
+    tls.filesz = 0u;
+    tls.memsz  = 0u;
+    tls.align  = 0u;
+#endif
+
     for(i = 0u; i < (uint32)phnum; i++)
     {
         elf_word_t p_type;
@@ -628,11 +757,6 @@ static int32 elf_measure_image(const char *path, elf_word_t phoff,
         elf_word_t p_vaddr;
         elf_word_t p_filesz;
         elf_word_t p_memsz;
-#if (ARKRTOS_USE_ELF_TLS == 1)
-        elf_word_t p_align;
-#endif
-        unsigned long a0;
-        unsigned long a1;
 
         rc = elf_read_exact(path, phdr, ELF_PHDR_SIZE,
                             (uint32)phoff + (i * (uint32)phentsize));
@@ -649,52 +773,11 @@ static int32 elf_measure_image(const char *path, elf_word_t phoff,
 #if (ARKRTOS_USE_ELF_TLS == 1)
         if(p_type == (elf_word_t)ELF_PT_TLS)
         {
-            /* PT_TLS 的四个字段语义与 PT_LOAD 不同：p_filesz 是模板字节数、
-             * p_memsz 是含 tbss 的整块大小。它**不一定**被某个 PT_LOAD 盖住
-             * （夹具里 .tbss 就在最后一个 LOAD 之外），所以尺寸判据要自己做，
-             * 并且要把 hi 推到 TLS 块末尾，否则区间判据放过的是一段没有
-             * 落位的地址。 */
-            uint32 t = 0u;
-
-            if(p_filesz > p_memsz)
+            rc = elf_measure_tls(phdr, bias, p_vaddr, p_filesz, p_memsz,
+                                 &hi, &tls);
+            if(rc != ARKRTOS_ELF_OK)
             {
-                return ARKRTOS_ELF_ERR_LAYOUT;
-            }
-            if(p_vaddr > (~0UL - bias))
-            {
-                return ARKRTOS_ELF_ERR_LAYOUT;
-            }
-            /* p_align 必须是 0/1 或 2 的幂，且 p_vaddr 真的对齐：错位的 TLS
-             * 块读出来的是别人的字节，而 AP 不会当场报错。 */
-            p_align = elf_rdword(phdr + ELF_PH_ALIGN);
-            t = (uint32)p_align;
-            if(t > 1u)
-            {
-                if((t & (t - 1u)) != 0u)
-                {
-                    return ARKRTOS_ELF_ERR_LAYOUT;
-                }
-                if(((bias + p_vaddr) & (t - 1u)) != 0u)
-                {
-                    return ARKRTOS_ELF_ERR_LAYOUT;
-                }
-            }
-            if(tls_memsz != 0u)
-            {
-                /* ELF 只允许一个 PT_TLS；两个就是格式错误，不能挑一个用。 */
-                return ARKRTOS_ELF_ERR_LAYOUT;
-            }
-            tls_va     = bias + p_vaddr;
-            if(p_memsz > (~0UL - tls_va))
-            {
-                return ARKRTOS_ELF_ERR_LAYOUT;
-            }
-            tls_filesz = (uint32)p_filesz;
-            tls_memsz  = (uint32)p_memsz;
-            tls_align  = t;
-            if((tls_va + tls_memsz) > hi)
-            {
-                hi = tls_va + tls_memsz;
+                return rc;
             }
             continue;
         }
@@ -704,42 +787,12 @@ static int32 elf_measure_image(const char *path, elf_word_t phoff,
         {
             continue;
         }
-
-        if(p_filesz > p_memsz)
+        rc = elf_measure_load(bias, p_offset, p_vaddr, p_filesz, p_memsz,
+                              ph_begin, ph_end, &lo, &hi, &phdr_va, &segs);
+        if(rc != ARKRTOS_ELF_OK)
         {
-            return ARKRTOS_ELF_ERR_LAYOUT;
+            return rc;
         }
-        /* 用减法写判据，不用 a0 + memsz：地址类型在多宽都不会回绕。
-         * 这里退掉了原先的「p_vaddr 超过 32 位就拒绝」——真实发行版二进制
-         * 的装入地址就是 0x120000000 这一档，那一条正是把它们全挡在门外
-         * 的判据。32 位 port 上 ~0UL 就是 0xFFFFFFFF，行为逐位不变。 */
-        if(p_vaddr > (~0UL - bias))
-        {
-            return ARKRTOS_ELF_ERR_LAYOUT;
-        }
-        a0 = bias + p_vaddr;
-        if(p_memsz > (~0UL - a0))
-        {
-            return ARKRTOS_ELF_ERR_LAYOUT;
-        }
-        a1 = a0 + p_memsz;
-
-        if(a0 < lo)
-        {
-            lo = a0;
-        }
-        if(a1 > hi)
-        {
-            hi = a1;
-        }
-
-        /* phdr 必须在某一段的 file range 里，AT_PHDR 才有对应内存。 */
-        if((ph_begin >= (uint32)p_offset) &&
-           (ph_end <= ((uint32)p_offset + (uint32)p_filesz)))
-        {
-            phdr_va = a0 + (ph_begin - (uint32)p_offset);
-        }
-        segs++;
     }
 
     if((segs == 0u) || (hi <= lo))
@@ -748,10 +801,10 @@ static int32 elf_measure_image(const char *path, elf_word_t phoff,
     }
 
 #if (ARKRTOS_USE_ELF_TLS == 1)
-    p_img->tls_va     = tls_va;
-    p_img->tls_filesz = tls_filesz;
-    p_img->tls_memsz  = tls_memsz;
-    p_img->tls_align  = tls_align;
+    p_img->tls_va     = tls.va;
+    p_img->tls_filesz = tls.filesz;
+    p_img->tls_memsz  = tls.memsz;
+    p_img->tls_align  = tls.align;
 #endif
 
     p_img->lo        = lo;
