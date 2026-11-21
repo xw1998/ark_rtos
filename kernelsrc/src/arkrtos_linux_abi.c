@@ -1618,45 +1618,44 @@ static int32 lx_execve(void *p_ctx)
 
 /* ---------------------------------------------------------------- 入口 */
 
-int32 arkrtos_linux_abi_try(void *p_svc_ctx)
-{
-    uint32 num = arkrtos_port_linux_syscall_num(p_svc_ctx);
-    int32  rc  = 0;
-
-    if(num == 0xFFFFFFFFu)
-    {
-        return 0;       /* 不是 Linux ABI 调用，交回 Ark 号表 */
-    }
-
+/* 号表直方图：在分发之前记，走到 default 的 -ENOSYS 与 exit 提前返回的调用
+ * 也要进直方图，否则「程序卡在哪一号」恰好在最关键的那几号上看不见。 */
 #if (ARKRTOS_LINUX_ABI_SYSSTAT == 1)
-    /* 在分发之前记：走到 default 的 -ENOSYS 与 exit 提前返回的调用
-     * 也要进直方图，否则「程序卡在哪一号」恰好在最关键的那几号上
-     * 看不见。 */
+static void lx_note_nr(uint32 num)
+{
+    uint32 i;
+
+    for(i = 0u; i < s_nr_used; i++)
     {
-        uint32 i;
-        for(i = 0u; i < s_nr_used; i++)
+        if(s_nr[i].nr == num)
         {
-            if(s_nr[i].nr == num)
-            {
-                s_nr[i].hits++;
-                break;
-            }
-        }
-        if(i == s_nr_used)
-        {
-            if(s_nr_used < (uint32)LX_NR_SLOTS)
-            {
-                s_nr[s_nr_used].nr   = num;
-                s_nr[s_nr_used].hits = 1u;
-                s_nr_used++;
-            }
-            else
-            {
-                s_nr_overflow++;
-            }
+            s_nr[i].hits++;
+            break;
         }
     }
+    if(i == s_nr_used)
+    {
+        if(s_nr_used < (uint32)LX_NR_SLOTS)
+        {
+            s_nr[s_nr_used].nr   = num;
+            s_nr[s_nr_used].hits = 1u;
+            s_nr_used++;
+        }
+        else
+        {
+            s_nr_overflow++;
+        }
+    }
+}
 #endif
+
+/* 号表分派。返回非 0 表示「这次调用已经结束、调用方直接 return 1」——只有
+ * exit 族（帧已交还）与 default（回了 -ENOSYS）这两条路会这样；其余都写
+ * *p_rc 交给调用方做返回值分类。 */
+static int32 lx_dispatch(void *p_svc_ctx, uint32 num, int32 *p_rc)
+{
+    int32 rc = 0;
+
     switch(num)
     {
     case LX_SYS_OPENAT:
@@ -1745,17 +1744,25 @@ int32 arkrtos_linux_abi_try(void *p_svc_ctx)
         return 1;
     }
 
+    *p_rc = rc;
+    return 0;
+}
+
+/* 返回值分类 + 写回 + 信号投递。地址类与 exec 已经在处理函数里按整字宽写回
+ * 或换好了帧，这里只补计数、不许再覆盖。 */
+static void lx_finish(void *p_svc_ctx, int32 rc)
+{
     if(rc == LX_RET_PTR_DONE)
     {
         /* 地址类返回值已由处理函数按整字宽写回，这里不许再覆盖。 */
         s_stat[LX_STAT_HANDLED]++;
-        return 1;
+        return;
     }
     if(rc == LX_RET_EXEC_DONE)
     {
         /* execve 成功：帧已经是新镜像的入口，没有返回值可写（Linux 语义）。 */
         s_stat[LX_STAT_HANDLED]++;
-        return 1;
+        return;
     }
     if(rc == -LX_EFAULT)
     {
@@ -1774,6 +1781,28 @@ int32 arkrtos_linux_abi_try(void *p_svc_ctx)
     /* 投递点：系统调用返回用户态之前。此时 a0 已经是本次调用的返回值，
      * 所以信号帧把它一并存下来，rt_sigreturn 再装回去。 */
     (void)lx_signal_deliver(p_svc_ctx);
+}
+
+int32 arkrtos_linux_abi_try(void *p_svc_ctx)
+{
+    uint32 num = arkrtos_port_linux_syscall_num(p_svc_ctx);
+    int32  rc  = 0;
+
+    if(num == 0xFFFFFFFFu)
+    {
+        return 0;       /* 不是 Linux ABI 调用，交回 Ark 号表 */
+    }
+
+    #if (ARKRTOS_LINUX_ABI_SYSSTAT == 1)
+    lx_note_nr(num);
+    #endif
+
+    if(lx_dispatch(p_svc_ctx, num, &rc) != 0)
+    {
+        return 1;       /* exit 族 / default：返回码已写、调用已结束 */
+    }
+
+    lx_finish(p_svc_ctx, rc);
     return 1;
 }
 

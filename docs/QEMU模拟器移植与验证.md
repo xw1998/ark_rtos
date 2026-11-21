@@ -5875,6 +5875,47 @@ ON-path 文件 + LA64 pin U/V/W + RV32 pin X）；`tools/smp_gate.py` **SMP-GATE
 
 结论分档：**编译通过 + 告警 0 + QEMU 端到端 PASS，未上板**（QEMU 算上板，不是真机）。
 
+#### 5.30.45 第四十笔：`arkrtos_linux_abi_try()` 拆成号表 / 分派 / 收尾三段（2026-11-21）
+
+`kernelsrc/src/arkrtos_linux_abi.c` 的 `arkrtos_linux_abi_try()`（**158 行**）是 Linux ABI 的
+总入口：判号 → 记号表直方图 → 一个 25 条 `case` 的分派表 → 返回值分类 → 写回并投递信号。
+三段各自成函数，主函数只剩「顺序 + 一条提前返回」。
+
+| 单元 | 干什么 | 行数 |
+|---|---|---|
+| `lx_note_nr()` | 号表直方图：命中就 `hits++`，没命中就占一个槽（`LX_NR_SLOTS` 满了记 `s_nr_overflow`）。整段在 `ARKRTOS_LINUX_ABI_SYSSTAT == 1` 门内 | 26 |
+| `lx_dispatch()` | 25 条 `case` 的分派表，逐条调处理函数写 `*p_rc`；**只有 exit 族与 default 会返回 1**（这两种「返回码已写、调用到此为止」，原函数里是 `return 1`） | 95 |
+| `lx_finish()` | 返回值分类（`PTR_DONE` / `EXEC_DONE` 直接计 `HANDLED` 并返回，不写回；`-EFAULT` / 其它负数 / 正数分三档计数）→ `lx_ret()` → `lx_signal_deliver()` 投递点 | 32 |
+| `arkrtos_linux_abi_try()` 自己 | 取号 → 非 Linux 号返回 0 → 记直方图 → `lx_dispatch` 判「已结束」→ `lx_finish` → 返回 1 | **22**（原 158） |
+
+三条口径：
+
+Ⓐ 「这次调用已经结束」在拆分后只能靠**返回值**带出来。原函数用 `return 1` 从 `case` 里直接冲出
+整个函数；`lx_dispatch` 是独立函数，`return 1` 只回到它自己的调用点，于是改成「返回 1 = 调用方也
+直接 return 1；返回 0 = 走收尾」。`rc` 通过 `*p_rc` 带出，因为 exit 与 default 两条路根本不产生
+「返回值分类」这件事。
+Ⓑ 号表直方图**必须留在分派之前**，不能挪进 `lx_dispatch`。走到 default 的 `-ENOSYS` 与 exit 提前
+返回的调用也要进直方图，否则「程序卡在哪一号」恰好在最关键的那几号上看不见——这条在原注释里写着，
+拆函数时按位置保留，不只是搬代码。
+Ⓒ `lx_finish()` 的两处提前返回（`PTR_DONE` / `EXEC_DONE`）都是「处理函数已经写完，这里不许再覆盖」，
+所以它对调用方没有返回值可给，返回 `void`；把这两条写成「返回一个码让主函数再判断」会把"不许覆盖"
+变成一次可被写错的判断。
+
+等价性：`default` 档两遍同配置 clean 构建 text **448920 → 449128（+208 B，唯一一处涨）**、
+`data` 448 / `bss` 5,128,740 / 总量 31,462,512 B 全不变；该文件 0 告警（全量 clean 构建 242 条告警
+前后逐条一致）。+208 B 与第 36 笔的 +288 B 同源：`-O2` 下多了一层不内联的调用边界与 `*p_rc` 的
+栈中转，**这是拆分的真实成本，不假装零成本**。`.bin` 的 sha256 仍不可作等价证据（`__DATE__` /
+`__TIME__`）。
+
+门禁：`tools/ci_gate.py` **57 passed / 0 failed / 0 skipped**；`tools/linux_abi_gate.py`
+**13 passed / 0 failed**（含 `off-zero-symbols` 关档零符号、`compile-on` 8 个 TU 在 LA64 真板级下
+全编过、`syscall-table` 25 条号与 asm-generic 逐条相等、`abi-split-la64/rv32` 两个方向的号段分家、
+`qemu-readout` 的 14 条 check / PASS 行 / `exit code 7` / 管道 14 条与信号 31 条 check（退出码 55 / 138）
+全在、`parser-selfcheck` 8 种坏法全被判红）；`tools/format_gate.py` OK 392；
+`doc_audit funcs` **9 → 8**。
+
+结论分档：**编译通过 + 告警 0 + QEMU 端到端 PASS，未上板**（QEMU 算上板，不是真机）。
+
 ### 5.31 LSX 向量寄存器上下文（U-19，2026-11-21）
 
 #### 5.31.1 缺口：FPU 档只存了一半的浮点上下文
