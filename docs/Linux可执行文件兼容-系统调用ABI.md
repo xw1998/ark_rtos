@@ -265,7 +265,7 @@ ELF 魔数排掉「顺手 reset 了 fd 表」；`brk(0)` 回到基点排掉「�
 ## 7 信号（`rt_sigaction` 134 / `rt_sigprocmask` 135 / `kill` 129 / `tkill` 130 / `tgkill` 131 / `rt_sigreturn` 139）
 
 2026-11-21 落地，QEMU LA64 实跑（`example/qemu_loongarch64/elf/linux_signal.c`，
-`[sig]` 块 29 条 check + PASS 行 + `exit code 138`）。
+`[sig]` 块 31 条 check + PASS 行 + `exit code 138`）。
 
 ```
 [sig] write /mnt/ram/linux_signal rc=0 size=8328
@@ -319,24 +319,43 @@ ELF 魔数排掉「顺手 reset 了 fd 表」；`brk(0)` 回到基点排掉「�
 
 ### 实测读数（`[sig]` 行，QEMU LA64）
 
-29 条 check：旧动作先回写后安装、`kill` 的返回值在处理函数跑完之后仍是 0、
+31 条 check：旧动作先回写后安装、`kill` 的返回值在处理函数跑完之后仍是 0、
 handler 跑过 1 次且 `signo=10`、handler 里再 kill 自己造成嵌套（`depth=2`、
 `nested signo=12`、嵌套那次 `kill` 返回 0）、`block` 之后不投递、
 `unblock` 时才送到（`delivered on unblock = 2`）、`sigsetsize != 8` / `SIGKILL` /
 无 restorer 三种拒绝都返 `-EINVAL` 且被拒的动作确实没装上、别的 pid → `-ESRCH`、
 `sig=99` → `-EINVAL`、`tgkill` 的 `tgid != tid` → `-ESRCH`、`SIG_IGN` 静音、
-最后还原 `SIG_DFL` 靠默认动作退出（`exit code 138` = 128 + 10）。全过才打 PASS 行。
+最后还原 `SIG_DFL` 靠默认动作退出（`exit code 138` = 128 + 10），再加
+**浮点寄存器区**两条：处理函数里读到的 `$f0` 仍是主程序装的图案、`sigreturn`
+之后 `$f0` 也被整帧恢复成那个图案。全过才打 PASS 行。
 
-**反假绿（两处变异都实测判红）**：
+LSX 档（`EXTRA_CFLAGS=-DARKRTOS_USE_LSX=1`）同样是 31 条，只是最后两条换成
+**向量区**：处理函数里读到的 `$vr0` 是主程序装的 128 位图案、`sigreturn` 之后
+`$vr0` 也被恢复。两条判据**不能同时存在**——`$f0` 就是 `$vr0` 的低 64 位，
+handler 里「把 `$f0` 改成图案 B」会顺手改掉 `$vr0` 的低半，第一版就是这么
+四条全红、而内核一处没错（同内核换回不带 `-mlsx` 的夹具立刻全绿）。所以
+LSX 档只验 `$vr0`：它的 128 位图案已经把低 64 位那一份（`$f0`）一起覆盖。
 
-1. 把分发器尾部的投递点注释掉 ⇒ 门禁 exit=1：`[sig] check 通过条数 21 != 29`、
-   缺 PASS 行、缺 `exit code 138`。
+**反假绿（四处变异都实测判红）**：
+
+1. 把分发器尾部的投递点注释掉 ⇒ 门禁 exit=1：`[sig] check 通过条数 21 != 31`
+   （当时门禁常量还是 29，报的是 21 != 29）、缺 PASS 行、缺 `exit code 138`。
 2. 把 `frame_import` 改成只写回 `ERA`/`SP`（丢掉快照其余部分）⇒ 门禁 exit=1：
    `old handler was SIG_DFL = 33554800 FAIL`、`rt_sigprocmask unblock rc = 12 FAIL`、
    `[sig] FAIL: 2 checks failed`、`exit code 1`。这条证明「整帧快照」不是装饰：
    少存寄存器，处理函数一返回现场就是坏的。
+3. （LSX 档）把 `arkrtos_port_svc_frame_bytes()` 改成恒返 528 ⇒ 交付的快照
+   不含向量区：`lsx vr0 seen in handler = 1 ok` 而
+   `lsx vr0 restored after sigreturn = 0 FAIL`、`[sig] FAIL: 1 checks failed`、
+   `exit code 1`。这说明「sigreturn 之后恢复」那条判据对**向量区那一半字节**
+   有分辨力，不是靠前半段顺带过的。
+4. （LSX 档）把 `LA_FP_RESTORE` 里的 `vld $vr0, \base, 528` 改成读 `512`
+   （落在 FCSR 槽上）⇒ 两条一起红（`seen = 0`、`restored = 0`），并且连带
+   `[lsx] A bad=50 | B bad=50 -> FAIL (vector regs leaked between tasks)`——
+   同一条恢复路径在任务切换上也坏了，佐证红的是内核那条指令而不是夹具。
 
-还原后复验 29/29 ok、`exit code 138`、门禁 13/13 全绿。
+还原后复验：默认档 31/31 ok、LSX 档 31/31 ok，两边 `exit code 138`，
+门禁 13/13 全绿，格式门禁 392 个文件干净。
 
 ### 边界
 
@@ -347,7 +366,8 @@ handler 跑过 1 次且 `signo=10`、handler 里再 kill 自己造成嵌套（`d
   无 `SA_RESTART` 语义（被信号打断的系统调用不会自动重试）。
 - 作业控制类（`SIGSTOP`/`SIGTSTP`/`SIGTTIN`/`SIGTTOU`）的默认动作按忽略处理：
   没有「另一个进程」可以停。
-- 帧里带 FPU 区；开 LSX 档时整块（1040 B）也一起拷，但**未单独验证**。LASX 未保存。
+- 帧里带 FPU 区（528 B 档实跑验过）；LSX 档整块 1040 B 也一起拷，且**向量区已单独
+  实测**（两条判据见上）。LASX（`$xr0..$xr31`）未保存。
 
 ## 8 开关与零体积
 
@@ -383,7 +403,7 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py --no-build
 | `abi-split-la64` | 立即数 == 0 是 Linux、!= 0 是 Ark |
 | `abi-split-rv32` | `0x10..0x22` 归 Ark，Linux 最小号 56 不撞 |
 | `build` | `make -f example/qemu_loongarch64/Makefile` 通过 |
-| `qemu-readout` | Linux 块 14 条 check 全 ok + PASS 行 + `exit code 7`；管道块 14 条 + `exit code 55`；信号块 29 条 + PASS 行 + `exit code 138`；旁路演示未受影响 |
+| `qemu-readout` | Linux 块 14 条 check 全 ok + PASS 行 + `exit code 7`；管道块 14 条 + `exit code 55`；信号块 31 条 + PASS 行 + `exit code 138`；旁路演示未受影响 |
 | `parser-selfcheck` | 把 8 种坏日志喂回判据，必须全判红 |
 
 `parser-selfcheck` 是防「绿得没有信息量」的：Linux 块去掉 PASS 行、退出码改 3、

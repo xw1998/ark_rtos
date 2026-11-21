@@ -270,7 +270,7 @@ Boundaries: non-blocking semantics (a spinning reader/writer gets `-EAGAIN`),
 ## 7 Signals (`rt_sigaction` 134 / `rt_sigprocmask` 135 / `kill` 129 / `tkill` 130 / `tgkill` 131 / `rt_sigreturn` 139)
 
 Landed 2026-11-21, measured on QEMU LA64 (`example/qemu_loongarch64/elf/linux_signal.c`,
-29 `[sig]` checks plus a PASS line and `exit code 138`).
+31 `[sig]` checks plus a PASS line and `exit code 138`).
 
 ### Semantics (how far it goes, stated plainly)
 
@@ -304,20 +304,53 @@ by `frame + 128`, and keeps a 64 B margin above the task stack bottom. The retur
 chain only pops and never pushes, so that location is safe for the kernel.
 
 Readout: before the fix `FATAL estat=0x000d0800 ecode=0x0d(INE) era=0`; after it
-29/29 checks pass with `exit code 138`.
+31/31 checks pass with `exit code 138`.
 
-### Anti-false-green (two mutations, both rejected by the gate)
+### What the 31 checks are
+
+Besides the action/old-action, `kill` return value across the handler, hits/signo,
+nesting (hits/`depth`/rc), block/query/unblock, the six `-EINVAL`/`-ESRCH`
+rejections, `SIG_IGN` silence and the final `SIG_DFL` exit, the last two checks
+cover the **floating-point register area**: the `$f0` seen inside the handler is
+still the pattern the main flow loaded, and after `sigreturn` the whole frame is
+restored, so `$f0` is that pattern again.
+
+The LSX profile (`EXTRA_CFLAGS=-DARKRTOS_USE_LSX=1`) is also 31 checks, but the
+last two are the **vector area** instead: the `$vr0` seen inside the handler is
+the 128-bit pattern the main flow loaded, and after `sigreturn` it is restored.
+The two pairs **cannot coexist**: `$f0` *is* the low 64 bits of `$vr0`, so
+"write pattern B into `$f0`" inside the handler also rewrites the low half of
+`$vr0`. The first version did exactly that and all four checks went red while the
+kernel was correct all along (same kernel, fixture rebuilt without `-mlsx`,
+instantly green). The LSX profile therefore only probes `$vr0`, whose 128-bit
+pattern already covers the low 64 bits (`$f0`).
+
+### Anti-false-green (four mutations, all rejected by the gate)
 
 1. Commenting out the delivery point at the dispatcher tail gives gate exit=1:
-   the check count becomes 21 != 29, and both the PASS line and `exit code 138`
-   are missing.
+   the check count becomes 21 != 31 (the gate constant was still 29 back then
+   and reported 21 != 29), and both the PASS line and `exit code 138` are
+   missing.
 2. Making `frame_import` restore only `ERA`/`SP` gives gate exit=1:
    `old handler was SIG_DFL = 33554800 FAIL`, `rt_sigprocmask unblock rc = 12
    FAIL`, `[sig] FAIL: 2 checks failed`, `exit code 1`. This proves the full
    snapshot is not decoration - drop a register and the handler returns into a
    broken context.
+3. (LSX profile) Making `arkrtos_port_svc_frame_bytes()` always return 528, so
+   the delivered snapshot carries no vector area: `lsx vr0 seen in handler = 1
+   ok` but `lsx vr0 restored after sigreturn = 0 FAIL`, `[sig] FAIL: 1 checks
+   failed`, `exit code 1`. So the "restored after sigreturn" check really does
+   discriminate the *upper half of the vector area*, it does not ride along on
+   the first half.
+4. (LSX profile) Pointing `vld $vr0, \base, 528` in `LA_FP_RESTORE` at `512`
+   instead (the FCSR slot) turns both checks red (`seen = 0`, `restored = 0`)
+   and additionally `[lsx] A bad=50 | B bad=50 -> FAIL (vector regs leaked
+   between tasks)` - the same restore path is broken for task switches too,
+   which is evidence that the red comes from that kernel instruction and not
+   from the fixture.
 
-Reverting both brings back 29/29 ok, `exit code 138` and a 13/13 green gate.
+Reverting all of them brings back 31/31 ok on both profiles, `exit code 138`,
+a 13/13 green gate and a format gate clean on 392 files.
 
 ### Boundaries
 
@@ -327,8 +360,9 @@ Reverting both brings back 29/29 ok, `exit code 138` and a 13/13 green gate.
 - No real-time signals, no `sigaltstack`, no `siginfo`, no `SA_RESTART`
   semantics (an interrupted syscall is not retried).
 - Stop-family defaults are treated as ignored: there is no other process to stop.
-- The frame includes the FPU area; with the LSX profile the whole 1040 B block is
-  copied too, but that path is **not verified separately**. LASX is not saved.
+- The frame includes the FPU area (measured on the 528 B profile); with the LSX
+  profile the whole 1040 B block is copied too and the **vector area is measured
+  separately** (two checks above). LASX (`$xr0..$xr31`) is not saved.
 
 ## 8 Switch and zero footprint
 
@@ -350,7 +384,7 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py [--no-build]
 board-switch, off-zero-symbols, port-wiring (two directions), compile-on (8 TUs
 under the real LA64 board), syscall-table (25 numbers vs asm-generic),
 abi-split-la64, abi-split-rv32, build, qemu-readout (14 Linux checks + PASS + exit 7,
-14 pipe checks + exit 55, 29 signal checks + PASS + exit 138, the unrelated demos
+14 pipe checks + exit 55, 31 signal checks + PASS + exit 138, the unrelated demos
 still intact), and parser-selfcheck (eight deliberately broken logs must each be
 rejected).
 
