@@ -80,6 +80,7 @@ DT_NAMES = {
 R_LA_NONE, R_LA_64, R_LA_RELATIVE = 0, 2, 3
 R_LA_JUMP_SLOT = 5
 R_LA_IRELATIVE = 12
+R_LA_TLS_TPREL64 = 11
 
 # 编号来自 LoongArch ELF psABI（TLS 占 6..11，IRELATIVE=12）。
 # tools/realbin_gate.py 会拿 binutils readelf 的名字与本表逐条对账，
@@ -132,7 +133,13 @@ R_NAMES = {
 # 这三张表就是「我们声称支持什么」。改它们必须同时改实现与门禁，
 # tools/realbin_gate.py 会把它们和 ldso.c / elf.c 对账。
 #
-ARK_SUPPORTED_RELOC = {R_LA_RELATIVE, R_LA_64, R_LA_JUMP_SLOT}
+ARK_SUPPORTED_RELOC = {R_LA_RELATIVE, R_LA_64, R_LA_JUMP_SLOT,
+                       R_LA_TLS_TPREL64}
+# 静态 PT_TLS：内核装载器自 2026-11-20 起读 PT_TLS 建 tdata/tbss 块并把
+# TP 指向块起点（fcc7ddf 真实 glibc 静态二进制 __thread 实跑），所以带
+# PT_TLS 的二进制不再算「还差能力」。真实发行版的 glibc 会在静态档自建
+# TCB（内核给 tls_placed=0），那一条不影响这里的判定。
+ARK_SUPPORTS_PT_TLS = True
 ARK_SUPPORTED_DT = {
     DT_NULL, DT_NEEDED, DT_PLTRELSZ, DT_HASH, DT_STRTAB, DT_SYMTAB,
     DT_RELA, DT_RELASZ, DT_RELAENT, DT_STRSZ, DT_SYMENT, DT_JMPREL,
@@ -442,7 +449,7 @@ def judge(r):
         b.append(("interp-path",
                   "PT_INTERP 指向 %s，VFS 里没有这个路径" % r["interp"],
                   "把解释器放到该路径，或让装载器按 /lib、/lib64 前缀去 /mnt/ram 找"))
-    if r["has_tls"]:
+    if r["has_tls"] and not ARK_SUPPORTS_PT_TLS:
         b.append(("tls",
                   "有 PT_TLS（filesz=%d memsz=%d align=%d）"
                   % (r["tls"]["filesz"], r["tls"]["memsz"], r["tls"]["align"]),
@@ -469,17 +476,21 @@ def judge(r):
         b.append(("pltrel-kind",
                   "DT_PLTREL 不是 RELA（=7），PLT 重定位不是 .rela 格式",
                   "ldso 只扫 .rela.dyn / .rela.plt；REL 形态要另写一套"))
+    # 「Ark 处理哪些重定位」只由上面的 ARK_SUPPORTED_RELOC 说，这里不再抄
+    # 一份名字表——抄一份的下场是加了 TLS_TPREL64 之后两处说法不一致。
+    ok_reloc_names = set(R_NAMES[v] for v in ARK_SUPPORTED_RELOC)
+    ok_reloc_names.add("R_LARCH_NONE")
     bad_reloc = {}
     for name, n in r["reloc_hist"].items():
-        if name in ("R_LARCH_RELATIVE", "R_LARCH_64", "R_LARCH_JUMP_SLOT"):
+        if name in ok_reloc_names:
             continue
         bad_reloc[name] = n
     if bad_reloc:
         b.append(("relocations",
                   "有 Ark 不处理的重定位：%s"
                   % ", ".join("%s x%d" % (k, v) for k, v in sorted(bad_reloc.items())),
-                  "IRELATIVE 要调用 resolver（IFUNC）；TLS_* 要 TCB 与 TP；"
-                  "COPY 要跨对象拷字节"))
+                  "IRELATIVE 要调用 resolver（IFUNC）；动态 TLS 的 DTPMOD/DTPREL/"
+                  "TLSDESC 要跨对象 TLS 模型，COPY 要跨对象拷字节"))
     # 依赖本身不是阻塞项：能不能装载依赖属于「装载器能力」，会在 dependent
     # 自己的 blockers 里出现。只有解析过 sysroot 且真的找不到时才算阻塞。
     if r["needed"] and r.get("deps"):
