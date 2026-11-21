@@ -2013,6 +2013,80 @@ def check_event_host():
     ok("event-host", "event objects on host (%s / %s)"
        % (lines[0], lines[1]))
 
+def check_timer_host():
+    """Software timers: object table, tick countdown, and the service task body.
+
+    arkrtos_timer.c had no host case until 2026-11-21. The tick handler only
+    counts down and sets a flag; the callback runs from a dedicated service
+    task. The expensive failure is the hand-off between the two: a service
+    task that is woken when it is not waiting (or not woken when it is)
+    leaves callbacks either never running or running over a live task.
+
+    Three configurations are built and run, because they are three different
+    bodies of code:
+      * USE_TIMER=1: the default build; the service loop runs on target, so
+        the host case drives it a bounded number of passes through
+        ARKRTOS_TIMER_HOST_TEST's budget (default build: this symbol and the
+        whole branch do not exist -- the object file is byte-identical to the
+        pre-hook file except the recorded source filename).
+      * USE_TIMER=1 + USE_TICKLESS=1: adds next_ticks(), the "when is the
+        nearest deadline" query used by tickless idle.
+      * USE_TIMER=0: every entry point must refuse with -1 instead of
+        pretending to create a timer whose callback can never run.
+
+    What is proven is the state machine and the accounting (slot allocation,
+    handle gates, ms-to-tick conversion including a 32-bit multiply overflow
+    floored to one tick, countdown/reload, hand-off to the service task, the
+    callback snapshot rules, self stop/delete from inside a callback). Real
+    tick timing and a real scheduler are NOT covered; a board proves those.
+    A missing host compiler is a FAIL, not a skip.
+    """
+    import tempfile
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("timer-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    want = (("timer", "TIMER-HOST OK"),
+            ("timer-tickless", "TIMER-HOST TL OK"),
+            ("timer-off", "TIMER-HOST OFF OK"))
+    names = [w[0] for w in want]
+    picked = {}
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name in names:
+            picked[name] = (test, mods, defs, incs)
+    for name, _marker in want:
+        if name not in picked:
+            fail("timer-host", "case %s missing from coverage_gate.CASES" % name)
+            return
+
+    lines = []
+    with tempfile.TemporaryDirectory() as td:
+        for name, marker in want:
+            test, mods, defs, incs = picked[name]
+            exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+                fail("timer-host", "%s did not build: %s" % (name, tail[:200]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            if r.returncode != 0 or marker not in txt:
+                fail("timer-host", "%s failed: %s" % (name, txt.strip()[:220]))
+                return
+            lines.append(txt.strip().splitlines()[-1])
+    ok("timer-host", "software timers on host (%s / %s / %s)"
+       % (lines[0], lines[1], lines[2]))
+
 def check_coverage_host():
     """Line coverage of the modules the host tests actually link.
 
@@ -2049,9 +2123,11 @@ def check_warn_host():
     which was added on 2026-11-18 once this machine's toolchain list was
     re-checked and riscv64-unknown-elf-gcc-10.2.0 turned up.
 
-    Scope is honest and narrow: the 18 host test cases, the 18 kernel modules
-    they link, and the SDK stdio test (41 TUs; sign, blk, dev and event are built
-    twice, once per configuration). Everything else in kernelsrc/ needs an
+    Scope is honest and narrow: every TU the cases in coverage_gate.CASES
+    compile -- 23 case configurations (test + module each) plus the SDK stdio
+    test, 47 TUs in total, because a few modules are built once per
+    configuration (sign, blk, dev and event twice; timer three times: default,
+    tickless and USE_TIMER=0). Everything else in kernelsrc/ needs an
     architecture toolchain (armcc/armclang, loongarch64, riscv64) to compile at
     all, so it is out of reach here.
 
@@ -2173,6 +2249,7 @@ CHECK_TABLE = (
     ("blk-host", check_blk_host),
     ("dev-host", check_dev_host),
     ("event-host", check_event_host),
+    ("timer-host", check_timer_host),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),
     ("analyzer", check_analyzer),

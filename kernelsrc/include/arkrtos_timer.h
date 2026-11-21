@@ -38,6 +38,14 @@ typedef struct {
     void  *arg;                  /* 回调参数 */
 } arkrtos_timer_obj_t;
 
+#else   /* ARKRTOS_USE_TIMER == 0 */
+
+/* 关档时对象类型和模式宏不存在，但函数原型照旧要在。
+ * 否则调用方在关档构建里只能得到隐式声明，反而不知道
+ * 这个模块是一组明确拒绝的函数。零件统计不变。 */
+
+#endif  /* ARKRTOS_USE_TIMER */
+
 void  arkrtos_timer_module_init(void);
 void  arkrtos_timer_task_install(void);
 
@@ -54,7 +62,5 @@ int32 arkrtos_timer_start_internal(int32 handle, uint32 period_ms, uint8 mode,
                                  void (*cb)(void *), void *arg);
 int32 arkrtos_timer_stop_internal(int32 handle);
 int32 arkrtos_timer_delete_internal(int32 handle);
-
-#endif /* ARKRTOS_USE_TIMER */
 
 #endif

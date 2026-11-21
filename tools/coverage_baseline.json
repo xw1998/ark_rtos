@@ -13,6 +13,7 @@
   "arkrtos_smp": 89.19,
   "arkrtos_sync": 99.22,
   "arkrtos_tickless": 98.97,
+  "arkrtos_timer": 100.0,
   "arkrtos_utest": 83.65,
   "arkrtos_waitmulti": 100.0
 }

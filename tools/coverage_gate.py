@@ -190,6 +190,17 @@ CASES = [
     ("event-multi", "kernelsrc/tests/test_event_host.c",
      ["kernelsrc/src/arkrtos_event.c"],
      ["-DARKRTOS_USE_WAITMULTI=1"], "EVENT-HOST MULTI OK"),
+    # --- 2026-11-21 新增：软定时器（USE_TIMER 开/关 + TICKLESS 是第三段代码）--
+    ("timer", "kernelsrc/tests/test_timer_host.c",
+     ["kernelsrc/src/arkrtos_timer.c"],
+     ["-DARKRTOS_USE_TIMER=1", "-DARKRTOS_TIMER_HOST_TEST"], "TIMER-HOST OK"),
+    ("timer-tickless", "kernelsrc/tests/test_timer_host.c",
+     ["kernelsrc/src/arkrtos_timer.c"],
+     ["-DARKRTOS_USE_TIMER=1", "-DARKRTOS_USE_TICKLESS=1",
+      "-DARKRTOS_TIMER_HOST_TEST"], "TIMER-HOST TL OK"),
+    ("timer-off", "kernelsrc/tests/test_timer_host.c",
+     ["kernelsrc/src/arkrtos_timer.c"],
+     ["-DARKRTOS_USE_TIMER=0"], "TIMER-HOST OFF OK"),
 ]
 
 

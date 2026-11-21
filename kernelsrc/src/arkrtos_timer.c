@@ -16,7 +16,24 @@
 
 #if (ARKRTOS_USE_TIMER == 1)
 
-static arkrtos_timer_obj_t arkrtos_timers[ARKRTOS_TIMER_NUM];
+/* The object table and the service loop are file-private in a normal build.
+ * A host test needs to call the loop a bounded number of times (it is a
+ * while(1) task body on target), so ARKRTOS_TIMER_HOST_TEST drops the
+ * storage class and adds a step budget.  In a normal build neither the
+ * budget symbol nor any behaviour change exists: ARKRTOS_TIMER_STATIC
+ * expands to plain static and the budget block is not compiled. */
+#if defined(ARKRTOS_TIMER_HOST_TEST)
+#define ARKRTOS_TIMER_STATIC
+int32 arkrtos_timer_daemon_budget = 0;
+#else
+#define ARKRTOS_TIMER_STATIC static
+#endif
+
+ARKRTOS_TIMER_STATIC arkrtos_timer_obj_t arkrtos_timers[ARKRTOS_TIMER_NUM];
+
+#if defined(ARKRTOS_TIMER_HOST_TEST)
+ARKRTOS_TIMER_STATIC void arkrtos_timer_daemon(void);
+#endif
 
 /* 定时器服务任务的栈与任务号（install 时分配） */
 static uint32 arkrtos_timer_task_stack[ARKRTOS_TIMER_TASK_STACK_WORDS];
@@ -41,12 +58,18 @@ void arkrtos_timer_module_init(void)
 }
 
 /* 定时器服务任务主体：无事件时永久阻塞，被 tick 唤醒后执行到期回调 */
-static void arkrtos_timer_daemon(void)
+ARKRTOS_TIMER_STATIC void arkrtos_timer_daemon(void)
 {
     while(1)
     {
         int32 i;
         int32 has_work = 0;
+
+#if defined(ARKRTOS_TIMER_HOST_TEST)
+        if(arkrtos_timer_daemon_budget <= 0)
+            return;                     /* host test: bounded run, no task exists */
+        arkrtos_timer_daemon_budget--;
+#endif
 
         ARKRTOS_DISABLE_IRQ();
         for(i = 0; i < ARKRTOS_TIMER_NUM; i++)
@@ -214,7 +237,7 @@ int32 arkrtos_timer_start_internal(int32 handle, uint32 period_ms, uint8 mode,
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
     uint32 ticks;
 
-    if(ARKRTOS_TIMER_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_TIMER_HANDLE_FLAG != ((uint32)handle & (uint32)ARKRTOS_HANDLE_MASK))
         return ARKRTOS_TIMER_ERR_HANDLE;
     if(idx >= ARKRTOS_TIMER_NUM || arkrtos_timers[idx].used == 0)
         return ARKRTOS_TIMER_ERR_STATE;
@@ -243,7 +266,7 @@ int32 arkrtos_timer_stop_internal(int32 handle)
 {
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
-    if(ARKRTOS_TIMER_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_TIMER_HANDLE_FLAG != ((uint32)handle & (uint32)ARKRTOS_HANDLE_MASK))
         return ARKRTOS_TIMER_ERR_HANDLE;
     if(idx >= ARKRTOS_TIMER_NUM || arkrtos_timers[idx].used == 0)
         return ARKRTOS_TIMER_ERR_STATE;
@@ -259,7 +282,7 @@ int32 arkrtos_timer_delete_internal(int32 handle)
 {
     int32 idx = handle & ARKRTOS_HANDLE_RELMASK;
 
-    if(ARKRTOS_TIMER_HANDLE_FLAG != (handle & ARKRTOS_HANDLE_MASK))
+    if(ARKRTOS_TIMER_HANDLE_FLAG != ((uint32)handle & (uint32)ARKRTOS_HANDLE_MASK))
         return ARKRTOS_TIMER_ERR_HANDLE;
     if(idx >= ARKRTOS_TIMER_NUM)
         return ARKRTOS_TIMER_ERR_HANDLE;
