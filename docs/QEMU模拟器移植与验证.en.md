@@ -3682,6 +3682,13 @@ when the compare fails.
 [smp] cores=2 mask=0x00000003 sent=1 ipi1=5 result=ok
 ```
 
+**Timeliness note (2026-11-21):** the `ipi1=5 result=ok` reading above was taken on
+11-19 and is **no longer reproducible on the 11-21 HEAD** -- the FPU/LSX context saves
+added after that date make the secondary core take Ecode=15 on its very first trap, and
+the machine hangs at the IPI step (see the section right before 9.7). The same command
+reproduces the reading again once the fix lands, so this was a regression, not a
+difference in environment.
+
 `-d in_asm` shows the secondary hart's trail: `0x1c000000` -> `0x1c000038` (idle) ->
 `0x1c000048` (mailbox non-zero, `beqz` not taken) -> `arkrtos_smp_secondary_main` ->
 `smp_mask_set`.
@@ -3775,6 +3782,89 @@ often under `-smp 2`.
 Sixth reading that is **not** permitted: `-accel tcg,thread=single` must not be
 presented as a working recipe -- it does not stop the crash and it keeps the
 secondary hart permanently offline.
+
+#### Secondary core never set `EUEN.FPE`: SMP combo regression and fix (2026-11-21)
+
+The FPU/LSX context saves on the shared `eentry` path (`b104c11`, `1477bdb`) turned a
+missing CSR write in the secondary-core entry into a fatal hang.
+
+**Symptom (deterministic, not intermittent).** The SMP image
+(`BUILD=build/la64_smp_only EXTRA_CFLAGS="-DARKRTOS_USE_SMP=1 -DARKRTOS_CPU_NUM=2"`)
+stops after 8 lines on every `-smp 2` run:
+
+```
+[smp] cores=2 mask=0x00000003 sent=1 ipi1=0 result=FAIL(ipi not received)
+```
+
+The 11-19 image `build/la64_sms_on/ark_qemu_la64.elf` still prints 122 lines and
+`ipi1=5 result=ok` with the same command line: a HEAD regression, not a QEMU or
+command-line difference.
+
+**Evidence: `-d int` shows the exception entry faulting on itself.**
+
+```
+loongarch_cpu_do_interrupt enter: pc 000000000024f0f4 ERA 0000000000246584 exception: 15 (Floating Point Disabled)
+loongarch_cpu_do_interrupt: PC 000000000024ee00 ERA 000000000024f0f4 cause 15
+, ESTAT 00000000000f1000 EXCFG 0000000000001000 ... cpu 1 asid 00000000000a0000
+```
+
+(1.73 M identical lines.) `ESTAT` Ecode = **15 (FPD)**, the faulting vCPU is **cpu 1**,
+`PC = 0x24ee00` is `eentry` itself and `ERA = 0x24f0f4` is the `fst.d` that saves FPRs
+inside it. `ipi_count` therefore never advances and CPU0 spins until the whole machine
+stops.
+
+**Root cause chain.** `example/qemu_loongarch64/start.S` sets `EUEN.FPE` for the boot
+core and its comment already spells out the consequence ("without this bit even the
+`fst.d` that saves FPRs in `eentry` will fault") -- but that is the **primary** core's
+`_start`. The secondary core enters `arkrtos_smp_secondary_entry` in
+`kernelsrc/port/loongarch/la64/arkrtos_context.S` with the hardware-reset CSR state and
+never writes `EUEN` (CSR 0x2); it only sets `EENTRY` / `ECFG` / `CORE_EN` / `CRMD.IE`.
+
+**Fix (three instructions + comment, inside `#if (ARKRTOS_USE_FPU == 1)`).** Before
+`EENTRY` is installed, `arkrtos_smp_secondary_entry` now does:
+
+```
+csrrd   $t1, 0x2
+ori     $t2, $zero, 0x1        /* EUEN.FPE */
+or      $t1, $t1, $t2
+csrwr   $t1, 0x2
+```
+
+with a second block for `EUEN.SXE` under `ARKRTOS_USE_LSX == 1` (SXE only, no ASXE, same
+as `start.S`). Chosen over "make `eentry` save FPRs conditionally" because it is exactly
+symmetric with the boot core, is three instructions, and the whole body sits inside the
+`ARKRTOS_USE_SMP == 1` function so the default build compiles none of it.
+
+**Readings after the fix (QEMU; the simulator counts as "on target", not real silicon).**
+
+| Build | Reading |
+|---|---|
+| SMP | `[smp] cores=2 mask=0x00000003 sent=1 ipi1=5 result=ok`; 191 lines within 25 s, `[A]/[B]` still running at round 17 |
+| SMP + `SMP_SCHED` | `[sched] to cpu1 rc=0` -> `cur1=0x00000006 q=1 sw=1 owned=1 loops=+2951/+3426/+3024` -> `[sched] back rc=0` -> `cur1=0xffffffff owned=0` |
+
+**Mutation self-check.** Replacing the `ori $t2, $zero, 0x1` (FPE) instruction with a
+comment and rebuilding reproduces the original failure byte for byte
+(`ipi1=0 result=FAIL`, hang after 8 lines); restoring it brings back `ipi1=5 result=ok`.
+So that instruction is the cause, not a cosmetic addition.
+
+**Gate.** `tools/smp_gate.py` pin V now additionally requires a write to CSR `0x2`
+inside the `arkrtos_smp_secondary_entry` body, plus a mutation self-check that replaces
+that `csrwr` with `nop` and demands the assertion goes red (otherwise the pin is not
+pointing at the write).
+
+**Default build: no code change.** Building the default (SMP=0) image twice -- once with
+the new file, once with the file reverted to HEAD -- gives identical `.text/.data/.bss`
+sizes (`449096 / 448 / 5128740`) and a `.text` diff of exactly **8 bytes**, all inside
+the `__DATE__`/`__TIME__` build-timestamp strings. Byte-for-byte repro of the whole image
+needs `SOURCE_DATE_EPOCH` as described in the readings section above.
+
+**Boundaries.** Every reading comes from `qemu-system-loongarch64` -- QEMU counts as
+"on target", not real hardware; this repo has no LA64 SMP board. The failure here is
+deterministic and is **not** the ~10% intermittent stop registered earlier in this
+chapter, which stays open. And this does not mean the secondary core's CSR setup is
+complete: it still does not enable paging (`CRMD.PG` stays 0, identity-mapped DA mode),
+installs no TLB entries, and `arkrtos_port_send_ipi()` still refuses core 0 -- all three
+are prerequisites for TLB shootdown, tracked in `docs/欠账盘点.md`.
 
 ### 9.7 RV32 side of ②③: ACLINT `msip` (2026-11-19, QEMU RV32 `-smp 2` executed)
 

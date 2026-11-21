@@ -50,6 +50,7 @@ RV32 的 ②③ ACLINT msip（pin X，§9.7）。LA32 侧与 RV32 的 ④ 仍未
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -389,9 +390,10 @@ def run_la64_pin_v(cc):
     inc = ["-I" + td]
     inc += ["-I" + os.path.join(ROOT, x) for x in LA64_INCLUDES]
 
-    def assemble(tag, smp):
+    def assemble(tag, smp, path=None):
         obj = os.path.join(td, tag + ".o")
-        cmd = [cc, "-march=loongarch64", "-mabi=lp64d", "-c", src, "-o", obj,
+        cmd = [cc, "-march=loongarch64", "-mabi=lp64d", "-c",
+               path or src, "-o", obj,
                "-include", "arkrtos_board_config.h"] + base_defs + inc
         cmd += ["-DARKRTOS_USE_SMP=1", "-DARKRTOS_CPU_NUM=2"] if smp else \
                ["-DARKRTOS_USE_SMP=0"]
@@ -417,6 +419,44 @@ def run_la64_pin_v(cc):
             bad += 1
         else:
             print("ok: LA64 context.S SMP=1 has secondary entry + iocsr + ertn")
+
+    # EUEN pin：FPU 档的次核入口必须自己置 EUEN.FPE（2026-11-21 回归，见
+    # docs/QEMU模拟器移植与验证.md 9.6.10）。主核的 EUEN 是在 start.S 里设的，
+    # 次核走的是硬件复位后的独立 CSR 状态、不继承；而 FPU 档的 eentry 会
+    # 无条件 fst.d 保存 FPR，缺这一位时次核一进陷阱就落 Ecode=15（FPD），
+    # 异常入口自己再故障 —— 表现是 IPI 永远收不到、次核原地打转。
+    # 变异自检：把置位那条 ori 抠掉重汇编，CSR 0x2 的写必须跟着消失。
+    euen_re = re.compile(r"csrwr\s+\$\w+,0x2\b")
+
+    def sec_entry(text):
+        i = text.find("<arkrtos_smp_secondary_entry>:")
+        if i < 0:
+            return ""
+        j = text.find("\n\n", i)
+        return text[i:j if j >= 0 else len(text)]
+
+    if on is not None:
+        body = sec_entry(on)
+        if not euen_re.search(body):
+            print("SMP-GATE FAIL: secondary entry never writes EUEN (CSR 0x2); "
+                  "an FPU build dies on the first trap with Ecode=15 FPD")
+            bad += 1
+        else:
+            mut_src = os.path.join(td, "ctx_mut.S")
+            raw = open(src, "rb").read().replace(
+                b"    csrwr   $t1, 0x2\r\n", b"    nop\r\n")
+            with open(mut_src, "wb") as f:
+                f.write(raw)
+            mut = assemble("smpmut", True, mut_src)
+            if mut is None:
+                bad += 1
+            elif euen_re.search(sec_entry(mut)):
+                print("SMP-GATE FAIL: dropping the EUEN write did not remove "
+                      "the CSR 0x2 write (pin does not point at it)")
+                bad += 1
+            else:
+                print("ok: LA64 EUEN pin (CSR 0x2 written in secondary entry, "
+                      "gone when the setter is removed)")
 
     off = assemble("smpoff", False)
     if off is None:

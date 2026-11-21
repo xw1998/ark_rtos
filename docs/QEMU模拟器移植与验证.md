@@ -7739,6 +7739,11 @@ timeout 25 "D:/env/tools/qemu/qemu9/mingw64/bin/qemu-system-loongarch64.exe" \
 `utest: 13 matched, 13 passed, 0 failed, 0 skipped; assertions 133 run / 0 failed`
 照旧（SMP 档没有破坏单核基线）。
 
+**时效说明（2026-11-21）**：上面这条 `ipi1=5 result=ok` 是 11-19 的读数，在 11-21 的
+HEAD 上**已不可复现** —— 那天之后加的 FPU/LSX 上下文保存让次核在第一次陷阱里落
+Ecode=15，整机在 IPI 处挂死（见 §9.6.11）。修掉之后再跑同样命令可以复现本条读数，
+所以这不是环境差异，是一次回归；在 §9.6.11 落地之前，本条读数只对 11-19 的镜像成立。
+
 **次核到底有没有跑到我们的代码**：`-d in_asm -D build/_asm2.log` 抓 TB 记录，
 日志里出现这一串（`-d in_asm` 不打印 CPU 号，靠符号名与地址区分）：
 
@@ -7938,6 +7943,130 @@ qemu-system-loongarch64.exe -M virt -m 128M -smp 2 -display none \
 6. **不能把 `-accel tcg,thread=single` 当推荐配方**：它并不修掉崩溃（SMP 镜像
    1/10 仍崩），并且会让次核**永远上不了线**（`mask=0x1`，10/10）。任何拿它当
    「稳定跑法」的说法都是错答案。
+
+#### 9.6.11 回归与修复：次核没开 `EUEN.FPE`，整机在 IPI 处挂死（2026-11-21）
+
+§9.6.4 / §9.6.8 那两处是**公共代码**的改动（`atomic_cas`、`eentry` 的 FPR 保存），
+它们把「次核入口缺一条 CSR 设置」这件事从无害变成了致命。本节记这次回归的取证、
+修法与判据。
+
+**现象（确定性复现，不是偶发）**
+
+SMP 镜像（`BUILD=build/la64_smp_only EXTRA_CFLAGS="-DARKRTOS_USE_SMP=1 -DARKRTOS_CPU_NUM=2"`）
+在 `-smp 2` 下每次都在第 8 行停住，串口最后一行是：
+
+```
+[smp] cores=2 mask=0x00000003 sent=1 ipi1=0 result=FAIL(ipi not received)
+```
+
+（`ipi1=0` 与后面的 ` result=FAIL` 贴在一起，容易被读成 `ipi10`。）11-19 的
+`build/la64_sms_on/ark_qemu_la64.elf` 用同一命令行仍打到 122 行且 `ipi1=5 result=ok`。
+即：**这是 HEAD 上的回归，不是 QEMU 或命令行差异**。
+
+**取证：`-d int` 抓到次核在异常入口里自激**
+
+```bash
+timeout 20 qemu-system-loongarch64.exe -M virt -m 128M -smp 2 -nographic \
+  -display none -serial file:D:/tmp/x.log -d int -D D:/tmp/int.log \
+  -kernel build/la64_smp_only/ark_qemu_la64.elf
+```
+
+`int.log` 173 万行全是同一条（摘原文）：
+
+```
+loongarch_cpu_do_interrupt enter: pc 000000000024f0f4 ERA 0000000000246584 exception: 15 (Floating Point Disabled)
+loongarch_cpu_do_interrupt: PC 000000000024ee00 ERA 000000000024f0f4 cause 15
+, ESTAT 00000000000f1000 EXCFG 0000000000001000 BADVA 0000000000000000 BADI 000000002bc40060 SYS_NUM 0 cpu 1 asid 00000000000a0000
+```
+
+三条读数把方向定死：`ESTAT` 的 Ecode = **15（FPD）**；**cpu 1**；`PC = 0x24ee00`
+正是 `eentry` 的入口地址（`nm` 可核），`ERA = 0x24f0f4` 是 `eentry` 里存 FPR 的
+`fst.d`。也就是说：**异常入口自己在故障，永远走不出去**，于是 `ipi_count` 不会涨、
+主核自旋超时后整机停摆。
+
+**根因链**
+
+1. `b104c11`（FCSR/FPU 上下文）与 `1477bdb`（LSX 上下文）让 `eentry` **无条件**保存
+   FPR（`fst.d`）。
+2. `example/qemu_loongarch64/start.S` 早就为这条路设了 `EUEN.FPE`，注释原句是
+   「不开这一位，连 eentry 里存 FPR 的那条 `fst.d` 自己都会故障」——但那是**主核**
+   的 `_start`。
+3. 次核走的是 `kernelsrc/port/loongarch/la64/arkrtos_context.S` 的
+   `arkrtos_smp_secondary_entry`，它按硬件复位后的 CSR 状态起跑，**从来不写 `EUEN`
+   （CSR 0x2）**，全部设置只有 `EENTRY` / `ECFG` / `CORE_EN` / `CRMD.IE`。
+4. 于是次核在第一条 IPI 陷阱上落 Ecode=15 ⇒ 见上。
+
+这条因果链在 `start.S` 的注释里已经写死了，只是次核入口漏了对称的一条。
+
+**修法（3 行汇编 + 注释，包在 `#if (ARKRTOS_USE_FPU == 1)` 里）**
+
+在 `arkrtos_smp_secondary_entry` 装 `EENTRY` **之前**补：
+
+```
+#if (ARKRTOS_USE_FPU == 1)
+    csrrd   $t1, 0x2
+    ori     $t2, $zero, 0x1        /* EUEN.FPE */
+    or      $t1, $t1, $t2
+    csrwr   $t1, 0x2
+#endif
+#if (ARKRTOS_USE_LSX == 1)
+    csrrd   $t1, 0x2
+    ori     $t2, $zero, 0x2        /* EUEN.SXE（只开 SXE、不开 ASXE，与 start.S 同） */
+    or      $t1, $t1, $t2
+    csrwr   $t1, 0x2
+#endif
+```
+
+选「次核入口补 EUEN」而不是「eentry 条件保存 FPR」的理由：与主核 `start.S` 完全对称、
+改动面最小，且整段在 `#if ARKRTOS_USE_SMP == 1` 的函数里 ⇒ 默认档一行都不编。
+
+**修后读数（QEMU，不是真机）**
+
+| 档位 | 读数 |
+|---|---|
+| SMP（`-DARKRTOS_USE_SMP=1 -DARKRTOS_CPU_NUM=2`） | `[smp] cores=2 mask=0x00000003 sent=1 ipi1=5 result=ok`，25 s 内 191 行、`[A]/[B]` 到 round=17 仍在跑 |
+| SMP + `SMP_SCHED`（`-DARKRTOS_USE_SMP_SCHED=1`） | `[sched] to cpu1 rc=0` → `cur1=0x00000006 q=1 sw=1 owned=1 loops=+2951/+3426/+3024 t=2020/4016/6016` → `[sched] back rc=0` → 之后 `cur1=0xffffffff owned=0` |
+
+**变异自检（证明这条指令就是因，不是「顺手加上就好了」）**
+
+把 `ori $t2, $zero, 0x1`（置 FPE 位那条）换成注释重编，其余不动：
+
+```
+[smp] cores=2 mask=0x00000003 sent=1 ipi1=0 result=FAIL(ipi not received)
+```
+
+串口 8 行后挂死，与修复前逐字一致；还原后回到 `ipi1=5 result=ok`。
+
+**门禁（`tools/smp_gate.py` pin V 扩展）**
+
+pin V 原本只要求 SMP=1 反汇编里有 `secondary_entry` / `iocsrwr` / `ertn`。现在追加：
+
+* 在 `arkrtos_smp_secondary_entry` 的函数体切片里必须出现 `csrwr $rN,0x2`；
+* 变异自检：把该文件的 `csrwr $t1, 0x2` 换成 `nop` 重汇编，上面这条断言必须消失 ——
+  否则说明断言不是钉在这条写上的（假绿）。
+
+```
+ok: LA64 EUEN pin (CSR 0x2 written in secondary entry, gone when the setter is removed)
+```
+
+**默认档零变化（如实记账，含一条限定）**
+
+同一源码树下分别用「新文件」「`git checkout --` 回的 HEAD 文件」各建一次默认档
+（SMP=0），两次镜像的 `.text/.data/.bss` 大小逐项相同（`449096 / 448 / 5128740`）；
+`.text` 逐字节比对只有 **8 个字节**不同，全部落在 `__DATE__` / `__TIME__` 展开出来的
+`Nov 21 2026 18:12:39` vs `18:12:53` 这类构建时间戳串里 ⇒ **代码字节零变化**。
+（限定：这条比对只在「两次构建间隔几十秒」下成立；真正的逐字节对拍要走
+`SOURCE_DATE_EPOCH`，见 §9.6.6。）
+
+**边界与不许读法**
+
+* 读数全部来自 `qemu-system-loongarch64`：**QEMU 算上板，不是真机**。本仓库没有
+  LA64 多核板。
+* 本节故障是**确定性**的（每次必挂、每次都停在同一行），与 §9.6.10 登记的
+  「~10% 间歇停机」不是同一现象；本节**没有**解释 §9.6.10，那条登记保持原状。
+* 不能把本节读成「次核的 CSR 初始化已经做全了」：本次只补了 `EUEN`。次核仍然不
+  打开分页（`CRMD.PG` 恒 0、DA 直通）、不装 TLB，`arkrtos_port_send_ipi()` 仍然
+  拒绝核 0 —— 这三条是 TLB shootdown 的前置，见 `docs/欠账盘点.md`。
 
 ### 9.7 RV32 侧 ②③：ACLINT `msip`（2026-11-19，QEMU RV32 `-smp 2` 实跑）
 

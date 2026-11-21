@@ -518,6 +518,25 @@ arkrtos_smp_secondary_entry:
     add.d   $sp, $sp, $t1
     add.d   $sp, $sp, $t2           /* 指向本块顶端（栈向下生长） */
 
+#if (ARKRTOS_USE_FPU == 1)
+    /* EUEN.FPE（bit 0）= 1：与主核 start.S 同一条设置，必须在装 EENTRY 与
+     * 开中断之前。主核在 start.S 里设这一位，而次核走的是硬件复位后自己
+     * 的 CSR 状态，那一位不会“继承”过来。不设的后果是静默的：FPU 档的
+     * eentry 保存 FPR（fst.d），次核一进陷阱就落 Ecode=15 FPD，异常入口
+     * 自己再故障 —— 表现是 IPI 永远收不到、次核在异常入口里原地打转
+     * （2026-11-21 实测复现，见 docs/QEMU模拟器移植与验证.md 9.6.11）。 */
+    csrrd   $t1, 0x2
+    ori     $t2, $zero, 0x1
+    or      $t1, $t1, $t2
+    csrwr   $t1, 0x2
+#endif
+#if (ARKRTOS_USE_LSX == 1)
+    /* EUEN.SXE（bit 1）= 1：与 start.S 同一理由（只开 SXE、不开 ASXE）。 */
+    csrrd   $t1, 0x2
+    ori     $t2, $zero, 0x2
+    or      $t1, $t1, $t2
+    csrwr   $t1, 0x2
+#endif
     la.abs  $t1, eentry
     csrwr   $t1, 0xC                /* EENTRY */
 
