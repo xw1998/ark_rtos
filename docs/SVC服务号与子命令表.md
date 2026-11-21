@@ -63,6 +63,39 @@ App / 驱动以非特权态运行时，每一个内核服务都经一条 `SVC` �
    `case ARKRTOS_<模块>_SUB_<操作>:`、SDK 封装里 `p[0]` 写同一个宏。三处名字相同，
    grep 一个宏名就能看全。
 
+## 参数块字宽（宽参 ABI）
+
+参数块 `p[]` 的每个槽在 64 位目标上默认仍是 32 位（`uint32`）。宽 VA 下用户地址
+可以超过 4 GB，`uint32` 槽放不下，因此有一条编译开关把参数块升级成原生字宽：
+
+| 项 | 窄档（默认） | 宽档 |
+|---|---|---|
+| 开关 | `ARKRTOS_USE_WIDE_SVC_ARGS=0` | `ARKRTOS_USE_WIDE_SVC_ARGS=1` |
+| 槽类型 | `typedef unsigned int arkrtos_svc_arg_t` | `typedef unsigned long arkrtos_svc_arg_t` |
+| 子命令标记 | 无（`p[0]` 就是子命令号） | `p[0]` 的高位置 `ARKRTOS_SVC_SUB_WORD`（`0x80000000UL`） |
+| 块字节数 | `n*4` | `n*8`（`ARKRTOS_SVC_ARG_BYTES(n)`） |
+| 生效条件 | 永远为空档 | 同时要求 `__SIZEOF_LONG__ > 4`（`ARKRTOS_SVC_WIDE_ARGS`） |
+
+相关宏都在 `arkrtos_svc_abi.h`：`ARKRTOS_SVC_SUB(sub)` 填 `p[0]`（宽档置
+bit31）、`ARKRTOS_SVC_SUB_OF(w)` 取出子命令号、`ARKRTOS_SVC_ARG_BYTES(n)` 算
+校验长度。内核侧 30 个 `svc_*()` 处理函数在取到块后用 `SVC_WIDE_GUARD()` 校验
+「块在用户 RAM 且 bit31 置位」，网络服务另有 `g_net_req_arg[]` 的宽化。
+
+三条口径：
+
+1. **宽参是编译开关，不是自适应**。内核与 App 必须用同一个 `ARKRTOS_USE_WIDE_SVC_ARGS`
+   编译。宽内核 + 窄 App：内核打一行一次性日志
+   `wide-args kernel got a 32-bit param block; kernel and app must be built with the same ARKRTOS_USE_WIDE_SVC_ARGS`
+   并拒绝该调用；窄内核 + 宽 App：调用被拒，不误成功。
+2. **32 位目标（ARM / RV32 / LA32）上宽档是空档**：`ARKRTOS_SVC_WIDE_ARGS` 要求
+   `__SIZEOF_LONG__ > 4`，开关打开也还是 32 位槽，体积与行为不变。默认档（开关
+   为 0）在 64 位目标上同样零变化。
+3. **SVC 返回寄存器只有 32 位**：宽档下若 mempool 分配到的块地址高于 4 GB，内核
+   返回 0 并打一行一次性日志，**不返回截断地址**。
+
+未覆盖：`kernelsrc/sdk/mini_sdk/arkc/` 仍是 `u32` 基（小程序运行时按 arkc 的
+部署清单独立编译，拿不到这套头文件），宽 VA 下不在本机制范围内。
+
 ## 与小程序 SDK 的关系
 
 `kernelsrc/sdk/mini_sdk/arkc/arkrtos_mini_rt_arkc.c` 是这两个服务（0x1A 控制台、

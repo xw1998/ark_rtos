@@ -49,6 +49,28 @@ Per-number detail lives in `kernelsrc/include/arkrtos_svc_abi.h`: one block per 
 3. **The `p[]` layout of each subcommand is not duplicated in the header**: it is written by the SDK wrapper (`arkrtos_oslib.c` fills `p[1..]`) and validated by `arkrtos_kernel_*_ok()` in the kernel handler. The header fixes numbers only, so one layout never exists in two places.
 4. **A new subcommand touches three places**: one line in `arkrtos_svc_abi.h`, one `case ARKRTOS_<module>_SUB_<operation>:` in the kernel `svc_*()`, and the same macro written to `p[0]` in the SDK wrapper. Same name in all three, so grepping the macro shows everything.
 
+## Parameter block word width (wide-argument ABI)
+
+Each slot of the parameter block `p[]` is still 32-bit (`uint32`) by default, even on 64-bit targets. With wide VA a user address may exceed 4 GB and does not fit in a `uint32` slot, so one compile-time switch upgrades the parameter block to native word width:
+
+| Item | Narrow (default) | Wide |
+|---|---|---|
+| Switch | `ARKRTOS_USE_WIDE_SVC_ARGS=0` | `ARKRTOS_USE_WIDE_SVC_ARGS=1` |
+| Slot type | `typedef unsigned int arkrtos_svc_arg_t` | `typedef unsigned long arkrtos_svc_arg_t` |
+| Subcommand marker | none (`p[0]` is the subcommand number) | high bit of `p[0]` set to `ARKRTOS_SVC_SUB_WORD` (`0x80000000UL`) |
+| Block bytes | `n*4` | `n*8` (`ARKRTOS_SVC_ARG_BYTES(n)`) |
+| Effective when | always narrow | also requires `__SIZEOF_LONG__ > 4` (`ARKRTOS_SVC_WIDE_ARGS`) |
+
+All macros live in `arkrtos_svc_abi.h`: `ARKRTOS_SVC_SUB(sub)` fills `p[0]` (setting bit31 in the wide build), `ARKRTOS_SVC_SUB_OF(w)` extracts the subcommand number, `ARKRTOS_SVC_ARG_BYTES(n)` computes the length to validate. On the kernel side all 30 `svc_*()` handlers validate "block lies in user RAM and bit31 is set" through `SVC_WIDE_GUARD()`; the net service additionally widens `g_net_req_arg[]`.
+
+Three ground rules:
+
+1. **Wide arguments are a compile-time switch, not adaptive.** Kernel and App must be built with the same `ARKRTOS_USE_WIDE_SVC_ARGS`. Wide kernel + narrow App: the kernel prints a one-shot log line `wide-args kernel got a 32-bit param block; kernel and app must be built with the same ARKRTOS_USE_WIDE_SVC_ARGS` and rejects the call; narrow kernel + wide App: the call is rejected, never silently succeeding.
+2. **On 32-bit targets (ARM / RV32 / LA32) the wide build is a no-op**: `ARKRTOS_SVC_WIDE_ARGS` requires `__SIZEOF_LONG__ > 4`, so even with the switch on the slot stays 32-bit and neither size nor behaviour changes. The default build (switch 0) likewise changes nothing on 64-bit targets.
+3. **The SVC return register is only 32 bits**: in the wide build, if a mempool block lands above 4 GB the kernel returns 0 and prints a one-shot log line rather than returning a truncated address.
+
+Not covered: `kernelsrc/sdk/mini_sdk/arkc/` remains `u32`-based (the mini-program runtime is compiled separately from arkc's deployment manifest and does not see these headers), so it is outside this mechanism under wide VA.
+
 ## Relation to the mini-program SDK
 
 `kernelsrc/sdk/mini_sdk/arkc/arkrtos_mini_rt_arkc.c` is the minimal copy of these two services (0x1A console, 0x1B thread exit) for the arkc + mini-program case, and it **does not include** the two tables above: that file is compiled once by arkc (which only eats files listed in the deployment manifest) and once by the host gcc gate (with no `-I`), so neither build gets a header search path. The copy inlines the same macro names and the comment names the authoritative source.
