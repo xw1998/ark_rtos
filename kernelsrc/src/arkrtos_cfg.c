@@ -87,7 +87,7 @@ int32 arkrtos_task_register(void (*entry)(void), uint32 *stack_bottom, uint32 st
     p_task->stack_size  = stack_size;
     p_task->rom_start   = 0;
     p_task->rom_size    = 0;
-    p_task->period      = ARKRTOS_MS_TO_TICK(period_ms);
+    p_task->period      = (int32)ARKRTOS_MS_TO_TICK(period_ms);
     p_task->priority      = priority;
     p_task->base_priority = priority;   /* 基准优先级：撤销优先级继承时的恢复依据 */
     p_task->shm_attri   = 0;

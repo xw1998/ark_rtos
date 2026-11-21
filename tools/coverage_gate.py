@@ -201,6 +201,18 @@ CASES = [
     ("timer-off", "kernelsrc/tests/test_timer_host.c",
      ["kernelsrc/src/arkrtos_timer.c"],
      ["-DARKRTOS_USE_TIMER=0"], "TIMER-HOST OFF OK"),
+    # --- 2026-11-21 新增：任务配置与任务表（STACK_USAGE 开/关 +
+    # STACK_GUARD 是第二段代码，按行号并集合并）-----------------------
+    # 槽位复用 / recover_pending 跳过 / 表满 / 三道参数闸门是同一个函数里的
+    # 不同分支，成功路径必须走一遍才看得见 TCB 填得对不对。
+    ("cfg", "kernelsrc/tests/test_cfg_host.c",
+     ["kernelsrc/src/arkrtos_cfg.c"], [], "CFG-HOST OK"),
+    ("cfg-guard", "kernelsrc/tests/test_cfg_host.c",
+     ["kernelsrc/src/arkrtos_cfg.c"], ["-DARKRTOS_USE_STACK_GUARD=1"],
+     "CFG-HOST GUARD OK"),
+    ("cfg-nousage", "kernelsrc/tests/test_cfg_host.c",
+     ["kernelsrc/src/arkrtos_cfg.c"], ["-DARKRTOS_USE_STACK_USAGE=0"],
+     "CFG-HOST NOUSAGE OK"),
 ]
 
 

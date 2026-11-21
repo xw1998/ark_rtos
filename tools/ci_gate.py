@@ -2087,6 +2087,77 @@ def check_timer_host():
     ok("timer-host", "software timers on host (%s / %s / %s)"
        % (lines[0], lines[1], lines[2]))
 
+def check_cfg_host():
+    """Task table and TCB construction: arkrtos_task_register itself.
+
+    Every task in the system is born here -- the application main, the built-in
+    service tasks and the loader's App start all funnel through this one
+    function -- so a wrong slot decision is not a local bug. The expensive
+    mistakes are quiet ones:
+      * a released slot (INVALID) and a slot waiting for recovery (INVALID +
+        recover_pending) look almost the same; reusing the second one silently
+        cancels a pending fault recovery;
+      * the parameter gates run after slot allocation, so "did a failed call
+        consume a slot" has to be answered by observation, not by reading;
+      * the stack-top alignment mask must be 64-bit wide (the address was
+        widened with the LA64 work); a 32-bit mask corrupts the high bits.
+
+    Three configurations are built and run:
+      * default (STACK_USAGE=1, STACK_GUARD=0): the shipping shape; the stack
+        fill/peak-low path is live.
+      * STACK_GUARD=1: the two arming lines only exist in this build, and they
+        are what let the guard check judge a task's stack bottom at all.
+      * STACK_USAGE=0: the fill and peak-low lines disappear; the case proves
+        the file still builds and does not touch the stack when the feature is
+        off.
+    A missing host compiler is a FAIL, not a skip.
+    """
+    import tempfile
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("cfg-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    want = (("cfg", "CFG-HOST OK"),
+            ("cfg-guard", "CFG-HOST GUARD OK"),
+            ("cfg-nousage", "CFG-HOST NOUSAGE OK"))
+    names = [w[0] for w in want]
+    picked = {}
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name in names:
+            picked[name] = (test, mods, defs, incs)
+    for name, _marker in want:
+        if name not in picked:
+            fail("cfg-host", "case %s missing from coverage_gate.CASES" % name)
+            return
+
+    lines = []
+    with tempfile.TemporaryDirectory() as td:
+        for name, marker in want:
+            test, mods, defs, incs = picked[name]
+            exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+                fail("cfg-host", "%s did not build: %s" % (name, tail[:200]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            if r.returncode != 0 or marker not in txt:
+                fail("cfg-host", "%s failed: %s" % (name, txt.strip()[:220]))
+                return
+            lines.append(txt.strip().splitlines()[-1])
+    ok("cfg-host", "task table on host (%s / %s / %s)"
+       % (lines[0], lines[1], lines[2]))
+
 def check_coverage_host():
     """Line coverage of the modules the host tests actually link.
 
@@ -2124,10 +2195,11 @@ def check_warn_host():
     re-checked and riscv64-unknown-elf-gcc-10.2.0 turned up.
 
     Scope is honest and narrow: every TU the cases in coverage_gate.CASES
-    compile -- 23 case configurations (test + module each) plus the SDK stdio
-    test, 47 TUs in total, because a few modules are built once per
+    compile -- 26 case configurations (test + module each) plus the SDK stdio
+    test, 53 TUs in total, because a few modules are built once per
     configuration (sign, blk, dev and event twice; timer three times: default,
-    tickless and USE_TIMER=0). Everything else in kernelsrc/ needs an
+    tickless and USE_TIMER=0; cfg three times: default, STACK_GUARD=1 and
+    STACK_USAGE=0). Everything else in kernelsrc/ needs an
     architecture toolchain (armcc/armclang, loongarch64, riscv64) to compile at
     all, so it is out of reach here.
 
@@ -2250,6 +2322,7 @@ CHECK_TABLE = (
     ("dev-host", check_dev_host),
     ("event-host", check_event_host),
     ("timer-host", check_timer_host),
+    ("cfg-host", check_cfg_host),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),
     ("analyzer", check_analyzer),
