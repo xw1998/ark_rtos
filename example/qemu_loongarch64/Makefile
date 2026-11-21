@@ -347,19 +347,28 @@ $(LXPIPE_H): $(LXPIPE_SIGNED) example/qemu_loongarch64/elf_blob.py
 $(BUILD)/example/qemu_loongarch64/elf_demo.o: $(LXPIPE_H)
 
 # 信号夹具（linux_signal.elf）：rt_sigaction / rt_sigprocmask / kill / tkill /
-# tgkill / rt_sigreturn 的八组行为（装动作与旧动作、投递点、a0 跨处理函数保留、
-# 嵌套、屏蔽与解除、非法参数、SIG_IGN、SIG_DFL 退出码 138）。
+# tgkill / rt_sigreturn 的九组行为（装动作与旧动作、投递点、a0 跨处理函数保留、
+# 嵌套、屏蔽与解除、非法参数、SIG_IGN、SIG_DFL 退出码 138、浮点与向量区恢复）。
 LXSIG_SRC := example/qemu_loongarch64/elf/linux_signal.c
 LXSIG_ELF := $(BUILD)/linux_signal.elf
 LXSIG_SIGNED := $(BUILD)/linux_signal.signed.elf
 LXSIG_H   := $(BUILD)/linux_signal_blob.h
+
+# 信号夹具在 LSX 档下要额外带 -mlsx 与 LX_SIG_LSX，才能验证向量寄存器区
+# 是否也在信号帧里（默认档只验证浮点寄存器区）。
+ARK_LSX_ON := $(findstring ARKRTOS_USE_LSX=1,$(EXTRA_CFLAGS))
+ifeq ($(ARK_LSX_ON),)
+LXSIG_EXTRA :=
+else
+LXSIG_EXTRA := -mlsx -DLX_SIG_LSX=1
+endif
 
 $(LXSIG_ELF): $(LXSIG_SRC)
 	@mkdir -p $(BUILD)
 	$(CC) $(ARCH_FLAGS) -O2 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
 	      -ffunction-sections -fdata-sections -Wl,--gc-sections \
 	      -Wl,-Ttext=$(WIN_ELF_BASE) -Wl,-e,_start -Wl,--strip-all \
-	      -Wl,-z,max-page-size=4096 -o $@ $< ;
+	      $(LXSIG_EXTRA) -Wl,-z,max-page-size=4096 -o $@ $< ;
 
 $(LXSIG_SIGNED): $(LXSIG_ELF) tools/sign_payload.py
 	python tools/sign_payload.py sign $(LXSIG_ELF) --out $@ ;

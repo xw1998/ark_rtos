@@ -16,7 +16,9 @@
 *               别的 pid、越界信号号、tgkill 的 tgid!=tid；
 *            7) SIG_IGN 真的不投递（计数一点都不涨）；
 *            8) 还原成 SIG_DFL 之后 kill 自己，默认动作结束任务，退出码
-*               128 + 10 = 138。
+*               128 + 10 = 138；
+*            9) 信号帧快照真的含浮点区（LSX 档还含向量区）：handler 里
+*               把 f0 / vr0 改坏，sigreturn 之后必须恢复成原图案。
 *
 * @note 不链 libc、不链启动代码，入口仍是 Linux 的 [argc][argv..][NULL]。
 * @author xw
@@ -199,6 +201,109 @@ static lx_long  s_last2;
 static lx_long  s_nested_rc;
 static lx_long  s_self;
 
+/* ------------------------------------------------------------------
+ * FPU / LSX 区是否真在信号帧快照里（本夹具最像「静默错答案」的一条）
+ *
+ * 手法：主程序把 f0（LSX 档换成 vr0）装成图案 A -> kill 自己 ->
+ * handler 里改成图案 B -> sigreturn 恢复整帧 -> 主程序读回必须仍是 A。
+ * 若快照不含这一区，读回的就是 B。两档都是两条 check。
+ *
+ * **为什么 LSX 档只验 vr0、不再单验 f0**：$f0 就是 $vr0 的低 64 位——
+ * 两者共用同一份寄存器存储。第一版在 LSX 档里先验 f0 再验 vr0，结果
+ * handler 里「把 f0 改成图案 B」那一步顺手改掉了 vr0 的低半，四条 check
+ * 全判红、而内核其实一处没错（换回不带 -mlsx 的夹具就全绿）。要测的
+ * 东西必须挑一个不会被自己踩坏的载体：LSX 档用 vr0 的 128 位图案，
+ * 它同时覆盖了低 64 位那一份（也就是 f0）。
+ *
+ * **为什么整段都写成内联汇编**：「装图案 -> 系统调用 -> 读回」必须在
+ * 一条汇编里做到底，并把 $f0/$vr0 写进 clobber；拆成小函数时编译器
+ * 不知道 asm 动过它们，会把它们当临时寄存器用（-mlsx 下连那个填字节
+ * 图案的循环都可能向量化到 $vr0 上）。
+ * ------------------------------------------------------------------ */
+#if !defined(LX_SIG_LSX)
+static double s_fp_a;
+static double s_fp_b;
+static double s_fp_after;      /* kill 返回后读到的 f0 */
+static double s_fp_in_hdl;     /* handler 里读到的 f0 */
+static lx_long s_fp_kill_rc;
+
+/* main 侧：f0 <- 图案 A，然后 kill 自己，返回后把 f0 读进 s_fp_after。 */
+static lx_long kill_with_f0(lx_long pid, lx_long sig)
+{
+    register lx_long r_a0 __asm__("a0") = pid;
+    register lx_long r_a1 __asm__("a1") = sig;
+    register lx_long r_a7 __asm__("a7") = LX_KILL;
+
+    __asm__ volatile("fld.d  $f0, %[a], 0\n\t"
+                     "syscall 0\n\t"
+                     "fst.d  $f0, %[o], 0"
+                     : "+r"(r_a0)
+                     : "r"(r_a1), "r"(r_a7),
+                       [a] "r"(&s_fp_a), [o] "r"(&s_fp_after)
+                     : "memory", "$f0");
+    return r_a0;
+}
+
+/* handler 侧：先把 f0 存进 s_fp_in_hdl，再把 f0 改成图案 B。 */
+static void f0_peek_and_destroy(void)
+{
+    __asm__ volatile("fst.d  $f0, %[o], 0\n\t"
+                     "fld.d  $f0, %[b], 0"
+                     :
+                     : [o] "r"(&s_fp_in_hdl), [b] "r"(&s_fp_b)
+                     : "memory", "$f0");
+}
+#endif
+
+#if defined(LX_SIG_LSX)
+static unsigned char s_vec_a[16] __attribute__((aligned(16)));
+static unsigned char s_vec_b[16] __attribute__((aligned(16)));
+static unsigned char s_vec_after[16] __attribute__((aligned(16)));
+static unsigned char s_vec_in_hdl[16] __attribute__((aligned(16)));
+
+/* main 侧：vr0 <- 图案 A，kill 自己，返回后把 vr0 读进 s_vec_after。 */
+static lx_long kill_with_vr0(lx_long pid, lx_long sig)
+{
+    register lx_long r_a0 __asm__("a0") = pid;
+    register lx_long r_a1 __asm__("a1") = sig;
+    register lx_long r_a7 __asm__("a7") = LX_KILL;
+
+    __asm__ volatile("vld     $vr0, %[a], 0\n\t"
+                     "syscall 0\n\t"
+                     "vst     $vr0, %[o], 0"
+                     : "+r"(r_a0)
+                     : "r"(r_a1), "r"(r_a7),
+                       [a] "r"(s_vec_a), [o] "r"(s_vec_after)
+                     : "memory", "$vr0");
+    return r_a0;
+}
+
+/* handler 侧：vr0 先落进 s_vec_in_hdl，再改成图案 B。 */
+static void vr0_peek_and_destroy(void)
+{
+    __asm__ volatile("vst     $vr0, %[o], 0\n\t"
+                     "vld     $vr0, %[b], 0"
+                     :
+                     : [o] "r"(s_vec_in_hdl), [b] "r"(s_vec_b)
+                     : "memory", "$vr0");
+}
+
+static int vec_equal(const unsigned char *a, const unsigned char *b)
+{
+    int i;
+
+    /* $vr0 是 128 位：比 16 字节就够，比多了只会比到没写过的 residue。 */
+    for(i = 0; i < 16; i++)
+    {
+        if(a[i] != b[i])
+        {
+            return 0;
+        }
+    }
+    return 1;
+}
+#endif
+
 extern void sig_restorer(void);
 
 /* 处理函数不能返回调用点：内核把 ra 指向 restorer，restorer 里发
@@ -217,6 +322,13 @@ static void on_signal(unsigned long signo)
 
     if ((signo == SIGUSR1) && (s_depth == 1))
     {
+        /* 先记下 handler 里看到的 f0 / vr0（应仍是主程序的图案 A），
+         * 再改成图案 B：sigreturn 恢复整帧之后必须回到 A。 */
+#if defined(LX_SIG_LSX)
+        vr0_peek_and_destroy();
+#else
+        f0_peek_and_destroy();
+#endif
         /* 嵌套：在这次 kill 的系统调用返回前会进第二个处理函数。 */
         s_nested_rc = lx2(LX_KILL, s_self, SIGUSR2);
     }
@@ -298,10 +410,44 @@ void linux_main(unsigned long sp)
     check("rt_sigaction SIGUSR2 rc", rc, 0);
 
     /* ---------------- 2/3：投递 + 返回值跨处理函数保留 ---------------- */
-    rc = lx2(LX_KILL, s_self, SIGUSR1);
+#if defined(LX_SIG_LSX)
+    {
+        int i;
+
+        /* 图案 A/B 都在进入汇编块之前填好：汇编块里只有 vld/vst。 */
+        for(i = 0; i < 16; i++)
+        {
+            s_vec_a[i] = (unsigned char)(i * 3 + 1);
+            s_vec_b[i] = 0x5Au;
+        }
+        rc = kill_with_vr0(s_self, SIGUSR1);
+    }
+#else
+    s_fp_a = 1.5;
+    s_fp_b = -2.25;
+    rc = kill_with_f0(s_self, SIGUSR1);
+    s_fp_kill_rc = rc;
+#endif
     check("kill rc survives handler", rc, 0);
     check("handler ran once", (lx_long)s_hits1, 1);
     check("handler signo", s_last1, SIGUSR1);
+
+    /* 这一组是「快照真的含浮点/向量区」的判据：handler 里改坏，
+     * sigreturn 之后必须被恢复成主程序装进去的图案。
+     * LSX 档的 kill 由 kill_with_vr0 发，f0 与 vr0 一并读回。 */
+#if defined(LX_SIG_LSX)
+    {
+        int seen = vec_equal(s_vec_in_hdl, s_vec_a);
+        int restored = vec_equal(s_vec_after, s_vec_a);
+
+        check("lsx vr0 seen in handler", (lx_long)seen, 1);
+        check("lsx vr0 restored after sigreturn", (lx_long)restored, 1);
+    }
+#else
+    check("fpu reg seen in handler", (lx_long)(s_fp_in_hdl == s_fp_a), 1);
+    check("fpu reg restored after sigreturn",
+          (lx_long)((s_fp_after == s_fp_a) && (s_fp_kill_rc == 0)), 1);
+#endif
 
     /* ---------------- 4：嵌套 ---------------- */
     check("nested handler ran", (lx_long)s_hits2, 1);

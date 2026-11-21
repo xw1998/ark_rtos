@@ -37,7 +37,7 @@
      LA64 的分界是「`syscall` 立即数 == 0」，RV32 的分界是 0x10..0x22 留给 Ark。
   F. QEMU 真读数：`[linux]` 的 14 条 check 全 ` ok`（一条 FAIL 都不许）、
      `PASS: every syscall answered as specified`、`exit code 7`；`[pipe]` 的
-     14 条、`[sig]` 的 29 条同理（PASS 行 + 退出码 55 / 138）；并且同一次
+     14 条、`[sig]` 的 31 条同理（PASS 行 + 退出码 55 / 138）；并且同一次
      启动里 hello/modhello/FS 的读数仍在（兼容层不许把别人的演示搞坏）。
   G. 解析器自检：把合成坏日志喂给同一个判据（去掉 PASS、把退出码改成 3、
      插一行 FAIL、少一条 check），每种坏法都必须被判红。
@@ -144,8 +144,11 @@ EXPECT_PIPE_CHECKS = 14
 # 信号夹具（linux_signal.c）的 check 条数：动作/旧动作、kill 返回值跨处理
 # 函数、hits/signo、嵌套 hits/depth/rc、block/query/unblock、sigsetsize、
 # SIGKILL、无 restorer、被拒动作未装上、别的 pid、sig=99、tgkill 的
-# tgid!=tid、SIG_IGN 静音、还原 SIG_DFL = 29 条。
-EXPECT_SIG_CHECKS = 29
+# tgid!=tid、SIG_IGN 静音、还原 SIG_DFL、浮点寄存器区（handler 里看到 / 
+# sigreturn 之后恢复）= 31 条。LSX 档另有两条向量区判据，那两条只在
+# EXTRA_CFLAGS=-DARKRTOS_USE_LSX=1 的构建里存在（本门禁跑默认档，因此
+# 默认档恒 31 条；LSX 档实跑同为 31 条，只是最后两条换成 vr0 的两条）。
+EXPECT_SIG_CHECKS = 31
 
 FAILS = []
 PASSES = []
@@ -557,7 +560,7 @@ def judge(text):
     if pipe_pass != 1:
         problems.append("缺 `[pipe] PASS: pipe2 two fds ...`")
 
-    # 信号那一块：29 条 check 一条 FAIL 都不许，PASS 行与退出码 138
+    # 信号那一块：31 条 check 一条 FAIL 都不许，PASS 行与退出码 138
     # （默认动作是「结束任务」，内核用 128+10 表达）。
     if sig_werr != 1:
         problems.append("缺 `[sig] write /mnt/ram/linux_signal rc=0`（信号夹具没送进去）")
