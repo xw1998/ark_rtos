@@ -221,6 +221,12 @@ CASES = [
     ("export-off", "kernelsrc/tests/test_export_host.c",
      ["kernelsrc/src/arkrtos_exports.c"],
      ["-DARKRTOS_USE_MODLOAD=0"], "EXPORT-HOST OFF OK"),
+    ("init", "kernelsrc/tests/test_init_host.c",
+     ["kernelsrc/src/arkrtos_init.c"], [], "INIT-HOST OK"),
+    ("init-on", "kernelsrc/tests/test_init_host.c",
+     ["kernelsrc/src/arkrtos_init.c"],
+     ["-DARKRTOS_USE_SBUF=1", "-DARKRTOS_USE_ESET=1",
+      "-DARKRTOS_USE_SMP=1"], "INIT-HOST ON OK"),
 ]
 
 

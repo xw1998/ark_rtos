@@ -2225,6 +2225,77 @@ def check_export_host():
     ok("export-host", "kernel export table on host (%s / %s)"
        % (lines[0], lines[1]))
 
+def check_init_host():
+    """Kernel module init order: arkrtos_kernel_module_init itself.
+
+    The function does nothing but call other modules' init in a fixed order, and
+    that order is the whole contract -- it is the single authoritative startup
+    sequence, so an application main that inits modules by hand is a second
+    startup path that will drift. Two orderings have consequences that show up
+    far from this file: SMP must be brought up before the scheduler starts
+    (a late secondary core finds a scheduler it does not own), and the timer
+    service task is registered by arkrtos_task_register, so it has to sit after
+    cfg_load and before the scheduler starts.
+
+    Two configurations are built and run:
+      * default (SBUF / ESET / SMP off): the shipping shape for those switches.
+      * SBUF+ESET+SMP on: the three extra steps must land in the documented
+        positions, not at the end of the list.
+    The case compares the recorded name sequence item by item, and separately
+    counts the calls, so "someone was added twice" and "someone was dropped"
+    both go red.
+
+    It also pins that there is no re-entry guard: two calls run the sequence
+    twice. That is a reading, not a promise -- if a guard is added the case must
+    be updated in the same commit, which is exactly the point of pinning it.
+
+    A missing host compiler is a FAIL, not a skip.
+    """
+    import tempfile
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("init-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    want = (("init", "INIT-HOST OK"),
+            ("init-on", "INIT-HOST ON OK"))
+    names = [w[0] for w in want]
+    picked = {}
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name in names:
+            picked[name] = (test, mods, defs, incs)
+    for name, _marker in want:
+        if name not in picked:
+            fail("init-host", "case %s missing from coverage_gate.CASES" % name)
+            return
+
+    lines = []
+    with tempfile.TemporaryDirectory() as td:
+        for name, marker in want:
+            test, mods, defs, incs = picked[name]
+            exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+                fail("init-host", "%s did not build: %s" % (name, tail[:200]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            if r.returncode != 0 or marker not in txt:
+                fail("init-host", "%s failed: %s" % (name, txt.strip()[:220]))
+                return
+            lines.append(txt.strip().splitlines()[-1])
+    ok("init-host", "kernel init order on host (%s / %s)"
+       % (lines[0], lines[1]))
+
 def check_coverage_host():
     """Line coverage of the modules the host tests actually link.
 
@@ -2262,9 +2333,9 @@ def check_warn_host():
     re-checked and riscv64-unknown-elf-gcc-10.2.0 turned up.
 
     Scope is honest and narrow: every TU the cases in coverage_gate.CASES
-    compile -- 28 case configurations (test + module each) plus the SDK stdio
-    test, 57 TUs in total, because a few modules are built once per
-    configuration (sign, blk, dev, event and export twice; timer three times: default,
+    compile -- 30 case configurations (test + module each) plus the SDK stdio
+    test, 61 TUs in total, because a few modules are built once per
+    configuration (sign, blk, dev, event, export and init twice; timer three times: default,
     tickless and USE_TIMER=0; cfg three times: default, STACK_GUARD=1 and
     STACK_USAGE=0). Everything else in kernelsrc/ needs an
     architecture toolchain (armcc/armclang, loongarch64, riscv64) to compile at
@@ -2391,6 +2462,7 @@ CHECK_TABLE = (
     ("timer-host", check_timer_host),
     ("cfg-host", check_cfg_host),
     ("export-host", check_export_host),
+    ("init-host", check_init_host),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),
     ("analyzer", check_analyzer),

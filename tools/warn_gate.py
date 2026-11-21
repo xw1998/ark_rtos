@@ -67,12 +67,12 @@ const char[]，同一批转型立刻变成"丢弃限定符"。两个选项是耦
 里的 p_tsk 声明了却从未赋值 —— 死任务的锁永远不会移交、等待队列永远摘不干净。
 那种缺陷编译通过、上板也不报错，只有读代码或看告警能发现。
 
-这条路为什么只覆盖这 57 个 TU
+这条路为什么只覆盖这 61 个 TU
 -----------------------------
 内核绝大多数文件依赖架构头（`__svc`、CMSIS、LA64 的 CSR 宏、RISC-V 的 PMP 常量），
 宿主的 x86 gcc 编不了，硬编也只会得到一堆"这个架构没有"的噪声。所以本门禁只跑
-**宿主用例已经链接到的那批 TU**：28 条用例配置（每条 = 测试文件 + 被测模块）+ SDK stdio
-（2026-11-21 由 21 增至 57；`sign` / `blk` / `dev` / `event` / `export` 各按两档编两次，
+**宿主用例已经链接到的那批 TU**：30 条用例配置（每条 = 测试文件 + 被测模块）+ SDK stdio
+（2026-11-21 由 21 增至 61；`sign` / `blk` / `dev` / `event` / `export` / `init` 各按两档编两次，
 `timer` 与 `cfg` 各按三档编三次(timer / timer-tickless / timer-off、
 cfg / cfg-guard / cfg-nousage)，模块跟着编同样多次）。
 剩下的文件要用各自工具链（armcc/armclang、loongarch64-newlib-elf-gcc、
@@ -84,7 +84,7 @@ riscv64 工具链）编，那是另一件事，本门禁不声称覆盖它们。
 * 选项集固定为 WARN_FLAGS（-Wall -Wextra -Wshadow + 三条接口暴露告警
   + -Wconversion + -Wcast-qual + -Wwrite-strings + -Wpointer-arith
   + -Wundef + -Wbad-function-cast，共十二条）；
-  加选项要先在宿主 57 个 TU 上跑成零告警，并在 docstring 里写清口径。
+  加选项要先在宿主 61 个 TU 上跑成零告警，并在 docstring 里写清口径。
 * 这里只证明"编译器在这个配置下没话说"，不证明没有逻辑缺陷；也不是 MISRA /
   认证意义上的静态分析。别拿它当"静态分析已完成"。
 * 宏组合与 tools/ci_gate.py 里对应的 *-host 检查逐条一致；改那边要同步这里。
