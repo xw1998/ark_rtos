@@ -6247,6 +6247,47 @@ QEMU 里跑信号夹具 `example/qemu_loongarch64/elf/linux_signal.c`，判 `[si
 结论分档：**编译通过（0 告警）+ QEMU 端到端 PASS（overlay 应用路径解析）+ 静态门禁全绿，未上板**
 （QEMU 算上板，不是真机）。
 
+#### 5.30.53 第四十八笔：`fdt_walk_match()` 拆出命中判定与结果交付（2026-11-21）
+
+`kernelsrc/src/arkrtos_fdt.c` 的 `fdt_walk_match()`（**121 行**）是上一次遍历同时回答两个问题：
+`ph != 0` 时按 phandle（含 `linux,phandle` 别名）找，`ph == 0` 时按（名字, 深度）找；找到就填
+`*out` 并按需拼出绝对路径。函数主体是 structure block 的 token 遍历，命中处理占了近一半行。
+
+| 单元 | 干什么 | 行数 |
+|---|---|---|
+| `fdt_node_hit()` | 刚进入节点时判命中：`ph != 0` 先试 `phandle` 再试 `linux,phandle`；`ph == 0` 比（`depth == want_depth` 且名字全等）。返回 1 = 命中 | 27 |
+| `fdt_take_hit()` | 命中后交付：按需填 `out`（name / depth / props_off / `fdt_count_props`），按需调 `fdt_build_path` 拼绝对路径 | 17 |
+| `fdt_walk_match()` 自己 | init 检查 → `off/end` → token 循环（NOP / END / END_NODE / PROP / BEGIN_NODE 各分支）→ 入栈、判命中、交付 | **88**（原 121） |
+
+三条口径：
+
+Ⓐ **命中判定要接「入栈后的深度」**：`depth` 在 `stack[depth] = name; depth++;` 之后才传给
+`fdt_node_hit`，函数里填 `tmp.depth = depth - 1u`、比较 `depth == want_depth`——这套「深度是
+1 起、name 里存的 index 是 0 起」的换算原样搬进新函数，没有在边界上改口径。
+Ⓑ **交付路径要用整条祖先链**：`fdt_take_hit` 收到的是 `stack` 与入栈后的 `depth`，而不是单个
+节点——因为 `fdt_build_path` 要的是从根到目标的整条链。传单个名字就拼不出绝对路径。
+Ⓒ **遍历循环本身一个字没动**：NOP 跳过、END 要求 `off == end`、END_NODE 要求 `depth != 0`、
+PROP 跳 `fdt_pad4(len)` 并查越界、BEGIN_NODE 查 `MAX_DEPTH + 1`——全部留在主函数里。抽的只是
+「这一节点是不是目标」和「命中之后怎么交付」这两件事，遍历状态机不拆。
+
+体积（`default` 档，`loongarch64-newlib-elf-size`，两遍同配置 `make clean` 构建）：
+
+- 改前 `text 449096 / data 448 / bss 5,128,740`
+- 改后 `text 449096 / data 448 / bss 5,128,740`
+- **0 B 差异**，全量告警 242 条前后一致、本文件 0 告警。0 B 只能说明编译器把两层调用内联成了同样的
+  形状，**不能当作行为等价**；等价性看下一段。
+
+端到端：`tools/fdt_gate.py` 的 `qemu-fdt-api` 在 QEMU 里跑 `chosen` / `path` / `phandle` 三条查询
+——分别打 `arkrtos_fdt_node_by_phandle`（走后者的 `ph != 0` 分支）与按路径查询（走 `ph == 0` 的
+名字+深度分支），三者解析到同一节点、`save+load` 往返 `nodes=10` 不变、空文件被拒且旧树保留；
+4 种坏法（alias / depth / nodes / 回滚读数）全被判红。门禁 **14 passed / 0 failed / FDT-GATE OK**。
+
+门禁：`tools/ci_gate.py` **57 passed / 0 failed / 0 skipped**；`tools/format_gate.py` OK 392；
+`doc_audit funcs` **1 → 0**（超过 120 行的函数清单清零）。
+
+结论分档：**编译通过（0 告警）+ QEMU 端到端 PASS（phandle / 路径两条分支都跑到）+ 静态门禁全绿，
+未上板**（QEMU 算上板，不是真机）。
+
 ### 5.31 LSX 向量寄存器上下文（U-19，2026-11-21）
 
 #### 5.31.1 缺口：FPU 档只存了一半的浮点上下文

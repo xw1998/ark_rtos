@@ -1007,6 +1007,57 @@ static int fdt_build_path(const char *const *stack, uint32 depth,
     return ARKRTOS_FDT_OK;
 }
 
+/* 判断刚进入的节点是不是目标：ph != 0 时按 phandle / linux,phandle 比；
+ * ph == 0 时按（depth == want_depth 且名字全等）比。depth 是入栈后的深度。
+ * 返回 1 = 命中。 */
+static int fdt_node_hit(uint32 ph, const char *name, uint32 depth,
+                        const char *want_name, uint32 want_depth,
+                        uint32 props_off)
+{
+    if(ph != 0u)
+    {
+        arkrtos_fdt_node_t tmp;
+        uint32 v = 0u;
+
+        tmp.name = name;
+        tmp.depth = depth - 1u;
+        tmp.props_off = props_off;
+        tmp.n_props = 0u;
+        if(((arkrtos_fdt_prop_u32(&tmp, "phandle", 0u, &v) == 0) ||
+            (arkrtos_fdt_prop_u32(&tmp, "linux,phandle", 0u, &v) == 0)) &&
+           (v == ph))
+        {
+            return 1;
+        }
+        return 0;
+    }
+    if((depth == want_depth) && (fdt_streq(name, want_name) != 0))
+    {
+        return 1;
+    }
+    return 0;
+}
+
+/* 命中后交付结果：按需填 *out，按需拼出绝对路径（拼路径要的是整条祖先链，
+ * 所以传的是栈与入栈后的深度）。 */
+static int fdt_take_hit(const char *stack[], uint32 depth, const char *name,
+                        uint32 props_off, arkrtos_fdt_node_t *out,
+                        char *pathbuf, uint32 pathcap)
+{
+    if(out != 0)
+    {
+        out->name = name;
+        out->depth = depth - 1u;
+        out->props_off = props_off;
+        out->n_props = fdt_count_props(props_off);
+    }
+    if(pathbuf != 0)
+    {
+        return fdt_build_path(stack, depth, pathbuf, pathcap);
+    }
+    return ARKRTOS_FDT_OK;
+}
+
 /* 一次遍历同时回答两个问题：按 phandle 找（ph != 0），或按
  * (名字, 深度) 找（ph == 0）；找到就填 *out，并按需拼出绝对路径。
  * 用名字+深度而不是节点地址，是因为节点只是一个视图，没有身份。 */
@@ -1077,7 +1128,6 @@ static int fdt_walk_match(uint32 ph, const char *want_name, uint32 want_depth,
         if(tok == FDT_TOK_BEGIN_NODE)
         {
             const char *name;
-            int         hit = 0;
 
             if(fdt_node_name(&off, &name) != ARKRTOS_FDT_OK)
             {
@@ -1090,41 +1140,9 @@ static int fdt_walk_match(uint32 ph, const char *want_name, uint32 want_depth,
             stack[depth] = name;
             depth++;
 
-            if(ph != 0u)
+            if(fdt_node_hit(ph, name, depth, want_name, want_depth, off) != 0)
             {
-                arkrtos_fdt_node_t tmp;
-                uint32 v = 0u;
-
-                tmp.name = name;
-                tmp.depth = depth - 1u;
-                tmp.props_off = off;
-                tmp.n_props = 0u;
-                if(((arkrtos_fdt_prop_u32(&tmp, "phandle", 0u, &v) == 0) ||
-                    (arkrtos_fdt_prop_u32(&tmp, "linux,phandle", 0u, &v) == 0)) &&
-                   (v == ph))
-                {
-                    hit = 1;
-                }
-            }
-            else if((depth == want_depth) && (fdt_streq(name, want_name) != 0))
-            {
-                hit = 1;
-            }
-
-            if(hit != 0)
-            {
-                if(out != 0)
-                {
-                    out->name = name;
-                    out->depth = depth - 1u;
-                    out->props_off = off;
-                    out->n_props = fdt_count_props(off);
-                }
-                if(pathbuf != 0)
-                {
-                    return fdt_build_path(stack, depth, pathbuf, pathcap);
-                }
-                return ARKRTOS_FDT_OK;
+                return fdt_take_hit(stack, depth, name, off, out, pathbuf, pathcap);
             }
             continue;
         }
