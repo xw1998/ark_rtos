@@ -353,29 +353,15 @@ void arkrtos_smp_sched_tick(uint32 cpu)
     }
 }
 
-uint32 arkrtos_smp_sched_switch(uint32 cpu, uint32 frame)
+/* ---- 第 1 段：处理交还请求 --------------------------------------
+ * s_handoff 是 CPU0 登记的"把这个任务还我"。任务可能正在跑（cur），
+ * 也可能只是躺在队列里（还没轮到）。两种都要处理，但处理完不立刻
+ * 决定谁上——统一走后面的选择逻辑。
+ * *p_cur / *p_handed 反映这一步之后的状态。 */
+static void sms_take_handoff(uint32 cpu, uint32 frame, int32 *p_cur, uint8 *p_handed)
 {
-    int32 cur;
-    int32 next;
-    uint32 ret;
-    uint8 handed = 0u;
+    int32 cur = *p_cur;
 
-    if(cpu == 0u || cpu >= (uint32)ARKRTOS_CPU_NUM)
-    {
-        return frame;                     /* 核号非法：原样返回，不碰状态 */
-    }
-
-    sms_lazy_init();
-    s_tick[cpu]++;
-
-    arkrtos_spin_lock(&s_lock[cpu]);
-
-    cur = s_cur[cpu];
-
-    /* ---- 1. 先处理交还请求 ----------------------------------------
-     * s_handoff 是 CPU0 登记的"把这个任务还我"。任务可能正在跑（cur），
-     * 也可能只是躺在队列里（还没轮到）。两种都要处理，但处理完不立刻
-     * 决定谁上——统一走下面的选择逻辑。 */
     if(s_handoff[cpu] != ARKRTOS_SMP_SCHED_NIL)
     {
         int32 h = s_handoff[cpu];
@@ -395,8 +381,8 @@ uint32 arkrtos_smp_sched_switch(uint32 cpu, uint32 frame)
                 s_cur[cpu]     = ARKRTOS_SMP_SCHED_NIL;
                 s_handoff[cpu] = ARKRTOS_SMP_SCHED_NIL;
                 sms_release_locked(cpu, h);
-                cur    = ARKRTOS_SMP_SCHED_NIL;
-                handed = 1u;
+                cur       = ARKRTOS_SMP_SCHED_NIL;
+                *p_handed = 1u;
             }
             else if(sms_q_find(cpu, h) >= 0)
             {
@@ -415,44 +401,59 @@ uint32 arkrtos_smp_sched_switch(uint32 cpu, uint32 frame)
         }
     }
 
-    /* ---- 2. 保存当前上下文 ---------------------------------------- */
-    if(handed == 0u)
+    *p_cur = cur;
+}
+
+/* ---- 第 2 段：保存当前上下文 ------------------------------------ */
+static void sms_save_cur(uint32 cpu, int32 cur, uint32 frame, uint8 handed)
+{
+    if(handed != 0u)
     {
-        if(cur >= 0)
-        {
-            arkrtos_task_table[cur].stack_ptr = frame;
-            #if (ARKRTOS_USE_STACK_USAGE == 1)
-            if(frame < arkrtos_task_table[cur].stack_peak_low)
-            {
-                arkrtos_task_table[cur].stack_peak_low = frame;
-            }
-            #endif
-            /* 被切下但仍可运行：放回队尾，保证同优先级轮转 */
-            if(sms_q_find(cpu, cur) < 0)
-            {
-                (void)sms_q_push(cpu, cur);
-            }
-        }
-        else
-        {
-            s_idle_sp[cpu] = frame;
-        }
+        return;      /* 交还那一路已经存过帧，这里不能再存 */
     }
 
-    /* ---- 3. 选择下一个 -------------------------------------------- */
-    next = sms_pick(cpu);
+    if(cur >= 0)
+    {
+        arkrtos_task_table[cur].stack_ptr = frame;
+        #if (ARKRTOS_USE_STACK_USAGE == 1)
+        if(frame < arkrtos_task_table[cur].stack_peak_low)
+        {
+            arkrtos_task_table[cur].stack_peak_low = frame;
+        }
+        #endif
+        /* 被切下但仍可运行：放回队尾，保证同优先级轮转 */
+        if(sms_q_find(cpu, cur) < 0)
+        {
+            (void)sms_q_push(cpu, cur);
+        }
+    }
+    else
+    {
+        s_idle_sp[cpu] = frame;
+    }
+}
+
+/* ---- 第 3 段：选择下一个 ----------------------------------------
+ * *p_stay = 1 表示"本拍原地返回"（本函数已解锁，调用方不要再解锁）。
+ * 三条短路都在这里返回 next 本身不动状态。 */
+static int32 sms_pick_next(uint32 cpu, int32 cur, uint8 handed, uint8 *p_stay)
+{
+    int32 next = sms_pick(cpu);
+
+    *p_stay = 0u;
 
     /* 空闲 -> 空闲：本核没有可跑的东西，帧已在第 2 步存进 s_idle_sp，
      * 直接原地返回。这一条不只是省一次切换：不返回的话会计一次假切换，
      * 让 s_switch_cnt 在纯空闲时每拍自增（读数看着像在疯狂切换）。
      * 只对 handed == 0 成立：交还那一路 cur 刚被置成 NIL，但 frame 属于
-     * 被交还的任务，必须走下面的 else 分支取 s_idle_sp 回来。 */
+     * 被交还的任务，必须走后面的 else 分支取 s_idle_sp 回来。 */
     if((handed == 0u) && (next == ARKRTOS_SMP_SCHED_NIL) &&
        (cur == ARKRTOS_SMP_SCHED_NIL))
     {
         s_slice[cpu] = (uint32)ARKRTOS_TIME_SLICE_TICKS;
         arkrtos_spin_unlock(&s_lock[cpu]);
-        return frame;
+        *p_stay = 1u;
+        return next;
     }
 
     if((next >= 0) && (next == cur))
@@ -462,7 +463,8 @@ uint32 arkrtos_smp_sched_switch(uint32 cpu, uint32 frame)
         {
             s_slice[cpu]--;
             arkrtos_spin_unlock(&s_lock[cpu]);
-            return frame;
+            *p_stay = 1u;
+            return next;
         }
 
         s_slice[cpu] = (uint32)ARKRTOS_TIME_SLICE_TICKS;
@@ -479,9 +481,18 @@ uint32 arkrtos_smp_sched_switch(uint32 cpu, uint32 frame)
         if(next == cur)
         {
             arkrtos_spin_unlock(&s_lock[cpu]);
-            return frame;
+            *p_stay = 1u;
+            return next;
         }
     }
+
+    return next;
+}
+
+/* ---- 第 4 段：落地切换（含解锁） -------------------------------- */
+static uint32 sms_apply_next(uint32 cpu, int32 next)
+{
+    uint32 ret;
 
     if(next >= 0)
     {
@@ -504,6 +515,40 @@ uint32 arkrtos_smp_sched_switch(uint32 cpu, uint32 frame)
     }
 
     arkrtos_spin_unlock(&s_lock[cpu]);
+
+    return ret;
+}
+
+uint32 arkrtos_smp_sched_switch(uint32 cpu, uint32 frame)
+{
+    int32 cur;
+    int32 next;
+    uint32 ret;
+    uint8 handed = 0u;
+    uint8 stay = 0u;
+
+    if(cpu == 0u || cpu >= (uint32)ARKRTOS_CPU_NUM)
+    {
+        return frame;                     /* 核号非法：原样返回，不碰状态 */
+    }
+
+    sms_lazy_init();
+    s_tick[cpu]++;
+
+    arkrtos_spin_lock(&s_lock[cpu]);
+
+    cur = s_cur[cpu];
+
+    sms_take_handoff(cpu, frame, &cur, &handed);
+    sms_save_cur(cpu, cur, frame, handed);
+
+    next = sms_pick_next(cpu, cur, handed, &stay);
+    if(stay != 0u)
+    {
+        return frame;                     /* 第 3 段已解锁并决定原地不动 */
+    }
+
+    ret = sms_apply_next(cpu, next);
 
     /* 防御：栈指针为 0 时 ertn 会跳到 0。宁可留在原地（同一帧）也不要
      * 让核跑飞——这是"宁可停住，也不给看似权威的错答案"的同一条原则。 */

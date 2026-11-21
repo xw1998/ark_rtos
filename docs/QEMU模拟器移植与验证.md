@@ -5835,6 +5835,46 @@ LA64 开档 + TLS 两项、`dynlink` 项的 QEMU 两条 PASS 与坏夹具 `exit 
 
 结论分档：**编译通过（含 TLS 开档）+ 告警 0 + QEMU 端到端 PASS，未上板**。
 
+#### 5.30.44 第三十九笔：`arkrtos_smp_sched_switch()` 按「交还 / 保存 / 选择 / 落地」拆成四段（2026-11-21）
+
+`kernelsrc/src/arkrtos_smp_sched.c` 的 `arkrtos_smp_sched_switch()`（**160 行**）是次核每拍从汇编
+进来的调度入口：核号合法性 → 处理 CPU0 的交还请求 → 存当前帧 → 选下一个 → 落地并返回要恢复的栈指针。
+四段各自成函数，主函数只剩「顺序 + 两条短路」。
+
+| 单元 | 干什么 | 行数 |
+|---|---|---|
+| `sms_take_handoff()` | 处理 CPU0 登记的「把这个任务还我」：任务正在跑（`h == cur`）就先存帧、交还所有权、本核置空闲并置 `handed`；还在本核队列里就直接摘出来交还；**既不在跑也不在队列里就保留登记、下一拍再看**（不吞请求）；坏下标清掉。`*p_cur` / `*p_handed` 反映处理后的状态 | 45 |
+| `sms_save_cur()` | `handed != 0` 时直接返回（交还那一路已经存过帧，**再存一次会把空闲帧写进任务控制块**）；否则存 `stack_ptr`（含栈水位），并把被切下的任务放回队尾保证同优先级轮转；`cur < 0` 时存 `s_idle_sp` | 27 |
+| `sms_pick_next()` | `sms_pick()` + 三条短路，短路时**自己解锁**并置 `*p_stay = 1`：①空闲→空闲原地返回（少计一次假切换，`s_switch_cnt` 不在纯空闲时每拍自增；只对 `handed == 0` 成立）；②当前任务仍最优且时间片未尽（`s_slice--`）；③时间片用尽后挪队尾重选仍是自己 | 52 |
+| `sms_apply_next()` | 落地：上 CPU 的从队列摘掉、重置时间片、`s_switch_cnt++`、写 `s_cur`；取不到任务则 `s_cur = NIL` 并返回 `s_idle_sp`；**统一在这里解锁** | 28 |
+| `arkrtos_smp_sched_switch()` 自己 | 核号非法直接返回 → 懒初始化 → 加锁 → 四段顺序调用 → `ret == 0` 防御 | **39**（原 160） |
+
+两条口径：
+
+Ⓐ 锁的所有权在拆分后必须**每条路径各解锁恰好一次**。原函数在 5 处 `arkrtos_spin_unlock` 后返回，
+拆分后其中 3 处（三条短路）搬进 `sms_pick_next()`，由 `*p_stay` 告诉调用方「已经解锁，别再动」；
+剩下两处（正常落地与 `ret == 0` 防御）分属 `sms_apply_next()` 与主函数。`stay` 标志不是为了省一次
+判断，而是为了**让"谁解的锁"在代码里可读**——否则漏解或双解都不会被编译器抓到，只会表现为某一拍
+死锁或计数器跳变。
+Ⓑ `handed` 这条状态跨了第 1、2、3 三段：它同时关掉「再存一次帧」和「空闲→空闲短路」两件事。
+拆函数时必须把它显式传递，不能只在某一段里读 `s_cur == NIL` 来替代——交还那一路 `cur` 刚被置成 NIL，
+但 `frame` 属于被交还的任务，必须走 `else` 分支把 `s_idle_sp` 取回来，语义完全不同。
+
+等价性：`default` 档两遍同配置 clean 构建 text **448920 → 448920（0 B）**、`data` 448 /
+`bss` 5,128,740 / 总量 31,462,512 B 全不变；该文件 0 告警（全量 clean 构建 242 条告警前后逐条一致）。
+`.bin` 的 sha256 不作为等价证据（`arkc_port_arkrtos.c` 内嵌 `__DATE__` / `__TIME__`，两次 clean 构建必差几字节）。
+
+门禁：`tools/ci_gate.py` **57 passed / 0 failed / 0 skipped**（含 `smp` 项的 host 计数 + 5 个 ARM
+ON-path 文件 + LA64 pin U/V/W + RV32 pin X）；`tools/smp_gate.py` **SMP-GATE OK**（LA64 自检会
+抓掉 TID 读、SMP=0 对象里不许有 SMP 标记、AMP 开关关掉时 `.text=0` 且无符号）；
+`tools/format_gate.py` OK 392；`doc_audit funcs` **10 → 9**。
+
+端到端：`make -f example/qemu_loongarch64/Makefile run`，串口 `out.txt` 跑到 `round=58`
+（被 90 s 窗口 `timeout` 杀掉，`exit=124` 属正常停法），全程 `svc_ok`、A/B 双任务按
+`d_tick≈1000 / d_ms≈500` 稳定轮转，`grep -icE "fail|panic|error|assert"` = **0**。
+
+结论分档：**编译通过 + 告警 0 + QEMU 端到端 PASS，未上板**（QEMU 算上板，不是真机）。
+
 ### 5.31 LSX 向量寄存器上下文（U-19，2026-11-21）
 
 #### 5.31.1 缺口：FPU 档只存了一半的浮点上下文
