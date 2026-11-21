@@ -28,13 +28,16 @@ LoongArch32/64 共用同一份内核。服务入口在 ARM 侧是 SVC，在 RISC
 **已经能跑**的是静态链接的原生 ELF 可执行文件：LoongArch64 走页表 + PLV3 窗口、RV32 走 PMP +
 U 模式，装载器按 `PT_LOAD` 落段、按 Linux 入口约定把 `sp` 指向 `argc/argv`，QEMU 上 `exec`
 反复跑过（[MMU进程模型与ELF装载](docs/MMU进程模型与ELF装载.md)）；**已经能按 Linux 的号说话**
-的是系统调用 ABI（`ARKRTOS_USE_LINUX_ABI`，默认关）：asm-generic 15 个号（`openat`/`close`/
-`read`/`write`/`exit`/`exit_group`/`set_tid_address`/`clock_gettime`/`uname`/`getpid`/`getuid`/
-`geteuid`/`brk`/`munmap`/`mmap`），QEMU LA64 上跑通一份只发 `syscall 0` 的静态程序，13 条 check
-全过、`exit code 7` 被读到（[Linux可执行文件兼容-系统调用ABI](docs/Linux可执行文件兼容-系统调用ABI.md)）；
-**还不能跑**的是现成 Linux 发行版里的二进制：动态链接（`PT_INTERP` / `ld.so`）在装载器里仍被
-明确拒绝，`fork`/`clone`、Unix 信号、fd 继承与管道、`socket`/`select`、`futex`、真 `mmap` 语义
-都没有——这些是**不支持**，不是还没测。这条差距按验收条款登记在
+的是系统调用 ABI（`ARKRTOS_USE_LINUX_ABI`，默认关）：asm-generic 25 个号（`openat`/`close`/
+`pipe2`/`read`/`write`/`pread64`/`exit`/`exit_group`/`set_tid_address`/`clock_gettime`/`kill`/
+`tkill`/`tgkill`/`rt_sigaction`/`rt_sigprocmask`/`rt_sigreturn`/`uname`/`getpid`/`getuid`/
+`geteuid`/`brk`/`munmap`/`execve`/`mmap`/`mprotect`），QEMU LA64 上跑通一份只发 `syscall 0` 的
+静态程序，14 条 check 全过、`exit code 7` 被读到；另有两份夹具分别覆盖非阻塞管道（14 条，
+`exit code 55`）与信号（29 条，`exit code 138`）
+（[Linux可执行文件兼容-系统调用ABI](docs/Linux可执行文件兼容-系统调用ABI.md)）；
+**还不能跑**的是现成 Linux 发行版里的二进制：动态链接（`PT_INTERP` / `ld.so`）在默认档仍被
+明确拒绝，`fork`/`clone`、跨任务信号（只能自己发给自己）、fd 继承、`socket`/`select`、`futex`、
+真 `mmap` 语义都没有——这些是**不支持**，不是还没测。这条差距按验收条款登记在
 [欠账盘点](docs/欠账盘点.md)，不写成"已经支持 Linux 程序"。
 
 **它对外的承诺只有一条：让 MCU 像手机一样安装、升级、卸载应用与驱动。**

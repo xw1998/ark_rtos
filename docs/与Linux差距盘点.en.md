@@ -15,6 +15,14 @@
 > `open` numbers, no fd inheritance and no signals, and dynamic linking (`PT_INTERP` / `ld.so`) is
 > rejected by the loader. That gap is registered as an acceptance item in [欠账盘点](欠账盘点.md).
 
+> **Revised 2026-11-21**: "the system-call ABI is still missing" is no longer the state of
+> things. The Linux-ABI profile (`ARKRTOS_USE_LINUX_ABI`) now speaks 25 asm-generic numbers
+> (non-blocking `pipe2` and a minimal signal set included), measured on QEMU LA64 by three
+> fixtures (`exit code 7` / `55` / `138`; see
+> [Linux可执行文件兼容-系统调用ABI](Linux可执行文件兼容-系统调用ABI.en.md)). What is really
+> missing now is the **process object** (`fork` / `clone` / fd inheritance / cross-task signals)
+> and the whole glibc compatibility surface.
+
 One question: put Ark RTOS and Linux side by side — what is still missing on the App side and on the
 kernel side?
 
@@ -74,8 +82,8 @@ In one line: **the "behaves like Linux" main line works**; what follows is what 
 | `getpid` / `getppid` / PID namespace | Only a kernel task id (task-table index); `getpid` is a stub only | Trade-off |
 | Dynamic linking, `.so` shared libraries, ELF loader | Two kinds of input coexist: the `.svcapp` container (copied whole into RAM) and a **statically linked native ELF** (`exec` / `ld`, running on LA64 and RV32; 32/64-bit field tables chosen by `__SIZEOF_LONG__`). The ELF loader accepts only `PT_LOAD` + `e_entry`: `PT_INTERP` (dynamic linking) is explicitly rejected (`ERR_FORMAT`); **no `.so`, no relocated shared libraries, no Linux system-call ABI** (`ecall` carries Ark's `0x10..0x22`) | Trade-off (dynamic linking, shared libraries) + debit (Linux syscall ABI, see [欠账盘点](欠账盘点.md)) |
 | `argv` / `argc` / environment variables | A `.svcapp` App still enters at `main(void)` with no argv; an **ELF program loaded by `exec` receives `sp -> argc/argv` per the Linux entry convention** (measured `argc=4` and `argv[0..3]` matching exactly), but there is **no `environ`** | Trade-off (`.svcapp`) + done (ELF argv) |
-| Signals (`signal` / `sigaction` / `kill`) | **No Unix signals**; inter-task synchronisation uses event sets, semaphores, mutexes, message queues, condition variables | Trade-off |
-| `pipe` / `FIFO` / Unix domain socket | None; the equivalents are message queues plus socket (loopback) | Trade-off |
+| Signals (`signal` / `sigaction` / `kill`) | Ark's own POSIX layer has **no signal API**; task synchronisation uses event sets, semaphores, mutexes, message queues, condition variables. **The Linux-ABI profile has a minimal set** (2026-11-21, QEMU LA64): `rt_sigaction` / `rt_sigprocmask` / `kill` / `tkill` / `tgkill` / `rt_sigreturn`, **self-delivery only**, delivered before a syscall returns, no cross-task delivery, no preemptive delivery, no real-time signals, no `siginfo`; the signal frame is a 32-byte header plus a snapshot of the whole trap frame | Partly done (Linux-ABI minimal set) + trade-off (Ark POSIX layer) |
+| `pipe` / `FIFO` / Unix domain socket | `pipe2` is done (2026-11-21, QEMU LA64, Linux ABI number 59): ring buffer with per-end reference counts, **non-blocking**, survives `execve`; FIFO and Unix domain sockets are still absent, the equivalents being message queues plus socket (loopback) | Partly done + trade-off |
 | System V / POSIX shared memory `shm` | No `shmget`/`shm_open`; only the MPU shared window (used for MiniApp handover, not exposed as general IPC) | Trade-off |
 | `clone` / namespaces / containers | None | Trade-off |
 
@@ -187,10 +195,11 @@ whether it is worth fixing:
 
 **Not planned** (class 1 trade-offs, written down so they are not repeatedly mistaken for "not done
 yet"): process model (`fork` / `waitpid`, COW), dynamic linking and `.so` shared libraries,
-multi-user / uid-gid, power management, ASLR, kernel modules, package manager, Unix signals,
+multi-user / uid-gid, power management, ASLR, kernel modules, package manager,
 shared-memory IPC, `/sys` + hotplug, symmetric-multicore automatic load balancing (SMP already has
 AMP core partitioning and explicit task migration; **static ELF loading with the Linux entry
-convention is done and is not on this list**).
+convention, plus the Linux syscall ABI for static programs (non-blocking pipes and the minimal
+signal set included), are done and are not on this list**).
 
 ## 4. One-line conclusion
 

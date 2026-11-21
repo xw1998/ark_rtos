@@ -34,15 +34,18 @@ read them as one - **what already runs** is a statically linked native ELF execu
 through the page-table + PLV3 window, RV32 through PMP + U mode; the loader maps `PT_LOAD` segments
 and lays out `sp -> argc/argv` per the Linux entry convention, and `exec` has been run repeatedly on
 QEMU ([docs/MMU进程模型与ELF装载.md](docs/MMU进程模型与ELF装载.md)). **What already speaks Linux
-numbers** is the syscall ABI (`ARKRTOS_USE_LINUX_ABI`, default off): 15 asm-generic numbers
-(`openat`/`close`/`read`/`write`/`exit`/`exit_group`/`set_tid_address`/`clock_gettime`/`uname`/
-`getpid`/`getuid`/`geteuid`/`brk`/`munmap`/`mmap`), exercised on QEMU LA64 by a static program that
-issues nothing but `syscall 0`: 13 checks pass and `exit code 7` comes back
+numbers** is the syscall ABI (`ARKRTOS_USE_LINUX_ABI`, default off): 25 asm-generic numbers
+(`openat`/`close`/`pipe2`/`read`/`write`/`pread64`/`exit`/`exit_group`/`set_tid_address`/
+`clock_gettime`/`kill`/`tkill`/`tgkill`/`rt_sigaction`/`rt_sigprocmask`/`rt_sigreturn`/`uname`/
+`getpid`/`getuid`/`geteuid`/`brk`/`munmap`/`execve`/`mmap`/`mprotect`), exercised on QEMU LA64 by a
+static program that issues nothing but `syscall 0`: 14 checks pass and `exit code 7` comes back;
+two more fixtures cover non-blocking pipes (14 checks, `exit code 55`) and signals (29 checks,
+`exit code 138`)
 ([docs/Linux可执行文件兼容-系统调用ABI.md](docs/Linux可执行文件兼容-系统调用ABI.md)). **What does
 not run yet** is a binary taken from a Linux distribution: dynamic linking (`PT_INTERP` / `ld.so`)
-is still explicitly rejected by the loader, and `fork`/`clone`, Unix signals, fd inheritance and
-pipes, `socket`/`select`, `futex` and real `mmap` semantics do not exist - those are *unsupported*,
-not merely untested. That gap is tracked as an acceptance item in
+is still explicitly rejected by the default profile, and `fork`/`clone`, cross-task signals
+(a task can only signal itself), fd inheritance, `socket`/`select`, `futex` and real `mmap`
+semantics do not exist - those are *unsupported*, not merely untested. That gap is tracked as an acceptance item in
 [docs/欠账盘点.md](docs/欠账盘点.md); this README never claims "Linux programs are supported".
 
 **It makes exactly one promise: an MCU can install, upgrade and uninstall applications and drivers
