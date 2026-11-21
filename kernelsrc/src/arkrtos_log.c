@@ -155,10 +155,11 @@ int32 arkrtos_console_write(const uint8 *p_data, uint32 len)
     {
         uint32 spin = 0u;
         int32  queued = 0;
+        uint8  byte = p_data[i];    /* const 源 -> 非 const 写接口，拷一个字节再传 */
 
         do
         {
-            if(arkrtos_dev_write_internal(dev, (uint8 *)&p_data[i], 1) == 1)
+            if(arkrtos_dev_write_internal(dev, &byte, 1) == 1)
             {
                 queued = 1;
                 break;
@@ -196,10 +197,11 @@ static void arkrtos_log_puts_raw(const char *s)
     {
         uint32 spin = 0u;
         int32  queued = 0;
+        uint8  byte = (uint8)(*s);  /* 同上：写接口收非 const 缓冲 */
 
         do
         {
-            if(arkrtos_dev_write_internal(dev, (uint8 *)s, 1) == 1)
+            if(arkrtos_dev_write_internal(dev, &byte, 1) == 1)
             {
                 queued = 1;
                 break;

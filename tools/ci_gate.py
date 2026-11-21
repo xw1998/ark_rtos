@@ -2296,6 +2296,82 @@ def check_init_host():
     ok("init-host", "kernel init order on host (%s / %s)"
        % (lines[0], lines[1]))
 
+def check_log_host():
+    """The kernel log: level filter, dmesg-shaped prefix, console lock, ring.
+
+    arkrtos_log.c is the only channel the system has left once something else
+    has already gone wrong, so every way it can be quiet is a real failure and
+    none of them shows up as an error code at the call site:
+
+      * the level filter written as a closed interval -- ERROR gets muted along
+        with DEBUG, and what the operator sees is simply fewer lines;
+      * the prefix -- the timestamp / syslog priority / reset pair is what log
+        scrapers parse, so one missing space or a colour leaking into the body
+        changes the format for every consumer;
+      * the console lock -- it exists so a line is never spliced, but a writer
+        that cannot take it must still write (dropping output is harder to
+        diagnose than an occasional join). "Spin the whole budget, then give up
+        and count it" is therefore a pinned behaviour, not an implementation
+        detail;
+      * the per-byte transmit budget -- a full pipe is waited out, and only a
+        byte that never left inside the budget is counted as dropped;
+      * the dmesg ring -- overwrite the oldest, and dump oldest-first after the
+        buffer has wrapped.
+
+    Three configurations are built and run:
+      * default (LOG=1, RING=1) with the ring shrunk to 64 bytes so the wrap is
+        reached by a handful of lines;
+      * RING=0: the ring block is compiled out and capacity/used/dump must
+        answer 0 rather than pretend to be an empty ring;
+      * LOG=0: the whole module becomes the "always refuse" stub.
+    A missing host compiler is a FAIL, not a skip.
+    """
+    import tempfile
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("log-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    want = (("log", "LOG-HOST OK"),
+            ("log-noring", "LOG-HOST NORING OK"),
+            ("log-off", "LOG-HOST OFF OK"))
+    names = [w[0] for w in want]
+    picked = {}
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name in names:
+            picked[name] = (test, mods, defs, incs)
+    for name, _marker in want:
+        if name not in picked:
+            fail("log-host", "case %s missing from coverage_gate.CASES" % name)
+            return
+
+    lines = []
+    with tempfile.TemporaryDirectory() as td:
+        for name, marker in want:
+            test, mods, defs, incs = picked[name]
+            exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+                fail("log-host", "%s did not build: %s" % (name, tail[:200]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            if r.returncode != 0 or marker not in txt:
+                fail("log-host", "%s failed: %s" % (name, txt.strip()[:220]))
+                return
+            lines.append(txt.strip().splitlines()[-1])
+    ok("log-host", "kernel log on host (%s / %s / %s)"
+       % (lines[0], lines[1], lines[2]))
+
 def check_coverage_host():
     """Line coverage of the modules the host tests actually link.
 
@@ -2333,9 +2409,10 @@ def check_warn_host():
     re-checked and riscv64-unknown-elf-gcc-10.2.0 turned up.
 
     Scope is honest and narrow: every TU the cases in coverage_gate.CASES
-    compile -- 30 case configurations (test + module each) plus the SDK stdio
-    test, 61 TUs in total, because a few modules are built once per
-    configuration (sign, blk, dev, event, export and init twice; timer three times: default,
+    compile -- 33 case configurations (test + module each) plus the SDK stdio
+    test, 67 TUs in total, because a few modules are built once per
+    configuration (sign, blk, dev, event, export and init twice; log three
+    times: default, USE_LOG_RING=0 and USE_LOG=0; timer three times: default,
     tickless and USE_TIMER=0; cfg three times: default, STACK_GUARD=1 and
     STACK_USAGE=0). Everything else in kernelsrc/ needs an
     architecture toolchain (armcc/armclang, loongarch64, riscv64) to compile at
@@ -2463,6 +2540,7 @@ CHECK_TABLE = (
     ("cfg-host", check_cfg_host),
     ("export-host", check_export_host),
     ("init-host", check_init_host),
+    ("log-host", check_log_host),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),
     ("analyzer", check_analyzer),

@@ -227,6 +227,19 @@ CASES = [
      ["kernelsrc/src/arkrtos_init.c"],
      ["-DARKRTOS_USE_SBUF=1", "-DARKRTOS_USE_ESET=1",
       "-DARKRTOS_USE_SMP=1"], "INIT-HOST ON OK"),
+    # --- 2026-11-21 新增：分级日志 / 控制台锁 / dmesg 环 ----------------
+    # USE_LOG 与 USE_LOG_RING 是两层 #if：#else 是「恒拒绝」桩、环的 #else 是
+    # 四个答 0 的函数，所以三档缺一档就有代码进不了行号并集。
+    # 默认档把环压到 64 字节，否则回卷要写满 4096 字节日志才看得见。
+    ("log", "kernelsrc/tests/test_log_host.c",
+     ["kernelsrc/src/arkrtos_log.c"],
+     ["-DARKRTOS_LOG_RING_SIZE=64"], "LOG-HOST OK"),
+    ("log-noring", "kernelsrc/tests/test_log_host.c",
+     ["kernelsrc/src/arkrtos_log.c"],
+     ["-DARKRTOS_USE_LOG_RING=0"], "LOG-HOST NORING OK"),
+    ("log-off", "kernelsrc/tests/test_log_host.c",
+     ["kernelsrc/src/arkrtos_log.c"],
+     ["-DARKRTOS_USE_LOG=0"], "LOG-HOST OFF OK"),
 ]
 
 

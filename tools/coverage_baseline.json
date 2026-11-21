@@ -9,6 +9,7 @@
   "arkrtos_fifo": 100.0,
   "arkrtos_init": 100.0,
   "arkrtos_loader": 98.41,
+  "arkrtos_log": 98.88,
   "arkrtos_mempool": 95.65,
   "arkrtos_mq": 100.0,
   "arkrtos_sbuf": 80.57,
