@@ -5956,6 +5956,46 @@ F1–F4 不管缩进，所以它一直没红）。这段整体搬进 `fdt_build_
 
 结论分档：**编译通过 + 告警 0 + QEMU 端到端 PASS，未上板**（QEMU 算上板，不是真机）。
 
+#### 5.30.47 第四十二笔：`arkrtos_fdt_stdout_resolve()` 拆成设备名 / 路径 / 选项三段（2026-11-21）
+
+`/chosen/stdout-path` 有两种形态：句柄（`<&uart0>`，4 字节）与字符串
+（`serial0:115200n8`）。`arkrtos_fdt_stdout_resolve()`（**142 行**）把字符串这一路
+「取设备名 → 设备名变路径（别名或绝对路径）→ 解析冒号后的选项」全写在了一起。
+
+| 单元 | 干什么 | 行数 |
+|---|---|---|
+| `fdt_stdout_dev()` | 取 `:` 之前那段设备名，写满 `cap` 报 `ERR_PATH`、空串也报 `ERR_PATH`，长度经 `*p_used` 带出 | 24 |
+| `fdt_stdout_dev_path()` | 以 `/` 开头就当路径直接 `node_by_path` 校验后复制；否则先 `arkrtos_fdt_alias` 再校验再复制，并置 `from_alias`。**别名查不到时把 `NOT_FOUND` 原样报出**，不混成路径错误 | 36 |
+| `fdt_stdout_opts()` | 冒号之后：数字 `<= 8` 当数据位、`> 8` 当波特率，各只认第一个（第二个报 `ERR_PATH`）；`n` / `o` / `e` 当校验位，同样只认第一个 | 56 |
+| `arkrtos_fdt_stdout_resolve()` 自己 | 六字段清零 → 取原始属性 → 句柄形式（`len == 4 && v[3] != 0`）→ 字符串形式（末字节必须 `\0`）→ 三段顺序调用 | **54**（原 142） |
+
+两条口径：
+
+Ⓐ 三段都返回 `ARKRTOS_FDT_ERR_*` / `OK`，主函数只做「`rc != OK` 就返回」的串联，
+没有任何一段靠「返回 1 表示成功」之类的二值约定——这条路径上错误码本来就已经是
+「0 = 成功、负 = 具体原因」，改写会让调用点丢信息。
+Ⓑ `fdt_stdout_dev_path()` 的别名分支要**保住 `NOT_FOUND` 的语义**：`arkrtos_fdt_alias`
+查不到不是路径写错，而是设备名不存在；原代码用三元把两者分开，抽函数时按原样保留
+（这一条在 `tools/fdt_gate.py` 的坏法自检里能看出后果：设备名不存在与路径不存在
+报的 reason 不同）。
+
+等价性：`default` 档两遍同配置 clean 构建 text **449112 → 449064（−48 B）**、
+`data` 448 / `bss` 5,128,740 / 总量 31,462,512 B 全不变；该文件 0 告警（全量 clean
+构建 242 条告警前后逐条一致）。
+
+端到端：这一条**有真实覆盖**——`dts/qemu_loongarch64.dts` 里
+`stdout-path = "serial0:115200n8"`，正好是「别名 + 冒号选项」这条路。
+`tools/fdt_gate.py` 的 `qemu-console` 读开机串口得到
+`path=/soc/serial@1fe001e0 baud=115200 clk=25000000 reason=ok match=1`：
+别名 `serial0` 解到了节点、`115200` 进了 baud、`n` 与 `8` 被吃下、`from_alias` 置位；
+同一门禁的 `console-selfcheck` 用 4 种坏样本（改路径 / 改 reason / 改 match / 缺行）
+证明这条检查会红。
+
+门禁：`tools/ci_gate.py` **57 passed / 0 failed / 0 skipped**；`tools/fdt_gate.py`
+**14 passed / 0 failed**；`tools/format_gate.py` OK 392；`doc_audit funcs` **7 → 6**。
+
+结论分档：**编译通过 + 告警 0 + QEMU 端到端 PASS，未上板**（QEMU 算上板，不是真机）。
+
 ### 5.31 LSX 向量寄存器上下文（U-19，2026-11-21）
 
 #### 5.31.1 缺口：FPU 档只存了一半的浮点上下文

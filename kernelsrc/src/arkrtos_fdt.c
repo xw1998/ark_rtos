@@ -1283,12 +1283,130 @@ static int fdt_copy_str(char *dst, uint32 cap, const char *src)
     return ARKRTOS_FDT_OK;
 }
 
+/* "/chosen/stdout-path" 的字符串形式：<设备或别名>[:<选项>]。
+ * 取 ':' 之前那段设备名（空串报错），长度经 *p_used 带出。 */
+static int fdt_stdout_dev(const uint8 *v, char *dev, uint32 cap, uint32 *p_used)
+{
+    uint32 i = 0u;
+
+    while((((const char *)v)[i] != '\0') && (((const char *)v)[i] != ':'))
+    {
+        if((i + 1u) >= cap)
+        {
+            return ARKRTOS_FDT_ERR_PATH;
+        }
+        dev[i] = (char)v[i];
+        i++;
+    }
+    dev[i] = '\0';
+    if(i == 0u)
+    {
+        return ARKRTOS_FDT_ERR_PATH;
+    }
+    *p_used = i;
+    return ARKRTOS_FDT_OK;
+}
+
+/* 设备名 -> 绝对路径：以 '/' 开头就当路径直接校验并复制；否则先当别名查。
+ * 别名查不到时把 NOT_FOUND 原样报出，不把别名的"没这名字"混成路径错误。 */
+static int fdt_stdout_dev_path(const char *dev, arkrtos_fdt_console_t *out)
+{
+    char aliasbuf[ARKRTOS_FDT_PATH_MAX];
+    int  rc;
+
+    if(dev[0] == '/')
+    {
+        rc = arkrtos_fdt_node_by_path(dev, 0);
+        if(rc != ARKRTOS_FDT_OK)
+        {
+            return rc;
+        }
+        return fdt_copy_str(out->path, ARKRTOS_FDT_PATH_MAX, dev);
+    }
+
+    rc = arkrtos_fdt_alias(dev, aliasbuf, (uint32)sizeof(aliasbuf));
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        return (rc == ARKRTOS_FDT_ERR_NOT_FOUND) ? ARKRTOS_FDT_ERR_NOT_FOUND : rc;
+    }
+    rc = arkrtos_fdt_node_by_path(aliasbuf, 0);
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        return rc;
+    }
+    rc = fdt_copy_str(out->path, ARKRTOS_FDT_PATH_MAX, aliasbuf);
+    if(rc != ARKRTOS_FDT_OK)
+    {
+        return rc;
+    }
+    out->from_alias = 1u;
+    return ARKRTOS_FDT_OK;
+}
+
+/* ':' 之后的选项：数字 <= 8 当数据位、> 8 当波特率，各只认第一个（第二个报错）；
+ * n/o/e 当校验位，同样只认第一个。 */
+static int fdt_stdout_opts(const uint8 *v, uint32 used, arkrtos_fdt_console_t *out)
+{
+    const char *p;
+
+    if(v[used] != ':')
+    {
+        return ARKRTOS_FDT_OK;
+    }
+
+    p = (const char *)v + used + 1u;
+    while(*p != '\0')
+    {
+        uint32 ok = 0u;
+        uint32 num;
+
+        if((*p >= '0') && (*p <= '9'))
+        {
+            num = fdt_parse_dec(&p, &ok);
+            if(ok == 0u)
+            {
+                return ARKRTOS_FDT_ERR_PATH;
+            }
+            if(num <= 8u)
+            {
+                if(out->bits != 0u)
+                {
+                    return ARKRTOS_FDT_ERR_PATH;   /* 第二个小数：不认识 */
+                }
+                out->bits = num;
+            }
+            else
+            {
+                if(out->baud != 0u)
+                {
+                    return ARKRTOS_FDT_ERR_PATH;
+                }
+                out->baud = num;
+            }
+        }
+        else if((*p == 'n') || (*p == 'o') || (*p == 'e'))
+        {
+            if(out->parity != 0)
+            {
+                return ARKRTOS_FDT_ERR_PATH;
+            }
+            out->parity = *p;
+            p++;
+        }
+        else
+        {
+            return ARKRTOS_FDT_ERR_PATH;
+        }
+    }
+    return ARKRTOS_FDT_OK;
+}
+
 int arkrtos_fdt_stdout_resolve(arkrtos_fdt_console_t *out)
 {
     const uint8 *v;
     uint32       len = 0u;
     char         dev[ARKRTOS_FDT_PATH_MAX];
-    uint32       i = 0u;
+    uint32       used = 0u;
     int          rc;
 
     if(s_fdt.ready == 0u)
@@ -1325,105 +1443,17 @@ int arkrtos_fdt_stdout_resolve(arkrtos_fdt_console_t *out)
     }
 
     /* 字符串形式：<设备或别名>[:<选项>]。 */
-    while((((const char *)v)[i] != '\0') && (((const char *)v)[i] != ':'))
+    rc = fdt_stdout_dev(v, dev, (uint32)sizeof(dev), &used);
+    if(rc != ARKRTOS_FDT_OK)
     {
-        if((i + 1u) >= (uint32)sizeof(dev))
-        {
-            return ARKRTOS_FDT_ERR_PATH;
-        }
-        dev[i] = (char)v[i];
-        i++;
+        return rc;
     }
-    dev[i] = '\0';
-    if(i == 0u)
+    rc = fdt_stdout_dev_path(dev, out);
+    if(rc != ARKRTOS_FDT_OK)
     {
-        return ARKRTOS_FDT_ERR_PATH;
+        return rc;
     }
-
-    if(dev[0] == '/')
-    {
-        rc = arkrtos_fdt_node_by_path(dev, 0);
-        if(rc != ARKRTOS_FDT_OK)
-        {
-            return rc;
-        }
-        rc = fdt_copy_str(out->path, ARKRTOS_FDT_PATH_MAX, dev);
-        if(rc != ARKRTOS_FDT_OK)
-        {
-            return rc;
-        }
-    }
-    else
-    {
-        char aliasbuf[ARKRTOS_FDT_PATH_MAX];
-
-        rc = arkrtos_fdt_alias(dev, aliasbuf, (uint32)sizeof(aliasbuf));
-        if(rc != ARKRTOS_FDT_OK)
-        {
-            return (rc == ARKRTOS_FDT_ERR_NOT_FOUND) ? ARKRTOS_FDT_ERR_NOT_FOUND : rc;
-        }
-        rc = arkrtos_fdt_node_by_path(aliasbuf, 0);
-        if(rc != ARKRTOS_FDT_OK)
-        {
-            return rc;
-        }
-        rc = fdt_copy_str(out->path, ARKRTOS_FDT_PATH_MAX, aliasbuf);
-        if(rc != ARKRTOS_FDT_OK)
-        {
-            return rc;
-        }
-        out->from_alias = 1u;
-    }
-
-    if(v[i] == ':')
-    {
-        const char *p = (const char *)v + i + 1u;
-
-        while(*p != '\0')
-        {
-            uint32 ok = 0u;
-            uint32 num;
-
-            if((*p >= '0') && (*p <= '9'))
-            {
-                num = fdt_parse_dec(&p, &ok);
-                if(ok == 0u)
-                {
-                    return ARKRTOS_FDT_ERR_PATH;
-                }
-                if(num <= 8u)
-                {
-                    if(out->bits != 0u)
-                    {
-                        return ARKRTOS_FDT_ERR_PATH;   /* 第二个小数：不认识 */
-                    }
-                    out->bits = num;
-                }
-                else
-                {
-                    if(out->baud != 0u)
-                    {
-                        return ARKRTOS_FDT_ERR_PATH;
-                    }
-                    out->baud = num;
-                }
-            }
-            else if((*p == 'n') || (*p == 'o') || (*p == 'e'))
-            {
-                if(out->parity != 0)
-                {
-                    return ARKRTOS_FDT_ERR_PATH;
-                }
-                out->parity = *p;
-                p++;
-            }
-            else
-            {
-                return ARKRTOS_FDT_ERR_PATH;
-            }
-        }
-    }
-    return ARKRTOS_FDT_OK;
+    return fdt_stdout_opts(v, used, out);
 }
 
 #endif /* ARKRTOS_USE_FDT */
