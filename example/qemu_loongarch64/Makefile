@@ -322,6 +322,30 @@ $(LXEXEC_H): $(LXEXEC_SIGNED) example/qemu_loongarch64/elf_blob.py
 
 $(BUILD)/example/qemu_loongarch64/elf_demo.o: $(LXEXEC_H)
 
+# 管道夹具（linux_pipe.elf）：pipe2(59) 的六条行为（两个 fd / 数据往返 /
+# 空读 -EAGAIN / 写端关掉读 EOF / O_CLOEXEC 回 -EINVAL / 满时短写与读端关掉
+# 回 -EPIPE）。和上面两份夹具同一条构建路径，只在 Linux ABI 档存在。
+LXPIPE_SRC := example/qemu_loongarch64/elf/linux_pipe.c
+LXPIPE_ELF := $(BUILD)/linux_pipe.elf
+LXPIPE_SIGNED := $(BUILD)/linux_pipe.signed.elf
+LXPIPE_H   := $(BUILD)/linux_pipe_blob.h
+
+$(LXPIPE_ELF): $(LXPIPE_SRC)
+	@mkdir -p $(BUILD)
+	$(CC) $(ARCH_FLAGS) -O2 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
+	      -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	      -Wl,-Ttext=$(WIN_ELF_BASE) -Wl,-e,_start -Wl,--strip-all \
+	      -Wl,-z,max-page-size=4096 -o $@ $< ;
+
+$(LXPIPE_SIGNED): $(LXPIPE_ELF) tools/sign_payload.py
+	python tools/sign_payload.py sign $(LXPIPE_ELF) --out $@ ;
+
+$(LXPIPE_H): $(LXPIPE_SIGNED) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(LXPIPE_SIGNED) \
+	       --output $@ --name ark_example_linux_pipe ;
+
+$(BUILD)/example/qemu_loongarch64/elf_demo.o: $(LXPIPE_H)
+
 # ---------------------------------------------------------------------------
 # PT_TLS 示例（tls_main.elf）：装载器读 PT_TLS、把模板铺进窗口、把 $tp 指过去。
 #

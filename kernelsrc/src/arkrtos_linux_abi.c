@@ -15,8 +15,13 @@
 *          任务号不变、fd 表保留、堆游标归零）；fork / clone 仍然没有——
 *          那需要地址空间复制，与「一个任务一块窗口」的模型不是同一级工作量，
 *          假装支持只会给出错答案。
-*          明确不做的事（文档里逐条列出）：fork/clone、信号、父子 fd 继承与
-*          管道、socket、futex，以及真 mmap 语义。动态链接的**内核侧**
+*          管道（pipe2）已做：一条环形缓冲 + 两端引用计数，两个 fd 指向同一条
+*          管道；读空回 -EAGAIN、写满回 -EAGAIN、读端全关写回 -EPIPE、写端
+*          全关读回 EOF。**不实现阻塞**——没有 fork、fd 表全局单份，两端通常
+*          在同一个任务里，阻塞就是自死锁。
+*          明确不做的事（文档里逐条列出）：fork/clone、信号、父子 fd 继承
+*          （没有 fork 就没有第二个进程可继承）、socket、futex，以及真 mmap
+*          语义。动态链接的**内核侧**
 *          （PT_INTERP + auxv）由 ARKRTOS_USE_DYNLOAD 单独提供，解释器
 *          本身是用户态程序；mprotect 接受但不强制（整窗 RWX，单独计数）。
 *          mmap/brk 只是
@@ -46,6 +51,7 @@
 /* asm-generic 号表：RISC-V 与 LoongArch 的 Linux UAPI 都用这一套。 */
 #define LX_SYS_OPENAT               (56u)
 #define LX_SYS_CLOSE                (57u)
+#define LX_SYS_PIPE2                (59u)
 #define LX_SYS_READ                 (63u)
 #define LX_SYS_WRITE                (64u)
 #define LX_SYS_PREAD64              (67u)
@@ -70,6 +76,7 @@
 #define LX_E2BIG                    (7)
 #define LX_ENOEXEC                  (8)
 #define LX_EBADF                    (9)
+#define LX_EAGAIN                   (11)
 #define LX_EACCES                   (13)
 #define LX_ENOMEM                   (12)
 #define LX_EFAULT                   (14)
@@ -77,6 +84,7 @@
 #define LX_EISDIR                   (21)
 #define LX_EINVAL                   (22)
 #define LX_ENFILE                   (23)
+#define LX_EPIPE                    (32)
 #define LX_EROFS                    (30)
 #define LX_ENAMETOOLONG             (36)
 #define LX_ENOSYS                   (38)
@@ -85,6 +93,20 @@
 #define LX_MAX_FD                   (8u)
 #define LX_PATH_MAX                 (64u)
 #define LX_IO_CHUNK                 (128u)
+
+/* fd 的两类用途。文件类 fd 的 path/size/off 有效；管道类 fd 只用一个
+ * 管道下标，读写都落到那块环形缓冲上。 */
+#define LX_FD_FILE                  (0u)
+#define LX_FD_PIPE_R                (1u)
+#define LX_FD_PIPE_W                (2u)
+
+/* 管道容量与同时存在的条数。256 字节够一次 read/write 的常见块，也不至于
+ * 让 .bss 多出一大块；条数按「一个程序同时用两条管道」给。
+ * 为什么不做阻塞：本内核没有 fork，fd 表也是全局单份，管道两端通常就在
+ * 同一个任务里——没有人能在这期间把数据写进来，阻塞就是自死锁。空读/满写
+ * 一律回 -EAGAIN，读程序必须自己重试（这与 Linux 的阻塞语义不同，文档里写死）。 */
+#define LX_PIPE_MAX                 (2u)
+#define LX_PIPE_BUF                 (256u)
 
 /* execve 的暂存区：旧镜像一旦被覆盖，用户地址上的 argv 就没了，所以
  * 这些字符串必须在装载**之前**落进内核。16 个参数 × 256 字节与装载器
@@ -97,6 +119,7 @@
 #define LX_O_ACCMODE                (0x3u)
 #define LX_O_CREAT                  (0x40u)
 #define LX_O_TRUNC                  (0x200u)
+#define LX_O_NONBLOCK               (0x800u)
 
 /* mmap 标志位（asm-generic） */
 #define LX_MAP_PRIVATE              (0x02u)
@@ -128,14 +151,29 @@
 typedef struct
 {
     uint8  used;
+    uint8  kind;        /* LX_FD_FILE / LX_FD_PIPE_R / LX_FD_PIPE_W */
+    uint8  pipe;        /* kind 是管道时，s_pipe 的下标 */
     uint32 size;
     uint32 off;
     char   path[LX_PATH_MAX];
 } lx_fd_t;
 
+typedef struct
+{
+    uint8  used;
+    uint8  readers;     /* 打开的读端个数；到 0 时写端得到 -EPIPE */
+    uint8  writers;     /* 打开的写端个数；到 0 时读端读到 EOF */
+    uint16 head;
+    uint16 tail;
+    uint16 count;
+    uint8  buf[LX_PIPE_BUF];
+} lx_pipe_t;
+
 /* fd 表是内核全局的：本版本的 ELF 装载器一次只跑一个程序，装载器在
  * 每次起跑前调用 arkrtos_linux_abi_reset() 把它清空。 */
 static lx_fd_t s_fd[LX_MAX_FD];
+/* 管道对象独立于 fd 表：一条管道被两个 fd 引用，fd 关掉一半时管道还要在。 */
+static lx_pipe_t s_pipe[LX_PIPE_MAX];
 static uint32  s_stat[LX_STAT_MAX];
 
 #if (ARKRTOS_LINUX_ABI_SYSSTAT == 1)
@@ -288,6 +326,225 @@ static int32 lx_fd_find(int32 fd)
     return idx;
 }
 
+/* 找第一个空 fd 槽位；返回的是表下标（不是 fd 号）。 */
+static int32 lx_fd_free_idx(void)
+{
+    uint32 i;
+
+    for(i = 0u; i < LX_MAX_FD; i++)
+    {
+        if(s_fd[i].used == 0u)
+        {
+            return (int32)i;
+        }
+    }
+    return -1;
+}
+
+static int32 lx_pipe_alloc(void)
+{
+    uint32 i;
+
+    for(i = 0u; i < LX_PIPE_MAX; i++)
+    {
+        if(s_pipe[i].used == 0u)
+        {
+            return (int32)i;
+        }
+    }
+    return -1;
+}
+
+/* 从管道读。空且还有写端 -> -EAGAIN（不阻塞，见 LX_PIPE_BUF 上的注释）；
+ * 空且写端全关 -> 0（EOF，与 Linux 一致）。 */
+static int32 lx_pipe_read(int32 idx, unsigned long ua, uint32 want)
+{
+    int32  pi = (int32)s_fd[idx].pipe;
+    uint8  buf[LX_IO_CHUNK];
+    uint32 done = 0u;
+
+    if((pi < 0) || (pi >= (int32)LX_PIPE_MAX) || (s_pipe[pi].used == 0u))
+    {
+        return -LX_EBADF;
+    }
+    if(want == 0u)
+    {
+        return 0;
+    }
+    if(ua == 0u)
+    {
+        return -LX_EFAULT;
+    }
+
+    while((done < want) && (s_pipe[pi].count > 0u))
+    {
+        uint32 n = want - done;
+        uint32 k;
+
+        if(n > (uint32)LX_IO_CHUNK)
+        {
+            n = (uint32)LX_IO_CHUNK;
+        }
+        if(n > (uint32)s_pipe[pi].count)
+        {
+            n = (uint32)s_pipe[pi].count;
+        }
+        for(k = 0u; k < n; k++)
+        {
+            buf[k] = s_pipe[pi].buf[s_pipe[pi].tail];
+            s_pipe[pi].tail = (uint16)(((uint32)s_pipe[pi].tail + 1u) % (uint32)LX_PIPE_BUF);
+            s_pipe[pi].count--;
+        }
+        if(arkrtos_copy_to_user((void *)(unsigned long)(ua + done), buf, n) != 0)
+        {
+            return (done > 0u) ? (int32)done : -LX_EFAULT;
+        }
+        done += n;
+    }
+
+    if(done == 0u)
+    {
+        return (s_pipe[pi].writers == 0u) ? 0 : -LX_EAGAIN;
+    }
+    return (int32)done;
+}
+
+/* 往管道写。写端全关但读端还在时没有意义（管道的写端已被关掉），
+ * 读端全关 -> -EPIPE；缓冲满 -> -EAGAIN；能写多少写多少，短写是正常结果，
+ * 不假装写全。 */
+static int32 lx_pipe_write(int32 idx, unsigned long ua, uint32 want)
+{
+    int32  pi = (int32)s_fd[idx].pipe;
+    uint8  buf[LX_IO_CHUNK];
+    uint32 done = 0u;
+
+    if((pi < 0) || (pi >= (int32)LX_PIPE_MAX) || (s_pipe[pi].used == 0u))
+    {
+        return -LX_EBADF;
+    }
+    if(s_pipe[pi].readers == 0u)
+    {
+        return -LX_EPIPE;
+    }
+    if(want == 0u)
+    {
+        return 0;
+    }
+    if(ua == 0u)
+    {
+        return -LX_EFAULT;
+    }
+
+    while((done < want) && (s_pipe[pi].count < (uint16)LX_PIPE_BUF))
+    {
+        uint32 space = (uint32)LX_PIPE_BUF - (uint32)s_pipe[pi].count;
+        uint32 n = want - done;
+        uint32 k;
+
+        if(n > (uint32)LX_IO_CHUNK)
+        {
+            n = (uint32)LX_IO_CHUNK;
+        }
+        if(n > space)
+        {
+            n = space;
+        }
+        if(arkrtos_copy_from_user(buf, (const void *)(unsigned long)(ua + done), n) != 0)
+        {
+            return (done > 0u) ? (int32)done : -LX_EFAULT;
+        }
+        for(k = 0u; k < n; k++)
+        {
+            s_pipe[pi].buf[s_pipe[pi].head] = buf[k];
+            s_pipe[pi].head = (uint16)(((uint32)s_pipe[pi].head + 1u) % (uint32)LX_PIPE_BUF);
+            s_pipe[pi].count++;
+        }
+        done += n;
+    }
+
+    if(done == 0u)
+    {
+        return -LX_EAGAIN;
+    }
+    return (int32)done;
+}
+
+/* pipe2(59)：成功时把两个 fd 号（读端在先）写回用户数组。flags 只认
+ * O_NONBLOCK，其余位明确 -EINVAL：本内核没有 exec 时的关闭语义，接受
+ * O_CLOEXEC 就是给一个不成立的承诺。 */
+static int32 lx_pipe2(void *p_ctx)
+{
+    unsigned long ua = ARKRTOS_SVC_ARG(p_ctx, 0u);
+    uint32 flags = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    int32  fds[2];
+    int32  pi;
+    int32  i0;
+    int32  i1;
+
+    if(ua == 0u)
+    {
+        return -LX_EFAULT;
+    }
+    if((flags & ~(uint32)LX_O_NONBLOCK) != 0u)
+    {
+        return -LX_EINVAL;
+    }
+
+    pi = lx_pipe_alloc();
+    if(pi < 0)
+    {
+        return -LX_ENFILE;
+    }
+    i0 = lx_fd_free_idx();
+    if(i0 < 0)
+    {
+        return -LX_ENFILE;
+    }
+    s_fd[i0].used = 1u;         /* 先占住，第二次找空位才不会拿回同一个 */
+    i1 = lx_fd_free_idx();
+    if(i1 < 0)
+    {
+        s_fd[i0].used = 0u;
+        return -LX_ENFILE;
+    }
+
+    s_pipe[pi].used    = 1u;
+    s_pipe[pi].readers = 1u;
+    s_pipe[pi].writers = 1u;
+    s_pipe[pi].head    = 0u;
+    s_pipe[pi].tail    = 0u;
+    s_pipe[pi].count   = 0u;
+
+    s_fd[i0].kind     = LX_FD_PIPE_R;
+    s_fd[i0].pipe     = (uint8)pi;
+    s_fd[i0].size     = 0u;
+    s_fd[i0].off      = 0u;
+    s_fd[i0].path[0]  = 0;
+    s_fd[i1].used     = 1u;
+    s_fd[i1].kind     = LX_FD_PIPE_W;
+    s_fd[i1].pipe     = (uint8)pi;
+    s_fd[i1].size     = 0u;
+    s_fd[i1].off      = 0u;
+    s_fd[i1].path[0]  = 0;
+
+    fds[0] = (int32)(3 + i0);
+    fds[1] = (int32)(3 + i1);
+    if(arkrtos_copy_to_user((void *)(unsigned long)ua, fds,
+                            (uint32)sizeof(fds)) != 0)
+    {
+        /* 用户地址写不进去：把刚建的两端整条撤回，不留半条管道。 */
+        s_pipe[pi].used    = 0u;
+        s_pipe[pi].count   = 0u;
+        s_pipe[pi].readers = 0u;
+        s_pipe[pi].writers = 0u;
+        s_fd[i0].used = 0u;
+        s_fd[i1].used = 0u;
+        return -LX_EFAULT;
+    }
+
+    return 0;
+}
+
 /* ---------------------------------------------------------------- 调用 */
 
 static int32 lx_openat(void *p_ctx)
@@ -341,6 +598,8 @@ static int32 lx_openat(void *p_ctx)
     }
 
     lx_copy_str(s_fd[i].path, (uint32)sizeof(s_fd[i].path), path);
+    s_fd[i].kind = LX_FD_FILE;
+    s_fd[i].pipe = 0u;
     s_fd[i].size = size;
     s_fd[i].off  = 0u;
     s_fd[i].used = 1u;
@@ -364,7 +623,39 @@ static int32 lx_close(void *p_ctx)
         return -LX_EBADF;
     }
 
+    if(s_fd[idx].kind != LX_FD_FILE)
+    {
+        int32 pi = (int32)s_fd[idx].pipe;
+
+        if((pi >= 0) && (pi < (int32)LX_PIPE_MAX) && (s_pipe[pi].used != 0u))
+        {
+            if(s_fd[idx].kind == LX_FD_PIPE_R)
+            {
+                if(s_pipe[pi].readers != 0u)
+                {
+                    s_pipe[pi].readers--;
+                }
+            }
+            else
+            {
+                if(s_pipe[pi].writers != 0u)
+                {
+                    s_pipe[pi].writers--;
+                }
+            }
+            if((s_pipe[pi].readers == 0u) && (s_pipe[pi].writers == 0u))
+            {
+                s_pipe[pi].used  = 0u;
+                s_pipe[pi].count = 0u;
+                s_pipe[pi].head  = 0u;
+                s_pipe[pi].tail  = 0u;
+            }
+        }
+    }
+
     s_fd[idx].used = 0u;
+    s_fd[idx].kind = LX_FD_FILE;
+    s_fd[idx].pipe = 0u;
     s_fd[idx].off  = 0u;
     s_fd[idx].size = 0u;
     s_fd[idx].path[0] = 0;
@@ -390,6 +681,14 @@ static int32 lx_read(void *p_ctx)
     if(idx < 0)
     {
         return -LX_EBADF;
+    }
+    if(s_fd[idx].kind != LX_FD_FILE)
+    {
+        if(s_fd[idx].kind != LX_FD_PIPE_R)
+        {
+            return -LX_EBADF;       /* 管道的写端不能读 */
+        }
+        return lx_pipe_read(idx, ua, want);
     }
     if(want == 0u)
     {
@@ -446,7 +745,14 @@ static int32 lx_write(void *p_ctx)
 
     if((fd != 1) && (fd != 2))
     {
-        return -LX_EBADF;       /* 只支持控制台的两个流 */
+        int32 pidx = lx_fd_find(fd);
+
+        /* 文件写仍是 -EROFS（openat 就不让可写打开）；这条路只认管道写端。 */
+        if((pidx < 0) || (s_fd[pidx].kind != LX_FD_PIPE_W))
+        {
+            return -LX_EBADF;
+        }
+        return lx_pipe_write(pidx, ua, want);
     }
     if((ua == 0u) && (want != 0u))
     {
@@ -920,6 +1226,9 @@ int32 arkrtos_linux_abi_try(void *p_svc_ctx)
     case LX_SYS_PREAD64:
         rc = lx_pread64(p_svc_ctx);
         break;
+    case LX_SYS_PIPE2:
+        rc = lx_pipe2(p_svc_ctx);
+        break;
     case LX_SYS_MPROTECT:
         rc = lx_mprotect(p_svc_ctx);
         break;
@@ -1060,7 +1369,19 @@ void arkrtos_linux_abi_reset(void)
         s_fd[i].used = 0u;
         s_fd[i].size = 0u;
         s_fd[i].off  = 0u;
+        s_fd[i].kind = LX_FD_FILE;
+        s_fd[i].pipe = 0u;
         s_fd[i].path[0] = 0;
+    }
+
+    for(i = 0u; i < LX_PIPE_MAX; i++)
+    {
+        s_pipe[i].used    = 0u;
+        s_pipe[i].readers = 0u;
+        s_pipe[i].writers = 0u;
+        s_pipe[i].head    = 0u;
+        s_pipe[i].tail    = 0u;
+        s_pipe[i].count   = 0u;
     }
 
     s_heap_cur = 0u;

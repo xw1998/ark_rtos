@@ -25,6 +25,7 @@
 #if (ARKRTOS_USE_LINUX_ABI == 1)
 #include "linux_hello_blob.h"
 #include "linux_execve_blob.h"
+#include "linux_pipe_blob.h"
 #include "arkrtos_linux_abi.h"
 #endif
 #if (ARKRTOS_USE_ELF_TLS == 1)
@@ -47,6 +48,7 @@
 #if (ARKRTOS_USE_LINUX_ABI == 1)
 #define LX_DEMO_PATH        "/mnt/ram/linux_hello"
 #define LX_EXEC_PATH        "/mnt/ram/linux_execve"
+#define LX_PIPE_PATH        "/mnt/ram/linux_pipe"
 #endif
 #if (ARKRTOS_USE_ELF_TLS == 1)
 #define TLS_DEMO_PATH       "/mnt/ram/tls_main"
@@ -451,6 +453,78 @@ static void task_elf_demo(void)
             }
         }
     }
+#if (ARKRTOS_USE_LINUX_ABI == 1)
+    /* 管道的现场证据：linux_pipe 自己建一条管道，写读一轮后逐字节比对，
+     * 再验四条失败面——空读 -EAGAIN、写端关掉读 EOF、O_CLOEXEC 被拒、
+     * 满时短写与读端关掉回 -EPIPE。判据是退出码 55；任一条 check 不对，
+     * 夹具自己把退出码变成 1，不会把失败的实现读成"看起来跑了"。 */
+    {
+        arkrtos_elf_info_t info;
+        char *pargv[1];
+
+        for(tries = 0u; tries < 100u; tries++)
+        {
+            rc = arkrtos_vfs_write_file(LX_PIPE_PATH, ark_example_linux_pipe,
+                                        (uint32)ARK_EXAMPLE_LINUX_PIPE_LEN);
+            if(rc >= 0)
+            {
+                break;
+            }
+            arkrtos_task_wait_internal(100u);
+        }
+
+        demo_puts("[pipe] write ");
+        demo_puts(LX_PIPE_PATH);
+        demo_puts(" rc=");
+        demo_putu((uint32)rc);
+        demo_puts(" size=");
+        demo_putu((uint32)ARK_EXAMPLE_LINUX_PIPE_LEN);
+        demo_puts("\n");
+
+        if(rc >= 0)
+        {
+            pargv[0] = "linux_pipe";
+            rc = arkrtos_elf_exec(LX_PIPE_PATH, 1, pargv);
+
+            demo_lock();
+            demo_puts("[pipe] exec rc=");
+            demo_putu((uint32)rc);
+            demo_puts("\n");
+            demo_unlock();
+
+            if(rc == ARKRTOS_ELF_OK)
+            {
+                waited = 0u;
+                while((arkrtos_elf_running() != 0) && (waited < DEMO_WAIT_MS))
+                {
+                    arkrtos_task_wait_internal(DEMO_POLL_MS);
+                    waited += DEMO_POLL_MS;
+                }
+
+                demo_lock();
+                demo_puts("[pipe] finished after ");
+                demo_putu(waited);
+                demo_puts(" ms, exit code ");
+                #if (ARKRTOS_USE_EXIT_CODE == 1)
+                if((arkrtos_elf_info(&info) == ARKRTOS_ELF_OK) &&
+                   (info.exit_code_set != 0u))
+                {
+                    demo_putu((uint32)info.exit_code);
+                }
+                else
+                {
+                    demo_puts("(not reported)");
+                }
+                #else
+                demo_puts("(exit code channel off)");
+                #endif
+                demo_puts("\n");
+                demo_unlock();
+            }
+        }
+    }
+#endif
+
 #endif
 
 #if (ARKRTOS_USE_ELF_TLS == 1) && (ARKRTOS_USE_LINUX_ABI == 1)

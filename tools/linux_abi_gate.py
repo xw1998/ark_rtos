@@ -41,8 +41,9 @@
   G. 解析器自检：把合成坏日志喂给同一个判据（去掉 PASS、把退出码改成 3、
      插一行 FAIL、少一条 check），每种坏法都必须被判红。
 
-不覆盖：fork/execve、信号、fd 继承与管道、socket、
-futex、真 mmap 语义（mmap/brk 只在 ELF 窗口内单调分配）。动态链接（PT_INTERP）
+不覆盖：fork/clone、信号、父子 fd 继承（没有 fork 就没有第二个
+进程）、socket、futex、真 mmap 语义；管道（pipe2，非阻塞）已做，读数在
+`[pipe]` 块里，本门禁按行首锚点判它，不靠 [linux] 的行数（mmap/brk 只在 ELF 窗口内单调分配）。动态链接（PT_INTERP）
 另有专门门禁 tools/dynlink_gate.py。以上各项是明确不支持，文档
 `docs/Linux可执行文件兼容-系统调用ABI.md` 里逐条写着；本门禁不为它们背书。
 
@@ -106,6 +107,7 @@ SIGN_KEY_HEADER = """#ifndef ARKRTOS_SIGN_KEY_LOCAL_H
 EXPECT_SYS = {
     "OPENAT": 56,
     "CLOSE": 57,
+    "PIPE2": 59,
     "READ": 63,
     "WRITE": 64,
     "EXIT": 93,
@@ -124,6 +126,10 @@ EXPECT_SYS = {
 
 # 程序自己打印的检查条数（linux_hello.c 里每一个 check() 一行）
 EXPECT_CHECKS = 14
+# 管道夹具（linux_pipe.c）的 check 条数：pipe2 rc / 两个 fd / 写 5 字节 /
+# 读 5 字节 / 内容逐字节 / 空读 -EAGAIN / 关写端 / 读回 EOF / O_CLOEXEC 被拒 /
+# 第二条 pipe2 / 满时短写 / 读回 256 / 排空后再写 / 读端关掉 -EPIPE = 14 条。
+EXPECT_PIPE_CHECKS = 14
 
 FAILS = []
 PASSES = []
@@ -384,7 +390,8 @@ def check_compile_on(la64, key_dir):
 def check_syscall_table():
     src = read_text(os.path.join(ROOT, "kernelsrc/src/arkrtos_linux_abi.c"))
     got = {}
-    for m in re.finditer(r"^#define\s+LX_SYS_([A-Z_]+)\s+\((\d+)u?\)", src, re.M):
+    # 号名里可能有数字（PIPE2），名字类不许漏掉这一类。
+    for m in re.finditer(r"^#define\s+LX_SYS_([A-Z0-9_]+)\s+\((\d+)u?\)", src, re.M):
         got[m.group(1)] = int(m.group(2))
     problems = []
     for name, want in sorted(EXPECT_SYS.items()):
@@ -395,7 +402,7 @@ def check_syscall_table():
     if problems:
         bad("syscall-table", "；".join(problems))
     else:
-        ok("syscall-table", "16 条号与 asm-generic 逐条相等")
+        ok("syscall-table", "%d 条号与 asm-generic 逐条相等" % len(EXPECT_SYS))
 
     la = read_text(os.path.join(ROOT, "kernelsrc/port/loongarch/la64/arkrtos_port.c"))
     rv = read_text(os.path.join(ROOT, "kernelsrc/port/riscv/rv32imac/arkrtos_port.c"))
@@ -458,7 +465,9 @@ def run_qemu(qemu, seconds):
     th.daemon = True
     th.start()
 
-    marker = b"[linux] finished after"
+    # 取最后一块的 marker：[linux] 之后还有 execve 与 pipe 两块，等的若是
+    # [linux] finished，后面两块会被 kill 截掉（实测过）。
+    marker = b"[pipe] finished after"
     deadline = time.time() + seconds
     while time.time() < deadline:
         if marker in b"".join(chunks):
@@ -491,6 +500,11 @@ def judge(text):
     checks_fail = count(lambda s: s.startswith("[linux] ") and "FAIL" in s)
     passline = count(lambda s: s.startswith("[linux] PASS: every syscall answered as specified"))
     exitline = count(lambda s: re.search(r"^\[linux\] finished after \d+ ms, exit code 7$", s) is not None)
+    pipe_fail = count(lambda s: s.startswith("[pipe] ") and "FAIL" in s)
+    pipe_ok = count(lambda s: s.startswith("[pipe] ") and s.rstrip().endswith(" ok"))
+    pipe_pass = count(lambda s: s.startswith("[pipe] PASS: pipe2 two fds"))
+    pipe_exit = count(lambda s: re.search(
+        r"^\[pipe\] finished after \d+ ms, exit code 55$", s) is not None)
     werr = count(lambda s: s.startswith("[linux] write /mnt/ram/linux_hello rc=0"))
     xerr = count(lambda s: s.startswith("[linux] exec rc=0"))
 
@@ -508,6 +522,16 @@ def judge(text):
     if exitline != 1:
         problems.append("缺 `exit code 7`（退出码没回到装载器的读数）")
 
+    # 管道（pipe2）那一块：13 条 check 一条 FAIL 都不许，PASS 行与退出码 55。
+    if pipe_exit != 1:
+        problems.append("缺 `[pipe] finished after <ms>, exit code 55`（管道夹具没跑到底）")
+    if pipe_fail != 0:
+        problems.append("管道夹具里有 %d 条 FAIL" % pipe_fail)
+    if pipe_ok != EXPECT_PIPE_CHECKS:
+        problems.append("[pipe] check 通过条数 %d != %d" % (pipe_ok, EXPECT_PIPE_CHECKS))
+    if pipe_pass != 1:
+        problems.append("缺 `[pipe] PASS: pipe2 two fds ...`")
+
     # 兼容层不许把别人的演示搞坏：同一次启动里这三条必须在
     # 这些读数在 Linux 块之前一定出现（同一次启动），所以「缺了」只可能是
     # 兼容层把别人的演示搞坏了，不可能是调度顺序。
@@ -521,7 +545,8 @@ def judge(text):
         for p in problems:
             notes.append(p)
         return False, notes
-    return True, ["14 条 check 全 ok、PASS 行与 exit code 7 都在，旁路演示未受影响"]
+    return True, ["%d 条 check 全 ok、PASS 行与 exit code 7 都在，管道 %d 条 check 全 ok、退出码 55，旁路演示未受影响"
+                  % (EXPECT_CHECKS, EXPECT_PIPE_CHECKS)]
 
 
 def self_check(good_text):
@@ -536,6 +561,10 @@ def self_check(good_text):
             "[linux] uname -> 0 ok",
             "[linux] uname -> 0 ok\n[linux] read 4 bytes -> 0 FAIL (want 4)"),
         "少一条 check": lambda s: s.replace("[linux] close -> 0 ok\n", ""),
+        "去掉管道 PASS 行": lambda s: s.replace(
+            "[pipe] PASS: pipe2 two fds", "[pipe] (quiet) pipe2 two fds"),
+        "管道退出码改成 1": lambda s: s.replace(
+            "exit code 55", "exit code 1"),
     }
     missed = []
     for name, fn in mutations.items():
@@ -557,7 +586,7 @@ def main(argv):
     ap.add_argument("--rv32-gcc", default="")
     ap.add_argument("--qemu", default="")
     ap.add_argument("--no-build", action="store_true", help="复用已有 ELF")
-    ap.add_argument("--seconds", type=int, default=25)
+    ap.add_argument("--seconds", type=int, default=35)
     ap.add_argument("--keep", action="store_true", help="打印串口日志尾部")
     a = ap.parse_args(argv)
 
@@ -601,7 +630,9 @@ def main(argv):
                     if missed:
                         bad("parser-selfcheck", "这些坏样本没被判红：%s" % ", ".join(missed))
                     else:
-                        ok("parser-selfcheck", "4 种坏法（缺 PASS / 错退出码 / 多 FAIL / 少 check）全被判红")
+                        ok("parser-selfcheck",
+                           "%d 种坏法（Linux 块缺 PASS / 错退出码 / 多 FAIL / 少 check，"
+                           "管道块去 PASS 行 / 改退出码）全被判红" % 6)
                 else:
                     bad("qemu-readout", "；".join(notes))
                     bad("parser-selfcheck", "读数没过，自检无从谈起")
