@@ -628,7 +628,13 @@ int32 arkrtos_softbus_selftest(void)
 /* ------------------------------------------------------------------ */
 
 /* arkrtos_shell.c 的 parse_u32 是 static 的，内核模块链接不到；这里自带
- * 一个等价实现：跳前导空格、纯十进制、无符号、溢出即失败。 */
+ * 一个等价实现：跳前后空白、纯十进制、无符号、溢出即失败。
+ *
+ * 「纯十进制」是逐字算数的：**数字后面还跟着别的东西就失败**。早先这一版
+ * 在遇到第一个非数字字符时就停下并返回已读到的值，于是 `bus stream 7x`
+ * 会老老实实发 7 字节、控制台上看不出任何异常——静默把错参数当对参数用。
+ * 内核 shell 的 parse_u32 一直是严格拒绝的，这里向它看齐：宁可回落到
+ * 默认值，也不给一个「看起来成功了」的错答案。 */
 static int sb_parse_u32(const char *s, uint32 *out)
 {
     uint32 v = 0u;
@@ -654,7 +660,11 @@ static int sb_parse_u32(const char *s, uint32 *out)
         any = 1;
         s++;
     }
-    if(any == 0)
+    while((*s == ' ') || (*s == '\t'))
+    {
+        s++;
+    }
+    if((any == 0) || (*s != '\0'))
     {
         return ARKRTOS_SOFTBUS_ERR_PARSE;
     }

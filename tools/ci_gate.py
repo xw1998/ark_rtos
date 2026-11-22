@@ -2448,6 +2448,138 @@ def check_smp_sched_host():
        "slice/rotation, idle-frame fallback, 0-sp guard): %s" % lines[0])
 
 
+def check_softbus_host():
+    """The softbus integration layer on the host, driving the real component.
+
+    arkrtos_softbus.c is thin -- install, build, pump, info, selftest, shell
+    command -- but every one of those calls lands inside the vendored
+    ark_softbus component (core / frame / qos / rpc / stream / discovery /
+    transport_loopback / port glue). So this check links the component for
+    real (coverage_gate.CASES carries the source list in its "link" slot) and
+    asks the kernel-side entry points to prove the wiring:
+
+      * pump before init answers NOTUP, init is idempotent, pump(0) means one
+        round;
+      * the tier printed by info is the tier that was compiled in
+        (msg<=128 topic<=12 dev<=4 qos=2 rpc=4 stream=1) -- the header's
+        #error guards a mismatch, but only this line proves the values the
+        running image actually uses;
+      * selftest's ten stages (codec / reader / discovery / pubsub /
+        directed+ack / rpc / stream / qos-timeout / errors / topics) all
+        report PASS and the tally says "failed 0";
+      * every shell subcommand and its error paths: pub / rpc / stream data
+        paths, the oversize payload and oversize RPC argument refusals, the
+        reply truncation at the local 32-byte result buffer, the number
+        parser rejecting trailing garbage, the topic table filling up and
+        reporting why, and the usage text for an unknown subcommand.
+
+    The port hooks are stubbed with a virtual clock: ark_bus_port_tick_ms
+    returns g_now and arkrtos_task_wait_internal advances it, so the 200 ms
+    QoS retransmit interval is deterministic instead of a real 12-second
+    wait.
+
+    The compiled-out tier (-DARKRTOS_USE_SOFTBUS=0) must leave an empty
+    translation unit -- nm on the object shows no defined global -- and the
+    test's own off-branch must still run, otherwise a stub would keep
+    answering PASS-shaped questions.
+
+    Not covered: two nodes on a physical UART (two boards, or board plus PC),
+    retransmit jitter under the real tick, and concurrent access to the bus
+    tables from more than one core. Those are board-only facts; see
+    docs/软总线接入.md.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("softbus-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    picks = {}
+    for case in CASES:
+        name, test, mods, defs, markers, incs, _argv = _case(case)
+        if name in ("softbus", "softbusoff"):
+            extra = case[5] if len(case) > 5 else {}
+            picks[name] = (test, mods, defs, incs, markers,
+                           list(extra.get("link", [])))
+    for name in ("softbus", "softbusoff"):
+        if name not in picks:
+            fail("softbus-host", "case %s missing from coverage_gate.CASES" % name)
+            return
+    if len(picks["softbus"][5]) < 10:
+        fail("softbus-host",
+             "the ON case is not linking the component (%d extra sources)"
+             % len(picks["softbus"][5]))
+        return
+
+    with TempDir() as td:
+        lines = []
+        for name in ("softbus", "softbusoff"):
+            test, mods, defs, incs, markers, link = picks[name]
+            exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + defs + incs + COMMON_INC + ["-o", exe, test] + mods + link)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                err = ((r.stderr or "").strip().splitlines() or [""])
+                fail("softbus-host", "%s did not build: %s"
+                     % (name, [x for x in err if x.strip()][-1][:220]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            bad = r.returncode != 0 or markers[0] not in txt or "FAIL" in txt
+            if bad:
+                fail("softbus-host", "%s failed: %s" % (name, txt.strip()[-260:]))
+                return
+            if name == "softbusoff" and " off" not in txt:
+                fail("softbus-host",
+                     "the OFF tier did not take its own branch: %s"
+                     % txt.strip()[-160:])
+                return
+            lines.append(txt.strip().splitlines()[-1])
+
+        # OFF means an empty translation unit: nm on the object must show no
+        # defined global. A surviving stub would still answer questions.
+        off_defs = picks["softbusoff"][2]
+        off_incs = picks["softbusoff"][3]
+        obj = os.path.join(td, "softbus_off.o")
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"] + off_defs
+               + off_incs + COMMON_INC
+               + ["-c", "-o", obj, "kernelsrc/src/arkrtos_softbus.c"])
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            fail("softbus-host", "OFF object did not build: %s"
+                 % ((r.stderr or "").strip().splitlines() or [""])[-1][:200])
+            return
+        nm = os.path.join(os.path.dirname(cc), "nm.exe" if os.name == "nt" else "nm")
+        if not os.path.isfile(nm):
+            nm = shutil.which("nm") or "nm"
+        r = _run_check([nm, obj])
+        nm_txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0:
+            fail("softbus-host", "nm failed on the OFF object: %s"
+                 % nm_txt.strip()[:200])
+            return
+        defined = []
+        for ln in nm_txt.splitlines():
+            parts = ln.split()
+            if len(parts) >= 3 and parts[-2].isupper():
+                defined.append(parts[-1])
+        if defined:
+            fail("softbus-host",
+                 "USE_SOFTBUS=0 object still defines symbols: %s"
+                 % ", ".join(defined[:8]))
+            return
+
+    ok("softbus-host",
+       "arkrtos_softbus drives the real ark_softbus component over the "
+       "in-board loopback on the host (init/pump/info/selftest ten stages, "
+       "all shell subcommands and their error paths), empty TU when off: %s"
+       % lines[0])
+
 def check_modld():
     """VxWorks-style downloadable modules (ARKRTOS_USE_MODLOAD) must be wired.
 
@@ -4391,6 +4523,7 @@ CHECK_TABLE = (
     ("vfs-host", check_vfs_host),
     ("fs-host", check_fs_host),
     ("smp-sched-host", check_smp_sched_host),
+    ("softbus-host", check_softbus_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),

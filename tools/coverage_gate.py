@@ -117,6 +117,29 @@ BLK_OFF_DEFS = [
 # 后者把 MAC 打到 stdout 交给 tools/sign_host_gate.py 与打包器比对，自己
 # 不做判定；前者自带手算 tag 对拍 + 篡改必拒 + 流式/一次性一致，宿主上
 # 失败会自己返回非 0。覆盖面也更宽（多跑了流式入口）。
+# 软总线宿主用例要链**真的组件**：被测的是内核接入层（arkrtos_softbus.c），
+# 但它一调就是 ark_bus_* 整条链（core / frame / qos / rpc / stream /
+# discovery / transport_loopback / port 胶水）。这些源要一起编进来参与链接，
+# 但覆盖率只记接入层那一个 .c —— 组件是同步进来的第三方副本，量它的行数
+# 说明不了本仓库的测试质量。
+SOFTBUS_INCS = ["-I" + p for p in EXTRA_INCLUDES] + [
+    "-Ikernelsrc/shell",
+    "-Ikernelsrc/shell/ark_shell",
+    "-Ikernelsrc/components/ark_softbus/src",
+    "-Ikernelsrc/components/ark_softbus/port",
+]
+
+SOFTBUS_DEFS = ["-DARKRTOS_USE_SOFTBUS=1"] + ["-D" + x for x in SOFTBUS_TIER_DEFS]
+
+SOFTBUS_LINK = (
+    [os.path.join("kernelsrc/components/ark_softbus/src", n)
+     for n in sorted(os.listdir(os.path.join(ROOT,
+                                             "kernelsrc/components/ark_softbus/src")))
+     if n.startswith("ark_bus_") and n.endswith(".c")]
+    + ["kernelsrc/components/ark_softbus/src/transport/transport_loopback.c",
+       "kernelsrc/components/ark_softbus/port/ark_bus_hal_arkrtos.c"]
+)
+
 CASES = [
     ("utest", "tools/utest_host_selftest.c",
      ["kernelsrc/src/arkrtos_utest.c"], [], "HOST-SELFTEST OK"),
@@ -521,6 +544,16 @@ CASES = [
      ["-DARKRTOS_USE_SMP_SCHED=0",
       "-fno-asynchronous-unwind-tables"],
      "SMP-SCHED-HOST OK"),
+    ("softbus", "kernelsrc/tests/test_softbus_host.c",
+     ["kernelsrc/src/arkrtos_softbus.c"],
+     SOFTBUS_DEFS + ["-fno-asynchronous-unwind-tables"],
+     "SOFTBUS-HOST OK",
+     {"incs": SOFTBUS_INCS, "link": SOFTBUS_LINK}),
+    ("softbusoff", "kernelsrc/tests/test_softbus_host.c",
+     ["kernelsrc/src/arkrtos_softbus.c"],
+     ["-DARKRTOS_USE_SOFTBUS=0", "-fno-asynchronous-unwind-tables"],
+     "SOFTBUS-HOST OK",
+     {"incs": SOFTBUS_INCS}),
 ]
 
 

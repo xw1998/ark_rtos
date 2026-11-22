@@ -39,6 +39,7 @@
   "arkrtos_shell_auth": 98.7,
   "arkrtos_smp_sched": 97.89,
   "arkrtos_smp": 89.19,
+  "arkrtos_softbus": 94.9,
   "arkrtos_sync": 99.22,
   "arkrtos_tickless": 98.97,
   "arkrtos_timer": 100.0,
