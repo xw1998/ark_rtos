@@ -3375,6 +3375,93 @@ def check_shell_cfg_host():
        "ACK-NAK over a 4-chunk record, timeout, validate and write "
        "failures): %s" % last)
 
+def check_shell_image_host():
+    """Image and installer command families on the host.
+
+    arkrtos_shell_image.c is where a wrong answer costs hardware: "install"
+    erases the flash of a slot before it receives the frame, so erasing a slot
+    that is still executing stops the running app with USGFAULT and the
+    operator only sees "install ok"; "info" prints the pool census people size
+    their images from; "app"/"drv" are the only way to see which record is
+    RUNNING.  This case links the real file against a fixture partition table,
+    programmable loader/installer return codes and a fixed-shape console, and
+    asserts on 168 checks:
+      * info prints layout / pool census / task and tick lines, and a pool map
+        that is ordered by base, not by index, and that skips FREE records,
+        base==0 records and anything below the last printed base, saying
+        "(pool is empty)" when nothing printed;
+      * app lists only APP records (an EMPTY record is still listed) and
+        prints the held reason per row; start / stop / uninstall each name
+        their own usage, success and failure lines; install refuses a slot
+        number outside fixed-slot mode, refuses an out-of-range / NULL slot,
+        names the missing file system, and reports the installer rc;
+      * app swap (compiled in with -DARKRTOS_USE_TASK_SWAP=1) reports
+        ERR_STATE, SWAP_ERR_LAYOUT and ERR_BUSY as three different lines;
+      * drv does the same over DRIVER records;
+      * install refuses a bare command in fixed-slot mode, refuses a slot that
+        cannot be parsed / does not exist / exists only in auto mode, and in
+        fixed mode walks the whole slot table: FREE records and non-overlapping
+        records are skipped, an overlapping record that is not running is
+        skipped, and an overlapping RUNNING record is stopped first (or the
+        erase is refused when the stop fails, and a failed erase is reported);
+      * after the one-shot window the console is drained (N reads then 0) and
+        the installer result is reported.
+
+    Honest limits:
+      1) nothing is really started, stopped or installed: every loader and
+         installer entry point is a programmable return code;
+      2) the partition table and arkrtos_ptable_stats() are fixtures, and
+         arkrtos_dev_read_internal()/arkrtos_shell_uart_open() are stubs, so
+         this says nothing about a real UART or a real flash erase;
+      3) the apprun and flashapp blocks are NOT compiled here: the loongarch64
+         board sets ARKRTOS_USE_APPRUN=0 and ARKRTOS_USE_FLASHAPP=0 (that
+         layout has neither an apprun window nor a flash app area), so those
+         two families have no host reading yet.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("shellimage-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    pick = None
+    for case in CASES:
+        name, test, mods, defs, markers, incs, _argv = _case(case)
+        if name == "shellimage":
+            pick = (test, mods, defs, incs, markers)
+            break
+    if pick is None:
+        fail("shellimage-host", "case shellimage missing from coverage_gate.CASES")
+        return
+
+    test, mods, defs, incs, markers = pick
+    with TempDir() as td:
+        exe = os.path.join(td, "shellimage" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            err = (r.stderr or "").strip().splitlines() or [""]
+            fail("shellimage-host", "the case did not build: %s"
+                 % [x for x in err if x.strip()][-1][:220])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or markers[0] not in txt or "FAIL" in txt:
+            fail("shellimage-host", txt.strip()[-260:])
+            return
+        last = txt.strip().splitlines()[-1]
+
+    ok("shellimage-host",
+       "arkrtos_shell_image on the host (info pool map ordering / app and drv "
+       "usage + start + stop + uninstall + install refusals / swap ERR_STATE, "
+       "LAYOUT and BUSY / install stop-before-erase with failing stop and "
+       "failing erase / console drain): %s" % last)
+
 def check_modld():
     """VxWorks-style downloadable modules (ARKRTOS_USE_MODLOAD) must be wired.
 
@@ -5328,6 +5415,7 @@ CHECK_TABLE = (
     ("ushell-host", check_shell_ushell_host),
     ("shellmod-host", check_shell_mod_host),
     ("shellcfg-host", check_shell_cfg_host),
+    ("shellimage-host", check_shell_image_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),
