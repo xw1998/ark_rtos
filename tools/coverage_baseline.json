@@ -47,6 +47,7 @@
   "arkrtos_tickless": 98.97,
   "arkrtos_timer": 100.0,
   "arkrtos_trace": 100.0,
+  "arkrtos_ushell": 99.17,
   "arkrtos_utest": 83.65,
   "arkrtos_vfs": 98.7,
   "arkrtos_vfs_lfs": 99.0,

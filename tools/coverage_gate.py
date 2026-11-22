@@ -666,6 +666,21 @@ CASES = [
                "-Ikernelsrc/fs/littlefs",
                "-Ikernelsrc/components/ark_vfs/include",
                "-Ikernelsrc/components/ark_softbus/include"]}),
+    # --- 2026-11-22：用户命令注册表（arkrtos_shell_ushell）----------------
+    # SVC 0x1A 的内核侧：注册表 + 跳板。板级口径与 shellmisc 同一份；不需要
+    # 额外开关。用例自己提供控制台命令表与分区表（跳板靠指针反查、靠分区
+    # 表判断处理器是否还在已装载镜像内）。
+    ("ushell", "kernelsrc/tests/test_shell_ushell_host.c",
+     ["kernelsrc/shell/arkrtos_shell_ushell.c"],
+     ['-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',
+      SIGN_KEY_DEF, "-fno-asynchronous-unwind-tables"]
+     + ["-D" + x for x in SOFTBUS_TIER_DEFS],
+     "USHELL-HOST OK",
+     {"incs": ["-Iboard/qemu_loongarch64", "-Ikernelsrc/shell",
+               "-Ikernelsrc/shell/ark_shell", "-Ikernelsrc/fs",
+               "-Ikernelsrc/fs/littlefs",
+               "-Ikernelsrc/components/ark_vfs/include",
+               "-Ikernelsrc/components/ark_softbus/include"]}),
 ]
 
 

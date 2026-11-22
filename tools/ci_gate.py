@@ -3113,6 +3113,93 @@ def check_shell_misc_host():
        "arkrtos_shell_misc on the host (history / uname / free / ps / which / "
        "man / dmesg / hwsafe / swap / lxstat): %s" % last)
 
+def check_shell_ushell_host():
+    """The user-command registry (arkrtos_shell_ushell.c) on the host.
+
+    This is the kernel side of SVC 0x1A: an App registers a command name and
+    a handler, the kernel copies the strings into its own RAM, appends a
+    trampoline row to the console command table, and refuses to call the
+    handler once the image that owns it is gone.  Its failure modes are the
+    quiet kind: a registry row that keeps a pointer the caller has already
+    freed, a table row left behind after unregistration (help then lists a
+    command that cannot run), or a trampoline that jumps into erased Flash
+    instead of saying the handler is gone.
+
+    So this case links the real file against stubs for the console (output
+    capture + the command table) and the partition table, and asserts on 141
+    checks:
+      * case-insensitive duplicate detection over the whole name (a prefix
+        is not a match), and case-insensitive unregistration;
+      * the copy bounds: exactly NAME_MAX characters is accepted and one
+        more is refused; help is clipped to HELP_MAX; a NULL help becomes
+        the empty string;
+      * four PARAM refusals with no registry state moved, plus the two
+        different FULLs (kernel table full is checked before the registry
+        fills), and slot reuse after a free;
+      * unregistration shifting the later rows down so help order has no
+        hole, with the cleared slot's strings wiped;
+      * the trampoline: no argv / no argv[0] / argc <= 0 / unmatched name
+        all answer "user command not available" and never call; an entry
+        whose handler is outside every loaded slot answers "handler no
+        longer available"; boundary (first byte inside, one past the end
+        outside), FREE / base 0 / not-loaded slots skipped, slot_max clamp,
+        and a NULL partition table treated as "cannot prove it is alive";
+      * a successful call returns the handler's code and raises
+        arkrtos_kernel_ushell_active only for the duration of the call;
+      * arkrtos_shell_print_n chunks at 64 bytes (exact multiples emit no
+        empty tail), copies only the first len bytes, and refuses NULL.
+
+    Honest limits:
+      1) no SVC transition and no user RAM window check: the entry is called
+         directly, so "an App can really reach this" is not shown;
+      2) the active flag is only observed to be raised and dropped -- what
+         the task side does with it is covered by the task case;
+      3) the one uncovered line is the NULL/NULL arm of the name comparison:
+         every caller checks for NULL before calling, so it is structurally
+         unreachable on this path.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("ushell-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    pick = None
+    for case in CASES:
+        name, test, mods, defs, markers, incs, _argv = _case(case)
+        if name == "ushell":
+            pick = (test, mods, defs, incs, markers)
+            break
+    if pick is None:
+        fail("ushell-host", "case ushell missing from coverage_gate.CASES")
+        return
+
+    test, mods, defs, incs, markers = pick
+    with TempDir() as td:
+        exe = os.path.join(td, "ushell" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            err = (r.stderr or "").strip().splitlines() or [""]
+            fail("ushell-host", "the case did not build: %s"
+                 % [x for x in err if x.strip()][-1][:220])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or markers[0] not in txt or "FAIL" in txt:
+            fail("ushell-host", txt.strip()[-260:])
+            return
+        last = txt.strip().splitlines()[-1]
+
+    ok("ushell-host",
+       "arkrtos_shell_ushell on the host (register / unregister / trampoline "
+       "alive check / chunked output): %s" % last)
+
 def check_modld():
     """VxWorks-style downloadable modules (ARKRTOS_USE_MODLOAD) must be wired.
 
@@ -5063,6 +5150,7 @@ CHECK_TABLE = (
     ("mini-host", check_mini_host),
     ("task-host", check_task_host),
     ("shellmisc-host", check_shell_misc_host),
+    ("ushell-host", check_shell_ushell_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),
