@@ -442,6 +442,12 @@ CASES = [
      ["kernelsrc/src/arkrtos_fdt_res.c"],
      ["-DARKRTOS_USE_FDT_RES=1", "-DARKRTOS_USE_FDT=1",
       "-fno-asynchronous-unwind-tables"], "FDT-RES-HOST OK"),
+    # --- 2026-11-22 新增：扁平设备树解析器本体（1477 行，用例在宿主侧手工
+    # 拼出整块 DTB：头 + 结构块 + 字符串块，再逐字段改坏） ---
+    ("fdt", "kernelsrc/tests/test_fdt_host.c",
+     ["kernelsrc/src/arkrtos_fdt.c"],
+     ["-DARKRTOS_USE_FDT=1", "-fno-asynchronous-unwind-tables"],
+     "FDT-HOST OK"),
 ]
 
 

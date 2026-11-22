@@ -1735,6 +1735,81 @@ def check_fdtres_host():
     ok("fdtres-host",
        "timebase and timer-node decisions (8 refusal codes + OK): %s" % last)
 
+def check_fdt_host():
+    """Flattened device tree reader on host: the refusals, not the happy path.
+
+    arkrtos_fdt.c is the base of the whole FDT family (console path, timer
+    node, overlay), all wrapped in #if (ARKRTOS_USE_FDT == 1) and off by
+    default.  A blob that parses "almost right" is worse than one that is
+    refused: the kernel would then read a node name from the wrong offset or
+    walk a tree whose END tokens do not balance, and every later symptom
+    would look like a driver bug.
+
+    Pinned here, with the case building real DTB blobs byte by byte (header +
+    structure block + strings block) and then breaking one field at a time:
+      * every header field has its own code -- null/short (ARG), bad magic,
+        version below 16 or last_comp above version, totalsize past the
+        buffer, misaligned offsets;
+      * unbalanced BEGIN/END, END at depth 0, bytes after END, an unknown
+        token, a node name without a NUL, a property name offset outside the
+        strings block, and a property length past the block are all FORMAT;
+      * nesting past ARKRTOS_FDT_MAX_DEPTH is DEPTH, and init is
+        transactional -- a bad blob leaves the previous tree usable;
+      * the read side: depth-first order, depth counted from 1, meta nodes
+        (__symbols__ / __fixups__ / __local_fixups__) excluded from both the
+        count and the walk *including their subtrees* (the two paths used to
+        disagree; that is what this case found), property / string / u32
+        cells / enabled status, absolute paths, phandle and linux,phandle,
+        aliases in string and phandle form, and stdout-path in all three
+        shapes plus every option spelling that must be refused.
+
+    Not covered: that a board's real dtb parses (tools/fdt_gate.py) and that
+    any driver actually uses the node it found -- separate gates.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("fdt-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    pick = None
+    link = []
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name == "fdt":
+            extra = case[5] if len(case) > 5 else {}
+            pick = (_markers, test, mods, defs, incs)
+            link = list(extra.get("link", []))
+            break
+    if pick is None:
+        fail("fdt-host", "case fdt missing from coverage_gate.CASES")
+        return
+
+    markers, test, mods, defs, incs = pick
+    with TempDir() as td:
+        exe = os.path.join(td, "fdthost" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods + link)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+            fail("fdt-host", "did not build: %s" % tail[:200])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or markers[0] not in txt:
+            fail("fdt-host", "failed: %s" % txt.strip()[:220])
+            return
+        last = txt.strip().splitlines()[-1]
+
+    ok("fdt-host",
+       "device tree refusals and lookups (8 codes + meta/path/phandle): %s"
+       % last)
+
 def check_elf_loader():
     """ELF64 executable loader (ARKRTOS_USE_ELF) must be wired, not decorative.
 
@@ -3879,6 +3954,7 @@ CHECK_TABLE = (
     ("shellauth-host", check_shellauth_host),
     ("fdtconsole-host", check_fdtconsole_host),
     ("fdtres-host", check_fdtres_host),
+    ("fdt-host", check_fdt_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),

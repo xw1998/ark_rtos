@@ -280,6 +280,7 @@ static int fdt_scan(uint32 *count_out)
     uint32 end = fdt_struct_end();
     uint32 depth = 0u;
     uint32 count = 0u;
+    uint32 skip_depth = 0u;
 
     for(;;)
     {
@@ -316,6 +317,10 @@ static int fdt_scan(uint32 *count_out)
                 return ARKRTOS_FDT_ERR_FORMAT;
             }
             depth--;
+            if((skip_depth != 0u) && (depth < skip_depth))
+            {
+                skip_depth = 0u;
+            }
             continue;
         }
         if(tok == FDT_TOK_PROP)
@@ -353,7 +358,15 @@ static int fdt_scan(uint32 *count_out)
                 s_fdt.model = fdt_find_model(off);
                 continue;
             }
-            if(fdt_is_meta_name(name) == 0)
+            /* 标签表节点连同整棵子树都不计入：arkrtos_fdt_next() 走到
+             * 它们时整段跳过（__local_fixups__ 底下通常真的挂着节点），
+             * 这里若只跳过节点本身，两边的节点数就会对不上。 */
+            if((depth == 2u) && (fdt_is_meta_name(name) != 0))
+            {
+                skip_depth = depth;
+                continue;
+            }
+            if(skip_depth == 0u)
             {
                 count++;
             }
