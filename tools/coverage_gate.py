@@ -245,6 +245,16 @@ CASES = [
     # --- 2026-11-22 新增：设备端布局解析（配置区记录 + 固定槽表 + 发布）---
     ("layout", "kernelsrc/tests/test_layout_host.c",
      ["kernelsrc/src/arkrtos_layout.c"], [], "LAYOUT-HOST OK"),
+    # --- 2026-11-22 新增：跨复位崩溃日志（USE_CRASH_LOG 开/关是两段代码，
+    # 关档连 journal 全局量都不存在）。宿主编译时把日志宏编掉
+    # （-DARKRTOS_LOG_LEVEL=0），该模块只依赖 ptable / tick / 临界区三个符号。
+    ("crash", "kernelsrc/tests/test_crash_host.c",
+     ["kernelsrc/src/arkrtos_crash.c"],
+     ["-DARKRTOS_LOG_LEVEL=0"], "CRASH-HOST OK  "),
+    ("crash-off", "kernelsrc/tests/test_crash_host.c",
+     ["kernelsrc/src/arkrtos_crash.c"],
+     ["-DARKRTOS_LOG_LEVEL=0", "-DARKRTOS_USE_CRASH_LOG=0"],
+     "CRASH-HOST OFF OK"),
     # --- 2026-11-22 新增：硬件安全态 / 遗言（HW_SAFE 开/关是两段代码）---
     ("hwsafe", "kernelsrc/tests/test_hwsafe_host.c",
      ["kernelsrc/src/arkrtos_hwsafe.c"],

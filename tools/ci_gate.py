@@ -2485,6 +2485,77 @@ def check_layout_host():
            "layout record validate/scan/adopt/write + live reason code (%s)"
            % txt.strip().splitlines()[-1])
 
+def check_crash_host():
+    """The cross-reset crash journal, on host, at both grades.
+
+    arkrtos_crash.c is the half of fault handling that has to outlive the reset
+    it is reacting to: which slot keeps crashing, why, and whether it has
+    already been held out of autostart. The failures it exists for are quiet:
+
+      * identity filed under a slot index instead of the image address, so the
+        re-scan after the table moves charges a newcomer with someone else's
+        crashes (or loses the history of the image that is still installed);
+      * the "nothing claims this address" sweep reporting a change for entries
+        that were already blank -- then every boot commits a new sequence
+        number for nothing (found by this test, fixed in the module);
+      * the hold not being re-applied on every boot, so an operator's manual
+        "app start" from the previous session survives the reset;
+      * a limit of 0 read as "unlimited" instead of "use the compiled default",
+        which would silently switch the policy off;
+      * the OFF grade still touching the partition table, or still reporting a
+        count / a disable for a fault it never recorded.
+
+    Two builds, because the module is two blocks of code: ON (the real journal,
+    which the test links and drives directly) and OFF (every entry point
+    compiled to a constant, no ledger at all). The test supplies partition
+    table / tick / critical-section doubles and compiles the logging macros out
+    with -DARKRTOS_LOG_LEVEL=0.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("crash-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    picks = {}
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name in ("crash", "crash-off"):
+            picks[name] = (test, mods, defs, incs)
+    for need in ("crash", "crash-off"):
+        if need not in picks:
+            fail("crash-host", "case %s missing from coverage_gate.CASES" % need)
+            return
+
+    results = []
+    for case_name, marker in (("crash", "CRASH-HOST OK"),
+                              ("crash-off", "CRASH-HOST OFF OK")):
+        test, mods, defs, incs = picks[case_name]
+        with TempDir() as td:
+            exe = os.path.join(td, case_name + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+                fail("crash-host",
+                     "%s did not build: %s" % (case_name, tail[:200]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            if r.returncode != 0 or marker not in txt:
+                fail("crash-host",
+                     "%s failed: %s" % (case_name, txt.strip()[:220]))
+                return
+            results.append(txt.strip().splitlines()[-1])
+    ok("crash-host",
+       "journal rebind/sweep/publish/mini + OFF constants: %s | %s"
+       % (results[0], results[1]))
+
 def check_hwsafe_host():
     """HW_SAFE on/off: who gets driven at the moment a task dies, and on what.
 
@@ -3139,6 +3210,7 @@ CHECK_TABLE = (
     ("log-host", check_log_host),
     ("ptable-host", check_ptable_host),
     ("layout-host", check_layout_host),
+    ("crash-host", check_crash_host),
     ("hwsafe-host", check_hwsafe_host),
     ("audit-host", check_audit_host),
     ("mpu-host", check_mpu_host),

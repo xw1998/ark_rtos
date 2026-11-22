@@ -236,9 +236,22 @@ static void arkrtos_crash_scan_rebind(arkrtos_partition_table_t *p_pt,
             /* Nothing carries this address: the entry describes a different
              * image - replaced, moved elsewhere, or the record was reused.
              * Drop it rather than charge a newcomer with someone else's
-             * crashes. */
-            arkrtos_crash_clear_entry(i);
-            *p_changed = 1u;
+             * crashes.
+             *
+             * An entry that is already blank is not a change: most slots have
+             * no history at all, and clearing them "again" would report a
+             * change on every single boot - which defeats the caller's
+             * "commit only when something moved" rule and grows the sequence
+             * number for nothing. */
+            if((p_j->base[i]        != 0u) ||
+               (p_j->crash_cnt[i]   != 0u) ||
+               (p_j->last_reason[i] != (uint32)ARKRTOS_CRASH_REASON_NONE) ||
+               (p_j->dis_reason[i]  != (uint32)ARKRTOS_CRASH_REASON_NONE) ||
+               (p_j->dis_tick[i]    != 0u))
+            {
+                arkrtos_crash_clear_entry(i);
+                *p_changed = 1u;
+            }
         }
     }
 }
