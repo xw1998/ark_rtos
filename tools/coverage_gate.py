@@ -436,6 +436,12 @@ CASES = [
      ["kernelsrc/src/arkrtos_fdt_console.c"],
      ["-DARKRTOS_USE_FDT_CONSOLE=1", "-DARKRTOS_USE_FDT=1",
       "-fno-asynchronous-unwind-tables"], "FDT-CONSOLE-HOST OK"),
+    # --- 2026-11-22 新增：定时器 / 时基的设备树核对（驱动配置源）---
+    # 七个 FDT 查询全部打桩，节点表由用例按需搭；不引入真实 DTB。
+    ("fdtres", "kernelsrc/tests/test_fdt_res_host.c",
+     ["kernelsrc/src/arkrtos_fdt_res.c"],
+     ["-DARKRTOS_USE_FDT_RES=1", "-DARKRTOS_USE_FDT=1",
+      "-fno-asynchronous-unwind-tables"], "FDT-RES-HOST OK"),
 ]
 
 

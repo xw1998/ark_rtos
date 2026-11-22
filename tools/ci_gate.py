@@ -1665,6 +1665,76 @@ def check_fdtconsole_host():
        "stdout-path decisions (8 refusal codes + OK) and truncated-copy safety: %s"
        % last)
 
+def check_fdtres_host():
+    """Timer / timebase check on host: every refusal names a tree fact.
+
+    arkrtos_fdt_res.c is wrapped in #if (ARKRTOS_USE_FDT_RES == 1), default 0,
+    so a default build never compiles it.  Its output is a frequency the
+    kernel's tick depends on, and a wrong-but-plausible answer shows up as
+    "time runs fast/slow", which reads like a scheduler bug.  So the point of
+    this case is the *reason codes*: "the tree did not write it" and "the tree
+    disagrees with the board" must stay distinguishable.
+
+    Pinned here, with the seven FDT queries stubbed (node table built by the
+    case, no real DTB):
+      * NULL expect / NULL out -> NO_CPUS without touching the tree;
+      * not initialised or /cpus missing -> NO_CPUS; missing timebase ->
+        NO_TIMEBASE only when one is expected (expect 0 means "do not check");
+      * differing timebase -> TIMEBASE_DIFF with the value still in out;
+      * timer_compat == 0 stops after the timebase;
+      * iterator failure, a walk with only disabled / other-compatible nodes,
+        and a malformed-blob error all -> NO_TIMER;
+      * missing reg / reg mismatch / missing clock-frequency / clock mismatch
+        are four codes, and earlier reads stay in out;
+      * expect fields at 0 skip their check; long node names are copied
+        truncated with a NUL; reason names are stable and unknown -> "?".
+
+    Not covered: real DTB parsing (arkrtos_fdt.c's own case) and whether the
+    timer really ticks at that rate -- that is a board reading.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("fdtres-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    pick = None
+    link = []
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name == "fdtres":
+            extra = case[5] if len(case) > 5 else {}
+            pick = (_markers, test, mods, defs, incs)
+            link = list(extra.get("link", []))
+            break
+    if pick is None:
+        fail("fdtres-host", "case fdtres missing from coverage_gate.CASES")
+        return
+
+    markers, test, mods, defs, incs = pick
+    with TempDir() as td:
+        exe = os.path.join(td, "fdtreshost" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods + link)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+            fail("fdtres-host", "did not build: %s" % tail[:200])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or markers[0] not in txt:
+            fail("fdtres-host", "failed: %s" % txt.strip()[:220])
+            return
+        last = txt.strip().splitlines()[-1]
+
+    ok("fdtres-host",
+       "timebase and timer-node decisions (8 refusal codes + OK): %s" % last)
+
 def check_elf_loader():
     """ELF64 executable loader (ARKRTOS_USE_ELF) must be wired, not decorative.
 
@@ -3808,6 +3878,7 @@ CHECK_TABLE = (
     ("shell-auth", check_shell_auth),
     ("shellauth-host", check_shellauth_host),
     ("fdtconsole-host", check_fdtconsole_host),
+    ("fdtres-host", check_fdtres_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),
