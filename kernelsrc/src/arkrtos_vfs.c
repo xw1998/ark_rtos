@@ -388,20 +388,23 @@ uint8 arkrtos_vfs_ready(void)
 int32 arkrtos_vfs_mount_volume(const char *dev, uint32 offset, uint32 size,
                              const char *target)
 {
-#if (ARKRTOS_USE_VFS_LFS == 0)
-    /* 本构建没有 littlefs 桥，而门面又不提供「自带 fsdrv」的入口，
-     * 所以这里确实没任何能做成的事——明说，不去假装挂上了一个空卷。 */
-    (void)dev; (void)offset; (void)size; (void)target;
-    return ARK_E_NOSYS;
-#else
-    ark_vfs_port_blk_t vol;
-    int32 rc;
-
+    /* 参数与就绪面的校验先于能力判断：调用方写错了参数（或根本没 init），
+     * 该说 INVAL 就别说「本构建不支持」——那会把一个能改的错说成改不了的
+     * 事实，而两者对上层是完全不同的处置。 */
     if ((g_vfs_ready == 0u) || (dev == NULL) || (target == NULL) ||
         (target[0] == '\0'))
     {
         return ARK_E_INVAL;
     }
+#if (ARKRTOS_USE_VFS_LFS == 0)
+    /* 本构建没有 littlefs 桥，而门面又不提供「自带 fsdrv」的入口，
+     * 所以到这里确实没任何能做成的事——明说，不去假装挂上了一个空卷。 */
+    (void)offset; (void)size;
+    return ARK_E_NOSYS;
+#else
+    ark_vfs_port_blk_t vol;
+    int32 rc;
+
     if (g_vol_target[0] != '\0')
     {
         /* arkrtos_fs 只有一个卷，这是它公开的限制，不是这里加的 */
@@ -710,6 +713,8 @@ typedef struct
     uint8  seq;       /* 发给这个槽的最后一个序号，1..255 */
     uint8  is_dir;
     uint8  append;    /* 打开时带了 O_APPEND */
+    uint8  has_pending; /* readdir 名字装不下时暂存的目录项 */
+    struct ark_vfs_dirent pending;  /* 被下层消费掉但还没交给调用方的那一项 */
     /* 内核侧镜像的读写位置与大小。为什么要镜像：两个文件系统对
      * seek 的返回约定不一样——ramfs 回「新的偏移」，littlefs 桥回 0。
      * 直接用下层的返回值当 POSIX lseek 的返回值，在 littlefs 卷上会
@@ -777,6 +782,7 @@ static int32 app_slot_take(int32 fd, uint32 flags)
             g_app_fds[i].owner  = (uint32)arkrtos_current_task_id;
             g_app_fds[i].is_dir = (uint8)(((flags & ARKRTOS_VFS_O_DIRECTORY) != 0u) ? 1u : 0u);
             g_app_fds[i].append = (uint8)(((flags & ARKRTOS_VFS_O_APPEND) != 0u) ? 1u : 0u);
+            g_app_fds[i].has_pending = 0u;
             g_app_fds[i].pos    = 0u;
             g_app_fds[i].size   = 0u;
             return (int32)((uint32)ARKRTOS_VFS_HANDLE_FLAG |
@@ -792,6 +798,7 @@ static void app_slot_release(uint32 i)
     g_app_fds[i].fd     = -1;
     g_app_fds[i].owner  = 0u;
     g_app_fds[i].is_dir = 0u;
+    g_app_fds[i].has_pending = 0u;
     /* seq 留着：旧句柄就靠它失效 */
 }
 
@@ -864,9 +871,9 @@ static int32 app_open_once(const char *path, uint32 flags)
         uint32 slot = (uint32)handle & 0xFFu;
         g_app_fds[slot].size = (st.size > 0) ? (uint32)st.size : 0u;
     }
-    /* O_APPEND 在两个文件系统里都只在 open 时定位一次（ramfs 与 littlefs 桥
-     * 都是「打开时把位置置为文件尾，之后顺序走」），所以镜像也照这个来；
-     * 否则第一个 write 的位置就会与设备真实位置分叉。 */
+    /* O_APPEND 的初始位置就在文件尾；之后每次写由 app_write 自己再定位
+     * 到末尾（见那里的 POSIX 说明）。否则第一个 write 的位置就会与设备
+     * 真实位置分叉。 */
     if (g_app_fds[(uint32)handle & 0xFFu].append != 0u)
     {
         g_app_fds[(uint32)handle & 0xFFu].pos =
@@ -927,6 +934,16 @@ int32 arkrtos_vfs_app_write(int32 handle, const uint8 *buf, uint32 len)
     rc = app_fd_lookup(handle, &slot);
     if (rc != ARK_VFS_OK) { return rc; }
     if (g_app_fds[slot].is_dir != 0u) { return ARK_E_ISDIR; }
+    if (g_app_fds[slot].append != 0u)
+    {
+        /* POSIX：带 O_APPEND 的每一次写都落在文件尾，和中间做过什么
+         * seek 无关。两个文件系统都只把「打开时定位到末尾」当一次性
+         * 动作，所以这里每次写之前自己再定位一次，镜像位置跟着回尾。 */
+        int32 wrc = ark_vfs_lseek(g_app_fds[slot].fd, (ark_off_t)0, ARK_SEEK_END);
+
+        if (wrc < 0) { return wrc; }
+        g_app_fds[slot].pos = g_app_fds[slot].size;
+    }
     n = ark_vfs_write(g_app_fds[slot].fd, (const void *)buf, (ark_size_t)len);
     if (n > 0)
     {
@@ -1014,9 +1031,18 @@ int32 arkrtos_vfs_app_readdir(int32 handle, char *name, uint32 cap,
     if (rc != ARK_VFS_OK) { return rc; }
     if (g_app_fds[slot].is_dir == 0u) { return ARK_E_NOTDIR; }
 
-    rc = ark_vfs_readdir(g_app_fds[slot].fd, &ent);
-    if (rc == ARK_E_NOENT) { return 1; }        /* 列完了：不是错误 */
-    if (rc != ARK_VFS_OK)  { return rc; }
+    if (g_app_fds[slot].has_pending != 0u)
+    {
+        /* 上一次因为调用方缓冲装不下而没交出去的那一项。 */
+        ent = g_app_fds[slot].pending;
+        g_app_fds[slot].has_pending = 0u;
+    }
+    else
+    {
+        rc = ark_vfs_readdir(g_app_fds[slot].fd, &ent);
+        if (rc == ARK_E_NOENT) { return 1; }    /* 列完了：不是错误 */
+        if (rc != ARK_VFS_OK)  { return rc; }
+    }
 
     while ((ent.name[n] != '\0') && ((n + 1u) < cap))
     {
@@ -1025,6 +1051,10 @@ int32 arkrtos_vfs_app_readdir(int32 handle, char *name, uint32 cap,
     }
     if (ent.name[n] != '\0')
     {
+        /* 下层游标已经越过这一项了：留下来下次再交，否则调用方换个
+         * 大缓冲重列时这一条就凭空消失了。 */
+        g_app_fds[slot].pending     = ent;
+        g_app_fds[slot].has_pending = 1u;
         name[0] = '\0';
         return ARK_E_NAMETOOLONG;   /* 缓冲区装不下整层名字，别回半截 */
     }

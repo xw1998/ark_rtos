@@ -1954,6 +1954,86 @@ def check_vfslfs_host():
        "littlefs->ark_vfs bridge on a RAM fake (single writer, BUSY, NOSYS): %s"
        % last)
 
+def check_vfs_host():
+    """arkrtos_vfs facade (arkrtos_vfs.c) on the host, linked against the real
+    ark_vfs core and the real ramfs; only the board-side port layer is stubbed
+    (block window, arkrtos_fs, littlefs bridge, log, task status).
+
+    So the namespace behaviour under test is the real one: /dev is mounted by
+    the port before init, / after it, longest-prefix lookup, the mount table,
+    and the core fd table all come from production code.
+
+    Pinned here:
+
+      * init is idempotent, and a failing step leaves the facade NOT ready --
+        no "half ready" state that later reports a zero-length mount table;
+      * the standard directories are created, and directory-slot exhaustion
+        warns instead of pretending /mnt and /media exist;
+      * mount_volume validates parameters before capability (INVAL for a bad
+        call, NOSYS only when the build really has no littlefs bridge), refuses
+        a second volume, a geometry mismatch and a broken block window, and
+        always leaves "volume mounted but mount point missing" cleaned up;
+      * the app handle layer is a capability, not a number: handle = tag | seq
+        | slot, a recycled slot never matches an old handle, another task gets
+        BADF, a dead task's slots are reclaimed only when a new handle is
+        needed, and the position/size mirror is the kernel's own accounting
+        (the two filesystems disagree on what lseek returns);
+      * O_APPEND lands at the end on every write, a short buffer is NOSPC
+        rather than a silently truncated file, and a dirent that does not fit
+        the caller's buffer is kept for the next call instead of vanishing.
+
+    Not covered here: real littlefs, a real block device, real task switching
+    under the handle table, and the two p_copy() overflow exits (a normalized
+    path is always shorter than the destination buffer, so they are
+    structurally unreachable).
+
+    Runs twice worth of code: the default tier plus -DARKRTOS_USE_VFS_LFS=0
+    for the NOSYS branch; coverage_gate.CASES carries both.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("vfs-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    pick = None
+    link = []
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name == "vfs":
+            extra = case[5] if len(case) > 5 else {}
+            pick = (_markers, test, mods, defs, incs)
+            link = list(extra.get("link", []))
+            break
+    if pick is None:
+        fail("vfs-host", "case vfs missing from coverage_gate.CASES")
+        return
+
+    markers, test, mods, defs, incs = pick
+    with TempDir() as td:
+        exe = os.path.join(td, "vfshost" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods + link)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+            fail("vfs-host", "did not build: %s" % tail[:200])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or markers[0] not in txt:
+            fail("vfs-host", "failed: %s" % txt.strip()[:220])
+            return
+        last = txt.strip().splitlines()[-1]
+
+    ok("vfs-host",
+       "arkrtos_vfs facade on the real ark_vfs core + ramfs (mount table, "
+       "handle capability, O_APPEND, NOSPC): %s" % last)
+
 def check_elf_loader():
     """ELF64 executable loader (ARKRTOS_USE_ELF) must be wired, not decorative.
 
@@ -4101,6 +4181,7 @@ CHECK_TABLE = (
     ("fdt-host", check_fdt_host),
     ("fdtovl-host", check_fdtovl_host),
     ("vfslfs-host", check_vfslfs_host),
+    ("vfs-host", check_vfs_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),

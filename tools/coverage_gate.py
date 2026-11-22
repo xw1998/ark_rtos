@@ -462,6 +462,32 @@ CASES = [
      "VFS-LFS-HOST OK",
      {"incs": ["-Ikernelsrc/components/ark_vfs/include",
                "-Ikernelsrc/components/ark_vfs/src"]}),
+    # arkrtos_vfs 门面：链真 ark_vfs core + 真 ramfs，只桩板级端口层
+    # （块设备窗口 / arkrtos_fs / littlefs 桥 / 日志 / 任务状态）。两档：
+    # 默认档跑完整的持久卷路径，vfsnolfs 档（LFS=0）走 mount_volume 的
+    # NOSYS 分支——同一个 .c 两档按行号并集计覆盖率。
+    # DARK_VFS_MAX_FDS=12：ark_vfs 的 fd 表要比 App 句柄表（8）宽，才走得到
+    # 「句柄槽用满、把刚开的 fd 还回去」那两条；8/8 它们是结构性不可达。
+    ("vfs", "kernelsrc/tests/test_vfs_host.c",
+     ["kernelsrc/src/arkrtos_vfs.c"],
+     ["-DARKRTOS_MINI_READ_VFS=1", "-DARK_VFS_MAX_FDS=12",
+      "-fno-asynchronous-unwind-tables"],
+     "VFS-HOST OK",
+     {"incs": ["-Ikernelsrc/components/ark_vfs/include",
+               "-Ikernelsrc/components/ark_vfs/src",
+               "-Ikernelsrc/components/ark_vfs/port"],
+      "link": ["kernelsrc/components/ark_vfs/src/ark_vfs_core.c",
+               "kernelsrc/components/ark_vfs/src/ark_vfs_ramfs.c"]}),
+    ("vfsnolfs", "kernelsrc/tests/test_vfs_host.c",
+     ["kernelsrc/src/arkrtos_vfs.c"],
+     ["-DARKRTOS_MINI_READ_VFS=1", "-DARKRTOS_USE_VFS_LFS=0",
+      "-DARK_VFS_MAX_FDS=12", "-fno-asynchronous-unwind-tables"],
+     "VFS-HOST OK",
+     {"incs": ["-Ikernelsrc/components/ark_vfs/include",
+               "-Ikernelsrc/components/ark_vfs/src",
+               "-Ikernelsrc/components/ark_vfs/port"],
+      "link": ["kernelsrc/components/ark_vfs/src/ark_vfs_core.c",
+               "kernelsrc/components/ark_vfs/src/ark_vfs_ramfs.c"]}),
 ]
 
 

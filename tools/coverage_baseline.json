@@ -14,6 +14,7 @@
   "arkrtos_fdt_res": 100.0,
   "arkrtos_fdt": 91.8,
   "arkrtos_fdt_overlay": 86.4,
+  "arkrtos_vfs": 98.7,
   "arkrtos_vfs_lfs": 99.0,
   "arkrtos_fifo": 100.0,
   "arkrtos_trace": 100.0,
