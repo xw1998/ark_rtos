@@ -686,6 +686,20 @@ CASES = [
                "-Ikernelsrc/fs/littlefs",
                "-Ikernelsrc/components/ark_vfs/include",
                "-Ikernelsrc/components/ark_softbus/include"]}),
+    # --- 2026-11-22：内存池读数与 CONFIG 区（arkrtos_shell_cfg）------------
+    # mpool list/test 与 cfg show/load/clear。板级口径与 shellmod 同一份；
+    # 用例自己提供池对象表、layout 模块与串口，所以不需要真实 Flash 或 UART。
+    ("shellcfg", "kernelsrc/tests/test_shell_cfg_host.c",
+     ["kernelsrc/shell/arkrtos_shell_cfg.c"],
+     ['-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',
+      SIGN_KEY_DEF, "-fno-asynchronous-unwind-tables"]
+     + ["-D" + x for x in SOFTBUS_TIER_DEFS],
+     "SHELL-CFG-HOST OK",
+     {"incs": ["-Iboard/qemu_loongarch64", "-Ikernelsrc/shell",
+               "-Ikernelsrc/shell/ark_shell", "-Ikernelsrc/fs",
+               "-Ikernelsrc/fs/littlefs",
+               "-Ikernelsrc/components/ark_vfs/include",
+               "-Ikernelsrc/components/ark_softbus/include"]}),
     ("ushell", "kernelsrc/tests/test_shell_ushell_host.c",
      ["kernelsrc/shell/arkrtos_shell_ushell.c"],
      ['-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',

@@ -3291,6 +3291,90 @@ def check_shell_mod_host():
        "modules / unld): %s" % last)
 
 
+def check_shell_cfg_host():
+    """Pool readings and the device CONFIG region on the host.
+
+    arkrtos_shell_cfg.c carries the two families whose wrong answer costs the
+    most because it looks right: "mpool list" and "cfg show" print numbers a
+    reader will act on, and "cfg load" answers a host tool with ACK/NAK -- a
+    device that ACKs a record it did not write leaves the host believing the
+    layout is applied.  So this case links the real file against a four-block
+    pool stub, a layout stub and a programmable byte stream, and asserts on
+    132 checks:
+      * mpool list prints one row per live pool with every column fed from
+        the snapshot, silently skips a handle that is alive but cannot be
+        queried, and prints "(no pool)" only when nothing was printed;
+      * mpool test reports each check separately (create / alloc all four /
+        exhaust / stats / free+reuse / reject bad free / duplicate name /
+        tiny block / delete / alive-after-delete) and returns -1 the moment
+        any of them fails -- each FAIL line is reached by injecting exactly
+        that defect, so the summary line is never the only evidence;
+      * mpool usage returns -1 with the two-line synopsis;
+      * cfg_recv_exact reassembles a record from short reads and gives up
+        after the accumulated idle time reaches the timeout;
+      * cfg show prints mode / source / region geometry / reclaim / knobs /
+        boot line, then one of the three record verdicts (rejected with the
+        reason name, accepted, compile-time default), and the slot table only
+        when the count is non-zero;
+      * cfg load drains the console (both "empty" and "64 reads of junk"
+        shapes), sends ACK for the first three chunks, and on the last chunk
+        either ACKs after a successful write (with and without the "region
+        erased first" suffix) or prints the reason / the write rc and NAKs;
+        the timed-out chunk NAKs without ever writing;
+      * cfg clear reports the erase rc, and cfg usage returns -1.
+
+    Honest limits:
+      1) the pool below is a bookkeeping stub, not the kernel pool -- block
+         ownership and the free list are tested in mempool-host;
+      2) the layout module is stubbed down to return codes, so this says
+         nothing about where a record lands in Flash;
+      3) "5000 ms" is 2500 counted yields, not wall time, and the console is
+         a byte array, not a UART.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("shellcfg-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    pick = None
+    for case in CASES:
+        name, test, mods, defs, markers, incs, _argv = _case(case)
+        if name == "shellcfg":
+            pick = (test, mods, defs, incs, markers)
+            break
+    if pick is None:
+        fail("shellcfg-host", "case shellcfg missing from coverage_gate.CASES")
+        return
+
+    test, mods, defs, incs, markers = pick
+    with TempDir() as td:
+        exe = os.path.join(td, "shellcfg" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            err = (r.stderr or "").strip().splitlines() or [""]
+            fail("shellcfg-host", "the case did not build: %s"
+                 % [x for x in err if x.strip()][-1][:220])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or markers[0] not in txt or "FAIL" in txt:
+            fail("shellcfg-host", txt.strip()[-260:])
+            return
+        last = txt.strip().splitlines()[-1]
+
+    ok("shellcfg-host",
+       "arkrtos_shell_cfg on the host (mpool row/verdict paths and every "
+       "selftest failure / cfg show verdicts and slot table / cfg load "
+       "ACK-NAK over a 4-chunk record, timeout, validate and write "
+       "failures): %s" % last)
+
 def check_modld():
     """VxWorks-style downloadable modules (ARKRTOS_USE_MODLOAD) must be wired.
 
@@ -5243,6 +5327,7 @@ CHECK_TABLE = (
     ("shellmisc-host", check_shell_misc_host),
     ("ushell-host", check_shell_ushell_host),
     ("shellmod-host", check_shell_mod_host),
+    ("shellcfg-host", check_shell_cfg_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),
