@@ -379,9 +379,12 @@
 #define ARKRTOS_USE_FDT_CONSOLE         0
 #endif
 
-/* 设备树的第三件事：dtb overlay（最小子集）。只认 target-path + __overlay__，
- * 属性覆盖 / 新子节点追加；target = <&label>、__fixups__、删除语义一律拒绝。
- * 默认 0：关档时 arkrtos_fdt_overlay.c 整文件不产生符号。 */
+/* 设备树的第三件事：dtb overlay（最小子集）。
+ * 认：target-path 与 target = <&label>（经 fragment 的 __fixups__ + 基树
+ * __symbols__ 还原）、属性覆盖 / 新属性、新子节点追加、长度 0 删属性、
+ * __delete 标记删子节点。拒：fragment 侧的 __symbols__ / __local_fixups__、
+ * 已解析的 phandle、相对路径、同名子节点。默认 0：关档时
+ * arkrtos_fdt_overlay.c 整文件不产生符号。 */
 #ifndef ARKRTOS_USE_FDT_OVERLAY
 #define ARKRTOS_USE_FDT_OVERLAY         0
 #endif

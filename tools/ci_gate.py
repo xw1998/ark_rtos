@@ -1810,6 +1810,79 @@ def check_fdt_host():
        "device tree refusals and lookups (8 codes + meta/path/phandle): %s"
        % last)
 
+def check_fdtovl_host():
+    """dtb overlay merge (arkrtos_fdt_overlay) on host: six refusals plus a
+    result that the real parser can read back.
+
+    The merge produces a new dtb from a base blob and an overlay blob.  What
+    must hold is not "the bytes look like dtc output" but "the result is a
+    legal dtb whose tree says the right thing" -- so the case runs every
+    accepted merge through arkrtos_fdt_init and queries it by path, and only
+    pins header/reserve-map layout byte by byte.
+
+    Pinned here:
+      * target-path and target=<0xffffffff> resolved through the fragment's
+        __fixups__ and the base tree's __symbols__; a resolved phandle, a
+        relative path, a missing node, "//" and a trailing '/' are all
+        TARGET (-12) -- the splitter does not normalise;
+      * property override, new property, new child subtree, later fragment
+        winning, delete property (length 0) and delete child (__delete),
+        with DEL (-16) when the target is absent;
+      * OVERLAY (-11) for shape errors, DUP (-13) for duplicate children,
+        SIZE (-14) for an arena too small, TAG (-15) for __symbols__ /
+        __local_fixups__ on the fragment side, DEPTH (-7) when the
+        base tree is past ARKRTOS_FDT_MAX_DEPTH;
+      * the reserve map copied verbatim, and argument guards (NULL dst,
+        NULL out_len, misaligned arena, cap below the documented minimum).
+
+    Not covered: that a real dtbo from dtc merges (our delete encoding is
+    deliberately not Linux's) and that the merged tree boots -- those are
+    board readings.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("fdtovl-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    pick = None
+    link = []
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name == "fdtovl":
+            extra = case[5] if len(case) > 5 else {}
+            pick = (_markers, test, mods, defs, incs)
+            link = list(extra.get("link", []))
+            break
+    if pick is None:
+        fail("fdtovl-host", "case fdtovl missing from coverage_gate.CASES")
+        return
+
+    markers, test, mods, defs, incs = pick
+    with TempDir() as td:
+        exe = os.path.join(td, "fdtovlhost" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods + link)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+            fail("fdtovl-host", "did not build: %s" % tail[:200])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or markers[0] not in txt:
+            fail("fdtovl-host", "failed: %s" % txt.strip()[:220])
+            return
+        last = txt.strip().splitlines()[-1]
+
+    ok("fdtovl-host",
+       "dtb overlay merge read back through the parser (6 codes + target/depth): %s"
+       % last)
+
 def check_elf_loader():
     """ELF64 executable loader (ARKRTOS_USE_ELF) must be wired, not decorative.
 
@@ -3955,6 +4028,7 @@ CHECK_TABLE = (
     ("fdtconsole-host", check_fdtconsole_host),
     ("fdtres-host", check_fdtres_host),
     ("fdt-host", check_fdt_host),
+    ("fdtovl-host", check_fdtovl_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),

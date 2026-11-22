@@ -448,6 +448,11 @@ CASES = [
      ["kernelsrc/src/arkrtos_fdt.c"],
      ["-DARKRTOS_USE_FDT=1", "-fno-asynchronous-unwind-tables"],
      "FDT-HOST OK"),
+    # --- 2026-11-22 新增：dtb overlay 重拼（2495 行，两遍扫描 + 六个拒绝码） ---
+    ("fdtovl", "kernelsrc/tests/test_fdt_overlay_host.c",
+     ["kernelsrc/src/arkrtos_fdt_overlay.c", "kernelsrc/src/arkrtos_fdt.c"],
+     ["-DARKRTOS_USE_FDT=1", "-DARKRTOS_USE_FDT_OVERLAY=1",
+      "-fno-asynchronous-unwind-tables"], "FDT-OVERLAY-HOST OK"),
 ]
 
 

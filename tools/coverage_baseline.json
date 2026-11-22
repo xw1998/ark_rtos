@@ -13,6 +13,7 @@
   "arkrtos_fdt_console": 97.6,
   "arkrtos_fdt_res": 100.0,
   "arkrtos_fdt": 91.8,
+  "arkrtos_fdt_overlay": 86.4,
   "arkrtos_fifo": 100.0,
   "arkrtos_trace": 100.0,
   "arkrtos_flashapp": 99.7,
