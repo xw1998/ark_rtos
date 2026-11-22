@@ -2784,6 +2784,127 @@ def check_rt_host():
        "cycle-counter arithmetic, jitter, wake/switch pairing and ledgers: %s | %s"
        % (results[0], results[1]))
 
+def check_sec_host():
+    """Security baseline self-check (arkrtos_sec_run and its twelve items).
+
+    The module is a read-only questionnaire: it asks "is this mechanism
+    actually in the build" and returns a report; it changes nothing. Almost
+    every one of the twelve items has an #if and an #else body, so no single
+    configuration can walk the whole file. Four are built and run:
+
+      * sec: everything on (CRC recheck, image sign, HW_SAFE, watchdog,
+        RTSTAT) plus a strong Flash-port stub, so the PASS and FINDING sides
+        of every item are exercised;
+      * sec-min: all baseline mechanisms off and SEC_HOST_NO_PORT, so the
+        module's own weak arkrtos_port_flash_protection answers
+        ARKRTOS_SEC_ERR_NO_PORT and the item reports SKIP;
+      * sec-page: the LoongArch64 shape -- MPU=0, PAGING=1, PRIV=1. Isolation
+        is code 2 (page tables), not a missing MPU, and the watchdog is not
+        biting, so guard.watchdog reports FINDING;
+      * sec-disabled: USE_SECCHECK=0, where the module is an empty TU. The
+        object is checked with nm to be free of global definitions -- "off"
+        must mean zero bytes and zero symbols, not a hidden stub.
+
+    What the case pins, beyond the item names and order:
+      * the gates bitmask is recomputed independently from this build's
+        macros (bit0 isolation, bit1 priv, bit2 stack check, bit3 fault
+        recovery, bit4 crash log, bit5 audit; sign and hwsafe are reported in
+        the upper bits but not required), so a renumbering on one side only
+        goes red;
+      * a slot whose magic is wrong is reported as 0x100 and is NOT handed to
+        the loader, and a loader rejection comes back verbatim;
+      * CRC recheck keeps three answers apart: 0 = PASS, ERR_CRC = FAIL,
+        any other negative = unknown, and when nothing could be rechecked the
+        item is SKIP -- a zero-checked run never reports PASS;
+      * the Flash item separates "no port" (SKIP) from "read it, RDP is level
+        0" (FINDING) and from "read it, RDP is on" (PASS);
+      * run(NULL) returns 0 and run() returns the FAIL count, not the item
+        count.
+
+    A missing host compiler is a FAIL, not a skip.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+    import shutil
+
+    cc = find_cc(None)
+    if not cc:
+        fail("sec-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    want = (("sec", "SEC-HOST OK  "),
+            ("sec-min", "SEC-HOST MIN OK  "),
+            ("sec-page", "SEC-HOST PAGE OK  "),
+            ("sec-disabled", "SEC-HOST DISABLED OK"))
+    names = [w[0] for w in want]
+    picked = {}
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name in names:
+            picked[name] = (test, mods, defs, incs)
+    for name, _marker in want:
+        if name not in picked:
+            fail("sec-host", "case %s missing from coverage_gate.CASES" % name)
+            return
+
+    lines = []
+    with TempDir() as td:
+        for name, marker in want:
+            test, mods, defs, incs = picked[name]
+            exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+                fail("sec-host", "%s did not build: %s" % (name, tail[:200]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            if r.returncode != 0 or marker not in txt:
+                fail("sec-host", "%s failed: %s" % (name, txt.strip()[:220]))
+                return
+            lines.append(txt.strip().splitlines()[-1])
+
+        # OFF means an empty translation unit: nm on the object must show no
+        # defined global. A stub that survived the switch would still answer
+        # PASS-shaped questions and defeat the point of the switch.
+        off_defs = picked["sec-disabled"][2]
+        obj = os.path.join(td, "sec_off.o")
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"] + off_defs
+               + COMMON_INC + ["-c", "-o", obj, "kernelsrc/src/arkrtos_sec.c"])
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            fail("sec-host", "OFF object did not build: %s"
+                 % ((r.stderr or "").strip().splitlines() or [""])[-1][:200])
+            return
+        nm = os.path.join(os.path.dirname(cc), "nm.exe" if os.name == "nt" else "nm")
+        if not os.path.isfile(nm):
+            nm = shutil.which("nm") or "nm"
+        r = _run_check([nm, obj])
+        nm_txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0:
+            fail("sec-host", "nm failed on the OFF object: %s" % nm_txt.strip()[:200])
+            return
+        defined = []
+        for ln in nm_txt.splitlines():
+            parts = ln.split()
+            # 只算大写类型（T/D/B/R = 已定义的全局符号）；小写是段符号与局部符号。
+            if len(parts) >= 3 and parts[-2].isupper():
+                defined.append(parts[-1])
+        if defined:
+            fail("sec-host",
+                 "USE_SECCHECK=0 object still defines symbols: %s"
+                 % ", ".join(defined[:8]))
+            return
+
+    ok("sec-host",
+       "12-item baseline: PASS/FAIL/FINDING/SKIP in 4 builds, OFF object has no symbols (%s)"
+       % " | ".join(lines))
+
+
 def check_coverage_host():
     """Line coverage of the modules the host tests actually link.
 
@@ -2960,6 +3081,7 @@ CHECK_TABLE = (
     ("mpu-host", check_mpu_host),
     ("guard-host", check_guard_host),
     ("rt-host", check_rt_host),
+    ("sec-host", check_sec_host),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),
     ("analyzer", check_analyzer),

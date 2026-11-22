@@ -19,6 +19,7 @@
   "arkrtos_mq": 100.0,
   "arkrtos_rt": 100.0,
   "arkrtos_sbuf": 80.57,
+  "arkrtos_sec": 100.0,
   "arkrtos_sign": 100.0,
   "arkrtos_smp": 89.19,
   "arkrtos_sync": 99.22,

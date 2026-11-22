@@ -288,6 +288,44 @@ CASES = [
     ("rt-off", "kernelsrc/tests/test_rt_host.c",
      ["kernelsrc/src/arkrtos_rt.c"],
      ["-DARKRTOS_USE_RTSTAT=0"], "RT-HOST OFF OK"),
+    # --- 2026-11-22 新增：安全基线自检（12 项判据）。四档并集才够：
+    # sec.c 每一项几乎都有 #if/#else 两种写法（开关在/不在），单档最多 99%。
+    # -ffunction-sections 是宿主的必需项：MinGW 在 -O0 下会把带（弱）符号的
+    # 函数放进调用者的 COMDAT 组，模块自带的 weak arkrtos_port_flash_protection
+    # 会被捆进 main 的组里，调用点解析到错误的入口（实测直接段错误）。
+    ("sec", "kernelsrc/tests/test_sec_host.c",
+     ["kernelsrc/src/arkrtos_sec.c"],
+     ["-ffunction-sections", "-DARKRTOS_USE_SECCHECK=1",
+      "-DARKRTOS_USE_IMAGE_CRC_RECHECK=1", "-DARKRTOS_USE_IMAGE_SIGN=1",
+      "-DARKRTOS_HW_SAFE=1", "-DARKRTOS_WDG_ENABLE=1",
+      "-DARKRTOS_USE_RTSTAT=1", SIGN_KEY_DEF], "SEC-HOST OK  "),
+    # 全关档：也把弱端口让出来（SEC_HOST_NO_PORT），由模块自带的弱符号兜底，
+    # 走的是 rc != 0 的那条 SKIP。
+    ("sec-min", "kernelsrc/tests/test_sec_host.c",
+     ["kernelsrc/src/arkrtos_sec.c"],
+     ["-ffunction-sections", "-DARKRTOS_USE_SECCHECK=1",
+      "-DARKRTOS_USE_MPU=0", "-DARKRTOS_USE_PRIV=0",
+      "-DARKRTOS_USE_STACK_CHECK=0", "-DARKRTOS_USE_FAULT_RECOVER=0",
+      "-DARKRTOS_USE_CRASH_LOG=0", "-DARKRTOS_USE_AUDIT=0",
+      "-DARKRTOS_USE_IMAGE_SIGN=0", "-DARKRTOS_USE_IMAGE_CRC_RECHECK=0",
+      "-DARKRTOS_HW_SAFE=0", "-DARKRTOS_USE_KERNEL_GUARD=0",
+      "-DARKRTOS_WDG_ENABLE=0", "-DARKRTOS_USE_RTSTAT=0",
+      "-DSEC_HOST_NO_PORT", "-DSEC_HOST_EXPECT_MIN"],
+     "SEC-HOST MIN OK  "),
+    # 页表后端：LA64 没有 ARM MPU，隔离由分页 + PLV 提供（iso=2）。
+    # 看门狗这一档不咬（WDG_ENABLE=0），所以 guard.watchdog 报 FINDING。
+    ("sec-page", "kernelsrc/tests/test_sec_host.c",
+     ["kernelsrc/src/arkrtos_sec.c"],
+     ["-ffunction-sections", "-DARKRTOS_USE_SECCHECK=1",
+      "-DARKRTOS_ARCH_CORE=0x0302", "-DARKRTOS_USE_MPU=0",
+      "-DARKRTOS_USE_PRIV=1", "-DARKRTOS_USE_PAGING=1",
+      "-DARKRTOS_USE_KERNEL_GUARD=1", "-DARKRTOS_WDG_ENABLE=0",
+      "-DSEC_HOST_EXPECT_PAGE"], "SEC-HOST PAGE OK  "),
+    # 开关关档：空目标（零体积零符号），覆盖率只由开档供给。
+    ("sec-disabled", "kernelsrc/tests/test_sec_host.c",
+     ["kernelsrc/src/arkrtos_sec.c"],
+     ["-ffunction-sections", "-DARKRTOS_USE_SECCHECK=0"],
+     "SEC-HOST DISABLED OK"),
 ]
 
 
