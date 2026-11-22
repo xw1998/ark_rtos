@@ -121,6 +121,18 @@ static int pmap_hex(const char *s, uint32 *out)
     return 0;
 }
 
+/* arkrtos_elf_exec_space() 的 argv 不带 const，而 shell 这里的路径是
+ * const char *。它只把字符串交给新任务、从不回写，所以这里用 union 做一次
+ * 显式类型互换：既不用 (char *) 把限定符强转掉（-Wcast-qual 会红），
+ * 也不走整数往返（宿主档 unsigned long 只有 32 位，会截断指针）。 */
+static char *pmap_argv_str(const char *s)
+{
+    union { const char *c; char *p; } u;
+
+    u.c = s;
+    return u.p;
+}
+
 static int pmap_kind(const char *s, arkrtos_mpu_mem_t *out)
 {
     if(strcmp(s, "ram") == 0) { *out = ARKRTOS_MPU_MEM_RAM;       return 0; }
@@ -1224,7 +1236,6 @@ int cmd_pmap(int argc, char *argv[])
         arkrtos_elf_info_t inf1;
         int fails = 0;
         int locked = 0;
-        int32 rc;
 
         if(arkrtos_paging_space_count() < 2u)
         {
@@ -1253,7 +1264,7 @@ int cmd_pmap(int argc, char *argv[])
         locked = 1;
         #endif
 
-        uargv[0] = (char *)path;
+        uargv[0] = pmap_argv_str(path);
         rc = arkrtos_elf_exec_space(path, 1, uargv, &s_first);
         if(rc != ARKRTOS_ELF_OK)
         {

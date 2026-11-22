@@ -3462,6 +3462,99 @@ def check_shell_image_host():
        "LAYOUT and BUSY / install stop-before-erase with failing stop and "
        "failing erase / console drain): %s" % last)
 
+def check_shell_pmap_host():
+    """Paging command family: the eighteen pmap subcommands on the host.
+
+    arkrtos_shell_pmap.c is where a user asks the machine "is this address
+    really translated".  A silent regression here reads as a green board test,
+    so every refusal path and every printed branch is pinned by 295 checks:
+      * the bare command and an unknown subcommand print the paging audit
+        counters and the full usage block, and return 0 (a read-only command
+        must not look like an error to a script);
+      * map / check / unmap / rd / rb / wrb / dyn / frame / ftest / rel /
+        space / pairs / look / u1 / elf / u2 / cu each accept their own
+        argument shape and reject a malformed one with their own usage line
+        and their own exit code (the -1-vs-1 split between "wrong usage" and
+        "the operation failed" is asserted, not assumed);
+      * rd clamps the word count at 8; pmap_hex refuses an empty string, a
+        bare "0x", a non-digit and accepts lowercase digits;
+      * ftest walks 1 + 3 frames, writes and reads back a 64-word pattern,
+        and refuses an out-of-pool free with -1 and a double free with -3;
+      * test maps a ROM page outside the static mapping, compares it with the
+        direct address, proves unmap drops the entry (lookup, not just rc=0),
+        rebinds the same VA and compares again; the first comparison is shown
+        to only report (mismatch=1 still passes), which is exactly why the
+        rebind loop is the one that gates;
+      * u1 writes two words through one VA in two spaces and reads both back;
+        both a total failure (no frame switch) and a partial one (only the
+        second switch fails, "1 of 2 reads wrong") are driven;
+      * elf prints the per-space ledger and caps the loop at the task table,
+        not at the space count;
+      * u2 loads one ELF path into two spaces and checks from the same VA that
+        each load only touches its own frame, that both instances are live
+        with distinct task ids bound to their own space, and every failure
+        string the command can emit (reused space, sentinel still there,
+        neighbour written, second load clobbering the first, shared task id,
+        wrong binding, no live task);
+      * cu drives all four refusal codes of the controlled user access
+        (-1 wrap, -2 no user window / kernel caller, -3 outside span / kernel
+        pointer / unmapped / write to ROM, -4 wrong space), both success
+        directions, and the "reports ok but copies nothing" byte check.
+
+    Honest limits:
+      1) no real MMU: every paging / port / ELF entry point is a stub, and the
+         TLB is modelled by a per-space shadow copy of the 2 MB window, so
+         "same VA, two frames" is a memory model, not hardware translation;
+      2) one branch is deliberately left uncovered - ftest's pattern mismatch
+         cannot fire on plain host RAM (it reads back what was just written),
+         and the test refuses to fake it with a fault injector; measured
+         coverage is therefore 99.42% (512 of 515 lines), not 100%;
+      3) the swap (U-16), ASID (U-7) and invop / asidinval families are
+         compiled out on qemu_loongarch64 and are not measured here.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("shellpmap-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    pick = None
+    for case in CASES:
+        name, test, mods, defs, markers, incs, _argv = _case(case)
+        if name == "shellpmap":
+            pick = (test, mods, defs, incs, markers)
+            break
+    if pick is None:
+        fail("shellpmap-host", "case shellpmap missing from coverage_gate.CASES")
+        return
+
+    test, mods, defs, incs, markers = pick
+    with TempDir() as td:
+        exe = os.path.join(td, "shellpmap" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            err = (r.stderr or "").strip().splitlines() or [""]
+            fail("shellpmap-host", "the case did not build: %s"
+                 % [x for x in err if x.strip()][-1][:220])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or markers[0] not in txt or "FAIL" in txt:
+            fail("shellpmap-host", txt.strip()[-260:])
+            return
+        last = txt.strip().splitlines()[-1]
+
+    ok("shellpmap-host",
+       "arkrtos_shell_pmap on the host (18 subcommands, map/check/unmap/rd/rb/"
+       "wrb/ftest/test/u1/elf/u2/cu refusal paths with their own exit codes, "
+       "same-VA two-frame memory model, cu -1/-2/-3/-4): %s" % last)
+
 def check_shell_core_host():
     """Console core: command registry, console task loop and task release.
 
@@ -5503,6 +5596,7 @@ CHECK_TABLE = (
     ("shellcfg-host", check_shell_cfg_host),
     ("shellimage-host", check_shell_image_host),
     ("shellcore-host", check_shell_core_host),
+    ("shellpmap-host", check_shell_pmap_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),

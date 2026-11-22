@@ -728,6 +728,28 @@ CASES = [
                "-Ikernelsrc/fs/littlefs",
                "-Ikernelsrc/components/ark_vfs/include",
                "-Ikernelsrc/components/ark_softbus/include"]}),
+    # --- 2026-11-23：分页命令族（arkrtos_shell_pmap）----------------------
+    # map / check / rd / rb / wrb / unmap / dyn / frame / ftest / test / rel /
+    # space / pairs / look / u1 / elf / u2 / cu 十八个子命令，逐条走拒绝路径
+    # 与打印分支。板级口径与 shellcore 同一份，但板级头换成本目录里的
+    # host_board_la64.h：pmap test 会直接解引用 ARKRTOS_MPU_KERNEL_ROM_BASE，
+    # 而真板级值 0x00200000 在 Windows 进程里被主线程栈保留区占着（实测
+    # VirtualAlloc 拿不到），这个包装头只把 CHIP_FLASH_BASE 挪到 0x02000000，
+    # 其余板级开关原样沿用。所以 -Ikernelsrc/tests 必须排在 include 最前。
+    # 覆盖率地板 99.4%：ftest 的"图案读回不符"分支在普通宿主内存上不可达
+    # （写什么读什么），用例里如实登记为故意不覆盖，不用故障注入伪造。
+    ("shellpmap", "kernelsrc/tests/test_shell_pmap_host.c",
+     ["kernelsrc/shell/arkrtos_shell_pmap.c"],
+     ['-DARKRTOS_BOARD_CONFIG="host_board_la64.h"',
+      SIGN_KEY_DEF, "-fno-asynchronous-unwind-tables",
+      "-DARKRTOS_USE_TASK_SWAP=1"]
+     + ["-D" + x for x in SOFTBUS_TIER_DEFS],
+     "SHELL-PMAP-HOST OK",
+     {"incs": ["-Ikernelsrc/tests", "-Iboard/qemu_loongarch64",
+               "-Ikernelsrc/shell", "-Ikernelsrc/shell/ark_shell",
+               "-Ikernelsrc/fs", "-Ikernelsrc/fs/littlefs",
+               "-Ikernelsrc/components/ark_vfs/include",
+               "-Ikernelsrc/components/ark_softbus/include"]}),
     ("ushell", "kernelsrc/tests/test_shell_ushell_host.c",
      ["kernelsrc/shell/arkrtos_shell_ushell.c"],
      ['-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',
