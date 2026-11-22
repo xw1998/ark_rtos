@@ -381,7 +381,6 @@ int32 arkrtos_apprun_on_task_exit(uint32 task_id)
 {
     uint32 irq;
     uint32 pt_index = 0u;
-    int32 ret;
 
     if(task_id == 0u)
     {

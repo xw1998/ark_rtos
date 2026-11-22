@@ -2556,6 +2556,75 @@ def check_crash_host():
        "journal rebind/sweep/publish/mini + OFF constants: %s | %s"
        % (results[0], results[1]))
 
+def check_apprun_host():
+    """Run-on-board: a bare arkc output loaded into a fixed window, on host.
+
+    arkrtos_apprun.c is the last step of the "compile then execute" chain: it
+    takes the bytes that "cc -o" wrote, puts them into one borrowed window and
+    starts a non-privileged task at the vector table's Reset_Handler. There is
+    no relocation anywhere -- the program was linked for those addresses, so
+    every check is about refusing, loudly, anything that is not exactly that.
+    The quiet failures it guards against:
+
+      * a first-fit block that is not the window base being accepted, so a
+        program linked for one address runs at another (jumps into nothing);
+      * an image bigger than the code window being truncated at the window edge,
+        which cuts an instruction in half and makes the rest random;
+      * "exactly the window size" not being told apart from "one byte more":
+        the extra probe read is the only thing that separates them;
+      * taking the entry from the first half-word of the file instead of the
+        vector table -- string literals are emitted before every function, so
+        the first bytes of a real program are characters, not instructions;
+      * the state word not being cleared when the task cannot be created, so
+        the next attempt answers BUSY forever, and the window leaks;
+      * the exit hook returning the window for a task that is not ours.
+
+    The module reads the window by absolute address, so the test maps
+    [SLOT_RAM_BASE, +SLOT_RAM_TOTAL) for real and bails out (non-zero, FAIL)
+    when the mapping cannot be taken. The window constants live in the h743
+    board header only; they are injected on the command line and the test
+    asserts their shape against that mapped range. OFF is an empty
+    translation unit, so coverage comes from this grade alone.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("apprun-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    picked = None
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name == "apprun":
+            picked = (test, mods, defs, incs)
+            break
+    if picked is None:
+        fail("apprun-host", "case apprun missing from coverage_gate.CASES")
+        return
+
+    test, mods, defs, incs = picked
+    with TempDir() as td:
+        exe = os.path.join(td, "apprun" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+            fail("apprun-host", "apprun did not build: %s" % tail[:200])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or "APPRUN-HOST OK" not in txt:
+            fail("apprun-host", "apprun failed: %s" % txt.strip()[:220])
+            return
+        ok("apprun-host",
+           "window borrow + vector table + task/MPU + exit hook (%s)"
+           % txt.strip().splitlines()[-1])
+
 def check_hwsafe_host():
     """HW_SAFE on/off: who gets driven at the moment a task dies, and on what.
 
@@ -3211,6 +3280,7 @@ CHECK_TABLE = (
     ("ptable-host", check_ptable_host),
     ("layout-host", check_layout_host),
     ("crash-host", check_crash_host),
+    ("apprun-host", check_apprun_host),
     ("hwsafe-host", check_hwsafe_host),
     ("audit-host", check_audit_host),
     ("mpu-host", check_mpu_host),

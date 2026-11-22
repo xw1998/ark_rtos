@@ -339,6 +339,20 @@ CASES = [
      ["kernelsrc/src/arkrtos_sec.c"],
      ["-ffunction-sections", "-DARKRTOS_USE_SECCHECK=0"],
      "SEC-HOST DISABLED OK"),
+    # --- 2026-11-22 新增：板上直跑（裸文件直接进固定窗口）---
+    # 窗口地址来自板级分区头，只有 h743 有；宿主按 h743 的数值从命令行
+    # 注入，用例自己再核一遍「注入的形状与 SLOT_RAM 映射区间一致」。
+    # 关档是空目标（零符号），覆盖率只由开档供给。
+    # 自旋锁走 fallback 档（SPINLOCK=0）只需临界区 + 屏障 + 核号三个桩。
+    ("apprun", "kernelsrc/tests/test_apprun_host.c",
+     ["kernelsrc/src/arkrtos_apprun.c"],
+     ["-DARKRTOS_USE_APPRUN=1", "-DARKRTOS_USE_VFS=1",
+      "-DARKRTOS_USE_SPINLOCK=0", "-DARKRTOS_LOG_LEVEL=0",
+      "-DARKRTOS_APPRUN_BASE=0x20010000", "-DARKRTOS_APPRUN_CODE_SIZE=8192",
+      "-DARKRTOS_APPRUN_RAM_BASE=0x20012000", "-DARKRTOS_APPRUN_RAM_SIZE=8192",
+      "-DARKRTOS_APPRUN_STACK_SIZE=4096", "-DARKRTOS_APPRUN_PRIORITY=11",
+      "-DARKRTOS_APPRUN_PERIOD_MS=0", "-DARKRTOS_APPRUN_MAX_IMAGE=8192",
+      "-DARKRTOS_APPRUN_PROLOGUE=0xB5E0"], "APPRUN-HOST OK"),
 ]
 
 
