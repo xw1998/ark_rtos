@@ -18,6 +18,8 @@
 * @date 2026.09.21
 */
 
+#include <stdint.h>   /* uintptr_t: see cfg->context below */
+
 #include "arkrtos_fs.h"
 #include "arkrtos_blk.h"
 #include "arkrtos_partition.h"
@@ -306,7 +308,7 @@ static int32 fs_build_config(const char *dev_name, uint32 offset, uint32 size,
         return ARKRTOS_FS_FAIL;
     }
 
-    cfg->context         = (void *)dev;
+    cfg->context         = (void *)(uintptr_t)dev;
     cfg->read            = fs_block_read;
     cfg->prog            = fs_block_prog;
     cfg->erase           = fs_block_erase;
@@ -1312,6 +1314,12 @@ int32 arkrtos_fs_close_write(void)
 }
 
 int32 arkrtos_fs_remove(const char *path)
+{
+    (void)path;
+    return ARKRTOS_FS_FAIL;
+}
+
+int32 arkrtos_fs_mkdir(const char *path)
 {
     (void)path;
     return ARKRTOS_FS_FAIL;

@@ -545,7 +545,7 @@ static void test_init_failures(void)
 
 static void test_init_ok(void)
 {
-    /* 根本身不占目录槽：13 个 fill 用掉 13 个槽，还剩 3 个 —— 
+    /* 根本身不占目录槽：13 个 fill 用掉 13 个槽，还剩 3 个 ——
      * /tmp /etc /home 建成，/mnt /media 拿 FULL 并各告警一次。 */
     env_boot_reset();
     g_port_fill_dirs = 13;

@@ -2034,6 +2034,97 @@ def check_vfs_host():
        "arkrtos_vfs facade on the real ark_vfs core + ramfs (mount table, "
        "handle capability, O_APPEND, NOSPC): %s" % last)
 
+def check_fs_host():
+    """arkrtos_fs facade (arkrtos_fs.c) on the host, linked against the real
+    littlefs in kernelsrc/fs -- not a stub.  The disk underneath is a 512 KB
+    RAM NOR written by the test harness: a write may only clear bits (1 -> 0)
+    and an erase refills with 0xFF, which is the property that makes "does the
+    facade really make littlefs erase before programming?" a real reading.
+
+    Pinned here:
+
+      * every entry point reports a failing call the same way (FAIL plus a
+        last_error distinct from littlefs's own codes: -1001 bad args/geometry,
+        -1002 no such block device, -1004 already mounted, -1005 nothing
+        mounted, -1006 the device refused it, -1007 short write, -1008 busy);
+      * mount validates geometry before touching the medium (unknown device,
+        unaligned offset, volume smaller than one erase unit, volume past the
+        end of the device, erase_unit = 0, fewer than three blocks), and a
+        blank medium comes back as CORRUPT with the "unformatted" predicate
+        true -- mount never formats silently;
+      * format(NULL) and format("nope") fail before a single erase happens;
+      * one stream at a time: the single file cache (256 B) is the reason, so a
+        second open or a truncate while a stream is up is BUSY, and unmount
+        drops an open stream instead of stranding the caller;
+      * whole-file and streaming writes that do not fit return SHORT (-1007)
+        rather than a silently truncated file, while a failed close reports the
+        device's own code (the two are different observables and the test keeps
+        them apart);
+      * a device read that breaks *after* a stream is open surfaces as the
+        device error (-5), never as a zero-length "end of file";
+      * truncate extends with zeros and a size that cannot be allocated is
+        LFS_ERR_NOSPC;
+      * "." and ".." are handed to the caller by littlefs and the facade passes
+        them through, so a directory's entry count is real entries + 2;
+      * the compiled-out tier (-DARKRTOS_USE_FS=0) answers every entry point
+        with FAIL and "nothing is mounted", so "no file system on this board"
+        and "no volume mounted" cannot be told apart -- that is deliberate.
+
+    Not covered here: the three block-window bounds guards in the adapter
+    (littlefs never asks for a block outside the volume it was given, so they
+    are structurally unreachable), the lfs_unmount / lfs_fs_size failure exits
+    (would need a medium that breaks between a successful mount and the very
+    next call), and the read/close failure exits inside read_file / read_at /
+    list / list_names (the calls are atomic, there is no seam to inject into).
+
+    Runs the default tier and the -DARKRTOS_USE_FS=0 tier; coverage_gate.CASES
+    carries both and takes the union of the two line sets.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("fs-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    pick = None
+    link = []
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name == "fs":
+            extra = case[5] if len(case) > 5 else {}
+            pick = (_markers, test, mods, defs, incs)
+            link = list(extra.get("link", []))
+            break
+    if pick is None:
+        fail("fs-host", "case fs missing from coverage_gate.CASES")
+        return
+
+    markers, test, mods, defs, incs = pick
+    with TempDir() as td:
+        exe = os.path.join(td, "fshost" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods + link)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+            fail("fs-host", "did not build: %s" % tail[:200])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or markers[0] not in txt:
+            fail("fs-host", "failed: %s" % txt.strip()[:220])
+            return
+        last = txt.strip().splitlines()[-1]
+
+    ok("fs-host",
+       "arkrtos_fs facade on the real littlefs over a RAM NOR (geometry, "
+       "format/mount, files, one-stream rule, SHORT/NOSPC, 1->0 only): %s"
+       % last)
+
 def check_elf_loader():
     """ELF64 executable loader (ARKRTOS_USE_ELF) must be wired, not decorative.
 
@@ -4182,6 +4273,7 @@ CHECK_TABLE = (
     ("fdtovl-host", check_fdtovl_host),
     ("vfslfs-host", check_vfslfs_host),
     ("vfs-host", check_vfs_host),
+    ("fs-host", check_fs_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),

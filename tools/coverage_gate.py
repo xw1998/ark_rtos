@@ -488,6 +488,28 @@ CASES = [
                "-Ikernelsrc/components/ark_vfs/port"],
       "link": ["kernelsrc/components/ark_vfs/src/ark_vfs_core.c",
                "kernelsrc/components/ark_vfs/src/ark_vfs_ramfs.c"]}),
+    # --- 2026-11-22 新增：littlefs 门面（真 littlefs + RAM NOR） ---
+    # 两档：开档跑整条持久化路径，关档（USE_FS=0）走空实现分支。
+    # link 里是链库里那份 littlefs 本体：真源码、同一组 LFS_NO_* 开关，不计入覆盖率。
+    ("fs", "kernelsrc/tests/test_fs_host.c",
+     ["kernelsrc/src/arkrtos_fs.c"],
+     ["-DARKRTOS_USE_FS=1", "-DLFS_NO_MALLOC", "-DLFS_NO_ASSERT",
+      "-DLFS_NO_DEBUG", "-DLFS_NO_WARN", "-DLFS_NO_ERROR",
+      "-fno-asynchronous-unwind-tables"],
+     "FS-HOST OK",
+     {"incs": ["-Ikernelsrc/fs",
+               "-isystem", "kernelsrc/fs/littlefs"],
+      "link": ["kernelsrc/fs/littlefs/lfs.c",
+               "kernelsrc/fs/littlefs/lfs_util.c"]}),
+    ("fsnofs", "kernelsrc/tests/test_fs_host.c",
+     ["kernelsrc/src/arkrtos_fs.c"],
+     ["-DARKRTOS_USE_FS=0", "-DARKRTOS_USE_MINIAPP=0",
+      "-DARKRTOS_USE_VFS_LFS=0", "-DLFS_NO_MALLOC", "-DLFS_NO_ASSERT",
+      "-DLFS_NO_DEBUG", "-DLFS_NO_WARN", "-DLFS_NO_ERROR",
+      "-fno-asynchronous-unwind-tables"],
+     "FS-HOST OK",
+     {"incs": ["-Ikernelsrc/fs",
+               "-isystem", "kernelsrc/fs/littlefs"]}),
 ]
 
 

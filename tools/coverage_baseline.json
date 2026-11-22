@@ -19,6 +19,7 @@
   "arkrtos_fifo": 100.0,
   "arkrtos_trace": 100.0,
   "arkrtos_flashapp": 99.7,
+  "arkrtos_fs": 91.72,
   "arkrtos_guard": 99.4,
   "arkrtos_init": 100.0,
   "arkrtos_installer": 97.72,
