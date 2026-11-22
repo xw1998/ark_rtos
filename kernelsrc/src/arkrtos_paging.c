@@ -610,7 +610,7 @@ int32 arkrtos_paging_user_copy(unsigned long rom_start, uint32 rom_size,
 
     if(write != 0u)
     {
-        volatile uint8 *p = (volatile uint8 *)user;
+        volatile uint8 *p = (volatile uint8 *)(unsigned long)user;
 
         for(i = 0u; i < len; i++)
         {
@@ -666,7 +666,7 @@ int32 arkrtos_copy_to_user_task(arkrtos_task_t *p_task, void *udst,
                                     p_task->ram_start, p_task->ram_size,
                                     arkrtos_paging_space_of(p_task),
                                     arkrtos_port_paging_space(),
-                                    (void *)src, udst, len, 1u);
+                                    (void *)(unsigned long)src, udst, len, 1u);
 }
 
 /**

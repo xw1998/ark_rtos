@@ -23,6 +23,7 @@
   "arkrtos_hwsafe": 99.58,
   "arkrtos_ptable": 99.05,
   "arkrtos_mpu": 100.0,
+  "arkrtos_paging": 100.0,
   "arkrtos_mq": 100.0,
   "arkrtos_rt": 100.0,
   "arkrtos_sbuf": 80.57,

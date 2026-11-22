@@ -406,6 +406,18 @@ CASES = [
      ["kernelsrc/src/arkrtos_installer.c"],
      ["-DARKRTOS_INSTALLER_HOST_TEST=1", "-fno-asynchronous-unwind-tables"],
      "INSTALLER-HOST OK"),
+    # --- 2026-11-22 新增：页表隔离后端（USE_PAGING 开/关是两段代码）---
+    # 只有开档有代码，关档是空目标。板级配置取 qemu_loongarch64 那份：
+    # 页表后端在 ARMv7-M 上被 arkrtos_config.h 直接 #error 拦掉，而这一层
+    # 的语义（审计面 / 空间切换 / 动态映射 / 受控拷贝）与具体 port 无关，
+    # 20 个 port 函数在用例里全部是桩。签名档位要一把 32 字节密钥才能过
+    # features.h 的 #error，这里按值注入，不依赖宿主机上任何临时头文件。
+    ("paging", "kernelsrc/tests/test_paging_host.c",
+     ["kernelsrc/src/arkrtos_paging.c"],
+     ['-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',
+      "-include", "arkrtos_board_config.h", SIGN_KEY_DEF,
+      "-fno-asynchronous-unwind-tables"], "PAGING-HOST OK",
+     {"incs": ["-Iboard/qemu_loongarch64", "-Ikernelsrc/port/loongarch/la64"]}),
 ]
 
 

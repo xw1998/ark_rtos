@@ -2907,6 +2907,80 @@ def check_insthost_host():
        "magic sync / refusal NAK + drain / autostart / fixed slot / file entrance: %s"
        % last)
 
+def check_paging_host():
+    """Page-table isolation backend (arkrtos_paging.c) on host.
+
+    This is the MMU half of task isolation: it audits a task's declared
+    windows, switches the active space, hands out dynamic aliases, and is the
+    only path by which user-supplied addresses reach kernel code. Its failures
+    are the quiet kind, so what is pinned here is the decision, not "it
+    returned 0":
+
+      * the audit surface is per-task and only rebuilt when a task really
+        declares ROM (rom_start == 0 must leave the surface alone, not clear
+        it), with ROM/RAMX/RAM classification decided by the slot window;
+      * set_app refuses NULL, refuses a privileged task, refuses an index
+        outside the task table, and only an accepted call reaches the port;
+      * a dynamic span is refused for size 0, any non-4K alignment (size, va
+        or pa) and anything over the 16-page map budget -- and a refusal must
+        not consume budget;
+      * a half-failed alias run leaves the page counter where it was, and a
+        half-failed unmap still gives back the pages it did release;
+      * user_copy orders its checks: bad argument (-1), no window (-2),
+        out-of-span (-3, write direction only accepts the RAM window) and
+        space mismatch (-4, decided before any window test), and the success
+        path really moves bytes in both directions.
+
+    The 20 port functions are stubs, so this proves paging's own decisions and
+    accounting. It does NOT prove TLB/CAM behaviour, real page faults or user-
+    mode containment -- those are the port's and the board's business, and
+    only a QEMU run (counted as "on board", never as real hardware) plus a
+    real LA64 board would show them.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("paging-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    pick = None
+    link = []
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name == "paging":
+            extra = case[5] if len(case) > 5 else {}
+            pick = (_markers, test, mods, defs, incs)
+            link = list(extra.get("link", []))
+            break
+    if pick is None:
+        fail("paging-host", "case paging missing from coverage_gate.CASES")
+        return
+
+    markers, test, mods, defs, incs = pick
+    with TempDir() as td:
+        exe = os.path.join(td, "paginghost" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods + link)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+            fail("paging-host", "did not build: %s" % tail[:200])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or markers[0] not in txt:
+            fail("paging-host", "failed: %s" % txt.strip()[:220])
+            return
+        last = txt.strip().splitlines()[-1]
+
+    ok("paging-host",
+       "audit surface / space switch / dynamic span budget / user_copy order: %s"
+       % last)
+
 def check_hwsafe_host():
     """HW_SAFE on/off: who gets driven at the moment a task dies, and on what.
 
@@ -3567,6 +3641,7 @@ CHECK_TABLE = (
     ("trace-host", check_trace_host),
     ("apppack-host", check_apppack_host),
     ("insthost-host", check_insthost_host),
+    ("paging-host", check_paging_host),
     ("hwsafe-host", check_hwsafe_host),
     ("audit-host", check_audit_host),
     ("mpu-host", check_mpu_host),
