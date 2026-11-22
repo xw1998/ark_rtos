@@ -2625,6 +2625,76 @@ def check_apprun_host():
            "window borrow + vector table + task/MPU + exit hook (%s)"
            % txt.strip().splitlines()[-1])
 
+def check_flashapp_host():
+    """Burn into intra-chip flash, verify, and boot from it, on host.
+
+    arkrtos_flashapp.c is the only software step of "product goes back into
+    flash and runs from there". It shares the data window with app run but
+    takes its code from the flash app area, and everything it refuses is about
+    that address contract:
+
+      * a file that was linked for another layout (wrong initial SP, entry
+        outside the area, entry past the payload, wrong arkc prologue) must be
+        rejected BEFORE the area is erased -- a broken upload must not destroy
+        the program that still works;
+      * "program returned 0" is not proof: the area is read back byte for byte
+        and a single flipped byte is VERIFY, not success;
+      * metadata lives in the last flash word, so a half-written image reads as
+        "nothing here" instead of looking runnable;
+      * a first-fit data window that is not exactly the apprun data block is
+        refused (the product is linked for that address);
+      * write / erase / run are three separate single-instance gates: writing
+        while running would erase the sector the CPU is fetching from;
+      * the exit hook only returns the window for its own task, and still
+        clears the state when the return itself fails.
+
+    The module reads both the flash area and the data window by absolute
+    address, so the test maps [FLASHAPP_BASE, +SIZE) and
+    [SLOT_RAM_BASE, +SLOT_RAM_TOTAL) for real and bails out (non-zero, FAIL)
+    when a mapping cannot be taken. Flash is modelled over the mapped memory
+    (erase = fill 0xFF, write = memcpy) with knobs for per-call failures and
+    post-write corruption. OFF is an empty translation unit, so coverage comes
+    from this grade alone.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("flashapp-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    picked = None
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name == "flashapp":
+            picked = (test, mods, defs, incs)
+            break
+    if picked is None:
+        fail("flashapp-host", "case flashapp missing from coverage_gate.CASES")
+        return
+
+    test, mods, defs, incs = picked
+    with TempDir() as td:
+        exe = os.path.join(td, "flashapp" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+            fail("flashapp-host", "flashapp did not build: %s" % tail[:200])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or "FLASHAPP-HOST OK" not in txt:
+            fail("flashapp-host", "flashapp failed: %s" % txt.strip()[:220])
+            return
+        ok("flashapp-host",
+           "burn + read-back verify + metadata + boot from flash (%s)"
+           % txt.strip().splitlines()[-1])
+
 def check_hwsafe_host():
     """HW_SAFE on/off: who gets driven at the moment a task dies, and on what.
 
@@ -3281,6 +3351,7 @@ CHECK_TABLE = (
     ("layout-host", check_layout_host),
     ("crash-host", check_crash_host),
     ("apprun-host", check_apprun_host),
+    ("flashapp-host", check_flashapp_host),
     ("hwsafe-host", check_hwsafe_host),
     ("audit-host", check_audit_host),
     ("mpu-host", check_mpu_host),
