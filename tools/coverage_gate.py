@@ -429,6 +429,13 @@ CASES = [
       "-DARKRTOS_SHELL_AUTH_DIGEST={0xBD,0xCD,0xB6,0x66,0x5B,0xC6,0x92,0xE8,0xEB,0xCC,0x98,0x4E,0xAF,0xDA,0xFE,0xD0,0xE7,0x81,0x34,0xB8,0x28,0x58,0x6F,0xC7,0x3B,0xA0,0x46,0x52,0x34,0xF2,0xF5,0xF1}",
       "-fno-asynchronous-unwind-tables"], "SHELL-AUTH-HOST OK",
      {"incs": ["-Ikernelsrc/shell", "-Ikernelsrc/shell/ark_shell"]}),
+    # --- 2026-11-22 新增：/chosen/stdout-path 的消费（判断与拒绝原因）---
+    # 依赖面只有 5 个 FDT 查询，全部在用例里打桩；不引入真实 DTB。
+    # 关档（默认 0）本文件不产生符号，这里固定开档测。
+    ("fdtconsole", "kernelsrc/tests/test_fdt_console_host.c",
+     ["kernelsrc/src/arkrtos_fdt_console.c"],
+     ["-DARKRTOS_USE_FDT_CONSOLE=1", "-DARKRTOS_USE_FDT=1",
+      "-fno-asynchronous-unwind-tables"], "FDT-CONSOLE-HOST OK"),
 ]
 
 

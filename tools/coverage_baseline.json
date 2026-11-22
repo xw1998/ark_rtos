@@ -10,6 +10,7 @@
   "arkrtos_event": 100.0,
   "arkrtos_exports": 100.0,
   "arkrtos_fault": 100.0,
+  "arkrtos_fdt_console": 97.6,
   "arkrtos_fifo": 100.0,
   "arkrtos_trace": 100.0,
   "arkrtos_flashapp": 99.7,

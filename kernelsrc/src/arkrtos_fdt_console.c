@@ -51,6 +51,9 @@ static int console_copy(char *dst, uint32 cap, const char *src)
     {
         if((i + 1u) >= cap)
         {
+            /* 截断：仍然给出合法的 C 字符串，
+             * 调用方看到的是前缀。 */
+            dst[cap - 1u] = '\0';
             return -1;
         }
         dst[i] = src[i];

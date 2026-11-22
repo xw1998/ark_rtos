@@ -1598,6 +1598,73 @@ def check_shellauth_host():
        "boot locked / exempt words / wrong-password count / hard lock / unlock+logout: %s"
        % last)
 
+def check_fdtconsole_host():
+    """Consume /chosen/stdout-path on host: decisions and every refusal reason.
+
+    arkrtos_fdt_console.c is wrapped in #if (ARKRTOS_USE_FDT_CONSOLE == 1) and
+    the switch defaults to 0, so a default build never sees a line of it.  The
+    module's whole job is to *refuse*, and a refusal reason that is wrong is
+    worse than no check at all, because it sends the reader to the wrong line
+    of the device tree.
+
+    Pinned here, with the five FDT queries stubbed (no real DTB needed):
+      * no stdout-path / unparsable value -> NO_STDOUT / BAD_PATH;
+      * path does not resolve, node disabled -> NO_NODE / DISABLED, with the
+        fields read so far still filled for the log line;
+      * OK fills path / compatible / reg / clock / baud / bits / parity;
+      * stdout-path options vs node current-speed conflict -> BAUD;
+      * expect mismatches are separate codes: COMPAT, ADDR, CLOCK (missing
+        clock-frequency counts as a clock mismatch, not "unchecked");
+      * a truncated copy still yields a NUL-terminated prefix;
+      * reason names are stable strings and unknown codes return "?".
+
+    Two defensive lines stay uncovered by design: console_str_eq's NULL guard
+    and console_copy's NULL/cap guard -- both callers pass non-NULL buffers.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("fdtconsole-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    pick = None
+    link = []
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name == "fdtconsole":
+            extra = case[5] if len(case) > 5 else {}
+            pick = (_markers, test, mods, defs, incs)
+            link = list(extra.get("link", []))
+            break
+    if pick is None:
+        fail("fdtconsole-host", "case fdtconsole missing from coverage_gate.CASES")
+        return
+
+    markers, test, mods, defs, incs = pick
+    with TempDir() as td:
+        exe = os.path.join(td, "fdtconsolehost" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods + link)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+            fail("fdtconsole-host", "did not build: %s" % tail[:200])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or markers[0] not in txt:
+            fail("fdtconsole-host", "failed: %s" % txt.strip()[:220])
+            return
+        last = txt.strip().splitlines()[-1]
+
+    ok("fdtconsole-host",
+       "stdout-path decisions (8 refusal codes + OK) and truncated-copy safety: %s"
+       % last)
+
 def check_elf_loader():
     """ELF64 executable loader (ARKRTOS_USE_ELF) must be wired, not decorative.
 
@@ -3740,6 +3807,7 @@ CHECK_TABLE = (
     ("linux-abi", check_linux_abi),
     ("shell-auth", check_shell_auth),
     ("shellauth-host", check_shellauth_host),
+    ("fdtconsole-host", check_fdtconsole_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),
