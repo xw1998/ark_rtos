@@ -510,6 +510,17 @@ CASES = [
      "FS-HOST OK",
      {"incs": ["-Ikernelsrc/fs",
                "-isystem", "kernelsrc/fs/littlefs"]}),
+    ("smpsched", "kernelsrc/tests/test_smp_sched_host.c",
+     ["kernelsrc/src/arkrtos_smp_sched.c"],
+     ["-DARKRTOS_USE_SMP_SCHED=1", "-DARKRTOS_USE_SMP=1",
+      "-DARKRTOS_CPU_NUM=3", "-DARKRTOS_TIME_SLICE_TICKS=1",
+      "-fno-asynchronous-unwind-tables"],
+     "SMP-SCHED-HOST OK"),
+    ("smpschedoff", "kernelsrc/tests/test_smp_sched_host.c",
+     ["kernelsrc/src/arkrtos_smp_sched.c"],
+     ["-DARKRTOS_USE_SMP_SCHED=0",
+      "-fno-asynchronous-unwind-tables"],
+     "SMP-SCHED-HOST OK"),
 ]
 
 

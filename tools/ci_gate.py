@@ -2332,6 +2332,122 @@ def check_sec_crc():
     else:
         fail("sec-crc", txt[-260:])
 
+def check_smp_sched_host():
+    """arkrtos_smp_sched.c on the host: the per-core run queue and the
+    explicit migration path, with no board involved.
+
+    What is pinned here:
+
+      * task_to answers -1 (bad task id / core id), -2 (cpu 0 goes through
+        task_back), -3 (not READY), -4 (already owned by another core) before
+        it touches any queue; a successful move removes the task from the
+        CPU0 ready chain and disarms its delay entry;
+      * the four switch stages: a handoff of the *running* task saves its
+        frame and frees the core, a handoff of a task still sitting in the
+        queue just removes it, and a handoff of neither is left registered
+        for the next tick;
+      * the four landing outcomes are told apart by readings -- stay in place
+        (idle to idle with no switch counter bump, slice not exhausted, or
+        rotation that lands on the same task again), switch to another task,
+        fall back to this core's idle frame, and the "stack pointer is 0"
+        guard that returns the incoming frame instead of 0;
+      * poll only re-adds a returned task whose status is READY, and clears
+        the pending return flag either way;
+      * enter() never returns (it is a WFI loop): the test harness makes
+        arkrtos_port_wfi longjmp after one loop iteration, so both the
+        illegal-core spin and the legal-core "start this core's timer, then
+        wait for the first tick" path are observable rather than skipped;
+      * the compiled-out tier (-DARKRTOS_USE_SMP_SCHED=0) must leave an empty
+        translation unit: nm on the object shows no defined global, otherwise
+        a stub would keep answering PASS-shaped questions.
+
+    Not covered: sms_q_push returning -1 (the queue holds at most one entry
+    per task and capacity equals ARKRTOS_TASK_MAX_NUM, so it cannot fill),
+    the defensive skip of a bad queue index in sms_pick, the re-add on a
+    failed push, and the bad-handoff-index clear -- none of them are reachable
+    through the public API, so no fake call is manufactured to touch them.
+    Real IPI delivery, the secondary core's exception frame, and cross-core
+    memory ordering are board-only facts.
+
+    Runs the default tier and the -DARKRTOS_USE_SMP_SCHED=0 tier;
+    coverage_gate.CASES carries both and takes the union of the line sets.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("smp-sched-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    picks = {}
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name in ("smpsched", "smpschedoff"):
+            picks[name] = (test, mods, defs, incs, _markers)
+    for name in ("smpsched", "smpschedoff"):
+        if name not in picks:
+            fail("smp-sched-host", "case %s missing from coverage_gate.CASES" % name)
+            return
+
+    with TempDir() as td:
+        lines = []
+        for name in ("smpsched", "smpschedoff"):
+            test, mods, defs, incs, markers = picks[name]
+            exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+                fail("smp-sched-host", "%s did not build: %s" % (name, tail[:200]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            if r.returncode != 0 or markers[0] not in txt:
+                fail("smp-sched-host", "%s failed: %s" % (name, txt.strip()[:220]))
+                return
+            lines.append(txt.strip().splitlines()[-1])
+
+        # OFF means an empty translation unit: nm on the object must show no
+        # defined global. A surviving stub would still answer questions.
+        off_defs = picks["smpschedoff"][2]
+        obj = os.path.join(td, "smpsched_off.o")
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"] + off_defs
+               + COMMON_INC + ["-c", "-o", obj, "kernelsrc/src/arkrtos_smp_sched.c"])
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            fail("smp-sched-host", "OFF object did not build: %s"
+                 % ((r.stderr or "").strip().splitlines() or [""])[-1][:200])
+            return
+        nm = os.path.join(os.path.dirname(cc), "nm.exe" if os.name == "nt" else "nm")
+        if not os.path.isfile(nm):
+            nm = shutil.which("nm") or "nm"
+        r = _run_check([nm, obj])
+        nm_txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0:
+            fail("smp-sched-host", "nm failed on the OFF object: %s"
+                 % nm_txt.strip()[:200])
+            return
+        defined = []
+        for ln in nm_txt.splitlines():
+            parts = ln.split()
+            if len(parts) >= 3 and parts[-2].isupper():
+                defined.append(parts[-1])
+        if defined:
+            fail("smp-sched-host",
+                 "USE_SMP_SCHED=0 object still defines symbols: %s"
+                 % ", ".join(defined[:8]))
+            return
+
+    ok("smp-sched-host",
+       "arkrtos_smp_sched per-core queues + migration on the host, and an "
+       "empty TU when off (task_to/task_back gates, four switch stages, "
+       "slice/rotation, idle-frame fallback, 0-sp guard): %s" % lines[0])
+
+
 def check_modld():
     """VxWorks-style downloadable modules (ARKRTOS_USE_MODLOAD) must be wired.
 
@@ -4274,6 +4390,7 @@ CHECK_TABLE = (
     ("vfslfs-host", check_vfslfs_host),
     ("vfs-host", check_vfs_host),
     ("fs-host", check_fs_host),
+    ("smp-sched-host", check_smp_sched_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),

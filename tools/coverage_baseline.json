@@ -37,6 +37,7 @@
   "arkrtos_sec": 100.0,
   "arkrtos_sign": 100.0,
   "arkrtos_shell_auth": 98.7,
+  "arkrtos_smp_sched": 97.89,
   "arkrtos_smp": 89.19,
   "arkrtos_sync": 99.22,
   "arkrtos_tickless": 98.97,
