@@ -3200,6 +3200,97 @@ def check_shell_ushell_host():
        "arkrtos_shell_ushell on the host (register / unregister / trampoline "
        "alive check / chunked output): %s" % last)
 
+def check_shell_mod_host():
+    """The two execution models of arkrtos_shell_mod.c on the host.
+
+    exec runs a linked ET_EXEC through the ELF loader and waits for that
+    address space only; ld runs a board-linked ET_REL through the module
+    loader and does not wait at all.  Both are the place where a wrong
+    reading is expensive precisely because it looks plausible: an exec that
+    prints a truncated entry address, a wait that reports 0 for a task that
+    never set a code, or an ld that prints a bare rc instead of the missing
+    symbol name all send the reader hunting in the wrong layer.
+
+    So this case links the real file against stubs for both loaders, the
+    task table and the export table, and asserts on 131 checks:
+      * exec usage, and a load failure that repeats the loader's own error
+        name and rc (not a shell-side rewording);
+      * the success reading prints bytes / segments / entry / sp / argc /
+        task / space from the fixture, then the duration, and the exit code
+        only when the instance reported one -- the "no code" arm prints the
+        duration alone rather than a zero that looks like a status;
+      * the 30 s cap gives the prompt back and says the program is still
+        running, with exactly 30000/20 polls and one yield per poll;
+      * the fallback only takes words that look like paths (/x, ./x, ../x),
+        and answers -1 for a bare word, "." and ".." so the caller still
+        reports command not found;
+      * wait refuses five malformed inputs (missing id, non-numeric id,
+        id 0, id past the task table, non-numeric timeout) before it reads
+        the task table, refuses the shell's own task, refuses an unused
+        slot, and then reports exit code / no code / still-running;
+      * ld reports the missing symbol name and the export-table hint, or the
+        bad relocation number, or one line for anything else; on success it
+        describes the row it just added and stays silent when the count did
+        not grow or the row cannot be read;
+      * lkup prints an address, "not exported", or the whole table (with "?"
+        for a row whose name is NULL) and says so when the table is absent;
+      * modules says "no module loaded" on an empty list, prints one line
+        per readable row with run/done state, and skips unreadable rows;
+      * unld refuses a missing or non-numeric index and reports a refused
+        unload with the loader's name and rc.
+
+    Honest limits:
+      1) nothing is parsed, mapped, relocated or scheduled: both loaders,
+         the task table and the export table are stubs, so this shows the
+         shell's logic, not that a real image loads;
+      2) the 30 s cap is 1500 yields, not 30 s of wall time;
+      3) the shell task's stack is not stressed here -- the 3080 B peak that
+         arkrtos_modld.h warns about is a board reading, not a host one.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("shellmod-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    pick = None
+    for case in CASES:
+        name, test, mods, defs, markers, incs, _argv = _case(case)
+        if name == "shellmod":
+            pick = (test, mods, defs, incs, markers)
+            break
+    if pick is None:
+        fail("shellmod-host", "case shellmod missing from coverage_gate.CASES")
+        return
+
+    test, mods, defs, incs, markers = pick
+    with TempDir() as td:
+        exe = os.path.join(td, "shellmod" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            err = (r.stderr or "").strip().splitlines() or [""]
+            fail("shellmod-host", "the case did not build: %s"
+                 % [x for x in err if x.strip()][-1][:220])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or markers[0] not in txt or "FAIL" in txt:
+            fail("shellmod-host", txt.strip()[-260:])
+            return
+        last = txt.strip().splitlines()[-1]
+
+    ok("shellmod-host",
+       "arkrtos_shell_mod on the host (exec reading + 30 s cap / wait "
+       "refusals and exit code / ld symbol and reloc naming / lkup / "
+       "modules / unld): %s" % last)
+
+
 def check_modld():
     """VxWorks-style downloadable modules (ARKRTOS_USE_MODLOAD) must be wired.
 
@@ -5151,6 +5242,7 @@ CHECK_TABLE = (
     ("task-host", check_task_host),
     ("shellmisc-host", check_shell_misc_host),
     ("ushell-host", check_shell_ushell_host),
+    ("shellmod-host", check_shell_mod_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),

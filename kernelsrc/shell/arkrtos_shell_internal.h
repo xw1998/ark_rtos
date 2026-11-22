@@ -209,6 +209,9 @@ void sh_out(const char *s);
 const char *slot_state_name(uint32 st);
 const char *slot_type_name(uint32 t);
 const char *task_state_name(uint32 st);
+/* Unknown-word fallback into the ELF path. Defined by arkrtos_shell_mod.c when
+ * ARKRTOS_USE_ELF is on; ark_shell_eval.c is its only caller. */
+int ark_shell_exec_fallback(int argc, char *argv[]);
 void ushell_drop(uint32 i);
 int vfs_complete(struct ark_shell_s *shell, const char *word, int is_first, char cand[][ARK_SHELL_LINE_SIZE], int max);
 

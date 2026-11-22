@@ -670,6 +670,22 @@ CASES = [
     # SVC 0x1A 的内核侧：注册表 + 跳板。板级口径与 shellmisc 同一份；不需要
     # 额外开关。用例自己提供控制台命令表与分区表（跳板靠指针反查、靠分区
     # 表判断处理器是否还在已装载镜像内）。
+    # --- 2026-11-22：可执行文件与可下载模块（arkrtos_shell_mod）-----------
+    # exec / wait 走 ELF64 装载器，ld / lkup / modules / unld 走 ET_REL 模块
+    # 装载器与导出表；板级口径与 ushell 同一份（qemu_loongarch64 已开
+    # USE_ELF / USE_EXIT_CODE / USE_MODLOAD）。用例自己提供装载器、任务表
+    # 与导出表，所以这里不需要真实的 VFS 或调度器。
+    ("shellmod", "kernelsrc/tests/test_shell_mod_host.c",
+     ["kernelsrc/shell/arkrtos_shell_mod.c"],
+     ['-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',
+      SIGN_KEY_DEF, "-fno-asynchronous-unwind-tables"]
+     + ["-D" + x for x in SOFTBUS_TIER_DEFS],
+     "SHELL-MOD-HOST OK",
+     {"incs": ["-Iboard/qemu_loongarch64", "-Ikernelsrc/shell",
+               "-Ikernelsrc/shell/ark_shell", "-Ikernelsrc/fs",
+               "-Ikernelsrc/fs/littlefs",
+               "-Ikernelsrc/components/ark_vfs/include",
+               "-Ikernelsrc/components/ark_softbus/include"]}),
     ("ushell", "kernelsrc/tests/test_shell_ushell_host.c",
      ["kernelsrc/shell/arkrtos_shell_ushell.c"],
      ['-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',
