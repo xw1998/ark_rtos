@@ -8,6 +8,7 @@
   "arkrtos_exports": 100.0,
   "arkrtos_fault": 100.0,
   "arkrtos_fifo": 100.0,
+  "arkrtos_guard": 99.4,
   "arkrtos_init": 100.0,
   "arkrtos_loader": 98.41,
   "arkrtos_log": 98.88,

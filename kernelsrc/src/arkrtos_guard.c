@@ -121,13 +121,13 @@ void arkrtos_guard_init(void)
         /* Requested but not running: say so instead of leaving the reader to
          * conclude from "enabled = 1" that a watchdog is protecting the board. */
         ARKRTOS_LOGE("GUARD", "watchdog requested but the port refused it (%u ms)",
-                   (uint32)ARKRTOS_WDG_TIMEOUT_MS);
+                   (unsigned int)(uint32)ARKRTOS_WDG_TIMEOUT_MS);
     }
     else
     {
         g_status.timeout_ms = arkrtos_port_wdg_timeout_ms();
         ARKRTOS_LOGI("GUARD", "watchdog armed, hardware timeout %u ms",
-                   (uint32)g_status.timeout_ms);
+                   (unsigned int)(uint32)g_status.timeout_ms);
     }
     #endif
 }

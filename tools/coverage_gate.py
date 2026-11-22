@@ -267,6 +267,18 @@ CASES = [
     ("mpu-off", "kernelsrc/tests/test_mpu_host.c",
      ["kernelsrc/src/arkrtos_mpu.c"],
      ["-DARKRTOS_USE_MPU=0"], "MPU-HOST OFF OK"),
+    # --- 2026-11-22 新增：看门狗门控与心跳契约 ---
+    # 装狗/不装狗是同一个宏的两个取值（同一份源码编出两段决策），关档又是另一段
+    # #else；三条并集才把两个分支都盖住。
+    ("guard", "kernelsrc/tests/test_guard_host.c",
+     ["kernelsrc/src/arkrtos_guard.c"],
+     ["-DARKRTOS_WDG_ENABLE=1"], "GUARD-HOST OK"),
+    ("guard-nowdg", "kernelsrc/tests/test_guard_host.c",
+     ["kernelsrc/src/arkrtos_guard.c"],
+     ["-DARKRTOS_WDG_ENABLE=0"], "GUARD-HOST NOWDG OK"),
+    ("guard-off", "kernelsrc/tests/test_guard_host.c",
+     ["kernelsrc/src/arkrtos_guard.c"],
+     ["-DARKRTOS_USE_KERNEL_GUARD=0"], "GUARD-HOST OFF OK"),
 ]
 
 

@@ -2648,6 +2648,80 @@ def check_mpu_host():
        % (results[0], results[1]))
 
 
+def check_guard_host():
+    """Watchdog gating and the heartbeat contract, on host, at three grades.
+
+    arkrtos_guard.c decides two things and touches no register: whether the
+    system is still keeping the promises it made, and whether the hardware
+    should be allowed to end this run. The host case stubs the neighbours
+    (tick counter, partition table, audit, crash ledger, fault ring, log,
+    watchdog port) and pins the decision, not the hardware:
+
+      * the contract is judged only on service ticks, and the judge is the
+        beat age alone -- a task blocked longer than its declared period is
+        still in violation, or an image that never wakes up is never caught;
+      * a violation is charged once per boot (crash ledger + fault ring),
+        after which only the starvation counter moves -- charging per
+        evaluation would turn one broken image into hundreds of faults;
+      * the watchdog is fed only when the verdict is clean; a board that did
+        not ask for one, or a port that refused to arm it, still judges and
+        still reports, it just never feeds;
+      * a contract dies with its task, so it is never charged to whichever
+        image is handed the id next.
+
+    Three builds: WDG_ENABLE=1 (armed), WDG_ENABLE=0 (board asked for none:
+    judging continues, feeding does not) and USE_KERNEL_GUARD=0, where the
+    module is an empty TU and every entry point answers "disabled" instead of
+    a silent success.
+    """
+    import tempfile
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("guard-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    picks = {}
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name in ("guard", "guard-nowdg", "guard-off"):
+            picks[name] = (test, mods, defs, incs)
+    for need in ("guard", "guard-nowdg", "guard-off"):
+        if need not in picks:
+            fail("guard-host", "case %s missing from coverage_gate.CASES" % need)
+            return
+
+    results = []
+    for case_name, marker in (("guard", "GUARD-HOST OK"),
+                              ("guard-nowdg", "GUARD-HOST NOWDG OK"),
+                              ("guard-off", "GUARD-HOST OFF OK")):
+        test, mods, defs, incs = picks[case_name]
+        with tempfile.TemporaryDirectory() as td:
+            exe = os.path.join(td, case_name + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+                fail("guard-host",
+                     "%s did not build: %s" % (case_name, tail[:200]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            if r.returncode != 0 or marker not in txt:
+                fail("guard-host",
+                     "%s failed: %s" % (case_name, txt.strip()[:220]))
+                return
+            results.append(txt.strip().splitlines()[-1])
+    ok("guard-host",
+       "heartbeat contract + watchdog gating (feed only on a clean verdict): %s | %s | %s"
+       % (results[0], results[1], results[2]))
+
+
 def check_coverage_host():
     """Line coverage of the modules the host tests actually link.
 
@@ -2685,9 +2759,10 @@ def check_warn_host():
     re-checked and riscv64-unknown-elf-gcc-10.2.0 turned up.
 
     Scope is honest and narrow: every TU the cases in coverage_gate.CASES
-    compile -- 40 case configurations (test + module each) plus the SDK stdio
-    test, 82 TUs in total, because a few modules are built once per
-    configuration (sign, blk, dev, event, export, init, hwsafe, audit and mpu twice; log three
+    compile -- 43 case configurations (test + module each) plus the SDK stdio
+    test, 88 TUs in total, because a few modules are built once per
+    configuration (sign, blk, dev, event, export, init, hwsafe, audit and mpu twice;
+    guard three times; log three
     times: default, USE_LOG_RING=0 and USE_LOG=0; timer three times: default,
     tickless and USE_TIMER=0; cfg three times: default, STACK_GUARD=1 and
     STACK_USAGE=0). Everything else in kernelsrc/ needs an
@@ -2821,6 +2896,7 @@ CHECK_TABLE = (
     ("hwsafe-host", check_hwsafe_host),
     ("audit-host", check_audit_host),
     ("mpu-host", check_mpu_host),
+    ("guard-host", check_guard_host),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),
     ("analyzer", check_analyzer),
