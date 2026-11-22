@@ -1105,6 +1105,8 @@ static int32 elf_write_image(const char *path, uint32 space, elf_word_t phoff,
         dst      = (uint8 *)(unsigned long)va;
 #if (ARKRTOS_USE_PAGING == 1)
         (void)dst;   /* 分页档不直接用窗口指针：统一走 elf_copy_to_window() */
+#else
+    (void)space;    /* 无分页档：落点就是窗口 VA，不需要帧号 */
 #endif
 
         if(p_filesz > 0ul)
@@ -1249,7 +1251,7 @@ static void elf_aux_add(elf_aux_t *aux, uint32 *p_n, uint32 type,
 * @return 0 = 成功（*p_sp / *p_execfn 有效）；否则为负错误码
 */
 static int32 elf_build_stack(unsigned long win_top, unsigned long argv_start,
-                             int32 argc, char *argv[],
+                             int32 argc, const char *const argv[],
                              elf_aux_t *aux, uint32 auxn,
                              unsigned long *p_sp, unsigned long *p_execfn)
 {
@@ -1412,6 +1414,8 @@ static int32 elf_start_task(elf_word_t entry, unsigned long stack_bottom,
      * frame B —— 程序一取指就落进别人的帧。绑定只记一个号，真正切换
      * 发生在下一次调度到它的时候。 */
     (void)arkrtos_paging_bind_task(&arkrtos_task_table[id - 1], space);
+#else
+    (void)space;    /* 无分页档只有一个空间，不绑定 */
 #endif
 
     /* 原子段落在这里收口：此后任务已降权、窗口已写回、帧已绑定，
@@ -1424,11 +1428,12 @@ static int32 elf_start_task(elf_word_t entry, unsigned long stack_bottom,
 /* 参数关：路径非空 -> 签名门 -> argc 范围 -> argv 缺省 -> 逐项非空。
  * 签名故意排在「路径非空」之后、「读 ELF 头」之前：既不让格式错误盖掉
  * 「文件没签名」，也不对空路径白算一遍 HMAC。 */
-static int32 elf_prepare_args(const char *path, int32 *p_argc, char ***p_argv,
-                              char *argv_auto[1])
+static int32 elf_prepare_args(const char *path, int32 *p_argc,
+                              const char *const **p_argv,
+                              const char *argv_auto[1])
 {
     int32 argc = *p_argc;
-    char **argv = *p_argv;
+    const char *const *argv = *p_argv;
     uint32 i;
 
     if((path == 0) || (path[0] == '\0'))
@@ -1461,7 +1466,7 @@ static int32 elf_prepare_args(const char *path, int32 *p_argc, char ***p_argv,
      * 而程序自己按 argv[0] 判断「我是谁」是常见写法，不能给 0。 */
     if((argc == 0) || (argv == 0))
     {
-        argv_auto[0] = (char *)path;
+        argv_auto[0] = path;
         argv = argv_auto;
         argc = 1;
     }
@@ -1524,7 +1529,7 @@ static int32 elf_check_entry(elf_word_t entry, unsigned long win_base,
 /* 栈关：用户栈与 argv 也在窗口里，铺之前先把地址空间装对。 */
 static int32 elf_stack_build(uint32 space, unsigned long win_top,
                              unsigned long argv_start,
-                             int32 argc, char *argv[],
+                             int32 argc, const char *const argv[],
                              elf_aux_t *aux, uint32 auxn,
                              unsigned long *p_sp, unsigned long *p_execfn)
 {
@@ -1576,7 +1581,7 @@ typedef struct
     unsigned long win_top;
     unsigned long argv_start;
     int32 argc;
-    char **argv;
+    const char *const *argv;
     uint32 start_task;
     unsigned long *p_tp;
 } elf_load_state_t;
@@ -1956,13 +1961,14 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
     elf_aux_t aux[ARKRTOS_ELF_AUX_MAX];
     elf_load_state_t st;
     int32 rc;
-    char *argv_auto[1];
+    const char *const *pargv = (const char *const *)argv;
+    const char *argv_auto[1];
     char interp_path[ARKRTOS_ELF_INTERP_PATH_MAX];
 #if (ARKRTOS_USE_DYNLOAD == 1)
     int32 has_interp = 0;
 #endif
 
-    rc = elf_prepare_args(path, &argc, &argv, argv_auto);
+    rc = elf_prepare_args(path, &argc, &pargv, argv_auto);
     if(rc != ARKRTOS_ELF_OK)
     {
         return rc;
@@ -2028,7 +2034,7 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
     st.win_top = win_top;
     st.argv_start = argv_start;
     st.argc = argc;
-    st.argv = argv;
+    st.argv = pargv;
     st.start_task = start_task;
     st.p_tp = p_tp;
 

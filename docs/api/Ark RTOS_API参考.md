@@ -11108,7 +11108,7 @@ static int32 elf_find_interp(const char *path, elf_word_t phoff, uint16 phnum, u
 ### `static int32 elf_build_stack(unsigned long win_top, unsigned long argv`
 
 ```c
-static int32 elf_build_stack(unsigned long win_top, unsigned long argv_start, int32 argc, char *argv[], elf_aux_t *aux, uint32 auxn, unsigned long *p_sp, unsigned long *p_execfn) {
+static int32 elf_build_stack(unsigned long win_top, unsigned long argv_start, int32 argc, const char *const argv[], elf_aux_t *aux, uint32 auxn, unsigned long *p_sp, unsigned long *p_execfn) {
 ```
 
 **把 argv 与 auxv 铺成 Linux 的形状，返回初始 sp**

@@ -2671,6 +2671,99 @@ def check_net_host():
        "on the host (errno table, per-op failures, handle lifetime, owner "
        "death), honest ENOTSUP when off: %s" % lines[0])
 
+def check_elf_host():
+    """The ELF loader's static path, driven on the host.
+
+    arkrtos_elf.c is the one place where a file stopped being bytes and
+    became an address space: header checks, per-segment range checks against
+    the window, the write pass (filesz copy + memsz-filesz zero), the Linux
+    argv/auxv stack, and the atomic task hand-over. A wrong range check does
+    not fail loudly -- it silently overwrites the kernel, and the symptom
+    shows up later as a random crash in an unrelated task. So this check
+    builds a fake VFS and a crafted ELF image per case and asserts on the
+    exact error code returned *before the first byte is written*:
+
+      * param gate: bad path, argc range, null argv element;
+      * header gate: magic, class, endianness, machine, e_type, phentsize,
+        phnum over the cap, phdr offset past EOF (short read);
+      * segment gate: filesz > memsz, window escapes, stack overlap, zero
+        PT_LOADs, address wraparound;
+      * write pass: filesz copied, the rest of memsz zeroed, and the byte
+        right after memsz left untouched;
+      * stack: argv strings top-down and 8-byte aligned, AT_RANDOM 16 bytes
+        aligned and non-zero, AT_PHDR only when the table is inside a LOAD,
+        sp pointing at argc;
+      * task: registered, de-privileged, window written back to the TCB,
+        MPU context rebuilt;
+      * ledger: running / running_in / info / last_space / BUSY, and lazy
+        cleanup once the task dies;
+      * exec_replace: no new task, the caller's id is kept.
+
+    The window is really mapped (VirtualAlloc / mmap(MAP_FIXED)): the loader
+    copies straight to the VA by design, so an unmapped window would mean
+    writing to random addresses. If the mapping fails the case FAILs -- it
+    never "skips", because skipping would run every assertion on unmapped
+    memory and look like a pass.
+
+    Host is 32-bit MinGW (ILP32), so only the ELF32 path is compiled here:
+    ELF64, PT_INTERP/ld.so, TLS blocks, paging spaces, exit codes and
+    signature enforcement are board-only and are covered on QEMU LoongArch64,
+    not disguised here. The OFF tier (-DARKRTOS_USE_ELF=0) must return honest
+    refusals and its own macros must still answer.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("elf-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    picks = {}
+    for case in CASES:
+        name, test, mods, defs, markers, incs, _argv = _case(case)
+        if name in ("elf", "elfoff"):
+            extra = case[5] if len(case) > 5 else {}
+            picks[name] = (test, mods, defs, incs, markers,
+                           list(extra.get("link", [])))
+    for name in ("elf", "elfoff"):
+        if name not in picks:
+            fail("elf-host", "case %s missing from coverage_gate.CASES" % name)
+            return
+
+    with TempDir() as td:
+        lines = []
+        for name in ("elf", "elfoff"):
+            test, mods, defs, incs, markers, link = picks[name]
+            exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + defs + incs + COMMON_INC + ["-o", exe, test] + mods + link)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                err = ((r.stderr or "").strip().splitlines() or [""])
+                fail("elf-host", "%s did not build: %s"
+                     % (name, [x for x in err if x.strip()][-1][:220]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            bad = r.returncode != 0 or markers[0] not in txt or "FAIL" in txt
+            if bad:
+                fail("elf-host", "%s failed: %s" % (name, txt.strip()[-260:]))
+                return
+            if name == "elfoff" and " off" not in txt.lower():
+                fail("elf-host",
+                     "the OFF tier did not take its own branch: %s"
+                     % txt.strip()[-160:])
+                return
+            lines.append(txt.strip().splitlines()[-1])
+
+    ok("elf-host",
+       "arkrtos_elf static path on the host against a crafted image and a "
+       "fake VFS (header / segment / stack / task ledger / exec_replace), "
+       "honest refusals when off: %s" % lines[0])
+
 def check_modld():
     """VxWorks-style downloadable modules (ARKRTOS_USE_MODLOAD) must be wired.
 
@@ -4616,6 +4709,7 @@ CHECK_TABLE = (
     ("smp-sched-host", check_smp_sched_host),
     ("softbus-host", check_softbus_host),
     ("net-host", check_net_host),
+    ("elf-host", check_elf_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),

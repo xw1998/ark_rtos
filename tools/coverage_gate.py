@@ -566,6 +566,24 @@ CASES = [
      ["-DARKRTOS_USE_LWIP=0", "-DARKRTOS_LOG_LEVEL=0",
       "-fno-asynchronous-unwind-tables"],
      "NET-HOST OFF OK"),
+    # --- 2026-11-22：ELF 装载器（静态档）。窗口是真的映射出来的：装载是
+    # 直接 memcpy 到 VA，宿主上不映射就是往随机地址写，所以用例自己
+    # VirtualAlloc / mmap(MAP_FIXED) 占住这块窗口。
+    ("elf", "kernelsrc/tests/test_elf_host.c",
+     ["kernelsrc/src/arkrtos_elf.c"],
+     ["-DARKRTOS_USE_ELF=1",
+      "-DARKRTOS_ELF_WINDOW_BASE=0x60000000u",
+      "-DARKRTOS_ELF_WINDOW_SIZE=0x200000u",
+      "-DARKRTOS_ELF_ARGV_SIZE=16384u",
+      "-DARKRTOS_ELF_STACK_SIZE=32768u",
+      "-DARKRTOS_LOG_LEVEL=0",
+      "-fno-asynchronous-unwind-tables"],
+     "ELF-HOST OK"),
+    ("elfoff", "kernelsrc/tests/test_elf_host.c",
+     ["kernelsrc/src/arkrtos_elf.c"],
+     ["-DARKRTOS_USE_ELF=0", "-DARKRTOS_LOG_LEVEL=0",
+      "-fno-asynchronous-unwind-tables"],
+     "ELF-HOST OFF OK"),
 ]
 
 
