@@ -2871,6 +2871,93 @@ def check_linux_abi_host():
        "user window (entry split, return classes, fd / pipe / signal / execve "
        "paths, reset), honest refusals when off: %s" % lines[0])
 
+def check_mini_host():
+    """The MiniApp loader, driven on the host: one image from header read to a
+    registered task, and the two switch tiers that share the same load path.
+
+    arkrtos_mini.c decides, in order: is the path an identity string, is
+    there a free slot / is the concurrency cap reached, is the image header
+    self-consistent, may we borrow a code block and a RAM block, did every
+    chunk read come back whole, does the CRC match, can a task be registered,
+    and only then does the instance become RUN. Every one of those steps can
+    be skipped in a way that still "works" once: a slot left occupied after a
+    failed load leaks a block pair per attempt, a failed rewind leaves an
+    unpatched image that runs and silently computes the wrong thing.
+
+    So this check drives the module with loader / ptable / task / crash
+    stubs and asserts on the call ledger (which byte range went to whom, how
+    many times, in what order) plus the exact error code on each failure
+    path, and on the seam where the second copy is armed but the switch has
+    not landed yet. Two tiers:
+      * ON  (mini_test_board.h)   -- ARKRTOS_USE_MINIAPP=1, LA64 paging
+        board, read path through arkrtos_vfs_read_at;
+      * OFF (mini_test_board_off.h) -- same board with the switch at 0; the
+        module must compile to an empty object and every reading must answer
+        "there is no such thing".
+
+    Honest limits (also written down in the test's own header):
+      1) loader_check_header / reloc_apply / crc_header are stubs -- what the
+         loader decides is covered by its own host case;
+      2) ptable_mini_alloc/free is a stub (first-fit over four 64 KiB
+         blocks); the real allocator's granularity is covered by its own;
+      3) the MPU/paging backend is stubbed: we only record that a window was
+         built for the right task, not that it is in effect (board-only);
+      4) scheduler lock / activate / yield are stubs: call counts only, no
+         real timing;
+      5) crash bookkeeping is a stub: ownership + "disabled after the cap"
+         is exercised, survival across reset is board-only.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("mini-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    picks = {}
+    for case in CASES:
+        name, test, mods, defs, markers, incs, _argv = _case(case)
+        if name in ("mini", "minioff"):
+            picks[name] = (test, mods, defs, incs, markers)
+    for name in ("mini", "minioff"):
+        if name not in picks:
+            fail("mini-host", "case %s missing from coverage_gate.CASES" % name)
+            return
+
+    with TempDir() as td:
+        lines = []
+        for name in ("mini", "minioff"):
+            test, mods, defs, incs, markers = picks[name]
+            exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                err = (r.stderr or "").strip().splitlines() or [""]
+                fail("mini-host", "%s did not build: %s"
+                     % (name, [x for x in err if x.strip()][-1][:220]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            bad = r.returncode != 0 or markers[0] not in txt or "FAIL" in txt
+            if bad:
+                fail("mini-host", "%s failed: %s" % (name, txt.strip()[-260:]))
+                return
+            if name == "minioff" and " off" not in txt.lower():
+                fail("mini-host",
+                     "the OFF tier did not take its own branch: %s"
+                     % txt.strip()[-160:])
+                return
+            lines.append(txt.strip().splitlines()[-1])
+
+    ok("mini-host",
+       "arkrtos_mini image load on the host (path / slot / header / borrow / "
+       "chunk read / CRC / task seam, failure unwinds, swap arm-take, "
+       "autostart list), honest refusals when off: %s" % lines[0])
+
 def check_modld():
     """VxWorks-style downloadable modules (ARKRTOS_USE_MODLOAD) must be wired.
 
@@ -4818,6 +4905,7 @@ CHECK_TABLE = (
     ("net-host", check_net_host),
     ("elf-host", check_elf_host),
     ("linux-abi-host", check_linux_abi_host),
+    ("mini-host", check_mini_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),

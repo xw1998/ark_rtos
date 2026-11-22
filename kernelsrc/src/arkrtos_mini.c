@@ -126,10 +126,20 @@ static uint8  g_mini_auto_out[ARKRTOS_MINI_AUTOSTART_MAX];
  * 不会递归回来再启动一轮。 */
 static uint32 g_mini_auto_boot_done;
 
-/* 不小于 v 的最小 2 的幂。只在本模块用，所以不去动公共头。 */
+/* 不小于 v 的最小 2 的幂。只在本模块用，所以不去动公共头。
+ *
+ * v > 0x80000000 时返回 0：这种值没有可表示的 2 的幂，不能在这里空转。
+ * 旧写法是 while (r < v) r <<= 1，v 超过 0x80000000 时 r 左移成 0 后永远
+ * 小于 v —— 头里 image_size 被改坏的一份镜像会死等在这里，而且此时调度器锁
+ * 还握着；后面那条「回绕自证」根本没机会执行。返回 0 由调用方按回绕判 SIZE。 */
 static uint32 arkrtos_mini_pow2_ceil(uint32 v)
 {
     uint32 r = 1u;
+
+    if(v > 0x80000000u)
+    {
+        return 0u;
+    }
 
     while(r < v)
     {

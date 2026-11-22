@@ -620,6 +620,24 @@ CASES = [
       SIGN_KEY_DEF, "-fno-asynchronous-unwind-tables", "-ffunction-sections"],
      "LINUX-ABI HOST OFF OK",
      {"incs": ["-Iboard/qemu_riscv32"]}),
+    # --- 2026-11-22：迷你应用装载器（arkrtos_mini）-------------------------
+    # 开关走「包装板级头」而不是 -D：板级头每项都是 #undef + #define 写死，
+    # 命令行 -D 会被覆盖。包装头在包含板级头之后再改那四项（见文件头注释）。
+    # incs 必须排在 COMMON_INC 之前，否则同名 arkrtos_board_config.h 会选中
+    # stm32f427 那一份（宿主上编不过）。
+    ("mini", "kernelsrc/tests/test_mini_host.c",
+     ["kernelsrc/src/arkrtos_mini.c"],
+     ['-DARKRTOS_BOARD_CONFIG="mini_test_board.h"',
+      "-fno-asynchronous-unwind-tables"],
+     "MINI HOST OK",
+     {"incs": ["-Ikernelsrc/tests", "-Iboard/qemu_loongarch64"]}),
+    # 关档：模块编成空目标（nm 自证），用例只证明「每个读数都回答没有」。
+    ("minioff", "kernelsrc/tests/test_mini_host.c",
+     ["kernelsrc/src/arkrtos_mini.c"],
+     ['-DARKRTOS_BOARD_CONFIG="mini_test_board_off.h"',
+      "-fno-asynchronous-unwind-tables"],
+     "MINI HOST OFF OK",
+     {"incs": ["-Ikernelsrc/tests", "-Iboard/qemu_loongarch64"]}),
 ]
 
 
