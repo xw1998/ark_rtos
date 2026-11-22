@@ -1142,7 +1142,7 @@ int cmd_syncinfo(int argc, char *argv[])
 
     for(i = 0; i < (int32)arkrtos_sync_sem_num(); i++)
     {
-        if(arkrtos_sync_sem_debug(i, &row) == 0)
+        if(arkrtos_sync_sem_debug(i, &row) != 0)
         {
             break;
         }
@@ -1150,7 +1150,7 @@ int cmd_syncinfo(int argc, char *argv[])
     }
     for(i = 0; i < (int32)arkrtos_sync_mtx_num(); i++)
     {
-        if(arkrtos_sync_mtx_debug(i, &row) == 0)
+        if(arkrtos_sync_mtx_debug(i, &row) != 0)
         {
             break;
         }
@@ -1158,7 +1158,7 @@ int cmd_syncinfo(int argc, char *argv[])
     }
     for(i = 0; i < (int32)arkrtos_sync_cond_num(); i++)
     {
-        if(arkrtos_sync_cond_debug(i, &row) == 0)
+        if(arkrtos_sync_cond_debug(i, &row) != 0)
         {
             break;
         }
@@ -1170,7 +1170,7 @@ int cmd_syncinfo(int argc, char *argv[])
         uint32 woke = 0u, reason = 0u, also = 0u;
         uint32 qbefore = 0u;
 
-        if(arkrtos_sync_sem_debug(i, &row) == 0)
+        if(arkrtos_sync_sem_debug(i, &row) != 0)
         {
             break;
         }
@@ -1209,7 +1209,7 @@ int cmd_log(int argc, char *argv[])
     {
         uint32 lvl;
 
-        if((parse_u32(argv[1], &lvl) == 0) || (lvl > (uint32)ARKRTOS_LOG_DEBUG))
+        if((parse_u32(argv[1], &lvl) != 0) || (lvl > (uint32)ARKRTOS_LOG_DEBUG))
         {
             sh_out("usage: log <0..4>   (0=off 1=error 2=warn 3=info 4=debug)\r\n");
             return -1;
@@ -1397,7 +1397,7 @@ int cmd_rt(int argc, char *argv[])
     {
         if(argc >= 3)
         {
-            if((parse_u32(argv[2], &n) == 0) || (n < 1u) || (n > 5000u))
+            if((parse_u32(argv[2], &n) != 0) || (n < 1u) || (n > 5000u))
             {
                 ark_shell_printf("usage: rt run [n]   (1 <= n <= 5000)\r\n");
                 return -1;

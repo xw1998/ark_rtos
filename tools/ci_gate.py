@@ -3555,6 +3555,116 @@ def check_shell_pmap_host():
        "wrb/ftest/test/u1/elf/u2/cu refusal paths with their own exit codes, "
        "same-VA two-frame memory model, cu -1/-2/-3/-4): %s" % last)
 
+def check_shell_diag_host():
+    """Diagnostic command family: the twenty subcommands on the host.
+
+    arkrtos_shell_diag.c is where an operator reads the machine back out --
+    task tables, stack peaks, watchdog contracts, crash journals, the device
+    tree, RT samples, sync objects, security baseline, board unit tests and
+    the pool layout.  A wrong number here is worse than a crash: it reads as
+    evidence.  This case links the real file against stub kernel hooks and
+    asserts on 275 checks over every command and every printed branch:
+      * task: table listing with the peak column, the 56-word frame dump, the
+        four "no such task" refusals (non-numeric, id 0, past the table, no
+        stack) and the optional blocks/wake-reason line;
+      * stack: the listing with all three "cannot measure" forms, the warn and
+        danger marks, check's three verdicts, raw's two read-out sources plus
+        its n/a row and the idle-context line both armed and refused;
+      * guard: disabled / requested-but-not-running / armed, per-slot rows for
+        all four states, an unset age printing "-", an empty slot skipped and
+        a slot the port cannot read stopping the table;
+      * crash: empty journal, per-slot rows, a MiniApp row whose hash matches
+        an autostart path, one that only has its raw hash, and the empty
+        MiniApp case;
+      * audit: clean and failing passes, the offender count as the exit code,
+        a bit whose name is unknown skipped rather than printed;
+      * sched: consistent and inconsistent, both mismatch directions;
+      * dt: a device node printed, a non-device skipped, a NULL hole skipped;
+      * fdt: not-ready, the whole-tree dump (with a node without compatible
+        skipped and a walk that ends on an error), path (usage / refused /
+        found), phandle (bad argument / refused / resolved), chosen (absent /
+        string / cell form / resolve refused / resolved), get (missing
+        property / string / string list / cells with a non-cell tail / a
+        control byte inside a NUL-terminated value), overlay (not built /
+        refused with reason / merged but rejected / applied), save (no tree /
+        written / write refused) and load (read refused / blob refused with
+        the previous tree kept / applied);
+      * fault, syncinfo (all three tables, the empty row, waiters, the four
+        tables that stop on an unreadable row, and the semaphore event
+        ledger), log (level listing, change, out-of-range refusal, console /
+        fifo / sync counters), rt (no cycle counter, a full report with both
+        counter and clock-source states, a row with no sample, late/skip and
+        jitter, tickless, reset, run with a bad count / dead counter / refused
+        wake / refused preempt with its reason code / success), sec (all five
+        filters, an unknown filter, both verdicts), utest (list with the real
+        output callback, a passing run, a failing run, usage) and pool (auto
+        layout, fixed layout with a matched and an empty slot).
+
+    Three real defects were found while pinning the branches, all of them
+    inverted success tests, all fixed in the same commit:
+      * cmd_syncinfo stopped at the first row it could read (the getters
+        return 0 on success), so the object tables were never printed at all;
+      * cmd_log treated a *successful* parse as bad usage (and therefore
+        passed an uninitialised level through on a non-numeric argument);
+      * cmd_rt "run" refused every valid sample count for the same reason.
+    The first would have been read as "no sync objects exist" on a board.
+
+    Honest limits:
+      1) nothing here touches hardware: the task table, watchdog, crash
+         journal, device tree, RT sampler, sync tables, security report, unit
+         test runner and pool layout are all stubs, so what is proved is the
+         decoding, formatting and exit code, not the readings themselves;
+      2) the stack-usage "accounting compiled out" branch is not in this
+         build (qemu_loongarch64 sets ARKRTOS_USE_STACK_USAGE=1);
+      3) the fdt overlay / save / load paths run against an in-memory stub,
+         not a real VFS or a real dtb, and the swap / waitmulti families are
+         compiled out here;
+      4) measured line coverage is 100.00% (633 of 633 lines), which is a
+         statement about this file under this board configuration only.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("shelldiag-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    pick = None
+    for case in CASES:
+        name, test, mods, defs, markers, incs, _argv = _case(case)
+        if name == "shelldiag":
+            pick = (test, mods, defs, incs, markers)
+            break
+    if pick is None:
+        fail("shelldiag-host", "case shelldiag missing from coverage_gate.CASES")
+        return
+
+    test, mods, defs, incs, markers = pick
+    with TempDir() as td:
+        exe = os.path.join(td, "shelldiag" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            err = (r.stderr or "").strip().splitlines() or [""]
+            fail("shelldiag-host", "the case did not build: %s"
+                 % [x for x in err if x.strip()][-1][:220])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or markers[0] not in txt or "FAIL" in txt:
+            fail("shelldiag-host", txt.strip()[-260:])
+            return
+        last = txt.strip().splitlines()[-1]
+
+    ok("shelldiag-host",
+       "arkrtos_shell_diag on the host (task/stack/guard/crash/audit/sched/dt/"
+       "fdt/fault/syncinfo/log/rt/sec/utest/pool, every refusal path and exit "
+       "code; fixed three inverted success tests in syncinfo/log/rt): %s" % last)
+
 def check_shell_core_host():
     """Console core: command registry, console task loop and task release.
 
@@ -5597,6 +5707,7 @@ CHECK_TABLE = (
     ("shellimage-host", check_shell_image_host),
     ("shellcore-host", check_shell_core_host),
     ("shellpmap-host", check_shell_pmap_host),
+    ("shelldiag-host", check_shell_diag_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),
