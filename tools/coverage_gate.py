@@ -401,6 +401,11 @@ CASES = [
      ["-DARKRTOS_USE_APPPACK=1", "-fno-asynchronous-unwind-tables"],
      "APPPACK-HOST OK",
      {"link": ["kernelsrc/src/arkrtos_loader.c"]}),
+    # 安装器的常驻任务循环体是 while(1)，门禁把它的一轮暴露出来才能有界地驱动。
+    ("insthost", "kernelsrc/tests/test_installer_host.c",
+     ["kernelsrc/src/arkrtos_installer.c"],
+     ["-DARKRTOS_INSTALLER_HOST_TEST=1", "-fno-asynchronous-unwind-tables"],
+     "INSTALLER-HOST OK"),
 ]
 
 

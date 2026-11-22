@@ -74,4 +74,21 @@ int32 arkrtos_installer_from_file(const char *path);
 }
 #endif
 
+#if defined(ARKRTOS_INSTALLER_HOST_TEST)
+#include "arkrtos_app_image.h"
+
+/* Host gate only (-DARKRTOS_INSTALLER_HOST_TEST). None of these exist in a
+ * normal build: the tick is static there and the accessors are not compiled.
+ * They expose exactly what a bounded test cannot reach through the public
+ * surface - one resident-task pass, the receive progress, and the file shim
+ * (whose read/write entries only the real loader calls). */
+void        arkrtos_installer_tick(int32 *p_dev);
+void        arkrtos_installer_test_reset(void);
+uint32      arkrtos_installer_test_got(void);
+const arkrtos_app_header_t *arkrtos_installer_test_hdr(void);
+int32       arkrtos_installer_test_file_read(uint8 *pdata, int32 len);
+int32       arkrtos_installer_test_file_write(uint8 *pdata, int32 len);
+extern int32 arkrtos_installer_fixed_state;
+#endif
+
 #endif /* __ARKRTOS_INSTALLER_H__ */

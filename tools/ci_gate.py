@@ -2834,6 +2834,79 @@ def check_apppack_host():
        "four relocation kinds / header + CRC / loader check_header / refusal exits: %s"
        % last)
 
+def check_insthost_host():
+    """In-kernel installer (arkrtos_installer.c) on host.
+
+    The installer is the "the device installs itself" entrance: it hunts the
+    image magic in a serial byte stream, decides whether the frame may land,
+    and only then hands it to the loader. Its failures are quiet ones, so what
+    is pinned here is the decision and the accounting, not "it returned 0":
+
+      * byte-wise magic sync (stray bytes, a header split across passes, and the
+        idle-limit pass proving already collected bytes are kept, not dropped);
+      * every refusal decided after the header arrived (DUP / VERSION / other
+        identity errors, plus a load failure) writes NAK 0x15, drains the frame
+        tail that is already on the wire, and clears the buffered header -- skip
+        the last step and the pump reports the same header every task period;
+      * the autostart flag decides start-or-not, and only the slot just committed
+        is started;
+      * fixed-slot mode: one clear before listening, no frame at all when no slot
+        is configured or the slot is not blank, and exactly one image per boot;
+      * the file entrance: unmounted / directory / size / short read / bad magic
+        / device-registration failure each return their own error, and the
+        success path really pulls the payload through the file stream.
+
+    Stubbed: device core, tasks, partition/layout table, loader, file system,
+    fault and log. So this proves the installer's decisions; flash writing,
+    relocation replay and CRC re-check are the loader's business (and the
+    board's).
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("insthost-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    pick = None
+    link = []
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name == "insthost":
+            extra = case[5] if len(case) > 5 else {}
+            pick = (_markers, test, mods, defs, incs)
+            link = list(extra.get("link", []))
+            break
+    if pick is None:
+        fail("insthost-host", "case insthost missing from coverage_gate.CASES")
+        return
+
+    markers, test, mods, defs, incs = pick
+    with TempDir() as td:
+        # Not "installer.exe": Windows treats that name as an installer and
+        # refuses to start it without elevation (WinError 740).
+        exe = os.path.join(td, "insthost" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods + link)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+            fail("insthost-host", "did not build: %s" % tail[:200])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or markers[0] not in txt:
+            fail("insthost-host", "failed: %s" % txt.strip()[:220])
+            return
+        last = txt.strip().splitlines()[-1]
+
+    ok("insthost-host",
+       "magic sync / refusal NAK + drain / autostart / fixed slot / file entrance: %s"
+       % last)
+
 def check_hwsafe_host():
     """HW_SAFE on/off: who gets driven at the moment a task dies, and on what.
 
@@ -3493,6 +3566,7 @@ CHECK_TABLE = (
     ("flashapp-host", check_flashapp_host),
     ("trace-host", check_trace_host),
     ("apppack-host", check_apppack_host),
+    ("insthost-host", check_insthost_host),
     ("hwsafe-host", check_hwsafe_host),
     ("audit-host", check_audit_host),
     ("mpu-host", check_mpu_host),

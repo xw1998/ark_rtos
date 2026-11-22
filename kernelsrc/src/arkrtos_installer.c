@@ -36,6 +36,16 @@
 
 #if (INSTALLER_ENABLE == 1)
 
+/* Host gate (-DARKRTOS_INSTALLER_HOST_TEST): the resident task body never
+ * returns on target, so the gate needs its single pass to be callable a
+ * bounded number of times. In a normal build this is plain static and
+ * neither the symbol nor any behaviour changes. */
+#if defined(ARKRTOS_INSTALLER_HOST_TEST)
+#define ARKRTOS_INSTALLER_TESTABLE
+#else
+#define ARKRTOS_INSTALLER_TESTABLE static
+#endif
+
 /* 空转上限：达到后先让出 CPU，下一轮继续在同一位置收（不丢已收字节） */
 #define ARKRTOS_INSTALLER_IDLE_LIMIT   (20000u)
 
@@ -332,7 +342,11 @@ static int32 arkrtos_installer_commit(int32 dev)
 #define ARKRTOS_INSTALLER_FIXED_DONE      (1)
 #define ARKRTOS_INSTALLER_FIXED_UNUSABLE  (2)
 
+#if defined(ARKRTOS_INSTALLER_HOST_TEST)
+int32 arkrtos_installer_fixed_state = ARKRTOS_INSTALLER_FIXED_UNJUDGED;
+#else
 static int32 arkrtos_installer_fixed_state = ARKRTOS_INSTALLER_FIXED_UNJUDGED;
+#endif
 
 /* One shot: make the configured fixed slot safe to receive into. Returns 0
  * when a frame may be accepted, -1 when nothing may be installed at all. */
@@ -453,50 +467,63 @@ static int32 arkrtos_installer_frame_ok(void)
     return 1;
 }
 
-static void arkrtos_installer_task(void)
+/* One pass of the resident task: open the device if needed, then either
+ * collect a header, commit it, or drain a frame that may not be committed.
+ * Split out of the for(;;) body so the host gate can drive exactly this
+ * many passes - a task body never returns on target. The device handle is
+ * kept across passes, so a frame may be split over any number of them. */
+ARKRTOS_INSTALLER_TESTABLE void arkrtos_installer_tick(int32 *p_dev)
 {
     char dev_name[] = INSTALLER_DEV_NAME;
+
+    /* 设备只在需要时打开一次，之后常驻持有句柄 */
+    if(*p_dev < 0)
+    {
+        *p_dev = arkrtos_dev_open_internal(dev_name, (uint32)INSTALLER_DEV_ARG);
+    }
+
+    if(*p_dev < 0)
+    {
+        return;
+    }
+
+    /* One shot, and it has to happen before the first byte is read:
+     * fixed mode must have its landing slot erased while the line is
+     * still quiet, not when a frame turns up. */
+    if(arkrtos_installer_fixed_state == ARKRTOS_INSTALLER_FIXED_UNJUDGED)
+    {
+        arkrtos_installer_fixed_state = (arkrtos_installer_fixed_prepare() == 0)
+                                          ? ARKRTOS_INSTALLER_FIXED_READY
+                                          : ARKRTOS_INSTALLER_FIXED_UNUSABLE;
+    }
+
+    if(arkrtos_installer_pump(*p_dev) == 0)
+    {
+        if(arkrtos_installer_frame_ok() != 0)
+        {
+            int32 slot = arkrtos_installer_commit(*p_dev);
+
+            if((slot >= 0) &&
+               (arkrtos_ptable_get()->layout_mode ==
+                (uint32)ARKRTOS_LAYOUT_MODE_FIXED))
+            {
+                arkrtos_installer_fixed_state = ARKRTOS_INSTALLER_FIXED_DONE;
+            }
+        }
+        else
+        {
+            arkrtos_installer_drain(*p_dev);
+        }
+    }
+}
+
+static void arkrtos_installer_task(void)
+{
     int32 dev = -1;
 
     for(;;)
     {
-        /* 设备只在需要时打开一次，之后常驻持有句柄 */
-        if(dev < 0)
-        {
-            dev = arkrtos_dev_open_internal(dev_name, (uint32)INSTALLER_DEV_ARG);
-        }
-
-        if(dev >= 0)
-        {
-            /* One shot, and it has to happen before the first byte is read:
-             * fixed mode must have its landing slot erased while the line is
-             * still quiet, not when a frame turns up. */
-            if(arkrtos_installer_fixed_state == ARKRTOS_INSTALLER_FIXED_UNJUDGED)
-            {
-                arkrtos_installer_fixed_state = (arkrtos_installer_fixed_prepare() == 0)
-                                                  ? ARKRTOS_INSTALLER_FIXED_READY
-                                                  : ARKRTOS_INSTALLER_FIXED_UNUSABLE;
-            }
-
-            if(arkrtos_installer_pump(dev) == 0)
-            {
-                if(arkrtos_installer_frame_ok() != 0)
-                {
-                    int32 slot = arkrtos_installer_commit(dev);
-
-                    if((slot >= 0) &&
-                       (arkrtos_ptable_get()->layout_mode ==
-                        (uint32)ARKRTOS_LAYOUT_MODE_FIXED))
-                    {
-                        arkrtos_installer_fixed_state = ARKRTOS_INSTALLER_FIXED_DONE;
-                    }
-                }
-                else
-                {
-                    arkrtos_installer_drain(dev);
-                }
-            }
-        }
+        arkrtos_installer_tick(&dev);
 
         /* 单轮结束（收完/未收完/设备未就绪）都让出 CPU，避免抢占 App 运行 */
         arkrtos_task_wait_internal((uint32)INSTALLER_TASK_PERIOD_MS);
@@ -769,6 +796,51 @@ int32 arkrtos_installer_from_file(const char *path)
 
     return r;
 }
+
+#if defined(ARKRTOS_INSTALLER_HOST_TEST)
+/* ------------------------------------------------------------------
+ * Host-gate accessors (never compiled into a normal build)
+ *
+ * Only the pieces a bounded host test cannot reach through the public
+ * surface: the receive progress (to start a pass mid-frame and to prove a
+ * timeout keeps what it already collected), the header itself, the file
+ * shim (only the real loader calls its read/write entries, and the loader
+ * is stubbed in the gate), and the fixed-slot one-shot state.
+ * ------------------------------------------------------------------ */
+void arkrtos_installer_test_reset(void)
+{
+    uint8 *p = (uint8 *)&arkrtos_installer_hdr;
+    uint32 i;
+
+    for(i = 0u; i < ARKRTOS_APP_HEADER_SIZE; i++)
+    {
+        p[i] = 0u;
+    }
+
+    arkrtos_installer_got = 0u;
+    arkrtos_installer_fixed_state = ARKRTOS_INSTALLER_FIXED_UNJUDGED;
+}
+
+uint32 arkrtos_installer_test_got(void)
+{
+    return arkrtos_installer_got;
+}
+
+const arkrtos_app_header_t *arkrtos_installer_test_hdr(void)
+{
+    return &arkrtos_installer_hdr;
+}
+
+int32 arkrtos_installer_test_file_read(uint8 *pdata, int32 len)
+{
+    return arkrtos_installer_file_read(&arkrtos_installer_file_obj, pdata, len);
+}
+
+int32 arkrtos_installer_test_file_write(uint8 *pdata, int32 len)
+{
+    return arkrtos_installer_file_write(&arkrtos_installer_file_obj, pdata, len);
+}
+#endif
 
 #else   /* INSTALLER_ENABLE == 0 */
 
