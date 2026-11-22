@@ -633,6 +633,24 @@ static int32 arkrtos_net_exec(void)
     }
 }
 
+/* One message, start to finish. Split out of the loop so the host case can
+ * drive exactly one round without the for(;;) that only a scheduler can end;
+ * the body is the same code the board runs. */
+static void arkrtos_net_handle_msg(uint32 msg)
+{
+    if(msg == ARKRTOS_NET_MSG_REQUEST)
+    {
+        g_net_req_result = arkrtos_net_exec();
+        /* Publish the result before the state: the waiter only looks at
+         * the result once it sees DONE, and a single writer means the
+         * order is all the safety this needs. */
+        ARKRTOS_DMB();
+        g_net_req_state = ARKRTOS_NET_REQ_DONE;
+    }
+
+    arkrtos_net_reap();
+}
+
 static void arkrtos_net_task(void)
 {
     uint32 msg;
@@ -648,19 +666,63 @@ static void arkrtos_net_task(void)
             continue;                       /* 队列被删了才会到这里 */
         }
 
-        if(msg == ARKRTOS_NET_MSG_REQUEST)
-        {
-            g_net_req_result = arkrtos_net_exec();
-            /* Publish the result before the state: the waiter only looks at
-             * the result once it sees DONE, and a single writer means the
-             * order is all the safety this needs. */
-            ARKRTOS_DMB();
-            g_net_req_state = ARKRTOS_NET_REQ_DONE;
-        }
-
-        arkrtos_net_reap();
+        arkrtos_net_handle_msg(msg);
     }
 }
+
+#if defined(ARKRTOS_NET_HOST_TEST)
+/* 宿主用例的观察口。生产构建里这些符号不存在，服务任务仍然是上面那个
+ * for(;;)；这里只是把"一拍"暴露出来，让用例能有界地驱动它——否则宿主
+ * 上没有任何办法让 static 的服务任务跑一轮。 */
+void arkrtos_net_host_step(void)
+{
+    uint32 msg;
+
+    if(arkrtos_mq_recv_internal(g_net_mq, &msg, 1, 0) < 0)
+    {
+        return;
+    }
+    arkrtos_net_handle_msg(msg);
+}
+
+uint32 arkrtos_net_host_req_state(void)
+{
+    return g_net_req_state;
+}
+
+int32 arkrtos_net_host_sock_fd(uint32 index)
+{
+    if(index >= (uint32)ARKRTOS_NET_MAX_SOCKETS)
+    {
+        return -2;
+    }
+    return g_net_sock[index].fd;
+}
+
+int32 arkrtos_net_host_sock_owner(uint32 index)
+{
+    if(index >= (uint32)ARKRTOS_NET_MAX_SOCKETS)
+    {
+        return -2;
+    }
+    return g_net_sock[index].owner;
+}
+
+/* 结果原文。主人已死的请求按设计取不回来（下一次调用会丢弃它），但"服务
+ * 任务到底算出什么"仍然要能被观察——否则这些拒绝分支只能靠间接现象推断。 */
+int32 arkrtos_net_host_req_result(void)
+{
+    return g_net_req_result;
+}
+
+/* 把请求槽强制恢复成空闲：用例之间互不继承对方的在飞请求。 */
+void arkrtos_net_host_reset(void)
+{
+    g_net_req_state  = ARKRTOS_NET_REQ_IDLE;
+    g_net_req_owner  = 0;
+    g_net_req_result = 0;
+}
+#endif /* ARKRTOS_NET_HOST_TEST */
 
 /* ============================================================
  * 5. the SVC entry point (never blocks)
@@ -876,12 +938,16 @@ static uint8 arkrtos_net_same_args(const arkrtos_svc_arg_t *p)
 int32 arkrtos_net_svc(void *p_svc_ctx)
 {
     arkrtos_svc_arg_t *p;
+    unsigned long a0;
     uint32  op;
     uint32  msg;
     uint32  i;
     int32   r;
 
-    p = (arkrtos_svc_arg_t *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    /* a0 里是参数块指针。先落到变量再转换：直接对函数返回值强转指针会
+     * 触发 -Wbad-function-cast，而这里也没有别的东西可校验。 */
+    a0 = ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    p  = (arkrtos_svc_arg_t *)a0;
 #if (ARKRTOS_SVC_WIDE_ARGS == 1)
     if(arkrtos_kernel_svc_wide_ok(p) == 0u)
     {

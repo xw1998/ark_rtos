@@ -58,4 +58,19 @@ int32 arkrtos_net_svc(void *p_svc_ctx);
 */
 void arkrtos_net_release_task(int32 task_id);
 
+#if defined(ARKRTOS_NET_HOST_TEST)
+/** @brief 宿主用例专用：只承接队列里的一条消息并执行（生产构建里不存在）。 */
+void   arkrtos_net_host_step(void);
+/** @brief 宿主用例专用：请求槽当前状态（IDLE / PENDING / DONE）。 */
+uint32 arkrtos_net_host_req_state(void);
+/** @brief 宿主用例专用：socket 表第 index 行的 lwIP fd（-1 = 空行）。 */
+int32  arkrtos_net_host_sock_fd(uint32 index);
+/** @brief 宿主用例专用：socket 表第 index 行的 owner（-1 = 孤儿）。 */
+int32  arkrtos_net_host_sock_owner(uint32 index);
+/** @brief 宿主用例专用：请求槽里最后一次执行的原样结果（主人已死时也只能经此读到）。 */
+int32  arkrtos_net_host_req_result(void);
+/** @brief 宿主用例专用：把请求槽强制恢复成空闲，用例之间互不继承。 */
+void   arkrtos_net_host_reset(void);
+#endif /* ARKRTOS_NET_HOST_TEST */
+
 #endif /* __ARKRTOS_NET_H__ */

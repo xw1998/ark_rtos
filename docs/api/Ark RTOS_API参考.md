@@ -36,7 +36,7 @@
 - [kernelsrc/include/arkrtos_mini.h](#kernelsrcincludearkrtos_minih)（20 项）
 - [kernelsrc/include/arkrtos_modld.h](#kernelsrcincludearkrtos_modldh)（8 项）
 - [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（22 项）
-- [kernelsrc/include/arkrtos_net.h](#kernelsrcincludearkrtos_neth)（6 项）
+- [kernelsrc/include/arkrtos_net.h](#kernelsrcincludearkrtos_neth)（12 项）
 - [kernelsrc/include/arkrtos_ptable.h](#kernelsrcincludearkrtos_ptableh)（23 项）
 - [kernelsrc/include/arkrtos_rt.h](#kernelsrcincludearkrtos_rth)（14 项）
 - [kernelsrc/include/arkrtos_sec.h](#kernelsrcincludearkrtos_sech)（8 项）
@@ -6001,6 +6001,54 @@ void arkrtos_net_release_task(int32 task_id);
 **归还某个任务名下的所有 socket。任务被卸载/故障回收时调用，**
 否则泄漏的是内核侧 socket 槽 —— 一个 App 反复崩溃会把它们耗干。
 - `task_id`：目标任务号（1 起）
+
+### `void   arkrtos_net_host_step(void);`
+
+```c
+void   arkrtos_net_host_step(void);
+```
+
+**宿主用例专用：只承接队列里的一条消息并执行（生产构建里不存在）。 */**
+
+### `uint32 arkrtos_net_host_req_state(void);`
+
+```c
+uint32 arkrtos_net_host_req_state(void);
+```
+
+**宿主用例专用：请求槽当前状态（IDLE / PENDING / DONE）。 */**
+
+### `int32  arkrtos_net_host_sock_fd(uint32 index);`
+
+```c
+int32  arkrtos_net_host_sock_fd(uint32 index);
+```
+
+**宿主用例专用：socket 表第 index 行的 lwIP fd（-1 = 空行）。 */**
+
+### `int32  arkrtos_net_host_sock_owner(uint32 index);`
+
+```c
+int32  arkrtos_net_host_sock_owner(uint32 index);
+```
+
+**宿主用例专用：socket 表第 index 行的 owner（-1 = 孤儿）。 */**
+
+### `int32  arkrtos_net_host_req_result(void);`
+
+```c
+int32  arkrtos_net_host_req_result(void);
+```
+
+**宿主用例专用：请求槽里最后一次执行的原样结果（主人已死时也只能经此读到）。 */**
+
+### `void   arkrtos_net_host_reset(void);`
+
+```c
+void   arkrtos_net_host_reset(void);
+```
+
+**宿主用例专用：把请求槽强制恢复成空闲，用例之间互不继承。 */**
 
 ## kernelsrc/include/arkrtos_ptable.h
 

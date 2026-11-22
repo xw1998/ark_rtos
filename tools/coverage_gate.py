@@ -554,6 +554,18 @@ CASES = [
      ["-DARKRTOS_USE_SOFTBUS=0", "-fno-asynchronous-unwind-tables"],
      "SOFTBUS-HOST OK",
      {"incs": SOFTBUS_INCS}),
+    ("net", "kernelsrc/tests/test_net_host.c",
+     ["kernelsrc/src/arkrtos_net.c"],
+     ["-DARKRTOS_USE_LWIP=1", "-DARKRTOS_USE_MQ=1",
+      "-DARKRTOS_NET_HOST_TEST=1", "-DARKRTOS_LOG_LEVEL=0",
+      "-fno-asynchronous-unwind-tables"],
+     "NET-HOST OK",
+     {"incs": ["-Ikernelsrc/tests/net_stub"]}),
+    ("netoff", "kernelsrc/tests/test_net_host.c",
+     ["kernelsrc/src/arkrtos_net.c"],
+     ["-DARKRTOS_USE_LWIP=0", "-DARKRTOS_LOG_LEVEL=0",
+      "-fno-asynchronous-unwind-tables"],
+     "NET-HOST OFF OK"),
 ]
 
 

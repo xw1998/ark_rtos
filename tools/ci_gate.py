@@ -2580,6 +2580,97 @@ def check_softbus_host():
        "all shell subcommands and their error paths), empty TU when off: %s"
        % lines[0])
 
+def check_net_host():
+    """The socket layer on the host, driven against a fake lwIP.
+
+    arkrtos_net.c is a request-slot service: the App-side entry drops a
+    request into a slot and the net task picks it up and calls the stack.
+    Linking the real lwIP would drag in tcpip threads, sys_arch and a NIC, so
+    a failure inside that block would be indistinguishable from a kernel bug
+    -- and the code under test is the layer this repo rewrote, not the stack.
+    So this check links a fake lwIP (kernelsrc/tests/net_stub) that can force
+    each entry to fail and records the last arguments, and asks the kernel
+    entry points to prove:
+
+      * a0 is a pointer to the argument block (not the first argument) --
+        getting that wrong segfaults;
+      * EPENDING on the first call, then the result of the worker's actual
+        execution on the second;
+      * handle lifetime: an accept that lands while the table is full closes
+        the new fd and returns ENOBUFS; a close failure still frees the row;
+      * every errno in the mapping table, one by one, through send failure;
+      * per-operation failure mapping for the whole socket API;
+      * a handle that is not owned by the caller is refused with EINVAL
+        before it ever reaches the stack;
+      * when the owner dies mid-flight, the DONE answer is dropped and the
+        worker's result is still EINVAL (read through host_req_result, which
+        is the only way to see an answer the design intentionally discards).
+
+    The compiled-out tier (-DARKRTOS_USE_LWIP=0) must return honest refusals
+    (start 0, ready 0, svc ENOTSUP) rather than empty success, and the test's
+    own off-branch must still run.
+
+    Not covered: the real lwIP socket lifecycle, a real NIC and real timing,
+    two boards talking to each other, and the non-blocking connect
+    EINPROGRESS progression. Those are board-only facts.
+
+    Host is 32-bit MinGW (ILP32, pointer == long == 4 bytes), so
+    ARKRTOS_SVC_WIDE_ARGS is 0 at compile time here and the wide-arg branch
+    is not compiled; it is covered on 64-bit targets, not disguised here.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("net-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    picks = {}
+    for case in CASES:
+        name, test, mods, defs, markers, incs, _argv = _case(case)
+        if name in ("net", "netoff"):
+            extra = case[5] if len(case) > 5 else {}
+            picks[name] = (test, mods, defs, incs, markers,
+                           list(extra.get("link", [])))
+    for name in ("net", "netoff"):
+        if name not in picks:
+            fail("net-host", "case %s missing from coverage_gate.CASES" % name)
+            return
+
+    with TempDir() as td:
+        lines = []
+        for name in ("net", "netoff"):
+            test, mods, defs, incs, markers, link = picks[name]
+            exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + defs + incs + COMMON_INC + ["-o", exe, test] + mods + link)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                err = ((r.stderr or "").strip().splitlines() or [""])
+                fail("net-host", "%s did not build: %s"
+                     % (name, [x for x in err if x.strip()][-1][:220]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            bad = r.returncode != 0 or markers[0] not in txt or "FAIL" in txt
+            if bad:
+                fail("net-host", "%s failed: %s" % (name, txt.strip()[-260:]))
+                return
+            if name == "netoff" and " off" not in txt.lower():
+                fail("net-host",
+                     "the OFF tier did not take its own branch: %s"
+                     % txt.strip()[-160:])
+                return
+            lines.append(txt.strip().splitlines()[-1])
+
+    ok("net-host",
+       "arkrtos_net request slot / owner / window check against a fake lwIP "
+       "on the host (errno table, per-op failures, handle lifetime, owner "
+       "death), honest ENOTSUP when off: %s" % lines[0])
+
 def check_modld():
     """VxWorks-style downloadable modules (ARKRTOS_USE_MODLOAD) must be wired.
 
@@ -4524,6 +4615,7 @@ CHECK_TABLE = (
     ("fs-host", check_fs_host),
     ("smp-sched-host", check_smp_sched_host),
     ("softbus-host", check_softbus_host),
+    ("net-host", check_net_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),
