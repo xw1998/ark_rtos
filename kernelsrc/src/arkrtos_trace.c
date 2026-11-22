@@ -132,6 +132,8 @@ volatile uint32 arkrtos_pendsv_stat_min = 0xFFFFFFFFu;
 volatile uint32 arkrtos_pendsv_stat_max = 0u;
 volatile uint32 arkrtos_pendsv_span_t0  = 0u;
 
+void arkrtos_sched_stat_close(uint32 t0);
+
 void arkrtos_sched_stat_close(uint32 t0)
 {
     uint32 d = arkrtos_trace_last_cycles() - t0;

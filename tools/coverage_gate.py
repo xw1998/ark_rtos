@@ -375,6 +375,25 @@ CASES = [
       "-DARKRTOS_FLASHAPP_RAM_BASE=0x20012000", "-DARKRTOS_FLASHAPP_RAM_SIZE=8192",
       "-DARKRTOS_FLASHAPP_STACK_SIZE=4096", "-DARKRTOS_FLASHAPP_PROLOGUE=0xB5E0",
       "-DARKRTOS_FLASHAPP_PRIORITY=11"], "FLASHAPP-HOST OK"),
+    # --- 2026-11-22 新增：内核事件追踪门面（SWD/BUFF/无后端/关档四档）---
+    # 三个后端分支与关档空实现各占一段 #if，单档最多 100% 覆盖其中一支；
+    # ark_shell.h 在 kernelsrc/shell 下，只有这个 TU 需要那条 include。
+    ("trace-swd", "kernelsrc/tests/test_trace_host.c",
+     ["kernelsrc/src/arkrtos_trace.c"],
+     ["-DTRACE_HOST_SWD=1", "-DMDK_TRACE_BACKEND_SWD=1"], "TRACE-HOST OK  ",
+     {"incs": ["-Ikernelsrc/shell", "-Ikernelsrc/shell/ark_shell"]}),
+    ("trace-buff", "kernelsrc/tests/test_trace_host.c",
+     ["kernelsrc/src/arkrtos_trace.c"],
+     ["-DTRACE_HOST_BUFF=1", "-DMDK_TRACE_BACKEND_BUFF=1"], "TRACE-HOST OK  ",
+     {"incs": ["-Ikernelsrc/shell", "-Ikernelsrc/shell/ark_shell"]}),
+    ("trace-none", "kernelsrc/tests/test_trace_host.c",
+     ["kernelsrc/src/arkrtos_trace.c"],
+     ["-DMDK_TRACE_BACKEND_NONE=1"], "TRACE-HOST OK  ",
+     {"incs": ["-Ikernelsrc/shell", "-Ikernelsrc/shell/ark_shell"]}),
+    ("trace-off", "kernelsrc/tests/test_trace_host.c",
+     ["kernelsrc/src/arkrtos_trace.c"],
+     ["-DTRACE_HOST_OFF=1", "-DARKRTOS_USE_MDK_TRACE=0"], "TRACE-HOST OFF OK",
+     {"incs": ["-Ikernelsrc/shell", "-Ikernelsrc/shell/ark_shell"]}),
 ]
 
 

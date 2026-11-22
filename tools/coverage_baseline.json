@@ -10,6 +10,7 @@
   "arkrtos_exports": 100.0,
   "arkrtos_fault": 100.0,
   "arkrtos_fifo": 100.0,
+  "arkrtos_trace": 100.0,
   "arkrtos_flashapp": 99.7,
   "arkrtos_guard": 99.4,
   "arkrtos_init": 100.0,

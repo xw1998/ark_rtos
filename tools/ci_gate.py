@@ -2695,6 +2695,77 @@ def check_flashapp_host():
            "burn + read-back verify + metadata + boot from flash (%s)"
            % txt.strip().splitlines()[-1])
 
+def check_trace_host():
+    """Kernel event trace facade over the mdk_trace component, on host.
+
+    arkrtos_trace.c is what turns kernel call sites into component events, and
+    what the console `trace` command reports. The failures that matter are:
+
+      * an event that fires once too often or not at all: a timeline with an
+        unexplained switch or a hole is worse than no timeline;
+      * recording while the facade is disabled: the promise is that tracing
+        does not change the thing it measures, so nothing may enter the ring;
+      * a switch counter that grows on a rejected id, or is not reset by
+        reset/init;
+      * the console refusing a subcommand it should accept, or accepting a
+        near-miss like "startx" as "start";
+      * PendSV round-trip accounting dropping samples when the trace is off
+        (it is deliberately measured outside the on/off gate).
+
+    Four builds are checked, because the module has four compile-time faces:
+    the SWD backend (compressed ring, readouts come from the control block),
+    the BUFF backend (record ring, readouts from the component API), no
+    backend at all, and USE_MDK_TRACE=0 where every entry is a no-op and the
+    console command is refused.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("trace-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    wanted = ("trace-swd", "trace-buff", "trace-none", "trace-off")
+    picks = {}
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name in wanted:
+            picks[name] = (test, mods, defs, incs)
+    for need in wanted:
+        if need not in picks:
+            fail("trace-host", "case %s missing from coverage_gate.CASES" % need)
+            return
+
+    results = []
+    for case_name, marker in (("trace-swd", "TRACE-HOST OK"),
+                              ("trace-buff", "TRACE-HOST OK"),
+                              ("trace-none", "TRACE-HOST OK"),
+                              ("trace-off", "TRACE-HOST OFF OK")):
+        test, mods, defs, incs = picks[case_name]
+        with TempDir() as td:
+            exe = os.path.join(td, case_name + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+                fail("trace-host",
+                     "%s did not build: %s" % (case_name, tail[:200]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            if r.returncode != 0 or marker not in txt:
+                fail("trace-host",
+                     "%s failed: %s" % (case_name, txt.strip()[:220]))
+                return
+            results.append(txt.strip().splitlines()[-1])
+    ok("trace-host",
+       "events / switch counters / console over SWD + BUFF + none + off: %s | %s | %s | %s"
+       % (results[0], results[1], results[2], results[3]))
+
 def check_hwsafe_host():
     """HW_SAFE on/off: who gets driven at the moment a task dies, and on what.
 
@@ -3352,6 +3423,7 @@ CHECK_TABLE = (
     ("crash-host", check_crash_host),
     ("apprun-host", check_apprun_host),
     ("flashapp-host", check_flashapp_host),
+    ("trace-host", check_trace_host),
     ("hwsafe-host", check_hwsafe_host),
     ("audit-host", check_audit_host),
     ("mpu-host", check_mpu_host),
