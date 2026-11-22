@@ -3665,6 +3665,93 @@ def check_shell_diag_host():
        "fdt/fault/syncinfo/log/rt/sec/utest/pool, every refusal path and exit "
        "code; fixed three inverted success tests in syncinfo/log/rt): %s" % last)
 
+def check_shell_platform_host():
+    """Shell platform layer: the nine functions ark-shell calls on the kernel.
+
+    platform_arkrtos.c is the seam between the upstream console core and this
+    kernel: it opens the console device, frames output with the console lock,
+    diverts writes into a pipeline capture buffer, reads the tick and asks the
+    board to reboot.  Every one of those is an ordering or pairing rule that a
+    reader cannot see from the call site, so the case records exact bytes and
+    exact call counts:
+
+      * closed port: send / send_string / send_buf write nothing, take no
+        lock, ask for no capture, and recv answers -1 without touching the
+        device;
+      * open: a failed open keeps the handle negative and the port retries on
+        the next init (and again through shell_uart_open), a successful open
+        is idempotent, and the baud rate is passed through unchanged;
+      * console hold: the outer begin locks once, nested begins do not lock
+        again, the inner end keeps the hold, the outer end releases it, an
+        extra end does nothing, and a *refused* lock is never released;
+      * capture: a consumed byte / string / buffer never reaches the UART,
+        while a capture that refuses the bytes falls back to the device;
+      * senders: one byte is one write, one string / buffer is one output
+        unit with exactly one lock (none when the console is already held),
+        a refused write is retried rather than dropped, and a device that
+        never accepts the byte spends exactly SHELL_TX_SPIN_LIMIT = 200000
+        retries per byte and then gives up -- still releasing its lock;
+      * recv: an empty FIFO is -1, a byte is returned unsigned (0xFF is 255,
+        not -1) and the device is asked for exactly one byte;
+      * misc: tick passthrough, the mode record in all three states, the
+        cleanup no-op, and reboot going to the board hook instead of AIRCR.
+
+    Honest limits:
+      1) the device table, console lock, capture buffer, tick and board reboot
+         are stubs here: what is proved is the port's own ordering, not that a
+         real UART sends, that the lock masks interrupts, or that a board
+         resets;
+      2) the AIRCR branch of platform_reboot is compiled out on this board
+         (qemu_loongarch64 defines ARKRTOS_PLATFORM_REBOOT_PORT), and the
+         self-spin loop after the reset request cannot be entered without a
+         real reset -- the test longjmps out of the board hook, so that one
+         line ("for(;;)") stays uncovered on purpose;
+      3) measured line coverage is 98.91% (90 of 91 lines) under this board
+         configuration; the single miss is the spin loop named above.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("shellplat-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    pick = None
+    for case in CASES:
+        name, test, mods, defs, markers, incs, _argv = _case(case)
+        if name == "shellplat":
+            pick = (test, mods, defs, incs, markers)
+            break
+    if pick is None:
+        fail("shellplat-host", "case shellplat missing from coverage_gate.CASES")
+        return
+
+    test, mods, defs, incs, markers = pick
+    with TempDir() as td:
+        exe = os.path.join(td, "shellplat" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            err = (r.stderr or "").strip().splitlines() or [""]
+            fail("shellplat-host", "the case did not build: %s"
+                 % [x for x in err if x.strip()][-1][:220])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or markers[0] not in txt or "FAIL" in txt:
+            fail("shellplat-host", txt.strip()[-260:])
+            return
+        last = txt.strip().splitlines()[-1]
+
+    ok("shellplat-host",
+       "arkrtos_shell platform layer on the host (open / send / recv routing, "
+       "console hold pairing, capture diversion, 200000-retry spin limit, tick "
+       "and mode passthrough, reboot via the board hook): %s" % last)
+
 def check_shell_core_host():
     """Console core: command registry, console task loop and task release.
 
@@ -5708,6 +5795,7 @@ CHECK_TABLE = (
     ("shellcore-host", check_shell_core_host),
     ("shellpmap-host", check_shell_pmap_host),
     ("shelldiag-host", check_shell_diag_host),
+    ("shellplat-host", check_shell_platform_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),

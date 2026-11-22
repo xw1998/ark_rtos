@@ -28,6 +28,7 @@
 #include "arkrtos_log.h"
 #include "arkrtos_task.h"
 #include "arkrtos_partition.h"      /* SHELL_DEV_NAME / SHELL_DEV_ARG */
+#include "arkrtos_shell.h"          /* arkrtos_shell_uart_handle / _open */
 
 /* 复位入口归本地化时，特权制应用本机没有 AIRCR 这个寄存器；此时由板级提供
  * arkrtos_board_reboot()，并由板级配置定义 ARKRTOS_PLATFORM_REBOOT_PORT。 */
@@ -170,8 +171,9 @@ void platform_uart_send_string(const char *str)
     while(*str != '\0')
     {
         uint32 spin = 0u;
+        uint8  byte = (uint8)*str;
 
-        while((arkrtos_dev_write_internal(g_shell_uart, (uint8 *)str, 1) != 1) &&
+        while((arkrtos_dev_write_internal(g_shell_uart, &byte, 1) != 1) &&
               (spin < SHELL_TX_SPIN_LIMIT))
         {
             spin++;
@@ -208,8 +210,9 @@ void platform_uart_send_buf(const unsigned char *buf, uint16_t len)
     for(i = 0u; i < len; i++)
     {
         uint32 spin = 0u;
+        uint8  byte = buf[i];
 
-        while((arkrtos_dev_write_internal(g_shell_uart, (uint8 *)&buf[i], 1) != 1) &&
+        while((arkrtos_dev_write_internal(g_shell_uart, &byte, 1) != 1) &&
               (spin < SHELL_TX_SPIN_LIMIT))
         {
             spin++;
