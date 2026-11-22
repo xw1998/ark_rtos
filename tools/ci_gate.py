@@ -29,6 +29,11 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+from tempdir_util import TempDir  # noqa: E402
+
 PART_HDR_427 = "config/arkrtos_partition.h"
 PART_HDR_401 = "config/stm32f401/arkrtos_partition.h"
 
@@ -845,12 +850,11 @@ def check_utest_host():
     report, so a framework regression is caught without a board in the loop.
     A missing host compiler is a FAIL, not a skip: an unrun check is not a pass.
     """
-    import tempfile
     cc = _find_host_cc()
     if not cc:
         fail("utest-host", "no host C compiler (set ARKRTOS_HOST_CC)")
         return
-    with tempfile.TemporaryDirectory() as td:
+    with TempDir() as td:
         exe = os.path.join(td, "utest_host_selftest.exe" if os.name == "nt"
                                else "utest_host_selftest")
         cmd = [cc]
@@ -879,12 +883,11 @@ def check_sdk_stdio_host():
     notices on a board but a host byte comparison catches immediately.
     A missing host compiler is a FAIL, not a skip.
     """
-    import tempfile
     cc = _find_host_cc()
     if not cc:
         fail("sdk-stdio-host", "no host C compiler (set ARKRTOS_HOST_CC)")
         return
-    with tempfile.TemporaryDirectory() as td:
+    with TempDir() as td:
         exe = os.path.join(td, "stdio_host.exe" if os.name == "nt" else "stdio_host")
         cmd = [cc]
         if "mingw" in cc.replace("\\", "/").lower():
@@ -914,12 +917,11 @@ def check_sbuf_host():
     a real scheduler - so this gate must not be read as "the module is verified".
     A missing host compiler is a FAIL, not a skip.
     """
-    import tempfile
     cc = _find_host_cc()
     if not cc:
         fail("sbuf-host", "no host C compiler (set ARKRTOS_HOST_CC)")
         return
-    with tempfile.TemporaryDirectory() as td:
+    with TempDir() as td:
         exe = os.path.join(td, "sbuf_host.exe" if os.name == "nt" else "sbuf_host")
         cmd = [cc]
         if "mingw" in cc.replace("\\", "/").lower():
@@ -951,12 +953,11 @@ def check_mempool_host():
     need the SVC boundary - so this gate must not be read as "the channel is
     verified". A missing host compiler is a FAIL, not a skip.
     """
-    import tempfile
     cc = _find_host_cc()
     if not cc:
         fail("mempool-host", "no host C compiler (set ARKRTOS_HOST_CC)")
         return
-    with tempfile.TemporaryDirectory() as td:
+    with TempDir() as td:
         exe = os.path.join(td, "mempool_host.exe" if os.name == "nt" else "mempool_host")
         cmd = [cc]
         if "mingw" in cc.replace("\\", "/").lower():
@@ -988,12 +989,11 @@ def check_mq_host():
     - they need a real scheduler - so this gate must not be read as "the module
     is verified". A missing host compiler is a FAIL, not a skip.
     """
-    import tempfile
     cc = _find_host_cc()
     if not cc:
         fail("mq-host", "no host C compiler (set ARKRTOS_HOST_CC)")
         return
-    with tempfile.TemporaryDirectory() as td:
+    with TempDir() as td:
         exe = os.path.join(td, "mq_host.exe" if os.name == "nt" else "mq_host")
         cmd = [cc]
         if "mingw" in cc.replace("\\", "/").lower():
@@ -1027,12 +1027,11 @@ def check_sync_host():
     inheritance need a real scheduler and are NOT covered - this gate must not
     be read as "the module is verified". A missing host compiler is a FAIL.
     """
-    import tempfile
     cc = _find_host_cc()
     if not cc:
         fail("sync-host", "no host C compiler (set ARKRTOS_HOST_CC)")
         return
-    with tempfile.TemporaryDirectory() as td:
+    with TempDir() as td:
         exe = os.path.join(td, "sync_host.exe" if os.name == "nt" else "sync_host")
         cmd = [cc]
         if "mingw" in cc.replace("\\", "/").lower():
@@ -1079,12 +1078,11 @@ def check_loader_host():
     install-then-recheck still needs a board or QEMU. Nothing here has run on a board, so this gate must not be read
     as "the install path is verified". A missing host compiler is a FAIL.
     """
-    import tempfile
     cc = _find_host_cc()
     if not cc:
         fail("loader-host", "no host C compiler (set ARKRTOS_HOST_CC)")
         return
-    with tempfile.TemporaryDirectory() as td:
+    with TempDir() as td:
         exe = os.path.join(td, "loader_host.exe" if os.name == "nt" else "loader_host")
         cmd = [cc]
         if "mingw" in cc.replace("\\", "/").lower():
@@ -1126,12 +1124,11 @@ def check_fifo_host():
     limit), and a hand-built size == 0 header (division by zero, caller
     breach, not provoked here). A missing host compiler is a FAIL.
     """
-    import tempfile
     cc = _find_host_cc()
     if not cc:
         fail("fifo-host", "no host C compiler (set ARKRTOS_HOST_CC)")
         return
-    with tempfile.TemporaryDirectory() as td:
+    with TempDir() as td:
         exe = os.path.join(td, "fifo_host.exe" if os.name == "nt" else "fifo_host")
         cmd = [cc]
         if "mingw" in cc.replace("\\", "/").lower():
@@ -1170,12 +1167,11 @@ def check_fault_host():
     real HardFault, and the SVC read packing format. A missing host compiler
     is a FAIL.
     """
-    import tempfile
     cc = _find_host_cc()
     if not cc:
         fail("fault-host", "no host C compiler (set ARKRTOS_HOST_CC)")
         return
-    with tempfile.TemporaryDirectory() as td:
+    with TempDir() as td:
         exe = os.path.join(td, "fault_host.exe" if os.name == "nt" else "fault_host")
         cmd = [cc]
         if "mingw" in cc.replace("\\", "/").lower():
@@ -1841,7 +1837,6 @@ def check_blk_host():
     timeouts, DMA and power-fail windows are NOT covered; only a board proves
     those. A missing host compiler is a FAIL, not a skip.
     """
-    import tempfile
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
@@ -1864,7 +1859,7 @@ def check_blk_host():
             return
 
     lines = []
-    with tempfile.TemporaryDirectory() as td:
+    with TempDir() as td:
         for name, marker in want:
             test, mods, defs, incs = picked[name]
             exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
@@ -1905,7 +1900,6 @@ def check_dev_host():
     board and the real scheduler prove those. A missing host compiler is a
     FAIL, not a skip.
     """
-    import tempfile
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
@@ -1928,7 +1922,7 @@ def check_dev_host():
             return
 
     lines = []
-    with tempfile.TemporaryDirectory() as td:
+    with TempDir() as td:
         for name, marker in want:
             test, mods, defs, incs = picked[name]
             exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
@@ -1969,7 +1963,6 @@ def check_event_host():
     scheduler timing and two tasks truly blocking at once are NOT covered; a
     board proves those. A missing host compiler is a FAIL, not a skip.
     """
-    import tempfile
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
@@ -1993,7 +1986,7 @@ def check_event_host():
             return
 
     lines = []
-    with tempfile.TemporaryDirectory() as td:
+    with TempDir() as td:
         for name, marker in want:
             test, mods, defs, incs = picked[name]
             exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
@@ -2041,7 +2034,6 @@ def check_timer_host():
     tick timing and a real scheduler are NOT covered; a board proves those.
     A missing host compiler is a FAIL, not a skip.
     """
-    import tempfile
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
@@ -2067,7 +2059,7 @@ def check_timer_host():
             return
 
     lines = []
-    with tempfile.TemporaryDirectory() as td:
+    with TempDir() as td:
         for name, marker in want:
             test, mods, defs, incs = picked[name]
             exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
@@ -2112,7 +2104,6 @@ def check_cfg_host():
         off.
     A missing host compiler is a FAIL, not a skip.
     """
-    import tempfile
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
@@ -2138,7 +2129,7 @@ def check_cfg_host():
             return
 
     lines = []
-    with tempfile.TemporaryDirectory() as td:
+    with TempDir() as td:
         for name, marker in want:
             test, mods, defs, incs = picked[name]
             exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
@@ -2180,7 +2171,6 @@ def check_export_host():
         "no such thing" without dragging in any undefined reference.
     A missing host compiler is a FAIL, not a skip.
     """
-    import tempfile
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
@@ -2205,7 +2195,7 @@ def check_export_host():
             return
 
     lines = []
-    with tempfile.TemporaryDirectory() as td:
+    with TempDir() as td:
         for name, marker in want:
             test, mods, defs, incs = picked[name]
             exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
@@ -2251,7 +2241,6 @@ def check_init_host():
 
     A missing host compiler is a FAIL, not a skip.
     """
-    import tempfile
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
@@ -2276,7 +2265,7 @@ def check_init_host():
             return
 
     lines = []
-    with tempfile.TemporaryDirectory() as td:
+    with TempDir() as td:
         for name, marker in want:
             test, mods, defs, incs = picked[name]
             exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
@@ -2326,7 +2315,6 @@ def check_log_host():
       * LOG=0: the whole module becomes the "always refuse" stub.
     A missing host compiler is a FAIL, not a skip.
     """
-    import tempfile
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
@@ -2352,7 +2340,7 @@ def check_log_host():
             return
 
     lines = []
-    with tempfile.TemporaryDirectory() as td:
+    with TempDir() as td:
         for name, marker in want:
             test, mods, defs, incs = picked[name]
             exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
@@ -2396,7 +2384,6 @@ def check_ptable_host():
     before any assertion, and returns non-zero (FAIL) when the mapping fails
     rather than running assertions against a null pointer.
     """
-    import tempfile
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
@@ -2418,7 +2405,7 @@ def check_ptable_host():
         return
 
     test, mods, defs, incs = picked
-    with tempfile.TemporaryDirectory() as td:
+    with TempDir() as td:
         exe = os.path.join(td, "ptable" + (".exe" if os.name == "nt" else ""))
         cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
                + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
@@ -2455,7 +2442,6 @@ def check_hwsafe_host():
     NOTE: the counters are monotonic across arkrtos_hwsafe_reset() by design,
     so the test asserts increments, not absolute values.
     """
-    import tempfile
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
@@ -2480,7 +2466,7 @@ def check_hwsafe_host():
     for case_name, marker in (("hwsafe", "HWSAFE-HOST OK"),
                               ("hwsafe-off", "HWSAFE-HOST OFF OK")):
         test, mods, defs, incs = picks[case_name]
-        with tempfile.TemporaryDirectory() as td:
+        with TempDir() as td:
             exe = os.path.join(td, case_name + (".exe" if os.name == "nt" else ""))
             cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
                    + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
@@ -2525,7 +2511,6 @@ def check_audit_host():
     the very corruption it is auditing answers nothing, so both got a
     short-circuit guard on 2026-11-22.
     """
-    import tempfile
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
@@ -2550,7 +2535,7 @@ def check_audit_host():
     for case_name, marker in (("audit", "AUDIT-HOST OK"),
                               ("audit-off", "AUDIT-HOST OFF OK")):
         test, mods, defs, incs = picks[case_name]
-        with tempfile.TemporaryDirectory() as td:
+        with TempDir() as td:
             exe = os.path.join(td, case_name + (".exe" if os.name == "nt" else ""))
             cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
                    + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
@@ -2601,7 +2586,6 @@ def check_mpu_host():
     to empty macros. The OFF case proves the call sites still compile and do
     nothing; it is not a claim that any window was built.
     """
-    import tempfile
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
@@ -2626,7 +2610,7 @@ def check_mpu_host():
     for case_name, marker in (("mpu", "MPU-HOST OK"),
                               ("mpu-off", "MPU-HOST OFF OK")):
         test, mods, defs, incs = picks[case_name]
-        with tempfile.TemporaryDirectory() as td:
+        with TempDir() as td:
             exe = os.path.join(td, case_name + (".exe" if os.name == "nt" else ""))
             cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
                    + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
@@ -2674,7 +2658,6 @@ def check_guard_host():
     module is an empty TU and every entry point answers "disabled" instead of
     a silent success.
     """
-    import tempfile
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
@@ -2700,7 +2683,7 @@ def check_guard_host():
                               ("guard-nowdg", "GUARD-HOST NOWDG OK"),
                               ("guard-off", "GUARD-HOST OFF OK")):
         test, mods, defs, incs = picks[case_name]
-        with tempfile.TemporaryDirectory() as td:
+        with TempDir() as td:
             exe = os.path.join(td, case_name + (".exe" if os.name == "nt" else ""))
             cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
                    + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
@@ -2721,6 +2704,85 @@ def check_guard_host():
        "heartbeat contract + watchdog gating (feed only on a clean verdict): %s | %s | %s"
        % (results[0], results[1], results[2]))
 
+
+def check_rt_host():
+    """Real-time measurement arithmetic and bookkeeping, on host, at two grades.
+
+    arkrtos_rt.c touches no register: every timestamp comes from the port's
+    free-running cycle counter, and both wakeup scenarios go through kernel
+    primitives. The host case stubs the counter, the semaphores, the task
+    registration and the delay, and pins the arithmetic and the ledgers:
+
+      * with no counter, or a counter but no clock, every row stays at n = 0
+        and the microsecond conversion returns 0 -- it never falls back to
+        tick counting and calls a value that is three orders of magnitude
+        off a measurement;
+      * cycles -> microseconds is split at the kilohertz boundary, so the
+        whole-second term and the remainder both survive without a 64-bit
+        divide (RV32 has no libgcc for it);
+      * jitter is signed (early is negative, late is positive) and the first
+        tick has no reference, so it records no sample;
+      * wake.lo starts at the tick entry while switch starts at the last line
+        of the tick body, so the two only subtract when the sequence numbers
+        pair; a sample taken inside an open tick body is discarded and counted
+        in skip_n instead of using the previous tick's end;
+      * a wakeup more than one period late is a preemption by something else,
+        not a wakeup delay, so it is counted in late_n and left out of the
+        statistics;
+      * the preemption helper is created once, and when it cannot start,
+        last_error names the step; a run with fewer samples than asked is
+        reported as a failure instead of being padded with zeros;
+      * a critical section is measured only by the outermost exit, and an
+        unbalanced exit neither samples nor underflows.
+
+    Two builds: RTSTAT=1 (with the host-only loop budget) and RTSTAT=0, where
+    the module is an empty TU -- the OFF case calls nothing and proves the
+    header exposes no symbol.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("rt-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    picks = {}
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name in ("rt", "rt-off"):
+            picks[name] = (test, mods, defs, incs)
+    for need in ("rt", "rt-off"):
+        if need not in picks:
+            fail("rt-host", "case %s missing from coverage_gate.CASES" % need)
+            return
+
+    results = []
+    for case_name, marker in (("rt", "RT-HOST OK"),
+                              ("rt-off", "RT-HOST OFF OK")):
+        test, mods, defs, incs = picks[case_name]
+        with TempDir() as td:
+            exe = os.path.join(td, case_name + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+                fail("rt-host",
+                     "%s did not build: %s" % (case_name, tail[:200]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            if r.returncode != 0 or marker not in txt:
+                fail("rt-host",
+                     "%s failed: %s" % (case_name, txt.strip()[:220]))
+                return
+            results.append(txt.strip().splitlines()[-1])
+    ok("rt-host",
+       "cycle-counter arithmetic, jitter, wake/switch pairing and ledgers: %s | %s"
+       % (results[0], results[1]))
 
 def check_coverage_host():
     """Line coverage of the modules the host tests actually link.
@@ -2759,10 +2821,10 @@ def check_warn_host():
     re-checked and riscv64-unknown-elf-gcc-10.2.0 turned up.
 
     Scope is honest and narrow: every TU the cases in coverage_gate.CASES
-    compile -- 43 case configurations (test + module each) plus the SDK stdio
-    test, 88 TUs in total, because a few modules are built once per
-    configuration (sign, blk, dev, event, export, init, hwsafe, audit and mpu twice;
-    guard three times; log three
+    compile -- 45 case configurations (test + module each) plus the SDK stdio
+    test, 92 TUs in total, because a few modules are built once per
+    configuration (sign, blk, dev, event, export, init, hwsafe, audit, mpu and rt
+    twice; guard three times; log three
     times: default, USE_LOG_RING=0 and USE_LOG=0; timer three times: default,
     tickless and USE_TIMER=0; cfg three times: default, STACK_GUARD=1 and
     STACK_USAGE=0). Everything else in kernelsrc/ needs an
@@ -2897,6 +2959,7 @@ CHECK_TABLE = (
     ("audit-host", check_audit_host),
     ("mpu-host", check_mpu_host),
     ("guard-host", check_guard_host),
+    ("rt-host", check_rt_host),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),
     ("analyzer", check_analyzer),

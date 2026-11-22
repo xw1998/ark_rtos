@@ -23,6 +23,17 @@
 #include "arkrtos_task.h"
 #include "arkrtos_sync.h"
 
+/* 辅助任务体在目标上是 for(;;)。宿主用例必须能按预算调用它
+ * （每模拟一次唤醒跑一圈），否则一调用就挂死门禁。默认档两样
+ * 东西都不存在：没有预算符号，也没有那个分支。 */
+#if defined(ARKRTOS_RT_HOST_TEST)
+#define ARKRTOS_RT_STATIC
+int32 arkrtos_rt_helper_budget = 0;
+void  rt_helper_task(void);
+#else
+#define ARKRTOS_RT_STATIC static
+#endif
+
 #define RT_ROW_TICK_ISR     0u
 #define RT_ROW_WAKE_LO      1u
 #define RT_ROW_WAKE_HI      2u
@@ -348,10 +359,14 @@ int32 arkrtos_rt_measure_wake(uint32 n)
 
 /* ---------------------------------------------------------------- 场景二 */
 
-static void rt_helper_task(void)
+ARKRTOS_RT_STATIC void rt_helper_task(void)
 {
     for(;;)
     {
+#if defined(ARKRTOS_RT_HOST_TEST)
+        if(arkrtos_rt_helper_budget <= 0) { return; }
+        arkrtos_rt_helper_budget--;
+#endif
         if(arkrtos_sem_wait_internal(g_rt.sem_hi, -1) != 0) { continue; }
 
         if(g_rt.hi_run != 0u)

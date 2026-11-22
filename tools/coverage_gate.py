@@ -38,7 +38,7 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
+from tempdir_util import TempDir  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -279,6 +279,15 @@ CASES = [
     ("guard-off", "kernelsrc/tests/test_guard_host.c",
      ["kernelsrc/src/arkrtos_guard.c"],
      ["-DARKRTOS_USE_KERNEL_GUARD=0"], "GUARD-HOST OFF OK"),
+    # --- 2026-11-22 新增：实时性度量（RTSTAT 开/关是两段代码）---
+    # 关档是空目标（零符号），覆盖率只由开档供给；开档带着宿主预算钩子
+    # ARKRTOS_RT_HOST_TEST，没有它辅助任务体那个 for(;;) 会把门禁挂死。
+    ("rt", "kernelsrc/tests/test_rt_host.c",
+     ["kernelsrc/src/arkrtos_rt.c"],
+     ["-DARKRTOS_USE_RTSTAT=1", "-DARKRTOS_RT_HOST_TEST=1"], "RT-HOST OK"),
+    ("rt-off", "kernelsrc/tests/test_rt_host.c",
+     ["kernelsrc/src/arkrtos_rt.c"],
+     ["-DARKRTOS_USE_RTSTAT=0"], "RT-HOST OFF OK"),
 ]
 
 
@@ -412,7 +421,7 @@ def measure(cc, name, test, mods, defs, markers, incs=(), argv=()):
     """编 + 跑 + gcov，返回 {模块基名: 行覆盖率}；失败抛 RuntimeError。"""
     base_cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0", "--coverage"]
                 + defs + incs + COMMON_INC)
-    with tempfile.TemporaryDirectory() as td:
+    with TempDir() as td:
         objs = []
         objmap = {}
         for src in [test] + mods:

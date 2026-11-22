@@ -109,6 +109,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
 from coverage_gate import CASES, COMMON_INC, _case, find_cc, mingw_prefix  # noqa: E402
+from tempdir_util import TempDir  # noqa: E402
 
 # 固定选项集，共十二条：前三条问「编译器能确定是错的吗」，接下来三条问「接口有没有
 # 露在暗处」，conversion / cast-qual / write-strings 问「类型意图有没有被隐式丢掉」，
@@ -158,8 +159,7 @@ def main():
     if args.selfcheck:
         # 一条必然告警的 TU（未用参数 + 未初始化读）：如果连它都报 0 条，
         # 说明是门禁瞎了而不是代码干净。
-        import tempfile
-        with tempfile.TemporaryDirectory() as td:
+        with TempDir() as td:
             bad_c = os.path.join(td, "deliberate_warning.c")
             with open(bad_c, "w", encoding="utf-8") as f:
                 f.write("int probe(int unused_arg)\n{\n    int x;\n    return x;\n}\n")
