@@ -647,6 +647,25 @@ CASES = [
       "-fno-asynchronous-unwind-tables"],
      "TASK HOST OK",
      {"incs": ["-Ikernelsrc/tests", "-Iboard/qemu_loongarch64"]}),
+    # --- 2026-11-22：Shell 杂项命令族（arkrtos_shell_misc）----------------
+    # 这一族是「只读、输出直接来自别的模块」的命令，所以被测的是它自己的
+    # 格式化与退出码；每个被调到的内核读数都在用例里打桩。板级口径取
+    # qemu_loongarch64 那份（SHELL 开、HW_SAFE 开），再显式打开两档可选
+    # 代码：LINUX_ABI_SYSSTAT 的 lxstat 与 TASK_SWAP 的 swap。
+    # swap 的成功路径在宿主上走不到（要真调度器让计数上涨），只覆盖两条
+    # 拒绝路径与 stat 行；这 28 行是已知且写死的地板，不是漏测。
+    ("shellmisc", "kernelsrc/tests/test_shell_misc_host.c",
+     ["kernelsrc/shell/arkrtos_shell_misc.c"],
+     ['-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',
+      "-DARKRTOS_LINUX_ABI_SYSSTAT=1", "-DARKRTOS_USE_TASK_SWAP=1",
+      SIGN_KEY_DEF, "-fno-asynchronous-unwind-tables"]
+     + ["-D" + x for x in SOFTBUS_TIER_DEFS],
+     "SHELL-MISC-HOST OK",
+     {"incs": ["-Iboard/qemu_loongarch64", "-Ikernelsrc/shell",
+               "-Ikernelsrc/shell/ark_shell", "-Ikernelsrc/fs",
+               "-Ikernelsrc/fs/littlefs",
+               "-Ikernelsrc/components/ark_vfs/include",
+               "-Ikernelsrc/components/ark_softbus/include"]}),
 ]
 
 

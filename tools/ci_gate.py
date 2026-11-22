@@ -3038,6 +3038,81 @@ def check_task_host():
        "arkrtos_task on the host (ready bitmap / delay chain / sched activate / "
        "fault rebuild / A/B swap / SVC dispatch table): %s" % last)
 
+def check_shell_misc_host():
+    """The Shell misc command family (arkrtos_shell_misc.c) on the host.
+
+    This file is where several read-only commands live: history / uname /
+    free / ps / which / man / dmesg / hwsafe / swap / lxstat.  They are the
+    part of the kernel a field engineer actually types at, and their failure
+    mode is quiet: a row that prints the wrong field still looks like a
+    table, a command that returns 0 after refusing still looks successful,
+    and a percentage computed from a zero total divides by zero on a target
+    where nobody is watching.
+
+    So this case links the real file against stubs for every kernel reading
+    it touches (partition table + stats, task table, hwsafe ledger, log ring,
+    Linux ABI counters, task swap) and asserts on 128 checks:
+      * each command's formatted line, with fixture numbers distinct enough
+        that printing the wrong field cannot pass;
+      * the documented exit code for every refusal (bad usage, no log ring,
+        unknown manual page, unknown command, swap cannot register / cannot
+        start) and for the happy paths;
+      * the defensive arithmetic: total == 0 gives 0 percent, used > total
+        clamps free at 0 instead of underflowing;
+      * the "stop on first bad index" loops (hwsafe device / ledger).
+
+    Honest limits:
+      1) the swap success path is not reachable on the host -- it needs the
+         test task to really run so its counters advance, which needs a
+         scheduler and a trap frame.  Only the two refusal paths and the
+         stat line are covered; those 28 lines are a known floor;
+      2) the UART is a buffer here: this proves what the command emits, not
+         that it reaches a wire;
+      3) the fixture tables are not real ledgers -- a real hwsafe / Linux
+         ABI table has shapes this stub does not reproduce.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("shellmisc-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    pick = None
+    for case in CASES:
+        name, test, mods, defs, markers, incs, _argv = _case(case)
+        if name == "shellmisc":
+            pick = (test, mods, defs, incs, markers)
+            break
+    if pick is None:
+        fail("shellmisc-host", "case shellmisc missing from coverage_gate.CASES")
+        return
+
+    test, mods, defs, incs, markers = pick
+    with TempDir() as td:
+        exe = os.path.join(td, "shellmisc" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            err = (r.stderr or "").strip().splitlines() or [""]
+            fail("shellmisc-host", "the case did not build: %s"
+                 % [x for x in err if x.strip()][-1][:220])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or markers[0] not in txt or "FAIL" in txt:
+            fail("shellmisc-host", txt.strip()[-260:])
+            return
+        last = txt.strip().splitlines()[-1]
+
+    ok("shellmisc-host",
+       "arkrtos_shell_misc on the host (history / uname / free / ps / which / "
+       "man / dmesg / hwsafe / swap / lxstat): %s" % last)
+
 def check_modld():
     """VxWorks-style downloadable modules (ARKRTOS_USE_MODLOAD) must be wired.
 
@@ -4987,6 +5062,7 @@ CHECK_TABLE = (
     ("linux-abi-host", check_linux_abi_host),
     ("mini-host", check_mini_host),
     ("task-host", check_task_host),
+    ("shellmisc-host", check_shell_misc_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),
