@@ -344,68 +344,6 @@ static int32 apppack_scan_same_insn(const uint8 *a, const uint8 *b, const uint8 
     return 0;
 }
 
-/* ---- 3) 指令本身不同：只能是 MOVW/MOVT 立即数对被链接期改写。
- * 这一步没有「不归它管」的出口：要么消费一步，要么报 DIFF。 */
-static int32 apppack_scan_movw_diff(const uint8 *a, const uint8 *b, const uint8 *c,
-                                   uint32 len, uint32 delta,
-                                   uint32 *table, apppack_count_t *count,
-                                   uint32 *p_n, uint32 *p_pos)
-{
-    uint32 pos = *p_pos;
-    uint32 n   = *p_n;
-    uint32 kind = 0u;
-
-    /* ---- 3) 指令本身不同：只能是 MOVW/MOVT 立即数对被链接期改写 ---- */
-    {
-        uint32 va = 0u;
-        uint32 vb = 0u;
-        uint32 vc = 0u;
-        uint32 db;
-        uint32 dc;
-
-        if((apppack_read_pair(a, len, pos, &va) == 0u) ||
-           (apppack_read_pair(b, len, pos, &vb) == 0u) ||
-           (apppack_read_pair(c, len, pos, &vc) == 0u))
-        {
-            return ARKRTOS_APPPACK_ERR_DIFF;
-        }
-
-        db = (vb - va) & 0xFFFFFFFFu;
-        dc = (vc - va) & 0xFFFFFFFFu;
-
-        if((db == delta) && (dc == 0u))
-        {
-            kind = APPPACK_KIND_ROM_MOVW;
-            count->n_rom_movw++;
-        }
-        else if((dc == delta) && (db == 0u))
-        {
-            kind = APPPACK_KIND_RAM_MOVW;
-            count->n_ram_movw++;
-        }
-        else
-        {
-            return ARKRTOS_APPPACK_ERR_DIFF;
-        }
-
-        if((pos % 2u) != 0u)
-        {
-            return ARKRTOS_APPPACK_ERR_DIFF;
-        }
-
-        if(table != 0)
-        {
-            table[n] = (pos / ARKRTOS_APP_RELOC_OFF_UNIT) << 2 | kind;
-        }
-        n++;
-        *p_n   = n;
-        *p_pos = pos + ARKRTOS_APP_RELOC_MOV_SIZE;
-        return 1;
-    }
-
-    return 0;
-}
-
 /**
 * @brief 差分一遍：把 (相对偏移, 类型) 编码进 table，或只计数
 * @param table 非 0 时逐个写入编码后的表项（偏移相对负载，未加表长）
@@ -434,8 +372,13 @@ static int32 apppack_scan(const uint8 *a, const uint8 *b, const uint8 *c,
         if(hit < 0) { return hit; }
         if(hit != 0) { continue; }
 
-        hit = apppack_scan_movw_diff(a, b, c, len, delta, table, count, &n, &pos);
-        if(hit < 0) { return hit; }
+        /* 三份指令不同，却又不是第 0/1 步解释得了的形态：一个基数增量说明
+         * 不了这处差异，就没有任何合法解释 ⇒ 拒绝打包（不猜）。
+         * 原先这里还有一份「再读一次立即数对、判 db/dc」的实现，它与第 0 步
+         * 的前置条件完全相同（同一 pos、同样要求三份都读得成 MOVW+MOVT），
+         * 因此它的两条合法出口永远走不到——留着只会让后人以为这里还有一条
+         * 能接受的路径。那份重复实现已删除，此处直接判 DIFF。 */
+        return ARKRTOS_APPPACK_ERR_DIFF;
     }
 
     return (int32)n;

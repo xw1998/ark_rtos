@@ -2766,6 +2766,74 @@ def check_trace_host():
        "events / switch counters / console over SWD + BUFF + none + off: %s | %s | %s | %s"
        % (results[0], results[1], results[2], results[3]))
 
+def check_apppack_host():
+    """Four-pass differential packer (arkrtos_apppack.c) on host.
+
+    The packer decides which bytes of an image are absolute addresses and emits
+    the relocation table the loader later replays. Getting it wrong is not a
+    compile error, it is an image that boots and then faults at an unrelated
+    address, so the checks pin the accounting rather than "it returned 0":
+
+      * all four table kinds (word ROM / word RAM / MOVW+MOVT ROM / RAM) are
+        really recognised, counted and encoded at the right offset with the
+        right kind bits -- a kind that silently stays at zero would make the
+        gate green while one class goes unverified;
+      * the produced image passes the loader's own check_header, computed by
+        the real arkrtos_loader.c (linked in, not re-implemented here), so the
+        packer and the loader cannot drift apart without this failing;
+      * the header CRC covers the table and the payload, and the payload is
+        restored to the nominal form A (not D) before the header is filled;
+      * every parameter gate and both "refuse rather than guess" exits
+        (DIFF / ENTRY / VERIFY / SIZE) fire where they should.
+
+    Not checked here: the real four-pass link on the toolchain, the actual
+    instruction stream a compiler emits, and patching at the load address --
+    those need the board.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("apppack-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    pick = None
+    link = []
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name == "apppack":
+            extra = case[5] if len(case) > 5 else {}
+            pick = (_markers, test, mods, defs, incs)
+            link = list(extra.get("link", []))
+            break
+    if pick is None:
+        fail("apppack-host", "case apppack missing from coverage_gate.CASES")
+        return
+
+    markers, test, mods, defs, incs = pick
+    with TempDir() as td:
+        exe = os.path.join(td, "apppack" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods + link)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+            fail("apppack-host", "did not build: %s" % tail[:200])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or markers[0] not in txt:
+            fail("apppack-host", "failed: %s" % txt.strip()[:220])
+            return
+        last = txt.strip().splitlines()[-1]
+
+    ok("apppack-host",
+       "four relocation kinds / header + CRC / loader check_header / refusal exits: %s"
+       % last)
+
 def check_hwsafe_host():
     """HW_SAFE on/off: who gets driven at the moment a task dies, and on what.
 
@@ -3424,6 +3492,7 @@ CHECK_TABLE = (
     ("apprun-host", check_apprun_host),
     ("flashapp-host", check_flashapp_host),
     ("trace-host", check_trace_host),
+    ("apppack-host", check_apppack_host),
     ("hwsafe-host", check_hwsafe_host),
     ("audit-host", check_audit_host),
     ("mpu-host", check_mpu_host),

@@ -394,6 +394,13 @@ CASES = [
      ["kernelsrc/src/arkrtos_trace.c"],
      ["-DTRACE_HOST_OFF=1", "-DARKRTOS_USE_MDK_TRACE=0"], "TRACE-HOST OFF OK",
      {"incs": ["-Ikernelsrc/shell", "-Ikernelsrc/shell/ark_shell"]}),
+    # apppack 用例必须真的链接 loader.c（产出的镜像要过装载器的 check_header），
+    # 但 loader 有自己的 case，所以这里用 link 只链接、不重复统计它的覆盖率。
+    ("apppack", "kernelsrc/tests/test_apppack_host.c",
+     ["kernelsrc/src/arkrtos_apppack.c"],
+     ["-DARKRTOS_USE_APPPACK=1", "-fno-asynchronous-unwind-tables"],
+     "APPPACK-HOST OK",
+     {"link": ["kernelsrc/src/arkrtos_loader.c"]}),
 ]
 
 
@@ -523,14 +530,18 @@ def _case(case):
     return (name, test, mods, defs, markers,
             list(extra.get("incs", [])), list(extra.get("argv", [])))
 
-def measure(cc, name, test, mods, defs, markers, incs=(), argv=()):
-    """编 + 跑 + gcov，返回 {模块基名: 行覆盖率}；失败抛 RuntimeError。"""
+def measure(cc, name, test, mods, defs, markers, incs=(), argv=(), link=()):
+    """编 + 跑 + gcov，返回 {模块基名: 行覆盖率}；失败抛 RuntimeError。
+
+    link 里的源文件会被编进来参与链接，但不做 gcov 统计——用于"必须真的链接
+    生产实现、而覆盖率只记被测模块"的场景（如 apppack 用例链真 loader）。
+    """
     base_cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0", "--coverage"]
                 + defs + incs + COMMON_INC)
     with TempDir() as td:
         objs = []
         objmap = {}
-        for src in [test] + mods:
+        for src in [test] + list(mods) + list(link):
             obj = os.path.join(td, os.path.basename(src)[:-2] + ".o")
             cmd = base_cmd + ["-c", "-o", obj, os.path.abspath(src)]
             rc, _out, err = _run(cmd, cwd=ROOT)
@@ -620,8 +631,10 @@ def main():
     bad = 0
     for case in CASES:
         name, test, mods, defs, markers, incs, argv = _case(case)
+        extra = case[5] if len(case) > 5 else {}
         try:
-            res = measure(cc, name, test, mods, defs, markers, incs, argv)
+            res = measure(cc, name, test, mods, defs, markers, incs, argv,
+                          list(extra.get("link", [])))
         except RuntimeError as exc:
             print("FAIL %-10s %s" % (name, exc))
             bad += 1
