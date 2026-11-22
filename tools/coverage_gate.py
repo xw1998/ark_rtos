@@ -107,6 +107,7 @@ BLK_OFF_DEFS = [
 #   incs —— 这个用例额外要的头文件搜索路径（F427 工程那套）
 #   argv —— 传给用例的实参（例如签名用例把镜像写到哪里）
 #   markers —— 覆盖掉第 5 项，要求多条输出同时出现才算过
+#   ldflags —— 链接期参数（如 -Wl,--wrap=名字），只影响链接
 #
 # 同一个 .c 出现在多个用例里（blk 的开档 / 关档）时，百分比按**行号并集**算：
 # 两档编出来的是不同的代码（#else 那一半只在关档时存在），而覆盖率问的是
@@ -139,6 +140,13 @@ SOFTBUS_LINK = (
     + ["kernelsrc/components/ark_softbus/src/transport/transport_loopback.c",
        "kernelsrc/components/ark_softbus/port/ark_bus_hal_arkrtos.c"]
 )
+
+# 板级配置由 -D + -include 显式带进来：coverage_gate 的 COMMON_INC 里那份
+# 是 stm32f427 的搜索路径，而 Linux ABI 依赖 qemu_loongarch64 的开关组合
+# （USE_PAGING / USE_LINUX_ABI / USE_ELF 同时打开）。
+BOARD_QEMU_LA64_DEFS = [
+    '-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',
+]
 
 CASES = [
     ("utest", "tools/utest_host_selftest.c",
@@ -584,6 +592,34 @@ CASES = [
      ["-DARKRTOS_USE_ELF=0", "-DARKRTOS_LOG_LEVEL=0",
       "-fno-asynchronous-unwind-tables"],
      "ELF-HOST OFF OK"),
+    # --- 2026-11-22：Linux 系统调用 ABI（开档 / 关档）---
+    # 这一档必须用 qemu_loongarch64 的板级配置：只有它把 USE_PAGING /
+    # USE_LINUX_ABI / USE_ELF 一起打开，copy_from_user 才是真的分页实现
+    # 而不是空壳。incs 排在 COMMON_INC 之前，因此不会选中 stm32f427 的
+    # 板级头（那一份会把 stm32f4xx.h 拖进来，宿主上编不过）。
+    #
+    # -Wl,--wrap 不是可选项：错误路径的端口能力探测靠一条 __attribute__
+    # ((weak)) 的默认实现回答"不支持"，而 MinGW 在 -O0 下会把同链接里的
+    # 弱定义解析到本地入口（-ffunction-sections 也救不回来，实测 call 到
+    # 段外地址直接崩），所以用链接期 wrap 把引用改指到用例的强定义。
+    ("linuxabi", "kernelsrc/tests/test_linux_abi_host.c",
+     ["kernelsrc/src/arkrtos_linux_abi.c"],
+     [BOARD_QEMU_LA64_DEFS[0], "-include", "arkrtos_board_config.h",
+      SIGN_KEY_DEF, "-DARKRTOS_LINUX_ABI_SYSSTAT=1",
+      "-fno-asynchronous-unwind-tables", "-ffunction-sections"],
+     "LINUX-ABI HOST OK",
+     {"incs": ["-Iboard/qemu_loongarch64",
+               "-Ikernelsrc/port/loongarch/la64"],
+      "ldflags": ["-Wl,--wrap=arkrtos_port_svc_exec_frame"]}),
+    # 关档：头文件把入口折成常量宏，被测模块编成空目标（nm 自证），
+    # 用例只证明"每个读数都回答没有这件事"。板级仍要一份不带
+    # USE_LINUX_ABI 的配置，这里用 qemu_riscv32 那份。
+    ("linuxabioff", "kernelsrc/tests/test_linux_abi_host.c",
+     ["kernelsrc/src/arkrtos_linux_abi.c"],
+     [BOARD_QEMU_LA64_DEFS[0], "-include", "arkrtos_board_config.h",
+      SIGN_KEY_DEF, "-fno-asynchronous-unwind-tables", "-ffunction-sections"],
+     "LINUX-ABI HOST OFF OK",
+     {"incs": ["-Iboard/qemu_riscv32"]}),
 ]
 
 
@@ -713,7 +749,8 @@ def _case(case):
     return (name, test, mods, defs, markers,
             list(extra.get("incs", [])), list(extra.get("argv", [])))
 
-def measure(cc, name, test, mods, defs, markers, incs=(), argv=(), link=()):
+def measure(cc, name, test, mods, defs, markers, incs=(), argv=(), link=(),
+            ldflags=()):
     """编 + 跑 + gcov，返回 {模块基名: 行覆盖率}；失败抛 RuntimeError。
 
     link 里的源文件会被编进来参与链接，但不做 gcov 统计——用于"必须真的链接
@@ -733,7 +770,8 @@ def measure(cc, name, test, mods, defs, markers, incs=(), argv=(), link=()):
             objs.append(obj)
             objmap[os.path.basename(src)[:-2]] = obj
         exe = os.path.join(td, "cov_" + name + (".exe" if os.name == "nt" else ""))
-        cmd = [cc] + mingw_prefix(cc) + ["--coverage", "-o", exe] + objs
+        cmd = ([cc] + mingw_prefix(cc) + ["--coverage", "-o", exe] + objs
+               + list(ldflags))
         rc, _out, err = _run(cmd, cwd=ROOT)
         if rc != 0:
             raise RuntimeError("链接失败 %s: %s" % (name, err.strip()[-300:]))
@@ -817,7 +855,8 @@ def main():
         extra = case[5] if len(case) > 5 else {}
         try:
             res = measure(cc, name, test, mods, defs, markers, incs, argv,
-                          list(extra.get("link", [])))
+                          list(extra.get("link", [])),
+                          list(extra.get("ldflags", [])))
         except RuntimeError as exc:
             print("FAIL %-10s %s" % (name, exc))
             bad += 1

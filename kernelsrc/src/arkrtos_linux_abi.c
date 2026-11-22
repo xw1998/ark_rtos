@@ -146,7 +146,12 @@
  * 为什么快照是整帧而不只是 era/sp/ra/tp：处理函数是普通 C 函数，会把
  * $t0 一类的临时寄存器改成自己的东西；只恢复四个寄存器的话，被打断的
  * 调用约定就断了（实测过：恢复后一条 ld.w 用了一个已经变成 2 的基址）。 */
-#define LX_SIGFRAME_MAGIC           (0x53494746524D4532UL)   /* "SIGFRME2" */
+#define LX_SIGFRAME_MAGIC           ((unsigned long)0x53494746524D4532UL)
+/* 显式转换成 unsigned long：32 位端口上这个常量放不进一个字，隐式截断会让
+ * 编译器对 `s_sigframe[0] != LX_SIGFRAME_MAGIC` 做出错误的常量折叠（宿
+ * 主 32 位 gcc 实测：整个比较被折成恒真，magic 校验与后面的 import 一起
+ * 被删掉）。magic 只在铺帧与收回之间自证，截断与否两侧一致，值本身不是
+ * ABI（帧长与字段语义才是）；写在这里，不留给编译器猜。 */
 #define LX_SIGFRAME_HDR_WORDS       (4u)
 #define LX_SIGFRAME_HDR_BYTES       ((uint32)LX_SIGFRAME_HDR_WORDS * 8u)
 /* 快照缓冲的上限（字）：LSX 档 130 字 = 1040 字节是当前最大的一档。
@@ -464,15 +469,23 @@ static int32 lx_pipe_read(int32 idx, unsigned long ua, uint32 want)
         {
             n = (uint32)s_pipe[pi].count;
         }
-        for(k = 0u; k < n; k++)
+        /* 先按 tail 把这一块抄进内核缓冲，**拷贝成功之后**才推进 tail：
+         * 用户指针在半路失效时，环形缓冲里不能少掉任何字节（否则下一次
+         * read 会从后面接着读，数据静默丢失）。 */
         {
-            buf[k] = s_pipe[pi].buf[s_pipe[pi].tail];
-            s_pipe[pi].tail = (uint16)(((uint32)s_pipe[pi].tail + 1u) % (uint32)LX_PIPE_BUF);
-            s_pipe[pi].count--;
-        }
-        if(arkrtos_copy_to_user((void *)(unsigned long)(ua + done), buf, n) != 0)
-        {
-            return (done > 0u) ? (int32)done : -LX_EFAULT;
+            uint16 tail = s_pipe[pi].tail;
+
+            for(k = 0u; k < n; k++)
+            {
+                buf[k] = s_pipe[pi].buf[tail];
+                tail = (uint16)(((uint32)tail + 1u) % (uint32)LX_PIPE_BUF);
+            }
+            if(arkrtos_copy_to_user((void *)(unsigned long)(ua + done), buf, n) != 0)
+            {
+                return (done > 0u) ? (int32)done : -LX_EFAULT;
+            }
+            s_pipe[pi].tail  = tail;
+            s_pipe[pi].count = (uint16)((uint32)s_pipe[pi].count - n);
         }
         done += n;
     }
@@ -970,9 +983,13 @@ static uint32 lx_sig_install(void *p_ctx, uint32 sig, lx_sigaction_t *sa,
     s_sig_blocked &= ~(lx_sig_bit((uint32)LX_SIGKILL) |
                        lx_sig_bit((uint32)LX_SIGSTOP));
 
-    if((arkrtos_port_svc_set_user_reg(p_ctx, LX_UREG_ERA, sa->handler) != 0) ||
+    /* 顺序有讲究：先把 ra/sp 写好，最后才写 era。era 一改，下一次返回用户态
+     * 就跳进 handler；任何一步失败都不能留下「era 已指向 handler、sp 还没指
+     * 向帧」的半截现场，所以唯一的跳转点排在最后（此前 era 先写，SP 失败时
+     * 会留下半个现场，宿主用例抓到过）。 */
+    if((arkrtos_port_svc_set_user_reg(p_ctx, LX_UREG_RA, sa->restorer) != 0) ||
        (arkrtos_port_svc_set_user_reg(p_ctx, LX_UREG_SP, fsp) != 0) ||
-       (arkrtos_port_svc_set_user_reg(p_ctx, LX_UREG_RA, sa->restorer) != 0))
+       (arkrtos_port_svc_set_user_reg(p_ctx, LX_UREG_ERA, sa->handler) != 0))
     {
         s_sig_blocked = saved_blocked;
         s_sig_pending |= lx_sig_bit(sig);
@@ -1211,6 +1228,9 @@ static int32 lx_read(void *p_ctx)
         if(arkrtos_vfs_read_at(s_fd[idx].path, buf, n,
                                s_fd[idx].off + done, &got) < 0)
         {
+            /* 分块失败：已交付的 done 字节必须记进游标。不记的话下一次
+             * read 会从原处重放同一段，程序看到的是重复数据而不是短读。 */
+            s_fd[idx].off += done;
             return (done > 0u) ? (int32)done : -LX_EIO;
         }
         if(got == 0u)
@@ -1219,6 +1239,7 @@ static int32 lx_read(void *p_ctx)
         }
         if(arkrtos_copy_to_user((void *)(unsigned long)(ua + done), buf, got) != 0)
         {
+            s_fd[idx].off += done;
             return (done > 0u) ? (int32)done : -LX_EFAULT;
         }
 
@@ -1510,6 +1531,14 @@ static int32 lx_mmap(void *p_ctx)
 
     start = lx_align_up(s_heap_cur);
     if(start == 0u)
+    {
+        return -LX_ENOMEM;
+    }
+    /* 32 位端口上 start + len 会回绕：先按减法核对余量，再看加法本身
+     * 有没有溢出。只靠 end > limit 是漏的——回绕之后 end 变成一个小
+     * 地址，于是「要了 4 GB」会被当成成功，堆游标反而被写回低地址。 */
+    if((start > limit) || (len > (limit - start)) ||
+       ((start + (unsigned long)len) < start))
     {
         return -LX_ENOMEM;
     }

@@ -2764,6 +2764,113 @@ def check_elf_host():
        "fake VFS (header / segment / stack / task ledger / exec_replace), "
        "honest refusals when off: %s" % lines[0])
 
+def check_linux_abi_host():
+    """The Linux syscall ABI, driven on the host: one call from entry to the
+    value written back into a0.
+
+    arkrtos_linux_abi.c is the layer that decides whether a syscall was
+    accepted, what errno the program sees, and whether user memory was
+    touched. Every one of those can be wrong in a way that still "runs":
+    a copy that advances the fd offset before it knows the copy succeeded
+    loses bytes silently, a signal frame written in the wrong order leaves
+    a half-installed handler behind. So this check drives both tiers with a
+    simulated user window and asserts on the exact return code and on the
+    exact bytes the program would see:
+
+      * entry: Linux-vs-Ark split (0xFFFFFFFF is not ours), number table,
+        exit family must not come back;
+      * return classes: pointer results written wide, errors classified,
+        exec success writes nothing (Linux: execve does not return);
+      * fd table: open/close bounds, EBADF for free slots, O_* refusals,
+        offsets on failure (no data loss, no replay);
+      * pipes: read/write wrap, EOF only when no writer is left, EPIPE,
+        a read that fails on copy_to_user must not consume the pipe;
+      * signals: rt_sigaction capability probe before argument checks,
+        mask &= ~(SIGKILL|SIGSTOP) semantics, delivery at syscall return,
+        rt_sigreturn restoring the frame, ENOSYS when the port cannot
+        deliver;
+      * execve: argv read as 8-byte slots, E2BIG past the cap, errno
+        mapping per loader failure, frame swap only after a successful
+        load, ENOSYS when the port has no frame swap;
+      * reset: fd/pipe/signal tables cleared, the caller's context is the
+        caller's business (reset does not touch registers).
+
+    Host is 32-bit MinGW (ILP32, unsigned long == 4 bytes). Three things
+    this check explicitly does not claim to prove:
+      1) the user window is simulated (copy_from_user/to_user are stubs),
+         so the real paging backend's window test is not exercised;
+      2) the 64-bit signal-frame layout (32-byte header, payload at 32) is
+         not reproduced here -- only the 32-bit shape (16-byte header);
+      3) a >4GB user address cannot be expressed, so argv slots are read
+         as 8-byte slots with the high half forced to zero.
+    The QEMU LoongArch64 run in linux-abi covers (1) and (2).
+
+    The OFF tier (-DARKRTOS_USE_LINUX_ABI=0) must answer "there is no such
+    thing" for every reading, never an empty success.
+
+    Link-time note: the "port cannot swap frames" default is a weak symbol,
+    and MinGW at -O0 resolves a weak definition inside the same link to the
+    local entry (-ffunction-sections does not help; the call lands outside
+    any section and faults), so both tiers are linked with
+    -Wl,--wrap=arkrtos_port_svc_exec_frame and the test supplies __wrap_.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("linux-abi-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    picks = {}
+    for case in CASES:
+        name, test, mods, defs, markers, incs, _argv = _case(case)
+        if name in ("linuxabi", "linuxabioff"):
+            extra = case[5] if len(case) > 5 else {}
+            picks[name] = (test, mods, defs, incs, markers,
+                           list(extra.get("link", [])),
+                           list(extra.get("ldflags", [])))
+    for name in ("linuxabi", "linuxabioff"):
+        if name not in picks:
+            fail("linux-abi-host",
+                 "case %s missing from coverage_gate.CASES" % name)
+            return
+
+    with TempDir() as td:
+        lines = []
+        for name in ("linuxabi", "linuxabioff"):
+            test, mods, defs, incs, markers, link, ldflags = picks[name]
+            exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + defs + incs + COMMON_INC + ["-o", exe, test] + mods + link
+                   + ldflags)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                err = ((r.stderr or "").strip().splitlines() or [""])
+                fail("linux-abi-host", "%s did not build: %s"
+                     % (name, [x for x in err if x.strip()][-1][:220]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            bad = r.returncode != 0 or markers[0] not in txt or "FAIL" in txt
+            if bad:
+                fail("linux-abi-host", "%s failed: %s"
+                     % (name, txt.strip()[-260:]))
+                return
+            if name == "linuxabioff" and " off" not in txt.lower():
+                fail("linux-abi-host",
+                     "the OFF tier did not take its own branch: %s"
+                     % txt.strip()[-160:])
+                return
+            lines.append(txt.strip().splitlines()[-1])
+
+    ok("linux-abi-host",
+       "arkrtos_linux_abi syscall round trip on the host against a simulated "
+       "user window (entry split, return classes, fd / pipe / signal / execve "
+       "paths, reset), honest refusals when off: %s" % lines[0])
+
 def check_modld():
     """VxWorks-style downloadable modules (ARKRTOS_USE_MODLOAD) must be wired.
 
@@ -4710,6 +4817,7 @@ CHECK_TABLE = (
     ("softbus-host", check_softbus_host),
     ("net-host", check_net_host),
     ("elf-host", check_elf_host),
+    ("linux-abi-host", check_linux_abi_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),

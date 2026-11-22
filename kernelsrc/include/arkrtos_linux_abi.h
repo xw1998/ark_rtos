@@ -5,14 +5,19 @@
 *          可执行文件，能不能在 Ark 的 ELF 用户任务里跑起来。答案是"能跑
 *          一个最小集合"，不是"支持 Linux"：
 *
-*            - 支持（asm-generic 号）：openat 56 / close 57 / read 63 /
-*              write 64 / pread64 67 / exit 93 / exit_group 94 /
+*            - 支持（asm-generic 号）：openat 56 / close 57 / pipe2 59 /
+*              read 63 / write 64 / pread64 67 / exit 93 / exit_group 94 /
 *              set_tid_address 96 / clock_gettime 113 / uname 160 /
 *              getpid 172 / getuid 174 / geteuid 175 / brk 214 / munmap 215 /
-*              mmap 222 / mprotect 226。
-*            - 不支持：fork / execve、信号、进程组、fd 继承与管道、socket、
-*              真 mmap 语义（页级映射、文件映射、权限位）、futex。未知号一律
-*              返回 -ENOSYS 并计数，绝不静默当成功。
+*              execve 221 / mmap 222 / mprotect 226；信号：kill 129 /
+*              tkill 130 / tgkill 131 / rt_sigaction 134 /
+*              rt_sigprocmask 135 / rt_sigreturn 139。
+*            - 不支持：fork / clone、进程组、fd 继承（execve 保留 fd 但不复制
+*              地址空间，没有父子）、socket、真 mmap 语义（页级映射、文件映射、
+*              权限位）、跨任务信号投递（信号只投给当前任务）、futex。未知号
+*              一律返回 -ENOSYS 并计数，绝不静默当成功。
+*            - execve 只做「同任务换镜像」：装载失败（格式/架构/布局/签名）
+*              旧镜像照常跑并返回负 errno；装载成功则不返回，帧换成新入口。
 *            - mprotect 只做区间校验并返回 0，**不强制**：整窗是一块 PS=20 的
 *              RWX 映射。它单独计数（arkrtos_linux_abi_stat(4)），读数时能
 *              把"接受"与"强制"分开。
