@@ -74,3 +74,8 @@ toolchain.local.mk
 *_sign_key_local.h
 # ---- 控制台登录凭据（盐+sha256），不入库 ----
 *_shell_auth_local.h
+
+# ---- gcov 计数据（tools/coverage_gate.py 与手工 --coverage 编译留下） ----
+*.gcda
+*.gcno
+*.gcov
