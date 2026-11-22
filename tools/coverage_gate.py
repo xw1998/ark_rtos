@@ -453,6 +453,15 @@ CASES = [
      ["kernelsrc/src/arkrtos_fdt_overlay.c", "kernelsrc/src/arkrtos_fdt.c"],
      ["-DARKRTOS_USE_FDT=1", "-DARKRTOS_USE_FDT_OVERLAY=1",
       "-fno-asynchronous-unwind-tables"], "FDT-OVERLAY-HOST OK"),
+    # --- 2026-11-22 新增：littlefs -> ark_vfs 桥（516 行，15 个门面桩，
+    # 单写流 / BUSY / NOSYS 三条承诺） ---
+    ("vfslfs", "kernelsrc/tests/test_vfs_lfs_host.c",
+     ["kernelsrc/src/arkrtos_vfs_lfs.c"],
+     ["-DARKRTOS_USE_VFS=1", "-DARKRTOS_USE_VFS_LFS=1",
+      "-DARKRTOS_USE_FS=1", "-fno-asynchronous-unwind-tables"],
+     "VFS-LFS-HOST OK",
+     {"incs": ["-Ikernelsrc/components/ark_vfs/include",
+               "-Ikernelsrc/components/ark_vfs/src"]}),
 ]
 
 

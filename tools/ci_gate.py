@@ -1883,6 +1883,77 @@ def check_fdtovl_host():
        "dtb overlay merge read back through the parser (6 codes + target/depth): %s"
        % last)
 
+def check_vfslfs_host():
+    """littlefs -> ark_vfs bridge (arkrtos_vfs_lfs) on the host, against a RAM
+    fake, with all 15 arkrtos_fs_* facade entries stubbed.
+
+    The bridge itself is what is under test -- not littlefs.  Three promises
+    are pinned:
+
+      * reads go through arkrtos_fs_read_at (random access, several read fds
+        at once), writes go through the single streaming handle;
+      * one write handle at a time: a second open for write is BUSY (-15),
+        and while a write stream is live read() and truncate() are BUSY too,
+        because they share the one file cache;
+      * what cannot be done is refused instead of approximated: seek on a
+        write handle and truncate(non-zero) on it are NOSYS (-12), chmod and
+        chown are NULL callbacks (the core turns them into NOSYS).
+
+    Also pinned: the mount root cannot be open()ed (ISDIR), read-only
+    mounts refuse write intent (ROFS), a missing parent on create is NOENT
+    rather than a blanket IO, every failure path that is not "no such
+    entry" reports IO while keeping the raw arkrtos_fs error for the log,
+    stat reports 0755/0644 with mtime/uid/gid 0 (littlefs keeps none),
+    readdir skips "." and ".." and does not advance on NOSPC/NAMETOOLONG,
+    and an over-32-char entry name is NAMETOOLONG (-13) instead of being
+    truncated.
+
+    Not covered: real littlefs behaviour (that is the arkrtos_fs cases) and
+    the core path walk/mount table (that is the ark_vfs cases).  This case
+    calls the driver table directly, so a broken contract between core and
+    driver would not be caught here.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("vfslfs-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    pick = None
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name == "vfslfs":
+            pick = (_markers, test, mods, defs, incs)
+            break
+    if pick is None:
+        fail("vfslfs-host", "case vfslfs missing from coverage_gate.CASES")
+        return
+
+    markers, test, mods, defs, incs = pick
+    with TempDir() as td:
+        exe = os.path.join(td, "vfslfshost" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+            fail("vfslfs-host", "did not build: %s" % tail[:200])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or markers[0] not in txt:
+            fail("vfslfs-host", "failed: %s" % txt.strip()[:220])
+            return
+        last = txt.strip().splitlines()[-1]
+
+    ok("vfslfs-host",
+       "littlefs->ark_vfs bridge on a RAM fake (single writer, BUSY, NOSYS): %s"
+       % last)
+
 def check_elf_loader():
     """ELF64 executable loader (ARKRTOS_USE_ELF) must be wired, not decorative.
 
@@ -4029,6 +4100,7 @@ CHECK_TABLE = (
     ("fdtres-host", check_fdtres_host),
     ("fdt-host", check_fdt_host),
     ("fdtovl-host", check_fdtovl_host),
+    ("vfslfs-host", check_vfslfs_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),
