@@ -242,6 +242,9 @@ CASES = [
      ["-DARKRTOS_USE_LOG=0"], "LOG-HOST OFF OK"),
     ("ptable", "kernelsrc/tests/test_ptable_host.c",
      ["kernelsrc/src/arkrtos_ptable.c"], [], "PTABLE-HOST OK"),
+    # --- 2026-11-22 新增：设备端布局解析（配置区记录 + 固定槽表 + 发布）---
+    ("layout", "kernelsrc/tests/test_layout_host.c",
+     ["kernelsrc/src/arkrtos_layout.c"], [], "LAYOUT-HOST OK"),
     # --- 2026-11-22 新增：硬件安全态 / 遗言（HW_SAFE 开/关是两段代码）---
     ("hwsafe", "kernelsrc/tests/test_hwsafe_host.c",
      ["kernelsrc/src/arkrtos_hwsafe.c"],

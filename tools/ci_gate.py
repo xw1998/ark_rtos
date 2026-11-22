@@ -2423,6 +2423,68 @@ def check_ptable_host():
            "partition table + slot allocator + two mini allocators (%s)"
            % txt.strip().splitlines()[-1])
 
+def check_layout_host():
+    """The on-device layout record: validate, scan, adopt, publish, write.
+
+    arkrtos_layout.c is what turns a 512-byte record in the config region into
+    the runtime layout. The quiet failures it guards against:
+
+      * a record with a good magic but a bad CRC or bad version being adopted --
+        the board then runs on garbage slot addresses;
+      * a slot table that overlaps, runs past the pool end, or leaves the first
+        8 slots unaligned, accepted because the header alone was checked;
+      * scan() picking the newest record by overwrite order instead of by the
+        append index, so a CRC-bad tail hides the last good record;
+      * a reason code that is always 0 because scan() already skipped the bad
+        record and init()'s failure branch is unreachable -- the console then
+        cannot tell why a board fell back to defaults;
+      * write() publishing the new record but never applying the runtime knobs,
+        so the log level only changes after a reboot.
+
+    The test maps [CONFIG_BASE, +CONFIG_SIZE) for real, drives both flash ports
+    with recording doubles, and links a self-checked CRC32 (zlib known answers)
+    instead of pulling in the whole loader. Returns non-zero (FAIL) when the
+    mapping fails rather than asserting against a null pointer.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("layout-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    picked = None
+    for case in CASES:
+        name, test, mods, defs, _markers, incs, _argv = _case(case)
+        if name == "layout":
+            picked = (test, mods, defs, incs)
+            break
+    if picked is None:
+        fail("layout-host", "case layout missing from coverage_gate.CASES")
+        return
+
+    test, mods, defs, incs = picked
+    with TempDir() as td:
+        exe = os.path.join(td, "layout" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            tail = ((r.stderr or "").strip().splitlines() or [""])[-1]
+            fail("layout-host", "layout did not build: %s" % tail[:200])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or "LAYOUT-HOST OK" not in txt:
+            fail("layout-host", "layout failed: %s" % txt.strip()[:220])
+            return
+        ok("layout-host",
+           "layout record validate/scan/adopt/write + live reason code (%s)"
+           % txt.strip().splitlines()[-1])
+
 def check_hwsafe_host():
     """HW_SAFE on/off: who gets driven at the moment a task dies, and on what.
 
@@ -3076,6 +3138,7 @@ CHECK_TABLE = (
     ("init-host", check_init_host),
     ("log-host", check_log_host),
     ("ptable-host", check_ptable_host),
+    ("layout-host", check_layout_host),
     ("hwsafe-host", check_hwsafe_host),
     ("audit-host", check_audit_host),
     ("mpu-host", check_mpu_host),

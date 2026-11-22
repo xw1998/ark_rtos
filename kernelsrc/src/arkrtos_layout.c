@@ -529,12 +529,19 @@ uint32 arkrtos_layout_validate(const arkrtos_cfg_record_t *rec)
 /* ============================================================
  * 扫描 / 读取
  * ============================================================ */
+/* 扫描时遇到「魔数对、整条校验不过」的记录，原因码记在这里：否则上层只看
+ * 到「没有可用记录」，串口永远显示 0（= 一切正常），现场无法知道是哪一条
+ * 记录、因为什么被拒。只保留最后一条（记录按顺序追加，越靠后越新）。 */
+static uint32 arkrtos_layout_scan_reason = ARKRTOS_CFG_OK;
+
 static const arkrtos_cfg_record_t *arkrtos_layout_scan(uint32 *p_index, uint32 *p_seq)
 {
     const arkrtos_cfg_record_t *best = 0;
     uint32 best_seq = 0u;
     uint32 best_idx = 0u;
     uint32 i;
+
+    arkrtos_layout_scan_reason = ARKRTOS_CFG_OK;
 
     for(i = 0u; i < ARKRTOS_LAYOUT_RECORDS; i++)
     {
@@ -550,9 +557,14 @@ static const arkrtos_cfg_record_t *arkrtos_layout_scan(uint32 *p_index, uint32 *
         {
             continue;                   /* 半写或陌生内容：跳过，继续找 */
         }
-        if(arkrtos_layout_validate(r) != ARKRTOS_CFG_OK)
         {
-            continue;
+            uint32 rc = arkrtos_layout_validate(r);
+
+            if(rc != ARKRTOS_CFG_OK)
+            {
+                arkrtos_layout_scan_reason = rc;
+                continue;
+            }
         }
         if((best == 0) || (r->seq > best_seq))
         {
@@ -617,6 +629,12 @@ void arkrtos_layout_init(void)
         {
             arkrtos_layout_reason_ram = rc;
         }
+    }
+    else
+    {
+        /* 区里没有可用记录：如果扫描时见过「魔数对但校验不过」的那一条，
+         * 把它被拒的原因留给串口，而不是一律报 0。 */
+        arkrtos_layout_reason_ram = arkrtos_layout_scan_reason;
     }
     arkrtos_layout_publish();
     arkrtos_layout_apply_runtime();
@@ -839,6 +857,7 @@ int32 arkrtos_layout_write(const uint8 *record, uint32 len, uint32 *p_erased)
     arkrtos_layout_adopt(&arkrtos_layout_wr_rec);
     arkrtos_layout_reason_ram = ARKRTOS_CFG_OK;
     arkrtos_layout_publish();
+    arkrtos_layout_apply_runtime();
 
     if(p_erased != 0)
     {
