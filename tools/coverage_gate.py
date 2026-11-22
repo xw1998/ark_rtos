@@ -418,6 +418,17 @@ CASES = [
       "-include", "arkrtos_board_config.h", SIGN_KEY_DEF,
       "-fno-asynchronous-unwind-tables"], "PAGING-HOST OK",
      {"incs": ["-Iboard/qemu_loongarch64", "-Ikernelsrc/port/loongarch/la64"]}),
+    # --- 2026-11-22 新增：控制台登录（密码闸门）---
+    # 盐与摘要是夹具，不来自任何构建生成物：盐 0x00..0x0F，口令 "s3cret!"，
+    # 摘要是 sha256(salt || "s3cret!") 离线算出来的。这样用例断言的是
+    # "输入正确口令真的解锁"，而不是把被测代码自己算出的值再比一遍。
+    ("shellauth", "kernelsrc/tests/test_shell_auth_host.c",
+     ["kernelsrc/src/arkrtos_shell_auth.c"],
+     ["-DARKRTOS_USE_SHELL_AUTH=1", "-DSHELL_ENABLE=1",
+      "-DARKRTOS_SHELL_AUTH_SALT={0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,0x0C,0x0D,0x0E,0x0F}",
+      "-DARKRTOS_SHELL_AUTH_DIGEST={0xBD,0xCD,0xB6,0x66,0x5B,0xC6,0x92,0xE8,0xEB,0xCC,0x98,0x4E,0xAF,0xDA,0xFE,0xD0,0xE7,0x81,0x34,0xB8,0x28,0x58,0x6F,0xC7,0x3B,0xA0,0x46,0x52,0x34,0xF2,0xF5,0xF1}",
+      "-fno-asynchronous-unwind-tables"], "SHELL-AUTH-HOST OK",
+     {"incs": ["-Ikernelsrc/shell", "-Ikernelsrc/shell/ark_shell"]}),
 ]
 
 
