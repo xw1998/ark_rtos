@@ -4997,8 +4997,89 @@ CHECK_TABLE = (
     ("sec-crc", check_sec_crc),
 )
 
+def _workflow_self_consistent(txt):
+    """校验 .workflow/ci.yml 的结构自洽，返回 (错误列表, 说明串)。
+
+    这里查的是本机查得动的部分：顶层字段在不在、push 触发里有没有 master、
+    stage -> step -> commands 这条路能不能走通、commands 里是不是那条
+    python3 tools/ci_gate.py --remote。查不动的是 Gitee Go 平台到底认不认
+    这套字段 —— 那只能在网页上第一次启用流水线时看，所以本函数只声明
+    「结构自洽」，不声明「平台接受」。
+
+    两条路径判同一组事实：有 PyYAML 就真解析，没有就退化成对扁平文本的
+    token 断言。没有解析库只会让校验变粗，不会让它变绿。
+    """
+    toks = [
+        ("version:", "顶层缺 version"),
+        ("triggers:", "顶层缺 triggers"),
+        ("push:", "触发里缺 push"),
+        ("branches:", "触发里缺 branches"),
+        ("- master", "push 分支列表里没有 master"),
+        ("stages:", "顶层缺 stages"),
+        ("steps:", "stage 里缺 steps"),
+        ("step: build@python", "没有 build@python 步骤"),
+        ("pythonVersion:", "步骤里缺 pythonVersion"),
+        ("commands:", "步骤里缺 commands"),
+        ("python3 tools/ci_gate.py --remote",
+         "commands 里没有 python3 tools/ci_gate.py --remote"),
+    ]
+    bad = [why for tok, why in toks if tok not in txt]
+    try:
+        import yaml
+    except Exception:
+        return bad, "tokens only (PyYAML unavailable)"
+
+    try:
+        doc = yaml.safe_load(txt)
+    except Exception as exc:
+        bad.append("YAML 解析失败: %s" % exc)
+        return bad, "tokens + yaml (parse failed)"
+    if not isinstance(doc, dict):
+        bad.append("顶层不是映射")
+        return bad, "tokens + yaml"
+    for key in ("version", "name", "triggers", "stages"):
+        if key not in doc:
+            bad.append("顶层缺 %s" % key)
+
+    trg = doc.get("triggers")
+    push = trg.get("push") if isinstance(trg, dict) else None
+    branches = push.get("branches") if isinstance(push, dict) else None
+    precise = branches.get("precise") if isinstance(branches, dict) else None
+    if not isinstance(precise, list) or "master" not in precise:
+        bad.append("triggers.push.branches.precise 里没有 master")
+
+    cmds = []
+    stages = doc.get("stages")
+    if not isinstance(stages, list) or not stages:
+        bad.append("stages 不是非空列表")
+    else:
+        for st in stages:
+            stage = st.get("stage") if isinstance(st, dict) else None
+            steps = stage.get("steps") if isinstance(stage, dict) else None
+            if not isinstance(steps, list) or not steps:
+                bad.append("某个 stage 没有 steps")
+                continue
+            for sp in steps:
+                # Gitee Go 的写法是「- step: build@python」后同级缩进写
+                # name / pythonVersion / commands，所以每个元素本身就是
+                # 那个 step 的映射，键 "step" 的值是类型串。
+                if not isinstance(sp, dict):
+                    bad.append("某个 step 不是映射")
+                    continue
+                if sp.get("step") != "build@python":
+                    continue
+                if not sp.get("pythonVersion"):
+                    bad.append("build@python 步骤没有 pythonVersion")
+                got = sp.get("commands")
+                if isinstance(got, list):
+                    cmds.extend([c for c in got if isinstance(c, str)])
+    if not any("tools/ci_gate.py" in c and "--remote" in c for c in cmds):
+        bad.append("没有任何 build@python 步骤真去跑 ci_gate.py --remote")
+    return bad, "tokens + yaml"
+
+
 def check_remote_ci():
-    """远程档本身也要有读数：工作流文件在不在、skip 清单有没有打错名字。
+    """远程档本身也要有读数：工作流文件在不在、结构自不自洽、skip 清单有没有打错名字。
 
     两个真实的失败形态：
       1. .workflow/ 里的流水线没指向 ci_gate（或者没带 --remote），
@@ -5007,6 +5088,7 @@ def check_remote_ci():
          armclang，然后在「没工具链」和「真失败」之间给人一个假红/假绿。
     """
     bad = []
+    struct_note = "workflow missing"
     wf = os.path.join(ROOT, ".workflow", "ci.yml")
     if not os.path.isfile(wf):
         bad.append(".workflow/ci.yml 不存在")
@@ -5016,6 +5098,8 @@ def check_remote_ci():
             bad.append("工作流没有调用 tools/ci_gate.py")
         if "--remote" not in txt:
             bad.append("工作流没有带 --remote（runner 上会去要 Keil/交叉编译器）")
+        struct_bad, struct_note = _workflow_self_consistent(txt)
+        bad.extend(struct_bad)
     labels = set(name for name, _fn in CHECK_TABLE)
     strays = sorted(set(LOCAL_TOOLCHAIN) - labels)
     if strays:
@@ -5024,8 +5108,9 @@ def check_remote_ci():
         fail("remote-ci", "; ".join(bad))
     else:
         ok("remote-ci",
-           "workflow calls the gate with --remote; %d skipped check(s) all named in the table"
-           % len(LOCAL_TOOLCHAIN))
+           "workflow self-consistent (%s) and calls the gate with --remote; "
+           "%d skipped check(s) all named in the table"
+           % (struct_note, len(LOCAL_TOOLCHAIN)))
 
 def main(argv):
     do_build = "--build" in argv

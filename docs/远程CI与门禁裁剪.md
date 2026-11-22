@@ -57,8 +57,15 @@ payload-sign, stack-guard, sec-crc
 1. **`skip` 行不是 `ok` 行**：它们不进 `PASSED`，也不改退出码；一条都没跑过的
    检查不可能因为「没跑」而被读成「通过」。
 2. **`remote-ci` 是一项真检查**：它确认 `.workflow/ci.yml` 存在、真的指向
-   `tools/ci_gate.py` 且带了 `--remote`，并确认 `LOCAL_TOOLCHAIN` 里每个名字都
-   在 `CHECK_TABLE` 里（名字写错会让本机检查在 runner 上照旧去要工具链）。
+   `tools/ci_gate.py` 且带了 `--remote`，确认 `LOCAL_TOOLCHAIN` 里每个名字都
+   在 `CHECK_TABLE` 里（名字写错会让本机检查在 runner 上照旧去要工具链），
+   并且（2026-11-22 起）校验工作流的**结构自洽**：顶层四个字段齐全、
+   `triggers.push.branches.precise` 含 `master`、`stage -> steps -> build@python`
+   这条路走得通、该步骤有 `pythonVersion`、`commands` 里真有
+   `python3 tools/ci_gate.py --remote`。有 PyYAML 时走真解析，没有时退化成
+   对扁平文本的 token 断言——**少了解析库只会让校验变粗，不会让它变绿**；
+   变异自检（把 `- master` 改成 `- mainline` 并删掉 `pythonVersion`）会同时
+   报出四条红。
 3. 本机跑的仍然是**全量档**（`python tools/ci_gate.py`），远程档只是补充，
    不替代本机读数。
 
@@ -87,7 +94,9 @@ loader/fifo/fault/coverage/warn-clean/sign-host）+ `remote-ci` 自身。
 
 * **工作流文件本身未验证**：本机没有 Gitee Go runner，`.workflow/ci.yml` 的
   schema 是按 Gitee Go 帮助中心（「触发事件」「任务编排」）的字段写的，第一次在
-  网页上启用流水线时以平台校验结果为准。字段用到的只有：`version` / `name` /
+  网页上启用流水线时以平台校验结果为准。**2026-11-22 收窄**：文件与它自己
+  声明的那套字段是否自洽，已由 `remote-ci` 本机校验（见 §2 第 2 条）；仍然
+  未验证的只是「Gitee Go 平台认不认这套字段」和「runner 上的真实读数」。字段用到的只有：`version` / `name` /
   `displayName` / `triggers.push.branches.precise` / `stages[].stage.name` /
   `displayName` / `strategy` / `trigger` / `steps[].step: build@python` /
   `pythonVersion` / `commands`。
