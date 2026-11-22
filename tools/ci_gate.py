@@ -3462,6 +3462,92 @@ def check_shell_image_host():
        "LAYOUT and BUSY / install stop-before-erase with failing stop and "
        "failing erase / console drain): %s" % last)
 
+def check_shell_core_host():
+    """Console core: command registry, console task loop and task release.
+
+    arkrtos_shell.c is the only place the kernel command table is written, so
+    a mistake here is either a silent overwrite of g_cmd_table or a command
+    that exists but is unreachable.  This case links the real file against
+    stub ark_shell_* / arkrtos_task_* hooks and stub handlers, and asserts on
+    280 checks:
+      * the nine name tables return the exact wording for every enum value and
+        "?" / "unknown" / "-" for anything else (no other shell case reads
+        them: they all stub these out);
+      * parse_u32 accepts "0" and "123" and rejects NULL, "" and non-digits
+        without touching the output;
+      * register_kernel_commands() writes the shipped 57-entry registry in
+        order -- name, handler pointer, help text and max_args each compared --
+        then a NULL sentinel, with g_cmd_count equal to the entries written;
+      * the table-full guard runs before the first write: from slot 31 the
+        50-slot bound lands on 81 > ARK_SHELL_MAX_COMMANDS, so it returns -1,
+        leaves the table and g_cmd_count untouched, and the console task says
+        "command table full" rather than overwriting memory;
+      * arkrtos_shell_init() passes entry, stack base, stack size,
+        SHELL_TASK_PRIORITY and SHELL_TASK_PERIOD_MS to arkrtos_task_register()
+        unchanged and returns its rc;
+      * the console loop drains at most SHELL_RX_DRAIN_MAX bytes per round,
+        stops early on an empty UART, goes round again, yields for
+        SHELL_TASK_PERIOD_MS, and drops an over-long line (clears the editor,
+        resets the state machine, says so) instead of poisoning every later
+        command;
+      * arkrtos_shell_release_task() refuses task id 0, drops exactly the
+        entries owned by the requested task and returns the count.
+
+    Honest limits:
+      1) no real serial port, shell state machine or scheduler is involved:
+         every ark_shell_* and arkrtos_task_* entry point is a stub;
+      2) every one of the 57 handlers is a stub too, so this proves the
+         registration (name / pointer / help / max_args), not the behaviour
+         of the commands;
+      3) the locked-console path (ARKRTOS_USE_SHELL_AUTH), board commands
+         (ARKRTOS_SHELL_BOARD_CMDS) and the arkvim / arkc / ark make
+         registration hooks are all compiled out in this build, and the
+         SHELL_ENABLE==0 fallback stubs at the end of the file are the branch
+         this build does not take.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("shellcore-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    pick = None
+    for case in CASES:
+        name, test, mods, defs, markers, incs, _argv = _case(case)
+        if name == "shellcore":
+            pick = (test, mods, defs, incs, markers)
+            break
+    if pick is None:
+        fail("shellcore-host", "case shellcore missing from coverage_gate.CASES")
+        return
+
+    test, mods, defs, incs, markers = pick
+    with TempDir() as td:
+        exe = os.path.join(td, "shellcore" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            err = (r.stderr or "").strip().splitlines() or [""]
+            fail("shellcore-host", "the case did not build: %s"
+                 % [x for x in err if x.strip()][-1][:220])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or markers[0] not in txt or "FAIL" in txt:
+            fail("shellcore-host", txt.strip()[-260:])
+            return
+        last = txt.strip().splitlines()[-1]
+
+    ok("shellcore-host",
+       "arkrtos_shell on the host (57-entry registry name/handler/help/max_args "
+       "/ table-full guard before first write / task register args / RX drain "
+       "budget and over-long line discard / release_task ownership): %s" % last)
+
 def check_modld():
     """VxWorks-style downloadable modules (ARKRTOS_USE_MODLOAD) must be wired.
 
@@ -5416,6 +5502,7 @@ CHECK_TABLE = (
     ("shellmod-host", check_shell_mod_host),
     ("shellcfg-host", check_shell_cfg_host),
     ("shellimage-host", check_shell_image_host),
+    ("shellcore-host", check_shell_core_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),

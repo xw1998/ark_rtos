@@ -712,6 +712,22 @@ CASES = [
                "-Ikernelsrc/fs/littlefs",
                "-Ikernelsrc/components/ark_vfs/include",
                "-Ikernelsrc/components/ark_softbus/include"]}),
+    # --- 2026-11-22：控制台核心（arkrtos_shell）------------------------------
+    # 命令注册表（57 条内核命令逐个核对 name/handler/help/max_args）、控制台
+    # 任务的收字节预算与超长行丢弃、任务注册参数、用户命令卸载。外部符号
+    # （ark_shell_* / arkrtos_task_* / 57 个 cmd_*）全部由用例桩住。
+    ("shellcore", "kernelsrc/tests/test_shell_core_host.c",
+     ["kernelsrc/shell/arkrtos_shell.c"],
+     ['-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',
+      SIGN_KEY_DEF, "-fno-asynchronous-unwind-tables",
+      "-DARKRTOS_USE_TASK_SWAP=1"]
+     + ["-D" + x for x in SOFTBUS_TIER_DEFS],
+     "SHELL-CORE-HOST OK",
+     {"incs": ["-Iboard/qemu_loongarch64", "-Ikernelsrc/shell",
+               "-Ikernelsrc/shell/ark_shell", "-Ikernelsrc/fs",
+               "-Ikernelsrc/fs/littlefs",
+               "-Ikernelsrc/components/ark_vfs/include",
+               "-Ikernelsrc/components/ark_softbus/include"]}),
     ("ushell", "kernelsrc/tests/test_shell_ushell_host.c",
      ["kernelsrc/shell/arkrtos_shell_ushell.c"],
      ['-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',

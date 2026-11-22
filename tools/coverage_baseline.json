@@ -36,6 +36,7 @@
   "arkrtos_rt": 100.0,
   "arkrtos_sbuf": 80.57,
   "arkrtos_sec": 100.0,
+  "arkrtos_shell": 100.0,
   "arkrtos_shell_auth": 98.7,
   "arkrtos_shell_cfg": 100.0,
   "arkrtos_shell_image": 100.0,
