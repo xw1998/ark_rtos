@@ -2958,6 +2958,86 @@ def check_mini_host():
        "chunk read / CRC / task seam, failure unwinds, swap arm-take, "
        "autostart list), honest refusals when off: %s" % lines[0])
 
+def check_task_host():
+    """The scheduler core (arkrtos_task.c) driven on the host.
+
+    arkrtos_task.c is the largest single module in the kernel and the one whose
+    failures are quiet: a ready bucket that keeps a bit for a task that is no
+    longer on the chain makes ready_top return a stale slot, and the caller's
+    +1 turns 255 into 256 -- an out of bounds task table read that shows up on
+    LoongArch64 as an occasional ADEM, not as a failed build. The same class of
+    "numbers look right, the set disagrees" applies to the delay chain, the
+    stack watermark, the fault recovery rebuild and the A/B swap block move.
+
+    So this case links the real module against a board header that keeps only
+    the task switches, stubs every port function (stack init, switch, MPU,
+    guard, swap frame rewrite/activate, console, trace) and asserts on:
+      * the ready bitmap / bucket / delay chain invariants, including the
+        reprio path and the defensive heal of an out of range bucket head;
+      * sched_next / sched_activate / sched_is_switching, the recovered-task
+        rebuild inside the fault handler, and the selftest swap hook;
+      * the whole SVC dispatch table: at least one accepted subcommand and one
+        refusal per service number, plus the refusal for services that are not
+        compiled in (SBUF / MEMPOOL must answer -1, not pretend success);
+      * the swap four steps measured through the stubs (which frame went to
+        which address, which entry, what the TCB ends up holding).
+    511 checks, marker "TASK HOST OK".
+
+    Honest limits:
+      1) PendSV itself is not run: sched_activate is called directly and the
+         port switch stub only counts; the real register save/restore is a
+         QEMU/board reading;
+      2) the swap frame rewrite is a stub -- what the port does to the trap
+         frame (ARM basic frame / RV mepc / LA64 ERA) is covered per port;
+      3) MPU region programming and privilege switching are stubs: we check a
+         window was built for the right task, not that hardware took it;
+      4) the recovery path's stack_init goes through the host stub, so "a new
+         frame was built" is a call fact, not a disassembly;
+      5) SMP scheduling, the second core's tables and the board-only parts of
+         the guard scanner are out of scope for this TU.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("task-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    pick = None
+    for case in CASES:
+        name, test, mods, defs, markers, incs, _argv = _case(case)
+        if name == "task":
+            pick = (test, mods, defs, incs, markers)
+            break
+    if pick is None:
+        fail("task-host", "case task missing from coverage_gate.CASES")
+        return
+
+    test, mods, defs, incs, markers = pick
+    with TempDir() as td:
+        exe = os.path.join(td, "task" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            err = (r.stderr or "").strip().splitlines() or [""]
+            fail("task-host", "the case did not build: %s"
+                 % [x for x in err if x.strip()][-1][:220])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or markers[0] not in txt or "FAIL" in txt:
+            fail("task-host", txt.strip()[-260:])
+            return
+        last = txt.strip().splitlines()[-1]
+
+    ok("task-host",
+       "arkrtos_task on the host (ready bitmap / delay chain / sched activate / "
+       "fault rebuild / A/B swap / SVC dispatch table): %s" % last)
+
 def check_modld():
     """VxWorks-style downloadable modules (ARKRTOS_USE_MODLOAD) must be wired.
 
@@ -4906,6 +4986,7 @@ CHECK_TABLE = (
     ("elf-host", check_elf_host),
     ("linux-abi-host", check_linux_abi_host),
     ("mini-host", check_mini_host),
+    ("task-host", check_task_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),

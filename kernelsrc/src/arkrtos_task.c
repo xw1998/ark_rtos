@@ -619,8 +619,12 @@ void arkrtos_kernel_svc_wide_reject(void)
 static void svc_event_ctrl(void *p_svc_ctx)
 {
     arkrtos_svc_arg_t *p;
+    unsigned long a0;
 
-    p = (arkrtos_svc_arg_t *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    /* 先落到整数变量再转指针：直接对函数返回值强转指针会触发
+     * -Wbad-function-cast（与 arkrtos_net.c 同一口径）。 */
+    a0 = ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    p  = (arkrtos_svc_arg_t *)a0;
     SVC_WIDE_GUARD(p_svc_ctx, p);
     /* 用户参数块必须先校验再解引用：内核 RAM / 内核 Flash 一律拒绝 */
     if(arkrtos_kernel_svc_args_ok(p, (uint32)ARKRTOS_SVC_ARG_BYTES(16u)) == 0u)
@@ -640,10 +644,10 @@ static void svc_event_ctrl(void *p_svc_ctx)
             ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_event_create_internal((char *)p[1]));
             break;
         case ARKRTOS_EVENT_SUB_WAIT:
-            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_event_wait_internal(p[1], (int32)p[2]));
+            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_event_wait_internal((int32)p[1], (int32)p[2]));
             break;
         case ARKRTOS_EVENT_SUB_SET:
-            arkrtos_event_set_internal(p[1]);
+            arkrtos_event_set_internal((int32)p[1]);
             break;
         default:
             break;
@@ -660,8 +664,10 @@ static void svc_eset_ctrl(void *p_svc_ctx)
 {
     arkrtos_svc_arg_t *p;
     int32  r;
+    unsigned long a0;
 
-    p = (arkrtos_svc_arg_t *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    a0 = ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    p  = (arkrtos_svc_arg_t *)a0;
     SVC_WIDE_GUARD(p_svc_ctx, p);
     if(arkrtos_kernel_svc_args_ok(p, (uint32)ARKRTOS_SVC_ARG_BYTES(24u)) == 0u)
     {
@@ -735,11 +741,14 @@ static void svc_sys_info(void *p_svc_ctx)
             /* 读取第 r1 条故障记录到 r2 指向的用户缓冲（3 个字） */
             {
                 const arkrtos_fault_record_t *p_rec = arkrtos_fault_record_get((int32)ARKRTOS_SVC_ARG(p_svc_ctx, 1));
-                if(p_rec != 0 && ARKRTOS_SVC_ARG(p_svc_ctx, 2) != 0)
+                unsigned long a0 = ARKRTOS_SVC_ARG(p_svc_ctx, 2);
+                uint32 *p_out = (uint32 *)a0;
+
+                if((p_rec != 0) && (a0 != 0u))
                 {
-                    ((uint32 *)ARKRTOS_SVC_ARG(p_svc_ctx, 2))[0] = p_rec->type;
-                    ((uint32 *)ARKRTOS_SVC_ARG(p_svc_ctx, 2))[1] = (uint32)p_rec->task_id;
-                    ((uint32 *)ARKRTOS_SVC_ARG(p_svc_ctx, 2))[2] = p_rec->tick;
+                    p_out[0] = p_rec->type;
+                    p_out[1] = (uint32)p_rec->task_id;
+                    p_out[2] = p_rec->tick;
                     ARKRTOS_SVC_RET(p_svc_ctx, 0);
                 }
                 else
@@ -755,10 +764,12 @@ static void svc_sys_info(void *p_svc_ctx)
             {
                 uint32 pool_largest = 0u;
                 uint32 pool_total = arkrtos_loader_pool_free(&pool_largest);
+                unsigned long a0 = ARKRTOS_SVC_ARG(p_svc_ctx, 1);
+                uint32 *p_out = (uint32 *)a0;
 
-                if(ARKRTOS_SVC_ARG(p_svc_ctx, 1) != 0u)
+                if(a0 != 0u)
                 {
-                    ((uint32 *)ARKRTOS_SVC_ARG(p_svc_ctx, 1))[0] = pool_largest;
+                    p_out[0] = pool_largest;
                 }
 
                 ARKRTOS_SVC_RET(p_svc_ctx, pool_total);
@@ -806,15 +817,20 @@ static void svc_task_ctrl(void *p_svc_ctx)
         #endif
         #if (ARKRTOS_USE_STACK_USAGE == 1)
         case ARKRTOS_TASK_SUB_STACK_INFO:
-            if(arkrtos_kernel_ptr_ram_ok((const void *)ARKRTOS_SVC_ARG(p_svc_ctx, 2), 12u) == 0u)
             {
-                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
-                break;
+                unsigned long a0 = ARKRTOS_SVC_ARG(p_svc_ctx, 2);
+                uint32 *p_out = (uint32 *)a0;
+
+                if(arkrtos_kernel_ptr_ram_ok((const void *)p_out, 12u) == 0u)
+                {
+                    ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
+                    break;
+                }
+                /* r1=任务号，r2=用户缓冲区（3 个字：总字节/峰值已用/剩余） */
+                ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_task_stack_info_internal(
+                                  (int32)ARKRTOS_SVC_ARG(p_svc_ctx, 1),
+                                  p_out));
             }
-            /* r1=任务号，r2=用户缓冲区（3 个字：总字节/峰值已用/剩余） */
-            ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_task_stack_info_internal(
-                              (int32)ARKRTOS_SVC_ARG(p_svc_ctx, 1),
-                              (uint32 *)ARKRTOS_SVC_ARG(p_svc_ctx, 2)));
             break;
         #endif
         default:
@@ -842,8 +858,10 @@ static void svc_dev_io_warn_once(const char *what)
 static void svc_dev_io(void *p_svc_ctx)
 {
     arkrtos_svc_arg_t *p;
+    unsigned long a0;
 
-    p = (arkrtos_svc_arg_t *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    a0 = ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    p  = (arkrtos_svc_arg_t *)a0;
     SVC_WIDE_GUARD(p_svc_ctx, p);
     /* 用户参数块必须先校验再解引用：内核 RAM / 内核 Flash 一律拒绝 */
     if(arkrtos_kernel_svc_args_ok(p, (uint32)ARKRTOS_SVC_ARG_BYTES(16u)) == 0u)
@@ -868,7 +886,7 @@ static void svc_dev_io(void *p_svc_ctx)
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
                 break;
             }
-            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_dev_read_internal(p[1], (uint8 *)p[2], p[3]));
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_dev_read_internal((int32)p[1], (uint8 *)p[2], (int32)p[3]));
             break;
         case ARKRTOS_DEV_SUB_WRITE:
             /* len > 0 : the kernel reads len bytes from the caller
@@ -884,7 +902,7 @@ static void svc_dev_io(void *p_svc_ctx)
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
                 break;
             }
-            if(((int32)p[3] > 0) && (arkrtos_console_is_handle(p[1]) != 0))
+            if(((int32)p[3] > 0) && (arkrtos_console_is_handle((int32)p[1]) != 0))
             {
                 /* Console: the whole buffer is one output unit, so a
                  * user mode write() can never be cut in half by a
@@ -893,14 +911,14 @@ static void svc_dev_io(void *p_svc_ctx)
             }
             else
             {
-                ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_dev_write_internal(p[1], (uint8 *)p[2], p[3]));
+                ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_dev_write_internal((int32)p[1], (uint8 *)p[2], (int32)p[3]));
             }
             break;
         case ARKRTOS_DEV_SUB_CTRL:
-            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_dev_ctrl_internal(p[1], p[2], p[3]));
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_dev_ctrl_internal((int32)p[1], p[2], p[3]));
             break;
         case ARKRTOS_DEV_SUB_CLOSE:
-            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_dev_close_internal(p[1]));
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_dev_close_internal((int32)p[1]));
             break;
         case ARKRTOS_DEV_SUB_SET_WILL:
             /* Declare the CURRENT task's "will" for a device it already
@@ -934,8 +952,10 @@ static void svc_dev_io(void *p_svc_ctx)
 static void svc_drv_mgr(void *p_svc_ctx)
 {
     arkrtos_svc_arg_t *p;
+    unsigned long a0;
 
-    p = (arkrtos_svc_arg_t *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    a0 = ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    p  = (arkrtos_svc_arg_t *)a0;
     SVC_WIDE_GUARD(p_svc_ctx, p);
     /* 用户参数块必须先校验再解引用：内核 RAM / 内核 Flash 一律拒绝 */
     if(arkrtos_kernel_svc_args_ok(p, (uint32)ARKRTOS_SVC_ARG_BYTES(16u)) == 0u)
@@ -1010,8 +1030,10 @@ static void svc_drv_mgr(void *p_svc_ctx)
 static void svc_sync_ctrl(void *p_svc_ctx)
 {
     arkrtos_svc_arg_t *p;
+    unsigned long a0;
 
-    p = (arkrtos_svc_arg_t *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    a0 = ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    p  = (arkrtos_svc_arg_t *)a0;
     SVC_WIDE_GUARD(p_svc_ctx, p);
     /* 用户参数块必须先校验再解引用：内核 RAM / 内核 Flash 一律拒绝 */
     if(arkrtos_kernel_svc_args_ok(p, (uint32)ARKRTOS_SVC_ARG_BYTES(16u)) == 0u)
@@ -1109,8 +1131,10 @@ static void svc_waitmulti_ctrl(void *p_svc_ctx)
 {
     arkrtos_svc_arg_t *p;
     int32  r;
+    unsigned long a0;
 
-    p = (arkrtos_svc_arg_t *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    a0 = ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    p  = (arkrtos_svc_arg_t *)a0;
     SVC_WIDE_GUARD(p_svc_ctx, p);
     if(arkrtos_kernel_svc_args_ok(p, (uint32)ARKRTOS_SVC_ARG_BYTES(20u)) == 0u)
     {
@@ -1148,8 +1172,10 @@ static void svc_waitmulti_ctrl(void *p_svc_ctx)
 static void svc_mq_ctrl(void *p_svc_ctx)
 {
     arkrtos_svc_arg_t *p;
+    unsigned long a0;
 
-    p = (arkrtos_svc_arg_t *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    a0 = ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    p  = (arkrtos_svc_arg_t *)a0;
     SVC_WIDE_GUARD(p_svc_ctx, p);
     /* 用户参数块必须先校验再解引用：内核 RAM / 内核 Flash 一律拒绝 */
     if(arkrtos_kernel_svc_args_ok(p, (uint32)ARKRTOS_SVC_ARG_BYTES(16u)) == 0u)
@@ -1198,8 +1224,10 @@ static void svc_mq_ctrl(void *p_svc_ctx)
 static void svc_sbuf_ctrl(void *p_svc_ctx)
 {
     arkrtos_svc_arg_t *p;
+    unsigned long a0;
 
-    p = (arkrtos_svc_arg_t *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    a0 = ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    p  = (arkrtos_svc_arg_t *)a0;
     SVC_WIDE_GUARD(p_svc_ctx, p);
     /* 用户参数块必须先校验再解引用：内核 RAM / 内核 Flash 一律拒绝 */
     if(arkrtos_kernel_svc_args_ok(p, (uint32)ARKRTOS_SVC_ARG_BYTES(24u)) == 0u)
@@ -1301,8 +1329,10 @@ static void svc_sbuf_ctrl(void *p_svc_ctx)
 static void svc_mempool_ctrl(void *p_svc_ctx)
 {
     arkrtos_svc_arg_t *p;
+    unsigned long a0;
 
-    p = (arkrtos_svc_arg_t *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    a0 = ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    p  = (arkrtos_svc_arg_t *)a0;
     SVC_WIDE_GUARD(p_svc_ctx, p);
     /* 用户参数块必须先校验再解引用：内核 RAM / 内核 Flash 一律拒绝 */
     if(arkrtos_kernel_svc_args_ok(p, (uint32)ARKRTOS_SVC_ARG_BYTES(24u)) == 0u)
@@ -1388,8 +1418,10 @@ static void svc_mempool_ctrl(void *p_svc_ctx)
 static void svc_timer_ctrl(void *p_svc_ctx)
 {
     arkrtos_svc_arg_t *p;
+    unsigned long a0;
 
-    p = (arkrtos_svc_arg_t *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    a0 = ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    p  = (arkrtos_svc_arg_t *)a0;
     SVC_WIDE_GUARD(p_svc_ctx, p);
     /* 用户参数块必须先校验再解引用：内核 RAM / 内核 Flash 一律拒绝 */
     if(arkrtos_kernel_svc_args_ok(p, (uint32)ARKRTOS_SVC_ARG_BYTES(16u)) == 0u)
@@ -1437,8 +1469,10 @@ static void svc_timer_ctrl(void *p_svc_ctx)
 static void svc_thread_ctrl(void *p_svc_ctx)
 {
     arkrtos_svc_arg_t *p;
+    unsigned long a0;
 
-    p = (arkrtos_svc_arg_t *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    a0 = ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    p  = (arkrtos_svc_arg_t *)a0;
     SVC_WIDE_GUARD(p_svc_ctx, p);
     /* Sub-command plus its arguments must sit in user visible RAM. The
      * entry point and the stack window get a second, stricter check down
@@ -1484,8 +1518,10 @@ static void svc_log(void *p_svc_ctx)
      * only string literals are the normal case); kernel RAM and kernel
      * flash stay rejected. */
     {
-        const char *tag = (const char *)ARKRTOS_SVC_ARG(p_svc_ctx, 1);
-        const char *msg = (const char *)ARKRTOS_SVC_ARG(p_svc_ctx, 2);
+        unsigned long a0 = ARKRTOS_SVC_ARG(p_svc_ctx, 1);
+        unsigned long a1 = ARKRTOS_SVC_ARG(p_svc_ctx, 2);
+        const char *tag = (const char *)a0;
+        const char *msg = (const char *)a1;
 
         if((arkrtos_kernel_user_ro_ok(tag, 1u) == 0u) ||
            (arkrtos_kernel_user_ro_ok(msg, 1u) == 0u))
@@ -1511,7 +1547,8 @@ static void svc_shell(void *p_svc_ctx)
      * callbacks use, so nobody can borrow shell privilege to run someone
      * else's code. */
     {
-        arkrtos_svc_arg_t *q = (arkrtos_svc_arg_t *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+        unsigned long a0 = ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+        arkrtos_svc_arg_t *q = (arkrtos_svc_arg_t *)a0;
         SVC_WIDE_GUARD(p_svc_ctx, q);
 
         if(arkrtos_kernel_svc_args_ok(q, 16u) == 0u)
@@ -1597,6 +1634,7 @@ static void svc_shell(void *p_svc_ctx)
 static void svc_heartbeat(void *p_svc_ctx)
 {
     arkrtos_svc_arg_t *p;
+    unsigned long a0;
 
     /* Heartbeat contract (SVC 0x1D).
      *   p[0] = 1  report in, and declare/replace the period in p[1] (ms)
@@ -1604,7 +1642,8 @@ static void svc_heartbeat(void *p_svc_ctx)
      * A period outside what the kernel can check is refused outright
      * (-1). It is not rounded to the nearest checkable value: the image
      * would then be watched against a promise it never made. */
-    p = (arkrtos_svc_arg_t *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    a0 = ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    p  = (arkrtos_svc_arg_t *)a0;
     SVC_WIDE_GUARD(p_svc_ctx, p);
     if(arkrtos_kernel_svc_args_ok(p, (uint32)ARKRTOS_SVC_ARG_BYTES(8u)) == 0u)
     {
@@ -2188,6 +2227,7 @@ static void svc_fs_namespace(void *p_svc_ctx, arkrtos_svc_arg_t *p)
 static void svc_file_sys(void *p_svc_ctx)
 {
     arkrtos_svc_arg_t *p;
+    unsigned long a0;
 
     /* User file service (SVC 0x1C). Path based on purpose: the kernel
      * opens, moves the bytes and closes inside the call, so no handle
@@ -2222,7 +2262,8 @@ static void svc_file_sys(void *p_svc_ctx)
      * takes milliseconds, an interrupt lock would be the wrong tool).
      * Mount / format stay with the shell and the kernel. */
 
-    p = (arkrtos_svc_arg_t *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    a0 = ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    p  = (arkrtos_svc_arg_t *)a0;
     SVC_WIDE_GUARD(p_svc_ctx, p);
 
     if(arkrtos_kernel_svc_args_ok(p, (uint32)ARKRTOS_SVC_ARG_BYTES(16u)) == 0u)
@@ -2260,8 +2301,10 @@ static void svc_net(void *p_svc_ctx)
 static void svc_app_mgr(void *p_svc_ctx)
 {
     arkrtos_svc_arg_t *p;
+    unsigned long a0;
 
-    p = (arkrtos_svc_arg_t *)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    a0 = ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    p  = (arkrtos_svc_arg_t *)a0;
     SVC_WIDE_GUARD(p_svc_ctx, p);
     /* 用户参数块必须先校验再解引用：内核 RAM / 内核 Flash 一律拒绝 */
     if(arkrtos_kernel_svc_args_ok(p, (uint32)ARKRTOS_SVC_ARG_BYTES(16u)) == 0u)
@@ -2915,7 +2958,7 @@ void arkrtos_stack_guard_watch_context(uint32 stack_bottom, uint32 stack_size,
 
     /* 只填 [bottom, top)：top 是调用方马上要送进 enter_idle 的栈指针，它以上
      * 没有属于这块栈的活帧；填整段会连调用者自己的活帧一起冲掉。 */
-    p = (uint32 *)(unsigned long)stack_bottom;
+    p = (arkrtos_svc_arg_t *)(unsigned long)stack_bottom;
     for(i = 0u; i < ((stack_top - stack_bottom) / 4u); i++)
     {
         p[i] = (uint32)ARKRTOS_STACK_FILL_PATTERN;
@@ -3087,8 +3130,8 @@ unsigned long arkrtos_sched_activate(int32 new_task, unsigned long old_psp)
     }
 
     arkrtos_trace_switch(
-        (uint8)((arkrtos_current_task_id > 0) ? (arkrtos_current_task_id - 1) : ARKRTOS_TR_ID_IDLE),
-        (uint8)((new_task > 0) ? (new_task - 1) : ARKRTOS_TR_ID_IDLE));
+        (uint8)((arkrtos_current_task_id > 0) ? (uint32)(arkrtos_current_task_id - 1) : (uint32)ARKRTOS_TR_ID_IDLE),
+        (uint8)((new_task > 0) ? (uint32)(new_task - 1) : (uint32)ARKRTOS_TR_ID_IDLE));
     arkrtos_current_task_id = new_task;
     if(arkrtos_current_task_id > 0)
     {
@@ -3889,7 +3932,7 @@ void arkrtos_task_wait_internal(uint32 ms)
     if(arkrtos_current_task_id > 0)
     {
         p_tsk = &arkrtos_task_table[arkrtos_current_task_id - 1];
-        p_tsk->wait_time = ARKRTOS_MS_TO_TICK(ms);
+        p_tsk->wait_time = (int32)ARKRTOS_MS_TO_TICK(ms);
         arkrtos_ready_del(arkrtos_current_task_id - 1);
         arkrtos_delay_arm(arkrtos_current_task_id - 1, (uint32)p_tsk->wait_time);
         p_tsk->status = ARKRTOS_TASK_WAIT;
@@ -4029,7 +4072,7 @@ int32 arkrtos_task_block_in_critical(uint32 timeout_ms)
         {
             arkrtos_dbg_wake_hits[(uint8)(arkrtos_current_task_id - 1)]++;
             arkrtos_dbg_wake_last[(uint8)(arkrtos_current_task_id - 1)] =
-                (uint8)(reason & 0x7Fu);
+                (uint8)((uint32)reason & 0x7Fu);
         }
     }
     return reason;

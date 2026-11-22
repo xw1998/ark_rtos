@@ -638,6 +638,15 @@ CASES = [
       "-fno-asynchronous-unwind-tables"],
      "MINI HOST OFF OK",
      {"incs": ["-Ikernelsrc/tests", "-Iboard/qemu_loongarch64"]}),
+    # --- 2026-11-22：任务/调度核心（arkrtos_task）------------------------
+    # 板级头只留 task 相关开关：USE_TASK_SWAP 打开（端口层四步全部由用例
+    # 打桩量指针），MINI/ELF/VFS 等全部关掉，保证只编这一个模块的路径。
+    ("task", "kernelsrc/tests/test_task_host.c",
+     ["kernelsrc/src/arkrtos_task.c"],
+     ['-DARKRTOS_BOARD_CONFIG="task_test_board.h"',
+      "-fno-asynchronous-unwind-tables"],
+     "TASK HOST OK",
+     {"incs": ["-Ikernelsrc/tests", "-Iboard/qemu_loongarch64"]}),
 ]
 
 
