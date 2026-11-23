@@ -60,6 +60,13 @@ typedef struct
     volatile uint32 idle_count;      /* 该核执行空转循环的次数                */
     volatile uint32 ipi_back;        /* 该核应要求回给 CPU0 的 IPI 次数        */
     volatile uint32 ipi_back_req;    /* 1 = 主核要求下一个 IPI 顺手回一个      */
+    volatile uint32 pg_on;           /* 1 = 本核已打开分页（R2）               */
+    volatile uint32 pg_rc;           /* 打开结果：0 成功；负数的原因是 port 层
+                                      * 的返回码；0xFFFFFFFF = 还没报          */
+    volatile uint32 pg_look;         /* 本核读回恒等映射：1 通过 / 0 不对       */
+    volatile uint32 pg_hit;          /* 读回时 tlbsrch 是否命中（0 = 没命中）  */
+    volatile uint32 pg_ppn;          /* 读回条目的 PPN（页基址）               */
+    volatile uint32 pg_ps;           /* 读回条目的页指数                       */
 } arkrtos_smp_cpu_t;
 
 /** @brief 每核状态表，下标即硬件核号（0..ARKRTOS_CPU_NUM-1） */

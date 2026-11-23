@@ -1260,6 +1260,99 @@ static void arkrtos_smp_ping_self_test(void)
     }
 #endif
 }
+
+#if ((ARKRTOS_USE_PAGING == 1) && (ARKRTOS_USE_PRIV == 1))
+/* ============================================================
+ * 次核分页自检（R2）
+ * @details 次核在 arkrtos_smp_secondary_main() 里打开分页，本核（CPU0）只读它
+ *          留下的读数。三列缺一不可：
+ *            on   = 1 表示 CRMD.PG 真的置上了（不是「请求过」）；
+ *            rc   = port 层返回码，0 成功，负数是原因（-1 无快照 / -2 溢出 /
+ *                   -3 开了但翻译不对）；
+ *            look = 次核自己在内核 .bss 地址上读回恒等映射的结果。
+ *          判据同样是串口上的原始读数。超时如实打 FAIL，不挂死。
+ * ============================================================ */
+static void arkrtos_smp_paging_self_test(void)
+{
+    uint32 cpu;
+    uint32 spin;
+    uint32 ok = 0u;
+
+#if (ARKRTOS_CPU_NUM < 2)
+    arkrtos_board_puts("[smp] pg result=skip(no secondary)\n");
+#else
+    for(cpu = 1u; cpu < (uint32)ARKRTOS_CPU_NUM; cpu++)
+    {
+        for(spin = 0u; spin < SMP_SELF_TEST_SPIN; spin++)
+        {
+            if(arkrtos_smp_cpu[cpu].pg_rc != 0xFFFFFFFFu)
+            {
+                break;                /* 次核已经报过结果了 */
+            }
+            arkrtos_port_spin_hint();
+        }
+
+        arkrtos_board_puts("[smp] pg cpu");
+        arkrtos_board_putu(cpu);
+        arkrtos_board_puts(" on=");
+        arkrtos_board_putu(arkrtos_smp_cpu[cpu].pg_on);
+        arkrtos_board_puts(" rc=");
+        if(arkrtos_smp_cpu[cpu].pg_rc == 0xFFFFFFFFu)
+        {
+            arkrtos_board_puts("(not reported)");
+        }
+        else if(arkrtos_smp_cpu[cpu].pg_rc == 0u)
+        {
+            arkrtos_board_putu(0u);
+        }
+        else
+        {
+            /* 负码：先打符号再打绝对值（putu 只认无符号） */
+            arkrtos_board_puts("-");
+            arkrtos_board_putu((uint32)(0u - arkrtos_smp_cpu[cpu].pg_rc));
+        }
+        arkrtos_board_puts(" look=");
+        if(arkrtos_smp_cpu[cpu].pg_look == 0xFFFFFFFFu)
+        {
+            arkrtos_board_puts("(none)");
+        }
+        else
+        {
+            arkrtos_board_putu(arkrtos_smp_cpu[cpu].pg_look);
+        }
+
+        if((arkrtos_smp_cpu[cpu].pg_on == 1u) &&
+           (arkrtos_smp_cpu[cpu].pg_rc == 0u) &&
+           (arkrtos_smp_cpu[cpu].pg_look == 1u))
+        {
+            ok++;
+        }
+        else
+        {
+            /* 失败时把读回的原始读数一并打出来：hit 分辨「条目没进去」与
+             * 「进去了但翻译不对」，ppn/ps 是那条条目的实际内容。 */
+            arkrtos_board_puts(" hit=");
+            arkrtos_board_putu(arkrtos_smp_cpu[cpu].pg_hit);
+            arkrtos_board_puts(" ppn=");
+            arkrtos_board_puthex(arkrtos_smp_cpu[cpu].pg_ppn);
+            arkrtos_board_puts(" ps=");
+            arkrtos_board_putu(arkrtos_smp_cpu[cpu].pg_ps);
+        }
+        arkrtos_board_puts("\n");
+    }
+
+    arkrtos_board_puts("[smp] pg result=");
+    if(ok == ((uint32)ARKRTOS_CPU_NUM - 1u))
+    {
+        arkrtos_board_puts("ok\n");
+    }
+    else
+    {
+        arkrtos_board_puts("FAIL(secondary paging)\n");
+    }
+#endif
+}
+#endif /* ARKRTOS_USE_PAGING && ARKRTOS_USE_PRIV */
 #endif /* ARKRTOS_USE_SMP == 1 */
 
 #if (ARKRTOS_USE_SMP_SCHED == 1) && (ARKRTOS_USE_SMP_BALANCE != 1)
@@ -1820,6 +1913,9 @@ int main(void)
      * 放在任何任务注册/启动之前：失败就在串口上一行看清，不埋在后续输出里。 */
     arkrtos_smp_self_test();
     arkrtos_smp_ping_self_test();   /* R1：主核 IPI 入口 + 次核回执 */
+#if ((ARKRTOS_USE_PAGING == 1) && (ARKRTOS_USE_PRIV == 1))
+    arkrtos_smp_paging_self_test(); /* R2：次核按快照重放静态映射并打开分页 */
+#endif
 #endif
 
 #if (ARKRTOS_USE_SMP_SCHED == 1) && (ARKRTOS_USE_SMP_BALANCE != 1)

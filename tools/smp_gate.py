@@ -108,6 +108,22 @@ R1_MARKERS = [
 
 MAIN_C = "example/qemu_loongarch64/main.c"
 
+# pin R2（2026-11-23）：次核开分页。五处在，缺一条这条路就不成立：
+#   1) 快照记录点（la_tlb_fill / la_tlb_write 末尾各一次，共两条）；
+#   2) 快照溢出**不许静默丢条目**，要置标志；
+#   3) 铺 256 条窗口条目那段把快照关掉（否则上限立刻被冲爆）；
+#   4) 次核换掉 TLBRENTRY，指向自己的重填入口（每核一份故障栈）；
+#   5) 打开后读回自证（-3 与「没打开」必须可分辨）。
+R2_PORT_MARKERS = [
+    "static void la_pg_snap_add(unsigned long va, uint32 ps, uint32 index,",
+    "s_pg_snap_overflow = 1u;",
+    "s_pg_snap_on = 0u;\n#endif\n    la_pg_boot_map();",
+    "LA_CSRW(LA_CSR_TLBRENTRY, (unsigned long)&tlb_refill_entry_secondary);",
+    "static uint32 la_pg_identity_ok(unsigned long va, uint32 ppn, uint32 ps)",
+]
+R2_SNAP_CALL = "la_pg_snap_add(vaddr, ps, index, lo0, lo1);"
+R2_CTX_SEC_STACK = "la_refill_stack_sec_top"
+
 LA64_INCLUDES = [
     "kernelsrc/include",
     "config",
@@ -651,6 +667,208 @@ def every_skip_is_guarded(text):
     return seen, -1
 
 
+def run_la64_pin_r2(cc):
+    """pin R2：次核开分页（快照重放 + 每核故障栈 + 读回自证）。
+
+    四层断言，每层都带自检，缺一层这条路就可能只是「写了注释」：
+      1) port.c 里四处标记都在；抠掉任意一处，同一判据必须报出来；
+      2) 快照记录点必须**恰好两处**（la_tlb_fill / la_tlb_write 各一次）；
+         抠掉一处后计数变 1，判据不许仍然说「够」；
+      3) SMP=1 的目标文件里有 arkrtos_port_paging_enable_secondary 与
+         arkrtos_port_paging_enable_secondary 之外的快照符号，SMP=0 的目标
+         文件里一个都没有 —— 默认档零变化不是靠嘴说；
+      4) context.S 以 SMP=1 汇编后，次核重填入口的 la.abs 必须指向
+         la_refill_stack_sec_top（每核一份栈）；把那个符号换成引导核的
+         la_refill_stack_top 重汇编，这条引用必须消失 —— 否则钉的是
+         「某个栈」，不是「本核自己的栈」。
+    """
+    od = cc.replace("gcc", "objdump")
+    nm = cc.replace("gcc", "nm")
+    if not os.path.exists(od) or not os.path.exists(nm):
+        print("SMP-GATE FAIL: no LA64 objdump/nm next to %s" % cc)
+        return False
+
+    td = tempfile.mkdtemp(prefix="arkrtos-smp-r2-")
+    bad = 0
+
+    with open(os.path.join(ROOT, LA64_PORT), encoding="utf-8",
+              errors="replace") as f:
+        port = f.read().replace("\r\n", "\n")
+
+    def r2_markers_present(text):
+        return all(m in text for m in R2_PORT_MARKERS)
+
+    for m in R2_PORT_MARKERS:
+        mut = port.replace(m, "/* removed */", 1)
+        if r2_markers_present(mut):
+            print("SMP-GATE FAIL: pin R2 self-check missed a removed marker: %r"
+                  % m[:44])
+            bad += 1
+        else:
+            print("ok: pin R2 self-check catches a removed marker (%s...)" % m[:30])
+
+    if not r2_markers_present(port):
+        print("SMP-GATE FAIL: %s lost a secondary-paging marker" % LA64_PORT)
+        bad += 1
+    else:
+        print("ok: secondary paging path present in %s (snapshot + replay + "
+              "refill entry + readback)" % LA64_PORT)
+
+    calls = port.count(R2_SNAP_CALL)
+    if calls != 2:
+        print("SMP-GATE FAIL: %s records the static snapshot %d time(s), "
+              "expected 2 (la_tlb_fill + la_tlb_write)" % (LA64_PORT, calls))
+        bad += 1
+    elif (port.replace(R2_SNAP_CALL, "/* removed */", 1)).count(R2_SNAP_CALL) != 1:
+        print("SMP-GATE FAIL: pin R2 snapshot-call count is not specific")
+        bad += 1
+    else:
+        print("ok: static snapshot recorded at both TLB writers (2 call sites)")
+
+    with open(os.path.join(ROOT, MAIN_C), encoding="utf-8",
+              errors="replace") as f:
+        main_c = f.read()
+    if "arkrtos_smp_paging_self_test();" not in main_c:
+        print("SMP-GATE FAIL: the SMP fixture never runs the secondary-paging "
+              "self test")
+        bad += 1
+    elif "[smp] pg cpu" not in main_c:
+        print("SMP-GATE FAIL: the SMP fixture never prints the pg reading")
+        bad += 1
+    else:
+        print("ok: the SMP fixture runs the secondary-paging self test and "
+              "prints its readings")
+
+    key = os.path.join(td, "arkrtos_sign_key_local.h")
+    with open(key, "w", encoding="utf-8") as f:
+        f.write("#ifndef ARKRTOS_SIGN_KEY_LOCAL_H\n"
+                "#define ARKRTOS_SIGN_KEY_LOCAL_H\n"
+                "#define ARKRTOS_IMAGE_SIGN_KEY { " +
+                ", ".join("0x%02X" % i for i in range(32)) + " }\n"
+                "#endif\n")
+
+    inc = ["-I" + td]
+    inc += ["-I" + os.path.join(ROOT, x) for x in LA64_INCLUDES]
+    base = ["-march=loongarch64", "-mabi=lp64d", "-std=c99", "-c",
+            os.path.join(ROOT, LA64_PORT), "-include", "arkrtos_board_config.h",
+            "-DARKRTOS_SIGN_KEY_LOCAL=1",
+            "-DARKRTOS_BOARD_CONFIG=\"arkrtos_board_config.h\""]
+
+    def build(tag, smp):
+        obj = os.path.join(td, "port_%s.o" % tag)
+        cmd = [cc] + base + ["-DARKRTOS_USE_SMP=%d" % smp,
+                             "-DARKRTOS_CPU_NUM=2", "-o", obj] + inc
+        rr = subprocess.run(cmd, cwd=ROOT, capture_output=True,
+                            encoding="utf-8", errors="replace")
+        if rr.returncode != 0:
+            print("SMP-GATE FAIL: port.c does not build with SMP=%d" % smp)
+            print((((rr.stdout or "") + (rr.stderr or "")).strip())[-900:])
+            return None
+        return obj
+
+    on_obj = build("on", 1)
+    off_obj = build("off", 0)
+    if (on_obj is None) or (off_obj is None):
+        bad += 1
+    else:
+        def symbols(obj):
+            rr = subprocess.run([nm, obj], capture_output=True,
+                               encoding="utf-8", errors="replace")
+            return (rr.stdout or "") + (rr.stderr or "")
+
+        on_syms = symbols(on_obj)
+        off_syms = symbols(off_obj)
+        sym = "arkrtos_port_paging_enable_secondary"
+        if sym not in on_syms:
+            print("SMP-GATE FAIL: SMP=1 object has no %s (the whole R2 path got "
+                  "compiled out)" % sym)
+            bad += 1
+        elif sym in off_syms:
+            print("SMP-GATE FAIL: SMP=0 object still has %s (the default build "
+                  "must not pay for this)" % sym)
+            bad += 1
+        else:
+            print("ok: %s exists only in the SMP=1 object" % sym)
+
+    # context.S：次核重填入口必须用本核自己的栈
+    src = os.path.join(ROOT, LA64_CTX)
+
+    def assemble(tag, smp, path=None, with_reloc=False):
+        obj = os.path.join(td, tag + ".o")
+        cmd = [cc, "-march=loongarch64", "-mabi=lp64d", "-c",
+               path or src, "-o", obj,
+               "-include", "arkrtos_board_config.h",
+               "-DARKRTOS_SIGN_KEY_LOCAL=1",
+               "-DARKRTOS_BOARD_CONFIG=\"arkrtos_board_config.h\""] + inc
+        cmd += ["-DARKRTOS_USE_SMP=1", "-DARKRTOS_CPU_NUM=2"] if smp else \
+               ["-DARKRTOS_USE_SMP=0"]
+        r = subprocess.run(cmd, cwd=ROOT, capture_output=True,
+                           encoding="utf-8", errors="replace")
+        out = ((r.stdout or "") + (r.stderr or "")).strip()
+        if r.returncode != 0:
+            print("SMP-GATE FAIL: LA64 %s does not assemble (SMP=%d)" % (tag, int(smp)))
+            print(out[-900:])
+            return None
+        flags = ["-dr"] if with_reloc else ["-d"]
+        d = subprocess.run([od] + flags + [obj], capture_output=True,
+                           encoding="utf-8", errors="replace")
+        return (d.stdout or "") + (d.stderr or "")
+
+    on_ctx = assemble("ctxon", True, None, True)
+    if on_ctx is None:
+        bad += 1
+    else:
+        if "<tlb_refill_entry_secondary>:" not in on_ctx:
+            print("SMP-GATE FAIL: SMP=1 context.S has no secondary refill entry")
+            bad += 1
+        elif R2_CTX_SEC_STACK not in on_ctx:
+            print("SMP-GATE FAIL: the secondary refill entry does not use its "
+                  "own static stack (%s)" % R2_CTX_SEC_STACK)
+            bad += 1
+        else:
+            # 自检：把本核栈换成引导核栈，同一个判据必须报出来
+            #        注意要把三处一起换：$r21 的加载、$sp 的加载、
+            #        以及 .globl/标签定义（否则符号仍在对象里，自检会假 FAIL）。
+            mut_src = os.path.join(td, "ctx_mut_r2.S")
+            raw = open(src, "rb").read()
+            raw = raw.replace(
+                b"la.abs  $r21, la_refill_stack_sec_top",
+                b"la.abs  $r21, la_refill_stack_top")
+            raw = raw.replace(
+                b"la.abs  $sp, la_refill_stack_sec_top",
+                b"la.abs  $sp, la_refill_stack_top")
+            raw = raw.replace(b"la_refill_stack_sec_", b"la_refill_stack_mut_")
+            with open(mut_src, "wb") as f:
+                f.write(raw)
+            mut = assemble("ctxmut", True, mut_src, True)
+            if mut is None:
+                bad += 1
+            elif R2_CTX_SEC_STACK in mut:
+                print("SMP-GATE FAIL: swapping the per-core stack did not remove "
+                      "the reference (pin does not point at it)")
+                bad += 1
+            else:
+                print("ok: LA64 R2 pin (secondary refill entry uses its own "
+                      "stack, gone when swapped)")
+
+    off_ctx = assemble("ctxoff", False)
+    if off_ctx is None:
+        bad += 1
+    else:
+        leaked = [m for m in ("tlb_refill_entry_secondary", R2_CTX_SEC_STACK)
+                  if m in off_ctx]
+        if leaked:
+            print("SMP-GATE FAIL: %s still in the SMP=0 object (pin R2 is in the "
+                  "wrong place)" % ", ".join(leaked))
+            bad += 1
+        else:
+            print("ok: LA64 R2 self-check (SMP=0 object has no secondary refill "
+                  "entry and no per-core stack)")
+
+    shutil.rmtree(td, ignore_errors=True)
+    return bad == 0
+
+
 def run_la64_smp_sched(cc):
     """pin W：④ AMP 调度分核（真编译两档 + 关档零内容 + 三处跳过各有开关）。"""
     od = cc.replace("gcc", "objdump")
@@ -1164,6 +1382,8 @@ def main():
         return 1
     if not run_la64_pin_r1(la):
         return 1
+    if not run_la64_pin_r2(la):
+        return 1
     if not run_la64_smp_sched(la):
         return 1
     if not run_la64_smp_balance(la):
@@ -1176,8 +1396,8 @@ def main():
     if not run_rv32_smp(rv):
         return 1
 
-    print("SMP-GATE OK (host accounting + %d ARM ON-path files + LA64 pin U/V/R1/W/Y "
-          "+ RV32 pin X, CPU_NUM=4/2)" % len(TARGETS))
+    print("SMP-GATE OK (host accounting + %d ARM ON-path files + LA64 pin "
+          "U/V/R1/R2/W/Y + RV32 pin X, CPU_NUM=4/2)" % len(TARGETS))
     return 0
 
 if __name__ == "__main__":

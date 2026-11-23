@@ -711,6 +711,27 @@ int32 arkrtos_port_paging_space_release(uint32 space);
  *           另一条陈旧条目」——地址空间切换静默失效时就靠它定位。 */
 uint32 arkrtos_port_paging_lookup(unsigned long va, uint32 *index, uint32 *ppn, uint32 *ps);
 
+#if ((ARKRTOS_USE_SMP == 1) && (ARKRTOS_USE_PRIV == 1))
+/** @brief 让当前核（次核）打开分页：按静态快照重放条目，再置 CRMD.PG (R2)
+ *  @return 0  = opened, and one identity entry read back correctly
+ *          -1 = nothing to replay (primary never filled the snapshot)
+ *          -2 = snapshot overflowed (would open PG with entries missing)
+ *          -3 = PG is on but an identity VA does not translate identically
+ *  @details 次核不重跑 la_mmu_init()：那一趟会从帧池给 space 0 拿 2 MB、
+ *           铺 256 条窗口条目，那是引导核的 App 地址空间。这里重放的是
+ *           **引导核真写下去的静态条目**（内核两条 PS=22、内核 UART、
+ *           App UART 别名、帧池），并换掉 TLBRENTRY 指向本核自己的重填
+ *           入口与故障栈。
+ *           -3 与「没打开」必须分开：CRMD.PG 已置位但翻译不对，在串口上
+ *           与「没打开」长得一样，只有读回能把它们分开。
+ *  @note 必须在中断关闭时调用（写 CSR 与重放条目之间不能被节拍打断）。 */
+int32 arkrtos_port_paging_enable_secondary(void);
+#else
+/* 关档（或单核）不出符号：调用方拿到 -1 就是「这台机器没有这条路」，
+ * 不能读成「已经打开了」。 */
+#define arkrtos_port_paging_enable_secondary()         (-1)
+#endif
+
 /** @brief Allocate a run of contiguous 4 KB page frames (U-3)
  *  @param count  frames wanted (> 0)
  *  @param p_base on success, physical base of the first frame

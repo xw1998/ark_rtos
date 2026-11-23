@@ -236,6 +236,13 @@ extern void tlb_refill_entry(void);
 extern void la_app_fault_switch(la_frame_word *frame, uint32 ecode);
 #endif
 
+#if ((ARKRTOS_USE_SMP == 1) && (ARKRTOS_USE_PRIV == 1))
+/* 次核的 TLB 重填入口（R2，arkrtos_context.S）：只差第一件事 —— 换到
+ * **本核自己的**静态故障栈。两核同时重填时共用一份帧会互相踩掉对方保存的
+ * 通用寄存器，所以每核一份。 */
+extern void tlb_refill_entry_secondary(void);
+#endif
+
 /* 板级可覆盖的故障报告（默认什么都不打，见文件末尾） */
 void arkrtos_port_fatal_report(uint32 code);
 
@@ -672,6 +679,61 @@ int32 arkrtos_port_send_ipi(uint32 cpu)
  * MTLB 是 2048 起的 64 条绝对条目。 */
 #define LA_STLB_WAYS        8u
 #define LA_MTLB_INDEX       2048u
+
+#if ((ARKRTOS_USE_SMP == 1) && (ARKRTOS_USE_PRIV == 1))
+/* ============================================================
+ * 静态映射快照（R2：次核开分页）
+ * @brief la_mmu_init() 铺的每一条**静态**条目在这里留一份副本
+ * @details 次核不能重跑 la_mmu_init()：那一趟会从帧池给 space 0 拿 2 MB、
+ *          铺 256 条窗口条目（那是引导核的 App 地址空间，不是次核该继承的
+ *          状态；跨核共享 VA 是 R3 的事）。所以这里的口径是「重放已有条目」，
+ *          不是「重建映射」—— 次核拿到的必须是引导核真写下去的那几条，
+ *          包括 tlbwr 写死的绝对索引。
+ *
+ *          记录范围由 s_pg_snap_on 门控，只在 la_mmu_init() 铺静态条目的
+ *          那一小段打开：之后运行期写的条目（动态 alias、换 App 窗口）
+ *          是本核运行期状态，不进快照。
+ *
+ *          上限 8 条，实际用量 5 条（内核两条 PS=22、内核 UART、App UART
+ *          别名、帧池）。溢出**不静默丢条目**：置 s_pg_snap_overflow，
+ *          次核启动时据此返回 -2 而不是带着缺条目的映射开 PG。
+ * ============================================================ */
+#define LA_PG_SNAP_MAX      8u
+
+typedef struct
+{
+    unsigned long va;
+    unsigned long lo0;
+    unsigned long lo1;
+    uint32        ps;
+    uint32        index;
+} la_pg_snap_t;
+
+static la_pg_snap_t s_pg_snap[LA_PG_SNAP_MAX];
+static uint32       s_pg_snap_n;
+static uint32       s_pg_snap_on;
+static uint32       s_pg_snap_overflow;
+
+static void la_pg_snap_add(unsigned long va, uint32 ps, uint32 index,
+                           unsigned long lo0, unsigned long lo1)
+{
+    if(s_pg_snap_on == 0u)
+    {
+        return;
+    }
+    if(s_pg_snap_n >= (uint32)LA_PG_SNAP_MAX)
+    {
+        s_pg_snap_overflow = 1u;
+        return;
+    }
+    s_pg_snap[s_pg_snap_n].va    = va;
+    s_pg_snap[s_pg_snap_n].ps    = ps;
+    s_pg_snap[s_pg_snap_n].index = index;
+    s_pg_snap[s_pg_snap_n].lo0   = lo0;
+    s_pg_snap[s_pg_snap_n].lo1   = lo1;
+    s_pg_snap_n++;
+}
+#endif
 #define LA_STLB_INDEX(va, way) \
     ((((uint32)(way)) % LA_STLB_WAYS) * 256u + \
      ((((unsigned long)(va)) >> 13) & 0xFFu))
@@ -730,6 +792,10 @@ static void la_tlb_fill(unsigned long vaddr, uint32 ps, uint32 index,
          * tlbwr 认 TLBIDX.INDEX，是确定的。 */
         __asm__ volatile("tlbwr" ::: "memory");
     }
+
+#if ((ARKRTOS_USE_SMP == 1) && (ARKRTOS_USE_PRIV == 1))
+    la_pg_snap_add(vaddr, ps, index, lo0, lo1);
+#endif
 }
 
 /**
@@ -757,6 +823,10 @@ static void la_tlb_write(unsigned long vaddr, uint32 ps, uint32 index,
     LA_CSRW(LA_CSR_TLBELO0, lo0);
     LA_CSRW(LA_CSR_TLBELO1, lo1);
     __asm__ volatile("tlbwr" ::: "memory");
+
+#if ((ARKRTOS_USE_SMP == 1) && (ARKRTOS_USE_PRIV == 1))
+    la_pg_snap_add(vaddr, ps, index, lo0, lo1);
+#endif
 }
 
 #if (ARKRTOS_USE_PAGING_ASID == 1)
@@ -827,7 +897,15 @@ static void la_tlb_fill_refill(unsigned long vaddr, unsigned long lo0, unsigned 
 static void la_pg_boot_map(void);
 #endif
 
-static void la_mmu_init(void)
+/**
+* @brief 铺本核的静态映射条目（不含「打开 PG」这一步）
+* @details R2 把 la_mmu_init() 拆成「铺条目」与「开 PG」两半，因为次核需要
+*          前者的一种**不同来源**：它不重跑这一趟，而是重放引导核留下的
+*          静态条目快照（见 arkrtos_port_paging_enable_secondary）。拆开
+*          之后「开 PG」那一刻做什么也就只有一处实现。
+* @note 本函数只由引导核调用一次（开中断之前）。次核**不**调它。
+*/
+static void la_mmu_fill_static(void)
 {
     /* ASID 全 0：内核与 App 共用一份映射，切换任务不换页 */
     LA_CSRW(LA_CSR_ASID, 0UL);
@@ -894,8 +972,17 @@ static void la_mmu_init(void)
      * 而旧条目仍留在别的槽里 —— 查找命中旧的那条，切换静默失效（实测：
      * space 1 写入的数据在 space 0 里被读到）。 */
 #if (ARKRTOS_USE_PAGING_PAGES == 1)
-    /* 页级窗口：从帧池给 space 0 拿一整块 2 MB，再铺 256 条 4 KB 条目。 */
+    /* 页级窗口：从帧池给 space 0 拿一整块 2 MB，再铺 256 条 4 KB 条目。
+     * 这 256 条**不进静态快照**：它们超过 LA_PG_SNAP_MAX，而且那是引导核
+     * 的 App 地址空间，不是次核该继承的映射。所以铺它们的那一小段把快照
+     * 关掉，铺完再打开（后面的 App UART 别名要进快照）。 */
+#if ((ARKRTOS_USE_SMP == 1) && (ARKRTOS_USE_PRIV == 1))
+    s_pg_snap_on = 0u;
+#endif
     la_pg_boot_map();
+#if ((ARKRTOS_USE_SMP == 1) && (ARKRTOS_USE_PRIV == 1))
+    s_pg_snap_on = 1u;
+#endif
 #else
     la_tlb_write(ARKRTOS_QEMU_APP_BASE, 20u, LA_MTLB_INDEX + 2u,
                  LA_PTE_APP(ARKRTOS_QEMU_APP_BASE),
@@ -942,21 +1029,149 @@ static void la_mmu_init(void)
                 LA_PTE_KERNEL(ARKRTOS_QEMU_FRAME_BASE + 0x400000u));
 #endif
 
-    /* 未映射地址的入口。硬件从这里进来时 CRMD.DA=1、PG=0、PLV=0、IE=0。 */
-    LA_CSRW(LA_CSR_TLBRENTRY, (unsigned long)&tlb_refill_entry);
+}
 
-    /* 打开分页：先关 DA 再开 PG。下一条取指就走第一条条目了。 */
-    {
-        unsigned long crmd;
+/**
+* @brief 打开本核的分页：先关 DA 再开 PG
+* @details 两件事必须一起做：只开 PG 不关 DA，取指仍走直译；只关 DA 不开 PG，
+*          下一条取指就没有地址翻译。开完之后 `ibar 0` 让流水线里的旧取指
+*          全部作废。
+* @note 次核走的是同一个函数（见 arkrtos_port_paging_enable_secondary）：
+*       「怎么开 PG」只有一处实现，免得两边口径分叉。
+*/
+static void la_mmu_enable_paging(void)
+{
+    unsigned long crmd;
 
-        LA_CSRR(LA_CSR_CRMD, crmd);
-        crmd &= ~(unsigned long)LA_CRMD_DA;
-        crmd |= (unsigned long)LA_CRMD_PG;
-        LA_CSRW(LA_CSR_CRMD, crmd);
-    }
+    LA_CSRR(LA_CSR_CRMD, crmd);
+    crmd &= ~(unsigned long)LA_CRMD_DA;
+    crmd |= (unsigned long)LA_CRMD_PG;
+    LA_CSRW(LA_CSR_CRMD, crmd);
 
     __asm__ volatile("ibar 0" ::: "memory");
 }
+
+static void la_mmu_init(void)
+{
+#if ((ARKRTOS_USE_SMP == 1) && (ARKRTOS_USE_PRIV == 1))
+    /* R2：从这一刻起记录静态条目（次核靠这份快照重放）。 */
+    s_pg_snap_n        = 0u;
+    s_pg_snap_overflow = 0u;
+    s_pg_snap_on       = 1u;
+#endif
+
+    la_mmu_fill_static();
+
+#if ((ARKRTOS_USE_SMP == 1) && (ARKRTOS_USE_PRIV == 1))
+    /* 开 PG 之后运行期还会写条目（动态 alias、换 App 窗口），那是本核的
+     * 运行期状态，不是「静态映射」，不进快照。 */
+    s_pg_snap_on = 0u;
+#endif
+
+    /* 未映射地址的入口。硬件从这里进来时 CRMD.DA=1、PG=0、PLV=0、IE=0。 */
+    LA_CSRW(LA_CSR_TLBRENTRY, (unsigned long)&tlb_refill_entry);
+
+    la_mmu_enable_paging();
+}
+
+#if ((ARKRTOS_USE_SMP == 1) && (ARKRTOS_USE_PRIV == 1) && (ARKRTOS_USE_PAGING == 1))
+/**
+* @brief 判断读回的条目是否把 va 恒等映射（自证用）
+* @param va  查询用的虚拟地址
+* @param ppn arkrtos_port_paging_lookup() 读回的 PPN
+* @param ps  同一个 lookup 读回的页指数
+* @return 1 = 是恒等映射；0 = 不是（或页指数不可信）
+* @details 两条容易读错的口径：
+*          1) **PPN 是页基址**，不是 va —— 拿 `va & ~0xFFF` 去比在 PS=22 的
+*             大页上必然假失败（首轮实测就是这么错的，on=0 rc=-3）；
+*          2) lookup() 只读 **TLBELO0（偶页）**。一条条目管一对页：偶页映射
+*             [base, base+2^ps)、奇页映射 [base+2^ps, base+2^(ps+1))。所以
+*             va 落在奇页时要给 PPN 加上一个页大小再比 —— 内核 .bss 有
+*             4.9 MB，跨过了 4 MB 边界，正好落在奇页里（实测第二错）。
+*/
+static uint32 la_pg_identity_ok(unsigned long va, uint32 ppn, uint32 ps)
+{
+    unsigned long mask;
+
+    if(ps > 30u)
+    {
+        return 0u;
+    }
+    mask = ~((1UL << ps) - 1UL);
+    if(((unsigned long)ppn + (va & (1UL << ps))) == (va & mask))
+    {
+        return 1u;
+    }
+    return 0u;
+}
+
+/**
+* @brief 让**当前核**（次核）打开分页：按静态快照重放条目，再置 CRMD.PG
+* @return 0  = 已打开，且读回一条恒等映射自证通过
+*         -1 = 没有可重放的条目（引导核还没铺 / 快照没开）
+*         -2 = 快照溢出（条目数超过 LA_PG_SNAP_MAX），不许带着缺条目的映射开 PG
+*         -3 = PG 已置位，但读回的翻译不是恒等映射（「开了但映射不对」）
+* @details 顺序是有讲究的：
+*          1) 先写本核的 ASID / STLBPS 并清 TLB —— 这两条是**每核 CSR**，
+*             引导核写的那份在这里不存在（QEMU 上 STLBPS 复位值是 0，不写
+*             就有一个只在 QEMU 上现形的坑，见 la_mmu_init 的注释）；
+*          2) 重放条目用 la_tlb_write（tlbwr + 确定的绝对索引），不用
+*             tlbfill：后者的路号是随机的，次核不该靠运气和引导核撞同一组；
+*          3) 换掉 TLBRENTRY —— 次核必须用自己的静态故障栈，两核同时重填
+*             时共用一份帧会互相踩掉对方保存的 GPR；
+*          4) 打开 PG；
+*          5) **读回自证**：拿一个必然恒等映射的内核地址做 tlbsrch，
+*             对不上就返回 -3。这一步不能省 —— 「CRMD.PG 打开了但翻译到了
+*             别处」与「没打开」在串口上长得一样，只有读回能把它们分开。
+* @note 调用者必须在**中断还没打开**的时候调（写 CSR 与重放条目之间不能被
+*       节拍打断），本 port 的次核入口满足这一点。
+*/
+int32 arkrtos_port_paging_enable_secondary(void)
+{
+    uint32 i;
+
+    if(s_pg_snap_overflow != 0u)
+    {
+        return -2;
+    }
+    if(s_pg_snap_n == 0u)
+    {
+        return -1;
+    }
+
+    LA_CSRW(LA_CSR_ASID, 0UL);
+    LA_CSRW(LA_CSR_STLBPS, 12UL);
+    __asm__ volatile("invtlb 0, $zero, $zero" ::: "memory");
+
+    for(i = 0u; i < s_pg_snap_n; i++)
+    {
+        la_tlb_write(s_pg_snap[i].va, s_pg_snap[i].ps, s_pg_snap[i].index,
+                     s_pg_snap[i].lo0, s_pg_snap[i].lo1);
+    }
+
+    LA_CSRW(LA_CSR_TLBRENTRY, (unsigned long)&tlb_refill_entry_secondary);
+
+    la_mmu_enable_paging();
+
+    {
+        unsigned long va = (unsigned long)&s_pg_snap_n;
+        uint32 index = 0u;
+        uint32 ppn = 0u;
+        uint32 ps = 0u;
+
+        if(arkrtos_port_paging_lookup(va, &index, &ppn, &ps) == 0u)
+        {
+            return -3;
+        }
+        if(la_pg_identity_ok(va, ppn, ps) == 0u)
+        {
+            return -3;
+        }
+    }
+
+    return 0;
+}
+#endif
 
 /**
 * @brief 把「下一个任务的特权级」写进要恢复的帧

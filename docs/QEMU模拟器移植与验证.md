@@ -8459,6 +8459,125 @@ QEMU 进程不会自己退出（`rc=124`），但 `-serial file:<log>` 照样正
 3. **不能把 `ipi0=2` 读成「IPI 不丢」或「带宽」**：同向量连发在 QEMU 模型上会被合并成一次，
    代码是一发一等；这个计数只证明「这一发到了、并且回了」，不证明任何吞吐。
 
+### 9.11 ⑦ 次核开分页（R2，2026-11-23，QEMU LA64 `-smp 2` 实跑）
+
+#### 9.11.1 缺口在哪：次核跑的是直译地址，不是「次核不会用 TLB」
+
+次核起来之后一直停在 `CRMD.DA=1` 的直译状态（`arkrtos_smp_secondary_main()` 只做 ping/回执与
+AMP 运行队列），它看到的地址与主核的映射视图无关；一旦次核要碰用户窗口 VA、或者在自己核上执行到
+一条会触发重填的取指，「次核那套 TLB 是空的」就立刻变成故障。
+
+所以 R2 不是「在次核上调一次 `arkrtos_port_paging_enable()`」：那条路会从帧池给 space 0 再拿 2 MB、
+把 256 条页级窗口条目铺一遍 —— 那是**引导核**的 App 地址空间，次核照抄等于把两台机器装成同一套房。
+（跨核共享 VA 是 R3，不是这一步。）
+
+#### 9.11.2 做法：重放「引导核铺静态条目」那一小段快照
+
+| # | 改动 | 为什么必须 |
+|---|---|---|
+| 1 | `la_tlb_fill()` / `la_tlb_write()` 末尾各记一次快照（`la_pg_snap_add()`，**恰好 2 处**） | 静态条目只经这两个写入口；漏一处就有条目不上快照 |
+| 2 | 门控 `s_pg_snap_on` 只在 `la_mmu_fill_static()` 的静态条目段打开，`la_pg_boot_map()` 那 256 条页级窗口**前后各关/开一次** | 不关就立刻冲爆上限（8 条），而且那 256 条是引导核的窗口，不该进快照 |
+| 3 | 容量 8 条、溢出**置 `s_pg_snap_overflow` 而不是静默丢** | 静默丢 = 次核少一条映射却报成功，等于给假绿 |
+| 4 | `arkrtos_port_paging_enable_secondary()`：写 `ASID=0` / `STLBPS=12` / `invtlb 0` → 按快照逐条 `la_tlb_write()` 重放 → 写 `TLBRENTRY` → DA→PG | 这四个 CSR 与 `CRMD` 都是**每核**状态，主核写过不代表次核有 |
+| 5 | 打开后立即读回自证：`arkrtos_port_paging_lookup((unsigned long)&s_pg_snap_n, …)` + `la_pg_identity_ok()`，不符返回 -3 | 「开了分页」与「开了之后还查得到地址」是两件事，只有后者能证明能继续跑 |
+
+快照内容就是 `la_mmu_fill_static()` 铺的那 5 条：内核 `0x00000000` PS=22 @MTLB+0、
+内核 `0x00800000` PS=22 @MTLB+1、控制台 UART `0x1fe00000` PS=12 @STLB way7、
+App UART 别名 PS=12 @STLB way6、帧池 `ARKRTOS_QEMU_FRAME_BASE` PS=22 @MTLB+11。
+运行期铺的条目（动态 alias、换空间窗口）**不进快照**。
+
+为了让快照只包住静态段，`la_mmu_init()` 拆成三段：`la_mmu_fill_static()`（原 body）、
+`la_mmu_enable_paging()`（关 DA 开 PG + `ibar 0`）、`la_mmu_init()`（置快照状态 → 铺静态 →
+关快照 → 写 `TLBRENTRY=&tlb_refill_entry` → 开分页）。行为与拆分前一致。
+
+#### 9.11.3 每核一份 8 KB 重填栈
+
+`la_refill_c` 的入口在 `.S` 里用一份**静态**栈保存 30 个 GPR。两核同时重填时共用一份 256 字节帧会
+互相覆盖现场（返回时跳到别人算出来的地址）。所以次核有自己的入口 `tlb_refill_entry_secondary`
+与自己的 8 KB 栈（`la_refill_stack_sec_bottom/top`），`TLBRENTRY` 每核各指各的。
+
+DEMAND 档的回退分支原来写死 `la.abs $sp, la_refill_stack_top`，改成 `addi.d $sp, $r21, 0`（`$r21`
+是本核帧基址）；不改的话，次核上走回退分支会把帧建到引导核的栈上。
+
+#### 9.11.4 两处判据错误：都是「读数错」，不是「功能错」
+
+第一刀（`on=0 rc=-3`）：读回比较写成 `va & ~0xFFF`。`arkrtos_port_paging_lookup()` 读回的 **PPN 是
+页基址**，PS=22 时是 4 MB 对齐值，与 `va & ~0xFFF` 永远不等 ⇒ 假失败。
+
+第二刀（`rc=-3` 仍在；把 `hit/ppn/ps` 打出来看到 `hit=1 ppn=0x00000000 ps=22` 后才定位）：lookup 只读
+**TLBELO0（偶页）**，一条条目管一对页。`&arkrtos_smp_cpu[cpu]` 在内核 `.bss`（4.9 MB，跨过 4 MB 边界）
+里，正好落在**奇页**，正确期望值要加一个页大小：
+
+```
+(ppn + (va & (1UL << ps))) == (va & ~((1UL << ps) - 1))
+```
+
+抽成 `la_pg_identity_ok()`，`port.c` 的自证与 `smp.c` 的独立读回用同一口径。这条也说明为什么
+调用方（`smp.c`）要在 port 自证之外**再用内核 `.bss` 的地址独立查一次**并把 `hit/ppn/ps`
+无条件落进状态块：`rc=-3` 与「没打开」必须可分辨，而分辨手段只能是读数。
+
+#### 9.11.5 失败不停机
+
+`arkrtos_port_paging_enable_secondary()` 的返回码：`0` 成功、`-1` 没有快照、`-2` 快照溢出、
+`-3` 打开后读回不符。失败时次核仍在 DA=1 下空转，**不停机** —— 停机会把「次核没开分页」
+伪装成「次核没起来」，那是两种完全不同的故障；失败由主核自检读 `pg_rc` 报 `result=FAIL(secondary paging)`。
+
+#### 9.11.6 默认档零变化（实测，不是推断）
+
+没有再引入新开关：整段包在既有的 `ARKRTOS_USE_SMP`（默认 0）之下，也不需要 `ARKRTOS_CPU_NUM>1`
+以外的配置。默认档与 R1 基线（`4cbf8d4`）同口径编两次：
+
+| | text | data | bss |
+|---|---|---|---|
+| `4cbf8d4` 默认档 | 449888 | 456 | 5128740 |
+| 带 R2 的默认档 | 449888 | 456 | 5128740 |
+
+`nm` 里 `pg_snap` / `enable_secondary` / `refill_entry_secondary` / `refill_stack_sec` **零符号**。
+
+#### 9.11.7 实跑读数
+
+SMP 档（`-DARKRTOS_USE_SMP=1 -DARKRTOS_CPU_NUM=2`），`-smp 2`：
+
+```
+[smp] cores=2 mask=0x00000003 sent=1 ipi1=5 result=ok
+[smp] ping ipi0=2 self=1 back1=1 result=ok
+[smp] pg cpu1 on=1 rc=0 look=1
+[smp] pg result=ok
+```
+
+`on=1` 是 port 层自证通过后才写的；`look=1` 是次核用 `&arkrtos_smp_cpu[1]` 这个内核 `.bss` 地址
+自己查回一条恒等映射且与 `va` 对得上；`rc=0`，不是「没报」（未报是 `0xFFFFFFFF`）。
+
+#### 9.11.8 门禁
+
+`tools/smp_gate.py` 新增 **pin R2**：
+
+- 5 条标记（`la_pg_snap_add` 定义、溢出置标志、`la_pg_boot_map()` 前后关/开、`TLBRENTRY` 换到次核入口、
+  `la_pg_identity_ok` 定义）逐条检查，**每条都带变异自检**（抠掉后必须报缺失）；
+- 快照记录点必须**恰好 2 处**（抠掉一处变 1 就报错）；
+- 真编 SMP=1 / SMP=0 两个目标文件，`nm` 断言 `arkrtos_port_paging_enable_secondary` 只在 ON 档；
+- `context.S` 两档汇编：ON 档必须有 `<tlb_refill_entry_secondary>:` 且引用 `la_refill_stack_sec_top`；
+  把该符号的**三处**（`$r21` 的加载、`$sp` 的加载、`.globl`/标签定义）一起换掉后，符号必须从对象里消失；
+  OFF 档两个符号都不许出现；
+- 夹具（`example/qemu_loongarch64/main.c`）必须真的调用次核分页自检并打印 `[smp] pg cpu`。
+
+**这里第一版自检是一次假失败**：变异只换了 `la.abs $r21, la_refill_stack_sec_top` 一处，而次核入口的
+`la.abs $sp` 与 `.bss` 里的标签定义仍引用该符号 ⇒ 符号还在对象里，自检当场报「pin 没指在那个符号上」。
+自检自己抓出了自己的不严谨，记在这里备查。
+
+#### 9.11.9 判词与三条不许读法
+
+判词：**`r2_secondary_paging_ok_on_qemu`** —— LA64 / QEMU `-smp 2` 上，次核自己写每核 CSR 开起了分页、
+重放了引导核的静态映射快照、并用内核 `.bss` 里的地址自己查回一条恒等 TLB 条目；默认档 text/data/bss
+逐项不变、零新符号。**真实硬件未验证。**
+
+1. **不能读成「跨核共享 VA 已具备」**：两核现在共享的是同一份**静态**快照，不是同一套 App 窗口。
+   R3 要求「至少一处非演示调用：用户态任务经 `task_to` 到次核，且两核都会访问同一窗口 VA」—— 一行都没做。
+2. **不能读成「TLB shootdown 已具备」**：R4 的回执判定不存在、失效协议不存在。R2 只是让次核
+   「有自己的条目」，而 shootdown 的前提是「有别人的条目需要被失效」。
+3. **不能把 `look=1` 读成「映射一致」**：它只说明这一条恒等映射在本核查得到。快照是引导核那一刻的内容，
+   运行期主核新铺的条目次核看不到 —— 那正是 R3/R4 要解决的问题。
+
 ## 10. `-Wconversion` 开档（2026-11-19）：默认档镜像逐字节不变
 
 `tools/warn_gate.py` 的选项集从六条扩到七条，新加 `-Wconversion`（GCC 隐含同开

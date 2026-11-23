@@ -23,7 +23,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（84 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（85 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -62,7 +62,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（12 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（105 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（109 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（18 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -4145,6 +4145,26 @@ uint32 arkrtos_port_paging_lookup(unsigned long va, uint32 *index, uint32 *ppn, 
 **返回**：1 = 命中（index/ppn/ps 被写）；0 = 未命中（输出参数不动）
 只读，不建映射。用于分辨「tlbwr 没生效」与「生效了但查找命中
 另一条陈旧条目」——地址空间切换静默失效时就靠它定位。
+
+### `int32 arkrtos_port_paging_enable_secondary(void);`
+
+```c
+int32 arkrtos_port_paging_enable_secondary(void);
+```
+
+**让当前核（次核）打开分页：按静态快照重放条目，再置 CRMD.PG (R2)**
+**返回**：0  = opened, and one identity entry read back correctly
+-1 = nothing to replay (primary never filled the snapshot)
+-2 = snapshot overflowed (would open PG with entries missing)
+-3 = PG is on but an identity VA does not translate identically
+次核不重跑 la_mmu_init()：那一趟会从帧池给 space 0 拿 2 MB、
+铺 256 条窗口条目，那是引导核的 App 地址空间。这里重放的是
+**引导核真写下去的静态条目**（内核两条 PS=22、内核 UART、
+App UART 别名、帧池），并换掉 TLBRENTRY 指向本核自己的重填
+入口与故障栈。
+-3 与「没打开」必须分开：CRMD.PG 已置位但翻译不对，在串口上
+与「没打开」长得一样，只有读回能把它们分开。
+> 说明：必须在中断关闭时调用（写 CSR 与重放条目之间不能被节拍打断）。
 
 ### `int32 arkrtos_port_paging_frame_alloc(uint32 count, uint32 *p_base);`
 
@@ -9425,6 +9445,77 @@ TLBRELO1 再 `tlbfill`。TLBREHI 的 PS 字段在 [5:0]，VPPN 从 bit13
 必须在开中断之前调用（节拍一进来就要过 TLB），也必须在
 所有任务注册之后调用不需要 —— 帧内容与映射方式无关，
 帧所在的地址在 DA 模式下写和分页模式下写是同一块内存。
+
+### `static void la_mmu_fill_static(void) {`
+
+```c
+static void la_mmu_fill_static(void) {
+```
+
+**铺本核的静态映射条目（不含「打开 PG」这一步）**
+R2 把 la_mmu_init() 拆成「铺条目」与「开 PG」两半，因为次核需要
+前者的一种**不同来源**：它不重跑这一趟，而是重放引导核留下的
+静态条目快照（见 arkrtos_port_paging_enable_secondary）。拆开
+之后「开 PG」那一刻做什么也就只有一处实现。
+> 说明：本函数只由引导核调用一次（开中断之前）。次核**不**调它。
+
+### `static void la_mmu_enable_paging(void) {`
+
+```c
+static void la_mmu_enable_paging(void) {
+```
+
+**打开本核的分页：先关 DA 再开 PG**
+两件事必须一起做：只开 PG 不关 DA，取指仍走直译；只关 DA 不开 PG，
+下一条取指就没有地址翻译。开完之后 `ibar 0` 让流水线里的旧取指
+全部作废。
+> 说明：次核走的是同一个函数（见 arkrtos_port_paging_enable_secondary）：
+「怎么开 PG」只有一处实现，免得两边口径分叉。
+
+### `static uint32 la_pg_identity_ok(unsigned long va, uint32 ppn, uint32 p`
+
+```c
+static uint32 la_pg_identity_ok(unsigned long va, uint32 ppn, uint32 ps) {
+```
+
+**判断读回的条目是否把 va 恒等映射（自证用）**
+- `va`：查询用的虚拟地址
+- `ppn`：arkrtos_port_paging_lookup() 读回的 PPN
+- `ps`：同一个 lookup 读回的页指数
+**返回**：1 = 是恒等映射；0 = 不是（或页指数不可信）
+两条容易读错的口径：
+1) **PPN 是页基址**，不是 va —— 拿 `va & ~0xFFF` 去比在 PS=22 的
+大页上必然假失败（首轮实测就是这么错的，on=0 rc=-3）；
+2) lookup() 只读 **TLBELO0（偶页）**。一条条目管一对页：偶页映射
+[base, base+2^ps)、奇页映射 [base+2^ps, base+2^(ps+1))。所以
+va 落在奇页时要给 PPN 加上一个页大小再比 —— 内核 .bss 有
+4.9 MB，跨过了 4 MB 边界，正好落在奇页里（实测第二错）。
+
+### `int32 arkrtos_port_paging_enable_secondary(void) {`
+
+```c
+int32 arkrtos_port_paging_enable_secondary(void) {
+```
+
+**让**当前核**（次核）打开分页：按静态快照重放条目，再置 CRMD.PG**
+**返回**：0  = 已打开，且读回一条恒等映射自证通过
+-1 = 没有可重放的条目（引导核还没铺 / 快照没开）
+-2 = 快照溢出（条目数超过 LA_PG_SNAP_MAX），不许带着缺条目的映射开 PG
+-3 = PG 已置位，但读回的翻译不是恒等映射（「开了但映射不对」）
+顺序是有讲究的：
+1) 先写本核的 ASID / STLBPS 并清 TLB —— 这两条是**每核 CSR**，
+引导核写的那份在这里不存在（QEMU 上 STLBPS 复位值是 0，不写
+就有一个只在 QEMU 上现形的坑，见 la_mmu_init 的注释）；
+2) 重放条目用 la_tlb_write（tlbwr + 确定的绝对索引），不用
+tlbfill：后者的路号是随机的，次核不该靠运气和引导核撞同一组；
+3) 换掉 TLBRENTRY —— 次核必须用自己的静态故障栈，两核同时重填
+时共用一份帧会互相踩掉对方保存的 GPR；
+4) 打开 PG；
+5) **读回自证**：拿一个必然恒等映射的内核地址做 tlbsrch，
+对不上就返回 -3。这一步不能省 —— 「CRMD.PG 打开了但翻译到了
+别处」与「没打开」在串口上长得一样，只有读回能把它们分开。
+> 说明：调用者必须在**中断还没打开**的时候调（写 CSR 与重放条目之间不能被
+节拍打断），本 port 的次核入口满足这一点。
 
 ### `static void la_frame_apply_priv(la_frame_word *frame) {`
 

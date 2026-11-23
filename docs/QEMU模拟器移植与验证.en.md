@@ -4325,6 +4325,138 @@ image); the default build's code and data sections are unchanged item by item; R
    are merged by the model and the code waits after each send; the number only proves "this one
    arrived and was answered", nothing about throughput.
 
+### 9.11 (7) Secondary cores enable paging (R2, 2026-11-23, QEMU LA64 `-smp 2` executed)
+
+#### 9.11.1 The gap: secondary cores run identity-mapped, not "cannot use a TLB"
+
+A secondary core stays in `CRMD.DA=1` identity mode (`arkrtos_smp_secondary_main()` only does the ping
+acknowledgement and the AMP run queue), so the addresses it sees have nothing to do with the primary's
+mapping view. The moment it touches an app window VA, or executes an instruction that needs a refill on
+its own core, "the secondary TLB is empty" turns into a fault.
+
+So R2 is not "call `arkrtos_port_paging_enable()` on the secondary": that path takes another 2 MB from the
+frame pool for space 0 and installs 256 page-level window entries - that is the **primary's** app address
+space, and copying it would put two machines in the same house. (Cross-core shared VA is R3.)
+
+#### 9.11.2 Approach: replay the snapshot of "the static entries the primary installed"
+
+| # | Change | Why it is required |
+|---|---|---|
+| 1 | `la_tlb_fill()` and `la_tlb_write()` each record one snapshot at their end (`la_pg_snap_add()`, **exactly 2 sites**) | static entries only pass through these two writers; missing one leaves an entry out of the snapshot |
+| 2 | `s_pg_snap_on` is on only inside the static part of `la_mmu_fill_static()`; `la_pg_boot_map()`'s 256 page-level window entries are excluded (off/on around it) | otherwise the 8-entry cap is blown immediately, and those 256 entries belong to the primary's window |
+| 3 | Cap 8 entries; overflow **sets `s_pg_snap_overflow` instead of silently dropping** | silently dropping means the secondary has one mapping fewer while reporting success - a false green |
+| 4 | `arkrtos_port_paging_enable_secondary()`: write `ASID=0` / `STLBPS=12` / `invtlb 0` -> replay each snapshot entry with `la_tlb_write()` -> write `TLBRENTRY` -> DA->PG | those CSRs and `CRMD` are **per-core**; the primary having written them does not help the secondary |
+| 5 | Read back and self-verify immediately: `arkrtos_port_paging_lookup((unsigned long)&s_pg_snap_n, ...)` + `la_pg_identity_ok()`, return -3 on mismatch | "paging is on" and "addresses still resolve after it is on" are different claims; only the latter proves the core keeps running |
+
+The snapshot is exactly the 5 entries `la_mmu_fill_static()` installs: kernel `0x00000000` PS=22 @MTLB+0,
+kernel `0x00800000` PS=22 @MTLB+1, console UART `0x1fe00000` PS=12 @STLB way7, the app UART alias
+PS=12 @STLB way6, and the frame pool `ARKRTOS_QEMU_FRAME_BASE` PS=22 @MTLB+11. Runtime entries
+(dynamic aliases, per-space windows) are **not** snapshotted.
+
+To keep the snapshot limited to the static part, `la_mmu_init()` is split into three pieces:
+`la_mmu_fill_static()` (the original body), `la_mmu_enable_paging()` (clear DA, set PG, `ibar 0`) and
+`la_mmu_init()` (arm the snapshot state -> install static entries -> disarm -> write
+`TLBRENTRY=&tlb_refill_entry` -> enable paging). Behaviour is identical to before the split.
+
+#### 9.11.3 One 8 KB refill stack per core
+
+The `la_refill_c` entry in `.S` saves 30 GPRs on a **static** stack. When both cores refill at once a
+single 256-byte frame would overwrite the other core's saved state (and `ertn` would jump to an address
+computed by the other core). The secondary therefore gets its own entry `tlb_refill_entry_secondary`
+and its own 8 KB stack (`la_refill_stack_sec_bottom/top`); `TLBRENTRY` points per core.
+
+The DEMAND fallback branch used to hard-code `la.abs $sp, la_refill_stack_top`; it is now
+`addi.d $sp, $r21, 0` (`$r21` is this core's frame base), otherwise the fallback on a secondary would
+build its frame on the primary's stack.
+
+#### 9.11.4 Two wrong predicates: both were "wrong reading", not "wrong function"
+
+First cut (`on=0 rc=-3`): the read-back compared against `va & ~0xFFF`. `arkrtos_port_paging_lookup()`
+returns the **page base PPN**; with PS=22 that is a 4 MB aligned value, never equal to `va & ~0xFFF` -
+a false failure.
+
+Second cut (`rc=-3` persisted; printing `hit/ppn/ps` showed `hit=1 ppn=0x00000000 ps=22`): lookup reads
+only **TLBELO0 (even page)**, one entry covers a page pair. `&arkrtos_smp_cpu[cpu]` lives in kernel `.bss`
+(4.9 MB, crossing the 4 MB boundary) and lands on an **odd** page, so the expected value needs one page
+size added:
+
+```
+(ppn + (va & (1UL << ps))) == (va & ~((1UL << ps) - 1))
+```
+
+This is factored into `la_pg_identity_ok()` and used by both the port self-check and the independent
+read-back in `smp.c`. It is also why the caller repeats the lookup with a kernel `.bss` address and
+unconditionally stores `hit/ppn/ps` into the status block: `rc=-3` and "never enabled" must be
+distinguishable, and readings are the only way to distinguish them.
+
+#### 9.11.5 Failure does not park the core
+
+Return codes of `arkrtos_port_paging_enable_secondary()`: `0` success, `-1` no snapshot, `-2` snapshot
+overflow, `-3` read-back mismatch. On failure the secondary keeps spinning with DA=1 and is **not parked**:
+parking would disguise "paging not enabled" as "core did not come up", which are two different faults.
+The primary's self test reads `pg_rc` and reports `result=FAIL(secondary paging)`.
+
+#### 9.11.6 Default build unchanged (measured, not inferred)
+
+No new switch: everything sits under the existing `ARKRTOS_USE_SMP` (default 0). Same machine, same
+toolchain, two builds:
+
+| | text | data | bss |
+|---|---|---|---|
+| `4cbf8d4` default build | 449888 | 456 | 5128740 |
+| default build with R2 | 449888 | 456 | 5128740 |
+
+`nm` shows **no** symbols matching `pg_snap` / `enable_secondary` / `refill_entry_secondary` /
+`refill_stack_sec`.
+
+#### 9.11.7 Readings
+
+SMP build (`-DARKRTOS_USE_SMP=1 -DARKRTOS_CPU_NUM=2`), `-smp 2`:
+
+```
+[smp] cores=2 mask=0x00000003 sent=1 ipi1=5 result=ok
+[smp] ping ipi0=2 self=1 back1=1 result=ok
+[smp] pg cpu1 on=1 rc=0 look=1
+[smp] pg result=ok
+```
+
+`on=1` is written only after the port-level self-verify passed; `look=1` means the secondary looked up
+`&arkrtos_smp_cpu[1]` (a kernel `.bss` address) itself and got an identity mapping matching the VA;
+`rc=0` (0xFFFFFFFF would mean "not reported").
+
+#### 9.11.8 Gate
+
+`tools/smp_gate.py` gains **pin R2**: five markers (the `la_pg_snap_add` definition, the overflow flag,
+the off/on around `la_pg_boot_map()`, `TLBRENTRY` repointed to the secondary entry, the
+`la_pg_identity_ok` definition), each with its own mutation self-check; the snapshot call sites must be
+**exactly 2** (removing one makes it 1 and fails); real SMP=1 / SMP=0 objects, with `nm` asserting
+`arkrtos_port_paging_enable_secondary` exists only in the ON build; `context.S` assembled in both modes -
+the ON object must contain `<tlb_refill_entry_secondary>:` and reference `la_refill_stack_sec_top`, and
+after swapping **all three** references of that symbol (`$r21` load, `$sp` load, `.globl`/label
+definition) the symbol must disappear from the object; the OFF object must contain neither symbol; and
+the fixture must actually call the secondary paging self test and print `[smp] pg cpu`.
+
+The first version of that mutation was a false failure: it only swapped `la.abs $r21,
+la_refill_stack_sec_top`, while the secondary entry's `la.abs $sp` and the `.bss` label still referenced
+the symbol, so the symbol stayed in the object and the self-check reported that the pin did not point at
+it. Kept here because it is exactly why the mutation must swap the definitions too.
+
+#### 9.11.9 Verdict and three forbidden readings
+
+Verdict: **`r2_secondary_paging_ok_on_qemu`** - on LA64 / QEMU `-smp 2` a secondary core enables paging
+itself (per-core CSRs), replays the primary's static mapping snapshot, and looks up an identity TLB
+entry using a kernel `.bss` address; the default build keeps identical text/data/bss and no new symbols.
+**Not verified on real hardware.**
+
+1. **Not "cross-core shared VA exists"**: what the two cores share is the same **static** snapshot, not
+   the same app window. R3 requires a real non-demo caller (a user-mode task migrated by `task_to` with
+   both cores touching the same window VA) - none of it is done.
+2. **Not "TLB shootdown exists"**: R4 has no receipt and no invalidation protocol. R2 only gives the
+   secondary entries of its own; shootdown needs entries of someone else's to invalidate.
+3. **`look=1` is not "mappings are coherent"**: it only says that one identity mapping resolves on this
+   core. The snapshot is the primary's view at that instant; entries installed later at runtime are
+   invisible to the secondary - which is precisely what R3/R4 must solve.
+
 ## 10. Enabling `-Wconversion` (2026-11-19): default image byte-identical
 
 `tools/warn_gate.py` goes from six options to seven; the new one is `-Wconversion`, which in

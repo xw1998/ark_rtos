@@ -101,7 +101,7 @@ the correct shape when no shootdown exists.
 | # | Condition | Test |
 |---|---|---|
 | R1 | Main core has an IPI path | **Met (2026-11-23, measured on QEMU LA64 `-smp 2`)**: `arkrtos_port_send_ipi(0)` returns 0; the INT branch of `la_trap_c()` has an `ESTAT.IS` IPI arm that reaches `arkrtos_smp_ipi_handler()`; `arkrtos_port_irq_init()` enables this core's `CORE_EN` and `ECFG.LIE[12]`. Reading `[smp] ping ipi0=2 self=1 back1=1 result=ok`; gate `tools/smp_gate.py` pin R1. See [QEMU emulator port and verification](QEMU模拟器移植与验证.en.md) §9.10 |
-| R2 | Secondary cores enable paging | a `CRMD.PG` write appears in the secondary entry and a secondary core can build and look up its own TLB entries (with a readout) |
+| R2 | Secondary cores enable paging | **Met (2026-11-23, measured on QEMU LA64 `-smp 2`)**: `la_mmu_init()` is split in three, static entries now come from a replayed snapshot (5 entries); `arkrtos_port_paging_enable_secondary()` writes its own `ASID`/`STLBPS`, replays the snapshot, repoints `TLBRENTRY` to `tlb_refill_entry_secondary` (one 8 KB stack per core) and finally goes DA->PG; after enabling it looks up an identity mapping through a kernel `.bss` address and returns -3 on mismatch. Reading `[smp] pg cpu1 on=1 rc=0 look=1 result=ok`; gate `tools/smp_gate.py` pin R2. See [QEMU emulator port and verification](QEMU模拟器移植与验证.en.md) §9.11 |
 | R3 | A real cross-core shared-VA caller exists | at least one non-demo caller: a user-mode task migrated by `task_to` while both cores touch the same window VA |
 | R4 | There is a receipt, not a timeout | it is provable that the target core actually invalidated (a readable counter, on silicon or QEMU) |
 | R5 | A real-board carrier exists | races and coherence protocol behaviour cannot be judged on QEMU alone |
@@ -114,7 +114,9 @@ R1-R4 can be advanced on this machine; R5 needs silicon. Until then shootdown ca
 The order is fixed: ~~R1 first (the only independent increment touching neither paging nor
 scheduling)~~ **done 2026-11-23** (four changes, host and emulator readings, and the gate are in the
 R1 row of §5.3 and [QEMU emulator port and verification](QEMU模拟器移植与验证.en.md) §9.10; next is R2),
-then R2 (only then does a secondary core have entries to invalidate), then the protocol
+~~then R2 (only then does a secondary core have entries to invalidate)~~ **done 2026-11-23**
+(snapshot scope, per-core refill stack, the -3 self-verify and the two wrong predicates are in the R2 row
+of §5.3 and [QEMU emulator port and verification](QEMU模拟器移植与验证.en.md) §9.11; next is R3), then the protocol
 (target core receives IPI, invalidates by VA at a safe point, writes a readable counter; the initiator
 waits for the counter with a bound and reports failure honestly - never "timeout means success").
 

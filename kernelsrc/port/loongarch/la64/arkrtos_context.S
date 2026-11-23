@@ -792,6 +792,25 @@ tlb_refill_entry:
      * 帧 256 字节 / 16 字节对齐，只放 GPR（ERA/PRMD 仍在 CSR 里）。 */
     la.abs  $r21, la_refill_stack_top
     addi.d  $r21, $r21, -256
+#if (ARKRTOS_USE_SMP == 1)
+    b       la_refill_save_gpr
+
+/* ============================================================
+ * 次核的 TLB 重填入口（R2，TLBRENTRY）
+ * @details 与引导核的入口只差第一件事：换到**本核自己的**静态故障栈
+ *          (la_refill_stack_sec_top)。之后保存 GPR、派发、恢复原指令
+ *          全走同一段代码 —— 那边的逻辑与核号无关。
+ *          每核一份栈的理由很硬：两核同时重填时，共用一份 256 字节帧会
+ *          互相覆盖对方保存的 $ra/$sp/$s0..，ertn 回去就是随机现场。
+ *          本段只在 ARKRTOS_USE_SMP=1 时存在：单核档连符号都不出。
+ * ============================================================ */
+    .globl  tlb_refill_entry_secondary
+    .align  2
+tlb_refill_entry_secondary:
+    la.abs  $r21, la_refill_stack_sec_top
+    addi.d  $r21, $r21, -256
+la_refill_save_gpr:
+#endif
     st.d    $ra, $r21, 0
     st.d    $tp, $r21, 8
     st.d    $sp, $r21, 16
@@ -825,8 +844,11 @@ tlb_refill_entry:
     addi.d  $sp, $r21, 0
     bl      la_refill_demand_c
     bnez    $a0, 1f
-    /* 不是这一档能处理的：落回原路径（它自己会再换一次静态栈，不返回） */
-    la.abs  $sp, la_refill_stack_top
+    /* 不是这一档能处理的：落回原路径（不返回）。栈用**本核**那一份帧基址，
+     * 不是引导核的 la_refill_stack_top —— 次核走到这里时引导核可能正在
+     * 自己的帧里跑，共用栈顶会把它踩掉。$r21 是 psABI 的保留寄存器，
+     * la_refill_demand_c 不会改它，所以这里还是本核的帧基址。 */
+    addi.d  $sp, $r21, 0
     bl      la_refill_c
 1:
     ld.d    $ra, $sp, 0
@@ -865,6 +887,17 @@ tlb_refill_entry:
     bl      la_refill_c
 1:
     b       1b
+
+#if (ARKRTOS_USE_SMP == 1)
+/* 非按需档的次核入口：与上面同构，只换静态栈。见 DEMAND 档那段注释。 */
+    .globl  tlb_refill_entry_secondary
+    .align  2
+tlb_refill_entry_secondary:
+    la.abs  $sp, la_refill_stack_sec_top
+    bl      la_refill_c
+1:
+    b       1b
+#endif
 #endif
 
 /* ============================================================
@@ -879,6 +912,17 @@ la_refill_stack_bottom:
     .space  8192
     .globl  la_refill_stack_top
 la_refill_stack_top:
+
+#if (ARKRTOS_USE_SMP == 1)
+/* 次核的静态故障栈（R2）：每核一份，理由见 tlb_refill_entry_secondary。
+ * 大小与引导核那份一致（8 KB），.bss 不占镜像体积。 */
+    .align  4
+    .globl  la_refill_stack_sec_bottom
+la_refill_stack_sec_bottom:
+    .space  8192
+    .globl  la_refill_stack_sec_top
+la_refill_stack_sec_top:
+#endif
 
 /* ============================================================
  * 换窗口专用的静态栈 (U-2)

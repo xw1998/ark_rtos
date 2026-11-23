@@ -71,6 +71,12 @@ static void smp_cpu_clear(arkrtos_smp_cpu_t *p_cpu)
     p_cpu->idle_count      = 0u;
     p_cpu->ipi_back        = 0u;
     p_cpu->ipi_back_req    = 0u;
+    p_cpu->pg_on           = 0u;
+    p_cpu->pg_rc           = 0xFFFFFFFFu;   /* 还没报：不是「成功」也不是「失败」 */
+    p_cpu->pg_look         = 0u;            /* 还没做读回 ⇒ 不是「通过」        */
+    p_cpu->pg_hit          = 0u;
+    p_cpu->pg_ppn          = 0u;
+    p_cpu->pg_ps           = 0u;
 }
 
 /**
@@ -160,6 +166,61 @@ void arkrtos_smp_secondary_main(uint32 cpu)
     }
 
     arkrtos_smp_cpu_online(cpu);
+
+#if ((ARKRTOS_USE_PAGING == 1) && (ARKRTOS_USE_PRIV == 1))
+    /* R2：打开本核的分页。顺序是硬要求 —— 必须在 arkrtos_port_enable_irq()
+     * **之前**：写 CSR 与按快照重放条目之间不能被节拍打断，否则节拍的
+     * 取指/访存会落在一半有映射一半没有的窗口里。
+     *
+     * 返回码如实记账，不美化：pg_on 只有「真的打开了」才置 1。
+     * 打开失败不在这里停机 —— 次核此时还在直译模式（DA=1）下跑，空转
+     * 循环不需要分页，停机只会把「次核没开分页」伪装成「次核没起来」。
+     * 失败由主核在自检里读 pg_rc 报 FAIL。 */
+    {
+        int32 pg_rc = arkrtos_port_paging_enable_secondary();
+
+        arkrtos_smp_cpu[cpu].pg_rc = (uint32)pg_rc;
+        arkrtos_smp_cpu[cpu].pg_on = (pg_rc == 0) ? 1u : 0u;
+
+        /* 调用方自己再核一遍：port 层读回的是它自己的快照口径，这里用一个
+         * **属于内核 .bss 的地址**独立验一次恒等映射。两层都过才算通过。
+         *
+         * 不论打开成功与否都读回一次，原始读数照抄进状态块：失败时这组数
+         * 就是判因依据 —— hit=0 说明条目根本没进 TLB；hit=1 而 ppn/ps 对
+         * 不上说明条目进去了但翻译不是恒等。读数本身不掺判词，判词在
+         * pg_look 里。 */
+        {
+            unsigned long va = (unsigned long)&arkrtos_smp_cpu[cpu];
+            unsigned long mask = ~0xFFFUL;
+            uint32 index = 0u;
+            uint32 ppn = 0u;
+            uint32 ps = 0u;
+            uint32 hit;
+
+            hit = arkrtos_port_paging_lookup(va, &index, &ppn, &ps);
+            arkrtos_smp_cpu[cpu].pg_hit = hit;
+            arkrtos_smp_cpu[cpu].pg_ppn = ppn;
+            arkrtos_smp_cpu[cpu].pg_ps = ps;
+
+            if((hit != 0u) && (ps <= 30u))
+            {
+                /* 与 port 层 la_pg_identity_ok() 同一个口径，理由见那里：
+                 *   1) PPN 是页基址，不是 va；
+                 *   2) lookup 只读 TLBELO0（偶页），va 落在奇页时要给
+                 *      PPN 加一个页大小 —— 内核 .bss 有 4.9 MB，跨过了
+                 *      4 MB 边界，这条地址正好落在奇页里。 */
+                mask = ~((1UL << ps) - 1UL);
+                arkrtos_smp_cpu[cpu].pg_look =
+                    (((unsigned long)ppn + (va & (1UL << ps))) == (va & mask))
+                        ? 1u : 0u;
+            }
+            else
+            {
+                arkrtos_smp_cpu[cpu].pg_look = 0u;
+            }
+        }
+    }
+#endif
 
     /* LA64 的 arkrtos_smp_secondary_entry 进 C 之前已经开过 CRMD.IE
      * （那里不能过 arkrtos_port_enable_irq()：它的 s_in_trap 是全局变量，
