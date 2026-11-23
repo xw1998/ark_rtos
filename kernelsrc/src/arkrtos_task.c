@@ -2789,6 +2789,70 @@ unsigned long arkrtos_cpu_fault_handler(uint32 fault_type)
     return 0u;
 }
 
+#if (ARKRTOS_USE_PAGING_MPROTECT == 1)
+/**
+* @brief 把「当前任务」直接摘掉并切走，不重启（U-22 的违规写路径）
+* @param fault_type 故障类型（只用于记录）
+* @return 可恢复的任务栈指针（非 0 时由板级层 resume_task 完成切换）；
+*         0 表示没有可切换的任务，板级层应停机
+* @details 与 arkrtos_cpu_fault_handler() 的差别只有一条，但这条决定一切：
+*          **不调 arkrtos_task_recover_mark()**。mprotect 的违规写若按「重启
+*          该任务」处理，重启后第一条指令还是那次写，于是无限重启；按 Linux
+*          的默认动作（SIGSEGV = 终止）摘掉才对。fork 出来的子任务被摘掉后，
+*          父进程的 wait4 会照常收尸（arkrtos_linux_abi_on_task_exit 就在
+*          这里调），所以「子进程越界写被杀死、父进程看得见」是可断言的。
+*
+*          收尾顺序与 arkrtos_task_kill_internal() 里那段一样，只是把
+*          「自己切走」换成「返回下一个任务的栈指针」：本函数是在异常里调用的，
+*          异常出口要靠返回的帧来 ertn，不能让 kill_internal 里那条
+*          ARKRTOS_SWITCH_TASK() 在异常上下文中执行。
+*          资源回收（互斥锁交接、VFS 句柄）刻意不在这里做：与
+*          arkrtos_cpu_fault_handler() 的禁用分支同一取舍 —— 故障路径里不做
+*          文件 I/O，句柄由 arkrtos_vfs_app_open() 在下次打开时回收。
+*/
+unsigned long arkrtos_cpu_fault_kill(uint32 fault_type)
+{
+    if(arkrtos_current_task_id <= 0)
+    {
+        arkrtos_fault_record(fault_type, 0);
+        return 0u;
+    }
+
+    {
+        int32 tid  = arkrtos_current_task_id;
+        int32 next;
+
+        arkrtos_fault_record(fault_type, tid);
+
+        ARKRTOS_DISABLE_IRQ();
+        arkrtos_ready_del(tid - 1);
+        arkrtos_delay_disarm(tid - 1);
+        arkrtos_task_table[tid - 1].status = ARKRTOS_TASK_INVALID;
+        ARKRTOS_ENABLE_IRQ();
+
+        /* 先让 fork 记账收尾再选下一个任务：父进程被唤醒后第一件事就是读
+         * 「子进程死了吗 / 退出码是什么」，读到的必须是终态。 */
+        #if (ARKRTOS_USE_EXIT_CODE == 1)
+        /* 这不是 exit(code)，是「被信号终止」：Linux 下写只读页收到的是
+         * SIGSEGV，父进程 wait4 拿到的是 WIFSIGNALED 而不是 WIFEXITED。
+         * 记成普通退出码会让 11 看起来像程序自己 exit(11)。 */
+        arkrtos_task_table[tid - 1].exit_code      = 11;   /* SIGSEGV */
+        arkrtos_task_table[tid - 1].exit_by_signal = 1u;
+        arkrtos_task_table[tid - 1].exit_code_set  = 1u;
+        #endif
+        arkrtos_linux_abi_on_task_exit(tid);
+
+        next = arkrtos_sched_next() + 1;
+        if(next < 0)
+        {
+            next = 0;
+        }
+
+        return (unsigned long)arkrtos_sched_activate(next, 0u);
+    }
+}
+#endif /* ARKRTOS_USE_PAGING_MPROTECT == 1 */
+
 unsigned long arkrtos_hardfault_handler(void)
 {
     return arkrtos_cpu_fault_handler(ARKRTOS_FAULT_HARDFAULT);

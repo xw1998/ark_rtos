@@ -65,7 +65,7 @@ ld.so 要用的三个新系统调用：
 | 号 | 名字 | 实现口径 |
 | --- | --- | --- |
 | 67 | `pread64` | 带偏移读，不动 fd 位置 |
-| 226 | `mprotect` | **接受但不强制**（整窗单条 `PS=20` 条目，RWX）；返回值与 `stat` 里如实标 `accepted, not enforced` |
+| 226 | `mprotect` | 默认档**接受但不强制**（整窗单条 `PS=20` 条目，RWX，`stat` 里如实标 `accepted, not enforced`）；打开 `ARKRTOS_USE_PAGING_MPROTECT` 后有 4 KB 粒度的页级写保护（见 [Linux可执行文件兼容-系统调用ABI](Linux可执行文件兼容-系统调用ABI.md) §8.6） |
 | — | `stat` 第 5 个变体 | `LX_STAT_MPROTECT` 承接上一条的「成功」 |
 
 `mmap`（222）沿用窗口内的单调分配；`MAP_FIXED` **不支持也不假装支持**——所以
@@ -275,7 +275,7 @@ reloc dynmain:      RELATIVE=1 64=2 JUMP_SLOT=6 TPREL64=0
    （`arch_prctl` / `set_thread_area`）、文件映射（`mmap` 带 fd；本内核只有
    一次性快照 + 整文件写回的一档，见 [Linux可执行文件兼容-系统调用ABI](Linux可执行文件兼容-系统调用ABI.md) §8.5）、
    `openat` 之外的整套 `*at`、`rt_sigaction` 等。内核侧大部分没有。
-3. **`mprotect` accepted-not-enforced**：整窗一条 `PS=20` 条目，权限位不生效。
+3. **`mprotect` 默认档 accepted-not-enforced**：整窗一条 `PS=20` 条目，权限位不生效；打开 `ARKRTOS_USE_PAGING_MPROTECT` 后改成 4 KB 粒度真强制（写位），但 `PROT_EXEC` 仍无法强制。
 4. **没有懒绑定**：`JUMP_SLOT` 全部在跳转前做完；`DT_PLTGOT` 的第二项没被
    用来做 `dl_runtime_resolve`。
 5. **`.init_array` / `.fini_array` 不调用**；**TLS 只有「静态块 + `TPREL64`」一档**

@@ -23,7 +23,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（82 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（84 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -51,7 +51,7 @@
 - [kernelsrc/include/arkrtos_spin.h](#kernelsrcincludearkrtos_spinh)（10 项）
 - [kernelsrc/include/arkrtos_svc_abi.h](#kernelsrcincludearkrtos_svc_abih)（4 项）
 - [kernelsrc/include/arkrtos_svc_call.h](#kernelsrcincludearkrtos_svc_callh)（20 项）
-- [kernelsrc/include/arkrtos_task.h](#kernelsrcincludearkrtos_taskh)（6 项）
+- [kernelsrc/include/arkrtos_task.h](#kernelsrcincludearkrtos_taskh)（7 项）
 - [kernelsrc/include/arkrtos_tickless.h](#kernelsrcincludearkrtos_ticklessh)（6 项）
 - [kernelsrc/include/arkrtos_ulog.h](#kernelsrcincludearkrtos_ulogh)（5 项）
 - [kernelsrc/include/arkrtos_ushell.h](#kernelsrcincludearkrtos_ushellh)（4 项）
@@ -62,7 +62,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（12 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（100 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（104 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（18 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -101,7 +101,7 @@
 - [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（27 项）
 - [kernelsrc/src/arkrtos_smp.c](#kernelsrcsrcarkrtos_smpc)（1 项）
 - [kernelsrc/src/arkrtos_smp_sched.c](#kernelsrcsrcarkrtos_smp_schedc)（1 项）
-- [kernelsrc/src/arkrtos_task.c](#kernelsrcsrcarkrtos_taskc)（6 项）
+- [kernelsrc/src/arkrtos_task.c](#kernelsrcsrcarkrtos_taskc)（7 项）
 - [kernelsrc/src/arkrtos_tickless.c](#kernelsrcsrcarkrtos_ticklessc)（1 项）
 - [kernelsrc/src/arkrtos_vfs_lfs.c](#kernelsrcsrcarkrtos_vfs_lfsc)（3 项）
 
@@ -4291,6 +4291,36 @@ seeing each other.  Uniquely for this port the granularity is one
 mapping that would land in it is refused (all-or-nothing).
 > 说明：关档时回 -1（宏），mmap 对 MAP_SHARED 回 -ENOSYS，与打开本开关之前一致。
 
+### `int32 arkrtos_port_paging_protect(unsigned long va, unsigned long len,`
+
+```c
+int32 arkrtos_port_paging_protect(unsigned long va, unsigned long len, uint32 writable);
+```
+
+**Set or clear the write bit of every 4 KB page in a window range (U-22)**
+- `va`：window VA, 4 KB aligned
+- `len`：byte count (> 0, 4 KB aligned)
+- `writable`：1 = restore write access, 0 = make read-only
+**返回**：0 = done; -1 = bad argument or out of the window
+The per-page bit is recorded even for a pair that has no frame
+yet (the demand path reads the ledger when it installs the
+entry), so protecting an untouched page is not a silent no-op.
+Only the write bit changes: this page-table format has no NR/NX
+bit, so PROT_EXEC cannot be enforced and is not pretended to be.
+> 说明：关档时回 -1（宏）：mprotect 只接受并记账，条目仍是可写。
+
+### `uint32 arkrtos_port_paging_mprotect_stat(uint32 which);`
+
+```c
+uint32 arkrtos_port_paging_mprotect_stat(uint32 which);
+```
+
+**mprotect readout (U-22)**
+- `which`：0 = protect calls, 1 = write violations caught, 2 = read-only pages
+**返回**：the reading; 0 for an unknown selector
+只有这一档才有这个符号：关档时一个「永远返回 0 的统计函数」会被
+读成「一次违规都没拦住」，那是错答案。
+
 ### `#if (ARKRTOS_USE_PAGING_SWAP == 1) uint32 arkrtos_port_paging_swap_sta`
 
 ```c
@@ -4722,7 +4752,7 @@ uint32 arkrtos_linux_abi_stat(uint32 which);
 
 **读计数器（内核 / shell 用）**
 - `which`：0 = 已处理，1 = 未知号（-ENOSYS），2 = 用户指针被拒，
-3 = 其它失败，4 = mprotect 接受但未强制
+3 = 其它失败，4 = mprotect 调用（关档接受但不强制、开档真改页）
 **返回**：计数值
 
 ### `uint32 arkrtos_linux_abi_nr_slots(void);`
@@ -7873,6 +7903,20 @@ int32  arkrtos_task_exit_code(int32 task_id, int32 *p_code);
 - `p_code`：可为 0；成功时写回退出码
 **返回**：1 = 该任务上报过退出码，0 = 没上报过 / 任务号非法
 
+### `unsigned long arkrtos_cpu_fault_kill(uint32 fault_type);`
+
+```c
+unsigned long arkrtos_cpu_fault_kill(uint32 fault_type);
+```
+
+**摘掉当前任务并切走，不重启（U-22：mprotect 违规写的处置）**
+- `fault_type`：故障类型（只用于记录）
+**返回**：可恢复的任务栈指针（非 0 时由板级层 resume_task 完成切换）；0 = 无可切换任务
+> 说明：与 arkrtos_cpu_fault_handler 的唯一差别是**不重启**：重启会回到同一条
+违规指令上，形成无限重启。fork 出来的子任务被摘掉后，父进程 wait4 照常
+收尸（收尾里调了 arkrtos_linux_abi_on_task_exit）。只有
+ARKRTOS_USE_PAGING_MPROTECT=1 时才存在这个符号。
+
 ## kernelsrc/include/arkrtos_tickless.h
 
 **Ark RTOS tickless idle（内核内部头文件）**
@@ -9350,6 +9394,36 @@ op 3              ：按 VA 失效，只清这个 VA，内核不受影响 ——
 窗口，只能先切到它的 ASID 再按 VA 撤（撤完把当前空间补铺回来），
 这就是 activate / space_release 现在走的那条路。
 
+### `static uint32 la_pg_page_ro(uint32 space, uint32 idx, uint32 high) {`
+
+```c
+static uint32 la_pg_page_ro(uint32 space, uint32 idx, uint32 high) {
+```
+
+这一对里某一页是否被 mprotect 记成只读（bit0 = 低半页 / bit1 = 高半页）
+
+### `static uint32 la_pg_mprotect_hit(unsigned long badv) {`
+
+```c
+static uint32 la_pg_mprotect_hit(unsigned long badv) {
+```
+
+badv 落在窗口内、且那一页被 mprotect 记成只读 ⇒ 1（这是 mprotect 违规写）
+判据只看台账，不猜故障码：同一对里「低半页只读、高半页可写」
+是合法的（4 KB 粒度），所以必须按页判，不能按对判。
+
+### `static void la_pg_pair_pte(uint32 space, uint32 idx, uint32 pa, uint32`
+
+```c
+static void la_pg_pair_pte(uint32 space, uint32 idx, uint32 pa, uint32 writable, unsigned long *p_lo0, unsigned long *p_lo1) {
+```
+
+按「可写意图 + mprotect 台账」算出这一对的两条条目
+- `writable`：1 = 调用方希望这一对可写（COW 共享对会先被调用方挡成 0）
+只有在 writable 为真时才看台账：COW 共享对本来就必须只读，
+那时 mprotect 记的是「自己加的一位」，撤掉它不该把共享对放开
+（放开就是绕过写时复制，两个进程从此各写各的帧）。
+
 ### `static uint32 la_pg_frame_slot(uint32 pa) {`
 
 ```c
@@ -9610,6 +9684,9 @@ static void la_fork_copy_pair(uint32 *dst, const uint32 *src) {
 
 8 KB 对拷贝：fork 档不开 swap 也要能搬，因此单独一份，不借用
 la_pg_copy_pair()（那个只在 swap 档定义）。
+只在「没有 COW」或「有 swap」的档里才有人调它：COW 档的常驻对只挂引用、
+一个字节都不搬，唯一要搬的是换出去的对（那要 SWAP）。不加这层守卫时，
+six-flag 档（COW=1、SWAP=0）会报一条 -Wunused-function。
 
 ### `int32 arkrtos_port_paging_space_clone(uint32 src, uint32 dst) {`
 
@@ -9698,6 +9775,33 @@ int32 arkrtos_port_paging_map_shared(unsigned long va, unsigned long len) {
 去带着上一任的字节就是一次静默的数据泄漏。
 粒度仍然是 8 KB 对：一段 4 KB 的共享映射也会独占那一对，后面的
 私有 mmap 落在同一对里会被拒绝（调用方错开地址即可）。
+
+### `int32 arkrtos_port_paging_protect(unsigned long va, unsigned long len,`
+
+```c
+int32 arkrtos_port_paging_protect(unsigned long va, unsigned long len, uint32 writable) {
+```
+
+**把一个窗口范围内的 4 KB 页设成只读或可写（U-22）**
+- `va`：窗口内 VA（4 KB 对齐）
+- `len`：字节数（> 0、4 KB 对齐）
+- `writable`：1 = 恢复可写，0 = 设成只读
+**返回**：0 = 已生效；-1 = 参数非法 / 越出窗口
+两遍走：
+1. 先改台账（**包括还没驻留的对**）。按需档的条目是第一次摸到
+才装的，只改条目等于「保护一个没人碰过的页 = 什么都没做」，
+下一次缺页就按可写装回来了；
+2. 再按台账重装**已经驻留**的对：只有这些才有硬件条目可改。
+粒度 4 KB：一对里只保护一页时，另一页照旧可写（这正是「按页」
+与「按对」的差别，夹具里有一条读数专门咬它）。
+三条不猜的规矩：
+1. 整段落在窗口外就整段拒绝（-1），不做「能保护多少保护多少」
+—— 半生效的保护是最难查的那一种；
+2. 重装走 la_pg_install_pair()：它会先按 VA 失效再写条目，旧
+条目可能落在别的路上（按需档是硬件选路的），留着就是一条
+权限相反的同名条目；
+3. COW 共享对（引用计数 > 1）一律按只读装：撤掉 mprotect 那一
+位不能顺手把共享只读也撤了 —— 那是唯一的写时复制触发点。
 
 ### `static void la_pg_boot_map(void) {`
 
@@ -12435,6 +12539,30 @@ static int32 sms_balance_step(void) {
 实现任务调度器、上下文切换的 C 侧逻辑、SVC 系统调用分发，以及任务控制接口。
 中断入口（SysTick_Handler/HardFault_Handler）在 board/ 中实现，
 它们最终调用本文件的 arkrtos_kernel_tick_handler / arkrtos_hardfault_handler。
+
+### `unsigned long arkrtos_cpu_fault_kill(uint32 fault_type) {`
+
+```c
+unsigned long arkrtos_cpu_fault_kill(uint32 fault_type) {
+```
+
+**把「当前任务」直接摘掉并切走，不重启（U-22 的违规写路径）**
+- `fault_type`：故障类型（只用于记录）
+**返回**：可恢复的任务栈指针（非 0 时由板级层 resume_task 完成切换）；
+0 表示没有可切换的任务，板级层应停机
+与 arkrtos_cpu_fault_handler() 的差别只有一条，但这条决定一切：
+**不调 arkrtos_task_recover_mark()**。mprotect 的违规写若按「重启
+该任务」处理，重启后第一条指令还是那次写，于是无限重启；按 Linux
+的默认动作（SIGSEGV = 终止）摘掉才对。fork 出来的子任务被摘掉后，
+父进程的 wait4 会照常收尸（arkrtos_linux_abi_on_task_exit 就在
+这里调），所以「子进程越界写被杀死、父进程看得见」是可断言的。
+收尾顺序与 arkrtos_task_kill_internal() 里那段一样，只是把
+「自己切走」换成「返回下一个任务的栈指针」：本函数是在异常里调用的，
+异常出口要靠返回的帧来 ertn，不能让 kill_internal 里那条
+ARKRTOS_SWITCH_TASK() 在异常上下文中执行。
+资源回收（互斥锁交接、VFS 句柄）刻意不在这里做：与
+arkrtos_cpu_fault_handler() 的禁用分支同一取舍 —— 故障路径里不做
+文件 I/O，句柄由 arkrtos_vfs_app_open() 在下次打开时回收。
 
 ### `int32 arkrtos_stack_guard_check(int32 slot) {`
 

@@ -806,6 +806,31 @@ int32 arkrtos_port_paging_map_shared(unsigned long va, unsigned long len);
 #define arkrtos_port_paging_map_shared(va, len)        (-1)
 #endif
 
+#if (ARKRTOS_USE_PAGING_MPROTECT == 1)
+/** @brief Set or clear the write bit of every 4 KB page in a window range (U-22)
+ *  @param va       window VA, 4 KB aligned
+ *  @param len      byte count (> 0, 4 KB aligned)
+ *  @param writable 1 = restore write access, 0 = make read-only
+ *  @return 0 = done; -1 = bad argument or out of the window
+ *  @details The per-page bit is recorded even for a pair that has no frame
+ *           yet (the demand path reads the ledger when it installs the
+ *           entry), so protecting an untouched page is not a silent no-op.
+ *           Only the write bit changes: this page-table format has no NR/NX
+ *           bit, so PROT_EXEC cannot be enforced and is not pretended to be.
+ *  @note 关档时回 -1（宏）：mprotect 只接受并记账，条目仍是可写。 */
+int32 arkrtos_port_paging_protect(unsigned long va, unsigned long len, uint32 writable);
+
+/** @brief mprotect readout (U-22)
+ *  @param which 0 = protect calls, 1 = write violations caught, 2 = read-only pages
+ *  @return the reading; 0 for an unknown selector
+ *  @details 只有这一档才有这个符号：关档时一个「永远返回 0 的统计函数」会被
+ *           读成「一次违规都没拦住」，那是错答案。 */
+uint32 arkrtos_port_paging_mprotect_stat(uint32 which);
+#else
+#define arkrtos_port_paging_protect(va, len, wr)       (-1)
+#define arkrtos_port_paging_mprotect_stat(which)       (0u)
+#endif
+
 /** @brief Page replacement readout (U-16) - only exists when the swap switch is on
  *  @param which 0 = swap-outs, 1 = swap-ins, 2 = slots in use, 3 = failures,
  *               4 = resident pairs, 5 = slot count
@@ -883,6 +908,8 @@ void arkrtos_port_paging_inval_va(unsigned long va);
 #define arkrtos_port_paging_write_space(sp, va, w, n)   (-1)
 #define arkrtos_port_paging_clone_frame(p, sp)          (-1)
 #define arkrtos_port_paging_map_shared(va, len)         (-1)
+#define arkrtos_port_paging_protect(va, len, wr)        (-1)
+#define arkrtos_port_paging_mprotect_stat(which)        (0u)
 #define arkrtos_port_paging_window_va()                 (0u)
 #define arkrtos_port_paging_asid_current()              (0UL)
 #define arkrtos_port_paging_asid_of(space)              (0u)

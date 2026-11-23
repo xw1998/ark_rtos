@@ -40,7 +40,7 @@ a purely Linux-ABI static binary with its own `_start`):
 **"A static program runs" is not "Linux is supported".** Section 3 lists what is
 explicitly unsupported.
 
-## 1 Supported syscalls (29; 27 measured on hardware, 2 table-and-argument only)
+## 1 Supported syscalls (29; 28 measured on hardware, 1 table-and-argument only)
 
 Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 
@@ -73,20 +73,21 @@ Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 | 221 | `execve` | replace the image of the **calling task**: load segments into its own window, write entry/`sp`/`tp` back into the trap frame; does not return on success | `stage2 pid==stage1 pid -> 11 ok` / `image reloaded (.data marker) -> 1 ok` / `fd 3 survived -> 1 ok` / `heap cursor reset -> 34668544 ok` / `exit code 42` (section 5) |
 | 222 | `mmap` | anonymous only: `MAP_PRIVATE|MAP_ANONYMOUS` or `MAP_SHARED|MAP_ANONYMOUS` (the latter needs `ARKRTOS_USE_PAGING_SHM`, section 8.3); `MAP_FIXED` and `PRIVATE|SHARED` together are refused | `mmap>0 -> 1 ok` / `mmap write/read -> 1 ok` |
 | 260 | `wait4` | only `options 0/WNOHANG`; **without `WNOHANG` it really blocks** (restartable syscall, section 8.1), never invents a status, the bookkeeping entry is consumed on reap (section 8) | `wait4 returned child pid -> 12 ok` / `WEXITSTATUS == 42 -> 42 ok` / `wait4(child) again == -ECHILD -> -10 ok` / `blocking wait4 blocked >= 40 ms -> 1 ok` |
-| 226 | `mprotect` | checks page alignment and window range only, returns 0 and counts separately; **protection is not enforced** (the window is one PS=20 RWX mapping) | no fixture readout (1.1) |
+| 226 | `mprotect` | **real page-level write protection** (`ARKRTOS_USE_PAGING_MPROTECT`, section 8.6): flips the `WE` bit at 4 KB granularity, a violating store kills the task with SIGSEGV; `PROT_EXEC` / `PROT_NONE` are recorded but not enforced; with the switch off it falls back to "validate, return 0" | `mprotect RO == 0 -> 0 ok` / `sibling 4 KB half of the same pair stays writable -> 13107 ok` / `mprotect violation reports SIGSEGV status -> 11 ok` (section 8.6, 11 checks) |
 | 227 | `msync` | writes back only this process's "writable shared file mapping" bookkeeping; a hit inside the heap window syncs, a miss inside it returns 0, outside it `-ENOMEM` (`ARKRTOS_USE_PAGING_FILEMAP`, section 8.5) | `filemap msync rc -> 0 ok` / `filemap private msync rc (no writeback) -> 0 ok` / `filemap shared write persisted, private write not (bits=31) -> 31 ok` |
 
 Unknown numbers return `-ENOSYS` (38) and are counted. Nothing is guessed.
 
-### 1.1 The two that are table-and-argument only
+### 1.1 The one that is table-and-argument only
 
-`pread64`(67) and `mprotect`(226) exist for `ld.so`, and this round has **no
-runtime fixture** for either: the first only has "the number matches
-`asm-generic` plus it compiles under the LA64 board profile", the second only
-has argument validation and an explicit degradation note - it returns 0 but
-**changes no page permission**, and the separate counter exists so that
-"accepted" and "enforced" can be told apart in the readout instead of passing
-off one as the other.
+`pread64`(67) exists for `ld.so`, and this round has **no runtime fixture** for
+it: only "the number matches `asm-generic` plus it compiles under the LA64 board
+profile".
+
+`mprotect`(226) used to be on that list too (validate the arguments, return 0,
+**change no page permission**). Batch C-2 turned it into real TLB edits
+(section 8.6), so it now has 11 serial readouts and is no longer a table-only
+number.
 
 The other 26 numbers all have serial readouts from the `[linux]` / `[pipe]` /
 `[sig]` / `[fork]` fixtures.
@@ -720,6 +721,68 @@ trap frame already carries `$a0..$a7` (`LA_FR_A0 + 0..7`), so the frame layout i
 untouched and native SVC still uses 0..3 only. RV32 was widened for the same
 reason, so the "reads as 0" trap is not left behind there either.
 
+### 8.6 `mprotect` page-level write protection (`ARKRTOS_USE_PAGING_MPROTECT`, 2026-11-23, QEMU LA64)
+
+Up to section 8.5, syscall 226 still only validated its arguments, returned 0 and
+bumped a counter - **not one page permission changed**. That means the RELRO
+protection `ld.so` installs (making `.text` and `.data.rel.ro` read-only) simply
+did not exist: a stray store could rewrite the relocation tables silently.
+Turning on `ARKRTOS_USE_PAGING_MPROTECT` (`depends on ARKRTOS_USE_LINUX_ABI` +
+`PAGING` + `PAGING_PAGES` + `PAGING_DEMAND`) makes `mprotect` edit real TLB
+entries.
+
+| item | current state |
+|---|---|
+| which bit is enforced | only the **write** bit: `PROT_WRITE` decides the page's `WE`. `PROT_EXEC` / `PROT_NONE` are recorded but not enforced - this LA64 path has no NR/NX, so hardware non-executability is impossible, and `PROT_NONE` is not made inaccessible either (reads still read). Stated as a boundary, not pretended away |
+| granularity | **4 KB**, not one 8 KB "pair": the ledger has one page per bit (bit0 = low 4 KB, bit1 = high 4 KB) and the port does two passes. `mprotect(addr, 4096, RO)` makes only the low 4 KB read-only; the high 4 KB of the same pair stays writable |
+| ledger constraint | a pair's entries are written two at a time (`tlbfill` installs pairs), so the protected page must be **resident as a whole pair**: if the pair has no frame yet, fault it in first, then rewrite the entries |
+| how a violation is classified | in the trap, **mprotect is checked before COW**: a hit means `arkrtos_cpu_fault_kill()` - **kill the task, do not restart it** (restarting would re-execute the same store forever); a PLV0 violation halts explicitly (it must not look like "the user program was killed") |
+| status word | being killed by a signal must be distinct from `exit(11)`: the TCB grew one byte, `exit_by_signal`, and the `wait4` status word carries the signal number in its low 7 bits (SIGSEGV = 11) while a normal exit is `code << 8`. Otherwise one out-of-bounds store looks like "a normal exit(11)" to the parent and `WIFEXITED` / `WIFSIGNALED` are both wrong |
+| switching away from the trap | after the kill, `s_pg_commit` must be set explicitly: a forked parent and child share one VA set, so the target frame address and the faulting frame address **can be byte-identical** (both measured as `0x021fbcb0`); `la_switch_prepare` then reads "equal addresses" as "no switch", the window is not swapped, and the frame restored is the faulting one again |
+| lifetime | inherited page by page across `fork` (`la_pg_space_clone`) and cleared when the space is released |
+| revoking | another `mprotect` with `PROT_READ|PROT_WRITE` revokes it. A COW-shared pair is read-only anyway, and revoking mprotect does not open it up (that would bypass copy-on-write and let both processes write their own frame) |
+| log | a violation prints `[LA64U] mprotect violation badv=0x... era=0x... tid=... -> kill task` (the `tid` tells operators which task was reaped; the gate uses this line as cross evidence) |
+
+Readouts (fifth tier plus `-DARKRTOS_USE_PAGING_MPROTECT=1`, **74 checks**, 11 of
+them the mprotect block):
+
+| readout | what it pins down |
+|---|---|
+| `mprotect mmap 8 KB > 0 -> 1` | the block really got an 8 KB anonymous mapping (everything below depends on it) |
+| `mprotect RO == 0 -> 0` | `mprotect(4096, PROT_READ)` is accepted |
+| `read of a read-only page still works -> 4369` | the read-only page can still be **read** (read-only was not turned into inaccessible) |
+| `sibling 4 KB half of the same pair stays writable -> 13107` | the other 4 KB of the same pair **is still writable** - granularity is 4 KB, not 8 KB |
+| `mprotect RW == 0 -> 0` / `write after mprotect(RW) took effect -> 17476` | protection is **revocable**, not one-way |
+| `mprotect RO again == 0 -> 0` | setting read-only a second time works (idempotent) |
+| `clone for mprotect child > 0 -> 1` | the violating child really forked |
+| `mprotect child reaped (killed, not restarted) -> 1` | the violating store is **really blocked**, and blocked by killing the task rather than restarting it (a restart would re-execute the same instruction) |
+| `mprotect violation reports SIGSEGV status -> 11` | the status word uses the Linux "killed by signal" encoding (low 7 bits = signal number), not the high byte of `exit(11)` |
+| `parent page unchanged after the violation -> 17476` | **not one byte** of the child's violating store reached the parent's page |
+
+Plus one serial-side cross evidence line: `[LA64U] mprotect violation badv=0x...
+era=0x... tid=... -> kill task`. Without it, "the child was reaped" could simply
+mean the child exited on its own; this line shows it went through the mprotect
+decision path.
+
+**A trap only a board reveals: identical parent/child frame addresses, and
+`s_pg_commit` does not set itself.** The first board run printed **two identical**
+violation lines, the second one with the parent's `tid`, then the whole demo
+ended early. The root cause was not the ledger but the "kill the task and switch
+away from the exception" step: the forked parent and child share one VA set, so
+the frame address returned equals the faulting frame address, `la_switch_prepare`
+concluded "equal addresses means no switch", the window stayed the child's, the
+frame restored was the child's again, and the same store ran once more - this
+time killing the parent. The fix is an explicit `s_pg_commit = 1u;` after
+`LA_PRIV_APPLY()` in the kill branch. **Address equality says nothing here**, and
+that applies to any future "switch tasks from inside the trap" path.
+
+**Second trap: the wording of a readout line is part of the judgement.** The
+fixture originally wrote `check("...SIGSEGV status -> 11", ...)`, so it printed
+`... -> 11 -> 11 ok` while the gate demanded the literal `... -> 11 ok`; the six
+tier gate therefore failed on its last tier - the code was right, the readout was
+right, **only the label carried one layer too many**. The fix is to keep the
+expected value out of the label and let `check` print it.
+
 ## 9 Switch and zero footprint
 
 `ARKRTOS_USE_LINUX_ABI` (features header + Kconfig), default **0**, and
@@ -761,6 +824,14 @@ four `#error` guards. With it off the file-mapping branch, the write-back
 bookkeeping and `msync` are not compiled and `mmap(fd)` returns `-ENOSYS`; with it
 on the evidence is the 63 readouts of the fifth tier (20 of them filemap) plus the
 337 host checks of the filemap profile.
+`ARKRTOS_USE_PAGING_MPROTECT` (section 8.6), default **0**, `depends on
+ARKRTOS_USE_LINUX_ABI` + `PAGING` + `PAGING_PAGES` + `PAGING_DEMAND` (a pair's
+entries can only be rewritten once demand paging can hand out the frame), with
+four `#error` guards in features.h; with it off the `s_pg_page_ro` ledger,
+`la_pg_page_ro` / `la_pg_mprotect_hit`, the port's `paging_protect` and
+`mprotect_stat` produce nothing and `mprotect` falls back to "validate, return 0,
+count separately"; with it on the evidence is the **74 readouts of the sixth
+tier** (11 of them mprotect) plus the host-side compile gate.
 
 ## 10 Gate
 
@@ -778,9 +849,10 @@ still intact), and parser-selfcheck (eight deliberately broken logs must each be
 rejected).
 
 The fork tier has its own gate, `tools/fork_gate.py` (invoked as `fork` from
-`ci_gate`, **36 items**; it runs the fork, fork+COW, fork+COW+SHM,
-fork+COW+SHM+futex and fork+COW+SHM+futex+filemap tiers one after the other, so
-build / qemu-readout / parser-selfcheck each appear five times):
+`ci_gate`, **43 items**; it runs the fork, fork+COW, fork+COW+SHM,
+fork+COW+SHM+futex, fork+COW+SHM+futex+filemap and
+fork+COW+SHM+futex+filemap+mprotect tiers one after the other, so
+build / qemu-readout / parser-selfcheck each appear six times):
 default-off (fork and SHM), kconfig-wired (all four `depends on`, plus the SHM
 item depending on COW), the four
 `#error` guards in features.h, off-zero-symbols (RV32 `linux_abi.o` has no
@@ -817,7 +889,20 @@ switch has its own `default-off-futex` / `kconfig-wired-futex` /
 `features-guard-futex` items. The filemap round requires 63 checks and validates
 the 20 filemap readouts one by one; its switch has its own
 `default-off-filemap` / `kconfig-wired-filemap` / `features-guard-filemap` items
-(autoconf 0, four `depends on` entries, four `#error` guards).
+(autoconf 0, four `depends on` entries, four `#error` guards). The mprotect
+round requires 74 checks and validates the 11 mprotect readouts one by one
+(mapping success, read-only and read-write both accepted, a read-only page still
+readable, the sibling 4 KB of the same pair still writable, a write going through
+after revocation, the violating child reaped rather than restarted, the status
+word equal to SIGSEGV, the parent page untouched), plus one serial
+`[LA64U] mprotect violation badv=0x... era=0x... tid=... -> kill task` line as
+cross evidence; its parser-selfcheck adds seven more bad logs (a read-only page
+that cannot be read back, granularity degraded to 8 KB, the violating store not
+blocked, the violating store reaching the parent page, the status word used as an
+exit code, the violation log line removed, the success readout removed); its
+switch has its own `default-off-mprotect` / `kconfig-wired-mprotect` /
+`features-guard-mprotect` items (autoconf 0, four `depends on` entries, four
+`#error` guards).
 
 ## 11 Three real bugs and one readout trap found on the way
 

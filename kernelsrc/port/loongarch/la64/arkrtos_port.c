@@ -1060,6 +1060,18 @@ static uint32 s_pg_space_base[ARKRTOS_PAGING_APPS_MAX];
  * 有一个「整块 2 MB 的基址」，物理页是按对零散拿的。 */
 static uint32 s_pg_pair_pa[ARKRTOS_PAGING_APPS_MAX][LA_PG_WIN_ENTRIES];
 static uint32 s_pg_demand_faults;   /* 装过条目的次数（诊断用） */
+
+#if (ARKRTOS_USE_PAGING_MPROTECT == 1)
+/* mprotect 台账（U-22）：每一对 8 KB 里两个 4 KB 页各一位，bit0 = 低半页、
+ * bit1 = 高半页，1 = 只读。按 4 KB 记而不是按对记：条目本来就是两条 4 KB
+ * 各一个 WE 位，按对记会把「保护 4 KB」谎报成「保护 8 KB」。
+ * 这一位与 COW 的引用计数是两回事：COW 说「这一对共享、写要复制」，这一位
+ * 说「这个空间的这一页被 mprotect 要成只读」。两条都为真时条目只读，写故障
+ * 先到 mprotect 判据（见 la_pg_mprotect_hit），不会被 COW 静默接管。 */
+static uint8  s_pg_page_ro[ARKRTOS_PAGING_APPS_MAX][LA_PG_WIN_ENTRIES];
+static uint32 s_pg_mp_calls;
+static uint32 s_pg_mp_faults;
+#endif
 #endif
 
 /* ------------------------------------------------------------
@@ -1128,6 +1140,73 @@ static void la_tlb_inval_page(unsigned long va)
 {
     __asm__ volatile("invtlb 3, $zero, %0"
                      :: "r"((unsigned long)va) : "memory");
+}
+
+#if (ARKRTOS_USE_PAGING_MPROTECT == 1)
+/** 这一对里某一页是否被 mprotect 记成只读（bit0 = 低半页 / bit1 = 高半页） */
+static uint32 la_pg_page_ro(uint32 space, uint32 idx, uint32 high)
+{
+    uint32 bits = (uint32)s_pg_page_ro[space][idx];
+
+    return (((bits & (high ? 2u : 1u)) != 0u) ? 1u : 0u);
+}
+#endif
+
+#if (ARKRTOS_USE_PAGING_MPROTECT == 1)
+/** badv 落在窗口内、且那一页被 mprotect 记成只读 ⇒ 1（这是 mprotect 违规写）
+ *  @details 判据只看台账，不猜故障码：同一对里「低半页只读、高半页可写」
+ *           是合法的（4 KB 粒度），所以必须按页判，不能按对判。 */
+static uint32 la_pg_mprotect_hit(unsigned long badv)
+{
+    unsigned long off;
+    uint32 idx;
+
+    if((badv < LA_WIN_VA) ||
+       (badv >= (LA_WIN_VA + (unsigned long)ARKRTOS_QEMU_APP_SIZE)))
+    {
+        return 0u;
+    }
+
+    off = badv - LA_WIN_VA;
+    idx = (uint32)(off / 0x2000u);
+    if(idx >= LA_PG_WIN_ENTRIES)
+    {
+        return 0u;
+    }
+
+    return la_pg_page_ro(s_pg_app_space, idx,
+                         (((off & 0x1000ul) != 0ul) ? 1u : 0u));
+}
+#endif /* ARKRTOS_USE_PAGING_MPROTECT == 1 */
+
+/** 按「可写意图 + mprotect 台账」算出这一对的两条条目
+ *  @param writable 1 = 调用方希望这一对可写（COW 共享对会先被调用方挡成 0）
+ *  @details 只有在 writable 为真时才看台账：COW 共享对本来就必须只读，
+ *          那时 mprotect 记的是「自己加的一位」，撤掉它不该把共享对放开
+ *          （放开就是绕过写时复制，两个进程从此各写各的帧）。
+ */
+static void la_pg_pair_pte(uint32 space, uint32 idx, uint32 pa, uint32 writable,
+                           unsigned long *p_lo0, unsigned long *p_lo1)
+{
+    unsigned long lo0 = (writable != 0u) ? LA_PTE_APP(pa) : LA_PTE_APP_RO(pa);
+    unsigned long lo1 = (writable != 0u) ? LA_PTE_APP(pa + 0x1000u) : LA_PTE_APP_RO(pa + 0x1000u);
+
+#if (ARKRTOS_USE_PAGING_MPROTECT == 1)
+    if(writable != 0u)
+    {
+        if(la_pg_page_ro(space, idx, 0u) != 0u)
+        {
+            lo0 = LA_PTE_APP_RO(pa);
+        }
+        if(la_pg_page_ro(space, idx, 1u) != 0u)
+        {
+            lo1 = LA_PTE_APP_RO(pa + 0x1000u);
+        }
+    }
+#endif
+
+    *p_lo0 = lo0;
+    *p_lo1 = lo1;
 }
 
 #if (ARKRTOS_USE_PAGING_COW == 1)
@@ -1322,8 +1401,7 @@ static void la_pg_install_pair(uint32 space, uint32 idx, uint32 pa, uint32 writa
     unsigned long saved = la_asid_swap(LA_PG_ASID_OF(space));
 #endif
 
-    lo0 = (writable != 0u) ? LA_PTE_APP(pa) : LA_PTE_APP_RO(pa);
-    lo1 = (writable != 0u) ? LA_PTE_APP(pa + 0x1000u) : LA_PTE_APP_RO(pa + 0x1000u);
+    la_pg_pair_pte(space, idx, pa, writable, &lo0, &lo1);
 
     la_tlb_inval_page(va);
     la_tlb_write(va, 12u, LA_STLB_INDEX(va, LA_PG_WIN_WAY_OF(space)), lo0, lo1);
@@ -1435,6 +1513,16 @@ static int32 la_pg_cow_fault(unsigned long badv)
         return 1;
     }
 #endif
+#if (ARKRTOS_USE_PAGING_MPROTECT == 1)
+    /* mprotect 要的只读不是 COW 要的只读：这里替它复制一份就是「把拒绝变成
+     * 成功」，所以这条路必须先被 la_trap_c 的 mprotect 判据截住。留着这道
+     * 门是为了让「漏截」的后果是「不复制、交回原路径」，而不是静默放行。 */
+    if(la_pg_mprotect_hit(badv) != 0u)
+    {
+        return 0;
+    }
+#endif
+
     if(la_pg_ref_get(pa) <= 1u)
     {
         return 0;
@@ -1523,8 +1611,10 @@ static void la_pg_install_space(uint32 space)
         if(pa != 0u)
         {
             unsigned long va = LA_WIN_VA + (i * 0x2000u);
-            unsigned long lo0 = LA_PTE_APP(pa);
-            unsigned long lo1 = LA_PTE_APP(pa + 0x1000u);
+            unsigned long lo0 = 0ul;
+            unsigned long lo1 = 0ul;
+
+            la_pg_pair_pte(space, i, pa, 1u, &lo0, &lo1);
 
 #if (ARKRTOS_USE_PAGING_COW == 1)
             /* 共享的对按只读装：换回这个空间时若装成可写，第一次写就绕过
@@ -1925,8 +2015,12 @@ uint32 arkrtos_port_paging_pair_pa(uint32 space, uint32 idx)
 
 #define LA_FORK_PAIR_WORDS        (2048u)   /* 8 KB / 4，与本档无关地自带一份 */
 
+#if ((ARKRTOS_USE_PAGING_COW == 0) || (ARKRTOS_USE_PAGING_SWAP == 1))
 /** 8 KB 对拷贝：fork 档不开 swap 也要能搬，因此单独一份，不借用
- *  la_pg_copy_pair()（那个只在 swap 档定义）。 */
+ *  la_pg_copy_pair()（那个只在 swap 档定义）。
+ *  只在「没有 COW」或「有 swap」的档里才有人调它：COW 档的常驻对只挂引用、
+ *  一个字节都不搬，唯一要搬的是换出去的对（那要 SWAP）。不加这层守卫时，
+ *  six-flag 档（COW=1、SWAP=0）会报一条 -Wunused-function。 */
 static void la_fork_copy_pair(uint32 *dst, const uint32 *src)
 {
     uint32 i;
@@ -1936,6 +2030,7 @@ static void la_fork_copy_pair(uint32 *dst, const uint32 *src)
         dst[i] = src[i];
     }
 }
+#endif
 
 /**
 * @brief 把 src 空间的整份窗口内容复制到 dst 空间
@@ -1969,6 +2064,17 @@ int32 arkrtos_port_paging_space_clone(uint32 src, uint32 dst)
         }
 #endif
     }
+
+#if (ARKRTOS_USE_PAGING_MPROTECT == 1)
+    /* mprotect 台账按**页**继承（U-22）：fork 出来的子进程看到的是父进程
+     * 那一刻的保护状态，而不是父进程后来的 mprotect。不搬这一张表，子进程
+     * 第一次缺页就会按「可写」装条目 —— 父进程设的只读在子进程里静默消失，
+     * 这类错只在「子进程写保护页」时暴露，靠读代码看不出来。 */
+    for(i = 0u; i < LA_PG_WIN_ENTRIES; i++)
+    {
+        s_pg_page_ro[dst][i] = s_pg_page_ro[src][i];
+    }
+#endif
 
 #if (ARKRTOS_USE_PAGING_COW == 1)
     /* 写时复制：一个字节都不搬，只把父的每一对指给子并把两边降成只读。
@@ -2341,8 +2447,10 @@ static int32 la_pg_demand_fault(unsigned long badv)
 
     {
         unsigned long va = LA_WIN_VA + (idx * 0x2000u);
-        unsigned long lo0 = LA_PTE_APP(pa);
-        unsigned long lo1 = LA_PTE_APP(pa + 0x1000u);
+        unsigned long lo0 = 0ul;
+        unsigned long lo1 = 0ul;
+
+        la_pg_pair_pte(space, idx, pa, 1u, &lo0, &lo1);
 
 #if (ARKRTOS_USE_PAGING_COW == 1)
         /* 共享的对必须**按只读**装进来。按需档切空间会把整段窗口的翻译全
@@ -2493,6 +2601,119 @@ int32 arkrtos_port_paging_map_shared(unsigned long va, unsigned long len)
     return 0;
 }
 #endif /* ARKRTOS_USE_PAGING_SHM == 1 */
+
+#if ((ARKRTOS_USE_PAGING_MPROTECT == 1) && (ARKRTOS_USE_PAGING_DEMAND == 1))
+/**
+* @brief 把一个窗口范围内的 4 KB 页设成只读或可写（U-22）
+* @param va       窗口内 VA（4 KB 对齐）
+* @param len      字节数（> 0、4 KB 对齐）
+* @param writable 1 = 恢复可写，0 = 设成只读
+* @return 0 = 已生效；-1 = 参数非法 / 越出窗口
+* @details 两遍走：
+*            1. 先改台账（**包括还没驻留的对**）。按需档的条目是第一次摸到
+*               才装的，只改条目等于「保护一个没人碰过的页 = 什么都没做」，
+*               下一次缺页就按可写装回来了；
+*            2. 再按台账重装**已经驻留**的对：只有这些才有硬件条目可改。
+*          粒度 4 KB：一对里只保护一页时，另一页照旧可写（这正是「按页」
+*          与「按对」的差别，夹具里有一条读数专门咬它）。
+*
+*          三条不猜的规矩：
+*            1. 整段落在窗口外就整段拒绝（-1），不做「能保护多少保护多少」
+*                —— 半生效的保护是最难查的那一种；
+*            2. 重装走 la_pg_install_pair()：它会先按 VA 失效再写条目，旧
+*               条目可能落在别的路上（按需档是硬件选路的），留着就是一条
+*               权限相反的同名条目；
+*            3. COW 共享对（引用计数 > 1）一律按只读装：撤掉 mprotect 那一
+*               位不能顺手把共享只读也撤了 —— 那是唯一的写时复制触发点。
+*/
+int32 arkrtos_port_paging_protect(unsigned long va, unsigned long len, uint32 writable)
+{
+    uint32 space = s_pg_app_space;
+    unsigned long end;
+    unsigned long p;
+
+    if((len == 0ul) || ((va & 0xFFFul) != 0ul) || ((len & 0xFFFul) != 0ul))
+    {
+        return -1;
+    }
+    if((va < LA_WIN_VA) || ((va + len) < va) ||
+       ((va + len) > (LA_WIN_VA + (unsigned long)ARKRTOS_QEMU_APP_SIZE)))
+    {
+        return -1;
+    }
+
+    end = va + len;
+
+    for(p = va; p < end; p += 0x1000u)
+    {
+        uint32 idx = (uint32)((p - LA_WIN_VA) / 0x2000u);
+        uint8  bit = (uint8)((((p - LA_WIN_VA) & 0x1000ul) != 0ul) ? 2u : 1u);
+
+        if(writable != 0u)
+        {
+            s_pg_page_ro[space][idx] = (uint8)((uint32)s_pg_page_ro[space][idx] & ~(uint32)bit);
+        }
+        else
+        {
+            s_pg_page_ro[space][idx] = (uint8)((uint32)s_pg_page_ro[space][idx] | (uint32)bit);
+        }
+    }
+
+    for(p = va; p < end; )
+    {
+        uint32 idx = (uint32)((p - LA_WIN_VA) / 0x2000u);
+        uint32 pa  = s_pg_pair_pa[space][idx];
+        uint32 wr  = writable;
+
+        if(pa != 0u)
+        {
+#if (ARKRTOS_USE_PAGING_COW == 1)
+            if((la_pg_ref_get(pa) > 1u)
+#if (ARKRTOS_USE_PAGING_SHM == 1)
+               && (la_pg_pair_shr(space, idx) == 0)
+#endif
+               )
+            {
+                wr = 0u;            /* 共享对：只读是写时复制的触发点 */
+            }
+#endif
+            la_pg_install_pair(space, idx, pa, wr);
+        }
+        p = LA_WIN_VA + ((idx + 1u) * 0x2000u);
+    }
+
+    s_pg_mp_calls++;
+    return 0;
+}
+
+uint32 arkrtos_port_paging_mprotect_stat(uint32 which)
+{
+    switch(which)
+    {
+        case 0u: return s_pg_mp_calls;
+        case 1u: return s_pg_mp_faults;
+        case 2u:
+        {
+            uint32 i;
+            uint32 space;
+            uint32 n = 0u;
+
+            for(space = 0u; space < (uint32)ARKRTOS_PAGING_APPS_MAX; space++)
+            {
+                for(i = 0u; i < LA_PG_WIN_ENTRIES; i++)
+                {
+                    uint32 bits = (uint32)s_pg_page_ro[space][i];
+
+                    n += ((bits & 1u) != 0u) ? 1u : 0u;
+                    n += ((bits & 2u) != 0u) ? 1u : 0u;
+                }
+            }
+            return n;
+        }
+        default: return 0u;
+    }
+}
+#endif /* ARKRTOS_USE_PAGING_MPROTECT && ARKRTOS_USE_PAGING_DEMAND */
 
 /** 开分页之前的首次铺窗口：只铺 space 0（其它空间等 activate 时再要帧） */
 static void la_pg_boot_map(void)
@@ -5151,6 +5372,62 @@ la_frame_word *la_trap_c(la_frame_word *frame)
     }
     else
     {
+#if (ARKRTOS_USE_PAGING_MPROTECT == 1)
+        /* mprotect 的违规写**必须排在 COW 前面判**：只读条目上的一次写，若
+         * 那是 mprotect 要的只读，交给 COW 就等于把一次明确的拒绝变成一次
+         * 悄悄成功的复制。
+         *
+         * 处置按 Linux 的默认动作：终止该任务（SIGSEGV 语义），**不重启** ——
+         * 重启会回到同一条违规指令上，成为无限重启。fork 出来的子任务被摘掉
+         * 后父进程 wait4 照常收尸，这一点是夹具里直接断言的。
+         *
+         * PLV0（内核经窗口写只读页）不适用「终止任务」：那会把一次内核路径
+         * 的越权写变成「用户程序被杀死」。这里明确停机并写清楚，不装作处理过。 */
+        if(((ecode == 2u) || (ecode == 4u)) &&
+           (la_pg_mprotect_hit(la_badv_read()) != 0u))
+        {
+            if((frame[LA_FR_PRMD] & 3UL) != 0UL)
+            {
+                unsigned long next;
+
+                s_pg_mp_faults++;
+                arkrtos_board_puts("[LA64U] mprotect violation badv=");
+                arkrtos_board_puthex((uint32)la_badv_read());
+                arkrtos_board_puts(" era=");
+                arkrtos_board_puthex((uint32)frame[LA_FR_ERA]);
+                arkrtos_board_puts(" tid=");
+                arkrtos_board_putu((uint32)arkrtos_current_task_id);
+                arkrtos_board_puts(" -> kill task\n");
+
+                next = arkrtos_cpu_fault_kill(ARKRTOS_FAULT_MEMFAULT);
+                if(next != 0u)
+                {
+                    frame = (la_frame_word *)(unsigned long)next;
+                    LA_PRIV_APPLY(frame);
+                    /* 这一次是**真的**换到了别人：必须置 commit，否则
+                     * la_switch_prepare 会以为「调度器把原帧交回来了」而
+                     * 不换窗口 —— fork 出来的父子任务共享同一套 VA，目标帧
+                     * 与故障帧地址往往完全相同（QEMU 实测都是 0x021fbcb0），
+                     * 于是恢复出来的还是子进程那一帧：同一条写指令再执行一次，
+                     * 又把父进程杀了。地址相等在这里什么都不说明。 */
+                    s_pg_commit = 1u;
+                }
+            }
+            else
+            {
+                arkrtos_board_puts("[LA64U] mprotect violation from PLV0 badv=");
+                arkrtos_board_puthex((uint32)la_badv_read());
+                arkrtos_board_puts(" -> fatal (kernel wrote a read-only page)\n");
+                arkrtos_port_fatal_report(estat);
+                la_fatal_dump(frame);
+                for(;;)
+                {
+                    __asm__ volatile("idle 0" ::: "memory");
+                }
+            }
+        }
+        else
+#endif
 #if (ARKRTOS_USE_PAGING_COW == 1)
         /* 写时复制：只读条目上的写（Ecode=2 PIS）先交给 COW 复制一次。
          * PLV0 与 PLV3 都走这里 —— 内核经窗口写（copy_to_user）落在共享

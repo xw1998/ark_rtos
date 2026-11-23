@@ -402,6 +402,46 @@
 #endif
 #endif
 
+/* U-22 页级写保护（mprotect 真生效）：0 = 关（mprotect 只接受并记账，整窗仍是
+ * RWX —— 与打开本开关之前逐字节相同），1 = mprotect 按 4 KB 页改硬件条目的
+ * WE 位，写保护页上的写会真的触发故障（PIS/PME），不再被静默放过。
+ *
+ * 五条写死的边界（都是「不支持」，不是欠验）：
+ *   - 只强制「可写 / 只读」一位。PROT_EXEC 与 PROT_NONE 照 Linux 的号码收下并
+ *     记账，但**不强制**：LA64 这一级页表没有 NR/NX 位，硬件根本拦不住取指；
+ *     PROT_NONE 在本档等于只读（读仍允许），不是「谁都不许碰」；
+ *   - 粒度是 4 KB（条目本来就是两条 4 KB 各一个 WE 位），但**必须整对驻留**：
+ *     按需档的条目按 8 KB 对装，保护一对里的一页不会替另一页拿帧；
+ *   - 违规写按当前任务的故障策略处理（fork 出来的子任务被摘下、父进程 wait4
+ *     收尸；App 主任务仍按「重启该 App」），本档不引入 SIGSEGV 送达；
+ *   - 与 COW 共享对（引用计数 > 1）叠加时，写保护撤不掉共享只读：那一对本来
+ *     就必须只读，才会在写时复制。mprotect(RW) 只把「自己加的那一位」撤掉；
+ *   - 换出/换入与 fork 复制都不搬这一位：mprotect 的登记是**每个空间自己的**，
+ *     子进程继承的是 fork 那一刻的条目，不是父进程后续的 mprotect。
+ *
+ * 要求 ARKRTOS_USE_LINUX_ABI == 1、ARKRTOS_USE_PAGING == 1、
+ * ARKRTOS_USE_PAGING_PAGES == 1 与 ARKRTOS_USE_PAGING_DEMAND == 1。
+ *
+ * 由 Kconfig 选择（config ARKRTOS_USE_PAGING_MPROTECT）。默认关：关档时不编译
+ * 那一张页级只读台账，条目一律按可写装，mmap 的整窗 RWX 语义不变，镜像零变化。 */
+#ifndef ARKRTOS_USE_PAGING_MPROTECT
+#define ARKRTOS_USE_PAGING_MPROTECT     0
+#endif
+#if (ARKRTOS_USE_PAGING_MPROTECT == 1)
+#if (ARKRTOS_USE_LINUX_ABI != 1)
+#error "ARKRTOS_USE_PAGING_MPROTECT=1 requires ARKRTOS_USE_LINUX_ABI=1"
+#endif
+#if (ARKRTOS_USE_PAGING != 1)
+#error "ARKRTOS_USE_PAGING_MPROTECT=1 requires ARKRTOS_USE_PAGING=1"
+#endif
+#if (ARKRTOS_USE_PAGING_PAGES != 1)
+#error "ARKRTOS_USE_PAGING_MPROTECT=1 requires ARKRTOS_USE_PAGING_PAGES=1"
+#endif
+#if (ARKRTOS_USE_PAGING_DEMAND != 1)
+#error "ARKRTOS_USE_PAGING_MPROTECT=1 requires ARKRTOS_USE_PAGING_DEMAND=1"
+#endif
+#endif
+
 /* U-16 页替换（swap）：0 = 关（一个字节都不编进镜像），1 = 帧池空了就把某一对
  * 8 KB 换出到内核静态交换区、把两帧还回池子，缺页时再换回来。
  * 要求 ARKRTOS_USE_PAGING_DEMAND == 1 —— 只有按需档才有「这一对还没驻留」

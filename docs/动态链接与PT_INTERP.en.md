@@ -48,8 +48,10 @@ static-profile block from the kernel, but in the dynamic profile that `$tp` is o
 the entry value — ld.so allocates its own unified block and rewrites `$tp`.
 
 Linux ABI additions (`kernelsrc/src/arkrtos_linux_abi.c`): `pread64 (67)`,
-`mprotect (226)` — **accepted, not enforced** (the window is one `PS=20` RWX
-entry), plus the fifth `stat` variant. `MAP_FIXED` is not supported and not
+`mprotect (226)` — **accepted, not enforced** by default (the window is one
+`PS=20` RWX entry; `stat` says `accepted, not enforced`), real 4 KB page-level
+write protection behind `ARKRTOS_USE_PAGING_MPROTECT` (section 8.6 of the Linux ABI
+page); plus the fifth `stat` variant. `MAP_FIXED` is not supported and not
 faked, so a library address is `mmap` result + `p_vaddr`.
 
 ## 3 The minimal ld.so
@@ -164,7 +166,9 @@ Not supported (do not read this as "Linux binaries run now"):
 2. glibc's ld.so needs the whole futex surface (only WAIT/WAKE exist here),
    `rseq`, TLS, fd-backed `mmap` (only a one-shot snapshot + whole-file
    write-back tier exists; see section 8.5 of the Linux ABI page), signals, …;
-3. `mprotect` is accepted, not enforced; the window is RWX;
+3. `mprotect` is accepted, not enforced by default (the window is RWX); the
+   `ARKRTOS_USE_PAGING_MPROTECT` profile enforces the write bit at 4 KB granularity
+   but still cannot make pages non-executable;
 4. no lazy binding, no `.init_array`; TLS is only the static-block + TPREL64
    (initial-exec) form — no `DT_TLSDESC` / `DTPMOD64` / `DTPREL64`;
 5. one dependency level, 4 objects, linear symbol scan;

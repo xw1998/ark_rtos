@@ -91,6 +91,11 @@ typedef struct {
 #if (ARKRTOS_USE_EXIT_CODE == 1)
     int32  exit_code;                               /* U-8：任务自己上报的退出码（exit_code_set=0 时无意义） */
     uint8  exit_code_set;                           /* 1 = exit_code 已由 EXIT_CODE 子命令写入 */
+    uint8  exit_by_signal;                          /* 1 = 该任务是被信号杀死的（exit_code 存信号号）。
+                                                     * wait4 的状态字按 Linux 的「信号终止」编码
+                                                     * （低 7 位 = 信号号），而不是退出码的高字节。
+                                                     * 两者混用会让 WIFEXITED / WIFSIGNALED
+                                                     * 同时判错：一个越界写看起来像正常 exit(11)。 */
 #endif
 #if (ARKRTOS_USE_LINUX_FORK == 1)
     uint32 generation;                              /* U-19：每次 register 自增的注册代次。
@@ -334,5 +339,17 @@ void   arkrtos_kernel_tick_ticks(uint32 n);
  *         0 表示不可恢复（内核/中断上下文故障），板级层应停机等待调试器。 */
 unsigned long arkrtos_cpu_fault_handler(uint32 fault_type);
 unsigned long arkrtos_hardfault_handler(void);
+#if (ARKRTOS_USE_PAGING_MPROTECT == 1)
+/**
+* @brief 摘掉当前任务并切走，不重启（U-22：mprotect 违规写的处置）
+* @param fault_type 故障类型（只用于记录）
+* @return 可恢复的任务栈指针（非 0 时由板级层 resume_task 完成切换）；0 = 无可切换任务
+* @note 与 arkrtos_cpu_fault_handler 的唯一差别是**不重启**：重启会回到同一条
+*       违规指令上，形成无限重启。fork 出来的子任务被摘掉后，父进程 wait4 照常
+*       收尸（收尾里调了 arkrtos_linux_abi_on_task_exit）。只有
+*       ARKRTOS_USE_PAGING_MPROTECT=1 时才存在这个符号。
+*/
+unsigned long arkrtos_cpu_fault_kill(uint32 fault_type);
+#endif
 
 #endif

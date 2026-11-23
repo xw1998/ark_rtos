@@ -37,9 +37,9 @@ U 模式，装载器按 `PT_LOAD` 落段、按 Linux 入口约定把 `sp` 指向
 （[Linux可执行文件兼容-系统调用ABI](docs/Linux可执行文件兼容-系统调用ABI.md)）；
 **还不能跑**的是现成 Linux 发行版里的二进制：动态链接（`PT_INTERP` / `ld.so`）在默认档仍被
 明确拒绝；`fork`/`clone` 只做到一次分叉一次回收（`ARKRTOS_USE_LINUX_FORK`，默认关，带写时复制、
-`MAP_SHARED` 匿名共享页、futex WAIT/WAKE、文件映射写回四档子开关，QEMU 上五档
-21/26/34/43/63 条 check），跨任务信号与每进程 fd 表已随 fork 档落地；仍不支持的是
-`socket`/`select`、`MAP_FIXED` 与页级权限、线程，以及 `mmap` 的完整语义（只做一次性快照 +
+`MAP_SHARED` 匿名共享页、futex WAIT/WAKE、文件映射写回、mprotect 页级写保护五档子开关，QEMU 上六档
+21/26/34/43/63/74 条 check），跨任务信号与每进程 fd 表已随 fork 档落地；仍不支持的是
+`socket`/`select`、`MAP_FIXED`、线程，以及 `mmap` 的完整语义（只做一次性快照 +
 整文件写回）——这些是**不支持**，不是还没测。这条差距按验收条款登记在
 [欠账盘点](docs/欠账盘点.md)，不写成"已经支持 Linux 程序"。
 

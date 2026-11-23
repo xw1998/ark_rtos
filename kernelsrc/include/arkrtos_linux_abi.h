@@ -50,7 +50,7 @@ int32 arkrtos_linux_abi_try(void *p_svc_ctx);
 /**
 * @brief 读计数器（内核 / shell 用）
 * @param which 0 = 已处理，1 = 未知号（-ENOSYS），2 = 用户指针被拒，
-*              3 = 其它失败，4 = mprotect 接受但未强制
+*              3 = 其它失败，4 = mprotect 调用（关档接受但不强制、开档真改页）
 * @return 计数值
 */
 uint32 arkrtos_linux_abi_stat(uint32 which);

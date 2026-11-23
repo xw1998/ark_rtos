@@ -37,7 +37,7 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 
 **「静态程序能跑」≠「支持 Linux」。** 第 3 节列的是明确不支持项，一条不含糊。
 
-## 1 支持的系统调用（29 个；27 个有实跑读数，2 个只有号表与参数校验）
+## 1 支持的系统调用（29 个；28 个有实跑读数，1 个只有号表与参数校验）
 
 编号取 `asm-generic`（LoongArch / RISC-V / ARM64 共用这一套）：
 
@@ -70,19 +70,20 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 | 221 | `execve` | 同任务换镜像：铺段进调用者自己的空间、把入口/`sp`/`tp` 写回 trap 帧；成功不返回 | `stage2 pid==stage1 pid -> 11 ok` / `image reloaded (.data marker) -> 1 ok` / `fd 3 survived -> 1 ok` / `heap cursor reset -> 34668544 ok` / `exit code 42`（§5） |
 | 222 | `mmap` | 只认匿名映射：`MAP_PRIVATE|MAP_ANONYMOUS` 或 `MAP_SHARED|MAP_ANONYMOUS`（后者要 `ARKRTOS_USE_PAGING_SHM`，§8.3）；拒 `MAP_FIXED` 与同时给 `PRIVATE|SHARED` | `mmap>0 -> 1 ok` / `mmap write/read -> 1 ok` |
 | 260 | `wait4` | 只认 `options 0/WNOHANG`；**无 `WNOHANG` 时真阻塞**（可重启系统调用，§8.1），不编造状态，reap 后记账清零（§8） | `wait4 returned child pid -> 12 ok` / `WEXITSTATUS == 42 -> 42 ok` / `wait4(child) again == -ECHILD -> -10 ok` / `blocking wait4 blocked >= 40 ms -> 1 ok` |
-| 226 | `mprotect` | 只校验页对齐与窗口范围、返 0 并单独计数；**保护不生效**（整窗一块 PS=20 的 RWX 映射） | 无夹具读数（§1.1） |
+| 226 | `mprotect` | **有页级写保护**（`ARKRTOS_USE_PAGING_MPROTECT`，§8.6）：4 KB 粒度改 `WE` 位、违规写按 SIGSEGV 杀任务；`PROT_EXEC` / `PROT_NONE` 只记账不强制；关档回「只校验参数、返 0」 | `mprotect RO == 0 -> 0 ok` / `sibling 4 KB half of the same pair stays writable -> 13107 ok` / `mprotect violation reports SIGSEGV status -> 11 ok`（§8.6，11 条） |
 | 227 | `msync` | 只写回本进程记账里的「可写共享文件映射」；窗口内未命中回 0、窗口外 `-ENOMEM`（`ARKRTOS_USE_PAGING_FILEMAP`，§8.5） | `filemap msync rc -> 0 ok` / `filemap private msync rc (no writeback) -> 0 ok` / `filemap shared write persisted, private write not (bits=31) -> 31 ok` |
 
 未知号一律 `-ENOSYS`（38），并计数；**不猜**。
 
-### 1.1 两个只有号表、没有夹具读数的（诚实标注）
+### 1.1 只有号表、没有夹具读数的那个（诚实标注）
 
-`pread64`(67) 与 `mprotect`(226) 是给 `ld.so` 铺段用的，本轮**没有实跑夹具**：
-前者只有「号表与 `asm-generic` 相等 + LA64 板级编译通过」，后者只有参数校验
-（对齐、窗口范围）与一条明确的降级说明——它返 0 但**不改任何页权限**，单独计数
-就是为了让「接受」与「强制」在读数时能分开，不冒充有页级保护。
+`pread64`(67) 是给 `ld.so` 铺段用的，本轮**没有实跑夹具**：只有「号表与
+`asm-generic` 相等 + LA64 板级编译通过」。
 
-表格里其余 27 个号都有 `[linux]` / `[pipe]` / `[sig]` / `[fork]` 夹具的串口读数。
+`mprotect`(226) 原先也在这张名单里（只校验参数、返 0、**不改任何页权限**）。批C-2
+把它改成了真改硬件条目（§8.6），于是它有了 11 条串口读数，不再是「只有号表」的号。
+
+表格里其余 28 个号都有 `[linux]` / `[pipe]` / `[sig]` / `[fork]` 夹具的串口读数。
 
 ## 2 两个 ABI 怎么分界
 
@@ -658,6 +659,59 @@ COW 只管「fork 之后各写各的」这一半；要让父子看见彼此的�
 `$a0..$a7` 本来就在（`LA_FR_A0 + 0..7`），不改帧布局；原生 SVC 一侧仍只用 0..3，两侧互不影响。
 RV32 一并放宽，是为了不留下同一个「读成 0」的坑。
 
+### 8.6 `mprotect` 页级写保护（`ARKRTOS_USE_PAGING_MPROTECT`，2026-11-23，QEMU LA64 实跑）
+
+到 §8.5 为止，226 号 `mprotect` 仍然只校验参数、返 0 并单独计数，**一页的权限都没改**：
+`ld.so` 把 `.text`、`.data.rel.ro` 设成只读（RELRO）之后本该有的保护全都不存在，
+一次野指针写能把重定位表改掉而毫无声响。打开 `ARKRTOS_USE_PAGING_MPROTECT`
+（`depends on ARKRTOS_USE_LINUX_ABI` + `PAGING` + `PAGING_PAGES` + `PAGING_DEMAND`）后，
+`mprotect` 改成真改 TLB 条目。
+
+| 项 | 现状 |
+|---|---|
+| 强制哪一位 | 只有**写位**：`PROT_WRITE` 决定这一页的 `WE`。`PROT_EXEC` / `PROT_NONE` 只记账不强制——LA64 这条通路没有 NR/NX，做不出硬件不可执行；`PROT_NONE` 也没做成不可访问（读仍然可读）。写在边界里，不假装 |
+| 粒度 | **4 KB**，不是 8 KB「对」：台账每位页一位（bit0 = 低 4 KB / bit1 = 高 4 KB），端口两遍走。`mprotect(addr, 4096, RO)` 只让低 4 KB 只读，同一对里的高 4 KB 仍可写 |
+| 对台账的约束 | 一对的条目一次写两条（`tlbfill` 按对装），所以被保护的那一页必须**整对驻留**：对还没有实体时先按需缺页拿帧，再改条目 |
+| 违规写怎么判 | trap 里**先判 mprotect 命中、再判 COW**：命中 ⇒ `arkrtos_cpu_fault_kill()` **杀任务不重启**（重启会回到同一条 store 上无限重启）；PLV0 违规 ⇒ 明确停机（不能表现成「用户程序被杀死」） |
+| 状态字 | 被信号终止必须与 `exit(11)` 分开：TCB 多一个字节 `exit_by_signal`，`wait4` 状态字低 7 位是信号号（SIGSEGV = 11），正常退出才是 `code << 8`。否则一次越界写在父进程眼里就是「正常 exit(11)」，`WIFEXITED` / `WIFSIGNALED` 同时判错 |
+| 从异常里切走 | kill 后必须显式置 `s_pg_commit`：fork 出的父子共享同一套 VA，目标帧地址与故障帧地址**可以完全相同**（实测都是 `0x021fbcb0`），`la_switch_prepare` 会把「地址相等」当成「没切」，于是窗口没换、恢复出来的还是故障那一帧 |
+| 台账生命周期 | 按页随 fork 继承（`la_pg_space_clone` 逐页拷），随空间释放清零 |
+| 撤销 | 再 `mprotect` 一次 `PROT_READ|PROT_WRITE` 即撤。COW 共享对本来只读，撤 mprotect 不会把它放开（放开就是绕过写时复制，两个进程从此各写各的帧） |
+| 日志 | 违规写打一行 `[LA64U] mprotect violation badv=0x… era=0x… tid=… -> kill task`（带 `tid` 是为了运维知道摘的是哪个任务，门禁按这行做交叉证据） |
+
+读数（第五档 + `-DARKRTOS_USE_PAGING_MPROTECT=1`，**74 条 check**，其中 mprotect 段 11 条）：
+
+| 读数 | 钉住什么 |
+|---|---|
+| `mprotect mmap 8 KB > 0 -> 1` | 段里真拿到 8 KB 匿名映射（下面每一条都靠它） |
+| `mprotect RO == 0 -> 0` | `mprotect(4096, PROT_READ)` 被接受 |
+| `read of a read-only page still works -> 4369` | 只读页**读得回来**（没把只读做成不可访问） |
+| `sibling 4 KB half of the same pair stays writable -> 13107` | 同一对里的另一半 4 KB **还能写** ⇒ 粒度是 4 KB 不是 8 KB |
+| `mprotect RW == 0 -> 0` / `write after mprotect(RW) took effect -> 17476` | 保护**可撤**，不是单向的 |
+| `mprotect RO again == 0 -> 0` | 可以第二次设只读（幂等） |
+| `clone for mprotect child > 0 -> 1` | 违规写的子进程真 fork 出来了 |
+| `mprotect child reaped (killed, not restarted) -> 1` | 违规写**真被拦住**，而且拦住后是杀任务、不是重启（重启会回到同一条指令） |
+| `mprotect violation reports SIGSEGV status -> 11` | 状态字按 Linux「被信号终止」编码（低 7 位 = 信号号），不是 `exit(11)` 的高字节 |
+| `parent page unchanged after the violation -> 17476` | 子进程那次违规写**一个字节都没落到父进程那一页** |
+
+再加一条串口侧交叉证据：`[LA64U] mprotect violation badv=0x… era=0x… tid=… -> kill task`
+——没有它，「子进程被 reap」也可能只是子进程自己退出了，这条说明它走的是
+mprotect 判定路径而不是别的死法。
+
+**只有上板才看得见的坑：父子帧地址相同，`s_pg_commit` 不会自己置上。**
+第一版上板时串口出现**两行完全相同**的违规日志、第二条 `tid` 是父任务，随后整轮
+演示提前结束。根因不在 mprotect 台账，而在「杀完任务从异常里切走」这一步：
+fork 出的父子共享同一套 VA，返回的帧地址与故障帧地址一模一样，`la_switch_prepare`
+判「地址相等 ⇒ 没切」，于是窗口仍是子进程的，从故障帧恢复出来的还是子进程那一帧，
+同一条 store 再执行一次，把父进程也杀了。修法是在 kill 分支里 `LA_PRIV_APPLY()`
+之后显式 `s_pg_commit = 1u;`。**「地址相等」在这里什么都不说明**，这条也适用于
+以后任何「从 trap 里换任务」的路径。
+
+**第二个坑：读数行的文案就是判据。** 夹具里那一行原本写成
+`check("…SIGSEGV status -> 11", …)`，于是打印出来是 `… -> 11 -> 11 ok`，
+而门禁要的是逐字 `… -> 11 ok`，于是六档门禁在最后一档判红——代码是对的、读数是对的，
+**只是文案多了一层**。修法是把期望值从标签里拿掉（值由 `check` 自己打）。
+
 ## 9 开关与零体积
 
 - `ARKRTOS_USE_LINUX_ABI`（`kernelsrc/include/arkrtos_features.h`、
@@ -688,6 +742,12 @@ RV32 一并放宽，是为了不留下同一个「读成 0」的坑。
   拿帧，没有 DEMAND 就装不进映射区），`features.h` 用四条 `#error` 顶住；关档时文件映射分支、
   写回记账与 `msync` 全不编译，`mmap(fd)` 回 `-ENOSYS`；开档实测是第五档的 63 条读数（其中
   filemap 20 条）与宿主 filemap 档的 337 checks。
+- `ARKRTOS_USE_PAGING_MPROTECT`（§8.6），默认 **0**，`depends on ARKRTOS_USE_LINUX_ABI` +
+  `ARKRTOS_USE_PAGING` + `ARKRTOS_USE_PAGING_PAGES` + `ARKRTOS_USE_PAGING_DEMAND`
+  （要按需缺页拿帧才能改一对的条目），`features.h` 用四条 `#error` 顶住；关档时台账
+  `s_pg_page_ro`、`la_pg_page_ro` / `la_pg_mprotect_hit`、端口 `paging_protect` 与
+  `mprotect_stat` 全不产出，`mprotect` 回到「只校验参数、返 0、单独计数」；开档实测是
+  **第六档 74 条读数**（其中 mprotect 11 条）与宿主侧编译门禁。
 - `arkrtos_autoconf.h` 由 `tools/kconfig/genconfig.py` 从 `config/arkrtos_defconfig`
   生成，新增 Kconfig 项后必须重跑一次，否则默认档读数里看不到这个开关。
 
@@ -717,7 +777,7 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py --no-build
 | `qemu-readout` | Linux 块 14 条 check 全 ok + PASS 行 + `exit code 7`；管道块 14 条 + `exit code 55`；信号块 31 条 + PASS 行 + `exit code 138`；旁路演示未受影响 |
 | `parser-selfcheck` | 把 8 种坏日志喂回判据，必须全判红 |
 
-fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**36 项**；fork / fork+COW / fork+COW+SHM / fork+COW+SHM+futex / fork+COW+SHM+futex+filemap **五档各跑一遍**，所以 build / qemu-readout / parser-selfcheck 各出现五次）：
+fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**43 项**；fork / fork+COW / fork+COW+SHM / fork+COW+SHM+futex / fork+COW+SHM+futex+filemap / fork+COW+SHM+futex+filemap+mprotect **六档各跑一遍**，所以 build / qemu-readout / parser-selfcheck 各出现六次）：
 
 | 项 | 钉住什么 |
 |---|---|
@@ -732,10 +792,12 @@ fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**3
 | `qemu-readout`（SHM 档） | fork+COW+SHM：`[fork]` **34 条** check 全 `ok`；六条 SHM 读数逐条校验（两条非法形态回 `-38`、映射成功、起始清零、父看到子写、子看到父 fork 之后的写）；内核日志另加至少一条 `pg shm map va=0x<n> pairs>=1` |
 | `qemu-readout`（futex 档） | fork+COW+SHM+futex：`[fork]` **43 条** check 全 `ok`；九条 futex 读数逐条校验（共享页映射成功、无等待者 WAKE 回 0、值不等 WAIT 回 `-11`、不认识的 op 回 `-38`、唤醒者克隆成功、WAIT 被叫醒回 0、父看到唤醒者写的 2、唤醒者被 reap、`bits=3` 两条证据位同时置位）；SHM 与 COW 的全部判据同时仍在 |
 | `qemu-readout`（filemap 档） | fork+COW+SHM+futex+filemap：`[fork]` **63 条** check 全 `ok`；filemap 段 20 条读数逐条校验（私有只读内容三读数、页尾仍是文件内容、offset 非对齐回 `-22`、坏 fd 回 `-9`、只读 fd 上可写共享映射回 `-13`、offset=4096 生效且 EOF 后读零、O_RDWR 打开成功、可写共享映射 + `msync` + `munmap`、私有映射 `msync` 不落盘、重映射读回、`bits=31` 的五位证据）；SHM / COW / futex 的全部判据同时仍在 |
-| `parser-selfcheck` | 9 种坏日志必须判红（COW 档另加 4 种：位掩码丢一位、父写丢失、整类删光 copy 行、fork 时搬了字节；SHM 档再加 5 种：删光 `pg shm map` 行、共享写没被父看到、子看不到父的写、共享页起始非 0、缺映射成功读数；futex 档再加 3 种：WAIT 没被叫醒、唤醒者只看到一半（`bits=1`）、无等待者 WAKE 回 1；filemap 档再加 3 种：写回没发生、写回把文件截短、私有映射的改动被落盘） |
+| `qemu-readout`（mprotect 档） | fork+COW+SHM+futex+filemap+mprotect：`[fork]` **74 条** check 全 `ok`；mprotect 段 11 条逐条校验（映射成功、`mprotect` 双向可设、只读页仍可读、同对另一半仍可写、撤保护后写得进、违规子进程被 reap 而非重启、状态字 = SIGSEGV、父页未被改）；串口另须有一行 `[LA64U] mprotect violation badv=0x… era=0x… tid=… -> kill task`；filemap / SHM / COW / futex 的全部判据同时仍在 |
+| `parser-selfcheck` | 9 种坏日志必须判红（COW 档另加 4 种：位掩码丢一位、父写丢失、整类删光 copy 行、fork 时搬了字节；SHM 档再加 5 种：删光 `pg shm map` 行、共享写没被父看到、子看不到父的写、共享页起始非 0、缺映射成功读数；futex 档再加 3 种：WAIT 没被叫醒、唤醒者只看到一半（`bits=1`）、无等待者 WAKE 回 1；filemap 档再加 3 种：写回没发生、写回把文件截短、私有映射的改动被落盘；mprotect 档再加 7 种：只读页读不回来、粒度退化成 8 KB、违规写没被拦住、违规写改了父页、状态字当成退出码、缺违规日志行、缺成功读数） |
 | `default-off-shm` / `kconfig-wired-shm` / `features-guard-shm` | SHM 开关的三件套：autoconf 为 0、Kconfig 有 `depends on ARKRTOS_USE_PAGING_COW`、features.h 有对应 `#error`；`off-zero-port` 另核关档没有 `arkrtos_port_paging_map_shared` |
 | `default-off-futex` / `kconfig-wired-futex` / `features-guard-futex` | futex 开关的三件套：autoconf 为 0、Kconfig 有 `depends on ARKRTOS_USE_LINUX_ABI`、features.h 有对应 `#error` |
 | `default-off-filemap` / `kconfig-wired-filemap` / `features-guard-filemap` | 文件映射开关的三件套：autoconf 为 0、Kconfig 四条 `depends on`（ABI / PAGING / PAGES / DEMAND）、features.h 四条 `#error` |
+| `default-off-mprotect` / `kconfig-wired-mprotect` / `features-guard-mprotect` | mprotect 开关的三件套：autoconf 为 0、Kconfig 四条 `depends on`（ABI / PAGING / PAGES / DEMAND）、features.h 四条 `#error` |
 | `restore-default` | 收尾把构建目录恢复默认档（避免下一次 `make` 复用 fork 档 `.o`） |
 
 `parser-selfcheck` 是防「绿得没有信息量」的：Linux 块去掉 PASS 行、退出码改 3、

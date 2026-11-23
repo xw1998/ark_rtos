@@ -114,6 +114,7 @@ int32 arkrtos_task_register(void (*entry)(void), uint32 *stack_bottom, uint32 st
      * 这条只在开关打开时存在，默认档一个字节都不多。 */
     p_task->exit_code     = 0;
     p_task->exit_code_set = 0u;
+    p_task->exit_by_signal = 0u;
     #endif
     p_task->is_priv     = 1u;   /* kernel-created tasks run privileged */
     p_task->status      = ARKRTOS_TASK_READY;

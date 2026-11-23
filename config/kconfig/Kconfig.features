@@ -708,6 +708,41 @@ config ARKRTOS_USE_PAGING_FILEMAP
 	  buffer: mmap answers -ENOSYS for a file descriptor and the image does
 	  not change by a byte.
 
+config ARKRTOS_USE_PAGING_MPROTECT
+	bool "Page-granular write protection (mprotect, U-22)"
+	depends on ARKRTOS_USE_LINUX_ABI
+	depends on ARKRTOS_USE_PAGING
+	depends on ARKRTOS_USE_PAGING_PAGES
+	depends on ARKRTOS_USE_PAGING_DEMAND
+	help
+	  Make mprotect real: the range is checked against the App window, the
+	  per-4 KB write bit of the hardware entry is cleared or restored, and a
+	  store to a protected page really faults instead of being accepted.
+
+	  What is enforced, and what is only recorded:
+	    1) Only the write bit.  PROT_EXEC and PROT_NONE are accepted and
+	       counted but NOT enforced: this page-table format has no NR/NX
+	       bit, so instruction fetch cannot be stopped, and PROT_NONE
+	       behaves as read-only here (reads still work).
+	    2) Granularity is 4 KB.  A pair only gets entries through the demand
+	       path, so protecting one page of an unbacked pair does not fault
+	       the other one in.
+	    3) A violation goes through the normal fault policy: a forked child
+	       task is dropped and reaped by wait4, while an App main task is
+	       restarted as before.  No SIGSEGV is delivered by this stage.
+	    4) A write-protect bit never overrides copy-on-write: a shared pair
+	       (refcount > 1) stays read-only so the first store still copies.
+	    5) The ledger is per address space and is not moved by fork or by
+	       swap: the child inherits the entries as they were, not the
+	       parent mprotect calls that came later.
+
+	  Requires ARKRTOS_USE_LINUX_ABI, ARKRTOS_USE_PAGING,
+	  ARKRTOS_USE_PAGING_PAGES and ARKRTOS_USE_PAGING_DEMAND.
+
+	  Off (default) compiles no per-page ledger and leaves every entry
+	  writable: mprotect accepts and counts as before and the image does not
+	  change by a byte.
+
 config ARKRTOS_USE_WIDE_SVC_ARGS
 	bool "Native-width SVC parameter block (wide-argument ABI, U-18)"
 	help

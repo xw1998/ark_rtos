@@ -43,9 +43,13 @@ two more fixtures cover non-blocking pipes (14 checks, `exit code 55`) and signa
 `exit code 138`)
 ([docs/Linux可执行文件兼容-系统调用ABI.md](docs/Linux可执行文件兼容-系统调用ABI.md)). **What does
 not run yet** is a binary taken from a Linux distribution: dynamic linking (`PT_INTERP` / `ld.so`)
-is still explicitly rejected by the default profile, and `fork`/`clone`, cross-task signals
-(a task can only signal itself), fd inheritance, `socket`/`select`, `futex` and real `mmap`
-semantics do not exist - those are *unsupported*, not merely untested. That gap is tracked as an acceptance item in
+is still explicitly rejected by the default profile; `fork`/`clone` exists behind
+`ARKRTOS_USE_LINUX_FORK` (default off) with six tiers - 21 / 26 / 34 / 43 / 63 / 74 checks
+on QEMU - covering copy-on-write, `MAP_SHARED` anonymous pages, futex WAIT/WAKE, file
+mapping write-back and page-level `mprotect`, and cross-task signals plus a per-process fd
+table landed with it. `socket`/`select`, `MAP_FIXED`, threads and the full `mmap` semantics
+(only a one-shot snapshot plus whole-file write-back) do not exist - those are
+*unsupported*, not merely untested. That gap is tracked as an acceptance item in
 [docs/欠账盘点.md](docs/欠账盘点.md); this README never claims "Linux programs are supported".
 
 **It makes exactly one promise: an MCU can install, upgrade and uninstall applications and drivers

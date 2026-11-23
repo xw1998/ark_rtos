@@ -119,6 +119,10 @@ FUTEX_FLAGS = SHM_FLAGS + ["-DARKRTOS_USE_LINUX_FUTEX=1"]
 # 映射的内容要靠按需缺页拿帧装进去，没有 DEMAND 就没有帧。夹具多 20 条 check
 # （其中 SHM 段的一条反假绿在开档时换成 -EBADF，见夹具里那段注释）。
 FILEMAP_FLAGS = FUTEX_FLAGS + ["-DARKRTOS_USE_PAGING_FILEMAP=1"]
+# MPROTECT 档 = FILEMAP 档 + 页级写保护（U-22）。叠在最上面而不是独立档：保护位
+# 写在 PTE 上，而 PTE 只在分页链里存在；夹具这一段还要用 COW 把「子进程写只读页」
+# 造出来，所以下面三档必须同时开。夹具多 10 条 check（63 -> 73）。
+MPROTECT_FLAGS = FILEMAP_FLAGS + ["-DARKRTOS_USE_PAGING_MPROTECT=1"]
 
 LA64_FALLBACKS = [
     "D:/LoongIDE/la64-tool/bin/loongarch64-newlib-elf-gcc.exe",
@@ -176,6 +180,12 @@ EXPECT_FUTEX_CHECKS = 43
 # msync/munmap 两次写回、私有可写映射与它不落盘、以及最后把「共享写落盘 +
 # 私有写不落盘」合成一个位掩码读数（20 % 26 那对字节）。合计 63 条。
 EXPECT_FILEMAP_CHECKS = 63
+# MPROTECT 段多 10 条：8 KB 映射、mprotect(RO)==0、只读页仍可读、**同一对里的
+# 另一半 4 KB 仍可写**（4 KB 粒度与 8 KB 粒度在此分家）、mprotect(RW)==0、
+# 恢复保护后写回得去、再设 RO、为违规写 fork 出子进程、子进程被摘掉（不是重启）、
+# 父进程那一页一个字节没变、状态字是「被信号终止」而不是 exit 码（第 74 条）。
+# 合计 74 条。
+EXPECT_MPROTECT_CHECKS = 74
 
 FAILS = []
 PASSES = []
@@ -411,6 +421,48 @@ def check_default_off():
     else:
         ok("features-guard-filemap", "features.h 四条 filemap #error 都在")
 
+    m = re.search(r"^#define\s+ARKRTOS_USE_PAGING_MPROTECT\s+(\d+)\s*$", ac, re.M)
+    if not m:
+        bad("default-off-mprotect",
+            "arkrtos_autoconf.h 里没有 ARKRTOS_USE_PAGING_MPROTECT")
+    elif m.group(1) != "0":
+        bad("default-off-mprotect", "默认档 ARKRTOS_USE_PAGING_MPROTECT=%s（必须是 0）"
+            % m.group(1))
+    else:
+        ok("default-off-mprotect", "arkrtos_autoconf.h: ARKRTOS_USE_PAGING_MPROTECT 0")
+
+    i = kc.find("config ARKRTOS_USE_PAGING_MPROTECT")
+    if i < 0:
+        bad("kconfig-wired-mprotect",
+            "Kconfig.features 里没有 config ARKRTOS_USE_PAGING_MPROTECT")
+    else:
+        tail = kc[i + len("config ARKRTOS_USE_PAGING_MPROTECT"):]
+        m_end = re.search(r"^(config|menuconfig)\s", tail, re.M)
+        blk = tail[:m_end.start()] if m_end else tail
+        needs = ["ARKRTOS_USE_LINUX_ABI", "ARKRTOS_USE_PAGING",
+                 "ARKRTOS_USE_PAGING_PAGES", "ARKRTOS_USE_PAGING_DEMAND"]
+        miss = [n for n in needs if n not in blk]
+        if miss:
+            bad("kconfig-wired-mprotect",
+                "Kconfig 的 mprotect 项 depends 里缺 %s" % "、".join(miss))
+        else:
+            ok("kconfig-wired-mprotect",
+               "Kconfig 项存在，四条依赖（ABI / PAGING / PAGES / DEMAND）都在")
+
+    guards = [
+        "ARKRTOS_USE_PAGING_MPROTECT=1 requires ARKRTOS_USE_LINUX_ABI=1",
+        "ARKRTOS_USE_PAGING_MPROTECT=1 requires ARKRTOS_USE_PAGING=1",
+        "ARKRTOS_USE_PAGING_MPROTECT=1 requires ARKRTOS_USE_PAGING_PAGES=1",
+        "ARKRTOS_USE_PAGING_MPROTECT=1 requires ARKRTOS_USE_PAGING_DEMAND=1",
+    ]
+    miss = [g for g in guards if g not in fh]
+    if miss:
+        bad("features-guard-mprotect",
+            "features.h 缺 %d 条 mprotect #error（第一缺：%s）"
+            % (len(miss), miss[0]))
+    else:
+        ok("features-guard-mprotect", "features.h 四条 mprotect #error 都在")
+
     bc = read_text(os.path.join(ROOT, "board/qemu_loongarch64/arkrtos_board_config.h"))
     if re.search(r"^#define\s+ARKRTOS_USE_LINUX_FORK\s+1\s*$", bc, re.M):
         bad("board-switch", "QEMU LA64 板级不该缺省打开 fork（应靠 EXTRA_CFLAGS 出镜像）")
@@ -608,7 +660,7 @@ def run_qemu(qemu, seconds):
 
 
 def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
-          futex=False, filemap=False):
+          futex=False, filemap=False, mprotect=False):
     lines = text.replace("\r\n", "\n").splitlines()
 
     def count(pred):
@@ -701,6 +753,26 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
             "私有映射的 msync 没回 0"
         req["filemap shared write persisted, private write not (bits=31) -> 31 ok"] = \
             "写回要么没落盘（共享写丢了）、要么把私有映射的改动也写回去了（两边都不算对）"
+    if mprotect:
+        # 这一段的判据不是「mprotect 返回 0」——那在关档时也成立（关档只记账）。
+        # 要的是「硬件真的挡住了」，所以下面每一条都必须逐字出现。
+        req["mprotect mmap 8 KB > 0 -> 1 ok"] = "mprotect 段没拿到 8 KB 映射"
+        req["mprotect RO == 0 -> 0 ok"] = "mprotect(RO) 没成功"
+        req["read of a read-only page still works -> 4369 ok"] = \
+            "只读页读不回来了（把只读做成了不可访问）"
+        req["sibling 4 KB half of the same pair stays writable -> 13107 ok"] = \
+            "同一对里的另一半 4 KB 也不能写了——保护粒度是 8 KB 而不是 4 KB"
+        req["mprotect RW == 0 -> 0 ok"] = "mprotect(RW) 没成功（保护不可撤）"
+        req["write after mprotect(RW) took effect -> 17476 ok"] = \
+            "撤销保护后写不进去（保护是单向的）"
+        req["mprotect RO again == 0 -> 0 ok"] = "第二次设 RO 失败"
+        req["clone for mprotect child > 0 -> 1 ok"] = "违规写的子进程没 fork 出来"
+        req["mprotect child reaped (killed, not restarted) -> 1 ok"] = \
+            "违规写没被拦住，或拦住后把任务重启了（重启会回到同一条指令）"
+        req["mprotect violation reports SIGSEGV status -> 11 ok"] = \
+            "状态字不是 SIGSEGV（被信号终止与 exit(11) 在 Linux 里是两件事）"
+        req["parent page unchanged after the violation -> 17476 ok"] = \
+            "违规写居然改到了父进程那一页"
     for line, why in req.items():
         if count(lambda s2, t=line: s2.strip() == "[fork] " + t) != 1:
             problems.append("缺 `[fork] %s` —— %s" % (line, why))
@@ -754,6 +826,17 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
         elif any(int(n) < 1 for n in maps):
             problems.append("pg shm map 的 pairs=0（什么都没建）")
 
+    if mprotect:
+        nl = text.replace("\r\n", "\n")
+        # 串口侧必须有一行「按页判违规并摘任务」。没有这行时，上面那条
+        # 「子进程被 reap」仍可能成立（子进程自己退出），所以这行是必需的交叉证据。
+        hits = re.findall(
+            r"^\[LA64U\] mprotect violation badv=0x[0-9a-f]+ era=0x[0-9a-f]+"
+            r" tid=\d+ -> kill task$", nl, re.M)
+        if not hits:
+            problems.append("缺 `[LA64U] mprotect violation badv=<hex> era=<hex>"
+                            " -> kill task`（违规写没走 mprotect 判定路径）")
+
     # 新开关不许把别人的演示搞坏。
     for tag, name in (("[linux] PASS", "Linux ABI 夹具"),
                       ("[FS] PASS", "ramfs 自测"),
@@ -767,7 +850,8 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
                   % (expect_checks, m_par.group(1), m_chi.group(1))]
 
 
-def self_check(good_text, cow=False, shm=False, futex=False, filemap=False):
+def self_check(good_text, cow=False, shm=False, futex=False, filemap=False,
+               mprotect=False):
     """把好日志的九种坏法喂回判据，每一种都必须判红，否则解析器是空转。"""
     g = good_text.replace("\r\n", "\n")
     mutations = {
@@ -839,6 +923,30 @@ def self_check(good_text, cow=False, shm=False, futex=False, filemap=False):
                 "[fork] futex(WAKE) with no waiter == 0 -> 0 ok",
                 "[fork] futex(WAKE) with no waiter == 0 -> 1 FAIL (want 0)"),
         })
+    if mprotect:
+        mutations.update({
+            "只读页读不回来": lambda s: s.replace(
+                "[fork] read of a read-only page still works -> 4369 ok",
+                "[fork] read of a read-only page still works -> -13 FAIL (want 4369)"),
+            # 这一条正是「按 8 KB 对记台账」的形态：另一半页也一起只读了。
+            "粒度退化成 8 KB": lambda s: s.replace(
+                "[fork] sibling 4 KB half of the same pair stays writable -> 13107 ok",
+                "[fork] sibling 4 KB half of the same pair stays writable -> 0 FAIL (want 13107)"),
+            "违规写没被拦住": lambda s: s.replace(
+                "[fork] mprotect child reaped (killed, not restarted) -> 1 ok",
+                "[fork] mprotect child reaped (killed, not restarted) -> 0 FAIL (want 1)"),
+            "违规写改了父页": lambda s: s.replace(
+                "[fork] parent page unchanged after the violation -> 17476 ok",
+                "[fork] parent page unchanged after the violation -> 57005 FAIL (want 17476)"),
+            "状态字当成退出码": lambda s: s.replace(
+                "[fork] mprotect violation reports SIGSEGV status -> 11 ok",
+                "[fork] mprotect violation reports SIGSEGV status -> 2816 FAIL (want 11)"),
+            "缺 mprotect 违规日志": lambda s: re.sub(
+                r"^\[LA64U\] mprotect violation badv=0x[0-9a-f]+ era=0x[0-9a-f]+"
+                r" tid=\d+ -> kill task$\n", "", s, flags=re.M),
+            "缺 mprotect 成功读数": lambda s: s.replace(
+                "[fork] mprotect RO == 0 -> 0 ok\n", ""),
+        })
     if filemap:
         mutations.update({
             "filemap 共享写没落盘": lambda s: s.replace(
@@ -854,16 +962,17 @@ def self_check(good_text, cow=False, shm=False, futex=False, filemap=False):
                 "[fork] filemap msync rc -> 0 ok\n", ""),
         })
     missed = []
-    nchk = (EXPECT_FILEMAP_CHECKS if filemap else
+    nchk = (EXPECT_MPROTECT_CHECKS if mprotect else
+            (EXPECT_FILEMAP_CHECKS if filemap else
             (EXPECT_FUTEX_CHECKS if futex else
             (EXPECT_SHM_CHECKS if shm else
-             (EXPECT_COW_CHECKS if cow else EXPECT_FORK_CHECKS))))
+             (EXPECT_COW_CHECKS if cow else EXPECT_FORK_CHECKS)))))
     for name, fn in mutations.items():
         mutated = fn(g)
         if mutated == g:
             missed.append("%s（坏样本没改到东西）" % name)
             continue
-        passed, _ = judge(mutated, nchk, cow, shm, futex, filemap)
+        passed, _ = judge(mutated, nchk, cow, shm, futex, filemap, mprotect)
         if passed:
             missed.append(name)
     return missed
@@ -916,6 +1025,12 @@ def main(argv):
                                          "-DARKRTOS_USE_LINUX_FUTEX=1",
                                          "-DARKRTOS_USE_PAGING_FILEMAP=1"],
                          "fork+cow+shm+futex+filemap")
+        check_compile_on(la64, key_dir, ["-DARKRTOS_USE_PAGING_COW=1",
+                                         "-DARKRTOS_USE_PAGING_SHM=1",
+                                         "-DARKRTOS_USE_LINUX_FUTEX=1",
+                                         "-DARKRTOS_USE_PAGING_FILEMAP=1",
+                                         "-DARKRTOS_USE_PAGING_MPROTECT=1"],
+                         "fork+cow+shm+futex+filemap+mprotect")
 
     if qemu:
         # 四档各跑一遍：默认 fork（21 条）、fork+COW（26 条 + 内核 COW 日志）、
@@ -932,6 +1047,8 @@ def main(argv):
             (FUTEX_FLAGS, EXPECT_FUTEX_CHECKS, True, True, "fork+cow+shm+futex"),
             (FILEMAP_FLAGS, EXPECT_FILEMAP_CHECKS, True, True,
              "fork+cow+shm+futex+filemap"),
+            (MPROTECT_FLAGS, EXPECT_MPROTECT_CHECKS, True, True,
+             "fork+cow+shm+futex+filemap+mprotect"),
         ]
         if a.no_build:
             rounds = rounds[-1:]
@@ -964,10 +1081,11 @@ def main(argv):
 
             futex = "-DARKRTOS_USE_LINUX_FUTEX=1" in flags
             filemap = "-DARKRTOS_USE_PAGING_FILEMAP=1" in flags
-            passed, notes = judge(text, nchk, cow, shm, futex, filemap)
+            mprotect = "-DARKRTOS_USE_PAGING_MPROTECT=1" in flags
+            passed, notes = judge(text, nchk, cow, shm, futex, filemap, mprotect)
             if passed:
                 ok("qemu-readout", "[%s] %s" % (tag, notes[0]))
-                missed = self_check(text, cow, shm, futex, filemap)
+                missed = self_check(text, cow, shm, futex, filemap, mprotect)
                 if missed:
                     bad("parser-selfcheck",
                         "[%s] 这些坏样本没被判红：%s" % (tag, "、".join(missed)))

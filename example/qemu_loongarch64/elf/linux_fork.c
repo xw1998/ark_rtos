@@ -77,6 +77,7 @@
 
 /* 文件映射（U-21）这一档要用的号：openat / mmap 已经有了 mmap 222，
  * 另外两个是 munmap 215 与 msync 227。 */
+#define LX_MPROTECT         226
 #define LX_OPENAT           56
 #define LX_MUNMAP           215
 #define LX_MSYNC            227
@@ -1108,6 +1109,85 @@ void linux_main(unsigned long sp)
             if (m5[21] == 'V') { bits |= 16; }
             check("filemap shared write persisted, private write not (bits=31)",
                   bits, 31);
+        }
+    }
+#endif
+
+#if defined(ARKRTOS_USE_PAGING_MPROTECT) && (ARKRTOS_USE_PAGING_MPROTECT == 1)
+    /* ---------------- 页级写保护 mprotect（U-22） ----------------
+     * 要证的是「mprotect 真的改了硬件条目」，不是「返回 0」：
+     *   1) 一页设只读后，读仍然成功（只读不是不可访问）；
+     *   2) **同一对里的另一半页照旧可写** —— 这是 4 KB 粒度与 8 KB 粒度
+     *      的分界线，按对记台账的实现在这里必红；
+     *   3) mprotect(RW) 之后写回得去（保护是可撤的，不是单向的）；
+     *   4) 违规写由子进程执行：它必须被**摘掉**（不是重启 —— 重启会回到
+     *      同一条指令、无限重启），父进程 wait4 收得到它，且父进程那一页
+     *      一个字节都没变。串口侧另有 `[LA64U] mprotect violation` 一行，
+     *      由门禁逐字断言。
+     * 反假绿：第 2 条咬粒度、第 4 条咬「真的拦住了」。只有第 1、3 条的话，
+     * 「mprotect 什么都不做」也能全绿。 */
+    {
+        volatile unsigned long *pg;
+        lx_long maddr;
+        lx_long child7;
+        lx_long status7 = -1;
+        lx_long rc7;
+
+        maddr = lx6(LX_MMAP, 0, 8192, 3,
+                    LX_MAP_PRIVATE | LX_MAP_ANONYMOUS, -1, 0);
+        check("mprotect mmap 8 KB > 0", (maddr > 0) ? 1 : 0, 1);
+
+        if (maddr > 0)
+        {
+            pg = (volatile unsigned long *)(unsigned long)maddr;
+            pg[0] = 0x1111ul;           /* 第一页 */
+            pg[1024] = 0x2222ul;        /* 第二页（4096 / 8 = 512 个 long） */
+
+            check("mprotect RO == 0",
+                  lx3(LX_MPROTECT, maddr, 4096, LX_PROT_READ), 0);
+            check("read of a read-only page still works",
+                  (lx_long)pg[0], 0x1111);
+
+            pg[1024] = 0x3333ul;
+            check("sibling 4 KB half of the same pair stays writable",
+                  (lx_long)pg[1024], 0x3333);
+
+            check("mprotect RW == 0",
+                  lx3(LX_MPROTECT, maddr, 4096, LX_PROT_READ | LX_PROT_WRITE), 0);
+            pg[0] = 0x4444ul;
+            check("write after mprotect(RW) took effect",
+                  (lx_long)pg[0], 0x4444);
+
+            check("mprotect RO again == 0",
+                  lx3(LX_MPROTECT, maddr, 4096, LX_PROT_READ), 0);
+
+            child7 = lx3(LX_CLONE, LX_SIGCHLD, 0, 0);
+            if (child7 == 0)
+            {
+                volatile unsigned long *c =
+                    (volatile unsigned long *)(unsigned long)maddr;
+
+                c[0] = 0xDEADul;        /* 这一条必须杀死本任务 */
+                (void)lx1(LX_EXIT, 0);  /* 走到这里 = 写没被拦住 */
+                for (;;)
+                {
+                }
+            }
+
+            check("clone for mprotect child > 0", (child7 > 0) ? 1 : 0, 1);
+
+            rc7 = lx4(LX_WAIT4, child7, (lx_long)(unsigned long)&status7, 0, 0);
+            /* 用位掩码比较而不是直接比 rc7：门禁要逐字断言这一行，
+             * 值随 pid 变就没法当读数用。 */
+            check("mprotect child reaped (killed, not restarted)",
+                  (rc7 == child7) ? 1 : 0, 1);
+            /* 状态字要按 Linux 的「被信号终止」编码（低 7 位 = 信号号），
+             * 不是 exit(11) 的高字节。两件事在 Linux 里 WIFEXITED/WIFSIGNALED
+             * 完全不同，混着报等于把一次越界写说成程序正常退出。 */
+            check("mprotect violation reports SIGSEGV status",
+                  status7 & 0x7F, 11);
+            check("parent page unchanged after the violation",
+                  (lx_long)pg[0], 0x4444);
         }
     }
 #endif

@@ -251,7 +251,7 @@
 #define LX_STAT_ENOSYS              (1u)
 #define LX_STAT_EFAULT              (2u)
 #define LX_STAT_OTHER               (3u)
-#define LX_STAT_MPROTECT            (4u)    /* mprotect 接受但未强制（整窗 RWX） */
+#define LX_STAT_MPROTECT            (4u)    /* mprotect 调用次数（关档接受不强制，开档真改页） */
 #if (ARKRTOS_USE_PAGING_FILEMAP == 1)
 #define LX_STAT_FILEMAP             (5u)    /* 真的写回过几次（U-21） */
 #define LX_STAT_MAX                 (6u)
@@ -1898,15 +1898,24 @@ static int32 lx_pread64(void *p_ctx)
     return (int32)done;
 }
 
-/* mprotect(addr, len, prot)：整窗是一块 PS=20 的 RWX 映射，硬件上拆不出
- * 只读/不可执行页。这里**接受并记账**（返回 0），但保护不生效——单独计数
- * 就是为了让"接受"与"强制"在读数时能分开，不冒充有页级保护。 */
+/* mprotect(addr, len, prot)
+ *
+ * 两种档的语义必须分开读，不许混着讲：
+ *   - 关档（默认）：整窗是一块 PS=20 的 RWX 映射，硬件上拆不出只读页，这里
+ *     **接受并记账**（返回 0）但保护不生效；
+ *   - 开 ARKRTOS_USE_PAGING_MPROTECT 后：按 4 KB 页改硬件条目的 WE 位，写保护
+ *     页上的写真的会触发故障。PROT_EXEC / PROT_NONE 仍只记账不强制（LA64 这
+ *     一级页表没有 NR/NX 位，PROT_NONE 在本档等于只读），这一点写在 features.h
+ *     与 §8.6 里，不在代码里假装。
+ * 记账单独计数，就是为了让「接受」与「强制」在读数时能分开。 */
 static int32 lx_mprotect(void *p_ctx)
 {
     unsigned long addr = ARKRTOS_SVC_ARG(p_ctx, 0u);
     unsigned long len  = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    unsigned long prot = ARKRTOS_SVC_ARG(p_ctx, 2u);
     unsigned long win_base = (unsigned long)ARKRTOS_ELF_WINDOW_BASE;
     unsigned long win_end  = win_base + (uint32)ARKRTOS_ELF_WINDOW_SIZE;
+    unsigned long span;
 
     if((addr & 0xFFFu) != 0u)
     {
@@ -1921,6 +1930,25 @@ static int32 lx_mprotect(void *p_ctx)
     {
         return -LX_ENOMEM;
     }
+
+#if (ARKRTOS_USE_PAGING_MPROTECT == 1)
+    /* 端口层只认 4 KB 对齐的长度：Linux 允许任意 len（尾部按整页算），这里
+     * 按 Linux 的语义向上取整到页，取整后仍越界就回 -ENOMEM。 */
+    span = (len + 0xFFFul) & ~0xFFFul;
+    if((span < len) || (addr > (win_end - 1ul)) || (span > (win_end - addr)))
+    {
+        return -LX_ENOMEM;
+    }
+    if(arkrtos_port_paging_protect(addr, span,
+                                   ((prot & LX_PROT_WRITE) != 0u) ? 1u : 0u) != 0)
+    {
+        return -LX_ENOMEM;
+    }
+#else
+    (void)prot;
+    (void)span;
+#endif
+
     s_stat[LX_STAT_MPROTECT]++;
     return 0;
 }
@@ -2645,7 +2673,18 @@ static int32 lx_wait4(void *p_ctx)
                 uint32 status = (uint32)0u;
 
                 #if (ARKRTOS_USE_EXIT_CODE == 1)
-                status = (((uint32)p_task->exit_code & 0xFFu) << 8);
+                /* 两种终态在 Linux 里编码不同：
+                 *   exit(code)  -> status = code << 8（WIFEXITED=1）
+                 *   被信号杀死  -> status = 信号号（WIFSIGNALED=1）
+                 * 混着写会让 WIFEXITED 对一次 SIGSEGV 也为真。 */
+                if(p_task->exit_by_signal != 0u)
+                {
+                    status = (uint32)p_task->exit_code & 0x7Fu;
+                }
+                else
+                {
+                    status = (((uint32)p_task->exit_code & 0xFFu) << 8);
+                }
                 #endif
                 if(arkrtos_copy_to_user((void *)(unsigned long)ustatus,
                                         &status, 4u) != 0)
