@@ -8632,7 +8632,7 @@ R3 要证明的只有一句：**同一个窗口 VA 在两核上翻译到同一�
 `sms_lazy_init()`**：不初始化的话 `s_win_space` 还是 `.bss` 的 0，会被读成「窗口里装着空间 0、
 装过 0 次」—— 一个看起来权威的错答案。
 
-#### 9.12.4 实测教训（八条，都是踩出来的）
+#### 9.12.4 实测教训（九条，都是踩出来的）
 
 1. **窗口是每核漂移状态，内核访问必须关中断成对完成。** 观察者在 `wait_internal` 里一阻塞，别的
    用户任务就可能把窗口换成自己的空间；醒来再按窗口 VA 去读，轻则读到别人的帧、重则 PLV0 直接
@@ -8663,6 +8663,16 @@ R3 要证明的只有一句：**同一个窗口 VA 在两核上翻译到同一�
    那一下关掉的不是中断而是**分页**，随后任何跨页取指都变成 PPI，整机自锁（`-d int` 抓到
    `pc=0x24e640` 反复 exception 7）。走内核的 `ARKRTOS_ENTER_CRITICAL` 宏：掩码在函数内是局部量、
    进入/退出成对，不依赖调用者的寄存器分配。
+
+9. **`want_user` 与 `is_priv` 语义相反，翻错一次是静默的。** `la_frame_priv_auto(f, want_user)`
+   的第二参数是「该不该是用户态」（1 = 用户），而 `s_next_pplv` 是 PRMD 原值（0 = 内核、3 = 用户），
+   `s_pend_priv` 记的是 `is_priv`（1 = 内核）。R3 三处调用点都按 `is_priv` 直接传了下去，结果**所有
+   用户任务都以 PLV0 恢复**：默认档全部用例、SMP 档 `[shva]` 读数、乃至 `-smp 2` 的八项 PASS 全绿，
+   隔离已经形同虚设却没有任何一条读数报警。暴露它的是 `fork` 门禁里的 `mprotect` 档 —— 那条路要按
+   `PRMD.PPLV` 决定「杀任务」还是「内核写只读页 = 致命」，于是 8/8 确定性停机（同档在 R2 版本上 2/2
+   通过，改动点在 R3，定位是二分比对出来的）。修法：三处显式翻一次语义，并在 `tools/paging_gate.py`
+   的 pin K 里钉死 `(s_next_pplv != 0u) ? 1u : 0u`（改回 `==` 必须报错）。教训本身比缺陷重要：
+   **「权限放松」不会自己报错，只有需要区分权限的用例才能测出来。**
 
 #### 9.12.5 默认档零足迹（附一处 +144 B，必须解释清楚）
 
@@ -8726,6 +8736,10 @@ SMP 档（`-DARKRTOS_USE_SMP=1 -DARKRTOS_CPU_NUM=2 -DARKRTOS_USE_SMP_SCHED=1`，
 宿主侧另加两档覆盖率用例（`tools/coverage_gate.py`）：`pagingsmp`（`arkrtos_paging.c` 在 `SMP=1` 下编，
 覆盖 `bind_task` 的 relocate 与失败回滚）、`smpschedwin`（`arkrtos_smp_sched.c` 在
 `SMP=1/PAGING=1/PRIV=1/CPU_NUM=3` 下编，覆盖 `sms_plan_prepare` 三条判决与 `prepare` 的三步顺序）。
+另有一处判据是收尾时才补的：`tools/paging_gate.py` 的 pin K 新增「`want_user` 换算不许写反」
+（第 9 条教训）。它不在 R3 的功能面上，而是这一轮**静默回归**的唯一防线 —— 没有 mprotect 档，三处
+调用点写反也能全绿。
+
 `kernelsrc/tests/test_smp_sched_win_host.c` 是新用例；`smp_sched` 的状态全是静态、没有 reset 接口，
 所以用例一律「夹具归一 + 读数取增量」收尾，不写死绝对值。
 

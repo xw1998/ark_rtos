@@ -4563,6 +4563,19 @@ window holds space 0, zero installs" - an authoritative-looking wrong answer.
    repeating exception 7). Use the kernel's `ARKRTOS_ENTER_CRITICAL`: the mask is a local inside the
    function and entry/exit are paired, independent of the caller's register allocation.
 
+9. **`want_user` and `is_priv` mean opposite things, and getting it backwards is silent.**
+   The second parameter of `la_frame_priv_auto(f, want_user)` says "should this run as user" (1 = user),
+   while `s_next_pplv` is a raw PRMD value (0 = kernel, 3 = user) and `s_pend_priv` stores `is_priv`
+   (1 = kernel). All three R3 call sites passed the `is_priv` sense straight through, so **every user task
+   was restored at PLV0**: every default-build case went green, the SMP `[shva]` readings went green, and
+   even the eight `-smp 2` PASS lines went green while isolation had silently evaporated. What exposed it
+   was the `mprotect` case of the `fork` gate - that path branches on `PRMD.PPLV` to decide between
+   "kill the task" and "kernel wrote a read-only page = fatal", so it failed 8/8 deterministically (the
+   same case passes 2/2 on the R2 commit, and bisecting the R3 diff located it). Fix: convert explicitly at
+   all three sites and pin `(s_next_pplv != 0u) ? 1u : 0u` in `tools/paging_gate.py`'s pin K (reverting to
+   `==` must fail). The lesson matters more than the defect: **loosening a privilege check never reports
+   itself; only a case that must distinguish privilege levels can see it.**
+
 #### 9.12.5 Zero footprint in the default build (with one +144 B, fully explained)
 
 R3 adds no switch; it all sits under the existing `ARKRTOS_USE_SMP` (default 0) + `ARKRTOS_USE_PAGING` +
@@ -4633,7 +4646,12 @@ Line by line:
 On the host side two coverage cases are added to `tools/coverage_gate.py`: `pagingsmp` (`arkrtos_paging.c`
 built with `SMP=1`, covering `bind_task`'s relocate call and its rollback) and `smpschedwin`
 (`arkrtos_smp_sched.c` built with `SMP=1/PAGING=1/PRIV=1/CPU_NUM=3`, covering the three `sms_plan_prepare`
-decisions and the three-step order in `prepare`). `kernelsrc/tests/test_smp_sched_win_host.c` is the new
+decisions and the three-step order in `prepare`). One check was added only while closing this batch: pin K in `tools/paging_gate.py` now pins the
+`want_user` conversion (lesson 9). It is not part of R3's feature surface but the only guard against the
+silent regression found here - without the `mprotect` case, all three call sites could be inverted and
+still be green.
+
+`kernelsrc/tests/test_smp_sched_win_host.c` is the new
 case; `smp_sched` state is all static with no reset hook, so every case normalises the fixture and reads
 deltas rather than absolute values.
 

@@ -141,7 +141,7 @@ R3_SCHED_MARKERS = [
     "arkrtos_smp_trap_stacks[ARKRTOS_CPU_NUM]",
     "s_pend_space[cpu] = 0xFFFFFFFFu;",
     "arkrtos_port_paging_install_space_window(",
-    "arkrtos_port_frame_apply_priv_auto(frame, (uint32)s_pend_priv[cpu]);",
+    "arkrtos_port_frame_apply_priv_auto(\n            frame, (s_pend_priv[cpu] == 0u) ? 1u : 0u);",
     "int32 arkrtos_smp_sched_win_stat(uint32 *out)",
 ]
 

@@ -267,4 +267,13 @@ config ARKRTOS_SMP_SEC_STACK_SIZE
 	int "Secondary-core stack bytes (ARKRTOS_USE_SMP)"
 	default 8192
 
+config ARKRTOS_SMP_TRAP_STACK_SIZE
+	int "Per-core trap-entry stack bytes (ARKRTOS_USE_SMP)"
+	default 4096
+	help
+	  R3 起次核在「恢复现场之前」要先跑 C 代码（装本核地址空间窗口、
+	  按 ERA 补初始帧的特权级），这段代码不能借用被打断任务的栈。
+	  4 KB 对这两个 C 函数够用；两核各一块静态数组。
+	  默认档（ARKRTOS_USE_SMP=n）下这块数组不参与编译。
+
 endmenu

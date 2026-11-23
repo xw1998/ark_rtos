@@ -1264,7 +1264,11 @@ static void la_frame_priv_auto(la_frame_word *f, uint32 want_user)
 */
 static void la_frame_apply_priv(la_frame_word *frame)
 {
-    la_frame_priv_auto(frame, (s_next_pplv == 0u) ? 1u : 0u);
+    /* s_next_pplv 是 PRMD 值：0 = PLV0（内核），3 = PLV3（用户）。
+     * want_user 的语义是「该不该是用户态」，所以是 != 0 而不是 == 0——
+     * 这里写反过一次：用户任务全被以 PLV0 恢复，隔离形同虚设，
+     * 只有 mprotect 档（要看 PLV 决定杀任务还是停机）才把它暴露出来。 */
+    la_frame_priv_auto(frame, (s_next_pplv != 0u) ? 1u : 0u);
 }
 
 /* 关掉时退化为空操作：默认档的代码与行为一个字节都不变。 */
@@ -3674,7 +3678,7 @@ void la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_frame)
 
     /* 与 C 侧 LA_PRIV_APPLY 同一判定：换完窗口之后写的是目标帧，era 也在
      * 目标空间里读得到（见 la_frame_priv_auto 的长注释）。 */
-    la_frame_priv_auto(new_frame, (s_next_pplv == 0u) ? 1u : 0u);
+    la_frame_priv_auto(new_frame, (s_next_pplv != 0u) ? 1u : 0u);
 }
 
 /* ------------------------------------------------------------ 空间回收 (U-3) */

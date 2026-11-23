@@ -350,7 +350,7 @@ static void test_user_task_window(void)
     CK_I(g_install_calls, 1u);
     CK_I(g_install_last_space, 3u);
     CK_I(g_priv_calls, 1u);
-    CK_I(g_priv_last_want, 0u);
+    CK_I(g_priv_last_want, 1u);        /* 用户任务：want_user = 1 */
     CK(g_priv_last_frame == (void *)frame);
 
     CK_I(win_stat(0), base + 1u);
@@ -393,7 +393,7 @@ static void test_install_failure(void)
     /* 特权级请求与装窗口是两件事：装失败也要照常定级，否则内核任务会被
      * 以 PLV3 恢复。这里用户任务的意图已经消费掉，故仍只记一次。 */
     CK_I(g_priv_calls, 1u);
-    CK_I(g_priv_last_want, 0u);
+    CK_I(g_priv_last_want, 1u);        /* 用户任务：want_user = 1 */
 
     /* 失败后 pending 已清，再调一次不许重复装。 */
     arkrtos_smp_sched_prepare((void *)frame);
@@ -421,7 +421,7 @@ static void test_priv_task(void)
     arkrtos_smp_sched_prepare((void *)frame);
     CK_I(g_install_calls, 0u);
     CK_I(g_priv_calls, 1u);
-    CK_I(g_priv_last_want, 1u);
+    CK_I(g_priv_last_want, 0u);        /* 内核任务：want_user = 0（回升 PLV0） */
     CK_I(win_stat(2), 0u);                  /* 没动窗口：还是夹具归一的空间 0 */
 
     /* 3b. 特权任务但栈在 App 窗口里（R3 实测踩过的那个形态）→ 必须装。
@@ -440,7 +440,7 @@ static void test_priv_task(void)
     CK_I(g_install_calls, 1u);
     CK_I(g_install_last_space, 2u);
     CK_I(g_priv_calls, 2u);
-    CK_I(g_priv_last_want, 1u);
+    CK_I(g_priv_last_want, 0u);        /* 仍是内核任务 */
     CK_I(win_stat(0), base + 1u);
     CK_I(win_stat(2), 2u);
 }

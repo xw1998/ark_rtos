@@ -940,7 +940,10 @@ void arkrtos_smp_sched_prepare(void *frame)
          * 还要看帧里 ERA 是不是落在 App 窗口 VA 里（用户任务卡在系统调用
          * 里被换下时，帧是从内核态存的，硬写 PLV3 会 PPI 死循环，见
          * arkrtos_port_frame_apply_priv_auto 的注释）。 */
-        arkrtos_port_frame_apply_priv_auto(frame, (uint32)s_pend_priv[cpu]);
+        /* s_pend_priv 记的是 is_priv（1 = 内核任务/idle），port 层要的是
+         * want_user（1 = 用户任务）—— 语义相反，这里必须显式翻一次。 */
+        arkrtos_port_frame_apply_priv_auto(
+            frame, (s_pend_priv[cpu] == 0u) ? 1u : 0u);
         s_pend_priv[cpu] = 0xFFu;
     }
 #else

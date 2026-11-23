@@ -450,10 +450,27 @@ def main():
                 bad.append("K: la_switch_prepare 没有清 pending")
             if "new_frame == old_frame" not in prep:
                 bad.append("K: la_switch_prepare 没认出「调度器最终没切走」")
-            if "LA_FR_PRMD" not in prep:
-                bad.append("K: la_switch_prepare 没补写 PRMD（C 侧写在旧窗口里）")
             if "arkrtos_port_paging_activate(space)" not in prep:
                 bad.append("K: la_switch_prepare 没有真正换窗口")
+            # R3 起不直写 LA_FR_PRMD：特权级要按**目标空间**的 ERA 定
+            # （la_frame_priv_auto），并且必须在换完窗口之后再写 ——
+            # 换窗口之前写进去的是旧窗口里的那块内存，不是目标帧。
+            if "la_frame_priv_auto(new_frame," not in prep:
+                bad.append("K: la_switch_prepare 没给目标帧补特权级"
+                           "（R3 起走 la_frame_priv_auto）")
+            elif prep.find("arkrtos_port_paging_activate(space)") >= 0 and \
+                    prep.find("la_frame_priv_auto(new_frame,") < \
+                    prep.find("arkrtos_port_paging_activate(space)"):
+                bad.append("K: la_switch_prepare 在换窗口之前就写目标帧"
+                           "（那时写的还是旧窗口里的内存）")
+        # want_user 的换算：s_next_pplv 是 PRMD 值（0 = PLV0 内核、3 = PLV3
+        # 用户），want_user 的语义是「该不该是用户态」，所以必须是 != 0。
+        # 这条判据来自一次**静默**回归：R3 把它写成 == 0，所有用户任务都以
+        # PLV0 恢复（隔离形同虚设），而默认档全部用例、SMP 档 [shva] 读数
+        # 都是绿的 —— 只有 mprotect 档按 PLV 分流时才暴露成整机停机。
+        if "la_frame_priv_auto(frame, (s_next_pplv != 0u) ? 1u : 0u);" not in port:
+            bad.append("K: la_frame_apply_priv 的 want_user 换算写反/缺失"
+                       "（用户任务会以 PLV0 恢复）")
         return bad
 
     def pin_l(asm):
@@ -698,10 +715,24 @@ def main():
         else:
             if "return -2;" not in body:
                 bad.append("S: activate 装完不抽查首末页（-2 不在）")
-            if "(s_pg_space_base[space] + ARKRTOS_QEMU_APP_SIZE - 0x2000u)" not in body:
-                bad.append("S: activate 的末页期望值不是偶页基址（TLBELO0 口径）")
-            if "(probed_ps != 12u)" not in body:
-                bad.append("S: activate 抽查不核对 ps=12")
+            # R3：自证从「lookup 出 ppn 再比 ps==12」换成 la_pg_win_entry_ok
+            # 按索引 tlbrd 读回整条条目、逐位比对 ehi/lo0/lo1。PS 字段在
+            # TLBELHI 里（比较用 ehi & ~0x1FFF），所以整字比对本身就核对
+            # PS=12 —— 判据没降级，换的是读数方式（tlbsrch 在 QEMU 上不可用）。
+            if "la_pg_win_entry_ok(space, 0u)" not in body:
+                bad.append("S: activate 装完不抽查首页条目（la_pg_win_entry_ok）")
+            if "la_pg_win_entry_ok(space, 1u)" not in body:
+                bad.append("S: activate 装完不抽查末页条目（la_pg_win_entry_ok）")
+            okb = _body(port, "static uint32 la_pg_win_entry_ok(")
+            if not okb:
+                bad.append("S: 找不到 la_pg_win_entry_ok 的定义")
+            else:
+                if "la_tlb_read_at(" not in okb:
+                    bad.append("S: la_pg_win_entry_ok 不按绝对索引读回（tlbsrch 口径已废）")
+                if "(ehi & ~0x1FFFUL)" not in okb:
+                    bad.append("S: la_pg_win_entry_ok 不比对 TLBELHI（PS 字段会漏检）")
+                if "lo0 != LA_PTE_APP(" not in okb or "lo1 != LA_PTE_APP(" not in okb:
+                    bad.append("S: la_pg_win_entry_ok 不同时比对 lo0/lo1（末页是奇页 lo1）")
         if "la_pg_boot_map();" not in port:
             bad.append("S: la_mmu_init 没有调 la_pg_boot_map（第一条 App 取指就 refill）")
         if "LA_STLB_INDEX(ARKRTOS_QEMU_UART_BASE, LA_PG_KUART_WAY)" not in port:
@@ -1256,6 +1287,11 @@ def main():
                           src_hal, src_mpu)),
             ("K", pin_k(src_port.replace("if(la_sp_in_app_window() != 0u)",
                                          "if(la_sp_in_app_window_X() != 0u)", 1))),
+            ("K-", pin_k(src_port.replace("la_frame_priv_auto(new_frame,",
+                                          "la_frame_priv_autoX(new_frame,", 1))),
+            ("K-priv", pin_k(src_port.replace(
+                "(s_next_pplv != 0u) ? 1u : 0u",
+                "(s_next_pplv == 0u) ? 1u : 0u"))),
             ("L", pin_l(src_asm.replace("bl      la_switch_prepare",
                                          "bl      la_switchXprepare", 1))),
             ("M", pin_m(src_elf.replace("arkrtos_paging_space_activate(prev)",
@@ -1290,6 +1326,10 @@ def main():
                 "arkrtos_port_paging_frame_alloc(LA_PG_WIN_PAGEZ, &base) != 0", 1),
                 src_hal, src_mpu, src_pg, src_sh,
                 src_feats, src_kconf, src_board)),
+            ("S-ok", pin_s(src_port.replace("la_pg_win_entry_ok(space, ",
+                                            "la_pg_win_entry_okX(space, "),
+                           src_hal, src_mpu, src_pg, src_sh,
+                           src_feats, src_kconf, src_board)),
             ("T", pin_t(src_port.replace("static uint32 s_pg_pair_pa[",
                                           "static uint32 s_pg_pair_pX[", 1),
                         src_asm, src_feats, src_kconf, src_board)),

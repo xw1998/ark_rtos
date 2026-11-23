@@ -316,6 +316,9 @@
  *
  * SMP 的次核栈用 #ifndef：默认档下它是「定义了但没用」的一个数，
  * 打开 SMP 时工程可以用 -D 覆盖，不必改本文件。
+ *
+ * 次核「恢复现场前」的临时内核栈（R3）：装窗口与补帧特权级都要用它。
+ * 4 KB 对两个 C 函数调用足够；两核各一块，见 arkrtos_smp_sched.c。
  * ============================================================ */
 #undef  ARKRTOS_HW_SAFE
 #define ARKRTOS_HW_SAFE              1
@@ -330,8 +333,6 @@
 #ifndef ARKRTOS_SMP_SEC_STACK_SIZE
 #define ARKRTOS_SMP_SEC_STACK_SIZE   8192
 #endif
-/* 次核「恢复现场前」的临时内核栈（R3）：装窗口与补帧特权级都要用它。
- * 4 KB 对两个 C 函数调用足够；两核各一块，见 arkrtos_smp_sched.c。 */
 #ifndef ARKRTOS_SMP_TRAP_STACK_SIZE
 #define ARKRTOS_SMP_TRAP_STACK_SIZE  4096
 #endif
