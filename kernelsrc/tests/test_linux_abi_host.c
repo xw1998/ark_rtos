@@ -792,7 +792,9 @@ static int call(t_ctx *c, uint32 nr, unsigned long a0, unsigned long a1,
 
 /* 六参调用：mmap 是 addr/len/prot/flags/fd/offset，四参的 call() 装不下。
  * 单独一个入口而不是把 call() 扩成变参：变参在 -Wformat 之外什么都检查不到，
- * 而这里写错的后果是「参数错位但照样返回一个数」。 */
+ * 而这里写错的后果是「参数错位但照样返回一个数」。
+ * 只有文件映射档用得到（mmap 带 fd），其它档编进来就是一条未使用函数告警。 */
+#if (ARKRTOS_USE_PAGING_FILEMAP == 1)
 static int call6(t_ctx *c, uint32 nr, unsigned long a0, unsigned long a1,
                  unsigned long a2, unsigned long a3, unsigned long a4,
                  unsigned long a5)
@@ -809,6 +811,7 @@ static int call6(t_ctx *c, uint32 nr, unsigned long a0, unsigned long a1,
     c->ret_written = 0;
     return (int)arkrtos_linux_abi_try(c);
 }
+#endif /* ARKRTOS_USE_PAGING_FILEMAP == 1 */
 
 static void ck_ret(t_ctx *c, int32 want, const char *what)
 {
