@@ -359,7 +359,8 @@ The built-in fixture still passes in the same profile: `[tls] finished after
    static local-exec path does not need it); the repo's own `ld-ark.so` does it
    now (2026-11-21, §5.6). `set_tid_address` (number
    96) **is implemented**: it only reports the caller's tid and writes nothing to
-   user memory (no futex in this kernel, so the registered pointer has no consumer).
+   user memory (this kernel has only the WAIT/WAKE futex tier and no robust list,
+   so the registered pointer has no consumer).
 3. When the `PT_TLS` block is fully image-backed we do **not** build a TLS block
    for the program; that is its own C runtime's job.
 

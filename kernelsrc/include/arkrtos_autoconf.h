@@ -253,6 +253,9 @@
 #ifndef ARKRTOS_USE_LINUX_FORK
 #define ARKRTOS_USE_LINUX_FORK 0
 #endif
+#ifndef ARKRTOS_USE_LINUX_FUTEX
+#define ARKRTOS_USE_LINUX_FUTEX 0
+#endif
 #ifndef ARKRTOS_USE_LOG
 #define ARKRTOS_USE_LOG 1
 #endif

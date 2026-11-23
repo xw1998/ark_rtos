@@ -33,8 +33,9 @@
   C. 开档编得过：LA64 真板级 + `-DARKRTOS_USE_LINUX_FORK=1
      -DARKRTOS_USE_PAGING_DEMAND=1`，五个内核 TU 与夹具本身全编得过；
      再加一档 `-DARKRTOS_USE_PAGING_COW=1` 同样要全编得过。
-  D. QEMU 真读数（三档各跑一遍）：默认 fork 档 `[fork]` 的 21 条 check、
-     fork+COW 档 26 条、fork+COW+SHM 档 34 条 check 全 ` ok`（一条 FAIL 都不许）、
+  D. QEMU 真读数（四档各跑一遍）：默认 fork 档 `[fork]` 的 21 条 check、
+     fork+COW 档 26 条、fork+COW+SHM 档 34 条、fork+COW+SHM+futex 档 43 条
+     check 全 ` ok`（一条 FAIL 都不许）、
      `PASS: child ran in its own space, exit 42 reaped`、`exit code 0`；
      `[fork] parent pid=` 与 `[fork] child pid=` 两个数必须不同；并且同一次
      启动里 hello / FS / 其余 Linux 夹具的读数仍在（新开关不许把别人的演示
@@ -48,6 +49,13 @@
      `ref=1` 的 copy 行（没共享也去复制就是白搬）、以及
      `cow child saw pre-fork values (bits=3) -> 3 ok`（子进程看到的仍是
      fork 前的值，父改的是它自己那份）。
+     FUTEX 档另加：九条 futex 专属读数逐条出现 —— 共享页映射成功、无等待者
+     时 WAKE 回 0、值不等时 WAIT 回 -EAGAIN、不认识的 op 回 -ENOSYS、fork 出
+     唤醒者、父进程在 WAIT 里真睡着且被叫醒后回 0、父进程看到唤醒者写进去的
+     值、唤醒者同时看到「父等的还是 1」与「WAKE 回 1」（位掩码 3）、子进程被
+     reap。这九条里最要紧的是「父 WAIT 回 0」：它在 LA64 上暴露过一个只有上板
+     才看得见的坑 —— 阻塞返回时 a0（返回值寄存器）被写成 0，而 a0 同时是
+     futex 的第一个参数，重放的那一次读到的 uaddr 就是 0。
      SHM 档另加：至少一条 `[LA64U] pg shm map va=<hex> pairs=<n>` 且 pairs>=1
      （共享页必须在 mmap 时刻就有实体；拖到 fork 才让父子各自缺页拿各自的帧，
      共享就退化成两次私有分配 —— 那种实现父子都不报错，只是各改各的），
@@ -98,6 +106,9 @@ COW_FLAGS = FORK_FLAGS + ["-DARKRTOS_USE_PAGING_COW=1"]
 # SHM 档 = COW 档 + MAP_SHARED 匿名共享页，且必须叠在 COW 档上：共享位的账本
 # 就是 COW 档的引用计数表，非 COW 克隆会把每一对实体复制，共享自然消失。
 SHM_FLAGS = COW_FLAGS + ["-DARKRTOS_USE_PAGING_SHM=1"]
+# FUTEX 档 = SHM 档 + futex WAIT/WAKE。叠在 SHM 档上而不是独立档：futex 的键
+# 是「物理帧 + 页内偏移」，没有共享页就没有跨进程的同一个字可等。
+FUTEX_FLAGS = SHM_FLAGS + ["-DARKRTOS_USE_LINUX_FUTEX=1"]
 
 LA64_FALLBACKS = [
     "D:/LoongIDE/la64-tool/bin/loongarch64-newlib-elf-gcc.exe",
@@ -145,6 +156,10 @@ EXPECT_COW_CHECKS = 26
 # SHM 段多 8 条：两条非法形态回 -ENOSYS（反假绿）、匿名共享映射成功、起始清零、
 # clone>0、父看到子写、子被 reap、子看到父 fork 之后的写。合计 34 条。
 EXPECT_SHM_CHECKS = 34
+# FUTEX 段多 9 条：共享页映射、无等待者 WAKE==0、值不等 WAIT==-EAGAIN、
+# 未知 op==-ENOSYS、clone>0、被叫醒的 WAIT==0、父看到新值、子被 reap、
+# 唤醒者位掩码 3（看到 1 且 WAKE 回 1）。合计 43 条。
+EXPECT_FUTEX_CHECKS = 43
 
 FAILS = []
 PASSES = []
@@ -310,6 +325,35 @@ def check_default_off():
         bad("features-guard-shm", "features.h 缺 `#error \"%s\"`" % g)
     else:
         ok("features-guard-shm", "features.h 的 SHM 依赖 #error 在")
+
+    m = re.search(r"^#define\s+ARKRTOS_USE_LINUX_FUTEX\s+(\d+)\s*$", ac, re.M)
+    if not m:
+        bad("default-off-futex", "arkrtos_autoconf.h 里没有 ARKRTOS_USE_LINUX_FUTEX")
+    elif m.group(1) != "0":
+        bad("default-off-futex", "默认档 ARKRTOS_USE_LINUX_FUTEX=%s（必须是 0）"
+            % m.group(1))
+    else:
+        ok("default-off-futex", "arkrtos_autoconf.h: ARKRTOS_USE_LINUX_FUTEX 0")
+
+    i = kc.find("config ARKRTOS_USE_LINUX_FUTEX")
+    if i < 0:
+        bad("kconfig-wired-futex", "Kconfig.features 里没有 config ARKRTOS_USE_LINUX_FUTEX")
+    else:
+        tail = kc[i + len("config ARKRTOS_USE_LINUX_FUTEX"):]
+        m_end = re.search(r"^(config|menuconfig)\s", tail, re.M)
+        blk = tail[:m_end.start()] if m_end else tail
+        if "ARKRTOS_USE_LINUX_ABI" not in blk:
+            bad("kconfig-wired-futex",
+                "Kconfig 的 futex 项没有 depends on ARKRTOS_USE_LINUX_ABI")
+        else:
+            ok("kconfig-wired-futex", "Kconfig 项存在，depends on ARKRTOS_USE_LINUX_ABI")
+
+    g = "requires ARKRTOS_USE_LINUX_ABI=1"
+    if re.search(r'#error\s+"ARKRTOS_USE_LINUX_FUTEX=1\s+requires ARKRTOS_USE_LINUX_ABI=1"',
+                 fh) is None:
+        bad("features-guard-futex", "features.h 缺 futex 对 LINUX_ABI 的 #error")
+    else:
+        ok("features-guard-futex", "features.h 的 futex 依赖 #error 在")
 
     bc = read_text(os.path.join(ROOT, "board/qemu_loongarch64/arkrtos_board_config.h"))
     if re.search(r"^#define\s+ARKRTOS_USE_LINUX_FORK\s+1\s*$", bc, re.M):
@@ -507,7 +551,8 @@ def run_qemu(qemu, seconds):
     return read_text_bytes(data)
 
 
-def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False):
+def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
+          futex=False):
     lines = text.replace("\r\n", "\n").splitlines()
 
     def count(pred):
@@ -561,6 +606,23 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False):
             "父进程看不到子进程对共享页的写（这根本不是共享）或者看到的不是 300"
         req["shm child saw parent post-fork write (bits=1) -> 1 ok"] = \
             "子进程看不到父进程 fork 之后对共享页的写（共享对被当私有复制了）"
+    if futex:
+        req["futex mmap shared page > 0 -> 1 ok"] = "futex 用的共享页没建起来"
+        req["futex(WAKE) with no waiter == 0 -> 0 ok"] = \
+            "没有等待者时 WAKE 居然回非 0"
+        req["futex(WAIT) on a different value == -EAGAIN -> -11 ok"] = \
+            "值不等时 WAIT 没有立即回 -EAGAIN（说明它去睡了）"
+        req["futex op other than WAIT/WAKE == -ENOSYS -> -38 ok"] = \
+            "不认识的 futex op 被接受了"
+        req["clone for futex child > 0 -> 1 ok"] = "futex 唤醒者没 fork 出来"
+        # 最要紧的一条：LA64 上阻塞返回时 a0 被写成 0，而 a0 就是 uaddr。
+        req["futex(WAIT) returned 0 after being woken -> 0 ok"] = \
+            "父进程没被 WAKE 叫醒（或重放时把 uaddr 读成了返回值 0）"
+        req["parent saw the value the waker wrote -> 2 ok"] = \
+            "父进程醒来后没看到唤醒者写的 2（等的不是同一个字）"
+        req["futex child reaped -> 12 ok"] = "futex 子进程没被 reap"
+        req["futex waker saw 1 and woke 1 (bits=3) -> 3 ok"] = \
+            "唤醒者看到的值不是父进程等的那个 1，或 WAKE 没真叫醒 1 个等待者"
     for line, why in req.items():
         if count(lambda s2, t=line: s2.strip() == "[fork] " + t) != 1:
             problems.append("缺 `[fork] %s` —— %s" % (line, why))
@@ -627,7 +689,7 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False):
                   % (expect_checks, m_par.group(1), m_chi.group(1))]
 
 
-def self_check(good_text, cow=False, shm=False):
+def self_check(good_text, cow=False, shm=False, futex=False):
     """把好日志的九种坏法喂回判据，每一种都必须判红，否则解析器是空转。"""
     g = good_text.replace("\r\n", "\n")
     mutations = {
@@ -687,14 +749,28 @@ def self_check(good_text, cow=False, shm=False):
             "缺共享映射成功读数": lambda s: s.replace(
                 "[fork] mmap(MAP_SHARED|ANON) > 0 -> 1 ok\n", ""),
         })
+    if futex:
+        mutations.update({
+            "futex WAIT 没被叫醒": lambda s: s.replace(
+                "[fork] futex(WAIT) returned 0 after being woken -> 0 ok",
+                "[fork] futex(WAIT) returned 0 after being woken -> -38 FAIL (want 0)"),
+            "futex 唤醒者只看到一半": lambda s: s.replace(
+                "[fork] futex waker saw 1 and woke 1 (bits=3) -> 3 ok",
+                "[fork] futex waker saw 1 and woke 1 (bits=3) -> 1 FAIL (want 3)"),
+            "futex 无等待者 WAKE 回 1": lambda s: s.replace(
+                "[fork] futex(WAKE) with no waiter == 0 -> 0 ok",
+                "[fork] futex(WAKE) with no waiter == 0 -> 1 FAIL (want 0)"),
+        })
     missed = []
-    nchk = EXPECT_SHM_CHECKS if shm else (EXPECT_COW_CHECKS if cow else EXPECT_FORK_CHECKS)
+    nchk = (EXPECT_FUTEX_CHECKS if futex else
+            (EXPECT_SHM_CHECKS if shm else
+             (EXPECT_COW_CHECKS if cow else EXPECT_FORK_CHECKS)))
     for name, fn in mutations.items():
         mutated = fn(g)
         if mutated == g:
             missed.append("%s（坏样本没改到东西）" % name)
             continue
-        passed, _ = judge(mutated, nchk, cow, shm)
+        passed, _ = judge(mutated, nchk, cow, shm, futex)
         if passed:
             missed.append(name)
     return missed
@@ -738,17 +814,24 @@ def main(argv):
         check_compile_on(la64, key_dir, ["-DARKRTOS_USE_PAGING_COW=1",
                                          "-DARKRTOS_USE_PAGING_SHM=1"],
                          "fork+cow+shm")
+        check_compile_on(la64, key_dir, ["-DARKRTOS_USE_PAGING_COW=1",
+                                         "-DARKRTOS_USE_PAGING_SHM=1",
+                                         "-DARKRTOS_USE_LINUX_FUTEX=1"],
+                         "fork+cow+shm+futex")
 
     if qemu:
-        # 三档各跑一遍：默认 fork（21 条）、fork+COW（26 条 + 内核 COW 日志）、
-        # fork+COW+SHM（34 条 + 内核共享映射日志）。别把 SHM 并进 COW 档 ——
-        # 那样「SHM 关档时 mmap(MAP_SHARED) 仍回 -ENOSYS」就测不到了。
+        # 四档各跑一遍：默认 fork（21 条）、fork+COW（26 条 + 内核 COW 日志）、
+        # fork+COW+SHM（34 条 + 内核共享映射日志）、fork+COW+SHM+futex
+        # （43 条 + 跨进程 WAIT/WAKE 配对）。别把 SHM 并进 COW 档、也别把
+        # futex 并进 SHM 档 —— 那样「关档时 mmap(MAP_SHARED) / futex 仍回
+        # -ENOSYS」这两条反假绿就永远测不到了。
         # 每次都要先 clean（make 不跟踪 EXTRA_CFLAGS），否则上一次的 .o 会让
         # 这一次只做链接，镜像里根本没有这一档的代码 —— 本门禁最想抓的假绿。
         rounds = [
             (FORK_FLAGS, EXPECT_FORK_CHECKS, False, False, "fork"),
             (COW_FLAGS, EXPECT_COW_CHECKS, True, False, "fork+cow"),
             (SHM_FLAGS, EXPECT_SHM_CHECKS, True, True, "fork+cow+shm"),
+            (FUTEX_FLAGS, EXPECT_FUTEX_CHECKS, True, True, "fork+cow+shm+futex"),
         ]
         if a.no_build:
             rounds = rounds[-1:]
@@ -779,10 +862,11 @@ def main(argv):
             except OSError:
                 dump = ""
 
-            passed, notes = judge(text, nchk, cow, shm)
+            futex = (tag == "fork+cow+shm+futex")
+            passed, notes = judge(text, nchk, cow, shm, futex)
             if passed:
                 ok("qemu-readout", "[%s] %s" % (tag, notes[0]))
-                missed = self_check(text, cow, shm)
+                missed = self_check(text, cow, shm, futex)
                 if missed:
                     bad("parser-selfcheck",
                         "[%s] 这些坏样本没被判红：%s" % (tag, "、".join(missed)))

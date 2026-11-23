@@ -161,8 +161,8 @@ Not supported (do not read this as "Linux binaries run now"):
 1. stock distribution binaries — their `PT_INTERP` points at glibc's
    `ld-linux-loongarch-lp64d.so.1`, which is not in this repo, and there is no
    LA64 Linux cross toolchain on this machine;
-2. glibc's ld.so needs `futex`, `rseq`, TLS, fd-backed `mmap`, signals, … none
-   of which exist here;
+2. glibc's ld.so needs the whole futex surface (only WAIT/WAKE exist here),
+   `rseq`, TLS, fd-backed `mmap`, signals, …;
 3. `mprotect` is accepted, not enforced; the window is RWX;
 4. no lazy binding, no `.init_array`; TLS is only the static-block + TPREL64
    (initial-exec) form — no `DT_TLSDESC` / `DTPMOD64` / `DTPREL64`;

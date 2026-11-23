@@ -368,8 +368,9 @@ TASK:4009 task 4 exits (self kill)
    **不是** glibc 的 `tcbhead_t`/`dtv` 布局。
 2. 内核静态装载器仍不做 `R_LARCH_TLS_TPREL64`（静态 local-exec 不需要它）；
    自研 `ld-ark.so` 侧已经在做（2026-11-21，§5.6）。`set_tid_address`（96 号）**已实现**：
-   `arkrtos_linux_abi.c` 只回报本任务的 tid，不往用户内存写一个字（本内核没有
-   futex，登记的指针没有消费者；替程序清 tid 变量是副作用）。
+   `arkrtos_linux_abi.c` 只回报本任务的 tid，不往用户内存写一个字（本内核的 futex
+   只有 WAIT/WAKE 最小一档，没有 robust list，登记的指针没有消费者；替程序清 tid
+   变量是副作用）。
 3. `PT_TLS` 块被镜像背书时我们**不**替程序建 TLS 块——那是它自己的 C 运行时的事。
 
 ---
@@ -684,8 +685,8 @@ py -3 tools/realbin_gate.py        # 7 项，全过打印 REALBIN-GATE OK
 
 1. **补 `R_LARCH_TLS_TPREL64` 重定位**（中小）：让「程序自己立 TCB」这条路径上的
    重定位收齐，判据仍是既有夹具 + 真实二进制不回归。（`set_tid_address` 原来列在
-   这里，现已实现，只剩「不写用户内存」这条明确语义；robust futex 清理除外，本内核
-   没有 futex。）
+   这里，现已实现，只剩「不写用户内存」这条明确语义；robust futex 清理除外，本内核的
+   futex 只有 WAIT/WAKE 最小一档。）
 2. **`PT_INTERP` + `ld.so` 动态档**（项目级，需单独立项）：带一套用户态动态装载器
    与 libc 兼容面，不是补一个缺口（§7 说明为什么不自研 `ld.so` 去配 glibc）。
 

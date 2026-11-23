@@ -92,7 +92,7 @@
 - [kernelsrc/src/arkrtos_fs.c](#kernelsrcsrcarkrtos_fsc)（1 项）
 - [kernelsrc/src/arkrtos_guard.c](#kernelsrcsrcarkrtos_guardc)（1 项）
 - [kernelsrc/src/arkrtos_installer.c](#kernelsrcsrcarkrtos_installerc)（1 项）
-- [kernelsrc/src/arkrtos_linux_abi.c](#kernelsrcsrcarkrtos_linux_abic)（5 项）
+- [kernelsrc/src/arkrtos_linux_abi.c](#kernelsrcsrcarkrtos_linux_abic)（6 项）
 - [kernelsrc/src/arkrtos_loader.c](#kernelsrcsrcarkrtos_loaderc)（6 项）
 - [kernelsrc/src/arkrtos_log.c](#kernelsrcsrcarkrtos_logc)（1 项）
 - [kernelsrc/src/arkrtos_mini.c](#kernelsrcsrcarkrtos_minic)（1 项）
@@ -11810,6 +11810,25 @@ static int32 lx_wait4(void *p_ctx) {
 在别处被杀）时回 -EIO 并放掉记账 —— 编一个 0 会看起来像成功；
 3) 槽位被复用后回 -ECHILD（靠注册代次认出来），不把新任务当儿子。
 rusage 指针忽略、一个字节都不写。
+
+### `static int32 lx_futex(void *p_ctx) {`
+
+```c
+static int32 lx_futex(void *p_ctx) {
+```
+
+**futex(2)：只支持 FUTEX_WAIT / FUTEX_WAKE**
+与 Linux 一致的语义：
+1) WAIT 在入口处读到的字 != val 时回 -EAGAIN（不睡）；
+2) 有未屏蔽信号时回 -EINTR（不睡）；
+3) WAKE 唤醒同一键上最多 val 个等待者，返回实际唤醒数。
+与 Linux 不同的边界（文档里写死）：
+- 键取自「物理帧 + 页内偏移」，只有落在 App 分页窗口里的字才
+有键；栈上的字（不在窗口里）如实回 -ENOSYS；
+- 其余 op（REQUEUE / PI / WAIT_BITSET …）一律 -ENOSYS；
+- 本内核没有无限睡眠：等待按 LX_WAIT_SLICE_MS 时间片重放，超时
+醒来后若值没变就继续睡，不编 -ETIMEDOUT（Linux 不传 timeout
+时也永远不会超时，语义一致）。
 
 ### `static int32 lx_execve(void *p_ctx) {`
 

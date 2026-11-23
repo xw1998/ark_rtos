@@ -336,6 +336,31 @@
 #endif
 #endif
 
+/* futex（只落 WAIT / WAKE）：0 = 关（futex 号走 default 分支回 -ENOSYS，与打开
+ * 本开关之前逐字节相同），1 = 让 futex(uaddr, FUTEX_WAIT/WAKE, ...) 真正排队与
+ * 唤醒。键取自「物理帧 + 页内偏移」而不是虚拟地址：每个进程有自己的对窗口，
+ * 同一个 VA 在父子身上指向不同帧，而 futex 要的是同一个字；两张共享同一帧的
+ * 进程因此落在同一个键上。
+ *
+ * 三条写死的边界（都是「不支持」，不是欠验）：
+ *   - 只有 WAIT / WAKE，其余 op（REQUEUE / PI / WAIT_BITSET …）一律 -ENOSYS；
+ *   - 开了分页窗口时只有落在窗口里的字有键，栈上的字回 -ENOSYS（窗口外没有
+ *     可查的帧）；没有分页窗口时（MPU 后端）虚拟地址本身就是键；
+ *   - 没有无限睡眠：按 LX_WAIT_SLICE_MS 时间片重放，值没变就继续睡，不编
+ *     -ETIMEDOUT。
+ *
+ * 要求 ARKRTOS_USE_LINUX_ABI == 1。
+ * 由 Kconfig 选择（config ARKRTOS_USE_LINUX_FUTEX）。默认关：关档时不编译等待
+ * 槽、键解析与任何一行日志，镜像零变化。 */
+#ifndef ARKRTOS_USE_LINUX_FUTEX
+#define ARKRTOS_USE_LINUX_FUTEX         0
+#endif
+#if (ARKRTOS_USE_LINUX_FUTEX == 1)
+#if (ARKRTOS_USE_LINUX_ABI != 1)
+#error "ARKRTOS_USE_LINUX_FUTEX=1 requires ARKRTOS_USE_LINUX_ABI=1"
+#endif
+#endif
+
 /* U-16 页替换（swap）：0 = 关（一个字节都不编进镜像），1 = 帧池空了就把某一对
  * 8 KB 换出到内核静态交换区、把两帧还回池子，缺页时再换回来。
  * 要求 ARKRTOS_USE_PAGING_DEMAND == 1 —— 只有按需档才有「这一对还没驻留」

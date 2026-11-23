@@ -628,6 +628,20 @@ CASES = [
       SIGN_KEY_DEF, "-fno-asynchronous-unwind-tables", "-ffunction-sections"],
      "LINUX-ABI HOST OFF OK",
      {"incs": ["-Iboard/qemu_riscv32"]}),
+    # futex 档：与 linuxabi 共用同一个 .c，多定义 ARKRTOS_USE_LINUX_FUTEX=1
+    # 并多 wrap 一个 arkrtos_port_svc_restart（WAIT 要问端口能不能重放）。
+    # 覆盖率只量 arkrtos_linux_abi.c，按行号与另外两档求并集。
+    ("linuxabifutex", "kernelsrc/tests/test_linux_abi_host.c",
+     ["kernelsrc/src/arkrtos_linux_abi.c"],
+     [BOARD_QEMU_LA64_DEFS[0], "-include", "arkrtos_board_config.h",
+      SIGN_KEY_DEF, "-DARKRTOS_LINUX_ABI_SYSSTAT=1",
+      "-DARKRTOS_HOST_WEAK_PORT=0", "-DARKRTOS_USE_LINUX_FUTEX=1",
+      "-DARKRTOS_HOST_NO_PORT_RESTART=1",
+      "-fno-asynchronous-unwind-tables", "-ffunction-sections"],
+     "LINUX-ABI HOST OK",
+     {"incs": ["-Iboard/qemu_loongarch64",
+               "-Ikernelsrc/port/loongarch/la64"],
+      "ldflags": ["-Wl,--wrap=arkrtos_port_svc_exec_frame"]}),
     # --- 2026-11-22：迷你应用装载器（arkrtos_mini）-------------------------
     # 开关走「包装板级头」而不是 -D：板级头每项都是 #undef + #define 写死，
     # 命令行 -D 会被覆盖。包装头在包含板级头之后再改那四项（见文件头注释）。

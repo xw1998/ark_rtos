@@ -91,6 +91,9 @@
 #define LX_SYS_RT_SIGPROCMASK       (135u)
 #define LX_SYS_RT_SIGRETURN         (139u)
 
+/* futex：asm-generic 98。只落 WAIT / WAKE 两档，其余 op 如实 -ENOSYS。 */
+#define LX_SYS_FUTEX                (98u)
+
 /* errno（asm-generic 编号，程序侧读到的是 -errno） */
 #define LX_EPERM                    (1)
 #define LX_ESRCH                    (3)
@@ -116,17 +119,30 @@
 
 /* 每个任务可见的 fd 上限；0/1/2 是标准流，不占表项。 */
 #define LX_MAX_FD                   (8u)
+
+/* 阻塞等待的一个时间片（ms）。两处用：
+ *   1) wait4：子进程正常 exit 时由退出钩子立即唤醒，这个上限只在「子进程
+ *      已经不在了但没人来唤醒」时兜底（例如故障路径把子任务禁用掉）；
+ *   2) futex WAIT：本内核没有无限睡眠，等待按时间片重放，醒来后值没变就
+ *      继续睡（不编 -ETIMEDOUT，与 Linux 不传 timeout 一致）。
+ * 有界而不是无限：无限等待在那些情形下就是死锁。 */
+#define LX_WAIT_SLICE_MS            (100u)
+
 #if (ARKRTOS_USE_LINUX_FORK == 1)
 /* fork 的记账上限：同时「生出来了但还没被 reap」的子进程个数。满了就
  * -EAGAIN（在真正 fork 之前判），不是生完再丢记录。 */
 #define LX_MAX_CHILD                (4u)
 #define LX_SIGCHLD_FLAG             (17u)
 #define LX_WNOHANG                  (1u)
-/* wait4 阻塞等待的一个时间片（ms）。子进程正常 exit 时由退出钩子立即唤醒，
- * 这个上限只在「子进程已经不在了但没人来唤醒」时兜底（例如故障路径把子
- * 任务禁用掉）。有界而不是无限：无限等待在那种情形下就是死锁。 */
-#define LX_WAIT_SLICE_MS            (100u)
 #endif
+#if (ARKRTOS_USE_LINUX_FUTEX == 1)
+/* futex 的最小一档：只有 WAIT / WAKE。FUTEX_PRIVATE_FLAG 接受但本实现不区分
+ * （键已经落在物理帧上，进程私有与共享走同一条查表路径）。 */
+#define LX_FUTEX_WAIT               (0u)
+#define LX_FUTEX_WAKE               (1u)
+#define LX_FUTEX_PRIVATE_FLAG       (128u)
+#endif
+
 #define LX_PATH_MAX                 (64u)
 #define LX_IO_CHUNK                 (128u)
 
@@ -264,6 +280,16 @@ static lx_child_t s_child[LX_MAX_CHILD];
 /* 管道对象独立于 fd 表：一条管道被两个 fd 引用，fd 关掉一半时管道还要在。 */
 static lx_pipe_t s_pipe[LX_PIPE_MAX];
 static uint32  s_stat[LX_STAT_MAX];
+
+#if (ARKRTOS_USE_LINUX_FUTEX == 1)
+/* 每个任务最多一次 futex WAIT：按任务号索引，不按进程槽（槽会随 fork 复制，
+ * 等待者身份必须是任务本身）。key 是「物理帧 + 页内偏移」，所以父与子把同一
+ * 张共享页上的同一个字拿到同一个键上。无效键记 ~0UL，不用 0 当哨兵
+ * （0 是一个合法的物理地址）。 */
+static unsigned long s_futex_key[ARKRTOS_TASK_MAX_NUM];
+static uint8   s_futex_used[ARKRTOS_TASK_MAX_NUM];
+static uint8   s_futex_woke[ARKRTOS_TASK_MAX_NUM];
+#endif
 
 /* ------------------------------------------------------------- 信号状态 */
 
@@ -579,6 +605,25 @@ static unsigned long lx_align_up(unsigned long v)
     }
     return (v + mask) & ~mask;
 }
+
+/* LA64 端口上共享页的物理粒度是 8 KB 一对（见
+ * arkrtos_port_paging_map_shared）：一段 4 KB 的共享映射也会独占整对。
+ * 所以共享映射的起址必须落在对边界上、堆游标也必须整对前进 —— 否则第二个
+ * 共享映射会叠进第一对的另一半，被端口按「这一段已经有内容」拒绝，形式上
+ * 是 -ENOMEM，读起来像内存不够。私有映射不这样要求：按需缺页的一对里可
+ * 以住两个不同进程的不同页。 */
+#if (ARKRTOS_USE_PAGING_SHM == 1)
+static unsigned long lx_pair_up(unsigned long v)
+{
+    unsigned long mask = 0x1FFFul;
+
+    if(v > (~0UL - mask))
+    {
+        return 0u;
+    }
+    return (v + mask) & ~mask;
+}
+#endif
 
 static int32 lx_fd_find(int32 fd)
 {
@@ -1860,6 +1905,16 @@ static int32 lx_mmap(void *p_ctx)
     {
         return -LX_ENOMEM;
     }
+#if (ARKRTOS_USE_PAGING_SHM == 1)
+    if((flags & LX_MAP_SHARED) != 0u)
+    {
+        start = lx_pair_up(start);
+        if(start == 0u)
+        {
+            return -LX_ENOMEM;
+        }
+    }
+#endif
     /* 32 位端口上 start + len 会回绕：先按减法核对余量，再看加法本身
      * 有没有溢出。只靠 end > limit 是漏的——回绕之后 end 变成一个小
      * 地址，于是「要了 4 GB」会被当成成功，堆游标反而被写回低地址。 */
@@ -1886,7 +1941,17 @@ static int32 lx_mmap(void *p_ctx)
         }
     }
 #endif
+#if (ARKRTOS_USE_PAGING_SHM == 1)
+    /* 共享映射按整对推进游标：留下的半个 4 KB 洞不还给分配器（这一段本来就
+     * 是那一对的，给出去就会与共享帧重叠）。 */
+    s_heap_cur = ((flags & LX_MAP_SHARED) != 0u) ? lx_pair_up(end) : end;
+    if(s_heap_cur == 0u)
+    {
+        s_heap_cur = end;
+    }
+#else
     s_heap_cur = end;
+#endif
     lx_ret_ptr(p_ctx, start);
     return LX_RET_PTR_DONE;
 }
@@ -2174,6 +2239,239 @@ static int32 lx_wait4(void *p_ctx)
 }
 #endif /* ARKRTOS_USE_LINUX_FORK == 1 */
 
+#if (ARKRTOS_USE_LINUX_FUTEX == 1)
+/* ------------------------------------------------ futex（WAIT / WAKE 最小一档） */
+
+/* 本次退出的任务如果还挂着 futex 等待，把它那一槽清掉。否则任务号被复用后
+ * 新任务会继承一条「已经在等」的旧记录。 */
+static void lx_futex_forget(int32 task_id)
+{
+    if((task_id > 0) && (task_id <= (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        s_futex_used[task_id - 1] = 0u;
+        s_futex_woke[task_id - 1] = 0u;
+        s_futex_key[task_id - 1]  = ~0UL;
+    }
+}
+
+/* 把用户地址换成 futex 键。
+ * 开了分页窗口时键是「物理帧 + 页内偏移」：每个进程有自己的 8 KB 对窗口，
+ * 同一个 VA 在父与子身上指向不同帧，而 futex 要的是「同一个字」，所以键必须
+ * 落在物理帧上。窗口之外（栈、内核直映射区）没有可查的帧，回 -1，调用方回
+ * ~0UL（无效）—— 不拿 VA 假装它是键，那会让两个无关进程在同一个 VA 上互相
+ * 叫醒。没有窗口时（MPU 后端）整个地址空间只有一份，VA 本身就是稳定的键。 */
+static unsigned long lx_futex_key(unsigned long uaddr)
+{
+#if (ARKRTOS_USE_PAGING == 1)
+    arkrtos_task_t *p_task;
+    unsigned long   win;
+    unsigned long   off;
+    uint32          space;
+    uint32          pa;
+#endif
+
+    /* 上面先判了 > 0，所以这里再转成无符号只为了不触发 -Wsign-compare；
+     * 转换不会改变任何一个合法任务号的判定。 */
+    if((arkrtos_current_task_id <= 0) ||
+       ((uint32)arkrtos_current_task_id > (uint32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return ~0UL;
+    }
+#if (ARKRTOS_USE_PAGING == 1)
+    win = arkrtos_paging_window_va();
+    if(win == 0ul)
+    {
+        /* 没有分页窗口（MPU 后端 / 未开分页）：整个地址空间只有一份，
+         * 虚拟地址本身就是稳定的键。 */
+        return (unsigned long)uaddr;
+    }
+    if(uaddr < win)
+    {
+        return ~0UL;
+    }
+    off = uaddr - win;
+    if(off >= ((unsigned long)arkrtos_paging_pair_total() * 0x2000ul))
+    {
+        return ~0UL;
+    }
+    p_task = &arkrtos_task_table[arkrtos_current_task_id - 1];
+    space = arkrtos_paging_space_of(p_task);
+    pa = arkrtos_paging_pair_pa(space, (uint32)(off / 0x2000ul));
+    if(pa == 0u)
+    {
+        return ~0UL;
+    }
+    return (unsigned long)pa + (off % 0x2000ul);
+#else
+    /* 没有分页后端：整个地址空间只有一份，虚拟地址本身就是稳定的键。 */
+    return (unsigned long)uaddr;
+#endif
+}
+
+/* 当前进程有没有「未屏蔽的待投递信号」。futex WAIT 在 Linux 上遇到这种情形
+ * 回 -EINTR 而不是继续睡。 */
+static uint8 lx_futex_sig_pending(void)
+{
+    return ((s_sig_pending & ~s_sig_blocked) != 0u) ? 1u : 0u;
+}
+
+/**
+* @brief futex(2)：只支持 FUTEX_WAIT / FUTEX_WAKE
+* @details 与 Linux 一致的语义：
+*            1) WAIT 在入口处读到的字 != val 时回 -EAGAIN（不睡）；
+*            2) 有未屏蔽信号时回 -EINTR（不睡）；
+*            3) WAKE 唤醒同一键上最多 val 个等待者，返回实际唤醒数。
+*          与 Linux 不同的边界（文档里写死）：
+*            - 键取自「物理帧 + 页内偏移」，只有落在 App 分页窗口里的字才
+*              有键；栈上的字（不在窗口里）如实回 -ENOSYS；
+*            - 其余 op（REQUEUE / PI / WAIT_BITSET …）一律 -ENOSYS；
+*            - 本内核没有无限睡眠：等待按 LX_WAIT_SLICE_MS 时间片重放，超时
+*              醒来后若值没变就继续睡，不编 -ETIMEDOUT（Linux 不传 timeout
+*              时也永远不会超时，语义一致）。
+*/
+static int32 lx_futex(void *p_ctx)
+{
+    unsigned long uaddr = ARKRTOS_SVC_ARG(p_ctx, 0u);
+    uint32 op   = (uint32)ARKRTOS_SVC_ARG(p_ctx, 1u);
+    uint32 val  = (uint32)ARKRTOS_SVC_ARG(p_ctx, 2u);
+    int32  me   = (int32)arkrtos_current_task_id;
+    unsigned long key;
+    uint32 word = 0u;
+
+    op &= ~(uint32)LX_FUTEX_PRIVATE_FLAG;
+
+    if((me <= 0) || (me > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return -LX_EFAULT;
+    }
+    key = lx_futex_key(uaddr);
+    if((key == ~0UL) && (uaddr == 0ul) && (op == (uint32)LX_FUTEX_WAIT))
+    {
+        /* 重放的那一次读到的 uaddr 是 0 —— 不是调用方写了 0，而是返回值
+         * 寄存器就是第一个参数寄存器：阻塞路径返回 0 时，分派器把 0 写进
+         * a0。这里不能靠地址认重放，只能靠「我这一槽还登记着」。一个任务
+         * 同时只可能有一次在飞的 WAIT（它睡着的时候不可能再发起一次），
+         * 所以 uaddr==0 且本槽在用就只能是它自己的重放。
+         * 这不是理论洁癖：wait4 的重放同样把 pid 读成 0，只是 0 对 wait4
+         * 本来就是合法输入（等任意儿子），所以此前没有暴露。 */
+        uint32 crit0 = ARKRTOS_ENTER_CRITICAL();
+        uint8  used0 = s_futex_used[me - 1];
+
+        if(used0 != 0u)
+        {
+            key = s_futex_key[me - 1];
+        }
+        ARKRTOS_EXIT_CRITICAL(crit0);
+    }
+    if(key == ~0UL)
+    {
+        return -LX_ENOSYS;
+    }
+
+    /* ---- WAKE ---- */
+    if(op == (uint32)LX_FUTEX_WAKE)
+    {
+        int32  want = (int32)val;
+        int32  woke = 0;
+        int32  i;
+        uint32 crit;
+
+        if(want < 0)
+        {
+            return -LX_EINVAL;
+        }
+        crit = ARKRTOS_ENTER_CRITICAL();
+        for(i = 1; (i <= (int32)ARKRTOS_TASK_MAX_NUM) && (woke < want); i++)
+        {
+            if((s_futex_used[i - 1] != 0u) && (s_futex_key[i - 1] == key))
+            {
+                s_futex_woke[i - 1] = 1u;
+                (void)arkrtos_task_wakeup_internal(i);
+                woke++;
+            }
+        }
+        ARKRTOS_EXIT_CRITICAL(crit);
+        return woke;
+    }
+
+    if(op != (uint32)LX_FUTEX_WAIT)
+    {
+        return -LX_ENOSYS;
+    }
+
+    /* ---- WAIT：先判这是不是上一次睡下那一次的重放 ---- */
+    {
+        uint32 crit = ARKRTOS_ENTER_CRITICAL();
+        uint8  resumed = ((s_futex_used[me - 1] != 0u) &&
+                          (s_futex_key[me - 1] == key)) ? 1u : 0u;
+        uint8  woke    = s_futex_woke[me - 1];
+
+        ARKRTOS_EXIT_CRITICAL(crit);
+
+        if(resumed != 0u)
+        {
+            if(woke != 0u)
+            {
+                lx_futex_forget(me);
+                return 0;           /* 真的被 WAKE 叫醒 */
+            }
+            /* 时间片到了（本内核的兜底唤醒）：值变了就当被叫醒，交给调用方
+             * 重新判断；值没变就继续睡一个时间片。 */
+            if(arkrtos_copy_from_user(&word, (const void *)uaddr, 4u) != 0)
+            {
+                lx_futex_forget(me);
+                return -LX_EFAULT;
+            }
+            if(word != val)
+            {
+                lx_futex_forget(me);
+                return 0;
+            }
+            if(lx_futex_sig_pending() != 0u)
+            {
+                lx_futex_forget(me);
+                return -LX_EINTR;
+            }
+            if(arkrtos_port_svc_restart(p_ctx) != 0)
+            {
+                lx_futex_forget(me);
+                return -LX_ENOSYS;
+            }
+            (void)arkrtos_task_block_in_critical((uint32)LX_WAIT_SLICE_MS);
+            return 0;
+        }
+    }
+
+    /* ---- WAIT：第一次进入 ---- */
+    if(arkrtos_copy_from_user(&word, (const void *)uaddr, 4u) != 0)
+    {
+        return -LX_EFAULT;
+    }
+    if(word != val)
+    {
+        return -LX_EAGAIN;
+    }
+    if(lx_futex_sig_pending() != 0u)
+    {
+        return -LX_EINTR;
+    }
+    if(arkrtos_port_svc_restart(p_ctx) != 0)
+    {
+        return -LX_ENOSYS;
+    }
+    {
+        uint32 crit = ARKRTOS_ENTER_CRITICAL();
+
+        s_futex_key[me - 1]  = key;
+        s_futex_used[me - 1] = 1u;
+        s_futex_woke[me - 1] = 0u;
+        ARKRTOS_EXIT_CRITICAL(crit);
+    }
+    (void)arkrtos_task_block_in_critical((uint32)LX_WAIT_SLICE_MS);
+    return 0;
+}
+#endif /* ARKRTOS_USE_LINUX_FUTEX == 1 */
+
 /* ------------------------------------------------ execve（同任务换镜像） */
 
 /* MinGW 把 __attribute__((weak)) 编成「同一目标内的弱别名」（符号表里
@@ -2204,12 +2502,18 @@ arkrtos_port_svc_exec_frame(void *p_exc_ctx, unsigned long entry,
 
 /* 同上：没有「重放系统调用」能力的 port 明确回 -1，阻塞等待由 wait4 自己
  * 降级成 -EAGAIN。绝不返回 0 假装睡过 —— 那会让父进程在子进程还活着的时候
- * 拿着一个编出来的退出码继续跑。 */
+ * 拿着一个编出来的退出码继续跑。
+ *
+ * 宿主用例要逐段改这条端口能力（futex WAIT 的重放分支），而 --wrap 只对
+ * 未定义引用生效、管不到同一个目标里的定义，所以覆盖档用
+ * -DARKRTOS_HOST_NO_PORT_RESTART=1 把缺省实现整段去掉，由用例自己给。 */
+#if !defined(ARKRTOS_HOST_NO_PORT_RESTART)
 ARKRTOS_PORT_FALLBACK_LINKAGE int32 arkrtos_port_svc_restart(void *p_exc_ctx)
 {
     (void)p_exc_ctx;
     return -1;
 }
+#endif
 
 static int32 lx_exec_errno(int32 rc)
 {
@@ -2421,6 +2725,11 @@ static int32 lx_dispatch(void *p_svc_ctx, uint32 num, int32 *p_rc)
     case LX_SYS_MUNMAP:
         rc = lx_munmap(p_svc_ctx);
         break;
+    #if (ARKRTOS_USE_LINUX_FUTEX == 1)
+    case LX_SYS_FUTEX:
+        rc = lx_futex(p_svc_ctx);
+        break;
+    #endif
     #if (ARKRTOS_USE_LINUX_FORK == 1)
     case LX_SYS_CLONE:
         rc = lx_clone(p_svc_ctx);
@@ -2437,9 +2746,10 @@ static int32 lx_dispatch(void *p_svc_ctx, uint32 num, int32 *p_rc)
         rc = 0;         /* 没有用户模型：唯一身份是 0，不编造 uid */
         break;
     case LX_SYS_SET_TID_ADDRESS:
-        /* Linux 把这个指针登记给 robust futex 清理用。本内核不提供 futex，
-         * 因此只回报自己的 tid，不保存、也不往用户内存里写一个字
-         * （glibc 传进来的就是它自己的 tid 变量，替它清零是副作用）。 */
+        /* Linux 把这个指针登记给 robust futex 清理用。本内核的 futex 只有
+         * WAIT/WAKE，没有 robust 表，因此只回报自己的 tid，不保存、也不往
+         * 用户内存里写一个字（glibc 传进来的就是它自己的 tid 变量，替它清零
+         * 是副作用）。开关关掉时同样如此。 */
         rc = (int32)arkrtos_current_task_id;
         break;
     case LX_SYS_EXIT:
@@ -2596,6 +2906,9 @@ void arkrtos_linux_abi_on_task_exit(int32 task_id)
     {
         return;
     }
+#if (ARKRTOS_USE_LINUX_FUTEX == 1)
+    lx_futex_forget(task_id);
+#endif
 
     for(i = 0u; i < (uint32)LX_MAX_CHILD; i++)
     {
@@ -2655,6 +2968,9 @@ void arkrtos_linux_abi_on_task_exit(int32 task_id)
 void arkrtos_linux_abi_on_task_exit(int32 task_id)
 {
     (void)task_id;
+#if (ARKRTOS_USE_LINUX_FUTEX == 1)
+    lx_futex_forget(task_id);
+#endif
 }
 #endif /* ARKRTOS_USE_LINUX_FORK == 1 */
 
@@ -2689,6 +3005,14 @@ void arkrtos_linux_abi_reset(void)
     {
         s_proc_of_task[i] = 0u;
         s_lx_wait[i]      = 0u;
+    }
+#endif
+#if (ARKRTOS_USE_LINUX_FUTEX == 1)
+    for(i = 0u; i < (uint32)ARKRTOS_TASK_MAX_NUM; i++)
+    {
+        s_futex_key[i]  = ~0UL;
+        s_futex_used[i] = 0u;
+        s_futex_woke[i] = 0u;
     }
 #endif
 

@@ -24,7 +24,12 @@
 *               关掉两个 fd 不影响父进程的读端，子进程写进管道的数据父进程
 *               读得到（引用计数正确，不是「谁来 close 都把管道拆了」）；
 *           10) 子进程退出会把 SIGCHLD 投给父进程：父进程装的处理函数在
-*               它下一次系统调用返回前被调用，信号号必须是 17。
+*               它下一次系统调用返回前被调用，信号号必须是 17；
+*           11) futex(98) 的 WAIT / WAKE 跨进程真的能配对：父进程在 WAIT 里
+*               睡着（这是本内核唯一的真阻塞点之一），子进程改共享页上的那
+*               个字再 WAKE，父进程必须带着 0 醒来并看到新值；futex 的键是
+*               「物理帧 + 页内偏移」，所以子进程必须叫醒的是**同一个字**，
+*               不是同一个虚拟地址上的另一份拷贝。
 *
 *          另外两条反假绿：
 *            - 子进程在退出前写一段自己的串，父不会被它的写"带跑"；
@@ -63,6 +68,11 @@
 #define LX_MAP_SHARED       0x01ul
 #define LX_MAP_PRIVATE      0x02ul
 #define LX_MAP_ANONYMOUS    0x20ul
+
+#define LX_FUTEX            98
+#define LX_FUTEX_WAIT       0
+#define LX_FUTEX_WAKE       1
+#define LX_EAGAIN           11
 
 typedef long lx_long;
 
@@ -836,6 +846,97 @@ void linux_main(unsigned long sp)
 
         (void)lx1(LX_CLOSE, (lx_long)cfds[0]);
         (void)lx1(LX_CLOSE, (lx_long)cfds[1]);
+    }
+#endif
+
+#if defined(ARKRTOS_USE_LINUX_FUTEX) && (ARKRTOS_USE_LINUX_FUTEX == 1)
+    /* ---------------- futex：WAIT / WAKE 跨进程配对 ----------------
+     * 顺序是构造出来的，不是碰出来的：
+     *   1) 父进程先把共享页上的字置 1，再 fork；
+     *   2) 父进程立刻进 futex(WAIT, 1) —— 这一次调用在本内核里是真阻塞
+     *      （时间片重放），父进程睡着之后调度器只剩子进程可跑；
+     *   3) 子进程看到字还是 1（证明父进程等的就是它），把它改成 2 再
+     *      futex(WAKE, 1)，这一次必须回 1（真的叫醒了一个等待者）；
+     *   4) 父进程带着 0 醒来，读到的字必须是 2。
+     * 反假绿：如果 WAKE 没叫醒（回 0），子进程用 SIGCHLD 把父进程从等待里
+     * 打断（跨进程信号会让 WAIT 回 -EINTR），这样失败是一次可读的读数，
+     * 不是把 QEMU 挂死。
+     *
+     * 另外三条单进程判据不依赖调度：没有等待者时 WAKE 回 0、值不等时 WAIT
+     * 回 -EAGAIN、不认识的 op 回 -ENOSYS。 */
+    {
+        volatile unsigned long *fw;
+        lx_long faddr;
+        lx_long child6;
+        lx_long status6 = -1;
+        lx_long rc6 = -1;
+        lx_long ppid;
+
+        faddr = lx6(LX_MMAP, 0, 4096, 3,
+                    LX_MAP_SHARED | LX_MAP_ANONYMOUS, -1, 0);
+        check("futex mmap shared page > 0", (faddr > 0) ? 1 : 0, 1);
+
+        if (faddr > 0)
+        {
+            fw = (volatile unsigned long *)(unsigned long)faddr;
+
+            check("futex(WAKE) with no waiter == 0",
+                  lx3(LX_FUTEX, (lx_long)(unsigned long)fw, LX_FUTEX_WAKE, 1),
+                  0);
+            check("futex(WAIT) on a different value == -EAGAIN",
+                  lx4(LX_FUTEX, (lx_long)(unsigned long)fw, LX_FUTEX_WAIT,
+                      7, 0), -LX_EAGAIN);
+            check("futex op other than WAIT/WAKE == -ENOSYS",
+                  lx3(LX_FUTEX, (lx_long)(unsigned long)fw, 9, 0), -LX_ENOSYS);
+
+            *fw = 1ul;
+            ppid = lx1(LX_GETPID, 0);
+
+            child6 = lx3(LX_CLONE, LX_SIGCHLD, 0, 0);
+            if (child6 == 0)
+            {
+                int    code = 0;
+                lx_long wrc;
+
+                if (*fw == 1ul)
+                {
+                    code |= 1;      /* bit0: 父进程等的还是 1 */
+                }
+                *fw = 2ul;
+                wrc = lx3(LX_FUTEX, (lx_long)(unsigned long)fw,
+                          LX_FUTEX_WAKE, 1);
+                if (wrc == 1)
+                {
+                    code |= 2;      /* bit1: 真的叫醒了 1 个等待者 */
+                }
+                else
+                {
+                    /* 兜底：父进程还睡着就把 SIGCHLD 投给它，让那次 WAIT
+                     * 回 -EINTR，而不是让整个镜像挂在这里等超时。 */
+                    (void)lx2(LX_KILL, ppid, LX_SIGCHLD);
+                }
+                (void)lx1(LX_EXIT, code);
+                for (;;)
+                {
+                }
+            }
+
+            check("clone for futex child > 0", (child6 > 0) ? 1 : 0, 1);
+
+            /* 父进程：睡着等子进程把字改成 2。 */
+            rc6 = lx4(LX_FUTEX, (lx_long)(unsigned long)fw, LX_FUTEX_WAIT,
+                      1, 0);
+            check("futex(WAIT) returned 0 after being woken", rc6, 0);
+            check("parent saw the value the waker wrote", (lx_long)(*fw), 2);
+
+            status6 = -1;
+            rc6 = lx4(LX_WAIT4, child6, (lx_long)(unsigned long)&status6, 0, 0);
+            check("futex child reaped", rc6, child6);
+            /* bit0 必须置：子进程看到的就是父进程等的那个 1（不是「父还没
+             * 睡下就叫醒了」那种空匹配）；bit1 必须置：WAKE 真的叫醒了它。 */
+            check("futex waker saw 1 and woke 1 (bits=3)",
+                  (status6 >> 8) & 0xFF, 3);
+        }
     }
 #endif
 

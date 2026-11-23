@@ -2845,6 +2845,14 @@ def check_linux_abi_host():
          as 8-byte slots with the high half forced to zero.
     The QEMU LoongArch64 run in linux-abi covers (1) and (2).
 
+    The FUTEX tier (-DARKRTOS_USE_LINUX_FUTEX=1) drives futex WAIT / WAKE
+    against the same simulated window: the key is the physical frame, so the
+    test supplies the paging backend's four readers and asserts that two
+    different pages are two different keys, that a WAKE on one key does not
+    wake a waiter on the other, that a value change or a signal account-close
+    the registration, and that a port without restart answers -ENOSYS
+    instead of pretending to have slept.
+
     The OFF tier (-DARKRTOS_USE_LINUX_ABI=0) must answer "there is no such
     thing" for every reading, never an empty success.
 
@@ -2867,12 +2875,12 @@ def check_linux_abi_host():
     picks = {}
     for case in CASES:
         name, test, mods, defs, markers, incs, _argv = _case(case)
-        if name in ("linuxabi", "linuxabioff"):
+        if name in ("linuxabi", "linuxabioff", "linuxabifutex"):
             extra = case[5] if len(case) > 5 else {}
             picks[name] = (test, mods, defs, incs, markers,
                            list(extra.get("link", [])),
                            list(extra.get("ldflags", [])))
-    for name in ("linuxabi", "linuxabioff"):
+    for name in ("linuxabi", "linuxabioff", "linuxabifutex"):
         if name not in picks:
             fail("linux-abi-host",
                  "case %s missing from coverage_gate.CASES" % name)
@@ -2880,7 +2888,7 @@ def check_linux_abi_host():
 
     with TempDir() as td:
         lines = []
-        for name in ("linuxabi", "linuxabioff"):
+        for name in ("linuxabi", "linuxabioff", "linuxabifutex"):
             test, mods, defs, incs, markers, link, ldflags = picks[name]
             exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
             cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]

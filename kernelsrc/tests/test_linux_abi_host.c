@@ -116,6 +116,7 @@ int main(void)
 #define T_NR_SET_TID        (96u)
 #define T_NR_CLOCK_GETTIME  (113u)
 #define T_NR_KILL           (129u)
+#define T_NR_FUTEX          (98u)
 #define T_NR_TKILL          (130u)
 #define T_NR_TGKILL         (131u)
 #define T_NR_RT_SIGACTION   (134u)
@@ -134,6 +135,7 @@ int main(void)
 #define T_EPERM             (1)
 #define T_ENOENT            (2)
 #define T_ESRCH             (3)
+#define T_EINTR             (4)
 #define T_EIO               (5)
 #define T_E2BIG             (7)
 #define T_ENOEXEC           (8)
@@ -312,6 +314,92 @@ int32 arkrtos_copy_to_user(void *udst, const void *src, uint32 len)
 {
     return host_copy_to(udst, src, len);
 }
+
+#if (ARKRTOS_USE_LINUX_FUTEX == 1)
+/* ---------------- futex 的前提桩 ----------------
+ * 本档只链接 linux_abi.c；futex 的键要走分页后端与任务表，这三组符号由用例
+ * 自己给：窗口就是模拟用户内存那一块（这样 copy_from_user 也能用），每对
+ * 8 KB 的物理基址按 idx 线性推进，idx 7 故意留空（没驻留的对应回 0）。
+ * 键因此是可算的：u_ptr(0x10) -> 0x00100010。 */
+#define T_FUTEX_WAIT        (0u)
+#define T_FUTEX_WAKE        (1u)
+
+/* 临界区：futex 的登记与扫描都在临界区里做（真机上与唤醒/切换争同一份
+ * 表）。宿主是单线程，进出都当无事发生，只数进入次数证明真的走进去过。 */
+uint32 g_crit_in;
+
+uint32 arkrtos_port_enter_critical(void)
+{
+    g_crit_in++;
+    return 0u;
+}
+
+void arkrtos_port_exit_critical(uint32 state)
+{
+    (void)state;
+}
+
+int32 g_block_calls;
+uint32 g_block_ms;
+int32 g_wake_calls;
+int32 g_wake_last;
+int32 g_restart_rc = -1;
+
+arkrtos_task_t arkrtos_task_table[ARKRTOS_TASK_MAX_NUM];
+
+int32 arkrtos_task_block_in_critical(uint32 timeout_ms)
+{
+    g_block_calls++;
+    g_block_ms = timeout_ms;
+    return 0;
+}
+
+int32 arkrtos_task_wakeup_internal(int32 task_id)
+{
+    g_wake_calls++;
+    g_wake_last = task_id;
+    return 0;
+}
+
+/* 窗口基址做成变量：futex 的键在「没有分页窗口」（MPU 后端）时退回虚拟
+ * 地址，那条分支只有把这里改成 0 才走得到。默认值与用户内存起点一致。 */
+unsigned long g_win_va = U_BASE;
+
+unsigned long arkrtos_paging_window_va(void)
+{
+    return g_win_va;
+}
+
+uint32 arkrtos_paging_pair_total(void)
+{
+    return (uint32)(U_SIZE / 0x2000u);
+}
+
+uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task)
+{
+    (void)p_task;
+    return 0u;
+}
+
+uint32 arkrtos_paging_pair_pa(uint32 space, uint32 idx)
+{
+    (void)space;
+    if(idx == 7u)
+    {
+        return 0u;          /* 没驻留的那一对：问什么都不编地址 */
+    }
+    return 0x00100000u + (idx * 0x2000u);
+}
+
+/* 端口能力由用例直接给：本档用 -DARKRTOS_HOST_NO_PORT_RESTART=1 把
+ * linux_abi.c 的缺省实现整段去掉（--wrap 管不到同一目标里的定义），
+ * g_restart_rc 逐段控制「会不会重放」。 */
+int32 arkrtos_port_svc_restart(void *p_exc_ctx)
+{
+    (void)p_exc_ctx;
+    return g_restart_rc;
+}
+#endif
 
 /* ---------------- 端口桩 ---------------- */
 
@@ -1149,6 +1237,52 @@ static void t_pipe(t_ctx *c)
     rc = (int32)c->ret;
     ck_ret(c, 0, "撤回后再建管道成功");
     ck(rc == 0, "撤回不留半条管道");
+
+    /* fd 号越过分区上限：必须先判号再算表下标，不拿一个大号去索引 */
+    (void)call(c, T_NR_READ, 11UL, u_ptr(T_DATA_OFF), 5UL, 0UL);
+    ck_ret(c, -T_EBADF, "fd 号越过分区上限回 -EBADF");
+
+    /* 长度 0 与空指针：Linux 这两个判据的顺序是「先长度后指针」，
+     * 所以 read(fd, NULL, 0) 合法回 0，不是 -EFAULT。 */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    u_get(T_DATA_OFF, fds, 8u);
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 0UL, 0UL);
+    ck_ret(c, 0, "管道 read 长度 0 回 0（不碰指针）");
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], 0UL, 5UL, 0UL);
+    ck_ret(c, -T_EFAULT, "管道 read 空指针回 -EFAULT");
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 0UL, 0UL);
+    ck_ret(c, 0, "管道 write 长度 0 回 0");
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], 0UL, 5UL, 0UL);
+    ck_ret(c, -T_EFAULT, "管道 write 空指针回 -EFAULT");
+
+    /* 读得比管道里有的多：n 要被压到 count，返回实际读到的字节数 */
+    u_put_str(T_STR_OFF, "hi!");
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 3UL, 0UL);
+    ck_ret(c, 3, "管道写 3 字节");
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 200UL, 0UL);
+    ck_ret(c, 3, "读得比有的多时短读到 count（不假装读满）");
+
+    /* 剩余空间小于一次拷贝块：n 要被压到 space，否则会盖掉还没读走的数据 */
+    for(i = 0u; i < 200u; i++)
+    {
+        g_user[T_STR_OFF + i] = (uint8)i;
+    }
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 200UL, 0UL);
+    ck_ret(c, 200, "管道先写 200 字节");
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 200UL, 0UL);
+    ck_ret(c, 56, "剩余空间只有 56 字节时短写到 space（不越界）");
+
+    /* 写侧半路失效：已拷进去的照常提交，返回已写字节数（短写是正常结果） */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    u_get(T_DATA_OFF, fds, 8u);
+    g_from_budget = 1;
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 256UL, 0UL);
+    g_from_budget = -1;
+    ck_ret(c, 128, "管道写半路失效返回已写字节数");
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 200UL, 0UL);
+    ck_ret(c, 128, "已提交的那一块真的在管道里");
 }
 
 /* 分组 8：clock_gettime / uname */
@@ -1280,6 +1414,16 @@ static void t_mem(t_ctx *c)
     ck_ret(c, 0, "munmap 接受但不还地址");
     (void)call(c, T_NR_BRK, 0UL, 0UL, 0UL, 0UL);
     ck_u(c->ret, base + 0x2000UL, "munmap 不改变堆游标");
+
+    /* 堆游标的惰性起点有两个入口：brk 先到（上面走过）与 mmap 先到。
+     * 后者必须自己把游标落到窗口半程 —— 从 0 开始会让第一批映射全落在
+     * 用户内存之外，程序拿到一个自己不能用、看着又合法的地址。 */
+    fresh(c);
+    (void)call(c, T_NR_MMAP, 0UL, 0x1000UL, 0UL,
+               (unsigned long)(T_MAP_PRIVATE | T_MAP_ANONYMOUS));
+    ck_u(c->ret, base, "reset 后第一个 mmap 从窗口半程起（惰性初始化堆起点）");
+    (void)call(c, T_NR_BRK, 0UL, 0UL, 0UL, 0UL);
+    ck_u(c->ret, base + 0x1000UL, "mmap 自己把堆游标推到映射之后");
 }
 
 /* 分组 10：信号（装/查动作、屏蔽字、投递、回收） */
@@ -1730,6 +1874,180 @@ static void t_task_exit(t_ctx *c)
        "a port without the primitive answers -1");
 }
 
+#if (ARKRTOS_USE_LINUX_FUTEX == 1)
+/* 分组 14：futex 的 WAIT / WAKE 最小一档
+ *
+ * 判据全部落在「程序看到什么」上：返回值、有没有真的登记、唤醒数、销账。
+ * 键是「物理帧 + 页内偏移」，所以 u_ptr(0x10) 与 u_ptr(0x2010) 必须是两个
+ * 不同的键 —— 后者若叫得醒前者，跨页的误唤醒就会混进读数。
+ *
+ * 本档端口能力（svc_restart）由 g_restart_rc 控制，口径与真 port 一致
+ * （LA64 的 arkrtos_port_svc_restart 回 0 = 已把 era 退回系统调用那条指令）：
+ *   -1  端口不会重放 ⇒ WAIT 如实 -ENOSYS，不留登记；
+ *    0  会重放      ⇒ WAIT 登记 + 阻塞，重放时继续睡 / 被 WAKE 叫醒后回 0。 */
+static void t_futex(t_ctx *c)
+{
+    unsigned long w0 = u_ptr(0x10u);
+    unsigned long w1 = u_ptr(0x2010u);
+    unsigned long noframe = u_ptr(0xE000u);   /* idx 7：pair_pa 回 0 */
+
+    u_put32(0x10u, 5u);
+    u_put32(0x2010u, 5u);
+
+    g_restart_rc = -1;
+    g_block_calls = 0;
+
+    /* 无等待者：WAKE 回 0，不改任何东西 */
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 0, "futex WAKE 没有等待者回 0");
+
+    /* 值不等：WAIT 立刻 -EAGAIN，不登记 */
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 7UL, 0UL);
+    ck_ret(c, -T_EAGAIN, "futex WAIT 值不等回 -EAGAIN");
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 0, "futex EAGAIN 之后没有留下等待登记");
+
+    /* 窗口外：没有可查的帧，回 -ENOSYS 而不是拿 VA 当键 */
+    (void)call(c, T_NR_FUTEX, U_BASE - 8UL, (unsigned long)T_FUTEX_WAIT,
+               5UL, 0UL);
+    ck_ret(c, -T_ENOSYS, "futex 窗口外回 -ENOSYS");
+
+    /* 没驻留的那一对：同样回 -ENOSYS */
+    (void)call(c, T_NR_FUTEX, noframe, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, -T_ENOSYS, "futex 未驻留的页回 -ENOSYS");
+
+    /* 不认识的 op：如实 -ENOSYS，不猜成 WAIT */
+    (void)call(c, T_NR_FUTEX, w0, 9UL, 5UL, 0UL);
+    ck_ret(c, -T_ENOSYS, "futex 未知 op 回 -ENOSYS");
+
+    /* 唤醒数取负：-EINVAL */
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE,
+               (unsigned long)-1, 0UL);
+    ck_ret(c, -T_EINVAL, "futex WAKE 负数回 -EINVAL");
+
+    /* 端口不会重放：值匹配也不假装睡过，回 -ENOSYS 且不登记 */
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, -T_ENOSYS, "futex WAIT 端口无重放能力回 -ENOSYS");
+    ck(g_block_calls == 0, "futex 没有重放能力时一次也没睡");
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 0, "futex ENOSYS 之后没有留下等待登记");
+
+    /* 端口会重放：WAIT 登记并阻塞一个时间片 */
+    g_restart_rc = 0;
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, 0, "futex WAIT 登记后回 0（返回值被重放的那次覆盖）");
+    ck(g_block_calls == 1, "futex WAIT 真的阻塞了一次");
+    ck_u((unsigned long)g_block_ms, 100UL, "futex 用的是 wait4 同一个时间片");
+
+    /* 重放同一次：值没变 ⇒ 继续睡，不销账 */
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, 0, "futex 时间片醒来后值没变，继续睡");
+    ck(g_block_calls == 2, "继续睡又阻塞了一次");
+
+    /* 另一个键的 WAKE 叫不醒它 */
+    (void)call(c, T_NR_FUTEX, w1, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 0, "futex 另一个键的 WAKE 叫不醒这个等待者");
+
+    /* 同一个键的 WAKE：唤醒 1 个，并真的叫了那个任务 */
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 1, "futex WAKE 回实际唤醒数 1");
+    ck(g_wake_calls > 0, "futex WAKE 真的调用了唤醒接口");
+    ck(g_wake_last == 42, "futex WAKE 叫的是等待的那个任务");
+
+    /* 重放：这次是「被 WAKE 叫醒」，回 0 并销账 */
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, 0, "futex 被 WAKE 叫醒后重放回 0");
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 0, "futex 醒来之后不再有等待者");
+
+    /* 超时醒来但值变了：当被叫醒处理，回 0 并销账 */
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, 0, "futex 再登记一次");
+    u_put32(0x10u, 6u);
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, 0, "futex 值在等待期间变了，重放回 0");
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 0, "futex 值变了之后也销了账");
+
+    /* 任务号越界：入口先判号再动手，回 -EFAULT 而不是拿坏号去索引任务表 */
+    arkrtos_current_task_id = 0;
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, -T_EFAULT, "futex 任务号为 0 回 -EFAULT");
+    arkrtos_current_task_id = 42;
+
+    /* 没有分页窗口（MPU 后端）：整个地址空间只有一份，虚拟地址本身就是键 */
+    g_win_va = 0ul;
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 0, "没有分页窗口时键退回虚拟地址（WAKE 回 0）");
+    g_win_va = U_BASE;
+
+    /* 越过窗口末端的字：没有可查的帧，不拿 VA 假装它是键 */
+    (void)call(c, T_NR_FUTEX, U_BASE + (unsigned long)U_SIZE,
+               (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, -T_ENOSYS, "futex 越过窗口末端回 -ENOSYS");
+
+    /* 重放识别：a0 被返回值清成 0 之后，靠「本槽还登记着」认出这是同一次
+     * WAIT。认出来之后走到「值没变、但用户地址是 0」那一步 —— 读不出来
+     * 就 -EFAULT 并销账，绝不拿键继续睡。 */
+    g_restart_rc = 0;
+    u_put32(0x10u, 5u);
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, 0, "futex 先登记一次等待（重放识别的前置）");
+    (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, -T_EFAULT, "futex 重放时 a0 已被清成 0，按槽认出来并回 -EFAULT");
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 0, "这条 -EFAULT 也销了账");
+
+    /* 重放时端口忽然不肯重放：如实 -ENOSYS，不假装又睡过一个时间片 */
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, 0, "futex 再登记一次等待");
+    g_restart_rc = -1;
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, -T_ENOSYS, "futex 重放时端口没有重放能力回 -ENOSYS");
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 0, "端口不肯重放时也销了账");
+    g_restart_rc = 0;
+
+    /* 第一次进入就读不出那个字：不登记、也不回 EAGAIN */
+    g_from_budget = 0;
+    (void)call(c, T_NR_FUTEX, w1, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    g_from_budget = -1;
+    ck_ret(c, -T_EFAULT, "futex 首次进入读不出字时回 -EFAULT");
+
+    /* 重放时撞上未屏蔽信号：时间片醒了、值没变，但有信号要处理 -> -EINTR
+     * 并销账（Linux 语义，不是我们编的）。先登记再 kill：首次进入的入口
+     * 有 pending 时根本不会登记。 */
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, 0, "futex 为 EINTR 那条路径先登记一次");
+    (void)sig_install_act(c, 10u, 0x1000UL, 0x2000UL, 0u);
+    (void)call(c, T_NR_KILL, 42UL, 10UL, 0UL, 0UL);
+    ck_ret(c, 0, "futex 前置：kill 自己成功（造一个投不掉的 pending）");
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, -T_EINTR, "futex 重放时撞上未屏蔽信号回 -EINTR");
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 0, "futex EINTR（重放路径）之后没有留下等待登记");
+
+    /* 有未屏蔽信号：WAIT 回 -EINTR 且不登记。
+     * 难点是让「待投递」活到下一次调用：信号在每次系统调用返回前都会投递，
+     * 默认动作会把它销掉。这里把 SIGUSR1 的处理函数装在一个读不出来的地址上
+     * ——投递时取不到指令就把 pending 位放回去（那条路径本来就不许拿猜的地址
+     * 铺帧），于是下一个入口仍看得见它。 */
+    u_put32(0x10u, 5u);
+    g_restart_rc = 0;
+    (void)sig_install_act(c, 10u, 0x1000UL, 0x2000UL, 0u);
+    ck_ret(c, 0, "futex 前置：给 SIGUSR1 装一个投递不到的处理函数");
+    (void)call(c, T_NR_KILL, 42UL, 10UL, 0UL, 0UL);
+    ck_ret(c, 0, "futex 前置：kill 自己成功");
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, -T_EINTR, "futex WAIT 有未屏蔽信号回 -EINTR");
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 0, "futex EINTR 之后没有留下等待登记");
+
+    /* 收尾：把端口能力恢复成默认，后面的分组依赖 -1 */
+    g_restart_rc = -1;
+}
+#endif /* ARKRTOS_USE_LINUX_FUTEX == 1 */
+
 int main(void)
 {
     t_ctx c;
@@ -1752,6 +2070,9 @@ int main(void)
     t_execve(&c);
     t_reset(&c);
     t_task_exit(&c);
+#if (ARKRTOS_USE_LINUX_FUTEX == 1)
+    t_futex(&c);
+#endif
 
     if(g_fails != 0)
     {

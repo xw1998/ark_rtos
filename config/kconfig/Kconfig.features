@@ -636,6 +636,38 @@ config ARKRTOS_USE_PAGING_SHM
 	  no log line: mmap still answers -ENOSYS for MAP_SHARED and the image
 	  does not change by a byte.
 
+config ARKRTOS_USE_LINUX_FUTEX
+	bool "futex WAIT / WAKE for the Linux ABI layer (U-20)"
+	depends on ARKRTOS_USE_LINUX_ABI
+	help
+	  Make futex(uaddr, FUTEX_WAIT, val) / futex(uaddr, FUTEX_WAKE, n) real
+	  for static ELF programs: WAIT returns -EAGAIN when the word at uaddr no
+	  longer equals val, -EINTR when a signal is pending, and otherwise queues
+	  the task; WAKE wakes up to n waiters on the same key and returns how
+	  many it woke.
+
+	  The key is "physical frame + offset in page", not the virtual address:
+	  each process owns its own 8 KB pair window, so the same VA points at
+	  different frames in parent and child, while a futex must name the same
+	  word.  Two processes sharing a MAP_SHARED page therefore land on the
+	  same key.
+
+	  Three boundaries (not bugs):
+	    1) Only WAIT and WAKE exist.  REQUEUE, PI and WAIT_BITSET answer
+	       -ENOSYS instead of being approximated.
+	    2) With a paging window, only words inside it have a key; a futex on
+	       a stack word answers -ENOSYS.  Without a window (MPU backend) the
+	       whole address space is one, so the virtual address is the key.
+	    3) There is no unbounded sleep: the wait is replayed every scheduler
+	       slice and simply re-blocks while the word is unchanged, so it never
+	       invents -ETIMEDOUT.
+
+	  Requires ARKRTOS_USE_LINUX_ABI.
+
+	  Off (default) compiles no wait slots, no key resolver and no log line:
+	  the futex number falls through to the default -ENOSYS and the image
+	  does not change by a byte.
+
 config ARKRTOS_USE_WIDE_SVC_ARGS
 	bool "Native-width SVC parameter block (wide-argument ABI, U-18)"
 	help

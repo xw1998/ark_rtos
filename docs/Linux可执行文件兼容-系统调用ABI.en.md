@@ -40,7 +40,7 @@ a purely Linux-ABI static binary with its own `_start`):
 **"A static program runs" is not "Linux is supported".** Section 3 lists what is
 explicitly unsupported.
 
-## 1 Supported syscalls (27; 25 measured on hardware, 2 table-and-argument only)
+## 1 Supported syscalls (28; 26 measured on hardware, 2 table-and-argument only)
 
 Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 
@@ -54,7 +54,8 @@ Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 | 67 | `pread64` | read at `pos` **without moving the fd cursor** (what `ld.so` needs to walk a segment table) | no fixture readout (1.1) |
 | 93 | `exit` | `arkrtos_thread_exit_code_internal()` | `exit code 7` |
 | 94 | `exit_group` | same (single-threaded) | same |
-| 96 | `set_tid_address` | remember the address, return the task id (no futex) | same path as getpid |
+| 96 | `set_tid_address` | remember the address, return the task id (not involved in futex; see 8.4) | same path as getpid |
+| 98 | `futex` | `WAIT`/`WAKE` only, key = physical frame + offset in page (`ARKRTOS_USE_LINUX_FUTEX`, 8.4) | `futex(WAKE) with no waiter == 0 -> 0 ok` / `futex(WAIT) on a different value == -EAGAIN -> -11 ok` / `futex(WAIT) returned 0 after being woken -> 0 ok` / `futex waker saw 1 and woke 1 (bits=3) -> 3 ok` |
 | 113 | `clock_gettime` | `MONOTONIC` from kernel ticks; `REALTIME` returns `-ENOSYS` | `MONOTONIC -> 0 ok` / `REALTIME -> -38 ok` |
 | 129 | `kill` | only towards the calling task (`pid != self` gives `-ESRCH`); sets pending (section 7) | `kill rc survives handler -> 0 ok` / `kill other pid -> -ESRCH = -3 ok` |
 | 130 | `tkill` | same entity as `kill` while single-threaded | same path as `kill` |
@@ -107,7 +108,9 @@ return value is a separate port primitive
 
 ## 3 Explicitly unsupported
 
-`dup`/`dup2` redirection, `socket`/`select`, `futex`, file-backed `mmap`,
+`dup`/`dup2` redirection, `socket`/`select`, the rest of `futex` (a
+WAIT/WAKE tier exists behind `ARKRTOS_USE_LINUX_FUTEX`, default off, section 8.4),
+file-backed `mmap`,
 `MAP_FIXED` and page-level permission bits, and threads. Anonymous `MAP_SHARED`
 exists in the SHM tier (section 8.3, default off) and is inherited through `fork`
 only. `fork`/`clone` is no longer in this
@@ -118,9 +121,10 @@ crosses tasks (`kill`/`tkill`/`tgkill` resolve the target by pid, 2026-11-23,
 QEMU LA64), but there is still no preemptive delivery, no real-time signal and no
 `siginfo` (section 7). fd inheritance exists in the fork tier: each process owns
 its fd table and a pipe end holds its own reference count (section 4/8). `futex`
-still needs a shared-memory wait queue that Ark RTOS does not have; faking it
-would produce silently wrong answers. See the Chinese page for the reasoning per
-row.
+has a minimal WAIT/WAKE tier behind a switch (section 8.4, default off): the key
+is the physical frame plus the offset, since a VA means different frames in
+parent and child; the other ops are `-ENOSYS` rather than guessed. See the
+Chinese page for the reasoning per row.
 
 `execve` replaces the image of the current task in place (section 5), and
 `fork` copies the address space into a second task (section 8). What is still
@@ -469,7 +473,8 @@ The fix copies Linux: the syscall **returns after going to sleep and is replayed
 The cost is stated plainly: this replays the whole syscall instead of resuming at
 the sleep point. That is semantically equivalent (`wait4` is an idempotent scan)
 but every wakeup rescans the child table, and no other blocking syscall (empty
-`read`, `futex`) is wired to this path.
+`read`) is wired to this path; `futex` WAIT uses the same replay mechanism
+(section 8.4).
 
 ### 8.2 Copy-on-write (`ARKRTOS_USE_PAGING_COW`, 2026-11-23, QEMU LA64)
 
@@ -575,6 +580,65 @@ reads its start timestamp before releasing the child to sleep 60 ms - otherwise
 `blocking wait4 waited 2 ms`, which looks like wait4 did not block. With both
 fixed the fork+cow+shm tier is stable 3/3 and the default tier 5/5.
 
+### 8.4 `futex`: the WAIT / WAKE tier (`ARKRTOS_USE_LINUX_FUTEX`, 2026-11-23, QEMU LA64)
+
+`clone` creates a second execution stream and `MAP_SHARED` lets both sides see the
+same memory, but "sleep until this word changes" was still missing - without it
+not one pthread mutex, condvar or semaphore can start. futex is that brick: the
+kernel does not synchronise for you, it only parks a task while the word still
+matches and wakes it when someone asks, so the common path stays in user mode.
+
+With `ARKRTOS_USE_LINUX_FUTEX` on (`depends on ARKRTOS_USE_LINUX_ABI`), number 98
+lands as the minimal tier: `FUTEX_WAIT` / `FUTEX_WAKE`.
+
+| Item | Current state |
+|---|---|
+| ops | only `WAIT`(0) / `WAKE`(1). `FUTEX_PRIVATE_FLAG`(128) is **accepted and stripped** - the key is physical anyway, so private and inter-process are the same thing here; everything else (`REQUEUE`, `WAIT_BITSET`, `PI`, `WAKE_OP` ...) is `-ENOSYS`, no guessing |
+| key | **physical frame number + offset in page**, not the VA. Each process owns its own 8 KB pair window, so the same VA names different frames in parent and child; a VA key would let two unrelated processes wake each other on the same address - a bug that reports no error and only wakes one waiter too many. Outside the window (stack, kernel direct map) no frame resolves, so it is `-ENOSYS` rather than a fake VA key |
+| sleep | no infinite sleep exists here: the task registers, calls `arkrtos_task_block_in_critical(LX_WAIT_SLICE_MS = 100 ms)` and `arkrtos_port_svc_restart()`, the same restartable-syscall path as 8.1. On wake it checks `s_futex_woke` first (someone called, return 0), otherwise re-reads the word: changed means woken, unchanged means another slice. **No `-ETIMEDOUT` is invented** (Linux without a timeout never times out either). A port without restart support returns `-ENOSYS` and clears the slot - it never pretends it slept |
+| `-EAGAIN` / `-EINTR` | word != `val` at entry gives `-EAGAIN` at once; an unblocked pending signal gives `-EINTR` at once, and the replay checks again so a signal can break a sleeper out |
+| wait slot | one per task (`s_futex_key / s_futex_used / s_futex_woke[ARKRTOS_TASK_MAX_NUM]`). A sleeping task cannot start a second WAIT, so one slot is enough; `on_task_exit` clears it, otherwise a reused task id would inherit an "already waiting" record |
+| `WAKE` | scans every task; for each registered one on the same key it sets `s_futex_woke = 1` and calls `arkrtos_task_wakeup_internal()`, up to `val` of them, returning how many were woken; no waiter returns 0 (as in Linux) |
+
+Readouts (`tools/fork_gate.py`, fork+COW+SHM+futex tier, 43 checks, 9 of them
+futex): the shared page is mapped (`> 0`), `WAKE` with no waiter returns 0,
+`WAIT` on a different value returns `-11`, an unknown op returns `-38`, the waker
+is a real cloned process, the parent's `WAIT` returns 0 after being woken, the
+parent sees the `2` the waker wrote, the waker is reaped, and
+`futex waker saw 1 and woke 1 (bits=3)` carries both evidence bits: bit 0 = the
+child still saw the `1` the parent was waiting on (so the parent really went to
+sleep, not an empty match), bit 1 = `WAKE` really woke one waiter.
+
+**Two traps only a board run exposes.**
+
+(1) **The 8 KB pair granularity of a shared mapping eats address space.** A 4 KB
+`MAP_SHARED` also owns a whole pair, so the mapping must start on a pair boundary
+and the heap cursor must advance by whole pairs. The first version advanced by
+4 KB, so the second shared mapping landed in the other half of the first pair and
+was refused wholesale as `-ENOMEM` - which reads like "out of memory" but is
+really alignment. `mmap` now does `lx_pair_up(start)` for the shared branch and
+sets `s_heap_cur = lx_pair_up(end)` (the leftover 4 KB hole is not returned to the
+allocator: handing it out would overlap the shared frames).
+
+(2) **The return register is the first argument register.** On the LA64 Linux ABI
+the syscall result is written to `a0`, and `futex` reads its first argument
+(`uaddr`) from `a0` too. When the blocking path returns 0 the dispatcher writes 0
+into `a0`, so **the replay reads `uaddr == 0`**. The replay cannot be recognised by
+address, only by "this slot is still registered": `uaddr == 0` plus `used == 1`
+takes back the key the task recorded. This is not theoretical tidiness - the
+`wait4` replay reads `pid == 0` too, but 0 is a legal `wait4` input (wait for any
+child), so it never showed; futex is the first place that has to say it out loud.
+A host case feeds exactly this shape: register a WAIT, then re-enter with
+`uaddr = 0`; it must be taken as a replay, not `-EFAULT`.
+
+Host accounting: the union line coverage of the `linuxabi` / `linuxabioff` /
+`linuxabifutex` profiles is **98.31% (870/885)**, the futex profile runs **268
+checks** and prints `LINUX-ABI HOST OK`. The `ARKRTOS_USE_PAGING_SHM=1` shared
+branches are **not in the host ledger** (the host fixture was never compiled with
+`LINUX_FORK=1`); that half is measured only by the 34 SHM and 9 futex board
+readouts. The 15 remaining uncovered lines were each inspected and are all
+dead/defensive branches, not "untested".
+
 ## 9 Switch and zero footprint
 
 `ARKRTOS_USE_LINUX_ABI` (features header + Kconfig), default **0**, and
@@ -601,6 +665,13 @@ the sharing evaporates). With it off the shared-bit table and
 `-ENOSYS` - measured by three tiers (zero symbols when off, 34 readouts when on,
 and the `-ENOSYS` control with SHM off).
 
+`ARKRTOS_USE_LINUX_FUTEX` (section 8.4) is the fifth switch, default **0**,
+`depends on ARKRTOS_USE_LINUX_ABI` with the same `#error` guard. With it off the
+wait slots, the key resolver and `lx_futex` are not compiled and number 98 falls
+back to `-ENOSYS`; with it on the measured evidence is the 43 readouts of the
+fork+COW+SHM+futex tier (9 of them futex) plus the 268 host checks of the futex
+profile.
+
 ## 10 Gate
 
 ```
@@ -610,15 +681,16 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py [--no-build]
 13 items; prints `LINUX-ABI-GATE OK` when all pass and is invoked from
 `tools/ci_gate.py` as `linux-abi`: default-off, kconfig-wired, features-guard,
 board-switch, off-zero-symbols, port-wiring (two directions), compile-on (8 TUs
-under the real LA64 board), syscall-table (27 numbers vs asm-generic),
+under the real LA64 board), syscall-table (28 numbers vs asm-generic),
 abi-split-la64, abi-split-rv32, build, qemu-readout (14 Linux checks + PASS + exit 7,
 14 pipe checks + exit 55, 31 signal checks + PASS + exit 138, the unrelated demos
 still intact), and parser-selfcheck (eight deliberately broken logs must each be
 rejected).
 
 The fork tier has its own gate, `tools/fork_gate.py` (invoked as `fork` from
-`ci_gate`, 22 items; it runs the fork, fork+COW and fork+COW+SHM tiers one after
-the other, so build / qemu-readout / parser-selfcheck each appear three times):
+`ci_gate`, **29 items**; it runs the fork, fork+COW, fork+COW+SHM and
+fork+COW+SHM+futex tiers one after the other, so build / qemu-readout /
+parser-selfcheck each appear four times):
 default-off (fork and SHM), kconfig-wired (all four `depends on`, plus the SHM
 item depending on COW), the four
 `#error` guards in features.h, off-zero-symbols (RV32 `linux_abi.o` has no
@@ -632,7 +704,9 @@ parser-selfcheck (nine broken logs rejected; the COW tier adds four more: a lost
 bit in the child mask, a lost parent write, all copy lines removed, and bytes
 moved at fork time; the SHM tier adds five: the `pg shm map` line removed, the
 child's shared write not seen by the parent, the child not seeing the parent's
-write, a non-zero start value, and the successful-mapping readout removed) and
+write, a non-zero start value, and the successful-mapping readout removed; the
+futex tier adds three: the WAIT was never woken, the waker only saw half
+(`bits=1`), and a waiterless `WAKE` returned 1) and
 restore-default (the build directory is returned to the default tier so a later
 `make` does not reuse fork-tier objects). The COW round additionally requires 26
 checks, `shared>=1 / stack>=1 / copied=0`, at least one `pg cow copy ... ref=2`,
@@ -642,7 +716,13 @@ parent sees the child's write, child sees the parent's post-fork write) and at
 least one `[LA64U] pg shm map va=0x<n> pairs>=1`. The SHM switch has its own
 `default-off-shm` / `kconfig-wired-shm` / `features-guard-shm` items, and
 `off-zero-port` also requires that a SHM-off build has no
-`arkrtos_port_paging_map_shared`.
+`arkrtos_port_paging_map_shared`. The futex round requires 43 checks and validates
+the nine futex readouts one by one (shared page mapped, waiterless `WAKE` returns
+0, mismatched `WAIT` returns `-11`, unknown op returns `-38`, the waker clones,
+`WAIT` returns 0 after being woken, the parent sees the waker's `2`, the waker is
+reaped, `bits == 3`), with the SHM and COW assertions still in place; the futex
+switch has its own `default-off-futex` / `kconfig-wired-futex` /
+`features-guard-futex` items.
 
 ## 11 Three real bugs and one readout trap found on the way
 
@@ -688,8 +768,11 @@ own switch (`ARKRTOS_USE_DYNLOAD`) and a minimal in-tree loader, but running gli
 binaries is still out of reach. Fork exists (section 8): per-process fd tables
 with inheritance, cross-task `SIGCHLD` and a blocking `wait4` all have QEMU LA64
 readouts, and copy-on-write now exists too (`ARKRTOS_USE_PAGING_COW`, section
-8.2, default off); still absent are threads (`CLONE_VM`/`CLONE_THREAD` are
-refused), preemptive signal delivery and `dup2`-style redirection.
+8.2, default off), as does a minimal futex tier (`ARKRTOS_USE_LINUX_FUTEX`,
+section 8.4, default off); still absent are threads
+(`CLONE_VM`/`CLONE_THREAD` are refused), preemptive signal delivery,
+`dup2`-style redirection and the rest of futex (`REQUEUE`/`PI`/`WAIT_BITSET`,
+robust-list cleanup).
 
 `execve` gives "replace this task's image" and `fork` gives "a second task with
 its own address-space copy". Both exist, but do not read this as a full process
