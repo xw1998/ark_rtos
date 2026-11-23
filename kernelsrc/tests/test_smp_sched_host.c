@@ -64,6 +64,7 @@ static int g_fails;
 
 arkrtos_task_t arkrtos_task_table[ARKRTOS_TASK_MAX_NUM];
 int32          arkrtos_task_count = 0;
+int32          arkrtos_current_task_id = 0;
 
 static int32 g_ready_add[ARKRTOS_TASK_MAX_NUM];
 static int32 g_ready_del[ARKRTOS_TASK_MAX_NUM];
@@ -287,6 +288,12 @@ static void test_migrate_and_switch(void)
     arkrtos_task_table[4].status = ARKRTOS_TASK_WAIT;
     CK_I(arkrtos_smp_sched_task_to(5, 1u), -3);                        /* 非 READY */
     arkrtos_task_table[4].status = ARKRTOS_TASK_READY;
+
+    /* 正在 CPU0 上跑的那一个：READY 且还挂在就绪链上，但迁走就是两核共用
+     * 一份栈，必须挡住（-6）。放在真正迁出之前测，才不会被 -4 先命中。 */
+    arkrtos_current_task_id = 1;
+    CK_I(arkrtos_smp_sched_task_to(1, 1u), -6);                        /* 正在跑 */
+    arkrtos_current_task_id = 0;
 
     /* --- 迁入 task1（idx0）：摘就绪链、摘延时链（幂等）--- */
     CK_I(arkrtos_smp_sched_task_to(1, 1u), 0);

@@ -111,6 +111,10 @@ def clean_comment(block):
         elif s.startswith("*/"):
             s = s[2:]
         s = s.lstrip("*").strip()
+        # 单行注释 /** @brief xxx */ 会走进上面第一个分支，闭合符留在行尾；
+        # 不剥掉它，生成的正文就以 */ 结尾（旧参考里有十处这种脏尾巴）。
+        if s.endswith("*/"):
+            s = s[:-2].strip()
         if not s or s.startswith("@file") or s.startswith("@defgroup") or s.startswith("@{"):
             continue
         if s.startswith("@brief"):

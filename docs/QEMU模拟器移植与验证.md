@@ -8238,6 +8238,126 @@ LA64 走的是 IOCSR mailbox，RISC-V 完全另一套：**每 hart 一个 `msip`
    编码与 `TICLR` 语义，IOCSR mailbox 的字节掩码同样来自 QEMU 9.2.3 源码；真实
    固件与硬件未验证。
 
+### 9.9 ⑤ AMP 自动负载均衡（2026-11-23，QEMU LA64 `-smp 2` 实跑）
+
+#### 9.9.1 位置：在 ④ 之上加一层策略，不动调度器
+
+④ 把「迁谁、什么时候迁」留给人。⑤ 只把**决策**自动化：次核空了就迁一个过去，
+次核排了两个而 CPU0 一个就绪任务都没有就要一个回来。**全局调度器仍然一行不改**，
+次核上的任务仍然不许调内核 API —— 省掉的不是锁，而是「同时有两条路径改同一份
+状态」这件事本身。所以这不叫对称多核，叫 AMP 上的一个负载策略。
+
+#### 9.9.2 开关与依赖
+
+`ARKRTOS_USE_SMP_BALANCE`（默认 0），两条 `#error`（放在 `arkrtos_config.h`）：
+必须 `ARKRTOS_USE_SMP_SCHED==1`，且 `ARKRTOS_CPU_NUM>=2`。Kconfig 里是
+`config ARKRTOS_USE_SMP_BALANCE`（`depends on ARKRTOS_USE_SMP_SCHED`，默认 n）。
+
+#### 9.9.3 两条规则与门槛为什么这样定
+
+| 规则 | 触发条件 | 动作 |
+|---|---|---|
+| ① 迁出 | 该次核 `s_qn==0 && s_cur==NIL` **且** CPU0 就绪任务 ≥2 | 把候选表里第一个 READY 任务迁到该核 |
+| ② 要回 | CPU0 就绪任务 ==0 **且** 该次核队列 ≥2 | 从该核队尾要回一个（`task_back`） |
+
+`≥2` 与 `==0 / ≥2` 这两组门槛是防 ping-pong 的：迁出要求 CPU0 手上还有富余，要回
+要求 CPU0 真空且次核真的排起来了 —— 不去定义「平均」，也就不会在两核各剩一个的
+时候来回搬。搬运本身仍是 ④ 的「请求 + 每拍轮询」，延迟上限 1 拍。
+
+**不迁「正在本核跑」的任务**：`task_to` 对 idx==当前任务返回 `-6`，策略的候选筛选
+也把当前任务剔掉。原因同 ④ 第 2 条边界 —— RUNNING 迁移要往源核的切换点插逻辑，
+这里不做，就明确拒绝而不是「试着搬搬看」。
+
+#### 9.9.4 接口
+
+| 接口 | 语义 |
+|---|---|
+| `arkrtos_smp_sched_auto_add(id)` | 登记进候选表（上限 `ARKRTOS_SMP_BALANCE_MAX`=4）。`-1` 表满 / `-3` 不是合法任务 |
+| `arkrtos_smp_sched_auto_del(id)` | 摘出候选表（收尾必做，否则策略还在动它） |
+| `arkrtos_smp_sched_auto_count()` | 候选表里的有效条数 |
+| `arkrtos_smp_sched_balance_stat(out[4])` | `out[0..3]` = 自动迁出 / 自动要回 / 次核空闲但无可迁 / 策略节拍 |
+
+候选表**必须由调用方显式登记** —— 不提供「自己猜该迁谁」的能力：猜错了就是把一个
+任务搬到它不该在的核上，而且没有任何读数能证明它猜错了。
+
+#### 9.9.5 实跑读数
+
+`EXTRA_CFLAGS` 加 `-DARKRTOS_USE_SMP=1 -DARKRTOS_CPU_NUM=2 -DARKRTOS_USE_SMP_SCHED=1 -DARKRTOS_USE_SMP_BALANCE=1`，
+`qemu-system-loongarch64 -machine virt -smp 2 -kernel ark_qemu_la64.elf -nographic`，跑 25 s：
+
+```
+[bal] id1=7 id2=8
+[bal] add b1 rc=0
+[bal] add b2 rc=0 n=2
+[bal] r=1 out=1 back=0 idle=0 tick=1003 cur1=6 q1=1 b1=+2925 c1=1 b2=+2919 c2=0
+[bal] r=2 out=1 back=0 idle=0 tick=2004 cur1=6 q1=1 b1=+2894 c1=1 b2=+2841 c2=0
+[bal] r=3 out=1 back=0 idle=0 tick=3004 cur1=6 q1=1 b1=+2975 c1=1 b2=+2966 c2=0
+[bal] r=4 out=1 back=0 idle=0 tick=4004 cur1=6 q1=1 b1=+3029 c1=1 b2=+3022 c2=0
+[bal] r=5 out=1 back=0 idle=0 tick=5004 cur1=6 q1=1 b1=+2956 c1=1 b2=+2952 c2=0
+[bal] r=6 out=1 back=0 idle=0 tick=6004 cur1=6 q1=1 b1=+2923 c1=1 b2=+2917 c2=0
+[bal] park b1=7 b2=8 done
+```
+
+四条判据逐条对上：
+
+1. `out=1` 且 `tick` 从 1003 涨到 6004 —— **迁出是策略自己做的**；`back=0` 是因为
+   CPU0 从未真空中断过，不是要回逻辑失效（这一点不要读反）；
+2. `cur1=6`（= id1−1）与 `c1=1` 说明次核上跑的是 b1；`c2=0` 说明 b2 一直在 CPU0；
+3. 两个计数**同时**涨约 2900–3030 / 200 拍 —— 两核在并行推进，且同优先级让 CPU0
+   侧那一个还能分到时间片（异优先级会被忙等的同核任务饿死，本轮踩过，见 9.9.6）；
+4. 收尾 `[bal] park b1=7 b2=8 done` 之后 worker 停在 `wfi`，镜像里原有的 `[A]/[B]`
+   周期任务继续正常打印（`svc_ok`）。
+
+#### 9.9.6 与 ④ 手工演示的互斥（本轮踩到的真问题）
+
+第一版把两套演示同时编进去，读数是 `out=0`（从不迁移）、`cur1=6` 一直是手工演示的
+`task_w`（id 7）—— **两套演示抢同一个次核**：手工那套先把次核占了，均衡策略看到
+「次核不空」就永远不动。这不是策略错，是两个演示在争一个资源。
+
+所以均衡档下手工 SMP 演示按 `(ARKRTOS_USE_SMP_BALANCE != 1)` 关掉三处（块头、
+注册段、`task_to` 段，以及只为它服务的 `s_stack_chk` 声明）。手工那套的读数改在
+仅 `SMP_SCHED=1` 的镜像里复跑，形态与 §9.8.4 一致（`to cpu1 rc=0` → 次核推进 →
+`back rc=0` → `cur1=0xffffffff`）—— **关掉的是演示，不是能力**。
+
+worker 收尾不能退出：任务退出要走内核调度器，而次核上不许走那条路径。所以 `park`
+的做法是「先从候选表摘掉 → 降到优先级 200（与 idle 同级）→ 非他人所有时挂回就绪链」，
+worker 本体在 `s_bal_stop` 置位后原地 `wfi`，永不返回。
+
+#### 9.9.7 顺手收掉的一个既有缺陷：任务函数返回 = 跳 0
+
+演示第一版跑出 `ecode=0x0d (INE) era=0`：`task_bal_chk` 打印完六轮就返回，而入口帧
+的 `ra` 是 0，`ret` 直接跳到地址 0。**这不是均衡引入的** —— 仅 `SMP_SCHED=1` 的参考
+镜像同样崩。
+
+修法：新增 `arkrtos_task_entry_return()`（`arkrtos_task.c`），log 一行
+`task <id> entry returned -> auto exit`，然后 `arkrtos_task_kill_internal()` 收尾，
+再 `wfi` 死循环；LA64 与 RV32 的 `arkrtos_port_stack_init` 都把入口帧的 `RA` 指向它。
+判据是实跑日志里出现 `task 9 entry returned -> auto exit` 且不再有 `FATAL`。
+**LA64 已实跑；RV32 只有编译，未实跑。**
+
+#### 9.9.8 默认档零变化
+
+`ARKRTOS_USE_SMP_BALANCE` 默认 0：新增状态（候选表、四个计数器）全在
+`arkrtos_smp_sched.c` 的 `#if` 内，演示全在 `main.c` 的 `#if` 内，默认档
+`arkrtos_smp_sched.o` 仍是空翻译单元。`tools/smp_gate.py` 的 pin Y 用 `objdump -t`
+逐符号钉住「BALANCE=1 的目标文件有四个契约符号 / BALANCE=0 的一个都没有」，并真编
+两条坏档证明 `#error` 会触发、好档能过。`build/la64_def_chk` 默认档 20 s 实跑：
+0 `FATAL`、无任何 `[bal]`/`[sched]` 输出。
+
+#### 9.9.9 判词与三条不许读法
+
+判词：**`smp_amp_balance_ok_on_qemu`** —— LA64 / QEMU `-smp 2` 上，策略能在次核空闲
+时自己迁出一个任务、两核并行推进各自的计数、收尾能停下来把 CPU0 交还；默认档与
+仅 ④ 档的行为都未变。RV32 侧与真实硬件**未验证**。
+
+1. **不能读成「对称多核 / 通用负载均衡」**：没有全局时钟同步、次核不许进内核、
+   没有 TLB shootdown；候选表靠人登记，策略只在「次核空」与「CPU0 真空」两个极端
+   点动作，中间状态一概不动。跑两个任务是自检，不是能力上限声明。
+2. **不能把 `b1=+2925 / b2=+2919` 读成「均衡带来的加速」**：这是「两个任务各在一个
+   核上跑」的读数，没有同口径的单核对照，不构成加速比证据。
+3. **不能读成真板可用**：次核启动、IPI、IOCSR mailbox 全部走 QEMU 9.2.3 的模型，
+   真实固件与硬件未验证。
+
 ## 10. `-Wconversion` 开档（2026-11-19）：默认档镜像逐字节不变
 
 `tools/warn_gate.py` 的选项集从六条扩到七条，新加 `-Wconversion`（GCC 隐含同开
@@ -8405,7 +8525,13 @@ LoongArch 的 `CRMD` 位序是 `PLV[1:0]`（bit0/1）、**`IE`（bit2）**、`DA
 - `-smp 2` 的 8 例只是 0/8，**没有冻结判据**，不构成「SMP 间歇停机已证明修好」；
   §三 欠账盘点里的 SMP 行按读数更新，不当结论用。
 - 原始 §5.13.4 那例（`frame@0x003071d0`、`s_pi_chain_stack_mid`、`ra=0`）是
-  「中途任务从入口返回」，与本节两族**不同源**，仍按上一节的判词处理。
+  「中途任务从入口返回」，与本节两族**不同源**。**这一族已于 2026-11-23 收口**：
+  任务函数返回时入口帧的 `ra` 是 0，`ret` 直接跳到地址 0（现场就是 `ecode=0x0d (INE)
+  era=0`）。修法是新增 `arkrtos_task_entry_return()` trampoline，LA64 / RV32 的
+  `arkrtos_port_stack_init` 都把入口帧的 `RA` 指向它（log 一行
+  `task <id> entry returned -> auto exit`，然后 `arkrtos_task_kill_internal()`，
+  再 `wfi` 死循环）。判据是实跑日志里出现该行且不再有 `FATAL`；LA64 已实跑，
+  RV32 仅编译。细节见 §9.9.7。
 
 ## 11. 开源 CPU 模拟器选型：ARM / RISC-V / LoongArch，带 MMU 与带 MPU（2026-11-19）
 

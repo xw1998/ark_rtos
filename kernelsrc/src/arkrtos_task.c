@@ -4235,6 +4235,33 @@ void arkrtos_task_kill_internal(void)
     }
 }
 
+/**
+* @brief 任务入口函数返回时的回收入口
+* @details 内核约定任务入口要么死循环、要么显式调 arkrtos_task_kill_internal()。
+*          入口一旦返回，旧实现里初始栈帧的 ra 是 0，PC 跳到地址 0 取指，
+*          硬件报 INE（ecode=0x0d）、era=0 —— 现场与「野指针打飞」完全同形，
+*          排查代价极高（docs/QEMU模拟器移植与验证 §5.13.4 记的就是这一族）。
+*          现在移植层把初始 ra 指向本函数：返回即按「自我结束」收尸，日志留痕，
+*          然后停在本任务上下文里 wfi，等调度器把本核切给别的任务。
+* @note 不返回。PLV3 的任务走不到这里（特权级不允许直呼内核函数），
+*       它们返回时仍落到 App 故障处理（重启该 App）。
+*/
+void arkrtos_task_entry_return(void)
+{
+    if(arkrtos_current_task_id > 0)
+    {
+        ARKRTOS_LOGI("TASK", "task %d entry returned -> auto exit",
+                     (int)arkrtos_current_task_id);
+    }
+
+    arkrtos_task_kill_internal();
+
+    for(;;)
+    {
+        arkrtos_port_wfi();
+    }
+}
+
 /* 任务状态查询：task_id 从 1 开始；非法任务号返回 -1 */
 int32 arkrtos_task_status_get_internal(int32 task_id)
 {

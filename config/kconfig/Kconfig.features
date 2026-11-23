@@ -47,6 +47,21 @@ config ARKRTOS_USE_SMP_SCHED
 	  关档下模块编成空目标，体积与行为不变。
 
 config ARKRTOS_USE_STACK_USAGE
+config ARKRTOS_USE_SMP_BALANCE
+	bool "Automatic load balancing across the AMP queues"
+	default n
+	depends on ARKRTOS_USE_SMP_SCHED
+	help
+	  在调度分核（AMP）之上加一条自动策略：CPU0 每拍看一眼次核，次核
+	  空闲且候选表里有任务在 CPU0 就绪集时迁一个过去；次核排了两个
+	  以上而 CPU0 一件就绪任务都没有时要回一个。只处理调用方用
+	  arkrtos_smp_sched_auto_add() 显式登记的候选任务。
+
+	  它不是对称调度：次核仍然不许发 SVC / 调内核 API，所以只能迁移
+	  「纯计算、不碰内核对象」的任务；自动迁移一个会发 SVC 的任务会让它
+	  当场致命停机。要求 ARKRTOS_USE_SMP_SCHED=1 与 ARKRTOS_CPU_NUM>=2
+	  （不满足直接 #error）。默认关，关档下候选表与策略都不编进来。
+
 	bool "Task stack usage statistics"
 	default y
 	help

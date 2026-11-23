@@ -3658,7 +3658,9 @@ unsigned long arkrtos_port_stack_init(unsigned long stack_top, void (*entry)(voi
         frame[i] = 0u;
     }
 
-    frame[LA_FR_RA]   = 0u;
+    /* ra 指向「入口返回」的回收入口：入口函数真的返回时按自我结束收尸，
+     * 而不是跳到地址 0 报一个和野指针同形的 INE(era=0)。 */
+    frame[LA_FR_RA]   = (unsigned long)arkrtos_task_entry_return;
     frame[LA_FR_SP]   = top;
     frame[LA_FR_ERA]  = (unsigned long)entry;
     frame[LA_FR_PRMD] = LA_PRMD_INIT;

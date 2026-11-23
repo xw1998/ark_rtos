@@ -65,6 +65,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include <setjmp.h>
 
 /* arkrtos_task.c 自己定义、但没有在头文件里 extern 的内部全局量。
  * 用例只读/清它们，不重复定义；重复定义会在链接期撞成 MULTIPLE DEFINITION。 */
@@ -147,6 +148,29 @@ void  arkrtos_port_set_thread_priv(uint32 is_priv)
 }
 void arkrtos_port_delay_us(uint32 us) { g_delay_us_sum += us; }
 void arkrtos_port_wfe(void)           { g_wfe_n++; }
+
+/* entry_return 的 wfi 桩：真实实现是"停在本任务上下文里死等"，宿主里没法
+ * 真的停住，所以用 setjmp/longjmp 截住。只验「返回即收尸、确实落进等待」，
+ * 死循环本身不可测（也不需要测）。 */
+static jmp_buf g_wfi_jmp;
+static int     g_wfi_jmp_armed = 0;
+static int     g_wfi_hits = 0;
+
+void arkrtos_port_wfi(void)
+{
+    if(g_wfi_jmp_armed == 0)
+    {
+        return;
+    }
+    /* 第一次返回让退出循环的那条回边走一遍（死等本身没内容，但回边是
+     * 别的东西"被卡住"时的唯一证据），第二次再跳出，用例才不会挂死。 */
+    g_wfi_hits++;
+    if(g_wfi_hits >= 2)
+    {
+        g_wfi_jmp_armed = 0;
+        longjmp(g_wfi_jmp, 1);
+    }
+}
 
 void arkrtos_port_switch_task(void)
 {
@@ -2630,6 +2654,49 @@ static void test_reap_and_recover(void)
 }
 
 /* ------------------------------------------------------------------
+ * T13b：任务入口返回（旧实现里 ra=0 -> 地址 0 取指 -> 硬件 INE）
+ * ------------------------------------------------------------------ */
+static void test_entry_return(void)
+{
+    /* 有当前任务：返回即按自我结束收尸，然后停在 wfi 等待调度 */
+    reset_all();
+    make_task(5u, 0u);
+    use_task(1);
+
+    g_wfi_jmp_armed = 1;
+    g_wfi_hits = 0;
+    if(setjmp(g_wfi_jmp) == 0)
+    {
+        arkrtos_task_entry_return();
+        ck(0, "entry return must not fall through");
+    }
+    ck_i32(g_wfi_jmp_armed, 0, "the returned entry lands in the wfi loop");
+    ck_i32(arkrtos_task_table[0].status, ARKRTOS_TASK_INVALID,
+           "a returned entry is reclaimed as a self kill");
+    ck(arkrtos_ready_contains(0) == 0,
+       "the returned task leaves the ready chain");
+    ck_u32(arkrtos_kill_ret_cnt, 1u,
+           "the ineffective switch after the exit is still counted");
+
+    /* 没有当前任务：不收尸任何槽（本不该发生，但不能因此改别人的状态），
+     * 仍然停在 wfi。 */
+    reset_all();
+    make_task(5u, 0u);
+    use_task(0);
+
+    g_wfi_jmp_armed = 1;
+    g_wfi_hits = 0;
+    if(setjmp(g_wfi_jmp) == 0)
+    {
+        arkrtos_task_entry_return();
+        ck(0, "entry return must not fall through without a current task");
+    }
+    ck_i32(g_wfi_jmp_armed, 0, "the wfi loop is entered either way");
+    ck_i32(arkrtos_task_table[0].status, ARKRTOS_TASK_READY,
+           "no current task means no slot is reclaimed");
+}
+
+/* ------------------------------------------------------------------
  * T14：切换判定 arkrtos_sched_is_switching
  * ------------------------------------------------------------------ */
 static void test_sched_is_switching(void)
@@ -2798,6 +2865,7 @@ int main(void)
     RUN(test_svc_dispatch);
     RUN(test_tick_and_slice);
     RUN(test_reap_and_recover);
+    RUN(test_entry_return);
     RUN(test_sched_is_switching);
     RUN(test_fault_handler);
     RUN(test_sched_check);

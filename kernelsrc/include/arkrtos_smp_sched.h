@@ -62,7 +62,9 @@ void arkrtos_smp_sched_enter(uint32 cpu);
 * @param cpu     目标核号（1..ARKRTOS_CPU_NUM-1；0 不走这里）
 * @return 0=已入次核运行队列；-1=任务号/核号非法；-2=目标核是 0（应调
 *         arkrtos_smp_sched_task_back）；-3=任务不是 READY（RUNNING/WAIT/
-*         DELAY/INVALID 一律拒绝）；-4=任务已归别的核；-5=目标队列满
+*         DELAY/INVALID 一律拒绝）；-4=任务已归别的核；-5=目标队列满；
+*         -6=任务正在 CPU0 上跑（运行中的任务仍挂在就绪链上，迁它等于
+*         让两核共用一份栈帧，必须先等它阻塞或让出）
 * @note 只在本核（CPU0）调用：它会摘 CPU0 的就绪链，那是全局结构。
 */
 int32 arkrtos_smp_sched_task_to(int32 task_id, uint32 cpu);
@@ -126,6 +128,45 @@ uint8 arkrtos_smp_sched_owned_by_other(int32 task_idx);
 */
 int32 arkrtos_smp_sched_selftest(uint32 *out);
 
+
+#if (ARKRTOS_USE_SMP_BALANCE == 1)
+/**
+* @brief 自动均衡候选表的上限
+* @note 候选表是"任务号"的固定小数组，不占 TCB、不改任务结构。上限是
+*       有意压低的一个常数：这套策略只该服务少数几个纯计算任务，放进
+*       几十个只会让"谁被迁走了"变得不可解释。
+*/
+#define ARKRTOS_SMP_BALANCE_MAX        4
+
+/**
+* @brief 把一个任务登记为可自动迁移的候选
+* @param task_id 任务号（1..task_count）
+* @return 0=已登记；-1=任务号非法；-2=候选表满；-3=已经在表里
+* @details 调用方必须自己保证这个任务**不发 SVC、不调任何内核 API**：
+*          次核没有跨核保护，自动迁移一个会发 SVC 的任务等于让它当场
+*          致命停机。本模块无法从任务体看出这件事，所以登记是显式的。
+*/
+int32 arkrtos_smp_sched_auto_add(int32 task_id);
+
+/**
+* @brief 把一个任务从候选表里摘掉
+* @return 0=已摘掉；-1=任务号非法；-4=本来就不在表里
+* @note 只改候选表，不搬任何队列：已经迁到次核的任务仍然归次核，
+*       要它回来请调 arkrtos_smp_sched_task_back()。
+*/
+int32 arkrtos_smp_sched_auto_del(int32 task_id);
+
+/** @brief 当前候选任务数 */
+uint32 arkrtos_smp_sched_auto_count(void);
+
+/**
+* @brief 读数快照（给自测/串口打印用）
+* @param out 至少 4 个字的数组，依次写：自动迁出次数 / 自动要回次数 /
+*            "次核空闲但没有可迁候选"的拍数 / 本策略跑了多少拍
+* @return 0=成功；-1=out 为空
+*/
+int32 arkrtos_smp_sched_balance_stat(uint32 *out);
+#endif /* ARKRTOS_USE_SMP_BALANCE == 1 */
 #endif /* ARKRTOS_USE_SMP_SCHED == 1 */
 
 #endif /* __ARKRTOS_SMP_SCHED_H__ */

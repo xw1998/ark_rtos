@@ -4069,6 +4069,147 @@ hardware are **unverified**.
    depends on QEMU's `ESTAT` encoding and `TICLR` semantics, and the IOCSR mailbox byte
    masks come from QEMU 9.2.3 sources; real firmware and silicon are unverified.
 
+### 9.9 ⑤ AMP automatic load balancing (2026-11-23, QEMU LA64 `-smp 2` executed)
+
+#### 9.9.1 Where it sits: a policy layer on top of ④, scheduler untouched
+
+④ left "who moves, and when" to the caller. ⑤ automates only the **decision**: if a
+secondary core is idle, move one candidate over; if a secondary core has two queued and
+CPU0 has zero ready tasks, pull one back. The global scheduler is still **not touched by
+a single line**, and a task on a secondary core still may not call kernel APIs — what is
+avoided is not a lock, it is the situation "two paths mutate the same state". So this is
+not symmetric multiprocessing; it is a load-balancing policy over AMP.
+
+#### 9.9.2 Switch and dependencies
+
+`ARKRTOS_USE_SMP_BALANCE` (default 0), with two `#error`s in `arkrtos_config.h`: it
+requires `ARKRTOS_USE_SMP_SCHED==1` and `ARKRTOS_CPU_NUM>=2`. Kconfig has
+`config ARKRTOS_USE_SMP_BALANCE` (`depends on ARKRTOS_USE_SMP_SCHED`, default n).
+
+#### 9.9.3 The two rules and why the thresholds are what they are
+
+| Rule | Trigger | Action |
+|---|---|---|
+| ① move out | that core has `s_qn==0 && s_cur==NIL` **and** CPU0 has >=2 ready tasks | migrate the first READY task in the candidate table to that core |
+| ② pull back | CPU0 has 0 ready tasks **and** that core has >=2 queued | pull one back from the tail of that core (`task_back`) |
+
+The `>=2` and `==0 / >=2` thresholds exist to prevent ping-pong: moving out requires CPU0
+to have spare work, pulling back requires CPU0 to be truly empty and the secondary core to
+be genuinely backlogged. No notion of "balanced" is defined, so the policy never shuffles
+tasks back and forth when one is left on each side. The move itself is still ④'s
+"request + poll each tick", latency bounded by one tick.
+
+**A task currently running on this core is never migrated**: `task_to` returns `-6` when
+idx == current task, and the policy's candidate filter excludes the current task as well.
+Same reason as ④'s boundary 2 — a RUNNING migration would need logic inserted at the
+source core's switch point; since that is not done, the move is refused outright rather
+than "tried and hoped for".
+
+#### 9.9.4 Interfaces
+
+| Interface | Meaning |
+|---|---|
+| `arkrtos_smp_sched_auto_add(id)` | add to the candidate table (cap `ARKRTOS_SMP_BALANCE_MAX`=4). `-1` table full / `-3` not a valid task |
+| `arkrtos_smp_sched_auto_del(id)` | remove from the candidate table (mandatory at teardown, otherwise the policy keeps moving it) |
+| `arkrtos_smp_sched_auto_count()` | number of live entries |
+| `arkrtos_smp_sched_balance_stat(out[4])` | `out[0..3]` = automatic moves out / automatic pulls back / secondary idle with nothing to move / policy ticks |
+
+The candidate table **must be filled in explicitly by the caller** — there is no "guess
+who should move" capability: a wrong guess means a task ends up on a core it does not
+belong on, with no reading able to prove the guess wrong.
+
+#### 9.9.5 Measurements
+
+`EXTRA_CFLAGS` adds `-DARKRTOS_USE_SMP=1 -DARKRTOS_CPU_NUM=2 -DARKRTOS_USE_SMP_SCHED=1 -DARKRTOS_USE_SMP_BALANCE=1`,
+then `qemu-system-loongarch64 -machine virt -smp 2 -kernel ark_qemu_la64.elf -nographic`
+for 25 s:
+
+```
+[bal] id1=7 id2=8
+[bal] add b1 rc=0
+[bal] add b2 rc=0 n=2
+[bal] r=1 out=1 back=0 idle=0 tick=1003 cur1=6 q1=1 b1=+2925 c1=1 b2=+2919 c2=0
+[bal] r=2 out=1 back=0 idle=0 tick=2004 cur1=6 q1=1 b1=+2894 c1=1 b2=+2841 c2=0
+[bal] r=3 out=1 back=0 idle=0 tick=3004 cur1=6 q1=1 b1=+2975 c1=1 b2=+2966 c2=0
+[bal] r=4 out=1 back=0 idle=0 tick=4004 cur1=6 q1=1 b1=+3029 c1=1 b2=+3022 c2=0
+[bal] r=5 out=1 back=0 idle=0 tick=5004 cur1=6 q1=1 b1=+2956 c1=1 b2=+2952 c2=0
+[bal] r=6 out=1 back=0 idle=0 tick=6004 cur1=6 q1=1 b1=+2923 c1=1 b2=+2917 c2=0
+[bal] park b1=7 b2=8 done
+```
+
+All four criteria hold:
+
+1. `out=1` while `tick` climbs from 1003 to 6004 — **the move was made by the policy
+   itself**; `back=0` because CPU0 was never truly empty, not because the pull-back path
+   is broken (do not read this backwards);
+2. `cur1=6` (= id1-1) and `c1=1` show the secondary core runs b1; `c2=0` shows b2 stayed
+   on CPU0;
+3. both counters rise **together** by roughly 2900-3030 per 200 ticks — the two cores run
+   in parallel, and equal priority lets the one left on CPU0 still get slices (a lower
+   priority would be starved by same-core busy-waiters; hit this round, see 9.9.6);
+4. after `[bal] park b1=7 b2=8 done` the workers sit in `wfi` and the image's original
+   `[A]/[B]` periodic tasks keep printing normally (`svc_ok`).
+
+#### 9.9.6 Mutual exclusion with ④'s manual demo (a real problem hit this round)
+
+The first version built both demos at once; the reading was `out=0` (never migrated) and
+`cur1=6` was permanently the manual demo's `task_w` (id 7) — **the two demos fought over
+the same secondary core**: the manual one took it first, so the balancing policy saw "not
+idle" and never acted. The policy was not wrong; two demos were competing for one
+resource.
+
+So in BALANCE builds the manual SMP demo is gated off in three places via
+`(ARKRTOS_USE_SMP_BALANCE != 1)` (block header, registration block, `task_to` block, plus
+the `s_stack_chk` declaration that only served it). The manual demo's reading is re-run in
+a `SMP_SCHED=1`-only image and matches §9.8.4 (`to cpu1 rc=0` → secondary progresses →
+`back rc=0` → `cur1=0xffffffff`) — **what was switched off is the demo, not the
+capability**.
+
+A worker cannot exit at teardown: task exit goes through the kernel scheduler and a task
+on a secondary core must not take that path. So `park` does "remove from the candidate
+table → drop priority to 200 (same as idle) → re-link to the ready chain only if not owned
+by someone else", and the worker body parks in `wfi` after `s_bal_stop`, never returning.
+
+#### 9.9.7 A pre-existing defect fixed along the way: a task function returning jumps to 0
+
+The first demo run produced `ecode=0x0d (INE) era=0`: `task_bal_chk` returned after six
+rounds, the entry frame's `ra` was 0, and `ret` jumped to address 0. **This was not
+introduced by balancing** — a `SMP_SCHED=1`-only reference image crashed the same way.
+
+Fix: add `arkrtos_task_entry_return()` (`arkrtos_task.c`) which logs
+`task <id> entry returned -> auto exit`, then `arkrtos_task_kill_internal()`, then spins in
+`wfi`; LA64 and RV32 `arkrtos_port_stack_init` point the entry frame's `RA` at it. The
+criterion is a real run showing `task 9 entry returned -> auto exit` with no `FATAL`.
+**LA64 executed; RV32 compiles only, not executed.**
+
+#### 9.9.8 Zero change in the default build
+
+`ARKRTOS_USE_SMP_BALANCE` defaults to 0: all new state (candidate table, four counters)
+sits inside `#if` in `arkrtos_smp_sched.c`, the demo inside `#if` in `main.c`, and the
+default build's `arkrtos_smp_sched.o` is still an empty translation unit. pin Y in
+`tools/smp_gate.py` pins symbol by symbol with `objdump -t` that "the BALANCE=1 object
+defines all four contract symbols / the BALANCE=0 object defines none", and actually
+compiles two bad configurations to prove the `#error`s fire while the good one builds.
+`build/la64_def_chk` (default build, 20 s): 0 `FATAL`, no `[bal]`/`[sched]` output at all.
+
+#### 9.9.9 Verdict and three forbidden readings
+
+Verdict: **`smp_amp_balance_ok_on_qemu`** — on LA64 / QEMU `-smp 2`, the policy moves a
+task out by itself when a secondary core is idle, both cores advance their own counters in
+parallel, and teardown stops cleanly and hands CPU0 back; the default build and the
+④-only build are both unchanged. RV32 and real hardware **unverified**.
+
+1. **Must not be read as "symmetric multiprocessing / general load balancing"**: no global
+   clock sync, the secondary core may not enter the kernel, no TLB shootdown; the candidate
+   table is filled in by hand and the policy acts only at two extremes ("secondary idle"
+   and "CPU0 truly empty"), never in between. Two tasks is a self-check, not a statement of
+   a capability ceiling.
+2. **Must not read `b1=+2925 / b2=+2919` as "speedup from balancing"**: it is the reading
+   of "two tasks, one per core", with no same-shape single-core control, so it is not
+   speedup evidence.
+3. **Must not be read as board-ready**: secondary bring-up, IPI and the IOCSR mailbox all
+   go through QEMU 9.2.3's model; real firmware and hardware are unverified.
+
 ## 10. Enabling `-Wconversion` (2026-11-19): default image byte-identical
 
 `tools/warn_gate.py` goes from six options to seven; the new one is `-Wconversion`, which in

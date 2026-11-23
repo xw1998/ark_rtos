@@ -2420,16 +2420,16 @@ def check_smp_sched_host():
     picks = {}
     for case in CASES:
         name, test, mods, defs, _markers, incs, _argv = _case(case)
-        if name in ("smpsched", "smpschedoff"):
+        if name in ("smpsched", "smpschedbal", "smpschedoff"):
             picks[name] = (test, mods, defs, incs, _markers)
-    for name in ("smpsched", "smpschedoff"):
+    for name in ("smpsched", "smpschedbal", "smpschedoff"):
         if name not in picks:
             fail("smp-sched-host", "case %s missing from coverage_gate.CASES" % name)
             return
 
     with TempDir() as td:
         lines = []
-        for name in ("smpsched", "smpschedoff"):
+        for name in ("smpsched", "smpschedbal", "smpschedoff"):
             test, mods, defs, incs, markers = picks[name]
             exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
             cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]

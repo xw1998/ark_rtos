@@ -33,11 +33,12 @@
      真汇编后反汇编必须有 iocsrwr / ertn / 该符号；同一文件 SMP=0 汇编时
      三者必须都不在（否则说明标记钉在了无条件代码上）。
 
-不覆盖：**对称多核调度**（自动负载均衡、全局时钟同步）与**真实硬件**上的
-次核启动 / IPI 延迟（本仓库没有任何多核板）。QEMU 上已实跑的三件事各有 pin：
-LA64 的 ②③（pin U/V，文档 §9.6）、LA64 的 ④ AMP 调度分核（pin W，§9.8）、
-RV32 的 ②③ ACLINT msip（pin X，§9.7）。LA32 侧与 RV32 的 ④ 仍未做，判词不许
-外推。所以这一道的结论是"骨架自洽 + 三条实跑路径都被钉住"，不是"通用多核"。
+不覆盖：**对称多核调度**（全局时钟同步、次核可进内核、TLB shootdown）与
+**真实硬件**上的次核启动 / IPI 延迟（本仓库没有任何多核板）。QEMU 上已实跑的
+四件事各有 pin：LA64 的 ②③（pin U/V，文档 §9.6）、LA64 的 ④ AMP 调度分核
+（pin W，§9.8）、RV32 的 ②③ ACLINT msip（pin X，§9.7）、LA64 的 ⑤ AMP 自动
+负载均衡（pin Y，§9.9）。LA32 侧与 RV32 的 ④ 仍未做，判词不许外推。所以这一道
+的结论是"骨架自洽 + 四条实跑路径都被钉住"，不是"通用多核"。
 
 用法
 ----
@@ -790,6 +791,230 @@ def run_rv32_smp(cc):
     shutil.rmtree(td, ignore_errors=True)
     return bad == 0
 
+# ---------------------------------------------------------------- pin Y
+# pin Y：⑤ 自动负载均衡（ARKRTOS_USE_SMP_BALANCE）。这一档的代码被两个开关
+# 夹着（SMP_SCHED 是前置，BALANCE 自己再一道），默认档一个编译器都不经过 ——
+# 与 pin U/V/W 同源的假绿形态。钉四件事：
+#   1) 四个契约符号在头/源里都在，且**只在 BALANCE=1 档**才落到目标文件里
+#      （关档零符号，靠 objdump -t 对照，不靠"看着像关了"）；
+#   2) 两条 #error 依赖是真编译出来的（BALANCE=1 缺 SMP_SCHED / CPU_NUM=1
+#      必须编不过），同时好档必须编得过 —— 否则"永远失败"也能骗过判据；
+#   3) 策略必须从 CPU0 的 poll 里被调起，而且那道调用在自己的 #if 里；
+#   4) 两处「不许迁正在跑的任务」的保护各在自己的位置上（-6 返回码 +
+#      候选筛选里的 current 判定）。
+BAL_H   = "kernelsrc/include/arkrtos_smp_sched.h"
+BAL_C   = SCHED_C
+BAL_MAIN = "example/qemu_loongarch64/main.c"
+BAL_API = ["arkrtos_smp_sched_auto_add",
+           "arkrtos_smp_sched_auto_del",
+           "arkrtos_smp_sched_auto_count",
+           "arkrtos_smp_sched_balance_stat"]
+BAL_GUARD = "#if (ARKRTOS_USE_SMP_BALANCE == 1)"
+
+def bal_poll_ok(text):
+    """poll 里那一句 (void)sms_balance_step(); 必须在 BALANCE 开关之内。"""
+    i = text.find("void arkrtos_smp_sched_poll(void)")
+    if i < 0:
+        return False
+    seg = text[i:]
+    j = seg.find("(void)sms_balance_step();")
+    if j < 0:
+        return False
+    return BAL_GUARD in seg[:j]
+
+def run_la64_smp_balance(cc):
+    """pin Y：⑤ AMP 自动负载均衡（两档真编译 + 关档零符号 + 依赖 #error + 策略 pin）。"""
+    od = cc.replace("gcc", "objdump")
+    if not os.path.exists(od):
+        print("SMP-GATE FAIL: no LA64 objdump next to %s" % cc)
+        return False
+
+    td = tempfile.mkdtemp(prefix="arkrtos-smp-y-")
+    bad = 0
+
+    key = os.path.join(td, "arkrtos_sign_key_local.h")
+    with open(key, "w", encoding="utf-8") as f:
+        f.write("#ifndef ARKRTOS_SIGN_KEY_LOCAL_H\n"
+                "#define ARKRTOS_SIGN_KEY_LOCAL_H\n"
+                "#define ARKRTOS_IMAGE_SIGN_KEY { " +
+                ", ".join("0x%02X" % i for i in range(32)) + " }\n"
+                "#endif\n")
+
+    base = ["-DARKRTOS_SIGN_KEY_LOCAL=1",
+            "-DARKRTOS_BOARD_CONFIG=\"arkrtos_board_config.h\"",
+            "-include", "arkrtos_board_config.h"]
+    inc = ["-I" + td] + ["-I" + os.path.join(ROOT, x) for x in LA64_INCLUDES]
+
+    try:
+        bal_h = open(os.path.join(ROOT, BAL_H), encoding="utf-8",
+                     errors="replace").read()
+        bal_c = open(os.path.join(ROOT, BAL_C), encoding="utf-8",
+                     errors="replace").read()
+        main_c = open(os.path.join(ROOT, BAL_MAIN), encoding="utf-8",
+                      errors="replace").read()
+    except OSError as exc:
+        print("SMP-GATE FAIL: cannot read the balance module (%s)" % exc)
+        shutil.rmtree(td, ignore_errors=True)
+        return False
+
+    missing = [a for a in BAL_API if a not in bal_h or a not in bal_c]
+    if missing:
+        print("SMP-GATE FAIL: %s missing from the balance header/source" %
+              ", ".join(missing))
+        bad += 1
+    else:
+        print("ok: balance module exposes all four contract symbols")
+
+    # 自检：抠掉一个符号名，同一判据必须报出来
+    if [a for a in BAL_API if a not in bal_h.replace(BAL_API[0], "")]:
+        print("ok: balance self-check (a removed symbol name is detected)")
+    else:
+        print("SMP-GATE FAIL: balance symbol self-check missed a removed name")
+        bad += 1
+
+    on_defs = base + ["-DARKRTOS_USE_SMP=1", "-DARKRTOS_CPU_NUM=2",
+                      "-DARKRTOS_USE_SMP_SCHED=1",
+                      "-DARKRTOS_USE_SMP_BALANCE=1"]
+
+    # 真编译：ON 档（-fsyntax-only 抓符号/宏/类型错误）
+    r = subprocess.run([cc, "-march=loongarch64", "-mabi=lp64d", "-std=c99",
+                        "-fsyntax-only", os.path.join(ROOT, BAL_C)] +
+                       on_defs + inc,
+                       cwd=ROOT, capture_output=True,
+                       encoding="utf-8", errors="replace")
+    out = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode != 0:
+        print("SMP-GATE FAIL: balance module does not compile with "
+              "SMP_BALANCE=1")
+        print(out[-900:])
+        bad += 1
+    else:
+        print("ok: balance module compiles with SMP_BALANCE=1")
+
+    # 两档各落一次目标文件：ON 档必须有四个符号，OFF 档一个都不许有。
+    def bal_symbols(extra, tag):
+        obj = os.path.join(td, "bal_%s.o" % tag)
+        rr = subprocess.run([cc, "-march=loongarch64", "-mabi=lp64d", "-std=c99",
+                             "-c", os.path.join(ROOT, BAL_C), "-o", obj] +
+                            base + extra + inc,
+                            cwd=ROOT, capture_output=True,
+                            encoding="utf-8", errors="replace")
+        if rr.returncode != 0:
+            print("SMP-GATE FAIL: balance module does not compile (%s)" % tag)
+            print((((rr.stdout or "") + (rr.stderr or "")).strip())[-900:])
+            return None
+        t = subprocess.run([od, "-t", obj], capture_output=True,
+                           encoding="utf-8", errors="replace")
+        return (t.stdout or "") + (t.stderr or "")
+
+    on_syms = bal_symbols(["-DARKRTOS_USE_SMP=1", "-DARKRTOS_CPU_NUM=2",
+                           "-DARKRTOS_USE_SMP_SCHED=1",
+                           "-DARKRTOS_USE_SMP_BALANCE=1"], "on")
+    off_syms = bal_symbols(["-DARKRTOS_USE_SMP=1", "-DARKRTOS_CPU_NUM=2",
+                            "-DARKRTOS_USE_SMP_SCHED=1"], "off")
+    if (on_syms is None) or (off_syms is None):
+        bad += 1
+    else:
+        on_hit = [a for a in BAL_API if a in on_syms]
+        off_hit = [a for a in BAL_API if a in off_syms]
+        if len(on_hit) != len(BAL_API):
+            print("SMP-GATE FAIL: BALANCE=1 object is missing %s" %
+                  ", ".join(a for a in BAL_API if a not in on_hit))
+            bad += 1
+        elif off_hit:
+            print("SMP-GATE FAIL: BALANCE=0 object still defines %s" %
+                  ", ".join(off_hit))
+            bad += 1
+        else:
+            print("ok: BALANCE=1 object defines all four symbols, BALANCE=0 "
+                  "object defines none")
+
+    # 两条 #error 依赖：坏档必须编不过，好档必须编得过。
+    def bal_compiles(defs):
+        rr = subprocess.run([cc, "-march=loongarch64", "-mabi=lp64d", "-std=c99",
+                             "-fsyntax-only", os.path.join(ROOT, BAL_C)] +
+                            base + defs + inc,
+                            cwd=ROOT, capture_output=True,
+                            encoding="utf-8", errors="replace")
+        return rr.returncode, ((rr.stdout or "") + (rr.stderr or "")).strip()
+
+    rc_bad1, out_bad1 = bal_compiles(["-DARKRTOS_USE_SMP=1",
+                                      "-DARKRTOS_CPU_NUM=2",
+                                      "-DARKRTOS_USE_SMP_SCHED=0",
+                                      "-DARKRTOS_USE_SMP_BALANCE=1"])
+    rc_bad2, out_bad2 = bal_compiles(["-DARKRTOS_USE_SMP=1",
+                                      "-DARKRTOS_CPU_NUM=1",
+                                      "-DARKRTOS_USE_SMP_SCHED=1",
+                                      "-DARKRTOS_USE_SMP_BALANCE=1"])
+    rc_ok, out_ok = bal_compiles(["-DARKRTOS_USE_SMP=1", "-DARKRTOS_CPU_NUM=2",
+                                  "-DARKRTOS_USE_SMP_SCHED=1",
+                                  "-DARKRTOS_USE_SMP_BALANCE=1"])
+    if rc_bad1 == 0:
+        print("SMP-GATE FAIL: SMP_BALANCE=1 without SMP_SCHED compiles "
+              "(the dependency is not enforced)")
+        bad += 1
+    elif "ARKRTOS_USE_SMP_SCHED" not in out_bad1:
+        print("SMP-GATE FAIL: BALANCE-without-SCHED failed for an unexpected "
+              "reason (no #error text)")
+        bad += 1
+    elif rc_bad2 == 0:
+        print("SMP-GATE FAIL: SMP_BALANCE=1 with CPU_NUM=1 compiles "
+              "(the dependency is not enforced)")
+        bad += 1
+    elif "CPU_NUM" not in out_bad2:
+        print("SMP-GATE FAIL: BALANCE-with-CPU_NUM=1 failed for an unexpected "
+              "reason (no #error text)")
+        bad += 1
+    elif rc_ok != 0:
+        print("SMP-GATE FAIL: the good BALANCE configuration does not compile "
+              "(the two failures above prove nothing)")
+        print(out_ok[-600:])
+        bad += 1
+    else:
+        print("ok: both #error dependencies fire, the good configuration compiles")
+
+    # 策略 pin：poll 里的调用必须带开关；-6 保护与候选筛选里的 current 判定都在。
+    if bal_poll_ok(bal_c):
+        print("ok: sms_balance_step() is called from poll inside its own #if")
+    else:
+        print("SMP-GATE FAIL: sms_balance_step() is not wired into "
+              "arkrtos_smp_sched_poll under ARKRTOS_USE_SMP_BALANCE")
+        bad += 1
+
+    mut = bal_c.replace("(void)sms_balance_step();", "/* removed */")
+    if bal_poll_ok(mut):
+        print("SMP-GATE FAIL: poll self-check missed a removed balance call")
+        bad += 1
+    else:
+        print("ok: poll self-check (a removed balance call is detected)")
+
+    if "return -6;" not in bal_c:
+        print("SMP-GATE FAIL: the running-task guard (-6) is gone from "
+              "arkrtos_smp_sched_task_to")
+        bad += 1
+    elif bal_c.count("(idx == (arkrtos_current_task_id - 1))") < 2:
+        print("SMP-GATE FAIL: the current-task filter is missing from either "
+              "task_to or sms_balance_step")
+        bad += 1
+    else:
+        print("ok: both running-task guards are in place (-6 + candidate filter)")
+
+    # 演示侧：均衡档下手工 SMP 演示必须让位（两者抢同一个次核），且判据齐。
+    if main_c.count("(ARKRTOS_USE_SMP_BALANCE != 1)") < 3:
+        print("SMP-GATE FAIL: the manual SMP_SCHED demo is not gated off in "
+              "BALANCE builds (both fight over the same secondary core)")
+        bad += 1
+    elif "[bal] park" not in main_c:
+        print("SMP-GATE FAIL: the balance demo has no park step "
+              "(workers would keep the CPU forever)")
+        bad += 1
+    else:
+        print("ok: balance demo is self-contained (legacy demo gated off, "
+              "park step present)")
+
+    shutil.rmtree(td, ignore_errors=True)
+    return bad == 0
+
 def main():
     ap = argparse.ArgumentParser(description="Host + syntax gate for the SMP scaffolding")
     ap.add_argument("--gcc", default=None)
@@ -824,6 +1049,8 @@ def main():
         return 1
     if not run_la64_smp_sched(la):
         return 1
+    if not run_la64_smp_balance(la):
+        return 1
 
     rv = find_rv32(args.rv32)
     if not rv:
@@ -832,7 +1059,7 @@ def main():
     if not run_rv32_smp(rv):
         return 1
 
-    print("SMP-GATE OK (host accounting + %d ARM ON-path files + LA64 pin U/V/W "
+    print("SMP-GATE OK (host accounting + %d ARM ON-path files + LA64 pin U/V/W/Y "
           "+ RV32 pin X, CPU_NUM=4/2)" % len(TARGETS))
     return 0
 

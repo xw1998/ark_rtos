@@ -81,6 +81,24 @@
 #define ARKRTOS_USE_SMP_SCHED           0
 #endif
 
+/* AMP 自动负载均衡：在上一档（每核运行队列 + 显式迁移）之上只加一条策略，
+ * 不碰全局调度器——CPU0 每拍看一眼次核：次核空闲、且有已登记的候选任务
+ * 在 CPU0 就绪集里，就把它迁过去；次核排了两个以上、而 CPU0 手上一件
+ * 就绪任务都没有时，要回一个。
+ *
+ * **它不是对称调度**：次核仍然不许发 SVC、不许调内核 API，所以只允许
+ * 调用方把「纯计算、不碰内核对象」的任务登记进候选表
+ * （arkrtos_smp_sched_auto_add）。登记是显式的，因为这个模块没有办法
+ * 从任务体看出它会不会发 SVC；自动迁移一个会发 SVC 的任务等于让它当场
+ * 停机。这条限制是这份实现的边界，不是"暂未实现"。
+ *
+ * 依赖：ARKRTOS_USE_SMP_SCHED=1 且 ARKRTOS_CPU_NUM >= 2（在
+ * arkrtos_config.h 里用 #error 拦）。默认关，关档下模块的候选表与策略
+ * 一行都不编进来。 */
+#ifndef ARKRTOS_USE_SMP_BALANCE
+#define ARKRTOS_USE_SMP_BALANCE         0
+#endif
+
 /* 任务栈用量统计：填充图案 + 最低栈指针双手段，算每任务峰值 */
 #ifndef ARKRTOS_USE_STACK_USAGE
 #define ARKRTOS_USE_STACK_USAGE         1

@@ -46,7 +46,7 @@
 - [kernelsrc/include/arkrtos_shell_auth.h](#kernelsrcincludearkrtos_shell_authh)（5 项）
 - [kernelsrc/include/arkrtos_sign.h](#kernelsrcincludearkrtos_signh)（10 项）
 - [kernelsrc/include/arkrtos_smp.h](#kernelsrcincludearkrtos_smph)（11 项）
-- [kernelsrc/include/arkrtos_smp_sched.h](#kernelsrcincludearkrtos_smp_schedh)（10 项）
+- [kernelsrc/include/arkrtos_smp_sched.h](#kernelsrcincludearkrtos_smp_schedh)（15 项）
 - [kernelsrc/include/arkrtos_softbus.h](#kernelsrcincludearkrtos_softbush)（5 项）
 - [kernelsrc/include/arkrtos_spin.h](#kernelsrcincludearkrtos_spinh)（10 项）
 - [kernelsrc/include/arkrtos_svc_abi.h](#kernelsrcincludearkrtos_svc_abih)（4 项）
@@ -100,7 +100,8 @@
 - [kernelsrc/src/arkrtos_mpu.c](#kernelsrcsrcarkrtos_mpuc)（1 项）
 - [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（27 项）
 - [kernelsrc/src/arkrtos_smp.c](#kernelsrcsrcarkrtos_smpc)（1 项）
-- [kernelsrc/src/arkrtos_task.c](#kernelsrcsrcarkrtos_taskc)（5 项）
+- [kernelsrc/src/arkrtos_smp_sched.c](#kernelsrcsrcarkrtos_smp_schedc)（1 项）
+- [kernelsrc/src/arkrtos_task.c](#kernelsrcsrcarkrtos_taskc)（6 项）
 - [kernelsrc/src/arkrtos_tickless.c](#kernelsrcsrcarkrtos_ticklessc)（1 项）
 - [kernelsrc/src/arkrtos_vfs_lfs.c](#kernelsrcsrcarkrtos_vfs_lfsc)（3 项）
 
@@ -638,7 +639,7 @@ int32  arkrtos_sbuf_send_from_isr(int32 handle, const void *buf, int32 len);
 int32  arkrtos_sbuf_used(int32 handle);
 ```
 
-**当前已存字节数，负值=句柄非法 */**
+**当前已存字节数，负值=句柄非法**
 
 ### `int32  arkrtos_sbuf_free(int32 handle);`
 
@@ -646,7 +647,7 @@ int32  arkrtos_sbuf_used(int32 handle);
 int32  arkrtos_sbuf_free(int32 handle);
 ```
 
-**当前剩余空间字节数，负值=句柄非法 */**
+**当前剩余空间字节数，负值=句柄非法**
 
 ### `int32  arkrtos_sbuf_reset(int32 handle);`
 
@@ -654,7 +655,7 @@ int32  arkrtos_sbuf_free(int32 handle);
 int32  arkrtos_sbuf_reset(int32 handle);
 ```
 
-**清空缓冲（唤醒等待空间的写者） */**
+**清空缓冲（唤醒等待空间的写者）**
 
 ### `int32  arkrtos_sbuf_delete(int32 handle);`
 
@@ -662,7 +663,7 @@ int32  arkrtos_sbuf_reset(int32 handle);
 int32  arkrtos_sbuf_delete(int32 handle);
 ```
 
-**删除缓冲（等待者收到"对象已删除"，不会睡到超时） */**
+**删除缓冲（等待者收到"对象已删除"，不会睡到超时）**
 
 ### `int32  arkrtos_mbuf_send(int32 handle, const void *buf, int32 len, int`
 
@@ -689,7 +690,7 @@ int32  arkrtos_mbuf_recv(int32 handle, void *buf, int32 len, int32 timeout_ms);
 int32  arkrtos_mbuf_send_from_isr(int32 handle, const void *buf, int32 len);
 ```
 
-**中断上下文发送消息（整条写入，放不下返回负值） */**
+**中断上下文发送消息（整条写入，放不下返回负值）**
 
 ### `int32  arkrtos_mbuf_peek_len(int32 handle);`
 
@@ -697,7 +698,7 @@ int32  arkrtos_mbuf_send_from_isr(int32 handle, const void *buf, int32 len);
 int32  arkrtos_mbuf_peek_len(int32 handle);
 ```
 
-**下一条完整消息的长度；没有完整消息返回负值（可先问长度再准备缓冲） */**
+**下一条完整消息的长度；没有完整消息返回负值（可先问长度再准备缓冲）**
 
 ### `typedef struct {`
 
@@ -705,7 +706,7 @@ int32  arkrtos_mbuf_peek_len(int32 handle);
 typedef struct {
 ```
 
-**池的只读快照 */**
+**池的只读快照**
 
 ### `int32  arkrtos_mpool_create(const char *name, void *pool, uint32 block`
 
@@ -747,7 +748,7 @@ int32  arkrtos_mpool_free(int32 handle, void *p);
 int32  arkrtos_mpool_query(int32 handle, arkrtos_mpool_stat_t *out);
 ```
 
-**取池快照 @return 0=成功；负值=句柄非法或输出区不在可见 RAM */**
+**取池快照 @return 0=成功；负值=句柄非法或输出区不在可见 RAM**
 
 ### `int32  arkrtos_mpool_delete(int32 handle);`
 
@@ -755,7 +756,7 @@ int32  arkrtos_mpool_query(int32 handle, arkrtos_mpool_stat_t *out);
 int32  arkrtos_mpool_delete(int32 handle);
 ```
 
-**销毁池（只释放对象表项，调用者提供的内存区不受影响） */**
+**销毁池（只释放对象表项，调用者提供的内存区不受影响）**
 
 ### `int32  arkrtos_timer_create(const char *name);`
 
@@ -1164,7 +1165,7 @@ The App gets a flat list of names, no types and no sizes.
 #define ARKRTOS_PATH_MAX          (64u)
 ```
 
-**Longest accepted namespace path, NUL included. */**
+**Longest accepted namespace path, NUL included.**
 
 ### `int32  arkrtos_path_open(const char *path, uint32 flags);`
 
@@ -1330,7 +1331,7 @@ Loader 按本结构解析、校验、重定位并写入镜像池。
 #define ARKRTOS_APP_MAGIC           (0x53564341u)
 ```
 
-**App 镜像头魔数 "SVCA" */**
+**App 镜像头魔数 "SVCA"**
 
 ### `#define ARKRTOS_APP_HEADER_SIZE     (256u)`
 
@@ -1338,7 +1339,7 @@ Loader 按本结构解析、校验、重定位并写入镜像池。
 #define ARKRTOS_APP_HEADER_SIZE     (256u)
 ```
 
-**App 镜像头固定长度（字节） */**
+**App 镜像头固定长度（字节）**
 
 ### `#define ARKRTOS_APP_TYPE_APP        (1u) #define ARKRTOS_APP_TYPE_DRIV`
 
@@ -1346,7 +1347,7 @@ Loader 按本结构解析、校验、重定位并写入镜像池。
 #define ARKRTOS_APP_TYPE_APP        (1u) #define ARKRTOS_APP_TYPE_DRIVER     (2u)
 ```
 
-**镜像类型 */**
+**镜像类型**
 
 ### `#define ARKRTOS_APP_TYPE_MINIAPP    (3u)`
 
@@ -1363,7 +1364,7 @@ Loader 按本结构解析、校验、重定位并写入镜像池。
 - 容器格式与类型 1/2 完全一致（256B 头 + 重定位表 + 负载），
 所以打包/校验/重定位代码完全复用；区别只在装载路径与运行位置。
 池内安装器只接受 1/2，把 3 装进 Flash 池会被拒收。
-详见 docs/小程序设计.md。*/
+详见 docs/小程序设计.md。
 
 ### `#define ARKRTOS_APP_TYPE_MASK(t)    (1u << (uint32)(t))`
 
@@ -1374,7 +1375,7 @@ Loader 按本结构解析、校验、重定位并写入镜像池。
 **类型位掩码：内核的头部校验函数按掩码判定「这个类型接受不接受」**
 用具名掩码而不是在调用点写 `type == A || type == B`，是因为
 校验函数被多条装载路径共用（安装 / 上电扫描 / 搬移 / 小程序），
-每条路径接受的类型不同，而「能不能接受」必须只有一处判定。 */
+每条路径接受的类型不同，而「能不能接受」必须只有一处判定。
 
 ### `#define ARKRTOS_APP_TYPE_MASK_POOL \ (ARKRTOS_APP_TYPE_MASK(ARKRTOS_AP`
 
@@ -1382,7 +1383,7 @@ Loader 按本结构解析、校验、重定位并写入镜像池。
 #define ARKRTOS_APP_TYPE_MASK_POOL \ (ARKRTOS_APP_TYPE_MASK(ARKRTOS_APP_TYPE_APP) | ARKRTOS_APP_TYPE_MASK(ARKRTOS_APP_TYPE_DRIVER))
 ```
 
-**镜像池安装器接受的全部类型（小程序不在列：它属于文件系统） */**
+**镜像池安装器接受的全部类型（小程序不在列：它属于文件系统）**
 
 ### `#define ARKRTOS_APP_TYPE_MASK_MINI  (ARKRTOS_APP_TYPE_MASK(ARKRTOS_APP`
 
@@ -1390,7 +1391,7 @@ Loader 按本结构解析、校验、重定位并写入镜像池。
 #define ARKRTOS_APP_TYPE_MASK_MINI  (ARKRTOS_APP_TYPE_MASK(ARKRTOS_APP_TYPE_MINIAPP))
 ```
 
-**小程序装载路径接受的类型 */**
+**小程序装载路径接受的类型**
 
 ### `#define ARKRTOS_APP_FLAG_AUTOSTART  (1u << 0)   /* 开机扫描认定后被自动启动 */`
 
@@ -1400,7 +1401,7 @@ Loader 按本结构解析、校验、重定位并写入镜像池。
 
 **镜像头 flags 位定义（见 arkrtos_app_header_t.flags）**
 > 说明：该字段落在头部 offset 96（原 reserved 区首 4 字节）。旧镜像该位置
-恒为 0，等价于「不设任何标志」，因此新增本字段不破坏旧镜像。 */
+恒为 0，等价于「不设任何标志」，因此新增本字段不破坏旧镜像。
 
 ### `#define ARKRTOS_APP_FLAG_NONE       (0u)`
 
@@ -1408,7 +1409,7 @@ Loader 按本结构解析、校验、重定位并写入镜像池。
 #define ARKRTOS_APP_FLAG_NONE       (0u)
 ```
 
-**未设置任何标志 */**
+**未设置任何标志**
 
 ### `#define ARKRTOS_APP_STATE_VALID       (0u)      /* 已提交，可用（旧镜像恒为该值） */ `
 
@@ -1460,7 +1461,7 @@ reloc_count*4 字节，这部分位移必须计入，否则代码里的自引用
 #define ARKRTOS_APP_RELOC_KIND_ROM_MOVW  (2u)
 ```
 
-**MOVW/MOVT 立即数对里的 ROM 类地址（表项占 8 字节：两条指令） */**
+**MOVW/MOVT 立即数对里的 ROM 类地址（表项占 8 字节：两条指令）**
 
 ### `#define ARKRTOS_APP_RELOC_KIND_RAM_MOVW  (3u)`
 
@@ -1468,7 +1469,7 @@ reloc_count*4 字节，这部分位移必须计入，否则代码里的自引用
 #define ARKRTOS_APP_RELOC_KIND_RAM_MOVW  (3u)
 ```
 
-**MOVW/MOVT 立即数对里的 RAM 类地址（表项占 8 字节：两条指令） */**
+**MOVW/MOVT 立即数对里的 RAM 类地址（表项占 8 字节：两条指令）**
 
 ### `#define ARKRTOS_APP_RELOC_KIND_32    (0u)`
 
@@ -1476,7 +1477,7 @@ reloc_count*4 字节，这部分位移必须计入，否则代码里的自引用
 #define ARKRTOS_APP_RELOC_KIND_32    (0u)
 ```
 
-**重定位表编码版本：偏移按字节存放（已废弃，低 2 位会被类型截断） */**
+**重定位表编码版本：偏移按字节存放（已废弃，低 2 位会被类型截断）**
 
 ### `#define ARKRTOS_APP_RELOC_KIND_HALF  (1u)`
 
@@ -1484,7 +1485,7 @@ reloc_count*4 字节，这部分位移必须计入，否则代码里的自引用
 #define ARKRTOS_APP_RELOC_KIND_HALF  (1u)
 ```
 
-**重定位表编码版本：偏移按半字存放（当前版本） */**
+**重定位表编码版本：偏移按半字存放（当前版本）**
 
 ### `#define ARKRTOS_APP_RELOC_KIND_CUR   (ARKRTOS_APP_RELOC_KIND_HALF)`
 
@@ -1492,7 +1493,7 @@ reloc_count*4 字节，这部分位移必须计入，否则代码里的自引用
 #define ARKRTOS_APP_RELOC_KIND_CUR   (ARKRTOS_APP_RELOC_KIND_HALF)
 ```
 
-**内核唯一接受的表编码版本 */**
+**内核唯一接受的表编码版本**
 
 ### `#define ARKRTOS_APP_RELOC_OFF_UNIT   (2u)`
 
@@ -1500,7 +1501,7 @@ reloc_count*4 字节，这部分位移必须计入，否则代码里的自引用
 #define ARKRTOS_APP_RELOC_OFF_UNIT   (2u)
 ```
 
-**表项里偏移的存放单位（字节）：2 = 按半字 */**
+**表项里偏移的存放单位（字节）：2 = 按半字**
 
 ### `#define ARKRTOS_APP_RELOC_OFF(e) \ (((e) & ~ARKRTOS_APP_RELOC_KIND_MAS`
 
@@ -1508,7 +1509,7 @@ reloc_count*4 字节，这部分位移必须计入，否则代码里的自引用
 #define ARKRTOS_APP_RELOC_OFF(e) \ (((e) & ~ARKRTOS_APP_RELOC_KIND_MASK) >> 1)
 ```
 
-**从条目取出偏移（相对镜像起始，按半字存放，恒为偶数） */**
+**从条目取出偏移（相对镜像起始，按半字存放，恒为偶数）**
 
 ### `#define ARKRTOS_APP_RELOC_ENTRY(off, kind) \ ((((uint32)(off) / ARKRTO`
 
@@ -1516,7 +1517,7 @@ reloc_count*4 字节，这部分位移必须计入，否则代码里的自引用
 #define ARKRTOS_APP_RELOC_ENTRY(off, kind) \ ((((uint32)(off) / ARKRTOS_APP_RELOC_OFF_UNIT) << 2) | \ ((uint32)(kind) & ARKRTOS_APP_RELOC_KIND_MASK))
 ```
 
-**由偏移与类型组装条目（与 ARKRTOS_APP_RELOC_OFF 互逆） */**
+**由偏移与类型组装条目（与 ARKRTOS_APP_RELOC_OFF 互逆）**
 
 ### `#define ARKRTOS_APP_RELOC_KIND(e)    ((e) & ARKRTOS_APP_RELOC_KIND_MAS`
 
@@ -1524,7 +1525,7 @@ reloc_count*4 字节，这部分位移必须计入，否则代码里的自引用
 #define ARKRTOS_APP_RELOC_KIND(e)    ((e) & ARKRTOS_APP_RELOC_KIND_MASK)
 ```
 
-**从条目取出类型 */**
+**从条目取出类型**
 
 ### `#define ARKRTOS_APP_RELOC_SIZE       (4u)`
 
@@ -1532,7 +1533,7 @@ reloc_count*4 字节，这部分位移必须计入，否则代码里的自引用
 #define ARKRTOS_APP_RELOC_SIZE       (4u)
 ```
 
-**一条重定位表目占用的字节数 */**
+**一条重定位表目占用的字节数**
 
 ### `#define ARKRTOS_APP_RELOC_MOV_SIZE   (8u)`
 
@@ -1540,7 +1541,7 @@ reloc_count*4 字节，这部分位移必须计入，否则代码里的自引用
 #define ARKRTOS_APP_RELOC_MOV_SIZE   (8u)
 ```
 
-**MOVW/MOVT 表项覆盖的字节数（两条 4 字节指令） */**
+**MOVW/MOVT 表项覆盖的字节数（两条 4 字节指令）**
 
 ### `#define ARKRTOS_APP_RELOC_NONE       (0u)`
 
@@ -1548,7 +1549,7 @@ reloc_count*4 字节，这部分位移必须计入，否则代码里的自引用
 #define ARKRTOS_APP_RELOC_NONE       (0u)
 ```
 
-**重定位表无需 CRC 归零的字段，故整表参与校验；本宏仅为可读性 */**
+**重定位表无需 CRC 归零的字段，故整表参与校验；本宏仅为可读性**
 
 ### `#define ARKRTOS_APP_RELOC_MAX        (1024u)`
 
@@ -1558,7 +1559,7 @@ reloc_count*4 字节，这部分位移必须计入，否则代码里的自引用
 
 **重定位表条目数上限（内核用于边界校验；表本身不驻留 RAM）**
 > 说明：表项按「需要修补的字」计数，不是按镜像字节数。4 KB 表 = 1024 个
-条目，对 1 MB 池里最大的镜像（768 KB 负载）也留出足够余量。 */
+条目，对 1 MB 池里最大的镜像（768 KB 负载）也留出足够余量。
 
 ### `#define ARKRTOS_APP_RELOC_TABLE_MAX  (ARKRTOS_APP_RELOC_MAX * ARKRTOS_`
 
@@ -1566,7 +1567,7 @@ reloc_count*4 字节，这部分位移必须计入，否则代码里的自引用
 #define ARKRTOS_APP_RELOC_TABLE_MAX  (ARKRTOS_APP_RELOC_MAX * ARKRTOS_APP_RELOC_SIZE)
 ```
 
-**重定位表字节数上限（= 条目上限 x 每项字节数） */**
+**重定位表字节数上限（= 条目上限 x 每项字节数）**
 
 ### `#define ARKRTOS_APP_RELOC_OFFSET     (ARKRTOS_APP_HEADER_SIZE)`
 
@@ -1574,7 +1575,7 @@ reloc_count*4 字节，这部分位移必须计入，否则代码里的自引用
 #define ARKRTOS_APP_RELOC_OFFSET     (ARKRTOS_APP_HEADER_SIZE)
 ```
 
-**重定位表在镜像内的固定偏移（紧跟镜像头） */**
+**重定位表在镜像内的固定偏移（紧跟镜像头）**
 
 ### `#define ARKRTOS_APP_PAYLOAD_OFFSET(p_hdr) \ (ARKRTOS_APP_HEADER_SIZE +`
 
@@ -1612,7 +1613,7 @@ crc32 字段自身的偏移见 ARKRTOS_APP_OFF_CRC32，state 见 ARKRTOS_APP_OFF
 #define ARKRTOS_APP_OFF_CRC32       (28u)
 ```
 
-**crc32 字段在头内的偏移（Loader 计算 CRC 时要把它按 0 处理） */**
+**crc32 字段在头内的偏移（Loader 计算 CRC 时要把它按 0 处理）**
 
 ### `#define ARKRTOS_APP_OFF_STATE       (100u)`
 
@@ -1620,7 +1621,7 @@ crc32 字段自身的偏移见 ARKRTOS_APP_OFF_CRC32，state 见 ARKRTOS_APP_OFF
 #define ARKRTOS_APP_OFF_STATE       (100u)
 ```
 
-**state 字段在头内的偏移（同上） */**
+**state 字段在头内的偏移（同上）**
 
 ### `#define ARKRTOS_APP_OFF_RUNTIME_RAM_BASE (252u)`
 
@@ -1632,7 +1633,7 @@ crc32 字段自身的偏移见 ARKRTOS_APP_OFF_CRC32，state 见 ARKRTOS_APP_OFF
 字节代入镜像 CRC：这个值不是「传输来的内容」，而是安装方在落盘前
 才决定并写进去的本地信息（安装时分配到的 RAM 块基址）。若把它算进
 校验，落盘形态与打包工具算的 want 就永远对不上，每一次安装都会
-误报 transfer crc 不符。 */
+误报 transfer crc 不符。
 
 ### `#define ARKRTOS_APP_OFF_TYPE        (4u)`
 
@@ -1643,7 +1644,7 @@ crc32 字段自身的偏移见 ARKRTOS_APP_OFF_CRC32，state 见 ARKRTOS_APP_OFF
 **type 字段在头内的偏移。卸载把镜像作废时清这一个字：**
 0 -> 0 之外没有任何位要动，是合法的 1 -> 0 编程；
 而「类型不是已知镜像」会被 check_header 拒收、上电扫描丢弃。
-magic 故意留着，好让回收沿用「本区间有带头内容」的判断。 */
+magic 故意留着，好让回收沿用「本区间有带头内容」的判断。
 
 ### `#define ARKRTOS_APP_OFF_SIGN        (32u)`
 
@@ -1651,7 +1652,7 @@ magic 故意留着，好让回收沿用「本区间有带头内容」的判断�
 #define ARKRTOS_APP_OFF_SIGN        (32u)
 ```
 
-**signature 字段在头内的偏移（64 字节，见 arkrtos_sign.h） */**
+**signature 字段在头内的偏移（64 字节，见 arkrtos_sign.h）**
 
 ### `typedef char arkrtos_app_header_size_check[ (sizeof(arkrtos_app_header`
 
@@ -1681,7 +1682,7 @@ Loader 计算 CRC 时按「偏移切片」而不是整体结构体来累加 CRC
 typedef char arkrtos_app_off_sign_check[ (__builtin_offsetof(arkrtos_app_header_t, signature) == ARKRTOS_APP_OFF_SIGN) ? 1 : -1];
 ```
 
-**signature 字段的偏移断言（签名子系统按它取 64 字节） */**
+**signature 字段的偏移断言（签名子系统按它取 64 字节）**
 
 ### `uint32 arkrtos_crc32(const void *data, uint32 len, uint32 crc);`
 
@@ -1708,7 +1709,7 @@ uint32 arkrtos_crc32(const void *data, uint32 len, uint32 crc);
 #define ARKRTOS_APPPACK_ERR_PARAM   (-30)
 ```
 
-**打包失败：参数非法（空指针 / 窗口不是 2 的幂 / payload 长度不一致） */**
+**打包失败：参数非法（空指针 / 窗口不是 2 的幂 / payload 长度不一致）**
 
 ### `#define ARKRTOS_APPPACK_ERR_DIFF    (-31)`
 
@@ -1716,7 +1717,7 @@ uint32 arkrtos_crc32(const void *data, uint32 len, uint32 crc);
 #define ARKRTOS_APPPACK_ERR_DIFF    (-31)
 ```
 
-**打包失败：某个位置无法用一个基址增量解释（不可重定位） */**
+**打包失败：某个位置无法用一个基址增量解释（不可重定位）**
 
 ### `#define ARKRTOS_APPPACK_ERR_VERIFY  (-32)`
 
@@ -1724,7 +1725,7 @@ uint32 arkrtos_crc32(const void *data, uint32 len, uint32 crc);
 #define ARKRTOS_APPPACK_ERR_VERIFY  (-32)
 ```
 
-**打包失败：把表应用回 A 之后与 D 不逐字节相同（表是错的） */**
+**打包失败：把表应用回 A 之后与 D 不逐字节相同（表是错的）**
 
 ### `#define ARKRTOS_APPPACK_ERR_SIZE    (-33)`
 
@@ -1732,7 +1733,7 @@ uint32 arkrtos_crc32(const void *data, uint32 len, uint32 crc);
 #define ARKRTOS_APPPACK_ERR_SIZE    (-33)
 ```
 
-**打包失败：表项数超过 ARKRTOS_APP_RELOC_MAX，或输出缓冲装不下 */**
+**打包失败：表项数超过 ARKRTOS_APP_RELOC_MAX，或输出缓冲装不下**
 
 ### `#define ARKRTOS_APPPACK_ERR_ENTRY   (-34)`
 
@@ -1740,7 +1741,7 @@ uint32 arkrtos_crc32(const void *data, uint32 len, uint32 crc);
 #define ARKRTOS_APPPACK_ERR_ENTRY   (-34)
 ```
 
-**打包失败：A 里没有可用的向量表（+4 不是本窗口内的地址） */**
+**打包失败：A 里没有可用的向量表（+4 不是本窗口内的地址）**
 
 ### `typedef struct {`
 
@@ -1856,7 +1857,7 @@ int32 arkrtos_apprun_on_task_exit(uint32 task_id);
 uint32 arkrtos_apprun_task_id(void);
 ```
 
-**当前在跑的任务号；0 = 没有 */**
+**当前在跑的任务号；0 = 没有**
 
 ### `int32 arkrtos_apprun_info(uint32 *p_entry, uint32 *p_code_base, uint32`
 
@@ -1864,7 +1865,7 @@ uint32 arkrtos_apprun_task_id(void);
 int32 arkrtos_apprun_info(uint32 *p_entry, uint32 *p_code_base, uint32 *p_ram_base);
 ```
 
-**起跑时用的入口地址与两个窗口（调试 / shell 展示）；0 = 没有在跑 */**
+**起跑时用的入口地址与两个窗口（调试 / shell 展示）；0 = 没有在跑**
 
 ### `const char *arkrtos_apprun_error_name(int32 rc);`
 
@@ -1872,7 +1873,7 @@ int32 arkrtos_apprun_info(uint32 *p_entry, uint32 *p_code_base, uint32 *p_ram_ba
 const char *arkrtos_apprun_error_name(int32 rc);
 ```
 
-**错误码的可读名字（只覆盖本路径独有的三个，其余交给调用方） */**
+**错误码的可读名字（只覆盖本路径独有的三个，其余交给调用方）**
 
 ## kernelsrc/include/arkrtos_audit.h
 
@@ -1887,7 +1888,7 @@ installer, the shell) and runs image code that shares the same
 #define ARKRTOS_AUDIT_BIT_MAX     (ARKRTOS_AUDIT_SCHED)
 ```
 
-**Highest bit this module uses (kept explicit so the shell can loop) */**
+**Highest bit this module uses (kept explicit so the shell can loop)**
 
 ### `typedef struct {`
 
@@ -1895,7 +1896,7 @@ installer, the shell) and runs image code that shares the same
 typedef struct {
 ```
 
-**Result of one audit pass */**
+**Result of one audit pass**
 
 ### `#define ARKRTOS_AUDIT_INDEX_NONE  (0xFFFFFFFFu)`
 
@@ -1903,7 +1904,7 @@ typedef struct {
 #define ARKRTOS_AUDIT_INDEX_NONE  (0xFFFFFFFFu)
 ```
 
-**"no offender index applies" */**
+**"no offender index applies"**
 
 ### `void arkrtos_audit_run(arkrtos_audit_result_t *p_out);`
 
@@ -1958,7 +1959,7 @@ is the internal flash controller, an external SPI NOR, or something
 #define ARKRTOS_BLK_NAME_MAX   (16u)
 ```
 
-Max bytes of a device name including the terminating zero */
+Max bytes of a device name including the terminating zero
 
 ### `#define ARKRTOS_BLK_MAX_DEVS   (4u)`
 
@@ -1966,7 +1967,7 @@ Max bytes of a device name including the terminating zero */
 #define ARKRTOS_BLK_MAX_DEVS   (4u)
 ```
 
-How many backends a build can carry. Raise here, not at the call sites. */
+How many backends a build can carry. Raise here, not at the call sites.
 
 ### `typedef struct arkrtos_blk_dev {`
 
@@ -1995,7 +1996,7 @@ or the descriptor lacks read/write/erase.
 uint32 arkrtos_blk_count(void);
 ```
 
-**Number of registered backends (0 means the board registered none) */**
+**Number of registered backends (0 means the board registered none)**
 
 ### `const arkrtos_blk_dev_t *arkrtos_blk_at(uint32 idx);`
 
@@ -2003,7 +2004,7 @@ uint32 arkrtos_blk_count(void);
 const arkrtos_blk_dev_t *arkrtos_blk_at(uint32 idx);
 ```
 
-**Backend by index in registration order, NULL when out of range */**
+**Backend by index in registration order, NULL when out of range**
 
 ### `const arkrtos_blk_dev_t *arkrtos_blk_find(const char *name);`
 
@@ -2011,7 +2012,7 @@ const arkrtos_blk_dev_t *arkrtos_blk_at(uint32 idx);
 const arkrtos_blk_dev_t *arkrtos_blk_find(const char *name);
 ```
 
-**Backend by name, NULL when not found */**
+**Backend by name, NULL when not found**
 
 ### `int32 arkrtos_blk_init(const arkrtos_blk_dev_t *dev);`
 
@@ -2028,7 +2029,7 @@ int32 arkrtos_blk_init(const arkrtos_blk_dev_t *dev);
 uint8 arkrtos_blk_is_ready(const arkrtos_blk_dev_t *dev);
 ```
 
-**1 when arkrtos_blk_init() has already succeeded for this backend */**
+**1 when arkrtos_blk_init() has already succeeded for this backend**
 
 ### `uint32 arkrtos_blk_size(const arkrtos_blk_dev_t *dev);`
 
@@ -2036,7 +2037,7 @@ uint8 arkrtos_blk_is_ready(const arkrtos_blk_dev_t *dev);
 uint32 arkrtos_blk_size(const arkrtos_blk_dev_t *dev);
 ```
 
-**Capacity in bytes; 0 when the device is not up or cannot answer */**
+**Capacity in bytes; 0 when the device is not up or cannot answer**
 
 ### `int32 arkrtos_blk_read (const arkrtos_blk_dev_t *dev, uint32 off, uint`
 
@@ -2053,7 +2054,7 @@ int32 arkrtos_blk_read (const arkrtos_blk_dev_t *dev, uint32 off, uint8 *buf, ui
 int32 arkrtos_blk_write(const arkrtos_blk_dev_t *dev, uint32 off, const uint8 *buf, uint32 len);
 ```
 
-**Write len bytes at offset off (target must already be erased) */**
+**Write len bytes at offset off (target must already be erased)**
 
 ### `int32 arkrtos_blk_erase(const arkrtos_blk_dev_t *dev, uint32 off, uint`
 
@@ -2096,7 +2097,7 @@ the partition table, which lives in shared RAM: shared RAM survives
 #define ARKRTOS_CRASH_MAGIC       (0x5343524Au)
 ```
 
-**Journal magic "SCRJ" - an uninitialized RAM area holds garbage */**
+**Journal magic "SCRJ" - an uninitialized RAM area holds garbage**
 
 ### `#define ARKRTOS_CRASH_VERSION     (2u)`
 
@@ -2106,7 +2107,7 @@ the partition table, which lives in shared RAM: shared RAM survives
 
 **Journal layout version. A build that changes the struct must bump**
 this: an older journal is then rejected as "not evidence" instead of
-being interpreted with the wrong field offsets. */
+being interpreted with the wrong field offsets.
 
 ### `typedef struct {`
 
@@ -2182,7 +2183,7 @@ uint32 arkrtos_crash_disabled(uint32 slot);
 uint32 arkrtos_crash_disabled_tick(uint32 slot);
 ```
 
-**Kernel tick at which the slot was disabled (0 = before this boot). */**
+**Kernel tick at which the slot was disabled (0 = before this boot).**
 
 ### `uint32 arkrtos_crash_count(uint32 slot);`
 
@@ -2201,7 +2202,7 @@ question rather than two slightly different ones.
 uint32 arkrtos_crash_last_reason(uint32 slot);
 ```
 
-**Reason of the slot's most recent fault (ARKRTOS_CRASH_REASON_x). */**
+**Reason of the slot's most recent fault (ARKRTOS_CRASH_REASON_x).**
 
 ### `void arkrtos_crash_forget(uint32 slot);`
 
@@ -2219,7 +2220,7 @@ install of the image, and an explicit human retry from the console.
 uint32 arkrtos_crash_boots(void);
 ```
 
-**Boots recorded by the current journal (1 right after power-on). */**
+**Boots recorded by the current journal (1 right after power-on).**
 
 ### `uint32 arkrtos_crash_seq(void);`
 
@@ -2227,7 +2228,7 @@ uint32 arkrtos_crash_boots(void);
 uint32 arkrtos_crash_seq(void);
 ```
 
-**Committed writes to the journal (evidence that it is being kept). */**
+**Committed writes to the journal (evidence that it is being kept).**
 
 ### `const char *arkrtos_crash_reason_name(uint32 reason);`
 
@@ -2235,7 +2236,7 @@ uint32 arkrtos_crash_seq(void);
 const char *arkrtos_crash_reason_name(uint32 reason);
 ```
 
-**Human-readable name of a disable reason, or "none" for 0. */**
+**Human-readable name of a disable reason, or "none" for 0.**
 
 ### `uint32 arkrtos_crash_area_base(void);`
 
@@ -2243,7 +2244,7 @@ const char *arkrtos_crash_reason_name(uint32 reason);
 uint32 arkrtos_crash_area_base(void);
 ```
 
-**Address and size of the journal region, for the shell and the audit. */**
+**Address and size of the journal region, for the shell and the audit.**
 
 ### `uint32 arkrtos_crash_hash_path(const char *path);`
 
@@ -2252,7 +2253,7 @@ uint32 arkrtos_crash_hash_path(const char *path);
 ```
 
 **FNV-1a hash of an image path, the MiniApp identity. @return 0 only**
-for a null/empty path (never a real path) so 0 can mean "free". */
+for a null/empty path (never a real path) so 0 can mean "free".
 
 ### `uint32 arkrtos_crash_mini_fault(uint32 hash, uint32 reason);`
 
@@ -2275,7 +2276,7 @@ count).
 uint32 arkrtos_crash_mini_disabled(uint32 hash);
 ```
 
-**ARKRTOS_CRASH_REASON_x when this path is disabled, 0 when it may run. */**
+**ARKRTOS_CRASH_REASON_x when this path is disabled, 0 when it may run.**
 
 ### `uint32 arkrtos_crash_mini_count(uint32 hash);`
 
@@ -2283,7 +2284,7 @@ uint32 arkrtos_crash_mini_disabled(uint32 hash);
 uint32 arkrtos_crash_mini_count(uint32 hash);
 ```
 
-**Consecutive faults on record for this path (0 when untracked). */**
+**Consecutive faults on record for this path (0 when untracked).**
 
 ### `uint32 arkrtos_crash_mini_disabled_tick(uint32 hash);`
 
@@ -2291,7 +2292,7 @@ uint32 arkrtos_crash_mini_count(uint32 hash);
 uint32 arkrtos_crash_mini_disabled_tick(uint32 hash);
 ```
 
-**Tick at which this path was disabled (0 = not disabled / before boot). */**
+**Tick at which this path was disabled (0 = not disabled / before boot).**
 
 ### `uint32 arkrtos_crash_mini_at(uint32 idx, uint32 *hash, uint32 *cnt, ui`
 
@@ -2322,7 +2323,7 @@ the path has to match the hash against a path it already knows.
 void arkrtos_crash_mini_forget(uint32 hash);
 ```
 
-**Forget this path's crash history and clear its disabled state. */**
+**Forget this path's crash history and clear its disabled state.**
 
 ## kernelsrc/include/arkrtos_dt.h
 
@@ -2337,7 +2338,7 @@ below is hand written and stable; only the data file changes when
 typedef struct {
 ```
 
-**One property of a node.  Only the field for its kind is valid. */**
+**One property of a node.  Only the field for its kind is valid.**
 
 ### `typedef struct {`
 
@@ -2345,7 +2346,7 @@ typedef struct {
 typedef struct {
 ```
 
-**One node of the compiled tree. */**
+**One node of the compiled tree.**
 
 ### `uint32 arkrtos_dt_count(void);`
 
@@ -2353,7 +2354,7 @@ typedef struct {
 uint32 arkrtos_dt_count(void);
 ```
 
-**Number of nodes in the compiled tree (root excluded). */**
+**Number of nodes in the compiled tree (root excluded).**
 
 ### `const arkrtos_dt_node_t *arkrtos_dt_node(uint32 idx);`
 
@@ -2361,7 +2362,7 @@ uint32 arkrtos_dt_count(void);
 const arkrtos_dt_node_t *arkrtos_dt_node(uint32 idx);
 ```
 
-**Node by index, or 0 when idx is out of range. */**
+**Node by index, or 0 when idx is out of range.**
 
 ### `const arkrtos_dt_node_t *arkrtos_dt_find(const char *compatible);`
 
@@ -2369,7 +2370,7 @@ const arkrtos_dt_node_t *arkrtos_dt_node(uint32 idx);
 const arkrtos_dt_node_t *arkrtos_dt_find(const char *compatible);
 ```
 
-**First enabled node whose first compatible string matches. */**
+**First enabled node whose first compatible string matches.**
 
 ### `const arkrtos_dt_node_t *arkrtos_dt_find_next(const char *compatible, `
 
@@ -2377,7 +2378,7 @@ const arkrtos_dt_node_t *arkrtos_dt_find(const char *compatible);
 const arkrtos_dt_node_t *arkrtos_dt_find_next(const char *compatible, const arkrtos_dt_node_t *from);
 ```
 
-**Iterate: pass the previous result (0 to start) to get the next. */**
+**Iterate: pass the previous result (0 to start) to get the next.**
 
 ### `const char *arkrtos_dt_model(void);`
 
@@ -2385,7 +2386,7 @@ const arkrtos_dt_node_t *arkrtos_dt_find_next(const char *compatible, const arkr
 const char *arkrtos_dt_model(void);
 ```
 
-**The root `model` string, or the board name when the tree has none. */**
+**The root `model` string, or the board name when the tree has none.**
 
 ### `const arkrtos_dt_prop_t *arkrtos_dt_prop(const arkrtos_dt_node_t *node`
 
@@ -2393,7 +2394,7 @@ const char *arkrtos_dt_model(void);
 const arkrtos_dt_prop_t *arkrtos_dt_prop(const arkrtos_dt_node_t *node, const char *name);
 ```
 
-**Property by name, or 0 when the node has no such property. */**
+**Property by name, or 0 when the node has no such property.**
 
 ### `int32 arkrtos_dt_prop_u32(const arkrtos_dt_node_t *node, const char *n`
 
@@ -2401,7 +2402,7 @@ const arkrtos_dt_prop_t *arkrtos_dt_prop(const arkrtos_dt_node_t *node, const ch
 int32 arkrtos_dt_prop_u32(const arkrtos_dt_node_t *node, const char *name, uint32 idx, uint32 *out);
 ```
 
-**Read the idx-th u32 of a U32 property.  Returns -1 on any mismatch. */**
+**Read the idx-th u32 of a U32 property.  Returns -1 on any mismatch.**
 
 ### `const char *arkrtos_dt_prop_str(const arkrtos_dt_node_t *node, const c`
 
@@ -2409,7 +2410,7 @@ int32 arkrtos_dt_prop_u32(const arkrtos_dt_node_t *node, const char *name, uint3
 const char *arkrtos_dt_prop_str(const arkrtos_dt_node_t *node, const char *name);
 ```
 
-**First string of a STR property, or 0. */**
+**First string of a STR property, or 0.**
 
 ### `int arkrtos_dt_str_eq(const char *a, const char *b);`
 
@@ -2417,7 +2418,7 @@ const char *arkrtos_dt_prop_str(const arkrtos_dt_node_t *node, const char *name)
 int arkrtos_dt_str_eq(const char *a, const char *b);
 ```
 
-**NULL-safe string equality; 1 when equal and both non-NULL. */**
+**NULL-safe string equality; 1 when equal and both non-NULL.**
 
 ## kernelsrc/include/arkrtos_elf.h
 
@@ -2432,7 +2433,7 @@ ELF64、把 PT_LOAD 段读进 App 窗口、按 Linux 的约定铺好用户栈
 typedef struct {
 ```
 
-**一次装载的可读结果（全部是实测值，不是推算值） */**
+**一次装载的可读结果（全部是实测值，不是推算值）**
 
 ### `int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[]);`
 
@@ -2501,7 +2502,7 @@ ARKRTOS_ELF_ERR_NOMEM（帧池不够或任务表满）/ ARKRTOS_ELF_ERR_PARAM
 不复制的东西（与 Linux 不同，文档写死）：fd 表、管道、信号表、
 堆游标都是**内核全局单份**，子看到的是同一份，不是副本。
 调用者必须是降权（is_priv == 0）用户任务；内核任务没有窗口。
-> 说明：只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。 */
+> 说明：只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。
 
 ### `int32 arkrtos_elf_info(arkrtos_elf_info_t *p_out);`
 
@@ -2509,7 +2510,7 @@ ARKRTOS_ELF_ERR_NOMEM（帧池不够或任务表满）/ ARKRTOS_ELF_ERR_PARAM
 int32 arkrtos_elf_info(arkrtos_elf_info_t *p_out);
 ```
 
-**上一次成功装载的读数（最近一次的那个空间）；没有过成功装载时返回 ARKRTOS_ELF_ERR_PARAM */**
+**上一次成功装载的读数（最近一次的那个空间）；没有过成功装载时返回 ARKRTOS_ELF_ERR_PARAM**
 
 ### `int32 arkrtos_elf_info_space(uint32 space, arkrtos_elf_info_t *p_out);`
 
@@ -2517,7 +2518,7 @@ int32 arkrtos_elf_info(arkrtos_elf_info_t *p_out);
 int32 arkrtos_elf_info_space(uint32 space, arkrtos_elf_info_t *p_out);
 ```
 
-**指定空间的那次装载读数 */**
+**指定空间的那次装载读数**
 
 ### `int32 arkrtos_elf_running_in(uint32 space);`
 
@@ -2525,7 +2526,7 @@ int32 arkrtos_elf_info_space(uint32 space, arkrtos_elf_info_t *p_out);
 int32 arkrtos_elf_running_in(uint32 space);
 ```
 
-**1 = 指定空间里有活的 ELF 任务，0 = 该空间空着（或没有这个空间） */**
+**1 = 指定空间里有活的 ELF 任务，0 = 该空间空着（或没有这个空间）**
 
 ### `int32 arkrtos_elf_running(void);`
 
@@ -2533,7 +2534,7 @@ int32 arkrtos_elf_running_in(uint32 space);
 int32 arkrtos_elf_running(void);
 ```
 
-**1 = 至少有一个 ELF 任务在跑，0 = 所有空间都空着 */**
+**1 = 至少有一个 ELF 任务在跑，0 = 所有空间都空着**
 
 ### `int32 arkrtos_elf_space_count(void);`
 
@@ -2541,7 +2542,7 @@ int32 arkrtos_elf_running(void);
 int32 arkrtos_elf_space_count(void);
 ```
 
-**可用的地址空间数（不分页的构建是 1） */**
+**可用的地址空间数（不分页的构建是 1）**
 
 ### `int32 arkrtos_elf_last_space(void);`
 
@@ -2549,7 +2550,7 @@ int32 arkrtos_elf_space_count(void);
 int32 arkrtos_elf_last_space(void);
 ```
 
-**最近一次成功装载落到哪个空间；-1 = 还没有过 */**
+**最近一次成功装载落到哪个空间；-1 = 还没有过**
 
 ### `const char *arkrtos_elf_error_name(int32 rc);`
 
@@ -2557,7 +2558,7 @@ int32 arkrtos_elf_last_space(void);
 const char *arkrtos_elf_error_name(int32 rc);
 ```
 
-**返回码的短名（只用于打印，不参与判定） */**
+**返回码的短名（只用于打印，不参与判定）**
 
 ## kernelsrc/include/arkrtos_export.h
 
@@ -2572,7 +2573,7 @@ const char *arkrtos_elf_error_name(int32 rc);
 typedef struct {
 ```
 
-**表项：名字 + 地址。地址用 unsigned long，64 位端口上不截断。 */**
+**表项：名字 + 地址。地址用 unsigned long，64 位端口上不截断。**
 
 ### `int32 arkrtos_export_lookup(const char *name, unsigned long *p_addr);`
 
@@ -2609,7 +2610,7 @@ flattened blob sits in the image and is parsed at boot, exactly
 typedef struct {
 ```
 
-**One node, as a view into the blob (no copy, no allocation). */**
+**One node, as a view into the blob (no copy, no allocation).**
 
 ### `typedef struct {`
 
@@ -2617,7 +2618,7 @@ typedef struct {
 typedef struct {
 ```
 
-**Walk cursor.  Treat the fields as private. */**
+**Walk cursor.  Treat the fields as private.**
 
 ### `int arkrtos_fdt_init(const void *blob, uint32 size);`
 
@@ -2625,7 +2626,7 @@ typedef struct {
 int arkrtos_fdt_init(const void *blob, uint32 size);
 ```
 
-**Parse and validate the header; compute the node count. */**
+**Parse and validate the header; compute the node count.**
 
 ### `int arkrtos_fdt_ready(void);`
 
@@ -2633,7 +2634,7 @@ int arkrtos_fdt_init(const void *blob, uint32 size);
 int arkrtos_fdt_ready(void);
 ```
 
-**1 when the last init succeeded. */**
+**1 when the last init succeeded.**
 
 ### `uint32 arkrtos_fdt_node_count(void);`
 
@@ -2641,7 +2642,7 @@ int arkrtos_fdt_ready(void);
 uint32 arkrtos_fdt_node_count(void);
 ```
 
-**Number of nodes, root excluded (matches arkrtos_dt_count()). */**
+**Number of nodes, root excluded (matches arkrtos_dt_count()).**
 
 ### `const char *arkrtos_fdt_model(void);`
 
@@ -2649,7 +2650,7 @@ uint32 arkrtos_fdt_node_count(void);
 const char *arkrtos_fdt_model(void);
 ```
 
-**The root "model" string, or 0 when the DTS has none. */**
+**The root "model" string, or 0 when the DTS has none.**
 
 ### `int arkrtos_fdt_iter_init(arkrtos_fdt_iter_t *it);`
 
@@ -2657,7 +2658,7 @@ const char *arkrtos_fdt_model(void);
 int arkrtos_fdt_iter_init(arkrtos_fdt_iter_t *it);
 ```
 
-**Start a depth-first walk.  Returns ARKRTOS_FDT_ERR_NOT_INIT if not ready. */**
+**Start a depth-first walk.  Returns ARKRTOS_FDT_ERR_NOT_INIT if not ready.**
 
 ### `int arkrtos_fdt_next(arkrtos_fdt_iter_t *it, arkrtos_fdt_node_t *out);`
 
@@ -2685,7 +2686,7 @@ const void *arkrtos_fdt_prop(const arkrtos_fdt_node_t *node, const char *name, u
 const char *arkrtos_fdt_prop_str(const arkrtos_fdt_node_t *node, const char *name);
 ```
 
-**First string of a string-list property, or 0. */**
+**First string of a string-list property, or 0.**
 
 ### `int32 arkrtos_fdt_prop_u32(const arkrtos_fdt_node_t *node, const char `
 
@@ -2693,7 +2694,7 @@ const char *arkrtos_fdt_prop_str(const arkrtos_fdt_node_t *node, const char *nam
 int32 arkrtos_fdt_prop_u32(const arkrtos_fdt_node_t *node, const char *name, uint32 idx, uint32 *out);
 ```
 
-**The idx-th 32-bit cell of a property.  Returns -1 on any mismatch. */**
+**The idx-th 32-bit cell of a property.  Returns -1 on any mismatch.**
 
 ### `int arkrtos_fdt_node_enabled(const arkrtos_fdt_node_t *node);`
 
@@ -2701,7 +2702,7 @@ int32 arkrtos_fdt_prop_u32(const arkrtos_fdt_node_t *node, const char *name, uin
 int arkrtos_fdt_node_enabled(const arkrtos_fdt_node_t *node);
 ```
 
-**1 when status is absent or "okay" - same rule as the C table. */**
+**1 when status is absent or "okay" - same rule as the C table.**
 
 ### `const void *arkrtos_fdt_blob(void);`
 
@@ -2709,7 +2710,7 @@ int arkrtos_fdt_node_enabled(const arkrtos_fdt_node_t *node);
 const void *arkrtos_fdt_blob(void);
 ```
 
-**当前正在被解析的 blob 与它的字节数（未 init 时返回 0）。 */**
+**当前正在被解析的 blob 与它的字节数（未 init 时返回 0）。**
 
 ### `int arkrtos_fdt_load(void *dst, uint32 cap, const void *src, uint32 le`
 
@@ -2730,7 +2731,7 @@ int arkrtos_fdt_load(void *dst, uint32 cap, const void *src, uint32 len);
 int arkrtos_fdt_node_by_path(const char *path, arkrtos_fdt_node_t *out);
 ```
 
-**按绝对路径取节点（"/soc/serial@1fe001e0"；"/" 是根节点）。 */**
+**按绝对路径取节点（"/soc/serial@1fe001e0"；"/" 是根节点）。**
 
 ### `int arkrtos_fdt_alias(const char *name, char *buf, uint32 cap);`
 
@@ -2738,7 +2739,7 @@ int arkrtos_fdt_node_by_path(const char *path, arkrtos_fdt_node_t *out);
 int arkrtos_fdt_alias(const char *name, char *buf, uint32 cap);
 ```
 
-**/aliases/<name> 指向的路径，拷进 buf（含 NUL）。 */**
+**/aliases/<name> 指向的路径，拷进 buf（含 NUL）。**
 
 ### `const char *arkrtos_fdt_stdout_path(void);`
 
@@ -2746,7 +2747,7 @@ int arkrtos_fdt_alias(const char *name, char *buf, uint32 cap);
 const char *arkrtos_fdt_stdout_path(void);
 ```
 
-**/chosen/stdout-path 的原始字符串；没有这个节点或属性就是 0。 */**
+**/chosen/stdout-path 的原始字符串；没有这个节点或属性就是 0。**
 
 ### `const void *arkrtos_fdt_stdout_raw(uint32 *len);`
 
@@ -2754,7 +2755,7 @@ const char *arkrtos_fdt_stdout_path(void);
 const void *arkrtos_fdt_stdout_raw(uint32 *len);
 ```
 
-**/chosen/stdout-path 的原始字节与长度（可能是字符串，也可能是句柄）。 */**
+**/chosen/stdout-path 的原始字节与长度（可能是字符串，也可能是句柄）。**
 
 ### `int arkrtos_fdt_node_by_phandle(uint32 ph, arkrtos_fdt_node_t *out);`
 
@@ -2762,7 +2763,7 @@ const void *arkrtos_fdt_stdout_raw(uint32 *len);
 int arkrtos_fdt_node_by_phandle(uint32 ph, arkrtos_fdt_node_t *out);
 ```
 
-**按 phandle 取节点（phandle / linux,phandle 两种属性都认）。 */**
+**按 phandle 取节点（phandle / linux,phandle 两种属性都认）。**
 
 ### `int arkrtos_fdt_path_of_phandle(uint32 ph, char *buf, uint32 cap);`
 
@@ -2770,7 +2771,7 @@ int arkrtos_fdt_node_by_phandle(uint32 ph, arkrtos_fdt_node_t *out);
 int arkrtos_fdt_path_of_phandle(uint32 ph, char *buf, uint32 cap);
 ```
 
-**把一个 phandle 还原成绝对路径，拷进 buf（含 NUL）。 */**
+**把一个 phandle 还原成绝对路径，拷进 buf（含 NUL）。**
 
 ### `typedef struct {`
 
@@ -2778,7 +2779,7 @@ int arkrtos_fdt_path_of_phandle(uint32 ph, char *buf, uint32 cap);
 typedef struct {
 ```
 
-**stdout-path 的解析结果（路径 + 选项）。 */**
+**stdout-path 的解析结果（路径 + 选项）。**
 
 ### `int arkrtos_fdt_stdout_resolve(arkrtos_fdt_console_t *out);`
 
@@ -2803,7 +2804,7 @@ ERR_PATH（选项写法不认识——不猜一个默认波特率）
 typedef struct {
 ```
 
-**板级期望：控制台应该是什么。字段为 0/NULL 表示"这一项不检查"。 */**
+**板级期望：控制台应该是什么。字段为 0/NULL 表示"这一项不检查"。**
 
 ### `typedef struct {`
 
@@ -2811,7 +2812,7 @@ typedef struct {
 typedef struct {
 ```
 
-**树里读出来、并与板级核对过的结果。 */**
+**树里读出来、并与板级核对过的结果。**
 
 ### `int arkrtos_console_from_fdt(const arkrtos_console_expect_t *expect, a`
 
@@ -2831,7 +2832,7 @@ int arkrtos_console_from_fdt(const arkrtos_console_expect_t *expect, arkrtos_con
 const char *arkrtos_console_reason(int rc);
 ```
 
-**原因码的稳定短名（用于日志），未知码返回 "?"。 */**
+**原因码的稳定短名（用于日志），未知码返回 "?"。**
 
 ## kernelsrc/include/arkrtos_fdt_overlay.h
 
@@ -2863,7 +2864,7 @@ int arkrtos_fdt_overlay(void *dst, uint32 cap, const void *base, uint32 base_len
 const char *arkrtos_fdt_overlay_reason(int rc);
 ```
 
-**错误码的文字解释（只用于日志，不参与判定）。 */**
+**错误码的文字解释（只用于日志，不参与判定）。**
 
 ## kernelsrc/include/arkrtos_fdt_res.h
 
@@ -2878,7 +2879,7 @@ const char *arkrtos_fdt_overlay_reason(int rc);
 typedef struct {
 ```
 
-**板级期望。字段为 0 表示"这一项不检查"。 */**
+**板级期望。字段为 0 表示"这一项不检查"。**
 
 ### `typedef struct {`
 
@@ -2886,7 +2887,7 @@ typedef struct {
 typedef struct {
 ```
 
-**树里读出来的资源。has_* 区分「没写」与「值为 0」。 */**
+**树里读出来的资源。has_* 区分「没写」与「值为 0」。**
 
 ### `int arkrtos_fdt_res_check(const arkrtos_fdt_res_expect_t *expect, arkr`
 
@@ -2906,7 +2907,7 @@ int arkrtos_fdt_res_check(const arkrtos_fdt_res_expect_t *expect, arkrtos_fdt_re
 const char *arkrtos_fdt_res_reason(int rc);
 ```
 
-**原因码的稳定短名（用于日志），未知码返回 "?"。 */**
+**原因码的稳定短名（用于日志），未知码返回 "?"。**
 
 ## kernelsrc/include/arkrtos_flashapp.h
 
@@ -2976,7 +2977,7 @@ int32 arkrtos_flashapp_run(uint32 *task_out);
 uint32 arkrtos_flashapp_task_id(void);
 ```
 
-**当前在跑的 Flash 产物任务号；0 = 没有 */**
+**当前在跑的 Flash 产物任务号；0 = 没有**
 
 ### `int32 arkrtos_flashapp_on_task_exit(uint32 task_id);`
 
@@ -2984,7 +2985,7 @@ uint32 arkrtos_flashapp_task_id(void);
 int32 arkrtos_flashapp_on_task_exit(uint32 task_id);
 ```
 
-**主任务退出时的回收钩子（由 arkrtos_task.c 的任务退出路径调用） */**
+**主任务退出时的回收钩子（由 arkrtos_task.c 的任务退出路径调用）**
 
 ### `const char *arkrtos_flashapp_error_name(int32 rc);`
 
@@ -2992,7 +2993,7 @@ int32 arkrtos_flashapp_on_task_exit(uint32 task_id);
 const char *arkrtos_flashapp_error_name(int32 rc);
 ```
 
-**错误码的可读名字（只覆盖本路径独有的，其余交调用方） */**
+**错误码的可读名字（只覆盖本路径独有的，其余交调用方）**
 
 ## kernelsrc/include/arkrtos_fs.h
 
@@ -3007,7 +3008,7 @@ an SVC handler later) and a single mount point keeps the RAM cost
 #define ARKRTOS_FS_PATH_MAX   (64u)
 ```
 
-Longest path accepted, including the leading '/' and the terminator */
+Longest path accepted, including the leading '/' and the terminator
 
 ### `#define ARKRTOS_FS_CACHE_SIZE (256u)`
 
@@ -3015,7 +3016,7 @@ Longest path accepted, including the leading '/' and the terminator */
 #define ARKRTOS_FS_CACHE_SIZE (256u)
 ```
 
-Bytes buffered for metadata/reads and for one open file */
+Bytes buffered for metadata/reads and for one open file
 
 ### `int32 arkrtos_fs_mount(const char *dev, uint32 offset, uint32 size);`
 
@@ -3047,7 +3048,7 @@ header). Returns -1 with last_error = -2 when no volume is configured.
 int32 arkrtos_fs_unmount(void);
 ```
 
-**Drop the mount. Safe to call when nothing is mounted. */**
+**Drop the mount. Safe to call when nothing is mounted.**
 
 ### `uint8 arkrtos_fs_mounted(void);`
 
@@ -3055,7 +3056,7 @@ int32 arkrtos_fs_unmount(void);
 uint8 arkrtos_fs_mounted(void);
 ```
 
-**1 while a volume is mounted */**
+**1 while a volume is mounted**
 
 ### `int32 arkrtos_fs_format(const char *dev, uint32 offset, uint32 size);`
 
@@ -3073,7 +3074,7 @@ is not mounted yet, and mounts it on success.
 int32 arkrtos_fs_stat(uint32 *total, uint32 *used);
 ```
 
-**Total and used bytes of the mounted volume (used = blocks in use) */**
+**Total and used bytes of the mounted volume (used = blocks in use)**
 
 ### `int32 arkrtos_fs_stat_path(const char *path, uint32 *size, uint32 *is_`
 
@@ -3109,7 +3110,7 @@ or a stream already open); arkrtos_fs_last_error() has the reason.
 int32 arkrtos_fs_read_file(const char *path, uint8 *buf, uint32 max, uint32 *out_len);
 ```
 
-**Read at most max bytes; *out_len gets the real length */**
+**Read at most max bytes; *out_len gets the real length**
 
 ### `int32 arkrtos_fs_open_read(const char *path);`
 
@@ -3146,7 +3147,7 @@ synchronous, so a caller loop may stop on it.
 int32 arkrtos_fs_close_read(void);
 ```
 
-**Close the read stream. Closing when none is open is not an error. */**
+**Close the read stream. Closing when none is open is not an error.**
 
 ### `int32 arkrtos_fs_open_write(const char *path);`
 
@@ -3163,7 +3164,7 @@ int32 arkrtos_fs_open_write(const char *path);
 int32 arkrtos_fs_write_next(const uint8 *buf, uint32 len);
 ```
 
-**Append one chunk to the open write stream. @return 0 on success */**
+**Append one chunk to the open write stream. @return 0 on success**
 
 ### `int32 arkrtos_fs_close_write(void);`
 
@@ -3181,7 +3182,7 @@ when none is open is not an error
 int32 arkrtos_fs_remove(const char *path);
 ```
 
-**Remove a file. @return 0 on success, -1 (not found / is a dir) */**
+**Remove a file. @return 0 on success, -1 (not found / is a dir)**
 
 ### `int32 arkrtos_fs_mkdir(const char *path);`
 
@@ -3189,7 +3190,7 @@ int32 arkrtos_fs_remove(const char *path);
 int32 arkrtos_fs_mkdir(const char *path);
 ```
 
-**Create a directory. @return 0 on success, -1 (exists / bad path) */**
+**Create a directory. @return 0 on success, -1 (exists / bad path)**
 
 ### `typedef int (*arkrtos_fs_list_cb_t)(const char *name, uint32 size, uin`
 
@@ -3197,7 +3198,7 @@ int32 arkrtos_fs_mkdir(const char *path);
 typedef int (*arkrtos_fs_list_cb_t)(const char *name, uint32 size, uint8 is_dir, void *arg);
 ```
 
-**Callback for arkrtos_fs_list(); returns 0 to continue, -1 to stop */**
+**Callback for arkrtos_fs_list(); returns 0 to continue, -1 to stop**
 
 ### `int32 arkrtos_fs_list(const char *dir, arkrtos_fs_list_cb_t cb, void *`
 
@@ -3205,7 +3206,7 @@ typedef int (*arkrtos_fs_list_cb_t)(const char *name, uint32 size, uint8 is_dir,
 int32 arkrtos_fs_list(const char *dir, arkrtos_fs_list_cb_t cb, void *arg);
 ```
 
-**List one directory ("/" for the root) */**
+**List one directory ("/" for the root)**
 
 ### `int32 arkrtos_fs_read_at(const char *path, uint8 *buf, uint32 len, uin`
 
@@ -3215,7 +3216,7 @@ int32 arkrtos_fs_read_at(const char *path, uint8 *buf, uint32 len, uint32 off, u
 
 **Read len bytes starting at byte offset off (random access read).**
 A partial read at end of file returns fewer bytes than len, with that
-number in *out_len - never an error. */
+number in *out_len - never an error.
 
 ### `int32 arkrtos_fs_rename(const char *old_path, const char *new_path);`
 
@@ -3223,7 +3224,7 @@ number in *out_len - never an error. */
 int32 arkrtos_fs_rename(const char *old_path, const char *new_path);
 ```
 
-**Move/rename one entry. Both paths are inside the volume. */**
+**Move/rename one entry. Both paths are inside the volume.**
 
 ### `int32 arkrtos_fs_list_names(const char *dir, char *out, uint32 out_siz`
 
@@ -3234,7 +3235,7 @@ int32 arkrtos_fs_list_names(const char *dir, char *out, uint32 out_size, uint32 
 **Copy the names of one directory into a caller buffer, one per line.**
 Only complete entries are copied: when the buffer runs out, the last
 partial name is dropped and *count counts what actually fits, so the
-caller can tell a full listing from a truncated one. */
+caller can tell a full listing from a truncated one.
 
 ### `int32 arkrtos_fs_volume(const char **dev, uint32 *offset, uint32 *size`
 
@@ -3315,7 +3316,7 @@ should the hardware put an end to it?"
 #define ARKRTOS_GUARD_OK          (0u) #define ARKRTOS_GUARD_BAD_AUDIT   (1u << 0)   /* a structure failed the self-audit */ #define ARKRTOS_GUARD_BAD_BEAT    (1u << 1)   /* a declared heartbeat window lapsed */
 ```
 
-**Verdict bits (ARKRTOS_GUARD_OK means "nothing known to be wrong") */**
+**Verdict bits (ARKRTOS_GUARD_OK means "nothing known to be wrong")**
 
 ### `#define ARKRTOS_GUARD_MIN_PERIOD_MS   (100u)`
 
@@ -3325,7 +3326,7 @@ should the hardware put an end to it?"
 
 **Shortest contract the kernel can actually check (equal to the**
 service period: a window shorter than the sampling interval could
-not be judged, and pretending to judge it would be a false verdict). */
+not be judged, and pretending to judge it would be a false verdict).
 
 ### `typedef struct {`
 
@@ -3333,7 +3334,7 @@ not be judged, and pretending to judge it would be a false verdict). */
 typedef struct {
 ```
 
-**One entry of the per-task heartbeat table, as reported to callers */**
+**One entry of the per-task heartbeat table, as reported to callers**
 
 ### `typedef struct {`
 
@@ -3341,7 +3342,7 @@ typedef struct {
 typedef struct {
 ```
 
-**Module-level status, for the shell and for a boot report */**
+**Module-level status, for the shell and for a boot report**
 
 ### `void arkrtos_guard_init(void);`
 
@@ -3408,7 +3409,7 @@ int32 arkrtos_guard_task_at(uint32 idx, arkrtos_guard_task_t *p_out);
 uint32 arkrtos_guard_task_slots(void);
 ```
 
-**Number of entries the walk in arkrtos_guard_task_at() covers. */**
+**Number of entries the walk in arkrtos_guard_task_at() covers.**
 
 ## kernelsrc/include/arkrtos_hal.h
 
@@ -3983,7 +3984,7 @@ int32 arkrtos_port_paging_init(void);
 **建立/确认分页映射**
 **返回**：0 = 映射可用；-1 = 本 port 不具备分页通路
 LoongArch 的静态映射在 la_mmu_init() 里建好（开中断之前），
-本函数只报告那份映射是否已经生效，不重建它。 */
+本函数只报告那份映射是否已经生效，不重建它。
 
 ### `int32 arkrtos_port_paging_check(unsigned long base, uint32 size, arkrt`
 
@@ -3995,7 +3996,7 @@ int32 arkrtos_port_paging_check(unsigned long base, uint32 size, arkrtos_mpu_mem
 - `base`：起始虚拟地址
 - `size`：字节数
 - `mem`：期望的内存属性（取自 arkrtos_mpu_mem_t）
-**返回**：0 = 已映射且权限满足；-1 = 未映射 / 权限不足 / 该属性本 port 无对应窗口 */
+**返回**：0 = 已映射且权限满足；-1 = 未映射 / 权限不足 / 该属性本 port 无对应窗口
 
 ### `int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_`
 
@@ -4005,7 +4006,7 @@ int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_t mem);
 
 **追加一条动态映射（VA -> PA）**
 **返回**：0 = 已建立；-1 = 本 port 未实现
-动态映射是登记欠账，这里不假装支持。 */
+动态映射是登记欠账，这里不假装支持。
 
 ### `int32 arkrtos_port_paging_unalias(uint32 va);`
 
@@ -4020,7 +4021,7 @@ int32 arkrtos_port_paging_unalias(uint32 va);
 -4 = 这个 VA 本来就没登记过
 撤销靠「按同一个绝对索引把这条条目重写空」完成：动态条目落
 MTLB 的绝对槽位，所以不需要 invtlb —— 覆盖后旧翻译就不存在了。
-两半都空了才把槽位标成空闲，否则只清被撤的那一半。 */
+两半都空了才把槽位标成空闲，否则只清被撤的那一半。
 
 ### `uint32 arkrtos_port_paging_dyn_used(void);`
 
@@ -4029,7 +4030,7 @@ uint32 arkrtos_port_paging_dyn_used(void);
 ```
 
 **当前占用了几条动态映射槽位（pmap 读数用）**
-**返回**：已占用槽位数（0..上限） */
+**返回**：已占用槽位数（0..上限）
 
 ### `void arkrtos_port_paging_flush(uint32 base, uint32 size);`
 
@@ -4039,7 +4040,7 @@ void arkrtos_port_paging_flush(uint32 base, uint32 size);
 
 **让一段地址的翻译失效**
 静态映射从不撤销，所以本 port 是空操作；留这个口是为了让
-将来真做动态重映射时有地方落，而不是到时候改契约。 */
+将来真做动态重映射时有地方落，而不是到时候改契约。
 
 ### `int32 arkrtos_port_paging_activate(uint32 space);`
 
@@ -4054,7 +4055,7 @@ int32 arkrtos_port_paging_activate(uint32 space);
 条目、切换时重写 App 窗口那一条 PS=20 条目。空间号即帧号：
 space 0 是 PA = ARKRTOS_QEMU_APP_BASE（行为与之前完全一致），
 space n 是 ARKRTOS_QEMU_APP_BASE + n * APP_SIZE。
-内核的恒等映射与 UART 条目一条都不动。 */
+内核的恒等映射与 UART 条目一条都不动。
 
 ### `int32 arkrtos_port_paging_switch_to(uint32 space);`
 
@@ -4072,7 +4073,7 @@ int32 arkrtos_port_paging_switch_to(uint32 space);
 （栈填充图案）停机。所以本 port 在「调用者 sp 落在 App 窗口内」
 时只记下空间号，由 arkrtos_context.S 的恢复现场路径在读目标帧
 之前补上这一刀（la_switch_prepare）。内核任务的 sp 在恒等映射
-里，那种情况立即生效，与 activate() 完全等价。 */
+里，那种情况立即生效，与 activate() 完全等价。
 
 ### `uint32 arkrtos_port_paging_space(void);`
 
@@ -4080,7 +4081,7 @@ int32 arkrtos_port_paging_switch_to(uint32 space);
 uint32 arkrtos_port_paging_space(void);
 ```
 
-**当前装进 App 窗口的空间号 */**
+**当前装进 App 窗口的空间号**
 
 ### `uint32 arkrtos_port_paging_space_frame(uint32 space);`
 
@@ -4088,7 +4089,7 @@ uint32 arkrtos_port_paging_space(void);
 uint32 arkrtos_port_paging_space_frame(uint32 space);
 ```
 
-**空间号对应的物理帧基址；越界返回 0（不猜一个地址出去） */**
+**空间号对应的物理帧基址；越界返回 0（不猜一个地址出去）**
 
 ### `uint32 arkrtos_port_paging_space_count(void);`
 
@@ -4096,7 +4097,7 @@ uint32 arkrtos_port_paging_space_frame(uint32 space);
 uint32 arkrtos_port_paging_space_count(void);
 ```
 
-**板级给了几个 App 地址空间（>= 1） */**
+**板级给了几个 App 地址空间（>= 1）**
 
 ### `int32 arkrtos_port_paging_space_release(uint32 space);`
 
@@ -4116,7 +4117,7 @@ window; -3 = the caller is standing inside the window VA
 只有页级窗口（ARKRTOS_USE_PAGING_PAGES=1）有帧可还；PS=20 的静态
 窗口是板级固定地址，没有可回收的东西，返回 -2。
 归还之后空间仍然存在（space_count 不变），下一次 activate() 会
-重新要帧 —— 语义是「这个空间空着」，不是「这个空间没了」。 */
+重新要帧 —— 语义是「这个空间空着」，不是「这个空间没了」。
 
 ### `uint32 arkrtos_port_paging_lookup(unsigned long va, uint32 *index, uin`
 
@@ -4127,7 +4128,7 @@ uint32 arkrtos_port_paging_lookup(unsigned long va, uint32 *index, uint32 *ppn, 
 **读回一个 VA 当前由哪条 TLB 条目翻译（诊断用）**
 **返回**：1 = 命中（index/ppn/ps 被写）；0 = 未命中（输出参数不动）
 只读，不建映射。用于分辨「tlbwr 没生效」与「生效了但查找命中
-另一条陈旧条目」——地址空间切换静默失效时就靠它定位。 */
+另一条陈旧条目」——地址空间切换静默失效时就靠它定位。
 
 ### `int32 arkrtos_port_paging_frame_alloc(uint32 count, uint32 *p_base);`
 
@@ -4140,7 +4141,7 @@ int32 arkrtos_port_paging_frame_alloc(uint32 count, uint32 *p_base);
 - `p_base`：on success, physical base of the first frame
 **返回**：0 = allocated; -1 = bad argument; -2 = no run that long
 Bookkeeping only: it does not install any mapping and does not
-touch the App window.  See ARKRTOS_USE_PAGING_FRAMES. */
+touch the App window.  See ARKRTOS_USE_PAGING_FRAMES.
 
 ### `int32 arkrtos_port_paging_frame_free(uint32 base, uint32 count);`
 
@@ -4152,7 +4153,7 @@ int32 arkrtos_port_paging_frame_free(uint32 base, uint32 count);
 **返回**：0 = returned; -1 = outside the pool / unaligned / bad count;
 -3 = the run contains a frame that was not allocated (nothing moved)
 All-or-nothing: one stray free frame refuses the whole run, so a
-frame can never end up owned by two callers. */
+frame can never end up owned by two callers.
 
 ### `uint32 arkrtos_port_paging_frame_total(void);`
 
@@ -4160,7 +4161,7 @@ frame can never end up owned by two callers. */
 uint32 arkrtos_port_paging_frame_total(void);
 ```
 
-**Total frames in the board pool (0 when there is none) */**
+**Total frames in the board pool (0 when there is none)**
 
 ### `uint32 arkrtos_port_paging_frame_used(void);`
 
@@ -4168,7 +4169,7 @@ uint32 arkrtos_port_paging_frame_total(void);
 uint32 arkrtos_port_paging_frame_used(void);
 ```
 
-**Frames currently allocated from the board pool */**
+**Frames currently allocated from the board pool**
 
 ### `uint32 arkrtos_port_paging_pair_total(void);`
 
@@ -4179,7 +4180,7 @@ uint32 arkrtos_port_paging_pair_total(void);
 **How many 8 KB pairs the App window is made of (0 = no window)**
 One PS=12 TLB entry covers two adjacent 4 KB pages, so the
 window's accounting unit is a pair, not a page. The number is
-the same for every space (the VA side never moves). */
+the same for every space (the VA side never moves).
 
 ### `uint32 arkrtos_port_paging_pair_count(uint32 space);`
 
@@ -4191,7 +4192,7 @@ uint32 arkrtos_port_paging_pair_count(uint32 space);
 **返回**：pair count; 0 for a bad space or a space that was never installed
 In the demand build this counts the pairs whose two frames have
 actually been paid for; in the page-level build an installed
-space owns the whole 2 MB run, so it is every pair. */
+space owns the whole 2 MB run, so it is every pair.
 
 ### `uint32 arkrtos_port_paging_pair_pa(uint32 space, uint32 idx);`
 
@@ -4204,7 +4205,7 @@ uint32 arkrtos_port_paging_pair_pa(uint32 space, uint32 idx);
 - `idx`：0 .. arkrtos_port_paging_pair_total()-1
 Read-only: it never faults a pair in, so asking "what is
 mapped" cannot change the answer. A pair that has not been
-touched yet reports 0 instead of a made-up address. */
+touched yet reports 0 instead of a made-up address.
 
 ### `int32 arkrtos_port_paging_space_clone(uint32 src, uint32 dst);`
 
@@ -4222,7 +4223,7 @@ switched, because the caller is running inside it. A pair the
 source has swapped out is copied in from the swap area, so the
 child sees the same bytes the parent would see, resident.
 On failure every frame this call took is returned to the pool.
-> 说明：只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。 */
+> 说明：只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。
 
 ### `int32 arkrtos_port_paging_write_space(uint32 space, unsigned long va, `
 
@@ -4238,7 +4239,7 @@ No demand faulting here on purpose: the caller must write into
 a pair the parent already made resident, otherwise it rolls
 back. Kernel paths do not quietly allocate frames behind the
 bookkeeping's back.
-> 说明：只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。 */
+> 说明：只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。
 
 ### `int32 arkrtos_port_paging_clone_frame(void *p_exc_ctx, uint32 space);`
 
@@ -4254,7 +4255,7 @@ Copies every register slot verbatim and rewrites a0 to 0, so
 the child resumes at the same PC with the same stack and sees
 clone() returning 0. ERA/sp/tp/fp and the FPU/vector area are
 inherited - that IS fork.
-> 说明：只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。 */
+> 说明：只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。
 
 ### `#if (ARKRTOS_USE_PAGING_SWAP == 1) uint32 arkrtos_port_paging_swap_sta`
 
@@ -4267,7 +4268,7 @@ inherited - that IS fork.
 4 = resident pairs, 5 = slot count
 **返回**：the reading; 0 for an unknown selector
 关档时连符号都不给（宏在 arkrtos_mpu.h 里回 0）：一个「永远返回 0
-的统计函数」会被读成「一次都没换出过」，那是错答案。 */
+的统计函数」会被读成「一次都没换出过」，那是错答案。
 
 ### `unsigned long arkrtos_port_paging_window_va(void);`
 
@@ -4281,7 +4282,7 @@ The physical side of the window differs per space and comes from
 arkrtos_port_paging_space_frame(); the VA side never moves.  Code
 that pokes the window must use this instead of the frame base:
 with ARKRTOS_USE_PAGING_PAGES=1 the frames come from the pool and
-no longer coincide with the window VA. */
+no longer coincide with the window VA.
 
 ### `#if (ARKRTOS_USE_PAGING_ASID == 1) unsigned long arkrtos_port_paging_a`
 
@@ -4292,7 +4293,7 @@ no longer coincide with the window VA. */
 **Hardware ASID currently in CSR.ASID (U-7); 0 when ASID is off**
 关档（ARKRTOS_USE_PAGING_ASID=0）时恒为 0：本 port 把每个 App 空间
 摊在一组固定的 TLB way 上、切换靠重写条目，压根没有 ASID 这个
-概念，返回一个非零值就是编的。 */
+概念，返回一个非零值就是编的。
 
 ### `unsigned long arkrtos_port_paging_asid_raw_swap(unsigned long asid);`
 
@@ -4306,7 +4307,7 @@ unsigned long arkrtos_port_paging_asid_raw_swap(unsigned long asid);
 与 arkrtos_port_paging_activate() 的差别只有一条但很要紧：
 activate 会读回校验、缺什么补什么，所以拿它测「条目还在不在」
 测不出来。本函数只做一次 csrwr，不记账不补铺，调用方负责换回
-去。生产路径不该用它。 */
+去。生产路径不该用它。
 
 ### `void arkrtos_port_paging_inval_va(unsigned long va);`
 
@@ -4317,7 +4318,7 @@ void arkrtos_port_paging_inval_va(unsigned long va);
 **按 VA 让翻译失效（invtlb op=3：不看 ASID，global 条目不动）**
 - `va`：要失效的虚拟地址
 留着它是为了做对照：op=6 的「定向」只有跟 op=3 的连带行为摆
-在一起才算证据。生产路径没有调用方。 */
+在一起才算证据。生产路径没有调用方。
 
 ### `int32  arkrtos_port_flash_erase(uint32 addr, uint32 size);`
 
@@ -4553,7 +4554,7 @@ another is the hardest kind of problem to find later.
 const arkrtos_cfg_slot_t *arkrtos_layout_slots(void);
 ```
 
-**Effective fixed-slot table (ARKRTOS_CFG_SLOT_MAX entries, type 0 = unused). */**
+**Effective fixed-slot table (ARKRTOS_CFG_SLOT_MAX entries, type 0 = unused).**
 
 ### `const arkrtos_cfg_slot_t *arkrtos_layout_slot(uint32 index);`
 
@@ -4561,7 +4562,7 @@ const arkrtos_cfg_slot_t *arkrtos_layout_slots(void);
 const arkrtos_cfg_slot_t *arkrtos_layout_slot(uint32 index);
 ```
 
-**One entry of the effective table, or 0 when index is out of range. */**
+**One entry of the effective table, or 0 when index is out of range.**
 
 ### `int32  arkrtos_layout_slot_by_base(uint32 addr);`
 
@@ -4578,7 +4579,7 @@ int32  arkrtos_layout_slot_by_base(uint32 addr);
 const char *arkrtos_layout_reason_text(uint32 reason);
 ```
 
-**Human-readable name of a validation reason code (ASCII, for the shell). */**
+**Human-readable name of a validation reason code (ASCII, for the shell).**
 
 ### `uint32 arkrtos_layout_validate(const arkrtos_cfg_record_t *rec);`
 
@@ -4635,7 +4636,7 @@ int32  arkrtos_layout_read(arkrtos_cfg_record_t *out, uint32 *p_seq);
 uint32 arkrtos_layout_crc(const arkrtos_cfg_record_t *rec);
 ```
 
-**CRC32 of a record with its crc32 field taken as zero (zlib-compatible). */**
+**CRC32 of a record with its crc32 field taken as zero (zlib-compatible).**
 
 ## kernelsrc/include/arkrtos_layout_def.h
 
@@ -4650,7 +4651,7 @@ knobs are stored, so a customer can configure a board without
 typedef struct {
 ```
 
-**One fixed slot: Flash placement + RAM window of a headed or bare image. */**
+**One fixed slot: Flash placement + RAM window of a headed or bare image.**
 
 ### `typedef struct {`
 
@@ -4658,7 +4659,7 @@ typedef struct {
 typedef struct {
 ```
 
-**The persistent layout + runtime configuration record (512 bytes, no padding). */**
+**The persistent layout + runtime configuration record (512 bytes, no padding).**
 
 ## kernelsrc/include/arkrtos_linux_abi.h
 
@@ -4809,7 +4810,7 @@ void  arkrtos_loader_slot_hint_set(int32 index);
 int32 arkrtos_loader_slot_hint_get(void);
 ```
 
-**读取当前的安装槽位提示（-1 = 未指定）。 @see arkrtos_loader_slot_hint_set */**
+**读取当前的安装槽位提示（-1 = 未指定）。 @see arkrtos_loader_slot_hint_set**
 
 ### `int32 arkrtos_loader_reclaim(void);`
 
@@ -5350,7 +5351,7 @@ void   arkrtos_log_ring_clear(void);
 typedef arkrtos_mpool_stat_t arkrtos_mempool_stat_t;
 ```
 
-**池的只读快照，供 shell / 自检使用（定义在 arkrtos.h，两侧共用一份） */**
+**池的只读快照，供 shell / 自检使用（定义在 arkrtos.h，两侧共用一份）**
 
 ### `void  arkrtos_mempool_module_init(void);`
 
@@ -5358,7 +5359,7 @@ typedef arkrtos_mpool_stat_t arkrtos_mempool_stat_t;
 void  arkrtos_mempool_module_init(void);
 ```
 
-**对象表初始化；由 arkrtos_kernel_init() 调用 */**
+**对象表初始化；由 arkrtos_kernel_init() 调用**
 
 ### `int32 arkrtos_mempool_create_internal(const char *name, void *pool, ui`
 
@@ -5397,7 +5398,7 @@ int32 arkrtos_mempool_free_internal(int32 handle, void *p);
 int32 arkrtos_mempool_delete_internal(int32 handle);
 ```
 
-**销毁池（对象表项释放；调用者提供的内存区不受影响） @return 0/-1 */**
+**销毁池（对象表项释放；调用者提供的内存区不受影响） @return 0/-1**
 
 ### `int32 arkrtos_mempool_is_alive(int32 handle);`
 
@@ -5405,7 +5406,7 @@ int32 arkrtos_mempool_delete_internal(int32 handle);
 int32 arkrtos_mempool_is_alive(int32 handle);
 ```
 
-**1 = 句柄指向活着的池（不是仅落在下标范围内） */**
+**1 = 句柄指向活着的池（不是仅落在下标范围内）**
 
 ### `int32 arkrtos_mempool_query_internal(int32 handle, arkrtos_mempool_sta`
 
@@ -5413,7 +5414,7 @@ int32 arkrtos_mempool_is_alive(int32 handle);
 int32 arkrtos_mempool_query_internal(int32 handle, arkrtos_mempool_stat_t *out);
 ```
 
-**取池快照 @return 0 = 成功；-1 = 句柄非法 */**
+**取池快照 @return 0 = 成功；-1 = 句柄非法**
 
 ### `void  arkrtos_mempool_release_task(int32 task_id);`
 
@@ -5449,7 +5450,7 @@ arkrtos_mini_run() 返回 ARKRTOS_MINI_ERR_FS 时有意义。
 typedef struct {
 ```
 
-**一次小程序装载的结果（arkrtos_mini_info() 的输出） */**
+**一次小程序装载的结果（arkrtos_mini_info() 的输出）**
 
 ### `int32 arkrtos_mini_run(const char *path);`
 
@@ -5680,7 +5681,7 @@ int32 arkrtos_mini_swap_take(void *p_exc_ctx, int32 task_id);
 typedef struct {
 ```
 
-**一次装载的可读结果（全部是实测值，不是推算值） */**
+**一次装载的可读结果（全部是实测值，不是推算值）**
 
 ### `int32 arkrtos_mod_load(const char *path, int32 argc, char *argv[]);`
 
@@ -5701,7 +5702,7 @@ int32 arkrtos_mod_load(const char *path, int32 argc, char *argv[]);
 int32 arkrtos_mod_count(void);
 ```
 
-**当前驻留的模块个数 */**
+**当前驻留的模块个数**
 
 ### `int32 arkrtos_mod_info(int32 index, arkrtos_mod_info_t *p_out);`
 
@@ -5709,7 +5710,7 @@ int32 arkrtos_mod_count(void);
 int32 arkrtos_mod_info(int32 index, arkrtos_mod_info_t *p_out);
 ```
 
-**取第 index 个驻留模块（index 是「第几个」，不是槽号） @return 0/-1 */**
+**取第 index 个驻留模块（index 是「第几个」，不是槽号） @return 0/-1**
 
 ### `int32 arkrtos_mod_unload(int32 index);`
 
@@ -5717,7 +5718,7 @@ int32 arkrtos_mod_info(int32 index, arkrtos_mod_info_t *p_out);
 int32 arkrtos_mod_unload(int32 index);
 ```
 
-**卸掉一个模块（按装载顺序的下标） @return 0 / ARKRTOS_MOD_ERR_* */**
+**卸掉一个模块（按装载顺序的下标） @return 0 / ARKRTOS_MOD_ERR_***
 
 ### `const char *arkrtos_mod_error_name(int32 rc);`
 
@@ -5725,7 +5726,7 @@ int32 arkrtos_mod_unload(int32 index);
 const char *arkrtos_mod_error_name(int32 rc);
 ```
 
-**返回码的短名（只用于打印，不参与判定） */**
+**返回码的短名（只用于打印，不参与判定）**
 
 ### `const char *arkrtos_mod_missing_symbol(void);`
 
@@ -5782,7 +5783,7 @@ from arkrtos_paging_map_pages() is how a caller sees how far it got.
 uint32 arkrtos_paging_map_pages(void);
 ```
 
-**How many pages this layer has registered (cumulative readout) */**
+**How many pages this layer has registered (cumulative readout)**
 
 ### `int32 arkrtos_paging_unmap_span(uint32 va, uint32 size);`
 
@@ -5797,7 +5798,7 @@ int32 arkrtos_paging_unmap_span(uint32 va, uint32 size);
 that failed (-1 parameter, -2 static span, -4 not registered)
 Only pages registered through map_span() can be taken out: static
 spans are the kernel's own and the port refuses them. A span that
-was only partly mapped reports the reason instead of a "done". */
+was only partly mapped reports the reason instead of a "done".
 
 ### `uint32 arkrtos_paging_dyn_used(void);`
 
@@ -5805,7 +5806,7 @@ was only partly mapped reports the reason instead of a "done". */
 uint32 arkrtos_paging_dyn_used(void);
 ```
 
-**How many dynamic mapping slots are in use right now (readout) */**
+**How many dynamic mapping slots are in use right now (readout)**
 
 ### `int32 arkrtos_copy_from_user(void *dst, const void *usrc, uint32 len);`
 
@@ -5820,7 +5821,7 @@ int32 arkrtos_copy_from_user(void *dst, const void *usrc, uint32 len);
 **返回**：0 = copied; -1/-2/-3/-4 as listed above
 The caller is arkrtos_task_get_current(). On a build where the
 calling task is a kernel task there is no user window, and the
-answer is -2 instead of an unchecked memcpy. */
+answer is -2 instead of an unchecked memcpy.
 
 ### `int32 arkrtos_copy_to_user(void *udst, const void *src, uint32 len);`
 
@@ -5829,7 +5830,7 @@ int32 arkrtos_copy_to_user(void *udst, const void *src, uint32 len);
 ```
 
 **Copy from a kernel buffer into a user buffer**
-**返回**：0 = copied; -1/-2/-3/-4 as listed above */
+**返回**：0 = copied; -1/-2/-3/-4 as listed above
 
 ### `int32 arkrtos_copy_from_user_task(arkrtos_task_t *p_task, void *dst, c`
 
@@ -5842,7 +5843,7 @@ Used where the kernel works on behalf of a task that is not the
 current one - a loader writing a program's argument block, for
 instance. The caller must have installed that task's address
 space first; if it did not, the copy is refused with -4 instead
-of quietly reaching into whatever frame is installed. */
+of quietly reaching into whatever frame is installed.
 
 ### `int32 arkrtos_paging_user_copy(unsigned long rom_start, uint32 rom_siz`
 
@@ -5863,7 +5864,7 @@ int32 arkrtos_paging_user_copy(unsigned long rom_start, uint32 rom_size, unsigne
 This exists so the QEMU self-test can exercise every refusal
 without manufacturing a fake TCB: the guards are the same code
 the task-based entry points run, only the numbers arrive
-directly. Kernel internal; Apps never see it. */
+directly. Kernel internal; Apps never see it.
 
 ### `uint32 arkrtos_paging_space_count(void);`
 
@@ -5871,7 +5872,7 @@ directly. Kernel internal; Apps never see it. */
 uint32 arkrtos_paging_space_count(void);
 ```
 
-**How many address spaces the board provides (>= 1) */**
+**How many address spaces the board provides (>= 1)**
 
 ### `uint32 arkrtos_paging_space_frame(uint32 space);`
 
@@ -5879,7 +5880,7 @@ uint32 arkrtos_paging_space_count(void);
 uint32 arkrtos_paging_space_frame(uint32 space);
 ```
 
-**Physical frame base behind a space; 0 when the space does not exist */**
+**Physical frame base behind a space; 0 when the space does not exist**
 
 ### `unsigned long arkrtos_paging_window_va(void);`
 
@@ -5891,7 +5892,7 @@ unsigned long arkrtos_paging_window_va(void);
 **返回**：the window VA base; 0 when the build has no paging backend
 Use this - not arkrtos_paging_space_frame() - when poking the
 window by address.  With ARKRTOS_USE_PAGING_PAGES=1 the frames come
-from the frame pool, so a frame base is no longer a VA. */
+from the frame pool, so a frame base is no longer a VA.
 
 ### `uint32 arkrtos_paging_space_current(void);`
 
@@ -5899,7 +5900,7 @@ from the frame pool, so a frame base is no longer a VA. */
 uint32 arkrtos_paging_space_current(void);
 ```
 
-**Which space is currently installed in the App window */**
+**Which space is currently installed in the App window**
 
 ### `int32 arkrtos_paging_space_activate(uint32 space);`
 
@@ -5911,7 +5912,7 @@ int32 arkrtos_paging_space_activate(uint32 space);
 **返回**：0 = installed or already there; -1 = bad space / no TLB path
 The scheduler also does this on every switch to an App, from the
 task's binding. Calling it from a kernel task is what lets a loader
-write into a frame the kernel is not currently "in". */
+write into a frame the kernel is not currently "in".
 
 ### `int32 arkrtos_paging_bind_task(arkrtos_task_t *p_task, uint32 space);`
 
@@ -5923,7 +5924,7 @@ int32 arkrtos_paging_bind_task(arkrtos_task_t *p_task, uint32 space);
 **返回**：0 = bound; -1 = bad task or bad space
 Only App tasks (is_priv == 0) trigger a switch on schedule; a
 kernel task leaves whatever space is installed alone, because
-kernel access to a frame is a deliberate, momentary thing. */
+kernel access to a frame is a deliberate, momentary thing.
 
 ### `uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task);`
 
@@ -5931,7 +5932,7 @@ kernel access to a frame is a deliberate, momentary thing. */
 uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task);
 ```
 
-**Space a task is bound to (0 when unknown) */**
+**Space a task is bound to (0 when unknown)**
 
 ### `int32 arkrtos_paging_space_clone(uint32 src, uint32 dst);`
 
@@ -5943,7 +5944,7 @@ int32 arkrtos_paging_space_clone(uint32 src, uint32 dst);
 - `src`：父空间，@param dst 子空间（必须空着）
 **返回**：0 / -1 参数 / -2 dst 已有帧 / -3 帧池拒绝（已回滚）
 纯搬运，不切窗口；只在按需分页的 LoongArch64 端口上实现。
-开关条件（PAGING_PAGES + PAGING_DEMAND）由 features.h #error 把住。 */
+开关条件（PAGING_PAGES + PAGING_DEMAND）由 features.h #error 把住。
 
 ### `int32 arkrtos_paging_space_release(uint32 space);`
 
@@ -5961,7 +5962,7 @@ entries of that space are dropped first, so anyone still running
 there would fault on its next fetch. The space itself stays
 (space_count does not change); the next activate() asks for fresh
 frames again, which is what makes repeated exec runs stop draining
-the pool. */
+the pool.
 
 ### `int32 arkrtos_paging_frame_alloc(uint32 count, uint32 *p_base);`
 
@@ -5969,7 +5970,7 @@ the pool. */
 int32 arkrtos_paging_frame_alloc(uint32 count, uint32 *p_base);
 ```
 
-**Allocate a run of contiguous 4 KB page frames */**
+**Allocate a run of contiguous 4 KB page frames**
 
 ### `int32 arkrtos_paging_frame_free(uint32 base, uint32 count);`
 
@@ -5977,7 +5978,7 @@ int32 arkrtos_paging_frame_alloc(uint32 count, uint32 *p_base);
 int32 arkrtos_paging_frame_free(uint32 base, uint32 count);
 ```
 
-**Return a run of contiguous 4 KB page frames (all-or-nothing) */**
+**Return a run of contiguous 4 KB page frames (all-or-nothing)**
 
 ### `uint32 arkrtos_paging_frame_total(void);`
 
@@ -5985,7 +5986,7 @@ int32 arkrtos_paging_frame_free(uint32 base, uint32 count);
 uint32 arkrtos_paging_frame_total(void);
 ```
 
-**Total frames in the board pool (0 when there is none) */**
+**Total frames in the board pool (0 when there is none)**
 
 ### `uint32 arkrtos_paging_frame_used(void);`
 
@@ -5993,7 +5994,7 @@ uint32 arkrtos_paging_frame_total(void);
 uint32 arkrtos_paging_frame_used(void);
 ```
 
-**Frames currently allocated from the board pool */**
+**Frames currently allocated from the board pool**
 
 ### `uint32 arkrtos_paging_pair_total(void);`
 
@@ -6006,7 +6007,7 @@ The window is accounted in 8 KB pairs because one PS=12 entry
 covers two 4 KB pages. Read-only: asking what is mapped never
 faults anything in. total() is 0 on a build without a paged
 window; count()/pa() answer 0 for a space that is not installed
-(or for a pair that has not been paid for yet). */
+(or for a pair that has not been paid for yet).
 
 ### `#if (ARKRTOS_USE_PAGING_SWAP == 1) uint32 arkrtos_paging_swap_stat(uin`
 
@@ -6019,7 +6020,7 @@ window; count()/pa() answer 0 for a space that is not installed
 4 = resident pairs, 5 = slot count
 只在 ARKRTOS_USE_PAGING_SWAP=1 的镜像里存在；关档回 0（宏），
 调用点因此不必套 #if —— 但 shell 里仍然套了，因为「这台板上没有
-页替换」和「有页替换、一次没换过」是两句话。 */
+页替换」和「有页替换、一次没换过」是两句话。
 
 ## kernelsrc/include/arkrtos_net.h
 
@@ -6035,7 +6036,7 @@ tcpip 线程并等它的完成信号量，也就是要阻塞；而 SVC 处理程
 ```
 
 **网络服务任务的优先级。tcpip 线程是 12（见 lwipopts.h），**
-服务任务要低一些，让 tcpip 能先跑完它投递的消息。 */
+服务任务要低一些，让 tcpip 能先跑完它投递的消息。
 
 ### `#ifndef ARKRTOS_NET_TASK_STACK_WORDS #define ARKRTOS_NET_TASK_STACK_WO`
 
@@ -6043,7 +6044,7 @@ tcpip 线程并等它的完成信号量，也就是要阻塞；而 SVC 处理程
 #ifndef ARKRTOS_NET_TASK_STACK_WORDS #define ARKRTOS_NET_TASK_STACK_WORDS (384u) #endif
 ```
 
-**服务任务栈（字）。只跑 lwIP 调用与一次 4 KB 以内的小拷贝。 */**
+**服务任务栈（字）。只跑 lwIP 调用与一次 4 KB 以内的小拷贝。**
 
 ### `int32 arkrtos_net_start(void);`
 
@@ -6090,7 +6091,7 @@ void arkrtos_net_release_task(int32 task_id);
 void   arkrtos_net_host_step(void);
 ```
 
-**宿主用例专用：只承接队列里的一条消息并执行（生产构建里不存在）。 */**
+**宿主用例专用：只承接队列里的一条消息并执行（生产构建里不存在）。**
 
 ### `uint32 arkrtos_net_host_req_state(void);`
 
@@ -6098,7 +6099,7 @@ void   arkrtos_net_host_step(void);
 uint32 arkrtos_net_host_req_state(void);
 ```
 
-**宿主用例专用：请求槽当前状态（IDLE / PENDING / DONE）。 */**
+**宿主用例专用：请求槽当前状态（IDLE / PENDING / DONE）。**
 
 ### `int32  arkrtos_net_host_sock_fd(uint32 index);`
 
@@ -6106,7 +6107,7 @@ uint32 arkrtos_net_host_req_state(void);
 int32  arkrtos_net_host_sock_fd(uint32 index);
 ```
 
-**宿主用例专用：socket 表第 index 行的 lwIP fd（-1 = 空行）。 */**
+**宿主用例专用：socket 表第 index 行的 lwIP fd（-1 = 空行）。**
 
 ### `int32  arkrtos_net_host_sock_owner(uint32 index);`
 
@@ -6114,7 +6115,7 @@ int32  arkrtos_net_host_sock_fd(uint32 index);
 int32  arkrtos_net_host_sock_owner(uint32 index);
 ```
 
-**宿主用例专用：socket 表第 index 行的 owner（-1 = 孤儿）。 */**
+**宿主用例专用：socket 表第 index 行的 owner（-1 = 孤儿）。**
 
 ### `int32  arkrtos_net_host_req_result(void);`
 
@@ -6122,7 +6123,7 @@ int32  arkrtos_net_host_sock_owner(uint32 index);
 int32  arkrtos_net_host_req_result(void);
 ```
 
-**宿主用例专用：请求槽里最后一次执行的原样结果（主人已死时也只能经此读到）。 */**
+**宿主用例专用：请求槽里最后一次执行的原样结果（主人已死时也只能经此读到）。**
 
 ### `void   arkrtos_net_host_reset(void);`
 
@@ -6130,7 +6131,7 @@ int32  arkrtos_net_host_req_result(void);
 void   arkrtos_net_host_reset(void);
 ```
 
-**宿主用例专用：把请求槽强制恢复成空闲，用例之间互不继承。 */**
+**宿主用例专用：把请求槽强制恢复成空闲，用例之间互不继承。**
 
 ## kernelsrc/include/arkrtos_ptable.h
 
@@ -6446,7 +6447,7 @@ int32 arkrtos_ptable_stats(uint32 *p_used, uint32 *p_total, uint32 *p_frag);
 typedef struct {
 ```
 
-**一行读数（周期 + 微秒两种单位，微秒按当前主频折算） */**
+**一行读数（周期 + 微秒两种单位，微秒按当前主频折算）**
 
 ### `#define ARKRTOS_RT_ROWS                 5u`
 
@@ -6454,7 +6455,7 @@ typedef struct {
 #define ARKRTOS_RT_ROWS                 5u
 ```
 
-**读数行数上限（由 arkrtos_rt_snapshot 填） */**
+**读数行数上限（由 arkrtos_rt_snapshot 填）**
 
 ### `void   arkrtos_rt_init(void);`
 
@@ -6462,7 +6463,7 @@ typedef struct {
 void   arkrtos_rt_init(void);
 ```
 
-**模块初始化：打开周期计数器、算出每拍周期数、清空统计 */**
+**模块初始化：打开周期计数器、算出每拍周期数、清空统计**
 
 ### `int32  arkrtos_rt_counter_alive(void);`
 
@@ -6481,7 +6482,7 @@ int32  arkrtos_rt_counter_alive(void);
 void   arkrtos_rt_tick_enter(void);
 ```
 
-**节拍中断入口/出口时间戳（由 arkrtos_kernel_tick_body 调用） */**
+**节拍中断入口/出口时间戳（由 arkrtos_kernel_tick_body 调用）**
 
 ### `void   arkrtos_rt_crit_enter(void);`
 
@@ -6489,7 +6490,7 @@ void   arkrtos_rt_tick_enter(void);
 void   arkrtos_rt_crit_enter(void);
 ```
 
-**临界区入口/出口（由移植层 enter/exit_critical 调用，带嵌套计数） */**
+**临界区入口/出口（由移植层 enter/exit_critical 调用，带嵌套计数）**
 
 ### `int32  arkrtos_rt_measure_wake(uint32 n);`
 
@@ -6534,7 +6535,7 @@ uint32 arkrtos_rt_snapshot(arkrtos_rt_row_t *rows, uint32 max_rows);
 uint32 arkrtos_rt_jitter(int32 *min_c, int32 *max_c, uint32 *n);
 ```
 
-**节拍抖动（有符号周期，正 = 比标称晚）：返回 0 表示还没有样本 */**
+**节拍抖动（有符号周期，正 = 比标称晚）：返回 0 表示还没有样本**
 
 ### `void   arkrtos_rt_reset(void);`
 
@@ -6542,7 +6543,7 @@ uint32 arkrtos_rt_jitter(int32 *min_c, int32 *max_c, uint32 *n);
 void   arkrtos_rt_reset(void);
 ```
 
-**清空所有统计（不影响已经建好的辅助任务） */**
+**清空所有统计（不影响已经建好的辅助任务）**
 
 ### `uint32 arkrtos_rt_cycles_per_tick(void);`
 
@@ -6550,7 +6551,7 @@ void   arkrtos_rt_reset(void);
 uint32 arkrtos_rt_cycles_per_tick(void);
 ```
 
-**一个节拍标称多少 CPU 周期（0 = 周期计数器不可用） */**
+**一个节拍标称多少 CPU 周期（0 = 周期计数器不可用）**
 
 ### `uint32 arkrtos_rt_to_us(uint32 c);`
 
@@ -6587,7 +6588,7 @@ int32  arkrtos_rt_last_error(void);
 #define ARKRTOS_SEC_ITEM_MAX        (16u)
 ```
 
-**自检项上限（超过的检查不会进报告，见 arkrtos_sec_add 的返回值） */**
+**自检项上限（超过的检查不会进报告，见 arkrtos_sec_add 的返回值）**
 
 ### `#define ARKRTOS_SEC_PASS            (0u) #define ARKRTOS_SEC_FAIL     `
 
@@ -6595,7 +6596,7 @@ int32  arkrtos_rt_last_error(void);
 #define ARKRTOS_SEC_PASS            (0u) #define ARKRTOS_SEC_FAIL            (1u) #define ARKRTOS_SEC_FINDING         (2u) #define ARKRTOS_SEC_SKIP            (3u)
 ```
 
-**单项结论 */**
+**单项结论**
 
 ### `#define ARKRTOS_SEC_ERR_NO_PORT     (-1)`
 
@@ -6605,7 +6606,7 @@ int32  arkrtos_rt_last_error(void);
 
 **板级弱符号的返回值：本板没有实现这条自查通路（不是"检查通过"）。**
 与上面的 PASS/FAIL/FINDING/SKIP 是两套语义：那是检查结果，这是
-「根本没有读数」。值不得单独修改。 */
+「根本没有读数」。值不得单独修改。
 
 ### `typedef struct {`
 
@@ -6624,7 +6625,7 @@ typedef struct {
 typedef struct {
 ```
 
-**一次自检的完整报告 */**
+**一次自检的完整报告**
 
 ### `uint32 arkrtos_sec_run(arkrtos_sec_report_t *p_out);`
 
@@ -6642,7 +6643,7 @@ uint32 arkrtos_sec_run(arkrtos_sec_report_t *p_out);
 uint32 arkrtos_sec_count(const arkrtos_sec_report_t *p_rep, uint32 state);
 ```
 
-**报告里某一档的条数（外壳打印用；state 越界返回 0） */**
+**报告里某一档的条数（外壳打印用；state 越界返回 0）**
 
 ### `const char *arkrtos_sec_state_name(uint32 state);`
 
@@ -6650,7 +6651,7 @@ uint32 arkrtos_sec_count(const arkrtos_sec_report_t *p_rep, uint32 state);
 const char *arkrtos_sec_state_name(uint32 state);
 ```
 
-**结论名：pass / fail / finding / skip */**
+**结论名：pass / fail / finding / skip**
 
 ## kernelsrc/include/arkrtos_sha256.h
 
@@ -6665,7 +6666,7 @@ only way to hash a runtime string was to turn the *image signature*
 #define ARKRTOS_SHA256_LEN          (32u)
 ```
 
-**Digest length in bytes. */**
+**Digest length in bytes.**
 
 ### `typedef struct {`
 
@@ -6673,7 +6674,7 @@ only way to hash a runtime string was to turn the *image signature*
 typedef struct {
 ```
 
-**Incremental hash context (caller owns it; may live on the stack). */**
+**Incremental hash context (caller owns it; may live on the stack).**
 
 ### `ARKRTOS_SHA256_UNUSED static void arkrtos_sha256_hash(const uint8 *dat`
 
@@ -6681,7 +6682,7 @@ typedef struct {
 ARKRTOS_SHA256_UNUSED static void arkrtos_sha256_hash(const uint8 *data, uint32 len, uint8 out[32]) {
 ```
 
-**One shot: digest of a single buffer (console login, small payloads). */**
+**One shot: digest of a single buffer (console login, small payloads).**
 
 ## kernelsrc/include/arkrtos_share.h
 
@@ -6696,7 +6697,7 @@ ARKRTOS_SHA256_UNUSED static void arkrtos_sha256_hash(const uint8 *data, uint32 
 #define ARKRTOS_PARTITION_MAGIC     (0x50415254u)
 ```
 
-**分区表魔数 "PART"，用于校验共享内存中的分区表是否有效 */**
+**分区表魔数 "PART"，用于校验共享内存中的分区表是否有效**
 
 ### `#define ARKRTOS_PARTITION_VERSION   (10u)`
 
@@ -6758,7 +6759,7 @@ ARKRTOS_MINI_ARRAY_MAX 的数组，下标记同一个小程序的两块。
 
 **小程序块数组的固定长度（ABI 形状常量）。**
 运行期同时能跑几个小程序由 ARKRTOS_MINI_MAX 决定（见 arkrtos_features.h），
-它必须 <= 本值；数组长度写死是为了让结构体尺寸与偏移跨版本稳定。 */
+它必须 <= 本值；数组长度写死是为了让结构体尺寸与偏移跨版本稳定。
 
 ### `#define ARKRTOS_SLOT_ARRAY_MAX      (16u)`
 
@@ -6768,7 +6769,7 @@ ARKRTOS_MINI_ARRAY_MAX 的数组，下标记同一个小程序的两块。
 
 **槽位数组的固定长度（ABI 形状常量）。**
 实际使用的槽位数由运行期字段 slot_max 决定，必须 <= 本值；
-数组长度写死是为了让结构体尺寸与偏移跨版本稳定。 */
+数组长度写死是为了让结构体尺寸与偏移跨版本稳定。
 
 ### `#define ARKRTOS_SLOT_FREE           (0u)   /* 记录未使用，对应 Flash 区间可被分配 */`
 
@@ -6776,7 +6777,7 @@ ARKRTOS_MINI_ARRAY_MAX 的数组，下标记同一个小程序的两块。
 #define ARKRTOS_SLOT_FREE           (0u)   /* 记录未使用，对应 Flash 区间可被分配 */ #define ARKRTOS_SLOT_APP            (1u)   /* 用户应用镜像 */ #define ARKRTOS_SLOT_DRIVER         (2u)   /* 用户驱动镜像 */
 ```
 
-**槽位类型（与 arkrtos_app_image.h 的 ARKRTOS_APP_TYPE_x 同值） */**
+**槽位类型（与 arkrtos_app_image.h 的 ARKRTOS_APP_TYPE_x 同值）**
 
 ### `#define ARKRTOS_APP_SLOT_EMPTY      (0u)    /* 空槽位 */ #define ARKRTOS_`
 
@@ -6784,7 +6785,7 @@ ARKRTOS_MINI_ARRAY_MAX 的数组，下标记同一个小程序的两块。
 #define ARKRTOS_APP_SLOT_EMPTY      (0u)    /* 空槽位 */ #define ARKRTOS_APP_SLOT_LOADED     (1u)    /* 已写入镜像并通过校验 */ #define ARKRTOS_APP_SLOT_RUNNING    (2u)    /* 已注册为任务并运行 */ #define ARKRTOS_APP_SLOT_INVALID    (3u)    /* 槽位有内容但校验失败（魔数/兼容签名/CRC 不符） */ #define ARKRTOS_APP_SLOT_INSTALLING (4u)    /* 正在安装：写入未完成，不可启动（掉电后由 CRC 判定为 INVALID） */ #define ARKRTOS_APP_SLOT_RAW        (5u)    /* 开发期裸镜像（无镜像头）：占用区间不参与分配，也不参与压实 */
 ```
 
-**槽位状态 */**
+**槽位状态**
 
 ### `typedef struct {`
 
@@ -6932,7 +6933,7 @@ arkrtos_shell_auth_gate()   - the shell's gate hook: 0 lets the
 void arkrtos_shell_auth_init(void);
 ```
 
-**Reset to "locked, no failures".  Called once from the shell task. */**
+**Reset to "locked, no failures".  Called once from the shell task.**
 
 ### `int arkrtos_shell_auth_gate(const char *name);`
 
@@ -6940,7 +6941,7 @@ void arkrtos_shell_auth_init(void);
 int arkrtos_shell_auth_gate(const char *name);
 ```
 
-**Gate hook: 0 = allowed, -1 = refused (reason already printed). */**
+**Gate hook: 0 = allowed, -1 = refused (reason already printed).**
 
 ### `int arkrtos_shell_auth_locked(void);`
 
@@ -6948,7 +6949,7 @@ int arkrtos_shell_auth_gate(const char *name);
 int arkrtos_shell_auth_locked(void);
 ```
 
-**1 while the console refuses everything but login/logout/help. */**
+**1 while the console refuses everything but login/logout/help.**
 
 ### `int arkrtos_shell_auth_cmd_login(int argc, char **argv);`
 
@@ -6956,7 +6957,7 @@ int arkrtos_shell_auth_locked(void);
 int arkrtos_shell_auth_cmd_login(int argc, char **argv);
 ```
 
-**`login <password>` */**
+**`login <password>`**
 
 ### `int arkrtos_shell_auth_cmd_logout(int argc, char **argv);`
 
@@ -6964,7 +6965,7 @@ int arkrtos_shell_auth_cmd_login(int argc, char **argv);
 int arkrtos_shell_auth_cmd_logout(int argc, char **argv);
 ```
 
-**`logout` */**
+**`logout`**
 
 ## kernelsrc/include/arkrtos_sign.h
 
@@ -6980,7 +6981,7 @@ HMAC-SHA256 over the image and stores it in the first 32 bytes of that
 ```
 
 **Signature length in bytes (HMAC-SHA256 output).**
-> 说明：Stored in signature[0..32); signature[32..64) stays zero. */
+> 说明：Stored in signature[0..32); signature[32..64) stays zero.
 
 ### `#define ARKRTOS_SIGN_KEY_LEN        (32u)`
 
@@ -6988,7 +6989,7 @@ HMAC-SHA256 over the image and stores it in the first 32 bytes of that
 #define ARKRTOS_SIGN_KEY_LEN        (32u)
 ```
 
-**Pre-shared key length in bytes. */**
+**Pre-shared key length in bytes.**
 
 ### `void arkrtos_sign_image(const uint8 *image, const arkrtos_app_header_t`
 
@@ -7020,7 +7021,7 @@ Streaming MAC, for the install path that never holds the whole nominal
 image in RAM.  Feed the header (as written to Flash), then the nominal
 reloc table and payload bytes exactly as they arrive over the wire, then
 compare against p_hdr->signature.  Same coverage as arkrtos_sign_image();
-one such transfer is in flight at a time, so the state is module-static. */
+one such transfer is in flight at a time, so the state is module-static.
 
 ### `void arkrtos_sign_payload(const uint8 *data, uint32 len, uint8 out[ARK`
 
@@ -7028,7 +7029,7 @@ one such transfer is in flight at a time, so the state is module-static. */
 void arkrtos_sign_payload(const uint8 *data, uint32 len, uint8 out[ARKRTOS_SIGN_LEN]);
 ```
 
-**一次算出 data[0..len) 的 tag；out 收 ARKRTOS_SIGN_LEN 字节 */**
+**一次算出 data[0..len) 的 tag；out 收 ARKRTOS_SIGN_LEN 字节**
 
 ### `int32 arkrtos_sign_payload_check(const uint8 *data, uint32 len, const `
 
@@ -7037,7 +7038,7 @@ int32 arkrtos_sign_payload_check(const uint8 *data, uint32 len, const uint8 tag[
 ```
 
 **比较 data[0..len) 的 MAC 与 tag（常量时间）**
-**返回**：0 = 一致，-1 = 不符 */
+**返回**：0 = 一致，-1 = 不符
 
 ### `void  arkrtos_sign_payload_begin(void);`
 
@@ -7046,7 +7047,7 @@ void  arkrtos_sign_payload_begin(void);
 ```
 
 **流式三件套（begin / update / end）：装载器不把整份文件读进 RAM 时用**
-> 说明：一次只能有一路在算（状态是模块静态的），装载路径本身是串行的。 */
+> 说明：一次只能有一路在算（状态是模块静态的），装载路径本身是串行的。
 
 ### `void  arkrtos_sign_payload_update(const uint8 *data, uint32 len);`
 
@@ -7054,7 +7055,7 @@ void  arkrtos_sign_payload_begin(void);
 void  arkrtos_sign_payload_update(const uint8 *data, uint32 len);
 ```
 
-**喂一块数据给流式 MAC；没 begin 过就调用会被静默丢弃 */**
+**喂一块数据给流式 MAC；没 begin 过就调用会被静默丢弃**
 
 ### `int32 arkrtos_sign_payload_end(const uint8 tag[ARKRTOS_SIGN_LEN]);`
 
@@ -7062,7 +7063,7 @@ void  arkrtos_sign_payload_update(const uint8 *data, uint32 len);
 int32 arkrtos_sign_payload_end(const uint8 tag[ARKRTOS_SIGN_LEN]);
 ```
 
-**返回**：0 = 一致，-1 = 不符（或没有 begin 过） */
+**返回**：0 = 一致，-1 = 不符（或没有 begin 过）
 
 ## kernelsrc/include/arkrtos_smp.h
 
@@ -7131,7 +7132,7 @@ arkrtos_smp_cpu_t *arkrtos_smp_cpu_self(void);
 uint32 arkrtos_smp_online_count(void);
 ```
 
-**在线核数（按掩码统计） */**
+**在线核数（按掩码统计）**
 
 ### `uint32 arkrtos_smp_online_mask_get(void);`
 
@@ -7139,7 +7140,7 @@ uint32 arkrtos_smp_online_count(void);
 uint32 arkrtos_smp_online_mask_get(void);
 ```
 
-**在线核掩码 */**
+**在线核掩码**
 
 ### `void arkrtos_smp_tick(void);`
 
@@ -7147,7 +7148,7 @@ uint32 arkrtos_smp_online_mask_get(void);
 void arkrtos_smp_tick(void);
 ```
 
-**记一拍（由各核的 tick 中断调用），只累加当前核的计数 */**
+**记一拍（由各核的 tick 中断调用），只累加当前核的计数**
 
 ### `int32 arkrtos_smp_send_ipi(uint32 cpu);`
 
@@ -7192,7 +7193,7 @@ void arkrtos_smp_idle_loop(void);
 #define ARKRTOS_SMP_SCHED_NIL           (-1)
 ```
 
-**"本核空闲"的哨兵值（队列里/当前任务号都用它表示没有任务） */**
+**"本核空闲"的哨兵值（队列里/当前任务号都用它表示没有任务）**
 
 ### `void arkrtos_smp_sched_enter(uint32 cpu);`
 
@@ -7219,7 +7220,9 @@ int32 arkrtos_smp_sched_task_to(int32 task_id, uint32 cpu);
 - `cpu`：目标核号（1..ARKRTOS_CPU_NUM-1；0 不走这里）
 **返回**：0=已入次核运行队列；-1=任务号/核号非法；-2=目标核是 0（应调
 arkrtos_smp_sched_task_back）；-3=任务不是 READY（RUNNING/WAIT/
-DELAY/INVALID 一律拒绝）；-4=任务已归别的核；-5=目标队列满
+DELAY/INVALID 一律拒绝）；-4=任务已归别的核；-5=目标队列满；
+-6=任务正在 CPU0 上跑（运行中的任务仍挂在就绪链上，迁它等于
+让两核共用一份栈帧，必须先等它阻塞或让出）
 > 说明：只在本核（CPU0）调用：它会摘 CPU0 的就绪链，那是全局结构。
 
 ### `int32 arkrtos_smp_sched_task_back(int32 task_id);`
@@ -7254,7 +7257,7 @@ uint32 arkrtos_smp_sched_switch(uint32 cpu, uint32 frame);
 void arkrtos_smp_sched_tick(uint32 cpu);
 ```
 
-**次核记一拍（由次核的定时器中断调用） */**
+**次核记一拍（由次核的定时器中断调用）**
 
 ### `void arkrtos_smp_sched_poll(void);`
 
@@ -7303,6 +7306,60 @@ int32 arkrtos_smp_sched_selftest(uint32 *out);
 [6] 待回收队列非空标志
 [7] 次核归属任务数（全表统计）
 **返回**：0=成功；-1=out 为空或没有次核
+
+### `#define ARKRTOS_SMP_BALANCE_MAX        4`
+
+```c
+#define ARKRTOS_SMP_BALANCE_MAX        4
+```
+
+**自动均衡候选表的上限**
+> 说明：候选表是"任务号"的固定小数组，不占 TCB、不改任务结构。上限是
+有意压低的一个常数：这套策略只该服务少数几个纯计算任务，放进
+几十个只会让"谁被迁走了"变得不可解释。
+
+### `int32 arkrtos_smp_sched_auto_add(int32 task_id);`
+
+```c
+int32 arkrtos_smp_sched_auto_add(int32 task_id);
+```
+
+**把一个任务登记为可自动迁移的候选**
+- `task_id`：任务号（1..task_count）
+**返回**：0=已登记；-1=任务号非法；-2=候选表满；-3=已经在表里
+调用方必须自己保证这个任务**不发 SVC、不调任何内核 API**：
+次核没有跨核保护，自动迁移一个会发 SVC 的任务等于让它当场
+致命停机。本模块无法从任务体看出这件事，所以登记是显式的。
+
+### `int32 arkrtos_smp_sched_auto_del(int32 task_id);`
+
+```c
+int32 arkrtos_smp_sched_auto_del(int32 task_id);
+```
+
+**把一个任务从候选表里摘掉**
+**返回**：0=已摘掉；-1=任务号非法；-4=本来就不在表里
+> 说明：只改候选表，不搬任何队列：已经迁到次核的任务仍然归次核，
+要它回来请调 arkrtos_smp_sched_task_back()。
+
+### `uint32 arkrtos_smp_sched_auto_count(void);`
+
+```c
+uint32 arkrtos_smp_sched_auto_count(void);
+```
+
+**当前候选任务数**
+
+### `int32 arkrtos_smp_sched_balance_stat(uint32 *out);`
+
+```c
+int32 arkrtos_smp_sched_balance_stat(uint32 *out);
+```
+
+**读数快照（给自测/串口打印用）**
+- `out`：至少 4 个字的数组，依次写：自动迁出次数 / 自动要回次数 /
+"次核空闲但没有可迁候选"的拍数 / 本策略跑了多少拍
+**返回**：0=成功；-1=out 为空
 
 ## kernelsrc/include/arkrtos_softbus.h
 
@@ -7384,7 +7441,7 @@ nest 记录同一 CPU 的嵌套层数。
 
 **Static initialiser for a global lock object.**
 > 说明：Must match arkrtos_spin_init(): owner 0xffffffff means "no owner", so a
-freshly defined lock cannot be mistaken for one held by CPU 0. */
+freshly defined lock cannot be mistaken for one held by CPU 0.
 
 ### `#define ARKRTOS_SPINLOCK_DEFINE(name)  arkrtos_spinlock_t name = ARKRT`
 
@@ -7482,7 +7539,7 @@ more than one operation, a sub-command in p[0] / parameters[0].
 typedef unsigned long arkrtos_svc_arg_t;
 ```
 
-**参数块里的一个字：原生指针宽度（宽档 = 8 字节）。 */**
+**参数块里的一个字：原生指针宽度（宽档 = 8 字节）。**
 
 ### `#define ARKRTOS_SVC_SUB(sub)            ((arkrtos_svc_arg_t)((unsigned`
 
@@ -7490,7 +7547,7 @@ typedef unsigned long arkrtos_svc_arg_t;
 #define ARKRTOS_SVC_SUB(sub)            ((arkrtos_svc_arg_t)((unsigned long)(sub) | ARKRTOS_SVC_SUB_WORD))
 ```
 
-**宽档写子命令字：置位标记，窄档内核据此拒绝而不是误读。 */**
+**宽档写子命令字：置位标记，窄档内核据此拒绝而不是误读。**
 
 ### `#define ARKRTOS_SVC_SUB_OF(w)           ((unsigned long)(w) & ~ARKRTOS`
 
@@ -7498,7 +7555,7 @@ typedef unsigned long arkrtos_svc_arg_t;
 #define ARKRTOS_SVC_SUB_OF(w)           ((unsigned long)(w) & ~ARKRTOS_SVC_SUB_WORD)
 ```
 
-**从子命令字取回子命令号（两档都能用）。 */**
+**从子命令字取回子命令号（两档都能用）。**
 
 ### `#define ARKRTOS_SVC_ARG_BYTES(n)        ((unsigned long)(n) * (sizeof(`
 
@@ -7506,7 +7563,7 @@ typedef unsigned long arkrtos_svc_arg_t;
 #define ARKRTOS_SVC_ARG_BYTES(n)        ((unsigned long)(n) * (sizeof(arkrtos_svc_arg_t) / 4u)) #else typedef unsigned int arkrtos_svc_arg_t;
 ```
 
-**参数块里 n 个 32 位字对应的字节数：窄档 n，宽档 2n。 */**
+**参数块里 n 个 32 位字对应的字节数：窄档 n，宽档 2n。**
 
 ## kernelsrc/include/arkrtos_svc_call.h
 
@@ -7521,7 +7578,7 @@ service number as its 8-bit immediate. How that instruction is
 #define ARKRTOS_SVC_DECL_1(ret, num, name, t0)          ret __svc(num) name(t0);
 ```
 
-Declare an SVC service that takes one argument and returns a value. */
+Declare an SVC service that takes one argument and returns a value.
 
 ### `#define ARKRTOS_SVC_DECL_2(ret, num, name, t0, t1)      ret __svc(num)`
 
@@ -7529,7 +7586,7 @@ Declare an SVC service that takes one argument and returns a value. */
 #define ARKRTOS_SVC_DECL_2(ret, num, name, t0, t1)      ret __svc(num) name(t0, t1);
 ```
 
-Declare an SVC service that takes two arguments and returns a value. */
+Declare an SVC service that takes two arguments and returns a value.
 
 ### `#define ARKRTOS_SVC_DECL_3(ret, num, name, t0, t1, t2)  ret __svc(num)`
 
@@ -7537,7 +7594,7 @@ Declare an SVC service that takes two arguments and returns a value. */
 #define ARKRTOS_SVC_DECL_3(ret, num, name, t0, t1, t2)  ret __svc(num) name(t0, t1, t2);
 ```
 
-Declare an SVC service that takes three arguments and returns a value. */
+Declare an SVC service that takes three arguments and returns a value.
 
 ### `#define ARKRTOS_SVC_DECL_V1(num, name, t0)              void __svc(num`
 
@@ -7545,7 +7602,7 @@ Declare an SVC service that takes three arguments and returns a value. */
 #define ARKRTOS_SVC_DECL_V1(num, name, t0)              void __svc(num) name(t0);
 ```
 
-Declare an SVC service that takes one argument and returns nothing. */
+Declare an SVC service that takes one argument and returns nothing.
 
 ### `#define ARKRTOS_SVC_DECL_V2(num, name, t0, t1)          void __svc(num`
 
@@ -7553,7 +7610,7 @@ Declare an SVC service that takes one argument and returns nothing. */
 #define ARKRTOS_SVC_DECL_V2(num, name, t0, t1)          void __svc(num) name(t0, t1);
 ```
 
-Declare an SVC service that takes two arguments and returns nothing. */
+Declare an SVC service that takes two arguments and returns nothing.
 
 ### `#define ARKRTOS_SVC_DECL_1(ret, num, name, t0)                        `
 
@@ -7561,7 +7618,7 @@ Declare an SVC service that takes two arguments and returns nothing. */
 #define ARKRTOS_SVC_DECL_1(ret, num, name, t0)                            \ ARKRTOS_INLINE ret name(t0 a0)                                        \ {                                                                     \ register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \ register unsigned long r_a7 __asm("a7") = (unsigned long)(num);    \ __asm volatile ("ecall" : "+r"(r_a0) : "r"(r_a7) : "memory");      \
 ```
 
-Declare an SVC service that takes one argument and returns a value. */
+Declare an SVC service that takes one argument and returns a value.
 
 ### `#define ARKRTOS_SVC_DECL_2(ret, num, name, t0, t1)                    `
 
@@ -7569,7 +7626,7 @@ Declare an SVC service that takes one argument and returns a value. */
 #define ARKRTOS_SVC_DECL_2(ret, num, name, t0, t1)                        \ ARKRTOS_INLINE ret name(t0 a0, t1 a1)                                 \ {                                                                     \ register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \ register unsigned long r_a1 __asm("a1") = (unsigned long)(a1);     \ register unsigned long r_a7 __asm("a7") = (unsigned long)(num);    \
 ```
 
-Declare an SVC service that takes two arguments and returns a value. */
+Declare an SVC service that takes two arguments and returns a value.
 
 ### `#define ARKRTOS_SVC_DECL_3(ret, num, name, t0, t1, t2)                `
 
@@ -7577,7 +7634,7 @@ Declare an SVC service that takes two arguments and returns a value. */
 #define ARKRTOS_SVC_DECL_3(ret, num, name, t0, t1, t2)                    \ ARKRTOS_INLINE ret name(t0 a0, t1 a1, t2 a2)                          \ {                                                                     \ register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \ register unsigned long r_a1 __asm("a1") = (unsigned long)(a1);     \ register unsigned long r_a2 __asm("a2") = (unsigned long)(a2);     \
 ```
 
-Declare an SVC service that takes three arguments and returns a value. */
+Declare an SVC service that takes three arguments and returns a value.
 
 ### `#define ARKRTOS_SVC_DECL_V1(num, name, t0)                            `
 
@@ -7585,7 +7642,7 @@ Declare an SVC service that takes three arguments and returns a value. */
 #define ARKRTOS_SVC_DECL_V1(num, name, t0)                                \ ARKRTOS_INLINE void name(t0 a0)                                       \ {                                                                     \ register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \ register unsigned long r_a7 __asm("a7") = (unsigned long)(num);    \ __asm volatile ("ecall" : "+r"(r_a0) : "r"(r_a7) : "memory");      \
 ```
 
-Declare an SVC service that takes one argument and returns nothing. */
+Declare an SVC service that takes one argument and returns nothing.
 
 ### `#define ARKRTOS_SVC_DECL_V2(num, name, t0, t1)                        `
 
@@ -7593,7 +7650,7 @@ Declare an SVC service that takes one argument and returns nothing. */
 #define ARKRTOS_SVC_DECL_V2(num, name, t0, t1)                            \ ARKRTOS_INLINE void name(t0 a0, t1 a1)                                \ {                                                                     \ register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \ register unsigned long r_a1 __asm("a1") = (unsigned long)(a1);     \ register unsigned long r_a7 __asm("a7") = (unsigned long)(num);    \
 ```
 
-Declare an SVC service that takes two arguments and returns nothing. */
+Declare an SVC service that takes two arguments and returns nothing.
 
 ### `#define ARKRTOS_SVC_DECL_1(ret, num, name, t0)                        `
 
@@ -7601,7 +7658,7 @@ Declare an SVC service that takes two arguments and returns nothing. */
 #define ARKRTOS_SVC_DECL_1(ret, num, name, t0)                            \ ARKRTOS_INLINE ret name(t0 a0)                                        \ {                                                                     \ register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \ __asm volatile ("syscall " ARKRTOS_STR(num) : "+r"(r_a0) : : "memory"); \ return (ret)r_a0;                                                 \
 ```
 
-Declare an SVC service that takes one argument and returns a value. */
+Declare an SVC service that takes one argument and returns a value.
 
 ### `#define ARKRTOS_SVC_DECL_2(ret, num, name, t0, t1)                    `
 
@@ -7609,7 +7666,7 @@ Declare an SVC service that takes one argument and returns a value. */
 #define ARKRTOS_SVC_DECL_2(ret, num, name, t0, t1)                        \ ARKRTOS_INLINE ret name(t0 a0, t1 a1)                                 \ {                                                                     \ register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \ register unsigned long r_a1 __asm("a1") = (unsigned long)(a1);     \ __asm volatile ("syscall " ARKRTOS_STR(num)                        \
 ```
 
-Declare an SVC service that takes two arguments and returns a value. */
+Declare an SVC service that takes two arguments and returns a value.
 
 ### `#define ARKRTOS_SVC_DECL_3(ret, num, name, t0, t1, t2)                `
 
@@ -7617,7 +7674,7 @@ Declare an SVC service that takes two arguments and returns a value. */
 #define ARKRTOS_SVC_DECL_3(ret, num, name, t0, t1, t2)                    \ ARKRTOS_INLINE ret name(t0 a0, t1 a1, t2 a2)                          \ {                                                                     \ register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \ register unsigned long r_a1 __asm("a1") = (unsigned long)(a1);     \ register unsigned long r_a2 __asm("a2") = (unsigned long)(a2);     \
 ```
 
-Declare an SVC service that takes three arguments and returns a value. */
+Declare an SVC service that takes three arguments and returns a value.
 
 ### `#define ARKRTOS_SVC_DECL_V1(num, name, t0)                            `
 
@@ -7625,7 +7682,7 @@ Declare an SVC service that takes three arguments and returns a value. */
 #define ARKRTOS_SVC_DECL_V1(num, name, t0)                                \ ARKRTOS_INLINE void name(t0 a0)                                       \ {                                                                     \ register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \ __asm volatile ("syscall " ARKRTOS_STR(num) : "+r"(r_a0) : : "memory"); \ }
 ```
 
-Declare an SVC service that takes one argument and returns nothing. */
+Declare an SVC service that takes one argument and returns nothing.
 
 ### `#define ARKRTOS_SVC_DECL_V2(num, name, t0, t1)                        `
 
@@ -7633,7 +7690,7 @@ Declare an SVC service that takes one argument and returns nothing. */
 #define ARKRTOS_SVC_DECL_V2(num, name, t0, t1)                            \ ARKRTOS_INLINE void name(t0 a0, t1 a1)                                \ {                                                                     \ register unsigned long r_a0 __asm("a0") = (unsigned long)(a0);     \ register unsigned long r_a1 __asm("a1") = (unsigned long)(a1);     \ __asm volatile ("syscall " ARKRTOS_STR(num)                        \
 ```
 
-Declare an SVC service that takes two arguments and returns nothing. */
+Declare an SVC service that takes two arguments and returns nothing.
 
 ### `#define ARKRTOS_SVC_DECL_1(ret, num, name, t0)                        `
 
@@ -7641,7 +7698,7 @@ Declare an SVC service that takes two arguments and returns nothing. */
 #define ARKRTOS_SVC_DECL_1(ret, num, name, t0)                          \ ARKRTOS_INLINE ret name(t0 a0)                                     \ {                                                                 \ register unsigned int r0 __asm("r0") = (unsigned int)a0;      \ __asm volatile ("svc #" ARKRTOS_STR(num) : "+r"(r0) : : "memory"); \ return (ret)r0;                                               \
 ```
 
-Declare an SVC service that takes one argument and returns a value. */
+Declare an SVC service that takes one argument and returns a value.
 
 ### `#define ARKRTOS_SVC_DECL_2(ret, num, name, t0, t1)                    `
 
@@ -7649,7 +7706,7 @@ Declare an SVC service that takes one argument and returns a value. */
 #define ARKRTOS_SVC_DECL_2(ret, num, name, t0, t1)                      \ ARKRTOS_INLINE ret name(t0 a0, t1 a1)                              \ {                                                                 \ register unsigned int r0 __asm("r0") = (unsigned int)a0;      \ register unsigned int r1 __asm("r1") = (unsigned int)a1;      \ __asm volatile ("svc #" ARKRTOS_STR(num)                        \
 ```
 
-Declare an SVC service that takes two arguments and returns a value. */
+Declare an SVC service that takes two arguments and returns a value.
 
 ### `#define ARKRTOS_SVC_DECL_3(ret, num, name, t0, t1, t2)                `
 
@@ -7657,7 +7714,7 @@ Declare an SVC service that takes two arguments and returns a value. */
 #define ARKRTOS_SVC_DECL_3(ret, num, name, t0, t1, t2)                  \ ARKRTOS_INLINE ret name(t0 a0, t1 a1, t2 a2)                       \ {                                                                 \ register unsigned int r0 __asm("r0") = (unsigned int)a0;      \ register unsigned int r1 __asm("r1") = (unsigned int)a1;      \ register unsigned int r2 __asm("r2") = (unsigned int)a2;      \
 ```
 
-Declare an SVC service that takes three arguments and returns a value. */
+Declare an SVC service that takes three arguments and returns a value.
 
 ### `#define ARKRTOS_SVC_DECL_V1(num, name, t0)                            `
 
@@ -7665,7 +7722,7 @@ Declare an SVC service that takes three arguments and returns a value. */
 #define ARKRTOS_SVC_DECL_V1(num, name, t0)                              \ ARKRTOS_INLINE void name(t0 a0)                                    \ {                                                                 \ register unsigned int r0 __asm("r0") = (unsigned int)a0;      \ __asm volatile ("svc #" ARKRTOS_STR(num) : "+r"(r0) : : "memory"); \ }
 ```
 
-Declare an SVC service that takes one argument and returns nothing. */
+Declare an SVC service that takes one argument and returns nothing.
 
 ### `#define ARKRTOS_SVC_DECL_V2(num, name, t0, t1)                        `
 
@@ -7673,7 +7730,7 @@ Declare an SVC service that takes one argument and returns nothing. */
 #define ARKRTOS_SVC_DECL_V2(num, name, t0, t1)                          \ ARKRTOS_INLINE void name(t0 a0, t1 a1)                             \ {                                                                 \ register unsigned int r0 __asm("r0") = (unsigned int)a0;      \ register unsigned int r1 __asm("r1") = (unsigned int)a1;      \ __asm volatile ("svc #" ARKRTOS_STR(num)                        \
 ```
 
-Declare an SVC service that takes two arguments and returns nothing. */
+Declare an SVC service that takes two arguments and returns nothing.
 
 ## kernelsrc/include/arkrtos_task.h
 
@@ -7758,7 +7815,7 @@ int32  arkrtos_task_exit_code(int32 task_id, int32 *p_code);
 #define ARKRTOS_TICKLESS_NO_EVENT   0xFFFFFFFFu
 ```
 
-无事件（延时链空 / 没有活动定时器）的哨兵值，给 plan 用 */
+无事件（延时链空 / 没有活动定时器）的哨兵值，给 plan 用
 
 ### `uint32 arkrtos_tickless_plan(uint32 delay_ticks, uint32 timer_ticks, u`
 
@@ -7951,7 +8008,7 @@ int32 arkrtos_shell_print(const char *msg);
 typedef void (*ark_utest_fn_t)(void);
 ```
 
-用例函数：无参无返回，失败通过断言宏记账 */
+用例函数：无参无返回，失败通过断言宏记账
 
 ### `typedef struct {`
 
@@ -7959,7 +8016,7 @@ typedef void (*ark_utest_fn_t)(void);
 typedef struct {
 ```
 
-一条用例：展示名（建议 "模块.场景"）+ 函数 */
+一条用例：展示名（建议 "模块.场景"）+ 函数
 
 ### `typedef struct {`
 
@@ -7967,7 +8024,7 @@ typedef struct {
 typedef struct {
 ```
 
-一次运行的汇总账 */
+一次运行的汇总账
 
 ### `typedef void (*ark_utest_out_t)(const char *s);`
 
@@ -7975,7 +8032,7 @@ typedef struct {
 typedef void (*ark_utest_out_t)(const char *s);
 ```
 
-输出汇：框架把每一行交给它；默认 NULL 表示丢弃输出 */
+输出汇：框架把每一行交给它；默认 NULL 表示丢弃输出
 
 ### `void ark_utest_register(const ark_utest_case_t *c);`
 
@@ -7983,7 +8040,7 @@ typedef void (*ark_utest_out_t)(const char *s);
 void ark_utest_register(const ark_utest_case_t *c);
 ```
 
-用例自注册。通常由 UTEST_CASE 宏自动调用；重复注册同一指针会被忽略 */
+用例自注册。通常由 UTEST_CASE 宏自动调用；重复注册同一指针会被忽略
 
 ### `uint32_t ark_utest_list(void);`
 
@@ -7991,7 +8048,7 @@ void ark_utest_register(const ark_utest_case_t *c);
 uint32_t ark_utest_list(void);
 ```
 
-列出全部已注册用例（名字 + 序号）；返回用例数 */
+列出全部已注册用例（名字 + 序号）；返回用例数
 
 ### `uint32_t ark_utest_run(const char *pattern, ark_utest_summary_t *out);`
 
@@ -8010,7 +8067,7 @@ uint32_t ark_utest_run(const char *pattern, ark_utest_summary_t *out);
 void ark_utest_bump(void);
 ```
 
-记一条断言（无论成败都计数）；仅可在用例函数内调用 */
+记一条断言（无论成败都计数）；仅可在用例函数内调用
 
 ### `void ark_utest_fail(const char *file, int line, const char *expr, cons`
 
@@ -8018,7 +8075,7 @@ void ark_utest_bump(void);
 void ark_utest_fail(const char *file, int line, const char *expr, const char *detail);
 ```
 
-记一条失败；detail 可为 NULL */
+记一条失败；detail 可为 NULL
 
 ### `void ark_utest_fail_num(const char *file, int line, const char *expr, `
 
@@ -8026,7 +8083,7 @@ void ark_utest_fail(const char *file, int line, const char *expr, const char *de
 void ark_utest_fail_num(const char *file, int line, const char *expr, long a, long b);
 ```
 
-记一条数值不等；以有符号十进制与十六进制两种口径打印 */
+记一条数值不等；以有符号十进制与十六进制两种口径打印
 
 ### `int  ark_utest_ctx_failed(void);`
 
@@ -8034,7 +8091,7 @@ void ark_utest_fail_num(const char *file, int line, const char *expr, long a, lo
 int  ark_utest_ctx_failed(void);
 ```
 
-当前用例是否已出现失败（供 UTEST_REQUIRE 提前收手） */
+当前用例是否已出现失败（供 UTEST_REQUIRE 提前收手）
 
 ### `void ark_utest_skip(const char *reason);`
 
@@ -8042,7 +8099,7 @@ int  ark_utest_ctx_failed(void);
 void ark_utest_skip(const char *reason);
 ```
 
-记一条跳过并置位；调用方随后 return */
+记一条跳过并置位；调用方随后 return
 
 ### `int  ark_utest_ctx_skipped(void);`
 
@@ -8050,7 +8107,7 @@ void ark_utest_skip(const char *reason);
 int  ark_utest_ctx_skipped(void);
 ```
 
-当前用例是否已被跳过 */
+当前用例是否已被跳过
 
 ### `#define ARK_UTEST_CASE_DEF(_ident)                                    `
 
@@ -8058,7 +8115,7 @@ int  ark_utest_ctx_skipped(void);
 #define ARK_UTEST_CASE_DEF(_ident)                                        \ static void utest_body_##_ident(void);                                \ static const ark_utest_case_t utest_case_##_ident = {                 \ #_ident, utest_body_##_ident };                                   \ static void __attribute__((constructor)) utest_autoreg_##_ident(void) \ {                                                                     \
 ```
 
-注册一条用例（文件作用域辅助）：供 UTEST_CASE 宏展开使用 */
+注册一条用例（文件作用域辅助）：供 UTEST_CASE 宏展开使用
 
 ### `#define UTEST_CASE(_ident) ARK_UTEST_CASE_DEF(_ident)`
 
@@ -8081,7 +8138,7 @@ UTEST_CHECK_EQ(a, b);
 #define UTEST_CHECK(_expr)                                        \ do {                                                          \ ark_utest_bump();                                         \ if(!(_expr))                                              \ {                                                         \ ark_utest_fail(__FILE__, __LINE__, #_expr, (const char *)0); \
 ```
 
-真值断言：失败只记账，继续跑后面的断言 */
+真值断言：失败只记账，继续跑后面的断言
 
 ### `#define UTEST_REQUIRE(_expr)                                      \ do`
 
@@ -8098,7 +8155,7 @@ UTEST_CHECK_EQ(a, b);
 #define UTEST_CHECK_EQ(_a, _b)                                    \ do {                                                          \ long utest_a_ = (long)(_a);                               \ long utest_b_ = (long)(_b);                               \ ark_utest_bump();                                         \ if(utest_a_ != utest_b_)                                  \
 ```
 
-数值相等（long 口径）*/
+数值相等（long 口径）
 
 ### `#define UTEST_CHECK_NE(_a, _b)                                    \ do`
 
@@ -8106,7 +8163,7 @@ UTEST_CHECK_EQ(a, b);
 #define UTEST_CHECK_NE(_a, _b)                                    \ do {                                                          \ long utest_a_ = (long)(_a);                               \ long utest_b_ = (long)(_b);                               \ ark_utest_bump();                                         \ if(utest_a_ == utest_b_)                                  \
 ```
 
-数值不等（long 口径）*/
+数值不等（long 口径）
 
 ### `#define UTEST_CHECK_RANGE(_lo, _x, _hi)                           \ do`
 
@@ -8114,7 +8171,7 @@ UTEST_CHECK_EQ(a, b);
 #define UTEST_CHECK_RANGE(_lo, _x, _hi)                           \ do {                                                          \ long utest_lo_ = (long)(_lo);                             \ long utest_x_  = (long)(_x);                              \ long utest_hi_ = (long)(_hi);                             \ ark_utest_bump();                                         \
 ```
 
-区间断言：lo <= x && x <= hi */
+区间断言：lo <= x && x <= hi
 
 ### `#define UTEST_FAIL(_msg)                                          \ do`
 
@@ -8122,7 +8179,7 @@ UTEST_CHECK_EQ(a, b);
 #define UTEST_FAIL(_msg)                                          \ do {                                                          \ ark_utest_bump();                                         \ ark_utest_fail(__FILE__, __LINE__, "FAIL", (_msg));       \ } while(0)
 ```
 
-无条件失败（用于"走到这里本不该发生"的分支）*/
+无条件失败（用于"走到这里本不该发生"的分支）
 
 ### `#define UTEST_SKIP(_reason)                                       \ do`
 
@@ -8130,7 +8187,7 @@ UTEST_CHECK_EQ(a, b);
 #define UTEST_SKIP(_reason)                                       \ do {                                                          \ ark_utest_skip(_reason);                                  \ return;                                                   \ } while(0)
 ```
 
-主动跳过当前用例（其后内容不再执行）*/
+主动跳过当前用例（其后内容不再执行）
 
 ## kernelsrc/include/arkrtos_version.h
 
@@ -8151,7 +8208,7 @@ The git tag and the README badge carry the same three numbers and
 #define ARKRTOS_VERSION_NUM       (((unsigned)ARKRTOS_VERSION_MAJOR << 24) | \ ((unsigned)ARKRTOS_VERSION_MINOR << 16) | \ ((unsigned)ARKRTOS_VERSION_PATCH << 8))
 ```
 
-The three numbers packed into one word: major << 24 | minor << 16 | patch << 8. */
+The three numbers packed into one word: major << 24 | minor << 16 | patch << 8.
 
 ## kernelsrc/include/arkrtos_vfs.h
 
@@ -8166,7 +8223,7 @@ ark_vfs 挂到内核上，让所有资源都落在同一棵目录树里：
 #define ARKRTOS_VFS_PATH_MAX   (64u)
 ```
 
-路径缓冲长度，含结尾 0。与 ark_vfs 的 ARK_VFS_PATH_MAX 必须一致 */
+路径缓冲长度，含结尾 0。与 ark_vfs 的 ARK_VFS_PATH_MAX 必须一致
 
 ### `#define ARKRTOS_VFS_ENOSYS     (-12)`
 
@@ -8218,7 +8275,7 @@ typedef struct {
 typedef int (*arkrtos_vfs_list_cb_t)(const char *name, const arkrtos_vfs_stat_t *st, void *arg);
 ```
 
-**目录列举回调，返回 0 继续、-1 停止 */**
+**目录列举回调，返回 0 继续、-1 停止**
 
 ### `int32 arkrtos_vfs_init(void);`
 
@@ -8237,7 +8294,7 @@ int32 arkrtos_vfs_init(void);
 uint8 arkrtos_vfs_ready(void);
 ```
 
-**1=arkrtos_vfs_init() 已经成功过 */**
+**1=arkrtos_vfs_init() 已经成功过**
 
 ### `int32 arkrtos_vfs_mount_volume(const char *dev, uint32 offset, uint32 `
 
@@ -8262,7 +8319,7 @@ ARK_E_NOSYS 本构建未启用文件系统或 littlefs 桥（见 arkrtos_feature
 int32 arkrtos_vfs_umount(const char *target);
 ```
 
-**卸载 target 处的挂载点，并在它是持久卷时同步卸载 littlefs */**
+**卸载 target 处的挂载点，并在它是持久卷时同步卸载 littlefs**
 
 ### `int32 arkrtos_vfs_mount_info(uint32 idx, arkrtos_vfs_mount_info_t *out`
 
@@ -8279,7 +8336,7 @@ int32 arkrtos_vfs_mount_info(uint32 idx, arkrtos_vfs_mount_info_t *out);
 int32 arkrtos_vfs_mount_count(void);
 ```
 
-**挂载点数量 */**
+**挂载点数量**
 
 ### `int32 arkrtos_vfs_read_file(const char *path, uint8 *buf, uint32 max, `
 
@@ -8289,7 +8346,7 @@ int32 arkrtos_vfs_read_file(const char *path, uint8 *buf, uint32 max, uint32 *ou
 
 **读整个文件；*out_len 收实际长度（可为 NULL）**
 > 说明：缓冲区必须装得下整个文件，否则报错而不是给你一半——
-要看大小不确定的文件（如 shell 的 cat）用下面三个流式入口。 */
+要看大小不确定的文件（如 shell 的 cat）用下面三个流式入口。
 
 ### `int32 arkrtos_vfs_read_at(const char *path, uint8 *buf, uint32 len, ui`
 
@@ -8349,7 +8406,7 @@ int32 arkrtos_vfs_read(int32 fd, uint8 *buf, uint32 len);
 int32 arkrtos_vfs_close(int32 fd);
 ```
 
-**归还句柄；负值为 ark_vfs 错误码 */**
+**归还句柄；负值为 ark_vfs 错误码**
 
 ### `int32 arkrtos_vfs_write_file(const char *path, const uint8 *buf, uint3`
 
@@ -8361,7 +8418,7 @@ int32 arkrtos_vfs_write_file(const char *path, const uint8 *buf, uint32 len);
 **返回**：0=成功；负值为 ark_vfs 错误码。**成功时不返回字节数**：
 实现走 ark_vfs_write_all()，它的返回值是 ARK_VFS_OK(0)，
 不是长度；拿 rc 跟 len 比会把写成功的文件判成失败。
-容量不够这类短写由底层返回负码，不会给你“写了一半=成功”。 */
+容量不够这类短写由底层返回负码，不会给你“写了一半=成功”。
 
 ### `int32 arkrtos_vfs_remove(const char *path);`
 
@@ -8369,7 +8426,7 @@ int32 arkrtos_vfs_write_file(const char *path, const uint8 *buf, uint32 len);
 int32 arkrtos_vfs_remove(const char *path);
 ```
 
-**删除一个文件 */**
+**删除一个文件**
 
 ### `int32 arkrtos_vfs_chmod(const char *path, uint32 mode);`
 
@@ -8397,7 +8454,7 @@ ARK_E_NOSYS（-12）。
 int32 arkrtos_vfs_list(const char *dir, arkrtos_vfs_list_cb_t cb, void *arg);
 ```
 
-**列一层目录 */**
+**列一层目录**
 
 ### `const char *arkrtos_vfs_error_name(int32 rc);`
 
@@ -8417,7 +8474,7 @@ const char *arkrtos_vfs_error_name(int32 rc);
 
 **open 标志。数值是 Ark RTOS 自己的，arkrtos_vfs.c 里逐位映射到**
 ark_vfs 的 ARK_O_*——App 不 include ark_vfs 的头，所以上游的值
-不能当 ABI 用。 */
+不能当 ABI 用。
 
 ### `#define ARKRTOS_VFS_S_IFCHR      (0x2000u) #define ARKRTOS_VFS_S_IFDIR`
 
@@ -8425,7 +8482,7 @@ ark_vfs 的 ARK_O_*——App 不 include ark_vfs 的头，所以上游的值
 #define ARKRTOS_VFS_S_IFCHR      (0x2000u) #define ARKRTOS_VFS_S_IFDIR      (0x4000u) #define ARKRTOS_VFS_S_IFREG      (0x8000u) #define ARKRTOS_VFS_S_IFMT       (0xF000u)
 ```
 
-**stat 的文件类型位，与 POSIX 的 S_IFMT 同形，映射到 ARK_S_IF*。 */**
+**stat 的文件类型位，与 POSIX 的 S_IFMT 同形，映射到 ARK_S_IF*。**
 
 ### `#define ARKRTOS_VFS_S_IRUSR      (0x0100u) #define ARKRTOS_VFS_S_IWUSR`
 
@@ -8436,7 +8493,7 @@ ark_vfs 的 ARK_O_*——App 不 include ark_vfs 的头，所以上游的值
 **权限位，布局与 POSIX 的 rwx 三元组一致，数值与 ark_vfs 的**
 ARK_S_I* 相同（arkrtos_vfs.c 里有静态断言盯着这个等式）。
 类型位在 ARKRTOS_VFS_S_PERM 之上，两者可分别用 S_IFMT / S_PERM
-取出。设备节点（/dev 下）按惯例是 0666，普通文件 0644、目录 0755。 */
+取出。设备节点（/dev 下）按惯例是 0666，普通文件 0644、目录 0755。
 
 ### `#define ARKRTOS_VFS_SEEK_SET     (0u) #define ARKRTOS_VFS_SEEK_CUR    `
 
@@ -8444,7 +8501,7 @@ ARK_S_I* 相同（arkrtos_vfs.c 里有静态断言盯着这个等式）。
 #define ARKRTOS_VFS_SEEK_SET     (0u) #define ARKRTOS_VFS_SEEK_CUR     (1u) #define ARKRTOS_VFS_SEEK_END     (2u)
 ```
 
-**seek 起点，与 POSIX 的 SEEK_* 同值 */**
+**seek 起点，与 POSIX 的 SEEK_* 同值**
 
 ### `#define ARKRTOS_VFS_HANDLE_FLAG  (0x01300000)`
 
@@ -8455,7 +8512,7 @@ ARK_S_I* 相同（arkrtos_vfs.c 里有静态断言盯着这个等式）。
 **句柄号的高位标志：句柄 = 标志 | (序号 << 8) | 槽号。**
 序号 1..255（0 留给「从没用过」），槽号 < 256；槽被回收后重新
 发出去时序号加一，所以旧号码在新持有者那里一律 BADF。
-与设备句柄的 ARKRTOS_DEV_HANDLE_FLAG 不同值，两者不会互相误认。 */
+与设备句柄的 ARKRTOS_DEV_HANDLE_FLAG 不同值，两者不会互相误认。
 
 ### `#define ARKRTOS_VFS_HANDLE_MAX   (8u)`
 
@@ -8465,7 +8522,7 @@ ARK_S_I* 相同（arkrtos_vfs.c 里有静态断言盯着这个等式）。
 
 **同时打开的 VFS 句柄数。注意底层 ark_vfs 的 fd 表全机器只有**
 ARK_VFS_MAX_FDS 张，与内核自身（shell 的 cat/ls 等）共用，
-所以打满时 open 回 ARK_E_FULL(-3) 而不是静默成功。 */
+所以打满时 open 回 ARK_E_FULL(-3) 而不是静默成功。
 
 ### `int32 arkrtos_vfs_app_open(const char *path, uint32 flags);`
 
@@ -8486,7 +8543,7 @@ int32 arkrtos_vfs_app_open(const char *path, uint32 flags);
 int32 arkrtos_vfs_app_read(int32 handle, uint8 *buf, uint32 len);
 ```
 
-**从当前偏移读。返回值 = 读到的字节数，0 = 文件尾，负值 = 错误 */**
+**从当前偏移读。返回值 = 读到的字节数，0 = 文件尾，负值 = 错误**
 
 ### `int32 arkrtos_vfs_app_write(int32 handle, const uint8 *buf, uint32 len`
 
@@ -8494,7 +8551,7 @@ int32 arkrtos_vfs_app_read(int32 handle, uint8 *buf, uint32 len);
 int32 arkrtos_vfs_app_write(int32 handle, const uint8 *buf, uint32 len);
 ```
 
-**从当前偏移写。返回值 = 写入的字节数，负值 = 错误 */**
+**从当前偏移写。返回值 = 写入的字节数，负值 = 错误**
 
 ### `int32 arkrtos_vfs_app_seek(int32 handle, int32 off, uint32 whence);`
 
@@ -8529,7 +8586,7 @@ int32 arkrtos_vfs_app_readdir(int32 handle, char *name, uint32 cap, uint32 *mode
 int32 arkrtos_vfs_app_close(int32 handle);
 ```
 
-**归还句柄。目录句柄与文件句柄走同一个入口 */**
+**归还句柄。目录句柄与文件句柄走同一个入口**
 
 ### `int32 arkrtos_vfs_app_stat(const char *path, uint32 *size, uint32 *mod`
 
@@ -8537,7 +8594,7 @@ int32 arkrtos_vfs_app_close(int32 handle);
 int32 arkrtos_vfs_app_stat(const char *path, uint32 *size, uint32 *mode);
 ```
 
-**按路径取类型与大小（不打开）。mode 收 ARKRTOS_VFS_S_IF* */**
+**按路径取类型与大小（不打开）。mode 收 ARKRTOS_VFS_S_IF***
 
 ### `int32 arkrtos_vfs_app_unlink(const char *path);`
 
@@ -8545,7 +8602,7 @@ int32 arkrtos_vfs_app_stat(const char *path, uint32 *size, uint32 *mode);
 int32 arkrtos_vfs_app_unlink(const char *path);
 ```
 
-**删除一个文件（目录不可用这个入口删） */**
+**删除一个文件（目录不可用这个入口删）**
 
 ### `int32 arkrtos_vfs_app_mkdir(const char *path);`
 
@@ -9192,7 +9249,7 @@ PLV3 且开中断」= PPLV=3 + PIE=1 = 0x7。
 static uint32 la_pg_app_frame(uint32 space) {
 ```
 
-空间号 -> 物理帧基址（2 MB 对齐，满足 PS=20 条目要求） */
+空间号 -> 物理帧基址（2 MB 对齐，满足 PS=20 条目要求）
 
 ### `static void la_tlb_inval_page(unsigned long va) {`
 
@@ -9220,7 +9277,7 @@ op 3              ：按 VA 失效，只清这个 VA，内核不受影响 ——
 这条是本 port 唯一敢用的失效手段。
 于是「只清某个 ASID 的条目」在本载体上**做不到**：想只撤一个空间的
 窗口，只能先切到它的 ASID 再按 VA 撤（撤完把当前空间补铺回来），
-这就是 activate / space_release 现在走的那条路。 */
+这就是 activate / space_release 现在走的那条路。
 
 ### `static int32 la_pg_space_ensure(uint32 space) {`
 
@@ -9228,7 +9285,7 @@ op 3              ：按 VA 失效，只清这个 VA，内核不受影响 ——
 static int32 la_pg_space_ensure(uint32 space) {
 ```
 
-给空间从帧池里拿一整块 2 MB；已经拿过就什么都不做 */
+给空间从帧池里拿一整块 2 MB；已经拿过就什么都不做
 
 ### `static void la_pg_install_space(uint32 space) {`
 
@@ -9236,7 +9293,7 @@ static int32 la_pg_space_ensure(uint32 space) {
 static void la_pg_install_space(uint32 space) {
 ```
 
-把该空间的 512 页铺进窗口（256 条 PS=12 条目，占该空间自己那一路） */
+把该空间的 512 页铺进窗口（256 条 PS=12 条目，占该空间自己那一路）
 
 ### `static void la_pg_drop_window(void) {`
 
@@ -9244,7 +9301,7 @@ static void la_pg_install_space(uint32 space) {
 static void la_pg_drop_window(void) {
 ```
 
-把整段窗口 VA 的旧翻译清掉（逐 4 KB：QEMU 按 (ASID, VA) 匹配条目） */
+把整段窗口 VA 的旧翻译清掉（逐 4 KB：QEMU 按 (ASID, VA) 匹配条目）
 
 ### `static void la_pg_copy_pair(uint32 *dst, const uint32 *src) {`
 
@@ -9252,7 +9309,7 @@ static void la_pg_drop_window(void) {
 static void la_pg_copy_pair(uint32 *dst, const uint32 *src) {
 ```
 
-8 KB 拷贝：重填上下文里没有 libc，也不能取锁/阻塞，只能是裸循环 */
+8 KB 拷贝：重填上下文里没有 libc，也不能取锁/阻塞，只能是裸循环
 
 ### `static int32 la_pg_swap_slot_alloc(uint32 *p_slot) {`
 
@@ -9260,7 +9317,7 @@ static void la_pg_copy_pair(uint32 *dst, const uint32 *src) {
 static int32 la_pg_swap_slot_alloc(uint32 *p_slot) {
 ```
 
-找一个空交换槽并占住；没有返回 -1 */
+找一个空交换槽并占住；没有返回 -1
 
 ### `static void la_pg_swap_slot_free(uint32 slot) {`
 
@@ -9268,7 +9325,7 @@ static int32 la_pg_swap_slot_alloc(uint32 *p_slot) {
 static void la_pg_swap_slot_free(uint32 slot) {
 ```
 
-放掉一个交换槽 */
+放掉一个交换槽
 
 ### `static uint32 la_pg_swap_slots_used(void) {`
 
@@ -9276,7 +9333,7 @@ static void la_pg_swap_slot_free(uint32 slot) {
 static uint32 la_pg_swap_slots_used(void) {
 ```
 
-占用的槽数（读数用） */
+占用的槽数（读数用）
 
 ### `static uint32 la_pg_pair_resident_count(void) {`
 
@@ -9284,7 +9341,7 @@ static uint32 la_pg_swap_slots_used(void) {
 static uint32 la_pg_pair_resident_count(void) {
 ```
 
-驻留（有帧）的对数（读数用） */
+驻留（有帧）的对数（读数用）
 
 ### `static int32 la_pg_swap_out_one(uint32 skip_space, uint32 skip_idx) {`
 
@@ -9367,7 +9424,7 @@ static void la_fork_copy_pair(uint32 *dst, const uint32 *src) {
 ```
 
 8 KB 对拷贝：fork 档不开 swap 也要能搬，因此单独一份，不借用
-la_pg_copy_pair()（那个只在 swap 档定义）。 */
+la_pg_copy_pair()（那个只在 swap 档定义）。
 
 ### `int32 arkrtos_port_paging_space_clone(uint32 src, uint32 dst) {`
 
@@ -9438,7 +9495,7 @@ static int32 la_pg_demand_fault(unsigned long badv) {
 static void la_pg_boot_map(void) {
 ```
 
-开分页之前的首次铺窗口：只铺 space 0（其它空间等 activate 时再要帧） */
+开分页之前的首次铺窗口：只铺 space 0（其它空间等 activate 时再要帧）
 
 ### `static void la_pg_assert_window(void) {`
 
@@ -9460,7 +9517,7 @@ tlbwr，代价可忽略，换来的是「invtlb 之后窗口一定还在」。
 static uint32 la_pg_pair_expect(uint32 space, uint32 idx) {
 ```
 
-这一对 8 KB 在这个空间里「应该」翻译到哪；0 = 这一档说不出该是什么 */
+这一对 8 KB 在这个空间里「应该」翻译到哪；0 = 这一档说不出该是什么
 
 ### `static int32 la_pg_pair_check(uint32 space, uint32 idx) {`
 
@@ -9468,7 +9525,7 @@ static uint32 la_pg_pair_expect(uint32 space, uint32 idx) {
 static int32 la_pg_pair_check(uint32 space, uint32 idx) {
 ```
 
-读回校验一对 8 KB：期望值为 0（这一档还没付费）时视为通过 */
+读回校验一对 8 KB：期望值为 0（这一档还没付费）时视为通过
 
 ### `static uint32 la_sp_in_app_window(void) {`
 
@@ -9476,7 +9533,7 @@ static int32 la_pg_pair_check(uint32 space, uint32 idx) {
 static uint32 la_sp_in_app_window(void) {
 ```
 
-调用者此刻的 sp 是否落在 App 窗口里 */
+调用者此刻的 sp 是否落在 App 窗口里
 
 ### `int32 arkrtos_port_paging_switch_to(uint32 space) {`
 
@@ -9533,7 +9590,7 @@ activate() 会重新要帧（ensure 看到基址 0 就再要一块）。这与
 void la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_frame) {
 ```
 
-没有窗口可换：恢复现场前没有要补做的事 */
+没有窗口可换：恢复现场前没有要补做的事
 
 ### `uint32 arkrtos_port_paging_space(void) {`
 
@@ -9541,7 +9598,7 @@ void la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_frame) {
 uint32 arkrtos_port_paging_space(void) {
 ```
 
-当前装进 App 窗口的空间号 */
+当前装进 App 窗口的空间号
 
 ### `uint32 arkrtos_port_paging_space_frame(uint32 space) {`
 
@@ -9549,7 +9606,7 @@ uint32 arkrtos_port_paging_space(void) {
 uint32 arkrtos_port_paging_space_frame(uint32 space) {
 ```
 
-空间号对应的物理帧基址；越界返回 0（不猜一个地址出去） */
+空间号对应的物理帧基址；越界返回 0（不猜一个地址出去）
 
 ### `uint32 arkrtos_port_paging_space_count(void) {`
 
@@ -9557,7 +9614,7 @@ uint32 arkrtos_port_paging_space_frame(uint32 space) {
 uint32 arkrtos_port_paging_space_count(void) {
 ```
 
-板级给了几个地址空间（>= 1） */
+板级给了几个地址空间（>= 1）
 
 ### `unsigned long arkrtos_port_paging_window_va(void) {`
 
@@ -9565,7 +9622,7 @@ uint32 arkrtos_port_paging_space_count(void) {
 unsigned long arkrtos_port_paging_window_va(void) {
 ```
 
-App 窗口的 VA 基址：各空间共用同一个 VA，物理侧才按空间换 */
+App 窗口的 VA 基址：各空间共用同一个 VA，物理侧才按空间换
 
 ### `unsigned long arkrtos_port_paging_asid_current(void) {`
 
@@ -9653,7 +9710,7 @@ space 0 里读得到），就是靠它把「写进去了但没生效」和「生
 static uint32 la_pg_static_hit(uint32 base, uint32 size) {
 ```
 
-这段 VA 是否落在静态跨度里（重叠即算） */
+这段 VA 是否落在静态跨度里（重叠即算）
 
 ### `static unsigned long la_pg_dyn_lo(uint32 pa, arkrtos_mpu_mem_t mem) {`
 
@@ -9664,7 +9721,7 @@ static unsigned long la_pg_dyn_lo(uint32 pa, arkrtos_mpu_mem_t mem) {
 mem -> TLBELO；0 表示这条属性不提供动态映射
 > 说明：开 ASID 档时四条都带 G（全局）：动态别名是**内核**的 MMIO 通路
 （PLV0），它不属于任何一个 App 空间，绑死在某一个 ASID 上就会出现
-「换个空间就 VFS 读不动 / 控制台写不出」这种只在开档后显形的形态。 */
+「换个空间就 VFS 读不动 / 控制台写不出」这种只在开档后显形的形态。
 
 ### `static uint32 la_pg_dyn_mask(arkrtos_mpu_mem_t mem) {`
 
@@ -9672,7 +9729,7 @@ mem -> TLBELO；0 表示这条属性不提供动态映射
 static uint32 la_pg_dyn_mask(arkrtos_mpu_mem_t mem) {
 ```
 
-属性掩码：RW 的页同时满足 RO 的审计，反过来不行 */
+属性掩码：RW 的页同时满足 RO 的审计，反过来不行
 
 ### `int32 arkrtos_port_paging_alias(uint32 va, uint32 pa, arkrtos_mpu_mem_`
 
@@ -9702,7 +9759,7 @@ STLB（实测症状：look 报 no entry，可经这个 VA 读出来的仍是旧�
 自己的条目，撤掉它下一次取指就 KERNEL refill。
 只清被撤的那一半：一对 8 KB 里另一半还登记着就不能一起丢。两半
 都空了才把槽位标回空闲，让下一个调用方能用上它 —— 这正是 U-15 缺
-的那一半能力（「动态映射只增不减」）。 */
+的那一半能力（「动态映射只增不减」）。
 
 ### `uint32 arkrtos_port_paging_dyn_used(void) {`
 
@@ -9712,7 +9769,7 @@ uint32 arkrtos_port_paging_dyn_used(void) {
 
 **已占用的动态映射槽位数**
 只会数 used 标志，不去读 TLB：读回路径（tlbsrch/tlbrd）在
-撤销之后不一定还能告诉你「槽位空着」，而槽位书是真的。 */
+撤销之后不一定还能告诉你「槽位空着」，而槽位书是真的。
 
 ### `int32 arkrtos_port_paging_init(void) {`
 
@@ -9759,7 +9816,7 @@ void arkrtos_port_paging_flush(uint32 base, uint32 size) {
 static uint32 la_fr_test(uint32 i) {
 ```
 
-该帧是否已分配 */
+该帧是否已分配
 
 ### `static void la_fr_mark(uint32 i) {`
 
@@ -9767,7 +9824,7 @@ static uint32 la_fr_test(uint32 i) {
 static void la_fr_mark(uint32 i) {
 ```
 
-标记已分配（调用方保证之前是空闲） */
+标记已分配（调用方保证之前是空闲）
 
 ### `static void la_fr_clear(uint32 i) {`
 
@@ -9775,7 +9832,7 @@ static void la_fr_mark(uint32 i) {
 static void la_fr_clear(uint32 i) {
 ```
 
-标记空闲（调用方保证之前是已分配） */
+标记空闲（调用方保证之前是已分配）
 
 ### `int32 arkrtos_port_paging_frame_alloc(uint32 count, uint32 *p_base) {`
 
@@ -9810,7 +9867,7 @@ int32 arkrtos_port_paging_frame_free(uint32 base, uint32 count) {
 uint32 arkrtos_port_paging_frame_total(void) {
 ```
 
-帧总数 */
+帧总数
 
 ### `uint32 arkrtos_port_paging_frame_used(void) {`
 
@@ -9818,7 +9875,7 @@ uint32 arkrtos_port_paging_frame_total(void) {
 uint32 arkrtos_port_paging_frame_used(void) {
 ```
 
-已分配帧数 */
+已分配帧数
 
 ### `uint32 arkrtos_port_syscall_num(void *p_exc_ctx) {`
 
@@ -10439,7 +10496,7 @@ int putchar(int c) {
 static void cap_reset(void) {
 ```
 
-**清空捕获缓冲，并把它当作"一个屏幕"的开始 */**
+**清空捕获缓冲，并把它当作"一个屏幕"的开始**
 
 ### `static int cap_len(void) {`
 
@@ -10447,7 +10504,7 @@ static void cap_reset(void) {
 static int cap_len(void) {
 ```
 
-**捕获内容里有多少个字节 */**
+**捕获内容里有多少个字节**
 
 ## kernelsrc/sdk/driver_sdk/arkrtos_driver_sdk.h
 
@@ -10680,7 +10737,7 @@ void arkrtos_stdio_init(void) {
 int arkrtos_stdio_ready(void) {
 ```
 
-**1 while the console is usable */**
+**1 while the console is usable**
 
 ### `static int glue_write(const unsigned char *buf, unsigned len) {`
 
@@ -10688,7 +10745,7 @@ int arkrtos_stdio_ready(void) {
 static int glue_write(const unsigned char *buf, unsigned len) {
 ```
 
-**Write a byte run to the console; returns bytes written or -1 */**
+**Write a byte run to the console; returns bytes written or -1**
 
 ### `int fputc(int ch, FILE *f) {`
 
@@ -10706,7 +10763,7 @@ the character went out would hide a console that is not there.
 void _ttywrch(int ch) {
 ```
 
-**Char-by-char console output (used by debuggers and some library paths) */**
+**Char-by-char console output (used by debuggers and some library paths)**
 
 ### `int fgetc(FILE *f) {`
 
@@ -10743,7 +10800,7 @@ static int glue_streq(const char *a, const char *b) {
 ```
 
 **NUL terminated string equality, without <string.h>: this file is**
-the bottom of the C library and should not depend on it. */
+the bottom of the C library and should not depend on it.
 
 ### `int _sys_istty(FILE *f) {`
 
@@ -10752,7 +10809,7 @@ int _sys_istty(FILE *f) {
 ```
 
 **1 = interactive terminal, so the library goes through fputc/fgetc.**
-That is the path we want: unbuffered, one byte per write. */
+That is the path we want: unbuffered, one byte per write.
 
 ### `int _sys_seek(FILE *f, long pos) {`
 
@@ -10760,7 +10817,7 @@ That is the path we want: unbuffered, one byte per write. */
 int _sys_seek(FILE *f, long pos) {
 ```
 
-**A console has no file position, so it cannot be seeked. */**
+**A console has no file position, so it cannot be seeked.**
 
 ### `int _sys_ensure(FILE *f) {`
 
@@ -10768,7 +10825,7 @@ int _sys_seek(FILE *f, long pos) {
 int _sys_ensure(FILE *f) {
 ```
 
-**Flush request. Output is unbuffered, so there is nothing to do. */**
+**Flush request. Output is unbuffered, so there is nothing to do.**
 
 ### `long _sys_flen(FILE *f) {`
 
@@ -10776,7 +10833,7 @@ int _sys_ensure(FILE *f) {
 long _sys_flen(FILE *f) {
 ```
 
-**Length is unknown for a console stream. */**
+**Length is unknown for a console stream.**
 
 ## kernelsrc/sdk/posix/arkrtos_posix.c
 
@@ -10816,7 +10873,7 @@ because Ark RTOS is a 32-bit only kernel and pretending otherwise
 
 POSIX clock ids. Only MONOTONIC is backed by anything here: Ark RTOS has a
 boot relative tick, there is no wall clock, so REALTIME is aliased to it
-rather than reported as a different (and wrong) time base. */
+rather than reported as a different (and wrong) time base.
 
 ## kernelsrc/sdk/posix/arpa/inet.h
 
@@ -10831,7 +10888,7 @@ nothing but a few instructions.
 in_addr_t    arkrtos_posix_inet_addr(const char *cp);
 ```
 
-"127.0.0.1" -> network order address, or INADDR_NONE on a bad string. */
+"127.0.0.1" -> network order address, or INADDR_NONE on a bad string.
 
 ### `char        *arkrtos_posix_inet_ntoa(struct in_addr in);`
 
@@ -10839,7 +10896,7 @@ in_addr_t    arkrtos_posix_inet_addr(const char *cp);
 char        *arkrtos_posix_inet_ntoa(struct in_addr in);
 ```
 
-Network order address -> text, in a static buffer this call owns. */
+Network order address -> text, in a static buffer this call owns.
 
 ### `int          arkrtos_posix_inet_pton(int af, const char *src, void *ds`
 
@@ -10848,7 +10905,7 @@ int          arkrtos_posix_inet_pton(int af, const char *src, void *dst);
 ```
 
 af must be AF_INET; returns 1 on success, 0 on a bad address, -1 with
-errno=ENOSYS for a family this layer does not have. */
+errno=ENOSYS for a family this layer does not have.
 
 ### `const char  *arkrtos_posix_inet_ntop(int af, const void *src, char *ds`
 
@@ -10856,7 +10913,7 @@ errno=ENOSYS for a family this layer does not have. */
 const char  *arkrtos_posix_inet_ntop(int af, const void *src, char *dst, socklen_t dst_size);
 ```
 
-The reverse; dst_size must be at least 16 bytes for AF_INET. */
+The reverse; dst_size must be at least 16 bytes for AF_INET.
 
 ## kernelsrc/sdk/posix/dirent.h
 
@@ -10872,7 +10929,7 @@ a bounded number is the honest answer. When the pool is empty,
 ```
 
 Longest entry name a dirent can carry, NUL included. One path component,
-not a path. */
+not a path.
 
 ### `#ifndef ARKRTOS_POSIX_DIR_MAX #define ARKRTOS_POSIX_DIR_MAX  (2u) #end`
 
@@ -10880,7 +10937,7 @@ not a path. */
 #ifndef ARKRTOS_POSIX_DIR_MAX #define ARKRTOS_POSIX_DIR_MAX  (2u) #endif
 ```
 
-How many directory streams can be open at once. Tunable before including. */
+How many directory streams can be open at once. Tunable before including.
 
 ## kernelsrc/sdk/posix/errno.h
 
@@ -10895,7 +10952,7 @@ involved - so it is stored here, in the App's own RAM, in one cell
 int32 *arkrtos_posix_errno_location(void);
 ```
 
-Address of the calling thread's errno cell; never NULL. */
+Address of the calling thread's errno cell; never NULL.
 
 ## kernelsrc/sdk/posix/pthread.h
 
@@ -10911,7 +10968,7 @@ typedef struct {
 ```
 
 Thread attributes. Anything left at 0 takes the built-in default, so a
-plain pthread_create(t, NULL, fn, arg) call needs no attributes at all. */
+plain pthread_create(t, NULL, fn, arg) call needs no attributes at all.
 
 ## kernelsrc/sdk/posix/semaphore.h
 
@@ -10926,7 +10983,7 @@ calls and no static storage is needed.
 typedef struct {
 ```
 
-Opaque to the caller: only arkrtos_posix.c knows what is inside. */
+Opaque to the caller: only arkrtos_posix.c knows what is inside.
 
 ## kernelsrc/sdk/posix/sys/stat.h
 
@@ -10941,7 +10998,7 @@ st_mtime as a real clock) are absent rather than filled in with a
 int arkrtos_posix_stat(const char *path, struct stat *st);
 ```
 
-Stat a path in the namespace. Returns 0, or -1 with errno set. */
+Stat a path in the namespace. Returns 0, or -1 with errno set.
 
 ### `int arkrtos_posix_fstat(int fd, struct stat *st);`
 
@@ -10949,7 +11006,7 @@ Stat a path in the namespace. Returns 0, or -1 with errno set. */
 int arkrtos_posix_fstat(int fd, struct stat *st);
 ```
 
-Stat an open descriptor. A device reports S_IFCHR with size 0. */
+Stat an open descriptor. A device reports S_IFCHR with size 0.
 
 ### `int arkrtos_posix_mkdir(const char *path, arkrtos_mode_t mode);`
 
@@ -10960,7 +11017,7 @@ int arkrtos_posix_mkdir(const char *path, arkrtos_mode_t mode);
 Create a directory (one level; the parent must exist). Returns 0, or -1
 with errno set. The mode argument is accepted so plain POSIX source
 compiles unchanged, but it is not applied: this namespace has no
-per-file permission model, and pretending otherwise would be a lie. */
+per-file permission model, and pretending otherwise would be a lie.
 
 ## kernelsrc/sdk/posix/unistd.h
 
@@ -10976,7 +11033,7 @@ arkrtos_off_t   arkrtos_posix_lseek(int fd, arkrtos_off_t off, int whence);
 ```
 
 Move the offset of an open path. Returns the new absolute offset, or -1
-with errno set; ESPIPE when the descriptor is a device (no offset). */
+with errno set; ESPIPE when the descriptor is a device (no offset).
 
 ### `int           arkrtos_posix_unlink(const char *path);`
 
@@ -10984,7 +11041,7 @@ with errno set; ESPIPE when the descriptor is a device (no offset). */
 int           arkrtos_posix_unlink(const char *path);
 ```
 
-Remove a file by path. A directory needs rmdir, never unlink. */
+Remove a file by path. A directory needs rmdir, never unlink.
 
 ### `int           arkrtos_posix_rmdir(const char *path);`
 
@@ -10992,7 +11049,7 @@ Remove a file by path. A directory needs rmdir, never unlink. */
 int           arkrtos_posix_rmdir(const char *path);
 ```
 
-Remove an empty directory. A file is refused, not silently taken. */
+Remove an empty directory. A file is refused, not silently taken.
 
 ### `int           arkrtos_posix_rename(const char *old_path, const char *n`
 
@@ -11000,7 +11057,7 @@ Remove an empty directory. A file is refused, not silently taken. */
 int           arkrtos_posix_rename(const char *old_path, const char *new_path);
 ```
 
-Rename or move a path inside one mount. Returns 0, or -1 with errno set. */
+Rename or move a path inside one mount. Returns 0, or -1 with errno set.
 
 ### `int           arkrtos_posix_truncate(const char *path, arkrtos_off_t l`
 
@@ -11012,7 +11069,7 @@ Set the length of a named file. The file must exist - "truncate" is not
 "create empty". Growing the file zero-fills. With the current drivers a
 file that is open for writing cannot be resized: the write stream is
 sequential and was cleared at open, so a length change would leave a
-half-true state, and the call refuses instead of approximating it. */
+half-true state, and the call refuses instead of approximating it.
 
 ### `int           arkrtos_posix_ftruncate(int fd, arkrtos_off_t length);`
 
@@ -11023,7 +11080,7 @@ int           arkrtos_posix_ftruncate(int fd, arkrtos_off_t length);
 Set the length of an open file. EINVAL on a descriptor that is not open
 for writing (POSIX: resizing is a write, even when the new length is 0),
 EISDIR on a directory. The offset is pulled back if it now points past
-the end. */
+the end.
 
 ### `int           arkrtos_posix_link(const char *old_path, const char *new`
 
@@ -11032,7 +11089,7 @@ int           arkrtos_posix_link(const char *old_path, const char *new_path);
 ```
 
 Hard links do not exist in this namespace: always EPERM, never a silent
-copy. POSIX's own answer for "filesystem without hard links". */
+copy. POSIX's own answer for "filesystem without hard links".
 
 ### `int           arkrtos_posix_symlink(const char *target, const char *li`
 
@@ -11040,7 +11097,7 @@ copy. POSIX's own answer for "filesystem without hard links". */
 int           arkrtos_posix_symlink(const char *target, const char *linkpath);
 ```
 
-Symbolic links do not exist here either: always EPERM. */
+Symbolic links do not exist here either: always EPERM.
 
 ### `arkrtos_ssize_t arkrtos_posix_readlink(const char *path, char *buf, ui`
 
@@ -11050,7 +11107,7 @@ arkrtos_ssize_t arkrtos_posix_readlink(const char *path, char *buf, uint32 bufsi
 
 Read a symbolic link. There is nothing to read: a missing path answers
 with errno ENOENT and an existing non-link with EINVAL, exactly as POSIX
-describes, rather than a fake empty success. */
+describes, rather than a fake empty success.
 
 ### `uint32 arkrtos_posix_sleep(uint32 seconds);`
 
@@ -11058,7 +11115,7 @@ describes, rather than a fake empty success. */
 uint32 arkrtos_posix_sleep(uint32 seconds);
 ```
 
-Suspend the calling thread for whole seconds (scheduler based). */
+Suspend the calling thread for whole seconds (scheduler based).
 
 ### `int    arkrtos_posix_usleep(arkrtos_useconds_t usec);`
 
@@ -11067,7 +11124,7 @@ int    arkrtos_posix_usleep(arkrtos_useconds_t usec);
 ```
 
 Suspend the calling thread for microseconds. Ark RTOS waits in ms, so the
-value is rounded UP: a sleep never returns early. */
+value is rounded UP: a sleep never returns early.
 
 ### `int    arkrtos_posix_nanosleep(const struct timespec *req, struct time`
 
@@ -11075,7 +11132,7 @@ value is rounded UP: a sleep never returns early. */
 int    arkrtos_posix_nanosleep(const struct timespec *req, struct timespec *rem);
 ```
 
-Suspend until the given absolute time on the chosen clock. */
+Suspend until the given absolute time on the chosen clock.
 
 ### `arkrtos_time_t arkrtos_posix_time(arkrtos_time_t *tloc);`
 
@@ -11083,7 +11140,7 @@ Suspend until the given absolute time on the chosen clock. */
 arkrtos_time_t arkrtos_posix_time(arkrtos_time_t *tloc);
 ```
 
-Wall clock seconds since boot - Ark RTOS has no RTC. */
+Wall clock seconds since boot - Ark RTOS has no RTC.
 
 ## kernelsrc/src/arkrtos_apppack.c
 
@@ -11171,7 +11228,7 @@ static int32 elf_measure_image(const char *path, elf_word_t phoff, uint16 phnum,
 static int32 elf_check_range(const elf_image_t *p_img, unsigned long lo_limit, unsigned long hi_limit) {
 ```
 
-**镜像必须整段落在 [lo_limit, hi_limit) 里（含端点判据用减法写） */**
+**镜像必须整段落在 [lo_limit, hi_limit) 里（含端点判据用减法写）**
 
 ### `typedef struct {`
 
@@ -11179,7 +11236,7 @@ static int32 elf_check_range(const elf_image_t *p_img, unsigned long lo_limit, u
 typedef struct {
 ```
 
-**一段「文件真的带着字节」的地址区间 [lo, hi) */**
+**一段「文件真的带着字节」的地址区间 [lo, hi)**
 
 ### `static int32 elf_load_file_spans(const char *path, elf_word_t phoff, u`
 
@@ -11414,7 +11471,7 @@ stack_bottom 以下（elf_check_range 已经守住），而 trap 帧与
 
 对象表。宿主门禁（-DARKRTOS_ESET_HOST_TEST）把它导出，好让测试直接摆
 两个等待槽，验证「谁先拿」「带 CLEAR 的位只交给一个等待者」这类判定；
-默认构建里它就是本文件内部的 static。 */
+默认构建里它就是本文件内部的 static。
 
 ## kernelsrc/src/arkrtos_exports.c
 
@@ -11463,7 +11520,7 @@ int32 arkrtos_fs_stat_path(const char *path, uint32 *size, uint32 *is_dir) {
 #define ARKRTOS_GUARD_AGE_NONE       (0xFFFFFFFFu)
 ```
 
-**"no evidence recorded yet" */**
+**"no evidence recorded yet"**
 
 ## kernelsrc/src/arkrtos_installer.c
 
@@ -11693,7 +11750,7 @@ SVC 0x19 之外的内部调用改变，全局生效（内核 + 所有 App/驱动
 typedef struct {
 ```
 
-**一个在跑（或在装载/拆除）的小程序 */**
+**一个在跑（或在装载/拆除）的小程序**
 
 ## kernelsrc/src/arkrtos_modld.c
 
@@ -11708,7 +11765,7 @@ ET_EXEC 的地址是链接期写死的，ET_REL 的地址由装载器现在给�
 static int32 mod_sym(const mod_link_t *c, uint32 idx, const char **p_name, uint32 *p_shndx, unsigned long *p_value) {
 ```
 
-**取一个符号的 (名字, 节下标, 值)；符号表坏了返回 -1 */**
+**取一个符号的 (名字, 节下标, 值)；符号表坏了返回 -1**
 
 ### `static int32 mod_sym_value(mod_link_t *c, uint32 idx, unsigned long *p`
 
@@ -11739,7 +11796,7 @@ pcalau12i 直接算地址；外部数据才走 `ld.d $r12,$r12,slot`。
 static int32 mod_fits(long v, uint32 bits) {
 ```
 
-**有符号立即数是否装得下 bits 位 */**
+**有符号立即数是否装得下 bits 位**
 
 ### `static int32 mod_one_rela(mod_link_t *c, uint32 target, uint32 off, ui`
 
@@ -11747,7 +11804,7 @@ static int32 mod_fits(long v, uint32 bits) {
 static int32 mod_one_rela(mod_link_t *c, uint32 target, uint32 off, uint32 type, uint32 symidx, long addend, unsigned long *st, uint32 *p_sp) {
 ```
 
-**一条 rela 记录：在 SOP 栈机上求值后写回指令字 */**
+**一条 rela 记录：在 SOP 栈机上求值后写回指令字**
 
 ## kernelsrc/src/arkrtos_mpu.c
 
@@ -11766,7 +11823,7 @@ Is this task's code window in RAM instead of the flash image pool?
 True for MiniApps only (they are loaded into RAM and run there, see
 arkrtos_mini.c); every App / Driver / kernel task answers no. The test is on
 the recorded window, not on a flag: a window in the image RAM pool can only
-have been put there by the MiniApp loader. */
+have been put there by the MiniApp loader.
 
 ## kernelsrc/src/arkrtos_paging.c
 
@@ -11783,7 +11840,7 @@ static uint8 arkrtos_paging_code_in_ram(const arkrtos_task_t *p_task) {
 
 Is this task's code window in the RAM pool (a MiniApp block) rather than in
 the flash image pool? Same test as the window backend uses, and for the same
-reason: it is the recorded window that says so, not a flag that could lie. */
+reason: it is the recorded window that says so, not a flag that could lie.
 
 ### `uint32 arkrtos_paging_space_count(void) {`
 
@@ -11894,7 +11951,7 @@ bug there cannot overwrite another process's memory silently.
 int32 arkrtos_paging_frame_alloc(uint32 count, uint32 *p_base) {
 ```
 
-**Allocate a run of contiguous 4 KB page frames from the board pool */**
+**Allocate a run of contiguous 4 KB page frames from the board pool**
 
 ### `int32 arkrtos_paging_frame_free(uint32 base, uint32 count) {`
 
@@ -11902,7 +11959,7 @@ int32 arkrtos_paging_frame_alloc(uint32 count, uint32 *p_base) {
 int32 arkrtos_paging_frame_free(uint32 base, uint32 count) {
 ```
 
-**Return a run of contiguous 4 KB page frames (all-or-nothing) */**
+**Return a run of contiguous 4 KB page frames (all-or-nothing)**
 
 ### `uint32 arkrtos_paging_frame_total(void) {`
 
@@ -11910,7 +11967,7 @@ int32 arkrtos_paging_frame_free(uint32 base, uint32 count) {
 uint32 arkrtos_paging_frame_total(void) {
 ```
 
-**Total frames in the board pool (0 when there is none) */**
+**Total frames in the board pool (0 when there is none)**
 
 ### `uint32 arkrtos_paging_frame_used(void) {`
 
@@ -11918,7 +11975,7 @@ uint32 arkrtos_paging_frame_total(void) {
 uint32 arkrtos_paging_frame_used(void) {
 ```
 
-**Frames currently allocated from the board pool */**
+**Frames currently allocated from the board pool**
 
 ### `uint32 arkrtos_paging_pair_total(void) {`
 
@@ -11929,7 +11986,7 @@ uint32 arkrtos_paging_pair_total(void) {
 **Pair-level window readout: forwards to the port's ledger**
 This layer adds no arithmetic on purpose. "Which pairs are
 mapped" is a property of the port's TLB/ledger, and a second
-copy of that truth here is exactly how the two drift apart. */
+copy of that truth here is exactly how the two drift apart.
 
 ### `uint32 arkrtos_paging_swap_stat(uint32 which) {`
 
@@ -11937,7 +11994,7 @@ copy of that truth here is exactly how the two drift apart. */
 uint32 arkrtos_paging_swap_stat(uint32 which) {
 ```
 
-**Page replacement readout (U-16): forwards to the port's ledger */**
+**Page replacement readout (U-16): forwards to the port's ledger**
 
 ### `int32 arkrtos_paging_map_span(uint32 va, uint32 pa, uint32 size, arkrt`
 
@@ -12093,6 +12150,23 @@ static void smp_mask_set(uint32 cpu) {
 **原子置位在线掩码的某一位**
 > 说明：用 CAS 重试而不是读-改-写：两个次核同时上线时，读-改-写会丢掉一个。
 
+## kernelsrc/src/arkrtos_smp_sched.c
+
+**调度分核（AMP）实现：每核运行队列 + 显式迁移 + 次核切换**
+五件事，按调用者分：
+- CPU0 任务侧：arkrtos_smp_sched_task_to / _task_back（迁移）；
+- CPU0 节拍侧：arkrtos_smp_sched_poll（收回归还的任务）；
+
+### `static int32 sms_balance_step(void) {`
+
+```c
+static int32 sms_balance_step(void) {
+```
+
+**策略主体：在 CPU0 的节拍里跑一次**
+**返回**：本次自动迁出的任务数
+> 说明：只在 CPU0 调用；它读 CPU0 的就绪集、改次核队列，两者都已有锁。
+
 ## kernelsrc/src/arkrtos_task.c
 
 **Ark RTOS 任务调度与系统调用分发实现**
@@ -12124,6 +12198,22 @@ static int32 arkrtos_sched_lock_blocks(void) {
 **返回**：1=已锁定（调用方应忽略本次阻塞请求），0=未锁定
 在调度器锁定期间调用阻塞接口会破坏任务状态一致性，
 此处忽略请求并记录一条故障记录，便于定位问题代码。
+
+### `void arkrtos_task_entry_return(void) {`
+
+```c
+void arkrtos_task_entry_return(void) {
+```
+
+**任务入口函数返回时的回收入口**
+内核约定任务入口要么死循环、要么显式调 arkrtos_task_kill_internal()。
+入口一旦返回，旧实现里初始栈帧的 ra 是 0，PC 跳到地址 0 取指，
+硬件报 INE（ecode=0x0d）、era=0 —— 现场与「野指针打飞」完全同形，
+排查代价极高（docs/QEMU模拟器移植与验证 §5.13.4 记的就是这一族）。
+现在移植层把初始 ra 指向本函数：返回即按「自我结束」收尸，日志留痕，
+然后停在本任务上下文里 wfi，等调度器把本核切给别的任务。
+> 说明：不返回。PLV3 的任务走不到这里（特权级不允许直呼内核函数），
+它们返回时仍落到 App 故障处理（重启该 App）。
 
 ### `void arkrtos_sched_lock_internal(void) {`
 
@@ -12183,7 +12273,7 @@ static uint32 arkrtos_tl_settle(void) {
 static int32_t p_abs(const char *rel, char *out, uint32_t cap) {
 ```
 
-**rel（相对挂载点、无前导 '/'）-> 卷内绝对路径 */**
+**rel（相对挂载点、无前导 '/'）-> 卷内绝对路径**
 
 ### `static int32_t p_io(const char *what, const char *path) {`
 
@@ -12191,7 +12281,7 @@ static int32_t p_abs(const char *rel, char *out, uint32_t cap) {
 static int32_t p_io(const char *what, const char *path) {
 ```
 
-**出错时把原始错误码落到日志，再返回统一的 ARK_E_IO */**
+**出错时把原始错误码落到日志，再返回统一的 ARK_E_IO**
 
 ### `static int32_t p_open_create_err(const char *path) {`
 
@@ -12204,4 +12294,4 @@ littlefs 在 LFS_O_CREAT 时，若父目录不存在就回 LFS_ERR_NOENT。
 这一条曾经统一走 p_io()，于是在 /mnt/nor/nodir/x.txt 上打印的是
 "FAILED (-11: backend error)"——把一个「父目录不存在」报成了
 「驱动出错」。而父目录存在时同一个调用是成功的，所以这不是
-「新建文件只能落卷根」，是错误码把原因吃掉了。 */
+「新建文件只能落卷根」，是错误码把原因吃掉了。

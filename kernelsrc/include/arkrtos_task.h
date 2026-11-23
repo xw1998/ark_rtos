@@ -212,6 +212,9 @@ void arkrtos_task_release_resources(int32 task_id);
 void arkrtos_task_release_resources_handover(int32 task_id);
 void arkrtos_task_delay_internal(uint32 us);
 void arkrtos_task_kill_internal(void);
+/* 任务入口返回时的回收入口：移植层建初始栈帧时把 ra 指向这里。
+ * 内核不承认「入口返回」是正常结束，但也绝不让 PC 跳到 0。 */
+void arkrtos_task_entry_return(void);
 int32  arkrtos_task_status_get_internal(int32 task_id);
 
 /* ============================================================

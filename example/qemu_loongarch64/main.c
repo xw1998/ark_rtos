@@ -96,7 +96,7 @@ static uint32 s_stack_fs[FS_STACK_WORDS];
 #define FS_CAP_BYTES           (640u * 1024u)
 static uint8 s_cap_buf[FS_CAP_BYTES];
 static uint32 s_idle_stack[IDLE_STACK_WORDS];
-#if (ARKRTOS_USE_SMP_SCHED == 1)
+#if (ARKRTOS_USE_SMP_SCHED == 1) && (ARKRTOS_USE_SMP_BALANCE != 1)
 static uint32 s_stack_chk[TASK_STACK_WORDS];
 #endif
 
@@ -1174,7 +1174,7 @@ static void arkrtos_smp_self_test(void)
 }
 #endif /* ARKRTOS_USE_SMP == 1 */
 
-#if (ARKRTOS_USE_SMP_SCHED == 1)
+#if (ARKRTOS_USE_SMP_SCHED == 1) && (ARKRTOS_USE_SMP_BALANCE != 1)
 /* ============================================================
  * 调度分核自检（只在 ARKRTOS_USE_SMP_SCHED=1 的镜像里编进来）
  * @details 判据同样是**串口上的原始读数**，不是"编过了"：
@@ -1250,6 +1250,147 @@ static void task_smp_chk(void)
 }
 #endif /* ARKRTOS_USE_SMP_SCHED == 1 */
 
+#if (ARKRTOS_USE_SMP_BALANCE == 1)
+/* ============================================================
+ * 自动负载均衡自检（AMP 策略层，不是对称调度）
+ * @details 两个纯计算任务登记进候选表，之后**不由人迁移**：策略自己会在
+ *          次核空闲、且 CPU0 还有两个以上就绪任务时迁一个过去。
+ *
+ *          判据是串口上的原始读数，不是"编过了"：
+ *            1) `[bal] out` 非 0 —— 自动迁出确实发生；
+ *            2) 两个循环计数**都在涨**，且被迁走的那个 `c1`/`c2` 变成 1
+ *               —— 它在次核上继续推进；
+ *            3) `[bal] cur1` 指向被迁任务的下标（任务号减一）；
+ *            4) 演示结束后 `[bal] park` 把两个 worker 降到最低优先级并
+ *               停下来，CPU0 交还给镜像里的其它任务。
+ *
+ *          **边界**：两个 worker 只累加自己的计数、只用 rdtime 忙等，
+ *          不碰任何内核 API —— 次核没有跨核保护，任何会走内核调度器的
+ *          路径（阻塞、退出、改优先级）都不许在次核上出现。
+ *          它们刻意同优先级：CPU0 上按时间片轮转，两个计数才会一起涨。
+ * ============================================================ */
+
+static volatile uint32 s_b1_loops = 0u;
+static volatile uint32 s_b2_loops = 0u;
+static volatile uint32 s_b1_core  = 0xFFFFFFFFu;
+static volatile uint32 s_b2_core  = 0xFFFFFFFFu;
+static volatile uint32 s_bal_stop = 0u;
+static uint32 s_stack_b1[TASK_STACK_WORDS];
+static uint32 s_stack_b2[TASK_STACK_WORDS];
+static uint32 s_stack_bal[TASK_STACK_WORDS];
+static int32  s_id_b1 = -1;
+static int32  s_id_b2 = -1;
+
+/* 两个 worker 共用同一条循环体：差别只有各自的计数与核号落点。 */
+static void bal_worker_body(volatile uint32 *loops, volatile uint32 *core)
+{
+    for(;;)
+    {
+        if(s_bal_stop != 0u)
+        {
+            /* 演示收尾：停在原地不占 CPU。worker 不能退出——任务退出要走
+             * 内核调度器，而次核上的任务绝不能碰那条路径。 */
+            arkrtos_port_wfi();
+            continue;
+        }
+        *core = arkrtos_port_cpu_id();
+        (*loops)++;
+        arkrtos_port_delay_us(200u);
+    }
+}
+
+static void task_b1(void)
+{
+    bal_worker_body(&s_b1_loops, &s_b1_core);
+}
+
+static void task_b2(void)
+{
+    bal_worker_body(&s_b2_loops, &s_b2_core);
+}
+
+/* 把 worker 降到最低优先级（与 idle 同级）并停掉。
+ * 次核上的 worker 不在 CPU0 就绪链上，改完优先级**不能**往 CPU0 链上挂。 */
+static void bal_park(int32 task_id)
+{
+    int32 idx = task_id - 1;
+
+    if((idx < 0) || (idx >= (int32)arkrtos_task_count))
+    {
+        return;
+    }
+    arkrtos_ready_del(idx);
+    arkrtos_task_table[idx].priority      = 200u;
+    arkrtos_task_table[idx].base_priority = 200u;
+    if(arkrtos_smp_sched_owned_by_other(idx) == 0u)
+    {
+        arkrtos_ready_add(idx);
+    }
+}
+
+static void task_bal_chk(void)
+{
+    uint32 out[8];
+    uint32 bst[4];
+    uint32 prev1;
+    uint32 prev2;
+    uint32 round;
+
+    for(round = 1u; round <= 6u; round++)
+    {
+        arkrtos_task_wait_internal(300u);
+
+        prev1 = s_b1_loops;
+        prev2 = s_b2_loops;
+        arkrtos_task_wait_internal(200u);
+
+        (void)arkrtos_smp_sched_selftest(out);
+        (void)arkrtos_smp_sched_balance_stat(bst);
+
+        arkrtos_board_puts("[bal] r=");
+        arkrtos_board_putu(round);
+        arkrtos_board_puts(" out=");
+        arkrtos_board_putu(bst[0]);
+        arkrtos_board_puts(" back=");
+        arkrtos_board_putu(bst[1]);
+        arkrtos_board_puts(" idle=");
+        arkrtos_board_putu(bst[2]);
+        arkrtos_board_puts(" tick=");
+        arkrtos_board_putu(bst[3]);
+        arkrtos_board_puts(" cur1=");
+        arkrtos_board_putu(out[0]);
+        arkrtos_board_puts(" q1=");
+        arkrtos_board_putu(out[1]);
+        arkrtos_board_puts(" b1=+");
+        arkrtos_board_putu(s_b1_loops - prev1);
+        arkrtos_board_puts(" c1=");
+        arkrtos_board_putu(s_b1_core);
+        arkrtos_board_puts(" b2=+");
+        arkrtos_board_putu(s_b2_loops - prev2);
+        arkrtos_board_puts(" c2=");
+        arkrtos_board_putu(s_b2_core);
+        arkrtos_board_puts("\n");
+    }
+
+    /* 收尾：先把两个 worker 从候选表摘掉（策略不再动它们），再降到
+     * 最低优先级并停下。必须在关中断下改优先级与就绪链，避免与本核
+     * 下一次调度决策交错。 */
+    (void)arkrtos_smp_sched_auto_del(s_id_b1);
+    (void)arkrtos_smp_sched_auto_del(s_id_b2);
+    s_bal_stop = 1u;
+
+    ARKRTOS_DISABLE_IRQ();
+    bal_park(s_id_b1);
+    bal_park(s_id_b2);
+    ARKRTOS_ENABLE_IRQ();
+
+    arkrtos_board_puts("[bal] park b1=");
+    arkrtos_board_putu((uint32)s_id_b1);
+    arkrtos_board_puts(" b2=");
+    arkrtos_board_putu((uint32)s_id_b2);
+    arkrtos_board_puts(" done\n");
+}
+#endif /* ARKRTOS_USE_SMP_BALANCE == 1 */
 #if (ARKRTOS_DEMO_HWSAFE == 1)
 /* ============================================================
  * A5：遗言机制在非 ARM 上的三条通道（QEMU 算上板，不是真机）
@@ -1439,12 +1580,43 @@ int main(void)
     }
     #endif
 
-    #if (ARKRTOS_USE_SMP_SCHED == 1)
+    #if (ARKRTOS_USE_SMP_SCHED == 1) && (ARKRTOS_USE_SMP_BALANCE != 1)
     /* 调度分核演示：一个纯计算任务 + 一个 CPU0 侧的观测任务。
      * worker 优先级 16（低于 A/B/存储/ELF），迁走之后 CPU0 上谁也不会
-     * 因为它的优先级而受影响。 */
+     * 因为它的优先级而受影响。
+     * **均衡档下不编这段**：它和自动均衡演示抢同一个次核，两个演示同时
+     * 在次核上挪任务，读数会互相污染。 */
     s_id_w = arkrtos_task_register(task_w, s_stack_w, sizeof(s_stack_w), 16u, 0u);
     (void)arkrtos_task_register(task_smp_chk, s_stack_chk, sizeof(s_stack_chk), 9u, 0u);
+    #endif
+    #if (ARKRTOS_USE_SMP_BALANCE == 1)
+    /* 自动均衡演示：两个纯计算任务登记进候选表，之后不再由人迁移。 */
+    s_id_b1 = arkrtos_task_register(task_b1, s_stack_b1, sizeof(s_stack_b1), 3u, 0u);
+    s_id_b2 = arkrtos_task_register(task_b2, s_stack_b2, sizeof(s_stack_b2), 3u, 0u);
+    (void)arkrtos_task_register(task_bal_chk, s_stack_bal, sizeof(s_stack_bal), 2u, 0u);
+    if(s_id_b1 > 0)
+    {
+        int32 arc = arkrtos_smp_sched_auto_add(s_id_b1);
+
+        arkrtos_board_puts("[bal] id1=");
+        arkrtos_board_putu((uint32)s_id_b1);
+        arkrtos_board_puts(" id2=");
+        arkrtos_board_putu((uint32)s_id_b2);
+        arkrtos_board_puts("\n");
+        arkrtos_board_puts("[bal] add b1 rc=");
+        arkrtos_board_putu((uint32)arc);
+        arkrtos_board_puts("\n");
+    }
+    if(s_id_b2 > 0)
+    {
+        int32 arc = arkrtos_smp_sched_auto_add(s_id_b2);
+
+        arkrtos_board_puts("[bal] add b2 rc=");
+        arkrtos_board_putu((uint32)arc);
+        arkrtos_board_puts(" n=");
+        arkrtos_board_putu(arkrtos_smp_sched_auto_count());
+        arkrtos_board_puts("\n");
+    }
     #endif
 
     #if (ARKRTOS_USE_ELF == 1)
@@ -1561,9 +1733,10 @@ int main(void)
     arkrtos_smp_self_test();
 #endif
 
-#if (ARKRTOS_USE_SMP_SCHED == 1)
+#if (ARKRTOS_USE_SMP_SCHED == 1) && (ARKRTOS_USE_SMP_BALANCE != 1)
     /* 把 worker 迁到 1 号核。此刻 worker 还是 READY（调度尚未启动），
-     * 是迁移 API 唯一接受的形态；迁完之后 CPU0 的就绪链里没有它。 */
+     * 是迁移 API 唯一接受的形态；迁完之后 CPU0 的就绪链里没有它。
+     * 均衡档下这段与自动均衡演示互斥（同一个次核）。 */
     if(s_id_w > 0)
     {
         int32 rc = arkrtos_smp_sched_task_to(s_id_w, 1u);

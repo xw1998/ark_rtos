@@ -242,6 +242,16 @@
 #error "ARKRTOS_USE_SMP_SCHED requires ARKRTOS_CPU_NUM >= 2: there is no secondary core to schedule onto."
 #endif
 
+/* AMP 自动负载均衡（ARKRTOS_USE_SMP_BALANCE）依赖上一档：没有每核运行队列
+ * 就没有可迁的地方；没有次核就没有目标。两条都在这里拦，因为只有这里
+ * 看得到 ARKRTOS_CPU_NUM。 */
+#if (ARKRTOS_USE_SMP_BALANCE == 1) && (ARKRTOS_USE_SMP_SCHED != 1)
+#error "ARKRTOS_USE_SMP_BALANCE requires ARKRTOS_USE_SMP_SCHED=1: the policy moves tasks into a per-core queue that only that module owns."
+#endif
+#if (ARKRTOS_USE_SMP_BALANCE == 1) && (ARKRTOS_CPU_NUM < 2)
+#error "ARKRTOS_USE_SMP_BALANCE requires ARKRTOS_CPU_NUM >= 2: there is no secondary core to balance onto."
+#endif
+
 #define ARKRTOS_MS_TO_TICK(ms)      ((ms) * 1000 / ARKRTOS_TICK_PERIOD_US)
 
 /* ============================================================

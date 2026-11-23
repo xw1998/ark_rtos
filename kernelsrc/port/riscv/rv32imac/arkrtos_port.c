@@ -787,7 +787,8 @@ unsigned long arkrtos_port_stack_init(unsigned long stack_top, void (*entry)(voi
 
     __asm__ volatile("mv %0, gp" : "=r"(gp));
 
-    frame[RV_FR_RA]      = 0u;
+    /* 同 LA64：ra 指向「入口返回」的回收入口。 */
+    frame[RV_FR_RA]      = (uint32)(unsigned long)arkrtos_task_entry_return;
     frame[RV_FR_SP]      = top;
     frame[RV_FR_GP]      = gp;
     frame[RV_FR_TP]      = 0u;

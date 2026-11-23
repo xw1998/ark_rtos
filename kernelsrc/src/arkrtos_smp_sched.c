@@ -72,6 +72,18 @@ static int32  s_back[ARKRTOS_CPU_NUM];
 static arkrtos_spinlock_t s_lock[ARKRTOS_CPU_NUM];
 
 static uint8 s_inited = 0u;
+#if (ARKRTOS_USE_SMP_BALANCE == 1)
+/* 候选表：任务下标（0 起）的定长数组，-1 = 空槽。 */
+static int32  s_auto[ARKRTOS_SMP_BALANCE_MAX];
+static uint32 s_auto_n = 0u;
+
+/* 策略读数：自动迁出 / 自动要回 / 次核空闲但无可迁候选 / 本策略节拍数 */
+static uint32 s_bal_out  = 0u;
+static uint32 s_bal_back = 0u;
+static uint32 s_bal_idle = 0u;
+static uint32 s_bal_tick = 0u;
+#endif
+
 
 /* ============================================================
  * 内部工具（调用方必须已持本核锁）
@@ -104,6 +116,17 @@ static void sms_lazy_init(void)
     {
         s_owner[i] = 0u;
     }
+#if (ARKRTOS_USE_SMP_BALANCE == 1)
+    for(i = 0u; i < (uint32)ARKRTOS_SMP_BALANCE_MAX; i++)
+    {
+        s_auto[i] = -1;
+    }
+    s_auto_n   = 0u;
+    s_bal_out  = 0u;
+    s_bal_back = 0u;
+    s_bal_idle = 0u;
+    s_bal_tick = 0u;
+#endif
     s_inited = 1u;
 }
 
@@ -253,6 +276,14 @@ int32 arkrtos_smp_sched_task_to(int32 task_id, uint32 cpu)
     {
         return -4;
     }
+    if(idx == (arkrtos_current_task_id - 1))
+    {
+        /* 正在 CPU0 上跑的任务不能迁：本内核的约定是"运行中的任务仍挂在
+         * 就绪链上"（阻塞类接口都是先 ready_del 自己），所以它同时满足
+         * READY + 在就绪链 + 未迁出。真迁过去就是两核共用一份栈，必然
+         * 毁栈。让调用方等它阻塞或让出后再来。 */
+        return -6;
+    }
 
     arkrtos_ready_del(idx);               /* 先摘 CPU0 就绪链，再交出归属 */
     arkrtos_delay_disarm(idx);            /* 幂等；READY 任务本来就不在延时链上 */
@@ -306,6 +337,201 @@ int32 arkrtos_smp_sched_task_back(int32 task_id)
     return 0;
 }
 
+#if (ARKRTOS_USE_SMP_BALANCE == 1)
+/* ============================================================
+ * 自动负载均衡（AMP 策略层）
+ * @details 两条规则，都只在 CPU0 的节拍里做判断，都不改全局调度器：
+ *          1) 某个次核空闲（队列空、且没在跑任务），而 CPU0 手上还有
+ *             两个以上就绪任务时，把候选表里第一个 READY 候选迁过去。
+ *             "两个以上"是有意的：迁完 CPU0 至少还留一个，不出现
+ *             为了填次核把 CPU0 自己饿成 idle。
+ *          2) CPU0 一件就绪任务都没有、而某个次核排了两个以上任务时，
+ *             要回一个（迁回由 CPU0 每拍 poll 收走，语义与显式迁移
+ *             完全相同）。
+ *          两条都要求候选表登记：没登记的任务一概不动。
+ *
+ *          **这不是对称调度**：次核仍然不许发 SVC、不许调内核 API。
+ *          自动迁移一个会发 SVC 的任务会让它当场致命停机，所以候选
+ *          只能由调用方显式登记，本模块不猜。
+ * ============================================================ */
+
+static int32 sms_auto_find(int32 task_idx)
+{
+    uint32 i;
+
+    for(i = 0u; i < (uint32)ARKRTOS_SMP_BALANCE_MAX; i++)
+    {
+        if(s_auto[i] == task_idx)
+        {
+            return (int32)i;
+        }
+    }
+    return -1;
+}
+
+int32 arkrtos_smp_sched_auto_add(int32 task_id)
+{
+    uint32 i;
+    int32  idx;
+
+    sms_lazy_init();
+
+    if((task_id <= 0) || (task_id > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return -1;
+    }
+    idx = task_id - 1;
+    if(idx >= arkrtos_task_count)
+    {
+        return -1;
+    }
+    if(sms_auto_find(idx) >= 0)
+    {
+        return -3;
+    }
+
+    for(i = 0u; i < (uint32)ARKRTOS_SMP_BALANCE_MAX; i++)
+    {
+        if(s_auto[i] < 0)
+        {
+            s_auto[i] = idx;
+            s_auto_n++;
+            return 0;
+        }
+    }
+    return -2;
+}
+
+int32 arkrtos_smp_sched_auto_del(int32 task_id)
+{
+    uint32 i;
+    int32  idx;
+
+    sms_lazy_init();
+
+    if((task_id <= 0) || (task_id > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return -1;
+    }
+    idx = task_id - 1;
+    for(i = 0u; i < (uint32)ARKRTOS_SMP_BALANCE_MAX; i++)
+    {
+        if(s_auto[i] == idx)
+        {
+            s_auto[i] = -1;
+            s_auto_n--;
+            return 0;
+        }
+    }
+    return -4;
+}
+
+uint32 arkrtos_smp_sched_auto_count(void)
+{
+    return s_auto_n;
+}
+
+/**
+* @brief 策略主体：在 CPU0 的节拍里跑一次
+* @return 本次自动迁出的任务数
+* @note 只在 CPU0 调用；它读 CPU0 的就绪集、改次核队列，两者都已有锁。
+*/
+static int32 sms_balance_step(void)
+{
+    uint32 cpu;
+    int32  moved = 0;
+    uint32 ready;
+
+    s_bal_tick++;
+
+    ready = arkrtos_sched_ready_count();
+
+    for(cpu = 1u; cpu < (uint32)ARKRTOS_CPU_NUM; cpu++)
+    {
+        uint32 i;
+        int32  target = -1;
+
+        /* 规则 1：次核空闲 + CPU0 有两个以上就绪任务 => 迁一个过去 */
+        if((s_qn[cpu] == 0u) && (s_cur[cpu] == ARKRTOS_SMP_SCHED_NIL) &&
+           (ready >= 2u))
+        {
+            for(i = 0u; i < (uint32)ARKRTOS_SMP_BALANCE_MAX; i++)
+            {
+                int32 idx = s_auto[i];
+
+                if(idx < 0)
+                {
+                    continue;
+                }
+                if((s_owner[idx] != 0u) ||
+                   (idx == (arkrtos_current_task_id - 1)) ||
+                   (arkrtos_task_table[idx].status != ARKRTOS_TASK_READY) ||
+                   (arkrtos_ready_contains(idx) == 0u))
+                {
+                    continue;
+                }
+                target = idx;
+                break;
+            }
+
+            if(target >= 0)
+            {
+                if(arkrtos_smp_sched_task_to(target + 1, cpu) == 0)
+                {
+                    s_bal_out++;
+                    moved++;
+                    ready--;
+                }
+            }
+            else
+            {
+                s_bal_idle++;
+            }
+            continue;
+        }
+
+        /* 规则 2：CPU0 没有就绪任务、次核排了两个以上 => 要回一个 */
+        if((ready == 0u) && (s_qn[cpu] >= 2u))
+        {
+            int32 pending = -1;
+
+            for(i = (uint32)s_qn[cpu]; i > 0u; i--)
+            {
+                int32 idx = (int32)s_q[cpu][i - 1u];
+
+                if((idx >= 0) && (sms_auto_find(idx) >= 0))
+                {
+                    pending = idx;
+                    break;
+                }
+            }
+
+            if((pending >= 0) &&
+               (arkrtos_smp_sched_task_back(pending + 1) == 0))
+            {
+                s_bal_back++;
+                ready++;
+            }
+        }
+    }
+
+    return moved;
+}
+
+int32 arkrtos_smp_sched_balance_stat(uint32 *out)
+{
+    if(out == 0)
+    {
+        return -1;
+    }
+    out[0] = s_bal_out;
+    out[1] = s_bal_back;
+    out[2] = s_bal_idle;
+    out[3] = s_bal_tick;
+    return 0;
+}
+#endif /* ARKRTOS_USE_SMP_BALANCE == 1 */
+
 void arkrtos_smp_sched_poll(void)
 {
     uint32 cpu;
@@ -339,6 +565,9 @@ void arkrtos_smp_sched_poll(void)
             arkrtos_ready_add(idx);
         }
     }
+#if (ARKRTOS_USE_SMP_BALANCE == 1)
+    (void)sms_balance_step();
+#endif
 }
 
 /* ============================================================
