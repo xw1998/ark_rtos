@@ -487,6 +487,12 @@ static uint32 g_con_lock_calls;
 static uint32 g_con_unlock_calls;
 static uint32 g_con_held;
 
+/* 与 kernelsrc/include/arkrtos_log.h 里的声明逐字一致：本用例不 include 那个
+ * 头（它会拉进日志宏与运行期级别），但原型必须在这里可见，否则
+ * -Wmissing-prototypes 会把这对桩当成"没声明的全局函数"报出来。 */
+int32 arkrtos_console_lock(void);
+void  arkrtos_console_unlock(void);
+
 int32 arkrtos_console_lock(void)
 {
     g_con_lock_calls++;

@@ -511,7 +511,7 @@ COW 只管「fork 之后各写各的」这一半；要让父子看见彼此的�
 
 读数（`tools/fork_gate.py` 的 fork+COW+SHM 档，共 34 条 check）：SHM 段 8 条 ——
 两条非法形态回 `-38`、`mmap(MAP_SHARED|ANON) > 0`、`shared page starts zeroed -> 0`、
-`clone for shm child > 0`、`parent saw child shared write -> 1`、`shm child exit reaped -> 12`、
+`clone for shm child > 0`、`parent saw child shared write -> 300`、`shm child exit reaped -> 12`、
 `shm child saw parent post-fork write (bits=1) -> 1`。内核日志断言另加一条
 `[LA64U] pg shm map va=0x<hex> pairs=<n>`（要求 `pairs >= 1`）。同一轮里
 `[LA64U] pg cow fork shared=<n> ...` 的 `shared` 比纯 COW 档多 1 对（共享对也算共享）。
@@ -525,6 +525,17 @@ COW 只管「fork 之后各写各的」这一半；要让父子看见彼此的�
 ——读数没少，是行被劈开了。现在 `lx_write` 整次调用持控制台锁
 （`arkrtos_console_lock()` / `arkrtos_console_unlock()`），内核日志拿同一把锁，
 二者不再互相切行。
+
+**判据侧的顺序是构造出来的，不是碰出来的。** 「父 fork 之后写、子在之后读到」这一条
+原先让子进程在纯用户循环里自旋等 4M 次，赌「父进程能在子自旋期间拿到 CPU」。
+一次 clone 之后子进程常常先跑，而用户态的自旋循环里没有任何让出点 ⇒ 这一赌会输：
+偶发读到 `bits=0`，看着像「共享对被 private 复制」，其实是夹具在赌调度顺序。
+现在子进程在一条**放行管道**上**轮询**——本内核的管道是非阻塞的（空管道
+`read` 当场 `-EAGAIN`，见 §6），所以要一直 read 到父进程那个字节真的取到——
+父进程写完 200 再写一个字节放行；「父看到子的 300」也改成在 `wait4` 返回之后读（子那时已经退出，
+没有竞态）。同一手法用在阻塞 `wait4` 那一段：父先读起点时刻，再放子进程去睡 60 ms
+—— 否则「子已经跑掉一部分」会让读数偶尔变成 `blocking wait4 waited 2 ms`，
+看起来像 wait4 没阻塞。改完 fork+cow+shm 档 3/3 连跑稳定。
 
 ## 9 开关与零体积
 
@@ -629,6 +640,14 @@ rodata 失败，因为栈窗口（32 KB）被单独设过，而代码窗口没�
 `[LA64U] pg cow copy ...` 能插在 `[fork] ... -> 1` 与 ` ok` 之间，门禁报「少了一条
 读数」（33 != 34），实际上一条都没少。修法是 `lx_write` 整次调用持
 `arkrtos_console_lock()`——内核日志拿的是同一把锁，二者不再互相切行（§8.3）。
+
+**⑤ 读数坑续：把「夹具赌调度」读成「实现坏了」。** 同一档里还有两处顺序问题，
+它们都不改实现就消失：SHM 段原来用纯用户自旋等 4M 次，阻塞 `wait4` 段原来让子
+进程一 clone 就开始睡 60 ms。前者在某次全量门禁里读出 `bits=0`（像共享失效），
+后者读出 `waited 2 ms`（像 wait4 没阻塞），单跑又都正常 —— 典型的「判据里藏着
+调度假设」。两处都改成「管道放行 + 轮询」定序（§8.3），3/3 与 5/5 连跑稳定。门禁同时补了一条
+可诊断性：QEMU 读数不过时把整段串口写到 `%TEMP%\ark_fork_<tier>.log` 并在失败
+行里给出行数与路径 —— 否则「缺某一行」分不出是夹具没打、还是串口只收到一半。
 
 ## 12 边界
 

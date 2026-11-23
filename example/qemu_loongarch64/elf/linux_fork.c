@@ -485,10 +485,13 @@ void linux_main(unsigned long sp)
     /* ---------------- 阻塞 wait4 / fd 继承 / 跨任务信号 ---------------- */
     {
         int     pfds[2];        /* Linux pipe2 的 out 参数是 int[2] */
+        int     god[2];         /* 放行管道：父先读起点、再放子进程开跑 */
+        int     gopipe = 0;
         lx_long child2;
         lx_long rc2;
         lx_long status2;
         char    rbuf[8];
+        char    goch;
         long    ts2[2];
         long    b0;
         long    b1;
@@ -496,17 +499,50 @@ void linux_main(unsigned long sp)
 
         check("pipe2 before fork == 0",
               lx2(LX_PIPE2, (lx_long)(unsigned long)pfds, 0), 0);
+        if (lx2(LX_PIPE2, (lx_long)(unsigned long)god, 0) != 0)
+        {
+            gopipe = 0;
+        }
+        else
+        {
+            gopipe = 1;
+        }
 
         child2 = lx3(LX_CLONE, LX_SIGCHLD, 0, 0);
         if (child2 == 0)
         {
             /* 子进程：先活够 60 ms（让父的阻塞 wait4 真的阻塞），再往管道里
              * 写 3 字节、关掉自己那两个 fd、退出 7。关的必须是**它自己**
-             * 那一份 fd 表 —— 旧实现是全局单份，父的读端会被一起关掉。 */
+             * 那一份 fd 表 —— 旧实现是全局单份，父的读端会被一起关掉。
+             *
+             * 「活够 60 ms」不能靠调度时序赌：先前子进程一 clone 就自己
+             * 开跑，父的起点读数就变成「子已经跑掉一部分」之后的时刻，
+             * 偶尔量出 2 ms 这种读数（看起来像 wait4 没阻塞）。
+             *
+             * 现在改成**轮询放行管道**：本内核的管道是非阻塞的（空管道
+             * read 当场 -EAGAIN，见文档 §6），所以「子阻塞在 read 上」这条
+             * 前提不成立 —— 单次 read 会立刻返回，子照样先跑掉。必须一直
+             * read 到父进程写进来的那个字节真的被取到为止。这样 60 ms 的
+             * 计时起点严格在「父读完 b0、写完放行字节」之后，读数是被构造
+             * 出来的，不是碰出来的。轮询有上限，取不到就照旧往下走（不会
+             * 挂死；真挂死也会在下面的读数里暴露出来）。 */
             long c0 = -1;
             long cnow;
+            long gpoll = 0;
             lx_long wrc;
 
+            if (gopipe != 0)
+            {
+                while (gpoll < 4000000)
+                {
+                    if (lx3(LX_READ, (lx_long)god[0],
+                            (lx_long)(unsigned long)&goch, 1) == 1)
+                    {
+                        break;
+                    }
+                    gpoll++;
+                }
+            }
             if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
                     (lx_long)(unsigned long)ts2, 0) == 0)
             {
@@ -545,6 +581,16 @@ void linux_main(unsigned long sp)
                 (lx_long)(unsigned long)ts2, 0) == 0)
         {
             b0 = (ts2[0] * 1000) + (ts2[1] / 1000000);
+        }
+
+        /* 起点已经读到了，现在才放子进程去睡那 60 ms。 */
+        if (gopipe != 0)
+        {
+            goch = 'g';
+            (void)lx3(LX_WRITE, (lx_long)god[1],
+                      (lx_long)(unsigned long)&goch, 1);
+            (void)lx1(LX_CLOSE, (lx_long)god[0]);
+            (void)lx1(LX_CLOSE, (lx_long)god[1]);
         }
 
         /* 阻塞 wait4：options = 0，没有 WNOHANG —— 父进程必须在这里等。 */
@@ -634,7 +680,8 @@ void linux_main(unsigned long sp)
     {
         volatile unsigned long *shm;
         lx_long shmaddr;
-        int     spins;
+        int     sfds[2];
+        int     spipe = 0;
 
         check("mmap(shared without anon) == -ENOSYS",
               lx6(LX_MMAP, 0, 4096, 3, LX_MAP_SHARED, -1, 0), -LX_ENOSYS);
@@ -652,30 +699,47 @@ void linux_main(unsigned long sp)
             lx_long child5;
             lx_long status5 = -1;
             lx_long rc5 = -1;
-            long    ts5[2];
-            long    t0 = -1;
-            long    now = 0;
-            int     seen = 0;
 
             shm = (volatile unsigned long *)(unsigned long)shmaddr;
             check("shared page starts zeroed", (lx_long)(*shm), 0);
             *shm = 100ul;
 
+            /* 用管道把「父先写、子后读」排成确定顺序。原先子进程纯用户自旋
+             * 等 4M 次，赌的是「父进程能在子自旋期间拿到 CPU」——在用户态
+             * 不抢占的配置下这把赌注会输，读数是 child bits=0，看起来像
+             * 「共享失效」，其实是夹具在赌调度。
+             *
+             * 本内核的管道是非阻塞的（空管道 read 当场 -EAGAIN），所以子进程
+             * 不能靠「阻塞在 read 上」定序 —— 要**轮询**到父进程写进来的
+             * 那个字节真的读到，再去读共享页。上限只是防挂死。 */
+            if (lx2(LX_PIPE2, (lx_long)(unsigned long)sfds, 0) == 0)
+            {
+                spipe = 1;
+            }
+
             child5 = lx3(LX_CLONE, LX_SIGCHLD, 0, 0);
             if (child5 == 0)
             {
-                int bits = 0;
+                int  bits = 0;
+                char go = 0;
 
-                for (spins = 0; spins < 4000000; spins++)
+                if (spipe != 0)
                 {
-                    if (*shm == 200ul)
+                    long spoll = 0;
+
+                    while (spoll < 4000000)
                     {
-                        bits = 1;
-                        break;
+                        if (lx3(LX_READ, (lx_long)sfds[0],
+                                (lx_long)(unsigned long)&go, 1) == 1)
+                        {
+                            break;
+                        }
+                        spoll++;
                     }
                 }
-                if (bits != 0)
+                if (*shm == 200ul)
                 {
+                    bits = 1;
                     *shm = 300ul;
                 }
                 (void)lx1(LX_EXIT, bits);
@@ -688,41 +752,20 @@ void linux_main(unsigned long sp)
 
             /* 父进程 fork 之后写：这一笔必须落到共享帧里。 */
             *shm = 200ul;
-
-            if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
-                    (lx_long)(unsigned long)ts5, 0) == 0)
+            if (spipe != 0)
             {
-                t0 = (ts5[0] * 1000) + (ts5[1] / 1000000);
-                now = t0;
+                char go = 'x';
+                (void)lx3(LX_WRITE, (lx_long)sfds[1],
+                          (lx_long)(unsigned long)&go, 1);
             }
-            for (;;)
-            {
-                if (*shm == 300ul)
-                {
-                    seen = 1;
-                    break;
-                }
-                if (t0 < 0)
-                {
-                    break;
-                }
-                if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
-                        (lx_long)(unsigned long)ts5, 0) != 0)
-                {
-                    break;
-                }
-                now = (ts5[0] * 1000) + (ts5[1] / 1000000);
-                if ((now - t0) >= 400)
-                {
-                    break;
-                }
-            }
-            check("parent saw child shared write", seen, 1);
 
             rc5 = lx4(LX_WAIT4, child5, (lx_long)(unsigned long)&status5, 0, 0);
             check("shm child exit reaped", rc5, child5);
             check("shm child saw parent post-fork write (bits=1)",
                   (status5 >> 8) & 0xFF, 1);
+            /* 子看到 200 之后写的 300 必须回落到同一帧：wait4 返回时子已经
+             * 退出，这一读没有竞态。 */
+            check("parent saw child shared write", (lx_long)(*shm), 300);
         }
     }
 #endif

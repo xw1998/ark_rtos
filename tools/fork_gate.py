@@ -555,8 +555,10 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False):
             "PRIVATE|SHARED 同时给居然被接受"
         req["mmap(MAP_SHARED|ANON) > 0 -> 1 ok"] = "匿名共享映射失败"
         req["shared page starts zeroed -> 0 ok"] = "共享页不是从 0 开始"
-        req["parent saw child shared write -> 1 ok"] = \
-            "父进程看不到子进程对共享页的写（这根本不是共享）"
+        # 这一条读的是子写进去的值本身（等值比较），所以行尾是 300 而不是 1：
+        # 只判「非 0」会把「写到了别的值」也放过。
+        req["parent saw child shared write -> 300 ok"] = \
+            "父进程看不到子进程对共享页的写（这根本不是共享）或者看到的不是 300"
         req["shm child saw parent post-fork write (bits=1) -> 1 ok"] = \
             "子进程看不到父进程 fork 之后对共享页的写（共享对被当私有复制了）"
     for line, why in req.items():
@@ -674,8 +676,8 @@ def self_check(good_text, cow=False, shm=False):
                 r"^\[LA64U\] pg shm map va=0x[0-9a-f]+ pairs=\d+$\n", "",
                 s, flags=re.M),
             "共享写没被父看到": lambda s: s.replace(
-                "[fork] parent saw child shared write -> 1 ok",
-                "[fork] parent saw child shared write -> 0 FAIL (want 1)"),
+                "[fork] parent saw child shared write -> 300 ok",
+                "[fork] parent saw child shared write -> 200 FAIL (want 300)"),
             "子看不到父的写": lambda s: s.replace(
                 "[fork] shm child saw parent post-fork write (bits=1) -> 1 ok",
                 "[fork] shm child saw parent post-fork write (bits=1) -> 0 FAIL (want 1)"),
@@ -766,6 +768,17 @@ def main(argv):
             if text is None:
                 bad("qemu-run", "[%s] QEMU 没写出串口（%s 秒内）" % (tag, a.seconds))
                 continue
+            # 串口整段留档：以前读数不对时只剩一句「缺 X 行」，到底是夹具
+            # 没打、还是串口只收到一半，分不出来 —— 那会把一次真缺陷读成
+            # 一次抖动。落盘一次，失败时可回看原文。
+            dump = os.path.join(tempfile.gettempdir(),
+                                "ark_fork_%s.log" % tag.replace("+", "_"))
+            try:
+                with open(dump, "w", encoding="utf-8", newline="") as f:
+                    f.write(text)
+            except OSError:
+                dump = ""
+
             passed, notes = judge(text, nchk, cow, shm)
             if passed:
                 ok("qemu-readout", "[%s] %s" % (tag, notes[0]))
@@ -777,7 +790,10 @@ def main(argv):
                     ok("parser-selfcheck",
                        "[%s] 坏法（含 COW 专属）全被判红" % tag)
             else:
-                bad("qemu-readout", "[%s] %s" % (tag, "；".join(notes)))
+                bad("qemu-readout", "[%s] %s（串口 %d 行，原文见 %s）"
+                    % (tag, "；".join(notes),
+                       len(text.replace("\r\n", "\n").splitlines()),
+                       dump or "（落盘失败）"))
                 bad("parser-selfcheck", "[%s] 读数没过，自检无从谈起" % tag)
             if a.keep:
                 tail = "\n".join(text.replace("\r\n", "\n").splitlines()[-40:])

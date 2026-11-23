@@ -540,7 +540,7 @@ and marks it shared **at mmap time**:
 Readouts (`tools/fork_gate.py`, fork+COW+SHM tier, 34 checks): the SHM section has
 8 - two refused forms returning `-38`, `mmap(MAP_SHARED|ANON) > 0`,
 `shared page starts zeroed -> 0`, `clone for shm child > 0`,
-`parent saw child shared write -> 1`, `shm child exit reaped -> 12` and
+`parent saw child shared write -> 300`, `shm child exit reaped -> 12` and
 `shm child saw parent post-fork write (bits=1) -> 1`. The kernel log adds at least
 one `[LA64U] pg shm map va=0x<hex> pairs=<n>` with `pairs >= 1`. In the same run
 the `shared` count of `[LA64U] pg cow fork shared=<n> ...` is one pair larger than
@@ -557,6 +557,23 @@ and the trailing ` ok`, which made the gate look like "one readout is missing" -
 none was missing, the line had been cut in half. `lx_write` now holds
 `arkrtos_console_lock()` for the whole call, and the kernel log takes the same lock,
 so the two no longer splice each other.
+
+**The order the readout depends on is constructed, not gambled.** "Parent writes
+after fork, child reads it" used to let the child spin 4M times in a pure user
+loop, betting that the parent would get the CPU during that spin. Right after
+`clone` the child usually runs first, and a user-mode spin loop has no yield
+point, so the bet loses now and then: `bits=0` is read, which looks like "the
+shared pair was privately copied" but is really the fixture gambling on
+scheduling. The child now **polls** a **release pipe** - pipes in this kernel are
+non-blocking (an empty read returns `-EAGAIN` at once, section 6), so it keeps
+reading until the parent's byte is actually taken - and the parent writes 200
+before sending that byte; "parent saw
+the child's 300" is read **after `wait4` returns**, when the child is gone, so
+there is no race. The same trick orders the blocking `wait4` section: the parent
+reads its start timestamp before releasing the child to sleep 60 ms - otherwise
+"the child already ran part of its sleep" occasionally reads as
+`blocking wait4 waited 2 ms`, which looks like wait4 did not block. With both
+fixed the fork+cow+shm tier is stable 3/3 and the default tier 5/5.
 
 ## 9 Switch and zero footprint
 
@@ -648,7 +665,14 @@ least one `[LA64U] pg shm map va=0x<n> pairs>=1`. The SHM switch has its own
    bytes but **a line split by preemption** once the user task started running;
    the demo now prints whole lines under the scheduler lock. Two reader-side
    traps were fixed too: killing on the marker prefix truncates `exit code 7`,
-   and `-serial file:` drops the last sub-4 KB block on kill.
+   and `-serial file:` drops the last sub-4 KB block on kill. The SHM tier hit
+   the same class twice more - a user-mode spin waiting 4M times and a child that
+   started its 60 ms sleep before the parent took its baseline - both read as
+   "the implementation is broken" while the implementation was fine; both are
+   now ordered with a release pipe plus polling (section 8.3). The gate also dumps the whole serial
+   capture to `%TEMP%\ark_fork_<tier>.log` on failure and prints the line count
+   and path, because "a certain line is missing" used to be indistinguishable
+   from "the serial only got half of it".
 
 ## 12 Boundaries
 
