@@ -769,6 +769,17 @@ CASES = [
      "PLATFORM-SHELL-HOST OK",
      {"incs": ["-Ikernelsrc/tests", "-Iboard/qemu_loongarch64",
                "-Ikernelsrc/shell", "-Ikernelsrc/shell/ark_shell"]}),
+    # --- 2026-11-23：块设备 / littlefs 门面 / VFS 命令 / mini / pwd-cd-df ---
+    # 用例自己提供两块内存 blk、littlefs 卷桩、VFS 命名空间与可编程的
+    # mini/crash，所以不需要真 Flash 或真实文件系统。板级口径用 F427 而不是
+    # qemu_loongarch64：后者把 MINIAPP 关掉会让 cmd_mini 不参与编译，链接
+    # 报 bad reloc。覆盖率地板 99.4%：剩下 7 行是防御分支，用例里写明不可达。
+    ("shellfs", "kernelsrc/tests/test_shell_fs_host.c",
+     ["kernelsrc/shell/arkrtos_shell_fs.c"],
+     F427_DEFS + [SIGN_KEY_DEF, "-fno-asynchronous-unwind-tables",
+                  "-DARKRTOS_USE_TASK_SWAP=1"],
+     "SHELL-FS-HOST OK",
+     {"incs": ["-Ikernelsrc/tests"] + F427_INCS}),
     ("ushell", "kernelsrc/tests/test_shell_ushell_host.c",
      ["kernelsrc/shell/arkrtos_shell_ushell.c"],
      ['-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',

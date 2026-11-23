@@ -3752,6 +3752,85 @@ def check_shell_platform_host():
        "console hold pairing, capture diversion, 200000-retry spin limit, tick "
        "and mode passthrough, reboot via the board hook): %s" % last)
 
+def check_shell_fs_host():
+    """Block devices, the littlefs facade, VFS commands and the mini applet.
+
+    arkrtos_shell_fs.c is the largest shell file and the only place the four
+    operator-facing families meet the storage layer, so a silent regression
+    here costs data instead of printing an error.  The case links the real file
+    against in-memory fixtures and walks every refusal path it can reach:
+
+      * blk: list / probe / rd / wr / erase / test; a write only lands on
+        erased (0xFF) bytes and an erase only on erase-unit boundaries, so a
+        success cannot come from a write that did nothing;
+      * fs: mount / unmount / format / info / ls / wr / rd / put / delete-file
+        / test / err, including the unformatted-volume hint, the chunked
+        upload's ACK/NAK handshake, and a "test" whose second read (after the
+        remount) is made to fail;
+      * vfs: mount / umount / ls (-l, -a, file argument, and pseudo rows when
+        stat fails) / cat (file and stdin, with non-printables escaped as \\xNN)
+        / delete-file / mkdir / rmdir / mv / cp / touch / chmod / chown /
+        stat, plus path completion at every branch;
+      * mini: run / stop / count / limit / forget / swap / autostart and list;
+      * pwd / cd / df.
+
+    Honest limits:
+      1) every backend is a stub with a programmable return code: what is
+         proved is the command layer's ordering and wording, not that a real
+         chip, littlefs volume or VFS exists;
+      2) the fixture deliberately keeps the real constraints that let "ok"
+         mean something (erased-before-write, unit-aligned erase, read-back in
+         blk test, remount-before-second-read in fs test);
+      3) measured line coverage is 99.4% (1157 of 1164 lines).  The 7 misses
+         are unreachable defence branches, named in the test's header: the
+         completion "would not fit" guard and the three mini "path too long"
+         branches (the shell can never hand over a long enough argument);
+      4) the board configuration is STM32F427, where MINIAPP is on.  The
+         qemu_loongarch64 board turns MINIAPP off, which drops cmd_mini from
+         the link, so this case must not use that include path.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("shellfs-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    pick = None
+    for case in CASES:
+        name, test, mods, defs, markers, incs, _argv = _case(case)
+        if name == "shellfs":
+            pick = (test, mods, defs, incs, markers)
+            break
+    if pick is None:
+        fail("shellfs-host", "case shellfs missing from coverage_gate.CASES")
+        return
+
+    test, mods, defs, incs, markers = pick
+    with TempDir() as td:
+        exe = os.path.join(td, "shellfs" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            err = (r.stderr or "").strip().splitlines() or [""]
+            fail("shellfs-host", "the case did not build: %s"
+                 % [x for x in err if x.strip()][-1][:220])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or markers[0] not in txt or "FAIL" in txt:
+            fail("shellfs-host", txt.strip()[-260:])
+            return
+        last = txt.strip().splitlines()[-1]
+
+    ok("shellfs-host",
+       "block device / littlefs facade / VFS commands / mini / pwd-cd-df on "
+       "the host, refusal paths included: %s" % last)
+
 def check_shell_core_host():
     """Console core: command registry, console task loop and task release.
 
@@ -5796,6 +5875,7 @@ CHECK_TABLE = (
     ("shellpmap-host", check_shell_pmap_host),
     ("shelldiag-host", check_shell_diag_host),
     ("shellplat-host", check_shell_platform_host),
+    ("shellfs-host", check_shell_fs_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),

@@ -1258,7 +1258,7 @@ static void ls_pseudo(const char *vpath, uint32 longfmt)
 
     if(ark_vfs_stat(vpath, &st) == 0)
     {
-        ls_long_row(".", st.mode, st.size, st.uid, st.gid);
+        ls_long_row(".", st.mode, (uint32)st.size, st.uid, st.gid);
     }
     else
     {
@@ -1276,7 +1276,7 @@ static void ls_pseudo(const char *vpath, uint32 longfmt)
     }
     if(ark_vfs_stat(dotdot, &st) == 0)
     {
-        ls_long_row("..", st.mode, st.size, st.uid, st.gid);
+        ls_long_row("..", st.mode, (uint32)st.size, st.uid, st.gid);
     }
     else
     {
@@ -1442,7 +1442,7 @@ int cmd_vfs_ls(int argc, char *argv[])
         {
             if(ctx.longfmt != 0u)
             {
-                ls_long_row(path_basename(vpath), fst.mode, fst.size,
+                ls_long_row(path_basename(vpath), fst.mode, (uint32)fst.size,
                             fst.uid, fst.gid);
             }
             else
