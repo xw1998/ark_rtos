@@ -566,11 +566,15 @@ config ARKRTOS_USE_LINUX_FORK
 	  accepts options 0 or WNOHANG.
 
 	  Three boundaries are deliberate and documented, not bugs:
-	    1) The fd table, pipes, signal table and heap cursor are one global
-	       copy.  A child inherits the same copy, not a duplicate, and there
-	       is no isolation between parent and child on those objects.
-	    2) wait4 cannot block.  A live child with options == 0 answers
-	       -EAGAIN, because this kernel has no "block inside a syscall" path.
+	    1) The descriptor table, pipes, signal actions and masked set are
+	       per process: a child inherits a copy, and closing a descriptor in
+	       the child does not close the parent's.  Pipe objects themselves
+	       are shared and reference counted.  The heap cursor is still one
+	       global value, not per process.
+	    2) wait4 with options == 0 really blocks: the task sleeps and the
+	       port rewinds ERA to the syscall so it is replayed on wakeup
+	       (the same shape as Linux ERESTARTSYS).  A port without replay
+	       support answers -EAGAIN.
 	    3) A child must be reaped before its task slot is reused.  Each TCB
 	       carries a registration generation; a wait4 that arrives after the
 	       slot was reused answers -ECHILD instead of reporting a stranger.
@@ -609,6 +613,28 @@ config ARKRTOS_USE_PAGING_COW
 
 	  Off (default) compiles no reference table and no fault handler; fork
 	  keeps copying frame by frame, so the image does not change by a byte.
+
+config ARKRTOS_USE_PAGING_SHM
+	bool "MAP_SHARED anonymous pages across fork (U-19c)"
+	depends on ARKRTOS_USE_PAGING_COW
+	help
+	  Make mmap(MAP_SHARED|MAP_ANONYMOUS) real: the pairs are allocated and
+	  zeroed at mmap time and marked shared, so fork only bumps the reference
+	  count instead of copying them.  Parent and child then see each other's
+	  writes through the same physical frames - a store never splits a shared
+	  pair the way copy-on-write splits a private one.
+
+	  Three boundaries (not bugs):
+	    1) The granularity is this port's 8 KB pair: a 4 KB shared mapping
+	       owns the whole pair, so a private mapping cannot share it.
+	    2) Sharing is inherited through fork only.  There is no shm_open, no
+	       file-backed mapping and no fd passing, so two unrelated processes
+	       cannot open the same object.
+	    3) The reference count is the COW tier's ledger, hence the dependency.
+
+	  Off (default) compiles no shared-pair table, no mapping entry point and
+	  no log line: mmap still answers -ENOSYS for MAP_SHARED and the image
+	  does not change by a byte.
 
 config ARKRTOS_USE_WIDE_SVC_ARGS
 	bool "Native-width SVC parameter block (wide-argument ABI, U-18)"

@@ -1160,6 +1160,13 @@ static uint8  s_pg_frame_ref[ARKRTOS_QEMU_FRAME_COUNT];
 static uint32 s_pg_cow_copies;      /* 复制过多少对（诊断） */
 static uint32 s_pg_cow_faults;      /* 写故障命中多少次（诊断） */
 static uint32 s_pg_cow_shared;      /* 当前 ref > 1 的对数（诊断） */
+#if (ARKRTOS_USE_PAGING_SHM == 1)
+/* MAP_SHARED 匿名共享页的「对」标记。ref > 1 只说明「有人在共享」，分不出
+ * 「COW 复制出来的共享」与「本来就要共享」——前者第一次写要复制，后者两个
+ * 进程必须看到彼此的字。所以共享对必须单独记一位，不能从 ref 推出来。
+ * 标记按「空间 + 对号」记：fork 时整份继承，空间回收时清掉。 */
+static uint8  s_pg_pair_shr[ARKRTOS_PAGING_APPS_MAX][LA_PG_WIN_ENTRIES];
+#endif
 
 /** 物理地址 -> 帧池槽号；不在池里回 LA_PG_COW_SLOT_NONE */
 static uint32 la_pg_frame_slot(uint32 pa)
@@ -1263,6 +1270,34 @@ static uint32 la_pg_pair_ref_down(uint32 pa)
     return 1u;
 }
 
+#if (ARKRTOS_USE_PAGING_SHM == 1)
+/** 某一对是否被标成 MAP_SHARED（越界/非法一律按「不是」处理） */
+static int32 la_pg_pair_shr(uint32 space, uint32 idx)
+{
+    if((space >= (uint32)ARKRTOS_PAGING_APPS_MAX) ||
+       (idx >= LA_PG_WIN_ENTRIES))
+    {
+        return 0;
+    }
+    return (s_pg_pair_shr[space][idx] != 0u) ? 1 : 0;
+}
+
+static void la_pg_pair_shr_set(uint32 space, uint32 idx, uint32 on)
+{
+    if((space >= (uint32)ARKRTOS_PAGING_APPS_MAX) ||
+       (idx >= LA_PG_WIN_ENTRIES))
+    {
+        return;
+    }
+    s_pg_pair_shr[space][idx] = (uint8)((on != 0u) ? 1u : 0u);
+}
+#define la_pg_pair_shr_check(space, idx)   (0)
+#else
+#define la_pg_pair_shr(space, idx)         (0)
+#define la_pg_pair_shr_set(space, idx, on) do { } while(0)
+#define la_pg_pair_shr_check(space, idx)   (0)
+#endif
+
 /** 8 KB 复制：故障/克隆上下文里没有 libc，也不能睡眠 */
 static void la_pg_copy_pair_words(uint32 *dst, const uint32 *src)
 {
@@ -1317,6 +1352,12 @@ static int32 la_pg_cow_break(uint32 space, uint32 idx)
     {
         return -1;
     }
+#if (ARKRTOS_USE_PAGING_SHM == 1)
+    if(la_pg_pair_shr(space, idx) != 0)
+    {
+        return 0;                   /* MAP_SHARED：写就该写进共享帧 */
+    }
+#endif
     r = la_pg_ref_get(old);
     if(r <= 1u)
     {
@@ -1381,7 +1422,20 @@ static int32 la_pg_cow_fault(unsigned long badv)
         return 0;
     }
     pa = s_pg_pair_pa[space][idx];
-    if((pa == 0u) || (la_pg_ref_get(pa) <= 1u))
+    if(pa == 0u)
+    {
+        return 0;
+    }
+#if (ARKRTOS_USE_PAGING_SHM == 1)
+    if(la_pg_pair_shr(space, idx) != 0)
+    {
+        /* 共享映射被装成了只读（重填路径的兜底会这么干）：装回可写就够了，
+         * 绝不复制 —— 复制出来的页就再也看不到对方了。 */
+        la_pg_install_pair(space, idx, pa, 1u);
+        return 1;
+    }
+#endif
+    if(la_pg_ref_get(pa) <= 1u)
     {
         return 0;
     }
@@ -1474,8 +1528,14 @@ static void la_pg_install_space(uint32 space)
 
 #if (ARKRTOS_USE_PAGING_COW == 1)
             /* 共享的对按只读装：换回这个空间时若装成可写，第一次写就绕过
-             * COW 直接写进两个进程共用的那一帧。 */
-            if(la_pg_ref_get(pa) > 1u)
+             * COW 直接写进两个进程共用的那一帧。MAP_SHARED 的对例外：
+             * 它本来就是两个人一起写，装只读只会把每次写都变成一次多余的
+             * 「复制回来」（那条路径能救回可写，但纯属白跑）。 */
+            if((la_pg_ref_get(pa) > 1u)
+#if (ARKRTOS_USE_PAGING_SHM == 1)
+               && (la_pg_pair_shr(space, i) == 0)
+#endif
+               )
             {
                 lo0 = LA_PTE_APP_RO(pa);
                 lo1 = LA_PTE_APP_RO(pa + 0x1000u);
@@ -1927,6 +1987,7 @@ int32 arkrtos_port_paging_space_clone(uint32 src, uint32 dst)
                 s_pg_pair_pa[dst][i] = spa;
                 la_pg_pair_ref_up(spa);
                 shared++;
+                la_pg_pair_shr_set(dst, i, (uint32)la_pg_pair_shr(src, i));
             }
 #if (ARKRTOS_USE_PAGING_SWAP == 1)
             else if(s_pg_pair_slot[src][i] != 0u)
@@ -1959,6 +2020,7 @@ int32 arkrtos_port_paging_space_clone(uint32 src, uint32 dst)
                 for(i = 0u; i < LA_PG_WIN_ENTRIES; i++)
                 {
                     if((s_pg_pair_pa[dst][i] != 0u) &&
+                       (la_pg_pair_shr(dst, i) == 0) &&
                        (la_pg_stack_pair(i) != 0))
                     {
                         if(la_pg_cow_break(dst, i) == 0)
@@ -1980,6 +2042,7 @@ int32 arkrtos_port_paging_space_clone(uint32 src, uint32 dst)
                 uint32 spa = s_pg_pair_pa[src][i];
 
                 if((spa != 0u) && (la_pg_ref_get(spa) > 1u) &&
+                   (la_pg_pair_shr(src, i) == 0) &&
                    (src == s_pg_app_space))
                 {
                     la_pg_install_pair(src, i, spa, 0u);
@@ -2011,6 +2074,7 @@ int32 arkrtos_port_paging_space_clone(uint32 src, uint32 dst)
                     (void)arkrtos_port_paging_frame_free(dpa, 2u);
                 }
                 s_pg_pair_pa[dst][i] = 0u;
+                la_pg_pair_shr_set(dst, i, 0u);
             }
         }
         return -3;
@@ -2110,8 +2174,10 @@ int32 arkrtos_port_paging_write_space(uint32 space, unsigned long va,
 #if (ARKRTOS_USE_PAGING_COW == 1)
         /* 共享对：先把自己的那一份复制出来。按 PA 直写绕不过 COW ——
          * 不复制就是往「别人也看得见」的帧里写（子进程的初始 trap 帧
-         * 正是走这条路，踩到就是父子的栈互相覆盖）。 */
-        if(la_pg_cow_break(space, idx) != 0)
+         * 正是走这条路，踩到就是父子的栈互相覆盖）。MAP_SHARED 的对
+         * 反过来：写进共享帧才是它的语义，复制会把共享断开。 */
+        if((la_pg_pair_shr_check(space, idx) == 0) &&
+           (la_pg_cow_break(space, idx) != 0))
         {
             return -1;
         }
@@ -2284,7 +2350,11 @@ static int32 la_pg_demand_fault(unsigned long badv)
          * 重新装条目；这里若一律装可写，COW 就只剩 fork 那一刻的一层只读，
          * 进程切回来第一次写就绕过 COW 写进两个进程共用的帧。
          * 栈对例外：栈页必须可写（trap 帧压在栈上），共享就地拆开。 */
-        if(la_pg_ref_get(pa) > 1u)
+        if((la_pg_ref_get(pa) > 1u)
+#if (ARKRTOS_USE_PAGING_SHM == 1)
+           && (la_pg_pair_shr(space, idx) == 0)
+#endif
+           )
         {
             if((la_pg_stack_pair(idx) != 0) &&
                (la_pg_cow_break(space, idx) == 0))
@@ -2311,6 +2381,118 @@ static int32 la_pg_demand_fault(unsigned long badv)
 }
 
 #endif /* ARKRTOS_USE_PAGING_DEMAND == 1 */
+
+#if (ARKRTOS_USE_PAGING_SHM == 1)
+/**
+* @brief 建一段 MAP_SHARED 匿名共享页（整对分配、清零、标记共享）
+* @param va  窗口内 VA（4 KB 对齐）
+* @param len 字节数（> 0、4 KB 对齐）
+* @return 0 = 已建好；-1 = 参数非法 / 越界 / 这一段已经有私有内容 / 帧池空
+* @details 与私有 mmap 的差别只有一条：**页在 mmap 那一刻就真的存在**。
+*          私有映射靠按需缺页在第一次摸到时拿帧，谁摸到算谁的；共享映射
+*          必须在 fork 之前就有实体，否则父进程 fork 时子进程拿到的只是
+*          「还没付过费」的状态，第一个写的人拿到一份新帧，两个人从此各看
+*          各的 —— 那不是共享，是两次私有的 malloc。
+*
+*          三条不猜的规矩：
+*            1. 一段里只要有一对已经挂着私有内容就**整段拒绝**：半共享半私有
+*               的映射没有可命名的语义；
+*            2. 分配失败要把本次已经拿到的帧全部还回去、标记清掉，子状态
+*               回到调用之前（「建了一半」比「没建」更难查）；
+*            3. 帧必须显式清零：帧池在 swap 档之后不再保证干净，共享页交出
+*               去带着上一任的字节就是一次静默的数据泄漏。
+*
+*          粒度仍然是 8 KB 对：一段 4 KB 的共享映射也会独占那一对，后面的
+*          私有 mmap 落在同一对里会被拒绝（调用方错开地址即可）。
+*/
+int32 arkrtos_port_paging_map_shared(unsigned long va, unsigned long len)
+{
+    uint32 space = s_pg_app_space;
+    uint32 first;
+    uint32 last;
+    uint32 i;
+
+    if((len == 0ul) || ((va & 0xFFFul) != 0ul) || ((len & 0xFFFul) != 0ul))
+    {
+        return -1;
+    }
+    if((va < LA_WIN_VA) || ((va + len) < va) ||
+       ((va + len) > (LA_WIN_VA + (unsigned long)ARKRTOS_QEMU_APP_SIZE)))
+    {
+        return -1;
+    }
+    if(space >= (uint32)ARKRTOS_PAGING_APPS_MAX)
+    {
+        return -1;
+    }
+
+    first = (uint32)((va - LA_WIN_VA) / 0x2000u);
+    last  = (uint32)(((va + len) - 1ul - LA_WIN_VA) / 0x2000u);
+    if((first >= LA_PG_WIN_ENTRIES) || (last >= LA_PG_WIN_ENTRIES) ||
+       (last < first))
+    {
+        return -1;
+    }
+
+    for(i = first; i <= last; i++)
+    {
+        if(s_pg_pair_pa[space][i] != 0u)
+        {
+            return -1;
+        }
+#if (ARKRTOS_USE_PAGING_SWAP == 1)
+        if(s_pg_pair_slot[space][i] != 0u)
+        {
+            return -1;
+        }
+#endif
+    }
+
+    for(i = first; i <= last; i++)
+    {
+        uint32 pa = 0u;
+        uint32 w;
+
+        if(arkrtos_port_paging_frame_alloc(2u, &pa) != 0)
+        {
+            uint32 k;
+
+            for(k = first; k < i; k++)
+            {
+                la_pg_pair_shr_set(space, k, 0u);
+                (void)arkrtos_port_paging_frame_free(s_pg_pair_pa[space][k], 2u);
+                s_pg_pair_pa[space][k] = 0u;
+            }
+            return -1;
+        }
+
+        for(w = 0u; w < LA_PG_COW_PAIR_WORDS; w++)
+        {
+            ((uint32 *)(unsigned long)pa)[w] = 0u;
+        }
+
+        s_pg_pair_pa[space][i] = pa;
+        la_pg_pair_own(pa);
+        la_pg_pair_shr_set(space, i, 1u);
+    }
+
+    /* 条目装成可写：共享页的写本来就该落到共享帧里，不该触发一次复制。 */
+    if(space == s_pg_app_space)
+    {
+        for(i = first; i <= last; i++)
+        {
+            la_pg_install_pair(space, i, s_pg_pair_pa[space][i], 1u);
+        }
+    }
+
+    arkrtos_board_puts("[LA64U] pg shm map va=");
+    arkrtos_board_puthex((uint32)va);
+    arkrtos_board_puts(" pairs=");
+    arkrtos_board_putu(last - first + 1u);
+    arkrtos_board_puts("\n");
+    return 0;
+}
+#endif /* ARKRTOS_USE_PAGING_SHM == 1 */
 
 /** 开分页之前的首次铺窗口：只铺 space 0（其它空间等 activate 时再要帧） */
 static void la_pg_boot_map(void)
@@ -2748,6 +2930,11 @@ int32 arkrtos_port_paging_space_release(uint32 space)
     for(i = 0u; i < LA_PG_WIN_ENTRIES; i++)
     {
         uint32 pa = s_pg_pair_pa[space][i];
+
+#if (ARKRTOS_USE_PAGING_COW == 1)
+        /* 共享标记只活在 COW 档（SHM 必须以 COW 为前提），关档这里没有表。 */
+        la_pg_pair_shr_set(space, i, 0u);
+#endif
 
         if(pa != 0u)
         {

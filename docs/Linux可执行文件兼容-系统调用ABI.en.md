@@ -70,7 +70,7 @@ Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 | 215 | `munmap` | returns 0 only, **does not give the address back** | same path |
 | 220 | `clone` | fork only: `flags` must be 0 or `SIGCHLD`, `child_stack` must be 0; copies the whole address space and makes a new task, the child returns 0 and the parent the child id (section 8, `ARKRTOS_USE_LINUX_FORK`) | `clone(child_stack!=0) == -EINVAL -> -22 ok` / `parent child=12` / `child pid != parent pid -> 1 ok` / `exit code 0` |
 | 221 | `execve` | replace the image of the **calling task**: load segments into its own window, write entry/`sp`/`tp` back into the trap frame; does not return on success | `stage2 pid==stage1 pid -> 11 ok` / `image reloaded (.data marker) -> 1 ok` / `fd 3 survived -> 1 ok` / `heap cursor reset -> 34668544 ok` / `exit code 42` (section 5) |
-| 222 | `mmap` | only `MAP_PRIVATE|MAP_ANONYMOUS`; `MAP_FIXED` refused | `mmap>0 -> 1 ok` / `mmap write/read -> 1 ok` |
+| 222 | `mmap` | anonymous only: `MAP_PRIVATE|MAP_ANONYMOUS` or `MAP_SHARED|MAP_ANONYMOUS` (the latter needs `ARKRTOS_USE_PAGING_SHM`, section 8.3); `MAP_FIXED` and `PRIVATE|SHARED` together are refused | `mmap>0 -> 1 ok` / `mmap write/read -> 1 ok` |
 | 260 | `wait4` | only `options 0/WNOHANG`; **without `WNOHANG` it really blocks** (restartable syscall, section 8.1), never invents a status, the bookkeeping entry is consumed on reap (section 8) | `wait4 returned child pid -> 12 ok` / `WEXITSTATUS == 42 -> 42 ok` / `wait4(child) again == -ECHILD -> -10 ok` / `blocking wait4 blocked >= 40 ms -> 1 ok` |
 | 226 | `mprotect` | checks page alignment and window range only, returns 0 and counts separately; **protection is not enforced** (the window is one PS=20 RWX mapping) | no fixture readout (1.1) |
 
@@ -107,8 +107,10 @@ return value is a separate port primitive
 
 ## 3 Explicitly unsupported
 
-`dup`/`dup2` redirection, `socket`/`select`, `futex`, real `mmap` semantics
-(file-backed, shared, `MAP_FIXED`, permission bits), and threads. `fork`/`clone` is no longer in this
+`dup`/`dup2` redirection, `socket`/`select`, `futex`, file-backed `mmap`,
+`MAP_FIXED` and page-level permission bits, and threads. Anonymous `MAP_SHARED`
+exists in the SHM tier (section 8.3, default off) and is inherited through `fork`
+only. `fork`/`clone` is no longer in this
 list: with `ARKRTOS_USE_LINUX_FORK` on (default off, 2026-11-23, QEMU LA64) a
 process can split once and be reaped via `wait4` - fork only, no threads
 (`CLONE_VM`/`CLONE_THREAD` are `-EINVAL`), see section 8. Signal delivery now
@@ -507,8 +509,8 @@ parent's write stays in its own copy). Four kernel-log assertions: at least one
 `[LA64U] pg cow fork shared=<n> stack=<n> copied=0 frames=<n>` with `shared>=1`,
 `stack>=1`, `copied==0`; at least one `[LA64U] pg cow copy idx=<n> ref=2`; no
 copy line with `ref=1` (copying an unshared pair is moving bytes for nothing);
-and the unrelated demos still intact. The gate runs two rounds (fork tier 21
-checks, then fork+COW tier 26 checks) and **never removes the default
+and the unrelated demos still intact. The gate runs three rounds (fork tier 21
+checks, fork+COW tier 26, fork+COW+SHM tier 34) and **never removes the default
 whole-clone path from testing**.
 
 Two real root causes were found here, both invisible to the compiler and to
@@ -517,6 +519,44 @@ switch, so a refill that always installs writable leaves COW alive only for the
 instant of the fork (the symptom was the parent's globals being dirtied by the
 child, with not a single `pg cow fault` printed); (2) writing a read-only page
 is **PME(4)**, not PIS(2), and accepting only 2 pushed it into the fatal path.
+
+### 8.3 Anonymous `MAP_SHARED` pages (`ARKRTOS_USE_PAGING_SHM`, 2026-11-23, QEMU LA64)
+
+COW only covers "both sides write their own copy after the fork". For parent and
+child to see each other's words there has to be an explicit shared path. With
+`ARKRTOS_USE_PAGING_SHM` (stacked on top of the COW tier, enforced by `#error`),
+`mmap(MAP_SHARED|MAP_ANONYMOUS)` builds every 8 KB pair as a real frame, zeroes it
+and marks it shared **at mmap time**:
+
+| Item | Current state |
+|---|---|
+| Granularity | still an **8 KB pair**: a 4 KB shared mapping owns a whole pair, and putting a private mapping into the same pair is refused wholesale (`-ENOMEM`) |
+| When pages are made | **at mmap time**. Deferring to the fork lets both sides fault in their own frames, which turns "shared" into two private allocations - that implementation reports no error at all, it just silently stops sharing |
+| Bookkeeping | a separate table (`s_pg_pair_shr[space][idx]`). `ref > 1` only says "somebody shares it", it cannot tell "shared because COW copied it" from "shared on purpose" |
+| fork | a shared pair only gets `ref++`: not dropped to read-only, not stack-privatised, not copied; refill and space install put the entry back writable; the write fault and `write_space` skip the pair |
+| Inheritance | inherited through `fork` only. No `shm_open`, no file-backed `mmap`, no `MAP_FIXED`; with the switch off `MAP_SHARED` is always `-ENOSYS` |
+| Refused forms | missing `MAP_ANONYMOUS`, `PRIVATE\|SHARED` together, and `MAP_FIXED` are all `-ENOSYS` (this kernel's rule: unsupported means `ENOSYS`, not `EINVAL`) |
+
+Readouts (`tools/fork_gate.py`, fork+COW+SHM tier, 34 checks): the SHM section has
+8 - two refused forms returning `-38`, `mmap(MAP_SHARED|ANON) > 0`,
+`shared page starts zeroed -> 0`, `clone for shm child > 0`,
+`parent saw child shared write -> 1`, `shm child exit reaped -> 12` and
+`shm child saw parent post-fork write (bits=1) -> 1`. The kernel log adds at least
+one `[LA64U] pg shm map va=0x<hex> pairs=<n>` with `pairs >= 1`. In the same run
+the `shared` count of `[LA64U] pg cow fork shared=<n> ...` is one pair larger than
+in the pure COW tier (a shared pair is a shared pair by any name).
+
+**Why the shared bit needs its own table.** "`ref > 1` means shared" only holds for
+COW: a `MAP_SHARED` pair with exactly a parent and a child also has `ref == 2`, but
+its first write **must not** copy (copying would split the sharing). It cannot be
+derived from the refcount, so it is stored separately.
+
+**One real defect fixed on the way: `write(1/2)` did not own the console.** With
+SHM in place the child's COW log could land between the parent's `[fork] ... -> 1`
+and the trailing ` ok`, which made the gate look like "one readout is missing" -
+none was missing, the line had been cut in half. `lx_write` now holds
+`arkrtos_console_lock()` for the whole call, and the kernel log takes the same lock,
+so the two no longer splice each other.
 
 ## 9 Switch and zero footprint
 
@@ -534,7 +574,15 @@ symbol table).
 `#error` guards on both of its prerequisites (fork and the demand tier). With it
 off the refcount table and every `la_pg_cow_*` helper are not compiled and
 `LA_PTE_APP_RO` is not emitted, so the default footprint and behaviour are
-unchanged - measured by the two-round gate, not merely declared.
+unchanged - measured by the multi-round gate, not merely declared.
+
+`ARKRTOS_USE_PAGING_SHM` (section 8.3) is the fourth switch, default **0**,
+`depends on ARKRTOS_USE_PAGING_COW` with the same `#error` guard (the shared bit
+table is the COW tier's refcount bookkeeping; a non-COW clone copies every pair and
+the sharing evaporates). With it off the shared-bit table and
+`arkrtos_port_paging_map_shared` are not emitted and `mmap(MAP_SHARED)` returns
+`-ENOSYS` - measured by three tiers (zero symbols when off, 34 readouts when on,
+and the `-ENOSYS` control with SHM off).
 
 ## 10 Gate
 
@@ -552,9 +600,10 @@ still intact), and parser-selfcheck (eight deliberately broken logs must each be
 rejected).
 
 The fork tier has its own gate, `tools/fork_gate.py` (invoked as `fork` from
-`ci_gate`, 15 items; it runs the fork and fork+COW tiers one after the other, so
-build / qemu-readout / parser-selfcheck each appear twice): default-off,
-kconfig-wired (all four `depends on`), the four
+`ci_gate`, 22 items; it runs the fork, fork+COW and fork+COW+SHM tiers one after
+the other, so build / qemu-readout / parser-selfcheck each appear three times):
+default-off (fork and SHM), kconfig-wired (all four `depends on`, plus the SHM
+item depending on COW), the four
 `#error` guards in features.h, off-zero-symbols (RV32 `linux_abi.o` has no
 `lx_clone`/`lx_wait4`/`s_child`; LA64 `elf`/`port`/`paging` have no fork symbols),
 compile-on (four TUs plus the fixture), build, qemu-readout (21 `[fork]` checks
@@ -564,10 +613,19 @@ really waited >= 40 ms, the parent read end still read 3 bytes after the child
 closed its own copy, the SIGCHLD handler really ran - are checked one by one),
 parser-selfcheck (nine broken logs rejected; the COW tier adds four more: a lost
 bit in the child mask, a lost parent write, all copy lines removed, and bytes
-moved at fork time) and restore-default (the build directory is returned to the
-default tier so a later `make` does not reuse fork-tier objects). The COW round
-additionally requires 26 checks, `shared>=1 / stack>=1 / copied=0`, at least one
-`pg cow copy ... ref=2`, and no `ref=1` copy line.
+moved at fork time; the SHM tier adds five: the `pg shm map` line removed, the
+child's shared write not seen by the parent, the child not seeing the parent's
+write, a non-zero start value, and the successful-mapping readout removed) and
+restore-default (the build directory is returned to the default tier so a later
+`make` does not reuse fork-tier objects). The COW round additionally requires 26
+checks, `shared>=1 / stack>=1 / copied=0`, at least one `pg cow copy ... ref=2`,
+and no `ref=1` copy line. The SHM round requires 34 checks, the six SHM readouts
+one by one (two refused forms returning `-38`, mapping success, start value 0,
+parent sees the child's write, child sees the parent's post-fork write) and at
+least one `[LA64U] pg shm map va=0x<n> pairs>=1`. The SHM switch has its own
+`default-off-shm` / `kconfig-wired-shm` / `features-guard-shm` items, and
+`off-zero-port` also requires that a SHM-off build has no
+`arkrtos_port_paging_map_shared`.
 
 ## 11 Three real bugs and one readout trap found on the way
 

@@ -400,11 +400,16 @@ ARK_FORK_ON := $(findstring ARKRTOS_USE_LINUX_FORK=1,$(EXTRA_CFLAGS))
 ifneq ($(ARK_FORK_ON),)
 # 夹具里的 COW 段只在 EXTRA_CFLAGS 开了 ARKRTOS_USE_PAGING_COW=1 时才编：
 # 默认关时夹具逐字节与原来相同（21 条 check），开时多 5 条（26 条）。
+# 共享页段同理（ARKRTOS_USE_PAGING_SHM=1，多 8 条 -> 34 条）：不这样分档，
+# 「关档时 mmap(MAP_SHARED) 仍回 -ENOSYS」这条反假绿就永远测不到。
 ARK_COW_ON := $(findstring ARKRTOS_USE_PAGING_COW=1,$(EXTRA_CFLAGS))
-ifeq ($(ARK_COW_ON),)
+ARK_SHM_ON := $(findstring ARKRTOS_USE_PAGING_SHM=1,$(EXTRA_CFLAGS))
 LXFORK_DEFS   :=
-else
-LXFORK_DEFS   := -DARKRTOS_USE_PAGING_COW=1
+ifneq ($(ARK_COW_ON),)
+LXFORK_DEFS   += -DARKRTOS_USE_PAGING_COW=1
+endif
+ifneq ($(ARK_SHM_ON),)
+LXFORK_DEFS   += -DARKRTOS_USE_PAGING_SHM=1
 endif
 LXFORK_SRC    := example/qemu_loongarch64/elf/linux_fork.c
 LXFORK_ELF    := $(BUILD)/linux_fork.elf

@@ -54,6 +54,7 @@
 #include "arkrtos_fs.h"
 #include "arkrtos_vfs.h"
 #include "arkrtos_board.h"
+#include "arkrtos_log.h"   /* write(1/2) 要独占控制台，别让内核日志插进半行 */
 #include "arkrtos_elf.h"   /* execve：装载器接口与 ARKRTOS_ELF_ERR_* */
 
 /* ---------------------------------------------------------------- 常量 */
@@ -196,6 +197,7 @@
 #define LX_O_NONBLOCK               (0x800u)
 
 /* mmap 标志位（asm-generic） */
+#define LX_MAP_SHARED               (0x01u)
 #define LX_MAP_PRIVATE              (0x02u)
 #define LX_MAP_FIXED                (0x10u)
 #define LX_MAP_ANONYMOUS            (0x20u)
@@ -1573,25 +1575,42 @@ static int32 lx_write(void *p_ctx)
         return -LX_EFAULT;
     }
 
-    while(done < want)
+    /* 整次 write 独占控制台：内核日志（[LA64U] ...）拿的是同一把
+     * 锁，于是用户的一行不会被切成两截。之前逐字节直
+     * 写 board_putc、不拿锁，子进程的 COW 日志能插在
+     * "[fork] ... -> 1" 与 " ok" 之间，门禁看起来像少了一
+     * 条读数——读数没少，是行被劈开了。 */
     {
-        uint32 n = want - done;
-        uint32 i;
+        int32 held = arkrtos_console_lock();
 
-        if(n > LX_IO_CHUNK)
+        while(done < want)
         {
-            n = LX_IO_CHUNK;
+            uint32 n = want - done;
+            uint32 i;
+
+            if(n > LX_IO_CHUNK)
+            {
+                n = LX_IO_CHUNK;
+            }
+            if(arkrtos_copy_from_user(buf, (const void *)(unsigned long)(ua + done),
+                                      n) != 0)
+            {
+                if(held != 0)
+                {
+                    arkrtos_console_unlock();
+                }
+                return (done > 0u) ? (int32)done : -LX_EFAULT;
+            }
+            for(i = 0u; i < n; i++)
+            {
+                arkrtos_board_putc((char)buf[i]);
+            }
+            done += n;
         }
-        if(arkrtos_copy_from_user(buf, (const void *)(unsigned long)(ua + done),
-                                  n) != 0)
+        if(held != 0)
         {
-            return (done > 0u) ? (int32)done : -LX_EFAULT;
+            arkrtos_console_unlock();
         }
-        for(i = 0u; i < n; i++)
-        {
-            arkrtos_board_putc((char)buf[i]);
-        }
-        done += n;
     }
 
     return (int32)want;
@@ -1811,13 +1830,25 @@ static int32 lx_mmap(void *p_ctx)
     {
         return -LX_EINVAL;
     }
-    /* 只认匿名私有映射；MAP_FIXED、文件映射等一律不假装支持。 */
+    /* 只认匿名映射；MAP_FIXED、文件映射等一律不假装支持。
+     * MAP_PRIVATE 与 MAP_SHARED 必须且只能有一个：两个都给是调用方写错，
+     * 一个都不给是没有语义的请求 —— 两种都如实 -ENOSYS。
+     * MAP_SHARED 只在 ARKRTOS_USE_PAGING_SHM 档里真做（否则同样 -ENOSYS，
+     * 不偷偷降级成私有：降级会让两个进程看起来共享、其实各改各的）。 */
     if(((flags & LX_MAP_ANONYMOUS) == 0u) ||
-       ((flags & LX_MAP_PRIVATE) == 0u) ||
-       ((flags & LX_MAP_FIXED) != 0u))
+       ((flags & LX_MAP_FIXED) != 0u) ||
+       (((flags & (LX_MAP_PRIVATE | LX_MAP_SHARED)) == 0u)) ||
+       (((flags & LX_MAP_PRIVATE) != 0u) &&
+        ((flags & LX_MAP_SHARED) != 0u)))
     {
         return -LX_ENOSYS;
     }
+#if (ARKRTOS_USE_PAGING_SHM != 1)
+    if((flags & LX_MAP_SHARED) != 0u)
+    {
+        return -LX_ENOSYS;
+    }
+#endif
 
     if(s_heap_cur == 0u)
     {
@@ -1843,6 +1874,18 @@ static int32 lx_mmap(void *p_ctx)
         return -LX_ENOMEM;
     }
 
+#if (ARKRTOS_USE_PAGING_SHM == 1)
+    if((flags & LX_MAP_SHARED) != 0u)
+    {
+        /* 共享映射必须在 mmap 这一刻就真的有帧：fork 时父子共享的是那几对
+         * 实体，而不是「还没付过费」的状态。建不出来就**什么都不改**
+         * （游标不推进、记账不落），调用方拿到 -ENOMEM 可以原样重试。 */
+        if(arkrtos_port_paging_map_shared(start, end - start) != 0)
+        {
+            return -LX_ENOMEM;
+        }
+    }
+#endif
     s_heap_cur = end;
     lx_ret_ptr(p_ctx, start);
     return LX_RET_PTR_DONE;

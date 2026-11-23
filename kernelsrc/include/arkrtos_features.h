@@ -313,6 +313,29 @@
 #endif
 #endif
 
+/* U-19c MAP_SHARED 匿名共享页：0 = 关（mmap 收到 MAP_SHARED 一律 -ENOSYS，
+ * 与打开本开关之前逐字节相同），1 = mmap(MAP_SHARED|MAP_ANONYMOUS) 在 mmap 那
+ * 一刻就把整对帧建出来、清零并标记共享；fork 时这些对只加引用计数，父子看到
+ * 同一份物理页，写不再触发复制。
+ *
+ * 三条写死的边界（都是「不支持」，不是欠验）：
+ *   - 粒度是 8 KB 对：一段 4 KB 的共享映射独占一对，同一对里不能再落私有
+ *     映射（整段拒绝，不造半共享半私有的映射）；
+ *   - 只随 fork 继承共享：没有 shm_open / 文件映射 / fd 传递，两个无关进程
+ *     之间无法建立共享，共享关系只有「祖先进程建过、后代 fork 出来」这一条路；
+ *   - 引用计数是 COW 档的账本，所以本开关要求 ARKRTOS_USE_PAGING_COW == 1。
+ *
+ * 由 Kconfig 选择（config ARKRTOS_USE_PAGING_SHM）。默认关：关档时不编译共享
+ * 标记表、映射入口与任何一行日志，mmap 对 MAP_SHARED 仍回 -ENOSYS，镜像零变化。 */
+#ifndef ARKRTOS_USE_PAGING_SHM
+#define ARKRTOS_USE_PAGING_SHM          0
+#endif
+#if (ARKRTOS_USE_PAGING_SHM == 1)
+#if (ARKRTOS_USE_PAGING_COW != 1)
+#error "ARKRTOS_USE_PAGING_SHM=1 requires ARKRTOS_USE_PAGING_COW=1"
+#endif
+#endif
+
 /* U-16 页替换（swap）：0 = 关（一个字节都不编进镜像），1 = 帧池空了就把某一对
  * 8 KB 换出到内核静态交换区、把两帧还回池子，缺页时再换回来。
  * 要求 ARKRTOS_USE_PAGING_DEMAND == 1 —— 只有按需档才有「这一对还没驻留」

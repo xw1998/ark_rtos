@@ -789,6 +789,23 @@ int32 arkrtos_port_paging_write_space(uint32 space, unsigned long va,
  *  @note 只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。 */
 int32 arkrtos_port_paging_clone_frame(void *p_exc_ctx, uint32 space);
 
+#if (ARKRTOS_USE_PAGING_SHM == 1)
+/** @brief Create MAP_SHARED anonymous pages (U-19c)
+ *  @param va  window VA (4 KB aligned), @param len byte count (> 0, 4 KB aligned)
+ *  @return 0 = created; -1 = bad argument, out of range, that range already
+ *          holds private content, or the frame pool refused
+ *  @details The pairs are allocated and zeroed right here instead of on the
+ *           first touch: a shared mapping must have an identity before fork,
+ *           otherwise parent and child each fault in their own frame and stop
+ *           seeing each other.  Uniquely for this port the granularity is one
+ *           8 KB pair, so a 4 KB mapping owns the whole pair and a private
+ *           mapping that would land in it is refused (all-or-nothing).
+ *  @note 关档时回 -1（宏），mmap 对 MAP_SHARED 回 -ENOSYS，与打开本开关之前一致。 */
+int32 arkrtos_port_paging_map_shared(unsigned long va, unsigned long len);
+#else
+#define arkrtos_port_paging_map_shared(va, len)        (-1)
+#endif
+
 /** @brief Page replacement readout (U-16) - only exists when the swap switch is on
  *  @param which 0 = swap-outs, 1 = swap-ins, 2 = slots in use, 3 = failures,
  *               4 = resident pairs, 5 = slot count
@@ -865,6 +882,7 @@ void arkrtos_port_paging_inval_va(unsigned long va);
 #define arkrtos_port_paging_space_clone(src, dst)       (-1)
 #define arkrtos_port_paging_write_space(sp, va, w, n)   (-1)
 #define arkrtos_port_paging_clone_frame(p, sp)          (-1)
+#define arkrtos_port_paging_map_shared(va, len)         (-1)
 #define arkrtos_port_paging_window_va()                 (0u)
 #define arkrtos_port_paging_asid_current()              (0UL)
 #define arkrtos_port_paging_asid_of(space)              (0u)

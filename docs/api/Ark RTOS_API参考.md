@@ -23,7 +23,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（81 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（82 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -62,7 +62,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（12 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（98 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（100 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（18 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -4272,6 +4272,24 @@ the child resumes at the same PC with the same stack and sees
 clone() returning 0. ERA/sp/tp/fp and the FPU/vector area are
 inherited - that IS fork.
 > 说明：只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。
+
+### `int32 arkrtos_port_paging_map_shared(unsigned long va, unsigned long l`
+
+```c
+int32 arkrtos_port_paging_map_shared(unsigned long va, unsigned long len);
+```
+
+**Create MAP_SHARED anonymous pages (U-19c)**
+- `va`：window VA (4 KB aligned), @param len byte count (> 0, 4 KB aligned)
+**返回**：0 = created; -1 = bad argument, out of range, that range already
+holds private content, or the frame pool refused
+The pairs are allocated and zeroed right here instead of on the
+first touch: a shared mapping must have an identity before fork,
+otherwise parent and child each fault in their own frame and stop
+seeing each other.  Uniquely for this port the granularity is one
+8 KB pair, so a 4 KB mapping owns the whole pair and a private
+mapping that would land in it is refused (all-or-nothing).
+> 说明：关档时回 -1（宏），mmap 对 MAP_SHARED 回 -ENOSYS，与打开本开关之前一致。
 
 ### `#if (ARKRTOS_USE_PAGING_SWAP == 1) uint32 arkrtos_port_paging_swap_sta`
 
@@ -9379,6 +9397,14 @@ static uint32 la_pg_pair_ref_down(uint32 pa) {
 
 少一个空间指向这一对；回 1 = 还有别人指着（不许还帧），0 = 现在没人了
 
+### `static int32 la_pg_pair_shr(uint32 space, uint32 idx) {`
+
+```c
+static int32 la_pg_pair_shr(uint32 space, uint32 idx) {
+```
+
+某一对是否被标成 MAP_SHARED（越界/非法一律按「不是」处理）
+
 ### `static void la_pg_copy_pair_words(uint32 *dst, const uint32 *src) {`
 
 ```c
@@ -9647,6 +9673,31 @@ static int32 la_pg_demand_fault(unsigned long badv) {
 「KERNEL refill -> fatal」上。
 没有帧就返回 0，让原来的路径去报错/杀任务 —— 这里绝不假装
 装好了（装一条 V=0 的条目会让 ertn 回到同一条指令上无限重填）。
+
+### `int32 arkrtos_port_paging_map_shared(unsigned long va, unsigned long l`
+
+```c
+int32 arkrtos_port_paging_map_shared(unsigned long va, unsigned long len) {
+```
+
+**建一段 MAP_SHARED 匿名共享页（整对分配、清零、标记共享）**
+- `va`：窗口内 VA（4 KB 对齐）
+- `len`：字节数（> 0、4 KB 对齐）
+**返回**：0 = 已建好；-1 = 参数非法 / 越界 / 这一段已经有私有内容 / 帧池空
+与私有 mmap 的差别只有一条：**页在 mmap 那一刻就真的存在**。
+私有映射靠按需缺页在第一次摸到时拿帧，谁摸到算谁的；共享映射
+必须在 fork 之前就有实体，否则父进程 fork 时子进程拿到的只是
+「还没付过费」的状态，第一个写的人拿到一份新帧，两个人从此各看
+各的 —— 那不是共享，是两次私有的 malloc。
+三条不猜的规矩：
+1. 一段里只要有一对已经挂着私有内容就**整段拒绝**：半共享半私有
+的映射没有可命名的语义；
+2. 分配失败要把本次已经拿到的帧全部还回去、标记清掉，子状态
+回到调用之前（「建了一半」比「没建」更难查）；
+3. 帧必须显式清零：帧池在 swap 档之后不再保证干净，共享页交出
+去带着上一任的字节就是一次静默的数据泄漏。
+粒度仍然是 8 KB 对：一段 4 KB 的共享映射也会独占那一对，后面的
+私有 mmap 落在同一对里会被拒绝（调用方错开地址即可）。
 
 ### `static void la_pg_boot_map(void) {`
 

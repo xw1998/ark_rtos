@@ -155,6 +155,7 @@ int main(void)
 #define T_O_WRONLY          (0x1u)
 #define T_O_CREAT           (0x40u)
 #define T_O_TRUNC           (0x200u)
+#define T_MAP_SHARED        (0x01u)
 #define T_MAP_PRIVATE       (0x02u)
 #define T_MAP_FIXED         (0x10u)
 #define T_MAP_ANONYMOUS     (0x20u)
@@ -475,6 +476,30 @@ void arkrtos_board_putc(char c)
     if(g_putc_len < (uint32)sizeof(g_putc))
     {
         g_putc[g_putc_len++] = c;
+    }
+}
+
+/* lx_write 现在整次调用持控制台锁（否则内核日志能把用户一行切成两截）。
+ * 宿主用例只链接 arkrtos_linux_abi.c，不链接 arkrtos_log.c，所以这里给一
+ * 对带计数的桩：既补上符号，也让 write 用例能验证"进过一次锁、出来一定
+ * 释放"——锁没释放的实现在下一次并发写里才会露馅，等不起。 */
+static uint32 g_con_lock_calls;
+static uint32 g_con_unlock_calls;
+static uint32 g_con_held;
+
+int32 arkrtos_console_lock(void)
+{
+    g_con_lock_calls++;
+    g_con_held++;
+    return 1;
+}
+
+void arkrtos_console_unlock(void)
+{
+    g_con_unlock_calls++;
+    if(g_con_held > 0u)
+    {
+        g_con_held--;
     }
 }
 
@@ -913,6 +938,8 @@ static void t_write(t_ctx *c)
     (void)call(c, T_NR_WRITE, 1UL, u_ptr(T_STR_OFF), 5UL, 0UL);
     ck_ret(c, 5, "write(1) 返回写入字节数");
     ck(g_putc_len == 5u && memcmp(g_putc, "hello", 5u) == 0, "标准输出逐字节写出");
+    ck((g_con_lock_calls == 1u) && (g_con_unlock_calls == 1u) && (g_con_held == 0u),
+       "整次 write 持控制台锁且退出时已释放");
 
     g_putc_len = 0u;
     (void)call(c, T_NR_WRITE, 2UL, u_ptr(T_STR_OFF), 5UL, 0UL);
@@ -1206,6 +1233,16 @@ static void t_mem(t_ctx *c)
     (void)call(c, T_NR_MMAP, 0UL, 0x1000UL, 0UL,
                (unsigned long)(T_MAP_PRIVATE | T_MAP_ANONYMOUS | T_MAP_FIXED));
     ck_ret(c, -T_ENOSYS, "mmap 带 MAP_FIXED 回 -ENOSYS");
+
+    /* SHM 关档（宿主这一档就是）时 MAP_SHARED 必须 -ENOSYS，不许偷偷降级成
+     * 私有：降级会让两个进程看起来共享、其实各改各的，那是最坏的一种"能跑"。
+     * 两个都给（PRIVATE|SHARED）同理。 */
+    (void)call(c, T_NR_MMAP, 0UL, 0x1000UL, 0UL,
+               (unsigned long)(T_MAP_SHARED | T_MAP_ANONYMOUS));
+    ck_ret(c, -T_ENOSYS, "SHM 关档时 MAP_SHARED 回 -ENOSYS（不降级成私有）");
+    (void)call(c, T_NR_MMAP, 0UL, 0x1000UL, 0UL,
+               (unsigned long)(T_MAP_PRIVATE | T_MAP_SHARED | T_MAP_ANONYMOUS));
+    ck_ret(c, -T_ENOSYS, "PRIVATE|SHARED 同时给回 -ENOSYS");
 
     (void)call(c, T_NR_MMAP, 0UL, 0x1000UL, 0UL,
                (unsigned long)(T_MAP_PRIVATE | T_MAP_ANONYMOUS));

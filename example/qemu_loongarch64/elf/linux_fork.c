@@ -43,9 +43,11 @@
 
 #define LX_EINVAL           22
 #define LX_ECHILD           10
+#define LX_ENOSYS           38
 
 #define LX_CLOSE            57
 #define LX_PIPE2            59
+#define LX_MMAP             222
 #define LX_READ             63
 #define LX_KILL             129
 #define LX_RT_SIGACTION     134
@@ -57,6 +59,10 @@
 #define LX_SIGCHLD          17          /* clone 只接受 0 / SIGCHLD */
 #define LX_CLONE_VM         0x00000100ul
 #define LX_WNOHANG          1
+
+#define LX_MAP_SHARED       0x01ul
+#define LX_MAP_PRIVATE      0x02ul
+#define LX_MAP_ANONYMOUS    0x20ul
 
 typedef long lx_long;
 
@@ -95,6 +101,25 @@ static lx_long lx3(lx_long n, lx_long a0v, lx_long a1v, lx_long a2v)
     __asm__ volatile("syscall 0"
                      : "+r"(r_a0)
                      : "r"(r_a1), "r"(r_a2), "r"(r_a7)
+                     : "memory");
+    return r_a0;
+}
+
+static lx_long lx6(lx_long n, lx_long a0v, lx_long a1v, lx_long a2v,
+                  lx_long a3v, lx_long a4v, lx_long a5v)
+{
+    register lx_long r_a0 __asm__("a0") = a0v;
+    register lx_long r_a1 __asm__("a1") = a1v;
+    register lx_long r_a2 __asm__("a2") = a2v;
+    register lx_long r_a3 __asm__("a3") = a3v;
+    register lx_long r_a4 __asm__("a4") = a4v;
+    register lx_long r_a5 __asm__("a5") = a5v;
+    register lx_long r_a7 __asm__("a7") = n;
+
+    __asm__ volatile("syscall 0"
+                     : "+r"(r_a0)
+                     : "r"(r_a1), "r"(r_a2), "r"(r_a3), "r"(r_a4), "r"(r_a5),
+                       "r"(r_a7)
                      : "memory");
     return r_a0;
 }
@@ -177,23 +202,79 @@ static void out_num(lx_long v)
 
 static int g_fail = 0;
 
-static void check(const char *what, lx_long got, lx_long want)
+/* 把一条判据先拼成整行再一次写出。
+ * 否则 "[fork] " 前缀与正文会被内核日志插在中间，
+ * 门禁按行计数就会少一条。 */
+static char *chk_str(char *p, const char *s)
 {
-    out("[fork] ");
-    out(what);
-    out(" -> ");
-    out_num(got);
-    if (got != want)
+    while (*s != '\0')
     {
-        out(" FAIL (want ");
-        out_num(want);
-        out(")\n");
-        g_fail++;
+        *p = *s;
+        p++;
+        s++;
+    }
+    return p;
+}
+
+static char *chk_num(char *p, lx_long v)
+{
+    char          tmp[24];
+    int           i = 0;
+    unsigned long u;
+
+    if (v < 0)
+    {
+        *p = '-';
+        p++;
+        u = (unsigned long)(-v);
     }
     else
     {
-        out(" ok\n");
+        u = (unsigned long)v;
     }
+    if (u == 0ul)
+    {
+        *p = '0';
+        p++;
+        return p;
+    }
+    while ((u != 0ul) && (i < 23))
+    {
+        tmp[i] = (char)('0' + (int)(u % 10ul));
+        u /= 10ul;
+        i++;
+    }
+    while (i > 0)
+    {
+        i--;
+        *p = tmp[i];
+        p++;
+    }
+    return p;
+}
+
+static void check(const char *what, lx_long got, lx_long want)
+{
+    char  buf[200];
+    char *p = buf;
+
+    p = chk_str(p, "[fork] ");
+    p = chk_str(p, what);
+    p = chk_str(p, " -> ");
+    p = chk_num(p, got);
+    if (got != want)
+    {
+        p = chk_str(p, " FAIL (want ");
+        p = chk_num(p, want);
+        p = chk_str(p, ")\n");
+        *p = '\0';
+        out(buf);
+        g_fail++;
+        return;
+    }
+    p = chk_str(p, " ok\n");
+    *p = '\0';
+    out(buf);
 }
 
 /* fork 之后父子各有一份：子进程改它，父进程必须读回 1。
@@ -539,6 +620,112 @@ void linux_main(unsigned long sp)
         check("SIGCHLD signo", s_chld_signo, LX_SIGCHLD);
         check("wait4 reaped exit code 9", (status3 >> 8) & 0xFF, 9);
     }
+
+
+#if defined(ARKRTOS_USE_PAGING_SHM) && (ARKRTOS_USE_PAGING_SHM == 1)
+    /* ---------------- MAP_SHARED 匿名页：fork 之后两边看到同一份 ----------------
+     * 这是 COW 的镜像问题：私有页「各写各的」，共享页「写的是同一帧」。判据
+     * 必须是**双向**的，只测一个方向会被「子进程自己那份」骗过：
+     *   1) 父在 fork 之后写的 200，子必须看得到（若共享对被 COW 复制了，
+     *      子永远停在 100/0，超时后退出码 bit0=0）；
+     *   2) 子看到 200 之后写 300，父必须看得到（证明写真的落回同一帧）。
+     * 另加两条反假绿：非匿名 MAP_SHARED 与 PRIVATE|SHARED 同时给，都必须当场
+     * -ENOSYS —— 「把 MAP_SHARED 悄悄当私有」是最难查的那种假绿。 */
+    {
+        volatile unsigned long *shm;
+        lx_long shmaddr;
+        int     spins;
+
+        check("mmap(shared without anon) == -ENOSYS",
+              lx6(LX_MMAP, 0, 4096, 3, LX_MAP_SHARED, -1, 0), -LX_ENOSYS);
+        check("mmap(private|shared) == -ENOSYS",
+              lx6(LX_MMAP, 0, 4096, 3,
+                  LX_MAP_PRIVATE | LX_MAP_SHARED | LX_MAP_ANONYMOUS, -1, 0),
+              -LX_ENOSYS);
+
+        shmaddr = lx6(LX_MMAP, 0, 4096, 3,
+                      LX_MAP_SHARED | LX_MAP_ANONYMOUS, -1, 0);
+        check("mmap(MAP_SHARED|ANON) > 0", (shmaddr > 0) ? 1 : 0, 1);
+
+        if (shmaddr > 0)
+        {
+            lx_long child5;
+            lx_long status5 = -1;
+            lx_long rc5 = -1;
+            long    ts5[2];
+            long    t0 = -1;
+            long    now = 0;
+            int     seen = 0;
+
+            shm = (volatile unsigned long *)(unsigned long)shmaddr;
+            check("shared page starts zeroed", (lx_long)(*shm), 0);
+            *shm = 100ul;
+
+            child5 = lx3(LX_CLONE, LX_SIGCHLD, 0, 0);
+            if (child5 == 0)
+            {
+                int bits = 0;
+
+                for (spins = 0; spins < 4000000; spins++)
+                {
+                    if (*shm == 200ul)
+                    {
+                        bits = 1;
+                        break;
+                    }
+                }
+                if (bits != 0)
+                {
+                    *shm = 300ul;
+                }
+                (void)lx1(LX_EXIT, bits);
+                for (;;)
+                {
+                }
+            }
+
+            check("clone for shm child > 0", (child5 > 0) ? 1 : 0, 1);
+
+            /* 父进程 fork 之后写：这一笔必须落到共享帧里。 */
+            *shm = 200ul;
+
+            if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                    (lx_long)(unsigned long)ts5, 0) == 0)
+            {
+                t0 = (ts5[0] * 1000) + (ts5[1] / 1000000);
+                now = t0;
+            }
+            for (;;)
+            {
+                if (*shm == 300ul)
+                {
+                    seen = 1;
+                    break;
+                }
+                if (t0 < 0)
+                {
+                    break;
+                }
+                if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                        (lx_long)(unsigned long)ts5, 0) != 0)
+                {
+                    break;
+                }
+                now = (ts5[0] * 1000) + (ts5[1] / 1000000);
+                if ((now - t0) >= 400)
+                {
+                    break;
+                }
+            }
+            check("parent saw child shared write", seen, 1);
+
+            rc5 = lx4(LX_WAIT4, child5, (lx_long)(unsigned long)&status5, 0, 0);
+            check("shm child exit reaped", rc5, child5);
+            check("shm child saw parent post-fork write (bits=1)",
+                  (status5 >> 8) & 0xFF, 1);
+        }
+    }
+#endif
 
 #if defined(ARKRTOS_USE_PAGING_COW) && (ARKRTOS_USE_PAGING_COW == 1)
     /* ---------------- 写时复制：fork 之后父的写不许被子看见 ---------------- */

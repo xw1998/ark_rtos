@@ -67,7 +67,7 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 | 215 | `munmap` | 只返 0，**不归还地址** | 走同一返回路径 |
 | 220 | `clone` | 只做 fork：`flags` 必须 0 或 `SIGCHLD`、`child_stack` 必须 0；复制整份地址空间 + 造新任务，子返 0 父返子号（§8，`ARKRTOS_USE_LINUX_FORK`） | `clone(child_stack!=0) == -EINVAL -> -22 ok` / `parent child=12` / `child pid != parent pid -> 1 ok` / `exit code 0` |
 | 221 | `execve` | 同任务换镜像：铺段进调用者自己的空间、把入口/`sp`/`tp` 写回 trap 帧；成功不返回 | `stage2 pid==stage1 pid -> 11 ok` / `image reloaded (.data marker) -> 1 ok` / `fd 3 survived -> 1 ok` / `heap cursor reset -> 34668544 ok` / `exit code 42`（§5） |
-| 222 | `mmap` | 只认 `MAP_PRIVATE|MAP_ANONYMOUS`；拒 `MAP_FIXED` | `mmap>0 -> 1 ok` / `mmap write/read -> 1 ok` |
+| 222 | `mmap` | 只认匿名映射：`MAP_PRIVATE|MAP_ANONYMOUS` 或 `MAP_SHARED|MAP_ANONYMOUS`（后者要 `ARKRTOS_USE_PAGING_SHM`，§8.3）；拒 `MAP_FIXED` 与同时给 `PRIVATE|SHARED` | `mmap>0 -> 1 ok` / `mmap write/read -> 1 ok` |
 | 260 | `wait4` | 只认 `options 0/WNOHANG`；**无 `WNOHANG` 时真阻塞**（可重启系统调用，§8.1），不编造状态，reap 后记账清零（§8） | `wait4 returned child pid -> 12 ok` / `WEXITSTATUS == 42 -> 42 ok` / `wait4(child) again == -ECHILD -> -10 ok` / `blocking wait4 blocked >= 40 ms -> 1 ok` |
 | 226 | `mprotect` | 只校验页对齐与窗口范围、返 0 并单独计数；**保护不生效**（整窗一块 PS=20 的 RWX 映射） | 无夹具读数（§1.1） |
 
@@ -110,7 +110,7 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 | `fd` 继承 | **已有**（fork 档每进程 fd 表 + 管道对象引用计数，2026-11-23） | 见 §4 与 §8；`dup`/`dup2` 重定向仍无 |
 | `socket` / `select` | 无（Ark 自己有一套 socket 兼容层，但**不在** Linux ABI 号表里） | 两套编号与阻塞语义不同，混在一个号表里只会给出错答案 |
 | `futex` | 无 | 没有共享内存与等待队列语义 |
-| 真 `mmap` 语义（文件映射/共享/`MAP_FIXED`/权限位） | 只做匿名私有分配，`RWX` 权限不区分 | 窗口式分配器（§4），兑现真语义需要页级权限与文件后端 |
+| 真 `mmap` 语义（文件映射/`MAP_FIXED`/权限位） | 匿名私有 + 匿名共享（`MAP_SHARED` 只随 `fork` 继承，无文件后端、无 `shm_open`，§8.3）；`RWX` 权限不区分 | 窗口式分配器（§4）；兑现文件映射需要文件后端，权限位需要页级保护 |
 | 多线程 | 无 | `clone` 没有；`exit_group` 与 `exit` 等价 |
 
 ## 4 降级实现，以及为什么这么降
@@ -493,6 +493,39 @@ PLV0 写就是 PME，而且**帧还没落地**：C 处理器（`la_trap_c`）根
 的全局被子进程写脏、内核一条 `pg cow fault` 都不打）；② 写只读页是 **PME(4)** 不是
 PIS(2)，只认 2 会把它当越权打进致命路径。
 
+### 8.3 `MAP_SHARED` 匿名共享页（`ARKRTOS_USE_PAGING_SHM`，2026-11-23，QEMU LA64 实跑）
+
+COW 只管「fork 之后各写各的」这一半；要让父子看见彼此的字，得有另一条显式的共享
+通路。打开 `ARKRTOS_USE_PAGING_SHM`（必须叠在 COW 档上，`#error` 顶住）后，
+`mmap(MAP_SHARED|MAP_ANONYMOUS)` 在**映射时刻**就把每一对 8 KB 建成实体、清零并
+标成共享：
+
+| 项 | 现状 |
+|---|---|
+| 粒度 | 仍是 **8 KB 对**：4 KB 的共享映射独占一对，同一对里再落私有映射会被整段拒绝（`-ENOMEM`） |
+| 建页时机 | **mmap 时刻**。拖到 fork 才让父子各自缺页，两边各拿一帧，「共享」就退化成两次私有分配 —— 那种实现父子都不报错，只是各改各的 |
+| 账本 | 共享位单独一张表（`s_pg_pair_shr[space][idx]`）。`ref > 1` 只说明「有人在共享」，分不出「COW 复制出来的共享」与「本来就要共享」 |
+| fork | 共享对只 `ref++`：不降只读、不栈私有化、不复制；重填与装空间时按可写装条目；写故障与 `write_space` 直接跳过这一对 |
+| 继承 | 只随 `fork` 继承。没有 `shm_open`、没有 `mmap` 文件后端、没有 `MAP_FIXED`；关档时 `MAP_SHARED` 一律 `-ENOSYS` |
+| 非法形态 | 不带 `MAP_ANONYMOUS`、同时给 `PRIVATE\|SHARED`、带 `MAP_FIXED` 都是 `-ENOSYS`（本内核的统一口径：不支持是 `ENOSYS`，不是 `EINVAL`） |
+
+读数（`tools/fork_gate.py` 的 fork+COW+SHM 档，共 34 条 check）：SHM 段 8 条 ——
+两条非法形态回 `-38`、`mmap(MAP_SHARED|ANON) > 0`、`shared page starts zeroed -> 0`、
+`clone for shm child > 0`、`parent saw child shared write -> 1`、`shm child exit reaped -> 12`、
+`shm child saw parent post-fork write (bits=1) -> 1`。内核日志断言另加一条
+`[LA64U] pg shm map va=0x<hex> pairs=<n>`（要求 `pairs >= 1`）。同一轮里
+`[LA64U] pg cow fork shared=<n> ...` 的 `shared` 比纯 COW 档多 1 对（共享对也算共享）。
+
+**为什么共享位要单独存。** 「`ref > 1` 就是共享」这句话只对 COW 成立：一个
+`MAP_SHARED` 的对在只有父子两个空间时 `ref` 也是 2，但它第一次写**不能**复制
+（复制就等于把共享拆了）。所以不能从引用计数反推，必须另存一位。
+
+**顺手修掉的一条真缺陷：`write(1/2)` 没有独占控制台。** 加 SHM 后子进程的 COW
+日志能插在父进程一行 `[fork] ... -> 1` 与 ` ok` 之间，门禁看起来像「少了一条读数」
+——读数没少，是行被劈开了。现在 `lx_write` 整次调用持控制台锁
+（`arkrtos_console_lock()` / `arkrtos_console_unlock()`），内核日志拿同一把锁，
+二者不再互相切行。
+
 ## 9 开关与零体积
 
 - `ARKRTOS_USE_LINUX_ABI`（`kernelsrc/include/arkrtos_features.h`、
@@ -509,6 +542,11 @@ PIS(2)，只认 2 会把它当越权打进致命路径。
   （必须有 `ARKRTOS_USE_LINUX_FORK` 与 `ARKRTOS_USE_PAGING_DEMAND`）；关档时引用
   计数表与 `la_pg_cow_*` 全不编译，`LA_PTE_APP_RO` 也不产出。门禁的两档实测
   （关档零符号、开档 26 条读数）保证「默认档体积与行为零变化」不是一句声明。
+- `ARKRTOS_USE_PAGING_SHM`（§8.3），默认 **0**，`depends on ARKRTOS_USE_PAGING_COW`
+  且 features.h 用 `#error` 顶住这条依赖（共享位的账本就是 COW 档的引用计数表，
+  非 COW 克隆会把每一对实体复制，共享自然消失）；关档时共享位表与
+  `arkrtos_port_paging_map_shared` 全不产出、`mmap(MAP_SHARED)` 回 `-ENOSYS`。
+  三档门禁实测（关档零符号、开档 34 条读数、SHM 关档的 `-ENOSYS` 对照）。
 - `arkrtos_autoconf.h` 由 `tools/kconfig/genconfig.py` 从 `config/arkrtos_defconfig`
   生成，新增 Kconfig 项后必须重跑一次，否则默认档读数里看不到这个开关。
 
@@ -538,7 +576,7 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py --no-build
 | `qemu-readout` | Linux 块 14 条 check 全 ok + PASS 行 + `exit code 7`；管道块 14 条 + `exit code 55`；信号块 31 条 + PASS 行 + `exit code 138`；旁路演示未受影响 |
 | `parser-selfcheck` | 把 8 种坏日志喂回判据，必须全判红 |
 
-fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，15 项；fork 与 fork+COW **两档各跑一遍**，所以 build / qemu-readout / parser-selfcheck 各出现两次）：
+fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，22 项；fork / fork+COW / fork+COW+SHM **三档各跑一遍**，所以 build / qemu-readout / parser-selfcheck 各出现三次）：
 
 | 项 | 钉住什么 |
 |---|---|
@@ -550,7 +588,9 @@ fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，15 
 | `build` | `make` 出 ELF |
 | `qemu-readout` | `[fork]` **21 条** check 全 `ok`、父子 pid 不同、PASS 行、`exit code 0`，且 hello / FS / 其余 Linux 夹具读数仍在；三条新读数（阻塞 `wait4` 真的等了 >= 40 ms / 父读端在子关掉自己那份之后仍读到 3 字节 / SIGCHLD handler 真被调到）逐条校验 |
 | `qemu-readout`（COW 档） | fork+COW：`[fork]` **26 条** check 全 `ok`；内核日志 `shared>=1 / stack>=1 / copied=0`、至少一条 `pg cow copy ... ref=2`、无 `ref=1` 的 copy 行；两条 COW 读数（子看到 fork 前的值、父的写只落自己那份）逐条校验 |
-| `parser-selfcheck` | 9 种坏日志必须判红（COW 档另加 4 种：位掩码丢一位、父写丢失、整类删光 copy 行、fork 时搬了字节） |
+| `qemu-readout`（SHM 档） | fork+COW+SHM：`[fork]` **34 条** check 全 `ok`；六条 SHM 读数逐条校验（两条非法形态回 `-38`、映射成功、起始清零、父看到子写、子看到父 fork 之后的写）；内核日志另加至少一条 `pg shm map va=0x<n> pairs>=1` |
+| `parser-selfcheck` | 9 种坏日志必须判红（COW 档另加 4 种：位掩码丢一位、父写丢失、整类删光 copy 行、fork 时搬了字节；SHM 档再加 5 种：删光 `pg shm map` 行、共享写没被父看到、子看不到父的写、共享页起始非 0、缺映射成功读数） |
+| `default-off-shm` / `kconfig-wired-shm` / `features-guard-shm` | SHM 开关的三件套：autoconf 为 0、Kconfig 有 `depends on ARKRTOS_USE_PAGING_COW`、features.h 有对应 `#error`；`off-zero-port` 另核关档没有 `arkrtos_port_paging_map_shared` |
 | `restore-default` | 收尾把构建目录恢复默认档（避免下一次 `make` 复用 fork 档 `.o`） |
 
 `parser-selfcheck` 是防「绿得没有信息量」的：Linux 块去掉 PASS 行、退出码改 3、
@@ -584,7 +624,11 @@ rodata 失败，因为栈窗口（32 KB）被单独设过，而代码窗口没�
 `elf_demo.c` 里把整行打印放进调度器锁（`arkrtos_sched_lock_internal()` /
 `arkrtos_sched_unlock_internal()`），改完 3/3 连跑稳定。判据侧另有两处：
 读到 marker 前缀就 kill 会把 `exit code 7` 截掉（加 0.5 s 宽限）；`-serial file:`
-后端在进程被 kill 时丢不满 4 KB 的尾块（改管道）。
+后端在进程被 kill 时丢不满 4 KB 的尾块（改管道）。加 SHM 档时同一个坑换了张脸
+再来一次：用户 `write(1/2)` 逐字节直写 `board_putc` 且不拿控制台锁，子进程的
+`[LA64U] pg cow copy ...` 能插在 `[fork] ... -> 1` 与 ` ok` 之间，门禁报「少了一条
+读数」（33 != 34），实际上一条都没少。修法是 `lx_write` 整次调用持
+`arkrtos_console_lock()`——内核日志拿的是同一把锁，二者不再互相切行（§8.3）。
 
 ## 12 边界
 
@@ -601,7 +645,9 @@ rodata 失败，因为栈窗口（32 KB）被单独设过，而代码窗口没�
   阻塞 `wait4`、fd 继承与管道引用计数、跨任务 SIGCHLD 三条读数逐条校验；
   解析器另有九种坏日志自检。fork+COW 档（`ARKRTOS_USE_PAGING_COW=1`）另跑一遍：
   26 条 check + 四条内核日志断言（共享对数、栈页私有化对数、`copied=0`、真发生过
-  写时复制），坏日志自检再加四种 COW 专属形态。
+  写时复制），坏日志自检再加四种 COW 专属形态；fork+COW+SHM 档（`ARKRTOS_USE_PAGING_SHM=1`）
+  再跑一遍：34 条 check + 共享映射内核日志断言（`pg shm map ... pairs>=1`），坏日志
+  自检再加五种 SHM 专属形态。
 - Real-time 语义不因兼容层改变：Linux ABI 的路径全部在 SVC 里同步完成，
   不额外开线程、不加锁（`read`/`write` 到 ramfs 或管道都是同步搬运；管道刻意
   不做阻塞，见 §6）。唯一的「睡下再回来」是阻塞 `wait4`，它用可重启系统调用实现
@@ -612,9 +658,10 @@ rodata 失败，因为栈窗口（32 KB）被单独设过，而代码窗口没�
   还差整条 libc 兼容面**——futex、rseq、TLS 初始化、文件映射、`mprotect` 真落实。
   信号已有跨任务投递（§7），「进程」这个对象也开了（`fork`/`clone` + `wait4`，§8，
   默认关）：每进程 fd 表与继承、跨任务 `SIGCHLD`、阻塞 `wait4` 都已在 QEMU LA64 上
-  有读数；写时复制也有了（`ARKRTOS_USE_PAGING_COW`，§8.2，默认关）；仍没有线程
+  有读数；写时复制也有了（`ARKRTOS_USE_PAGING_COW`，§8.2，默认关）、匿名
+  `MAP_SHARED` 共享页也有了（`ARKRTOS_USE_PAGING_SHM`，§8.3，默认关）；仍没有线程
   （`CLONE_VM`/`CLONE_THREAD` 拒）、没有抢占式信号投递、没有 `dup2` 与 `flash`
-  类重定向。
+  类重定向、没有文件映射。
 - `execve` 是「同任务换镜像」；`fork` 才是「多一个任务 + 一份独立地址空间」。
   两者都在，但**不要**因此把这一层读成「有完整的进程模型」：调度与优先级仍是
   内核全局单份，`fd` 表在 fork 档才分进程（默认档全局单份），写时复制只在

@@ -33,8 +33,8 @@
   C. 开档编得过：LA64 真板级 + `-DARKRTOS_USE_LINUX_FORK=1
      -DARKRTOS_USE_PAGING_DEMAND=1`，五个内核 TU 与夹具本身全编得过；
      再加一档 `-DARKRTOS_USE_PAGING_COW=1` 同样要全编得过。
-  D. QEMU 真读数（两档各跑一遍）：默认 fork 档 `[fork]` 的 21 条 check、
-     fork+COW 档 26 条 check 全 ` ok`（一条 FAIL 都不许）、
+  D. QEMU 真读数（三档各跑一遍）：默认 fork 档 `[fork]` 的 21 条 check、
+     fork+COW 档 26 条、fork+COW+SHM 档 34 条 check 全 ` ok`（一条 FAIL 都不许）、
      `PASS: child ran in its own space, exit 42 reaped`、`exit code 0`；
      `[fork] parent pid=` 与 `[fork] child pid=` 两个数必须不同；并且同一次
      启动里 hello / FS / 其余 Linux 夹具的读数仍在（新开关不许把别人的演示
@@ -48,6 +48,11 @@
      `ref=1` 的 copy 行（没共享也去复制就是白搬）、以及
      `cow child saw pre-fork values (bits=3) -> 3 ok`（子进程看到的仍是
      fork 前的值，父改的是它自己那份）。
+     SHM 档另加：至少一条 `[LA64U] pg shm map va=<hex> pairs=<n>` 且 pairs>=1
+     （共享页必须在 mmap 时刻就有实体；拖到 fork 才让父子各自缺页拿各自的帧，
+     共享就退化成两次私有分配 —— 那种实现父子都不报错，只是各改各的），
+     以及六条 SHM 专属读数逐条出现：两条非法形态必须回 -ENOSYS（关档/组合
+     反假绿）、映射成功、起始清零、父看到子写、子看到父 fork 之后的写。
   E. 解析器自检：把合成坏日志喂给同一个判据（去掉 PASS、改退出码、插 FAIL、
      少一条 check、父子 pid 改成相同、去掉 exec rc=0），每种坏法都必须判红。
 
@@ -59,8 +64,8 @@
 
 不覆盖：vfork / CLONE_VM 线程（无共享地址空间，一律 -EINVAL）、CLONE_FILES
 （每进程 fd 表是 fork 语义的一部分，共享 fd 表这种形态本门禁不为它背书）、
-MAP_SHARED 匿名共享页（COW 只管「fork 之后各写各的」这一半；显式共享要另外
-做，见 docs/MMU进程模型与ELF装载.md）。
+文件映射 / MAP_FIXED / mprotect 强制（匿名 MAP_SHARED 共享页已由第三档覆盖；
+本档的 SHM 只管「经 fork 继承的匿名共享对」，没有 shm_open、没有文件后端）。
 
 用法
 ----
@@ -90,6 +95,9 @@ FORK_FLAGS = ["-DARKRTOS_USE_LINUX_FORK=1", "-DARKRTOS_USE_PAGING_DEMAND=1"]
 # 再 fork+COW 档（26 条 + 内核 COW 日志）。绝不把 FORK_FLAGS 直接改成带
 # COW —— 那样默认 fork 路径（整块克隆）就再也没被测过了。
 COW_FLAGS = FORK_FLAGS + ["-DARKRTOS_USE_PAGING_COW=1"]
+# SHM 档 = COW 档 + MAP_SHARED 匿名共享页，且必须叠在 COW 档上：共享位的账本
+# 就是 COW 档的引用计数表，非 COW 克隆会把每一对实体复制，共享自然消失。
+SHM_FLAGS = COW_FLAGS + ["-DARKRTOS_USE_PAGING_SHM=1"]
 
 LA64_FALLBACKS = [
     "D:/LoongIDE/la64-tool/bin/loongarch64-newlib-elf-gcc.exe",
@@ -134,6 +142,9 @@ EXPECT_FORK_CHECKS = 21
 # COW 段多 5 条：pipe2、clone>0、子被 reap、子看到 fork 前的值（位掩码 3）、
 # 父自己的写还在。合计 26 条。
 EXPECT_COW_CHECKS = 26
+# SHM 段多 8 条：两条非法形态回 -ENOSYS（反假绿）、匿名共享映射成功、起始清零、
+# clone>0、父看到子写、子被 reap、子看到父 fork 之后的写。合计 34 条。
+EXPECT_SHM_CHECKS = 34
 
 FAILS = []
 PASSES = []
@@ -272,6 +283,34 @@ def check_default_off():
     else:
         ok("features-guard", "features.h 四条 #error 都在")
 
+    m = re.search(r"^#define\s+ARKRTOS_USE_PAGING_SHM\s+(\d+)\s*$", ac, re.M)
+    if not m:
+        bad("default-off-shm", "arkrtos_autoconf.h 里没有 ARKRTOS_USE_PAGING_SHM")
+    elif m.group(1) != "0":
+        bad("default-off-shm", "默认档 ARKRTOS_USE_PAGING_SHM=%s（必须是 0）"
+            % m.group(1))
+    else:
+        ok("default-off-shm", "arkrtos_autoconf.h: ARKRTOS_USE_PAGING_SHM 0")
+
+    i = kc.find("config ARKRTOS_USE_PAGING_SHM")
+    if i < 0:
+        bad("kconfig-wired-shm", "Kconfig.features 里没有 config ARKRTOS_USE_PAGING_SHM")
+    else:
+        tail = kc[i + len("config ARKRTOS_USE_PAGING_SHM"):]
+        m_end = re.search(r"^(config|menuconfig)\s", tail, re.M)
+        blk = tail[:m_end.start()] if m_end else tail
+        if "ARKRTOS_USE_PAGING_COW" not in blk:
+            bad("kconfig-wired-shm",
+                "Kconfig 的 SHM 项没有 depends on ARKRTOS_USE_PAGING_COW")
+        else:
+            ok("kconfig-wired-shm", "Kconfig 项存在，depends on ARKRTOS_USE_PAGING_COW")
+
+    g = "ARKRTOS_USE_PAGING_SHM=1 requires ARKRTOS_USE_PAGING_COW=1"
+    if g not in fh:
+        bad("features-guard-shm", "features.h 缺 `#error \"%s\"`" % g)
+    else:
+        ok("features-guard-shm", "features.h 的 SHM 依赖 #error 在")
+
     bc = read_text(os.path.join(ROOT, "board/qemu_loongarch64/arkrtos_board_config.h"))
     if re.search(r"^#define\s+ARKRTOS_USE_LINUX_FORK\s+1\s*$", bc, re.M):
         bad("board-switch", "QEMU LA64 板级不该缺省打开 fork（应靠 EXTRA_CFLAGS 出镜像）")
@@ -311,6 +350,8 @@ def check_off_zero_symbols(rv32, la64, nm, key_dir):
         ("kernelsrc/port/loongarch/la64/arkrtos_port.c",
          "arkrtos_port_paging_space_clone"),
         ("kernelsrc/src/arkrtos_paging.c", "arkrtos_paging_space_clone"),
+        ("kernelsrc/port/loongarch/la64/arkrtos_port.c",
+         "arkrtos_port_paging_map_shared"),
     ]
     leaking = []
     for rel, sym in pairs:
@@ -466,7 +507,7 @@ def run_qemu(qemu, seconds):
     return read_text_bytes(data)
 
 
-def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False):
+def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False):
     lines = text.replace("\r\n", "\n").splitlines()
 
     def count(pred):
@@ -507,6 +548,17 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False):
             "COW 没生效（子看到了父 fork 之后的写）"
         req["parent cow write kept -> 48879 ok"] = \
             "父进程自己的写没落到自己那份页"
+    if shm:
+        req["mmap(shared without anon) == -ENOSYS -> -38 ok"] = \
+            "没带 MAP_ANONYMOUS 的 MAP_SHARED 居然被接受"
+        req["mmap(private|shared) == -ENOSYS -> -38 ok"] = \
+            "PRIVATE|SHARED 同时给居然被接受"
+        req["mmap(MAP_SHARED|ANON) > 0 -> 1 ok"] = "匿名共享映射失败"
+        req["shared page starts zeroed -> 0 ok"] = "共享页不是从 0 开始"
+        req["parent saw child shared write -> 1 ok"] = \
+            "父进程看不到子进程对共享页的写（这根本不是共享）"
+        req["shm child saw parent post-fork write (bits=1) -> 1 ok"] = \
+            "子进程看不到父进程 fork 之后对共享页的写（共享对被当私有复制了）"
     for line, why in req.items():
         if count(lambda s2, t=line: s2.strip() == "[fork] " + t) != 1:
             problems.append("缺 `[fork] %s` —— %s" % (line, why))
@@ -549,6 +601,17 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False):
         elif any(ref == "1" for _i, ref in copies):
             problems.append("出现 ref=1 的 copy 行（没共享也去复制，白搬字节）")
 
+    if shm:
+        nl = text.replace("\r\n", "\n")
+        maps = re.findall(
+            r"^\[LA64U\] pg shm map va=0x[0-9a-f]+ pairs=(\d+)$", nl, re.M)
+        if not maps:
+            problems.append("缺 `[LA64U] pg shm map va=<hex> pairs=<n>`"
+                            "（共享页没在 mmap 时刻建实体：fork 时才各自缺页拿各自的帧，"
+                            "共享退化成两次私有分配）")
+        elif any(int(n) < 1 for n in maps):
+            problems.append("pg shm map 的 pairs=0（什么都没建）")
+
     # 新开关不许把别人的演示搞坏。
     for tag, name in (("[linux] PASS", "Linux ABI 夹具"),
                       ("[FS] PASS", "ramfs 自测"),
@@ -562,7 +625,7 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False):
                   % (expect_checks, m_par.group(1), m_chi.group(1))]
 
 
-def self_check(good_text, cow=False):
+def self_check(good_text, cow=False, shm=False):
     """把好日志的九种坏法喂回判据，每一种都必须判红，否则解析器是空转。"""
     g = good_text.replace("\r\n", "\n")
     mutations = {
@@ -605,13 +668,31 @@ def self_check(good_text, cow=False):
                 r"\1 copied=2",
                 s, count=1, flags=re.M),
         })
+    if shm:
+        mutations.update({
+            "缺 pg shm map 日志": lambda s: re.sub(
+                r"^\[LA64U\] pg shm map va=0x[0-9a-f]+ pairs=\d+$\n", "",
+                s, flags=re.M),
+            "共享写没被父看到": lambda s: s.replace(
+                "[fork] parent saw child shared write -> 1 ok",
+                "[fork] parent saw child shared write -> 0 FAIL (want 1)"),
+            "子看不到父的写": lambda s: s.replace(
+                "[fork] shm child saw parent post-fork write (bits=1) -> 1 ok",
+                "[fork] shm child saw parent post-fork write (bits=1) -> 0 FAIL (want 1)"),
+            "共享页起始非 0": lambda s: s.replace(
+                "[fork] shared page starts zeroed -> 0 ok",
+                "[fork] shared page starts zeroed -> 7 FAIL (want 0)"),
+            "缺共享映射成功读数": lambda s: s.replace(
+                "[fork] mmap(MAP_SHARED|ANON) > 0 -> 1 ok\n", ""),
+        })
     missed = []
+    nchk = EXPECT_SHM_CHECKS if shm else (EXPECT_COW_CHECKS if cow else EXPECT_FORK_CHECKS)
     for name, fn in mutations.items():
         mutated = fn(g)
         if mutated == g:
             missed.append("%s（坏样本没改到东西）" % name)
             continue
-        passed, _ = judge(mutated, EXPECT_COW_CHECKS if cow else EXPECT_FORK_CHECKS, cow)
+        passed, _ = judge(mutated, nchk, cow, shm)
         if passed:
             missed.append(name)
     return missed
@@ -652,18 +733,24 @@ def main(argv):
     if la64:
         check_compile_on(la64, key_dir)
         check_compile_on(la64, key_dir, ["-DARKRTOS_USE_PAGING_COW=1"], "fork+cow")
+        check_compile_on(la64, key_dir, ["-DARKRTOS_USE_PAGING_COW=1",
+                                         "-DARKRTOS_USE_PAGING_SHM=1"],
+                         "fork+cow+shm")
 
     if qemu:
-        # 两档各跑一遍：默认 fork（21 条）与 fork+COW（26 条 + 内核 COW 日志）。
+        # 三档各跑一遍：默认 fork（21 条）、fork+COW（26 条 + 内核 COW 日志）、
+        # fork+COW+SHM（34 条 + 内核共享映射日志）。别把 SHM 并进 COW 档 ——
+        # 那样「SHM 关档时 mmap(MAP_SHARED) 仍回 -ENOSYS」就测不到了。
         # 每次都要先 clean（make 不跟踪 EXTRA_CFLAGS），否则上一次的 .o 会让
         # 这一次只做链接，镜像里根本没有这一档的代码 —— 本门禁最想抓的假绿。
         rounds = [
-            (FORK_FLAGS, EXPECT_FORK_CHECKS, False, "fork"),
-            (COW_FLAGS, EXPECT_COW_CHECKS, True, "fork+cow"),
+            (FORK_FLAGS, EXPECT_FORK_CHECKS, False, False, "fork"),
+            (COW_FLAGS, EXPECT_COW_CHECKS, True, False, "fork+cow"),
+            (SHM_FLAGS, EXPECT_SHM_CHECKS, True, True, "fork+cow+shm"),
         ]
         if a.no_build:
-            rounds = rounds[1:]
-        for flags, nchk, cow, tag in rounds:
+            rounds = rounds[-1:]
+        for flags, nchk, cow, shm, tag in rounds:
             if not a.no_build:
                 built, why = build_image(flags)
                 if not built:
@@ -679,10 +766,10 @@ def main(argv):
             if text is None:
                 bad("qemu-run", "[%s] QEMU 没写出串口（%s 秒内）" % (tag, a.seconds))
                 continue
-            passed, notes = judge(text, nchk, cow)
+            passed, notes = judge(text, nchk, cow, shm)
             if passed:
                 ok("qemu-readout", "[%s] %s" % (tag, notes[0]))
-                missed = self_check(text, cow)
+                missed = self_check(text, cow, shm)
                 if missed:
                     bad("parser-selfcheck",
                         "[%s] 这些坏样本没被判红：%s" % (tag, "、".join(missed)))
