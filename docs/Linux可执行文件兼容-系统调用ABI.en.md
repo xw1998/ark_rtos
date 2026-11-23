@@ -607,8 +607,17 @@ futex): the shared page is mapped (`> 0`), `WAKE` with no waiter returns 0,
 is a real cloned process, the parent's `WAIT` returns 0 after being woken, the
 parent sees the `2` the waker wrote, the waker is reaped, and
 `futex waker saw 1 and woke 1 (bits=3)` carries both evidence bits: bit 0 = the
-child still saw the `1` the parent was waiting on (so the parent really went to
-sleep, not an empty match), bit 1 = `WAKE` really woke one waiter.
+child read the same `1` the parent was about to wait on (so parent and child
+really share the word), bit 1 = `WAKE` really woke one waiter.
+
+The ordering here **retries until it converges** instead of assuming a schedule:
+user mode can be preempted by the time slice, so the child may finish before the
+parent ever reaches `WAIT` (this was actually observed once: parent `WAIT`
+returned `-EAGAIN`, child `WAKE` returned 0, which looks like broken pairing).
+The child now loops "write 2 + `WAKE`" until it gets 1, and the parent re-sleeps
+on the current value when it was overtaken; if futex pairing were really broken
+neither side would converge and the readout stays red. "The parent really slept"
+is proven by the `WAIT` returning 0 line, not by bit 0.
 
 **Three traps only a board run exposes.**
 

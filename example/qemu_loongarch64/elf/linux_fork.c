@@ -29,7 +29,8 @@
 *               睡着（这是本内核唯一的真阻塞点之一），子进程改共享页上的那
 *               个字再 WAKE，父进程必须带着 0 醒来并看到新值；futex 的键是
 *               「物理帧 + 页内偏移」，所以子进程必须叫醒的是**同一个字**，
-*               不是同一个虚拟地址上的另一份拷贝。
+*               不是同一个虚拟地址上的另一份拷贝。两边都用「重试到收敛」的
+*               写法（用户态可被时间片抢占），不拿调度顺序当判据。
 *
 *          另外两条反假绿：
 *            - 子进程在退出前写一段自己的串，父不会被它的写"带跑"；
@@ -908,24 +909,38 @@ void linux_main(unsigned long sp)
             child6 = lx3(LX_CLONE, LX_SIGCHLD, 0, 0);
             if (child6 == 0)
             {
-                int    code = 0;
-                lx_long wrc;
+                int     code = 0;
+                lx_long wrc  = 0;
+                int     tries;
 
                 if (*fw == 1ul)
                 {
                     code |= 1;      /* bit0: 父进程等的还是 1 */
                 }
-                *fw = 2ul;
-                wrc = lx3(LX_FUTEX, (lx_long)(unsigned long)fw,
-                          LX_FUTEX_WAKE, 1);
-                if (wrc == 1)
+                /* 「写值 + 叫醒」重复到真的叫醒一个等待者为止。
+                 *
+                 * 写成循环而不是一次，是因为「父进程恰好在 clone 返回之后
+                 * 被时间片切走」是合法调度：用户态可以被抢占，一次就判红
+                 * 等于拿调度当判据。实测确实踩到过（WAIT 回 -EAGAIN、
+                 * WAKE 回 0，看起来像 futex 不配对，其实是子进程先跑完了）。
+                 * 值一直写 2，父进程那边用「当前值」当期望值重睡，所以不管
+                 * 谁先被调度，两边都会收敛；futex 真的不配对时这个循环永远
+                 * 叫不醒人，仍是红的。 */
+                for (tries = 0; tries < 200000; tries++)
                 {
-                    code |= 2;      /* bit1: 真的叫醒了 1 个等待者 */
+                    *fw = 2ul;
+                    wrc = lx3(LX_FUTEX, (lx_long)(unsigned long)fw,
+                              LX_FUTEX_WAKE, 1);
+                    if (wrc == 1)
+                    {
+                        code |= 2;  /* bit1: 真的叫醒了 1 个等待者 */
+                        break;
+                    }
                 }
-                else
+                if (wrc != 1)
                 {
-                    /* 兜底：父进程还睡着就把 SIGCHLD 投给它，让那次 WAIT
-                     * 回 -EINTR，而不是让整个镜像挂在这里等超时。 */
+                    /* 兜底：一直没叫醒就把 SIGCHLD 投给父进程，让那次 WAIT
+                     * 回 -EINTR（读数是失败），而不是让镜像挂在这里等超时。 */
                     (void)lx2(LX_KILL, ppid, LX_SIGCHLD);
                 }
                 (void)lx1(LX_EXIT, code);
@@ -936,9 +951,28 @@ void linux_main(unsigned long sp)
 
             check("clone for futex child > 0", (child6 > 0) ? 1 : 0, 1);
 
-            /* 父进程：睡着等子进程把字改成 2。 */
-            rc6 = lx4(LX_FUTEX, (lx_long)(unsigned long)fw, LX_FUTEX_WAIT,
-                      1, 0);
+            /* 父进程：睡着等子进程把字改成 2。
+             *
+             * 第一次进入时期望值还是 1。若子进程抢在父进程睡下之前就把值改
+             * 了（合法调度），这一次 WAIT 按 Linux 语义当场回 -EAGAIN ——
+             * 那不是缺陷，拿当前值再睡一次即可；子进程那边一直在重试
+             * WAKE，所以「真睡下 + 真被叫醒」这一条仍是可证的。 */
+            {
+                int round;
+
+                rc6 = -LX_EAGAIN;
+                for (round = 0; round < 4; round++)
+                {
+                    lx_long v6 = (lx_long)(*fw);
+
+                    rc6 = lx4(LX_FUTEX, (lx_long)(unsigned long)fw,
+                              LX_FUTEX_WAIT, v6, 0);
+                    if (rc6 != -LX_EAGAIN)
+                    {
+                        break;
+                    }
+                }
+            }
             check("futex(WAIT) returned 0 after being woken", rc6, 0);
             check("parent saw the value the waker wrote", (lx_long)(*fw), 2);
 

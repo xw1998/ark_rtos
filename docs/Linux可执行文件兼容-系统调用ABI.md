@@ -566,10 +566,15 @@ COW 只管「fork 之后各写各的」这一半；要让父子看见彼此的�
 | `futex(WAIT) on a different value == -EAGAIN -> -11` | 值已变就不睡（Linux 的 fast path） |
 | `futex op other than WAIT/WAKE == -ENOSYS -> -38` | 未实现的 op 如实拒绝，不静默当成 WAIT |
 | `clone for futex child > 0 -> 1` | 唤醒者是另一个真实进程，不是同一任务的自我唤醒 |
-| `futex(WAIT) returned 0 after being woken -> 0` | 父进程真被叫醒（失败时子进程用 SIGCHLD 打断，读数是 `-EINTR`，不会挂死 QEMU） |
+| `futex(WAIT) returned 0 after being woken -> 0` | 父进程真睡下并被叫醒。第一次进入时期望值 1；被子进程抢先改值时按 Linux 语义回 `-EAGAIN`，夹具拿当前值重睡（最多 4 轮）——所以这一条判的是「真睡下 + 真被叫醒」，不是「父进程一定先走到 WAIT」。失败时子进程用 SIGCHLD 打断，读数是 `-EINTR`，不会挂死 QEMU |
 | `parent saw the value the waker wrote -> 2` | 醒来后看到的是唤醒者写的字（共享页真生效，不是私有副本） |
 | `futex child reaped -> 12` | 唤醒者正常退出并被 reap |
-| `futex waker saw 1 and woke 1 (bits=3) -> 3` | bit0 = 子进程看到的还是父进程等的那个 1（证明父真睡下了，不是「父还没睡就被叫醒」的空匹配）；bit1 = `WAKE` 真的叫醒了 1 个 |
+| `futex waker saw 1 and woke 1 (bits=3) -> 3` | bit0 = 子进程读共享页时看到的还是父进程要等的那个 1（证明父子读写的是同一个字，共享帧生效）；bit1 = `WAKE` 真的叫醒了 1 个 |
+
+这一档的定序是**重试到收敛**，不拿调度当判据：用户态可被时间片抢占，子进程可能在父进程走到 `WAIT`
+之前就跑完（实测踩到过一次：父 `WAIT` 回 `-EAGAIN`、子 `WAKE` 回 0，看起来像 futex 不配对）。现在的写法是
+子进程循环「写 2 + `WAKE`」直到回 1，父进程在被抢值时拿当前值重睡；futex 真的不配对时两边都收敛不了，
+读数仍是红的。
 
 **三条只有上板才看得见的坑。**
 
