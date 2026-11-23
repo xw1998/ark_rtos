@@ -69,6 +69,8 @@ static void smp_cpu_clear(arkrtos_smp_cpu_t *p_cpu)
     p_cpu->tick            = 0u;
     p_cpu->ipi_count       = 0u;
     p_cpu->idle_count      = 0u;
+    p_cpu->ipi_back        = 0u;
+    p_cpu->ipi_back_req    = 0u;
 }
 
 /**
@@ -229,9 +231,50 @@ int32 arkrtos_smp_send_ipi(uint32 cpu)
     return arkrtos_port_send_ipi(cpu);
 }
 
+int32 arkrtos_smp_ping_main(uint32 cpu)
+{
+    if((cpu == 0u) || (cpu >= (uint32)ARKRTOS_CPU_NUM))
+    {
+        return -1;                    /* 自己不需要回 ping；越界不落地 */
+    }
+
+    /* 先登记再发：反过来的话次核可能在中断里先到，看到 req==0 就不回，
+     * 主核白等一个上限。ip_back_req 是普通 uint32 store，次核在中断里
+     * 读它——这里是「先写后发中断」，中间那条 IPI 写自带同步语义。 */
+    arkrtos_smp_cpu[cpu].ipi_back_req = 1u;
+
+    if(arkrtos_smp_send_ipi(cpu) != 0)
+    {
+        arkrtos_smp_cpu[cpu].ipi_back_req = 0u;
+        return -1;                    /* 没上线：把登记的请求撤掉，不留哑弹 */
+    }
+
+    return 0;
+}
+
 ARKRTOS_SMP_WEAK void arkrtos_smp_ipi_handler(void)
 {
-    arkrtos_smp_cpu_self()->ipi_count++;
+    uint32 cpu = arkrtos_port_cpu_id();
+
+    if(cpu >= (uint32)ARKRTOS_CPU_NUM)
+    {
+        cpu = 0u;                     /* 核号读错时收敛到 0，与 cpu_self 同口径 */
+    }
+
+    arkrtos_smp_cpu[cpu].ipi_count++;
+
+    /* R1 的双向读数：主核登记了「下一个 IPI 顺手回一个」时，次核在这里
+     * 回一个给 CPU0。只在次核上做（cpu != 0），并且回完就清登记——
+     * 一次登记换一次回执，不做周期性心跳（那会把计数变成时间函数，
+     * 读数就不再是「这条路径通不通」的证据）。 */
+    if((cpu != 0u) && (arkrtos_smp_cpu[cpu].ipi_back_req != 0u))
+    {
+        arkrtos_smp_cpu[cpu].ipi_back_req = 0u;
+        if(arkrtos_smp_send_ipi(0u) == 0)
+        {
+            arkrtos_smp_cpu[cpu].ipi_back++;
+        }
+    }
 }
 
 void arkrtos_smp_idle_loop(void)

@@ -243,6 +243,58 @@ int main(void)
     ck(arkrtos_smp_cpu[0].online == 1u, "the fallback core marks itself online");
     ck(arkrtos_smp_online_mask_get() == 0x1u, "the mask keeps only the fallback core");
 
+    /* --- 10. 主核 IPI 回执（R1） ------------------------------- *
+     * 这一段钉的是「主核那条接收路径通不通」的回执面：ping_main 只对在线的
+     * 次核登记并发中断，handler 只在被登记的次核上回一个给 CPU0。
+     * 真实投递仍只有多核载体能证明（宿主上没有第二个核）。 */
+    stub_reset();
+    arkrtos_smp_init();
+    ck(arkrtos_smp_ping_main(0u) == -1, "ping_main refuses CPU0 itself");
+    ck(arkrtos_smp_ping_main(9u) == -1, "ping_main refuses an out-of-range core");
+    ck(arkrtos_smp_ping_main(4u) == -1, "ping_main refuses the first out-of-range id");
+
+    g_ipi_calls = 0;
+    ck(arkrtos_smp_ping_main(2u) == -1, "ping_main refuses an offline secondary core");
+    ck(g_ipi_calls == 0, "a refused ping never reaches the port layer");
+    ck(arkrtos_smp_cpu[2].ipi_back_req == 0u,
+       "a refused ping leaves no dangling ping request behind");
+
+    arkrtos_smp_cpu_online(2u);
+    g_ipi_calls = 0;
+    g_ipi_last  = 0u;
+    ck(arkrtos_smp_ping_main(2u) == 0, "ping_main accepts an online secondary core");
+    ck(arkrtos_smp_cpu[2].ipi_back_req == 1u, "ping_main registers the back-ping request");
+    ck(g_ipi_calls == 1 && g_ipi_last == 2u,
+       "ping_main sends exactly one IPI, to the target core");
+
+    /* 次核侧：被登记的那一下要回一个给 CPU0，并且只回一次。 */
+    g_cpu_id = 2u;
+    arkrtos_smp_cpu[2].ipi_count = 0u;
+    arkrtos_smp_cpu[2].ipi_back  = 0u;
+    g_ipi_calls = 0;
+    g_ipi_last  = 0xffffffffu;
+    arkrtos_smp_ipi_handler();
+    ck(arkrtos_smp_cpu[2].ipi_count == 1u, "the handler still counts on the current core");
+    ck(arkrtos_smp_cpu[2].ipi_back == 1u, "a registered core pings CPU0 back once");
+    ck(arkrtos_smp_cpu[2].ipi_back_req == 0u, "the back-ping request is consumed, not periodic");
+    ck(g_ipi_calls == 1 && g_ipi_last == 0u, "the back-ping is addressed to CPU0");
+
+    g_ipi_calls = 0;
+    arkrtos_smp_ipi_handler();
+    ck(arkrtos_smp_cpu[2].ipi_back == 1u, "a second IPI without a request sends nothing back");
+    ck(g_ipi_calls == 0, "no unsolicited back-ping reaches the port layer");
+
+    g_cpu_id = 0u;
+    arkrtos_smp_cpu[0].ipi_back_req = 1u;
+    arkrtos_smp_cpu[0].ipi_back     = 0u;
+    g_ipi_calls = 0;
+    arkrtos_smp_ipi_handler();
+    ck(arkrtos_smp_cpu[0].ipi_back == 0u, "CPU0 never pings itself back");
+    ck(arkrtos_smp_cpu[0].ipi_back_req == 1u,
+       "CPU0 keeps the request untouched (it is only meaningful on a secondary)");
+    ck(g_ipi_calls == 0, "no CPU0 self-ping loop");
+    arkrtos_smp_cpu[0].ipi_back_req = 0u;
+
     drain();
     return 0;
 }

@@ -100,7 +100,7 @@ the correct shape when no shootdown exists.
 
 | # | Condition | Test |
 |---|---|---|
-| R1 | Main core has an IPI path | `arkrtos_port_send_ipi(0)` returns 0 and a handler is registered for that vector |
+| R1 | Main core has an IPI path | **Met (2026-11-23, measured on QEMU LA64 `-smp 2`)**: `arkrtos_port_send_ipi(0)` returns 0; the INT branch of `la_trap_c()` has an `ESTAT.IS` IPI arm that reaches `arkrtos_smp_ipi_handler()`; `arkrtos_port_irq_init()` enables this core's `CORE_EN` and `ECFG.LIE[12]`. Reading `[smp] ping ipi0=2 self=1 back1=1 result=ok`; gate `tools/smp_gate.py` pin R1. See [QEMU emulator port and verification](QEMU模拟器移植与验证.en.md) §9.10 |
 | R2 | Secondary cores enable paging | a `CRMD.PG` write appears in the secondary entry and a secondary core can build and look up its own TLB entries (with a readout) |
 | R3 | A real cross-core shared-VA caller exists | at least one non-demo caller: a user-mode task migrated by `task_to` while both cores touch the same window VA |
 | R4 | There is a receipt, not a timeout | it is provable that the target core actually invalidated (a readable counter, on silicon or QEMU) |
@@ -111,8 +111,10 @@ R1-R4 can be advanced on this machine; R5 needs silicon. Until then shootdown ca
 
 ### 5.4 If reopened, the minimal first step
 
-The order is fixed: R1 first (the only independent increment touching neither paging nor
-scheduling), then R2 (only then does a secondary core have entries to invalidate), then the protocol
+The order is fixed: ~~R1 first (the only independent increment touching neither paging nor
+scheduling)~~ **done 2026-11-23** (four changes, host and emulator readings, and the gate are in the
+R1 row of §5.3 and [QEMU emulator port and verification](QEMU模拟器移植与验证.en.md) §9.10; next is R2),
+then R2 (only then does a secondary core have entries to invalidate), then the protocol
 (target core receives IPI, invalidates by VA at a safe point, writes a readable counter; the initiator
 waits for the counter with a bound and reports failure honestly - never "timeout means success").
 

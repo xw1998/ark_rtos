@@ -180,12 +180,16 @@ Ark RTOS 把这件事拆成五层，每层各拦一种失败，且每一层的"�
 > `https://gitee.com/loongson-edu/la32r-QEMU.git`（machine `ls3a5k32`）只发布 Linux 二进制，
 > 本机既无 WSL 发行版也无 MSYS2，细节与该分支机器参数见该文档 §6.1。
 >
-> **SMP**：LA64 上 ② 次核启动、③ IPI 通路、④ 调度分核都已在 QEMU `-smp 2` 上实跑
+> **SMP**：LA64 上 ② 次核启动、③ IPI 通路、④ 调度分核、⑤ AMP 自动负载均衡、⑥ 主核 IPI 接收路径
+> 都已在 QEMU `-smp 2` 上实跑
 > （判词 `smp_bringup_ok_on_qemu` / `smp_amp_sched_ok_on_qemu`，读数见该文档 §9.6 / §9.8）。
 > ④ 走的是 **AMP**：全局调度器仍是单核一份，次核拿一份自己的运行队列，任务由调用方
 > `arkrtos_smp_sched_task_to()` 显式迁过去、`_task_back()` 显式要回，次核上的任务不许
 > 调内核 API（遇 SVC 直接致命停机）。所以这条**不等于**「对称多核」或「自动负载均衡」。
 > RV32 侧的 ②③ 走 ACLINT `msip`，也已 `-smp 2` 实跑（§9.7），④ 这一轮只落在 LA64。
+> ⑥（R1）是 2026-11-23 补的：主核的 trap 分派里新增了 IPI 分支并打开本核 CORE_EN/LIE[12]，
+> `arkrtos_port_send_ipi(0)` 因此不再拒绝核 0；但这只是 TLB shootdown 五条前置里的第一条，
+> 其余四条未做——**shootdown 仍不实现**，仍然只能说「主核也能收 IPI」。
 > 另外 `-smp 2` 下有约 10% 概率的间歇停机（**与 SMP 代码无关**：默认
 > 镜像 `-smp 2` 同样复现），已按未解决登记在该文档 §9.6.10。
 

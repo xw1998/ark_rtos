@@ -4210,6 +4210,121 @@ parallel, and teardown stops cleanly and hands CPU0 back; the default build and 
 3. **Must not be read as board-ready**: secondary bring-up, IPI and the IOCSR mailbox all
    go through QEMU 9.2.3's model; real firmware and hardware are unverified.
 
+### 9.10 ⑥ Main-core IPI receive path (R1, 2026-11-23, QEMU LA64 `-smp 2` executed)
+
+#### 9.10.1 The gap: the dispatch table has no such vector
+
+Until now `arkrtos_port_send_ipi(0)` returned -1 with an explicit reason: **the main core has no
+IPI handling path**. Concretely, the INT branch of `la_trap_c()` only recognises the timer bit of
+`ESTAT.IS`; every other interrupt falls through to `arkrtos_port_fatal_report()` and halts. So
+"send an IPI to the main core" was never a question of delivery — it was that delivery would turn
+into a fatal stop.
+
+This is R1 of [SMP symmetric scheduling and TLB shootdown: design ruling](SMP对称调度与TLB-shootdown-设计裁定.en.md)
+§5.3, and the fix §5.4 fixes as the minimal first step: it touches neither paging nor scheduling,
+so it is the only piece that can ship alone.
+
+#### 9.10.2 Four changes; miss one and the path does not exist
+
+| # | Change | Why it is mandatory |
+|---|---|---|
+| 1 | Pend-clearing collapses into `la_ipi_clear_pending()` (read `STATUS 0x1000` -> write `CLEAR 0x100C`) | The sequence only existed in the scheduler-split secondary path; without clearing, `ertn` re-enters immediately = interrupt storm |
+| 2 | `la_trap_c()` gains `else if((estat & LA_ESTAT_IS_IPI) != 0u)` after the timer branch, **clears first and then** calls `arkrtos_smp_ipi_handler()`, **never touches `s_switch_pending`** | Reversed order is the storm above; touching `s_switch_pending` would misread "an IPI arrived" as "switch tasks" |
+| 3 | `arkrtos_port_irq_init()` writes `CORE_EN = 0xfff` (IOCSR `0x1004`) and sets `ECFG.LIE[12]` under `#if SMP` | QEMU's loongson-ipi **only raises the interrupt when this core's `CORE_EN` selects that vector**; a pending bit alone never enters. `ECFG.LIE` off means the same |
+| 4 | `arkrtos_port_send_ipi()` no longer refuses core 0 (out of range still returns -1) | The old refusal reason (no main-core path) no longer exists |
+
+The vector number stays 1 as elsewhere in the repo (`IPI_SEND` carries `(target << 16) | vector`).
+**Two IPIs on the same vector back to back get merged by QEMU**, so the caller is strictly
+"send one, wait for it" — the counter can never be used as a bandwidth measurement.
+
+**Back-receipt** (no new switch; everything under `ARKRTOS_USE_SMP`): `arkrtos_smp_cpu_t` gains
+`ipi_back` / `ipi_back_req`; `arkrtos_smp_ping_main(cpu)` registers the request before sending, and
+the default `arkrtos_smp_ipi_handler()` on a secondary core answers CPU0 once, bumps `ipi_back` and
+consumes the request. A core that is offline or a send that fails withdraws the request (no
+dangling registration). **One-shot receipt, not a heartbeat** — a heartbeat would make `ipi_count`
+a function of time, and then the number stops being evidence that this path works.
+
+**RV32 stays untouched on purpose**: there CPU0's `msip` is the PendSV pend bit, so mixing IPIs and
+the handler into it would scramble the semantics (`arkrtos_port_send_ipi(0)` still refuses on RV32,
+with the reason in a comment).
+
+#### 9.10.3 Zero change in the default build (measured, not assumed)
+
+Same machine, same toolchain, default build (no `EXTRA_CFLAGS`), built twice: once from a clean
+`d7ab1c1` checkout (`git worktree`), once with these changes.
+
+| | text | data | bss |
+|---|---|---|---|
+| `d7ab1c1` default | 449888 | 456 | 5128740 |
+| default with R1 | 449888 | 456 | 5128740 |
+
+Section by section, all 12 loadable sections are equal; only `.debug_info` / `.debug_line` /
+`.debug_str` differ by 1-12 bytes (the two build directory names have different lengths, and the
+paths land in the `-g` info). I.e. **code and data are unchanged**; the 24-byte file-size delta is
+entirely debug sections.
+
+#### 9.10.4 Measured readings
+
+SMP-only build (`-DARKRTOS_USE_SMP=1 -DARKRTOS_CPU_NUM=2`), `-smp 2`, 25 s:
+
+```
+[smp] cores=2 mask=0x00000003 sent=1 ipi1=5 result=ok
+[smp] ping ipi0=2 self=1 back1=1 result=ok
+```
+
+- `ipi0=2`: one is CPU0 pinging itself (`self=1` says that one really came back), one is the
+  secondary's registered back-ping;
+- `back1=1`: the secondary's handler really answered, once (a second IPI in the same image answers
+  nothing — see the host test);
+- `ipi1=5` on the line above is the pre-existing secondary-side reading, unchanged.
+
+SMP_SCHED + BALANCE build (`+ -DARKRTOS_USE_SMP_SCHED=1 -DARKRTOS_USE_SMP_BALANCE=1`), both paths
+in one image, neither disturbing the other:
+
+```
+[smp] ping ipi0=2 self=1 back1=1 result=ok
+[bal] r=1 out=2 back=1 idle=0 tick=1004 cur1=7 q1=1 b1=+2665 c1=0 b2=+2688 c2=1
+...
+[bal] park b1=7 b2=8 done
+```
+
+**Command-line trap hit this round**: `-nographic` together with `-display none` puts the monitor on
+stdio and QEMU never exits on its own (`rc=124`), while `-serial file:<log>` still writes normally.
+Use `-monitor none`, or wrap the call in `timeout` (these readings used the latter).
+
+#### 9.10.5 Gates
+
+- `tools/smp_gate.py` gains **pin R1**: four markers checked one by one, **each with a mutation
+  self-check** (delete it from `port.c` and the marker check must report the loss). The first marker
+  is `else if((estat & LA_ESTAT_IS_IPI) != 0u)` rather than `LA_ESTAT_IS_IPI`: the first version was
+  too loose and the self-check immediately caught it (removing the dispatch branch still passed
+  because the `#define` matched), so the marker was narrowed to the branch itself. Plus: really
+  compile SMP=1 / SMP=0 objects and assert with `nm` that `la_ipi_clear_pending` exists only in the
+  ON object; and the fixture (`example/qemu_loongarch64/main.c`) must actually call
+  `arkrtos_smp_ping_self_test()`.
+- `kernelsrc/tests/test_smp_host.c` section 10, about 20 assertions: `ping_main` refuses CPU0,
+  out-of-range ids and offline cores; a refusal never reaches the port layer and leaves no dangling
+  request; an online core gets exactly one send addressed to it; the secondary handler answers CPU0
+  once and consumes the request; a second IPI without a request answers nothing; CPU0 never pings
+  itself even when a request is set. Reading: `SMP-HOST OK (66 checks)`.
+- Coverage: `arkrtos_smp` rises from 89.19% to **90.11%** (baseline untouched).
+
+#### 9.10.6 Verdict and three forbidden readings
+
+Verdict: **`r1_main_core_ipi_ok_on_qemu`** — on LA64 / QEMU `-smp 2` the main core receives IPIs
+and accounts for them honestly (self-ping and secondary receipt both have readings in the same
+image); the default build's code and data sections are unchanged item by item; RV32 untouched.
+**Real hardware unverified.**
+
+1. **Must not be read as "TLB shootdown is available"**: R1 is only the first item of §5.3. R2
+   (secondary paging), R3 (real cross-core shared-VA caller), R4 (invalidation receipt) and R5
+   (silicon) are all still open; shootdown is still not implemented.
+2. **Must not be read as "symmetric multiprocessing / secondaries may enter the kernel"**: an SVC on
+   a secondary is still a fatal stop, and there is still exactly one global scheduler.
+3. **Must not read `ipi0=2` as "IPIs are lossless" or as bandwidth**: back-to-back IPIs on one vector
+   are merged by the model and the code waits after each send; the number only proves "this one
+   arrived and was answered", nothing about throughput.
+
 ## 10. Enabling `-Wconversion` (2026-11-19): default image byte-identical
 
 `tools/warn_gate.py` goes from six options to seven; the new one is `-Wconversion`, which in

@@ -8358,6 +8358,107 @@ worker 本体在 `s_bal_stop` 置位后原地 `wfi`，永不返回。
 3. **不能读成真板可用**：次核启动、IPI、IOCSR mailbox 全部走 QEMU 9.2.3 的模型，
    真实固件与硬件未验证。
 
+### 9.10 ⑥ 主核 IPI 接收路径（R1，2026-11-23，QEMU LA64 `-smp 2` 实跑）
+
+#### 9.10.1 缺口在哪：不是「少写一个处理函数」，是分派表里没有这个向量
+
+在此之前 `arkrtos_port_send_ipi(0)` 直接返回 -1，理由写得很清楚：**主核没有 IPI 处理路径**。
+更具体地说，`la_trap_c()` 的 INT 分支只认 `ESTAT.IS` 的定时器位，其余中断一律落到
+`arkrtos_port_fatal_report()` 停机。所以「给主核发一个 IPI」不是能不能收到的问题，而是
+收进来就会把自己打成致命停机。
+
+这条缺口是 [SMP对称调度与TLB-shootdown-设计裁定](SMP对称调度与TLB-shootdown-设计裁定.md)
+§5.3 的 R1，也是 §5.4 写死的「最小第一步」：它不改分页、不改调度，是唯一能单独交付的一项。
+
+#### 9.10.2 四处改动，缺一条这条路就不存在
+
+| # | 改动 | 为什么必须 |
+|---|---|---|
+| 1 | 清挂起收敛成 `la_ipi_clear_pending()`（读 `STATUS 0x1000` → 写 `CLEAR 0x100C`） | 这段序列原来只有「调度分核」档的次核路径有；不清就 `ertn` 回去立刻再进一次 = 中断风暴 |
+| 2 | `la_trap_c()` 在定时器分支之后加 `else if((estat & LA_ESTAT_IS_IPI) != 0u)`，**先清挂起再**调 `arkrtos_smp_ipi_handler()`，**不碰 `s_switch_pending`** | 顺序反了就是上面那个风暴；碰 `s_switch_pending` 会把「收到 IPI」误读成「该切任务」 |
+| 3 | `arkrtos_port_irq_init()` 在 `#if SMP` 下写 `CORE_EN = 0xfff`（IOCSR `0x1004`）并置 `ECFG.LIE[12]` | QEMU 的 loongson-ipi **只在本核 `CORE_EN` 命中该向量时**才拉中断，光置挂起位不会进来；`ECFG.LIE` 不开同样收不到 |
+| 4 | `arkrtos_port_send_ipi()` 不再拒绝核 0（越界仍 -1） | 原来的拒绝理由（主核没有处理路径）已经不存在 |
+
+向量号沿用本仓既有约定 1（`IPI_SEND` 写 `(目标核 << 16) | 向量号`）。**同一个向量连发会被
+QEMU 合并成一次**，所以调用侧是「一发一等」，不可能靠压计数当带宽测。
+
+**回执机制**（不引入新开关，全在 `ARKRTOS_USE_SMP` 之下）：`arkrtos_smp_cpu_t` 增
+`ipi_back` / `ipi_back_req` 两个字段，`arkrtos_smp_ping_main(cpu)` 先登记 req 再发 IPI，
+默认 `arkrtos_smp_ipi_handler()` 在次核上看到 req 就回一个给 CPU0、`ipi_back++`、清 req。
+登记与撤除的规则：目标核不在线或发不出去就把 req 撤掉（不留悬空请求）。**一次性回执，
+不做心跳** —— 心跳会让 `ipi_count` 变成时间的函数，读数就不再是「这条路径通不通」的证据。
+
+**RV32 这一档明确不动**：那里 CPU0 的 `msip` 是 PendSV 的挂起位，把 IPI 和处理函数混进去
+会搅乱语义（`arkrtos_port_send_ipi(0)` 在 RV32 上仍然拒绝，注释里写明原因）。
+
+#### 9.10.3 默认档零变化（实测，不是推断）
+
+同一台机、同一工具链、默认档（不带 `EXTRA_CFLAGS`）编两次：一份是 `d7ab1c1` 的干净检出
+（`git worktree`），一份带本轮改动。
+
+| | text | data | bss |
+|---|---|---|---|
+| `d7ab1c1` 默认档 | 449888 | 456 | 5128740 |
+| 带 R1 的默认档 | 449888 | 456 | 5128740 |
+
+逐节对比：`.text` / `.data` / `.bss` 等 12 个装载节全等，只有 `.debug_info` / `.debug_line` /
+`.debug_str` 三个调试节差 1–12 字节（两边的构建目录名长度不同，路径字符串进了 `-g` 信息）。
+即：**代码与数据零变化**；ELF 文件大小差 24 字节全部在调试节里。
+
+#### 9.10.4 实跑读数
+
+仅 SMP 档（`-DARKRTOS_USE_SMP=1 -DARKRTOS_CPU_NUM=2`），`-smp 2` 跑 25 s：
+
+```
+[smp] cores=2 mask=0x00000003 sent=1 ipi1=5 result=ok
+[smp] ping ipi0=2 self=1 back1=1 result=ok
+```
+
+- `ipi0=2`：一次是 CPU0 自投（`self=1` 表示自投那一发确实回来了），一次是次核按登记回 ping；
+- `back1=1`：次核的 handler 确实回了，且只回一次（同一镜像里第二次 IPI 不再回，见宿主用例）；
+- 上一行的 `ipi1=5` 是既有的次核侧读数，未变。
+
+SMP_SCHED + BALANCE 档（`+ -DARKRTOS_USE_SMP_SCHED=1 -DARKRTOS_USE_SMP_BALANCE=1`）同一镜像里
+两条路径互不打架：
+
+```
+[smp] ping ipi0=2 self=1 back1=1 result=ok
+[bal] r=1 out=2 back=1 idle=0 tick=1004 cur1=7 q1=1 b1=+2665 c1=0 b2=+2688 c2=1
+...
+[bal] park b1=7 b2=8 done
+```
+
+**命令行的坑（本轮踩到）**：`-nographic` 与 `-display none` 同时给会把 monitor 挂在 stdio，
+QEMU 进程不会自己退出（`rc=124`），但 `-serial file:<log>` 照样正常写入；要么加
+`-monitor none`，要么外面套 `timeout`。本节读数用的是后者。
+
+#### 9.10.5 门禁
+
+- `tools/smp_gate.py` 新增 **pin R1**：四条标记逐条检查、**每条都带变异自检**（把它从
+  `port.c` 抠掉后标记检查必须报缺失）。第一条标记写的是
+  `else if((estat & LA_ESTAT_IS_IPI) != 0u)` 而不是 `LA_ESTAT_IS_IPI` —— 第一版写宽了，
+  自检当场抓住「抠掉分派分支后，`#define` 那一处还让检查通过」，于是把标记收窄到分支本体。
+  另加：真编 SMP=1 / SMP=0 两个目标文件，`nm` 断言 `la_ipi_clear_pending` 只存在于 ON 档；
+  夹具（`example/qemu_loongarch64/main.c`）必须真的调用 `arkrtos_smp_ping_self_test()`。
+- `kernelsrc/tests/test_smp_host.c` 第 10 段约 20 条断言：`ping_main` 拒 0 / 拒越界 / 拒离线核、
+  拒绝时不碰 port 层也不留悬空 req、在线核登记 1 条且只发 1 发到目标核、次核 handler 回一次
+  给 CPU0 且消费掉 req、无 req 的第二次 IPI 不回、CPU0 上即使有 req 也不自投。
+  跑出来的读数是 `SMP-HOST OK (66 checks)`。
+- 覆盖率：`arkrtos_smp` 由 89.19% 升到 **90.11%**（基线未动）。
+
+#### 9.10.6 判词与三条不许读法
+
+判词：**`r1_main_core_ipi_ok_on_qemu`** —— LA64 / QEMU `-smp 2` 上，主核能收到 IPI 并如实认账
+（自投与次核回执在同一镜像里都有读数），默认档的代码与数据节逐项不变，RV32 未改动。
+**真实硬件未验证。**
+
+1. **不能读成「TLB shootdown 已经具备」**：R1 只是 §5.3 的第一条。R2（次核开分页）、
+   R3（跨核共享 VA 调用者）、R4（失效回执）、R5（真机）一件都没做，shootdown 仍然不实现。
+2. **不能读成「对称多核 / 次核可以进内核」**：次核上遇到 SVC 依然一律致命停机，全局调度器
+   依然只有一份。
+3. **不能把 `ipi0=2` 读成「IPI 不丢」或「带宽」**：同向量连发在 QEMU 模型上会被合并成一次，
+   代码是一发一等；这个计数只证明「这一发到了、并且回了」，不证明任何吞吐。
+
 ## 10. `-Wconversion` 开档（2026-11-19）：默认档镜像逐字节不变
 
 `tools/warn_gate.py` 的选项集从六条扩到七条，新加 `-Wconversion`（GCC 隐含同开

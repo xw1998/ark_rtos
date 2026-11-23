@@ -45,7 +45,7 @@
 - [kernelsrc/include/arkrtos_shell.h](#kernelsrcincludearkrtos_shellh)（9 项）
 - [kernelsrc/include/arkrtos_shell_auth.h](#kernelsrcincludearkrtos_shell_authh)（5 项）
 - [kernelsrc/include/arkrtos_sign.h](#kernelsrcincludearkrtos_signh)（10 项）
-- [kernelsrc/include/arkrtos_smp.h](#kernelsrcincludearkrtos_smph)（11 项）
+- [kernelsrc/include/arkrtos_smp.h](#kernelsrcincludearkrtos_smph)（12 项）
 - [kernelsrc/include/arkrtos_smp_sched.h](#kernelsrcincludearkrtos_smp_schedh)（15 项）
 - [kernelsrc/include/arkrtos_softbus.h](#kernelsrcincludearkrtos_softbush)（5 项）
 - [kernelsrc/include/arkrtos_spin.h](#kernelsrcincludearkrtos_spinh)（10 项）
@@ -62,7 +62,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（12 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（104 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（105 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（18 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -7244,6 +7244,21 @@ int32 arkrtos_smp_send_ipi(uint32 cpu);
 - `cpu`：目标核号
 **返回**：0 = 已交给 port 层发出；-1 = 核号越界 / 该核未上线 / port 不支持
 
+### `int32 arkrtos_smp_ping_main(uint32 cpu);`
+
+```c
+int32 arkrtos_smp_ping_main(uint32 cpu);
+```
+
+**请指定次核在下一个 IPI 上顺手回一个 IPI 给 CPU0（R1 的回执读数）**
+- `cpu`：目标次核号（1..ARKRTOS_CPU_NUM-1）
+**返回**：0 = 已登记并已发出；-1 = 核号越界 / 该核未上线 / port 不支持
+这不是「失效回执」，只是「主核那条接收路径真的通」的读数：
+次核在 arkrtos_smp_ipi_handler() 里看到 ipi_back_req 就把本核
+ipi_back++ 并 arkrtos_smp_send_ipi(0)，CPU0 侧则读自己的
+ipi_count。send_ipi(0) 两侧都必须被允许，否则这条路径不存在。
+> 说明：关档（ARKRTOS_USE_SMP=0）时不存在。
+
 ### `void arkrtos_smp_ipi_handler(void);`
 
 ```c
@@ -7251,8 +7266,9 @@ void arkrtos_smp_ipi_handler(void);
 ```
 
 **核间中断服务例程（由 port 层的 IPI 中断调用）**
-> 说明：默认实现只累加当前核的 ipi_count。需要真实动作（例如踢调度）时，
-应用提供同名强符号即可覆盖（本实现标了 __weak）。
+> 说明：默认实现累加当前核的 ipi_count；若该核的 ipi_back_req 被登记为 1，
+顺手回一个 IPI 给 CPU0 并把 ipi_back++（R1 的双向读数）。需要真实
+动作（例如踢调度）时，应用提供同名强符号即可覆盖（__weak）。
 
 ### `void arkrtos_smp_idle_loop(void);`
 
@@ -9227,10 +9243,62 @@ ARKRTOS_WEAK void arkrtos_port_irq_init(void) {
 
 ## kernelsrc/port/loongarch/la64/arkrtos_port.c
 
+**把一个地址空间装进 App 窗口**
+- `space`：空间号（0 .. 板级 ARKRTOS_PAGING_APPS_MAX-1）
+**返回**：0 = 已是该空间或切换成功；-1 = 空间号越界
+只换 App 窗口那一条 PS=20 条目。调用方（调度器切到某个 App）
+
+### `#include "arkrtos_hal.h" #include "arkrtos_task.h" #include "arkrtos_f`
+
+```c
+#include "arkrtos_hal.h" #include "arkrtos_task.h" #include "arkrtos_fault.h" #include "arkrtos_smp.h"       /* arkrtos_smp_ipi_handler()：主核 IPI 入口（R1） */
+```
+
 **Ark RTOS LoongArch64 移植层实现**
 实现 arkrtos_hal.h 声明的全部硬件抽象接口。目标平台是 QEMU 的
 `virt` 机器（单核、PLV0、无页表），但本文件里只有 CSR 编号、
 定时器与 UART 的常量是平台相关的，其余都是 LoongArch 架构本身
+的约定，换到真实的 LA64 芯片时只需要改板级头。
+## 与 Cortex-M / RISC-V 移植的对应关系
+| Cortex-M              | RISC-V                  | 本移植                       |
+|-----------------------|-------------------------|------------------------------|
+| SVC 异常              | `ecall`（号经 a7）      | `syscall code`（号在指令里） |
+| PendSV 切换           | CLINT 软件中断          | **就地切换**（无软中断可用） |
+| SysTick 节拍          | CLINT 机器定时器        | TCFG/TICLR 定时器            |
+| 硬件自动压栈异常帧    | trap_entry 手写 144 字节| eentry 手写 256 字节帧       |
+| PRIMASK               | mstatus.MIE             | CRMD.IE                      |
+| IPSR != 0 判在中断里  | 软件计数 s_in_trap      | 软件计数 s_in_trap           |
+## 为什么没有「挂起切换」
+LoongArch 的 CSR.IPI 只向**其他核**发中断：单核上 `csrwr` 自触发
+实测不产生任何中断（docs 里有探针记录），所以没有 RISC-V 中
+MSIP/PendSV 那样的「置挂起位、异常返回后再进一次 trap」的机制。
+于是切换分成两种落点，共用同一种 256 字节帧：
+- **任务上下文调用**（arkrtos_port_switch_task）：直接在调用者栈上
+构造同格式帧并 ertn，见 arkrtos_context.S 的
+`arkrtos_port_switch_task`。此时若在异常内部则只置
+`s_switch_pending`，由异常出口结算。
+- **异常内部调用**（节拍 / SVC 处理程序里）：置 `s_switch_pending`，
+la_trap_c() 在返回前调一次 arkrtos_sched_is_switching() /
+activate()，等价于 RISC-V 那次「异常返回后立刻进的软中断」。
+## 已经知道的边界（不得当成「已有隔离」对外表述）
+1) **PLV3 用户态隔离已打开**（ARKRTOS_USE_PRIV=1）：内核低 16 MB、
+内核 UART 都是 PLV0 页，App 只拿到一页 2 MB（PLV3）加一页 UART
+别名。App 碰内核页 = PPI(7)、碰未映射地址 = 重填异常(1/2/3)、
+执行 CSR = IPE(14)，三条都走内核的故障恢复而不是停机。
+**没有做的**：没有软件页表（TLB 条目是启动时写死的静态映射，
+没有按需换页、没有 swap）、App 页是整页 RWX（不做 W^X）、
+App 的 sp 由 App 自己决定 —— 它若指向内核页，trap 帧就会按它
+给的位置写；
+2) 普通异常（eentry）与被中断的任务共用同一个栈（没有独立 handler
+栈）；只有 TLB 重填这条入口用静态故障栈（la_refill_stack），
+因为重填可能是「被打断的 sp 本身就是坏的」引起的；
+3) trap 不可嵌套：进异常时 CRMD.IE 已被硬件清零，处理程序全程关中断；
+4) `syscall` 之后 ERA 由本层加 4（硬件不会自己前进，不加上就是死循环）；
+5) **64 位指针、32 位内核**：内核的地址字段是 uint32，本 port 在两处
+（sched_activate 的帧指针、任务栈指针）显式截断到 32 位再回填。
+QEMU virt 的 RAM 全在低 4 GB 内，所以截断不丢信息；换到高地址
+布局的机器上必须先改内核的地址宽度，不能靠这个 port。
+`@author xw`
 
 ### `static uint32 la_us_to_counts(uint32 us) {`
 
@@ -9253,6 +9321,18 @@ LoongArch 的 `ll.w` / `sc.w` 是真原子指令。单核下关中断也算
 正确，但这套写法在 SMP 上同样成立，将来换多核不用重写。
 > 说明：用 `.w` 而不是 `.d` 与内核的 uint32 宽度严格对应：内核的原子量
 是 32 位，用 64 位原子会读写到相邻字段。
+
+### `static void la_ipi_clear_pending(void) {`
+
+```c
+static void la_ipi_clear_pending(void) {
+```
+
+**清本核挂起的 IPI（读 STATUS 0x1000 → 写 CLEAR 0x100C）**
+> 说明：写 1 的位被清。不清的话 ertn 回去立刻再进一次，变成中断风暴。
+这段序列原来只存在于「调度分核」那一档的次核路径里；R1 把主核
+也接上了 IPI 入口，两处因此共用这一份（次核汇编路径仍在汇编里
+自己清，那是它进 C 之前必须做的事）。
 
 ### `static void la_tlb_fill(unsigned long vaddr, uint32 ps, uint32 index, `
 
@@ -10478,16 +10558,6 @@ la_frame_word *la_trap_c(la_frame_word *frame) {
 - 其余 Ecode 一律按致命异常处理（报 Ecode/ESTAT/ERA 后停机，
 不做假恢复）。
 出口处结算 s_switch_pending：这是「没有软中断」的补偿点。
-
-### `static void la_smp_ipi_clear(void) {`
-
-```c
-static void la_smp_ipi_clear(void) {
-```
-
-**清本核的 IPI 挂起位（IOCSR 0x1000 状态 → 0x100C 清除）**
-> 说明：这段序列原来是 arkrtos_context.S 里 la_smp_trap_entry 的内联拷贝，
-打开调度分核后汇编不再自己清，两处只剩这一份。
 
 ### `la_frame_word *la_smp_trap_c(la_frame_word *frame, uint32 cpu) {`
 

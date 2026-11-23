@@ -58,6 +58,8 @@ typedef struct
     volatile uint32 tick;            /* 该核自己的节拍计数                    */
     volatile uint32 ipi_count;       /* 该核收到的核间中断次数                */
     volatile uint32 idle_count;      /* 该核执行空转循环的次数                */
+    volatile uint32 ipi_back;        /* 该核应要求回给 CPU0 的 IPI 次数        */
+    volatile uint32 ipi_back_req;    /* 1 = 主核要求下一个 IPI 顺手回一个      */
 } arkrtos_smp_cpu_t;
 
 /** @brief 每核状态表，下标即硬件核号（0..ARKRTOS_CPU_NUM-1） */
@@ -115,9 +117,22 @@ void arkrtos_smp_tick(void);
 int32 arkrtos_smp_send_ipi(uint32 cpu);
 
 /**
+* @brief 请指定次核在下一个 IPI 上顺手回一个 IPI 给 CPU0（R1 的回执读数）
+* @param cpu 目标次核号（1..ARKRTOS_CPU_NUM-1）
+* @return 0 = 已登记并已发出；-1 = 核号越界 / 该核未上线 / port 不支持
+* @details 这不是「失效回执」，只是「主核那条接收路径真的通」的读数：
+*          次核在 arkrtos_smp_ipi_handler() 里看到 ipi_back_req 就把本核
+*          ipi_back++ 并 arkrtos_smp_send_ipi(0)，CPU0 侧则读自己的
+*          ipi_count。send_ipi(0) 两侧都必须被允许，否则这条路径不存在。
+* @note 关档（ARKRTOS_USE_SMP=0）时不存在。
+*/
+int32 arkrtos_smp_ping_main(uint32 cpu);
+
+/**
 * @brief 核间中断服务例程（由 port 层的 IPI 中断调用）
-* @note 默认实现只累加当前核的 ipi_count。需要真实动作（例如踢调度）时，
-*       应用提供同名强符号即可覆盖（本实现标了 __weak）。
+* @note 默认实现累加当前核的 ipi_count；若该核的 ipi_back_req 被登记为 1，
+*       顺手回一个 IPI 给 CPU0 并把 ipi_back++（R1 的双向读数）。需要真实
+*       动作（例如踢调度）时，应用提供同名强符号即可覆盖（__weak）。
 */
 void arkrtos_smp_ipi_handler(void);
 

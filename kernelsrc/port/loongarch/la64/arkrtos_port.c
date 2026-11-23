@@ -58,6 +58,7 @@
 #include "arkrtos_hal.h"
 #include "arkrtos_task.h"
 #include "arkrtos_fault.h"
+#include "arkrtos_smp.h"       /* arkrtos_smp_ipi_handler()：主核 IPI 入口（R1） */
 
 /* 板级输出。port 层不包含 board/<板>/arkrtos_board.h（换板时这个头会换），
  * 这几个函数是唯一需要解析的板级符号，就地声明即可。 */
@@ -124,13 +125,15 @@ extern void arkrtos_board_puthex(uint32 val);
 
 /* ESTAT：IS[12:0]、Ecode[21:16]、EsubCode[30:22] */
 #define LA_ESTAT_IS_TIMER   (1u << 11)      /* TI：定时器中断 */
+#define LA_ESTAT_IS_IPI     (1u << 12)      /* IPI：核间中断（只有 SMP 档有入口） */
 #define LA_ESTAT_ECODE_SYS  (0xBu)          /* SYS：syscall    */
 #define LA_ESTAT_ECODE_INT  (0x0u)          /* 中断（Ecode=0，靠 IS 分源） */
 #define LA_ESTAT_ECODE_PPI  (0x7u)          /* PPI：页存在但 PLV 不够（App 摸内核页） */
 #define LA_ESTAT_ECODE_IPE  (0xEu)          /* IPE：特权指令（App 执行 CSR / idle） */
 
-/* ECFG：LIE[12:0]、VS[15:13]。定时器 = LIE[11] */
+/* ECFG：LIE[12:0]、VS[15:13]。定时器 = LIE[11]、核间中断 = LIE[12] */
 #define LA_ECFG_LIE_TIMER   (1u << 11)
+#define LA_ECFG_LIE_IPI     (1u << 12)
 
 /* TCFG：En[0]、Periodic[1]、InitVal[31:2] */
 #define LA_TCFG_EN          (1u << 0)
@@ -448,6 +451,7 @@ void arkrtos_port_spin_hint(void)
  *          对称多核，两件事不能混着说。
  * ------------------------------------------------------------ */
 #define LA_IOCSR_IPI_STATUS     0x1000u
+#define LA_IOCSR_IPI_EN         0x1004u
 #define LA_IOCSR_IPI_CLEAR      0x100Cu
 #define LA_IOCSR_IPI_SEND       0x1040u
 #define LA_IOCSR_MAIL_SEND      0x1048u
@@ -465,6 +469,21 @@ static void la_iocsr_write_w(uint32 addr, uint32 val)
 static void la_iocsr_write_d(uint32 addr, unsigned long val)
 {
     __asm__ volatile("iocsrwr.d %0, %1" : : "r"(val), "r"(addr) : "memory");
+}
+
+/**
+* @brief 清本核挂起的 IPI（读 STATUS 0x1000 → 写 CLEAR 0x100C）
+* @note 写 1 的位被清。不清的话 ertn 回去立刻再进一次，变成中断风暴。
+*       这段序列原来只存在于「调度分核」那一档的次核路径里；R1 把主核
+*       也接上了 IPI 入口，两处因此共用这一份（次核汇编路径仍在汇编里
+*       自己清，那是它进 C 之前必须做的事）。
+*/
+static void la_ipi_clear_pending(void)
+{
+    uint32 st = 0u;
+
+    __asm__ volatile("iocsrrd.w %0, %1" : "=r"(st) : "r"(LA_IOCSR_IPI_STATUS));
+    la_iocsr_write_w(LA_IOCSR_IPI_CLEAR, st);
 }
 
 int32 arkrtos_port_cpu_start(uint32 cpu)
@@ -486,14 +505,17 @@ int32 arkrtos_port_cpu_start(uint32 cpu)
 
 int32 arkrtos_port_send_ipi(uint32 cpu)
 {
-    if((cpu == 0u) || (cpu >= (uint32)ARKRTOS_CPU_NUM))
+    if(cpu >= (uint32)ARKRTOS_CPU_NUM)
     {
-        /* 核 0 是引导核：本移植没有给主核装 IPI 处理路径（它一进异常就落到
-         * la_trap_c 的通用链路），所以拒绝自投，明确报 -1，而不是让主核
-         * 掉进一个没处理过的中断里。 */
         return -1;
     }
 
+    /* 核 0 现在也能收（R1，2026-11-23）：la_trap_c 的中断分派里有一条
+     * LA_ESTAT_IS_IPI 分支，arkrtos_port_irq_init() 也把 CORE_EN 与
+     * ECFG.LIE[12] 打开了。此前这里拒绝核 0，理由是「主核没有 IPI 处理
+     * 路径」——那条理由已经不存在，所以这里不再拒绝；越界仍然报 -1。
+     * 自投（CPU0 发给 CPU0）也走同一条路径：QEMU 的 loongson-ipi 对目标
+     * 核一视同仁，回来时同样落在 la_trap_c 的 IS_IPI 分支上。 */
     la_iocsr_write_w(LA_IOCSR_IPI_SEND, (cpu << 16) | 1u);
     return 0;
 }
@@ -5342,6 +5364,22 @@ la_frame_word *la_trap_c(la_frame_word *frame)
             la_ticlr_clear();
             arkrtos_kernel_tick_handler();
         }
+        #if (ARKRTOS_USE_SMP == 1)
+        else if((estat & LA_ESTAT_IS_IPI) != 0u)
+        {
+            /* 主核的核间中断入口（R1，2026-11-23）。取裁定页 §5.4 的第一
+             * 步：先只做「主核能收到并认账」，不做任何「假定对方已失效」
+             * 的动作——后者需要一个可读回执，那是 §5.4 第 3 步的事。
+             *
+             * 顺序是硬的：先清挂起、再调处理函数。反过来的话处理函数里
+             * 一旦让出（现在不会），返回时挂起位还在，ertn 立刻再进一次。
+             *
+             * 这里不碰 s_switch_pending：IPI 本身不请求切换。谁要切换，
+             * 在处理函数里登记，由出口结算那条既有路径负责。 */
+            la_ipi_clear_pending();
+            arkrtos_smp_ipi_handler();
+        }
+        #endif
         else
         {
             /* 没有别的中断源被使能，来一个就是配置错误：把 IS 打出来停机。 */
@@ -5493,18 +5531,8 @@ la_frame_word *la_trap_c(la_frame_word *frame)
 }
 
 #if (ARKRTOS_USE_SMP == 1) && (ARKRTOS_USE_SMP_SCHED == 1)
-/**
-* @brief 清本核的 IPI 挂起位（IOCSR 0x1000 状态 → 0x100C 清除）
-* @note 这段序列原来是 arkrtos_context.S 里 la_smp_trap_entry 的内联拷贝，
-*       打开调度分核后汇编不再自己清，两处只剩这一份。
-*/
-static void la_smp_ipi_clear(void)
-{
-    uint32 st = 0u;
-
-    __asm__ volatile("iocsrrd.w %0, %1" : "=r"(st) : "r"(LA_IOCSR_IPI_STATUS));
-    la_iocsr_write_w(LA_IOCSR_IPI_CLEAR, st);
-}
+/* 清挂起的序列已提到上面的 la_ipi_clear_pending()：R1 之后主核 trap 也要
+ * 用它，而那个函数在 la_trap_c 之前就定义了，这里不再留第二份拷贝。 */
 
 /**
 * @brief 次核异常的统一 C 入口（只在调度分核打开时存在）
@@ -5534,7 +5562,7 @@ la_frame_word *la_smp_trap_c(la_frame_word *frame, uint32 cpu)
                    arkrtos_smp_sched_switch(cpu, (uint32)(unsigned long)frame);
         }
 
-        la_smp_ipi_clear();
+        la_ipi_clear_pending();
         arkrtos_smp_ipi_handler();
         return frame;
     }
@@ -5590,6 +5618,22 @@ ARKRTOS_WEAK void arkrtos_port_irq_init(void)
     /* 分页在开中断之前打开：节拍一进来就要经 TLB 取指/访存。
      * 此时任务已经注册完（帧写在各自的栈上），映射与帧内容无关。 */
     la_mmu_init();
+    #endif
+
+    #if (ARKRTOS_USE_SMP == 1)
+    /* 主核的核间中断使能（R1）。两件事缺一不可：
+     *   1) IOCSR 0x1004 CORE_EN 写 0xfff —— QEMU 的 loongson-ipi 只有
+     *      在「本核 CORE_EN 命中该向量」时才真的拉中断，光置挂起位不
+     *      会进来。次核入口里写的是同一个值（固件也写 0xfff）。
+     *   2) ECFG.LIE[12] —— 中断源的「使能闸门」，与定时器的 LIE[11]
+     *      同层，但时机不同：定时器要等调度结构就绪才放行，IPI 的处理
+     *      函数只做计数/登记，此刻打开是安全的。 */
+    la_iocsr_write_w(LA_IOCSR_IPI_EN, 0xfffu);
+    {
+        uint32 mask = LA_ECFG_LIE_IPI;
+
+        __asm__ volatile("csrxchg %0, %0, 0x4" : "+r"(mask) : : "memory");
+    }
     #endif
 
     {

@@ -1172,6 +1172,94 @@ static void arkrtos_smp_self_test(void)
     }
 #endif
 }
+
+/* ============================================================
+ * 主核 IPI 入口自检（R1，2026-11-23）
+ * @details 上面那一段证明「主核能发给次核」，这一段证明反向：
+ *            1) 次核收到主核的 IPI 后，按登记回一个给 CPU0，CPU0 自己的
+ *               ipi_count 必须涨——这一条同时咬 port 层 send_ipi(0) 被放行、
+ *               主核 trap 的 IS_IPI 分支、CORE_EN 与 ECFG.LIE[12] 三处；
+ *            2) 自投（CPU0 → CPU0）也走同一条分支，单独记一位。
+ *          判据是串口上的原始计数，不是「编过了」。全部自旋有上限，超时就
+ *          如实打 FAIL，不挂死。
+ * ============================================================ */
+static void arkrtos_smp_ping_self_test(void)
+{
+    uint32 cpu;
+    uint32 spin;
+    uint32 self_ok = 0u;
+    uint32 back_ok = 0u;
+    uint32 base;
+
+#if (ARKRTOS_CPU_NUM < 2)
+    arkrtos_board_puts("[smp] ping result=skip(no secondary)\n");
+    return;
+#else
+    base = arkrtos_smp_cpu[0].ipi_count;
+
+    /* --- 1. 自投：主核发给主核 -------------------------------- */
+    if(arkrtos_smp_send_ipi(0u) == 0)
+    {
+        for(spin = 0u; spin < SMP_SELF_TEST_SPIN; spin++)
+        {
+            if(arkrtos_smp_cpu[0].ipi_count > base)
+            {
+                self_ok = 1u;
+                break;
+            }
+            arkrtos_port_spin_hint();
+        }
+    }
+
+    /* --- 2. 次核回 ping：每一个次核各一次 -------------------- */
+    base = arkrtos_smp_cpu[0].ipi_count;
+    for(cpu = 1u; cpu < (uint32)ARKRTOS_CPU_NUM; cpu++)
+    {
+        if(arkrtos_smp_ping_main(cpu) != 0)
+        {
+            break;
+        }
+        for(spin = 0u; spin < SMP_SELF_TEST_SPIN; spin++)
+        {
+            if((arkrtos_smp_cpu[cpu].ipi_back >= 1u) &&
+               (arkrtos_smp_cpu[0].ipi_count > base))
+            {
+                back_ok++;
+                break;
+            }
+            arkrtos_port_spin_hint();
+        }
+        base = arkrtos_smp_cpu[0].ipi_count;
+        if(back_ok != cpu)
+        {
+            break;                    /* 这一核没回来，不再追后面的 */
+        }
+    }
+
+    arkrtos_board_puts("[smp] ping ipi0=");
+    arkrtos_board_putu(arkrtos_smp_cpu[0].ipi_count);
+    arkrtos_board_puts(" self=");
+    arkrtos_board_putu(self_ok);
+    for(cpu = 1u; cpu < (uint32)ARKRTOS_CPU_NUM; cpu++)
+    {
+        arkrtos_board_puts(" back");
+        arkrtos_board_putu(cpu);
+        arkrtos_board_puts("=");
+        arkrtos_board_putu(arkrtos_smp_cpu[cpu].ipi_back);
+    }
+
+    /* 判据（逐条都可核）：自投收到 1 次；每个次核都把自己的那一次回执
+     * 交上来。任一不成立就是 FAIL，并保留原始计数供判读。 */
+    if((self_ok == 1u) && (back_ok == ((uint32)ARKRTOS_CPU_NUM - 1u)))
+    {
+        arkrtos_board_puts(" result=ok\n");
+    }
+    else
+    {
+        arkrtos_board_puts(" result=FAIL(main ipi path)\n");
+    }
+#endif
+}
 #endif /* ARKRTOS_USE_SMP == 1 */
 
 #if (ARKRTOS_USE_SMP_SCHED == 1) && (ARKRTOS_USE_SMP_BALANCE != 1)
@@ -1731,6 +1819,7 @@ int main(void)
     /* 次核是在 kernel_module_init() 里拉起来的，这里等它上线并发 IPI 验证。
      * 放在任何任务注册/启动之前：失败就在串口上一行看清，不埋在后续输出里。 */
     arkrtos_smp_self_test();
+    arkrtos_smp_ping_self_test();   /* R1：主核 IPI 入口 + 次核回执 */
 #endif
 
 #if (ARKRTOS_USE_SMP_SCHED == 1) && (ARKRTOS_USE_SMP_BALANCE != 1)

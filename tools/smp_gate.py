@@ -94,6 +94,20 @@ LA64_CTX  = "kernelsrc/port/loongarch/la64/arkrtos_context.S"
 CTX_MARKERS = ["arkrtos_smp_secondary_entry", "iocsrwr", "ertn"]
 PORT_MARKERS = ["LA_IOCSR_MAIL_SEND", "LA_IOCSR_IPI_SEND", "LA_IOCSR_IPI_CLEAR"]
 
+# pin R1（2026-11-23）：主核 IPI 接收路径。四处在，缺一条这条路就不存在：
+#   1) 中断分派里有 LA_ESTAT_IS_IPI 分支（只有 IS_TIMER 时，IPI 一律进致命分支）；
+#   2) 该分支里先清挂起（la_ipi_clear_pending）再调处理函数；
+#   3) irq_init 打开本核 CORE_EN 与 ECFG.LIE[12]（不打开则永远收不到）；
+#   4) send_ipi 不再拒绝核 0（越界仍然拒绝）。
+R1_MARKERS = [
+    "else if((estat & LA_ESTAT_IS_IPI) != 0u)",   # 分派分支本体，不是 #define
+    "la_ipi_clear_pending();\n            arkrtos_smp_ipi_handler();",
+    "la_iocsr_write_w(LA_IOCSR_IPI_EN, 0xfffu);",
+    "if(cpu >= (uint32)ARKRTOS_CPU_NUM)",
+]
+
+MAIN_C = "example/qemu_loongarch64/main.c"
+
 LA64_INCLUDES = [
     "kernelsrc/include",
     "config",
@@ -351,6 +365,107 @@ def run_la64(cc):
         bad += 1
     else:
         print("ok: LA64 port keeps the SMP-off constant return")
+
+    shutil.rmtree(td, ignore_errors=True)
+    return bad == 0
+
+def run_la64_pin_r1(cc):
+    """pin R1：主核 IPI 接收路径（文本标记 + 关档符号自检）。
+
+    三条断言，每条都带自检，缺任何一条这条路就只是「写了注释」：
+      1) 四处标记都在 port.c 里（见 R1_MARKERS）；
+      2) 逐块抠掉其中一条，标记检查必须报缺失 —— 否则钉的是别处同名字符串；
+      3) SMP=1 的目标文件里有 la_ipi_clear_pending，SMP=0 的目标文件里没有
+         —— 主核那条分支真的只在开关档里编出来。
+    """
+    od = cc.replace("gcc", "objdump")
+    nm = cc.replace("gcc", "nm")
+    if not os.path.exists(od) or not os.path.exists(nm):
+        print("SMP-GATE FAIL: no LA64 objdump/nm next to %s" % cc)
+        return False
+
+    td = tempfile.mkdtemp(prefix="arkrtos-smp-r1-")
+    bad = 0
+
+    with open(os.path.join(ROOT, LA64_PORT), encoding="utf-8", errors="replace") as f:
+        port = f.read().replace("\r\n", "\n")   # 行尾无关：标记按 LF 写，CRLF 文件同样命中
+
+    def r1_markers_present(text):
+        return all(m in text for m in R1_MARKERS)
+
+    # 自检：每一条抠掉后都必须被抓住
+    for m in R1_MARKERS:
+        mut = port.replace(m, "/* removed */", 1)
+        if r1_markers_present(mut):
+            print("SMP-GATE FAIL: pin R1 self-check missed a removed marker: %r" % m[:40])
+            bad += 1
+        else:
+            print("ok: pin R1 self-check catches a removed marker (%s...)" % m[:28])
+
+    if not r1_markers_present(port):
+        print("SMP-GATE FAIL: %s lost a main-core IPI marker" % LA64_PORT)
+        bad += 1
+    else:
+        print("ok: main-core IPI path present in %s (dispatch + clear + enable + send)" % LA64_PORT)
+
+    # 演示侧：自检必须真调起来，否则读数不会出现
+    with open(os.path.join(ROOT, MAIN_C), encoding="utf-8", errors="replace") as f:
+        main_c = f.read()
+    if "arkrtos_smp_ping_self_test();" not in main_c:
+        print("SMP-GATE FAIL: the SMP fixture never runs the main-core IPI self test")
+        bad += 1
+    else:
+        print("ok: the SMP fixture runs the main-core IPI self test")
+
+    key = os.path.join(td, "arkrtos_sign_key_local.h")
+    with open(key, "w", encoding="utf-8") as f:
+        f.write("#ifndef ARKRTOS_SIGN_KEY_LOCAL_H\n"
+                "#define ARKRTOS_SIGN_KEY_LOCAL_H\n"
+                "#define ARKRTOS_IMAGE_SIGN_KEY { " +
+                ", ".join("0x%02X" % i for i in range(32)) + " }\n"
+                "#endif\n")
+
+    inc = ["-I" + os.path.join(ROOT, x) for x in LA64_INCLUDES]
+    inc.insert(0, "-I" + td)
+    base = ["-march=loongarch64", "-mabi=lp64d", "-std=c99", "-c",
+            os.path.join(ROOT, LA64_PORT), "-include", "arkrtos_board_config.h",
+            "-DARKRTOS_SIGN_KEY_LOCAL=1",
+            "-DARKRTOS_BOARD_CONFIG=\"arkrtos_board_config.h\""]
+
+    def build(tag, smp):
+        obj = os.path.join(td, "port_%s.o" % tag)
+        cmd = [cc] + base + ["-DARKRTOS_USE_SMP=%d" % smp,
+                             "-DARKRTOS_CPU_NUM=2", "-o", obj] + inc
+        rr = subprocess.run(cmd, cwd=ROOT, capture_output=True,
+                            encoding="utf-8", errors="replace")
+        if rr.returncode != 0:
+            print("SMP-GATE FAIL: port.c does not build with SMP=%d" % smp)
+            print((((rr.stdout or "") + (rr.stderr or "")).strip())[-900:])
+            return None
+        return obj
+
+    on_obj = build("on", 1)
+    off_obj = build("off", 0)
+    if (on_obj is None) or (off_obj is None):
+        bad += 1
+    else:
+        def symbols(obj):
+            rr = subprocess.run([nm, obj], capture_output=True,
+                                encoding="utf-8", errors="replace")
+            return (rr.stdout or "") + (rr.stderr or "")
+
+        on_syms = symbols(on_obj)
+        off_syms = symbols(off_obj)
+        if "la_ipi_clear_pending" not in on_syms:
+            print("SMP-GATE FAIL: SMP=1 object has no la_ipi_clear_pending "
+                  "(the IPI dispatch got compiled out)")
+            bad += 1
+        elif "la_ipi_clear_pending" in off_syms:
+            print("SMP-GATE FAIL: SMP=0 object still has la_ipi_clear_pending "
+                  "(the default build must not pay for this)")
+            bad += 1
+        else:
+            print("ok: la_ipi_clear_pending exists only in the SMP=1 object")
 
     shutil.rmtree(td, ignore_errors=True)
     return bad == 0
@@ -1047,6 +1162,8 @@ def main():
         return 1
     if not run_la64_pin_v(la):
         return 1
+    if not run_la64_pin_r1(la):
+        return 1
     if not run_la64_smp_sched(la):
         return 1
     if not run_la64_smp_balance(la):
@@ -1059,7 +1176,7 @@ def main():
     if not run_rv32_smp(rv):
         return 1
 
-    print("SMP-GATE OK (host accounting + %d ARM ON-path files + LA64 pin U/V/W/Y "
+    print("SMP-GATE OK (host accounting + %d ARM ON-path files + LA64 pin U/V/R1/W/Y "
           "+ RV32 pin X, CPU_NUM=4/2)" % len(TARGETS))
     return 0
 
