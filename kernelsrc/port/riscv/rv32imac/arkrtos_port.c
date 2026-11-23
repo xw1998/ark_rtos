@@ -524,7 +524,12 @@ uint32 arkrtos_port_syscall_num(void *p_exc_ctx)
 
 unsigned long arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx)
 {
+    /* 与 LA64 同一个理由：Linux ABI 的 mmap 六参，原生 SVC 仍四参。 */
+#if (ARKRTOS_USE_LINUX_ABI == 1)
+    if(idx >= 6u)
+#else
     if(idx >= ARKRTOS_ARCH_SVC_ARG_MAX)
+#endif
     {
         return 0u;
     }

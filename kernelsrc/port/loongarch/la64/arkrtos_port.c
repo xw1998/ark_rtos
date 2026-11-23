@@ -3813,7 +3813,17 @@ uint32 arkrtos_port_syscall_num(void *p_exc_ctx)
 
 unsigned long arkrtos_port_svc_get_arg(void *p_exc_ctx, uint32 idx)
 {
+    /* Linux ABI 的 mmap 是**六参**（addr/len/prot/flags/fd/offset），而原生
+     * SVC 的参数块只有 4 个槽（ARKRTOS_ARCH_SVC_ARG_MAX）。这里在 Linux ABI
+     * 档里放宽到 6：trap 帧里 $a0..$a7 本来就在（LA_FR_A0 + 0..7），取第 5/6
+     * 个参数不需要改帧布局；原生 SVC 一侧仍然只用 0..3，两侧互不影响。
+     * 不放宽的话，开文件映射档时 fd 会读成 0 —— 读成一个"合法但不属于调用方"
+     * 的 fd，回 -EBADF 看着像调用方写错，其实是取参被截断（只有上板才看得见）。 */
+#if (ARKRTOS_USE_LINUX_ABI == 1)
+    if(idx >= 6u)
+#else
     if(idx >= ARKRTOS_ARCH_SVC_ARG_MAX)
+#endif
     {
         return 0UL;
     }

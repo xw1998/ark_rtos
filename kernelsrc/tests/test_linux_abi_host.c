@@ -131,6 +131,7 @@ int main(void)
 #define T_NR_EXECVE         (221u)
 #define T_NR_MMAP           (222u)
 #define T_NR_MPROTECT       (226u)
+#define T_NR_MSYNC          (227u)
 
 #define T_EPERM             (1)
 #define T_ENOENT            (2)
@@ -154,6 +155,7 @@ int main(void)
 #define T_ENOSYS            (38)
 
 #define T_O_NONBLOCK        (0x800u)
+#define T_O_RDWR            (0x2u)
 #define T_O_WRONLY          (0x1u)
 #define T_O_CREAT           (0x40u)
 #define T_O_TRUNC           (0x200u)
@@ -161,6 +163,9 @@ int main(void)
 #define T_MAP_PRIVATE       (0x02u)
 #define T_MAP_FIXED         (0x10u)
 #define T_MAP_ANONYMOUS     (0x20u)
+#define T_PROT_READ         (0x1u)
+#define T_PROT_WRITE        (0x2u)
+#define T_MS_SYNC           (4u)
 #define T_SIGSET_BYTES      (8u)
 
 #define T_UREG_ERA          (0u)
@@ -315,17 +320,9 @@ int32 arkrtos_copy_to_user(void *udst, const void *src, uint32 len)
     return host_copy_to(udst, src, len);
 }
 
-#if (ARKRTOS_USE_LINUX_FUTEX == 1)
-/* ---------------- futex 的前提桩 ----------------
- * 本档只链接 linux_abi.c；futex 的键要走分页后端与任务表，这三组符号由用例
- * 自己给：窗口就是模拟用户内存那一块（这样 copy_from_user 也能用），每对
- * 8 KB 的物理基址按 idx 线性推进，idx 7 故意留空（没驻留的对应回 0）。
- * 键因此是可算的：u_ptr(0x10) -> 0x00100010。 */
-#define T_FUTEX_WAIT        (0u)
-#define T_FUTEX_WAKE        (1u)
-
-/* 临界区：futex 的登记与扫描都在临界区里做（真机上与唤醒/切换争同一份
- * 表）。宿主是单线程，进出都当无事发生，只数进入次数证明真的走进去过。 */
+/* 临界区：futex 的登记与文件映射的写回忙标志都在临界区里（真机上与唤醒/切换
+ * 争同一份表）。宿主是单线程，进出都当无事发生，只数进入次数证明真的走进去过。
+ * 两个开关都要它，所以放在 futex 的条件之外。 */
 uint32 g_crit_in;
 
 uint32 arkrtos_port_enter_critical(void)
@@ -338,6 +335,15 @@ void arkrtos_port_exit_critical(uint32 state)
 {
     (void)state;
 }
+
+#if (ARKRTOS_USE_LINUX_FUTEX == 1)
+/* ---------------- futex 的前提桩 ----------------
+ * 本档只链接 linux_abi.c；futex 的键要走分页后端与任务表，这三组符号由用例
+ * 自己给：窗口就是模拟用户内存那一块（这样 copy_from_user 也能用），每对
+ * 8 KB 的物理基址按 idx 线性推进，idx 7 故意留空（没驻留的对应回 0）。
+ * 键因此是可算的：u_ptr(0x10) -> 0x00100010。 */
+#define T_FUTEX_WAIT        (0u)
+#define T_FUTEX_WAKE        (1u)
 
 int32 g_block_calls;
 uint32 g_block_ms;
@@ -405,7 +411,7 @@ int32 arkrtos_port_svc_restart(void *p_exc_ctx)
 
 typedef struct
 {
-    unsigned long arg[4];
+    unsigned long arg[6];
     uint32 nr;
     int    is_linux;
     unsigned long ret;
@@ -434,7 +440,7 @@ unsigned long arkrtos_port_svc_get_arg(void *p, uint32 idx)
 {
     t_ctx *c = (t_ctx *)p;
 
-    return (idx < 4u) ? c->arg[idx] : 0UL;
+    return (idx < 6u) ? c->arg[idx] : 0UL;
 }
 
 void arkrtos_port_svc_set_ret(void *p, unsigned long value)
@@ -671,6 +677,47 @@ int32 arkrtos_vfs_read_at(const char *path, uint8 *buf, uint32 len, uint32 off,
     return 0;
 }
 
+/* 写整个文件的桩：记下最后一次写回的路径/长度/内容，并按需拒绝。
+ * 文件映射的写回是「读整个文件 → 覆盖映射段 → 整文件写回」，所以这里同时
+ * 是读数口：写回成功后 g_file 就是文件的新内容。 */
+static uint8  g_wbuf[8192];
+static uint32 g_wlen;
+static int32  g_write_rc;
+static int    g_write_calls;
+static char   g_write_path[64];
+
+int32 arkrtos_vfs_write_file(const char *path, const uint8 *buf, uint32 len)
+{
+    size_t n = strlen(path);
+    uint32 k = len;
+
+    if(n >= sizeof(g_write_path))
+    {
+        n = sizeof(g_write_path) - 1u;
+    }
+    memcpy(g_write_path, path, n);
+    g_write_path[n] = 0;
+    g_write_calls++;
+    g_wlen = len;
+    if(k > sizeof(g_wbuf))
+    {
+        k = (uint32)sizeof(g_wbuf);
+    }
+    memcpy(g_wbuf, buf, (size_t)k);
+    if(g_write_rc != 0)
+    {
+        return g_write_rc;
+    }
+    k = len;
+    if(k > (uint32)sizeof(g_file))
+    {
+        k = (uint32)sizeof(g_file);
+    }
+    memcpy(g_file, buf, (size_t)k);
+    g_file_len = len;
+    return 0;
+}
+
 /* ---------------- 假 ELF 装载器 ---------------- */
 
 static int32 g_exec_rc;
@@ -738,6 +785,26 @@ static int call(t_ctx *c, uint32 nr, unsigned long a0, unsigned long a1,
     c->arg[1] = a1;
     c->arg[2] = a2;
     c->arg[3] = a3;
+    c->ret = 0xDEADBEEFUL;
+    c->ret_written = 0;
+    return (int)arkrtos_linux_abi_try(c);
+}
+
+/* 六参调用：mmap 是 addr/len/prot/flags/fd/offset，四参的 call() 装不下。
+ * 单独一个入口而不是把 call() 扩成变参：变参在 -Wformat 之外什么都检查不到，
+ * 而这里写错的后果是「参数错位但照样返回一个数」。 */
+static int call6(t_ctx *c, uint32 nr, unsigned long a0, unsigned long a1,
+                 unsigned long a2, unsigned long a3, unsigned long a4,
+                 unsigned long a5)
+{
+    c->nr = nr;
+    c->is_linux = 1;
+    c->arg[0] = a0;
+    c->arg[1] = a1;
+    c->arg[2] = a2;
+    c->arg[3] = a3;
+    c->arg[4] = a4;
+    c->arg[5] = a5;
     c->ret = 0xDEADBEEFUL;
     c->ret_written = 0;
     return (int)arkrtos_linux_abi_try(c);
@@ -1369,7 +1436,13 @@ static void t_mem(t_ctx *c)
     (void)call(c, T_NR_MMAP, 0UL, 0x1000UL, 0UL, (unsigned long)T_MAP_ANONYMOUS);
     ck_ret(c, -T_ENOSYS, "mmap 缺 MAP_PRIVATE 回 -ENOSYS");
     (void)call(c, T_NR_MMAP, 0UL, 0x1000UL, 0UL, (unsigned long)T_MAP_PRIVATE);
+#if (ARKRTOS_USE_PAGING_FILEMAP == 1)
+    /* 开了文件映射档之后，「没有 MAP_ANONYMOUS」不再是无意义请求，而是文件
+     * 映射：fd 无效就该是 -EBADF（这一条读数把两档的语义差别钉住）。 */
+    ck_ret(c, -T_EBADF, "文件映射档下缺 MAP_ANONYMOUS 按文件映射处理（坏 fd 回 -EBADF）");
+#else
     ck_ret(c, -T_ENOSYS, "mmap 缺 MAP_ANONYMOUS 回 -ENOSYS");
+#endif
     (void)call(c, T_NR_MMAP, 0UL, 0x1000UL, 0UL,
                (unsigned long)(T_MAP_PRIVATE | T_MAP_ANONYMOUS | T_MAP_FIXED));
     ck_ret(c, -T_ENOSYS, "mmap 带 MAP_FIXED 回 -ENOSYS");
@@ -1425,6 +1498,414 @@ static void t_mem(t_ctx *c)
     (void)call(c, T_NR_BRK, 0UL, 0UL, 0UL, 0UL);
     ck_u(c->ret, base + 0x1000UL, "mmap 自己把堆游标推到映射之后");
 }
+
+#if (ARKRTOS_USE_PAGING_FILEMAP == 1)
+/* 分组 13：文件映射与写回（U-21）。这一档的语义都写死在开关文档里，这里逐条
+ * 变成读数：内容真的装进映射区、EOF 之后是零、offset 真的生效、可写共享映射
+ * 写回、私有映射不写回、参数校验、写回失败不吞错误。 */
+static void t_filemap(t_ctx *c)
+{
+    unsigned long base = U_BASE + ((unsigned long)U_SIZE / 2UL);
+    uint32 i;
+    int fd;
+    int fdrd;
+
+    fresh(c);
+    g_stat_rc = 0;
+    g_stat_mode = 0u;
+    g_stat_size = 300u;
+    g_file_len = 300u;
+    for(i = 0u; i < 300u; i++)
+    {
+        g_file[i] = (uint8)('A' + (i % 26u));
+    }
+    g_write_rc = 0;
+    g_write_calls = 0;
+    g_wlen = 0u;
+    g_read_rc = 0;
+
+    u_put_str(T_PATH_OFF, "/mnt/ram/fm");
+    (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF), 0UL, 0UL);
+    fd = (int32)c->ret;
+    ck(fd == 3, "只读打开文件拿到 fd 3");
+
+    /* 1) MAP_PRIVATE + PROT_READ：内容装进映射区 */
+    (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL, (unsigned long)T_PROT_READ,
+                (unsigned long)T_MAP_PRIVATE, (unsigned long)fd, 0UL);
+    {
+        unsigned long addr = c->ret;
+
+        ck(addr == base, "文件映射从窗口半程起（与匿名同一套堆游标）");
+        ck_u(u_get8((uint32)(addr - U_BASE) + 0u), 'A', "映射首字节是文件首字节");
+        ck_u(u_get8((uint32)(addr - U_BASE) + 25u), 'Z', "映射内容按 pattern 前进");
+        /* EOF 之后清零：300 之后到 4 KB 全 0 */
+        ck_u(u_get8((uint32)(addr - U_BASE) + 299u), 'A' + (299u % 26u),
+             "EOF 前最后一字节仍是文件内容");
+        ck_u(u_get8((uint32)(addr - U_BASE) + 300u), 0u, "EOF 之后清零（不伪造 SIGBUS）");
+        ck_u(u_get8((uint32)(addr - U_BASE) + 4095u), 0u, "整段末尾也是零");
+        ck(g_write_calls == 0, "只读私有映射不产生写回");
+    }
+
+    /* 2) 参数校验 */
+    (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL, (unsigned long)T_PROT_READ,
+                (unsigned long)T_MAP_PRIVATE, (unsigned long)fd, 0x10UL);
+    ck_ret(c, -T_EINVAL, "offset 非 4 KB 对齐回 -EINVAL");
+    (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL, 0UL,
+                (unsigned long)T_MAP_PRIVATE, (unsigned long)fd, 0UL);
+    ck_ret(c, -T_EINVAL, "prot 不含 PROT_READ 回 -EINVAL");
+    (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL, (unsigned long)T_PROT_READ,
+                (unsigned long)T_MAP_PRIVATE, 99UL, 0UL);
+    ck_ret(c, -T_EBADF, "坏 fd 回 -EBADF");
+    (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL,
+                (unsigned long)(T_PROT_READ | T_PROT_WRITE),
+                (unsigned long)T_MAP_SHARED, (unsigned long)fd, 0UL);
+    ck_ret(c, -T_EACCES, "只读 fd + 可写共享映射回 -EACCES（Linux 语义）");
+
+    /* 3) offset 生效：offset=4096 在 300 字节文件里是整段越界 ⇒ 全零 */
+    (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL, (unsigned long)T_PROT_READ,
+                (unsigned long)T_MAP_PRIVATE, (unsigned long)fd, 0x1000UL);
+    {
+        unsigned long addr = c->ret;
+
+        ck(addr > base, "第二次映射接在第一次之后");
+        ck_u(u_get8((uint32)(addr - U_BASE) + 0u), 0u, "offset 越过 EOF 时整段零");
+    }
+
+    /* 4) 私有可写映射：改动不落盘 */
+    (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL,
+                (unsigned long)(T_PROT_READ | T_PROT_WRITE),
+                (unsigned long)T_MAP_PRIVATE, (unsigned long)fd, 0UL);
+    {
+        unsigned long addr = c->ret;
+        uint32 off = (uint32)(addr - U_BASE);
+
+        u_put(off, "ZZ", 2u);
+        (void)call(c, T_NR_MSYNC, addr, 0x1000UL, (unsigned long)T_MS_SYNC, 0UL);
+        ck_ret(c, 0, "msync 私有映射回 0（没有可写回的东西）");
+        ck(g_write_calls == 0, "私有映射的改动不写回");
+    }
+
+    /* 5) O_RDWR + 可写共享映射：真的写回 */
+    (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF),
+               (unsigned long)T_O_RDWR, 0UL);
+    fdrd = (int32)c->ret;
+    ck(fdrd > 3, "FILEMAP 档下已存在文件可以 O_RDWR 打开");
+    (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL,
+                (unsigned long)(T_PROT_READ | T_PROT_WRITE),
+                (unsigned long)T_MAP_SHARED, (unsigned long)fdrd, 0UL);
+    {
+        unsigned long addr = c->ret;
+        uint32 off = (uint32)(addr - U_BASE);
+
+        ck(addr > 0 && addr < (U_BASE + (unsigned long)U_SIZE), "可写共享映射拿到地址");
+        u_put(off + 10u, "XY", 2u);
+        (void)call(c, T_NR_MSYNC, addr, 0x1000UL, (unsigned long)T_MS_SYNC, 0UL);
+        ck_ret(c, 0, "msync 可写共享映射回 0");
+        ck(g_write_calls == 1, "写回发生了一次");
+        ck_u(g_wlen, 300u, "写回的长度是文件原长（不因映射 4 KB 而变长）");
+        ck_u((uint32)g_wbuf[10], (uint32)'X', "写回把映射里的改动带上去了");
+        ck_u((uint32)g_wbuf[12], (uint32)'M', "未被改动的位置保留原内容");
+        ck(strcmp(g_write_path, "/mnt/ram/fm") == 0, "写回的路径就是打开时的路径");
+        u_put(off + 10u, "AB", 2u);
+        (void)call(c, T_NR_MUNMAP, addr, 0x1000UL, 0UL, 0UL);
+        ck_ret(c, 0, "munmap 命中记账回 0");
+        ck(g_write_calls == 2, "munmap 也是一次写回");
+        ck_u((uint32)g_wbuf[10], (uint32)'A', "第二次写回带上了新内容");
+        (void)call(c, T_NR_MUNMAP, addr, 0x1000UL, 0UL, 0UL);
+        ck(g_write_calls == 2, "同一段再 munmap 不重复写回");
+    }
+
+    /* 6) 写回失败不被吞掉：文件长度在映射期间变了 */
+    (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL,
+                (unsigned long)(T_PROT_READ | T_PROT_WRITE),
+                (unsigned long)T_MAP_SHARED, (unsigned long)fdrd, 0UL);
+    {
+        unsigned long addr = c->ret;
+
+        g_stat_size = 301u;
+        (void)call(c, T_NR_MSYNC, addr, 0x1000UL, (unsigned long)T_MS_SYNC, 0UL);
+        ck_ret(c, -T_EIO, "文件长度变了就 -EIO（不把文件截断成读到的长度）");
+        g_stat_size = 300u;
+        g_write_rc = -1;
+        (void)call(c, T_NR_MUNMAP, addr, 0x1000UL, 0UL, 0UL);
+        ck_ret(c, -T_EIO, "写回失败时 munmap 把错误交回去");
+        g_write_rc = 0;
+        (void)call(c, T_NR_MUNMAP, addr, 0x1000UL, 0UL, 0UL);
+        ck_ret(c, 0, "写回成功后同一次 munmap 重试可以收尾（记账没被吞掉）");
+    }
+
+    /* 7) msync 参数校验 */
+    (void)call(c, T_NR_MSYNC, base + 1UL, 0x1000UL, 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "msync 地址非页对齐回 -EINVAL");
+    (void)call(c, T_NR_MSYNC, base, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "msync 长度 0 回 -EINVAL");
+    (void)call(c, T_NR_MSYNC, base, 0x1000UL, 0x8UL, 0UL);
+    ck_ret(c, -T_EINVAL, "msync 未知标志位回 -EINVAL");
+    (void)call(c, T_NR_MSYNC, 0x1000UL, 0x1000UL, 0UL, 0UL);
+    ck_ret(c, -T_ENOMEM, "msync 堆窗口之外回 -ENOMEM");
+
+    /* 8) 文件太大：mmap 当场 -ENOMEM */
+    g_stat_size = 9000u;
+    (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF),
+               (unsigned long)T_O_RDWR, 0UL);
+    {
+        int big = (int32)c->ret;
+
+        (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL,
+                    (unsigned long)(T_PROT_READ | T_PROT_WRITE),
+                    (unsigned long)T_MAP_SHARED, (unsigned long)big, 0UL);
+        ck_ret(c, -T_ENOMEM, "超过写回缓冲的文件当场 -ENOMEM");
+    }
+    g_stat_size = 300u;
+
+    /* 9) 普通文件 write 如实 -ENOSYS（不装作写进去了） */
+    (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF),
+               (unsigned long)T_O_RDWR, 0UL);
+    {
+        int wfd = (int32)c->ret;
+
+        u_put(T_DATA_OFF, "abcd", 4u);
+        (void)call(c, T_NR_WRITE, (unsigned long)wfd, u_ptr(T_DATA_OFF), 4UL, 0UL);
+        ck_ret(c, -T_ENOSYS, "普通文件 write 回 -ENOSYS（内容只走映射写回）");
+    }
+}
+#endif /* ARKRTOS_USE_PAGING_FILEMAP == 1 */
+
+#if (ARKRTOS_USE_PAGING_FILEMAP == 1)
+/* 分组 14：文件映射的错误与边界路径（U-21）。分组 13 走的是「正常用法」，
+ * 这一组专门打那些只有走错一条路才会碰到的分支：写回槽用满、要的长度越过
+ * 堆窗口、拿管道 fd 去映射、底层短读、拷贝半路失败、写回期间文件被换掉。
+ * 覆盖率门禁要求它们不是死代码；判据要求每条都回对的错误码（不吞、不伪造）。 */
+static void t_filemap_edge(t_ctx *c)
+{
+    int32 fda;
+    int32 fdb;
+    int32 fdc;
+    int32 prd;
+    uint32 i;
+
+    /* --- 1) 写回记账槽用满：每进程 2 条可写共享映射 --- */
+    fresh(c);
+    g_stat_rc = 0;
+    g_stat_mode = 0u;
+    g_stat_size = 300u;
+    g_file_len = 300u;
+    g_read_rc = 0;
+    g_write_rc = 0;
+    g_write_calls = 0;
+    for(i = 0u; i < 300u; i++)
+    {
+        g_file[i] = (uint8)('A' + (i % 26u));
+    }
+    u_put_str(T_PATH_OFF, "/mnt/ram/fm");
+    (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF),
+               (unsigned long)T_O_RDWR, 0UL);
+    fda = (int32)c->ret;
+    (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF),
+               (unsigned long)T_O_RDWR, 0UL);
+    fdb = (int32)c->ret;
+    (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF),
+               (unsigned long)T_O_RDWR, 0UL);
+    fdc = (int32)c->ret;
+    ck(fda > 0 && fdb > 0 && fdc > 0, "三份 O_RDWR 句柄都拿到了");
+    (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL,
+                (unsigned long)(T_PROT_READ | T_PROT_WRITE),
+                (unsigned long)T_MAP_SHARED, (unsigned long)fda, 0UL);
+    ck((c->ret > 0u) && (c->ret < (U_BASE + (unsigned long)U_SIZE)),
+       "第一条可写共享映射成功");
+    (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL,
+                (unsigned long)(T_PROT_READ | T_PROT_WRITE),
+                (unsigned long)T_MAP_SHARED, (unsigned long)fdb, 0UL);
+    ck((c->ret > 0u) && (c->ret < (U_BASE + (unsigned long)U_SIZE)),
+       "第二条可写共享映射成功");
+    (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL,
+                (unsigned long)(T_PROT_READ | T_PROT_WRITE),
+                (unsigned long)T_MAP_SHARED, (unsigned long)fdc, 0UL);
+    ck_ret(c, -T_ENOMEM, "第三条可写共享映射回 -ENOMEM（每进程 2 条写回记账）");
+
+    /* --- 2) 要的长度越过堆窗口：当场 -ENOMEM，不悄悄缩成一段 --- */
+    fresh(c);
+    g_stat_rc = 0;
+    g_stat_size = 300u;
+    g_file_len = 300u;
+    g_read_rc = 0;
+    u_put_str(T_PATH_OFF, "/mnt/ram/fm");
+    (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF), 0UL, 0UL);
+    fda = (int32)c->ret;
+    ck(fda > 0, "越窗测试先拿到只读句柄");
+    (void)call6(c, T_NR_MMAP, 0UL, 0x180000UL, (unsigned long)T_PROT_READ,
+                (unsigned long)T_MAP_PRIVATE, (unsigned long)fda, 0UL);
+    ck_ret(c, -T_ENOMEM, "映射长度越过堆窗口回 -ENOMEM");
+
+    /* --- 3) 管道 fd 不能当文件映射 --- */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "pipe2 建管道");
+    prd = (int32)u_get32(T_DATA_OFF);
+    ck(prd > 0, "管道读端拿到 fd");
+    (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL, (unsigned long)T_PROT_READ,
+                (unsigned long)T_MAP_PRIVATE, (unsigned long)prd, 0UL);
+    ck_ret(c, -T_EBADF, "拿管道读端去映射回 -EBADF（只有普通文件能映射）");
+
+    /* --- 4) 底层短读：读到的比声明的少，余下按 EOF 清零 --- */
+    fresh(c);
+    g_stat_rc = 0;
+    g_stat_size = 300u;
+    g_file_len = 100u;
+    g_read_rc = 0;
+    u_put_str(T_PATH_OFF, "/mnt/ram/fm");
+    (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF), 0UL, 0UL);
+    fda = (int32)c->ret;
+    (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL, (unsigned long)T_PROT_READ,
+                (unsigned long)T_MAP_PRIVATE, (unsigned long)fda, 0UL);
+    {
+        unsigned long addr = c->ret;
+        uint32 off;
+
+        ck((addr > 0u) && (addr < (U_BASE + (unsigned long)U_SIZE)),
+           "短读场景下映射照样拿到地址");
+        off = (uint32)(addr - U_BASE);
+        ck_u(u_get8(off + 99u), (unsigned long)('A' + (99u % 26u)),
+             "短读之前的内容照装");
+        ck_u(u_get8(off + 100u), 0u, "底层短读之后余下按 EOF 清零");
+        ck_u(u_get8(off + 299u), 0u, "清零铺到文件声明的长度上");
+    }
+
+    /* --- 5) 内容拷贝半路失败：如实 -EFAULT --- */
+    fresh(c);
+    g_stat_rc = 0;
+    g_stat_size = 300u;
+    g_file_len = 300u;
+    g_read_rc = 0;
+    u_put_str(T_PATH_OFF, "/mnt/ram/fm");
+    (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF), 0UL, 0UL);
+    fda = (int32)c->ret;
+    g_to_budget = 0;
+    (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL, (unsigned long)T_PROT_READ,
+                (unsigned long)T_MAP_PRIVATE, (unsigned long)fda, 0UL);
+    ck_ret(c, -T_EFAULT, "内容往用户区拷不进去回 -EFAULT");
+    g_to_budget = -1;
+
+    /* --- 6) 清零阶段拷贝失败：-EFAULT 且写回记账不泄漏 --- */
+    fresh(c);
+    g_stat_rc = 0;
+    g_stat_size = 0u;
+    g_file_len = 0u;
+    g_read_rc = 0;
+    u_put_str(T_PATH_OFF, "/mnt/ram/fm");
+    (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF),
+               (unsigned long)T_O_RDWR, 0UL);
+    fda = (int32)c->ret;
+    g_to_budget = 0;
+    (void)call6(c, T_NR_MMAP, 0UL, 0x2000UL,
+                (unsigned long)(T_PROT_READ | T_PROT_WRITE),
+                (unsigned long)T_MAP_SHARED, (unsigned long)fda, 0UL);
+    ck_ret(c, -T_EFAULT, "清零阶段拷不进去回 -EFAULT");
+    g_to_budget = -1;
+    for(i = 0u; i < 2u; i++)
+    {
+        (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL,
+                    (unsigned long)(T_PROT_READ | T_PROT_WRITE),
+                    (unsigned long)T_MAP_SHARED, (unsigned long)fda, 0UL);
+        ck((c->ret > 0u) && (c->ret < (U_BASE + (unsigned long)U_SIZE)),
+           "失败那次没把写回槽吃掉（同一条仍能再建两条）");
+    }
+    (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL,
+                (unsigned long)(T_PROT_READ | T_PROT_WRITE),
+                (unsigned long)T_MAP_SHARED, (unsigned long)fda, 0UL);
+    ck_ret(c, -T_ENOMEM, "两条建满之后第三条仍是 -ENOMEM（槽数是 2 不是 3）");
+
+    /* --- 7) msync 地址在窗口里但不属于任何记账：回 0 --- */
+    fresh(c);
+    g_stat_rc = 0;
+    g_stat_size = 300u;
+    g_file_len = 300u;
+    g_read_rc = 0;
+    g_write_rc = 0;
+    g_write_calls = 0;
+    u_put_str(T_PATH_OFF, "/mnt/ram/fm");
+    (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF),
+               (unsigned long)T_O_RDWR, 0UL);
+    fda = (int32)c->ret;
+    (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL,
+                (unsigned long)(T_PROT_READ | T_PROT_WRITE),
+                (unsigned long)T_MAP_SHARED, (unsigned long)fda, 0UL);
+    {
+        unsigned long addr = c->ret;
+
+        ck((addr > 0u) && (addr < (U_BASE + (unsigned long)U_SIZE)),
+           "记账存在时的可写共享映射成功");
+        (void)call(c, T_NR_MSYNC, addr + 0x8000UL, 0x1000UL,
+                   (unsigned long)T_MS_SYNC, 0UL);
+        ck_ret(c, 0, "msync 跳到窗口里别的页回 0（认得窗口，但不假装有东西要写回）");
+        ck(g_write_calls == 0, "没有记账命中就不发生写回");
+    }
+
+    /* --- 8) 写回本身的三条失败路径 --- */
+    (void)call(c, T_NR_MSYNC, U_BASE + ((unsigned long)U_SIZE / 2UL),
+               0x1000UL, (unsigned long)T_MS_SYNC, 0UL);
+    fresh(c);
+    g_stat_rc = 0;
+    g_stat_size = 300u;
+    g_file_len = 300u;
+    g_read_rc = 0;
+    g_write_rc = 0;
+    g_write_calls = 0;
+    u_put_str(T_PATH_OFF, "/mnt/ram/fm");
+    (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF),
+               (unsigned long)T_O_RDWR, 0UL);
+    fda = (int32)c->ret;
+    (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL,
+                (unsigned long)(T_PROT_READ | T_PROT_WRITE),
+                (unsigned long)T_MAP_SHARED, (unsigned long)fda, 0UL);
+    {
+        unsigned long addr = c->ret;
+
+        ck((addr > 0u) && (addr < (U_BASE + (unsigned long)U_SIZE)),
+           "失败路径用的可写共享映射成功");
+        g_read_rc = -1;
+        (void)call(c, T_NR_MSYNC, addr, 0x1000UL, (unsigned long)T_MS_SYNC, 0UL);
+        ck_ret(c, -T_EIO, "写回读不到原文件回 -EIO");
+        g_read_rc = 0;
+        g_stat_rc = -1;
+        (void)call(c, T_NR_MSYNC, addr, 0x1000UL, (unsigned long)T_MS_SYNC, 0UL);
+        ck_ret(c, -T_EIO, "写回量不出文件长度回 -EIO");
+        g_stat_rc = 0;
+        g_from_budget = 0;
+        (void)call(c, T_NR_MSYNC, addr, 0x1000UL, (unsigned long)T_MS_SYNC, 0UL);
+        ck_ret(c, -T_EFAULT, "写回把映射区读不回内核回 -EFAULT");
+        g_from_budget = -1;
+        (void)call(c, T_NR_MSYNC, addr, 0x1000UL, (unsigned long)T_MS_SYNC, 0UL);
+        ck_ret(c, 0, "三条失败都收尾之后写回仍能成功（忙标志没被卡住）");
+        ck(g_write_calls == 1, "前三次失败一次都没写，第四次才写");
+    }
+
+    /* --- 9) 映射段整段落在 EOF 之后：写回是空操作，文件也不因此变长 --- */
+    fresh(c);
+    g_stat_rc = 0;
+    g_stat_size = 300u;
+    g_file_len = 300u;
+    g_read_rc = 0;
+    g_write_rc = 0;
+    g_write_calls = 0;
+    u_put_str(T_PATH_OFF, "/mnt/ram/fm");
+    (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF),
+               (unsigned long)T_O_RDWR, 0UL);
+    fda = (int32)c->ret;
+    (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL,
+                (unsigned long)(T_PROT_READ | T_PROT_WRITE),
+                (unsigned long)T_MAP_SHARED, (unsigned long)fda, 0x1000UL);
+    {
+        unsigned long addr = c->ret;
+
+        ck((addr > 0u) && (addr < (U_BASE + (unsigned long)U_SIZE)),
+           "整段越过 EOF 的可写共享映射也能建起来");
+        (void)call(c, T_NR_MSYNC, addr, 0x1000UL, (unsigned long)T_MS_SYNC, 0UL);
+        ck_ret(c, 0, "msync 整段越过 EOF 回 0");
+        ck(g_write_calls == 0, "没有字节可写回时不动文件（不把它撑长）");
+    }
+}
+#endif /* ARKRTOS_USE_PAGING_FILEMAP == 1 */
 
 /* 分组 10：信号（装/查动作、屏蔽字、投递、回收） */
 static void t_signal(t_ctx *c)
@@ -2072,6 +2553,10 @@ int main(void)
     t_task_exit(&c);
 #if (ARKRTOS_USE_LINUX_FUTEX == 1)
     t_futex(&c);
+#endif
+#if (ARKRTOS_USE_PAGING_FILEMAP == 1)
+    t_filemap(&c);
+    t_filemap_edge(&c);
 #endif
 
     if(g_fails != 0)

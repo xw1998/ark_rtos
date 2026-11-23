@@ -272,7 +272,8 @@ reloc dynmain:      RELATIVE=1 64=2 JUMP_SLOT=6 TPREL64=0
    交叉工具链能产出这类二进制（本仓夹具是靠 manifest 重写出来的）。
 2. **glibc 的 ld.so 要的系统调用面远超现在**：`futex`（本内核只有 WAIT/WAKE
    最小一档，glibc 还要 `REQUEUE`/`PI`/robust list）、`rseq`、TLS
-   （`arch_prctl` / `set_thread_area`）、文件映射（`mmap` 带 fd）、
+   （`arch_prctl` / `set_thread_area`）、文件映射（`mmap` 带 fd；本内核只有
+   一次性快照 + 整文件写回的一档，见 [Linux可执行文件兼容-系统调用ABI](Linux可执行文件兼容-系统调用ABI.md) §8.5）、
    `openat` 之外的整套 `*at`、`rt_sigaction` 等。内核侧大部分没有。
 3. **`mprotect` accepted-not-enforced**：整窗一条 `PS=20` 条目，权限位不生效。
 4. **没有懒绑定**：`JUMP_SLOT` 全部在跳转前做完；`DT_PLTGOT` 的第二项没被

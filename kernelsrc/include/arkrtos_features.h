@@ -361,6 +361,47 @@
 #endif
 #endif
 
+/* U-21 文件映射与写回：0 = 关（mmap 收到非 MAP_ANONYMOUS 一律 -ENOSYS，与打
+ * 开本开关之前逐字节相同），1 = mmap(fd, ...) 把文件内容装进 App 窗口的一段
+ * 堆区，MAP_SHARED 且可写的映射在 msync / munmap / 进程退出三处写回文件。
+ *
+ * 六条写死的边界（都是「不支持」，不是欠验）：
+ *   - 每个进程一份私有帧：两个进程映射同一个文件，在写回之前互相看不见对方
+ *     的写；这不是 Linux 的共享映射语义，是「写回即落盘」；
+ *   - 写回要整文件进内核缓冲，超过 ARKRTOS_LX_FILEMAP_WB_MAX（8 KB）的文件
+ *     在 mmap 那一刻就 -ENOMEM，不给一个「后面写一半」的假承诺；
+ *   - 越过 EOF 的写在写回时被丢掉（文件不因此变长），读到 EOF 之后是零而不是
+ *     SIGBUS；
+ *   - openat 仍拒绝 O_CREAT / O_TRUNC / O_WRONLY，只多放一个「已存在的文件
+ *     以 O_RDWR 打开」，那是可写共享映射的前提（Linux 否则回 -EACCES）；
+ *   - 写回记账按进程，不跨 fork 继承：子进程要同步就用自己的那条记账同步；
+ *   - 页不归还：munmap 只写回并忘掉记账，地址仍留在堆游标之前，下一次 mmap
+ *     不会把同一段发出去。
+ *
+ * 要求 ARKRTOS_USE_LINUX_ABI == 1、ARKRTOS_USE_PAGING == 1、
+ * ARKRTOS_USE_PAGING_PAGES == 1 与 ARKRTOS_USE_PAGING_DEMAND == 1（映射靠按
+ * 需缺页拿帧，没有 DEMAND 就没有帧可装）。
+ *
+ * 由 Kconfig 选择（config ARKRTOS_USE_PAGING_FILEMAP）。默认关：关档时不编译
+ * 记账表、msync 号与写回缓冲，mmap 对文件描述符回 -ENOSYS，镜像零变化。 */
+#ifndef ARKRTOS_USE_PAGING_FILEMAP
+#define ARKRTOS_USE_PAGING_FILEMAP      0
+#endif
+#if (ARKRTOS_USE_PAGING_FILEMAP == 1)
+#if (ARKRTOS_USE_LINUX_ABI != 1)
+#error "ARKRTOS_USE_PAGING_FILEMAP=1 requires ARKRTOS_USE_LINUX_ABI=1"
+#endif
+#if (ARKRTOS_USE_PAGING != 1)
+#error "ARKRTOS_USE_PAGING_FILEMAP=1 requires ARKRTOS_USE_PAGING=1"
+#endif
+#if (ARKRTOS_USE_PAGING_PAGES != 1)
+#error "ARKRTOS_USE_PAGING_FILEMAP=1 requires ARKRTOS_USE_PAGING_PAGES=1"
+#endif
+#if (ARKRTOS_USE_PAGING_DEMAND != 1)
+#error "ARKRTOS_USE_PAGING_FILEMAP=1 requires ARKRTOS_USE_PAGING_DEMAND=1"
+#endif
+#endif
+
 /* U-16 页替换（swap）：0 = 关（一个字节都不编进镜像），1 = 帧池空了就把某一对
  * 8 KB 换出到内核静态交换区、把两帧还回池子，缺页时再换回来。
  * 要求 ARKRTOS_USE_PAGING_DEMAND == 1 —— 只有按需档才有「这一对还没驻留」

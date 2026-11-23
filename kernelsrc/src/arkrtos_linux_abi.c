@@ -79,6 +79,7 @@
 #define LX_SYS_EXECVE               (221u)
 #define LX_SYS_MMAP                 (222u)
 #define LX_SYS_MPROTECT             (226u)
+#define LX_SYS_MSYNC                (227u)  /* U-21：只在 ARKRTOS_USE_PAGING_FILEMAP */
 #define LX_SYS_CLONE                (220u)  /* U-19：只在 ARKRTOS_USE_LINUX_FORK */
 #define LX_SYS_WAIT4                (260u)  /* U-19：同上 */
 
@@ -211,12 +212,34 @@
 #define LX_O_CREAT                  (0x40u)
 #define LX_O_TRUNC                  (0x200u)
 #define LX_O_NONBLOCK               (0x800u)
+/* U-21 唯一放开的访问模式：打开**已存在**的文件时 O_RDWR 合法（可写共享映射
+ * 的前提）。O_WRONLY 不放开：只写映射的语义要整文件回填，本档没有。 */
+#define LX_O_RDWR                   (0x2u)
 
 /* mmap 标志位（asm-generic） */
 #define LX_MAP_SHARED               (0x01u)
 #define LX_MAP_PRIVATE              (0x02u)
 #define LX_MAP_FIXED                (0x10u)
 #define LX_MAP_ANONYMOUS            (0x20u)
+
+/* mmap prot（asm-generic）。本档只认 READ 与 WRITE：PROT_EXEC 在 LA64 的
+ * 这一套条目里没有 NR/NX 位可设（见文档「执行位无法在硬件上强制」），给了
+ * 也不假装强制，因此**接受但不记账**，与 mprotect 那条路同一口径。 */
+#define LX_PROT_READ                (0x1u)
+#define LX_PROT_WRITE               (0x2u)
+
+/* msync flags（asm-generic） */
+#define LX_MS_ASYNC                 (1u)
+#define LX_MS_INVALIDATE            (2u)
+#define LX_MS_SYNC                  (4u)
+
+/* 文件映射记账与写回上限（U-21）。
+ *   - 每个进程最多 LX_FILEMAP_MAX 条「可写共享映射」的写回记账：真正需要
+ *     写回的就是这一种，私有映射与被写保护的不必记账；
+ *   - 写回要整文件进内核静态缓冲，所以文件大于 LX_FILEMAP_WB_MAX 时 mmap
+ *     当场 -ENOMEM —— 不给一个「后面只写得回一半」的假承诺。 */
+#define LX_FILEMAP_MAX              (2u)
+#define LX_FILEMAP_WB_MAX           (8192u)
 
 /* clockid */
 #define LX_CLOCK_REALTIME           (0u)
@@ -229,7 +252,12 @@
 #define LX_STAT_EFAULT              (2u)
 #define LX_STAT_OTHER               (3u)
 #define LX_STAT_MPROTECT            (4u)    /* mprotect 接受但未强制（整窗 RWX） */
+#if (ARKRTOS_USE_PAGING_FILEMAP == 1)
+#define LX_STAT_FILEMAP             (5u)    /* 真的写回过几次（U-21） */
+#define LX_STAT_MAX                 (6u)
+#else
 #define LX_STAT_MAX                 (5u)
+#endif
 
 #if (ARKRTOS_LINUX_ABI_SYSSTAT == 1)
 /* 按号直方图的槽数。16 个不同号已经足够描出一个 hello 世界级别的
@@ -245,6 +273,7 @@ typedef struct
     uint8  used;
     uint8  kind;        /* LX_FD_FILE / LX_FD_PIPE_R / LX_FD_PIPE_W */
     uint8  pipe;        /* kind 是管道时，s_pipe 的下标 */
+    uint8  wr;          /* 1 = 以 O_RDWR 打开（U-21 可写共享映射的前提） */
     uint32 size;
     uint32 off;
     char   path[LX_PATH_MAX];
@@ -260,6 +289,22 @@ typedef struct
     uint16 count;
     uint8  buf[LX_PIPE_BUF];
 } lx_pipe_t;
+
+#if (ARKRTOS_USE_PAGING_FILEMAP == 1)
+/* 一条「可写共享文件映射」的写回记账（U-21）。只记需要写回的那一种：
+ * 私有映射改的是自己那份帧，没有可写回的东西；写保护的也不可能有脏页。
+ * addr/len/off/size 都是 mmap 那一刻的值，写回时按 off 之前的文件内容 + 这段
+ * 映射里的内容重新拼出整个文件（VFS 没有 write_at）。 */
+typedef struct
+{
+    uint8  used;
+    uint32 addr;
+    uint32 len;
+    uint32 off;
+    uint32 size;
+    char   path[LX_PATH_MAX];
+} lx_filemap_t;
+#endif
 
 /* fd 表是内核全局的：本版本的 ELF 装载器一次只跑一个程序，装载器在
  * 每次起跑前调用 arkrtos_linux_abi_reset() 把它清空。 */
@@ -327,6 +372,9 @@ typedef struct
     lx_sigaction_t sig[LX_NSIG];
     uint32         sig_pending;
     uint32         sig_blocked;
+#if (ARKRTOS_USE_PAGING_FILEMAP == 1)
+    lx_filemap_t   fmap[LX_FILEMAP_MAX];
+#endif
 } lx_proc_t;
 
 static lx_proc_t s_proc[LX_PROC_MAX];
@@ -345,6 +393,9 @@ static lx_proc_t *lx_proc_curp(void);
 #define s_sig           (lx_proc_curp()->sig)
 #define s_sig_pending   (lx_proc_curp()->sig_pending)
 #define s_sig_blocked   (lx_proc_curp()->sig_blocked)
+#if (ARKRTOS_USE_PAGING_FILEMAP == 1)
+#define s_fmap          (lx_proc_curp()->fmap)
+#endif
 
 static void lx_proc_zero(uint32 slot)
 {
@@ -358,7 +409,21 @@ static void lx_proc_zero(uint32 slot)
         s_proc[slot].fd[i].size = 0u;
         s_proc[slot].fd[i].off  = 0u;
         s_proc[slot].fd[i].path[0] = 0;
+        s_proc[slot].fd[i].wr   = 0u;
     }
+#if (ARKRTOS_USE_PAGING_FILEMAP == 1)
+    /* 写回记账**不跨 fork 继承**（见开关文档第 5 条）：子进程要同步自己的映射
+     * 就读自己那张表，父的那条不会替它写回。 */
+    for(i = 0u; i < (uint32)LX_FILEMAP_MAX; i++)
+    {
+        s_proc[slot].fmap[i].used = 0u;
+        s_proc[slot].fmap[i].addr = 0u;
+        s_proc[slot].fmap[i].len  = 0u;
+        s_proc[slot].fmap[i].off  = 0u;
+        s_proc[slot].fmap[i].size = 0u;
+        s_proc[slot].fmap[i].path[0] = 0;
+    }
+#endif
     for(i = 0u; i < (uint32)LX_NSIG; i++)
     {
         s_proc[slot].sig[i].handler  = LX_SIG_DFL;
@@ -1342,6 +1407,7 @@ static int32 lx_openat(void *p_ctx)
     char   path[LX_PATH_MAX];
     uint32 flags = ARKRTOS_SVC_ARG(p_ctx, 2u);
     uint32 size  = 0u;
+    uint32 wr    = 0u;      /* 1 = 本次以 O_RDWR 打开（只有 FILEMAP 档会给 1） */
     int32  rc;
     uint32 i;
 
@@ -1352,7 +1418,20 @@ static int32 lx_openat(void *p_ctx)
     }
 
     /* 这台板上的用户态文件系统是只读的（文件由内核侧写进去）。想写就
-     * 明确回 -EROFS，而不是给一个"能打开、写不进去"的句柄。 */
+     * 明确回 -EROFS，而不是给一个"能打开、写不进去"的句柄。
+     *
+     * U-21 只放开一个例外：FILEMAP 档下打开一个**已存在**的文件时 O_RDWR
+     * 合法 —— 可写共享映射要求 fd 以读写打开（Linux 语义），没有它就验不了
+     * 写回。O_CREAT / O_TRUNC / O_WRONLY 仍然 -EROFS：建文件与截断不在这一档
+     * 的语义里，写内容也只走映射写回这一条路。 */
+#if (ARKRTOS_USE_PAGING_FILEMAP == 1)
+    if(((flags & LX_O_ACCMODE) == LX_O_RDWR) &&
+       ((flags & (LX_O_CREAT | LX_O_TRUNC)) == 0u))
+    {
+        wr = 1u;
+    }
+    else
+#endif
     if(((flags & LX_O_ACCMODE) != 0u) || ((flags & LX_O_CREAT) != 0u) ||
        ((flags & LX_O_TRUNC) != 0u))
     {
@@ -1392,6 +1471,7 @@ static int32 lx_openat(void *p_ctx)
     s_fd[i].pipe = 0u;
     s_fd[i].size = size;
     s_fd[i].off  = 0u;
+    s_fd[i].wr   = (uint8)wr;
     s_fd[i].used = 1u;
 
     return (int32)(3u + i);
@@ -1445,6 +1525,7 @@ static uint32 lx_fd_release(uint32 slot, uint32 idx)
     s_proc[slot].fd[idx].off  = 0u;
     s_proc[slot].fd[idx].size = 0u;
     s_proc[slot].fd[idx].path[0] = 0;
+    s_proc[slot].fd[idx].wr = 0u;
     return 1u;
 }
 
@@ -1608,8 +1689,18 @@ static int32 lx_write(void *p_ctx)
     {
         int32 pidx = lx_fd_find(fd);
 
-        /* 文件写仍是 -EROFS（openat 就不让可写打开）；这条路只认管道写端。 */
-        if((pidx < 0) || (s_fd[pidx].kind != LX_FD_PIPE_W))
+        /* 文件写仍是 -EROFS（openat 就不让可写打开）；这条路只认管道写端。
+         * U-21 的 O_RDWR fd 也不走这里：文件内容的写只有「映射 + 写回」一条
+         * 路，这里如实回 -ENOSYS，而不是给一个看似成功的空写。 */
+        if((pidx < 0))
+        {
+            return -LX_EBADF;
+        }
+        if(s_fd[pidx].kind == LX_FD_FILE)
+        {
+            return -LX_ENOSYS;
+        }
+        if(s_fd[pidx].kind != LX_FD_PIPE_W)
         {
             return -LX_EBADF;
         }
@@ -1862,6 +1953,322 @@ static int32 lx_brk(void *p_ctx)
     return LX_RET_PTR_DONE;
 }
 
+#if (ARKRTOS_USE_PAGING_FILEMAP == 1)
+/* ------------------------------------------------ 文件映射与写回（U-21） */
+
+/* 写回缓冲是内核单份：VFS 的口径本来就是「同一时刻只能有一个读者拿着文件
+ * 缓存」，所以两笔写回不能并行。忙标志把第二笔如实挡成 -EBUSY，而不是让两份
+ * 数据在同一个缓冲里互相覆盖 —— 那会写回一个查不出来的错文件。 */
+static uint8 s_fm_wb[LX_FILEMAP_WB_MAX];
+static uint8 s_fm_wb_busy;
+
+static int32 lx_fm_wb_begin(void)
+{
+    uint32 crit = ARKRTOS_ENTER_CRITICAL();
+    int32  rc   = 0;
+
+    if(s_fm_wb_busy != 0u)
+    {
+        rc = -LX_EBUSY;
+    }
+    else
+    {
+        s_fm_wb_busy = 1u;
+    }
+    ARKRTOS_EXIT_CRITICAL(crit);
+    return rc;
+}
+
+static void lx_fm_wb_end(void)
+{
+    uint32 crit = ARKRTOS_ENTER_CRITICAL();
+
+    s_fm_wb_busy = 0u;
+    ARKRTOS_EXIT_CRITICAL(crit);
+}
+
+/* 把一条记账写回文件。返回 0 = 写回完成（或这条记账本来就不需要写回）。
+ * 做法是「读整个文件 → 覆盖映射段 → 整文件写回」：VFS 没有 write_at，而这里
+ * 不能糊（拼错一位就是一个静默的错文件）。 */
+static int32 lx_filemap_sync(lx_filemap_t *p_m)
+{
+    uint32 size = 0u;
+    uint32 mode = 0u;
+    uint32 got  = 0u;
+    uint32 n;
+    int32  rc;
+
+    if((p_m == 0) || (p_m->used == 0u))
+    {
+        return 0;
+    }
+    rc = lx_fm_wb_begin();
+    if(rc != 0)
+    {
+        return rc;
+    }
+    rc = -LX_EIO;
+    if(arkrtos_vfs_read_at(p_m->path, s_fm_wb, (uint32)sizeof(s_fm_wb),
+                           0u, &got) < 0)
+    {
+        goto out;
+    }
+    if(arkrtos_vfs_app_stat(p_m->path, &size, &mode) < 0)
+    {
+        goto out;
+    }
+    if(size != got)
+    {
+        /* 文件在映射期间被别人改了长度：整文件写回会把它截断成 got 字节，
+         * 那就是丢数据。如实 -EIO，让调用方决定。 */
+        goto out;
+    }
+    n = p_m->len;
+    if(p_m->off >= size)
+    {
+        n = 0u;     /* 整段都在 EOF 之后：写回没有意义，文件也不因此变长 */
+    }
+    else if(n > (size - p_m->off))
+    {
+        n = size - p_m->off;
+    }
+    if(n != 0u)
+    {
+        if(arkrtos_copy_from_user(&s_fm_wb[p_m->off],
+                                  (const void *)(unsigned long)p_m->addr,
+                                  n) != 0)
+        {
+            rc = -LX_EFAULT;
+            goto out;
+        }
+        if(arkrtos_vfs_write_file(p_m->path, s_fm_wb, got) < 0)
+        {
+            goto out;
+        }
+    }
+    rc = 0;
+out:
+    lx_fm_wb_end();
+    return rc;
+}
+
+/* msync(addr, len, flags)：Linux 的 227。只写回本进程记账里的那段可写共享
+ * 映射；堆窗口里的其他地址回 0（私有/匿名映射本来就没有可写回的东西，Linux
+ * 也回 0）；窗口之外才 -ENOMEM。 */
+static int32 lx_msync(void *p_ctx)
+{
+    unsigned long addr  = ARKRTOS_SVC_ARG(p_ctx, 0u);
+    uint32 len   = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    uint32 flags = ARKRTOS_SVC_ARG(p_ctx, 2u);
+    uint32 i;
+
+    if(((addr & 0xFFFu) != 0u) || (len == 0u))
+    {
+        return -LX_EINVAL;
+    }
+    if((flags & ~(LX_MS_ASYNC | LX_MS_INVALIDATE | LX_MS_SYNC)) != 0u)
+    {
+        return -LX_EINVAL;
+    }
+    for(i = 0u; i < (uint32)LX_FILEMAP_MAX; i++)
+    {
+        lx_filemap_t *p_m = &s_fmap[i];
+        int32 rc;
+
+        if(p_m->used == 0u)
+        {
+            continue;
+        }
+        if((addr < (unsigned long)p_m->addr) ||
+           (addr > ((unsigned long)p_m->addr + (unsigned long)p_m->len)))
+        {
+            continue;
+        }
+        if((unsigned long)len >
+           (((unsigned long)p_m->addr + (unsigned long)p_m->len) - addr))
+        {
+            continue;
+        }
+        rc = lx_filemap_sync(p_m);
+        if(rc != 0)
+        {
+            return rc;
+        }
+        s_stat[LX_STAT_FILEMAP]++;
+        return 0;
+    }
+    if((addr >= lx_heap_base()) && (addr < lx_heap_end()))
+    {
+        return 0;       /* 堆窗口内、但没有写回账：没有可写回的东西 */
+    }
+    return -LX_ENOMEM;
+}
+
+/* mmap(fd, offset)：把文件内容装进堆窗口的一段（U-21）。
+ * len / MAP_FIXED / PRIVATE|SHARED 已由 lx_mmap 校验过。 */
+static int32 lx_mmap_file(void *p_ctx, uint32 len, uint32 prot, uint32 flags)
+{
+    unsigned long base  = lx_heap_base();
+    unsigned long limit = lx_heap_end();
+    unsigned long start;
+    unsigned long end;
+    uint32 uoff = ARKRTOS_SVC_ARG(p_ctx, 5u);
+    uint32 size = 0u;
+    uint32 i;
+    uint32 n;
+    uint32 done = 0u;
+    uint8  buf[LX_IO_CHUNK];
+    int32  idx  = lx_fd_find((int32)ARKRTOS_SVC_ARG(p_ctx, 4u));
+    int32  rc   = 0;
+    lx_filemap_t *p_m = 0;
+
+    if(idx < 0)
+    {
+        return -LX_EBADF;
+    }
+    if(s_fd[idx].kind != LX_FD_FILE)
+    {
+        return -LX_EBADF;       /* 管道与标准流不能映射 */
+    }
+    if(((uoff & 0xFFFu) != 0u) || ((prot & LX_PROT_READ) == 0u))
+    {
+        return -LX_EINVAL;
+    }
+    if(((flags & LX_MAP_SHARED) != 0u) && ((prot & LX_PROT_WRITE) != 0u))
+    {
+        /* 可写共享映射：必须 O_RDWR 打开（Linux 用 -EACCES 表达），且文件
+         * 必须装得进写回缓冲（现在就 -ENOMEM，而不是以后只写得回一半）。 */
+        if(s_fd[idx].wr == 0u)
+        {
+            return -LX_EACCES;
+        }
+        if(s_fd[idx].size > (uint32)LX_FILEMAP_WB_MAX)
+        {
+            return -LX_ENOMEM;
+        }
+        for(i = 0u; i < (uint32)LX_FILEMAP_MAX; i++)
+        {
+            if(s_fmap[i].used == 0u)
+            {
+                p_m = &s_fmap[i];
+                break;
+            }
+        }
+        if(p_m == 0)
+        {
+            return -LX_ENOMEM;  /* 写回记账槽用满 */
+        }
+    }
+    size = s_fd[idx].size;
+    if(s_heap_cur == 0u)
+    {
+        s_heap_cur = base;
+    }
+    start = lx_align_up(s_heap_cur);
+    if(start == 0u)
+    {
+        return -LX_ENOMEM;
+    }
+    if((start > limit) || (len > (limit - start)) ||
+       ((start + (unsigned long)len) < start))
+    {
+        return -LX_ENOMEM;
+    }
+    end = lx_align_up(start + len);
+    if((end == 0u) || (end > limit))
+    {
+        return -LX_ENOMEM;
+    }
+    s_heap_cur = end;
+
+    /* 文件内容：EOF 之前按 LX_IO_CHUNK 分块拷进映射区，EOF 之后清零。
+     * 越界读不伪造 SIGBUS（Linux 对超出文件末尾的整页也是零）。 */
+    n = len;
+    if(uoff >= size)
+    {
+        n = 0u;
+    }
+    else if(n > (size - uoff))
+    {
+        n = size - uoff;
+    }
+    while(done < n)
+    {
+        uint32 want = n - done;
+        uint32 got  = 0u;
+
+        if(want > LX_IO_CHUNK)
+        {
+            want = LX_IO_CHUNK;
+        }
+        if(arkrtos_vfs_read_at(s_fd[idx].path, buf, want, uoff + done, &got) < 0)
+        {
+            rc = -LX_EIO;
+            goto fail;
+        }
+        if(got == 0u)
+        {
+            break;
+        }
+        if(arkrtos_copy_to_user((void *)(unsigned long)(start + done),
+                                buf, got) != 0)
+        {
+            rc = -LX_EFAULT;
+            goto fail;
+        }
+        done += got;
+        if(got < want)
+        {
+            break;
+        }
+    }
+    if(done < len)
+    {
+        for(i = 0u; i < (uint32)sizeof(buf); i++)
+        {
+            buf[i] = 0u;
+        }
+        while(done < len)
+        {
+            uint32 want = len - done;
+
+            if(want > LX_IO_CHUNK)
+            {
+                want = LX_IO_CHUNK;
+            }
+            if(arkrtos_copy_to_user((void *)(unsigned long)(start + done),
+                                    buf, want) != 0)
+            {
+                rc = -LX_EFAULT;
+                goto fail;
+            }
+            done += want;
+        }
+    }
+
+    if(p_m != 0)
+    {
+        p_m->used = 1u;
+        p_m->addr = (uint32)start;
+        p_m->len  = len;
+        p_m->off  = uoff;
+        p_m->size = size;
+        lx_copy_str(p_m->path, (uint32)sizeof(p_m->path), s_fd[idx].path);
+    }
+    lx_ret_ptr(p_ctx, start);
+    return LX_RET_PTR_DONE;
+
+fail:
+    /* 堆游标不回滚：这一段可能已经有页装进去了，把它再发给下一个映射就是
+     * 两段映射共用一页（静默错答案）。记账清掉，这段地址就地作废。 */
+    if(p_m != 0)
+    {
+        p_m->used = 0u;
+    }
+    return rc;
+}
+#endif /* ARKRTOS_USE_PAGING_FILEMAP == 1 */
+
 static int32 lx_mmap(void *p_ctx)
 {
     uint32 len   = ARKRTOS_SVC_ARG(p_ctx, 1u);
@@ -1875,19 +2282,31 @@ static int32 lx_mmap(void *p_ctx)
     {
         return -LX_EINVAL;
     }
-    /* 只认匿名映射；MAP_FIXED、文件映射等一律不假装支持。
-     * MAP_PRIVATE 与 MAP_SHARED 必须且只能有一个：两个都给是调用方写错，
-     * 一个都不给是没有语义的请求 —— 两种都如实 -ENOSYS。
+    /* MAP_FIXED 一律不假装支持；MAP_PRIVATE 与 MAP_SHARED 必须且只能有一个：
+     * 两个都给是调用方写错，一个都不给是没有语义的请求。
      * MAP_SHARED 只在 ARKRTOS_USE_PAGING_SHM 档里真做（否则同样 -ENOSYS，
      * 不偷偷降级成私有：降级会让两个进程看起来共享、其实各改各的）。 */
-    if(((flags & LX_MAP_ANONYMOUS) == 0u) ||
-       ((flags & LX_MAP_FIXED) != 0u) ||
+    if(((flags & LX_MAP_FIXED) != 0u) ||
        (((flags & (LX_MAP_PRIVATE | LX_MAP_SHARED)) == 0u)) ||
        (((flags & LX_MAP_PRIVATE) != 0u) &&
         ((flags & LX_MAP_SHARED) != 0u)))
     {
         return -LX_ENOSYS;
     }
+#if (ARKRTOS_USE_PAGING_FILEMAP == 1)
+    /* 没有 MAP_ANONYMOUS 就是文件映射（U-21）。arg2 = prot，arg4 = fd，
+     * arg5 = offset，由这里往下传。 */
+    if((flags & LX_MAP_ANONYMOUS) == 0u)
+    {
+        return lx_mmap_file(p_ctx, len, ARKRTOS_SVC_ARG(p_ctx, 2u), flags);
+    }
+#else
+    /* 只认匿名映射；文件映射一律不假装支持。 */
+    if((flags & LX_MAP_ANONYMOUS) == 0u)
+    {
+        return -LX_ENOSYS;
+    }
+#endif
 #if (ARKRTOS_USE_PAGING_SHM != 1)
     if((flags & LX_MAP_SHARED) != 0u)
     {
@@ -1964,6 +2383,41 @@ static int32 lx_munmap(void *p_ctx)
     {
         return -LX_EINVAL;
     }
+
+#if (ARKRTOS_USE_PAGING_FILEMAP == 1)
+    /* U-21：munmap 是写回的一个时机。命中记账就先写回；写回失败时**不**忘掉
+     * 记账（munmap 是最后一次写回机会之一，吞掉错误就等于丢数据），把错误
+     * 交回去让调用方重试。 */
+    {
+        uint32 i;
+        uint32 len = ARKRTOS_SVC_ARG(p_ctx, 1u);
+
+        if(((addr & 0xFFFu) != 0u) || (len == 0u))
+        {
+            return -LX_EINVAL;
+        }
+        for(i = 0u; i < (uint32)LX_FILEMAP_MAX; i++)
+        {
+            int32 rc;
+
+            if(s_fmap[i].used == 0u)
+            {
+                continue;
+            }
+            if((unsigned long)s_fmap[i].addr != addr)
+            {
+                continue;
+            }
+            rc = lx_filemap_sync(&s_fmap[i]);
+            if(rc != 0)
+            {
+                return rc;
+            }
+            s_fmap[i].used = 0u;
+            break;
+        }
+    }
+#endif
 
     /* 窗口是整块静态映射，没有页级取消映射这件事。这里只记账成功，
      * 绝不把地址还给分配器——否则下一次 mmap 会在程序还认为有效的地址
@@ -2725,6 +3179,11 @@ static int32 lx_dispatch(void *p_svc_ctx, uint32 num, int32 *p_rc)
     case LX_SYS_MUNMAP:
         rc = lx_munmap(p_svc_ctx);
         break;
+    #if (ARKRTOS_USE_PAGING_FILEMAP == 1)
+    case LX_SYS_MSYNC:
+        rc = lx_msync(p_svc_ctx);
+        break;
+    #endif
     #if (ARKRTOS_USE_LINUX_FUTEX == 1)
     case LX_SYS_FUTEX:
         rc = lx_futex(p_svc_ctx);
@@ -2906,6 +3365,24 @@ void arkrtos_linux_abi_on_task_exit(int32 task_id)
     {
         return;
     }
+#if (ARKRTOS_USE_PAGING_FILEMAP == 1)
+    /* U-21：退出是写回的一个时机（Linux 在 close/exit 时把脏页写回）。这一步
+     * 必须在下面的临界区之前做完 —— 写回要调 VFS，不能在关中断里干，也不能
+     * 拿着 fd 表的锁去等存储。写回失败只能记在日志外的读数里：进程已经在
+     * 退出，没有返回值可以交（这条代价写在开关文档里）。 */
+    {
+        int32 fslot = lx_proc_find(task_id);
+        uint32 f;
+
+        if(fslot >= 0)
+        {
+            for(f = 0u; f < (uint32)LX_FILEMAP_MAX; f++)
+            {
+                (void)lx_filemap_sync(&s_proc[(uint32)fslot].fmap[f]);
+            }
+        }
+    }
+#endif
 #if (ARKRTOS_USE_LINUX_FUTEX == 1)
     lx_futex_forget(task_id);
 #endif
@@ -2971,6 +3448,17 @@ void arkrtos_linux_abi_on_task_exit(int32 task_id)
 #if (ARKRTOS_USE_LINUX_FUTEX == 1)
     lx_futex_forget(task_id);
 #endif
+#if (ARKRTOS_USE_PAGING_FILEMAP == 1)
+    /* 关 fork 档只有槽 0：退出即写回，与开档那条路同一口径。 */
+    {
+        uint32 f;
+
+        for(f = 0u; f < (uint32)LX_FILEMAP_MAX; f++)
+        {
+            (void)lx_filemap_sync(&s_proc[0].fmap[f]);
+        }
+    }
+#endif
 }
 #endif /* ARKRTOS_USE_LINUX_FORK == 1 */
 
@@ -3035,6 +3523,12 @@ void arkrtos_linux_abi_reset(void)
     s_sig_stop_ignored = 0u;
 
     s_heap_cur = 0u;
+
+#if (ARKRTOS_USE_PAGING_FILEMAP == 1)
+    /* 写回缓冲的忙标志：换程序时归零。上一个程序的写回若是被强杀的，标志
+     * 会留在 1，下一个程序的所有写回都会莫名其妙 -EBUSY。 */
+    s_fm_wb_busy = 0u;
+#endif
 
 #if (ARKRTOS_USE_LINUX_FORK == 1)
     /* 子进程记账：换程序时一并清掉（装载器的语义仍是「起一个新程序」，

@@ -33,7 +33,7 @@
   C. 开档编得过：LA64 真板级 + `-DARKRTOS_USE_LINUX_FORK=1
      -DARKRTOS_USE_PAGING_DEMAND=1`，五个内核 TU 与夹具本身全编得过；
      再加一档 `-DARKRTOS_USE_PAGING_COW=1` 同样要全编得过。
-  D. QEMU 真读数（四档各跑一遍）：默认 fork 档 `[fork]` 的 21 条 check、
+  D. QEMU 真读数（五档各跑一遍）：默认 fork 档 `[fork]` 的 21 条 check、
      fork+COW 档 26 条、fork+COW+SHM 档 34 条、fork+COW+SHM+futex 档 43 条
      check 全 ` ok`（一条 FAIL 都不许）、
      `PASS: child ran in its own space, exit 42 reaped`、`exit code 0`；
@@ -56,6 +56,11 @@
      reap。这九条里最要紧的是「父 WAIT 回 0」：它在 LA64 上暴露过一个只有上板
      才看得见的坑 —— 阻塞返回时 a0（返回值寄存器）被写成 0，而 a0 同时是
      futex 的第一个参数，重放的那一次读到的 uaddr 就是 0。
+     FILEMAP 档另加：八条文件映射读数逐条出现 —— 首字节是文件首字节、坏 fd
+     回 -EBADF、只读 fd 上的可写共享回 -EACCES、offset=4096 读出的是文件
+     第二页、EOF 之后是零、可写共享的 msync 回 0、私有映射的 msync 也回 0 但
+     不落盘、以及重新映射读回时「共享写生效 + 私有写未生效」的位掩码 31。
+     最要紧的是最后一条：只判「共享写生效」的话，把整段直接写回文件也能过。
      SHM 档另加：至少一条 `[LA64U] pg shm map va=<hex> pairs=<n>` 且 pairs>=1
      （共享页必须在 mmap 时刻就有实体；拖到 fork 才让父子各自缺页拿各自的帧，
      共享就退化成两次私有分配 —— 那种实现父子都不报错，只是各改各的），
@@ -72,8 +77,9 @@
 
 不覆盖：vfork / CLONE_VM 线程（无共享地址空间，一律 -EINVAL）、CLONE_FILES
 （每进程 fd 表是 fork 语义的一部分，共享 fd 表这种形态本门禁不为它背书）、
-文件映射 / MAP_FIXED / mprotect 强制（匿名 MAP_SHARED 共享页已由第三档覆盖；
-本档的 SHM 只管「经 fork 继承的匿名共享对」，没有 shm_open、没有文件后端）。
+MAP_FIXED / mprotect 强制。文件映射已由第五档覆盖，但**不是** Linux 的页缓存
+语义：每个进程各拿各的帧，写回（msync / munmap / 退出）之后才经文件路径互相
+可见；没有 shm_open、没有超过 8 KB 的文件（写回要整文件进内核缓冲）。
 
 用法
 ----
@@ -109,6 +115,10 @@ SHM_FLAGS = COW_FLAGS + ["-DARKRTOS_USE_PAGING_SHM=1"]
 # FUTEX 档 = SHM 档 + futex WAIT/WAKE。叠在 SHM 档上而不是独立档：futex 的键
 # 是「物理帧 + 页内偏移」，没有共享页就没有跨进程的同一个字可等。
 FUTEX_FLAGS = SHM_FLAGS + ["-DARKRTOS_USE_LINUX_FUTEX=1"]
+# FILEMAP 档 = FUTEX 档 + 文件映射与写回（U-21）。叠在分页链上而不是独立档：
+# 映射的内容要靠按需缺页拿帧装进去，没有 DEMAND 就没有帧。夹具多 20 条 check
+# （其中 SHM 段的一条反假绿在开档时换成 -EBADF，见夹具里那段注释）。
+FILEMAP_FLAGS = FUTEX_FLAGS + ["-DARKRTOS_USE_PAGING_FILEMAP=1"]
 
 LA64_FALLBACKS = [
     "D:/LoongIDE/la64-tool/bin/loongarch64-newlib-elf-gcc.exe",
@@ -160,6 +170,12 @@ EXPECT_SHM_CHECKS = 34
 # 未知 op==-ENOSYS、clone>0、被叫醒的 WAIT==0、父看到新值、子被 reap、
 # 唤醒者位掩码 3（看到 1 且 WAKE 回 1）。合计 43 条。
 EXPECT_FUTEX_CHECKS = 43
+# FILEMAP 段多 20 条：只读私有映射的内容三处读数（首字节 / 第 25 / 第 4095）、
+# 三条参数校验（未对齐 offset -EINVAL、坏 fd -EBADF、只读 fd 上的可写共享
+# -EACCES）、offset=4096 的映射与 EOF 补零、O_RDWR 打开、可写共享映射与
+# msync/munmap 两次写回、私有可写映射与它不落盘、以及最后把「共享写落盘 +
+# 私有写不落盘」合成一个位掩码读数（20 % 26 那对字节）。合计 63 条。
+EXPECT_FILEMAP_CHECKS = 63
 
 FAILS = []
 PASSES = []
@@ -354,6 +370,46 @@ def check_default_off():
         bad("features-guard-futex", "features.h 缺 futex 对 LINUX_ABI 的 #error")
     else:
         ok("features-guard-futex", "features.h 的 futex 依赖 #error 在")
+
+    m = re.search(r"^#define\s+ARKRTOS_USE_PAGING_FILEMAP\s+(\d+)\s*$", ac, re.M)
+    if not m:
+        bad("default-off-filemap", "arkrtos_autoconf.h 里没有 ARKRTOS_USE_PAGING_FILEMAP")
+    elif m.group(1) != "0":
+        bad("default-off-filemap", "默认档 ARKRTOS_USE_PAGING_FILEMAP=%s（必须是 0）"
+            % m.group(1))
+    else:
+        ok("default-off-filemap", "arkrtos_autoconf.h: ARKRTOS_USE_PAGING_FILEMAP 0")
+
+    i = kc.find("config ARKRTOS_USE_PAGING_FILEMAP")
+    if i < 0:
+        bad("kconfig-wired-filemap",
+            "Kconfig.features 里没有 config ARKRTOS_USE_PAGING_FILEMAP")
+    else:
+        tail = kc[i + len("config ARKRTOS_USE_PAGING_FILEMAP"):]
+        m_end = re.search(r"^(config|menuconfig)\s", tail, re.M)
+        blk = tail[:m_end.start()] if m_end else tail
+        needs = ["ARKRTOS_USE_LINUX_ABI", "ARKRTOS_USE_PAGING",
+                 "ARKRTOS_USE_PAGING_PAGES", "ARKRTOS_USE_PAGING_DEMAND"]
+        miss = [n for n in needs if n not in blk]
+        if miss:
+            bad("kconfig-wired-filemap",
+                "Kconfig 的 filemap 项 depends 里缺 %s" % "、".join(miss))
+        else:
+            ok("kconfig-wired-filemap",
+               "Kconfig 项存在，四条依赖（ABI / PAGING / PAGES / DEMAND）都在")
+
+    guards = [
+        "ARKRTOS_USE_PAGING_FILEMAP=1 requires ARKRTOS_USE_LINUX_ABI=1",
+        "ARKRTOS_USE_PAGING_FILEMAP=1 requires ARKRTOS_USE_PAGING=1",
+        "ARKRTOS_USE_PAGING_FILEMAP=1 requires ARKRTOS_USE_PAGING_PAGES=1",
+        "ARKRTOS_USE_PAGING_FILEMAP=1 requires ARKRTOS_USE_PAGING_DEMAND=1",
+    ]
+    miss = [g for g in guards if g not in fh]
+    if miss:
+        bad("features-guard-filemap",
+            "features.h 缺 %d 条 filemap #error（第一缺：%s）" % (len(miss), miss[0]))
+    else:
+        ok("features-guard-filemap", "features.h 四条 filemap #error 都在")
 
     bc = read_text(os.path.join(ROOT, "board/qemu_loongarch64/arkrtos_board_config.h"))
     if re.search(r"^#define\s+ARKRTOS_USE_LINUX_FORK\s+1\s*$", bc, re.M):
@@ -552,7 +608,7 @@ def run_qemu(qemu, seconds):
 
 
 def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
-          futex=False):
+          futex=False, filemap=False):
     lines = text.replace("\r\n", "\n").splitlines()
 
     def count(pred):
@@ -594,8 +650,14 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
         req["parent cow write kept -> 48879 ok"] = \
             "父进程自己的写没落到自己那份页"
     if shm:
-        req["mmap(shared without anon) == -ENOSYS -> -38 ok"] = \
-            "没带 MAP_ANONYMOUS 的 MAP_SHARED 居然被接受"
+        if filemap:
+            # 开了文件映射档之后「没带 MAP_ANONYMOUS」是文件映射请求，
+            # fd=-1 必须回 -EBADF（而不是被当成匿名映射放过）。
+            req["mmap(shared without anon) == -EBADF -> -9 ok"] = \
+                "文件映射档下没带 MAP_ANONYMOUS 的请求没按文件映射处理（fd=-1 应回 -EBADF）"
+        else:
+            req["mmap(shared without anon) == -ENOSYS -> -38 ok"] = \
+                "没带 MAP_ANONYMOUS 的 MAP_SHARED 居然被接受"
         req["mmap(private|shared) == -ENOSYS -> -38 ok"] = \
             "PRIVATE|SHARED 同时给居然被接受"
         req["mmap(MAP_SHARED|ANON) > 0 -> 1 ok"] = "匿名共享映射失败"
@@ -623,6 +685,22 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
         req["futex child reaped -> 12 ok"] = "futex 子进程没被 reap"
         req["futex waker saw 1 and woke 1 (bits=3) -> 3 ok"] = \
             "唤醒者看到的值不是父进程等的那个 1，或 WAKE 没真叫醒 1 个等待者"
+    if filemap:
+        req["filemap first byte is file first byte -> 65 ok"] = \
+            "文件内容没装进映射区（首字节不是 'A'）"
+        req["filemap bad fd == -EBADF -> -9 ok"] = \
+            "坏 fd 被当成了有效映射"
+        req["filemap writable shared on read-only fd == -EACCES -> -13 ok"] = \
+            "只读 fd 上的可写共享映射居然被接受（Linux 回 -EACCES）"
+        req["filemap offset content starts at 4096 -> 79 ok"] = \
+            "offset 没生效（映射区里还是文件首页的内容）"
+        req["filemap past EOF reads zero -> 0 ok"] = \
+            "EOF 之后不是零（把内存里的垃圾当成了文件内容）"
+        req["filemap msync rc -> 0 ok"] = "msync 写回没成功"
+        req["filemap private msync rc (no writeback) -> 0 ok"] = \
+            "私有映射的 msync 没回 0"
+        req["filemap shared write persisted, private write not (bits=31) -> 31 ok"] = \
+            "写回要么没落盘（共享写丢了）、要么把私有映射的改动也写回去了（两边都不算对）"
     for line, why in req.items():
         if count(lambda s2, t=line: s2.strip() == "[fork] " + t) != 1:
             problems.append("缺 `[fork] %s` —— %s" % (line, why))
@@ -689,7 +767,7 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
                   % (expect_checks, m_par.group(1), m_chi.group(1))]
 
 
-def self_check(good_text, cow=False, shm=False, futex=False):
+def self_check(good_text, cow=False, shm=False, futex=False, filemap=False):
     """把好日志的九种坏法喂回判据，每一种都必须判红，否则解析器是空转。"""
     g = good_text.replace("\r\n", "\n")
     mutations = {
@@ -761,16 +839,31 @@ def self_check(good_text, cow=False, shm=False, futex=False):
                 "[fork] futex(WAKE) with no waiter == 0 -> 0 ok",
                 "[fork] futex(WAKE) with no waiter == 0 -> 1 FAIL (want 0)"),
         })
+    if filemap:
+        mutations.update({
+            "filemap 共享写没落盘": lambda s: s.replace(
+                "[fork] filemap shared write persisted, private write not (bits=31) -> 31 ok",
+                "[fork] filemap shared write persisted, private write not (bits=31) -> 23 FAIL (want 31)"),
+            "filemap 私有写也落盘": lambda s: s.replace(
+                "[fork] filemap private msync rc (no writeback) -> 0 ok",
+                "[fork] filemap private msync rc (no writeback) -> -5 FAIL (want 0)"),
+            "filemap offset 没生效": lambda s: s.replace(
+                "[fork] filemap offset content starts at 4096 -> 79 ok",
+                "[fork] filemap offset content starts at 4096 -> 65 FAIL (want 79)"),
+            "缺 filemap msync 读数": lambda s: s.replace(
+                "[fork] filemap msync rc -> 0 ok\n", ""),
+        })
     missed = []
-    nchk = (EXPECT_FUTEX_CHECKS if futex else
+    nchk = (EXPECT_FILEMAP_CHECKS if filemap else
+            (EXPECT_FUTEX_CHECKS if futex else
             (EXPECT_SHM_CHECKS if shm else
-             (EXPECT_COW_CHECKS if cow else EXPECT_FORK_CHECKS)))
+             (EXPECT_COW_CHECKS if cow else EXPECT_FORK_CHECKS))))
     for name, fn in mutations.items():
         mutated = fn(g)
         if mutated == g:
             missed.append("%s（坏样本没改到东西）" % name)
             continue
-        passed, _ = judge(mutated, nchk, cow, shm, futex)
+        passed, _ = judge(mutated, nchk, cow, shm, futex, filemap)
         if passed:
             missed.append(name)
     return missed
@@ -818,6 +911,11 @@ def main(argv):
                                          "-DARKRTOS_USE_PAGING_SHM=1",
                                          "-DARKRTOS_USE_LINUX_FUTEX=1"],
                          "fork+cow+shm+futex")
+        check_compile_on(la64, key_dir, ["-DARKRTOS_USE_PAGING_COW=1",
+                                         "-DARKRTOS_USE_PAGING_SHM=1",
+                                         "-DARKRTOS_USE_LINUX_FUTEX=1",
+                                         "-DARKRTOS_USE_PAGING_FILEMAP=1"],
+                         "fork+cow+shm+futex+filemap")
 
     if qemu:
         # 四档各跑一遍：默认 fork（21 条）、fork+COW（26 条 + 内核 COW 日志）、
@@ -832,6 +930,8 @@ def main(argv):
             (COW_FLAGS, EXPECT_COW_CHECKS, True, False, "fork+cow"),
             (SHM_FLAGS, EXPECT_SHM_CHECKS, True, True, "fork+cow+shm"),
             (FUTEX_FLAGS, EXPECT_FUTEX_CHECKS, True, True, "fork+cow+shm+futex"),
+            (FILEMAP_FLAGS, EXPECT_FILEMAP_CHECKS, True, True,
+             "fork+cow+shm+futex+filemap"),
         ]
         if a.no_build:
             rounds = rounds[-1:]
@@ -862,11 +962,12 @@ def main(argv):
             except OSError:
                 dump = ""
 
-            futex = (tag == "fork+cow+shm+futex")
-            passed, notes = judge(text, nchk, cow, shm, futex)
+            futex = "-DARKRTOS_USE_LINUX_FUTEX=1" in flags
+            filemap = "-DARKRTOS_USE_PAGING_FILEMAP=1" in flags
+            passed, notes = judge(text, nchk, cow, shm, futex, filemap)
             if passed:
                 ok("qemu-readout", "[%s] %s" % (tag, notes[0]))
-                missed = self_check(text, cow, shm, futex)
+                missed = self_check(text, cow, shm, futex, filemap)
                 if missed:
                     bad("parser-selfcheck",
                         "[%s] 这些坏样本没被判红：%s" % (tag, "、".join(missed)))

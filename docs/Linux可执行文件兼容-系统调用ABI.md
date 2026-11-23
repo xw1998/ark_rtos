@@ -37,7 +37,7 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 
 **「静态程序能跑」≠「支持 Linux」。** 第 3 节列的是明确不支持项，一条不含糊。
 
-## 1 支持的系统调用（28 个；26 个有实跑读数，2 个只有号表与参数校验）
+## 1 支持的系统调用（29 个；27 个有实跑读数，2 个只有号表与参数校验）
 
 编号取 `asm-generic`（LoongArch / RISC-V / ARM64 共用这一套）：
 
@@ -71,6 +71,7 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 | 222 | `mmap` | 只认匿名映射：`MAP_PRIVATE|MAP_ANONYMOUS` 或 `MAP_SHARED|MAP_ANONYMOUS`（后者要 `ARKRTOS_USE_PAGING_SHM`，§8.3）；拒 `MAP_FIXED` 与同时给 `PRIVATE|SHARED` | `mmap>0 -> 1 ok` / `mmap write/read -> 1 ok` |
 | 260 | `wait4` | 只认 `options 0/WNOHANG`；**无 `WNOHANG` 时真阻塞**（可重启系统调用，§8.1），不编造状态，reap 后记账清零（§8） | `wait4 returned child pid -> 12 ok` / `WEXITSTATUS == 42 -> 42 ok` / `wait4(child) again == -ECHILD -> -10 ok` / `blocking wait4 blocked >= 40 ms -> 1 ok` |
 | 226 | `mprotect` | 只校验页对齐与窗口范围、返 0 并单独计数；**保护不生效**（整窗一块 PS=20 的 RWX 映射） | 无夹具读数（§1.1） |
+| 227 | `msync` | 只写回本进程记账里的「可写共享文件映射」；窗口内未命中回 0、窗口外 `-ENOMEM`（`ARKRTOS_USE_PAGING_FILEMAP`，§8.5） | `filemap msync rc -> 0 ok` / `filemap private msync rc (no writeback) -> 0 ok` / `filemap shared write persisted, private write not (bits=31) -> 31 ok` |
 
 未知号一律 `-ENOSYS`（38），并计数；**不猜**。
 
@@ -81,7 +82,7 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 （对齐、窗口范围）与一条明确的降级说明——它返 0 但**不改任何页权限**，单独计数
 就是为了让「接受」与「强制」在读数时能分开，不冒充有页级保护。
 
-表格里其余 26 个号都有 `[linux]` / `[pipe]` / `[sig]` / `[fork]` 夹具的串口读数。
+表格里其余 27 个号都有 `[linux]` / `[pipe]` / `[sig]` / `[fork]` 夹具的串口读数。
 
 ## 2 两个 ABI 怎么分界
 
@@ -595,10 +596,62 @@ COW 只管「fork 之后各写各的」这一半；要让父子看见彼此的�
 `out_line5`）。Linux 上的 `printf` 行缓冲做的是同一件事；RT-Thread 的 `rt_kprintf` 之所以
 看起来没这个问题，是因为它整行在关中断下拼好再一次输出。判据侧不再为「谁先调度到」留余地。
 
-宿主侧口径：`linuxabi` / `linuxabioff` / `linuxabifutex` 三档并集行覆盖率 **98.31%（870/885）**，
-futex 档 **268 checks**、`LINUX-ABI HOST OK`；`ARKRTOS_USE_PAGING_SHM=1` 的共享分支**不在宿主账内**
-（宿主用例从未在 `LINUX_FORK=1` 下编过），那一半的口径只有上板 34 条 SHM 读数与 9 条 futex 读数。
-剩余 15 行未覆盖经逐行核对全是死/防御分支（列表见覆盖率门禁的说明），不是「没测」。
+宿主侧口径：`linuxabi` / `linuxabioff` / `linuxabifutex` / `linuxabifilemap` 四档并集行覆盖率
+**97.96%（1055/1077）**（基线钉的是 97.20%，本轮新增 §8.5 之后分母涨了、读数没降），
+`linuxabi` 档 **270 checks**、futex 档 **312 checks**、filemap 档 **337 checks**，都打印
+`LINUX-ABI HOST OK`；`ARKRTOS_USE_PAGING_SHM=1` 的共享分支**不在宿主账内**
+（宿主用例从未在 `LINUX_FORK=1` 下编过），那一半的口径只有上板 34 条 SHM 读数、9 条 futex
+读数与 20 条 filemap 读数。剩余 22 行未覆盖经逐行核对全是死/防御分支（两处 `-EBUSY`
+重入、`-ENOMEM` 的溢出与对齐变体、`-E2BIG`、嵌入式弱符号兜底等；列表见覆盖率门禁的
+说明与本周的 `covmiss` 记录），不是「没测」。
+
+### 8.5 文件映射与写回（`ARKRTOS_USE_PAGING_FILEMAP`，2026-11-23，QEMU LA64 实跑）
+
+`clone` 造出了第二条执行流、`MAP_SHARED` 让两条流看见同一块内存，但**「把文件当内存用」**还缺一块：
+没有它，`ld.so` 装依赖库只能整文件读进匿名内存、改了文件内容没有回去的通路、`msync` 无从谈起。
+打开 `ARKRTOS_USE_PAGING_FILEMAP`（`depends on ARKRTOS_USE_LINUX_ABI` + `PAGING` +
+`PAGING_PAGES` + `PAGING_DEMAND`）后，222 号 `mmap` 在没有 `MAP_ANONYMOUS` 时走文件映射，
+并新增 227 号 `msync`。
+
+| 项 | 现状 |
+|---|---|
+| 认哪几种 | 没有 `MAP_ANONYMOUS` 就是文件映射；`MAP_FIXED` 仍 `-ENOSYS`，`MAP_PRIVATE` / `MAP_SHARED` 必须且只能给一个；`prot` 必须含 `PROT_READ`，`offset` 必须 4 KB 对齐 |
+| 装内容 | `mmap` 当场把文件内容按 128 字节分块读进堆窗口（`arkrtos_vfs_read_at` + `arkrtos_copy_to_user`）；`offset` 生效，**EOF 之后清零**（不伪造 SIGBUS）。映射建立之后文件再变，**映射看不见**——这不是按需回读文件页，是一次性装快照 |
+| 地址 | 与匿名 `mmap` 共用同一套堆游标；失败**不回收**游标（回收会让两段映射共用一页，那是静默错答案），这一段地址就地作废 |
+| 写回认哪几种 | 只有「`MAP_SHARED` + `PROT_WRITE` + `O_RDWR` 打开」的映射记账，每进程 **2 条**（`LX_FILEMAP_MAX`）；私有映射的改动不落盘 |
+| 写回时机 | `msync`（227）、`munmap`、任务退出（`on_task_exit` 开头、临界区之前——写回要调 VFS，不能在关中断里做） |
+| 写回方式 | VFS 没有 `write_at` ⇒ 「读整个文件 → 覆盖映射段 → 整文件写回」。文件在映射期间**长度变了** ⇒ `-EIO`（绝不把别人写长的文件截断成读到的长度）；映射段整段落在 EOF 之后 ⇒ 空操作（文件不因此变长） |
+| 缓冲 | 内核单份 8 KB 写回缓冲 + 临界区忙标志：第二笔并发写回如实 `-EBUSY`，不让两份数据在同一个缓冲里互相覆盖（那会写回一个查不出来的错文件） |
+| 上限 | 文件 > 8 KB 时「可写共享映射」当场 `-ENOMEM`（早报，而不是以后只写得回一半）；私有映射不受这条限，但要的 `len` 仍受堆窗口限 |
+| `msync` | 地址须 4 KB 对齐、`len` 非 0、flags 只认 `MS_ASYNC` / `MS_INVALIDATE` / `MS_SYNC`；命中记账就写回并计数；窗口内未命中回 0（私有/匿名本来没有可写回的东西，Linux 同）；窗口外 `-ENOMEM` |
+| 普通文件 `write` | 仍 `-ENOSYS`：写内容只走映射写回这一条路，不假装写进去了 |
+| `mprotect` | 不受影响：仍是只校验不生效（§1），PROT_EXEC 无法硬件强制（LA64 这条通路没有 NR/NX 位） |
+
+读数（`tools/fork_gate.py` 的第五档 fork+COW+SHM+futex+filemap，**63 条 check**，其中 filemap 段 20 条）：
+
+| 读数 | 钉住什么 |
+|---|---|
+| `filemap open read-only fd > 2 -> 1` | 文件真在 ramfs 里、真能按命名空间路径打开 |
+| `filemap private map > 0` / `first byte is file first byte` / `byte 25 is Z` | 内容真的按文件装进去了，不是一块零页 |
+| `filemap last byte of the page -> 'N'` | 5000 字节文件在 4 KB 页尾仍是文件内容（不是提前清零） |
+| `filemap misaligned offset == -EINVAL -> -22` | `offset` 4 KB 对齐是硬校验 |
+| `filemap bad fd == -EBADF -> -9` | 坏 fd 不落到匿名路径上去 |
+| `filemap writable shared on read-only fd == -EACCES -> -13` | 可写共享映射要求 `O_RDWR`（Linux 语义） |
+| `filemap offset=4096 map > 0` / `offset content starts at 4096 -> 'O'` | `offset` 真的生效，不是被忽略 |
+| `filemap past EOF reads zero -> 0` | EOF 之后读零（不伪造 SIGBUS） |
+| `filemap O_RDWR open on existing file > 0` | FILEMAP 档放开的那一个例外真能用 |
+| `filemap writable shared map > 0` / `msync rc -> 0` / `munmap rc -> 0` | 可写共享映射建得起来、两个写回时机都回 0 |
+| `filemap private writable map > 0` / `private msync rc (no writeback) -> 0` | 私有映射的 `msync` 回 0 且**不**落盘 |
+| `filemap remap after writeback > 0` | 写回之后重新映射能读回同一批字节 |
+| `filemap shared write persisted, private write not (bits=31) -> 31` | 五个证据位同时成立：共享映射的写进了文件、私有映射的写没进文件 |
+
+**只有上板才看得见的坑：SVC 取参上限是 4。** 第一版在 QEMU 上 7 条 FAIL、全部文件映射都回 `-9`：
+`ARKRTOS_ARCH_SVC_ARG_MAX = 4`，端口的 `arkrtos_port_svc_get_arg()` 在 `idx >= 4` 时直接返 0，
+于是 `mmap` 的 `fd`（`a4`）与 `offset`（`a5`）**恒为 0** ⇒ `lx_fd_find(0)` 失败 ⇒ `-EBADF`。
+宿主用例全过，因为宿主那份 `svc_get_arg` 桩允许取到 6 参——**这种缺陷只有上板才看得见**。
+修法是 LA64 与 RV32 的端口在 `ARKRTOS_USE_LINUX_ABI == 1` 时把取参上界放宽到 6：trap 帧里
+`$a0..$a7` 本来就在（`LA_FR_A0 + 0..7`），不改帧布局；原生 SVC 一侧仍只用 0..3，两侧互不影响。
+RV32 一并放宽，是为了不留下同一个「读成 0」的坑。
 
 ## 9 开关与零体积
 
@@ -625,6 +678,11 @@ futex 档 **268 checks**、`LINUX-ABI HOST OK`；`ARKRTOS_USE_PAGING_SHM=1` 的�
   `features.h` 用 `#error` 顶住这条依赖；关档时不编译等待槽、键解析与 `lx_futex`，98 号落回
   `-ENOSYS`；开档实测是 fork+COW+SHM+futex 档的 43 条读数（其中 futex 9 条）与宿主 futex 档的
   268 checks。
+- `ARKRTOS_USE_PAGING_FILEMAP`（§8.5），默认 **0**，`depends on ARKRTOS_USE_LINUX_ABI` +
+  `ARKRTOS_USE_PAGING` + `ARKRTOS_USE_PAGING_PAGES` + `ARKRTOS_USE_PAGING_DEMAND`（内容靠按需缺页
+  拿帧，没有 DEMAND 就装不进映射区），`features.h` 用四条 `#error` 顶住；关档时文件映射分支、
+  写回记账与 `msync` 全不编译，`mmap(fd)` 回 `-ENOSYS`；开档实测是第五档的 63 条读数（其中
+  filemap 20 条）与宿主 filemap 档的 337 checks。
 - `arkrtos_autoconf.h` 由 `tools/kconfig/genconfig.py` 从 `config/arkrtos_defconfig`
   生成，新增 Kconfig 项后必须重跑一次，否则默认档读数里看不到这个开关。
 
@@ -647,14 +705,14 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py --no-build
 | `off-zero-symbols` | 关档 `.o` 符号表**全空**（不是「没测」） |
 | `port-wiring` | 关档无 `arkrtos_port_linux_syscall_num` / 开档有（两向） |
 | `compile-on` | LA64 真板级下 8 个 TU 全编过（含四个用户程序本身） |
-| `syscall-table` | 28 个号与 `asm-generic` 逐条相等 |
+| `syscall-table` | 29 个号与 `asm-generic` 逐条相等 |
 | `abi-split-la64` | 立即数 == 0 是 Linux、!= 0 是 Ark |
 | `abi-split-rv32` | `0x10..0x22` 归 Ark，Linux 最小号 56 不撞 |
 | `build` | `make -f example/qemu_loongarch64/Makefile` 通过 |
 | `qemu-readout` | Linux 块 14 条 check 全 ok + PASS 行 + `exit code 7`；管道块 14 条 + `exit code 55`；信号块 31 条 + PASS 行 + `exit code 138`；旁路演示未受影响 |
 | `parser-selfcheck` | 把 8 种坏日志喂回判据，必须全判红 |
 
-fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**29 项**；fork / fork+COW / fork+COW+SHM / fork+COW+SHM+futex **四档各跑一遍**，所以 build / qemu-readout / parser-selfcheck 各出现四次）：
+fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**36 项**；fork / fork+COW / fork+COW+SHM / fork+COW+SHM+futex / fork+COW+SHM+futex+filemap **五档各跑一遍**，所以 build / qemu-readout / parser-selfcheck 各出现五次）：
 
 | 项 | 钉住什么 |
 |---|---|
@@ -668,9 +726,11 @@ fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**2
 | `qemu-readout`（COW 档） | fork+COW：`[fork]` **26 条** check 全 `ok`；内核日志 `shared>=1 / stack>=1 / copied=0`、至少一条 `pg cow copy ... ref=2`、无 `ref=1` 的 copy 行；两条 COW 读数（子看到 fork 前的值、父的写只落自己那份）逐条校验 |
 | `qemu-readout`（SHM 档） | fork+COW+SHM：`[fork]` **34 条** check 全 `ok`；六条 SHM 读数逐条校验（两条非法形态回 `-38`、映射成功、起始清零、父看到子写、子看到父 fork 之后的写）；内核日志另加至少一条 `pg shm map va=0x<n> pairs>=1` |
 | `qemu-readout`（futex 档） | fork+COW+SHM+futex：`[fork]` **43 条** check 全 `ok`；九条 futex 读数逐条校验（共享页映射成功、无等待者 WAKE 回 0、值不等 WAIT 回 `-11`、不认识的 op 回 `-38`、唤醒者克隆成功、WAIT 被叫醒回 0、父看到唤醒者写的 2、唤醒者被 reap、`bits=3` 两条证据位同时置位）；SHM 与 COW 的全部判据同时仍在 |
-| `parser-selfcheck` | 9 种坏日志必须判红（COW 档另加 4 种：位掩码丢一位、父写丢失、整类删光 copy 行、fork 时搬了字节；SHM 档再加 5 种：删光 `pg shm map` 行、共享写没被父看到、子看不到父的写、共享页起始非 0、缺映射成功读数；futex 档再加 3 种：WAIT 没被叫醒、唤醒者只看到一半（`bits=1`）、无等待者 WAKE 回 1） |
+| `qemu-readout`（filemap 档） | fork+COW+SHM+futex+filemap：`[fork]` **63 条** check 全 `ok`；filemap 段 20 条读数逐条校验（私有只读内容三读数、页尾仍是文件内容、offset 非对齐回 `-22`、坏 fd 回 `-9`、只读 fd 上可写共享映射回 `-13`、offset=4096 生效且 EOF 后读零、O_RDWR 打开成功、可写共享映射 + `msync` + `munmap`、私有映射 `msync` 不落盘、重映射读回、`bits=31` 的五位证据）；SHM / COW / futex 的全部判据同时仍在 |
+| `parser-selfcheck` | 9 种坏日志必须判红（COW 档另加 4 种：位掩码丢一位、父写丢失、整类删光 copy 行、fork 时搬了字节；SHM 档再加 5 种：删光 `pg shm map` 行、共享写没被父看到、子看不到父的写、共享页起始非 0、缺映射成功读数；futex 档再加 3 种：WAIT 没被叫醒、唤醒者只看到一半（`bits=1`）、无等待者 WAKE 回 1；filemap 档再加 3 种：写回没发生、写回把文件截短、私有映射的改动被落盘） |
 | `default-off-shm` / `kconfig-wired-shm` / `features-guard-shm` | SHM 开关的三件套：autoconf 为 0、Kconfig 有 `depends on ARKRTOS_USE_PAGING_COW`、features.h 有对应 `#error`；`off-zero-port` 另核关档没有 `arkrtos_port_paging_map_shared` |
 | `default-off-futex` / `kconfig-wired-futex` / `features-guard-futex` | futex 开关的三件套：autoconf 为 0、Kconfig 有 `depends on ARKRTOS_USE_LINUX_ABI`、features.h 有对应 `#error` |
+| `default-off-filemap` / `kconfig-wired-filemap` / `features-guard-filemap` | 文件映射开关的三件套：autoconf 为 0、Kconfig 四条 `depends on`（ABI / PAGING / PAGES / DEMAND）、features.h 四条 `#error` |
 | `restore-default` | 收尾把构建目录恢复默认档（避免下一次 `make` 复用 fork 档 `.o`） |
 
 `parser-selfcheck` 是防「绿得没有信息量」的：Linux 块去掉 PASS 行、退出码改 3、

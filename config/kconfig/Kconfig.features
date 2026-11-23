@@ -668,6 +668,46 @@ config ARKRTOS_USE_LINUX_FUTEX
 	  the futex number falls through to the default -ENOSYS and the image
 	  does not change by a byte.
 
+config ARKRTOS_USE_PAGING_FILEMAP
+	bool "File-backed mmap and write-back (U-21)"
+	depends on ARKRTOS_USE_LINUX_ABI
+	depends on ARKRTOS_USE_PAGING
+	depends on ARKRTOS_USE_PAGING_PAGES
+	depends on ARKRTOS_USE_PAGING_DEMAND
+	help
+	  Make mmap(fd, ...) real for static ELF programs: the requested range is
+	  taken from the App window heap, the file content from offset is copied
+	  into it, the part past EOF is zero-filled, and a MAP_SHARED writable
+	  mapping is written back by msync, by munmap and by process exit.
+
+	  What is honest about this stage:
+	    1) Each process gets its own frames. Two processes mapping one file
+	       do NOT see each other's stores before the writer syncs - that is
+	       not Linux's shared-mapping semantics, it is write-back-on-sync.
+	       The file path is the only rendezvous, exactly as with a real
+	       page cache flushed to disk.
+	    2) Write-back needs the whole file in a kernel buffer, so a file
+	       larger than ARKRTOS_LX_FILEMAP_WB_MAX (8 KB) is refused at mmap
+	       time with -ENOMEM instead of being half-written later.
+	    3) A store past EOF is dropped at write-back (the file is not
+	       extended); a read past EOF returns zeros rather than SIGBUS.
+	    4) openat still refuses O_CREAT / O_TRUNC / O_WRONLY.  The one new
+	       mode is O_RDWR on an existing file, which is what a writable
+	       shared mapping requires (Linux answers -EACCES otherwise).
+	    5) The write-back ledger is per process and is NOT inherited across
+	       fork: a child that maps the same file syncs through its own entry.
+	    6) Pages are never unmapped: munmap only writes back and forgets the
+	       ledger, so the address stays reserved (a later mmap never hands
+	       out the same range).
+
+	  Requires ARKRTOS_USE_LINUX_ABI, ARKRTOS_USE_PAGING,
+	  ARKRTOS_USE_PAGING_PAGES and ARKRTOS_USE_PAGING_DEMAND (the mapping is
+	  populated through the demand path; without it there are no frames).
+
+	  Off (default) compiles no ledger, no msync number and no write-back
+	  buffer: mmap answers -ENOSYS for a file descriptor and the image does
+	  not change by a byte.
+
 config ARKRTOS_USE_WIDE_SVC_ARGS
 	bool "Native-width SVC parameter block (wide-argument ABI, U-18)"
 	help

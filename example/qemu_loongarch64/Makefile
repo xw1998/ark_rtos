@@ -406,6 +406,9 @@ ifneq ($(ARK_FORK_ON),)
 ARK_COW_ON := $(findstring ARKRTOS_USE_PAGING_COW=1,$(EXTRA_CFLAGS))
 ARK_SHM_ON := $(findstring ARKRTOS_USE_PAGING_SHM=1,$(EXTRA_CFLAGS))
 ARK_FUTEX_ON := $(findstring ARKRTOS_USE_LINUX_FUTEX=1,$(EXTRA_CFLAGS))
+# 文件映射（U-21）第五档：夹具多出 18 条 check（43 -> 61）。同样只在
+# EXTRA_CFLAGS 里显式开了才编 —— 关档时夹具与内核都不多一个字节。
+ARK_FILEMAP_ON := $(findstring ARKRTOS_USE_PAGING_FILEMAP=1,$(EXTRA_CFLAGS))
 LXFORK_DEFS   :=
 ifneq ($(ARK_COW_ON),)
 LXFORK_DEFS   += -DARKRTOS_USE_PAGING_COW=1
@@ -415,6 +418,9 @@ LXFORK_DEFS   += -DARKRTOS_USE_PAGING_SHM=1
 endif
 ifneq ($(ARK_FUTEX_ON),)
 LXFORK_DEFS   += -DARKRTOS_USE_LINUX_FUTEX=1
+endif
+ifneq ($(ARK_FILEMAP_ON),)
+LXFORK_DEFS   += -DARKRTOS_USE_PAGING_FILEMAP=1
 endif
 LXFORK_SRC    := example/qemu_loongarch64/elf/linux_fork.c
 LXFORK_ELF    := $(BUILD)/linux_fork.elf

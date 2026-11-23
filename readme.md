@@ -28,16 +28,19 @@ LoongArch32/64 共用同一份内核。服务入口在 ARM 侧是 SVC，在 RISC
 **已经能跑**的是静态链接的原生 ELF 可执行文件：LoongArch64 走页表 + PLV3 窗口、RV32 走 PMP +
 U 模式，装载器按 `PT_LOAD` 落段、按 Linux 入口约定把 `sp` 指向 `argc/argv`，QEMU 上 `exec`
 反复跑过（[MMU进程模型与ELF装载](docs/MMU进程模型与ELF装载.md)）；**已经能按 Linux 的号说话**
-的是系统调用 ABI（`ARKRTOS_USE_LINUX_ABI`，默认关）：asm-generic 25 个号（`openat`/`close`/
+的是系统调用 ABI（`ARKRTOS_USE_LINUX_ABI`，默认关）：asm-generic 29 个号（`openat`/`close`/
 `pipe2`/`read`/`write`/`pread64`/`exit`/`exit_group`/`set_tid_address`/`clock_gettime`/`kill`/
 `tkill`/`tgkill`/`rt_sigaction`/`rt_sigprocmask`/`rt_sigreturn`/`uname`/`getpid`/`getuid`/
-`geteuid`/`brk`/`munmap`/`execve`/`mmap`/`mprotect`），QEMU LA64 上跑通一份只发 `syscall 0` 的
+`geteuid`/`brk`/`munmap`/`execve`/`mmap`/`mprotect`/`msync`），QEMU LA64 上跑通一份只发 `syscall 0` 的
 静态程序，14 条 check 全过、`exit code 7` 被读到；另有两份夹具分别覆盖非阻塞管道（14 条，
 `exit code 55`）与信号（29 条，`exit code 138`）
 （[Linux可执行文件兼容-系统调用ABI](docs/Linux可执行文件兼容-系统调用ABI.md)）；
 **还不能跑**的是现成 Linux 发行版里的二进制：动态链接（`PT_INTERP` / `ld.so`）在默认档仍被
-明确拒绝，`fork`/`clone`、跨任务信号（只能自己发给自己）、fd 继承、`socket`/`select`、`futex`、
-真 `mmap` 语义都没有——这些是**不支持**，不是还没测。这条差距按验收条款登记在
+明确拒绝；`fork`/`clone` 只做到一次分叉一次回收（`ARKRTOS_USE_LINUX_FORK`，默认关，带写时复制、
+`MAP_SHARED` 匿名共享页、futex WAIT/WAKE、文件映射写回四档子开关，QEMU 上五档
+21/26/34/43/63 条 check），跨任务信号与每进程 fd 表已随 fork 档落地；仍不支持的是
+`socket`/`select`、`MAP_FIXED` 与页级权限、线程，以及 `mmap` 的完整语义（只做一次性快照 +
+整文件写回）——这些是**不支持**，不是还没测。这条差距按验收条款登记在
 [欠账盘点](docs/欠账盘点.md)，不写成"已经支持 Linux 程序"。
 
 **它对外的承诺只有一条：让 MCU 像手机一样安装、升级、卸载应用与驱动。**
@@ -834,7 +837,7 @@ STM32F427VGTx @96 MHz，DAPLink（SWD 两线，无 SWO）经 mdkdebug 的 SWD tr
 | 看调度器怎么实现、实测代价账怎么算 | [调度器说明](docs/调度器说明.md) |
 | 看内存保护怎么起效、App 越权会怎样 | [内存保护与App越权验证](docs/内存保护与App越权验证.md) |
 | 把 Linux / Windows 上的 C 程序搬过来 | [POSIX与Windows兼容层说明](docs/POSIX与Windows兼容层说明.md) |
-| 在 MMU 档上跑 Linux 的静态可执行文件（只发 Linux 系统调用号） | [Linux可执行文件兼容-系统调用ABI](docs/Linux可执行文件兼容-系统调用ABI.md)（15 个 asm-generic 号的实测读数、两个 ABI 的分界、明确不支持项、门禁 13 项） |
+| 在 MMU 档上跑 Linux 的静态可执行文件（只发 Linux 系统调用号） | [Linux可执行文件兼容-系统调用ABI](docs/Linux可执行文件兼容-系统调用ABI.md)（29 个 asm-generic 号的实测读数、两个 ABI 的分界、明确不支持项、syscall 门禁 13 项 + fork 门禁 36 项） |
 | 想知道它和 Linux 比还差什么 | [与Linux差距盘点](docs/与Linux差距盘点.md) |
 | 写 socket / select 程序 | [socket与select兼容层](docs/socket与select兼容层.md) |
 | 加一个「放在文件系统里、想跑就跑」的小程序 | [小程序设计](docs/小程序设计.md) |

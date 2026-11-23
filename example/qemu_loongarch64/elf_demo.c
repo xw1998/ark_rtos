@@ -606,6 +606,34 @@ static void task_elf_demo(void)
     }
 #endif
 
+#if (ARKRTOS_USE_LINUX_FORK == 1) && (ARKRTOS_USE_PAGING_FILEMAP == 1)
+    /* U-21 的探测文件：文件映射要读的内容不可能由夹具自己写出来（它一被
+     * exec 就要读），所以由内核侧先落进 ramfs。5000 字节，第 i 字节 =
+     * 'A' + (i % 26)：规律式内容让夹具可以逐位置核对「读到的是文件的第几个
+     * 字节」，而不是只比首字节 —— 只比首字节的话，把 offset 吃掉也能过。 */
+    {
+        static uint8 s_fm_probe[5000];
+        uint32 i;
+
+        for(i = 0u; i < 5000u; i++)
+        {
+            s_fm_probe[i] = (uint8)('A' + (i % 26u));
+        }
+        for(tries = 0u; tries < 100u; tries++)
+        {
+            rc = arkrtos_vfs_write_file("/mnt/ram/filemap", s_fm_probe, 5000u);
+            if(rc >= 0)
+            {
+                break;
+            }
+            arkrtos_task_wait_internal(100u);
+        }
+        demo_puts("[filemap] write /mnt/ram/filemap rc=");
+        demo_putu((uint32)rc);
+        demo_puts(" size=5000\n");
+    }
+#endif
+
 #if (ARKRTOS_USE_LINUX_FORK == 1)
     /* fork 的现场证据：linux_fork 自己 clone 出一个子进程 —— 子进程改自己那份
      * .data 后 exit(42)，父进程用 wait4(WNOHANG) 收它的退出码，再确认父的全局

@@ -40,7 +40,7 @@ a purely Linux-ABI static binary with its own `_start`):
 **"A static program runs" is not "Linux is supported".** Section 3 lists what is
 explicitly unsupported.
 
-## 1 Supported syscalls (28; 26 measured on hardware, 2 table-and-argument only)
+## 1 Supported syscalls (29; 27 measured on hardware, 2 table-and-argument only)
 
 Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 
@@ -74,6 +74,7 @@ Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 | 222 | `mmap` | anonymous only: `MAP_PRIVATE|MAP_ANONYMOUS` or `MAP_SHARED|MAP_ANONYMOUS` (the latter needs `ARKRTOS_USE_PAGING_SHM`, section 8.3); `MAP_FIXED` and `PRIVATE|SHARED` together are refused | `mmap>0 -> 1 ok` / `mmap write/read -> 1 ok` |
 | 260 | `wait4` | only `options 0/WNOHANG`; **without `WNOHANG` it really blocks** (restartable syscall, section 8.1), never invents a status, the bookkeeping entry is consumed on reap (section 8) | `wait4 returned child pid -> 12 ok` / `WEXITSTATUS == 42 -> 42 ok` / `wait4(child) again == -ECHILD -> -10 ok` / `blocking wait4 blocked >= 40 ms -> 1 ok` |
 | 226 | `mprotect` | checks page alignment and window range only, returns 0 and counts separately; **protection is not enforced** (the window is one PS=20 RWX mapping) | no fixture readout (1.1) |
+| 227 | `msync` | writes back only this process's "writable shared file mapping" bookkeeping; a hit inside the heap window syncs, a miss inside it returns 0, outside it `-ENOMEM` (`ARKRTOS_USE_PAGING_FILEMAP`, section 8.5) | `filemap msync rc -> 0 ok` / `filemap private msync rc (no writeback) -> 0 ok` / `filemap shared write persisted, private write not (bits=31) -> 31 ok` |
 
 Unknown numbers return `-ENOSYS` (38) and are counted. Nothing is guessed.
 
@@ -87,8 +88,8 @@ has argument validation and an explicit degradation note - it returns 0 but
 "accepted" and "enforced" can be told apart in the readout instead of passing
 off one as the other.
 
-The other 25 numbers all have serial readouts from the `[linux]` / `[pipe]` /
-`[sig]` fixtures.
+The other 26 numbers all have serial readouts from the `[linux]` / `[pipe]` /
+`[sig]` / `[fork]` fixtures.
 
 ## 2 How the two ABIs are told apart
 
@@ -645,12 +646,70 @@ same thing; `rt_kprintf` in RT-Thread looks immune because it formats the whole 
 and emits it with interrupts off.
 
 Host accounting: the union line coverage of the `linuxabi` / `linuxabioff` /
-`linuxabifutex` profiles is **98.31% (870/885)**, the futex profile runs **268
-checks** and prints `LINUX-ABI HOST OK`. The `ARKRTOS_USE_PAGING_SHM=1` shared
-branches are **not in the host ledger** (the host fixture was never compiled with
-`LINUX_FORK=1`); that half is measured only by the 34 SHM and 9 futex board
-readouts. The 15 remaining uncovered lines were each inspected and are all
-dead/defensive branches, not "untested".
+`linuxabifutex` / `linuxabifilemap` profiles is **97.96% (1055/1077)** (the pinned
+baseline is 97.20%; section 8.5 grew the denominator, the readout did not fall),
+the `linuxabi` profile runs **270 checks**, the futex profile **312** and the
+filemap profile **337**, all printing `LINUX-ABI HOST OK`. The
+`ARKRTOS_USE_PAGING_SHM=1` shared branches are **not in the host ledger** (the host
+fixture was never compiled with `LINUX_FORK=1`); that half is measured only by the
+34 SHM, 9 futex and 20 filemap board readouts. The 22 remaining uncovered lines
+were each inspected and are all dead/defensive branches (two `-EBUSY` re-entry
+returns, the overflow/alignment `-ENOMEM` variants, `-E2BIG`, embedded weak-symbol
+fallbacks), not "untested".
+
+### 8.5 File mapping and write-back (`ARKRTOS_USE_PAGING_FILEMAP`, 2026-11-23, QEMU LA64)
+
+`clone` gives a second execution stream and `MAP_SHARED` lets both see the same
+memory, but **using a file as memory** was still missing: without it `ld.so` can
+only read a whole library into anonymous memory, there is no path to put modified
+content back, and `msync` has nothing to mean. With
+`ARKRTOS_USE_PAGING_FILEMAP` (`depends on ARKRTOS_USE_LINUX_ABI` + `PAGING` +
+`PAGING_PAGES` + `PAGING_DEMAND`) number 222 `mmap` takes the file path when
+`MAP_ANONYMOUS` is absent, and number 227 `msync` appears.
+
+| item | current state |
+|---|---|
+| accepted shapes | no `MAP_ANONYMOUS` means a file mapping; `MAP_FIXED` still `-ENOSYS`; exactly one of `MAP_PRIVATE` / `MAP_SHARED`; `prot` must include `PROT_READ`; `offset` must be 4 KB aligned |
+| filling | at `mmap` time the file content is copied into the heap window in 128-byte chunks (`arkrtos_vfs_read_at` + `arkrtos_copy_to_user`); `offset` applies; **bytes past EOF read as zero** (no faked SIGBUS). Changes to the file after the mapping are **not** visible - this is a one-shot snapshot, not demand paging from the file |
+| address | shares the same heap cursor as anonymous `mmap`; the cursor is **not** rolled back on failure (rolling back would let two mappings share a page - a silent wrong answer) |
+| write-back bookkeeping | only "`MAP_SHARED` + `PROT_WRITE` + opened `O_RDWR`" mappings, at most **2 per process** (`LX_FILEMAP_MAX`); private mappings never reach the file |
+| write-back moments | `msync` (227), `munmap`, and task exit (top of `on_task_exit`, before any critical section - write-back calls VFS and must not run with interrupts off) |
+| how | VFS has no `write_at`, so: read the whole file, overlay the mapped range, write the whole file back. If the file **changed length** while mapped the call returns `-EIO` (never truncate somebody's longer file); a range entirely past EOF is a no-op (the file does not grow) |
+| buffer | one kernel-side 8 KB buffer plus a critical-section busy flag: a second concurrent write-back honestly returns `-EBUSY` instead of letting two copies overwrite each other in one buffer |
+| limits | a writable shared mapping of a file larger than 8 KB fails at `mmap` time with `-ENOMEM` (early, rather than writing back half of it later); private mappings are not capped by this, but `len` is still limited by the heap window |
+| `msync` | address 4 KB aligned, `len` non-zero, flags limited to `MS_ASYNC` / `MS_INVALIDATE` / `MS_SYNC`; a hit in the bookkeeping syncs and counts; a miss inside the window returns 0 (private/anonymous have nothing to write back, same as Linux); outside the window `-ENOMEM` |
+| plain file `write` | still `-ENOSYS`: content reaches the file only through the mapping, and nothing pretends otherwise |
+| `mprotect` | unaffected: still validation-only (section 1); `PROT_EXEC` cannot be enforced in hardware on this LA64 path (no NR/NX bit) |
+
+Readouts (the fifth tier of `tools/fork_gate.py`, fork+COW+SHM+futex+filemap,
+**63 checks**, 20 of them the filemap block):
+
+| readout | what it pins down |
+|---|---|
+| `filemap open read-only fd > 2 -> 1` | the file really exists in ramfs and opens by namespace path |
+| `filemap private map > 0` / `first byte is file first byte` / `byte 25 is Z` | the content really came from the file, not from a zero page |
+| `filemap last byte of the page -> 'N'` | a 5000-byte file still has content at the end of the first 4 KB page |
+| `filemap misaligned offset == -EINVAL -> -22` | 4 KB offset alignment is enforced |
+| `filemap bad fd == -EBADF -> -9` | a bad fd does not fall through to the anonymous path |
+| `filemap writable shared on read-only fd == -EACCES -> -13` | writable shared mappings require `O_RDWR` (Linux semantics) |
+| `filemap offset=4096 map > 0` / `offset content starts at 4096 -> 'O'` | `offset` is honoured, not ignored |
+| `filemap past EOF reads zero -> 0` | past EOF reads zero (no faked SIGBUS) |
+| `filemap O_RDWR open on existing file > 0` | the one exception this tier allows really works |
+| `filemap writable shared map > 0` / `msync rc -> 0` / `munmap rc -> 0` | a writable shared mapping can be built and both write-back moments return 0 |
+| `filemap private writable map > 0` / `private msync rc (no writeback) -> 0` | a private `msync` returns 0 and does **not** write back |
+| `filemap remap after writeback > 0` | after write-back a fresh mapping reads the same bytes back |
+| `filemap shared write persisted, private write not (bits=31) -> 31` | five evidence bits at once: the shared write reached the file and the private write did not |
+
+**A trap only a board can show: the SVC argument cap is 4.** The first version
+failed 7 checks on QEMU and every file mapping returned `-9`: `ARKRTOS_ARCH_SVC_ARG_MAX`
+is 4 and the port's `arkrtos_port_svc_get_arg()` returns 0 for `idx >= 4`, so
+`mmap`'s `fd` (`a4`) and `offset` (`a5`) were **always 0** => `lx_fd_find(0)`
+failed => `-EBADF`. The host fixture passed because its `svc_get_arg` stub allows
+six arguments - **this class of defect only shows up on hardware.** The fix widens
+the cap to 6 in the LA64 and RV32 ports when `ARKRTOS_USE_LINUX_ABI == 1`: the
+trap frame already carries `$a0..$a7` (`LA_FR_A0 + 0..7`), so the frame layout is
+untouched and native SVC still uses 0..3 only. RV32 was widened for the same
+reason, so the "reads as 0" trap is not left behind there either.
 
 ## 9 Switch and zero footprint
 
@@ -682,8 +741,17 @@ and the `-ENOSYS` control with SHM off).
 `depends on ARKRTOS_USE_LINUX_ABI` with the same `#error` guard. With it off the
 wait slots, the key resolver and `lx_futex` are not compiled and number 98 falls
 back to `-ENOSYS`; with it on the measured evidence is the 43 readouts of the
-fork+COW+SHM+futex tier (9 of them futex) plus the 268 host checks of the futex
+fork+COW+SHM+futex tier (9 of them futex) plus the 312 host checks of the futex
 profile.
+
+`ARKRTOS_USE_PAGING_FILEMAP` (section 8.5) is the sixth switch, default **0**,
+`depends on ARKRTOS_USE_LINUX_ABI` + `ARKRTOS_USE_PAGING` +
+`ARKRTOS_USE_PAGING_PAGES` + `ARKRTOS_USE_PAGING_DEMAND` (content reaches the
+mapping through demand-paged frames, so without DEMAND it cannot be filled), with
+four `#error` guards. With it off the file-mapping branch, the write-back
+bookkeeping and `msync` are not compiled and `mmap(fd)` returns `-ENOSYS`; with it
+on the evidence is the 63 readouts of the fifth tier (20 of them filemap) plus the
+337 host checks of the filemap profile.
 
 ## 10 Gate
 
@@ -694,16 +762,16 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py [--no-build]
 13 items; prints `LINUX-ABI-GATE OK` when all pass and is invoked from
 `tools/ci_gate.py` as `linux-abi`: default-off, kconfig-wired, features-guard,
 board-switch, off-zero-symbols, port-wiring (two directions), compile-on (8 TUs
-under the real LA64 board), syscall-table (28 numbers vs asm-generic),
+under the real LA64 board), syscall-table (29 numbers vs asm-generic),
 abi-split-la64, abi-split-rv32, build, qemu-readout (14 Linux checks + PASS + exit 7,
 14 pipe checks + exit 55, 31 signal checks + PASS + exit 138, the unrelated demos
 still intact), and parser-selfcheck (eight deliberately broken logs must each be
 rejected).
 
 The fork tier has its own gate, `tools/fork_gate.py` (invoked as `fork` from
-`ci_gate`, **29 items**; it runs the fork, fork+COW, fork+COW+SHM and
-fork+COW+SHM+futex tiers one after the other, so build / qemu-readout /
-parser-selfcheck each appear four times):
+`ci_gate`, **36 items**; it runs the fork, fork+COW, fork+COW+SHM,
+fork+COW+SHM+futex and fork+COW+SHM+futex+filemap tiers one after the other, so
+build / qemu-readout / parser-selfcheck each appear five times):
 default-off (fork and SHM), kconfig-wired (all four `depends on`, plus the SHM
 item depending on COW), the four
 `#error` guards in features.h, off-zero-symbols (RV32 `linux_abi.o` has no
@@ -719,7 +787,9 @@ moved at fork time; the SHM tier adds five: the `pg shm map` line removed, the
 child's shared write not seen by the parent, the child not seeing the parent's
 write, a non-zero start value, and the successful-mapping readout removed; the
 futex tier adds three: the WAIT was never woken, the waker only saw half
-(`bits=1`), and a waiterless `WAKE` returned 1) and
+(`bits=1`), and a waiterless `WAKE` returned 1; the filemap tier adds three:
+the write-back never happened, the write-back truncated the file, and a private
+write reached the file) and
 restore-default (the build directory is returned to the default tier so a later
 `make` does not reuse fork-tier objects). The COW round additionally requires 26
 checks, `shared>=1 / stack>=1 / copied=0`, at least one `pg cow copy ... ref=2`,
@@ -735,7 +805,10 @@ the nine futex readouts one by one (shared page mapped, waiterless `WAKE` return
 `WAIT` returns 0 after being woken, the parent sees the waker's `2`, the waker is
 reaped, `bits == 3`), with the SHM and COW assertions still in place; the futex
 switch has its own `default-off-futex` / `kconfig-wired-futex` /
-`features-guard-futex` items.
+`features-guard-futex` items. The filemap round requires 63 checks and validates
+the 20 filemap readouts one by one; its switch has its own
+`default-off-filemap` / `kconfig-wired-filemap` / `features-guard-filemap` items
+(autoconf 0, four `depends on` entries, four `#error` guards).
 
 ## 11 Three real bugs and one readout trap found on the way
 

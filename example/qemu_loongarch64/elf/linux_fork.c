@@ -74,6 +74,28 @@
 #define LX_FUTEX_WAKE       1
 #define LX_EAGAIN           11
 
+/* 文件映射（U-21）这一档要用的号：openat / mmap 已经有了 mmap 222，
+ * 另外两个是 munmap 215 与 msync 227。 */
+#define LX_OPENAT           56
+#define LX_MUNMAP           215
+#define LX_MSYNC            227
+
+#define LX_O_RDONLY         0
+#define LX_O_RDWR           2
+#define LX_PROT_NONE        0
+#define LX_PROT_READ        1
+#define LX_PROT_WRITE       2
+#define LX_MS_SYNC          4
+#define LX_EBADF            9
+#define LX_EACCES           13
+#define LX_ENOMEM           12
+#define LX_EIO              5
+
+#define LX_AT_FDCWD         (-100)
+
+#define FM_PATH             "/mnt/ram/filemap"
+#define FM_SIZE             5000
+
 typedef long lx_long;
 
 /* ------------------------------------------------------------------
@@ -676,8 +698,16 @@ void linux_main(unsigned long sp)
         int     sfds[2];
         int     spipe = 0;
 
+#if defined(ARKRTOS_USE_PAGING_FILEMAP) && (ARKRTOS_USE_PAGING_FILEMAP == 1)
+        /* 开了文件映射档之后，「没带 MAP_ANONYMOUS」不再是非法形态，而是
+         * 一次文件映射：fd = -1 必须回 -EBADF。这条读数把两档的语义差别
+         * 钉住，也顺手证明它没有被当成匿名映射放过。 */
+        check("mmap(shared without anon) == -EBADF",
+              lx6(LX_MMAP, 0, 4096, 3, LX_MAP_SHARED, -1, 0), -LX_EBADF);
+#else
         check("mmap(shared without anon) == -ENOSYS",
               lx6(LX_MMAP, 0, 4096, 3, LX_MAP_SHARED, -1, 0), -LX_ENOSYS);
+#endif
         check("mmap(private|shared) == -ENOSYS",
               lx6(LX_MMAP, 0, 4096, 3,
                   LX_MAP_PRIVATE | LX_MAP_SHARED | LX_MAP_ANONYMOUS, -1, 0),
@@ -919,6 +949,131 @@ void linux_main(unsigned long sp)
              * 睡下就叫醒了」那种空匹配）；bit1 必须置：WAKE 真的叫醒了它。 */
             check("futex waker saw 1 and woke 1 (bits=3)",
                   (status6 >> 8) & 0xFF, 3);
+        }
+    }
+#endif
+
+#if defined(ARKRTOS_USE_PAGING_FILEMAP) && (ARKRTOS_USE_PAGING_FILEMAP == 1)
+    /* ---------------- 文件映射与写回（U-21） ----------------
+     * 探测文件 /mnt/ram/filemap 是内核侧先写进 ramfs 的 5000 字节，
+     * 第 i 字节 = 'A' + (i % 26)。夹具自己不写这个文件（它一启动就要读），
+     * 所以这里只读、只核对。四组判据：
+     *   1) 只读私有映射：内容真的装进映射区（首字节 / 第 25 / 第 4095）；
+     *   2) 参数校验：offset 非 4 KB、坏 fd、只读 fd 上的可写共享分别回
+     *      -EINVAL / -EBADF / -EACCES；
+     *   3) offset=4096：映射从第二页起（5000 字节文件的第二页只剩 904
+     *      字节内容），EOF 之后必须是零而不是垃圾；
+     *   4) 写回：O_RDWR + MAP_SHARED 改两个字节 → msync → 重新映射读回，
+     *      必须看到新值；同一次里再做一份私有可写映射写另外两个字节，
+     *      重新映射时那两个字节必须还是原值。
+     * 反假绿：第 4 组把「共享写落盘」与「私有写不落盘」放在同一次重新
+     * 映射里读 —— 只判前者的话，"把映射区直接整段写回文件"也能过。 */
+    {
+        lx_long fd;
+        lx_long fdw;
+        lx_long addr;
+        lx_long addr2;
+        lx_long addr5;
+        lx_long maddr = 0;
+        lx_long paddr = 0;
+        lx_long bits;
+
+        fd = lx3(LX_OPENAT, LX_AT_FDCWD, (lx_long)(unsigned long)FM_PATH,
+                 LX_O_RDONLY);
+        check("filemap open read-only fd > 2", (fd > 2) ? 1 : 0, 1);
+
+        addr = lx6(LX_MMAP, 0, 4096, LX_PROT_READ, LX_MAP_PRIVATE, fd, 0);
+        check("filemap private map > 0", (addr > 0) ? 1 : 0, 1);
+        if (addr > 0)
+        {
+            volatile unsigned char *m =
+                (volatile unsigned char *)(unsigned long)addr;
+
+            /* 'A' + 25 = 'Z'；4095 % 26 = 13 -> 'N' */
+            check("filemap first byte is file first byte", (lx_long)m[0], 'A');
+            check("filemap byte 25 is Z", (lx_long)m[25], 'Z');
+            check("filemap last byte of the page", (lx_long)m[4095], 'N');
+        }
+
+        check("filemap misaligned offset == -EINVAL",
+              lx6(LX_MMAP, 0, 4096, LX_PROT_READ, LX_MAP_PRIVATE, fd, 0x10),
+              -LX_EINVAL);
+        check("filemap bad fd == -EBADF",
+              lx6(LX_MMAP, 0, 4096, LX_PROT_READ, LX_MAP_PRIVATE, 99, 0),
+              -LX_EBADF);
+        check("filemap writable shared on read-only fd == -EACCES",
+              lx6(LX_MMAP, 0, 4096, LX_PROT_READ | LX_PROT_WRITE, LX_MAP_SHARED,
+                  fd, 0), -LX_EACCES);
+
+        /* offset=4096：4096 % 26 = 14 -> 'O'；5000 - 4096 = 904 字节之后是 EOF */
+        addr2 = lx6(LX_MMAP, 0, 4096, LX_PROT_READ, LX_MAP_PRIVATE, fd, 4096);
+        check("filemap offset=4096 map > 0", (addr2 > 0) ? 1 : 0, 1);
+        if (addr2 > 0)
+        {
+            volatile unsigned char *m2 =
+                (volatile unsigned char *)(unsigned long)addr2;
+
+            check("filemap offset content starts at 4096", (lx_long)m2[0], 'O');
+            check("filemap past EOF reads zero", (lx_long)m2[904], 0);
+        }
+
+        fdw = lx3(LX_OPENAT, LX_AT_FDCWD, (lx_long)(unsigned long)FM_PATH,
+                  LX_O_RDWR);
+        check("filemap O_RDWR open on existing file > 0",
+              (fdw > 2) ? 1 : 0, 1);
+
+        if (fdw > 2)
+        {
+            maddr = lx6(LX_MMAP, 0, 4096, LX_PROT_READ | LX_PROT_WRITE,
+                        LX_MAP_SHARED, fdw, 0);
+            check("filemap writable shared map > 0", (maddr > 0) ? 1 : 0, 1);
+            if (maddr > 0)
+            {
+                volatile unsigned char *mw =
+                    (volatile unsigned char *)(unsigned long)maddr;
+
+                mw[10] = 'X';
+                mw[11] = 'Y';
+                check("filemap msync rc",
+                      lx3(LX_MSYNC, maddr, 4096, LX_MS_SYNC), 0);
+                check("filemap munmap rc", lx2(LX_MUNMAP, maddr, 4096), 0);
+            }
+
+            paddr = lx6(LX_MMAP, 0, 4096, LX_PROT_READ | LX_PROT_WRITE,
+                        LX_MAP_PRIVATE, fdw, 0);
+            check("filemap private writable map > 0", (paddr > 0) ? 1 : 0, 1);
+            if (paddr > 0)
+            {
+                volatile unsigned char *mp =
+                    (volatile unsigned char *)(unsigned long)paddr;
+
+                /* 20 % 26 = 20 -> 'U'，21 -> 'V'；改成 Q 之后必须不落盘 */
+                mp[20] = 'Q';
+                mp[21] = 'Q';
+                check("filemap private msync rc (no writeback)",
+                      lx3(LX_MSYNC, paddr, 4096, LX_MS_SYNC), 0);
+                check("filemap private munmap rc",
+                      lx2(LX_MUNMAP, paddr, 4096), 0);
+            }
+        }
+
+        /* 重新映射读回：共享写的 10/11 变了（'X'/'Y'），12 还是 'M'，
+         * 私有的 20/21 还是 'U'/'V'。 */
+        addr5 = lx6(LX_MMAP, 0, 4096, LX_PROT_READ, LX_MAP_PRIVATE, fd, 0);
+        check("filemap remap after writeback > 0", (addr5 > 0) ? 1 : 0, 1);
+        if (addr5 > 0)
+        {
+            volatile unsigned char *m5 =
+                (volatile unsigned char *)(unsigned long)addr5;
+
+            bits = 0;
+            if (m5[10] == 'X') { bits |= 1; }
+            if (m5[11] == 'Y') { bits |= 2; }
+            if (m5[12] == 'M') { bits |= 4; }
+            if (m5[20] == 'U') { bits |= 8; }
+            if (m5[21] == 'V') { bits |= 16; }
+            check("filemap shared write persisted, private write not (bits=31)",
+                  bits, 31);
         }
     }
 #endif
