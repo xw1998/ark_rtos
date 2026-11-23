@@ -8761,6 +8761,174 @@ SMP 档（`-DARKRTOS_USE_SMP=1 -DARKRTOS_CPU_NUM=2 -DARKRTOS_USE_SMP_SCHED=1`，
    同一块帧。窗口是漂移状态，两个核各自跑到不同空间时它们的窗口本来就不该一致；一致性由调度器保证
    （谁跑在这个空间就装这个空间），不是由硬件保证。
 
+### 9.13 ⑨ 跨核 TLB 失效 + 回执（R4，2026-11-23，QEMU LA64 `-smp 2` 实跑）
+
+#### 9.13.1 缺口在哪：R3 让次核拿到「那一刻的条目」，却没有办法让它们作废
+
+R3 之后两核能经同一段窗口 VA 读写同一块帧。但那是**一次装上、一直用下去**的做法：次核的条目是它在切任务前
+自己 `tlbwr` 写下去的静态拷贝。引导核在运行中改了三类东西 —— 换空间、COW 重写某页、`mprotect` 改权限 ——
+改完它只撤自己那 256 条，次核手里还是旧条目：
+
+- 次核继续用旧条目访存，读到的可能是**已经被回收给别的空间的物理帧**；
+- 更糟的是「旧条目还在且在」和「该失效」两件事**在读数上无法区分** —— 谁都没错、谁都没报错。
+
+Linux 解决这件事的机制是 shootdown：发起核改完页表，给每个可能缓存了该映射的核发 IPI，**等它们回执**
+（`flush_tlb_mm_range` + `smp_call_function_many` 的 completion）。R4 做的就是这条协议的最小可用版本。
+注意 R4 要证的不是「旧条目确实消失了」（那需要一个能在运行期 remap 的 API 或真机），而是**协议成立**：
+请求被目标核真的处理、结果真的回传、失败真的被如实上报。
+
+#### 9.13.2 做法：每核一条请求槽 + `seq` 作发布点 + 目标核写 `ack`
+
+| # | 改动 | 为什么必须这样 |
+|---|---|---|
+| 1 | `kernelsrc/include/arkrtos_smp_shootdown.h` + `kernelsrc/src/arkrtos_smp_shootdown.c`：每核一个 `arkrtos_smp_sd_slot_t`（`seq/ack/space/va/pages/last_rc`），全局 `sd_sent/sd_ack/sd_inval/sd_skip/sd_fail/sd_timeout` | 槽是**每核一份**的：两个发起核同时发的请求不会互相覆盖；`ack` 是目标核写的计数，发起核只读 |
+| 2 | 发起：填字段 → `__sync_synchronize()` → 写 `seq` → `__sync_synchronize()` → 发 IPI | `seq` 是唯一的发布点。先写 `seq` 后写数据，目标核可能读到「新序号 + 旧参数」，那会撤错范围 —— 这类错在读数上完全看不出来 |
+| 3 | 目标：`arkrtos_smp_sd_target_poll()` 挂在 `arkrtos_smp_ipi_handler()` 尾，`seq != ack` 才处理（幂等） | 幂等是必需的：同一条 IPI 被重复投递、或核在处理过程中又收到一条，都不能重复撤 |
+| 4 | 失效动作 = `arkrtos_port_paging_install_space_window(space)`（撤旧 → 按账本重铺 → 按索引读回自证） | 本载体的窗口条目不是硬件缺页填的，是内核自己 `tlbwr` 写下去的。**只撤不铺**会让目标核下一次访问直接 `KERNEL refill (plv0)` 致命 —— 这不是「保守」，是唯一能活着回来的做法。等价于 Linux 的「带新 PTE 的 shootdown」 |
+| 5 | 目标核判定「本核当前装着的窗口 == 请求的空间」才真撤，否则 `sd_skip++` 并**照旧回执** | 别的空间在本核上根本没有条目，撤它没有意义；但「跳过」也是一次处理结果，必须让发起核知道，否则发起核分不清「跳过了」和「没收到」 |
+| 6 | 失败也回执：`rc < 0` 时 `sd_fail++`、`last_rc` 记负码，`ack` 照样写 | 不写 `ack` 的话发起核只能超时，最后拿到 -2 —— 把「装不回去」读成「没响应」，两种完全不同的故障混成一个读数 |
+| 7 | 发起核自己**不撤**自己的条目 | 它的窗口由 `activate` / `install_space_window` 在改完账本后自己撤自己铺；在这里再撤一次会把调用方正在用的栈映射打掉 |
+| 8 | `arkrtos_config.h` 两条 `#error`：开 `ARKRTOS_USE_SMP_TLB_SD` 必须 `ARKRTOS_USE_SMP=1` 且 `CPU_NUM >= 2` | 「开了但只有一个核」的档编译得过、永远返回 -1，那是假功能 |
+| 9 | 次核异常入口统一切 Trap 栈（`arkrtos_context.S` 的 `la_smp_trap_entry`），Trap 栈 4096 → 8192 | 见 9.13.4 第 1 条：这是本轮真正修的那个缺陷，不是顺手优化 |
+
+窗口几何没变：`0x02000000` 起 2 MB = 256 条 PS=12 条目，栈页 `0x02100000` 落在条目 8。
+夹具请求的就是 `(space=0, va=0x02100000, pages=1)` —— 一小段真实存在的、次核确实装着的窗口。
+
+#### 9.13.3 失败码：装没装、跳过没跳过、回没回执，三件事分开报
+
+`arkrtos_smp_tlb_shootdown()`：`0` 全部目标核都回了执、`-1` 参数/环境不允许（页数为 0、VA 未 4 KB 对齐、
+在线核不足 2、在线掩码与计数不一致导致一条都没发出去）、`-2` 有目标核在迭代上限内没回执、`-3` IPI 发不出去。
+
+超时是**迭代次数上限**（`ARKRTOS_SMP_SD_SPINS`，默认 200 万次），不是时间上限 —— 后者在 QEMU 上毫无意义
+（时间取决于宿主调度），迭代数才是两侧可比的量。超时**绝不当成功**，`sd_timeout++` 后返回 -2。
+
+`sent == 0` 这一条是收尾时才补的：在线计数说「有 2 个核」而在线掩码里只剩本核时，旧实现里
+`done == sent == 0` 直接返回 0 ——**什么都没做也叫成功**。判为 API 缺陷，改成返回 -1。
+
+#### 9.13.4 实测教训（五条，第 1 条是本轮真正修掉的缺陷）
+
+1. **失效动作不能跑在「可能就在待失效窗口里」的栈上。** 次核收到 IPI 时，它的 `sp` 指向的是**被打断任务的栈**
+   —— 而这个任务可能正好是一个用户任务，它的栈就在 `0x02100000` 那个待失效的窗口 VA 上。原来次核的
+   异常入口是「在被打断任务的栈上进 C」，于是 `install_space_window` 的序言第一条栈写就撞在**正被换掉的
+   窗口**上：`la_pg_drop_window()` 刚把条目撤掉、还没铺回，这一次栈写就 `KERNEL refill (plv0) badv=0x02100568`
+   致命 → 次核 `idle 0` 停机 → 回执永远不来 → 发起核超时 -2。
+   这不是「shootdown 逻辑写错了」，是**运行位置不对**。修法照 Linux 的惯例：**中断入口一律切内核栈**。
+   `la_smp_trap_entry` 在 `bl la_smp_trap_c` 之前先按 `CSR 0x40`（`CPU_ID`）算出本核 Trap 栈顶、把 `sp` 换过去、
+   把原帧指针放进 `$a0`；返回后再取 `$a0`（目标帧可能已被换成另一个任务）。既然整个异常分派都在这块栈上跑，
+   Trap 栈从 4 KB 提到 8 KB。**顺带的好处**：tick、任务切换、SVC 这些路径本来也可能跑在窗口内的栈上，
+   一处修改把这一族问题一起关掉。
+2. **换栈时漏了 `$a1`（本核号），次核当场不调度。** 原代码用 `csrrd $a1, 0x40` 把核号填进 `$a1` 传给 C；
+   改写后我自己从 `$t1` 取了核号算栈地址，却忘了再 `move $a1, $t1` —— 于是 C 侧拿到一个垃圾核号，
+   `[sched] cur1=0xffffffff sw=0`，次核永久停在「没有当前任务」。**换栈改的是 `sp` 与 `$a0`，被我顺手也
+   改掉的 `$a1` 在读数上只剩一个 `0xffffffff`** —— 记住：改内联汇编的 ABI 参数，改一处就要核一遍**全部**
+   参数。
+3. **只改 `Kconfig` 的 default 不生效。** Trap 栈从 4096 改 8192 时先改的是
+   `config/kconfig/board/Kconfig.qemu_loongarch64` 的 default，编出来还是 4096。实际生效值在
+   `config/qemu_loongarch64_defconfig`；改完还得跑 `tools/kconfig/genboard.py --board qemu_loongarch64`
+   才会落到 `board/qemu_loongarch64/arkrtos_board_config.h`。三处**缺一处就等于没改**。
+4. **pin 的变异自检被「子串匹配」骗过。** pin R4 的自检是把源码改坏再看判据会不会报错。第一次的变异写成
+   `arkrtos_smp_trap_stacks_x`，而判据按**子串**找 `arkrtos_smp_trap_stacks` —— 变异后照样命中，自检假绿。
+   改成不以原符号为前缀的 `ark_smp_trap_stack_blk`，并把这件事写进 pin 的注释（「实测踩过」）。
+   **凡是「改坏它必须报错」的自检，变异体不能包含原串。**
+5. **`[sddbg]` 诊断打印不能删，要降级成开关。** 定位第 1 条缺陷靠的是「本核账本空间 `win=0` 与请求空间
+   `space=0` 相等」这一行 —— 它一次性排除了「账本记错」这个诱人的错误方向，把注意力逼到「运行位置」上。
+   这种证据不该丢：改成 `ARKRTOS_SMP_SD_DEBUG`（默认 0），注释里写明它当年是用来干什么的。默认关 = 零代码零输出。
+
+#### 9.13.5 默认档零足迹（与 R3 基线逐位相同）
+
+R4 整段包在既有的 `ARKRTOS_USE_SMP_TLB_SD`（默认 **0**）之下，且该开关在 `arkrtos_config.h` 里要求
+`SMP=1 && CPU_NUM>=2`。默认档同口径编两次：
+
+| | text | data | bss |
+|---|---|---|---|
+| R3 基线（`62e9a99`） | 450032 | 456 | 5128740 |
+| 带 R4 的默认档 | 450032 | 456 | 5128740 |
+
+逐位相同，`nm` 里 SD 相关符号 0 个（`tlb_shootdown` / `sd_target_poll` / `sd_slot` / `sd_seq` 全无）。
+Trap 栈扩容也不需要单独解释：`arkrtos_smp_trap_stacks` 本来就只在 `SMP_SCHED=1` 下编，默认档不参与。
+
+#### 9.13.6 实跑读数
+
+SMP 档（`-DARKRTOS_USE_SMP=1 -DARKRTOS_CPU_NUM=2 -DARKRTOS_USE_SMP_SCHED=1 -DARKRTOS_USE_SMP_TLB_SD=1`，
+板级 `PAGING=1 PRIV=1`），`-smp 2`，跑 30 s：
+
+```
+[sd] win=0 pos rc=0 dack=1 dinval=1 dskip=0 dtimeout=0 dipi1=1 seq1=1 ack1=1 rc1=0
+[sd] neg rc=4294967294 dack=0
+[sd] rec rc=0 dack=1 dinval=1
+[sd] result=ok
+[shva] win inst=1 rc=0 space=0
+[shva] ack=1 core1=1 data=0x00001235 loops=38403464
+[shva] back rc=0 owned=0 winrc=0
+[shva] result=ok
+```
+
+逐条读：
+
+- `win=0` —— 次核当前装着空间 0 的窗口（`0xFFFFFFFF` 才表示「不知道」）；
+- `pos rc=0` —— 正向请求返回 0：**每个目标核都自己写了回执**；
+- `dack=1` —— `sd_ack` 涨了 1，这一格是**目标核写的**，不是发起核自增的；
+- `dinval=1` —— 目标核真的执行了一次「撤旧 + 重铺」，且 `install_space_window` 的按索引读回自证通过；
+- `dskip=0` / `dtimeout=0` —— 既不是「跳过」也不是「超时」；
+- `dipi1=1` —— 次核的 IPI 计数确实涨了 1（不是「发了个假的就返回」）；
+- `seq1=1 ack1=1` —— 槽里的序号与回执相等，回执是这一条请求的；
+- `rc1=0` —— 目标核记的返回码是 0（装回去了）；
+- `neg rc=4294967294` = `-2` 且 `dack=0` —— 负控制：`sd_drop=1` 时目标核**看了请求但不回执**，发起核
+  只能如实超时，`sd_ack` 一格都没涨。这一格是整套读数里最关键的一条：它证明 `dack/dinval` 不是
+  发起核自己数出来的；
+- `rec rc=0 dack=1 dinval=1` —— 关掉 `drop` 后同一条请求恢复正常，说明负控制没有留下后遗症；
+- `[shva]` 四行与 R3 读数同形（`core1=1`、`data=0x00001235`、`loops=38403464`），说明 Trap 栈前置切换
+  之后跨核共享 VA 没有被破坏；
+- 同一次启动其余 8 项 PASS（FS / ELF tamper / linux / execve / pipe / sig / MOD tamper / fcsr），无 FAIL，
+  无 `refill`、无 `FATAL`，流程继续跑到 A/B 轮次 28 以上。
+
+#### 9.13.7 门禁
+
+`tools/smp_gate.py` 新增 **pin R4**，六层断言，每层都带自检：
+
+1. 源码标记（5 条）：槽数组 `sd_slot[CPU_NUM]`、`seq` 发布点、目标核写 `ack`、`sd_drop` 负控制、
+   `last_rc` 记账；抠掉任一处判据必须报错；
+2. 目标核的失效动作（2 条）：`sd_win_space(cpu) == space` 才真撤、撤的动作是
+   `arkrtos_port_paging_install_space_window(space)`（不许退化成「只撤不铺」）；
+3. 次核入口顺序：`arkrtos_context.S` 里 `la_smp_trap_entry` 到下一条 `bl la_smp_trap_c` 之间必须有
+   `arkrtos_smp_trap_stacks` 的取址且中间没有 `#endif`；自检变异把取址换成
+   `ark_smp_trap_stack_blk`（**不以原符号为前缀**）后判据必须报错；
+4. IPI 钩子：`arkrtos_smp.c` 必须调用 `arkrtos_smp_sd_target_poll()`（否则请求永远躺在槽里）；
+5. 对象级：`SMP=1 + SMP_TLB_SD=1` 编出的目标文件必须有 `arkrtos_smp_tlb_shootdown` /
+   `arkrtos_smp_sd_target_poll` / `arkrtos_smp_sd_slot` / `arkrtos_smp_sd_drop`，开关关掉时四个都
+   不许出现；自检变异把 `arkrtos_smp_tlb_shootdown` 改名后判据必须报错（证明读的是真符号）；
+6. 夹具：必须打印 `[sd] win=` / `[sd] neg rc=` / `[sd] rec rc=` / `[sd] result=`（有判定，不是只打印）。
+
+跑出的汇总行：`SMP-GATE OK ... U/V/R1/R2/R3/R4/W/Y`。
+
+宿主侧新增覆盖率档 `smpshootdown`（`kernelsrc/tests/test_smp_shootdown_host.c`，12 组用例 / 41 个检查，
+输出 `SMP-SD-HOST OK`）。桩里 `arkrtos_smp_send_ipi` 是**同步投递**（临时切 `g_cpu_id` 调 `target_poll` 再切回），
+这样「回执」确实是目标侧写出来的。覆盖的情形：参数拒绝（`pages=0` / 未对齐）、无第二核、正常回执、
+空间不符 skip、账本 `0xFFFFFFFF` 不当成空间 0、装窗口失败记 fail 且 `last_rc` 为负、`drop` 负控制 → -2、
+IPI 发不出 → -3、幂等（同 `seq` 不重复 ack/install）、空槽无副作用、只发在线核（返回 -1）、
+`CPU_NUM` 遍历（每核一条 IPI、发起核不给自己发）。
+
+两档实测：`arkrtos_smp_shootdown 96.88%`（新模块，基线同值）、`arkrtos_smp_sched 98.43%`（基线 97.89 —— 上涨
+是因为新增的 `arkrtos_smp_sched_win_space` 被补了 6 条断言，不是调低基线）。
+
+#### 9.13.8 判词与四条不许读法
+
+判词：**`r4_shootdown_ack_ok_on_qemu`** —— LA64 / QEMU `-smp 2` 上，发起核按 `seq` 发布请求并等回执，
+目标核在 IPI 里按请求撤旧并重铺该空间窗口、按索引读回自证后**自己写 ack**，失败与跳过都如实记账；
+负控制（`sd_drop=1`）让发起核只能拿到 -2 且 `ack` 不动。默认档零足迹（与 R3 基线逐位相同）。
+**真实硬件未验证（R5）。**
+
+1. **不能读成「TLB shootdown 已完整实现」**：每核只有一条请求槽、一次请求只能覆盖一个连续区间、
+   没有批量合并、没有「只撤某几页」的精细失效（实际做的是整窗重铺）、没有等待队列。它证明的是**协议与回执**，
+   不是**性能**与**并发正确性**。
+2. **不能读成「旧条目确实消失了」**：R4 证明的是「目标核处理了请求并回执」。要证明「那条旧翻译真的被
+   换掉」，需要一个运行期可 remap 的 API（或真机上能读回 MTLB）并做二次访存比对 —— 本载体在 QEMU 上
+   `tlbsrch` 与 MTLB `tlbrd` 都不可用（见 9.12.4 第 5 条），这一条**在本机做不了**，如实留白。
+3. **不能把 `dskip=1` 读成失败**：目标核当前装着别的空间时，请求的空间在它上面根本没有条目，跳过是**正确结论**，
+   并且它照旧回执 —— 回执的含义是「我看过了」，不是「我撤了」。
+4. **不能读成「对称多核」**：次核上的 SVC 依然一律致命停机，全局调度器依然只有一份；R4 只让
+   「显式迁移过去的用户任务 + IPI 处理」在次核上跑得起来。R5（真机载体）仍是 §5.4 唯一剩下的前置。
+
 ## 10. `-Wconversion` 开档（2026-11-19）：默认档镜像逐字节不变
 
 `tools/warn_gate.py` 的选项集从六条扩到七条，新加 `-Wconversion`（GCC 隐含同开

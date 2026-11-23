@@ -33,12 +33,13 @@
      真汇编后反汇编必须有 iocsrwr / ertn / 该符号；同一文件 SMP=0 汇编时
      三者必须都不在（否则说明标记钉在了无条件代码上）。
 
-不覆盖：**对称多核调度**（全局时钟同步、次核可进内核、TLB shootdown）与
-**真实硬件**上的次核启动 / IPI 延迟（本仓库没有任何多核板）。QEMU 上已实跑的
-四件事各有 pin：LA64 的 ②③（pin U/V，文档 §9.6）、LA64 的 ④ AMP 调度分核
-（pin W，§9.8）、RV32 的 ②③ ACLINT msip（pin X，§9.7）、LA64 的 ⑤ AMP 自动
-负载均衡（pin Y，§9.9）。LA32 侧与 RV32 的 ④ 仍未做，判词不许外推。所以这一道
-的结论是"骨架自洽 + 四条实跑路径都被钉住"，不是"通用多核"。
+不覆盖：**真实硬件**上的次核启动 / IPI 延迟 / TLB 一致性（本仓库没有任何
+多核板 —— R4 的 shootdown 只在 QEMU 上演示过），以及 LA32 与 RV32 的 ④ 调度
+分核。QEMU 上已实跑的路径各有 pin：LA64 的 ②③（pin U/V，文档 §9.6）、主核
+IPI 接收（pin R1）、次核开分页（pin R2）、跨核共享 VA（pin R3）、跨核 TLB
+失效 + 回执（pin R4）、LA64 的 ④ AMP 调度分核（pin W，§9.8）、LA64 的 ⑤ AMP
+自动负载均衡（pin Y，§9.9）、RV32 的 ②③ ACLINT msip（pin X，§9.7）。判词不许
+外推：所以这一道的结论是"骨架自洽 + 这些实跑路径都被钉住"，不是"通用多核"。
 
 用法
 ----
@@ -154,6 +155,46 @@ R3_FIXTURE_MARKERS = [
     "[shva] ack=",
     "[shva] win inst=",
     "arkrtos_smp_sched_selftest",
+]
+
+# pin R4（2026-11-23）：跨核 TLB 失效 + 回执。协议的四条骨架 —— 少任何一条
+# 都会退化成「发个 IPI 然后假定目标核已经失效」：
+#   1) 每核一个请求槽（下标即核号）；
+#   2) 字段先落地、序号最后发布（barrier 在 seq 之前），否则目标核可能读到
+#      半条请求；
+#   3) ack 由**目标核**写（发起核只读），所以「发完就返回 0」过不了；
+#   4) 负控制：drop 档让目标核看了不回执 —— 这条不是测试代码，是判据的一部分。
+SD_C = "kernelsrc/src/arkrtos_smp_shootdown.c"
+SD_H = "kernelsrc/include/arkrtos_smp_shootdown.h"
+SMP_C = "kernelsrc/src/arkrtos_smp.c"
+
+R4_C_MARKERS = [
+    "arkrtos_smp_sd_slot_t arkrtos_smp_sd_slot[ARKRTOS_CPU_NUM];",
+    "arkrtos_smp_sd_slot[i].seq     = seq;   /* 再发布序号 */",
+    "s->ack = seq;                     /* 回执：目标核写、发起核读 */",
+    "if(arkrtos_smp_sd_drop != 0u)",
+    "s->last_rc = (uint32)rc;",
+]
+
+# 次核入口必须在**进 C 之前**换到本核 Trap 栈：R4 实测的 refill 停机就是
+# 这一条缺了 —— 被打断任务的栈可能就落在待失效的窗口里，而失效动作要在
+# 窗口内重装页表。两处标记：换栈那段用 Trap 栈符号，且它出现在
+# `bl la_smp_trap_c` 之前。
+R4_CTX_STACK_SYM = "arkrtos_smp_trap_stacks"
+R4_CTX_TRAP_CALL = "bl      la_smp_trap_c"
+
+# 目标核的失效动作：只有账本空间一致才真撤，并且撤完按账本重铺（只撤不铺
+# 会让目标核下一次访问直接 refill 致命）。
+R4_POLL_MARKERS = [
+    "if(sd_win_space(cpu) == space)",
+    "rc = arkrtos_port_paging_install_space_window(space);",
+]
+
+R4_FIXTURE_MARKERS = [
+    "[sd] result=",
+    "[sd] win=",
+    "[sd] neg rc=",
+    "[sd] rec rc=",
 ]
 
 LA64_INCLUDES = [
@@ -1086,6 +1127,184 @@ def run_la64_pin_r3(cc):
     shutil.rmtree(td, ignore_errors=True)
     return bad == 0
 
+def run_la64_pin_r4(cc):
+    """pin R4：跨核 TLB 失效 + 回执（协议 / 换栈 / 钩子 / 对象 / 夹具）。
+
+    R4 最值钱的一条教训写在这道 pin 里 —— 目标核处理失效请求时**不能跑在
+    被打断任务的栈上**：那个栈很可能就在待失效的窗口里，而失效动作要在窗口
+    内重装页表，于是函数序言的第一条栈写就 refill 致命，次核停机后永不回执。
+    四层断言，每层都带「改坏必须报出来」的自检：
+
+      1) 协议骨架五处在（槽 / 发布点 / 目标核写 ack / drop 负控制 / last_rc）；
+      2) 次核入口里，Trap 栈符号出现在 `bl la_smp_trap_c` **之前**；把那段
+         换栈抠掉，同一条判据必须报出来；
+      3) IPI 处理里真的调了 poll，且 poll 里是「同空间才撤 + 撤完重铺」；
+      4) 对象级：SMP=1+SD=1 编出的目标文件有 tlb_shootdown / target_poll /
+         sd_slot；关档时一个符号都没有且 .text 为 0；把 shootdown 改名重编，
+         判据必须随之报错（证明读的是真符号）；
+      5) 夹具：main.c 有 [sd] 的正向 / 负控制 / 恢复三段与 result 判词。
+    """
+    nm = cc.replace("gcc", "nm")
+    if not os.path.exists(nm):
+        print("SMP-GATE FAIL: no LA64 nm next to %s" % cc)
+        return False
+
+    td = tempfile.mkdtemp(prefix="arkrtos-smp-r4-")
+    bad = 0
+
+    def read(rel):
+        with open(os.path.join(ROOT, rel), encoding="utf-8",
+                  errors="replace") as f:
+            return f.read().replace("\r\n", "\n")
+
+    sd_c = read(SD_C)
+    ctx = read(LA64_CTX)
+    smp_c = read(SMP_C)
+    main_c = read(MAIN_C)
+
+    # --- 1) 协议骨架 ---
+    for m in R4_C_MARKERS:
+        if m not in sd_c:
+            print("SMP-GATE FAIL: %s lost an R4 marker: %r" % (SD_C, m[:54]))
+            bad += 1
+        elif m in sd_c.replace(m, "/* removed */"):
+            print("SMP-GATE FAIL: pin R4 self-check missed a removed marker: %r"
+                  % m[:44])
+            bad += 1
+        else:
+            print("ok: pin R4 marker present and self-checked (%s...)" % m[:34])
+
+    for m in R4_POLL_MARKERS:
+        if m not in sd_c:
+            print("SMP-GATE FAIL: %s lost a poll marker: %r" % (SD_C, m[:54]))
+            bad += 1
+        else:
+            print("ok: pin R4 poll marker present (%s...)" % m[:34])
+
+    # --- 2) 次核入口先换栈再进 C ---
+    def stack_switch_first(text):
+        i = text.find(R4_CTX_TRAP_CALL)
+        if i < 0:
+            return False
+        j = text.find("la_smp_trap_entry:")
+        if (j < 0) or (j > i):
+            return False
+        head = text[j:i]
+        return (R4_CTX_STACK_SYM in head) and ("#endif" not in head)
+
+    if not stack_switch_first(ctx):
+        print("SMP-GATE FAIL: %s does not switch to the per-core trap stack "
+              "before `bl la_smp_trap_c` (an IPI doing TLB work would run on a "
+              "stack that lives inside the window being invalidated)"
+              % LA64_CTX)
+        bad += 1
+    else:
+        # 改成「不以原符号为前缀」的名字：写成 arkrtos_smp_trap_stacks_x
+        # 会让子串判据照样命中，自检直接假绿（实测踩过）。
+        mut = ctx.replace("la.abs  $t2, " + R4_CTX_STACK_SYM,
+                          "la.abs  $t2, ark_smp_trap_stack_blk", 1)
+        if stack_switch_first(mut):
+            print("SMP-GATE FAIL: pin R4 stack check is not specific (removing "
+                  "the switch still passes)")
+            bad += 1
+        else:
+            print("ok: LA64 R4 (trap stack taken before calling C, self-checked)")
+
+    # --- 3) IPI 钩子 ---
+    if "arkrtos_smp_sd_target_poll();" not in smp_c:
+        print("SMP-GATE FAIL: %s never calls arkrtos_smp_sd_target_poll() (the "
+              "request would sit in the slot forever)" % SMP_C)
+        bad += 1
+    else:
+        print("ok: IPI handler polls the shootdown slot")
+
+    # --- 4) 对象级 ---
+    key = os.path.join(td, "arkrtos_sign_key_local.h")
+    with open(key, "w", encoding="utf-8") as f:
+        f.write("#ifndef ARKRTOS_SIGN_KEY_LOCAL_H\n"
+                "#define ARKRTOS_SIGN_KEY_LOCAL_H\n"
+                "#define ARKRTOS_IMAGE_SIGN_KEY { " +
+                ", ".join("0x%02X" % i for i in range(32)) + " }\n"
+                "#endif\n")
+
+    inc = ["-I" + td]
+    inc += ["-I" + os.path.join(ROOT, x) for x in LA64_INCLUDES]
+    base = ["-march=loongarch64", "-mabi=lp64d", "-std=c99", "-c",
+            "-include", "arkrtos_board_config.h",
+            "-DARKRTOS_SIGN_KEY_LOCAL=1",
+            "-DARKRTOS_BOARD_CONFIG=\"arkrtos_board_config.h\""]
+    on_defs = ["-DARKRTOS_USE_SMP=1", "-DARKRTOS_CPU_NUM=2",
+               "-DARKRTOS_USE_SMP_SCHED=1", "-DARKRTOS_USE_SMP_TLB_SD=1"]
+
+    def build_sd(tag, on, path=None):
+        obj = os.path.join(td, "sd_%s.o" % tag)
+        cmd = ([cc] + base + (on_defs if on else [])
+               + ["-o", obj, path or os.path.join(ROOT, SD_C)] + inc)
+        rr = subprocess.run(cmd, cwd=ROOT, capture_output=True,
+                            encoding="utf-8", errors="replace")
+        if rr.returncode != 0:
+            print("SMP-GATE FAIL: shootdown.c does not build with SD on=%d"
+                  % int(on))
+            print((((rr.stdout or "") + (rr.stderr or "")).strip())[-900:])
+            return None
+        return obj
+
+    def syms(obj):
+        rr = subprocess.run([nm, obj], capture_output=True,
+                            encoding="utf-8", errors="replace")
+        return (rr.stdout or "") + (rr.stderr or "")
+
+    want = ["arkrtos_smp_tlb_shootdown", "arkrtos_smp_sd_target_poll",
+            "arkrtos_smp_sd_slot", "arkrtos_smp_sd_drop"]
+    on_obj = build_sd("on", True)
+    off_obj = build_sd("off", False)
+    if (on_obj is None) or (off_obj is None):
+        bad += 1
+    else:
+        on_syms = syms(on_obj)
+        off_syms = syms(off_obj)
+        missing = [w for w in want if w not in on_syms]
+        leaked = [w for w in want if w in off_syms]
+        if missing:
+            print("SMP-GATE FAIL: SD=1 object has no %s (the R4 protocol got "
+                  "compiled out)" % ", ".join(missing))
+            bad += 1
+        elif leaked:
+            print("SMP-GATE FAIL: default object still has %s (the default "
+                  "build must not pay for R4)" % ", ".join(leaked))
+            bad += 1
+        else:
+            print("ok: R4 symbols exist only in the SMP=1 + SD=1 object")
+
+        # 自检：改名后同一判据必须报出来
+        raw = open(os.path.join(ROOT, SD_C), "rb").read()
+        mut_src = os.path.join(td, "sd_mut.c")
+        with open(mut_src, "wb") as f:
+            f.write(raw.replace(b"arkrtos_smp_tlb_shootdown",
+                                b"arkrtos_smp_tlb_shootdowx"))
+        mut_obj = build_sd("mut", True, mut_src)
+        if mut_obj is None:
+            bad += 1
+        elif "arkrtos_smp_tlb_shootdown" in syms(mut_obj):
+            print("SMP-GATE FAIL: renaming the entry point did not change the "
+                  "checked object (the pin is not looking at the real symbol)")
+            bad += 1
+        else:
+            print("ok: LA64 R4 self-check (renaming the entry removes the "
+                  "checked symbol)")
+
+    # --- 5) 夹具 ---
+    miss_fx = [m for m in R4_FIXTURE_MARKERS if m not in main_c]
+    if miss_fx:
+        print("SMP-GATE FAIL: the QEMU fixture lost %r (R4 would be unmeasured)"
+              % miss_fx[0])
+        bad += 1
+    else:
+        print("ok: the QEMU fixture prints and judges the shootdown handshake")
+
+    shutil.rmtree(td, ignore_errors=True)
+    return bad == 0
+
 def run_la64_smp_sched(cc):
     """pin W：④ AMP 调度分核（真编译两档 + 关档零内容 + 三处跳过各有开关）。"""
     od = cc.replace("gcc", "objdump")
@@ -1603,6 +1822,8 @@ def main():
         return 1
     if not run_la64_pin_r3(la):
         return 1
+    if not run_la64_pin_r4(la):
+        return 1
     if not run_la64_smp_sched(la):
         return 1
     if not run_la64_smp_balance(la):
@@ -1616,7 +1837,7 @@ def main():
         return 1
 
     print("SMP-GATE OK (host accounting + %d ARM ON-path files + LA64 pin "
-          "U/V/R1/R2/R3/W/Y + RV32 pin X, CPU_NUM=4/2)" % len(TARGETS))
+          "U/V/R1/R2/R3/R4/W/Y + RV32 pin X, CPU_NUM=4/2)" % len(TARGETS))
     return 0
 
 if __name__ == "__main__":

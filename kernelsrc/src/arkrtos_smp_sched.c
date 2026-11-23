@@ -973,6 +973,23 @@ uint8 arkrtos_smp_sched_owned_by_other(int32 task_idx)
     return (s_owner[task_idx] != 0u) ? 1u : 0u;
 }
 
+uint32 arkrtos_smp_sched_win_space(uint32 cpu)
+{
+#if (ARK_SMP_WIN == 1)
+    if(cpu >= (uint32)ARKRTOS_CPU_NUM)
+    {
+        return 0xFFFFFFFFu;
+    }
+    /* 与 win_stat 同一条理由：首读可能早于第一次节拍，不先建状态就会把
+     * .bss 的 0 读成「装着空间 0」—— 那是空间号 0 本身，不是「不知道」。 */
+    sms_lazy_init();
+    return s_win_space[cpu];
+#else
+    (void)cpu;
+    return 0xFFFFFFFFu;
+#endif
+}
+
 int32 arkrtos_smp_sched_win_stat(uint32 *out)
 {
 #if (ARK_SMP_WIN == 1)

@@ -147,6 +147,15 @@ void arkrtos_smp_sched_prepare(void *frame);
 */
 int32 arkrtos_smp_sched_win_stat(uint32 *out);
 
+/**
+* @brief 某核当前装着的窗口空间号（R4：失效回执要判断「该不该撤」）
+* @param cpu 硬件核号
+* @return 空间号；0xFFFFFFFF = 不知道 / 该核没装过 / 本档没有每核窗口
+* @note 「不知道」不许当成 0：空间 0 是真实空间，混起来会让目标核去撤一个
+*       它根本没有的条目，然后回一个看起来成功的回执。
+*/
+uint32 arkrtos_smp_sched_win_space(uint32 cpu);
+
 
 #if (ARKRTOS_USE_SMP_BALANCE == 1)
 /**

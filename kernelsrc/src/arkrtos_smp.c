@@ -30,6 +30,9 @@
 #if (ARKRTOS_USE_SMP_SCHED == 1)
 #include "arkrtos_smp_sched.h"
 #endif
+#if (ARKRTOS_USE_SMP_TLB_SD == 1)
+#include "arkrtos_smp_shootdown.h"   /* R4：失效请求的目标侧 */
+#endif
 
 /* 弱符号：armclang / armcc 认 __weak，GCC 认 __attribute__((weak))。
  * 宿主（MinGW）上弱定义会被老 ld 当成 .eh_frame 的坏重定位而链接失败，
@@ -323,6 +326,12 @@ ARKRTOS_SMP_WEAK void arkrtos_smp_ipi_handler(void)
     }
 
     arkrtos_smp_cpu[cpu].ipi_count++;
+
+#if (ARKRTOS_USE_SMP_TLB_SD == 1)
+    /* R4：先处理失效请求，再管 R1 的回执 —— 失效这件事有明确的前后关系
+     * （发起核在等），而「回一个 IPI」只是通路读数，晚一步没有影响。 */
+    arkrtos_smp_sd_target_poll();
+#endif
 
     /* R1 的双向读数：主核登记了「下一个 IPI 顺手回一个」时，次核在这里
      * 回一个给 CPU0。只在次核上做（cpu != 0），并且回完就清登记——

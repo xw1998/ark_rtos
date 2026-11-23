@@ -62,6 +62,24 @@ config ARKRTOS_USE_SMP_BALANCE
 	  当场致命停机。要求 ARKRTOS_USE_SMP_SCHED=1 与 ARKRTOS_CPU_NUM>=2
 	  （不满足直接 #error）。默认关，关档下候选表与策略都不编进来。
 
+config ARKRTOS_USE_SMP_TLB_SD
+	bool "Cross-core TLB invalidation with acknowledgement (R4)"
+	default n
+	depends on ARKRTOS_USE_SMP
+	help
+	  跨核 TLB 失效 + 回执。发起核给每个在线核写一条请求（空间 / VA /
+	  页数 / 序号），发 IPI 后**等目标核把 ack 写成同一个序号**；目标核
+	  在自己的 IPI 处理里按请求「撤旧 -> 按账本重铺 -> 按索引读回自证」，
+	  跳过与失败都如实记账并照旧回执。
+
+	  它**不是**完整 shootdown：每核一条请求槽、一次只覆盖一个连续区间、
+	  没有批量合并、没有精细页范围（实际做的是整窗重铺），也没有在真机上
+	  验证过竞态与一致性协议。而且本载体没有可用的 MTLB 读回，它证明的是
+	  「请求被处理并回执」，不是「旧条目确实消失」。
+
+	  要求 ARKRTOS_USE_SMP=1 且 ARKRTOS_CPU_NUM>=2（不满足直接 #error）。
+	  默认关，关档下模块编成空目标，体积与行为逐位不变。
+
 	bool "Task stack usage statistics"
 	default y
 	help

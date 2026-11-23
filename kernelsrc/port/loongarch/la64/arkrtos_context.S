@@ -436,18 +436,29 @@ la_smp_trap_entry:
      * （la_smp_trap_c）。它返回的帧**可能已经是另一个任务的帧**——次核
      * 在定时器里换任务就是靠这一手，所以先把 sp 换成返回的帧，下面的
      * 恢复序列才会从正确的帧里取寄存器。 */
-    move    $a0, $sp
-    csrrd   $a1, 0x40
-    andi    $a1, $a1, 0x3ff
+    /* R4：**必须先换到本核静态栈再进 C**。被打断任务的栈可能就落在
+     * 「即将被失效/重装」的 App 窗口里（跨核 TLB shootdown 的 IPI 处理
+     * 要在窗口内重装页表），在那个栈上跑 C 会在函数序言的第一条栈写入
+     * 上 refill 致命 —— 实测 badv=0x02100568（任务栈页）era=install 的
+     * 序言，次核停机后永不回执。帧的 256 字节已全部落在被打断的栈上，
+     * 这里只把「帧指针」留在 callee-saved 的 s1（原值上面已存进帧）。 */
+    move    $s1, $sp
+    csrrd   $t1, 0x40
+    andi    $t1, $t1, 0x3ff
+    la.abs  $t2, arkrtos_smp_trap_stacks
+    li.d    $t3, ARKRTOS_SMP_TRAP_STACK_SIZE
+    mul.d   $t4, $t1, $t3
+    add.d   $t2, $t2, $t4
+    add.d   $sp, $t2, $t3           /* sp = 本核 trap 栈顶 */
+    move    $a0, $s1                /* a0 = 帧 */
+    move    $a1, $t1                /* a1 = 本核号（同上 CSR 0x40）*/
     bl      la_smp_trap_c
-    move    $sp, $a0
+    move    $s1, $a0                /* 目标帧可能已被换成另一个任务 */
 
     /* R3：目标帧可能落在另一个 App 的页里，而「装窗口」与「补 PRMD 的
-     * PPLV」都必须在新窗口下作用于新帧。此刻 sp 还指向被打断任务的栈
-     * （那个栈本身可能就在旧窗口里），所以先换到本核的静态栈再进 C ——
-     * 与引导核 la_switch_prepare 同形。prepare 自己不再碰栈以外的东西，
-     * 返回之后本段只按帧指针恢复寄存器。 */
-    move    $s1, $sp                /* s1 = 目标帧（callee-saved，跨 C 调用有效） */
+     * PPLV」都必须在新窗口下作用于新帧 —— 所以 prepare 也必须跑在本核
+     * 静态栈上。R4 已把换栈提前到进 C 之前，这里是幂等再设一次（不依赖
+     * 上面那段是否被编译），s1 此刻是目标帧而非 sp。 */
     csrrd   $t1, 0x40               /* CPUID */
     andi    $t1, $t1, 0x3ff
     la.abs  $sp, arkrtos_smp_trap_stacks

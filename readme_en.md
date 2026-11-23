@@ -233,15 +233,31 @@ board self-test:
 >
 > **SMP** on LA64 (all measured on QEMU `-smp 2`): secondary bring-up, IPI path, per-core scheduling
 > (AMP - one global scheduler, tasks migrated explicitly by `arkrtos_smp_sched_task_to()`), AMP load
-> balancing, the main-core IPI receive path (R1), secondary paging (R2) and cross-core shared VA (R3).
+> balancing, the main-core IPI receive path (R1), secondary paging (R2), cross-core shared VA (R3)
+> and cross-core TLB invalidation with acknowledgement (R4).
 > R3 means a secondary installs the task's space window into its own TLB before switching to it
 > (proved by an indexed read-back), sets the restore privilege from the frame's own return address,
 > and both cores read/write the same physical frame through the same window VA (reading
-> `[shva] win inst=1 rc=0 space=0` / `ack=1 core1=1 data=0x00001235` / `result=ok`). R1-R3 are only
-> three of the five prerequisites for TLB shootdown; R4 (invalidation receipt) and R5 (silicon) are
-> not done, so **shootdown is still not implemented**. A task on a secondary still may not call kernel
-> APIs (SVC there is a fatal stop), so none of this is symmetric multiprocessing. See
-> docs/QEMU模拟器移植与验证.en.md sections 9.10-9.12.
+> `[shva] win inst=1 rc=0 space=0` / `ack=1 core1=1 data=0x00001235` / `result=ok`).
+> R4 publishes a request by `seq` and waits for **the target core to write `ack` equal to that
+> `seq`** (a counter written by the target, not an initiator spin count); the target, inside the IPI,
+> does "drop old -> rebuild from the ledger -> indexed read-back proof" and records skips and
+> failures honestly. Readings `[sd] pos rc=0 dack=1 dinval=1` / negative control
+> `[sd] neg rc=-2 dack=0` (target saw it and refused to ack) / `[sd] result=ok`; default build zero
+> footprint, byte-identical to the R3 baseline. The defect really fixed this round: the secondary
+> trap entry used to enter C **on the interrupted task's stack**, which may live in the very window VA
+> being invalidated, so the first store died with a refill and the ack never came; following the Linux
+> convention the **trap entry now always switches to this core's Trap stack** (which also grew from
+> 4 KB to 8 KB).
+> R1-R4 are only four of the five prerequisites for TLB shootdown; **R5 (silicon) is not done**, so
+> **shootdown still counts only as "demonstrated on QEMU" and must not be announced as supported**:
+> method-wise it wakes the target to drop by VA and rebuild from the ledger, one request slot per
+> core, one contiguous range per request, no batching, no fine-grained page range, and races and
+> coherence have not been verified on real hardware. It also proves "the request was processed and
+> acknowledged", **not "the stale entry really disappeared"** (`tlbsrch` and MTLB `tlbrd` are
+> unusable on QEMU, see section 9.12.4). A task on a secondary still may not call kernel APIs (SVC
+> there is a fatal stop), so none of this is symmetric multiprocessing. See
+> docs/QEMU模拟器移植与验证.en.md sections 9.10-9.13.
 
 ### The architecture abstraction layer
 

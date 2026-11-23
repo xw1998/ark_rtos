@@ -315,6 +315,14 @@ static void test_before_init(void)
     CK_I(win_stat(1), 0);
     CK_I(win_stat(2), 0xFFFFFFFFu);
     CK_I(arkrtos_smp_sched_win_stat(0), -1);
+
+    /* R4：单核读数口（失效协议问「本核装着哪个空间」）。初始化前每核都应
+     * 回答「没装过」，越界核号也是同一个答案 —— 绝不许把 .bss 的 0 读成
+     * 「装着空间 0」（空间 0 是真实空间）。 */
+    CK_I(arkrtos_smp_sched_win_space(0), 0xFFFFFFFFu);
+    CK_I(arkrtos_smp_sched_win_space(1), 0xFFFFFFFFu);
+    CK_I(arkrtos_smp_sched_win_space(2), 0xFFFFFFFFu);
+    CK_I(arkrtos_smp_sched_win_space(3), 0xFFFFFFFFu);   /* 越界（CPU_NUM=3） */
 }
 
 /* ------------------------------------------------------------
@@ -356,6 +364,12 @@ static void test_user_task_window(void)
     CK_I(win_stat(0), base + 1u);
     CK_I(win_stat(1), 0);
     CK_I(win_stat(2), 3u);
+
+    /* 装成功之后，单核读数口必须跟账本一致（R4 的目标核就是靠它决定
+     * 「这个空间在我这儿有没有条目」）。夹具把次核号设成 1，所以答案落
+     * 在核 1 上；核 0 没装过，必须仍是「不知道」。 */
+    CK_I(arkrtos_smp_sched_win_space(1), 3u);
+    CK_I(arkrtos_smp_sched_win_space(0), 0xFFFFFFFFu);  /* 别的核没动 */
 
     /* 一次性消费：同一份 pending 不许装第二次（重复装=白白冲一次 TLB）。 */
     arkrtos_smp_sched_prepare((void *)frame);

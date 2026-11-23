@@ -252,6 +252,15 @@
 #error "ARKRTOS_USE_SMP_BALANCE requires ARKRTOS_CPU_NUM >= 2: there is no secondary core to balance onto."
 #endif
 
+/* 跨核 TLB 失效回执（ARKRTOS_USE_SMP_TLB_SD）依赖 IPI 与第二颗核：
+ * 没有目标核就没有回执的对象，没有 IPI 就没有通知通路。 */
+#if (ARKRTOS_USE_SMP_TLB_SD == 1) && (ARKRTOS_USE_SMP != 1)
+#error "ARKRTOS_USE_SMP_TLB_SD requires ARKRTOS_USE_SMP=1: the ack protocol runs on the IPI path."
+#endif
+#if (ARKRTOS_USE_SMP_TLB_SD == 1) && (ARKRTOS_CPU_NUM < 2)
+#error "ARKRTOS_USE_SMP_TLB_SD requires ARKRTOS_CPU_NUM >= 2: with one core there is nothing to invalidate elsewhere."
+#endif
+
 #define ARKRTOS_MS_TO_TICK(ms)      ((ms) * 1000 / ARKRTOS_TICK_PERIOD_US)
 
 /* ============================================================

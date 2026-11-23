@@ -46,7 +46,8 @@
 - [kernelsrc/include/arkrtos_shell_auth.h](#kernelsrcincludearkrtos_shell_authh)（5 项）
 - [kernelsrc/include/arkrtos_sign.h](#kernelsrcincludearkrtos_signh)（10 项）
 - [kernelsrc/include/arkrtos_smp.h](#kernelsrcincludearkrtos_smph)（12 项）
-- [kernelsrc/include/arkrtos_smp_sched.h](#kernelsrcincludearkrtos_smp_schedh)（17 项）
+- [kernelsrc/include/arkrtos_smp_sched.h](#kernelsrcincludearkrtos_smp_schedh)（18 项）
+- [kernelsrc/include/arkrtos_smp_shootdown.h](#kernelsrcincludearkrtos_smp_shootdownh)（3 项）
 - [kernelsrc/include/arkrtos_softbus.h](#kernelsrcincludearkrtos_softbush)（5 项）
 - [kernelsrc/include/arkrtos_spin.h](#kernelsrcincludearkrtos_spinh)（10 项）
 - [kernelsrc/include/arkrtos_svc_abi.h](#kernelsrcincludearkrtos_svc_abih)（4 项）
@@ -7537,6 +7538,18 @@ int32 arkrtos_smp_sched_win_stat(uint32 *out);
 [2] 次核当前装着的空间号（0xFFFFFFFF=没装过）
 **返回**：0=成功；-1=out 为空 / 没有次核 / 本档没有次核窗口这条路
 
+### `uint32 arkrtos_smp_sched_win_space(uint32 cpu);`
+
+```c
+uint32 arkrtos_smp_sched_win_space(uint32 cpu);
+```
+
+**某核当前装着的窗口空间号（R4：失效回执要判断「该不该撤」）**
+- `cpu`：硬件核号
+**返回**：空间号；0xFFFFFFFF = 不知道 / 该核没装过 / 本档没有每核窗口
+> 说明：「不知道」不许当成 0：空间 0 是真实空间，混起来会让目标核去撤一个
+它根本没有的条目，然后回一个看起来成功的回执。
+
 ### `#define ARKRTOS_SMP_BALANCE_MAX        4`
 
 ```c
@@ -7590,6 +7603,56 @@ int32 arkrtos_smp_sched_balance_stat(uint32 *out);
 - `out`：至少 4 个字的数组，依次写：自动迁出次数 / 自动要回次数 /
 "次核空闲但没有可迁候选"的拍数 / 本策略跑了多少拍
 **返回**：0=成功；-1=out 为空
+
+## kernelsrc/include/arkrtos_smp_shootdown.h
+
+**跨核 TLB 失效 + 回执（R4，默认关）**
+这里做的**不是**「发个 IPI 然后假定目标核已经失效」。协议是：
+发起核：给每个在线核写一条请求（空间 / VA / 页数 / 序号），
+发 IPI，然后**等那个核把 ack 写回序号**；
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**每个目标核一条请求槽：seq 是发布点（最后写），ack 是回执**
+arkrtos_smp_ipi_handler() 在打开 ARKRTOS_USE_SMP_TLB_SD 后于尾部调用
+arkrtos_smp_sd_target_poll()，它按本核下标取槽，先读 seq 再读参数：
+发起侧先写 space/va/pages/last_rc 再写 seq（两条 __sync_synchronize
+夹住），所以目标核看到新 seq 时参数一定已经是这条请求的。
+目标核处理完把 ack 写成同一个 seq —— 回执由目标核写、发起核只读。
+
+### `int32 arkrtos_smp_tlb_shootdown(uint32 space, unsigned long va, uint32`
+
+```c
+int32 arkrtos_smp_tlb_shootdown(uint32 space, unsigned long va, uint32 pages);
+```
+
+**让所有在线核失效某个空间的一段 VA（R4）**
+- `space`：空间号
+- `va`：起始 VA（按 4 KB 对齐）
+- `pages`：页数（>= 1）
+**返回**：0 = 全部目标核都回了执
+**返回**：-1 = 参数/环境不允许（页数为 0、VA 未对齐、没有第二个在线核）
+**返回**：-2 = 有目标核在迭代上限内没回执（如实失败，绝不当成功）
+**返回**：-3 = IPI 发不出去
+发起核自己**不**在这里撤条目：它的窗口由调用方按自己的上下文
+管（activate / install_space_window 都会在改完账本后自行撤铺），
+在这里再撤一次只会把调用方的栈搞掉。
+> 说明：只能在任务上下文调用（这里会自旋等回执，占着 CPU 不放）；
+中断上下文调用会把目标核饿死。
+
+### `void arkrtos_smp_sd_target_poll(void);`
+
+```c
+void arkrtos_smp_sd_target_poll(void);
+```
+
+**目标侧：在 IPI 处理里处理本核的请求槽（R4）**
+arkrtos_smp_ipi_handler() 在打开本开关后会调用它。幂等：
+同一个 seq 处理过一次就不再处理（ack 已经是它了）。
 
 ## kernelsrc/include/arkrtos_softbus.h
 

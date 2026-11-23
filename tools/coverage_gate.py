@@ -859,6 +859,19 @@ CASES = [
                "-Ikernelsrc/fs/littlefs",
                "-Ikernelsrc/components/ark_vfs/include",
                "-Ikernelsrc/components/ark_softbus/include"]}),
+    # --- 2026-11-23：跨核 TLB 失效 + 回执（R4）---
+    # 协议本体是纯软件状态机（请求槽 / 发布点 / 目标核写 ack / drop 负控制），
+    # 宿主上可以用同步投递的 IPI 桩逐条摆出来：正常回执、空间不符跳过、
+    # 装窗口失败、不看回执的负控制、IPI 发不出去、同一请求不重复处理。
+    # 不在本档：真实 IPI 投递延迟、真实 TLB 条目是否消失（只有多核板能证）。
+    ("smpshootdown", "kernelsrc/tests/test_smp_shootdown_host.c",
+     ["kernelsrc/src/arkrtos_smp_shootdown.c"],
+     [BOARD_QEMU_LA64_DEFS[0], "-include", "arkrtos_board_config.h",
+      SIGN_KEY_DEF, "-DARKRTOS_USE_SMP=1", "-DARKRTOS_CPU_NUM=2",
+      "-DARKRTOS_USE_SMP_SCHED=1", "-DARKRTOS_USE_SMP_TLB_SD=1",
+      "-fno-asynchronous-unwind-tables"],
+     "SMP-SD-HOST OK",
+     {"incs": ["-Iboard/qemu_loongarch64", "-Ikernelsrc/port/loongarch/la64"]}),
 ]
 
 

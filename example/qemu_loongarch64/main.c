@@ -41,6 +41,9 @@
 #if (ARKRTOS_USE_SMP_SCHED == 1)
 #include "arkrtos_smp_sched.h" /* 调度分核自检：次核运行队列 / 显式迁移（默认关时空头） */
 #endif
+#if (ARKRTOS_USE_SMP_TLB_SD == 1)
+#include "arkrtos_smp_shootdown.h" /* 跨核 TLB 失效 + 回执（R4，默认关时空头） */
+#endif
 #if (ARKRTOS_USE_PAGING == 1)
 #include "arkrtos_mpu.h"       /* 分页后端：arkrtos_paging_bind_task（R3 共享 VA 演示用） */
 #endif
@@ -1535,6 +1538,119 @@ static void shva_win_leave(void)
     ARKRTOS_EXIT_CRITICAL(s_shva_irq);
 }
 
+#if (ARKRTOS_USE_SMP_TLB_SD == 1)
+/* 跨核 TLB 失效 + 回执自检（R4）
+ * @details 只有在次核真的装过 space 0 的窗口时才有可证的对象：本函数由
+ *          [shva] 观测者在「次核已经跑起窗口里的任务」之后调用，因此
+ *          arkrtos_smp_sched_win_space(1) 必须等于 0（这是前置条件，先打印
+ *          再判，不满足就如实 FAIL，不把 skip 当成功）。
+ *
+ *          三段读数：
+ *            1) 正向：arkrtos_smp_tlb_shootdown(0, 任务栈页 VA, 1) 必须回 0，
+ *               且 sd_ack / sd_inval 各涨 1。sd_ack 由**目标核写、发起核读**，
+ *               所以「发完就假装成功」的假实现过不了这一条；
+ *            2) 负控制：sd_drop 置 1，目标核看了请求但故意不回执 -> 必须
+ *               回 -2 且 sd_timeout 涨 1（证明没回执不会被当成成功）；
+ *            3) 恢复：sd_drop 清 0 再来一次 -> 必须回 0 且 sd_inval 再涨 1
+ *               （证明 -2 没把协议搞坏）。
+ *
+ *          **不证明的事**：旧 TLB 条目「确实消失了」这一层没有数据级证明
+ *          （需要 remap API 或真机观察访存行为），本档只证「请求被目标核
+ *          处理并回执」。真机未验证（R5）。 */
+static void sd_self_test(void)
+{
+    uint32 wspace;
+    uint32 a0;
+    uint32 k0;
+    uint32 i0;
+    uint32 t0;
+    uint32 a1;
+    uint32 k1;
+    uint32 i1;
+    uint32 t1;
+    uint32 a2;
+    uint32 k2;
+    uint32 i_ini;
+    uint32 i_end;
+    int32  rc_pos;
+    int32  rc_neg;
+    int32  rc_rec;
+
+    wspace = arkrtos_smp_sched_win_space(1u);
+
+    a0 = arkrtos_smp_sd_ack;
+    k0 = arkrtos_smp_sd_inval;
+    i0 = arkrtos_smp_sd_skip;
+    t0 = arkrtos_smp_sd_timeout;
+
+    i_ini = arkrtos_smp_cpu[1].ipi_count;
+    rc_pos = arkrtos_smp_tlb_shootdown(0u, (unsigned long)SHVA_STACK_VA, 1u);
+    i_end = arkrtos_smp_cpu[1].ipi_count;
+
+    a1 = arkrtos_smp_sd_ack;
+    k1 = arkrtos_smp_sd_inval;
+    i1 = arkrtos_smp_sd_skip;
+    t1 = arkrtos_smp_sd_timeout;
+
+    arkrtos_board_puts("[sd] win=");
+    arkrtos_board_putu(wspace);
+    arkrtos_board_puts(" pos rc=");
+    arkrtos_board_putu((uint32)rc_pos);
+    arkrtos_board_puts(" dack=");
+    arkrtos_board_putu(a1 - a0);
+    arkrtos_board_puts(" dinval=");
+    arkrtos_board_putu(k1 - k0);
+    arkrtos_board_puts(" dskip=");
+    arkrtos_board_putu(i1 - i0);
+    arkrtos_board_puts(" dtimeout=");
+    arkrtos_board_putu(t1 - t0);
+    arkrtos_board_puts(" dipi1=");
+    arkrtos_board_putu(i_end - i_ini);
+    arkrtos_board_puts(" seq1=");
+    arkrtos_board_putu(arkrtos_smp_sd_slot[1].seq);
+    arkrtos_board_puts(" ack1=");
+    arkrtos_board_putu(arkrtos_smp_sd_slot[1].ack);
+    arkrtos_board_puts(" rc1=");
+    arkrtos_board_putu(arkrtos_smp_sd_slot[1].last_rc);
+    arkrtos_board_puts("\n");
+
+    /* 负控制：目标核看了请求但不回执 */
+    arkrtos_smp_sd_drop = 1u;
+    rc_neg = arkrtos_smp_tlb_shootdown(0u, (unsigned long)SHVA_STACK_VA, 1u);
+    arkrtos_smp_sd_drop = 0u;
+    a2 = arkrtos_smp_sd_ack;
+    k2 = arkrtos_smp_sd_inval;
+    arkrtos_board_puts("[sd] neg rc=");
+    arkrtos_board_putu((uint32)rc_neg);
+    arkrtos_board_puts(" dack=");
+    arkrtos_board_putu(a2 - a1);
+    arkrtos_board_puts("\n");
+
+    rc_rec = arkrtos_smp_tlb_shootdown(0u, (unsigned long)SHVA_STACK_VA, 1u);
+    arkrtos_board_puts("[sd] rec rc=");
+    arkrtos_board_putu((uint32)rc_rec);
+    arkrtos_board_puts(" dack=");
+    arkrtos_board_putu(arkrtos_smp_sd_ack - a2);
+    arkrtos_board_puts(" dinval=");
+    arkrtos_board_putu(arkrtos_smp_sd_inval - k2);
+    arkrtos_board_puts("\n");
+
+    arkrtos_board_puts("[sd] result=");
+    if((wspace == 0u) &&
+       (rc_pos == 0) && ((a1 - a0) >= 1u) && ((k1 - k0) == 1u) &&
+       ((i1 - i0) == 0u) &&
+       (rc_neg == -2) && ((a2 - a1) == 0u) &&
+       (rc_rec == 0) && ((arkrtos_smp_sd_inval - k2) == 1u))
+    {
+        arkrtos_board_puts("ok\n");
+    }
+    else
+    {
+        arkrtos_board_puts("FAIL(shootdown ack)\n");
+    }
+}
+#endif /* ARKRTOS_USE_SMP_TLB_SD */
+
 /* CPU0 侧观测者：迁移 -> 等 ACK -> 收回 -> 确认归属 -> 停掉任务 -> 判结果 */
 static void task_shva_chk(void)
 {
@@ -1613,6 +1729,19 @@ static void task_shva_chk(void)
         win_rc_bad = 0xEEEEu;
     }
     shva_win_leave();
+#if (ARKRTOS_USE_SMP_TLB_SD == 1)
+    /* R4：次核此刻正跑着窗口里的任务（ack == 1 的前提），窗口一定装着
+     * space 0 —— 这是跨核失效唯一有意义的对象。任务还没迁回，别先收回。 */
+    if(ack == 1u)
+    {
+        sd_self_test();
+    }
+    else
+    {
+        arkrtos_board_puts("[sd] skip: core1 task not up\n");
+        arkrtos_board_puts("[sd] result=FAIL(shootdown ack)\n");
+    }
+#endif
 
     if(s_id_shva > 0)
     {

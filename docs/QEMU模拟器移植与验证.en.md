@@ -4676,6 +4676,202 @@ self-check defect fix). **Not verified on real hardware.**
    run in different spaces their windows are not supposed to agree. Coherence is guaranteed by the
    scheduler (whoever runs in a space installs it), not by hardware.
 
+### 9.13 (9) Cross-core TLB invalidation + acknowledgement (R4, 2026-11-23, QEMU LA64 `-smp 2` executed)
+
+#### 9.13.1 The gap: R3 gives the secondary core "the entries of that moment", but no way to revoke them
+
+After R3 both cores can read/write the same physical frame through the same window VA. But that is an
+"install once, use forever" arrangement: the secondary core's entries are a static copy it wrote itself with
+`tlbwr` before switching tasks. The boot core changes three kinds of things at run time -- space switch, COW
+rewrite of a page, `mprotect` permission change -- and after changing them it only drops its own 256 entries;
+the secondary core still holds the old ones:
+
+- the secondary core keeps accessing memory through stale entries and may read a **physical frame already
+  recycled to another space**;
+- worse, "the stale entry is still there and valid" and "it should have been invalidated" are **indistinguishable
+  in the readings** -- nobody is wrong, nobody reports an error.
+
+Linux solves this with shootdown: the initiator changes the page table, sends an IPI to every core that may
+cache the mapping, and **waits for their acknowledgement** (`flush_tlb_mm_range` +
+`smp_call_function_many`'s completion). R4 is the minimal usable version of that protocol. Note what R4 proves
+is not "the stale entry really disappeared" (that needs a run-time remap API or real hardware) but **that the
+protocol holds**: the request is really processed by the target core, the result is really returned, and
+failures are really reported.
+
+#### 9.13.2 Approach: one request slot per core + `seq` as the publication point + target writes `ack`
+
+| # | Change | Why it must be this way |
+|---|---|---|
+| 1 | `arkrtos_smp_shootdown.h` + `.c`: one `arkrtos_smp_sd_slot_t` per core (`seq/ack/space/va/pages/last_rc`) plus global `sd_sent/sd_ack/sd_inval/sd_skip/sd_fail/sd_timeout` | The slot is **per core**: two initiators sending at once cannot overwrite each other; `ack` is a counter written by the target, only read by the initiator |
+| 2 | Initiator: fill fields -> `__sync_synchronize()` -> write `seq` -> `__sync_synchronize()` -> send IPI | `seq` is the only publication point. Writing data after `seq` lets the target see "new sequence + old parameters" and invalidate the wrong range -- an error that is invisible in the readings |
+| 3 | Target: `arkrtos_smp_sd_target_poll()` hooked at the tail of `arkrtos_smp_ipi_handler()`, acts only when `seq != ack` (idempotent) | Idempotence is required: a re-delivered IPI, or a second one arriving during processing, must not invalidate twice |
+| 4 | The invalidation action is `arkrtos_port_paging_install_space_window(space)` (drop old -> rebuild from the ledger -> read back by index for self-proof) | This carrier's window entries are not filled by hardware page faults; the kernel writes them with `tlbwr`. **Dropping without rebuilding** makes the target's next access die with `KERNEL refill (plv0)` -- this is not caution, it is the only way to come back alive. Equivalent to Linux's "shootdown carrying the new PTE" |
+| 5 | The target really invalidates only when "the window I currently hold == the requested space"; otherwise `sd_skip++` and **still acknowledges** | Another space has no entries on this core, dropping it is meaningless; but a skip is also a processing result and the initiator must learn it, otherwise it cannot tell "skipped" from "not received" |
+| 6 | Failure also acknowledges: on `rc < 0` do `sd_fail++`, record the negative code in `last_rc`, and still write `ack` | Without `ack` the initiator can only time out with -2 -- reading "could not rebuild" as "no response", two completely different faults collapsed into one number |
+| 7 | The initiator does **not** drop its own entries | Its window is dropped and rebuilt by `activate` / `install_space_window` after the ledger change; dropping again here would destroy the caller's live stack mapping |
+| 8 | Two `#error`s in `arkrtos_config.h`: enabling `ARKRTOS_USE_SMP_TLB_SD` requires `SMP=1` and `CPU_NUM >= 2` | "Enabled but single core" would compile and always return -1 -- that is a fake feature |
+| 9 | Secondary trap entry switches to the Trap stack (`la_smp_trap_entry` in `arkrtos_context.S`), Trap stack 4096 -> 8192 | See 9.13.4 item 1: this is the defect actually fixed this round, not an opportunistic optimisation |
+
+Window geometry is unchanged: 2 MB from `0x02000000` = 256 PS=12 entries, stack page `0x02100000` is entry 8.
+The fixture requests `(space=0, va=0x02100000, pages=1)` -- a short range that really exists and is really held
+by the secondary core.
+
+#### 9.13.3 Failure codes: installed, skipped, acknowledged are three different things
+
+`arkrtos_smp_tlb_shootdown()`: `0` every target acknowledged, `-1` parameters/environment not allowed
+(zero pages, VA not 4 KB aligned, fewer than 2 online cores, online mask inconsistent with the count so nothing
+was sent), `-2` some target did not acknowledge within the iteration cap, `-3` the IPI could not be sent.
+
+The timeout is an **iteration cap** (`ARKRTOS_SMP_SD_SPINS`, default 2 million), not a time cap -- the latter is
+meaningless on QEMU (time depends on host scheduling), iteration counts are comparable on both sides. A timeout is
+**never** treated as success: `sd_timeout++` then return -2.
+
+The `sent == 0` case was added at the end: when the online count says 2 but the online mask only contains this
+core, the old implementation had `done == sent == 0` and returned 0 -- **doing nothing counted as success**.
+Judged an API defect, changed to return -1.
+
+#### 9.13.4 Lessons (five; item 1 is the defect really fixed this round)
+
+1. **The invalidation action must not run on a stack that may live in the window being invalidated.**
+   When the secondary core takes the IPI, its `sp` points at **the interrupted task's stack** -- and that task may
+   be a user task whose stack sits at the very window VA `0x02100000` being invalidated. The old trap entry did
+   "enter C on the interrupted task's stack", so the first stack write in `install_space_window`'s prologue hit the
+   **window being swapped**: `la_pg_drop_window()` had just dropped the entries and had not yet rebuilt them, so
+   that store died with `KERNEL refill (plv0) badv=0x02100568`, the secondary core halted at `idle 0`, the
+   acknowledgement never came, and the initiator timed out with -2.
+   This was not "shootdown logic written wrong", it was **wrong place to run**. The fix follows the Linux
+   convention: **the trap entry always switches to a kernel stack**. `la_smp_trap_entry` now, before
+   `bl la_smp_trap_c`, derives this core's Trap stack top from `CSR 0x40` (`CPU_ID`), switches `sp`, and puts the
+   original frame pointer in `$a0`; on return it reloads `$a0` (the target frame may already be another task).
+   Since the whole trap dispatch now runs on that stack, the Trap stack goes from 4 KB to 8 KB. **Bonus**: tick,
+   task switch and SVC paths could also run on a stack inside the window; one change closes that whole family.
+2. **The stack switch forgot `$a1` (core id) and the secondary core stopped scheduling.** The original code filled
+   `$a1` via `csrrd $a1, 0x40` and passed it to C; in the rewrite I computed the stack address from `$t1` and
+   forgot `move $a1, $t1` -- so C got a garbage core id and `[sched] cur1=0xffffffff sw=0`, the secondary core
+   stuck at "no current task". **The rewrite touched `sp` and `$a0`, and the `$a1` I also broke showed up as a
+   single `0xffffffff`** -- remember: when changing inline-assembly ABI arguments, re-check **all** of them.
+3. **Changing only the `Kconfig` default does not take effect.** The Trap stack change 4096 -> 8192 first went into
+   the default of `config/kconfig/board/Kconfig.qemu_loongarch64` and still built 4096. The effective value lives
+   in `config/qemu_loongarch64_defconfig`; after editing it you must run
+   `tools/kconfig/genboard.py --board qemu_loongarch64` to land it in
+   `board/qemu_loongarch64/arkrtos_board_config.h`. **Missing any one of the three means unchanged.**
+4. **A pin's mutation self-check was fooled by substring matching.** The pin R4 self-check breaks the source and
+   expects the check to fail. The first mutation was `arkrtos_smp_trap_stacks_x`, while the check looks for the
+   substring `arkrtos_smp_trap_stacks` -- so the mutation still matched and the self-check was falsely green.
+   Changed to `ark_smp_trap_stack_blk` (not prefixed by the original symbol) and noted it in the pin comment
+   ("actually hit"). **Any "break it and it must fail" self-check must not use a mutant containing the original
+   string.**
+5. **The `[sddbg]` diagnostic print must not be deleted, it must become a switch.** Locating item 1 relied on the
+   line "this core's ledger space `win=0` equals the requested `space=0`" -- it eliminated the tempting wrong
+   direction ("the ledger is wrong") once and for all and pushed the attention to "where it runs". That evidence
+   should not be lost: it became `ARKRTOS_SMP_SD_DEBUG` (default 0) with a comment saying what it was for.
+   Default off = zero code, zero output.
+
+#### 9.13.5 Default configuration zero footprint (byte-identical to the R3 baseline)
+
+R4 is entirely under the existing `ARKRTOS_USE_SMP_TLB_SD` (default **0**), which `arkrtos_config.h` requires to
+come with `SMP=1 && CPU_NUM>=2`. Building the default configuration twice with the same recipe:
+
+| | text | data | bss |
+|---|---|---|---|
+| R3 baseline (`62e9a99`) | 450032 | 456 | 5128740 |
+| default with R4 | 450032 | 456 | 5128740 |
+
+Byte-identical; `nm` shows 0 SD symbols (`tlb_shootdown` / `sd_target_poll` / `sd_slot` / `sd_seq` all absent).
+The Trap stack enlargement needs no separate explanation: `arkrtos_smp_trap_stacks` only exists under
+`SMP_SCHED=1`, so the default build does not compile it.
+
+#### 9.13.6 Measured readings
+
+SMP build (`-DARKRTOS_USE_SMP=1 -DARKRTOS_CPU_NUM=2 -DARKRTOS_USE_SMP_SCHED=1 -DARKRTOS_USE_SMP_TLB_SD=1`,
+board `PAGING=1 PRIV=1`), `-smp 2`, 30 s:
+
+```
+[sd] win=0 pos rc=0 dack=1 dinval=1 dskip=0 dtimeout=0 dipi1=1 seq1=1 ack1=1 rc1=0
+[sd] neg rc=4294967294 dack=0
+[sd] rec rc=0 dack=1 dinval=1
+[sd] result=ok
+[shva] win inst=1 rc=0 space=0
+[shva] ack=1 core1=1 data=0x00001235 loops=38403464
+[shva] back rc=0 owned=0 winrc=0
+[shva] result=ok
+```
+
+Line by line:
+
+- `win=0` -- the secondary core currently holds space 0's window (`0xFFFFFFFF` would mean "unknown");
+- `pos rc=0` -- the positive request returns 0: **every target wrote its own acknowledgement**;
+- `dack=1` -- `sd_ack` grew by 1; that cell is **written by the target**, not incremented by the initiator;
+- `dinval=1` -- the target really performed one "drop + rebuild", and `install_space_window`'s read-back by index
+  passed;
+- `dskip=0` / `dtimeout=0` -- neither "skipped" nor "timed out";
+- `dipi1=1` -- the secondary core's IPI counter really grew by 1 (not "sent something fake and returned");
+- `seq1=1 ack1=1` -- the slot's sequence equals its acknowledgement; the ack belongs to this request;
+- `rc1=0` -- the target recorded return code 0 (rebuilt successfully);
+- `neg rc=4294967294` = `-2` with `dack=0` -- negative control: with `sd_drop=1` the target **looked at the
+  request but refused to acknowledge**, so the initiator could only time out and `sd_ack` did not move by one.
+  This is the single most important reading in the set: it proves `dack/dinval` are not counted by the initiator;
+- `rec rc=0 dack=1 dinval=1` -- after clearing `drop` the same request works again, so the negative control left
+  no residue;
+- the four `[shva]` lines look exactly like R3 (`core1=1`, `data=0x00001235`, `loops=38403464`), showing the
+  Trap-stack switch did not break cross-core shared VA;
+- the other 8 items in the same run PASS (FS / ELF tamper / linux / execve / pipe / sig / MOD tamper / fcsr), no
+  FAIL, no `refill`, no `FATAL`, and the run continues past A/B round 28.
+
+#### 9.13.7 Gates
+
+`tools/smp_gate.py` gained **pin R4**, five assertion layers:
+
+1. Source markers: the slot array, the `seq` publication point, the target's `ack` write, the `sd_drop` negative
+   control, and `last_rc` must all exist; removing any of them must be reported;
+2. In `arkrtos_context.S`, the stack-switch symbols (`ARKRTOS_SMP_TRAP_STACK_SIZE` and the address of
+   `smp_trap_stacks`) must appear **before** the `la_smp_trap_c` call, and the order "switch stack first, then
+   enter C" is asserted;
+3. Mutation self-check one: renaming the stack switch to `ark_smp_trap_stack_blk` (not prefixed by the original
+   symbol) must make the check fail;
+4. Mutation self-check two: renaming `tlb_shootdown` must make the check fail (proving it reads real symbols);
+5. Object level: the object built with `SMP=1 + SMP_TLB_SD=1` must define `arkrtos_smp_tlb_shootdown` /
+   `arkrtos_smp_sd_target_poll` / `arkrtos_smp_sd_slot`; with the switch off none of them exists;
+6. The fixture must really print `[sd] result=` and call `sd_self_test` (asserted, not just printed).
+
+The summary line printed is: `SMP-GATE OK ... U/V/R1/R2/R3/R4/W/Y`.
+
+Host side gains a coverage case `smpshootdown` (`kernelsrc/tests/test_smp_shootdown_host.c`, 12 groups / 41
+checks, prints `SMP-SD-HOST OK`). The stub for `arkrtos_smp_send_ipi` is **synchronous delivery** (temporarily
+switch `g_cpu_id`, call `target_poll`, switch back), so the acknowledgement really is written by the target side.
+Covered: parameter rejection (`pages=0` / unaligned), no second core, normal ack, space mismatch skip, ledger
+`0xFFFFFFFF` not treated as space 0, window install failure recorded as fail with a negative `last_rc`, `drop`
+negative control -> -2, IPI send failure -> -3, idempotence (same `seq` does not re-ack/re-install), empty slot has
+no side effect, only online cores are targeted (returns -1), `CPU_NUM` traversal (one IPI per core, the initiator
+does not send to itself).
+
+Two measured figures: `arkrtos_smp_shootdown 96.88%` (new module, baseline the same) and `arkrtos_smp_sched
+98.43%` (baseline 97.89 -- the rise comes from adding 6 assertions for the new `arkrtos_smp_sched_win_space`,
+not from lowering the baseline).
+
+#### 9.13.8 Verdict and four disallowed readings
+
+Verdict: **`r4_shootdown_ack_ok_on_qemu`** -- on LA64 / QEMU `-smp 2`, the initiator publishes a request by
+`seq` and waits for acknowledgement; the target, inside the IPI, drops and rebuilds that space's window, proves it
+by reading back by index, and **writes `ack` itself**; failures and skips are accounted honestly; the negative
+control (`sd_drop=1`) leaves the initiator with -2 and no `ack` movement. Default build has zero footprint
+(byte-identical to the R3 baseline). **Real hardware not verified (R5).**
+
+1. **Not "TLB shootdown fully implemented"**: one request slot per core, one request covers a single contiguous
+   range, no batching, no fine-grained "invalidate just these pages" (what it really does is rebuild the whole
+   window), no wait queue. It proves the **protocol and the acknowledgement**, not **performance** or
+   **concurrency correctness**.
+2. **Not "the stale entry really disappeared"**: R4 proves "the target processed the request and acknowledged".
+   Proving "that old translation was really replaced" needs a run-time remappable API (or real hardware where
+   MTLB can be read back) plus a second access comparison -- on QEMU both `tlbsrch` and MTLB `tlbrd` are unusable
+   (see 9.12.4 item 5), so this **cannot be done on this machine** and is left open honestly.
+3. **`dskip=1` is not a failure**: when the target currently holds another space, the requested space has no
+   entries on it, so skipping is the **correct conclusion**, and it still acknowledges -- an acknowledgement means
+   "I looked at it", not "I invalidated it".
+4. **Not "symmetric multiprocessing"**: SVC on the secondary core is still fatal, and there is still only one
+   global scheduler; R4 only makes "a user task explicitly migrated over + IPI processing" work on the secondary
+   core. R5 (real hardware carrier) remains the only outstanding precondition in §5.4.
+
 ## 10. Enabling `-Wconversion` (2026-11-19): default image byte-identical
 
 `tools/warn_gate.py` goes from six options to seven; the new one is `-Wconversion`, which in

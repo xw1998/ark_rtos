@@ -99,6 +99,22 @@
 #define ARKRTOS_USE_SMP_BALANCE         0
 #endif
 
+/* 跨核 TLB 失效 + 回执（R4）：在 SMP/IPI 之上只加一条协议 ——
+ * 「发起核写请求 → 发 IPI → 目标核自己失效并把序号写回 → 发起核等到序号」。
+ * 回执由**目标核**写，所以「发完就返回 0」的假实现会被负控制（sd_drop）
+ * 当场打出来：发起核只能拿到 -2。
+ *
+ * 为什么需要它：R3 只保证「次核在切换那一刻拿到的是当时的条目」，引导核
+ * 之后对这个空间做 COW / 换空间 / mprotect 重写条目，次核看不到。
+ *
+ * 边界：等待是迭代上限而不是时间上限；目标核只有在「它当前装着的窗口就是
+ * 这个空间」时才真去撤（否则记 skip 并照样回执）；真机未验证（R5）。
+ * 依赖 ARKRTOS_USE_SMP=1 且 CPU_NUM>=2（在 arkrtos_config.h 里拦）。
+ * 默认关，关档下模块一个符号都不产生。 */
+#ifndef ARKRTOS_USE_SMP_TLB_SD
+#define ARKRTOS_USE_SMP_TLB_SD          0
+#endif
+
 /* 任务栈用量统计：填充图案 + 最低栈指针双手段，算每任务峰值 */
 #ifndef ARKRTOS_USE_STACK_USAGE
 #define ARKRTOS_USE_STACK_USAGE         1
