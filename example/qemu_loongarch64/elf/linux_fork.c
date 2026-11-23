@@ -173,43 +173,6 @@ static void out(const char *s)
     }
 }
 
-static void out_num(lx_long v)
-{
-    char buf[24];
-    int  i = 0;
-    unsigned long u;
-
-    if (v < 0)
-    {
-        out("-");
-        u = (unsigned long)(-v);
-    }
-    else
-    {
-        u = (unsigned long)v;
-    }
-    if (u == 0ul)
-    {
-        out("0");
-        return;
-    }
-    while ((u != 0ul) && (i < (int)(sizeof(buf) - 1)))
-    {
-        buf[i] = (char)('0' + (int)(u % 10ul));
-        u /= 10ul;
-        i++;
-    }
-    while (i > 0)
-    {
-        char one[2];
-
-        i--;
-        one[0] = buf[i];
-        one[1] = '\0';
-        out(one);
-    }
-}
-
 static int g_fail = 0;
 
 /* 把一条判据先拼成整行再一次写出。
@@ -261,6 +224,39 @@ static char *chk_num(char *p, lx_long v)
         p++;
     }
     return p;
+}
+
+
+/* 一行里带数字时也必须**一次 write 写完**。
+ * lx_write 持控制台锁只保证「一次调用不被打断」；本内核的 write 每次是一次
+ * 系统调用，所以 "parent child=" / 数字 / 换行 三次 write 之间仍然会让位，
+ * 另一个进程的整行会插在中间（实测：[fork] parent child=[fork] child pid=12）。
+ * 门禁按行读，这一行就变成「缺了 child pid」。 */
+static void out_line3(const char *a, lx_long v, const char *b)
+{
+    char  buf[200];
+    char *p = buf;
+
+    p = chk_str(p, a);
+    p = chk_num(p, v);
+    p = chk_str(p, b);
+    *p = '\0';
+    out(buf);
+}
+
+static void out_line5(const char *a, lx_long v1, const char *b, lx_long v2,
+                      const char *c)
+{
+    char  buf[200];
+    char *p = buf;
+
+    p = chk_str(p, a);
+    p = chk_num(p, v1);
+    p = chk_str(p, b);
+    p = chk_num(p, v2);
+    p = chk_str(p, c);
+    *p = '\0';
+    out(buf);
 }
 
 static void check(const char *what, lx_long got, lx_long want)
@@ -364,9 +360,7 @@ static void child_path(void)
 {
     lx_long pid = lx1(LX_GETPID, 0);
 
-    out("[fork] child pid=");
-    out_num(pid);
-    out("\n");
+    out_line3("[fork] child pid=", pid, "\n");
 
     /* 子进程改自己那份 .data，然后如实报告退出码 42 */
     g_fork_marker = 0x5A5A5A5Aul;
@@ -382,9 +376,7 @@ void linux_main(unsigned long sp)
 {
     (void)sp;
 
-    out("[fork] parent pid=");
-    out_num(lx1(LX_GETPID, 0));
-    out("\n");
+    out_line3("[fork] parent pid=", lx1(LX_GETPID, 0), "\n");
 
     /* 反假绿一：两条越界参数必须当场被拒 */
     check("clone(child_stack!=0) == -EINVAL",
@@ -403,14 +395,11 @@ void linux_main(unsigned long sp)
             child_path();       /* 不返回 */
         }
 
-        out("[fork] parent child=");
-        out_num(child);
-        out("\n");
+        out_line3("[fork] parent child=", child, "\n");
         if (child <= 0)
         {
-            out("[fork] FAIL: clone returned ");
-            out_num(child);
-            out(" in the parent\n");
+            out_line3("[fork] FAIL: clone returned ", child,
+                      " in the parent\n");
             (void)lx1(LX_EXIT, 1);
             for (;;)
             {
@@ -465,16 +454,11 @@ void linux_main(unsigned long sp)
                     break;
                 }
             }
-            out("[fork] WNOHANG waited ");
-            out_num((t0 < 0) ? -1 : (now - t0));
-            out(" ms, saw_alive=");
-            out_num(saw_alive);
-            out("\n");
+            out_line5("[fork] WNOHANG waited ", (t0 < 0) ? -1 : (now - t0),
+                      " ms, saw_alive=", saw_alive, "\n");
         }
         check("wait4 returned child pid", rc, child);
-        out("[fork] status=");
-        out_num(status);
-        out("\n");
+        out_line3("[fork] status=", status, "\n");
         check("WEXITSTATUS == 42", (status >> 8) & 0xFF, 42);
         check("WIFEXITED (low 7 bits == 0)", status & 0x7F, 0);
 
@@ -612,9 +596,8 @@ void linux_main(unsigned long sp)
         {
             b1 = (ts2[0] * 1000) + (ts2[1] / 1000000);
         }
-        out("[fork] blocking wait4 waited ");
-        out_num(((b0 < 0) || (b1 < 0)) ? -1 : (b1 - b0));
-        out(" ms\n");
+        out_line3("[fork] blocking wait4 waited ",
+                  ((b0 < 0) || (b1 < 0)) ? -1 : (b1 - b0), " ms\n");
 
         check("blocking wait4 returned child pid", rc2, child2);
         check("child exit code 7", (status2 >> 8) & 0xFF, 7);
@@ -947,9 +930,7 @@ void linux_main(unsigned long sp)
     }
     else
     {
-        out("[fork] FAIL: ");
-        out_num(g_fail);
-        out(" checks failed\n");
+        out_line3("[fork] FAIL: ", g_fail, " checks failed\n");
         (void)lx1(LX_EXIT, 1);
     }
     for (;;)

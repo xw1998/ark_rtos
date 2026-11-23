@@ -609,7 +609,7 @@ parent sees the `2` the waker wrote, the waker is reaped, and
 child still saw the `1` the parent was waiting on (so the parent really went to
 sleep, not an empty match), bit 1 = `WAKE` really woke one waiter.
 
-**Two traps only a board run exposes.**
+**Three traps only a board run exposes.**
 
 (1) **The 8 KB pair granularity of a shared mapping eats address space.** A 4 KB
 `MAP_SHARED` also owns a whole pair, so the mapping must start on a pair boundary
@@ -630,6 +630,19 @@ takes back the key the task recorded. This is not theoretical tidiness - the
 child), so it never showed; futex is the first place that has to say it out loud.
 A host case feeds exactly this shape: register a WAIT, then re-enter with
 `uaddr = 0`; it must be taken as a replay, not `-EFAULT`.
+
+(3) **One `write` is not one line.** Section 8.3 made `lx_write` hold the console
+lock, which fixes "a kernel log line lands inside a user line"; it does not cover a
+fixture that splits one logical line into three `write` calls (prefix, number,
+newline) - another process's whole line can land between two of them. The full gate
+hit exactly that: the child's `[fork] child pid=12` appeared between
+`[fork] parent child=` and its number, producing
+`[fork] parent child=[fork] child pid=12`, so a line-oriented gate reported "the
+child pid readout is missing" while every readout had been printed. The fix lives in
+the fixture: lines with numbers are formatted into a stack buffer and written with a
+**single `write`** (`out_line3` / `out_line5`). Linux line-buffered `printf` does the
+same thing; `rt_kprintf` in RT-Thread looks immune because it formats the whole line
+and emits it with interrupts off.
 
 Host accounting: the union line coverage of the `linuxabi` / `linuxabioff` /
 `linuxabifutex` profiles is **98.31% (870/885)**, the futex profile runs **268
