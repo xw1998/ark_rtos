@@ -32,17 +32,26 @@
      `arkrtos_paging_space_clone`。
   C. 开档编得过：LA64 真板级 + `-DARKRTOS_USE_LINUX_FORK=1
      -DARKRTOS_USE_PAGING_DEMAND=1`，四个内核 TU 与夹具本身全编得过。
-  D. QEMU 真读数：`[fork]` 的 10 条 check 全 ` ok`（一条 FAIL 都不许）、
+  D. QEMU 真读数：`[fork]` 的 21 条 check 全 ` ok`（一条 FAIL 都不许）、
      `PASS: child ran in its own space, exit 42 reaped`、`exit code 0`；
      `[fork] parent pid=` 与 `[fork] child pid=` 两个数必须不同；并且同一次
      启动里 hello / FS / 其余 Linux 夹具的读数仍在（新开关不许把别人的演示
-     搞坏）。
+     搞坏）。三条新读数必须**逐条**出现（只比总条数会在换夹具时假绿）：
+       - `blocking wait4 blocked >= 40 ms -> 1 ok`（父真的等过，不是立即返回）
+       - `parent read end survived child close -> 3 ok`（fd 表是每进程一份）
+       - `SIGCHLD handler ran -> 1 ok`（跨任务信号真的投到了父进程）
   E. 解析器自检：把合成坏日志喂给同一个判据（去掉 PASS、改退出码、插 FAIL、
      少一条 check、父子 pid 改成相同、去掉 exec rc=0），每种坏法都必须判红。
 
-不覆盖：vfork / CLONE_VM 线程（无共享地址空间，一律 -EINVAL）、子进程继承
-fd 表（本内核的 fd 表是全局单份，fork 不复制它 —— 这一条写进文档，本门禁
-不为它背书）、父进程阻塞等子（没有阻塞系统调用通路，只用 WNOHANG）。
+覆盖：fork 的返回值分流与地址空间复制、退出码经 wait4 回到父、记账是消耗品、
+越界参数拒绝、**阻塞 wait4**（options=0，父进程真等到子进程退出）、
+**fd 表按进程一份**（子 close 不影响父的读端）、**管道对象共享且引用计数正确**
+（子写的数据父读得到）、**跨任务 SIGCHLD**（子退出后父的 handler 在下一次系统
+调用返回前被调用）。
+
+不覆盖：vfork / CLONE_VM 线程（无共享地址空间，一律 -EINVAL）、CLONE_FILES
+（每进程 fd 表是 fork 语义的一部分，共享 fd 表这种形态本门禁不为它背书）、
+写时复制（本版本的地址空间复制是装载期的整块克隆，不是 COW）。
 
 用法
 ----
@@ -100,10 +109,15 @@ SIGN_KEY_HEADER = """#ifndef ARKRTOS_SIGN_KEY_LOCAL_H
 #endif
 """
 
-# 夹具（elf/linux_fork.c）里的 check() 条数：两条 -EINVAL、child pid > 0、
-# child pid != parent、wait4 返回子号、WEXITSTATUS==42、WIFEXITED、父 marker
-# 未被改、reap 后 -ECHILD、认不出的号 -ECHILD = 10 条。
-EXPECT_FORK_CHECKS = 10
+# 夹具（elf/linux_fork.c）里的 check() 条数：
+#   第一段（继承的 fork 语义）10 条：两条 -EINVAL、child pid > 0、
+#   child pid != parent、wait4 返回子号、WEXITSTATUS==42、WIFEXITED、
+#   父 marker 未被改、reap 后 -ECHILD、认不出的号 -ECHILD；
+#   第二段（阻塞 wait4 / fd 继承）7 条：pipe2、clone>0、阻塞 wait4 得子号、
+#   子退出码 7、阻塞时长 >= 40 ms、父读端存活、子写的数据到达；
+#   第三段（跨任务 SIGCHLD）4 条：装 handler、handler 被调到、信号号 17、
+#   回收退出码 9 —— 合计 21 条。
+EXPECT_FORK_CHECKS = 21
 
 FAILS = []
 PASSES = []
@@ -461,6 +475,16 @@ def judge(text):
         problems.append("有 %d 条 check 打了 FAIL" % fk_fail)
     if fk_ok != EXPECT_FORK_CHECKS:
         problems.append("check 通过条数 %d != %d" % (fk_ok, EXPECT_FORK_CHECKS))
+    # 三条新读数必须逐条出现：只比总条数时，换一个夹具（少写一条、多写一条）
+    # 仍可能凑出同一个数，那是假绿。
+    req = {
+        "blocking wait4 blocked >= 40 ms -> 1 ok": "阻塞 wait4 没读出等待时长",
+        "parent read end survived child close -> 3 ok": "fd 表不是每进程一份（父读端被子关掉）",
+        "SIGCHLD handler ran -> 1 ok": "跨任务 SIGCHLD 没投递到父进程",
+    }
+    for line, why in req.items():
+        if count(lambda s2, t=line: s2.strip() == "[fork] " + t) != 1:
+            problems.append("缺 `[fork] %s` —— %s" % (line, why))
     if passline != 1:
         problems.append("缺 `[fork] PASS: child ran in its own space, exit 42 reaped`")
     if exitline != 1:
@@ -486,7 +510,7 @@ def judge(text):
 
 
 def self_check(good_text):
-    """把好日志的六种坏法喂回判据，每一种都必须判红，否则解析器是空转。"""
+    """把好日志的九种坏法喂回判据，每一种都必须判红，否则解析器是空转。"""
     g = good_text.replace("\r\n", "\n")
     mutations = {
         "去掉 PASS 行": lambda s: s.replace(
@@ -501,6 +525,15 @@ def self_check(good_text):
             r"^\[fork\] child pid=\d+$", lambda m: m.group(0), s, flags=re.M
         ).replace(_pid_line(s, "child"), _pid_line(s, "parent")),
         "去掉 exec rc=0": lambda s: s.replace("[fork] exec rc=0\n", ""),
+        "阻塞读数改成没等": lambda s: s.replace(
+            "[fork] blocking wait4 blocked >= 40 ms -> 1 ok",
+            "[fork] blocking wait4 blocked >= 40 ms -> 0 FAIL (want 1)"),
+        "父读端改成 -EBADF": lambda s: s.replace(
+            "[fork] parent read end survived child close -> 3 ok",
+            "[fork] parent read end survived child close -> -9 FAIL (want 3)"),
+        "SIGCHLD 没被调到": lambda s: s.replace(
+            "[fork] SIGCHLD handler ran -> 1 ok",
+            "[fork] SIGCHLD handler ran -> 0 FAIL (want 1)"),
     }
     missed = []
     for name, fn in mutations.items():
@@ -570,7 +603,7 @@ def main(argv):
                         bad("parser-selfcheck", "这些坏样本没被判红：%s" % "、".join(missed))
                     else:
                         ok("parser-selfcheck",
-                           "6 种坏法（缺 PASS / 错退出码 / 多 FAIL / 少 check / 父子同号 / 缺 exec）全被判红")
+                           "9 种坏法（缺 PASS / 错退出码 / 多 FAIL / 少 check / 父子同号 / 缺 exec / 阻塞读数坏 / 读端坏 / SIGCHLD 坏）全被判红")
                 else:
                     bad("qemu-readout", "；".join(notes))
                     bad("parser-selfcheck", "读数没过，自检无从谈起")

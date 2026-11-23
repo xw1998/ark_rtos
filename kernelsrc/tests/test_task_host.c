@@ -1376,6 +1376,45 @@ static void test_blocking(void)
     arkrtos_task_delay_internal(1234u);
     ck_u32(g_delay_us_sum, 1234u, "delay forwards the microsecond count");
 }/* ------------------------------------------------------------------
+ * T5b：跨任务唤醒（arkrtos_task_wakeup_internal）
+ *
+ * 只认 WAIT：命中的任务打交接令牌、清 wait_time、置 READY、挂回就绪链
+ * （ready_add 幂等，顺带把延时链摘掉）；READY / INVALID / 越界号一律 -1
+ * 且一位不改——迟到的唤醒不能把一个已经在跑或已被收尸的任务叫醒。
+ * ------------------------------------------------------------------ */
+static void test_wakeup_internal(void)
+{
+    reset_all();
+    (void)make_task(3u, 50u);
+    use_task(1);
+    arkrtos_task_wait_internal(100u);
+    ck_u32(arkrtos_task_table[0].delay_queued, 1u,
+         "wakeup fixture arms the delay chain");
+
+    ck_i32(arkrtos_task_wakeup_internal(1), 0, "wakeup accepts a WAIT task");
+    ck_i32((int)arkrtos_task_table[0].status, ARKRTOS_TASK_READY,
+           "wakeup makes the task READY");
+    ck_i32((int)arkrtos_task_table[0].wake_reason, ARKRTOS_WAKE_HANDOFF,
+           "wakeup sets the hand-off token");
+    ck_i32((int)arkrtos_task_table[0].wait_time, 0,
+           "wakeup clears the wait timeout");
+    ck_u32(arkrtos_ready_contains(0), 1u,
+           "wakeup puts the task back in the ready set");
+    ck_u32(arkrtos_task_table[0].delay_queued, 0u,
+           "wakeup detaches the delay chain");
+
+    /* 迟到的唤醒：已经 READY，什么都不改 */
+    ck_i32(arkrtos_task_wakeup_internal(1), -1,
+           "wakeup refuses a task that is not WAIT");
+
+    /* 越界任务号：0 与「大于任务数」，都在碰表之前就被拒 */
+    ck_i32(arkrtos_task_wakeup_internal(0), -1,
+           "wakeup refuses task id 0");
+    ck_i32(arkrtos_task_wakeup_internal((int32)arkrtos_task_count + 1), -1,
+           "wakeup refuses an id past the task table");
+}
+
+/* ------------------------------------------------------------------
  * T6：线程创建 / 自身 / 退出
  *
  * 创建有三道闸门：入口在调用方自己的代码区、栈在调用方自己的 RAM 区、
@@ -2857,6 +2896,7 @@ int main(void)
     RUN(test_delay_chain);
     RUN(test_sched_lock);
     RUN(test_blocking);
+    RUN(test_wakeup_internal);
     RUN(test_thread_lifecycle);
     RUN(test_sched_activate);
     RUN(test_stack_usage);

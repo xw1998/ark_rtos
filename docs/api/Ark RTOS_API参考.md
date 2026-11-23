@@ -23,13 +23,13 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（80 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（81 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
 - [kernelsrc/include/arkrtos_layout.h](#kernelsrcincludearkrtos_layouth)（11 项）
 - [kernelsrc/include/arkrtos_layout_def.h](#kernelsrcincludearkrtos_layout_defh)（2 项）
-- [kernelsrc/include/arkrtos_linux_abi.h](#kernelsrcincludearkrtos_linux_abih)（6 项）
+- [kernelsrc/include/arkrtos_linux_abi.h](#kernelsrcincludearkrtos_linux_abih)（7 项）
 - [kernelsrc/include/arkrtos_loader.h](#kernelsrcincludearkrtos_loaderh)（32 项）
 - [kernelsrc/include/arkrtos_log.h](#kernelsrcincludearkrtos_logh)（16 项）
 - [kernelsrc/include/arkrtos_mempool.h](#kernelsrcincludearkrtos_mempoolh)（9 项）
@@ -51,7 +51,7 @@
 - [kernelsrc/include/arkrtos_spin.h](#kernelsrcincludearkrtos_spinh)（10 项）
 - [kernelsrc/include/arkrtos_svc_abi.h](#kernelsrcincludearkrtos_svc_abih)（4 项）
 - [kernelsrc/include/arkrtos_svc_call.h](#kernelsrcincludearkrtos_svc_callh)（20 项）
-- [kernelsrc/include/arkrtos_task.h](#kernelsrcincludearkrtos_taskh)（5 项）
+- [kernelsrc/include/arkrtos_task.h](#kernelsrcincludearkrtos_taskh)（6 项）
 - [kernelsrc/include/arkrtos_tickless.h](#kernelsrcincludearkrtos_ticklessh)（6 项）
 - [kernelsrc/include/arkrtos_ulog.h](#kernelsrcincludearkrtos_ulogh)（5 项）
 - [kernelsrc/include/arkrtos_ushell.h](#kernelsrcincludearkrtos_ushellh)（4 项）
@@ -62,7 +62,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（12 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（87 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（88 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（18 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -92,7 +92,7 @@
 - [kernelsrc/src/arkrtos_fs.c](#kernelsrcsrcarkrtos_fsc)（1 项）
 - [kernelsrc/src/arkrtos_guard.c](#kernelsrcsrcarkrtos_guardc)（1 项）
 - [kernelsrc/src/arkrtos_installer.c](#kernelsrcsrcarkrtos_installerc)（1 项）
-- [kernelsrc/src/arkrtos_linux_abi.c](#kernelsrcsrcarkrtos_linux_abic)（4 项）
+- [kernelsrc/src/arkrtos_linux_abi.c](#kernelsrcsrcarkrtos_linux_abic)（5 项）
 - [kernelsrc/src/arkrtos_loader.c](#kernelsrcsrcarkrtos_loaderc)（6 项）
 - [kernelsrc/src/arkrtos_log.c](#kernelsrcsrcarkrtos_logc)（1 项）
 - [kernelsrc/src/arkrtos_mini.c](#kernelsrcsrcarkrtos_minic)（1 项）
@@ -3583,6 +3583,22 @@ int32  arkrtos_port_svc_exec_frame(void *p_exc_ctx, unsigned long entry, unsigne
 port 没有「同任务换镜像」能力时（目前 RISC-V / Cortex-M / LA32），
 由 arkrtos_linux_abi.c 里的弱定义顶住，execve 回 -ENOSYS。
 
+### `int32  arkrtos_port_svc_restart(void *p_exc_ctx);`
+
+```c
+int32  arkrtos_port_svc_restart(void *p_exc_ctx);
+```
+
+**把当前系统调用「退回重放」（ERA 退回一条指令）**
+- `p_exc_ctx`：系统调用上下文指针
+**返回**：0 = 已退回，被唤醒后从用户态重新发起同一次调用；
+-1 = 本 port 不支持（调用方必须改走非阻塞语义，不许假装睡过）
+阻塞形态的 wait4 需要它：本内核在 SVC 处理程序里没有真正睡眠的
+通路（置 WAIT + 请求切换，切换在异常出口结算，函数本身立刻返回），
+所以「等子进程退出」只能做成「睡下 -> 被唤醒 -> 重放这条系统调用
+-> 重新扫一遍」。这与 Linux 的可重启系统调用（ERESTARTSYS）是
+同一手法：参数寄存器在帧里本来就没被改写，重放读到的就是同一组值。
+
 ### `uint32 arkrtos_port_enter_critical(void);`
 
 ```c
@@ -4724,9 +4740,29 @@ uint32 arkrtos_linux_abi_nr_overflow(void);
 void arkrtos_linux_abi_reset(void);
 ```
 
-**清空每次 exec 都必须重置的状态（fd 表与堆游标）**
-由 ELF 装载器在起跑前调用：fd 表是内核全局的（一次只跑一个
-程序），上一次留下的句柄不该被下一次继承。
+**清空每次 exec 都必须重置的状态（进程槽的 fd 表/信号状态、堆游标）**
+由 ELF 装载器在起跑前调用：exec 换的是当前任务的镜像，fd 表按
+进程分槽（fork 关档只有槽 0，等价于旧版那张全局表），这里逐槽
+清空，并把槽位与任务号的映射一起复位，下一个进 ABI 的任务重新
+惰性分配。上一次留下的句柄与信号处理函数不该被下一次继承。
+
+### `void arkrtos_linux_abi_on_task_exit(int32 task_id);`
+
+```c
+void arkrtos_linux_abi_on_task_exit(int32 task_id);
+```
+
+**任务退出时由内核收尸路径调用（fork 记账收尾 + 唤醒等它的父进程）**
+- `task_id`：刚被置为 INVALID 的任务号
+只有 ARKRTOS_USE_LINUX_FORK=1 时才有实体：
+- 把「正在等这个子进程」的父进程从等待里唤醒（父进程 blocked
+in wait4 时才会被唤醒，别的等待原因不动）；
+- 按 Linux 的做法给父进程置一个 SIGCHLD 待投递位（默认动作是
+忽略，与 Linux 一致，不会把没装处理函数的父进程弄死）；
+- 放掉这个进程自己的 fd/信号状态槽（管道引用计数随之递减）。
+调用点在 status 已置 INVALID、退出码已写好之后，被唤醒的父进程
+读到的必然是终态。fork 关档时本函数编译成空宏，内核侧调用点也在
+#if 里，默认档不产生任何符号与体积。
 
 ## kernelsrc/include/arkrtos_loader.h
 
@@ -7767,6 +7803,23 @@ int32 arkrtos_task_block_in_critical(uint32 timeout_ms);
 对“先把自己挂进等待队列、再睡下”的原语来说，那中间存在唤醒丢失窗口
 （ISR 的唤醒会投给一个还没睡下的任务）。本函数把置状态与切走放在同一临界区内。
 
+### `int32 arkrtos_task_wakeup_internal(int32 task_id);`
+
+```c
+int32 arkrtos_task_wakeup_internal(int32 task_id);
+```
+
+**唤醒一个正在等待的任务（可在别的任务上下文里调用）**
+- `task_id`：目标任务号（1 起）
+**返回**：0 = 已从 WAIT 置为 READY；-1 = 目标任务不存在或不处于等待态
+与各同步对象里手写的唤醒三件套同形（wake_reason / status /
+arkrtos_ready_add），但收在一处、自带保存-恢复临界区。
+只动 status == ARKRTOS_TASK_WAIT 的任务：对就绪/运行/无效的任务
+调用不产生任何状态变化，因此不会把一个已经死掉的任务从旧栈
+"复活"（收尸清掉等待登记之后仍可能有迟到的唤醒）。
+当前唯一使用者是 Linux ABI 兼容层（子进程退出唤醒等它的父进程、
+跨任务信号唤醒目标进程）；默认档没有调用点，符号也不产生。
+
 ### `void arkrtos_task_release_resources(int32 task_id);`
 
 ```c
@@ -9904,6 +9957,22 @@ Ark 自己的服务号写在 `syscall` 的 15 位立即数里，Linux 用
 `syscall 0` 并把号放进 $a7。因此「立即数是否为 0」就是分界，
 不需要按号段猜，两边也不会撞号。
 
+### `int32 arkrtos_port_svc_restart(void *p_exc_ctx) {`
+
+```c
+int32 arkrtos_port_svc_restart(void *p_exc_ctx) {
+```
+
+**把当前系统调用退回重放：ERA 减 4（回到 syscall 指令本身）**
+- `p_exc_ctx`：系统调用上下文指针
+**返回**：0 = 已退回；-1 = 参数不可用（一个字节都不动）
+本 port 的阻塞只在异常出口结算：SVC 处理程序内部「置 WAIT +
+请求切换」之后函数立刻返回，真正的切换发生在 la_trap_c 末尾。
+于是「睡到事件发生再继续」的系统调用（wait4 阻塞形态）不能靠
+函数内等待实现，只能让任务醒来后从用户态**重放**同一次调用。
+帧里的参数寄存器（a0~a3）在内核这一路本来就没被改写，重放读到的
+就是同一组参数 —— 与 Linux 用 ERESTARTSYS 重启系统调用同一手法。
+
 ### `uint32 arkrtos_port_svc_frame_bytes(void) {`
 
 ```c
@@ -11602,6 +11671,23 @@ static int32 lx_execve(void *p_ctx) {
 的地址不做任何回收声明**——旧镜像已经没了，没有谁还在用它们。
 参数纪律：path 与 argv 都在用户内存里，且马上要被新镜像覆盖，
 所以全部先拷进内核再装载。
+
+### `void arkrtos_linux_abi_on_task_exit(int32 task_id) {`
+
+```c
+void arkrtos_linux_abi_on_task_exit(int32 task_id) {
+```
+
+**进程退出收尾（fork 记账 + 父进程通知 + 状态还池）**
+调用点在 arkrtos_task_kill_internal()：status 已是 INVALID、
+退出码已写好。这里做三件事：
+1) 对每一条「pid == 刚死的任务、代次也对得上」的记账，唤醒
+正在 wait4 里等它的父进程，并置 SIGCHLD 待投递位；
+2) 把该进程的 fd 全部关掉（管道读写端引用计数递减，与 close
+同一条路径）；
+3) 信号动作表与槽位还池，并解除任务号绑定。
+第 1 步只唤醒「登记过自己在 wait4」的父进程（s_lx_wait），
+不打扰因为别的原因在等的任务；父进程没在等就只是 pending。
 
 ## kernelsrc/src/arkrtos_loader.c
 

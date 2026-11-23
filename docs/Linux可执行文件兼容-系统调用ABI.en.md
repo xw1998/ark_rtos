@@ -71,7 +71,7 @@ Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 | 220 | `clone` | fork only: `flags` must be 0 or `SIGCHLD`, `child_stack` must be 0; copies the whole address space and makes a new task, the child returns 0 and the parent the child id (section 8, `ARKRTOS_USE_LINUX_FORK`) | `clone(child_stack!=0) == -EINVAL -> -22 ok` / `parent child=12` / `child pid != parent pid -> 1 ok` / `exit code 0` |
 | 221 | `execve` | replace the image of the **calling task**: load segments into its own window, write entry/`sp`/`tp` back into the trap frame; does not return on success | `stage2 pid==stage1 pid -> 11 ok` / `image reloaded (.data marker) -> 1 ok` / `fd 3 survived -> 1 ok` / `heap cursor reset -> 34668544 ok` / `exit code 42` (section 5) |
 | 222 | `mmap` | only `MAP_PRIVATE|MAP_ANONYMOUS`; `MAP_FIXED` refused | `mmap>0 -> 1 ok` / `mmap write/read -> 1 ok` |
-| 260 | `wait4` | only `options 0/WNOHANG`; never blocks, never invents a status, the bookkeeping entry is consumed on reap (section 8) | `wait4 returned child pid -> 12 ok` / `WEXITSTATUS == 42 -> 42 ok` / `wait4(child) again == -ECHILD -> -10 ok` |
+| 260 | `wait4` | only `options 0/WNOHANG`; **without `WNOHANG` it really blocks** (restartable syscall, section 8.1), never invents a status, the bookkeeping entry is consumed on reap (section 8) | `wait4 returned child pid -> 12 ok` / `WEXITSTATUS == 42 -> 42 ok` / `wait4(child) again == -ECHILD -> -10 ok` / `blocking wait4 blocked >= 40 ms -> 1 ok` |
 | 226 | `mprotect` | checks page alignment and window range only, returns 0 and counts separately; **protection is not enforced** (the window is one PS=20 RWX mapping) | no fixture readout (1.1) |
 
 Unknown numbers return `-ENOSYS` (38) and are counted. Nothing is guessed.
@@ -107,24 +107,23 @@ return value is a separate port primitive
 
 ## 3 Explicitly unsupported
 
-fd inheritance / redirection,
-`socket`/`select`, `futex`, real `mmap` semantics (file-backed, shared,
-`MAP_FIXED`, permission bits), and threads. `fork`/`clone` is no longer in this
+`dup`/`dup2` redirection, `socket`/`select`, `futex`, real `mmap` semantics
+(file-backed, shared, `MAP_FIXED`, permission bits), and threads. `fork`/`clone` is no longer in this
 list: with `ARKRTOS_USE_LINUX_FORK` on (default off, 2026-11-23, QEMU LA64) a
 process can split once and be reaped via `wait4` - fork only, no threads
-(`CLONE_VM`/`CLONE_THREAD` are `-EINVAL`), see section 8. Signals exist only in a minimal
-form: same-task self-delivery, delivered on the way out of a syscall, no
-cross-task delivery, no preemptive delivery, no real-time signals, no `siginfo`
-(section 7). Each of these needs an object (a
-process, a user-side signal frame, a shared-memory wait queue) that Ark RTOS
-does not have; faking them would produce silently wrong answers. See the Chinese
-page for the reasoning per row.
+(`CLONE_VM`/`CLONE_THREAD` are `-EINVAL`), see section 8. Signal delivery now
+crosses tasks (`kill`/`tkill`/`tgkill` resolve the target by pid, 2026-11-23,
+QEMU LA64), but there is still no preemptive delivery, no real-time signal and no
+`siginfo` (section 7). fd inheritance exists in the fork tier: each process owns
+its fd table and a pipe end holds its own reference count (section 4/8). `futex`
+still needs a shared-memory wait queue that Ark RTOS does not have; faking it
+would produce silently wrong answers. See the Chinese page for the reasoning per
+row.
 
 `execve` replaces the image of the current task in place (section 5), and
 `fork` copies the address space into a second task (section 8). What is still
-missing is the rest of the *process* model: the fd table stays kernel-global and
-is not copied by `fork`, signals cannot cross tasks, and there is no blocking
-wait.
+missing is the rest of the *process* model: no copy-on-write, no threads, no
+`dup2`, no job control; the fd table is per-process only in the fork tier.
 
 Dynamic linking no longer belongs in this list: with `ARKRTOS_USE_DYNLOAD` on,
 the kernel loads a `PT_INTERP` interpreter and ships a minimal in-tree
@@ -133,10 +132,15 @@ the kernel loads a `PT_INTERP` interpreter and ships a minimal in-tree
 
 ## 4 Deliberate degradations
 
-- **fd table** is kernel-global (`lx_fd_t s_fd[8]`, path + offset) and is reset
-  by the shell's `exec` (which starts a *new* task). `execve` keeps the fds
-  opened before the call, as Linux does. There are no parents, so inheritance
-  still cannot be faked.
+- **fd table** comes in two tiers. The default tier (`ARKRTOS_USE_LINUX_FORK=0`)
+  is kernel-global (`lx_fd_t s_fd[8]`, path + offset) and is reset by the shell's
+  `exec` (which starts a *new* task); `execve` keeps the fds opened before the
+  call, as Linux does. The fork tier makes it **per process** (`lx_proc_t { fd[8];
+  sig[NSIG]; sig_pending; sig_blocked; }`, `static lx_proc_t s_proc[LX_PROC_MAX]`):
+  `clone` copies the whole table and bumps both pipe reference counts, and the
+  child's `close` only drops its own reference (the pipe object survives on the
+  parent side). The implementation is a macro alias (`#define s_fd
+  (lx_proc_curp()->fd)`), so the 500+ existing call sites stay untouched.
 - **heap**: `brk` and `mmap` share one monotonic region inside the 2 MB ELF
   window (`0x02000000`), leaving 128 KB of stack below the top. A successful
   `execve` resets the cursor: the old cursor's address meaning belongs to the
@@ -244,8 +248,9 @@ close-on-exec semantics to promise; `O_NONBLOCK` is accepted. Exhausting the 8
 fd slots or the 2 pipes returns `-ENFILE`; a failed `copy_to_user` of `fds[2]`
 rolls the whole pipe back (`-EFAULT`).
 
-Why no blocking: there is no `fork` and the fd table is kernel-global, so both
-ends usually live in the **same task** - blocking would be waiting on itself.
+Why no blocking: pipe I/O is still a synchronous in-kernel copy and deliberately
+never sleeps. In the fork tier the two ends can really belong to parent and
+child (fds are inherited), but "sleep until readable" was not wired up.
 
 Measured readout (14 `check()` calls in
 `example/qemu_loongarch64/elf/linux_pipe.c`, `exit code 55`):
@@ -270,8 +275,10 @@ reader check on the write side flips the readout to
 pipe-specific broken logs back into the judge; both must be rejected.
 
 Boundaries: non-blocking semantics (a spinning reader/writer gets `-EAGAIN`),
-256-byte buffer, at most 2 pipes, 8 fd slots, no fd inheritance (no `fork`), no
-`SIGPIPE`.
+256-byte buffer, at most 2 pipes, 8 fd slots, no `SIGPIPE`. fd inheritance does
+exist in the fork tier: the parent creates a pipe, `clone` hands both ends to the
+child, and closing the parent's write end does not give the reader EOF while the
+child still holds it.
 
 ## 7 Signals (`rt_sigaction` 134 / `rt_sigprocmask` 135 / `kill` 129 / `tkill` 130 / `tgkill` 131 / `rt_sigreturn` 139)
 
@@ -282,7 +289,7 @@ Landed 2026-11-21, measured on QEMU LA64 (`example/qemu_loongarch64/elf/linux_si
 
 | item | status |
 |---|---|
-| delivery target | **only "the task signals itself"**. There is no `fork`/`clone`, so there is no second entity; `pid != self` gives `-ESRCH` (`kill`/`tkill` are the same entity, `tgkill` additionally wants `tgid == tid`) |
+| delivery target | **self or, in the fork tier, another process**: `kill`/`tkill`/`tgkill` resolve the pid to a process slot and its task (2026-11-23). A pid that maps to no live task gives `-ESRCH`; `tgkill` additionally wants `tgid == tid` |
 | numbers | 1..31; 0 is an existence probe (returns 0), >= 32 gives `-EINVAL`; no real-time signals |
 | delivery point | **before the syscall returns to user mode** (the single exit of the dispatcher). No preemptive delivery: a signal only arrives the next time the program enters the kernel |
 | handler address | must be a fetchable user address (`copy_from_user(..., 4)` probes it first) |
@@ -360,7 +367,10 @@ a 13/13 green gate and a format gate clean on 392 files.
 
 ### Boundaries
 
-- **No cross-task delivery**: a task can only signal itself.
+- **Cross-task delivery exists** (2026-11-23): `kill`/`tkill`/`tgkill` set the
+target's `sig_pending`; if the target is parked in a blocking `wait4`,
+`arkrtos_task_wakeup_internal()` wakes it, and the signal is delivered on the way
+out of its next syscall. Self-delivery still goes through the same path.
 - **No preemptive delivery**: only at the syscall return point. A program that
   never enters the kernel keeps the signal pending (`kill` returns 0, no handler).
 - No real-time signals, no `sigaltstack`, no `siginfo`, no `SA_RESTART`
@@ -388,7 +398,7 @@ any is missing: `ARKRTOS_USE_LINUX_ABI` (numbers), `ARKRTOS_USE_EXIT_CODE`
 | task id | a fresh TCB (`is_priv = 0`); `generation` tells a reused task number from the old instance; `getpid` reads `current_task_id` |
 | ordering | copy space and frame first, then register the task and patch its TCB inside a critical section (same reason Linux `copy_process` calls `wake_up_new_task` last: a half-configured task must never enter the ready set) |
 | accepted `wait4` arguments | `options == 0` or `WNOHANG(1)`; `pid` must be a child this process registered |
-| `wait4` returns | child alive + `WNOHANG` -> `0`; child alive without `WNOHANG` -> `-EAGAIN` (this kernel cannot sleep inside a syscall); not our child -> `-ECHILD`; child dead but exit code never reported -> `-EIO` (never invent 0 or SIGKILL) |
+| `wait4` returns | child alive + `WNOHANG` -> `0`; child alive without `WNOHANG` -> **sleeps until woken** (restartable syscall, section 8.1); not our child -> `-ECHILD`; child dead but exit code never reported -> `-EIO` (never invent 0 or SIGKILL); after the 100 ms fallback timeout a rescan that still finds no exit code for a dead child -> `-EIO` |
 | `status` | `(code & 0xFF) << 8`, written as 4 bytes via `copy_to_user`; a failed copy returns `-EFAULT` and **keeps** the bookkeeping (retryable) |
 | bookkeeping | `s_child[4]` (`LX_MAX_CHILD`); `used = 0` after a successful reap; a reused slot is recognised by `generation` |
 | practical ceiling | four bookkeeping entries, but the real gate is the number of address spaces (`ARKRTOS_PAGING_APPS_MAX 2` on this board): parent plus child fill both, a further `clone` returns `-EAGAIN` (`ARKRTOS_ELF_ERR_BUSY` -> `-EAGAIN`: a concurrency limit, not an out-of-memory) |
@@ -426,6 +436,38 @@ gone. The lesson matches how Linux and RT-Thread schedule: **"did it switch" mus
 be answered by the point that made the decision, never inferred afterwards from
 an external reading that may just happen to be equal**.
 
+### 8.1 Blocking `wait4` via a restartable syscall (Linux `ERESTARTSYS` shape)
+
+The first attempt - "sleep a slice, then rescan" - deadlocked the machine: this
+kernel has **no true sleep path inside an SVC handler**. `arkrtos_task_block_in_critical()`
+only sets WAIT, removes the task from the ready set, arms the delayed wakeup and
+sets `s_switch_pending`; the actual switch is settled at the end of `la_trap_c()`.
+Called from an SVC it merely removes the parent from the ready set and keeps
+spinning with interrupts off, so the child never ran. The symptom was the log
+stopping at `dbg parent entering blocking wait4` with no `TASK: ... exits` line.
+
+The fix copies Linux: the syscall **returns after going to sleep and is replayed**.
+
+- New port primitive `arkrtos_port_svc_restart(void *p_exc_ctx)`: the LA64
+  implementation subtracts 4 from `ERA`, i.e. backs up onto the `syscall`
+  instruction, so the next time the task is scheduled it re-executes the same
+  `syscall`; the weak definition in `hal.h` returns `-1` (unsupported) and the ABI
+  layer then reports `-EAGAIN` - it never pretends it blocked.
+- Argument registers are untouched in the trap frame, so the replay reads the
+  same `pid`/`status`/`options`.
+- Two wake paths: (1) `arkrtos_linux_abi_on_task_exit()` sets the parent's
+  `SIGCHLD` pending and calls `arkrtos_task_wakeup_internal(parent)`; (2) a
+  100 ms fallback timeout (`LX_WAIT_SLICE_MS`) for a child that died on a fault
+  path and never ran the exit hook - the rescan then finds "dead but no exit
+  code" and returns `-EIO`.
+- `s_lx_wait[task]` marks "parked in wait4"; cross-task `kill` consults it when
+  deciding whether to wake the target.
+
+The cost is stated plainly: this replays the whole syscall instead of resuming at
+the sleep point. That is semantically equivalent (`wait4` is an idempotent scan)
+but every wakeup rescans the child table, and no other blocking syscall (empty
+`read`, `futex`) is wired to this path.
+
 ## 9 Switch and zero footprint
 
 `ARKRTOS_USE_LINUX_ABI` (features header + Kconfig), default **0**, and
@@ -454,14 +496,17 @@ still intact), and parser-selfcheck (eight deliberately broken logs must each be
 rejected).
 
 The fork tier has its own gate, `tools/fork_gate.py` (invoked as `fork` from
-`ci_gate`, 11 items): default-off, kconfig-wired (all four `depends on`), the four
+`ci_gate`, 9 items): default-off, kconfig-wired (all four `depends on`), the four
 `#error` guards in features.h, off-zero-symbols (RV32 `linux_abi.o` has no
 `lx_clone`/`lx_wait4`/`s_child`; LA64 `elf`/`port`/`paging` have no fork symbols),
-compile-on (four TUs plus the fixture), build, qemu-readout (ten `[fork]` checks
+compile-on (four TUs plus the fixture), build, qemu-readout (21 `[fork]` checks
 all `ok`, different parent/child pids, PASS line, `exit code 0`, hello/FS and the
-other Linux fixtures still intact), parser-selfcheck (six broken logs rejected),
-and restore-default (the build directory is returned to the default tier so a
-later `make` does not reuse fork-tier objects).
+other Linux fixtures still intact; the three new readouts - blocking `wait4`
+really waited >= 40 ms, the parent read end still read 3 bytes after the child
+closed its own copy, the SIGCHLD handler really ran - are checked one by one),
+parser-selfcheck (nine broken logs rejected) and restore-default (the build
+directory is returned to the default tier so a later `make` does not reuse
+fork-tier objects).
 
 ## 11 Three real bugs and one readout trap found on the way
 
@@ -492,12 +537,18 @@ This is the minimal syscall set that lets a static program run, not a Linux
 compatibility layer: no ptrace, no Linux `/proc`. Pipes exist but are
 non-blocking (section 6), which is a different contract from Linux. The
 real-time behaviour is unchanged — every Linux-ABI path completes synchronously
-inside the SVC with no extra thread, no blocking point. Dynamic linking has its
+inside the SVC with no extra thread and no lock. The single "sleep and come back"
+path is blocking `wait4`, built as a restartable syscall (section 8.1): the task
+is removed from the ready set, `ERA` is backed up onto the `syscall`, and the
+call is replayed after the wakeup - it is not an interrupts-off spin. Dynamic linking has its
 own switch (`ARKRTOS_USE_DYNLOAD`) and a minimal in-tree loader, but running glibc
-binaries is still out of reach. Fork exists (section 8) but only as "split once,
-reap once": no threads, no fd inheritance, no cross-task signals, no blocking wait.
+binaries is still out of reach. Fork exists (section 8): per-process fd tables
+with inheritance, cross-task `SIGCHLD` and a blocking `wait4` all have QEMU LA64
+readouts; still absent are threads (`CLONE_VM`/`CLONE_THREAD` are refused),
+copy-on-write, preemptive signal delivery and `dup2`-style redirection.
 
 `execve` gives "replace this task's image" and `fork` gives "a second task with
 its own address-space copy". Both exist, but do not read this as a full process
-model: scheduling, priorities and the fd table are still kernel-global, and
-`fork` does not copy the fd table (section 8).
+model: scheduling and priorities are still kernel-global, the fd table is
+per-process only in the fork tier (kernel-global by default), and there is no
+COW, no threads and no job control.

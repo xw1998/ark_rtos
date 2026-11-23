@@ -2323,23 +2323,28 @@ def check_fork():
       B. 关档零符号：RV32 编 linux_abi.o 不许有 lx_clone/lx_wait4/s_child，
          LA64 真板级编 elf/port/paging 不许有 fork 相关符号；
       C. 开档编得过：LA64 + 两个 flag，四个内核 TU 与夹具全过；
-      D. QEMU 真读数：[fork] 十条 check 全 ok、父子 pid 不同、PASS 与
+      D. QEMU 真读数：[fork] 二十一条 check 全 ok、父子 pid 不同、PASS 与
          exit code 0 都在，且同一次启动里 hello/FS 等既有夹具读数仍在；
-      E. 解析器自检：六种坏日志（去 PASS、改退出码、插 FAIL、少一条 check、
-         父子 pid 相同、去 exec rc=0）必须判红。
+         三条新读数逐条校验：阻塞 wait4 真的等过（>= 40 ms）、父的管道读端
+         没被子进程 close 掉（fd 表每进程一份）、子退出后父的 SIGCHLD
+         handler 在下一次系统调用返回前被调用；
+      E. 解析器自检：九种坏日志（去 PASS、改退出码、插 FAIL、少一条 check、
+         父子 pid 相同、去 exec rc=0、阻塞读数坏、读端坏、SIGCHLD 坏）必须判红。
 
-    不覆盖：vfork / CLONE_VM（无共享地址空间，一律 -EINVAL）、子进程继承 fd 表
-（本内核 fd 表是全局单份，fork 不复制，这一条写进
-docs/Linux可执行文件兼容-系统调用ABI.md，本门禁不为它背书）、父进程阻塞等子
-（没有阻塞系统调用通路，只用 WNOHANG）。
+    覆盖：fork 返回值分流 / 地址空间复制 / 退出码经 wait4 回收 / 记账消耗 /
+参数拒绝 / **阻塞 wait4** / **每进程 fd 表** / **共享管道对象的引用计数** /
+**跨任务 SIGCHLD**。
+不覆盖：vfork 与 CLONE_VM（无共享地址空间，一律 -EINVAL）、CLONE_FILES、
+写时复制（本版本是装载期整块克隆，不是 COW）。
     """
     r = _run_check([sys.executable, os.path.join("tools", "fork_gate.py")])
     txt = ((r.stdout or "") + (r.stderr or "")).strip()
     if r.returncode == 0 and "FORK-GATE OK" in txt:
         ok("fork",
            "default off zero symbols (RV32 abi + LA64 elf/port/paging) / LA64 ON "
-           "4 TU compile / QEMU 10 fork checks + child pid != parent + exit code 0 "
-           "with hello/FS readings intact / parser self-check 6/6")
+           "4 TU compile / QEMU 21 fork checks (blocking wait4 + per-proc fd table "
+           "+ SIGCHLD) + child pid != parent + exit code 0 with hello/FS readings "
+           "intact / parser self-check 9/9")
     else:
         fail("fork", txt[-320:])
 

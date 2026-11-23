@@ -184,6 +184,19 @@ int32 arkrtos_port_svc_frame_import(void *p_exc_ctx, const void *p_src);
 */
 int32  arkrtos_port_svc_exec_frame(void *p_exc_ctx, unsigned long entry,
                                    unsigned long sp, unsigned long tp);
+
+/**
+* @brief 把当前系统调用「退回重放」（ERA 退回一条指令）
+* @param p_exc_ctx 系统调用上下文指针
+* @return 0 = 已退回，被唤醒后从用户态重新发起同一次调用；
+*         -1 = 本 port 不支持（调用方必须改走非阻塞语义，不许假装睡过）
+* @details 阻塞形态的 wait4 需要它：本内核在 SVC 处理程序里没有真正睡眠的
+*          通路（置 WAIT + 请求切换，切换在异常出口结算，函数本身立刻返回），
+*          所以「等子进程退出」只能做成「睡下 -> 被唤醒 -> 重放这条系统调用
+*          -> 重新扫一遍」。这与 Linux 的可重启系统调用（ERESTARTSYS）是
+*          同一手法：参数寄存器在帧里本来就没被改写，重放读到的就是同一组值。
+*/
+int32  arkrtos_port_svc_restart(void *p_exc_ctx);
 #endif
 
 

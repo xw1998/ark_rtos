@@ -38,6 +38,8 @@
 #include "arkrtos_config.h"
 #include "arkrtos_linux_abi.h"
 
+extern int32 arkrtos_port_svc_restart(void *p_exc_ctx);
+
 #if (ARKRTOS_USE_LINUX_ABI == 0)
 
 /* 关档：入口全折成常量。这里只证明这一档仍可编可跑，且每个读数都回答
@@ -989,6 +991,14 @@ static void t_pread(t_ctx *c)
     (void)call(c, T_NR_PREAD64, 3UL, u_ptr(T_DATA_OFF), 300UL, 0UL);
     g_to_budget = -1;
     ck_ret(c, 128, "pread64 半路拷贝失败返回已读字节数");
+
+    /* 越过文件末尾：VFS 给 0 字节，循环当场收工（不是死转） */
+    (void)call(c, T_NR_PREAD64, 3UL, u_ptr(T_DATA_OFF), 20UL, 500UL);
+    ck_ret(c, 0, "pread64 越过文件末尾回 0");
+
+    /* 尾部不足一整块：拿到 50 就收，不补读、不报错 */
+    (void)call(c, T_NR_PREAD64, 3UL, u_ptr(T_DATA_OFF), 200UL, 250UL);
+    ck_ret(c, 50, "pread64 尾部不足时返回实际字节数");
 }
 
 /* 分组 7：pipe2 / 管道读写 */
@@ -1086,6 +1096,15 @@ static void t_pipe(t_ctx *c)
     ck_ret(c, -T_ENFILE, "fd 只剩一个空位时 pipe2 回 -ENFILE");
     (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF), 0UL, 0UL);
     ck_ret(c, 10, "失败后那个 fd 槽位被还回去");
+
+    /* fd 表满：第一个空位都拿不到，走 i0 这一支回滚 */
+    fresh(c);
+    for(i = 0u; i < 8u; i++)
+    {
+        (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF), 0UL, 0UL);
+    }
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    ck_ret(c, -T_ENFILE, "fd 表全满时 pipe2 回 -ENFILE");
 
     /* 写回用户数组失败：整条管道撤回，fd 槽位也还回 */
     fresh(c);
@@ -1650,6 +1669,24 @@ static void t_reset(t_ctx *c)
     ck(arkrtos_linux_abi_stat(0u) >= s0, "reset 不清 stat 计数器");
 }
 
+/* 分组 13：任务退出钩子，以及「可重启系统调用」的端口降级约定
+ *
+ * fork 关档（宿主这一档）时 on_task_exit 必须在越界号与正常号上都是原地
+ * 返回的空实现——它由 task 的收尸路径无条件调用，任何一条「没有进程状态」
+ * 的路径都不能解引用进程槽。svc_restart 的弱定义回答 -1，ABI 层据此回
+ * -EAGAIN；这里直接钉住这条降级约定，而不是让「睡不下去也当睡着了」
+ * 混进读数。 */
+static void t_task_exit(t_ctx *c)
+{
+    (void)c;
+    arkrtos_linux_abi_on_task_exit(0);
+    arkrtos_linux_abi_on_task_exit(9999);
+    arkrtos_linux_abi_on_task_exit(1);
+    ck(1, "on_task_exit accepts out-of-range and live task ids alike");
+    ck(arkrtos_port_svc_restart(0) == -1,
+       "a port without the primitive answers -1");
+}
+
 int main(void)
 {
     t_ctx c;
@@ -1671,6 +1708,7 @@ int main(void)
     t_signal(&c);
     t_execve(&c);
     t_reset(&c);
+    t_task_exit(&c);
 
     if(g_fails != 0)
     {

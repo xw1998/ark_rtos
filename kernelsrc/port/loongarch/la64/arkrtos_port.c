@@ -3234,6 +3234,29 @@ void arkrtos_port_svc_set_ret_signed(void *p_exc_ctx, int32 value)
 }
 
 /**
+* @brief 把当前系统调用退回重放：ERA 减 4（回到 syscall 指令本身）
+* @param p_exc_ctx 系统调用上下文指针
+* @return 0 = 已退回；-1 = 参数不可用（一个字节都不动）
+* @details 本 port 的阻塞只在异常出口结算：SVC 处理程序内部「置 WAIT +
+*          请求切换」之后函数立刻返回，真正的切换发生在 la_trap_c 末尾。
+*          于是「睡到事件发生再继续」的系统调用（wait4 阻塞形态）不能靠
+*          函数内等待实现，只能让任务醒来后从用户态**重放**同一次调用。
+*          帧里的参数寄存器（a0~a3）在内核这一路本来就没被改写，重放读到的
+*          就是同一组参数 —— 与 Linux 用 ERESTARTSYS 重启系统调用同一手法。
+*/
+int32 arkrtos_port_svc_restart(void *p_exc_ctx)
+{
+    la_frame_word *frame = (la_frame_word *)p_exc_ctx;
+
+    if(frame == 0)
+    {
+        return -1;
+    }
+    frame[LA_FR_ERA] -= 4u;     /* syscall 指令占 4 字节；进 SVC 前已经 +4 */
+    return 0;
+}
+
+/**
 * @brief 整份 trap 帧的字节数与整块存取（信号快照用）
 * @details 信号不能只存 era/sp/ra/tp：处理函数是普通 C 函数，会把
 *          $t0 一类的临时寄存器改成自己的东西，返回后被打断的调用

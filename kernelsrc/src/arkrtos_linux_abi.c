@@ -121,6 +121,10 @@
 #define LX_MAX_CHILD                (4u)
 #define LX_SIGCHLD_FLAG             (17u)
 #define LX_WNOHANG                  (1u)
+/* wait4 阻塞等待的一个时间片（ms）。子进程正常 exit 时由退出钩子立即唤醒，
+ * 这个上限只在「子进程已经不在了但没人来唤醒」时兜底（例如故障路径把子
+ * 任务禁用掉）。有界而不是无限：无限等待在那种情形下就是死锁。 */
+#define LX_WAIT_SLICE_MS            (100u)
 #endif
 #define LX_PATH_MAX                 (64u)
 #define LX_IO_CHUNK                 (128u)
@@ -241,7 +245,6 @@ typedef struct
 
 /* fd 表是内核全局的：本版本的 ELF 装载器一次只跑一个程序，装载器在
  * 每次起跑前调用 arkrtos_linux_abi_reset() 把它清空。 */
-static lx_fd_t s_fd[LX_MAX_FD];
 #if (ARKRTOS_USE_LINUX_FORK == 1)
 /* 子进程记账（U-19）：pid 就是任务号；generation 是 TCB 的注册代次，
  * 用来把「同一个任务号上的新旧两个实例」分开 —— 槽位会被复用，只比 pid
@@ -251,6 +254,7 @@ typedef struct
     uint8  used;
     int32  pid;
     uint32 generation;
+    int32  parent;      /* 发起 fork 的父进程任务号（wait4 只认自己的儿子） */
 } lx_child_t;
 
 static lx_child_t s_child[LX_MAX_CHILD];
@@ -269,11 +273,172 @@ typedef struct
     unsigned long mask;         /* 处理期间附加的屏蔽位 */
 } lx_sigaction_t;
 
+/* ---------------------------- 进程级状态（fd 表 / 信号动作 / 屏蔽 / pending）
+ * 历史版本把这两张表做成内核全局单份，并写死「一次只跑一个 ELF 程序」。
+ * fork 落地之后这条前提不再成立：父与子必须各自持有自己的 fd 表与信号表
+ * （Linux 语义），否则子进程 close 一个 fd 会把父的也关掉、子进程装的处理
+ * 函数会被父执行。
+ *
+ * 关档（ARKRTOS_USE_LINUX_FORK=0）时 LX_PROC_MAX 就是 1：只有 s_proc[0]
+ * 一份，映射与分配逻辑整段不参与编译，所有调用点读到的仍是那唯一的全局表，
+ * 行为与历史版本逐位相同（体积只多出几个恒返回 0 的内联判断）。
+ *
+ * 槽位在任务第一次进 Linux ABI 时惰性分配（lx_proc_cur）；fork 时由
+ * lx_clone 预先分配并把父的那一份复制过去。
+ * 槽用满时 arkrtos_linux_abi_try 直接回 -ENOMEM —— 绝不把两个进程塞进
+ * 同一份 fd/信号状态里，那会是一个查不出来的错答案。 */
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+#define LX_PROC_MAX   (LX_MAX_CHILD + 3u)
+#else
+#define LX_PROC_MAX   (1u)
+#endif
+
+typedef struct
+{
+    lx_fd_t        fd[LX_MAX_FD];
+    lx_sigaction_t sig[LX_NSIG];
+    uint32         sig_pending;
+    uint32         sig_blocked;
+} lx_proc_t;
+
+static lx_proc_t s_proc[LX_PROC_MAX];
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+static uint8 s_proc_used[LX_PROC_MAX];               /* 1 = 该槽已有主 */
+static uint8 s_proc_of_task[ARKRTOS_TASK_MAX_NUM];   /* 0 = 未绑定；n = 槽 n-1 */
+/* 1 = 该任务正卡在 wait4 的阻塞里：子进程退出 / 收到信号时只唤醒这种任务，
+ * 不去打扰因为别的原因（sleep、信号量）在等的任务。 */
+static uint8 s_lx_wait[ARKRTOS_TASK_MAX_NUM];
+#endif
+
+/* 历史名字改成宏：函数体里 s_fd[i] / s_sig[n] / s_sig_pending / s_sig_blocked
+ * 原样可用，读写的都是**当前进程**那一份。 */
+static lx_proc_t *lx_proc_curp(void);
+#define s_fd            (lx_proc_curp()->fd)
+#define s_sig           (lx_proc_curp()->sig)
+#define s_sig_pending   (lx_proc_curp()->sig_pending)
+#define s_sig_blocked   (lx_proc_curp()->sig_blocked)
+
+static void lx_proc_zero(uint32 slot)
+{
+    uint32 i;
+
+    for(i = 0u; i < LX_MAX_FD; i++)
+    {
+        s_proc[slot].fd[i].used = 0u;
+        s_proc[slot].fd[i].kind = LX_FD_FILE;
+        s_proc[slot].fd[i].pipe = 0u;
+        s_proc[slot].fd[i].size = 0u;
+        s_proc[slot].fd[i].off  = 0u;
+        s_proc[slot].fd[i].path[0] = 0;
+    }
+    for(i = 0u; i < (uint32)LX_NSIG; i++)
+    {
+        s_proc[slot].sig[i].handler  = LX_SIG_DFL;
+        s_proc[slot].sig[i].flags    = 0UL;
+        s_proc[slot].sig[i].restorer = 0UL;
+        s_proc[slot].sig[i].mask     = 0UL;
+    }
+    s_proc[slot].sig_pending = 0u;
+    s_proc[slot].sig_blocked = 0u;
+}
+
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+/* 任务 -> 槽（只查已绑定的；-1 = 这个任务还没有进程状态）。 */
+static int32 lx_proc_find(int32 task_id)
+{
+    if((task_id <= 0) || (task_id > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return -1;
+    }
+    if(s_proc_of_task[task_id - 1] == 0u)
+    {
+        return -1;
+    }
+    return (int32)(s_proc_of_task[task_id - 1] - 1u);
+}
+
+/* 占一个空槽（不清内容也不绑定；调用方决定零化还是复制父的）。-1 = 用满。 */
+static int32 lx_proc_alloc(void)
+{
+    uint32 i;
+
+    for(i = 0u; i < (uint32)LX_PROC_MAX; i++)
+    {
+        if(s_proc_used[i] == 0u)
+        {
+            s_proc_used[i] = 1u;
+            return (int32)i;
+        }
+    }
+    return -1;
+}
+
+static void lx_proc_free(uint32 slot)
+{
+    if(slot < (uint32)LX_PROC_MAX)
+    {
+        s_proc_used[slot] = 0u;
+    }
+}
+
+static void lx_proc_bind(uint32 slot, int32 task_id)
+{
+    if((task_id > 0) && (task_id <= (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        s_proc_of_task[task_id - 1] = (uint8)(slot + 1u);
+    }
+}
+
+static void lx_proc_unbind(int32 task_id)
+{
+    if((task_id > 0) && (task_id <= (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        s_proc_of_task[task_id - 1] = 0u;
+        s_lx_wait[task_id - 1]      = 0u;
+    }
+}
+#endif /* ARKRTOS_USE_LINUX_FORK == 1 */
+
+/* 当前任务的槽号：第一次进 ABI 时惰性分配。返回 LX_PROC_MAX 表示槽用满
+ * （调用方 arkrtos_linux_abi_try 会如实回 -ENOMEM）。 */
+static uint32 lx_proc_cur(void)
+{
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+    int32 slot = lx_proc_find((int32)arkrtos_current_task_id);
+
+    if(slot >= 0)
+    {
+        return (uint32)slot;
+    }
+    slot = lx_proc_alloc();
+    if(slot < 0)
+    {
+        return (uint32)LX_PROC_MAX;
+    }
+    lx_proc_zero((uint32)slot);
+    lx_proc_bind((uint32)slot, (int32)arkrtos_current_task_id);
+    return (uint32)slot;
+#else
+    return 0u;
+#endif
+}
+
+static lx_proc_t *lx_proc_curp(void)
+{
+    uint32 slot = lx_proc_cur();
+
+    /* 越界只可能出现在 try() 已经拒绝之后：钳到 0 只为不踩内存，
+     * 那条路径上一个字都不会被返回给程序。 */
+    if(slot >= (uint32)LX_PROC_MAX)
+    {
+        slot = 0u;
+    }
+    return &s_proc[slot];
+}
+
+
 /* 32 项动作表：1..31 有效，0 号不用。一个任务一份（fd 表也是这个口径：
  * 本版本一次只跑一个 ELF 程序）。 */
-static lx_sigaction_t s_sig[LX_NSIG];
-static uint32 s_sig_pending;        /* 已收未投递 */
-static uint32 s_sig_blocked;        /* 当前屏蔽字 */
 static uint32 s_sig_delivered;      /* 真投递进处理函数的次数 */
 static uint32 s_sig_ignored;        /* SIG_IGN 或默认忽略 */
 static uint32 s_sig_refused;        /* kill 的目标不是自己 */
@@ -832,6 +997,42 @@ static int32 lx_sig_send(int32 pid, uint32 sig)
 {
     if(pid != (int32)arkrtos_current_task_id)
     {
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+        int32  slot;
+
+        /* 跨进程投递：目标必须是「本内核认识的、还活着的」那个任务，而且
+         * 它自己已经有一份进程状态（fork 出来的子一定绑定了槽）。只置
+         * pending，不动目标的寄存器与栈；真正的铺帧仍在目标自己下一次
+         * 系统调用返回时做（屏蔽字与 handler 都是它那一份）。
+         * 目标正卡在 wait4 的阻塞里时顺手唤醒它，让它在这次调用的返回
+         * 路径上就拿到信号；目标在别处等待/正在跑时不打扰。 */
+        if((pid > 0) && (pid <= (int32)ARKRTOS_TASK_MAX_NUM))
+        {
+            slot = lx_proc_find(pid);
+            if((slot >= 0) &&
+               (arkrtos_task_table[pid - 1].status != ARKRTOS_TASK_INVALID))
+            {
+                uint32 crit;
+
+                if(sig == 0u)
+                {
+                    return 0;       /* 只做存在性探测，与 Linux 一致 */
+                }
+                if(sig >= (uint32)LX_NSIG)
+                {
+                    return -LX_EINVAL;
+                }
+                crit = ARKRTOS_ENTER_CRITICAL();
+                s_proc[(uint32)slot].sig_pending |= lx_sig_bit(sig);
+                if(s_lx_wait[pid - 1] != 0u)
+                {
+                    (void)arkrtos_task_wakeup_internal(pid);
+                }
+                ARKRTOS_EXIT_CRITICAL(crit);
+                return 0;
+            }
+        }
+#endif
         s_sig_refused++;
         return -LX_ESRCH;
     }
@@ -1149,29 +1350,26 @@ static int32 lx_openat(void *p_ctx)
     return (int32)(3u + i);
 }
 
-static int32 lx_close(void *p_ctx)
+/* 关掉一个 fd 槽（含管道引用计数）。参数是**显式槽位**：任务退出时收尸
+ * 要清的是那个进程的槽，而当前上下文可能已经不是它了。
+ * 返回 1 = 这个槽原本是有效 fd。 */
+static uint32 lx_fd_release(uint32 slot, uint32 idx)
 {
-    int32 fd = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
-    int32 idx;
-
-    if((fd >= 0) && (fd <= 2))
+    if((slot >= (uint32)LX_PROC_MAX) || (idx >= LX_MAX_FD))
     {
-        return 0;       /* 标准流：关掉是空操作，不制造假句柄 */
+        return 0u;
     }
-
-    idx = lx_fd_find(fd);
-    if(idx < 0)
+    if(s_proc[slot].fd[idx].used == 0u)
     {
-        return -LX_EBADF;
+        return 0u;
     }
-
-    if(s_fd[idx].kind != LX_FD_FILE)
+    if(s_proc[slot].fd[idx].kind != LX_FD_FILE)
     {
-        int32 pi = (int32)s_fd[idx].pipe;
+        int32 pi = (int32)s_proc[slot].fd[idx].pipe;
 
         if((pi >= 0) && (pi < (int32)LX_PIPE_MAX) && (s_pipe[pi].used != 0u))
         {
-            if(s_fd[idx].kind == LX_FD_PIPE_R)
+            if(s_proc[slot].fd[idx].kind == LX_FD_PIPE_R)
             {
                 if(s_pipe[pi].readers != 0u)
                 {
@@ -1194,14 +1392,84 @@ static int32 lx_close(void *p_ctx)
             }
         }
     }
+    s_proc[slot].fd[idx].used = 0u;
+    s_proc[slot].fd[idx].kind = LX_FD_FILE;
+    s_proc[slot].fd[idx].pipe = 0u;
+    s_proc[slot].fd[idx].off  = 0u;
+    s_proc[slot].fd[idx].size = 0u;
+    s_proc[slot].fd[idx].path[0] = 0;
+    return 1u;
+}
 
-    s_fd[idx].used = 0u;
-    s_fd[idx].kind = LX_FD_FILE;
-    s_fd[idx].pipe = 0u;
-    s_fd[idx].off  = 0u;
-    s_fd[idx].size = 0u;
-    s_fd[idx].path[0] = 0;
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+/* 把父进程的状态复制进刚 fork 出来的子槽：fd 表逐项照抄（管道对象的读写端
+ * 引用计数各加一 —— fd 被复制了一份，管道还是同一条，与 Linux 的 dup 语义
+ * 一致），信号动作照抄；pending 与屏蔽字清零（新进程从 clone 的返回点开始，
+ * 不该继承父进程还没投递的信号）。 */
+static void lx_proc_fork_child(uint32 slot, int32 child, int32 parent)
+{
+    int32  pslot = lx_proc_find(parent);
+    uint32 i;
 
+    lx_proc_zero(slot);
+    if(pslot >= 0)
+    {
+        for(i = 0u; i < LX_MAX_FD; i++)
+        {
+            s_proc[slot].fd[i] = s_proc[(uint32)pslot].fd[i];
+            if(s_proc[slot].fd[i].used == 0u)
+            {
+                continue;
+            }
+            if(s_proc[slot].fd[i].kind == LX_FD_FILE)
+            {
+                continue;
+            }
+            {
+                int32 pi = (int32)s_proc[slot].fd[i].pipe;
+
+                if((pi < 0) || (pi >= (int32)LX_PIPE_MAX) || (s_pipe[pi].used == 0u))
+                {
+                    continue;
+                }
+                if(s_proc[slot].fd[i].kind == LX_FD_PIPE_R)
+                {
+                    s_pipe[pi].readers++;
+                }
+                else
+                {
+                    s_pipe[pi].writers++;
+                }
+            }
+        }
+        for(i = 0u; i < (uint32)LX_NSIG; i++)
+        {
+            s_proc[slot].sig[i] = s_proc[(uint32)pslot].sig[i];
+        }
+        s_proc[slot].sig_blocked = s_proc[(uint32)pslot].sig_blocked;
+        s_proc[slot].sig_pending = 0u;
+    }
+    lx_proc_bind(slot, child);
+}
+#endif /* ARKRTOS_USE_LINUX_FORK == 1 */
+
+static int32 lx_close(void *p_ctx)
+{
+    int32 fd = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
+    int32 idx;
+
+    if((fd >= 0) && (fd <= 2))
+    {
+        return 0;       /* 标准流：关掉是空操作，不制造假句柄 */
+    }
+
+    idx = lx_fd_find(fd);
+    if(idx < 0)
+    {
+        return -LX_EBADF;
+    }
+
+    (void)lx_fd_release(lx_proc_cur(), (uint32)idx);
     return 0;
 }
 
@@ -1645,6 +1913,9 @@ static int32 lx_clone(void *p_ctx)
     uint32 space = 0u;
     int32  child = 0;
     int32  slot;
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+    int32  pslot = -1;
+#endif
     int32  rc;
 
     if((child_stack != 0ul) ||
@@ -1659,21 +1930,43 @@ static int32 lx_clone(void *p_ctx)
         return -LX_EAGAIN;
     }
 
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+    /* 进程状态槽在 fork **之前**占好：占不到就不 fork（-EAGAIN）。反过来的
+     * 顺序不行 —— 子进程已经跑起来了却没有 fd/信号表，只能二选一：让它和
+     * 父共用一份（静默错答案），或者当场收掉一个正在跑的任务（更大的错）。 */
+    pslot = lx_proc_alloc();
+    if(pslot < 0)
+    {
+        return -LX_EAGAIN;
+    }
+#endif
+
     rc = arkrtos_elf_fork(p_ctx, &child, &space);
     if(rc != ARKRTOS_ELF_OK)
     {
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+        lx_proc_free((uint32)pslot);
+#endif
         return lx_fork_errno(rc);
     }
 
     if((child <= 0) || (child > (int32)ARKRTOS_TASK_MAX_NUM))
     {
         /* 装载器不会给出这种值；真给了就如实报错，不登记一条假记账。 */
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+        lx_proc_free((uint32)pslot);
+#endif
         return -LX_EINVAL;
     }
+
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+    lx_proc_fork_child((uint32)pslot, child, (int32)arkrtos_current_task_id);
+#endif
 
     s_child[slot].used       = 1u;
     s_child[slot].pid        = child;
     s_child[slot].generation = arkrtos_task_table[child - 1].generation;
+    s_child[slot].parent     = (int32)arkrtos_current_task_id;
 
     return child;
 }
@@ -1693,85 +1986,164 @@ static int32 lx_wait4(void *p_ctx)
     int32  pid     = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
     unsigned long ustatus = ARKRTOS_SVC_ARG(p_ctx, 1u);
     uint32 options = (uint32)ARKRTOS_SVC_ARG(p_ctx, 2u);
-    uint32 i;
+    int32  me      = (int32)arkrtos_current_task_id;
 
     if((options & ~(uint32)LX_WNOHANG) != 0u)
     {
         return -LX_EINVAL;
     }
-
-    for(i = 0u; i < (uint32)LX_MAX_CHILD; i++)
+    if(me <= 0)
     {
-        arkrtos_task_t *p_task;
+        return -LX_ECHILD;      /* 内核上下文不可能有儿子 */
+    }
 
-        if(s_child[i].used == 0u)
-        {
-            continue;
-        }
-        if((pid > 0) && (pid != s_child[i].pid))
-        {
-            continue;
-        }
+    #if (ARKRTOS_USE_LINUX_FORK == 1)
+    {
+        /* 上次睡下时登记的标记到此作废：它只在「正在睡」的时候有意义。
+         * 重放这条系统调用时先清掉，避免上一个时间片留下的标记让退出钩子
+         * 对着一个没在等的任务发唤醒。 */
+        uint32 crit0 = ARKRTOS_ENTER_CRITICAL();
 
-        if((s_child[i].pid <= 0) || (s_child[i].pid > (int32)ARKRTOS_TASK_MAX_NUM))
-        {
-            s_child[i].used = 0u;
-            continue;
-        }
+        s_lx_wait[me - 1] = 0u;
+        ARKRTOS_EXIT_CRITICAL(crit0);
+    }
+    #endif
 
-        p_task = &arkrtos_task_table[s_child[i].pid - 1];
+    /* 阻塞是循环重扫，不是「睡下就信唤醒」：子进程可能在父进程睡下之前
+     * 就已经 exit（退出钩子的唤醒投给了一个还没睡的父进程），也可能死在
+     * 故障路径上（那条路不经过退出钩子）。两种情况都由「醒来再扫一遍」
+     * 兜住，最多多睡一个 LX_WAIT_SLICE_MS 的时间片。 */
+    for(;;)
+    {
+        uint32 crit;
+        uint32 i;
+        int32  alive = 0;
 
-        if(p_task->generation != s_child[i].generation)
+        crit = ARKRTOS_ENTER_CRITICAL();
+        for(i = 0u; i < (uint32)LX_MAX_CHILD; i++)
         {
-            /* 槽位已被别人复用：那个实例早就没了，退出码也无从取回。 */
-            s_child[i].used = 0u;
-            continue;
-        }
+            arkrtos_task_t *p_task;
+            int32 st;
 
-        if(p_task->status != ARKRTOS_TASK_INVALID)
-        {
-            if((options & (uint32)LX_WNOHANG) != 0u)
+            if(s_child[i].used == 0u)
             {
-                return 0;
+                continue;
             }
-            return -LX_EAGAIN;
-        }
+            if(s_child[i].parent != me)
+            {
+                continue;       /* 别人的儿子：不认 */
+            }
+            if((pid > 0) && (pid != s_child[i].pid))
+            {
+                continue;
+            }
 
-        #if (ARKRTOS_USE_EXIT_CODE == 1)
-        if(p_task->exit_code_set == 0u)
-        {
-            s_child[i].used = 0u;
-            return -LX_EIO;
-        }
-        #endif
+            if((s_child[i].pid <= 0) || (s_child[i].pid > (int32)ARKRTOS_TASK_MAX_NUM))
+            {
+                s_child[i].used = 0u;
+                continue;
+            }
 
-        {
-            uint32 status = (uint32)0u;
+            p_task = &arkrtos_task_table[s_child[i].pid - 1];
+
+            if(p_task->generation != s_child[i].generation)
+            {
+                /* 槽位已被别人复用：那个实例早就没了，退出码也无从取回。 */
+                s_child[i].used = 0u;
+                continue;
+            }
+
+            if(p_task->status != ARKRTOS_TASK_INVALID)
+            {
+                if((options & (uint32)LX_WNOHANG) != 0u)
+                {
+                    ARKRTOS_EXIT_CRITICAL(crit);
+                    return 0;
+                }
+                alive = 1;      /* 还有活着的儿子：可以睡一觉再扫 */
+                continue;
+            }
 
             #if (ARKRTOS_USE_EXIT_CODE == 1)
-            status = (((uint32)p_task->exit_code & 0xFFu) << 8);
+            if(p_task->exit_code_set == 0u)
+            {
+                s_child[i].used = 0u;
+                ARKRTOS_EXIT_CRITICAL(crit);
+                return -LX_EIO;
+            }
             #endif
 
+            st = s_child[i].pid;
+            /* 拷状态在临界区外做（copy_to_user 可能触发缺页，不能在关中断
+             * 的窗口里走那条路）。记账先不放：写不进去时调用者改好指针再
+             * 来一次，这一次的退出码还在。 */
+            ARKRTOS_EXIT_CRITICAL(crit);
             if(ustatus != 0ul)
             {
+                uint32 status = (uint32)0u;
+
+                #if (ARKRTOS_USE_EXIT_CODE == 1)
+                status = (((uint32)p_task->exit_code & 0xFFu) << 8);
+                #endif
                 if(arkrtos_copy_to_user((void *)(unsigned long)ustatus,
                                         &status, 4u) != 0)
                 {
-                    /* 状态写不进去：**不放掉**记账，让调用者修好指针再来。 */
                     return -LX_EFAULT;
                 }
             }
+            crit = ARKRTOS_ENTER_CRITICAL();
+            s_child[i].used = 0u;
+            ARKRTOS_EXIT_CRITICAL(crit);
+            return st;
         }
 
-        s_child[i].used = 0u;
-        return s_child[i].pid;
-    }
+        if(alive == 0)
+        {
+            ARKRTOS_EXIT_CRITICAL(crit);
+            return -LX_ECHILD;
+        }
 
-    return -LX_ECHILD;
+        #if (ARKRTOS_USE_LINUX_FORK == 1)
+        /* 登记「我卡在 wait4」：子退出 / 跨进程信号只在登记过的时候唤醒，
+         * 不打扰因为别的原因在等的任务。 */
+        s_lx_wait[me - 1] = 1u;
+        #endif
+        /* 本内核在 SVC 处理程序内部**没有真正睡眠**的通路：阻塞只是
+         * 「置 WAIT + 请求切换」，切换在异常出口结算，函数本身立刻返回。
+         * 所以这条系统调用必须能被重放：把 ERA 退回 syscall 指令，任务被
+         * 唤醒（子进程退出钩子 / 超时时间片）后从用户态重新发起这次 wait4，
+         * 届时再扫一遍记账。参数寄存器在帧里没有被改写，重放读到同一组值。 */
+        if(arkrtos_port_svc_restart(p_ctx) != 0)
+        {
+            /* 端口不给重放能力：如实回 -EAGAIN，不假装阻塞过。 */
+            #if (ARKRTOS_USE_LINUX_FORK == 1)
+            s_lx_wait[me - 1] = 0u;
+            #endif
+            ARKRTOS_EXIT_CRITICAL(crit);
+            return -LX_EAGAIN;
+        }
+        /* 置 WAIT + 武装 LX_WAIT_SLICE_MS 超时 + 请求切换；不在这里等它返回。 */
+        (void)arkrtos_task_block_in_critical((uint32)LX_WAIT_SLICE_MS);
+        ARKRTOS_EXIT_CRITICAL(crit);
+        /* 这次调用的返回值会被重放的那一次覆盖，写什么都无所谓。 */
+        return 0;
+    }
 }
 #endif /* ARKRTOS_USE_LINUX_FORK == 1 */
 
 /* ------------------------------------------------ execve（同任务换镜像） */
+
+/* MinGW 把 __attribute__((weak)) 编成「同一目标内的弱别名」（符号表里
+ * 是 w 未定义，COMDAT 组名带调用者），跨目标引用既不解析也不计数。
+ * 所以覆盖档（coverage_gate 的 linuxabi 用例）用 -DARKRTOS_HOST_WEAK_PORT=0
+ * 把 svc_restart 的缺省实现编成普通强符号：行为一字不差（回 -1），只是宿主
+ * 看得见才数得到。exec_frame 那条不套这个宏：它的成功路径由用例的 --wrap
+ * 强定义接管，改成强符号反而会顶掉 wrap。产物构建永远不带这个宏。 */
+#if defined(ARKRTOS_HOST_WEAK_PORT) && (ARKRTOS_HOST_WEAK_PORT == 0)
+#define ARKRTOS_PORT_FALLBACK_LINKAGE
+#else
+#define ARKRTOS_PORT_FALLBACK_LINKAGE __attribute__((weak))
+#endif
 
 /* 没有「同任务换镜像」落地能力的 port（RISC-V / Cortex-M / LA32）不提供
  * 这条符号：弱定义让那些构建照样链接，运行期 execve 明确回 -ENOSYS，
@@ -1784,6 +2156,15 @@ arkrtos_port_svc_exec_frame(void *p_exc_ctx, unsigned long entry,
     (void)entry;
     (void)sp;
     (void)tp;
+    return -1;
+}
+
+/* 同上：没有「重放系统调用」能力的 port 明确回 -1，阻塞等待由 wait4 自己
+ * 降级成 -EAGAIN。绝不返回 0 假装睡过 —— 那会让父进程在子进程还活着的时候
+ * 拿着一个编出来的退出码继续跑。 */
+ARKRTOS_PORT_FALLBACK_LINKAGE int32 arkrtos_port_svc_restart(void *p_exc_ctx)
+{
+    (void)p_exc_ctx;
     return -1;
 }
 
@@ -2083,6 +2464,18 @@ int32 arkrtos_linux_abi_try(void *p_svc_ctx)
         return 0;       /* 不是 Linux ABI 调用，交回 Ark 号表 */
     }
 
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+    if(lx_proc_cur() >= (uint32)LX_PROC_MAX)
+    {
+        /* 进程状态槽用满：如实回 -ENOMEM。两条进程共用一份 fd/信号表会产出
+         * 一个查不出来的错答案（子进程 close 掉父的 fd），比拒绝更糟。 */
+        s_stat[LX_STAT_OTHER]++;
+        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-LX_ENOMEM));
+        return 1;
+    }
+#endif
+
+
     #if (ARKRTOS_LINUX_ABI_SYSSTAT == 1)
     lx_note_nr(num);
     #endif
@@ -2139,9 +2532,94 @@ uint32 arkrtos_linux_abi_nr_overflow(void)
 }
 #endif /* ARKRTOS_LINUX_ABI_SYSSTAT */
 
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+/**
+* @brief 进程退出收尾（fork 记账 + 父进程通知 + 状态还池）
+* @details 调用点在 arkrtos_task_kill_internal()：status 已是 INVALID、
+*          退出码已写好。这里做三件事：
+*            1) 对每一条「pid == 刚死的任务、代次也对得上」的记账，唤醒
+*               正在 wait4 里等它的父进程，并置 SIGCHLD 待投递位；
+*            2) 把该进程的 fd 全部关掉（管道读写端引用计数递减，与 close
+*               同一条路径）；
+*            3) 信号动作表与槽位还池，并解除任务号绑定。
+*          第 1 步只唤醒「登记过自己在 wait4」的父进程（s_lx_wait），
+*          不打扰因为别的原因在等的任务；父进程没在等就只是 pending。
+*/
+void arkrtos_linux_abi_on_task_exit(int32 task_id)
+{
+    uint32 i;
+
+    if((task_id <= 0) || (task_id > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return;
+    }
+
+    for(i = 0u; i < (uint32)LX_MAX_CHILD; i++)
+    {
+        int32  parent;
+        int32  pslot;
+        uint32 crit;
+
+        if((s_child[i].used == 0u) || (s_child[i].pid != task_id))
+        {
+            continue;
+        }
+        if(arkrtos_task_table[task_id - 1].generation != s_child[i].generation)
+        {
+            continue;
+        }
+        parent = s_child[i].parent;
+        if((parent <= 0) || (parent > (int32)ARKRTOS_TASK_MAX_NUM))
+        {
+            continue;
+        }
+        pslot = lx_proc_find(parent);
+        if(pslot < 0)
+        {
+            continue;       /* 父进程没有进程状态：不伪造通知 */
+        }
+        crit = ARKRTOS_ENTER_CRITICAL();
+        s_proc[(uint32)pslot].sig_pending |= lx_sig_bit((uint32)LX_SIGCHLD_FLAG);
+        if(s_lx_wait[parent - 1] != 0u)
+        {
+            (void)arkrtos_task_wakeup_internal(parent);
+        }
+        ARKRTOS_EXIT_CRITICAL(crit);
+    }
+
+    {
+        int32 slot = lx_proc_find(task_id);
+
+        if(slot >= 0)
+        {
+            uint32 crit = ARKRTOS_ENTER_CRITICAL();
+            uint32 f;
+
+            for(f = 0u; f < LX_MAX_FD; f++)
+            {
+                (void)lx_fd_release((uint32)slot, f);
+            }
+            lx_proc_zero((uint32)slot);
+            lx_proc_free((uint32)slot);
+            lx_proc_unbind(task_id);
+            ARKRTOS_EXIT_CRITICAL(crit);
+        }
+    }
+}
+#else
+/* fork 关档：内核只在 ARKRTOS_USE_LINUX_ABI=1 时调用本函数，这里如实回答
+ * 「没有可收尾的进程状态」，而不是假装做完了什么。 */
+void arkrtos_linux_abi_on_task_exit(int32 task_id)
+{
+    (void)task_id;
+}
+#endif /* ARKRTOS_USE_LINUX_FORK == 1 */
+
+
 void arkrtos_linux_abi_reset(void)
 {
     uint32 i;
+    uint32 slot;
 
 #if (ARKRTOS_LINUX_ABI_SYSSTAT == 1)
     for(i = 0u; i < (uint32)LX_NR_SLOTS; i++)
@@ -2152,15 +2630,24 @@ void arkrtos_linux_abi_reset(void)
     s_nr_used     = 0u;
     s_nr_overflow = 0u;
 #endif
-    for(i = 0u; i < LX_MAX_FD; i++)
+    /* 进程状态（fd 表 + 信号动作/屏蔽/pending）逐槽清空。fork 关档时只有
+     * 槽 0，等价于历史版本的「清那张全局表」；fork 开档时连槽位与任务号的
+     * 映射一起清，下一个进 ABI 的任务重新惰性分配。 */
+    for(slot = 0u; slot < (uint32)LX_PROC_MAX; slot++)
     {
-        s_fd[i].used = 0u;
-        s_fd[i].size = 0u;
-        s_fd[i].off  = 0u;
-        s_fd[i].kind = LX_FD_FILE;
-        s_fd[i].pipe = 0u;
-        s_fd[i].path[0] = 0;
+        lx_proc_zero(slot);
     }
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+    for(i = 0u; i < (uint32)LX_PROC_MAX; i++)
+    {
+        s_proc_used[i] = 0u;
+    }
+    for(i = 0u; i < (uint32)ARKRTOS_TASK_MAX_NUM; i++)
+    {
+        s_proc_of_task[i] = 0u;
+        s_lx_wait[i]      = 0u;
+    }
+#endif
 
     for(i = 0u; i < LX_PIPE_MAX; i++)
     {
@@ -2172,17 +2659,8 @@ void arkrtos_linux_abi_reset(void)
         s_pipe[i].count   = 0u;
     }
 
-    /* 信号：动作表、pending、屏蔽字全部回到默认。新程序不该继承上一个
-     * 程序的信号处理函数（那是一个已经不存在的代码地址）。 */
-    for(i = 0u; i < (uint32)LX_NSIG; i++)
-    {
-        s_sig[i].handler  = LX_SIG_DFL;
-        s_sig[i].flags    = 0UL;
-        s_sig[i].restorer = 0UL;
-        s_sig[i].mask     = 0UL;
-    }
-    s_sig_pending = 0u;
-    s_sig_blocked = 0u;
+    /* 信号：动作表、pending、屏蔽字已在上面逐槽清过，这里只归零计数器。
+     * 新程序不该继承上一个程序的信号处理函数（那是一个已经不存在的代码地址）。 */
     s_sig_delivered = 0u;
     s_sig_ignored = 0u;
     s_sig_refused = 0u;
@@ -2192,13 +2670,14 @@ void arkrtos_linux_abi_reset(void)
     s_heap_cur = 0u;
 
 #if (ARKRTOS_USE_LINUX_FORK == 1)
-    /* 子进程记账与 fd 表同一条取舍：它是「当前这一个程序」的状态，
-     * 换程序时一并清掉。 */
+    /* 子进程记账：换程序时一并清掉（装载器的语义仍是「起一个新程序」，
+     * 上一次留下的父子关系不该被它继承）。 */
     for(i = 0u; i < (uint32)LX_MAX_CHILD; i++)
     {
         s_child[i].used       = 0u;
         s_child[i].pid        = 0;
         s_child[i].generation = 0u;
+        s_child[i].parent     = 0;
     }
 #endif
 }

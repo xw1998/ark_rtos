@@ -85,11 +85,28 @@ uint32 arkrtos_linux_abi_nr_overflow(void);
 #endif /* ARKRTOS_LINUX_ABI_SYSSTAT */
 
 /**
-* @brief 清空每次 exec 都必须重置的状态（fd 表与堆游标）
-* @details 由 ELF 装载器在起跑前调用：fd 表是内核全局的（一次只跑一个
-*          程序），上一次留下的句柄不该被下一次继承。
+* @brief 清空每次 exec 都必须重置的状态（进程槽的 fd 表/信号状态、堆游标）
+* @details 由 ELF 装载器在起跑前调用：exec 换的是当前任务的镜像，fd 表按
+*          进程分槽（fork 关档只有槽 0，等价于旧版那张全局表），这里逐槽
+*          清空，并把槽位与任务号的映射一起复位，下一个进 ABI 的任务重新
+*          惰性分配。上一次留下的句柄与信号处理函数不该被下一次继承。
 */
 void arkrtos_linux_abi_reset(void);
+
+/**
+* @brief 任务退出时由内核收尸路径调用（fork 记账收尾 + 唤醒等它的父进程）
+* @param task_id 刚被置为 INVALID 的任务号
+* @details 只有 ARKRTOS_USE_LINUX_FORK=1 时才有实体：
+*            - 把「正在等这个子进程」的父进程从等待里唤醒（父进程 blocked
+*              in wait4 时才会被唤醒，别的等待原因不动）；
+*            - 按 Linux 的做法给父进程置一个 SIGCHLD 待投递位（默认动作是
+*              忽略，与 Linux 一致，不会把没装处理函数的父进程弄死）；
+*            - 放掉这个进程自己的 fd/信号状态槽（管道引用计数随之递减）。
+*          调用点在 status 已置 INVALID、退出码已写好之后，被唤醒的父进程
+*          读到的必然是终态。fork 关档时本函数编译成空宏，内核侧调用点也在
+*          #if 里，默认档不产生任何符号与体积。
+*/
+void arkrtos_linux_abi_on_task_exit(int32 task_id);
 
 #else
 
@@ -99,6 +116,7 @@ void arkrtos_linux_abi_reset(void);
 #define arkrtos_linux_abi_nr_slot(i, p)  (0u)
 #define arkrtos_linux_abi_nr_overflow()  (0u)
 #define arkrtos_linux_abi_reset()        ((void)0)
+#define arkrtos_linux_abi_on_task_exit(id) ((void)0)
 
 #endif /* ARKRTOS_USE_LINUX_ABI */
 

@@ -4078,6 +4078,34 @@ int32 arkrtos_task_block_in_critical(uint32 timeout_ms)
     return reason;
 }
 
+/* 唤醒一个 WAIT 态任务（跨任务可用）。与 sync 对象的唤醒三件套同形，
+ * 但收在一处：wake_reason 打令牌交接位、status 置 READY、挂回就绪链。
+ * 只认 WAIT：迟到的唤醒（目标已经自己超时醒来、或已被收尸置 INVALID）
+ * 一律返回 -1，什么都不改。 */
+int32 arkrtos_task_wakeup_internal(int32 task_id)
+{
+    arkrtos_task_t *p_tsk;
+    uint32 state;
+
+    if((task_id <= 0) || (task_id > (int32)arkrtos_task_count))
+    {
+        return -1;
+    }
+    state = ARKRTOS_ENTER_CRITICAL();
+    p_tsk = &arkrtos_task_table[task_id - 1];
+    if(p_tsk->status != ARKRTOS_TASK_WAIT)
+    {
+        ARKRTOS_EXIT_CRITICAL(state);
+        return -1;
+    }
+    p_tsk->wake_reason = ARKRTOS_WAKE_HANDOFF;
+    p_tsk->wait_time   = 0;
+    p_tsk->status      = ARKRTOS_TASK_READY;
+    arkrtos_ready_add(task_id - 1);          /* 幂等；顺带摘掉延时链 */
+    ARKRTOS_EXIT_CRITICAL(state);
+    return 0;
+}
+
 void arkrtos_task_delay_internal(uint32 us)
 {
     arkrtos_port_delay_us(us);
@@ -4186,6 +4214,14 @@ void arkrtos_task_kill_internal(void)
         arkrtos_delay_disarm(arkrtos_current_task_id - 1);
         arkrtos_task_table[arkrtos_current_task_id - 1].status = ARKRTOS_TASK_INVALID;
         ARKRTOS_ENABLE_IRQ();
+
+        #if (ARKRTOS_USE_LINUX_ABI == 1)
+        /* Linux ABI 的 fork 记账收尾：唤醒正在 wait4 等这个子进程的父进程，
+         * 并放掉本进程的 fd/信号状态槽。放在 status 已是 INVALID、退出码
+         * 已写好之后：父进程被唤醒后第一件事就是读这两个值，读到的必须
+         * 是终态（提前唤醒会拿到"还活着"的旧读数）。 */
+        arkrtos_linux_abi_on_task_exit(arkrtos_current_task_id);
+        #endif
     }
 
 #if ARKRTOS_USE_VFS

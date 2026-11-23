@@ -68,7 +68,7 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 | 220 | `clone` | 只做 fork：`flags` 必须 0 或 `SIGCHLD`、`child_stack` 必须 0；复制整份地址空间 + 造新任务，子返 0 父返子号（§8，`ARKRTOS_USE_LINUX_FORK`） | `clone(child_stack!=0) == -EINVAL -> -22 ok` / `parent child=12` / `child pid != parent pid -> 1 ok` / `exit code 0` |
 | 221 | `execve` | 同任务换镜像：铺段进调用者自己的空间、把入口/`sp`/`tp` 写回 trap 帧；成功不返回 | `stage2 pid==stage1 pid -> 11 ok` / `image reloaded (.data marker) -> 1 ok` / `fd 3 survived -> 1 ok` / `heap cursor reset -> 34668544 ok` / `exit code 42`（§5） |
 | 222 | `mmap` | 只认 `MAP_PRIVATE|MAP_ANONYMOUS`；拒 `MAP_FIXED` | `mmap>0 -> 1 ok` / `mmap write/read -> 1 ok` |
-| 260 | `wait4` | 只认 `options 0/WNOHANG`；不阻塞、不编造状态，reap 后记账清零（§8） | `wait4 returned child pid -> 12 ok` / `WEXITSTATUS == 42 -> 42 ok` / `wait4(child) again == -ECHILD -> -10 ok` |
+| 260 | `wait4` | 只认 `options 0/WNOHANG`；**无 `WNOHANG` 时真阻塞**（可重启系统调用，§8.1），不编造状态，reap 后记账清零（§8） | `wait4 returned child pid -> 12 ok` / `WEXITSTATUS == 42 -> 42 ok` / `wait4(child) again == -ECHILD -> -10 ok` / `blocking wait4 blocked >= 40 ms -> 1 ok` |
 | 226 | `mprotect` | 只校验页对齐与窗口范围、返 0 并单独计数；**保护不生效**（整窗一块 PS=20 的 RWX 映射） | 无夹具读数（§1.1） |
 
 未知号一律 `-ENOSYS`（38），并计数；**不猜**。
@@ -106,8 +106,8 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 |---|---|---|
 | 动态链接（`PT_INTERP` / `.so`） | **默认档仍拒**；打开 `ARKRTOS_USE_DYNLOAD` 后已支持（2026-11-20，QEMU LA64 实跑） | 内核按 Linux 约定装载解释器、铺 auxv、入口跳解释器，配一套自研 `ld-ark.so`；见 [动态链接与PT_INTERP](动态链接与PT_INTERP.md)。范围是「自研装载器 + 一级依赖 + 立即重定位」：现成发行版二进制仍跑不了（`ld.so` 是 glibc 的，仓里没有） |
 | `fork` / `clone` | **已有**（`ARKRTOS_USE_LINUX_FORK`，默认关；2026-11-23，QEMU LA64 实跑） | 只做 fork，不做线程：`CLONE_VM` / `CLONE_THREAD` 一律 `-EINVAL`；见 §8 |
-| 信号只做到「最小一档」 | 同一任务自我投递 + 系统调用返回前投递；无跨任务、无抢占、无实时、无 `siginfo`（§7） | 投递对象仍是「自己」；跨任务投递要先有第二个可投递实体的判定与抢占式入口，本轮先不做 |
-| `fd` 继承、重定向 | 无 | fd 表是内核全局（§4），shell 的 `exec` 起新任务并清零；`execve` 保留 fd，但没有父子可继承（管道已做，见 §6） |
+| 信号 | **已有跨任务投递**（`kill`/`tkill`/`tgkill` 按 pid 定位目标进程，2026-11-23，QEMU LA64 实跑）；仍无抢占式投递、无实时信号、无 `siginfo`（§7） | 跨任务靠「置目标 `sig_pending` + 目标卡在阻塞 `wait4` 时唤醒」，铺帧仍在目标自己下一次系统调用返回时做；抢占式入口还没有 |
+| `fd` 继承 | **已有**（fork 档每进程 fd 表 + 管道对象引用计数，2026-11-23） | 见 §4 与 §8；`dup`/`dup2` 重定向仍无 |
 | `socket` / `select` | 无（Ark 自己有一套 socket 兼容层，但**不在** Linux ABI 号表里） | 两套编号与阻塞语义不同，混在一个号表里只会给出错答案 |
 | `futex` | 无 | 没有共享内存与等待队列语义 |
 | 真 `mmap` 语义（文件映射/共享/`MAP_FIXED`/权限位） | 只做匿名私有分配，`RWX` 权限不区分 | 窗口式分配器（§4），兑现真语义需要页级权限与文件后端 |
@@ -115,9 +115,13 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 
 ## 4 降级实现，以及为什么这么降
 
-- **fd 表**：内核全局 `lx_fd_t s_fd[8]`（路径 + 偏移），shell 的 `exec`（起新任务）
-  成功时 `reset`；`execve`（同任务换镜像）**保留** `execve` 之前的 fd，与 Linux
-  一致。没有父子，所以仍然谈不上「继承」。
+- **fd 表**：分两档。默认档（`ARKRTOS_USE_LINUX_FORK=0`）仍是内核全局
+  `lx_fd_t s_fd[8]`（路径 + 偏移），shell 的 `exec`（起新任务）成功时 `reset`；
+  `execve`（同任务换镜像）**保留** `execve` 之前的 fd，与 Linux 一致。fork 档改成
+  **每进程一份**（`lx_proc_t { fd[8]; sig[NSIG]; sig_pending; sig_blocked; }`，
+  `static lx_proc_t s_proc[LX_PROC_MAX]`）：`clone` 时整表复制，管道两端 `readers` /
+  `writers` 各 +1，子进程 `close` 只减自己那份引用（管道对象在父那边继续存活）。
+  实现手法是宏别名（`#define s_fd (lx_proc_curp()->fd)`），既有 500+ 个调用点不动。
 - **堆**：`brk` / `mmap` 共用 ELF 窗口内的一段（窗口 `0x02000000`，2 MB；堆从
   窗口一半起，末尾留 128 KB 给栈）。单调向上分配，不回收；`execve` 成功时游标
   归零（旧游标的地址语义属于旧镜像）。
@@ -208,9 +212,9 @@ ELF 魔数排掉「顺手 reset 了 fd 表」；`brk(0)` 回到基点排掉「�
 
 | 事件 | Ark | Linux | 为什么不一样 |
 |---|---|---|---|
-| 读空缓冲、写端还在 | `-EAGAIN`（11） | 阻塞 | 没有 `fork`，fd 表全局单份，管道两端通常落在**同一个任务**里；阻塞就是自己等自己 |
+| 读空缓冲、写端还在 | `-EAGAIN`（11） | 阻塞 | 管道读写仍是内核内同步搬运、刻意不做阻塞；fork 档下两端可以真分属父子（fd 已继承），但「读空就睡」这类等待没有接 |
 | 读空缓冲、写端全关 | 返回 `0`（EOF） | 返回 0 | 与 Linux 一致；**绝不用 0 冒充「暂时没数据」** |
-| 写满缓冲 | 短写（返回实际字节数） | 阻塞到能写 | 同上，不阻塞；短写本来就是 Linux 允许的返回形状 |
+| 写满缓冲 | 短写（返回实际字节数） | 阻塞到能写 | 同上，不阻塞；短写本来就是 Linux 允许的返回形状，程序按返回值循环即可 |
 | 缓冲全满、一个字节都写不进 | `-EAGAIN` | 阻塞 | 同上 |
 | 读端全关还写 | `-EPIPE`（32） | `SIGPIPE` / `-EPIPE` | 没有信号，只能返回 `-EPIPE`；`SIGPIPE` 不会来 |
 | `flags` 带 `O_CLOEXEC` | `-EINVAL` | 接受 | 本内核没有 `exec` 时的关闭语义，接受该位等于给一个不成立的承诺 |
@@ -260,8 +264,9 @@ ELF 魔数排掉「顺手 reset 了 fd 表」；`brk(0)` 回到基点排掉「�
 - **非阻塞语义与 Linux 不同**：任何「写满/读空就自旋等」的程序在这套管道上会拿到
   `-EAGAIN` 而死循环。这是有意选择，不是没做完——理由见上表。
 - 缓冲 256 字节、`LX_PIPE_MAX 2` 条、fd 槽 8 个。
-- 没有 `fork` / `clone`，所以**没有 fd 继承**：管道能在同一任务里用、能跨 `execve`
-  存活，但没法「父进程建管道、子进程继承一端」。
+- **fd 继承已做**（fork 档）：父进程建管道、`clone` 之后子进程继承两端，父子各持一份
+  引用；父关掉自己的写端、子仍持有时读端不会拿到 EOF。
+- 阻塞仍不做：`read`/`write` 遇到空/满返 `-EAGAIN` 或短写，不睡眠。
 - 没有 `SIGPIPE`：读端关掉后的写只是返回 `-EPIPE`。
 
 ## 7 信号（`rt_sigaction` 134 / `rt_sigprocmask` 135 / `kill` 129 / `tkill` 130 / `tgkill` 131 / `rt_sigreturn` 139）
@@ -361,7 +366,10 @@ LSX 档只验 `$vr0`：它的 128 位图案已经把低 64 位那一份（`$f0`�
 
 ### 边界
 
-- **无跨任务投递**：只能自己发给自己。
+- **跨任务投递已支持**（2026-11-23）：`kill`/`tkill`/`tgkill` 按 pid 找到目标进程槽与
+  任务，置目标的 `sig_pending`；目标若正卡在阻塞 `wait4` 上就
+  `arkrtos_task_wakeup_internal()` 唤醒它，信号在它下一次系统调用返回时送达。
+  同任务自我投递仍走同一条路（pid == 自己）。
 - **无抢占式投递**：只在系统调用返回点送。程序若一直不调系统调用，信号就一直
   pending（`kill` 返 0 但 handler 不跑）。
 - 无实时信号（1..31 之外一律 `-EINVAL`）、无 `sigaltstack`、无 `siginfo`、
@@ -388,7 +396,7 @@ LSX 档只验 `$vr0`：它的 128 位图案已经把低 64 位那一份（`$f0`�
 | 任务号 | 子进程是新 TCB（`is_priv = 0`），`generation` 与同号旧实例区分；`getpid` 读 `current_task_id` |
 | 复制先后 | 先复制空间与帧、再进临界区注册任务并打补丁（与 Linux `copy_process` 把 `wake_up_new_task` 放最后同理：不让半配好的任务进就绪集） |
 | `wait4` 认的参数 | `options == 0` 或 `WNOHANG(1)`；`pid` 必须是自己登记过的子 |
-| `wait4` 返回 | 子活着 + `WNOHANG` → `0`；子活着 + 无 `WNOHANG` → `-EAGAIN`（本内核不能在系统调用里睡眠等事件）；不是自己的子 → `-ECHILD`；子已死但退出码没上报 → `-EIO`（绝不编造 0 或 SIGKILL） |
+| `wait4` 返回 | 子活着 + `WNOHANG` → `0`；子活着 + 无 `WNOHANG` → **睡下等**（可重启系统调用，见 §8.1）；不是自己的子 → `-ECHILD`；子已死但退出码没上报 → `-EIO`（绝不编造 0 或 SIGKILL）；100 ms 超时唤醒后重扫仍无退出码且子任务已死 → `-EIO` |
 | `status` | `(code & 0xFF) << 8`，`copy_to_user` 写 4 字节；写失败回 `-EFAULT` 且**不清**记账（可以重试） |
 | 记账 | `s_child[4]`（`LX_MAX_CHILD`）；reap 成功后 `used = 0`；同号新实例靠 `generation` 认出来 |
 | 实际上限 | 记账表 4 条，但真正的闸门是地址空间数（本板 `ARKRTOS_PAGING_APPS_MAX 2`）：父子占满 2 个空间，再 `clone` 回 `-EAGAIN`（`ARKRTOS_ELF_ERR_BUSY` → `-EAGAIN`，是「并发上限」不是「内存不够」） |
@@ -419,6 +427,32 @@ trap 帧与子进程保存的帧地址可能完全相同（实测都是 `0x21fbd
 判据改成 `commit == 0` 就当没切。改完连跑 6/6 + 3/3 全过、`rc=-14` 归零。
 教训与 Linux / RT-Thread 的调度器一致：**「切没切」要由做出决定的那个点说话，
 不要事后从一个可能恰好相等的外部读数反推**。
+
+### 8.1 阻塞 `wait4`：可重启系统调用（Linux `ERESTARTSYS` 同型）
+
+第一版想的是「睡一会儿再重扫」，实测**整机静默死锁**：本内核在 SVC 处理程序内部
+没有真正睡眠的通路——`arkrtos_task_block_in_critical()` 只是「置 WAIT + 从就绪集摘掉
++ 武装延迟唤醒 + 置 `s_switch_pending`」，真正切走发生在 `la_trap_c()` 末尾；从 SVC
+里调它只是把父自己摘出就绪集、然后**继续在关中断的热自旋里跑**，子进程一次都没被
+调度。症状是日志停在 `dbg parent entering blocking wait4`，`TASK: ... exits` 一行都
+不出现。
+
+改法照 Linux 的做法：**睡下之后返回，让那次系统调用被重放**。
+
+- 端口层新增 `arkrtos_port_svc_restart(void *p_exc_ctx)`：LA64 实现把帧里的 `ERA`
+  减 4（退回 `syscall` 指令），下次该任务被调度回来时重新执行同一条 `syscall`；
+  `hal.h` 里的弱定义返 `-1`（不支持），ABI 层收到 `-1` 就如实回 `-EAGAIN`，
+  **绝不假装阻塞过**。
+- 参数寄存器在 trap 帧里没被改写 ⇒ 重放读到的是同一组 `pid`/`status`/`options`。
+- 唤醒路径两条：① 子进程退出时 `arkrtos_linux_abi_on_task_exit()` 给父置
+  `SIGCHLD` pending 并 `arkrtos_task_wakeup_internal(父)`；② 100 ms 兜底超时
+  （`LX_WAIT_SLICE_MS`）——兜住「子进程死在故障路径、不走退出钩子」的情形，
+  醒来重扫发现「死了但没有退出码」就判 `-EIO`。
+- `s_lx_wait[task]` 标记「卡在 wait4」，跨任务 `kill` 据此决定要不要唤醒。
+
+代价写在明面上：这是「重放整个系统调用」而不是「从睡眠点续跑」，语义上等价
+（`wait4` 是幂等的扫描），但**每次唤醒都要重扫一遍子表**；`wait4` 之外的阻塞系统
+调用（`read` 空管道、`futex`）**没有**接这条通路。
 
 ## 9 开关与零体积
 
@@ -461,7 +495,7 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py --no-build
 | `qemu-readout` | Linux 块 14 条 check 全 ok + PASS 行 + `exit code 7`；管道块 14 条 + `exit code 55`；信号块 31 条 + PASS 行 + `exit code 138`；旁路演示未受影响 |
 | `parser-selfcheck` | 把 8 种坏日志喂回判据，必须全判红 |
 
-fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，11 项）：
+fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，9 项）：
 
 | 项 | 钉住什么 |
 |---|---|
@@ -471,13 +505,14 @@ fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，11 
 | `off-zero-symbols` | 关档 RV32 编 `linux_abi.o` 零 `lx_clone`/`lx_wait4`/`s_child`；LA64 板级编 `elf`/`port`/`paging` 零 fork 符号 |
 | `compile-on` | LA64 + 两个 flag，四 TU + 夹具全编过 |
 | `build` | `make` 出 ELF |
-| `qemu-readout` | `[fork]` 十条 check 全 `ok`、父子 pid 不同、PASS 行、`exit code 0`，且 hello / FS / 其余 Linux 夹具读数仍在 |
-| `parser-selfcheck` | 6 种坏日志必须判红 |
+| `qemu-readout` | `[fork]` **21 条** check 全 `ok`、父子 pid 不同、PASS 行、`exit code 0`，且 hello / FS / 其余 Linux 夹具读数仍在；三条新读数（阻塞 `wait4` 真的等了 >= 40 ms / 父读端在子关掉自己那份之后仍读到 3 字节 / SIGCHLD handler 真被调到）逐条校验 |
+| `parser-selfcheck` | 9 种坏日志必须判红 |
 | `restore-default` | 收尾把构建目录恢复默认档（避免下一次 `make` 复用 fork 档 `.o`） |
 
 `parser-selfcheck` 是防「绿得没有信息量」的：Linux 块去掉 PASS 行、退出码改 3、
 插一条 FAIL、少一条 check，管道块去掉 PASS 行、退出码改成 1，信号块去掉 PASS 行、
-退出码改成 1，八种都必须被判红。
+退出码改成 1，fork 块把「阻塞读数改成没等」/「父读端改成 `-EBADF`」/「SIGCHLD 没被
+调到」，九种都必须被判红。
 
 ## 11 本轮踩到的三个真 bug 与一个读数坑
 
@@ -517,18 +552,23 @@ rodata 失败，因为栈窗口（32 KB）被单独设过，而代码窗口没�
 - fork 这一档的门禁是独立的 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项）：默认档
   autoconf=0 + 四道 `#error` + Kconfig 两条 `depends on`；关档 RV32 编 `linux_abi.o`
   零 `lx_clone`/`lx_wait4`/`s_child`、LA64 编 `elf`/`port`/`paging` 零 fork 符号；
-  开档四 TU + 夹具编过；QEMU 上 `[fork]` 十条 check 全 `ok`、父子 pid 必须不同、
-  `exit code 0`，且同一次启动里 hello / FS / 其余 Linux 夹具的读数仍在；
-  解析器另有六种坏日志自检。
+  开档四 TU + 夹具编过；QEMU 上 `[fork]` 21 条 check 全 `ok`、父子 pid 必须不同、
+  `exit code 0`，且同一次启动里 hello / FS / 其余 Linux 夹具的读数仍在；其中
+  阻塞 `wait4`、fd 继承与管道引用计数、跨任务 SIGCHLD 三条读数逐条校验；
+  解析器另有九种坏日志自检。
 - Real-time 语义不因兼容层改变：Linux ABI 的路径全部在 SVC 里同步完成，
-  不额外开线程、不加锁、不引入阻塞点（`read`/`write` 到 ramfs 或管道都是同步
-  搬运；管道还刻意不做阻塞，见 §6）。
+  不额外开线程、不加锁（`read`/`write` 到 ramfs 或管道都是同步搬运；管道刻意
+  不做阻塞，见 §6）。唯一的「睡下再回来」是阻塞 `wait4`，它用可重启系统调用实现
+  （§8.1）：睡下时把任务从就绪集摘掉、把 `ERA` 退回 `syscall`，唤醒后重放；
+  不是关中断自旋。
 - 下一步（若要用真正的 Linux 工具链产物）：动态链接的内核侧与自研装载器已落地
   （2026-11-20，见 [动态链接与PT_INTERP](动态链接与PT_INTERP.md)），但**离 glibc
   还差整条 libc 兼容面**——futex、rseq、TLS 初始化、文件映射、`mprotect` 真落实。
-  信号已做最小一档（§7），「进程」这个对象的头也开了（`fork`/`clone` + `wait4`，
-  §8，默认关）；但那一档只做到「一次分叉、一次回收」，没有线程、没有 fd 继承、
-  没有跨任务信号、没有阻塞等待。
+  信号已有跨任务投递（§7），「进程」这个对象也开了（`fork`/`clone` + `wait4`，§8，
+  默认关）：每进程 fd 表与继承、跨任务 `SIGCHLD`、阻塞 `wait4` 都已在 QEMU LA64 上
+  有读数；仍没有线程（`CLONE_VM`/`CLONE_THREAD` 拒）、没有写时复制、没有抢占式
+  信号投递、没有 `dup2` 与 `flash` 类重定向。
 - `execve` 是「同任务换镜像」；`fork` 才是「多一个任务 + 一份独立地址空间」。
-  两者都在，但**不要**因此把这一层读成「有完整的进程模型」：调度、优先级、
-  fd 表仍是内核全局单份，`fork` 不复制 fd 表（§8）。
+  两者都在，但**不要**因此把这一层读成「有完整的进程模型」：调度与优先级仍是
+  内核全局单份，`fd` 表在 fork 档才分进程（默认档全局单份），没有 COW、没有线程、
+  没有作业控制。

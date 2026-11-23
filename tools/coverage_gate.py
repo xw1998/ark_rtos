@@ -613,6 +613,7 @@ CASES = [
      ["kernelsrc/src/arkrtos_linux_abi.c"],
      [BOARD_QEMU_LA64_DEFS[0], "-include", "arkrtos_board_config.h",
       SIGN_KEY_DEF, "-DARKRTOS_LINUX_ABI_SYSSTAT=1",
+      "-DARKRTOS_HOST_WEAK_PORT=0",
       "-fno-asynchronous-unwind-tables", "-ffunction-sections"],
      "LINUX-ABI HOST OK",
      {"incs": ["-Iboard/qemu_loongarch64",

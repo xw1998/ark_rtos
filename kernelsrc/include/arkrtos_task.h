@@ -197,6 +197,20 @@ void arkrtos_task_block_internal(void);
 int32 arkrtos_task_block_in_critical(uint32 timeout_ms);
 
 /**
+* @brief 唤醒一个正在等待的任务（可在别的任务上下文里调用）
+* @param task_id 目标任务号（1 起）
+* @return 0 = 已从 WAIT 置为 READY；-1 = 目标任务不存在或不处于等待态
+* @details 与各同步对象里手写的唤醒三件套同形（wake_reason / status /
+*          arkrtos_ready_add），但收在一处、自带保存-恢复临界区。
+*          只动 status == ARKRTOS_TASK_WAIT 的任务：对就绪/运行/无效的任务
+*          调用不产生任何状态变化，因此不会把一个已经死掉的任务从旧栈
+*          "复活"（收尸清掉等待登记之后仍可能有迟到的唤醒）。
+*          当前唯一使用者是 Linux ABI 兼容层（子进程退出唤醒等它的父进程、
+*          跨任务信号唤醒目标进程）；默认档没有调用点，符号也不产生。
+*/
+int32 arkrtos_task_wakeup_internal(int32 task_id);
+
+/**
 * @brief 任务下线收尸：清理该任务在同步对象/消息队列中的等待登记与锁持有关系
 * @param task_id 目标任务号（从 1 开始）
 * @details 用于任务自杀（kill）、故障恢复、覆盖安装前硬停任务等场景。

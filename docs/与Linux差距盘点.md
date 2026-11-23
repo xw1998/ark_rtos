@@ -61,11 +61,11 @@
 
 | Linux 有 | Ark RTOS | 归类 |
 |---------|---------|------|
-| 进程（独立地址空间）+ `fork` / `exec` / `waitpid` | 没有 fork 语义：**一个 App = 一个地址空间 + 若干线程**，`fork` / `waitpid` 不提供。`exec` **有**两种形态：shell 的 `exec` 是内核命令（装载一个新 ELF 到新任务上跑），`execve`（Linux ABI 号 221，2026-11-21，QEMU LA64 实跑）是**真的替换当前任务映像**（任务号不变、fd 保留、成功不返回）；被装载的程序按 Linux 入口约定拿到 `sp -> argc/argv`。没有 `fork` 就没有父子，所以 `execve` 之后也没有 `wait` 与 fd 继承 | 取舍（fork）+ 已做（静态 ELF 装载与同任务 `execve`） |
+| 进程（独立地址空间）+ `fork` / `exec` / `waitpid` | 没有 fork 语义：**一个 App = 一个地址空间 + 若干线程**，`fork` / `waitpid` 不提供。`exec` **有**两种形态：shell 的 `exec` 是内核命令（装载一个新 ELF 到新任务上跑），`execve`（Linux ABI 号 221，2026-11-21，QEMU LA64 实跑）是**真的替换当前任务映像**（任务号不变、fd 保留、成功不返回）；被装载的程序按 Linux 入口约定拿到 `sp -> argc/argv`。**`fork` 已做**（`ARKRTOS_USE_LINUX_FORK`，默认关，2026-11-23，QEMU LA64 实跑 21 条 check）：每进程 fd 表与继承、跨任务 `SIGCHLD`、真阻塞的 `wait4`（可重启系统调用）都已有读数；仍无线程（`CLONE_VM`/`CLONE_THREAD` 拒）、无写时复制 | 已做（静态 ELF 装载、同任务 `execve`、`fork`+`wait4`） |
 | `getpid` / `getppid` / PID 命名空间 | 只有内核任务号（任务表索引），`getpid` 只有桩 | 取舍 |
 | 动态链接、`.so` 共享库、ELF 加载器 | 两类输入并存：装应用的 `.svcapp` 容器（整体复制到 RAM），以及**静态链接的原生 ELF**（`exec`/`ld`，LA64 与 RV32 实跑；64 位/32 位字段表按 `__SIZEOF_LONG__` 选）。ELF 装载器只认 `PT_LOAD` + `e_entry`：`PT_INTERP`（动态链接）明确拒绝（`ERR_FORMAT`），**无 `.so`、无重定位后的共享库、无 Linux 系统调用 ABI**（`ecall` 走 Ark 的 `0x10..0x22`） | 取舍（动态链接、共享库）+ 欠账（Linux syscall ABI，见 [欠账盘点](欠账盘点.md)） |
 | `argv` / `argc` / 环境变量 | `.svcapp` 的 App 入口仍是 `main(void)`，没有 argv；**被 `exec` 装载的 ELF 程序按 Linux 入口约定拿到 `sp -> argc/argv`**（实测 `argc=4`、`argv[0..3]` 逐字对上），但**无 `environ`** | 取舍（`.svcapp`）+ 已做（ELF 的 argv） |
-| 信号（`signal` / `sigaction` / `kill`） | Ark 自己的 POSIX 层**没有 signal API**，任务间同步用事件组、信号量、互斥量、消息队列、条件变量。**Linux ABI 档下另有最小一档**（2026-11-21，QEMU LA64 实跑）：`rt_sigaction` / `rt_sigprocmask` / `kill` / `tkill` / `tgkill` / `rt_sigreturn` 六个号，**只能同一任务给自己发**、在系统调用返回前投递，无跨任务、无抢占、无实时信号、无 `siginfo`；信号帧 = 32 B 头 + 整份 trap 帧快照 | 部分已做（Linux ABI 最小档）+ 取舍（Ark POSIX 层） |
+| 信号（`signal` / `sigaction` / `kill`） | Ark 自己的 POSIX 层**没有 signal API**，任务间同步用事件组、信号量、互斥量、消息队列、条件变量。**Linux ABI 档下另有一档**（2026-11-21 落地，2026-11-23 扩跨任务）：`rt_sigaction` / `rt_sigprocmask` / `kill` / `tkill` / `tgkill` / `rt_sigreturn` 六个号，**支持跨任务投递**（按 pid 定位目标进程槽，目标卡在阻塞 `wait4` 时唤醒它），在系统调用返回前投递，无抢占、无实时信号、无 `siginfo`；信号帧 = 32 B 头 + 整份 trap 帧快照 | 部分已做（Linux ABI 一档，含跨任务）+ 取舍（Ark POSIX 层） |
 | `pipe` / `FIFO` / Unix domain socket | `pipe2` 已做（2026-11-21，QEMU LA64 实跑，Linux ABI 号 59）：环形缓冲 + 两端引用计数、**非阻塞**、跨 `execve` 存活；FIFO 与 Unix domain socket 仍无，等价物是消息队列 + socket（回环） | 部分已做 + 取舍 |
 | System V / POSIX 共享内存 `shm` | 无 `shmget`/`shm_open`；只有 MPU 的共享窗口（用于小程序交接，不对外当通用 IPC） | 取舍 |
 | `clone` / 命名空间 / 容器 | 无 | 取舍 |
