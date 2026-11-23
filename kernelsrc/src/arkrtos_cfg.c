@@ -17,6 +17,12 @@
 
 arkrtos_task_t arkrtos_task_table[ARKRTOS_TASK_MAX_NUM];
 int32 arkrtos_task_count = 0;
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+/* U-19：注册代次。任务槽位会被复用（INVALID 的前一个空位），fork 的父进程
+ * 记下「子 pid + 代次」这一对，才能把迟到的 reap 与「同号的新任务」分开报。
+ * 32 位计数，自增到回绕要 40 亿次注册，比任何一块板的寿命长。 */
+static uint32 s_task_generation = 0u;
+#endif
 
 /* 任务表 RAM 预算守护：把 ARKRTOS_TASK_MAX_NUM 调得过大时直接编译报错，
  * 避免静态 TCB 表悄悄吃掉内核 RAM。预算见 arkrtos_config.h 的
@@ -82,6 +88,10 @@ int32 arkrtos_task_register(void (*entry)(void), uint32 *stack_bottom, uint32 st
     stack_bottom[0] = ARKRTOS_STACK_END_FLAG_VAL;
 
     p_task = &arkrtos_task_table[free_idx];
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+    s_task_generation++;
+    p_task->generation  = s_task_generation;
+#endif
     p_task->ram_start   = (uint32)stack_bottom;
     p_task->ram_size    = stack_size;
     p_task->stack_size  = stack_size;
@@ -97,6 +107,13 @@ int32 arkrtos_task_register(void (*entry)(void), uint32 *stack_bottom, uint32 st
      * 不会被误判成溢出。 */
     p_task->stack_guard_armed    = 1u;
     p_task->stack_guard_reported = 0u;
+    #endif
+    #if (ARKRTOS_USE_EXIT_CODE == 1)
+    /* 槽位复用不许继承上一个任务的退出码：否则一个刚起来、还没上报过
+     * 任何东西的任务，会被 elf 台账 / wait4 读成「已经退出，代码是别人的」。
+     * 这条只在开关打开时存在，默认档一个字节都不多。 */
+    p_task->exit_code     = 0;
+    p_task->exit_code_set = 0u;
     #endif
     p_task->is_priv     = 1u;   /* kernel-created tasks run privileged */
     p_task->status      = ARKRTOS_TASK_READY;

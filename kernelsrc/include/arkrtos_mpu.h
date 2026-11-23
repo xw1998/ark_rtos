@@ -205,6 +205,15 @@ int32 arkrtos_paging_bind_task(arkrtos_task_t *p_task, uint32 space);
 /** @brief Space a task is bound to (0 when unknown) */
 uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task);
 
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+/** @brief 把一个空间的整份窗口内容复制到另一个空间（U-19 fork 的落地）
+ *  @param src 父空间，@param dst 子空间（必须空着）
+ *  @return 0 / -1 参数 / -2 dst 已有帧 / -3 帧池拒绝（已回滚）
+ *  @details 纯搬运，不切窗口；只在按需分页的 LoongArch64 端口上实现。
+ *          开关条件（PAGING_PAGES + PAGING_DEMAND）由 features.h #error 把住。 */
+int32 arkrtos_paging_space_clone(uint32 src, uint32 dst);
+#endif
+
 /** @brief Give an address space's frames back to the pool (U-3 leftover)
  *  @param space 0 .. arkrtos_paging_space_count()-1
  *  @return 0 = returned (also when it never took any); -1 = bad space;
@@ -286,6 +295,7 @@ uint32 arkrtos_paging_swap_stat(uint32 which);
 #define arkrtos_paging_bind_task(p_task, space)              (-1)
 #define arkrtos_paging_space_of(p_task)                      (0u)
 #define arkrtos_paging_space_release(space)                  (-1)
+#define arkrtos_paging_space_clone(src, dst)                 (-1)
 #define arkrtos_paging_frame_alloc(count, p_base)            (-1)
 #define arkrtos_paging_frame_free(base, count)               (-1)
 #define arkrtos_paging_frame_total()                         (0u)

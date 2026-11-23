@@ -224,6 +224,46 @@
 #define ARKRTOS_USE_PAGING_DEMAND       0
 #endif
 
+/* Linux ABI 的 fork/clone + wait4（U-19）：0 = 关（ABI 层不认识 220/260，
+ * 与打开本开关之前逐字节相同），1 = 给 Linux ABI 用户任务补上「复制一份
+ * 地址空间继续跑」这件事：
+ *
+ *   - clone(220) 只接受 flags == 0 或 flags == SIGCHLD(17)，且 child_stack
+ *     必须为 0 —— 这不是线程库，CLONE_VM / CLONE_THREAD / CLONE_VFORK /
+ *     CLONE_SETTLS 等一律 -EINVAL；
+ *   - 子进程拿到**父进程地址空间的逐字副本**（8 KB 对级拷贝），trap 帧里的
+ *     a0 改成 0，于是父返回子 pid、子返回 0；
+ *   - wait4(260) 只支持 options == 0 或 WNOHANG(1)。
+ *
+ * 三条硬边界（文档里逐条写死，不假装修好了）：
+ *   1) fd 表 / 管道 / 信号表 / 堆游标仍是**内核全局单份**：子进程继承的是
+ *      同一份，不是副本，也没有隔离；
+ *   2) wait4 不能阻塞：子进程还活着而 options == 0 时回 -EAGAIN（本内核
+ *      没有「阻塞在系统调用里等事件」这条通路）；
+ *   3) 子进程必须在任务槽位被复用前 reap。TCB 带一个注册代次，靠它把
+ *      「同一个任务号上的新旧两个实例」区分开，晚到的那次如实报 -ECHILD。
+ *
+ * 要求 ARKRTOS_USE_LINUX_ABI == 1、ARKRTOS_USE_EXIT_CODE == 1、
+ * ARKRTOS_USE_PAGING_PAGES == 1、ARKRTOS_USE_PAGING_DEMAND == 1（地址空间
+ * 复制只在按需分页的 LoongArch64 端口上实现），缺一即 #error。
+ * 由 Kconfig 选择（config ARKRTOS_USE_LINUX_FORK）。
+ * 默认关：关档时 port 的三个新接口、装载器的 fork 入口、ABI 的 220/260
+ * 两个号全部不编译，镜像体积与行为零变化。 */
+#ifndef ARKRTOS_USE_LINUX_FORK
+#define ARKRTOS_USE_LINUX_FORK          0
+#endif
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+#if (ARKRTOS_USE_LINUX_ABI != 1)
+#error "ARKRTOS_USE_LINUX_FORK=1 requires ARKRTOS_USE_LINUX_ABI=1"
+#endif
+#if (ARKRTOS_USE_EXIT_CODE != 1)
+#error "ARKRTOS_USE_LINUX_FORK=1 requires ARKRTOS_USE_EXIT_CODE=1 (wait4 can only report a status the child did report)"
+#endif
+#if (ARKRTOS_USE_PAGING != 1) || (ARKRTOS_USE_PAGING_PAGES != 1) || (ARKRTOS_USE_PAGING_DEMAND != 1)
+#error "ARKRTOS_USE_LINUX_FORK=1 requires ARKRTOS_USE_PAGING_PAGES=1 and ARKRTOS_USE_PAGING_DEMAND=1"
+#endif
+#endif
+
 /* U-16 页替换（swap）：0 = 关（一个字节都不编进镜像），1 = 帧池空了就把某一对
  * 8 KB 换出到内核静态交换区、把两帧还回池子，缺页时再换回来。
  * 要求 ARKRTOS_USE_PAGING_DEMAND == 1 —— 只有按需档才有「这一对还没驻留」

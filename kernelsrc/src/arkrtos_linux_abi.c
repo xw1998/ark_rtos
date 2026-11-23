@@ -12,9 +12,12 @@
 *               （见 arkrtos_port_svc_set_ret_signed）。
 *
 *          做了一半的事：execve（221）已支持**同任务换镜像**（不起新任务、
-*          任务号不变、fd 表保留、堆游标归零）；fork / clone 仍然没有——
-*          那需要地址空间复制，与「一个任务一块窗口」的模型不是同一级工作量，
-*          假装支持只会给出错答案。
+*          任务号不变、fd 表保留、堆游标归零）；fork / clone（220）+ wait4（260）
+*          由 ARKRTOS_USE_LINUX_FORK 单独提供：子进程拿到父地址空间的逐字
+*          副本、父返回 pid、子返回 0。**不复制**的是 fd 表 / 管道 / 信号表 /
+*          堆游标（内核全局单份，子看到同一份），wait4 **不能阻塞**（活着就
+*          回 -EAGAIN），子进程必须在任务槽位被复用前 reap（TCB 带注册代次，
+*          晚到的 reap 如实回 -ECHILD）。线程（CLONE_VM 一族）一律 -EINVAL。
 *          管道（pipe2）已做：一条环形缓冲 + 两端引用计数，两个 fd 指向同一条
 *          管道；读空回 -EAGAIN、写满回 -EAGAIN、读端全关写回 -EPIPE、写端
 *          全关读回 EOF。**不实现阻塞**——没有 fork、fd 表全局单份，两端通常
@@ -46,6 +49,7 @@
 #include "arkrtos_def.h"
 #include "arkrtos_hal.h"
 #include "arkrtos_task.h"
+#include "arkrtos_cfg.h"   /* fork/wait4 记账要读 TCB 的注册代次 */
 #include "arkrtos_mpu.h"
 #include "arkrtos_fs.h"
 #include "arkrtos_vfs.h"
@@ -74,6 +78,8 @@
 #define LX_SYS_EXECVE               (221u)
 #define LX_SYS_MMAP                 (222u)
 #define LX_SYS_MPROTECT             (226u)
+#define LX_SYS_CLONE                (220u)  /* U-19：只在 ARKRTOS_USE_LINUX_FORK */
+#define LX_SYS_WAIT4                (260u)  /* U-19：同上 */
 
 /* 信号相关的号：rt_sigaction / rt_sigprocmask / kill / tkill / tgkill /
  * rt_sigreturn。asm-generic 编号，LoongArch 与 RISC-V 共用。 */
@@ -93,6 +99,7 @@
 #define LX_E2BIG                    (7)
 #define LX_ENOEXEC                  (8)
 #define LX_EBADF                    (9)
+#define LX_ECHILD                   (10)
 #define LX_EAGAIN                   (11)
 #define LX_EACCES                   (13)
 #define LX_ENOMEM                   (12)
@@ -108,6 +115,13 @@
 
 /* 每个任务可见的 fd 上限；0/1/2 是标准流，不占表项。 */
 #define LX_MAX_FD                   (8u)
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+/* fork 的记账上限：同时「生出来了但还没被 reap」的子进程个数。满了就
+ * -EAGAIN（在真正 fork 之前判），不是生完再丢记录。 */
+#define LX_MAX_CHILD                (4u)
+#define LX_SIGCHLD_FLAG             (17u)
+#define LX_WNOHANG                  (1u)
+#endif
 #define LX_PATH_MAX                 (64u)
 #define LX_IO_CHUNK                 (128u)
 
@@ -228,6 +242,19 @@ typedef struct
 /* fd 表是内核全局的：本版本的 ELF 装载器一次只跑一个程序，装载器在
  * 每次起跑前调用 arkrtos_linux_abi_reset() 把它清空。 */
 static lx_fd_t s_fd[LX_MAX_FD];
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+/* 子进程记账（U-19）：pid 就是任务号；generation 是 TCB 的注册代次，
+ * 用来把「同一个任务号上的新旧两个实例」分开 —— 槽位会被复用，只比 pid
+ * 会认错人。这里同样是**内核全局单份**（与 fd 表同一条取舍）。 */
+typedef struct
+{
+    uint8  used;
+    int32  pid;
+    uint32 generation;
+} lx_child_t;
+
+static lx_child_t s_child[LX_MAX_CHILD];
+#endif
 /* 管道对象独立于 fd 表：一条管道被两个 fd 引用，fd 关掉一半时管道还要在。 */
 static lx_pipe_t s_pipe[LX_PIPE_MAX];
 static uint32  s_stat[LX_STAT_MAX];
@@ -1568,6 +1595,182 @@ static int32 lx_munmap(void *p_ctx)
     return 0;
 }
 
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+/* ------------------------------------------------ clone / wait4（U-19） */
+
+static int32 lx_fork_errno(int32 rc)
+{
+    switch(rc)
+    {
+    case ARKRTOS_ELF_ERR_BUSY:
+        /* 地址空间全被活实例占着：这是并发上限，不是内存不够。 */
+        return -LX_EAGAIN;
+    case ARKRTOS_ELF_ERR_NOMEM:
+        return -LX_ENOMEM;
+    case ARKRTOS_ELF_ERR_PARAM:
+        return -LX_EINVAL;
+    default:
+        return -LX_EINVAL;
+    }
+}
+
+/* 在真正 fork 之前先确认还有记账位：反过来的顺序（先生后记账）会出现
+ * 「子进程已经在跑、父却拿不到它」这种谁都不该负责的形态。 */
+static int32 lx_child_slot(void)
+{
+    uint32 i;
+
+    for(i = 0u; i < (uint32)LX_MAX_CHILD; i++)
+    {
+        if(s_child[i].used == 0u)
+        {
+            return (int32)i;
+        }
+    }
+
+    return -1;
+}
+
+/**
+* @brief clone(2)：只做 fork，不做线程
+* @details 只接受 flags == 0 或 SIGCHLD、child_stack == 0。CLONE_VM /
+*          CLONE_THREAD / CLONE_VFORK / CLONE_SETTLS / CLONE_FILES 等一律
+*          -EINVAL —— 本内核没有共享地址空间的线程，也没有线程组。
+*          成功时父返回子 pid（任务号），子返回 0（那一格已经在子帧里改好）。
+*/
+static int32 lx_clone(void *p_ctx)
+{
+    uint32 flags = (uint32)ARKRTOS_SVC_ARG(p_ctx, 0u);
+    unsigned long child_stack = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    uint32 space = 0u;
+    int32  child = 0;
+    int32  slot;
+    int32  rc;
+
+    if((child_stack != 0ul) ||
+       ((flags != 0u) && (flags != (uint32)LX_SIGCHLD_FLAG)))
+    {
+        return -LX_EINVAL;
+    }
+
+    slot = lx_child_slot();
+    if(slot < 0)
+    {
+        return -LX_EAGAIN;
+    }
+
+    rc = arkrtos_elf_fork(p_ctx, &child, &space);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return lx_fork_errno(rc);
+    }
+
+    if((child <= 0) || (child > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        /* 装载器不会给出这种值；真给了就如实报错，不登记一条假记账。 */
+        return -LX_EINVAL;
+    }
+
+    s_child[slot].used       = 1u;
+    s_child[slot].pid        = child;
+    s_child[slot].generation = arkrtos_task_table[child - 1].generation;
+
+    return child;
+}
+
+/**
+* @brief wait4(2)：只支持 options == 0 / WNOHANG
+* @details 三条与 Linux 不同的边界（文档里写死）：
+*            1) **不能阻塞**：子进程还活着且没给 WNOHANG 时回 -EAGAIN，
+*               因为本内核没有「在系统调用里睡眠等事件」这条通路；
+*            2) 状态只有「上报过退出码」这一种：exit_code_set == 0（故障 /
+*               在别处被杀）时回 -EIO 并放掉记账 —— 编一个 0 会看起来像成功；
+*            3) 槽位被复用后回 -ECHILD（靠注册代次认出来），不把新任务当儿子。
+*          rusage 指针忽略、一个字节都不写。
+*/
+static int32 lx_wait4(void *p_ctx)
+{
+    int32  pid     = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
+    unsigned long ustatus = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    uint32 options = (uint32)ARKRTOS_SVC_ARG(p_ctx, 2u);
+    uint32 i;
+
+    if((options & ~(uint32)LX_WNOHANG) != 0u)
+    {
+        return -LX_EINVAL;
+    }
+
+    for(i = 0u; i < (uint32)LX_MAX_CHILD; i++)
+    {
+        arkrtos_task_t *p_task;
+
+        if(s_child[i].used == 0u)
+        {
+            continue;
+        }
+        if((pid > 0) && (pid != s_child[i].pid))
+        {
+            continue;
+        }
+
+        if((s_child[i].pid <= 0) || (s_child[i].pid > (int32)ARKRTOS_TASK_MAX_NUM))
+        {
+            s_child[i].used = 0u;
+            continue;
+        }
+
+        p_task = &arkrtos_task_table[s_child[i].pid - 1];
+
+        if(p_task->generation != s_child[i].generation)
+        {
+            /* 槽位已被别人复用：那个实例早就没了，退出码也无从取回。 */
+            s_child[i].used = 0u;
+            continue;
+        }
+
+        if(p_task->status != ARKRTOS_TASK_INVALID)
+        {
+            if((options & (uint32)LX_WNOHANG) != 0u)
+            {
+                return 0;
+            }
+            return -LX_EAGAIN;
+        }
+
+        #if (ARKRTOS_USE_EXIT_CODE == 1)
+        if(p_task->exit_code_set == 0u)
+        {
+            s_child[i].used = 0u;
+            return -LX_EIO;
+        }
+        #endif
+
+        {
+            uint32 status = (uint32)0u;
+
+            #if (ARKRTOS_USE_EXIT_CODE == 1)
+            status = (((uint32)p_task->exit_code & 0xFFu) << 8);
+            #endif
+
+            if(ustatus != 0ul)
+            {
+                if(arkrtos_copy_to_user((void *)(unsigned long)ustatus,
+                                        &status, 4u) != 0)
+                {
+                    /* 状态写不进去：**不放掉**记账，让调用者修好指针再来。 */
+                    return -LX_EFAULT;
+                }
+            }
+        }
+
+        s_child[i].used = 0u;
+        return s_child[i].pid;
+    }
+
+    return -LX_ECHILD;
+}
+#endif /* ARKRTOS_USE_LINUX_FORK == 1 */
+
 /* ------------------------------------------------ execve（同任务换镜像） */
 
 /* 没有「同任务换镜像」落地能力的 port（RISC-V / Cortex-M / LA32）不提供
@@ -1794,6 +1997,14 @@ static int32 lx_dispatch(void *p_svc_ctx, uint32 num, int32 *p_rc)
     case LX_SYS_MUNMAP:
         rc = lx_munmap(p_svc_ctx);
         break;
+    #if (ARKRTOS_USE_LINUX_FORK == 1)
+    case LX_SYS_CLONE:
+        rc = lx_clone(p_svc_ctx);
+        break;
+    case LX_SYS_WAIT4:
+        rc = lx_wait4(p_svc_ctx);
+        break;
+    #endif
     case LX_SYS_GETPID:
         rc = (int32)arkrtos_current_task_id;
         break;
@@ -1979,6 +2190,17 @@ void arkrtos_linux_abi_reset(void)
     s_sig_stop_ignored = 0u;
 
     s_heap_cur = 0u;
+
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+    /* 子进程记账与 fd 表同一条取舍：它是「当前这一个程序」的状态，
+     * 换程序时一并清掉。 */
+    for(i = 0u; i < (uint32)LX_MAX_CHILD; i++)
+    {
+        s_child[i].used       = 0u;
+        s_child[i].pid        = 0;
+        s_child[i].generation = 0u;
+    }
+#endif
 }
 
 #endif /* ARKRTOS_USE_LINUX_ABI */

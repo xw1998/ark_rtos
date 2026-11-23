@@ -740,6 +740,42 @@ uint32 arkrtos_port_paging_pair_count(uint32 space);
  *           touched yet reports 0 instead of a made-up address. */
 uint32 arkrtos_port_paging_pair_pa(uint32 space, uint32 idx);
 
+/** @brief Copy one space's whole window content into another (U-19, fork)
+ *  @param src source space, @param dst destination space (must be empty)
+ *  @return 0 = copied; -1 = bad space / same space; -2 = dst already has
+ *          frames (never overwritten); -3 = frame pool refused, rolled back
+ *  @details Copies the pairs the source actually owns, frame by frame,
+ *           through the pool's identity mapping - the App window is NOT
+ *           switched, because the caller is running inside it. A pair the
+ *           source has swapped out is copied in from the swap area, so the
+ *           child sees the same bytes the parent would see, resident.
+ *           On failure every frame this call took is returned to the pool.
+ *  @note 只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。 */
+int32 arkrtos_port_paging_space_clone(uint32 src, uint32 dst);
+
+/** @brief Write a few words into a space by physical address (U-19, fork)
+ *  @param space target space, @param va window VA (8-byte aligned)
+ *  @param words source words (8 bytes each), @param n word count
+ *  @return 0 = written; -1 = out of range, or that pair has no frames
+ *  @details No demand faulting here on purpose: the caller must write into
+ *           a pair the parent already made resident, otherwise it rolls
+ *           back. Kernel paths do not quietly allocate frames behind the
+ *           bookkeeping's back.
+ *  @note 只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。 */
+int32 arkrtos_port_paging_write_space(uint32 space, unsigned long va,
+                                      const unsigned long *words, uint32 n);
+
+/** @brief Turn the parent trap frame into the child's first frame (U-19)
+ *  @param p_exc_ctx parent's syscall trap frame (also its VA in the child)
+ *  @param space     child space
+ *  @return 0 = written; <0 = arkrtos_port_paging_write_space's reason
+ *  @details Copies every register slot verbatim and rewrites a0 to 0, so
+ *           the child resumes at the same PC with the same stack and sees
+ *           clone() returning 0. ERA/sp/tp/fp and the FPU/vector area are
+ *           inherited - that IS fork.
+ *  @note 只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。 */
+int32 arkrtos_port_paging_clone_frame(void *p_exc_ctx, uint32 space);
+
 /** @brief Page replacement readout (U-16) - only exists when the swap switch is on
  *  @param which 0 = swap-outs, 1 = swap-ins, 2 = slots in use, 3 = failures,
  *               4 = resident pairs, 5 = slot count
@@ -813,6 +849,9 @@ void arkrtos_port_paging_inval_va(unsigned long va);
 #define arkrtos_port_paging_pair_total()                (0u)
 #define arkrtos_port_paging_pair_count(space)           (0u)
 #define arkrtos_port_paging_pair_pa(space, idx)         (0u)
+#define arkrtos_port_paging_space_clone(src, dst)       (-1)
+#define arkrtos_port_paging_write_space(sp, va, w, n)   (-1)
+#define arkrtos_port_paging_clone_frame(p, sp)          (-1)
 #define arkrtos_port_paging_window_va()                 (0u)
 #define arkrtos_port_paging_asid_current()              (0UL)
 #define arkrtos_port_paging_asid_of(space)              (0u)

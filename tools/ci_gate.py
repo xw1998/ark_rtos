@@ -2237,8 +2237,9 @@ def check_linux_abi():
     并在 QEMU 上真跑一份纯 Linux ABI 的静态程序（14 条 check + PASS + exit 7），
     而且解析器要能把自己喂进去的四种坏日志判红。
 
-    不覆盖：动态链接（PT_INTERP）、fork/execve、信号、socket、futex、真 mmap
-    语义——这些是**不支持**，不是欠验，见 docs/Linux可执行文件兼容-系统调用ABI.md。
+    不覆盖：动态链接（PT_INTERP）、信号、socket、futex、真 mmap 语义——这些是
+    **不支持**，不是欠验；fork/clone + wait4 见 check_fork，
+    出处 docs/Linux可执行文件兼容-系统调用ABI.md。
     """
     r = _run_check([sys.executable, os.path.join("tools", "linux_abi_gate.py")])
     txt = ((r.stdout or "") + (r.stderr or "")).strip()
@@ -2307,6 +2308,40 @@ def check_realbin():
            "ways / reloc names match readelf (SKIP if toolchain absent)")
     else:
         fail("realbin", txt[-320:])
+
+def check_fork():
+    """Linux fork/clone + wait4（ARKRTOS_USE_LINUX_FORK）必须两头都是读数。
+
+    这一档的假绿有四种形态，每一种都编得过、跑得出一份「看起来对」的日志：
+开关没接线（默认档悄悄多出代码）、只改了 trap 帧没复制窗口（父子共享物理页，
+那不是 fork 是共享内存）、退出码是编出来的（对着没上报的任务回 0 或 SIGKILL）、
+记账不消耗（同一个号能反复 reap）。tools/fork_gate.py 因此把判据全落在可证伪
+的读数上：
+
+      A. 默认档：autoconf 里 ARKRTOS_USE_LINUX_FORK 必须是 0，features.h 四道
+         #error，Kconfig 的两条 depends on 都还在；
+      B. 关档零符号：RV32 编 linux_abi.o 不许有 lx_clone/lx_wait4/s_child，
+         LA64 真板级编 elf/port/paging 不许有 fork 相关符号；
+      C. 开档编得过：LA64 + 两个 flag，四个内核 TU 与夹具全过；
+      D. QEMU 真读数：[fork] 十条 check 全 ok、父子 pid 不同、PASS 与
+         exit code 0 都在，且同一次启动里 hello/FS 等既有夹具读数仍在；
+      E. 解析器自检：六种坏日志（去 PASS、改退出码、插 FAIL、少一条 check、
+         父子 pid 相同、去 exec rc=0）必须判红。
+
+    不覆盖：vfork / CLONE_VM（无共享地址空间，一律 -EINVAL）、子进程继承 fd 表
+（本内核 fd 表是全局单份，fork 不复制，这一条写进
+docs/Linux可执行文件兼容-系统调用ABI.md，本门禁不为它背书）、父进程阻塞等子
+（没有阻塞系统调用通路，只用 WNOHANG）。
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "fork_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "FORK-GATE OK" in txt:
+        ok("fork",
+           "default off zero symbols (RV32 abi + LA64 elf/port/paging) / LA64 ON "
+           "4 TU compile / QEMU 10 fork checks + child pid != parent + exit code 0 "
+           "with hello/FS readings intact / parser self-check 6/6")
+    else:
+        fail("fork", txt[-320:])
 
 def check_sec_crc():
     """镜像 CRC 开机复核（SEC-G17 / ARKRTOS_USE_IMAGE_CRC_RECHECK）必须两档都对。
@@ -5927,6 +5962,7 @@ CHECK_TABLE = (
     ("paging", check_paging_switch),
     ("elf", check_elf_loader),
     ("linux-abi", check_linux_abi),
+    ("fork", check_fork),
     ("shell-auth", check_shell_auth),
     ("shellauth-host", check_shellauth_host),
     ("fdtconsole-host", check_fdtconsole_host),

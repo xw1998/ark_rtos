@@ -357,6 +357,27 @@ uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task)
 *          这种只在很久以后才显形的错。归还之后空间仍然存在，下一次
 *          activate() 重新要帧，于是反复 exec 不再把池子一格一格吃掉。
 */
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+/**
+* @brief Copy one space's window content into another (U-19, fork)
+* @return 0 = copied; -1 = bad space / same space; -2 = dst already has
+*         frames; -3 = frame pool refused (everything taken was rolled back)
+* @details Thin forward. The caller (the ELF loader) has already checked that
+*          dst has no live instance; the port re-checks that dst is empty so a
+*          bug there cannot overwrite another process's memory silently.
+*/
+int32 arkrtos_paging_space_clone(uint32 src, uint32 dst)
+{
+    if((src >= arkrtos_port_paging_space_count()) ||
+       (dst >= arkrtos_port_paging_space_count()))
+    {
+        return -1;
+    }
+
+    return arkrtos_port_paging_space_clone(src, dst);
+}
+#endif
+
 int32 arkrtos_paging_space_release(uint32 space)
 {
     if(space >= arkrtos_port_paging_space_count())

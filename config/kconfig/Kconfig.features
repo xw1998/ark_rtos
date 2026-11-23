@@ -537,6 +537,36 @@ config ARKRTOS_USE_LINUX_ABI
 	  the two port entry points are not compiled, so the image is
 	  byte-for-byte what it was before this option existed.
 
+config ARKRTOS_USE_LINUX_FORK
+	bool "fork/clone + wait4 for Linux ABI user tasks (U-19)"
+	depends on ARKRTOS_USE_LINUX_ABI && ARKRTOS_USE_EXIT_CODE
+	depends on ARKRTOS_USE_PAGING_PAGES && ARKRTOS_USE_PAGING_DEMAND
+	help
+	  Add the one thing the Linux ABI layer explicitly did not have: a second
+	  copy of the running program.  clone(220) accepts flags 0 or SIGCHLD
+	  with child_stack == 0 (it is not a thread library: CLONE_VM and every
+	  other shared-memory flag answers -EINVAL), copies the parent's address
+	  space frame by frame, and rewrites a0 in the child's trap frame to 0,
+	  so the parent returns the child pid and the child returns 0.  wait4(260)
+	  accepts options 0 or WNOHANG.
+
+	  Three boundaries are deliberate and documented, not bugs:
+	    1) The fd table, pipes, signal table and heap cursor are one global
+	       copy.  A child inherits the same copy, not a duplicate, and there
+	       is no isolation between parent and child on those objects.
+	    2) wait4 cannot block.  A live child with options == 0 answers
+	       -EAGAIN, because this kernel has no "block inside a syscall" path.
+	    3) A child must be reaped before its task slot is reused.  Each TCB
+	       carries a registration generation; a wait4 that arrives after the
+	       slot was reused answers -ECHILD instead of reporting a stranger.
+
+	  Requires ARKRTOS_USE_PAGING_PAGES and ARKRTOS_USE_PAGING_DEMAND (the
+	  space copy exists only on the LoongArch64 demand-paging port).
+
+	  Off (default) compiles nothing: the three new port entry points, the
+	  loader's fork entry and syscalls 220/260 are all absent, so the image is
+	  byte-for-byte what it was before this option existed.
+
 config ARKRTOS_USE_WIDE_SVC_ARGS
 	bool "Native-width SVC parameter block (wide-argument ABI, U-18)"
 	help

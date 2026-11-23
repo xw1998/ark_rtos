@@ -1564,6 +1564,205 @@ uint32 arkrtos_port_paging_pair_pa(uint32 space, uint32 idx)
 }
 
 
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+/* ------------------------------------------------------------
+ * 地址空间复制（U-19：fork 的落地形态）
+ * @details 这一段只做三件**纯搬运**的事：把父空间里挂着的 8 KB 对逐对复制
+ *          到子空间、按 PA 往某个空间里写一小段字、把父的 trap 帧复制成
+ *          子的初始帧。三件事都**不切空间**——父任务此刻正站在窗口里执行
+ *          系统调用，把窗口切到子空间就等于把当前调用栈从翻译里抽掉，
+ *          下一条指令就 refill 致死。帧池在 port 初始化时有一条 PS=22 的
+ *          恒等映射，内核可以按 PA 直接读写任何一帧，所以这里不需要切空间。
+ *
+ *          空间号、VA、PA 三者的关系与按需缺页档完全一致：VA 侧固定
+ *          （LA_WIN_VA），每对 8 KB 的 PA 记在 s_pg_pair_pa[space][idx]。
+ * ------------------------------------------------------------ */
+
+#define LA_FORK_PAIR_WORDS        (2048u)   /* 8 KB / 4，与本档无关地自带一份 */
+
+/** 8 KB 对拷贝：fork 档不开 swap 也要能搬，因此单独一份，不借用
+ *  la_pg_copy_pair()（那个只在 swap 档定义）。 */
+static void la_fork_copy_pair(uint32 *dst, const uint32 *src)
+{
+    uint32 i;
+
+    for(i = 0u; i < LA_FORK_PAIR_WORDS; i++)
+    {
+        dst[i] = src[i];
+    }
+}
+
+/**
+* @brief 把 src 空间的整份窗口内容复制到 dst 空间
+* @return 0 = 已复制；-1 = 参数非法；-2 = dst 已经有帧（不覆写别人）；
+*         -3 = 帧池拒绝，本次已回滚
+* @details 只复制**父空间真正挂着**的对（按需档下父也可能只摸了一部分）。
+*          父的对若在交换区里（swap 档），子拿到的是该内容的**驻留副本**：
+*          fork 的语义是「子看到与父此刻相同的内容」，父的换出状态不是子
+*          该继承的东西。失败一律回滚成 dst 空着，绝不留半份地址空间。
+*/
+int32 arkrtos_port_paging_space_clone(uint32 src, uint32 dst)
+{
+    uint32 i;
+
+    if((src >= (uint32)ARKRTOS_PAGING_APPS_MAX) ||
+       (dst >= (uint32)ARKRTOS_PAGING_APPS_MAX) || (src == dst))
+    {
+        return -1;
+    }
+
+    for(i = 0u; i < LA_PG_WIN_ENTRIES; i++)
+    {
+        if(s_pg_pair_pa[dst][i] != 0u)
+        {
+            return -2;
+        }
+#if (ARKRTOS_USE_PAGING_SWAP == 1)
+        if(s_pg_pair_slot[dst][i] != 0u)
+        {
+            return -2;
+        }
+#endif
+    }
+
+    for(i = 0u; i < LA_PG_WIN_ENTRIES; i++)
+    {
+        uint32 spa = s_pg_pair_pa[src][i];
+        uint32 dpa = 0u;
+
+        if(spa != 0u)
+        {
+            if(arkrtos_port_paging_frame_alloc(2u, &dpa) != 0)
+            {
+                break;
+            }
+            la_fork_copy_pair((uint32 *)(unsigned long)dpa,
+                              (const uint32 *)(unsigned long)spa);
+            s_pg_pair_pa[dst][i] = dpa;
+        }
+#if (ARKRTOS_USE_PAGING_SWAP == 1)
+        else if(s_pg_pair_slot[src][i] != 0u)
+        {
+            uint32 slot = (uint32)s_pg_pair_slot[src][i] - 1u;
+
+            if(arkrtos_port_paging_frame_alloc(2u, &dpa) != 0)
+            {
+                break;
+            }
+            la_fork_copy_pair((uint32 *)(unsigned long)dpa, s_pg_swap_area[slot]);
+            s_pg_pair_pa[dst][i] = dpa;
+        }
+#endif
+    }
+
+    if(i < LA_PG_WIN_ENTRIES)
+    {
+        /* 回滚：本次已经给 dst 拿到的帧全部还回去。子空间变回「什么都没
+         * 挂」的状态，调用方据此报 ENOMEM，父进程不受影响。 */
+        uint32 k;
+
+        for(k = 0u; k < LA_PG_WIN_ENTRIES; k++)
+        {
+            if(s_pg_pair_pa[dst][k] != 0u)
+            {
+                (void)arkrtos_port_paging_frame_free(s_pg_pair_pa[dst][k], 2u);
+                s_pg_pair_pa[dst][k] = 0u;
+            }
+        }
+        return -3;
+    }
+
+    return 0;
+}
+
+/**
+* @brief 按 PA 往某个空间里写一小段字（不切窗口）
+* @param space 目标空间号
+* @param va    窗口内的虚拟地址（调用方保证 8 字节对齐）
+* @param words 源字数组（8 字节 / 字）
+* @param n     字数
+* @return 0 = 已写；-1 = 参数越界，或目标 VA 所在的那一对没有帧
+* @details 这一档**不做按需缺页**：调用方要写的地址必须已经驻留，否则
+*          回 -1 让它回滚。在内核路径里临时拿帧会绕开「谁欠谁」的账本，
+*          而且 fork 的初始帧本来就落在父任务已经摸过的栈页里。
+*/
+int32 arkrtos_port_paging_write_space(uint32 space, unsigned long va,
+                                      const unsigned long *words, uint32 n)
+{
+    uint32 done = 0u;
+
+    if((space >= (uint32)ARKRTOS_PAGING_APPS_MAX) || (words == 0) || (n == 0u))
+    {
+        return -1;
+    }
+    if((va < LA_WIN_VA) ||
+       ((va + ((unsigned long)n * 8ul)) > (LA_WIN_VA + (unsigned long)ARKRTOS_QEMU_APP_SIZE)))
+    {
+        return -1;
+    }
+
+    while(done < n)
+    {
+        unsigned long addr = va + ((unsigned long)done * 8ul);
+        uint32 idx = (uint32)((addr - LA_WIN_VA) / 0x2000u);
+        uint32 off = (uint32)((addr - LA_WIN_VA) % 0x2000u);
+        uint32 pa  = s_pg_pair_pa[space][idx];
+        uint32 cnt = (uint32)((0x2000u - off) / 8u);
+        unsigned long *dst;
+        uint32 k;
+
+        if(pa == 0u)
+        {
+            return -1;
+        }
+        if(cnt > (n - done))
+        {
+            cnt = n - done;
+        }
+        dst = (unsigned long *)(unsigned long)(pa + off);
+        for(k = 0u; k < cnt; k++)
+        {
+            dst[k] = words[done + k];
+        }
+        done += cnt;
+    }
+
+    return 0;
+}
+
+/**
+* @brief 把父任务的 trap 帧复制成子任务的初始帧（同一 VA）
+* @param p_exc_ctx 父任务这次系统调用的 trap 帧（同时是它在子空间里的 VA）
+* @param space     子空间
+* @return 0 = 已写；-1/-2 透出 write_space / 越界的原因
+* @details 只改一格：a0。Linux 的 clone 约定是「父返回 pid、子返回 0」，
+*          而子恢复现场时唯一不同的就是返回值寄存器。ERA/sp/tp 与所有
+*          通用/浮点/向量寄存器原样继承 —— 包括 fp，于是子的调用栈与父
+*          逐字相同（这正是 fork 要的）。
+*/
+int32 arkrtos_port_paging_clone_frame(void *p_exc_ctx, uint32 space)
+{
+    static unsigned long s_fork_frame[LA_FR_WORDS];
+    const unsigned long *src = (const unsigned long *)p_exc_ctx;
+    unsigned long va = (unsigned long)p_exc_ctx;
+    uint32 i;
+
+    if((p_exc_ctx == 0) || (va < LA_WIN_VA) ||
+       (va > (LA_WIN_VA + (unsigned long)ARKRTOS_QEMU_APP_SIZE - LA_FR_SIZE)))
+    {
+        return -1;
+    }
+
+    for(i = 0u; i < LA_FR_WORDS; i++)
+    {
+        s_fork_frame[i] = src[i];
+    }
+    s_fork_frame[LA_FR_A0] = 0ul;       /* 子进程 fork() 返回 0 */
+
+    return arkrtos_port_paging_write_space(space, va, s_fork_frame, LA_FR_WORDS);
+}
+#endif /* ARKRTOS_USE_LINUX_FORK == 1 */
+
 #if (ARKRTOS_USE_PAGING_DEMAND == 1)
 /**
 * @brief 按需缺页：给 badv 所在的那一对 8 KB 拿帧并装条目
@@ -1961,6 +2160,13 @@ int32 arkrtos_port_paging_activate(uint32 space)
 
 static volatile uint32 s_pg_pending_space = LA_PG_PENDING_NONE;
 
+/* 这一帧的切换是否真的落地了（目标帧确实要被 ertn 恢复）。
+ * 不能用「new_frame == old_frame」判断：fork 出来的子任务与父任务共享同一套
+ * 虚拟地址，父子栈帧的 VA 可能完全相同 —— 地址相等并不等于「没切」。
+ * 所以由真正做出切换决定的两处（la_trap_c 出口 / la_switch_inline）显式置位，
+ * la_switch_prepare 消费后清零。 */
+static volatile uint32 s_pg_commit = 0u;
+
 /** 调用者此刻的 sp 是否落在 App 窗口里 */
 static uint32 la_sp_in_app_window(void)
 {
@@ -2010,6 +2216,10 @@ int32 arkrtos_port_paging_switch_to(uint32 space)
 void la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_frame)
 {
     uint32 space = s_pg_pending_space;
+    uint32 commit = s_pg_commit;
+
+    /* 每次进这里都把 commit 消费掉：标志只对「紧接着这一次恢复」有效。 */
+    s_pg_commit = 0u;
 
     if(space == LA_PG_PENDING_NONE)
     {
@@ -2018,9 +2228,11 @@ void la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_frame)
 
     s_pg_pending_space = LA_PG_PENDING_NONE;
 
-    /* 调度器把帧原样交回来了：窗口必须留在原处，否则这一帧的恢复会从
-     * 另一个 App 的帧里取值。 */
-    if(new_frame == old_frame)
+    /* 本次并没有真的发生切换（调度器把帧原样交回来 / 栈帧闸门拦下）：
+     * 窗口必须留在原处，否则这一帧的恢复会从另一个 App 的帧里取值。
+     * 判据用显式 commit 标志，而不是 new_frame == old_frame —— 后者在
+     * fork 出的父子任务上会因为共享 VA 而误判。 */
+    if(commit == 0u)
     {
         return;
     }
@@ -3733,6 +3945,7 @@ la_frame_word *la_switch_inline(la_frame_word *frame)
     if(next < 0)
     {
         s_swp_exit++;
+        s_pg_commit = 0u;
         return frame;
     }
 
@@ -3774,6 +3987,7 @@ la_frame_word *la_switch_inline(la_frame_word *frame)
             s_swp_bogus++;
             s_swp_bogus_next = (uint32)next_sp;
             s_swp_bogus_cur  = (uint32)arkrtos_current_task_id;
+            s_pg_commit = 0u;
 #if (ARKRTOS_USE_PRIV == 1)
             s_next_pplv = self_pplv;       /* 没切走：恢复本任务的特权级 */
 #endif
@@ -3791,6 +4005,7 @@ la_frame_word *la_switch_inline(la_frame_word *frame)
             /* 真正的切换点：把目标任务的 PLV 写进它的帧，再 ertn 过去。
              * 不切换（next_sp == 0）时不动自己的帧：那时 s_next_pplv 是
              * 别处的残留值，套到自己头上会把自己的特权级改掉。 */
+            s_pg_commit = 1u;
             LA_PRIV_APPLY(next_frame);
             return next_frame;
         }
@@ -3799,6 +4014,7 @@ la_frame_word *la_switch_inline(la_frame_word *frame)
 #if (ARKRTOS_USE_PRIV == 1)
     s_next_pplv = self_pplv;           /* next_sp == 0：原地继续本任务 */
 #endif
+    s_pg_commit = 0u;
     return frame;
 }
 
@@ -4307,6 +4523,7 @@ la_frame_word *la_trap_c(la_frame_word *frame)
 
             if(next_sp != 0u)
             {
+                s_pg_commit = 1u;
                 frame = (la_frame_word *)(unsigned long)next_sp;
                 /* 交换到别人（可能是 PLV3 的 App）时，把它的特权级写进帧 */
                 LA_PRIV_APPLY(frame);

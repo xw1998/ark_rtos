@@ -14,7 +14,7 @@
 - [kernelsrc/include/arkrtos_cfg.h](#kernelsrcincludearkrtos_cfgh)（1 项）
 - [kernelsrc/include/arkrtos_crash.h](#kernelsrcincludearkrtos_crashh)（22 项）
 - [kernelsrc/include/arkrtos_dt.h](#kernelsrcincludearkrtos_dth)（11 项）
-- [kernelsrc/include/arkrtos_elf.h](#kernelsrcincludearkrtos_elfh)（11 项）
+- [kernelsrc/include/arkrtos_elf.h](#kernelsrcincludearkrtos_elfh)（12 项）
 - [kernelsrc/include/arkrtos_export.h](#kernelsrcincludearkrtos_exporth)（3 项）
 - [kernelsrc/include/arkrtos_fdt.h](#kernelsrcincludearkrtos_fdth)（22 项）
 - [kernelsrc/include/arkrtos_fdt_console.h](#kernelsrcincludearkrtos_fdt_consoleh)（4 项）
@@ -23,7 +23,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（77 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（80 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -35,7 +35,7 @@
 - [kernelsrc/include/arkrtos_mempool.h](#kernelsrcincludearkrtos_mempoolh)（9 项）
 - [kernelsrc/include/arkrtos_mini.h](#kernelsrcincludearkrtos_minih)（20 项）
 - [kernelsrc/include/arkrtos_modld.h](#kernelsrcincludearkrtos_modldh)（8 项）
-- [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（22 项）
+- [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（23 项）
 - [kernelsrc/include/arkrtos_net.h](#kernelsrcincludearkrtos_neth)（12 项）
 - [kernelsrc/include/arkrtos_ptable.h](#kernelsrcincludearkrtos_ptableh)（23 项）
 - [kernelsrc/include/arkrtos_rt.h](#kernelsrcincludearkrtos_rth)（14 项）
@@ -62,7 +62,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（12 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（83 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（87 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（18 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -86,19 +86,19 @@
 - [kernelsrc/src/arkrtos_apppack.c](#kernelsrcsrcarkrtos_apppackc)（1 项）
 - [kernelsrc/src/arkrtos_cfg.c](#kernelsrcsrcarkrtos_cfgc)（1 项）
 - [kernelsrc/src/arkrtos_dev.c](#kernelsrcsrcarkrtos_devc)（1 项）
-- [kernelsrc/src/arkrtos_elf.c](#kernelsrcsrcarkrtos_elfc)（17 项）
+- [kernelsrc/src/arkrtos_elf.c](#kernelsrcsrcarkrtos_elfc)（18 项）
 - [kernelsrc/src/arkrtos_eset.c](#kernelsrcsrcarkrtos_esetc)（1 项）
 - [kernelsrc/src/arkrtos_exports.c](#kernelsrcsrcarkrtos_exportsc)（1 项）
 - [kernelsrc/src/arkrtos_fs.c](#kernelsrcsrcarkrtos_fsc)（1 项）
 - [kernelsrc/src/arkrtos_guard.c](#kernelsrcsrcarkrtos_guardc)（1 项）
 - [kernelsrc/src/arkrtos_installer.c](#kernelsrcsrcarkrtos_installerc)（1 项）
-- [kernelsrc/src/arkrtos_linux_abi.c](#kernelsrcsrcarkrtos_linux_abic)（2 项）
+- [kernelsrc/src/arkrtos_linux_abi.c](#kernelsrcsrcarkrtos_linux_abic)（4 项）
 - [kernelsrc/src/arkrtos_loader.c](#kernelsrcsrcarkrtos_loaderc)（6 项）
 - [kernelsrc/src/arkrtos_log.c](#kernelsrcsrcarkrtos_logc)（1 项）
 - [kernelsrc/src/arkrtos_mini.c](#kernelsrcsrcarkrtos_minic)（1 项）
 - [kernelsrc/src/arkrtos_modld.c](#kernelsrcsrcarkrtos_modldc)（5 项）
 - [kernelsrc/src/arkrtos_mpu.c](#kernelsrcsrcarkrtos_mpuc)（1 项）
-- [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（26 项）
+- [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（27 项）
 - [kernelsrc/src/arkrtos_smp.c](#kernelsrcsrcarkrtos_smpc)（1 项）
 - [kernelsrc/src/arkrtos_task.c](#kernelsrcsrcarkrtos_taskc)（5 项）
 - [kernelsrc/src/arkrtos_tickless.c](#kernelsrcsrcarkrtos_ticklessc)（1 项）
@@ -2483,6 +2483,26 @@ int32 arkrtos_elf_exec_replace(const char *path, int32 argc, char *argv[], arkrt
 成功时不返回旧镜像（Linux 约定），失败返回负错误码、旧镜像继续跑。
 fork / 地址空间复制**不在**这条接口里。
 
+### `int32 arkrtos_elf_fork(void *p_svc_ctx, int32 *p_child_task, uint32 *p`
+
+```c
+int32 arkrtos_elf_fork(void *p_svc_ctx, int32 *p_child_task, uint32 *p_child_space);
+```
+
+**复制**当前任务**，返回子任务的 id 与它落到的空间（U-19）**
+- `p_svc_ctx`：当前任务这次系统调用的 trap 帧（它同时是子空间里的同一 VA）
+- `p_child_task`：可为 0；成功时写回子任务号
+- `p_child_space`：可为 0；成功时写回子任务绑定的空间号
+**返回**：ARKRTOS_ELF_OK / ARKRTOS_ELF_ERR_BUSY（没有空空间）/
+ARKRTOS_ELF_ERR_NOMEM（帧池不够或任务表满）/ ARKRTOS_ELF_ERR_PARAM
+子进程拿到父进程地址空间的**逐字副本**（8 KB 对级拷贝，父空间里
+已经驻留的对才复制），子任务恢复的现场就是父这次系统调用的 trap
+帧，只有 a0 被改成 0 —— 于是父返回子 pid、子返回 0。
+不复制的东西（与 Linux 不同，文档写死）：fd 表、管道、信号表、
+堆游标都是**内核全局单份**，子看到的是同一份，不是副本。
+调用者必须是降权（is_priv == 0）用户任务；内核任务没有窗口。
+> 说明：只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。 */
+
 ### `int32 arkrtos_elf_info(arkrtos_elf_info_t *p_out);`
 
 ```c
@@ -4186,6 +4206,56 @@ Read-only: it never faults a pair in, so asking "what is
 mapped" cannot change the answer. A pair that has not been
 touched yet reports 0 instead of a made-up address. */
 
+### `int32 arkrtos_port_paging_space_clone(uint32 src, uint32 dst);`
+
+```c
+int32 arkrtos_port_paging_space_clone(uint32 src, uint32 dst);
+```
+
+**Copy one space's whole window content into another (U-19, fork)**
+- `src`：source space, @param dst destination space (must be empty)
+**返回**：0 = copied; -1 = bad space / same space; -2 = dst already has
+frames (never overwritten); -3 = frame pool refused, rolled back
+Copies the pairs the source actually owns, frame by frame,
+through the pool's identity mapping - the App window is NOT
+switched, because the caller is running inside it. A pair the
+source has swapped out is copied in from the swap area, so the
+child sees the same bytes the parent would see, resident.
+On failure every frame this call took is returned to the pool.
+> 说明：只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。 */
+
+### `int32 arkrtos_port_paging_write_space(uint32 space, unsigned long va, `
+
+```c
+int32 arkrtos_port_paging_write_space(uint32 space, unsigned long va, const unsigned long *words, uint32 n);
+```
+
+**Write a few words into a space by physical address (U-19, fork)**
+- `space`：target space, @param va window VA (8-byte aligned)
+- `words`：source words (8 bytes each), @param n word count
+**返回**：0 = written; -1 = out of range, or that pair has no frames
+No demand faulting here on purpose: the caller must write into
+a pair the parent already made resident, otherwise it rolls
+back. Kernel paths do not quietly allocate frames behind the
+bookkeeping's back.
+> 说明：只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。 */
+
+### `int32 arkrtos_port_paging_clone_frame(void *p_exc_ctx, uint32 space);`
+
+```c
+int32 arkrtos_port_paging_clone_frame(void *p_exc_ctx, uint32 space);
+```
+
+**Turn the parent trap frame into the child's first frame (U-19)**
+- `p_exc_ctx`：parent's syscall trap frame (also its VA in the child)
+- `space`：child space
+**返回**：0 = written; <0 = arkrtos_port_paging_write_space's reason
+Copies every register slot verbatim and rewrites a0 to 0, so
+the child resumes at the same PC with the same stack and sees
+clone() returning 0. ERA/sp/tp/fp and the FPU/vector area are
+inherited - that IS fork.
+> 说明：只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。 */
+
 ### `#if (ARKRTOS_USE_PAGING_SWAP == 1) uint32 arkrtos_port_paging_swap_sta`
 
 ```c
@@ -5862,6 +5932,18 @@ uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task);
 ```
 
 **Space a task is bound to (0 when unknown) */**
+
+### `int32 arkrtos_paging_space_clone(uint32 src, uint32 dst);`
+
+```c
+int32 arkrtos_paging_space_clone(uint32 src, uint32 dst);
+```
+
+**把一个空间的整份窗口内容复制到另一个空间（U-19 fork 的落地）**
+- `src`：父空间，@param dst 子空间（必须空着）
+**返回**：0 / -1 参数 / -2 dst 已有帧 / -3 帧池拒绝（已回滚）
+纯搬运，不切窗口；只在按需分页的 LoongArch64 端口上实现。
+开关条件（PAGING_PAGES + PAGING_DEMAND）由 features.h #error 把住。 */
 
 ### `int32 arkrtos_paging_space_release(uint32 space);`
 
@@ -9278,6 +9360,60 @@ uint32 arkrtos_port_paging_pair_pa(uint32 space, uint32 idx) {
 只读：按需档下它不会替调用方把这一对缺进来 —— 问「现在挂着
 什么」不能改变答案。没挂的对如实回 0，不编一个地址。
 
+### `static void la_fork_copy_pair(uint32 *dst, const uint32 *src) {`
+
+```c
+static void la_fork_copy_pair(uint32 *dst, const uint32 *src) {
+```
+
+8 KB 对拷贝：fork 档不开 swap 也要能搬，因此单独一份，不借用
+la_pg_copy_pair()（那个只在 swap 档定义）。 */
+
+### `int32 arkrtos_port_paging_space_clone(uint32 src, uint32 dst) {`
+
+```c
+int32 arkrtos_port_paging_space_clone(uint32 src, uint32 dst) {
+```
+
+**把 src 空间的整份窗口内容复制到 dst 空间**
+**返回**：0 = 已复制；-1 = 参数非法；-2 = dst 已经有帧（不覆写别人）；
+-3 = 帧池拒绝，本次已回滚
+只复制**父空间真正挂着**的对（按需档下父也可能只摸了一部分）。
+父的对若在交换区里（swap 档），子拿到的是该内容的**驻留副本**：
+fork 的语义是「子看到与父此刻相同的内容」，父的换出状态不是子
+该继承的东西。失败一律回滚成 dst 空着，绝不留半份地址空间。
+
+### `int32 arkrtos_port_paging_write_space(uint32 space, unsigned long va, `
+
+```c
+int32 arkrtos_port_paging_write_space(uint32 space, unsigned long va, const unsigned long *words, uint32 n) {
+```
+
+**按 PA 往某个空间里写一小段字（不切窗口）**
+- `space`：目标空间号
+- `va`：窗口内的虚拟地址（调用方保证 8 字节对齐）
+- `words`：源字数组（8 字节 / 字）
+- `n`：字数
+**返回**：0 = 已写；-1 = 参数越界，或目标 VA 所在的那一对没有帧
+这一档**不做按需缺页**：调用方要写的地址必须已经驻留，否则
+回 -1 让它回滚。在内核路径里临时拿帧会绕开「谁欠谁」的账本，
+而且 fork 的初始帧本来就落在父任务已经摸过的栈页里。
+
+### `int32 arkrtos_port_paging_clone_frame(void *p_exc_ctx, uint32 space) {`
+
+```c
+int32 arkrtos_port_paging_clone_frame(void *p_exc_ctx, uint32 space) {
+```
+
+**把父任务的 trap 帧复制成子任务的初始帧（同一 VA）**
+- `p_exc_ctx`：父任务这次系统调用的 trap 帧（同时是它在子空间里的 VA）
+- `space`：子空间
+**返回**：0 = 已写；-1/-2 透出 write_space / 越界的原因
+只改一格：a0。Linux 的 clone 约定是「父返回 pid、子返回 0」，
+而子恢复现场时唯一不同的就是返回值寄存器。ERA/sp/tp 与所有
+通用/浮点/向量寄存器原样继承 —— 包括 fp，于是子的调用栈与父
+逐字相同（这正是 fork 要的）。
+
 ### `static int32 la_pg_demand_fault(unsigned long badv) {`
 
 ```c
@@ -11213,6 +11349,24 @@ U-2（2026-11-17）：装载不再假设"只有一块窗口"。先挑一个没�
 内核任务原来的视图装回去。挑空间只看台账，不看地址：窗口 VA
 在所有空间里都是同一个值，这个值本身不携带任何身份。
 
+### `int32 arkrtos_elf_fork(void *p_svc_ctx, int32 *p_child_task, uint32 *p`
+
+```c
+int32 arkrtos_elf_fork(void *p_svc_ctx, int32 *p_child_task, uint32 *p_child_space) {
+```
+
+**复制当前任务（U-19：Linux clone/fork 的内核落地）**
+实现顺序刻意是「先复制、后注册」：
+1) 挑一个没有活实例、且不是父自己的空间；
+2) 先释放它上一轮的帧（一定没有活实例），再整份复制父空间；
+3) 把父这次系统调用的 trap 帧写成子空间里的同一 VA，a0 = 0；
+4) 最后才在一个临界区里注册任务、把 TCB 的窗口/栈/入口全部
+改成父的值、绑定空间。
+顺序不能反：register 会把任务直接挂进就绪集，而「降权 / 窗口
+写回 / 绑定」是它之后的事 —— 被 tick 切走就会得到一个跑在错帧
+上的半配置任务（与装载器那条路径同一个坑，见 elf_start_task）。
+前三步都可回滚（失败就把子空间还回池子）；第四步之后不再失败。
+
 ### `int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[]) {`
 
 ```c
@@ -11346,6 +11500,33 @@ static int32 lx_copy_user_str(unsigned long uaddr, char *out, uint32 cap) {
 
 **把用户地址上的 NUL 结尾串拷进内核缓冲**
 **返回**：0 成功；-EFAULT 指针非法；-ENAMETOOLONG 在 cap 内没有 NUL
+
+### `static int32 lx_clone(void *p_ctx) {`
+
+```c
+static int32 lx_clone(void *p_ctx) {
+```
+
+**clone(2)：只做 fork，不做线程**
+只接受 flags == 0 或 SIGCHLD、child_stack == 0。CLONE_VM /
+CLONE_THREAD / CLONE_VFORK / CLONE_SETTLS / CLONE_FILES 等一律
+-EINVAL —— 本内核没有共享地址空间的线程，也没有线程组。
+成功时父返回子 pid（任务号），子返回 0（那一格已经在子帧里改好）。
+
+### `static int32 lx_wait4(void *p_ctx) {`
+
+```c
+static int32 lx_wait4(void *p_ctx) {
+```
+
+**wait4(2)：只支持 options == 0 / WNOHANG**
+三条与 Linux 不同的边界（文档里写死）：
+1) **不能阻塞**：子进程还活着且没给 WNOHANG 时回 -EAGAIN，
+因为本内核没有「在系统调用里睡眠等事件」这条通路；
+2) 状态只有「上报过退出码」这一种：exit_code_set == 0（故障 /
+在别处被杀）时回 -EIO 并放掉记账 —— 编一个 0 会看起来像成功；
+3) 槽位被复用后回 -ECHILD（靠注册代次认出来），不把新任务当儿子。
+rusage 指针忽略、一个字节都不写。
 
 ### `static int32 lx_execve(void *p_ctx) {`
 
@@ -11677,10 +11858,10 @@ uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task) {
 
 **Space a task is bound to (0 for unbound / unknown)**
 
-### `int32 arkrtos_paging_space_release(uint32 space) {`
+### `#if (ARKRTOS_USE_LINUX_FORK == 1)`
 
 ```c
-int32 arkrtos_paging_space_release(uint32 space) {
+#if (ARKRTOS_USE_LINUX_FORK == 1)
 ```
 
 **把一个地址空间的帧还给帧池（空间回收，U-3 遗留）**
@@ -11693,6 +11874,19 @@ int32 arkrtos_paging_space_release(uint32 space) {
 —— 帧回到池子里而旧条目还指着它，是「两个空间共享同一块物理页」
 这种只在很久以后才显形的错。归还之后空间仍然存在，下一次
 activate() 重新要帧，于是反复 exec 不再把池子一格一格吃掉。
+
+### `int32 arkrtos_paging_space_clone(uint32 src, uint32 dst) {`
+
+```c
+int32 arkrtos_paging_space_clone(uint32 src, uint32 dst) {
+```
+
+**Copy one space's window content into another (U-19, fork)**
+**返回**：0 = copied; -1 = bad space / same space; -2 = dst already has
+frames; -3 = frame pool refused (everything taken was rolled back)
+Thin forward. The caller (the ELF loader) has already checked that
+dst has no live instance; the port re-checks that dst is empty so a
+bug there cannot overwrite another process's memory silently.
 
 ### `int32 arkrtos_paging_frame_alloc(uint32 count, uint32 *p_base) {`
 

@@ -92,6 +92,13 @@ typedef struct {
     int32  exit_code;                               /* U-8：任务自己上报的退出码（exit_code_set=0 时无意义） */
     uint8  exit_code_set;                           /* 1 = exit_code 已由 EXIT_CODE 子命令写入 */
 #endif
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+    uint32 generation;                              /* U-19：每次 register 自增的注册代次。
+                                                     * 任务槽位会被复用，单看 pid 认不出
+                                                     * 「同一个号上的新旧两个实例」；fork 的
+                                                     * wait4 拿它区分，晚到的 reap 如实报
+                                                     * -ECHILD 而不是认错人。 */
+#endif
     uint8  is_priv;                                 /* 1 = Thread mode privileged, 0 = unprivileged.
                                                      * Honoured only when ARKRTOS_USE_PRIV == 1;
                                                      * the switch path writes CONTROL.nPRIV from

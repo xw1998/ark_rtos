@@ -2153,6 +2153,181 @@ int32 arkrtos_elf_exec_space(const char *path, int32 argc, char *argv[],
     return ARKRTOS_ELF_OK;
 }
 
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+/* fork 用的内核静态栈：只为了让 arkrtos_task_register() 有地方写它的初始帧。
+ * 真正的栈指针在下面被改成「父任务这次系统调用的 trap 帧 VA」，于是这块
+ * 内存只活到本次调用结束，子任务永远不会执行到它上面。2 KB 足够放下本
+ * 端口最大的一种帧（LSX 档 1040 字节）加对齐与栈底保护字。 */
+#define ELF_FORK_SCRATCH_WORDS   (512u)
+static uint32 s_elf_fork_scratch[ELF_FORK_SCRATCH_WORDS];
+
+/**
+* @brief 复制当前任务（U-19：Linux clone/fork 的内核落地）
+* @details 实现顺序刻意是「先复制、后注册」：
+*            1) 挑一个没有活实例、且不是父自己的空间；
+*            2) 先释放它上一轮的帧（一定没有活实例），再整份复制父空间；
+*            3) 把父这次系统调用的 trap 帧写成子空间里的同一 VA，a0 = 0；
+*            4) 最后才在一个临界区里注册任务、把 TCB 的窗口/栈/入口全部
+*               改成父的值、绑定空间。
+*          顺序不能反：register 会把任务直接挂进就绪集，而「降权 / 窗口
+*          写回 / 绑定」是它之后的事 —— 被 tick 切走就会得到一个跑在错帧
+*          上的半配置任务（与装载器那条路径同一个坑，见 elf_start_task）。
+*          前三步都可回滚（失败就把子空间还回池子）；第四步之后不再失败。
+*/
+int32 arkrtos_elf_fork(void *p_svc_ctx, int32 *p_child_task,
+                       uint32 *p_child_space)
+{
+    uint32 parent_space;
+    uint32 space;
+    uint32 crit;
+    int32  parent_id = arkrtos_current_task_id;
+    arkrtos_task_t *p_parent;
+    int32  rc;
+    int32  id;
+
+    if(p_child_task != 0)
+    {
+        *p_child_task = 0;
+    }
+    if(p_child_space != 0)
+    {
+        *p_child_space = 0u;
+    }
+
+    if((p_svc_ctx == 0) || (parent_id <= 0) ||
+       (parent_id > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return ARKRTOS_ELF_ERR_PARAM;
+    }
+
+    p_parent = &arkrtos_task_table[parent_id - 1];
+    if(p_parent->is_priv != 0u)
+    {
+        /* 内核任务没有用户窗口，也就没有「复制一份进程」这回事。 */
+        return ARKRTOS_ELF_ERR_PARAM;
+    }
+
+#if (ARKRTOS_USE_PAGING == 1)
+    parent_space = arkrtos_paging_space_of(p_parent);
+#else
+    return ARKRTOS_ELF_ERR_PARAM;
+#endif
+
+    for(space = 0u; space < elf_space_capacity(); space++)
+    {
+        if((space != parent_space) && (elf_slot_live(space) == 0))
+        {
+            break;
+        }
+    }
+    if(space >= elf_space_capacity())
+    {
+        return ARKRTOS_ELF_ERR_BUSY;
+    }
+
+    /* 上一轮的帧先还回去（这个空间没有活实例），让复制落在干净的目标上。
+     * 这一步不切窗口：调用者正站在窗口里跑系统调用。 */
+    (void)arkrtos_paging_space_release(space);
+
+    rc = arkrtos_paging_space_clone(parent_space, space);
+    if(rc != 0)
+    {
+        return (rc == -2) ? ARKRTOS_ELF_ERR_BUSY : ARKRTOS_ELF_ERR_NOMEM;
+    }
+
+    rc = arkrtos_port_paging_clone_frame(p_svc_ctx, space);
+    if(rc != 0)
+    {
+        (void)arkrtos_paging_space_release(space);
+        return ARKRTOS_ELF_ERR_NOMEM;
+    }
+
+    crit = ARKRTOS_ENTER_CRITICAL();
+    id = arkrtos_task_register((void (*)(void))p_parent->entry,
+                               s_elf_fork_scratch,
+                               (uint32)sizeof(s_elf_fork_scratch),
+                               p_parent->priority, 0u);
+    if(id <= 0)
+    {
+        ARKRTOS_EXIT_CRITICAL(crit);
+        (void)arkrtos_paging_space_release(space);
+        return ARKRTOS_ELF_ERR_NOMEM;
+    }
+
+    {
+        arkrtos_task_t *p_child = &arkrtos_task_table[id - 1];
+
+        p_child->is_priv      = 0u;
+        p_child->rom_start    = p_parent->rom_start;
+        p_child->rom_size     = p_parent->rom_size;
+        p_child->ram_start    = p_parent->ram_start;
+        p_child->ram_size     = p_parent->ram_size;
+        p_child->stack_bottom = p_parent->stack_bottom;
+        p_child->stack_top    = p_parent->stack_top;
+        p_child->stack_size   = p_parent->stack_size;
+        p_child->entry        = p_parent->entry;
+        /* 子任务恢复的现场就是那一帧：同一个 VA 在子空间里指向子自己的
+         * 拷贝（clone_frame 已经把 a0 改成 0）。 */
+        p_child->stack_ptr    = (unsigned long)p_svc_ctx;
+#if (ARKRTOS_USE_STACK_USAGE == 1)
+        p_child->stack_peak_low = p_parent->stack_peak_low;
+#endif
+#if (ARKRTOS_USE_STACK_GUARD == 1)
+        /* 栈底保护字在窗口里，复制空间时一起带过来了；这里只登记「可查」。 */
+        p_child->stack_guard_armed    = 1u;
+        p_child->stack_guard_reported = 0u;
+#endif
+#if (ARKRTOS_USE_EXIT_CODE == 1)
+        p_child->exit_code     = 0;
+        p_child->exit_code_set = 0u;
+#endif
+#if (ARKRTOS_USE_MPU == 1)
+        arkrtos_mpu_build_task(p_child);
+#endif
+        (void)arkrtos_paging_bind_task(p_child, space);
+    }
+
+    ARKRTOS_EXIT_CRITICAL(crit);
+
+    /* 台账：子空间如实登记。s_elf_last **不动** —— 「上一次装载读数」问的
+     * 是装载，不是这次 fork；动它会让装配方读到子进程的信息。 */
+    s_elf_task[space] = id;
+    if(s_elf_info[parent_space].task > 0)
+    {
+        s_elf_info[space] = s_elf_info[parent_space];
+    }
+    else
+    {
+        /* 父的装载读数没登记（不该发生，但绝不把垃圾当读数传下去）。 */
+        s_elf_info[space].entry      = 0ul;
+        s_elf_info[space].bytes      = 0u;
+        s_elf_info[space].segs       = 0u;
+        s_elf_info[space].argc       = 0u;
+        s_elf_info[space].sp         = 0ul;
+        s_elf_info[space].stack_size = 0u;
+        s_elf_info[space].dynamic    = 0u;
+        s_elf_info[space].interp_base  = 0ul;
+        s_elf_info[space].interp_entry = 0ul;
+    }
+    s_elf_info[space].task = id;
+#if (ARKRTOS_USE_EXIT_CODE == 1)
+    s_elf_info[space].exit_code     = 0;
+    s_elf_info[space].exit_code_set = 0u;
+#endif
+
+    if(p_child_task != 0)
+    {
+        *p_child_task = id;
+    }
+    if(p_child_space != 0)
+    {
+        *p_child_space = space;
+    }
+
+    return ARKRTOS_ELF_OK;
+}
+#endif /* ARKRTOS_USE_LINUX_FORK == 1 */
+
 /**
 * @brief 兼容入口：装一个 ELF 程序，不关心它落到哪个空间
 */

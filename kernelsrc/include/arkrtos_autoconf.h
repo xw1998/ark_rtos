@@ -250,6 +250,9 @@
 #ifndef ARKRTOS_USE_LINUX_ABI
 #define ARKRTOS_USE_LINUX_ABI 0
 #endif
+#ifndef ARKRTOS_USE_LINUX_FORK
+#define ARKRTOS_USE_LINUX_FORK 0
+#endif
 #ifndef ARKRTOS_USE_LOG
 #define ARKRTOS_USE_LOG 1
 #endif

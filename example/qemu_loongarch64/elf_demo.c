@@ -27,6 +27,9 @@
 #include "linux_execve_blob.h"
 #include "linux_pipe_blob.h"
 #include "linux_signal_blob.h"
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+#include "linux_fork_blob.h"
+#endif
 #include "arkrtos_linux_abi.h"
 #endif
 #if (ARKRTOS_USE_ELF_TLS == 1)
@@ -51,6 +54,9 @@
 #define LX_EXEC_PATH        "/mnt/ram/linux_execve"
 #define LX_PIPE_PATH        "/mnt/ram/linux_pipe"
 #define LX_SIG_PATH         "/mnt/ram/linux_signal"
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+#define LX_FORK_PATH        "/mnt/ram/linux_fork"
+#endif
 #endif
 #if (ARKRTOS_USE_ELF_TLS == 1)
 #define TLS_DEMO_PATH       "/mnt/ram/tls_main"
@@ -600,6 +606,76 @@ static void task_elf_demo(void)
     }
 #endif
 
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+    /* fork 的现场证据：linux_fork 自己 clone 出一个子进程 —— 子进程改自己那份
+     * .data 后 exit(42)，父进程用 wait4(WNOHANG) 收它的退出码，再确认父的全局
+     * 变量没被改、记账已经被消耗掉。夹具自检失败走 exit 1，正常收尾是 exit 0。 */
+    {
+        arkrtos_elf_info_t info;
+        char *fargv[1];
+
+        for(tries = 0u; tries < 100u; tries++)
+        {
+            rc = arkrtos_vfs_write_file(LX_FORK_PATH, ark_example_linux_fork,
+                                        (uint32)ARK_EXAMPLE_LINUX_FORK_LEN);
+            if(rc >= 0)
+            {
+                break;
+            }
+            arkrtos_task_wait_internal(100u);
+        }
+
+        demo_puts("[fork] write ");
+        demo_puts(LX_FORK_PATH);
+        demo_puts(" rc=");
+        demo_putu((uint32)rc);
+        demo_puts(" size=");
+        demo_putu((uint32)ARK_EXAMPLE_LINUX_FORK_LEN);
+        demo_puts("\n");
+
+        if(rc >= 0)
+        {
+            fargv[0] = "linux_fork";
+            rc = arkrtos_elf_exec(LX_FORK_PATH, 1, fargv);
+
+            demo_lock();
+            demo_puts("[fork] exec rc=");
+            demo_putu((uint32)rc);
+            demo_puts("\n");
+            demo_unlock();
+
+            if(rc == ARKRTOS_ELF_OK)
+            {
+                waited = 0u;
+                while((arkrtos_elf_running() != 0) && (waited < DEMO_WAIT_MS))
+                {
+                    arkrtos_task_wait_internal(DEMO_POLL_MS);
+                    waited += DEMO_POLL_MS;
+                }
+
+                demo_lock();
+                demo_puts("[fork] finished after ");
+                demo_putu(waited);
+                demo_puts(" ms, exit code ");
+                #if (ARKRTOS_USE_EXIT_CODE == 1)
+                if((arkrtos_elf_info(&info) == ARKRTOS_ELF_OK) &&
+                   (info.exit_code_set != 0u))
+                {
+                    demo_putu((uint32)info.exit_code);
+                }
+                else
+                {
+                    demo_puts("(not reported)");
+                }
+                #else
+                demo_puts("(exit code channel off)");
+                #endif
+                demo_puts("\n");
+                demo_unlock();
+            }
+        }
+    }
+#endif
 #endif
 
 #if (ARKRTOS_USE_ELF_TLS == 1) && (ARKRTOS_USE_LINUX_ABI == 1)

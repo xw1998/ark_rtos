@@ -387,6 +387,39 @@ $(LXSIG_H): $(LXSIG_SIGNED) example/qemu_loongarch64/elf_blob.py
 
 $(BUILD)/example/qemu_loongarch64/elf_demo.o: $(LXSIG_H)
 
+
+# ---------------------------------------------------------------------------
+# fork/clone 夹具（linux_fork.elf）：clone(220) 与 wait4(260) 的七组行为
+# （父子返回值分流、子号不同于父号、地址空间真复制、退出码 42 经 wait4
+#   回来、reap 后再问回 -ECHILD、child_stack/CLONE_VM 当场 -EINVAL、
+#   认不出的号 -ECHILD）。只有 EXTRA_CFLAGS 里显式开 ARKRTOS_USE_LINUX_FORK=1
+# 才构建：默认档一条命令都不多、镜像里一个字节都不多。
+# ---------------------------------------------------------------------------
+ARK_FORK_ON := $(findstring ARKRTOS_USE_LINUX_FORK=1,$(EXTRA_CFLAGS))
+
+ifneq ($(ARK_FORK_ON),)
+LXFORK_SRC    := example/qemu_loongarch64/elf/linux_fork.c
+LXFORK_ELF    := $(BUILD)/linux_fork.elf
+LXFORK_SIGNED := $(BUILD)/linux_fork.signed.elf
+LXFORK_H      := $(BUILD)/linux_fork_blob.h
+
+$(LXFORK_ELF): $(LXFORK_SRC)
+	@mkdir -p $(BUILD)
+	$(CC) $(ARCH_FLAGS) -O2 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
+	      -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	      -Wl,-Ttext=$(WIN_ELF_BASE) -Wl,-e,_start -Wl,--strip-all \
+	      -Wl,-z,max-page-size=4096 -o $@ $< ;
+
+$(LXFORK_SIGNED): $(LXFORK_ELF) tools/sign_payload.py
+	python tools/sign_payload.py sign $(LXFORK_ELF) --out $@ ;
+
+$(LXFORK_H): $(LXFORK_SIGNED) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(LXFORK_SIGNED) \
+	       --output $@ --name ark_example_linux_fork ;
+
+$(BUILD)/example/qemu_loongarch64/elf_demo.o: $(LXFORK_H)
+endif
+
 # ---------------------------------------------------------------------------
 # PT_TLS 示例（tls_main.elf）：装载器读 PT_TLS、把模板铺进窗口、把 $tp 指过去。
 #

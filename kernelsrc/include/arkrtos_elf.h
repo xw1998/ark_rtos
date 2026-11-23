@@ -107,6 +107,25 @@ int32 arkrtos_elf_exec_replace(const char *path, int32 argc, char *argv[],
                                arkrtos_elf_info_t *p_info,
                                unsigned long *p_tp);
 
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+/**
+* @brief 复制**当前任务**，返回子任务的 id 与它落到的空间（U-19）
+* @param p_svc_ctx 当前任务这次系统调用的 trap 帧（它同时是子空间里的同一 VA）
+* @param p_child_task  可为 0；成功时写回子任务号
+* @param p_child_space 可为 0；成功时写回子任务绑定的空间号
+* @return ARKRTOS_ELF_OK / ARKRTOS_ELF_ERR_BUSY（没有空空间）/
+*         ARKRTOS_ELF_ERR_NOMEM（帧池不够或任务表满）/ ARKRTOS_ELF_ERR_PARAM
+* @details 子进程拿到父进程地址空间的**逐字副本**（8 KB 对级拷贝，父空间里
+*          已经驻留的对才复制），子任务恢复的现场就是父这次系统调用的 trap
+*          帧，只有 a0 被改成 0 —— 于是父返回子 pid、子返回 0。
+*          不复制的东西（与 Linux 不同，文档写死）：fd 表、管道、信号表、
+*          堆游标都是**内核全局单份**，子看到的是同一份，不是副本。
+*          调用者必须是降权（is_priv == 0）用户任务；内核任务没有窗口。
+* @note 只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。 */
+int32 arkrtos_elf_fork(void *p_svc_ctx, int32 *p_child_task,
+                       uint32 *p_child_space);
+#endif
+
 /** @brief 上一次成功装载的读数（最近一次的那个空间）；没有过成功装载时返回 ARKRTOS_ELF_ERR_PARAM */
 int32 arkrtos_elf_info(arkrtos_elf_info_t *p_out);
 
@@ -138,6 +157,7 @@ const char *arkrtos_elf_error_name(int32 rc);
 #define arkrtos_elf_space_count()               ((int32)1)
 #define arkrtos_elf_last_space()                ((int32)(-1))
 #define arkrtos_elf_exec_replace(p, c, v, i, t)  ((int32)(-1))
+#define arkrtos_elf_fork(ctx, t, sp)            ((int32)(-1))
 #define arkrtos_elf_info(out)                   ((int32)(-1))
 #define arkrtos_elf_info_space(space, out)      ((int32)(-1))
 #define arkrtos_elf_error_name(rc)              ("elf support not compiled in")

@@ -40,7 +40,7 @@ a purely Linux-ABI static binary with its own `_start`):
 **"A static program runs" is not "Linux is supported".** Section 3 lists what is
 explicitly unsupported.
 
-## 1 Supported syscalls (25; 23 measured on hardware, 2 table-and-argument only)
+## 1 Supported syscalls (27; 25 measured on hardware, 2 table-and-argument only)
 
 Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 
@@ -68,8 +68,10 @@ Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 | 175 | `geteuid` | always 0 | same path |
 | 214 | `brk` | monotonic allocation inside the ELF window | `brk(0)>0` / `brk(+4096) -> 34607104 ok` |
 | 215 | `munmap` | returns 0 only, **does not give the address back** | same path |
+| 220 | `clone` | fork only: `flags` must be 0 or `SIGCHLD`, `child_stack` must be 0; copies the whole address space and makes a new task, the child returns 0 and the parent the child id (section 8, `ARKRTOS_USE_LINUX_FORK`) | `clone(child_stack!=0) == -EINVAL -> -22 ok` / `parent child=12` / `child pid != parent pid -> 1 ok` / `exit code 0` |
 | 221 | `execve` | replace the image of the **calling task**: load segments into its own window, write entry/`sp`/`tp` back into the trap frame; does not return on success | `stage2 pid==stage1 pid -> 11 ok` / `image reloaded (.data marker) -> 1 ok` / `fd 3 survived -> 1 ok` / `heap cursor reset -> 34668544 ok` / `exit code 42` (section 5) |
 | 222 | `mmap` | only `MAP_PRIVATE|MAP_ANONYMOUS`; `MAP_FIXED` refused | `mmap>0 -> 1 ok` / `mmap write/read -> 1 ok` |
+| 260 | `wait4` | only `options 0/WNOHANG`; never blocks, never invents a status, the bookkeeping entry is consumed on reap (section 8) | `wait4 returned child pid -> 12 ok` / `WEXITSTATUS == 42 -> 42 ok` / `wait4(child) again == -ECHILD -> -10 ok` |
 | 226 | `mprotect` | checks page alignment and window range only, returns 0 and counts separately; **protection is not enforced** (the window is one PS=20 RWX mapping) | no fixture readout (1.1) |
 
 Unknown numbers return `-ENOSYS` (38) and are counted. Nothing is guessed.
@@ -84,7 +86,7 @@ has argument validation and an explicit degradation note - it returns 0 but
 "accepted" and "enforced" can be told apart in the readout instead of passing
 off one as the other.
 
-The other 23 numbers all have serial readouts from the `[linux]` / `[pipe]` /
+The other 25 numbers all have serial readouts from the `[linux]` / `[pipe]` /
 `[sig]` fixtures.
 
 ## 2 How the two ABIs are told apart
@@ -105,9 +107,12 @@ return value is a separate port primitive
 
 ## 3 Explicitly unsupported
 
-`fork`/`clone`, fd inheritance / redirection,
+fd inheritance / redirection,
 `socket`/`select`, `futex`, real `mmap` semantics (file-backed, shared,
-`MAP_FIXED`, permission bits), and threads. Signals exist only in a minimal
+`MAP_FIXED`, permission bits), and threads. `fork`/`clone` is no longer in this
+list: with `ARKRTOS_USE_LINUX_FORK` on (default off, 2026-11-23, QEMU LA64) a
+process can split once and be reaped via `wait4` - fork only, no threads
+(`CLONE_VM`/`CLONE_THREAD` are `-EINVAL`), see section 8. Signals exist only in a minimal
 form: same-task self-delivery, delivered on the way out of a syscall, no
 cross-task delivery, no preemptive delivery, no real-time signals, no `siginfo`
 (section 7). Each of these needs an object (a
@@ -115,10 +120,11 @@ process, a user-side signal frame, a shared-memory wait queue) that Ark RTOS
 does not have; faking them would produce silently wrong answers. See the Chinese
 page for the reasoning per row.
 
-`execve` is no longer unsupported either: it replaces the image of the current
-task in place (section 5). What is still missing is the *process* object - there
-is no `fork`/`clone`, no address-space copy, and therefore no parent/child
-relation to inherit anything through.
+`execve` replaces the image of the current task in place (section 5), and
+`fork` copies the address space into a second task (section 8). What is still
+missing is the rest of the *process* model: the fd table stays kernel-global and
+is not copied by `fork`, signals cannot cross tasks, and there is no blocking
+wait.
 
 Dynamic linking no longer belongs in this list: with `ARKRTOS_USE_DYNLOAD` on,
 the kernel loads a `PT_INTERP` interpreter and ships a minimal in-tree
@@ -364,16 +370,75 @@ a 13/13 green gate and a format gate clean on 392 files.
   profile the whole 1040 B block is copied too and the **vector area is measured
   separately** (two checks above). LASX (`$xr0..$xr31`) is not saved.
 
-## 8 Switch and zero footprint
+## 8 fork (220 `clone`) + wait4 (260): parent and child (2026-11-23, QEMU LA64)
+
+`ARKRTOS_USE_LINUX_FORK` (default off) connects "one process becomes two":
+`clone` copies the whole address space and creates a new task, the child resumes
+at the return point and reads 0, the parent reads the child id; `wait4` hands the
+exit code back. It depends on three layers and `features.h` raises `#error` if
+any is missing: `ARKRTOS_USE_LINUX_ABI` (numbers), `ARKRTOS_USE_EXIT_CODE`
+(exit-code reporting), `ARKRTOS_USE_PAGING_PAGES` + `ARKRTOS_USE_PAGING_DEMAND`
+(copyable page window and the deferred window switch U-2).
+
+| item | state |
+|---|---|
+| accepted `clone` arguments | `flags == 0` or `SIGCHLD(17)`, and `child_stack == 0`; everything else is `-EINVAL` (no `CLONE_VM`, hence no threads) |
+| address space | `arkrtos_paging_space_clone()` copies the parent 8 KB pair by pair; the child gets its **own** frame-pool space, writes are not visible across |
+| child's starting point | a copy of the parent's trap frame with `a0` (the return slot) zeroed, so the child continues after `clone` and reads 0 |
+| task id | a fresh TCB (`is_priv = 0`); `generation` tells a reused task number from the old instance; `getpid` reads `current_task_id` |
+| ordering | copy space and frame first, then register the task and patch its TCB inside a critical section (same reason Linux `copy_process` calls `wake_up_new_task` last: a half-configured task must never enter the ready set) |
+| accepted `wait4` arguments | `options == 0` or `WNOHANG(1)`; `pid` must be a child this process registered |
+| `wait4` returns | child alive + `WNOHANG` -> `0`; child alive without `WNOHANG` -> `-EAGAIN` (this kernel cannot sleep inside a syscall); not our child -> `-ECHILD`; child dead but exit code never reported -> `-EIO` (never invent 0 or SIGKILL) |
+| `status` | `(code & 0xFF) << 8`, written as 4 bytes via `copy_to_user`; a failed copy returns `-EFAULT` and **keeps** the bookkeeping (retryable) |
+| bookkeeping | `s_child[4]` (`LX_MAX_CHILD`); `used = 0` after a successful reap; a reused slot is recognised by `generation` |
+| practical ceiling | four bookkeeping entries, but the real gate is the number of address spaces (`ARKRTOS_PAGING_APPS_MAX 2` on this board): parent plus child fill both, a further `clone` returns `-EAGAIN` (`ARKRTOS_ELF_ERR_BUSY` -> `-EAGAIN`: a concurrency limit, not an out-of-memory) |
+
+With the switch off, `arkrtos_elf_fork` / `arkrtos_port_paging_space_clone` /
+`arkrtos_port_paging_write_space` / `arkrtos_port_paging_clone_frame` are not
+compiled at all and `nm` shows zero symbols (gate item B).
+
+### Why the deferred window switch (U-2) has to hold here
+
+Both `clone` and `wait4` run while the parent is **standing in its own window**:
+the frame it needs to resume from (and the return address) sits on the very same
+VA. So `arkrtos_mpu_set_app()` only records `s_pg_pending_space`, and the real
+`activate()` is performed by `la_switch_prepare()` after the assembly has moved
+`sp` onto a kernel static stack.
+
+### A real defect found here: frame-address equality cannot mean "no switch"
+
+The first version of `la_switch_prepare()` treated `new_frame == old_frame` as
+"the scheduler handed the frame back", and that breaks on `fork`: **parent and
+child share the same virtual addresses**, so the parent's trap frame inside
+`wait4` and the child's saved frame can sit at the identical address (measured:
+both `0x21fbdc0`). The switch was then judged a no-op, the window stayed on the
+parent's space, yet the child kept running inside that parent window - every
+`write` came back `-14` (`-EFAULT`, because `space_of(child) != current window
+space`) and the child then continued along the parent's code while the parent
+looked hung. It failed about one run in three, and the failing runs never printed
+`TASK: task 12 exits`.
+
+Fix: an explicit `s_pg_commit` flag - set at the only two places that really
+decide a switch (`la_trap_c()` exit and `la_switch_inline()` after the frame gate)
+and consumed/cleared by `la_switch_prepare()`, which now skips when
+`commit == 0`. After the change 6/6 + 3/3 consecutive runs pass and `rc=-14` is
+gone. The lesson matches how Linux and RT-Thread schedule: **"did it switch" must
+be answered by the point that made the decision, never inferred afterwards from
+an external reading that may just happen to be equal**.
+
+## 9 Switch and zero footprint
 
 `ARKRTOS_USE_LINUX_ABI` (features header + Kconfig), default **0**, and
-`depends on ARKRTOS_USE_ELF`. With the switch off the whole
+`depends on ARKRTOS_USE_ELF`. `ARKRTOS_USE_LINUX_FORK` (section 8) is a second,
+narrower switch, default **0**, `depends on ARKRTOS_USE_LINUX_ABI &&
+ARKRTOS_USE_EXIT_CODE` and on both paging tiers; with it off none of the four
+fork symbols exist. With the switch off the whole
 `arkrtos_linux_abi.c` file compiles to nothing, the port has no
 `arkrtos_port_linux_syscall_num`, and `arkrtos_autoconf.h` records the 0. The
 gate measures this in both directions (the off-profile `.o` must have an empty
 symbol table).
 
-## 9 Gate
+## 10 Gate
 
 ```
 env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py [--no-build]
@@ -382,13 +447,23 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py [--no-build]
 13 items; prints `LINUX-ABI-GATE OK` when all pass and is invoked from
 `tools/ci_gate.py` as `linux-abi`: default-off, kconfig-wired, features-guard,
 board-switch, off-zero-symbols, port-wiring (two directions), compile-on (8 TUs
-under the real LA64 board), syscall-table (25 numbers vs asm-generic),
+under the real LA64 board), syscall-table (27 numbers vs asm-generic),
 abi-split-la64, abi-split-rv32, build, qemu-readout (14 Linux checks + PASS + exit 7,
 14 pipe checks + exit 55, 31 signal checks + PASS + exit 138, the unrelated demos
 still intact), and parser-selfcheck (eight deliberately broken logs must each be
 rejected).
 
-## 10 Three real bugs and one readout trap found on the way
+The fork tier has its own gate, `tools/fork_gate.py` (invoked as `fork` from
+`ci_gate`, 11 items): default-off, kconfig-wired (all four `depends on`), the four
+`#error` guards in features.h, off-zero-symbols (RV32 `linux_abi.o` has no
+`lx_clone`/`lx_wait4`/`s_child`; LA64 `elf`/`port`/`paging` have no fork symbols),
+compile-on (four TUs plus the fixture), build, qemu-readout (ten `[fork]` checks
+all `ok`, different parent/child pids, PASS line, `exit code 0`, hello/FS and the
+other Linux fixtures still intact), parser-selfcheck (six broken logs rejected),
+and restore-default (the build directory is returned to the default tier so a
+later `make` does not reuse fork-tier objects).
+
+## 11 Three real bugs and one readout trap found on the way
 
 1. **Every user pointer returned `-EFAULT`**: `arkrtos_elf.c` wrote the task's
    rom/ram window fields inside `#if (ARKRTOS_USE_MPU == 1)`, but QEMU LA64 is
@@ -411,17 +486,18 @@ rejected).
    traps were fixed too: killing on the marker prefix truncates `exit code 7`,
    and `-serial file:` drops the last sub-4 KB block on kill.
 
-## 11 Boundaries
+## 12 Boundaries
 
 This is the minimal syscall set that lets a static program run, not a Linux
 compatibility layer: no ptrace, no Linux `/proc`. Pipes exist but are
 non-blocking (section 6), which is a different contract from Linux. The
 real-time behaviour is unchanged — every Linux-ABI path completes synchronously
-inside the SVC with no extra thread, no blocking point. Going further requires a
-process object (for a real libc surface) before anything else; signals are
-already at their minimal form (section 7). Dynamic linking itself has its own switch (`ARKRTOS_USE_DYNLOAD`) and a
-minimal in-tree loader, but running glibc binaries is still out of reach.
+inside the SVC with no extra thread, no blocking point. Dynamic linking has its
+own switch (`ARKRTOS_USE_DYNLOAD`) and a minimal in-tree loader, but running glibc
+binaries is still out of reach. Fork exists (section 8) but only as "split once,
+reap once": no threads, no fd inheritance, no cross-task signals, no blocking wait.
 
-`execve` gives "replace this task's image", not "this system has processes":
-without `fork` there is no second task, and without an address-space copy there
-is no parent/child isolation. Do not read it as "Ark has processes now".
+`execve` gives "replace this task's image" and `fork` gives "a second task with
+its own address-space copy". Both exist, but do not read this as a full process
+model: scheduling, priorities and the fd table are still kernel-global, and
+`fork` does not copy the fd table (section 8).
