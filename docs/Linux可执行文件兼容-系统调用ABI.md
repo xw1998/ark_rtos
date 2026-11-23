@@ -454,6 +454,45 @@ trap 帧与子进程保存的帧地址可能完全相同（实测都是 `0x21fbd
 （`wait4` 是幂等的扫描），但**每次唤醒都要重扫一遍子表**；`wait4` 之外的阻塞系统
 调用（`read` 空管道、`futex`）**没有**接这条通路。
 
+### 8.2 写时复制（`ARKRTOS_USE_PAGING_COW`，2026-11-23，QEMU LA64 实跑）
+
+fork 默认仍是「整块克隆」（逐 8 KB 对搬字节）。打开 `ARKRTOS_USE_PAGING_COW`
+后改成**共享 + 第一次写才复制**：`space_clone()` 一个字节都不搬，把父的每一对
+直接指给子（引用计数 1→2）、把父窗口里共享的条目降成只读（WE=0）；哪一方先写，
+就命中一条只读条目，`la_pg_cow_fault()` 把那一对复制成自己的、装回可写、`ertn`
+回到出错的那条指令。实现边界写死：
+
+| 项 | 现状 |
+|---|---|
+| 粒度 | **8 KB 对**：一条 PS=12 条目同时给出 lo0/lo1，WE 位整条共用，这套映射表达不出「一页可写一页只读」；多抄 4 KB，不多看见一个字节 |
+| 引用计数 | 按 4 KB 帧号（帧池 first-fit 不保证 8 KB 对齐），一对的偶数帧号就是它的句柄；**`ref > 1` 即共享**，不另存布尔位 —— 多一个位就多一处能和计数对不上的地方 |
+| 只读条目 | `LA_PTE_APP_RO` = 去掉 WE；故障码两种都认：V=0 是 PIS(2)，**V=1 且 WE=0 是 PME(4)**（QEMU LA64 实测报 4），PLV0 与 PLV3 一视同仁 |
+| 栈页 | **强制私有**：fork 时立刻给子复制一份（日志里 `stack=<n>` 是这一步的对数）。理由见下；`copied=0` 仍然成立（`copied` 只表示 swap 槽的实体复制） |
+| 缺页回装 | 按需档每次切空间都把窗口翻译整段丢掉，重填时**共享对必须按只读装** —— 否则 COW 只剩 fork 那一刻的一层只读，进程切回来第一次写就绕过它 |
+| 上限 | 没有 swap 时 COW 只是「延迟复制」：两边都写过之后各有一份实体帧，2 个地址空间 × 2 MB 仍受帧池（2048 帧）约束 |
+
+**为什么栈页必须私有。** 本内核的异常入口 `eentry` 第一件事就是
+`addi.d $sp,$sp,-256` 然后往帧里写通用寄存器 —— **trap 帧压在 App 自己的栈上**
+（与 Linux「进异常先换内核栈」的做法不同）。如果栈页被降成「共享只读」，这一次
+PLV0 写就是 PME，而且**帧还没落地**：C 处理器（`la_trap_c`）根本没机会跑，嵌套
+异常直接把机器停掉（实测 `FATAL ecode=0x4 era` 落在 `eentry` 里、随后
+`[STK] ... stack bottom flag overwritten`）。所以 fork 时把与任务栈相交的对立刻
+复制给子进程、父保持可写，两边都不留「共享只读」的时间窗。这条边界在打开 COW 时
+**必然存在**，不是可调参数；要改只有先给 trap 换独立内核栈（那是另一级改动）。
+
+读数（`tools/fork_gate.py` 的 fork+COW 档）：26 条 check 全 `ok`，其中 COW 段 5 条
+—— `cow child saw pre-fork values (bits=3) -> 3 ok`（子进程看到的还是 fork 前的值）、
+`parent cow write kept -> 48879 ok`（父的写只落在自己那份）。内核日志断言四条：至少
+一条 `[LA64U] pg cow fork shared=<n> stack=<n> copied=0 frames=<n>`（要求 `shared>=1`、
+`stack>=1`、`copied==0`）、至少一条 `[LA64U] pg cow copy idx=<n> ref=2`、不许出现
+`ref=1` 的 copy 行（没共享也复制就是白搬字节）、旁路演示读数仍在。门禁跑两遍
+（先 fork 档 21 条、再 fork+COW 档 26 条），**不把默认的整块克隆路径从测试里换掉**。
+
+修这一档时抓到两个真根因，都是「编译期与静态检查看不出来」的那种：① 按需档切空间
+会把窗口翻译整段丢掉，重填若一律装可写，COW 只剩 fork 那一刻的一层（表现为父进程
+的全局被子进程写脏、内核一条 `pg cow fault` 都不打）；② 写只读页是 **PME(4)** 不是
+PIS(2)，只认 2 会把它当越权打进致命路径。
+
 ## 9 开关与零体积
 
 - `ARKRTOS_USE_LINUX_ABI`（`kernelsrc/include/arkrtos_features.h`、
@@ -466,6 +505,10 @@ trap 帧与子进程保存的帧地址可能完全相同（实测都是 `0x21fbd
   ARKRTOS_USE_EXIT_CODE` 且 `depends on ARKRTOS_USE_PAGING_PAGES &&
   ARKRTOS_USE_PAGING_DEMAND`；关档时 fork 的四个符号（`arkrtos_elf_fork` 与端口层
   三个搬运函数）一个都不产生。
+- `ARKRTOS_USE_PAGING_COW`（§8.2），默认 **0**，`#error` 顶住两条前提
+  （必须有 `ARKRTOS_USE_LINUX_FORK` 与 `ARKRTOS_USE_PAGING_DEMAND`）；关档时引用
+  计数表与 `la_pg_cow_*` 全不编译，`LA_PTE_APP_RO` 也不产出。门禁的两档实测
+  （关档零符号、开档 26 条读数）保证「默认档体积与行为零变化」不是一句声明。
 - `arkrtos_autoconf.h` 由 `tools/kconfig/genconfig.py` 从 `config/arkrtos_defconfig`
   生成，新增 Kconfig 项后必须重跑一次，否则默认档读数里看不到这个开关。
 
@@ -495,7 +538,7 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py --no-build
 | `qemu-readout` | Linux 块 14 条 check 全 ok + PASS 行 + `exit code 7`；管道块 14 条 + `exit code 55`；信号块 31 条 + PASS 行 + `exit code 138`；旁路演示未受影响 |
 | `parser-selfcheck` | 把 8 种坏日志喂回判据，必须全判红 |
 
-fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，9 项）：
+fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，15 项；fork 与 fork+COW **两档各跑一遍**，所以 build / qemu-readout / parser-selfcheck 各出现两次）：
 
 | 项 | 钉住什么 |
 |---|---|
@@ -506,7 +549,8 @@ fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，9 �
 | `compile-on` | LA64 + 两个 flag，四 TU + 夹具全编过 |
 | `build` | `make` 出 ELF |
 | `qemu-readout` | `[fork]` **21 条** check 全 `ok`、父子 pid 不同、PASS 行、`exit code 0`，且 hello / FS / 其余 Linux 夹具读数仍在；三条新读数（阻塞 `wait4` 真的等了 >= 40 ms / 父读端在子关掉自己那份之后仍读到 3 字节 / SIGCHLD handler 真被调到）逐条校验 |
-| `parser-selfcheck` | 9 种坏日志必须判红 |
+| `qemu-readout`（COW 档） | fork+COW：`[fork]` **26 条** check 全 `ok`；内核日志 `shared>=1 / stack>=1 / copied=0`、至少一条 `pg cow copy ... ref=2`、无 `ref=1` 的 copy 行；两条 COW 读数（子看到 fork 前的值、父的写只落自己那份）逐条校验 |
+| `parser-selfcheck` | 9 种坏日志必须判红（COW 档另加 4 种：位掩码丢一位、父写丢失、整类删光 copy 行、fork 时搬了字节） |
 | `restore-default` | 收尾把构建目录恢复默认档（避免下一次 `make` 复用 fork 档 `.o`） |
 
 `parser-selfcheck` 是防「绿得没有信息量」的：Linux 块去掉 PASS 行、退出码改 3、
@@ -555,7 +599,9 @@ rodata 失败，因为栈窗口（32 KB）被单独设过，而代码窗口没�
   开档四 TU + 夹具编过；QEMU 上 `[fork]` 21 条 check 全 `ok`、父子 pid 必须不同、
   `exit code 0`，且同一次启动里 hello / FS / 其余 Linux 夹具的读数仍在；其中
   阻塞 `wait4`、fd 继承与管道引用计数、跨任务 SIGCHLD 三条读数逐条校验；
-  解析器另有九种坏日志自检。
+  解析器另有九种坏日志自检。fork+COW 档（`ARKRTOS_USE_PAGING_COW=1`）另跑一遍：
+  26 条 check + 四条内核日志断言（共享对数、栈页私有化对数、`copied=0`、真发生过
+  写时复制），坏日志自检再加四种 COW 专属形态。
 - Real-time 语义不因兼容层改变：Linux ABI 的路径全部在 SVC 里同步完成，
   不额外开线程、不加锁（`read`/`write` 到 ramfs 或管道都是同步搬运；管道刻意
   不做阻塞，见 §6）。唯一的「睡下再回来」是阻塞 `wait4`，它用可重启系统调用实现
@@ -566,9 +612,10 @@ rodata 失败，因为栈窗口（32 KB）被单独设过，而代码窗口没�
   还差整条 libc 兼容面**——futex、rseq、TLS 初始化、文件映射、`mprotect` 真落实。
   信号已有跨任务投递（§7），「进程」这个对象也开了（`fork`/`clone` + `wait4`，§8，
   默认关）：每进程 fd 表与继承、跨任务 `SIGCHLD`、阻塞 `wait4` 都已在 QEMU LA64 上
-  有读数；仍没有线程（`CLONE_VM`/`CLONE_THREAD` 拒）、没有写时复制、没有抢占式
-  信号投递、没有 `dup2` 与 `flash` 类重定向。
+  有读数；写时复制也有了（`ARKRTOS_USE_PAGING_COW`，§8.2，默认关）；仍没有线程
+  （`CLONE_VM`/`CLONE_THREAD` 拒）、没有抢占式信号投递、没有 `dup2` 与 `flash`
+  类重定向。
 - `execve` 是「同任务换镜像」；`fork` 才是「多一个任务 + 一份独立地址空间」。
   两者都在，但**不要**因此把这一层读成「有完整的进程模型」：调度与优先级仍是
-  内核全局单份，`fd` 表在 fork 档才分进程（默认档全局单份），没有 COW、没有线程、
-  没有作业控制。
+  内核全局单份，`fd` 表在 fork 档才分进程（默认档全局单份），写时复制只在
+  `ARKRTOS_USE_PAGING_COW` 档（且栈页强制私有），没有线程、没有作业控制。

@@ -200,6 +200,15 @@ static void check(const char *what, lx_long got, lx_long want)
  * 共享同一份地址空间（或只改 trap 帧不复制窗口）的实现会在这里露馅。 */
 volatile unsigned long g_fork_marker = 1ul;
 
+#if defined(ARKRTOS_USE_PAGING_COW) && (ARKRTOS_USE_PAGING_COW == 1)
+/* 写时复制段用的一对全局：fork 之前两边都是 100，fork 之后父进程把它们
+ * 改成 0xBEEF；子进程必须仍读到 100（它那一份是 COW 复制出来的私有页）。
+ * 两个变量放在同一个 8 KB 对里的概率很高，所以只要有任何一个被子看到
+ * 父的新值，位掩码就丢一位 —— 这正是要抓的「其实共享同一份物理页」。 */
+volatile unsigned long g_cow_a = 0ul;
+volatile unsigned long g_cow_b = 0ul;
+#endif
+
 /* ------------------------------------------------------------------
  * 第二批读取：阻塞 wait4 / 每进程 fd 表 / 跨任务 SIGCHLD
  *
@@ -530,6 +539,75 @@ void linux_main(unsigned long sp)
         check("SIGCHLD signo", s_chld_signo, LX_SIGCHLD);
         check("wait4 reaped exit code 9", (status3 >> 8) & 0xFF, 9);
     }
+
+#if defined(ARKRTOS_USE_PAGING_COW) && (ARKRTOS_USE_PAGING_COW == 1)
+    /* ---------------- 写时复制：fork 之后父的写不许被子看见 ---------------- */
+    {
+        int     cfds[2];
+        lx_long child4;
+        lx_long rc4;
+        lx_long status4;
+        char    cch;
+        int     spins;
+
+        g_cow_a = 100ul;
+        g_cow_b = 100ul;
+
+        check("pipe2 for cow == 0",
+              lx2(LX_PIPE2, (lx_long)(unsigned long)cfds, 0), 0);
+
+        child4 = lx3(LX_CLONE, LX_SIGCHLD, 0, 0);
+        if (child4 == 0)
+        {
+            /* 子进程：轮询父进程的「已写完」字节（本内核管道空读回 -EAGAIN，
+             * 不阻塞），拿到字节后才看两个全局。用位掩码当退出码：
+             * bit0 = g_cow_a 仍是 100，bit1 = g_cow_b 仍是 100。 */
+            int seen = 0;
+
+            cch = 0;
+            for (spins = 0; spins < 200000; spins++)
+            {
+                rc4 = lx3(LX_READ, (lx_long)cfds[0],
+                          (lx_long)(unsigned long)&cch, 1);
+                if (rc4 == 1)
+                {
+                    break;
+                }
+            }
+            if (g_cow_a == 100ul)
+            {
+                seen |= 1;
+            }
+            if (g_cow_b == 100ul)
+            {
+                seen |= 2;
+            }
+            (void)lx1(LX_CLOSE, (lx_long)cfds[0]);
+            (void)lx1(LX_CLOSE, (lx_long)cfds[1]);
+            (void)lx1(LX_EXIT, seen);
+            for (;;)
+            {
+            }
+        }
+
+        check("clone for cow child > 0", (child4 > 0) ? 1 : 0, 1);
+
+        /* 父进程在 fork 之后写这两个全局，再通知子进程去读。COW 没生效时
+         * （父子共享同一份物理页）子会读到 0xBEEF，退出码就丢位。 */
+        g_cow_a = 0xBEEFul;
+        g_cow_b = 0xBEEFul;
+        (void)lx3(LX_WRITE, (lx_long)cfds[1], (lx_long)(unsigned long)"C", 1);
+
+        status4 = -1;
+        rc4 = lx4(LX_WAIT4, child4, (lx_long)(unsigned long)&status4, 0, 0);
+        check("cow child exit reaped", rc4, child4);
+        check("cow child saw pre-fork values (bits=3)", (status4 >> 8) & 0xFF, 3);
+        check("parent cow write kept", (lx_long)g_cow_a, 0xBEEF);
+
+        (void)lx1(LX_CLOSE, (lx_long)cfds[0]);
+        (void)lx1(LX_CLOSE, (lx_long)cfds[1]);
+    }
+#endif
 
     if (g_fail == 0)
     {

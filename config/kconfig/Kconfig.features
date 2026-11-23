@@ -582,6 +582,34 @@ config ARKRTOS_USE_LINUX_FORK
 	  loader's fork entry and syscalls 220/260 are all absent, so the image is
 	  byte-for-byte what it was before this option existed.
 
+config ARKRTOS_USE_PAGING_COW
+	bool "Copy-on-write fork (U-19b)"
+	depends on ARKRTOS_USE_LINUX_FORK
+	depends on ARKRTOS_USE_PAGING_DEMAND
+	help
+	  Make fork share the parent's 8 KB pairs read-only instead of copying
+	  them eagerly: every pair the parent owns is pointed at by the child too
+	  (reference count 1 -> 2) and both entries are downgraded to read-only.
+	  The first store into a shared pair raises Ecode=PIS, la_pg_cow_fault()
+	  copies that pair, installs a writable entry for the faulting space and
+	  ertn returns to the faulting instruction.  Frames are not returned to
+	  the pool until the last space pointing at them is released.
+
+	  Boundaries (deliberate, not bugs):
+	    1) The copy granularity is this port's mapping unit, one 8 KB pair:
+	       a PS=12 entry carries both lo0 and lo1 and shares a single WE bit,
+	       so "writable here, read-only there" cannot be expressed.
+	    2) Pairs that were swapped out do not share: their content lives in a
+	       swap slot owned by one space, so fork falls back to a real copy.
+	    3) If the frame pool cannot give two frames at fault time, the fault
+	       is handed back to the original kill path - never a half-installed
+	       writable entry, which would let two processes share one page.
+
+	  Requires ARKRTOS_USE_LINUX_FORK and ARKRTOS_USE_PAGING_DEMAND.
+
+	  Off (default) compiles no reference table and no fault handler; fork
+	  keeps copying frame by frame, so the image does not change by a byte.
+
 config ARKRTOS_USE_WIDE_SVC_ARGS
 	bool "Native-width SVC parameter block (wide-argument ABI, U-18)"
 	help

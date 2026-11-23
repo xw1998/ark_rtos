@@ -78,7 +78,7 @@ In one line: **the "behaves like Linux" main line works**; what follows is what 
 
 | Linux has | Ark RTOS | Class |
 |---|---|---|
-| Process (own address space) + `fork` / `exec` / `waitpid` | No `fork` semantics: **one App = one address space + several threads**; `fork` / `waitpid` are not provided. `exec` **does** exist in two forms: the shell command (load a new ELF onto a new task) and `execve` (Linux ABI nr 221, 2026-11-21, run under QEMU LA64), which **really replaces the current task's image** (same task id, fds kept, does not return on success); the loaded program receives `sp -> argc/argv` per the Linux entry convention. **`fork` is done** (`ARKRTOS_USE_LINUX_FORK`, default off, 2026-11-23, 21 checks under QEMU LA64): per-process fd tables with inheritance, cross-task `SIGCHLD` and a really blocking `wait4` (restartable syscall) all have readouts; still no threads (`CLONE_VM`/`CLONE_THREAD` refused) and no copy-on-write | Done (static ELF loading, same-task `execve`, `fork`+`wait4`) |
+| Process (own address space) + `fork` / `exec` / `waitpid` | No `fork` semantics: **one App = one address space + several threads**; `fork` / `waitpid` are not provided. `exec` **does** exist in two forms: the shell command (load a new ELF onto a new task) and `execve` (Linux ABI nr 221, 2026-11-21, run under QEMU LA64), which **really replaces the current task's image** (same task id, fds kept, does not return on success); the loaded program receives `sp -> argc/argv` per the Linux entry convention. **`fork` is done** (`ARKRTOS_USE_LINUX_FORK`, default off, 2026-11-23, 21 checks under QEMU LA64): per-process fd tables with inheritance, cross-task `SIGCHLD` and a really blocking `wait4` (restartable syscall) all have readouts; copy-on-write is done as well (`ARKRTOS_USE_PAGING_COW`, default off, 2026-11-23, 26 checks under QEMU LA64: 8 KB pairs with refcounts, stack pages forced private); still no threads (`CLONE_VM`/`CLONE_THREAD` refused) | Done (static ELF loading, same-task `execve`, `fork`+`wait4`, copy-on-write) |
 | `getpid` / `getppid` / PID namespace | Only a kernel task id (task-table index); `getpid` is a stub only | Trade-off |
 | Dynamic linking, `.so` shared libraries, ELF loader | Two kinds of input coexist: the `.svcapp` container (copied whole into RAM) and a **statically linked native ELF** (`exec` / `ld`, running on LA64 and RV32; 32/64-bit field tables chosen by `__SIZEOF_LONG__`). The ELF loader accepts only `PT_LOAD` + `e_entry`: `PT_INTERP` (dynamic linking) is explicitly rejected (`ERR_FORMAT`); **no `.so`, no relocated shared libraries, no Linux system-call ABI** (`ecall` carries Ark's `0x10..0x22`) | Trade-off (dynamic linking, shared libraries) + debit (Linux syscall ABI, see [欠账盘点](欠账盘点.md)) |
 | `argv` / `argc` / environment variables | A `.svcapp` App still enters at `main(void)` with no argv; an **ELF program loaded by `exec` receives `sp -> argc/argv` per the Linux entry convention** (measured `argc=4` and `argv[0..3]` matching exactly), but there is **no `environ`** | Trade-off (`.svcapp`) + done (ELF argv) |
@@ -194,12 +194,13 @@ whether it is worth fixing:
 | Low | A writable `/sys`-style kernel attribute surface | None (`/proc` is read-only) | Do it when needed |
 
 **Not planned** (class 1 trade-offs, written down so they are not repeatedly mistaken for "not done
-yet"): process model (`fork` / `waitpid`, COW), dynamic linking and `.so` shared libraries,
+yet"): dynamic linking and `.so` shared libraries,
 multi-user / uid-gid, power management, ASLR, kernel modules, package manager,
 shared-memory IPC, `/sys` + hotplug, symmetric-multicore automatic load balancing (SMP already has
 AMP core partitioning and explicit task migration; **static ELF loading with the Linux entry
 convention, plus the Linux syscall ABI for static programs (non-blocking pipes and the minimal
-signal set included), are done and are not on this list**).
+signal set included), `fork`/`wait4` and copy-on-write are done and are not on this
+list**; what `fork` still lacks is threads and preemptive signal delivery).
 
 ## 4. One-line conclusion
 

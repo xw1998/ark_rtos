@@ -61,7 +61,7 @@
 
 | Linux 有 | Ark RTOS | 归类 |
 |---------|---------|------|
-| 进程（独立地址空间）+ `fork` / `exec` / `waitpid` | 没有 fork 语义：**一个 App = 一个地址空间 + 若干线程**，`fork` / `waitpid` 不提供。`exec` **有**两种形态：shell 的 `exec` 是内核命令（装载一个新 ELF 到新任务上跑），`execve`（Linux ABI 号 221，2026-11-21，QEMU LA64 实跑）是**真的替换当前任务映像**（任务号不变、fd 保留、成功不返回）；被装载的程序按 Linux 入口约定拿到 `sp -> argc/argv`。**`fork` 已做**（`ARKRTOS_USE_LINUX_FORK`，默认关，2026-11-23，QEMU LA64 实跑 21 条 check）：每进程 fd 表与继承、跨任务 `SIGCHLD`、真阻塞的 `wait4`（可重启系统调用）都已有读数；仍无线程（`CLONE_VM`/`CLONE_THREAD` 拒）、无写时复制 | 已做（静态 ELF 装载、同任务 `execve`、`fork`+`wait4`） |
+| 进程（独立地址空间）+ `fork` / `exec` / `waitpid` | 没有 fork 语义：**一个 App = 一个地址空间 + 若干线程**，`fork` / `waitpid` 不提供。`exec` **有**两种形态：shell 的 `exec` 是内核命令（装载一个新 ELF 到新任务上跑），`execve`（Linux ABI 号 221，2026-11-21，QEMU LA64 实跑）是**真的替换当前任务映像**（任务号不变、fd 保留、成功不返回）；被装载的程序按 Linux 入口约定拿到 `sp -> argc/argv`。**`fork` 已做**（`ARKRTOS_USE_LINUX_FORK`，默认关，2026-11-23，QEMU LA64 实跑 21 条 check）：每进程 fd 表与继承、跨任务 `SIGCHLD`、真阻塞的 `wait4`（可重启系统调用）都已有读数；写时复制也已做（`ARKRTOS_USE_PAGING_COW`，默认关，2026-11-23，QEMU LA64 实跑 26 条 check：8 KB 对 + 引用计数，栈页强制私有）；仍无线程（`CLONE_VM`/`CLONE_THREAD` 拒） | 已做（静态 ELF 装载、同任务 `execve`、`fork`+`wait4`、写时复制） |
 | `getpid` / `getppid` / PID 命名空间 | 只有内核任务号（任务表索引），`getpid` 只有桩 | 取舍 |
 | 动态链接、`.so` 共享库、ELF 加载器 | 两类输入并存：装应用的 `.svcapp` 容器（整体复制到 RAM），以及**静态链接的原生 ELF**（`exec`/`ld`，LA64 与 RV32 实跑；64 位/32 位字段表按 `__SIZEOF_LONG__` 选）。ELF 装载器只认 `PT_LOAD` + `e_entry`：`PT_INTERP`（动态链接）明确拒绝（`ERR_FORMAT`），**无 `.so`、无重定位后的共享库、无 Linux 系统调用 ABI**（`ecall` 走 Ark 的 `0x10..0x22`） | 取舍（动态链接、共享库）+ 欠账（Linux syscall ABI，见 [欠账盘点](欠账盘点.md)） |
 | `argv` / `argc` / 环境变量 | `.svcapp` 的 App 入口仍是 `main(void)`，没有 argv；**被 `exec` 装载的 ELF 程序按 Linux 入口约定拿到 `sp -> argc/argv`**（实测 `argc=4`、`argv[0..3]` 逐字对上），但**无 `environ`** | 取舍（`.svcapp`）+ 已做（ELF 的 argv） |
@@ -175,10 +175,11 @@
 | 低 | `/sys` 风格可写内核属性面 | 无（`/proc` 只读） | 有需要再做 |
 
 **不打算做的**（第一类取舍，这里明确写下以免反复被当成"还没做"）：
-进程模型（`fork` / `waitpid`、COW）、动态链接与 `.so` 共享库、多用户 / uid-gid、电源管理、
+动态链接与 `.so` 共享库、多用户 / uid-gid、电源管理、
 ASLR、内核模块、包管理器、共享内存 IPC、`/sys`+热插拔、对称多核自动负载均衡
 （SMP 已有 AMP 分核与显式任务迁移；**静态 ELF 装载、Linux 入口约定、Linux 静态程序的
-系统调用 ABI（含非阻塞管道与最小一档信号）都已经做了，不在此列**）。
+系统调用 ABI（含非阻塞管道与最小一档信号）、`fork`/`wait4` 与写时复制都已经做了，
+不在此列**；`fork` 之外仍欠的是线程与抢占式信号投递）。
 
 ---
 

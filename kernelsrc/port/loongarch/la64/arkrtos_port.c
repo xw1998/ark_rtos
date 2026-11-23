@@ -636,6 +636,12 @@ int32 arkrtos_port_send_ipi(uint32 cpu)
 /* App 普通页：PLV3 ⇒ PLV0..3 都可访问 */
 #define LA_PTE_APP(pa)      (LA_PTE_V | LA_PTE_WE | LA_PTE_CCA(1u) | \
                              LA_PTE_PLV(3u) | LA_PTE_PPN(pa))
+/* App 的只读页（COW 用）：PLV3 可读写之外的一切不变，只去掉 WE。
+ * 写它走通用异常，不是重填 —— 条目 V=1、查找命中、只是 WE=0。码有两种：
+ * V=0 是 PIS(2)，V=1 而 WE=0 是 PME(4)，COW 条目正是后者（实测 QEMU 的
+ * LA64 报 4）。两种都认：内核 PLV0 经窗口写共享页时落的是同一条。 */
+#define LA_PTE_APP_RO(pa)   (LA_PTE_V | LA_PTE_CCA(1u) | \
+                             LA_PTE_PLV(3u) | LA_PTE_PPN(pa))
 /* App 的 MMIO 别名：同样 PLV3，但不缓存 */
 #define LA_PTE_APP_MMIO(pa) (LA_PTE_V | LA_PTE_WE | LA_PTE_CCA(0u) | \
                              LA_PTE_PLV(3u) | LA_PTE_PPN(pa))
@@ -1124,6 +1130,274 @@ static void la_tlb_inval_page(unsigned long va)
                      :: "r"((unsigned long)va) : "memory");
 }
 
+#if (ARKRTOS_USE_PAGING_COW == 1)
+/* ------------------------------------------------------------
+ * 写时复制（U-19b）：fork 只分享，第一次写才复制
+ * @details 两个账本 + 一条故障路径：
+ *            - s_pg_frame_ref[帧号]：这一帧有几个地址空间指着它。帧号从
+ *              ARKRTOS_QEMU_FRAME_BASE 起按 4 KB 算，一张字节表就够
+ *              （缺省 2048 帧 = 2 KB .bss）；
+ *            - s_pg_pair_pa[space][idx]：truth，与按需档完全一致；
+ *            - **共享与否不另存**：ref > 1 就是共享。多一个布尔位就多一处
+ *              能和计数对不上的地方。
+ *
+ *          fork 时把父的每一对直接指给子（ref 1→2），并把父空间那 256 条
+ *          条目里共享的那些降成只读（WE=0）——父此刻正站在窗口里执行
+ *          clone，条目还是可写的，不降就是「父照写、子看不到」，fork 语义
+ *          直接失效。第一次写命中只读条目 ⇒ Ecode=PIS（page-invalid-store）
+ *          ⇒ la_pg_cow_fault() 复制那一对、把当前空间的条目换成可写、
+ *          ertn 回到出错的那条指令。
+ *
+ *          为什么按**对**复制而不是按页：一条 PS=12 条目同时给出 lo0/lo1，
+ *          WE 位整条共用 —— 这套映射表达不出「一页可写、一页只读」。
+ *          粒度是 8 KB，语义仍然正确（多抄 4 KB，不多不少看见任何字节）。
+ * ------------------------------------------------------------ */
+
+#define LA_PG_COW_PAIR_WORDS     (2048u)   /* 8 KB / 4 */
+#define LA_PG_COW_SLOT_NONE      (0xFFFFFFFFu)
+
+static uint8  s_pg_frame_ref[ARKRTOS_QEMU_FRAME_COUNT];
+static uint32 s_pg_cow_copies;      /* 复制过多少对（诊断） */
+static uint32 s_pg_cow_faults;      /* 写故障命中多少次（诊断） */
+static uint32 s_pg_cow_shared;      /* 当前 ref > 1 的对数（诊断） */
+
+/** 物理地址 -> 帧池槽号；不在池里回 LA_PG_COW_SLOT_NONE */
+static uint32 la_pg_frame_slot(uint32 pa)
+{
+    if((pa < (uint32)ARKRTOS_QEMU_FRAME_BASE) ||
+       (pa >= ((uint32)ARKRTOS_QEMU_FRAME_BASE +
+               ((uint32)ARKRTOS_QEMU_FRAME_COUNT * 0x1000u))))
+    {
+        return LA_PG_COW_SLOT_NONE;
+    }
+    return (pa - (uint32)ARKRTOS_QEMU_FRAME_BASE) >> 12;
+}
+
+/** 某一对（8 KB）是否落在**当前任务**的栈范围内
+ *  @details 栈页在 COW 下必须私有。本内核的异常入口 eentry 第一件事就是
+ *           sp -= 256、把通用寄存器写进 App 自己的栈（见 arkrtos_context.S），
+ *           而内核在 PLV0 往只读页写是 PME —— 帧还没落地就嵌套异常，
+ *           C 处理器根本没机会救（实测：FATAL ecode=4 era 落在 eentry 里）。
+ *           所以 fork 时把栈页复制一份给子进程、父进程保持可写，两边都不
+ *           留「共享只读」的时间窗；粒度仍是 8 KB 对，语义不变。
+ *  @return 1 = 相交；0 = 不相交 / 当前任务没登记栈 / 下标越界
+ */
+static int32 la_pg_stack_pair(uint32 idx)
+{
+    extern arkrtos_task_t arkrtos_task_table[];
+    unsigned long plo = LA_WIN_VA + ((unsigned long)idx * 0x2000u);
+    unsigned long phi = plo + 0x2000u;
+    unsigned long lo;
+    unsigned long hi;
+    int32 id = arkrtos_current_task_id;
+
+    if((id <= 0) || (id > (int32)ARKRTOS_TASK_MAX_NUM) ||
+       (idx >= LA_PG_WIN_ENTRIES))
+    {
+        return 0;
+    }
+    if((arkrtos_task_table[id - 1].stack_top == 0ul) ||
+       (arkrtos_task_table[id - 1].stack_size == 0u))
+    {
+        return 0;
+    }
+    hi = arkrtos_task_table[id - 1].stack_top;
+    lo = hi - (unsigned long)arkrtos_task_table[id - 1].stack_size;
+    if((hi <= plo) || (lo >= phi))
+    {
+        return 0;
+    }
+    return 1;
+}
+
+static uint32 la_pg_ref_get(uint32 pa)
+{
+    uint32 s = la_pg_frame_slot(pa);
+
+    return (s == LA_PG_COW_SLOT_NONE) ? 0u : (uint32)s_pg_frame_ref[s];
+}
+
+static void la_pg_ref_set(uint32 pa, uint32 n)
+{
+    uint32 s = la_pg_frame_slot(pa);
+
+    if(s != LA_PG_COW_SLOT_NONE)
+    {
+        s_pg_frame_ref[s] = (uint8)((n > 255u) ? 255u : n);
+    }
+}
+
+/** 一对新帧归某个空间所有（分配之后调用一次） */
+static void la_pg_pair_own(uint32 pa)
+{
+    la_pg_ref_set(pa, 1u);
+}
+
+/** 又多一个空间指向这一对（fork 共享） */
+static void la_pg_pair_ref_up(uint32 pa)
+{
+    uint32 r = la_pg_ref_get(pa);
+
+    la_pg_ref_set(pa, r + 1u);
+    if(r == 1u)
+    {
+        s_pg_cow_shared++;
+    }
+}
+
+/** 少一个空间指向这一对；回 1 = 还有别人指着（不许还帧），0 = 现在没人了 */
+static uint32 la_pg_pair_ref_down(uint32 pa)
+{
+    uint32 r = la_pg_ref_get(pa);
+
+    if(r <= 1u)
+    {
+        la_pg_ref_set(pa, 0u);
+        return 0u;
+    }
+    la_pg_ref_set(pa, r - 1u);
+    if((r - 1u) == 1u)
+    {
+        s_pg_cow_shared--;
+    }
+    return 1u;
+}
+
+/** 8 KB 复制：故障/克隆上下文里没有 libc，也不能睡眠 */
+static void la_pg_copy_pair_words(uint32 *dst, const uint32 *src)
+{
+    uint32 i;
+
+    for(i = 0u; i < LA_PG_COW_PAIR_WORDS; i++)
+    {
+        dst[i] = src[i];
+    }
+}
+
+/** 把某一对按「可写 / 只读」装进某个空间的窗口
+ *  @details 先按 VA 撤旧条目再写新的：旧条目可能落在**别的路上**（按需
+ *           缺页是用 tlbfill 由硬件随机选路的），留着就是一条权限相反的
+ *           同名条目 —— 查找命中它的时候 COW 整条链就绕过去了。 */
+static void la_pg_install_pair(uint32 space, uint32 idx, uint32 pa, uint32 writable)
+{
+    unsigned long va = LA_WIN_VA + (idx * 0x2000u);
+    unsigned long lo0;
+    unsigned long lo1;
+#if (ARKRTOS_USE_PAGING_ASID == 1)
+    unsigned long saved = la_asid_swap(LA_PG_ASID_OF(space));
+#endif
+
+    lo0 = (writable != 0u) ? LA_PTE_APP(pa) : LA_PTE_APP_RO(pa);
+    lo1 = (writable != 0u) ? LA_PTE_APP(pa + 0x1000u) : LA_PTE_APP_RO(pa + 0x1000u);
+
+    la_tlb_inval_page(va);
+    la_tlb_write(va, 12u, LA_STLB_INDEX(va, LA_PG_WIN_WAY_OF(space)), lo0, lo1);
+
+#if (ARKRTOS_USE_PAGING_ASID == 1)
+    (void)la_asid_swap(saved);
+#endif
+}
+
+/**
+* @brief 把某一对私有化（共享则复制一份，独占则什么都不做）
+* @param space 目标空间、@param idx 对号
+* @return 0 = 现在这一对归 space 独占（条目还没换）；-1 = 没有帧 / 池空
+* @details 只改 PA 账本，不动 TLB：调用者按自己的上下文决定要不要装条目
+*          （写故障要装、内核按 PA 写（write_space）不用装）。
+*          **引用计数只在这里减** —— 其它任何地方少一个持有者都必须走
+*          la_pg_pair_ref_down()，否则帧会被提前还回池子。
+*/
+static int32 la_pg_cow_break(uint32 space, uint32 idx)
+{
+    uint32 old = s_pg_pair_pa[space][idx];
+    uint32 np  = 0u;
+    uint32 r;
+
+    if(old == 0u)
+    {
+        return -1;
+    }
+    r = la_pg_ref_get(old);
+    if(r <= 1u)
+    {
+        return 0;                       /* 独占：写自己的页，不需要复制 */
+    }
+    if(arkrtos_port_paging_frame_alloc(2u, &np) != 0)
+    {
+        return -1;                      /* 池空：如实失败，绝不半共享半可写 */
+    }
+
+    la_pg_copy_pair_words((uint32 *)(unsigned long)np,
+                          (const uint32 *)(unsigned long)old);
+    s_pg_pair_pa[space][idx] = np;
+    la_pg_pair_own(np);
+    (void)la_pg_pair_ref_down(old);
+    s_pg_cow_copies++;
+
+    arkrtos_board_puts("[LA64U] pg cow copy idx=");
+    arkrtos_board_putu(idx);
+    arkrtos_board_puts(" ref=");
+    arkrtos_board_putu(r);
+    arkrtos_board_puts("\n");
+    return 0;
+}
+
+/** CSR.BADV：通用异常里的出错地址（重填用的是 TLBRBADV，不是这个） */
+static unsigned long la_badv_read(void)
+{
+    unsigned long v = 0ul;
+
+    LA_CSRR(LA_CSR_BADV, v);
+    return v;
+}
+
+/**
+* @brief COW 写故障：把当前空间的那一对复制出来、换成可写
+* @param badv 出错地址（CSR.BADV）
+* @return 1 = 已复制并装好可写条目，调用方应 ertn 回原指令；
+*         0 = 不是 COW 能处理的情形（交给原来的故障路径）
+* @details 三条判据缺一不可：
+*            1. badv 在窗口里、对号合法；
+*            2. 这一对挂着帧，且**引用计数 > 1**（独占页上的写故障是真的
+*               权限问题，复制它只会把一个明确的报错变成静默的越权）；
+*            3. 帧池还能给出两帧。
+*          PLV0 与 PLV3 一视同仁：内核经窗口写（copy_to_user / 装载器）
+*          落在共享页上时是**同一条** PIS 故障，不拦就会停机。
+*/
+static int32 la_pg_cow_fault(unsigned long badv)
+{
+    uint32 space = s_pg_app_space;
+    uint32 idx;
+    uint32 pa;
+
+    if((badv < LA_WIN_VA) ||
+       (badv >= (LA_WIN_VA + (unsigned long)ARKRTOS_QEMU_APP_SIZE)))
+    {
+        return 0;
+    }
+    idx = (uint32)((badv - LA_WIN_VA) / 0x2000u);
+    if(idx >= LA_PG_WIN_ENTRIES)
+    {
+        return 0;
+    }
+    pa = s_pg_pair_pa[space][idx];
+    if((pa == 0u) || (la_pg_ref_get(pa) <= 1u))
+    {
+        return 0;
+    }
+
+    s_pg_cow_faults++;
+    if(la_pg_cow_break(space, idx) != 0)
+    {
+        return 0;                       /* 池空：交回原路径（杀任务） */
+    }
+
+    pa = s_pg_pair_pa[space][idx];
+    la_pg_install_pair(space, idx, pa, 1u);
+    return 1;
+}
+#endif /* ARKRTOS_USE_PAGING_COW == 1 */
+
 #if (ARKRTOS_USE_PAGING_PAGES == 1)
 /* ------------------------------------------------------------
  * 页级窗口（U-3 第二阶）：帧池的第一个真实使用方
@@ -1195,9 +1469,20 @@ static void la_pg_install_space(uint32 space)
         if(pa != 0u)
         {
             unsigned long va = LA_WIN_VA + (i * 0x2000u);
+            unsigned long lo0 = LA_PTE_APP(pa);
+            unsigned long lo1 = LA_PTE_APP(pa + 0x1000u);
 
+#if (ARKRTOS_USE_PAGING_COW == 1)
+            /* 共享的对按只读装：换回这个空间时若装成可写，第一次写就绕过
+             * COW 直接写进两个进程共用的那一帧。 */
+            if(la_pg_ref_get(pa) > 1u)
+            {
+                lo0 = LA_PTE_APP_RO(pa);
+                lo1 = LA_PTE_APP_RO(pa + 0x1000u);
+            }
+#endif
             la_tlb_write(va, 12u, LA_STLB_INDEX(va, LA_PG_WIN_WAY_OF(space)),
-                         LA_PTE_APP(pa), LA_PTE_APP(pa + 0x1000u));
+                         lo0, lo1);
         }
     }
 #else
@@ -1625,6 +1910,112 @@ int32 arkrtos_port_paging_space_clone(uint32 src, uint32 dst)
 #endif
     }
 
+#if (ARKRTOS_USE_PAGING_COW == 1)
+    /* 写时复制：一个字节都不搬，只把父的每一对指给子并把两边降成只读。
+     * 换出去的对例外（内容在属于 src 的交换槽里），照旧实体复制。 */
+    {
+        uint32 shared = 0u;
+        uint32 copied = 0u;
+        uint32 stack  = 0u;
+
+        for(i = 0u; i < LA_PG_WIN_ENTRIES; i++)
+        {
+            uint32 spa = s_pg_pair_pa[src][i];
+
+            if(spa != 0u)
+            {
+                s_pg_pair_pa[dst][i] = spa;
+                la_pg_pair_ref_up(spa);
+                shared++;
+            }
+#if (ARKRTOS_USE_PAGING_SWAP == 1)
+            else if(s_pg_pair_slot[src][i] != 0u)
+            {
+                uint32 slot = (uint32)s_pg_pair_slot[src][i] - 1u;
+                uint32 dpa = 0u;
+
+                if(arkrtos_port_paging_frame_alloc(2u, &dpa) != 0)
+                {
+                    break;
+                }
+                la_fork_copy_pair((uint32 *)(unsigned long)dpa,
+                                  s_pg_swap_area[slot]);
+                s_pg_pair_pa[dst][i] = dpa;
+                la_pg_pair_own(dpa);
+                copied++;
+            }
+#endif
+        }
+
+        if(i == LA_PG_WIN_ENTRIES)
+        {
+            /* 栈页私有化：本内核把 trap 帧压在 App 自己的栈上（eentry
+             * 第一件事就是 sp -= 256 再写帧），栈页若是「共享只读」，
+             * 这次 PLV0 写就是 PME，而帧还没落地 ⇒ 嵌套异常救不回来。
+             * 所以栈与内核栈一样**不共享**：fork 时给子复制一份，父保持
+             * 可写（上面的共享计数随后被拆回 1）。 */
+            if(src == s_pg_app_space)
+            {
+                for(i = 0u; i < LA_PG_WIN_ENTRIES; i++)
+                {
+                    if((s_pg_pair_pa[dst][i] != 0u) &&
+                       (la_pg_stack_pair(i) != 0))
+                    {
+                        if(la_pg_cow_break(dst, i) == 0)
+                        {
+                            stack++;
+                        }
+                    }
+                }
+            }
+            else
+            {
+                (void)stack;
+            }
+
+            /* 父空间此刻挂着的条目必须立刻降成只读：调用者正站在窗口里
+             * 执行 clone，那些条目还是可写的。栈对已不再共享，会被跳过。 */
+            for(i = 0u; i < LA_PG_WIN_ENTRIES; i++)
+            {
+                uint32 spa = s_pg_pair_pa[src][i];
+
+                if((spa != 0u) && (la_pg_ref_get(spa) > 1u) &&
+                   (src == s_pg_app_space))
+                {
+                    la_pg_install_pair(src, i, spa, 0u);
+                }
+            }
+
+            arkrtos_board_puts("[LA64U] pg cow fork shared=");
+            arkrtos_board_putu(shared);
+            arkrtos_board_puts(" stack=");
+            arkrtos_board_putu(stack);
+            arkrtos_board_puts(" copied=");
+            arkrtos_board_putu(copied);
+            arkrtos_board_puts(" frames=");
+            arkrtos_board_putu(arkrtos_port_paging_frame_used());
+            arkrtos_board_puts("\n");
+            return 0;
+        }
+
+        /* 回滚：共享的减一次引用（还归 src），实体复制的还帧。子空间变回
+         * 「什么都没挂」，调用方据此报 ENOMEM，父进程不受影响。 */
+        for(i = 0u; i < LA_PG_WIN_ENTRIES; i++)
+        {
+            uint32 dpa = s_pg_pair_pa[dst][i];
+
+            if(dpa != 0u)
+            {
+                if(la_pg_pair_ref_down(dpa) == 0u)
+                {
+                    (void)arkrtos_port_paging_frame_free(dpa, 2u);
+                }
+                s_pg_pair_pa[dst][i] = 0u;
+            }
+        }
+        return -3;
+    }
+#else
     for(i = 0u; i < LA_PG_WIN_ENTRIES; i++)
     {
         uint32 spa = s_pg_pair_pa[src][i];
@@ -1673,6 +2064,7 @@ int32 arkrtos_port_paging_space_clone(uint32 src, uint32 dst)
     }
 
     return 0;
+#endif /* ARKRTOS_USE_PAGING_COW */
 }
 
 /**
@@ -1715,6 +2107,16 @@ int32 arkrtos_port_paging_write_space(uint32 space, unsigned long va,
         {
             return -1;
         }
+#if (ARKRTOS_USE_PAGING_COW == 1)
+        /* 共享对：先把自己的那一份复制出来。按 PA 直写绕不过 COW ——
+         * 不复制就是往「别人也看得见」的帧里写（子进程的初始 trap 帧
+         * 正是走这条路，踩到就是父子的栈互相覆盖）。 */
+        if(la_pg_cow_break(space, idx) != 0)
+        {
+            return -1;
+        }
+        pa = s_pg_pair_pa[space][idx];
+#endif
         if(cnt > (n - done))
         {
             cnt = n - done;
@@ -1837,6 +2239,9 @@ static int32 la_pg_demand_fault(unsigned long badv)
         }
 
         s_pg_pair_pa[space][idx] = pa;
+#if (ARKRTOS_USE_PAGING_COW == 1)
+        la_pg_pair_own(pa);
+#endif
 
         if(slot != 0u)
         {
@@ -1862,15 +2267,43 @@ static int32 la_pg_demand_fault(unsigned long badv)
         }
 
         s_pg_pair_pa[space][idx] = pa;
+#if (ARKRTOS_USE_PAGING_COW == 1)
+        la_pg_pair_own(pa);
+#endif
 #endif
     }
 
     {
         unsigned long va = LA_WIN_VA + (idx * 0x2000u);
+        unsigned long lo0 = LA_PTE_APP(pa);
+        unsigned long lo1 = LA_PTE_APP(pa + 0x1000u);
+
+#if (ARKRTOS_USE_PAGING_COW == 1)
+        /* 共享的对必须**按只读**装进来。按需档切空间会把整段窗口的翻译全
+         * 丢掉（见 arkrtos_port_paging_activate），之后每一次访问都从这里
+         * 重新装条目；这里若一律装可写，COW 就只剩 fork 那一刻的一层只读，
+         * 进程切回来第一次写就绕过 COW 写进两个进程共用的帧。
+         * 栈对例外：栈页必须可写（trap 帧压在栈上），共享就地拆开。 */
+        if(la_pg_ref_get(pa) > 1u)
+        {
+            if((la_pg_stack_pair(idx) != 0) &&
+               (la_pg_cow_break(space, idx) == 0))
+            {
+                pa = s_pg_pair_pa[space][idx];
+                lo0 = LA_PTE_APP(pa);
+                lo1 = LA_PTE_APP(pa + 0x1000u);
+            }
+            else
+            {
+                lo0 = LA_PTE_APP_RO(pa);
+                lo1 = LA_PTE_APP_RO(pa + 0x1000u);
+            }
+        }
+#endif
 
         /* 这里处在重填上下文里：必须走 TLBREHI/TLBRELO + tlbfill
          * （tlbwr/tlbfill 在 ISTLBR=1 时只认 TLBR* 那一组镜像 CSR）。 */
-        la_tlb_fill_refill(va, LA_PTE_APP(pa), LA_PTE_APP(pa + 0x1000u));
+        la_tlb_fill_refill(va, lo0, lo1);
     }
 
     s_pg_demand_faults++;
@@ -2318,6 +2751,14 @@ int32 arkrtos_port_paging_space_release(uint32 space)
 
         if(pa != 0u)
         {
+#if (ARKRTOS_USE_PAGING_COW == 1)
+            if(la_pg_pair_ref_down(pa) != 0u)
+            {
+                /* 还有别的空间指着这一对：只减计数，帧留在池子里。 */
+                s_pg_pair_pa[space][i] = 0u;
+                continue;
+            }
+#endif
             if(arkrtos_port_paging_frame_free(pa, 2u) != 0)
             {
                 if(rc == 0)
@@ -4513,23 +4954,39 @@ la_frame_word *la_trap_c(la_frame_word *frame)
     }
     else
     {
-        #if (ARKRTOS_USE_PRIV == 1)
-        /* 从 PLV3 进来的非 syscall 异常 = App 越权或非法指令。
-         * 走故障恢复（重启该 App）而不是停机：一个 App 的 bug 打死整个
-         * 系统，就不是「隔离」了。PLV0 自己的异常仍然按致命处理。 */
-        if((frame[LA_FR_PRMD] & 3UL) != 0UL)
+#if (ARKRTOS_USE_PAGING_COW == 1)
+        /* 写时复制：只读条目上的写（Ecode=2 PIS）先交给 COW 复制一次。
+         * PLV0 与 PLV3 都走这里 —— 内核经窗口写（copy_to_user）落在共享
+         * 页上时是同一条故障，不拦就会停机。处理成功后落到出口结算，
+         * ERA 没有前进，ertn 自然回到出错的那条指令。 */
+        /* LoongArch 把「写只读页」报成两种码：V=0 是 PIS(2)、V=1 且 WE=0
+         * 是 PME(4)。COW 条目是后者 —— 只认 2 会把它当越权打进致命路径。 */
+        if(((ecode == 2u) || (ecode == 4u)) &&
+           (la_pg_cow_fault(la_badv_read()) != 0))
         {
-            /* 走换栈入口：故障处理会把整个任务栈重填，处理函数不能跑在
-             * 那个栈上（否则返回地址变成 0xcdcdcdcd）。不返回。 */
-            la_app_fault_switch(frame, ecode);
+            /* 已复制并装好可写条目：什么都不用改，走出口。 */
         }
-        #endif
-
-        arkrtos_port_fatal_report(estat);
-        la_fatal_dump(frame);
-        for(;;)
+        else
+#endif
         {
-            __asm__ volatile("idle 0" ::: "memory");
+            #if (ARKRTOS_USE_PRIV == 1)
+            /* 从 PLV3 进来的非 syscall 异常 = App 越权或非法指令。
+             * 走故障恢复（重启该 App）而不是停机：一个 App 的 bug 打死整个
+             * 系统，就不是「隔离」了。PLV0 自己的异常仍然按致命处理。 */
+            if((frame[LA_FR_PRMD] & 3UL) != 0UL)
+            {
+                /* 走换栈入口：故障处理会把整个任务栈重填，处理函数不能跑在
+                 * 那个栈上（否则返回地址变成 0xcdcdcdcd）。不返回。 */
+                la_app_fault_switch(frame, ecode);
+            }
+            #endif
+
+            arkrtos_port_fatal_report(estat);
+            la_fatal_dump(frame);
+            for(;;)
+            {
+                __asm__ volatile("idle 0" ::: "memory");
+            }
         }
     }
 

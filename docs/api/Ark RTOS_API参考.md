@@ -62,7 +62,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（12 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（88 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（98 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（18 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -9331,6 +9331,112 @@ op 3              ：按 VA 失效，只清这个 VA，内核不受影响 ——
 于是「只清某个 ASID 的条目」在本载体上**做不到**：想只撤一个空间的
 窗口，只能先切到它的 ASID 再按 VA 撤（撤完把当前空间补铺回来），
 这就是 activate / space_release 现在走的那条路。
+
+### `static uint32 la_pg_frame_slot(uint32 pa) {`
+
+```c
+static uint32 la_pg_frame_slot(uint32 pa) {
+```
+
+物理地址 -> 帧池槽号；不在池里回 LA_PG_COW_SLOT_NONE
+
+### `static int32 la_pg_stack_pair(uint32 idx) {`
+
+```c
+static int32 la_pg_stack_pair(uint32 idx) {
+```
+
+某一对（8 KB）是否落在**当前任务**的栈范围内
+栈页在 COW 下必须私有。本内核的异常入口 eentry 第一件事就是
+sp -= 256、把通用寄存器写进 App 自己的栈（见 arkrtos_context.S），
+而内核在 PLV0 往只读页写是 PME —— 帧还没落地就嵌套异常，
+C 处理器根本没机会救（实测：FATAL ecode=4 era 落在 eentry 里）。
+所以 fork 时把栈页复制一份给子进程、父进程保持可写，两边都不
+留「共享只读」的时间窗；粒度仍是 8 KB 对，语义不变。
+**返回**：1 = 相交；0 = 不相交 / 当前任务没登记栈 / 下标越界
+
+### `static void la_pg_pair_own(uint32 pa) {`
+
+```c
+static void la_pg_pair_own(uint32 pa) {
+```
+
+一对新帧归某个空间所有（分配之后调用一次）
+
+### `static void la_pg_pair_ref_up(uint32 pa) {`
+
+```c
+static void la_pg_pair_ref_up(uint32 pa) {
+```
+
+又多一个空间指向这一对（fork 共享）
+
+### `static uint32 la_pg_pair_ref_down(uint32 pa) {`
+
+```c
+static uint32 la_pg_pair_ref_down(uint32 pa) {
+```
+
+少一个空间指向这一对；回 1 = 还有别人指着（不许还帧），0 = 现在没人了
+
+### `static void la_pg_copy_pair_words(uint32 *dst, const uint32 *src) {`
+
+```c
+static void la_pg_copy_pair_words(uint32 *dst, const uint32 *src) {
+```
+
+8 KB 复制：故障/克隆上下文里没有 libc，也不能睡眠
+
+### `static void la_pg_install_pair(uint32 space, uint32 idx, uint32 pa, ui`
+
+```c
+static void la_pg_install_pair(uint32 space, uint32 idx, uint32 pa, uint32 writable) {
+```
+
+把某一对按「可写 / 只读」装进某个空间的窗口
+先按 VA 撤旧条目再写新的：旧条目可能落在**别的路上**（按需
+缺页是用 tlbfill 由硬件随机选路的），留着就是一条权限相反的
+同名条目 —— 查找命中它的时候 COW 整条链就绕过去了。
+
+### `static int32 la_pg_cow_break(uint32 space, uint32 idx) {`
+
+```c
+static int32 la_pg_cow_break(uint32 space, uint32 idx) {
+```
+
+**把某一对私有化（共享则复制一份，独占则什么都不做）**
+- `space`：目标空间、@param idx 对号
+**返回**：0 = 现在这一对归 space 独占（条目还没换）；-1 = 没有帧 / 池空
+只改 PA 账本，不动 TLB：调用者按自己的上下文决定要不要装条目
+（写故障要装、内核按 PA 写（write_space）不用装）。
+**引用计数只在这里减** —— 其它任何地方少一个持有者都必须走
+la_pg_pair_ref_down()，否则帧会被提前还回池子。
+
+### `static unsigned long la_badv_read(void) {`
+
+```c
+static unsigned long la_badv_read(void) {
+```
+
+CSR.BADV：通用异常里的出错地址（重填用的是 TLBRBADV，不是这个）
+
+### `static int32 la_pg_cow_fault(unsigned long badv) {`
+
+```c
+static int32 la_pg_cow_fault(unsigned long badv) {
+```
+
+**COW 写故障：把当前空间的那一对复制出来、换成可写**
+- `badv`：出错地址（CSR.BADV）
+**返回**：1 = 已复制并装好可写条目，调用方应 ertn 回原指令；
+0 = 不是 COW 能处理的情形（交给原来的故障路径）
+三条判据缺一不可：
+1. badv 在窗口里、对号合法；
+2. 这一对挂着帧，且**引用计数 > 1**（独占页上的写故障是真的
+权限问题，复制它只会把一个明确的报错变成静默的越权）；
+3. 帧池还能给出两帧。
+PLV0 与 PLV3 一视同仁：内核经窗口写（copy_to_user / 装载器）
+落在共享页上时是**同一条** PIS 故障，不拦就会停机。
 
 ### `static int32 la_pg_space_ensure(uint32 space) {`
 

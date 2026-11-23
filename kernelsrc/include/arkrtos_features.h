@@ -253,13 +253,15 @@
  *     a0 改成 0，于是父返回子 pid、子返回 0；
  *   - wait4(260) 只支持 options == 0 或 WNOHANG(1)。
  *
- * 三条硬边界（文档里逐条写死，不假装修好了）：
- *   1) fd 表 / 管道 / 信号表 / 堆游标仍是**内核全局单份**：子进程继承的是
- *      同一份，不是副本，也没有隔离；
- *   2) wait4 不能阻塞：子进程还活着而 options == 0 时回 -EAGAIN（本内核
- *      没有「阻塞在系统调用里等事件」这条通路）；
+ * 硬边界（文档里逐条写死，不假装修好了）：
+ *   1) fd 表 / 信号动作 / 信号屏蔽 / pending 按进程一份（fork 时复制父的），
+ *      管道对象与文件才是共享的并带引用计数 —— 子进程 close 不影响父进程；
+ *   2) wait4 的 options == 0 是**真阻塞**：置 WAIT + 请求切换，被唤醒后由
+ *      port 的 arkrtos_port_svc_restart() 把 ERA 退回 syscall 重放这次调用
+ *      （Linux ERESTARTSYS 的同型做法）。没有重放能力的 port 如实回 -EAGAIN；
  *   3) 子进程必须在任务槽位被复用前 reap。TCB 带一个注册代次，靠它把
  *      「同一个任务号上的新旧两个实例」区分开，晚到的那次如实报 -ECHILD。
+ *   4) 地址空间复制默认是整块克隆；ARKRTOS_USE_PAGING_COW=1 时改成写时复制。
  *
  * 要求 ARKRTOS_USE_LINUX_ABI == 1、ARKRTOS_USE_EXIT_CODE == 1、
  * ARKRTOS_USE_PAGING_PAGES == 1、ARKRTOS_USE_PAGING_DEMAND == 1（地址空间
@@ -279,6 +281,35 @@
 #endif
 #if (ARKRTOS_USE_PAGING != 1) || (ARKRTOS_USE_PAGING_PAGES != 1) || (ARKRTOS_USE_PAGING_DEMAND != 1)
 #error "ARKRTOS_USE_LINUX_FORK=1 requires ARKRTOS_USE_PAGING_PAGES=1 and ARKRTOS_USE_PAGING_DEMAND=1"
+#endif
+#endif
+
+/* U-19b 写时复制：0 = 关（fork 把父空间逐对实体拷贝，与打开本开关之前逐字节
+ * 相同），1 = fork 只把父空间挂着的每一对 8 KB 指给子空间（引用计数 1 变 2）、
+ * 把两边的 TLB 条目降成只读；第一次写命中只读条目时由 la_pg_cow_fault()
+ * 复制那一对并换成可写。引用计数归零之前不还帧。
+ *
+ * 三条与关档不同的语义（都是 fork 本来就该有的，不是"放宽"）：
+ *   - 复制粒度是这个端口的最小映射单位**一对 8 KB**（一条 PS=12 条目同时
+ *     给出 lo0/lo1，WE 位整条共用，拆不出"这一页可写、那一页只读"）；
+ *   - 换出去（swap 档）的对不参与共享：内容在属于某个空间的交换槽里，
+ *     fork 遇到这种对退化成实体复制；
+ *   - 复制失败（帧池空）如实走回原来的故障路径（杀任务），绝不装一条半成品
+ *     的可写条目 —— 那会让两个进程真的共享一页，比崩溃更坏。
+ *
+ * 要求 ARKRTOS_USE_LINUX_FORK == 1 与 ARKRTOS_USE_PAGING_DEMAND == 1。
+ * 由 Kconfig 选择（config ARKRTOS_USE_PAGING_COW）。
+ * 默认关：关档时不编译引用计数表、故障处理与任何一行日志，fork 仍是整块
+ * 克隆，镜像与行为零变化。 */
+#ifndef ARKRTOS_USE_PAGING_COW
+#define ARKRTOS_USE_PAGING_COW          0
+#endif
+#if (ARKRTOS_USE_PAGING_COW == 1)
+#if (ARKRTOS_USE_LINUX_FORK != 1)
+#error "ARKRTOS_USE_PAGING_COW=1 requires ARKRTOS_USE_LINUX_FORK=1 (COW exists only for fork)"
+#endif
+#if (ARKRTOS_USE_PAGING_DEMAND != 1)
+#error "ARKRTOS_USE_PAGING_COW=1 requires ARKRTOS_USE_PAGING_DEMAND=1"
 #endif
 #endif
 

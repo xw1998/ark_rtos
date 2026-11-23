@@ -122,8 +122,9 @@ row.
 
 `execve` replaces the image of the current task in place (section 5), and
 `fork` copies the address space into a second task (section 8). What is still
-missing is the rest of the *process* model: no copy-on-write, no threads, no
-`dup2`, no job control; the fd table is per-process only in the fork tier.
+missing is the rest of the *process* model: no threads, no `dup2`, no job
+control; copy-on-write is available behind `ARKRTOS_USE_PAGING_COW` (section
+8.2, stack pages private), and the fd table is per-process only in the fork tier.
 
 Dynamic linking no longer belongs in this list: with `ARKRTOS_USE_DYNLOAD` on,
 the kernel loads a `PT_INTERP` interpreter and ships a minimal in-tree
@@ -468,6 +469,55 @@ the sleep point. That is semantically equivalent (`wait4` is an idempotent scan)
 but every wakeup rescans the child table, and no other blocking syscall (empty
 `read`, `futex`) is wired to this path.
 
+### 8.2 Copy-on-write (`ARKRTOS_USE_PAGING_COW`, 2026-11-23, QEMU LA64)
+
+By default `fork` still clones the whole address space pair by pair. With
+`ARKRTOS_USE_PAGING_COW` on, `space_clone()` moves no bytes at all: every
+resident 8 KB pair of the parent is pointed at by the child (refcount 1->2) and
+the parent's shared entries are dropped to read-only (WE=0). Whichever side
+writes first hits a read-only entry, `la_pg_cow_fault()` copies that pair,
+installs a writable entry and `ertn`s back to the faulting instruction. The
+boundaries are fixed:
+
+| Item | Status |
+|---|---|
+| Granularity | **8 KB pair**: one PS=12 entry carries lo0/lo1 and a single WE bit, so "one page writable, one read-only" cannot be expressed; we copy 4 KB more, never show one byte more |
+| Refcount | per 4 KB frame (the first-fit frame allocator does not guarantee 8 KB alignment); the even frame number of a pair is its handle; **`ref > 1` means shared**, there is no separate boolean (an extra bit is one more place to disagree with the count) |
+| Read-only entry | `LA_PTE_APP_RO` = WE cleared; both fault codes are accepted: V=0 is PIS(2), **V=1 with WE=0 is PME(4)** (QEMU LA64 reports 4), and PLV0 is treated exactly like PLV3 |
+| Stack pages | **forced private**: at fork the child gets an immediate copy (`stack=<n>` in the log counts those pairs). See below; `copied=0` still holds (`copied` only counts swap-slot materialisation) |
+| Refill | the demand tier drops the whole window translation on every space switch, so a shared pair must be refilled **read-only** - otherwise COW survives only for the instant of the fork |
+| Ceiling | without swap, COW is only "deferred copy": once both sides have written, both hold real frames, and 2 address spaces x 2 MB are still bounded by the 2048-frame pool |
+
+**Why the stack must be private.** The exception entry `eentry` starts with
+`addi.d $sp,$sp,-256` and writes the general registers into that frame - **the
+trap frame lives on the App's own stack** (unlike Linux, which switches to a
+kernel stack first). If the stack pair were shared read-only, that PLV0 write is
+a PME and **the frame has not landed yet**: the C handler (`la_trap_c`) never
+runs, the nested exception stops the machine (measured: `FATAL ecode=0x4` with
+ERA inside `eentry`, followed by `[STK] ... stack bottom flag overwritten`). So
+fork immediately copies every pair overlapping the task stack for the child and
+leaves the parent writable; neither side ever has a "shared read-only" window.
+This is not a tunable: it exists whenever COW is on, and removing it requires
+giving traps their own kernel stack first.
+
+Readouts (`tools/fork_gate.py`, fork+COW tier): 26 checks all `ok`, 5 of them in
+the COW section - `cow child saw pre-fork values (bits=3) -> 3 ok` (the child
+still sees the pre-fork values) and `parent cow write kept -> 48879 ok` (the
+parent's write stays in its own copy). Four kernel-log assertions: at least one
+`[LA64U] pg cow fork shared=<n> stack=<n> copied=0 frames=<n>` with `shared>=1`,
+`stack>=1`, `copied==0`; at least one `[LA64U] pg cow copy idx=<n> ref=2`; no
+copy line with `ref=1` (copying an unshared pair is moving bytes for nothing);
+and the unrelated demos still intact. The gate runs two rounds (fork tier 21
+checks, then fork+COW tier 26 checks) and **never removes the default
+whole-clone path from testing**.
+
+Two real root causes were found here, both invisible to the compiler and to
+static checks: (1) the demand tier drops all window translations on a space
+switch, so a refill that always installs writable leaves COW alive only for the
+instant of the fork (the symptom was the parent's globals being dirtied by the
+child, with not a single `pg cow fault` printed); (2) writing a read-only page
+is **PME(4)**, not PIS(2), and accepting only 2 pushed it into the fatal path.
+
 ## 9 Switch and zero footprint
 
 `ARKRTOS_USE_LINUX_ABI` (features header + Kconfig), default **0**, and
@@ -479,6 +529,12 @@ fork symbols exist. With the switch off the whole
 `arkrtos_port_linux_syscall_num`, and `arkrtos_autoconf.h` records the 0. The
 gate measures this in both directions (the off-profile `.o` must have an empty
 symbol table).
+
+`ARKRTOS_USE_PAGING_COW` (section 8.2) is the third switch, default **0**, with
+`#error` guards on both of its prerequisites (fork and the demand tier). With it
+off the refcount table and every `la_pg_cow_*` helper are not compiled and
+`LA_PTE_APP_RO` is not emitted, so the default footprint and behaviour are
+unchanged - measured by the two-round gate, not merely declared.
 
 ## 10 Gate
 
@@ -496,7 +552,9 @@ still intact), and parser-selfcheck (eight deliberately broken logs must each be
 rejected).
 
 The fork tier has its own gate, `tools/fork_gate.py` (invoked as `fork` from
-`ci_gate`, 9 items): default-off, kconfig-wired (all four `depends on`), the four
+`ci_gate`, 15 items; it runs the fork and fork+COW tiers one after the other, so
+build / qemu-readout / parser-selfcheck each appear twice): default-off,
+kconfig-wired (all four `depends on`), the four
 `#error` guards in features.h, off-zero-symbols (RV32 `linux_abi.o` has no
 `lx_clone`/`lx_wait4`/`s_child`; LA64 `elf`/`port`/`paging` have no fork symbols),
 compile-on (four TUs plus the fixture), build, qemu-readout (21 `[fork]` checks
@@ -504,9 +562,12 @@ all `ok`, different parent/child pids, PASS line, `exit code 0`, hello/FS and th
 other Linux fixtures still intact; the three new readouts - blocking `wait4`
 really waited >= 40 ms, the parent read end still read 3 bytes after the child
 closed its own copy, the SIGCHLD handler really ran - are checked one by one),
-parser-selfcheck (nine broken logs rejected) and restore-default (the build
-directory is returned to the default tier so a later `make` does not reuse
-fork-tier objects).
+parser-selfcheck (nine broken logs rejected; the COW tier adds four more: a lost
+bit in the child mask, a lost parent write, all copy lines removed, and bytes
+moved at fork time) and restore-default (the build directory is returned to the
+default tier so a later `make` does not reuse fork-tier objects). The COW round
+additionally requires 26 checks, `shared>=1 / stack>=1 / copied=0`, at least one
+`pg cow copy ... ref=2`, and no `ref=1` copy line.
 
 ## 11 Three real bugs and one readout trap found on the way
 
@@ -544,11 +605,13 @@ call is replayed after the wakeup - it is not an interrupts-off spin. Dynamic li
 own switch (`ARKRTOS_USE_DYNLOAD`) and a minimal in-tree loader, but running glibc
 binaries is still out of reach. Fork exists (section 8): per-process fd tables
 with inheritance, cross-task `SIGCHLD` and a blocking `wait4` all have QEMU LA64
-readouts; still absent are threads (`CLONE_VM`/`CLONE_THREAD` are refused),
-copy-on-write, preemptive signal delivery and `dup2`-style redirection.
+readouts, and copy-on-write now exists too (`ARKRTOS_USE_PAGING_COW`, section
+8.2, default off); still absent are threads (`CLONE_VM`/`CLONE_THREAD` are
+refused), preemptive signal delivery and `dup2`-style redirection.
 
 `execve` gives "replace this task's image" and `fork` gives "a second task with
 its own address-space copy". Both exist, but do not read this as a full process
 model: scheduling and priorities are still kernel-global, the fd table is
-per-process only in the fork tier (kernel-global by default), and there is no
-COW, no threads and no job control.
+per-process only in the fork tier (kernel-global by default), copy-on-write
+exists only in the `ARKRTOS_USE_PAGING_COW` tier (with private stack pages), and
+there are no threads and no job control.

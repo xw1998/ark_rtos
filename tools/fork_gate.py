@@ -31,8 +31,10 @@
      `arkrtos_elf_fork` / `arkrtos_port_paging_space_clone` /
      `arkrtos_paging_space_clone`。
   C. 开档编得过：LA64 真板级 + `-DARKRTOS_USE_LINUX_FORK=1
-     -DARKRTOS_USE_PAGING_DEMAND=1`，四个内核 TU 与夹具本身全编得过。
-  D. QEMU 真读数：`[fork]` 的 21 条 check 全 ` ok`（一条 FAIL 都不许）、
+     -DARKRTOS_USE_PAGING_DEMAND=1`，五个内核 TU 与夹具本身全编得过；
+     再加一档 `-DARKRTOS_USE_PAGING_COW=1` 同样要全编得过。
+  D. QEMU 真读数（两档各跑一遍）：默认 fork 档 `[fork]` 的 21 条 check、
+     fork+COW 档 26 条 check 全 ` ok`（一条 FAIL 都不许）、
      `PASS: child ran in its own space, exit 42 reaped`、`exit code 0`；
      `[fork] parent pid=` 与 `[fork] child pid=` 两个数必须不同；并且同一次
      启动里 hello / FS / 其余 Linux 夹具的读数仍在（新开关不许把别人的演示
@@ -40,6 +42,12 @@
        - `blocking wait4 blocked >= 40 ms -> 1 ok`（父真的等过，不是立即返回）
        - `parent read end survived child close -> 3 ok`（fd 表是每进程一份）
        - `SIGCHLD handler ran -> 1 ok`（跨任务信号真的投到了父进程）
+     COW 档另加四类内核日志断言：至少一条 `[LA64U] pg cow fork shared=<n>
+     stack=<n> copied=0 frames=<n>`（共享了、栈页已私有化、一个字节都没搬）、至少一条
+     `[LA64U] pg cow copy idx=<n> ref=2`（写故障时真复制了）、不许有
+     `ref=1` 的 copy 行（没共享也去复制就是白搬）、以及
+     `cow child saw pre-fork values (bits=3) -> 3 ok`（子进程看到的仍是
+     fork 前的值，父改的是它自己那份）。
   E. 解析器自检：把合成坏日志喂给同一个判据（去掉 PASS、改退出码、插 FAIL、
      少一条 check、父子 pid 改成相同、去掉 exec rc=0），每种坏法都必须判红。
 
@@ -51,7 +59,8 @@
 
 不覆盖：vfork / CLONE_VM 线程（无共享地址空间，一律 -EINVAL）、CLONE_FILES
 （每进程 fd 表是 fork 语义的一部分，共享 fd 表这种形态本门禁不为它背书）、
-写时复制（本版本的地址空间复制是装载期的整块克隆，不是 COW）。
+MAP_SHARED 匿名共享页（COW 只管「fork 之后各写各的」这一半；显式共享要另外
+做，见 docs/MMU进程模型与ELF装载.md）。
 
 用法
 ----
@@ -77,6 +86,10 @@ BUILD_DIR = os.path.join(ROOT, "build", "qemu_loongarch64")
 ELF_NAME = "ark_qemu_la64.elf"
 
 FORK_FLAGS = ["-DARKRTOS_USE_LINUX_FORK=1", "-DARKRTOS_USE_PAGING_DEMAND=1"]
+# COW 档 = fork 档 + 写时复制开关。本门禁跑两遍：先默认 fork 档（21 条），
+# 再 fork+COW 档（26 条 + 内核 COW 日志）。绝不把 FORK_FLAGS 直接改成带
+# COW —— 那样默认 fork 路径（整块克隆）就再也没被测过了。
+COW_FLAGS = FORK_FLAGS + ["-DARKRTOS_USE_PAGING_COW=1"]
 
 LA64_FALLBACKS = [
     "D:/LoongIDE/la64-tool/bin/loongarch64-newlib-elf-gcc.exe",
@@ -118,6 +131,9 @@ SIGN_KEY_HEADER = """#ifndef ARKRTOS_SIGN_KEY_LOCAL_H
 #   第三段（跨任务 SIGCHLD）4 条：装 handler、handler 被调到、信号号 17、
 #   回收退出码 9 —— 合计 21 条。
 EXPECT_FORK_CHECKS = 21
+# COW 段多 5 条：pipe2、clone>0、子被 reap、子看到 fork 前的值（位掩码 3）、
+# 父自己的写还在。合计 26 条。
+EXPECT_COW_CHECKS = 26
 
 FAILS = []
 PASSES = []
@@ -325,8 +341,9 @@ def check_off_zero_symbols(rv32, la64, nm, key_dir):
 
 # ---------------------------------------------------------------- C 开档编得过
 
-def check_compile_on(la64, key_dir):
-    flags = LA64_ARCH + COMMON + board_flags("qemu_loongarch64", FORK_FLAGS) + [
+def check_compile_on(la64, key_dir, extra=None, tag="fork"):
+    defs = FORK_FLAGS + list(extra or [])
+    flags = LA64_ARCH + COMMON + board_flags("qemu_loongarch64", defs) + [
         "-I" + key_dir,
         "-Ikernelsrc/components/mdk_trace",
         "-Ikernelsrc/shell",
@@ -352,7 +369,7 @@ def check_compile_on(la64, key_dir):
         rc, out = run(la64, flags + [rel])
         if rc != 0:
             bads.append("%s：\n%s" % (rel, out[-400:]))
-    prog = run(la64, LA64_ARCH + [
+    prog = run(la64, LA64_ARCH + list(extra or []) + [
         "-O2", "-Wall", "-ffreestanding", "-fno-common",
         "-nostdlib", "-nostartfiles", "-fno-builtin", "-fsyntax-only",
         "example/qemu_loongarch64/elf/linux_fork.c",
@@ -360,17 +377,18 @@ def check_compile_on(la64, key_dir):
     if prog[0] != 0:
         bads.append("elf/linux_fork.c：\n%s" % prog[1][-400:])
     if bads:
-        bad("compile-on", "开档编不过 —— " + bads[0])
+        bad("compile-on", "开档编不过（%s）—— " % tag + bads[0])
     else:
-        ok("compile-on", "6 个 TU 在 LA64 真板级 + fork 档下全编过（含夹具本身）")
+        ok("compile-on", "6 个 TU 在 LA64 真板级 + %s 档下全编过（含夹具本身）" % tag)
 
 
 # ---------------------------------------------------------------- D 真读数
 
-def build_image():
+def build_image(flags=None):
+    flags = FORK_FLAGS if flags is None else flags
     log = os.path.join(tempfile.gettempdir(), "ark_fork_build.log")
     env = dict(os.environ)
-    env["EXTRA_CFLAGS"] = " ".join(FORK_FLAGS)
+    env["EXTRA_CFLAGS"] = " ".join(flags)
     with open(log, "wb") as f:
         # 先 clean：make 不跟踪 EXTRA_CFLAGS，上一档留下的 .o 会让这一次只做
         # 链接，于是镜像里根本没有 fork —— 那是本门禁最想抓的假绿。
@@ -448,14 +466,16 @@ def run_qemu(qemu, seconds):
     return read_text_bytes(data)
 
 
-def judge(text):
+def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False):
     lines = text.replace("\r\n", "\n").splitlines()
 
     def count(pred):
         return sum(1 for ln in lines if pred(ln))
 
     fk_ok = count(lambda s: s.startswith("[fork] ") and s.rstrip().endswith(" ok"))
-    fk_fail = count(lambda s: s.startswith("[fork] ") and "FAIL" in s)
+    # 汇总行 `[fork] FAIL: N checks failed` 不是一条 check，别把它算进去
+    fk_fail = count(lambda s: s.startswith("[fork] ") and "FAIL" in s
+                    and not s.startswith("[fork] FAIL:"))
     passline = count(lambda s: s.startswith(
         "[fork] PASS: child ran in its own space, exit 42 reaped"))
     exitline = count(lambda s: re.search(
@@ -473,8 +493,8 @@ def judge(text):
         problems.append("缺 `[fork] exec rc=0`（装载器没接受夹具）")
     if fk_fail != 0:
         problems.append("有 %d 条 check 打了 FAIL" % fk_fail)
-    if fk_ok != EXPECT_FORK_CHECKS:
-        problems.append("check 通过条数 %d != %d" % (fk_ok, EXPECT_FORK_CHECKS))
+    if fk_ok != expect_checks:
+        problems.append("check 通过条数 %d != %d" % (fk_ok, expect_checks))
     # 三条新读数必须逐条出现：只比总条数时，换一个夹具（少写一条、多写一条）
     # 仍可能凑出同一个数，那是假绿。
     req = {
@@ -482,6 +502,11 @@ def judge(text):
         "parent read end survived child close -> 3 ok": "fd 表不是每进程一份（父读端被子关掉）",
         "SIGCHLD handler ran -> 1 ok": "跨任务 SIGCHLD 没投递到父进程",
     }
+    if cow:
+        req["cow child saw pre-fork values (bits=3) -> 3 ok"] = \
+            "COW 没生效（子看到了父 fork 之后的写）"
+        req["parent cow write kept -> 48879 ok"] = \
+            "父进程自己的写没落到自己那份页"
     for line, why in req.items():
         if count(lambda s2, t=line: s2.strip() == "[fork] " + t) != 1:
             problems.append("缺 `[fork] %s` —— %s" % (line, why))
@@ -496,6 +521,34 @@ def judge(text):
     if m_par and m_chi and m_par.group(1) == m_chi.group(1):
         problems.append("父子 pid 相同（%s）—— 这不是 fork" % m_par.group(1))
 
+    if cow:
+        # 内核日志证明 fork 只挂引用、栈页已私有化、一个字节都没搬，
+        # 且复制只在写故障时发生。注意：上面 text 可能带 \r\n，$ 匹配不到
+        # 行尾的 \r —— 先归一化再跑正则（否则有日志也报「缺日志」）。
+        nl = text.replace("\r\n", "\n")
+        shares = re.findall(
+            r"^\[LA64U\] pg cow fork shared=(\d+) stack=(\d+) copied=(\d+) frames=(\d+)$",
+            nl, re.M)
+        if not shares:
+            problems.append("缺 `[LA64U] pg cow fork shared=<n> stack=<n> copied=0 frames=<n>`"
+                            "（fork 没走 COW 路径）")
+        else:
+            broke = [t for t in shares if t[2] != "0" or int(t[0]) < 1]
+            if broke:
+                problems.append("COW fork 日志不对（shared=%s stacked=%s copied=%s）："
+                                "应为 shared>=1 且 copied=0"
+                                % (broke[0][0], broke[0][1], broke[0][2]))
+            nopriv = [t for t in shares if int(t[1]) < 1]
+            if nopriv:
+                problems.append("栈页没有私有化（stack=%s）—— trap 帧压在栈上，"
+                                "栈页必须留可写" % nopriv[0][1])
+        copies = re.findall(r"^\[LA64U\] pg cow copy idx=(\d+) ref=(\d+)$", nl, re.M)
+        if not copies:
+            problems.append("缺 `[LA64U] pg cow copy idx=<n> ref=2`"
+                            "（一次写时复制都没发生，COW 等于没接线）")
+        elif any(ref == "1" for _i, ref in copies):
+            problems.append("出现 ref=1 的 copy 行（没共享也去复制，白搬字节）")
+
     # 新开关不许把别人的演示搞坏。
     for tag, name in (("[linux] PASS", "Linux ABI 夹具"),
                       ("[FS] PASS", "ramfs 自测"),
@@ -506,10 +559,10 @@ def judge(text):
     if problems:
         return False, problems
     return True, ["%d 条 check 全 ok、PASS 行与 exit code 0 都在，父子 pid 不同（%s != %s），旁路演示未受影响"
-                  % (EXPECT_FORK_CHECKS, m_par.group(1), m_chi.group(1))]
+                  % (expect_checks, m_par.group(1), m_chi.group(1))]
 
 
-def self_check(good_text):
+def self_check(good_text, cow=False):
     """把好日志的九种坏法喂回判据，每一种都必须判红，否则解析器是空转。"""
     g = good_text.replace("\r\n", "\n")
     mutations = {
@@ -535,13 +588,30 @@ def self_check(good_text):
             "[fork] SIGCHLD handler ran -> 1 ok",
             "[fork] SIGCHLD handler ran -> 0 FAIL (want 1)"),
     }
+    if cow:
+        mutations.update({
+            "COW 位掩码丢一位": lambda s: s.replace(
+                "[fork] cow child saw pre-fork values (bits=3) -> 3 ok",
+                "[fork] cow child saw pre-fork values (bits=3) -> 1 FAIL (want 3)"),
+            "COW 父写丢失": lambda s: s.replace(
+                "[fork] parent cow write kept -> 48879 ok",
+                "[fork] parent cow write kept -> 0 FAIL (want 48879)"),
+            # 真日志里有多条 copy 行：只删一条仍能通过判据，那不是坏样本。
+            # 整类删光才是「一次写时复制都没发生」的形态。
+            "缺 cow copy 行": lambda s: re.sub(
+                r"^\[LA64U\] pg cow copy idx=\d+ ref=\d+$\n", "", s, flags=re.M),
+            "fork 时搬了字节": lambda s: re.sub(
+                r"^(\[LA64U\] pg cow fork shared=\d+ stack=\d+) copied=0",
+                r"\1 copied=2",
+                s, count=1, flags=re.M),
+        })
     missed = []
     for name, fn in mutations.items():
         mutated = fn(g)
         if mutated == g:
             missed.append("%s（坏样本没改到东西）" % name)
             continue
-        passed, _ = judge(mutated)
+        passed, _ = judge(mutated, EXPECT_COW_CHECKS if cow else EXPECT_FORK_CHECKS, cow)
         if passed:
             missed.append(name)
     return missed
@@ -581,37 +651,50 @@ def main(argv):
         check_off_zero_symbols(rv32, la64, nm, key_dir)
     if la64:
         check_compile_on(la64, key_dir)
+        check_compile_on(la64, key_dir, ["-DARKRTOS_USE_PAGING_COW=1"], "fork+cow")
 
     if qemu:
-        if not a.no_build:
-            built, why = build_image()
-            if not built:
-                bad("build", "make 失败：\n%s" % why)
-            else:
-                ok("build", "make -f %s EXTRA_CFLAGS=\"%s\" 通过"
-                   % (MAKEFILE, " ".join(FORK_FLAGS)))
-        if os.path.isfile(os.path.join(BUILD_DIR, ELF_NAME)):
+        # 两档各跑一遍：默认 fork（21 条）与 fork+COW（26 条 + 内核 COW 日志）。
+        # 每次都要先 clean（make 不跟踪 EXTRA_CFLAGS），否则上一次的 .o 会让
+        # 这一次只做链接，镜像里根本没有这一档的代码 —— 本门禁最想抓的假绿。
+        rounds = [
+            (FORK_FLAGS, EXPECT_FORK_CHECKS, False, "fork"),
+            (COW_FLAGS, EXPECT_COW_CHECKS, True, "fork+cow"),
+        ]
+        if a.no_build:
+            rounds = rounds[1:]
+        for flags, nchk, cow, tag in rounds:
+            if not a.no_build:
+                built, why = build_image(flags)
+                if not built:
+                    bad("build", "[%s] make 失败：\n%s" % (tag, why))
+                    continue
+                ok("build", "[%s] make -f %s EXTRA_CFLAGS=\"%s\" 通过"
+                   % (tag, MAKEFILE, " ".join(flags)))
+            if not os.path.isfile(os.path.join(BUILD_DIR, ELF_NAME)):
+                bad("qemu-run", "[%s] 找不到 %s（先编一次，或去掉 --no-build）"
+                    % (tag, ELF_NAME))
+                continue
             text = run_qemu(qemu, a.seconds)
             if text is None:
-                bad("qemu-run", "QEMU 没写出串口（%s 秒内）" % a.seconds)
-            else:
-                passed, notes = judge(text)
-                if passed:
-                    ok("qemu-readout", notes[0])
-                    missed = self_check(text)
-                    if missed:
-                        bad("parser-selfcheck", "这些坏样本没被判红：%s" % "、".join(missed))
-                    else:
-                        ok("parser-selfcheck",
-                           "9 种坏法（缺 PASS / 错退出码 / 多 FAIL / 少 check / 父子同号 / 缺 exec / 阻塞读数坏 / 读端坏 / SIGCHLD 坏）全被判红")
+                bad("qemu-run", "[%s] QEMU 没写出串口（%s 秒内）" % (tag, a.seconds))
+                continue
+            passed, notes = judge(text, nchk, cow)
+            if passed:
+                ok("qemu-readout", "[%s] %s" % (tag, notes[0]))
+                missed = self_check(text, cow)
+                if missed:
+                    bad("parser-selfcheck",
+                        "[%s] 这些坏样本没被判红：%s" % (tag, "、".join(missed)))
                 else:
-                    bad("qemu-readout", "；".join(notes))
-                    bad("parser-selfcheck", "读数没过，自检无从谈起")
-                if a.keep:
-                    tail = "\n".join(text.replace("\r\n", "\n").splitlines()[-40:])
-                    print("\n---- 串口末尾 ----\n%s\n------------------" % tail)
-        else:
-            bad("qemu-run", "找不到 %s（先编一次，或去掉 --no-build）" % ELF_NAME)
+                    ok("parser-selfcheck",
+                       "[%s] 坏法（含 COW 专属）全被判红" % tag)
+            else:
+                bad("qemu-readout", "[%s] %s" % (tag, "；".join(notes)))
+                bad("parser-selfcheck", "[%s] 读数没过，自检无从谈起" % tag)
+            if a.keep:
+                tail = "\n".join(text.replace("\r\n", "\n").splitlines()[-40:])
+                print("\n---- 串口末尾（%s） ----\n%s\n------------------" % (tag, tail))
 
         good, why = restore_default_build()
         if not good:
