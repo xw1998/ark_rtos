@@ -23,7 +23,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（85 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（90 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -46,7 +46,7 @@
 - [kernelsrc/include/arkrtos_shell_auth.h](#kernelsrcincludearkrtos_shell_authh)（5 项）
 - [kernelsrc/include/arkrtos_sign.h](#kernelsrcincludearkrtos_signh)（10 项）
 - [kernelsrc/include/arkrtos_smp.h](#kernelsrcincludearkrtos_smph)（12 项）
-- [kernelsrc/include/arkrtos_smp_sched.h](#kernelsrcincludearkrtos_smp_schedh)（15 项）
+- [kernelsrc/include/arkrtos_smp_sched.h](#kernelsrcincludearkrtos_smp_schedh)（17 项）
 - [kernelsrc/include/arkrtos_softbus.h](#kernelsrcincludearkrtos_softbush)（5 项）
 - [kernelsrc/include/arkrtos_spin.h](#kernelsrcincludearkrtos_spinh)（10 项）
 - [kernelsrc/include/arkrtos_svc_abi.h](#kernelsrcincludearkrtos_svc_abih)（4 项）
@@ -62,7 +62,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（12 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（109 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（117 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（18 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -100,7 +100,7 @@
 - [kernelsrc/src/arkrtos_mpu.c](#kernelsrcsrcarkrtos_mpuc)（1 项）
 - [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（27 项）
 - [kernelsrc/src/arkrtos_smp.c](#kernelsrcsrcarkrtos_smpc)（1 项）
-- [kernelsrc/src/arkrtos_smp_sched.c](#kernelsrcsrcarkrtos_smp_schedc)（1 项）
+- [kernelsrc/src/arkrtos_smp_sched.c](#kernelsrcsrcarkrtos_smp_schedc)（2 项）
 - [kernelsrc/src/arkrtos_task.c](#kernelsrcsrcarkrtos_taskc)（7 项）
 - [kernelsrc/src/arkrtos_tickless.c](#kernelsrcsrcarkrtos_ticklessc)（1 项）
 - [kernelsrc/src/arkrtos_vfs_lfs.c](#kernelsrcsrcarkrtos_vfs_lfsc)（3 项）
@@ -4166,6 +4166,91 @@ App UART 别名、帧池），并换掉 TLBRENTRY 指向本核自己的重填
 与「没打开」长得一样，只有读回能把它们分开。
 > 说明：必须在中断关闭时调用（写 CSR 与重放条目之间不能被节拍打断）。
 
+### `int32 arkrtos_port_paging_install_space_window(uint32 space);`
+
+```c
+int32 arkrtos_port_paging_install_space_window(uint32 space);
+```
+
+**在**当前核**上把某个地址空间铺进 App 窗口（R3：跨核共享 VA）**
+- `space`：0 .. arkrtos_port_paging_space_count()-1
+**返回**：0 = 已铺好且读回首尾两页自证通过
+-1 = 空间号越界
+-2 = 本档没有页级窗口（静态 PS=20 窗口在次核快照里已带着）
+-3 = 帧池拒绝（该空间还没拿到那 2 MB；半张窗口不许留）
+-4 = 按需档不支持（次核缺页路径未验证）
+-5 = 铺完读回对不上（「装上了但映射不对」与「没装」分开报）
+与 arkrtos_port_paging_activate() 的分工：那个走引导核的切换
+路径并更新 s_pg_app_space；这个只写当前核的 TLB 条目（ASID 档
+下连同 CSR.ASID），不碰引导核的记账。次核切到用户任务前调用。
+边界：次核拿到的是「此刻的条目」，引导核之后的 COW / 换空间 /
+mprotect 重写它看不到 —— 那是 R4（失效回执）的事。
+
+### `int32 arkrtos_port_paging_va_in_window(unsigned long va, uint32 len);`
+
+```c
+int32 arkrtos_port_paging_va_in_window(unsigned long va, uint32 len);
+```
+
+**这段地址是不是落在 App 窗口 VA 里（R3）**
+- `va`：起始 VA；len 长度（字节）
+**返回**：1 = 整段都在窗口里（访问它要经窗口翻译）；0 = 不在 / 跨出窗口 /
+本档的窗口是恒等映射（PAGES=0，装不装都一样）
+用途只有一个：决定「切到这个任务之前要不要装窗口」。判据不是
+特权级而是**地址**——栈在窗口里的特权任务同样要装窗口，否则它
+的每一次压栈都落在别的空间的物理页上。
+
+### `int32 arkrtos_port_paging_relocate_frame(uint32 space, void *frame, un`
+
+```c
+int32 arkrtos_port_paging_relocate_frame(uint32 space, void *frame, unsigned long stack_top, void *entry);
+```
+
+**在目标空间里重造一份**未运行过的**任务初始帧（R3）**
+- `space`：任务要绑定到的空间号
+- `frame`：帧起始（task->stack_ptr；不在 App 窗口里时是空操作）
+- `stack_top`：任务的栈顶（TCB 里的 stack_top）
+- `entry`：任务的入口（TCB 里的 entry）
+**返回**：0 = 已经在对的位置（或不需要动）；+1 = 这不是栈顶那一份初始帧，
+看过了、一个字都没动（fork 的子进程就是这种）；
+-1 = 参数/空间号非法；-3 = 帧池拒绝；-5 = 装窗口失败；
+-6 = 帧重造好了但恢复原窗口失败（必须当失败读数）
+任务注册时构造初始帧是「按 stack_top 直接写」的，若该栈落在
+App 窗口 VA 上而此刻窗口装的是别的空间，这一写就进了别的物理页。
+任务第一次被恢复时 ERA/PRMD 是错的，ertn 跳到垃圾地址。
+重造而不是搬字节：注册那一写本来就落在错的页上，没有可搬的内容；
+初始帧的全部内容就是 stack_init 写的那四个槽，其余全零。
+只在页级窗口档有实际动作；静态 PS=20 窗口是恒等映射，返回 0。
+
+### `void arkrtos_port_frame_apply_priv(void *frame, uint32 is_priv);`
+
+```c
+void arkrtos_port_frame_apply_priv(void *frame, uint32 is_priv);
+```
+
+**把一个特权级写进任意一份栈帧（R3：次核切换用）**
+- `frame`：帧起始（各架构自己的帧布局）
+- `is_priv`：1 = 恢复成特权态（PLV0 / Thread privileged），0 = 用户态
+与 arkrtos_port_set_thread_priv() 不同：那个写的是「下一次引导核
+切换要用的」全局状态，这个直接写进交出去的那一帧。帧可能落在
+App 窗口里，调用方必须已经装好该帧所属空间。
+
+### `void arkrtos_port_frame_apply_priv_auto(void *frame, uint32 want_user)`
+
+```c
+void arkrtos_port_frame_apply_priv_auto(void *frame, uint32 want_user);
+```
+
+**按「帧自己的返回地址」决定恢复特权级（R3：次核切换用）**
+- `frame`：即将被恢复的帧
+- `want_user`：1 = 这个任务应该跑在用户态；0 = 内核任务
+与 arkrtos_port_frame_apply_priv() 的唯一差别：want_user 只是
+必要条件，还要看帧里的 ERA 落在 App 窗口 VA 里才写 PLV3。
+为什么必须多这一条：用户任务卡在系统调用里被换下时，帧是从
+内核态存的（ERA 在内核镜像里），只看任务属性会把 PPLV 写成 3，
+恢复后以内核身份在 PLV3 上取指 ⇒ Page Privilege error 死循环。
+调用方仍须先把帧所属空间铺进本核窗口。
+
 ### `int32 arkrtos_port_paging_frame_alloc(uint32 count, uint32 *p_base);`
 
 ```c
@@ -7427,6 +7512,31 @@ int32 arkrtos_smp_sched_selftest(uint32 *out);
 [7] 次核归属任务数（全表统计）
 **返回**：0=成功；-1=out 为空或没有次核
 
+### `void arkrtos_smp_sched_prepare(void *frame);`
+
+```c
+void arkrtos_smp_sched_prepare(void *frame);
+```
+
+**次核恢复现场前的最后一步：装窗口 + 补帧特权级（R3）**
+- `frame`：即将被 ertn 恢复的帧
+**只能由 arkrtos_context.S 的次核异常入口调用**，且必须在切到
+本核静态栈之后（此刻 sp 还指向被打断任务的栈，可能就在旧窗口里，
+就地写栈会改到别人的帧）。其余核/其余上下文调用等于自己把窗口
+换掉，调用方的栈可能当场失效。
+
+### `int32 arkrtos_smp_sched_win_stat(uint32 *out);`
+
+```c
+int32 arkrtos_smp_sched_win_stat(uint32 *out);
+```
+
+**次核窗口读数（R3）**
+- `out`：至少 3 个字的数组：[0] 次核装窗口成功的次数；
+[1] 最近一次 install 的返回码（0=成功，负值=该档不支持/失败）；
+[2] 次核当前装着的空间号（0xFFFFFFFF=没装过）
+**返回**：0=成功；-1=out 为空 / 没有次核 / 本档没有次核窗口这条路
+
 ### `#define ARKRTOS_SMP_BALANCE_MAX        4`
 
 ```c
@@ -9393,6 +9503,28 @@ MTLB 是确定索引、查找时按条目自己的 PS 比 VPPN，不会和内核
 静态 4 KB 条目抢同一组的 8 路，也不需要知道 STLB 的 way 布局。
 代价是 MTLB 只有 64 条，所以动态表的上限由它决定（见 LA_PG_DYN_PAIRS）。
 
+### `static uint32 la_tlb_read_at(uint32 index, unsigned long *ehi, unsigne`
+
+```c
+static uint32 la_tlb_read_at(uint32 index, unsigned long *ehi, unsigned long *lo0, unsigned long *lo1) {
+```
+
+**按**绝对条目号**读回一条 TLB 条目（自证用）**
+- `index`：绝对条目号，编码与 la_tlb_write() 相同（STLB: way*256+组、
+MTLB: 2048 起）
+- `ehi`：TLBELHI.VPPN（写入时给的那个 VA 基址）
+- `lo0`：偶页 TLBELO
+- `lo1`：奇页 TLBELO
+**返回**：1 = 条目有效（TLBIDX.NE == 0）；0 = 条目无效
+**为什么不用 tlbsrch**：本载体的 QEMU 9.x 上 `tlbsrch` 不可靠 ——
+MTLB 条目按 VA 查找一律报未命中（`tlbrd` 也读成 invalid：见
+[T] idx=2048/2059 全 0x800008xx），STLB 条目同样会报 miss，而
+同一条窗口条目用**按索引**的 `tlbrd` 读得出来、内容逐位正确。
+拿 tlbsrch 当映射自证会得到稳定的假阴性（activate 曾因此恒
+返回 -2、install_space_window 恒 -5）。这里改成「按索引读回刚
+写下去的那一条」，验证的正是 install 做的事：条目在、内容与
+期望逐位相同。真机上两种读法都成立，所以这条改动不是降级。
+
 ### `static unsigned long la_asid_get(void) {`
 
 ```c
@@ -9517,6 +9649,31 @@ tlbfill：后者的路号是随机的，次核不该靠运气和引导核撞同�
 > 说明：调用者必须在**中断还没打开**的时候调（写 CSR 与重放条目之间不能被
 节拍打断），本 port 的次核入口满足这一点。
 
+### `static void la_frame_priv_auto(la_frame_word *f, uint32 want_user) {`
+
+```c
+static void la_frame_priv_auto(la_frame_word *f, uint32 want_user) {
+```
+
+**定一帧的恢复特权级：**意图**（该不该是用户任务）与**地址**取交集**
+- `f`：即将被 ertn 恢复的帧
+- `want_user`：1 = 调度器说这是用户任务；0 = 内核任务
+只改 PRMD.PPLV（低 2 位），PIE/PWE 原样保留：ertn 按
+PRMD.PPLV 写 CRMD.PLV、按 PRMD.PIE 写 CRMD.IE，所以「回到
+PLV3 且开中断」= PPLV=3 + PIE=1 = 0x7。
+为什么不能只看 want_user：一个用户任务**卡在系统调用里**被换下时，
+它的帧是从内核态存下来的（ERA 落在内核镜像里），这时写 PLV3 会让
+它以内核身份在 PLV3 上继续取指 —— 下一条指令就是取指越权（PPI），
+而 PPI 不写 ERA、恢复回来又落在同一条指令上，实测表现是整机停住、
+串口一个字都不再出（2026-11-23 R3，QEMU -d int 抓到
+pc=0x0024E540 task_shva_chk+0x170 反复 PPI）。
+判据用**帧自己的返回地址**：ERA 落在 App 窗口 VA 里才是「回用户
+代码」，写 PLV3；否则一律回内核，写 PLV0。App 窗口 VA 在页级窗口
+与静态 PS=20 窗口两档里是同一个区间，所以这里只看地址区间
+（LA_FRAME_IN_APP），不经过 TLB。
+> 说明：这条不变式对**所有**恢复路径成立：本核 trap 出口、切换路径、
+次核 prepare，谁写 PRMD 都必须过这里。
+
 ### `static void la_frame_apply_priv(la_frame_word *frame) {`
 
 ```c
@@ -9525,9 +9682,48 @@ static void la_frame_apply_priv(la_frame_word *frame) {
 
 **把「下一个任务的特权级」写进要恢复的帧**
 - `frame`：即将被 ertn 恢复的帧
-只改 PRMD.PPLV（低 2 位），PIE/PWE 原样保留：ertn 按
-PRMD.PPLV 写 CRMD.PLV、按 PRMD.PIE 写 CRMD.IE，所以「回到
-PLV3 且开中断」= PPLV=3 + PIE=1 = 0x7。
+s_next_pplv 由 arkrtos_port_set_thread_priv() 按**任务属性**写入，
+这里再与帧的 ERA 取交集（见 la_frame_priv_auto）：用户任务卡在
+系统调用里被换下时，帧的 ERA 在内核镜像里，必须回落 PLV0。
+
+### `void arkrtos_port_frame_apply_priv(void *frame, uint32 is_priv) {`
+
+```c
+void arkrtos_port_frame_apply_priv(void *frame, uint32 is_priv) {
+```
+
+**把一个特权级直接写进「任意一份」帧（R3：次核切换用）**
+- `frame`：指向栈帧的起始（la_frame_word 数组）
+- `is_priv`：1 = 恢复成 PLV0，0 = 恢复成 PLV3
+与 la_frame_apply_priv 的差别只有一条：那个读写的是 port 自己
+记着的 s_next_pplv（只有引导核的切换路径会更新它），次核切换
+路径不能借用那份全局状态 —— 它要写的是「本次交出去的这一帧」。
+只改 PRMD 低 2 位，PIE/PWE 原样保留。
+> 说明：帧地址可能落在 App 窗口里：调用方必须保证此刻装着的窗口就是
+这一帧所属空间（次核的调用点在装完窗口之后，见
+arkrtos_smp_sched_prepare）。
+
+### `void arkrtos_port_frame_apply_priv_auto(void *frame, uint32 want_user)`
+
+```c
+void arkrtos_port_frame_apply_priv_auto(void *frame, uint32 want_user) {
+```
+
+**按「帧自己的返回地址」决定恢复特权级，并写进这一帧（R3）**
+- `frame`：即将被 ertn 恢复的帧
+- `want_user`：1 = 这个任务「应该」跑在用户态；0 = 内核任务
+为什么不能只看 want_user：用户任务卡在系统调用里被换下时，它
+的帧是从**内核态**存下来的（ERA 落在内核镜像里，PRMD.PPLV=0），
+把 PPLV 硬写成 3 会让它以内核身份回到 PLV3 上取指 —— 恢复序列
+第一条 ld.d 就 PPI，异常又 ertn 回同一条指令，实测表现是整机
+在那一刻停住、串口一个字都不再出来（QEMU -d int 抓到的 ERA
+0x002203C4 = arkrtos_task_wait_internal+0xa4）。
+判据换成地址：ERA 落在 App 窗口 VA 里才是「回用户代码」，写
+PLV3；否则一律回内核，写 PLV0。这条对两种窗口都成立 ——
+页级窗口与静态 PS=20 窗口的 App VA 的是同一个区间，所以这里
+用纯区间判断（LA_FRAME_IN_APP），不经过 TLB 语义。
+> 说明：调用方仍须先把这一帧所属的空间铺进本核的窗口（帧本身可能就在
+窗口页里）。
 
 ### `static uint32 la_pg_app_frame(uint32 space) {`
 
@@ -9725,6 +9921,21 @@ static void la_pg_install_space(uint32 space) {
 
 把该空间的 512 页铺进窗口（256 条 PS=12 条目，占该空间自己那一路）
 
+### `static uint32 la_pg_win_entry_ok(uint32 space, uint32 last) {`
+
+```c
+static uint32 la_pg_win_entry_ok(uint32 space, uint32 last) {
+```
+
+**窗口首/末那一对条目的读回自证**
+- `space`：空间号
+- `last`：0 = 第 0 对（VA 最低）；1 = 第 255 对（VA 最高）
+**返回**：1 = 条目在且 TLBELHI/TLBELO0/TLBELO1 与期望逐位相同；0 = 对不上
+这是 install_space_window / activate 的失败判据。与旧的
+tlbsrch 版本相比只换了一件事实来源：条目号由**我们写了哪一条**
+决定，而不是由「硬件找到哪一条」决定 —— 在本载体上前者可靠、
+后者不可靠（见 la_tlb_read_at 的说明）。
+
 ### `static void la_pg_drop_window(void) {`
 
 ```c
@@ -9732,6 +9943,34 @@ static void la_pg_drop_window(void) {
 ```
 
 把整段窗口 VA 的旧翻译清掉（逐 4 KB：QEMU 按 (ASID, VA) 匹配条目）
+
+### `int32 arkrtos_port_paging_install_space_window(uint32 space) {`
+
+```c
+int32 arkrtos_port_paging_install_space_window(uint32 space) {
+```
+
+**在**当前核**上把某个地址空间铺进 App 窗口（R3：跨核共享 VA）**
+- `space`：空间号（0 .. ARKRTOS_PAGING_APPS_MAX-1）
+**返回**：0 = 已铺好并读回首末两页自证通过
+-1 = 空间号越界
+-2 = 这一档没有页级窗口（静态 PS=20 窗口/无帧池）
+-3 = 帧池拒绝（该空间还没拿到 2 MB；半张窗口不许留）
+-4 = 按需档不支持（次核缺页路径未验证，不能假装能跑）
+-5 = 铺完读回对不上（「装上了但映射不对」与「没装」必须分开报）
+与 arkrtos_port_paging_activate() 的分工：那个是**引导核**
+的切换路径，改的是 s_pg_app_space；这个只写 TLB 条目与（ASID 档
+下的）CSR.ASID，**不碰 s_pg_app_space** —— 次核有自己的视图，
+把引导核的记账改成次核眼下跑的空间是错的。
+三条硬口径：
+1) 先 drop 再铺：上一个任务可能是别的空间（同一段 VA 上残留的
+旧条目在非 ASID 档下会直接翻译到别人的帧）；
+2) ASID 档下装完**不还原** CSR.ASID —— 紧接着 ertn 回去的就是
+这个空间里的代码，还原成内核 ASID 会让它当场 refill；
+3) 读回校验首尾两页（末页要给偶页基址，见 activate 里那段注释）。
+**边界**：次核装上的是「此刻的条目」。引导核之后再对这个空间做
+COW / 换空间 / mprotect 重写条目，次核看不到 —— 那正是 R4
+（失效回执）要解决的事，本函数不假装解决了它。
 
 ### `static void la_pg_copy_pair(uint32 *dst, const uint32 *src) {`
 
@@ -9981,6 +10220,50 @@ static void la_pg_boot_map(void) {
 ```
 
 开分页之前的首次铺窗口：只铺 space 0（其它空间等 activate 时再要帧）
+
+### `int32 arkrtos_port_paging_va_in_window(unsigned long va, uint32 len) {`
+
+```c
+int32 arkrtos_port_paging_va_in_window(unsigned long va, uint32 len) {
+```
+
+**这段地址是不是落在 App 窗口 VA 里（R3：跨核共享 VA 的前置）**
+- `va`：起始 VA；len 长度（字节）
+**返回**：1 = 整段都在窗口里；0 = 不在 / 跨出窗口 / 本档窗口是恒等映射
+判据只有一条：页级窗口档（PAGES=1）下窗口 VA 与物理帧是两套地址，
+任何经窗口的访问都必须先装对应空间；这之外的地址（内核恒等映射、
+外设页）都不需要装窗口。所以「要不要装」就是「这段地址在不在窗口里」。
+静态 PS=20 窗口是恒等映射（VA 就是 PA），装不装都一样，按 0 返回。
+
+### `int32 arkrtos_port_paging_relocate_frame(uint32 space, void *frame, un`
+
+```c
+int32 arkrtos_port_paging_relocate_frame(uint32 space, void *frame, unsigned long stack_top, void *entry) {
+```
+
+**在目标空间里重造一份**未运行过的**任务初始帧（R3：跨核共享 VA 的前置）**
+- `space`：任务要绑定到的空间号
+- `frame`：帧起始（task->stack_ptr；不在 App 窗口里时什么都不做）
+- `stack_top`：任务的栈顶（TCB 里的 stack_top）
+- `entry`：任务的入口（TCB 里的 entry）
+**返回**：0 = 已经在对的位置（或不需要动）；+1 = 这不是栈顶那一份初始帧，
+看过了、一个字都没动（fork 的子进程就是这种）；
+-1 = 参数/空间号非法；-3 = 帧池拒绝；-5 = 装窗口失败；
+-6 = 帧重造好了但恢复原窗口失败（必须当失败读数）
+为什么需要它：任务注册时 arkrtos_port_stack_init() 按 stack_top
+算出帧地址并**直接写**。若这个栈落在 App 窗口 VA 上，而此刻窗口
+装的不是该任务的空间，这一写就落进了别的物理页 —— 页级档下各空间
+的 2 MB 是帧池里各自拿的一块，互不相干。之后任务第一次被恢复，
+ERA/PRMD 是从错的物理页读出来的，ertn 就跳到垃圾地址。
+为什么是「重造」而不是「搬字节」：注册那一写本来就落在错的页上，
+没有可搬的内容；而 fork 的子进程帧是 clone_frame 拷过来的**活现场**
+（a0 已经被改成 0），把它重建成初始帧会让子进程从函数头上重跑一遍。
+所以判据是**形状**：只有「帧地址正好是 stack_top 下面紧贴的一帧」
+（stack_init 的唯一算法）才重造，否则一个字都不动、返回 +1。
+边界：本函数只在 PRIV=1 且页级窗口（PAGES=1）时才有实际动作；
+静态 PS=20 窗口是恒等映射，VA 就是 PA，直接返回 0。
+栈守卫对窗口里的栈不成立（内核在别的窗口下复核栈底字），
+这类任务由调用方显式关掉 stack_guard_armed，本函数不碰。
 
 ### `static void la_pg_assert_window(void) {`
 
@@ -12693,6 +12976,23 @@ static int32 sms_balance_step(void) {
 **策略主体：在 CPU0 的节拍里跑一次**
 **返回**：本次自动迁出的任务数
 > 说明：只在 CPU0 调用；它读 CPU0 的就绪集、改次核队列，两者都已有锁。
+
+### `void arkrtos_smp_sched_prepare(void *frame) {`
+
+```c
+void arkrtos_smp_sched_prepare(void *frame) {
+```
+
+**次核恢复现场前的最后一步：装窗口 + 补帧特权级（R3）**
+- `frame`：即将被 ertn 恢复的帧（可能就是另一个任务的帧）
+由 arkrtos_context.S 的次核异常入口在**切到本核静态栈之后**调用，
+与引导核的 la_switch_prepare 同形。三件事的顺序不能换：
+1) 先装窗口（帧本身可能就在新空间的页里，不先装就对不上）；
+2) 再按请求补 PRMD.PPLV；
+3) 清请求（一次性消费，绝不残留给下一次恢复）。
+装失败时把 s_win_space 复位成「没装过」并把返回码记下来 ——
+下一个用户任务在次核上必然取指失败，读数会如实报 FAIL，
+这里不假装成功。
 
 ## kernelsrc/src/arkrtos_task.c
 

@@ -41,6 +41,9 @@
 #if (ARKRTOS_USE_SMP_SCHED == 1)
 #include "arkrtos_smp_sched.h" /* 调度分核自检：次核运行队列 / 显式迁移（默认关时空头） */
 #endif
+#if (ARKRTOS_USE_PAGING == 1)
+#include "arkrtos_mpu.h"       /* 分页后端：arkrtos_paging_bind_task（R3 共享 VA 演示用） */
+#endif
 #include "arkrtos_ptable.h"    /* 分区表：崩溃日志按槽位记账，必须先于它初始化 */
 #include "arkrtos_crash.h"
 #include "arkrtos_guard.h"   /* 心跳窗口守卫（ARKRTOS_USE_KERNEL_GUARD） */     /* 跨复位崩溃日志（ARKRTOS_USE_CRASH_LOG） */
@@ -1431,6 +1434,255 @@ static void task_smp_chk(void)
 }
 #endif /* ARKRTOS_USE_SMP_SCHED == 1 */
 
+#if (ARKRTOS_USE_SMP_SCHED == 1) && (ARKRTOS_USE_SMP_BALANCE != 1) && \
+    (ARKRTOS_USE_PAGING == 1) && (ARKRTOS_USE_PRIV == 1)
+/* ============================================================
+ * 跨核共享 VA 自检（R3）
+ * @details 要证明的事情只有一句：**同一个窗口 VA 在两核上翻译到同一块
+ *          物理帧**。此前只有引导核能装这张窗口（它的 256 条页级条目不进
+ *          次核的静态快照），所以一个 PLV3 任务被迁到次核会在第一条取指上
+ *          就 refill 死。R3 让次核在切到用户任务前自己装一遍窗口，并在同
+ *          一帧上补 PRMD 的 PPLV。
+ *
+ *          判据是串口上的原始读数：
+ *            1) `[shva] win inst` >= 1 且 `rc=0` —— 次核真的自己装了；
+ *            2) `[shva] core1=1` —— 迁移期间次核的 cur 指向这个任务；
+ *            3) `[shva] data` 等于种子 + 1 —— 次核读到 CPU0 写的值并写回
+ *               同一段 VA，CPU0 再读回来（跨核共享 VA 的直接证据）；
+ *            4) `[shva] back rc=0 owned=0` —— 归属回到 CPU0，次核空闲。
+ *
+ *          **这个任务不调任何内核 API**：次核上的 SYS 一律致命停机，
+ *          连入口返回（arkrtos_task_entry_return 走内核）都不行，所以它
+ *          置完 ACK 之后原地自旋，由 CPU0 侧收尾。
+ *
+ *          **为什么这个任务不是 PLV3**：页级窗口档下 0x02000000 起 2 MB 的
+ *          翻译由「当前装着的空间」决定 —— space 0 的窗口指向帧池里自己那
+ *          2 MB，不是 QEMU 把 .appprobe 装进去的那块物理内存。所以放在
+ *          .appprobe 里的**代码**一旦窗口装好就取不到了（读回来是池里的
+ *          零）。本演示要量的是「栈与数据经窗口在两核间共享」，不是 PLV3 保护
+ *          （那条由 ELF 程序与 PLV3 探针各自覆盖），所以任务保持 PLV0：代码在
+ *          内核恒等映射里天然可执行，栈与信箱放在窗口里一段保留 VA 上。
+ * ============================================================ */
+#define LA_SHVA_MAGIC   0x53485641u      /* "SHVA" */
+#define SHVA_REQ        0u               /* CPU0 写的请求魔数 */
+#define SHVA_DATA       1u               /* 种子；次核 +1 写回 */
+#define SHVA_ACK        2u               /* 次核置成魔数 */
+#define SHVA_LOOPS      3u               /* 次核自旋次数（证明它真跑起来了） */
+
+/* 信箱与任务栈都在**窗口 VA 里的一段保留地址**上：CPU0 按这段 VA 写，
+ * 次核按同一段 VA 读写 —— 这就是被测的东西本身。
+ *
+ * 为什么不是 .appprobe 里的两个静态数组：页级窗口档下窗口 VA 的物理落点由
+ * 「当前装着的空间」决定（space 0 -> 帧池里自己那 2 MB），静态数组所在的
+ * 那 2 MB 物理页在不装窗口时才是 0x02000000。演示要的恰恰是「经窗口」的访问，
+ * 所以地址必须是窗口 VA，而且必须落在**没人占**的一段上：
+ *   0x02000000 起    ELF 装载器放程序段（实测 6392 字节）
+ *   0x02100000       本演示保留区（窗口里 1 MB 处，装载器的程序段与用户栈
+ *                    都在它两边的远处）
+ *   窗口顶端向下      ELF 程序的用户栈（32 KB）
+ *   [0x02100000, 0x02100800)  任务栈（2 KB，从高往低用）
+ *   [0x02100800, 0x02100810)  信箱（4 字）
+ */
+#define SHVA_STACK_VA   0x02100000u
+#define SHVA_STACK_LEN  0x800u
+#define SHVA_BOX_VA     0x02100800u
+#define SHVA_BOX        ((volatile uint32 *)(unsigned long)SHVA_BOX_VA)
+
+static uint32 s_stack_shva_chk[TASK_STACK_WORDS];
+static int32  s_id_shva = -1;
+
+static void task_shva(void)
+{
+    uint32 n = 0u;
+
+    /* 等 CPU0 把种子写好（PLV3 里只能读自己的页，不能发 SVC） */
+    while(SHVA_BOX[SHVA_DATA] == 0u)
+    {
+    }
+    SHVA_BOX[SHVA_DATA] = SHVA_BOX[SHVA_DATA] + 1u;
+    SHVA_BOX[SHVA_ACK]  = LA_SHVA_MAGIC;
+
+    /* 不退出、不调内核：次核上这两件事都是致命停机 */
+    for(;;)
+    {
+        n++;
+        SHVA_BOX[SHVA_LOOPS] = n;
+    }
+}
+
+/* 窗口是**每核**一份、随调度漂移的状态：观察者在 wait 里一阻塞，别的用户
+ * 任务就会把窗口换成自己的空间；醒来再按窗口 VA 去读，轻则读到别人的帧，
+ * 重则 PLV0 直接 refill 致命（实测踩到过：badv=0x02000808 = 信箱的 ACK 槽）。
+ * 所以窗口 VA 的每一次访问都按「关中断 -> 装 space 0 -> 读写 -> 恢复中断」
+ * 这一段做，中间不给调度器插进来的机会。 */
+static uint32 s_shva_irq = 0u;
+
+/* 关中断走内核自己的临界区 API，不手写内联汇编。
+ * 手写版本（csrrd CRMD + csrxchg 清 bit2）在 -O2 下把掩码常量放在一个
+ * callee-saved 寄存器里跨调用复用，实测出现过掩码变成 0x10（CRMD.PG）的
+ * 情形 —— 那一下关掉的不是中断而是**分页**，随后任何跨页取指都变成
+ * PPI，整机停死（QEMU -d int 抓到 pc=0x24e640 反复 exception 7）。
+ * 内核 API 的掩码在函数内是局部量，且进入/退出成对，不依赖调用者的寄存器分配。 */
+static int32 shva_win_enter(void)
+{
+    s_shva_irq = ARKRTOS_ENTER_CRITICAL();
+
+    return arkrtos_port_paging_activate(0u);
+}
+
+static void shva_win_leave(void)
+{
+    ARKRTOS_EXIT_CRITICAL(s_shva_irq);
+}
+
+/* CPU0 侧观测者：迁移 -> 等 ACK -> 收回 -> 确认归属 -> 停掉任务 -> 判结果 */
+static void task_shva_chk(void)
+{
+    uint32 st[8];
+    uint32 win[3];
+    uint32 seed = 0x1234u;
+    uint32 i;
+    uint32 ack = 0u;
+    uint32 core1 = 0u;
+    uint32 loops = 0u;
+    uint32 data = 0u;
+    uint32 owned = 0xFFFFFFFFu;
+    int32  rc_to = -99;
+    int32  rc_back = -99;
+    int32  idx = s_id_shva - 1;
+    uint32 win_rc_bad = 0u;
+
+    /* 窗口必须停在 space 0：下面按同一段 VA 读写信箱，窗口若停在别的
+     * 空间，读到的就是别人的帧（那会变成自欺的读数）。 */
+    if(shva_win_enter() != 0)
+    {
+        win_rc_bad = 0xFFFFu;
+    }
+    SHVA_BOX[SHVA_REQ]   = LA_SHVA_MAGIC;
+    SHVA_BOX[SHVA_DATA]  = seed;
+    SHVA_BOX[SHVA_ACK]   = 0u;
+    SHVA_BOX[SHVA_LOOPS] = 0u;
+    shva_win_leave();
+
+    if(s_id_shva > 0)
+    {
+        rc_to = arkrtos_smp_sched_task_to(s_id_shva, 1u);
+    }
+
+    arkrtos_board_puts("[shva] id=");
+    arkrtos_board_putu((uint32)s_id_shva);
+    arkrtos_board_puts(" to rc=");
+    arkrtos_board_putu((uint32)rc_to);
+    arkrtos_board_puts("\n");
+
+    for(i = 0u; i < 40u; i++)
+    {
+        uint32 rcw;
+
+        arkrtos_task_wait_internal(50u);
+        (void)arkrtos_smp_sched_selftest(st);
+        if(st[0] == (uint32)idx)
+        {
+            core1 = 1u;
+        }
+
+        rcw = (uint32)shva_win_enter();
+        if(rcw != 0u)
+        {
+            win_rc_bad = rcw;
+        }
+        if(SHVA_BOX[SHVA_ACK] == LA_SHVA_MAGIC)
+        {
+            ack = 1u;
+        }
+        shva_win_leave();
+
+        if(ack != 0u)
+        {
+            break;
+        }
+    }
+
+    if(shva_win_enter() == 0)
+    {
+        data  = SHVA_BOX[SHVA_DATA];
+        loops = SHVA_BOX[SHVA_LOOPS];
+    }
+    else
+    {
+        win_rc_bad = 0xEEEEu;
+    }
+    shva_win_leave();
+
+    if(s_id_shva > 0)
+    {
+        rc_back = arkrtos_smp_sched_task_back(s_id_shva);
+    }
+
+    for(i = 0u; i < 40u; i++)
+    {
+        arkrtos_task_wait_internal(50u);
+        (void)arkrtos_smp_sched_selftest(st);
+        owned = st[7];
+        if((owned == 0u) && (st[0] == 0xFFFFFFFFu))
+        {
+            break;
+        }
+    }
+
+    (void)arkrtos_smp_sched_win_stat(win);
+
+    arkrtos_board_puts("[shva] win inst=");
+    arkrtos_board_putu(win[0]);
+    arkrtos_board_puts(" rc=");
+    arkrtos_board_putu((uint32)win[1]);
+    arkrtos_board_puts(" space=");
+    arkrtos_board_putu(win[2]);
+    arkrtos_board_puts("\n");
+
+    arkrtos_board_puts("[shva] ack=");
+    arkrtos_board_putu(ack);
+    arkrtos_board_puts(" core1=");
+    arkrtos_board_putu(core1);
+    arkrtos_board_puts(" data=");
+    arkrtos_board_puthex(data);
+    arkrtos_board_puts(" loops=");
+    arkrtos_board_putu(loops);
+    arkrtos_board_puts("\n");
+
+    arkrtos_board_puts("[shva] back rc=");
+    arkrtos_board_putu((uint32)rc_back);
+    arkrtos_board_puts(" owned=");
+    arkrtos_board_putu(owned);
+    arkrtos_board_puts(" winrc=");
+    arkrtos_board_putu(win_rc_bad);
+    arkrtos_board_puts("\n");
+
+    /* 停掉演示任务：它已经是 CPU0 的普通 READY 用户任务，留着只会一直自旋。
+     * 摘链 + 降到最低优先级就够（与 [bal] park 同一手法），不删槽位 ——
+     * 删除任务要有回收路径，这里没有。 */
+    if((idx >= 0) && (idx < (int32)arkrtos_task_count))
+    {
+        arkrtos_ready_del(idx);
+        arkrtos_task_table[idx].priority      = 200u;
+        arkrtos_task_table[idx].base_priority = 200u;
+    }
+
+    arkrtos_board_puts("[shva] result=");
+    if((rc_to == 0) && (ack == 1u) && (core1 == 1u) &&
+       (data == (seed + 1u)) && (loops != 0u) &&
+       (rc_back == 0) && (owned == 0u) && (win_rc_bad == 0u) &&
+       (win[0] >= 1u) && (win[1] == 0u))
+    {
+        arkrtos_board_puts("ok\n");
+    }
+    else
+    {
+        arkrtos_board_puts("FAIL(shared va)\n");
+    }
+}
+#endif /* R3: SMP_SCHED && !BALANCE && PAGING && PRIV */
+
 #if (ARKRTOS_USE_SMP_BALANCE == 1)
 /* ============================================================
  * 自动负载均衡自检（AMP 策略层，不是对称调度）
@@ -1769,6 +2021,46 @@ int main(void)
      * 在次核上挪任务，读数会互相污染。 */
     s_id_w = arkrtos_task_register(task_w, s_stack_w, sizeof(s_stack_w), 16u, 0u);
     (void)arkrtos_task_register(task_smp_chk, s_stack_chk, sizeof(s_stack_chk), 9u, 0u);
+    #endif
+
+    #if (ARKRTOS_USE_SMP_SCHED == 1) && (ARKRTOS_USE_SMP_BALANCE != 1) && \
+        (ARKRTOS_USE_PAGING == 1) && (ARKRTOS_USE_PRIV == 1)
+    /* R3：PLV3 用户任务 + CPU0 侧观测者。用户任务的栈与代码都在
+     * .appprobe（0x02000000），所以它在次核上能否跑起来直接取决于
+     * 「次核有没有装上这张窗口」——这正是本演示要量的东西。
+     * 这个任务是 PLV0：判据是「它的栈/信箱在不在窗口 VA 里」，不是特权级
+     * （页级窗口下窗口 VA 的物理落点由空间决定，paddr 取不到 .appprobe）。 */
+    /* 注册必须在 **space 0 的窗口装着** 的时候做：任务注册会把栈底保护字与
+     * 初始帧直接写到那两段地址上，窗口装的是别的空间，这两写就落进了别人的
+     * 物理页（实测症状：次核恢复出来的 ERA/PRMD 是池里的零，ertn 跳到 0）。
+     * 装完把引导核原来的视图恢复回去，不把它的记账改掉。 */
+    s_id_shva = -1;
+    {
+        uint32 prev_space = arkrtos_paging_space_current();
+        int32  arc = arkrtos_paging_space_activate(0u);
+
+        if(arc == 0)
+        {
+            s_id_shva = arkrtos_task_register(task_shva,
+                                              (uint32 *)(unsigned long)SHVA_STACK_VA,
+                                              SHVA_STACK_LEN, 30u, 0u);
+        }
+        if(s_id_shva > 0)
+        {
+            arkrtos_task_t *p_shva = &arkrtos_task_table[s_id_shva - 1];
+
+            #if (ARKRTOS_USE_STACK_GUARD == 1)
+            /* 栈守卫对「窗口里的栈」不成立：检查读的是同一个 VA，窗口漂到
+             * 别的空间时读到的就是别人的页（假溢出，还会把任务摘掉）。
+             * 这类任务的栈底字没法由内核安全复核，显式关掉而不是留个假绿。 */
+            p_shva->stack_guard_armed = 0u;
+            #endif
+            (void)arkrtos_paging_bind_task(p_shva, 0u);
+        }
+        (void)arkrtos_paging_space_activate(prev_space);
+    }
+    (void)arkrtos_task_register(task_shva_chk, s_stack_shva_chk,
+                                sizeof(s_stack_shva_chk), 2u, 0u);
     #endif
     #if (ARKRTOS_USE_SMP_BALANCE == 1)
     /* 自动均衡演示：两个纯计算任务登记进候选表，之后不再由人迁移。 */

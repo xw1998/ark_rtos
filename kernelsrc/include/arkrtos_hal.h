@@ -732,6 +732,82 @@ int32 arkrtos_port_paging_enable_secondary(void);
 #define arkrtos_port_paging_enable_secondary()         (-1)
 #endif
 
+#if ((ARKRTOS_USE_PAGING == 1) && (ARKRTOS_USE_PRIV == 1))
+/** @brief 在**当前核**上把某个地址空间铺进 App 窗口（R3：跨核共享 VA）
+ *  @param space 0 .. arkrtos_port_paging_space_count()-1
+ *  @return 0 = 已铺好且读回首尾两页自证通过
+ *          -1 = 空间号越界
+ *          -2 = 本档没有页级窗口（静态 PS=20 窗口在次核快照里已带着）
+ *          -3 = 帧池拒绝（该空间还没拿到那 2 MB；半张窗口不许留）
+ *          -4 = 按需档不支持（次核缺页路径未验证）
+ *          -5 = 铺完读回对不上（「装上了但映射不对」与「没装」分开报）
+ *  @details 与 arkrtos_port_paging_activate() 的分工：那个走引导核的切换
+ *           路径并更新 s_pg_app_space；这个只写当前核的 TLB 条目（ASID 档
+ *           下连同 CSR.ASID），不碰引导核的记账。次核切到用户任务前调用。
+ *           边界：次核拿到的是「此刻的条目」，引导核之后的 COW / 换空间 /
+ *           mprotect 重写它看不到 —— 那是 R4（失效回执）的事。 */
+int32 arkrtos_port_paging_install_space_window(uint32 space);
+
+/** @brief 这段地址是不是落在 App 窗口 VA 里（R3）
+ *  @param va  起始 VA；len 长度（字节）
+ *  @return 1 = 整段都在窗口里（访问它要经窗口翻译）；0 = 不在 / 跨出窗口 /
+ *          本档的窗口是恒等映射（PAGES=0，装不装都一样）
+ *  @details 用途只有一个：决定「切到这个任务之前要不要装窗口」。判据不是
+ *          特权级而是**地址**——栈在窗口里的特权任务同样要装窗口，否则它
+ *          的每一次压栈都落在别的空间的物理页上。 */
+int32 arkrtos_port_paging_va_in_window(unsigned long va, uint32 len);
+
+/** @brief 在目标空间里重造一份**未运行过的**任务初始帧（R3）
+ *  @param space     任务要绑定到的空间号
+ *  @param frame     帧起始（task->stack_ptr；不在 App 窗口里时是空操作）
+ *  @param stack_top 任务的栈顶（TCB 里的 stack_top）
+ *  @param entry     任务的入口（TCB 里的 entry）
+ *  @return  0 = 已经在对的位置（或不需要动）；+1 = 这不是栈顶那一份初始帧，
+ *               看过了、一个字都没动（fork 的子进程就是这种）；
+ *          -1 = 参数/空间号非法；-3 = 帧池拒绝；-5 = 装窗口失败；
+ *          -6 = 帧重造好了但恢复原窗口失败（必须当失败读数）
+ *  @details 任务注册时构造初始帧是「按 stack_top 直接写」的，若该栈落在
+ *           App 窗口 VA 上而此刻窗口装的是别的空间，这一写就进了别的物理页。
+ *           任务第一次被恢复时 ERA/PRMD 是错的，ertn 跳到垃圾地址。
+ *
+ *          重造而不是搬字节：注册那一写本来就落在错的页上，没有可搬的内容；
+ *          初始帧的全部内容就是 stack_init 写的那四个槽，其余全零。
+ *          只在页级窗口档有实际动作；静态 PS=20 窗口是恒等映射，返回 0。 */
+int32 arkrtos_port_paging_relocate_frame(uint32 space, void *frame,
+                                         unsigned long stack_top, void *entry);
+#else
+#define arkrtos_port_paging_install_space_window(space) (-1)
+#define arkrtos_port_paging_va_in_window(va, len) \
+    ((void)(va), (void)(len), 0)
+#define arkrtos_port_paging_relocate_frame(space, frame, stack_top, entry) \
+    ((void)(space), (void)(frame), (void)(stack_top), (void)(entry), 0)
+#endif
+
+#if (ARKRTOS_USE_PRIV == 1)
+/** @brief 把一个特权级写进任意一份栈帧（R3：次核切换用）
+ *  @param frame   帧起始（各架构自己的帧布局）
+ *  @param is_priv 1 = 恢复成特权态（PLV0 / Thread privileged），0 = 用户态
+ *  @details 与 arkrtos_port_set_thread_priv() 不同：那个写的是「下一次引导核
+ *           切换要用的」全局状态，这个直接写进交出去的那一帧。帧可能落在
+ *           App 窗口里，调用方必须已经装好该帧所属空间。 */
+void arkrtos_port_frame_apply_priv(void *frame, uint32 is_priv);
+
+/** @brief 按「帧自己的返回地址」决定恢复特权级（R3：次核切换用）
+ *  @param frame     即将被恢复的帧
+ *  @param want_user 1 = 这个任务应该跑在用户态；0 = 内核任务
+ *  @details 与 arkrtos_port_frame_apply_priv() 的唯一差别：want_user 只是
+ *          必要条件，还要看帧里的 ERA 落在 App 窗口 VA 里才写 PLV3。
+ *          为什么必须多这一条：用户任务卡在系统调用里被换下时，帧是从
+ *          内核态存的（ERA 在内核镜像里），只看任务属性会把 PPLV 写成 3，
+ *          恢复后以内核身份在 PLV3 上取指 ⇒ Page Privilege error 死循环。
+ *          调用方仍须先把帧所属空间铺进本核窗口。 */
+void arkrtos_port_frame_apply_priv_auto(void *frame, uint32 want_user);
+#else
+#define arkrtos_port_frame_apply_priv(frame, is_priv)   do { (void)(frame); (void)(is_priv); } while(0)
+#define arkrtos_port_frame_apply_priv_auto(frame, want_user) \
+    do { (void)(frame); (void)(want_user); } while(0)
+#endif
+
 /** @brief Allocate a run of contiguous 4 KB page frames (U-3)
  *  @param count  frames wanted (> 0)
  *  @param p_base on success, physical base of the first frame

@@ -111,7 +111,7 @@ grep -rn "arkrtos_smp_sched_task_to" kernelsrc/ example/
 |---|---|---|
 | R1 | 主核有 IPI 处理路径 | **已满足（2026-11-23，QEMU LA64 `-smp 2` 实测）**：`arkrtos_port_send_ipi(0)` 返回 0；`la_trap_c()` 的 INT 分支里有一条 `ESTAT.IS` 的 IPI 分支进 `arkrtos_smp_ipi_handler()`；`arkrtos_port_irq_init()` 打开本核 `CORE_EN` 与 `ECFG.LIE[12]`。读数 `[smp] ping ipi0=2 self=1 back1=1 result=ok`，门禁 `tools/smp_gate.py` pin R1。见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §9.10 |
 | R2 | 次核开分页 | **已满足（2026-11-23，QEMU LA64 `-smp 2` 实测）**：`la_mmu_init()` 拆成三段，静态条目改成快照重放（5 条）；`arkrtos_port_paging_enable_secondary()` 在次核上自己写 `ASID`/`STLBPS`、逐条重放、把 `TLBRENTRY` 换成 `tlb_refill_entry_secondary`（每核一份 8 KB 栈）、最后 DA→PG；打开后用内核 `.bss` 地址自查恒等映射，不符返回 -3。读数 `[smp] pg cpu1 on=1 rc=0 look=1 result=ok`，门禁 `tools/smp_gate.py` pin R2。见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §9.11 |
-| R3 | 存在真实的跨核共享 VA 调用者 | 至少一处非演示调用：用户态任务经 `task_to` 到次核，且两核都会访问同一窗口 VA |
+| R3 | 存在真实的跨核共享 VA 调用者 | **已满足（2026-11-23，QEMU LA64 `-smp 2` 实测）**：走的是真实的 `arkrtos_smp_sched_task_to` 迁移路径（不是自制模拟），任务栈与信箱都落在 `0x02100000` 的窗口 VA 上，两核经同一段 VA 读写同一块物理帧。次核侧三件：切到用户任务前自己装该空间的窗口（`arkrtos_port_paging_install_space_window`，先撤旧条目再铺，装完按**索引**读回首末两对条目自证，返回码 -1/-2/-3/-4/-5 分档）；恢复前按帧自己的返回地址定 `PRMD.PPLV`（`la_frame_priv_auto` 取「该不该是用户任务」与「ERA 在不在 App 窗口 VA」的交集，三条恢复路径共用）；任务绑定时在目标空间里重造初始帧（`relocate_frame` 按帧池物理地址直写，不走窗口）。读数 `[shva] win inst=1 rc=0 space=0` / `[shva] ack=1 core1=1 data=0x00001235 loops=46896894` / `[shva] back rc=0 owned=0` / `[shva] result=ok`；门禁 `tools/smp_gate.py` pin R3。见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §9.12 |
 | R4 | 有回执判定手段 | 能证明「目标核确实失效了」，不是靠时间等待（真机或 QEMU 上的可读计数） |
 | R5 | 有真机载体 | 竞态与一致性协议行为不能只在 QEMU 上判死 |
 
@@ -127,7 +127,9 @@ R1–R4 都可以在本机推进（前三项是代码，第四项要设计一个
    [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §9.10。下一步是 R2（次核开分页）。
 2. ~~再做 R2（次核开分页）——此时次核才有可失效的条目；~~
    **已完成（2026-11-23）**：快照口径、每核重填栈、-3 自证与两处判据错误的实测过程见
-   §5.3 的 R2 行与 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §9.11。下一步是 R3（跨核共享 VA 调用者）。
+   §5.3 的 R2 行与 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §9.11。下一步是 R3（跨核共享 VA 调用者），**已完成（2026-11-23）**：见 §5.3 的 R3 行与
+[QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §9.12；shootdown 现在只差 R4 的失效回执与
+R5 的真机载体。
 3. 最后才谈失效协议：目标核收到 IPI → 在安全点按 VA 失效 → 回写一个可读计数 → 发起核等到计数变化。
    等待必须有上限且失败要**如实报错**，不允许「超时即认为成功」。
 

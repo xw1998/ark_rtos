@@ -124,6 +124,38 @@ R2_PORT_MARKERS = [
 R2_SNAP_CALL = "la_pg_snap_add(vaddr, ps, index, lo0, lo1);"
 R2_CTX_SEC_STACK = "la_refill_stack_sec_top"
 
+SMP_SCHED_C = "kernelsrc/src/arkrtos_smp_sched.c"
+PAGING_C    = "kernelsrc/src/arkrtos_paging.c"
+
+# pin R3：跨核共享 VA 的四个落点。每一条都在下面被单独抠掉验过一次 ——
+# 只写在注释里而没有守卫，是这道门禁最想抓的假绿。
+R3_PORT_MARKERS = [
+    "static uint32 la_pg_win_entry_ok(uint32 space, uint32 last)",
+    "int32 arkrtos_port_paging_install_space_window(uint32 space)",
+    "int32 arkrtos_port_paging_va_in_window(unsigned long va, uint32 len)",
+    "int32 arkrtos_port_paging_relocate_frame(uint32 space, void *frame,",
+    "static void la_frame_priv_auto(la_frame_word *f, uint32 want_user)",
+]
+
+R3_SCHED_MARKERS = [
+    "arkrtos_smp_trap_stacks[ARKRTOS_CPU_NUM]",
+    "s_pend_space[cpu] = 0xFFFFFFFFu;",
+    "arkrtos_port_paging_install_space_window(",
+    "arkrtos_port_frame_apply_priv_auto(frame, (uint32)s_pend_priv[cpu]);",
+    "int32 arkrtos_smp_sched_win_stat(uint32 *out)",
+]
+
+# 单核档不编 relocate：这条守卫就是「默认档零足迹」在源头上的那一道。
+R3_PAGING_GUARD = "#if ((ARKRTOS_USE_SMP == 1) && (ARKRTOS_USE_PRIV == 1))"
+R3_RELOC_CALL = "arkrtos_port_paging_relocate_frame("
+
+R3_FIXTURE_MARKERS = [
+    "[shva] result=",
+    "[shva] ack=",
+    "[shva] win inst=",
+    "arkrtos_smp_sched_selftest",
+]
+
 LA64_INCLUDES = [
     "kernelsrc/include",
     "config",
@@ -869,6 +901,191 @@ def run_la64_pin_r2(cc):
     return bad == 0
 
 
+def run_la64_pin_r3(cc):
+    """pin R3：跨核共享 VA（次核装窗口 + 帧定级 + 每核 prepare 栈）。
+
+    R3 的内容是「次核拿到一个用户任务时，自己把该空间的窗口铺上、再按帧
+    自己的返回地址定特权级」。它由四段代码共同成立，缺一段就会退回「次核
+    上取不到用户代码」或「以内核身份在 PLV3 上取指」两种静默错误：
+
+      A) port 层四个实现（窗口自证 / 装窗口 / 地址在不在窗口 / 重造初始帧）；
+      B) sched 层 prepare：每核临时栈 + 记下「要装哪个空间、什么特权级」；
+      C) paging 层绑定任务时重造初始帧，且**整段只在 SMP 档编**；
+      D) QEMU 夹具真的跑这条链并给出判定（不是只打印没判据）。
+
+    五层断言，每层都带自检：
+      1) A/B 的标记逐个存在；抠掉任意一处，判据必须报出来；
+      2) install_space_window 恰好两处定义（页级窗口档 / 静态窗口档各一条）；
+      3) C 的调用点之前必须是 SMP 守卫、且中间没有 #endif；把守卫换成只判
+         PAGING，同一条判据必须报出来 —— 否则「默认档不编」只是巧合；
+      4) 对象级：smp_sched.c 以 SMP=1 + SMP_SCHED=1 编出的目标文件里有
+         prepare / win_stat / 每核栈；两个开关都关时一个符号都没有。再把
+         prepare 改名重编，判据必须随之报错（证明读的是真符号）；
+      5) 夹具：main.c 里有这条链的打印与判定字符串。
+    """
+    nm = cc.replace("gcc", "nm")
+    if not os.path.exists(nm):
+        print("SMP-GATE FAIL: no LA64 nm next to %s" % cc)
+        return False
+
+    td = tempfile.mkdtemp(prefix="arkrtos-smp-r3-")
+    bad = 0
+
+    def read(rel):
+        with open(os.path.join(ROOT, rel), encoding="utf-8",
+                  errors="replace") as f:
+            return f.read().replace("\r\n", "\n")
+
+    port = read(LA64_PORT)
+    sched = read(SMP_SCHED_C)
+    paging = read(PAGING_C)
+    main_c = read(MAIN_C)
+
+    for m in R3_PORT_MARKERS:
+        if m not in port:
+            print("SMP-GATE FAIL: %s lost an R3 marker: %r"
+                  % (LA64_PORT, m[:54]))
+            bad += 1
+        elif m in port.replace(m, "/* removed */"):
+            print("SMP-GATE FAIL: pin R3 self-check missed a removed marker: %r"
+                  % m[:44])
+            bad += 1
+        else:
+            print("ok: pin R3 marker present and self-checked (%s...)" % m[:34])
+
+    n = port.count("int32 arkrtos_port_paging_install_space_window(uint32 space)")
+    if n != 2:
+        print("SMP-GATE FAIL: install_space_window has %d definition(s), "
+              "expected 2 (page-level window / static window)" % n)
+        bad += 1
+    else:
+        print("ok: install_space_window defined once per window flavour (2)")
+
+    for m in R3_SCHED_MARKERS:
+        if m not in sched:
+            print("SMP-GATE FAIL: %s lost an R3 marker: %r"
+                  % (SMP_SCHED_C, m[:54]))
+            bad += 1
+        elif m in sched.replace(m, "/* removed */"):
+            print("SMP-GATE FAIL: pin R3 self-check missed a removed sched "
+                  "marker: %r" % m[:44])
+            bad += 1
+        else:
+            print("ok: pin R3 sched marker present and self-checked (%s...)"
+                  % m[:34])
+
+    # --- C：默认档不编 relocate -------------------------------------
+    def guard_covers(text):
+        i = text.find(R3_RELOC_CALL)
+        if i < 0:
+            return False
+        j = text.rfind(R3_PAGING_GUARD, 0, i)
+        if j < 0:
+            return False
+        tail = text[j:i]
+        return ("#endif" not in tail) and ("#else" not in tail)
+
+    if not guard_covers(paging):
+        print("SMP-GATE FAIL: %s binds tasks to a space without the SMP-only "
+              "guard around %s (the default image would pay for R3)"
+              % (PAGING_C, R3_RELOC_CALL))
+        bad += 1
+    else:
+        mut = paging.replace(R3_PAGING_GUARD, "#if (ARKRTOS_USE_PAGING == 1)", 1)
+        if guard_covers(mut):
+            print("SMP-GATE FAIL: pin R3 guard check is not specific (a "
+                  "PAGING-only guard still passes)")
+            bad += 1
+        else:
+            print("ok: task binding calls relocate_frame only under the SMP "
+                  "guard (gone when the guard is weakened)")
+
+    for m in R3_FIXTURE_MARKERS:
+        if m not in main_c:
+            print("SMP-GATE FAIL: the QEMU fixture lost %r (R3 would be "
+                  "unmeasured)" % m)
+            bad += 1
+    else:
+        print("ok: the QEMU fixture prints and judges the shared-VA chain")
+
+    # --- D：对象级 ---------------------------------------------------
+    key = os.path.join(td, "arkrtos_sign_key_local.h")
+    with open(key, "w", encoding="utf-8") as f:
+        f.write("#ifndef ARKRTOS_SIGN_KEY_LOCAL_H\n"
+                "#define ARKRTOS_SIGN_KEY_LOCAL_H\n"
+                "#define ARKRTOS_IMAGE_SIGN_KEY { " +
+                ", ".join("0x%02X" % i for i in range(32)) + " }\n"
+                "#endif\n")
+
+    inc = ["-I" + td]
+    inc += ["-I" + os.path.join(ROOT, x) for x in LA64_INCLUDES]
+    base = ["-march=loongarch64", "-mabi=lp64d", "-std=c99", "-c",
+            "-include", "arkrtos_board_config.h",
+            "-DARKRTOS_SIGN_KEY_LOCAL=1",
+            "-DARKRTOS_BOARD_CONFIG=\"arkrtos_board_config.h\""]
+
+    def build_sched(tag, on, path=None):
+        obj = os.path.join(td, "sched_%s.o" % tag)
+        defs = (["-DARKRTOS_USE_SMP=1", "-DARKRTOS_USE_SMP_SCHED=1"]
+                if on else ["-DARKRTOS_USE_SMP=0", "-DARKRTOS_USE_SMP_SCHED=0"])
+        cmd = ([cc] + base + defs + ["-DARKRTOS_CPU_NUM=2"]
+               + ["-o", obj, path or os.path.join(ROOT, SMP_SCHED_C)] + inc)
+        rr = subprocess.run(cmd, cwd=ROOT, capture_output=True,
+                            encoding="utf-8", errors="replace")
+        if rr.returncode != 0:
+            print("SMP-GATE FAIL: smp_sched.c does not build with SMP on=%d"
+                  % int(on))
+            print((((rr.stdout or "") + (rr.stderr or "")).strip())[-900:])
+            return None
+        return obj
+
+    def syms(obj):
+        rr = subprocess.run([nm, obj], capture_output=True,
+                            encoding="utf-8", errors="replace")
+        return (rr.stdout or "") + (rr.stderr or "")
+
+    want = ["arkrtos_smp_sched_prepare", "arkrtos_smp_sched_win_stat",
+            "arkrtos_smp_trap_stacks"]
+    on_obj = build_sched("on", True)
+    off_obj = build_sched("off", False)
+    if (on_obj is None) or (off_obj is None):
+        bad += 1
+    else:
+        on_syms = syms(on_obj)
+        off_syms = syms(off_obj)
+        missing = [w for w in want if w not in on_syms]
+        leaked = [w for w in want if w in off_syms]
+        if missing:
+            print("SMP-GATE FAIL: SMP=1 sched object has no %s (the R3 prepare "
+                  "path got compiled out)" % ", ".join(missing))
+            bad += 1
+        elif leaked:
+            print("SMP-GATE FAIL: SMP=0 sched object still has %s (the default "
+                  "build must not pay for R3)" % ", ".join(leaked))
+            bad += 1
+        else:
+            print("ok: R3 sched symbols exist only in the SMP=1 object")
+
+        # 自检：把 prepare 改名后重编，同一条判据必须报出来
+        raw = open(os.path.join(ROOT, SMP_SCHED_C), "rb").read()
+        mut_src = os.path.join(td, "sched_mut.c")
+        with open(mut_src, "wb") as f:
+            f.write(raw.replace(b"arkrtos_smp_sched_prepare",
+                                b"arkrtos_smp_sched_preparx"))
+        mut_obj = build_sched("mut", True, mut_src)
+        if mut_obj is None:
+            bad += 1
+        elif "arkrtos_smp_sched_prepare" in syms(mut_obj):
+            print("SMP-GATE FAIL: renaming prepare did not change the checked "
+                  "object (the pin is not looking at the real symbol)")
+            bad += 1
+        else:
+            print("ok: LA64 R3 self-check (renaming prepare removes the "
+                  "checked symbol)")
+
+    shutil.rmtree(td, ignore_errors=True)
+    return bad == 0
+
 def run_la64_smp_sched(cc):
     """pin W：④ AMP 调度分核（真编译两档 + 关档零内容 + 三处跳过各有开关）。"""
     od = cc.replace("gcc", "objdump")
@@ -1384,6 +1601,8 @@ def main():
         return 1
     if not run_la64_pin_r2(la):
         return 1
+    if not run_la64_pin_r3(la):
+        return 1
     if not run_la64_smp_sched(la):
         return 1
     if not run_la64_smp_balance(la):
@@ -1397,7 +1616,7 @@ def main():
         return 1
 
     print("SMP-GATE OK (host accounting + %d ARM ON-path files + LA64 pin "
-          "U/V/R1/R2/W/Y + RV32 pin X, CPU_NUM=4/2)" % len(TARGETS))
+          "U/V/R1/R2/R3/W/Y + RV32 pin X, CPU_NUM=4/2)" % len(TARGETS))
     return 0
 
 if __name__ == "__main__":

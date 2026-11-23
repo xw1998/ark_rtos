@@ -441,6 +441,23 @@ la_smp_trap_entry:
     andi    $a1, $a1, 0x3ff
     bl      la_smp_trap_c
     move    $sp, $a0
+
+    /* R3：目标帧可能落在另一个 App 的页里，而「装窗口」与「补 PRMD 的
+     * PPLV」都必须在新窗口下作用于新帧。此刻 sp 还指向被打断任务的栈
+     * （那个栈本身可能就在旧窗口里），所以先换到本核的静态栈再进 C ——
+     * 与引导核 la_switch_prepare 同形。prepare 自己不再碰栈以外的东西，
+     * 返回之后本段只按帧指针恢复寄存器。 */
+    move    $s1, $sp                /* s1 = 目标帧（callee-saved，跨 C 调用有效） */
+    csrrd   $t1, 0x40               /* CPUID */
+    andi    $t1, $t1, 0x3ff
+    la.abs  $sp, arkrtos_smp_trap_stacks
+    li.d    $t2, ARKRTOS_SMP_TRAP_STACK_SIZE
+    mul.d   $t3, $t1, $t2
+    add.d   $sp, $sp, $t3
+    add.d   $sp, $sp, $t2
+    move    $a0, $s1
+    bl      arkrtos_smp_sched_prepare
+    move    $sp, $s1
 #else
     /* 清 IPI 挂起：读 STATUS(0x1000) → 写 CLEAR(0x100C)。
      * 写 1 的位被清；不清的话 ertn 回去立刻再进一次，变成中断风暴。 */

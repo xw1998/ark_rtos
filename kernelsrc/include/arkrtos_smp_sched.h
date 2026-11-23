@@ -128,6 +128,25 @@ uint8 arkrtos_smp_sched_owned_by_other(int32 task_idx);
 */
 int32 arkrtos_smp_sched_selftest(uint32 *out);
 
+/**
+* @brief 次核恢复现场前的最后一步：装窗口 + 补帧特权级（R3）
+* @param frame 即将被 ertn 恢复的帧
+* @details **只能由 arkrtos_context.S 的次核异常入口调用**，且必须在切到
+*          本核静态栈之后（此刻 sp 还指向被打断任务的栈，可能就在旧窗口里，
+*          就地写栈会改到别人的帧）。其余核/其余上下文调用等于自己把窗口
+*          换掉，调用方的栈可能当场失效。
+*/
+void arkrtos_smp_sched_prepare(void *frame);
+
+/**
+* @brief 次核窗口读数（R3）
+* @param out 至少 3 个字的数组：[0] 次核装窗口成功的次数；
+*            [1] 最近一次 install 的返回码（0=成功，负值=该档不支持/失败）；
+*            [2] 次核当前装着的空间号（0xFFFFFFFF=没装过）
+* @return 0=成功；-1=out 为空 / 没有次核 / 本档没有次核窗口这条路
+*/
+int32 arkrtos_smp_sched_win_stat(uint32 *out);
+
 
 #if (ARKRTOS_USE_SMP_BALANCE == 1)
 /**

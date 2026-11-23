@@ -34,6 +34,23 @@
 #include "arkrtos_hal.h"
 #include "arkrtos_spin.h"
 
+/* R3：次核切到用户任务时，「窗口」与「特权级」两件事都要在**次核自己**
+ * 上落地。只有分页与特权级同时开着的镜像才有这条路；其余组合下这一段
+ * 整段不编（默认档一个符号都不多）。 */
+#if ((ARKRTOS_USE_PAGING == 1) && (ARKRTOS_USE_PRIV == 1))
+#define ARK_SMP_WIN     1
+#include "arkrtos_mpu.h"
+#else
+#define ARK_SMP_WIN     0
+#endif
+
+/* 次核「恢复现场前」的临时内核栈。C 侧 prepare 要用栈，而此刻 sp 还指向
+ * 被打断任务的栈（可能就在旧窗口里），不能就地用。每核一块，两核同时
+ * 进 prepare 也不会互相踩。 */
+#ifndef ARKRTOS_SMP_TRAP_STACK_SIZE
+#define ARKRTOS_SMP_TRAP_STACK_SIZE   4096
+#endif
+
 /* ============================================================
  * 每核状态
  * ============================================================ */
@@ -54,6 +71,29 @@ static uint32 s_tick[ARKRTOS_CPU_NUM];
 static uint32 s_switch_cnt[ARKRTOS_CPU_NUM];
 static uint32 s_mig_in[ARKRTOS_CPU_NUM];
 static uint32 s_mig_out[ARKRTOS_CPU_NUM];
+
+/* 每核 prepare 用的临时内核栈（见文件头上面的说明）。放 .bss，不占镜像。 */
+/* 16 字节对齐：psABI 要求调用 C 之前 sp 16 字节对齐（FPU/LSX 的存取
+ * 会对齐检查），数组默认只保证 8 字节。 */
+unsigned long arkrtos_smp_trap_stacks[ARKRTOS_CPU_NUM]
+                                     [ARKRTOS_SMP_TRAP_STACK_SIZE / sizeof(unsigned long)]
+                                     __attribute__((aligned(16)));
+
+#if (ARK_SMP_WIN == 1)
+/* 次核当前装着哪个空间的窗口（0xFFFFFFFF = 还没装过 / 装失败过）。
+ * 与引导核的 s_pg_app_space 是两回事：那是引导核的视图，这个是次核的。 */
+static uint32 s_win_space[ARKRTOS_CPU_NUM];
+
+/* 读数：装成功的次数 / 最近一次的返回码 */
+static uint32 s_win_installs[ARKRTOS_CPU_NUM];
+static int32  s_win_rc[ARKRTOS_CPU_NUM];
+
+/* 本次切换留给恢复路径的两件事（0xFFFFFFFF / 0xFF = 没有）。
+ * 之所以不就地做：此刻 sp 还在被打断任务的栈上，而这两件事都要求
+ * **新窗口已经装上**之后才作用于新帧。 */
+static uint32 s_pend_space[ARKRTOS_CPU_NUM];
+static uint8  s_pend_priv[ARKRTOS_CPU_NUM];
+#endif
 
 /* 本核运行队列（数组当 FIFO，长度上限就是任务表大小） */
 static uint8  s_q[ARKRTOS_CPU_NUM][ARKRTOS_TASK_MAX_NUM];
@@ -107,6 +147,13 @@ static void sms_lazy_init(void)
         s_switch_cnt[i] = 0u;
         s_mig_in[i]     = 0u;
         s_mig_out[i]    = 0u;
+#if (ARK_SMP_WIN == 1)
+        s_win_space[i]    = 0xFFFFFFFFu;
+        s_win_installs[i] = 0u;
+        s_win_rc[i]       = 0;
+        s_pend_space[i]   = 0xFFFFFFFFu;
+        s_pend_priv[i]    = 0xFFu;
+#endif
         s_qn[i]         = 0u;
         s_handoff[i]    = ARKRTOS_SMP_SCHED_NIL;
         s_back[i]       = ARKRTOS_SMP_SCHED_NIL;
@@ -718,10 +765,67 @@ static int32 sms_pick_next(uint32 cpu, int32 cur, uint8 handed, uint8 *p_stay)
     return next;
 }
 
+#if (ARK_SMP_WIN == 1)
+/* ---- 第 4 段的前置：记下「恢复现场前要做的两件事」 ----------------
+ * 只写本核字段（本核自己的切换路径在跑），不需要跨核锁。
+ *  - 目标是用户任务：窗口按它绑定的空间装（已是该空间则跳过）；PPLV=3；
+ *  - 目标是内核任务或 idle：不动窗口（内核任务跑在恒等映射上，窗口里
+ *    是什么由上一次用户任务决定）——但 PPLV 必须写回 0，否则一个刚从
+ *    用户任务切下来的核会把内核任务以 PLV3 恢复，第一次碰内核数据就 trap。
+ *  - 例外（R3）：**栈落在 App 窗口 VA 里的特权任务**要按它绑定的空间装窗口。
+ *    它的每一次压栈都要经窗口翻译，不装就是拿别人的物理页当栈（实测：
+ *    恢复出来的 ERA/PRMD 是池里的零）。判决用地址不用特权级。 */
+static void sms_plan_prepare(uint32 cpu, int32 next)
+{
+    s_pend_space[cpu] = 0xFFFFFFFFu;
+
+    if(next < 0)
+    {
+        s_pend_priv[cpu] = 1u;
+        return;
+    }
+
+    if(arkrtos_task_table[next].is_priv != 0u)
+    {
+        uint32 sp;
+
+        s_pend_priv[cpu] = 1u;
+
+        if(arkrtos_port_paging_va_in_window(
+               (unsigned long)arkrtos_task_table[next].stack_bottom,
+               arkrtos_task_table[next].stack_size) == 0)
+        {
+            return;             /* 栈在恒等映射里：照旧不动窗口 */
+        }
+
+        sp = arkrtos_paging_space_of(&arkrtos_task_table[next]);
+        if(sp != s_win_space[cpu])
+        {
+            s_pend_space[cpu] = sp;
+        }
+        return;
+    }
+
+    s_pend_priv[cpu] = 0u;
+    {
+        uint32 sp = arkrtos_paging_space_of(&arkrtos_task_table[next]);
+
+        if(sp != s_win_space[cpu])
+        {
+            s_pend_space[cpu] = sp;
+        }
+    }
+}
+#endif /* ARK_SMP_WIN */
+
 /* ---- 第 4 段：落地切换（含解锁） -------------------------------- */
 static uint32 sms_apply_next(uint32 cpu, int32 next)
 {
     uint32 ret;
+
+#if (ARK_SMP_WIN == 1)
+    sms_plan_prepare(cpu, next);
+#endif
 
     if(next >= 0)
     {
@@ -788,6 +892,62 @@ uint32 arkrtos_smp_sched_switch(uint32 cpu, uint32 frame)
     return ret;
 }
 
+/**
+* @brief 次核恢复现场前的最后一步：装窗口 + 补帧特权级（R3）
+* @param frame 即将被 ertn 恢复的帧（可能就是另一个任务的帧）
+* @details 由 arkrtos_context.S 的次核异常入口在**切到本核静态栈之后**调用，
+*          与引导核的 la_switch_prepare 同形。三件事的顺序不能换：
+*          1) 先装窗口（帧本身可能就在新空间的页里，不先装就对不上）；
+*          2) 再按请求补 PRMD.PPLV；
+*          3) 清请求（一次性消费，绝不残留给下一次恢复）。
+*          装失败时把 s_win_space 复位成「没装过」并把返回码记下来 ——
+*          下一个用户任务在次核上必然取指失败，读数会如实报 FAIL，
+*          这里不假装成功。
+*/
+void arkrtos_smp_sched_prepare(void *frame)
+{
+#if (ARK_SMP_WIN == 1)
+    uint32 cpu = arkrtos_port_cpu_id();
+    uint32 sp;
+
+    if((cpu >= (uint32)ARKRTOS_CPU_NUM) || (s_inited == 0u))
+    {
+        return;
+    }
+
+    sp = s_pend_space[cpu];
+    s_pend_space[cpu] = 0xFFFFFFFFu;
+
+    if(sp != 0xFFFFFFFFu)
+    {
+        int32 rc = arkrtos_port_paging_install_space_window(sp);
+
+        s_win_rc[cpu] = rc;
+        if(rc == 0)
+        {
+            s_win_space[cpu] = sp;
+            s_win_installs[cpu]++;
+        }
+        else
+        {
+            s_win_space[cpu] = 0xFFFFFFFFu;
+        }
+    }
+
+    if(s_pend_priv[cpu] != 0xFFu)
+    {
+        /* 只把「该不该是用户态」这个意图交下去；真正的判据在 port 层：
+         * 还要看帧里 ERA 是不是落在 App 窗口 VA 里（用户任务卡在系统调用
+         * 里被换下时，帧是从内核态存的，硬写 PLV3 会 PPI 死循环，见
+         * arkrtos_port_frame_apply_priv_auto 的注释）。 */
+        arkrtos_port_frame_apply_priv_auto(frame, (uint32)s_pend_priv[cpu]);
+        s_pend_priv[cpu] = 0xFFu;
+    }
+#else
+    (void)frame;
+#endif
+}
+
 /* ============================================================
  * 查询
  * ============================================================ */
@@ -808,6 +968,26 @@ uint8 arkrtos_smp_sched_owned_by_other(int32 task_idx)
         return 0u;
     }
     return (s_owner[task_idx] != 0u) ? 1u : 0u;
+}
+
+int32 arkrtos_smp_sched_win_stat(uint32 *out)
+{
+#if (ARK_SMP_WIN == 1)
+    if((out == 0) || ((uint32)ARKRTOS_CPU_NUM < 2u))
+    {
+        return -1;
+    }
+    /* 第一次读数可能早于第一次节拍：不先建状态，s_win_space 还是 .bss 的 0，
+     * 会被读成「窗口里装着空间 0」——一个看起来权威的错答案。 */
+    sms_lazy_init();
+    out[0] = s_win_installs[1];
+    out[1] = (uint32)s_win_rc[1];
+    out[2] = s_win_space[1];
+    return 0;
+#else
+    (void)out;
+    return -1;
+#endif
 }
 
 int32 arkrtos_smp_sched_selftest(uint32 *out)

@@ -4457,6 +4457,207 @@ entry using a kernel `.bss` address; the default build keeps identical text/data
    core. The snapshot is the primary's view at that instant; entries installed later at runtime are
    invisible to the secondary - which is precisely what R3/R4 must solve.
 
+### 9.12 (8) Cross-core shared VA (R3, 2026-11-23, QEMU LA64 `-smp 2` executed)
+
+#### 9.12.1 The gap: the window is per-core drifting state, and R2 shares only a static snapshot
+
+After R2 a secondary core has its own TLB and can run kernel code, but the app window it sees is only the
+handful of static entries the primary installed at `la_mmu_init()`. The 2 MB app window at `0x02000000`
+(page-level window build) is made of 256 page entries whose **physical landing place is decided by "which
+space is installed right now"** - per-core state that drifts on every task switch. The secondary never
+installed it, so:
+
+- when a user task's stack/frame lives in window VA, the secondary restores it against an empty window and
+  the very first `ld.d` takes a refill fault;
+- even if it happened to install once, once the two cores drift to different spaces "the same VA" means two
+  different physical memories - that is two machines talking past each other, not sharing.
+
+R3 has exactly one claim to prove: **the same window VA translates to the same physical frame on both
+cores**. That needs three things: the secondary installs the window itself before switching to a user task;
+frame privilege is decided from the frame's own return address; and the task-registration write lands in its
+own space's physical page.
+
+#### 9.12.2 Approach: four port pieces, a per-core prepare stack in sched, frame rebuild on bind
+
+| # | Change | Why it is required |
+|---|---|---|
+| 1 | `arkrtos_port_paging_install_space_window(space)`: `la_pg_drop_window()` then `la_pg_install_space(space)`; in the ASID build write `CSR.ASID` and **do not restore it**; finish with a read-back of the first and last entry pair by index | the previous task may belong to another space; stale entries on the same VA translate straight into someone else's frame. And `ertn` follows immediately, so restoring ASID would refill on the user code at once |
+| 2 | that function **does not touch** `s_pg_app_space` | that is the primary's switching bookkeeping; the secondary has its own view, and rewriting it to the secondary's current space would corrupt the primary's next switch decision |
+| 3 | `arkrtos_port_paging_va_in_window(va,len)`: returns 1 only when the whole range lies in `[LA_WIN_VA, +2 MB)` | "do we need to install the window" is decided by **address**, not privilege: a privileged task whose stack sits in the window translates every push through it |
+| 4 | `la_frame_priv_auto(f, want_user)`: intersect `want_user` with "does the frame's ERA lie in app window VA" and write `PRMD.PPLV` | a user task switched out inside a syscall has a frame saved from kernel mode; forcing PLV3 makes it fetch kernel code at PLV3 -> PPI loop |
+| 5 | `arkrtos_smp_sched.c`: per-core `s_pend_space/s_pend_priv`, `sms_plan_prepare()` (decide on switch-out), `arkrtos_smp_sched_prepare()` (apply before restore, three steps in order: install window -> set privilege -> clear request), and `arkrtos_smp_trap_stacks[CPU_NUM][4096] aligned(16)` | the decision can only be made on **switch-out** (only then is `next` known); application can only happen **before restore** (only then must the window change); and the frame itself may live in the new space's pages, so the order cannot be swapped |
+| 6 | `arkrtos_context.S` secondary entry: move to this core's static stack, then `bl arkrtos_smp_sched_prepare` | at that moment `sp` still points at the interrupted task's stack (possibly inside the old window); writing the stack in place would overwrite someone else's frame |
+| 7 | `arkrtos_paging_bind_task()`: after a successful bind, call `arkrtos_port_paging_relocate_frame()` to rebuild the initial frame inside the target space, the whole block under `((SMP==1)&&(PRIV==1))` | registration writes the initial frame at `stack_top` directly; if that stack is in window VA while another space is installed, the write lands in the wrong physical page and the restored ERA/PRMD are zeros from the pool |
+| 8 | `relocate_frame` writes straight through the **frame-pool physical address** (`pa = space frame base + (va - LA_WIN_VA)`); no window install, no ASID swap, no `s_pg_app_space` touch | the frame pool has a PS=22 identity mapping, so one word-wise write is enough; the "install window, write by VA" route costs 768 TLB operations just to write 264 bytes |
+
+`sms_plan_prepare()` decisions, in order, first match returns:
+
+1. `next < 0` (idle): `pending_priv=1`, window untouched - idle runs identity-mapped;
+2. `next` is a privileged task: `pending_priv=1`; if its **stack is not in the window**, return at once
+   (kernel tasks keep the window as it was); if the **stack is in the window** (the new R3 case), install
+   its bound space;
+3. `next` is a user task: `pending_priv=0`, install its bound space.
+
+A window already holding that space is skipped (a request is recorded only when `sp != s_win_space[cpu]`).
+This step is per-core and needs no cross-core lock: a core's switch path only writes that core's fields.
+Application (`arkrtos_smp_sched_prepare`) is also three steps in fixed order: install the window (the frame
+may live in the new space's pages), set `PRMD.PPLV`, then clear the request (consumed exactly once, never
+left over for the next restore).
+
+#### 9.12.3 Failure codes: "not installed" and "installed but wrong" are reported separately
+
+`arkrtos_port_paging_install_space_window()`: `0` ok, `-1` space out of range, `-2` this build has no
+page-level window (a static PS=20 window is identity-mapped and already present in the secondary's
+snapshot), `-3` frame pool refused (the space has not got its 2 MB yet), `-4` demand build unsupported (the
+secondary fault path is not verified, so it does not pretend to run), `-5` read-back mismatch on the first
+and last entry pair.
+
+On failure `arkrtos_smp_sched_prepare()` **resets** `s_win_space[cpu]` to `0xFFFFFFFF` rather than keeping
+the stale value, and `[shva] win inst/rc/space` prints "how many installs / last return code / which space
+is installed" verbatim. The next user task on the secondary will then fault on its first fetch, and the
+readout reports FAIL honestly - nothing here pretends success.
+
+`arkrtos_smp_sched_win_stat(out)` returns `[0]=installs`, `[1]=rc`, `[2]=space`, and **calls
+`sms_lazy_init()` before its first read**: without it `s_win_space` is still `.bss` zero and reports "the
+window holds space 0, zero installs" - an authoritative-looking wrong answer.
+
+#### 9.12.4 Eight lessons measured the hard way
+
+1. **The window is per-core drifting state, so kernel accesses must be paired inside a critical section.**
+   Once the observer blocks in `wait_internal`, another user task can swap the window to its own space;
+   reading window VA after waking then returns someone else's frame, or traps outright (measured:
+   `badv=0x02000808`, exactly the mailbox ACK slot). So every window-VA access is written as
+   `ARKRTOS_ENTER_CRITICAL` -> install space 0 -> read/write -> `ARKRTOS_EXIT_CRITICAL`.
+2. **Code in `.appprobe` cannot be fetched in the page-level window build.** Where window VA lands is
+   decided by the installed space; space 0's window points at its own 2 MB inside the frame pool, not at the
+   physical memory QEMU loaded `.appprobe` into. The demo task therefore keeps its code in the kernel
+   identity mapping (PLV0) and puts only its **stack and mailbox** in window VA - what is being measured is
+   stack/data sharing through the window, not PLV3 protection.
+3. **The initial frame must be written through the frame-pool physical address.** Mind the in-page offset:
+   the 264 bytes written are exactly `stack_init`'s four slots (`ra/sp/era/prmd`), everything else zero.
+4. **One 2 MB window cannot host a hand-made task and the ELF loader at the same time.** The loader's
+   segments start at `0x02000000` (6392 bytes) and the user stack grows down from the window top (32 KB),
+   so the demo reserves 1 MB in: `[0x02100000,0x02100800)` for the 2 KB task stack and
+   `[0x02100800,0x02100810)` for the 4-word mailbox, with the reason written into the comment.
+5. **`tlbsrch` and MTLB `tlbrd` read-back are both unusable on QEMU 9.x.** MTLB entries report miss for
+   any VA lookup and `tlbrd` reads them as invalid; the same window entry reads back fine and bit-exact
+   through a **by-absolute-index** `tlbrd`. Using `tlbsrch` as the mapping self-check yields a stable false
+   negative (`activate` used to return `-2` every time and `install_space_window` `-5`). Reading back
+   exactly the entry we just wrote tests what install actually did; real silicon supports both, so this is
+   not a downgrade. `activate`'s "already in that space, return early" fast path got the same first/last
+   entry-pair self-check.
+6. **`PRMD.PPLV` must not be written from task attributes alone.** It must be intersected with "does the
+   frame's ERA lie in app window VA" (`la_frame_priv_auto` / `arkrtos_port_frame_apply_priv_auto`). With
+   attributes alone, a user task switched out inside a syscall returns at PLV3 onto kernel code; PPI does
+   not save ERA and `ertn` returns to the same instruction - measured as a whole machine going silent on
+   the serial port (`QEMU -d int` caught `pc=0x002203C4 arkrtos_task_wait_internal+0xa4` repeating
+   exception 7).
+7. **Every restore path must share one privilege function.** The local trap exit (`la_frame_apply_priv`),
+   the switch path (`la_switch_prepare`) and the secondary prepare
+   (`arkrtos_port_frame_apply_priv_auto`) all go through `la_frame_priv_auto` now; three copies would be
+   three different holes.
+8. **Demo/test code must not hand-roll CSR critical-section inline assembly.** The hand-written version
+   (`csrrd CRMD` + `csrxchg` clearing bit2) kept the mask constant in a callee-saved register across calls
+   at `-O2`, and once the mask turned out to be `0x10` (`CRMD.PG`) - so it disabled **paging** instead of
+   interrupts, turning any cross-page fetch into PPI and hanging the machine (`-d int` caught `pc=0x24e640`
+   repeating exception 7). Use the kernel's `ARKRTOS_ENTER_CRITICAL`: the mask is a local inside the
+   function and entry/exit are paired, independent of the caller's register allocation.
+
+#### 9.12.5 Zero footprint in the default build (with one +144 B, fully explained)
+
+R3 adds no switch; it all sits under the existing `ARKRTOS_USE_SMP` (default 0) + `ARKRTOS_USE_PAGING` +
+`ARKRTOS_USE_PRIV`. Same-configuration builds:
+
+| | text | data | bss |
+|---|---|---|---|
+| R2 baseline (`751b1cc`) | 449888 | 456 | 5128740 |
+| default build with R3 | 450032 | 456 | 5128740 |
+
+`text +144 B`; `nm` shows zero R3 symbols (`install_space_window` / `va_in_window` / `relocate_frame` /
+`apply_priv_auto` / `smp_sched_prepare` / `win_stat` / `smp_trap_stacks`). The 144 bytes have exactly one
+source: `arkrtos_port_paging_activate()`'s self-check moved from a `tlbsrch` version to a by-index
+`tlbrd` comparison of the first and last entry pairs (`la_pg_win_entry_ok`) - a **defect fix** (lesson 5),
+not new functionality: the default build has always run activate's self-check on every call.
+
+`smp_gate` pins this at the source: the `relocate_frame` call site inside `arkrtos_paging_bind_task()` must
+be preceded by the `((SMP==1)&&(PRIV==1))` guard with no `#endif` in between; weakening the guard to
+`PAGING` alone must make the same check fail.
+
+#### 9.12.6 Executed readout
+
+SMP build (`-DARKRTOS_USE_SMP=1 -DARKRTOS_CPU_NUM=2 -DARKRTOS_USE_SMP_SCHED=1`, board
+`PAGING=1 PRIV=1`), `-smp 2`, 30 s:
+
+```
+[smp] pg cpu1 on=1 rc=0 look=1
+[smp] pg result=ok
+[sched] to cpu1 rc=0
+[shva] id=9 to rc=0
+[shva] win inst=1 rc=0 space=0
+[shva] ack=1 core1=1 data=0x00001235 loops=46896894
+[shva] back rc=0 owned=0 winrc=0
+[shva] result=ok
+```
+
+Line by line:
+
+- `win inst=1 rc=0 space=0` - the secondary **installed it itself** before restoring the task, and the
+  read-back self-check passed;
+- `core1=1` - during the migration core 1's `cur` really pointed at the task (not "migrated but never ran");
+- `data=0x00001235` - CPU0 wrote seed `0x1234` at `0x02100800`, the secondary read it through the **same
+  VA**, added one and wrote it back, and CPU0 read it again at the same VA. That is direct evidence of
+  shared VA, not "both sides wrote something";
+- `loops=46896894` - the secondary really spun tens of millions of times inside that task;
+- `back rc=0 owned=0 winrc=0` - ownership is back on CPU0, core 1 is idle, and the observer's own window
+  accesses never failed;
+- the same boot also reports 8 other PASS lines (FS / ELF tamper / linux / execve / pipe / sig / MOD tamper
+  / fcsr) and no FAIL.
+
+#### 9.12.7 Gate
+
+`tools/smp_gate.py` gains **pin R3**, five layers, each with its own self-check:
+
+1. 5 port markers + 5 sched markers must each be present; replacing any of them with `/* removed */` must
+   make the check fail;
+2. `arkrtos_port_paging_install_space_window` must have **exactly 2 definitions** (page-level window flavour
+   / static window flavour);
+3. the `relocate_frame` call site in `paging.c` must be covered by the `((SMP==1)&&(PRIV==1))` guard;
+   changing the guard to `PAGING` alone must fail the check (otherwise "not compiled by default" is a
+   coincidence);
+4. object level: `smp_sched.c` built with `SMP=1 + SMP_SCHED=1` must contain `arkrtos_smp_sched_prepare`,
+   `arkrtos_smp_sched_win_stat` and `arkrtos_smp_trap_stacks`; with both switches off none of them may
+   appear; renaming `prepare` and rebuilding must make the check fail (proving it reads real symbols);
+5. the fixture (`example/qemu_loongarch64/main.c`) must actually print `[shva] win inst=` / `[shva] ack=` /
+   `[shva] result=` and call `arkrtos_smp_sched_selftest` (it has a verdict, not just prints).
+
+On the host side two coverage cases are added to `tools/coverage_gate.py`: `pagingsmp` (`arkrtos_paging.c`
+built with `SMP=1`, covering `bind_task`'s relocate call and its rollback) and `smpschedwin`
+(`arkrtos_smp_sched.c` built with `SMP=1/PAGING=1/PRIV=1/CPU_NUM=3`, covering the three `sms_plan_prepare`
+decisions and the three-step order in `prepare`). `kernelsrc/tests/test_smp_sched_win_host.c` is the new
+case; `smp_sched` state is all static with no reset hook, so every case normalises the fixture and reads
+deltas rather than absolute values.
+
+Measured: `arkrtos_paging 100.00%` (baseline 100.0), `arkrtos_smp_sched 98.67%` (baseline 97.89).
+
+#### 9.12.8 Verdict and three forbidden readings
+
+Verdict: **`r3_cross_core_shared_va_ok_on_qemu`** - on LA64 / QEMU `-smp 2` a secondary core installs the
+task's space window into its own TLB before switching to it and proves it by an indexed read-back, sets the
+restore privilege from the frame's own return address, and both cores read and write the same physical
+frame through the same window VA; the default build gains no new symbols (`text +144 B` is the activate
+self-check defect fix). **Not verified on real hardware.**
+
+1. **Not "TLB shootdown exists"**: R3 is only the third of the five prerequisites in section 5.4. What the
+   secondary got is "the entries as of that instant"; COW / space switches / mprotect rewriting those
+   entries on the primary afterwards are **invisible** to it - R4 (invalidation receipt) is not started and
+   shootdown is still not implemented.
+2. **Not "symmetric multiprocessing"**: an SVC on a secondary is still a fatal stop and there is still one
+   global scheduler; R3 only lets an explicitly migrated user task run on a secondary.
+3. **`[shva] result=ok` is not "the two windows are coherent"**: it only proves that this run, this
+   reserved VA range, at this moment, hit the same frame. The window is drifting state; when the two cores
+   run in different spaces their windows are not supposed to agree. Coherence is guaranteed by the
+   scheduler (whoever runs in a space installs it), not by hardware.
+
 ## 10. Enabling `-Wconversion` (2026-11-19): default image byte-identical
 
 `tools/warn_gate.py` goes from six options to seven; the new one is `-Wconversion`, which in

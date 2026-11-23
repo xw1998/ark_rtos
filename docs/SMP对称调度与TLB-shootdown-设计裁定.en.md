@@ -102,7 +102,7 @@ the correct shape when no shootdown exists.
 |---|---|---|
 | R1 | Main core has an IPI path | **Met (2026-11-23, measured on QEMU LA64 `-smp 2`)**: `arkrtos_port_send_ipi(0)` returns 0; the INT branch of `la_trap_c()` has an `ESTAT.IS` IPI arm that reaches `arkrtos_smp_ipi_handler()`; `arkrtos_port_irq_init()` enables this core's `CORE_EN` and `ECFG.LIE[12]`. Reading `[smp] ping ipi0=2 self=1 back1=1 result=ok`; gate `tools/smp_gate.py` pin R1. See [QEMU emulator port and verification](QEMU模拟器移植与验证.en.md) §9.10 |
 | R2 | Secondary cores enable paging | **Met (2026-11-23, measured on QEMU LA64 `-smp 2`)**: `la_mmu_init()` is split in three, static entries now come from a replayed snapshot (5 entries); `arkrtos_port_paging_enable_secondary()` writes its own `ASID`/`STLBPS`, replays the snapshot, repoints `TLBRENTRY` to `tlb_refill_entry_secondary` (one 8 KB stack per core) and finally goes DA->PG; after enabling it looks up an identity mapping through a kernel `.bss` address and returns -3 on mismatch. Reading `[smp] pg cpu1 on=1 rc=0 look=1 result=ok`; gate `tools/smp_gate.py` pin R2. See [QEMU emulator port and verification](QEMU模拟器移植与验证.en.md) §9.11 |
-| R3 | A real cross-core shared-VA caller exists | at least one non-demo caller: a user-mode task migrated by `task_to` while both cores touch the same window VA |
+| R3 | A real cross-core shared-VA caller exists | **Met (2026-11-23, measured on QEMU LA64 `-smp 2`)**: the path used is the real `arkrtos_smp_sched_task_to` migration (not a hand-rolled simulation); the task's stack and mailbox both live in window VA at `0x02100000`, and both cores read and write the same physical frame through that VA. Three pieces on the secondary side: it installs the space's window itself before switching to the user task (`arkrtos_port_paging_install_space_window` drops the old entries first, then proves the first and last entry pairs by **indexed** read-back, with codes -1/-2/-3/-4/-5); the restore privilege comes from the frame's own return address (`la_frame_priv_auto` intersects "should be a user task" with "ERA inside app window VA", shared by all three restore paths); and task binding rebuilds the initial frame inside the target space (`relocate_frame` writes straight through the frame-pool physical address, no window involved). Readings `[shva] win inst=1 rc=0 space=0` / `[shva] ack=1 core1=1 data=0x00001235 loops=46896894` / `[shva] back rc=0 owned=0` / `[shva] result=ok`; gate `tools/smp_gate.py` pin R3. See [QEMU emulator port and verification](QEMU模拟器移植与验证.en.md) §9.12 |
 | R4 | There is a receipt, not a timeout | it is provable that the target core actually invalidated (a readable counter, on silicon or QEMU) |
 | R5 | A real-board carrier exists | races and coherence protocol behaviour cannot be judged on QEMU alone |
 
@@ -116,7 +116,9 @@ scheduling)~~ **done 2026-11-23** (four changes, host and emulator readings, and
 R1 row of §5.3 and [QEMU emulator port and verification](QEMU模拟器移植与验证.en.md) §9.10; next is R2),
 ~~then R2 (only then does a secondary core have entries to invalidate)~~ **done 2026-11-23**
 (snapshot scope, per-core refill stack, the -3 self-verify and the two wrong predicates are in the R2 row
-of §5.3 and [QEMU emulator port and verification](QEMU模拟器移植与验证.en.md) §9.11; next is R3), then the protocol
+of §5.3 and [QEMU emulator port and verification](QEMU模拟器移植与验证.en.md) §9.11; next is R3), ~~R3~~ **done 2026-11-23** (the R3 row of §5.3 and
+[QEMU emulator port and verification](QEMU模拟器移植与验证.en.md) §9.12; only R4's receipt and
+R5's silicon are left for shootdown), then the protocol
 (target core receives IPI, invalidates by VA at a safe point, writes a readable counter; the initiator
 waits for the counter with a bound and reports failure honestly - never "timeout means success").
 

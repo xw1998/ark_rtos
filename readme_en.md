@@ -230,6 +230,18 @@ board self-test:
 > surface, but this host cannot execute it: the Loongson-Edu LA32 QEMU fork
 > https://gitee.com/loongson-edu/la32r-QEMU.git (machine ls3a5k32) ships Linux binaries only, and this
 > host has neither a WSL distro nor MSYS2. Section 6.1 of that document lists the machine parameters.
+>
+> **SMP** on LA64 (all measured on QEMU `-smp 2`): secondary bring-up, IPI path, per-core scheduling
+> (AMP - one global scheduler, tasks migrated explicitly by `arkrtos_smp_sched_task_to()`), AMP load
+> balancing, the main-core IPI receive path (R1), secondary paging (R2) and cross-core shared VA (R3).
+> R3 means a secondary installs the task's space window into its own TLB before switching to it
+> (proved by an indexed read-back), sets the restore privilege from the frame's own return address,
+> and both cores read/write the same physical frame through the same window VA (reading
+> `[shva] win inst=1 rc=0 space=0` / `ack=1 core1=1 data=0x00001235` / `result=ok`). R1-R3 are only
+> three of the five prerequisites for TLB shootdown; R4 (invalidation receipt) and R5 (silicon) are
+> not done, so **shootdown is still not implemented**. A task on a secondary still may not call kernel
+> APIs (SVC there is a fatal stop), so none of this is symmetric multiprocessing. See
+> docs/QEMU模拟器移植与验证.en.md sections 9.10-9.12.
 
 ### The architecture abstraction layer
 

@@ -456,6 +456,43 @@ static void test_task_back(void)
     CK_I(arkrtos_smp_sched_owned_by_other(5), 0);
 }
 
+/* ------------------------------------------------------------
+ * 7. R3 的窗口路径在本档没编（PAGING / PRIV 不同时开）
+ * ------------------------------------------------------------ */
+
+static void test_win_path_off(void)
+{
+    uint32 out[3];
+    uint32 frame[4];
+
+    /* 读数接口必须如实回答"本档没有这条路"（-1），而不是给三个 0 让人
+     * 读成"装过 0 次、窗口装着空间 0"。返回 -1 时也不许写 out：那三个字
+     * 是调用方的。 */
+    out[0] = 0xAAAA0001u;
+    out[1] = 0xAAAA0002u;
+    out[2] = 0xAAAA0003u;
+    CK_I(arkrtos_smp_sched_win_stat(out), -1);
+    CK_I(out[0], 0xAAAA0001u);
+    CK_I(out[1], 0xAAAA0002u);
+    CK_I(out[2], 0xAAAA0003u);
+    CK_I(arkrtos_smp_sched_win_stat(0), -1);
+
+    /* prepare 关档是空操作：一个字节都不许动帧。帧是即将 ertn 的现场，
+     * 在它上面写错一个字段，下一个被恢复的任务就跑到别处去了。 */
+    frame[0] = 0x11112222u;
+    frame[1] = 0x33334444u;
+    frame[2] = 0x55556666u;
+    frame[3] = 0x77778888u;
+    arkrtos_smp_sched_prepare(frame);
+    CK_I(frame[0], 0x11112222u);
+    CK_I(frame[1], 0x33334444u);
+    CK_I(frame[2], 0x55556666u);
+    CK_I(frame[3], 0x77778888u);
+
+    /* 空指针也不许崩：prepare 在异常入口里跑，崩了就是整机停机。 */
+    arkrtos_smp_sched_prepare(0);
+}
+
 #else   /* ARKRTOS_USE_SMP_SCHED == 0 */
 
 /* 关档：头文件不声明任何入口，翻译单元为空。这里只钉住"没编进来"
@@ -479,6 +516,7 @@ int main(void)
     test_migrate_and_switch();
     test_tick_and_bad_cpu();
     test_task_back();
+    test_win_path_off();
 #else
     test_compiled_out();
 #endif

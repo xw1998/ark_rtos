@@ -449,6 +449,17 @@ CASES = [
       "-include", "arkrtos_board_config.h", SIGN_KEY_DEF,
       "-fno-asynchronous-unwind-tables"], "PAGING-HOST OK",
      {"incs": ["-Iboard/qemu_loongarch64", "-Ikernelsrc/port/loongarch/la64"]}),
+    # --- 2026-11-23 新增：同一份 paging 后端的 SMP 档（R3）---
+    # 绑定新空间时多一道「请 port 在新窗口下重造初始帧」。单核档这段整段
+    # 编掉（见 paging.c 的守卫），所以必须单独起一档，否则 -2 那条失败语义
+    # 与绑定表回滚一行都进不了行号并集。
+    ("pagingsmp", "kernelsrc/tests/test_paging_host.c",
+     ["kernelsrc/src/arkrtos_paging.c"],
+     ['-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',
+      "-include", "arkrtos_board_config.h", SIGN_KEY_DEF,
+      "-DARKRTOS_USE_SMP=1", "-DARKRTOS_CPU_NUM=2",
+      "-fno-asynchronous-unwind-tables"], "PAGING-HOST OK",
+     {"incs": ["-Iboard/qemu_loongarch64", "-Ikernelsrc/port/loongarch/la64"]}),
     # --- 2026-11-22 新增：控制台登录（密码闸门）---
     # 盐与摘要是夹具，不来自任何构建生成物：盐 0x00..0x0F，口令 "s3cret!"，
     # 摘要是 sha256(salt || "s3cret!") 离线算出来的。这样用例断言的是
@@ -559,6 +570,20 @@ CASES = [
      ["-DARKRTOS_USE_SMP_SCHED=0",
       "-fno-asynchronous-unwind-tables"],
      "SMP-SCHED-HOST OK"),
+    # --- 2026-11-23 新增：次核装窗口 + 补特权级（R3）---
+    # 这一段只在 PAGING 与 PRIV 同时开时编（ARK_SMP_WIN），默认档一个符号
+    # 都不多。port 侧五个入口全是桩，验的是什么时候装、失败怎么记账、
+    # 请求有没有被一次性消费，不是 TLB 真的换了。
+    ("smpschedwin", "kernelsrc/tests/test_smp_sched_win_host.c",
+     ["kernelsrc/src/arkrtos_smp_sched.c"],
+     ['-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',
+      "-include", "arkrtos_board_config.h", SIGN_KEY_DEF,
+      "-DARKRTOS_USE_SMP_SCHED=1", "-DARKRTOS_USE_SMP=1",
+      "-DARKRTOS_CPU_NUM=3", "-DARKRTOS_TIME_SLICE_TICKS=1",
+      "-DARKRTOS_USE_PAGING=1", "-DARKRTOS_USE_PRIV=1",
+      "-fno-asynchronous-unwind-tables"],
+     "SMP-SCHED-WIN-HOST OK",
+     {"incs": ["-Iboard/qemu_loongarch64", "-Ikernelsrc/port/loongarch/la64"]}),
     ("softbus", "kernelsrc/tests/test_softbus_host.c",
      ["kernelsrc/src/arkrtos_softbus.c"],
      SOFTBUS_DEFS + ["-fno-asynchronous-unwind-tables"],

@@ -133,6 +133,34 @@ static uint32 g_unalias_va[32];
 static uint32 g_dyn_used;
 static uint32 g_flush_calls;
 
+#if (ARKRTOS_USE_SMP == 1)
+/* R3：绑定新空间时 paging 侧要请 port 在**新窗口下**把初始帧重造一遍。
+ * 重造本身是 port 的事（页表在那一侧），这里只记"请了谁、带什么参数、
+ * 被拒绝了会怎样"。 */
+static int32  g_reloc_rc;
+static uint32 g_reloc_calls;
+static uint32 g_reloc_space;
+static void  *g_reloc_frame;
+static unsigned long g_reloc_stack_top;
+static void  *g_reloc_entry;
+
+int32 arkrtos_port_paging_relocate_frame(uint32 space, void *frame,
+                                         unsigned long stack_top,
+                                         void *entry);
+
+int32 arkrtos_port_paging_relocate_frame(uint32 space, void *frame,
+                                         unsigned long stack_top,
+                                         void *entry)
+{
+    g_reloc_calls++;
+    g_reloc_space     = space;
+    g_reloc_frame     = frame;
+    g_reloc_stack_top = stack_top;
+    g_reloc_entry     = entry;
+    return g_reloc_rc;
+}
+#endif
+
 int32 arkrtos_port_paging_init(void)
 {
     return g_init_rc;
@@ -306,6 +334,14 @@ static void reset_port(void)
     g_unalias_calls   = 0u;
     g_dyn_used        = 0u;
     g_flush_calls     = 0u;
+#if (ARKRTOS_USE_SMP == 1)
+    g_reloc_rc        = 0;
+    g_reloc_calls     = 0u;
+    g_reloc_space     = 0xFFFFFFFFu;
+    g_reloc_frame     = 0;
+    g_reloc_stack_top = 0ul;
+    g_reloc_entry     = 0;
+#endif
     g_current         = 0;
     g_current_calls   = 0;
 }
@@ -567,6 +603,35 @@ static void test_bind_and_of(void)
     /* 重新绑定覆盖旧值（不叠加） */
     CK_I(arkrtos_paging_bind_task(&arkrtos_task_table[1], 1u), 0);
     CK_U(arkrtos_paging_space_of(&arkrtos_task_table[1]), 1u);
+
+#if (ARKRTOS_USE_SMP == 1)
+    /* R3：SMP 档多一道动作——请 port 在**新窗口下**重造初始帧。
+     * 单核档没有"窗口此刻装着别的空间"这条路，整段编掉（见 paging.c）。 */
+    arkrtos_mpu_module_init();
+    reset_port();
+
+    arkrtos_task_table[3].stack_ptr  = 0x00012340ul;
+    arkrtos_task_table[3].stack_top  = 0x00012400ul;
+    arkrtos_task_table[3].entry      = (void (*)(void))0x00001001ul;
+
+    CK_I(arkrtos_paging_bind_task(&arkrtos_task_table[3], 2u), 0);
+    CK_U(g_reloc_calls, 1u);
+    CK_U(g_reloc_space, 2u);
+    CK(g_reloc_frame == (void *)arkrtos_task_table[3].stack_ptr);
+    CK_U((uint32)g_reloc_stack_top, 0x00012400u);
+    CK(g_reloc_entry == (void *)arkrtos_task_table[3].entry);
+
+    /* port 拒绝重造：不许留半截绑定，返回码必须与"参数非法"(-1) 分得开。 */
+    g_reloc_rc = -3;
+    CK_I(arkrtos_paging_bind_task(&arkrtos_task_table[4], 3u), -2);
+    CK_U(arkrtos_paging_space_of(&arkrtos_task_table[4]), 0u);
+    CK_U(g_reloc_calls, 2u);
+    g_reloc_rc = 0;
+
+    /* 失败后重新绑定成功：半截状态已经被清掉，不是"卡死在那里"。 */
+    CK_I(arkrtos_paging_bind_task(&arkrtos_task_table[4], 3u), 0);
+    CK_U(arkrtos_paging_space_of(&arkrtos_task_table[4]), 3u);
+#endif
 }
 
 /* ------------------------------------------------------------------ */

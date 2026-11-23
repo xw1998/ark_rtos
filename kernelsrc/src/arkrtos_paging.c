@@ -321,6 +321,32 @@ int32 arkrtos_paging_bind_task(arkrtos_task_t *p_task, uint32 space)
     }
 
     s_pg_task_space[idx] = (uint8)space;
+
+    /* 绑定 = 「这个任务从此属于这个空间」。若它的栈落在 App 窗口 VA 上，
+     * 注册那一刻写进去的初始帧可能落在**当时装着的**另一个空间的物理页里
+     * （页级档下各空间的 2 MB 互不相干）。这里在真正属于它的窗口下把这份
+     * 初始帧重造一遍；不这么做，任务第一次被恢复时读出的 ERA/PRMD 是别人页里
+     * 的内容，ertn 直接跳到垃圾地址。
+     *
+     * +1 不是错误：那是「这一帧不是栈顶刚造出来的初始帧」（fork 的子进程帧
+     * 是拷贝过来的活现场），调用方的现场已经在目标空间里，不动就是对的。 */
+#if ((ARKRTOS_USE_SMP == 1) && (ARKRTOS_USE_PRIV == 1))
+    /* 单核档没有「窗口此刻装着别的空间」这条路径：注册与绑定都在引导核、
+     * 窗口是 space 0，注册那一写本来就落在对的页上。整段编掉，默认档的
+     * 代码与体积一个字节都不变（relocate_frame 也随之从默认档镜像里消失）。 */
+    {
+        int32 frc = arkrtos_port_paging_relocate_frame(
+                        space, (void *)p_task->stack_ptr,
+                        (unsigned long)p_task->stack_top, (void *)p_task->entry);
+
+        if(frc < 0)
+        {
+            s_pg_task_space[idx] = 0u;  /* 不留半绑定的状态 */
+            return -2;
+        }
+    }
+#endif
+
     return 0;
 }
 

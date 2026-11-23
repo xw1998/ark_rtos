@@ -8578,6 +8578,175 @@ SMP 档（`-DARKRTOS_USE_SMP=1 -DARKRTOS_CPU_NUM=2`），`-smp 2`：
 3. **不能把 `look=1` 读成「映射一致」**：它只说明这一条恒等映射在本核查得到。快照是引导核那一刻的内容，
    运行期主核新铺的条目次核看不到 —— 那正是 R3/R4 要解决的问题。
 
+### 9.12 ⑧ 跨核共享 VA（R3，2026-11-23，QEMU LA64 `-smp 2` 实跑）
+
+#### 9.12.1 缺口在哪：窗口是「每核漂移状态」，而 R2 只共享一张静态快照
+
+R2 之后次核有自己的 TLB、能跑内核代码，但它看到的用户窗口只有引导核在 `la_mmu_init()` 那一刻铺的
+那几张静态条目。`0x02000000` 起 2 MB 的 App 窗口（页级窗口档）由 256 条页级条目组成，条目的物理
+落点**由「此刻装着哪个空间」决定** —— 这是每核各一份、随任务切换不停漂移的状态。次核从没装过它，于是：
+
+- 一个用户任务的栈/帧落在窗口 VA 上时，次核拿着空窗口去恢复，第一条 `ld.d` 就 refill 失败；
+- 就算碰巧装上过一次，两个核各自漂到不同空间时，「同一段 VA」在两核上是两块不同的物理内存 ——
+  那叫各说各话，不叫共享。
+
+R3 要证明的只有一句：**同一个窗口 VA 在两核上翻译到同一块物理帧**。为此需要三件事：次核能在切到
+用户任务前自己装窗口；帧的特权级要按帧自己的返回地址定；任务注册那一写必须落在它自己空间的物理页上。
+
+#### 9.12.2 做法：port 四件 + sched 每核 prepare 栈 + paging 绑定重造帧
+
+| # | 改动 | 为什么必须 |
+|---|---|---|
+| 1 | `arkrtos_port_paging_install_space_window(space)`：先 `la_pg_drop_window()` 再 `la_pg_install_space(space)`，ASID 档下写 `CSR.ASID` 且**不还原**，末尾首末两对条目按索引读回自证 | 上一个任务可能是别的空间，同一段 VA 上的残留条目会直接翻译到别人的帧；装完就 `ertn`，还原 ASID 等于让用户代码当场 refill |
+| 2 | 该函数**不碰** `s_pg_app_space` | 那是引导核切换路径的记账；次核有自己的视图，把它改成次核眼下的空间会让引导核下一次切换判断错 |
+| 3 | `arkrtos_port_paging_va_in_window(va,len)`：整段都在 `[LA_WIN_VA, +2 MB)` 内才返回 1 | 「要不要装窗口」的判据是**地址**不是特权级：栈在窗口里的特权任务，每次压栈都要经窗口翻译 |
+| 4 | `la_frame_priv_auto(f, want_user)`：`want_user` 与「帧的 ERA 是否落在 App 窗口 VA」取交集，写 `PRMD.PPLV` | 用户任务卡在系统调用里被换下时，帧是从内核态存的，硬写 PLV3 ⇒ 内核身份在 PLV3 上取指 ⇒ PPI 死循环 |
+| 5 | `arkrtos_smp_sched.c`：每核 `s_pend_space/s_pend_priv` + `sms_plan_prepare()`（切出时判决）+ `arkrtos_smp_sched_prepare()`（恢复前落地，三步顺序：装窗口 → 定级 → 清请求）+ `arkrtos_smp_trap_stacks[CPU_NUM][4096] aligned(16)` | 判决只能在**切出**时做（那时 `next` 已知），落地只能在**恢复前**做（那时才该换窗口）；帧本身可能就在新空间的页里，顺序不能换 |
+| 6 | `arkrtos_context.S` 次核入口：切到本核静态栈之后再 `bl arkrtos_smp_sched_prepare` | 此刻 `sp` 还指向被打断任务的栈（可能就在旧窗口里），就地写栈会改到别人的帧 |
+| 7 | `arkrtos_paging_bind_task()`：绑定成功后调 `arkrtos_port_paging_relocate_frame()` 在目标空间里重造初始帧，整段包在 `((SMP==1)&&(PRIV==1))` 里 | 注册时 `stack_init` 按 `stack_top` 直接写；若栈在窗口 VA 上而窗口装着别的空间，这一写进了别人的物理页，恢复出来 ERA/PRMD 是池里的零 |
+| 8 | `relocate_frame` 按**帧池物理地址**直写（`pa = 空间帧基址 + (va - LA_WIN_VA)`），不装窗口、不切 ASID、不动 `s_pg_app_space` | 帧池有 PS=22 恒等映射，一次按字写就够；走「装窗口 → 按 VA 写」要多做 768 次 TLB 操作，只为写 264 字节 |
+
+`sms_plan_prepare()` 的判决（按顺序，命中即返回）：
+
+1. `next < 0`（idle）：`pending_priv=1`，不动窗口 —— idle 跑恒等映射；
+2. `next` 是特权任务：`pending_priv=1`；**栈不在窗口里**就直接返回（内核任务照旧不动窗口），
+   **栈在窗口里**（R3 的新情形）按它绑定的空间装；
+3. `next` 是用户任务：`pending_priv=0`，按绑定空间装。
+
+窗口已经是该空间时跳过（`sp != s_win_space[cpu]` 才记请求）—— 这一步是每核的，不需要跨核锁：
+本核的切换路径只写本核字段。落地顺序（`arkrtos_smp_sched_prepare`）也是三步不换：先装窗口
+（帧可能就在新空间的页里，不先装就对不上），再按请求补 `PRMD.PPLV`，最后清请求（一次性消费，
+绝不残留给下一次恢复）。
+
+#### 9.12.3 失败码：装没装、装上没对上，必须分开报
+
+`arkrtos_port_paging_install_space_window()`：`0` 成功、`-1` 空间号越界、`-2` 本档没有页级窗口
+（静态 PS=20 窗口是恒等映射，次核快照里已带着）、`-3` 帧池拒绝（该空间还没拿到那 2 MB）、
+`-4` 按需档不支持（次核缺页路径未验证，不假装能跑）、`-5` 铺完首末两对条目读回对不上。
+
+失败时 `arkrtos_smp_sched_prepare()` 把 `s_win_space[cpu]` **复位**成 `0xFFFFFFFF`（不是留着旧值），
+`[shva] win inst/rc/space` 三槽把「装了几次 / 最近一次返回码 / 当前装着哪个空间」原样打出来。
+下一个用户任务在次核上必然取指失败，读数会如实报 FAIL —— 这里不假装成功。
+
+`arkrtos_smp_sched_win_stat(out)` 返回 `[0]=installs`、`[1]=rc`、`[2]=space`，且**第一次读数前先
+`sms_lazy_init()`**：不初始化的话 `s_win_space` 还是 `.bss` 的 0，会被读成「窗口里装着空间 0、
+装过 0 次」—— 一个看起来权威的错答案。
+
+#### 9.12.4 实测教训（八条，都是踩出来的）
+
+1. **窗口是每核漂移状态，内核访问必须关中断成对完成。** 观察者在 `wait_internal` 里一阻塞，别的
+   用户任务就可能把窗口换成自己的空间；醒来再按窗口 VA 去读，轻则读到别人的帧、重则 PLV0 直接
+   refill 致命（实测踩到：`badv=0x02000808`，正是信箱的 ACK 槽）。所以窗口 VA 的每一次访问都写成
+   「`ARKRTOS_ENTER_CRITICAL` → 装 space 0 → 读写 → `ARKRTOS_EXIT_CRITICAL`」。
+2. **`.appprobe` 里的代码在页级窗口下取不到。** 窗口 VA 的物理落点由当前空间决定，space 0 的窗口
+   指向帧池里自己那 2 MB，不是 QEMU 把 `.appprobe` 装进去的那块。所以演示任务的代码放内核恒等映射里
+   （PLV0），只把**栈与信箱**放窗口 VA —— 要量的是「栈与数据经窗口共享」，不是 PLV3 保护。
+3. **初始帧要按帧池物理地址直写。** 注意页内偏移别丢：写下去的 264 字节正好是 `stack_init` 那四个槽
+   （`ra/sp/era/prmd`），其余全零。
+4. **同一个 2 MB 窗口不能同时住手工任务与 ELF 装载器。** 装载器的程序段在 `0x02000000` 起 6392 字节、
+   用户栈在窗口顶端向下 32 KB，演示任务因此保留 `0x02100000` 起 1 MB 处的一段：
+   `[0x02100000,0x02100800)` 任务栈 2 KB、`[0x02100800,0x02100810)` 信箱 4 字，并写进注释说明为什么。
+5. **QEMU 9.x 的 `tlbsrch` 与 MTLB `tlbrd` 读回都不可用。** MTLB 条目按 VA 查找一律报 miss、
+   `tlbrd` 读成 invalid；同一条窗口条目用**按绝对索引**的 `tlbrd` 读得出来且逐位正确。拿 `tlbsrch`
+   当映射自证会得到稳定的假阴性（`activate` 曾因此恒 `-2`、`install_space_window` 恒 `-5`）。
+   改成「按索引读回刚写下去的那一条」，验的正是 install 做的事；真机上两种读法都成立，所以这不是降级。
+   顺带把 `activate` 的「已经在该空间就直接返回」也改成带首末两对条目自证的快速路径。
+6. **`PRMD.PPLV` 不能按任务属性写。** 必须与「帧的 ERA 是否落在 App 窗口 VA」取交集
+   （`la_frame_priv_auto` / `arkrtos_port_frame_apply_priv_auto`）。只看属性会让卡在系统调用里的用户
+   任务以 PLV3 回到内核代码上取指，PPI 不写 ERA、`ertn` 又回同一条指令 —— 实测整机停住、串口一个字
+   都不再出（`QEMU -d int` 抓到 `pc=0x002203C4 arkrtos_task_wait_internal+0xa4` 反复 exception 7）。
+7. **所有恢复路径必须共用同一个定级函数。** 本核 trap 出口（`la_frame_apply_priv`）、切换路径
+   （`la_switch_prepare`）、次核 prepare（`arkrtos_port_frame_apply_priv_auto`）现在都过
+   `la_frame_priv_auto`；三处各写一遍就是三个各写各的漏洞。
+8. **演示/测试代码禁止手写 CSR 临界区内联汇编。** 手写版（`csrrd CRMD` + `csrxchg` 清 bit2）在 `-O2`
+   下把掩码常量放在一个 callee-saved 寄存器里跨调用复用，实测出现过掩码变成 `0x10`（`CRMD.PG`）——
+   那一下关掉的不是中断而是**分页**，随后任何跨页取指都变成 PPI，整机自锁（`-d int` 抓到
+   `pc=0x24e640` 反复 exception 7）。走内核的 `ARKRTOS_ENTER_CRITICAL` 宏：掩码在函数内是局部量、
+   进入/退出成对，不依赖调用者的寄存器分配。
+
+#### 9.12.5 默认档零足迹（附一处 +144 B，必须解释清楚）
+
+R3 不引入新开关，整段包在既有的 `ARKRTOS_USE_SMP`（默认 0）+ `ARKRTOS_USE_PAGING` +
+`ARKRTOS_USE_PRIV` 之下。默认档同口径编两次：
+
+| | text | data | bss |
+|---|---|---|---|
+| R2 基线（`751b1cc`） | 449888 | 456 | 5128740 |
+| 带 R3 的默认档 | 450032 | 456 | 5128740 |
+
+`text +144 B`；`nm` 里 R3 的符号（`install_space_window` / `va_in_window` / `relocate_frame` /
+`apply_priv_auto` / `smp_sched_prepare` / `win_stat` / `smp_trap_stacks`）全为 0。多出来的 144 B 只有
+一处来源：`arkrtos_port_paging_activate()` 的自证从 `tlbsrch` 版换成「按索引 `tlbrd` 比首末两对条目」
+（`la_pg_win_entry_ok`），这是一次**缺陷修复**（第 5 条教训），不是新功能 —— 默认档本来就每次都跑
+activate 的自证。
+
+`smp_gate` 在源头把这条钉住：`arkrtos_paging_bind_task()` 里 `relocate_frame` 的调用点之前必须是
+`((SMP==1)&&(PRIV==1))` 守卫且中间没有 `#endif`；把守卫弱化成只判 `PAGING`，同一条判据必须报错。
+
+#### 9.12.6 实跑读数
+
+SMP 档（`-DARKRTOS_USE_SMP=1 -DARKRTOS_CPU_NUM=2 -DARKRTOS_USE_SMP_SCHED=1`，板级
+`PAGING=1 PRIV=1`），`-smp 2`，跑 30 s：
+
+```
+[smp] pg cpu1 on=1 rc=0 look=1
+[smp] pg result=ok
+[sched] to cpu1 rc=0
+[shva] id=9 to rc=0
+[shva] win inst=1 rc=0 space=0
+[shva] ack=1 core1=1 data=0x00001235 loops=46896894
+[shva] back rc=0 owned=0 winrc=0
+[shva] result=ok
+```
+
+逐条读：
+
+- `win inst=1 rc=0 space=0` —— 次核在恢复这个任务前**自己装了一遍** space 0 的窗口，读回自证通过；
+- `core1=1` —— 迁移期间次核的 `cur` 确实指向它（不是「发了迁移但没跑」）；
+- `data=0x00001235` —— CPU0 往 `0x02100800` 写种子 `0x1234`，次核经**同一段 VA** 读出、加一、写回，
+  CPU0 再在同段 VA 读回来。这是跨核共享 VA 的直接证据，不是「两边都写了」；
+- `loops=46896894` —— 次核确实在这个任务里跑了几千万次自旋；
+- `back rc=0 owned=0 winrc=0` —— 归属回到 CPU0、次核空闲、观察者自己的窗口访问一次都没出错；
+- 同一次启动另外 8 项 PASS（FS / ELF tamper / linux / execve / pipe / sig / MOD tamper / fcsr），无 FAIL。
+
+#### 9.12.7 门禁
+
+`tools/smp_gate.py` 新增 **pin R3**，五层断言、每层都带自检：
+
+1. port 5 个标记 + sched 5 个标记逐个存在；把任一处替换成 `/* removed */` 后判据必须报出来；
+2. `arkrtos_port_paging_install_space_window` 必须**恰好 2 处定义**（页级窗口档 / 静态窗口档各一条）；
+3. `paging.c` 里 `relocate_frame` 的调用点必须被 `((SMP==1)&&(PRIV==1))` 守卫覆盖；把守卫换成只判
+   `PAGING`，判据必须报错（否则「默认档不编」只是巧合）；
+4. 对象级：`smp_sched.c` 在 `SMP=1 + SMP_SCHED=1` 下编出的目标文件里必须有
+   `arkrtos_smp_sched_prepare` / `arkrtos_smp_sched_win_stat` / `arkrtos_smp_trap_stacks`；两个开关都关
+   时一个符号都没有；把 `prepare` 改名重编，判据必须随之报错（证明读的是真符号）；
+5. 夹具（`example/qemu_loongarch64/main.c`）必须真的打印 `[shva] win inst=` / `[shva] ack=` /
+   `[shva] result=` 并调用 `arkrtos_smp_sched_selftest`（有判据，不是只打印）。
+
+宿主侧另加两档覆盖率用例（`tools/coverage_gate.py`）：`pagingsmp`（`arkrtos_paging.c` 在 `SMP=1` 下编，
+覆盖 `bind_task` 的 relocate 与失败回滚）、`smpschedwin`（`arkrtos_smp_sched.c` 在
+`SMP=1/PAGING=1/PRIV=1/CPU_NUM=3` 下编，覆盖 `sms_plan_prepare` 三条判决与 `prepare` 的三步顺序）。
+`kernelsrc/tests/test_smp_sched_win_host.c` 是新用例；`smp_sched` 的状态全是静态、没有 reset 接口，
+所以用例一律「夹具归一 + 读数取增量」收尾，不写死绝对值。
+
+两档实测：`arkrtos_paging 100.00%`（基线 100.0）、`arkrtos_smp_sched 98.67%`（基线 97.89）。
+
+#### 9.12.8 判词与三条不许读法
+
+判词：**`r3_cross_core_shared_va_ok_on_qemu`** —— LA64 / QEMU `-smp 2` 上，次核在切到用户任务前自己把
+该空间的窗口铺进本核 TLB 并按索引读回自证，恢复前按帧自己的返回地址定特权级，两核经同一段窗口 VA
+读写同一块物理帧；默认档零新符号（`text +144 B` 是 activate 自证改按索引读回的缺陷修复）。
+**真实硬件未验证。**
+
+1. **不能读成「TLB shootdown 已具备」**：R3 只是 §5.4 五条前置里的第三条。次核拿到的是「那一刻的
+   条目」，引导核之后对这个空间做 COW / 换空间 / mprotect 重写条目，次核**看不到** —— R4（失效回执）
+   一行都还没做，shootdown 仍然不实现。
+2. **不能读成「对称多核」**：次核上的 SVC 依然一律致命停机，全局调度器依然只有一份；R3 只让
+   「被显式迁移的用户任务」在次核上跑得起来。
+3. **不能把 `[shva] result=ok` 读成「两核窗口一致」**：它只证明这一次、这一段保留 VA、在这个时刻是
+   同一块帧。窗口是漂移状态，两个核各自跑到不同空间时它们的窗口本来就不该一致；一致性由调度器保证
+   （谁跑在这个空间就装这个空间），不是由硬件保证。
+
 ## 10. `-Wconversion` 开档（2026-11-19）：默认档镜像逐字节不变
 
 `tools/warn_gate.py` 的选项集从六条扩到七条，新加 `-Wconversion`（GCC 隐含同开
