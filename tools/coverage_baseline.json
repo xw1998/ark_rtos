@@ -41,11 +41,11 @@
   "arkrtos_shell_cfg": 100.0,
   "arkrtos_shell_diag": 100.0,
   "arkrtos_shell_fs": 99.4,
-  "platform_arkrtos": 98.91,
   "arkrtos_shell_image": 100.0,
   "arkrtos_shell_misc": 85.86,
   "arkrtos_shell_mod": 100.0,
   "arkrtos_shell_pmap": 99.42,
+  "arkrtos_shell_ushell": 99.17,
   "arkrtos_sign": 100.0,
   "arkrtos_smp": 89.19,
   "arkrtos_smp_sched": 97.89,
@@ -55,9 +55,10 @@
   "arkrtos_tickless": 98.97,
   "arkrtos_timer": 100.0,
   "arkrtos_trace": 100.0,
-  "arkrtos_ushell": 99.17,
   "arkrtos_utest": 83.65,
   "arkrtos_vfs": 98.7,
   "arkrtos_vfs_lfs": 99.0,
-  "arkrtos_waitmulti": 100.0
+  "arkrtos_waitmulti": 100.0,
+  "drvblk": 100.0,
+  "platform_arkrtos": 98.91
 }

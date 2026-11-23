@@ -3831,6 +3831,83 @@ def check_shell_fs_host():
        "block device / littlefs facade / VFS commands / mini / pwd-cd-df on "
        "the host, refusal paths included: %s" % last)
 
+def check_drvblk_host():
+    """Board block device registration: the two thin adapters over storage.
+
+    board/stm32f427/drvblk.c is the only seam between everything above (the
+    loader, the file system, the shell) and the two non-volatile backends this
+    board has.  It is small, but a wrong descriptor field or an address slip is
+    silent: the pool would read from the wrong address, or the NOR would answer
+    a size it does not have.  This case links the real file and walks:
+
+      * registration: int0 and nor0 are offered in order, every descriptor
+        field matches the contract (name, size, erase unit, bringup, size_fn,
+        the three IO pointers), and calling init touches neither flash nor SPI;
+      * a refused registration returns -1 without short-circuiting the other
+        backend (the second descriptor is still offered);
+      * int0: read is a memcpy from IMAGE_POOL_BASE + off; write and erase are
+        translated to the same absolute address before reaching the port layer,
+        length and buffer pass through unchanged, and a port failure comes back
+        unchanged;
+      * nor0: bringup / size_fn / read / write / erase are pure forwards, the
+        capacity is asked of the chip (the descriptor size is 0 by design), and
+        a driver failure comes back unchanged.
+
+    Honest limits:
+      1) the port layer (arkrtos_port_flash_*) and drvnor are stubs with a
+         programmable return code: what is proved is what this layer hands to
+         whom, not that a real flash controller or SPI part works;
+      2) real erase/program timing and a power-loss window are not observable
+         here;
+      3) the internal pool is really mapped at IMAGE_POOL_BASE (VirtualAlloc on
+         Windows, MAP_FIXED mmap on POSIX) -- a mapping failure is a hard FAIL,
+         never a skip, because skipping would run the memcpy assertions on an
+         illegal address and read like a pass;
+      4) measured line coverage is 100% (14 of 14 lines) under this board
+         configuration.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from coverage_gate import CASES, _case, find_cc, mingw_prefix, COMMON_INC
+
+    cc = find_cc(None)
+    if not cc:
+        fail("drvblk-host", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+
+    pick = None
+    for case in CASES:
+        name, test, mods, defs, markers, incs, _argv = _case(case)
+        if name == "drvblk":
+            pick = (test, mods, defs, incs, markers)
+            break
+    if pick is None:
+        fail("drvblk-host", "case drvblk missing from coverage_gate.CASES")
+        return
+
+    test, mods, defs, incs, markers = pick
+    with TempDir() as td:
+        exe = os.path.join(td, "drvblk" + (".exe" if os.name == "nt" else ""))
+        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+               + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            err = (r.stderr or "").strip().splitlines() or [""]
+            fail("drvblk-host", "the case did not build: %s"
+                 % [x for x in err if x.strip()][-1][:220])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or markers[0] not in txt or "FAIL" in txt:
+            fail("drvblk-host", txt.strip()[-260:])
+            return
+        last = txt.strip().splitlines()[-1]
+
+    ok("drvblk-host",
+       "board block device registration on the host (two descriptor contracts, "
+       "int0 address arithmetic, nor0 pure forwarding, refusal paths): %s" % last)
+
 def check_shell_core_host():
     """Console core: command registry, console task loop and task release.
 
@@ -5876,6 +5953,7 @@ CHECK_TABLE = (
     ("shelldiag-host", check_shell_diag_host),
     ("shellplat-host", check_shell_platform_host),
     ("shellfs-host", check_shell_fs_host),
+    ("drvblk-host", check_drvblk_host),
     ("modld", check_modld),
     ("payload-sign", check_payload_sign),
     ("stack-guard", check_stack_guard),
