@@ -92,7 +92,8 @@
 #define LX_SYS_RT_SIGPROCMASK       (135u)
 #define LX_SYS_RT_SIGRETURN         (139u)
 
-/* futex：asm-generic 98。只落 WAIT / WAKE 两档，其余 op 如实 -ENOSYS。 */
+/* futex：asm-generic 98。落 WAIT / WAKE / REQUEUE / CMP_REQUEUE /
+ * WAIT_BITSET / WAKE_BITSET 六档；PI 与 FD 类 op 如实 -ENOSYS。 */
 #define LX_SYS_FUTEX                (98u)
 
 /* errno（asm-generic 编号，程序侧读到的是 -errno） */
@@ -117,6 +118,7 @@
 #define LX_EROFS                    (30)
 #define LX_ENAMETOOLONG             (36)
 #define LX_ENOSYS                   (38)
+#define LX_ETIMEDOUT                (110)
 
 /* 每个任务可见的 fd 上限；0/1/2 是标准流，不占表项。 */
 #define LX_MAX_FD                   (8u)
@@ -137,11 +139,19 @@
 #define LX_WNOHANG                  (1u)
 #endif
 #if (ARKRTOS_USE_LINUX_FUTEX == 1)
-/* futex 的最小一档：只有 WAIT / WAKE。FUTEX_PRIVATE_FLAG 接受但本实现不区分
- * （键已经落在物理帧上，进程私有与共享走同一条查表路径）。 */
+/* futex 落的六档 op。FUTEX_PRIVATE_FLAG 接受但本实现不区分（键已经落在
+ * 物理帧上，进程私有与共享走同一条查表路径）；FUTEX_CLOCK_REALTIME 只对
+ * WAIT_BITSET 有意义，且本机没有墙钟，带 timeout 时如实 -ENOSYS。 */
 #define LX_FUTEX_WAIT               (0u)
 #define LX_FUTEX_WAKE               (1u)
+#define LX_FUTEX_REQUEUE            (3u)
+#define LX_FUTEX_CMP_REQUEUE        (4u)
+#define LX_FUTEX_WAIT_BITSET        (9u)
+#define LX_FUTEX_WAKE_BITSET        (10u)
 #define LX_FUTEX_PRIVATE_FLAG       (128u)
+#define LX_FUTEX_CLOCK_REALTIME     (256u)
+/* 「不按位筛选」：普通 WAIT 登记的就是这档，普通 WAKE 也等于全选。 */
+#define LX_FUTEX_BITSET_ALL         (0xFFFFFFFFu)
 #endif
 
 #define LX_PATH_MAX                 (64u)
@@ -340,6 +350,12 @@ static uint8   s_futex_woke[ARKRTOS_TASK_MAX_NUM];
  * 重放时用「上一次真正睡下时的地址和值」继续判。 */
 static unsigned long s_futex_uaddr[ARKRTOS_TASK_MAX_NUM];
 static uint32  s_futex_val[ARKRTOS_TASK_MAX_NUM];
+/* WAIT_BITSET 的位集与截止时刻。截止时刻是内核毫秒坐标上的绝对值（0 表示
+ * 没给 timeout）；timed 单独一格而不是拿 0 当哨兵，因为开机瞬间的绝对
+ * 截止时刻真的可能是 0。 */
+static uint32  s_futex_bitset[ARKRTOS_TASK_MAX_NUM];
+static uint32  s_futex_deadline[ARKRTOS_TASK_MAX_NUM];
+static uint8   s_futex_timed[ARKRTOS_TASK_MAX_NUM];
 #endif
 
 /* ------------------------------------------------------------- 信号状态 */
@@ -2794,7 +2810,7 @@ static int32 lx_wait4(void *p_ctx)
 #endif /* ARKRTOS_USE_LINUX_FORK == 1 */
 
 #if (ARKRTOS_USE_LINUX_FUTEX == 1)
-/* ------------------------------------------------ futex（WAIT / WAKE 最小一档） */
+/* ------------------------------- futex（WAIT/WAKE/REQUEUE/BITSET 六档） */
 
 /* 本次退出的任务如果还挂着 futex 等待，把它那一槽清掉。否则任务号被复用后
  * 新任务会继承一条「已经在等」的旧记录。 */
@@ -2802,11 +2818,14 @@ static void lx_futex_forget(int32 task_id)
 {
     if((task_id > 0) && (task_id <= (int32)ARKRTOS_TASK_MAX_NUM))
     {
-        s_futex_used[task_id - 1]  = 0u;
-        s_futex_woke[task_id - 1]  = 0u;
-        s_futex_key[task_id - 1]   = ~0UL;
-        s_futex_uaddr[task_id - 1] = 0ul;
-        s_futex_val[task_id - 1]   = 0u;
+        s_futex_used[task_id - 1]     = 0u;
+        s_futex_woke[task_id - 1]     = 0u;
+        s_futex_key[task_id - 1]      = ~0UL;
+        s_futex_uaddr[task_id - 1]    = 0ul;
+        s_futex_val[task_id - 1]      = 0u;
+        s_futex_bitset[task_id - 1]   = 0u;
+        s_futex_deadline[task_id - 1] = 0u;
+        s_futex_timed[task_id - 1]    = 0u;
     }
 }
 
@@ -2871,37 +2890,124 @@ static uint8 lx_futex_sig_pending(void)
     return ((s_sig_pending & ~s_sig_blocked) != 0u) ? 1u : 0u;
 }
 
+/* 读用户给的 timespec，换成内核毫秒坐标上的截止时刻。
+ *
+ * @param abs_flag 1 = 绝对时刻（WAIT_BITSET 的语义），0 = 相对时长（WAIT）
+ * @param p_dl     出参：截止时刻（内核毫秒）
+ * @return 0 = 没给 timeout（无限等）；1 = 已算出截止；负数 = errno
+ *
+ * 为什么先换成「截止时刻」而不是每次重放都算 now + 时长：相对超时只该从
+ * 第一次进入算起，每次时间片醒来重新加一遍的话永远也到不了期。
+ * 绝对时刻用 32 位毫秒表示时只保留「从现在起 2^31-1 ms 以内」的部分，
+ * 更远的按上限处理；这样到期判定可以用 int32 差值，不受计数回绕影响。 */
+static int32 lx_futex_timeout(void *p_ctx, uint32 abs_flag, uint32 *p_dl)
+{
+    unsigned long ua = ARKRTOS_SVC_ARG(p_ctx, 3u);
+    long          ts[2];
+    uint32        ms;
+    uint32        now;
+
+    if(ua == 0ul)
+    {
+        return 0;
+    }
+    if(arkrtos_copy_from_user(ts, (const void *)ua, (uint32)sizeof(ts)) != 0)
+    {
+        return -LX_EFAULT;
+    }
+    if((ts[0] < 0) || (ts[1] < 0) || (ts[1] >= 1000000000L))
+    {
+        return -LX_EINVAL;
+    }
+    if(ts[0] > 2147483L)
+    {
+        /* 2^31-1 ms 约 24.8 天；再长的时长按上限算，避免 32 位乘加溢出。 */
+        ms = 0x7FFFFFFFu;
+    }
+    else
+    {
+        ms = ((uint32)ts[0] * 1000u) + (uint32)(ts[1] / 1000000L);
+    }
+    now = arkrtos_kernel_get_time();
+    if(abs_flag != 0u)
+    {
+        if((int32)(ms - now) <= 0)
+        {
+            *p_dl = now;                        /* 已经过去：立刻到期 */
+            return 1;
+        }
+        ms -= now;
+    }
+    if(ms > 0x7FFFFFFFu)
+    {
+        ms = 0x7FFFFFFFu;                       /* 上限约 24.8 天 */
+    }
+    *p_dl = now + ms;
+    return 1;
+}
+
 /**
-* @brief futex(2)：只支持 FUTEX_WAIT / FUTEX_WAKE
+* @brief futex(2)：WAIT / WAKE / REQUEUE / CMP_REQUEUE / WAIT_BITSET /
+*        WAKE_BITSET 六档
 * @details 与 Linux 一致的语义：
 *            1) WAIT 在入口处读到的字 != val 时回 -EAGAIN（不睡）；
 *            2) 有未屏蔽信号时回 -EINTR（不睡）；
-*            3) WAKE 唤醒同一键上最多 val 个等待者，返回实际唤醒数。
+*            3) WAKE 唤醒同一键上最多 val 个等待者，返回实际唤醒数；
+*            4) WAIT 带 timeout（相对）到期回 -ETIMEDOUT；WAIT_BITSET 的
+*               timeout 与 Linux 一样是**绝对**时刻（本内核时钟是单调毫秒）；
+*            5) WAIT_BITSET / WAKE_BITSET 用 val3 当位集，只唤醒位集相交的
+*               等待者；普通 WAIT 登记的是全 1，所以普通 WAKE 能叫醒它，
+*               WAKE_BITSET 的任意非零位集也能；
+*            6) REQUEUE 把同一键上的等待者（先唤醒 nr_wake 个）改挂到
+*               uaddr2；CMP_REQUEUE 在动手前先核对 uaddr 上的字等于 val3，
+*               不等回 -EAGAIN。Linux 把 nr_requeue 塞在第四个参数
+*               （timeout 那一格）里，这里照抄这个复用。
 *          与 Linux 不同的边界（文档里写死）：
 *            - 键取自「物理帧 + 页内偏移」，只有落在 App 分页窗口里的字才
 *              有键；栈上的字（不在窗口里）如实回 -ENOSYS；
-*            - 其余 op（REQUEUE / PI / WAIT_BITSET …）一律 -ENOSYS；
-*            - 本内核没有无限睡眠：等待按 LX_WAIT_SLICE_MS 时间片重放，超时
-*              醒来后若值没变就继续睡，不编 -ETIMEDOUT（Linux 不传 timeout
-*              时也永远不会超时，语义一致）。
+*            - PI / FD 类 op（2 / 5..8 / 11..14）一律 -ENOSYS；
+*            - 本机没有墙钟，FUTEX_CLOCK_REALTIME 带 timeout 时如实
+*              -ENOSYS（不拿开机时长冒充绝对时刻）；
+*            - 本内核没有无限睡眠：等待按 LX_WAIT_SLICE_MS 时间片重放，没
+*              给 timeout 时重放醒来只要值没变就继续睡（Linux 语义一致）；
+*            - 被 requeue 的等待者把「期望值」更新为 uaddr2 上的当前字：
+*              requeue 本身不唤醒它（与 Linux 一致），但它下次时间片醒来
+*              不会因为两个地址的字不同而被误判成「已唤醒」。
 */
 static int32 lx_futex(void *p_ctx)
 {
     unsigned long uaddr = ARKRTOS_SVC_ARG(p_ctx, 0u);
-    uint32 op   = (uint32)ARKRTOS_SVC_ARG(p_ctx, 1u);
-    uint32 val  = (uint32)ARKRTOS_SVC_ARG(p_ctx, 2u);
-    int32  me   = (int32)arkrtos_current_task_id;
+    uint32 op_full = (uint32)ARKRTOS_SVC_ARG(p_ctx, 1u);
+    uint32 val     = (uint32)ARKRTOS_SVC_ARG(p_ctx, 2u);
+    int32  me      = (int32)arkrtos_current_task_id;
+    uint32 op      = op_full & ~(uint32)(LX_FUTEX_PRIVATE_FLAG |
+                                         LX_FUTEX_CLOCK_REALTIME);
+    uint32 rt      = (op_full & (uint32)LX_FUTEX_CLOCK_REALTIME) != 0u ? 1u : 0u;
     unsigned long key;
     uint32 word = 0u;
-
-    op &= ~(uint32)LX_FUTEX_PRIVATE_FLAG;
 
     if((me <= 0) || (me > (int32)ARKRTOS_TASK_MAX_NUM))
     {
         return -LX_EFAULT;
     }
+
+    /* CLOCK_REALTIME 只有 WAIT_BITSET 用得到；本机没有墙钟，带了 timeout
+     * 就如实 -ENOSYS。没带 timeout 时这面旗没有作用对象，直接忽略。 */
+    if(rt != 0u)
+    {
+        if(op != (uint32)LX_FUTEX_WAIT_BITSET)
+        {
+            return -LX_ENOSYS;
+        }
+        if(ARKRTOS_SVC_ARG(p_ctx, 3u) != 0ul)
+        {
+            return -LX_ENOSYS;
+        }
+    }
+
     key = lx_futex_key(uaddr);
-    if((key == ~0UL) && (uaddr == 0ul) && (op == (uint32)LX_FUTEX_WAIT))
+    if((key == ~0UL) && (uaddr == 0ul) &&
+       ((op == (uint32)LX_FUTEX_WAIT) || (op == (uint32)LX_FUTEX_WAIT_BITSET)))
     {
         /* 重放的那一次读到的 uaddr 是 0 —— 不是调用方写了 0，而是返回值
          * 寄存器就是第一个参数寄存器：阻塞路径返回 0 时，分派器把 0 写进
@@ -2926,14 +3032,21 @@ static int32 lx_futex(void *p_ctx)
         return -LX_ENOSYS;
     }
 
-    /* ---- WAKE ---- */
-    if(op == (uint32)LX_FUTEX_WAKE)
+    /* ---- WAKE / WAKE_BITSET ---- */
+    if((op == (uint32)LX_FUTEX_WAKE) || (op == (uint32)LX_FUTEX_WAKE_BITSET))
     {
         int32  want = (int32)val;
+        uint32 mask = (op == (uint32)LX_FUTEX_WAKE_BITSET) ?
+                      (uint32)ARKRTOS_SVC_ARG(p_ctx, 5u) :
+                      (uint32)LX_FUTEX_BITSET_ALL;
         int32  woke = 0;
         int32  i;
         uint32 crit;
 
+        if((op == (uint32)LX_FUTEX_WAKE_BITSET) && (mask == 0u))
+        {
+            return -LX_EINVAL;
+        }
         if(want < 0)
         {
             return -LX_EINVAL;
@@ -2941,7 +3054,8 @@ static int32 lx_futex(void *p_ctx)
         crit = ARKRTOS_ENTER_CRITICAL();
         for(i = 1; (i <= (int32)ARKRTOS_TASK_MAX_NUM) && (woke < want); i++)
         {
-            if((s_futex_used[i - 1] != 0u) && (s_futex_key[i - 1] == key))
+            if((s_futex_used[i - 1] != 0u) && (s_futex_key[i - 1] == key) &&
+               ((s_futex_bitset[i - 1] & mask) != 0u))
             {
                 s_futex_woke[i - 1] = 1u;
                 (void)arkrtos_task_wakeup_internal(i);
@@ -2952,17 +3066,87 @@ static int32 lx_futex(void *p_ctx)
         return woke;
     }
 
-    if(op != (uint32)LX_FUTEX_WAIT)
+    /* ---- REQUEUE / CMP_REQUEUE ---- */
+    if((op == (uint32)LX_FUTEX_REQUEUE) || (op == (uint32)LX_FUTEX_CMP_REQUEUE))
+    {
+        unsigned long uaddr2 = ARKRTOS_SVC_ARG(p_ctx, 4u);
+        uint32 val2 = (uint32)ARKRTOS_SVC_ARG(p_ctx, 3u);   /* nr_requeue 复用这一格 */
+        int32  want = (int32)val;
+        int32  nreq = (int32)val2;
+        unsigned long key2;
+        uint32 word2 = 0u;
+        int32  woke = 0;
+        int32  req  = 0;
+        int32  i;
+        uint32 crit;
+
+        if((want < 0) || (nreq < 0) || (uaddr2 == 0ul))
+        {
+            return -LX_EINVAL;
+        }
+        key2 = lx_futex_key(uaddr2);
+        if(key2 == ~0UL)
+        {
+            return -LX_ENOSYS;
+        }
+        if(op == (uint32)LX_FUTEX_CMP_REQUEUE)
+        {
+            uint32 expected = (uint32)ARKRTOS_SVC_ARG(p_ctx, 5u);
+
+            if(arkrtos_copy_from_user(&word, (const void *)uaddr, 4u) != 0)
+            {
+                return -LX_EFAULT;
+            }
+            if(word != expected)
+            {
+                return -LX_EAGAIN;
+            }
+        }
+        /* 被 requeue 的等待者把期望值改记成新地址上的当前字：它们本来就
+         * 不该被这次调用唤醒（Linux 里 requeue 不叫醒人）。 */
+        if(arkrtos_copy_from_user(&word2, (const void *)uaddr2, 4u) != 0)
+        {
+            return -LX_EFAULT;
+        }
+
+        crit = ARKRTOS_ENTER_CRITICAL();
+        for(i = 1; (i <= (int32)ARKRTOS_TASK_MAX_NUM) &&
+                   ((woke < want) || (req < nreq)); i++)
+        {
+            if((s_futex_used[i - 1] != 0u) && (s_futex_key[i - 1] == key))
+            {
+                if(woke < want)
+                {
+                    s_futex_woke[i - 1] = 1u;
+                    (void)arkrtos_task_wakeup_internal(i);
+                    woke++;
+                }
+                else
+                {
+                    s_futex_key[i - 1]   = key2;
+                    s_futex_uaddr[i - 1] = uaddr2;
+                    s_futex_val[i - 1]   = word2;
+                    req++;
+                }
+            }
+        }
+        ARKRTOS_EXIT_CRITICAL(crit);
+        return woke;
+    }
+
+    if((op != (uint32)LX_FUTEX_WAIT) && (op != (uint32)LX_FUTEX_WAIT_BITSET))
     {
         return -LX_ENOSYS;
     }
 
-    /* ---- WAIT：先判这是不是上一次睡下那一次的重放 ---- */
+    /* ---- WAIT / WAIT_BITSET：先判这是不是上一次睡下那一次的重放 ---- */
     {
         uint32 crit = ARKRTOS_ENTER_CRITICAL();
         uint8  resumed = ((s_futex_used[me - 1] != 0u) &&
                           (s_futex_key[me - 1] == key)) ? 1u : 0u;
         uint8  woke    = s_futex_woke[me - 1];
+        uint8  timed   = s_futex_timed[me - 1];
+        uint32 dl      = s_futex_deadline[me - 1];
 
         ARKRTOS_EXIT_CRITICAL(crit);
 
@@ -2972,6 +3156,12 @@ static int32 lx_futex(void *p_ctx)
             {
                 lx_futex_forget(me);
                 return 0;           /* 真的被 WAKE 叫醒 */
+            }
+            if((timed != 0u) &&
+               ((int32)(arkrtos_kernel_get_time() - dl) >= 0))
+            {
+                lx_futex_forget(me);
+                return -LX_ETIMEDOUT;
             }
             /* 时间片到了（本内核的兜底唤醒）：值变了就当被叫醒，交给调用方
              * 重新判断；值没变就继续睡一个时间片。 */
@@ -3000,35 +3190,69 @@ static int32 lx_futex(void *p_ctx)
         }
     }
 
-    /* ---- WAIT：第一次进入 ---- */
-    if(arkrtos_copy_from_user(&word, (const void *)uaddr, 4u) != 0)
+    /* ---- WAIT / WAIT_BITSET：第一次进入 ---- */
     {
-        return -LX_EFAULT;
-    }
-    if(word != val)
-    {
-        return -LX_EAGAIN;
-    }
-    if(lx_futex_sig_pending() != 0u)
-    {
-        return -LX_EINTR;
-    }
-    if(arkrtos_port_svc_restart(p_ctx) != 0)
-    {
-        return -LX_ENOSYS;
-    }
-    {
-        uint32 crit = ARKRTOS_ENTER_CRITICAL();
+        uint32 bits = (op == (uint32)LX_FUTEX_WAIT_BITSET) ?
+                      (uint32)ARKRTOS_SVC_ARG(p_ctx, 5u) :
+                      (uint32)LX_FUTEX_BITSET_ALL;
+        uint32 dl   = 0u;
+        uint8  timed = 0u;
+        int32  trc;
 
-        s_futex_key[me - 1]   = key;
-        s_futex_used[me - 1]  = 1u;
-        s_futex_woke[me - 1]  = 0u;
-        s_futex_uaddr[me - 1] = uaddr;
-        s_futex_val[me - 1]   = val;
-        ARKRTOS_EXIT_CRITICAL(crit);
+        if((op == (uint32)LX_FUTEX_WAIT_BITSET) && (bits == 0u))
+        {
+            return -LX_EINVAL;
+        }
+        trc = lx_futex_timeout(p_ctx,
+                               (op == (uint32)LX_FUTEX_WAIT_BITSET) ? 1u : 0u,
+                               &dl);
+        if(trc < 0)
+        {
+            return trc;
+        }
+        if(trc > 0)
+        {
+            timed = 1u;
+        }
+
+        if(arkrtos_copy_from_user(&word, (const void *)uaddr, 4u) != 0)
+        {
+            return -LX_EFAULT;
+        }
+        if(word != val)
+        {
+            return -LX_EAGAIN;
+        }
+        /* 值相等但已经过了截止时刻：直接 -ETIMEDOUT，不白睡一个时间片。 */
+        if((timed != 0u) &&
+           ((int32)(arkrtos_kernel_get_time() - dl) >= 0))
+        {
+            return -LX_ETIMEDOUT;
+        }
+        if(lx_futex_sig_pending() != 0u)
+        {
+            return -LX_EINTR;
+        }
+        if(arkrtos_port_svc_restart(p_ctx) != 0)
+        {
+            return -LX_ENOSYS;
+        }
+        {
+            uint32 crit = ARKRTOS_ENTER_CRITICAL();
+
+            s_futex_key[me - 1]      = key;
+            s_futex_used[me - 1]     = 1u;
+            s_futex_woke[me - 1]     = 0u;
+            s_futex_uaddr[me - 1]    = uaddr;
+            s_futex_val[me - 1]      = val;
+            s_futex_bitset[me - 1]   = bits;
+            s_futex_deadline[me - 1] = dl;
+            s_futex_timed[me - 1]    = timed;
+            ARKRTOS_EXIT_CRITICAL(crit);
+        }
+        (void)arkrtos_task_block_in_critical((uint32)LX_WAIT_SLICE_MS);
+        return 0;
     }
-    (void)arkrtos_task_block_in_critical((uint32)LX_WAIT_SLICE_MS);
-    return 0;
 }
 #endif /* ARKRTOS_USE_LINUX_FUTEX == 1 */
 
@@ -3604,11 +3828,14 @@ void arkrtos_linux_abi_reset(void)
 #if (ARKRTOS_USE_LINUX_FUTEX == 1)
     for(i = 0u; i < (uint32)ARKRTOS_TASK_MAX_NUM; i++)
     {
-        s_futex_key[i]   = ~0UL;
-        s_futex_used[i]  = 0u;
-        s_futex_woke[i]  = 0u;
-        s_futex_uaddr[i] = 0ul;
-        s_futex_val[i]   = 0u;
+        s_futex_key[i]      = ~0UL;
+        s_futex_used[i]     = 0u;
+        s_futex_woke[i]     = 0u;
+        s_futex_uaddr[i]    = 0ul;
+        s_futex_val[i]      = 0u;
+        s_futex_bitset[i]   = 0u;
+        s_futex_deadline[i] = 0u;
+        s_futex_timed[i]    = 0u;
     }
 #endif
 

@@ -153,6 +153,7 @@ int main(void)
 #define T_EPIPE             (32)
 #define T_ENAMETOOLONG      (36)
 #define T_ENOSYS            (38)
+#define T_ETIMEDOUT         (110)
 
 #define T_O_NONBLOCK        (0x800u)
 #define T_O_RDWR            (0x2u)
@@ -363,6 +364,11 @@ void arkrtos_port_exit_critical(uint32 state)
  * 键因此是可算的：u_ptr(0x10) -> 0x00100010。 */
 #define T_FUTEX_WAIT        (0u)
 #define T_FUTEX_WAKE        (1u)
+#define T_FUTEX_REQUEUE     (3u)
+#define T_FUTEX_CMP_REQUEUE (4u)
+#define T_FUTEX_WAIT_BITSET (9u)
+#define T_FUTEX_WAKE_BITSET (10u)
+#define T_FUTEX_CLOCK_REALTIME (256u)
 
 int32 g_block_calls;
 uint32 g_block_ms;
@@ -813,7 +819,7 @@ static int call(t_ctx *c, uint32 nr, unsigned long a0, unsigned long a1,
  * 单独一个入口而不是把 call() 扩成变参：变参在 -Wformat 之外什么都检查不到，
  * 而这里写错的后果是「参数错位但照样返回一个数」。
  * 只有文件映射档用得到（mmap 带 fd），其它档编进来就是一条未使用函数告警。 */
-#if (ARKRTOS_USE_PAGING_FILEMAP == 1)
+#if (ARKRTOS_USE_PAGING_FILEMAP == 1) || (ARKRTOS_USE_LINUX_FUTEX == 1)
 static int call6(t_ctx *c, uint32 nr, unsigned long a0, unsigned long a1,
                  unsigned long a2, unsigned long a3, unsigned long a4,
                  unsigned long a5)
@@ -2491,7 +2497,7 @@ static void t_task_exit(t_ctx *c)
 }
 
 #if (ARKRTOS_USE_LINUX_FUTEX == 1)
-/* 分组 14：futex 的 WAIT / WAKE 最小一档
+/* 分组 14：futex 的六档 op（WAIT / WAKE / REQUEUE / CMP_REQUEUE / 位集 / 超时）
  *
  * 判据全部落在「程序看到什么」上：返回值、有没有真的登记、唤醒数、销账。
  * 键是「物理帧 + 页内偏移」，所以 u_ptr(0x10) 与 u_ptr(0x2010) 必须是两个
@@ -2532,8 +2538,10 @@ static void t_futex(t_ctx *c)
     (void)call(c, T_NR_FUTEX, noframe, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
     ck_ret(c, -T_ENOSYS, "futex 未驻留的页回 -ENOSYS");
 
-    /* 不认识的 op：如实 -ENOSYS，不猜成 WAIT */
-    (void)call(c, T_NR_FUTEX, w0, 9UL, 5UL, 0UL);
+    /* 不认识的 op：如实 -ENOSYS，不猜成 WAIT。
+     * 用 6（FUTEX_LOCK_PI）：9 / 10 已经是 WAIT_BITSET / WAKE_BITSET 了，
+     * 拿它们当「未知 op」会让夹具与实现自相矛盾。 */
+    (void)call(c, T_NR_FUTEX, w0, 6UL, 5UL, 0UL);
     ck_ret(c, -T_ENOSYS, "futex 未知 op 回 -ENOSYS");
 
     /* 唤醒数取负：-EINVAL */
@@ -2678,6 +2686,205 @@ static void t_futex(t_ctx *c)
     ck_ret(c, -T_EINTR, "futex WAIT 有未屏蔽信号回 -EINTR");
     (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
     ck_ret(c, 0, "futex EINTR 之后没有留下等待登记");
+
+    /* ---------------- 第二档：REQUEUE / CMP_REQUEUE / BITSET / TIMEOUT ----------------
+     * 这一段的每个条目都独立造自己的状态：先登记一个等待者，再验证「这次的 op
+     * 对它做了什么」，最后把账销干净，下一条从空表开始。
+     *
+     * 先屏蔽 SIGUSR1：上面 EINTR 那两条把 pending 位留在位上了（处理函数故意
+     * 投递不到），不屏蔽的话下面每次 WAIT 都会先回 -EINTR。块尾恢复。 */
+    u_put32(T_SET_OFF, 0x200u);        /* bit9 = 信号 10 */
+    (void)call(c, T_NR_RT_SIGPROCMASK, 0UL, u_ptr(T_SET_OFF), 0UL,
+               (unsigned long)T_SIGSET_BYTES);
+    ck_ret(c, 0, "futex 第二档前置：屏蔽 SIGUSR1（EINTR 那条留下的 pending）");
+
+    /* ---- timeout（相对，WAIT 的语义） ---- */
+    u_put32(0x10u, 5u);
+    g_restart_rc = 0;
+    g_ms = 1000u;
+    u_put32(0x60u, 0u);                /* tv_sec  */
+    u_put32(0x64u, 50000000u);         /* tv_nsec = 50 ms */
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, u_ptr(0x60u));
+    ck_ret(c, 0, "futex WAIT 带相对 timeout 先睡下");
+    g_ms = 1030u;
+    (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT, 5UL, u_ptr(0x60u));
+    ck_ret(c, 0, "futex 没到期的那次重放继续睡（不重新计时）");
+    g_ms = 1060u;
+    (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT, 5UL, u_ptr(0x60u));
+    ck_ret(c, -T_ETIMEDOUT, "futex WAIT 相对 timeout 到期回 -ETIMEDOUT");
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 0, "futex 超时之后没有留下等待登记");
+
+    /* 相对 timeout 为 0：值相等也当场 -ETIMEDOUT，不白睡一个时间片 */
+    u_put32(0x60u, 0u);
+    u_put32(0x64u, 0u);
+    {
+        int32 blocks0 = g_block_calls;
+
+        (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL,
+                   u_ptr(0x60u));
+        ck_ret(c, -T_ETIMEDOUT, "futex WAIT 相对 timeout 为 0 当场 -ETIMEDOUT");
+        ck(g_block_calls == blocks0, "futex 当场超时的那次一次也没睡");
+    }
+
+    /* timespec 本身不合法：-EINVAL（不是当成 0） */
+    u_put32(0x60u, 0u);
+    u_put32(0x64u, 1000000000u);       /* nsec 必须 < 1e9 */
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, u_ptr(0x60u));
+    ck_ret(c, -T_EINVAL, "futex timeout 的 nsec 越界回 -EINVAL");
+    u_put32(0x60u, 0xFFFFFFFFu);       /* tv_sec 是负数（long） */
+    u_put32(0x64u, 0u);
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, u_ptr(0x60u));
+    ck_ret(c, -T_EINVAL, "futex timeout 的 tv_sec 为负回 -EINVAL");
+
+    /* timeout 指针读不出来：-EFAULT（不登记、也不是 EAGAIN） */
+    u_put32(0x60u, 0u);
+    u_put32(0x64u, 50000000u);
+    g_from_budget = 0;
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, u_ptr(0x60u));
+    g_from_budget = -1;
+    ck_ret(c, -T_EFAULT, "futex timeout 指针读不出来回 -EFAULT");
+
+    /* WAKE 之后再超时也没关系：先被叫醒就该回 0，不是 -ETIMEDOUT */
+    g_ms = 2000u;
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, u_ptr(0x60u));
+    ck_ret(c, 0, "futex 带 timeout 登记一次");
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 1, "futex 带 timeout 的等待者也能被 WAKE 叫醒");
+    g_ms = 999999u;                    /* 远超截止时刻 */
+    (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT, 5UL, u_ptr(0x60u));
+    ck_ret(c, 0, "futex 被 WAKE 叫醒优先于超时（回 0 不是 -ETIMEDOUT）");
+
+    /* ---- WAIT_BITSET / WAKE_BITSET ---- */
+    u_put32(0x10u, 5u);
+    (void)call6(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT_BITSET, 5UL, 0UL,
+                0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "futex WAIT_BITSET 位集为 0 回 -EINVAL");
+
+    (void)call6(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT_BITSET, 5UL, 0UL,
+                0UL, 2UL);
+    ck_ret(c, 0, "futex WAIT_BITSET 登记位集 2 并睡下");
+    (void)call6(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE_BITSET, 1UL, 0UL,
+                0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "futex WAKE_BITSET 位集为 0 回 -EINVAL");
+    (void)call6(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE_BITSET, 1UL, 0UL,
+                0UL, 1UL);
+    ck_ret(c, 0, "futex WAKE_BITSET 位集不相交时不唤醒");
+    (void)call6(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT_BITSET, 5UL, 0UL,
+                0UL, 2UL);
+    ck_ret(c, 0, "futex WAIT_BITSET 没被唤醒前重放继续睡");
+    (void)call6(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE_BITSET, 1UL, 0UL,
+                0UL, 2UL);
+    ck_ret(c, 1, "futex WAKE_BITSET 位集相交时唤醒 1 个");
+    (void)call6(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT_BITSET, 5UL, 0UL,
+                0UL, 2UL);
+    ck_ret(c, 0, "futex WAIT_BITSET 被叫醒后重放回 0");
+
+    /* 普通 WAKE 不按位筛选：能叫醒位集等待者（Linux 语义） */
+    (void)call6(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT_BITSET, 5UL, 0UL,
+                0UL, 4UL);
+    ck_ret(c, 0, "futex WAIT_BITSET 再登记一次（位集 4）");
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 1, "futex 普通 WAKE 能叫醒位集等待者");
+    (void)call6(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT_BITSET, 5UL, 0UL,
+                0UL, 4UL);
+    ck_ret(c, 0, "futex 被普通 WAKE 叫醒的位集重放回 0");
+
+    /* WAIT_BITSET 的 timeout 是**绝对**时刻（与 Linux 一致），不是相对时长 */
+    g_ms = 5000u;
+    u_put32(0x60u, 2u);                /* 绝对 2000 ms，已经过去 */
+    u_put32(0x64u, 0u);
+    (void)call6(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT_BITSET, 5UL,
+                u_ptr(0x60u), 0UL, 1UL);
+    ck_ret(c, -T_ETIMEDOUT, "futex WAIT_BITSET 绝对时刻已过回 -ETIMEDOUT");
+    u_put32(0x60u, 6u);                /* 绝对 6000 ms，还差 1000 ms */
+    (void)call6(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT_BITSET, 5UL,
+                u_ptr(0x60u), 0UL, 1UL);
+    ck_ret(c, 0, "futex WAIT_BITSET 绝对时刻未到先睡下");
+    g_ms = 6100u;
+    (void)call6(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT_BITSET, 5UL,
+                u_ptr(0x60u), 0UL, 1UL);
+    ck_ret(c, -T_ETIMEDOUT, "futex WAIT_BITSET 绝对时刻到了回 -ETIMEDOUT");
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 0, "futex WAIT_BITSET 超时之后没有留下等待登记");
+
+    /* CLOCK_REALTIME：本机没有墙钟，带 timeout 如实 -ENOSYS；
+     * 不带 timeout 时这面旗没有作用对象（忽略），但仍只对 WAIT_BITSET 合法。 */
+    g_ms = 7000u;
+    u_put32(0x60u, 8u);
+    u_put32(0x64u, 0u);
+    (void)call6(c, T_NR_FUTEX, w0,
+                (unsigned long)(T_FUTEX_WAIT_BITSET | T_FUTEX_CLOCK_REALTIME),
+                5UL, u_ptr(0x60u), 0UL, 1UL);
+    ck_ret(c, -T_ENOSYS, "futex CLOCK_REALTIME 带 timeout 回 -ENOSYS（没有墙钟）");
+    (void)call6(c, T_NR_FUTEX, w0,
+                (unsigned long)(T_FUTEX_WAIT | T_FUTEX_CLOCK_REALTIME),
+                5UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_ENOSYS, "futex CLOCK_REALTIME 配非 WAIT_BITSET 回 -ENOSYS");
+
+    /* ---- REQUEUE ---- */
+    u_put32(0x10u, 5u);
+    u_put32(0x2010u, 7u);
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, 0, "futex REQUEUE 前置：先登记一个等待者");
+    (void)call6(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_REQUEUE, 0UL, 1UL, w1,
+                0UL);
+    ck_ret(c, 0, "futex REQUEUE nr_wake=0 回 0（只改挂、不唤醒）");
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 0, "futex 改挂之后原地址上没有等待者了");
+    (void)call(c, T_NR_FUTEX, w1, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 1, "futex 改挂之后新地址上的 WAKE 叫醒 1 个");
+    (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, 0, "futex 被改挂的等待者重放回 0（用新地址与新期望值）");
+
+    /* nr_wake 与 nr_requeue 同时给：先唤醒再改挂，返回的是唤醒数 */
+    u_put32(0x10u, 5u);
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, 0, "futex REQUEUE 前置：再登记一个等待者");
+    (void)call6(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_REQUEUE, 1UL, 0UL, w1,
+                0UL);
+    ck_ret(c, 1, "futex REQUEUE nr_wake=1 回 1");
+    (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, 0, "futex REQUEUE 唤醒的那条重放回 0");
+    (void)call(c, T_NR_FUTEX, w1, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 0, "futex nr_requeue=0 时没有把等待者挂到新地址");
+
+    /* ---- CMP_REQUEUE ---- */
+    u_put32(0x10u, 5u);
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, 0, "futex CMP_REQUEUE 前置：再登记一个等待者");
+    (void)call6(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_CMP_REQUEUE, 0UL, 1UL,
+                w1, 9UL);
+    ck_ret(c, -T_EAGAIN, "futex CMP_REQUEUE 期望值不符回 -EAGAIN");
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 1, "futex CMP_REQUEUE 判不通过时没动过等待者");
+    (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, 0, "futex 它还是被原地址的 WAKE 叫醒（重放回 0）");
+
+    u_put32(0x10u, 5u);
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, 0, "futex CMP_REQUEUE 前置：再登记一个等待者");
+    (void)call6(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_CMP_REQUEUE, 1UL, 1UL,
+                w1, 5UL);
+    ck_ret(c, 1, "futex CMP_REQUEUE 期望值相符时唤醒 nr_wake 个");
+    (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, 0, "futex CMP_REQUEUE 唤醒的那条重放回 0");
+
+    /* 参数与键的边界 */
+    (void)call6(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_REQUEUE, 0UL, 0UL, 0UL,
+                0UL);
+    ck_ret(c, -T_EINVAL, "futex REQUEUE 缺 uaddr2 回 -EINVAL");
+    (void)call6(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_REQUEUE, 0UL, 1UL,
+                U_BASE - 8UL, 0UL);
+    ck_ret(c, -T_ENOSYS, "futex REQUEUE 目标地址没有键回 -ENOSYS");
+    (void)call6(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_REQUEUE, 0UL,
+                (unsigned long)-1, w1, 0UL);
+    ck_ret(c, -T_EINVAL, "futex REQUEUE nr_requeue 为负回 -EINVAL");
+
+    /* 块尾：恢复信号屏蔽（与进入这一段之前的状态一致） */
+    (void)call(c, T_NR_RT_SIGPROCMASK, 1UL, u_ptr(T_SET_OFF), 0UL,
+               (unsigned long)T_SIGSET_BYTES);
+    ck_ret(c, 0, "futex 第二档收尾：恢复 SIGUSR1 屏蔽");
 
     /* 收尾：把端口能力恢复成默认，后面的分组依赖 -1 */
     g_restart_rc = -1;

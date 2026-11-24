@@ -187,20 +187,25 @@ EXPECT_SHM_CHECKS = 40
 # 唤醒者位掩码 3（看到 1 且 WAKE 回 1）。
 # 多时间片段再 7 条：共享页映射、clone>0、跨时间片 WAIT==0、父看到新值、
 # WAIT 墙钟 >= 150 ms、子被 reap、唤醒者位掩码 3。合计 49 + 7 = 56 条。
-EXPECT_FUTEX_CHECKS = 56
+# 第二档（位集 / 超时 / 改挂）再 20 条：单进程 9 条参数与语义（位集 0 两条
+# -EINVAL、无等待者 WAKE_BITSET==0、相对 0 超时 -ETIMEDOUT、绝对时刻已过
+# -ETIMEDOUT、无等待者 REQUEUE==0、CMP_REQUEUE 期望值不符 -EAGAIN、缺
+# uaddr2 -EINVAL、mmap）、相对 50 ms 超时 2 条（返回值 + 墙钟 >= 50 ms）、
+# 位集跨进程 4 条、改挂跨进程 5 条。合计 56 + 20 = 76 条。
+EXPECT_FUTEX_CHECKS = 76
 # FILEMAP 段多 20 条：只读私有映射的内容三处读数（首字节 / 第 25 / 第 4095）、
 # 三条参数校验（未对齐 offset -EINVAL、坏 fd -EBADF、只读 fd 上的可写共享
 # -EACCES）、offset=4096 的映射与 EOF 补零、O_RDWR 打开、可写共享映射与
 # msync/munmap 两次写回、私有可写映射与它不落盘、以及最后把「共享写落盘 +
 # 私有写不落盘」合成一个位掩码读数（20 % 26 那对字节）。合计 69 条；
 # 再叠 futex 档的 15 条（含多时间片 7 条）= 76 条。
-EXPECT_FILEMAP_CHECKS = 76
+EXPECT_FILEMAP_CHECKS = 96
 # MPROTECT 段多 10 条：8 KB 映射、mprotect(RO)==0、只读页仍可读、**同一对里的
 # 另一半 4 KB 仍可写**（4 KB 粒度与 8 KB 粒度在此分家）、mprotect(RW)==0、
 # 恢复保护后写回得去、再设 RO、为违规写 fork 出子进程、子进程被摘掉（不是重启）、
 # 父进程那一页一个字节没变、状态字是「被信号终止」而不是 exit 码。
 # 合计 80 条；再叠 futex 档的 15 条（含多时间片 7 条）= 87 条。
-EXPECT_MPROTECT_CHECKS = 87
+EXPECT_MPROTECT_CHECKS = 107
 
 FAILS = []
 PASSES = []
@@ -752,8 +757,10 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
             "没有等待者时 WAKE 居然回非 0"
         req["futex(WAIT) on a different value == -EAGAIN -> -11 ok"] = \
             "值不等时 WAIT 没有立即回 -EAGAIN（说明它去睡了）"
-        req["futex op other than WAIT/WAKE == -ENOSYS -> -38 ok"] = \
-            "不认识的 futex op 被接受了"
+        # 6 = FUTEX_LOCK_PI：PI 类 op 仍未实现，必须如实回 -ENOSYS。
+        # （这一条原来拿 op 9 测，9 现在是 WAIT_BITSET，已实现，不能再当反例。）
+        req["futex PI op (LOCK_PI) == -ENOSYS -> -38 ok"] = \
+            "PI 类 futex op 被接受了（它必须如实回 -ENOSYS）"
         req["clone for futex child > 0 -> 1 ok"] = "futex 唤醒者没 fork 出来"
         # 最要紧的一条：LA64 上阻塞返回时 a0 被写成 0，而 a0 就是 uaddr。
         req["futex(WAIT) returned 0 after being woken -> 0 ok"] = \
@@ -778,6 +785,45 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
             "多时间片的 futex 子进程没被 reap"
         req["futex multislice waker saw 1 and woke 1 (bits=3) -> 3 ok"] = \
             "多时间片唤醒者没同时看到「父等的还是 1」与「WAKE 回 1」"
+        # 第二档：位集 / 超时 / 改挂（REQUEUE、CMP_REQUEUE、WAIT_BITSET、
+        # WAKE_BITSET、相对 50 ms 超时）。这些是 glibc 的 condvar 真正走的路。
+        req["futex2 mmap shared page > 0 -> 1 ok"] = \
+            "第二档 futex 的共享页没建起来"
+        req["futex(WAIT_BITSET) with bitset 0 == -EINVAL -> -22 ok"] = \
+            "位集为 0 的 WAIT_BITSET 被接受了（Linux 回 -EINVAL）"
+        req["futex(WAKE_BITSET) with bitset 0 == -EINVAL -> -22 ok"] = \
+            "位集为 0 的 WAKE_BITSET 被接受了（Linux 回 -EINVAL）"
+        req["futex(WAKE_BITSET) with no waiter == 0 -> 0 ok"] = \
+            "没有等待者时 WAKE_BITSET 回非 0"
+        req["futex(WAIT) with zero relative timeout == -ETIMEDOUT -> -110 ok"] = \
+            "相对超时为 0 的 WAIT 没有立刻回 -ETIMEDOUT（去睡了一个时间片）"
+        req["futex(WAIT_BITSET) with absolute past == -ETIMEDOUT -> -110 ok"] = \
+            "绝对时刻已经过去的 WAIT_BITSET 没有立刻回 -ETIMEDOUT" \
+            "（说明它把绝对时刻当成了相对时长）"
+        req["futex(REQUEUE) with no waiter == 0 -> 0 ok"] = \
+            "没有等待者时 REQUEUE 回非 0"
+        req["futex(CMP_REQUEUE) with mismatched value == -EAGAIN -> -11 ok"] = \
+            "CMP_REQUEUE 没核对期望值（Linux 在不等时回 -EAGAIN）"
+        req["futex(REQUEUE) without uaddr2 == -EINVAL -> -22 ok"] = \
+            "缺 uaddr2 的 REQUEUE 被接受了"
+        req["futex(WAIT) with 50 ms timeout == -ETIMEDOUT -> -110 ok"] = \
+            "相对 50 ms 超时没到期（说明超时被每次时间片重放重新计时了）"
+        req["futex(WAIT) timeout spanned >= 50 ms -> 1 ok"] = \
+            "这次带超时的 WAIT 不到 50 ms 就返回了，等于没测到超时"
+        req["clone for futex2 bitset child > 0 -> 1 ok"] = \
+            "位集用例的唤醒者没 fork 出来"
+        req["futex(WAIT_BITSET) returned 0 after being woken -> 0 ok"] = \
+            "按位集等待的父进程没被叫醒"
+        req["futex2 bitset waker saw 1, woke only matching (bits=7) -> 7 ok"] = \
+            "位集要么被忽略了（不相交的掩码也叫醒了人）、要么相交的掩码叫不醒"
+        req["clone for futex2 requeue child > 0 -> 1 ok"] = \
+            "改挂用例的唤醒者没 fork 出来"
+        req["futex(WAIT) on requeued word returned 0 -> 0 ok"] = \
+            "被改挂的父进程没能在新地址上被叫醒"
+        req["futex2 requeue: old word has no waiter left -> 0 ok"] = \
+            "改挂之后旧地址上还有等待者（改挂没把等待者搬走）"
+        req["futex2 requeue child saw 1 and new-word WAKE woke 1 (bits=3) -> 3 ok"] = \
+            "改挂用例的读数不全（没看到父等的 1，或新地址的 WAKE 没真叫醒人）"
     if filemap:
         req["filemap first byte is file first byte -> 65 ok"] = \
             "文件内容没装进映射区（首字节不是 'A'）"
@@ -817,6 +863,18 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
     for line, why in req.items():
         if count(lambda s2, t=line: s2.strip() == "[fork] " + t) != 1:
             problems.append("缺 `[fork] %s` —— %s" % (line, why))
+    if futex:
+        # 子进程号会随前面的用例复用（这里是 6 / 12 都出现过），所以这两条
+        # 只判「形态」：确实是某一次 reap 读数且 ok。
+        for pat, why in (
+            (r"^\[fork\] futex2 bitset child reaped -> \d+ ok$",
+             "位集用例的子进程没被 reap"),
+            (r"^\[fork\] futex2 requeue child reaped -> \d+ ok$",
+             "改挂用例的子进程没被 reap"),
+        ):
+            if re.search(pat, text.replace("\r\n", "\n"), re.M) is None:
+                problems.append("缺 `%s` 形态的读数 —— %s"
+                                % (pat.replace("^", "").replace("$", ""), why))
     if passline != 1:
         problems.append("缺 `[fork] PASS: child ran in its own space, exit 42 reaped`")
     if exitline != 1:
@@ -972,6 +1030,18 @@ def self_check(good_text, cow=False, shm=False, futex=False, filemap=False,
             "futex 多时间片没跨过时间片": lambda s: s.replace(
                 "[fork] futex multislice WAIT spanned >= 150 ms (crossed a slice) -> 1 ok",
                 "[fork] futex multislice WAIT spanned >= 150 ms (crossed a slice) -> 0 FAIL (want 1)"),
+            # 位集被忽略的形态：不相交的掩码也叫醒了人 ⇒ 位集那条读数从 7 变 3。
+            "futex 位集被忽略": lambda s: s.replace(
+                "[fork] futex2 bitset waker saw 1, woke only matching (bits=7) -> 7 ok",
+                "[fork] futex2 bitset waker saw 1, woke only matching (bits=7) -> 3 FAIL (want 7)"),
+            # 改挂没生效的形态：旧地址上还有等待者。
+            "futex 改挂没搬走等待者": lambda s: s.replace(
+                "[fork] futex2 requeue: old word has no waiter left -> 0 ok",
+                "[fork] futex2 requeue: old word has no waiter left -> 1 FAIL (want 0)"),
+            # 超时被重新计时的形态：那次 WAIT 根本没到期。
+            "futex 超时没到期": lambda s: s.replace(
+                "[fork] futex(WAIT) with 50 ms timeout == -ETIMEDOUT -> -110 ok",
+                "[fork] futex(WAIT) with 50 ms timeout == -ETIMEDOUT -> 0 FAIL (want -110)"),
         })
     if mprotect:
         mutations.update({

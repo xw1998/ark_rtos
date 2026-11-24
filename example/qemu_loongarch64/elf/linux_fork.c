@@ -74,7 +74,12 @@
 #define LX_FUTEX            98
 #define LX_FUTEX_WAIT       0
 #define LX_FUTEX_WAKE       1
+#define LX_FUTEX_REQUEUE    3
+#define LX_FUTEX_CMP_REQUEUE 4
+#define LX_FUTEX_WAIT_BITSET 9
+#define LX_FUTEX_WAKE_BITSET 10
 #define LX_EAGAIN           11
+#define LX_ETIMEDOUT        110
 
 /* 文件映射（U-21）这一档要用的号：openat / mmap 已经有了 mmap 222，
  * 另外两个是 munmap 215 与 msync 227。 */
@@ -940,8 +945,10 @@ void linux_main(unsigned long sp)
             check("futex(WAIT) on a different value == -EAGAIN",
                   lx4(LX_FUTEX, (lx_long)(unsigned long)fw, LX_FUTEX_WAIT,
                       7, 0), -LX_EAGAIN);
-            check("futex op other than WAIT/WAKE == -ENOSYS",
-                  lx3(LX_FUTEX, (lx_long)(unsigned long)fw, 9, 0), -LX_ENOSYS);
+            /* 6 = FUTEX_LOCK_PI：PI 类 op 一律 -ENOSYS。这一条不能再拿 9
+             * 来测——9 已经是 WAIT_BITSET，是实现了的合法 op。 */
+            check("futex PI op (LOCK_PI) == -ENOSYS",
+                  lx3(LX_FUTEX, (lx_long)(unsigned long)fw, 6, 0), -LX_ENOSYS);
 
             *fw = 1ul;
             ppid = lx1(LX_GETPID, 0);
@@ -1163,6 +1170,247 @@ void linux_main(unsigned long sp)
                   (status8 >> 8) & 0xFF, 3);
         }
     }
+
+    /* ---------------- futex 第二档：位集 / 超时 / 改挂 ----------------
+     * 单进程那几条判「参数与语义」：位集 0、绝对时刻已过、相对 0、
+     * REQUEUE 缺 uaddr2 / 期望值不符。
+     * 跨进程那两条判「真的按位集筛选」「真的把等待者挂到新地址」：父进程
+     * 先睡下（单核上父睡了才轮到子），子进程再动手，所以「掩码不相交时
+     * 回 0」确实是在有一个等待者的前提下读到的。
+     * 反假绿都落在读数上：位集被忽略时 mask=2 的 WAKE 永远回 0；requeue
+     * 没生效时新地址的 WAKE 也永远回 0。 */
+    {
+        volatile unsigned long *q;
+        lx_long qa;
+        long    zero[2];
+        long    past[2];
+        long    dur[2];
+        long    t0;
+        long    t1;
+        lx_long rq;
+
+        zero[0] = 0; zero[1] = 0;
+        past[0] = 0; past[1] = 0;      /* 单调时钟 0 ms 一定已经过去 */
+        dur[0]  = 0; dur[1] = 50000000; /* 相对 50 ms */
+
+        qa = lx6(LX_MMAP, 0, 4096, 3,
+                 LX_MAP_SHARED | LX_MAP_ANONYMOUS, -1, 0);
+        check("futex2 mmap shared page > 0", (qa > 0) ? 1 : 0, 1);
+
+        if (qa > 0)
+        {
+            q = (volatile unsigned long *)(unsigned long)qa;
+            *q = 1ul;
+
+            check("futex(WAIT_BITSET) with bitset 0 == -EINVAL",
+                  lx6(LX_FUTEX, (lx_long)(unsigned long)q,
+                      LX_FUTEX_WAIT_BITSET, 1, 0, 0, 0), -LX_EINVAL);
+            check("futex(WAKE_BITSET) with bitset 0 == -EINVAL",
+                  lx6(LX_FUTEX, (lx_long)(unsigned long)q,
+                      LX_FUTEX_WAKE_BITSET, 1, 0, 0, 0), -LX_EINVAL);
+            check("futex(WAKE_BITSET) with no waiter == 0",
+                  lx6(LX_FUTEX, (lx_long)(unsigned long)q,
+                      LX_FUTEX_WAKE_BITSET, 1, 0, 0, 1), 0);
+            check("futex(WAIT) with zero relative timeout == -ETIMEDOUT",
+                  lx4(LX_FUTEX, (lx_long)(unsigned long)q, LX_FUTEX_WAIT, 1,
+                      (lx_long)(unsigned long)zero), -LX_ETIMEDOUT);
+            check("futex(WAIT_BITSET) with absolute past == -ETIMEDOUT",
+                  lx6(LX_FUTEX, (lx_long)(unsigned long)q,
+                      LX_FUTEX_WAIT_BITSET, 1,
+                      (lx_long)(unsigned long)past, 0, 1), -LX_ETIMEDOUT);
+            check("futex(REQUEUE) with no waiter == 0",
+                  lx6(LX_FUTEX, (lx_long)(unsigned long)q,
+                      LX_FUTEX_REQUEUE, 0, 0,
+                      (lx_long)(unsigned long)(q + 8), 0), 0);
+            check("futex(CMP_REQUEUE) with mismatched value == -EAGAIN",
+                  lx6(LX_FUTEX, (lx_long)(unsigned long)q,
+                      LX_FUTEX_CMP_REQUEUE, 0, 0,
+                      (lx_long)(unsigned long)(q + 8), 99), -LX_EAGAIN);
+            check("futex(REQUEUE) without uaddr2 == -EINVAL",
+                  lx6(LX_FUTEX, (lx_long)(unsigned long)q,
+                      LX_FUTEX_REQUEUE, 0, 0, 0, 0), -LX_EINVAL);
+
+            /* 相对 50 ms 超时：真的跨过一个时间片后回 -ETIMEDOUT。
+             * 这条不依赖别的进程：没有人改这个字，到期就是到期。 */
+            t0 = -1;
+            t1 = -1;
+            if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                    (lx_long)(unsigned long)zero, 0) == 0)
+            {
+                t0 = zero[0] * 1000 + zero[1] / 1000000;
+            }
+            rq = lx4(LX_FUTEX, (lx_long)(unsigned long)q, LX_FUTEX_WAIT, 1,
+                     (lx_long)(unsigned long)dur);
+            if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                    (lx_long)(unsigned long)zero, 0) == 0)
+            {
+                t1 = zero[0] * 1000 + zero[1] / 1000000;
+            }
+            check("futex(WAIT) with 50 ms timeout == -ETIMEDOUT",
+                  rq, -LX_ETIMEDOUT);
+            check("futex(WAIT) timeout spanned >= 50 ms",
+                  ((t0 >= 0) && (t1 >= 0) && ((t1 - t0) >= 50)) ? 1 : 0, 1);
+
+            /* 父进程在 q 上按位集 2 睡下；子进程先试不相交的位集（必须
+             * 叫不醒），再试相交的位集（必须叫醒）。 */
+            *q = 1ul;
+            {
+                lx_long ppid2 = lx1(LX_GETPID, 0);
+                lx_long child9 = lx3(LX_CLONE, LX_SIGCHLD, 0, 0);
+                lx_long status9 = -1;
+                lx_long rc9 = -1;
+
+                if (child9 == 0)
+                {
+                    int     code = 0;
+                    lx_long w   = 0;
+                    int     tries;
+
+                    if (*q == 1ul)
+                    {
+                        code |= 1;      /* bit0: 父进程等的还是 1 */
+                    }
+                    /* 父进程已经睡下（单核上父睡了才轮到子），所以这一次
+                     * 确实有一个等待者：位集不相交就必须回 0。 */
+                    w = lx6(LX_FUTEX, (lx_long)(unsigned long)q,
+                            LX_FUTEX_WAKE_BITSET, 1, 0, 0, 1);
+                    if (w == 0)
+                    {
+                        code |= 2;      /* bit1: 不相交的位集没有唤醒它 */
+                    }
+                    for (tries = 0; tries < 200000; tries++)
+                    {
+                        w = lx6(LX_FUTEX, (lx_long)(unsigned long)q,
+                                LX_FUTEX_WAKE_BITSET, 1, 0, 0, 2);
+                        if (w == 1)
+                        {
+                            code |= 4;  /* bit2: 相交的位集叫醒了 1 个 */
+                            break;
+                        }
+                    }
+                    if (w != 1)
+                    {
+                        (void)lx2(LX_KILL, ppid2, LX_SIGCHLD);
+                    }
+                    (void)lx1(LX_EXIT, code);
+                    for (;;)
+                    {
+                    }
+                }
+
+                check("clone for futex2 bitset child > 0",
+                      (child9 > 0) ? 1 : 0, 1);
+                {
+                    int round;
+
+                    rc9 = -LX_EAGAIN;
+                    for (round = 0; round < 4; round++)
+                    {
+                        lx_long v9 = (lx_long)(*q);
+
+                        rc9 = lx6(LX_FUTEX, (lx_long)(unsigned long)q,
+                                  LX_FUTEX_WAIT_BITSET, v9, 0, 0, 2);
+                        if (rc9 != -LX_EAGAIN)
+                        {
+                            break;
+                        }
+                    }
+                }
+                check("futex(WAIT_BITSET) returned 0 after being woken",
+                      rc9, 0);
+                rc9 = lx4(LX_WAIT4, child9, (lx_long)(unsigned long)&status9,
+                          0, 0);
+                check("futex2 bitset child reaped", rc9, child9);
+                check("futex2 bitset waker saw 1, woke only matching (bits=7)",
+                      (status9 >> 8) & 0xFF, 7);
+            }
+
+            /* 父进程在 q 上睡下；子进程用 CMP_REQUEUE 把它改挂到 q+8，
+             * 然后在新地址上 WAKE（旧地址上 WAKE 必须叫不醒）。 */
+            *q = 1ul;
+            q[8] = 1ul;                 /* 新地址上的字，requeue 后就是期望值 */
+            {
+                lx_long ppid3 = lx1(LX_GETPID, 0);
+                lx_long child10 = lx3(LX_CLONE, LX_SIGCHLD, 0, 0);
+                lx_long status10 = -1;
+                lx_long rc10 = -1;
+                volatile unsigned long *q2 =
+                    (volatile unsigned long *)(unsigned long)(q + 8);
+
+                if (child10 == 0)
+                {
+                    int     code = 0;
+                    lx_long cq   = 0;
+                    lx_long w    = 0;
+                    int     tries;
+
+                    if (*q == 1ul)
+                    {
+                        code |= 1;      /* bit0: 父进程等的还是 1 */
+                    }
+                    for (tries = 0; tries < 200000; tries++)
+                    {
+                        cq = lx6(LX_FUTEX, (lx_long)(unsigned long)q,
+                                 LX_FUTEX_CMP_REQUEUE, 0, 1,
+                                 (lx_long)(unsigned long)q2, 1);
+                        if (cq != 0)
+                        {
+                            break;
+                        }
+                        w = lx3(LX_FUTEX, (lx_long)(unsigned long)q2,
+                                LX_FUTEX_WAKE, 1);
+                        if (w == 1)
+                        {
+                            break;
+                        }
+                        /* 旧地址上 WAKE 必须叫不醒（已经挂走了；还没挂走时
+                         * 这里也可能回 1，所以只在确认挂走之后才读）。 */
+                    }
+                    if ((cq == 0) && (w == 1))
+                    {
+                        code |= 2;      /* bit1: 新地址上的 WAKE 叫醒了 1 个 */
+                    }
+                    if (w != 1)
+                    {
+                        (void)lx2(LX_KILL, ppid3, LX_SIGCHLD);
+                    }
+                    (void)lx1(LX_EXIT, code);
+                    for (;;)
+                    {
+                    }
+                }
+
+                check("clone for futex2 requeue child > 0",
+                      (child10 > 0) ? 1 : 0, 1);
+                {
+                    int round;
+
+                    rc10 = -LX_EAGAIN;
+                    for (round = 0; round < 4; round++)
+                    {
+                        lx_long v10 = (lx_long)(*q);
+
+                        rc10 = lx4(LX_FUTEX, (lx_long)(unsigned long)q,
+                                   LX_FUTEX_WAIT, v10, 0);
+                        if (rc10 != -LX_EAGAIN)
+                        {
+                            break;
+                        }
+                    }
+                }
+                check("futex(WAIT) on requeued word returned 0", rc10, 0);
+                check("futex2 requeue: old word has no waiter left",
+                      lx3(LX_FUTEX, (lx_long)(unsigned long)q,
+                          LX_FUTEX_WAKE, 1), 0);
+                rc10 = lx4(LX_WAIT4, child10,
+                           (lx_long)(unsigned long)&status10, 0, 0);
+                check("futex2 requeue child reaped", rc10, child10);
+                check("futex2 requeue child saw 1 and new-word WAKE woke 1 "
+                      "(bits=3)", (status10 >> 8) & 0xFF, 3);
+            }
+        }
+    }
+
 #endif
 
 #if defined(ARKRTOS_USE_PAGING_FILEMAP) && (ARKRTOS_USE_PAGING_FILEMAP == 1)

@@ -2893,12 +2893,19 @@ def check_linux_abi_host():
          as 8-byte slots with the high half forced to zero.
     The QEMU LoongArch64 run in linux-abi covers (1) and (2).
 
-    The FUTEX tier (-DARKRTOS_USE_LINUX_FUTEX=1) drives futex WAIT / WAKE
-    against the same simulated window: the key is the physical frame, so the
-    test supplies the paging backend's four readers and asserts that two
-    different pages are two different keys, that a WAKE on one key does not
-    wake a waiter on the other, that a value change or a signal account-close
-    the registration, and that a port without restart answers -ENOSYS
+    The FUTEX tier (-DARKRTOS_USE_LINUX_FUTEX=1) drives all six futex ops
+    (WAIT / WAKE / REQUEUE / CMP_REQUEUE / WAIT_BITSET / WAKE_BITSET, plus
+    timeout) against the same simulated window: the key is the physical
+    frame, so the test supplies the paging backend's four readers and
+    asserts that two different pages are two different keys, that a WAKE on
+    one key does not wake a waiter on the other, that a REQUEUE moves a
+    waiter onto uaddr2's key and a CMP_REQUEUE only does so when the word
+    matches, that a bitset WAKE only wakes waiters whose mask intersects,
+    that a value change or a signal account-close the registration, that a
+    relative WAIT timeout and an absolute WAIT_BITSET deadline both expire
+    as -ETIMEDOUT (the deadline is stored, not the duration, so a replay
+    does not restart the clock), that CLOCK_REALTIME is refused -ENOSYS
+    rather than faked, and that a port without restart answers -ENOSYS
     instead of pretending to have slept.
 
     The OFF tier (-DARKRTOS_USE_LINUX_ABI=0) must answer "there is no such
