@@ -494,6 +494,23 @@ static void sec_check_rt(arkrtos_sec_report_t *p_rep)
 #endif
 }
 
+/* 13. 每 App 任务配额（SEC-G07）：一个 App 能不能把任务表吃干净。
+ *     这一项刻意不写「已启用」就算过 —— 关档时它只是 SKIP（这一版镜像没有这
+ *     条防线，读出来的就是没防），开档时报的是编译进去的上限值与生效方式。
+ *     owner 号是运行期分配的，这里报的是「有额度、且线程与进程都算」这件事。 */
+static void sec_check_app_quota(arkrtos_sec_report_t *p_rep)
+{
+#if (ARKRTOS_USE_APP_QUOTA == 1)
+    sec_add(p_rep, "app.quota", (uint32)ARKRTOS_SEC_PASS,
+            "per-App live tasks capped at %u (processes + threads share one owner)",
+            (uint32)ARKRTOS_APP_MAX_TASKS, 0u, 0u, 0u);
+#else
+    sec_add(p_rep, "app.quota", (uint32)ARKRTOS_SEC_SKIP,
+            "not compiled (ARKRTOS_USE_APP_QUOTA=0): a fork bomb is limited only by the task table",
+            0u, 0u, 0u, 0u);
+#endif
+}
+
 uint32 arkrtos_sec_run(arkrtos_sec_report_t *p_out)
 {
     if(p_out == 0)
@@ -519,6 +536,7 @@ uint32 arkrtos_sec_run(arkrtos_sec_report_t *p_out)
     sec_check_console(p_out);
     sec_check_flash_protection(p_out);
     sec_check_rt(p_out);
+    sec_check_app_quota(p_out);
 
     return p_out->fail;
 }

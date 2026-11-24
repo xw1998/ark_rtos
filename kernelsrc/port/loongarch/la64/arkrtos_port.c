@@ -1721,6 +1721,15 @@ static uint32 la_pg_frame_slot(uint32 pa)
     return (pa - (uint32)ARKRTOS_QEMU_FRAME_BASE) >> 12;
 }
 
+/* 线程（clone(CLONE_THREAD)）没有独立栈底：elf 装载只填 stack_top，
+ * stack_size 保持 0。若因此把它判成「非栈对」，COW 兜底会给线程栈装只读
+ * 页；而 eentry 把 trap 帧压在 App 自己的栈上，一次 PLV0 写只读页就是
+ * PME，帧还没落地就嵌套异常，C 处理器根本没机会救（实测崩溃即此形态：
+ * 线程 tid 的栈对 ref=2 / stack=0，被装成 LA_PTE_APP_RO，随后无限嵌套）。
+ * 所以线程按「栈顶下方的提示窗口」判类。这是**分类提示**，不是栈底保证：
+ * stack_guard、越界检查、栈溢出判定一律不得依赖它。 */
+#define LA_PG_THREAD_STACK_HINT  (32u * 1024u)
+
 /** 某一对（8 KB）是否落在**当前任务**的栈范围内
  *  @details 栈页在 COW 下必须私有。本内核的异常入口 eentry 第一件事就是
  *           sp -= 256、把通用寄存器写进 App 自己的栈（见 arkrtos_context.S），
@@ -1744,13 +1753,22 @@ static int32 la_pg_stack_pair(uint32 idx)
     {
         return 0;
     }
-    if((arkrtos_task_table[id - 1].stack_top == 0ul) ||
-       (arkrtos_task_table[id - 1].stack_size == 0u))
+    /* stack_top == 0 表示「这个任务没有 App 栈」（内核任务），与栈对无关。 */
+    if(arkrtos_task_table[id - 1].stack_top == 0ul)
     {
         return 0;
     }
     hi = arkrtos_task_table[id - 1].stack_top;
-    lo = hi - (unsigned long)arkrtos_task_table[id - 1].stack_size;
+    if(arkrtos_task_table[id - 1].stack_size != 0u)
+    {
+        lo = hi - (unsigned long)arkrtos_task_table[id - 1].stack_size;
+    }
+    else
+    {
+        /* 线程：只知道栈顶。按提示窗口判类，见 LA_PG_THREAD_STACK_HINT。 */
+        lo = (hi > (unsigned long)LA_PG_THREAD_STACK_HINT)
+             ? (hi - (unsigned long)LA_PG_THREAD_STACK_HINT) : 0ul;
+    }
     if((hi <= plo) || (lo >= phi))
     {
         return 0;

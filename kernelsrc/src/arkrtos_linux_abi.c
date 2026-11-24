@@ -3925,10 +3925,37 @@ static int32 lx_munmap(void *p_ctx)
 #if (ARKRTOS_USE_LINUX_FORK == 1)
 /* ------------------------------------------------ clone / wait4（U-19） */
 
+#if (ARKRTOS_USE_APP_QUOTA == 1)
+/* SEC-G07：配额拒绝的唯一外部痕迹。没有这一行，调用者只看到 EAGAIN，
+ * 分不出「空间用完」与「这个 App 的额度用完」——而这两件事的处置完全不同。 */
+static void lx_appq_log(const char *what)
+{
+    int32 id = arkrtos_current_task_id;
+
+    arkrtos_board_puts("[appq] refused ");
+    arkrtos_board_puts(what);
+    arkrtos_board_puts(": owner ");
+    if((id > 0) && (id <= (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        arkrtos_board_putu(arkrtos_task_table[id - 1].app_owner);
+    }
+    else
+    {
+        arkrtos_board_puts("?");
+    }
+    arkrtos_board_puts(" quota ");
+    arkrtos_board_putu((uint32)ARKRTOS_APP_MAX_TASKS);
+    arkrtos_board_puts(" tasks reached\n");
+}
+#endif
+
 static int32 lx_fork_errno(int32 rc)
 {
     switch(rc)
     {
+    case ARKRTOS_ELF_ERR_QUOTA:
+        /* 每 App 任务配额用完：Linux 在 RLIMIT_NPROC 命中时回的也是 EAGAIN。 */
+        return -LX_EAGAIN;
     case ARKRTOS_ELF_ERR_BUSY:
         /* 地址空间全被活实例占着：这是并发上限，不是内存不够。 */
         return -LX_EAGAIN;
@@ -4096,6 +4123,12 @@ static int32 lx_clone_thread(void *p_ctx, uint32 flags, unsigned long child_stac
                             &child, lx_thread_bind_hook);
     if(rc != ARKRTOS_ELF_OK)
     {
+#if (ARKRTOS_USE_APP_QUOTA == 1)
+        if(rc == ARKRTOS_ELF_ERR_QUOTA)
+        {
+            lx_appq_log("thread");
+        }
+#endif
         return lx_fork_errno(rc);
     }
     if((child <= 0) || (child > (int32)ARKRTOS_TASK_MAX_NUM))
@@ -4265,6 +4298,12 @@ static int32 lx_clone(void *p_ctx)
     {
 #if (ARKRTOS_USE_LINUX_FORK == 1)
         lx_proc_free((uint32)pslot);
+#endif
+#if (ARKRTOS_USE_APP_QUOTA == 1)
+        if(rc == ARKRTOS_ELF_ERR_QUOTA)
+        {
+            lx_appq_log("fork");
+        }
 #endif
         return lx_fork_errno(rc);
     }
@@ -5673,6 +5712,11 @@ static int32 lx_dispatch(void *p_svc_ctx, uint32 num, int32 *p_rc)
         }
         lx_ret(p_svc_ctx, 0);
         return 1;
+#else
+    /* 线程档关掉时没有线程组，exit_group 与 exit 同实体（单线程程序里
+     * 两者本来就等价）—— Linux 的 glibc 在任何进程里都可能发 94，
+     * 回 -ENOSYS 会让「正常退出」变成一条错误路径。 */
+    case LX_SYS_EXIT_GROUP:
 #endif
     case LX_SYS_EXIT:
         /* exit(93) 只退调用它的那个线程（关闭线程档时就是退整个进程）。

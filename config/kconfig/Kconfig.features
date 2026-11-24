@@ -624,14 +624,47 @@ config ARKRTOS_USE_LINUX_THREAD
 
 	  Boundaries: wait4 does not see threads; exit(93) ends the calling thread
 	  only; exit_group(94) ends the whole group and leaves its code on the
-	  leader's TCB; getpid(172) returns the thread-group id and gettid(186)
-	  returns the calling thread id. A thread group whose leader died stays
+	  leader's TCB; getpid(172) returns the thread-group id and gettid(178)
+	  returns the calling thread id (LA64 follows the asm-generic table; 186
+	  is the x86_64 number). A thread group whose leader died stays
 	  alive while any sibling thread is still running.
 
 	  Requires ARKRTOS_USE_LINUX_FORK. Off (default) compiles nothing: the
 	  thread entry point in the port, the loader's thread entry, the clone
 	  thread branch and gettid are all absent, so the image is byte-for-byte
 	  what it was before this option existed.
+
+config ARKRTOS_USE_APP_QUOTA
+	bool "Per-App task quota (SEC-G07)"
+	depends on ARKRTOS_USE_ELF
+	help
+	  Stop one App from exhausting the task table (a fork / clone bomb).
+	  Every ELF load gets a fresh non-zero owner id; fork(220) and
+	  clone(CLONE_THREAD) inherit it, so every process and thread one App
+	  derives is counted against the same budget. The count is over live
+	  tasks only (status != INVALID), so exiting children return their
+	  budget immediately.
+
+	  A creation that would exceed ARKRTOS_APP_MAX_TASKS fails with -EAGAIN
+	  (Linux returns EAGAIN when RLIMIT_NPROC is hit) and prints one
+	  [appq] line naming the owner and the limit; nothing is half-created.
+
+	  Scope, stated so it is not over-read: this covers the task table only.
+	  The fd table is already capped per process (LX_MAX_FD), and an App's
+	  page frames are already capped by its own address window, so neither
+	  can be exhausted by one App.
+
+	  Off (default) compiles nothing: no owner field, no counter, no check,
+	  so the image is byte-for-byte what it was before this option existed.
+
+config ARKRTOS_APP_MAX_TASKS
+	int "Live tasks per App owner (SEC-G07)"
+	depends on ARKRTOS_USE_APP_QUOTA
+	range 1 64
+	default 8
+	help
+	  How many live tasks (processes plus threads) one App owner may have
+	  at once. The parent that called exec counts as the first one.
 
 config ARKRTOS_USE_PAGING_COW
 	bool "Copy-on-write fork (U-19b)"

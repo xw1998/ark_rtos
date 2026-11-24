@@ -1051,6 +1051,60 @@ tgid、两栈同址、`exit_group` 码错、缺 clone 读数）必须被判红�
 - **没有优先级 / 调度策略继承的额外语义**：线程就是一个普通任务，优先级、时间片与
   其它任务同档。
 
+### 8.11 每 App 任务配额（`ARKRTOS_USE_APP_QUOTA`，2026-11-24，QEMU LA64 第十档 198 条）
+
+第十档 = 第九档（186 条）+ 配额段。它回答的是「一个 App 能不能把任务表吃光」，
+不是一个新系统调用：装载器给每份 ELF 发一个非零 owner 号（`elf_app_owner_new()`），
+fork 与 `clone(CLONE_THREAD)` 都**继承**同一个 owner，同一 owner 的**活任务**数到
+`ARKRTOS_APP_MAX_TASKS` 时创建失败——`ARKRTOS_ELF_ERR_QUOTA` 在 `lx_fork_errno()`
+里映射成 `-EAGAIN`，并各打一行
+`[appq] refused <fork|thread>: owner N quota M tasks reached`。
+
+**为什么上限取 3。** 本板 `ARKRTOS_PAGING_APPS_MAX = 2`（并发进程最多父 + 1 子），
+而 `ERR_QUOTA` 与 `ERR_BUSY` 都映射 `-EAGAIN` ⇒ 返回值上分不出是谁拦的。只有
+「线程不占新地址空间」这条能把两者分开，所以夹具用「1 进程 + 2 线程」把 3 个名额
+压满，再读两条**无歧义**的拒绝：线程超限（不可能 BUSY）、以及**空间空闲时** fork
+超限。3 同时高于第三批线程段的峰值 2，两段互不干扰；配额计数逻辑与常量取值无关，
+默认档的 8 走同一条代码。
+
+**配额段的读数（`[fork] quota …`）**：① 上限内 fork 成；② 线程把最后一格占掉；
+③ 超限 fork 回 `-11`；④ 超限线程回 `-11`；⑤ 被阻塞的子进程按 `wait4` 真收走
+（配额数的是活任务，前提是它真的活着）；⑥ 上限内第二个线程成；⑦ **空间空闲时**
+fork 仍回 `-EAGAIN`（全段最干净的一条）；⑧ 第三个线程回 `-EAGAIN`；⑨ 两个线程按
+真实的 join 路径（`CHILD_CLEARTID` 清零 + `FUTEX_WAIT`）归队；⑩ 额度回收后立刻能
+再 fork；⑪ 那个子进程退出码照传 3。另加三行 `[appq]` **交叉证据**：必须恰好 3 行
+（2 次 fork + 1 次 thread）、owner 是同一个、上限读数是 3——没有这一行，调用者只
+看到 `EAGAIN`，分不出「空间用完」与「额度用完」。
+
+**两个只有真跑才暴露的坑（都已修）。**
+
+1. **管道读不阻塞 ⇒ 子进程半路自杀。** 本内核 `lx_pipe_read()` 在「空且还有写端」
+   时回 `-EAGAIN`（见 `LX_PIPE_BUF` 上的注释，这是既有取舍，不改）。夹具第一版写
+   `while (read(...) > 0) {}`，负值直接跳出 ⇒ 子进程立刻 `exit`、配额压根没被压满，
+   症状是「线程被放行」与「没东西可回收」两条同时红，`[DBG] cnt` 打出来的活列表里
+   已经找不到那个 tid。修法是子进程每 100 ms 用一次 `futex(FUTEX_WAIT)` 超时醒来
+   重试，只在读到 EOF(0) 时才退出（睡的是内核记账的 futex 超时，不读用户态时钟）。
+   **休眠字必须是 App 窗口内的全局变量**：`lx_futex_key_task()` 对 `uaddr < LA_WIN_VA`
+   直接回无效，栈上的字等不到唤醒。
+2. **线程栈在 COW 下的分类需要提示窗口。** 线程帧落在 `child_stack - 1040`，而
+   `clone` 不给 `stack_size`，`la_pg_stack_pair()` 原先只认 `[hi-size, hi)` ⇒ 把线程
+   栈判成「不是栈」，fork 时给它装了只读页。第一次 `st.d` 就 PME（`ecode=4`），而
+   eentry 第一件事是 `addi.d $sp,$sp,-528` ⇒ 异常栈踩同一页，无限嵌套，C 处理器
+   没机会跑。修法是：线程且 `stack_size == 0` 时按栈顶下方 32 KB
+   （`LA_PG_THREAD_STACK_HINT`）判类。**这是分类提示，不是栈底保证**——栈守卫、
+   越界检查、栈溢出判定一律不得依赖它。
+
+**写死的边界。** 配额只管**任务表**：fd 表本来每进程只有 `LX_MAX_FD` 个槽、页帧
+本来被 App 自己的 2 MB 地址窗口卡住，一个 App 都耗不尽；**内存池的按 App 配额仍未
+做**（要给分配器加 per-owner 账本）。并发进程数受 `ARKRTOS_PAGING_APPS_MAX` 限制；
+`ERR_QUOTA` 与 `ERR_BUSY` 同为 `-EAGAIN`，调用者只能靠 `[appq]` 日志区分。见
+[已知限制](已知限制.md) §四与 [安全认证准备](安全认证准备.md) §7 SEC-G07。
+
+**关档零变化。** `elf_app_owner_new` / `elf_app_task_count` / `lx_appq_log` 三个符号
+与 TCB 里的 `app_owner` 字段在 `ARKRTOS_USE_APP_QUOTA=0` 时一个都不产出，门禁
+`off-zero-symbols` 用 `nm` 逐条核对；`features.h` 里有
+`ARKRTOS_USE_APP_QUOTA=1 requires ARKRTOS_USE_ELF=1` 的 `#error` 顶住。
+
 ## 9 开关与零体积
 
 - `ARKRTOS_USE_LINUX_ABI`（`kernelsrc/include/arkrtos_features.h`、

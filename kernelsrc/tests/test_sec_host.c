@@ -348,7 +348,7 @@ static void test_api(void)
     memset(&rep, 0, sizeof(rep));
     (void)arkrtos_sec_run(&rep);
 
-    ck_u(rep.count, 12u, "twelve baseline items");
+    ck_u(rep.count, 13u, "thirteen baseline items");
     ck_u((unsigned long)(rep.pass + rep.fail + rep.finding + rep.skip),
          (unsigned long)rep.count, "per-state counts add up to count");
 
@@ -911,7 +911,7 @@ int main(void)
     test_flash();
     test_rt();
 
-    /* 全清的板子跑一遍：项数固定 12，run 返回 FAIL 条数 */
+    /* 全清的板子跑一遍：项数固定 13，run 返回 FAIL 条数 */
     {
         arkrtos_sec_report_t rep;
         uint32 fails;
@@ -919,7 +919,7 @@ int main(void)
         table_clear();
         memset(&rep, 0, sizeof(rep));
         fails = arkrtos_sec_run(&rep);
-        ck_u(rep.count, 12u, "final run has 12 items");
+        ck_u(rep.count, 13u, "final run has 13 items");
         ck_u((unsigned long)fails, (unsigned long)rep.fail,
              "run() returns the FAIL count");
     }

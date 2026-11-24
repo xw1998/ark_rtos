@@ -22,6 +22,9 @@
 #ifndef ARKRTOS_AUTOCONF_H
 #define ARKRTOS_AUTOCONF_H
 
+#ifndef ARKRTOS_APP_MAX_TASKS
+#define ARKRTOS_APP_MAX_TASKS (8)
+#endif
 #ifndef ARKRTOS_AUTOMOUNT_NOR
 #define ARKRTOS_AUTOMOUNT_NOR 0
 #endif
@@ -92,8 +95,6 @@
 #define ARKRTOS_NET_MAX_SOCKETS (4)
 #endif
 #ifndef ARKRTOS_NET_TASK_STACK_WORDS
-/* 1.5 KB 会打穿（见 config/kconfig/Kconfig.net 的 help：lwIP 调用链深度不
- * 由我们控制，实测服务任务栈底守卫字被覆盖后 recv 永不回）。 */
 #define ARKRTOS_NET_TASK_STACK_WORDS (1024)
 #endif
 #ifndef ARKRTOS_PACK_IN_EXTRAM
@@ -173,6 +174,9 @@
 #endif
 #ifndef ARKRTOS_USE_APPRUN
 #define ARKRTOS_USE_APPRUN 0
+#endif
+#ifndef ARKRTOS_USE_APP_QUOTA
+#define ARKRTOS_USE_APP_QUOTA 0
 #endif
 #ifndef ARKRTOS_USE_ARKC
 #define ARKRTOS_USE_ARKC 0

@@ -14,7 +14,7 @@
 - [kernelsrc/include/arkrtos_cfg.h](#kernelsrcincludearkrtos_cfgh)（1 项）
 - [kernelsrc/include/arkrtos_crash.h](#kernelsrcincludearkrtos_crashh)（22 项）
 - [kernelsrc/include/arkrtos_dt.h](#kernelsrcincludearkrtos_dth)（11 项）
-- [kernelsrc/include/arkrtos_elf.h](#kernelsrcincludearkrtos_elfh)（12 项）
+- [kernelsrc/include/arkrtos_elf.h](#kernelsrcincludearkrtos_elfh)（13 项）
 - [kernelsrc/include/arkrtos_export.h](#kernelsrcincludearkrtos_exporth)（3 项）
 - [kernelsrc/include/arkrtos_fdt.h](#kernelsrcincludearkrtos_fdth)（22 项）
 - [kernelsrc/include/arkrtos_fdt_console.h](#kernelsrcincludearkrtos_fdt_consoleh)（4 项）
@@ -23,7 +23,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（91 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（92 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -36,7 +36,7 @@
 - [kernelsrc/include/arkrtos_mini.h](#kernelsrcincludearkrtos_minih)（20 项）
 - [kernelsrc/include/arkrtos_modld.h](#kernelsrcincludearkrtos_modldh)（8 项）
 - [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（23 项）
-- [kernelsrc/include/arkrtos_net.h](#kernelsrcincludearkrtos_neth)（13 项）
+- [kernelsrc/include/arkrtos_net.h](#kernelsrcincludearkrtos_neth)（14 项）
 - [kernelsrc/include/arkrtos_net_dev.h](#kernelsrcincludearkrtos_net_devh)（7 项）
 - [kernelsrc/include/arkrtos_ptable.h](#kernelsrcincludearkrtos_ptableh)（23 项）
 - [kernelsrc/include/arkrtos_rt.h](#kernelsrcincludearkrtos_rth)（14 项）
@@ -65,7 +65,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（12 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（118 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（119 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（18 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -89,13 +89,13 @@
 - [kernelsrc/src/arkrtos_apppack.c](#kernelsrcsrcarkrtos_apppackc)（1 项）
 - [kernelsrc/src/arkrtos_cfg.c](#kernelsrcsrcarkrtos_cfgc)（1 项）
 - [kernelsrc/src/arkrtos_dev.c](#kernelsrcsrcarkrtos_devc)（1 项）
-- [kernelsrc/src/arkrtos_elf.c](#kernelsrcsrcarkrtos_elfc)（18 项）
+- [kernelsrc/src/arkrtos_elf.c](#kernelsrcsrcarkrtos_elfc)（21 项）
 - [kernelsrc/src/arkrtos_eset.c](#kernelsrcsrcarkrtos_esetc)（1 项）
 - [kernelsrc/src/arkrtos_exports.c](#kernelsrcsrcarkrtos_exportsc)（1 项）
 - [kernelsrc/src/arkrtos_fs.c](#kernelsrcsrcarkrtos_fsc)（1 项）
 - [kernelsrc/src/arkrtos_guard.c](#kernelsrcsrcarkrtos_guardc)（1 项）
 - [kernelsrc/src/arkrtos_installer.c](#kernelsrcsrcarkrtos_installerc)（1 项）
-- [kernelsrc/src/arkrtos_linux_abi.c](#kernelsrcsrcarkrtos_linux_abic)（7 项）
+- [kernelsrc/src/arkrtos_linux_abi.c](#kernelsrcsrcarkrtos_linux_abic)（8 项）
 - [kernelsrc/src/arkrtos_loader.c](#kernelsrcsrcarkrtos_loaderc)（6 项）
 - [kernelsrc/src/arkrtos_log.c](#kernelsrcsrcarkrtos_logc)（1 项）
 - [kernelsrc/src/arkrtos_mini.c](#kernelsrcsrcarkrtos_minic)（1 项）
@@ -2521,6 +2521,34 @@ ARKRTOS_ELF_ERR_NOMEM（帧池不够或任务表满）/ ARKRTOS_ELF_ERR_PARAM
 调用者必须是降权（is_priv == 0）用户任务；内核任务没有窗口。
 > 说明：只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。
 
+### `int32 arkrtos_elf_thread(void *p_svc_ctx, unsigned long child_stack, u`
+
+```c
+int32 arkrtos_elf_thread(void *p_svc_ctx, unsigned long child_stack, unsigned long child_tls, int32 *p_child_task, void (*p_hook)(int32 parent, int32 child));
+```
+
+**在当前任务的**同一份地址空间**里再起一个任务（U-25：CLONE_THREAD）**
+- `p_svc_ctx`：当前线程这次系统调用的 trap 帧（模板）
+- `child_stack`：子线程的用户栈顶（非 0、16 字节对齐；只给栈顶，不给大小）
+- `child_tls`：CLONE_SETTLS 时子线程的 $tp，否则传 0 表示照抄父线程
+- `p_child_task`：可为 0；成功时写回子任务号
+- `p_hook`：可为 0；子任务**在离开临界区之前**被回调一次，
+参数是（父任务号, 子任务号）。Linux ABI 层用它把子线程
+绑到父的进程状态槽上 —— 晚一步绑定，子线程第一次进
+ABI 会给自己惰性分配一份新槽，于是它有自己的 fd 表，
+而这正是线程语义的反面。回调里只许做纯记账（不许
+睡眠、不许拷贝用户内存）。
+**返回**：ARKRTOS_ELF_OK / ARKRTOS_ELF_ERR_PARAM / ARKRTOS_ELF_ERR_NOMEM
+与 arkrtos_elf_fork 的差别只有一条，但它是全部差别的来源：子任务
+绑到**父任务那个空间**，不复制任何帧。于是父子看到的是同一份内存
+（那正是线程要的），trap 帧落在 child_stack 顶上下一个帧长处。
+初始返回值 A0 = 0，其余寄存器继承父线程，ERTN 回到父线程系统调用
+的下一条指令。
+不管的东西（文档写死）：栈大小不记账（clone 只给栈顶），因此
+stack_size = 0、栈底保护字不布防；线程栈靠按需缺页长出来，
+帧所在的那一对由 port 当场要帧并清零。
+> 说明：只在 ARKRTOS_USE_LINUX_THREAD == 1 时存在。
+
 ### `int32 arkrtos_elf_info(arkrtos_elf_info_t *p_out);`
 
 ```c
@@ -4395,6 +4423,32 @@ clone() returning 0. ERA/sp/tp/fp and the FPU/vector area are
 inherited - that IS fork.
 > 说明：只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。
 
+### `int32 arkrtos_port_paging_thread_frame(void *p_exc_ctx, uint32 space, `
+
+```c
+int32 arkrtos_port_paging_thread_frame(void *p_exc_ctx, uint32 space, unsigned long child_sp, unsigned long child_tls, unsigned long *p_frame_va);
+```
+
+**Build a new thread's first trap frame on its own user stack (U-25)**
+- `p_exc_ctx`：parent's syscall trap frame (the template)
+- `space`：the (shared) space the thread is bound to
+- `child_sp`：the child's user stack top (16-byte aligned, non-zero)
+- `child_tls`：value for the child's $tp when CLONE_SETTLS was given,
+ignored otherwise
+- `p_frame_va`：may be 0; on success the VA the frame was written at
+(child_sp - frame size), which is the child's stack_ptr
+**返回**：0 = written; -1 = bad argument / out of window / that pair refused
+Unlike fork this frame does NOT live at the parent's VA: the
+child runs on a different stack, so the frame goes at
+child_sp - LA_FR_SIZE, exactly where the trap entry would have
+put it (the entry does `sp -= 1040`), with SP = child_sp, A0 = 0
+and every other register inherited from the parent.
+The pair holding that VA is taken from the pool and zeroed first:
+a fresh pair may carry someone else's bytes, and a thread must not
+start on a window into another task's memory.  Pages the child
+spills below the frame are demand-faulted as usual.
+> 说明：Only exists when ARKRTOS_USE_LINUX_THREAD == 1.
+
 ### `int32 arkrtos_port_paging_map_shared(unsigned long va, unsigned long l`
 
 ```c
@@ -6268,10 +6322,16 @@ tcpip 线程并等它的完成信号量，也就是要阻塞；而 SVC 处理程
 ### `#ifndef ARKRTOS_NET_TASK_STACK_WORDS #define ARKRTOS_NET_TASK_STACK_WO`
 
 ```c
-#ifndef ARKRTOS_NET_TASK_STACK_WORDS #define ARKRTOS_NET_TASK_STACK_WORDS (384u) #endif
+#ifndef ARKRTOS_NET_TASK_STACK_WORDS #define ARKRTOS_NET_TASK_STACK_WORDS (1024u) #endif
 ```
 
-**服务任务栈（字）。只跑 lwIP 调用与一次 4 KB 以内的小拷贝。**
+**服务任务栈（字）。**
+这里跑的是**真 lwIP 的函数**（lwip_recvfrom / lwip_send / lwip_accept），
+调用链是 netconn -> api_msg -> tcpip 同步消息，深度不受我们控制。实测
+384 字（1.5 KB）在 LA64 上会打穿：QEMU 上表现为任务 13 的栈底守卫字被
+覆盖（"[STK] task 13: stack bottom flag overwritten"），随后 recv 请求
+再也不回（调用方看到的是「一直等不到数据」的超时，而不是一个错误码）。
+4 KB 是实测跑完 TCP/UDP 收发与 accept 都留有余量的档位。
 
 ### `int32 arkrtos_net_start(void);`
 
@@ -6311,6 +6371,16 @@ void arkrtos_net_release_task(int32 task_id);
 **归还某个任务名下的所有 socket。任务被卸载/故障回收时调用，**
 否则泄漏的是内核侧 socket 槽 —— 一个 App 反复崩溃会把它们耗干。
 - `task_id`：目标任务号（1 起）
+
+### `int32 arkrtos_net_reply_ready(int32 owner);`
+
+```c
+int32 arkrtos_net_reply_ready(int32 owner);
+```
+
+**某条在飞请求的回复是否已经落地（供 Linux ABI 层在睡时间片前询问）**
+- `owner`：发起者任务号
+**返回**：1 = 回复已就绪且属于该任务，可直接重放；0 = 还没好（照旧睡时间片）
 
 ### `int32 arkrtos_net_call(uint32 op, uint32 a1, uint32 a2, uint32 a3, uin`
 
@@ -10467,6 +10537,34 @@ int32 arkrtos_port_paging_clone_frame(void *p_exc_ctx, uint32 space) {
 通用/浮点/向量寄存器原样继承 —— 包括 fp，于是子的调用栈与父
 逐字相同（这正是 fork 要的）。
 
+### `int32 arkrtos_port_paging_thread_frame(void *p_exc_ctx, uint32 space, `
+
+```c
+int32 arkrtos_port_paging_thread_frame(void *p_exc_ctx, uint32 space, unsigned long child_sp, unsigned long child_tls, unsigned long *p_frame_va) {
+```
+
+**在子线程自己的用户栈上造它的初始 trap 帧（U-25）**
+- `p_exc_ctx`：父线程这次系统调用的 trap 帧（模板）
+- `space`：子线程绑定的空间（与父线程是**同一份**）
+- `child_sp`：子线程的用户栈顶（非 0、16 字节对齐）
+- `child_tls`：CLONE_SETTLS 时子线程的 $tp，否则无效
+- `p_frame_va`：可为 0；成功时回写帧的 VA（child_sp - 帧长），
+也就是子任务的 stack_ptr
+**返回**：0 = 已写；-1 = 参数非法 / 越出 App 窗口 / 帧池拒绝
+与 fork 不同，这一帧**不在父线程的 VA 上**：子线程换了一条栈，
+所以帧落在 child_sp - LA_FR_SIZE —— 正是 trap 入口那句
+`sp -= 1040` 会把它放的位置，而帧里的 SP 写 child_sp、A0 写 0、
+其余寄存器（含 ERA/PRMD/浮点向量区）原样继承父线程。子线程
+被第一次恢复时，ertn 回到父线程系统调用的下一条指令，返回值 0。
+帧所在的对必须先驻留：内核路径不做按需缺页，拿不到帧就回 -1
+让上层回滚。这一档和 fork 有一个关键差别 —— fork 的子空间是
+父空间的副本，帧落的那一对父线程早就摸过；线程的栈是**新页**，
+所以这里得自己去帧池要，并且**显式清零**：帧池里的对可能是别人
+刚还回来的，线程不能从一个装着别人内容的窗口上起跑。
+非 SWAP 档帧池刚起来是干净的，但换出/换入一旦发生这个前提就不
+成立，所以清零是无条件的。
+> 说明：只在 ARKRTOS_USE_LINUX_THREAD == 1 时存在。
+
 ### `static int32 la_pg_demand_fault(unsigned long badv) {`
 
 ```c
@@ -12451,6 +12549,22 @@ argv[argc-1..0]、argc  <- sp
 字符串从窗口顶端往下写，数组紧贴在 argv_start 之上。
 **返回**：0 = 成功（*p_sp / *p_execfn 有效）；否则为负错误码
 
+### `static uint32 elf_app_owner_new(void) {`
+
+```c
+static uint32 elf_app_owner_new(void) {
+```
+
+发一个新的 App 身份（0 保留给"没有身份"）
+
+### `static uint32 elf_app_task_count(uint32 owner) {`
+
+```c
+static uint32 elf_app_task_count(uint32 owner) {
+```
+
+这个 owner 名下的活任务数
+
 ### `static int32 elf_load_interp(elf_load_state_t *st, const char *interp_`
 
 ```c
@@ -12562,6 +12676,25 @@ int32 arkrtos_elf_fork(void *p_svc_ctx, int32 *p_child_task, uint32 *p_child_spa
 写回 / 绑定」是它之后的事 —— 被 tick 切走就会得到一个跑在错帧
 上的半配置任务（与装载器那条路径同一个坑，见 elf_start_task）。
 前三步都可回滚（失败就把子空间还回池子）；第四步之后不再失败。
+
+### `int32 arkrtos_elf_thread(void *p_svc_ctx, unsigned long child_stack, u`
+
+```c
+int32 arkrtos_elf_thread(void *p_svc_ctx, unsigned long child_stack, unsigned long child_tls, int32 *p_child_task, void (*p_hook)(int32 parent, int32 child)) {
+```
+
+**在当前任务的同一份地址空间里再起一个任务（U-25：CLONE_THREAD）**
+顺序与 fork 同源，但少了「挑空间 / 复制空间 / 写同一 VA 的帧」：
+1) 帧直接造在 child_stack 顶上下一个帧长处（port 负责要帧、清零、
+写寄存器）；
+2) 临界区里注册任务，把 TCB 的窗口/入口/栈改成线程自己的；
+3) **先 bind_task，再改 stack_ptr**：bind_task 在 SMP 档会检查
+「stack_ptr + 帧长 == stack_top」，正好成立时会把这一帧当初始
+帧重造（ERA 改成 entry）。线程的现场是真的现场，不能被重造。
+失败时那几对新帧留在空间里（它们已经记在空间账上，空间回收时一起
+还回去）；这里不逐个还帧，因为还帧要把对号从空间账上抹掉，而抹错
+一格就是别的线程的栈。
+台账不维护计数器：组长死没死由 elf_slot_live 现场数（见那里的注释）。
 
 ### `int32 arkrtos_elf_exec(const char *path, int32 argc, char *argv[]) {`
 
@@ -12697,6 +12830,46 @@ static int32 lx_copy_user_str(unsigned long uaddr, char *out, uint32 cap) {
 **把用户地址上的 NUL 结尾串拷进内核缓冲**
 **返回**：0 成功；-EFAULT 指针非法；-ENAMETOOLONG 在 cap 内没有 NUL
 
+### `static int32 lx_clone_thread(void *p_ctx, uint32 flags, unsigned long `
+
+```c
+static int32 lx_clone_thread(void *p_ctx, uint32 flags, unsigned long child_stack) {
+```
+
+**clone(2) 的线程分支：共享地址空间 + 共享进程状态槽**
+与 fork 分支的差别有三条，每条都必须做对：
+1) 地址空间**不复制**（arkrtos_elf_thread 直接绑父的那个 space），
+于是父子的全局变量是同一份 —— 这正是线程要的；
+2) 进程状态槽**共用**：子线程用 lx_thread_bind_hook 在装载器的
+临界区里就被绑到父的槽上。晚一步，子线程第一次进 ABI 会给自己
+惰性分配一份新槽，于是它有自己的 fd 表 —— 而这种错不报错，
+只表现为「线程里 close 不掉主线程的 fd」；
+3) 不登记 s_child[]：Linux 的 wait4 看不见线程（它们不是子进程），
+只有整组退出才由组长那一份记账收尾。
+flags 判据：认 LX_CLONE_THREAD_OK 里的位，多一位就 -EINVAL；
+CLONE_VM 与 CLONE_THREAD 必须同时给（只给 VM 是「共享内存但独立
+进程状态」，本内核没有这一档）；child_stack 必须非 0 且 16 字节
+对齐（LA64 的 ABI 要求 sp 16 对齐，帧就压在它下面）。
+
+### `static void lx_thread_group_exit(int32 code) {`
+
+```c
+static void lx_thread_group_exit(int32 code) {
+```
+
+**exit_group(2)：把同组全部任务按「正常退出」收掉，退出码记在每人身上**
+为什么不只退自己：Linux 的 exit_group 是「结束整个线程组」，
+组长那一份 TCB 上的退出码才是 wait4 要读的东西 —— 一个线程自己
+退掉、把组留给别人，会让父进程永远等不到那一组结束。
+做法与 arkrtos_task_kill_internal / arkrtos_cpu_fault_kill 同一套：
+摘出就绪链与延时链、置 INVALID、调 ABI 退出钩子（futex/select/
+socket 的等待登记 + 本线程的 CLEARTID 清零）、再回收资源。
+任务号先收集再动手：收集那一遍在临界区里，动手那一遍不可能在
+临界区里（ABI 钩子要调 VFS / 拷贝用户内存）。
+**SMP 边界**：这里强杀的是「可能正在另一核上跑」的任务。本内核的
+线程档只在单核 QEMU 配置下被验证过；多核要真正的核间停核协议，
+这一版没有，文档里写死。
+
 ### `static int32 lx_clone(void *p_ctx) {`
 
 ```c
@@ -12723,39 +12896,6 @@ static int32 lx_wait4(void *p_ctx) {
 在别处被杀）时回 -EIO 并放掉记账 —— 编一个 0 会看起来像成功；
 3) 槽位被复用后回 -ECHILD（靠注册代次认出来），不把新任务当儿子。
 rusage 指针忽略、一个字节都不写。
-
-### `static int32 lx_futex(void *p_ctx) {`
-
-```c
-static int32 lx_futex(void *p_ctx) {
-```
-
-**futex(2)：WAIT / WAKE / REQUEUE / CMP_REQUEUE / WAIT_BITSET /**
-WAKE_BITSET 六档
-与 Linux 一致的语义：
-1) WAIT 在入口处读到的字 != val 时回 -EAGAIN（不睡）；
-2) 有未屏蔽信号时回 -EINTR（不睡）；
-3) WAKE 唤醒同一键上最多 val 个等待者，返回实际唤醒数；
-4) WAIT 带 timeout（相对）到期回 -ETIMEDOUT；WAIT_BITSET 的
-timeout 与 Linux 一样是**绝对**时刻（本内核时钟是单调毫秒）；
-5) WAIT_BITSET / WAKE_BITSET 用 val3 当位集，只唤醒位集相交的
-等待者；普通 WAIT 登记的是全 1，所以普通 WAKE 能叫醒它，
-WAKE_BITSET 的任意非零位集也能；
-6) REQUEUE 把同一键上的等待者（先唤醒 nr_wake 个）改挂到
-uaddr2；CMP_REQUEUE 在动手前先核对 uaddr 上的字等于 val3，
-不等回 -EAGAIN。Linux 把 nr_requeue 塞在第四个参数
-（timeout 那一格）里，这里照抄这个复用。
-与 Linux 不同的边界（文档里写死）：
-- 键取自「物理帧 + 页内偏移」，只有落在 App 分页窗口里的字才
-有键；栈上的字（不在窗口里）如实回 -ENOSYS；
-- PI / FD 类 op（2 / 5..8 / 11..14）一律 -ENOSYS；
-- 本机没有墙钟，FUTEX_CLOCK_REALTIME 带 timeout 时如实
--ENOSYS（不拿开机时长冒充绝对时刻）；
-- 本内核没有无限睡眠：等待按 LX_WAIT_SLICE_MS 时间片重放，没
-给 timeout 时重放醒来只要值没变就继续睡（Linux 语义一致）；
-- 被 requeue 的等待者把「期望值」更新为 uaddr2 上的当前字：
-requeue 本身不唤醒它（与 Linux 一致），但它下次时间片醒来
-不会因为两个地址的字不同而被误判成「已唤醒」。
 
 ### `static int32 lx_pselect6(void *p_ctx) {`
 

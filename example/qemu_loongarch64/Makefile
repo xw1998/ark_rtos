@@ -498,6 +498,16 @@ ARK_THREAD_ON := $(findstring ARKRTOS_USE_LINUX_THREAD=1,$(EXTRA_CFLAGS))
 ifneq ($(ARK_THREAD_ON),)
 LXFORK_DEFS   += -DARKRTOS_USE_LINUX_THREAD=1
 endif
+
+# SEC-G07 每 App 任务配额夹具段：只认它自己的开关。上限值也从 EXTRA_CFLAGS
+# 透传过去 —— 夹具断言「第几个 fork 被拒」必须与内核用的是同一个数，
+# 两边各写一个 8 只是碰巧对，改一处就会静默错位。
+ARK_QUOTA_ON := $(findstring ARKRTOS_USE_APP_QUOTA=1,$(EXTRA_CFLAGS))
+ARK_APPQ_N   := $(patsubst -DARKRTOS_APP_MAX_TASKS=%,%,$(filter -DARKRTOS_APP_MAX_TASKS=%,$(EXTRA_CFLAGS)))
+ifneq ($(ARK_QUOTA_ON),)
+LXFORK_DEFS   += -DARKRTOS_USE_APP_QUOTA=1
+LXFORK_DEFS   += -DARKRTOS_APP_MAX_TASKS=$(if $(ARK_APPQ_N),$(ARK_APPQ_N),8)
+endif
 ifneq ($(ARK_DEMAND_ON),)
 LXFORK_DEFS   += -DARKRTOS_USE_PAGING_DEMAND=1
 endif

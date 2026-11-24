@@ -104,6 +104,12 @@ typedef struct {
                                                      * wait4 拿它区分，晚到的 reap 如实报
                                                      * -ECHILD 而不是认错人。 */
 #endif
+#if (ARKRTOS_USE_APP_QUOTA == 1)
+    uint32 app_owner;                               /* SEC-G07：这条任务属于哪个 App。
+                                                     * 装载时分配一个非零号，fork 与
+                                                     * clone(CLONE_THREAD) 继承；0 表示
+                                                     * 没有身份（内核任务 / 不参与配额）。 */
+#endif
     uint8  is_priv;                                 /* 1 = Thread mode privileged, 0 = unprivileged.
                                                      * Honoured only when ARKRTOS_USE_PRIV == 1;
                                                      * the switch path writes CONTROL.nPRIV from

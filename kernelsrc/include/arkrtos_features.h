@@ -341,6 +341,28 @@
 #endif
 #endif
 
+/* SEC-G07 每 App 任务配额：0 = 关（任务表里没有 app_owner 字段、fork/clone
+ * 里没有计数与拒绝分支，镜像与打开本开关之前逐字节相同），1 = 每次 ELF 装载
+ * 分配一个非零 owner 号，fork 与 clone(CLONE_THREAD) 继承它，同一 owner 的活
+ * 任务数达到 ARKRTOS_APP_MAX_TASKS 时创建失败并回 -EAGAIN（另有 [appq] 日志）。
+ *
+ * 只数活任务（status != INVALID），所以子进程退出后额度立刻回来。范围写死：
+ * 只管任务表；fd 表每进程本来就只有 LX_MAX_FD 个槽，App 的页帧本来就被自己
+ * 那块地址窗口卡住，这两项都不是一个 App 能"耗尽"的。
+ *
+ * 要求 ARKRTOS_USE_ELF == 1。由 Kconfig 选择（config ARKRTOS_USE_APP_QUOTA）。 */
+#ifndef ARKRTOS_USE_APP_QUOTA
+#define ARKRTOS_USE_APP_QUOTA           0
+#endif
+#ifndef ARKRTOS_APP_MAX_TASKS
+#define ARKRTOS_APP_MAX_TASKS           8
+#endif
+#if (ARKRTOS_USE_APP_QUOTA == 1)
+#if (ARKRTOS_USE_ELF != 1)
+#error "ARKRTOS_USE_APP_QUOTA=1 requires ARKRTOS_USE_ELF=1"
+#endif
+#endif
+
 /* U-19b 写时复制：0 = 关（fork 把父空间逐对实体拷贝，与打开本开关之前逐字节
  * 相同），1 = fork 只把父空间挂着的每一对 8 KB 指给子空间（引用计数 1 变 2）、
  * 把两边的 TLB 条目降成只读；第一次写命中只读条目时由 la_pg_cow_fault()

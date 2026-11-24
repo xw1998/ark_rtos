@@ -455,6 +455,121 @@ static void thread_body2(void)
     {
     }
 }
+#if defined(ARKRTOS_USE_APP_QUOTA) && (ARKRTOS_USE_APP_QUOTA == 1)
+/* 配额段专用的线程脚手架。
+ *
+ * 为什么要三块栈：配额段会**同时**有两个填充线程活着（它们就是「名额
+ * 已满」的证据），另外还有几次「应该被拒」的 clone 需要一个不会被真用到
+ * 的栈。共用一块栈会让两个线程踩同一片内存 —— 那种失败看起来像内核问题。
+ */
+static volatile lx_long g_q_go;       /* 填充线程 1 的放行字 */
+static volatile lx_long g_q_seen;
+static volatile lx_long g_q_ctid;     /* 填充线程 1 的 CLEARTID 字 */
+static volatile lx_long g_q2_go;      /* 填充线程 2 的放行字 */
+static volatile lx_long g_q2_ctid;    /* 填充线程 2 的 CLEARTID 字 */
+static volatile lx_long g_q_park;    /* 配管子进程的定时休眠字（无人会改它） */
+static unsigned char s_q_stk[3][16384] __attribute__((aligned(16)));
+
+static void quota_thread_body(void)
+{
+    g_q_seen = 1;
+    while (g_q_go == 0)
+    {
+        (void)lx4(LX_FUTEX, (lx_long)(unsigned long)&g_q_go,
+                  LX_FUTEX_WAIT, 0, 0);
+    }
+    (void)lx1(LX_EXIT, 0);
+    for (;;)
+    {
+    }
+}
+
+static void quota_thread_body2(void)
+{
+    while (g_q2_go == 0)
+    {
+        (void)lx4(LX_FUTEX, (lx_long)(unsigned long)&g_q2_go,
+                  LX_FUTEX_WAIT, 0, 0);
+    }
+    (void)lx1(LX_EXIT, 0);
+    for (;;)
+    {
+    }
+}
+
+/* 「应该被拒」的那几次用它：万一内核真的放行了，子线程立刻退出，
+ * 不许它接着跑父线程的判据代码（那会把后面的读数全部搅乱）。 */
+static void quota_nop_body(void)
+{
+    (void)lx1(LX_EXIT, 0);
+    for (;;)
+    {
+    }
+}
+
+/* slot 选栈（0/1 给填充线程，2 给误放行的 nop）；ctid_addr = 0 表示不要
+ * CLEARTID（内核把 0 当「没给」，退出时什么也不写）。 */
+static lx_long quota_thread_spawn(void (*body)(void), lx_long ctid_addr, int slot)
+{
+    unsigned int ptid = 0xFFFFFFFFu;
+
+    return lx_clone_thread_call(
+               (lx_long)(LX_CLONE_VM | LX_CLONE_FS | LX_CLONE_FILES |
+                         LX_CLONE_SIGHAND | LX_CLONE_THREAD |
+                         LX_CLONE_PARENT_SETTID | LX_CLONE_CHILD_CLEARTID),
+               (lx_long)(unsigned long)(s_q_stk[slot] + sizeof(s_q_stk[slot])),
+               (lx_long)(unsigned long)&ptid,
+               ctid_addr, 0, body);
+}
+
+static lx_long quota_thread_start(lx_long ctid_addr)
+{
+    return quota_thread_spawn(quota_thread_body, ctid_addr, 0);
+}
+
+static lx_long quota_thread_start2(lx_long ctid_addr)
+{
+    return quota_thread_spawn(quota_thread_body2, ctid_addr, 1);
+}
+
+static lx_long quota_thread_nop(void)
+{
+    return quota_thread_spawn(quota_nop_body, 0, 2);
+}
+
+/* 放行 + 按 pthread_join 的真实路径等 CLEARTID 被清成 0。 */
+static void quota_thread_join(volatile lx_long *p_go, volatile lx_long *p_ctid)
+{
+    long     ts[2];
+    lx_long  dur[2];
+    lx_long  wrc = 0;
+    int      spun;
+
+    dur[0] = 0;
+    dur[1] = 0;
+    if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+            (lx_long)(unsigned long)ts, 0) == 0)
+    {
+        dur[0] = ts[0] + 2;
+        dur[1] = ts[1];
+    }
+    *p_go = 1;
+    (void)lx3(LX_FUTEX, (lx_long)(unsigned long)p_go, LX_FUTEX_WAKE, 1);
+    for (spun = 0; spun < 64; spun++)
+    {
+        if (*p_ctid == 0)
+        {
+            break;
+        }
+        wrc = lx4(LX_FUTEX, (lx_long)(unsigned long)p_ctid, LX_FUTEX_WAIT,
+                  *p_ctid, (lx_long)(unsigned long)dur);
+        if ((wrc == 0) || (wrc != -LX_EAGAIN))
+        {
+            break;
+        }
+    }
+}
+#endif
 #endif
 
 #if defined(ARKRTOS_USE_PAGING_COW) && (ARKRTOS_USE_PAGING_COW == 1)
@@ -2441,6 +2556,168 @@ void linux_main(unsigned long sp)
             check("exit_group from the leader reaped", r, p);
             check("exit_group-from-leader code 7", (st >> 8) & 0xFF, 7);
         }
+    }
+#endif
+
+#if defined(ARKRTOS_USE_APP_QUOTA) && (ARKRTOS_USE_APP_QUOTA == 1)
+    /* ------------------------------------------------------------------
+     * 第四批：SEC-G07 每 App 任务配额
+     * ------------------------------------------------------------------
+     * 判据只有一条：这个 App 的**活任务数**到上限之后，再 fork /
+     * clone(CLONE_THREAD) 必须回 -EAGAIN，且回收之后立刻能再起。
+     *
+     * 口径（本板最要紧的两条限制）：
+     *   1) qemu_loongarch64 的 ARKRTOS_PAGING_APPS_MAX 是 2，**并发进程最多
+     *      两个**（父 + 1 子）。fork 被拒时 ERR_QUOTA 与 ERR_BUSY 都映射成
+     *      -EAGAIN，所以「空间已满」时那次 fork 分不出是谁拦的。
+     *   2) 线程**不占新地址空间**，所以线程是唯一能把「配额」与「空间用完」
+     *      分开的杠杆。
+     * 于是这一段用「进程 + 线程」混合把名额压满，再分别读三条：
+     *   - 线程被拒（干净：不需要空间）；
+     *   - fork 被拒而空间仍空闲（干净：不可能是 ERR_BUSY）；
+     *   - 回收后立刻能再起（正控制）。
+     * 门禁取 ARKRTOS_APP_MAX_TASKS = 3：父 + 1 子 + 1 线程刚好压满，而
+     * 第三批线程段（父 + 1 线程 = 2）仍在上限内，两段互不干扰。配额计数
+     * 逻辑与常量取值无关，默认档的 8 走同一条代码。
+     */
+#ifndef ARKRTOS_APP_MAX_TASKS
+#define ARKRTOS_APP_MAX_TASKS 3
+#endif
+    {
+        int      qp[2];
+        lx_long  kid = -1;
+        lx_long  thr1 = -1;
+        lx_long  thr2 = -1;
+        lx_long  rc;
+        int      nreap = 0;
+        int      i;
+
+        check("quota pipe2 for the child barrier -> 0",
+              lx2(LX_PIPE2, (lx_long)(unsigned long)qp, 0), 0);
+
+        /* ① 进程先占一格：父 1 + 子 1 = 2。子进程关掉自己的写端后堵在管道
+         *    读上 —— 配额数的是**活任务**，让它直接 exit 就测不到上限。 */
+        kid = lx3(LX_CLONE, LX_SIGCHLD, 0, 0);
+        if (kid == 0)
+        {
+            char    b;
+            long    park[2];
+            lx_long rr;
+
+            (void)lx1(LX_CLOSE, (lx_long)qp[1]);
+            /* 本内核的管道读**不阻塞**：空且还有写端时回 -EAGAIN（见
+             * LX_PIPE_BUF 上的注释）。所以「等数据」这一步得自己睡出来：
+             * 每 100 ms 醒一次重试，读到 EOF(0) 才退出。睡的是内核自己
+             * 记账的 futex 超时，不读用户态时钟。 */
+            park[0] = 0;
+            park[1] = 100000000L;       /* 100 ms */
+            for (;;)
+            {
+                rr = lx3(LX_READ, (lx_long)qp[0],
+                         (lx_long)(unsigned long)&b, 1);
+                if (rr == 0)
+                {
+                    break;              /* 写端全关：EOF */
+                }
+                if ((rr < 0) && (rr != -LX_EAGAIN))
+                {
+                    break;              /* 其它错误：别在这里空转 */
+                }
+                (void)lx4(LX_FUTEX, (lx_long)(unsigned long)&g_q_park,
+                          LX_FUTEX_WAIT, 0, (lx_long)(unsigned long)park);
+            }
+            (void)lx1(LX_EXIT, 4);
+            for (;;)
+            {
+            }
+        }
+        check("quota fork under the limit > 0", (kid > 0) ? 1 : 0, 1);
+
+        /* ② 再用一个线程把最后一格占掉：父 + 子 + 线程 = 3 = 上限。
+         *   线程不需要新地址空间，所以下面几条的拒绝不可能来自空间耗尽。 */
+        g_q_go   = 0;
+        g_q_seen = 0;
+        g_q_ctid = 0x0badf00d;
+        thr1 = quota_thread_start((lx_long)(unsigned long)&g_q_ctid);
+        check("quota thread fills the last slot > 0", (thr1 > 0) ? 1 : 0, 1);
+
+        /* ③ 名额已满：fork 与线程都必须被拒。fork 这一条此刻空间 1 已被
+         *    子进程占着（同时被配额与空间挡），线程这一条是干净的。 */
+        check("quota fork over the limit == -EAGAIN -> -11",
+              lx3(LX_CLONE, LX_SIGCHLD, 0, 0), -LX_EAGAIN);
+        check("quota thread over the limit == -EAGAIN -> -11",
+              quota_thread_nop(), -LX_EAGAIN);
+
+        /* ④ 关写端 → 子进程读到 EOF 退出 → 活任务数掉回 2（父 + 线程1）。 */
+        (void)lx1(LX_CLOSE, (lx_long)qp[1]);
+        if (kid > 0)
+        {
+            lx_long st = -1;
+            lx_long r;
+
+            for (;;)
+            {
+                r = lx4(LX_WAIT4, kid, (lx_long)(unsigned long)&st, 0, 0);
+                if ((r == kid) || (r < 0))
+                {
+                    break;
+                }
+            }
+            if (r == kid)
+            {
+                nreap++;
+            }
+        }
+        (void)lx1(LX_CLOSE, (lx_long)qp[0]);
+        check("quota blocked child reaped -> 1", (lx_long)nreap, 1);
+
+        /* ⑤ 再加一个线程压满（父 + 线程1 + 线程2 = 3），此时**空间 1 是空的**
+         *    —— 这一次 fork 的拒绝只能是配额。这是全段最干净的一条读数。 */
+        g_q2_go   = 0;
+        g_q2_ctid = 0x0ddba11;
+        thr2 = quota_thread_start2((lx_long)(unsigned long)&g_q2_ctid);
+        check("quota second thread under the limit > 0", (thr2 > 0) ? 1 : 0, 1);
+        check("quota fork blocked while a space is free == -EAGAIN",
+              lx3(LX_CLONE, LX_SIGCHLD, 0, 0), -LX_EAGAIN);
+
+        /* ⑥ 线程同时算额度：再要一个线程也必须被拒。 */
+        check("quota third thread over the limit == -EAGAIN",
+              quota_thread_nop(), -LX_EAGAIN);
+
+        /* ⑦ 放行两个线程，按 pthread_join 的真实路径等 CHILD_CLEARTID 清零。
+         *    上限 2 s：唤醒丢了就整台机器挂死，连 FAIL 都印不出来。 */
+        quota_thread_join(&g_q_go, &g_q_ctid);
+        quota_thread_join(&g_q2_go, &g_q2_ctid);
+        check("quota threads joined (CHILD_CLEARTID cleared -> 0)",
+              (g_q_ctid == 0 && g_q2_ctid == 0) ? 1 : 0, 1);
+
+        /* ⑧ 额度与空间都回来了：立刻能再起一个进程，且退出码照传。 */
+        rc = lx3(LX_CLONE, LX_SIGCHLD, 0, 0);
+        if (rc == 0)
+        {
+            (void)lx1(LX_EXIT, 3);
+            for (;;)
+            {
+            }
+        }
+        check("quota fork after the quota was refilled > 0 -> 1",
+              (rc > 0) ? 1 : 0, 1);
+        if (rc > 0)
+        {
+            lx_long st = -1;
+            lx_long r;
+
+            for (;;)
+            {
+                r = lx4(LX_WAIT4, rc, (lx_long)(unsigned long)&st, 0, 0);
+                if ((r == rc) || (r < 0))
+                {
+                    break;
+                }
+            }
+            check("quota refilled child exit code 3 -> 3", (st >> 8) & 0xFF, 3);
+        }
+        (void)i;
     }
 #endif
 

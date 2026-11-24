@@ -915,7 +915,10 @@ static void ck_ret(t_ctx *c, int32 want, const char *what)
 }
 
 /* 阻塞中的调用（socket / pselect6）走 LX_RET_RETRY：这一次**不写** a0。
- * 所以「登记重放」的判据是 ret_written==0，而不是某个返回值。 */
+ * 所以「登记重放」的判据是 ret_written==0，而不是某个返回值。
+ * 两个特性都不开的档里没人用它（只有那两档会挂起重放），所以整段跟着
+ * 特性走；否则 -Wunused-function 会把它报出来，而告警门禁是硬基线。 */
+#if (ARKRTOS_USE_LINUX_SOCKET == 1) || (ARKRTOS_USE_LINUX_SELECT == 1)
 static void ck_pending(t_ctx *c, const char *what)
 {
     g_checks++;
@@ -926,6 +929,7 @@ static void ck_pending(t_ctx *c, const char *what)
                what, (int)(int32)c->ret, __LINE__);
     }
 }
+#endif
 
 static void fresh(t_ctx *c)
 {
@@ -3280,6 +3284,13 @@ static void net_addr_out(unsigned long ip_ua, unsigned long port_ua)
     (void)host_copy_to((void *)ip_ua, &w, 4u);
 }
 
+/* 服务任务在回复落地时会调这个查询（见 lx_sock_replay_ms）：宿主上没有
+ * 那份回复队列，所以恒报「还没到」，让重放路径按时间片兜底走下去。 */
+int32 arkrtos_net_reply_ready(int32 owner)
+{
+    (void)owner;
+    return 0;
+}
 int32 arkrtos_net_call(uint32 op, uint32 a1, uint32 a2, uint32 a3,
                        uint32 a4, uint32 a5)
 {

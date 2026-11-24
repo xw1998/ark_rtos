@@ -44,6 +44,7 @@
 #define ARKRTOS_ELF_ERR_BUSY        (-7)    /* M1：窗口是单实例，上一个还在跑 */
 #define ARKRTOS_ELF_ERR_SIGN        (-8)    /* 缺尾部签名 tag / tag 不匹配（EXEC_SIGN 档） */
 #define ARKRTOS_ELF_ERR_INTERP      (-9)    /* PT_INTERP 解释器缺失/不可用（DYNLOAD 档） */
+#define ARKRTOS_ELF_ERR_QUOTA       (-10)   /* SEC-G07：这个 App 的活任务数已到上限 */
 
 /** @brief 一次装载的可读结果（全部是实测值，不是推算值） */
 typedef struct {

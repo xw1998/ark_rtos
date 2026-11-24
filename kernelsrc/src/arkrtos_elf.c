@@ -1419,6 +1419,53 @@ static int32 elf_build_stack(unsigned long win_top, unsigned long argv_start,
 /* 第二遍：真写。先 filesz 拷数据，再 memsz-filesz 清零（BSS）。
  * 顺序不能反：清零写在拷贝之前会被后面的数据覆盖，写在之后才是对的。 */
 
+#if (ARKRTOS_USE_APP_QUOTA == 1)
+/* ------------------------------------------------------------
+ * SEC-G07：每 App 任务配额
+ * @details 「App」的身份是装载时发的 owner 号，不是地址空间号 ——
+ *          fork 出来的子进程各有自己的空间，但必须和父算在同一个额度里，
+ *          否则一个 fork 炸弹换一个空间就绕过去了。线程同理（共用父空间，
+ *          所以按空间计数碰巧也成立，但按 owner 计数才是一件事）。
+ *          计数只数活任务：status == INVALID 的槽子已经被回收，额度必须
+ *          立刻回来，否则「先起一批、退出、再起一批」会被误判成超限。
+ * ------------------------------------------------------------ */
+static uint32 s_elf_app_owner_next;
+
+/** 发一个新的 App 身份（0 保留给"没有身份"） */
+static uint32 elf_app_owner_new(void)
+{
+    s_elf_app_owner_next++;
+    if(s_elf_app_owner_next == 0u)
+    {
+        s_elf_app_owner_next = 1u;
+    }
+    return s_elf_app_owner_next;
+}
+
+/** 这个 owner 名下的活任务数 */
+static uint32 elf_app_task_count(uint32 owner)
+{
+    uint32 i;
+    uint32 n = 0u;
+
+    if(owner == 0u)
+    {
+        return 0u;
+    }
+
+
+    for(i = 0u; i < (uint32)ARKRTOS_TASK_MAX_NUM; i++)
+    {
+        if((arkrtos_task_table[i].status != ARKRTOS_TASK_INVALID) &&
+           (arkrtos_task_table[i].app_owner == owner))
+        {
+            n++;
+        }
+    }
+    return n;
+}
+#endif /* ARKRTOS_USE_APP_QUOTA == 1 */
+
 /* 第三阶段：注册任务、降权、写回窗口、绑帧，整段做成原子段。
  * 只在这一处做，是因为这四步之间被 tick 切走就会露出半配置状态
  * （5 连跑 2 败的间歇签名，见 §5.25）。返回任务 id 或负错误码。 */
@@ -1441,6 +1488,11 @@ static int32 elf_start_task(elf_word_t entry, unsigned long stack_bottom,
 
     /* 注册出来的任务默认是特权任务；ELF 程序必须降权，否则隔离为空。 */
     arkrtos_task_table[id - 1].is_priv = 0u;
+
+#if (ARKRTOS_USE_APP_QUOTA == 1)
+    /* 一次装载 = 一个新的 App 身份；它的 fork 子进程与线程都继承这个号。 */
+    arkrtos_task_table[id - 1].app_owner = elf_app_owner_new();
+#endif
 
 #if (ARKRTOS_USE_ELF_TLS == 1)
     /* TLS 块已经铺进窗口，但任务第一句代码就可能读 __thread 变量，
@@ -2275,6 +2327,14 @@ int32 arkrtos_elf_fork(void *p_svc_ctx, int32 *p_child_task,
         return ARKRTOS_ELF_ERR_PARAM;
     }
 
+#if (ARKRTOS_USE_APP_QUOTA == 1)
+    /* 在动空间与帧之前就拒绝：超配额不该先复制 2 MB 再把失败还回去。 */
+    if(elf_app_task_count(p_parent->app_owner) >= (uint32)ARKRTOS_APP_MAX_TASKS)
+    {
+        return ARKRTOS_ELF_ERR_QUOTA;
+    }
+#endif
+
 #if (ARKRTOS_USE_PAGING == 1)
     parent_space = arkrtos_paging_space_of(p_parent);
 #else
@@ -2330,6 +2390,9 @@ int32 arkrtos_elf_fork(void *p_svc_ctx, int32 *p_child_task,
         p_child->rom_size     = p_parent->rom_size;
         p_child->ram_start    = p_parent->ram_start;
         p_child->ram_size     = p_parent->ram_size;
+#if (ARKRTOS_USE_APP_QUOTA == 1)
+        p_child->app_owner    = p_parent->app_owner;   /* 同一个 App 的额度 */
+#endif
         p_child->stack_bottom = p_parent->stack_bottom;
         p_child->stack_top    = p_parent->stack_top;
         p_child->stack_size   = p_parent->stack_size;
@@ -2447,6 +2510,14 @@ int32 arkrtos_elf_thread(void *p_svc_ctx, unsigned long child_stack,
         return ARKRTOS_ELF_ERR_PARAM;
     }
 
+#if (ARKRTOS_USE_APP_QUOTA == 1)
+    /* 线程也要算额度：一个 App 用线程把任务表塞满，与用进程塞满是一回事。 */
+    if(elf_app_task_count(p_parent->app_owner) >= (uint32)ARKRTOS_APP_MAX_TASKS)
+    {
+        return ARKRTOS_ELF_ERR_QUOTA;
+    }
+#endif
+
 #if (ARKRTOS_USE_PAGING == 1)
     parent_space = arkrtos_paging_space_of(p_parent);
 #else
@@ -2465,6 +2536,7 @@ int32 arkrtos_elf_thread(void *p_svc_ctx, unsigned long child_stack,
                                s_elf_thread_scratch,
                                (uint32)sizeof(s_elf_thread_scratch),
                                p_parent->priority, 0u);
+
     if(id <= 0)
     {
         ARKRTOS_EXIT_CRITICAL(crit);
@@ -2480,6 +2552,9 @@ int32 arkrtos_elf_thread(void *p_svc_ctx, unsigned long child_stack,
         p_child->ram_start    = p_parent->ram_start;
         p_child->ram_size     = p_parent->ram_size;
         p_child->entry        = p_parent->entry;
+#if (ARKRTOS_USE_APP_QUOTA == 1)
+        p_child->app_owner    = p_parent->app_owner;   /* 线程与进程同一个额度 */
+#endif
         /* 线程只拿到栈顶，拿不到栈的大小：clone(2) 的契约就是「栈由调用者
          * 自己 mmap，内核只管从哪开始」。所以大小记 0、栈底保护字不布防 ——
          * 假装知道边界比不知道更危险。 */

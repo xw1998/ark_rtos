@@ -1188,6 +1188,70 @@ caller); it is neither implemented nor refused. There is no TLS module allocatio
 futex list and no `set_robust_list`; `SET_TID_ADDRESS` only reports the tid and stores nothing.
 A thread is an ordinary task: same priority, same time slice, no extra scheduling semantics.
 
+### 8.11 Per-App task quota (`ARKRTOS_USE_APP_QUOTA`, 2026-11-24, tenth QEMU LA64 tier, 198 checks)
+
+The tenth tier = the ninth tier (186 checks) + the quota section. It answers "can one App eat
+the whole task table", which is not a new syscall: the loader hands out a non-zero owner id per
+ELF load (`elf_app_owner_new()`), fork and `clone(CLONE_THREAD)` **inherit** it, and once the
+owner's **live** task count reaches `ARKRTOS_APP_MAX_TASKS` creation fails --
+`ARKRTOS_ELF_ERR_QUOTA` is mapped to `-EAGAIN` by `lx_fork_errno()`, plus one
+`[appq] refused <fork|thread>: owner N quota M tasks reached` line per refusal.
+
+**Why the cap is 3.** This board has `ARKRTOS_PAGING_APPS_MAX = 2` (at most parent + one child
+process), and `ERR_QUOTA` and `ERR_BUSY` both map to `-EAGAIN`, so the return value cannot tell
+which one refused. Only "a thread takes no new address space" separates them, so the fixture
+fills the three slots with "one process + two threads" and then reads two **unambiguous**
+refusals: a thread over the cap (cannot be BUSY) and a fork over the cap **while a space is
+free**. 3 is also above the peak of 2 in the third (thread) section, so the two sections do not
+interfere; the counting logic is independent of the constant, and the default 8 goes through the
+same code.
+
+**What the quota section reads (`[fork] quota …`)**: (1) fork under the cap succeeds; (2) a
+thread takes the last slot; (3) fork over the cap returns `-11`; (4) thread over the cap returns
+`-11`; (5) the blocked child is really reaped by `wait4` (the cap counts live tasks, so it has to
+be alive); (6) a second thread under the cap succeeds; (7) fork still returns `-EAGAIN` **while
+a space is free** (the cleanest reading of the section); (8) a third thread returns `-EAGAIN`;
+(9) both threads rejoin through the real path (`CHILD_CLEARTID` cleared + `FUTEX_WAIT`);
+(10) a fork succeeds immediately after the quota is released; (11) that child's exit code still
+comes back as 3. Plus three `[appq]` **cross-evidence** lines: exactly 3 (2 fork + 1 thread),
+one and the same owner, cap reading 3 -- without that line the caller sees only `EAGAIN` and
+cannot tell "quota exhausted" from "address space exhausted".
+
+**Two pits that only a real run exposes (both fixed).**
+
+1. **Pipe reads do not block, so the child killed itself.** Here `lx_pipe_read()` returns
+   `-EAGAIN` when the buffer is empty and a writer is still open (see the note on `LX_PIPE_BUF`;
+   that is an existing trade-off and was not changed). The first fixture wrote
+   `while (read(...) > 0) {}`; a negative value fell straight through, the child called `exit`,
+   the quota was never filled, and the symptom was two reds at once ("thread was let through" and
+   "nothing to reap") -- the `[DBG] cnt` live list no longer contained that tid. The fix is for
+   the child to sleep on a 100 ms `futex(FUTEX_WAIT)` timeout and retry, leaving only on EOF(0)
+   (that is a kernel-accounted futex timeout, not a user-space clock). **The sleep word must be a
+   global inside the App window**: `lx_futex_key_task()` returns invalid for
+   `uaddr < LA_WIN_VA`, so a word on the stack never gets woken.
+2. **Classifying a thread stack under COW needs a hint window.** A thread frame lands at
+   `child_stack - 1040`, and `clone` provides no `stack_size`, so `la_pg_stack_pair()` only knew
+   `[hi-size, hi)` and classified the thread stack as "not a stack", installing read-only pages
+   at fork time. The first `st.d` then raised a PME (`ecode=4`), while eentry starts with
+   `addi.d $sp,$sp,-528`, so the exception frame hit the same page and nested forever without the
+   C handler ever running. The fix: for a thread with `stack_size == 0`, classify by a 32 KB hint
+   window below the stack top (`LA_PG_THREAD_STACK_HINT`). **That is a classification hint, not
+   a stack-bottom guarantee** -- stack guards, bounds checks and overflow decisions must not rely
+   on it.
+
+**Boundaries written down.** The quota covers the **task table** only: the fd table is already
+capped per process (`LX_MAX_FD`) and page frames are already bounded by the App's own 2 MB
+window, so one App cannot exhaust either; **a per-App quota for the memory pool is still not
+done** (it needs a per-owner ledger in the allocator). The number of concurrent processes is
+bounded by `ARKRTOS_PAGING_APPS_MAX`; `ERR_QUOTA` and `ERR_BUSY` are both `-EAGAIN`, so only the
+`[appq]` log separates them. See section 4 of [已知限制](已知限制.md) and section 7 SEC-G07 of
+[安全认证准备](安全认证准备.md).
+
+**Zero footprint when off.** `elf_app_owner_new`, `elf_app_task_count` and `lx_appq_log`, plus
+the `app_owner` field in the TCB, produce nothing when `ARKRTOS_USE_APP_QUOTA=0`; the gate's
+`off-zero-symbols` step checks them with `nm` one by one, and `features.h` holds the
+`ARKRTOS_USE_APP_QUOTA=1 requires ARKRTOS_USE_ELF=1` `#error`.
+
 ## 9 Switch and zero footprint
 
 `ARKRTOS_USE_LINUX_THREAD` (section 8.10) is a third Linux ABI switch, default **0**,

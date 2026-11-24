@@ -148,6 +148,13 @@ SOCKET_FLAGS = SELECT_FLAGS + ["-DARKRTOS_USE_LINUX_SOCKET=1",
 # 在用的同一套对象；而且线程退出路径里「不是最后一个就别拆 fd 表」只有在
 # fd 表里真有东西（socket）时才看得见差别。夹具多 25 条 check。
 THREAD_FLAGS = SOCKET_FLAGS + ["-DARKRTOS_USE_LINUX_THREAD=1"]
+# QUOTA 档 = THREAD 档 + 每 App 任务配额（SEC-G07）。叠在线程档上而不是独立
+# 档：配额的三条干净读数全靠「线程不占新地址空间」把「配额用完」与「空间用完」
+# 分开，没有线程档就分不开（ERR_QUOTA 与 ERR_BUSY 都映射成 -EAGAIN）。
+# 上限取 3：父 + 1 子 + 1 线程刚好压满，同时高于线程档自己的峰值 2（父 + 1
+# 线程），两段互不干扰。板级 PAGING_APPS_MAX 是 2，并发进程最多两个。
+QUOTA_FLAGS = THREAD_FLAGS + ["-DARKRTOS_USE_APP_QUOTA=1",
+                              "-DARKRTOS_APP_MAX_TASKS=3"]
 
 LA64_FALLBACKS = [
     "D:/LoongIDE/la64-tool/bin/loongarch64-newlib-elf-gcc.exe",
@@ -248,6 +255,12 @@ EXPECT_SOCKET_CHECKS = 161
 # 提前拆）与被 reap 的退出码 5、线程发起 exit_group 整组被 reap 且码 6、
 # 组长发起 exit_group 整组被 reap 且码 7。合计 161 + 25 = 186 条。
 EXPECT_THREAD_CHECKS = 186
+# QUOTA 段多 11 条（上限 3 = 父 + 1 子 + 1 线程）：建管子、上限内 fork 成功、
+# 线程把最后一格占掉、超限 fork==-EAGAIN、超限线程==-EAGAIN、被阻塞的子进程
+# 真被 reap、回收后第二个线程成功、**空间空闲时 fork 仍被拒**（全段最干净的
+# 一条：不可能是 ERR_BUSY）、第三个线程被拒、两个线程按 CHILD_CLEARTID 归队、
+# 额度回来后立刻能再起且退出码照传。合计 186 + 12 = 198 条。
+EXPECT_QUOTA_CHECKS = 198
 # 上面这一档的每一段都对应一类「看起来对」的实现：另开地址空间（共享全局读
 # 不到）、每线程一份 fd 表（fork 段留不住）、线程退出就把进程拆了（进程活不
 # 下来）、把线程当进程挂到 wait4 上（exit_group 码不对）。
@@ -629,6 +642,37 @@ def check_default_off():
     else:
         ok("features-guard-thread", "features.h 的 thread 依赖 #error 在")
 
+    m = re.search(r"^#define\s+ARKRTOS_USE_APP_QUOTA\s+(\d+)\s*$", ac, re.M)
+    if not m:
+        bad("default-off-appq",
+            "arkrtos_autoconf.h 里没有 ARKRTOS_USE_APP_QUOTA")
+    elif m.group(1) != "0":
+        bad("default-off-appq", "默认档 ARKRTOS_USE_APP_QUOTA=%s（必须是 0）"
+            % m.group(1))
+    else:
+        ok("default-off-appq", "arkrtos_autoconf.h: ARKRTOS_USE_APP_QUOTA 0")
+
+    i = kc.find("config ARKRTOS_USE_APP_QUOTA")
+    if i < 0:
+        bad("kconfig-wired-appq",
+            "Kconfig.features 里没有 config ARKRTOS_USE_APP_QUOTA")
+    else:
+        tail = kc[i + len("config ARKRTOS_USE_APP_QUOTA"):]
+        m_end = re.search(r"^(config|menuconfig)\s", tail, re.M)
+        blk = tail[:m_end.start()] if m_end else tail
+        if "ARKRTOS_USE_ELF" not in blk:
+            bad("kconfig-wired-appq",
+                "Kconfig 的配额项没有 depends on ARKRTOS_USE_ELF")
+        else:
+            ok("kconfig-wired-appq",
+               "Kconfig 项存在，depends on ARKRTOS_USE_ELF")
+
+    if "ARKRTOS_USE_APP_QUOTA=1 requires ARKRTOS_USE_ELF=1" not in fh:
+        bad("features-guard-appq",
+            "features.h 缺配额对 ELF 的 #error")
+    else:
+        ok("features-guard-appq", "features.h 的配额依赖 #error 在")
+
     bc = read_text(os.path.join(ROOT, "board/qemu_loongarch64/arkrtos_board_config.h"))
     if re.search(r"^#define\s+ARKRTOS_USE_LINUX_FORK\s+1\s*$", bc, re.M):
         bad("board-switch", "QEMU LA64 板级不该缺省打开 fork（应靠 EXTRA_CFLAGS 出镜像）")
@@ -660,7 +704,8 @@ def check_off_zero_symbols(rv32, la64, nm, key_dir):
         hits = [t for t in ("lx_clone", "lx_wait4", "s_child",
                             "lx_sock_submit", "s_sockctx", "lx_socket",
                             "lx_thread_group_exit", "lx_clone_thread",
-                            "lx_thread_bind_hook", "lx_thread_clear_tid")
+                            "lx_thread_bind_hook", "lx_thread_clear_tid",
+                            "lx_appq_log")
                 if t in text]
         if hits:
             bad("off-zero-symbols", "关档 linux_abi.o 里仍有 %s" % "、".join(hits))
@@ -679,6 +724,9 @@ def check_off_zero_symbols(rv32, la64, nm, key_dir):
     # 线程档的两个新符号：关档时不许留在 .o 里。
     pairs = pairs + [
         ("kernelsrc/src/arkrtos_elf.c", "arkrtos_elf_thread"),
+        # SEC-G07：配额计数与发号在关档时不许留在 .o 里。
+        ("kernelsrc/src/arkrtos_elf.c", "elf_app_task_count"),
+        ("kernelsrc/src/arkrtos_elf.c", "elf_app_owner_new"),
         ("kernelsrc/port/loongarch/la64/arkrtos_port.c",
          "arkrtos_port_paging_thread_frame"),
     ]
@@ -838,7 +886,7 @@ def run_qemu(qemu, seconds):
 
 def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
           futex=False, filemap=False, mprotect=False, select=False,
-          socket=False, thread=False):
+          socket=False, thread=False, quota=False):
     lines = text.replace("\r\n", "\n").splitlines()
 
     def count(pred):
@@ -1197,6 +1245,56 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
             problems.append("线程 getpid=%s 与父进程 pid=%s 不同（不是同一个线程组）"
                             % (m_tg.group(1), m_par.group(1)))
 
+    if quota:
+        nl = text.replace("\r\n", "\n")
+
+        def one_q(pat, why):
+            hits = re.findall(pat, nl, re.M)
+            if len(hits) != 1:
+                problems.append("配额读数 %s 出现 %d 次（必须恰好 1 次）：%s"
+                                % (pat, len(hits), why))
+
+        one_q(r"^\[fork\] quota fork under the limit > 0 -> 1 ok$",
+              "上限内的 fork 就没成")
+        one_q(r"^\[fork\] quota thread fills the last slot > 0 -> 1 ok$",
+              "线程没把最后一格占掉（后面两条拒绝就没有前提）")
+        one_q(r"^\[fork\] quota thread over the limit == -EAGAIN -> -11 -> -11 ok$",
+              "线程绕过了配额（这条是唯一不可能是 ERR_BUSY 的拒绝）")
+        one_q(r"^\[fork\] quota fork blocked while a space is free == -EAGAIN -> -11 ok$",
+              "空间空闲时 fork 仍没被拒（配额没生效，只是空间挡住了）")
+        one_q(r"^\[fork\] quota blocked child reaped -> 1 -> 1 ok$",
+              "子进程没真的被阻塞回收（配额数的是活任务，前提塌了）")
+        one_q(r"^\[fork\] quota third thread over the limit == -EAGAIN -> -11 ok$",
+              "第三个线程没被拒（配额漏算）")
+        one_q(r"^\[fork\] quota threads joined \(CHILD_CLEARTID cleared -> 0\)"
+             r" -> 1 ok$", "两个线程没按 CLEARTID 归队")
+        one_q(r"^\[fork\] quota fork after the quota was refilled > 0 -> 1 -> 1 ok$",
+              "额度回收后没能立刻再起（计数漏回）")
+        one_q(r"^\[fork\] quota refilled child exit code 3 -> 3 -> 3 ok$",
+              "回收后那个子进程退出码没传回来")
+        # 交叉证据：三次拒绝必须各留一行 [appq] 日志，且 owner 号与上限
+        # 与本档设置一致。没有这一行，调用者只看到 EAGAIN，分不出
+        # 「空间用完」与「额度用完」。
+        appq = re.findall(
+            r"^\[appq\] refused (fork|thread): owner (\d+) quota (\d+) tasks"
+            r" reached$", nl, re.M)
+        if len(appq) != 4:
+            problems.append("[appq] 拒绝日志 %d 行（应有 4 行：超限 fork、超限线程、"
+                            "空间空闲时 fork、第三个线程）" % len(appq))
+        else:
+            kinds = [k for k, _o, _q in appq]
+            if kinds.count("fork") != 2 or kinds.count("thread") != 2:
+                problems.append("[appq] 日志种类不对（%s）：应为 2 次 fork + 2 次 thread"
+                                % "、".join(kinds))
+            owners = set(o for _k, o, _q in appq)
+            quotas = set(q for _k, _o, q in appq)
+            if len(owners) != 1:
+                problems.append("[appq] 三行日志的 owner 不是同一个（%s）"
+                                % "、".join(sorted(owners)))
+            if quotas != {"3"}:
+                problems.append("[appq] 日志里的上限是 %s（门禁设的是 3）"
+                                % "、".join(sorted(quotas)))
+
     # 新开关不许把别人的演示搞坏。
     for tag, name in (("[linux] PASS", "Linux ABI 夹具"),
                       ("[FS] PASS", "ramfs 自测"),
@@ -1211,7 +1309,8 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
 
 
 def self_check(good_text, cow=False, shm=False, futex=False, filemap=False,
-               mprotect=False, select=False, socket=False, thread=False):
+               mprotect=False, select=False, socket=False, thread=False,
+               quota=False):
     """把好日志的九种坏法喂回判据，每一种都必须判红，否则解析器是空转。"""
     g = good_text.replace("\r\n", "\n")
     mutations = {
@@ -1397,6 +1496,25 @@ def self_check(good_text, cow=False, shm=False, futex=False, filemap=False,
             "缺 clone 线程读数": lambda s: s.replace(
                 "[fork] clone(CLONE_THREAD) > 0 -> 1 ok\n", ""),
         })
+    if quota:
+        mutations.update({
+            "配额被绕过（线程放行）": lambda s: s.replace(
+                "[fork] quota thread over the limit == -EAGAIN -> -11 -> -11 ok",
+                "[fork] quota thread over the limit == -EAGAIN -> -11 -> 15 FAIL (want -11)"),
+            "配额没生效（空间空闲时 fork 放行）": lambda s: s.replace(
+                "[fork] quota fork blocked while a space is free == -EAGAIN -> -11 ok",
+                "[fork] quota fork blocked while a space is free == -EAGAIN -> 12"),
+            "计数漏回（回收后起不来）": lambda s: s.replace(
+                "[fork] quota fork after the quota was refilled > 0 -> 1 -> 1 ok",
+                "[fork] quota fork after the quota was refilled > 0 -> 1 -> 0 FAIL (want 1)"),
+            "配额数成死任务（子进程没回收）": lambda s: s.replace(
+                "[fork] quota blocked child reaped -> 1 -> 1 ok",
+                "[fork] quota blocked child reaped -> 1 -> 0 FAIL (want 1)"),
+            "缺 [appq] 日志": lambda s: re.sub(
+                r"^\[appq\] refused \w+: owner \d+ quota \d+ tasks reached$\n",
+                "", s, flags=re.M),
+        })
+
     if filemap:
         mutations.update({
             "filemap 共享写没落盘": lambda s: s.replace(
@@ -1412,20 +1530,21 @@ def self_check(good_text, cow=False, shm=False, futex=False, filemap=False,
                 "[fork] filemap msync rc -> 0 ok\n", ""),
         })
     missed = []
-    nchk = (EXPECT_THREAD_CHECKS if thread else
+    nchk = (EXPECT_QUOTA_CHECKS if quota else
+            (EXPECT_THREAD_CHECKS if thread else
             (EXPECT_SELECT_CHECKS if select else
             (EXPECT_MPROTECT_CHECKS if mprotect else
             (EXPECT_FILEMAP_CHECKS if filemap else
             (EXPECT_FUTEX_CHECKS if futex else
             (EXPECT_SHM_CHECKS if shm else
-             (EXPECT_COW_CHECKS if cow else EXPECT_FORK_CHECKS)))))))
+             (EXPECT_COW_CHECKS if cow else EXPECT_FORK_CHECKS))))))))
     for name, fn in mutations.items():
         mutated = fn(g)
         if mutated == g:
             missed.append("%s（坏样本没改到东西）" % name)
             continue
         passed, _ = judge(mutated, nchk, cow, shm, futex, filemap, mprotect,
-                          select, socket, thread)
+                          select, socket, thread, quota)
         if passed:
             missed.append(name)
     return missed
@@ -1510,12 +1629,25 @@ def main(argv):
                                          "-DARKRTOS_USE_LWIP=1",
                                          "-DARKRTOS_USE_LINUX_THREAD=1"],
                          "fork+cow+shm+futex+filemap+mprotect+select+socket+thread")
+        check_compile_on(la64, key_dir, ["-DARKRTOS_USE_PAGING_COW=1",
+                                         "-DARKRTOS_USE_PAGING_SHM=1",
+                                         "-DARKRTOS_USE_LINUX_FUTEX=1",
+                                         "-DARKRTOS_USE_PAGING_FILEMAP=1",
+                                         "-DARKRTOS_USE_PAGING_MPROTECT=1",
+                                         "-DARKRTOS_USE_LINUX_SELECT=1",
+                                         "-DARKRTOS_USE_LINUX_SOCKET=1",
+                                         "-DARKRTOS_USE_LWIP=1",
+                                         "-DARKRTOS_USE_LINUX_THREAD=1",
+                                         "-DARKRTOS_USE_APP_QUOTA=1",
+                                         "-DARKRTOS_APP_MAX_TASKS=3"],
+                         "fork+…+thread+appq")
 
     if qemu:
-        # 六档各跑一遍：默认 fork（27 条）、fork+COW（32 条 + 内核 COW 日志）、
+        # 十档各跑一遍：默认 fork（27 条）、fork+COW（32 条 + 内核 COW 日志）、
         # fork+COW+SHM（40 条 + 内核共享映射日志）、fork+COW+SHM+futex
         # （55 条 + 跨进程 WAIT/WAKE 配对 + 多时间片重放）、再叠 filemap（69 条）与
-        # mprotect（80 条）。别把 SHM 并进 COW 档、也别把
+        # mprotect（107 条）、select（123 条）、socket（161 条）、thread（186 条）
+        # 与配额（198 条）。别把 SHM 并进 COW 档、也别把
         # futex 并进 SHM 档 —— 那样「关档时 mmap(MAP_SHARED) / futex 仍回
         # -ENOSYS」这两条反假绿就永远测不到了。
         # 每次都要先 clean（make 不跟踪 EXTRA_CFLAGS），否则上一次的 .o 会让
@@ -1535,6 +1667,8 @@ def main(argv):
              "fork+cow+shm+futex+filemap+mprotect+select+socket"),
             (THREAD_FLAGS, EXPECT_THREAD_CHECKS, True, True,
              "fork+cow+shm+futex+filemap+mprotect+select+socket+thread"),
+            (QUOTA_FLAGS, EXPECT_QUOTA_CHECKS, True, True,
+             "fork+cow+shm+futex+filemap+mprotect+select+socket+thread+appq"),
         ]
         if a.no_build:
             rounds = rounds[-1:]
@@ -1571,12 +1705,13 @@ def main(argv):
             select = "-DARKRTOS_USE_LINUX_SELECT=1" in flags
             socket = "-DARKRTOS_USE_LINUX_SOCKET=1" in flags
             thread = "-DARKRTOS_USE_LINUX_THREAD=1" in flags
+            quota = "-DARKRTOS_USE_APP_QUOTA=1" in flags
             passed, notes = judge(text, nchk, cow, shm, futex, filemap, mprotect,
-                                  select, socket, thread)
+                                  select, socket, thread, quota)
             if passed:
                 ok("qemu-readout", "[%s] %s" % (tag, notes[0]))
                 missed = self_check(text, cow, shm, futex, filemap, mprotect,
-                                    select, socket, thread)
+                                    select, socket, thread, quota)
                 if missed:
                     bad("parser-selfcheck",
                         "[%s] 这些坏样本没被判红：%s" % (tag, "、".join(missed)))

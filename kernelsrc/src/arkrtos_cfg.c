@@ -116,6 +116,13 @@ int32 arkrtos_task_register(void (*entry)(void), uint32 *stack_bottom, uint32 st
     p_task->exit_code_set = 0u;
     p_task->exit_by_signal = 0u;
     #endif
+    #if (ARKRTOS_USE_APP_QUOTA == 1)
+    /* SEC-G07: 槽位复用不许继承上一个 App 的 owner —— 否则内核任务或
+     * 刚装载进来的任务会悄悄算进某个 App 的额度，把它提前顶到上限。
+     * 装载器（arkrtos_elf.c）会在注册成功后显式发一个 owner 号。
+     */
+    p_task->app_owner   = 0;
+    #endif
     p_task->is_priv     = 1u;   /* kernel-created tasks run privileged */
     p_task->status      = ARKRTOS_TASK_READY;
     p_task->period_time = p_task->period;
