@@ -43,8 +43,15 @@
  * 实测 1 KB 会打穿（STK 守卫当场报 "stack bottom flag overwritten"，
  * 而被打穿的是相邻的 .bss —— 症状看起来像协议栈内部断言，其实是栈溢出）。
  * 所以只在开网卡时把栈加到 4 KB，默认档的 RAM 占用一个字节都不多。 */
-#if (ARKRTOS_USE_NET_VIRTIO == 1)
-static uint32 g_lwip_task_stack[1024];   /* 4 KB：tcpip_init + netif 装配 */
+/* 开 socket 翻译层（U-23）时也要 4 KB：这一档靠 lwIP 的回环网卡跑 TCP/UDP，
+ * tcpip_init 这一轮除了建 tcpip 线程，还要装 lo 网卡并挂上 loopif 的
+ * tcpip_try_callback 通路。实测 1 KB 会打穿 —— 症状是相邻 .bss 被踩，
+ * 先看到 lwIP 自己报 "memp_free: mem properly aligned" 断言，随后 lwIP
+ * 任务在 era=0x23 上 INE 停机（栈底守卫字从 0x0000ed01 变成 0x0000000d）。
+ * 关档时仍然只占 1 KB。 */
+#if (ARKRTOS_USE_NET_VIRTIO == 1) || (defined(ARKRTOS_USE_LINUX_SOCKET) && \
+                                      (ARKRTOS_USE_LINUX_SOCKET == 1))
+static uint32 g_lwip_task_stack[1024];   /* 4 KB：tcpip_init + 回环/网卡装配 */
 #else
 static uint32 g_lwip_task_stack[256];    /* 1 KB：只调一次 tcpip_init */
 #endif

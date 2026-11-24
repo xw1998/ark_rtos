@@ -43,7 +43,14 @@ config ARKRTOS_NET_MAX_SOCKETS
 
 config ARKRTOS_NET_TASK_STACK_WORDS
 	int "Network service task stack (words)"
-	default 384
+	default 1024
 	range 128 4096
+	help
+	  The service task runs real lwIP functions (lwip_recvfrom / lwip_send /
+	  lwip_accept), whose call depth we do not control: netconn -> api_msg ->
+	  a synchronous message to the tcpip thread. 384 words (1.5 KB) overflows
+	  on LA64: QEMU shows "stack bottom flag overwritten" for the service task
+	  and the pending recv then never answers, which the caller sees as "no
+	  data ever arrives" rather than as an error code. 4 KB measured enough.
 
 endmenu

@@ -86,6 +86,28 @@ typedef char arkrtos_net_sock_rows_must_match_init[ARKRTOS_NET_MAX_SOCKETS == 4 
 static volatile uint32 g_net_req_state;
 static int32  g_net_req_owner;
 static volatile int32 g_net_req_result;
+/* 1 = 槽里这条请求是 Linux ABI 层（U-23）发出的：那一层在等不到回复时会
+ * 睡一个时间片再重放，所以回复落地时可以直接叫醒它，省掉整整一个
+ * LX_WAIT_SLICE_MS（100 ms）。裸 Ark SVC 调用者没有这个约定 —— 它可能
+ * 正在等别的东西，把它唤醒会提前结束那段等待 —— 因此就绪信号必须跟着
+ * 请求一起登记，而不是「谁在等就叫醒谁」。
+ *
+ * 整个机制只在 socket 开关打开时编译：关掉这一档，连这 1 字节的 BSS 都
+ * 不产生（"关档零变化"要能逐字节核得住，而不是只有符号表干净）。 */
+#if (defined(ARKRTOS_USE_LINUX_SOCKET) && (ARKRTOS_USE_LINUX_SOCKET == 1))
+static volatile uint8 g_net_req_wake;
+#define NET_REQ_WAKE_CLEAR()    (g_net_req_wake = 0u)
+#define NET_REQ_WAKE_NOTIFY()                                          \
+    do {                                                               \
+        if((g_net_req_wake != 0u) && (g_net_req_owner > 0))            \
+        {                                                              \
+            (void)arkrtos_task_wakeup_internal(g_net_req_owner);       \
+        }                                                              \
+    } while(0)
+#else
+#define NET_REQ_WAKE_CLEAR()    ((void)0)
+#define NET_REQ_WAKE_NOTIFY()   ((void)0)
+#endif
 /* 请求槽：参数块按字宽存放（宽档每字 8 字节），见 arkrtos_svc_abi.h。 */
 static arkrtos_svc_arg_t g_net_req_arg[ARKRTOS_NET_ARG_WORDS];
 
@@ -646,6 +668,11 @@ static void arkrtos_net_handle_msg(uint32 msg)
          * order is all the safety this needs. */
         ARKRTOS_DMB();
         g_net_req_state = ARKRTOS_NET_REQ_DONE;
+        /* 回复已经可以被取走。发起者是 Linux ABI 层（g_net_req_wake）且
+         * 正睡在重放时间片里时，立刻叫醒它：一次 TCP/UDP 往返不该按
+         * 100 ms 粒度结算。叫醒失败是正常的两条路 —— 对方还没睡下（它
+         * 会先看到 DONE，不睡就直接重放），或对方已经死了（应答丢弃）。 */
+        NET_REQ_WAKE_NOTIFY();
     }
 
     arkrtos_net_reap();
@@ -721,6 +748,7 @@ void arkrtos_net_host_reset(void)
     g_net_req_state  = ARKRTOS_NET_REQ_IDLE;
     g_net_req_owner  = 0;
     g_net_req_result = 0;
+    NET_REQ_WAKE_CLEAR();
 }
 #endif /* ARKRTOS_NET_HOST_TEST */
 
@@ -968,6 +996,7 @@ static int32 arkrtos_net_submit(const arkrtos_svc_arg_t *p)
             /* The owner died before collecting this. Nobody can use it now,
              * and leaving it here would lock the slot for good. */
             g_net_req_state = ARKRTOS_NET_REQ_IDLE;
+            NET_REQ_WAKE_CLEAR();
         }
         else if(g_net_req_owner != arkrtos_current_task_id)
         {
@@ -978,6 +1007,7 @@ static int32 arkrtos_net_submit(const arkrtos_svc_arg_t *p)
         {
             r = g_net_req_result;
             g_net_req_state = ARKRTOS_NET_REQ_IDLE;
+            NET_REQ_WAKE_CLEAR();       /* 回复已取走：不再叫醒任何人 */
             arkrtos_sched_unlock_internal();
             return r;
         }
@@ -987,6 +1017,7 @@ static int32 arkrtos_net_submit(const arkrtos_svc_arg_t *p)
              * has moved on. That reply answers a question nobody is asking
              * any more, so it is dropped rather than handed to this call. */
             g_net_req_state = ARKRTOS_NET_REQ_IDLE;
+            NET_REQ_WAKE_CLEAR();
         }
     }
 
@@ -1039,6 +1070,7 @@ static int32 arkrtos_net_submit(const arkrtos_svc_arg_t *p)
     if(arkrtos_mq_send_internal(g_net_mq, &msg, 1, 0) < 0)
     {
         g_net_req_state = ARKRTOS_NET_REQ_IDLE;
+        NET_REQ_WAKE_CLEAR();
         arkrtos_sched_unlock_internal();
         return ARKRTOS_NET_EBUSY;
     }
@@ -1079,6 +1111,7 @@ int32 arkrtos_net_call(uint32 op, uint32 a1, uint32 a2, uint32 a3,
 {
     arkrtos_svc_arg_t p[ARKRTOS_NET_ARG_WORDS];
     uint32 i;
+    int32  r;
 
     for(i = 0u; i < (uint32)ARKRTOS_NET_ARG_WORDS; i++)
     {
@@ -1090,7 +1123,33 @@ int32 arkrtos_net_call(uint32 op, uint32 a1, uint32 a2, uint32 a3,
     p[3] = (arkrtos_svc_arg_t)a3;
     p[4] = (arkrtos_svc_arg_t)a4;
     p[5] = (arkrtos_svc_arg_t)a5;
-    return arkrtos_net_submit(p);
+    r = arkrtos_net_submit(p);
+    /* 只有「这次调用自己把请求留在槽里」才打这个标记：EBUSY 是别人在飞，
+     * 标了就会把别人的唤醒权挂到自己头上。 */
+    if(r == ARKRTOS_NET_EPENDING)
+    {
+        g_net_req_wake = 1u;
+    }
+    return r;
+}
+
+/* 我这一条请求的回复是不是已经落地（= 可以立刻重放，不必睡时间片）。
+ * 存在的理由是一条真实的竞态：服务任务可能在上面的 arkrtos_net_call
+ * 返回之前就把回复写好了，那时 g_net_req_wake 还没置 1，唤醒自然发不
+ * 出去。等的一方在睡下之前先问一句，两种顺序都不会白等 100 ms。 */
+int32 arkrtos_net_reply_ready(int32 owner)
+{
+    int32 r;
+
+    if(owner <= 0)
+    {
+        return 0;
+    }
+    arkrtos_sched_lock_internal();
+    r = ((g_net_req_state == ARKRTOS_NET_REQ_DONE) &&
+         (g_net_req_owner == owner)) ? 1 : 0;
+    arkrtos_sched_unlock_internal();
+    return r;
 }
 #endif /* ARKRTOS_USE_LINUX_SOCKET */
 
@@ -1165,7 +1224,8 @@ int32 arkrtos_net_start(void)
         return rc;
     }
 
-    ARKRTOS_LOGI("NET", "socket service up (SVC 0x1E)");
+    ARKRTOS_LOGI("NET", "socket service up (SVC 0x1E) task=%d stack=%u words",
+                 (int)rc, (unsigned)ARKRTOS_NET_TASK_STACK_WORDS);
     return 0;
 }
 
@@ -1200,6 +1260,7 @@ void arkrtos_net_release_task(int32 task_id)
     if(g_net_req_owner == task_id)
     {
         g_net_req_owner = -1;
+        NET_REQ_WAKE_CLEAR();
     }
 
     if(g_net_mq >= 0)
@@ -1241,6 +1302,14 @@ int32 arkrtos_net_call(uint32 op, uint32 a1, uint32 a2, uint32 a3,
     (void)a5;
     /* 没有协议栈就没有服务：Linux ABI 层据此回 -ENOSYS，而不是编一个 0。 */
     return ARKRTOS_NET_ENOTSUP;
+}
+
+int32 arkrtos_net_reply_ready(int32 owner)
+{
+    (void)owner;
+    /* 没有服务任务，就永远没有「回复已落地」：走重放时间片那条兜底路，
+     * 下一次 net_call 会如实回 ENOTSUP。 */
+    return 0;
 }
 #endif /* ARKRTOS_USE_LINUX_SOCKET */
 

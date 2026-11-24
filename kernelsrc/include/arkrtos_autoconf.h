@@ -92,7 +92,9 @@
 #define ARKRTOS_NET_MAX_SOCKETS (4)
 #endif
 #ifndef ARKRTOS_NET_TASK_STACK_WORDS
-#define ARKRTOS_NET_TASK_STACK_WORDS (384)
+/* 1.5 KB 会打穿（见 config/kconfig/Kconfig.net 的 help：lwIP 调用链深度不
+ * 由我们控制，实测服务任务栈底守卫字被覆盖后 recv 永不回）。 */
+#define ARKRTOS_NET_TASK_STACK_WORDS (1024)
 #endif
 #ifndef ARKRTOS_PACK_IN_EXTRAM
 #define ARKRTOS_PACK_IN_EXTRAM 0

@@ -137,6 +137,12 @@ MPROTECT_FLAGS = FILEMAP_FLAGS + ["-DARKRTOS_USE_PAGING_MPROTECT=1"]
 # 但夹具的后半段整段都在分页链上，单独造一档会让「就绪判据」和「fd 表」
 # 各自只在一半场景里被测过。夹具多 15 条 check。
 SELECT_FLAGS = MPROTECT_FLAGS + ["-DARKRTOS_USE_LINUX_SELECT=1"]
+# SOCKET 档 = SELECT 档 + socket 翻译层 + lwIP 回环（U-23）。叠在 select 档上
+# 是因为夹具的「等协议栈起来」用 pselect6 的空超时当睡眠，而且 fd 表、重放
+# 槽、任务身份这些前置正好都是 select 档已经在跑的同一套对象。lwIP 开着但
+# 不接 virtio 网卡：socket 走 127.0.0.1 回环，包不出芯片。夹具多 37 条 check。
+SOCKET_FLAGS = SELECT_FLAGS + ["-DARKRTOS_USE_LINUX_SOCKET=1",
+                               "-DARKRTOS_USE_LWIP=1"]
 
 LA64_FALLBACKS = [
     "D:/LoongIDE/la64-tool/bin/loongarch64-newlib-elf-gcc.exe",
@@ -216,7 +222,18 @@ EXPECT_MPROTECT_CHECKS = 107
 # 就绪位在用户集里保留、写端有空间就绪、stdout 恒可写、写满后写端不就绪、
 # 写端全关后读端按 EOF 就绪、exceptfds 永不上报（0）、exceptfds 被清位、
 # 坏 fd 回 -EBADF。合计 107 + 15 = 122 条。
-EXPECT_SELECT_CHECKS = 122
+# 再加 1 条反假绿：socket 开关没开时 198 号必须如实回 -ENOSYS（这一条只在
+# select 档里编，socket 档自己不编，所以 socket 档仍然从 122 起算）。
+EXPECT_SELECT_CHECKS = 123
+# SOCKET 段多 37 条：等协议栈、stream/dgram 两个 fd、坏 domain 与坏 type
+# 两个 errno、bind/listen/getsockname（addrlen 16、family、端口 8081）、
+# connect、accept（fd + 写回 family）、TCP 收发与载荷逐字节（前 4 字节打包
+# + 末字节）、getpeername 的 127.0.0.1、SO_REUSEADDR、SO_TYPE 与 SO_ERROR
+# 各自的 rc 与本地值、未知选项 -ENOPROTOOPT、写 SO_ERROR -EINVAL、UDP
+# bind/sendto/recvfrom/载荷/对端端口一致、shutdown 后对端 EOF、关闭后
+# read/write 回 -EBADF。合计 122 + 38 + 1 = 161 条（最后一条是「一次 socket
+# 往返不按一个 100 ms 等待时间片结算」的性能回归门）。
+EXPECT_SOCKET_CHECKS = 161
 
 FAILS = []
 PASSES = []
@@ -525,6 +542,45 @@ def check_default_off():
     else:
         ok("features-guard-select", "features.h 的 select 依赖 #error 在")
 
+    m = re.search(r"^#define\s+ARKRTOS_USE_LINUX_SOCKET\s+(\d+)\s*$", ac, re.M)
+    if not m:
+        bad("default-off-socket",
+            "arkrtos_autoconf.h 里没有 ARKRTOS_USE_LINUX_SOCKET")
+    elif m.group(1) != "0":
+        bad("default-off-socket", "默认档 ARKRTOS_USE_LINUX_SOCKET=%s（必须是 0）"
+            % m.group(1))
+    else:
+        ok("default-off-socket", "arkrtos_autoconf.h: ARKRTOS_USE_LINUX_SOCKET 0")
+
+    i = kc.find("config ARKRTOS_USE_LINUX_SOCKET")
+    if i < 0:
+        bad("kconfig-wired-socket",
+            "Kconfig.features 里没有 config ARKRTOS_USE_LINUX_SOCKET")
+    else:
+        tail = kc[i + len("config ARKRTOS_USE_LINUX_SOCKET"):]
+        m_end = re.search(r"^(config|menuconfig)\s", tail, re.M)
+        blk = tail[:m_end.start()] if m_end else tail
+        miss = [n for n in ("ARKRTOS_USE_LINUX_ABI", "ARKRTOS_USE_LWIP")
+                if n not in blk]
+        if miss:
+            bad("kconfig-wired-socket",
+                "Kconfig 的 socket 项 depends 里缺 %s" % "、".join(miss))
+        else:
+            ok("kconfig-wired-socket",
+               "Kconfig 项存在，depends on ABI 与 LWIP 都在")
+
+    guards = [
+        "ARKRTOS_USE_LINUX_SOCKET=1 requires ARKRTOS_USE_LINUX_ABI=1",
+        "ARKRTOS_USE_LINUX_SOCKET=1 requires ARKRTOS_USE_LWIP=1",
+    ]
+    miss = [g for g in guards if g not in fh]
+    if miss:
+        bad("features-guard-socket",
+            "features.h 缺 %d 条 socket #error（第一缺：%s）"
+            % (len(miss), miss[0]))
+    else:
+        ok("features-guard-socket", "features.h 两条 socket #error 都在")
+
     bc = read_text(os.path.join(ROOT, "board/qemu_loongarch64/arkrtos_board_config.h"))
     if re.search(r"^#define\s+ARKRTOS_USE_LINUX_FORK\s+1\s*$", bc, re.M):
         bad("board-switch", "QEMU LA64 板级不该缺省打开 fork（应靠 EXTRA_CFLAGS 出镜像）")
@@ -553,11 +609,14 @@ def check_off_zero_symbols(rv32, la64, nm, key_dir):
         bad("off-zero-symbols", "关档把 linux_abi.c 编成 .o 失败：\n%s" % out[-400:])
     else:
         text = _sym_defs(nm, obj)
-        hits = [t for t in ("lx_clone", "lx_wait4", "s_child") if t in text]
+        hits = [t for t in ("lx_clone", "lx_wait4", "s_child",
+                            "lx_sock_submit", "s_sockctx", "lx_socket")
+                if t in text]
         if hits:
             bad("off-zero-symbols", "关档 linux_abi.o 里仍有 %s" % "、".join(hits))
         else:
-            ok("off-zero-symbols", "关档 linux_abi.o 没有 fork 记账与两个入口")
+            ok("off-zero-symbols",
+               "关档 linux_abi.o 没有 fork 记账、两个入口与 socket 翻译层")
 
     pairs = [
         ("kernelsrc/src/arkrtos_elf.c", "arkrtos_elf_fork"),
@@ -722,7 +781,8 @@ def run_qemu(qemu, seconds):
 
 
 def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
-          futex=False, filemap=False, mprotect=False, select=False):
+          futex=False, filemap=False, mprotect=False, select=False,
+          socket=False):
     lines = text.replace("\r\n", "\n").splitlines()
 
     def count(pred):
@@ -809,7 +869,6 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
             "父进程没被 WAKE 叫醒（或重放时把 uaddr 读成了返回值 0）"
         req["parent saw the value the waker wrote -> 2 ok"] = \
             "父进程醒来后没看到唤醒者写的 2（等的不是同一个字）"
-        req["futex child reaped -> 12 ok"] = "futex 子进程没被 reap"
         req["futex waker saw 1 and woke 1 (bits=3) -> 3 ok"] = \
             "唤醒者看到的值不是父进程等的那个 1，或 WAKE 没真叫醒 1 个等待者"
         # 多时间片：真调度器才是「时间片到期」的来源，这一组只有上板才证明得了。
@@ -823,8 +882,6 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
             "跨时间片醒来后没看到唤醒者写的 2"
         req["futex multislice WAIT spanned >= 150 ms (crossed a slice) -> 1 ok"] = \
             "这次 WAIT 没真的跨过时间片（不到 150 ms 就返回，等于没测到重放）"
-        req["futex multislice child reaped -> 12 ok"] = \
-            "多时间片的 futex 子进程没被 reap"
         req["futex multislice waker saw 1 and woke 1 (bits=3) -> 3 ok"] = \
             "多时间片唤醒者没同时看到「父等的还是 1」与「WAKE 回 1」"
         # 第二档：位集 / 超时 / 改挂（REQUEUE、CMP_REQUEUE、WAIT_BITSET、
@@ -931,13 +988,56 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
         req["pselect6 clears exceptfds -> 0 ok"] = "exceptfds 没被清位"
         req["pselect6 bad fd == -EBADF -> -9 ok"] = \
             "没有对象支撑的 fd 被静默忽略了（Linux 回 -EBADF）"
+    if socket:
+        # socket 段同样不看「返回了个数」：连接必须真的把 5 个字节送到对端，
+        # 端口必须按网络序读回来，半关必须让对端看到 EOF。
+        req["socket stream fd >= 3 -> 1 ok"] = "协议栈 3 秒内都没起来（socket 建不出来）"
+        req["bind loopback:8081 == 0 -> 0 ok"] = "回环地址 bind 失败"
+        req["getsockname port == 8081 -> 8081 ok"] = \
+            "getsockname 读回的端口不是 8081（端口没按网络序写回）"
+        req["socket unsupported type == -ESOCKTNOSUPPORT -> -94 ok"] = \
+            "范围内但不支持的 type 没回 -ESOCKTNOSUPPORT（跟 type 越界混成一档了）"
+        req["connect loopback:8081 == 0 -> 0 ok"] = "回环 connect 失败"
+        req["accept fd >= 3 -> 1 ok"] = "accept 没拿到新 fd"
+        req["tcp send 5 == 5 -> 5 ok"] = "TCP 发送不完整"
+        req["tcp recv 5 == 5 -> 5 ok"] = "TCP 接收不完整"
+        req["tcp payload hiyo -> 1751742831 ok"] = \
+            "收到的载荷不是发出去的那 5 个字节（只是长度对）"
+        req["tcp payload last byte -> 117 ok"] = "第 5 个字节不是 u"
+        req["getpeername ip == 127.0.0.1 -> 2130706433 ok"] = \
+            "getpeername 读回的对端地址不是 127.0.0.1"
+        req["getsockopt SO_TYPE locally answered 1 -> 1 ok"] = \
+            "SO_TYPE 没被本层答成 SOCK_STREAM"
+        req["getsockopt unknown opt == -ENOPROTOOPT -> -92 ok"] = \
+            "未知选项被转给协议栈去猜了（应回 -ENOPROTOOPT）"
+        req["setsockopt SO_ERROR == -EINVAL -> -22 ok"] = \
+            "写 SO_ERROR 被接受了（Linux 回 -EINVAL）"
+        req["udp sendto 3 == 3 -> 3 ok"] = "UDP 发送失败"
+        req["udp recvfrom 3 == 3 -> 3 ok"] = "UDP 接收失败"
+        req["udp payload udp -> 7693424 ok"] = "UDP 载荷不是发出去的那 3 个字节"
+        req["udp recvfrom peer port == client port -> 0 ok"] = \
+            "recvfrom 读回的对端端口不是客户端本地端口（地址不是这根连接的）"
+        req["shutdown SHUT_WR == 0 -> 0 ok"] = "shutdown(SHUT_WR) 失败"
+        req["recv after peer shutdown == 0 (EOF) -> 0 ok"] = \
+            "半关之后对端没看到 EOF（FIN 没发出去，或 recv 在空队列上永久阻塞）"
+        req["write on closed socket == -EBADF -> -9 ok"] = \
+            "关掉的 fd 还能写（fd 槽没释放）"
+        req["read on closed socket == -EBADF -> -9 ok"] = \
+            "关掉的 fd 还能读（fd 槽没释放）"
+        # 串口侧交叉证据：lwIP 任务必须在这次启动里起过（回环网卡就靠它）。
+        if count(lambda s2: s2.startswith("[boot] lwip task=")) != 1:
+            problems.append("缺 `[boot] lwip task=<n>`（协议栈没起，socket 读数不算）")
     for line, why in req.items():
         if count(lambda s2, t=line: s2.strip() == "[fork] " + t) != 1:
             problems.append("缺 `[fork] %s` —— %s" % (line, why))
     if futex:
-        # 子进程号会随前面的用例复用（这里是 6 / 12 都出现过），所以这两条
-        # 只判「形态」：确实是某一次 reap 读数且 ok。
+        # 子进程号会随前面的用例复用（6 / 12 / 15 都出现过，档位不同 pid
+        # 就不一样），所以这几条只判「形态」：确实是某一次 reap 读数且 ok。
         for pat, why in (
+            (r"^\[fork\] futex child reaped -> \d+ ok$",
+             "futex 子进程没被 reap"),
+            (r"^\[fork\] futex multislice child reaped -> \d+ ok$",
+             "多时间片的 futex 子进程没被 reap"),
             (r"^\[fork\] futex2 bitset child reaped -> \d+ ok$",
              "位集用例的子进程没被 reap"),
             (r"^\[fork\] futex2 requeue child reaped -> \d+ ok$",
@@ -1021,7 +1121,7 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
 
 
 def self_check(good_text, cow=False, shm=False, futex=False, filemap=False,
-               mprotect=False, select=False):
+               mprotect=False, select=False, socket=False):
     """把好日志的九种坏法喂回判据，每一种都必须判红，否则解析器是空转。"""
     g = good_text.replace("\r\n", "\n")
     mutations = {
@@ -1137,6 +1237,25 @@ def self_check(good_text, cow=False, shm=False, futex=False, filemap=False,
                 r" tid=\d+ -> kill task$\n", "", s, flags=re.M),
             "缺 mprotect 成功读数": lambda s: s.replace(
                 "[fork] mprotect RO == 0 -> 0 ok\n", ""),
+        })
+    if socket:
+        mutations.update({
+            "socket 载荷只对长度": lambda s: s.replace(
+                "[fork] tcp payload hiyo -> 1751742831 ok",
+                "[fork] tcp payload hiyo -> 0 ok"),
+            "getsockname 端口没按网络序": lambda s: s.replace(
+                "[fork] getsockname port == 8081 -> 8081 ok",
+                "[fork] getsockname port == 8081 -> 129 ok"),
+            "半关没让对端看到 EOF": lambda s: s.replace(
+                "[fork] recv after peer shutdown == 0 (EOF) -> 0 ok",
+                "[fork] recv after peer shutdown == 0 (EOF) -> -11 FAIL (want 0)"),
+            "关掉的 fd 仍可写": lambda s: s.replace(
+                "[fork] write on closed socket == -EBADF -> -9 ok",
+                "[fork] write on closed socket == -EBADF -> 2 ok"),
+            "recvfrom 对端端口不对": lambda s: s.replace(
+                "[fork] udp recvfrom peer port == client port -> 0 ok",
+                "[fork] udp recvfrom peer port == client port -> 1 ok"),
+            "lwip 任务没起": lambda s: s.replace("[boot] lwip task=", "[boot] lwip off="),
         })
     if select:
         mutations.update({
@@ -1257,6 +1376,15 @@ def main(argv):
                                          "-DARKRTOS_USE_PAGING_MPROTECT=1",
                                          "-DARKRTOS_USE_LINUX_SELECT=1"],
                          "fork+cow+shm+futex+filemap+mprotect+select")
+        check_compile_on(la64, key_dir, ["-DARKRTOS_USE_PAGING_COW=1",
+                                         "-DARKRTOS_USE_PAGING_SHM=1",
+                                         "-DARKRTOS_USE_LINUX_FUTEX=1",
+                                         "-DARKRTOS_USE_PAGING_FILEMAP=1",
+                                         "-DARKRTOS_USE_PAGING_MPROTECT=1",
+                                         "-DARKRTOS_USE_LINUX_SELECT=1",
+                                         "-DARKRTOS_USE_LINUX_SOCKET=1",
+                                         "-DARKRTOS_USE_LWIP=1"],
+                         "fork+cow+shm+futex+filemap+mprotect+select+socket")
 
     if qemu:
         # 六档各跑一遍：默认 fork（27 条）、fork+COW（32 条 + 内核 COW 日志）、
@@ -1278,6 +1406,8 @@ def main(argv):
              "fork+cow+shm+futex+filemap+mprotect"),
             (SELECT_FLAGS, EXPECT_SELECT_CHECKS, True, True,
              "fork+cow+shm+futex+filemap+mprotect+select"),
+            (SOCKET_FLAGS, EXPECT_SOCKET_CHECKS, True, True,
+             "fork+cow+shm+futex+filemap+mprotect+select+socket"),
         ]
         if a.no_build:
             rounds = rounds[-1:]
@@ -1312,12 +1442,13 @@ def main(argv):
             filemap = "-DARKRTOS_USE_PAGING_FILEMAP=1" in flags
             mprotect = "-DARKRTOS_USE_PAGING_MPROTECT=1" in flags
             select = "-DARKRTOS_USE_LINUX_SELECT=1" in flags
+            socket = "-DARKRTOS_USE_LINUX_SOCKET=1" in flags
             passed, notes = judge(text, nchk, cow, shm, futex, filemap, mprotect,
-                                  select)
+                                  select, socket)
             if passed:
                 ok("qemu-readout", "[%s] %s" % (tag, notes[0]))
                 missed = self_check(text, cow, shm, futex, filemap, mprotect,
-                                    select)
+                                    select, socket)
                 if missed:
                     bad("parser-selfcheck",
                         "[%s] 这些坏样本没被判红：%s" % (tag, "、".join(missed)))

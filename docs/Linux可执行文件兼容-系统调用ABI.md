@@ -867,7 +867,7 @@ EXTRA_CFLAGS**，所以夹具看不到内核的编译开关。这一段只在 `A
 放在同一个开关下，会让「关档零体积」这条承诺变成「关档少了一半功能」。
 `ARKRTOS_USE_LINUX_SELECT` 只依赖 `ARKRTOS_USE_LINUX_ABI`。
 
-### 8.9 socket（U-23）：宿主侧翻译层（2026-11-24，宿主档 581 checks，**无 QEMU 读数**）
+### 8.9 socket（U-23）：翻译层与 QEMU 第八档（2026-11-24，宿主 581 checks + QEMU 161 条）
 
 13 个号落地：`socket`(198)、`bind`(200)、`listen`(201)、`accept`(202)、`connect`(203)、
 `getsockname`(204)、`getpeername`(205)、`sendto`(206)、`recvfrom`(207)、`setsockopt`(208)、
@@ -896,12 +896,76 @@ EXTRA_CFLAGS**，所以夹具看不到内核的编译开关。这一段只在 `A
 再把 `ARKRTOS_USE_LINUX_SOCKET=1` 与 lwIP 一起塞进 `LXFORK_DEFS`。这条档是为了让
 「有 lwIP 协议栈、没有网卡」的宿主/仿真构建也能出 ELF。
 
-**读数来源只有宿主档，必须说清楚。** 本轮新增的第六个 Linux ABI 覆盖率档
-`linuxabisocket`（`tools/coverage_gate.py`）在宿主上跑 `test_linux_abi_host.c` 的
-socket 段，`linuxabisocket` 单档 **98.73%**，六档 union **98.48%**（基线 97.96%），
-整档 **581 checks** 全绿。**QEMU 第八档夹具还没有写**：`tools/fork_gate.py` 的档位里
-没有 socket 档，`example/qemu_loongarch64/elf/linux_fork.c` 也没有 socket 段。所以
-socket 这一节的结论只能读到「宿主侧全覆盖、LA64 板级编译通过」，不能写成「QEMU 实跑」。
+**宿主读数。** 第六个 Linux ABI 覆盖率档 `linuxabisocket`（`tools/coverage_gate.py`）
+在宿主上跑 `test_linux_abi_host.c` 的 socket 段：单档 **98.73%**，六档 union **98.48%**
+（基线 97.96%），整档 **581 checks** 全绿。
+
+**QEMU 第八档：161 条 check 全 `ok` + `exit code 0`。** `tools/fork_gate.py` 的第八档
+（`SELECT+SOCKET+LWIP`）在 LA64 上真跑 `example/qemu_loongarch64/elf/linux_fork.c` 的
+socket 段（38 条）加一条性能回归门（1 条），叠在第七档 122 条之上：
+
+读取对象是**真 lwIP 回环**（`127.0.0.1`），不是桩：`socket` 建 stream/dgram 两个句柄；
+坏 domain / 坏 type / 不支持的 type 各自的 errno；`bind` + `listen` + `getsockname` 端口按
+网络序读回 8081；`connect` 回环、`accept` 拿到新 fd 且写回的对端 family 是 `AF_INET`；
+`send` 5 字节 / `recv` 5 字节载荷逐字节比对（`hiyo` + `u`）；`getpeername` 的 IP 是
+`127.0.0.1`；`setsockopt` 认 REUSEADDR，`getsockopt` 的 `SO_TYPE` / `SO_ERROR` 由本层本地
+作答、未知 opt 回 `-ENOPROTOOPT`、写 `SO_ERROR` 回 `-EINVAL`；`shutdown(SHUT_WR)` 之后
+对端 `recv` 回 0（真 EOF）；关掉之后 `read`/`write` 回 `-EBADF`；UDP 走 `sendto`/`recvfrom`，
+`recvfrom` 的对端端口必须等于客户端的 `getsockname` 端口。
+
+**三个只有真跑才暴露的坑（都已修）。**
+
+1. **`sendto`/`recvfrom`/`setsockopt` 必须用 6 参数入口。** 第一版用 4 参数的 `lx4`，
+   0 号参数没传，`send` 恒回 `-22`；改用 `lx6` 后正常。
+2. **`getsockopt` 的 4 字节 `int` 不能用 `lx_long` 接。** 内核写 4 字节，`lx_long` 的高
+   32 位保留旧值，读回来是 `-4294967295` 这种「看起来很深」的假数字；改成
+   `unsigned int pack32` 并把地址传进去才是对的。
+3. **netconn 池只有 4 个。** `MEMP_NUM_NETCONN = 4`、`ARKRTOS_NET_MAX_SOCKETS = 4`、
+   `LX_MAX_FD = 8`（fd 3..10）三者同量级，夹具同时开三只 TCP + 一只 UDP 就会把池子占满。
+   修法是**夹具用完就关**（真实程序也是这么写的），而不是把池子调大 —— 调大要改默认档
+   BSS，破坏「默认档零变化」。同理，shm 段留下的管道 fd 也在这里显式关掉。
+
+**lwIP 服务任务栈 384 → 1024 字，lwIP 任务栈 1 KB → 4 KB。** 第一版 `tcp recv 5` 永久挂住：
+net 服务任务用 384 字（1.5 KB）栈跑 `netconn` 一轮就把它打穿，STK 守卫报
+`stack bottom flag overwritten`，被踩的是相邻 `.bss`，症状看起来像协议栈内部断言。
+`ARKRTOS_NET_TASK_STACK_WORDS` 三处同步改成 1024（`Kconfig.net` 默认值、
+`arkrtos_autoconf.h`、`arkrtos_net.h` 兜底），`lwip_port.c` 里非 virtio + socket 档的
+lwIP 任务栈同步提到 1024 字（与 virtio 档同值，理由写在注释里：这一轮还要装 lo 网卡）。
+
+**「一次 socket 往返 = 一个 100 ms 时间片」这条性能缺陷（已修）。** 第八档第一版跑得过，
+但整段 socket 读数要 3.0 s（`[fork] finished after 3000 ms` 临界）。分段计时把账量出来：
+`t_setup 507 ms / t_conn 403 / t_acc 202 / t_recv 202`，每一步都恰好是一个
+`LX_WAIT_SLICE_MS = 100 ms` 的整数倍 —— 请求已经完成，等的人还在睡满一整个时间片。
+根因是请求/回复槽只有一个「状态字」而没有任何就绪通知：`arkrtos_net_submit` 回
+`EPENDING`，翻译层就盲睡一个时间片再重放。
+
+修法照 Linux / RT-Thread 的做法，把「等」变成事件驱动（`kernelsrc/src/arkrtos_net.c`）：
+
+- 服务任务发布 `REQ_DONE` 之后，若这条请求是 Linux ABI 层发的（`g_net_req_wake`），
+  直接 `arkrtos_task_wakeup_internal(owner)` 叫醒等待者。裸 Ark SVC 调用者没有这个
+  约定（它可能在等别的东西），所以唤醒权跟着请求一起登记，而不是「谁在等就叫醒谁」。
+- 那条唤醒有竞态：服务任务可能在上面的 `arkrtos_net_call()` 返回**之前**就把回复写好了，
+  那时标记还没置 1、唤醒发不出去。所以等待方在睡下之前先问一句
+  `arkrtos_net_reply_ready(me)`，两种顺序都不会白等一个时间片。
+- 时间片保留为丢唤醒时的兜底 —— 一次没叫醒不会永久卡住。
+- `connect` 那种「协议栈还在推进」的两段式等待改按 `LX_SOCK_POLL_MS = 10 ms` 重放：
+  那类状态变化通常几毫秒内就发生，用 100 ms 去等就是 121 ms 一次本地 connect。
+
+实测：`t_tcp 2023 → 168 ms`，整段 3.0 s → **0.58 s**（`[fork] finished after 580 ms,
+exit code 0`）。这条也进了判据：
+`socket round trips do not cost a wait slice (< 800 ms) -> 1 ok` —— 唤醒要是丢了，
+十几次往返会立刻回到 2 s 级，判据必红。
+
+**夹具的两个构造约束（与内核无关，但改了夹具才稳）。**
+
+- **子进程等待不用用户态读时钟。** 多时间片的 futex WAIT 原来靠「反复 `clock_gettime`
+  忙等 250 ms」，QEMU 实测这条路径偶发让某一次 `clock_gettime` 回一个来路不明的正值
+  （内核侧既没有 `rc=3` 记录、也没有 Linux 分发落空记录），忙等被提前打断，跨时间片那条
+  判据假红。现在子进程改成连睡三个内核记账的 100 ms 定时 `futex(WAIT)`，一个字都不读
+  时钟；父进程的墙钟只读两次，且带 8 次重试。异常本身登记在
+  [已知限制](已知限制.md)，属待定位项。
+- **两条 `child reaped -> N ok` 的 `N` 是子进程 pid**，随档位变化（6 / 12 / 15 都出现过），
+  所以判据只判形态（`^\[fork\] futex child reaped -> \d+ ok$`），不写死具体 pid。
 
 ## 9 开关与零体积
 
@@ -950,7 +1014,8 @@ socket 这一节的结论只能读到「宿主侧全覆盖、LA64 板级编译�
 - `ARKRTOS_USE_LINUX_SOCKET`（§8.9），默认 **0**，`depends on ARKRTOS_USE_LINUX_ABI` 且
   `features.h` 用 `#error` 顶住这条依赖；关档时不编译 `lx_sock_*` 全部实现与 fd 表的
   socket 分派，`198`–`210` 与 `242` 落回 `-ENOSYS`；开档实测是宿主 socket 档的
-  **581 checks**（覆盖率单档 98.73%、六档 union 98.48%），**QEMU 第八档尚未落地**。
+  **581 checks**（覆盖率单档 98.73%、六档 union 98.48%）与 **QEMU 第八档 161 条读数**
+  （其中 socket 段 39 条：语义 38 + 往返耗时 1）。
 - `arkrtos_autoconf.h` 由 `tools/kconfig/genconfig.py` 从 `config/arkrtos_defconfig`
   生成，新增 Kconfig 项后必须重跑一次，否则默认档读数里看不到这个开关。
 
@@ -980,13 +1045,14 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py --no-build
 | `qemu-readout` | Linux 块 14 条 check 全 ok + PASS 行 + `exit code 7`；管道块 14 条 + `exit code 55`；信号块 31 条 + PASS 行 + `exit code 138`；旁路演示未受影响 |
 | `parser-selfcheck` | 把 8 种坏日志喂回判据，必须全判红 |
 
-socket 这一层目前只有宿主门禁：`tools/coverage_gate.py` 的第六个 Linux ABI 档
+socket 这一层是**两侧都有读数**的：宿主侧是 `tools/coverage_gate.py` 的第六个 Linux ABI 档
 `linuxabisocket`（`-DARKRTOS_USE_LINUX_SOCKET=1 -DARKRTOS_USE_LWIP=1`，`-Wl,--wrap=arkrtos_port_svc_exec_frame`）
 跑 `test_linux_abi_host.c`，581 checks 全绿、单档覆盖率 98.73%、六档 union 98.48%（基线 97.96%），
-`tools/ci_gate.py` 的 `linux-abi-host` 项已带上这一档。**`tools/fork_gate.py` 还没有 socket 档**，
-QEMU 夹具也还没有 socket 段，这一项在欠账盘点里按实登记。
+`tools/ci_gate.py` 的 `linux-abi-host` 项已带上这一档；板级侧是 `tools/fork_gate.py` 的
+**第八档**（`-DARKRTOS_USE_LINUX_SELECT=1 -DARKRTOS_USE_LINUX_SOCKET=1 -DARKRTOS_USE_LWIP=1`），
+QEMU LA64 上 161 条 check 全 `ok` + `exit code 0`。
 
-fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**50 项**；fork / fork+COW / fork+COW+SHM / fork+COW+SHM+futex / fork+COW+SHM+futex+filemap / fork+COW+SHM+futex+filemap+mprotect / fork+COW+SHM+futex+filemap+mprotect+select **七档各跑一遍**，所以 build / qemu-readout / parser-selfcheck 各出现七次、compile-on 七次）：
+fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**57 项**；fork / fork+COW / fork+COW+SHM / fork+COW+SHM+futex / fork+COW+SHM+futex+filemap / fork+COW+SHM+futex+filemap+mprotect / fork+COW+SHM+futex+filemap+mprotect+select / fork+COW+SHM+futex+filemap+mprotect+select+socket **八档各跑一遍**，所以 build / qemu-readout / parser-selfcheck 各出现八次、compile-on 八次）：
 
 | 项 | 钉住什么 |
 |---|---|

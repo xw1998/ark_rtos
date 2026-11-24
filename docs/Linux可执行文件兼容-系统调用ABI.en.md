@@ -987,7 +987,7 @@ they would have to be rewritten. Putting select and a future socket layer behind
 switch would turn "zero footprint when off" into "half the feature when off".
 `ARKRTOS_USE_LINUX_SELECT` depends only on `ARKRTOS_USE_LINUX_ABI`.
 
-### 8.9 socket (U-23): host-tier translation layer (2026-11-24, 581 host checks, **no QEMU readout**)
+### 8.9 socket (U-23): translation layer and the QEMU eighth tier (2026-11-24, 581 host checks + 161 QEMU checks)
 
 13 numbers: `socket`(198), `bind`(200), `listen`(201), `accept`(202), `connect`(203),
 `getsockname`(204), `getpeername`(205), `sendto`(206), `recvfrom`(207), `setsockopt`(208),
@@ -1005,12 +1005,97 @@ dispatch on the fd kind (the same fd table holds files, pipes and sockets).
 | blocking | a pending kernel result becomes `-EAGAIN` under `O_NONBLOCK`/`MSG_DONTWAIT`, otherwise the call is replayed through `arkrtos_port_svc_restart()`; if replay is unavailable it returns `-EAGAIN` **without sleeping** |
 | identity | `lx_sock_me_ok` checks the task identity before the fd: `task_id==0` yields `-ENOSYS` for every entry and **issues no net request at all** |
 
-**Host-tier only, stated plainly.** The sixth Linux ABI coverage tier `linuxabisocket`
-(`tools/coverage_gate.py`) runs the socket section of `test_linux_abi_host.c`: 98.73% on that
-tier alone, 98.48% union across six tiers (baseline 97.96%), **581 checks** green. The
-**QEMU eighth tier does not exist yet**: `tools/fork_gate.py` has no socket tier and
-`example/qemu_loongarch64/elf/linux_fork.c` has no socket section. The honest reading is
-"full host coverage plus LA64 board compile", not "QEMU run".
+**Host readout.** The sixth Linux ABI coverage tier `linuxabisocket`
+(`tools/coverage_gate.py`) runs the socket section of `test_linux_abi_host.c` on the host:
+98.73% on that tier alone, 98.48% union across six tiers (baseline 97.96%), **581 checks**
+green.
+
+**QEMU eighth tier: 161 checks all `ok` + `exit code 0`.** The eighth tier of
+`tools/fork_gate.py` (`SELECT+SOCKET+LWIP`) really runs the socket section of
+`example/qemu_loongarch64/elf/linux_fork.c` on LA64 (38 checks) plus one performance
+regression check, stacked on the 122 checks of the seventh tier:
+
+What it reads is the **real lwIP loopback** (`127.0.0.1`), not a stub: `socket` creates both
+a stream and a dgram handle; the errno of a bad domain / bad type / unsupported type;
+`bind` + `listen` + `getsockname` reads the port back as 8081 in network order; `connect` over
+loopback, `accept` takes a new fd and writes back a peer whose family is `AF_INET`;
+`send` 5 bytes / `recv` 5 bytes compared byte for byte (`hiyo` + `u`); `getpeername`'s IP is
+`127.0.0.1`; `setsockopt` accepts REUSEADDR, `getsockopt`'s `SO_TYPE` / `SO_ERROR` are
+answered locally by this layer, an unknown opt gives `-ENOPROTOOPT` and writing `SO_ERROR`
+gives `-EINVAL`; after `shutdown(SHUT_WR)` the peer's `recv` returns 0 (a real EOF); after
+closing, `read`/`write` return `-EBADF`; UDP goes through `sendto`/`recvfrom` and the peer
+port of `recvfrom` must equal the client's `getsockname` port.
+
+**Three pits that only a real run exposes (all fixed).**
+
+1. **`sendto`/`recvfrom`/`setsockopt` must use the 6-argument entry.** The first version used
+   the 4-argument `lx4`, argument 0 was never passed, and `send` always returned `-22`; with
+   `lx6` it is fine.
+2. **`getsockopt`'s 4-byte `int` must not be received through `lx_long`.** The kernel writes
+   4 bytes, the upper 32 bits of `lx_long` keep their old value, and the read comes back as
+   `-4294967295` - a fake number that looks deep; passing an `unsigned int pack32` and its
+   address is the correct form.
+3. **The netconn pool only has 4 slots.** `MEMP_NUM_NETCONN = 4`,
+   `ARKRTOS_NET_MAX_SOCKETS = 4` and `LX_MAX_FD = 8` (fd 3..10) are the same order of
+   magnitude; three TCP plus one UDP at the same time exhausts the pool. The fix is for the
+   **fixture to close what it opened** (real programs do the same), not to enlarge the pool -
+   enlarging it changes the default BSS and breaks "zero change when off". Likewise the pipe
+   fds left over from the shm section are explicitly closed here.
+
+**lwIP service task stack 384 -> 1024 words, lwIP task stack 1 KB -> 4 KB.** The first version
+hung forever in `tcp recv 5`: the net service task running one round of `netconn` on a 384-word
+(1.5 KB) stack punched through it, the STK guard reported
+`stack bottom flag overwritten`, and the neighbouring `.bss` being stepped on looks like a
+protocol-stack assertion. `ARKRTOS_NET_TASK_STACK_WORDS` is synchronised in three places to
+1024 (`Kconfig.net` default, `arkrtos_autoconf.h`, the `arkrtos_net.h` fallback), and the lwIP
+task stack of the non-virtio + socket build in `lwip_port.c` goes to 1024 words (the same
+value as the virtio build; the reason is in a comment: this round also has to host a lo NIC).
+
+**The "one socket round trip = one 100 ms slice" performance defect (fixed).** The first
+version of the eighth tier passed, but the whole socket readout took 3.0 s
+(`[fork] finished after 3000 ms`, right at the limit). Section timings measured the account:
+`t_setup 507 ms / t_conn 403 / t_acc 202 / t_recv 202`, every step exactly an integer multiple
+of `LX_WAIT_SLICE_MS = 100 ms` - the request was long done and the waiter still slept out a
+whole slice. The root cause is that the request/reply slot only has a "state word" and no
+readiness notification at all: `arkrtos_net_submit` returns `EPENDING` and the translation
+layer blindly sleeps one slice and replays.
+
+The fix follows what Linux / RT-Thread do and turns "waiting" into event-driven
+(`kernelsrc/src/arkrtos_net.c`):
+
+- After the service task publishes `REQ_DONE`, if this request came from the Linux ABI layer
+  (`g_net_req_wake`) it calls `arkrtos_task_wakeup_internal(owner)` and wakes the waiter
+  directly. A bare Ark SVC caller has no such contract (it may be waiting for something
+  else), so the wake right is registered together with the request instead of "wake up
+  whoever is waiting".
+- That wake has a race: the service task may write the reply **before**
+  `arkrtos_net_call()` above returns, at which point the flag is not set yet and no wake can
+  be sent. So the waiter asks `arkrtos_net_reply_ready(me)` before going to sleep, and
+  neither ordering wastes a slice.
+- The slice stays as the fallback for a lost wake - one missed wake must not hang forever.
+- The two-phase wait of `connect` ("the stack is still making progress") is replayed at
+  `LX_SOCK_POLL_MS = 10 ms`: that kind of state change usually happens within a few
+  milliseconds, so 100 ms per poll is a 121 ms local connect.
+
+Measured: `t_tcp 2023 -> 168 ms`, the whole section 3.0 s -> **0.58 s**
+(`[fork] finished after 580 ms, exit code 0`). This is a check too:
+`socket round trips do not cost a wait slice (< 800 ms) -> 1 ok` - lose the wake and a dozen
+round trips are back at 2 s level, so the check goes red immediately.
+
+**Two construction constraints of the fixture (nothing to do with the kernel, but the fixture
+is only stable with them).**
+
+- **The child does not read the clock in user mode to wait.** The multi-slice futex WAIT used
+  to spin on `clock_gettime` for 250 ms; on QEMU this path occasionally lets one
+  `clock_gettime` return a positive value of unknown origin (the kernel side has no `rc=3`
+  record and there is no Linux dispatch fall-through record either), the spin is cut short and
+  the cross-slice check goes falsely red. The child now sleeps three kernel-accounted 100 ms
+  timed `futex(WAIT)` calls and reads no clock at all; the parent reads the wall clock twice
+  with 8 retries. The anomaly itself is recorded in
+  [Known limitations](已知限制.md) as an open item.
+- **The `N` in the two `child reaped -> N ok` readouts is the child's pid** and varies with
+  the tier (6 / 12 / 15 have all been seen), so the check only judges the shape
+  (`^\[fork\] futex child reaped -> \d+ ok$`) and never a literal pid.
 
 **Build tier with lwIP and no NIC.** `example/qemu_loongarch64/Makefile` gained
 `ARK_LWIP_ON := $(findstring ARKRTOS_USE_LWIP=1,$(EXTRA_CFLAGS))`: with lwIP on and
@@ -1078,7 +1163,8 @@ profile.
 `depends on ARKRTOS_USE_LINUX_ABI` with an `#error` guard; with it off all `lx_sock_*`
 code and the socket dispatch in the fd table are not compiled and `198`-`210`/`242` fall
 back to `-ENOSYS`; with it on the measured readout is the host socket tier's **581 checks**
-(98.73% on that tier, 98.48% union), while **the QEMU eighth tier is not in place yet**.
+(98.73% on that tier, 98.48% union) plus the **161 readouts of the QEMU eighth tier**
+(39 of them the socket section: 38 semantic + 1 round-trip timing).
 
 `MAP_FIXED` (section 8.7) is **not a switch of its own**: it exists when
 `ARKRTOS_USE_PAGING_DEMAND=1` (per-pair entry installation is what makes
@@ -1101,18 +1187,21 @@ abi-split-la64, abi-split-rv32, build, qemu-readout (14 Linux checks + PASS + ex
 still intact), and parser-selfcheck (eight deliberately broken logs must each be
 rejected).
 
-The socket layer has host gates only: the sixth Linux ABI coverage tier `linuxabisocket`
-in `tools/coverage_gate.py` (with `-DARKRTOS_USE_LINUX_SOCKET=1 -DARKRTOS_USE_LWIP=1` and
+The socket layer has readouts on **both tiers**: on the host the sixth Linux ABI coverage
+tier `linuxabisocket` in `tools/coverage_gate.py` (with
+`-DARKRTOS_USE_LINUX_SOCKET=1 -DARKRTOS_USE_LWIP=1` and
 `-Wl,--wrap=arkrtos_port_svc_exec_frame`) runs `test_linux_abi_host.c` with 581 checks green,
-98.73% on the tier and 98.48% union (baseline 97.96%); `tools/ci_gate.py`'s `linux-abi-host`
-item already includes it. **`tools/fork_gate.py` has no socket tier and the QEMU fixture has
-no socket section**, recorded as an open item.
+98.73% on the tier and 98.48% union (baseline 97.96%), and `tools/ci_gate.py`'s
+`linux-abi-host` item already includes it; on the board the **eighth tier** of
+`tools/fork_gate.py` (`-DARKRTOS_USE_LINUX_SELECT=1 -DARKRTOS_USE_LINUX_SOCKET=1
+-DARKRTOS_USE_LWIP=1`) gives 161 checks all `ok` + `exit code 0` on QEMU LA64.
 
 The fork tier has its own gate, `tools/fork_gate.py` (invoked as `fork` from
-`ci_gate`, **50 items**; it runs the fork, fork+COW, fork+COW+SHM,
+`ci_gate`, **57 items**; it runs the fork, fork+COW, fork+COW+SHM,
 fork+COW+SHM+futex, fork+COW+SHM+futex+filemap,
-fork+COW+SHM+futex+filemap+mprotect and
-fork+COW+SHM+futex+filemap+mprotect+select tiers one after the other, so
+fork+COW+SHM+futex+filemap+mprotect,
+fork+COW+SHM+futex+filemap+mprotect+select and
+fork+COW+SHM+futex+filemap+mprotect+select+socket tiers one after the other, so
 build / qemu-readout / parser-selfcheck / compile-on each appear seven times):
 default-off (fork and SHM), kconfig-wired (all four `depends on`, plus the SHM
 item depending on COW), the four

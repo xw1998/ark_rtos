@@ -91,6 +91,36 @@
 /* pselect6：跨 fd 就绪等待（U-22） */
 #define LX_PSELECT6         72
 
+/* socket 家族（U-23，第八档） */
+#define LX_SOCKET           198
+#define LX_BIND             200
+#define LX_LISTEN           201
+#define LX_ACCEPT           202
+#define LX_CONNECT          203
+#define LX_GETSOCKNAME      204
+#define LX_GETPEERNAME      205
+#define LX_SENDTO           206
+#define LX_RECVFROM         207
+#define LX_SETSOCKOPT       208
+#define LX_GETSOCKOPT       209
+#define LX_SHUTDOWN         210
+
+#define LX_AF_INET          2
+#define LX_SOCK_STREAM      1
+#define LX_SOCK_DGRAM       2
+#define LX_SOL_SOCKET       1
+#define LX_SO_REUSEADDR     2
+#define LX_SO_TYPE          3
+#define LX_SO_ERROR         4
+#define LX_SHUT_WR          1
+
+#define LX_ENOPROTOOPT      92
+#define LX_EAFNOSUPPORT     97
+#define LX_ESOCKTNOSUPPORT  94
+
+#define SK_PORT             8081
+#define SK_UPORT            8082
+
 #define LX_O_RDONLY         0
 #define LX_O_RDWR           2
 #define LX_PROT_NONE        0
@@ -207,6 +237,27 @@ static void out(const char *s)
 }
 
 static int g_fail = 0;
+
+/* 读一次单调时钟（毫秒）。QEMU 上实测「连续读时钟」这条路径偶发让某一次
+ * clock_gettime 回一个来路不明的正值（详见 docs/已知限制.md），所以这里
+ * 重试几次；全失败才回 -1 —— 判据据此判红，不拿 0 冒充成功。 */
+static long mono_ms(void)
+{
+    long ts[2];
+    int  i;
+
+    for (i = 0; i < 8; i++)
+    {
+        ts[0] = 0;
+        ts[1] = 0;
+        if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                (lx_long)(unsigned long)ts, 0) == 0)
+        {
+            return (ts[0] * 1000) + (ts[1] / 1000000);
+        }
+    }
+    return -1;
+}
 
 /* 把一条判据先拼成整行再一次写出。
  * 否则 "[fork] " 前缀与正文会被内核日志插在中间，
@@ -838,6 +889,14 @@ void linux_main(unsigned long sp)
             /* 子看到 200 之后写的 300 必须回落到同一帧：wait4 返回时子已经
              * 退出，这一读没有竞态。 */
             check("parent saw child shared write", (lx_long)(*shm), 300);
+
+            /* fd 表只有 8 格：定序管道用完就还回去，否则后面 socket 段
+             * 会因为 fd 槽不够拿不到 socket。 */
+            if (spipe != 0)
+            {
+                (void)lx1(LX_CLOSE, (lx_long)sfds[0]);
+                (void)lx1(LX_CLOSE, (lx_long)sfds[1]);
+            }
         }
     }
 #endif
@@ -1063,6 +1122,7 @@ void linux_main(unsigned long sp)
         {
             fw2 = (volatile unsigned long *)(unsigned long)faddr2;
             *fw2 = 1ul;
+            fw2[1] = 0ul;       /* 子进程在它上面等内核超时，没人会改它 */
             ppid8 = lx1(LX_GETPID, 0);
 
             child8 = lx3(LX_CLONE, LX_SIGCHLD, 0, 0);
@@ -1070,41 +1130,25 @@ void linux_main(unsigned long sp)
             {
                 int     code = 0;
                 lx_long wrc  = 0;
-                long    ts[2];
-                long    c0 = -1;
-                long    cnow;
+                long    dur[2];
+                int     k;
                 int     spins;
 
                 if (*fw2 == 1ul)
                 {
                     code |= 1;      /* bit0: 父进程等的还是 1 */
                 }
-                /* 忙等至少 250 ms：跨过两个 100 ms 时间片。时钟拿不到就退回
-                 * 固定圈数（QEMU 上这条路径不该发生，但不许死等）。 */
-                if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
-                        (lx_long)(unsigned long)ts, 0) == 0)
+                /* 等满 300 ms（三个 100 ms 时间片）——**不用用户态读时钟**。
+                 * 原来这里是「反复 clock_gettime 忙等 250 ms」，QEMU 实测这条
+                 * 路径偶发让某一次 clock_gettime 回一个来路不明的正值，忙等被
+                 * 提前打断、跨时间片那条判据就假红。改成内核自己记账的超时：
+                 * 连睡三个时间片，一个字都不读时钟。 */
+                dur[0] = 0;
+                dur[1] = 100000000L;        /* 100 ms */
+                for (k = 0; k < 3; k++)
                 {
-                    c0 = (ts[0] * 1000) + (ts[1] / 1000000);
-                }
-                for (spins = 0;; spins++)
-                {
-                    if (c0 >= 0)
-                    {
-                        if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
-                                (lx_long)(unsigned long)ts, 0) != 0)
-                        {
-                            break;
-                        }
-                        cnow = (ts[0] * 1000) + (ts[1] / 1000000);
-                        if ((cnow - c0) >= 250)
-                        {
-                            break;
-                        }
-                    }
-                    else if (spins >= 4000000)
-                    {
-                        break;
-                    }
+                    (void)lx4(LX_FUTEX, (lx_long)(unsigned long)(fw2 + 1),
+                              LX_FUTEX_WAIT, 0, (lx_long)(unsigned long)dur);
                 }
                 for (spins = 0; spins < 200000; spins++)
                 {
@@ -1131,15 +1175,9 @@ void linux_main(unsigned long sp)
                   (child8 > 0) ? 1 : 0, 1);
 
             {
-                long ts[2];
-                long t0 = -1;
+                long t0 = mono_ms();
                 int  round;
 
-                if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
-                        (lx_long)(unsigned long)ts, 0) == 0)
-                {
-                    t0 = (ts[0] * 1000) + (ts[1] / 1000000);
-                }
                 rc8 = -LX_EAGAIN;
                 for (round = 0; round < 8; round++)
                 {
@@ -1154,10 +1192,11 @@ void linux_main(unsigned long sp)
                 }
                 if (t0 >= 0)
                 {
-                    if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
-                            (lx_long)(unsigned long)ts, 0) == 0)
+                    long t1 = mono_ms();
+
+                    if (t1 >= 0)
                     {
-                        elapsed8 = ((ts[0] * 1000) + (ts[1] / 1000000)) - t0;
+                        elapsed8 = t1 - t0;
                     }
                 }
             }
@@ -1780,6 +1819,280 @@ void linux_main(unsigned long sp)
 
         (void)lx1(LX_CLOSE, (lx_long)selr);
     }
+#endif
+
+
+#if defined(ARKRTOS_USE_LINUX_SOCKET) && (ARKRTOS_USE_LINUX_SOCKET == 1) && \
+    defined(ARKRTOS_USE_LWIP) && (ARKRTOS_USE_LWIP == 1)
+    /* ---------------- socket：翻译层 + lwIP 回环（U-23） ----------------
+     * 要证的是「13 个号真的把一个 TCP 连接跑完」，不是「返回了个数」：
+     *   1) 建 stream / dgram 两个 socket，坏 domain / 坏 type 各自的 errno；
+     *   2) bind 127.0.0.1:8081 + listen + getsockname 读回端口（端口写回
+     *      必须按 sockaddr_in 的网络序，不是 host 序）；
+     *   3) connect 回环、accept 拿到新 fd、accept 写回的对端 family；
+     *   4) send 5 字节 / recv 5 字节，载荷逐字节比对 —— 只比长度的话
+     *      「返回 5 但内容是旧的」也能过；
+     *   5) getpeername 读回 127.0.0.1（证明地址不是 0.0.0.0）；
+     *   6) SO_REUSEADDR 设置成功、SO_TYPE 本地答 1、SO_ERROR 本地答 0；
+     *      未知选项回 -ENOPROTOOPT、写 SO_ERROR 回 -EINVAL（翻译层自己
+     *      的拒法，不能转给协议栈去猜）；
+     *   7) UDP 走 sendto / recvfrom，且 recvfrom 对端端口必须等于客户端
+     *      getsockname 读到的本地端口（同一根连接，不是「随便找了个地址」）；
+     *   8) shutdown(SHUT_WR) 之后对端 recv 回 0（EOF）—— 这一条咬的是
+     *      「半关真的发了 FIN」，不是「关了个标志」；
+     *   9) 关掉之后 read / write 同一个 fd 回 -EBADF（反假绿：fd 槽必须
+     *      真的被释放）。
+     *
+     * 协议栈由 lwIP 的回环网卡提供（127.0.0.1/8，包不出芯片）。第一个
+     * socket() 可能早于 tcpip 线程起来，此时 net 服务回 ENOTSUP，翻译层
+     * 如实回 -ENOSYS；这里用 pselect6 的空超时当睡眠重试，最多 3 秒。
+     * 不重试的话，这一档的成败会取决于调度顺序。 */
+    {
+        typedef struct
+        {
+            unsigned char b[16];
+        } sk_sa_t;
+
+        sk_sa_t  sa;
+        sk_sa_t  pa;
+        unsigned int lenp;
+        char     buf[16];
+        lx_long  srv;
+        lx_long  cli;
+        lx_long  acc;
+        lx_long  dgs;
+        lx_long  dgc;
+        lx_long  r;
+        lx_long  r2;
+        lx_long  pack;
+        unsigned int pack32;
+        long     ts[2];
+        int      i;
+        int      tries;
+        long     tm0;
+        long     tm2;
+
+        /* 地址按 Linux sockaddr_in 写：family 小端 2 字节、端口网络序、
+         * 地址 4 字节网络序。 */
+        for (i = 0; i < 16; i++)
+        {
+            sa.b[i] = 0u;
+            pa.b[i] = 0u;
+        }
+        sa.b[0] = (unsigned char)(LX_AF_INET & 0xFF);
+        sa.b[1] = 0u;
+        sa.b[2] = (unsigned char)((SK_PORT >> 8) & 0xFF);
+        sa.b[3] = (unsigned char)(SK_PORT & 0xFF);
+        sa.b[4] = 127u;
+        sa.b[7] = 1u;
+
+        tm0 = mono_ms();
+        /* 等协议栈：socket() 早于 tcpip 线程时如实回 -ENOSYS，重试。 */
+        srv = -1;
+        for (tries = 0; tries < 300; tries++)
+        {
+            srv = lx3(LX_SOCKET, LX_AF_INET, LX_SOCK_STREAM, 0);
+            if (srv >= 0)
+            {
+                break;
+            }
+            ts[0] = 0;
+            ts[1] = 10 * 1000000;
+            (void)lx6(LX_PSELECT6, 0, 0, 0, 0,
+                      (lx_long)(unsigned long)ts, 0);
+        }
+        check("socket stream fd >= 3", (srv >= 3) ? 1 : 0, 1);
+
+        check("socket bad domain == -EAFNOSUPPORT",
+              lx3(LX_SOCKET, 99, LX_SOCK_STREAM, 0), -LX_EAFNOSUPPORT);
+        check("socket type >= SOCK_MAX == -EINVAL",
+              lx3(LX_SOCKET, LX_AF_INET, 15, 0), -LX_EINVAL);
+        check("socket unsupported type == -ESOCKTNOSUPPORT",
+              lx3(LX_SOCKET, LX_AF_INET, 7, 0), -LX_ESOCKTNOSUPPORT);
+
+        dgs = lx3(LX_SOCKET, LX_AF_INET, LX_SOCK_DGRAM, 0);
+        check("socket dgram fd >= 3", (dgs >= 3) ? 1 : 0, 1);
+
+        check("bind loopback:8081 == 0",
+              lx3(LX_BIND, srv, (lx_long)(unsigned long)&sa, 16), 0);
+        check("listen == 0", lx2(LX_LISTEN, srv, 2), 0);
+
+        /* getsockname：端口要按网络序读回 8081。 */
+        lenp = 0u;
+        r = lx3(LX_GETSOCKNAME, srv, (lx_long)(unsigned long)&pa,
+                (lx_long)(unsigned long)&lenp);
+        check("getsockname == 0", r, 0);
+        check("getsockname addrlen == 16", (lx_long)lenp, 16);
+        check("getsockname family == AF_INET", (lx_long)pa.b[0], LX_AF_INET);
+        check("getsockname port == 8081",
+              ((lx_long)pa.b[2] << 8) | (lx_long)pa.b[3], SK_PORT);
+
+        cli = lx3(LX_SOCKET, LX_AF_INET, LX_SOCK_STREAM, 0);
+        check("client socket fd >= 3", (cli >= 3) ? 1 : 0, 1);
+        check("connect loopback:8081 == 0",
+              lx3(LX_CONNECT, cli, (lx_long)(unsigned long)&sa, 16), 0);
+
+        for (i = 0; i < 16; i++)
+        {
+            pa.b[i] = 0u;
+        }
+        lenp = 0u;
+        acc = lx3(LX_ACCEPT, srv, (lx_long)(unsigned long)&pa,
+                  (lx_long)(unsigned long)&lenp);
+        check("accept fd >= 3", (acc >= 3) ? 1 : 0, 1);
+        check("accept wrote peer family == AF_INET", (lx_long)pa.b[0],
+              LX_AF_INET);
+
+        r = lx6(LX_SENDTO, cli, (lx_long)(unsigned long)"hiyou", 5,
+                0, 0, 0);
+        check("tcp send 5 == 5", r, 5);
+        for (i = 0; i < 16; i++)
+        {
+            buf[i] = 0;
+        }
+        r = lx6(LX_RECVFROM, acc, (lx_long)(unsigned long)buf, 5,
+                0, 0, 0);
+        check("tcp recv 5 == 5", r, 5);
+        pack = ((lx_long)(unsigned char)buf[0] << 24) |
+               ((lx_long)(unsigned char)buf[1] << 16) |
+               ((lx_long)(unsigned char)buf[2] << 8) |
+               (lx_long)(unsigned char)buf[3];
+        check("tcp payload hiyo", pack, 0x6869796FL);
+        check("tcp payload last byte", (lx_long)(unsigned char)buf[4], 0x75);
+
+        for (i = 0; i < 16; i++)
+        {
+            pa.b[i] = 0u;
+        }
+        lenp = 0u;
+        r = lx3(LX_GETPEERNAME, acc, (lx_long)(unsigned long)&pa,
+                (lx_long)(unsigned long)&lenp);
+        check("getpeername == 0", r, 0);
+        check("getpeername ip == 127.0.0.1",
+              ((lx_long)pa.b[4] << 24) | ((lx_long)pa.b[5] << 16) |
+              ((lx_long)pa.b[6] << 8) | (lx_long)pa.b[7], 0x7F000001L);
+
+        pack32 = 1u;
+        r = lx6(LX_SETSOCKOPT, cli, LX_SOL_SOCKET, LX_SO_REUSEADDR,
+                (lx_long)(unsigned long)&pack32, 4, 0);
+        check("setsockopt REUSEADDR == 0", r, 0);
+
+        {
+            unsigned int optlen = 4u;
+
+            /* 内核按 int 写 4 字节：缓冲就要是 4 字节，用 long 接的话高 32
+             * 位保留旧值，读回来是一个「看起来很深」的假数字。 */
+            pack32 = 0xFFFFFFFFu;
+            r = lx6(LX_GETSOCKOPT, cli, LX_SOL_SOCKET, LX_SO_TYPE,
+                    (lx_long)(unsigned long)&pack32,
+                    (lx_long)(unsigned long)&optlen, 0);
+            check("getsockopt SO_TYPE == 0", r, 0);
+            check("getsockopt SO_TYPE locally answered 1",
+                  (lx_long)pack32, 1);
+
+            pack32 = 0xFFFFFFFFu;
+            optlen = 4u;
+            r = lx6(LX_GETSOCKOPT, cli, LX_SOL_SOCKET, LX_SO_ERROR,
+                    (lx_long)(unsigned long)&pack32,
+                    (lx_long)(unsigned long)&optlen, 0);
+            check("getsockopt SO_ERROR == 0", r, 0);
+            check("getsockopt SO_ERROR locally answered 0",
+                  (lx_long)pack32, 0);
+
+            pack32 = 0u;
+            optlen = 4u;
+            r = lx6(LX_GETSOCKOPT, cli, LX_SOL_SOCKET, 55,
+                    (lx_long)(unsigned long)&pack32,
+                    (lx_long)(unsigned long)&optlen, 0);
+            check("getsockopt unknown opt == -ENOPROTOOPT", r,
+                  -LX_ENOPROTOOPT);
+
+            pack32 = 0u;
+            r = lx6(LX_SETSOCKOPT, cli, LX_SOL_SOCKET, LX_SO_ERROR,
+                    (lx_long)(unsigned long)&pack32, 4, 0);
+            check("setsockopt SO_ERROR == -EINVAL", r, -LX_EINVAL);
+        }
+
+        /* 半关：对端必须看到 EOF（recv 回 0），不是「什么都没有」。 */
+        check("shutdown SHUT_WR == 0", lx2(LX_SHUTDOWN, acc, LX_SHUT_WR), 0);
+        r = lx6(LX_RECVFROM, cli, (lx_long)(unsigned long)buf, 8,
+                0, 0, 0);
+        check("recv after peer shutdown == 0 (EOF)", r, 0);
+
+        /* TCP 这三只先关掉：lwIP 的 netconn 池（MEMP_NUM_NETCONN=4）与
+         * 内核的 socket 行数（ARKRTOS_NET_MAX_SOCKETS=4）一样大，同时占满
+         * 之后 UDP 那一对建不出来。真实程序也是「用完就关」，这里照做比
+         * 悄悄把池子调大更能暴露「池子到底够不够」。 */
+        (void)lx1(LX_CLOSE, acc);
+        (void)lx1(LX_CLOSE, srv);
+        (void)lx1(LX_CLOSE, cli);
+
+        /* 反假绿：fd 槽必须真的释放，关掉之后不能再读写。 */
+        check("write on closed socket == -EBADF",
+              lx3(LX_WRITE, cli, (lx_long)(unsigned long)"x", 1), -LX_EBADF);
+        check("read on closed socket == -EBADF",
+              lx3(LX_READ, cli, (lx_long)(unsigned long)buf, 1), -LX_EBADF);
+
+        /* UDP：sendto 之后 recvfrom 必须同时读回数据与对端端口。 */
+        sa.b[2] = (unsigned char)((SK_UPORT >> 8) & 0xFF);
+        sa.b[3] = (unsigned char)(SK_UPORT & 0xFF);
+        check("udp bind loopback:8082 == 0",
+              lx3(LX_BIND, dgs, (lx_long)(unsigned long)&sa, 16), 0);
+
+        dgc = lx3(LX_SOCKET, LX_AF_INET, LX_SOCK_DGRAM, 0);
+        check("udp client socket fd >= 3", (dgc >= 3) ? 1 : dgc, 1);
+        r = lx6(LX_SENDTO, dgc, (lx_long)(unsigned long)"udp", 3u, 0,
+                (lx_long)(unsigned long)&sa, 16);
+        check("udp sendto 3 == 3", r, 3);
+
+        for (i = 0; i < 16; i++)
+        {
+            pa.b[i] = 0u;
+            buf[i] = 0;
+        }
+        lenp = 0u;
+        r = lx6(LX_RECVFROM, dgs, (lx_long)(unsigned long)buf, 3u, 0,
+                (lx_long)(unsigned long)&pa,
+                (lx_long)(unsigned long)&lenp);
+        check("udp recvfrom 3 == 3", r, 3);
+        pack = ((lx_long)(unsigned char)buf[0] << 16) |
+               ((lx_long)(unsigned char)buf[1] << 8) |
+               (lx_long)(unsigned char)buf[2];
+        check("udp payload udp", pack, 0x756470L);
+
+        {
+            sk_sa_t cli_sa;
+            unsigned int cli_len = 0u;
+            lx_long      cli_port;
+
+            for (i = 0; i < 16; i++)
+            {
+                cli_sa.b[i] = 0u;
+            }
+            r2 = lx3(LX_GETSOCKNAME, dgc, (lx_long)(unsigned long)&cli_sa,
+                     (lx_long)(unsigned long)&cli_len);
+            cli_port = ((lx_long)cli_sa.b[2] << 8) | (lx_long)cli_sa.b[3];
+            check("udp recvfrom peer port == client port",
+                  (r2 == 0) ? ((((lx_long)pa.b[2] << 8) |
+                                (lx_long)pa.b[3]) - cli_port) : -1, 0);
+        }
+
+        (void)lx1(LX_CLOSE, dgc);
+        (void)lx1(LX_CLOSE, dgs);
+        /* 一次 socket 往返不该按「一个等待时间片」结算（LX_WAIT_SLICE_MS =
+         * 100 ms）：回复落地时服务任务会直接叫醒等待者（见 arkrtos_net.c 的
+         * g_net_req_wake）。这条判据就是那个机制的回归门 —— 唤醒丢了的话，
+         * 这一段十几次往返会回到 ~2 s。 */
+        tm2 = mono_ms();
+        check("socket round trips do not cost a wait slice (< 800 ms)",
+              ((tm0 >= 0) && (tm2 >= 0) && ((tm2 - tm0) < 800)) ? 1 : 0, 1);
+    }
+#elif defined(ARKRTOS_USE_LINUX_SELECT) && (ARKRTOS_USE_LINUX_SELECT == 1)
+    /* 反假绿：socket 开关没开时，198 号必须如实回 -ENOSYS，而不是落到
+     * 一个「看起来能用」的桩上。这一条只在 select 档（socket 的下一档）
+     * 里存在，所以不改变下面各档的条数。 */
+    check("socket with the switch off == -ENOSYS",
+          lx3(LX_SOCKET, LX_AF_INET, LX_SOCK_STREAM, 0), -LX_ENOSYS);
 #endif
 
     if (g_fail == 0)

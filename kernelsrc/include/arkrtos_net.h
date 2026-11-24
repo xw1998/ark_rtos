@@ -26,9 +26,16 @@
 /** @brief 网络服务任务的优先级。tcpip 线程是 12（见 lwipopts.h），
  *         服务任务要低一些，让 tcpip 能先跑完它投递的消息。 */
 #define ARKRTOS_NET_TASK_PRIO        (14u)
-/** @brief 服务任务栈（字）。只跑 lwIP 调用与一次 4 KB 以内的小拷贝。 */
+/** @brief 服务任务栈（字）。
+ *
+ * 这里跑的是**真 lwIP 的函数**（lwip_recvfrom / lwip_send / lwip_accept），
+ * 调用链是 netconn -> api_msg -> tcpip 同步消息，深度不受我们控制。实测
+ * 384 字（1.5 KB）在 LA64 上会打穿：QEMU 上表现为任务 13 的栈底守卫字被
+ * 覆盖（"[STK] task 13: stack bottom flag overwritten"），随后 recv 请求
+ * 再也不回（调用方看到的是「一直等不到数据」的超时，而不是一个错误码）。
+ * 4 KB 是实测跑完 TCP/UDP 收发与 accept 都留有余量的档位。 */
 #ifndef ARKRTOS_NET_TASK_STACK_WORDS
-#define ARKRTOS_NET_TASK_STACK_WORDS (384u)
+#define ARKRTOS_NET_TASK_STACK_WORDS (1024u)
 #endif
 
 /**
@@ -59,6 +66,13 @@ int32 arkrtos_net_svc(void *p_svc_ctx);
 void arkrtos_net_release_task(int32 task_id);
 
 #if (defined(ARKRTOS_USE_LINUX_SOCKET) && (ARKRTOS_USE_LINUX_SOCKET == 1))
+/**
+* @brief 某条在飞请求的回复是否已经落地（供 Linux ABI 层在睡时间片前询问）
+* @param owner 发起者任务号
+* @return 1 = 回复已就绪且属于该任务，可直接重放；0 = 还没好（照旧睡时间片）
+*/
+int32 arkrtos_net_reply_ready(int32 owner);
+
 /**
 * @brief 内核内的网络调用口（Linux ABI 层用，U-23）。
 * @details 与 arkrtos_net_svc 同一条请求状态机，区别只在参数块来自内核栈：
