@@ -655,14 +655,18 @@ config ARKRTOS_USE_PAGING_SHM
 	  does not change by a byte.
 
 config ARKRTOS_USE_LINUX_FUTEX
-	bool "futex WAIT / WAKE for the Linux ABI layer (U-20)"
+	bool "futex WAIT / WAKE / REQUEUE / BITSET + timeout for the Linux ABI layer (U-20)"
 	depends on ARKRTOS_USE_LINUX_ABI
 	help
-	  Make futex(uaddr, FUTEX_WAIT, val) / futex(uaddr, FUTEX_WAKE, n) real
-	  for static ELF programs: WAIT returns -EAGAIN when the word at uaddr no
-	  longer equals val, -EINTR when a signal is pending, and otherwise queues
-	  the task; WAKE wakes up to n waiters on the same key and returns how
-	  many it woke.
+	  Make futex real for static ELF programs, all six ops glibc needs: WAIT,
+	  WAKE, REQUEUE, CMP_REQUEUE, WAIT_BITSET and WAKE_BITSET, plus a relative
+	  WAIT timeout and an absolute WAIT_BITSET deadline.  WAIT returns -EAGAIN
+	  when the word at uaddr no longer equals val and -EINTR when a signal is
+	  pending; a timeout expires as -ETIMEDOUT.  WAKE wakes up to n waiters on
+	  the same key.  A REQUEUE moves up to nr_requeue waiters onto uaddr2 (the
+	  count arrives in the fourth argument slot, the way Linux reuses it);
+	  CMP_REQUEUE only does so when the word still matches val3 (else -EAGAIN).
+	  A bitset WAKE only wakes waiters whose mask intersects.
 
 	  The key is "physical frame + offset in page", not the virtual address:
 	  each process owns its own 8 KB pair window, so the same VA points at
@@ -670,15 +674,20 @@ config ARKRTOS_USE_LINUX_FUTEX
 	  word.  Two processes sharing a MAP_SHARED page therefore land on the
 	  same key.
 
-	  Three boundaries (not bugs):
-	    1) Only WAIT and WAKE exist.  REQUEUE, PI and WAIT_BITSET answer
-	       -ENOSYS instead of being approximated.
-	    2) With a paging window, only words inside it have a key; a futex on
+	  Boundaries (not bugs):
+	    1) PI and FD ops (2, 5..8, 11..14) answer -ENOSYS instead of being
+	       approximated; there is no robust-list cleanup.
+	    2) The deadline is stored, not the duration, so a scheduler-slice
+	       replay does not restart the clock.  There is no wall clock:
+	       FUTEX_CLOCK_REALTIME with a timeout answers -ENOSYS rather than
+	       faking an absolute time.  Without a timeout the wait simply
+	       re-blocks every slice while the word is unchanged.
+	    3) With a paging window, only words inside it have a key; a futex on
 	       a stack word answers -ENOSYS.  Without a window (MPU backend) the
 	       whole address space is one, so the virtual address is the key.
-	    3) There is no unbounded sleep: the wait is replayed every scheduler
-	       slice and simply re-blocks while the word is unchanged, so it never
-	       invents -ETIMEDOUT.
+	    4) A requeued waiter has its expected value updated to whatever uaddr2
+	       currently holds: requeue does not wake it, but its next slice must
+	       not mistake "two addresses hold different words" for "woken".
 
 	  Requires ARKRTOS_USE_LINUX_ABI.
 
