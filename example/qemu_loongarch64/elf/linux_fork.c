@@ -1025,6 +1025,144 @@ void linux_main(unsigned long sp)
                   (status6 >> 8) & 0xFF, 3);
         }
     }
+
+    /* 多时间片等待：父进程的 WAIT 若跨过一个 LX_WAIT_SLICE_MS（100 ms）
+     * 时间片仍没被叫醒，重放的那一次 a0 已被清成 0。修复前它拿 0 去读字
+     * ⇒ -EFAULT 并销账（一次正常的长等待被打死）；修复后用登记下来的地址
+     * 继续睡。这条只有 QEMU 上能证明：宿主用例把「重放」单独造出来了，但
+     * 真正的调度器才是「时间片到期」这件事的来源。
+     *
+     * 构造：子进程先忙等 250 ms（> 两个时间片）再写值 + WAKE，父进程这期间
+     * 至少被时间片叫醒两次、每次都该继续睡。最终 rc 必须是 0，且从进入
+     * WAIT 到返回的墙钟必须 >= 150 ms（证明真的跨了时间片，不是一次命中）。 */
+    {
+        volatile unsigned long *fw2;
+        lx_long faddr2;
+        lx_long child8;
+        lx_long status8 = -1;
+        lx_long rc8 = -1;
+        lx_long ppid8;
+        long    elapsed8 = -1;
+
+        faddr2 = lx6(LX_MMAP, 0, 4096, 3,
+                     LX_MAP_SHARED | LX_MAP_ANONYMOUS, -1, 0);
+        check("futex multislice mmap shared page > 0",
+              (faddr2 > 0) ? 1 : 0, 1);
+
+        if (faddr2 > 0)
+        {
+            fw2 = (volatile unsigned long *)(unsigned long)faddr2;
+            *fw2 = 1ul;
+            ppid8 = lx1(LX_GETPID, 0);
+
+            child8 = lx3(LX_CLONE, LX_SIGCHLD, 0, 0);
+            if (child8 == 0)
+            {
+                int     code = 0;
+                lx_long wrc  = 0;
+                long    ts[2];
+                long    c0 = -1;
+                long    cnow;
+                int     spins;
+
+                if (*fw2 == 1ul)
+                {
+                    code |= 1;      /* bit0: 父进程等的还是 1 */
+                }
+                /* 忙等至少 250 ms：跨过两个 100 ms 时间片。时钟拿不到就退回
+                 * 固定圈数（QEMU 上这条路径不该发生，但不许死等）。 */
+                if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                        (lx_long)(unsigned long)ts, 0) == 0)
+                {
+                    c0 = (ts[0] * 1000) + (ts[1] / 1000000);
+                }
+                for (spins = 0;; spins++)
+                {
+                    if (c0 >= 0)
+                    {
+                        if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                                (lx_long)(unsigned long)ts, 0) != 0)
+                        {
+                            break;
+                        }
+                        cnow = (ts[0] * 1000) + (ts[1] / 1000000);
+                        if ((cnow - c0) >= 250)
+                        {
+                            break;
+                        }
+                    }
+                    else if (spins >= 4000000)
+                    {
+                        break;
+                    }
+                }
+                for (spins = 0; spins < 200000; spins++)
+                {
+                    *fw2 = 2ul;
+                    wrc = lx3(LX_FUTEX, (lx_long)(unsigned long)fw2,
+                              LX_FUTEX_WAKE, 1);
+                    if (wrc == 1)
+                    {
+                        code |= 2;  /* bit1: 真的叫醒了 1 个等待者 */
+                        break;
+                    }
+                }
+                if (wrc != 1)
+                {
+                    (void)lx2(LX_KILL, ppid8, LX_SIGCHLD);
+                }
+                (void)lx1(LX_EXIT, code);
+                for (;;)
+                {
+                }
+            }
+
+            check("clone for futex multislice child > 0",
+                  (child8 > 0) ? 1 : 0, 1);
+
+            {
+                long ts[2];
+                long t0 = -1;
+                int  round;
+
+                if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                        (lx_long)(unsigned long)ts, 0) == 0)
+                {
+                    t0 = (ts[0] * 1000) + (ts[1] / 1000000);
+                }
+                rc8 = -LX_EAGAIN;
+                for (round = 0; round < 8; round++)
+                {
+                    lx_long v8 = (lx_long)(*fw2);
+
+                    rc8 = lx4(LX_FUTEX, (lx_long)(unsigned long)fw2,
+                              LX_FUTEX_WAIT, v8, 0);
+                    if (rc8 != -LX_EAGAIN)
+                    {
+                        break;
+                    }
+                }
+                if (t0 >= 0)
+                {
+                    if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                            (lx_long)(unsigned long)ts, 0) == 0)
+                    {
+                        elapsed8 = ((ts[0] * 1000) + (ts[1] / 1000000)) - t0;
+                    }
+                }
+            }
+            check("futex multislice WAIT returned 0 after being woken", rc8, 0);
+            check("futex multislice parent saw the value the waker wrote",
+                  (lx_long)(*fw2), 2);
+            check("futex multislice WAIT spanned >= 150 ms (crossed a slice)",
+                  (elapsed8 >= 150) ? 1 : 0, 1);
+            status8 = -1;
+            rc8 = lx4(LX_WAIT4, child8, (lx_long)(unsigned long)&status8, 0, 0);
+            check("futex multislice child reaped", rc8, child8);
+            check("futex multislice waker saw 1 and woke 1 (bits=3)",
+                  (status8 >> 8) & 0xFF, 3);
+        }
+    }
 #endif
 
 #if defined(ARKRTOS_USE_PAGING_FILEMAP) && (ARKRTOS_USE_PAGING_FILEMAP == 1)

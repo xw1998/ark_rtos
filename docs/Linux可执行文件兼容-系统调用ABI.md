@@ -553,12 +553,12 @@ COW 只管「fork 之后各写各的」这一半；要让父子看见彼此的�
 |---|---|
 | op | 只有 `WAIT`(0) / `WAKE`(1)。`FUTEX_PRIVATE_FLAG`(128) **接受但剥掉**——本实现的键本来就是物理的，私有与进程间是同一件事；其余（`REQUEUE` / `WAIT_BITSET` / `PI` / `WAKE_OP` …）一律 `-ENOSYS`，不猜 |
 | 键 | **物理帧号 + 页内偏移**，不是 VA。每个进程有自己的 8 KB 对窗口，同一个 VA 在父子身上指不同帧；拿 VA 当键会让两个无关进程在同一个 VA 上互相叫醒——那种错法不报错，只偶发多醒。窗口之外（栈、内核直映射区）查不到帧 ⇒ 如实 `-ENOSYS`，不拿 VA 冒充 |
-| 睡眠 | 本内核没有无限睡眠：登记后 `arkrtos_task_block_in_critical(LX_WAIT_SLICE_MS=100 ms)` + `arkrtos_port_svc_restart()`，与 §8.1 同一条可重启系统调用通路。醒来先看 `s_futex_woke`（有人叫过就回 0），否则重读一次字：值变了就当被叫醒，没变继续睡一个时间片；**不编 `-ETIMEDOUT`**（Linux 不传 timeout 时同样永不超时，语义一致）。端口不支持重放时回 `-ENOSYS` 并清槽，**绝不假装睡过** |
+| 睡眠 | 本内核没有无限睡眠：登记后 `arkrtos_task_block_in_critical(LX_WAIT_SLICE_MS=100 ms)` + `arkrtos_port_svc_restart()`，与 §8.1 同一条可重启系统调用通路。醒来先看 `s_futex_woke`（有人叫过就回 0），否则重读一次字：值变了就当被叫醒，没变继续睡一个时间片；**不编 `-ETIMEDOUT`**（Linux 不传 timeout 时同样永不超时，语义一致）。端口不支持重放时回 `-ENOSYS` 并清槽，**绝不假装睡过**。重放的那一次 a0 已被返回值清成 0（见坑 ②），所以「读哪个字、期望值是多少」都用登记下来的那一份，而不是重放时读到的参数 |
 | `-EAGAIN` / `-EINTR` | 入口读到的字 != `val` ⇒ 立即 `-EAGAIN`（不睡）；有未屏蔽待投递信号 ⇒ 立即 `-EINTR`。重放那一次也再查一遍信号，所以信号能把已经睡着的等待者叫回来 |
-| 等待槽 | 每任务一槽（`s_futex_key / s_futex_used / s_futex_woke[ARKRTOS_TASK_MAX_NUM]`）。一个任务睡着时不可能再发起一次 WAIT，一槽够用；任务退出时 `on_task_exit` 清槽，否则任务号复用后新任务会继承一条「已经在等」的旧记录 |
+| 等待槽 | 每任务一槽（`s_futex_key / s_futex_used / s_futex_woke / s_futex_uaddr / s_futex_val[ARKRTOS_TASK_MAX_NUM]`）。后两格记的是「上一次真正睡下时的 `uaddr` 与 `val`」——重放时 a0 已经被返回值清成 0，不存下来就只能拿 0 去读字。一个任务睡着时不可能再发起一次 WAIT，一槽够用；任务退出时 `on_task_exit` 清槽（五格一起清），否则任务号复用后新任务会继承一条「已经在等」的旧记录 |
 | `WAKE` | 扫所有任务，同键且登记中的逐个置 `s_futex_woke=1` + `arkrtos_task_wakeup_internal()`，最多 `val` 个，返回实际唤醒数；没有等待者返 0（与 Linux 同） |
 
-读数（`tools/fork_gate.py` 的 fork+COW+SHM+futex 档，49 条 check，其中 futex 段 9 条）：
+读数（`tools/fork_gate.py` 的 fork+COW+SHM+futex 档，56 条 check，其中 futex 段 16 条 —— 9 条基本配对 + 7 条多时间片）：
 
 | 读数 | 钉住什么 |
 |---|---|
@@ -571,6 +571,13 @@ COW 只管「fork 之后各写各的」这一半；要让父子看见彼此的�
 | `parent saw the value the waker wrote -> 2` | 醒来后看到的是唤醒者写的字（共享页真生效，不是私有副本） |
 | `futex child reaped -> 12` | 唤醒者正常退出并被 reap |
 | `futex waker saw 1 and woke 1 (bits=3) -> 3` | bit0 = 子进程读共享页时看到的还是父进程要等的那个 1（证明父子读写的是同一个字，共享帧生效）；bit1 = `WAKE` 真的叫醒了 1 个 |
+| `futex multislice mmap shared page > 0 -> 1` | 多时间片那组用的共享页确实建起来了 |
+| `clone for futex multislice child > 0 -> 1` | 对应的唤醒者是另一个真实进程 |
+| `futex multislice WAIT returned 0 after being woken -> 0` | 跨过至少一个 100 ms 时间片之后 WAIT 仍回 0 —— 修复前这里会变成 `-EFAULT`（重放拿 0 去读字），所以这一条是把「一次正常的长时间等」钉死 |
+| `futex multislice parent saw the value the waker wrote -> 2` | 跨时间片醒来后看到唤醒者写的 2（读的是登记地址，不是 0） |
+| `futex multislice WAIT spanned >= 150 ms (crossed a slice) -> 1` | 从进入 WAIT 到返回的墙钟 >= 150 ms —— 证明真的跨了时间片，而不是一次命中（否则这一档等于没测到重放） |
+| `futex multislice child reaped -> 12` | 多时间片的唤醒者被正常 reap |
+| `futex multislice waker saw 1 and woke 1 (bits=3) -> 3` | 同一组证据位在跨时间片场景下仍成立 |
 
 这一档的定序是**重试到收敛**，不拿调度当判据：用户态可被时间片抢占，子进程可能在父进程走到 `WAIT`
 之前就跑完（实测踩到过一次：父 `WAIT` 回 `-EAGAIN`、子 `WAKE` 回 0，看起来像 futex 不配对）。现在的写法是
@@ -590,8 +597,18 @@ COW 只管「fork 之后各写各的」这一半；要让父子看见彼此的�
 读到的 `uaddr` 是 0**。不能靠地址认重放，只能靠「我这一槽还登记着」：`uaddr == 0` 且本槽 `used`
 为 1，就取回本任务记下的键。这不是理论洁癖——`wait4` 的重放同样把 `pid` 读成 0，只是 0 对 `wait4`
 本来就是合法输入（等任意儿子），所以此前没有暴露；`futex` 是第一个必须把这件事说清楚的地方。
-宿主用例里有一条专门喂这个形态：先登记一次 WAIT，再用 `uaddr=0` 重入，必须被认成重放而不是
-`-EFAULT`。
+宿主用例里有一条专门喂这个形态：先登记一次 WAIT，再用 `uaddr=0` 重入 —— 必须被认成重放、用登记下来的
+地址继续睡，而不是 `-EFAULT`。
+
+**这一步最初是错的，而且被当成了期望值。** 最早的实现认出重放之后，仍用重放时读到的 `uaddr`（=0）
+去 `copy_from_user` 读字 ⇒ 必然 `-EFAULT`，然后清槽返回。于是「一个超过 100 ms 还没被唤醒的 WAIT」
+会以 `-EFAULT` 死掉 —— 恰恰是 futex 最正常的用法（等得久一点）。它没在上板夹具里暴露，是因为
+基本配对那组子进程几乎立刻写值 + `WAKE`，父进程通常在一个时间片内就被叫醒；而宿主用例当时把
+`-EFAULT` 写成了「期望值」，等于用测试把这个缺陷固化了下来。修法就是第 3 张表里的 `s_futex_uaddr /
+s_futex_val`：登记时存 `uaddr`、`val`，重放时取回它们再读字。改完宿主用例的那三条断言（继续睡 /
+值变了当被叫醒 / 登记地址真读不出来才 `-EFAULT`）与 QEMU 的多时间片段一起把这个行为钉住。
+这个缺陷值得单独记一笔，因为它的形态是「**修复前后都能跑、都返回一个像样的错误码**」——只有把
+『等得久』当成一条正常路径去测，才会发现正常路径被当成了错误。
 
 ③ **「一次 write」不等于「一行」。** §8.3 让 `lx_write` 持控制台锁，解决的是
 「内核日志插进用户一行中间」；但夹具自己把一行拆成三次 `write`（前缀、数字、换行）时，
@@ -604,9 +621,9 @@ COW 只管「fork 之后各写各的」这一半；要让父子看见彼此的�
 
 宿主侧口径：`linuxabi` / `linuxabioff` / `linuxabifutex` / `linuxabifilemap` 四档并集行覆盖率
 **97.96%（1055/1077）**（基线钉的是 97.20%，本轮新增 §8.5 之后分母涨了、读数没降），
-`linuxabi` 档 **270 checks**、futex 档 **312 checks**、filemap 档 **337 checks**，都打印
+`linuxabi` 档 **270 checks**、futex 档 **317 checks**、filemap 档 **358 checks**，都打印
 `LINUX-ABI HOST OK`；`ARKRTOS_USE_PAGING_SHM=1` 的共享分支**不在宿主账内**
-（宿主用例从未在 `LINUX_FORK=1` 下编过），那一半的口径只有上板 40 条 SHM 读数、9 条 futex
+（宿主用例从未在 `LINUX_FORK=1` 下编过），那一半的口径只有上板 40 条 SHM 读数、16 条 futex
 读数与 20 条 filemap 读数。剩余 22 行未覆盖经逐行核对全是死/防御分支（两处 `-EBUSY`
 重入、`-ENOMEM` 的溢出与对齐变体、`-E2BIG`、嵌入式弱符号兜底等；列表见覆盖率门禁的
 说明与本周的 `covmiss` 记录），不是「没测」。
@@ -792,12 +809,12 @@ EXTRA_CFLAGS**，所以夹具看不到内核的编译开关。这一段只在 `A
   三档门禁实测（关档零符号、开档 40 条读数、SHM 关档的 `-ENOSYS` 对照）。
 - `ARKRTOS_USE_LINUX_FUTEX`（§8.4），默认 **0**，`depends on ARKRTOS_USE_LINUX_ABI` 且
   `features.h` 用 `#error` 顶住这条依赖；关档时不编译等待槽、键解析与 `lx_futex`，98 号落回
-  `-ENOSYS`；开档实测是 fork+COW+SHM+futex 档的 49 条读数（其中 futex 9 条）与宿主 futex 档的
-  268 checks。
+  `-ENOSYS`；开档实测是 fork+COW+SHM+futex 档的 56 条读数（其中 futex 16 条，含多时间片 7 条）与
+  宿主 futex 档的 317 checks。
 - `ARKRTOS_USE_PAGING_FILEMAP`（§8.5），默认 **0**，`depends on ARKRTOS_USE_LINUX_ABI` +
   `ARKRTOS_USE_PAGING` + `ARKRTOS_USE_PAGING_PAGES` + `ARKRTOS_USE_PAGING_DEMAND`（内容靠按需缺页
   拿帧，没有 DEMAND 就装不进映射区），`features.h` 用四条 `#error` 顶住；关档时文件映射分支、
-  写回记账与 `msync` 全不编译，`mmap(fd)` 回 `-ENOSYS`；开档实测是第五档的 69 条读数（其中
+  写回记账与 `msync` 全不编译，`mmap(fd)` 回 `-ENOSYS`；开档实测是第五档的 76 条读数（其中
   filemap 20 条）与宿主 filemap 档的 337 checks。
 - `ARKRTOS_USE_PAGING_MPROTECT`（§8.6），默认 **0**，`depends on ARKRTOS_USE_LINUX_ABI` +
   `ARKRTOS_USE_PAGING` + `ARKRTOS_USE_PAGING_PAGES` + `ARKRTOS_USE_PAGING_DEMAND`
@@ -851,10 +868,10 @@ fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**4
 | `qemu-readout` | `[fork]` **27 条** check 全 `ok`、父子 pid 不同、PASS 行、`exit code 0`，且 hello / FS / 其余 Linux 夹具读数仍在；三条新读数（阻塞 `wait4` 真的等了 >= 40 ms / 父读端在子关掉自己那份之后仍读到 3 字节 / SIGCHLD handler 真被调到）逐条校验；另有 `MAP_FIXED` 段 6 条（§8.7，丢弃后内容为 0、地址不变、非对齐与共享形态被拒）逐条校验 |
 | `qemu-readout`（COW 档） | fork+COW：`[fork]` **32 条** check 全 `ok`；内核日志 `shared>=1 / stack>=1 / copied=0`、至少一条 `pg cow copy ... ref=2`、无 `ref=1` 的 copy 行；两条 COW 读数（子看到 fork 前的值、父的写只落自己那份）逐条校验 |
 | `qemu-readout`（SHM 档） | fork+COW+SHM：`[fork]` **40 条** check 全 `ok`；六条 SHM 读数逐条校验（两条非法形态回 `-38`、映射成功、起始清零、父看到子写、子看到父 fork 之后的写）；内核日志另加至少一条 `pg shm map va=0x<n> pairs>=1` |
-| `qemu-readout`（futex 档） | fork+COW+SHM+futex：`[fork]` **49 条** check 全 `ok`；九条 futex 读数逐条校验（共享页映射成功、无等待者 WAKE 回 0、值不等 WAIT 回 `-11`、不认识的 op 回 `-38`、唤醒者克隆成功、WAIT 被叫醒回 0、父看到唤醒者写的 2、唤醒者被 reap、`bits=3` 两条证据位同时置位）；SHM 与 COW 的全部判据同时仍在 |
-| `qemu-readout`（filemap 档） | fork+COW+SHM+futex+filemap：`[fork]` **69 条** check 全 `ok`；filemap 段 20 条读数逐条校验（私有只读内容三读数、页尾仍是文件内容、offset 非对齐回 `-22`、坏 fd 回 `-9`、只读 fd 上可写共享映射回 `-13`、offset=4096 生效且 EOF 后读零、O_RDWR 打开成功、可写共享映射 + `msync` + `munmap`、私有映射 `msync` 不落盘、重映射读回、`bits=31` 的五位证据）；SHM / COW / futex 的全部判据同时仍在 |
-| `qemu-readout`（mprotect 档） | fork+COW+SHM+futex+filemap+mprotect：`[fork]` **80 条** check 全 `ok`；mprotect 段 11 条逐条校验（映射成功、`mprotect` 双向可设、只读页仍可读、同对另一半仍可写、撤保护后写得进、违规子进程被 reap 而非重启、状态字 = SIGSEGV、父页未被改）；串口另须有一行 `[LA64U] mprotect violation badv=0x… era=0x… tid=… -> kill task`；filemap / SHM / COW / futex 的全部判据同时仍在 |
-| `parser-selfcheck` | 9 种坏日志必须判红（COW 档另加 4 种：位掩码丢一位、父写丢失、整类删光 copy 行、fork 时搬了字节；SHM 档再加 5 种：删光 `pg shm map` 行、共享写没被父看到、子看不到父的写、共享页起始非 0、缺映射成功读数；futex 档再加 3 种：WAIT 没被叫醒、唤醒者只看到一半（`bits=1`）、无等待者 WAKE 回 1；filemap 档再加 3 种：写回没发生、写回把文件截短、私有映射的改动被落盘；mprotect 档再加 7 种：只读页读不回来、粒度退化成 8 KB、违规写没被拦住、违规写改了父页、状态字当成退出码、缺违规日志行、缺成功读数） |
+| `qemu-readout`（futex 档） | fork+COW+SHM+futex：`[fork]` **56 条** check 全 `ok`；十六条 futex 读数逐条校验（九条基本配对 + 七条多时间片：跨时间片 WAIT 回 0、父看到新值、WAIT 墙钟 >= 150 ms、多时间片唤醒者被 reap、`bits=3` 等）；SHM 与 COW 的全部判据同时仍在 |
+| `qemu-readout`（filemap 档） | fork+COW+SHM+futex+filemap：`[fork]` **76 条** check 全 `ok`；filemap 段 20 条读数逐条校验（私有只读内容三读数、页尾仍是文件内容、offset 非对齐回 `-22`、坏 fd 回 `-9`、只读 fd 上可写共享映射回 `-13`、offset=4096 生效且 EOF 后读零、O_RDWR 打开成功、可写共享映射 + `msync` + `munmap`、私有映射 `msync` 不落盘、重映射读回、`bits=31` 的五位证据）；SHM / COW / futex 的全部判据同时仍在 |
+| `qemu-readout`（mprotect 档） | fork+COW+SHM+futex+filemap+mprotect：`[fork]` **87 条** check 全 `ok`；mprotect 段 11 条逐条校验（映射成功、`mprotect` 双向可设、只读页仍可读、同对另一半仍可写、撤保护后写得进、违规子进程被 reap 而非重启、状态字 = SIGSEGV、父页未被改）；串口另须有一行 `[LA64U] mprotect violation badv=0x… era=0x… tid=… -> kill task`；filemap / SHM / COW / futex 的全部判据同时仍在 |
+| `parser-selfcheck` | 9 种坏日志必须判红（COW 档另加 4 种：位掩码丢一位、父写丢失、整类删光 copy 行、fork 时搬了字节；SHM 档再加 5 种：删光 `pg shm map` 行、共享写没被父看到、子看不到父的写、共享页起始非 0、缺映射成功读数；futex 档再加 5 种：WAIT 没被叫醒、唤醒者只看到一半（`bits=1`）、无等待者 WAKE 回 1、多时间片 WAIT 被打成 `-EFAULT`、多时间片没跨过时间片；filemap 档再加 3 种：写回没发生、写回把文件截短、私有映射的改动被落盘；mprotect 档再加 7 种：只读页读不回来、粒度退化成 8 KB、违规写没被拦住、违规写改了父页、状态字当成退出码、缺违规日志行、缺成功读数） |
 | `default-off-shm` / `kconfig-wired-shm` / `features-guard-shm` | SHM 开关的三件套：autoconf 为 0、Kconfig 有 `depends on ARKRTOS_USE_PAGING_COW`、features.h 有对应 `#error`；`off-zero-port` 另核关档没有 `arkrtos_port_paging_map_shared` |
 | `default-off-futex` / `kconfig-wired-futex` / `features-guard-futex` | futex 开关的三件套：autoconf 为 0、Kconfig 有 `depends on ARKRTOS_USE_LINUX_ABI`、features.h 有对应 `#error` |
 | `default-off-filemap` / `kconfig-wired-filemap` / `features-guard-filemap` | 文件映射开关的三件套：autoconf 为 0、Kconfig 四条 `depends on`（ABI / PAGING / PAGES / DEMAND）、features.h 四条 `#error` |
@@ -939,6 +956,17 @@ rodata 失败，因为栈窗口（32 KB）被单独设过，而代码窗口没�
 97.96% 掉到 97.91%，`coverage` 项判红。这不是「造一个用例把它盖住」的场合：
 硬造一个进不去的入口等于造假入口。正确做法是删掉那条冗余判断、用注释把
 不变量（两个端点都页对齐）写死。删完并集回到 98.18%，`COVERAGE-GATE OK`。
+
+**⑨ futex 重放用被清成 0 的 `uaddr` 去读字：正常的长等待被打成 `-EFAULT`。**
+LA64 上系统调用返回值写回 `a0`，而 `futex(WAIT)` 的第一个参数（`uaddr`）也从 `a0` 读；阻塞返回 0
+时重放的那一次读到的 `uaddr` 就是 0。最早的实现认出重放后仍拿这个 0 去 `copy_from_user`，必然
+`-EFAULT` —— 也就是说**一次超过 100 ms 没被唤醒的 WAIT 会以错误码终止**，而这是 futex 最正常的
+用法。更糟的是宿主用例把 `-EFAULT` 写成了期望值，等于测试在替缺陷做证。修法是每槽增加
+`s_futex_uaddr` / `s_futex_val`，登记时存下真正的地址与期望值，重放时取回再用；宿主用例改成
+「继续睡 / 值变了当被叫醒 / 登记地址真读不出来才 `-EFAULT`」三条，QEMU 侧另加一组「子进程先忙等
+250 ms 跨过两个时间片再写值 + `WAKE`」的读数（含墙钟 >= 150 ms 与 `bits=3`）。教训两条：**返回
+值是第一个参数寄存器时，「重放」必须靠外部记账而不是靠参数**；以及**别把「修复前能跑通的错误码」
+当成期望值**——它的形态是前后都跑得动、都返回一个像样的 `errno`。
 
 ## 12 边界
 

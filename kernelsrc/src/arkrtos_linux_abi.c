@@ -334,6 +334,12 @@ static uint32  s_stat[LX_STAT_MAX];
 static unsigned long s_futex_key[ARKRTOS_TASK_MAX_NUM];
 static uint8   s_futex_used[ARKRTOS_TASK_MAX_NUM];
 static uint8   s_futex_woke[ARKRTOS_TASK_MAX_NUM];
+/* 用户地址与期望值也必须登记：阻塞返回时 a0（返回值寄存器就是第一个参数
+ * 寄存器）被清成 0，重放的那一次读到 uaddr == 0、val 仍是原值。没有这两格
+ * 就只能拿 0 去读字（必然 -EFAULT），或者信任一个不该信任的参数。存下来，
+ * 重放时用「上一次真正睡下时的地址和值」继续判。 */
+static unsigned long s_futex_uaddr[ARKRTOS_TASK_MAX_NUM];
+static uint32  s_futex_val[ARKRTOS_TASK_MAX_NUM];
 #endif
 
 /* ------------------------------------------------------------- 信号状态 */
@@ -2796,9 +2802,11 @@ static void lx_futex_forget(int32 task_id)
 {
     if((task_id > 0) && (task_id <= (int32)ARKRTOS_TASK_MAX_NUM))
     {
-        s_futex_used[task_id - 1] = 0u;
-        s_futex_woke[task_id - 1] = 0u;
-        s_futex_key[task_id - 1]  = ~0UL;
+        s_futex_used[task_id - 1]  = 0u;
+        s_futex_woke[task_id - 1]  = 0u;
+        s_futex_key[task_id - 1]   = ~0UL;
+        s_futex_uaddr[task_id - 1] = 0ul;
+        s_futex_val[task_id - 1]   = 0u;
     }
 }
 
@@ -2907,7 +2915,9 @@ static int32 lx_futex(void *p_ctx)
 
         if(used0 != 0u)
         {
-            key = s_futex_key[me - 1];
+            key   = s_futex_key[me - 1];
+            uaddr = s_futex_uaddr[me - 1];
+            val   = s_futex_val[me - 1];
         }
         ARKRTOS_EXIT_CRITICAL(crit0);
     }
@@ -3010,9 +3020,11 @@ static int32 lx_futex(void *p_ctx)
     {
         uint32 crit = ARKRTOS_ENTER_CRITICAL();
 
-        s_futex_key[me - 1]  = key;
-        s_futex_used[me - 1] = 1u;
-        s_futex_woke[me - 1] = 0u;
+        s_futex_key[me - 1]   = key;
+        s_futex_used[me - 1]  = 1u;
+        s_futex_woke[me - 1]  = 0u;
+        s_futex_uaddr[me - 1] = uaddr;
+        s_futex_val[me - 1]   = val;
         ARKRTOS_EXIT_CRITICAL(crit);
     }
     (void)arkrtos_task_block_in_critical((uint32)LX_WAIT_SLICE_MS);
@@ -3592,9 +3604,11 @@ void arkrtos_linux_abi_reset(void)
 #if (ARKRTOS_USE_LINUX_FUTEX == 1)
     for(i = 0u; i < (uint32)ARKRTOS_TASK_MAX_NUM; i++)
     {
-        s_futex_key[i]  = ~0UL;
-        s_futex_used[i] = 0u;
-        s_futex_woke[i] = 0u;
+        s_futex_key[i]   = ~0UL;
+        s_futex_used[i]  = 0u;
+        s_futex_woke[i]  = 0u;
+        s_futex_uaddr[i] = 0ul;
+        s_futex_val[i]   = 0u;
     }
 #endif
 

@@ -599,19 +599,28 @@ lands as the minimal tier: `FUTEX_WAIT` / `FUTEX_WAKE`.
 |---|---|
 | ops | only `WAIT`(0) / `WAKE`(1). `FUTEX_PRIVATE_FLAG`(128) is **accepted and stripped** - the key is physical anyway, so private and inter-process are the same thing here; everything else (`REQUEUE`, `WAIT_BITSET`, `PI`, `WAKE_OP` ...) is `-ENOSYS`, no guessing |
 | key | **physical frame number + offset in page**, not the VA. Each process owns its own 8 KB pair window, so the same VA names different frames in parent and child; a VA key would let two unrelated processes wake each other on the same address - a bug that reports no error and only wakes one waiter too many. Outside the window (stack, kernel direct map) no frame resolves, so it is `-ENOSYS` rather than a fake VA key |
-| sleep | no infinite sleep exists here: the task registers, calls `arkrtos_task_block_in_critical(LX_WAIT_SLICE_MS = 100 ms)` and `arkrtos_port_svc_restart()`, the same restartable-syscall path as 8.1. On wake it checks `s_futex_woke` first (someone called, return 0), otherwise re-reads the word: changed means woken, unchanged means another slice. **No `-ETIMEDOUT` is invented** (Linux without a timeout never times out either). A port without restart support returns `-ENOSYS` and clears the slot - it never pretends it slept |
+| sleep | no infinite sleep exists here: the task registers, calls `arkrtos_task_block_in_critical(LX_WAIT_SLICE_MS = 100 ms)` and `arkrtos_port_svc_restart()`, the same restartable-syscall path as 8.1. On wake it checks `s_futex_woke` first (someone called, return 0), otherwise re-reads the word: changed means woken, unchanged means another slice. **No `-ETIMEDOUT` is invented** (Linux without a timeout never times out either). A port without restart support returns `-ENOSYS` and clears the slot - it never pretends it slept. On a replay `a0` has already been clobbered to 0 by the return value (trap 2), so which word to read and what value to expect come from the registered copy, never from the replayed arguments |
 | `-EAGAIN` / `-EINTR` | word != `val` at entry gives `-EAGAIN` at once; an unblocked pending signal gives `-EINTR` at once, and the replay checks again so a signal can break a sleeper out |
-| wait slot | one per task (`s_futex_key / s_futex_used / s_futex_woke[ARKRTOS_TASK_MAX_NUM]`). A sleeping task cannot start a second WAIT, so one slot is enough; `on_task_exit` clears it, otherwise a reused task id would inherit an "already waiting" record |
+| wait slot | one per task (`s_futex_key / s_futex_used / s_futex_woke / s_futex_uaddr / s_futex_val[ARKRTOS_TASK_MAX_NUM]`). The last two remember the `uaddr` and `val` of the last real sleep, because on a replay `a0` has been clobbered to 0 and without them the only thing left to read is address 0. A sleeping task cannot start a second WAIT, so one slot is enough; `on_task_exit` clears all five, otherwise a reused task id would inherit an "already waiting" record |
 | `WAKE` | scans every task; for each registered one on the same key it sets `s_futex_woke = 1` and calls `arkrtos_task_wakeup_internal()`, up to `val` of them, returning how many were woken; no waiter returns 0 (as in Linux) |
 
-Readouts (`tools/fork_gate.py`, fork+COW+SHM+futex tier, 49 checks, 9 of them
-futex): the shared page is mapped (`> 0`), `WAKE` with no waiter returns 0,
+Readouts (`tools/fork_gate.py`, fork+COW+SHM+futex tier, 56 checks, 16 of them
+futex - 9 basic pairing plus 7 multi-slice): the shared page is mapped (`> 0`), `WAKE` with no waiter returns 0,
 `WAIT` on a different value returns `-11`, an unknown op returns `-38`, the waker
 is a real cloned process, the parent's `WAIT` returns 0 after being woken, the
 parent sees the `2` the waker wrote, the waker is reaped, and
 `futex waker saw 1 and woke 1 (bits=3)` carries both evidence bits: bit 0 = the
 child read the same `1` the parent was about to wait on (so parent and child
 really share the word), bit 1 = `WAKE` really woke one waiter.
+
+The multi-slice group adds seven more: its own shared page and clone, a `WAIT`
+that crosses at least one 100 ms slice and still returns 0, the parent seeing the
+`2` the waker wrote, an elapsed wall clock >= 150 ms between entering and leaving
+`WAIT` (proof it really crossed a slice instead of matching once), the waker
+reaped, and `bits == 3` again in the multi-slice scenario. Before the fix in trap
+2 this WAIT died with `-EFAULT` on its first slice expiry, because the replay read
+address 0; the child busy-waits 250 ms, i.e. two slices, before writing the value
+and calling `WAKE`, so the board scheduler itself exercises the replay path.
 
 The ordering here **retries until it converges** instead of assuming a schedule:
 user mode can be preempted by the time slice, so the child may finish before the
@@ -642,7 +651,24 @@ takes back the key the task recorded. This is not theoretical tidiness - the
 `wait4` replay reads `pid == 0` too, but 0 is a legal `wait4` input (wait for any
 child), so it never showed; futex is the first place that has to say it out loud.
 A host case feeds exactly this shape: register a WAIT, then re-enter with
-`uaddr = 0`; it must be taken as a replay, not `-EFAULT`.
+`uaddr = 0`; it must be taken as a replay and keep sleeping on the registered
+address, not `-EFAULT`.
+
+**That step was wrong at first, and the wrong answer had been written down as the
+expected value.** The first version recognised the replay but still read the word
+with the replayed `uaddr` (= 0), so `copy_from_user` always failed with `-EFAULT`
+and the slot was dropped. A WAIT that is not woken within 100 ms - the most normal
+futex use there is - therefore died with an error code. It never showed on the
+board fixture because the basic pairing group has the child write and `WAKE`
+almost immediately, so the parent is usually woken inside one slice; and the host
+case asserted `-EFAULT` as if it were correct, freezing the bug into the test.
+The fix is `s_futex_uaddr` / `s_futex_val`: store the real address and expected
+value when registering, take them back on replay. The host case now asserts
+"keeps sleeping / value changed counts as woken / a genuinely unreadable
+registered address is `-EFAULT`" and the board's multi-slice group pins the same
+behaviour to the real scheduler. It is worth its own entry because the shape is
+"**works before and after, and returns a plausible errno either way**" - you only
+catch it by treating "waits a long time" as a normal path.
 
 (3) **One `write` is not one line.** Section 8.3 made `lx_write` hold the console
 lock, which fixes "a kernel log line lands inside a user line"; it does not cover a
@@ -660,11 +686,11 @@ and emits it with interrupts off.
 Host accounting: the union line coverage of the `linuxabi` / `linuxabioff` /
 `linuxabifutex` / `linuxabifilemap` profiles is **97.96% (1055/1077)** (the pinned
 baseline is 97.20%; section 8.5 grew the denominator, the readout did not fall),
-the `linuxabi` profile runs **270 checks**, the futex profile **312** and the
-filemap profile **337**, all printing `LINUX-ABI HOST OK`. The
+the `linuxabi` profile runs **270 checks**, the futex profile **317** and the
+filemap profile **358**, all printing `LINUX-ABI HOST OK`. The
 `ARKRTOS_USE_PAGING_SHM=1` shared branches are **not in the host ledger** (the host
 fixture was never compiled with `LINUX_FORK=1`); that half is measured only by the
-34 SHM, 9 futex and 20 filemap board readouts. The 22 remaining uncovered lines
+34 SHM, 16 futex and 20 filemap board readouts. The 22 remaining uncovered lines
 were each inspected and are all dead/defensive branches (two `-EBUSY` re-entry
 returns, the overflow/alignment `-ENOMEM` variants, `-E2BIG`, embedded weak-symbol
 fallbacks), not "untested".
@@ -883,9 +909,9 @@ and the `-ENOSYS` control with SHM off).
 `ARKRTOS_USE_LINUX_FUTEX` (section 8.4) is the fifth switch, default **0**,
 `depends on ARKRTOS_USE_LINUX_ABI` with the same `#error` guard. With it off the
 wait slots, the key resolver and `lx_futex` are not compiled and number 98 falls
-back to `-ENOSYS`; with it on the measured evidence is the 43 readouts of the
-fork+COW+SHM+futex tier (9 of them futex) plus the 312 host checks of the futex
-profile.
+back to `-ENOSYS`; with it on the measured evidence is the 56 readouts of the
+fork+COW+SHM+futex tier (16 of them futex, 7 of those multi-slice) plus the 317
+host checks of the futex profile.
 
 `ARKRTOS_USE_PAGING_FILEMAP` (section 8.5) is the sixth switch, default **0**,
 `depends on ARKRTOS_USE_LINUX_ABI` + `ARKRTOS_USE_PAGING` +
@@ -946,8 +972,9 @@ bit in the child mask, a lost parent write, all copy lines removed, and bytes
 moved at fork time; the SHM tier adds five: the `pg shm map` line removed, the
 child's shared write not seen by the parent, the child not seeing the parent's
 write, a non-zero start value, and the successful-mapping readout removed; the
-futex tier adds three: the WAIT was never woken, the waker only saw half
-(`bits=1`), and a waiterless `WAKE` returned 1; the filemap tier adds three:
+futex tier adds five: the WAIT was never woken, the waker only saw half
+(`bits=1`), a waiterless `WAKE` returned 1, a multi-slice WAIT came back as
+`-EFAULT`, and a multi-slice WAIT did not cross a slice; the filemap tier adds three:
 the write-back never happened, the write-back truncated the file, and a private
 write reached the file) and
 restore-default (the build directory is returned to the default tier so a later
@@ -959,17 +986,17 @@ parent sees the child's write, child sees the parent's post-fork write) and at
 least one `[LA64U] pg shm map va=0x<n> pairs>=1`. The SHM switch has its own
 `default-off-shm` / `kconfig-wired-shm` / `features-guard-shm` items, and
 `off-zero-port` also requires that a SHM-off build has no
-`arkrtos_port_paging_map_shared`. The futex round requires 49 checks and validates
-the nine futex readouts one by one (shared page mapped, waiterless `WAKE` returns
-0, mismatched `WAIT` returns `-11`, unknown op returns `-38`, the waker clones,
-`WAIT` returns 0 after being woken, the parent sees the waker's `2`, the waker is
-reaped, `bits == 3`), with the SHM and COW assertions still in place; the futex
+`arkrtos_port_paging_map_shared`. The futex round requires 56 checks and validates
+the sixteen futex readouts one by one (the nine basic pairing readouts plus the
+seven multi-slice ones: a WAIT spanning >= 150 ms still returns 0, the parent
+sees the waker's `2`, the multi-slice waker is reaped, `bits == 3`), with the SHM
+and COW assertions still in place; the futex
 switch has its own `default-off-futex` / `kconfig-wired-futex` /
-`features-guard-futex` items. The filemap round requires 69 checks and validates
+`features-guard-futex` items. The filemap round requires 76 checks and validates
 the 20 filemap readouts one by one; its switch has its own
 `default-off-filemap` / `kconfig-wired-filemap` / `features-guard-filemap` items
 (autoconf 0, four `depends on` entries, four `#error` guards). The mprotect
-round requires 80 checks and validates the 11 mprotect readouts one by one
+round requires 87 checks and validates the 11 mprotect readouts one by one
 (mapping success, read-only and read-write both accepted, a read-only page still
 readable, the sibling 4 KB of the same pair still writable, a write going through
 after revocation, the violating child reaped rather than restarted, the status
@@ -1042,6 +1069,25 @@ switch has its own `default-off-mprotect` / `kconfig-wired-mprotect` /
    reaches it - a fake entrance is worse than no coverage. The right fix is to
    delete the redundant check and pin the invariant (both endpoints page aligned)
    in a comment; the union went back to 98.18% and `COVERAGE-GATE OK` returned.
+8. **The futex replay read the word at the clobbered `uaddr` (0), so a normal long
+   wait died with `-EFAULT`.** On the LA64 ABI the syscall result is written to
+   `a0`, which is also where `futex(WAIT)` reads `uaddr`; when the blocking path
+   returns 0 the replayed call reads `uaddr == 0`. The first version recognised
+   the replay but still read the word at that 0, so `copy_from_user` always
+   failed with `-EFAULT` and the slot was dropped - a WAIT not woken within
+   100 ms, the most normal futex use there is, terminated with an error code.
+   Worse, the host case asserted `-EFAULT` as the expected value, so the test was
+   vouching for the bug. The fix adds `s_futex_uaddr` / `s_futex_val` per slot:
+   store the real address and expected value when registering, take them back on
+   replay. The host case now asserts "keeps sleeping / value changed counts as
+   woken / a genuinely unreadable registered address is `-EFAULT`", and the board
+   adds a multi-slice group (the child busy-waits 250 ms across two slices before
+   writing and calling `WAKE`, with an elapsed-time check and `bits == 3`).
+   Lessons: **when the return register is the first argument register, replay
+   must be identified by external bookkeeping, not by the arguments**; and
+   **never write a "plausible errno the old code returned" down as the expected
+   value** - the shape works before and after and returns a plausible `errno`
+   either way.
 
 ## 12 Boundaries
 

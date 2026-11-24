@@ -2603,14 +2603,34 @@ static void t_futex(t_ctx *c)
     ck_ret(c, -T_ENOSYS, "futex 越过窗口末端回 -ENOSYS");
 
     /* 重放识别：a0 被返回值清成 0 之后，靠「本槽还登记着」认出这是同一次
-     * WAIT。认出来之后走到「值没变、但用户地址是 0」那一步 —— 读不出来
-     * 就 -EFAULT 并销账，绝不拿键继续睡。 */
+     * WAIT，并用登记下来的地址与期望值继续判，而不是拿 0 去读字。
+     * 这正是「一次超过一个时间片仍没被唤醒的 WAIT」会走的路：以前这里
+     * 必然 -EFAULT，现在它应当和普通时间片重放一样继续睡。 */
     g_restart_rc = 0;
     u_put32(0x10u, 5u);
     (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
     ck_ret(c, 0, "futex 先登记一次等待（重放识别的前置）");
+    {
+        int32 blocks0 = g_block_calls;
+        (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+        ck_ret(c, 0, "futex 重放时 a0 被清成 0，用登记下的地址继续睡（不再 -EFAULT）");
+        ck(g_block_calls == blocks0 + 1, "futex 重放后真的又睡了一个时间片");
+    }
+    /* 值在等待期间变了：重放读到登记地址上的新值，按被叫醒处理并销账。 */
+    u_put32(0x10u, 6u);
     (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
-    ck_ret(c, -T_EFAULT, "futex 重放时 a0 已被清成 0，按槽认出来并回 -EFAULT");
+    ck_ret(c, 0, "futex 重放时读到登记地址上的新值，当被叫醒处理");
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 0, "值变了那条重放也销了账");
+
+    /* 登记下的地址真的读不出来：这才是 -EFAULT（不是「地址是 0」就判死）。 */
+    u_put32(0x10u, 5u);
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, 0, "futex 再登记一次等待");
+    g_from_budget = 0;
+    (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    g_from_budget = -1;
+    ck_ret(c, -T_EFAULT, "futex 重放时登记地址读不出来才回 -EFAULT");
     (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
     ck_ret(c, 0, "这条 -EFAULT 也销了账");
 

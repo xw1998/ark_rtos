@@ -34,8 +34,8 @@
      -DARKRTOS_USE_PAGING_DEMAND=1`，五个内核 TU 与夹具本身全编得过；
      再加一档 `-DARKRTOS_USE_PAGING_COW=1` 同样要全编得过。
   D. QEMU 真读数（六档各跑一遍）：默认 fork 档 `[fork]` 的 27 条 check、
-     fork+COW 档 32 条、fork+COW+SHM 档 40 条、fork+COW+SHM+futex 档 49 条、
-     fork+…+filemap 档 69 条、fork+…+mprotect 档 80 条
+     fork+COW 档 32 条、fork+COW+SHM 档 40 条、fork+COW+SHM+futex 档 56 条、
+     fork+…+filemap 档 76 条、fork+…+mprotect 档 87 条
      check 全 ` ok`（一条 FAIL 都不许）、
      `PASS: child ran in its own space, exit 42 reaped`、`exit code 0`；
      `[fork] parent pid=` 与 `[fork] child pid=` 两个数必须不同；并且同一次
@@ -57,6 +57,13 @@
      reap。这九条里最要紧的是「父 WAIT 回 0」：它在 LA64 上暴露过一个只有上板
      才看得见的坑 —— 阻塞返回时 a0（返回值寄存器）被写成 0，而 a0 同时是
      futex 的第一个参数，重放的那一次读到的 uaddr 就是 0。
+     再另加六条「多时间片等待」读数（子进程先忙等 250 ms 跨过两个 100 ms
+     时间片再写值 + WAKE）：共享页映射、clone>0、跨时间片 WAIT 回 0、父看到
+     新值、WAIT 墙钟 >= 150 ms（证明真跨了时间片而不是一次命中）、子进程被
+     reap、唤醒者位掩码 3。这组把「重放时 a0 被清成 0」这条真缺陷钉死在调度
+     器上：修复前父进程第一个时间片醒来就拿 0 去读字 ⇒ -EFAULT。futex 档合计
+     9 + 7 = 16 条，再叠进 filemap / mprotect 两档后是 69 + 7 = 76 与
+     80 + 7 = 87 条。
      FILEMAP 档另加：八条文件映射读数逐条出现 —— 首字节是文件首字节、坏 fd
      回 -EBADF、只读 fd 上的可写共享回 -EACCES、offset=4096 读出的是文件
      第二页、EOF 之后是零、可写共享的 msync 回 0、私有映射的 msync 也回 0 但
@@ -177,20 +184,23 @@ EXPECT_COW_CHECKS = 32
 EXPECT_SHM_CHECKS = 40
 # FUTEX 段多 9 条：共享页映射、无等待者 WAKE==0、值不等 WAIT==-EAGAIN、
 # 未知 op==-ENOSYS、clone>0、被叫醒的 WAIT==0、父看到新值、子被 reap、
-# 唤醒者位掩码 3（看到 1 且 WAKE 回 1）。合计 49 条。
-EXPECT_FUTEX_CHECKS = 49
+# 唤醒者位掩码 3（看到 1 且 WAKE 回 1）。
+# 多时间片段再 7 条：共享页映射、clone>0、跨时间片 WAIT==0、父看到新值、
+# WAIT 墙钟 >= 150 ms、子被 reap、唤醒者位掩码 3。合计 49 + 7 = 56 条。
+EXPECT_FUTEX_CHECKS = 56
 # FILEMAP 段多 20 条：只读私有映射的内容三处读数（首字节 / 第 25 / 第 4095）、
 # 三条参数校验（未对齐 offset -EINVAL、坏 fd -EBADF、只读 fd 上的可写共享
 # -EACCES）、offset=4096 的映射与 EOF 补零、O_RDWR 打开、可写共享映射与
 # msync/munmap 两次写回、私有可写映射与它不落盘、以及最后把「共享写落盘 +
-# 私有写不落盘」合成一个位掩码读数（20 % 26 那对字节）。合计 69 条。
-EXPECT_FILEMAP_CHECKS = 69
+# 私有写不落盘」合成一个位掩码读数（20 % 26 那对字节）。合计 69 条；
+# 再叠 futex 档的 15 条（含多时间片 7 条）= 76 条。
+EXPECT_FILEMAP_CHECKS = 76
 # MPROTECT 段多 10 条：8 KB 映射、mprotect(RO)==0、只读页仍可读、**同一对里的
 # 另一半 4 KB 仍可写**（4 KB 粒度与 8 KB 粒度在此分家）、mprotect(RW)==0、
 # 恢复保护后写回得去、再设 RO、为违规写 fork 出子进程、子进程被摘掉（不是重启）、
-# 父进程那一页一个字节没变、状态字是「被信号终止」而不是 exit 码（第 74 条）。
-# 合计 80 条。
-EXPECT_MPROTECT_CHECKS = 80
+# 父进程那一页一个字节没变、状态字是「被信号终止」而不是 exit 码。
+# 合计 80 条；再叠 futex 档的 15 条（含多时间片 7 条）= 87 条。
+EXPECT_MPROTECT_CHECKS = 87
 
 FAILS = []
 PASSES = []
@@ -753,6 +763,21 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
         req["futex child reaped -> 12 ok"] = "futex 子进程没被 reap"
         req["futex waker saw 1 and woke 1 (bits=3) -> 3 ok"] = \
             "唤醒者看到的值不是父进程等的那个 1，或 WAKE 没真叫醒 1 个等待者"
+        # 多时间片：真调度器才是「时间片到期」的来源，这一组只有上板才证明得了。
+        req["futex multislice mmap shared page > 0 -> 1 ok"] = \
+            "多时间片 futex 的共享页没建起来"
+        req["clone for futex multislice child > 0 -> 1 ok"] = \
+            "多时间片 futex 的唤醒者没 fork 出来"
+        req["futex multislice WAIT returned 0 after being woken -> 0 ok"] = \
+            "跨时间片的 WAIT 没回 0（重放时把 uaddr 读成返回值 0 的老毛病）"
+        req["futex multislice parent saw the value the waker wrote -> 2 ok"] = \
+            "跨时间片醒来后没看到唤醒者写的 2"
+        req["futex multislice WAIT spanned >= 150 ms (crossed a slice) -> 1 ok"] = \
+            "这次 WAIT 没真的跨过时间片（不到 150 ms 就返回，等于没测到重放）"
+        req["futex multislice child reaped -> 12 ok"] = \
+            "多时间片的 futex 子进程没被 reap"
+        req["futex multislice waker saw 1 and woke 1 (bits=3) -> 3 ok"] = \
+            "多时间片唤醒者没同时看到「父等的还是 1」与「WAKE 回 1」"
     if filemap:
         req["filemap first byte is file first byte -> 65 ok"] = \
             "文件内容没装进映射区（首字节不是 'A'）"
@@ -941,6 +966,12 @@ def self_check(good_text, cow=False, shm=False, futex=False, filemap=False,
             "futex 无等待者 WAKE 回 1": lambda s: s.replace(
                 "[fork] futex(WAKE) with no waiter == 0 -> 0 ok",
                 "[fork] futex(WAKE) with no waiter == 0 -> 1 FAIL (want 0)"),
+            "futex 多时间片 WAIT 被打成 -EFAULT": lambda s: s.replace(
+                "[fork] futex multislice WAIT returned 0 after being woken -> 0 ok",
+                "[fork] futex multislice WAIT returned 0 after being woken -> -14 FAIL (want 0)"),
+            "futex 多时间片没跨过时间片": lambda s: s.replace(
+                "[fork] futex multislice WAIT spanned >= 150 ms (crossed a slice) -> 1 ok",
+                "[fork] futex multislice WAIT spanned >= 150 ms (crossed a slice) -> 0 FAIL (want 1)"),
         })
     if mprotect:
         mutations.update({
@@ -1054,7 +1085,7 @@ def main(argv):
     if qemu:
         # 六档各跑一遍：默认 fork（27 条）、fork+COW（32 条 + 内核 COW 日志）、
         # fork+COW+SHM（40 条 + 内核共享映射日志）、fork+COW+SHM+futex
-        # （49 条 + 跨进程 WAIT/WAKE 配对）、再叠 filemap（69 条）与
+        # （55 条 + 跨进程 WAIT/WAKE 配对 + 多时间片重放）、再叠 filemap（69 条）与
         # mprotect（80 条）。别把 SHM 并进 COW 档、也别把
         # futex 并进 SHM 档 —— 那样「关档时 mmap(MAP_SHARED) / futex 仍回
         # -ENOSYS」这两条反假绿就永远测不到了。
