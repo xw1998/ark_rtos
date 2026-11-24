@@ -695,6 +695,43 @@ config ARKRTOS_USE_LINUX_FUTEX
 	  the futex number falls through to the default -ENOSYS and the image
 	  does not change by a byte.
 
+config ARKRTOS_USE_LINUX_SELECT
+	bool "pselect6 over the Linux ABI fd table (U-22)"
+	depends on ARKRTOS_USE_LINUX_ABI
+	help
+	  Make pselect6(72) real for the descriptors the Linux ABI layer already
+	  has: regular files and pipes.  pselect6 is where glibc's select() and
+	  poll() wrappers land, and it is the missing piece between "pipes work"
+	  and "one task can multiplex several pipes".  readfds/writefds are
+	  polled once; when nothing is ready the call blocks by replaying across
+	  scheduler slices (the same shape as futex and wait4), and a relative
+	  timeout expires as 0.
+
+	  Readiness, stated exactly (not bugs):
+	    1) A pipe read descriptor is ready when it has bytes, or when every
+	       writer is closed (read returns 0 = EOF, exactly like Linux).
+	    2) A pipe write descriptor is ready when it has buffer space, or when
+	       every reader is closed (write returns -EPIPE at once).
+	    3) A regular file descriptor is always ready (this layer has no page
+	       cache; read/write run to completion synchronously).
+	    4) stdin (fd 0) is readable (read returns EOF); stdout and stderr
+	       (1, 2) are writable.  A descriptor number with no backing object
+	       answers -EBADF if it is selected, the way Linux does.
+	    5) exceptfds is accepted but never reports anything: this layer has
+	       no out-of-band data and no asynchronous error queue.
+	    6) The per-call signal mask (sixth argument) is not supported and
+	       answers -ENOSYS rather than being silently ignored.  Wrap the call
+	       in sigprocmask instead.
+
+	  The deadline is stored, not the duration, so a replay does not restart
+	  the clock.  nfds is capped at FD_SETSIZE (1024).
+
+	  Requires ARKRTOS_USE_LINUX_ABI.
+
+	  Off (default) compiles no scan helper, no deadline slot and no log
+	  line: syscall 72 falls through to the default -ENOSYS and the image
+	  does not change by a byte.
+
 config ARKRTOS_USE_PAGING_FILEMAP
 	bool "File-backed mmap and write-back (U-21)"
 	depends on ARKRTOS_USE_LINUX_ABI

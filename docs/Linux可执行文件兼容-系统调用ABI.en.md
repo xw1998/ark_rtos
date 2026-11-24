@@ -729,11 +729,11 @@ same thing; `rt_kprintf` in RT-Thread looks immune because it formats the whole 
 and emits it with interrupts off.
 
 Host accounting: the union line coverage of the `linuxabi` / `linuxabioff` /
-`linuxabifutex` / `linuxabifilemap` profiles is **98.00%** (the pinned baseline in
-`tools/coverage_baseline.json` is 97.96%; this round only moved up and neither
-lowered the baseline nor ran `--update`), the `linuxabi` profile runs **270
-checks**, the futex profile **366** and the filemap profile **358**, all printing
-`LINUX-ABI HOST OK`. The
+`linuxabifutex` / `linuxabifilemap` / `linuxabiselect` profiles is **98.22%** (the
+pinned baseline in `tools/coverage_baseline.json` is 97.96%; this round only moved
+up and neither lowered the baseline nor ran `--update`), the `linuxabi` profile runs
+**270 checks**, the futex profile **366**, the filemap profile **358** and the
+select profile **327**, all printing `LINUX-ABI HOST OK`. The
 `ARKRTOS_USE_PAGING_SHM=1` shared branches are **not in the host ledger** (the host
 fixture was never compiled with `LINUX_FORK=1`); that half is measured only by the
 34 SHM, 36 futex and 20 filemap board readouts. The 24 remaining uncovered lines
@@ -926,6 +926,62 @@ fix moves the function (with its comment) outside the COW block, right after
 `la_tlb_inval_page`, `LA_STLB_INDEX`, `LA_PG_WIN_WAY_OF`, `la_asid_swap`) is
 unconditionally defined.
 
+### 8.8 `pselect6`: readiness wait across fds (`ARKRTOS_USE_LINUX_SELECT`, 2026-11-24, QEMU LA64)
+
+Up to §8.7 the compatibility layer could "wait" in two ways: `wait4` for a child to
+exit (§8.1) and `futex` for a word to change (§8.4). The missing third one is what
+shells, initscripts and any select loop depend on - **"tell me when one of these fds
+can be read / written"**. On asm-generic that is syscall 72 `pselect6` (`select`
+itself is not a separate syscall on la64 any more; libc translates `select` into it).
+
+| Item | Status |
+|---|---|
+| Syscall and args | 72 `pselect6`: 0=`nfds`, 1=`readfds`, 2=`writefds`, 3=`exceptfds`, 4=`timespec*`, 5=temporary signal mask pointer |
+| Timeout | As in Linux: `NULL` waits forever (replayed in time slices here), `0` is a poll returning 0 immediately, otherwise a **relative** duration that is **not written back** (that is the `pselect` / `select` difference) |
+| Return value | Number of ready descriptors; ready bits are written back to the user sets and everything else is cleared. All three sets `NULL` with `nfds>0` means "no objects", i.e. a pure timeout wait |
+| Read readiness | fd 0 always readable (returns EOF); regular files always ready; pipe read end when `count > 0 \|\| writers == 0` (**writer gone means EOF and must be reported readable**); pipe write end and unopened fds are not readable |
+| Write readiness | fds 1 / 2 always writable (console); regular files always ready; pipe write end when `readers == 0 \|\| count < 256` (**full means no space** - the criterion is capacity, not "write would be callable"); pipe read end and unopened fds are not writable |
+| `exceptfds` | Accepted but **never reported**: there is no out-of-band data path and no async error queue here. They are cleared on write-back too, not left untouched |
+| fd validity | A selected fd must be backed by an object (fd <= 2, or present in this process's fd table); otherwise `-EBADF`. Silently ignoring it is the worst kind of false green: the caller then waits until its timeout |
+| Argument checks | `nfds > 1024` (`FD_SETSIZE`) returns `-EINVAL`; a non-NULL sixth argument (the temporary signal mask) returns `-ENOSYS` instead of being silently ignored |
+| `fd_set` access | Read and written **one 32-bit word at a time** with `copy_from_user` / `copy_to_user`; the full 1024-bit (128 byte) set is never placed on the kernel stack, and `nfds` decides how many words are touched |
+| Blocking shape | Same as futex: `arkrtos_port_svc_restart` plus `arkrtos_task_block_in_critical(100 ms)`, with the **deadline** stored per task (not the remaining duration - otherwise every replay restarts the timer); without a restartable port it returns `-EAGAIN` honestly |
+| Task id reuse | Task exit and `reset` both clear `s_sel_armed/s_sel_deadline`: task ids are reused, and a stale record means a new task inherits "already waiting" |
+
+Readouts (seventh `tools/fork_gate.py` tier, fixture 107 -> **122 checks**, 15 of them select):
+
+| Readout | What it pins |
+|---|---|
+| `pselect6 pipe2 == 0 -> 0` | The pipe is created first (every other readout depends on it) |
+| `pselect6 empty pipe read end not ready -> 0` | An empty pipe read end is **not** ready (`timeout=0` returns 0 at once) |
+| `pselect6 clears the user set when nothing is ready -> 0` | With nothing ready the user `fd_set` is cleared, not returned unchanged |
+| `pselect6 timed wait returns 0 at the deadline -> 0` | A 50 ms relative timeout returns 0 when it expires |
+| `pselect6 timed wait really waited >= 40 ms -> 1` | The wait **really** elapsed wall-clock time (an implementation that restarts the timer on every replay turns red here) |
+| `pselect6 pipe wrote 3 bytes -> 3` | The fixture write is complete |
+| `pselect6 read end ready after 3 bytes -> 1` | The read end is ready once data is buffered |
+| `pselect6 keeps the ready bit in the user set -> 1` | The ready bit is written back (treating the user mask as input only turns red here) |
+| `pselect6 write end ready while the pipe has space -> 1` | A write end with space is ready |
+| `pselect6 stdout is always writable -> 1` | fd 1 is always writable |
+| `pselect6 write end not ready when the pipe is full -> 0` | After the pipe is full (256 bytes) the write end is **not** ready - capacity, not "write would be callable" |
+| `pselect6 read end ready on EOF after the writer closed -> 1` | With every writer closed the read end becomes ready by EOF (Linux must report readable, or a `read` loop never ends) |
+| `pselect6 never reports exceptfds -> 0` | Only `exceptfds` given, fd readable: returns 0 |
+| `pselect6 clears exceptfds -> 0` | That set is cleared as well |
+| `pselect6 bad fd == -EBADF -> -9` | A selected fd with no backing object is rejected honestly |
+
+**A trap only a board run shows: the fixture bit layout.** The first version wrote
+"stdout is always writable" as `ws[1] = 2u`, meaning "the bit of fd 1" - but `fd_set`
+is an array of 32-bit words, so bit 1 of `ws[1]` is **fd 33**, and an `nfds=2` call
+contains no fd 1 at all; the readout honestly returned 0. The code was right and the
+test was wrong, and only a real run exposed it (the host case writes the same word
+through `u_put32` and never hit it). The fix is to clear the whole set and then set
+`ws[0] = 2u` for fd 1.
+
+**Why a separate switch.** The readiness criteria depend on the concrete shape of the
+fd table and pipe objects (capacity 256, `writers` / `readers` counts); with sockets
+they would have to be rewritten. Putting select and a future socket layer behind one
+switch would turn "zero footprint when off" into "half the feature when off".
+`ARKRTOS_USE_LINUX_SELECT` depends only on `ARKRTOS_USE_LINUX_ABI`.
+
 ## 9 Switch and zero footprint
 
 `ARKRTOS_USE_LINUX_ABI` (features header + Kconfig), default **0**, and
@@ -976,6 +1032,13 @@ four `#error` guards in features.h; with it off the `s_pg_page_ro` ledger,
 count separately"; with it on the evidence is the **74 readouts of the sixth
 tier** (11 of them mprotect) plus the host-side compile gate.
 
+`ARKRTOS_USE_LINUX_SELECT` (section 8.8), default **0**, `depends on
+ARKRTOS_USE_LINUX_ABI` with the same `#error` guard; with it off the readiness
+criteria, the `fd_set` scan and `s_sel_armed/s_sel_deadline` are not compiled and
+number 72 falls back to `-ENOSYS`; with it on the evidence is the **122 readouts
+of the seventh tier** (15 of them select) plus the 327 host checks of the select
+profile.
+
 `MAP_FIXED` (section 8.7) is **not a switch of its own**: it exists when
 `ARKRTOS_USE_PAGING_DEMAND=1` (per-pair entry installation is what makes
 "discard this range" meaningful). With `DEMAND=0`, `mmap(MAP_FIXED)` honestly
@@ -998,10 +1061,11 @@ still intact), and parser-selfcheck (eight deliberately broken logs must each be
 rejected).
 
 The fork tier has its own gate, `tools/fork_gate.py` (invoked as `fork` from
-`ci_gate`, **43 items**; it runs the fork, fork+COW, fork+COW+SHM,
-fork+COW+SHM+futex, fork+COW+SHM+futex+filemap and
-fork+COW+SHM+futex+filemap+mprotect tiers one after the other, so
-build / qemu-readout / parser-selfcheck each appear six times):
+`ci_gate`, **50 items**; it runs the fork, fork+COW, fork+COW+SHM,
+fork+COW+SHM+futex, fork+COW+SHM+futex+filemap,
+fork+COW+SHM+futex+filemap+mprotect and
+fork+COW+SHM+futex+filemap+mprotect+select tiers one after the other, so
+build / qemu-readout / parser-selfcheck / compile-on each appear seven times):
 default-off (fork and SHM), kconfig-wired (all four `depends on`, plus the SHM
 item depending on COW), the four
 `#error` guards in features.h, off-zero-symbols (RV32 `linux_abi.o` has no
@@ -1059,7 +1123,18 @@ blocked, the violating store reaching the parent page, the status word used as a
 exit code, the violation log line removed, the success readout removed); its
 switch has its own `default-off-mprotect` / `kconfig-wired-mprotect` /
 `features-guard-mprotect` items (autoconf 0, four `depends on` entries, four
-`#error` guards).
+`#error` guards). The select round requires 122 checks and validates the 15 select
+readouts one by one (an empty pipe read end not ready, the user set cleared when
+nothing is ready, a 50 ms timed wait returning 0 with a wall clock >= 40 ms, the
+read end ready after data with the ready bit kept, a write end with space and
+stdout writable, the write end not ready once the pipe is full, EOF readiness once
+every writer closed, `exceptfds` never reported and cleared, a bad fd returning
+`-9`), with every mprotect / filemap / SHM / COW / futex assertion still in place;
+its parser-selfcheck adds eight more bad logs (an empty pipe reported ready, EOF
+not reported, a full pipe still reported writable, the `fd_set` not cleared, the
+timeout restarted on every replay, `exceptfds` reported, a bad fd let through, and
+the select readout removed); its switch has its own `default-off-select` /
+`kconfig-wired-select` / `features-guard-select` items.
 
 ## 11 Real bugs and readout traps found on the way
 

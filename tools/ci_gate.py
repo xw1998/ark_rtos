@@ -2911,6 +2911,16 @@ def check_linux_abi_host():
     The OFF tier (-DARKRTOS_USE_LINUX_ABI=0) must answer "there is no such
     thing" for every reading, never an empty success.
 
+    The SELECT tier (-DARKRTOS_USE_LINUX_SELECT=1) drives pselect6 against
+    the same window: a ready fd counts once, the caller's fd_set is rewritten
+    to only the ready bits, a descriptor with no object behind it answers
+    -EBADF, exceptfds is accepted but never reported, timeout=0 polls and
+    does not sleep, a zero timeout and an expired deadline both answer 0 with
+    the sets cleared, the deadline is stored (a replay does not restart the
+    clock) while readiness wins over a deadline that has not passed, a task
+    exit clears a pending deadline so a reused task id does not inherit it,
+    and a port without restart answers -EAGAIN instead of pretending to wait.
+
     Link-time note: the "port cannot swap frames" default is a weak symbol,
     and MinGW at -O0 resolves a weak definition inside the same link to the
     local entry (-ffunction-sections does not help; the call lands outside
@@ -2930,12 +2940,14 @@ def check_linux_abi_host():
     picks = {}
     for case in CASES:
         name, test, mods, defs, markers, incs, _argv = _case(case)
-        if name in ("linuxabi", "linuxabioff", "linuxabifutex"):
+        if name in ("linuxabi", "linuxabioff", "linuxabifutex",
+                    "linuxabiselect"):
             extra = case[5] if len(case) > 5 else {}
             picks[name] = (test, mods, defs, incs, markers,
                            list(extra.get("link", [])),
                            list(extra.get("ldflags", [])))
-    for name in ("linuxabi", "linuxabioff", "linuxabifutex"):
+    for name in ("linuxabi", "linuxabioff", "linuxabifutex",
+                 "linuxabiselect"):
         if name not in picks:
             fail("linux-abi-host",
                  "case %s missing from coverage_gate.CASES" % name)
@@ -2943,7 +2955,8 @@ def check_linux_abi_host():
 
     with TempDir() as td:
         lines = []
-        for name in ("linuxabi", "linuxabioff", "linuxabifutex"):
+        for name in ("linuxabi", "linuxabioff", "linuxabifutex",
+                     "linuxabiselect"):
             test, mods, defs, incs, markers, link, ldflags = picks[name]
             exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
             cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
@@ -2972,7 +2985,8 @@ def check_linux_abi_host():
     ok("linux-abi-host",
        "arkrtos_linux_abi syscall round trip on the host against a simulated "
        "user window (entry split, return classes, fd / pipe / signal / execve "
-       "paths, reset), honest refusals when off: %s" % lines[0])
+       "paths, futex six ops, pselect6 readiness, reset), honest refusals "
+       "when off: %s" % lines[0])
 
 def check_mini_host():
     """The MiniApp loader, driven on the host: one image from header read to a

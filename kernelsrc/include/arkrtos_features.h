@@ -352,18 +352,21 @@
 #endif
 #endif
 
-/* futex（只落 WAIT / WAKE）：0 = 关（futex 号走 default 分支回 -ENOSYS，与打开
- * 本开关之前逐字节相同），1 = 让 futex(uaddr, FUTEX_WAIT/WAKE, ...) 真正排队与
- * 唤醒。键取自「物理帧 + 页内偏移」而不是虚拟地址：每个进程有自己的对窗口，
- * 同一个 VA 在父子身上指向不同帧，而 futex 要的是同一个字；两张共享同一帧的
- * 进程因此落在同一个键上。
+/* futex（六档 op：WAIT / WAKE / REQUEUE / CMP_REQUEUE / WAIT_BITSET /
+ * WAKE_BITSET，外加相对/绝对超时）：0 = 关（futex 号走 default 分支回 -ENOSYS，
+ * 与打开本开关之前逐字节相同），1 = 让 futex 真正排队与唤醒。键取自「物理帧 +
+ * 页内偏移」而不是虚拟地址：每个进程有自己的对窗口，同一个 VA 在父子身上指向
+ * 不同帧，而 futex 要的是同一个字；两张共享同一帧的进程因此落在同一个键上。
  *
- * 三条写死的边界（都是「不支持」，不是欠验）：
- *   - 只有 WAIT / WAKE，其余 op（REQUEUE / PI / WAIT_BITSET …）一律 -ENOSYS；
+ * 四条写死的边界（都是「不支持」，不是欠验）：
+ *   - PI / FD 类 op 一律 -ENOSYS，也没有 robust list 清理；
+ *   - 存的是截止时刻不是时长，时间片重放不会把时钟重新起算；本机没有墙钟，
+ *     FUTEX_CLOCK_REALTIME 带超时时回 -ENOSYS，不拿开机时长冒充绝对时刻；
+ *     不给 timeout 时按 LX_WAIT_SLICE_MS 时间片重放，值没变就继续睡；
  *   - 开了分页窗口时只有落在窗口里的字有键，栈上的字回 -ENOSYS（窗口外没有
  *     可查的帧）；没有分页窗口时（MPU 后端）虚拟地址本身就是键；
- *   - 没有无限睡眠：按 LX_WAIT_SLICE_MS 时间片重放，值没变就继续睡，不编
- *     -ETIMEDOUT。
+ *   - 被 requeue 的等待者把期望值更新为 uaddr2 当前字：requeue 不唤醒它，但
+ *     下次时间片醒来不能把「两个地址字不同」误判成「已唤醒」。
  *
  * 要求 ARKRTOS_USE_LINUX_ABI == 1。
  * 由 Kconfig 选择（config ARKRTOS_USE_LINUX_FUTEX）。默认关：关档时不编译等待
@@ -374,6 +377,33 @@
 #if (ARKRTOS_USE_LINUX_FUTEX == 1)
 #if (ARKRTOS_USE_LINUX_ABI != 1)
 #error "ARKRTOS_USE_LINUX_FUTEX=1 requires ARKRTOS_USE_LINUX_ABI=1"
+#endif
+#endif
+
+/* pselect6（U-22）：0 = 关（72 号走 default 分支回 -ENOSYS，与打开本开关之前
+ * 逐字节相同），1 = 让 pselect6(72) 对已有的文件与管道描述符真正做就绪等待。
+ * 这是 glibc select()/poll() 包装的落点，也是「管道能用」到「一个任务能多路
+ * 复用几条管道」之间缺的那一块。
+ *
+ * 四条写死的边界（都是「不支持」，不是欠验）：
+ *   - 就绪判据按本层已有的对象定义：管道读端有数据或写端全关（读回 0=EOF）、
+ *     管道写端有空间或读端全关（写回 -EPIPE）、普通文件永远就绪、stdin 可读、
+ *     stdout/stderr 可写；没有任何对象支撑的描述符号被选中时回 -EBADF；
+ *   - exceptfds 接受但永不上报：本层没有带外数据与异步错误队列；
+ *   - 第六个参数（每次调用临时信号掩码）不支持，如实回 -ENOSYS 而不是悄悄
+ *     忽略；要屏蔽信号请在调用前后用 sigprocmask；
+ *   - 存的是截止时刻不是时长，时间片重放不会把时钟重新起算；没有可重放端口
+ *     时回 -EAGAIN，不假装睡过；nfds 上限 FD_SETSIZE（1024）。
+ *
+ * 要求 ARKRTOS_USE_LINUX_ABI == 1。
+ * 由 Kconfig 选择（config ARKRTOS_USE_LINUX_SELECT）。默认关：关档时不编译扫描
+ * 辅助、截止时刻槽与任何一行日志，镜像零变化。 */
+#ifndef ARKRTOS_USE_LINUX_SELECT
+#define ARKRTOS_USE_LINUX_SELECT        0
+#endif
+#if (ARKRTOS_USE_LINUX_SELECT == 1)
+#if (ARKRTOS_USE_LINUX_ABI != 1)
+#error "ARKRTOS_USE_LINUX_SELECT=1 requires ARKRTOS_USE_LINUX_ABI=1"
 #endif
 #endif
 

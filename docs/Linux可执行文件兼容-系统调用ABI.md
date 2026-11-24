@@ -643,9 +643,10 @@ s_futex_val`：登记时存 `uaddr`、`val`，重放时取回它们再读字。�
 `out_line5`）。Linux 上的 `printf` 行缓冲做的是同一件事；RT-Thread 的 `rt_kprintf` 之所以
 看起来没这个问题，是因为它整行在关中断下拼好再一次输出。判据侧不再为「谁先调度到」留余地。
 
-宿主侧口径：`linuxabi` / `linuxabioff` / `linuxabifutex` / `linuxabifilemap` 四档并集行覆盖率
-**98.00%**（基线 `tools/coverage_baseline.json` 钉的是 97.96%，本轮只往上走、没有调低也没有
-`--update`），`linuxabi` 档 **270 checks**、futex 档 **366 checks**、filemap 档 **358 checks**，都打印
+宿主侧口径：`linuxabi` / `linuxabioff` / `linuxabifutex` / `linuxabifilemap` / `linuxabiselect`
+五档并集行覆盖率 **98.22%**（基线 `tools/coverage_baseline.json` 钉的是 97.96%，本轮只往上走、没有调低也没有
+`--update`），`linuxabi` 档 **270 checks**、futex 档 **366 checks**、filemap 档 **358 checks**、
+select 档 **327 checks**，都打印
 `LINUX-ABI HOST OK`；`ARKRTOS_USE_PAGING_SHM=1` 的共享分支**不在宿主账内**
 （宿主用例从未在 `LINUX_FORK=1` 下编过），那一半的口径只有上板 40 条 SHM 读数、36 条 futex
 读数与 20 条 filemap 读数。剩余 24 行未覆盖经逐行核对全是死/防御分支（两处 `-EBUSY`
@@ -810,6 +811,58 @@ EXTRA_CFLAGS**，所以夹具看不到内核的编译开关。这一段只在 `A
 `LA_STLB_INDEX` / `LA_PG_WIN_WAY_OF` / `la_asid_swap` 全是无条件定义，搬出来不引入
 任何新的条件依赖。
 
+### 8.8 `pselect6`：跨 fd 的就绪等待（`ARKRTOS_USE_LINUX_SELECT`，2026-11-24，QEMU LA64 实跑）
+
+到 §8.7 为止，兼容层的「等」有两条：`wait4` 等子进程退出（§8.1）、`futex` 等一个字被改
+（§8.4）。缺的第三条是 shell、`initscripts`、任何 select 循环都靠的那一条 ——
+**「这一堆 fd 里有一个能读了/能写了就叫我」**。它在 asm-generic 上是 72 号 `pselect6`
+（`select` 在 la64 上只剩这一条路，libc 的 `select` 也翻译成它）。
+
+| 项 | 现状 |
+|---|---|
+| 号与参数 | 72 号 `pselect6`：0=`nfds`、1=`readfds`、2=`writefds`、3=`exceptfds`、4=`timespec*`、5=临时信号掩码指针 |
+| 超时语义 | 与 Linux 一致：`timeout == NULL` 是无限等待（本内核按时间片重放）、`timeout=0` 是纯轮询立刻回 0、否则是**相对时长**且**不写回**用户结构（这是 `pselect` 与 `select` 的区别） |
+| 返回值 | 就绪描述符个数；就绪位写回用户表、非就绪位清零。三张表都不给（全 NULL）且 `nfds>0` 时按 0 个对象处理，只做超时等待 |
+| 读就绪 | fd 0 恒可读（读到 EOF）；普通文件恒就绪（同步读）；管道读端 `count > 0 || writers == 0`（**写端全关就是 EOF，必须报可读**）；管道写端 / 未打开 fd 不可读 |
+| 写就绪 | fd 1 / 2 恒可写（控制台）；普通文件恒就绪；管道写端 `readers == 0 || count < 256`（**满就没空间**，判的是容量不是「能调 write」）；管道读端 / 未打开 fd 不可写 |
+| `exceptfds` | 接受但**永不上报**：本层没有带外数据、没有异步错误队列。写回时同样被清位 —— 不是「原样留着」 |
+| fd 有效性 | 被选中的 fd 必须**有对象支撑**（fd ≤ 2，或在本进程 fd 表里）；否则 `-EBADF`。静默忽略是最难查的假绿：调用方会一直等到超时 |
+| 参数校验 | `nfds > 1024`（`FD_SETSIZE`）回 `-EINVAL`；第 6 个参数（每次调用临时信号掩码）**非空回 `-ENOSYS`**，不装作忽略 |
+| fd_set 读写 | 按 **32 位字**逐个 `copy_from_user` / `copy_to_user`，不把 1024 位（128 字节）整张搬上内核栈；`nfds` 决定要读几个字 |
+| 阻塞形式 | 与 futex 同型：`arkrtos_port_svc_restart` + `arkrtos_task_block_in_critical(100 ms)`，截止时刻存 per-task（**存截止时刻**，不是剩余时长 —— 否则每次重放都会重新计时）；没有可重放端口时如实回 `-EAGAIN` |
+| 任务号复用 | 任务退出与 `reset` 都清掉 `s_sel_armed/s_sel_deadline`：任务号会被复用，不清就是「新任务继承一条已经在等的旧记录」 |
+
+读数（`tools/fork_gate.py` 第七档，夹具 107 → **122 条**，其中 select 15 条）：
+
+| 读数 | 钉住什么 |
+|---|---|
+| `pselect6 pipe2 == 0 -> 0` | 段里先把管道建起来（下面每条都靠它） |
+| `pselect6 empty pipe read end not ready -> 0` | 空管道读端**不**就绪（`timeout=0` 即刻回 0，不是「有管道就报读」） |
+| `pselect6 clears the user set when nothing is ready -> 0` | 没有就绪位时用户 `fd_set` 被清位，不是原样退回来 |
+| `pselect6 timed wait returns 0 at the deadline -> 0` | 50 ms 的相对超时到点回 0 |
+| `pselect6 timed wait really waited >= 40 ms -> 1` | 这次等待**真的等够了**（墙钟读数；「每次重放重新计时」的实现在这里必红） |
+| `pselect6 pipe wrote 3 bytes -> 3` | 夹具侧写入完整（不是半截） |
+| `pselect6 read end ready after 3 bytes -> 1` | 有数据之后读端就绪 |
+| `pselect6 keeps the ready bit in the user set -> 1` | 就绪位写回用户集（把「用户要求的那几位」当输出漏掉，会在这里红） |
+| `pselect6 write end ready while the pipe has space -> 1` | 有空间的写端就绪 |
+| `pselect6 stdout is always writable -> 1` | fd 1 恒可写 |
+| `pselect6 write end not ready when the pipe is full -> 0` | 管道写满（256 字节）之后写端**不**就绪 —— 判的是容量，不是「能调 write」 |
+| `pselect6 read end ready on EOF after the writer closed -> 1` | 写端全关之后读端按 EOF 就绪（Linux 在 EOF 上必须报可读，否则 `read` 循环永远等不到） |
+| `pselect6 never reports exceptfds -> 0` | 只给了 `exceptfds` 且 fd 可读时回 0 |
+| `pselect6 clears exceptfds -> 0` | 同上那张表被清位 |
+| `pselect6 bad fd == -EBADF -> -9` | 没有对象支撑的 fd 被选中如实拒绝 |
+
+**只有上板才看得见的坑：夹具的位宽。** 第一版把「stdout 恒可写」写成了
+`ws[1] = 2u`，本意是「fd 1 的位」——但 `fd_set` 是按 32 位字排的数组，
+`ws[1]` 第 1 位是 **fd 33**，于是 `nfds=2` 的调用里根本没有 fd 1，读数如实回 0。
+代码是对的、判断是错的，这条只有真跑才暴露（宿主用例用 `u_put32` 写的是同一个字，
+没踩到）。修法是先清零整张表，再把 `ws[0] = 2u` 当 fd 1 的位。
+
+**为什么单独开一个开关。** 就绪判据依赖 fd 表与管道对象的具体形状（容量 256、
+`writers/readers` 计数），换 socket 之后这套判据要重写。把 select 与未来的 socket
+放在同一个开关下，会让「关档零体积」这条承诺变成「关档少了一半功能」。
+`ARKRTOS_USE_LINUX_SELECT` 只依赖 `ARKRTOS_USE_LINUX_ABI`。
+
 ## 9 开关与零体积
 
 - `ARKRTOS_USE_LINUX_ABI`（`kernelsrc/include/arkrtos_features.h`、
@@ -846,6 +899,10 @@ EXTRA_CFLAGS**，所以夹具看不到内核的编译开关。这一段只在 `A
   `s_pg_page_ro`、`la_pg_page_ro` / `la_pg_mprotect_hit`、端口 `paging_protect` 与
   `mprotect_stat` 全不产出，`mprotect` 回到「只校验参数、返 0、单独计数」；开档实测是
   **第六档 107 条读数**（其中 mprotect 11 条）与宿主侧编译门禁。
+- `ARKRTOS_USE_LINUX_SELECT`（§8.8），默认 **0**，`depends on ARKRTOS_USE_LINUX_ABI` 且
+  `features.h` 用 `#error` 顶住这条依赖；关档时不编译就绪判据、`fd_set` 扫描与
+  `s_sel_armed/s_sel_deadline`，72 号落回 `-ENOSYS`；开档实测是**第七档 122 条读数**
+  （其中 select 15 条）与宿主 select 档的 327 checks。
 - `MAP_FIXED`（§8.7）**不是独立开关**：它在 `ARKRTOS_USE_PAGING_DEMAND=1` 时才有
   （要有按对装条目的能力，才谈得上「把这一段原来的东西丢掉」）；`DEMAND=0` 时
   `mmap(MAP_FIXED)` 如实回 `-ENOSYS`，夹具里那 6 条读数也整段不出现 —— 所以
@@ -879,7 +936,7 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py --no-build
 | `qemu-readout` | Linux 块 14 条 check 全 ok + PASS 行 + `exit code 7`；管道块 14 条 + `exit code 55`；信号块 31 条 + PASS 行 + `exit code 138`；旁路演示未受影响 |
 | `parser-selfcheck` | 把 8 种坏日志喂回判据，必须全判红 |
 
-fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**43 项**；fork / fork+COW / fork+COW+SHM / fork+COW+SHM+futex / fork+COW+SHM+futex+filemap / fork+COW+SHM+futex+filemap+mprotect **六档各跑一遍**，所以 build / qemu-readout / parser-selfcheck 各出现六次）：
+fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**50 项**；fork / fork+COW / fork+COW+SHM / fork+COW+SHM+futex / fork+COW+SHM+futex+filemap / fork+COW+SHM+futex+filemap+mprotect / fork+COW+SHM+futex+filemap+mprotect+select **七档各跑一遍**，所以 build / qemu-readout / parser-selfcheck 各出现七次、compile-on 七次）：
 
 | 项 | 钉住什么 |
 |---|---|
@@ -895,11 +952,13 @@ fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**4
 | `qemu-readout`（futex 档） | fork+COW+SHM+futex：`[fork]` **76 条** check 全 `ok`；三十六条 futex 读数逐条校验（九条基本配对 + 七条多时间片 + 二十条第二档：位集 0 回 `-22`、相对/绝对超时各一条 `-110`、50 ms 墙钟、`CMP_REQUEUE` 期望值不符回 `-11`、缺 `uaddr2` 回 `-22`、位集 `bits=7`、改挂后旧地址 `WAKE` 回 0 与 `bits=3` 等）；SHM 与 COW 的全部判据同时仍在 |
 | `qemu-readout`（filemap 档） | fork+COW+SHM+futex+filemap：`[fork]` **96 条** check 全 `ok`；filemap 段 20 条读数逐条校验（私有只读内容三读数、页尾仍是文件内容、offset 非对齐回 `-22`、坏 fd 回 `-9`、只读 fd 上可写共享映射回 `-13`、offset=4096 生效且 EOF 后读零、O_RDWR 打开成功、可写共享映射 + `msync` + `munmap`、私有映射 `msync` 不落盘、重映射读回、`bits=31` 的五位证据）；SHM / COW / futex 的全部判据同时仍在 |
 | `qemu-readout`（mprotect 档） | fork+COW+SHM+futex+filemap+mprotect：`[fork]` **107 条** check 全 `ok`；mprotect 段 11 条逐条校验（映射成功、`mprotect` 双向可设、只读页仍可读、同对另一半仍可写、撤保护后写得进、违规子进程被 reap 而非重启、状态字 = SIGSEGV、父页未被改）；串口另须有一行 `[LA64U] mprotect violation badv=0x… era=0x… tid=… -> kill task`；filemap / SHM / COW / futex 的全部判据同时仍在 |
-| `parser-selfcheck` | 9 种坏日志必须判红（COW 档另加 4 种：位掩码丢一位、父写丢失、整类删光 copy 行、fork 时搬了字节；SHM 档再加 5 种：删光 `pg shm map` 行、共享写没被父看到、子看不到父的写、共享页起始非 0、缺映射成功读数；futex 档再加 8 种：WAIT 没被叫醒、唤醒者只看到一半（`bits=1`）、无等待者 WAKE 回 1、多时间片 WAIT 被打成 `-EFAULT`、多时间片没跨过时间片、位集被忽略（`bits=7` 变 3）、改挂没搬走等待者、超时没到期；filemap 档再加 3 种：写回没发生、写回把文件截短、私有映射的改动被落盘；mprotect 档再加 7 种：只读页读不回来、粒度退化成 8 KB、违规写没被拦住、违规写改了父页、状态字当成退出码、缺违规日志行、缺成功读数） |
+| `qemu-readout`（select 档） | fork+COW+SHM+futex+filemap+mprotect+select：`[fork]` **122 条** check 全 `ok`；select 段 15 条逐条校验（空管道读端不就绪、非就绪时用户集被清位、50 ms 定时等待回 0 且墙钟 >= 40 ms、有数据后读端就绪且就绪位保留、有空间的写端与 stdout 可写、写满后写端不就绪、写端全关后按 EOF 就绪、`exceptfds` 永不上报且被清位、坏 fd 回 `-9`）；mprotect / filemap / SHM / COW / futex 的全部判据同时仍在 |
+| `parser-selfcheck` | 9 种坏日志必须判红（COW 档另加 4 种：位掩码丢一位、父写丢失、整类删光 copy 行、fork 时搬了字节；SHM 档再加 5 种：删光 `pg shm map` 行、共享写没被父看到、子看不到父的写、共享页起始非 0、缺映射成功读数；futex 档再加 8 种：WAIT 没被叫醒、唤醒者只看到一半（`bits=1`）、无等待者 WAKE 回 1、多时间片 WAIT 被打成 `-EFAULT`、多时间片没跨过时间片、位集被忽略（`bits=7` 变 3）、改挂没搬走等待者、超时没到期；filemap 档再加 3 种：写回没发生、写回把文件截短、私有映射的改动被落盘；mprotect 档再加 7 种：只读页读不回来、粒度退化成 8 KB、违规写没被拦住、违规写改了父页、状态字当成退出码、缺违规日志行、缺成功读数；select 档再加 8 种：空管道被报就绪、EOF 不报就绪、满管道仍报可写、`fd_set` 没清位、超时被重新计时、`exceptfds` 被上报、坏 fd 被放过、缺 select 读数） |
 | `default-off-shm` / `kconfig-wired-shm` / `features-guard-shm` | SHM 开关的三件套：autoconf 为 0、Kconfig 有 `depends on ARKRTOS_USE_PAGING_COW`、features.h 有对应 `#error`；`off-zero-port` 另核关档没有 `arkrtos_port_paging_map_shared` |
 | `default-off-futex` / `kconfig-wired-futex` / `features-guard-futex` | futex 开关的三件套：autoconf 为 0、Kconfig 有 `depends on ARKRTOS_USE_LINUX_ABI`、features.h 有对应 `#error` |
 | `default-off-filemap` / `kconfig-wired-filemap` / `features-guard-filemap` | 文件映射开关的三件套：autoconf 为 0、Kconfig 四条 `depends on`（ABI / PAGING / PAGES / DEMAND）、features.h 四条 `#error` |
 | `default-off-mprotect` / `kconfig-wired-mprotect` / `features-guard-mprotect` | mprotect 开关的三件套：autoconf 为 0、Kconfig 四条 `depends on`（ABI / PAGING / PAGES / DEMAND）、features.h 四条 `#error` |
+| `default-off-select` / `kconfig-wired-select` / `features-guard-select` | select 开关的三件套：autoconf 为 0、Kconfig 有 `depends on ARKRTOS_USE_LINUX_ABI`、features.h 有对应 `#error`；`off-zero-port` 同档核关档没有 select 的新符号 |
 | `restore-default` | 收尾把构建目录恢复默认档（避免下一次 `make` 复用 fork 档 `.o`） |
 
 `parser-selfcheck` 是防「绿得没有信息量」的：Linux 块去掉 PASS 行、退出码改 3、

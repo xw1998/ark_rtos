@@ -88,6 +88,9 @@
 #define LX_MUNMAP           215
 #define LX_MSYNC            227
 
+/* pselect6：跨 fd 就绪等待（U-22） */
+#define LX_PSELECT6         72
+
 #define LX_O_RDONLY         0
 #define LX_O_RDWR           2
 #define LX_PROT_NONE        0
@@ -1614,6 +1617,168 @@ void linux_main(unsigned long sp)
             check("parent page unchanged after the violation",
                   (lx_long)pg[0], 0x4444);
         }
+    }
+#endif
+
+#if defined(ARKRTOS_USE_LINUX_SELECT) && (ARKRTOS_USE_LINUX_SELECT == 1)
+    /* ---------------- pselect6：跨 fd 就绪等待（U-22） ----------------
+     * 要证的是「就绪判据真的按对象状态算」，不是「返回了个数」：
+     *   1) 空管道的读端**不**就绪：timeout=0 即刻回 0，且用户集被清位
+     *      （写回只留就绪位，不是原样退回来）；
+     *   2) 50 ms 定时等待必须真的等够：墙钟读数，不拿调度顺序当判据；
+     *   3) 写进 3 字节后读端就绪，且用户集里那一位还在；
+     *   4) 写端按「管道还有空间」判就绪，stdout 恒可写；
+     *   5) 管道写满后写端**不再**就绪 —— 这一条咬的是「容量」不是「能写」；
+     *   6) 写端全关后读端按 EOF 就绪 —— 这一条咬的是「写端没了」不是
+     *      「有数据」（Linux 的 select 在 EOF 上必须报可读）；
+     *   7) exceptfds 接受但永不上报，且同样被清位（本层没有带外数据）；
+     *   8) 没有对象支撑的 fd 被选中回 -EBADF，不是静默忽略。
+     * 反假绿：第 5 条咬容量、第 6 条咬 EOF、第 8 条咬 fd 有效性。只留
+     * 第 3/4/7 条的话，「直接回 nfds 个」也能全绿。 */
+    {
+        int          sel[2];
+        unsigned int rs[32];
+        unsigned int ws[32];
+        unsigned int es[32];
+        long         to[2];
+        long         cts[2];
+        lx_long      r;
+        lx_long      wrc;
+        long         t0;
+        long         t1;
+        int          i;
+        int          selr;
+        int          selw;
+        int          rword;
+        int          wword;
+        unsigned int rbit;
+        unsigned int wbit;
+
+        check("pselect6 pipe2 == 0",
+              lx2(LX_PIPE2, (lx_long)(unsigned long)sel, 0), 0);
+
+        selr  = sel[0];
+        selw  = sel[1];
+        rword = selr >> 5;
+        wword = selw >> 5;
+        rbit  = 1u << (unsigned int)(selr & 31);
+        wbit  = 1u << (unsigned int)(selw & 31);
+
+        /* (1) 空管道读端不就绪：timeout=0 是纯轮询，不睡。 */
+        for (i = 0; i < 32; i++)
+        {
+            rs[i] = 0u;
+            ws[i] = 0u;
+            es[i] = 0u;
+        }
+        rs[rword] = rbit;
+        to[0] = 0;
+        to[1] = 0;
+        r = lx6(LX_PSELECT6, (lx_long)(selr + 1),
+                (lx_long)(unsigned long)rs, 0, 0,
+                (lx_long)(unsigned long)to, 0);
+        check("pselect6 empty pipe read end not ready", r, 0);
+        check("pselect6 clears the user set when nothing is ready",
+              (lx_long)rs[rword], 0);
+
+        /* (2) 50 ms 定时等待：真的等够，而不是立刻回 0。 */
+        t0 = -1;
+        if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                (lx_long)(unsigned long)cts, 0) == 0)
+        {
+            t0 = (cts[0] * 1000) + (cts[1] / 1000000);
+        }
+        rs[rword] = rbit;
+        to[0] = 0;
+        to[1] = 50 * 1000000;
+        r = lx6(LX_PSELECT6, (lx_long)(selr + 1),
+                (lx_long)(unsigned long)rs, 0, 0,
+                (lx_long)(unsigned long)to, 0);
+        t1 = -1;
+        if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                (lx_long)(unsigned long)cts, 0) == 0)
+        {
+            t1 = (cts[0] * 1000) + (cts[1] / 1000000);
+        }
+        out_line3("[fork] pselect6 timed wait ",
+                  ((t0 < 0) || (t1 < 0)) ? -1 : (t1 - t0), " ms\n");
+        check("pselect6 timed wait returns 0 at the deadline", r, 0);
+        check("pselect6 timed wait really waited >= 40 ms",
+              ((t0 >= 0) && (t1 >= 0) && ((t1 - t0) >= 40)) ? 1 : 0, 1);
+
+        /* (3) 有数据之后读端就绪，用户集里那一位必须保留。 */
+        wrc = lx3(LX_WRITE, (lx_long)selw,
+                  (lx_long)(unsigned long)"abc", 3);
+        check("pselect6 pipe wrote 3 bytes", wrc, 3);
+        rs[rword] = rbit;
+        to[0] = 0;
+        to[1] = 0;
+        r = lx6(LX_PSELECT6, (lx_long)(selr + 1),
+                (lx_long)(unsigned long)rs, 0, 0,
+                (lx_long)(unsigned long)to, 0);
+        check("pselect6 read end ready after 3 bytes", r, 1);
+        check("pselect6 keeps the ready bit in the user set",
+              (((int)rs[rword] & (int)rbit) != 0) ? 1 : 0, 1);
+
+        /* (4) 写端按「还有空间」就绪；stdout 恒可写。 */
+        ws[wword] = wbit;
+        r = lx6(LX_PSELECT6, (lx_long)(selw + 1),
+                0, (lx_long)(unsigned long)ws, 0,
+                (lx_long)(unsigned long)to, 0);
+        check("pselect6 write end ready while the pipe has space", r, 1);
+
+        for (i = 0; i < 32; i++)
+        {
+            ws[i] = 0u;
+        }
+        ws[0] = 2u;                     /* fd 1 的位（第 0 个 32 位字） */
+        r = lx6(LX_PSELECT6, 2, 0, (lx_long)(unsigned long)ws, 0,
+                (lx_long)(unsigned long)to, 0);
+        check("pselect6 stdout is always writable", r, 1);
+
+        /* (5) 写满之后写端不再就绪（容量 256 字节） */
+        i = 0;
+        while (i < 8192)
+        {
+            wrc = lx3(LX_WRITE, (lx_long)selw,
+                      (lx_long)(unsigned long)"x", 1);
+            if (wrc != 1)
+            {
+                break;
+            }
+            i++;
+        }
+        out_line3("[fork] pselect6 filled the pipe with ", i, " bytes\n");
+        ws[wword] = wbit;
+        r = lx6(LX_PSELECT6, (lx_long)(selw + 1),
+                0, (lx_long)(unsigned long)ws, 0,
+                (lx_long)(unsigned long)to, 0);
+        check("pselect6 write end not ready when the pipe is full", r, 0);
+
+        /* (6) 写端全关之后读端按 EOF 就绪 */
+        (void)lx1(LX_CLOSE, (lx_long)selw);
+        rs[rword] = rbit;
+        r = lx6(LX_PSELECT6, (lx_long)(selr + 1),
+                (lx_long)(unsigned long)rs, 0, 0,
+                (lx_long)(unsigned long)to, 0);
+        check("pselect6 read end ready on EOF after the writer closed",
+              r, 1);
+
+        /* (7) exceptfds 永不上报，且被清位 */
+        es[rword] = rbit;
+        r = lx6(LX_PSELECT6, (lx_long)(selr + 1), 0, 0,
+                (lx_long)(unsigned long)es,
+                (lx_long)(unsigned long)to, 0);
+        check("pselect6 never reports exceptfds", r, 0);
+        check("pselect6 clears exceptfds", (lx_long)es[rword], 0);
+
+        /* (8) 没有对象支撑的 fd 被选中必须回 -EBADF */
+        rs[3] = 8u;                     /* fd 99 的位 */
+        r = lx6(LX_PSELECT6, 100, (lx_long)(unsigned long)rs, 0, 0,
+                (lx_long)(unsigned long)to, 0);
+        check("pselect6 bad fd == -EBADF", r, -LX_EBADF);
+
+        (void)lx1(LX_CLOSE, (lx_long)selr);
     }
 #endif
 

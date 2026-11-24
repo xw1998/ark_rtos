@@ -66,6 +66,7 @@
 #define LX_SYS_READ                 (63u)
 #define LX_SYS_WRITE                (64u)
 #define LX_SYS_PREAD64              (67u)
+#define LX_SYS_PSELECT6             (72u)
 #define LX_SYS_EXIT                 (93u)
 #define LX_SYS_EXIT_GROUP           (94u)
 #define LX_SYS_SET_TID_ADDRESS      (96u)
@@ -153,6 +154,16 @@
 /* 「不按位筛选」：普通 WAIT 登记的就是这档，普通 WAKE 也等于全选。 */
 #define LX_FUTEX_BITSET_ALL         (0xFFFFFFFFu)
 #endif
+
+#if (ARKRTOS_USE_LINUX_SELECT == 1)
+/* pselect6 落点的最大描述符号数：0=stdin / 1=stdout / 2=stderr，
+ * 3..(3+LX_MAX_FD-1) 走本进程 fd 表。任何 >= 本值的描述符被选中都回
+ * -EBADF（本层根本没有那个对象）。FD_SETSIZE 按 Linux 默认 1024 位核，
+ * 一张 fd_set 最多 128 字节；这里按 32 位字读取，不把整张搬上栈。 */
+#define LX_SEL_NFD                  (LX_MAX_FD + 3u)
+#define LX_SEL_SETSIZE              (1024u)
+#endif
+
 
 #define LX_PATH_MAX                 (64u)
 #define LX_IO_CHUNK                 (128u)
@@ -356,6 +367,14 @@ static uint32  s_futex_val[ARKRTOS_TASK_MAX_NUM];
 static uint32  s_futex_bitset[ARKRTOS_TASK_MAX_NUM];
 static uint32  s_futex_deadline[ARKRTOS_TASK_MAX_NUM];
 static uint8   s_futex_timed[ARKRTOS_TASK_MAX_NUM];
+#endif
+
+#if (ARKRTOS_USE_LINUX_SELECT == 1)
+/* 每个任务最多一次 pselect6 阻塞：登记截止时刻（内核毫秒；0 也合法，所以用
+ * 独立的 armed 标志而不是拿 0 当哨兵）。一条任务同一时刻只可能在一条
+ * pselect6 里，不需要像 futex 那样按 key 分辨是不是重放。 */
+static uint8  s_sel_armed[ARKRTOS_TASK_MAX_NUM];
+static uint32 s_sel_deadline[ARKRTOS_TASK_MAX_NUM];
 #endif
 
 /* ------------------------------------------------------------- 信号状态 */
@@ -3256,6 +3275,326 @@ static int32 lx_futex(void *p_ctx)
 }
 #endif /* ARKRTOS_USE_LINUX_FUTEX == 1 */
 
+#if (ARKRTOS_USE_LINUX_SELECT == 1)
+/* ------------------------------- pselect6（U-22，就绪等待） */
+
+/* fd 有没有落地对象。0/1/2 当作打开（stdin 读到 EOF、stdout/stderr 可写），
+ * 3..10 查本进程 fd 表；其余一律没有。 */
+static uint8 lx_sel_open(int32 fd)
+{
+    /* fd 由 32 位 nfds 逐位推出，不会为负，不在这里留一条走不到的拒绝。 */
+    if(fd <= 2)
+    {
+        return 1u;
+    }
+    return (lx_fd_find(fd) >= 0) ? 1u : 0u;
+}
+
+/* 读就绪。fd 0 永远可读（读到 EOF），普通文件永远就绪（同步读写），管道
+ * 读端有数据或写端全关才就绪。写端 fd / 未打开 fd 不可读。 */
+static uint8 lx_sel_rd_ready(int32 fd)
+{
+    int32 idx;
+
+    if(fd == 0)
+    {
+        return 1u;
+    }
+    idx = lx_fd_find(fd);
+    if(idx < 0)
+    {
+        return 0u;
+    }
+    if(s_fd[idx].kind == LX_FD_FILE)
+    {
+        return 1u;
+    }
+    if(s_fd[idx].kind == LX_FD_PIPE_R)
+    {
+        int32 pi = (int32)s_fd[idx].pipe;
+
+        if((pi >= 0) && (pi < (int32)LX_PIPE_MAX) && (s_pipe[pi].used != 0u))
+        {
+            if((s_pipe[pi].count > 0u) || (s_pipe[pi].writers == 0u))
+            {
+                return 1u;
+            }
+        }
+    }
+    return 0u;
+}
+
+/* 写就绪。fd 1/2 永远可写（控制台），普通文件永远就绪，管道写端有空间或
+ * 读端全关（写回 -EPIPE）才就绪。读端 fd / 未打开 fd 不可写。 */
+static uint8 lx_sel_wr_ready(int32 fd)
+{
+    int32 idx;
+
+    if((fd == 1) || (fd == 2))
+    {
+        return 1u;
+    }
+    idx = lx_fd_find(fd);
+    if(idx < 0)
+    {
+        return 0u;
+    }
+    if(s_fd[idx].kind == LX_FD_FILE)
+    {
+        return 1u;
+    }
+    if(s_fd[idx].kind == LX_FD_PIPE_W)
+    {
+        int32 pi = (int32)s_fd[idx].pipe;
+
+        if((pi >= 0) && (pi < (int32)LX_PIPE_MAX) && (s_pipe[pi].used != 0u))
+        {
+            if((s_pipe[pi].readers == 0u) ||
+               (s_pipe[pi].count < (uint16)LX_PIPE_BUF))
+            {
+                return 1u;
+            }
+        }
+    }
+    return 0u;
+}
+
+/* 读用户 timespec，算出「从现在起多少毫秒」。pselect6 的 timeout 是相对时长
+ * 且不被写回（这是 pselect 与 select 的区别）。返回负数 errno。 */
+static int32 lx_sel_rel_ms(unsigned long ua, uint32 *p_ms)
+{
+    long ts[2];
+
+    if(arkrtos_copy_from_user(ts, (const void *)ua, (uint32)sizeof(ts)) != 0)
+    {
+        return -LX_EFAULT;
+    }
+    if((ts[0] < 0) || (ts[1] < 0) || (ts[1] >= 1000000000L))
+    {
+        return -LX_EINVAL;
+    }
+    if(ts[0] > 2147483L)
+    {
+        *p_ms = 0x7FFFFFFFu;                    /* 约 24.8 天，够用且不溢出 */
+    }
+    else
+    {
+        *p_ms = ((uint32)ts[0] * 1000u) + (uint32)(ts[1] / 1000000L);
+    }
+    return 0;
+}
+
+/* 扫一遍 fd_set，统计就绪数；write_back != 0 时把用户那三张表改写成「只剩
+ * 就绪位」。按 32 位字读写，不把整张 128 字节 fd_set 搬上栈。返回 0 或
+ * -EBADF/-EFAULT；就绪计数写进 *p_cnt。except 集永不上报。 */
+static int32 lx_sel_scan(uint32 nfds, unsigned long rptr, unsigned long wptr,
+                         unsigned long eptr, uint32 *p_cnt, uint8 write_back)
+{
+    uint32 words = (nfds + 31u) / 32u;
+    uint32 cnt = 0u;
+    uint32 w;
+
+    for(w = 0u; w < words; w++)
+    {
+        uint32 in_r = 0u;
+        uint32 in_w = 0u;
+        uint32 in_e = 0u;
+        uint32 out_r = 0u;
+        uint32 out_w = 0u;
+        uint32 base = w * 32u;
+        uint32 bit;
+        unsigned long wr = (unsigned long)(w * 4u);
+
+        if((rptr != 0ul) &&
+           (arkrtos_copy_from_user(&in_r, (const void *)(rptr + wr), 4u) != 0))
+        {
+            return -LX_EFAULT;
+        }
+        if((wptr != 0ul) &&
+           (arkrtos_copy_from_user(&in_w, (const void *)(wptr + wr), 4u) != 0))
+        {
+            return -LX_EFAULT;
+        }
+        if((eptr != 0ul) &&
+           (arkrtos_copy_from_user(&in_e, (const void *)(eptr + wr), 4u) != 0))
+        {
+            return -LX_EFAULT;
+        }
+
+        for(bit = 0u; bit < 32u; bit++)
+        {
+            uint32 mask = (uint32)1u << bit;
+            uint32 fd = base + bit;
+
+            if(fd >= nfds)
+            {
+                break;
+            }
+            if(((in_r | in_w | in_e) & mask) == 0u)
+            {
+                continue;
+            }
+            if(lx_sel_open((int32)fd) == 0u)
+            {
+                return -LX_EBADF;
+            }
+            if((in_r & mask) != 0u)
+            {
+                if(lx_sel_rd_ready((int32)fd) != 0u)
+                {
+                    out_r |= mask;
+                    cnt++;
+                }
+            }
+            if((in_w & mask) != 0u)
+            {
+                if(lx_sel_wr_ready((int32)fd) != 0u)
+                {
+                    out_w |= mask;
+                    cnt++;
+                }
+            }
+            /* exceptfds：本层没有带外数据，永不置位。 */
+        }
+
+        /* 写回：这几个 4 字节刚刚被上面同一组指针 copy_from_user 读成功，
+         * 中间没有让出 CPU，本层又没有别的执行流能改本任务的映射，所以写回
+         * 不可能失败。返回值只看「写了几字节」，不编一条走不到的 EFAULT。 */
+        if(write_back != 0u)
+        {
+            if(rptr != 0ul)
+            {
+                (void)arkrtos_copy_to_user((void *)(rptr + wr), &out_r, 4u);
+            }
+            if(wptr != 0ul)
+            {
+                (void)arkrtos_copy_to_user((void *)(wptr + wr), &out_w, 4u);
+            }
+            if(eptr != 0ul)
+            {
+                uint32 zero = 0u;
+
+                (void)arkrtos_copy_to_user((void *)(eptr + wr), &zero, 4u);
+            }
+        }
+    }
+
+    *p_cnt = cnt;
+    return 0;
+}
+
+/* 本任务若还挂着一次 pselect6 阻塞，把它的截止时刻清掉。任务号会被复用，
+ * 不清的话新任务会继承一条「已经在等」的旧记录。 */
+static void lx_sel_forget(int32 task_id)
+{
+    if((task_id > 0) && (task_id <= (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        s_sel_armed[task_id - 1]    = 0u;
+        s_sel_deadline[task_id - 1] = 0u;
+    }
+}
+
+/**
+* @brief pselect6(2)：对文件/管道描述符做就绪等待
+* @details 与 Linux 一致的部分：readfds/writefds 轮询一次，就绪位写回用户
+*          表、非就绪位清除，返回值是就绪描述符个数；timeout=0 是纯轮询，
+*          timeout=NULL 是无限等待（本内核按时间片重放）；timeout 是相对时长
+*          且不被写回。
+*          与 Linux 不同的边界（都在文档里写死）：
+*            - exceptfds 接受但永不上报（没有带外数据/异步错误队列）；
+*            - 第六个参数（每次调用临时信号掩码）回 -ENOSYS 而不是忽略；
+*            - 就绪判据按本层对象定义：管道读端有数据或写端全关、管道写端
+*              有空间或读端全关、普通文件永远就绪、stdin 可读、stdout/stderr
+*              可写；没有任何对象支撑的描述符被选中回 -EBADF；
+*            - 没有可重放端口时阻塞路径回 -EAGAIN，不假装睡过。
+*/
+static int32 lx_pselect6(void *p_ctx)
+{
+    uint32 nfds = (uint32)ARKRTOS_SVC_ARG(p_ctx, 0u);
+    unsigned long rptr = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    unsigned long wptr = ARKRTOS_SVC_ARG(p_ctx, 2u);
+    unsigned long eptr = ARKRTOS_SVC_ARG(p_ctx, 3u);
+    unsigned long tptr = ARKRTOS_SVC_ARG(p_ctx, 4u);
+    unsigned long sptr = ARKRTOS_SVC_ARG(p_ctx, 5u);
+    int32  me = (int32)arkrtos_current_task_id;
+    uint32 cnt = 0u;
+    int32  rc;
+
+    /* 第六个参数是「每次调用临时信号掩码」的指针；本层不支持，明确拒绝，
+     * 不装作忽略。 */
+    if(sptr != 0ul)
+    {
+        return -LX_ENOSYS;
+    }
+    if(nfds > (uint32)LX_SEL_SETSIZE)
+    {
+        return -LX_EINVAL;
+    }
+
+    rc = lx_sel_scan(nfds, rptr, wptr, eptr, &cnt, 0u);
+    if(rc < 0)
+    {
+        lx_sel_forget(me);
+        return rc;
+    }
+
+    if(cnt > 0u)
+    {
+        rc = lx_sel_scan(nfds, rptr, wptr, eptr, &cnt, 1u);
+        lx_sel_forget(me);
+        return (rc < 0) ? rc : (int32)cnt;
+    }
+
+    /* 没有就绪的。以下要么立刻超时返回 0，要么阻塞重放。 */
+    if((me <= 0) || (me > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        /* 内核上下文没有可阻塞的身份：按纯轮询处理，回 0（并清空用户表）。 */
+        (void)lx_sel_scan(nfds, rptr, wptr, eptr, &cnt, 1u);
+        return 0;
+    }
+
+    if(tptr != 0ul)
+    {
+        if(s_sel_armed[me - 1] == 0u)
+        {
+            uint32 ms = 0u;
+
+            rc = lx_sel_rel_ms(tptr, &ms);
+            if(rc < 0)
+            {
+                lx_sel_forget(me);
+                return rc;
+            }
+            if(ms == 0u)
+            {
+                /* select 的 timeout=0 是「纯轮询」：立即回 0，不睡。 */
+                (void)lx_sel_scan(nfds, rptr, wptr, eptr, &cnt, 1u);
+                lx_sel_forget(me);
+                return 0;
+            }
+            s_sel_deadline[me - 1] = arkrtos_kernel_get_time() + ms;
+            s_sel_armed[me - 1]    = 1u;
+        }
+        else if((int32)(arkrtos_kernel_get_time() - s_sel_deadline[me - 1]) >= 0)
+        {
+            /* 截止时刻已过：Linux 回 0 并清空就绪集。 */
+            (void)lx_sel_scan(nfds, rptr, wptr, eptr, &cnt, 1u);
+            lx_sel_forget(me);
+            return 0;
+        }
+    }
+
+    /* 需要睡：本内核没有在 SVC 内真睡的通路，和 futex/wait4 一样靠重放。
+     * 没有可重放端口就如实回 -EAGAIN，不假装睡过。 */
+    if(arkrtos_port_svc_restart(p_ctx) != 0)
+    {
+        lx_sel_forget(me);
+        return -LX_EAGAIN;
+    }
+    (void)arkrtos_task_block_in_critical((uint32)LX_WAIT_SLICE_MS);
+    return 0;                       /* 返回值会被重放的那一次覆盖 */
+}
+#endif /* ARKRTOS_USE_LINUX_SELECT == 1 */
 /* ------------------------------------------------ execve（同任务换镜像） */
 
 /* MinGW 把 __attribute__((weak)) 编成「同一目标内的弱别名」（符号表里
@@ -3519,6 +3858,11 @@ static int32 lx_dispatch(void *p_svc_ctx, uint32 num, int32 *p_rc)
         rc = lx_futex(p_svc_ctx);
         break;
     #endif
+    #if (ARKRTOS_USE_LINUX_SELECT == 1)
+    case LX_SYS_PSELECT6:
+        rc = lx_pselect6(p_svc_ctx);
+        break;
+    #endif
     #if (ARKRTOS_USE_LINUX_FORK == 1)
     case LX_SYS_CLONE:
         rc = lx_clone(p_svc_ctx);
@@ -3716,6 +4060,9 @@ void arkrtos_linux_abi_on_task_exit(int32 task_id)
 #if (ARKRTOS_USE_LINUX_FUTEX == 1)
     lx_futex_forget(task_id);
 #endif
+#if (ARKRTOS_USE_LINUX_SELECT == 1)
+    lx_sel_forget(task_id);
+#endif
 
     for(i = 0u; i < (uint32)LX_MAX_CHILD; i++)
     {
@@ -3778,6 +4125,9 @@ void arkrtos_linux_abi_on_task_exit(int32 task_id)
 #if (ARKRTOS_USE_LINUX_FUTEX == 1)
     lx_futex_forget(task_id);
 #endif
+#if (ARKRTOS_USE_LINUX_SELECT == 1)
+    lx_sel_forget(task_id);
+#endif
 #if (ARKRTOS_USE_PAGING_FILEMAP == 1)
     /* 关 fork 档只有槽 0：退出即写回，与开档那条路同一口径。 */
     {
@@ -3836,6 +4186,13 @@ void arkrtos_linux_abi_reset(void)
         s_futex_bitset[i]   = 0u;
         s_futex_deadline[i] = 0u;
         s_futex_timed[i]    = 0u;
+    }
+#endif
+#if (ARKRTOS_USE_LINUX_SELECT == 1)
+    for(i = 0u; i < (uint32)ARKRTOS_TASK_MAX_NUM; i++)
+    {
+        s_sel_armed[i]    = 0u;
+        s_sel_deadline[i] = 0u;
     }
 #endif
 

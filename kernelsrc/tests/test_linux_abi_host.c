@@ -111,6 +111,7 @@ int main(void)
 #define T_NR_READ           (63u)
 #define T_NR_WRITE          (64u)
 #define T_NR_PREAD64        (67u)
+#define T_NR_PSELECT6       (72u)
 #define T_NR_EXIT           (93u)
 #define T_NR_EXIT_GROUP     (94u)
 #define T_NR_SET_TID        (96u)
@@ -356,12 +357,14 @@ void arkrtos_port_exit_critical(uint32 state)
     (void)state;
 }
 
-#if (ARKRTOS_USE_LINUX_FUTEX == 1)
-/* ---------------- futex 的前提桩 ----------------
+#if (ARKRTOS_USE_LINUX_FUTEX == 1) || (ARKRTOS_USE_LINUX_SELECT == 1)
+/* ---------------- futex / pselect6 的前提桩 ----------------
  * 本档只链接 linux_abi.c；futex 的键要走分页后端与任务表，这三组符号由用例
  * 自己给：窗口就是模拟用户内存那一块（这样 copy_from_user 也能用），每对
  * 8 KB 的物理基址按 idx 线性推进，idx 7 故意留空（没驻留的对应回 0）。
- * 键因此是可算的：u_ptr(0x10) -> 0x00100010。 */
+ * 键因此是可算的：u_ptr(0x10) -> 0x00100010。
+ * pselect6 只要同一组「任务表 + block_in_critical + svc_restart」，分页那几
+ * 个符号它不用，但一并编进来不影响读数。 */
 #define T_FUTEX_WAIT        (0u)
 #define T_FUTEX_WAKE        (1u)
 #define T_FUTEX_REQUEUE     (3u)
@@ -819,7 +822,8 @@ static int call(t_ctx *c, uint32 nr, unsigned long a0, unsigned long a1,
  * 单独一个入口而不是把 call() 扩成变参：变参在 -Wformat 之外什么都检查不到，
  * 而这里写错的后果是「参数错位但照样返回一个数」。
  * 只有文件映射档用得到（mmap 带 fd），其它档编进来就是一条未使用函数告警。 */
-#if (ARKRTOS_USE_PAGING_FILEMAP == 1) || (ARKRTOS_USE_LINUX_FUTEX == 1)
+#if (ARKRTOS_USE_PAGING_FILEMAP == 1) || (ARKRTOS_USE_LINUX_FUTEX == 1) || \
+    (ARKRTOS_USE_LINUX_SELECT == 1)
 static int call6(t_ctx *c, uint32 nr, unsigned long a0, unsigned long a1,
                  unsigned long a2, unsigned long a3, unsigned long a4,
                  unsigned long a5)
@@ -2891,6 +2895,254 @@ static void t_futex(t_ctx *c)
 }
 #endif /* ARKRTOS_USE_LINUX_FUTEX == 1 */
 
+#if (ARKRTOS_USE_LINUX_SELECT == 1)
+/* 分组 15：pselect6（U-22，就绪等待）
+ *
+ * 判据落在「程序看到什么」上：返回值是就绪描述符个数、用户 fd_set 被改写成
+ * 只剩就绪位、timeout=0 不睡、到点回 0、没有可重放端口回 -EAGAIN。就绪
+ * 判据按本层对象定义：管道读端有数据或写端全关、管道写端有空间或读端全关、
+ * 普通文件永远就绪、fd 0 可读、fd 1/2 可写；没有任何对象支撑的描述符被选中
+ * 回 -EBADF；exceptfds 永不上报。 */
+static void t_pselect6(t_ctx *c)
+{
+    uint32 fds[2];
+    uint32 i;
+    unsigned long R0 = u_ptr(T_DATA_OFF);              /* 0x1000 读集 */
+    unsigned long W0 = u_ptr(T_DATA_OFF + 0x100u);     /* 0x1100 写集 */
+    unsigned long E0 = u_ptr(T_DATA_OFF + 0x200u);     /* 0x1200 异常集 */
+    uint32 tpo = T_DATA_OFF + 0x300u;                  /* 0x1300 时长（偏移） */
+    unsigned long TP = u_ptr(tpo);
+
+    fresh(c);
+    g_restart_rc = -1;
+    g_block_calls = 0;
+    g_ms = 1000u;
+
+    /* ---- 参数边界 ---- */
+    (void)call6(c, T_NR_PSELECT6, 0UL, 0UL, 0UL, 0UL, 0UL, 1UL);
+    ck_ret(c, -T_ENOSYS, "pselect6 带临时信号掩码回 -ENOSYS");
+
+    (void)call6(c, T_NR_PSELECT6, 1025UL, 0UL, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "pselect6 nfds > 1024 回 -EINVAL");
+
+    u_put32(tpo, 0u);
+    u_put32(tpo + 4u, 0u);
+    (void)call6(c, T_NR_PSELECT6, 0UL, 0UL, 0UL, 0UL, TP, 0UL);
+    ck_ret(c, 0, "pselect6 nfds=0 且 timeout=0 回 0");
+
+    u_put32(tpo, 3000000u);                     /* 约 34 天：截到 int32 上限 */
+    u_put32(tpo + 4u, 0u);
+    (void)call6(c, T_NR_PSELECT6, 0UL, 0UL, 0UL, 0UL, TP, 0UL);
+    ck_ret(c, -T_EAGAIN, "pselect6 超大时长按上限登记（没有重放端口回 -EAGAIN）");
+
+    (void)call6(c, T_NR_PSELECT6, 1UL, U_BASE - 8UL, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EFAULT, "pselect6 fd_set 指针不可读回 -EFAULT");
+    (void)call6(c, T_NR_PSELECT6, 1UL, 0UL, U_BASE - 8UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EFAULT, "pselect6 写集指针不可读回 -EFAULT");
+    (void)call6(c, T_NR_PSELECT6, 1UL, 0UL, 0UL, U_BASE - 8UL, 0UL, 0UL);
+    ck_ret(c, -T_EFAULT, "pselect6 异常集指针不可读回 -EFAULT");
+
+    /* ---- 无管道时的就绪判据 ---- */
+    u_put32(T_DATA_OFF, 1u);                    /* bit0 = stdin */
+    (void)call6(c, T_NR_PSELECT6, 1UL, R0, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 1, "pselect6 fd0 恒可读回 1");
+    ck_u(u_get32(T_DATA_OFF), 1u, "pselect6 fd0 就绪位保留");
+
+    u_put32(T_DATA_OFF + 0x100u, 2u);           /* bit1 = stdout */
+    (void)call6(c, T_NR_PSELECT6, 2UL, 0UL, W0, 0UL, 0UL, 0UL);
+    ck_ret(c, 1, "pselect6 fd1 恒可写回 1");
+
+    u_put32(tpo, 0u);                           /* 纯轮询 */
+    u_put32(tpo + 4u, 0u);
+    u_put32(T_DATA_OFF, 0x02u);                 /* bit1 选读：stderr 不可读 */
+    (void)call6(c, T_NR_PSELECT6, 2UL, R0, 0UL, 0UL, TP, 0UL);
+    ck_ret(c, 0, "pselect6 fd1 不可读回 0");
+
+    u_put32(T_DATA_OFF + 0x100u, 0x01u);        /* bit0 选写：stdin 不可写 */
+    (void)call6(c, T_NR_PSELECT6, 1UL, 0UL, W0, 0UL, TP, 0UL);
+    ck_ret(c, 0, "pselect6 fd0 不可写回 0");
+
+    /* 普通文件同步读写，两个方向永远就绪 */
+    g_stat_rc = 0;
+    g_stat_mode = 0u;
+    u_put_str(T_PATH_OFF, "/sel.txt");
+    (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF), 0UL, 0UL);
+    ck_ret(c, 3, "pselect6 前置：打开普通文件得 fd 3");
+    u_put32(T_DATA_OFF, 0x08u);
+    (void)call6(c, T_NR_PSELECT6, 4UL, R0, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 1, "pselect6 普通文件读就绪回 1");
+    u_put32(T_DATA_OFF + 0x100u, 0x08u);
+    (void)call6(c, T_NR_PSELECT6, 4UL, 0UL, W0, 0UL, 0UL, 0UL);
+    ck_ret(c, 1, "pselect6 普通文件写就绪回 1");
+    (void)call(c, T_NR_CLOSE, 3UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "pselect6 收尾：关普通文件");
+
+    u_put32(T_DATA_OFF, 0x20u);                 /* bit5：没有打开 */
+    (void)call6(c, T_NR_PSELECT6, 6UL, R0, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EBADF, "pselect6 选中未打开的描述符回 -EBADF");
+
+    u_put32(T_DATA_OFF, 1u);                    /* bit0 读 + bit1 写 */
+    u_put32(T_DATA_OFF + 0x100u, 2u);
+    (void)call6(c, T_NR_PSELECT6, 2UL, R0, W0, 0UL, 0UL, 0UL);
+    ck_ret(c, 2, "pselect6 读写集同时就绪回 2");
+
+    /* ---- 管道就绪 ---- */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF + 0x400u), 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "pselect6 前置：建管道");
+    u_get(T_DATA_OFF + 0x400u, fds, 8u);
+
+    u_put32(tpo, 0u);
+    u_put32(tpo + 4u, 0u);
+    u_put32(T_DATA_OFF, 0x08u);                 /* bit3 = 读端 */
+    (void)call6(c, T_NR_PSELECT6, 4UL, R0, 0UL, 0UL, TP, 0UL);
+    ck_ret(c, 0, "pselect6 空管道 timeout=0 回 0");
+    ck_u(u_get32(T_DATA_OFF), 0u, "pselect6 空管道把就绪位清掉");
+    ck(g_block_calls == 0, "pselect6 timeout=0 不睡");
+
+    u_put32(T_DATA_OFF, 0x10u);                 /* bit4 = 写端 */
+    (void)call6(c, T_NR_PSELECT6, 5UL, R0, 0UL, 0UL, TP, 0UL);
+    ck_ret(c, 0, "pselect6 管道写端不可读回 0");
+
+    u_put_str(T_DATA_OFF + 0x500u, "hi");
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1],
+               u_ptr(T_DATA_OFF + 0x500u), 2UL, 0UL);
+    ck_ret(c, 2, "pselect6 前置：向管道写 2 字节");
+    u_put32(T_DATA_OFF, 0x08u);
+    (void)call6(c, T_NR_PSELECT6, 4UL, R0, 0UL, 0UL, TP, 0UL);
+    ck_ret(c, 1, "pselect6 有数据的管道读端回 1");
+    ck_u(u_get32(T_DATA_OFF), 0x08u, "pselect6 读端就绪位保留");
+
+    u_put32(T_DATA_OFF + 0x100u, 0x10u);
+    (void)call6(c, T_NR_PSELECT6, 5UL, 0UL, W0, 0UL, TP, 0UL);
+    ck_ret(c, 1, "pselect6 未满管道写端可写回 1");
+
+    for(i = 0u; i < 300u; i++)
+    {
+        g_user[T_DATA_OFF + 0x500u + i] = (uint8)i;
+    }
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1],
+               u_ptr(T_DATA_OFF + 0x500u), 300UL, 0UL);
+    ck_ret(c, 254, "pselect6 前置：写满管道（短写 254 字节）");
+    u_put32(T_DATA_OFF + 0x100u, 0x10u);
+    (void)call6(c, T_NR_PSELECT6, 5UL, 0UL, W0, 0UL, TP, 0UL);
+    ck_ret(c, 0, "pselect6 满管道写端不可写回 0");
+    u_put32(T_DATA_OFF, 0x08u);
+    (void)call6(c, T_NR_PSELECT6, 4UL, R0, 0UL, 0UL, TP, 0UL);
+    ck_ret(c, 1, "pselect6 满管道读端仍可读回 1");
+
+    (void)call(c, T_NR_READ, (unsigned long)fds[0],
+               u_ptr(T_DATA_OFF + 0x600u), 256UL, 0UL);
+    ck_ret(c, 256, "pselect6 前置：排空管道");
+    u_put32(T_DATA_OFF, 0x08u);
+    (void)call6(c, T_NR_PSELECT6, 4UL, R0, 0UL, 0UL, TP, 0UL);
+    ck_ret(c, 0, "pselect6 排空后读端未就绪（写端还开着）");
+
+    (void)call(c, T_NR_CLOSE, (unsigned long)fds[1], 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "pselect6 前置：关写端");
+    u_put32(T_DATA_OFF, 0x08u);
+    (void)call6(c, T_NR_PSELECT6, 4UL, R0, 0UL, 0UL, TP, 0UL);
+    ck_ret(c, 1, "pselect6 写端全关后读端按 EOF 就绪");
+
+    u_put32(T_DATA_OFF + 0x200u, 0x08u);
+    (void)call6(c, T_NR_PSELECT6, 4UL, 0UL, 0UL, E0, TP, 0UL);
+    ck_ret(c, 0, "pselect6 exceptfds 永不上报");
+    ck_u(u_get32(T_DATA_OFF + 0x200u), 0u, "pselect6 exceptfds 被清空");
+
+    (void)call(c, T_NR_CLOSE, (unsigned long)fds[0], 0UL, 0UL, 0UL);
+    u_put32(T_DATA_OFF, 0x08u);
+    (void)call6(c, T_NR_PSELECT6, 4UL, R0, 0UL, 0UL, TP, 0UL);
+    ck_ret(c, -T_EBADF, "pselect6 关掉的描述符仍被选中回 -EBADF");
+
+    /* ---- 阻塞与超时（靠 svc_restart 重放） ---- */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF + 0x400u), 0UL, 0UL, 0UL);
+    u_get(T_DATA_OFF + 0x400u, fds, 8u);
+    g_block_calls = 0;
+    g_ms = 1000u;
+
+    arkrtos_current_task_id = 0;
+    u_put32(T_DATA_OFF, 0x08u);
+    (void)call6(c, T_NR_PSELECT6, 4UL, R0, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "pselect6 没有任务身份时按纯轮询回 0");
+    ck_u(u_get32(T_DATA_OFF), 0u, "pselect6 无身份时也清空就绪集");
+    arkrtos_current_task_id = 7;
+
+    u_put32(T_DATA_OFF, 0x08u);
+    (void)call6(c, T_NR_PSELECT6, 4UL, R0, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EAGAIN, "pselect6 无限等待但没有可重放端口回 -EAGAIN");
+    ck(g_block_calls == 0, "pselect6 -EAGAIN 时不假装睡过");
+
+    g_restart_rc = 0;
+    u_put32(tpo, 1u);                            /* 相对 1 s */
+    u_put32(tpo + 4u, 0u);
+    (void)call6(c, T_NR_PSELECT6, 4UL, R0, 0UL, 0UL, TP, 0UL);
+    ck_ret(c, 0, "pselect6 无就绪就登记并阻塞");
+    ck(g_block_calls == 1, "pselect6 阻塞走 block_in_critical 一次");
+
+    g_ms = 1500u;
+    (void)call6(c, T_NR_PSELECT6, 4UL, R0, 0UL, 0UL, TP, 0UL);
+    ck_ret(c, 0, "pselect6 截止时刻未到继续睡");
+    ck(g_block_calls == 2, "pselect6 继续睡也走一次 block_in_critical");
+
+    g_ms = 2500u;
+    u_put32(T_DATA_OFF, 0x08u);
+    (void)call6(c, T_NR_PSELECT6, 4UL, R0, 0UL, 0UL, TP, 0UL);
+    ck_ret(c, 0, "pselect6 到点回 0");
+    ck(g_block_calls == 2, "pselect6 到点不再睡");
+    ck_u(u_get32(T_DATA_OFF), 0u, "pselect6 超时把就绪位清掉");
+
+    (void)call6(c, T_NR_PSELECT6, 0UL, 0UL, 0UL, 0UL, U_BASE - 8UL, 0UL);
+    ck_ret(c, -T_EFAULT, "pselect6 timeout 指针不可读回 -EFAULT");
+    u_put32(tpo, 0u);
+    u_put32(tpo + 4u, 1000000000u);
+    (void)call6(c, T_NR_PSELECT6, 0UL, 0UL, 0UL, 0UL, TP, 0UL);
+    ck_ret(c, -T_EINVAL, "pselect6 tv_nsec 越界回 -EINVAL");
+    u_put32(tpo, 0xFFFFFFFFu);
+    u_put32(tpo + 4u, 0u);
+    (void)call6(c, T_NR_PSELECT6, 0UL, 0UL, 0UL, 0UL, TP, 0UL);
+    ck_ret(c, -T_EINVAL, "pselect6 负 tv_sec 回 -EINVAL");
+
+    /* 就绪优先于未到期的超时 */
+    g_ms = 1000u;
+    g_block_calls = 0;
+    u_put32(tpo, 5u);
+    u_put32(tpo + 4u, 0u);
+    u_put32(T_DATA_OFF, 0x08u);
+    (void)call6(c, T_NR_PSELECT6, 4UL, R0, 0UL, 0UL, TP, 0UL);
+    ck_ret(c, 0, "pselect6 前置：挂一次 5 s 等待");
+    u_put_str(T_DATA_OFF + 0x500u, "z");
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1],
+               u_ptr(T_DATA_OFF + 0x500u), 1UL, 0UL);
+    g_ms = 1500u;
+    u_put32(T_DATA_OFF, 0x08u);
+    (void)call6(c, T_NR_PSELECT6, 4UL, R0, 0UL, 0UL, TP, 0UL);
+    ck_ret(c, 1, "pselect6 就绪优先于未到期的超时");
+
+    /* 任务退出要清掉挂着的截止时刻：否则任务号复用会继承旧记录 */
+    g_ms = 1000u;
+    g_block_calls = 0;
+    (void)call(c, T_NR_READ, (unsigned long)fds[0],
+               u_ptr(T_DATA_OFF + 0x600u), 1UL, 0UL);
+    ck_ret(c, 1, "pselect6 前置：排空 1 字节");
+    u_put32(tpo, 5u);
+    u_put32(tpo + 4u, 0u);
+    u_put32(T_DATA_OFF, 0x08u);
+    (void)call6(c, T_NR_PSELECT6, 4UL, R0, 0UL, 0UL, TP, 0UL);
+    ck_ret(c, 0, "pselect6 前置：挂一次 5 s 等待");
+    arkrtos_linux_abi_on_task_exit(7);
+    g_ms = 7000u;                               /* 已过旧截止 6000 */
+    (void)call6(c, T_NR_PSELECT6, 4UL, R0, 0UL, 0UL, TP, 0UL);
+    ck_ret(c, 0, "pselect6 任务退出后重新登记");
+    ck(g_block_calls == 2, "pselect6 任务退出清掉了旧的截止时刻");
+
+    /* 收尾：清掉挂着的记录，恢复端口能力 */
+    (void)arkrtos_linux_abi_on_task_exit(7);
+    g_restart_rc = -1;
+    g_block_calls = 0;
+}
+#endif /* ARKRTOS_USE_LINUX_SELECT == 1 */
+
 int main(void)
 {
     t_ctx c;
@@ -2915,6 +3167,9 @@ int main(void)
     t_task_exit(&c);
 #if (ARKRTOS_USE_LINUX_FUTEX == 1)
     t_futex(&c);
+#endif
+#if (ARKRTOS_USE_LINUX_SELECT == 1)
+    t_pselect6(&c);
 #endif
 #if (ARKRTOS_USE_PAGING_DEMAND == 1)
     t_mapfixed(&c);

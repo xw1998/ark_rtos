@@ -436,6 +436,10 @@ ARK_FILEMAP_ON := $(findstring ARKRTOS_USE_PAGING_FILEMAP=1,$(EXTRA_CFLAGS))
 # EXTRA_CFLAGS 里显式开了才编 —— 关档时夹具与内核都不多一个字节，而且
 # 「关档时 mprotect 仍然只记账、写保护页照写不误」这条反假绿才测得到。
 ARK_MPROT_ON := $(findstring ARKRTOS_USE_PAGING_MPROTECT=1,$(EXTRA_CFLAGS))
+# pselect6（U-22）第七档：夹具多出 15 条 check（107 -> 122）。同样只在
+# EXTRA_CFLAGS 里显式开了才编 —— 关档时夹具与内核都不多一个字节，而且
+# 「关档时 select 类号的系统调用如实回 -ENOSYS」这条反假绿才测得到。
+ARK_SELECT_ON := $(findstring ARKRTOS_USE_LINUX_SELECT=1,$(EXTRA_CFLAGS))
 # 按需分页（真 mmap 语义 MAP_FIXED 的前提）本身不是夹具的一档，但夹具里
 # MAP_FIXED 那 6 条读数只在按需档才存在（关档时内核如实回 -ENOSYS，那正是
 # 反假绿要钉的）。因此这里也必须把 DEMAND 镜像给夹具。
@@ -460,6 +464,9 @@ LXFORK_DEFS   += -DARKRTOS_USE_PAGING_FILEMAP=1
 endif
 ifneq ($(ARK_MPROT_ON),)
 LXFORK_DEFS   += -DARKRTOS_USE_PAGING_MPROTECT=1
+endif
+ifneq ($(ARK_SELECT_ON),)
+LXFORK_DEFS   += -DARKRTOS_USE_LINUX_SELECT=1
 endif
 ifneq ($(ARK_DEMAND_ON),)
 LXFORK_DEFS   += -DARKRTOS_USE_PAGING_DEMAND=1

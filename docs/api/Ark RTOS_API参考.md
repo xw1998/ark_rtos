@@ -95,7 +95,7 @@
 - [kernelsrc/src/arkrtos_fs.c](#kernelsrcsrcarkrtos_fsc)（1 项）
 - [kernelsrc/src/arkrtos_guard.c](#kernelsrcsrcarkrtos_guardc)（1 项）
 - [kernelsrc/src/arkrtos_installer.c](#kernelsrcsrcarkrtos_installerc)（1 项）
-- [kernelsrc/src/arkrtos_linux_abi.c](#kernelsrcsrcarkrtos_linux_abic)（6 项）
+- [kernelsrc/src/arkrtos_linux_abi.c](#kernelsrcsrcarkrtos_linux_abic)（7 项）
 - [kernelsrc/src/arkrtos_loader.c](#kernelsrcsrcarkrtos_loaderc)（6 项）
 - [kernelsrc/src/arkrtos_log.c](#kernelsrcsrcarkrtos_logc)（1 项）
 - [kernelsrc/src/arkrtos_mini.c](#kernelsrcsrcarkrtos_minic)（1 项）
@@ -12715,18 +12715,51 @@ rusage 指针忽略、一个字节都不写。
 static int32 lx_futex(void *p_ctx) {
 ```
 
-**futex(2)：只支持 FUTEX_WAIT / FUTEX_WAKE**
+**futex(2)：WAIT / WAKE / REQUEUE / CMP_REQUEUE / WAIT_BITSET /**
+WAKE_BITSET 六档
 与 Linux 一致的语义：
 1) WAIT 在入口处读到的字 != val 时回 -EAGAIN（不睡）；
 2) 有未屏蔽信号时回 -EINTR（不睡）；
-3) WAKE 唤醒同一键上最多 val 个等待者，返回实际唤醒数。
+3) WAKE 唤醒同一键上最多 val 个等待者，返回实际唤醒数；
+4) WAIT 带 timeout（相对）到期回 -ETIMEDOUT；WAIT_BITSET 的
+timeout 与 Linux 一样是**绝对**时刻（本内核时钟是单调毫秒）；
+5) WAIT_BITSET / WAKE_BITSET 用 val3 当位集，只唤醒位集相交的
+等待者；普通 WAIT 登记的是全 1，所以普通 WAKE 能叫醒它，
+WAKE_BITSET 的任意非零位集也能；
+6) REQUEUE 把同一键上的等待者（先唤醒 nr_wake 个）改挂到
+uaddr2；CMP_REQUEUE 在动手前先核对 uaddr 上的字等于 val3，
+不等回 -EAGAIN。Linux 把 nr_requeue 塞在第四个参数
+（timeout 那一格）里，这里照抄这个复用。
 与 Linux 不同的边界（文档里写死）：
 - 键取自「物理帧 + 页内偏移」，只有落在 App 分页窗口里的字才
 有键；栈上的字（不在窗口里）如实回 -ENOSYS；
-- 其余 op（REQUEUE / PI / WAIT_BITSET …）一律 -ENOSYS；
-- 本内核没有无限睡眠：等待按 LX_WAIT_SLICE_MS 时间片重放，超时
-醒来后若值没变就继续睡，不编 -ETIMEDOUT（Linux 不传 timeout
-时也永远不会超时，语义一致）。
+- PI / FD 类 op（2 / 5..8 / 11..14）一律 -ENOSYS；
+- 本机没有墙钟，FUTEX_CLOCK_REALTIME 带 timeout 时如实
+-ENOSYS（不拿开机时长冒充绝对时刻）；
+- 本内核没有无限睡眠：等待按 LX_WAIT_SLICE_MS 时间片重放，没
+给 timeout 时重放醒来只要值没变就继续睡（Linux 语义一致）；
+- 被 requeue 的等待者把「期望值」更新为 uaddr2 上的当前字：
+requeue 本身不唤醒它（与 Linux 一致），但它下次时间片醒来
+不会因为两个地址的字不同而被误判成「已唤醒」。
+
+### `static int32 lx_pselect6(void *p_ctx) {`
+
+```c
+static int32 lx_pselect6(void *p_ctx) {
+```
+
+**pselect6(2)：对文件/管道描述符做就绪等待**
+与 Linux 一致的部分：readfds/writefds 轮询一次，就绪位写回用户
+表、非就绪位清除，返回值是就绪描述符个数；timeout=0 是纯轮询，
+timeout=NULL 是无限等待（本内核按时间片重放）；timeout 是相对时长
+且不被写回。
+与 Linux 不同的边界（都在文档里写死）：
+- exceptfds 接受但永不上报（没有带外数据/异步错误队列）；
+- 第六个参数（每次调用临时信号掩码）回 -ENOSYS 而不是忽略；
+- 就绪判据按本层对象定义：管道读端有数据或写端全关、管道写端
+有空间或读端全关、普通文件永远就绪、stdin 可读、stdout/stderr
+可写；没有任何对象支撑的描述符被选中回 -EBADF；
+- 没有可重放端口时阻塞路径回 -EAGAIN，不假装睡过。
 
 ### `static int32 lx_execve(void *p_ctx) {`
 

@@ -132,6 +132,11 @@ FILEMAP_FLAGS = FUTEX_FLAGS + ["-DARKRTOS_USE_PAGING_FILEMAP=1"]
 # 写在 PTE 上，而 PTE 只在分页链里存在；夹具这一段还要用 COW 把「子进程写只读页」
 # 造出来，所以下面三档必须同时开。夹具多 11 条 check（63 -> 74）。
 MPROTECT_FLAGS = FILEMAP_FLAGS + ["-DARKRTOS_USE_PAGING_MPROTECT=1"]
+# SELECT 档 = MPROTECT 档 + pselect6 跨 fd 就绪等待（U-22）。叠在最上面是因为
+# 夹具这一段要用管道对象与普通文件描述符一起读就绪位；管道虽然不依赖分页，
+# 但夹具的后半段整段都在分页链上，单独造一档会让「就绪判据」和「fd 表」
+# 各自只在一半场景里被测过。夹具多 15 条 check。
+SELECT_FLAGS = MPROTECT_FLAGS + ["-DARKRTOS_USE_LINUX_SELECT=1"]
 
 LA64_FALLBACKS = [
     "D:/LoongIDE/la64-tool/bin/loongarch64-newlib-elf-gcc.exe",
@@ -206,6 +211,12 @@ EXPECT_FILEMAP_CHECKS = 96
 # 父进程那一页一个字节没变、状态字是「被信号终止」而不是 exit 码。
 # 合计 80 条；再叠 futex 档的 15 条（含多时间片 7 条）= 87 条。
 EXPECT_MPROTECT_CHECKS = 107
+# SELECT 段多 15 条：pipe2、空管道读端不就绪（返回值 0）、非就绪时用户集被清位、
+# 50 ms 定时等待回 0、定时等待墙钟 >= 40 ms、写进 3 字节、读端就绪（1）、
+# 就绪位在用户集里保留、写端有空间就绪、stdout 恒可写、写满后写端不就绪、
+# 写端全关后读端按 EOF 就绪、exceptfds 永不上报（0）、exceptfds 被清位、
+# 坏 fd 回 -EBADF。合计 107 + 15 = 122 条。
+EXPECT_SELECT_CHECKS = 122
 
 FAILS = []
 PASSES = []
@@ -483,6 +494,37 @@ def check_default_off():
     else:
         ok("features-guard-mprotect", "features.h 四条 mprotect #error 都在")
 
+    m = re.search(r"^#define\s+ARKRTOS_USE_LINUX_SELECT\s+(\d+)\s*$", ac, re.M)
+    if not m:
+        bad("default-off-select",
+            "arkrtos_autoconf.h 里没有 ARKRTOS_USE_LINUX_SELECT")
+    elif m.group(1) != "0":
+        bad("default-off-select", "默认档 ARKRTOS_USE_LINUX_SELECT=%s（必须是 0）"
+            % m.group(1))
+    else:
+        ok("default-off-select", "arkrtos_autoconf.h: ARKRTOS_USE_LINUX_SELECT 0")
+
+    i = kc.find("config ARKRTOS_USE_LINUX_SELECT")
+    if i < 0:
+        bad("kconfig-wired-select",
+            "Kconfig.features 里没有 config ARKRTOS_USE_LINUX_SELECT")
+    else:
+        tail = kc[i + len("config ARKRTOS_USE_LINUX_SELECT"):]
+        m_end = re.search(r"^(config|menuconfig)\s", tail, re.M)
+        blk = tail[:m_end.start()] if m_end else tail
+        if "ARKRTOS_USE_LINUX_ABI" not in blk:
+            bad("kconfig-wired-select",
+                "Kconfig 的 select 项没有 depends on ARKRTOS_USE_LINUX_ABI")
+        else:
+            ok("kconfig-wired-select",
+               "Kconfig 项存在，depends on ARKRTOS_USE_LINUX_ABI")
+
+    if re.search(r'#error\s+"ARKRTOS_USE_LINUX_SELECT=1\s+requires '
+                 r'ARKRTOS_USE_LINUX_ABI=1"', fh) is None:
+        bad("features-guard-select", "features.h 缺 select 对 LINUX_ABI 的 #error")
+    else:
+        ok("features-guard-select", "features.h 的 select 依赖 #error 在")
+
     bc = read_text(os.path.join(ROOT, "board/qemu_loongarch64/arkrtos_board_config.h"))
     if re.search(r"^#define\s+ARKRTOS_USE_LINUX_FORK\s+1\s*$", bc, re.M):
         bad("board-switch", "QEMU LA64 板级不该缺省打开 fork（应靠 EXTRA_CFLAGS 出镜像）")
@@ -680,7 +722,7 @@ def run_qemu(qemu, seconds):
 
 
 def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
-          futex=False, filemap=False, mprotect=False):
+          futex=False, filemap=False, mprotect=False, select=False):
     lines = text.replace("\r\n", "\n").splitlines()
 
     def count(pred):
@@ -860,6 +902,35 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
             "状态字不是 SIGSEGV（被信号终止与 exit(11) 在 Linux 里是两件事）"
         req["parent page unchanged after the violation -> 17476 ok"] = \
             "违规写居然改到了父进程那一页"
+    if select:
+        # 这一段不看「返回了个数」：每条读数都必须逐字出现。
+        req["pselect6 pipe2 == 0 -> 0 ok"] = "pselect6 段没建起管道"
+        req["pselect6 empty pipe read end not ready -> 0 ok"] = \
+            "空管道的读端被报成了就绪（就绪判据没看缓冲区）"
+        req["pselect6 clears the user set when nothing is ready -> 0 ok"] = \
+            "没有就绪位时用户 fd_set 没被清位（原样退回来了）"
+        req["pselect6 timed wait returns 0 at the deadline -> 0 ok"] = \
+            "定时等待没在截止时刻回 0"
+        req["pselect6 timed wait really waited >= 40 ms -> 1 ok"] = \
+            "50 ms 的定时等待不到 40 ms 就返回了（超时被每次重放重新计时）"
+        req["pselect6 pipe wrote 3 bytes -> 3 ok"] = "pselect6 段的写入不完整"
+        req["pselect6 read end ready after 3 bytes -> 1 ok"] = \
+            "管道里有数据之后读端没报就绪"
+        req["pselect6 keeps the ready bit in the user set -> 1 ok"] = \
+            "就绪位没写回用户集（把「就绪」和「用户要求的那几位」弄混了）"
+        req["pselect6 write end ready while the pipe has space -> 1 ok"] = \
+            "有空间的管道写端没报就绪"
+        req["pselect6 stdout is always writable -> 1 ok"] = \
+            "stdout 没被当成恒可写"
+        req["pselect6 write end not ready when the pipe is full -> 0 ok"] = \
+            "管道写满之后写端还被报成就绪（判的是「能调 write」而不是「有容量」）"
+        req["pselect6 read end ready on EOF after the writer closed -> 1 ok"] = \
+            "写端全关之后读端没按 EOF 报就绪（Linux 在 EOF 上必须报可读）"
+        req["pselect6 never reports exceptfds -> 0 ok"] = \
+            "exceptfds 被上报了（本层没有带外数据通路）"
+        req["pselect6 clears exceptfds -> 0 ok"] = "exceptfds 没被清位"
+        req["pselect6 bad fd == -EBADF -> -9 ok"] = \
+            "没有对象支撑的 fd 被静默忽略了（Linux 回 -EBADF）"
     for line, why in req.items():
         if count(lambda s2, t=line: s2.strip() == "[fork] " + t) != 1:
             problems.append("缺 `[fork] %s` —— %s" % (line, why))
@@ -950,7 +1021,7 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
 
 
 def self_check(good_text, cow=False, shm=False, futex=False, filemap=False,
-               mprotect=False):
+               mprotect=False, select=False):
     """把好日志的九种坏法喂回判据，每一种都必须判红，否则解析器是空转。"""
     g = good_text.replace("\r\n", "\n")
     mutations = {
@@ -1067,6 +1138,32 @@ def self_check(good_text, cow=False, shm=False, futex=False, filemap=False,
             "缺 mprotect 成功读数": lambda s: s.replace(
                 "[fork] mprotect RO == 0 -> 0 ok\n", ""),
         })
+    if select:
+        mutations.update({
+            "空管道被报就绪": lambda s: s.replace(
+                "[fork] pselect6 empty pipe read end not ready -> 0 ok",
+                "[fork] pselect6 empty pipe read end not ready -> 1 FAIL (want 0)"),
+            "EOF 不报就绪": lambda s: s.replace(
+                "[fork] pselect6 read end ready on EOF after the writer closed -> 1 ok",
+                "[fork] pselect6 read end ready on EOF after the writer closed -> 0 FAIL (want 1)"),
+            "满管道仍报可写": lambda s: s.replace(
+                "[fork] pselect6 write end not ready when the pipe is full -> 0 ok",
+                "[fork] pselect6 write end not ready when the pipe is full -> 1 FAIL (want 0)"),
+            "fd_set 没清位": lambda s: s.replace(
+                "[fork] pselect6 clears the user set when nothing is ready -> 0 ok",
+                "[fork] pselect6 clears the user set when nothing is ready -> 1 FAIL (want 0)"),
+            "超时被重新计时": lambda s: s.replace(
+                "[fork] pselect6 timed wait really waited >= 40 ms -> 1 ok",
+                "[fork] pselect6 timed wait really waited >= 40 ms -> 0 FAIL (want 1)"),
+            "exceptfds 被上报": lambda s: s.replace(
+                "[fork] pselect6 never reports exceptfds -> 0 ok",
+                "[fork] pselect6 never reports exceptfds -> 1 FAIL (want 0)"),
+            "坏 fd 被放过": lambda s: s.replace(
+                "[fork] pselect6 bad fd == -EBADF -> -9 ok",
+                "[fork] pselect6 bad fd == -EBADF -> 0 FAIL (want -9)"),
+            "缺 select 读数": lambda s: s.replace(
+                "[fork] pselect6 stdout is always writable -> 1 ok\n", ""),
+        })
     if filemap:
         mutations.update({
             "filemap 共享写没落盘": lambda s: s.replace(
@@ -1082,17 +1179,19 @@ def self_check(good_text, cow=False, shm=False, futex=False, filemap=False,
                 "[fork] filemap msync rc -> 0 ok\n", ""),
         })
     missed = []
-    nchk = (EXPECT_MPROTECT_CHECKS if mprotect else
+    nchk = (EXPECT_SELECT_CHECKS if select else
+            (EXPECT_MPROTECT_CHECKS if mprotect else
             (EXPECT_FILEMAP_CHECKS if filemap else
             (EXPECT_FUTEX_CHECKS if futex else
             (EXPECT_SHM_CHECKS if shm else
-             (EXPECT_COW_CHECKS if cow else EXPECT_FORK_CHECKS)))))
+             (EXPECT_COW_CHECKS if cow else EXPECT_FORK_CHECKS))))))
     for name, fn in mutations.items():
         mutated = fn(g)
         if mutated == g:
             missed.append("%s（坏样本没改到东西）" % name)
             continue
-        passed, _ = judge(mutated, nchk, cow, shm, futex, filemap, mprotect)
+        passed, _ = judge(mutated, nchk, cow, shm, futex, filemap, mprotect,
+                          select)
         if passed:
             missed.append(name)
     return missed
@@ -1151,6 +1250,13 @@ def main(argv):
                                          "-DARKRTOS_USE_PAGING_FILEMAP=1",
                                          "-DARKRTOS_USE_PAGING_MPROTECT=1"],
                          "fork+cow+shm+futex+filemap+mprotect")
+        check_compile_on(la64, key_dir, ["-DARKRTOS_USE_PAGING_COW=1",
+                                         "-DARKRTOS_USE_PAGING_SHM=1",
+                                         "-DARKRTOS_USE_LINUX_FUTEX=1",
+                                         "-DARKRTOS_USE_PAGING_FILEMAP=1",
+                                         "-DARKRTOS_USE_PAGING_MPROTECT=1",
+                                         "-DARKRTOS_USE_LINUX_SELECT=1"],
+                         "fork+cow+shm+futex+filemap+mprotect+select")
 
     if qemu:
         # 六档各跑一遍：默认 fork（27 条）、fork+COW（32 条 + 内核 COW 日志）、
@@ -1170,6 +1276,8 @@ def main(argv):
              "fork+cow+shm+futex+filemap"),
             (MPROTECT_FLAGS, EXPECT_MPROTECT_CHECKS, True, True,
              "fork+cow+shm+futex+filemap+mprotect"),
+            (SELECT_FLAGS, EXPECT_SELECT_CHECKS, True, True,
+             "fork+cow+shm+futex+filemap+mprotect+select"),
         ]
         if a.no_build:
             rounds = rounds[-1:]
@@ -1203,10 +1311,13 @@ def main(argv):
             futex = "-DARKRTOS_USE_LINUX_FUTEX=1" in flags
             filemap = "-DARKRTOS_USE_PAGING_FILEMAP=1" in flags
             mprotect = "-DARKRTOS_USE_PAGING_MPROTECT=1" in flags
-            passed, notes = judge(text, nchk, cow, shm, futex, filemap, mprotect)
+            select = "-DARKRTOS_USE_LINUX_SELECT=1" in flags
+            passed, notes = judge(text, nchk, cow, shm, futex, filemap, mprotect,
+                                  select)
             if passed:
                 ok("qemu-readout", "[%s] %s" % (tag, notes[0]))
-                missed = self_check(text, cow, shm, futex, filemap, mprotect)
+                missed = self_check(text, cow, shm, futex, filemap, mprotect,
+                                    select)
                 if missed:
                     bad("parser-selfcheck",
                         "[%s] 这些坏样本没被判红：%s" % (tag, "、".join(missed)))
