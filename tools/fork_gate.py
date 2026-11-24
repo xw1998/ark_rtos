@@ -121,7 +121,7 @@ FUTEX_FLAGS = SHM_FLAGS + ["-DARKRTOS_USE_LINUX_FUTEX=1"]
 FILEMAP_FLAGS = FUTEX_FLAGS + ["-DARKRTOS_USE_PAGING_FILEMAP=1"]
 # MPROTECT 档 = FILEMAP 档 + 页级写保护（U-22）。叠在最上面而不是独立档：保护位
 # 写在 PTE 上，而 PTE 只在分页链里存在；夹具这一段还要用 COW 把「子进程写只读页」
-# 造出来，所以下面三档必须同时开。夹具多 10 条 check（63 -> 73）。
+# 造出来，所以下面三档必须同时开。夹具多 11 条 check（63 -> 74）。
 MPROTECT_FLAGS = FILEMAP_FLAGS + ["-DARKRTOS_USE_PAGING_MPROTECT=1"]
 
 LA64_FALLBACKS = [

@@ -48,6 +48,15 @@
 
 #if (ARKRTOS_USE_ELF == 1)
 
+/* 压力档：同一台板上反复跑「fork 一个子进程 -> 收尸」这条路。
+ * 1（默认）= 只跑一次，输出与行为一个字节都不变；>1 时每个子进程退出后
+ * 立刻在同一批空间/帧池上再来一轮，把「子进程退出后空间回收」与
+ * 「父进程共享页降只读」两条路径压到重复次数上（就是它们出过问题）。
+ * 由 -DDEMO_FORK_REPEAT=<n> 打开，不写进 Kconfig。 */
+#ifndef DEMO_FORK_REPEAT
+#define DEMO_FORK_REPEAT    1
+#endif
+
 #define DEMO_PATH           "/mnt/ram/hello"
 #if (ARKRTOS_USE_LINUX_ABI == 1)
 #define LX_DEMO_PATH        "/mnt/ram/linux_hello"
@@ -661,45 +670,66 @@ static void task_elf_demo(void)
         demo_putu((uint32)ARK_EXAMPLE_LINUX_FORK_LEN);
         demo_puts("\n");
 
-        if(rc >= 0)
         {
-            fargv[0] = "linux_fork";
-            rc = arkrtos_elf_exec(LX_FORK_PATH, 1, fargv);
+            int32  wrc = rc;        /* write 的结果：循环里不能被 exec 覆盖 */
+            uint32 fk;
 
-            demo_lock();
-            demo_puts("[fork] exec rc=");
-            demo_putu((uint32)rc);
-            demo_puts("\n");
-            demo_unlock();
-
-            if(rc == ARKRTOS_ELF_OK)
+            for(fk = 0u; (wrc >= 0) && (fk < (uint32)DEMO_FORK_REPEAT); fk++)
             {
-                waited = 0u;
-                while((arkrtos_elf_running() != 0) && (waited < DEMO_WAIT_MS))
+                int32 erc;
+
+                if(fk != 0u)
                 {
-                    arkrtos_task_wait_internal(DEMO_POLL_MS);
-                    waited += DEMO_POLL_MS;
+                    /* 压力档才有的一行：默认档一个字节都不多打。 */
+                    demo_lock();
+                    demo_puts("[fork] iter=");
+                    demo_putu(fk + 1u);
+                    demo_puts("\n");
+                    demo_unlock();
                 }
 
+                fargv[0] = "linux_fork";
+                erc = arkrtos_elf_exec(LX_FORK_PATH, 1, fargv);
+
                 demo_lock();
-                demo_puts("[fork] finished after ");
-                demo_putu(waited);
-                demo_puts(" ms, exit code ");
-                #if (ARKRTOS_USE_EXIT_CODE == 1)
-                if((arkrtos_elf_info(&info) == ARKRTOS_ELF_OK) &&
-                   (info.exit_code_set != 0u))
+                demo_puts("[fork] exec rc=");
+                demo_putu((uint32)erc);
+                demo_puts("\n");
+                demo_unlock();
+
+                if(erc == ARKRTOS_ELF_OK)
                 {
-                    demo_putu((uint32)info.exit_code);
+                    waited = 0u;
+                    while((arkrtos_elf_running() != 0) && (waited < DEMO_WAIT_MS))
+                    {
+                        arkrtos_task_wait_internal(DEMO_POLL_MS);
+                        waited += DEMO_POLL_MS;
+                    }
+
+                    demo_lock();
+                    demo_puts("[fork] finished after ");
+                    demo_putu(waited);
+                    demo_puts(" ms, exit code ");
+                    #if (ARKRTOS_USE_EXIT_CODE == 1)
+                    if((arkrtos_elf_info(&info) == ARKRTOS_ELF_OK) &&
+                       (info.exit_code_set != 0u))
+                    {
+                        demo_putu((uint32)info.exit_code);
+                    }
+                    else
+                    {
+                        demo_puts("(not reported)");
+                    }
+                    #else
+                    demo_puts("(exit code channel off)");
+                    #endif
+                    demo_puts("\n");
+                    demo_unlock();
                 }
                 else
                 {
-                    demo_puts("(not reported)");
+                    break;
                 }
-                #else
-                demo_puts("(exit code channel off)");
-                #endif
-                demo_puts("\n");
-                demo_unlock();
             }
         }
     }

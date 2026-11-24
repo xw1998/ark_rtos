@@ -1610,6 +1610,10 @@ static void la_pg_pair_pte(uint32 space, uint32 idx, uint32 pa, uint32 writable,
 static uint8  s_pg_frame_ref[ARKRTOS_QEMU_FRAME_COUNT];
 static uint32 s_pg_cow_copies;      /* 复制过多少对（诊断） */
 static uint32 s_pg_cow_faults;      /* 写故障命中多少次（诊断） */
+/* 陈旧只读条目被装回可写的次数（ref<=1 却还是只读）：这类事件一次都不该
+ * 停机，但也必须留读数 —— 它是「子空间回收」与「父进程共享页降只读」两条
+ * 路径交叉处的唯一证据。 */
+static uint32 s_pg_cow_reclaims;
 static uint32 s_pg_cow_shared;      /* 当前 ref > 1 的对数（诊断） */
 #if (ARKRTOS_USE_PAGING_SHM == 1)
 /* MAP_SHARED 匿名共享页的「对」标记。ref > 1 只说明「有人在共享」，分不出
@@ -1897,7 +1901,17 @@ static int32 la_pg_cow_fault(unsigned long badv)
 
     if(la_pg_ref_get(pa) <= 1u)
     {
-        return 0;
+        /* 陈旧只读条目：这一格现在只剩本空间一个持有者，但窗口里那一条
+         * 还是 fork 时刻装上的只读（对面空间已经被回收，ref 掉回 1）。
+         * 这时**不能复制**（复制等于把一次明确的权限判断变成静默放行，
+         * 还白吃两帧），也不能交回原路径 —— 交回去就是把「本空间自己的
+         * 私有页」当成越权：PLV0 直接停机、PLV3 把 App 重启掉。
+         * 与 MAP_SHARED 那条同理：装回可写就够了。
+         * 触发序列：进程 fork 出子进程 -> 子进程退出 -> 进程再 fork 一次
+         * （这一刻子空间被回收、ref 2->1）-> 进程写自己那块共享过的页。 */
+        s_pg_cow_reclaims++;
+        la_pg_install_pair(space, idx, pa, 1u);
+        return 1;
     }
 
     s_pg_cow_faults++;
@@ -5401,6 +5415,7 @@ uint32 s_swp_exit = 0u;
 uint32 s_swp_bogus = 0u;         /* 被栈帧合法性闸门拦下的次数 */
 uint32 s_swp_bogus_next = 0u;    /* 最近一次被拦下的栈指针 */
 uint32 s_swp_bogus_cur = 0u;     /* 拦下时的当前任务号 */
+uint32 s_swp_bogus_era = 0u;     /* 被取指地址闸门拦下的次数（目标帧 ERA 非 4 对齐） */
 
 /* 内核 RAM 窗（与 example 的链接脚本一致）：所有任务的栈都在这里，
  * 帧指针不可能落在窗外，落在窗外就只可能是越界读出来的垃圾。 */
@@ -5482,10 +5497,34 @@ la_frame_word *la_switch_inline(la_frame_word *frame)
         }
         {
             la_frame_word *next_frame = (la_frame_word *)(unsigned long)next_sp;
+            uint32 j = (uint32)((s_swp_pos - 1u) & 15u) * LA_SWP_FIELDS;
+
+            /* 取指地址闸门：LA64 没有压缩指令，任何一条合法指令都 4 字节对齐，
+             * 所以「目标帧的 ERA 不是 4 的倍数」只可能是帧内容坏了（被野写、
+             * 被当成别的结构体填过、或从一块已回收的栈里读出来的旧内存）。
+             * 拿这种帧 ertn 出去，第一条指令就是一次 INE，而 INE 不写 BADV，
+             * 现场只剩一个「看着不像地址」的 ERA —— 这正是 fork+cow+shm+
+             * futex+filemap 五档全开时那两次 0x0D 停机的形态。
+             * 与上面那道栈指针闸门同一取向：宁可原地不切，也不要把坏帧交出去。
+             * 这条闸门不会误伤合法路径：合法帧的 ERA 只可能来自
+             * arkrtos_port_stack_init() 写的入口地址（符号地址，天然 4 对齐）
+             * 或 eentry 保存的硬件 ERA（硬件 ERA 必然 4 对齐）。 */
+            if((next_frame[LA_FR_ERA] & 3UL) != 0UL)
+            {
+                s_swp_bogus_era++;
+                s_swp_bogus_next = (uint32)next_sp;
+                s_swp_bogus_cur  = (uint32)arkrtos_current_task_id;
+                s_swp_log[j + 6u] = (uint32)next_frame[LA_FR_ERA];
+                s_swp_log[j + 7u] = (uint32)next_frame[LA_FR_SP];
+                s_pg_commit = 0u;
+#if (ARKRTOS_USE_PRIV == 1)
+                s_next_pplv = self_pplv;
+#endif
+                return frame;
+            }
 
             /* 诊断：记下目标帧的 ERA / SP 槽。这一帧马上要被 ertn 恢复，
              * 这两格是「恢复之后到底跳到哪、用谁的 sp」的直接来源。 */
-            uint32 j = (uint32)((s_swp_pos - 1u) & 15u) * LA_SWP_FIELDS;
             s_swp_log[j + 6u] = (uint32)next_frame[LA_FR_ERA];
             s_swp_log[j + 7u] = (uint32)next_frame[LA_FR_SP];
 
@@ -5664,6 +5703,8 @@ static void la_fatal_dump(la_frame_word *frame)
     arkrtos_board_puthex(s_swp_bogus_next);
     arkrtos_board_puts(" bogus_cur=");
     arkrtos_board_puthex(s_swp_bogus_cur);
+    arkrtos_board_puts(" bogus_era=");
+    arkrtos_board_puthex(s_swp_bogus_era);
     arkrtos_board_puts("\n");
 }
 

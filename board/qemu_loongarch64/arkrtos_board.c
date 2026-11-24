@@ -426,6 +426,34 @@ uint32 arkrtos_board_hw_demo_level(uint32 idx)
 #endif /* ARKRTOS_DEMO_HWSAFE */
 
 
+/* 64 位十六进制打印：arkrtos_board_puthex() 只吃 uint32，而 LA64 的
+ * ERA/BADV/BADI 都是 64 位 CSR。以前这里直接用 uint32 接，高位被砍掉，
+ * 曾经让人把「0x00000000_0025229b」读成内核镜像里的地址（宽 VA 档的 App
+ * 窗口本来就可能落在高位）。高位为零时输出与旧口径逐字相同。 */
+static void la_board_puthex64(unsigned long v)
+{
+    static const char hexd[] = "0123456789abcdef";
+    char buf[17];
+    uint32 i;
+    uint32 n = 0u;
+    int started = 0;
+
+    for(i = 0u; i < 16u; i++)
+    {
+        uint32 nib = (uint32)((v >> ((15u - i) * 4u)) & 0xFu);
+
+        if((started == 0) && (nib == 0u) && (i < 15u))
+        {
+            continue;
+        }
+        started = 1;
+        buf[n] = hexd[nib];
+        n++;
+    }
+    buf[n] = '\0';
+    arkrtos_board_puts(buf);
+}
+
 /* ============================================================
  * 致命异常报告（覆盖 port 层的弱实现）
  * @details 打三个最关键的读数：ESTAT（Ecode + IS）、ERA（出错 PC）、
@@ -435,9 +463,9 @@ uint32 arkrtos_board_hw_demo_level(uint32 idx)
 * ============================================================ */
 void arkrtos_port_fatal_report(uint32 code)
 {
-    uint32 era;
-    uint32 crmd;
-    uint32 ecode;
+    unsigned long era;
+    unsigned long crmd;
+    unsigned long ecode;
 
     (void)code;
 
@@ -451,23 +479,23 @@ void arkrtos_port_fatal_report(uint32 code)
     /* BADV（CSR 0x7）是出错地址、BADI（0x8）是出错指令，和 ARM 的 BFAR 同位：
      * 没有它们只能知道"在哪条指令出事"，有了才知道"碰的是哪个地址"。 */
     {
-        uint32 badv;
-        uint32 badi;
+        unsigned long badv;
+        unsigned long badi;
 
         __asm__ volatile("csrrd %0, 0x7" : "=r"(badv) : : "memory");
         __asm__ volatile("csrrd %0, 0x8" : "=r"(badi) : : "memory");
         arkrtos_board_puts("\n[Ark RTOS] FATAL: estat=");
-        arkrtos_board_puthex(ecode);
+        la_board_puthex64(ecode);
         arkrtos_board_puts(" ecode=");
-        arkrtos_board_puthex((ecode >> 16) & 0x3Fu);
+        arkrtos_board_puthex((uint32)((ecode >> 16) & 0x3Fu));
         arkrtos_board_puts(" era=");
-        arkrtos_board_puthex(era);
+        la_board_puthex64(era);
         arkrtos_board_puts(" badv=");
-        arkrtos_board_puthex(badv);
+        la_board_puthex64(badv);
         arkrtos_board_puts(" badi=");
-        arkrtos_board_puthex(badi);
+        la_board_puthex64(badi);
         arkrtos_board_puts(" crmd=");
-        arkrtos_board_puthex(crmd);
+        la_board_puthex64(crmd);
         arkrtos_board_puts("\n[Ark RTOS] halted.\n");
         return;
     }
