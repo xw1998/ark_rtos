@@ -98,6 +98,14 @@
  * 4 KB 页帧池（U-3）：避开 App 区、内核区与 pmap test 的 0x03000000 测试
  * VA；8 MB 对齐（PS=22 条目要求 2^(22+1) = 8 MB），port 给它单独补一条
  * 恒等映射；2048 帧正好是 ARKRTOS_USE_PAGING_FRAMES 的编译期上限。
+ *
+ * PCIe 两段（virtio-net 用）：ECAM 与 MMIO 都必须在开 PG 之前就有静态
+ * 条目。曾经用动态 alias 逐页登记 BAR4，实测运行到第二帧 ARP 重发时
+ * 那条 MTLB 条目已经不在（badv=0x40003004 KERNEL refill）——设备 MMIO
+ * 是**常驻**映射，本来就该是静态条目，不该借动态槽位。ECAM 一段用
+ * PS=20 覆盖 bus 0 的 1 MB（(bus<<20)|(dev<<15)|(fn<<12)，枚举不到
+ * bus 1 就不需要 128 MB）；MMIO 一段按 BAR4 实测的 16 KB 铺 4 条 4 KB。
+ * 这三行只在 ARKRTOS_USE_NET_VIRTIO=1 时被编译进映射（见 port）。
  * ============================================================ */
 #define ARKRTOS_QEMU_APP_BASE        0x02000000u
 #define ARKRTOS_QEMU_APP_SIZE        (2u * 1024u * 1024u)
@@ -105,6 +113,9 @@
 #define ARKRTOS_PAGING_APPS_MAX      2u
 #define ARKRTOS_QEMU_FRAME_BASE      0x04000000u
 #define ARKRTOS_QEMU_FRAME_COUNT     2048u
+#define ARKRTOS_QEMU_PCI_ECAM_BASE   0x20000000u
+#define ARKRTOS_QEMU_PCI_MMIO_BASE   0x40000000u
+#define ARKRTOS_QEMU_PCI_MMIO_SIZE   (16u * 1024u)
 #undef  ARKRTOS_USE_PAGING_FRAMES
 #define ARKRTOS_USE_PAGING_FRAMES    1
 #undef  ARKRTOS_USE_PAGING_PAGES

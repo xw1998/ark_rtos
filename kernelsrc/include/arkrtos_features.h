@@ -843,9 +843,57 @@
 #define ARKRTOS_USE_LWIP                0
 #endif
 
+/* 真实以太网网卡（板级驱动 + 一张由真实驱动供包的 lwIP netif）。
+ * 打开后 lwIP 除了 127.0.0.1 的回环网卡之外，还多一张真网卡：帧从芯片
+ * 进来、从芯片出去（ARP / ICMP / TCP 都走真以太网帧）。
+ *
+ * 目前只有一种实现：board/<b>/drvnet.c 的 virtio-net over PCI（QEMU
+ * loongarch64 virt）。为什么它和 ARKRTOS_USE_LWIP 分开：协议栈是协议栈，
+ * 网卡是网卡；关掉这一档时 lwIP 仍是一张回环网卡，一个字节都不变。
+ *
+ * 依赖 ARKRTOS_USE_LWIP=1（没有协议栈就没有 netif 可接），单独打开会被
+ * 下面的一致性检查挡住。
+ *
+ * 诚实边界：这是 QEMU 的虚拟网卡，不是真 PHY。它证明的是内核能驱动一张
+ * 真的以太网控制器并把帧收发出去；PHY / MDIO / RMII 那条路仍欠账。 */
+#ifndef ARKRTOS_USE_NET_VIRTIO
+#define ARKRTOS_USE_NET_VIRTIO          0
+#endif
+
+/* 网卡开着就必须有协议栈。这里不是"顺手开一个开关"，而是把一条真实的
+ * 依赖定死在唯一的地方：驱动的唯一消费者是 lwIP 的 netif，单独打开网卡
+ * 只会在链接期缺 netif_add / ethernet_input 一整串符号。反过来不成立
+ * （协议栈可以只有回环网卡），所以只在这一侧强制。
+ *
+ * 为什么必须写在这里而不是让调用方同时给两个 -D：板级配置头是由
+ * tools/kconfig/genboard.py 生成的，它对 ARKRTOS_USE_LWIP 用的是
+ * #undef + #define 0（生成值必须压过命令行），而 -D 无论排在 -include
+ * 前后都会被 gcc 提前处理，所以命令行 root 不掉它。ARKRTOS_USE_NET_VIRTIO
+ * 是这一版新加的符号、板级头里没有它，于是它是这条依赖唯一可靠的入口。 */
+#if ARKRTOS_USE_NET_VIRTIO
+#undef  ARKRTOS_USE_LWIP
+#define ARKRTOS_USE_LWIP                1
+#endif
+
 /* MDK trace 采集（components/mdk_trace，依赖 DWT/ITM 调试硬件） */
 #ifndef ARKRTOS_USE_MDK_TRACE
 #define ARKRTOS_USE_MDK_TRACE           1
+#endif
+
+/* 调度开销统计（ARKRTOS_USE_SCHED_STAT）的实现住在 arkrtos_trace.c 里，而且
+ * 落在同一个 ARKRTOS_USE_MDK_TRACE 门内：计数器与 arkrtos_sched_stat_close()
+ * 都在那块 #if 里，连计时的数据源 arkrtos_trace_last_cycles()（DWT CYCCNT，
+ * 由 mdk_trace_init() 打开）也在里面。
+ * 因此「统计」对「trace」是真依赖，不是可选组合：trace 关掉时统计没有任何
+ * 数据源可读。这里派生一个「实际生效」的开关，所有实现与调用点都只看它，
+ * 让「关 trace 的板子」照样能编译（features.h 规则 3），而不是链接期报
+ * L6218E: Undefined symbol arkrtos_sched_stat_close。
+ * 注意：trace 关掉时统计是静默无效的（和 arkrtos_trace_last_cycles 一样），
+ * 所以 shell 的 stat 读数只在 ARKRTOS_USE_MDK_TRACE=1 的构建里才有意义。 */
+#if (ARKRTOS_USE_SCHED_STAT == 1) && (ARKRTOS_USE_MDK_TRACE == 1)
+#define ARKRTOS_SCHED_STAT_ENABLED      1
+#else
+#define ARKRTOS_SCHED_STAT_ENABLED      0
 #endif
 
 /* cm_backtrace 故障回溯（components/cm_backtrace，依赖 DWT/NVIC） */
@@ -1142,6 +1190,12 @@
  * 关掉 ARKRTOS_USE_MQ 会让它到链接期才炸；这里先挡住。 */
 #if ARKRTOS_USE_LWIP && !ARKRTOS_USE_MQ
 #error "ARKRTOS_USE_LWIP=1 requires ARKRTOS_USE_MQ=1 (sys_arch.c maps lwIP mailboxes onto arkrtos_mq)"
+#endif
+
+/* 网卡驱动接在 lwIP 的 netif 上，没有协议栈就没有可接的东西：单独打开
+ * 会在链接期缺 netif_add 一群符号。 */
+#if ARKRTOS_USE_NET_VIRTIO && !ARKRTOS_USE_LWIP
+#error "ARKRTOS_USE_NET_VIRTIO=1 requires ARKRTOS_USE_LWIP=1 (the driver only feeds a lwIP netif)"
 #endif
 
 #endif /* __ARKRTOS_FEATURES_H__ */

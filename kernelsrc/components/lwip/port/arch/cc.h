@@ -21,6 +21,20 @@
 /* 工具链的 <unistd.h> 是半主机那一套，lwIP 不需要，也不该把内核拖进去。 */
 #define LWIP_NO_UNISTD_H   1
 
+/* ssize_t 归谁定义：newlib 的 <sys/types.h> 已经有一个（typedef _ssize_t，
+ * 也就是 64 位 long），而 lwIP 的 arch.h 在看不到 SSIZE_MAX 时会自己
+ * `typedef int ssize_t;` —— 同一翻译单元里先 include <stdio.h> 再 include
+ * lwIP 就是类型冲突（实测：arkrtos_net.c 打开 ARKRTOS_USE_LWIP 后直接编不过）。
+ *
+ * 修法是把"平台已经提供"这条路走完整：定义 SSIZE_MAX 让 arch.h 不自己
+ * typedef，同时在这里把 ssize_t 定义成与 newlib 完全一样的 long。两处
+ * 类型一致，<sys/types.h> 先到后到都不冲突（C11 允许同类型重复 typedef）。
+ * 值取 ssize_t 的上限而不是 INT_MAX：这套工具链是 LP64。 */
+#ifndef SSIZE_MAX
+#define SSIZE_MAX  0x7FFFFFFFFFFFFFFFL
+#endif
+typedef long ssize_t;
+
 /* sockets 层要 errno。用 lwIP 自带那份（它自己定义 errno 变量），
  * 免得链进工具链的 <errno.h>——那份没有 ENOENT 这类 POSIX 码。 */
 #define LWIP_PROVIDE_ERRNO 1

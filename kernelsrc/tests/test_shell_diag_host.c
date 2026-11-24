@@ -1360,7 +1360,13 @@ static void t_task(void)
 
     CK_I(c0(cmd_task), 0);
     CK(out_has("id  prio  state     period  wait    peak/low  entry"));
-    CK(out_has("tasks: 2 used / 48 max  (ids 1..2)"));
+    {
+        char want[80];
+
+        snprintf(want, sizeof want, "tasks: 2 used / %d max  (ids 1..2)",
+                 (int)ARKRTOS_TASK_MAX_NUM);
+        CK(out_has(want));
+    }
     /* accounting is on in this build: the peak column prints the number */
     CK(out_has("4096"));
 

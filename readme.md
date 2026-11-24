@@ -533,8 +533,8 @@ arkrtos_dev_write(h, &on, 1);            /* 点亮蓝灯 */
 | `ARKRTOS_USE_FPU` | 由架构派生，本板 1 | 浮点单元使能 |
 | `ARKRTOS_USE_MPU` | 由架构派生，本板 1 | MPU 内存保护使能。Cortex-M4 上默认 = `ARKRTOS_ARCH_HAS_MPU`，全仓无显式关闭；机制与上板验证见 [docs/内存保护与App越权验证.md](docs/内存保护与App越权验证.md) |
 | `ARKRTOS_USE_PRIV` | 依赖 `ARKRTOS_USE_MPU`，本板 1 | 特权级分离使能。`ARKRTOS_USE_MPU == 1` 时自动为 1：App 任务非特权（CONTROL.nPRIV = 1），内核任务特权 |
-| `ARKRTOS_TASK_MAX_NUM` | 48 | 任务表总容量（静态 TCB 数组元素个数）。默认值已**移到 `config/arkrtos_partition.h` 第九节**，与分区策略同源，见下文「任务容量分层」 |
-| `ARKRTOS_TASK_TABLE_RAM_MAX` | 8192 | TCB 数组的 RAM 预算上限（字节），**固定 8KB，不随容量派生**；守护断言直接比较 `sizeof(arkrtos_task_table)`，超出则编译报错 |
+| `ARKRTOS_TASK_MAX_NUM` | 32 | 任务表总容量（静态 TCB 数组元素个数）。默认值**由分区派生**（`ARKRTOS_TASK_NEED_MIN + 8`），定义在 `config/arkrtos_partition.h` 第九节，与分区策略同源，见下文「任务容量分层」 |
+| `ARKRTOS_TASK_TABLE_RAM_MAX` | 12288 | TCB 数组的 RAM 预算上限（字节），**固定 12KB，不随容量派生**；守护断言直接比较 `sizeof(arkrtos_task_table)`，超出则编译报错 |
 | `ARKRTOS_TICK_PERIOD_US` | 500 | 滴答周期（微秒） |
 | `ARKRTOS_EVENT_NUM` | 10 | 事件对象数量 |
 | `ARKRTOS_MAX_EVENT_WAITERS` | 4 | 单个事件的等待者上限 |
@@ -591,12 +591,12 @@ arkrtos_dev_write(h, &on, 1);            /* 点亮蓝灯 */
 
 | 宏 | 默认值 | 说明 |
 |----|----|----|
-| `ARKRTOS_TASK_MAX_NUM` | 48 | 任务表总容量，扩规模只改这个数字 |
+| `ARKRTOS_TASK_MAX_NUM` | 派生（本板 32） | 任务表总容量 = `ARKRTOS_TASK_NEED_MIN + 8`（8 条动态余量），随 `SLOT_MAX` 自动伸缩 |
 | `ARKRTOS_TASK_MAX_KERNEL` | 8 | 内核自带任务 + 示例静态任务的预留 |
 | `ARKRTOS_TASK_PER_DRIVER` | 1 | 每个驱动镜像占用的任务数 |
 | `ARKRTOS_TASK_PER_APP` | 1 | 每个 App 镜像占用的任务数 |
 | `ARKRTOS_TASK_NEED_MIN` | 派生 | `内核 + 槽位数 × 每槽任务数` 之和，即分区策略要求的最小容量 |
-| `ARKRTOS_TASK_TABLE_RAM_MAX` | 8192 | 静态 TCB 数组的 RAM 预算（字节），固定值；实测 `sizeof(arkrtos_task_t)` = 76 字节（MPU 关）/ 140 字节（MPU 开） |
+| `ARKRTOS_TASK_TABLE_RAM_MAX` | 12288 | 静态 TCB 数组的 RAM 预算（字节），固定值；实测 `sizeof(arkrtos_task_t)` = 76 字节（MPU 关）/ 156 字节（MPU 开） |
 
 编译期断言 `arkrtos_task_capacity_check` 会拦住「容量装不下当前槽位策略」的配置；
 `arkrtos_cfg.c` 的 `arkrtos_task_table_ram_check` 再拦一道 RAM 预算。

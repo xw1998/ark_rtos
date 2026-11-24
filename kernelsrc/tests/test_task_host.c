@@ -1170,14 +1170,19 @@ static void test_delay_chain(void)
     arkrtos_delay_tick();
     ck_i32(arkrtos_task_table[1].status, ARKRTOS_TASK_READY, "the second sleep expires on time");
 
-    /* 周期等待：wait_time<=0 时补回一个周期 */
+    /* 周期等待：wait_time<=0 时把下一次间隔复位成配置周期。
+     * 这里曾经断言的是 period_time 30 -> 35（"补回一个周期"），而
+     * wait_period_internal 拿 period_time 当"从现在起再睡多久"来 arm，
+     * 于是周期变成 5/10/15/20… 逐次累加 —— 一个周期任务会越跑越慢。
+     * 正确的不变量是"每次到期后间隔回到 period"。 */
     arkrtos_task_table[2].wait_time = 0;
     arkrtos_task_table[2].period = 5;
     arkrtos_task_table[2].period_time = 30;
     arkrtos_kernel_tick = 30u;
     arkrtos_delay_tick();
     ck_i32(arkrtos_task_table[2].status, ARKRTOS_TASK_READY, "periodic wait expires");
-    ck_i32(arkrtos_task_table[2].period_time, 35, "periodic wait adds one period");
+    ck_i32(arkrtos_task_table[2].period_time, 5,
+           "periodic wait resets the interval to the configured period");
 
     /* 僵尸节点：已被提前唤醒（status != WAIT）的节点到期直接丢弃 */
     arkrtos_task_table[0].status = ARKRTOS_TASK_READY;

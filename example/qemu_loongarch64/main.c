@@ -55,6 +55,9 @@
 #include "arkrtos_elf.h"       /* ARKRTOS_USE_ELF：ELF64 装载器（M1） */
 #include "drvblk.h"
 #include "arkrtos_softbus_line.h"  /* 软总线物理线（第二条 UART，默认关时空头） */
+#if (ARKRTOS_USE_LWIP == 1)
+#include "lwip_port.h"         /* lwIP 服务任务：第一轮 tcpip_init + 接网卡 */
+#endif
 #if (ARKRTOS_USE_FDT == 1)
 #include "arkrtos_fdt.h"       /* MMU 档：启动时解析镜像里的标准 .dtb */
 #endif
@@ -79,6 +82,11 @@ extern int32 arkrtos_elf_demo_register(void);
  * 「Linux 式（PLV3、定址）」与「VxWorks 式（PLV0、装载期定址）」的差别。 */
 #if (ARKRTOS_USE_MODLOAD == 1)
 extern int32 arkrtos_mod_demo_register(void);
+#endif
+/* 真实以太网演示（见 net_demo.c）：对 10.0.2.2 发三次 ICMP echo，判据是
+ * 串口上的回包读数 + QEMU 抓包。只在 ARKRTOS_NET_DEMO=1 时存在。 */
+#if defined(ARKRTOS_NET_DEMO) && (ARKRTOS_NET_DEMO == 1)
+extern int32 arkrtos_net_demo_register(void);
 #endif
 
 /* 任务栈：LoongArch 没有硬件压栈，只有软件帧，512 字（4 KB）很宽裕。
@@ -2735,6 +2743,32 @@ int main(void)
     arkrtos_board_puts((((uint32)la_app_magic) == 0x4C413634u) ? " (probe image loaded)\n"
                                                              : " -> APP IMAGE NOT LOADED\n");
     #endif
+
+#if (ARKRTOS_USE_LWIP == 1)
+    /* lwIP 服务任务（优先级 9）：第一轮 tcpip_init() 把协议栈与 tcpip 线程
+     * 起起来，随后接上真实网卡。为什么放在这里而不是 main() 里直接调
+     * tcpip_init()：那会阻塞在一个信号量上等 tcpip 线程，而 main() 跑在
+     * 调度器启动之前，等不到任何任务。 */
+    {
+        int32 id_lwip = arkrtos_lwip_start();
+
+        arkrtos_board_puts("[boot] lwip task=");
+        arkrtos_board_putu((uint32)id_lwip);
+        arkrtos_board_puts("\n");
+    }
+#endif
+
+#if defined(ARKRTOS_NET_DEMO) && (ARKRTOS_NET_DEMO == 1)
+    /* 以太网演示任务：优先级 13，250 ms 一轮。它不做收包（收包由 lwIP 接入层
+     * 自己那个 1 ms 轮询任务搬），只负责按时发请求并把回包读数打出来。 */
+    {
+        int32 id_net = arkrtos_net_demo_register();
+
+        arkrtos_board_puts("[boot] net task=");
+        arkrtos_board_putu((uint32)id_net);
+        arkrtos_board_puts("\n");
+    }
+#endif
 
 #if defined(ARKRTOS_BUS_LINE_DEMO) && (ARKRTOS_BUS_LINE_DEMO == 1)
     /* 软总线物理线演示任务：优先级 13（低于 A/B/存储/自检，高于 shell 的 14），

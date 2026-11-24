@@ -62,7 +62,7 @@ Ark RTOS 是一个面向ARM Cortex-M系列MCU的实时操作系统，核心特�
 
 ```c
 #define ARKRTOS_CPU_ARCH         ARKRTOS_ARCH_CORTEX_M4
-/* ARKRTOS_TASK_MAX_NUM 不在本文件定义，见 config/arkrtos_partition.h（默认 48） */
+/* ARKRTOS_TASK_MAX_NUM 不在本文件定义，见 config/arkrtos_partition.h（由分区派生，默认 NEED_MIN + 8） */
 #define ARKRTOS_TICK_PERIOD_US   (500)
 #define ARKRTOS_EVENT_NUM        (10)
 ```
@@ -392,7 +392,7 @@ int32 count = arkrtos_drv_get_count();
 
 // 调度器参数
 // 注：ARKRTOS_TASK_MAX_NUM / ARKRTOS_TASK_TABLE_RAM_MAX 已移到 config/arkrtos_partition.h
-#define ARKRTOS_TASK_MAX_NUM        (48)  // 任务表总容量（默认值，可在板级覆盖）
+#define ARKRTOS_TASK_MAX_NUM        (32)  // 任务表总容量（由分区派生，可在板级覆盖）
 #define ARKRTOS_TICK_PERIOD_US      (500) // 滴答周期(微秒)
 #define ARKRTOS_EVENT_NUM           (10)  // 最大事件数
 #define ARKRTOS_MAX_EVENT_WAITERS   (4)   // 每事件最大等待者
@@ -415,7 +415,7 @@ int32 count = arkrtos_drv_get_count();
 
 ```c
 #define ARKRTOS_CPU_ARCH         ARKRTOS_ARCH_CORTEX_M3
-#define ARKRTOS_TASK_MAX_NUM     (16)   // 必须 >= ARKRTOS_TASK_NEED_MIN，否则编译失败
+#define ARKRTOS_TASK_MAX_NUM     (32)   // 必须 >= ARKRTOS_TASK_NEED_MIN（默认 24），否则编译失败
 #define ARKRTOS_TICK_PERIOD_US   (1000)
 #define ARKRTOS_EVENT_NUM        (4)
 #define ARKRTOS_MAX_EVENT_WAITERS (2)

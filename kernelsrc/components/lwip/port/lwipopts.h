@@ -22,7 +22,7 @@
  * 1. 运行模式：带 OS 的 sockets
  * ============================================================ */
 #define NO_SYS                          0
-#define SYS_LIGHTWEIGHT_PROT            1   /* sys_arch.h 用 PRIMASK 提供 */
+#define SYS_LIGHTWEIGHT_PROT            1   /* sys_arch.h 用各架构的全局中断位提供 */
 #define LWIP_NETCONN                    1   /* netconn API：sockets 的底座 */
 #define LWIP_SOCKET                     1
 #define LWIP_SOCKET_SELECT              1

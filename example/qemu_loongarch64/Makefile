@@ -183,6 +183,28 @@ SRCS_C := $(KERNEL_SRCS) \
 	example/qemu_loongarch64/mod_demo.c \
 	example/qemu_loongarch64/libc_shim.c
 
+# --- 真实以太网网卡（virtio-net over PCI，默认关）--------------------------
+# 只有 EXTRA_CFLAGS 里显式写了 ARKRTOS_USE_NET_VIRTIO=1 才把板级驱动与 lwIP
+# 源码加进来。默认档下 SRCS_C / INCLUDES 与改动前逐字节相同，镜像也一样。
+#
+# lwIP 的源清单是显式列目录通配 + $(sort)：不许整树 wildcard —— 那会把
+# apps/（未 vendored）与 ipv6/（本工程 LWIP_IPV6=0，编了也用不上）拖进来，
+# 而且顺序跟着目录枚举走，镜像就不再可复现。
+ARK_NET_ON := $(findstring ARKRTOS_USE_NET_VIRTIO=1,$(EXTRA_CFLAGS))
+ifneq ($(ARK_NET_ON),)
+LWIP_DIR := kernelsrc/components/lwip
+LWIP_SRCS := $(sort $(wildcard $(LWIP_DIR)/src/core/*.c) \
+                    $(wildcard $(LWIP_DIR)/src/core/ipv4/*.c) \
+                    $(wildcard $(LWIP_DIR)/src/api/*.c)) \
+             $(LWIP_DIR)/src/netif/ethernet.c \
+             $(LWIP_DIR)/port/lwip_port.c \
+             $(LWIP_DIR)/port/sys_arch.c \
+             $(LWIP_DIR)/port/lwip_netif_link.c
+SRCS_C += board/qemu_loongarch64/drvnet.c $(LWIP_SRCS) \
+          example/qemu_loongarch64/net_demo.c
+INCLUDES += -I$(LWIP_DIR)/src/include -I$(LWIP_DIR)/port
+endif
+
 SRCS_S := \
 	kernelsrc/port/loongarch/la64/arkrtos_context.S \
 	example/qemu_loongarch64/start.S

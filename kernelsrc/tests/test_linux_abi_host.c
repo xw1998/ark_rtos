@@ -541,7 +541,7 @@ int32 __wrap_arkrtos_port_svc_exec_frame(void *p, unsigned long entry,
 
 /* ---------------- 内核侧桩 ---------------- */
 
-int32 arkrtos_current_task_id = 42;
+int32 arkrtos_current_task_id = 7;
 
 static uint32 g_ms = 1234567u;
 static int32  g_exit_code = -1;
@@ -877,7 +877,7 @@ static void t_entry(t_ctx *c)
     /* getpid / getuid / geteuid / set_tid_address */
     h0 = arkrtos_linux_abi_stat(0u);
     (void)call(c, T_NR_GETPID, 0UL, 0UL, 0UL, 0UL);
-    ck_ret(c, 42, "getpid");
+    ck_ret(c, 7, "getpid");
     (void)call(c, T_NR_GETUID, 0UL, 0UL, 0UL, 0UL);
     ck_ret(c, 0, "getuid");
     (void)call(c, T_NR_GETEUID, 0UL, 0UL, 0UL, 0UL);
@@ -885,7 +885,7 @@ static void t_entry(t_ctx *c)
 
     u_put32(T_DATA_OFF, 0xA5A5A5A5u);
     (void)call(c, T_NR_SET_TID, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
-    ck_ret(c, 42, "set_tid_address 回报 tid");
+    ck_ret(c, 7, "set_tid_address 回报 tid");
     ck_u(u_get32(T_DATA_OFF), 0xA5A5A5A5u, "set_tid_address 不写用户内存");
 
     ck_u(arkrtos_linux_abi_stat(0u) - h0, 4u, "四次成功计进 stat(0)");
@@ -1998,15 +1998,15 @@ static void t_signal(t_ctx *c)
     fresh(c);
     (void)call(c, T_NR_KILL, 43UL, 10UL, 0UL, 0UL);
     ck_ret(c, -T_ESRCH, "kill 不是自己回 -ESRCH");
-    (void)call(c, T_NR_KILL, 42UL, 0UL, 0UL, 0UL);
+    (void)call(c, T_NR_KILL, 7UL, 0UL, 0UL, 0UL);
     ck_ret(c, 0, "kill(sig 0) 是存在性探测");
-    (void)call(c, T_NR_KILL, 42UL, 32UL, 0UL, 0UL);
+    (void)call(c, T_NR_KILL, 7UL, 32UL, 0UL, 0UL);
     ck_ret(c, -T_EINVAL, "kill 实时信号号回 -EINVAL");
     (void)call(c, T_NR_TKILL, 43UL, 10UL, 0UL, 0UL);
     ck_ret(c, -T_ESRCH, "tkill 不是自己回 -ESRCH");
     (void)call(c, T_NR_TGKILL, 1UL, 2UL, 10UL, 0UL);
     ck_ret(c, -T_ESRCH, "tgkill tgid != tid 回 -ESRCH");
-    (void)call(c, T_NR_TGKILL, 42UL, 42UL, 10UL, 0UL);
+    (void)call(c, T_NR_TGKILL, 7UL, 7UL, 10UL, 0UL);
     ck_ret(c, 0, "tgkill 自己成功");
 
     /* --- 投递：帧内容 / 寄存器改写 / 屏蔽字 --- */
@@ -2021,7 +2021,7 @@ static void t_signal(t_ctx *c)
         g_export_pat[i] = 0x11110000UL + i;
     }
     ck(sig_install_act(c, 12u, T_HANDLER, T_RESTORER, 0UL) == 0, "安装 SIGUSR2");
-    (void)call(c, T_NR_KILL, 42UL, 12UL, 0UL, 0UL);
+    (void)call(c, T_NR_KILL, 7UL, 12UL, 0UL, 0UL);
 
     /* 投递点在「系统调用返回用户态之前」，kill 这次调用自己就会进 handler，
      * 所以 a0 已经是信号号（不是 kill 的 0）。 */
@@ -2085,36 +2085,36 @@ static void t_signal(t_ctx *c)
 
     /* --- 默认动作 / 忽略 / 不可投递 --- */
     fresh(c);
-    (void)call(c, T_NR_KILL, 42UL, 17UL, 0UL, 0UL);
+    (void)call(c, T_NR_KILL, 7UL, 17UL, 0UL, 0UL);
     (void)call(c, T_NR_GETPID, 0UL, 0UL, 0UL, 0UL);
-    ck_ret(c, 42, "默认忽略的信号不改变返回值");
+    ck_ret(c, 7, "默认忽略的信号不改变返回值");
     ck_u(c->reg[T_UREG_ERA], 0u, "默认忽略的信号不进处理函数");
 
     fresh(c);
-    (void)call(c, T_NR_KILL, 42UL, 19UL, 0UL, 0UL);
+    (void)call(c, T_NR_KILL, 7UL, 19UL, 0UL, 0UL);
     (void)call(c, T_NR_GETPID, 0UL, 0UL, 0UL, 0UL);
-    ck_ret(c, 42, "默认停止（SIGSTOP）按忽略处理");
+    ck_ret(c, 7, "默认停止（SIGSTOP）按忽略处理");
 
     fresh(c);
     g_exit_calls = 0;
     g_exit_code = -1;
-    (void)call(c, T_NR_KILL, 42UL, 2UL, 0UL, 0UL);
+    (void)call(c, T_NR_KILL, 7UL, 2UL, 0UL, 0UL);
     (void)call(c, T_NR_GETPID, 0UL, 0UL, 0UL, 0UL);
     ck(g_exit_calls == 1, "默认终止的信号让任务退出");
     ck(g_exit_code == 130, "退出码 = 128 + 信号号");
 
     fresh(c);
     ck(sig_install_act(c, 10u, 1UL, 0UL, 0UL) == 0, "SIG_IGN 不需要 restorer");
-    (void)call(c, T_NR_KILL, 42UL, 10UL, 0UL, 0UL);
+    (void)call(c, T_NR_KILL, 7UL, 10UL, 0UL, 0UL);
     (void)call(c, T_NR_GETPID, 0UL, 0UL, 0UL, 0UL);
-    ck_ret(c, 42, "SIG_IGN 的信号被吞掉");
+    ck_ret(c, 7, "SIG_IGN 的信号被吞掉");
     ck_u(c->reg[T_UREG_ERA], 0u, "SIG_IGN 不改上下文");
 
     /* 端口报不出帧长 / handler 不可读 / 栈不够：都不投递，pending 留着 */
     fresh(c);
     ck(sig_install_act(c, 10u, T_HANDLER, T_RESTORER, 0UL) == 0, "安装处理函数");
     g_frame_bytes = 0u;      /* 投递点就在 kill 这次调用的返回处，条件必须提前设 */
-    (void)call(c, T_NR_KILL, 42UL, 10UL, 0UL, 0UL);
+    (void)call(c, T_NR_KILL, 7UL, 10UL, 0UL, 0UL);
     (void)call(c, T_NR_GETPID, 0UL, 0UL, 0UL, 0UL);
     ck_u(c->reg[T_UREG_ERA], 0u, "帧长未知时不投递");
     g_frame_bytes = T_FRAME_BYTES;
@@ -2124,28 +2124,28 @@ static void t_signal(t_ctx *c)
     fresh(c);
     ck(sig_install_act(c, 10u, 0x02000801UL, T_RESTORER, 0UL) == 0,
        "装一个未对齐的 handler（内核不拦，投递时拦）");
-    (void)call(c, T_NR_KILL, 42UL, 10UL, 0UL, 0UL);
+    (void)call(c, T_NR_KILL, 7UL, 10UL, 0UL, 0UL);
     (void)call(c, T_NR_GETPID, 0UL, 0UL, 0UL, 0UL);
     ck_u(c->reg[T_UREG_ERA], 0u, "handler 未对齐时不投递");
 
     fresh(c);
     ck(sig_install_act(c, 10u, 0x200UL, T_RESTORER, 0UL) == 0,
        "装一个窗口外的 handler");
-    (void)call(c, T_NR_KILL, 42UL, 10UL, 0UL, 0UL);
+    (void)call(c, T_NR_KILL, 7UL, 10UL, 0UL, 0UL);
     (void)call(c, T_NR_GETPID, 0UL, 0UL, 0UL, 0UL);
     ck_u(c->reg[T_UREG_ERA], 0u, "handler 读不出指令时不投递");
 
     fresh(c);
     ck(sig_install_act(c, 10u, T_HANDLER, T_RESTORER, 0UL) == 0, "安装处理函数");
     c->reserve = 0UL;
-    (void)call(c, T_NR_KILL, 42UL, 10UL, 0UL, 0UL);
+    (void)call(c, T_NR_KILL, 7UL, 10UL, 0UL, 0UL);
     (void)call(c, T_NR_GETPID, 0UL, 0UL, 0UL, 0UL);
     ck_u(c->reg[T_UREG_ERA], 0u, "栈不够时不投递");
 
     fresh(c);
     ck(sig_install_act(c, 10u, T_HANDLER, T_RESTORER, 0UL) == 0, "安装处理函数");
     g_to_budget = 0;
-    (void)call(c, T_NR_KILL, 42UL, 10UL, 0UL, 0UL);
+    (void)call(c, T_NR_KILL, 7UL, 10UL, 0UL, 0UL);
     (void)call(c, T_NR_GETPID, 0UL, 0UL, 0UL, 0UL);
     g_to_budget = -1;
     ck_u(c->reg[T_UREG_ERA], 0u, "帧铺不进用户栈时不投递");
@@ -2153,7 +2153,7 @@ static void t_signal(t_ctx *c)
     fresh(c);
     ck(sig_install_act(c, 10u, T_HANDLER, T_RESTORER, 0UL) == 0, "安装处理函数");
     c->set_reg_fail = T_UREG_SP;
-    (void)call(c, T_NR_KILL, 42UL, 10UL, 0UL, 0UL);
+    (void)call(c, T_NR_KILL, 7UL, 10UL, 0UL, 0UL);
     (void)call(c, T_NR_GETPID, 0UL, 0UL, 0UL, 0UL);
     ck_u(c->reg[T_UREG_ERA], 0u, "写 sp 失败时回滚 era（不进半个 handler）");
     c->set_reg_fail = -1;
@@ -2166,7 +2166,7 @@ static void t_signal(t_ctx *c)
     u_put32(T_SET_OFF, 1u << (10u - 1u));
     (void)call(c, T_NR_RT_SIGPROCMASK, 0UL, u_ptr(T_SET_OFF), 0UL,
                (unsigned long)T_SIGSET_BYTES);
-    (void)call(c, T_NR_KILL, 42UL, 10UL, 0UL, 0UL);
+    (void)call(c, T_NR_KILL, 7UL, 10UL, 0UL, 0UL);
     (void)call(c, T_NR_GETPID, 0UL, 0UL, 0UL, 0UL);
     ck_u(c->reg[T_UREG_ERA], 0u, "被屏蔽的信号不投递");
     (void)call(c, T_NR_RT_SIGPROCMASK, 1UL, u_ptr(T_SET_OFF), 0UL,
@@ -2314,7 +2314,7 @@ static void t_reset(t_ctx *c)
     (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
     u_get(T_DATA_OFF, fds, 8u);
     ck(sig_install_act(c, 10u, T_HANDLER, T_RESTORER, 0UL) == 0, "安装处理函数");
-    (void)call(c, T_NR_KILL, 42UL, 10UL, 0UL, 0UL);
+    (void)call(c, T_NR_KILL, 7UL, 10UL, 0UL, 0UL);
     s0 = arkrtos_linux_abi_stat(0u);
 
     arkrtos_linux_abi_reset();
@@ -2436,7 +2436,7 @@ static void t_futex(t_ctx *c)
     (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
     ck_ret(c, 1, "futex WAKE 回实际唤醒数 1");
     ck(g_wake_calls > 0, "futex WAKE 真的调用了唤醒接口");
-    ck(g_wake_last == 42, "futex WAKE 叫的是等待的那个任务");
+    ck(g_wake_last == 7, "futex WAKE 叫的是等待的那个任务");
 
     /* 重放：这次是「被 WAKE 叫醒」，回 0 并销账 */
     (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
@@ -2457,7 +2457,7 @@ static void t_futex(t_ctx *c)
     arkrtos_current_task_id = 0;
     (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
     ck_ret(c, -T_EFAULT, "futex 任务号为 0 回 -EFAULT");
-    arkrtos_current_task_id = 42;
+    arkrtos_current_task_id = 7;
 
     /* 没有分页窗口（MPU 后端）：整个地址空间只有一份，虚拟地址本身就是键 */
     g_win_va = 0ul;
@@ -2504,7 +2504,7 @@ static void t_futex(t_ctx *c)
     (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
     ck_ret(c, 0, "futex 为 EINTR 那条路径先登记一次");
     (void)sig_install_act(c, 10u, 0x1000UL, 0x2000UL, 0u);
-    (void)call(c, T_NR_KILL, 42UL, 10UL, 0UL, 0UL);
+    (void)call(c, T_NR_KILL, 7UL, 10UL, 0UL, 0UL);
     ck_ret(c, 0, "futex 前置：kill 自己成功（造一个投不掉的 pending）");
     (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
     ck_ret(c, -T_EINTR, "futex 重放时撞上未屏蔽信号回 -EINTR");
@@ -2520,7 +2520,7 @@ static void t_futex(t_ctx *c)
     g_restart_rc = 0;
     (void)sig_install_act(c, 10u, 0x1000UL, 0x2000UL, 0u);
     ck_ret(c, 0, "futex 前置：给 SIGUSR1 装一个投递不到的处理函数");
-    (void)call(c, T_NR_KILL, 42UL, 10UL, 0UL, 0UL);
+    (void)call(c, T_NR_KILL, 7UL, 10UL, 0UL, 0UL);
     ck_ret(c, 0, "futex 前置：kill 自己成功");
     (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
     ck_ret(c, -T_EINTR, "futex WAIT 有未屏蔽信号回 -EINTR");

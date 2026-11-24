@@ -51,7 +51,7 @@
  * 这里给桩一个同签名原型，避免 -Wmissing-prototypes。 */
 void ark_shell_printf(const char *fmt, ...);
 
-#if (ARKRTOS_USE_SCHED_STAT == 1)
+#if ARKRTOS_SCHED_STAT_ENABLED
 /* 这四个账本在 arkrtos_trace.c 里是全局符号，调用点（arkrtos_task.c）
  * 就地 extern 声明——仓库里没有集中头，这里同样就地声明。 */
 extern volatile uint32 arkrtos_sched_stat_n;
@@ -379,7 +379,7 @@ static void test_record(void)
  * ------------------------------------------------------------------ */
 static void test_sched_stat(void)
 {
-#if (ARKRTOS_USE_SCHED_STAT == 1)
+#if ARKRTOS_SCHED_STAT_ENABLED
     /* 切换耗时：由调度器在切换点调用 close(t0)。 */
     arkrtos_sched_stat_n = 0u;
     arkrtos_sched_stat_sum = 0u;

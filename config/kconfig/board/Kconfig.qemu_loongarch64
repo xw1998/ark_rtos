@@ -119,6 +119,29 @@ config ARKRTOS_QEMU_UART_BASE
 	hex "ns16550a console base"
 	default 0x1FE001E0
 
+config ARKRTOS_QEMU_PCI_ECAM_BASE
+	hex "PCIe ECAM base (bus 0 config space window)"
+	default 0x20000000
+	help
+	  QEMU loongarch virt 的 pcie@20000000 把 128 MB 的 ECAM 放在这里：
+	  (bus << 20) | (dev << 15) | (fn << 12)。内核只在 bus 0 上枚举，
+	  所以静态映射只需要 1 MB（PS=20 一条），不是整段 128 MB。
+
+config ARKRTOS_QEMU_PCI_MMIO_BASE
+	hex "PCIe MMIO window base (where BARs get assigned)"
+	default 0x40000000
+	help
+	  pcie ranges 里 MEM 的父地址。板级驱动只把 BAR 落到这里，不自己
+	  挑地址 —— 静态映射与 BAR 回落地址必须是同一个数，否则驱动写进
+	  BAR 的地址在内核里没有映射，第一次访问就 refill。
+
+config ARKRTOS_QEMU_PCI_MMIO_SIZE
+	int "PCIe MMIO window size in bytes (statically mapped)"
+	default 16384
+	help
+	  静态映射的 MMIO 窗口长度。virtio-net 的 BAR4 实测 16 KB（common
+	  /notify/device/isr 四段都在里面），所以默认就是一整个 BAR 的大小。
+
 config ARKRTOS_QEMU_UART_CLK
 	int "ns16550a input clock in Hz (device-tree cross-check)"
 	default 25000000

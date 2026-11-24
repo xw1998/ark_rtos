@@ -312,7 +312,28 @@ u32_t sys_arch_mbox_tryfetch(sys_mbox_t *mbox, void **msg)
  * lwIP 线程）。两个槽足够，多出来的请求会拿到 SYS_THREAD_NULL 而不是
  * 悄悄复用别人的栈。 */
 #define LWIP_THREAD_MAX      2
+/* 栈按字算，实际给的是 LWIP_THREAD_STACK_W * 4 字节。
+ *
+ * 开真实网卡时给 8 KB：这一轮 tcpip 线程要跑 tcpip_callback(netif_add)、
+ * ethernet_input 与 pbuf 链，实测 1 KB / 2 KB 都会被打穿——读数就是
+ * "[STK] task N: stack bottom flag overwritten"，随后所有 tcpip_callback
+ * 静默不执行（协议栈本身一句错都不报）。8 KB 是 lwIP 官方对 32 位平台
+ * tcpip 线程的推荐下限。
+ *
+ * 关档保持 512 字（2 KB）：两个槽共 4 KB。这不是随手写的小数——Keil 的
+ * F427 / F401 工程把 lwip_port.c 一起链进去，而 F427 的内核 RAM 区只有
+ * 56 KB（build/kernel.sct 的 RW_KERNEL 0xE000）。两个槽按 8 KB 给会多占
+ * 12 KB，实测直接 L6406E "No space in execution regions"（停在链接期，
+ * 不是编译期），并且这 12 KB 换不来任何东西：ARM 这一档没有真网卡，
+ * tcpip 线程仍然只调一次 tcpip_init。 */
+#if (ARKRTOS_USE_NET_VIRTIO == 1)
+#define LWIP_THREAD_STACK_W  2048u  /* 8 KB：接真网卡后的 tcpip 线程 */
+#else
 #define LWIP_THREAD_STACK_W  512u   /* 2 KB，与 TCPIP_THREAD_STACKSIZE 对齐 */
+#endif
+
+/* lwipopts 里的 stacksize 只是"至少这么多"，真正的栈是下面的槽数组。
+ * 两者一致时按槽给，不一致就报错——不截短、不悄悄放大。 */
 
 typedef struct
 {
@@ -377,13 +398,28 @@ sys_thread_t sys_thread_new(const char *name, lwip_thread_fn thread, void *arg,
     {
         if(g_thread_slot[i].used == 0u)
         {
+            int32 id;
+
             g_thread_slot[i].used  = 1u;
             g_thread_slot[i].entry = thread;
             g_thread_slot[i].arg   = arg;
-            return (sys_thread_t)arkrtos_task_register(g_thread_tramp[i],
-                                                     g_thread_slot[i].stack,
-                                                     (uint32)stacksize,
-                                                     (uint8)prio, 0u);
+            id = arkrtos_task_register(g_thread_tramp[i],
+                                       g_thread_slot[i].stack,
+                                       (uint32)sizeof(g_thread_slot[i].stack),
+                                       (uint8)prio, 0u);
+            if(id <= 0)
+            {
+                /* 注册失败必须留痕：tcpip 线程没起来时，协议栈不会有任何
+                 * 报错，症状只是"所有 tcpip_callback 都不执行"。 */
+                ARKRTOS_LOGE("LWIP", "thread_new: register failed id=%d stack=%d prio=%d",
+                             (int)id, stacksize, prio);
+                g_thread_slot[i].used = 0u;
+                return SYS_THREAD_NULL;
+            }
+            ARKRTOS_LOGI("LWIP", "thread %u up id=%d stack=%u prio=%d",
+                         (unsigned)i, (int)id,
+                         (unsigned)sizeof(g_thread_slot[i].stack), prio);
+            return (sys_thread_t)id;
         }
     }
     ARKRTOS_LOGE("LWIP", "thread_new: no slot");

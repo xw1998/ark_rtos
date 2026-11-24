@@ -12,10 +12,29 @@ config ARKRTOS_USE_LWIP
 	help
 	  The lwIP sources are not conditional-compiled; this gate only
 	  controls the port layer, so off means no port is built and the
-	  socket SVCs return NOSYS.  No real Ethernet MAC is wired yet - this
-	  verifies the stack and socket semantics only, not traffic.  It is
-	  large (about 2.5 MB of sources, tens of KB of static RAM), so it
-	  defaults off and is turned on per project with -D.
+	  socket SVCs return NOSYS.  On its own this gives a loopback netif
+	  only (127.0.0.1); real Ethernet frames need ARKRTOS_USE_NET_VIRTIO
+	  as well.  It is large (about 2.5 MB of sources, tens of KB of
+	  static RAM), so it defaults off and is turned on per project with -D.
+
+config ARKRTOS_USE_NET_VIRTIO
+	bool "Real Ethernet NIC: virtio-net over PCI (polling)"
+	depends on ARKRTOS_USE_LWIP
+	default n
+	help
+	  Adds board/<board>/drvnet.c and the lwIP link layer, so that the
+	  stack is fed by a real Ethernet controller instead of the loopback
+	  netif.  Frames really leave and enter the chip: ARP, ICMP and TCP
+	  all traverse real Ethernet frames.
+
+	  The only implementation today is virtio-net over PCI on QEMU
+	  loongarch64 virt (modern 1.0 interface, polled - this port has no
+	  PCI interrupt controller wired up).  It proves the kernel can drive
+	  a real Ethernet controller; the PHY / MDIO / RMII path is still
+	  outstanding and needs a real board.
+
+	  Requires ARKRTOS_USE_LWIP=y.  Off by default: nothing is compiled
+	  and the image is unchanged.
 
 config ARKRTOS_NET_MAX_SOCKETS
 	int "Simultaneous sockets"

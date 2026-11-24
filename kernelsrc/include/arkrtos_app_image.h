@@ -31,7 +31,20 @@
 #ifndef __ARKRTOS_APP_IMAGE_H__
 #define __ARKRTOS_APP_IMAGE_H__
 
+#include <stddef.h>
+
 #include "arkrtos_types.h"
+
+/**
+* @brief 字段偏移的常量表达式
+* @details 下面几条偏移断言要出现在数组长度里，必须是编译期常量。armcc 5
+*          （RVCT，Keil 的 AC5）没有 __builtin_offsetof —— 直接用它会让
+*          example/stm32f427 与 stm32f401 两个 Keil 工程各报几百条错误
+*          （实测 F427 352 条 / F401 320 条，全部指向这里）。ARMCC 的
+*          offsetof() 是 ((size_t)&(((t *)0)->m)) 形式，在 AC5 上可用作
+*          常量表达式；GCC / clang / loongarch64-gcc 也都支持。
+*/
+#define ARKRTOS_APP_OFFSETOF(type, member) offsetof(type, member)
 
 /** @brief App 镜像头魔数 "SVCA" */
 #define ARKRTOS_APP_MAGIC           (0x53564341u)
@@ -273,17 +286,17 @@ typedef char arkrtos_app_header_size_check[
 *          就会静默算出错误的校验值。这里逐个钉死。
 */
 typedef char arkrtos_app_off_crc32_check[
-    (__builtin_offsetof(arkrtos_app_header_t, crc32) == ARKRTOS_APP_OFF_CRC32) ? 1 : -1];
+    (ARKRTOS_APP_OFFSETOF(arkrtos_app_header_t, crc32) == ARKRTOS_APP_OFF_CRC32) ? 1 : -1];
 typedef char arkrtos_app_off_state_check[
-    (__builtin_offsetof(arkrtos_app_header_t, state) == ARKRTOS_APP_OFF_STATE) ? 1 : -1];
+    (ARKRTOS_APP_OFFSETOF(arkrtos_app_header_t, state) == ARKRTOS_APP_OFF_STATE) ? 1 : -1];
 typedef char arkrtos_app_off_type_check[
-    (__builtin_offsetof(arkrtos_app_header_t, type) == ARKRTOS_APP_OFF_TYPE) ? 1 : -1];
+    (ARKRTOS_APP_OFFSETOF(arkrtos_app_header_t, type) == ARKRTOS_APP_OFF_TYPE) ? 1 : -1];
 
 /** @brief signature 字段的偏移断言（签名子系统按它取 64 字节） */
 typedef char arkrtos_app_off_sign_check[
-    (__builtin_offsetof(arkrtos_app_header_t, signature) == ARKRTOS_APP_OFF_SIGN) ? 1 : -1];
+    (ARKRTOS_APP_OFFSETOF(arkrtos_app_header_t, signature) == ARKRTOS_APP_OFF_SIGN) ? 1 : -1];
 typedef char arkrtos_app_off_runtime_ram_base_check[
-    (__builtin_offsetof(arkrtos_app_header_t, runtime_ram_base) == ARKRTOS_APP_OFF_RUNTIME_RAM_BASE) ? 1 : -1];
+    (ARKRTOS_APP_OFFSETOF(arkrtos_app_header_t, runtime_ram_base) == ARKRTOS_APP_OFF_RUNTIME_RAM_BASE) ? 1 : -1];
 
 #if (defined(__cplusplus))
 extern "C" {

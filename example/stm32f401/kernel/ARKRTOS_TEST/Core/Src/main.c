@@ -64,7 +64,9 @@
 
 /* USER CODE BEGIN PV */
 #define ARKRTOS_IDLE_STACK_WORDS    512
-#define ARKRTOS_LED_STACK_WORDS     1024
+/* 见 F427 同名处：这条示例任务只加锁 + 写设备 + 等待，2 KB 足够；
+ * 4 KB 是模板默认值，占的是 96 KB SRAM 里最紧张的那 56 KB 内核区。 */
+#define ARKRTOS_LED_STACK_WORDS     512
 #define ARKRTOS_CNT_STACK_WORDS     1024
 
 /* 注意：外部镜像（驱动 / App）由各自镜像静态注册任务时，

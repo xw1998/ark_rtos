@@ -6,7 +6,7 @@
 ## 目录
 
 - [kernelsrc/include/arkrtos.h](#kernelsrcincludearkrtosh)（110 项）
-- [kernelsrc/include/arkrtos_app_image.h](#kernelsrcincludearkrtos_app_imageh)（38 项）
+- [kernelsrc/include/arkrtos_app_image.h](#kernelsrcincludearkrtos_app_imageh)（39 项）
 - [kernelsrc/include/arkrtos_apppack.h](#kernelsrcincludearkrtos_apppackh)（9 项）
 - [kernelsrc/include/arkrtos_apprun.h](#kernelsrcincludearkrtos_apprunh)（6 项）
 - [kernelsrc/include/arkrtos_audit.h](#kernelsrcincludearkrtos_audith)（7 项）
@@ -37,6 +37,7 @@
 - [kernelsrc/include/arkrtos_modld.h](#kernelsrcincludearkrtos_modldh)（8 项）
 - [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（23 项）
 - [kernelsrc/include/arkrtos_net.h](#kernelsrcincludearkrtos_neth)（12 项）
+- [kernelsrc/include/arkrtos_net_dev.h](#kernelsrcincludearkrtos_net_devh)（7 项）
 - [kernelsrc/include/arkrtos_ptable.h](#kernelsrcincludearkrtos_ptableh)（23 项）
 - [kernelsrc/include/arkrtos_rt.h](#kernelsrcincludearkrtos_rth)（14 项）
 - [kernelsrc/include/arkrtos_sec.h](#kernelsrcincludearkrtos_sech)（8 项）
@@ -1327,6 +1328,20 @@ App 镜像 = 固定 256 字节头 + 代码/数据段原始内容（负载）+ �
 镜像由 App 工程编译产物转换而来（见 tools/pack_app.py），
 Loader 按本结构解析、校验、重定位并写入镜像池。
 
+### `#define ARKRTOS_APP_OFFSETOF(type, member) offsetof(type, member)`
+
+```c
+#define ARKRTOS_APP_OFFSETOF(type, member) offsetof(type, member)
+```
+
+**字段偏移的常量表达式**
+下面几条偏移断言要出现在数组长度里，必须是编译期常量。armcc 5
+（RVCT，Keil 的 AC5）没有 __builtin_offsetof —— 直接用它会让
+example/stm32f427 与 stm32f401 两个 Keil 工程各报几百条错误
+（实测 F427 352 条 / F401 320 条，全部指向这里）。ARMCC 的
+offsetof() 是 ((size_t)&(((t *)0)->m)) 形式，在 AC5 上可用作
+常量表达式；GCC / clang / loongarch64-gcc 也都支持。
+
 ### `#define ARKRTOS_APP_MAGIC           (0x53564341u)`
 
 ```c
@@ -1667,10 +1682,10 @@ typedef char arkrtos_app_header_size_check[ (sizeof(arkrtos_app_header_t) == ARK
 “结构体布局”和“固定长度宏”解释镜像，一旦不一致就会静默错位。
 此断言让不一致在编译期直接暴露。
 
-### `typedef char arkrtos_app_off_crc32_check[ (__builtin_offsetof(arkrtos_`
+### `typedef char arkrtos_app_off_crc32_check[ (ARKRTOS_APP_OFFSETOF(arkrto`
 
 ```c
-typedef char arkrtos_app_off_crc32_check[ (__builtin_offsetof(arkrtos_app_header_t, crc32) == ARKRTOS_APP_OFF_CRC32) ? 1 : -1];
+typedef char arkrtos_app_off_crc32_check[ (ARKRTOS_APP_OFFSETOF(arkrtos_app_header_t, crc32) == ARKRTOS_APP_OFF_CRC32) ? 1 : -1];
 ```
 
 **关键字段偏移静态校验**
@@ -1678,10 +1693,10 @@ Loader 计算 CRC 时按「偏移切片」而不是整体结构体来累加 CRC
 （crc32 与 state 两个字段要按 0 参与），因此这些偏移一旦漂移
 就会静默算出错误的校验值。这里逐个钉死。
 
-### `typedef char arkrtos_app_off_sign_check[ (__builtin_offsetof(arkrtos_a`
+### `typedef char arkrtos_app_off_sign_check[ (ARKRTOS_APP_OFFSETOF(arkrtos`
 
 ```c
-typedef char arkrtos_app_off_sign_check[ (__builtin_offsetof(arkrtos_app_header_t, signature) == ARKRTOS_APP_OFF_SIGN) ? 1 : -1];
+typedef char arkrtos_app_off_sign_check[ (ARKRTOS_APP_OFFSETOF(arkrtos_app_header_t, signature) == ARKRTOS_APP_OFF_SIGN) ? 1 : -1];
 ```
 
 **signature 字段的偏移断言（签名子系统按它取 64 字节）**
@@ -6323,6 +6338,87 @@ void   arkrtos_net_host_reset(void);
 ```
 
 **宿主用例专用：把请求槽强制恢复成空闲，用例之间互不继承。**
+
+## kernelsrc/include/arkrtos_net_dev.h
+
+**以太网设备端口契约：板级给内核一张网卡，内核把它接到 lwIP**
+这一层只搬「一整帧以太网报文」，不认识 IP、不认识 ARP，也不
+认识 lwIP 的 pbuf。分工如此，是因为三件事的分界线本来就在这里：
+1) **板上**（例如 board/qemu_loongarch64/drvnet.c）负责找到
+
+### `int32 arkrtos_net_dev_init(void);`
+
+```c
+int32 arkrtos_net_dev_init(void);
+```
+
+**找到并初始化网卡**
+**返回**：0 = 成功（此后 tx/rx 可用）；负值 = 失败，调用方据此**不建 netif**
+> 说明：可重复调用：第二次直接返回上一次的结果，不重新复位设备。
+失败必须如实返回负值——"没找到设备"绝不能变成一个看上去正常的
+网卡，否则上层看到的是"包发出去了但没人回"，那是另一种 bug。
+
+### `const uint8 *arkrtos_net_dev_mac(void);`
+
+```c
+const uint8 *arkrtos_net_dev_mac(void);
+```
+
+**取本卡 MAC（6 字节，驱动内静态存储）**
+**返回**：指针；init 之前调用返回 0
+
+### `int32 arkrtos_net_dev_tx(const uint8 *frame, uint16 len);`
+
+```c
+int32 arkrtos_net_dev_tx(const uint8 *frame, uint16 len);
+```
+
+**发送一整帧**
+**返回**：0 = 已交给硬件（不代表对方收到）；负值 = 丢弃（环满 / 未初始化）
+
+### `int32 arkrtos_net_dev_rx(uint8 *buf, uint16 max_len, uint16 *out_len);`
+
+```c
+int32 arkrtos_net_dev_rx(uint8 *buf, uint16 max_len, uint16 *out_len);
+```
+
+**取一整帧**
+- `buf`：接收缓冲
+- `max_len`：buf 的字节数
+- `out_len`：实际帧长（成功时写）
+**返回**：1 = 取到一帧；0 = 暂时没有；负值 = 硬件错误（调用方计数，不重试）
+> 说明：每次只取一帧：一轮里取多少帧由调用方的节拍决定，驱动不擅自循环，
+否则"收得多"和"收得慢"在读数上分不开。
+
+### `void arkrtos_net_dev_stats(uint32 *tx_ok, uint32 *tx_drop, uint32 *rx_`
+
+```c
+void arkrtos_net_dev_stats(uint32 *tx_ok, uint32 *tx_drop, uint32 *rx_ok, uint32 *rx_drop);
+```
+
+**计数器快照（全部单调递增）**
+- `tx_ok`：已交硬件的帧数（成功返回 0 的那些）
+- `tx_drop`：发送被拒/丢弃的帧数
+- `rx_ok`：已交给上层的帧数
+- `rx_drop`：收到但因缓冲不足或驱动错误丢掉的帧数
+
+### `int32 arkrtos_net_dev_link_up(void);`
+
+```c
+int32 arkrtos_net_dev_link_up(void);
+```
+
+**链路是否已就绪（初始化成功且设备状态为 DRIVER_OK）**
+**返回**：1 = 就绪；0 = 未就绪
+
+### `const char *arkrtos_net_dev_name(void);`
+
+```c
+const char *arkrtos_net_dev_name(void);
+```
+
+**控制器名字（一行文本，给 shell / 演示打读数用）**
+**返回**：指向常量字符串；未初始化时返回 "none"
 
 ## kernelsrc/include/arkrtos_ptable.h
 

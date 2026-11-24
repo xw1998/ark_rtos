@@ -27,6 +27,23 @@
 #undef  ARKRTOS_USE_PRIV
 #define ARKRTOS_USE_PRIV            0
 
+/* MDK trace (components/mdk_trace). It is a debugger-side aid: an MTF
+ * ring in RAM plus SWD/ITM/RTT emitters. The F401 kernel region is 128 KB
+ * of the 512 KB part and the full kernel image is 131788 B of code+RO with
+ * the component in (measured: Code=118278 RO-data=13510), i.e. 716 B over
+ * before the RW load region is even counted. The switch exists for exactly
+ * this, so it is off here and on for F427; nothing in the kernel depends on
+ * it. Turning it off also returns the 4.8 KB SWD ring to a board that has
+ * the least kernel RAM in the family. */
+#undef  ARKRTOS_USE_MDK_TRACE
+#define ARKRTOS_USE_MDK_TRACE       0
+
+/* The scheduler cost counters live inside the trace module (see the
+ * compile-time check in arkrtos_features.h), so leaving them on while the
+ * trace is off is a link error. Turn both off together. */
+#undef  ARKRTOS_USE_SCHED_STAT
+#define ARKRTOS_USE_SCHED_STAT      0
+
 /* MiniApp (小程序). Loading one needs a 4 KB static relocation-table
  * buffer in the kernel image (the whole table is validated in one piece),
  * and this board has the least kernel RAM of the family: 96 KB SRAM minus

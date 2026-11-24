@@ -39,7 +39,17 @@ typedef int32_t sys_mutex_t;
 #define sys_mbox_valid(mbox)        (((mbox) != NULL) && (*(mbox) >= 0))
 #define sys_mbox_set_invalid(mbox)  do { if((mbox) != NULL) { *(mbox) = SYS_MBOX_NULL; } } while(0)
 
-/* ---- 临界区：PRIMASK 存/取，可嵌套（返回上一次的掩码） ---- */
+/* ---- 临界区：关中断并返回"上一次是否开着"，可嵌套 ----
+ *
+ * 语义与 Cortex-M 的 PRIMASK 存/取一致：进入时返回旧值、退出时按旧值恢复，
+ * 所以套两层也不会在内层退出时把中断提前打开。
+ *
+ * 三套架构各用自己的"全局中断使能位"：
+ *   Cortex-M   PRIMASK（bit0 = 关中断）
+ *   LoongArch  CRMD.IE（bit2）
+ *   RISC-V     mstatus.MIE（bit3）
+ * 这三个位都只能在内核态（PLV0 / M）里改，本文件只被内核侧的 lwIP 用，
+ * 符合这个前提；App 态代码不 include 它。 */
 typedef uint32_t sys_prot_t;
 
 #if defined(__CC_ARM) && !defined(__clang__)
@@ -53,6 +63,51 @@ static __inline sys_prot_t lwip_primask_enter(void)
 static __inline void lwip_primask_exit(sys_prot_t pm)
 {
     __asm { MSR PRIMASK, pm }
+}
+#elif defined(__loongarch__)
+/* CRMD 是 CSR 0。csrwr rd, csr 的语义是"交换"：读旧值进 rd、把 rd 写进 csr，
+ * 所以一次 csrwr 就能拿到旧值，不必再多读一次。 */
+#define LWIP_LA_CRMD_IE     0x4UL
+static inline sys_prot_t lwip_primask_enter(void)
+{
+    unsigned long old;
+    unsigned long neu;
+
+    __asm volatile ("csrrd %0, 0x0" : "=r" (old) :: "memory");
+    neu = old & ~LWIP_LA_CRMD_IE;
+    if(neu != old)
+    {
+        __asm volatile ("csrwr %0, 0x0" : "+r" (neu) :: "memory");
+    }
+    return (sys_prot_t)old;
+}
+static inline void lwip_primask_exit(sys_prot_t pm)
+{
+    if((pm & LWIP_LA_CRMD_IE) != 0u)
+    {
+        unsigned long v;
+
+        __asm volatile ("csrrd %0, 0x0" : "=r" (v) :: "memory");
+        v |= LWIP_LA_CRMD_IE;
+        __asm volatile ("csrwr %0, 0x0" : "+r" (v) :: "memory");
+    }
+}
+#elif defined(__riscv)
+#define LWIP_RV_MSTATUS_MIE 0x8UL
+static inline sys_prot_t lwip_primask_enter(void)
+{
+    unsigned long old;
+
+    /* csrrci rd, mstatus, 8：rd = mstatus; mstatus &= ~8 */
+    __asm volatile ("csrrci %0, mstatus, 8" : "=r" (old) :: "memory");
+    return (sys_prot_t)old;
+}
+static inline void lwip_primask_exit(sys_prot_t pm)
+{
+    if((pm & LWIP_RV_MSTATUS_MIE) != 0u)
+    {
+        __asm volatile ("csrsi mstatus, 8" ::: "memory");
+    }
 }
 #else
 static inline sys_prot_t lwip_primask_enter(void)

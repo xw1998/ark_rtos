@@ -121,7 +121,7 @@ uint32 arkrtos_trace_switch_count(uint8 task_id)
  *   arkrtos_sched_stat_*   每次真正切换时 sched_activate() 的 DWT 周期数
  *   arkrtos_pendsv_stat_*  PendSV 整趟往返（在下面的 isr 钩子里量，与 trace 开关无关）
  * 注意：CYCCNT 由 mdk_trace_init() 打开，统计才有意义。 */
-#if (ARKRTOS_USE_SCHED_STAT == 1)
+#if ARKRTOS_SCHED_STAT_ENABLED
 volatile uint32 arkrtos_sched_stat_n   = 0u;
 volatile uint32 arkrtos_sched_stat_sum = 0u;
 volatile uint32 arkrtos_sched_stat_min = 0xFFFFFFFFu;
@@ -175,7 +175,7 @@ void arkrtos_trace_wait(uint8 task_id)
 
 void arkrtos_trace_isr(uint8 irq, uint8 kind)
 {
-#if (ARKRTOS_USE_SCHED_STAT == 1)
+#if ARKRTOS_SCHED_STAT_ENABLED
     /* PendSV(14) 的进/出钩子正好夹住整个异常处理（不切换时也会成对进出），
      * 用它们量整趟往返。放在 g_tr_on 早退之前，所以 trace 关掉时也能量。 */
     if(irq == 14u)

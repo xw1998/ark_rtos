@@ -431,9 +431,8 @@
  * @note 运行时仍可继续用 arkrtos_task_register() 动态创建任务，上限就是
  *       ARKRTOS_TASK_MAX_NUM；上面两个上限只约束固定占用的那部分。
  * ============================================================ */
-#ifndef ARKRTOS_TASK_MAX_NUM
-#define ARKRTOS_TASK_MAX_NUM        (48)   /* 任务表总容量（静态 TCB 数组元素个数） */
-#endif
+/* 任务表总容量在 ARKRTOS_TASK_NEED_MIN 之后派生（见下），
+ * 因为它是「分区必需的最小容量 + 动态余量」，不是一串拍出来的数字。 */
 
 #define ARKRTOS_TASK_MAX_KERNEL     (8)    /* 内核自带任务 + 示例静态任务的预留 */
 #define ARKRTOS_TASK_PER_DRIVER     (1)    /* 每个驱动镜像占用的任务数 */
@@ -449,10 +448,22 @@
                                    (SLOT_MAX * (ARKRTOS_TASK_PER_DRIVER > ARKRTOS_TASK_PER_APP ? \
                                                 ARKRTOS_TASK_PER_DRIVER : ARKRTOS_TASK_PER_APP)))
 
+/* 任务表总容量（静态 TCB 数组元素个数）= 上述必需容量 + 8 条动态余量。
+ * 为什么不再写死 48：这张表是静态数组，每条 TCB 在 MPU 档下 156 字节
+ * （STM32F427 工程实测 48 条 = 7488 字节），而分区真正需要的是
+ * ARKRTOS_TASK_NEED_MIN 条（SLOT_MAX=16 时 = 8 + 16 = 24）。48 这个数
+ * 当年只是「比下限宽松一点」，多出来的 24 条是白占的内核 RAM ——
+ * F427 内核镜像正是因此比 56 KB + 64 KB 的可用区多出 4.4 KB，链接期
+ * 报 L6406E。改成按需派生后容量随 SLOT_MAX 自动伸缩，想要更宽的板子
+ * 在板级头里显式 #define 本宏即可（本块是 #ifndef）。 */
+#ifndef ARKRTOS_TASK_MAX_NUM
+#define ARKRTOS_TASK_MAX_NUM        (ARKRTOS_TASK_NEED_MIN + 8)
+#endif
+
 /* 静态 TCB 数组的 RAM 预算（字节）。守护断言直接比较真实的
  * sizeof(arkrtos_task_table)，不依赖「每个 TCB 多少字节」的估算：
  * Cortex-M4 上实测 sizeof(arkrtos_task_t) = 76 字节（ARKRTOS_USE_MPU=0）
- * / 140 字节（ARKRTOS_USE_MPU=1）。
+ * / 156 字节（ARKRTOS_USE_MPU=1，STM32F427 工程 48 槽 TCB 表 = 7488 字节实测）。
  * 预算固定 12KB（SLOT_MAX 提到 16 后 TCB 表按 16*2 条需求估），
  * 超出时把本宏显式改大即可，改多少就是显式占用多少内核 RAM。 */
 #ifndef ARKRTOS_TASK_TABLE_RAM_MAX

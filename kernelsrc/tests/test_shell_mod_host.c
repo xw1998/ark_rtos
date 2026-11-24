@@ -605,10 +605,18 @@ static void t_wait_refusals(void)
     /* an unused slot: stack_ptr stays 0 */
     cap_reset();
     arkrtos_current_task_id = 1;
-    argv[1] = W("48");
-    CK_I(cmd_wait(2, argv), 1);
-    CK(out_has("wait: no such task 48"));
-    CK_I(g_wait_calls, 0u);
+    {
+        char idbuf[16];
+        char want[48];
+
+        snprintf(idbuf, sizeof idbuf, "%d", (int)ARKRTOS_TASK_MAX_NUM);
+        snprintf(want, sizeof want, "wait: no such task %d",
+                 (int)ARKRTOS_TASK_MAX_NUM);
+        argv[1] = W(idbuf);
+        CK_I(cmd_wait(2, argv), 1);
+        CK(out_has(want));
+        CK_I(g_wait_calls, 0u);
+    }
 }
 
 static void t_wait_exit(void)

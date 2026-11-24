@@ -1067,6 +1067,52 @@ static void la_mmu_fill_static(void)
                 LA_PTE_APP_MMIO((ARKRTOS_QEMU_UART_BASE & ~0xFFFu) + 0x1000u));
 #endif
 
+#if (ARKRTOS_USE_NET_VIRTIO == 1)
+    /* PCIe 两段常驻映射（virtio-net）：ECAM 与 MMIO。
+     *
+     * 为什么必须在开 PG 之前铺好，而不是交给动态 alias：
+     * 动态 alias 是给"临时借一块物理页看一眼"的调用方用的（8 对 4 KB
+     * 槽位，可登记可撤销）；设备 MMIO 则从驱动 probe 到关机一直在被读写，
+     * 是**常驻**映射。早期版本让驱动逐页 alias 了 BAR4 的 16 KB，实测
+     * 运行到第二帧 ARP 重发时那条 MTLB 条目已经不在（badv=0x40003004
+     * -> KERNEL refill (plv0) fatal）：动态槽位被别的调用方回收，
+     * alias 撤掉一对 8 KB 就把它顺手带走了。设备窗口没有"撤"这个语义，
+     * 所以它不能住在会被回收的地方。
+     *
+     * 槽位：+3..+10 是动态 alias，+11 是帧池，+12/+13 在按需档是两条
+     * MMIO 页。PCIe 从 +20 起，与既有分工不冲突（MTLB 共 64 条）。
+     *
+     * ECAM 用 PS=20 覆盖 bus 0 的 1 MB（(bus<<20)|(dev<<15)|(fn<<12)，
+     * 32 设备 x 32 KB）；只枚举 bus 0 就只需要这 1 MB，不是 128 MB。
+     * MMIO 按 BAR4 实测的 16 KB 逐页 4 KB 铺。两个基址都来自板级
+     * （ARKRTOS_QEMU_PCI_*），与驱动写进 BAR 的地址是同一个来源。 */
+#if ((ARKRTOS_QEMU_PCI_MMIO_SIZE == 0) || ((ARKRTOS_QEMU_PCI_MMIO_SIZE % 0x1000u) != 0u))
+#error "ARKRTOS_QEMU_PCI_MMIO_SIZE must be a positive multiple of 4 KB"
+#endif
+#if (ARKRTOS_QEMU_PCI_MMIO_SIZE > (8u * 0x1000u))
+#error "static PCIe MMIO window is limited to 8 pages (MTLB slots +21..+28)"
+#endif
+#if ((ARKRTOS_QEMU_PCI_ECAM_BASE & 0x1FFFFFu) != 0u)
+#error "ARKRTOS_QEMU_PCI_ECAM_BASE must be 2 MB aligned (PS=20 entry)"
+#endif
+
+    la_tlb_write(ARKRTOS_QEMU_PCI_ECAM_BASE, 20u, LA_MTLB_INDEX + 20u,
+                 LA_PTE_MMIO(ARKRTOS_QEMU_PCI_ECAM_BASE),
+                 LA_PTE_MMIO(ARKRTOS_QEMU_PCI_ECAM_BASE + 0x100000u));
+
+    {
+        uint32 pci_off;
+
+        for(pci_off = 0u; pci_off < ARKRTOS_QEMU_PCI_MMIO_SIZE; pci_off += 0x1000u)
+        {
+            la_tlb_write(ARKRTOS_QEMU_PCI_MMIO_BASE + pci_off, 12u,
+                         LA_MTLB_INDEX + 21u + (pci_off >> 12),
+                         LA_PTE_MMIO(ARKRTOS_QEMU_PCI_MMIO_BASE + pci_off),
+                         LA_PTE_MMIO(ARKRTOS_QEMU_PCI_MMIO_BASE + pci_off + 0x1000u));
+        }
+    }
+#endif
+
 #if (ARKRTOS_USE_PAGING_FRAMES == 1)
     /* 4 KB 页帧池（U-3）：一条 PS=22 恒等映射，让内核在分页模式下按物理
      * 地址直接读写帧本身。没有这一条，帧池就是一块在 PLV0 下也触不到的
@@ -1369,6 +1415,18 @@ static const la_pg_span_t s_pg_spans[] = {
     /* App 的 UART 别名（PLV3、不缓存）：App 唯一的 MMIO 页 */
     { (ARKRTOS_QEMU_APP_UART & ~0xFFFu), 0x1000u,
       LA_PG_BIT(ARKRTOS_MPU_MEM_PERIPH_RO) | LA_PG_BIT(ARKRTOS_MPU_MEM_PERIPH_RW) },
+
+#if (ARKRTOS_USE_NET_VIRTIO == 1)
+    /* PCIe：ECAM（bus 0 的 1 MB 配置窗口）与 MMIO（BAR4 的 16 KB）。
+     * 两条都是 PLV0 的设备内存：App 看不到 PCI 配置空间，也不该直接
+     * 摸设备的 DMA 环。写进跨度表的目的是让动态 alias 拒绝落在这两段上
+     * （la_pg_static_hit），免得同一块物理页在两条路子上被登记两次。 */
+    { ARKRTOS_QEMU_PCI_ECAM_BASE, 1024u * 1024u,
+      LA_PG_BIT(ARKRTOS_MPU_MEM_PERIPH_RO) | LA_PG_BIT(ARKRTOS_MPU_MEM_PERIPH_RW) },
+
+    { ARKRTOS_QEMU_PCI_MMIO_BASE, ARKRTOS_QEMU_PCI_MMIO_SIZE,
+      LA_PG_BIT(ARKRTOS_MPU_MEM_PERIPH_RO) | LA_PG_BIT(ARKRTOS_MPU_MEM_PERIPH_RW) },
+#endif
 };
 
 #define LA_PG_SPAN_COUNT        (sizeof(s_pg_spans) / sizeof(s_pg_spans[0]))

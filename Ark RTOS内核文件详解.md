@@ -109,7 +109,7 @@ typedef signed   char  int8;
 | `ARKRTOS_USE_FPU` | 1 | FPU 浮点单元使能 |
 | `ARKRTOS_USE_MPU` | 1 | MPU 内存保护使能 |
 | `ARKRTOS_USE_PRIV` | 依赖 MPU | 特权级分离使能 |
-| `ARKRTOS_TASK_MAX_NUM` | 48 | 任务表总容量（静态 TCB 数组元素个数），定义在 `config/arkrtos_partition.h` |
+| `ARKRTOS_TASK_MAX_NUM` | 32 | 任务表总容量（静态 TCB 数组元素个数），定义在 `config/arkrtos_partition.h`，**由分区派生** = `ARKRTOS_TASK_NEED_MIN + 8`（本板 `SLOT_MAX=16` ⇒ 8 + 16 + 8 = 32） |
 | `ARKRTOS_TICK_PERIOD_US` | 500 | 系统节拍周期（微秒） |
 | `ARKRTOS_EVENT_NUM` | 10 | 事件对象数量 |
 | `ARKRTOS_MAX_EVENT_WAITERS` | 4 | 单个事件最大等待者数 |
@@ -936,7 +936,7 @@ RAM 从低到高的分区顺序是：
 #define ARKRTOS_USE_PRIV         0
 #define ARKRTOS_USE_CPU_LOAD     0
 #define ARKRTOS_USE_STACK_CHECK  0
-#define ARKRTOS_TASK_MAX_NUM     (24)   /* 不得小于 ARKRTOS_TASK_NEED_MIN */
+#define ARKRTOS_TASK_MAX_NUM     (32)   /* 不得小于 ARKRTOS_TASK_NEED_MIN */
 #define ARKRTOS_TICK_PERIOD_US   (1000)
 ```
 
@@ -945,10 +945,10 @@ RAM 从低到高的分区顺序是：
 > 而不是运行期静默注册失败。
 > `ARKRTOS_TASK_NEED_MIN` = `ARKRTOS_TASK_MAX_KERNEL`（默认 8）
 > + `SLOT_MAX` × max(`ARKRTOS_TASK_PER_DRIVER`, `ARKRTOS_TASK_PER_APP`)（每镜像 1 个任务）。
-> 默认 `SLOT_MAX=16`，故下限 = 8 + 16 = **24**，而 `ARKRTOS_TASK_MAX_NUM` 默认 **48**。
+> 默认 `SLOT_MAX=16`，故下限 = 8 + 16 = **24**，而 `ARKRTOS_TASK_MAX_NUM` 默认取 `ARKRTOS_TASK_NEED_MIN + 8` = **32**（8 条动态余量）。
 > 早期按「驱动 / App 各 4 槽均分」推出的 16 已作废——现在两者共用一个池，
 > 上限都取 `SLOT_MAX`，需求只按一次计。要压低下限，调小 `SLOT_MAX`
 > 或 `ARKRTOS_TASK_MAX_KERNEL`；只改 `ARKRTOS_TASK_MAX_NUM` 而不顾下限无效。
 > 另外静态 TCB 数组的 RAM 占用是 `ARKRTOS_TASK_MAX_NUM × sizeof(arkrtos_task_t)` 字节，
-> 实测单 TCB 为 76 字节（MPU 关）/ 140 字节（MPU 开），默认 48 槽即 3648 / 6720 字节，
-> 由固定的 8KB 预算 `ARKRTOS_TASK_TABLE_RAM_MAX` 约束。
+> 实测单 TCB 为 76 字节（MPU 关）/ 156 字节（MPU 开），默认 32 槽即 2432 / 4992 字节，
+> 由固定的 12KB 预算 `ARKRTOS_TASK_TABLE_RAM_MAX` 约束。

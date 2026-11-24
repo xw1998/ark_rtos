@@ -32,9 +32,22 @@
 #include "lwip_port.h"
 #include "arkrtos_net.h"      /* socket service: starts once tcpip is alive */
 
+#if (ARKRTOS_USE_NET_VIRTIO == 1)
+#include "lwip_netif_link.h"  /* real NIC -> lwIP netif (off by default) */
+#endif
+
 #if (ARKRTOS_USE_LWIP == 1)
 
+/* 服务任务的栈。默认档只需要 1 KB（只调一次 tcpip_init），但接真实网卡
+ * 之后这一轮还要跑 tcpip_callback(netif_add) 与一行带格式化的日志，
+ * 实测 1 KB 会打穿（STK 守卫当场报 "stack bottom flag overwritten"，
+ * 而被打穿的是相邻的 .bss —— 症状看起来像协议栈内部断言，其实是栈溢出）。
+ * 所以只在开网卡时把栈加到 4 KB，默认档的 RAM 占用一个字节都不多。 */
+#if (ARKRTOS_USE_NET_VIRTIO == 1)
+static uint32 g_lwip_task_stack[1024];   /* 4 KB：tcpip_init + netif 装配 */
+#else
 static uint32 g_lwip_task_stack[256];    /* 1 KB：只调一次 tcpip_init */
+#endif
 
 static void arkrtos_lwip_task(void)
 {
@@ -48,6 +61,18 @@ static void arkrtos_lwip_task(void)
      * accept a request before the tcpip thread exists, and this is the only
      * point that knows that happened. */
     (void)arkrtos_net_start();
+
+#if (ARKRTOS_USE_NET_VIRTIO == 1)
+    /* Real Ethernet NIC: bring it up and attach a netif.  It must happen
+     * here and not earlier: netif_add() runs on the tcpip thread, and this
+     * is the first point that knows the tcpip thread exists.  A failure is
+     * logged by the link layer and leaves the loopback netif working, so it
+     * is reported but not fatal. */
+    if(arkrtos_netif_link_start() != 0)
+    {
+        ARKRTOS_LOGE("LWIP", "netif link start failed, loopback only");
+    }
+#endif
 
     /* 之后没有周期工作。任务不能退出（内核没有"结束自己"这个语义），所以
      * 按周期躺着；将来接真实以太网驱动时，收包搬运就落在这个循环里。 */

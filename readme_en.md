@@ -615,8 +615,8 @@ configuration file.
 | `ARKRTOS_USE_FPU` | Derived, 1 on this board | Floating-point unit |
 | `ARKRTOS_USE_MPU` | Derived, 1 on this board | MPU protection. On Cortex-M4 it defaults to `ARKRTOS_ARCH_HAS_MPU` and is never explicitly disabled anywhere in the tree; mechanism and board verification in [docs/内存保护与App越权验证.md](docs/内存保护与App越权验证.md) |
 | `ARKRTOS_USE_PRIV` | Requires `ARKRTOS_USE_MPU`, 1 here | Privilege separation. With `ARKRTOS_USE_MPU == 1` it becomes 1 automatically: app tasks are unprivileged (`CONTROL.nPRIV = 1`), kernel tasks stay privileged |
-| `ARKRTOS_TASK_MAX_NUM` | 48 | Total task table capacity (static TCB array). The default now lives in **section 9 of `config/arkrtos_partition.h`**, next to the partition strategy - see "Task capacity layering" |
-| `ARKRTOS_TASK_TABLE_RAM_MAX` | 8192 | RAM budget for the TCB array in bytes, **fixed at 8 KB and not derived**; a guard assertion compares `sizeof(arkrtos_task_table)` and fails the build when exceeded |
+| `ARKRTOS_TASK_MAX_NUM` | 32 | Total task table capacity (static TCB array). The default is **derived from the partition** (`ARKRTOS_TASK_NEED_MIN + 8`) in **section 9 of `config/arkrtos_partition.h`**, next to the partition strategy - see "Task capacity layering" |
+| `ARKRTOS_TASK_TABLE_RAM_MAX` | 12288 | RAM budget for the TCB array in bytes, **fixed at 12 KB and not derived**; a guard assertion compares `sizeof(arkrtos_task_table)` and fails the build when exceeded |
 | `ARKRTOS_TICK_PERIOD_US` | 500 | Tick period in microseconds |
 | `ARKRTOS_EVENT_NUM` | 10 | Number of event objects |
 | `ARKRTOS_MAX_EVENT_WAITERS` | 4 | Waiters per event |
@@ -676,12 +676,12 @@ the flash/RAM layout, so one cannot be changed without noticing the other):
 
 | Macro | Default | Description |
 |---|---|---|
-| `ARKRTOS_TASK_MAX_NUM` | 48 | Total capacity; scaling up means changing this number only |
+| `ARKRTOS_TASK_MAX_NUM` | Derived (32 on this board) | Total capacity = `ARKRTOS_TASK_NEED_MIN + 8` (8 slots of dynamic headroom), tracks `SLOT_MAX` automatically |
 | `ARKRTOS_TASK_MAX_KERNEL` | 8 | Reserve for kernel-owned and example static tasks |
 | `ARKRTOS_TASK_PER_DRIVER` | 1 | Tasks consumed by each driver image |
 | `ARKRTOS_TASK_PER_APP` | 1 | Tasks consumed by each app image |
 | `ARKRTOS_TASK_NEED_MIN` | Derived | `kernel + slots x tasks per slot`, the minimum the partition strategy requires |
-| `ARKRTOS_TASK_TABLE_RAM_MAX` | 8192 | RAM budget for the static TCB array in bytes; measured `sizeof(arkrtos_task_t)` is 76 bytes (MPU off) / 140 bytes (MPU on) |
+| `ARKRTOS_TASK_TABLE_RAM_MAX` | 12288 | RAM budget for the static TCB array in bytes; measured `sizeof(arkrtos_task_t)` is 76 bytes (MPU off) / 156 bytes (MPU on) |
 
 The compile-time assertion `arkrtos_task_capacity_check` rejects a configuration whose capacity cannot
 hold the current slot strategy, and `arkrtos_task_table_ram_check` in `arkrtos_cfg.c` checks the RAM

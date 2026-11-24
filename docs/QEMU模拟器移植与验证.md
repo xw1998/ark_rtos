@@ -9453,3 +9453,123 @@ IMAGE_SIGN / SMP 等一整套，只留「节拍 + 任务 + SVC + 串口」。
 | `-kernel` 吃不了绝对路径 | 仓库路径含中文，QEMU 用窄字符 API，直接失败 | `cd build/qemu_mps2_an386` 后只传文件名 |
 | `ArkRTOS` 的 fs facade 被 `filter-out` 掉了 | Makefile 照抄 RV32 剔除了 `arkrtos_fs.c`，而 FS=0 时它才是符号来源 | 显式加回 `SRCS_C`，并补 `-DLFS_NO_*`（littlefs 配置头会断言的开关） |
 
+
+## 13. 真实以太网帧（QEMU virtio-net over PCIe，2026-11-24，QEMU 实跑 + pcap 抓包）
+
+这一节回答一个问题：**协议栈能不能驱动一块真的网卡，让帧真的出去、真的回来**。
+此前 lwIP 只挂在 loopif 上——raw pcb 能收到自己发出的包，日志看起来一模一样，
+但那不是网卡。本节的读数全部落在**我们自己的 printf 之外**：QEMU 的
+`filter-dump` 抓到 pcap，帧的源 MAC、ICMP id/seq、回显负载都在里面。
+
+### 13.1 开关与组成
+
+`ARKRTOS_USE_NET_VIRTIO`（默认 0，依赖 `ARKRTOS_USE_LWIP`）打开后编进三个源：
+
+| 文件 | 角色 |
+|---|---|
+| `board/qemu_loongarch64/drvnet.c` | PCIe ECAM 枚举 → virtio-net 现代接口 bringup → 两个 virtqueue 的装填与回收（整文件在 `#if (ARKRTOS_USE_NET_VIRTIO == 1)` 里） |
+| `kernelsrc/components/lwip/port/lwip_netif_link.c` | lwIP `netif` 的 linkoutput / 收包投递；`arkrtos_netif_link_poll()` 是轮询入口 |
+| `example/qemu_loongarch64/net_demo.c` | 演示任务：ARP 之后 ping 三次并逐条打印回包（`ARKRTOS_NET_DEMO=1`，不进内核配置，自己的依赖 `#error` 在文件顶） |
+
+默认档下这三个源不进 `SRCS_C`（`example/qemu_loongarch64/Makefile` 用
+`ARK_NET_ON := $(findstring ARKRTOS_USE_NET_VIRTIO=1,$(EXTRA_CFLAGS))` 做条件块），
+镜像逐字节不变。
+
+### 13.2 硬件路径（QEMU virt 机型）
+
+- ECAM 在 `0x20000000`（bus 0 的 1 MB 配置窗口），MMIO 在 `0x40000000`；
+  两者都在 `kernelsrc/port/loongarch/la64/arkrtos_port.c` 里做了静态映射并登记
+  进 `s_pg_spans[]`（**设备 MMIO 不能住动态 alias**：`tlbfill` 的 way 是随机的，
+  一条动态条目就能把它顶掉，控制台先死）。
+- 设备在 `00:01.0`，ID `0x1AF4:0x1041`（virtio-net non-transitional），
+  BAR4 `0x40000000` size `0x4000`；notify 区 `BAR+0x3000`，RX 队列
+  `notify_off=0`（`0x40003000`）、TX `notify_off=1`（`0x40003004`）；每队列
+  16 个描述符、virtio-net 头 12 B。
+- **没有 PCI 中断**：本 port 没有接 virtio 的 INTx/MSI，驱动纯轮询（收包时
+  看 used ring）。
+
+### 13.3 线程模型（这条不注意就是「跑几百毫秒整机停住」）
+
+`LWIP_TCPIP_CORE_LOCKING=0` ⇒ 协议栈只在 tcpip 线程里跑。所以轮询任务
+**只做** `pbuf_alloc` + `pbuf_take` + `tcpip_input()`；`netif_add` 的 input
+回调也用 `tcpip_input`，`n->flags` 必须同时含 `NETIF_FLAG_ETHERNET` 与
+`NETIF_FLAG_ETHARP`。`tcpip_input` 返回非 `ERR_OK` 时 pbuf 所有权仍在调用者，
+必须 `pbuf_free`。早期版本在轮询任务里直接调 netif input，同时改 ARP 表与
+netif 状态，表现是「几百毫秒后整机停住、raw pcb 一个包都收不到」——它长得
+像网卡坏，其实是并发。
+
+### 13.4 实跑读数
+
+构建：`make -f example/qemu_loongarch64/Makefile BUILD=build/qemu_loongarch64 \
+EXTRA_CFLAGS="-DARKRTOS_USE_NET_VIRTIO=1 -DARKRTOS_NET_DEMO=1" -j8`；
+运行：`-machine virt -kernel ark_qemu_la64.elf -nographic -monitor none
+-netdev user,id=n0 -device virtio-net-pci-non-transitional,netdev=n0
+-object filter-dump,id=f0,netdev=n0,file=net.pcap`。
+
+串口（节选）：
+
+```
+[boot] net task=12
+[net] virtio-net: found at pci 00:01.0
+[net] virtio-net: bar4=0x40000000 size=0x00004000
+[net] virtio-net: mac=0x00000052:0x00000054:0x00000000:0x00000012:0x00000034:0x00000056 queues=2 status=ok
+NET:276 netif up: virtio-net ip 10.0.2.15/24 gw 10.0.2.2
+[net] ping seq=1 -> 10.0.2.2
+[net] reply from 10.0.2.2 seq=1 len=60 data="@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_"
+[net] ping seq=2 -> 10.0.2.2
+[net] reply from 10.0.2.2 seq=2 len=60 data="@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_"
+[net] ping seq=3 -> 10.0.2.2
+[net] reply from 10.0.2.2 seq=3 len=60 data="@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_"
+[net] ping: 3/3 ok
+[net] stats tx=5 txdrop=0 rx=4 rxdrop=0 last_len=60
+[net] demo: done
+```
+
+pcap 9 帧：ARP request ×2（我们 → 广播）、ARP reply ×1（`52:55:0a:00:02:02` →
+我们）、ICMP echo request/reply 各 3（type 8/0，id=16722，seq=1/2/3，负载就是
+`@ABC...^_`）。slirp 侧地址：guest `10.0.2.15/24`、网关/宿主 `10.0.2.2`。
+
+反假绿档：`-net none` 时串口必须是
+
+```
+[net] virtio-net: no device on pci bus 0
+LWIP:73 netif link start failed, loopback only
+[net] send failed seq=1 / seq=2 / seq=3
+[net] ping: 0/3 FAIL
+[net] stats tx=0 txdrop=0 rx=0 rxdrop=0 last_len=0
+```
+
+**注意 `-net none` 不是「不给 `-device`」**：QEMU 的 virt 机型有默认 NIC，
+省掉 `-device` 时驱动照样 `found at 00:01.0`——早期版本就是这么做出了一份假对照。
+
+### 13.5 门禁
+
+`tools/net_virtio_gate.py`，十项：默认关（`arkrtos_autoconf.h` 为 0 + Kconfig 依赖
++ features 护栏 + Makefile 条件块）/ 开档 clean 全量构建 / QEMU 串口六类读数 /
+pcap 四类帧 / 无网卡档必须失败 / 十种坏日志坏 pcap 变异自检 / 收尾恢复默认档构建。
+已注册进 `tools/ci_gate.py` 的 `net-virtio` 项（在 `LOCAL_TOOLCHAIN` 里，远程档跳过）。
+判据 = 末行 `NET-VIRTIO-GATE OK`。
+
+**为什么必须先 `make clean`**：`make` 不跟踪 `EXTRA_CFLAGS`，上一档留下的 `.o`
+会让这一次只做链接——镜像里没有网卡，日志却照样有。收尾也必须重编默认档，
+否则下一个人看到「默认档也有 `[net]` 读数」。
+
+### 13.6 这一轮踩到的坑（按代价排）
+
+| 坑 | 形态 | 修法 |
+|----|------|------|
+| **raw 回调拿到的 pbuf 仍带 IP 头** | lwIP STABLE-2_1_3 的 `ip4_input()` 在 `pbuf_remove_header()` **之前**调 `raw_input()`，回调里 `d[0]==0x45`，拿它当 ICMP type 判永远是「不是回包」：pcap 里回包明明回来了，`ping` 却 0/3。旧探针打印的 `1 2 3 325`（325=0x145）就是这条线索 | 回调里先按 `(d[0] & 0x0F) * 4` 跳过 IP 头；返回非 0 时 pbuf 所有权归回调（须 `pbuf_free`），返回 0 时栈继续（`icmp_input` 会吃掉 echo reply） |
+| **周期等待间隔逐次累加（内核）** | `arkrtos_delay_tick()` 的周期分支原先 `p->period_time += p->period`，而 `arkrtos_task_wait_period_internal()` 把 `period_time` 当「从现在起再睡多久」传给 `arkrtos_delay_arm()` ⇒ 间隔 250→500→750→1000 ms。实测 ping 三次落在 guest 0.03 / 0.79 / 2.54 s；无网卡档 15 s 打不出 `ping: 0/3 FAIL` | 到期即 `p->period_time = p->period`；宿主用例那条「periodic wait adds one period」断言同步订正（它把这个缺陷断言成了正确行为）。受影响者还有 `lwip_port.c` 的 lwIP 服务任务与 `arkrtos_net.c` 的 socket 服务 |
+| 设备 MMIO 住动态 alias | 早先 virtio BAR 用动态映射，`pmap test` 一登记就顶掉它（`tlbfill` way 随机） | BAR4 进 `arkrtos_port.c` 的静态 span 表 |
+| 「机器停了」是误判 | `-d int,guest_errors` 复跑到 guest 5 s 仍正常；早期日志停在 0.126 s 是测试脚本到点 kill 掉 QEMU（正好切在某行中间） | 先确认机器活着，再判「越等越久」 |
+| 默认 NIC 让对照失效 | 见 §13.4 的反假绿说明 | 反假绿必须写 `-net none` |
+
+### 13.7 边界（不许读成什么）
+
+1. 这是 **PCIe 虚拟网卡**，不是真实 PHY：没有 MDIO、没有 RMII 引脚、没有链路
+   自协商、没有 PCI 中断（纯轮询）。`grep -ri "mdio\|rmii\|eth_" board/stm32f427/`
+   仍为空 ⇒ 物理层那一半仍欠账，本节的「真实」只指**真实以太网帧**。
+2. 不覆盖多播/广播收包、TCP 连接级流量、DHCP；测的是 ARP + ICMP 往返。
+3. 不许把「ping 通了」读成「TCP 可用」——socket 层另有 `net-host` 宿主用例，
+   但它对的是 fake lwIP；这一节只证明链路与帧收发。
+4. QEMU 的 virtio-net 模型不模拟时序与真实 PHY 的错帧/丢帧行为。

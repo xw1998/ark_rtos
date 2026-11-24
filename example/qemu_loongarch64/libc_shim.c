@@ -663,3 +663,40 @@ int __ctzsi2(unsigned int v)
 
     return n;
 }
+
+/* lwIP 的 netif_find()（netif.c，!LWIP_SINGLE_NETIF 时编译）拿名称后缀做
+ * atoi，用来把 "en0" 变成编号 0。协议栈本身不做字符串到数字的转换，这里
+ * 补上最小的一份：跳空白、可选正负号、连续十进制数字，遇到第一个非数字
+ * 停在哪儿返回哪儿——与 C 标准一致（溢出未定义，调用方只传 0..255）。 */
+int atoi(const char *s)
+{
+    int sign = 1;
+    int v = 0;
+
+    if(s == 0)
+    {
+        return 0;
+    }
+
+    while((*s == ' ') || (*s == '\t') || (*s == '\n') || (*s == '\r'))
+    {
+        s++;
+    }
+
+    if((*s == '+') || (*s == '-'))
+    {
+        if(*s == '-')
+        {
+            sign = -1;
+        }
+        s++;
+    }
+
+    while((*s >= '0') && (*s <= '9'))
+    {
+        v = (v * 10) + (int)(*s - '0');
+        s++;
+    }
+
+    return sign * v;
+}

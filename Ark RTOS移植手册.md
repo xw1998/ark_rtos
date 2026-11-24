@@ -95,7 +95,7 @@ ARKRTOS/
 #define ARKRTOS_USE_FPU             1
 #define ARKRTOS_USE_MPU             1
 #define ARKRTOS_USE_PRIV            1
-#define ARKRTOS_TASK_MAX_NUM        (48)   /* 默认值在 config/arkrtos_partition.h，本文件已不含该定义 */
+#define ARKRTOS_TASK_MAX_NUM        (32)   /* 默认值在 config/arkrtos_partition.h，本文件已不含该定义 */
 #define ARKRTOS_TICK_PERIOD_US      (500)
 ```
 

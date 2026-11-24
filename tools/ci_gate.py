@@ -2739,6 +2739,26 @@ def check_net_host():
        "on the host (errno table, per-op failures, handle lifetime, owner "
        "death), honest ENOTSUP when off: %s" % lines[0])
 
+def check_net_virtio():
+    """Real Ethernet frames over QEMU virtio-net (ARKRTOS_USE_NET_VIRTIO).
+
+    The switch defaults to 0, so every line of the driver, the lwIP link
+    layer and the ping demo is dead code in the normal build.  "It pings"
+    is also the easiest claim in this repo to fake (the loopback netif can
+    make a raw callback fire, and a log line saying "reply" proves nothing),
+    so tools/net_virtio_gate.py judges on readings that exist outside our
+    own printf: a QEMU filter-dump pcap with the ARP exchange and the three
+    echo round trips, plus a `-net none` run that must fail.  It cleans and
+    rebuilds for both tiers (make does not track EXTRA_CFLAGS), so it is a
+    slow check; a missing toolchain is a FAIL, not a skip.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "net_virtio_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "NET-VIRTIO-GATE OK" in txt:
+        ok("net-virtio", txt.splitlines()[-1])
+    else:
+        fail("net-virtio", txt[-360:])
+
 def check_elf_host():
     """The ELF loader's static path, driven on the host.
 
@@ -5926,6 +5946,7 @@ LOCAL_TOOLCHAIN = {
     "stack-guard": "LA64 / RV32 cross gcc",
     "svc-wide": "pure python (source assertions)",
     "dynlink": "LA64 cross gcc + qemu-system-loongarch64",
+    "net-virtio": "LA64 cross gcc + qemu-system-loongarch64",
     "bus-line": "LA64 cross gcc + qemu-system-loongarch64",
     "realbin": "LA64 cross gcc (+ loongarch64-linux-gnu-readelf for one check)",
     "sec-crc": "armclang (Keil MDK)",
@@ -6017,6 +6038,7 @@ CHECK_TABLE = (
     ("smp-sched-host", check_smp_sched_host),
     ("softbus-host", check_softbus_host),
     ("net-host", check_net_host),
+    ("net-virtio", check_net_virtio),
     ("elf-host", check_elf_host),
     ("linux-abi-host", check_linux_abi_host),
     ("mini-host", check_mini_host),

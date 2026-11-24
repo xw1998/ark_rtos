@@ -425,7 +425,7 @@ static void arkrtos_task_recover_mark(int32 task_id);
 static void arkrtos_task_recover_pending(void);
 
 
-#if (ARKRTOS_USE_SCHED_STAT == 1)
+#if ARKRTOS_SCHED_STAT_ENABLED
 /* 统计符号定义在 arkrtos_trace.c（可观测性模块），这里只做本地声明 */
 extern volatile uint32 arkrtos_sched_stat_n;
 extern volatile uint32 arkrtos_sched_stat_sum;
@@ -3624,12 +3624,16 @@ void arkrtos_delay_tick(void)
         }
         else
         {
-            /* 周期等待到期：按原语义补回一个周期 */
-            p->period_time += p->period;
-            if(p->period_time <= 0)
-            {
-                p->period_time = p->period;
-            }
+            /* 周期等待到期：把下一次的间隔复位成配置周期。
+             *
+             * 这里曾经写的是 period_time += period（"补回一个周期"）。那在
+             * 语义上等于把间隔逐次累加：第一次 250 ms、第二次 500 ms、第三次
+             * 750 ms …… 因为 arkrtos_task_wait_period_internal() 是拿
+             * period_time 当"从现在起再睡多久"来 arm 的。实测周期任务在
+             * QEMU/LA64 上就是这样一步步慢下去的（[net] 演示的三次发送落在
+             * 0.03 s / 0.79 s / 2.54 s，间隔 760 ms、1751 ms），而任何靠周期
+             * 节拍推进的服务（lwIP 服务任务、socket 服务）都会跟着漂。 */
+            p->period_time = p->period;
         }
         p->status = ARKRTOS_TASK_READY;
         arkrtos_ready_add(idx);

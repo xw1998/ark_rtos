@@ -71,8 +71,12 @@
 /* 1 KB: the idle context only sleeps/wakes, and this test image is RAM
  * tight (utest statics + trace ring + lwIP + shell leave <100 B). */
 #define ARKRTOS_IDLE_STACK_WORDS    256
-#define ARKRTOS_LED_STACK_WORDS     1024
-#define ARKRTOS_LED2_STACK_WORDS    1024
+/* 两个 LED 示例任务只做「加锁 + 设备写 + 等待」，没有 printf / 浮点，
+ * 2 KB（512 字）是它们实际深度的数倍。原来照模板抄的 4 KB 是内核 RAM
+ * 沉没成本：F427 的 56 KB + 64 KB 区放不下整套功能（实测差 4.4 KB），
+ * 这里按任务的真实深度收紧，内核容量策略一行不动。 */
+#define ARKRTOS_LED_STACK_WORDS     512
+#define ARKRTOS_LED2_STACK_WORDS    512
 
 /* 注意：外部分区固件（驱动 / App）不再在这里静态注册任务。
  * 它们的入口地址与栈由内核加载器按 config/arkrtos_partition.h 推导：
