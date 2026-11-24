@@ -36,7 +36,9 @@ static int shell_exec_file(const char *path, int argc, char *argv[])
     int32 rc;
     uint32 waited = 0u;
     uint32 space = 0u;
+#if (ARKRTOS_USE_AUDIT_LOG == 1)
     uint32 task_id = 0u;
+#endif
 
     rc = arkrtos_elf_exec_space(path, argc, argv, &space);
     if (rc != ARKRTOS_ELF_OK)
@@ -51,7 +53,9 @@ static int shell_exec_file(const char *path, int argc, char *argv[])
 
     if (arkrtos_elf_info_space(space, &info) == 0)
     {
+#if (ARKRTOS_USE_AUDIT_LOG == 1)
         task_id = (uint32)info.task;
+#endif
         /* entry/sp 是 unsigned long：宽 VA 档的窗口基址在 0x1_2000_0000 以上，
          * 用 %08X 会把它截成低 32 位（实测真值是 0x1200008E0，打出来却是
          * 0x200008E0）——读数是假的，不是装载器装错了。这里按原生字宽打。*/

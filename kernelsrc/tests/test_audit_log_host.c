@@ -35,6 +35,13 @@
 
 #include "arkrtos_audit_log.h"
 #include "arkrtos_features.h"
+/* The five stubs below are the module's real externs, so take their
+ * signatures from the real headers rather than restating them: a stub
+ * that drifts from the declaration stops testing the module and starts
+ * testing the stub. */
+#include "arkrtos_app_image.h"   /* arkrtos_crc32 */
+#include "arkrtos_fs.h"          /* mounted / read_at / write_at */
+#include "arkrtos_task.h"        /* arkrtos_kernel_get_tick */
 
 /* ---------------- 断言 ---------------- */
 

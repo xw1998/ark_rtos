@@ -343,7 +343,7 @@ int32 arkrtos_audit_log_init(void)
     }
 
     g_al.head = head;
-    g_al.wrapped = wrapped;
+    g_al.wrapped = (uint8)(wrapped & 0xFFu);
     g_al.seq_next = seq_next;
     g_al.ready = 1u;
     g_al.opens++;
@@ -425,7 +425,7 @@ int32 arkrtos_audit_log_record(uint32 kind, uint32 owner, uint32 code)
     }
 
     g_al.head = new_head;
-    g_al.wrapped = new_wrapped;
+    g_al.wrapped = (uint8)(new_wrapped & 0xFFu);
     g_al.seq_next = seq + 1u;
     g_al_in_use = 0u;
 
