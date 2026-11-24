@@ -2941,13 +2941,13 @@ def check_linux_abi_host():
     for case in CASES:
         name, test, mods, defs, markers, incs, _argv = _case(case)
         if name in ("linuxabi", "linuxabioff", "linuxabifutex",
-                    "linuxabiselect"):
+                    "linuxabiselect", "linuxabisocket"):
             extra = case[5] if len(case) > 5 else {}
             picks[name] = (test, mods, defs, incs, markers,
                            list(extra.get("link", [])),
                            list(extra.get("ldflags", [])))
     for name in ("linuxabi", "linuxabioff", "linuxabifutex",
-                 "linuxabiselect"):
+                 "linuxabiselect", "linuxabisocket"):
         if name not in picks:
             fail("linux-abi-host",
                  "case %s missing from coverage_gate.CASES" % name)
@@ -2956,7 +2956,7 @@ def check_linux_abi_host():
     with TempDir() as td:
         lines = []
         for name in ("linuxabi", "linuxabioff", "linuxabifutex",
-                     "linuxabiselect"):
+                     "linuxabiselect", "linuxabisocket"):
             test, mods, defs, incs, markers, link, ldflags = picks[name]
             exe = os.path.join(td, name + (".exe" if os.name == "nt" else ""))
             cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
@@ -2985,7 +2985,8 @@ def check_linux_abi_host():
     ok("linux-abi-host",
        "arkrtos_linux_abi syscall round trip on the host against a simulated "
        "user window (entry split, return classes, fd / pipe / signal / execve "
-       "paths, futex six ops, pselect6 readiness, reset), honest refusals "
+       "paths, futex six ops, pselect6 readiness, socket translation, "
+       "reset), honest refusals "
        "when off: %s" % lines[0])
 
 def check_mini_host():

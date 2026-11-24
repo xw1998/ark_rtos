@@ -56,6 +56,9 @@
 #include "arkrtos_board.h"
 #include "arkrtos_log.h"   /* write(1/2) 要独占控制台，别让内核日志插进半行 */
 #include "arkrtos_elf.h"   /* execve：装载器接口与 ARKRTOS_ELF_ERR_* */
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+#include "arkrtos_net.h"    /* U-23：内核内的网络调用口 arkrtos_net_call */
+#endif
 
 /* ---------------------------------------------------------------- 常量 */
 
@@ -97,6 +100,26 @@
  * WAIT_BITSET / WAKE_BITSET 六档；PI 与 FD 类 op 如实 -ENOSYS。 */
 #define LX_SYS_FUTEX                (98u)
 
+/* socket 族（U-23）。asm-generic 号表，LoongArch 与 RISC-V 共用；只在
+ * ARKRTOS_USE_LINUX_SOCKET 档参与编译。send/recv 没有独立的号：glibc 把它们
+ * 编译成 sendto/recvfrom（地址指针传 NULL），所以这里也不单列，由 read/write
+ * 与 sendto/recvfrom 两路口承接。 */
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+#define LX_SYS_SOCKET               (198u)
+#define LX_SYS_BIND                 (200u)
+#define LX_SYS_LISTEN               (201u)
+#define LX_SYS_ACCEPT               (202u)
+#define LX_SYS_CONNECT              (203u)
+#define LX_SYS_GETSOCKNAME          (204u)
+#define LX_SYS_GETPEERNAME          (205u)
+#define LX_SYS_SENDTO               (206u)
+#define LX_SYS_RECVFROM             (207u)
+#define LX_SYS_SETSOCKOPT           (208u)
+#define LX_SYS_GETSOCKOPT           (209u)
+#define LX_SYS_SHUTDOWN             (210u)
+#define LX_SYS_ACCEPT4              (242u)
+#endif
+
 /* errno（asm-generic 编号，程序侧读到的是 -errno） */
 #define LX_EPERM                    (1)
 #define LX_ESRCH                    (3)
@@ -120,6 +143,25 @@
 #define LX_ENAMETOOLONG             (36)
 #define LX_ENOSYS                   (38)
 #define LX_ETIMEDOUT                (110)
+/* socket 族专有的几个 errno（asm-generic 编号）。 */
+#define LX_EMFILE                   (24)
+#define LX_ENOTSOCK                 (88)
+#define LX_EMSGSIZE                 (90)
+#define LX_EPROTOTYPE               (91)
+#define LX_ENOPROTOOPT              (92)
+#define LX_EPROTONOSUPPORT          (93)
+#define LX_ESOCKTNOSUPPORT          (94)
+#define LX_EOPNOTSUPP               (95)
+#define LX_EAFNOSUPPORT             (97)
+#define LX_ECONNABORTED             (103)
+#define LX_ECONNRESET               (104)
+#define LX_ENOBUFS                  (105)
+#define LX_EISCONN                  (106)
+#define LX_ENOTCONN                 (107)
+#define LX_ECONNREFUSED             (111)
+#define LX_EHOSTUNREACH             (113)
+#define LX_EINPROGRESS              (115)
+#define LX_EALREADY                 (114)
 
 /* 每个任务可见的 fd 上限；0/1/2 是标准流，不占表项。 */
 #define LX_MAX_FD                   (8u)
@@ -164,6 +206,34 @@
 #define LX_SEL_SETSIZE              (1024u)
 #endif
 
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+/* socket 族常量（U-23）。家族只认 AF_INET；type 的低位是 STREAM/DGRAM，高位
+ * 只认 Linux 的两个附加位，其余位如实 -EINVAL（Linux 在 __sys_socket 里就是
+ * 这么判的，不是悄悄忽略）。
+ *
+ * SOL_SOCKET 的选项号是 **Linux 的编号**，与 net 服务自己的编号不同，必须在
+ * 这里逐条翻译：Linux 的 2/7/8 分别是 net 的 1/3/2，而 SO_ERROR 在 net 那边
+ * 有独立的 4 号。翻译漏一条就是一个「设置成功、行为没变」的假成功。 */
+#define LX_AF_INET                  (2)
+#define LX_SOCK_STREAM              (1)
+#define LX_SOCK_DGRAM               (2)
+#define LX_SOCK_NONBLOCK            (0x800u)
+#define LX_SOCK_CLOEXEC             (0x80000u)
+/* Linux 的 type 上界（net/socket.c 的 SOCK_MAX）：type >= 它回 -EINVAL，
+ * 在范围内但本协议族不支持的 type 才回 -ESOCKTNOSUPPORT。 */
+#define LX_SOCK_MAX                 (15)
+#define LX_SOCKF_NONBLOCK           (1u)
+#define LX_SOCKF_CLOEXEC            (2u)
+#define LX_SOL_SOCKET               (1)
+#define LX_SO_REUSEADDR             (2)
+#define LX_SO_TYPE                  (3)
+#define LX_SO_ERROR                 (4)
+#define LX_SO_SNDBUF                (7)
+#define LX_SO_RCVBUF                (8)
+#define LX_SO_DOMAIN                (39)
+#define LX_MSG_DONTWAIT             (0x40u)
+#endif
+
 
 #define LX_PATH_MAX                 (64u)
 #define LX_IO_CHUNK                 (128u)
@@ -173,6 +243,9 @@
 #define LX_FD_FILE                  (0u)
 #define LX_FD_PIPE_R                (1u)
 #define LX_FD_PIPE_W                (2u)
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+#define LX_FD_SOCKET                (3u)    /* U-23：net 服务里的一格 socket */
+#endif
 
 /* 管道容量与同时存在的条数。256 字节够一次 read/write 的常见块，也不至于
  * 让 .bss 多出一大块；条数按「一个程序同时用两条管道」给。
@@ -297,6 +370,17 @@ typedef struct
     uint8  wr;          /* 1 = 以 O_RDWR 打开（U-21 可写共享映射的前提） */
     uint32 size;
     uint32 off;
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+    /* U-23：socket 类 fd 用到的四格。net 是 net 服务里那一格的句柄（1 起）；
+     * stype 是建的时候给的 SOCK_STREAM/SOCK_DGRAM（getsockopt(SO_TYPE) 与
+     * accept 的继承都要它）；sflags 是本层的 NONBLOCK/CLOEXEC 位；
+     * pok/pbits 是 pselect6 一轮内的就绪答复缓存（见 lx_sock_net_ready）。 */
+    uint8  net;
+    uint8  stype;
+    uint8  sflags;
+    uint8  pok;
+    uint8  pbits;
+#endif
     char   path[LX_PATH_MAX];
 } lx_fd_t;
 
@@ -377,6 +461,28 @@ static uint8  s_sel_armed[ARKRTOS_TASK_MAX_NUM];
 static uint32 s_sel_deadline[ARKRTOS_TASK_MAX_NUM];
 #endif
 
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+/* 每个任务最多一次 socket 调用在飞（U-23）。登记的是**原始系统调用参数**
+ * （a0..a5）：重放时 a0 已经被 lx_finish 写成本次返回值（0），只有 a1..a5
+ * 还在寄存器里，所以不能靠参数寄存器。第一次进来把六个参数抄进本任务的槽，
+ * 重放时反过来从槽里取 —— 两种情况下 r[] 都是权威值。
+ *
+ * step/res/aux 只给 accept 用：accept 成功之后若调用方要地址，还要再发一次
+ * getpeername。第二次请求同样会重放，而重放会把整段处理函数再走一遍 ——
+ * 如果那时不留记号，就会再造一个 socket。所以主请求一旦成功就把「已经接过
+ * 的句柄 + 分配到的 fd」记下来，重放时跳过 accept 直奔地址查询。 */
+typedef struct
+{
+    uint8  armed;
+    uint8  step;
+    uint32 arg[6];
+    int32  res;
+    int32  aux;
+} lx_sockctx_t;
+
+static lx_sockctx_t s_sockctx[ARKRTOS_TASK_MAX_NUM];
+#endif
+
 /* ------------------------------------------------------------- 信号状态 */
 
 typedef struct
@@ -451,6 +557,13 @@ static void lx_proc_zero(uint32 slot)
         s_proc[slot].fd[i].off  = 0u;
         s_proc[slot].fd[i].path[0] = 0;
         s_proc[slot].fd[i].wr   = 0u;
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+        s_proc[slot].fd[i].net    = 0u;
+        s_proc[slot].fd[i].stype  = 0u;
+        s_proc[slot].fd[i].sflags = 0u;
+        s_proc[slot].fd[i].pok    = 0u;
+        s_proc[slot].fd[i].pbits  = 0u;
+#endif
     }
 #if (ARKRTOS_USE_PAGING_FILEMAP == 1)
     /* 写回记账**不跨 fork 继承**（见开关文档第 5 条）：子进程要同步自己的映射
@@ -616,6 +729,11 @@ static void lx_ret(void *p_ctx, int32 value)
  * 用另一个哨兵而不用 0，是为了让「成功但不返回」与「返回 0」在分发器里
  * 看得出区别。 */
 #define LX_RET_EXEC_DONE    ((int32)0x7FFFFF00)
+/* 「这次调用还没结束，参数寄存器原样留给重放的那一次」。分发器见到它只计数：
+ * 不写 a0（写了就把 a0 里的第一个参数冲掉，重放时读到一个假参数）、不投递
+ * 信号（调用还没返回，信号帧里不该有这个半截的现场）。socket 族与 pselect6
+ * 的阻塞路径都用它。 */
+#define LX_RET_RETRY        ((int32)0x7FFFFE00)
 
 static void lx_ret_ptr(void *p_ctx, unsigned long value)
 {
@@ -1531,7 +1649,14 @@ static uint32 lx_fd_release(uint32 slot, uint32 idx)
     {
         return 0u;
     }
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+    /* 套接字不进管道记账：net 那一格由 close 或退出时的 best-effort
+     * 关闭负责，这里只退 fd 槽。 */
+    if((s_proc[slot].fd[idx].kind == LX_FD_PIPE_R) ||
+       (s_proc[slot].fd[idx].kind == LX_FD_PIPE_W))
+#else
     if(s_proc[slot].fd[idx].kind != LX_FD_FILE)
+#endif
     {
         int32 pi = (int32)s_proc[slot].fd[idx].pipe;
 
@@ -1567,9 +1692,1124 @@ static uint32 lx_fd_release(uint32 slot, uint32 idx)
     s_proc[slot].fd[idx].size = 0u;
     s_proc[slot].fd[idx].path[0] = 0;
     s_proc[slot].fd[idx].wr = 0u;
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+    s_proc[slot].fd[idx].net    = 0u;
+    s_proc[slot].fd[idx].stype  = 0u;
+    s_proc[slot].fd[idx].sflags = 0u;
+    s_proc[slot].fd[idx].pok    = 0u;
+    s_proc[slot].fd[idx].pbits  = 0u;
+#endif
     return 1u;
 }
 
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+/* ------------------------------------------------------ socket（U-23） */
+
+/* 一次 net 请求的负错误号 → 本层 errno。ENOTSUP 是「这套内核根本没编进
+ * 协议栈」，对应 -ENOSYS；其余逐条对齐 Linux 的同名 errno。对不上号的只可能
+ * 是实现漏了一档，如实回 -EIO —— 编一个看似合理的号会让程序走错分支。 */
+static int32 lx_sock_errno(int32 rc)
+{
+    switch(rc)
+    {
+    case ARKRTOS_NET_EINVAL:        return -LX_EINVAL;
+    case ARKRTOS_NET_EWOULDBLOCK:   return -LX_EAGAIN;
+    case ARKRTOS_NET_EINPROGRESS:   return -LX_EINPROGRESS;
+    case ARKRTOS_NET_EALREADY:      return -LX_EALREADY;
+    case ARKRTOS_NET_EISCONN:       return -LX_EISCONN;
+    case ARKRTOS_NET_ENOTCONN:      return -LX_ENOTCONN;
+    case ARKRTOS_NET_ECONNREFUSED:  return -LX_ECONNREFUSED;
+    case ARKRTOS_NET_ECONNRESET:    return -LX_ECONNRESET;
+    case ARKRTOS_NET_ECONNABORTED:  return -LX_ECONNABORTED;
+    case ARKRTOS_NET_EHOSTUNREACH:  return -LX_EHOSTUNREACH;
+    case ARKRTOS_NET_EMSGSIZE:      return -LX_EMSGSIZE;
+    case ARKRTOS_NET_ENOBUFS:       return -LX_ENOBUFS;
+    case ARKRTOS_NET_ENOTSUP:       return -LX_ENOSYS;
+    default:                        return -LX_EIO;
+    }
+}
+
+/* 本任务的重启槽归零。任务退出/换程序时调用：任务号会被复用，不清的话新
+ * 任务会继承一条「已经在等」的旧登记，第一次 socket 调用就会走重放分支。 */
+static void lx_sock_ctx_clear(int32 task_id)
+{
+    uint32 i;
+
+    if((task_id <= 0) || (task_id > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return;
+    }
+    s_sockctx[task_id - 1].armed = 0u;
+    s_sockctx[task_id - 1].step  = 0u;
+    s_sockctx[task_id - 1].res   = 0;
+    s_sockctx[task_id - 1].aux   = 0;
+    for(i = 0u; i < 6u; i++)
+    {
+        s_sockctx[task_id - 1].arg[i] = 0u;
+    }
+}
+
+/* 重放时参数已经不在寄存器里（a0 被 lx_finish 清成 0），所以每个 socket 处理
+ * 函数都必须先经过这里：armed=0 时把这次调用的 6 个参数抄进本任务的槽，
+ * armed=1 时反过来从槽里取。两种情况 r[] 都是权威值。 */
+static void lx_sock_load(int32 me, void *p_ctx, uint32 *r)
+{
+    uint32 i;
+
+    if(s_sockctx[me - 1].armed != 0u)
+    {
+        for(i = 0u; i < 6u; i++)
+        {
+            r[i] = s_sockctx[me - 1].arg[i];
+        }
+        return;
+    }
+    for(i = 0u; i < 6u; i++)
+    {
+        r[i] = (uint32)ARKRTOS_SVC_ARG(p_ctx, i);
+        s_sockctx[me - 1].arg[i] = r[i];
+    }
+}
+
+/* 「这一次还没结束」：登记重放、睡一个时间片，返回 LX_RET_RETRY。没有可重放
+ * 端口时如实回 -EAGAIN（不假装睡过）并把登记撤掉。 */
+static int32 lx_sock_replay(void *p_ctx, int32 me)
+{
+    if(arkrtos_port_svc_restart(p_ctx) != 0)
+    {
+        lx_sock_ctx_clear(me);
+        return -LX_EAGAIN;
+    }
+    s_sockctx[me - 1].armed = 1u;
+    (void)arkrtos_task_block_in_critical((uint32)LX_WAIT_SLICE_MS);
+    return LX_RET_RETRY;
+}
+
+/* 发一次 net 请求并推进到结束。成功时把非负结果写进 *p_res 并返回 0；需要等
+ * （EPENDING/EBUSY）时走重放，返回 LX_RET_RETRY。EBUSY 也等：请求槽全系统
+ * 只有一个，别人（同一进程的另一个 socket 调用、或 App 自己的网络 SDK）在飞
+ * 时，唯一正确的做法是稍后再问，而不是把「忙」当成这个 socket 的错误交给程序。
+ *
+ * 一次 net 请求至少要一个往返（提交 → 服务任务执行 → 取回结果），所以任何一个
+ * socket 系统调用都必然经历一次重放 —— 这也是为什么参数必须落在本任务的槽里。 */
+static int32 lx_sock_submit(void *p_ctx, int32 me, uint32 op,
+                            uint32 a1, uint32 a2, uint32 a3,
+                            uint32 a4, uint32 a5, int32 *p_res)
+{
+    int32 rc;
+
+    rc = arkrtos_net_call(op, a1, a2, a3, a4, a5);
+    if((rc == ARKRTOS_NET_EPENDING) || (rc == ARKRTOS_NET_EBUSY))
+    {
+        return lx_sock_replay(p_ctx, me);
+    }
+    s_sockctx[me - 1].step = 0u;
+    if(rc < 0)
+    {
+        return lx_sock_errno(rc);
+    }
+    *p_res = rc;
+    return 0;
+}
+
+/* 找一个空 fd 槽，返回 fd 号（3 起）；满了 -EMFILE。**在真正建 socket 之前
+ * 调用**：先建再回滚会把一个 lwIP socket 漏在系统里，而这里没有「关不掉」的
+ * 补救路径（服务任务也挂掉时谁也关不了）。 */
+static int32 lx_sock_alloc_fd(void)
+{
+    uint32 i;
+
+    for(i = 0u; i < LX_MAX_FD; i++)
+    {
+        if(s_fd[i].used == 0u)
+        {
+            return (int32)(3u + i);
+        }
+    }
+    return -LX_EMFILE;
+}
+
+/* fd 号 → 表下标，且必须是 socket 类。fd 不存在回 -EBADF，种类不对回
+ * -ENOTSOCK（Linux 的 socket 族调用对非 socket 描述符给的就是它）。 */
+static int32 lx_sock_idx(int32 fd)
+{
+    int32 idx = lx_fd_find(fd);
+
+    if(idx < 0)
+    {
+        return -LX_EBADF;
+    }
+    if(s_fd[idx].kind != LX_FD_SOCKET)
+    {
+        return -LX_ENOTSOCK;
+    }
+    return idx;
+}
+
+/* 把一个刚拿到的 net 句柄落进 fd 槽。 */
+static void lx_sock_fill(uint32 idx, int32 handle, uint32 stype, uint32 sflags)
+{
+    s_fd[idx].kind    = LX_FD_SOCKET;
+    s_fd[idx].pipe    = 0u;
+    s_fd[idx].wr      = 0u;
+    s_fd[idx].size    = 0u;
+    s_fd[idx].off     = 0u;
+    s_fd[idx].path[0] = 0;
+    s_fd[idx].net     = (uint8)handle;
+    s_fd[idx].stype   = (uint8)stype;
+    s_fd[idx].sflags  = (uint8)sflags;
+    s_fd[idx].pok     = 0u;
+    s_fd[idx].pbits   = 0u;
+    s_fd[idx].used    = 1u;
+}
+
+/* Linux sockaddr_in 的布局（32/64 位同布局，共 16 字节）：u16 family /
+ * u16 port(网络序) / u32 addr(网络序) / 8 字节零。前 8 字节就装下了全部信息，
+ * 所以 addrlen 只要 >= 8 就能读（Linux 也是这么判的）。 */
+static int32 lx_sock_addr_in(unsigned long ua, uint32 alen,
+                             uint32 *p_ip, uint32 *p_port)
+{
+    uint8  sa[8];
+    uint32 family;
+
+    if(ua == 0ul)
+    {
+        return -LX_EFAULT;
+    }
+    if(alen < 8u)
+    {
+        return -LX_EINVAL;
+    }
+    if(arkrtos_copy_from_user(sa, (const void *)ua, 8u) != 0)
+    {
+        return -LX_EFAULT;
+    }
+    family = (uint32)sa[0] | ((uint32)sa[1] << 8);
+    if(family != (uint32)LX_AF_INET)
+    {
+        return -LX_EAFNOSUPPORT;
+    }
+    *p_port = ((uint32)sa[2] << 8) | (uint32)sa[3];
+    *p_ip   = ((uint32)sa[4] << 24) | ((uint32)sa[5] << 16) |
+              ((uint32)sa[6] << 8)  | (uint32)sa[7];
+    return 0;
+}
+
+/* net 的输出是「两个 4 字节 host order 写进用户地址」。我们没有第二个干净的
+ * 用户缓冲，于是借调用方自己的 sockaddr 当临时区：**端口写偏移 0、地址写偏移
+ * 4**，两块互不重叠（正好对上 net 的先后顺序），拿回来之后再按 Linux 布局重写
+ * 整个 16 字节。这样既不多占内存，也不会把半个地址留在用户表里。 */
+static int32 lx_sock_addr_fetch(unsigned long ua, uint32 *p_ip, uint32 *p_port)
+{
+    uint32 w;
+
+    if(arkrtos_copy_from_user(&w, (const void *)ua, 4u) != 0)
+    {
+        return -LX_EFAULT;
+    }
+    *p_port = w;
+    if(arkrtos_copy_from_user(&w, (const void *)(ua + 4ul), 4u) != 0)
+    {
+        return -LX_EFAULT;
+    }
+    *p_ip = w;
+    return 0;
+}
+
+/* 把地址与端口按 Linux 的 sockaddr_in 写回用户表，并把 addrlen 写成 16。
+ * ua==0 是「调用方不要地址」：此时 addrlen 按 Linux 的习惯写 0。 */
+static int32 lx_sock_addr_out(unsigned long ua, unsigned long ulenp,
+                             uint32 ip, uint32 port)
+{
+    uint8  sa[16];
+    uint32 len;
+    uint32 i;
+
+    if(ua != 0ul)
+    {
+        for(i = 0u; i < 16u; i++)
+        {
+            sa[i] = 0u;
+        }
+        sa[0] = (uint8)((uint32)LX_AF_INET & 0xFFu);
+        sa[1] = (uint8)(((uint32)LX_AF_INET >> 8) & 0xFFu);
+        sa[2] = (uint8)((port >> 8) & 0xFFu);
+        sa[3] = (uint8)(port & 0xFFu);
+        sa[4] = (uint8)((ip >> 24) & 0xFFu);
+        sa[5] = (uint8)((ip >> 16) & 0xFFu);
+        sa[6] = (uint8)((ip >> 8) & 0xFFu);
+        sa[7] = (uint8)(ip & 0xFFu);
+        if(arkrtos_copy_to_user((void *)ua, sa, 16u) != 0)
+        {
+            return -LX_EFAULT;
+        }
+        len = 16u;
+    }
+    else
+    {
+        len = 0u;
+    }
+    if(ulenp != 0ul)
+    {
+        if(arkrtos_copy_to_user((void *)ulenp, &len, 4u) != 0)
+        {
+            return -LX_EFAULT;
+        }
+    }
+    return 0;
+}
+
+/* Linux 的 SOL_SOCKET 选项号 → net 服务的选项号。返回 -1 表示**这一层**不认，
+ * 调用方据此回 -ENOPROTOOPT，而不是把一个陌生的号发给 net 让它猜。 */
+static int32 lx_sock_opt_net(int32 opt)
+{
+    switch(opt)
+    {
+    case LX_SO_REUSEADDR: return ARKRTOS_NET_SO_REUSEADDR;
+    case LX_SO_RCVBUF:    return ARKRTOS_NET_SO_RCVBUF;
+    case LX_SO_SNDBUF:    return ARKRTOS_NET_SO_SNDBUF;
+    case LX_SO_ERROR:     return ARKRTOS_NET_SO_ERROR;
+    default:              return -1;
+    }
+}
+
+/* 参数是「这次调用的 6 个原始参数」能否推进到结束。所有处理函数共用的前置：
+ * 内核上下文（没有可登记的身份）一律 -ENOSYS。 */
+static int32 lx_sock_me_ok(void)
+{
+    int32 me = (int32)arkrtos_current_task_id;
+
+    if((me <= 0) || (me > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return -1;
+    }
+    return me;
+}
+
+/* ------------------------------ socket(2) */
+static int32 lx_socket(void *p_ctx)
+{
+    int32  me;
+    uint32 r[6];
+    uint32 type;
+    uint32 sf = 0u;
+    int32  res = 0;
+    int32  rc;
+    int32  fd;
+
+    me = lx_sock_me_ok();
+    if(me < 0)
+    {
+        return -LX_ENOSYS;
+    }
+    lx_sock_load(me, p_ctx, r);
+
+    if(r[0] != (uint32)LX_AF_INET)
+    {
+        return -LX_EAFNOSUPPORT;
+    }
+    /* type 与两个标志位是**同一个字**里的不同段：先摘掉标志位再判 type。
+     * Linux 的判法是 type >= SOCK_MAX 回 -EINVAL，范围内但不支持的 type 回
+     * -ESOCKTNOSUPPORT —— 两种错法必须分开，程序据此决定是「调用写错了」
+     * 还是「这套内核不支持这种 socket」。 */
+    type = r[1] & ~(uint32)(LX_SOCK_NONBLOCK | LX_SOCK_CLOEXEC);
+    if(type >= (uint32)LX_SOCK_MAX)
+    {
+        return -LX_EINVAL;
+    }
+    if((type != (uint32)LX_SOCK_STREAM) && (type != (uint32)LX_SOCK_DGRAM))
+    {
+        return -LX_ESOCKTNOSUPPORT;
+    }
+    if(r[2] != 0u)
+    {
+        return -LX_EPROTONOSUPPORT;
+    }
+
+    fd = lx_sock_alloc_fd();
+    if(fd < 0)
+    {
+        return fd;
+    }
+
+    rc = lx_sock_submit(p_ctx, me, ARKRTOS_NET_SUB_SOCKET, type,
+                        0u, 0u, 0u, 0u, &res);
+    if(rc != 0)
+    {
+        return rc;
+    }
+    if((res <= 0) || (res > 255))
+    {
+        /* 服务回的句柄不在约定范围里：这不是成功，也不能拿它去后续调用。 */
+        return -LX_EIO;
+    }
+    if((r[1] & (uint32)LX_SOCK_NONBLOCK) != 0u)
+    {
+        sf |= LX_SOCKF_NONBLOCK;
+    }
+    if((r[1] & (uint32)LX_SOCK_CLOEXEC) != 0u)
+    {
+        sf |= LX_SOCKF_CLOEXEC;
+    }
+    lx_sock_fill((uint32)(fd - 3), res, type, sf);
+    return fd;
+}
+
+/* ------------------------------ bind(2) */
+static int32 lx_bind(void *p_ctx)
+{
+    int32  me;
+    uint32 r[6];
+    uint32 ip = 0u;
+    uint32 port = 0u;
+    int32  idx;
+    int32  res = 0;
+    int32  rc;
+
+    me = lx_sock_me_ok();
+    if(me < 0)
+    {
+        return -LX_ENOSYS;
+    }
+    lx_sock_load(me, p_ctx, r);
+
+    idx = lx_sock_idx((int32)r[0]);
+    if(idx < 0)
+    {
+        return idx;
+    }
+    rc = lx_sock_addr_in(r[1], r[2], &ip, &port);
+    if(rc < 0)
+    {
+        return rc;
+    }
+    rc = lx_sock_submit(p_ctx, me, ARKRTOS_NET_SUB_BIND, (uint32)s_fd[idx].net,
+                        ip, port, 0u, 0u, &res);
+    return (rc == 0) ? 0 : rc;
+}
+
+/* ------------------------------ listen(2) */
+static int32 lx_listen(void *p_ctx)
+{
+    int32  me;
+    uint32 r[6];
+    uint32 backlog;
+    int32  idx;
+    int32  res = 0;
+    int32  rc;
+
+    me = lx_sock_me_ok();
+    if(me < 0)
+    {
+        return -LX_ENOSYS;
+    }
+    lx_sock_load(me, p_ctx, r);
+
+    idx = lx_sock_idx((int32)r[0]);
+    if(idx < 0)
+    {
+        return idx;
+    }
+    /* 负 backlog：Linux 静默当 0；上界 255 是 net 协议里的宽度，Linux 也是
+     * 静默截断（不是报错）。 */
+    backlog = r[1];
+    if(backlog > 0x7FFFFFFFu)
+    {
+        backlog = 0u;
+    }
+    if(backlog > 255u)
+    {
+        backlog = 255u;
+    }
+    rc = lx_sock_submit(p_ctx, me, ARKRTOS_NET_SUB_LISTEN, (uint32)s_fd[idx].net,
+                        backlog, 0u, 0u, 0u, &res);
+    return (rc == 0) ? 0 : rc;
+}
+
+/* ------------------------------ accept(2) / accept4(2)
+ * accept 要做两次 net 请求（接一个 + 取对端地址），两次都会重放。所以第一次
+ * 成功之后必须把「接到的句柄 + 分配到的 fd」记进本任务的槽：重放时跳过 accept，
+ * 否则每重放一次就多出一个没人认领的 socket。 */
+static int32 lx_accept(void *p_ctx, uint8 with_flags)
+{
+    int32  me;
+    uint32 r[6];
+    uint32 extra = 0u;
+    uint32 ip = 0u;
+    uint32 port = 0u;
+    int32  idx;
+    int32  res = 0;
+    int32  rc;
+    int32  newfd;
+    int32  newh;
+
+    me = lx_sock_me_ok();
+    if(me < 0)
+    {
+        return -LX_ENOSYS;
+    }
+    lx_sock_load(me, p_ctx, r);
+
+    if((s_sockctx[me - 1].armed != 0u) && (s_sockctx[me - 1].step == 1u))
+    {
+        /* 上一轮已经把 accept 做完了：这一步只补地址查询。 */
+        newh  = s_sockctx[me - 1].res;
+        newfd = s_sockctx[me - 1].aux;
+    }
+    else
+    {
+        idx = lx_sock_idx((int32)r[0]);
+        if(idx < 0)
+        {
+            return idx;
+        }
+        if(with_flags != 0u)
+        {
+            if((r[3] & ~(uint32)(LX_SOCK_NONBLOCK | LX_SOCK_CLOEXEC)) != 0u)
+            {
+                return -LX_EINVAL;
+            }
+            extra = r[3];
+        }
+        newfd = lx_sock_alloc_fd();
+        if(newfd < 0)
+        {
+            return newfd;
+        }
+        rc = lx_sock_submit(p_ctx, me, ARKRTOS_NET_SUB_ACCEPT,
+                            (uint32)s_fd[idx].net, 0u, 0u, 0u, 0u, &res);
+        if(rc != 0)
+        {
+            return rc;
+        }
+        if((res <= 0) || (res > 255))
+        {
+            return -LX_EIO;
+        }
+        newh = res;
+        {
+            uint32 sf = 0u;
+
+            if((extra & (uint32)LX_SOCK_NONBLOCK) != 0u)
+            {
+                sf |= LX_SOCKF_NONBLOCK;
+            }
+            if((extra & (uint32)LX_SOCK_CLOEXEC) != 0u)
+            {
+                sf |= LX_SOCKF_CLOEXEC;
+            }
+            /* 新连接的 socket 类型跟着监听的那个走。 */
+            lx_sock_fill((uint32)(newfd - 3), newh, (uint32)s_fd[idx].stype, sf);
+        }
+        if(r[1] == 0u)
+        {
+            return newfd;
+        }
+        s_sockctx[me - 1].res  = newh;
+        s_sockctx[me - 1].aux  = newfd;
+        s_sockctx[me - 1].step = 1u;
+    }
+
+    rc = lx_sock_submit(p_ctx, me, ARKRTOS_NET_SUB_GETPEERNAME, (uint32)newh,
+                        (uint32)(r[1] + 4ul), r[1], 0u, 0u, &res);
+    if(rc != 0)
+    {
+        return rc;
+    }
+    rc = lx_sock_addr_fetch(r[1], &ip, &port);
+    if(rc < 0)
+    {
+        /* 地址写不回去：fd 已经建好了，只能把它退掉，不让调用方拿到一个
+         * 「一半失败」的句柄。net 侧的那一格由任务退出时的收尸关闭。 */
+        (void)lx_fd_release(lx_proc_cur(), (uint32)(newfd - 3));
+        return rc;
+    }
+    rc = lx_sock_addr_out(r[1], r[2], ip, port);
+    if(rc < 0)
+    {
+        (void)lx_fd_release(lx_proc_cur(), (uint32)(newfd - 3));
+        return rc;
+    }
+    return newfd;
+}
+
+/* ------------------------------ connect(2) */
+static int32 lx_connect(void *p_ctx)
+{
+    int32  me;
+    uint32 r[6];
+    uint32 ip = 0u;
+    uint32 port = 0u;
+    int32  idx;
+    int32  res = 0;
+    int32  rc;
+
+    me = lx_sock_me_ok();
+    if(me < 0)
+    {
+        return -LX_ENOSYS;
+    }
+    lx_sock_load(me, p_ctx, r);
+
+    idx = lx_sock_idx((int32)r[0]);
+    if(idx < 0)
+    {
+        return idx;
+    }
+    rc = lx_sock_addr_in(r[1], r[2], &ip, &port);
+    if(rc < 0)
+    {
+        return rc;
+    }
+    rc = lx_sock_submit(p_ctx, me, ARKRTOS_NET_SUB_CONNECT, (uint32)s_fd[idx].net,
+                        ip, port, 0u, 0u, &res);
+    if((rc == -LX_EINPROGRESS) || (rc == -LX_EALREADY))
+    {
+        /* 非阻塞 socket 的 connect 是两段式：把「还在进行」如实交回去，程序
+         * 自己再问（Linux 就是这个语义）。阻塞 socket 就在时间片上重放，直到
+         * 连上或给出真正的错误。 */
+        if((s_fd[idx].sflags & LX_SOCKF_NONBLOCK) != 0u)
+        {
+            return rc;
+        }
+        return lx_sock_replay(p_ctx, me);
+    }
+    return (rc == 0) ? 0 : rc;
+}
+
+/* sendto(2)（也承接 glibc 的 send/recv 与 write/read 的 socket 分支）。
+ * flags 只认 MSG_DONTWAIT：本层不做 SIGPIPE，也不往 net 转发 lwIP 的 flags
+ * 编号（协议层语义不同，转发过去就是一个翻译错误）。 */
+static int32 lx_sendto(void *p_ctx)
+{
+    int32  me;
+    uint32 r[6];
+    uint32 ip = 0u;
+    uint32 port = 0u;
+    int32  idx;
+    int32  res = 0;
+    int32  rc;
+
+    me = lx_sock_me_ok();
+    if(me < 0)
+    {
+        return -LX_ENOSYS;
+    }
+    lx_sock_load(me, p_ctx, r);
+
+    idx = lx_sock_idx((int32)r[0]);
+    if(idx < 0)
+    {
+        return idx;
+    }
+    if(r[2] > 0xFFFFu)
+    {
+        return -LX_EMSGSIZE;        /* net 协议里的长度宽度 */
+    }
+    if(r[4] != 0u)
+    {
+        rc = lx_sock_addr_in(r[4], r[5], &ip, &port);
+        if(rc < 0)
+        {
+            return rc;
+        }
+        rc = lx_sock_submit(p_ctx, me, ARKRTOS_NET_SUB_SENDTO,
+                            (uint32)s_fd[idx].net, r[1], r[2], ip, port, &res);
+    }
+    else
+    {
+        rc = lx_sock_submit(p_ctx, me, ARKRTOS_NET_SUB_SEND,
+                            (uint32)s_fd[idx].net, r[1], r[2], 0u, 0u, &res);
+    }
+    if(rc == -LX_EAGAIN)
+    {
+        if(((s_fd[idx].sflags & LX_SOCKF_NONBLOCK) != 0u) ||
+           ((r[3] & LX_MSG_DONTWAIT) != 0u))
+        {
+            return rc;
+        }
+        return lx_sock_replay(p_ctx, me);
+    }
+    return (rc == 0) ? res : rc;
+}
+
+/* recvfrom(2)。len==0 时 Linux 直接回 0 且不发请求；地址的输出同样借用户自己
+ * 的 sockaddr 当临时区（见 lx_sock_addr_fetch）。 */
+static int32 lx_recvfrom(void *p_ctx)
+{
+    int32  me;
+    uint32 r[6];
+    uint32 ip = 0u;
+    uint32 port = 0u;
+    int32  idx;
+    int32  res = 0;
+    int32  rc;
+
+    me = lx_sock_me_ok();
+    if(me < 0)
+    {
+        return -LX_ENOSYS;
+    }
+    lx_sock_load(me, p_ctx, r);
+
+    idx = lx_sock_idx((int32)r[0]);
+    if(idx < 0)
+    {
+        return idx;
+    }
+    if(r[2] == 0u)
+    {
+        return 0;
+    }
+    if(r[2] > 0xFFFFu)
+    {
+        return -LX_EMSGSIZE;
+    }
+    if(r[4] != 0u)
+    {
+        rc = lx_sock_submit(p_ctx, me, ARKRTOS_NET_SUB_RECVFROM,
+                            (uint32)s_fd[idx].net, r[1], r[2],
+                            (uint32)(r[4] + 4ul), r[4], &res);
+    }
+    else
+    {
+        rc = lx_sock_submit(p_ctx, me, ARKRTOS_NET_SUB_RECV,
+                            (uint32)s_fd[idx].net, r[1], r[2], 0u, 0u, &res);
+    }
+    if(rc == -LX_EAGAIN)
+    {
+        if(((s_fd[idx].sflags & LX_SOCKF_NONBLOCK) != 0u) ||
+           ((r[3] & LX_MSG_DONTWAIT) != 0u))
+        {
+            return rc;
+        }
+        return lx_sock_replay(p_ctx, me);
+    }
+    if(rc != 0)
+    {
+        return rc;
+    }
+    if(r[4] != 0u)
+    {
+        rc = lx_sock_addr_fetch(r[4], &ip, &port);
+        if(rc < 0)
+        {
+            return rc;
+        }
+        rc = lx_sock_addr_out(r[4], r[5], ip, port);
+        if(rc < 0)
+        {
+            return rc;
+        }
+    }
+    return res;
+}
+
+/* ------------------------------ setsockopt(2) */
+static int32 lx_setsockopt(void *p_ctx)
+{
+    int32  me;
+    uint32 r[6];
+    uint32 val = 0u;
+    int32  idx;
+    int32  nopt;
+    int32  res = 0;
+    int32  rc;
+
+    me = lx_sock_me_ok();
+    if(me < 0)
+    {
+        return -LX_ENOSYS;
+    }
+    lx_sock_load(me, p_ctx, r);
+
+    idx = lx_sock_idx((int32)r[0]);
+    if(idx < 0)
+    {
+        return idx;
+    }
+    if((int32)r[1] != LX_SOL_SOCKET)
+    {
+        return -LX_ENOPROTOOPT;
+    }
+    nopt = lx_sock_opt_net((int32)r[2]);
+    if(nopt < 0)
+    {
+        return -LX_ENOPROTOOPT;
+    }
+    if((int32)r[2] == LX_SO_ERROR)
+    {
+        return -LX_EINVAL;          /* 只读选项 */
+    }
+    if(r[3] == 0u)
+    {
+        return -LX_EFAULT;
+    }
+    if(r[4] < 4u)
+    {
+        return -LX_EINVAL;
+    }
+    if(arkrtos_copy_from_user(&val, (const void *)r[3], 4u) != 0)
+    {
+        return -LX_EFAULT;
+    }
+    rc = lx_sock_submit(p_ctx, me, ARKRTOS_NET_SUB_SETSOCKOPT,
+                        (uint32)s_fd[idx].net, (uint32)nopt, val, 0u, 0u, &res);
+    return (rc == 0) ? 0 : rc;
+}
+
+/* ------------------------------ getsockopt(2)
+ * SO_TYPE / SO_DOMAIN / SO_ERROR 三个本地就能答：
+ *   - TYPE/DOMAIN 是建 socket 时就知道的事实；
+ *   - ERROR 恒 0：本层没有异步错误队列，socket 的错误都在调用返回值里给出。
+ * 与其让 net 去猜（它没有这三格），不如在这里如实回答。 */
+static int32 lx_getsockopt(void *p_ctx)
+{
+    int32  me;
+    uint32 r[6];
+    uint32 val = 0u;
+    uint32 len;
+    uint32 four = 4u;
+    int32  idx;
+    int32  opt;
+    int32  nopt;
+    int32  res = 0;
+    int32  rc;
+
+    me = lx_sock_me_ok();
+    if(me < 0)
+    {
+        return -LX_ENOSYS;
+    }
+    lx_sock_load(me, p_ctx, r);
+
+    idx = lx_sock_idx((int32)r[0]);
+    if(idx < 0)
+    {
+        return idx;
+    }
+    if((int32)r[1] != LX_SOL_SOCKET)
+    {
+        return -LX_ENOPROTOOPT;
+    }
+    if(r[3] == 0u)
+    {
+        return -LX_EFAULT;
+    }
+    if(r[4] != 0u)
+    {
+        if(arkrtos_copy_from_user(&len, (const void *)r[4], 4u) != 0)
+        {
+            return -LX_EFAULT;
+        }
+        if(len < 4u)
+        {
+            return -LX_EINVAL;
+        }
+    }
+    opt = (int32)r[2];
+    if((opt == LX_SO_TYPE) || (opt == LX_SO_DOMAIN) || (opt == LX_SO_ERROR))
+    {
+        if(opt == LX_SO_TYPE)
+        {
+            val = (uint32)s_fd[idx].stype;
+        }
+        else if(opt == LX_SO_DOMAIN)
+        {
+            val = (uint32)LX_AF_INET;
+        }
+        else
+        {
+            val = 0u;
+        }
+        if(arkrtos_copy_to_user((void *)r[3], &val, 4u) != 0)
+        {
+            return -LX_EFAULT;
+        }
+        if((r[4] != 0u) &&
+           (arkrtos_copy_to_user((void *)r[4], &four, 4u) != 0))
+        {
+            return -LX_EFAULT;
+        }
+        return 0;
+    }
+    nopt = lx_sock_opt_net(opt);
+    if(nopt < 0)
+    {
+        return -LX_ENOPROTOOPT;
+    }
+    /* 其余交给 net：它把 4 字节结果直接写进用户地址（这就是为什么这里必须
+     * 传用户指针，而不是内核栈上的临时变量）。 */
+    rc = lx_sock_submit(p_ctx, me, ARKRTOS_NET_SUB_GETSOCKOPT,
+                        (uint32)s_fd[idx].net, (uint32)nopt, r[3], 0u, 0u, &res);
+    if(rc != 0)
+    {
+        return rc;
+    }
+    if((r[4] != 0u) && (arkrtos_copy_to_user((void *)r[4], &four, 4u) != 0))
+    {
+        return -LX_EFAULT;
+    }
+    return 0;
+}
+
+/* ------------------------------ getsockname(2) / getpeername(2) */
+static int32 lx_sock_name(void *p_ctx, uint8 peer)
+{
+    int32  me;
+    uint32 r[6];
+    uint32 ip = 0u;
+    uint32 port = 0u;
+    uint32 op;
+    int32  idx;
+    int32  res = 0;
+    int32  rc;
+
+    me = lx_sock_me_ok();
+    if(me < 0)
+    {
+        return -LX_ENOSYS;
+    }
+    lx_sock_load(me, p_ctx, r);
+
+    idx = lx_sock_idx((int32)r[0]);
+    if(idx < 0)
+    {
+        return idx;
+    }
+    op = (peer != 0u) ? (uint32)ARKRTOS_NET_SUB_GETPEERNAME
+                      : (uint32)ARKRTOS_NET_SUB_GETSOCKNAME;
+    if(r[1] == 0u)
+    {
+        /* 不要地址：仍然问一次，让「socket 已经不在了」这类错误照常报出来。 */
+        rc = lx_sock_submit(p_ctx, me, op, (uint32)s_fd[idx].net,
+                            0u, 0u, 0u, 0u, &res);
+        return (rc == 0) ? 0 : rc;
+    }
+    rc = lx_sock_submit(p_ctx, me, op, (uint32)s_fd[idx].net,
+                        (uint32)(r[1] + 4ul), r[1], 0u, 0u, &res);
+    if(rc != 0)
+    {
+        return rc;
+    }
+    rc = lx_sock_addr_fetch(r[1], &ip, &port);
+    if(rc < 0)
+    {
+        return rc;
+    }
+    return lx_sock_addr_out(r[1], r[2], ip, port);
+}
+
+/* ------------------------------ shutdown(2) */
+static int32 lx_shutdown(void *p_ctx)
+{
+    int32  me;
+    uint32 r[6];
+    int32  idx;
+    int32  res = 0;
+    int32  rc;
+
+    me = lx_sock_me_ok();
+    if(me < 0)
+    {
+        return -LX_ENOSYS;
+    }
+    lx_sock_load(me, p_ctx, r);
+
+    idx = lx_sock_idx((int32)r[0]);
+    if(idx < 0)
+    {
+        return idx;
+    }
+    if(r[1] > (uint32)ARKRTOS_NET_SHUT_RDWR)
+    {
+        return -LX_EINVAL;
+    }
+    rc = lx_sock_submit(p_ctx, me, ARKRTOS_NET_SUB_SHUTDOWN,
+                        (uint32)s_fd[idx].net, r[1], 0u, 0u, 0u, &res);
+    return (rc == 0) ? 0 : rc;
+}
+
+/* ------------------------------ read(2) / write(2) 落在 socket 上
+ * glibc 的 read/write 就是 63/64 号系统调用，落在 socket 上时等价于
+ * recv(fd,buf,len,0) / send(fd,buf,len,0)。这两条是**阻塞**语义：非阻塞
+ * socket 立刻回 -EAGAIN，阻塞 socket 在时间片上重放。 */
+static int32 lx_sock_read(void *p_ctx)
+{
+    int32  me;
+    uint32 r[6];
+    int32  idx;
+    int32  res = 0;
+    int32  rc;
+
+    me = lx_sock_me_ok();
+    if(me < 0)
+    {
+        return -LX_ENOSYS;
+    }
+    lx_sock_load(me, p_ctx, r);
+
+    idx = lx_sock_idx((int32)r[0]);
+    if(idx < 0)
+    {
+        return idx;
+    }
+    if(r[2] == 0u)
+    {
+        return 0;
+    }
+    if(r[2] > 0xFFFFu)
+    {
+        return -LX_EMSGSIZE;
+    }
+    rc = lx_sock_submit(p_ctx, me, ARKRTOS_NET_SUB_RECV,
+                        (uint32)s_fd[idx].net, r[1], r[2], 0u, 0u, &res);
+    if((rc == -LX_EAGAIN) && ((s_fd[idx].sflags & LX_SOCKF_NONBLOCK) == 0u))
+    {
+        return lx_sock_replay(p_ctx, me);
+    }
+    return (rc == 0) ? res : rc;
+}
+
+static int32 lx_sock_write(void *p_ctx)
+{
+    int32  me;
+    uint32 r[6];
+    int32  idx;
+    int32  res = 0;
+    int32  rc;
+
+    me = lx_sock_me_ok();
+    if(me < 0)
+    {
+        return -LX_ENOSYS;
+    }
+    lx_sock_load(me, p_ctx, r);
+
+    idx = lx_sock_idx((int32)r[0]);
+    if(idx < 0)
+    {
+        return idx;
+    }
+    if(r[2] > 0xFFFFu)
+    {
+        return -LX_EMSGSIZE;
+    }
+    rc = lx_sock_submit(p_ctx, me, ARKRTOS_NET_SUB_SEND,
+                        (uint32)s_fd[idx].net, r[1], r[2], 0u, 0u, &res);
+    if((rc == -LX_EAGAIN) && ((s_fd[idx].sflags & LX_SOCKF_NONBLOCK) == 0u))
+    {
+        return lx_sock_replay(p_ctx, me);
+    }
+    return (rc == 0) ? res : rc;
+}
+
+/* ------------------------------ close(2) 落在 socket 上
+ * 把 net 那一格关掉，再把 fd 槽退掉。close 的错误本层不报（Linux 的 close
+ * 也是一样：错误在写回时已经错过了报告时机），但**一定要退槽**，否则程序
+ * 反复 close 会把 8 个槽耗干。 */
+static int32 lx_sock_close(void *p_ctx)
+{
+    int32  me;
+    uint32 r[6];
+    int32  idx;
+    int32  res = 0;
+    int32  rc;
+
+    me = lx_sock_me_ok();
+    if(me < 0)
+    {
+        return -LX_ENOSYS;
+    }
+    lx_sock_load(me, p_ctx, r);
+
+    idx = lx_sock_idx((int32)r[0]);
+    if(idx < 0)
+    {
+        return idx;
+    }
+    rc = lx_sock_submit(p_ctx, me, ARKRTOS_NET_SUB_CLOSE,
+                        (uint32)s_fd[idx].net, 0u, 0u, 0u, 0u, &res);
+    if(rc == LX_RET_RETRY)
+    {
+        return rc;
+    }
+    (void)lx_fd_release(lx_proc_cur(), (uint32)idx);
+    return 0;
+}
+
+/* ------------------------------ pselect6 的就绪探测
+ * 谓词不能阻塞，所以这里只发一次请求：服务还没答复就按「未就绪」处理，由外面
+ * 那一轮的时间片重放再来问。一次 net poll 至少要一个往返，所以第一轮一定报
+ * 未就绪 —— 与「真的没准备好」在读数上不可区分，但两者都只让调用方多等一个
+ * 时间片，不会给出错的就绪位。
+ *
+ * 缓存只在**一次 pselect6 调用内**有效：lx_pselect6 每轮先把所有 pok 清掉，
+ * 第一遍扫描填、第二遍（写回那遍）复用。留到下一轮就会拿一个过期的就绪位把
+ * 调用方骗起来。 */
+#if (ARKRTOS_USE_LINUX_SELECT == 1)
+static uint8 lx_sock_net_ready(uint32 idx, uint32 mask)
+{
+    int32 rc;
+
+    if((uint32)s_fd[idx].net == 0u)
+    {
+        return 0u;
+    }
+    if(s_fd[idx].pok == 0u)
+    {
+        rc = arkrtos_net_call(ARKRTOS_NET_SUB_POLL, (uint32)s_fd[idx].net,
+                              (uint32)(ARKRTOS_NET_POLL_IN | ARKRTOS_NET_POLL_OUT),
+                              0u, 0u, 0u);
+        if(rc > 0)
+        {
+            s_fd[idx].pbits = (uint8)rc;
+            s_fd[idx].pok   = 1u;
+        }
+    }
+    return ((s_fd[idx].pbits & mask) != 0u) ? 1u : 0u;
+}
+#endif /* ARKRTOS_USE_LINUX_SELECT == 1 */
+/* 本次调用是不是「重放的那一次」。只有 socket 的处理函数会登记重放，所以
+ * close/read/write 在前面看到 armed 就能确定要转给 socket 那条路 —— 那时
+ * a0 已经被 lx_finish 清成 0，不能再用它当 fd。 */
+static uint8 lx_sock_armed(void)
+{
+    int32 me = (int32)arkrtos_current_task_id;
+
+    if((me <= 0) || (me > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return 0u;
+    }
+    return s_sockctx[me - 1].armed;
+}
+
+/* 退出收尸：把该槽上所有套接字的 net 句柄 best-effort 关掉。不等答复 ——
+ * 退出路径上没有可以交回错误的调用者，服务任务会自己做完。必须在临界区
+ * **之外**调用：net 请求是投消息，不能在关中断时做。 */
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+static void lx_sock_close_all(uint32 slot)
+{
+    uint32 i;
+
+    if(slot >= (uint32)LX_PROC_MAX)
+    {
+        return;
+    }
+    for(i = 0u; i < LX_MAX_FD; i++)
+    {
+        if((s_proc[slot].fd[i].used != 0u) &&
+           (s_proc[slot].fd[i].kind == LX_FD_SOCKET) &&
+           ((uint32)s_proc[slot].fd[i].net != 0u))
+        {
+            (void)arkrtos_net_call(ARKRTOS_NET_SUB_CLOSE,
+                                   (uint32)s_proc[slot].fd[i].net,
+                                   0u, 0u, 0u, 0u);
+        }
+    }
+}
+#endif /* ARKRTOS_USE_LINUX_FORK == 1 */
+#endif /* ARKRTOS_USE_LINUX_SOCKET == 1 */
 #if (ARKRTOS_USE_LINUX_FORK == 1)
 /* 把父进程的状态复制进刚 fork 出来的子槽：fd 表逐项照抄（管道对象的读写端
  * 引用计数各加一 —— fd 被复制了一份，管道还是同一条，与 Linux 的 dup 语义
@@ -1590,6 +2830,21 @@ static void lx_proc_fork_child(uint32 slot, int32 child, int32 parent)
             {
                 continue;
             }
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+            if(s_proc[slot].fd[i].kind == LX_FD_SOCKET)
+            {
+                /* 净层没有 dup：套接字不跨 fork 继承。子进程看到一个空槽，
+                 * 之后用它回 -EBADF —— 不给一个属于父进程的假句柄。 */
+                s_proc[slot].fd[i].used   = 0u;
+                s_proc[slot].fd[i].kind   = LX_FD_FILE;
+                s_proc[slot].fd[i].net    = 0u;
+                s_proc[slot].fd[i].stype  = 0u;
+                s_proc[slot].fd[i].sflags = 0u;
+                s_proc[slot].fd[i].pok    = 0u;
+                s_proc[slot].fd[i].pbits  = 0u;
+                continue;
+            }
+#endif
             if(s_proc[slot].fd[i].kind == LX_FD_FILE)
             {
                 continue;
@@ -1625,6 +2880,14 @@ static void lx_proc_fork_child(uint32 slot, int32 child, int32 parent)
 static int32 lx_close(void *p_ctx)
 {
     int32 fd = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+    /* 重放的那一次 a0 已经被 lx_finish 清成 0，参数只剩在本任务的槽里；
+     * 这里必须先看 armed，否则会把 fd=0 当成「关标准流」直接回 0。 */
+    if(lx_sock_armed() != 0u)
+    {
+        return lx_sock_close(p_ctx);
+    }
+#endif
     int32 idx;
 
     if((fd >= 0) && (fd <= 2))
@@ -1637,6 +2900,15 @@ static int32 lx_close(void *p_ctx)
     {
         return -LX_EBADF;
     }
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+    /* 套接字要交给 net 去关：只摘掉 fd 项而不告诉协议栈，会在系统里
+     * 漏一个 net socket（槽位数有上限，漏满之后所有 socket 调用都失败）。
+     * 这一段属于正常路径，不能写在 if(idx < 0) 的块里。 */
+    if(s_fd[idx].kind == LX_FD_SOCKET)
+    {
+        return lx_sock_close(p_ctx);
+    }
+#endif
 
     (void)lx_fd_release(lx_proc_cur(), (uint32)idx);
     return 0;
@@ -1644,6 +2916,12 @@ static int32 lx_close(void *p_ctx)
 
 static int32 lx_read(void *p_ctx)
 {
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+    if(lx_sock_armed() != 0u)
+    {
+        return lx_sock_read(p_ctx);
+    }
+#endif
     int32  fd   = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
     unsigned long ua = ARKRTOS_SVC_ARG(p_ctx, 1u);
     uint32 want = ARKRTOS_SVC_ARG(p_ctx, 2u);
@@ -1661,6 +2939,12 @@ static int32 lx_read(void *p_ctx)
     {
         return -LX_EBADF;
     }
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+    if(s_fd[idx].kind == LX_FD_SOCKET)
+    {
+        return lx_sock_read(p_ctx);
+    }
+#endif
     if(s_fd[idx].kind != LX_FD_FILE)
     {
         if(s_fd[idx].kind != LX_FD_PIPE_R)
@@ -1720,6 +3004,12 @@ static int32 lx_read(void *p_ctx)
 
 static int32 lx_write(void *p_ctx)
 {
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+    if(lx_sock_armed() != 0u)
+    {
+        return lx_sock_write(p_ctx);
+    }
+#endif
     int32  fd   = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
     unsigned long ua = ARKRTOS_SVC_ARG(p_ctx, 1u);
     uint32 want = ARKRTOS_SVC_ARG(p_ctx, 2u);
@@ -1737,6 +3027,12 @@ static int32 lx_write(void *p_ctx)
         {
             return -LX_EBADF;
         }
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+        if(s_fd[pidx].kind == LX_FD_SOCKET)
+        {
+            return lx_sock_write(p_ctx);
+        }
+#endif
         if(s_fd[pidx].kind == LX_FD_FILE)
         {
             return -LX_ENOSYS;
@@ -3305,6 +4601,14 @@ static uint8 lx_sel_rd_ready(int32 fd)
     {
         return 0u;
     }
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+    if(s_fd[idx].kind == LX_FD_SOCKET)
+    {
+        /* 套接字的就绪由 net 服务答（一次 POLL）。服务还没答复就按
+         * 未就绪处理：谓词不能阻塞，外圈那一轮的时间片会再来问。 */
+        return lx_sock_net_ready((uint32)idx, (uint32)ARKRTOS_NET_POLL_IN);
+    }
+#endif
     if(s_fd[idx].kind == LX_FD_FILE)
     {
         return 1u;
@@ -3339,6 +4643,12 @@ static uint8 lx_sel_wr_ready(int32 fd)
     {
         return 0u;
     }
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+    if(s_fd[idx].kind == LX_FD_SOCKET)
+    {
+        return lx_sock_net_ready((uint32)idx, (uint32)ARKRTOS_NET_POLL_OUT);
+    }
+#endif
     if(s_fd[idx].kind == LX_FD_FILE)
     {
         return 1u;
@@ -3530,6 +4840,19 @@ static int32 lx_pselect6(void *p_ctx)
     {
         return -LX_EINVAL;
     }
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+    /* 套接字就绪是每轮现问的：跨轮留着上一轮的就绪位会把调用方骗起来。
+     * 第一遍扫描填、第二遍（写回那遍）复用。 */
+    {
+        uint32 k;
+
+        for(k = 0u; k < (uint32)LX_MAX_FD; k++)
+        {
+            s_fd[k].pok   = 0u;
+            s_fd[k].pbits = 0u;
+        }
+    }
+#endif
 
     rc = lx_sel_scan(nfds, rptr, wptr, eptr, &cnt, 0u);
     if(rc < 0)
@@ -3592,7 +4915,9 @@ static int32 lx_pselect6(void *p_ctx)
         return -LX_EAGAIN;
     }
     (void)arkrtos_task_block_in_critical((uint32)LX_WAIT_SLICE_MS);
-    return 0;                       /* 返回值会被重放的那一次覆盖 */
+    /* 不写 a0：nfds 是这一轮的输入，被清成 0 会让下一次重放少扫
+     * 一圈描述符。和 socket 一样走 RETRY 哨兵。 */
+    return LX_RET_RETRY;
 }
 #endif /* ARKRTOS_USE_LINUX_SELECT == 1 */
 /* ------------------------------------------------ execve（同任务换镜像） */
@@ -3863,6 +5188,47 @@ static int32 lx_dispatch(void *p_svc_ctx, uint32 num, int32 *p_rc)
         rc = lx_pselect6(p_svc_ctx);
         break;
     #endif
+    #if (ARKRTOS_USE_LINUX_SOCKET == 1)
+    case LX_SYS_SOCKET:
+        rc = lx_socket(p_svc_ctx);
+        break;
+    case LX_SYS_BIND:
+        rc = lx_bind(p_svc_ctx);
+        break;
+    case LX_SYS_LISTEN:
+        rc = lx_listen(p_svc_ctx);
+        break;
+    case LX_SYS_ACCEPT:
+        rc = lx_accept(p_svc_ctx, 0u);
+        break;
+    case LX_SYS_ACCEPT4:
+        rc = lx_accept(p_svc_ctx, 1u);
+        break;
+    case LX_SYS_CONNECT:
+        rc = lx_connect(p_svc_ctx);
+        break;
+    case LX_SYS_GETSOCKNAME:
+        rc = lx_sock_name(p_svc_ctx, 0u);
+        break;
+    case LX_SYS_GETPEERNAME:
+        rc = lx_sock_name(p_svc_ctx, 1u);
+        break;
+    case LX_SYS_SENDTO:
+        rc = lx_sendto(p_svc_ctx);
+        break;
+    case LX_SYS_RECVFROM:
+        rc = lx_recvfrom(p_svc_ctx);
+        break;
+    case LX_SYS_SETSOCKOPT:
+        rc = lx_setsockopt(p_svc_ctx);
+        break;
+    case LX_SYS_GETSOCKOPT:
+        rc = lx_getsockopt(p_svc_ctx);
+        break;
+    case LX_SYS_SHUTDOWN:
+        rc = lx_shutdown(p_svc_ctx);
+        break;
+    #endif
     #if (ARKRTOS_USE_LINUX_FORK == 1)
     case LX_SYS_CLONE:
         rc = lx_clone(p_svc_ctx);
@@ -3921,6 +5287,24 @@ static void lx_finish(void *p_svc_ctx, int32 rc)
         s_stat[LX_STAT_HANDLED]++;
         return;
     }
+#if (ARKRTOS_USE_LINUX_SOCKET == 1) || (ARKRTOS_USE_LINUX_SELECT == 1)
+    if(rc == LX_RET_RETRY)
+    {
+        /* 还在等（socket / pselect6）：这一次不算完成，既不写 a0（那是
+         * 本次调用的输入，重放的那一次要重新读），也不投信号。开关全关时
+         * 这一段不参与编译：默认档的目标码逐字节不变。 */
+        s_stat[LX_STAT_HANDLED]++;
+        return;
+    }
+#endif
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+    /* 这一次 socket 系统调用真的结束了（不是重放）：把登记撤掉。不撤的话
+     * 下一次调用进来 armed 还立着，参数会从上一次的槽里取 —— 表现是「参数
+     * 被悄悄换成上一次的」，只有真跑一串调用才看得出来。重放那一路在上面
+     * 已经 return 掉了，accept 的两步式（同一逻辑调用里两次 net 请求）也不
+     * 受影响。 */
+    lx_sock_ctx_clear((int32)arkrtos_current_task_id);
+#endif
     if(rc == -LX_EFAULT)
     {
         s_stat[LX_STAT_EFAULT]++;
@@ -4063,6 +5447,10 @@ void arkrtos_linux_abi_on_task_exit(int32 task_id)
 #if (ARKRTOS_USE_LINUX_SELECT == 1)
     lx_sel_forget(task_id);
 #endif
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+    /* 任务号会被复用：不清的话新任务第一次 socket 调用就走了重放分支。 */
+    lx_sock_ctx_clear(task_id);
+#endif
 
     for(i = 0u; i < (uint32)LX_MAX_CHILD; i++)
     {
@@ -4097,6 +5485,17 @@ void arkrtos_linux_abi_on_task_exit(int32 task_id)
         ARKRTOS_EXIT_CRITICAL(crit);
     }
 
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+    /* 套接字的 net 句柄不受 fd 表的临界区保护，也必须在关中断之前投出去。 */
+    {
+        int32 sslot = lx_proc_find(task_id);
+
+        if(sslot >= 0)
+        {
+            lx_sock_close_all((uint32)sslot);
+        }
+    }
+#endif
     {
         int32 slot = lx_proc_find(task_id);
 
@@ -4127,6 +5526,10 @@ void arkrtos_linux_abi_on_task_exit(int32 task_id)
 #endif
 #if (ARKRTOS_USE_LINUX_SELECT == 1)
     lx_sel_forget(task_id);
+#endif
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+    /* 任务号会被复用：不清的话新任务第一次 socket 调用就走了重放分支。 */
+    lx_sock_ctx_clear(task_id);
 #endif
 #if (ARKRTOS_USE_PAGING_FILEMAP == 1)
     /* 关 fork 档只有槽 0：退出即写回，与开档那条路同一口径。 */
@@ -4193,6 +5596,12 @@ void arkrtos_linux_abi_reset(void)
     {
         s_sel_armed[i]    = 0u;
         s_sel_deadline[i] = 0u;
+    }
+#endif
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+    for(i = 0u; i < (uint32)ARKRTOS_TASK_MAX_NUM; i++)
+    {
+        lx_sock_ctx_clear((int32)(i + 1u));
     }
 #endif
 

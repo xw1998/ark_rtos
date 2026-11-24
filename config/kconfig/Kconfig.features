@@ -732,6 +732,46 @@ config ARKRTOS_USE_LINUX_SELECT
 	  line: syscall 72 falls through to the default -ENOSYS and the image
 	  does not change by a byte.
 
+config ARKRTOS_USE_LINUX_SOCKET
+	bool "Berkeley sockets over the Linux ABI (U-23)"
+	depends on ARKRTOS_USE_LINUX_ABI
+	depends on ARKRTOS_USE_LWIP
+	help
+	  Wire the Linux socket numbers (socket 198, bind 200, listen 201,
+	  accept 202, connect 203, getsockname 204, getpeername 205, sendto
+	  206, recvfrom 207, setsockopt 208, getsockopt 209, shutdown 210,
+	  accept4 242) to the kernel network service (SVC 0x1E) and let
+	  pselect6 wait on sockets too.  This is the missing piece between
+	  "files and pipes work" and "a Linux program can talk to a peer over
+	  TCP/UDP".
+
+	  What is supported, stated exactly (boundaries, not pending work):
+	    1) AF_INET only, SOCK_STREAM / SOCK_DGRAM only.  SOCK_NONBLOCK and
+	       SOCK_CLOEXEC are accepted in the type word (the latter is
+	       recorded but has no effect: this layer has no exec inheritance).
+	       Other families, types or a non-zero protocol answer -EAFNOSUPPORT
+	       / -EPROTONOSUPPORT instead of being approximated.
+	    2) The kernel stack is always non-blocking; blocking semantics are
+	       rebuilt here by replaying the call across scheduler slices (the
+	       same shape as futex, wait4 and pselect6).  A non-blocking socket
+	       returns -EAGAIN instead.  Without a replay-capable port the call
+	       answers -EAGAIN rather than pretending it slept.
+	    3) Sockets are not inherited across fork: the network layer has no
+	       dup, and handing a child a descriptor that names its parent's
+	       handle would be an undetectable wrong answer, so the child's
+	       socket slots are cleared.
+	    4) Socket readiness inside pselect6 costs one network request per
+	       socket, and the request slot is single system wide: with several
+	       sockets in one wait the scan converges over successive slices
+	       instead of pretending one pass asked them all.
+
+	  Requires ARKRTOS_USE_LINUX_ABI and ARKRTOS_USE_LWIP (no stack, no
+	  object to wait on).
+
+	  Off (default): the socket numbers fall through to the default
+	  -ENOSYS, the fd table gains no field and no symbol is emitted - the
+	  image does not change by a byte.
+
 config ARKRTOS_USE_PAGING_FILEMAP
 	bool "File-backed mmap and write-back (U-21)"
 	depends on ARKRTOS_USE_LINUX_ABI

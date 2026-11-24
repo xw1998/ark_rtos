@@ -37,7 +37,7 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 
 **「静态程序能跑」≠「支持 Linux」。** 第 3 节列的是明确不支持项，一条不含糊。
 
-## 1 支持的系统调用（29 个；28 个有实跑读数，1 个只有号表与参数校验）
+## 1 支持的系统调用（42 个；28 个有 QEMU 实跑读数，13 个 socket 只有宿主档读数，1 个只有号表与参数校验）
 
 编号取 `asm-generic`（LoongArch / RISC-V / ARM64 共用这一套）：
 
@@ -72,6 +72,10 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 | 260 | `wait4` | 只认 `options 0/WNOHANG`；**无 `WNOHANG` 时真阻塞**（可重启系统调用，§8.1），不编造状态，reap 后记账清零（§8） | `wait4 returned child pid -> 12 ok` / `WEXITSTATUS == 42 -> 42 ok` / `wait4(child) again == -ECHILD -> -10 ok` / `blocking wait4 blocked >= 40 ms -> 1 ok` |
 | 226 | `mprotect` | **有页级写保护**（`ARKRTOS_USE_PAGING_MPROTECT`，§8.6）：4 KB 粒度改 `WE` 位、违规写按 SIGSEGV 杀任务；`PROT_EXEC` / `PROT_NONE` 只记账不强制；关档回「只校验参数、返 0」 | `mprotect RO == 0 -> 0 ok` / `sibling 4 KB half of the same pair stays writable -> 13107 ok` / `mprotect violation reports SIGSEGV status -> 11 ok`（§8.6，11 条） |
 | 227 | `msync` | 只写回本进程记账里的「可写共享文件映射」；窗口内未命中回 0、窗口外 `-ENOMEM`（`ARKRTOS_USE_PAGING_FILEMAP`，§8.5） | `filemap msync rc -> 0 ok` / `filemap private msync rc (no writeback) -> 0 ok` / `filemap shared write persisted, private write not (bits=31) -> 31 ok` |
+
+socket 家族（`198-210`、`242`，共 13 个）见 §8.9：它们已经在翻译层里落地并有宿主
+档的 581 条断言，但 **QEMU 夹具还没有 socket 段**，所以不计入上面「有 QEMU 实跑读数」
+的 28 个号。
 
 未知号一律 `-ENOSYS`（38），并计数；**不猜**。
 
@@ -863,6 +867,42 @@ EXTRA_CFLAGS**，所以夹具看不到内核的编译开关。这一段只在 `A
 放在同一个开关下，会让「关档零体积」这条承诺变成「关档少了一半功能」。
 `ARKRTOS_USE_LINUX_SELECT` 只依赖 `ARKRTOS_USE_LINUX_ABI`。
 
+### 8.9 socket（U-23）：宿主侧翻译层（2026-11-24，宿主档 581 checks，**无 QEMU 读数**）
+
+13 个号落地：`socket`(198)、`bind`(200)、`listen`(201)、`accept`(202)、`connect`(203)、
+`getsockname`(204)、`getpeername`(205)、`sendto`(206)、`recvfrom`(207)、`setsockopt`(208)、
+`getsockopt`(209)、`shutdown`(210)、`accept4`(242)。`read`/`write`/`close` 三个老号按 fd
+的种类分派到 socket 实现（同一张 fd 表，`kind` 字段区分文件/管道/socket）。
+
+| 语义 | 实现 |
+|---|---|
+| 句柄 | fd 槽里的 `kind` 标 socket，`net` 字段存内核 net 句柄；socket 与文件/管道共用同一张表 |
+| `bind` / `connect` | 地址从用户 `sockaddr_in` 拷进来（family 必须 `AF_INET`，否则 `-EAFNOSUPPORT`；`alen < 8` → `-EINVAL`；拷不动 → `-EFAULT`） |
+| `accept` / `accept4` | 两步式：`step=1` 先拿结果与 aux 句柄，`step=2` 再往用户地址写；地址写失败时**释放刚拿到的 fd** 再返回错误。`accept4` 认 `SOCK_NONBLOCK` / `SOCK_CLOEXEC` |
+| `getsockname` / `getpeername` | 名字查询返回后按需写回 16 字节 `sockaddr_in` 与 `addrlen`；`addrlen==0`（`r[1]==0`）时**提前返回、不碰用户 `addrlen`** |
+| `sendto` / `recvfrom` | `r[4]!=0` 才走带地址的形态，否则退化成 `SEND`/`RECV`；`recvfrom` 长度 `>0xFFFF` → `-EMSGSIZE`，`-ECONNRESET` 直回 |
+| `setsockopt` / `getsockopt` | `SOL_SOCKET` 下翻译 `SO_REUSEADDR`(2)、`SO_SNDBUF`(7)、`SO_RCVBUF`(8)、`SO_ERROR`(4)；`SO_TYPE`(3)、`SO_DOMAIN`(39)、`SO_ERROR` 由本层本地作答；`SO_ERROR` 写回 → `-EINVAL`；非 `SOL_SOCKET` 或未知 opt → `-ENOPROTOOPT`；值/长度拷不动 → `-EFAULT`/`-EINVAL` |
+| 阻塞与非阻塞 | 内核回 pending 时按 fd 的 `O_NONBLOCK` 与 `MSG_DONTWAIT` 决定是「直接回 `-EAGAIN`」还是「重放」。重放走 `arkrtos_port_svc_restart()`：不可重放时回 `-EAGAIN` 且**不睡** |
+| 身份 | `lx_sock_me_ok` 先查任务身份再查 fd：`task_id==0` 的调用一律 `-ENOSYS`，且**不发任何 net 请求** |
+| 关闭 | `close` 走 socket 分支释放 net 句柄与 fd 槽；对管道读端 `write` 如实 `-EBADF` |
+
+**为什么先查身份再查 fd。** 这是宿主档第五百多条断言逼出来的顺序问题：如果先判 fd，
+空任务身份下会给出 `-EBADF`，把「这个上下文根本没有 socket 能力」误报成「fd 用错」。
+反过来也守住一条：非法身份下 13 个入口的 net 请求计数必须**一个都不涨**。
+
+**只开 lwIP、不开 virtio 网卡的构建档。** `example/qemu_loongarch64/Makefile` 新增
+`ARK_LWIP_ON := $(findstring ARKRTOS_USE_LWIP=1,$(EXTRA_CFLAGS))`：`ARKRTOS_USE_LWIP=1`
+而 `ARKRTOS_USE_NET_VIRTIO` 未开时只编 `$(LWIP_SRCS)`，不编 `drvnet.c`/`net_demo.c`，
+再把 `ARKRTOS_USE_LINUX_SOCKET=1` 与 lwIP 一起塞进 `LXFORK_DEFS`。这条档是为了让
+「有 lwIP 协议栈、没有网卡」的宿主/仿真构建也能出 ELF。
+
+**读数来源只有宿主档，必须说清楚。** 本轮新增的第六个 Linux ABI 覆盖率档
+`linuxabisocket`（`tools/coverage_gate.py`）在宿主上跑 `test_linux_abi_host.c` 的
+socket 段，`linuxabisocket` 单档 **98.73%**，六档 union **98.48%**（基线 97.96%），
+整档 **581 checks** 全绿。**QEMU 第八档夹具还没有写**：`tools/fork_gate.py` 的档位里
+没有 socket 档，`example/qemu_loongarch64/elf/linux_fork.c` 也没有 socket 段。所以
+socket 这一节的结论只能读到「宿主侧全覆盖、LA64 板级编译通过」，不能写成「QEMU 实跑」。
+
 ## 9 开关与零体积
 
 - `ARKRTOS_USE_LINUX_ABI`（`kernelsrc/include/arkrtos_features.h`、
@@ -907,6 +947,10 @@ EXTRA_CFLAGS**，所以夹具看不到内核的编译开关。这一段只在 `A
   （要有按对装条目的能力，才谈得上「把这一段原来的东西丢掉」）；`DEMAND=0` 时
   `mmap(MAP_FIXED)` 如实回 `-ENOSYS`，夹具里那 6 条读数也整段不出现 —— 所以
   `example/qemu_loongarch64/Makefile` 必须把 DEMAND 镜像进 `LXFORK_DEFS`。
+- `ARKRTOS_USE_LINUX_SOCKET`（§8.9），默认 **0**，`depends on ARKRTOS_USE_LINUX_ABI` 且
+  `features.h` 用 `#error` 顶住这条依赖；关档时不编译 `lx_sock_*` 全部实现与 fd 表的
+  socket 分派，`198`–`210` 与 `242` 落回 `-ENOSYS`；开档实测是宿主 socket 档的
+  **581 checks**（覆盖率单档 98.73%、六档 union 98.48%），**QEMU 第八档尚未落地**。
 - `arkrtos_autoconf.h` 由 `tools/kconfig/genconfig.py` 从 `config/arkrtos_defconfig`
   生成，新增 Kconfig 项后必须重跑一次，否则默认档读数里看不到这个开关。
 
@@ -935,6 +979,12 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py --no-build
 | `build` | `make -f example/qemu_loongarch64/Makefile` 通过 |
 | `qemu-readout` | Linux 块 14 条 check 全 ok + PASS 行 + `exit code 7`；管道块 14 条 + `exit code 55`；信号块 31 条 + PASS 行 + `exit code 138`；旁路演示未受影响 |
 | `parser-selfcheck` | 把 8 种坏日志喂回判据，必须全判红 |
+
+socket 这一层目前只有宿主门禁：`tools/coverage_gate.py` 的第六个 Linux ABI 档
+`linuxabisocket`（`-DARKRTOS_USE_LINUX_SOCKET=1 -DARKRTOS_USE_LWIP=1`，`-Wl,--wrap=arkrtos_port_svc_exec_frame`）
+跑 `test_linux_abi_host.c`，581 checks 全绿、单档覆盖率 98.73%、六档 union 98.48%（基线 97.96%），
+`tools/ci_gate.py` 的 `linux-abi-host` 项已带上这一档。**`tools/fork_gate.py` 还没有 socket 档**，
+QEMU 夹具也还没有 socket 段，这一项在欠账盘点里按实登记。
 
 fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**50 项**；fork / fork+COW / fork+COW+SHM / fork+COW+SHM+futex / fork+COW+SHM+futex+filemap / fork+COW+SHM+futex+filemap+mprotect / fork+COW+SHM+futex+filemap+mprotect+select **七档各跑一遍**，所以 build / qemu-readout / parser-selfcheck 各出现七次、compile-on 七次）：
 

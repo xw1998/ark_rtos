@@ -191,6 +191,10 @@ SRCS_C := $(KERNEL_SRCS) \
 # apps/（未 vendored）与 ipv6/（本工程 LWIP_IPV6=0，编了也用不上）拖进来，
 # 而且顺序跟着目录枚举走，镜像就不再可复现。
 ARK_NET_ON := $(findstring ARKRTOS_USE_NET_VIRTIO=1,$(EXTRA_CFLAGS))
+# socket 档要的是「有协议栈、没有网卡」：Linux socket 系统调用落在 lwIP 上，
+# 但回环之外的收发在 QEMU 里没有硬件。只开 LWIP（不开 NET_VIRTIO）时编协议栈
+# 与 port 层，不编板级网卡驱动与 net_demo —— 后者会去注册 virtio 网卡。
+ARK_LWIP_ON := $(findstring ARKRTOS_USE_LWIP=1,$(EXTRA_CFLAGS))
 ifneq ($(ARK_NET_ON),)
 LWIP_DIR := kernelsrc/components/lwip
 LWIP_SRCS := $(sort $(wildcard $(LWIP_DIR)/src/core/*.c) \
@@ -202,6 +206,17 @@ LWIP_SRCS := $(sort $(wildcard $(LWIP_DIR)/src/core/*.c) \
              $(LWIP_DIR)/port/lwip_netif_link.c
 SRCS_C += board/qemu_loongarch64/drvnet.c $(LWIP_SRCS) \
           example/qemu_loongarch64/net_demo.c
+INCLUDES += -I$(LWIP_DIR)/src/include -I$(LWIP_DIR)/port
+else ifneq ($(ARK_LWIP_ON),)
+LWIP_DIR := kernelsrc/components/lwip
+LWIP_SRCS := $(sort $(wildcard $(LWIP_DIR)/src/core/*.c) \
+                    $(wildcard $(LWIP_DIR)/src/core/ipv4/*.c) \
+                    $(wildcard $(LWIP_DIR)/src/api/*.c)) \
+             $(LWIP_DIR)/src/netif/ethernet.c \
+             $(LWIP_DIR)/port/lwip_port.c \
+             $(LWIP_DIR)/port/sys_arch.c \
+             $(LWIP_DIR)/port/lwip_netif_link.c
+SRCS_C += $(LWIP_SRCS)
 INCLUDES += -I$(LWIP_DIR)/src/include -I$(LWIP_DIR)/port
 endif
 
@@ -467,6 +482,15 @@ LXFORK_DEFS   += -DARKRTOS_USE_PAGING_MPROTECT=1
 endif
 ifneq ($(ARK_SELECT_ON),)
 LXFORK_DEFS   += -DARKRTOS_USE_LINUX_SELECT=1
+endif
+# socket 夹具段同时要看 LINUX_SOCKET 与 LWIP 两个开关：前者决定读哪些
+# 调用，后者决定协议栈在不在（不在就逐条断言 -ENOSYS）。
+ARK_SOCKET_ON := $(findstring ARKRTOS_USE_LINUX_SOCKET=1,$(EXTRA_CFLAGS))
+ifneq ($(ARK_SOCKET_ON),)
+LXFORK_DEFS   += -DARKRTOS_USE_LINUX_SOCKET=1
+endif
+ifneq ($(ARK_LWIP_ON),)
+LXFORK_DEFS   += -DARKRTOS_USE_LWIP=1
 endif
 ifneq ($(ARK_DEMAND_ON),)
 LXFORK_DEFS   += -DARKRTOS_USE_PAGING_DEMAND=1

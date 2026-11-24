@@ -407,6 +407,42 @@
 #endif
 #endif
 
+/* Linux ABI 套接字层（U-23）：0 = 关（198/200/201/202/203/204/205/206/207/208/
+ * 209/210/242 这些号走 default 分支回 -ENOSYS，与打开本开关之前逐字节相同），
+ * 1 = 把这些号接到内核网络服务（SVC 0x1E）的 socket/bind/listen/accept/
+ * connect/sendto/recvfrom/setsockopt/getsockopt/getsockname/getpeername/
+ * shutdown/poll 上，并让 pselect6 把套接字也当作可等待的对象。
+ *
+ * 作用的范围（写死，都是边界而不是欠验）：
+ *   - 只有 AF_INET（v4）与 SOCK_STREAM/SOCK_DGRAM；type 里的 SOCK_NONBLOCK
+ *     与 SOCK_CLOEXEC 都接受（后者只记录不生效，本层没有 exec 继承这回事），
+ *     其它 family / type / protocol 如实拒绝而不是近似；
+ *   - 内核侧协议栈始终是非阻塞的，本层用「时间片重放」把 blocking 语义补上：
+ *     一次 send/recv/accept/connect 在没就绪时 arm 重放、睡一个时间片再问，
+ *     没有可重放端口时回 -EAGAIN（与 futex/wait4/pselect6 同一手法）；
+ *   - socket() 建出来的描述符**不跨 fork 继承**：净层没有 dup 这回事，子进程
+ *     继承一张指向别人 handle 的 fd 表只会得到一个查不出来的错答案，所以
+ *     fork 时子进程的套接字槽被清掉；
+ *   - pselect6 的套接字就绪靠网络服务的 poll 子命令，一次只能问一个套接字
+ *     （请求槽全系统只有一个）：多套接字同轮等待时按轮询收敛，代价写在文档
+ *     §8.9 里，不假装一次扫描就能全问完。
+ *
+ * 要求 ARKRTOS_USE_LINUX_ABI == 1 且 ARKRTOS_USE_LWIP == 1（没有协议栈就没有
+ * 可等待的对象）。
+ * 由 Kconfig 选择（config ARKRTOS_USE_LINUX_SOCKET）。默认关：关档时一个字节的
+ * 状态都不多（fd 表不加字段、不新增符号）。 */
+#ifndef ARKRTOS_USE_LINUX_SOCKET
+#define ARKRTOS_USE_LINUX_SOCKET        0
+#endif
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+#if (ARKRTOS_USE_LINUX_ABI != 1)
+#error "ARKRTOS_USE_LINUX_SOCKET=1 requires ARKRTOS_USE_LINUX_ABI=1"
+#endif
+#if (ARKRTOS_USE_LWIP != 1)
+#error "ARKRTOS_USE_LINUX_SOCKET=1 requires ARKRTOS_USE_LWIP=1"
+#endif
+#endif
+
 /* U-21 文件映射与写回：0 = 关（mmap 收到非 MAP_ANONYMOUS 一律 -ENOSYS，与打
  * 开本开关之前逐字节相同），1 = mmap(fd, ...) 把文件内容装进 App 窗口的一段
  * 堆区，MAP_SHARED 且可写的映射在 msync / munmap / 进程退出三处写回文件。

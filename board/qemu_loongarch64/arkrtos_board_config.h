@@ -266,8 +266,9 @@
 #define ARKRTOS_USE_MINIAPP          0
 #undef  ARKRTOS_USE_POSIX
 #define ARKRTOS_USE_POSIX            0
-#undef  ARKRTOS_USE_LWIP
+#ifndef ARKRTOS_USE_LWIP
 #define ARKRTOS_USE_LWIP             0
+#endif
 #undef  ARKRTOS_USE_SOFTBUS
 #define ARKRTOS_USE_SOFTBUS          1
 #undef  ARKRTOS_USE_SHELL

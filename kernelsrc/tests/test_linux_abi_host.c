@@ -87,6 +87,10 @@ int main(void)
 #include "arkrtos_hal.h"
 #include "arkrtos_mpu.h"
 #include "arkrtos_board.h"
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+/* net_abi 的子命令/错误号从这张头来；它不拉 lwIP（只有 net.c 才拉）。 */
+#include "arkrtos_net.h"
+#endif
 
 #if !defined(__SIZEOF_LONG__) || (__SIZEOF_LONG__ != 4)
 #error "test_linux_abi_host 的帧头断言按 32 位字宽写死，需要 ILP32 宿主"
@@ -133,6 +137,22 @@ int main(void)
 #define T_NR_MMAP           (222u)
 #define T_NR_MPROTECT       (226u)
 #define T_NR_MSYNC          (227u)
+/* socket 族号（asm-generic）。send/recv 没有独立号：glibc 走 sendto/recvfrom。 */
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+#define T_NR_SOCKET         (198u)
+#define T_NR_BIND           (200u)
+#define T_NR_LISTEN         (201u)
+#define T_NR_ACCEPT         (202u)
+#define T_NR_CONNECT        (203u)
+#define T_NR_GETSOCKNAME    (204u)
+#define T_NR_GETPEERNAME    (205u)
+#define T_NR_SENDTO         (206u)
+#define T_NR_RECVFROM       (207u)
+#define T_NR_SETSOCKOPT     (208u)
+#define T_NR_GETSOCKOPT     (209u)
+#define T_NR_SHUTDOWN       (210u)
+#define T_NR_ACCEPT4        (242u)
+#endif
 
 #define T_EPERM             (1)
 #define T_ENOENT            (2)
@@ -155,6 +175,38 @@ int main(void)
 #define T_ENAMETOOLONG      (36)
 #define T_ENOSYS            (38)
 #define T_ETIMEDOUT         (110)
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+#define T_EMFILE            (24)
+#define T_ENOTSOCK          (88)
+#define T_EMSGSIZE          (90)
+#define T_ENOPROTOOPT       (92)
+#define T_EPROTONOSUPPORT   (93)
+#define T_ESOCKTNOSUPPORT   (94)
+#define T_EAFNOSUPPORT      (97)
+#define T_ENOBUFS           (105)
+#define T_EHOSTUNREACH      (113)
+#define T_ECONNABORTED      (103)
+#define T_ECONNRESET        (104)
+#define T_EISCONN           (106)
+#define T_ENOTCONN          (107)
+#define T_ECONNREFUSED      (111)
+#define T_EALREADY          (114)
+#define T_EINPROGRESS       (115)
+/* socket 常量（与 asm-generic 的号表另写一份，理由同上面那张号表）。 */
+#define T_AF_INET           (2u)
+#define T_SOCK_STREAM       (1u)
+#define T_SOCK_DGRAM        (2u)
+#define T_SOCK_NONBLOCK     (0x800u)
+#define T_SOCK_CLOEXEC      (0x80000u)
+#define T_SOL_SOCKET        (1)
+#define T_SO_REUSEADDR      (2)
+#define T_SO_TYPE           (3)
+#define T_SO_ERROR          (4)
+#define T_SO_RCVBUF         (8)
+#define T_SO_SNDBUF         (7)
+#define T_SO_DOMAIN         (39)
+#define T_MSG_DONTWAIT      (0x40u)
+#endif
 
 #define T_O_NONBLOCK        (0x800u)
 #define T_O_RDWR            (0x2u)
@@ -357,7 +409,8 @@ void arkrtos_port_exit_critical(uint32 state)
     (void)state;
 }
 
-#if (ARKRTOS_USE_LINUX_FUTEX == 1) || (ARKRTOS_USE_LINUX_SELECT == 1)
+#if (ARKRTOS_USE_LINUX_FUTEX == 1) || (ARKRTOS_USE_LINUX_SELECT == 1) || \
+    (ARKRTOS_USE_LINUX_SOCKET == 1)
 /* ---------------- futex / pselect6 的前提桩 ----------------
  * 本档只链接 linux_abi.c；futex 的键要走分页后端与任务表，这三组符号由用例
  * 自己给：窗口就是模拟用户内存那一块（这样 copy_from_user 也能用），每对
@@ -813,6 +866,8 @@ static int call(t_ctx *c, uint32 nr, unsigned long a0, unsigned long a1,
     c->arg[1] = a1;
     c->arg[2] = a2;
     c->arg[3] = a3;
+    c->arg[4] = 0UL;
+    c->arg[5] = 0UL;
     c->ret = 0xDEADBEEFUL;
     c->ret_written = 0;
     return (int)arkrtos_linux_abi_try(c);
@@ -823,7 +878,7 @@ static int call(t_ctx *c, uint32 nr, unsigned long a0, unsigned long a1,
  * 而这里写错的后果是「参数错位但照样返回一个数」。
  * 只有文件映射档用得到（mmap 带 fd），其它档编进来就是一条未使用函数告警。 */
 #if (ARKRTOS_USE_PAGING_FILEMAP == 1) || (ARKRTOS_USE_LINUX_FUTEX == 1) || \
-    (ARKRTOS_USE_LINUX_SELECT == 1)
+    (ARKRTOS_USE_LINUX_SELECT == 1) || (ARKRTOS_USE_LINUX_SOCKET == 1)
 static int call6(t_ctx *c, uint32 nr, unsigned long a0, unsigned long a1,
                  unsigned long a2, unsigned long a3, unsigned long a4,
                  unsigned long a5)
@@ -856,6 +911,19 @@ static void ck_ret(t_ctx *c, int32 want, const char *what)
         g_fails++;
         printf("FAIL %s: got %d want %d (line %d)\n",
                what, (int)(int32)c->ret, (int)want, __LINE__);
+    }
+}
+
+/* 阻塞中的调用（socket / pselect6）走 LX_RET_RETRY：这一次**不写** a0。
+ * 所以「登记重放」的判据是 ret_written==0，而不是某个返回值。 */
+static void ck_pending(t_ctx *c, const char *what)
+{
+    g_checks++;
+    if(c->ret_written != 0)
+    {
+        g_fails++;
+        printf("FAIL %s: ret written %d, want pending (line %d)\n",
+               what, (int)(int32)c->ret, __LINE__);
     }
 }
 
@@ -3077,12 +3145,12 @@ static void t_pselect6(t_ctx *c)
     u_put32(tpo, 1u);                            /* 相对 1 s */
     u_put32(tpo + 4u, 0u);
     (void)call6(c, T_NR_PSELECT6, 4UL, R0, 0UL, 0UL, TP, 0UL);
-    ck_ret(c, 0, "pselect6 无就绪就登记并阻塞");
+    ck_pending(c, "pselect6 无就绪就登记并阻塞（不写 a0）");
     ck(g_block_calls == 1, "pselect6 阻塞走 block_in_critical 一次");
 
     g_ms = 1500u;
     (void)call6(c, T_NR_PSELECT6, 4UL, R0, 0UL, 0UL, TP, 0UL);
-    ck_ret(c, 0, "pselect6 截止时刻未到继续睡");
+    ck_pending(c, "pselect6 截止时刻未到继续睡（不写 a0）");
     ck(g_block_calls == 2, "pselect6 继续睡也走一次 block_in_critical");
 
     g_ms = 2500u;
@@ -3110,7 +3178,7 @@ static void t_pselect6(t_ctx *c)
     u_put32(tpo + 4u, 0u);
     u_put32(T_DATA_OFF, 0x08u);
     (void)call6(c, T_NR_PSELECT6, 4UL, R0, 0UL, 0UL, TP, 0UL);
-    ck_ret(c, 0, "pselect6 前置：挂一次 5 s 等待");
+    ck_pending(c, "pselect6 前置：挂一次 5 s 等待");
     u_put_str(T_DATA_OFF + 0x500u, "z");
     (void)call(c, T_NR_WRITE, (unsigned long)fds[1],
                u_ptr(T_DATA_OFF + 0x500u), 1UL, 0UL);
@@ -3129,11 +3197,11 @@ static void t_pselect6(t_ctx *c)
     u_put32(tpo + 4u, 0u);
     u_put32(T_DATA_OFF, 0x08u);
     (void)call6(c, T_NR_PSELECT6, 4UL, R0, 0UL, 0UL, TP, 0UL);
-    ck_ret(c, 0, "pselect6 前置：挂一次 5 s 等待");
+    ck_pending(c, "pselect6 前置：挂一次 5 s 等待");
     arkrtos_linux_abi_on_task_exit(7);
     g_ms = 7000u;                               /* 已过旧截止 6000 */
     (void)call6(c, T_NR_PSELECT6, 4UL, R0, 0UL, 0UL, TP, 0UL);
-    ck_ret(c, 0, "pselect6 任务退出后重新登记");
+    ck_pending(c, "pselect6 任务退出后重新登记");
     ck(g_block_calls == 2, "pselect6 任务退出清掉了旧的截止时刻");
 
     /* 收尾：清掉挂着的记录，恢复端口能力 */
@@ -3142,6 +3210,1136 @@ static void t_pselect6(t_ctx *c)
     g_block_calls = 0;
 }
 #endif /* ARKRTOS_USE_LINUX_SELECT == 1 */
+
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+/* ===================== socket（U-23）=====================
+ * 被测层只链接 linux_abi.c，net.c 不进来：下面是一份按脚本回答的
+ * arkrtos_net_call。三条纪律：
+ *   1) 参数原样记下来 ——「ABI 层到底把什么交给了服务」是可断言的事实，
+ *      不是注释里的承诺；
+ *   2) 地址类输出按 net 的约定写进用户地址（ip 先、port 后），换算走
+ *      host_copy_to，与 copy_to_user 同一套映射；
+ *   3)「先 EPENDING 再成功」逐段可控 —— 一次 net 请求至少要一个往返，
+ *      不把这个往返造出来就等于只测了一半。
+ */
+
+#define T_STILL_WAITING     (0x7FFF)
+#define T_SA_OFF            (T_DATA_OFF + 0x400u)   /* sockaddr_in，16 B */
+#define T_LEN_OFF           (T_DATA_OFF + 0x420u)   /* socklen_t */
+#define T_VAL_OFF           (T_DATA_OFF + 0x430u)   /* int 选项值 */
+#define T_IO_OFF            (T_DATA_OFF + 0x440u)   /* send/recv 缓冲 */
+#define T_TMO_OFF           (T_DATA_OFF + 0x480u)   /* pselect6 的 timespec */
+#define T_PIPE_OFF          (T_DATA_OFF + 0x700u)   /* 管道 fds[2] */
+
+static uint32 g_net_calls;
+static uint32 g_net_opn[32];      /* 每个子命令被问了几次 */
+static uint32 g_net_arg[5];
+static int    g_net_pending;      /* >0：还要再回这么多次 EPENDING */
+static int    g_net_peer_pending; /* >0：GETPEERNAME 还要再回多少次 EPENDING */
+static int    g_net_busy;         /* >0：还要再回这么多次 EBUSY */
+static int32  g_net_rc;           /* 最终返回：>=0 结果，<0 负错误号 */
+static int32  g_net_handle;       /* SOCKET / ACCEPT 回的句柄 */
+static uint32 g_net_ip;
+static uint32 g_net_port;
+static int    g_net_bytes;        /* RECV 回的字节数（取完即清零） */
+static const uint8 g_net_payload[8] = { 'h', 'e', 'l', 'l', 'o', 0u, 0u, 0u };
+
+static void net_reset(void)
+{
+    uint32 i;
+
+    g_net_calls       = 0u;
+    for(i = 0u; i < 32u; i++)
+    {
+        g_net_opn[i] = 0u;
+    }
+    for(i = 0u; i < 5u; i++)
+    {
+        g_net_arg[i] = 0u;
+    }
+    g_net_pending      = 0;
+    g_net_peer_pending = 0;
+    g_net_busy         = 0;
+    g_net_rc           = 0;
+    g_net_handle       = 1;
+    g_net_ip           = 0x0A000001u;
+    g_net_port         = 8080u;
+    g_net_bytes        = 0;
+}
+
+/* net 的地址输出：ip 写进第一个用户指针、port 写进第二个。顺序是协议的一部分
+ * （见 arkrtos_net_abi.h 的 GETSOCKNAME 行），写反了在真机上就是「端口变成了
+ * IP 的低半字」这种查不出根因的错答案。 */
+static void net_addr_out(unsigned long ip_ua, unsigned long port_ua)
+{
+    uint32 w;
+
+    w = g_net_port;
+    (void)host_copy_to((void *)port_ua, &w, 4u);
+    w = g_net_ip;
+    (void)host_copy_to((void *)ip_ua, &w, 4u);
+}
+
+int32 arkrtos_net_call(uint32 op, uint32 a1, uint32 a2, uint32 a3,
+                       uint32 a4, uint32 a5)
+{
+    uint32 n;
+    uint32 w;
+
+    g_net_calls++;
+    if((op < 32u) && (g_net_opn[op] < 0xFFFFFFFFu))
+    {
+        g_net_opn[op]++;
+    }
+    g_net_arg[0] = a1;
+    g_net_arg[1] = a2;
+    g_net_arg[2] = a3;
+    g_net_arg[3] = a4;
+    g_net_arg[4] = a5;
+
+    if(g_net_busy > 0)
+    {
+        g_net_busy--;
+        return ARKRTOS_NET_EBUSY;
+    }
+    if((op == ARKRTOS_NET_SUB_GETPEERNAME) && (g_net_peer_pending > 0))
+    {
+        g_net_peer_pending--;
+        return ARKRTOS_NET_EPENDING;
+    }
+    if(g_net_pending > 0)
+    {
+        g_net_pending--;
+        return ARKRTOS_NET_EPENDING;
+    }
+
+    switch(op)
+    {
+    case ARKRTOS_NET_SUB_SOCKET:
+    case ARKRTOS_NET_SUB_ACCEPT:
+        return g_net_handle;
+    case ARKRTOS_NET_SUB_GETSOCKNAME:
+    case ARKRTOS_NET_SUB_GETPEERNAME:
+        net_addr_out((unsigned long)a2, (unsigned long)a3);
+        /* 地址照写（成功路径用得上），返回码交给 g_net_rc：测试要能造出
+         * 「名字查询失败」这一档，否则那条分支永远测不到。 */
+        return g_net_rc;
+    case ARKRTOS_NET_SUB_RECVFROM:
+        net_addr_out((unsigned long)a4, (unsigned long)a5);
+        /* fall through */
+    case ARKRTOS_NET_SUB_RECV:
+        if(g_net_rc < 0)
+        {
+            return g_net_rc;
+        }
+        n = (uint32)g_net_bytes;
+        if(n > a3)
+        {
+            n = a3;
+        }
+        if(n > 0u)
+        {
+            (void)host_copy_to((void *)(unsigned long)a2, g_net_payload, n);
+        }
+        g_net_bytes = 0;
+        return (int32)n;
+    case ARKRTOS_NET_SUB_GETSOCKOPT:
+        /* 结果直接写进用户地址 —— ABI 层因此必须把用户指针交下来。 */
+        w = g_net_ip;
+        (void)host_copy_to((void *)(unsigned long)a3, &w, 4u);
+        return g_net_rc;
+    case ARKRTOS_NET_SUB_POLL:
+        return g_net_rc;
+    default:
+        return g_net_rc;
+    }
+}
+
+/* 一次「逻辑调用」跑到底：第一遍用原参数，之后每一遍**全 0 参数**。
+ * 这就是「参数落在本任务的槽里」的强断言 —— 如果实现偷懒从寄存器读，
+ * 重放那一遍就会拿着 0 去调 net，这里立刻就能看出来。 */
+static int32 sock_run(t_ctx *c, uint32 nr, unsigned long a0, unsigned long a1,
+                      unsigned long a2, unsigned long a3,
+                      unsigned long a4, unsigned long a5)
+{
+    int32 r = T_STILL_WAITING;
+    int   i;
+
+    for(i = 0; i < 8; i++)
+    {
+        if(i == 0)
+        {
+            (void)call6(c, nr, a0, a1, a2, a3, a4, a5);
+        }
+        else
+        {
+            (void)call6(c, nr, 0UL, 0UL, 0UL, 0UL, 0UL, 0UL);
+        }
+        if(c->ret_written != 0)
+        {
+            r = (int32)c->ret;
+            break;
+        }
+    }
+    return r;
+}
+
+/* Linux 的 sockaddr_in 铺 16 字节：family(host) / port(BE) / addr(BE) / 8 零。 */
+static void sa_put(uint32 off, uint32 ip, uint32 port)
+{
+    uint8  b[16];
+    uint32 i;
+
+    for(i = 0u; i < 16u; i++)
+    {
+        b[i] = 0u;
+    }
+    b[0] = (uint8)(T_AF_INET & 0xFFu);
+    b[1] = (uint8)((T_AF_INET >> 8) & 0xFFu);
+    b[2] = (uint8)((port >> 8) & 0xFFu);
+    b[3] = (uint8)(port & 0xFFu);
+    b[4] = (uint8)((ip >> 24) & 0xFFu);
+    b[5] = (uint8)((ip >> 16) & 0xFFu);
+    b[6] = (uint8)((ip >> 8) & 0xFFu);
+    b[7] = (uint8)(ip & 0xFFu);
+    u_put(off, b, 16u);
+}
+
+static uint32 sa_ip(uint32 off)
+{
+    return ((uint32)u_get8(off + 4u) << 24) | ((uint32)u_get8(off + 5u) << 16) |
+           ((uint32)u_get8(off + 6u) << 8)  |  (uint32)u_get8(off + 7u);
+}
+
+static uint32 sa_port(uint32 off)
+{
+    return ((uint32)u_get8(off + 2u) << 8) | (uint32)u_get8(off + 3u);
+}
+
+static void t_socket(t_ctx *c)
+{
+    unsigned long sa = u_ptr(T_SA_OFF);
+    unsigned long lenp = u_ptr(T_LEN_OFF);
+    unsigned long valp = u_ptr(T_VAL_OFF);
+    unsigned long iop  = u_ptr(T_IO_OFF);
+    unsigned long tmo  = u_ptr(T_TMO_OFF);
+    uint32 fds[2];
+    uint8  buf[8];
+    int32  r;
+    uint32 h3;
+
+    /* ---- socket(2) 的参数校验：一条都不能发到 net 去 ---- */
+    fresh(c);
+    net_reset();
+    g_restart_rc = 0;
+    g_block_calls = 0;
+
+    (void)call(c, T_NR_SOCKET, 10UL, T_SOCK_STREAM, 0UL, 0UL);
+    ck_ret(c, -T_EAFNOSUPPORT, "socket 非 AF_INET 回 -EAFNOSUPPORT");
+    (void)call(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM | 0x10UL, 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "socket 高位里除 NONBLOCK/CLOEXEC 外的位回 -EINVAL");
+    (void)call(c, T_NR_SOCKET, T_AF_INET, 5UL, 0UL, 0UL);
+    ck_ret(c, -T_ESOCKTNOSUPPORT, "socket 未知 type 回 -ESOCKTNOSUPPORT");
+    (void)call(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 6UL, 0UL);
+    ck_ret(c, -T_EPROTONOSUPPORT, "socket 指定非 0 协议回 -EPROTONOSUPPORT");
+    ck_u(g_net_calls, 0u, "参数校验失败一次 net 请求都不发");
+    ck(g_block_calls == 0, "参数校验失败不睡");
+
+    /* ---- socket(2) 成功：一次往返 ---- */
+    net_reset();
+    g_net_pending = 1;
+    g_net_handle  = 5;
+    r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM | T_SOCK_NONBLOCK,
+                 0UL, 0UL, 0UL, 0UL);
+    ck(r == 3, "socket 成功回 fd=3（句柄 5 只留在槽里，不外露）");
+    ck_u(g_net_opn[ARKRTOS_NET_SUB_SOCKET], 2u, "socket 往返两次：登记 + 取结果");
+    ck_u(g_net_arg[0], T_SOCK_STREAM, "交给 net 的 type 已去掉 SOCK_NONBLOCK");
+    ck(g_block_calls == 1, "一次往返睡一个时间片");
+    h3 = 3u;
+
+    /* ---- EBUSY 也等：别人的请求在飞不是这个 socket 的错误 ---- */
+    net_reset();
+    g_net_busy   = 2;
+    g_net_handle = 6;
+    g_block_calls = 0;
+    r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_DGRAM, 0UL, 0UL, 0UL, 0UL);
+    ck(r == 4, "两次 EBUSY 之后成功，拿到 fd=4");
+    ck_u(g_net_calls, 3u, "两次 EBUSY + 一次成功共三次请求");
+    ck_u(g_net_arg[0], T_SOCK_DGRAM, "重放之后 type 仍取自本任务的槽");
+    ck(g_block_calls == 2, "每次 EBUSY 都睡一个时间片");
+
+    /* ---- 服务回坏句柄：-EIO，且不吃 fd 槽 ---- */
+    net_reset();
+    g_net_handle = 0;
+    r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+    ck(r == -T_EIO, "服务回句柄 0 判成 -EIO，不交给程序");
+    net_reset();
+    g_net_handle = 300;
+    r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+    ck(r == -T_EIO, "服务回越界句柄 300 也判 -EIO");
+    net_reset();
+    g_net_handle = 7;
+    r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+    ck(r == 5, "前两次失败不吃 fd 槽：这次仍是 fd=5");
+
+    /* ---- net 的负错误号逐档映射 ---- */
+    sa_put(T_SA_OFF, 0x7F000001u, 0x1F90u);
+    net_reset();
+    g_net_rc = ARKRTOS_NET_ENOTSUP;
+    r = sock_run(c, T_NR_BIND, (unsigned long)h3, sa, 16UL, 0UL, 0UL, 0UL);
+    ck(r == -T_ENOSYS, "net ENOTSUP 映射成 -ENOSYS（协议栈没编进来）");
+    g_net_rc = ARKRTOS_NET_EHOSTUNREACH;
+    r = sock_run(c, T_NR_BIND, (unsigned long)h3, sa, 16UL, 0UL, 0UL, 0UL);
+    ck(r == -T_EHOSTUNREACH, "net EHOSTUNREACH 原样映射");
+    g_net_rc = ARKRTOS_NET_ENOBUFS;
+    r = sock_run(c, T_NR_BIND, (unsigned long)h3, sa, 16UL, 0UL, 0UL, 0UL);
+    ck(r == -T_ENOBUFS, "net ENOBUFS 原样映射");
+    g_net_rc = ARKRTOS_NET_EINVAL;
+    r = sock_run(c, T_NR_BIND, (unsigned long)h3, sa, 16UL, 0UL, 0UL, 0UL);
+    ck(r == -T_EINVAL, "net EINVAL 原样映射");
+    g_net_rc = -999;
+    r = sock_run(c, T_NR_BIND, (unsigned long)h3, sa, 16UL, 0UL, 0UL, 0UL);
+    ck(r == -T_EIO, "对不上号的 net 错误回 -EIO，不编一个看似合理的 errno");
+    g_net_rc = 0;
+
+    /* ---- bind(2) ---- */
+    net_reset();
+    (void)call(c, T_NR_BIND, 99UL, sa, 16UL, 0UL);
+    ck_ret(c, -T_EBADF, "bind 未打开的 fd 回 -EBADF");
+    (void)call(c, T_NR_PIPE2, u_ptr(T_PIPE_OFF), 0UL, 0UL, 0UL);
+    u_get(T_PIPE_OFF, fds, 8u);
+    (void)call(c, T_NR_BIND, (unsigned long)fds[0], sa, 16UL, 0UL);
+    ck_ret(c, -T_ENOTSOCK, "bind 一个管道 fd 回 -ENOTSOCK");
+    (void)call(c, T_NR_BIND, (unsigned long)h3, sa, 4UL, 0UL);
+    ck_ret(c, -T_EINVAL, "bind addrlen < 8 回 -EINVAL");
+    (void)call(c, T_NR_BIND, (unsigned long)h3, 0UL, 16UL, 0UL);
+    ck_ret(c, -T_EFAULT, "bind 地址为 NULL 回 -EFAULT");
+    ck_u(g_net_calls, 0u, "bind 的参数错误一条都不发到 net");
+    sa_put(T_SA_OFF, 0x7F000001u, 0x1F90u);
+    g_user[T_SA_OFF] = 10u;
+    (void)call(c, T_NR_BIND, (unsigned long)h3, sa, 16UL, 0UL);
+    ck_ret(c, -T_EAFNOSUPPORT, "bind 非 AF_INET 的走地址回 -EAFNOSUPPORT");
+    sa_put(T_SA_OFF, 0x7F000001u, 0x1F90u);
+    net_reset();
+    r = sock_run(c, T_NR_BIND, (unsigned long)h3, sa, 16UL, 0UL, 0UL, 0UL);
+    ck(r == 0, "bind 成功回 0");
+    ck_u(g_net_opn[ARKRTOS_NET_SUB_BIND], 1u, "bind 一个往返就够了（无阻塞）");
+    ck_u(g_net_arg[1], 0x7F000001u, "bind 交给 net 的地址是 host order");
+    ck_u(g_net_arg[2], 0x1F90u, "bind 交给 net 的端口是 host order");
+    ck_u(g_net_arg[0], 5u, "bind 交的是这个 fd 的 net 句柄");
+
+    /* ---- listen(2)：backlog 静默夹取 ---- */
+    net_reset();
+    r = sock_run(c, T_NR_LISTEN, (unsigned long)h3, 0xFFFFFFFFUL, 0UL, 0UL, 0UL, 0UL);
+    ck(r == 0, "listen 负 backlog 仍然成功");
+    ck_u(g_net_arg[1], 0u, "listen 负 backlog 静默当 0");
+    net_reset();
+    r = sock_run(c, T_NR_LISTEN, (unsigned long)h3, 1000UL, 0UL, 0UL, 0UL, 0UL);
+    ck(r == 0, "listen 大 backlog 也成功");
+    ck_u(g_net_arg[1], 255u, "listen backlog 超过 255 静默截到 255");
+    (void)call(c, T_NR_LISTEN, (unsigned long)fds[0], 5UL, 0UL, 0UL);
+    ck_ret(c, -T_ENOTSOCK, "listen 管道 fd 回 -ENOTSOCK");
+
+    /* ---- accept(2)：没有地址时只差一个往返 ---- */
+    fresh(c);
+    net_reset();
+    g_restart_rc = 0;
+    g_net_handle = 11;
+    r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+    ck(r == 3, "accept 前置：监听 socket = fd 3");
+    net_reset();
+    g_net_pending = 1;
+    g_net_handle  = 42;
+    r = sock_run(c, T_NR_ACCEPT, 3UL, 0UL, 0UL, 0UL, 0UL, 0UL);
+    ck(r == 4, "accept 不带地址回新 fd=4");
+    ck_u(g_net_arg[0], 11u, "accept 交的是监听 socket 的句柄");
+
+    /* ---- accept(2) 带地址：两步式，重放不许重复 accept ---- */
+    net_reset();
+    g_net_peer_pending = 2;
+    g_net_handle = 43;
+    g_net_ip     = 0xC0A80105u;
+    g_net_port   = 1234u;
+    u_put32(T_LEN_OFF, 0u);
+    sa_put(T_SA_OFF, 0u, 0u);
+    r = sock_run(c, T_NR_ACCEPT, 3UL, sa, lenp, 0UL, 0UL, 0UL);
+    ck(r == 5, "accept 带地址回新 fd=5");
+    ck_u(g_net_opn[ARKRTOS_NET_SUB_ACCEPT], 1u,
+         "第二轮只补 GETPEERNAME，不重复 accept（否则每次重放漏一个 socket）");
+    ck_u(g_net_opn[ARKRTOS_NET_SUB_GETPEERNAME], 3u, "地址查询按重放次数轮询");
+    ck_u(sa_ip(T_SA_OFF), 0xC0A80105u, "accept 回填对端地址（网络序进布局）");
+    ck_u(sa_port(T_SA_OFF), 1234u, "accept 回填对端端口");
+    ck_u((uint32)u_get8(T_SA_OFF) | ((uint32)u_get8(T_SA_OFF + 1u) << 8),
+         2u, "回填的 family 是 AF_INET");
+    ck_u(u_get32(T_LEN_OFF), 16u, "回填的 addrlen 是 16");
+
+    /* ---- accept4(2)：只有两个标志位合法 ---- */
+    (void)call(c, T_NR_ACCEPT4, 3UL, 0UL, 0UL, 0x10UL);
+    ck_ret(c, -T_EINVAL, "accept4 高位里有别的位回 -EINVAL");
+    net_reset();
+    g_net_handle = 44;
+    u_put32(T_LEN_OFF, 0u);
+    r = sock_run(c, T_NR_ACCEPT4, 3UL, 0UL, 0UL, T_SOCK_NONBLOCK, 0UL, 0UL);
+    ck(r == 6, "accept4 带 SOCK_NONBLOCK 成功回 fd=6");
+
+    /* ---- connect(2)：非阻塞直报 EINPROGRESS，阻塞在时间片上重放 ---- */
+    fresh(c);
+    net_reset();
+    g_restart_rc = 0;
+    g_net_handle = 21;
+    r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM | T_SOCK_NONBLOCK,
+                 0UL, 0UL, 0UL, 0UL);
+    ck(r == 3, "connect 前置：非阻塞 socket = fd 3");
+    net_reset();
+    g_net_rc = ARKRTOS_NET_EINPROGRESS;
+    g_block_calls = 0;
+    sa_put(T_SA_OFF, 0x7F000001u, 8080u);
+    (void)call6(c, T_NR_CONNECT, 3UL, sa, 16UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EINPROGRESS, "非阻塞 connect 把「还在进行」如实交回去");
+    ck(g_block_calls == 0, "非阻塞 connect 不睡");
+    ck_u(g_net_opn[ARKRTOS_NET_SUB_CONNECT], 1u, "非阻塞 connect 只问一次");
+
+    net_reset();
+    g_net_handle = 22;
+    r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+    ck(r == 4, "connect 前置：阻塞 socket = fd 4");
+    net_reset();
+    g_net_rc = ARKRTOS_NET_EINPROGRESS;
+    g_block_calls = 0;
+    (void)call6(c, T_NR_CONNECT, 4UL, sa, 16UL, 0UL, 0UL, 0UL);
+    ck_pending(c, "阻塞 connect 遇到 EINPROGRESS 登记重放（不写 a0）");
+    ck(g_block_calls == 1, "阻塞 connect 重放时睡一个时间片");
+    g_net_rc = 0;
+    (void)call6(c, T_NR_CONNECT, 0UL, 0UL, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "阻塞 connect 重放后连上回 0");
+    ck_u(g_net_arg[0], 22u, "重放时句柄取自本任务的槽");
+
+    /* ---- sendto(2) / recvfrom(2) ---- */
+    fresh(c);
+    net_reset();
+    g_restart_rc = 0;
+    g_net_handle = 31;
+    r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+    ck(r == 3, "sendto 前置：socket = fd 3");
+    (void)call(c, T_NR_SENDTO, 3UL, iop, 0x11170UL, 0UL);
+    ck_ret(c, -T_EMSGSIZE, "sendto 长度超过 16 位宽度回 -EMSGSIZE");
+    net_reset();
+    u_put_str(T_IO_OFF, "hi");
+    r = sock_run(c, T_NR_SENDTO, 3UL, iop, 2UL, 0UL, 0UL, 0UL);
+    ck(r == 0, "sendto 无地址走 SEND，返回 net 的字节数");
+    ck_u(g_net_opn[ARKRTOS_NET_SUB_SEND], 1u, "无地址的 sendto 走 SEND 而不是 SENDTO");
+    ck_u(g_net_arg[1], (uint32)iop, "SEND 交的是用户缓冲地址");
+    ck_u(g_net_arg[2], 2u, "SEND 交的是长度");
+
+    net_reset();
+    sa_put(T_SA_OFF, 0x0A0000FEu, 9999u);
+    r = sock_run(c, T_NR_SENDTO, 3UL, iop, 2UL, 0UL, sa, 16UL);
+    ck(r == 0, "sendto 带地址成功");
+    ck_u(g_net_opn[ARKRTOS_NET_SUB_SENDTO], 1u, "带地址的 sendto 走 SENDTO");
+    ck_u(g_net_arg[3], 0x0A0000FEu, "SENDTO 的地址是 host order");
+    ck_u(g_net_arg[4], 9999u, "SENDTO 的端口是 host order");
+
+    net_reset();
+    g_net_bytes = 5;
+    u_put32(T_LEN_OFF, 0u);
+    r = sock_run(c, T_NR_RECVFROM, 3UL, iop, 8UL, 0UL, sa, lenp);
+    ck(r == 5, "recvfrom 回收到的字节数");
+    u_get(T_IO_OFF, buf, 5u);
+    ck(memcmp(buf, "hello", 5) == 0, "recvfrom 的数据落进用户缓冲");
+    ck_u(sa_ip(T_SA_OFF), 0x0A000001u, "recvfrom 回填来源地址");
+    ck_u(sa_port(T_SA_OFF), 8080u, "recvfrom 回填来源端口");
+    ck_u(u_get32(T_LEN_OFF), 16u, "recvfrom 回填 addrlen=16");
+    (void)call(c, T_NR_RECVFROM, 3UL, iop, 0UL, 0UL);
+    ck_ret(c, 0, "recvfrom 长度 0 直接回 0，不发请求");
+    net_reset();
+    (void)call(c, T_NR_RECVFROM, 3UL, iop, 0x11170UL, 0UL);
+    ck_ret(c, -T_EMSGSIZE, "recvfrom 长度超过 16 位宽度回 -EMSGSIZE");
+    ck_u(g_net_calls, 0u, "这两条参数路径一条请求都不发");
+
+    net_reset();
+    g_net_rc = ARKRTOS_NET_EWOULDBLOCK;
+    (void)call(c, T_NR_SENDTO, 3UL, iop, 2UL, T_MSG_DONTWAIT);
+    ck_ret(c, -T_EAGAIN, "MSG_DONTWAIT 的 sendto 遇到没空间立刻回 -EAGAIN");
+    ck_u(g_net_opn[ARKRTOS_NET_SUB_SEND], 1u, "不重放：只问了一次");
+    g_block_calls = 0;
+    (void)call(c, T_NR_SENDTO, 3UL, iop, 2UL, 0UL);
+    ck_pending(c, "阻塞 sendto 遇到没空间登记重放（不写 a0）");
+    ck(g_block_calls == 1, "阻塞 sendto 重放时睡一个时间片");
+    g_net_rc = 0;
+    (void)call(c, T_NR_SENDTO, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "阻塞 sendto 重放后成功");
+
+    (void)call(c, T_NR_PIPE2, u_ptr(T_PIPE_OFF), 0UL, 0UL, 0UL);
+    u_get(T_PIPE_OFF, fds, 8u);
+    (void)call(c, T_NR_SENDTO, (unsigned long)fds[0], iop, 2UL, 0UL);
+    ck_ret(c, -T_ENOTSOCK, "sendto 一个管道 fd 回 -ENOTSOCK");
+
+    /* ---- setsockopt(2) / getsockopt(2) ---- */
+    fresh(c);
+    net_reset();
+    g_net_handle = 51;
+    r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_DGRAM, 0UL, 0UL, 0UL, 0UL);
+    ck(r == 3, "setsockopt 前置：dgram socket = fd 3");
+    net_reset();
+    u_put32(T_VAL_OFF, 4096u);
+    (void)call(c, T_NR_SETSOCKOPT, 3UL, 6UL, T_SO_REUSEADDR, valp);
+    ck_ret(c, -T_ENOPROTOOPT, "setsockopt 非 SOL_SOCKET 的 level 回 -ENOPROTOOPT");
+    (void)call(c, T_NR_SETSOCKOPT, 3UL, T_SOL_SOCKET, 99UL, valp);
+    ck_ret(c, -T_ENOPROTOOPT, "setsockopt 本层不认的选项号回 -ENOPROTOOPT");
+    (void)call(c, T_NR_SETSOCKOPT, 3UL, T_SOL_SOCKET, T_SO_ERROR, valp);
+    ck_ret(c, -T_EINVAL, "setsockopt SO_ERROR 是只读选项，回 -EINVAL");
+    (void)call(c, T_NR_SETSOCKOPT, 3UL, T_SOL_SOCKET, T_SO_RCVBUF, 0UL);
+    ck_ret(c, -T_EFAULT, "setsockopt 值指针为 NULL 回 -EFAULT");
+    (void)call(c, T_NR_SETSOCKOPT, 3UL, T_SOL_SOCKET, T_SO_RCVBUF, valp);
+    ck_u(g_net_calls, 0u, "以上四条参数错误一条都不发到 net");
+
+    net_reset();
+    /* 4 参入口装不下 optlen：linux_abi.c 看到的是 0，按 Linux 的判法回 -EINVAL。 */
+    (void)call(c, T_NR_SETSOCKOPT, 3UL, (unsigned long)T_SOL_SOCKET,
+               (unsigned long)T_SO_RCVBUF, valp);
+    ck_ret(c, -T_EINVAL, "setsockopt 4 参入口的 optlen 是 0，回 -EINVAL");
+    ck_u(g_net_calls, 0u, "optlen 不足一条请求都不发");
+    net_reset();
+    (void)call6(c, T_NR_SETSOCKOPT, 3UL, (unsigned long)T_SOL_SOCKET,
+                (unsigned long)T_SO_RCVBUF, valp, 2UL, 0UL);
+    ck_ret(c, -T_EINVAL, "setsockopt optlen < 4 回 -EINVAL");
+    net_reset();
+    u_put32(T_VAL_OFF, 4096u);
+    (void)call6(c, T_NR_SETSOCKOPT, 3UL, (unsigned long)T_SOL_SOCKET,
+                (unsigned long)T_SO_RCVBUF, valp, 4UL, 0UL);
+    ck_ret(c, 0, "setsockopt SO_RCVBUF 成功");
+    ck_u(g_net_opn[ARKRTOS_NET_SUB_SETSOCKOPT], 1u, "成功路径只发一条请求");
+    ck_u(g_net_arg[0], 51u, "SETSOCKOPT 的句柄");
+    ck_u(g_net_arg[1], ARKRTOS_NET_SO_RCVBUF, "本层的选项号翻译成 net 的选项号");
+    ck_u(g_net_arg[2], 4096u, "选项值原样交给 net");
+
+    /* getsockopt：三个本地就能答的 + 一个转发 */
+    u_put32(T_LEN_OFF, 4u);
+    u_put32(T_VAL_OFF, 0u);
+    (void)call6(c, T_NR_GETSOCKOPT, 3UL, (unsigned long)T_SOL_SOCKET,
+                (unsigned long)T_SO_TYPE, valp, lenp, 0UL);
+    ck_ret(c, 0, "getsockopt SO_TYPE 本地作答");
+    ck_u(u_get32(T_VAL_OFF), T_SOCK_DGRAM, "SO_TYPE 回的就是建 socket 时的 type");
+    ck_u(u_get32(T_LEN_OFF), 4u, "SO_TYPE 把 optlen 写成 4");
+    (void)call6(c, T_NR_GETSOCKOPT, 3UL, (unsigned long)T_SOL_SOCKET,
+                (unsigned long)T_SO_DOMAIN, valp, lenp, 0UL);
+    ck_ret(c, 0, "getsockopt SO_DOMAIN 本地作答");
+    ck_u(u_get32(T_VAL_OFF), T_AF_INET, "SO_DOMAIN 恒是 AF_INET");
+    u_put32(T_VAL_OFF, 0xDEADBEEFu);
+    (void)call6(c, T_NR_GETSOCKOPT, 3UL, (unsigned long)T_SOL_SOCKET,
+                (unsigned long)T_SO_ERROR, valp, lenp, 0UL);
+    ck_ret(c, 0, "getsockopt SO_ERROR 本地作答");
+    ck_u(u_get32(T_VAL_OFF), 0u, "SO_ERROR 恒 0（错误都在调用返回值里给过）");
+    (void)call6(c, T_NR_GETSOCKOPT, 3UL, (unsigned long)T_SOL_SOCKET,
+                (unsigned long)T_SO_ERROR, 0UL, lenp, 0UL);
+    ck_ret(c, -T_EFAULT, "getsockopt 值指针为 NULL 回 -EFAULT");
+    u_put32(T_LEN_OFF, 2u);
+    (void)call6(c, T_NR_GETSOCKOPT, 3UL, (unsigned long)T_SOL_SOCKET,
+                (unsigned long)T_SO_TYPE, valp, lenp, 0UL);
+    ck_ret(c, -T_EINVAL, "getsockopt optlen < 4 回 -EINVAL");
+    (void)call6(c, T_NR_GETSOCKOPT, 3UL, 6UL, (unsigned long)T_SO_TYPE, valp, lenp, 0UL);
+    ck_ret(c, -T_ENOPROTOOPT, "getsockopt 非 SOL_SOCKET 的 level 回 -ENOPROTOOPT");
+
+    net_reset();
+    u_put32(T_LEN_OFF, 4u);
+    u_put32(T_VAL_OFF, 0u);
+    g_net_ip = 8192u;
+    (void)call6(c, T_NR_GETSOCKOPT, 3UL, (unsigned long)T_SOL_SOCKET,
+                (unsigned long)T_SO_RCVBUF, valp, lenp, 0UL);
+    ck_ret(c, 0, "getsockopt SO_RCVBUF 转发给 net");
+    ck_u(g_net_arg[2], (uint32)valp, "GETSOCKOPT 交的是用户指针，不是内核栈地址");
+    ck_u(u_get32(T_VAL_OFF), 8192u, "net 写回的值原样留在用户内存里");
+    ck_u(u_get32(T_LEN_OFF), 4u, "转发路径也把 optlen 写成 4");
+
+    /* ---- getsockname(2) / getpeername(2) ---- */
+    net_reset();
+    g_net_ip = 0x7F000001u;
+    g_net_port = 5555u;
+    u_put32(T_LEN_OFF, 0u);
+    r = sock_run(c, T_NR_GETSOCKNAME, 3UL, sa, lenp, 0UL, 0UL, 0UL);
+    ck(r == 0, "getsockname 成功回 0");
+    ck_u(g_net_opn[ARKRTOS_NET_SUB_GETSOCKNAME], 1u, "getsockname 问的是 GETSOCKNAME");
+    ck_u(sa_ip(T_SA_OFF), 0x7F000001u, "getsockname 回填地址");
+    ck_u(sa_port(T_SA_OFF), 5555u, "getsockname 回填端口");
+    ck_u(u_get32(T_LEN_OFF), 16u, "getsockname 回填 addrlen=16");
+    net_reset();
+    g_net_ip = 0x7F000002u;
+    g_net_port = 6666u;
+    r = sock_run(c, T_NR_GETPEERNAME, 3UL, sa, lenp, 0UL, 0UL, 0UL);
+    ck(r == 0, "getpeername 成功回 0");
+    ck_u(g_net_opn[ARKRTOS_NET_SUB_GETPEERNAME], 1u, "getpeername 问的是 GETPEERNAME");
+    ck_u(sa_port(T_SA_OFF), 6666u, "getpeername 回填端口");
+    net_reset();
+    r = sock_run(c, T_NR_GETSOCKNAME, 3UL, 0UL, 0UL, 0UL, 0UL, 0UL);
+    ck(r == 0, "getsockname 不要地址也成功");
+    ck_u(g_net_opn[ARKRTOS_NET_SUB_GETSOCKNAME], 1u,
+         "不要地址仍然问一次：socket 已经不在了这类错误要照常报出来");
+
+    /* ---- shutdown(2) ---- */
+    net_reset();
+    (void)call(c, T_NR_SHUTDOWN, 3UL, 3UL, 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "shutdown how > 2 回 -EINVAL");
+    ck_u(g_net_calls, 0u, "非法 how 不发请求");
+    net_reset();
+    r = sock_run(c, T_NR_SHUTDOWN, 3UL, 1UL, 0UL, 0UL, 0UL, 0UL);
+    ck(r == 0, "shutdown SHUT_WR 成功");
+    ck_u(g_net_opn[ARKRTOS_NET_SUB_SHUTDOWN], 1u, "shutdown 走 SHUTDOWN 子命令");
+    ck_u(g_net_arg[1], 1u, "how 原样交给 net");
+
+    /* ---- read(2) / write(2) 落在 socket 上 ---- */
+    fresh(c);
+    net_reset();
+    g_restart_rc = 0;
+    g_net_handle = 61;
+    r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+    ck(r == 3, "read/write 前置：阻塞 socket = fd 3");
+    (void)call(c, T_NR_READ, 3UL, iop, 0UL, 0UL);
+    ck_ret(c, 0, "socket 上 read 长度 0 直接回 0");
+    (void)call(c, T_NR_READ, 3UL, iop, 0x11170UL, 0UL);
+    ck_ret(c, -T_EMSGSIZE, "socket 上 read 长度超过 16 位宽度回 -EMSGSIZE");
+    net_reset();
+    g_net_bytes = 5;
+    r = sock_run(c, T_NR_READ, 3UL, iop, 8UL, 0UL, 0UL, 0UL);
+    ck(r == 5, "socket 上 read 回 net 的字节数");
+    ck_u(g_net_opn[ARKRTOS_NET_SUB_RECV], 1u, "read 走 RECV");
+    u_get(T_IO_OFF, buf, 5u);
+    ck(memcmp(buf, "hello", 5) == 0, "read 拿到的内容落进用户缓冲");
+
+    net_reset();
+    r = sock_run(c, T_NR_WRITE, 3UL, iop, 3UL, 0UL, 0UL, 0UL);
+    ck(r == 0, "socket 上 write 成功回 net 的字节数");
+    ck_u(g_net_opn[ARKRTOS_NET_SUB_SEND], 1u, "write 走 SEND");
+    (void)call(c, T_NR_WRITE, 3UL, iop, 0x11170UL, 0UL);
+    ck_ret(c, -T_EMSGSIZE, "socket 上 write 长度超过 16 位宽度回 -EMSGSIZE");
+
+    net_reset();
+    g_net_rc = ARKRTOS_NET_EWOULDBLOCK;
+    g_block_calls = 0;
+    (void)call(c, T_NR_READ, 3UL, iop, 8UL, 0UL);
+    ck_pending(c, "阻塞 read 遇到没数据登记重放（不写 a0）");
+    ck(g_block_calls == 1, "阻塞 read 重放时睡一个时间片");
+    g_net_bytes = 2;
+    g_net_rc = 0;
+    (void)call(c, T_NR_READ, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 2, "阻塞 read 重放后拿到数据");
+    ck_u(g_net_arg[0], 61u, "重放时句柄取自本任务的槽");
+
+    net_reset();
+    g_net_rc = ARKRTOS_NET_EWOULDBLOCK;
+    (void)call(c, T_NR_WRITE, 3UL, iop, 2UL, 0UL);
+    ck_pending(c, "阻塞 write 遇到没空间登记重放");
+    g_net_rc = 0;
+    (void)call(c, T_NR_WRITE, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "阻塞 write 重放后成功");
+
+    /* 非阻塞 socket：EAGAIN 立刻交回，不重放 */
+    fresh(c);
+    net_reset();
+    g_restart_rc = 0;
+    g_net_handle = 62;
+    r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM | T_SOCK_NONBLOCK,
+                 0UL, 0UL, 0UL, 0UL);
+    ck(r == 3, "非阻塞前置：fd 3");
+    net_reset();
+    g_net_rc = ARKRTOS_NET_EWOULDBLOCK;
+    g_block_calls = 0;
+    (void)call(c, T_NR_READ, 3UL, iop, 8UL, 0UL);
+    ck_ret(c, -T_EAGAIN, "非阻塞 read 遇到没数据立刻回 -EAGAIN");
+    (void)call(c, T_NR_WRITE, 3UL, iop, 2UL, 0UL);
+    ck_ret(c, -T_EAGAIN, "非阻塞 write 遇到没空间立刻回 -EAGAIN");
+    ck(g_block_calls == 0, "非阻塞两条路径都不睡");
+
+    /* ---- close(2) 落在 socket 上 ---- */
+    fresh(c);
+    net_reset();
+    g_restart_rc = 0;
+    g_net_handle = 71;
+    r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+    ck(r == 3, "close 前置：fd 3");
+    net_reset();
+    g_net_pending = 1;
+    g_block_calls = 0;
+    (void)call(c, T_NR_CLOSE, 3UL, 0UL, 0UL, 0UL);
+    ck_pending(c, "socket 的 close 遇到 EPENDING 登记重放（不写 a0）");
+    ck(g_block_calls == 1, "socket 的 close 重放时睡一个时间片");
+    (void)call(c, T_NR_CLOSE, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "socket 的 close 重放后成功（a0 已被清成 0 也认得出）");
+    ck_u(g_net_arg[0], 71u, "CLOSE 交的是这个 socket 的句柄");
+    (void)call(c, T_NR_CLOSE, 3UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EBADF, "socket 关掉之后同一个 fd 回 -EBADF");
+
+    /* ---- fd 槽用满：先判 -EMFILE，不往 net 发请求 ---- */
+    fresh(c);
+    net_reset();
+    g_restart_rc = 0;
+    g_net_handle = 1;
+    for(r = 0; r < 8; r++)
+    {
+        (void)sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+    }
+    net_reset();
+    (void)sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EMFILE, "8 个 fd 槽用满后 socket 回 -EMFILE");
+    ck_u(g_net_calls, 0u, "槽满时一条请求都不发（不会漏一个 net socket）");
+
+    /* ---- 任务退出 / 复位要把重放登记撤掉 ---- */
+    fresh(c);
+    net_reset();
+    g_restart_rc = 0;
+    g_net_handle = 81;
+    r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+    ck(r == 3, "清槽前置：fd 3");
+    net_reset();
+    g_net_rc = ARKRTOS_NET_EWOULDBLOCK;
+    (void)call(c, T_NR_READ, 3UL, iop, 8UL, 0UL);
+    ck_pending(c, "清槽前置：read 挂起并登记重放");
+    arkrtos_linux_abi_on_task_exit(7);
+    net_reset();
+    (void)call(c, T_NR_SOCKET, 10UL, T_SOCK_STREAM, 0UL, 0UL);
+    ck_ret(c, -T_EAFNOSUPPORT,
+           "任务退出清掉重放登记：下一次调用用的是新参数，不是上一次的槽");
+    ck_u(g_net_calls, 0u, "被参数校验挡住，一条请求都不发");
+
+    /* ---- 没有任务身份：一律 -ENOSYS ---- */
+    arkrtos_current_task_id = 0;
+    (void)call(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL);
+    ck_ret(c, -T_ENOSYS, "没有任务身份时 socket 回 -ENOSYS");
+    arkrtos_current_task_id = 7;
+
+#if (ARKRTOS_USE_LINUX_SELECT == 1)
+    /* ---- pselect6 的 socket 就绪位 ---- */
+    fresh(c);
+    net_reset();
+    g_restart_rc = 0;
+    g_net_handle = 91;
+    r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+    ck(r == 3, "pselect6 前置：socket = fd 3（bit3）");
+    net_reset();
+    g_net_rc = (int32)ARKRTOS_NET_POLL_IN;
+    u_put32(T_DATA_OFF, 0x08u);
+    (void)call6(c, T_NR_PSELECT6, 4UL, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 1, "pselect6 把 socket 的 POLL_IN 折成读就绪");
+    ck_u(u_get32(T_DATA_OFF), 0x08u, "读就绪位留在集合里");
+    ck_u(g_net_opn[ARKRTOS_NET_SUB_POLL], 1u, "一次 pselect6 只问一次 POLL");
+
+    net_reset();
+    g_net_rc = (int32)ARKRTOS_NET_POLL_OUT;
+    u_put32(T_DATA_OFF + 0x100u, 0x08u);
+    (void)call6(c, T_NR_PSELECT6, 4UL, 0UL, u_ptr(T_DATA_OFF + 0x100u), 0UL, 0UL, 0UL);
+    ck_ret(c, 1, "pselect6 把 POLL_OUT 折成写就绪");
+    net_reset();
+    g_net_rc = 0;
+    u_put32(T_TMO_OFF, 0u);
+    u_put32(T_TMO_OFF + 4u, 0u);
+    u_put32(T_DATA_OFF, 0x08u);
+    (void)call6(c, T_NR_PSELECT6, 4UL, u_ptr(T_DATA_OFF), 0UL, 0UL, tmo, 0UL);
+    ck_ret(c, 0, "socket 没就绪 + timeout=0 回 0");
+    ck_u(u_get32(T_DATA_OFF), 0u, "没就绪就把就绪位清掉");
+    ck(g_block_calls >= 0, "（时间片计数只作可读性参照）");
+#endif /* ARKRTOS_USE_LINUX_SELECT == 1 */
+
+    /* ================= 第二波：拒绝路径、边界与不可达分支 ================= */
+
+    /* ---- net 的负错误号逐档映射（EALREADY..EMSGSIZE） ---- */
+    {
+        static const struct
+        {
+            int32 net;
+            int32 lx;
+            const char *what;
+        } emap[] =
+        {
+            { ARKRTOS_NET_EALREADY,     -T_EALREADY,     "net EALREADY 映射成 -EALREADY" },
+            { ARKRTOS_NET_EISCONN,      -T_EISCONN,      "net EISCONN 映射成 -EISCONN" },
+            { ARKRTOS_NET_ENOTCONN,     -T_ENOTCONN,     "net ENOTCONN 映射成 -ENOTCONN" },
+            { ARKRTOS_NET_ECONNREFUSED, -T_ECONNREFUSED, "net ECONNREFUSED 映射成 -ECONNREFUSED" },
+            { ARKRTOS_NET_ECONNRESET,   -T_ECONNRESET,   "net ECONNRESET 映射成 -ECONNRESET" },
+            { ARKRTOS_NET_ECONNABORTED, -T_ECONNABORTED, "net ECONNABORTED 映射成 -ECONNABORTED" },
+            { ARKRTOS_NET_EMSGSIZE,     -T_EMSGSIZE,     "net EMSGSIZE 映射成 -EMSGSIZE" },
+        };
+        uint32 k;
+
+        fresh(c);
+        net_reset();
+        g_restart_rc = 0;
+        g_net_handle = 101;
+        r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+        ck(r == 3, "errno 映射前置：fd 3");
+        sa_put(T_SA_OFF, 0x7F000001u, 1234u);
+        for(k = 0u; k < (uint32)(sizeof(emap) / sizeof(emap[0])); k++)
+        {
+            net_reset();
+            g_net_rc = emap[k].net;
+            r = sock_run(c, T_NR_BIND, 3UL, sa, 16UL, 0UL, 0UL, 0UL);
+            ck(r == emap[k].lx, emap[k].what);
+        }
+    }
+
+    /* ---- 没有可重放端口：如实回 -EAGAIN，不假装睡过 ---- */
+    {
+        fresh(c);
+        net_reset();
+        g_restart_rc = 0;
+        g_net_handle = 102;
+        r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+        ck(r == 3, "重放不可用前置：fd 3");
+        net_reset();
+        g_restart_rc = -1;
+        g_net_pending = 1;
+        g_block_calls = 0;
+        r = sock_run(c, T_NR_BIND, 3UL, sa, 16UL, 0UL, 0UL, 0UL);
+        ck(r == -T_EAGAIN, "没有重放端口时 bind 回 -EAGAIN（不假装睡过）");
+        ck(g_block_calls == 0, "没有重放端口时一次也不睡");
+        g_restart_rc = 0;
+    }
+
+    /* ---- 没有任务身份：每个入口都回 -ENOSYS，一条 net 请求都不发 ---- */
+    {
+        fresh(c);
+        net_reset();
+        g_restart_rc = 0;
+        g_net_handle = 111;
+        r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_DGRAM, 0UL, 0UL, 0UL, 0UL);
+        ck(r == 3, "身份前置：dgram socket = fd 3");
+        arkrtos_current_task_id = 0;
+        net_reset();
+        g_block_calls = 0;
+        sa_put(T_SA_OFF, 0x7F000001u, 1234u);
+        u_put32(T_LEN_OFF, 4u);
+
+        (void)call(c, T_NR_BIND, 3UL, sa, 16UL, 0UL);
+        ck_ret(c, -T_ENOSYS, "没有任务身份时 bind 回 -ENOSYS");
+        (void)call(c, T_NR_LISTEN, 3UL, 4UL, 0UL, 0UL);
+        ck_ret(c, -T_ENOSYS, "没有任务身份时 listen 回 -ENOSYS");
+        (void)call(c, T_NR_ACCEPT, 3UL, 0UL, 0UL, 0UL);
+        ck_ret(c, -T_ENOSYS, "没有任务身份时 accept 回 -ENOSYS");
+        (void)call(c, T_NR_CONNECT, 3UL, sa, 16UL, 0UL);
+        ck_ret(c, -T_ENOSYS, "没有任务身份时 connect 回 -ENOSYS");
+        (void)call(c, T_NR_SENDTO, 3UL, iop, 2UL, 0UL);
+        ck_ret(c, -T_ENOSYS, "没有任务身份时 sendto 回 -ENOSYS");
+        (void)call(c, T_NR_RECVFROM, 3UL, iop, 2UL, 0UL);
+        ck_ret(c, -T_ENOSYS, "没有任务身份时 recvfrom 回 -ENOSYS");
+        (void)call(c, T_NR_SETSOCKOPT, 3UL, T_SOL_SOCKET, T_SO_RCVBUF, valp);
+        ck_ret(c, -T_ENOSYS, "没有任务身份时 setsockopt 回 -ENOSYS");
+        (void)call6(c, T_NR_GETSOCKOPT, 3UL, (unsigned long)T_SOL_SOCKET,
+                    (unsigned long)T_SO_TYPE, valp, lenp, 0UL);
+        ck_ret(c, -T_ENOSYS, "没有任务身份时 getsockopt 回 -ENOSYS");
+        (void)call(c, T_NR_GETSOCKNAME, 3UL, sa, lenp, 0UL);
+        ck_ret(c, -T_ENOSYS, "没有任务身份时 getsockname 回 -ENOSYS");
+        (void)call(c, T_NR_GETPEERNAME, 3UL, sa, lenp, 0UL);
+        ck_ret(c, -T_ENOSYS, "没有任务身份时 getpeername 回 -ENOSYS");
+        (void)call(c, T_NR_SHUTDOWN, 3UL, 1UL, 0UL, 0UL);
+        ck_ret(c, -T_ENOSYS, "没有任务身份时 shutdown 回 -ENOSYS");
+        (void)call(c, T_NR_READ, 3UL, iop, 4UL, 0UL);
+        ck_ret(c, -T_ENOSYS, "没有任务身份时 socket 上 read 回 -ENOSYS");
+        (void)call(c, T_NR_WRITE, 3UL, iop, 2UL, 0UL);
+        ck_ret(c, -T_ENOSYS, "没有任务身份时 socket 上 write 回 -ENOSYS");
+        (void)call(c, T_NR_CLOSE, 3UL, 0UL, 0UL, 0UL);
+        ck_ret(c, -T_ENOSYS, "没有任务身份时 socket 上 close 回 -ENOSYS");
+        ck_u(g_net_calls, 0u, "没有任务身份时一条 net 请求都不发");
+        ck(g_block_calls == 0, "没有任务身份时一次也不睡");
+        arkrtos_current_task_id = 7;
+    }
+
+    /* ---- 坏 fd：在 net 之前就拒掉 ---- */
+    {
+        fresh(c);
+        net_reset();
+        g_restart_rc = 0;
+        g_net_handle = 112;
+        r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+        ck(r == 3, "坏 fd 前置：fd 3");
+        net_reset();
+        (void)call(c, T_NR_ACCEPT, 99UL, 0UL, 0UL, 0UL);
+        ck_ret(c, -T_EBADF, "accept 未打开的 fd 回 -EBADF");
+        (void)call(c, T_NR_CONNECT, 99UL, sa, 16UL, 0UL);
+        ck_ret(c, -T_EBADF, "connect 未打开的 fd 回 -EBADF");
+        (void)call(c, T_NR_RECVFROM, 99UL, iop, 8UL, 0UL);
+        ck_ret(c, -T_EBADF, "recvfrom 未打开的 fd 回 -EBADF");
+        (void)call(c, T_NR_SETSOCKOPT, 99UL, T_SOL_SOCKET, T_SO_RCVBUF, valp);
+        ck_ret(c, -T_EBADF, "setsockopt 未打开的 fd 回 -EBADF");
+        (void)call6(c, T_NR_GETSOCKOPT, 99UL, (unsigned long)T_SOL_SOCKET,
+                    (unsigned long)T_SO_TYPE, valp, lenp, 0UL);
+        ck_ret(c, -T_EBADF, "getsockopt 未打开的 fd 回 -EBADF");
+        (void)call(c, T_NR_GETSOCKNAME, 99UL, sa, lenp, 0UL);
+        ck_ret(c, -T_EBADF, "getsockname 未打开的 fd 回 -EBADF");
+        (void)call(c, T_NR_SHUTDOWN, 99UL, 1UL, 0UL, 0UL);
+        ck_ret(c, -T_EBADF, "shutdown 未打开的 fd 回 -EBADF");
+        ck_u(g_net_calls, 0u, "坏 fd 一条请求都不发");
+    }
+
+    /* ---- 地址拷不动 / 写不回：都必须在 net 之外如实报 -EFAULT ---- */
+    {
+        fresh(c);
+        net_reset();
+        g_restart_rc = 0;
+        g_net_handle = 121;
+        r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+        ck(r == 3, "地址失败前置：fd 3");
+        sa_put(T_SA_OFF, 0x7F000001u, 1234u);
+
+        net_reset();
+        (void)call(c, T_NR_BIND, 3UL, 0x10UL, 16UL, 0UL);
+        ck_ret(c, -T_EFAULT, "bind 读不到用户 sockaddr 回 -EFAULT");
+        ck_u(g_net_calls, 0u, "bind 地址读失败不发请求");
+
+        net_reset();
+        (void)call6(c, T_NR_SENDTO, 3UL, iop, 2UL, 0UL, 0x10UL, 16UL);
+        ck_ret(c, -T_EFAULT, "sendto 读不到目的地址回 -EFAULT");
+        ck_u(g_net_calls, 0u, "sendto 地址读失败不发请求");
+
+        net_reset();
+        (void)call(c, T_NR_GETSOCKNAME, 3UL, 0x10UL, lenp, 0UL);
+        ck_ret(c, -T_EFAULT, "getsockname 第一块地址读不回回 -EFAULT");
+
+        net_reset();
+        (void)call(c, T_NR_GETSOCKNAME, 3UL, u_ptr(U_SIZE - 4u), lenp, 0UL);
+        ck_ret(c, -T_EFAULT, "getsockname 第二块地址读不回回 -EFAULT");
+
+        net_reset();
+        (void)call(c, T_NR_GETSOCKNAME, 3UL, u_ptr(U_SIZE - 8u), lenp, 0UL);
+        ck_ret(c, -T_EFAULT, "getsockname 16 字节写不回回 -EFAULT");
+
+        net_reset();
+        u_put32(T_LEN_OFF, 0xDEADBEEFu);
+        (void)call(c, T_NR_GETSOCKNAME, 3UL, 0UL, lenp, 0UL);
+        ck_ret(c, 0, "getsockname 不要地址也成功");
+        ck_u(u_get32(T_LEN_OFF), 0xDEADBEEFu,
+             "不要地址时本层不碰 addrlen（这条分支在 lx_sock_name 里早退，"
+             " addr_out 的 ua==0 那一半因此不可达）");
+
+        net_reset();
+        (void)call(c, T_NR_GETSOCKNAME, 3UL, sa, u_ptr(U_SIZE - 2u), 0UL);
+        ck_ret(c, -T_EFAULT, "getsockname addrlen 写不回回 -EFAULT");
+
+        net_reset();
+        g_net_bytes = 0;
+        (void)call6(c, T_NR_RECVFROM, 3UL, iop, 4UL, 0UL, 0x10UL, 16UL);
+        ck_ret(c, -T_EFAULT, "recvfrom 来源地址第一块读不回回 -EFAULT");
+
+        net_reset();
+        g_net_bytes = 0;
+        (void)call6(c, T_NR_RECVFROM, 3UL, iop, 4UL, 0UL, u_ptr(U_SIZE - 8u), 16UL);
+        ck_ret(c, -T_EFAULT, "recvfrom 16 字节来源地址写不回回 -EFAULT");
+
+        net_reset();
+        g_net_rc = ARKRTOS_NET_ECONNRESET;
+        (void)call(c, T_NR_GETSOCKNAME, 3UL, sa, lenp, 0UL);
+        ck_ret(c, -T_ECONNRESET, "getsockname 转发错误原样交回");
+
+        net_reset();
+        (void)call(c, T_NR_GETPEERNAME, 3UL, 0x10UL, lenp, 0UL);
+        ck_ret(c, -T_EFAULT, "getpeername 地址读不回回 -EFAULT");
+    }
+
+    /* ---- SOL_SOCKET 选项：翻译、只读、越界与写回失败 ---- */
+    {
+        fresh(c);
+        net_reset();
+        g_restart_rc = 0;
+        g_net_handle = 131;
+        r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM | T_SOCK_CLOEXEC,
+                     0UL, 0UL, 0UL, 0UL);
+        ck(r == 3, "带 SOCK_CLOEXEC 建 socket 成功");
+
+        net_reset();
+        u_put32(T_VAL_OFF, 1u);
+        (void)call6(c, T_NR_SETSOCKOPT, 3UL, (unsigned long)T_SOL_SOCKET,
+                    (unsigned long)T_SO_REUSEADDR, valp, 4UL, 0UL);
+        ck_ret(c, 0, "setsockopt SO_REUSEADDR 成功");
+        ck_u(g_net_arg[1], ARKRTOS_NET_SO_REUSEADDR,
+             "REUSEADDR 翻成 net 的选项号");
+
+        net_reset();
+        u_put32(T_VAL_OFF, 8192u);
+        (void)call6(c, T_NR_SETSOCKOPT, 3UL, (unsigned long)T_SOL_SOCKET,
+                    (unsigned long)T_SO_SNDBUF, valp, 4UL, 0UL);
+        ck_ret(c, 0, "setsockopt SO_SNDBUF 成功");
+        ck_u(g_net_arg[1], ARKRTOS_NET_SO_SNDBUF,
+             "SNDBUF 翻成 net 的选项号");
+        ck_u(g_net_arg[2], 8192u, "SNDBUF 的值原样交给 net");
+
+        net_reset();
+        (void)call6(c, T_NR_SETSOCKOPT, 3UL, (unsigned long)T_SOL_SOCKET,
+                    (unsigned long)T_SO_RCVBUF, 0x10UL, 4UL, 0UL);
+        ck_ret(c, -T_EFAULT, "setsockopt 值读不回回 -EFAULT");
+
+        net_reset();
+        u_put32(T_LEN_OFF, 4u);
+        (void)call6(c, T_NR_GETSOCKOPT, 3UL, (unsigned long)T_SOL_SOCKET,
+                    (unsigned long)T_SO_TYPE, valp, 0x10UL, 0UL);
+        ck_ret(c, -T_EFAULT, "getsockopt optlen 读不回回 -EFAULT");
+
+        net_reset();
+        u_put32(T_LEN_OFF, 4u);
+        (void)call6(c, T_NR_GETSOCKOPT, 3UL, (unsigned long)T_SOL_SOCKET,
+                    (unsigned long)T_SO_TYPE, u_ptr(U_SIZE - 2u), lenp, 0UL);
+        ck_ret(c, -T_EFAULT, "getsockopt 本地值写不回回 -EFAULT");
+
+        net_reset();
+        u_put32(T_LEN_OFF, 4u);
+        g_to_budget = 1;
+        (void)call6(c, T_NR_GETSOCKOPT, 3UL, (unsigned long)T_SOL_SOCKET,
+                    (unsigned long)T_SO_TYPE, valp, lenp, 0UL);
+        ck_ret(c, -T_EFAULT, "getsockopt 本地 optlen 写不回回 -EFAULT");
+        g_to_budget = -1;
+
+        net_reset();
+        u_put32(T_LEN_OFF, 4u);
+        (void)call6(c, T_NR_GETSOCKOPT, 3UL, (unsigned long)T_SOL_SOCKET,
+                    99UL, valp, lenp, 0UL);
+        ck_ret(c, -T_ENOPROTOOPT, "getsockopt 本层不认的选项号回 -ENOPROTOOPT");
+
+        net_reset();
+        u_put32(T_LEN_OFF, 4u);
+        g_net_rc = ARKRTOS_NET_EINVAL;
+        (void)call6(c, T_NR_GETSOCKOPT, 3UL, (unsigned long)T_SOL_SOCKET,
+                    (unsigned long)T_SO_RCVBUF, valp, lenp, 0UL);
+        ck_ret(c, -T_EINVAL, "getsockopt 转发的错误原样交回");
+
+        net_reset();
+        u_put32(T_LEN_OFF, 4u);
+        g_to_budget = 1;
+        (void)call6(c, T_NR_GETSOCKOPT, 3UL, (unsigned long)T_SOL_SOCKET,
+                    (unsigned long)T_SO_RCVBUF, valp, lenp, 0UL);
+        ck_ret(c, -T_EFAULT, "getsockopt 转发路径 optlen 写不回回 -EFAULT");
+        g_to_budget = -1;
+    }
+
+    /* ---- accept 族的分配失败、坏句柄与地址半路失败 ---- */
+    {
+        fresh(c);
+        net_reset();
+        g_restart_rc = 0;
+        g_net_handle = 141;
+        r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+        ck(r == 3, "accept 边界前置：监听 socket = fd 3");
+
+        for(r = 0; r < 7; r++)
+        {
+            (void)sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM,
+                           0UL, 0UL, 0UL, 0UL);
+        }
+        net_reset();
+        (void)sock_run(c, T_NR_ACCEPT, 3UL, 0UL, 0UL, 0UL, 0UL, 0UL);
+        ck_ret(c, -T_EMFILE, "fd 槽用满时 accept 回 -EMFILE");
+        ck_u(g_net_calls, 0u,
+             "槽满时 accept 一条请求都不发（不会漏一个 net socket）");
+
+        fresh(c);
+        net_reset();
+        g_restart_rc = 0;
+        g_net_handle = 142;
+        r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+        ck(r == 3, "accept 坏句柄前置：fd 3");
+        net_reset();
+        g_net_handle = 0;
+        r = sock_run(c, T_NR_ACCEPT, 3UL, 0UL, 0UL, 0UL, 0UL, 0UL);
+        ck(r == -T_EIO, "accept 收到的坏句柄判 -EIO");
+
+        net_reset();
+        g_net_handle = 143;
+        r = sock_run(c, T_NR_ACCEPT4, 3UL, 0UL, 0UL, T_SOCK_CLOEXEC, 0UL, 0UL);
+        ck(r == 4, "accept4 带 SOCK_CLOEXEC 成功回新 fd");
+
+        fresh(c);
+        net_reset();
+        g_restart_rc = 0;
+        g_net_handle = 144;
+        r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+        ck(r == 3, "accept 地址失败前置：fd 3");
+        net_reset();
+        g_net_handle = 145;
+        g_from_budget = 0;
+        r = sock_run(c, T_NR_ACCEPT, 3UL, sa, lenp, 0UL, 0UL, 0UL);
+        ck(r == -T_EFAULT, "accept 读不回对端地址回 -EFAULT（新 fd 已退掉）");
+        g_from_budget = -1;
+        net_reset();
+        g_net_handle = 146;
+        r = sock_run(c, T_NR_ACCEPT, 3UL, 0UL, 0UL, 0UL, 0UL, 0UL);
+        ck(r == 4, "accept 地址失败后新 fd 已退掉，下一次仍拿 fd 4");
+
+        net_reset();
+        g_net_handle = 147;
+        g_to_budget = 2;
+        r = sock_run(c, T_NR_ACCEPT, 3UL, sa, lenp, 0UL, 0UL, 0UL);
+        ck(r == -T_EFAULT, "accept 写不回对端地址回 -EFAULT（新 fd 已退掉）");
+        g_to_budget = -1;
+    }
+
+    /* ---- recvfrom：无地址走 RECV、非阻塞直回、阻塞重放、其他错误直回 ---- */
+    {
+        fresh(c);
+        net_reset();
+        g_restart_rc = 0;
+        g_net_handle = 151;
+        r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_DGRAM, 0UL, 0UL, 0UL, 0UL);
+        ck(r == 3, "recvfrom 边界前置：fd 3");
+
+        net_reset();
+        g_net_bytes = 5;
+        r = sock_run(c, T_NR_RECVFROM, 3UL, iop, 8UL, 0UL, 0UL, 0UL);
+        ck(r == 5, "recvfrom 不带地址回收到的字节数");
+        ck_u(g_net_opn[ARKRTOS_NET_SUB_RECV], 1u,
+             "不带地址的 recvfrom 走 RECV 而不是 RECVFROM");
+
+        net_reset();
+        g_net_rc = ARKRTOS_NET_ECONNRESET;
+        r = sock_run(c, T_NR_RECVFROM, 3UL, iop, 8UL, 0UL, 0UL, 0UL);
+        ck(r == -T_ECONNRESET, "recvfrom 的其他错误原样交回");
+        g_net_rc = 0;
+
+        net_reset();
+        g_net_rc = ARKRTOS_NET_EWOULDBLOCK;
+        g_block_calls = 0;
+        r = sock_run(c, T_NR_RECVFROM, 3UL, iop, 8UL, T_MSG_DONTWAIT, 0UL, 0UL);
+        ck(r == -T_EAGAIN, "MSG_DONTWAIT 的 recvfrom 遇到没数据立刻回 -EAGAIN");
+        ck(g_block_calls == 0, "MSG_DONTWAIT 的 recvfrom 不睡");
+        g_net_rc = 0;
+
+        net_reset();
+        g_net_rc = ARKRTOS_NET_EWOULDBLOCK;
+        g_block_calls = 0;
+        (void)call6(c, T_NR_RECVFROM, 3UL, iop, 8UL, 0UL, 0UL, 0UL);
+        ck_pending(c, "阻塞 recvfrom 遇到没数据登记重放");
+        ck(g_block_calls == 1, "阻塞 recvfrom 重放时睡一个时间片");
+        g_net_bytes = 3;
+        g_net_rc = 0;
+        (void)call6(c, T_NR_RECVFROM, 0UL, 0UL, 0UL, 0UL, 0UL, 0UL);
+        ck_ret(c, 3, "阻塞 recvfrom 重放后拿到数据");
+
+        fresh(c);
+        net_reset();
+        g_restart_rc = 0;
+        g_net_handle = 152;
+        r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_DGRAM | T_SOCK_NONBLOCK,
+                     0UL, 0UL, 0UL, 0UL);
+        ck(r == 3, "非阻塞 recvfrom 前置：fd 3");
+        net_reset();
+        g_net_rc = ARKRTOS_NET_EWOULDBLOCK;
+        g_block_calls = 0;
+        r = sock_run(c, T_NR_RECVFROM, 3UL, iop, 8UL, 0UL, 0UL, 0UL);
+        ck(r == -T_EAGAIN, "非阻塞 recvfrom 遇到没数据立刻回 -EAGAIN");
+        ck(g_block_calls == 0, "非阻塞 recvfrom 不睡");
+    }
+
+    /* ---- write 落在管道读端：-EBADF ---- */
+    {
+        fresh(c);
+        net_reset();
+        (void)call(c, T_NR_PIPE2, u_ptr(T_PIPE_OFF), 0UL, 0UL, 0UL);
+        u_get(T_PIPE_OFF, fds, 8u);
+        u_put_str(T_IO_OFF, "x");
+        (void)call(c, T_NR_WRITE, (unsigned long)fds[0], iop, 1UL, 0UL);
+        ck_ret(c, -T_EBADF, "往管道读端写回 -EBADF");
+    }
+
+    /* 收尾：把挂着的登记和端口能力恢复成默认 */
+    (void)arkrtos_linux_abi_on_task_exit(7);
+    g_restart_rc = -1;
+    g_block_calls = 0;
+}
+#endif /* ARKRTOS_USE_LINUX_SOCKET == 1 */
 
 int main(void)
 {
@@ -3170,6 +4368,9 @@ int main(void)
 #endif
 #if (ARKRTOS_USE_LINUX_SELECT == 1)
     t_pselect6(&c);
+#endif
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+    t_socket(&c);
 #endif
 #if (ARKRTOS_USE_PAGING_DEMAND == 1)
     t_mapfixed(&c);

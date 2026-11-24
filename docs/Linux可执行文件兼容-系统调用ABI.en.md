@@ -40,7 +40,7 @@ a purely Linux-ABI static binary with its own `_start`):
 **"A static program runs" is not "Linux is supported".** Section 3 lists what is
 explicitly unsupported.
 
-## 1 Supported syscalls (29; 28 measured on hardware, 1 table-and-argument only)
+## 1 Supported syscalls (42; 28 measured on QEMU, 13 socket numbers host-tier only, 1 table-and-argument only)
 
 Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 
@@ -75,6 +75,11 @@ Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 | 260 | `wait4` | only `options 0/WNOHANG`; **without `WNOHANG` it really blocks** (restartable syscall, section 8.1), never invents a status, the bookkeeping entry is consumed on reap (section 8) | `wait4 returned child pid -> 12 ok` / `WEXITSTATUS == 42 -> 42 ok` / `wait4(child) again == -ECHILD -> -10 ok` / `blocking wait4 blocked >= 40 ms -> 1 ok` |
 | 226 | `mprotect` | **real page-level write protection** (`ARKRTOS_USE_PAGING_MPROTECT`, section 8.6): flips the `WE` bit at 4 KB granularity, a violating store kills the task with SIGSEGV; `PROT_EXEC` / `PROT_NONE` are recorded but not enforced; with the switch off it falls back to "validate, return 0" | `mprotect RO == 0 -> 0 ok` / `sibling 4 KB half of the same pair stays writable -> 13107 ok` / `mprotect violation reports SIGSEGV status -> 11 ok` (section 8.6, 11 checks) |
 | 227 | `msync` | writes back only this process's "writable shared file mapping" bookkeeping; a hit inside the heap window syncs, a miss inside it returns 0, outside it `-ENOMEM` (`ARKRTOS_USE_PAGING_FILEMAP`, section 8.5) | `filemap msync rc -> 0 ok` / `filemap private msync rc (no writeback) -> 0 ok` / `filemap shared write persisted, private write not (bits=31) -> 31 ok` |
+
+The socket family (`198-210`, `242`, 13 numbers) is described in section 8.9: it is
+implemented in the translation layer and covered by 581 host assertions, but the **QEMU
+fixture has no socket section yet**, so it is not counted among the 28 numbers with QEMU
+readouts.
 
 Unknown numbers return `-ENOSYS` (38) and are counted. Nothing is guessed.
 
@@ -982,6 +987,36 @@ they would have to be rewritten. Putting select and a future socket layer behind
 switch would turn "zero footprint when off" into "half the feature when off".
 `ARKRTOS_USE_LINUX_SELECT` depends only on `ARKRTOS_USE_LINUX_ABI`.
 
+### 8.9 socket (U-23): host-tier translation layer (2026-11-24, 581 host checks, **no QEMU readout**)
+
+13 numbers: `socket`(198), `bind`(200), `listen`(201), `accept`(202), `connect`(203),
+`getsockname`(204), `getpeername`(205), `sendto`(206), `recvfrom`(207), `setsockopt`(208),
+`getsockopt`(209), `shutdown`(210), `accept4`(242). The older `read`/`write`/`close`
+dispatch on the fd kind (the same fd table holds files, pipes and sockets).
+
+| Semantics | Implementation |
+|---|---|
+| handle | the fd slot carries `kind == socket` plus the kernel net handle; sockets share one table with files and pipes |
+| `bind` / `connect` | address copied from the user `sockaddr_in`; family must be `AF_INET` (else `-EAFNOSUPPORT`), `alen < 8` -> `-EINVAL`, copy failure -> `-EFAULT` |
+| `accept` / `accept4` | two-step: `step=1` takes the result and aux handle, `step=2` writes the address; a failed address write **releases the just-taken fd**. `accept4` honours `SOCK_NONBLOCK` / `SOCK_CLOEXEC` |
+| `getsockname` / `getpeername` | after the name query, the 16-byte `sockaddr_in` and `addrlen` are written only when asked; `r[1]==0` returns early and **never touches the user `addrlen`** |
+| `sendto` / `recvfrom` | only `r[4]!=0` takes the address form, otherwise it degrades to `SEND`/`RECV`; `recvfrom` length `>0xFFFF` -> `-EMSGSIZE`, `-ECONNRESET` returned directly |
+| `setsockopt` / `getsockopt` | under `SOL_SOCKET` it translates `SO_REUSEADDR`(2), `SO_SNDBUF`(7), `SO_RCVBUF`(8), `SO_ERROR`(4); `SO_TYPE`(3), `SO_DOMAIN`(39) and `SO_ERROR` are answered locally; writing `SO_ERROR` -> `-EINVAL`; non-`SOL_SOCKET` or unknown opt -> `-ENOPROTOOPT`; unreadable value/length -> `-EFAULT`/`-EINVAL` |
+| blocking | a pending kernel result becomes `-EAGAIN` under `O_NONBLOCK`/`MSG_DONTWAIT`, otherwise the call is replayed through `arkrtos_port_svc_restart()`; if replay is unavailable it returns `-EAGAIN` **without sleeping** |
+| identity | `lx_sock_me_ok` checks the task identity before the fd: `task_id==0` yields `-ENOSYS` for every entry and **issues no net request at all** |
+
+**Host-tier only, stated plainly.** The sixth Linux ABI coverage tier `linuxabisocket`
+(`tools/coverage_gate.py`) runs the socket section of `test_linux_abi_host.c`: 98.73% on that
+tier alone, 98.48% union across six tiers (baseline 97.96%), **581 checks** green. The
+**QEMU eighth tier does not exist yet**: `tools/fork_gate.py` has no socket tier and
+`example/qemu_loongarch64/elf/linux_fork.c` has no socket section. The honest reading is
+"full host coverage plus LA64 board compile", not "QEMU run".
+
+**Build tier with lwIP and no NIC.** `example/qemu_loongarch64/Makefile` gained
+`ARK_LWIP_ON := $(findstring ARKRTOS_USE_LWIP=1,$(EXTRA_CFLAGS))`: with lwIP on and
+`ARKRTOS_USE_NET_VIRTIO` off it compiles only `$(LWIP_SRCS)` (no `drvnet.c`/`net_demo.c`),
+and pushes `ARKRTOS_USE_LINUX_SOCKET=1` together with lwIP into `LXFORK_DEFS`.
+
 ## 9 Switch and zero footprint
 
 `ARKRTOS_USE_LINUX_ABI` (features header + Kconfig), default **0**, and
@@ -1039,6 +1074,12 @@ number 72 falls back to `-ENOSYS`; with it on the evidence is the **122 readouts
 of the seventh tier** (15 of them select) plus the 327 host checks of the select
 profile.
 
+`ARKRTOS_USE_LINUX_SOCKET` (section 8.9) is a further switch, default **0**,
+`depends on ARKRTOS_USE_LINUX_ABI` with an `#error` guard; with it off all `lx_sock_*`
+code and the socket dispatch in the fd table are not compiled and `198`-`210`/`242` fall
+back to `-ENOSYS`; with it on the measured readout is the host socket tier's **581 checks**
+(98.73% on that tier, 98.48% union), while **the QEMU eighth tier is not in place yet**.
+
 `MAP_FIXED` (section 8.7) is **not a switch of its own**: it exists when
 `ARKRTOS_USE_PAGING_DEMAND=1` (per-pair entry installation is what makes
 "discard this range" meaningful). With `DEMAND=0`, `mmap(MAP_FIXED)` honestly
@@ -1059,6 +1100,13 @@ abi-split-la64, abi-split-rv32, build, qemu-readout (14 Linux checks + PASS + ex
 14 pipe checks + exit 55, 31 signal checks + PASS + exit 138, the unrelated demos
 still intact), and parser-selfcheck (eight deliberately broken logs must each be
 rejected).
+
+The socket layer has host gates only: the sixth Linux ABI coverage tier `linuxabisocket`
+in `tools/coverage_gate.py` (with `-DARKRTOS_USE_LINUX_SOCKET=1 -DARKRTOS_USE_LWIP=1` and
+`-Wl,--wrap=arkrtos_port_svc_exec_frame`) runs `test_linux_abi_host.c` with 581 checks green,
+98.73% on the tier and 98.48% union (baseline 97.96%); `tools/ci_gate.py`'s `linux-abi-host`
+item already includes it. **`tools/fork_gate.py` has no socket tier and the QEMU fixture has
+no socket section**, recorded as an open item.
 
 The fork tier has its own gate, `tools/fork_gate.py` (invoked as `fork` from
 `ci_gate`, **50 items**; it runs the fork, fork+COW, fork+COW+SHM,

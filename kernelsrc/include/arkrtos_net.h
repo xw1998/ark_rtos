@@ -58,6 +58,21 @@ int32 arkrtos_net_svc(void *p_svc_ctx);
 */
 void arkrtos_net_release_task(int32 task_id);
 
+#if (defined(ARKRTOS_USE_LINUX_SOCKET) && (ARKRTOS_USE_LINUX_SOCKET == 1))
+/**
+* @brief 内核内的网络调用口（Linux ABI 层用，U-23）。
+* @details 与 arkrtos_net_svc 同一条请求状态机，区别只在参数块来自内核栈：
+*          不需要用户指针校验。返回约定与 SVC 完全一致，包括
+*          ARKRTOS_NET_EPENDING（请求已登记，稍后用同样的参数再问）与
+*          ARKRTOS_NET_EBUSY（别人的请求在飞）。
+* @param op 子命令号（ARKRTOS_NET_SUB_*）
+* @param a1..a5 子命令参数，含义见 arkrtos_net_abi.h
+* @return 见 arkrtos_net_abi.h
+*/
+int32 arkrtos_net_call(uint32 op, uint32 a1, uint32 a2, uint32 a3,
+                       uint32 a4, uint32 a5);
+#endif
+
 #if defined(ARKRTOS_NET_HOST_TEST)
 /** @brief 宿主用例专用：只承接队列里的一条消息并执行（生产构建里不存在）。 */
 void   arkrtos_net_host_step(void);

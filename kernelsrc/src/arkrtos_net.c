@@ -935,29 +935,16 @@ static uint8 arkrtos_net_same_args(const arkrtos_svc_arg_t *p)
     return 1u;
 }
 
-int32 arkrtos_net_svc(void *p_svc_ctx)
+/* 请求状态机本体。与 SVC 入口分开的唯一理由是「参数块从哪来」：SVC 入口
+ * 拿到的是用户内存里的块（必须先做指针与窗口校验），而 Linux ABI 层是在
+ * 内核栈上拼同一形状的块直接进来（见 arkrtos_net_call）。校验归入口，
+ * 状态机归这里 —— 两者分开之后，「一次请求在飞」的全部规则仍然只有一份。 */
+static int32 arkrtos_net_submit(const arkrtos_svc_arg_t *p)
 {
-    arkrtos_svc_arg_t *p;
-    unsigned long a0;
     uint32  op;
     uint32  msg;
     uint32  i;
     int32   r;
-
-    /* a0 里是参数块指针。先落到变量再转换：直接对函数返回值强转指针会
-     * 触发 -Wbad-function-cast，而这里也没有别的东西可校验。 */
-    a0 = ARKRTOS_SVC_ARG(p_svc_ctx, 0);
-    p  = (arkrtos_svc_arg_t *)a0;
-#if (ARKRTOS_SVC_WIDE_ARGS == 1)
-    if(arkrtos_kernel_svc_wide_ok(p) == 0u)
-    {
-        return ARKRTOS_NET_EINVAL;
-    }
-#endif
-    if(arkrtos_kernel_svc_args_ok(p, (uint32)ARKRTOS_SVC_ARG_BYTES(ARKRTOS_NET_ARG_WORDS * 4u)) == 0u)
-    {
-        return ARKRTOS_NET_EINVAL;
-    }
 
     op = (uint32)ARKRTOS_SVC_SUB_OF(p[0]);
 
@@ -1059,6 +1046,53 @@ int32 arkrtos_net_svc(void *p_svc_ctx)
 
     return ARKRTOS_NET_EPENDING;
 }
+
+int32 arkrtos_net_svc(void *p_svc_ctx)
+{
+    arkrtos_svc_arg_t *p;
+    unsigned long a0;
+
+    /* a0 里是参数块指针。先落到变量再转换：直接对函数返回值强转指针会
+     * 触发 -Wbad-function-cast，而这里也没有别的东西可校验。 */
+    a0 = ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    p  = (arkrtos_svc_arg_t *)a0;
+#if (ARKRTOS_SVC_WIDE_ARGS == 1)
+    if(arkrtos_kernel_svc_wide_ok(p) == 0u)
+    {
+        return ARKRTOS_NET_EINVAL;
+    }
+#endif
+    if(arkrtos_kernel_svc_args_ok(p, (uint32)ARKRTOS_SVC_ARG_BYTES(ARKRTOS_NET_ARG_WORDS * 4u)) == 0u)
+    {
+        return ARKRTOS_NET_EINVAL;
+    }
+    return arkrtos_net_submit(p);
+}
+
+#if (defined(ARKRTOS_USE_LINUX_SOCKET) && (ARKRTOS_USE_LINUX_SOCKET == 1))
+/* 内核内的调用口：Linux ABI 层（U-23）在自己的 SVC 处理程序里用它，而不是
+ * 拿一个寄存器上下文去走 arkrtos_net_svc。参数块在**内核栈**上拼，所以既
+ * 不需要用户指针校验，也不会因为宽参数档的字宽标记而误判。语义与一次真正
+ * 的网络 SVC 完全一致：登记请求 / 取回结果 / EPENDING / EBUSY 一个都不少。 */
+int32 arkrtos_net_call(uint32 op, uint32 a1, uint32 a2, uint32 a3,
+                       uint32 a4, uint32 a5)
+{
+    arkrtos_svc_arg_t p[ARKRTOS_NET_ARG_WORDS];
+    uint32 i;
+
+    for(i = 0u; i < (uint32)ARKRTOS_NET_ARG_WORDS; i++)
+    {
+        p[i] = (arkrtos_svc_arg_t)0u;
+    }
+    p[0] = (arkrtos_svc_arg_t)ARKRTOS_SVC_SUB(op);
+    p[1] = (arkrtos_svc_arg_t)a1;
+    p[2] = (arkrtos_svc_arg_t)a2;
+    p[3] = (arkrtos_svc_arg_t)a3;
+    p[4] = (arkrtos_svc_arg_t)a4;
+    p[5] = (arkrtos_svc_arg_t)a5;
+    return arkrtos_net_submit(p);
+}
+#endif /* ARKRTOS_USE_LINUX_SOCKET */
 
 /* 1 = a live service task (entry == arkrtos_net_task) sits in the task table.
  * Only the rebuild path asks, so a second service task is never stacked on
@@ -1194,6 +1228,21 @@ int32 arkrtos_net_svc(void *p_svc_ctx)
      * App gets "not supported" instead of an empty success. */
     return ARKRTOS_NET_ENOTSUP;
 }
+
+#if (defined(ARKRTOS_USE_LINUX_SOCKET) && (ARKRTOS_USE_LINUX_SOCKET == 1))
+int32 arkrtos_net_call(uint32 op, uint32 a1, uint32 a2, uint32 a3,
+                       uint32 a4, uint32 a5)
+{
+    (void)op;
+    (void)a1;
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+    /* 没有协议栈就没有服务：Linux ABI 层据此回 -ENOSYS，而不是编一个 0。 */
+    return ARKRTOS_NET_ENOTSUP;
+}
+#endif /* ARKRTOS_USE_LINUX_SOCKET */
 
 void arkrtos_net_release_task(int32 task_id)
 {

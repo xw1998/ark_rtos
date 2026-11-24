@@ -36,7 +36,7 @@
 - [kernelsrc/include/arkrtos_mini.h](#kernelsrcincludearkrtos_minih)（20 项）
 - [kernelsrc/include/arkrtos_modld.h](#kernelsrcincludearkrtos_modldh)（8 项）
 - [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（23 项）
-- [kernelsrc/include/arkrtos_net.h](#kernelsrcincludearkrtos_neth)（12 项）
+- [kernelsrc/include/arkrtos_net.h](#kernelsrcincludearkrtos_neth)（13 项）
 - [kernelsrc/include/arkrtos_net_dev.h](#kernelsrcincludearkrtos_net_devh)（7 项）
 - [kernelsrc/include/arkrtos_ptable.h](#kernelsrcincludearkrtos_ptableh)（23 项）
 - [kernelsrc/include/arkrtos_rt.h](#kernelsrcincludearkrtos_rth)（14 项）
@@ -6311,6 +6311,21 @@ void arkrtos_net_release_task(int32 task_id);
 **归还某个任务名下的所有 socket。任务被卸载/故障回收时调用，**
 否则泄漏的是内核侧 socket 槽 —— 一个 App 反复崩溃会把它们耗干。
 - `task_id`：目标任务号（1 起）
+
+### `int32 arkrtos_net_call(uint32 op, uint32 a1, uint32 a2, uint32 a3, uin`
+
+```c
+int32 arkrtos_net_call(uint32 op, uint32 a1, uint32 a2, uint32 a3, uint32 a4, uint32 a5);
+```
+
+**内核内的网络调用口（Linux ABI 层用，U-23）。**
+与 arkrtos_net_svc 同一条请求状态机，区别只在参数块来自内核栈：
+不需要用户指针校验。返回约定与 SVC 完全一致，包括
+ARKRTOS_NET_EPENDING（请求已登记，稍后用同样的参数再问）与
+ARKRTOS_NET_EBUSY（别人的请求在飞）。
+- `op`：子命令号（ARKRTOS_NET_SUB_*）
+- `a1..a5`：子命令参数，含义见 arkrtos_net_abi.h
+**返回**：见 arkrtos_net_abi.h
 
 ### `void   arkrtos_net_host_step(void);`
 

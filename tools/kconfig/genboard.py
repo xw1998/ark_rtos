@@ -303,7 +303,11 @@ BLOCKS = [
         ("override", "ARKRTOS_USE_PROCFS", "bool"),
         ("override", "ARKRTOS_USE_MINIAPP", "bool"),
         ("override", "ARKRTOS_USE_POSIX", "bool"),
-        ("override", "ARKRTOS_USE_LWIP", "bool"),
+        # LWIP 用 guard 而不是 override：Kconfig.net 的 help 明说它「默认关、
+        # 由项目用 -D 打开」（协议栈约 2.5 MB 源码、数万字节静态 RAM，不该
+        # 常驻默认镜像）。写成 override 会让 -DARKRTOS_USE_LWIP=1 被板级头的
+        # #undef 静默吃掉。不给 -D 时值仍是 0，默认镜像逐字节不变。2026-11-24
+        ("guard", "ARKRTOS_USE_LWIP", "bool"),
         ("override", "ARKRTOS_USE_SOFTBUS", "bool"),
         ("override", "ARKRTOS_USE_SHELL", "bool"),
         ("override", "ARKRTOS_USE_APPPACK", "bool"),
