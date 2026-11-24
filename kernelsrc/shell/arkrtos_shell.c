@@ -317,6 +317,10 @@ static int register_kernel_commands(void)
     g_cmd_table[idx++] = ARK_SHELL_CMD("audit", cmd_audit,
         "Structure self-audit: partition / slots / tasks vs their invariants", 1);
 #endif /* ARKRTOS_USE_AUDIT */
+#if (ARKRTOS_USE_AUDIT_LOG == 1)
+    g_cmd_table[idx++] = ARK_SHELL_CMD("auditlog", cmd_auditlog,
+        "Persistent audit trail: auditlog | auditlog dump [n] (oldest first)", 3);
+#endif /* ARKRTOS_USE_AUDIT_LOG */
 
 #if ARKRTOS_USE_KERNEL_GUARD
     g_cmd_table[idx++] = ARK_SHELL_CMD("guard", cmd_guard,

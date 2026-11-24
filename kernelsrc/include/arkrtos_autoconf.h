@@ -25,6 +25,9 @@
 #ifndef ARKRTOS_APP_MAX_TASKS
 #define ARKRTOS_APP_MAX_TASKS (8)
 #endif
+#ifndef ARKRTOS_AUDIT_LOG_RECORDS
+#define ARKRTOS_AUDIT_LOG_RECORDS (64)
+#endif
 #ifndef ARKRTOS_AUTOMOUNT_NOR
 #define ARKRTOS_AUTOMOUNT_NOR 0
 #endif
@@ -189,6 +192,9 @@
 #endif
 #ifndef ARKRTOS_USE_AUDIT
 #define ARKRTOS_USE_AUDIT 1
+#endif
+#ifndef ARKRTOS_USE_AUDIT_LOG
+#define ARKRTOS_USE_AUDIT_LOG 0
 #endif
 #ifndef ARKRTOS_USE_BLK
 #define ARKRTOS_USE_BLK 1

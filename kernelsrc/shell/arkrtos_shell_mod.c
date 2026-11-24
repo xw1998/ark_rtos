@@ -8,6 +8,9 @@
 */
 
 #include "arkrtos_shell_internal.h"
+#if (ARKRTOS_USE_AUDIT_LOG == 1)
+#include "arkrtos_audit_log.h"
+#endif
 
 #if (SHELL_ENABLE == 1)
 
@@ -33,6 +36,7 @@ static int shell_exec_file(const char *path, int argc, char *argv[])
     int32 rc;
     uint32 waited = 0u;
     uint32 space = 0u;
+    uint32 task_id = 0u;
 
     rc = arkrtos_elf_exec_space(path, argc, argv, &space);
     if (rc != ARKRTOS_ELF_OK)
@@ -47,6 +51,7 @@ static int shell_exec_file(const char *path, int argc, char *argv[])
 
     if (arkrtos_elf_info_space(space, &info) == 0)
     {
+        task_id = (uint32)info.task;
         /* entry/sp 是 unsigned long：宽 VA 档的窗口基址在 0x1_2000_0000 以上，
          * 用 %08X 会把它截成低 32 位（实测真值是 0x1200008E0，打出来却是
          * 0x200008E0）——读数是假的，不是装载器装错了。这里按原生字宽打。*/
@@ -56,6 +61,14 @@ static int shell_exec_file(const char *path, int argc, char *argv[])
                          (unsigned long)info.entry, (unsigned long)info.sp,
                          (unsigned)info.argc, (int)info.task, (unsigned)space);
     }
+
+#if (ARKRTOS_USE_AUDIT_LOG == 1)
+    /* "This image ran." Only the launch site knows the task id, and a trail
+     * that names a guessed task is worse than one that names none, so 0 means
+     * "the info read failed" rather than a plausible-looking number. */
+    (void)arkrtos_audit_log_record(ARKRTOS_AUDIT_EV_EXEC_START,
+                                   (uint32)arkrtos_current_task_id, task_id);
+#endif
 
     /* 等它跑完。必须让出 CPU 而不是忙等：本函数在 shell 任务里，忙等期间
      * 同优先级上下的程序任务拿不到时间片的概率全看调度器，读数会飘。
@@ -87,6 +100,11 @@ static int shell_exec_file(const char *path, int argc, char *argv[])
             ark_shell_printf("[ELF] %s: finished after %u ms (space %u, exit code %d)\r\n",
                              path, (unsigned)waited, (unsigned)space,
                              (int)fin.exit_code);
+#if (ARKRTOS_USE_AUDIT_LOG == 1)
+            (void)arkrtos_audit_log_record(ARKRTOS_AUDIT_EV_EXEC_EXIT,
+                                           (uint32)arkrtos_current_task_id,
+                                           (uint32)fin.exit_code);
+#endif
             return 0;
         }
     }

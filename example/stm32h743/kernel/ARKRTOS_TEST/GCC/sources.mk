@@ -21,6 +21,7 @@ SRCS := \
   kernelsrc/src/arkrtos_blk.c \
   kernelsrc/src/arkrtos_fs.c \
   kernelsrc/src/arkrtos_audit.c \
+  kernelsrc/src/arkrtos_audit_log.c \
   kernelsrc/src/arkrtos_guard.c \
   kernelsrc/src/arkrtos_crash.c \
   kernelsrc/src/arkrtos_sign.c \

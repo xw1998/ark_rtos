@@ -5843,6 +5843,27 @@ def check_sec_host():
        % " | ".join(lines))
 
 
+def check_auditlog():
+    """Persistent audit ring (SEC-G05): the trail must survive a remount.
+
+    tools/audit_log_gate.py holds the five groups: the switch defaults to OFF and
+    the three config files must agree; the OFF object must export no symbol; the
+    seven wired files (module + fs / installer / three shell files / linux_abi)
+    must compile with the switch ON, because every wiring line sits inside an
+    #if that the normal build never sees; the host cases must pass in both
+    builds; and the judge itself must reject a bogus output.
+
+    What this does NOT prove: that a real board keeps the ring across a power
+    cycle. The host volume is a RAM array, and QEMU's NOR is RAM too - only real
+    flash can answer that. A missing compiler is a FAIL, not a skip.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "audit_log_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "AUDIT-LOG-GATE OK" in txt:
+        ok("auditlog", "OFF default + zero-symbol OFF object + 7 ON-path files + host cases")
+    else:
+        fail("auditlog", txt[-300:])
+
 def check_coverage_host():
     """Line coverage of the modules the host tests actually link.
 
@@ -6030,6 +6051,7 @@ CHECK_TABLE = (
     ("guard-host", check_guard_host),
     ("rt-host", check_rt_host),
     ("sec-host", check_sec_host),
+    ("auditlog", check_auditlog),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),
     ("analyzer", check_analyzer),

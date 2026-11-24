@@ -10,6 +10,7 @@
 - [kernelsrc/include/arkrtos_apppack.h](#kernelsrcincludearkrtos_apppackh)（9 项）
 - [kernelsrc/include/arkrtos_apprun.h](#kernelsrcincludearkrtos_apprunh)（6 项）
 - [kernelsrc/include/arkrtos_audit.h](#kernelsrcincludearkrtos_audith)（7 项）
+- [kernelsrc/include/arkrtos_audit_log.h](#kernelsrcincludearkrtos_audit_logh)（8 项）
 - [kernelsrc/include/arkrtos_blk.h](#kernelsrcincludearkrtos_blkh)（13 项）
 - [kernelsrc/include/arkrtos_cfg.h](#kernelsrcincludearkrtos_cfgh)（1 项）
 - [kernelsrc/include/arkrtos_crash.h](#kernelsrcincludearkrtos_crashh)（22 项）
@@ -21,7 +22,7 @@
 - [kernelsrc/include/arkrtos_fdt_overlay.h](#kernelsrcincludearkrtos_fdt_overlayh)（2 项）
 - [kernelsrc/include/arkrtos_fdt_res.h](#kernelsrcincludearkrtos_fdt_resh)（4 项）
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
-- [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
+- [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（30 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
 - [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（92 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
@@ -1963,6 +1964,94 @@ const char *arkrtos_audit_name(uint32 bit);
 - `bit`：A single ARKRTOS_AUDIT_x bit.
 **返回**：Static string, or NULL when @p bit is not a defined audit bit.
 
+## kernelsrc/include/arkrtos_audit_log.h
+
+**Persistent audit trail (SEC-G05): what happened, in order, on the volume**
+The crash journal answers "how many times did this slot fault"; the
+fault ring answers "what happened just before the reset" and is
+cleared by design on every boot. Neither answers the question an
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**What the trail knows about itself, for the console and the tests.**
+
+### `int32 arkrtos_audit_log_init(void);`
+
+```c
+int32 arkrtos_audit_log_init(void);
+```
+
+**Open (or create) the trail on the mounted volume and recover its tail.**
+Idempotent. Called on demand by every entry point, so a system whose
+volume is mounted later than boot still gets a trail; it also means
+the console can retry after `umount`/`mount` without a reboot.
+On success one ARKRTOS_AUDIT_EV_LOG_OPEN record is appended with the
+number of records recovered, so an empty trail and a trail that lost
+its tail do not look the same from the console.
+**返回**：ARKRTOS_AUDIT_LOG_OK, ERR_NOMOUNT when no volume is mounted, or
+ERR_WRITE when the file exists but cannot be read/created.
+
+### `int32 arkrtos_audit_log_record(uint32 kind, uint32 owner, uint32 code)`
+
+```c
+int32 arkrtos_audit_log_record(uint32 kind, uint32 owner, uint32 code);
+```
+
+**Append one record.**
+- `kind`：ARKRTOS_AUDIT_EV_x; an unknown value is ERR_PARAM (the trail
+does not accept "some other event" - it would be unreadable).
+- `owner`：task / owner id, 0 for kernel or console.
+- `code`：kind-specific number.
+**返回**：ARKRTOS_AUDIT_LOG_OK, ERR_NOMOUNT, ERR_BUSY or ERR_WRITE. A failure
+increments `dropped` (and `busy` for the busy case) so the console
+reports the loss instead of showing a gap in `seq` without a reason.
+
+### `int32 arkrtos_audit_log_read(uint32 index, arkrtos_audit_rec_t *p_out)`
+
+```c
+int32 arkrtos_audit_log_read(uint32 index, arkrtos_audit_rec_t *p_out);
+```
+
+**Read one record by age: 0 = oldest.**
+**返回**：OK, ERR_EMPTY past the newest, ERR_CRC when the slot on disk fails its
+own crc (the caller must not read `*p_out` as content then).
+
+### `void arkrtos_audit_log_stats(arkrtos_audit_log_stats_t *p_out);`
+
+```c
+void arkrtos_audit_log_stats(arkrtos_audit_log_stats_t *p_out);
+```
+
+**Fill @p p_out with the current counters (no I/O beyond one open).**
+
+### `uint32 arkrtos_audit_log_cap(void);`
+
+```c
+uint32 arkrtos_audit_log_cap(void);
+```
+
+**Configured ring depth, so a caller can size a dump before reading.**
+
+### `const char *arkrtos_audit_log_path(void);`
+
+```c
+const char *arkrtos_audit_log_path(void);
+```
+
+**File the trail lives in (compile-time; never built from user input).**
+
+### `const char *arkrtos_audit_kind_name(uint32 kind);`
+
+```c
+const char *arkrtos_audit_kind_name(uint32 kind);
+```
+
+**Stable name of a kind, or "unknown" for a value this build has no name for.**
+
 ## kernelsrc/include/arkrtos_blk.h
 
 **Ark RTOS block device registry - one handle per non-volatile backend**
@@ -3262,6 +3351,21 @@ int32 arkrtos_fs_read_at(const char *path, uint8 *buf, uint32 len, uint32 off, u
 **Read len bytes starting at byte offset off (random access read).**
 A partial read at end of file returns fewer bytes than len, with that
 number in *out_len - never an error.
+
+### `int32 arkrtos_fs_write_at(const char *path, const uint8 *buf, uint32 l`
+
+```c
+int32 arkrtos_fs_write_at(const char *path, const uint8 *buf, uint32 len, uint32 off);
+```
+
+**Write len bytes at byte offset off (random access write).**
+The file is created when missing and extended when off+len runs
+past the end; bytes outside [off, off+len) are left alone, which
+is the difference from arkrtos_fs_write_file() (that one replaces
+the whole file). This is what a ring buffer on the volume needs:
+one 32-byte record per event instead of rewriting the ring.
+A partial failure is a failure - the caller cannot tell how much
+landed, so it must not treat a non-zero return as "mostly ok".
 
 ### `int32 arkrtos_fs_rename(const char *old_path, const char *new_path);`
 

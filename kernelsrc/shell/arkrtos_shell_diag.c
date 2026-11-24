@@ -606,6 +606,112 @@ int cmd_audit(int argc, char *argv[])
     return 0;
 }
 
+#if (ARKRTOS_USE_AUDIT_LOG == 1)
+/* auditlog: the persistent trail (SEC-G05).
+ *
+ * Two forms on purpose. Bare `auditlog` reads the counters, which is what an
+ * operator checks first: is a volume mounted, how far back does the ring go,
+ * and did this boot lose anything. `auditlog dump [n]` prints the records
+ * themselves, oldest first.
+ *
+ * A slot that fails its own crc is printed as BAD_CRC with no field values.
+ * It really is a half-written record (reset in the middle of an append), and
+ * showing its numbers would be showing whatever the torn bytes happen to say.
+ */
+int cmd_auditlog(int argc, char *argv[])
+{
+    arkrtos_audit_log_stats_t st;
+    uint32 n;
+    uint32 i;
+
+    if(argc >= 2)
+    {
+        if(strcmp(argv[1], "dump") != 0)
+        {
+            sh_out("usage: auditlog [dump [n]]\r\n");
+            return 1;
+        }
+
+        n = 16u;
+        if(argc >= 3)
+        {
+            if((parse_u32(argv[2], &n) != 0) || (n == 0u))
+            {
+                sh_out("auditlog: n must be a positive decimal count\r\n");
+                return 1;
+            }
+        }
+
+        if(arkrtos_audit_log_init() != ARKRTOS_AUDIT_LOG_OK)
+        {
+            sh_out("auditlog: no volume mounted - the trail cannot be read\r\n");
+            return 1;
+        }
+
+        arkrtos_audit_log_stats(&st);
+        if(st.used == 0u)
+        {
+            sh_out("auditlog: the trail holds no readable record yet\r\n");
+            return 0;
+        }
+        if(n > st.used)
+        {
+            n = st.used;
+        }
+
+        for(i = 0u; i < n; i++)
+        {
+            arkrtos_audit_rec_t rec;
+            int32 err = arkrtos_audit_log_read(i, &rec);
+
+            if(err == ARKRTOS_AUDIT_LOG_ERR_CRC)
+            {
+                ark_shell_printf("  [%u] BAD_CRC (torn record; fields withheld)\r\n", i);
+                continue;
+            }
+            if(err != ARKRTOS_AUDIT_LOG_OK)
+            {
+                ark_shell_printf("  [%u] unreadable (%d)\r\n", i, (int)err);
+                continue;
+            }
+            ark_shell_printf("  [%u] seq=%u t=%u kind=%s owner=%u code=%u\r\n",
+                             i, rec.seq, rec.tick,
+                             arkrtos_audit_kind_name(rec.kind),
+                             rec.owner, rec.code);
+        }
+        return 0;
+    }
+
+    arkrtos_audit_log_stats(&st);
+
+    ark_shell_printf("  path=%s cap=%u used=%u wrapped=%u ready=%u\r\n",
+                     arkrtos_audit_log_path(), st.cap, st.used,
+                     st.wrapped, (unsigned)st.ready);
+    ark_shell_printf("  seq=%u..%u dropped=%u busy=%u bad_crc=%u rebuilds=%u opens=%u\r\n",
+                     st.first_seq, st.last_seq, st.dropped, st.busy,
+                     st.bad_crc, st.rebuilds, st.opens);
+
+    if(st.ready == 0u)
+    {
+        sh_out("auditlog: no volume mounted - nothing is being recorded\r\n");
+        return 1;
+    }
+    if(st.dropped != 0u)
+    {
+        sh_out("auditlog: records were LOST this boot (see dropped/busy)\r\n");
+        return 0;
+    }
+    if(st.rebuilds != 0u)
+    {
+        sh_out("auditlog: header was rebuilt from the slots after an unclean stop\r\n");
+        return 0;
+    }
+
+    sh_out("auditlog: ring consistent, no loss recorded this boot\r\n");
+    return 0;
+}
+
+#endif /* ARKRTOS_USE_AUDIT_LOG */
 #endif /* ARKRTOS_USE_AUDIT */
 int cmd_sched(int argc, char *argv[])
 {

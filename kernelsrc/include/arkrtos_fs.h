@@ -174,6 +174,16 @@ int32 arkrtos_fs_list(const char *dir, arkrtos_fs_list_cb_t cb, void *arg);
 int32 arkrtos_fs_read_at(const char *path, uint8 *buf, uint32 len, uint32 off,
                       uint32 *out_len);
 
+/** @brief Write len bytes at byte offset off (random access write).
+ *  @details The file is created when missing and extended when off+len runs
+ *           past the end; bytes outside [off, off+len) are left alone, which
+ *           is the difference from arkrtos_fs_write_file() (that one replaces
+ *           the whole file). This is what a ring buffer on the volume needs:
+ *           one 32-byte record per event instead of rewriting the ring.
+ *           A partial failure is a failure - the caller cannot tell how much
+ *           landed, so it must not treat a non-zero return as "mostly ok". */
+int32 arkrtos_fs_write_at(const char *path, const uint8 *buf, uint32 len, uint32 off);
+
 /** @brief Move/rename one entry. Both paths are inside the volume. */
 int32 arkrtos_fs_rename(const char *old_path, const char *new_path);
 

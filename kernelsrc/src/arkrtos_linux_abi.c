@@ -46,6 +46,9 @@
 #if (ARKRTOS_USE_LINUX_ABI == 1)
 
 #include "arkrtos_linux_abi.h"
+#if (ARKRTOS_USE_AUDIT_LOG == 1)
+#include "arkrtos_audit_log.h"
+#endif
 #include "arkrtos_def.h"
 #include "arkrtos_hal.h"
 #include "arkrtos_task.h"
@@ -3931,6 +3934,20 @@ static int32 lx_munmap(void *p_ctx)
 static void lx_appq_log(const char *what)
 {
     int32 id = arkrtos_current_task_id;
+
+#if (ARKRTOS_USE_AUDIT_LOG == 1)
+    /* Both refusal sites (thread and fork) come through this function, so the
+     * trail cannot end up knowing about only one of them. code carries the
+     * owner: the record layout has no second spare field, and QUOTA_REFUSE's
+     * code field is defined as the owner the limit was enforced on. */
+    {
+        uint32 owner = ((id > 0) && (id <= (int32)ARKRTOS_TASK_MAX_NUM))
+                       ? (uint32)arkrtos_task_table[id - 1].app_owner : 0u;
+
+        (void)arkrtos_audit_log_record(ARKRTOS_AUDIT_EV_QUOTA_REFUSE,
+                                       (uint32)id, owner);
+    }
+#endif
 
     arkrtos_board_puts("[appq] refused ");
     arkrtos_board_puts(what);

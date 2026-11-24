@@ -33,6 +33,9 @@
 #include "arkrtos_partition.h"
 #include "arkrtos_log.h"
 #include "arkrtos_fs.h"
+#if (ARKRTOS_USE_AUDIT_LOG == 1)
+#include "arkrtos_audit_log.h"
+#endif
 
 #if (INSTALLER_ENABLE == 1)
 
@@ -708,7 +711,7 @@ static int32 arkrtos_installer_file_hdr(void)
     return 0;
 }
 
-int32 arkrtos_installer_from_file(const char *path)
+static int32 installer_from_file_body(const char *path)
 {
     uint32 size = 0u;
     uint32 is_dir = 0u;
@@ -841,6 +844,34 @@ int32 arkrtos_installer_test_file_write(uint8 *pdata, int32 len)
     return arkrtos_installer_file_write(&arkrtos_installer_file_obj, pdata, len);
 }
 #endif
+
+/* The acceptance verdict, in one place.
+ *
+ * The body above returns from a dozen different points (bad path, no volume,
+ * bad magic, bad crc, short read, load failure). Wrapping it is what makes
+ * "every refusal is recorded with its reason" true by construction instead of
+ * true until someone adds a new early return.
+ */
+int32 arkrtos_installer_from_file(const char *path)
+{
+    int32 r = installer_from_file_body(path);
+
+#if (ARKRTOS_USE_AUDIT_LOG == 1)
+    if(r == 0)
+    {
+        (void)arkrtos_audit_log_record(ARKRTOS_AUDIT_EV_IMAGE_OK,
+                                       (uint32)arkrtos_current_task_id, 0u);
+    }
+    else
+    {
+        (void)arkrtos_audit_log_record(ARKRTOS_AUDIT_EV_IMAGE_REFUSE,
+                                       (uint32)arkrtos_current_task_id,
+                                       (uint32)r);
+    }
+#endif
+
+    return r;
+}
 
 #else   /* INSTALLER_ENABLE == 0 */
 

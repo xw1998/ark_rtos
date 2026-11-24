@@ -1539,4 +1539,49 @@ config ARKRTOS_USE_IMAGE_CRC_RECHECK
 	  boot).  Off (the default) compiles the recheck out, and the sec item
 	  keeps reporting SKIP with a reason that says so.
 
+config ARKRTOS_USE_AUDIT_LOG
+	bool "Persistent audit log ring on a mounted volume (SEC-G05)"
+	default n
+	depends on ARKRTOS_USE_FS
+	help
+	  Turns on the 8-word (32 byte) audit ring that lives in a file on
+	  the mounted filesystem, so that events survive a reboot on real
+	  flash.  Events: log open, root mount, image accepted / refused,
+	  exec start / exit, auth failure / lockout, quota refuse.
+	  Every record carries a sequence number, a tick, the event kind,
+	  an owner id, a code and a crc32; a torn tail record is detected
+	  and skipped instead of being reported as if it were a real event.
+
+	  Boundaries, by design:
+	    - task context only.  The panic path does not touch the
+	      filesystem; crash counting is arkrtos_crash.h's job.
+	    - single writer.  A concurrent record() call returns BUSY and
+	      increments the dropped counter; nothing is silently merged.
+	    - no key material.  Anyone who can write the volume can delete
+	      or forge records that still pass the crc.  Detecting that
+	      needs SEC-G10 (symmetric signature) or an append-only medium.
+
+	  Cost: 32 + N*32 bytes of volume for the ring, plus the code.
+	  Off (the default) compiles arkrtos_audit_log.c to nothing.
+
+config ARKRTOS_AUDIT_LOG_RECORDS
+	int "Audit ring capacity, in records"
+	default 64
+	range 8 512
+	depends on ARKRTOS_USE_AUDIT_LOG
+	help
+	  How many records the ring holds before the oldest is overwritten.
+	  Volume cost is 32 + N*32 bytes: 64 records is 2 KiB, 512 is 16 KiB.
+	  The whole ring is scanned but never staged in memory, so a large
+	  value does not cost stack.
+
+config ARKRTOS_AUDIT_LOG_PATH
+	string "Audit log file path"
+	default "/audit.bin"
+	depends on ARKRTOS_USE_AUDIT_LOG
+	help
+	  Mount-relative path of the ring file.  Must be a compile-time
+	  constant; the file is created on first record and extended to
+	  full size immediately, because the ring is addressed by offset.
+
 endmenu

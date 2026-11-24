@@ -21,6 +21,9 @@
 #include <stdint.h>   /* uintptr_t: see cfg->context below */
 
 #include "arkrtos_fs.h"
+#if (ARKRTOS_USE_AUDIT_LOG == 1)
+#include "arkrtos_audit_log.h"
+#endif
 #include "arkrtos_blk.h"
 #include "arkrtos_partition.h"
 
@@ -363,6 +366,15 @@ static int32 fs_mount_with(struct lfs_config *cfg)
 
     g_fs.mounted = 1u;
     g_fs.last_error = 0;
+
+#if (ARKRTOS_USE_AUDIT_LOG == 1)
+    /* One record per successful mount. It lives here rather than in the
+     * caller because mount is the only place that knows the volume is up;
+     * every other path to a volume goes through this function. The call is
+     * one-way at the source level (fs -> audit), and it is compiled out when
+     * the switch is off, so the FS never depends on the trail existing. */
+    (void)arkrtos_audit_log_record(ARKRTOS_AUDIT_EV_ROOT_MOUNT, 0u, 0u);
+#endif
 
 #if (ARKRTOS_USE_MINIAPP == 1) && (ARKRTOS_MINI_READ_VFS == 0)
     /* 卷可用了——这是小程序唯一能起来的时刻：它的代码就放在这个卷里，而内核
@@ -1018,6 +1030,79 @@ int32 arkrtos_fs_read_at(const char *path, uint8 *buf, uint32 len, uint32 off,
     return 0;
 }
 
+int32 arkrtos_fs_write_at(const char *path, const uint8 *buf, uint32 len, uint32 off)
+{
+    struct lfs_file_config fcfg;
+    lfs_file_t              file;
+    lfs_soff_t              pos;
+    int                     err;
+
+    /* "Nothing is mounted" and "you passed rubbish" are different answers: a
+     * caller retrying against a volume that is not up yet would loop forever
+     * on a code that says its own arguments are wrong. */
+    if(g_fs.mounted == 0u)
+    {
+        g_fs.last_error = ARKRTOS_FS_ERR_NOT_MOUNTED;
+        return ARKRTOS_FS_FAIL;
+    }
+
+    if((buf == 0) || (len == 0u) || (fs_check_path(path) != 0))
+    {
+        g_fs.last_error = ARKRTOS_FS_ERR_ARGS;
+        return ARKRTOS_FS_FAIL;
+    }
+
+    /* Same rule as read_at: the one file cache belongs to a stream. */
+    if(g_fs.stream_mode != ARKRTOS_FS_STREAM_NONE)
+    {
+        g_fs.last_error = ARKRTOS_FS_ERR_BUSY;
+        return ARKRTOS_FS_FAIL;
+    }
+
+    fcfg.buffer     = g_fs.file_cache;
+    fcfg.attrs      = 0;
+    fcfg.attr_count = 0;
+
+    /* O_RDWR without O_TRUNC: the whole point is to keep the other records. */
+    err = lfs_file_opencfg(&g_fs.lfs, &file, path,
+                           LFS_O_RDWR | LFS_O_CREAT, &fcfg);
+
+    if(err != 0)
+    {
+        g_fs.last_error = err;
+        return ARKRTOS_FS_FAIL;
+    }
+
+    pos = lfs_file_seek(&g_fs.lfs, &file, (lfs_soff_t)off, LFS_SEEK_SET);
+
+    if(pos < 0)
+    {
+        g_fs.last_error = (int32)pos;
+        (void)lfs_file_close(&g_fs.lfs, &file);
+        return ARKRTOS_FS_FAIL;
+    }
+
+    /* The write count is the only trustworthy report: this littlefs build has
+     * no lfs_file_error() (it was added in 2.6 and removed again), so a short
+     * write is reported as our own SHORT rather than borrowed from littlefs. */
+    if(lfs_file_write(&g_fs.lfs, &file, buf, (lfs_size_t)len) != (lfs_ssize_t)len)
+    {
+        g_fs.last_error = ARKRTOS_FS_ERR_SHORT;
+        (void)lfs_file_close(&g_fs.lfs, &file);
+        return ARKRTOS_FS_FAIL;
+    }
+
+    err = lfs_file_close(&g_fs.lfs, &file);
+
+    if(err != 0)
+    {
+        g_fs.last_error = err;
+        return ARKRTOS_FS_FAIL;
+    }
+
+    return 0;
+}
+
 int32 arkrtos_fs_rename(const char *old_path, const char *new_path)
 {
     int err;
@@ -1341,6 +1426,15 @@ int32 arkrtos_fs_read_at(const char *path, uint8 *buf, uint32 len, uint32 off,
     (void)len;
     (void)off;
     (void)out_len;
+    return ARKRTOS_FS_FAIL;
+}
+
+int32 arkrtos_fs_write_at(const char *path, const uint8 *buf, uint32 len, uint32 off)
+{
+    (void)path;
+    (void)buf;
+    (void)len;
+    (void)off;
     return ARKRTOS_FS_FAIL;
 }
 

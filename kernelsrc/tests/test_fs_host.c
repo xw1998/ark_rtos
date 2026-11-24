@@ -318,6 +318,8 @@ static void test_not_mounted(void)
     CK_I(arkrtos_fs_remove("/a"), -1);
     CK_I(arkrtos_fs_mkdir("/a"), -1);
     CK_I(arkrtos_fs_read_at("/a", buf, 1u, 0u, &a), -1);
+    CK_I(arkrtos_fs_write_at("/a", buf, 1u, 0u), -1);
+    CK_I(arkrtos_fs_last_error(), -1005);
     CK_I(arkrtos_fs_rename("/a", "/b"), -1);
     CK_I(arkrtos_fs_volume(&dev, &a, &b), -1);
 
@@ -576,6 +578,60 @@ static void test_files(void)
     CK_I(arkrtos_fs_read_at("/zzz", back, 4u, 0u, &n), -1);
     CK_I(arkrtos_fs_last_error(), LFS_ERR_NOENT);
     CK_I(arkrtos_fs_read_at("/b.txt", 0, 4u, 0u, &n), -1);
+
+    /* 随机写：缺文件即创建，只动给定区间 */
+    {
+        uint8 wbuf[4];
+        uint8 rbuf[16];
+        uint32 m = 0u;
+
+        wbuf[0] = 0x11u; wbuf[1] = 0x22u; wbuf[2] = 0x33u; wbuf[3] = 0x44u;
+        CK_I(arkrtos_fs_write_at("/w.bin", wbuf, 4u, 0u), 0);
+        CK_I(arkrtos_fs_stat_path("/w.bin", &m, 0), 0);
+        CK_I(m, 4);
+        memset(rbuf, 0, sizeof(rbuf));
+        CK_I(arkrtos_fs_read_at("/w.bin", rbuf, 4u, 0u, &m), 0);
+        CK_I(m, 4);
+        CK(memcmp(rbuf, wbuf, 4u) == 0);
+
+        /* 只覆盖中间两个字节：两侧原样保留 */
+        wbuf[0] = 0x99u; wbuf[1] = 0x99u;
+        CK_I(arkrtos_fs_write_at("/w.bin", wbuf, 2u, 1u), 0);
+        CK_I(arkrtos_fs_stat_path("/w.bin", &m, 0), 0);
+        CK_I(m, 4);
+        memset(rbuf, 0, sizeof(rbuf));
+        CK_I(arkrtos_fs_read_at("/w.bin", rbuf, 4u, 0u, &m), 0);
+        CK_I(rbuf[0], 0x11u);
+        CK_I(rbuf[1], 0x99u);
+        CK_I(rbuf[2], 0x99u);
+        CK_I(rbuf[3], 0x44u);
+
+        /* 越过末尾写：中间补 0，文件被撑长 */
+        CK_I(arkrtos_fs_write_at("/w.bin", wbuf, 1u, 8u), 0);
+        CK_I(arkrtos_fs_stat_path("/w.bin", &m, 0), 0);
+        CK_I(m, 9);
+        memset(rbuf, 0xAA, sizeof(rbuf));
+        CK_I(arkrtos_fs_read_at("/w.bin", rbuf, 4u, 4u, &m), 0);
+        CK_I(m, 4);
+        CK_I(rbuf[0], 0);
+        CK_I(rbuf[3], 0);
+
+        /* 参数：相对路径 / 空缓冲 / 零长度都拒 */
+        CK_I(arkrtos_fs_write_at("w.bin", wbuf, 1u, 0u), -1);
+        CK_I(arkrtos_fs_last_error(), -1001);
+        CK_I(arkrtos_fs_write_at("/w.bin", 0, 1u, 0u), -1);
+        CK_I(arkrtos_fs_last_error(), -1001);
+        CK_I(arkrtos_fs_write_at("/w.bin", wbuf, 0u, 0u), -1);
+        CK_I(arkrtos_fs_last_error(), -1001);
+
+        /* 流开着的时候共用的那块文件缓存归流，一次性写要让路 */
+        CK_I(arkrtos_fs_open_write("/w2.bin"), 0);
+        CK_I(arkrtos_fs_write_at("/w.bin", wbuf, 1u, 0u), -1);
+        CK_I(arkrtos_fs_last_error(), -1008);
+        CK_I(arkrtos_fs_close_write(), 0);
+        /* 让路之后立刻能用（BUSY 不留残留状态） */
+        CK_I(arkrtos_fs_write_at("/w.bin", wbuf, 1u, 0u), 0);
+    }
 
     /* 截断：可以缩短，也可以把文件撑长（补 0） */
     CK_I(arkrtos_fs_truncate("/b.txt", 4u), 0);
@@ -854,6 +910,40 @@ static void test_failures(void)
     g_fail_read = 0;
     CK_I(arkrtos_fs_close_read(), 0);
 
+    /* 随机写：三条失败路径各自落到自己的分支上，不能都读成「写坏了」 */
+    {
+        uint8 w8[8];
+
+        memset(w8, 0x3C, sizeof(w8));
+
+        /* 父目录不存在：打开就失败，报 littlefs 自己的 NOENT */
+        CK_I(arkrtos_fs_write_at("/nodir/x.bin", w8, sizeof(w8), 0u), -1);
+        CK_I(arkrtos_fs_last_error(), LFS_ERR_NOENT);
+
+        /* 先正常建一个文件，再让设备写失败 */
+        CK_I(arkrtos_fs_write_at("/ok2.bin", w8, sizeof(w8), 0u), 0);
+
+        g_fail_write = 1;
+        /* 这一版 littlefs 的写是「先分配块、再 prog」，小写也当场落盘，所以
+         * 失败发生在 lfs_file_write 里：门面记 SHORT 并去关文件；close 又把
+         * 同一个设备错误报了一遍，所以调用方看到的是 IO（与 write_file 一致）。 */
+        CK_I(arkrtos_fs_write_at("/ok2.bin", w8, sizeof(w8), 0u), -1);
+        CK_I(arkrtos_fs_last_error(), LFS_ERR_IO);
+        g_fail_write = 0;
+
+        /* 卷的统计要真的读介质：设备读坏时不能报一个凭空的块数 */
+        g_fail_read = 1;
+        CK_I(arkrtos_fs_stat(&n, 0), -1);
+        CK_I(arkrtos_fs_last_error(), LFS_ERR_IO);
+        g_fail_read = 0;
+
+        /* 让路之后卷仍可用：内容没有被半条记录占住 */
+        CK_I(arkrtos_fs_write_at("/ok2.bin", w8, sizeof(w8), 0u), 0);
+        CK_I(arkrtos_fs_stat_path("/ok2.bin", &n, 0), 0);
+        CK_I(n, 8);
+
+    }
+
     /* 写被拒：4 KB 在调用内就刷下去了（缓存只有 256 B），失败发生在
      * lfs_file_write 里 ⇒ 门面报 SHORT，而不是等 close 才发现。 */
     g_fail_write = 1;
@@ -988,6 +1078,9 @@ static void test_stubs(void)
     CK_I(arkrtos_fs_remove("/a"), -1);
     CK_I(arkrtos_fs_mkdir("/a"), -1);
     CK_I(arkrtos_fs_read_at("/a", buf, 1u, 0u, &a), -1);
+    CK_I(arkrtos_fs_write_at("/a", buf, 1u, 0u), -1);
+    CK_I(arkrtos_fs_last_is_noent(), 0);
+    CK_I(arkrtos_fs_last_is_nospc(), 0);
     CK_I(arkrtos_fs_rename("/a", "/b"), -1);
     CK_I(arkrtos_fs_list("/", 0, 0), -1);
     CK_I(arkrtos_fs_list_names("/", names, sizeof(names), &a), -1);

@@ -552,6 +552,12 @@ CASES = [
      "FS-HOST OK",
      {"incs": ["-Ikernelsrc/fs",
                "-isystem", "kernelsrc/fs/littlefs"]}),
+    # --- 2026-11-25 新增：持久审计日志环（SEC-G05，默认关） ---
+    # 开档跑整条环形写入 / 扫描 / 重建路径；crc32 用真实现，卷是内存数组。
+    ("auditlog", "kernelsrc/tests/test_audit_log_host.c",
+     ["kernelsrc/src/arkrtos_audit_log.c"],
+     ["-DARKRTOS_USE_AUDIT_LOG=1", "-fno-asynchronous-unwind-tables"],
+     "AUDIT-LOG HOST OK"),
     ("smpsched", "kernelsrc/tests/test_smp_sched_host.c",
      ["kernelsrc/src/arkrtos_smp_sched.c"],
      ["-DARKRTOS_USE_SMP_SCHED=1", "-DARKRTOS_USE_SMP=1",

@@ -61,6 +61,7 @@ SRCS := \
   kernelsrc/src/arkrtos_blk.c \
   kernelsrc/src/arkrtos_fs.c \
   kernelsrc/src/arkrtos_audit.c \
+  kernelsrc/src/arkrtos_audit_log.c \
   kernelsrc/src/arkrtos_guard.c \
   kernelsrc/src/arkrtos_crash.c \
   kernelsrc/src/arkrtos_sign.c \
@@ -74,16 +75,18 @@ SRCS := \
   kernelsrc/src/arkrtos_dev.c \
   kernelsrc/src/arkrtos_event.c \
   kernelsrc/src/arkrtos_eset.c \
+  kernelsrc/src/arkrtos_waitmulti.c \
+  kernelsrc/src/arkrtos_smp.c \
   kernelsrc/src/arkrtos_fifo.c \
   kernelsrc/src/arkrtos_cfg.c \
   kernelsrc/src/arkrtos_sync.c \
-  kernelsrc/src/arkrtos_waitmulti.c \
-  kernelsrc/src/arkrtos_smp.c \
-  kernelsrc/src/arkrtos_mq.c \
   kernelsrc/src/arkrtos_sbuf.c \
+  kernelsrc/src/arkrtos_mq.c \
   kernelsrc/src/arkrtos_mempool.c \
   kernelsrc/src/arkrtos_net.c \
   kernelsrc/src/arkrtos_timer.c \
+  kernelsrc/src/arkrtos_tickless.c \
+  kernelsrc/src/arkrtos_rt.c \
   kernelsrc/src/arkrtos_fault.c \
   kernelsrc/src/arkrtos_hwsafe.c \
   kernelsrc/src/arkrtos_init.c \
@@ -135,10 +138,10 @@ SRCS := \
   kernelsrc/components/ark_softbus/port/ark_bus_hal_arkrtos.c \
   kernelsrc/shell/platform_arkrtos.c \
   kernelsrc/shell/arkrtos_shell.c \
-  kernelsrc/shell/arkrtos_shell_cfg.c \
-  kernelsrc/shell/arkrtos_shell_diag.c \
-  kernelsrc/shell/arkrtos_shell_fs.c \
   kernelsrc/shell/arkrtos_shell_image.c \
+  kernelsrc/shell/arkrtos_shell_diag.c \
+  kernelsrc/shell/arkrtos_shell_cfg.c \
+  kernelsrc/shell/arkrtos_shell_fs.c \
   kernelsrc/shell/arkrtos_shell_misc.c \
   kernelsrc/shell/arkrtos_shell_mod.c \
   kernelsrc/shell/arkrtos_shell_pmap.c \

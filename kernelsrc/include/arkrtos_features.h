@@ -1138,6 +1138,26 @@
 #define ARKRTOS_USE_AUDIT               1
 #endif
 
+/* 持久审计日志（arkrtos_audit_log.c，SEC-G05）：把「卷挂上了、镜像装上/被拒、
+ * 镜像起了/退了、控制台口令错/被锁、App 配额被拒」按发生顺序写进卷上的定长
+ * 记录环（32 字节头 + N 条 32 字节记录），复位后仍能读回来。
+ * 默认关：关掉时该文件编成空目标（零符号），命令表与体积逐字节不变。
+ * 依赖文件系统与已挂载的卷；路径是编译期常量，不接受运行期拼接。 */
+#ifndef ARKRTOS_USE_AUDIT_LOG
+#define ARKRTOS_USE_AUDIT_LOG           0
+#endif
+
+/* 环深（记录条数）。卷上占用 = 32 + N*32 字节（默认 64 条 = 2080 B）。
+ * 环满后最旧的一条被覆盖：先覆盖、后记账，wrapped 置 1 而不是悄悄丢。 */
+#ifndef ARKRTOS_AUDIT_LOG_RECORDS
+#define ARKRTOS_AUDIT_LOG_RECORDS       64
+#endif
+
+/* 审计日志文件在卷上的绝对路径（ASCII，编译期常量）。 */
+#ifndef ARKRTOS_AUDIT_LOG_PATH
+#define ARKRTOS_AUDIT_LOG_PATH          "/audit.bin"
+#endif
+
 /* 板端单元测试框架（arkrtos_utest.c）：用例自动注册 + 断言记账 + 汇总，
  * 对齐 RT-Thread utest / Zephyr ztest 的形态。关掉后框架与 shell 的 utest 命令都不参与编译，
  * 体积与行为零变化。自动注册需要构造函数支持（armclang/GCC）。 */

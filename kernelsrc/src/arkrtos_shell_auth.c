@@ -31,6 +31,9 @@
 #include "arkrtos_shell_auth.h"
 #include "arkrtos_sha256.h"
 #include "ark_shell.h"          /* ark_shell_printf */
+#if (ARKRTOS_USE_AUDIT_LOG == 1)
+#include "arkrtos_audit_log.h"
+#endif
 
 /* Injected by -DARKRTOS_SHELL_AUTH_LOCAL=1 -> arkrtos_shell_auth_local.h,
  * which the build generates (example/qemu_loongarch64/Makefile) and which
@@ -175,9 +178,22 @@ int arkrtos_shell_auth_cmd_login(int argc, char **argv)
 
     for(i = 0u; i < ARKRTOS_SHA256_LEN; i++) { digest[i] = 0u; }
     s_auth_fails++;
+#if (ARKRTOS_USE_AUDIT_LOG == 1)
+    /* The trail gets the attempt number, not the password and not its digest:
+     * an audit record is meant to be readable by whoever picks up the board,
+     * and "how many times did someone guess" is the whole forensic value. */
+    (void)arkrtos_audit_log_record(ARKRTOS_AUDIT_EV_AUTH_FAIL,
+                                   (uint32)arkrtos_current_task_id,
+                                   (uint32)s_auth_fails);
+#endif
     if(s_auth_fails >= ARKRTOS_SHELL_AUTH_TRIES)
     {
         s_auth_locked_hard = 1;
+#if (ARKRTOS_USE_AUDIT_LOG == 1)
+        (void)arkrtos_audit_log_record(ARKRTOS_AUDIT_EV_AUTH_LOCK,
+                                       (uint32)arkrtos_current_task_id,
+                                       (uint32)ARKRTOS_SHELL_AUTH_TRIES);
+#endif
         ark_shell_printf("login: wrong password, console locked until reset (%d/%d)\r\n",
                          s_auth_fails, ARKRTOS_SHELL_AUTH_TRIES);
     }

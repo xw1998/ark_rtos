@@ -904,6 +904,11 @@
               <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_audit.c</FilePath>
             </File>
             <File>
+              <FileName>arkrtos_audit_log.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_audit_log.c</FilePath>
+            </File>
+            <File>
               <FileName>arkrtos_guard.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_guard.c</FilePath>
