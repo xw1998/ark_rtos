@@ -126,6 +126,34 @@ int32 arkrtos_elf_fork(void *p_svc_ctx, int32 *p_child_task,
                        uint32 *p_child_space);
 #endif
 
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+/**
+* @brief 在当前任务的**同一份地址空间**里再起一个任务（U-25：CLONE_THREAD）
+* @param p_svc_ctx    当前线程这次系统调用的 trap 帧（模板）
+* @param child_stack  子线程的用户栈顶（非 0、16 字节对齐；只给栈顶，不给大小）
+* @param child_tls    CLONE_SETTLS 时子线程的 $tp，否则传 0 表示照抄父线程
+* @param p_child_task 可为 0；成功时写回子任务号
+* @param p_hook       可为 0；子任务**在离开临界区之前**被回调一次，
+*                     参数是（父任务号, 子任务号）。Linux ABI 层用它把子线程
+*                     绑到父的进程状态槽上 —— 晚一步绑定，子线程第一次进
+*                     ABI 会给自己惰性分配一份新槽，于是它有自己的 fd 表，
+*                     而这正是线程语义的反面。回调里只许做纯记账（不许
+*                     睡眠、不许拷贝用户内存）。
+* @return ARKRTOS_ELF_OK / ARKRTOS_ELF_ERR_PARAM / ARKRTOS_ELF_ERR_NOMEM
+* @details 与 arkrtos_elf_fork 的差别只有一条，但它是全部差别的来源：子任务
+*          绑到**父任务那个空间**，不复制任何帧。于是父子看到的是同一份内存
+*          （那正是线程要的），trap 帧落在 child_stack 顶上下一个帧长处。
+*          初始返回值 A0 = 0，其余寄存器继承父线程，ERTN 回到父线程系统调用
+*          的下一条指令。
+*          不管的东西（文档写死）：栈大小不记账（clone 只给栈顶），因此
+*          stack_size = 0、栈底保护字不布防；线程栈靠按需缺页长出来，
+*          帧所在的那一对由 port 当场要帧并清零。
+* @note 只在 ARKRTOS_USE_LINUX_THREAD == 1 时存在。 */
+int32 arkrtos_elf_thread(void *p_svc_ctx, unsigned long child_stack,
+                         unsigned long child_tls, int32 *p_child_task,
+                         void (*p_hook)(int32 parent, int32 child));
+#endif
+
 /** @brief 上一次成功装载的读数（最近一次的那个空间）；没有过成功装载时返回 ARKRTOS_ELF_ERR_PARAM */
 int32 arkrtos_elf_info(arkrtos_elf_info_t *p_out);
 
@@ -158,6 +186,7 @@ const char *arkrtos_elf_error_name(int32 rc);
 #define arkrtos_elf_last_space()                ((int32)(-1))
 #define arkrtos_elf_exec_replace(p, c, v, i, t)  ((int32)(-1))
 #define arkrtos_elf_fork(ctx, t, sp)            ((int32)(-1))
+#define arkrtos_elf_thread(ctx, cs, ct, t)      ((int32)(-1))
 #define arkrtos_elf_info(out)                   ((int32)(-1))
 #define arkrtos_elf_info_space(space, out)      ((int32)(-1))
 #define arkrtos_elf_error_name(rc)              ("elf support not compiled in")

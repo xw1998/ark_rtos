@@ -2887,6 +2887,138 @@ int32 arkrtos_port_paging_clone_frame(void *p_exc_ctx, uint32 space)
 
     return arkrtos_port_paging_write_space(space, va, s_fork_frame, LA_FR_WORDS);
 }
+
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+/**
+* @brief 在子线程自己的用户栈上造它的初始 trap 帧（U-25）
+* @param p_exc_ctx 父线程这次系统调用的 trap 帧（模板）
+* @param space     子线程绑定的空间（与父线程是**同一份**）
+* @param child_sp  子线程的用户栈顶（非 0、16 字节对齐）
+* @param child_tls CLONE_SETTLS 时子线程的 $tp，否则无效
+* @param p_frame_va 可为 0；成功时回写帧的 VA（child_sp - 帧长），
+*                  也就是子任务的 stack_ptr
+* @return 0 = 已写；-1 = 参数非法 / 越出 App 窗口 / 帧池拒绝
+* @details 与 fork 不同，这一帧**不在父线程的 VA 上**：子线程换了一条栈，
+*          所以帧落在 child_sp - LA_FR_SIZE —— 正是 trap 入口那句
+*          `sp -= 1040` 会把它放的位置，而帧里的 SP 写 child_sp、A0 写 0、
+*          其余寄存器（含 ERA/PRMD/浮点向量区）原样继承父线程。子线程
+*          被第一次恢复时，ertn 回到父线程系统调用的下一条指令，返回值 0。
+*
+*          帧所在的对必须先驻留：内核路径不做按需缺页，拿不到帧就回 -1
+*          让上层回滚。这一档和 fork 有一个关键差别 —— fork 的子空间是
+*          父空间的副本，帧落的那一对父线程早就摸过；线程的栈是**新页**，
+*          所以这里得自己去帧池要，并且**显式清零**：帧池里的对可能是别人
+*          刚还回来的，线程不能从一个装着别人内容的窗口上起跑。
+*          非 SWAP 档帧池刚起来是干净的，但换出/换入一旦发生这个前提就不
+*          成立，所以清零是无条件的。
+*  @note 只在 ARKRTOS_USE_LINUX_THREAD == 1 时存在。 */
+int32 arkrtos_port_paging_thread_frame(void *p_exc_ctx, uint32 space,
+                                       unsigned long child_sp,
+                                       unsigned long child_tls,
+                                       unsigned long *p_frame_va)
+{
+    static unsigned long s_thr_frame[LA_FR_WORDS];
+    const unsigned long *src = (const unsigned long *)p_exc_ctx;
+    unsigned long va;
+    unsigned long end;
+    uint32 i;
+
+    if((p_exc_ctx == 0) || (space >= (uint32)ARKRTOS_PAGING_APPS_MAX) ||
+       (child_sp == 0ul) || ((child_sp & 15ul) != 0ul))
+    {
+        return -1;
+    }
+    if((child_sp > (LA_WIN_VA + (unsigned long)ARKRTOS_QEMU_APP_SIZE)) ||
+       (child_sp < (LA_WIN_VA + (unsigned long)LA_FR_SIZE)))
+    {
+        return -1;
+    }
+
+    va  = child_sp - (unsigned long)LA_FR_SIZE;
+    end = child_sp;
+
+    /* 帧跨到的每一对都必须有帧。要帧的顺序按 VA 从小到大，失败时把这次
+     * 自己拿到的还回去（不能留下没人记账的帧）。 */
+    {
+        uint32 taken[2];
+        uint32 taken_idx[2];
+        uint32 ntaken = 0u;
+
+        for(i = 0u; i < 3u; i++)
+        {
+            unsigned long mark = va + ((unsigned long)i * 0x2000ul);
+            uint32 idx;
+            uint32 pa;
+            uint32 w;
+
+            if(mark >= end)
+            {
+                break;
+            }
+            idx = (uint32)((mark - LA_WIN_VA) / 0x2000u);
+            if(idx >= LA_PG_WIN_ENTRIES)
+            {
+                break;
+            }
+            if(s_pg_pair_pa[space][idx] != 0u)
+            {
+                continue;
+            }
+
+            pa = 0u;
+#if (ARKRTOS_USE_PAGING_SWAP == 1)
+            if(la_pg_take_pair(space, idx, &pa) != 0)
+#else
+            if(arkrtos_port_paging_frame_alloc(2u, &pa) != 0)
+#endif
+            {
+                while(ntaken > 0u)
+                {
+                    ntaken--;
+                    s_pg_pair_pa[space][taken_idx[ntaken]] = 0u;
+                    (void)arkrtos_port_paging_frame_free(taken[ntaken], 2u);
+                }
+                return -1;
+            }
+
+            s_pg_pair_pa[space][idx] = pa;
+            la_pg_pair_own(pa);
+            for(w = 0u; w < (0x2000u / 4u); w++)
+            {
+                ((uint32 *)pa)[w] = 0u;
+            }
+            if(ntaken < 2u)
+            {
+                taken[ntaken]     = pa;
+                taken_idx[ntaken] = idx;
+                ntaken++;
+            }
+        }
+    }
+
+    for(i = 0u; i < LA_FR_WORDS; i++)
+    {
+        s_thr_frame[i] = src[i];
+    }
+    s_thr_frame[LA_FR_A0] = 0ul;         /* 子线程 clone() 返回 0 */
+    s_thr_frame[LA_FR_SP] = child_sp;    /* 帧里记的是栈顶，不是帧地址 */
+    if(child_tls != 0ul)                 /* CLONE_SETTLS：没给就沿父线程的 $tp */
+    {
+        s_thr_frame[LA_FR_TP] = child_tls;
+    }
+    /* child_tls == 0 无法表达「把 $tp 设成 0」，按未给处理 */
+
+    if(arkrtos_port_paging_write_space(space, va, s_thr_frame, LA_FR_WORDS) != 0)
+    {
+        return -1;
+    }
+    if(p_frame_va != 0)
+    {
+        *p_frame_va = va;
+    }
+    return 0;
+}
+#endif /* ARKRTOS_USE_LINUX_THREAD == 1 */
 #endif /* ARKRTOS_USE_LINUX_FORK == 1 */
 
 #if (ARKRTOS_USE_PAGING_DEMAND == 1)

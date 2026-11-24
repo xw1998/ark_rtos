@@ -143,6 +143,11 @@ SELECT_FLAGS = MPROTECT_FLAGS + ["-DARKRTOS_USE_LINUX_SELECT=1"]
 # 不接 virtio 网卡：socket 走 127.0.0.1 回环，包不出芯片。夹具多 37 条 check。
 SOCKET_FLAGS = SELECT_FLAGS + ["-DARKRTOS_USE_LINUX_SOCKET=1",
                                "-DARKRTOS_USE_LWIP=1"]
+# THREAD 档 = SOCKET 档 + CLONE_THREAD（U-25）。叠在 socket 档上而不是独立档：
+# 线程要验的「共享地址空间 + 同一张 fd 表 + 共享进程槽」正好是 socket 档已经
+# 在用的同一套对象；而且线程退出路径里「不是最后一个就别拆 fd 表」只有在
+# fd 表里真有东西（socket）时才看得见差别。夹具多 25 条 check。
+THREAD_FLAGS = SOCKET_FLAGS + ["-DARKRTOS_USE_LINUX_THREAD=1"]
 
 LA64_FALLBACKS = [
     "D:/LoongIDE/la64-tool/bin/loongarch64-newlib-elf-gcc.exe",
@@ -234,6 +239,18 @@ EXPECT_SELECT_CHECKS = 123
 # read/write 回 -EBADF。合计 122 + 38 + 1 = 161 条（最后一条是「一次 socket
 # 往返不按一个 100 ms 等待时间片结算」的性能回归门）。
 EXPECT_SOCKET_CHECKS = 161
+# THREAD 段多 25 条：clone(CLONE_THREAD)>0、PARENT_SETTID 写回、CLEARTID 上的
+# futex WAIT 回 0、CLEARTID 被清 0、线程真跑了、CHILD_SETTID 看到自己的 tid、
+# tid != 父 tid、线程 getpid == tgid、父 getpid 未变、SETTLS 落到 $tp、两栈
+# 不同址、父的局部变量还在、同组第二个线程 clone>0、它退出后 CLEARTID 也清 0、
+# 两个线程都退之后进程仍活、四条参数门槛（缺 CLONE_VM / child_stack=0 /
+# 未对齐 / CLONE_VFORK 各 -EINVAL）、线程退出之后还能 fork（父进程 fd 表没被
+# 提前拆）与被 reap 的退出码 5、线程发起 exit_group 整组被 reap 且码 6、
+# 组长发起 exit_group 整组被 reap 且码 7。合计 161 + 25 = 186 条。
+EXPECT_THREAD_CHECKS = 186
+# 上面这一档的每一段都对应一类「看起来对」的实现：另开地址空间（共享全局读
+# 不到）、每线程一份 fd 表（fork 段留不住）、线程退出就把进程拆了（进程活不
+# 下来）、把线程当进程挂到 wait4 上（exit_group 码不对）。
 
 FAILS = []
 PASSES = []
@@ -581,6 +598,37 @@ def check_default_off():
     else:
         ok("features-guard-socket", "features.h 两条 socket #error 都在")
 
+    m = re.search(r"^#define\s+ARKRTOS_USE_LINUX_THREAD\s+(\d+)\s*$", ac, re.M)
+    if not m:
+        bad("default-off-thread",
+            "arkrtos_autoconf.h 里没有 ARKRTOS_USE_LINUX_THREAD")
+    elif m.group(1) != "0":
+        bad("default-off-thread", "默认档 ARKRTOS_USE_LINUX_THREAD=%s（必须是 0）"
+            % m.group(1))
+    else:
+        ok("default-off-thread", "arkrtos_autoconf.h: ARKRTOS_USE_LINUX_THREAD 0")
+
+    i = kc.find("config ARKRTOS_USE_LINUX_THREAD")
+    if i < 0:
+        bad("kconfig-wired-thread",
+            "Kconfig.features 里没有 config ARKRTOS_USE_LINUX_THREAD")
+    else:
+        tail = kc[i + len("config ARKRTOS_USE_LINUX_THREAD"):]
+        m_end = re.search(r"^(config|menuconfig)\s", tail, re.M)
+        blk = tail[:m_end.start()] if m_end else tail
+        if "ARKRTOS_USE_LINUX_FORK" not in blk:
+            bad("kconfig-wired-thread",
+                "Kconfig 的 thread 项没有 depends on ARKRTOS_USE_LINUX_FORK")
+        else:
+            ok("kconfig-wired-thread",
+               "Kconfig 项存在，depends on ARKRTOS_USE_LINUX_FORK")
+
+    if "ARKRTOS_USE_LINUX_THREAD=1 requires ARKRTOS_USE_LINUX_FORK=1" not in fh:
+        bad("features-guard-thread",
+            "features.h 缺 thread 对 LINUX_FORK 的 #error")
+    else:
+        ok("features-guard-thread", "features.h 的 thread 依赖 #error 在")
+
     bc = read_text(os.path.join(ROOT, "board/qemu_loongarch64/arkrtos_board_config.h"))
     if re.search(r"^#define\s+ARKRTOS_USE_LINUX_FORK\s+1\s*$", bc, re.M):
         bad("board-switch", "QEMU LA64 板级不该缺省打开 fork（应靠 EXTRA_CFLAGS 出镜像）")
@@ -610,7 +658,9 @@ def check_off_zero_symbols(rv32, la64, nm, key_dir):
     else:
         text = _sym_defs(nm, obj)
         hits = [t for t in ("lx_clone", "lx_wait4", "s_child",
-                            "lx_sock_submit", "s_sockctx", "lx_socket")
+                            "lx_sock_submit", "s_sockctx", "lx_socket",
+                            "lx_thread_group_exit", "lx_clone_thread",
+                            "lx_thread_bind_hook", "lx_thread_clear_tid")
                 if t in text]
         if hits:
             bad("off-zero-symbols", "关档 linux_abi.o 里仍有 %s" % "、".join(hits))
@@ -625,6 +675,12 @@ def check_off_zero_symbols(rv32, la64, nm, key_dir):
         ("kernelsrc/src/arkrtos_paging.c", "arkrtos_paging_space_clone"),
         ("kernelsrc/port/loongarch/la64/arkrtos_port.c",
          "arkrtos_port_paging_map_shared"),
+    ]
+    # 线程档的两个新符号：关档时不许留在 .o 里。
+    pairs = pairs + [
+        ("kernelsrc/src/arkrtos_elf.c", "arkrtos_elf_thread"),
+        ("kernelsrc/port/loongarch/la64/arkrtos_port.c",
+         "arkrtos_port_paging_thread_frame"),
     ]
     leaking = []
     for rel, sym in pairs:
@@ -782,7 +838,7 @@ def run_qemu(qemu, seconds):
 
 def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
           futex=False, filemap=False, mprotect=False, select=False,
-          socket=False):
+          socket=False, thread=False):
     lines = text.replace("\r\n", "\n").splitlines()
 
     def count(pred):
@@ -1107,6 +1163,40 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
             problems.append("缺 `[LA64U] mprotect violation badv=<hex> era=<hex>"
                             " -> kill task`（违规写没走 mprotect 判定路径）")
 
+    if thread:
+        nl = text.replace("\r\n", "\n")
+
+        def one(pat, why):
+            hits = re.findall(pat, nl, re.M)
+            if len(hits) != 1:
+                problems.append("线程读数 %s 出现 %d 次（必须恰好 1 次）：%s"
+                                % (pat, len(hits), why))
+
+        one(r"^\[fork\] clone\(CLONE_THREAD\) > 0 -> 1 ok$",
+            "线程根本没造出来")
+        one(r"^\[fork\] CHILD_CLEARTID cleared to 0 -> 0 ok$",
+            "CHILD_CLEARTID 没被清（pthread_join 会永远等下去）")
+        one(r"^\[fork\] futex WAIT on CHILD_CLEARTID woke with 0 -> 0 ok$",
+            "join 用的 futex WAIT 没被唤醒（线程退出时的 WAKE 丢了）")
+        one(r"^\[fork\] CLONE_SETTLS landed in \$tp -> 1515847680 ok$",
+            "CLONE_SETTLS 没写进 $tp（0x5a5a0000 没到位）")
+        one(r"^\[fork\] two stacks are distinct -> 1 ok$",
+            "线程用的栈和父线程是同一处（帧被踩）")
+        one(r"^\[fork\] exit_group-from-thread code 6 -> 6 ok$",
+            "线程发起的 exit_group 没把整组带走（或码被改成组长的）")
+        one(r"^\[fork\] exit_group-from-leader code 7 -> 7 ok$",
+            "组长发起的 exit_group 读数不对")
+        # 交叉证据：线程的 getpid 必须真的等于父进程报出来的那个数，而不是
+        # 夹具里另找的一个常量。
+        m_tg = re.search(r"^\[fork\] thread getpid == tgid \(parent pid\) -> (\d+) ok$",
+                         nl, re.M)
+        if not m_tg:
+            problems.append("缺 `[fork] thread getpid == tgid (parent pid) -> <n> ok`"
+                            "（线程的 getpid 没被读到）")
+        elif m_par and (m_tg.group(1) != m_par.group(1)):
+            problems.append("线程 getpid=%s 与父进程 pid=%s 不同（不是同一个线程组）"
+                            % (m_tg.group(1), m_par.group(1)))
+
     # 新开关不许把别人的演示搞坏。
     for tag, name in (("[linux] PASS", "Linux ABI 夹具"),
                       ("[FS] PASS", "ramfs 自测"),
@@ -1121,7 +1211,7 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
 
 
 def self_check(good_text, cow=False, shm=False, futex=False, filemap=False,
-               mprotect=False, select=False, socket=False):
+               mprotect=False, select=False, socket=False, thread=False):
     """把好日志的九种坏法喂回判据，每一种都必须判红，否则解析器是空转。"""
     g = good_text.replace("\r\n", "\n")
     mutations = {
@@ -1283,6 +1373,30 @@ def self_check(good_text, cow=False, shm=False, futex=False, filemap=False,
             "缺 select 读数": lambda s: s.replace(
                 "[fork] pselect6 stdout is always writable -> 1 ok\n", ""),
         })
+    if thread:
+        mutations.update({
+            "线程 CLEARTID 没清": lambda s: s.replace(
+                "[fork] CHILD_CLEARTID cleared to 0 -> 0 ok",
+                "[fork] CHILD_CLEARTID cleared to 0 -> 1711149807 FAIL (want 0)"),
+            "join 的 WAIT 没被唤醒": lambda s: s.replace(
+                "[fork] futex WAIT on CHILD_CLEARTID woke with 0 -> 0 ok",
+                "[fork] futex WAIT on CHILD_CLEARTID woke with 0 -> -110 FAIL (want 0)"),
+            "SETTLS 没落 $tp": lambda s: s.replace(
+                "[fork] CLONE_SETTLS landed in $tp -> 1515847680 ok",
+                "[fork] CLONE_SETTLS landed in $tp -> 0 FAIL (want 1515847680)"),
+            "线程 getpid 不等于 tgid": lambda s: re.sub(
+                r"^\[fork\] thread getpid == tgid \(parent pid\) -> \d+ ok$",
+                "[fork] thread getpid == tgid (parent pid) -> 999999 ok",
+                s, flags=re.M),
+            "两栈同址": lambda s: s.replace(
+                "[fork] two stacks are distinct -> 1 ok",
+                "[fork] two stacks are distinct -> 0 FAIL (want 1)"),
+            "线程 exit_group 码被改成组长的": lambda s: s.replace(
+                "[fork] exit_group-from-thread code 6 -> 6 ok",
+                "[fork] exit_group-from-thread code 6 -> 7 FAIL (want 6)"),
+            "缺 clone 线程读数": lambda s: s.replace(
+                "[fork] clone(CLONE_THREAD) > 0 -> 1 ok\n", ""),
+        })
     if filemap:
         mutations.update({
             "filemap 共享写没落盘": lambda s: s.replace(
@@ -1298,19 +1412,20 @@ def self_check(good_text, cow=False, shm=False, futex=False, filemap=False,
                 "[fork] filemap msync rc -> 0 ok\n", ""),
         })
     missed = []
-    nchk = (EXPECT_SELECT_CHECKS if select else
+    nchk = (EXPECT_THREAD_CHECKS if thread else
+            (EXPECT_SELECT_CHECKS if select else
             (EXPECT_MPROTECT_CHECKS if mprotect else
             (EXPECT_FILEMAP_CHECKS if filemap else
             (EXPECT_FUTEX_CHECKS if futex else
             (EXPECT_SHM_CHECKS if shm else
-             (EXPECT_COW_CHECKS if cow else EXPECT_FORK_CHECKS))))))
+             (EXPECT_COW_CHECKS if cow else EXPECT_FORK_CHECKS)))))))
     for name, fn in mutations.items():
         mutated = fn(g)
         if mutated == g:
             missed.append("%s（坏样本没改到东西）" % name)
             continue
         passed, _ = judge(mutated, nchk, cow, shm, futex, filemap, mprotect,
-                          select)
+                          select, socket, thread)
         if passed:
             missed.append(name)
     return missed
@@ -1385,6 +1500,16 @@ def main(argv):
                                          "-DARKRTOS_USE_LINUX_SOCKET=1",
                                          "-DARKRTOS_USE_LWIP=1"],
                          "fork+cow+shm+futex+filemap+mprotect+select+socket")
+        check_compile_on(la64, key_dir, ["-DARKRTOS_USE_PAGING_COW=1",
+                                         "-DARKRTOS_USE_PAGING_SHM=1",
+                                         "-DARKRTOS_USE_LINUX_FUTEX=1",
+                                         "-DARKRTOS_USE_PAGING_FILEMAP=1",
+                                         "-DARKRTOS_USE_PAGING_MPROTECT=1",
+                                         "-DARKRTOS_USE_LINUX_SELECT=1",
+                                         "-DARKRTOS_USE_LINUX_SOCKET=1",
+                                         "-DARKRTOS_USE_LWIP=1",
+                                         "-DARKRTOS_USE_LINUX_THREAD=1"],
+                         "fork+cow+shm+futex+filemap+mprotect+select+socket+thread")
 
     if qemu:
         # 六档各跑一遍：默认 fork（27 条）、fork+COW（32 条 + 内核 COW 日志）、
@@ -1408,6 +1533,8 @@ def main(argv):
              "fork+cow+shm+futex+filemap+mprotect+select"),
             (SOCKET_FLAGS, EXPECT_SOCKET_CHECKS, True, True,
              "fork+cow+shm+futex+filemap+mprotect+select+socket"),
+            (THREAD_FLAGS, EXPECT_THREAD_CHECKS, True, True,
+             "fork+cow+shm+futex+filemap+mprotect+select+socket+thread"),
         ]
         if a.no_build:
             rounds = rounds[-1:]
@@ -1443,12 +1570,13 @@ def main(argv):
             mprotect = "-DARKRTOS_USE_PAGING_MPROTECT=1" in flags
             select = "-DARKRTOS_USE_LINUX_SELECT=1" in flags
             socket = "-DARKRTOS_USE_LINUX_SOCKET=1" in flags
+            thread = "-DARKRTOS_USE_LINUX_THREAD=1" in flags
             passed, notes = judge(text, nchk, cow, shm, futex, filemap, mprotect,
-                                  select, socket)
+                                  select, socket, thread)
             if passed:
                 ok("qemu-readout", "[%s] %s" % (tag, notes[0]))
                 missed = self_check(text, cow, shm, futex, filemap, mprotect,
-                                    select, socket)
+                                    select, socket, thread)
                 if missed:
                     bad("parser-selfcheck",
                         "[%s] 这些坏样本没被判红：%s" % (tag, "、".join(missed)))

@@ -886,6 +886,33 @@ int32 arkrtos_port_paging_write_space(uint32 space, unsigned long va,
  *  @note 只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。 */
 int32 arkrtos_port_paging_clone_frame(void *p_exc_ctx, uint32 space);
 
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+/** @brief Build a new thread's first trap frame on its own user stack (U-25)
+ *  @param p_exc_ctx  parent's syscall trap frame (the template)
+ *  @param space      the (shared) space the thread is bound to
+ *  @param child_sp   the child's user stack top (16-byte aligned, non-zero)
+ *  @param child_tls  value for the child's $tp when CLONE_SETTLS was given,
+ *                    ignored otherwise
+ *  @param p_frame_va may be 0; on success the VA the frame was written at
+ *                    (child_sp - frame size), which is the child's stack_ptr
+ *  @return 0 = written; -1 = bad argument / out of window / that pair refused
+ *  @details Unlike fork this frame does NOT live at the parent's VA: the
+ *           child runs on a different stack, so the frame goes at
+ *           child_sp - LA_FR_SIZE, exactly where the trap entry would have
+ *           put it (the entry does `sp -= 1040`), with SP = child_sp, A0 = 0
+ *           and every other register inherited from the parent.
+ *
+ *           The pair holding that VA is taken from the pool and zeroed first:
+ *           a fresh pair may carry someone else's bytes, and a thread must not
+ *           start on a window into another task's memory.  Pages the child
+ *           spills below the frame are demand-faulted as usual.
+ *  @note Only exists when ARKRTOS_USE_LINUX_THREAD == 1. */
+int32 arkrtos_port_paging_thread_frame(void *p_exc_ctx, uint32 space,
+                                       unsigned long child_sp,
+                                       unsigned long child_tls,
+                                       unsigned long *p_frame_va);
+#endif
+
 #if (ARKRTOS_USE_PAGING_SHM == 1)
 /** @brief Create MAP_SHARED anonymous pages (U-19c)
  *  @param va  window VA (4 KB aligned), @param len byte count (> 0, 4 KB aligned)
@@ -1024,6 +1051,8 @@ void arkrtos_port_paging_inval_va(unsigned long va);
 #define arkrtos_port_paging_space_clone(src, dst)       (-1)
 #define arkrtos_port_paging_write_space(sp, va, w, n)   (-1)
 #define arkrtos_port_paging_clone_frame(p, sp)          (-1)
+#define arkrtos_port_paging_thread_frame(p, sp, csp, ctls, pf) \
+    ((void)(p), (void)(sp), (void)(csp), (void)(ctls), (void)(pf), (-1))
 #define arkrtos_port_paging_map_shared(va, len)         (-1)
 #define arkrtos_port_paging_protect(va, len, wr)        (-1)
 #define arkrtos_port_paging_mprotect_stat(which)        (0u)

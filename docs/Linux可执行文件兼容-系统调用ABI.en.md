@@ -1102,7 +1102,97 @@ is only stable with them).**
 `ARKRTOS_USE_NET_VIRTIO` off it compiles only `$(LWIP_SRCS)` (no `drvnet.c`/`net_demo.c`),
 and pushes `ARKRTOS_USE_LINUX_SOCKET=1` together with lwIP into `LXFORK_DEFS`.
 
+### 8.10 Threads (`CLONE_THREAD`, U-25): one address space shared by a group of tasks (2026-11-24, ninth QEMU LA64 tier, 186 checks)
+
+The thread branch of `clone(220)` is in, behind `ARKRTOS_USE_LINUX_THREAD` (default **0**,
+`depends on ARKRTOS_USE_LINUX_FORK`). The split between the fork branch and this one is
+purely by flags: `CLONE_VM` together with `CLONE_THREAD` takes the thread path, while
+`flags == 0`/`SIGCHLD` with `child_stack == 0` takes the fork path. Everything else is
+`-EINVAL` (`CLONE_VFORK`, `CLONE_VM` without `CLONE_THREAD`, `child_stack == 0`, a stack
+that is not 16-byte aligned).
+
+| Semantics | Implementation |
+|---|---|
+| address space | **not copied**: the child is bound to the parent's `space` - the same pair ledger, the same physical frames, so the parent's and the child's globals are literally the same words |
+| frame | the child's initial trap frame sits at `child_stack - LA_FR_SIZE` (1040 B) with `SP = child_stack` and `A0 = 0`; every other register (including `ERA`) is **inherited from the parent's frame**, so the child resumes at the instruction **after** the `syscall` with return value 0 - exactly the legacy `clone(2)` contract glibc's `pthread_create` relies on |
+| frame pages | unlike fork the thread stack is a **new** page and the kernel path has no demand faulting, so this code takes the pairs from the frame pool itself and **zeroes them unconditionally** (a pair may come back from another space; once swap exists "fresh pools are clean" is false); on failure it hands back what it took |
+| process state slot | **shared** with the parent through a refcount. The binding happens inside the loader's critical section (`lx_thread_bind_hook`), not when the child first enters the ABI - one step late and the child lazily allocates its own slot, which shows up only as "a thread cannot close the main thread's fd" and reports nothing |
+| fd / signals | one fd table, one set of signal actions and masks (both carried by the shared slot) |
+| `CLONE_SETTLS` | `a2` goes into the child's `$tp`; `tls == 0` is treated as "not given" (`$tp` follows the parent) - **"set `$tp` to 0" cannot be expressed**, recorded in the known-limitations page |
+| `PARENT_SETTID` / `CHILD_SETTID` | both write a 4-byte `int`; the kernel probes writability before creating (a bad pointer discovered afterwards would leave a running thread and an unexplainable return code) |
+| `CHILD_CLEARTID` | on exit the word is cleared and one `FUTEX_WAKE` is issued - this is where `pthread_join` waits |
+| `getpid` / `gettid` | `getpid(172)` returns the **thread group id** (leader task id), `gettid(178)` returns this thread; with the switch off `gettid` still returns `-ENOSYS` |
+
+**Exit semantics.** `exit(93)` ends only the calling thread; `exit_group(94)` ends the whole
+group. The teardown path splits on whether siblings are still alive:
+
+- **siblings alive**: only this thread's `CLEARTID` is cleared and the waiter woken; it
+  **must not** run `sock_close_all`, fd release or slot recycling, or the first thread to exit
+  would take the whole group's fd table and socket handles with it;
+- **last one out (including the leader)**: the full teardown runs (close sockets, release every
+  fd, clear and unbind the slot) and the exit code is recorded on the leader's TCB, which is
+  what `wait4` reads.
+
+Threads are **not** registered in `s_child[]`: Linux's `wait4` cannot see threads, so the
+group keeps exactly one "process" facing the outside.
+
+**Ninth QEMU tier: 186 checks all `ok` + `exit code 0` (600 ms).** The ninth tier of
+`tools/fork_gate.py` is the eighth (161 checks) plus 25 thread checks. Six readings matter most:
+
+- `clone(CLONE_THREAD) > 0 -> 1 ok`, `thread PARENT_SETTID wrote the tid -> 6 ok`;
+- `futex WAIT on CHILD_CLEARTID woke with 0 -> 0 ok` - the **real join path**
+  (`CHILD_CLEARTID` + `FUTEX_WAIT`) covers CLEARTID, WAKE and WAIT in one go;
+- `CLONE_SETTLS landed in $tp -> 1515847680 ok` (`0x5a5a0000`);
+- `thread getpid == tgid (parent pid) -> 14 ok` - and the gate carries a **cross-check**: that
+  14 must equal the fixture's `[fork] parent pid=`, otherwise "tgid is some constant" passes too;
+- `exit_group from a thread reaped the group -> 6 ok` / `exit_group-from-leader code 7 -> 7 ok`,
+  both issued inside a **child process** so the test process survives; in between,
+  `fork after threads reaped -> 6 ok` shows a thread exit did not tear down the process's fd
+  table or slot early.
+
+Anti-false-green: the four argument gates (no `CLONE_VM`, `child_stack == 0`, misaligned stack,
+`CLONE_VFORK`) must each be refused while the switch is on; `judge()` requires each of seven
+thread readings to appear **exactly once**, and `self_check()` has seven bad samples (CLEARTID
+not cleared, WAIT not woken, SETTLS not landed, `getpid` not equal to the tgid, two stacks at the
+same address, wrong `exit_group` code, missing clone reading) that must be judged red.
+
+**Zero change when off.** `arkrtos_elf_thread` / `arkrtos_port_paging_thread_frame` and the four
+symbols `lx_thread_group_exit` / `lx_clone_thread` / `lx_thread_bind_hook` / `lx_thread_clear_tid`
+are not emitted at all; the `off-zero-symbols` gate checks each with `nm`.
+
+**Four pits only a real run exposes (all fixed).**
+
+1. **`gettid` was written as 186.** 186 is x86_64's number; LA64 follows the asm-generic table
+   and uses **178**. A wrong number does not fail loudly - a real glibc program asking for
+   `gettid` would get `-ENOSYS`, while the fixture uses the same constant and stays green.
+2. **The child does not "jump to the thread body"; it continues after the `syscall`.** The first
+   fixture assumed the parent's continuation, so the child re-ran the parent's whole section of
+   checks (the same line appearing twice, the second reading 0) and the body never ran. The real
+   form is `if (thr == 0) { body(); }`, and that branch must sit between the `syscall` and the
+   test with **no compiler-inserted stack access** (the child is already on its own stack): the
+   fixture copies musl `__clone` and puts `syscall` / `bnez` / `jirl` in one asm block.
+3. **`PARENT_SETTID` writes a 4-byte `int`.** The fixture received it through `lx_long` with an
+   initial value of `-1` and read back `-4294967290` (low 32 bits are the tid, high 32 bits are
+   still `0xFFFFFFFF`). Same class as the `getsockopt` pit in section 8.9; same fix: `unsigned int`.
+4. **`FUTEX_WAIT` can be interrupted by the `SIGCHLD` of a child process in the same process
+   (`-EINTR`).** The first requeue fixture retried only on `-EAGAIN`, so one legal interruption in
+   the ninth tier was read as a false red (`rc10 = -4`). Real callers retry `-EINTR` too, so the
+   fixture now retries `-EAGAIN` / `-EINTR` / `-ETIMEDOUT` with a 100 ms per-round, 60-round cap
+   (it can neither hang nor turn "did not wait" into "waited").
+
+**Boundaries written down.** `exit_group` kills tasks that may be running on another core and
+there is no inter-core stop protocol, so the thread tier was only measured on **single-core**
+QEMU. `execve` from a non-leader thread is **undefined** here: it replaces the calling task's
+image while siblings still point at the old space (Linux ends the whole group and keeps only the
+caller); it is neither implemented nor refused. There is no TLS module allocation, no robust
+futex list and no `set_robust_list`; `SET_TID_ADDRESS` only reports the tid and stores nothing.
+A thread is an ordinary task: same priority, same time slice, no extra scheduling semantics.
+
 ## 9 Switch and zero footprint
+
+`ARKRTOS_USE_LINUX_THREAD` (section 8.10) is a third Linux ABI switch, default **0**,
+`depends on ARKRTOS_USE_LINUX_FORK` (with an `#error` guard); with it off the two loader/port
+functions and the four `lx_thread_*` symbols are not emitted.
 
 `ARKRTOS_USE_LINUX_ABI` (features header + Kconfig), default **0**, and
 `depends on ARKRTOS_USE_ELF`. `ARKRTOS_USE_LINUX_FORK` (section 8) is a second,
@@ -1197,12 +1287,14 @@ tier `linuxabisocket` in `tools/coverage_gate.py` (with
 -DARKRTOS_USE_LWIP=1`) gives 161 checks all `ok` + `exit code 0` on QEMU LA64.
 
 The fork tier has its own gate, `tools/fork_gate.py` (invoked as `fork` from
-`ci_gate`, **57 items**; it runs the fork, fork+COW, fork+COW+SHM,
+`ci_gate`, **64 items**; it runs the fork, fork+COW, fork+COW+SHM,
 fork+COW+SHM+futex, fork+COW+SHM+futex+filemap,
 fork+COW+SHM+futex+filemap+mprotect,
-fork+COW+SHM+futex+filemap+mprotect+select and
-fork+COW+SHM+futex+filemap+mprotect+select+socket tiers one after the other, so
-build / qemu-readout / parser-selfcheck / compile-on each appear seven times):
+fork+COW+SHM+futex+filemap+mprotect+select,
+fork+COW+SHM+futex+filemap+mprotect+select+socket and
+fork+COW+SHM+futex+filemap+mprotect+select+socket+thread tiers one after the
+other, so build / qemu-readout / parser-selfcheck / compile-on each appear nine
+times):
 default-off (fork and SHM), kconfig-wired (all four `depends on`, plus the SHM
 item depending on COW), the four
 `#error` guards in features.h, off-zero-symbols (RV32 `linux_abi.o` has no
@@ -1271,7 +1363,31 @@ its parser-selfcheck adds eight more bad logs (an empty pipe reported ready, EOF
 not reported, a full pipe still reported writable, the `fd_set` not cleared, the
 timeout restarted on every replay, `exceptfds` reported, a bad fd let through, and
 the select readout removed); its switch has its own `default-off-select` /
-`kconfig-wired-select` / `features-guard-select` items.
+`kconfig-wired-select` / `features-guard-select` items. The socket round requires
+161 checks and validates the 38 socket readouts one by one (bind / listen /
+accept / connect / send / recv over a real lwIP `127.0.0.1` loopback, name
+queries, four `SOL_SOCKET` options, non-blocking `-EAGAIN`, plus one
+round-trip-time regression gate), with every select / mprotect / filemap / SHM /
+COW / futex assertion still in place; its parser-selfcheck adds six more bad logs
+and its switch has its own `default-off-socket` / `kconfig-wired-socket` /
+`features-guard-socket` items (autoconf 0, two `depends on` entries, two
+`#error` guards). The thread round requires 186 checks and validates the 25
+thread readouts one by one (`clone(CLONE_THREAD)` positive and negative, both
+SETTIDs, `getpid` equal to the tgid and cross-checked against the parent pid the
+fixture prints, `gettid` different from the parent, `CLONE_SETTLS` landing in
+`$tp`, two stacks at different addresses, a parent local surviving, `CHILD_CLEARTID`
+cleared to 0 with the `FUTEX_WAIT` woken, the four argument gates, a `fork` still
+working after threads, and `exit_group` from a thread versus from the leader),
+with every socket-and-below assertion still in place; its parser-selfcheck adds
+seven more bad logs (CLEARTID not cleared, the join WAIT never woken, `SETTLS` not
+landing in `$tp`, a thread `getpid` not equal to the tgid, both stacks at one
+address, the thread-initiated `exit_group` code replaced by the leader's, and the
+`clone(CLONE_THREAD)` readout removed), and its switch has its own
+`default-off-thread` / `kconfig-wired-thread` / `features-guard-thread` items
+(autoconf 0, `depends on ARKRTOS_USE_LINUX_FORK`, the corresponding `#error`);
+`off-zero-symbols` / `off-zero-port` also require that a thread-off build produces
+none of `arkrtos_elf_thread`, `arkrtos_port_paging_thread_frame` and the four
+`lx_thread_*` symbols.
 
 ## 11 Real bugs and readout traps found on the way
 

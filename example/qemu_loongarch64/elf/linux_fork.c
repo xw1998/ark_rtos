@@ -42,6 +42,8 @@
 
 #define LX_WRITE            64
 #define LX_EXIT             93
+#define LX_EXIT_GROUP       94
+#define LX_GETTID           178     /* asm-generic 表：LA64 的 gettid 是 178 */
 #define LX_CLOCK_GETTIME    113
 #define LX_GETPID           172
 #define LX_CLONE            220
@@ -64,6 +66,15 @@
 #define LX_CLOCK_MONOTONIC  1
 #define LX_SIGCHLD          17          /* clone 只接受 0 / SIGCHLD */
 #define LX_CLONE_VM         0x00000100ul
+#define LX_CLONE_FS         0x00000200ul
+#define LX_CLONE_FILES      0x00000400ul
+#define LX_CLONE_SIGHAND    0x00000800ul
+#define LX_CLONE_VFORK      0x00004000ul
+#define LX_CLONE_THREAD     0x00010000ul
+#define LX_CLONE_SETTLS     0x00080000ul
+#define LX_CLONE_PARENT_SETTID  0x00100000ul
+#define LX_CLONE_CHILD_CLEARTID 0x00200000ul
+#define LX_CLONE_CHILD_SETTID   0x01000000ul
 #define LX_WNOHANG          1
 
 #define LX_MAP_SHARED       0x01ul
@@ -79,6 +90,7 @@
 #define LX_FUTEX_WAIT_BITSET 9
 #define LX_FUTEX_WAKE_BITSET 10
 #define LX_EAGAIN           11
+#define LX_EINTR            4
 #define LX_ETIMEDOUT        110
 
 /* 文件映射（U-21）这一档要用的号：openat / mmap 已经有了 mmap 222，
@@ -370,6 +382,80 @@ static void check(const char *what, lx_long got, lx_long want)
 /* fork 之后父子各有一份：子进程改它，父进程必须读回 1。
  * 共享同一份地址空间（或只改 trap 帧不复制窗口）的实现会在这里露馅。 */
 volatile unsigned long g_fork_marker = 1ul;
+
+#if defined(ARKRTOS_USE_LINUX_THREAD) && (ARKRTOS_USE_LINUX_THREAD == 1)
+/* ------------------------------------------------------------------
+ * 第三批读取：CLONE_THREAD（线程共享同一份地址空间）
+ *
+ * 下面这些全局全部落在同一份 .bss 里。线程与父线程共享它 —— 这正是要
+ * 验的东西：如果实现给线程另开了一份地址空间，子线程写的字父线程读不
+ * 到，这里的 check 立刻红。
+ * ------------------------------------------------------------------ */
+static volatile lx_long g_thr_ran;
+static volatile lx_long g_thr_tid;
+static volatile lx_long g_thr_pid;
+static volatile lx_long g_thr_tp;
+static volatile lx_long g_thr_ctid_self;
+static volatile lx_long g_thr_local_addr;
+static volatile lx_long g_thr_ctid;
+static volatile lx_long g_thr2_ctid;
+#define THR_TLS_MAGIC   ((lx_long)0x5a5a0000)
+
+/* 旧式 clone(2) 的子线程从**系统调用后面那条指令**继续跑，返回值 0。
+ * 也就是说「进线程体」这件事必须挤在 syscall 与分支之间、不许编译器插入
+ * 任何一条读栈的指令 —— 子线程此时已经换到自己的栈上了，父线程的栈内容
+ * 它一点都读不到。这里照 musl __clone 的写法，把 syscall / 分支 / 跳转
+ * 写进同一个 asm 块：子线程那条路只有 bnez 与 jirl 两条指令。 */
+static lx_long lx_clone_thread_call(lx_long flags, lx_long sp, lx_long ptid,
+                                    lx_long ctid, lx_long tls,
+                                    void (*body)(void))
+{
+    register lx_long r_a0 __asm__("a0") = flags;
+    register lx_long r_a1 __asm__("a1") = sp;
+    register lx_long r_a2 __asm__("a2") = ptid;
+    register lx_long r_a3 __asm__("a3") = ctid;
+    register lx_long r_a4 __asm__("a4") = tls;
+    register lx_long r_a7 __asm__("a7") = LX_CLONE;
+
+    __asm__ volatile("syscall 0\n\t"
+                     "bnez $a0, 1f\n\t"
+                     "jirl $ra, %[body], 0\n\t"
+                     "1:\n"
+                     : "+r"(r_a0)
+                     : "r"(r_a1), "r"(r_a2), "r"(r_a3), "r"(r_a4), "r"(r_a7),
+                       [body] "r"((lx_long)(unsigned long)body)
+                     : "memory");
+    return r_a0;
+}
+
+static void thread_body(void)
+{
+    lx_long local = 0x51;
+    lx_long tpv = 0;
+
+    __asm__ volatile("move %0, $tp" : "=r"(tpv));
+    g_thr_tp        = tpv;
+    g_thr_tid       = lx1(LX_GETTID, 0);
+    g_thr_pid       = lx1(LX_GETPID, 0);
+    g_thr_local_addr = (lx_long)(unsigned long)&local;
+    /* CHILD_SETTID 应当已经在跑起来之前就写好了：读回来必须是自己的 tid。 */
+    g_thr_ctid_self = g_thr_ctid;
+    g_thr_ran       = 1;
+    (void)lx1(LX_EXIT, 0);
+    for (;;)
+    {
+    }
+}
+
+/* 第二个线程只用来验「同组里能有两个」，退出码与第一次无关。 */
+static void thread_body2(void)
+{
+    (void)lx1(LX_EXIT, 0);
+    for (;;)
+    {
+    }
+}
+#endif
 
 #if defined(ARKRTOS_USE_PAGING_COW) && (ARKRTOS_USE_PAGING_COW == 1)
 /* 写时复制段用的一对全局：fork 之前两边都是 100，fork 之后父进程把它们
@@ -1425,16 +1511,32 @@ void linux_main(unsigned long sp)
                 check("clone for futex2 requeue child > 0",
                       (child10 > 0) ? 1 : 0, 1);
                 {
-                    int round;
+                    int     round;
+                    lx_long tdur[2];
 
+                    tdur[0] = 0;
+                    tdur[1] = 100000000L;       /* 100 ms：只用来给重试封顶 */
                     rc10 = -LX_EAGAIN;
-                    for (round = 0; round < 4; round++)
+                    for (round = 0; round < 60; round++)
                     {
                         lx_long v10 = (lx_long)(*q);
 
                         rc10 = lx4(LX_FUTEX, (lx_long)(unsigned long)q,
-                                   LX_FUTEX_WAIT, v10, 0);
-                        if (rc10 != -LX_EAGAIN)
+                                   LX_FUTEX_WAIT, v10,
+                                   (lx_long)(unsigned long)tdur);
+                        if (rc10 == 0)
+                        {
+                            break;
+                        }
+                        /* 三种「这次没等到」都要重试，真实调用方也是这么写的：
+                         *   -EAGAIN  子线程还没来得及把字改掉；
+                         *   -EINTR   被本进程里子进程退出的 SIGCHLD 打断
+                         *            （Linux 允许 FUTEX_WAIT 被信号打断）；
+                         *   -ETIMEDOUT 这一轮 100 ms 内子线程还没轮到。
+                         * 第一版只认 -EAGAIN，第九档里偶发把一次合法打断读成
+                         * 假红（rc10 = -4）。 */
+                        if ((rc10 != -LX_EAGAIN) && (rc10 != -LX_EINTR) &&
+                            (rc10 != -LX_ETIMEDOUT))
                         {
                             break;
                         }
@@ -2093,6 +2195,253 @@ void linux_main(unsigned long sp)
      * 里存在，所以不改变下面各档的条数。 */
     check("socket with the switch off == -ENOSYS",
           lx3(LX_SOCKET, LX_AF_INET, LX_SOCK_STREAM, 0), -LX_ENOSYS);
+#endif
+
+#if defined(ARKRTOS_USE_LINUX_THREAD) && (ARKRTOS_USE_LINUX_THREAD == 1)
+    /* ------------------------------------------------------------------
+     * 第三批：CLONE_THREAD
+     * ------------------------------------------------------------------ */
+    {
+        static unsigned char s_thr_stack[16384] __attribute__((aligned(16)));
+        static unsigned char s_thr2_stack[16384] __attribute__((aligned(16)));
+        unsigned int ptid = 0xFFFFFFFFu;   /* 内核按 int 写 4 字节，别拿 64 位读 */
+        lx_long  thr;
+        lx_long  self_local = 0x1234;
+        lx_long  parent_tid = lx1(LX_GETTID, 0);
+        lx_long  parent_pid = lx1(LX_GETPID, 0);
+        lx_long  flags;
+
+        flags = (lx_long)(LX_CLONE_VM | LX_CLONE_FS | LX_CLONE_FILES |
+                          LX_CLONE_SIGHAND | LX_CLONE_THREAD |
+                          LX_CLONE_SETTLS | LX_CLONE_PARENT_SETTID |
+                          LX_CLONE_CHILD_SETTID | LX_CLONE_CHILD_CLEARTID);
+
+        g_thr_ctid = 0x7eadbeef;      /* 非零，好观察 CLEARTID 有没有真的清 */
+        g_thr_ran  = 0;
+        g_thr_tid  = 0;
+        g_thr_pid  = 0;
+        g_thr_tp   = 0;
+
+        thr = lx_clone_thread_call(flags,
+                  (lx_long)(unsigned long)(s_thr_stack + sizeof(s_thr_stack)),
+                  (lx_long)(unsigned long)&ptid,
+                  (lx_long)(unsigned long)&g_thr_ctid,
+                  THR_TLS_MAGIC, thread_body);
+        check("clone(CLONE_THREAD) > 0", (thr > 0) ? 1 : 0, 1);
+        check("thread PARENT_SETTID wrote the tid", (lx_long)ptid, thr);
+
+        if (thr > 0)
+        {
+            /* pthread_join 的真实路径：CHILD_CLEARTID 把字清成 0 并 futex 唤醒。
+             * 上限 2 s，避免唤醒丢了就把整台机器挂死（那样连 FAIL 都印不出来）。 */
+            {
+                long     ts[2];
+                lx_long  dur[2];
+                lx_long  wrc = 0;
+                int      spun;
+
+                dur[0] = 0;
+                dur[1] = 0;
+                if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                        (lx_long)(unsigned long)ts, 0) == 0)
+                {
+                    dur[0] = ts[0] + 2;
+                    dur[1] = ts[1];
+                }
+                for (spun = 0; spun < 64; spun++)
+                {
+                    if (g_thr_ctid == 0)
+                    {
+                        wrc = 0;
+                        break;
+                    }
+                    wrc = lx4(LX_FUTEX,
+                              (lx_long)(unsigned long)&g_thr_ctid, LX_FUTEX_WAIT,
+                              g_thr_ctid, (lx_long)(unsigned long)dur);
+                    if ((wrc == 0) || (wrc != -LX_EAGAIN))
+                    {
+                        break;
+                    }
+                }
+                check("futex WAIT on CHILD_CLEARTID woke with 0", wrc, 0);
+            }
+            check("CHILD_CLEARTID cleared to 0", g_thr_ctid, 0);
+            check("thread ran", g_thr_ran, 1);
+            check("thread CHILD_SETTID saw its own tid", g_thr_ctid_self, thr);
+            check("thread tid != parent tid", (g_thr_tid != parent_tid) ? 1 : 0, 1);
+            check("thread getpid == tgid (parent pid)", g_thr_pid, parent_pid);
+            check("parent getpid unchanged after thread", lx1(LX_GETPID, 0),
+                  parent_pid);
+            check("CLONE_SETTLS landed in $tp", g_thr_tp, THR_TLS_MAGIC);
+            check("two stacks are distinct",
+                  (g_thr_local_addr != (lx_long)(unsigned long)&self_local) ? 1 : 0, 1);
+            check("parent local survived thread", self_local, 0x1234);
+        }
+
+        /* 第二个线程：同一组里再来一个，验证计数式退出（不是最后一个就别拆
+         * 进程的 fd 表 / 槽）没有把组拆坏。 */
+        g_thr2_ctid = 0x600df00d;
+        {
+            unsigned int ptid2 = 0xFFFFFFFFu;
+            lx_long thr2;
+
+            thr2 = lx_clone_thread_call(
+                       (lx_long)(LX_CLONE_VM | LX_CLONE_FS | LX_CLONE_FILES |
+                                 LX_CLONE_SIGHAND | LX_CLONE_THREAD |
+                                 LX_CLONE_PARENT_SETTID | LX_CLONE_CHILD_CLEARTID),
+                       (lx_long)(unsigned long)(s_thr2_stack + sizeof(s_thr2_stack)),
+                       (lx_long)(unsigned long)&ptid2,
+                       (lx_long)(unsigned long)&g_thr2_ctid,
+                       0, thread_body2);
+            check("second thread in group clone > 0", (thr2 > 0) ? 1 : 0, 1);
+
+            if (thr2 > 0)
+            {
+                int n;
+
+                for (n = 0; n < 400; n++)
+                {
+                    if (g_thr2_ctid == 0)
+                    {
+                        break;
+                    }
+                    (void)lx4(LX_FUTEX,
+                              (lx_long)(unsigned long)&g_thr2_ctid, LX_FUTEX_WAIT,
+                              g_thr2_ctid, 0);
+                }
+                check("second thread CHILD_CLEARTID cleared", g_thr2_ctid, 0);
+            }
+        }
+        check("process alive after two thread exits", lx1(LX_GETPID, 0),
+              parent_pid);
+
+        /* 反假绿：参数门槛。这四条在开关打开时也必须逐条拒绝。 */
+        check("CLONE_THREAD without CLONE_VM == -EINVAL",
+              lx3(LX_CLONE,
+                  (lx_long)(LX_CLONE_THREAD | LX_CLONE_SIGHAND | LX_CLONE_FS |
+                            LX_CLONE_FILES),
+                  (lx_long)(unsigned long)(s_thr_stack + sizeof(s_thr_stack)),
+                  0), -LX_EINVAL);
+        check("CLONE_THREAD child_stack=0 == -EINVAL",
+              lx3(LX_CLONE,
+                  (lx_long)(LX_CLONE_VM | LX_CLONE_THREAD), 0, 0), -LX_EINVAL);
+        check("CLONE_THREAD misaligned stack == -EINVAL",
+              lx3(LX_CLONE,
+                  (lx_long)(LX_CLONE_VM | LX_CLONE_THREAD),
+                  (lx_long)(unsigned long)(s_thr_stack + sizeof(s_thr_stack) - 8u),
+                  0), -LX_EINVAL);
+        check("CLONE_THREAD|CLONE_VFORK == -EINVAL",
+              lx3(LX_CLONE,
+                  (lx_long)(LX_CLONE_VM | LX_CLONE_THREAD | LX_CLONE_VFORK),
+                  (lx_long)(unsigned long)(s_thr_stack + sizeof(s_thr_stack)),
+                  0), -LX_EINVAL);
+
+        /* fork 之后仍然能 fork：线程退出没有把 fd 表 / 进程槽提前拆掉。 */
+        {
+            lx_long p = lx3(LX_CLONE, LX_SIGCHLD, 0, 0);
+
+            if (p == 0)
+            {
+                (void)lx1(LX_EXIT, 5);
+                for (;;)
+                {
+                }
+            }
+            if (p > 0)
+            {
+                lx_long st = -1;
+                lx_long r = -1;
+
+                for (;;)
+                {
+                    r = lx4(LX_WAIT4, p, (lx_long)(unsigned long)&st, 0, 0);
+                    if ((r == p) || (r < 0))
+                    {
+                        break;
+                    }
+                }
+                check("fork after threads reaped", r, p);
+                check("fork-after-threads exit code 5", (st >> 8) & 0xFF, 5);
+            }
+        }
+    }
+
+    /* exit_group(94) 从线程发起：整组一起走，wait4 拿到的码是线程给的那个。 */
+    {
+        lx_long p = lx3(LX_CLONE, LX_SIGCHLD, 0, 0);
+
+        if (p == 0)
+        {
+            static unsigned char s_eg_stack[8192] __attribute__((aligned(16)));
+            lx_long t = lx6(LX_CLONE,
+                            (lx_long)(LX_CLONE_VM | LX_CLONE_FS |
+                                      LX_CLONE_FILES | LX_CLONE_SIGHAND |
+                                      LX_CLONE_THREAD),
+                            (lx_long)(unsigned long)(s_eg_stack + sizeof(s_eg_stack)),
+                            0, 0, 0, 0);
+
+            if (t == 0)
+            {
+                (void)lx1(LX_EXIT_GROUP, 6);    /* 线程：整组退 */
+            }
+            if (t > 0)
+            {
+                for (;;)
+                {
+                    (void)lx1(LX_GETPID, 0);    /* 组长：等着被带走 */
+                }
+            }
+            (void)lx1(LX_EXIT, 99);             /* 造线程失败 */
+            for (;;)
+            {
+            }
+        }
+        if (p > 0)
+        {
+            lx_long st = -1;
+            lx_long r = -1;
+
+            for (;;)
+            {
+                r = lx4(LX_WAIT4, p, (lx_long)(unsigned long)&st, 0, 0);
+                if ((r == p) || (r < 0))
+                {
+                    break;
+                }
+            }
+            check("exit_group from a thread reaped the group", r, p);
+            check("exit_group-from-thread code 6", (st >> 8) & 0xFF, 6);
+        }
+    }
+
+    /* exit_group(94) 从组长发起：同样整组退出，码取组长的。 */
+    {
+        lx_long p = lx3(LX_CLONE, LX_SIGCHLD, 0, 0);
+
+        if (p == 0)
+        {
+            (void)lx1(LX_EXIT_GROUP, 7);
+            for (;;)
+            {
+            }
+        }
+        if (p > 0)
+        {
+            lx_long st = -1;
+            lx_long r = -1;
+
+            for (;;)
+            {
+                r = lx4(LX_WAIT4, p, (lx_long)(unsigned long)&st, 0, 0);
+                if ((r == p) || (r < 0))
+                {
+                    break;
+                }
+            }
+            check("exit_group from the leader reaped", r, p);
+            check("exit_group-from-leader code 7", (st >> 8) & 0xFF, 7);
+        }
+    }
 #endif
 
     if (g_fail == 0)

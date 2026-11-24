@@ -967,6 +967,90 @@ exit code 0`）。这条也进了判据：
 - **两条 `child reaped -> N ok` 的 `N` 是子进程 pid**，随档位变化（6 / 12 / 15 都出现过），
   所以判据只判形态（`^\[fork\] futex child reaped -> \d+ ok$`），不写死具体 pid。
 
+### 8.10 线程（`CLONE_THREAD`，U-25）：一组任务共用一份地址空间（2026-11-24，QEMU LA64 第九档 186 条）
+
+`clone(220)` 的线程分支落地，开关 `ARKRTOS_USE_LINUX_THREAD`（默认关，
+`depends on ARKRTOS_USE_LINUX_FORK`）。与 fork 分支的分流只看 flags：同时带
+`CLONE_VM` 与 `CLONE_THREAD` 走线程，`flags==0`/`SIGCHLD` 且 `child_stack==0`
+走 fork。除此之外一律 `-EINVAL`（含 `CLONE_VFORK`、只给 `CLONE_VM` 不给
+`CLONE_THREAD`、`child_stack==0`、栈不是 16 字节对齐）。
+
+| 语义 | 实现 |
+|---|---|
+| 地址空间 | **不复制**：子任务直接绑父的那个 `space`，同一份 `s_pg_pair_pa` 账本、同一批物理帧。父线程的 .bss 与子线程的 .bss 是同一个字 |
+| 帧 | 子线程的初始 trap 帧落在 `child_stack - LA_FR_SIZE`（1040 B），帧里 `SP = child_stack`、`A0 = 0`，其余寄存器（含 `ERA`）**原样继承父线程那次系统调用的帧** —— 于是子线程第一次被恢复时回到 `syscall` 的**下一条指令**、返回值 0，这正是旧式 `clone(2)` 的约定（glibc 的 `pthread_create` 也是靠这条约定分流的） |
+| 帧所在页 | 与 fork 相反：线程栈是**新页**，内核路径不做按需缺页，所以这里自己去帧池要那几对、**无条件清零**（池里的对可能装着别人刚还回来的内容；换出/换入一旦发生"刚起来是干净的"就不成立），失败就把这次拿到的还回去 |
+| 进程状态槽 | **共用**父的槽，靠引用计数。绑定发生在装载器的临界区里（`lx_thread_bind_hook`），而不是等子线程第一次进 ABI —— 晚一步子线程会给自己惰性分配新槽，症状是"线程里关不掉主线程的 fd"，且不报任何错 |
+| fd / 信号 | 同一张 fd 表、同一份信号动作与屏蔽字（都由共用槽承载） |
+| `CLONE_SETTLS` | `a2` 写进子线程帧的 `$tp`；`tls==0` 按"没给"处理（`$tp` 沿父线程）——**"把 `$tp` 设成 0"这个意图表达不出来**，登记在 [已知限制](已知限制.md) |
+| `PARENT_SETTID` / `CHILD_SETTID` | 都写 4 字节 `int`（内核侧先探一次可写再创建：创建之后才发现坏指针，只能留下一个跑着的线程和一个说不清的返回码） |
+| `CHILD_CLEARTID` | 退出时把那个字清零并 `FUTEX_WAKE` 一次 —— `pthread_join` 的等待就落在这条路上 |
+| `getpid` / `gettid` | `getpid(172)` 回**线程组号**（组长任务号），`gettid(178)` 回本线程号。关档时 `gettid` 仍回 `-ENOSYS` |
+
+**退出语义（这一节只有真跑才看得出来）。** `exit(93)` 只结束调用它的那个线程；
+`exit_group(94)` 结束同组全部线程。收尾路径按"组里还有没有别人活着"分岔：
+
+- **还有兄弟活着**：只清自己的 `CLEARTID`、唤醒等待者，**绝不**走 `sock_close_all`、
+  fd 释放与槽回收 —— 否则先退的那个线程会把整组的 fd 表与 socket 句柄一起带走。
+- **最后一个走（含组长）**：才做完整的资源回收（关 socket、释放每个 fd、清槽、
+  解绑），退出码记在组长那份 TCB 上，`wait4` 读的就是它。
+
+线程**不登记** `s_child[]`：Linux 的 `wait4` 看不见线程（它们不是子进程），
+所以整组只剩组长一个"对外的进程"。
+
+**QEMU 第九档：186 条 check 全 `ok` + `exit code 0`（600 ms）。** `tools/fork_gate.py`
+的第九档 = 第八档（161 条）+ 线程段 25 条。读数里最要紧的六条：
+
+- `clone(CLONE_THREAD) > 0 -> 1 ok`、`thread PARENT_SETTID wrote the tid -> 6 ok`；
+- `futex WAIT on CHILD_CLEARTID woke with 0 -> 0 ok` —— 用**真实的 join 路径**
+  （`CHILD_CLEARTID` + `FUTEX_WAIT`）等线程退出，一次验完 CLEARTID、WAKE、WAIT 三件事；
+- `CLONE_SETTLS landed in $tp -> 1515847680 ok`（`0x5a5a0000`）；
+- `thread getpid == tgid (parent pid) -> 14 ok` —— 门禁另有一条**交叉证据**：这个 14
+  必须等于夹具打出来的 `[fork] parent pid=`，否则"tgid 恒等于某个常量"也能过；
+- `exit_group from a thread reaped the group -> 6 ok` / `exit_group-from-leader code 7 -> 7 ok`
+  —— 两条都在**子进程**里做，不杀测试进程本身；中间夹一条 `fork after threads reaped -> 6 ok`
+  证明线程退出没有把进程的 fd 表 / 进程槽提前拆掉（否则后面 fork 会立刻失败）。
+
+反假绿：四条参数门槛（缺 `CLONE_VM`、`child_stack=0`、栈未对齐、带 `CLONE_VFORK`
+各 `-EINVAL`）在开档时逐条必须拒绝；`judge()` 对七条线程读数逐条要求"恰好出现一次"，
+`self_check()` 有七种坏样本（CLEARTID 没清、WAIT 没唤醒、SETTLS 没落、`getpid` 不等
+tgid、两栈同址、`exit_group` 码错、缺 clone 读数）必须被判红。
+
+**关档零变化。** `arkrtos_elf_thread` / `arkrtos_port_paging_thread_frame` 两个函数
+与 `lx_thread_group_exit` / `lx_clone_thread` / `lx_thread_bind_hook` / `lx_thread_clear_tid`
+四个符号在关档时**一个都不产出**，门禁 `off-zero-symbols` 用 `nm` 逐条核对。
+
+**四个只有真跑才暴露的坑（都已修）。**
+
+1. **`gettid` 的号抄成了 186。** 186 是 x86_64 的 `gettid`；LA64 走 asm-generic 表，
+   是 **178**。号写错的后果不是报错，而是"真实 glibc 程序调 `gettid` 拿到 `-ENOSYS`"——
+   夹具自己用的是同一个常量，所以自测全绿也发现不了。这一条是复核系统调用表时抓出来的。
+2. **子线程不是"跳到线程体"，而是从 `syscall` 的下一条指令继续跑。** 第一版夹具直接
+   `thr = clone(...);` 之后就当作父线程继续，结果子线程把父线程后面的检查**整段又跑了
+   一遍**（日志里同一句出现两次、第二次读数是 0），并且线程体一次都没执行。真实写法是
+   `if (thr == 0) { 线程体(); }`，而且这个分支必须挤在 `syscall` 与分支之间**不许编译器
+   插入任何读栈的指令**（子线程此时已经换到自己的栈上，父栈的内容它读不到）：夹具按
+   musl `__clone` 的写法把 `syscall` / `bnez` / `jirl` 放进同一个 asm 块。
+3. **`PARENT_SETTID` 是 4 字节 `int`。** 夹具拿 `lx_long` 接、初值 `-1`，内核只写低
+   4 字节，读回来是 `-4294967290`（低 32 位是 tid、高 32 位还是 `0xFFFFFFFF`）。这和
+   §8.9 的 `getsockopt` 坑是同一类，修法也一样：用 `unsigned int`。
+4. **`FUTEX_WAIT` 会被同进程子进程退出的 `SIGCHLD` 打断（`-EINTR`）。** requeue 用例
+   第一版只把 `-EAGAIN` 当"重试"，第九档里偶发一次合法打断就被读成假红（`rc10 = -4`）。
+   真实调用方对 `-EINTR` 也是重试的，夹具改成 `-EAGAIN` / `-EINTR` / `-ETIMEDOUT` 三种
+   都重试，并给它 100 ms 一轮、最多 60 轮的上限（既不会挂死，也不会把"没等到"读成"等到"）。
+
+**写死的边界（不假装修好了）。**
+
+- **SMP 未验证。** `exit_group` 强杀的是"可能正在另一核上跑"的任务，本内核没有核间
+  停核协议；线程档只在**单核** QEMU 配置下跑过。
+- **`execve` 在非组长线程上的行为未定义。** `execve` 换的是**当前任务**的映像，同组
+  其它线程仍指着旧空间；Linux 的语义是"`execve` 结束整组、只留调用者"，本内核没有这么做，
+  也**没有**在非组长线程上拒绝（登记在 [已知限制](已知限制.md)）。
+- **没有线程本地存储模块分配、没有 robust futex 表、没有 `set_robust_list`。** `SETTLS`
+  只写 `$tp`，TLS 布局是 libc 的事；`SET_TID_ADDRESS` 只回报自己的 tid、不保存指针。
+- **没有优先级 / 调度策略继承的额外语义**：线程就是一个普通任务，优先级、时间片与
+  其它任务同档。
+
 ## 9 开关与零体积
 
 - `ARKRTOS_USE_LINUX_ABI`（`kernelsrc/include/arkrtos_features.h`、
@@ -975,6 +1059,9 @@ exit code 0`）。这条也进了判据：
 - 默认关时：`arkrtos_linux_abi.c` 整文件不产出任何符号，port 里没有
   `arkrtos_port_linux_syscall_num`，`arkrtos_hal.h` 只剩空宏。**体积与行为零变化**，
   这一条在门禁里是双向实测的（关档 `.o` 的符号表必须全空）。
+- `ARKRTOS_USE_LINUX_THREAD`（§8.10），默认 **0**，`depends on ARKRTOS_USE_LINUX_FORK`
+  （features.h 有一条 `#error` 顶住）。关档时 `arkrtos_elf_thread` /
+  `arkrtos_port_paging_thread_frame` 两个函数与四个 `lx_thread_*` 符号全部不产出。
 - `ARKRTOS_USE_LINUX_FORK`（§8），默认 **0**，`depends on ARKRTOS_USE_LINUX_ABI &&
   ARKRTOS_USE_EXIT_CODE` 且 `depends on ARKRTOS_USE_PAGING_PAGES &&
   ARKRTOS_USE_PAGING_DEMAND`；关档时 fork 的四个符号（`arkrtos_elf_fork` 与端口层
@@ -1052,7 +1139,7 @@ socket 这一层是**两侧都有读数**的：宿主侧是 `tools/coverage_gate
 **第八档**（`-DARKRTOS_USE_LINUX_SELECT=1 -DARKRTOS_USE_LINUX_SOCKET=1 -DARKRTOS_USE_LWIP=1`），
 QEMU LA64 上 161 条 check 全 `ok` + `exit code 0`。
 
-fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**57 项**；fork / fork+COW / fork+COW+SHM / fork+COW+SHM+futex / fork+COW+SHM+futex+filemap / fork+COW+SHM+futex+filemap+mprotect / fork+COW+SHM+futex+filemap+mprotect+select / fork+COW+SHM+futex+filemap+mprotect+select+socket **八档各跑一遍**，所以 build / qemu-readout / parser-selfcheck 各出现八次、compile-on 八次）：
+fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**64 项**；fork / fork+COW / fork+COW+SHM / fork+COW+SHM+futex / fork+COW+SHM+futex+filemap / fork+COW+SHM+futex+filemap+mprotect / fork+COW+SHM+futex+filemap+mprotect+select / fork+COW+SHM+futex+filemap+mprotect+select+socket / fork+COW+SHM+futex+filemap+mprotect+select+socket+thread **九档各跑一遍**，所以 build / qemu-readout / parser-selfcheck 各出现九次、compile-on 九次）：
 
 | 项 | 钉住什么 |
 |---|---|
@@ -1069,12 +1156,16 @@ fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**5
 | `qemu-readout`（filemap 档） | fork+COW+SHM+futex+filemap：`[fork]` **96 条** check 全 `ok`；filemap 段 20 条读数逐条校验（私有只读内容三读数、页尾仍是文件内容、offset 非对齐回 `-22`、坏 fd 回 `-9`、只读 fd 上可写共享映射回 `-13`、offset=4096 生效且 EOF 后读零、O_RDWR 打开成功、可写共享映射 + `msync` + `munmap`、私有映射 `msync` 不落盘、重映射读回、`bits=31` 的五位证据）；SHM / COW / futex 的全部判据同时仍在 |
 | `qemu-readout`（mprotect 档） | fork+COW+SHM+futex+filemap+mprotect：`[fork]` **107 条** check 全 `ok`；mprotect 段 11 条逐条校验（映射成功、`mprotect` 双向可设、只读页仍可读、同对另一半仍可写、撤保护后写得进、违规子进程被 reap 而非重启、状态字 = SIGSEGV、父页未被改）；串口另须有一行 `[LA64U] mprotect violation badv=0x… era=0x… tid=… -> kill task`；filemap / SHM / COW / futex 的全部判据同时仍在 |
 | `qemu-readout`（select 档） | fork+COW+SHM+futex+filemap+mprotect+select：`[fork]` **122 条** check 全 `ok`；select 段 15 条逐条校验（空管道读端不就绪、非就绪时用户集被清位、50 ms 定时等待回 0 且墙钟 >= 40 ms、有数据后读端就绪且就绪位保留、有空间的写端与 stdout 可写、写满后写端不就绪、写端全关后按 EOF 就绪、`exceptfds` 永不上报且被清位、坏 fd 回 `-9`）；mprotect / filemap / SHM / COW / futex 的全部判据同时仍在 |
-| `parser-selfcheck` | 9 种坏日志必须判红（COW 档另加 4 种：位掩码丢一位、父写丢失、整类删光 copy 行、fork 时搬了字节；SHM 档再加 5 种：删光 `pg shm map` 行、共享写没被父看到、子看不到父的写、共享页起始非 0、缺映射成功读数；futex 档再加 8 种：WAIT 没被叫醒、唤醒者只看到一半（`bits=1`）、无等待者 WAKE 回 1、多时间片 WAIT 被打成 `-EFAULT`、多时间片没跨过时间片、位集被忽略（`bits=7` 变 3）、改挂没搬走等待者、超时没到期；filemap 档再加 3 种：写回没发生、写回把文件截短、私有映射的改动被落盘；mprotect 档再加 7 种：只读页读不回来、粒度退化成 8 KB、违规写没被拦住、违规写改了父页、状态字当成退出码、缺违规日志行、缺成功读数；select 档再加 8 种：空管道被报就绪、EOF 不报就绪、满管道仍报可写、`fd_set` 没清位、超时被重新计时、`exceptfds` 被上报、坏 fd 被放过、缺 select 读数） |
+| `qemu-readout`（socket 档） | fork+COW+SHM+futex+filemap+mprotect+select+socket：`[fork]` **161 条** check 全 `ok`；socket 段 38 条逐条校验（`127.0.0.1` 真 lwIP 回环上的 bind/listen/accept/connect/send/recv、名字查询、`SOL_SOCKET` 四条 option、非阻塞 `-EAGAIN`，含一条往返耗时回归门）；select / mprotect / filemap / SHM / COW / futex 的全部判据同时仍在 |
+| `qemu-readout`（thread 档） | fork+COW+SHM+futex+filemap+mprotect+select+socket+thread：`[fork]` **186 条** check 全 `ok`；线程段 25 条逐条校验（`clone(CLONE_THREAD)` 正负、两个 SETTID、`getpid`=tgid 且与夹具打出的父 pid 交叉相等、`gettid` 与父不同、`CLONE_SETTLS` 落 `$tp`、两栈不同址、父局部存活、`CHILD_CLEARTID` 清 0 + `FUTEX_WAIT` 被唤醒、四条参数门槛、线程后仍能 `fork`、线程发起与组长发起的 `exit_group` 各一条）；socket 及以下各档判据同时仍在 |
+| `parser-selfcheck` | 9 种坏日志必须判红（COW 档另加 4 种：位掩码丢一位、父写丢失、整类删光 copy 行、fork 时搬了字节；SHM 档再加 5 种：删光 `pg shm map` 行、共享写没被父看到、子看不到父的写、共享页起始非 0、缺映射成功读数；futex 档再加 8 种：WAIT 没被叫醒、唤醒者只看到一半（`bits=1`）、无等待者 WAKE 回 1、多时间片 WAIT 被打成 `-EFAULT`、多时间片没跨过时间片、位集被忽略（`bits=7` 变 3）、改挂没搬走等待者、超时没到期；filemap 档再加 3 种：写回没发生、写回把文件截短、私有映射的改动被落盘；mprotect 档再加 7 种：只读页读不回来、粒度退化成 8 KB、违规写没被拦住、违规写改了父页、状态字当成退出码、缺违规日志行、缺成功读数；select 档再加 8 种：空管道被报就绪、EOF 不报就绪、满管道仍报可写、`fd_set` 没清位、超时被重新计时、`exceptfds` 被上报、坏 fd 被放过、缺 select 读数；socket 档再加 6 种；线程档再加 7 种：CLEARTID 没清 0、join 的 WAIT 没被唤醒、`SETTLS` 没落 `$tp`、线程 `getpid` 不等于 tgid、两栈同址、线程发起的 `exit_group` 码被改成组长的、缺 `clone(CLONE_THREAD)` 读数。累计 fork 10 / cow 14 / shm 19 / futex 27 / filemap 31 / mprotect 38 / select 46 / socket 52 / thread 59 种） |
 | `default-off-shm` / `kconfig-wired-shm` / `features-guard-shm` | SHM 开关的三件套：autoconf 为 0、Kconfig 有 `depends on ARKRTOS_USE_PAGING_COW`、features.h 有对应 `#error`；`off-zero-port` 另核关档没有 `arkrtos_port_paging_map_shared` |
 | `default-off-futex` / `kconfig-wired-futex` / `features-guard-futex` | futex 开关的三件套：autoconf 为 0、Kconfig 有 `depends on ARKRTOS_USE_LINUX_ABI`、features.h 有对应 `#error` |
 | `default-off-filemap` / `kconfig-wired-filemap` / `features-guard-filemap` | 文件映射开关的三件套：autoconf 为 0、Kconfig 四条 `depends on`（ABI / PAGING / PAGES / DEMAND）、features.h 四条 `#error` |
 | `default-off-mprotect` / `kconfig-wired-mprotect` / `features-guard-mprotect` | mprotect 开关的三件套：autoconf 为 0、Kconfig 四条 `depends on`（ABI / PAGING / PAGES / DEMAND）、features.h 四条 `#error` |
 | `default-off-select` / `kconfig-wired-select` / `features-guard-select` | select 开关的三件套：autoconf 为 0、Kconfig 有 `depends on ARKRTOS_USE_LINUX_ABI`、features.h 有对应 `#error`；`off-zero-port` 同档核关档没有 select 的新符号 |
+| `default-off-socket` / `kconfig-wired-socket` / `features-guard-socket` | socket 开关的三件套：autoconf 为 0、Kconfig 两条 `depends on`（ABI / LWIP）、features.h 两条 `#error`；`off-zero-port` 同档核关档没有 socket 的新符号 |
+| `default-off-thread` / `kconfig-wired-thread` / `features-guard-thread` | 线程开关的三件套：autoconf 为 0、Kconfig 有 `depends on ARKRTOS_USE_LINUX_FORK`、features.h 有对应 `#error`；`off-zero-symbols` / `off-zero-port` 同档核关档 `arkrtos_elf_thread` / `arkrtos_port_paging_thread_frame` 与四个 `lx_thread_*` 全不产出 |
 | `restore-default` | 收尾把构建目录恢复默认档（避免下一次 `make` 复用 fork 档 `.o`） |
 
 `parser-selfcheck` 是防「绿得没有信息量」的：Linux 块去掉 PASS 行、退出码改 3、

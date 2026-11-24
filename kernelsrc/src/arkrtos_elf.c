@@ -339,6 +339,53 @@ static int32 s_elf_last = -1;                       /* 最近一次装载落在�
 
 /* 任务退出后 status 回到 INVALID。懒清理：不要求退出路径回调进来，
  * 代价是一次数组读，和原来的单实例版本同量级。 */
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+/* 这个空间里除了 skip_id 之外还有几个活着的用户任务（U-25）。
+ *
+ * 为什么按需数一遍而不是维持一个计数器：计数器的每一次减都押在「每条退出
+ * 路径都会回调进来」上，而这个内核里退出路径不止一条（正常 exit、mprotect
+ * 故障摘任务、以及将来可能加的强制回收）。漏掉一条的表现是空间**永远**无法
+ * 释放 —— 那种缺陷只在跑满一整轮 fork/exec 之后才看得见。数一遍是 O(任务表)，
+ * 而且只在「组长已经死了」这条冷路径上发生。
+ *
+ * 判据刻意保守：非特权 + 空间号相同 + 栈顶非 0。没绑过空间的用户任务不会被
+ * 误当成占用者（它们的栈顶还没被装载器设过）。 */
+static uint32 elf_other_live_in(uint32 space, int32 skip_id)
+{
+    uint32 i;
+    uint32 n = 0u;
+
+    for(i = 0u; i < (uint32)ARKRTOS_TASK_MAX_NUM; i++)
+    {
+        arkrtos_task_t *p = &arkrtos_task_table[i];
+
+        if(((int32)(i + 1u)) == skip_id)
+        {
+            continue;
+        }
+        if(p->status == ARKRTOS_TASK_INVALID)
+        {
+            continue;
+        }
+        if((p->is_priv != 0u) || (p->stack_top == 0ul))
+        {
+            continue;
+        }
+#if (ARKRTOS_USE_PAGING == 1)
+        if(arkrtos_paging_space_of(p) != space)
+        {
+            continue;
+        }
+#else
+        (void)space;
+#endif
+        n++;
+    }
+
+    return n;
+}
+#endif
+
 static int32 elf_slot_live(uint32 space)
 {
     int32 id;
@@ -356,6 +403,27 @@ static int32 elf_slot_live(uint32 space)
 
     if(arkrtos_task_table[id - 1].status == ARKRTOS_TASK_INVALID)
     {
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+        /* 组长先退了、同组线程还在跑：这个空间仍是活的，但退出码现在就要
+         * 取走 —— 组长的 TCB 随时会被复用，等最后一个线程退时它已经不在了。
+         * exit_code_set 保证只取一次。 */
+        if(elf_other_live_in(space, id) != 0u)
+        {
+#if (ARKRTOS_USE_EXIT_CODE == 1)
+            if(s_elf_info[space].exit_code_set == 0u)
+            {
+                int32 code0 = 0;
+
+                if(arkrtos_task_exit_code(id, &code0) != 0)
+                {
+                    s_elf_info[space].exit_code = code0;
+                    s_elf_info[space].exit_code_set = 1u;
+                }
+            }
+#endif
+            return 1;
+        }
+#endif
 #if (ARKRTOS_USE_EXIT_CODE == 1)
         /* U-8：任务死了但 TCB 还没被复用，这是唯一能安全取退出码的时刻；
          * 取走之后再清槽位。没上报过就保持 exit_code_set=0，不编 0。 */
@@ -2327,6 +2395,132 @@ int32 arkrtos_elf_fork(void *p_svc_ctx, int32 *p_child_task,
     return ARKRTOS_ELF_OK;
 }
 #endif /* ARKRTOS_USE_LINUX_FORK == 1 */
+
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+/* 线程注册用的内核静态栈：与 fork 的那份同构，只有一个用途 ——
+ * arkrtos_task_register() 要一块能写初始帧的地方。注册完立刻把 TCB 的
+ * stack_ptr 改成用户帧，于是这块内存活到本次调用结束。
+ * 单份够用：register 与「改 stack_ptr」在同一个临界区里，另一核进不来，
+ * 而离开临界区时子任务的 stack_ptr 已经指向它自己的栈了。 */
+static uint32 s_elf_thread_scratch[ELF_FORK_SCRATCH_WORDS];
+
+/**
+* @brief 在当前任务的同一份地址空间里再起一个任务（U-25：CLONE_THREAD）
+* @details 顺序与 fork 同源，但少了「挑空间 / 复制空间 / 写同一 VA 的帧」：
+*          1) 帧直接造在 child_stack 顶上下一个帧长处（port 负责要帧、清零、
+*             写寄存器）；
+*          2) 临界区里注册任务，把 TCB 的窗口/入口/栈改成线程自己的；
+*          3) **先 bind_task，再改 stack_ptr**：bind_task 在 SMP 档会检查
+*             「stack_ptr + 帧长 == stack_top」，正好成立时会把这一帧当初始
+*             帧重造（ERA 改成 entry）。线程的现场是真的现场，不能被重造。
+*          失败时那几对新帧留在空间里（它们已经记在空间账上，空间回收时一起
+*          还回去）；这里不逐个还帧，因为还帧要把对号从空间账上抹掉，而抹错
+*          一格就是别的线程的栈。
+*          台账不维护计数器：组长死没死由 elf_slot_live 现场数（见那里的注释）。
+*/
+int32 arkrtos_elf_thread(void *p_svc_ctx, unsigned long child_stack,
+                         unsigned long child_tls, int32 *p_child_task,
+                         void (*p_hook)(int32 parent, int32 child))
+{
+    uint32 parent_space;
+    uint32 crit;
+    int32  parent_id = arkrtos_current_task_id;
+    arkrtos_task_t *p_parent;
+    unsigned long frame_va = 0ul;
+    int32  rc;
+    int32  id;
+
+    if(p_child_task != 0)
+    {
+        *p_child_task = 0;
+    }
+    if((p_svc_ctx == 0) || (parent_id <= 0) ||
+       (parent_id > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return ARKRTOS_ELF_ERR_PARAM;
+    }
+
+    p_parent = &arkrtos_task_table[parent_id - 1];
+    if(p_parent->is_priv != 0u)
+    {
+        /* 内核任务没有用户窗口，也就没有「同空间再起一个」这回事。 */
+        return ARKRTOS_ELF_ERR_PARAM;
+    }
+
+#if (ARKRTOS_USE_PAGING == 1)
+    parent_space = arkrtos_paging_space_of(p_parent);
+#else
+    return ARKRTOS_ELF_ERR_PARAM;
+#endif
+
+    rc = arkrtos_port_paging_thread_frame(p_svc_ctx, parent_space, child_stack,
+                                          child_tls, &frame_va);
+    if(rc != 0)
+    {
+        return ARKRTOS_ELF_ERR_NOMEM;
+    }
+
+    crit = ARKRTOS_ENTER_CRITICAL();
+    id = arkrtos_task_register((void (*)(void))p_parent->entry,
+                               s_elf_thread_scratch,
+                               (uint32)sizeof(s_elf_thread_scratch),
+                               p_parent->priority, 0u);
+    if(id <= 0)
+    {
+        ARKRTOS_EXIT_CRITICAL(crit);
+        return ARKRTOS_ELF_ERR_NOMEM;
+    }
+
+    {
+        arkrtos_task_t *p_child = &arkrtos_task_table[id - 1];
+
+        p_child->is_priv      = 0u;
+        p_child->rom_start    = p_parent->rom_start;
+        p_child->rom_size     = p_parent->rom_size;
+        p_child->ram_start    = p_parent->ram_start;
+        p_child->ram_size     = p_parent->ram_size;
+        p_child->entry        = p_parent->entry;
+        /* 线程只拿到栈顶，拿不到栈的大小：clone(2) 的契约就是「栈由调用者
+         * 自己 mmap，内核只管从哪开始」。所以大小记 0、栈底保护字不布防 ——
+         * 假装知道边界比不知道更危险。 */
+        p_child->stack_top    = child_stack;
+        p_child->stack_bottom = (uint32 *)child_stack;
+        p_child->stack_size   = 0u;
+#if (ARKRTOS_USE_STACK_USAGE == 1)
+        p_child->stack_peak_low = child_stack;
+#endif
+#if (ARKRTOS_USE_STACK_GUARD == 1)
+        p_child->stack_guard_armed    = 0u;
+        p_child->stack_guard_reported = 0u;
+#endif
+#if (ARKRTOS_USE_EXIT_CODE == 1)
+        p_child->exit_code     = 0;
+        p_child->exit_code_set = 0u;
+#endif
+#if (ARKRTOS_USE_MPU == 1)
+        arkrtos_mpu_build_task(p_child);
+#endif
+        (void)arkrtos_paging_bind_task(p_child, parent_space);
+        /* 绑定之后再改 stack_ptr：见函数头的第 3 条。 */
+        p_child->stack_ptr = frame_va;
+        /* 记账回调也必须在临界区里：子任务一离开这里就可能被切上 CPU，
+         * 等它第一次进 ABI 时再绑槽就已经晚了（见 elf.h 的注释）。 */
+        if(p_hook != 0)
+        {
+            p_hook(parent_id, id);
+        }
+    }
+
+    ARKRTOS_EXIT_CRITICAL(crit);
+
+    if(p_child_task != 0)
+    {
+        *p_child_task = id;
+    }
+
+    return ARKRTOS_ELF_OK;
+}
+#endif /* ARKRTOS_USE_LINUX_THREAD == 1 */
 
 /**
 * @brief 兼容入口：装一个 ELF 程序，不关心它落到哪个空间

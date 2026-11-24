@@ -604,6 +604,35 @@ config ARKRTOS_USE_LINUX_FORK
 	  loader's fork entry and syscalls 220/260 are all absent, so the image is
 	  byte-for-byte what it was before this option existed.
 
+config ARKRTOS_USE_LINUX_THREAD
+	bool "CLONE_THREAD threads for Linux ABI user tasks (U-25)"
+	depends on ARKRTOS_USE_LINUX_FORK
+	help
+	  Let clone(220) create a task that SHARES the caller's address space
+	  instead of copying it: flags must carry both CLONE_VM and CLONE_THREAD,
+	  child_stack must be non-zero and 16-byte aligned. The child gets its own
+	  task id, its own trap frame and its own user stack, but the same page
+	  space, the same fd table and the same signal state; the process state
+	  slot is shared through a reference count.
+
+	  Accepted flags: CLONE_VM, CLONE_THREAD, CLONE_SIGHAND, CLONE_FILES,
+	  CLONE_FS, CLONE_SETTLS (arg2 becomes the child's $tp), CLONE_PARENT_SETTID,
+	  CLONE_CHILD_SETTID, CLONE_CHILD_CLEARTID (the word is cleared and one
+	  FUTEX_WAKE is issued when the thread exits - this is what pthread_join
+	  waits on). Rejected with -EINVAL: CLONE_VFORK, CLONE_VM without
+	  CLONE_THREAD, child_stack == 0 or misaligned, and every CLONE_NEW*.
+
+	  Boundaries: wait4 does not see threads; exit(93) ends the calling thread
+	  only; exit_group(94) ends the whole group and leaves its code on the
+	  leader's TCB; getpid(172) returns the thread-group id and gettid(186)
+	  returns the calling thread id. A thread group whose leader died stays
+	  alive while any sibling thread is still running.
+
+	  Requires ARKRTOS_USE_LINUX_FORK. Off (default) compiles nothing: the
+	  thread entry point in the port, the loader's thread entry, the clone
+	  thread branch and gettid are all absent, so the image is byte-for-byte
+	  what it was before this option existed.
+
 config ARKRTOS_USE_PAGING_COW
 	bool "Copy-on-write fork (U-19b)"
 	depends on ARKRTOS_USE_LINUX_FORK

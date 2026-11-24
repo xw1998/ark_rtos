@@ -78,6 +78,8 @@
 #define LX_SYS_GETPID               (172u)
 #define LX_SYS_GETUID               (174u)
 #define LX_SYS_GETEUID              (175u)
+#define LX_SYS_GETTID               (178u)  /* U-25：asm-generic 表（LA64 用这张）；
+                                             * 186 是 x86_64 的，别抄错 */
 #define LX_SYS_BRK                  (214u)
 #define LX_SYS_MUNMAP               (215u)
 #define LX_SYS_EXECVE               (221u)
@@ -179,6 +181,28 @@
  * -EAGAIN（在真正 fork 之前判），不是生完再丢记录。 */
 #define LX_MAX_CHILD                (4u)
 #define LX_SIGCHLD_FLAG             (17u)
+
+/* clone(2) 的旗标位（asm-generic 的 linux/sched.h）。只有 U-25 那一档认其中
+ * 一部分；其余位一旦出现就 -EINVAL，绝不当成「差不多的旗标」放过去 ——
+ * 一个被忽略的旗标会让程序以为拿到了它要的语义（典型是 CLONE_VFORK）。 */
+#define LX_CLONE_VM                 (0x00000100u)
+#define LX_CLONE_FS                 (0x00000200u)
+#define LX_CLONE_FILES              (0x00000400u)
+#define LX_CLONE_SIGHAND            (0x00000800u)
+#define LX_CLONE_VFORK              (0x00004000u)
+#define LX_CLONE_THREAD             (0x00010000u)
+#define LX_CLONE_NEWNS              (0x00020000u)
+#define LX_CLONE_SETTLS             (0x00080000u)
+#define LX_CLONE_PARENT_SETTID      (0x00100000u)
+#define LX_CLONE_CHILD_CLEARTID     (0x00200000u)
+#define LX_CLONE_CHILD_SETTID       (0x01000000u)
+/* 线程档接受的位（其余一律 -EINVAL）：VM / THREAD 是必需的，FS / FILES /
+ * SIGHAND 在本内核里本来就是共享的（进程状态槽只有一份），所以接受；
+ * SETTLS / 两个 SETTID / CLEARTID 真的实现了。 */
+#define LX_CLONE_THREAD_OK  (LX_CLONE_VM | LX_CLONE_FS | LX_CLONE_FILES | \
+                             LX_CLONE_SIGHAND | LX_CLONE_THREAD | \
+                             LX_CLONE_SETTLS | LX_CLONE_PARENT_SETTID | \
+                             LX_CLONE_CHILD_SETTID | LX_CLONE_CHILD_CLEARTID)
 #define LX_WNOHANG                  (1u)
 #endif
 #if (ARKRTOS_USE_LINUX_FUTEX == 1)
@@ -519,6 +543,14 @@ typedef struct
     lx_sigaction_t sig[LX_NSIG];
     uint32         sig_pending;
     uint32         sig_blocked;
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+    /* U-25：线程组号（= 组长的任务号）与组长注册时的代次。同一组的线程
+     * 共用一个槽，所以这两个字段对组里每个成员都是同一份 —— getpid 读它，
+     * exit_group 靠它认出「我这一组是谁」。tgid == 0 表示还没定（惰性分配
+     * 的槽在第一次进 ABI 时补上）。 */
+    int32          tgid;
+    uint32         tgid_gen;
+#endif
 #if (ARKRTOS_USE_PAGING_FILEMAP == 1)
     lx_filemap_t   fmap[LX_FILEMAP_MAX];
 #endif
@@ -531,6 +563,12 @@ static uint8 s_proc_of_task[ARKRTOS_TASK_MAX_NUM];   /* 0 = 未绑定；n = 槽 
 /* 1 = 该任务正卡在 wait4 的阻塞里：子进程退出 / 收到信号时只唤醒这种任务，
  * 不去打扰因为别的原因（sleep、信号量）在等的任务。 */
 static uint8 s_lx_wait[ARKRTOS_TASK_MAX_NUM];
+#endif
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+/* 每个线程的 CLONE_CHILD_CLEARTID 地址（0 = 没给）。退出时把那个字清零并
+ * FUTEX_WAKE 一次 —— pthread_join 就卡在这里等。放在 ABI 层而不是 TCB 里：
+ * 这是 Linux 语义的东西，内核核心不需要知道它。 */
+static unsigned long s_lx_cleartid[ARKRTOS_TASK_MAX_NUM];
 #endif
 
 /* 历史名字改成宏：函数体里 s_fd[i] / s_sig[n] / s_sig_pending / s_sig_blocked
@@ -587,6 +625,10 @@ static void lx_proc_zero(uint32 slot)
     }
     s_proc[slot].sig_pending = 0u;
     s_proc[slot].sig_blocked = 0u;
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+    s_proc[slot].tgid     = 0;
+    s_proc[slot].tgid_gen = 0u;
+#endif
 }
 
 #if (ARKRTOS_USE_LINUX_FORK == 1)
@@ -664,6 +706,13 @@ static uint32 lx_proc_cur(void)
     }
     lx_proc_zero((uint32)slot);
     lx_proc_bind((uint32)slot, (int32)arkrtos_current_task_id);
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+    /* 这个槽的第一位主人就是组长。代次一起记下：任务槽会被复用，单看任务号
+     * 认不出「同一个号上的新旧两个实例」。 */
+    s_proc[(uint32)slot].tgid     = (int32)arkrtos_current_task_id;
+    s_proc[(uint32)slot].tgid_gen =
+        arkrtos_task_table[arkrtos_current_task_id - 1].generation;
+#endif
     return (uint32)slot;
 #else
     return 0u;
@@ -2895,6 +2944,13 @@ static void lx_proc_fork_child(uint32 slot, int32 child, int32 parent)
         s_proc[slot].sig_pending = 0u;
     }
     lx_proc_bind(slot, child);
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+    /* fork 出来的子进程是**自己那一组**的组长：它之后 clone 出来的线程挂在
+     * 这个槽上，getpid 也回它。 */
+    s_proc[slot].tgid     = child;
+    s_proc[slot].tgid_gen = ((child > 0) && (child <= (int32)ARKRTOS_TASK_MAX_NUM)) ?
+                            arkrtos_task_table[child - 1].generation : 0u;
+#endif
 }
 #endif /* ARKRTOS_USE_LINUX_FORK == 1 */
 
@@ -3902,6 +3958,258 @@ static int32 lx_child_slot(void)
     return -1;
 }
 
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+/* ---------------------------------------------- 线程组（U-25）
+
+ * 三个判据都刻意「现场数一遍」而不是维护计数器：
+ *   - 一个组里有几个任务活着：数 s_proc_of_task（O(任务表)，只在退出与
+ *     wait4 这些冷路径上发生）；
+ *   - 计数器要押「每条退出路径都会回调」，而这个内核里退出路径不止一条
+ *     （正常 exit、mprotect 故障摘任务、exit_group 强杀），漏一条就是
+ *     槽位永远不释放 —— 那种缺陷只在跑满一轮循环之后才现形。
+ */
+
+/* 这个槽上除了 task_id 之外还有几个活着的任务。0 = 我是最后一个。 */
+static uint32 lx_proc_others_live(uint32 slot, int32 task_id)
+{
+    uint32 i;
+    uint32 n = 0u;
+
+    if(slot >= (uint32)LX_PROC_MAX)
+    {
+        return 0u;
+    }
+    for(i = 0u; i < (uint32)ARKRTOS_TASK_MAX_NUM; i++)
+    {
+        if(((int32)(i + 1u)) == task_id)
+        {
+            continue;
+        }
+        if(s_proc_of_task[i] != (uint8)(slot + 1u))
+        {
+            continue;
+        }
+        if(arkrtos_task_table[i].status == ARKRTOS_TASK_INVALID)
+        {
+            continue;
+        }
+        n++;
+    }
+    return n;
+}
+
+/* 当前任务的线程组号。没有进程状态（还没进过 ABI）就回自己的任务号 ——
+ * 那正是「一个任务自成一组」的情形。 */
+static int32 lx_tgid_of_current(void)
+{
+    int32 slot = lx_proc_find((int32)arkrtos_current_task_id);
+
+    if((slot >= 0) && (s_proc[(uint32)slot].tgid > 0))
+    {
+        return s_proc[(uint32)slot].tgid;
+    }
+    return (int32)arkrtos_current_task_id;
+}
+
+/* 线程记账回调：在装载器的临界区里被调用，只写一格 uint8（见 elf.h）。 */
+static void lx_thread_bind_hook(int32 parent, int32 child)
+{
+    int32 slot = lx_proc_find(parent);
+
+    if(slot >= 0)
+    {
+        lx_proc_bind((uint32)slot, child);
+    }
+}
+
+/**
+* @brief clone(2) 的线程分支：共享地址空间 + 共享进程状态槽
+* @details 与 fork 分支的差别有三条，每条都必须做对：
+*            1) 地址空间**不复制**（arkrtos_elf_thread 直接绑父的那个 space），
+*               于是父子的全局变量是同一份 —— 这正是线程要的；
+*            2) 进程状态槽**共用**：子线程用 lx_thread_bind_hook 在装载器的
+*               临界区里就被绑到父的槽上。晚一步，子线程第一次进 ABI 会给自己
+*               惰性分配一份新槽，于是它有自己的 fd 表 —— 而这种错不报错，
+*               只表现为「线程里 close 不掉主线程的 fd」；
+*            3) 不登记 s_child[]：Linux 的 wait4 看不见线程（它们不是子进程），
+*               只有整组退出才由组长那一份记账收尾。
+*          flags 判据：认 LX_CLONE_THREAD_OK 里的位，多一位就 -EINVAL；
+*          CLONE_VM 与 CLONE_THREAD 必须同时给（只给 VM 是「共享内存但独立
+*          进程状态」，本内核没有这一档）；child_stack 必须非 0 且 16 字节
+*          对齐（LA64 的 ABI 要求 sp 16 对齐，帧就压在它下面）。
+*/
+static int32 lx_clone_thread(void *p_ctx, uint32 flags, unsigned long child_stack)
+{
+    unsigned long ptid = ARKRTOS_SVC_ARG(p_ctx, 2u);   /* parent_tid */
+    unsigned long ctid = ARKRTOS_SVC_ARG(p_ctx, 3u);   /* child_tid  */
+    unsigned long tls  = ARKRTOS_SVC_ARG(p_ctx, 4u);   /* tls        */
+    uint32 zero = 0u;
+    int32  me   = (int32)arkrtos_current_task_id;
+    int32  slot;
+    int32  child = 0;
+    int32  rc;
+
+    if((flags & ~(uint32)LX_CLONE_THREAD_OK) != 0u)
+    {
+        return -LX_EINVAL;      /* CLONE_VFORK / CLONE_NEW* / 其它没实现的位 */
+    }
+    if((flags & (uint32)LX_CLONE_VM) == 0u)
+    {
+        return -LX_EINVAL;      /* 线程必须让子任务看见同一份内存 */
+    }
+    if((child_stack == 0ul) || ((child_stack & 15ul) != 0ul))
+    {
+        return -LX_EINVAL;
+    }
+    if((me <= 0) || (me > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return -LX_EINVAL;
+    }
+
+    /* 槽位先确认在手上：等到子任务已经在跑才发现拿不到槽，就只能二选一
+     * （让它和父共用一份是错的，当场收掉一个正在跑的任务是更大的错）。 */
+    slot = (int32)lx_proc_cur();
+    if(slot >= (int32)LX_PROC_MAX)
+    {
+        return -LX_EAGAIN;
+    }
+
+    /* 两个 SETTID 都是「先探一次可写再创建」：创建之后才发现的坏指针，
+     * 只能留下一个已经跑起来的线程和一个说不清的返回码。 */
+    if(((flags & (uint32)LX_CLONE_PARENT_SETTID) != 0u) && (ptid != 0ul))
+    {
+        if(arkrtos_copy_to_user((void *)ptid, &zero, 4u) != 0)
+        {
+            return -LX_EFAULT;
+        }
+    }
+    if(((flags & (uint32)LX_CLONE_CHILD_SETTID) != 0u) && (ctid != 0ul))
+    {
+        if(arkrtos_copy_to_user((void *)ctid, &zero, 4u) != 0)
+        {
+            return -LX_EFAULT;
+        }
+    }
+
+    rc = arkrtos_elf_thread(p_ctx, child_stack,
+                            ((flags & (uint32)LX_CLONE_SETTLS) != 0u) ? tls : 0ul,
+                            &child, lx_thread_bind_hook);
+    if(rc != ARKRTOS_ELF_OK)
+    {
+        return lx_fork_errno(rc);
+    }
+    if((child <= 0) || (child > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return -LX_EINVAL;
+    }
+
+    if((flags & (uint32)LX_CLONE_CHILD_CLEARTID) != 0u)
+    {
+        s_lx_cleartid[child - 1] = ctid;    /* 0 = 没给，退出时什么也不做 */
+    }
+
+    {
+        int32 tid = child;
+
+        if(((flags & (uint32)LX_CLONE_PARENT_SETTID) != 0u) && (ptid != 0ul))
+        {
+            (void)arkrtos_copy_to_user((void *)ptid, &tid, 4u);
+        }
+        if(((flags & (uint32)LX_CLONE_CHILD_SETTID) != 0u) && (ctid != 0ul))
+        {
+            (void)arkrtos_copy_to_user((void *)ctid, &tid, 4u);
+        }
+    }
+
+    return child;
+}
+
+/**
+* @brief exit_group(2)：把同组全部任务按「正常退出」收掉，退出码记在每人身上
+* @details 为什么不只退自己：Linux 的 exit_group 是「结束整个线程组」，
+*          组长那一份 TCB 上的退出码才是 wait4 要读的东西 —— 一个线程自己
+*          退掉、把组留给别人，会让父进程永远等不到那一组结束。
+*
+*          做法与 arkrtos_task_kill_internal / arkrtos_cpu_fault_kill 同一套：
+*          摘出就绪链与延时链、置 INVALID、调 ABI 退出钩子（futex/select/
+*          socket 的等待登记 + 本线程的 CLEARTID 清零）、再回收资源。
+*          任务号先收集再动手：收集那一遍在临界区里，动手那一遍不可能在
+*          临界区里（ABI 钩子要调 VFS / 拷贝用户内存）。
+*
+*          **SMP 边界**：这里强杀的是「可能正在另一核上跑」的任务。本内核的
+*          线程档只在单核 QEMU 配置下被验证过；多核要真正的核间停核协议，
+*          这一版没有，文档里写死。 */
+static void lx_thread_group_exit(int32 code)
+{
+    int32  me   = (int32)arkrtos_current_task_id;
+    int32  slot = lx_proc_find(me);
+    int32  ids[ARKRTOS_TASK_MAX_NUM];
+    uint32 n = 0u;
+    uint32 i;
+    uint32 k;
+
+    if(slot < 0)
+    {
+        return;
+    }
+
+    {
+        uint32 crit = ARKRTOS_ENTER_CRITICAL();
+
+        for(i = 0u; i < (uint32)ARKRTOS_TASK_MAX_NUM; i++)
+        {
+            if(((int32)(i + 1u)) == me)
+            {
+                continue;
+            }
+            if(s_proc_of_task[i] != (uint8)((uint32)slot + 1u))
+            {
+                continue;
+            }
+            if(arkrtos_task_table[i].status == ARKRTOS_TASK_INVALID)
+            {
+                continue;
+            }
+            ids[n] = (int32)(i + 1u);
+            n++;
+        }
+        ARKRTOS_EXIT_CRITICAL(crit);
+    }
+
+    for(k = 0u; k < n; k++)
+    {
+        int32  t   = ids[k];
+        arkrtos_task_t *p_t = &arkrtos_task_table[t - 1];
+
+        if(p_t->status == ARKRTOS_TASK_INVALID)
+        {
+            continue;           /* 期间已经被别处收掉了 */
+        }
+
+        {
+            uint32 crit = ARKRTOS_ENTER_CRITICAL();
+
+            arkrtos_ready_del(t - 1);
+            arkrtos_delay_disarm(t - 1);
+            p_t->status = ARKRTOS_TASK_INVALID;
+#if (ARKRTOS_USE_EXIT_CODE == 1)
+            /* 全组同一个退出码：Linux 只把「导致整组退出的那个码」报给父进程，
+             * 而父进程等的是组长那份 TCB。 */
+            p_t->exit_code      = code;
+            p_t->exit_by_signal = 0u;
+            p_t->exit_code_set  = 1u;
+#endif
+            ARKRTOS_EXIT_CRITICAL(crit);
+        }
+
+        /* 先让 ABI 记账收尾（futex/select/socket 的登记要放掉，CLEARTID 要清），
+         * 再回收互斥锁与 VFS 句柄。顺序反了会让后者看到一份还在等的登记。 */
+        arkrtos_linux_abi_on_task_exit(t);
+        arkrtos_task_release_resources(t);
+    }
+}
+#endif /* ARKRTOS_USE_LINUX_THREAD == 1 */
+
 /**
 * @brief clone(2)：只做 fork，不做线程
 * @details 只接受 flags == 0 或 SIGCHLD、child_stack == 0。CLONE_VM /
@@ -3921,6 +4229,14 @@ static int32 lx_clone(void *p_ctx)
 #endif
     int32  rc;
 
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+    /* 线程分支先分流：它要 CLONE_VM|CLONE_THREAD 与一条自己的栈，
+     * 与 fork 的判据正好相反（fork 要求 child_stack == 0）。 */
+    if((flags & (uint32)LX_CLONE_THREAD) != 0u)
+    {
+        return lx_clone_thread(p_ctx, flags, child_stack);
+    }
+#endif
     if((child_stack != 0ul) ||
        ((flags != 0u) && (flags != (uint32)LX_SIGCHLD_FLAG)))
     {
@@ -4171,7 +4487,7 @@ static void lx_futex_forget(int32 task_id)
  * 落在物理帧上。窗口之外（栈、内核直映射区）没有可查的帧，回 -1，调用方回
  * ~0UL（无效）—— 不拿 VA 假装它是键，那会让两个无关进程在同一个 VA 上互相
  * 叫醒。没有窗口时（MPU 后端）整个地址空间只有一份，VA 本身就是稳定的键。 */
-static unsigned long lx_futex_key(unsigned long uaddr)
+static unsigned long lx_futex_key_task(int32 task_id, unsigned long uaddr)
 {
 #if (ARKRTOS_USE_PAGING == 1)
     arkrtos_task_t *p_task;
@@ -4183,8 +4499,8 @@ static unsigned long lx_futex_key(unsigned long uaddr)
 
     /* 上面先判了 > 0，所以这里再转成无符号只为了不触发 -Wsign-compare；
      * 转换不会改变任何一个合法任务号的判定。 */
-    if((arkrtos_current_task_id <= 0) ||
-       ((uint32)arkrtos_current_task_id > (uint32)ARKRTOS_TASK_MAX_NUM))
+    if((task_id <= 0) ||
+       ((uint32)task_id > (uint32)ARKRTOS_TASK_MAX_NUM))
     {
         return ~0UL;
     }
@@ -4205,7 +4521,7 @@ static unsigned long lx_futex_key(unsigned long uaddr)
     {
         return ~0UL;
     }
-    p_task = &arkrtos_task_table[arkrtos_current_task_id - 1];
+    p_task = &arkrtos_task_table[task_id - 1];
     space = arkrtos_paging_space_of(p_task);
     pa = arkrtos_paging_pair_pa(space, (uint32)(off / 0x2000ul));
     if(pa == 0u)
@@ -4217,6 +4533,12 @@ static unsigned long lx_futex_key(unsigned long uaddr)
     /* 没有分页后端：整个地址空间只有一份，虚拟地址本身就是稳定的键。 */
     return (unsigned long)uaddr;
 #endif
+}
+
+/* 当前任务自己的键（绝大多数调用者的用法）。 */
+static unsigned long lx_futex_key(unsigned long uaddr)
+{
+    return lx_futex_key_task((int32)arkrtos_current_task_id, uaddr);
 }
 
 /* 当前进程有没有「未屏蔽的待投递信号」。futex WAIT 在 Linux 上遇到这种情形
@@ -4310,6 +4632,33 @@ static int32 lx_futex_timeout(void *p_ctx, uint32 abs_flag, uint32 *p_dl)
 *              requeue 本身不唤醒它（与 Linux 一致），但它下次时间片醒来
 *              不会因为两个地址的字不同而被误判成「已唤醒」。
 */
+/* 按键唤醒至多 want 个等待者（位掩码过滤）。抽出来是因为 CLONE_CHILD_CLEARTID
+ * 的退出路径也要走同一套判据：两处各写一遍，迟早在「唤醒谁」上分叉。 */
+static int32 lx_futex_wake_key(unsigned long key, int32 want, uint32 mask)
+{
+    int32  woke = 0;
+    int32  i;
+    uint32 crit;
+
+    if((want < 0) || (mask == 0u))
+    {
+        return -LX_EINVAL;
+    }
+    crit = ARKRTOS_ENTER_CRITICAL();
+    for(i = 1; (i <= (int32)ARKRTOS_TASK_MAX_NUM) && (woke < want); i++)
+    {
+        if((s_futex_used[i - 1] != 0u) && (s_futex_key[i - 1] == key) &&
+           ((s_futex_bitset[i - 1] & mask) != 0u))
+        {
+            s_futex_woke[i - 1] = 1u;
+            (void)arkrtos_task_wakeup_internal(i);
+            woke++;
+        }
+    }
+    ARKRTOS_EXIT_CRITICAL(crit);
+    return woke;
+}
+
 static int32 lx_futex(void *p_ctx)
 {
     unsigned long uaddr = ARKRTOS_SVC_ARG(p_ctx, 0u);
@@ -4375,31 +4724,12 @@ static int32 lx_futex(void *p_ctx)
         uint32 mask = (op == (uint32)LX_FUTEX_WAKE_BITSET) ?
                       (uint32)ARKRTOS_SVC_ARG(p_ctx, 5u) :
                       (uint32)LX_FUTEX_BITSET_ALL;
-        int32  woke = 0;
-        int32  i;
-        uint32 crit;
 
         if((op == (uint32)LX_FUTEX_WAKE_BITSET) && (mask == 0u))
         {
             return -LX_EINVAL;
         }
-        if(want < 0)
-        {
-            return -LX_EINVAL;
-        }
-        crit = ARKRTOS_ENTER_CRITICAL();
-        for(i = 1; (i <= (int32)ARKRTOS_TASK_MAX_NUM) && (woke < want); i++)
-        {
-            if((s_futex_used[i - 1] != 0u) && (s_futex_key[i - 1] == key) &&
-               ((s_futex_bitset[i - 1] & mask) != 0u))
-            {
-                s_futex_woke[i - 1] = 1u;
-                (void)arkrtos_task_wakeup_internal(i);
-                woke++;
-            }
-        }
-        ARKRTOS_EXIT_CRITICAL(crit);
-        return woke;
+        return lx_futex_wake_key(key, want, mask);
     }
 
     /* ---- REQUEUE / CMP_REQUEUE ---- */
@@ -4591,6 +4921,47 @@ static int32 lx_futex(void *p_ctx)
     }
 }
 #endif /* ARKRTOS_USE_LINUX_FUTEX == 1 */
+
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+/* 线程退出：把 CLONE_CHILD_CLEARTID 给的字清零，再唤醒一个等待者。
+ * 顺序是「先清字、再唤醒」：pthread_join 醒来后要读到 0，倒过来会让它读到
+ * 旧 tid 又睡回去 —— 那种错误只在真线程上出现，而且表现成偶发挂死。
+ *
+ * 清零不依赖 futex 档：没有 futex 也要把字清掉（程序可能只是轮询）。
+ * 唤醒那半段才在 futex 档里。 */
+static void lx_thread_clear_tid(int32 task_id)
+{
+    unsigned long addr;
+    uint32 zero = 0u;
+
+    if((task_id <= 0) || (task_id > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return;
+    }
+    addr = s_lx_cleartid[task_id - 1];
+    s_lx_cleartid[task_id - 1] = 0ul;
+    if(addr == 0ul)
+    {
+        return;
+    }
+
+    /* 写的还是**这个任务自己的**地址空间：它已经不在就绪集里，但空间要到
+     * 装载器下次复用时才被撤，所以这次写是安全的。写不进去也没有返回值
+     * 可以交 —— 退出路径没有调用者。 */
+    (void)arkrtos_copy_to_user_task(&arkrtos_task_table[task_id - 1], (void *)addr,
+                                    &zero, 4u);
+#if (ARKRTOS_USE_LINUX_FUTEX == 1)
+    {
+        unsigned long key = lx_futex_key_task(task_id, addr);
+
+        if(key != ~0UL)
+        {
+            (void)lx_futex_wake_key(key, 1, (uint32)LX_FUTEX_BITSET_ALL);
+        }
+    }
+#endif
+}
+#endif /* ARKRTOS_USE_LINUX_THREAD == 1 */
 
 #if (ARKRTOS_USE_LINUX_SELECT == 1)
 /* ------------------------------- pselect6（U-22，就绪等待） */
@@ -5259,8 +5630,21 @@ static int32 lx_dispatch(void *p_svc_ctx, uint32 num, int32 *p_rc)
         break;
     #endif
     case LX_SYS_GETPID:
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+        /* 线程组语义：同一组里每个线程的 getpid 都回组长的号（Linux 就是这么
+         * 定义的）。没有线程时它就是自己的任务号，与打开本档之前逐位相同。 */
+        rc = lx_tgid_of_current();
+#else
+        rc = (int32)arkrtos_current_task_id;
+#endif
+        break;
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+    case LX_SYS_GETTID:
+        /* 本线程自己的号。关闭线程档时不认这个号（仍回 -ENOSYS）—— 没有线程
+         * 的世界里 gettid == getpid，多认一个号只会让默认镜像的行为变样。 */
         rc = (int32)arkrtos_current_task_id;
         break;
+#endif
     case LX_SYS_GETUID:
     case LX_SYS_GETEUID:
         rc = 0;         /* 没有用户模型：唯一身份是 0，不编造 uid */
@@ -5272,8 +5656,27 @@ static int32 lx_dispatch(void *p_svc_ctx, uint32 num, int32 *p_rc)
          * 是副作用）。开关关掉时同样如此。 */
         rc = (int32)arkrtos_current_task_id;
         break;
-    case LX_SYS_EXIT:
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
     case LX_SYS_EXIT_GROUP:
+        /* exit_group(94)：整组一起走。分派器在两个号之间分得清，因为号就是
+         * 这里的 case 标签 —— 不需要从帧里反推是哪一条指令。 */
+        s_stat[LX_STAT_HANDLED]++;
+        {
+            int32 code0 = (int32)ARKRTOS_SVC_ARG(p_svc_ctx, 0u);
+
+            lx_thread_group_exit(code0);
+            #if (ARKRTOS_USE_EXIT_CODE == 1)
+            arkrtos_thread_exit_code_internal(code0);
+            #else
+            arkrtos_thread_exit_internal();
+            #endif
+        }
+        lx_ret(p_svc_ctx, 0);
+        return 1;
+#endif
+    case LX_SYS_EXIT:
+        /* exit(93) 只退调用它的那个线程（关闭线程档时就是退整个进程）。
+         * 组里其它线程继续跑；整组退出走上面的 exit_group(94)。 */
         s_stat[LX_STAT_HANDLED]++;
         #if (ARKRTOS_USE_EXIT_CODE == 1)
         arkrtos_thread_exit_code_internal((int32)ARKRTOS_SVC_ARG(p_svc_ctx, 0u));
@@ -5506,6 +5909,21 @@ void arkrtos_linux_abi_on_task_exit(int32 task_id)
         ARKRTOS_EXIT_CRITICAL(crit);
     }
 
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+    /* U-25：同一个线程组的槽是被几个任务共用的。只要组里还有别人活着，这一次
+     * 退出就只是「一个线程退了」——关 fd、清槽、放开 socket 全都不能做，
+     * 否则退掉的这一个会把整组的 fd 表与套接字一起带走。
+     * 位置必须在 sock_close_all 与 fd 释放之前（它们在下面）。 */
+    {
+        int32 tslot = lx_proc_find(task_id);
+
+        if((tslot >= 0) && (lx_proc_others_live((uint32)tslot, task_id) != 0u))
+        {
+            lx_thread_clear_tid(task_id);
+            return;
+        }
+    }
+#endif
 #if (ARKRTOS_USE_LINUX_SOCKET == 1)
     /* 套接字的 net 句柄不受 fd 表的临界区保护，也必须在关中断之前投出去。 */
     {
@@ -5516,6 +5934,11 @@ void arkrtos_linux_abi_on_task_exit(int32 task_id)
             lx_sock_close_all((uint32)sslot);
         }
     }
+#endif
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+    /* 组里最后一个人走了：CLEARTID 也在这里清（前面的提前返回已经处理过
+     * 「还有兄弟活着」的情形）。 */
+    lx_thread_clear_tid(task_id);
 #endif
     {
         int32 slot = lx_proc_find(task_id);

@@ -300,6 +300,47 @@
 #endif
 #endif
 
+/* U-25 多线程：clone(220) 带 CLONE_VM|CLONE_THREAD，子任务**共享父任务的
+ * 地址空间**（不复制窗口），有自己的用户栈（child_stack）与自己的 trap 帧。
+ *
+ * 与 fork 档的分工（两条都开时以 flags 分流）：
+ *   - flags == 0 / SIGCHLD，child_stack == 0  -> 走 arkrtos_elf_fork（复制空间）；
+ *   - flags 同时带 CLONE_VM 与 CLONE_THREAD   -> 走 arkrtos_elf_thread（共享空间）。
+ *
+ * 共享的：地址空间（同一个 space，同一份物理帧）、fd 表、信号动作与屏蔽字
+ * （同一份进程状态槽，带引用计数）。独立的：任务号、trap 帧、用户栈、退出
+ * 时机、futex 等待登记。
+ *
+ * 硬边界（文档里逐条写死，不假装修好了）：
+ *   1) 必须同时给 CLONE_VM 与 CLONE_THREAD，且 child_stack 非 0 且 16 字节
+ *      对齐；CLONE_VFORK 一律 -EINVAL；只给 CLONE_VM 不给 CLONE_THREAD 也
+ *      是 -EINVAL（本内核没有「共享内存但独立进程状态」这一档）；
+ *   2) CLONE_SETTLS 接受：a2 就是新线程的 $tp，写进它的初始帧（LA64 有 tp
+ *      寄存器；不做 TLS 模块分配，那是 libc 的事）；
+ *   3) CLONE_PARENT_SETTID / CLONE_CHILD_SETTID / CLONE_CHILD_CLEARTID 接受：
+ *      前者写父给的地址、中者写子给的地址、后者在子退出时把那个字清零并
+ *      FUTEX_WAKE 一次（pthread_join 的等待就落在这条路上）；
+ *   4) wait4 看不到线程：线程不登记子进程记账；组长退出时若同组还有线程，
+ *      wait4 仍按「活着」处理；
+ *   5) exit(93) 只结束当前线程；exit_group(94) 结束同组全部线程，退出码记在
+ *      组长那份 TCB 上（wait4 读的就是它）；
+ *   6) getpid(172) 返回**线程组号**（组长任务号），gettid(178) 返回本线程号。
+ *      LA64 跟的是 asm-generic 表（178 是 gettid），186 那是 x86_64 的号。
+ *
+ * 要求 ARKRTOS_USE_LINUX_FORK == 1（复用 fork 的分页档与装载器台账）。
+ * 由 Kconfig 选择（config ARKRTOS_USE_LINUX_THREAD）。默认关：port 的新接口、
+ * 装载器的线程入口、clone 的线程分支与 gettid 全部不编译，镜像体积与行为
+ * 零变化。 */
+
+#ifndef ARKRTOS_USE_LINUX_THREAD
+#define ARKRTOS_USE_LINUX_THREAD        0
+#endif
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+#if (ARKRTOS_USE_LINUX_FORK != 1)
+#error "ARKRTOS_USE_LINUX_THREAD=1 requires ARKRTOS_USE_LINUX_FORK=1"
+#endif
+#endif
+
 /* U-19b 写时复制：0 = 关（fork 把父空间逐对实体拷贝，与打开本开关之前逐字节
  * 相同），1 = fork 只把父空间挂着的每一对 8 KB 指给子空间（引用计数 1 变 2）、
  * 把两边的 TLB 条目降成只读；第一次写命中只读条目时由 la_pg_cow_fault()

@@ -492,6 +492,12 @@ endif
 ifneq ($(ARK_LWIP_ON),)
 LXFORK_DEFS   += -DARKRTOS_USE_LWIP=1
 endif
+# CLONE_THREAD 夹具段：只认它自己的开关。它必须叠在 fork 档上（内核那边
+# features.h 有 #error 兜着），但夹具只按「线程段读不读」决定。
+ARK_THREAD_ON := $(findstring ARKRTOS_USE_LINUX_THREAD=1,$(EXTRA_CFLAGS))
+ifneq ($(ARK_THREAD_ON),)
+LXFORK_DEFS   += -DARKRTOS_USE_LINUX_THREAD=1
+endif
 ifneq ($(ARK_DEMAND_ON),)
 LXFORK_DEFS   += -DARKRTOS_USE_PAGING_DEMAND=1
 endif
