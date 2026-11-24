@@ -176,6 +176,7 @@ SRCS_C := $(KERNEL_SRCS) \
 	board/qemu_loongarch64/arkrtos_fdt_overlay_blob.c \
 	board/qemu_loongarch64/drvblk.c \
 	board/qemu_loongarch64/drvuart.c \
+	board/qemu_loongarch64/drvuart_line.c \
 	board/qemu_loongarch64/arkrtos_bus_port.c \
 	example/qemu_loongarch64/main.c \
 	example/qemu_loongarch64/elf_demo.c \

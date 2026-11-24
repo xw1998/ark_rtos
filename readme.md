@@ -836,11 +836,12 @@ STM32F427VGTx @96 MHz，DAPLink（SWD 两线，无 SWO）经 mdkdebug 的 SWD tr
 | 崩溃上限的三次禁用 + 跨复位保持 | 崩 3 次 → `CRASH:3006 slot N disabled: crash-limit, 3 consecutive faults`；`reboot` 后开机首行即 `CRASH: slot N held: crash-limit, 3 faults, last at tick <原 tick>`、`app list` `auto=no`/`INVALID` 且不再自启；**卸载低地址槽造成槽位下标 1→0 漂移后仍能接管该历史**，二次重启幂等（修前实测不保持，见 [docs/崩溃恢复与镜像版本把关.md](docs/崩溃恢复与镜像版本把关.md) §1.7） |
 | 固定槽 `install <slot>` 的落点 | `install 2` 落 `0x080A0000` → `reboot` 后仍在 `0x080A0000` 且 `RUNNING`；装 slot 1 不影响 slot 2。修前实测镜像会被开机回收搬到 `0x08060000` 并擦掉配置槽（见 [docs/配置区与安装策略.md](docs/配置区与安装策略.md) §3.2.1） |
 | 软总线（板内两节点） | F427 上 `bus selftest` 10 项全 PASS（`checks 56, failed 0`），`bus info` 报 `ark_softbus 18c6ccf` 与同步副本一致 |
+| 软总线物理线两节点（QEMU） | 两个 QEMU LA64 实例经第二路 UART 对连：A 的心跳对端确实收到（`rx topic=line/hb len=5`）、远程调用回包逐字节 +1 校验 `echo=ok`；**没有对端时必须失败**（`result=fail (no reply)`）。真板未验证 | [QEMU模拟器移植与验证](docs/QEMU模拟器移植与验证.md) §9.14 |
 
 仍未上板验证或未闭环的项：
 
 - **真实以太网收发**：板级无可用 PHY（`board/stm32f427/` 下没有 PHY 驱动、MDIO 读写、`eth_` 接口与 RMII 引脚分配），网络路径跑的是回环网卡，未做真实链路收发验证（见 [docs/lwIP协议栈接入.md](docs/lwIP协议栈接入.md) §1）
-- **软总线的物理线两节点**：板上只有一路 USART1 且被内核控制台独占，无空闲 UART，故只验证了板内 loopback；真实串口线上两节点（两块板 / 板 + PC）**未验证**（见 [docs/软总线接入.md](docs/软总线接入.md) §7）
+- **软总线的真板物理线两节点**：QEMU 上两个实例经第二路 UART 对连**已跑通**（见上表），但真板仍缺一路空闲 UART、波特率编程与硬件流控，故**真板未验证**（见 [docs/软总线接入.md](docs/软总线接入.md) §7）
 - **安全认证用例**：T1–T12 **全部有上板读数**（2026-11-12 补齐 T10 看门狗复位与 T12 签名强制：未签名镜像被拒 `err -18`、签名镜像装得上且起得来、`sec` 的 `images.signature` 转 PASS，见 `docs/安全认证准备.md` §8）。遗留不在机制而在部署：正式签名需要产线把真实密钥写进构建（密钥不进仓库），RDP/WRP 的**设置**通路与 shell 认证仍缺（**读取**通路已于 2026-11-13 闭环：`sec` 报出真实 `rdp`/`wrp`），见同文件 §7 的缺口寄存器
 
 文档索引见 [docs/README.md](docs/README.md)。

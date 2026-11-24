@@ -49,6 +49,7 @@
 - [kernelsrc/include/arkrtos_smp_sched.h](#kernelsrcincludearkrtos_smp_schedh)（18 项）
 - [kernelsrc/include/arkrtos_smp_shootdown.h](#kernelsrcincludearkrtos_smp_shootdownh)（3 项）
 - [kernelsrc/include/arkrtos_softbus.h](#kernelsrcincludearkrtos_softbush)（5 项）
+- [kernelsrc/include/arkrtos_softbus_line.h](#kernelsrcincludearkrtos_softbus_lineh)（10 项）
 - [kernelsrc/include/arkrtos_spin.h](#kernelsrcincludearkrtos_spinh)（10 项）
 - [kernelsrc/include/arkrtos_svc_abi.h](#kernelsrcincludearkrtos_svc_abih)（4 项）
 - [kernelsrc/include/arkrtos_svc_call.h](#kernelsrcincludearkrtos_svc_callh)（20 项）
@@ -7708,6 +7709,134 @@ int arkrtos_softbus_shell_cmd(int argc, char **argv);
 ```
 
 **控制台命令 `bus` 的处理器（内核 Shell 命令表里注册的就是它）**
+
+## kernelsrc/include/arkrtos_softbus_line.h
+
+**软总线物理线：两个节点、一根真线（第二条 UART，默认关）**
+`arkrtos_softbus.c` 那条链路是**板内 loopback**：两个 ark_bus_t 实例
+走真实的帧编解码/环形缓冲/收发路径，但字节没有出过芯片。本文件补
+的是另一半 —— 同样的总线核心，传输层换成组件自带的 UART 适配器
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**物理线的统计读数（全部单调递增）**
+前八项取自总线核心的 ark_bus_stats_t，后三项是本层自己的账：
+uart_tx_timeout 由板上端口给出（发送器不 ready），msg_count 与
+rpc_served 是本节点作为接收方看到的量。它们分开记是为了让
+「线坏了」与「对端没答」在控制台上是两行不同的数。
+
+### `int32 arkrtos_softbus_line_init(uint32 node_id, uint32 node_type);`
+
+```c
+int32 arkrtos_softbus_line_init(uint32 node_id, uint32 node_type);
+```
+
+**在本节点上架起物理线并启动总线**
+装板级三钩子与线端口，把 UART 传输层接到总线核心，再以给定 id
+启动节点。重复调用会按新 id 重新来过（先停后起，不清硬件）。
+- `node_id`：本节点 id，0 非法（0 是总线保留的广播/空标识）
+- `node_type`：节点类型（1 = MCU 边缘节点，2 = 执行器，见 ark_bus_types.h）
+**返回**：0 = 成功，负值 = 参数非法或启动失败
+
+### `int32 arkrtos_softbus_line_pump(uint32 rounds);`
+
+```c
+int32 arkrtos_softbus_line_pump(uint32 rounds);
+```
+
+**推进物理线：抽干接收 FIFO → 喂帧解析器 → poll 一轮总线**
+- `rounds`：轮数，0 表示 1 轮
+**返回**：0 = 成功，负值 = 尚未 init
+
+### `int32 arkrtos_softbus_line_subscribe(const char *topic, ark_bus_msg_cb`
+
+```c
+int32 arkrtos_softbus_line_subscribe(const char *topic, ark_bus_msg_cb_t cb, void *user);
+```
+
+**订阅一个主题（收到时回调）**
+- `topic`：主题名（最长 ARK_BUS_TOPIC_NAME_MAX - 1）
+- `cb`：收到消息的回调
+- `user`：回调上下文
+**返回**：主题 id（> 0）或负的 ARK_BUS_E_* 值
+
+### `int32 arkrtos_softbus_line_publish(uint32 target_id, const char *topic`
+
+```c
+int32 arkrtos_softbus_line_publish(uint32 target_id, const char *topic, const void *payload, uint16 len);
+```
+
+**定向发布（带 QoS1：对端 ACK 前会重传）**
+- `target_id`：对端节点 id
+- `topic`：主题名
+- `payload`：载荷
+- `len`：载荷长度（<= ARK_BUS_MSG_MAX_SIZE）
+**返回**：交给传输层的字节数，或负的 ARK_BUS_E_* 值
+
+### `int32 arkrtos_softbus_line_rpc(uint32 target_id, uint16 method, const `
+
+```c
+int32 arkrtos_softbus_line_rpc(uint32 target_id, uint16 method, const void *params, uint16 len, ark_bus_rpc_cb_t cb, void *user);
+```
+
+**发一次远程调用**
+回复可能在若干次 pump 之后才到，回调由 ark_bus_poll 触发；没有
+回复时回调拿到 ARK_BUS_E_TIMEOUT，本函数本身**不阻塞等待**。
+- `target_id`：对端节点 id
+- `method`：方法号（两端必须一致，见 ark_bus_protocol.h）
+- `params`：参数
+- `len`：参数长度
+- `cb`：回复回调（可为 NULL）
+- `user`：回调上下文
+**返回**：交给传输层的字节数，或负的 ARK_BUS_E_* 值
+
+### `int32 arkrtos_softbus_line_rpc_register(uint16 method, ark_bus_rpc_han`
+
+```c
+int32 arkrtos_softbus_line_rpc_register(uint16 method, ark_bus_rpc_handler_t handler, void *user);
+```
+
+**注册一个远程调用方法供对端调用**
+- `method`：方法号
+- `handler`：处理器（返回 ARK_BUS_OK 并按 rlen 给出回复）
+- `user`：处理器上下文
+**返回**：0 = 成功，负的 ARK_BUS_E_* 值 = 失败
+
+### `int32 arkrtos_softbus_line_probe(uint32 lines);`
+
+```c
+int32 arkrtos_softbus_line_probe(uint32 lines);
+```
+
+**直接往线上写一行文本（接线核验用，不是总线帧）**
+只用来回答「第二路 UART 到底连上没有」这一个问题：它绕开帧编码，
+对端任何字节都收得到。收方会把它当作坏帧丢掉并记 rx_dropped ——
+这是预期行为，不是缺陷。
+- `lines`：行数（0 表示 1 行）
+**返回**：写出的字节数，或负值
+
+### `uint32 arkrtos_softbus_line_node_id(void);`
+
+```c
+uint32 arkrtos_softbus_line_node_id(void);
+```
+
+**取本节点 id**
+**返回**：本节点 id，未 init 时为 0
+
+### `int32 arkrtos_softbus_line_stats(arkrtos_softbus_line_stats_t *out);`
+
+```c
+int32 arkrtos_softbus_line_stats(arkrtos_softbus_line_stats_t *out);
+```
+
+**读一份统计快照**
+- `out`：输出缓冲（不可为空）
+**返回**：0 = 成功，负值 = 参数非法或尚未 init
 
 ## kernelsrc/include/arkrtos_spin.h
 

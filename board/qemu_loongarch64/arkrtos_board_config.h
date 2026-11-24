@@ -77,6 +77,7 @@
 #define ARKRTOS_QEMU_UART_CLK        25000000u
 #endif
 #define ARKRTOS_QEMU_UART_REG_SHIFT  0u
+#define ARKRTOS_QEMU_UART2_BASE      0x1FE002E0u
 
 /* ============================================================
  * 四、分页与用户态窗口

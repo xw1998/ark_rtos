@@ -594,6 +594,17 @@ CASES = [
      ["-DARKRTOS_USE_SOFTBUS=0", "-fno-asynchronous-unwind-tables"],
      "SOFTBUS-HOST OK",
      {"incs": SOFTBUS_INCS}),
+    # 物理线接入层：默认关（ARKRTOS_USE_BUS_UART=0），所以这一档必须显式
+    # 打开，否则 arkrtos_softbus_line.c 是空翻译单元、一行都不会被量到。
+    # 链接在 SOFTBUS_LINK 之上再加 transport_uart.c（组件的那份传输层）。
+    ("softbusline", "kernelsrc/tests/test_softbus_line_host.c",
+     ["kernelsrc/src/arkrtos_softbus_line.c"],
+     ["-DARKRTOS_USE_SOFTBUS=1", "-DARKRTOS_USE_BUS_UART=1"]
+     + SOFTBUS_DEFS + ["-fno-asynchronous-unwind-tables"],
+     "SOFTBUS-LINE-HOST OK",
+     {"incs": SOFTBUS_INCS,
+      "link": SOFTBUS_LINK
+      + ["kernelsrc/components/ark_softbus/src/transport/transport_uart.c"]}),
     ("net", "kernelsrc/tests/test_net_host.c",
      ["kernelsrc/src/arkrtos_net.c"],
      ["-DARKRTOS_USE_LWIP=1", "-DARKRTOS_USE_MQ=1",

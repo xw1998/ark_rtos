@@ -2252,6 +2252,34 @@ def check_linux_abi():
         fail("linux-abi", txt[-320:])
 
 
+def check_bus_line():
+    """软总线物理线两节点：两个 QEMU 实例经第二路 UART 对连，必须真出读数。
+
+    这一档证的不是「协议对不对」（那是 softbus-host 的事），而是**物理线那一段**：
+    字节真的从一侧 UART 寄存器出去、经一根线进到另一侧、被解析成消息并回答一次
+    RPC。判据三条同时成立才算过：
+
+      * probe 档：对端 socket 真的收到 ARK-BUS-LINE（线通）；
+      * two 档：B 侧收到 A 的心跳（`rx topic=line/hb len=5`），A 侧的 RPC 回包
+        逐字节 +1 校验 `echo=ok`（内容对，不是"有字节回来"就算）；
+      * solo 档：没有对端时必须 `result=fail (no reply)` —— 没有这条，一个永远
+        打印成功的假绿会一直绿下去。
+
+    `tools/bus_line_two_nodes.py` 自己带变异自检（好/坏/半截日志先喂判据），
+    所以「判据能区分好坏」不是声称。
+
+    不覆盖：真板（缺一路空闲 UART、波特率编程与硬件流控）、中断驱动收发、
+    硬件流控与线上误码。见 docs/QEMU模拟器移植与验证.md §9.14。
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "bus_line_two_nodes.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "RESULT: PASS" in txt:
+        ok("bus-line",
+           "two QEMU instances over the 2nd UART: probe recv / peer rx + RPC echo=ok / "
+           "no-peer must fail / checker self-check")
+    else:
+        fail("bus-line", txt[-320:])
+
 def check_dynlink():
     """Linux 动态链接（PT_INTERP + 自研 ld.so）必须是开档有读数、关档零符号。
 
@@ -5898,6 +5926,7 @@ LOCAL_TOOLCHAIN = {
     "stack-guard": "LA64 / RV32 cross gcc",
     "svc-wide": "pure python (source assertions)",
     "dynlink": "LA64 cross gcc + qemu-system-loongarch64",
+    "bus-line": "LA64 cross gcc + qemu-system-loongarch64",
     "realbin": "LA64 cross gcc (+ loongarch64-linux-gnu-readelf for one check)",
     "sec-crc": "armclang (Keil MDK)",
     "analyzer": "RV32 cross gcc with -fanalyzer (GCC 10+)",
@@ -6008,6 +6037,7 @@ CHECK_TABLE = (
     ("stack-guard", check_stack_guard),
     ("svc-wide", check_svc_wide),
     ("svc-args-mini", check_svc_args_mini),
+    ("bus-line", check_bus_line),
     ("dynlink", check_dynlink),
     ("realbin", check_realbin),
     ("sec-crc", check_sec_crc),

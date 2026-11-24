@@ -4872,6 +4872,128 @@ control (`sd_drop=1`) leaves the initiator with -2 and no `ack` movement. Defaul
    global scheduler; R4 only makes "a user task explicitly migrated over + IPI processing" work on the secondary
    core. R5 (real hardware carrier) remains the only outstanding precondition in §5.4.
 
+### 9.14 (10) Soft-bus physical line between two nodes (2026-11-24, two QEMU LA64 instances over the second UART)
+
+#### 9.14.1 The gap: in the "two nodes over in-board loopback" demo, no byte ever leaves the CPU
+
+The "two nodes" in `docs/软总线接入.en.md` is a loopback inside one process: protocol layer, framing, QoS,
+RPC and discovery all run the real code, but the bytes are copied through local memory. The path on a real
+board has always been missing for a concrete reason: **the console owns the only debug UART**. So "the soft
+bus can run two nodes" was, in terms of evidence, only "the protocol is self-consistent", not "two nodes over
+one wire".
+
+What this step proves is **the physical-line segment**: bytes really leave one side's UART registers, travel
+over a wire, enter the other side, are parsed by that side's bus into a message, and a RPC is answered. The
+protocol itself is out of scope here (that is the component's host test).
+
+#### 9.14.2 Carrier: QEMU's second ns16550a, two instances joined by a socket chardev
+
+QEMU's `loongarch virt` does not expose just one UART. Evidence first, code second:
+
+```bash
+qemu-system-loongarch64 -M virt -m 128M -display none -monitor none \
+    -machine dumpdtb=D:/tmp/la64_virt.dtb -kernel <elf>
+strings D:/tmp/la64_virt.dtb | grep -i serial
+```
+
+Four ns16550a: `0x1FE001E0` (console), `0x1FE002E0`, `0x1FE003E0`, `0x1FE004E0`. This step uses **the second**:
+
+- side A: `-chardev socket,id=u2,path=<sock>,server=on,wait=off -serial chardev:u2`
+- side B: same socket, `server=off`, connects to it;
+- the console goes to `-serial file:` or stdio and **never shares the data line**.
+
+The original assumption "the second UART is at `0x1FE00200`" was wrong (that is the plic area); every register
+offset had to be redone -- dump first, then write code.
+
+#### 9.14.3 How: board registers, a platform-free line interface, and an integration layer -- three layers, one job each
+
+| # | File | Responsibility |
+|---|---|---|
+| 1 | `board/qemu_loongarch64/drvuart_line.c` (new) | Second-UART registers: IER=0 / LCR=0x03 / FCR=0x07 / MCR=0x03, with `_init` / `_write` / `_read` (non-blocking FIFO drain) / `_tx_timeouts`. The whole file sits inside `#if ARKRTOS_USE_BUS_UART && ARKRTOS_USE_SOFTBUS` |
+| 2 | `kernelsrc/components/ark_softbus/port/ark_bus_line_port.h` (new) | The component side only knows these four hooks (`stdint` types, same signatures as the board implementation). The bus core is untouched |
+| 3 | `kernelsrc/src/arkrtos_softbus_line.c` + `kernelsrc/include/arkrtos_softbus_line.h` (new) | Integration layer: install the board port -> install the component's `transport_uart` -> `ark_bus_init/start` -> expose `pump/subscribe/publish/rpc/rpc_register/probe/stats` |
+| 4 | `config/kconfig/Kconfig.features`: `ARKRTOS_USE_BUS_UART` (bool, depends on SOFTBUS, **default n**) | A default-off switch, paired as the MCU profile rule in `docs/软总线接入.en.md` requires |
+| 5 | `config/kconfig/board/Kconfig.qemu_loongarch64` + `config/qemu_loongarch64_defconfig`: `ARKRTOS_QEMU_UART2_BASE` | Board constant; **the default does not take effect, the effective value lives in the defconfig**; after editing you must run `tools/kconfig/genboard.py --board qemu_loongarch64`, and the symbol must be listed in `genboard.py`'s `BLOCKS` table or it is never emitted |
+| 6 | `example/qemu_loongarch64/main.c`: `ARKRTOS_BUS_LINE_DEMO` + `ARKRTOS_BUS_LINE_ROLE` (1 = A publishes heartbeats and issues RPC / 2 = B only receives and answers / 0 = probe) | Three roles, one source, selected by `-D`; `LINE_GIVE_UP_TICKS` lets the gate shrink the 20 s window to 2 s without changing the criterion |
+| 7 | `kernelsrc/tests/test_softbus_line_host.c` (new, host) | Real component + fake serial FIFO: only the four hooks are replaced by memory queues, to check "is the wiring correct" |
+| 8 | `tools/bus_line_two_nodes.py` (new, standalone gate) | Builds four tiers, runs three cases, applies the criteria plus a **mutation self-check** (feeds good/bad/truncated logs to the checker first) |
+
+**Why polling, not interrupts**: this LA64 port has no external interrupt controller wired up. Faking an
+interrupt would hand the reader a false fact; a real board with an IRQ only replaces the four hooks with a ring
+buffer plus an ISR, and neither the bus core nor the integration layer changes.
+
+#### 9.14.4 Criterion: no ACK counter, so use "peer received + reply content"
+
+`ark_bus_stats_t` has no ACK counter, so "bytes were sent" is not evidence. Two things must hold at once:
+
+- **the peer really received it**: side B prints `[line] rx topic=line/hb len=5` (the payload is A's 5-byte heartbeat);
+- **the reply content is right**: A increments every byte of the RPC answer by one before reading it, so `ping`
+  must come back as `qjoh` (`reply_len=4 echo=ok`).
+
+Plus a **negative** criterion: with no peer the node must print `result=fail (no reply)` -- otherwise an
+"always succeeds" green light stays green forever. A waits `LINE_GIVE_UP_TICKS` (default 40000 ticks ~= 20 s)
+before printing that line, and `rpc_fail` is reported separately.
+
+#### 9.14.5 Lessons (six; the first three only surface once a real wire is attached)
+
+1. **QEMU's second UART never sets THRE when no peer is connected.** The original transmit timeout was
+   "1e6 iterations per byte", which made a 149-byte frame hang for ten-plus seconds and starved the task -- the
+   symptom was "the gate cannot read the 20 s line". Changed to a **whole-frame millisecond** timeout
+   (`ARK_BUS_LINE_TX_TIMEOUT_MS`, default 250 ms, leaving room for a real board at 9600 bps / 149 B ~= 155 ms),
+   with the iteration cap demoted to a second-line guard. This also separates "slow peer" (still completes) from
+   "no peer" (honestly counted as a timeout).
+2. **An RPC timeout also fires the callback: `status != 0` with `len == 0`.** The demo used to count any callback
+   as "a reply arrived", so with no peer it printed `reply_len=0 echo=BAD result=fail` yet counted a successful
+   exchange. Fixed by counting only `status == 0` and adding `s_line_rpc_fail`; the gate also treats
+   `reply_len=0` as no reply.
+3. **"Drain the receive FIFO" loops forever when the back end pins `LSR.DR` to 1.** `SB_LINE_DRAIN_LIMIT`
+   (32 rounds x 64 B = 2048 B per call) guarantees `pump` returns; a host stub (`g_read_stuck`) pins this down.
+4. **A short probe write was counted as a full line.** `probe(2)` with "fail after 5 bytes" counted the same
+   half line twice (reporting 10 B). Now `n != line length` means failure and returns the bytes already sent; the
+   host test asserts `probe(2)==5` and a negative return for `fail-at-0`.
+5. **`puthex` already prints `0x`.** The demo wrote `"node=0x"` plus `puthex` and printed `node=0x0x00002101`,
+   which the gate regex did not match -- noise generated by the readings themselves is the easiest thing to fool
+   an eye with.
+6. **On the LLP64 host, `uint32` is not `uint32_t`.** This kernel's `uint32` is `unsigned long` on 32-bit
+   targets; under MinGW `long` is a *different* 4-byte type, so the `uint32_t` hook declarations in the header
+   conflicted with the `uint32` stub definitions (`conflicting types`). The host stubs now use the `<stdint.h>`
+   `_t` types (identical on the target, so nothing changes there).
+
+#### 9.14.6 Measured output (`tools/bus_line_two_nodes.py`, QEMU LA64, PASS)
+
+```
+[build] probe / a / b / solo  four tiers
+case probe : recv=b'ARK-BUS-LINE' -> ok        # proves only "the wire carries bytes"
+case two   : A: [line] init node=0x00002101 role=1 rc=0
+             A: [line] node=0x00002101 pubs=2 rpc=1 reply_len=4 echo=ok result=ok
+             B: [line] init node=0x00002102 role=2 rc=0
+             B: [line] rx topic=line/hb len=5
+             B: [line] node=0x00002102 rx=1 served=1 result=ok
+case solo  : A: [line] node=0x00002101 pubs=7 rpc=3 rpc_fail=0 result=fail (no reply)
+RESULT: PASS
+```
+
+The `solo` tier is "no peer": 7 publishes and 3 RPCs all time out honestly within 2 s and print
+`result=fail (no reply)`, and **the gate requires this case to fail** for the tier to count as passing.
+
+The host case (`softbusline`) reports **98.85%** line coverage (the only uncovered line is the defensive
+`ark_bus_start` failure branch).
+
+#### 9.14.7 Default-off zero footprint + verdict
+
+- With `ARKRTOS_USE_BUS_UART=n` (the default) both new `.c` files are empty translation units: measured
+  text `450032` / data `456` / bss `5128740`, and `nm` shows zero `softbus_line|bus_line_uart` symbols --
+  **bit-identical** to the R4 baseline.
+- Verdict: **`bus_line_two_nodes_ok_on_qemu`**.
+  Qualified three ways: QEMU only, two instances joined over the second UART; polling, not interrupts; no
+  hardware flow control and no baud-rate programming (QEMU's ns16550a does not check the baud divisor).
+- Forbidden readings: (1) it does not mean "real boards support the physical line" -- a real board still needs
+  a free UART, baud-rate programming and hardware flow control; (2) the `probe` connectivity is not protocol
+  correctness (it only proves the wire carries bytes); (3) the host coverage is not end-to-end evidence (it
+  uses a memory fake port).
+
+---
+
 ## 10. Enabling `-Wconversion` (2026-11-19): default image byte-identical
 
 `tools/warn_gate.py` goes from six options to seven; the new one is `-Wconversion`, which in

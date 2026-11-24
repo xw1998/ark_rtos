@@ -187,6 +187,9 @@
 #ifndef ARKRTOS_USE_BLK
 #define ARKRTOS_USE_BLK 1
 #endif
+#ifndef ARKRTOS_USE_BUS_UART
+#define ARKRTOS_USE_BUS_UART 0
+#endif
 #ifndef ARKRTOS_USE_CM_BACKTRACE
 #define ARKRTOS_USE_CM_BACKTRACE 1
 #endif

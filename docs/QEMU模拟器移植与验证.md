@@ -8929,6 +8929,112 @@ IPI 发不出 → -3、幂等（同 `seq` 不重复 ack/install）、空槽无�
 4. **不能读成「对称多核」**：次核上的 SVC 依然一律致命停机，全局调度器依然只有一份；R4 只让
    「显式迁移过去的用户任务 + IPI 处理」在次核上跑得起来。R5（真机载体）仍是 §5.4 唯一剩下的前置。
 
+### 9.14 ⑩ 软总线物理线两节点（2026-11-24，QEMU LA64 两个实例经第二路 UART 对连）
+
+#### 9.14.1 缺口在哪：「板内 loopback 两节点」里，字节从没离开过这颗 CPU
+
+`docs/软总线接入.md` 里那个「两节点」是同一进程内的 loopback：协议层、帧、QoS、RPC、发现全走了真代码，
+但字节是本机内存里搬来搬去。真板上的路一直是断的，原因很具体：**控制台占了唯一一路调试串口**。
+于是「软总线能跑两个节点」这句话在证据上只能算「协议自洽」，不能算「一根线两个节点」。
+
+这一步要证的是**物理线这一段**：字节真的从一侧的 UART 寄存器出去、经一根线进到另一侧、被另一侧的
+总线解析成一条消息并回答一次 RPC。协议本身不在这一步的判断范围内（那是组件宿主用例的事）。
+
+#### 9.14.2 载体：QEMU 的第二路 ns16550a，两个实例用 socket chardev 对连
+
+QEMU `loongarch virt` 不是只有一路串口。先取证再动手：
+
+```bash
+qemu-system-loongarch64 -M virt -m 128M -display none -monitor none \
+    -machine dumpdtb=D:/tmp/la64_virt.dtb -kernel <elf>
+strings D:/tmp/la64_virt.dtb | grep -i serial
+```
+
+四路 ns16550a：`0x1FE001E0`（控制台）、`0x1FE002E0`、`0x1FE003E0`、`0x1FE004E0`。本步用**第二路**：
+
+- A 侧：`-chardev socket,id=u2,path=<sock>,server=on,wait=off -serial chardev:u2`
+- B 侧：同一个 socket，`server=off` 去连接；
+- 控制台走 `-serial file:` 或 stdio，**不与数据线共用**。
+
+原假设「第二路在 `0x1FE00200`」是错的（那是 plic 那一带），寄存器偏移都要重来 —— 先 dump 再写代码。
+
+#### 9.14.3 做法：板级寄存器、平台无关的线接口、内核接入层，三层各管一件事
+
+| # | 文件 | 职责 |
+|---|---|---|
+| 1 | `board/qemu_loongarch64/drvuart_line.c`（新增） | 第二路寄存器：IER=0 / LCR=0x03 / FCR=0x07 / MCR=0x03，`_init` / `_write` / `_read`（非阻塞抽干 FIFO）/ `_tx_timeouts`。整段在 `#if ARKRTOS_USE_BUS_UART && ARKRTOS_USE_SOFTBUS` 里 |
+| 2 | `kernelsrc/components/ark_softbus/port/ark_bus_line_port.h`（新增） | 组件侧只认这四个钩子（`stdint` 类型，与板上实现同签名）。总线核一行不改 |
+| 3 | `kernelsrc/src/arkrtos_softbus_line.c` + `kernelsrc/include/arkrtos_softbus_line.h`（新增） | 接入层：装板级端口 → 装组件 `transport_uart` → `ark_bus_init/start` → 暴露 `pump/subscribe/publish/rpc/rpc_register/probe/stats` |
+| 4 | `config/kconfig/Kconfig.features`：`ARKRTOS_USE_BUS_UART`（bool，depends on SOFTBUS，**default n**） | 默认关的开关，成对出现（`docs/软总线接入.md` 的 MCU 档规矩） |
+| 5 | `config/kconfig/board/Kconfig.qemu_loongarch64` + `config/qemu_loongarch64_defconfig`：`ARKRTOS_QEMU_UART2_BASE` | 板级常量；**default 不生效，生效值在 defconfig**，改完必须跑 `tools/kconfig/genboard.py --board qemu_loongarch64`，并且这个符号要写进 `genboard.py` 的 `BLOCKS` 渲染表才会被发射 |
+| 6 | `example/qemu_loongarch64/main.c`：`ARKRTOS_BUS_LINE_DEMO` + `ARKRTOS_BUS_LINE_ROLE`（1=A 发心跳带 RPC / 2=B 只收并应答 / 0=探针） | 三角色共一份代码，靠 `-D` 分档；`LINE_GIVE_UP_TICKS` 留给门禁把 20 s 判据压到 2 s（语义不变） |
+| 7 | `kernelsrc/tests/test_softbus_line_host.c`（新增，宿主） | 真组件 + 假串口 FIFO：只把四个钩子换成内存队列，验「接线有没有接错」 |
+| 8 | `tools/bus_line_two_nodes.py`（新增，独立门禁） | 编四档、跑三案例、判据 + **变异自检**（好/坏/半截日志先喂判据看它分不分得出来） |
+
+**为什么轮询不接中断**：本 LA64 移植没有接外部中断控制器。包装成「中断」会给读者一个假事实；
+真板有 IRQ 时把四个钩子换成环形缓冲 + ISR 即可，总线核与接入层都不用动。
+
+#### 9.14.4 判据：没有 ACK 计数，就用「对端收到 + 回包内容」
+
+`ark_bus_stats_t` 里没有 ACK 计数，所以「发出去了」这种读数不能当证据。判的是两件事同时成立：
+
+- **对端真的收到了**：B 侧打印 `[line] rx topic=line/hb len=5`（载荷是 A 发的 5 字节心跳）；
+- **回包内容对**：A 侧把 RPC 应答的每个字节 +1 再读回，`ping` 回来必须是 `qjoh`（`reply_len=4 echo=ok`）。
+
+再加一条**否定**判据：没有对端时必须 `result=fail (no reply)` —— 否则「永远成功」的假绿会一直绿下去。
+A 侧等 `LINE_GIVE_UP_TICKS`（默认 40000 拍 ≈ 20 s）仍无回包才打这一行，`rpc_fail` 单列。
+
+#### 9.14.5 实测教训（六条，前三条都是「只有接上一条真线才会露头」的缺陷）
+
+1. **QEMU 第二路 UART 在没有对端时 THRE 永不置位。** 原来的写超时是「每字节 1e6 次迭代」，一帧 149 B
+   就要卡十几秒，任务被活活饿死，表现为「门禁读不到 20 s 那行输出」。改成**整帧按毫秒**超时
+   （`ARK_BUS_LINE_TX_TIMEOUT_MS`，默认 250 ms，为真板 9600 bps / 149 B ≈ 155 ms 留余量），
+   迭代上限降为二级保险。这条同时把「慢对端」与「没对端」分开：前者照样发完，后者如实记超时。
+2. **RPC 超时也会回调，`status != 0` 但 `len == 0`。** 原演示只在回调里数「收到了回包」，于是没对端时
+   打出 `reply_len=0 echo=BAD result=fail` 却被算成一次成功交互。修法：只统计 `status == 0`，
+   另加 `s_line_rpc_fail`；判据脚本也把「reply_len=0」视为没收到。
+3. **「抽干接收 FIFO」在后端把 `LSR.DR` 钉在 1 时会无限循环。** 加 `SB_LINE_DRAIN_LIMIT`（32 次 × 64 B
+   = 2048 B/轮）后 pump 一定返回；宿主用例用一个 `g_read_stuck` 桩把这条钉住。
+4. **探针短写被当成整行成功。** `probe(2)` 在「写到第 5 个字节就失败」时会把同一截半行数两遍（报 10 B）。
+   改成「`n != 行长` 即视为失败，返回已发字节数」，宿主用例断言 `probe(2)==5`、`fail-at-0` 返回负。
+5. **`puthex` 自带 `0x`。** 演示里写成 `"node=0x"` + `puthex` 打印出 `node=0x0x00002101`，判据正则对不上 ——
+   这类「读数自己造出来的噪音」最容易骗过眼睛。
+6. **宿主 LLP64 下 `uint32` 不是 `uint32_t`。** 本内核的 `uint32` 在 32 位目标上是 `unsigned long`；
+   MinGW 下 `long` 是 4 字节的**另一种类型**，于是头文件里 `uint32_t` 声明的钩子与用例桩的 `uint32`
+   定义冲突（`conflicting types`）。宿主侧的桩统一改成 `<stdint.h>` 的 `_t` 型（目标板上两者同型，不受影响）。
+
+#### 9.14.6 实跑读数（`tools/bus_line_two_nodes.py`，QEMU LA64，PASS）
+
+```
+[build] probe / a / b / solo  四档
+case probe : recv=b'ARK-BUS-LINE' -> ok        # 只证明"线通、字节真出去了"
+case two   : A: [line] init node=0x00002101 role=1 rc=0
+             A: [line] node=0x00002101 pubs=2 rpc=1 reply_len=4 echo=ok result=ok
+             B: [line] init node=0x00002102 role=2 rc=0
+             B: [line] rx topic=line/hb len=5
+             B: [line] node=0x00002102 rx=1 served=1 result=ok
+case solo  : A: [line] node=0x00002101 pubs=7 rpc=3 rpc_fail=0 result=fail (no reply)
+RESULT: PASS
+```
+
+`solo` 档就是「没有对端」：7 次发布、3 次 RPC 全部在 2 s 内如实超时并打 `result=fail (no reply)`，
+**判据脚本要求它必须失败**，通过才算这一档过。
+
+宿主用例（`softbusline` 档）行覆盖率 **98.85%**（唯一未覆盖的是 `ark_bus_start` 失败的防御分支）。
+
+#### 9.14.7 默认档零足迹 + 判词
+
+- `ARKRTOS_USE_BUS_UART=n`（默认）时两个新 `.c` 都是空翻译单元：实测 text `450032` / data `456` /
+  bss `5128740`，`nm` 里 `softbus_line|bus_line_uart` 零符号 —— 与 R4 基线**逐位相同**。
+- 判词：**`bus_line_two_nodes_ok_on_qemu`**。
+  限定三条：只在 QEMU 上、两个实例经第二路 UART 对连；收发是轮询不是中断；没有硬件流控、
+  没有波特率编程（QEMU 的 ns16550a 不校验波特率）。
+- 不许读法：① 不许读成「真板已支持物理线」——真板还缺「找一路空闲 UART + 波特率编程 + 硬件流控」
+  三件事；② 不许把 `probe` 的连通当作协议正确（那只证明线通）；③ 不许把宿主用例的高覆盖率
+  当作端到端证据（它用的是内存假口）。
+
+---
+
 ## 10. `-Wconversion` 开档（2026-11-19）：默认档镜像逐字节不变
 
 `tools/warn_gate.py` 的选项集从六条扩到七条，新加 `-Wconversion`（GCC 隐含同开

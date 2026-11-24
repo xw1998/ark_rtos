@@ -151,6 +151,7 @@ BLOCKS = [
         ("plain", "ARKRTOS_QEMU_UART_BASE", "hexu"),
         ("guard", "ARKRTOS_QEMU_UART_CLK", "u"),
         ("plain", "ARKRTOS_QEMU_UART_REG_SHIFT", "u"),
+        ("plain", "ARKRTOS_QEMU_UART2_BASE", "hexu"),
     ]),
 
     ("四、分页与用户态窗口", [

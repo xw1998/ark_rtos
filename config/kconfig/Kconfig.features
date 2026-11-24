@@ -978,6 +978,29 @@ config ARKRTOS_USE_SOFTBUS
 	  the per-MCU -DARK_BUS_* set in the project, or arkrtos_softbus.h
 	  fails the build with #error instead of quietly taking defaults.
 
+config ARKRTOS_USE_BUS_UART
+	bool "Soft bus over a second physical UART (two nodes, one wire)"
+	depends on ARKRTOS_USE_SOFTBUS
+	default n
+	help
+	  Adds kernelsrc/src/arkrtos_softbus_line.c and a board-provided second
+	  ns16550a port: the bus node exchanges real bytes over a real line
+	  instead of the in-board loopback ring, so two machine instances can
+	  be wired back to back (on QEMU: a -chardev socket between them).
+
+	  The line is polled, not interrupt driven, because this LoongArch
+	  port has no external interrupt controller wired up; pretending
+	  otherwise would be a fake interrupt.
+
+	  Off compiles zero bytes of the line layer and the board keeps only
+	  the console UART.  That is the default, and the default image is
+	  byte-for-byte what it was before this option existed.
+
+	  Honest scope: this proves the bus frame / QoS / RPC path over a
+	  physical byte line between two instances of THIS kernel.  It does
+	  not prove interoperability with a non-Ark peer, and it is verified
+	  on QEMU only until a board with a spare UART runs it.
+
 endmenu
 
 menu "Shell"

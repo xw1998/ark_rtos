@@ -962,6 +962,7 @@ Closed on hardware:
 | Crash limit: three consecutive faults then disable, held across resets | After three faults: `CRASH:3006 slot N disabled: crash-limit, 3 consecutive faults`; after `reboot` the very first line is `CRASH: slot N held: crash-limit, 3 faults, last at tick <previous tick>`, `app list` shows `auto=no` / `INVALID` and the image no longer autostarts. It also survives a slot-index drift (1 -> 0) caused by uninstalling the low slot, and a second reboot is idempotent (before the fix it did not persist, see [docs/崩溃恢复与镜像版本把关.md](docs/崩溃恢复与镜像版本把关.md) section 1.7) |
 | Placement of `install <slot>` in fixed-slot mode | `install 2` lands at `0x080A0000` and is still there after `reboot` (`RUNNING`); installing slot 1 does not disturb slot 2. Before the fix the boot scan moved the image to `0x08060000` and erased the config slot (see [docs/配置区与安装策略.md](docs/配置区与安装策略.md) section 3.2.1) |
 | Soft bus (two nodes in one firmware) | `bus selftest` on F427 passes all 10 stages (`checks 56, failed 0`); `bus info` reports `ark_softbus 18c6ccf`, matching the synced copy |
+| Soft bus over a physical line (QEMU) | Two QEMU LA64 instances joined over the second UART: A's heartbeat is really received (`rx topic=line/hb len=5`), the RPC reply passes a byte+1 check (`echo=ok`), and with no peer the node must fail (`result=fail (no reply)`). Not verified on real boards | [QEMU port](docs/QEMU模拟器移植与验证.en.md) section 9.14 |
 
 Still not verified on hardware, or not closed:
 
@@ -970,9 +971,9 @@ Still not verified on hardware, or not closed:
   netif and has not been verified against a real link (see [docs/lwIP协议栈接入.md](docs/lwIP协议栈接入.md) section 1)
 - **A mini app exiting normally takes the planned-handover path**: not obtained on Ark RTOS (this
   path has been verified on hardware on the svcrtos_nano side, see that repo's same-named document)
-- **A two-node soft bus over a physical wire**: the board has only one USART1 and the kernel console
-  owns it, so there is no spare UART; only the in-firmware loopback has been verified. Two nodes over a
-  real serial line (two boards, or board + host) is **not verified** (see [docs/软总线接入.md](docs/软总线接入.md) section 7)
+- **A two-node soft bus over a physical wire on a real board**: two QEMU instances joined over the
+  second UART **do work** (row above), but a real board still needs a spare UART, baud-rate programming
+  and hardware flow control, so **real hardware is not verified** (see [docs/soft bus](docs/软总线接入.en.md) section 8)
 - **Security certification use cases**: T1-T12 **all have hardware readings** (T10 watchdog reset and
   T12 signature enforcement were closed on 2026-11-12: an unsigned image is rejected with `err -18`, a
   signed image installs and starts, and `sec` turns `images.signature` into PASS - see

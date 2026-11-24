@@ -51,6 +51,7 @@
   "arkrtos_smp_sched": 98.43,
   "arkrtos_smp_shootdown": 96.88,
   "arkrtos_softbus": 94.9,
+  "arkrtos_softbus_line": 98.85,
   "arkrtos_sync": 99.22,
   "arkrtos_task": 86.98,
   "arkrtos_tickless": 98.97,

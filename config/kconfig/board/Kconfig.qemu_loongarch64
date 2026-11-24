@@ -135,6 +135,20 @@ config ARKRTOS_QEMU_UART_REG_SHIFT
 	help
 	  寄存器按字节寻址，与 16550 布局一致，所以移位是 0。
 
+config ARKRTOS_QEMU_UART2_BASE
+	hex "Second ns16550a base (soft-bus physical line)"
+	default 0x1FE002E0
+	help
+	  板上第二路 ns16550a，专供软总线物理线（控制台独占第一路）。
+	  依据是 QEMU loongarch virt 的机器设备树：它提供 4 路 ns16550a，
+	  依次落在 0x1FE001E0 / 0x1FE002E0 / 0x1FE003E0 / 0x1FE004E0
+	  （-machine dumpdtb=D:/tmp/x.dtb 导出后看 serial@ 节点名即可核对，
+	  见 docs/QEMU模拟器移植与验证.md）。本板只取第二路，第三/四路不
+	  使用，也不出现在任何代码里。
+
+	  这个数只在 ARKRTOS_USE_BUS_UART=1 时被读；开关关着时它不出现在
+	  镜像里（生成的头里有 #define，但没有任何 TU 引用它，链接后零符号）。
+
 endmenu
 
 menu "Paging / user-mode probe window"

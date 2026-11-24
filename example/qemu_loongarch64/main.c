@@ -54,6 +54,7 @@
 #include "arkrtos_vfs.h"
 #include "arkrtos_elf.h"       /* ARKRTOS_USE_ELF：ELF64 装载器（M1） */
 #include "drvblk.h"
+#include "arkrtos_softbus_line.h"  /* 软总线物理线（第二条 UART，默认关时空头） */
 #if (ARKRTOS_USE_FDT == 1)
 #include "arkrtos_fdt.h"       /* MMU 档：启动时解析镜像里的标准 .dtb */
 #endif
@@ -2053,6 +2054,261 @@ static void task_hw_hold(void)
 }
 #endif /* ARKRTOS_DEMO_HWSAFE */
 
+/* ==================================================================
+ * 软总线物理线的双节点演示（默认不编：ARKRTOS_BUS_LINE_DEMO 未定义）
+ *
+ * 为什么要有这一段：`bus selftest` 走的是板内 loopback —— 帧编解码/环形
+ * 缓冲/收发路径都是真的，但字节没有出过芯片。这里补的另一半是把同一个总线
+ * 节点接到**第二路 UART**上，让两台机器实例经一根真线对连（QEMU 上是
+ * 两个 -chardev socket 互连）。
+ *
+ * 三种角色，由 -DARKRTOS_BUS_LINE_ROLE 选：
+ *   0  接线核验：只往线上写三行文本，不建总线。用来回答「第二路 UART 到底
+ *      连上没有」——它绕开帧编码，对端任何字节都能看到。
+ *   1  发起方：定向发布（QoS1）+ 远程调用，拿到回包后打一行 result=ok。
+ *      判据是**回包内容**（每个参数字节 +1），不是"我发出去了"。
+ *   2  应答方：订阅 + 注册回显方法，收到消息/服务过一次调用就打 result=ok，
+ *      之后继续 pump（发起方的重传要靠它答）。
+ *
+ * 防假绿：发起方在 20 s 内没拿到回包就打 result=fail —— 没有对端时它必须
+ * 失败，否则这个演示什么也没证明。工具 tools/bus_line_two_nodes.py 同时跑
+ * 「有对端」与「只有发起方」两种情形来钉住这条。
+ * ================================================================== */
+#if defined(ARKRTOS_BUS_LINE_DEMO) && (ARKRTOS_BUS_LINE_DEMO == 1)
+
+#ifndef ARKRTOS_BUS_LINE_ROLE
+#define ARKRTOS_BUS_LINE_ROLE      1
+#endif
+#ifndef ARKRTOS_BUS_LINE_NODE_ID
+#define ARKRTOS_BUS_LINE_NODE_ID   0x00002101u
+#endif
+#ifndef ARKRTOS_BUS_LINE_PEER_ID
+#define ARKRTOS_BUS_LINE_PEER_ID   0x00002102u
+#endif
+
+#define LINE_STACK_WORDS          1024u
+#define LINE_TOPIC                "line/hb"
+#define LINE_METHOD               0x0001u   /* = ARK_BUS_M_PING */
+#define LINE_PUB_EVERY_TICKS      600u      /* 300 ms @ 500 us/拍 */
+#define LINE_RPC_EVERY_TICKS      1200u     /* 600 ms */
+/* 20 s。门禁的"无对端必须失败"那一档会用 -D 覆盖成 2 s：判据的语义没变，
+ * 只是不必为了让一件事失败而把自动化测试拖到 20 s。 */
+#ifndef LINE_GIVE_UP_TICKS
+#define LINE_GIVE_UP_TICKS        40000u
+#endif
+
+static uint32 s_stack_line[LINE_STACK_WORDS];
+static uint32 s_line_rx;          /* 应答方：收到的消息数 */
+static uint32 s_line_served;      /* 应答方：服务过的调用数 */
+static uint32 s_line_replies;     /* 发起方：收到的回包数 */
+static int    s_line_last_status; /* 发起方：回包状态 */
+static uint32 s_line_rpc_fail;    /* 发起方：RPC 超时/失败次数 */
+static uint8  s_line_echo[16];    /* 发起方：回包内容 */
+static uint16 s_line_echo_len;
+
+static void line_on_msg(const char *topic, const uint8 *payload, uint16 len,
+                        void *user)
+{
+    (void)payload;
+    (void)user;
+    s_line_rx++;
+    arkrtos_board_puts("[line] rx topic=");
+    arkrtos_board_puts((topic != NULL) ? topic : "-");
+    arkrtos_board_puts(" len=");
+    arkrtos_board_putu((uint32)len);
+    arkrtos_board_puts("\n");
+}
+
+/* 回显处理器：每个参数字节 +1。选这个形状是因为它既是"服务真的执行了"的
+ * 证据（内容是算出来的，不是回填的），又能一眼看出字节序有没有错位。 */
+static int line_echo_handler(struct ark_bus *bus, uint32 from,
+                             const uint8 *params, uint16 plen,
+                             uint8 *reply, uint16 rcap, uint16 *rlen,
+                             void *user)
+{
+    uint16 i;
+    uint16 n = plen;
+
+    (void)bus;
+    (void)from;
+    (void)user;
+    s_line_served++;
+    if(n > rcap)
+    {
+        n = rcap;
+    }
+    for(i = 0u; i < n; i++)
+    {
+        reply[i] = (uint8)((params != NULL) ? (params[i] + 1u) : 1u);
+    }
+    *rlen = n;
+    return ARK_BUS_OK;
+}
+
+static void line_on_rpc(int status, const uint8 *result, uint16 len, void *user)
+{
+    uint16 i;
+    uint16 n = len;
+
+    (void)user;
+    /* 超时/失败也会回调（len=0、result 可能为空），那不是"收到回包"。
+     * 只统计 status==0 的成功应答，否则无对端时会被自己的超时回调骗成 ok。 */
+    if(status != 0)
+    {
+        s_line_rpc_fail++;
+        return;
+    }
+    s_line_replies++;
+    s_line_last_status = status;
+    if(n > (uint16)sizeof(s_line_echo))
+    {
+        n = (uint16)sizeof(s_line_echo);
+    }
+    s_line_echo_len = n;
+    for(i = 0u; i < n; i++)
+    {
+        s_line_echo[i] = (result != NULL) ? result[i] : (uint8)0u;
+    }
+}
+
+static void task_bus_line(void)
+{
+    int32  rc;
+    uint32 now;
+    uint32 t0;
+    uint32 last_pub = 0u;
+    uint32 last_rpc = 0u;
+    uint32 n_pub = 0u;
+    uint32 n_rpc = 0u;
+    uint32 done = 0u;
+    uint32 reported = 0u;
+
+    /* 让启动行先出去：串口是逐字节轮询写的，这里只求日志顺序好读。 */
+    arkrtos_task_wait_internal(300u);
+
+#if (ARKRTOS_BUS_LINE_ROLE == 0)
+    /* 接线核验：不建总线，只往第二路 UART 写三行。 */
+    rc = arkrtos_softbus_line_probe(3u);
+    arkrtos_board_puts("[line] role=probe bytes=");
+    arkrtos_board_putu((rc > 0) ? (uint32)rc : 0u);
+    arkrtos_board_puts((rc > 0) ? " result=ok\n" : " result=fail\n");
+    for(;;)
+    {
+        arkrtos_task_wait_internal(1000u);
+    }
+#else
+    rc = arkrtos_softbus_line_init(ARKRTOS_BUS_LINE_NODE_ID,
+                                   (ARKRTOS_BUS_LINE_ROLE == 2) ? 2u : 1u);
+    arkrtos_board_puts("[line] init node=");
+    arkrtos_board_puthex(ARKRTOS_BUS_LINE_NODE_ID);
+    arkrtos_board_puts(" role=");
+    arkrtos_board_putu(ARKRTOS_BUS_LINE_ROLE);
+    arkrtos_board_puts(" rc=");
+    arkrtos_board_putu((uint32)rc);
+    arkrtos_board_puts("\n");
+    if(rc != 0)
+    {
+        arkrtos_board_puts("[line] result=fail (line init failed)\n");
+        for(;;)
+        {
+            arkrtos_task_wait_internal(1000u);
+        }
+    }
+
+#if (ARKRTOS_BUS_LINE_ROLE == 2)
+    (void)arkrtos_softbus_line_subscribe(LINE_TOPIC, line_on_msg, NULL);
+    (void)arkrtos_softbus_line_rpc_register(LINE_METHOD, line_echo_handler, NULL);
+#else
+    (void)arkrtos_softbus_line_subscribe(LINE_TOPIC, line_on_msg, NULL);
+#endif
+
+    t0 = arkrtos_kernel_get_tick();
+
+    for(;;)
+    {
+        (void)arkrtos_softbus_line_pump(1u);
+        now = arkrtos_kernel_get_tick();
+
+#if (ARKRTOS_BUS_LINE_ROLE == 1)
+        if(done == 0u)
+        {
+            if((now - last_pub) >= LINE_PUB_EVERY_TICKS)
+            {
+                last_pub = now;
+                rc = arkrtos_softbus_line_publish(ARKRTOS_BUS_LINE_PEER_ID,
+                                                  LINE_TOPIC, "hello", 5u);
+                if(rc > 0)
+                {
+                    n_pub++;
+                }
+            }
+            if((s_line_replies == 0u) && ((now - last_rpc) >= LINE_RPC_EVERY_TICKS))
+            {
+                last_rpc = now;
+                rc = arkrtos_softbus_line_rpc(ARKRTOS_BUS_LINE_PEER_ID, LINE_METHOD,
+                                              "ping", 4u, line_on_rpc, NULL);
+                if(rc > 0)
+                {
+                    n_rpc++;
+                }
+            }
+            if(s_line_replies > 0u)
+            {
+                /* 期望 'p','i','n','g' + 1 = 'q','j','o','h' */
+                int echo_ok = (s_line_last_status == 0)
+                              && (s_line_echo_len == 4u)
+                              && (s_line_echo[0] == (uint8)'q')
+                              && (s_line_echo[1] == (uint8)'j')
+                              && (s_line_echo[2] == (uint8)'o')
+                              && (s_line_echo[3] == (uint8)'h');
+
+                arkrtos_board_puts("[line] node=");
+                arkrtos_board_puthex(ARKRTOS_BUS_LINE_NODE_ID);
+                arkrtos_board_puts(" pubs=");
+                arkrtos_board_putu(n_pub);
+                arkrtos_board_puts(" rpc=");
+                arkrtos_board_putu(n_rpc);
+                arkrtos_board_puts(" reply_len=");
+                arkrtos_board_putu((uint32)s_line_echo_len);
+                arkrtos_board_puts(echo_ok ? " echo=ok" : " echo=BAD");
+                arkrtos_board_puts(echo_ok ? " result=ok\n" : " result=fail\n");
+                done = 1u;
+            }
+            else if((now - t0) >= LINE_GIVE_UP_TICKS)
+            {
+                arkrtos_board_puts("[line] node=");
+                arkrtos_board_puthex(ARKRTOS_BUS_LINE_NODE_ID);
+                arkrtos_board_puts(" pubs=");
+                arkrtos_board_putu(n_pub);
+                arkrtos_board_puts(" rpc=");
+                arkrtos_board_putu(n_rpc);
+                arkrtos_board_puts(" rpc_fail=");
+                arkrtos_board_putu(s_line_rpc_fail);
+                arkrtos_board_puts(" result=fail (no reply)\n");
+                done = 1u;
+            }
+        }
+#else
+        /* 应答方：两件事都发生过才打 ok，之后继续 pump（重传要靠它答）。 */
+        if((reported == 0u) && (s_line_rx > 0u) && (s_line_served > 0u))
+        {
+            arkrtos_board_puts("[line] node=");
+            arkrtos_board_puthex(ARKRTOS_BUS_LINE_NODE_ID);
+            arkrtos_board_puts(" rx=");
+            arkrtos_board_putu(s_line_rx);
+            arkrtos_board_puts(" served=");
+            arkrtos_board_putu(s_line_served);
+            arkrtos_board_puts(" result=ok\n");
+            reported = 1u;
+        }
+#endif
+
+        arkrtos_task_wait_internal(5u);
+    }
+#endif /* ARKRTOS_BUS_LINE_ROLE */
+}
+#endif /* ARKRTOS_BUS_LINE_DEMO */
+
 static void arkrtos_start_idle(void)
 {
     uint32 sp = (uint32)(unsigned long)(&s_idle_stack[IDLE_STACK_WORDS]);
@@ -2479,6 +2735,19 @@ int main(void)
     arkrtos_board_puts((((uint32)la_app_magic) == 0x4C413634u) ? " (probe image loaded)\n"
                                                              : " -> APP IMAGE NOT LOADED\n");
     #endif
+
+#if defined(ARKRTOS_BUS_LINE_DEMO) && (ARKRTOS_BUS_LINE_DEMO == 1)
+    /* 软总线物理线演示任务：优先级 13（低于 A/B/存储/自检，高于 shell 的 14），
+     * 5 ms 一轮 poll + 抽 UART —— 这条线是轮询的，不能占着 CPU 不让别人跑。 */
+    {
+        int32 id_line = arkrtos_task_register(task_bus_line, s_stack_line,
+                                             sizeof(s_stack_line), 13u, 0u);
+
+        arkrtos_board_puts("[boot] busline task=");
+        arkrtos_board_putu((uint32)id_line);
+        arkrtos_board_puts("\n");
+    }
+#endif
 
     arkrtos_start_idle();
 
