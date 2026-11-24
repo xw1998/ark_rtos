@@ -69,6 +69,7 @@
 #define LX_MAP_SHARED       0x01ul
 #define LX_MAP_PRIVATE      0x02ul
 #define LX_MAP_ANONYMOUS    0x20ul
+#define LX_MAP_FIXED        0x10ul
 
 #define LX_FUTEX            98
 #define LX_FUTEX_WAIT       0
@@ -641,6 +642,44 @@ void linux_main(unsigned long sp)
         (void)lx1(LX_CLOSE, (lx_long)pfds[0]);
         (void)lx1(LX_CLOSE, (lx_long)pfds[1]);
     }
+
+#if defined(ARKRTOS_USE_PAGING_DEMAND) && (ARKRTOS_USE_PAGING_DEMAND == 1)
+    /* ---------------- 真 mmap 语义：MAP_FIXED 丢掉同一地址上的旧内容 ----------------
+     * 这一档只在按需分页（DEMAND）构建里存在：没有页级账本就无法「丢掉」
+     * 一段已映射的东西，ABI 层在那里如实回 -ENOSYS。
+     *
+     * 判据是**内容**而不是返回值：先写两个标记字节，再对同一地址做一次
+     * MAP_FIXED，之后必须是 0。只判「返回值等于请求地址」的实现能过，
+     * 但它其实是把旧页原地留着 —— 那不是 mmap 语义。 */
+    {
+        lx_long fp;
+        volatile unsigned char *fq;
+        lx_long frc;
+
+        fp = lx6(LX_MMAP, 0, 4096, LX_PROT_READ | LX_PROT_WRITE,
+                 LX_MAP_PRIVATE | LX_MAP_ANONYMOUS, -1, 0);
+        check("mmap for MAP_FIXED > 0", (fp > 0) ? 1 : 0, 1);
+        fq = (volatile unsigned char *)(unsigned long)fp;
+        fq[0] = 0x11u;
+        fq[4095] = 0x22u;
+        frc = lx6(LX_MMAP, fp, 4096, LX_PROT_READ | LX_PROT_WRITE,
+                  LX_MAP_PRIVATE | LX_MAP_ANONYMOUS | LX_MAP_FIXED, -1, 0);
+        check("MAP_FIXED returned the same address", (frc == fp) ? 1 : 0, 1);
+        check("MAP_FIXED discarded the old bytes",
+              ((fq[0] == 0u) && (fq[4095] == 0u)) ? 1 : 0, 1);
+        fq[0] = 0x33u;
+        check("MAP_FIXED page writable afterwards", (fq[0] == 0x33u) ? 1 : 0, 1);
+        check("MAP_FIXED misaligned -> -EINVAL",
+              lx6(LX_MMAP, fp + 1, 4096, LX_PROT_READ | LX_PROT_WRITE,
+                  LX_MAP_PRIVATE | LX_MAP_ANONYMOUS | LX_MAP_FIXED, -1, 0),
+              -LX_EINVAL);
+        check("MAP_FIXED shared -> -ENOSYS",
+              lx6(LX_MMAP, fp, 4096, LX_PROT_READ | LX_PROT_WRITE,
+                  LX_MAP_SHARED | LX_MAP_ANONYMOUS | LX_MAP_FIXED, -1, 0),
+              -LX_ENOSYS);
+        (void)lx2(LX_MUNMAP, fp, 4096);
+    }
+#endif
 
     /* ---------------- 跨任务信号：子进程退出 -> 父进程 SIGCHLD ---------------- */
     {

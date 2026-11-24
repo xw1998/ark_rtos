@@ -112,8 +112,10 @@ return value is a separate port primitive
 
 `dup`/`dup2` redirection, `socket`/`select`, the rest of `futex` (a
 WAIT/WAKE tier exists behind `ARKRTOS_USE_LINUX_FUTEX`, default off, section 8.4),
-file-backed `mmap`,
-`MAP_FIXED` and page-level permission bits, and threads. Anonymous `MAP_SHARED`
+threads, `dup`/`dup2` redirection and the rest of `futex`. File-backed `mmap`
+exists (section 8.5), page-level write protection exists (section 8.6), and real
+`mmap` semantics `MAP_FIXED` exists in the demand tier (section 8.7) - it accepts
+anonymous private mappings only. Anonymous `MAP_SHARED`
 exists in the SHM tier (section 8.3, default off) and is inherited through `fork`
 only. `fork`/`clone` is no longer in this
 list: with `ARKRTOS_USE_LINUX_FORK` on (default off, 2026-11-23, QEMU LA64) a
@@ -509,15 +511,15 @@ leaves the parent writable; neither side ever has a "shared read-only" window.
 This is not a tunable: it exists whenever COW is on, and removing it requires
 giving traps their own kernel stack first.
 
-Readouts (`tools/fork_gate.py`, fork+COW tier): 26 checks all `ok`, 5 of them in
+Readouts (`tools/fork_gate.py`, fork+COW tier): 32 checks all `ok`, 5 of them in
 the COW section - `cow child saw pre-fork values (bits=3) -> 3 ok` (the child
 still sees the pre-fork values) and `parent cow write kept -> 48879 ok` (the
 parent's write stays in its own copy). Four kernel-log assertions: at least one
 `[LA64U] pg cow fork shared=<n> stack=<n> copied=0 frames=<n>` with `shared>=1`,
 `stack>=1`, `copied==0`; at least one `[LA64U] pg cow copy idx=<n> ref=2`; no
 copy line with `ref=1` (copying an unshared pair is moving bytes for nothing);
-and the unrelated demos still intact. The gate runs three rounds (fork tier 21
-checks, fork+COW tier 26, fork+COW+SHM tier 34) and **never removes the default
+and the unrelated demos still intact. The gate runs three rounds (fork tier 27
+checks, fork+COW tier 32, fork+COW+SHM tier 40) and **never removes the default
 whole-clone path from testing**.
 
 Two real root causes were found here, both invisible to the compiler and to
@@ -541,10 +543,10 @@ and marks it shared **at mmap time**:
 | When pages are made | **at mmap time**. Deferring to the fork lets both sides fault in their own frames, which turns "shared" into two private allocations - that implementation reports no error at all, it just silently stops sharing |
 | Bookkeeping | a separate table (`s_pg_pair_shr[space][idx]`). `ref > 1` only says "somebody shares it", it cannot tell "shared because COW copied it" from "shared on purpose" |
 | fork | a shared pair only gets `ref++`: not dropped to read-only, not stack-privatised, not copied; refill and space install put the entry back writable; the write fault and `write_space` skip the pair |
-| Inheritance | inherited through `fork` only. No `shm_open`, no file-backed `mmap`, no `MAP_FIXED`; with the switch off `MAP_SHARED` is always `-ENOSYS` |
-| Refused forms | missing `MAP_ANONYMOUS`, `PRIVATE\|SHARED` together, and `MAP_FIXED` are all `-ENOSYS` (this kernel's rule: unsupported means `ENOSYS`, not `EINVAL`) |
+| Inheritance | inherited through `fork` only. No `shm_open`; a shared mapping is always anonymous. With the switch off `MAP_SHARED` is always `-ENOSYS` |
+| Refused forms | missing `MAP_ANONYMOUS`, `PRIVATE\|SHARED` together, and `MAP_SHARED` with `MAP_FIXED` are all `-ENOSYS` (this kernel's rule: unsupported means `ENOSYS`, not `EINVAL`) |
 
-Readouts (`tools/fork_gate.py`, fork+COW+SHM tier, 34 checks): the SHM section has
+Readouts (`tools/fork_gate.py`, fork+COW+SHM tier, 40 checks): the SHM section has
 8 - two refused forms returning `-38`, `mmap(MAP_SHARED|ANON) > 0`,
 `shared page starts zeroed -> 0`, `clone for shm child > 0`,
 `parent saw child shared write -> 300`, `shm child exit reaped -> 12` and
@@ -602,7 +604,7 @@ lands as the minimal tier: `FUTEX_WAIT` / `FUTEX_WAKE`.
 | wait slot | one per task (`s_futex_key / s_futex_used / s_futex_woke[ARKRTOS_TASK_MAX_NUM]`). A sleeping task cannot start a second WAIT, so one slot is enough; `on_task_exit` clears it, otherwise a reused task id would inherit an "already waiting" record |
 | `WAKE` | scans every task; for each registered one on the same key it sets `s_futex_woke = 1` and calls `arkrtos_task_wakeup_internal()`, up to `val` of them, returning how many were woken; no waiter returns 0 (as in Linux) |
 
-Readouts (`tools/fork_gate.py`, fork+COW+SHM+futex tier, 43 checks, 9 of them
+Readouts (`tools/fork_gate.py`, fork+COW+SHM+futex tier, 49 checks, 9 of them
 futex): the shared page is mapped (`> 0`), `WAKE` with no waiter returns 0,
 `WAIT` on a different value returns `-11`, an unknown op returns `-38`, the waker
 is a real cloned process, the parent's `WAIT` returns 0 after being woken, the
@@ -679,7 +681,7 @@ content back, and `msync` has nothing to mean. With
 
 | item | current state |
 |---|---|
-| accepted shapes | no `MAP_ANONYMOUS` means a file mapping; `MAP_FIXED` still `-ENOSYS`; exactly one of `MAP_PRIVATE` / `MAP_SHARED`; `prot` must include `PROT_READ`; `offset` must be 4 KB aligned |
+| accepted shapes | no `MAP_ANONYMOUS` means a file mapping; `MAP_FIXED` with a file mapping is still `-ENOSYS` (discard-then-re-read needs write-back semantics); exactly one of `MAP_PRIVATE` / `MAP_SHARED`; `prot` must include `PROT_READ`; `offset` must be 4 KB aligned |
 | filling | at `mmap` time the file content is copied into the heap window in 128-byte chunks (`arkrtos_vfs_read_at` + `arkrtos_copy_to_user`); `offset` applies; **bytes past EOF read as zero** (no faked SIGBUS). Changes to the file after the mapping are **not** visible - this is a one-shot snapshot, not demand paging from the file |
 | address | shares the same heap cursor as anonymous `mmap`; the cursor is **not** rolled back on failure (rolling back would let two mappings share a page - a silent wrong answer) |
 | write-back bookkeeping | only "`MAP_SHARED` + `PROT_WRITE` + opened `O_RDWR`" mappings, at most **2 per process** (`LX_FILEMAP_MAX`); private mappings never reach the file |
@@ -692,7 +694,7 @@ content back, and `msync` has nothing to mean. With
 | `mprotect` | unaffected: still validation-only (section 1); `PROT_EXEC` cannot be enforced in hardware on this LA64 path (no NR/NX bit) |
 
 Readouts (the fifth tier of `tools/fork_gate.py`, fork+COW+SHM+futex+filemap,
-**63 checks**, 20 of them the filemap block):
+**69 checks**, 20 of them the filemap block):
 
 | readout | what it pins down |
 |---|---|
@@ -743,7 +745,7 @@ entries.
 | revoking | another `mprotect` with `PROT_READ|PROT_WRITE` revokes it. A COW-shared pair is read-only anyway, and revoking mprotect does not open it up (that would bypass copy-on-write and let both processes write their own frame) |
 | log | a violation prints `[LA64U] mprotect violation badv=0x... era=0x... tid=... -> kill task` (the `tid` tells operators which task was reaped; the gate uses this line as cross evidence) |
 
-Readouts (fifth tier plus `-DARKRTOS_USE_PAGING_MPROTECT=1`, **74 checks**, 11 of
+Readouts (fifth tier plus `-DARKRTOS_USE_PAGING_MPROTECT=1`, **80 checks**, 11 of
 them the mprotect block):
 
 | readout | what it pins down |
@@ -782,6 +784,75 @@ fixture originally wrote `check("...SIGSEGV status -> 11", ...)`, so it printed
 tier gate therefore failed on its last tier - the code was right, the readout was
 right, **only the label carried one layer too many**. The fix is to keep the
 expected value out of the label and let `check` print it.
+
+### 8.7 Real `mmap` semantics: `MAP_FIXED` (demand tier, 2026-11-24, QEMU LA64)
+
+Up to section 8.6, syscall 222 `mmap` had one shape only: take a **fresh**
+address above the heap-window cursor. `MAP_FIXED` is the exact opposite - "**use
+this address**, throw away whatever is there". The difference is not a return
+value: the first guarantees no other mapping is disturbed, the second is a
+statement that this range now belongs to the caller. `ld.so` reserving and then
+laying out in place, `brk` shrinking and growing again, and any "map a placeholder,
+then fill it in place" scheme all rest on the second one.
+
+**Anonymous private only.** `MAP_SHARED|MAP_FIXED` and `MAP_FIXED` on a file
+mapping are both `-ENOSYS`: a shared pair can only be discarded when the **whole
+pair** lies inside the span (see below), and discard-then-re-read on a file needs
+write-back semantics this kernel does not have. **Unsupported means refuse**, never
+"allocate elsewhere and hand back the same address" - the program would believe it
+owns that memory, which is the hardest green to spot.
+
+| item | current state |
+|---|---|
+| semantics | discard in place: every page covered by `[want, want+len)` is **zeroed in place** and the entry is installed writable. On success the return value is `want` itself |
+| frames are not returned to the pool | a resident private pair is **zeroed in place**, not freed. Two reasons: a space's frames are only borrowed anyway, and freeing would make a later unrelated allocation fail; zeroing keeps the address stable so the first store after `MAP_FIXED` does not fault again |
+| never-touched pages | `pa == 0` is skipped - under demand paging it is zero already, there is no frame to clear and no entry to install |
+| swapped pages | the swap slot is freed too: those bytes become unreachable immediately, keeping the slot would be a leak |
+| COW-shared pairs | **copied first**: the other side keeps its bytes, we get a fresh pair and then zero it. This keeps `MAP_FIXED` from modifying somebody else's page |
+| `MAP_SHARED` pairs | discarded only when the **whole pair** is inside the range; a partial overlap returns `-1` - "this half private, the other half shared" is a state this page-table format cannot express, so the whole call is refused instead of half-done |
+| `mprotect` ledger | the read-only bit of the discarded page is cleared (a fresh mapping is writable) and the entry is installed writable |
+| range | 4 KB aligned and entirely inside the heap window `[lx_heap_base(), lx_heap_end())`; misaligned or `want < base` is `-EINVAL`, `len > limit - want` is `-ENOMEM` |
+| never half-done | the shared-pair split check runs **before anything is touched**; an empty frame pool returns `-2` (translated to `-ENOMEM` by the ABI layer) with the ledger untouched |
+| cursor | on success `s_heap_cur` moves past the span (monotonically), so the next "any address" `mmap` does not hand out the same range again |
+| switch off | with `ARKRTOS_USE_PAGING_DEMAND=0`, `mmap(MAP_FIXED)` honestly returns `-ENOSYS` (without per-pair entry installation there is nothing to discard), no downgrade and no pretending |
+
+Readouts (all six `tools/fork_gate.py` tiers compile with
+`-DARKRTOS_USE_PAGING_DEMAND=1`, so this block runs in every tier; 6 checks):
+
+| readout | what it pins down |
+|---|---|
+| `mmap for MAP_FIXED > 0 -> 1` | the block really got a mapping that can be discarded |
+| `MAP_FIXED returned the same address -> 1` | the address returned is the one **requested**, not somewhere else |
+| `MAP_FIXED discarded the old bytes -> 1` | a marker byte is written at the start and at the end, and both read back as 0 after `MAP_FIXED` - the judgement is on **content**, not on the return value |
+| `MAP_FIXED page writable afterwards -> 1` | the page can be written and read back after the discard |
+| `MAP_FIXED misaligned -> -EINVAL -> -22` | `want + 1` is refused |
+| `MAP_FIXED shared -> -ENOSYS -> -38` | `MAP_SHARED|MAP_ANONYMOUS|MAP_FIXED` is refused instead of silently accepted |
+
+The third row is the important one: an implementation that only checks "same
+address came back" can leave the old page untouched, and the program reads its own
+stale data - the hardest green to spot. That is why the judgement has to sit on
+the bytes.
+
+**Fixture trap: every switch must be mirrored by hand.** In
+`example/qemu_loongarch64/Makefile`, `$(LXFORK_ELF)` is built with
+`$(ARCH_FLAGS) $(LXFORK_DEFS)` only - **not** CFLAGS / EXTRA_CFLAGS - so the
+fixture cannot see the kernel switches. This block only exists when
+`ARKRTOS_USE_PAGING_DEMAND=1`, and DEMAND was never mirrored, so all six tiers
+reported "check count 26 != 32" while the code was perfectly correct. The fix is
+an `ARK_DEMAND_ON` mirror in the Makefile, with a comment saying that every switch
+a fixture needs must be mirrored explicitly and that a missing mirror shows up as
+"those readouts never appear".
+
+**The other real defect: `la_pg_install_pair` lived inside the COW block.** It was
+defined inside `#if (ARKRTOS_USE_PAGING_COW == 1)`, while
+`arkrtos_port_paging_discard()` calls it unconditionally - so the
+"demand on, COW off" tier failed to link with
+`undefined reference to 'la_pg_install_pair'`. That combination is exactly the
+first `[fork]` tier: in other words, **DEMAND-only had never been linked**. The
+fix moves the function (with its comment) outside the COW block, right after
+`la_pg_pair_pte()`; everything it depends on (`la_tlb_write`,
+`la_tlb_inval_page`, `LA_STLB_INDEX`, `LA_PG_WIN_WAY_OF`, `la_asid_swap`) is
+unconditionally defined.
 
 ## 9 Switch and zero footprint
 
@@ -833,6 +904,12 @@ four `#error` guards in features.h; with it off the `s_pg_page_ro` ledger,
 count separately"; with it on the evidence is the **74 readouts of the sixth
 tier** (11 of them mprotect) plus the host-side compile gate.
 
+`MAP_FIXED` (section 8.7) is **not a switch of its own**: it exists when
+`ARKRTOS_USE_PAGING_DEMAND=1` (per-pair entry installation is what makes
+"discard this range" meaningful). With `DEMAND=0`, `mmap(MAP_FIXED)` honestly
+returns `-ENOSYS` and the six fixture readouts never appear, which is why
+`example/qemu_loongarch64/Makefile` must mirror DEMAND into `LXFORK_DEFS`.
+
 ## 10 Gate
 
 ```
@@ -857,9 +934,11 @@ default-off (fork and SHM), kconfig-wired (all four `depends on`, plus the SHM
 item depending on COW), the four
 `#error` guards in features.h, off-zero-symbols (RV32 `linux_abi.o` has no
 `lx_clone`/`lx_wait4`/`s_child`; LA64 `elf`/`port`/`paging` have no fork symbols),
-compile-on (four TUs plus the fixture), build, qemu-readout (21 `[fork]` checks
+compile-on (four TUs plus the fixture), build, qemu-readout (27 `[fork]` checks
 all `ok`, different parent/child pids, PASS line, `exit code 0`, hello/FS and the
-other Linux fixtures still intact; the three new readouts - blocking `wait4`
+other Linux fixtures still intact; six `MAP_FIXED` readouts (section 8.7: content
+zeroed after the discard, the same address returned, misaligned and shared forms
+refused); the three new readouts - blocking `wait4`
 really waited >= 40 ms, the parent read end still read 3 bytes after the child
 closed its own copy, the SIGCHLD handler really ran - are checked one by one),
 parser-selfcheck (nine broken logs rejected; the COW tier adds four more: a lost
@@ -872,25 +951,25 @@ futex tier adds three: the WAIT was never woken, the waker only saw half
 the write-back never happened, the write-back truncated the file, and a private
 write reached the file) and
 restore-default (the build directory is returned to the default tier so a later
-`make` does not reuse fork-tier objects). The COW round additionally requires 26
+`make` does not reuse fork-tier objects). The COW round additionally requires 32
 checks, `shared>=1 / stack>=1 / copied=0`, at least one `pg cow copy ... ref=2`,
-and no `ref=1` copy line. The SHM round requires 34 checks, the six SHM readouts
+and no `ref=1` copy line. The SHM round requires 40 checks, the six SHM readouts
 one by one (two refused forms returning `-38`, mapping success, start value 0,
 parent sees the child's write, child sees the parent's post-fork write) and at
 least one `[LA64U] pg shm map va=0x<n> pairs>=1`. The SHM switch has its own
 `default-off-shm` / `kconfig-wired-shm` / `features-guard-shm` items, and
 `off-zero-port` also requires that a SHM-off build has no
-`arkrtos_port_paging_map_shared`. The futex round requires 43 checks and validates
+`arkrtos_port_paging_map_shared`. The futex round requires 49 checks and validates
 the nine futex readouts one by one (shared page mapped, waiterless `WAKE` returns
 0, mismatched `WAIT` returns `-11`, unknown op returns `-38`, the waker clones,
 `WAIT` returns 0 after being woken, the parent sees the waker's `2`, the waker is
 reaped, `bits == 3`), with the SHM and COW assertions still in place; the futex
 switch has its own `default-off-futex` / `kconfig-wired-futex` /
-`features-guard-futex` items. The filemap round requires 63 checks and validates
+`features-guard-futex` items. The filemap round requires 69 checks and validates
 the 20 filemap readouts one by one; its switch has its own
 `default-off-filemap` / `kconfig-wired-filemap` / `features-guard-filemap` items
 (autoconf 0, four `depends on` entries, four `#error` guards). The mprotect
-round requires 74 checks and validates the 11 mprotect readouts one by one
+round requires 80 checks and validates the 11 mprotect readouts one by one
 (mapping success, read-only and read-write both accepted, a read-only page still
 readable, the sibling 4 KB of the same pair still writable, a write going through
 after revocation, the violating child reaped rather than restarted, the status
@@ -904,7 +983,7 @@ switch has its own `default-off-mprotect` / `kconfig-wired-mprotect` /
 `features-guard-mprotect` items (autoconf 0, four `depends on` entries, four
 `#error` guards).
 
-## 11 Three real bugs and one readout trap found on the way
+## 11 Real bugs and readout traps found on the way
 
 1. **Every user pointer returned `-EFAULT`**: `arkrtos_elf.c` wrote the task's
    rom/ram window fields inside `#if (ARKRTOS_USE_MPU == 1)`, but QEMU LA64 is
@@ -934,6 +1013,36 @@ switch has its own `default-off-mprotect` / `kconfig-wired-mprotect` /
    and path, because "a certain line is missing" used to be indistinguishable
    from "the serial only got half of it".
 
+5. **`la_pg_install_pair` lived inside the COW block, so the DEMAND-only tier
+   had never been linked.** Adding `MAP_FIXED` made
+   `arkrtos_port_paging_discard()` call `la_pg_install_pair()` unconditionally,
+   but the function was defined inside `#if (ARKRTOS_USE_PAGING_COW == 1)`, so the
+   first `[fork]` tier (`LINUX_FORK=1 + DEMAND=1`, COW off) failed to link with
+   `undefined reference to 'la_pg_install_pair'`. **This was not new code's
+   fault**: the combination "DEMAND on, COW off" had never been linked by any
+   gate (`compile-on` only runs `-c`, no linking). The fix moves the function
+   outside the COW block. Lesson: **`-c` passing does not mean the combination
+   exists**; linkability of switch combinations can only be proven by a real link
+   (or a real run).
+6. **The fixture is built without `EXTRA_CFLAGS`, so a missing switch mirror
+   shows up as "readouts never appear".** `$(LXFORK_ELF)` uses
+   `$(ARCH_FLAGS) $(LXFORK_DEFS)` only. The `MAP_FIXED` block only compiles with
+   `ARKRTOS_USE_PAGING_DEMAND=1` and DEMAND was never mirrored, so all six tiers
+   reported "26 != 32 checks" (and 34/40, 43/49, 63/69, 74/80) while the code was
+   correct (`compile-on` passed in all six tiers because the gate itself builds
+   the fixture with FORK_FLAGS). The fix is the `ARK_DEMAND_ON` mirror. Lesson:
+   **separate "not measured" from "not compiled in"** - the two look alike in a
+   log, but one needs a fixture change and the other a Makefile change.
+7. **The coverage gate went red over a provably unreachable guard.** The
+   `MAP_FIXED` branch originally re-checked `end == 0 || end > limit` after
+   computing `end = align_up(want + len)`. Since `want` and `limit` are both page
+   aligned and the previous line already guarantees `len <= limit - want`, that
+   branch is unreachable, so neither arm gets covered and the four-tier union
+   dropped from 97.96% to 97.91%. This is not a case for inventing a test that
+   reaches it - a fake entrance is worse than no coverage. The right fix is to
+   delete the redundant check and pin the invariant (both endpoints page aligned)
+   in a comment; the union went back to 98.18% and `COVERAGE-GATE OK` returned.
+
 ## 12 Boundaries
 
 This is the minimal syscall set that lets a static program run, not a Linux
@@ -947,9 +1056,12 @@ call is replayed after the wakeup - it is not an interrupts-off spin. Dynamic li
 own switch (`ARKRTOS_USE_DYNLOAD`) and a minimal in-tree loader, but running glibc
 binaries is still out of reach. Fork exists (section 8): per-process fd tables
 with inheritance, cross-task `SIGCHLD` and a blocking `wait4` all have QEMU LA64
-readouts, and copy-on-write now exists too (`ARKRTOS_USE_PAGING_COW`, section
+readouts, copy-on-write now exists too (`ARKRTOS_USE_PAGING_COW`, section
 8.2, default off), as does a minimal futex tier (`ARKRTOS_USE_LINUX_FUTEX`,
-section 8.4, default off); still absent are threads
+section 8.4, default off), file mapping (`ARKRTOS_USE_PAGING_FILEMAP`, section
+8.5, default off), real page-level write protection
+(`ARKRTOS_USE_PAGING_MPROTECT`, section 8.6, default off) and real `mmap`
+semantics `MAP_FIXED` (demand tier, section 8.7, no extra switch); still absent are threads
 (`CLONE_VM`/`CLONE_THREAD` are refused), preemptive signal delivery,
 `dup2`-style redirection and the rest of futex (`REQUEUE`/`PI`/`WAIT_BITSET`,
 robust-list cleanup).

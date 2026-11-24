@@ -2310,17 +2310,72 @@ static int32 lx_mmap(void *p_ctx)
     {
         return -LX_EINVAL;
     }
-    /* MAP_FIXED 一律不假装支持；MAP_PRIVATE 与 MAP_SHARED 必须且只能有一个：
-     * 两个都给是调用方写错，一个都不给是没有语义的请求。
-     * MAP_SHARED 只在 ARKRTOS_USE_PAGING_SHM 档里真做（否则同样 -ENOSYS，
-     * 不偷偷降级成私有：降级会让两个进程看起来共享、其实各改各的）。 */
-    if(((flags & LX_MAP_FIXED) != 0u) ||
-       (((flags & (LX_MAP_PRIVATE | LX_MAP_SHARED)) == 0u)) ||
+    /* MAP_PRIVATE 与 MAP_SHARED 必须且只能有一个：两个都给是调用方写错，
+     * 一个都不给是没有语义的请求。MAP_SHARED 只在 ARKRTOS_USE_PAGING_SHM 档
+     * 里真做（否则同样 -ENOSYS，不偷偷降级成私有：降级会让两个进程看起来
+     * 共享、其实各改各的）。
+     * MAP_FIXED 只在按需缺页档（ARKRTOS_USE_PAGING_DEMAND）真做：那一档才有
+     * 按对装条目的能力，也才谈得上「把这一段原来的东西丢掉」。别的档回
+     * -ENOSYS，不改成「在别处分配还给同一个地址」—— 那是骗调用方。 */
+    if((((flags & (LX_MAP_PRIVATE | LX_MAP_SHARED)) == 0u)) ||
        (((flags & LX_MAP_PRIVATE) != 0u) &&
         ((flags & LX_MAP_SHARED) != 0u)))
     {
         return -LX_ENOSYS;
     }
+#if (ARKRTOS_USE_PAGING_DEMAND != 1)
+    if((flags & LX_MAP_FIXED) != 0u)
+    {
+        return -LX_ENOSYS;
+    }
+#endif
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
+    if((flags & LX_MAP_FIXED) != 0u)
+    {
+        unsigned long want = (unsigned long)ARKRTOS_SVC_ARG(p_ctx, 0u);
+        int32 drc;
+
+        /* MAP_FIXED 的意思就是「就在这个地址」：不原样接受就如实拒绝，绝不在
+         * 别处分配一个还给同一个地址 —— 那样程序会以为自己手里是那块内存。
+         *   1) 只支持匿名私有（文件映射 + MAP_FIXED 与共享 + MAP_FIXED 都回
+         *      -ENOSYS，不半做）；
+         *   2) 必须是 4 KB 对齐，且整段落在堆窗口里（窗口外是程序自己的映像、
+         *      解释器区与栈区，把它们「丢掉」只会制造一场谁都不该负责的停机）；
+         *   3) 丢掉这一段：驻留的私有对就地清零，写时复制共享的对先复制
+         *      （对面保持原样），换出过的对连槽一起作废。
+         * 成功后游标推到这一段之后，下一次「在哪儿都行」的 mmap 不会又发
+         * 一次同一段地址。 */
+        if((((flags & LX_MAP_ANONYMOUS) == 0u)) ||
+           ((flags & LX_MAP_SHARED) != 0u))
+        {
+            return -LX_ENOSYS;
+        }
+        if(((want & 0xFFFul) != 0ul) || (want < base))
+        {
+            return -LX_EINVAL;
+        }
+        if((len > (limit - want)) || ((want + (unsigned long)len) < want))
+        {
+            return -LX_ENOMEM;
+        }
+        /* want 与堆窗口顶端 limit 都是页对齐的，上一句已经判过
+         * len <= limit - want，故 want + len 不会越界也不会回绕，
+         * align_up 最多补到 limit。这里只算长度交给端口。 */
+        end = lx_align_up(want + len);
+        drc = arkrtos_port_paging_discard(want, end - want);
+        if(drc != 0)
+        {
+            return (drc == -2) ? -LX_ENOMEM : -LX_EINVAL;
+        }
+        if(end > s_heap_cur)
+        {
+            s_heap_cur = end;
+        }
+        lx_ret_ptr(p_ctx, want);
+        return LX_RET_PTR_DONE;
+    }
+#endif
+
 #if (ARKRTOS_USE_PAGING_FILEMAP == 1)
     /* 没有 MAP_ANONYMOUS 就是文件映射（U-21）。arg2 = prot，arg4 = fd，
      * arg5 = offset，由这里往下传。 */

@@ -4934,7 +4934,7 @@ Plus a **negative** criterion: with no peer the node must print `result=fail (no
 "always succeeds" green light stays green forever. A waits `LINE_GIVE_UP_TICKS` (default 40000 ticks ~= 20 s)
 before printing that line, and `rpc_fail` is reported separately.
 
-#### 9.14.5 Lessons (six; the first three only surface once a real wire is attached)
+#### 9.14.5 Lessons (seven; the first three only surface once a real wire is attached)
 
 1. **QEMU's second UART never sets THRE when no peer is connected.** The original transmit timeout was
    "1e6 iterations per byte", which made a 149-byte frame hang for ten-plus seconds and starved the task -- the
@@ -4958,6 +4958,19 @@ before printing that line, and `rpc_fail` is reported separately.
    targets; under MinGW `long` is a *different* 4-byte type, so the `uint32_t` hook declarations in the header
    conflicted with the `uint32` stub definitions (`conflicting types`). The host stubs now use the `<stdint.h>`
    `_t` types (identical on the target, so nothing changes there).
+7. **The criterion read a `-serial file:` console, and QEMU's file chardev buffers -- so a correct run was
+   judged red.** On 2026-11-24 the full `ci_gate --build` failed `bus-line` once, reading "A already reports
+   `echo=ok reply_len=4` (so B really did answer) plus only B's `init` line", which fails `case two`; twelve
+   back-to-back standalone runs of the same script minutes later did not reproduce it. The root cause is not in
+   the kernel: **A can only receive `qjoh` from B's RPC handler, so B's `rx`/`served` counters must already be
+   non-zero -- only the two console lines were missing**. QEMU's file chardev accumulates output until it has a
+   block to flush, and the criterion gave up before the tail appeared. Fixed by moving all three cases' consoles
+   to socket chardevs (`socket,id=con,...,server=on,wait=off` plus `-serial chardev:con`) read incrementally by
+   Python: **what has been read counts, with no need to wait for exit and no reliance on flush at terminate
+   time**. In the same run B now prints its later `rx` lines live (`rx=2`), which is exactly what the buffer had
+   been hiding. General rule: **any gate whose criterion reads another process's console must not use a
+   buffered file chardev**; otherwise a red run cannot be told apart from a real defect, and a green run does not
+   prove no line was dropped.
 
 #### 9.14.6 Measured output (`tools/bus_line_two_nodes.py`, QEMU LA64, PASS)
 
@@ -4968,7 +4981,9 @@ case two   : A: [line] init node=0x00002101 role=1 rc=0
              A: [line] node=0x00002101 pubs=2 rpc=1 reply_len=4 echo=ok result=ok
              B: [line] init node=0x00002102 role=2 rc=0
              B: [line] rx topic=line/hb len=5
-             B: [line] node=0x00002102 rx=1 served=1 result=ok
+             B: [line] rx topic=line/hb len=5
+             B: [line] node=0x00002102 rx=2 served=1 result=ok
+             B: [line] rx topic=line/hb len=5
 case solo  : A: [line] node=0x00002101 pubs=7 rpc=3 rpc_fail=0 result=fail (no reply)
 RESULT: PASS
 ```

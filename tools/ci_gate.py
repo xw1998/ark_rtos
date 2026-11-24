@@ -2237,8 +2237,8 @@ def check_linux_abi():
     并在 QEMU 上真跑一份纯 Linux ABI 的静态程序（14 条 check + PASS + exit 7），
     而且解析器要能把自己喂进去的四种坏日志判红。
 
-    不覆盖：动态链接（PT_INTERP）、信号、socket、futex、真 mmap 语义——这些是
-    **不支持**，不是欠验；fork/clone + wait4 见 check_fork，
+    不覆盖：动态链接（PT_INTERP）、信号、socket、futex——这些是**不支持**，
+    不是欠验；fork/clone + wait4 + 真 mmap 语义（MAP_FIXED）见 check_fork，
     出处 docs/Linux可执行文件兼容-系统调用ABI.md。
     """
     r = _run_check([sys.executable, os.path.join("tools", "linux_abi_gate.py")])
@@ -2370,9 +2370,9 @@ def check_fork():
     if r.returncode == 0 and "FORK-GATE OK" in txt:
         ok("fork",
            "default off zero symbols (RV32 abi + LA64 elf/port/paging) / LA64 ON "
-           "4 TU compile / QEMU 21 fork checks (blocking wait4 + per-proc fd table "
-           "+ SIGCHLD) + child pid != parent + exit code 0 with hello/FS readings "
-           "intact / parser self-check 9/9")
+           "4 TU compile / QEMU 27 fork checks (blocking wait4 + per-proc fd table "
+           "+ SIGCHLD + MAP_FIXED) + child pid != parent + exit code 0 with hello/FS "
+           "readings intact / parser self-check 9/9")
     else:
         fail("fork", txt[-320:])
 

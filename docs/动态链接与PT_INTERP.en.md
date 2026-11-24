@@ -51,8 +51,9 @@ Linux ABI additions (`kernelsrc/src/arkrtos_linux_abi.c`): `pread64 (67)`,
 `mprotect (226)` — **accepted, not enforced** by default (the window is one
 `PS=20` RWX entry; `stat` says `accepted, not enforced`), real 4 KB page-level
 write protection behind `ARKRTOS_USE_PAGING_MPROTECT` (section 8.6 of the Linux ABI
-page); plus the fifth `stat` variant. `MAP_FIXED` is not supported and not
-faked, so a library address is `mmap` result + `p_vaddr`.
+page); plus the fifth `stat` variant. `MAP_FIXED` now exists in the demand tier (section 8.7 of the Linux ABI page)
+but **this loader does not use it**, so a library address is `mmap` result +
+`p_vaddr`.
 
 ## 3 The minimal ld.so
 

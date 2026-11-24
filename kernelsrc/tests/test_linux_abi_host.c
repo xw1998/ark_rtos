@@ -323,6 +323,25 @@ int32 arkrtos_copy_to_user(void *udst, const void *src, uint32 len)
 /* 临界区：futex 的登记与文件映射的写回忙标志都在临界区里（真机上与唤醒/切换
  * 争同一份表）。宿主是单线程，进出都当无事发生，只数进入次数证明真的走进去过。
  * 两个开关都要它，所以放在 futex 的条件之外。 */
+/* MAP_FIXED 的端口能力（只有按需缺页档才有这一格）。宿主的职责只到「ABI
+ * 层把请求原样交给了端口、把端口的结果翻成 errno、把游标推过去」；窗口里的
+ * 字节怎么丢由端口负责，宿主不假装验它。g_discard_rc 让用例把端口的两种
+ * 拒绝（-1 参数/越界、-2 帧池空）分别喂回来。 */
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
+uint32 g_discard_calls;
+int32  g_discard_rc;
+unsigned long g_discard_va;
+unsigned long g_discard_len;
+
+int32 arkrtos_port_paging_discard(unsigned long va, unsigned long len)
+{
+    g_discard_calls++;
+    g_discard_va  = va;
+    g_discard_len = len;
+    return g_discard_rc;
+}
+#endif
+
 uint32 g_crit_in;
 
 uint32 arkrtos_port_enter_critical(void)
@@ -1446,9 +1465,17 @@ static void t_mem(t_ctx *c)
 #else
     ck_ret(c, -T_ENOSYS, "mmap 缺 MAP_ANONYMOUS 回 -ENOSYS");
 #endif
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
+    /* 按需缺页档：MAP_FIXED 是真支持的，具体读数在 t_mapfixed 里。这里只咬住
+     * 「不原样接受就拒绝」这一条 —— 地址为 0 不是可交付的固定地址。 */
+    (void)call(c, T_NR_MMAP, 0UL, 0x1000UL, 0UL,
+               (unsigned long)(T_MAP_PRIVATE | T_MAP_ANONYMOUS | T_MAP_FIXED));
+    ck_ret(c, -T_EINVAL, "MAP_FIXED(addr=0) 回 -EINVAL");
+#else
     (void)call(c, T_NR_MMAP, 0UL, 0x1000UL, 0UL,
                (unsigned long)(T_MAP_PRIVATE | T_MAP_ANONYMOUS | T_MAP_FIXED));
     ck_ret(c, -T_ENOSYS, "mmap 带 MAP_FIXED 回 -ENOSYS");
+#endif
 
     /* SHM 关档（宿主这一档就是）时 MAP_SHARED 必须 -ENOSYS，不许偷偷降级成
      * 私有：降级会让两个进程看起来共享、其实各改各的，那是最坏的一种"能跑"。
@@ -1501,6 +1528,73 @@ static void t_mem(t_ctx *c)
     (void)call(c, T_NR_BRK, 0UL, 0UL, 0UL, 0UL);
     ck_u(c->ret, base + 0x1000UL, "mmap 自己把堆游标推到映射之后");
 }
+
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
+/* 分组 12b：MAP_FIXED（真 mmap 语义里「就在这里」那一半）。这一档能测的是
+ * ABI 层：地址原样交回、长度按页对齐交给端口、游标被推过去、端口的两种拒绝
+ * 各自翻成 -ENOMEM / -EINVAL、以及「不支持就明确拒绝」的两种组合（共享、
+ * 文件映射）。窗口里的字节由 QEMU 上板读，宿主不假装验它。 */
+static void t_mapfixed(t_ctx *c)
+{
+    unsigned long base  = U_BASE + ((unsigned long)U_SIZE / 2UL);
+    unsigned long limit = U_BASE + ((unsigned long)U_SIZE - (128UL * 1024UL));
+
+    fresh(c);
+    g_discard_calls = 0u;
+    g_discard_rc    = 0;
+    g_discard_va    = 0UL;
+    g_discard_len   = 0UL;
+
+    (void)call(c, T_NR_MMAP, base + 0x3000UL, 0x2000UL, 0UL,
+               (unsigned long)(T_MAP_PRIVATE | T_MAP_ANONYMOUS | T_MAP_FIXED));
+    ck_u(c->ret, base + 0x3000UL, "MAP_FIXED 返回的就是请求的那个地址");
+    ck(g_discard_calls == 1u, "MAP_FIXED 真的走到端口 discard 一次");
+    ck_u((unsigned long)g_discard_va, base + 0x3000UL, "交给端口的起址 = 请求地址");
+    ck_u((unsigned long)g_discard_len, 0x2000UL, "交给端口的长度按页对齐");
+
+    (void)call(c, T_NR_BRK, 0UL, 0UL, 0UL, 0UL);
+    ck_u(c->ret, base + 0x5000UL, "MAP_FIXED 之后堆游标推到这一段之后");
+
+    /* 非页对齐：Linux 的 mmap 也回 -EINVAL，端口一次都不该被叫 */
+    g_discard_calls = 0u;
+    (void)call(c, T_NR_MMAP, base + 0x5001UL, 0x1000UL, 0UL,
+               (unsigned long)(T_MAP_PRIVATE | T_MAP_ANONYMOUS | T_MAP_FIXED));
+    ck_ret(c, -T_EINVAL, "MAP_FIXED 未对齐回 -EINVAL");
+    ck(g_discard_calls == 0u, "参数非法时不动端口");
+
+    /* 低于堆窗口：那是程序自己的映像/解释器区，丢掉它只会停机 */
+    (void)call(c, T_NR_MMAP, U_BASE + 0x1000UL, 0x1000UL, 0UL,
+               (unsigned long)(T_MAP_PRIVATE | T_MAP_ANONYMOUS | T_MAP_FIXED));
+    ck_ret(c, -T_EINVAL, "MAP_FIXED 落在堆窗口之下回 -EINVAL");
+
+    /* 放不下 */
+    (void)call(c, T_NR_MMAP, limit - 0x1000UL, 0x2000UL, 0UL,
+               (unsigned long)(T_MAP_PRIVATE | T_MAP_ANONYMOUS | T_MAP_FIXED));
+    ck_ret(c, -T_ENOMEM, "MAP_FIXED 超出窗口顶回 -ENOMEM");
+
+    /* 端口两种拒绝的翻译 */
+    g_discard_rc = -2;
+    (void)call(c, T_NR_MMAP, base + 0x6000UL, 0x1000UL, 0UL,
+               (unsigned long)(T_MAP_PRIVATE | T_MAP_ANONYMOUS | T_MAP_FIXED));
+    ck_ret(c, -T_ENOMEM, "端口帧池空(-2) 翻成 -ENOMEM");
+    g_discard_rc = -1;
+    (void)call(c, T_NR_MMAP, base + 0x6000UL, 0x1000UL, 0UL,
+               (unsigned long)(T_MAP_PRIVATE | T_MAP_ANONYMOUS | T_MAP_FIXED));
+    ck_ret(c, -T_EINVAL, "端口拒绝(-1) 翻成 -EINVAL");
+    g_discard_rc = 0;
+    (void)call(c, T_NR_BRK, 0UL, 0UL, 0UL, 0UL);
+    ck_u(c->ret, base + 0x5000UL, "端口失败时堆游标一步都不动");
+
+    /* 两种「不支持就不做」的组合：共享与文件映射。半做比不做更难查。 */
+    (void)call(c, T_NR_MMAP, base + 0x7000UL, 0x1000UL, 0UL,
+               (unsigned long)(T_MAP_PRIVATE | T_MAP_SHARED |
+                               T_MAP_ANONYMOUS | T_MAP_FIXED));
+    ck_ret(c, -T_ENOSYS, "MAP_FIXED + MAP_SHARED 回 -ENOSYS");
+    (void)call(c, T_NR_MMAP, base + 0x7000UL, 0x1000UL, 0UL,
+               (unsigned long)(T_MAP_PRIVATE | T_MAP_FIXED));
+    ck_ret(c, -T_ENOSYS, "MAP_FIXED + 文件映射回 -ENOSYS");
+}
+#endif /* ARKRTOS_USE_PAGING_DEMAND == 1 */
 
 #if (ARKRTOS_USE_PAGING_FILEMAP == 1)
 /* 分组 13：文件映射与写回（U-21）。这一档的语义都写死在开关文档里，这里逐条
@@ -1906,6 +2000,44 @@ static void t_filemap_edge(t_ctx *c)
         (void)call(c, T_NR_MSYNC, addr, 0x1000UL, (unsigned long)T_MS_SYNC, 0UL);
         ck_ret(c, 0, "msync 整段越过 EOF 回 0");
         ck(g_write_calls == 0, "没有字节可写回时不动文件（不把它撑长）");
+    }
+
+    /* --- 10) munmap：参数校验 + 命中前先跳过别的记账 --- */
+    fresh(c);
+    g_stat_rc = 0;
+    g_stat_size = 300u;
+    g_file_len = 300u;
+    g_read_rc = 0;
+    g_write_rc = 0;
+    g_write_calls = 0;
+    u_put_str(T_PATH_OFF, "/mnt/ram/fm");
+    (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF),
+               (unsigned long)T_O_RDWR, 0UL);
+    fda = (int32)c->ret;
+    {
+        unsigned long a1;
+        unsigned long a2;
+
+        (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL,
+                    (unsigned long)(T_PROT_READ | T_PROT_WRITE),
+                    (unsigned long)T_MAP_SHARED, (unsigned long)fda, 0UL);
+        a1 = c->ret;
+        (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL,
+                    (unsigned long)(T_PROT_READ | T_PROT_WRITE),
+                    (unsigned long)T_MAP_SHARED, (unsigned long)fda, 0UL);
+        a2 = c->ret;
+        ck((a1 > 0u) && (a2 > 0u) && (a1 != a2),
+           "两条可写共享映射落在不同地址");
+        (void)call(c, T_NR_MUNMAP, a1 + 1UL, 0x1000UL, 0UL, 0UL);
+        ck_ret(c, -T_EINVAL, "munmap 地址非对齐回 -EINVAL");
+        (void)call(c, T_NR_MUNMAP, a1, 0UL, 0UL, 0UL);
+        ck_ret(c, -T_EINVAL, "munmap 长度 0 回 -EINVAL");
+        (void)call(c, T_NR_MUNMAP, a2, 0x1000UL, 0UL, 0UL);
+        ck_ret(c, 0, "munmap 跳过前面未命中的记账、命中目标后回 0");
+        ck(g_write_calls == 1, "munmap 收掉可写共享映射时把改动写回一次");
+        (void)call(c, T_NR_MUNMAP, a1, 0x1000UL, 0UL, 0UL);
+        ck_ret(c, 0, "再收掉第一条也回 0");
+        ck(g_write_calls == 2, "两条各自写回一次");
     }
 }
 #endif /* ARKRTOS_USE_PAGING_FILEMAP == 1 */
@@ -2556,6 +2688,9 @@ int main(void)
     t_task_exit(&c);
 #if (ARKRTOS_USE_LINUX_FUTEX == 1)
     t_futex(&c);
+#endif
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
+    t_mapfixed(&c);
 #endif
 #if (ARKRTOS_USE_PAGING_FILEMAP == 1)
     t_filemap(&c);

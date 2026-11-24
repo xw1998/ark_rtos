@@ -33,8 +33,9 @@
   C. 开档编得过：LA64 真板级 + `-DARKRTOS_USE_LINUX_FORK=1
      -DARKRTOS_USE_PAGING_DEMAND=1`，五个内核 TU 与夹具本身全编得过；
      再加一档 `-DARKRTOS_USE_PAGING_COW=1` 同样要全编得过。
-  D. QEMU 真读数（五档各跑一遍）：默认 fork 档 `[fork]` 的 21 条 check、
-     fork+COW 档 26 条、fork+COW+SHM 档 34 条、fork+COW+SHM+futex 档 43 条
+  D. QEMU 真读数（六档各跑一遍）：默认 fork 档 `[fork]` 的 27 条 check、
+     fork+COW 档 32 条、fork+COW+SHM 档 40 条、fork+COW+SHM+futex 档 49 条、
+     fork+…+filemap 档 69 条、fork+…+mprotect 档 80 条
      check 全 ` ok`（一条 FAIL 都不许）、
      `PASS: child ran in its own space, exit 42 reaped`、`exit code 0`；
      `[fork] parent pid=` 与 `[fork] child pid=` 两个数必须不同；并且同一次
@@ -76,8 +77,9 @@
 调用返回前被调用）。
 
 不覆盖：vfork / CLONE_VM 线程（无共享地址空间，一律 -EINVAL）、CLONE_FILES
-（每进程 fd 表是 fork 语义的一部分，共享 fd 表这种形态本门禁不为它背书）、
-MAP_FIXED / mprotect 强制。文件映射已由第五档覆盖，但**不是** Linux 的页缓存
+（每进程 fd 表是 fork 语义的一部分，共享 fd 表这种形态本门禁不为它背书）。
+MAP_FIXED 已覆盖（按需分页档的「同址丢弃旧内容」；非对齐回 -EINVAL、
+MAP_FIXED|MAP_SHARED 回 -ENOSYS 两条反假绿也在）。文件映射已由第五档覆盖，但**不是** Linux 的页缓存
 语义：每个进程各拿各的帧，写回（msync / munmap / 退出）之后才经文件路径互相
 可见；没有 shm_open、没有超过 8 KB 的文件（写回要整文件进内核缓冲）。
 
@@ -105,8 +107,8 @@ BUILD_DIR = os.path.join(ROOT, "build", "qemu_loongarch64")
 ELF_NAME = "ark_qemu_la64.elf"
 
 FORK_FLAGS = ["-DARKRTOS_USE_LINUX_FORK=1", "-DARKRTOS_USE_PAGING_DEMAND=1"]
-# COW 档 = fork 档 + 写时复制开关。本门禁跑两遍：先默认 fork 档（21 条），
-# 再 fork+COW 档（26 条 + 内核 COW 日志）。绝不把 FORK_FLAGS 直接改成带
+# COW 档 = fork 档 + 写时复制开关。本门禁跑两遍：先默认 fork 档（27 条），
+# 再 fork+COW 档（32 条 + 内核 COW 日志）。绝不把 FORK_FLAGS 直接改成带
 # COW —— 那样默认 fork 路径（整块克隆）就再也没被测过了。
 COW_FLAGS = FORK_FLAGS + ["-DARKRTOS_USE_PAGING_COW=1"]
 # SHM 档 = COW 档 + MAP_SHARED 匿名共享页，且必须叠在 COW 档上：共享位的账本
@@ -162,30 +164,33 @@ SIGN_KEY_HEADER = """#ifndef ARKRTOS_SIGN_KEY_LOCAL_H
 #   第二段（阻塞 wait4 / fd 继承）7 条：pipe2、clone>0、阻塞 wait4 得子号、
 #   子退出码 7、阻塞时长 >= 40 ms、父读端存活、子写的数据到达；
 #   第三段（跨任务 SIGCHLD）4 条：装 handler、handler 被调到、信号号 17、
-#   回收退出码 9 —— 合计 21 条。
-EXPECT_FORK_CHECKS = 21
+#   回收退出码 9；
+#   第四段（真 mmap 语义 MAP_FIXED）6 条：先 mmap、同址 MAP_FIXED 返回同址、
+#   旧内容被丢掉（两个标记字节都变 0）、之后仍可写、非对齐回 -EINVAL、
+#   MAP_SHARED 形态回 -ENOSYS —— 合计 27 条。
+EXPECT_FORK_CHECKS = 27
 # COW 段多 5 条：pipe2、clone>0、子被 reap、子看到 fork 前的值（位掩码 3）、
-# 父自己的写还在。合计 26 条。
-EXPECT_COW_CHECKS = 26
+# 父自己的写还在。合计 32 条。
+EXPECT_COW_CHECKS = 32
 # SHM 段多 8 条：两条非法形态回 -ENOSYS（反假绿）、匿名共享映射成功、起始清零、
-# clone>0、父看到子写、子被 reap、子看到父 fork 之后的写。合计 34 条。
-EXPECT_SHM_CHECKS = 34
+# clone>0、父看到子写、子被 reap、子看到父 fork 之后的写。合计 40 条。
+EXPECT_SHM_CHECKS = 40
 # FUTEX 段多 9 条：共享页映射、无等待者 WAKE==0、值不等 WAIT==-EAGAIN、
 # 未知 op==-ENOSYS、clone>0、被叫醒的 WAIT==0、父看到新值、子被 reap、
-# 唤醒者位掩码 3（看到 1 且 WAKE 回 1）。合计 43 条。
-EXPECT_FUTEX_CHECKS = 43
+# 唤醒者位掩码 3（看到 1 且 WAKE 回 1）。合计 49 条。
+EXPECT_FUTEX_CHECKS = 49
 # FILEMAP 段多 20 条：只读私有映射的内容三处读数（首字节 / 第 25 / 第 4095）、
 # 三条参数校验（未对齐 offset -EINVAL、坏 fd -EBADF、只读 fd 上的可写共享
 # -EACCES）、offset=4096 的映射与 EOF 补零、O_RDWR 打开、可写共享映射与
 # msync/munmap 两次写回、私有可写映射与它不落盘、以及最后把「共享写落盘 +
-# 私有写不落盘」合成一个位掩码读数（20 % 26 那对字节）。合计 63 条。
-EXPECT_FILEMAP_CHECKS = 63
+# 私有写不落盘」合成一个位掩码读数（20 % 26 那对字节）。合计 69 条。
+EXPECT_FILEMAP_CHECKS = 69
 # MPROTECT 段多 10 条：8 KB 映射、mprotect(RO)==0、只读页仍可读、**同一对里的
 # 另一半 4 KB 仍可写**（4 KB 粒度与 8 KB 粒度在此分家）、mprotect(RW)==0、
 # 恢复保护后写回得去、再设 RO、为违规写 fork 出子进程、子进程被摘掉（不是重启）、
 # 父进程那一页一个字节没变、状态字是「被信号终止」而不是 exit 码（第 74 条）。
-# 合计 74 条。
-EXPECT_MPROTECT_CHECKS = 74
+# 合计 80 条。
+EXPECT_MPROTECT_CHECKS = 80
 
 FAILS = []
 PASSES = []
@@ -695,6 +700,17 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
         "blocking wait4 blocked >= 40 ms -> 1 ok": "阻塞 wait4 没读出等待时长",
         "parent read end survived child close -> 3 ok": "fd 表不是每进程一份（父读端被子关掉）",
         "SIGCHLD handler ran -> 1 ok": "跨任务 SIGCHLD 没投递到父进程",
+        "mmap for MAP_FIXED > 0 -> 1 ok": "MAP_FIXED 段没拿到一块可丢弃的映射",
+        "MAP_FIXED returned the same address -> 1 ok":
+            "MAP_FIXED 返回的地址与请求地址不同（不是真 mmap 语义）",
+        "MAP_FIXED discarded the old bytes -> 1 ok":
+            "同一地址上的旧内容没被丢掉（只是把旧页原地留着）",
+        "MAP_FIXED page writable afterwards -> 1 ok":
+            "丢弃之后那一页写不进去",
+        "MAP_FIXED misaligned -> -EINVAL -> -22 ok":
+            "非页对齐的 MAP_FIXED 没被拒绝",
+        "MAP_FIXED shared -> -ENOSYS -> -38 ok":
+            "MAP_FIXED|MAP_SHARED 被悄悄接受（这种形态本内核不支持）",
     }
     if cow:
         req["cow child saw pre-fork values (bits=3) -> 3 ok"] = \
@@ -876,6 +892,9 @@ def self_check(good_text, cow=False, shm=False, futex=False, filemap=False,
         "SIGCHLD 没被调到": lambda s: s.replace(
             "[fork] SIGCHLD handler ran -> 1 ok",
             "[fork] SIGCHLD handler ran -> 0 FAIL (want 1)"),
+        "MAP_FIXED 没丢旧内容": lambda s: s.replace(
+            "[fork] MAP_FIXED discarded the old bytes -> 1 ok\n",
+            "[fork] MAP_FIXED discarded the old bytes -> 0 ok\n"),
     }
     if cow:
         mutations.update({
@@ -1033,9 +1052,10 @@ def main(argv):
                          "fork+cow+shm+futex+filemap+mprotect")
 
     if qemu:
-        # 四档各跑一遍：默认 fork（21 条）、fork+COW（26 条 + 内核 COW 日志）、
-        # fork+COW+SHM（34 条 + 内核共享映射日志）、fork+COW+SHM+futex
-        # （43 条 + 跨进程 WAIT/WAKE 配对）。别把 SHM 并进 COW 档、也别把
+        # 六档各跑一遍：默认 fork（27 条）、fork+COW（32 条 + 内核 COW 日志）、
+        # fork+COW+SHM（40 条 + 内核共享映射日志）、fork+COW+SHM+futex
+        # （49 条 + 跨进程 WAIT/WAKE 配对）、再叠 filemap（69 条）与
+        # mprotect（80 条）。别把 SHM 并进 COW 档、也别把
         # futex 并进 SHM 档 —— 那样「关档时 mmap(MAP_SHARED) / futex 仍回
         # -ENOSYS」这两条反假绿就永远测不到了。
         # 每次都要先 clean（make 不跟踪 EXTRA_CFLAGS），否则上一次的 .o 会让

@@ -8984,7 +8984,7 @@ strings D:/tmp/la64_virt.dtb | grep -i serial
 再加一条**否定**判据：没有对端时必须 `result=fail (no reply)` —— 否则「永远成功」的假绿会一直绿下去。
 A 侧等 `LINE_GIVE_UP_TICKS`（默认 40000 拍 ≈ 20 s）仍无回包才打这一行，`rpc_fail` 单列。
 
-#### 9.14.5 实测教训（六条，前三条都是「只有接上一条真线才会露头」的缺陷）
+#### 9.14.5 实测教训（七条，前三条都是「只有接上一条真线才会露头」的缺陷）
 
 1. **QEMU 第二路 UART 在没有对端时 THRE 永不置位。** 原来的写超时是「每字节 1e6 次迭代」，一帧 149 B
    就要卡十几秒，任务被活活饿死，表现为「门禁读不到 20 s 那行输出」。改成**整帧按毫秒**超时
@@ -9002,6 +9002,17 @@ A 侧等 `LINE_GIVE_UP_TICKS`（默认 40000 拍 ≈ 20 s）仍无回包才打�
 6. **宿主 LLP64 下 `uint32` 不是 `uint32_t`。** 本内核的 `uint32` 在 32 位目标上是 `unsigned long`；
    MinGW 下 `long` 是 4 字节的**另一种类型**，于是头文件里 `uint32_t` 声明的钩子与用例桩的 `uint32`
    定义冲突（`conflicting types`）。宿主侧的桩统一改成 `<stdint.h>` 的 `_t` 型（目标板上两者同型，不受影响）。
+7. **判据读的是 `-serial file:`，而 QEMU 的 file chardev 会攒块 —— 用例跑对了也会被判红。**
+   2026-11-24 全量 `ci_gate --build` 里 `bus-line` 红过一次，读到的是「A 已经 `echo=ok
+   reply_len=4`（说明 B 确实应答了）＋ B 控制台里只有 `init` 一行」，`case two` 因此判失败；
+   相隔几分钟单跑同一个脚本 12 次却 0 次复现。根因不在内核：**A 能收到 `qjoh` 就只能来自 B 的
+   RPC 处理函数，B 的 `rx`/`served` 计数必然已经非零，少的只是那两行控制台输出**。QEMU 的
+   file chardev 会攒满一块才落盘，判据在尾巴出现之前就放弃了等待。修法是把三个案例的控制台也
+   改成 socket chardev（`socket,id=con,...,server=on,wait=off` + `-serial chardev:con`），
+   由 Python 侧增量 `recv` 读：**读到就算数，不用等进程退出，也不依赖 terminate 时的 flush**。
+   改完同一次运行里 B 会实时多打出后面的 `rx` 行（`rx=2`），这正是之前被缓冲吃掉的东西。
+   这条的普适结论：**凡是「判据靠读另一个进程的控制台」的门禁，控制台就不能走带缓冲的 file
+   chardev**；否则红的那一次无法与真缺陷区分，而绿的那一次不能证明没有丢行。
 
 #### 9.14.6 实跑读数（`tools/bus_line_two_nodes.py`，QEMU LA64，PASS）
 
@@ -9012,7 +9023,9 @@ case two   : A: [line] init node=0x00002101 role=1 rc=0
              A: [line] node=0x00002101 pubs=2 rpc=1 reply_len=4 echo=ok result=ok
              B: [line] init node=0x00002102 role=2 rc=0
              B: [line] rx topic=line/hb len=5
-             B: [line] node=0x00002102 rx=1 served=1 result=ok
+             B: [line] rx topic=line/hb len=5
+             B: [line] node=0x00002102 rx=2 served=1 result=ok
+             B: [line] rx topic=line/hb len=5
 case solo  : A: [line] node=0x00002101 pubs=7 rpc=3 rpc_fail=0 result=fail (no reply)
 RESULT: PASS
 ```

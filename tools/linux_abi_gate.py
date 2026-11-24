@@ -43,7 +43,9 @@
      插一行 FAIL、少一条 check），每种坏法都必须被判红。
 
 不覆盖：fork/clone、父子 fd 继承（没有 fork 就没有第二个进程）、socket、
-futex、真 mmap 语义；管道（pipe2，非阻塞）已做，读数在 `[pipe]` 块；信号
+futex；真 mmap 语义（MAP_FIXED 的同址丢弃）已做，但它在按需分页档才存在，
+读数在 tools/fork_gate.py 的 `[fork]` 块（本门禁跑默认档，那里回 -ENOSYS）；
+管道（pipe2，非阻塞）已做，读数在 `[pipe]` 块；信号
 （同一任务自我投递的最小一档：rt_sigaction/rt_sigprocmask/kill/tkill/tgkill/
 rt_sigreturn）已做，读数在 `[sig]` 块。两块都按行首锚点判，不靠 [linux] 的
 行数（mmap/brk 只在 ELF 窗口内单调分配）。动态链接（PT_INTERP）

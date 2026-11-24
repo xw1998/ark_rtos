@@ -183,30 +183,87 @@ def build_tier(tier, defs, jobs):
 
 
 # ---------------------------------------------------------------- 运行
+class Console(object):
+    """QEMU 控制台的增量读取器。
+
+    为什么不用 `-serial file:`：QEMU 的 file chardev 会攒块再落盘，两三行
+    的日志可能一直等到进程退出才看得见。把它读成"没有输出"，门禁就会把跑
+    对的用例判红——实测过一次：A 已经拿到 echo=ok（说明 B 确实应答了），
+    B 自己的汇总行却还堵在缓冲里，于是 case two 被判失败。socket chardev
+    逐字节转发，读到就算数，既不用等进程结束，也不依赖 terminate 时的 flush。
+    """
+
+    def __init__(self, sock):
+        self.sock = sock
+        self.buf = b""
+        self.sock.setblocking(False)
+
+    def text(self, settle=0.0):
+        """收下已经到达的字节并解码；settle>0 时再多等一小会儿等尾巴。"""
+        end = time.time() + settle
+        while True:
+            try:
+                d = self.sock.recv(4096)
+            except BlockingIOError:
+                d = None
+            except OSError:
+                d = b""
+            if d:
+                self.buf += d
+                continue
+            if d == b"" or settle <= 0.0 or time.time() >= end:
+                break
+            time.sleep(0.02)
+        return self.buf.decode("utf-8", "replace")
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def _connect_console(port, proc, timeout=20.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            return socket.create_connection(("127.0.0.1", port), timeout=2)
+        except OSError:
+            if proc.poll() is not None:
+                return None
+            time.sleep(0.05)
+    return None
+
+
 def run_qemu(qemu, elf, tmp, tag, extra, wait=0.0):
-    """启动一个 QEMU 实例。返回 (proc, console_log_path)。
+    """启动一个 QEMU 实例。返回 (proc, Console)；控制台没连上时第二个为 None。
 
     extra 里给出与第二路串口相关的 -chardev/-serial 片段。
     """
-    console = os.path.join(tmp, "%s_console.log" % tag)
+    cport = free_port()
     local_elf = os.path.join(tmp, "%s.elf" % tag)
     shutil.copyfile(elf, local_elf)
     cmd = [qemu, "-M", "virt", "-m", "128M", "-smp", "2",
            "-display", "none", "-monitor", "none"] + extra + [
-           "-serial", "file:" + console,
+           "-chardev",
+           "socket,id=con,host=127.0.0.1,port=%d,server=on,wait=off" % cport,
+           "-serial", "chardev:con",
            "-serial", "chardev:bus",
            "-kernel", local_elf]
     p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    s = _connect_console(cport, p)
+    if s is None:
+        stop(p)
+        return p, None
+    con = Console(s)
     if wait:
         time.sleep(wait)
-    return p, console
+    return p, con
 
 
-def read_text(path):
-    if not os.path.exists(path):
-        return ""
-    with open(path, "rb") as f:
-        return f.read().decode("utf-8", "replace")
+def close_console(con):
+    if con is not None:
+        con.close()
 
 
 def stop(p):
@@ -231,9 +288,13 @@ def free_port():
 def case_probe(qemu, elf, tmp):
     port = free_port()
     chardev = "socket,id=bus,host=127.0.0.1,port=%d,server=on,wait=off" % port
-    p, console = run_qemu(qemu, elf, tmp, "probe", ["-chardev", chardev])
+    p, con = run_qemu(qemu, elf, tmp, "probe", ["-chardev", chardev])
     got = b""
     conn = None
+    if con is None:
+        stop(p)
+        print("  case probe : console chardev 没连上 -> fail")
+        return False
     try:
         for _ in range(150):
             if p.poll() is not None:
@@ -259,6 +320,7 @@ def case_probe(qemu, elf, tmp):
     finally:
         if conn is not None:
             conn.close()
+        close_console(con)
         stop(p)
     ok = judge_probe(got)
     print("  case probe : recv=%r -> %s" % (got[:64], "ok" if ok else "fail"))
@@ -269,22 +331,36 @@ def case_two_nodes(qemu, a_elf, b_elf, tmp, budget):
     port = free_port()
     ch_a = "socket,id=bus,host=127.0.0.1,port=%d,server=on,wait=off" % port
     ch_b = "socket,id=bus,host=127.0.0.1,port=%d,server=off" % port
-    a, a_log = run_qemu(qemu, a_elf, tmp, "a", ["-chardev", ch_a])
-    b, b_log = run_qemu(qemu, b_elf, tmp, "b", ["-chardev", ch_b], wait=1.0)
+    a, ca = run_qemu(qemu, a_elf, tmp, "a", ["-chardev", ch_a])
+    if ca is None:
+        stop(a)
+        print("  case two   : console chardev 没连上 -> fail")
+        return False
+    b, cb = run_qemu(qemu, b_elf, tmp, "b", ["-chardev", ch_b], wait=1.0)
+    if cb is None:
+        close_console(ca)
+        stop(b)
+        stop(a)
+        print("  case two   : console chardev 没连上 -> fail")
+        return False
     ok = False
     try:
         deadline = time.time() + budget
         while time.time() < deadline:
-            if judge_two_nodes(read_text(a_log), read_text(b_log)):
+            if judge_two_nodes(ca.text(), cb.text()):
                 ok = True
                 break
             if a.poll() is not None and b.poll() is not None:
                 break
-            time.sleep(0.5)
+            time.sleep(0.2)
     finally:
+        # 先把还没读完的尾巴收进缓冲，再关进程。socket 逐字节转发，
+        # 这里不需要依赖 terminate 时 QEMU 的 flush。
+        ta, tb = ca.text(settle=0.3), cb.text(settle=0.3)
+        close_console(ca)
+        close_console(cb)
         stop(b)
         stop(a)
-    ta, tb = read_text(a_log), read_text(b_log)
     # 放宽的观测：即使失败也把两边的 line 行打出来，方便定位
     for l in ta.splitlines():
         if "[line]" in l:
@@ -306,23 +382,27 @@ def case_single_node(qemu, a_elf, tmp):
     """
     port = free_port()
     ch_a = "socket,id=bus,host=127.0.0.1,port=%d,server=on,wait=off" % port
-    a, a_log = run_qemu(qemu, a_elf, tmp, "solo", ["-chardev", ch_a])
+    a, con = run_qemu(qemu, a_elf, tmp, "solo", ["-chardev", ch_a])
+    if con is None:
+        stop(a)
+        print("  case solo  : console chardev 没连上 -> fail")
+        return False
     ok = False
     try:
         # 2 s 判据 + 余量。这一档的 ELF 用 -DLINE_GIVE_UP_TICKS=4000u 编，
         # 所以不需要为了等判据而空转 20 s。
         deadline = time.time() + 25
         while time.time() < deadline:
-            if judge_single_node(read_text(a_log)):
+            if judge_single_node(con.text()):
                 ok = True
                 break
             if a.poll() is not None:
                 break
-            time.sleep(0.5)
+            time.sleep(0.2)
     finally:
+        ta = con.text(settle=0.3)
+        close_console(con)
         stop(a)
-
-    ta = read_text(a_log)
     for l in ta.splitlines():
         if "[line]" in l:
             print("    A:", l)

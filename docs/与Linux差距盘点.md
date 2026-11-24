@@ -75,7 +75,7 @@
 | Linux 有 | Ark RTOS | 归类 |
 |---------|---------|------|
 | MMU 虚拟内存、地址翻译、按需分页、swap | **窗口档**（Cortex-M / RV32）：只有 MPU/PMP 分段保护，没有地址翻译。**页表档**（LoongArch64）：页表 + PLV3 已实跑，且有每 App 地址空间（同 VA 多实例）、每空间 ASID、4 KB 页帧分配器、按需缺页、页替换（swap），读数见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.21–§5.29；**仍缺** TLB shootdown（改映射后按 ASID 定向失效，多核要 IPI）与真实硬件验证 | 窗口档是取舍（硬件前提）；页表档的 shootdown 是欠账（[欠账盘点](欠账盘点.md) 的 U-7 剩余半条） |
-| `mmap` / `munmap` / `brk` / `sbrk` | 默认档无；App 内存来自槽位 RAM 窗口 + App 侧 arena（`arkrtos_posix_malloc`，默认 1 KB）。Linux ABI 档有最小实现：匿名 `mmap` + 文件映射与整文件写回（`ARKRTOS_USE_PAGING_FILEMAP`，默认关），没有 `MAP_FIXED` 与共享文件页的并发写（页级写保护已做，见 §8.6），见 [Linux可执行文件兼容-系统调用ABI](Linux可执行文件兼容-系统调用ABI.md) §8.5 | 取舍 + 部分交付（Linux ABI 档） |
+| `mmap` / `munmap` / `brk` / `sbrk` | 默认档无；App 内存来自槽位 RAM 窗口 + App 侧 arena（`arkrtos_posix_malloc`，默认 1 KB）。Linux ABI 档有最小实现：匿名 `mmap` + 文件映射与整文件写回（`ARKRTOS_USE_PAGING_FILEMAP`，默认关）+ 真 `mmap` 语义 `MAP_FIXED`（按需分页档，§8.7，只认匿名私有）；仍没有共享文件页的并发写（页级写保护已做，见 §8.6），见 [Linux可执行文件兼容-系统调用ABI](Linux可执行文件兼容-系统调用ABI.md) §8.5 | 取舍 + 部分交付（Linux ABI 档） |
 | 内核统一管理物理内存 | 内核不是分配器：地址在 `config/arkrtos_partition.h` 定义一次，槽位窗口在安装时绑定 | 取舍 |
 | 内存超售 / OOM killer | 无。越界由 MPU/PMP 或 TLB 条目当场拦；**栈哨兵只写入没人检查**（`stack_bottom[0]` 写 `0xed01`，全仓没有读它，见 [欠账盘点](欠账盘点.md) 的 U-13） | 取舍 + 欠账（栈哨兵） |
 

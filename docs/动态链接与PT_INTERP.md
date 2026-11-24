@@ -68,8 +68,9 @@ ld.so 要用的三个新系统调用：
 | 226 | `mprotect` | 默认档**接受但不强制**（整窗单条 `PS=20` 条目，RWX，`stat` 里如实标 `accepted, not enforced`）；打开 `ARKRTOS_USE_PAGING_MPROTECT` 后有 4 KB 粒度的页级写保护（见 [Linux可执行文件兼容-系统调用ABI](Linux可执行文件兼容-系统调用ABI.md) §8.6） |
 | — | `stat` 第 5 个变体 | `LX_STAT_MPROTECT` 承接上一条的「成功」 |
 
-`mmap`（222）沿用窗口内的单调分配；`MAP_FIXED` **不支持也不假装支持**——所以
-ld.so 的库地址 = `mmap` 返回值 + `p_vaddr`，不是由 ELF 指定的。
+`mmap`（222）沿用窗口内的单调分配；`MAP_FIXED` 在按需分页档已支持（见
+[Linux可执行文件兼容-系统调用ABI](Linux可执行文件兼容-系统调用ABI.md) §8.7），但**本装载器不用它**——
+所以 ld.so 的库地址 = `mmap` 返回值 + `p_vaddr`，不是由 ELF 指定的。
 
 ---
 

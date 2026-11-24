@@ -23,7 +23,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（29 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（90 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（91 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -65,7 +65,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（12 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（117 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（118 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（18 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -4455,6 +4455,27 @@ uint32 arkrtos_port_paging_mprotect_stat(uint32 which);
 **返回**：the reading; 0 for an unknown selector
 关档时连符号都不给（宏在 arkrtos_mpu.h 里回 0）：一个「永远返回 0
 的统计函数」会被读成「一次都没换出过」，那是错答案。
+
+### `int32 arkrtos_port_paging_discard(unsigned long va, unsigned long len)`
+
+```c
+int32 arkrtos_port_paging_discard(unsigned long va, unsigned long len);
+```
+
+**Discard a window span so the next touch starts from zeroes (MAP_FIXED)**
+- `va`：window VA, 4 KB aligned
+- `len`：byte count (> 0, 4 KB aligned)
+**返回**：0 = done; -1 = bad argument / outside the window / would split a
+MAP_SHARED pair; -2 = frame pool empty (the ledger is unchanged)
+MAP_FIXED means "replace whatever is there".  On the demand tier a
+mapping is a pair of frames plus one 8 KB entry, so this call
+zeroes an owned pair in place, copies a COW-shared pair first (the
+other space keeps its bytes), frees a swap slot if the pair was
+swapped out, clears the mprotect read-only bit for the covered
+pages, and installs the entry writable again.  Frames are not
+returned to the pool - see the implementation note.
+> 说明：只在 ARKRTOS_USE_PAGING_DEMAND == 1 时存在；关档时 mmap 对 MAP_FIXED
+仍回 -ENOSYS（不偷偷降级成「在别处分配」）。
 
 ### `unsigned long arkrtos_port_paging_window_va(void);`
 
@@ -10079,6 +10100,17 @@ static void la_pg_pair_pte(uint32 space, uint32 idx, uint32 pa, uint32 writable,
 那时 mprotect 记的是「自己加的一位」，撤掉它不该把共享对放开
 （放开就是绕过写时复制，两个进程从此各写各的帧）。
 
+### `static void la_pg_install_pair(uint32 space, uint32 idx, uint32 pa, ui`
+
+```c
+static void la_pg_install_pair(uint32 space, uint32 idx, uint32 pa, uint32 writable) {
+```
+
+把某一对按「可写 / 只读」装进某个空间的窗口
+先按 VA 撤旧条目再写新的：旧条目可能落在**别的路上**（按需
+缺页是用 tlbfill 由硬件随机选路的），留着就是一条权限相反的
+同名条目 —— 查找命中它的时候 COW 整条链就绕过去了。
+
 ### `static uint32 la_pg_frame_slot(uint32 pa) {`
 
 ```c
@@ -10141,17 +10173,6 @@ static void la_pg_copy_pair_words(uint32 *dst, const uint32 *src) {
 ```
 
 8 KB 复制：故障/克隆上下文里没有 libc，也不能睡眠
-
-### `static void la_pg_install_pair(uint32 space, uint32 idx, uint32 pa, ui`
-
-```c
-static void la_pg_install_pair(uint32 space, uint32 idx, uint32 pa, uint32 writable) {
-```
-
-把某一对按「可写 / 只读」装进某个空间的窗口
-先按 VA 撤旧条目再写新的：旧条目可能落在**别的路上**（按需
-缺页是用 tlbfill 由硬件随机选路的），留着就是一条权限相反的
-同名条目 —— 查找命中它的时候 COW 整条链就绕过去了。
 
 ### `static int32 la_pg_cow_break(uint32 space, uint32 idx) {`
 
@@ -10448,6 +10469,47 @@ static int32 la_pg_demand_fault(unsigned long badv) {
 「KERNEL refill -> fatal」上。
 没有帧就返回 0，让原来的路径去报错/杀任务 —— 这里绝不假装
 装好了（装一条 V=0 的条目会让 ertn 回到同一条指令上无限重填）。
+
+### `int32 arkrtos_port_paging_discard(unsigned long va, unsigned long len)`
+
+```c
+int32 arkrtos_port_paging_discard(unsigned long va, unsigned long len) {
+```
+
+**Discard a window span so the next touch sees zeroes (MAP_FIXED)**
+- `va`：window VA, 4 KB aligned
+- `len`：byte count (> 0, 4 KB aligned); (va + len) must not wrap
+**返回**：0 = the span is "never touched" again; -1 = bad argument / out of the
+window / would split a shared pair; -2 = frame pool empty (nothing
+was changed)
+Linux MAP_FIXED means "throw away whatever is there and hand me a
+fresh mapping".  In this port a mapping is a pair of frames plus an
+8 KB TLB entry, so "throw away" is expressed as:
+1. a pair that is not resident (no frame) is simply forgotten; a
+swap slot, if any, is freed because its bytes are about to
+become unreachable;
+2. an owned pair (ref == 1, not MAP_SHARED) is zeroed **in place**.
+Zeroing instead of returning the frames keeps the pair address
+stable and makes the next store a plain store (no second
+fault, no second allocation);
+3. a pair shared through COW (ref > 1) is **copied first**: the
+other space keeps its bytes, ours gets a fresh pair.  Copying
+the whole pair and then zeroing only the covered 4 KB is what
+keeps the untouched neighbour page intact - this mapping
+cannot split a pair, so the neighbour becomes private to us
+from now on, which is strictly safer than sharing it;
+4. a MAP_SHARED pair can be discarded only when the **whole pair**
+falls inside the span.  Replacing half of a shared pair would
+leave the neighbour page shared while this half is private, a
+state this page-table format cannot describe, so that case is
+refused with -1 instead of being silently half-done.
+The mprotect read-only bit is cleared for the discarded pages (a
+fresh mapping is writable), and the entry is installed writable so
+the first store after MAP_FIXED does not fault again.
+Nothing here frees frames back to the pool: a space's frames are
+already only borrowed (see the note above map_span), and a discard
+that silently shrank the pool would make the next allocation fail
+somewhere unrelated to this call.
 
 ### `int32 arkrtos_port_paging_map_shared(unsigned long va, unsigned long l`
 

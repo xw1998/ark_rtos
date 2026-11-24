@@ -938,6 +938,26 @@ uint32 arkrtos_port_paging_mprotect_stat(uint32 which);
 uint32 arkrtos_port_paging_swap_stat(uint32 which);
 #endif
 
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
+/** @brief Discard a window span so the next touch starts from zeroes (MAP_FIXED)
+ *  @param va  window VA, 4 KB aligned
+ *  @param len byte count (> 0, 4 KB aligned)
+ *  @return 0 = done; -1 = bad argument / outside the window / would split a
+ *          MAP_SHARED pair; -2 = frame pool empty (the ledger is unchanged)
+ *  @details MAP_FIXED means "replace whatever is there".  On the demand tier a
+ *           mapping is a pair of frames plus one 8 KB entry, so this call
+ *           zeroes an owned pair in place, copies a COW-shared pair first (the
+ *           other space keeps its bytes), frees a swap slot if the pair was
+ *           swapped out, clears the mprotect read-only bit for the covered
+ *           pages, and installs the entry writable again.  Frames are not
+ *           returned to the pool - see the implementation note.
+ *  @note 只在 ARKRTOS_USE_PAGING_DEMAND == 1 时存在；关档时 mmap 对 MAP_FIXED
+ *        仍回 -ENOSYS（不偷偷降级成「在别处分配」）。 */
+int32 arkrtos_port_paging_discard(unsigned long va, unsigned long len);
+#else
+#define arkrtos_port_paging_discard(va, len)           (-1)
+#endif
+
 /** @brief Virtual base of the App window (same VA for every address space)
  *  @return the window VA base (0 when the board has no paging window)
  *  @details The physical side of the window differs per space and comes from
@@ -1007,6 +1027,7 @@ void arkrtos_port_paging_inval_va(unsigned long va);
 #define arkrtos_port_paging_map_shared(va, len)         (-1)
 #define arkrtos_port_paging_protect(va, len, wr)        (-1)
 #define arkrtos_port_paging_mprotect_stat(which)        (0u)
+#define arkrtos_port_paging_discard(va, len)           (-1)
 #define arkrtos_port_paging_window_va()                 (0u)
 #define arkrtos_port_paging_asid_current()              (0UL)
 #define arkrtos_port_paging_asid_of(space)              (0u)

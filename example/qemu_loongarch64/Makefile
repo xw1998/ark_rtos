@@ -436,6 +436,15 @@ ARK_FILEMAP_ON := $(findstring ARKRTOS_USE_PAGING_FILEMAP=1,$(EXTRA_CFLAGS))
 # EXTRA_CFLAGS 里显式开了才编 —— 关档时夹具与内核都不多一个字节，而且
 # 「关档时 mprotect 仍然只记账、写保护页照写不误」这条反假绿才测得到。
 ARK_MPROT_ON := $(findstring ARKRTOS_USE_PAGING_MPROTECT=1,$(EXTRA_CFLAGS))
+# 按需分页（真 mmap 语义 MAP_FIXED 的前提）本身不是夹具的一档，但夹具里
+# MAP_FIXED 那 6 条读数只在按需档才存在（关档时内核如实回 -ENOSYS，那正是
+# 反假绿要钉的）。因此这里也必须把 DEMAND 镜像给夹具。
+#
+# 注意：$(LXFORK_ELF) 只用 $(ARCH_FLAGS) $(LXFORK_DEFS) 编译，不带 CFLAGS /
+# EXTRA_CFLAGS / -include arkrtos_board_config.h。所以内核开关不能指望从
+# 别处漏进来 —— 每加一个夹具要看的开关，就得在这张表里显式镜像一条，
+# 漏镜像的表现是「那几行读数在六档里整段不出现」。
+ARK_DEMAND_ON := $(findstring ARKRTOS_USE_PAGING_DEMAND=1,$(EXTRA_CFLAGS))
 LXFORK_DEFS   :=
 ifneq ($(ARK_COW_ON),)
 LXFORK_DEFS   += -DARKRTOS_USE_PAGING_COW=1
@@ -451,6 +460,9 @@ LXFORK_DEFS   += -DARKRTOS_USE_PAGING_FILEMAP=1
 endif
 ifneq ($(ARK_MPROT_ON),)
 LXFORK_DEFS   += -DARKRTOS_USE_PAGING_MPROTECT=1
+endif
+ifneq ($(ARK_DEMAND_ON),)
+LXFORK_DEFS   += -DARKRTOS_USE_PAGING_DEMAND=1
 endif
 LXFORK_SRC    := example/qemu_loongarch64/elf/linux_fork.c
 LXFORK_ELF    := $(BUILD)/linux_fork.elf

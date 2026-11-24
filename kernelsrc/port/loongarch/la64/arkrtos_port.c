@@ -1639,6 +1639,34 @@ static void la_pg_pair_pte(uint32 space, uint32 idx, uint32 pa, uint32 writable,
     *p_lo1 = lo1;
 }
 
+/* 这一对安装函数在 COW 段之外：按需分页档（DEMAND=1、COW=0）的
+ * arkrtos_port_paging_discard() / 缺页重装都要用它。原先它躺在 COW 段里，
+ * DEMAND-only 档链接时直接 undefined reference。依赖的 la_tlb_write /
+ * la_tlb_inval_page / LA_STLB_INDEX / LA_PG_WIN_WAY_OF / la_asid_swap 全是
+ * 无条件定义，搬出来不引入任何新的条件依赖。 */
+/** 把某一对按「可写 / 只读」装进某个空间的窗口
+ *  @details 先按 VA 撤旧条目再写新的：旧条目可能落在**别的路上**（按需
+ *           缺页是用 tlbfill 由硬件随机选路的），留着就是一条权限相反的
+ *           同名条目 —— 查找命中它的时候 COW 整条链就绕过去了。 */
+static void la_pg_install_pair(uint32 space, uint32 idx, uint32 pa, uint32 writable)
+{
+    unsigned long va = LA_WIN_VA + (idx * 0x2000u);
+    unsigned long lo0;
+    unsigned long lo1;
+#if (ARKRTOS_USE_PAGING_ASID == 1)
+    unsigned long saved = la_asid_swap(LA_PG_ASID_OF(space));
+#endif
+
+    la_pg_pair_pte(space, idx, pa, writable, &lo0, &lo1);
+
+    la_tlb_inval_page(va);
+    la_tlb_write(va, 12u, LA_STLB_INDEX(va, LA_PG_WIN_WAY_OF(space)), lo0, lo1);
+
+#if (ARKRTOS_USE_PAGING_ASID == 1)
+    (void)la_asid_swap(saved);
+#endif
+}
+
 #if (ARKRTOS_USE_PAGING_COW == 1)
 /* ------------------------------------------------------------
  * 写时复制（U-19b）：fork 只分享，第一次写才复制
@@ -1820,29 +1848,6 @@ static void la_pg_copy_pair_words(uint32 *dst, const uint32 *src)
     {
         dst[i] = src[i];
     }
-}
-
-/** 把某一对按「可写 / 只读」装进某个空间的窗口
- *  @details 先按 VA 撤旧条目再写新的：旧条目可能落在**别的路上**（按需
- *           缺页是用 tlbfill 由硬件随机选路的），留着就是一条权限相反的
- *           同名条目 —— 查找命中它的时候 COW 整条链就绕过去了。 */
-static void la_pg_install_pair(uint32 space, uint32 idx, uint32 pa, uint32 writable)
-{
-    unsigned long va = LA_WIN_VA + (idx * 0x2000u);
-    unsigned long lo0;
-    unsigned long lo1;
-#if (ARKRTOS_USE_PAGING_ASID == 1)
-    unsigned long saved = la_asid_swap(LA_PG_ASID_OF(space));
-#endif
-
-    la_pg_pair_pte(space, idx, pa, writable, &lo0, &lo1);
-
-    la_tlb_inval_page(va);
-    la_tlb_write(va, 12u, LA_STLB_INDEX(va, LA_PG_WIN_WAY_OF(space)), lo0, lo1);
-
-#if (ARKRTOS_USE_PAGING_ASID == 1)
-    (void)la_asid_swap(saved);
-#endif
 }
 
 /**
@@ -3033,6 +3038,148 @@ static int32 la_pg_demand_fault(unsigned long badv)
 
     s_pg_demand_faults++;
     return 1;
+}
+
+/**
+* @brief Discard a window span so the next touch sees zeroes (MAP_FIXED)
+* @param va  window VA, 4 KB aligned
+* @param len byte count (> 0, 4 KB aligned); (va + len) must not wrap
+* @return 0 = the span is "never touched" again; -1 = bad argument / out of the
+*         window / would split a shared pair; -2 = frame pool empty (nothing
+*         was changed)
+* @details Linux MAP_FIXED means "throw away whatever is there and hand me a
+*          fresh mapping".  In this port a mapping is a pair of frames plus an
+*          8 KB TLB entry, so "throw away" is expressed as:
+*
+*            1. a pair that is not resident (no frame) is simply forgotten; a
+*               swap slot, if any, is freed because its bytes are about to
+*               become unreachable;
+*            2. an owned pair (ref == 1, not MAP_SHARED) is zeroed **in place**.
+*               Zeroing instead of returning the frames keeps the pair address
+*               stable and makes the next store a plain store (no second
+*               fault, no second allocation);
+*            3. a pair shared through COW (ref > 1) is **copied first**: the
+*               other space keeps its bytes, ours gets a fresh pair.  Copying
+*               the whole pair and then zeroing only the covered 4 KB is what
+*               keeps the untouched neighbour page intact - this mapping
+*               cannot split a pair, so the neighbour becomes private to us
+*               from now on, which is strictly safer than sharing it;
+*            4. a MAP_SHARED pair can be discarded only when the **whole pair**
+*               falls inside the span.  Replacing half of a shared pair would
+*               leave the neighbour page shared while this half is private, a
+*               state this page-table format cannot describe, so that case is
+*               refused with -1 instead of being silently half-done.
+*
+*          The mprotect read-only bit is cleared for the discarded pages (a
+*          fresh mapping is writable), and the entry is installed writable so
+*          the first store after MAP_FIXED does not fault again.
+*
+*          Nothing here frees frames back to the pool: a space's frames are
+*          already only borrowed (see the note above map_span), and a discard
+*          that silently shrank the pool would make the next allocation fail
+*          somewhere unrelated to this call.
+*/
+int32 arkrtos_port_paging_discard(unsigned long va, unsigned long len)
+{
+    uint32 space = s_pg_app_space;
+    unsigned long end;
+    unsigned long p;
+
+    if((len == 0ul) || ((va & 0xFFFul) != 0ul) || ((len & 0xFFFul) != 0ul))
+    {
+        return -1;
+    }
+    if((va < LA_WIN_VA) || ((va + len) < va) ||
+       ((va + len) > (LA_WIN_VA + (unsigned long)ARKRTOS_QEMU_APP_SIZE)))
+    {
+        return -1;
+    }
+
+    /* The shared-pair rule is checked **before** anything is touched: a span
+     * that would split a shared pair must fail with the ledger unchanged. */
+#if (ARKRTOS_USE_PAGING_SHM == 1)
+    for(p = va; p < (va + len); )
+    {
+        uint32 idx = (uint32)((p - LA_WIN_VA) / 0x2000u);
+        unsigned long pair_va = LA_WIN_VA + (idx * 0x2000u);
+
+        if(la_pg_pair_shr(space, idx) != 0)
+        {
+            if((va > pair_va) || ((va + len) < (pair_va + 0x2000u)))
+            {
+                return -1;          /* cannot split a shared pair */
+            }
+        }
+        p = pair_va + 0x2000u;
+    }
+#endif
+
+    end = va + len;
+
+    for(p = va; p < end; p += 0x1000u)
+    {
+        uint32 off  = (uint32)(p - LA_WIN_VA);
+        uint32 idx  = off / 0x2000u;
+        uint32 page = (uint32)((off & 0x1000u) / 0x1000u);
+        uint32 pa   = s_pg_pair_pa[space][idx];
+        uint32 w;
+
+#if (ARKRTOS_USE_PAGING_SWAP == 1)
+        if(s_pg_pair_slot[space][idx] != 0u)
+        {
+            la_pg_swap_slot_free((uint32)s_pg_pair_slot[space][idx] - 1u);
+            s_pg_pair_slot[space][idx] = 0u;
+        }
+#endif
+        if(pa == 0u)
+        {
+            continue;               /* never touched: it is already zero */
+        }
+
+#if (ARKRTOS_USE_PAGING_COW == 1)
+        if((la_pg_ref_get(pa) > 1u)
+#if (ARKRTOS_USE_PAGING_SHM == 1)
+           || (la_pg_pair_shr(space, idx) != 0)
+#endif
+          )
+        {
+            uint32 np = 0u;
+            uint32 i;
+
+            if(arkrtos_port_paging_frame_alloc(2u, &np) != 0)
+            {
+                return -2;          /* pool empty: leave the ledger alone */
+            }
+            for(i = 0u; i < 2048u; i++)
+            {
+                ((uint32 *)(unsigned long)np)[i] =
+                    ((const uint32 *)(unsigned long)pa)[i];
+            }
+            s_pg_pair_pa[space][idx] = np;
+            la_pg_pair_own(np);
+            (void)la_pg_pair_ref_down(pa);
+            pa = np;
+        }
+#endif
+
+        /* Zero only the covered 4 KB: the other half of the pair belongs to a
+         * mapping nobody asked to replace. */
+        for(w = 0u; w < 1024u; w++)
+        {
+            ((uint32 *)(unsigned long)(pa + (page * 0x1000u)))[w] = 0u;
+        }
+#if (ARKRTOS_USE_PAGING_SHM == 1)
+        la_pg_pair_shr_set(space, idx, 0u);
+#endif
+#if (ARKRTOS_USE_PAGING_MPROTECT == 1)
+        s_pg_page_ro[space][idx] =
+            (uint8)((uint32)s_pg_page_ro[space][idx] &
+                    ~(uint32)((page == 0u) ? 1u : 2u));
+#endif
+        la_pg_install_pair(space, idx, pa, 1u);
+    }
+
+    return 0;
 }
 
 #endif /* ARKRTOS_USE_PAGING_DEMAND == 1 */
