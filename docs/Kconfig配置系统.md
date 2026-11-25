@@ -191,6 +191,14 @@ make -f example/qemu_loongarch64/Makefile BUILD=build/qemu_la64_demand \
 不改默认档任何一个字节（固定 `SOURCE_DATE_EPOCH` 后比 `--strip-debug` 镜像，
 哈希与改动前相同）。见 [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.23。
 
+再往后还有一项**不对应任何开关**的回归门禁，挂在检查表**末尾**（因此不改动上面
+那些「第 N 项」的编号）：`tools/icount_stack_gate.py`（`ci_gate` 的
+`icount-stack` 项）。它守的是 LA64 十档镜像里 lwIP tcpip 线程的栈预算——判据
+一半在源码（8 KB 那条 `#if` 必须同时含 `ARKRTOS_USE_NET_VIRTIO` 与
+`ARKRTOS_USE_LINUX_SOCKET`），一半在运行（`-icount shift=5` 纯跑不许出现
+`[Ark RTOS] FATAL`、`[fork] PASS` 之后还要继续跑）。根因与取证纪律见
+[已知限制](已知限制.md) 第一节第一行。
+
 ## 6. 数量限制
 
 原先散在头文件里写死的上限（任务表、同步对象表、队列、定时器、设备表、socket、

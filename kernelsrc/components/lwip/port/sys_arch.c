@@ -325,9 +325,18 @@ u32_t sys_arch_mbox_tryfetch(sys_mbox_t *mbox, void **msg)
  * 56 KB（build/kernel.sct 的 RW_KERNEL 0xE000）。两个槽按 8 KB 给会多占
  * 12 KB，实测直接 L6406E "No space in execution regions"（停在链接期，
  * 不是编译期），并且这 12 KB 换不来任何东西：ARM 这一档没有真网卡，
- * tcpip 线程仍然只调一次 tcpip_init。 */
-#if (ARKRTOS_USE_NET_VIRTIO == 1)
-#define LWIP_THREAD_STACK_W  2048u  /* 8 KB：接真网卡后的 tcpip 线程 */
+ * tcpip 线程仍然只调一次 tcpip_init。
+ *
+ * 2026-11-25 修正（LA64 十档低频 INE 停机的根因）：判断条件不能只看
+ * NET_VIRTIO。**只要 LINUX_SOCKET 打开**，tcpip 线程就会跑 netconn /
+ * socket 的收发与 select 唤醒，深度远超「只调一次 tcpip_init」——
+ * 实测（QEMU LA64、-icount shift=5 确定性复现）2 KB 槽被 100% 用满
+ * （0xcd 填充图案在整段 2044 字节里一个不剩），528 字节的陷阱帧溢出到
+ * 槽下方的 g_lwip_task_stack，把相邻任务（task 11 arkrtos_lwip_task）
+ * 保存的 ra 改写成 0x800，恢复时 jr $ra 落到零页 → INE 停机。
+ * 因此：真网卡 或 socket 档一律 8 KB；ARM 那两档不开 socket，仍是 2 KB。 */
+#if (ARKRTOS_USE_NET_VIRTIO == 1) || (ARKRTOS_USE_LINUX_SOCKET == 1)
+#define LWIP_THREAD_STACK_W  2048u  /* 8 KB：真网卡档 / socket 档的 tcpip 线程 */
 #else
 #define LWIP_THREAD_STACK_W  512u   /* 2 KB，与 TCPIP_THREAD_STACKSIZE 对齐 */
 #endif

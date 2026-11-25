@@ -2272,6 +2272,34 @@ def check_stack_guard():
         fail("stack-guard", txt[-260:])
 
 
+def check_icount_stack():
+    """lwIP tcpip 线程的栈预算（LA64 十档低频 INE 停机）必须两头都在。
+
+    2026-11-23 起十档镜像会低频停在零页（`ecode=0x0d` INE）。根因坐实到
+    机制级：`sys_arch.c` 里 `LWIP_THREAD_STACK_W` 只在 `NET_VIRTIO` 时给
+    8 KB，而 socket 档的 tcpip 线程也要跑 netconn/select，2 KB 槽被 100%
+    用满，528 字节陷阱帧溢出到槽下方，改坏相邻任务保存的 ra。
+    检测当时为何失灵：守卫字确实报了 task 12，但报的是「已发生」——
+    它踩坏的相邻帧不会因为把 task 12 摘掉而复原。
+
+    tools/icount_stack_gate.py 因此判两层：源码层栈预算不许回退（8 KB 的
+    那条 `#if` 必须同时含 NET_VIRTIO 与 LINUX_SOCKET），运行层必须真的跑
+    过那段窗口（`-icount shift=5` 纯跑、不许任何单步——gdb 单步会扰动
+    icount 相位，历史实测因此复现不出），且只允许演示任务被报栈底守卫。
+    本项会 clean 重编两次（十档 + 复位默认档），是慢检查。
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "icount_stack_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "ICOUNT-STACK-GATE OK" in txt:
+        ok("icount-stack",
+           "source pins (8 KB iff NET_VIRTIO or LINUX_SOCKET, lwip task 4 KB) / "
+           "parser self-check 6/6 / ten-tier build + -icount shift=5 pure run: no "
+           "FATAL, [fork] PASS, keeps running after fork / tcpip stack headroom / "
+           "default build restored")
+    else:
+        fail("icount-stack", txt[-360:])
+
+
 def check_svc_wide():
     """宽参 ABI（ARKRTOS_USE_WIDE_SVC_ARGS）的拒绝路径与清空顺序都必须有读数。
 
@@ -6211,6 +6239,7 @@ LOCAL_TOOLCHAIN = {
     "modld": "LA64 / RV32 / LA32 cross gcc",
     "payload-sign": "LA64 cross gcc",
     "stack-guard": "LA64 / RV32 cross gcc",
+    "icount-stack": "LA64 cross gcc + qemu-system-loongarch64",
     "svc-wide": "pure python (source assertions)",
     "dynlink": "LA64 cross gcc + qemu-system-loongarch64",
     "net-virtio": "LA64 cross gcc + qemu-system-loongarch64",
@@ -6338,6 +6367,7 @@ CHECK_TABLE = (
     ("dynlink", check_dynlink),
     ("realbin", check_realbin),
     ("sec-crc", check_sec_crc),
+    ("icount-stack", check_icount_stack),
 )
 
 def _workflow_self_consistent(txt):

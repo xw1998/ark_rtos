@@ -207,6 +207,16 @@ make -f example/qemu_loongarch64/Makefile BUILD=build/qemu_la64_demand \
   profile (with a fixed `SOURCE_DATE_EPOCH`, the `--strip-debug` image hashes the same
   as before the change).
 
+One further regression gate adds **no new switch** and sits at the **end of the check
+table** (so it does not renumber any of the "item N" entries above):
+`tools/icount_stack_gate.py` (the `icount-stack` item of `ci_gate`). It guards the
+lwIP tcpip thread stack budget in the LA64 ten-tier image — half of the judgement is
+in the source (the 8 KB branch's `#if` must mention both `ARKRTOS_USE_NET_VIRTIO` and
+`ARKRTOS_USE_LINUX_SOCKET`), the other half is at run time (a pure `-icount shift=5`
+run must show no `[Ark RTOS] FATAL`, and `[A] round=` must keep counting after
+`[fork] PASS`). Root cause and evidence discipline are in
+[Known limitations](已知限制.en.md), first row of section 1.
+
 ## 6. Capacity limits
 
 Formerly hard-coded limits in headers (task table, sync object table, queues, timers,
