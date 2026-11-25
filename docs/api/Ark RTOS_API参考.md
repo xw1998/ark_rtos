@@ -22,6 +22,7 @@
 - [kernelsrc/include/arkrtos_fdt_console.h](#kernelsrcincludearkrtos_fdt_consoleh)（4 项）
 - [kernelsrc/include/arkrtos_fdt_overlay.h](#kernelsrcincludearkrtos_fdt_overlayh)（2 项）
 - [kernelsrc/include/arkrtos_fdt_res.h](#kernelsrcincludearkrtos_fdt_resh)（4 项）
+- [kernelsrc/include/arkrtos_fi.h](#kernelsrcincludearkrtos_fih)（17 项）
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（30 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
@@ -3067,6 +3068,168 @@ const char *arkrtos_fdt_res_reason(int rc);
 ```
 
 **原因码的稳定短名（用于日志），未知码返回 "?"。**
+
+## kernelsrc/include/arkrtos_fi.h
+
+**Fault injection and tamper watch (SEC-G16, the software-reachable half)**
+IEC 61508 的故障注入问的是「诊断项声称能发现的那类失效，注入进去
+之后真的被发现了吗」。没有这一步，诊断覆盖率只是一张清单。本模块
+给两件东西，各自的能力边界写死在下面：
+
+### `#define ARKRTOS_FI_DEFAULT_BUDGET   (1u)`
+
+```c
+#define ARKRTOS_FI_DEFAULT_BUDGET   (1u)
+```
+
+**arm 时预算传 0 表示用这个默认值（1 次）**
+
+### `#define ARKRTOS_FI_WATCH_MAX        (4u)`
+
+```c
+#define ARKRTOS_FI_WATCH_MAX        (4u)
+```
+
+**篡改监视同时能登记的段数**
+
+### `#define ARKRTOS_FI_SELFTEST_WATCH   (1u << 3) #define ARKRTOS_FI_SELFT`
+
+```c
+#define ARKRTOS_FI_SELFTEST_WATCH   (1u << 3) #define ARKRTOS_FI_SELFTEST_ALL     (ARKRTOS_FI_KIND_ALL | ARKRTOS_FI_SELFTEST_WATCH)
+```
+
+**自检返回值：三个注入点之外，篡改监视那一条也过了**
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**单个注入点的读数**
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**一段篡改监视的读数**
+
+### `int32 arkrtos_fi_arm(uint32 kind, uint32 budget);`
+
+```c
+int32 arkrtos_fi_arm(uint32 kind, uint32 budget);
+```
+
+**给一个注入点武装预算。**
+- `kind`：ARKRTOS_FI_KIND_xxx；一次只能一个位（用 ALL 逐个武装）。
+- `budget`：注入几次；0 表示 ARKRTOS_FI_DEFAULT_BUDGET。
+**返回**：ARKRTOS_FI_OK / ARKRTOS_FI_ERR_PARAM
+
+### `int32 arkrtos_fi_disarm(uint32 kind);`
+
+```c
+int32 arkrtos_fi_disarm(uint32 kind);
+```
+
+**撤防（预算清零）。已注入的次数保留在 fired 里。**
+- `kind`：ARKRTOS_FI_KIND_xxx，或 ARKRTOS_FI_KIND_ALL 表示全部撤防并清计数。
+**返回**：ARKRTOS_FI_OK / ARKRTOS_FI_ERR_PARAM
+
+### `uint32 arkrtos_fi_armed(uint32 kind);`
+
+```c
+uint32 arkrtos_fi_armed(uint32 kind);
+```
+
+**剩余预算（0 = 没武装）**
+
+### `uint32 arkrtos_fi_fired(uint32 kind);`
+
+```c
+uint32 arkrtos_fi_fired(uint32 kind);
+```
+
+**累计注入次数**
+
+### `int32 arkrtos_fi_stat(uint32 kind, arkrtos_fi_slot_t *out);`
+
+```c
+int32 arkrtos_fi_stat(uint32 kind, arkrtos_fi_slot_t *out);
+```
+
+**读一个注入点的完整读数（含 last_tick）。**
+**返回**：ARKRTOS_FI_OK / ARKRTOS_FI_ERR_PARAM（kind 不是单个位或 out 为空）
+
+### `uint32 arkrtos_fi_inject(uint32 kind);`
+
+```c
+uint32 arkrtos_fi_inject(uint32 kind);
+```
+
+**注入点的实现侧入口：返回 1 表示「这一次按失败处理」。**
+只在 hook 站点调用。武装且预算未用完时返回 1 并扣减预算；
+预算用满的那一次之后自动撤防，之后恒返回 0。
+
+### `uint32 arkrtos_fi_selftest(void);`
+
+```c
+uint32 arkrtos_fi_selftest(void);
+```
+
+**框架自检：三个注入点各走一遍「武装 → 注入 → 预算用满 → 自动撤防」，**
+再用模块私有的静态缓冲走一遍「登记 → 改一个字节 → 检出 → 还原」。
+**返回**：通过的位掩码（期望 ARKRTOS_FI_SELFTEST_ALL）。结束时注入点全部
+撤防、临时监视段被摘掉，但 fired 计数与检出的日志/审计会留下 ——
+这就是它想留下的证据。
+> 说明：篡改监视那一条用 index 0，会覆盖调用方在 0 号槽登记的段。
+
+### `int32 arkrtos_fi_watch(uint32 index, uint32 addr, uint32 len);`
+
+```c
+int32 arkrtos_fi_watch(uint32 index, uint32 addr, uint32 len);
+```
+
+**登记一段要监视的内存，并把当前内容记为基线。**
+- `index`：0 .. ARKRTOS_FI_WATCH_MAX-1
+- `addr`：起始地址（非 0）
+- `len`：长度（非 0，addr+len 不得回绕）
+**返回**：ARKRTOS_FI_OK / ARKRTOS_FI_ERR_PARAM
+
+### `int32 arkrtos_fi_scan(uint32 index);`
+
+```c
+int32 arkrtos_fi_scan(uint32 index);
+```
+
+**重新算一段的 crc32 并与基线比。不符时 hits++、写审计。**
+**返回**：0 = 与基线一致；1 = 检出改动；-1 = 参数错 / 该段没登记。
+
+### `int32 arkrtos_fi_scan_all(void);`
+
+```c
+int32 arkrtos_fi_scan_all(void);
+```
+
+**扫全部已登记的段，返回检出改动的段数（0/1 以外说明不止一段）。**
+
+### `int32 arkrtos_fi_watch_stat(uint32 index, arkrtos_fi_watch_t *out);`
+
+```c
+int32 arkrtos_fi_watch_stat(uint32 index, arkrtos_fi_watch_t *out);
+```
+
+**读一段监视的读数。**
+**返回**：ARKRTOS_FI_OK / ARKRTOS_FI_ERR_PARAM
+
+### `void arkrtos_fi_module_init(void);`
+
+```c
+void arkrtos_fi_module_init(void);
+```
+
+**清掉所有注入点与监视段（开机调用；`fi clear` 也走这里）。**
 
 ## kernelsrc/include/arkrtos_flashapp.h
 
@@ -13586,7 +13749,7 @@ SVC 0x19 之外的内部调用改变，全局生效（内核 + 所有 App/驱动
 ### `#include "arkrtos_mempool.h" #include "arkrtos_hal.h" #include "arkrto`
 
 ```c
-#include "arkrtos_mempool.h" #include "arkrtos_hal.h" #include "arkrtos_task.h" #if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0) #include "arkrtos_cfg.h"                     /* arkrtos_task_table（取 app_owner） */ #endif
+#include "arkrtos_mempool.h" #include "arkrtos_hal.h" #include "arkrtos_task.h" #include "arkrtos_fi.h"                       /* 故障注入 hook（SEC-G16） */ #if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0) #include "arkrtos_cfg.h"                     /* arkrtos_task_table（取 app_owner） */
 ```
 
 **Ark RTOS 固定块内存池模块实现**

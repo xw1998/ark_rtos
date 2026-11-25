@@ -1300,6 +1300,19 @@
 #define ARKRTOS_SELFTEST_PATROL_MS      0
 #endif
 
+/* 故障注入与篡改监视（arkrtos_fi.c，SEC-G16 中软件能触到的那一半）：
+ * 三个定点注入（内存池分配失败 / 线程创建失败 / 这一次节拍不前进）各自带
+ * 预算、用满自动撤防；另有一段 crc32 基线监视（最多四段），发现「登记之后
+ * 被改过」。默认关：关档编成空 TU，三个 hook 站点整段不参与编译。
+ *
+ * 边界：注入的是内核的「决定」，不是内存里的位翻转 —— 位翻转、电压/时钟
+ * 毛刺属于硬件故障注入，本模块不声称覆盖；监视也发现不了「登记那一刻就已
+ * 经被伪造」的内容，那需要签名链（SEC-G12/SEC-G09）。
+ */
+#ifndef ARKRTOS_USE_FAULT_INJECT
+#define ARKRTOS_USE_FAULT_INJECT        0
+#endif
+
 /* 板端单元测试框架（arkrtos_utest.c）：用例自动注册 + 断言记账 + 汇总，
  * 对齐 RT-Thread utest / Zephyr ztest 的形态。关掉后框架与 shell 的 utest 命令都不参与编译，
  * 体积与行为零变化。自动注册需要构造函数支持（armclang/GCC）。 */

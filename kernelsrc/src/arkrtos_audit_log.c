@@ -554,6 +554,7 @@ const char *arkrtos_audit_kind_name(uint32 kind)
     case ARKRTOS_AUDIT_EV_ROLLBACK_ARM: return "rollback_arm";
     case ARKRTOS_AUDIT_EV_ROLLBACK_OK:  return "rollback_ok";
     case ARKRTOS_AUDIT_EV_SELFTEST_FAIL: return "selftest_fail";
+    case ARKRTOS_AUDIT_EV_TAMPER:        return "tamper";
     default:                            break;
     }
     return "unknown";

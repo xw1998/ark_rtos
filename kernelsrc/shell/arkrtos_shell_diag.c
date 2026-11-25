@@ -10,6 +10,9 @@
 #if (ARKRTOS_USE_SELFTEST == 1)
 #include "arkrtos_selftest.h"
 #endif
+#if (ARKRTOS_USE_FAULT_INJECT == 1)
+#include "arkrtos_fi.h"
+#endif
 
 #if (SHELL_ENABLE == 1)
 
@@ -1713,6 +1716,228 @@ int cmd_selftest(int argc, char *argv[])
     return 0;
 }
 #endif /* ARKRTOS_USE_SELFTEST */
+
+/* ============================================================
+ * fi：故障注入与篡改监视（SEC-G16 软件那一半）
+ *
+ * 三件事分开读，因为它们证明的东西不同：
+ *   - armed / fired：注入有没有按预算发生（框架自己的账）；
+ *   - test：框架走一遍「武装 → 注入 → 用满撤防」，证明注入点的语义；
+ *   - watch / scan：一段内存登记之后的 crc32 变化，检出即写审计。
+ * 注入点**不**声称是位翻转：它注入的是内核的决定（见 arkrtos_fi.h 文件头）。
+ * ============================================================ */
+#if (ARKRTOS_USE_FAULT_INJECT == 1)
+static const char *fi_kind_name(uint32 kind)
+{
+    switch(kind)
+    {
+    case ARKRTOS_FI_KIND_ALLOC: return "alloc";
+    case ARKRTOS_FI_KIND_TASK:  return "task ";
+    case ARKRTOS_FI_KIND_TICK:  return "tick ";
+    default:                    return "?    ";
+    }
+}
+
+static int fi_kind_by_name(const char *s, uint32 *out)
+{
+    if(strcmp(s, "alloc") == 0) { *out = ARKRTOS_FI_KIND_ALLOC; return 0; }
+    if(strcmp(s, "task") == 0)  { *out = ARKRTOS_FI_KIND_TASK;  return 0; }
+    if(strcmp(s, "tick") == 0)  { *out = ARKRTOS_FI_KIND_TICK;  return 0; }
+    return -1;
+}
+
+/* 十进制或 0x 十六进制：登记的地址通常是从别处抄来的 hex。 */
+static int fi_u32(const char *s, uint32 *out)
+{
+    uint32 v = 0u;
+    uint32 base = 10u;
+
+    if((s == 0) || (*s == '\0'))
+    {
+        return -1;
+    }
+    if((s[0] == '0') && ((s[1] == 'x') || (s[1] == 'X')))
+    {
+        base = 16u;
+        s += 2;
+        if(*s == '\0')
+        {
+            return -1;
+        }
+    }
+    while(*s != '\0')
+    {
+        uint32 d;
+        char c = *s;
+
+        if((c >= '0') && (c <= '9'))      { d = (uint32)(c - '0'); }
+        else if((c >= 'a') && (c <= 'f')) { d = (uint32)(c - 'a') + 10u; }
+        else if((c >= 'A') && (c <= 'F')) { d = (uint32)(c - 'A') + 10u; }
+        else                              { return -1; }
+        if(d >= base)
+        {
+            return -1;
+        }
+        v = v * base + d;
+        s++;
+    }
+    *out = v;
+    return 0;
+}
+
+static void fi_print_one(uint32 kind)
+{
+    arkrtos_fi_slot_t st;
+
+    if(arkrtos_fi_stat(kind, &st) != ARKRTOS_FI_OK)
+    {
+        return;
+    }
+    ark_shell_printf("  %s armed %u  fired %u  last-tick %u\r\n",
+                     fi_kind_name(kind), (unsigned)st.armed,
+                     (unsigned)st.fired, (unsigned)st.last_tick);
+}
+
+int cmd_fi(int argc, char *argv[])
+{
+    const char *sub = (argc >= 2) ? argv[1] : "list";
+
+    if(strcmp(sub, "list") == 0)
+    {
+        uint32 i;
+
+        fi_print_one(ARKRTOS_FI_KIND_ALLOC);
+        fi_print_one(ARKRTOS_FI_KIND_TASK);
+        fi_print_one(ARKRTOS_FI_KIND_TICK);
+        for(i = 0u; i < ARKRTOS_FI_WATCH_MAX; i++)
+        {
+            arkrtos_fi_watch_t w;
+
+            if(arkrtos_fi_watch_stat(i, &w) != ARKRTOS_FI_OK)
+            {
+                continue;
+            }
+            ark_shell_printf("  watch %u addr=0x%08X len=%u crc=0x%08X "
+                             "scans %u hits %u last=0x%08X\r\n",
+                             (unsigned)i, (unsigned)w.addr, (unsigned)w.len,
+                             (unsigned)w.baseline, (unsigned)w.scans,
+                             (unsigned)w.hits, (unsigned)w.last_crc);
+        }
+        return 0;
+    }
+
+    if(strcmp(sub, "arm") == 0)
+    {
+        uint32 kind = 0u;
+        uint32 budget = 0u;
+
+        if((argc < 3) || (fi_kind_by_name(argv[2], &kind) != 0))
+        {
+            sh_out("usage: fi arm <alloc|task|tick> [budget]\r\n");
+            return -1;
+        }
+        if((argc >= 4) && (fi_u32(argv[3], &budget) != 0))
+        {
+            sh_out("fi arm: budget is not a number\r\n");
+            return -1;
+        }
+        if(arkrtos_fi_arm(kind, budget) != ARKRTOS_FI_OK)
+        {
+            sh_out("fi arm: refused\r\n");
+            return -1;
+        }
+        ark_shell_printf("fi: %s armed for %u injection(s)\r\n",
+                         fi_kind_name(kind), (unsigned)arkrtos_fi_armed(kind));
+        return 0;
+    }
+
+    if(strcmp(sub, "clear") == 0)
+    {
+        arkrtos_fi_module_init();
+        sh_out("fi: all injection points and watch spans cleared\r\n");
+        return 0;
+    }
+
+    if(strcmp(sub, "test") == 0)
+    {
+        uint32 pass = arkrtos_fi_selftest();
+        uint32 bad = (ARKRTOS_FI_SELFTEST_ALL & ~pass);
+        uint32 i;
+        static const uint32 kinds[3] =
+        {
+            ARKRTOS_FI_KIND_ALLOC, ARKRTOS_FI_KIND_TASK, ARKRTOS_FI_KIND_TICK
+        };
+
+        for(i = 0u; i < 3u; i++)
+        {
+            ark_shell_printf("  %s %s\r\n", fi_kind_name(kinds[i]),
+                             ((pass & kinds[i]) != 0u) ? "PASS" : "FAIL");
+        }
+        ark_shell_printf("  watch %s\r\n",
+                         ((pass & ARKRTOS_FI_SELFTEST_WATCH) != 0u) ? "PASS" : "FAIL");
+        ark_shell_printf("fi test: %s (failed 0x%X)\r\n",
+                         (bad == 0u) ? "PASS" : "FAIL", (unsigned)bad);
+        return (bad == 0u) ? 0 : 1;
+    }
+
+    if(strcmp(sub, "watch") == 0)
+    {
+        uint32 idx = 0u;
+        uint32 addr = 0u;
+        uint32 len = 0u;
+
+        if((argc < 5) || (fi_u32(argv[2], &idx) != 0) ||
+           (fi_u32(argv[3], &addr) != 0) || (fi_u32(argv[4], &len) != 0))
+        {
+            sh_out("usage: fi watch <index 0-3> <addr> <len>\r\n");
+            return -1;
+        }
+        if(arkrtos_fi_watch(idx, addr, len) != ARKRTOS_FI_OK)
+        {
+            sh_out("fi watch: refused (index / address / length)\r\n");
+            return -1;
+        }
+        ark_shell_printf("fi: watch %u armed at 0x%08X (%u bytes)\r\n",
+                         (unsigned)idx, (unsigned)addr, (unsigned)len);
+        return 0;
+    }
+
+    if(strcmp(sub, "scan") == 0)
+    {
+        if(argc >= 3)
+        {
+            uint32 idx = 0u;
+            int32 rc;
+
+            if(fi_u32(argv[2], &idx) != 0)
+            {
+                sh_out("usage: fi scan [index]\r\n");
+                return -1;
+            }
+            rc = arkrtos_fi_scan(idx);
+            if(rc < 0)
+            {
+                ark_shell_printf("fi scan %u: not registered\r\n", (unsigned)idx);
+                return -1;
+            }
+            ark_shell_printf("fi scan %u: %s\r\n", (unsigned)idx,
+                             (rc == 0) ? "unchanged" : "TAMPER detected");
+            return rc;
+        }
+
+        {
+            int32 bad = arkrtos_fi_scan_all();
+
+            ark_shell_printf("fi scan: %d span(s) changed\r\n", (int)bad);
+            return (bad == 0) ? 0 : 1;
+        }
+    }
+
+    sh_out("usage: fi [list] | arm <alloc|task|tick> [budget] | clear | test | "
+           "watch <i> <addr> <len> | scan [i]\r\n");
+    return -1;
+}
+#endif /* ARKRTOS_USE_FAULT_INJECT */
 
 /* ============================================================
  * utest：板端单元测试

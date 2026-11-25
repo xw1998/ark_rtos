@@ -5997,6 +5997,32 @@ def check_selftest():
     else:
         fail("selftest", txt[-300:])
 
+def check_fault_inject():
+    """Fault injection and tamper watch (SEC-G16, software half).
+
+    tools/fi_gate.py holds the five groups: the switch defaults to OFF and
+    features.h / Kconfig / defconfig / autoconf must agree; the OFF object must
+    export no symbol; the module plus six wired files (init, task, mempool, two
+    shell files) must compile with the switch ON and the softbus tier macros
+    present; the host cases must pass in three builds (OFF, ON, ON+audit); the
+    judge itself must reject a bogus output; and the injection sites must still
+    be wired into mempool (alloc) and task (create, tick) behind the switch.
+
+    What this does NOT prove: two things were deliberately left out of scope.
+    This injects kernel *decisions* (alloc failure, create failure, a skipped
+    tick), not bit flips in RAM or voltage/clock glitches -- those need hardware
+    and stay with SEC-G15. And the tamper watch compares against a baseline
+    taken at registration time: if the span was already forged before it was
+    registered, the scan sees nothing. Closing that needs the signed-image
+    chain (SEC-G12 / SEC-G09), not this module.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "fi_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "FI-GATE OK" in txt:
+        ok("fault-inject", "OFF default + zero-symbol OFF object + 6 ON-path files + host cases OFF/ON/ON+audit + wired injection sites")
+    else:
+        fail("fault-inject", txt[-300:])
+
 def check_trust_root():
     """Trust root (SEC-G12): the image key comes from somewhere, and that
     somewhere must not be "whatever this firmware was built with".
@@ -6214,6 +6240,7 @@ CHECK_TABLE = (
     ("auditlog", check_auditlog),
     ("rollback", check_rollback),
     ("selftest", check_selftest),
+    ("fault-inject", check_fault_inject),
     ("trust-root", check_trust_root),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),

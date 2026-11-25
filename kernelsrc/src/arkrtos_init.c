@@ -42,6 +42,7 @@
 #include "arkrtos_eset.h"
 #include "arkrtos_smp.h"
 #include "arkrtos_init.h"
+#include "arkrtos_fi.h"
 #if (ARKRTOS_USE_SELFTEST == 1)
 #include "arkrtos_selftest.h"
 #endif
@@ -90,6 +91,13 @@ void arkrtos_kernel_module_init(void)
      * 留日志与审计记录，要不要停机是产品策略。 */
 #if (ARKRTOS_USE_SELFTEST == 1)
     (void)arkrtos_selftest_boot();
+#endif
+
+    /* 故障注入与篡改监视（SEC-G16）：开机清账，保证"开机时没有武装的
+     * 注入点、也没有登记过的监视段"是静态事实而不是约定。
+     * 关档时 arkrtos_fi_module_init 不存在（整文件是空 TU），这一步编掉。 */
+#if (ARKRTOS_USE_FAULT_INJECT == 1)
+    arkrtos_fi_module_init();
 #endif
 
     /* 信任根（SEC-G12）：必须在任何镜像被认领之前跑一次——loader 的

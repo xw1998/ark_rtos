@@ -32,6 +32,7 @@
 #include "arkrtos_linux_abi.h"
 #include "arkrtos_loader.h"
 #include "arkrtos_kernel_check.h"   /* shared SVC pointer checks */
+#include "arkrtos_fi.h"             /* 故障注入 hook（SEC-G16） */
 #include "arkrtos_net.h"            /* SVC 0x1E network service */
 #if (ARKRTOS_USE_SMP_SCHED == 1)
 #include "arkrtos_smp_sched.h"     /* 调度分核：CPU0 侧回收与一致性跳过 */
@@ -317,6 +318,14 @@ int32 arkrtos_thread_create_internal(void (*entry)(void), uint32 *stack_bottom,
     {
         return ARKRTOS_TASK_ERR_PRIORITY;
     }
+#if (ARKRTOS_USE_FAULT_INJECT == 1)
+    /* 定点注入：这一次创建按失败返回，槽位一个都不占 —— 用注入证明
+     * "创建失败不泄漏资源"这条约定，而不是靠读代码相信它。 */
+    if(arkrtos_fi_inject(ARKRTOS_FI_KIND_TASK) != 0u)
+    {
+        return 0;
+    }
+#endif
     {
         int32 tid = arkrtos_task_register(entry, stack_bottom, stack_size, priority, period_ms);
 
@@ -473,7 +482,17 @@ void arkrtos_kernel_tick_handler(void)
     #if (ARKRTOS_USE_RTSTAT == 1)
     arkrtos_rt_tick_enter();
     #endif
+#if (ARKRTOS_USE_FAULT_INJECT == 1)
+    /* 定点注入：这一次节拍照样跑完（守卫、定时器、调度都按这一拍结算），
+     * 只有墙上的时间少走一拍。要发现它，得靠第二路时钟（selftest 的
+     * clock 项）或外部观测 —— 这正是注入想证明的诊断覆盖。 */
+    if(arkrtos_fi_inject(ARKRTOS_FI_KIND_TICK) == 0u)
+    {
+        arkrtos_kernel_tick++;
+    }
+#else
     arkrtos_kernel_tick++;
+#endif
 
     /* Guard first: it records which task was on the CPU when this tick
      * fired, and every service period decides whether the watchdog gets

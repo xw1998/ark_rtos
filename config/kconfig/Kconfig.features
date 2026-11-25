@@ -1549,6 +1549,34 @@ config ARKRTOS_SELFTEST_PATROL_MS
 	  that re-runs RAM, the image CRC and the clock check. CPU is not
 	  re-run: it cannot change while the same code runs on it.
 
+config ARKRTOS_USE_FAULT_INJECT
+	bool "Fault injection and tamper watch (SEC-G16, software half)"
+	default n
+	help
+	  Certification evidence needs more than a list of diagnostics: it
+	  needs proof that injecting the failure they claim to catch actually
+	  makes them report it. This switch adds three injection points, each
+	  one a kernel decision rather than a memory bit:
+
+	    - ALLOC: the next fixed-block allocation returns failure;
+	    - TASK: the next thread creation returns failure without taking a
+	      slot;
+	    - TICK: the next tick does not advance, so wall time loses one
+	      tick (the clock cross-check in SEC-G14 is what can see it).
+
+	  Every armed point carries a budget and disarms itself when the
+	  budget is spent, so a forgotten test cannot leave the system in a
+	  failing state. It also adds up to four crc32 watch spans whose
+	  baseline is taken at registration; a scan that no longer matches
+	  logs and writes the persistent TAMPER audit record (when the audit
+	  trail is on).
+
+	  What this does NOT cover: bit flips, voltage or clock glitches.
+	  Those are hardware fault injection; there is no such unit on this
+	  target and the module does not pretend to emulate one. A watch also
+	  cannot detect a value that was already forged when registered -
+	  that needs the signature chain.
+
 config ARKRTOS_USE_UTEST
 	bool "On-board unit test framework"
 	default y

@@ -13,6 +13,7 @@
 #include "arkrtos_mempool.h"
 #include "arkrtos_hal.h"
 #include "arkrtos_task.h"
+#include "arkrtos_fi.h"                       /* 故障注入 hook（SEC-G16） */
 #if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0)
 #include "arkrtos_cfg.h"                     /* arkrtos_task_table（取 app_owner） */
 #endif
@@ -365,6 +366,17 @@ void *arkrtos_mempool_alloc_internal(int32 handle)
     }
 
     state = ARKRTOS_ENTER_CRITICAL();
+
+#if (ARKRTOS_USE_FAULT_INJECT == 1)
+    /* 定点注入：这一次分配按失败返回。块一个都不摘，池状态与"池空了"
+     * 完全一致 —— 被注入的是错误路径本身，不是池。 */
+    if(arkrtos_fi_inject(ARKRTOS_FI_KIND_ALLOC) != 0u)
+    {
+        p->alloc_fail++;
+        ARKRTOS_EXIT_CRITICAL(state);
+        return 0;
+    }
+#endif
 
     if(p->free_list == 0)
     {

@@ -332,6 +332,11 @@ static int register_kernel_commands(void)
         "Component self-test: selftest [all | ram | cpu | flash | clock | "
         "patrol | rebaseline]", 2);
 #endif /* ARKRTOS_USE_SELFTEST */
+#if (ARKRTOS_USE_FAULT_INJECT == 1)
+    g_cmd_table[idx++] = ARK_SHELL_CMD("fi", cmd_fi,
+        "Fault injection / tamper watch: fi [list] | arm <alloc|task|tick> "
+        "[n] | clear | test | watch <i> <addr> <len> | scan [i]", 5);
+#endif /* ARKRTOS_USE_FAULT_INJECT */
 
 #if ARKRTOS_USE_KERNEL_GUARD
     g_cmd_table[idx++] = ARK_SHELL_CMD("guard", cmd_guard,

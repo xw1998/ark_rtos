@@ -617,6 +617,12 @@ CASES = [
      ["kernelsrc/src/arkrtos_rollback.c"],
      ["-DARKRTOS_USE_ROLLBACK=1", "-fno-asynchronous-unwind-tables"],
      "ROLLBACK HOST OK"),
+    # --- 2026-11-25 新增：故障注入与篡改监视（SEC-G16 软件半边，默认关） ---
+    # 开档跑预算/隔离/参数/监视/自检/篡改留痕六组路径。
+    ("fi", "kernelsrc/tests/test_fi_host.c",
+     ["kernelsrc/src/arkrtos_fi.c"],
+     ["-DARKRTOS_USE_FAULT_INJECT=1", "-fno-asynchronous-unwind-tables"],
+     "FI HOST OK"),
     ("smpsched", "kernelsrc/tests/test_smp_sched_host.c",
      ["kernelsrc/src/arkrtos_smp_sched.c"],
      ["-DARKRTOS_USE_SMP_SCHED=1", "-DARKRTOS_USE_SMP=1",
