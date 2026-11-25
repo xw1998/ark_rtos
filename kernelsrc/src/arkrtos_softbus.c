@@ -278,6 +278,23 @@ int32 arkrtos_softbus_info(void)
                      (unsigned)ARK_BUS_QOS_MAX_SESSIONS,
                      (unsigned)ARK_BUS_RPC_MAX_SLOTS,
                      (unsigned)ARK_BUS_STREAM_RX_SLOTS);
+#if (ARK_BUS_CRYPTO_ENABLED == 1)
+    ark_shell_printf("  crypto    : auth=hmac-sha256 tag=%u enc=%s replay=%s keyed=%s\r\n",
+                     (unsigned)ARK_BUS_CRYPTO_TAG_LEN,
+#if (ARK_BUS_ENCRYPT_ENABLED == 1)
+                     "chacha20",
+#else
+                     "off",
+#endif
+#if (ARK_BUS_REPLAY_ENABLED == 1)
+                     "on",
+#else
+                     "off",
+#endif
+                     (ark_bus_crypto_key_set(&g_node) == 1) ? "yes" : "no");
+#else
+    ark_shell_printf("  crypto    : off (ARKRTOS_USE_BUS_CRYPTO=0)\r\n");
+#endif
     ark_shell_printf("  peers     : %u (peer 0x%08X %s)\r\n",
                      (unsigned)ark_bus_device_count(&g_node),
                      (unsigned)SB_PEER_ID,
@@ -297,6 +314,61 @@ int32 arkrtos_softbus_info(void)
                      (unsigned)g_peer_stream_calls);
     return 0;
 }
+
+/* ------------------------------------------------------------------ */
+/* 加密：预共享密钥                                                     */
+/* ------------------------------------------------------------------ */
+
+#if (ARK_BUS_CRYPTO_ENABLED == 1)
+
+int32 arkrtos_softbus_set_key(const uint8_t *key, uint16 len)
+{
+    if((key == NULL) || (len == 0u) || (len > (uint16)ARK_BUS_CRYPTO_KEY_MAX))
+    {
+        return ARKRTOS_SOFTBUS_ERR_PARAM;
+    }
+    if(g_up == 0u)
+    {
+        if(arkrtos_softbus_init() != 0)
+        {
+            return ARKRTOS_SOFTBUS_ERR_INIT;
+        }
+    }
+    if(ark_bus_crypto_set_key(&g_node, key, len) != ARK_BUS_OK)
+    {
+        return ARKRTOS_SOFTBUS_ERR_PARAM;
+    }
+    /* 常驻对端是同一固件里的第二个实例、同一信任域：不一起装密钥，loopback
+     * 上每一帧都会被对端按 fail-closed 拒掉，看起来像"加密坏了"。真实的外
+     * 部节点各自调自己的 set_key——本函数管不到别人的固件。 */
+    (void)ark_bus_crypto_set_key(&g_peer, key, len);
+    return 0;
+}
+
+void arkrtos_softbus_clear_key(void)
+{
+    ark_bus_crypto_clear_key(&g_node);
+    ark_bus_crypto_clear_key(&g_peer);
+}
+
+uint32 arkrtos_softbus_crypto_state(void)
+{
+    uint32 st = 0u;
+
+    if(ark_bus_crypto_key_set(&g_node) == 1)
+    {
+        st |= 0x1u;
+    }
+#if (ARK_BUS_ENCRYPT_ENABLED == 1)
+    st |= 0x2u;
+#endif
+#if (ARK_BUS_REPLAY_ENABLED == 1)
+    st |= 0x4u;
+#endif
+    return st;
+}
+
+#endif /* ARK_BUS_CRYPTO_ENABLED == 1 */
 
 /* ------------------------------------------------------------------ */
 /* 自检                                                                 */
@@ -551,7 +623,18 @@ static void sb_st_errors(void)
     n = ark_bus_frame_encode(&f, buf, (uint16_t)sizeof(buf));
 
     msgs_before = g_peer_msgs;
-    sb_ck(ark_bus_feed(&g_node, buf, (uint16_t)n) == ARK_BUS_OK, "self frame accepted");
+#if (ARK_BUS_CRYPTO_ENABLED == 1)
+    if(ark_bus_crypto_key_set(&g_node) != 0)
+    {
+        /* 装了钥之后，没有标签的帧一律拒绝：自环也不给例外。
+         * 这条正是 fail-closed 契约，不能因为"是自己发的"就放行。 */
+        sb_ck(ark_bus_feed(&g_node, buf, (uint16_t)n) == ARK_BUS_E_AUTH,
+              "untagged frame refused while keyed");
+    }
+    else
+#endif
+    sb_ck(ark_bus_feed(&g_node, buf, (uint16_t)n) == ARK_BUS_OK,
+          "self frame accepted");
     sb_ck(g_peer_msgs == msgs_before, "self frame not echoed onward");
 
     buf[n - 1] ^= 0xFFu;
@@ -592,15 +675,230 @@ static void sb_st_topics(void)
     sb_ck(dup_ok == 1, "no unexpected error while filling");
 }
 
+#if (ARK_BUS_CRYPTO_ENABLED == 1)
+/* 环上还没被取走的字节数。 */
+static uint16 sb_ring_pending(const ark_bus_ring_t *r)
+{
+    if(r->head >= r->tail)
+    {
+        return (uint16)(r->head - r->tail);
+    }
+    return (uint16)(r->cap - r->tail + r->head);
+}
+
+/* 10. 加密与验签（只在装了密钥时有意义）。
+ *
+ * 三个不变量都只能在「帧还躺在环上、对端还没取走」的窗口里验证：
+ *   1) 开加密时线上找不到明文——被动监听只能看到密文；
+ *   2) 翻掉一个 bit 的帧必须被对端丢掉（rx_auth_fail 加一），回调不触发；
+ *   3) 原样的帧必须被收下，载荷逐字节与发出的一致；
+ *   4) 开重放窗口时，把同一帧再喂一次必须被拒（rx_replay 加一）。
+ * 这个窗口只有自检拿得到（它自己控制 pump），所以放在这里，而不是指望
+ * 控制台上手工去做。 */
+static void sb_st_crypto(void)
+{
+    static const uint8_t msg[] = "crypto-probe-0123456789";
+    const uint16_t  mlen  = (uint16_t)(sizeof(msg) - 1u);
+    ark_bus_ring_t *wire  = &g_lb.a2b;   /* 本节点 -> 常驻对端 */
+    uint16          pending;
+    uint16          i;
+    uint16          j;
+    uint16          idx;
+    uint8          saved;
+    uint32          auth_before;
+    int             seen_plain;
+    uint16          clen;
+    uint8           cap[ARK_BUS_FRAME_MAX_SIZE];
+
+    if(ark_bus_crypto_key_set(&g_node) == 0)
+    {
+        ark_shell_printf("    (no key installed: run `bus key set <hex>`;"
+                         " keyed checks skipped)\r\n");
+        return;
+    }
+    /* 只装了本端、对端没装，说明有人绕过 arkrtos_softbus_set_key 直接动了
+     * g_node：这种配置下每一帧都会被拒，要报出来而不是当成"链路坏了"。 */
+    sb_ck(ark_bus_crypto_key_set(&g_peer) == 1, "peer holds the same key");
+
+    if(ark_bus_subscribe(&g_peer, "crypto/probe", sb_peer_on_msg, NULL) < 0)
+    {
+        sb_ck(0, "peer subscribed to crypto/probe");
+        return;
+    }
+    g_peer_msgs = 0u;
+    g_peer_last_len = 0u;
+
+    /* 前面几段（尤其 stream）可能留下没被取走的字节。这一段的前提是"环上
+     * 只有自己刚发的那一帧"，否则待处理字节数不是一帧，下面的偏移与 CRC
+     * 重算全会错位。这里先清空：丢掉的是被测链路里的残留，不影响任何断言。 */
+    wire->tail = wire->head;
+
+    /* --- 1. 线上字节：不得出现明文 --- */
+    if(ark_bus_publish(&g_node, "crypto/probe", msg, mlen) <= 0)
+    {
+        sb_ck(0, "probe frame published");
+        return;
+    }
+    pending = sb_ring_pending(wire);
+    sb_ck(pending > (uint16)(mlen + 8u), "frame carries nonce + tag overhead");
+    seen_plain = 0;
+    for(i = 0u; (uint16)(i + mlen) <= pending; i++)
+    {
+        int same = 1;
+
+        for(j = 0u; j < mlen; j++)
+        {
+            if(wire->buf[(uint16)((wire->tail + i + j) % wire->cap)] != msg[j])
+            {
+                same = 0;
+                break;
+            }
+        }
+        if(same != 0)
+        {
+            seen_plain = 1;
+            break;
+        }
+    }
+#if (ARK_BUS_ENCRYPT_ENABLED == 1)
+    sb_ck(seen_plain == 0, "plaintext does not appear on the wire");
+#else
+    /* 只认证不加密时明文本来就看得见——这是档位定义，不是缺陷。 */
+    sb_ck(seen_plain == 1, "auth-only build: payload stays readable (by design)");
+#endif
+
+    /* --- 2. 改一个 bit：标签必须抓到 ---
+     *
+     * 这里不能只翻线上一个字节就喂回去：CRC 覆盖整个线上帧，先翻字节会被
+     * CRC 挡下（rx_crc_errors 加一），证明的只是"CRC 有效"；而 CRC 不带
+     * 密钥，攻击者随手就能重算。要证的恰恰是"重算过 CRC 之后仍然过不了标
+     * 签"，所以先翻载荷区一个字节，再把 CRC 重算对，然后才喂进去。
+     *
+     * 环上那一份不在环上就地改：截获者看到的是线上那一帧。这里把它取出来
+     * （tail 推到 head，等于"监听完就丢弃"），改副本再直接喂给对端，回调
+     * 计数才不会被环上那份正常帧污染。 */
+    pending = sb_ring_pending(wire);
+    if((pending == 0u) || (pending > (uint16)sizeof(cap)))
+    {
+        sb_ck(0, "tamper probe fits one frame");
+        return;
+    }
+    clen = pending;
+    for(i = 0u; i < clen; i++)
+    {
+        cap[i] = wire->buf[(uint16)((wire->tail + i) % wire->cap)];
+    }
+    wire->tail = wire->head;
+
+    idx = (uint16)(ARK_BUS_HDR_LEN + 1u);   /* 载荷区第二个字节（nonce 内） */
+    if(((uint32)idx + ARK_BUS_CRC_LEN) >= (uint32)clen)
+    {
+        sb_ck(0, "tamper offset inside the frame");
+        return;
+    }
+    saved = cap[idx];
+    cap[idx] = (uint8)(saved ^ 0x01u);
+    {
+        uint16 crc = ark_bus_crc16(cap, (uint16)(clen - ARK_BUS_CRC_LEN));
+
+        cap[clen - 2u] = (uint8)(crc >> 8);
+        cap[clen - 1u] = (uint8)(crc & 0xFFu);
+    }
+
+    auth_before = g_peer.stats.rx_auth_fail;
+    sb_ck(ark_bus_feed(&g_peer, cap, clen) == ARK_BUS_E_AUTH,
+          "tampered frame (crc refixed) refused by tag");
+    sb_ck(g_peer.stats.rx_auth_fail == (auth_before + 1u),
+          "tampered frame refused (auth_fail +1)");
+    sb_ck(g_peer_msgs == 0u, "tampered frame never reached the callback");
+
+    /* --- 3. 原样的帧：必须收下，且载荷完好 --- */
+    g_peer_msgs = 0u;
+    if(ark_bus_publish(&g_node, "crypto/probe", msg, mlen) <= 0)
+    {
+        sb_ck(0, "clean probe published");
+        return;
+    }
+    (void)arkrtos_softbus_pump(2u);
+    sb_ck(g_peer_msgs == 1u, "clean frame reached the callback");
+    sb_ck((g_peer_last_len == mlen) &&
+          (memcmp(g_peer_last_payload, msg, mlen) == 0),
+          "payload survived encrypt/decrypt byte for byte");
+
+#if (ARK_BUS_REPLAY_ENABLED == 1)
+    /* --- 4. 重放：同一帧再喂一次 --- */
+    {
+        uint32 rp;
+        int    rc;
+
+        g_peer_msgs = 0u;
+        if(ark_bus_publish(&g_node, "crypto/probe", msg, mlen) <= 0)
+        {
+            sb_ck(0, "replay probe published");
+            return;
+        }
+        clen = sb_ring_pending(wire);
+        if((clen == 0u) || (clen > (uint16)sizeof(cap)))
+        {
+            sb_ck(0, "replay probe fits one frame");
+            (void)arkrtos_softbus_pump(2u);
+            return;
+        }
+        for(i = 0u; i < clen; i++)
+        {
+            cap[i] = wire->buf[(uint16)((wire->tail + i) % wire->cap)];
+        }
+        (void)arkrtos_softbus_pump(2u);
+        sb_ck(g_peer_msgs == 1u, "frame delivered once before the replay");
+
+        rp = g_peer.stats.rx_replay;
+        rc = ark_bus_feed(&g_peer, cap, clen);
+        sb_ck(rc != ARK_BUS_OK, "verbatim replay refused");
+        sb_ck(g_peer.stats.rx_replay == (rp + 1u), "replay counted");
+        sb_ck(g_peer_msgs == 1u, "replay never reached the callback");
+    }
+#endif /* ARK_BUS_REPLAY_ENABLED */
+}
+#endif /* ARK_BUS_CRYPTO_ENABLED == 1 */
+
 int32 arkrtos_softbus_selftest(void)
 {
+#if (ARK_BUS_CRYPTO_ENABLED == 1)
+    /* 自检末尾要复位总线（主题表被填满了），而 ark_bus_init 会把整个实例
+     * 清零——密钥也会一起没。先抄下来，复位后装回去；栈上那份立刻抹掉。 */
+    uint8   ksave[ARK_BUS_CRYPTO_KEY_MAX];
+    uint16  klen = 0u;
+    uint8   had  = 0u;
+#endif
+
     ark_shell_printf("\r\nsoftbus selftest (loopback, two in-board nodes)\r\n");
+
+#if (ARK_BUS_CRYPTO_ENABLED == 1)
+    /* 必须先抄钥再 init：下面的 arkrtos_softbus_init() 会 ark_bus_init 整个
+     * 实例（memset），钥在那一步就没了。抄晚了等于自检一跑，用户的钥无声
+     * 消失——这正是"看起来成功了"的那类静默缺陷。 */
+    if(ark_bus_crypto_key_set(&g_node) == 1)
+    {
+        had  = 1u;
+        klen = (uint16)g_node.crypto_key_len;
+        (void)memcpy(ksave, g_node.crypto_key, (uint32)klen);
+    }
+#endif
 
     if(arkrtos_softbus_init() != 0)
     {
         ark_shell_printf("  init failed\r\n");
         return 99;
     }
+
+#if (ARK_BUS_CRYPTO_ENABLED == 1)
+    /* 立刻装回去：各段（尤其是 crypto 段）要在"装了钥"的真实配置下跑，
+     * 否则这一段只是在证明"关着钥的自检也能过"。 */
+    if(had != 0u)
+    {
+        (void)arkrtos_softbus_set_key(ksave, klen);
+    }
+#endif
 
     g_ck = 0u;
     g_bad = 0u;
@@ -614,12 +912,24 @@ int32 arkrtos_softbus_selftest(void)
     sb_stage("stream", sb_st_stream);
     sb_stage("qos-timeout", sb_st_qos);
     sb_stage("errors", sb_st_errors);
+#if (ARK_BUS_CRYPTO_ENABLED == 1)
+    /* crypto 段必须排在 topics 之前：topics 会把主题表填满，
+     * 之后 crypto/probe 注册不进来，这一段就发不出帧。 */
+    sb_stage("crypto", sb_st_crypto);
+#endif
     sb_stage("topics", sb_st_topics);
 
     ark_shell_printf("  checks %u, failed %u\r\n", (unsigned)g_ck, (unsigned)g_bad);
 
     /* 自检把主题表填满了，跑完复位一次，让 `bus pub/rpc` 还能用。 */
     (void)arkrtos_softbus_init();
+#if (ARK_BUS_CRYPTO_ENABLED == 1)
+    if(had != 0u)
+    {
+        (void)arkrtos_softbus_set_key(ksave, klen);
+    }
+    (void)memset(ksave, 0, sizeof(ksave));
+#endif
     return (int32)g_bad;
 }
 
@@ -674,9 +984,141 @@ static int sb_parse_u32(const char *s, uint32 *out)
 
 static void sb_usage(void)
 {
+#if (ARK_BUS_CRYPTO_ENABLED == 1)
+    ark_shell_printf("usage: bus [info | selftest | pump [n] | peers | rx |"
+                     " pub <topic> <text> | rpc <text> | stream <n> |"
+                     " key [show | set <hex> | clear]]\r\n");
+#else
     ark_shell_printf("usage: bus [info | selftest | pump [n] | peers | rx |"
                      " pub <topic> <text> | rpc <text> | stream <n>]\r\n");
+#endif
 }
+
+#if (ARK_BUS_CRYPTO_ENABLED == 1)
+/* "0a1b2c" -> 字节。要求非空、偶数个十六进制字符、不超过上限；多一个字符
+ * 都算错。理由与 sb_parse_u32 相同：把半个密钥当成整把装进去，是那种
+ * 「看起来成功了」的静默错误，比直接报错糟得多。 */
+static int sb_parse_hex(const char *s, uint8 *out, uint16 cap, uint16 *out_len)
+{
+    uint16 n  = 0u;
+    int    hi = -1;
+
+    if((s == NULL) || (out == NULL) || (out_len == NULL))
+    {
+        return ARKRTOS_SOFTBUS_ERR_PARAM;
+    }
+    for(; *s != '\0'; s++)
+    {
+        int v;
+
+        if((*s >= '0') && (*s <= '9'))
+        {
+            v = *s - '0';
+        }
+        else if((*s >= 'a') && (*s <= 'f'))
+        {
+            v = *s - 'a' + 10;
+        }
+        else if((*s >= 'A') && (*s <= 'F'))
+        {
+            v = *s - 'A' + 10;
+        }
+        else
+        {
+            return ARKRTOS_SOFTBUS_ERR_PARSE;
+        }
+        if(hi < 0)
+        {
+            hi = v;
+        }
+        else
+        {
+            if(n >= cap)
+            {
+                return ARKRTOS_SOFTBUS_ERR_PARAM;
+            }
+            out[n] = (uint8)((hi << 4) | v);
+            n++;
+            hi = -1;
+        }
+    }
+    if((hi >= 0) || (n == 0u))
+    {
+        return ARKRTOS_SOFTBUS_ERR_PARSE;   /* 半个字节或空串 */
+    }
+    *out_len = n;
+    return 0;
+}
+
+static void sb_crypto_show(void)
+{
+    uint32 st = arkrtos_softbus_crypto_state();
+
+    ark_shell_printf("bus crypto: keyed=%s auth=hmac-sha256 tag=%u enc=%s"
+                     " replay=%s key_len=%u\r\n",
+                     ((st & 0x1u) != 0u) ? "yes" : "no",
+                     (unsigned)ARK_BUS_CRYPTO_TAG_LEN,
+                     ((st & 0x2u) != 0u) ? "chacha20" : "off",
+                     ((st & 0x4u) != 0u) ? "on" : "off",
+                     (unsigned)g_node.crypto_key_len);
+}
+
+/* `bus key`：装/卸/看。密钥**不**回显、不留在栈上（用完立刻 memset），
+ * 也不写审计日志的载荷字段——日志要能证明"装过"，但不能成为密钥的副本。 */
+static int sb_cmd_key(int argc, char *argv[])
+{
+    uint8  key[ARK_BUS_CRYPTO_KEY_MAX];
+    uint16 klen = 0u;
+    int    rc;
+
+    if((argc < 3) || (strcmp(argv[2], "show") == 0))
+    {
+        sb_crypto_show();
+        return 0;
+    }
+    if(strcmp(argv[2], "clear") == 0)
+    {
+        arkrtos_softbus_clear_key();
+        ark_shell_printf("bus key: cleared (frames are plain and unverified"
+                         " again)\r\n");
+        return 0;
+    }
+    if(strcmp(argv[2], "set") == 0)
+    {
+        if(argc < 4)
+        {
+            ark_shell_printf("usage: bus key set <hex>\r\n");
+            return ARKRTOS_SOFTBUS_ERR_USAGE;
+        }
+        rc = sb_parse_hex(argv[3], key, (uint16)sizeof(key), &klen);
+        if(rc != 0)
+        {
+            (void)memset(key, 0, sizeof(key));
+            ark_shell_printf("bus key: bad hex (even count of 0-9a-f,"
+                             " 1..%u bytes)\r\n", (unsigned)sizeof(key));
+            return rc;
+        }
+        rc = (int)arkrtos_softbus_set_key(key, klen);
+        (void)memset(key, 0, sizeof(key));
+        if(rc != 0)
+        {
+            ark_shell_printf("bus key: install failed (%d)\r\n", rc);
+            return rc;
+        }
+        ark_shell_printf("bus key: %u bytes installed; every frame is now"
+                         " %s and verified\r\n", (unsigned)klen,
+#if (ARK_BUS_ENCRYPT_ENABLED == 1)
+                         "encrypted"
+#else
+                         "tagged"
+#endif
+                         );
+        return 0;
+    }
+    ark_shell_printf("usage: bus key [show | set <hex> | clear]\r\n");
+    return ARKRTOS_SOFTBUS_ERR_USAGE;
+}
+#endif /* ARK_BUS_CRYPTO_ENABLED == 1 */
 
 static int sb_cmd_pub(int argc, char *argv[])
 {
@@ -890,6 +1332,12 @@ int arkrtos_softbus_shell_cmd(int argc, char **argv)
     {
         return sb_cmd_stream(argc, argv);
     }
+#if (ARK_BUS_CRYPTO_ENABLED == 1)
+    if(strcmp(sub, "key") == 0)
+    {
+        return sb_cmd_key(argc, argv);
+    }
+#endif
 
     sb_usage();
     return ARKRTOS_SOFTBUS_ERR_USAGE;

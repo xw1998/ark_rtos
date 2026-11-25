@@ -54,7 +54,7 @@
 - [kernelsrc/include/arkrtos_smp.h](#kernelsrcincludearkrtos_smph)（12 项）
 - [kernelsrc/include/arkrtos_smp_sched.h](#kernelsrcincludearkrtos_smp_schedh)（18 项）
 - [kernelsrc/include/arkrtos_smp_shootdown.h](#kernelsrcincludearkrtos_smp_shootdownh)（3 项）
-- [kernelsrc/include/arkrtos_softbus.h](#kernelsrcincludearkrtos_softbush)（5 项）
+- [kernelsrc/include/arkrtos_softbus.h](#kernelsrcincludearkrtos_softbush)（8 项）
 - [kernelsrc/include/arkrtos_softbus_line.h](#kernelsrcincludearkrtos_softbus_lineh)（10 项）
 - [kernelsrc/include/arkrtos_spin.h](#kernelsrcincludearkrtos_spinh)（10 项）
 - [kernelsrc/include/arkrtos_svc_abi.h](#kernelsrcincludearkrtos_svc_abih)（4 项）
@@ -8491,6 +8491,46 @@ int arkrtos_softbus_shell_cmd(int argc, char **argv);
 ```
 
 **控制台命令 `bus` 的处理器（内核 Shell 命令表里注册的就是它）**
+
+### `int32 arkrtos_softbus_set_key(const uint8_t *key, uint16 len);`
+
+```c
+int32 arkrtos_softbus_set_key(const uint8_t *key, uint16 len);
+```
+
+**给板内这条总线装预共享密钥（本节点与常驻对端都装，两者同信任域）**
+装了密钥之后，本节点发出的每一帧都带 HMAC-SHA256 截断标签，收到
+的帧先验签再分发；带标签但验不过的帧、以及**根本没有标签**的帧
+一律丢弃（fail-closed：否则攻击者把标签剥掉就能伪造 src_id）。
+开 ARKRTOS_USE_BUS_ENCRYPT 时载荷同时用 ChaCha20 加密
+（encrypt-then-MAC）。
+对真实的第二个节点（另一块板 / PC），两端必须装同一把密钥、用
+同一个标签长度，并各自调用自己的 set_key——本函数只装本固件内的
+两个实例。
+> 说明：密钥只在调用瞬间被复制进总线实例，调用方应当把自己那份
+清掉；本函数不保留指针。长度 1..ARK_BUS_CRYPTO_KEY_MAX。
+- `key`：密钥字节
+- `len`：密钥长度
+**返回**：0 = 成功，负值 = 参数非法
+
+### `void arkrtos_softbus_clear_key(void);`
+
+```c
+void arkrtos_softbus_clear_key(void);
+```
+
+**卸掉密钥：总线退回「不打标签、也不拒未打标签的帧」**
+用于轮换密钥：先 clear 再 set，两端必须都做，中间那段时间的帧
+会因验签失败被丢弃（这是有意的，不静默降级）。
+
+### `uint32 arkrtos_softbus_crypto_state(void);`
+
+```c
+uint32 arkrtos_softbus_crypto_state(void);
+```
+
+**当前总线的加密状态：bit0 = 已装密钥，bit1 = 编译了加密，**
+bit2 = 编译了重放窗口
 
 ## kernelsrc/include/arkrtos_softbus_line.h
 

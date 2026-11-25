@@ -2465,6 +2465,45 @@ def check_fork():
     else:
         fail("fork", txt[-320:])
 
+def check_bus_crypto():
+    """软总线侧信道加密（SEC-G06）：三档矩阵 + 默认档零成本。
+
+    串口与网络是这条总线上别人也能读的一段。组件本来就有认证（HMAC 标签）、
+    加密（ChaCha20）、重放窗口（16 位滑动窗口）三档能力，难点不在密码学，
+    而在"接对了没有"：两层的宏（ARK_BUS_*_ENABLED 与 ARKRTOS_USE_BUS_*）只要
+    有一个对不上，struct 里密钥字段就会错位，链路时好时坏且报错落在别处。
+    tools/bus_crypto_gate.py 因此把判据全落在可证伪的读数上：
+
+      * 默认档：autoconf / defconfig / Kconfig 三项都是关，ENCRYPT 与 REPLAY
+        挂在 CRYPTO 之下（组件里没有"加密开、认证关"这种档位）；
+      * 一致性闸门两个方向都测：只给 -DARK_BUS_CRYPTO_ENABLED=1 而 Kconfig
+        是 0 时必须编不过，两边都给 1 时必须编得过；
+      * 关档零成本：默认档的 .o 里没有 crypto / replay / chacha / sha256 符号，
+        也没有 `bus key` 这段子命令文案；开档编时必须引用到
+        ark_bus_crypto_set_key（只测一向的话，"写成 1 但代码没包住"与"根本没
+        编"长得一样）；
+      * 构建侧接线：三个从 autoconf 取档位的 Makefile、F427 的 GCC Makefile
+        与 Keil 工程、以及 f427_env.py 的默认 Tier；
+      * 宿主矩阵 6 格：组件级 test_bus_crypto_host.c（RFC 4231 HMAC /
+        RFC 8439 ChaCha20 / SHA-256 向量 / 无钥明文不变 / 只装一端 E_AUTH /
+        错钥拒绝后换钥通过 / 重放拒绝）与内核级 test_softbus_host.c，各跑
+        full / auth-only / off 三档，成功行必须自带档位标签；
+      * 判据自检：5 种坏输出（少 OK / 档位标签错 / 计数错 / off 档却有计数 /
+        有 FAILED）必须全被判红。
+
+    不覆盖：物理串口上的两个节点、真节拍下的密钥轮换、密钥从哪来（部署问题）。
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "bus_crypto_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "BUS-CRYPTO-GATE OK" in txt:
+        ok("bus-crypto",
+           "default off + Kconfig depends + #error both ways / OFF object has no "
+           "crypto symbols or `bus key` / 6 host cells (full 95, auth 71, kernel "
+           "124/124/84) / parser self-check 5/5")
+    else:
+        fail("bus-crypto", txt[-320:])
+
+
 def check_sec_crc():
     """镜像 CRC 开机复核（SEC-G17 / ARKRTOS_USE_IMAGE_CRC_RECHECK）必须两档都对。
 
@@ -6272,6 +6311,7 @@ CHECK_TABLE = (
     ("fs-host", check_fs_host),
     ("smp-sched-host", check_smp_sched_host),
     ("softbus-host", check_softbus_host),
+    ("bus-crypto", check_bus_crypto),
     ("net-host", check_net_host),
     ("net-virtio", check_net_virtio),
     ("elf-host", check_elf_host),

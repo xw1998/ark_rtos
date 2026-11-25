@@ -55,4 +55,9 @@ SOFTBUS_TIER_DEFS = [
     "ARK_BUS_STREAM_RX_SLOTS=1",
     "ARK_BUS_STREAM_RX_MAX=256",
     "ARK_BUS_STREAM_MAX_BYTES=256",
+    # 加密档位（SEC-G06）。默认关；需要 ON 档构建的用例在 case 自己的
+    # defs 里显式给出这三项（先生成一份过滤掉这三项的列表再加）。
+    "ARK_BUS_CRYPTO_ENABLED=0",
+    "ARK_BUS_ENCRYPT_ENABLED=0",
+    "ARK_BUS_REPLAY_ENABLED=0",
 ]

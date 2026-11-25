@@ -1176,6 +1176,66 @@ config ARKRTOS_USE_BUS_UART
 	  not prove interoperability with a non-Ark peer, and it is verified
 	  on QEMU only until a board with a spare UART runs it.
 
+config ARKRTOS_USE_BUS_CRYPTO
+	bool "Soft bus frame authentication (HMAC-SHA256 tag)"
+	depends on ARKRTOS_USE_SOFTBUS
+	default n
+	help
+	  Install a pre-shared key on the bus and every frame it sends carries a
+	  truncated HMAC-SHA256 tag over the header fields and the payload.  A
+	  keyed node refuses a frame whose tag does not verify, and refuses a
+	  frame with no tag at all: that fail-closed choice is what stops an
+	  attacker from stripping the tag and forging a src_id.
+
+	  Off by default.  With no key installed nothing here runs even when
+	  compiled in -- frames carry no tag and are accepted exactly as before.
+
+	  Cost when compiled in: ~2.7 KB of .text + .rodata (SHA-256 + HMAC),
+	  no .bss (the hash state lives on the stack of the frame being sealed
+	  or opened), and ARK_BUS_CRYPTO_KEY_MAX + 2 bytes inside the bus
+	  struct for the key.  The tag itself is ARK_BUS_CRYPTO_TAG_LEN bytes
+	  on every frame once a key is installed.
+
+	  This option only decides whether the code is compiled in.  Whether a
+	  given bus is keyed is a runtime call: arkrtos_softbus_set_key().  Both
+	  ends of a link must use the same key and the same tag length.
+
+config ARKRTOS_USE_BUS_ENCRYPT
+	bool "Soft bus payload encryption (ChaCha20, encrypt-then-MAC)"
+	depends on ARKRTOS_USE_BUS_CRYPTO
+	default n
+	help
+	  Authentication alone makes a payload un-tamperable but still
+	  readable.  This encrypts the payload with ChaCha20 under a subkey
+	  derived from the same secret by HMAC key separation, so a passive
+	  listener on the medium sees ciphertext.  The tag covers the
+	  ciphertext (encrypt-then-MAC): a tampered ciphertext can never be
+	  decrypted into something that looks valid.
+
+	  Each frame grows by ARK_BUS_CRYPTO_NONCE_LEN (8) bytes for the nonce
+	  counter, plus the tag.  Off by default; with it off the wire format is
+	  the authenticated-but-plaintext one.
+
+	  Why ChaCha20 and not AES: it is a byte-oriented ARX design with no
+	  S-box, table or data-dependent branches, so the pure-C fallback has no
+	  cache-timing surface and needs no hardware AES unit.  Interoperable
+	  under RFC 8439.
+
+config ARKRTOS_USE_BUS_REPLAY
+	bool "Soft bus replay window"
+	depends on ARKRTOS_USE_BUS_CRYPTO
+	default n
+	help
+	  Remember the sequence numbers already seen from each peer and drop a
+	  verbatim replay before it is dispatched, counted in
+	  stats.rx_replay.  Only meaningful on a keyed bus: the sequence
+	  number is covered by the tag, so a captured frame cannot be
+	  renumbered to slip past the window.  QoS1 frames are exempt because a
+	  retransmission reuses its sequence number by design.
+
+	  Off by default.  Turning it on changes the bytes the tag covers, so
+	  both ends must agree.
+
 endmenu
 
 menu "Shell"

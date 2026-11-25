@@ -94,7 +94,11 @@ static int loopback_recv(void *ctx, uint8_t *buf, uint16_t max_len)
 
     plen = (uint16_t)(((uint16_t)ring_peek(r, 9) << 8) | ring_peek(r, 10));
     total = ark_bus_frame_size(plen);
-    if (plen > ARK_BUS_MSG_MAX_SIZE || total > max_len) {
+    /* 上限必须是**线上**载荷上限：装了认证/加密之后，一帧的 plen 里还带着
+     * nonce 与标签，合法帧会比 ARK_BUS_MSG_MAX_SIZE 大。这里按调用方上限
+     * 判，就会把满载荷的加密帧当成噪声逐字节丢掉——表现为"链路时好时坏"，
+     * 而且只在载荷够大时出现。 */
+    if (plen > ARK_BUS_WIRE_PAYLOAD_MAX || total > max_len) {
         ring_drop(r, 1);
         return 0;
     }

@@ -42,13 +42,25 @@ INCLUDES := -Ikernelsrc/include \
 
 # ark_softbus MCU 档位（清单见 kernelsrc/include/arkrtos_softbus.h 顶部注释）。
 # 默认值与工程值必须同档，否则 arkrtos_softbus.h 里有 #error 闸门。
+# 软总线加密档位（认证 / 加密 / 重放）：唯一取值来源是 Kconfig，本工程用的
+# 共享头 kernelsrc/include/arkrtos_autoconf.h 就是它的出口。组件内部只认
+# ARK_BUS_*，看不到 Kconfig，所以在这里翻成 -D；两边值不一致时
+# arkrtos_softbus.h 有 #error —— 编不过，而不是带着两种 struct ark_bus
+# 布局上板踩内存。
+BUS_CRYPTO  := $(or $(shell awk '/define ARKRTOS_USE_BUS_CRYPTO /{print $$3}' kernelsrc/include/arkrtos_autoconf.h),0)
+BUS_ENCRYPT := $(or $(shell awk '/define ARKRTOS_USE_BUS_ENCRYPT /{print $$3}' kernelsrc/include/arkrtos_autoconf.h),0)
+BUS_REPLAY  := $(or $(shell awk '/define ARKRTOS_USE_BUS_REPLAY /{print $$3}' kernelsrc/include/arkrtos_autoconf.h),0)
+
 ARK_BUS_FLAGS := -DARK_BUS_MAX_TOPICS=12 -DARK_BUS_MAX_DEVICES=4 \
                  -DARK_BUS_MSG_MAX_SIZE=128 -DARK_BUS_TOPIC_NAME_MAX=24 \
                  -DARK_BUS_QOS_MAX_SESSIONS=2 -DARK_BUS_RPC_MAX_SLOTS=4 \
                  -DARK_BUS_RPC_MAX_METHODS=4 -DARK_BUS_TASK_ENABLED=0 \
                  -DARK_BUS_COLL_ENABLED=0 -DARK_BUS_INFER_ENABLED=0 \
                  -DARK_BUS_STREAM_TX_SLOTS=1 -DARK_BUS_STREAM_RX_SLOTS=1 \
-                 -DARK_BUS_STREAM_RX_MAX=256 -DARK_BUS_STREAM_MAX_BYTES=256
+                 -DARK_BUS_STREAM_RX_MAX=256 -DARK_BUS_STREAM_MAX_BYTES=256 \
+                 -DARK_BUS_CRYPTO_ENABLED=$(BUS_CRYPTO) \
+                 -DARK_BUS_ENCRYPT_ENABLED=$(BUS_ENCRYPT) \
+                 -DARK_BUS_REPLAY_ENABLED=$(BUS_REPLAY)
 
 # 默认目标显式写成 all：下面的密钥生成规则排在 all 之前，
 # 不写这句 make 会把第一个出现的规则当成默认目标。

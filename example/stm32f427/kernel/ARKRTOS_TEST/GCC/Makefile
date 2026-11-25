@@ -42,6 +42,14 @@ USE_SBUF ?= 0
 # ARKRTOS_USE_SHELL，不再走 -DSHELL_ENABLE。
 USE_SHELL ?= 1
 
+# 软总线加密（SEC-G06）：三个旋钮只为方便"这一趟构建打开"，取值同样进
+# per-build defconfig，再由 Kconfig 出口 autoconf.h 回到内核侧。组件那一层
+# 只认 ARK_BUS_*，所以 DEFS 里把同一组值再翻一次；两处不同值时
+# arkrtos_softbus.h 的 #error 会拦住。
+USE_BUS_CRYPTO  ?= 0
+USE_BUS_ENCRYPT ?= 0
+USE_BUS_REPLAY  ?= 0
+
 # 交叉工具链前缀；默认取 PATH 上的 arm-none-eabi-
 CROSS ?= arm-none-eabi-
 CC    := $(CROSS)gcc
@@ -66,7 +74,10 @@ DEFS := \
   -DARK_BUS_TOPIC_NAME_MAX=24 -DARK_BUS_QOS_MAX_SESSIONS=2 -DARK_BUS_RPC_MAX_SLOTS=4 \
   -DARK_BUS_RPC_MAX_METHODS=4 -DARK_BUS_TASK_ENABLED=0 -DARK_BUS_COLL_ENABLED=0 \
   -DARK_BUS_INFER_ENABLED=0 -DARK_BUS_STREAM_TX_SLOTS=1 -DARK_BUS_STREAM_RX_SLOTS=1 \
-  -DARK_BUS_STREAM_RX_MAX=256 -DARK_BUS_STREAM_MAX_BYTES=256
+  -DARK_BUS_STREAM_RX_MAX=256 -DARK_BUS_STREAM_MAX_BYTES=256 \
+  -DARK_BUS_CRYPTO_ENABLED=$(USE_BUS_CRYPTO) \
+  -DARK_BUS_ENCRYPT_ENABLED=$(USE_BUS_ENCRYPT) \
+  -DARK_BUS_REPLAY_ENABLED=$(USE_BUS_REPLAY)
 
 # -----------------------------------------------------------------------------
 # Kconfig（唯一真相）：make 变量只是旋钮，取值由 Kconfig 决定。
@@ -82,7 +93,10 @@ KCFG_BASE      := $(ROOT)/config/stm32f427_gcc_defconfig
 KCFG_DEFCONFIG := $(KCFG_DIR)/stm32f427_gcc_defconfig
 KCFG_HEADER    := $(KCFG_DIR)/arkrtos_autoconf.h
 
-KCFG_KNOBS := ARKRTOS_USE_SBUF=$(USE_SBUF) ARKRTOS_USE_SHELL=$(USE_SHELL)
+KCFG_KNOBS := ARKRTOS_USE_SBUF=$(USE_SBUF) ARKRTOS_USE_SHELL=$(USE_SHELL) \
+              ARKRTOS_USE_BUS_CRYPTO=$(USE_BUS_CRYPTO) \
+              ARKRTOS_USE_BUS_ENCRYPT=$(USE_BUS_ENCRYPT) \
+              ARKRTOS_USE_BUS_REPLAY=$(USE_BUS_REPLAY)
 
 $(KCFG_DEFCONFIG): $(KCFG_BASE) FORCE
 	@mkdir -p $(KCFG_DIR)

@@ -175,6 +175,14 @@ static void test_info(void)
     CK(cap_has("link      : loopback (in-board, not a physical UART)"));
     CK(cap_has("profile   : msg<=128 topic<=12 dev<=4 qos=2 rpc=4 stream=1"));
     CK(cap_has("peers     : 1 (peer 0x00001002 online)"));
+#if (ARK_BUS_CRYPTO_ENABLED == 1)
+    /* 加密档：这一行是"开关真的编进来了、此刻有没有钥"的唯一运行时读数。
+     * 没装钥时应为 keyed=no——自检/命令装过的钥在复位后不该偷偷留着。 */
+    CK(cap_has("crypto    : auth=hmac-sha256 tag="));
+    CK(cap_has("keyed=no"));
+#else
+    CK(cap_has("crypto    : off (ARKRTOS_USE_BUS_CRYPTO=0)"));
+#endif
     CK(cap_has("node tx   : frames="));
     CK(cap_has("node rx   : frames="));
     CK(cap_has("peer saw  : msgs="));
@@ -199,7 +207,13 @@ static void test_selftest(void)
     CK(cap_has("  PASS qos-timeout"));
     CK(cap_has("  PASS errors"));
     CK(cap_has("  PASS topics"));
+#if (ARK_BUS_CRYPTO_ENABLED == 1)
+    /* 加密档多一段：未装钥时它只打一行"跳过"，装了钥才真跑（见用例 8）。 */
+    CK(cap_has("  PASS crypto"));
+    CK(cap_count("  PASS ") == 11);
+#else
     CK(cap_count("  PASS ") == 10);
+#endif
 }
 
 /* 4. shell 的信息类子命令。 */
@@ -428,6 +442,145 @@ static void test_topic_table_full(void)
     CK(saw_sub_fail == 1);
 }
 
+#if (ARK_BUS_CRYPTO_ENABLED == 1)
+/* 8. 加密档的接入层：bus key 的三条子命令、参数错误、装钥后的自检与收发。
+ *    这一节只在 ARKRTOS_USE_BUS_CRYPTO=1 的构建里存在（默认关），它的存在
+ *    本身就是"开关真能打开、打开后接入层仍然完整"的证据。
+ *
+ *    密钥不回显是硬要求，所以这里的断言数的是字节数，不是钥本身；
+ *    "装进去了"由 crypto_state() 的 keyed 位证明。 */
+static void test_crypto_shell(void)
+{
+    char *argv[4];
+
+    CK(arkrtos_softbus_init() == 0);
+    CK((arkrtos_softbus_crypto_state() & 0x1u) == 0u);   /* 复位后无钥 */
+
+    /* --- show：还没装钥 --- */
+    cap_clear();
+    argv[0] = LIT("bus");
+    argv[1] = LIT("key");
+    argv[2] = LIT("show");
+    CK(arkrtos_softbus_shell_cmd(3, argv) == 0);
+    CK(cap_has("bus crypto: keyed=no"));
+    CK(cap_has("auth=hmac-sha256 tag="));
+#if (ARK_BUS_ENCRYPT_ENABLED == 1)
+    CK(cap_has("enc=chacha20"));
+#else
+    CK(cap_has("enc=off"));
+#endif
+#if (ARK_BUS_REPLAY_ENABLED == 1)
+    CK(cap_has("replay=on"));
+#else
+    CK(cap_has("replay=off"));
+#endif
+    CK(cap_has("key_len=0"));
+
+    /* --- 参数错误：三种都不许装进半把钥，且都必须报错 --- */
+    cap_clear();
+    argv[0] = LIT("bus");
+    argv[1] = LIT("key");
+    argv[2] = LIT("set");
+    CK(arkrtos_softbus_shell_cmd(3, argv) != 0);
+    CK(cap_has("usage: bus key set <hex>"));
+
+    cap_clear();
+    argv[3] = LIT("zz");
+    CK(arkrtos_softbus_shell_cmd(4, argv) != 0);
+    CK(cap_has("bus key: bad hex"));
+
+    cap_clear();
+    argv[3] = LIT("abc");                       /* 奇数个十六进制字符 */
+    CK(arkrtos_softbus_shell_cmd(4, argv) != 0);
+    CK(cap_has("bus key: bad hex"));
+
+    {
+        /* 比 KEY_MAX 多一个字节的钥。长度不能写死：KEY_MAX 是组件档位
+         * （默认 32），写死 17 在默认档下是合法长度，用例会变成假绿。 */
+        char bighex[2 * (ARK_BUS_CRYPTO_KEY_MAX + 1) + 1];
+        int  i;
+
+        for (i = 0; i < (int)sizeof(bighex) - 1; i++) {
+            bighex[i] = 'a';
+        }
+        bighex[sizeof(bighex) - 1] = '\0';
+        cap_clear();
+        argv[3] = bighex;
+        CK(arkrtos_softbus_shell_cmd(4, argv) != 0);
+        CK(cap_has("bus key: bad hex"));
+        CK((arkrtos_softbus_crypto_state() & 0x1u) == 0u);   /* 没装进去 */
+    }
+
+    /* --- 正常装钥：只报字节数，绝不回显钥 --- */
+    cap_clear();
+    argv[3] = LIT("0a1b2c3d4e5f6071");
+    CK(arkrtos_softbus_shell_cmd(4, argv) == 0);
+    CK(cap_has("bus key: 8 bytes installed"));
+    CK(!cap_has("0a1b2c3d"));                   /* 钥不回显 */
+    CK((arkrtos_softbus_crypto_state() & 0x1u) != 0u);
+
+    /* argc==2 等价于 show。 */
+    cap_clear();
+    CK(arkrtos_softbus_shell_cmd(2, argv) == 0);
+    CK(cap_has("bus crypto: keyed=yes"));
+    CK(cap_has("key_len=8"));
+
+    /* --- 装了钥跑自检：crypto 段真跑（不是"跳过"），且跑完钥还在 --- */
+    cap_clear();
+    CK(arkrtos_softbus_selftest() == 0);
+    CK(cap_has("  PASS crypto"));
+    CK(cap_has("failed 0"));
+    CK(!cap_has("keyed checks skipped"));       /* 这一段确实执行了 */
+    CK((arkrtos_softbus_crypto_state() & 0x1u) != 0u);
+
+    /* 自检复位了总线，重新按装了钥的状态发起一次发布：链路仍然通。 */
+    cap_clear();
+    argv[0] = LIT("bus");
+    argv[1] = LIT("pub");
+    argv[2] = LIT("crypto/live");
+    argv[3] = LIT("hello");
+    CK(arkrtos_softbus_shell_cmd(4, argv) == 0);
+    CK(cap_has("peer got 1 msg (crypto/live len=5)"));
+
+    /* --- 大写十六进制同样接受：控制台上贴的钥常常是大写，
+     * 不接受就是一个只有人手才会碰到的「看起来成功了」白给。 --- */
+    cap_clear();
+    argv[0] = LIT("bus");
+    argv[1] = LIT("key");
+    argv[2] = LIT("set");
+    argv[3] = LIT("00112233AABBCCDD");
+    CK(arkrtos_softbus_shell_cmd(4, argv) == 0);
+    CK(cap_has("bus key: 8 bytes installed"));
+    CK((arkrtos_softbus_crypto_state() & 0x1u) != 0u);
+
+    /* --- clear：回到无钥，明文仍能通 --- */
+    cap_clear();
+    argv[0] = LIT("bus");
+    argv[1] = LIT("key");
+    argv[2] = LIT("clear");
+    CK(arkrtos_softbus_shell_cmd(3, argv) == 0);
+    CK(cap_has("bus key: cleared"));
+    CK((arkrtos_softbus_crypto_state() & 0x1u) == 0u);
+
+    cap_clear();
+    argv[0] = LIT("bus");
+    argv[1] = LIT("pub");
+    argv[2] = LIT("crypto/live");
+    argv[3] = LIT("plain");
+    CK(arkrtos_softbus_shell_cmd(4, argv) == 0);
+    CK(cap_has("peer got 1 msg (crypto/live len=5)"));
+
+    /* --- 未知子命令：打 usage 返回错误 --- */
+    cap_clear();
+    argv[0] = LIT("bus");
+    argv[1] = LIT("key");
+    argv[2] = LIT("zzz");
+    CK(arkrtos_softbus_shell_cmd(3, argv) != 0);
+    CK(cap_has("usage: bus key [show | set <hex> | clear]"));
+}
+#endif /* ARK_BUS_CRYPTO_ENABLED == 1 */
+
+
 int main(void)
 {
     test_lifecycle();
@@ -437,12 +590,17 @@ int main(void)
     test_shell_data();
     test_shell_limits();
     test_topic_table_full();
+#if (ARK_BUS_CRYPTO_ENABLED == 1)
+    test_crypto_shell();
+#endif
 
     if (g_fails != 0) {
         printf("SOFTBUS-HOST FAILED  %d/%d checks failed\n", g_fails, g_checks);
         return 1;
     }
-    printf("SOFTBUS-HOST OK  %d checks\n", g_checks);
+    printf("SOFTBUS-HOST OK  %d checks (crypto=%d encrypt=%d replay=%d)\n",
+           g_checks, ARK_BUS_CRYPTO_ENABLED, ARK_BUS_ENCRYPT_ENABLED,
+           ARK_BUS_REPLAY_ENABLED);
     return 0;
 }
 #endif /* ARKRTOS_USE_SOFTBUS */

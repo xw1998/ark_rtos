@@ -665,6 +665,33 @@ CASES = [
      ["-DARKRTOS_USE_SOFTBUS=0", "-fno-asynchronous-unwind-tables"],
      "SOFTBUS-HOST OK",
      {"incs": SOFTBUS_INCS}),
+    # 加密档：同一份接入层在 CRYPTO/ENCRYPT/REPLAY 全开时再编一遍。执行行集
+    # 与默认档按模块求并集（main() 的口径），所以这一档真正补上的是 #if 里面
+    # 那一半——默认档永远走不到的 set_key / `bus key` / selftest 的 crypto 段。
+    # 这一档开着加密开关，把 `#if ARK_BUS_CRYPTO_ENABLED` 里的那一半
+    # （set_key / `bus key` / crypto 自检段）拉进执行行并集。代价是模块在这一档
+    # 下多出约 180 行可执行行，其中 26 行是 `sb_ck(0, ...); return;`
+    # 这类「只在检查失败时才执行」的失败护栏，正常跑永远覆盖不到。
+    # 所以 `arkrtos_softbus` 的基线从 94.90% 重锚到 92.23%（理由写在
+    # docs/软总线接入.md §10.4）——是「补了新代码」，不是「漏了测试」。
+    ("softbuscrypto", "kernelsrc/tests/test_softbus_host.c",
+     ["kernelsrc/src/arkrtos_softbus.c"],
+     # 三个 ARK_BUS_*_ENABLED 已在 SOFTBUS_TIER_DEFS 里给了 =0，这里必须先
+     # 抽掉再给 =1：直接追加会被编译器当成重复定义（redefined），
+     # 而 warn_gate 会把命令行重复定义判成告警。
+     [d for d in SOFTBUS_DEFS
+      if not d.startswith("-DARK_BUS_CRYPTO_ENABLED=")
+      and not d.startswith("-DARK_BUS_ENCRYPT_ENABLED=")
+      and not d.startswith("-DARK_BUS_REPLAY_ENABLED=")]
+     + ["-DARKRTOS_USE_BUS_CRYPTO=1",
+        "-DARKRTOS_USE_BUS_ENCRYPT=1",
+        "-DARKRTOS_USE_BUS_REPLAY=1",
+        "-DARK_BUS_CRYPTO_ENABLED=1",
+        "-DARK_BUS_ENCRYPT_ENABLED=1",
+        "-DARK_BUS_REPLAY_ENABLED=1",
+        "-fno-asynchronous-unwind-tables"],
+     "SOFTBUS-HOST OK",
+     {"incs": SOFTBUS_INCS, "link": SOFTBUS_LINK}),
     # 物理线接入层：默认关（ARKRTOS_USE_BUS_UART=0），所以这一档必须显式
     # 打开，否则 arkrtos_softbus_line.c 是空翻译单元、一行都不会被量到。
     # 链接在 SOFTBUS_LINK 之上再加 transport_uart.c（组件的那份传输层）。

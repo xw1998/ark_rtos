@@ -258,6 +258,14 @@ int ark_bus_emit(ark_bus_t *bus, uint32_t dst, uint8_t msg_type,
     if (!bus || !bus->transport) {
         return ARK_BUS_E_INVAL;
     }
+    /* 调用方的上限始终是 ARK_BUS_MSG_MAX_SIZE，认证/加密增加的是**线上**的
+     * 字节，不是调用方可以交进来的载荷。没有这一条，加密档下超限的发布
+     * 会先撞上 seal 的缓冲上限、变成 E_NOMEM，而不是其他档一律返回的
+     * E_INVAL——同一个错误被开关改了名字，调用方就再也分不清"参数错"和
+     * "资源不够"。 */
+    if (len > ARK_BUS_MSG_MAX_SIZE) {
+        return ARK_BUS_E_INVAL;
+    }
 
     bus_lock(bus);
 
