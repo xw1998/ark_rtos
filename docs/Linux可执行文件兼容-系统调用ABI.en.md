@@ -704,6 +704,26 @@ behaviour to the real scheduler. It is worth its own entry because the shape is
 "**works before and after, and returns a plausible errno either way**" - you only
 catch it by treating "waits a long time" as a normal path.
 
+**(2b) The replay test cannot be "the address matches".** Fixing "which word does
+the replay read" left a sibling trap: `REQUEUE` **moves the slot's key**
+(`s_futex_key` becomes `uaddr2`), while the replay still computes its key from the
+old `uaddr` the caller wrote. `resumed` used to mean "the slot's key equals the key
+computed now", so **a requeued waiter could not recognise itself**: it fell into the
+first-entry branch, read the old word, found it still equal to the expected value,
+and went back to sleep on the old address - and a `WAKE` on the new address could
+never wake it again. That is exactly how the `fork+cow+shm+futex` profile of the
+`fork` gate went red: 72 != 76 readouts, the serial log stopping right after
+`clone for futex2 requeue child > 0`, with the parent cycling through
+`-ETIMEDOUT` retries until the runner timed out. The test is now "**my own slot is
+still in use**": a task cannot start a second `WAIT` while it sleeps, so a used slot
+can only be a replay; the value to compare against also comes from that slot (it was
+updated to the current word at `uaddr2` when the requeue happened). The host case
+used to simulate the replay with `uaddr = 0`, which only reaches the "`a0` was
+cleared to 0 by the return value" fallback and could never show this shape - it now
+re-enters with **the address the caller actually wrote**, plus an assertion that a
+`WAKE` on the old address still returns 0 after the replay, pinning "it did not go
+back to sleep on the old address".
+
 9. **Two arguments change meaning with the op: the `timeout` slot is `nr_requeue`
    inside `REQUEUE`.** The futex number table reuses the same argument slot across
    ops: in `REQUEUE`/`CMP_REQUEUE` argument 4 is `nr_requeue` (not a timeout
@@ -737,7 +757,7 @@ Host accounting: the union line coverage of the `linuxabi` / `linuxabioff` /
 `linuxabifutex` / `linuxabifilemap` / `linuxabiselect` profiles is **98.22%** (the
 pinned baseline in `tools/coverage_baseline.json` is 97.96%; this round only moved
 up and neither lowered the baseline nor ran `--update`), the `linuxabi` profile runs
-**270 checks**, the futex profile **366**, the filemap profile **358** and the
+**270 checks**, the futex profile **371**, the filemap profile **358** and the
 select profile **327**, all printing `LINUX-ABI HOST OK`. The
 `ARKRTOS_USE_PAGING_SHM=1` shared branches are **not in the host ledger** (the host
 fixture was never compiled with `LINUX_FORK=1`); that half is measured only by the
@@ -1287,7 +1307,7 @@ and the `-ENOSYS` control with SHM off).
 wait slots, the key resolver and `lx_futex` are not compiled and number 98 falls
 back to `-ENOSYS`; with it on the measured evidence is the 76 readouts of the
 fork+COW+SHM+futex tier (36 of them futex: 9 basic pairing, 7 multi-slice and 20
-for bitsets/timeout/requeue) plus the 366 host checks of the futex profile.
+for bitsets/timeout/requeue) plus the 371 host checks of the futex profile.
 
 `ARKRTOS_USE_PAGING_FILEMAP` (section 8.5) is the sixth switch, default **0**,
 `depends on ARKRTOS_USE_LINUX_ABI` + `ARKRTOS_USE_PAGING` +

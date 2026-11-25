@@ -564,7 +564,7 @@ COW 只管「fork 之后各写各的」这一半；要让父子看见彼此的�
 | `-EAGAIN` / `-EINTR` | 入口读到的字 != `val` ⇒ 立即 `-EAGAIN`（不睡）；有未屏蔽待投递信号 ⇒ 立即 `-EINTR`。重放那一次也再查一遍信号，所以信号能把已经睡着的等待者叫回来 |
 | 等待槽 | 每任务一槽（`s_futex_key / s_futex_used / s_futex_woke / s_futex_uaddr / s_futex_val / s_futex_bitset / s_futex_deadline / s_futex_timed[ARKRTOS_TASK_MAX_NUM]`）。`uaddr`/`val` 记的是「上一次真正睡下时的地址与期望值」——重放时 a0 已经被返回值清成 0，不存下来就只能拿 0 去读字；`bitset` 记位集（普通 WAIT 登记全 1，所以普通 WAKE 能叫醒它），`deadline` 记截止时刻，`timed` 是「有没有超时」的独立标志（**不拿 0 当哨兵**：单调时钟从 0 开始，0 是合法截止时刻）。一个任务睡着时不可能再发起一次 WAIT，一槽够用；任务退出时 `on_task_exit` 清槽（八格一起清），否则任务号复用后新任务会继承一条「已经在等」的旧记录 |
 | `WAKE` / `WAKE_BITSET` | 扫所有任务，同键且登记中的逐个置 `s_futex_woke=1` + `arkrtos_task_wakeup_internal()`，最多 `val` 个，返回实际唤醒数；没有等待者返 0（与 Linux 同）。`WAKE_BITSET` 另按 `val3` 掩码筛：位集为 0 回 `-EINVAL`，只有 `bitset & mask` 非 0 的等待者会被叫醒；普通 `WAKE` 不看位集，所以它能叫醒按位集睡着的人（与 Linux 一致） |
-| `REQUEUE` / `CMP_REQUEUE` | Linux 把 `nr_requeue` **塞在 `timeout` 那一格**（第 4 个参数）、`uaddr2` 在第 5 格，这里照抄这个复用：先唤醒 `val` 个，再把剩下的最多 `nr_requeue` 个改挂到 `uaddr2`，返回值是**唤醒数加改挂数**（`man futex` 的措辞是 "woken up or requeued"）：Linux 的调用方靠这个数判断「挂过去了没有」，`nr_wake=0` 的 `CMP_REQUEUE` 若只回 0，glibc 的 `pthread_cond_broadcast` 就无从判断。`CMP_REQUEUE` 动手前先核对 `uaddr` 上的字等于 `val3`，不等回 `-EAGAIN`；缺 `uaddr2` 回 `-EINVAL`。被改挂的等待者把**期望值更新成 `uaddr2` 上的当前字**：Linux 里 requeue 不叫醒人，而本内核靠时间片重放回到用户态，若不更新期望值，重放时会因「两个地址的字不同」被误判成「已唤醒」——这是模型内的必要偏差，写在代码注释里 |
+| `REQUEUE` / `CMP_REQUEUE` | Linux 把 `nr_requeue` **塞在 `timeout` 那一格**（第 4 个参数）、`uaddr2` 在第 5 格，这里照抄这个复用：先唤醒 `val` 个，再把剩下的最多 `nr_requeue` 个改挂到 `uaddr2`，返回值是**唤醒数加改挂数**（`man futex` 的措辞是 "woken up or requeued"）：Linux 的调用方靠这个数判断「挂过去了没有」，`nr_wake=0` 的 `CMP_REQUEUE` 若只回 0，glibc 的 `pthread_cond_broadcast` 就无从判断。`CMP_REQUEUE` 动手前先核对 `uaddr` 上的字等于 `val3`，不等回 `-EAGAIN`；缺 `uaddr2` 回 `-EINVAL`。被改挂的等待者把**期望值更新成 `uaddr2` 上的当前字**：Linux 里 requeue 不叫醒人，而本内核靠时间片重放回到用户态，若不更新期望值，重放时会因「两个地址的字不同」被误判成「已唤醒」——这是模型内的必要偏差，写在代码注释里。同理，「这次是不是重放」按**自己那一槽还在用**判定，不按地址比对：改挂已经把键搬到 `uaddr2`，按地址会比不出自己（详见本节②的另一半） |
 | 检查顺序 | 一次 WAIT 醒来依次判：有人 `WAKE` 过 → 超时到期 → 值变了（当叫醒） → 有未屏蔽信号（`-EINTR`） → 继续睡。顺序即优先级：`WAKE` 优先于超时（同一刻既被叫醒又到期时，Linux 回 0） |
 
 读数（`tools/fork_gate.py` 的 fork+COW+SHM+futex 档，**76 条 check**，其中 futex 段 36 条 —— 9 条基本配对 + 7 条多时间片 + 20 条第二档（位集 / 超时 / 改挂））：
@@ -638,6 +638,17 @@ s_futex_val`：登记时存 `uaddr`、`val`，重放时取回它们再读字。�
 这个缺陷值得单独记一笔，因为它的形态是「**修复前后都能跑、都返回一个像样的错误码**」——只有把
 『等得久』当成一条正常路径去测，才会发现正常路径被当成了错误。
 
+**② 的另一半：认重放的判据不能是「地址对得上」。** 修好「重放读哪个字」之后还剩下一个同源的坑：
+`REQUEUE` 会把等待者那一槽的**键搬走**（`s_futex_key` 改到 `uaddr2`），而重放的那一次算出来的键仍来自
+用户原样写下的旧地址 `uaddr`。早先 `resumed` 判的是「槽里的键 == 这次算出的键」，于是**被改挂过的
+等待者醒来后认不出自己**：它掉进「第一次进入」分支，读到旧地址上的字仍等于期望值，就又在旧地址上睡下，
+新地址上的 `WAKE` 再也叫不醒它。`fork` 门禁的 `fork+cow+shm+futex` 档就是这么判红的——读数 72 != 76，
+串口停在 `clone for futex2 requeue child > 0` 之后、父进程在 `-ETIMEDOUT` 重试里转到运行器超时。
+判据改成「**自己那一槽还在用**」：一个任务睡着的时候不可能再发起一次 `WAIT`，槽在用就只能是重放；
+要比对的值也取槽里记的那一份（改挂时它已经更新成 `uaddr2` 上的当前字）。宿主用例原来用 `uaddr=0`
+模拟重放，只走得到「a0 被返回值清 0」那条兜底分支，照不出这个形态——现在改成**按用户原样写下的
+地址**重入，并追加一条「重放之后旧地址上 `WAKE` 仍回 0」，把「没有重新睡回旧地址」钉住。
+
 ③ **「一次 write」不等于「一行」。** §8.3 让 `lx_write` 持控制台锁，解决的是
 「内核日志插进用户一行中间」；但夹具自己把一行拆成三次 `write`（前缀、数字、换行）时，
 **同一把锁保护不了三次调用之间的空隙**——另一个进程的整行会插进来。全量门禁里就撞到了：
@@ -649,7 +660,7 @@ s_futex_val`：登记时存 `uaddr`、`val`，重放时取回它们再读字。�
 
 宿主侧口径：`linuxabi` / `linuxabioff` / `linuxabifutex` / `linuxabifilemap` / `linuxabiselect`
 五档并集行覆盖率 **98.22%**（基线 `tools/coverage_baseline.json` 钉的是 97.96%，本轮只往上走、没有调低也没有
-`--update`），`linuxabi` 档 **270 checks**、futex 档 **366 checks**、filemap 档 **358 checks**、
+`--update`），`linuxabi` 档 **270 checks**、futex 档 **371 checks**、filemap 档 **358 checks**、
 select 档 **327 checks**，都打印
 `LINUX-ABI HOST OK`；`ARKRTOS_USE_PAGING_SHM=1` 的共享分支**不在宿主账内**
 （宿主用例从未在 `LINUX_FORK=1` 下编过），那一半的口径只有上板 40 条 SHM 读数、36 条 futex

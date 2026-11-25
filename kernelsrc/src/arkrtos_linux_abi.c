@@ -4690,7 +4690,9 @@ static int32 lx_futex_timeout(void *p_ctx, uint32 abs_flag, uint32 *p_dl)
 *              给 timeout 时重放醒来只要值没变就继续睡（Linux 语义一致）；
 *            - 被 requeue 的等待者把「期望值」更新为 uaddr2 上的当前字：
 *              requeue 本身不唤醒它（与 Linux 一致），但它下次时间片醒来
-*              不会因为两个地址的字不同而被误判成「已唤醒」。
+*              不会因为两个地址的字不同而被误判成「已唤醒」；
+*            - 重放识别按「任务自己那一槽还在用」判定，不按地址比对：键在
+*              requeue 时已经搬到 uaddr2，按地址会比不出自己。
 */
 /* 按键唤醒至多 want 个等待者（位掩码过滤）。抽出来是因为 CLONE_CHILD_CLEARTID
  * 的退出路径也要走同一套判据：两处各写一遍，迟早在「唤醒谁」上分叉。 */
@@ -4870,15 +4872,24 @@ static int32 lx_futex(void *p_ctx)
 
     /* ---- WAIT / WAIT_BITSET：先判这是不是上一次睡下那一次的重放 ---- */
     {
-        uint32 crit = ARKRTOS_ENTER_CRITICAL();
-        uint8  resumed = ((s_futex_used[me - 1] != 0u) &&
-                          (s_futex_key[me - 1] == key)) ? 1u : 0u;
-        uint8  woke    = s_futex_woke[me - 1];
-        uint8  timed   = s_futex_timed[me - 1];
-        uint32 dl      = s_futex_deadline[me - 1];
+        uint32        crit    = ARKRTOS_ENTER_CRITICAL();
+        uint8         resumed = (s_futex_used[me - 1] != 0u) ? 1u : 0u;
+        uint8         woke    = s_futex_woke[me - 1];
+        uint8         timed   = s_futex_timed[me - 1];
+        uint32        dl      = s_futex_deadline[me - 1];
+        unsigned long saddr   = s_futex_uaddr[me - 1];
+        uint32        sval    = s_futex_val[me - 1];
 
         ARKRTOS_EXIT_CRITICAL(crit);
 
+        /* 「我是不是那次重放」只认自己那一槽，不认地址：REQUEUE 会把这一
+         * 槽的键改到 uaddr2 上，而重放的那一次读到的 uaddr 还是用户原样
+         * 写下的旧地址——早先按「槽里的键 == 这次算出的键」认重放，被改挂
+         * 过的等待者醒来后认不出自己，会在旧地址上重新睡下，等不到新地址
+         * 上的 WAKE（fork 夹具 futex2 requeue 一档就是这么挂死的）。一个
+         * 任务睡着的时候不可能再发起一次 WAIT，所以「槽在用」就等于「这次
+         * 是重放」；要比对的值也取槽里那一份——改挂时它已经更新成 uaddr2
+         * 上的当前字，正是期望值该有的口径。 */
         if(resumed != 0u)
         {
             if(woke != 0u)
@@ -4894,12 +4905,12 @@ static int32 lx_futex(void *p_ctx)
             }
             /* 时间片到了（本内核的兜底唤醒）：值变了就当被叫醒，交给调用方
              * 重新判断；值没变就继续睡一个时间片。 */
-            if(arkrtos_copy_from_user(&word, (const void *)uaddr, 4u) != 0)
+            if(arkrtos_copy_from_user(&word, (const void *)saddr, 4u) != 0)
             {
                 lx_futex_forget(me);
                 return -LX_EFAULT;
             }
-            if(word != val)
+            if(word != sval)
             {
                 lx_futex_forget(me);
                 return 0;

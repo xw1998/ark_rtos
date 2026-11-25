@@ -2958,8 +2958,13 @@ static void t_futex(t_ctx *c)
     ck_ret(c, 1, "futex CMP_REQUEUE nr_wake=0 回 1（改挂数计入返回值）");
     (void)call(c, T_NR_FUTEX, w1, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
     ck_ret(c, 1, "futex CMP_REQUEUE 改挂之后新地址上的 WAKE 叫醒 1 个");
-    (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
-    ck_ret(c, 0, "futex 被 CMP_REQUEUE 改挂的等待者重放回 0");
+    /* 重放用的是**用户原样写下的旧地址**（真机上重放的 a0 就是它；早先这里
+     * 写成 0 只走得到「a0 被返回值抹成 0」那条兜底分支，于是「按地址认重放
+     * 认不出被改挂过的自己」这个缺陷在宿主档里照不出来）。 */
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, 0, "futex 被 CMP_REQUEUE 改挂的等待者按原地址重放也回 0");
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 0, "改挂过的等待者没有重新睡回旧地址");
 
     /* 参数与键的边界 */
     (void)call6(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_REQUEUE, 0UL, 0UL, 0UL,
