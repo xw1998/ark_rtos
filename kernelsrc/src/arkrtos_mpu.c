@@ -323,14 +323,26 @@ void arkrtos_mpu_build_task(arkrtos_task_t *p_task)
                           (ram_size == rom_size)) ? ARKRTOS_MPU_MEM_RAMX
                                                   : ARKRTOS_MPU_MEM_RAM);
 
-    /* Region 2: shared RAM, where the partition table lives. Every external
-     * task reads it at boot. Skipped when the RAM window already covers it. */
+    /* Region 2: shared RAM, where the partition table and the crash journal
+     * live. Every external task reads it at boot; nothing outside the kernel
+     * has any business writing it. Until 2026-11-25 the region was plain
+     * read/write, so an App could rewrite the slot records -- and with them
+     * the layout the whole system believes in (SEC-G03). It is now a
+     * privileged-write / unprivileged-read window: the kernel keeps writing
+     * it (boot rebuild, install bookkeeping, fault journal) because those
+     * paths run privileged, while a task only ever reads.
+     * No SVC hand-off exists because no App-side write to this window ever
+     * existed: the only published accessor is read-only, and the journal is
+     * kernel-only (see arkrtos_crash.h). If a future feature needs a write,
+     * it belongs behind an SVC, not in this region.
+     * Skipped when the RAM window already covers it (kernel tasks do, and
+     * they are privileged anyway). */
     if((ARKRTOS_MPU_SHARE_RAM_BASE < ram_base) ||
        (ARKRTOS_MPU_SHARE_RAM_BASE >= (ram_base + ram_size)))
     {
         arkrtos_mpu_add_region(p_mpu, ARKRTOS_MPU_RGN_SHARE,
                              ARKRTOS_MPU_SHARE_RAM_BASE, ARKRTOS_MPU_SHARE_RAM_SIZE,
-                             ARKRTOS_MPU_MEM_RAM);
+                             ARKRTOS_MPU_MEM_RAM_RO);
     }
 
     /* Regions 3/4: peripheral windows from the board policy. */

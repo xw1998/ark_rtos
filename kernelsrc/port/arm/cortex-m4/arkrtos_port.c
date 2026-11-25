@@ -660,6 +660,16 @@ int32 arkrtos_port_mpu_encode(arkrtos_arch_mpu_t *p_mpu, uint32 idx, uint32 base
             attr = 0x03060001u;     /* AP=0b011: read-write, XN=0 */
             break;
 
+        case ARKRTOS_MPU_MEM_RAM_RO:
+            /* Shared RAM (partition table / crash journal): AP=0b010 keeps
+             * the write available to the kernel, which is the only writer,
+             * and makes it unprivileged read-only so an App cannot rewrite
+             * the slot records it is required to trust. Memory attributes are
+             * the same Normal non-cacheable ones as MEM_RAM, otherwise the
+             * kernel would read the table through a different alias. */
+            attr = 0x12060001u;     /* AP=0b010: priv RW / unpriv RO, XN=1 */
+            break;
+
         case ARKRTOS_MPU_MEM_PERIPH_RO:
             attr = 0x12060001u;     /* AP=0b010: unprivileged read-only, XN=1 */
             break;

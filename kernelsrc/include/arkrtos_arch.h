@@ -203,7 +203,16 @@ typedef enum {
     ARKRTOS_MPU_MEM_RAMX,         /* read/write AND executable (MiniApp block only) */
     ARKRTOS_MPU_MEM_PERIPH_RO,    /* peripheral, unprivileged read-only */
     ARKRTOS_MPU_MEM_PERIPH_RW,    /* peripheral, unprivileged read/write */
-    ARKRTOS_MPU_MEM_EXTRAM        /* external RAM: read/write, XN, Normal NC */
+    ARKRTOS_MPU_MEM_EXTRAM,       /* external RAM: read/write, XN, Normal NC */
+    ARKRTOS_MPU_MEM_RAM_RO        /* shared RAM: PRIVILEGED read/write,
+                                     unprivileged read-only, XN, normal memory.
+                                     Exists because the kernel owns the writes
+                                     (partition table / crash journal) while an
+                                     unprivileged task only ever reads it.
+                                     Ports that cannot express the split must say
+                                     so instead of silently widening it (RV32 PMP:
+                                     no privilege bit -> falls back to read/write,
+                                     documented in docs/已知限制.md). */
 } arkrtos_mpu_mem_t;
 
 #endif

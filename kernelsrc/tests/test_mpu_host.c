@@ -377,7 +377,12 @@ static void test_pool_ram_exact(void)
     {
         ck_u(c->base, (unsigned long)ARKRTOS_MPU_SHARE_RAM_BASE, "share region base");
         ck_u(c->size, (unsigned long)ARKRTOS_MPU_SHARE_RAM_SIZE, "share region size");
-        ck(c->mem == ARKRTOS_MPU_MEM_RAM, "share region is read/write non-executable");
+        /* SEC-G03: the kernel keeps the write, an unprivileged task does
+         * not get it. Asserting the exact kind (not just "not RAM")
+         * is what would catch a future change that quietly widens it
+         * back to read/write. */
+        ck(c->mem == ARKRTOS_MPU_MEM_RAM_RO,
+           "share region is privileged read/write, unprivileged read-only");
     }
 }
 

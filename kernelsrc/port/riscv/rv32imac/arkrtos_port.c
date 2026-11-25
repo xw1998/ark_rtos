@@ -1322,6 +1322,14 @@ int32 arkrtos_port_mpu_encode(arkrtos_arch_mpu_t *p_mpu, uint32 idx, uint32 base
         case ARKRTOS_MPU_MEM_ROM:       attr = RV_PMP_R | RV_PMP_X; break;
         case ARKRTOS_MPU_MEM_RAM:       attr = RV_PMP_R | RV_PMP_W; break;
         case ARKRTOS_MPU_MEM_RAMX:      attr = RV_PMP_R | RV_PMP_W | RV_PMP_X; break;
+        /* PMP has no privilege bit: an entry applies to M-mode as well, so
+         * "kernel may write, U-mode may only read" cannot be expressed here.
+         * Encoding it read-only would also take the write away from the kernel
+         * (the SVC handler runs with the task's PMP still installed), i.e. it
+         * would break installs instead of closing the hole. The region is
+         * therefore read/write on this port and the mitigation is documented
+         * as absent for RV32 in docs/已知限制.md (SEC-G03). */
+        case ARKRTOS_MPU_MEM_RAM_RO:    attr = RV_PMP_R | RV_PMP_W; break;
         case ARKRTOS_MPU_MEM_PERIPH_RO: attr = RV_PMP_R; break;
         case ARKRTOS_MPU_MEM_PERIPH_RW: attr = RV_PMP_R | RV_PMP_W; break;
         case ARKRTOS_MPU_MEM_EXTRAM:    attr = RV_PMP_R | RV_PMP_W; break;

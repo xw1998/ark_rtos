@@ -704,6 +704,14 @@ int32 arkrtos_port_mpu_encode(arkrtos_arch_mpu_t *p_mpu, uint32 idx, uint32 base
             attr = arkrtos_port_mpu_extram_attr();
             break;
 
+        case ARKRTOS_MPU_MEM_RAM_RO:
+            /* Shared RAM (partition table / crash journal): AP=0b010 keeps
+             * the kernel write, removes it from unprivileged tasks. Bit
+             * pattern is MEM_RAM with the AP field flipped, so the memory
+             * attributes stay identical to the window the kernel reads. */
+            attr = 0x12020001u;     /* AP=0b010: priv RW / unpriv RO, XN=1, S=0, Normal NC */
+            break;
+
         case ARKRTOS_MPU_MEM_PERIPH_RO:
             attr = 0x12050001u;     /* AP=0b010: unpriv read-only, XN=1, S=1, Device */
             break;
