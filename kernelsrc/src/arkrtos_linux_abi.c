@@ -4675,7 +4675,11 @@ static int32 lx_futex_timeout(void *p_ctx, uint32 abs_flag, uint32 *p_dl)
 *            6) REQUEUE 把同一键上的等待者（先唤醒 nr_wake 个）改挂到
 *               uaddr2；CMP_REQUEUE 在动手前先核对 uaddr 上的字等于 val3，
 *               不等回 -EAGAIN。Linux 把 nr_requeue 塞在第四个参数
-*               （timeout 那一格）里，这里照抄这个复用。
+*               （timeout 那一格）里，这里照抄这个复用。返回值是**唤醒数
+*               加改挂数**（man futex 的措辞是 "woken up or requeued"）：
+*               只回唤醒数时，nr_wake=0 的 CMP_REQUEUE 永远回 0，调用方
+*               没法从返回值知道「挂过去了没有」——glibc 的
+*               pthread_cond_broadcast 正是按这个数判断的。
 *          与 Linux 不同的边界（文档里写死）：
 *            - 键取自「物理帧 + 页内偏移」，只有落在 App 分页窗口里的字才
 *              有键；栈上的字（不在窗口里）如实回 -ENOSYS；
@@ -4853,7 +4857,10 @@ static int32 lx_futex(void *p_ctx)
             }
         }
         ARKRTOS_EXIT_CRITICAL(crit);
-        return woke;
+
+        /* 唤醒数 + 改挂数（不是只回唤醒数）：nr_wake=0 的 CMP_REQUEUE
+         * 也必须能从返回值看出「有没有挂过去」。 */
+        return (int32)(woke + req);
     }
 
     if((op != (uint32)LX_FUTEX_WAIT) && (op != (uint32)LX_FUTEX_WAIT_BITSET))

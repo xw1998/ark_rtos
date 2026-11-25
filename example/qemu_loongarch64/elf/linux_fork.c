@@ -1591,30 +1591,49 @@ void linux_main(unsigned long sp)
                     {
                         code |= 1;      /* bit0: 父进程等的还是 1 */
                     }
-                    for (tries = 0; tries < 200000; tries++)
+                    /* 子进程不能忙等：它不让步，父进程根本轮不到去 sleep，
+                     * 结果 CMP_REQUEUE 永远看不到等待者，子进程把预算烧完
+                     * 退出、父进程才去睡 —— 一次必定超时的假红（实测偶发）。
+                     * 0.5 ms 一次的重试既让步又给了 60 轮 100 ms 的父进程
+                     * 足够窗口（共 5 s，父进程那边总共 6 s）。 */
+                    for (tries = 0; tries < 10000; tries++)
                     {
+                        lx_long yld[2];
+
                         cq = lx6(LX_FUTEX, (lx_long)(unsigned long)q,
                                  LX_FUTEX_CMP_REQUEUE, 0, 1,
                                  (lx_long)(unsigned long)q2, 1);
-                        if (cq != 0)
+                        /* 返回值 = 唤醒数 + 改挂数：val=0 时它就是「挂过去
+                         * 了几个」，所以 >0 才算这次真的动了手。 */
+                        if (cq > 0)
                         {
+                            w = lx3(LX_FUTEX, (lx_long)(unsigned long)q2,
+                                    LX_FUTEX_WAKE, 1);
+                            if (w == 1)
+                            {
+                                code |= 2;  /* bit1: 新地址上的 WAKE 叫醒 1 个 */
+                            }
                             break;
                         }
-                        w = lx3(LX_FUTEX, (lx_long)(unsigned long)q2,
-                                LX_FUTEX_WAKE, 1);
-                        if (w == 1)
+                        if ((cq < 0) && (cq != -LX_EAGAIN))
                         {
-                            break;
+                            break;          /* 真错误：不再重试 */
                         }
-                        /* 旧地址上 WAKE 必须叫不醒（已经挂走了；还没挂走时
-                         * 这里也可能回 1，所以只在确认挂走之后才读）。 */
+                        /* 让步：在这一页里另挑一个字（与 q / q2 不同键，
+                         * 没人等它）睡 0.5 ms。本机没有 sched_yield 也没有
+                         * nanosleep，FUTEX_WAIT 带 timeout 是唯一能主动交出
+                         * CPU 的路；栈上的字没有键（回 -ENOSYS），所以必须
+                         * 用这张映射页里的字。 */
+                        yld[0] = 0;
+                        yld[1] = 500000L;
+                        (void)lx4(LX_FUTEX,
+                                  (lx_long)(unsigned long)(q + 64),
+                                  LX_FUTEX_WAIT, 0,
+                                  (lx_long)(unsigned long)yld);
                     }
-                    if ((cq == 0) && (w == 1))
+                    if ((cq <= 0) || (w != 1))
                     {
-                        code |= 2;      /* bit1: 新地址上的 WAKE 叫醒了 1 个 */
-                    }
-                    if (w != 1)
-                    {
+                        code &= ~2;
                         (void)lx2(LX_KILL, ppid3, LX_SIGCHLD);
                     }
                     (void)lx1(LX_EXIT, code);

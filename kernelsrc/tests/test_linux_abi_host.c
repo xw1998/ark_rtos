@@ -2905,7 +2905,7 @@ static void t_futex(t_ctx *c)
     ck_ret(c, 0, "futex REQUEUE 前置：先登记一个等待者");
     (void)call6(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_REQUEUE, 0UL, 1UL, w1,
                 0UL);
-    ck_ret(c, 0, "futex REQUEUE nr_wake=0 回 0（只改挂、不唤醒）");
+    ck_ret(c, 1, "futex REQUEUE nr_wake=0 回 1（改挂数也计入返回值）");
     (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
     ck_ret(c, 0, "futex 改挂之后原地址上没有等待者了");
     (void)call(c, T_NR_FUTEX, w1, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
@@ -2913,7 +2913,8 @@ static void t_futex(t_ctx *c)
     (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
     ck_ret(c, 0, "futex 被改挂的等待者重放回 0（用新地址与新期望值）");
 
-    /* nr_wake 与 nr_requeue 同时给：先唤醒再改挂，返回的是唤醒数 */
+    /* nr_wake 与 nr_requeue 同时给：先唤醒再改挂，返回值是唤醒数加改挂数
+     * （man futex 的措辞是 "woken up or requeued"） */
     u_put32(0x10u, 5u);
     (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
     ck_ret(c, 0, "futex REQUEUE 前置：再登记一个等待者");
@@ -2945,6 +2946,20 @@ static void t_futex(t_ctx *c)
     ck_ret(c, 1, "futex CMP_REQUEUE 期望值相符时唤醒 nr_wake 个");
     (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
     ck_ret(c, 0, "futex CMP_REQUEUE 唤醒的那条重放回 0");
+
+    /* nr_wake=0 的 CMP_REQUEUE：返回值必须能看出「挂过去了」——glibc 的
+     * pthread_cond_broadcast 就是按这个数决定要不要继续的 */
+    u_put32(0x10u, 5u);
+    u_put32(0x2010u, 5u);
+    (void)call(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, 0, "futex CMP_REQUEUE nr_wake=0 前置：再登记一个等待者");
+    (void)call6(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_CMP_REQUEUE, 0UL,
+                1UL, w1, 5UL);
+    ck_ret(c, 1, "futex CMP_REQUEUE nr_wake=0 回 1（改挂数计入返回值）");
+    (void)call(c, T_NR_FUTEX, w1, (unsigned long)T_FUTEX_WAKE, 1UL, 0UL);
+    ck_ret(c, 1, "futex CMP_REQUEUE 改挂之后新地址上的 WAKE 叫醒 1 个");
+    (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
+    ck_ret(c, 0, "futex 被 CMP_REQUEUE 改挂的等待者重放回 0");
 
     /* 参数与键的边界 */
     (void)call6(c, T_NR_FUTEX, w0, (unsigned long)T_FUTEX_REQUEUE, 0UL, 0UL, 0UL,
