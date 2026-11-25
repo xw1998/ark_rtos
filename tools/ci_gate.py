@@ -2499,7 +2499,7 @@ def check_bus_crypto():
         ok("bus-crypto",
            "default off + Kconfig depends + #error both ways / OFF object has no "
            "crypto symbols or `bus key` / 6 host cells (full 95, auth 71, kernel "
-           "124/124/84) / parser self-check 5/5")
+           "127/127/84) / parser self-check 5/5")
     else:
         fail("bus-crypto", txt[-320:])
 
