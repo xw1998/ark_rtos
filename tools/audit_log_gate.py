@@ -30,6 +30,7 @@
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -105,6 +106,14 @@ def run(cmd, env):
     return r.returncode, ((r.stdout or b"").decode("utf-8", "replace"),
                           (r.stderr or b"").decode("utf-8", "replace"))
 
+
+def counts(txt):
+    """从用例输出里取 checks/fails。汇总行写死数字会在加用例后开始撒谎，
+    所以这两项一律从实际输出读。"""
+    m = re.search(r"checks=(\d+) fails=(\d+)", txt)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
 
 def judge(txt, marker, rc):
     """门禁的唯一判据：退出码为 0 且标准输出/错误里出现定长标记。
@@ -204,6 +213,8 @@ def main():
 
     check_defaults(errs)
 
+    on_counts = None
+    off_counts = None
     td = tempfile.mkdtemp(prefix="arkrtos-auditlog-gate-")
     exe_suffix = ".exe" if os.name == "nt" else ""
     try:
@@ -218,6 +229,8 @@ def main():
             rc, (out, err) = run([exe], env)
             if not judge(out + err, "AUDIT-LOG OFF OK", rc):
                 errs.append("default build is not OFF: %s" % (out + err).strip()[:200])
+            else:
+                off_counts = counts(out + err)
 
         # B 组：关档对象里不许有任何已定义的全局符号。
         obj = os.path.join(td, "audit_log_off.o")
@@ -265,6 +278,8 @@ def main():
             txt = out + err
             if not judge(txt, "AUDIT-LOG HOST OK", rc):
                 errs.append("ON case failed: %s" % txt.strip()[:240])
+            else:
+                on_counts = counts(txt)
     finally:
         if not args.keep:
             shutil.rmtree(td, ignore_errors=True)
@@ -277,8 +292,12 @@ def main():
         print("AUDIT-LOG-GATE FAILED (%d)" % len(errs))
         return 1
 
+    def _fmt(pair):
+        return "%d checks" % pair[0] if pair else "count unread"
+
     print("AUDIT-LOG-GATE OK  default=OFF, OFF object has no symbols, "
-          "7 wired files compile with the switch ON, host cases 163/4 pass")
+          "7 wired files compile with the switch ON, host cases ON %s / OFF %s"
+          % (_fmt(on_counts), _fmt(off_counts)))
     return 0
 
 

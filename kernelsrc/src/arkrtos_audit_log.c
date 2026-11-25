@@ -551,6 +551,8 @@ const char *arkrtos_audit_kind_name(uint32 kind)
     case ARKRTOS_AUDIT_EV_AUTH_FAIL:    return "auth_fail";
     case ARKRTOS_AUDIT_EV_AUTH_LOCK:    return "auth_lock";
     case ARKRTOS_AUDIT_EV_QUOTA_REFUSE: return "quota_refuse";
+    case ARKRTOS_AUDIT_EV_ROLLBACK_ARM: return "rollback_arm";
+    case ARKRTOS_AUDIT_EV_ROLLBACK_OK:  return "rollback_ok";
     default:                            break;
     }
     return "unknown";

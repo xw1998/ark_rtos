@@ -57,7 +57,9 @@
 #define ARKRTOS_AUDIT_EV_AUTH_FAIL    (7u)   /* wrong console password; code = try no */
 #define ARKRTOS_AUDIT_EV_AUTH_LOCK    (8u)   /* console hard-locked; code = limit */
 #define ARKRTOS_AUDIT_EV_QUOTA_REFUSE (9u)   /* app task quota hit; code = owner */
-#define ARKRTOS_AUDIT_EV_LAST         ARKRTOS_AUDIT_EV_QUOTA_REFUSE
+#define ARKRTOS_AUDIT_EV_ROLLBACK_ARM (10u)  /* rollback target armed; code = budget */
+#define ARKRTOS_AUDIT_EV_ROLLBACK_OK  (11u)  /* downgrade admitted; code = that entry's used */
+#define ARKRTOS_AUDIT_EV_LAST         ARKRTOS_AUDIT_EV_ROLLBACK_OK
 
 /* ------------------------------------------------------------------
  * One record, 32 bytes on the volume

@@ -200,6 +200,7 @@ static int register_kernel_commands(void)
              + (((ARKRTOS_USE_LINUX_ABI == 1) && (ARKRTOS_LINUX_ABI_SYSSTAT == 1)) ? 1 : 0)
              + ((ARKRTOS_USE_EXIT_CODE == 1) ? 1 : 0)
              + ((ARKRTOS_USE_SHELL_AUTH == 1) ? 2 : 0)
+             + ((ARKRTOS_USE_ROLLBACK == 1) ? 1 : 0)
              + (ARKRTOS_USE_FDT ? 1 : 0);
 
     if((idx + need) > ARK_SHELL_MAX_COMMANDS)
@@ -321,6 +322,10 @@ static int register_kernel_commands(void)
     g_cmd_table[idx++] = ARK_SHELL_CMD("auditlog", cmd_auditlog,
         "Persistent audit trail: auditlog | auditlog dump [n] (oldest first)", 3);
 #endif /* ARKRTOS_USE_AUDIT_LOG */
+#if (ARKRTOS_USE_ROLLBACK == 1)
+    g_cmd_table[idx++] = ARK_SHELL_CMD("rollback", cmd_rollback,
+        "Rollback whitelist: rollback [list] | arm <id> <ver> [uses] | clear", 4);
+#endif /* ARKRTOS_USE_ROLLBACK */
 
 #if ARKRTOS_USE_KERNEL_GUARD
     g_cmd_table[idx++] = ARK_SHELL_CMD("guard", cmd_guard,

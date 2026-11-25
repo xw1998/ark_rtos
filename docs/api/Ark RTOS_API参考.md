@@ -40,6 +40,7 @@
 - [kernelsrc/include/arkrtos_net.h](#kernelsrcincludearkrtos_neth)（14 项）
 - [kernelsrc/include/arkrtos_net_dev.h](#kernelsrcincludearkrtos_net_devh)（7 项）
 - [kernelsrc/include/arkrtos_ptable.h](#kernelsrcincludearkrtos_ptableh)（23 项）
+- [kernelsrc/include/arkrtos_rollback.h](#kernelsrcincludearkrtos_rollbackh)（6 项）
 - [kernelsrc/include/arkrtos_rt.h](#kernelsrcincludearkrtos_rth)（14 项）
 - [kernelsrc/include/arkrtos_sec.h](#kernelsrcincludearkrtos_sech)（8 项）
 - [kernelsrc/include/arkrtos_sha256.h](#kernelsrcincludearkrtos_sha256h)（3 项）
@@ -6930,6 +6931,84 @@ int32 arkrtos_ptable_stats(uint32 *p_used, uint32 *p_total, uint32 *p_frag);
 - `p_total`：池可分配总字节数（= pool_usable_size）
 - `p_frag`：空闲区间个数（>1 表示存在碎片）
 **返回**：0=成功
+
+## kernelsrc/include/arkrtos_rollback.h
+
+**Explicit, bounded rollback to a known-good image (SEC-G11)**
+The install path refuses any image whose version is not higher than
+the copy already in the pool (arkrtos_loader_check_install). That
+rule is what stops a downgrade attack, and it is also what stops the
+
+### `int32 arkrtos_rollback_arm(uint32 image_id, uint32 version, uint32 use`
+
+```c
+int32 arkrtos_rollback_arm(uint32 image_id, uint32 version, uint32 uses);
+```
+
+**Arm one rollback target from the copy already installed in the pool.**
+- `image_id`：payload identity of the image to roll back to
+- `version`：version of that image
+- `uses`：admissions to grant; 0 means ARKRTOS_ROLLBACK_USES
+**返回**：ARKRTOS_ROLLBACK_OK, ERR_PARAM, ERR_NOTFOUND when no LOADED/RUNNING
+copy of (image_id, version) with a valid header is in the pool, or
+ERR_FULL when the whitelist has no free entry.
+Reading the anchor out of the pool is the point: the operator names
+a version, the device decides which bytes that means. Re-arming the
+same target adds to its budget instead of creating a second entry.
+A copy whose state is INVALID (disabled by the crash policy) is not
+a usable anchor - reinstall it first if that is what you want back.
+
+### `int32 arkrtos_rollback_arm_ex(uint32 image_id, uint32 version, uint32 `
+
+```c
+int32 arkrtos_rollback_arm_ex(uint32 image_id, uint32 version, uint32 image_size, uint32 crc32, uint32 uses);
+```
+
+**Arm an explicit target with the caller-supplied anchor values.**
+Same as above without the pool lookup. Provided for a host test and
+for a bootloader-style caller that already holds the header; the
+console path must use arkrtos_rollback_arm() so the crc comes from
+the pool rather than from a number somebody typed.
+
+### `int32 arkrtos_rollback_clear(void);`
+
+```c
+int32 arkrtos_rollback_clear(void);
+```
+
+**Drop every entry and the permit counter. Returns OK always.**
+
+### `int32 arkrtos_rollback_allow(const arkrtos_app_header_t *p_hdr);`
+
+```c
+int32 arkrtos_rollback_allow(const arkrtos_app_header_t *p_hdr);
+```
+
+**Ask whether this incoming image is an armed rollback, and consume one**
+admission if it is.
+- `p_hdr`：the incoming image header (the same one check_install holds)
+**返回**：ARKRTOS_ROLLBACK_OK when admitted (one use consumed), ERR_PARAM on a
+null header, ERR_NOENTRY when nothing matches or the matching entry's
+budget is exhausted.
+Called from arkrtos_loader_check_install() only, and only for a
+version strictly below the installed best - an equal or higher
+version never needs this path.
+
+### `uint32 arkrtos_rollback_list(arkrtos_rollback_entry_t *p_out, uint32 m`
+
+```c
+uint32 arkrtos_rollback_list(arkrtos_rollback_entry_t *p_out, uint32 max);
+```
+
+**Copy out the current entries; returns how many were written.**
+
+### `uint32 arkrtos_rollback_permits(void);`
+
+```c
+uint32 arkrtos_rollback_permits(void);
+```
+
+**Admissions granted since the last reset (each one was a rollback).**
 
 ## kernelsrc/include/arkrtos_rt.h
 

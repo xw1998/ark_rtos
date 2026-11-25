@@ -148,6 +148,9 @@ int cmd_audit(int argc, char *argv[]);
 #if (ARKRTOS_USE_AUDIT_LOG == 1)
 int cmd_auditlog(int argc, char *argv[]);
 #endif
+#if (ARKRTOS_USE_ROLLBACK == 1)
+int cmd_rollback(int argc, char *argv[]);
+#endif
 int cmd_blk(int argc, char *argv[]);
 int cmd_cd(int argc, char *argv[]);
 int cmd_cfg(int argc, char *argv[]);

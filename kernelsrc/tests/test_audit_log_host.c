@@ -531,6 +531,39 @@ static void case_write_failure(void)
     ck_u(st.last_seq, 3ul, "and the seq continues from where it stopped");
 }
 
+/* 种类号是卷上 ABI，名字是操作员在 'auditlog dump' 里读到的东西。两者都只追加：
+ * 新种类可以加，旧种类的号与名都不能改，否则旧版本固件写下的台账会被读错。
+ * 每条都钉死，顺带让 kind_name() 的每个分支都被走到。 */
+static void case_kind_names(void)
+{
+    ck(strcmp(arkrtos_audit_kind_name(ARKRTOS_AUDIT_EV_LOG_OPEN), "log_open") == 0,
+       "kind 1 is log_open");
+    ck(strcmp(arkrtos_audit_kind_name(ARKRTOS_AUDIT_EV_ROOT_MOUNT), "root_mount") == 0,
+       "kind 2 is root_mount");
+    ck(strcmp(arkrtos_audit_kind_name(ARKRTOS_AUDIT_EV_IMAGE_OK), "image_ok") == 0,
+       "kind 3 is image_ok");
+    ck(strcmp(arkrtos_audit_kind_name(ARKRTOS_AUDIT_EV_IMAGE_REFUSE), "image_refuse") == 0,
+       "kind 4 is image_refuse");
+    ck(strcmp(arkrtos_audit_kind_name(ARKRTOS_AUDIT_EV_EXEC_START), "exec_start") == 0,
+       "kind 5 is exec_start");
+    ck(strcmp(arkrtos_audit_kind_name(ARKRTOS_AUDIT_EV_EXEC_EXIT), "exec_exit") == 0,
+       "kind 6 is exec_exit");
+    ck(strcmp(arkrtos_audit_kind_name(ARKRTOS_AUDIT_EV_AUTH_FAIL), "auth_fail") == 0,
+       "kind 7 is auth_fail");
+    ck(strcmp(arkrtos_audit_kind_name(ARKRTOS_AUDIT_EV_AUTH_LOCK), "auth_lock") == 0,
+       "kind 8 is auth_lock");
+    ck(strcmp(arkrtos_audit_kind_name(ARKRTOS_AUDIT_EV_QUOTA_REFUSE), "quota_refuse") == 0,
+       "kind 9 is quota_refuse");
+    ck(strcmp(arkrtos_audit_kind_name(ARKRTOS_AUDIT_EV_ROLLBACK_ARM), "rollback_arm") == 0,
+       "kind 10 is rollback_arm (SEC-G11 appended, never renumbered)");
+    ck(strcmp(arkrtos_audit_kind_name(ARKRTOS_AUDIT_EV_ROLLBACK_OK), "rollback_ok") == 0,
+       "kind 11 is rollback_ok");
+    ck_u((unsigned long)ARKRTOS_AUDIT_EV_LAST, 11ul, "EV_LAST is the highest appended kind");
+    ck(strcmp(arkrtos_audit_kind_name(0u), "unknown") == 0, "kind 0 is unknown");
+    ck(strcmp(arkrtos_audit_kind_name(ARKRTOS_AUDIT_EV_LAST + 1u), "unknown") == 0,
+       "a kind newer than this build reads as unknown, not as the last one");
+}
+
 #endif /* ARKRTOS_USE_AUDIT_LOG */
 
 int main(void)
@@ -549,6 +582,7 @@ int main(void)
     case_scan_counts_bad_crc();
     case_header_rebuild();
     case_write_failure();
+    case_kind_names();
 
     printf("checks=%d fails=%d\n", g_checks, g_fails);
     if(g_fails != 0)
@@ -563,7 +597,7 @@ int main(void)
      * they describe the volume format, which outlives the switch. */
     ck(ARKRTOS_USE_AUDIT_LOG == 0, "OFF: the switch really is 0 in this build");
     ck_u((unsigned long)ARKRTOS_AUDIT_REC_SIZE, 32ul, "OFF: REC_SIZE is still 32");
-    ck_u((unsigned long)ARKRTOS_AUDIT_EV_LAST, 9ul, "OFF: kinds are still numbered");
+    ck_u((unsigned long)ARKRTOS_AUDIT_EV_LAST, 11ul, "OFF: kinds are still numbered");
     ck_u((unsigned long)ARKRTOS_AUDIT_LOG_ERR_BUSY, (unsigned long)-6,
          "OFF: status codes are still the published ones");
 

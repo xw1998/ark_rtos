@@ -1584,4 +1584,56 @@ config ARKRTOS_AUDIT_LOG_PATH
 	  constant; the file is created on first record and extended to
 	  full size immediately, because the ring is addressed by offset.
 
+config ARKRTOS_USE_ROLLBACK
+	bool "Explicit, bounded rollback to a known-good image (SEC-G11)"
+	default n
+	help
+	  The install path refuses any image whose version is not higher
+	  than the copy already in the pool.  That rule is what stops a
+	  downgrade; it is also what stops the one legitimate operation an
+	  operator needs after a bad release: put the previous build back.
+
+	  This switch is that exception, and it is deliberately narrow:
+	    - the whitelist lives in RAM only.  A reset clears it, so an arm
+	      cannot be replayed forever: the operator has to authorise the
+	      rollback again, on purpose.  A persistent entry would turn one
+	      console command into a permanent downgrade ticket.
+	    - an entry is bound to content, not to a version number.  arm()
+	      reads crc32 and image_size out of the copy already installed
+	      in the pool; the install path re-verifies that crc32 against
+	      the payload it received, so what comes back is the exact bytes
+	      that ran before, not "a build that calls itself v1.2.3".
+	    - every entry carries a use budget, consumed when the image is
+	      ADMITTED (not when it is written): a failed install costs an
+	      authorisation instead of leaving the ticket open.  Fail closed.
+	    - each arm and each admitted rollback goes to the persistent
+	      audit trail (SEC-G05) when that switch is on.
+
+	  It does not decide that a version is good, and it does not remove
+	  the bad copy - after a rollback both versions are in the pool, and
+	  which one starts is the autostart / `app start` decision.
+
+	  Cost: the table plus the code.  Off (the default) compiles
+	  arkrtos_rollback.c to nothing and the loader hook out.
+
+config ARKRTOS_ROLLBACK_ENTRIES
+	int "Rollback whitelist entries"
+	default 2
+	range 1 8
+	depends on ARKRTOS_USE_ROLLBACK
+	help
+	  How many distinct (image_id, version, content) targets can be armed
+	  at once.  Each entry is 24 bytes of RAM.  Re-arming the same target
+	  tops up its budget instead of taking a second entry.
+
+config ARKRTOS_ROLLBACK_USES
+	int "Admissions granted per armed target"
+	default 1
+	range 1 8
+	depends on ARKRTOS_USE_ROLLBACK
+	help
+	  Default budget when `rollback arm` names no count.  A use is spent
+	  when check_install admits the image, not when the write succeeds;
+	  a failed install therefore consumes an authorisation.
+
 endmenu

@@ -5864,6 +5864,27 @@ def check_auditlog():
     else:
         fail("auditlog", txt[-300:])
 
+def check_rollback():
+    """Rollback whitelist (SEC-G11): an explicit and bounded downgrade lane.
+
+    tools/rollback_gate.py holds the five groups: the switch defaults to OFF and
+    features.h / Kconfig / defconfig / autoconf must agree; the OFF object must
+    export no symbol; the four wired files (module + loader + two shell files)
+    must compile with the switch ON; the host cases must pass in three builds
+    (OFF, ON, ON+audit); and the judge itself must reject a bogus output.
+
+    What this does NOT prove: that a real downgrade works end to end on a board
+    with flash and a reboot in between. The host pool is a RAM array, and the
+    whitelist is RAM-only by design - the reset behaviour is the point, so it
+    can only be observed on hardware.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "rollback_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "ROLLBACK-GATE OK" in txt:
+        ok("rollback", "OFF default + zero-symbol OFF object + 4 ON-path files + host cases OFF/ON/ON+audit")
+    else:
+        fail("rollback", txt[-300:])
+
 def check_coverage_host():
     """Line coverage of the modules the host tests actually link.
 
@@ -6052,6 +6073,7 @@ CHECK_TABLE = (
     ("rt-host", check_rt_host),
     ("sec-host", check_sec_host),
     ("auditlog", check_auditlog),
+    ("rollback", check_rollback),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),
     ("analyzer", check_analyzer),

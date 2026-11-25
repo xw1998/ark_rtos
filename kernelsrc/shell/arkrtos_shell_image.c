@@ -7,6 +7,9 @@
 */
 
 #include "arkrtos_shell_internal.h"
+#if (ARKRTOS_USE_ROLLBACK == 1)
+#include "arkrtos_rollback.h"
+#endif
 
 #if (SHELL_ENABLE == 1)
 
@@ -792,5 +795,119 @@ int cmd_install(int argc, char *argv[])
     }
     return 0;
 }
+
+/* ============================================================
+ * rollback：回滚白名单的武装 / 查看 / 清空（SEC-G11）
+ *
+ * 这里只做搬运：锚点（image_size + crc32）由模块自己从池里那份已提交副本读，
+ * 所以操作员抄的只有 id 与 version —— 名字不构成凭据，字节才构成凭据。
+ * ============================================================ */
+#if (ARKRTOS_USE_ROLLBACK == 1)
+int cmd_rollback(int argc, char *argv[])
+{
+    arkrtos_partition_table_t *pt = arkrtos_ptable_get();
+    arkrtos_rollback_entry_t rb[ARKRTOS_ROLLBACK_ENTRIES];
+    uint32 n;
+    uint32 idx;
+
+    if((argc >= 2) && (strcmp(argv[1], "clear") == 0))
+    {
+        (void)arkrtos_rollback_clear();
+        sh_out("rollback: whitelist cleared (arming again requires a fresh command)\r\n");
+        return 0;
+    }
+
+    if((argc >= 2) && (strcmp(argv[1], "arm") == 0))
+    {
+        uint32 image_id;
+        uint32 version;
+        uint32 uses = 0u;           /* 0 = ARKRTOS_ROLLBACK_USES */
+        int32 rc;
+
+        if((argc < 4) ||
+           (parse_u32(argv[2], &image_id) != 0) ||
+           (parse_u32(argv[3], &version) != 0) ||
+           ((argc >= 5) && (parse_u32(argv[4], &uses) != 0)))
+        {
+            sh_out("usage: rollback arm <image_id> <version> [uses]\r\n");
+            sh_out("       id and version come from the installed-copy table above\r\n");
+            return -1;
+        }
+
+        rc = arkrtos_rollback_arm(image_id, version, uses);
+
+        if(rc == ARKRTOS_ROLLBACK_OK)
+        {
+            ark_shell_printf("rollback: armed id %u version %u (%u admission(s))\r\n",
+                             (unsigned)image_id, (unsigned)version,
+                             (unsigned)((uses != 0u) ? uses : (uint32)ARKRTOS_ROLLBACK_USES));
+            return 0;
+        }
+        if(rc == ARKRTOS_ROLLBACK_ERR_NOTFOUND)
+        {
+            sh_out("rollback: no LOADED/RUNNING copy of that id+version; see the table above\r\n");
+        }
+        else if(rc == ARKRTOS_ROLLBACK_ERR_FULL)
+        {
+            sh_out("rollback: whitelist is full; 'rollback clear' first\r\n");
+        }
+        else
+        {
+            sh_out("rollback: bad arguments (id and version must be non-zero)\r\n");
+        }
+        return -1;
+    }
+
+    /* 默认 / list：先列可作锚点的副本，再列已武装的条目。 */
+    ark_shell_printf("\r\ninstalled copies (records only, not written)\r\n");
+    ark_shell_printf("slot  type    state     version  image_id    size    crc32\r\n");
+    for(idx = 0u; (idx < pt->slot_max) && (idx < ARKRTOS_SLOT_ARRAY_MAX); idx++)
+    {
+        const arkrtos_app_header_t *p_hdr;
+        uint32 base = pt->slot_base[idx];
+
+        if(base == 0u)
+        {
+            continue;
+        }
+        if((pt->slot_state[idx] != ARKRTOS_APP_SLOT_LOADED) &&
+           (pt->slot_state[idx] != ARKRTOS_APP_SLOT_RUNNING))
+        {
+            continue;
+        }
+        if(*(const volatile uint32 *)base != (uint32)ARKRTOS_APP_MAGIC)
+        {
+            continue;
+        }
+
+        p_hdr = (const arkrtos_app_header_t *)base;
+        ark_shell_printf(" %-4u  %-4s  %-8s  %-7u  0x%08X  %-6u  0x%08X\r\n",
+                         idx,
+                         slot_type_name(pt->slot_type[idx]),
+                         slot_state_name(pt->slot_state[idx]),
+                         p_hdr->version,
+                         p_hdr->image_id,
+                         p_hdr->image_size,
+                         p_hdr->crc32);
+    }
+
+    n = arkrtos_rollback_list(rb, (uint32)ARKRTOS_ROLLBACK_ENTRIES);
+
+    ark_shell_printf("\r\narmed rollback targets (%u of %u), admitted since reset: %u\r\n",
+                     (unsigned)n, (unsigned)ARKRTOS_ROLLBACK_ENTRIES,
+                     (unsigned)arkrtos_rollback_permits());
+    if(n == 0u)
+    {
+        sh_out("  (none: the install path still refuses every downgrade)\r\n");
+    }
+    for(idx = 0u; idx < n; idx++)
+    {
+        ark_shell_printf("  id 0x%08X  version %-7u  size %-6u  crc 0x%08X  budget %u  used %u\r\n",
+                         rb[idx].image_id, rb[idx].version, rb[idx].image_size,
+                         rb[idx].crc32, rb[idx].budget, rb[idx].used);
+    }
+    return 0;
+}
+#endif /* ARKRTOS_USE_ROLLBACK */
 
 #endif /* SHELL_ENABLE */

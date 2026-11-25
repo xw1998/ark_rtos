@@ -1158,6 +1158,27 @@
 #define ARKRTOS_AUDIT_LOG_PATH          "/audit.bin"
 #endif
 
+/* 回滚白名单（arkrtos_rollback.c，SEC-G11）：给「版本不许降」这条安装规则开
+ * 一个显式、有界、留痕的例外——操作员指定一个已经装在池里的旧版本，安装路径
+ * 才允许它把当前版本降回去。
+ * 默认关：关掉时该文件编成空目标（零符号），装载器的放行钩子也不参与编译。
+ * 条目只在 RAM：复位即失效是这套机制的安全前提，不是缺陷——持久条目等于
+ * 一张永久的降级通行证。 */
+#ifndef ARKRTOS_USE_ROLLBACK
+#define ARKRTOS_USE_ROLLBACK            0
+#endif
+
+/* 白名单条目数（不同 (id, version, 内容) 的组合各占一条）。 */
+#ifndef ARKRTOS_ROLLBACK_ENTRIES
+#define ARKRTOS_ROLLBACK_ENTRIES        2
+#endif
+
+/* 每条默认授权几次放行（0 传给 arm 表示用这个值）。按「放行」消耗：
+ * 装失败不退，方向是失败关闭。 */
+#ifndef ARKRTOS_ROLLBACK_USES
+#define ARKRTOS_ROLLBACK_USES           1
+#endif
+
 /* 板端单元测试框架（arkrtos_utest.c）：用例自动注册 + 断言记账 + 汇总，
  * 对齐 RT-Thread utest / Zephyr ztest 的形态。关掉后框架与 shell 的 utest 命令都不参与编译，
  * 体积与行为零变化。自动注册需要构造函数支持（armclang/GCC）。 */

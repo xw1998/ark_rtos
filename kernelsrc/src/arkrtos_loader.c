@@ -44,6 +44,9 @@
 #include "arkrtos_fault.h"
 #include "arkrtos_partition.h"    /* 内核专属：读取池布局 / 任务运行参数 */
 #include "arkrtos_log.h"
+#if (ARKRTOS_USE_ROLLBACK == 1)
+#include "arkrtos_rollback.h"    /* 显式回滚白名单：只给「版本下降」开一个口子 */
+#endif
 
 /* 设备流式加载的分块缓冲（避免整镜像驻留 RAM） */
 #define ARKRTOS_LOADER_CHUNK_SIZE   (512u)
@@ -2317,6 +2320,15 @@ int32 arkrtos_loader_check_install(const arkrtos_app_header_t *p_hdr)
     {
         return ARKRTOS_LOADER_ERR_DUP;
     }
+#if (ARKRTOS_USE_ROLLBACK == 1)
+    /* 降级到这里才被问一次：只有操作员事先武装过、且内容（image_size +
+     * crc32）与那份已装副本完全一致的镜像才放行，放行一次消耗一次授权。
+     * 同版本重建走上面的 DUP 分支，升级根本不会到这里。 */
+    if((p_hdr->version < best_ver) && (arkrtos_rollback_allow(p_hdr) == ARKRTOS_ROLLBACK_OK))
+    {
+        return 0;
+    }
+#endif
     return ARKRTOS_LOADER_ERR_VERSION;
 }
 

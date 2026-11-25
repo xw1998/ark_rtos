@@ -558,6 +558,12 @@ CASES = [
      ["kernelsrc/src/arkrtos_audit_log.c"],
      ["-DARKRTOS_USE_AUDIT_LOG=1", "-fno-asynchronous-unwind-tables"],
      "AUDIT-LOG HOST OK"),
+    # --- 2026-11-25 新增：回滚白名单（SEC-G11，默认关） ---
+    # 开档跑武装 / 内容绑定 / 预算 / 清空 / 审计五组路径。
+    ("rollback", "kernelsrc/tests/test_rollback_host.c",
+     ["kernelsrc/src/arkrtos_rollback.c"],
+     ["-DARKRTOS_USE_ROLLBACK=1", "-fno-asynchronous-unwind-tables"],
+     "ROLLBACK HOST OK"),
     ("smpsched", "kernelsrc/tests/test_smp_sched_host.c",
      ["kernelsrc/src/arkrtos_smp_sched.c"],
      ["-DARKRTOS_USE_SMP_SCHED=1", "-DARKRTOS_USE_SMP=1",
