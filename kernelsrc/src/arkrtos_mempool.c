@@ -13,6 +13,14 @@
 #include "arkrtos_mempool.h"
 #include "arkrtos_hal.h"
 #include "arkrtos_task.h"
+#if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0)
+#include "arkrtos_cfg.h"                     /* arkrtos_task_table（取 app_owner） */
+#endif
+
+/* 两个表尺寸在关档时也要可见：quota_slot 的入参校验写在 #if 外面，
+ * 否则关档编译会因为宏没定义而报错。 */
+#define MP_QUOTA_BLOCKS  (128u)
+#define MP_QUOTA_SLOTS   (8u)
 
 #if (ARKRTOS_USE_MEMPOOL == 1)
 
@@ -30,10 +38,142 @@ typedef struct {
     uint32 alloc_fail;
     uint32 free_bad;
     uint32 peak_used;
+#if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0)
+    uint32 quota_fail;                        /* SEC-G07：被按 App 配额挡下的分配次数
+                                               * （关档时整个字段编掉，镜像逐字节不变） */
+#endif
     void  *free_list;                         /* 空闲块侵入式单链链头 */
 } arkrtos_mempool_obj_t;
 
 static arkrtos_mempool_obj_t arkrtos_mempools[ARKRTOS_MEMPOOL_NUM];
+
+#if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0)
+/* ---- SEC-G07 余项：固定块池的按 App 配额 ----
+ * 记账粒度写死在这里，别读成"所有池都管得住"：
+ *   - 每池最多记 MP_QUOTA_BLOCKS 块，block_count 超过它的池整池不记账；
+ *   - 每池最多同时记 MP_QUOTA_SLOTS 个 owner，第 9 个在这个池上拿不到块
+ *     （失败关闭：宁可拒绝，也不悄悄放行）；
+ *   - 块表存的是"槽下标 + 1"，0 表示这块没被记在某人的账上（内核拿的、
+ *     或池子不参与记账）。free 时按块表核销，所以跨 owner 释放也记在人头
+ *     上，不会把额度记错人。
+ *   - 只做记账与限额，**不校验块归属**：free 的合法性仍由原有的
+ *     "落在池内 + 按块对齐" 判据负责。 */
+typedef struct {
+    uint32 owner;                             /* 0 = 空槽；非 0 = App owner 号 */
+    uint32 held;                              /* 该 owner 在本池已记的块数 */
+} mp_owner_slot_t;
+
+static uint8            s_mp_blk_slot[ARKRTOS_MEMPOOL_NUM][MP_QUOTA_BLOCKS];
+static mp_owner_slot_t  s_mp_owner[ARKRTOS_MEMPOOL_NUM][MP_QUOTA_SLOTS];
+
+/* 当前上下文的 App 身份：内核任务 / 中断 / 无人认领一律 0（不受限）。 */
+static uint32 mp_quota_owner(void)
+{
+    int32 id = arkrtos_current_task_id;
+    if((id <= 0) || (id > ARKRTOS_TASK_MAX_NUM))
+    {
+        return 0u;
+    }
+    return arkrtos_task_table[id - 1].app_owner;
+}
+
+static void mp_quota_clear(int32 handle)
+{
+    uint32 i;
+    for(i = 0u; i < MP_QUOTA_BLOCKS; i++)
+    {
+        s_mp_blk_slot[handle][i] = 0u;
+    }
+    for(i = 0u; i < MP_QUOTA_SLOTS; i++)
+    {
+        s_mp_owner[handle][i].owner = 0u;
+        s_mp_owner[handle][i].held  = 0u;
+    }
+}
+
+/* 1 = 放行（并已记账），0 = 超限拒绝（池状态未动）。 */
+static int mp_quota_charge(int32 handle, arkrtos_mempool_obj_t *p, void *blk)
+{
+    uint32 owner;
+    uint32 idx;
+    uint32 i;
+    uint32 free_slot = MP_QUOTA_SLOTS;
+
+    if(p->block_count > MP_QUOTA_BLOCKS)
+    {
+        return 1;                             /* 大池不记账（如实不受管） */
+    }
+    owner = mp_quota_owner();
+    if(owner == 0u)
+    {
+        return 1;                             /* 内核/无线程上下文免配额 */
+    }
+    idx = (uint32)((uint8 *)blk - p->base) / p->block_size;
+    if(idx >= MP_QUOTA_BLOCKS)
+    {
+        return 1;                             /* 防御：几何不该走到这里 */
+    }
+
+    for(i = 0u; i < MP_QUOTA_SLOTS; i++)
+    {
+        if(s_mp_owner[handle][i].owner == owner)
+        {
+            break;
+        }
+        if((s_mp_owner[handle][i].owner == 0u) && (free_slot == MP_QUOTA_SLOTS))
+        {
+            free_slot = i;
+        }
+    }
+    if(i >= MP_QUOTA_SLOTS)
+    {
+        if(free_slot >= MP_QUOTA_SLOTS)
+        {
+            return 0;                         /* owner 槽用尽：失败关闭 */
+        }
+        i = free_slot;
+        s_mp_owner[handle][i].owner = owner;  /* held 已经是 0，不用再清 */
+    }
+    if(s_mp_owner[handle][i].held >= (uint32)ARKRTOS_APP_MAX_POOL_BLOCKS)
+    {
+        return 0;                             /* 该 App 在本池的额度已满 */
+    }
+    s_mp_owner[handle][i].held++;
+    s_mp_blk_slot[handle][idx] = (uint8)(i + 1u);
+    return 1;
+}
+
+/* 按块表核销。没记账的块（slot==0）直接返回，所以内核拿的块 / 不受管的池
+ * 不会被"释放时凭空多记一次"。 */
+static void mp_quota_release(int32 handle, arkrtos_mempool_obj_t *p, void *blk)
+{
+    uint32 idx;
+    uint32 slot;
+
+    if(p->block_count > MP_QUOTA_BLOCKS)
+    {
+        return;
+    }
+    idx = (uint32)((uint8 *)blk - p->base) / p->block_size;
+    if(idx >= MP_QUOTA_BLOCKS)
+    {
+        return;
+    }
+    slot = s_mp_blk_slot[handle][idx];
+    if(slot == 0u)
+    {
+        return;
+    }
+    s_mp_blk_slot[handle][idx] = 0u;
+    if(s_mp_owner[handle][slot - 1u].held > 0u)
+    {
+        s_mp_owner[handle][slot - 1u].held--;
+    }
+    /* held 归 0 时**不**释放槽位：同一 App 反复取放不该每次都重建槽，
+     * 否则 8 个槽会被"曾经来过"的 owner 耗尽。 */
+}
+#endif /* ARKRTOS_USE_APP_QUOTA && ARKRTOS_APP_MAX_POOL_BLOCKS */
+
 
 static int32 mp_name_eq(const char *a, const char *b)
 {
@@ -95,7 +235,13 @@ void arkrtos_mempool_module_init(void)
         arkrtos_mempools[i].alloc_fail  = 0;
         arkrtos_mempools[i].free_bad    = 0;
         arkrtos_mempools[i].peak_used   = 0;
+#if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0)
+        arkrtos_mempools[i].quota_fail  = 0;
+#endif
         arkrtos_mempools[i].free_list   = 0;
+#if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0)
+        mp_quota_clear(i);
+#endif
     }
 }
 
@@ -186,7 +332,13 @@ int32 arkrtos_mempool_create_internal(const char *name, void *pool,
     p->alloc_fail  = 0;
     p->free_bad    = 0;
     p->peak_used   = 0;
+#if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0)
+    p->quota_fail  = 0;
+#endif
     p->free_list   = 0;
+#if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0)
+    mp_quota_clear(i);
+#endif
 
     /* 从最后一块往前插，链头是最低地址那块 */
     for(k = block_count; k > 0u; k--)
@@ -222,6 +374,17 @@ void *arkrtos_mempool_alloc_internal(int32 handle)
     }
 
     blk = p->free_list;
+#if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0)
+    /* 先记账、再摘链：额度不够时块还在链上，池状态一动不动，
+     * 返回值与"池空了"一致（0），另有 alloc_fail / quota_fail 两种计数分开。 */
+    if(mp_quota_charge(handle, p, blk) == 0)
+    {
+        p->alloc_fail++;
+        p->quota_fail++;
+        ARKRTOS_EXIT_CRITICAL(state);
+        return 0;
+    }
+#endif
     p->free_list = *(void **)blk;
     p->free_count--;
     p->alloc_ok++;
@@ -268,6 +431,9 @@ int32 arkrtos_mempool_free_internal(int32 handle, void *p_blk)
     *(void **)p_blk = p->free_list;
     p->free_list = p_blk;
     p->free_count++;
+#if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0)
+    mp_quota_release(handle, p, p_blk);
+#endif
 
     ARKRTOS_EXIT_CRITICAL(state);
     return 0;
@@ -288,6 +454,9 @@ int32 arkrtos_mempool_delete_internal(int32 handle)
     p->creator_id = 0;
     p->name[0]    = 0;
     p->free_list  = 0;
+#if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0)
+    mp_quota_clear(handle);
+#endif
     ARKRTOS_EXIT_CRITICAL(state);
     return 0;
 }
@@ -319,6 +488,9 @@ void arkrtos_mempool_release_task(int32 task_id)
             arkrtos_mempools[i].creator_id = 0;
             arkrtos_mempools[i].name[0]    = 0;
             arkrtos_mempools[i].free_list  = 0;
+#if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0)
+            mp_quota_clear(i);
+#endif
         }
     }
     ARKRTOS_EXIT_CRITICAL(state);
@@ -347,6 +519,102 @@ int32 arkrtos_mempool_query_internal(int32 handle, arkrtos_mempool_stat_t *out)
     out->peak_used   = p->peak_used;
     return 0;
 }
+
+/* ---- SEC-G07 余项的只读查询（shell / 自检用；不进 SVC 回填结构） ----
+ * 只在配额档编译：关档连这四个符号都不存在（"默认关 = 零体积零符号"不是
+ * 只指最终镜像，也指目标文件）。 */
+#if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0)
+
+uint32 arkrtos_mempool_quota_limit(void)
+{
+#if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0)
+    return (uint32)ARKRTOS_APP_MAX_POOL_BLOCKS;
+#else
+    return 0u;
+#endif
+}
+
+uint32 arkrtos_mempool_quota_failed(int32 handle)
+{
+    arkrtos_mempool_obj_t *p = mp_get(handle);
+#if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0)
+    return (p != 0) ? p->quota_fail : 0u;
+#else
+    (void)p;
+    return 0u;
+#endif
+}
+
+int32 arkrtos_mempool_owner_held(int32 handle, uint32 owner, uint32 *p_held)
+{
+    arkrtos_mempool_obj_t *p = mp_get(handle);
+    uint32 i;
+
+    if(p_held == 0)
+    {
+        return ARKRTOS_MEMPOOL_ERR_PARAM;
+    }
+    *p_held = 0u;
+    if(p == 0)
+    {
+        return ARKRTOS_MEMPOOL_ERR_HANDLE;
+    }
+#if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0)
+    if((owner != 0u) && (p->block_count <= MP_QUOTA_BLOCKS))
+    {
+        for(i = 0u; i < MP_QUOTA_SLOTS; i++)
+        {
+            if(s_mp_owner[handle][i].owner == owner)
+            {
+                *p_held = s_mp_owner[handle][i].held;
+                break;
+            }
+        }
+    }
+#else
+    (void)owner;
+    (void)i;
+#endif
+    return 0;
+}
+
+int32 arkrtos_mempool_quota_slot(int32 handle, uint32 index,
+                                 uint32 *p_owner, uint32 *p_held)
+{
+    arkrtos_mempool_obj_t *p = mp_get(handle);
+    uint32 i;
+
+    if((p == 0) || (index >= MP_QUOTA_SLOTS))
+    {
+        return ARKRTOS_MEMPOOL_ERR_PARAM;
+    }
+#if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0)
+    if(p->block_count > MP_QUOTA_BLOCKS)
+    {
+        return 0;                             /* 大池不记账，没有槽可报 */
+    }
+    if(s_mp_owner[handle][index].owner == 0u)
+    {
+        return 0;
+    }
+    if(p_owner != 0)
+    {
+        *p_owner = s_mp_owner[handle][index].owner;
+    }
+    if(p_held != 0)
+    {
+        *p_held = s_mp_owner[handle][index].held;
+    }
+    return 1;
+#else
+    (void)i;
+    (void)p_owner;
+    (void)p_held;
+    return 0;
+#endif
+}
+
+#endif /* ARKRTOS_USE_APP_QUOTA && ARKRTOS_APP_MAX_POOL_BLOCKS */
 
 #else  /* ARKRTOS_USE_MEMPOOL == 0 : 关掉时整块不进二进制，只留调用桩 */
 
@@ -377,5 +645,7 @@ int32 arkrtos_mempool_query_internal(int32 handle, void *out)
 }
 
 void  arkrtos_mempool_release_task(int32 task_id) { (void)task_id; }
+
+
 
 #endif /* ARKRTOS_USE_MEMPOOL */

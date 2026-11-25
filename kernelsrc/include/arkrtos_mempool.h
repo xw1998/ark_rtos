@@ -96,6 +96,35 @@ int32 arkrtos_mempool_query_internal(int32 handle, arkrtos_mempool_stat_t *out);
  */
 void  arkrtos_mempool_release_task(int32 task_id);
 
+#if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0)
+/**
+ * @brief SEC-G07 余项：每 App 在单个池里最多同时占多少块
+ * @return >0 = 配额值；0 = 未启用（默认档；此时下面三个查询恒回 0/空）
+ * @note 记账只覆盖 block_count <= 128 的池，且每池最多同时记 8 个 owner；
+ *       内核任务（app_owner==0）不受限。这些边界是**故意的**，写在这里
+ *       免得把"没记账"读成"没超限"。
+ */
+uint32 arkrtos_mempool_quota_limit(void);
+
+/** @brief 该池因配额被拒的分配次数（未启用恒 0；句柄非法也回 0） */
+uint32 arkrtos_mempool_quota_failed(int32 handle);
+
+/**
+ * @brief 查某个 owner 在该池手里记着多少块
+ * @return 0 = 成功（*p_held 已填）；-1 = 句柄非法或 *p_held 为空
+ */
+int32 arkrtos_mempool_owner_held(int32 handle, uint32 owner, uint32 *p_held);
+
+/**
+ * @brief 枚举该池的 owner 记账槽（shell 读数用）
+ * @return 1 = 该槽在册（*p_owner / *p_held 已填）；0 = 空槽或不记账的池；
+ *         -1 = 句柄非法或 index 越界（index < 8）
+ */
+int32 arkrtos_mempool_quota_slot(int32 handle, uint32 index,
+                                 uint32 *p_owner, uint32 *p_held);
+
+#endif /* ARKRTOS_USE_APP_QUOTA && ARKRTOS_APP_MAX_POOL_BLOCKS */
+
 #endif /* ARKRTOS_USE_MEMPOOL */
 
 #endif /* __ARKRTOS_MEMPOOL_H__ */

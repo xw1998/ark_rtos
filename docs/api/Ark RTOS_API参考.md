@@ -34,7 +34,7 @@
 - [kernelsrc/include/arkrtos_linux_abi.h](#kernelsrcincludearkrtos_linux_abih)（7 项）
 - [kernelsrc/include/arkrtos_loader.h](#kernelsrcincludearkrtos_loaderh)（33 项）
 - [kernelsrc/include/arkrtos_log.h](#kernelsrcincludearkrtos_logh)（16 项）
-- [kernelsrc/include/arkrtos_mempool.h](#kernelsrcincludearkrtos_mempoolh)（9 项）
+- [kernelsrc/include/arkrtos_mempool.h](#kernelsrcincludearkrtos_mempoolh)（13 项）
 - [kernelsrc/include/arkrtos_mini.h](#kernelsrcincludearkrtos_minih)（20 项）
 - [kernelsrc/include/arkrtos_modld.h](#kernelsrcincludearkrtos_modldh)（8 项）
 - [kernelsrc/include/arkrtos_mpu.h](#kernelsrcincludearkrtos_mpuh)（23 项）
@@ -103,6 +103,7 @@
 - [kernelsrc/src/arkrtos_linux_abi.c](#kernelsrcsrcarkrtos_linux_abic)（8 项）
 - [kernelsrc/src/arkrtos_loader.c](#kernelsrcsrcarkrtos_loaderc)（6 项）
 - [kernelsrc/src/arkrtos_log.c](#kernelsrcsrcarkrtos_logc)（1 项）
+- [kernelsrc/src/arkrtos_mempool.c](#kernelsrcsrcarkrtos_mempoolc)（1 项）
 - [kernelsrc/src/arkrtos_mini.c](#kernelsrcsrcarkrtos_minic)（1 项）
 - [kernelsrc/src/arkrtos_modld.c](#kernelsrcsrcarkrtos_modldc)（5 项）
 - [kernelsrc/src/arkrtos_mpu.c](#kernelsrcsrcarkrtos_mpuc)（1 项）
@@ -5884,6 +5885,45 @@ void  arkrtos_mempool_release_task(int32 task_id);
 **回收某个任务创建的池（任务下线时由内核调用）**
 > 说明：只释放对象表项；池占用的内存区属于调用者，不在这里释放。
 内核/无人认领（creator_id==0）的池不会被任何任务下线带走。
+
+### `uint32 arkrtos_mempool_quota_limit(void);`
+
+```c
+uint32 arkrtos_mempool_quota_limit(void);
+```
+
+**SEC-G07 余项：每 App 在单个池里最多同时占多少块**
+**返回**：>0 = 配额值；0 = 未启用（默认档；此时下面三个查询恒回 0/空）
+> 说明：记账只覆盖 block_count <= 128 的池，且每池最多同时记 8 个 owner；
+内核任务（app_owner==0）不受限。这些边界是**故意的**，写在这里
+免得把"没记账"读成"没超限"。
+
+### `uint32 arkrtos_mempool_quota_failed(int32 handle);`
+
+```c
+uint32 arkrtos_mempool_quota_failed(int32 handle);
+```
+
+**该池因配额被拒的分配次数（未启用恒 0；句柄非法也回 0）**
+
+### `int32 arkrtos_mempool_owner_held(int32 handle, uint32 owner, uint32 *p`
+
+```c
+int32 arkrtos_mempool_owner_held(int32 handle, uint32 owner, uint32 *p_held);
+```
+
+**查某个 owner 在该池手里记着多少块**
+**返回**：0 = 成功（*p_held 已填）；-1 = 句柄非法或 *p_held 为空
+
+### `int32 arkrtos_mempool_quota_slot(int32 handle, uint32 index, uint32 *p`
+
+```c
+int32 arkrtos_mempool_quota_slot(int32 handle, uint32 index, uint32 *p_owner, uint32 *p_held);
+```
+
+**枚举该池的 owner 记账槽（shell 读数用）**
+**返回**：1 = 该槽在册（*p_owner / *p_held 已填）；0 = 空槽或不记账的池；
+-1 = 句柄非法或 index 越界（index < 8）
 
 ## kernelsrc/include/arkrtos_mini.h
 
@@ -13540,6 +13580,23 @@ SVC 0x19 之外的内部调用改变，全局生效（内核 + 所有 App/驱动
 行内不做重入保护：日志只能在任务上下文调用，这是设备框架的
 写接口本身的前提（见 arkrtos_dev.h）。
 > 说明：本模块由内核特权态调用；用户态经 SVC 0x19 进入 arkrtos_log_svc()。
+
+## kernelsrc/src/arkrtos_mempool.c
+
+### `#include "arkrtos_mempool.h" #include "arkrtos_hal.h" #include "arkrto`
+
+```c
+#include "arkrtos_mempool.h" #include "arkrtos_hal.h" #include "arkrtos_task.h" #if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0) #include "arkrtos_cfg.h"                     /* arkrtos_task_table（取 app_owner） */ #endif
+```
+
+**Ark RTOS 固定块内存池模块实现**
+见头文件的口径说明。实现上只有三件事：
+- 创建：把调用者给的区按 block_size 切成 block_count 块，
+用侵入式单链表把所有空闲块串起来（块自己的前 sizeof(void*) 字节存 next）；
+- 分配：摘链头，O(1)；
+- 释放：先校验指针确实落在本池的某个块首，再插回链头。
+进入临界区是因为 free_list 是共享可变状态，任务与中断都可能碰。
+分配与释放本身不阻塞、不切任务，所以临界区极短。
 
 ## kernelsrc/src/arkrtos_mini.c
 

@@ -44,6 +44,33 @@ static int mpool_show_all(void)
                          (unsigned)st.peak_used,
                          (unsigned)st.alloc_ok, (unsigned)st.alloc_fail,
                          (unsigned)st.free_bad);
+#if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0)
+        /* SEC-G07 余项：配额档才编进来。quota-fail 与 fail 分开报，
+         * 是为了现场能分清"池空了"和"这个 App 把额度用满了"。
+         * 关档时连这段读数一起编掉，shell 的镜像逐字节不变。 */
+        if(arkrtos_mempool_quota_limit() != 0u)
+        {
+            uint32 owner;
+            uint32 held;
+            uint32 k;
+            int32  slot;
+
+            ark_shell_printf("       quota %u blk/owner  quota-fail %u\r\n",
+                             (unsigned)arkrtos_mempool_quota_limit(),
+                             (unsigned)arkrtos_mempool_quota_failed(i));
+            for(k = 0u; k < 8u; k++)
+            {
+                owner = 0u;
+                held  = 0u;
+                slot  = arkrtos_mempool_quota_slot(i, k, &owner, &held);
+                if(slot == 1)
+                {
+                    ark_shell_printf("       owner %u held %u\r\n",
+                                     (unsigned)owner, (unsigned)held);
+                }
+            }
+        }
+#endif
     }
     if(n == 0)
     {

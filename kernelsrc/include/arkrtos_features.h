@@ -363,6 +363,39 @@
 #endif
 #endif
 
+/* SEC-G07 内存那一半：同一 App 从**同一个固定块池**里同时最多拿多少块。
+ * 0 = 不限制（默认；池的分配路径与计数字段全部编掉，镜像逐字节不变），
+ * >0 = 每次分配记到调用者任务的 app_owner 名下，超限时把刚摘下来的块挂回
+ * 空闲链并返回 0（与"池空了"同一个返回值，另有 quota_fail 计数与 shell
+ * 读数把它分开）。
+ *
+ * 为什么需要它：块的内存区虽然由调用者提供，但**内核建的池是共享的**，
+ * 而 App 经 SVC 0x20 可以用任何一个句柄去取块（句柄是小整数，猜得到），
+ * 于是"一个 App 把共享池抽干"是可达的；即便内存区属于 App 自己，把它
+ * 抽干也会让同一个 App 的兄弟任务拿不到块。配额是这条路上唯一的闸。
+ *
+ * 与任务配额的关系：共用 owner 号（装载时发、fork / clone 继承），所以
+ * 同一个 App 的所有进程线程共用一个额度。内核任务（owner 0）不受限。
+ *
+ * 记账精度（写死，别读成"所有池都管得住"）：每池最多记 128 块（
+ * block_count 超过 128 的池不记账，如实不受配额管）；每池最多同时记 8 个
+ * owner（第 9 个 owner 在这个池上拿不到块，失败关闭而不是悄悄放行）。
+ * 要求 ARKRTOS_USE_APP_QUOTA == 1 且 ARKRTOS_USE_MEMPOOL == 1。 */
+#ifndef ARKRTOS_APP_MAX_POOL_BLOCKS
+#define ARKRTOS_APP_MAX_POOL_BLOCKS     0
+#endif
+#if (ARKRTOS_APP_MAX_POOL_BLOCKS < 0) || (ARKRTOS_APP_MAX_POOL_BLOCKS > 64)
+#error "ARKRTOS_APP_MAX_POOL_BLOCKS out of range 0..64"
+#endif
+#if (ARKRTOS_APP_MAX_POOL_BLOCKS > 0)
+#if (ARKRTOS_USE_APP_QUOTA != 1)
+#error "ARKRTOS_APP_MAX_POOL_BLOCKS>0 requires ARKRTOS_USE_APP_QUOTA=1 (the owner id lives there)"
+#endif
+#if (ARKRTOS_USE_MEMPOOL != 1)
+#error "ARKRTOS_APP_MAX_POOL_BLOCKS>0 requires ARKRTOS_USE_MEMPOOL=1"
+#endif
+#endif
+
 /* U-19b 写时复制：0 = 关（fork 把父空间逐对实体拷贝，与打开本开关之前逐字节
  * 相同），1 = fork 只把父空间挂着的每一对 8 KB 指给子空间（引用计数 1 变 2）、
  * 把两边的 TLB 条目降成只读；第一次写命中只读条目时由 la_pg_cow_fault()

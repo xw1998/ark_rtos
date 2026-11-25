@@ -10,9 +10,19 @@
 池内、双释放把同一个块挂两次、区大小回绕让越界判成合法。判据里最容易写错
 的是"拒绝时池状态必须一动不动"，这条只有跑起来才查得出来。
 
+两档编译（同一份用例、同一份被测代码）：
+
+  1) 默认档 —— 只有 MEMPOOL，配额整段被 #if 编掉；这一档是"关档逐字节不变"
+     的守卫，用例里的配额组也跟着一起消失。
+  2) 配额档 —— 追加 -DARKRTOS_USE_APP_QUOTA=1 -DARKRTOS_USE_ELF=1
+     -DARKRTOS_APP_MAX_POOL_BLOCKS=2；这一档才真正跑"每 App 最多 2 块"的三条
+     断言（额度按 owner 独立、超限时池状态一动不动、内核上下文不受限）。
+     限额用 2 而不是 64，是为了让"第 3 次被拒"一眼看得见；用例本身从
+     arkrtos_mempool_quota_limit() 读回限额，不写死这个数字。
+
 已知边界：SVC 0x20 的参数校验与用户可见性检查需要内核地址空间与 SVC 边界，
-宿主上看不到；App 侧 arkrtos_mpool_* 封装同理。那部分只有上板用例能证明，
-不要把这门禁读成"整个通道已验证"。
+宿主上看不到；App 侧 arkrtos_mpool_* 封装同理。配额档也只能证明"池这一侧
+的记账与拒绝"正确 —— 真实 App 打满配额并看到 quota_fail 需要上板用例。
 
 用法
 ----
@@ -79,28 +89,39 @@ def main():
         print("no host C compiler found (use --gcc)", file=sys.stderr)
         return 1
 
-    td = tempfile.mkdtemp(prefix="arkrtos-mempool-gate-")
-    exe = os.path.join(td, "mempool_host.exe" if os.name == "nt" else "mempool_host")
-    cmd = [cc]
-    if "mingw" in cc.replace("\\", "/").lower():
-        cmd.append("-B" + os.path.dirname(cc))
-    cmd += ["-std=gnu11", "-DARKRTOS_USE_MEMPOOL=1"]
-    cmd += ["-I" + p for p in INCLUDES]
-    cmd += ["-o", exe, TEST_C, MP_C]
-
     # 有些 MinGW 装配把 as.exe / collect2.exe 只放在自己 bin 下，
     # 而 gcc 记的 exec prefix 是编译时的路径，找不到就在 CreateProcess 上炸。
     env = dict(os.environ)
     env["PATH"] = os.path.dirname(cc) + os.pathsep + env.get("PATH", "")
 
-    print("gcc: %s" % cc)
-    r = subprocess.run(cmd, cwd=ROOT, env=env)
-    if r.returncode != 0:
-        print("build failed", file=sys.stderr)
-        return 1
+    modes = [
+        ("default", ["-DARKRTOS_USE_MEMPOOL=1"]),
+        ("quota", ["-DARKRTOS_USE_MEMPOOL=1", "-DARKRTOS_USE_APP_QUOTA=1",
+                   "-DARKRTOS_USE_ELF=1", "-DARKRTOS_APP_MAX_POOL_BLOCKS=2"]),
+    ]
 
-    r = subprocess.run([exe], cwd=ROOT, env=env)
-    ok = (r.returncode == 0)
+    td = tempfile.mkdtemp(prefix="arkrtos-mempool-gate-")
+    ok = True
+    for name, defines in modes:
+        exe = os.path.join(td, ("mempool_host_%s.exe" % name) if os.name == "nt"
+                           else ("mempool_host_%s" % name))
+        cmd = [cc]
+        if "mingw" in cc.replace("\\", "/").lower():
+            cmd.append("-B" + os.path.dirname(cc))
+        cmd += ["-std=gnu11"] + defines
+        cmd += ["-I" + p for p in INCLUDES]
+        cmd += ["-o", exe, TEST_C, MP_C]
+
+        print("gcc: %s  [%s]" % (cc, name))
+        r = subprocess.run(cmd, cwd=ROOT, env=env)
+        if r.returncode != 0:
+            print("build failed (%s)" % name, file=sys.stderr)
+            ok = False
+            continue
+        r = subprocess.run([exe], cwd=ROOT, env=env)
+        if r.returncode != 0:
+            print("run failed (%s)" % name, file=sys.stderr)
+            ok = False
 
     if not args.keep:
         shutil.rmtree(td, ignore_errors=True)

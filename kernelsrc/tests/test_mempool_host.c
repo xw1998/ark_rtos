@@ -66,6 +66,9 @@ static void check(int cond, const char *what)
 static uint32 g_arena[64];   /* 256 B = 16 块 × 16 B */
 static uint32 g_small[16];   /*  64 B =  4 块 × 16 B */
 static uint32 g_other[32];   /* 128 B =  8 块 × 16 B */
+#if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0)
+static uint32 g_quota[32];   /* 128 B =  8 块 × 16 B（配额用例专用） */
+#endif
 
 int main(void)
 {
@@ -187,6 +190,79 @@ int main(void)
     arkrtos_current_task_id = 0;
     arkrtos_mempool_release_task(0);
     check(arkrtos_mempool_is_alive(h) == 1, "release_task(0) never touches kernel/unowned pools");
+
+#if (ARKRTOS_USE_APP_QUOTA == 1) && (ARKRTOS_APP_MAX_POOL_BLOCKS > 0)
+    /* ---- 8. SEC-G07 余项：按 App 配额 ----
+     * 三条要在宿主上钉住的事：额度按 owner 独立、超限时池状态一动不动、
+     * 内核任务（owner 0）不受限。配额值由门禁以 -D 传入，这里从
+     * arkrtos_mempool_quota_limit() 读回，断言不写死 2。 */
+    {
+        int32  hq;
+        uint32 limit = arkrtos_mempool_quota_limit();
+        uint32 held = 0u;
+        uint32 owner = 0u;
+        uint32 k;
+        int32  slot_n = 0;
+
+        check(limit > 0u, "quota limit is reported when the feature is on");
+        hq = arkrtos_mempool_create_internal("qp", (void *)g_quota, BS, 8u);
+        check(hq >= 0, "quota pool created");
+
+        /* owner 7 = 任务 3 */
+        arkrtos_current_task_id = 3;
+        arkrtos_task_table[2].app_owner = 7u;
+        for(k = 0u; k < limit; k++)
+        {
+            check(arkrtos_mempool_alloc_internal(hq) != 0, "quota: take up to the limit");
+        }
+        check(arkrtos_mempool_alloc_internal(hq) == 0, "quota: one past the limit is refused");
+        (void)arkrtos_mempool_query_internal(hq, &st);
+        check(st.free_count == (8u - limit), "quota: refused take leaves free_count alone");
+        check(arkrtos_mempool_quota_failed(hq) == 1u, "quota: quota_fail counts the refusal");
+        check(st.alloc_fail == 1u, "quota: alloc_fail still counts every refusal");
+        check(arkrtos_mempool_owner_held(hq, 7u, &held) == 0 && held == limit,
+              "quota: owner 7 is charged exactly the limit");
+        check(arkrtos_mempool_owner_held(hq, 8u, &held) == 0 && held == 0u,
+              "quota: an owner that took nothing is charged nothing");
+
+        /* 换 owner：额度是各自独立的 */
+        arkrtos_current_task_id = 4;
+        arkrtos_task_table[3].app_owner = 8u;
+        check(arkrtos_mempool_alloc_internal(hq) != 0, "quota: a second owner has its own allowance");
+
+        /* 释放一块，owner 7 就又能拿一块 */
+        arkrtos_current_task_id = 3;
+        (void)arkrtos_mempool_free_internal(hq, (void *)((uint8 *)g_quota + 0u));
+        check(arkrtos_mempool_owner_held(hq, 7u, &held) == 0 && held == (limit - 1u),
+              "quota: freeing gives the block back to the owner");
+        check(arkrtos_mempool_alloc_internal(hq) != 0, "quota: the freed allowance is reusable");
+
+        /* owner 0（内核/无身份）不受限：把剩下的全拿走 */
+        arkrtos_current_task_id = 0;
+        while(arkrtos_mempool_alloc_internal(hq) != 0)
+        {
+            /* 全部取走 */
+        }
+        (void)arkrtos_mempool_query_internal(hq, &st);
+        check(st.free_count == 0u, "quota: kernel context can take every remaining block");
+
+        /* 槽枚举：在册的 owner 必须能被 shell 读到 */
+        for(k = 0u; k < 8u; k++)
+        {
+            if(arkrtos_mempool_quota_slot(hq, k, &owner, &held) == 1)
+            {
+                slot_n++;
+                check((owner == 7u) || (owner == 8u), "quota: only real owners appear in the slots");
+            }
+        }
+        check(slot_n == 2, "quota: both owners are listed (one slot each)");
+
+        check(arkrtos_mempool_delete_internal(hq) == 0, "quota: pool deleted");
+        check(arkrtos_mempool_owner_held(hq, 7u, &held) < 0, "quota: dead handle is refused by owner_held");
+        arkrtos_task_table[2].app_owner = 0u;
+        arkrtos_task_table[3].app_owner = 0u;
+    }
+#endif /* APP_QUOTA && APP_MAX_POOL_BLOCKS */
 
     if(g_fail == 0)
     {

@@ -666,6 +666,33 @@ config ARKRTOS_APP_MAX_TASKS
 	  How many live tasks (processes plus threads) one App owner may have
 	  at once. The parent that called exec counts as the first one.
 
+config ARKRTOS_APP_MAX_POOL_BLOCKS
+	int "Blocks per App in one fixed-block pool (SEC-G07, mempool half)"
+	depends on ARKRTOS_USE_APP_QUOTA
+	depends on ARKRTOS_USE_MEMPOOL
+	range 0 64
+	default 0
+	help
+	  Stop one App from draining a shared fixed-block pool. Every block
+	  taken is charged to the calling task's app_owner; a take that would
+	  exceed this limit puts the block straight back on the free list and
+	  returns 0, the same value an empty pool returns. A separate
+	  quota_fail counter and the 'mpool list' readout tell the two apart.
+
+	  Why it is needed: the pool's memory area is supplied by the caller,
+	  but a kernel-created pool is shared, and SVC 0x20 accepts any handle
+	  -- handles are small integers, so they can be guessed. Draining a
+	  shared pool is therefore reachable; the quota is the gate.
+
+	  Accounting limits, stated so they are not over-read: at most 128
+	  blocks per pool are tracked (a pool with more blocks is not charged
+	  at all), and at most 8 owners are tracked per pool (a 9th owner
+	  cannot get a block there -- fail closed, not silently allowed).
+	  Kernel tasks (owner 0) are never limited.
+
+	  0 (default) compiles no table, no counter and no check, so the image
+	  is byte-for-byte what it was before this option existed.
+
 config ARKRTOS_USE_PAGING_COW
 	bool "Copy-on-write fork (U-19b)"
 	depends on ARKRTOS_USE_LINUX_FORK
