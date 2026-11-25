@@ -1058,7 +1058,46 @@
 #if defined(ARKRTOS_SIGN_KEY_LOCAL)
 #include "arkrtos_sign_key_local.h"
 #endif
-#if (ARKRTOS_USE_IMAGE_SIGN == 1) && !defined(ARKRTOS_IMAGE_SIGN_KEY)
+/* 镜像签名的非对称档（SEC-G10）：设备只持 32 字节公钥，安装期用 Ed25519
+ * 验一次签名，因此「能校验镜像的人」不再等于「能签发镜像的人」。
+ *
+ * 两个开关，必须同时给：
+ *   ARKRTOS_USE_IMAGE_SIGN=1          —— 安装期校验这一步照样要开；
+ *   ARKRTOS_USE_IMAGE_SIGN_ED25519=1   —— 把后端从 HMAC 换成 Ed25519；
+ *   ARKRTOS_USE_ED25519=1             —— 验签原语本体（arkrtos_ed25519.c）。
+ * 没有用 Kconfig 的 select 自动带出来，是因为这套生成器只认 depends；把依赖
+ * 写成两个 #error，比悄悄按默认档少编一个文件、最后在链接期报未定义符号好读。
+ *
+ * 三种组合的后果写在这里，免得读代码的人自己推：
+ *   - ED25519=1 而 IMAGE_SIGN=0：原语编进来但没人调用，装载器那条路径不变；
+ *   - ED25519=1 而 USE_ED25519=0：链接期缺 arkrtos_ed25519_verify ⇒ 这里先 #error；
+ *   - ED25519=1 与 EXEC_SIGN=1 同时开：exec/ld 的 tag 是对称 HMAC，这套档位
+ *     下没有密钥可用，也没有「设备端签发」的能力 ⇒ 这里先 #error，不给出
+ *     一个只在镜像路径生效、exec 路径静默失效的半套配置。
+ *
+ * 公钥注入通道与密钥同形：ARKRTOS_IMAGE_SIGN_PUBKEY 是 32 字节初始化列表，
+ * 通常写在 *.h 里由 -D 引入；不提供公钥就在编译期报错，而不是等到安装时
+ * 才发现「没有公钥」。
+ * 默认关：关档时此文件不参与任何编译，默认镜像逐字节不变。 */
+#ifndef ARKRTOS_USE_IMAGE_SIGN_ED25519
+#define ARKRTOS_USE_IMAGE_SIGN_ED25519  0
+#endif
+#ifndef ARKRTOS_USE_ED25519
+#define ARKRTOS_USE_ED25519             0
+#endif
+#if (ARKRTOS_USE_IMAGE_SIGN_ED25519 == 1) && (ARKRTOS_USE_IMAGE_SIGN != 1)
+#error "ARKRTOS_USE_IMAGE_SIGN_ED25519=1 requires ARKRTOS_USE_IMAGE_SIGN=1"
+#endif
+#if (ARKRTOS_USE_IMAGE_SIGN_ED25519 == 1) && (ARKRTOS_USE_ED25519 != 1)
+#error "ARKRTOS_USE_IMAGE_SIGN_ED25519=1 requires ARKRTOS_USE_ED25519=1 (the verifier)"
+#endif
+#if (ARKRTOS_USE_IMAGE_SIGN_ED25519 == 1) && (ARKRTOS_USE_EXEC_SIGN == 1)
+#error "ARKRTOS_USE_EXEC_SIGN is HMAC-only; it cannot be combined with Ed25519 image signatures"
+#endif
+#if (ARKRTOS_USE_IMAGE_SIGN_ED25519 == 1) && !defined(ARKRTOS_IMAGE_SIGN_PUBKEY)
+#error "ARKRTOS_USE_IMAGE_SIGN_ED25519=1 requires ARKRTOS_IMAGE_SIGN_PUBKEY (32 byte initialiser list)"
+#endif
+#if (ARKRTOS_USE_IMAGE_SIGN_ED25519 == 0) && (ARKRTOS_USE_IMAGE_SIGN == 1) && !defined(ARKRTOS_IMAGE_SIGN_KEY)
 #error "ARKRTOS_USE_IMAGE_SIGN=1 requires ARKRTOS_IMAGE_SIGN_KEY (32 byte initialiser list)"
 #endif
 
@@ -1076,19 +1115,6 @@
 #error "ARKRTOS_USE_EXEC_SIGN=1 requires ARKRTOS_USE_IMAGE_SIGN=1 (same pre-shared key)"
 #endif
 
-/* ELF 可执行文件与可下载模块的签名门（ARKRTOS_USE_EXEC_SIGN）。
- * 打开后 `exec` 与 `ld` 只接受「文件末尾追加 32 字节 HMAC tag」的输入，
- * 校验覆盖 tag 之前的全部字节（格式与理由见 kernelsrc/include/arkrtos_sign.h）。
- * 为什么单独一个开关而不是并进 IMAGE_SIGN：IMAGE_SIGN 管的是 App 安装/升级
- * 路径，已经打开它的板子不该因为我们多管了 exec/ld 而行为突变。
- * 默认关；关档时装载器里那几行不参与编译，体积与行为零变化。
- * 它依赖 IMAGE_SIGN（同一把预共享密钥、同一套 SHA-256/HMAC 实现）。 */
-#ifndef ARKRTOS_USE_EXEC_SIGN
-#define ARKRTOS_USE_EXEC_SIGN           0
-#endif
-#if (ARKRTOS_USE_EXEC_SIGN == 1) && (ARKRTOS_USE_IMAGE_SIGN != 1)
-#error "ARKRTOS_USE_EXEC_SIGN=1 requires ARKRTOS_USE_IMAGE_SIGN=1 (same pre-shared key)"
-#endif
 
 /* 跨复位崩溃日记（arkrtos_crash.c）：落在共享内存尾部的 .noinit 区 */
 #ifndef ARKRTOS_USE_CRASH_LOG

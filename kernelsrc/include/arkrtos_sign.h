@@ -14,6 +14,17 @@
 *              trust chain: whoever can read the key out of a device can sign a
 *              new image.  A public-key scheme (device holds only a public key)
 *              is the real fix and is not implemented here.
+*            - There are two backends, chosen at build time:
+*                ARKRTOS_USE_IMAGE_SIGN alone              -> HMAC-SHA256 (symmetric)
+*                ARKRTOS_USE_IMAGE_SIGN_ED25519 + ..._ED25519 -> Ed25519 (public key)
+*              In the Ed25519 build the device holds only a 32-byte public key
+*              (ARKRTOS_IMAGE_SIGN_PUBKEY) and the 64-byte signature in
+*              signature[64] is checked over a SHA-256 digest of the same
+*              covered bytes.  The device can then no longer sign an image,
+*              which is the whole point: reading a device used to yield the
+*              power to mint new firmware.  What that does *not* solve is where
+*              the public key itself comes from and how it is kept - that is the
+*              trust-root question (SEC-G12), not this module.
 *            - It is checked at install time only.  Image already in Flash are
 *              trusted on the next boot; the point of the check is to keep a bad
 *              image out, not to re-audit the pool.
@@ -42,6 +53,15 @@
 #define ARKRTOS_USE_EXEC_SIGN       0
 #endif
 
+/* Fallbacks for the asymmetric backend; features.h is authoritative and is
+ * also where the "both switches + a public key" checks live. */
+#ifndef ARKRTOS_USE_IMAGE_SIGN_ED25519
+#define ARKRTOS_USE_IMAGE_SIGN_ED25519  0
+#endif
+#ifndef ARKRTOS_USE_ED25519
+#define ARKRTOS_USE_ED25519             0
+#endif
+
 /** @brief Signature length in bytes (HMAC-SHA256 output).
  *  @note Stored in signature[0..32); signature[32..64) stays zero. */
 #define ARKRTOS_SIGN_LEN            (32u)
@@ -51,18 +71,44 @@
 
 #if (ARKRTOS_USE_IMAGE_SIGN == 1)
 
+#if (ARKRTOS_USE_IMAGE_SIGN_ED25519 == 0)
+
 /**
 * @brief Compute an image's signature into out[ARKRTOS_SIGN_LEN].
 * @param image  start of the image (header + reloc table + payload)
 * @param p_hdr  its parsed header
 * @param out    receives ARKRTOS_SIGN_LEN bytes
+* @note Only exists in the HMAC build.  The Ed25519 build has no private key on
+*       the device, so it genuinely cannot compute a signature - the symbol is
+*       absent rather than present-and-wrong.
 */
 void arkrtos_sign_image(const uint8 *image, const arkrtos_app_header_t *p_hdr,
                       uint8 out[ARKRTOS_SIGN_LEN]);
 
+#else /* ARKRTOS_USE_IMAGE_SIGN_ED25519 == 1 */
+
+/**
+* @brief SHA-256 digest of exactly the bytes the signature covers.
+* @param image  start of the image (header + reloc table + payload)
+* @param p_hdr  its parsed header
+* @param out    receives 32 bytes
+* @note The Ed25519 signature in p_hdr->signature[0..64) is over this digest,
+*       so packing-side and device-side agree iff both hash the same fields.
+*       Exposed because the device holds no private key: reading the digest
+*       reveals nothing that reading the image does not.
+*/
+void arkrtos_sign_digest(const uint8 *image, const arkrtos_app_header_t *p_hdr,
+                         uint8 out[32]);
+
+#endif /* !ARKRTOS_USE_IMAGE_SIGN_ED25519 */
+
 /**
 * @brief Check the signature stored in p_hdr->signature against the image.
-* @return 0 = matches, -1 = does not (comparison is constant time).
+* @return 0 = matches, -1 = does not.
+* @note HMAC build: 32-byte MAC compared in constant time.
+*       Ed25519 build: 64-byte signature over a SHA-256 digest of the same
+*       covered bytes; the comparison is the signature check itself, so an
+*       early exit leaks nothing beyond "invalid".
 */
 int32 arkrtos_sign_verify(const uint8 *image, const arkrtos_app_header_t *p_hdr);
 

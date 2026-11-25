@@ -1449,6 +1449,25 @@ def check_sign_host():
         fail("sign-host", txt[-260:])
 
 
+def check_sign_ed25519():
+    """IMAGE_SIGN_ED25519 (Ed25519) must agree between kernel and packer.
+
+    Same failure mode as sign-host, one notch further out: the switch defaults to
+    0, so arkrtos_sign.c takes the HMAC backend and arkrtos_ed25519.c is empty,
+    and nothing ever runs the verify path.  A mismatch in the covered fields
+    makes a device reject an image its own packer signed.  This compiles the
+    real arkrtos_sign.c + arkrtos_ed25519.c, checks a golden signature over the
+    deterministic buffer, requires tampering to be refused, compares the kernel
+    digest against tools/pack_app.py::calc_digest(), and requires the three
+    impossible switch combinations to be refused at compile time.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "ed25519_image_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "ED25519-GATE OK" in txt:
+        ok("sign-ed25519", "kernel digest == packer digest + golden sig + 3 switch guards")
+    else:
+        fail("sign-ed25519", txt[-260:])
+
 def check_swap_syntax():
     """Seamless upgrade (A/B task swap) must compile with the switch ON.
 
@@ -6111,6 +6130,7 @@ CHECK_TABLE = (
     ("mps2-m4", check_mps2_m4),
     ("seccheck", check_seccheck_syntax),
     ("sign-host", check_sign_host),
+    ("sign-ed25519", check_sign_ed25519),
     ("swap", check_swap_syntax),
     ("paging", check_paging_switch),
     ("elf", check_elf_loader),

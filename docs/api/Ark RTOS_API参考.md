@@ -15,6 +15,7 @@
 - [kernelsrc/include/arkrtos_cfg.h](#kernelsrcincludearkrtos_cfgh)（1 项）
 - [kernelsrc/include/arkrtos_crash.h](#kernelsrcincludearkrtos_crashh)（22 项）
 - [kernelsrc/include/arkrtos_dt.h](#kernelsrcincludearkrtos_dth)（11 项）
+- [kernelsrc/include/arkrtos_ed25519.h](#kernelsrcincludearkrtos_ed25519h)（1 项）
 - [kernelsrc/include/arkrtos_elf.h](#kernelsrcincludearkrtos_elfh)（13 项）
 - [kernelsrc/include/arkrtos_export.h](#kernelsrcincludearkrtos_exporth)（3 项）
 - [kernelsrc/include/arkrtos_fdt.h](#kernelsrcincludearkrtos_fdth)（22 项）
@@ -48,7 +49,7 @@
 - [kernelsrc/include/arkrtos_share.h](#kernelsrcincludearkrtos_shareh)（7 项）
 - [kernelsrc/include/arkrtos_shell.h](#kernelsrcincludearkrtos_shellh)（9 项）
 - [kernelsrc/include/arkrtos_shell_auth.h](#kernelsrcincludearkrtos_shell_authh)（5 项）
-- [kernelsrc/include/arkrtos_sign.h](#kernelsrcincludearkrtos_signh)（10 项）
+- [kernelsrc/include/arkrtos_sign.h](#kernelsrcincludearkrtos_signh)（11 项）
 - [kernelsrc/include/arkrtos_smp.h](#kernelsrcincludearkrtos_smph)（12 项）
 - [kernelsrc/include/arkrtos_smp_sched.h](#kernelsrcincludearkrtos_smp_schedh)（18 项）
 - [kernelsrc/include/arkrtos_smp_shootdown.h](#kernelsrcincludearkrtos_smp_shootdownh)（3 项）
@@ -2527,6 +2528,26 @@ int arkrtos_dt_str_eq(const char *a, const char *b);
 ```
 
 **NULL-safe string equality; 1 when equal and both non-NULL.**
+
+## kernelsrc/include/arkrtos_ed25519.h
+
+**Ed25519 signature verification (RFC 8032), verify-only.**
+Optional: ARKRTOS_USE_ED25519.
+The image signature used to be one symmetric HMAC key: a device
+that can check an image can also *make* one, because it holds the
+
+### `int32 arkrtos_ed25519_verify(const uint8 sig[ARKRTOS_ED25519_SIG_LEN],`
+
+```c
+int32 arkrtos_ed25519_verify(const uint8 sig[ARKRTOS_ED25519_SIG_LEN], const uint8 *msg, uint32 len, const uint8 pub[ARKRTOS_ED25519_PUB_LEN]);
+```
+
+**Verify an Ed25519 signature over a byte string.**
+- `sig`：64-byte signature, R (32) followed by s (32)
+- `msg`：signed bytes; may be NULL only when len is 0
+- `len`：message length in bytes
+- `pub`：32-byte public key, the RFC 8032 encoding
+**返回**：0 when the signature is valid, -1 otherwise
 
 ## kernelsrc/include/arkrtos_elf.h
 
@@ -7677,6 +7698,24 @@ void arkrtos_sign_image(const uint8 *image, const arkrtos_app_header_t *p_hdr, u
 - `image`：start of the image (header + reloc table + payload)
 - `p_hdr`：its parsed header
 - `out`：receives ARKRTOS_SIGN_LEN bytes
+> 说明：Only exists in the HMAC build.  The Ed25519 build has no private key on
+the device, so it genuinely cannot compute a signature - the symbol is
+absent rather than present-and-wrong.
+
+### `void arkrtos_sign_digest(const uint8 *image, const arkrtos_app_header_`
+
+```c
+void arkrtos_sign_digest(const uint8 *image, const arkrtos_app_header_t *p_hdr, uint8 out[32]);
+```
+
+**SHA-256 digest of exactly the bytes the signature covers.**
+- `image`：start of the image (header + reloc table + payload)
+- `p_hdr`：its parsed header
+- `out`：receives 32 bytes
+> 说明：The Ed25519 signature in p_hdr->signature[0..64) is over this digest,
+so packing-side and device-side agree iff both hash the same fields.
+Exposed because the device holds no private key: reading the digest
+reveals nothing that reading the image does not.
 
 ### `int32 arkrtos_sign_verify(const uint8 *image, const arkrtos_app_header`
 
@@ -7685,7 +7724,11 @@ int32 arkrtos_sign_verify(const uint8 *image, const arkrtos_app_header_t *p_hdr)
 ```
 
 **Check the signature stored in p_hdr->signature against the image.**
-**返回**：0 = matches, -1 = does not (comparison is constant time).
+**返回**：0 = matches, -1 = does not.
+> 说明：HMAC build: 32-byte MAC compared in constant time.
+Ed25519 build: 64-byte signature over a SHA-256 digest of the same
+covered bytes; the comparison is the signature check itself, so an
+early exit leaks nothing beyond "invalid".
 
 ### `void  arkrtos_sign_stream_begin(const uint8 *image);`
 

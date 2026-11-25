@@ -495,6 +495,11 @@
               <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_sign.c</FilePath>
             </File>
             <File>
+              <FileName>arkrtos_ed25519.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_ed25519.c</FilePath>
+            </File>
+            <File>
               <FileName>lfs.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\..\..\..\..\kernelsrc\fs\littlefs\lfs.c</FilePath>

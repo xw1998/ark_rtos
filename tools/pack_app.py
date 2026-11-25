@@ -590,6 +590,24 @@ def calc_sign(header, reloc_table, payload, key):
     mac = hmac.new(key, bytes(z) + reloc_table + payload, hashlib.sha256).digest()
     return mac[:SIGN_KEY_LEN]
 
+def calc_digest(header, reloc_table, payload):
+    """与内核 Ed25519 档的 arkrtos_sign_digest() 等价：同一套「哪些字段按 0」
+    的规则，对头 + 重定位表 + 负载算一次 SHA-256，返回 32 字节。
+    非对称签名签的是这个摘要而不是整幅镜像：安装器是流式喂字节的，它本来
+    就在算这份哈希，不必为了签名再留一份镜像副本。"""
+    z = bytearray(header)
+    z[CRC32_OFFSET:CRC32_OFFSET + 4] = b"\x00" * 4
+    z[SIG_OFFSET:SIG_OFFSET + SIGN_SIZE] = b"\x00" * SIGN_SIZE
+    z[STATE_CRC_OFFSET:STATE_CRC_OFFSET + 4] = b"\x00" * 4
+    z[RUNTIME_OFFSET:RUNTIME_OFFSET + 4] = b"\x00" * 4
+    return hashlib.sha256(bytes(z) + reloc_table + payload).digest()
+
+def calc_sign_ed25519(header, reloc_table, payload, private_key):
+    """Ed25519 签名：64 字节，正好填满 signature[64]（HMAC 档只占前 32）。
+    private_key 是 cryptography 的 Ed25519PrivateKey 对象；本函数不自己实现
+    签名，可签名方由打包环境负责，设备端只验签。"""
+    return private_key.sign(calc_digest(header, reloc_table, payload))
+
 def load_sign_key(text):
     """--sign-key：SIGN_KEY_LEN*2 个 hex 字符，或一个含 hex / 原始 SIGN_KEY_LEN
     字节的文件。任何含糊的输入都直接报错，不猜。"""
@@ -614,7 +632,7 @@ def load_sign_key(text):
 
 def assemble(img_type, hw_compat, version, payload, entry_offset, nominal_base,
              nominal_ram_base, ram_size, entries, flags, manifest=None,
-             sign_key=None):
+             sign_key=None, sign_ed25519=None):
     """组装最终镜像（头 + 重定位表 + 负载）"""
     reloc_count = len(entries)
     if reloc_count > 1024:
@@ -634,6 +652,13 @@ def assemble(img_type, hw_compat, version, payload, entry_offset, nominal_base,
     # 顺序要紧：内核的 CRC 覆盖 signature 字段（只把 crc32/state/runtime 按 0），
     # 所以必须先落签名、再算 CRC；反过来会把 CRC 算在「签名还是 0」的头上面，
     # 签名一填进去，设备重算 CRC 就对不上，报 err -5。
+    if (sign_key is not None) and (sign_ed25519 is not None):
+        raise PackError("--sign-key 与 --sign-ed25519-key 只能给一个："
+                        "内核的镜像签名档只能选一种（HMAC 或 Ed25519）")
+    if sign_ed25519 is not None:
+        sig = calc_sign_ed25519(header, reloc_table, payload, sign_ed25519)
+        header = (header[:SIG_OFFSET] + sig
+                  + header[SIG_OFFSET + SIGN_SIZE:])
     if sign_key is not None:
         mac = calc_sign(header, reloc_table, payload, sign_key)
         header = (header[:SIG_OFFSET] + mac + b"\x00" * (SIGN_SIZE - SIGN_KEY_LEN)
@@ -870,8 +895,41 @@ def restore_dev_scatter(proj_ctx):
         print("[pack] 警告：还原开发用 .sct 失败：%s" % exc)
 
 
+def load_ed25519_key(text):
+    """--sign-ed25519-key：32 字节种子的 hex（64 字符），或含该种子/hex 的文件。
+    cryptography 只在**真的要用它签名**时才导入：默认打包路径不碰它，没装这个
+    库的机器照样能打包装（只是不能做非对称签名）。"""
+    if text is None:
+        return None
+    s = text.strip()
+    seed = None
+    if len(s) == 64 and all(c in "0123456789abcdefABCDEF" for c in s):
+        seed = bytes.fromhex(s)
+    elif os.path.isfile(s):
+        with open(s, "rb") as f:
+            raw = f.read()
+        if len(raw) == 32:
+            seed = raw
+        else:
+            try:
+                txt = raw.decode("ascii").strip()
+                if len(txt) == 64 and all(c in "0123456789abcdefABCDEF" for c in txt):
+                    seed = bytes.fromhex(txt)
+            except Exception:  # noqa: BLE001
+                pass
+    if seed is None:
+        raise PackError("Ed25519 私钥既不是 64 个 hex 字符（32 字节种子），"
+                        "也不是 32 字节的文件：%s" % text)
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    except ImportError:
+        raise PackError("--sign-ed25519-key 需要 python 的 cryptography 库"
+                        "（pip install cryptography）")
+    return Ed25519PrivateKey.from_private_bytes(seed)
+
 def do_pack(args):
     sign_key = load_sign_key(args.sign_key)
+    sign_ed25519 = load_ed25519_key(args.sign_ed25519_key)
     layout = load_layout(args.header)
     v = layout.v
     img_type = {"app": TYPE_APP, "driver": TYPE_DRIVER, "miniapp": TYPE_MINIAPP}[args.type]
@@ -992,7 +1050,8 @@ def do_pack(args):
                                     version, img_a, entry_offset,
                                     payload_link_base, nominal_ram_base, ram_size,
                                     entries, flags, manifest,
-                                    sign_key=sign_key)
+                                    sign_key=sign_key,
+                                    sign_ed25519=sign_ed25519)
 
     # ---- 小程序：RAM 池里要同时借出「代码块 + RAM 块」，两块都是 pow2 ----
     # 内核侧 arkrtos_ptable_mini_alloc() 的上限口径：两块各自落在
@@ -1243,6 +1302,11 @@ def main():
 
     out = ap.add_argument_group("输出与元数据")
     out.add_argument("--out", help="输出 .svcapp 路径")
+    out.add_argument("--sign-ed25519-key",
+                     help="Ed25519 签名私钥：32 字节种子的 hex，或含该种子的文件；"
+                          "给出后按 RFC 8032 写入 64 字节 signature（内核需开 "
+                          "ARKRTOS_USE_IMAGE_SIGN_ED25519 + ARKRTOS_USE_ED25519，"
+                          "并编译进对应的 32 字节公钥）。依赖 python 的 cryptography。")
     out.add_argument("--sign-key",
                      help="镜像签名密钥：%d 个 hex 字符，或含 hex/原始 %d 字节的文件；"
                           "给出后按 HMAC-SHA256 写入 signature（内核需开 ARKRTOS_USE_IMAGE_SIGN）"

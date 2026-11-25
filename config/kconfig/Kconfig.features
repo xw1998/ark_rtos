@@ -1249,6 +1249,29 @@ config ARKRTOS_USE_IMAGE_SIGN
 	  Symmetric by design: this is tamper detection plus provenance, not a
 	  full trust chain.
 
+config ARKRTOS_USE_ED25519
+	bool "Ed25519 signature verification (verify-only primitive)"
+	default n
+	help
+	  Compile the Ed25519 verifier (arkrtos_ed25519.c).  Verify-only on
+	  purpose: a device checks what it is given and never signs, so no
+	  secret exists on the device and there is no constant-time
+	  arithmetic to review.  Needs no key and no library.
+
+config ARKRTOS_USE_IMAGE_SIGN_ED25519
+	bool "Image signature: Ed25519 (device holds only a public key)"
+	default n
+	depends on ARKRTOS_USE_IMAGE_SIGN
+	depends on ARKRTOS_USE_ED25519
+	help
+	  Replace the symmetric HMAC image check with Ed25519: the device
+	  holds a 32-byte public key ARKRTOS_IMAGE_SIGN_PUBKEY and can only
+	  verify, so reading a device no longer yields the power to sign a
+	  new image.  The signed object is a SHA-256 digest over the same
+	  bytes the CRC covers, which lets the streaming installer verify
+	  without buffering the image.  Mutually exclusive with
+	  ARKRTOS_USE_EXEC_SIGN (that tag is symmetric).
+
 config ARKRTOS_USE_EXEC_SIGN
 	bool "Signature gate for exec and ld (requires IMAGE_SIGN)"
 	default n

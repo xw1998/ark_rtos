@@ -89,6 +89,12 @@ F427_DEFS = [
 SIGN_KEY_DEF = "-DARKRTOS_IMAGE_SIGN_KEY={" + ",".join(
     "0x%02X" % b for b in range(32)) + "}"
 
+# Ed25519 档的公钥：种子 0x00..0x1F 对应的公钥，与
+# test_sign_ed25519_host.c / tools/ed25519_image_gate.py 里的 PUBKEY 一致。
+ED25519_PUBKEY_DEF = "-DARKRTOS_IMAGE_SIGN_PUBKEY={" + ",".join(
+    "0x%02X" % b for b in bytes.fromhex(
+        "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8")) + "}"
+
 # 关掉块层时它上层的三个消费者也必须一起关（features.h 有 #error 守着，
 # 这不是本门禁的额外要求，而是仓库自己的依赖规则）。
 BLK_OFF_DEFS = [
@@ -195,6 +201,17 @@ CASES = [
      ["kernelsrc/src/arkrtos_sign.c"],
      ["-DARKRTOS_USE_IMAGE_SIGN=1", "-Wno-variably-modified", SIGN_KEY_DEF],
      ["MAC ", "IMAGE "], {"argv": ["image.bin"]}),
+    # 非对称档（Ed25519）：验签原语与镜像验签两条后端与 HMAC 互斥，
+    # 所以单独立两格，不与上面的 sign / sign-image 并成一行。
+    ("ed25519", "kernelsrc/tests/test_ed25519_host.c",
+     ["kernelsrc/src/arkrtos_ed25519.c"],
+     ["-DARKRTOS_USE_ED25519=1"], "ED25519-HOST OK"),
+    ("sign-ed25519", "kernelsrc/tests/test_sign_ed25519_host.c",
+     ["kernelsrc/src/arkrtos_sign.c", "kernelsrc/src/arkrtos_ed25519.c"],
+     ["-DARKRTOS_USE_IMAGE_SIGN=1", "-DARKRTOS_USE_IMAGE_SIGN_ED25519=1",
+      "-DARKRTOS_USE_ED25519=1", "-Wno-variably-modified",
+      ED25519_PUBKEY_DEF],
+     ["DIGEST ", "SIGN-ED25519-HOST OK"], {"argv": ["image.bin"]}),
     ("tickless", "kernelsrc/tests/test_tickless_host.c",
      ["kernelsrc/src/arkrtos_tickless.c"],
      ["-DARKRTOS_USE_TICKLESS=1", "-DARKRTOS_USE_TIMER=1"],

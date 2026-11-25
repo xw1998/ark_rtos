@@ -21,6 +21,45 @@
  * default image stopped matching the pre-change build byte for byte. */
 
 #include "arkrtos_sha256.h"
+#if (ARKRTOS_USE_IMAGE_SIGN_ED25519 == 1)
+#include "arkrtos_ed25519.h"
+#endif
+
+/* ------------------------------------------------- what the signature covers */
+
+/* The coverage rule lives in one place now.  It used to be written twice (the
+ * buffered and the streaming path) and both copies had to agree byte for byte
+ * with tools/pack_app.py; a third caller - the Ed25519 digest - would have been
+ * a third copy.  Splitting it into "header" and "body" is what lets the
+ * streaming installer feed the body chunks as they land.
+ *
+ * Four header fields are replaced by zeros: crc32 (28), signature (32..96),
+ * state (100) and runtime_ram_base (252).  Same rule the CRC uses, plus the
+ * signature field itself - a signature cannot cover its own value. */
+static void arkrtos_sign_cover_header(arkrtos_sha256_t *c, const uint8 *image)
+{
+    static const uint8 zero4[4]   = { 0u, 0u, 0u, 0u };
+    static const uint8 zero64[64] = { 0u };
+
+    arkrtos_sha256_update(c, image, ARKRTOS_APP_OFF_CRC32);
+    arkrtos_sha256_update(c, zero4, 4u);
+    arkrtos_sha256_update(c, zero64, 64u);
+    arkrtos_sha256_update(c, image + 96u, 4u);            /* flags */
+    arkrtos_sha256_update(c, zero4, 4u);
+    arkrtos_sha256_update(c, image + 104u, 148u);         /* 104..252 */
+    arkrtos_sha256_update(c, zero4, 4u);
+}
+
+static void arkrtos_sign_cover_body(arkrtos_sha256_t *c, const uint8 *image,
+                                    const arkrtos_app_header_t *p_hdr)
+{
+    uint32 rt_len = p_hdr->reloc_count * ARKRTOS_APP_RELOC_SIZE;
+
+    arkrtos_sha256_update(c, image + ARKRTOS_APP_HEADER_SIZE,
+                          rt_len + p_hdr->image_size);
+}
+
+#if (ARKRTOS_USE_IMAGE_SIGN_ED25519 == 0)
 
 /* ------------------------------------------------------------------- HMAC */
 
@@ -74,27 +113,11 @@ static const uint8 arkrtos_sign_key[ARKRTOS_SIGN_KEY_LEN] = ARKRTOS_IMAGE_SIGN_K
 void arkrtos_sign_image(const uint8 *image, const arkrtos_app_header_t *p_hdr,
                       uint8 out[ARKRTOS_SIGN_LEN])
 {
-    static const uint8 zero4[4]  = { 0u, 0u, 0u, 0u };
-    static const uint8 zero64[64] = { 0u };
     arkrtos_hmac_t h;
-    uint32 rt_len = p_hdr->reloc_count * ARKRTOS_APP_RELOC_SIZE;
 
     arkrtos_hmac_init(&h, arkrtos_sign_key, ARKRTOS_SIGN_KEY_LEN);
-
-    /* header, with the four fields that are either self-referential or set
-     * after packing replaced by zeros: crc32 (28), signature (32..96),
-     * state (100) and runtime_ram_base (252).  Same rule the CRC uses, plus
-     * the signature field itself - a signature cannot cover its own value. */
-    arkrtos_hmac_update(&h, image, ARKRTOS_APP_OFF_CRC32);
-    arkrtos_hmac_update(&h, zero4, 4u);
-    arkrtos_hmac_update(&h, zero64, 64u);
-    arkrtos_hmac_update(&h, image + 96u, 4u);            /* flags */
-    arkrtos_hmac_update(&h, zero4, 4u);
-    arkrtos_hmac_update(&h, image + 104u, 148u);         /* 104..252 */
-    arkrtos_hmac_update(&h, zero4, 4u);
-    /* reloc table + payload */
-    arkrtos_hmac_update(&h, image + ARKRTOS_APP_HEADER_SIZE, rt_len + p_hdr->image_size);
-
+    arkrtos_sign_cover_header(&h.inner, image);
+    arkrtos_sign_cover_body(&h.inner, image, p_hdr);
     arkrtos_hmac_final(&h, out);
 }
 
@@ -106,17 +129,9 @@ static arkrtos_hmac_t arkrtos_sign_stream_ctx;
 
 void arkrtos_sign_stream_begin(const uint8 *image)
 {
-    static const uint8 zero4[4]  = { 0u, 0u, 0u, 0u };
-    static const uint8 zero64[64] = { 0u };
-
-    arkrtos_hmac_init(&arkrtos_sign_stream_ctx, arkrtos_sign_key, ARKRTOS_SIGN_KEY_LEN);
-    arkrtos_hmac_update(&arkrtos_sign_stream_ctx, image, ARKRTOS_APP_OFF_CRC32);
-    arkrtos_hmac_update(&arkrtos_sign_stream_ctx, zero4, 4u);
-    arkrtos_hmac_update(&arkrtos_sign_stream_ctx, zero64, 64u);
-    arkrtos_hmac_update(&arkrtos_sign_stream_ctx, image + 96u, 4u);
-    arkrtos_hmac_update(&arkrtos_sign_stream_ctx, zero4, 4u);
-    arkrtos_hmac_update(&arkrtos_sign_stream_ctx, image + 104u, 148u);
-    arkrtos_hmac_update(&arkrtos_sign_stream_ctx, zero4, 4u);
+    arkrtos_hmac_init(&arkrtos_sign_stream_ctx, arkrtos_sign_key,
+                      ARKRTOS_SIGN_KEY_LEN);
+    arkrtos_sign_cover_header(&arkrtos_sign_stream_ctx.inner, image);
 }
 
 void arkrtos_sign_stream_update(const uint8 *data, uint32 len)
@@ -151,6 +166,83 @@ int32 arkrtos_sign_verify(const uint8 *image, const arkrtos_app_header_t *p_hdr)
     }
     return (diff == 0u) ? 0 : -1;
 }
+
+#else /* ARKRTOS_USE_IMAGE_SIGN_ED25519 == 1 */
+
+/* ---------------------------------------------------------------- Ed25519 */
+
+/* The public key is a compile time list of 32 bytes, the mirror image of the
+ * HMAC key: there is no secret here, so a device that verifies images cannot
+ * also mint them.  features.h refuses a build that turns this on without
+ * ARKRTOS_IMAGE_SIGN_PUBKEY, so reaching this initialiser means a key exists.
+ *
+ * What is signed is a 32-byte SHA-256 digest of the same covered region, not
+ * the image itself.  Two reasons, both practical: the streaming installer
+ * already hashes the bytes as they arrive (so there is no need to hold a
+ * second copy of the image just to sign it), and a fixed 32-byte message keeps
+ * the verifier's cost independent of the image size. */
+static const uint8 arkrtos_sign_pubkey[ARKRTOS_ED25519_PUB_LEN] =
+    ARKRTOS_IMAGE_SIGN_PUBKEY;
+
+void arkrtos_sign_digest(const uint8 *image, const arkrtos_app_header_t *p_hdr,
+                               uint8 out[32])
+{
+    arkrtos_sha256_t c;
+
+    arkrtos_sha256_init(&c);
+    arkrtos_sign_cover_header(&c, image);
+    arkrtos_sign_cover_body(&c, image, p_hdr);
+    arkrtos_sha256_final(&c, out);
+}
+
+int32 arkrtos_sign_verify(const uint8 *image, const arkrtos_app_header_t *p_hdr)
+{
+    uint8 digest[32];
+
+    arkrtos_sign_digest(image, p_hdr, digest);
+    return arkrtos_ed25519_verify(p_hdr->signature, digest, 32u,
+                                  arkrtos_sign_pubkey);
+}
+
+/* Streaming: the header is hashed at begin, the reloc table and payload arrive
+ * in chunks.  "Open" is tracked so a stray update (or an update after the end)
+ * cannot feed a digest that silently covers only part of the image. */
+static arkrtos_sha256_t arkrtos_sign_stream_ctx;
+static uint8            arkrtos_sign_stream_open;
+
+void arkrtos_sign_stream_begin(const uint8 *image)
+{
+    arkrtos_sha256_init(&arkrtos_sign_stream_ctx);
+    arkrtos_sign_cover_header(&arkrtos_sign_stream_ctx, image);
+    arkrtos_sign_stream_open = 1u;
+}
+
+void arkrtos_sign_stream_update(const uint8 *data, uint32 len)
+{
+    if((arkrtos_sign_stream_open == 0u) || (len == 0u))
+    {
+        return;
+    }
+    arkrtos_sha256_update(&arkrtos_sign_stream_ctx, data, len);
+}
+
+int32 arkrtos_sign_stream_end(const arkrtos_app_header_t *p_hdr)
+{
+    uint8 digest[32];
+
+    if(arkrtos_sign_stream_open == 0u)
+    {
+        return -1;
+    }
+    arkrtos_sign_stream_open = 0u;
+
+    arkrtos_sha256_final(&arkrtos_sign_stream_ctx, digest);
+    return arkrtos_ed25519_verify(p_hdr->signature, digest, 32u,
+                                  arkrtos_sign_pubkey);
+}
+
+#endif /* ARKRTOS_USE_IMAGE_SIGN_ED25519 */
+
 
 /* ------------------------------------------------------------ payload MAC */
 
