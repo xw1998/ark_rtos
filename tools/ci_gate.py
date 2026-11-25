@@ -1106,6 +1106,76 @@ def check_loader_host():
         else:
             fail("loader-host", "gate failed: %s" % txt.strip()[:160])
 
+def check_loader_accept_verify():
+    """Claiming an image must not trust the state word alone (SEC-G09).
+
+    ARKRTOS_USE_IMAGE_ACCEPT_VERIFY defaults to 0, so the recheck inside
+    arkrtos_loader_accept() is compiled out of every default build: a pool
+    copy that was damaged after installation is claimed on the strength of one
+    VALID word.  With the switch on, the installer's check is re-run on the
+    image as it lies in Flash -- and Flash holds the *relocated* form, so the
+    ROM / RAM deltas have to be undone before the bytes can be compared.  Two
+    ways that goes silently wrong: the deltas are computed from different
+    inputs than at install time, or a MOVW entry is decoded by a second, copied
+    implementation that drifts.  This compiles the real arkrtos_loader.c +
+    arkrtos_sign.c with both switches on and drives the known-answer image the
+    host test builds: landed-but-relocated verify must pass; flags / payload /
+    patched word / reloc table / signature tampering must each be refused;
+    runtime_ram_base drift must be detected (it feeds the delta); an unpatched
+    ram base and short caps must report "cannot tell", never "matched".
+    It also compiles the CRC-only fallback (ACCEPT_VERIFY without IMAGE_SIGN)
+    so that branch is not dead text.  Host only: the claim path inside a real
+    pool scan still needs a board or QEMU.  A missing host compiler is a FAIL.
+    """
+    cc = _find_host_cc()
+    if not cc:
+        fail("loader-accept-verify", "no host C compiler (set ARKRTOS_HOST_CC)")
+        return
+    key = "-DARKRTOS_IMAGE_SIGN_KEY={" + ",".join(
+        "0x%02X" % (i & 0xFF) for i in range(32)) + "}"
+    with TempDir() as td:
+        exe = os.path.join(td, "acc_verify.exe" if os.name == "nt" else "acc_verify")
+        cmd = [cc]
+        if "mingw" in cc.replace("\\", "/").lower():
+            cmd.append("-B" + os.path.dirname(cc))
+        cmd += ["-std=gnu11", "-fno-asynchronous-unwind-tables",
+                "-DARKRTOS_USE_IMAGE_SIGN=1",
+                "-DARKRTOS_USE_IMAGE_ACCEPT_VERIFY=1",
+                "-ffunction-sections", "-fdata-sections", "-Wl,--gc-sections",
+                "-Ikernelsrc/include", "-Ikernelsrc/components/mdk_trace",
+                "-Iboard/stm32f427", "-Iconfig", "-o", exe,
+                "kernelsrc/tests/test_loader_accept_host.c",
+                "kernelsrc/src/arkrtos_loader.c",
+                "kernelsrc/src/arkrtos_sign.c", key]
+        r = _run_check(cmd)
+        if r.returncode != 0:
+            fail("loader-accept-verify", "gate did not build: %s"
+                 % (r.stderr or "").strip().splitlines()[-1:])
+            return
+        r = _run_check([exe])
+        txt = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or "ACCEPT-VERIFY-HOST OK" not in txt:
+            fail("loader-accept-verify", "gate failed: %s" % txt.strip()[:200])
+            return
+        # 没有签名档时 accept() 退回 CRC 反算：那条分支只在这种组合下编入，
+        # 默认档与上面的签名档都看不到它，所以这里单独编一遍。
+        obj = os.path.join(td, "loader_crc_only.o")
+        cmd2 = [cc]
+        if "mingw" in cc.replace("\\", "/").lower():
+            cmd2.append("-B" + os.path.dirname(cc))
+        cmd2 += ["-std=gnu11", "-c",
+                 "-DARKRTOS_USE_IMAGE_ACCEPT_VERIFY=1",
+                 "-Ikernelsrc/include", "-Ikernelsrc/components/mdk_trace",
+                 "-Iboard/stm32f427", "-Iconfig", "-o", obj,
+                 "kernelsrc/src/arkrtos_loader.c"]
+        r = _run_check(cmd2)
+        if r.returncode != 0:
+            fail("loader-accept-verify", "crc-only fallback did not build: %s"
+                 % (r.stderr or "").strip().splitlines()[-1:])
+            return
+    ok("loader-accept-verify",
+       "relocated recheck verifies + 5 tamper classes refused + unpatched ram base is not a pass")
+
 def check_fifo_host():
     """Byte FIFO: capacity accounting and the two silent-loss counters.
 
@@ -6089,6 +6159,7 @@ CHECK_TABLE = (
     ("eset-host", check_eset_host),
     ("waitmulti-host", check_waitmulti_host),
     ("loader-host", check_loader_host),
+    ("loader-accept-verify", check_loader_accept_verify),
     ("fifo-host", check_fifo_host),
     ("fault-host", check_fault_host),
     ("blk-host", check_blk_host),

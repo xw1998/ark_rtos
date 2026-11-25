@@ -206,6 +206,14 @@ CASES = [
     ("ed25519", "kernelsrc/tests/test_ed25519_host.c",
      ["kernelsrc/src/arkrtos_ed25519.c"],
      ["-DARKRTOS_USE_ED25519=1"], "ED25519-HOST OK"),
+    # 认领时复验（SEC-G09）：安装期验过的签名，在"落盘 + 落点!=标称基址"
+    # 的形态上还能验出来。它同时覆盖 loader 的 sink 化反算路径（与
+    # loader-crc-recheck 的那条是同一段代码，只是喂给签名而不是 CRC）。
+    ("loader-accept-verify", "kernelsrc/tests/test_loader_accept_host.c",
+     ["kernelsrc/src/arkrtos_loader.c", "kernelsrc/src/arkrtos_sign.c"],
+     ["-fno-asynchronous-unwind-tables",
+      "-DARKRTOS_USE_IMAGE_SIGN=1", "-DARKRTOS_USE_IMAGE_ACCEPT_VERIFY=1",
+      SIGN_KEY_DEF], "ACCEPT-VERIFY-HOST OK"),
     ("sign-ed25519", "kernelsrc/tests/test_sign_ed25519_host.c",
      ["kernelsrc/src/arkrtos_sign.c", "kernelsrc/src/arkrtos_ed25519.c"],
      ["-DARKRTOS_USE_IMAGE_SIGN=1", "-DARKRTOS_USE_IMAGE_SIGN_ED25519=1",

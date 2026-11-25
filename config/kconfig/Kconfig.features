@@ -1620,6 +1620,30 @@ config ARKRTOS_USE_IMAGE_CRC_RECHECK
 	  boot).  Off (the default) compiles the recheck out, and the sec item
 	  keeps reporting SKIP with a reason that says so.
 
+config ARKRTOS_USE_IMAGE_ACCEPT_VERIFY
+	bool "Re-verify an image when it is accepted at run time (SEC-G09)"
+	default n
+	help
+	  Install-time verification does not make a pool image permanently
+	  trustworthy: flash can rot, and the same bytes can be written by
+	  another path.  With this on, arkrtos_loader_accept() stops trusting
+	  the single state word and rebuilds the nominal (as-packed) form from
+	  the landed bytes - the same un-patching walk the CRC recheck uses -
+	  then feeds it to the same verifier install uses.
+
+	  Two profiles, and they are not the same claim:
+	    - with a signature profile (ARKRTOS_USE_IMAGE_SIGN, HMAC or
+	      Ed25519) the signature is re-verified, so forgery is detected
+	      as well as damage;
+	    - with no signature profile only the CRC is recomputed, which
+	      detects damage but NOT deliberate forgery - a writer can always
+	      recompute a crc32.  The doc says so; do not read this option as
+	      authentication on its own.
+
+	  Cost: one extra pass over each accepted image, at claim time only.
+	  Off (the default) compiles both recheck entry points out and the
+	  accept path is byte for byte what it was.
+
 config ARKRTOS_USE_AUDIT_LOG
 	bool "Persistent audit log ring on a mounted volume (SEC-G05)"
 	default n

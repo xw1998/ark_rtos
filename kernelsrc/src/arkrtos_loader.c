@@ -874,8 +874,8 @@ uint32 arkrtos_loader_crc_header(const arkrtos_app_header_t *p_hdr)
 /* ============================================================
  * 开机复核镜像 CRC（SEC-G17）
  * ============================================================ */
-#if (ARKRTOS_USE_IMAGE_CRC_RECHECK == 1)
-/* 把「落盘形态」反算回「标称形态」再算 CRC。
+#if ((ARKRTOS_USE_IMAGE_CRC_RECHECK == 1) || (ARKRTOS_USE_IMAGE_ACCEPT_VERIFY == 1))
+/* 把「落盘形态」反算回「标称形态」，再交给 CRC 或签名。
  *
  * Flash 上躺着的是**打过重定位补丁**的字节，而头里的 crc32 是打包工具对
  * 标称形态算的。要让开机复核真的能看见"Flash 里被改坏了一个字节"，只有两条路：
@@ -967,81 +967,134 @@ static int32 loader_crc_begin(const uint8 *p_img, uint32 base, uint32 cap,
     c->crc = arkrtos_loader_crc_header(&c->hdr);
     c->pos = ARKRTOS_APP_RELOC_OFFSET;
 
-    /* 重定位表原样参与（安装时它就是原样落盘的） */
+    /* 表体与负载由 loader_nominal_body() 统一喂出去：CRC 与签名必须走同一段
+     * 字节、同一个顺序，否则两条判据迟早对不上。 */
+    return 0;
+}
+
+/* 标称形态的字节流向：CRC 与签名（认领时复验，SEC-G09）走同一条反算路径，
+ * 只有「喂给谁」不同。给签名另抄一份表项解码，等于给同一件事留两处会分叉的
+ * 写法——这正是这条路径最怕的东西。 */
+typedef struct
+{
+    void (*emit)(void *p_ctx, const uint8 *p_data, uint32 len);
+    void  *p_ctx;
+} loader_nominal_sink_t;
+
+/* CRC 这条出口只在「真会算 CRC」的两档里编：CRC 复核档，或认领复验但没有签名
+ * 档。有签名档时 accept() 走签名，这条出口没有调用者（留着就是一条 -Wunused-
+ * function，等于把门禁的告警预算白花掉）。 */
+#if ((ARKRTOS_USE_IMAGE_CRC_RECHECK == 1) || \
+     ((ARKRTOS_USE_IMAGE_ACCEPT_VERIFY == 1) && (ARKRTOS_USE_IMAGE_SIGN == 0)))
+static void loader_sink_crc(void *p_ctx, const uint8 *p_data, uint32 len)
+{
+    uint32 *p_crc = (uint32 *)p_ctx;
+
+    *p_crc = arkrtos_crc32(p_data, len, *p_crc);
+}
+#endif /* CRC_RECHECK || (ACCEPT_VERIFY && !SIGN) */
+
+#if ((ARKRTOS_USE_IMAGE_SIGN == 1) && (ARKRTOS_USE_IMAGE_ACCEPT_VERIFY == 1))
+static void loader_sink_sign(void *p_ctx, const uint8 *p_data, uint32 len)
+{
+    (void)p_ctx;
+    arkrtos_sign_stream_update(p_data, len);
+}
+#endif
+
+/* 把 [pos, total) 按标称形态交给 sink：表体原样，负载里被补丁过的字先减回
+ * 各自增量（ROM / RAM）再交出。返回 0，或 ARKRTOS_LOADER_ERR_RELOC
+ * （表项往回退：重复计入会让 CRC 静默偏掉）。 */
+static int32 loader_nominal_body(const uint8 *p_img, loader_crc_ctx_t *c,
+                                 loader_nominal_sink_t *p_sink)
+{
+    uint32 i;
+
+    /* 重定位表安装时就是原样落盘的：标称形态与落盘形态相同 */
     if(c->hdr.reloc_count != 0u)
     {
         uint32 rt_len = c->hdr.reloc_count * ARKRTOS_APP_RELOC_SIZE;
 
-        c->crc = arkrtos_crc32(p_img + c->pos, rt_len, c->crc);
+        p_sink->emit(p_sink->p_ctx, p_img + c->pos, rt_len);
         c->pos += rt_len;
     }
 
+    for(i = 0u; i < c->hdr.reloc_count; i++)
+    {
+        uint32 entry;
+        uint32 kind;
+        uint32 off;
+        uint32 need;
+        uint32 delta;
+        uint32 word[2];
+
+        arkrtos_loader_copy_bytes((uint8 *)&entry, (const uint8 *)(c->p_rel + i), 4u);
+
+        kind = ARKRTOS_APP_RELOC_KIND(entry);
+        off  = ARKRTOS_APP_RELOC_OFF(entry);
+
+        need = ((kind == ARKRTOS_APP_RELOC_KIND_ROM_MOVW) ||
+                (kind == ARKRTOS_APP_RELOC_KIND_RAM_MOVW))
+             ? (uint32)ARKRTOS_APP_RELOC_MOV_SIZE : (uint32)ARKRTOS_APP_RELOC_SIZE;
+
+        /* check_header 已经验过「落在负载内、按升序」，但它允许两个表项指向
+         * 同一偏移；这里把「往回退」也挡掉，否则 pos..off 那段会被重复计入，
+         * 静默算出一个与打包工具不同的值（那就是一句看着权威的错话）。 */
+        if(off < c->pos)
+        {
+            return ARKRTOS_LOADER_ERR_RELOC;
+        }
+
+        if(off > c->pos)
+        {
+            p_sink->emit(p_sink->p_ctx, p_img + c->pos, off - c->pos);
+        }
+
+        delta = ((kind == ARKRTOS_APP_RELOC_KIND_RAM) ||
+                 (kind == ARKRTOS_APP_RELOC_KIND_RAM_MOVW)) ? c->delta_ram : c->delta_rom;
+
+        /* 先拷到自己的对齐缓冲里再改：Flash 映射区不能就地写，而且 MOVW 表项
+         * 只保证半字对齐，直接按 uint32 解引用会在严格对齐的核上炸。 */
+        arkrtos_loader_copy_bytes((uint8 *)word, p_img + off, need);
+
+        if(need == (uint32)ARKRTOS_APP_RELOC_MOV_SIZE)
+        {
+            /* 减 delta 就是「加 (0 - delta)」：解码/编码那一套只留一份实现，
+             * 另写一套逆运算等于给同一件事两个可能分叉的写法。 */
+            arkrtos_loader_reloc_movw((uint8 *)word, 0u - delta);
+        }
+        else
+        {
+            word[0] -= delta;
+        }
+
+        p_sink->emit(p_sink->p_ctx, (const uint8 *)word, need);
+        c->pos = off + need;
+    }
+
+    if(c->pos < c->total)
+    {
+        p_sink->emit(p_sink->p_ctx, p_img + c->pos, c->total - c->pos);
+    }
+
     return 0;
 }
 
-/* 一个重定位表项：把落盘形态按装载时的同一口径减回标称形态，再折进 CRC。
- * 返回 0，或 ARKRTOS_LOADER_ERR_RELOC（表项往回退：重复计入会让 CRC 静默偏掉）。 */
-static int32 loader_crc_entry(const uint8 *p_img, loader_crc_ctx_t *c, uint32 i)
-{
-    uint32 entry;
-    uint32 kind;
-    uint32 off;
-    uint32 need;
-    uint32 delta;
-    uint32 word[2];
-
-    arkrtos_loader_copy_bytes((uint8 *)&entry, (const uint8 *)(c->p_rel + i), 4u);
-
-    kind = ARKRTOS_APP_RELOC_KIND(entry);
-    off  = ARKRTOS_APP_RELOC_OFF(entry);
-
-    need = ((kind == ARKRTOS_APP_RELOC_KIND_ROM_MOVW) ||
-            (kind == ARKRTOS_APP_RELOC_KIND_RAM_MOVW))
-         ? (uint32)ARKRTOS_APP_RELOC_MOV_SIZE : (uint32)ARKRTOS_APP_RELOC_SIZE;
-
-    /* check_header 已经验过「落在负载内、按升序」，但它允许两个表项指向
-     * 同一偏移；这里把「往回退」也挡掉，否则 pos..off 那段会被重复计入 CRC，
-     * 静默算出一个与打包工具不同的值（那就是一句看着权威的错话）。 */
-    if(off < c->pos)
-    {
-        return ARKRTOS_LOADER_ERR_RELOC;
-    }
-
-    if(off > c->pos)
-    {
-        c->crc = arkrtos_crc32(p_img + c->pos, off - c->pos, c->crc);
-    }
-
-    delta = ((kind == ARKRTOS_APP_RELOC_KIND_RAM) ||
-             (kind == ARKRTOS_APP_RELOC_KIND_RAM_MOVW)) ? c->delta_ram : c->delta_rom;
-
-    /* 先拷到自己的对齐缓冲里再改：Flash 映射区不能就地写，而且 MOVW 表项
-     * 只保证半字对齐，直接按 uint32 解引用会在严格对齐的核上炸。 */
-    arkrtos_loader_copy_bytes((uint8 *)word, p_img + off, need);
-
-    if(need == (uint32)ARKRTOS_APP_RELOC_MOV_SIZE)
-    {
-        /* 减 delta 就是「加 (0 - delta)」：解码/编码那一套只留一份实现，
-         * 另写一套逆运算等于给同一件事两个可能分叉的写法。 */
-        arkrtos_loader_reloc_movw((uint8 *)word, 0u - delta);
-    }
-    else
-    {
-        word[0] -= delta;
-    }
-
-    c->crc = arkrtos_crc32(word, need, c->crc);
-    c->pos = off + need;
-
-    return 0;
-}
-
-/* 入口：参数（p_got 先清零）、前半段、逐表项、尾段、与 hdr.crc32 比。
- * 校验与增量公式全在 loader_crc_begin 里，这里只留「把表项串起来」这一件事。 */
-int32 arkrtos_loader_crc_recheck(const uint8 *p_img, uint32 base, uint32 cap, uint32 *p_got)
+/* 反算 + 与 hdr.crc32 比对的同一件事。
+ *
+ * 公共入口 arkrtos_loader_crc_recheck() 属于 SEC-G17（CRC_RECHECK）；认领复验
+ * （SEC-G09）在没有签名档时要复用它。所以这层实现放在"任一开关真的会用到它"
+ * 里，公共入口只在 CRC_RECHECK 档导出——否则 SEC-G17 那条"实现在开关内、默认
+ * 关时一个编译器都不经过"的 pin 会被悄悄绕开。
+ *
+ * 第三个条件（认领复验且没有签名档）不是可有可无的：有签名档时 accept() 走的是
+ * 签名，这条 CRC 反算在那一档里没有任何调用者，留着就是一个 -Wunused-function。 */
+#if ((ARKRTOS_USE_IMAGE_CRC_RECHECK == 1) || \
+     ((ARKRTOS_USE_IMAGE_ACCEPT_VERIFY == 1) && (ARKRTOS_USE_IMAGE_SIGN == 0)))
+static int32 loader_crc_recheck(const uint8 *p_img, uint32 base, uint32 cap, uint32 *p_got)
 {
     loader_crc_ctx_t c;
-    uint32 i;
+    loader_nominal_sink_t sink;
     int32 ret;
 
     if(p_got == 0)
@@ -1056,25 +1109,67 @@ int32 arkrtos_loader_crc_recheck(const uint8 *p_img, uint32 base, uint32 cap, ui
         return ret;
     }
 
-    for(i = 0u; i < c.hdr.reloc_count; i++)
-    {
-        ret = loader_crc_entry(p_img, &c, i);
-        if(ret != 0)
-        {
-            return ret;
-        }
-    }
+    sink.emit  = loader_sink_crc;
+    sink.p_ctx = (void *)&c.crc;
 
-    if(c.pos < c.total)
+    ret = loader_nominal_body(p_img, &c, &sink);
+    if(ret != 0)
     {
-        c.crc = arkrtos_crc32(p_img + c.pos, c.total - c.pos, c.crc);
+        return ret;
     }
 
     *p_got = c.crc;
 
     return (c.crc == c.hdr.crc32) ? 0 : ARKRTOS_LOADER_ERR_CRC;
 }
+#endif /* CRC_RECHECK || (ACCEPT_VERIFY && !SIGN) */
+
+#if (ARKRTOS_USE_IMAGE_CRC_RECHECK == 1)
+/* 公共入口：参数校验、前半段、逐段、尾段、与 hdr.crc32 比。
+ * 校验与增量公式全在 loader_crc_begin 里，这里只留「把字节串起来」这一件事。 */
+int32 arkrtos_loader_crc_recheck(const uint8 *p_img, uint32 base, uint32 cap, uint32 *p_got)
+{
+    return loader_crc_recheck(p_img, base, cap, p_got);
+}
 #endif /* ARKRTOS_USE_IMAGE_CRC_RECHECK */
+
+#if ((ARKRTOS_USE_IMAGE_SIGN == 1) && (ARKRTOS_USE_IMAGE_ACCEPT_VERIFY == 1))
+/* 认领时重验签名（SEC-G09）。
+ *
+ * 安装期验过签名不等于这份镜像永远是那份：Flash 会被改坏，池里那一份也可能
+ * 被别的路径写。这里把落盘形态按上面的走法反算回标称形态，再走与安装期**同一
+ * 个**流式校验入口（arkrtos_sign_stream_*），所以两处判据不可能各自漂移。
+ *
+ * 头部直接取 Flash 上那 256 字节：覆盖规则会把 crc32 / signature / state /
+ * runtime_ram_base 四个字段按 0 代入，而它们恰好就是安装与运行期间会变的字段，
+ * 所以"落盘后的头"与"安装时的头"在覆盖规则下逐字节相同。 */
+int32 arkrtos_loader_sign_recheck(const uint8 *p_img, uint32 base, uint32 cap)
+{
+    loader_crc_ctx_t c;
+    loader_nominal_sink_t sink;
+    int32 ret;
+
+    ret = loader_crc_begin(p_img, base, cap, &c);
+    if(ret != 0)
+    {
+        return ret;
+    }
+
+    arkrtos_sign_stream_begin(p_img);
+
+    sink.emit  = loader_sink_sign;
+    sink.p_ctx = 0;
+
+    ret = loader_nominal_body(p_img, &c, &sink);
+    if(ret != 0)
+    {
+        return ret;
+    }
+
+    return (arkrtos_sign_stream_end(&c.hdr) == 0) ? 0 : ARKRTOS_LOADER_ERR_SIGN;
+}
+#endif /* IMAGE_SIGN && ACCEPT_VERIFY */
+#endif /* CRC_RECHECK || ACCEPT_VERIFY */
 
 /* 把已接收的镜像尾部（重定位表 + 负载）流式落盘，并在落盘前打补丁。
  * 返回 0 或 ARKRTOS_LOADER_ERR_x。
@@ -2217,6 +2312,33 @@ static int32 arkrtos_loader_accept(uint32 base, uint32 *out_total, uint32 *out_e
     {
         return ARKRTOS_LOADER_FAIL_STATE;
     }
+
+#if (ARKRTOS_USE_IMAGE_ACCEPT_VERIFY == 1)
+    /* SEC-G09：认领时不再只信 state 那一个字，而是与安装期共用同一套校验。
+     * 有签名档就跑签名（它覆盖同一段字节、还带密钥/公钥）；没有签名档时退回
+     * CRC 反算——那只能发现损坏，发现不了伪造，所以这一档的边界照实写进文档。
+     * 走到这里 state 已经是 VALID，runtime_ram_base 一定固化过，反算是成立的。 */
+    {
+        int32 vrc;
+
+#if (ARKRTOS_USE_IMAGE_SIGN == 1)
+        vrc = arkrtos_loader_sign_recheck((const uint8 *)base, base, 0u);
+#else
+        {
+            uint32 got = 0u;
+
+            vrc = loader_crc_recheck((const uint8 *)base, base, 0u, &got);
+        }
+#endif
+
+        if(vrc != 0)
+        {
+            ARKRTOS_LOGE("LOADER", "accept refused: image at %u failed recheck (%d)",
+                         (unsigned)base, (int)vrc);
+            return ARKRTOS_LOADER_FAIL_STATE;
+        }
+    }
+#endif /* ARKRTOS_USE_IMAGE_ACCEPT_VERIFY */
 
     *out_entry = arkrtos_loader_entry_addr(base, p_hdr->payload_offset, p_hdr->entry_offset);
     *out_autostart = ((p_hdr->flags & ARKRTOS_APP_FLAG_AUTOSTART) != 0u) ? 1u : 0u;

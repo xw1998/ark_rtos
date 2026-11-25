@@ -41,6 +41,7 @@ FAIL。没有这一段，解析器写松了（比如把 `>=5` 写成 `>=0`）也
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -354,16 +355,21 @@ def judge(text):
 
 
 def run_qemu(qemu, seconds):
-    outp = os.path.join(tempfile.gettempdir(), "qemu_m4_gate_serial.txt")
-    if os.path.exists(outp):
-        os.remove(outp)
+    # 每次跑一个**独立的**临时目录与文件名。以前这里用固定的
+    # %TEMP%/qemu_m4_gate_serial.txt，一旦有另一个实例同时跑（上一个门禁的
+    # QEMU 没被回收、或人手另起一次），两个进程会往同一个路径写，读回来就是
+    # 两段运行交错的内容——表现成"round=12 出现两次、tick 对不上"，而 FAIL
+    # 信息里只剩一段串口日志，看不出是并行写坏的。固定路径省下的那一点力气
+    # 换不来这种排查成本。
+    run_dir = tempfile.mkdtemp(prefix="qemu_m4_gate_")
+    outp = os.path.join(run_dir, "serial.txt")
     # -kernel 只吃相对名：本机仓库路径含非 ASCII 字符，QEMU 在该参数上会用
     # 窄字符 API 打开，绝对路径直接失败（同一坑在 RV32/LA64 的 run 目标里
     # 已经写进文档）。所以 cwd 切到 BUILD_DIR，只传文件名。
     cmd = [qemu, "-M", "mps2-an386", "-cpu", "cortex-m4", "-nographic",
            "-kernel", os.path.basename(ELF),
            "-serial", "file:" + outp.replace("\\", "/")]
-    log = open(os.path.join(tempfile.gettempdir(), "qemu_m4_gate_qemu.log"), "wb")
+    log = open(os.path.join(run_dir, "qemu.log"), "wb")
     p = subprocess.Popen(cmd, cwd=BUILD_DIR, stdout=log, stderr=subprocess.STDOUT)
     try:
         p.wait(timeout=seconds)
@@ -372,8 +378,13 @@ def run_qemu(qemu, seconds):
         p.wait()
     log.close()
     if not os.path.isfile(outp):
+        shutil.rmtree(run_dir, ignore_errors=True)
         return None
-    return read_text(outp)
+    text = read_text(outp)
+    # 读到内存就把这次运行的临时目录收掉：固定路径时代价是"忘删"，现在每次
+    # 新建一个目录，不收就会在 %TEMP% 里越堆越多。
+    shutil.rmtree(run_dir, ignore_errors=True)
+    return text
 
 
 def self_check():
@@ -464,6 +475,9 @@ def main(argv):
 
     print("\n%d passed, %d failed" % (len(PASSES), len(FAILS)))
     if FAILS:
+        # 最后一行固定带 "QEMU-M4-GATE FAIL:" 与失败项名单：ci_gate 只保留输出
+        # 的尾巴，以前尾巴上是串口日志，读的人看不到到底哪一条判据不过。
+        print("QEMU-M4-GATE FAIL: %s" % ", ".join(FAILS))
         return 1
     print("QEMU-M4-GATE OK (linker pin + image head + %d s QEMU run + parser self-check)"
           % args.seconds)

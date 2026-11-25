@@ -1115,6 +1115,20 @@
 #error "ARKRTOS_USE_EXEC_SIGN=1 requires ARKRTOS_USE_IMAGE_SIGN=1 (same pre-shared key)"
 #endif
 
+/* 认领镜像时的复验（SEC-G09）。
+ * 安装期验过签名不等于这份镜像永远是那份：Flash 会坏，池里那一份也可能被
+ * 别的路径写。打开后 arkrtos_loader_accept() 不再只信 state 那一个字，而是
+ * 把落盘形态反算回标称形态、走与安装期同一个校验入口：
+ *   - 有签名档（IMAGE_SIGN=1，HMAC 或 Ed25519 都算）-> 重验签名；
+ *   - 没有签名档 -> 退回 CRC 反算（能发现损坏，发现不了伪造）。
+ * 代价是每次认领多扫一遍镜像；默认关，关档时那两个函数不参与编译，
+ * 认领路径逐字节不变。
+ * 为什么单独一个开关：它改变的是**运行期**行为（池里某份镜像可能因此被
+ * 判成不可用），不该跟着安装期开关一起悄悄变。 */
+#ifndef ARKRTOS_USE_IMAGE_ACCEPT_VERIFY
+#define ARKRTOS_USE_IMAGE_ACCEPT_VERIFY 0
+#endif
+
 
 /* 跨复位崩溃日记（arkrtos_crash.c）：落在共享内存尾部的 .noinit 区 */
 #ifndef ARKRTOS_USE_CRASH_LOG

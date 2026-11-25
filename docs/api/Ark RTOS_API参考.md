@@ -32,7 +32,7 @@
 - [kernelsrc/include/arkrtos_layout.h](#kernelsrcincludearkrtos_layouth)（11 项）
 - [kernelsrc/include/arkrtos_layout_def.h](#kernelsrcincludearkrtos_layout_defh)（2 项）
 - [kernelsrc/include/arkrtos_linux_abi.h](#kernelsrcincludearkrtos_linux_abih)（7 项）
-- [kernelsrc/include/arkrtos_loader.h](#kernelsrcincludearkrtos_loaderh)（32 项）
+- [kernelsrc/include/arkrtos_loader.h](#kernelsrcincludearkrtos_loaderh)（33 项）
 - [kernelsrc/include/arkrtos_log.h](#kernelsrcincludearkrtos_logh)（16 项）
 - [kernelsrc/include/arkrtos_mempool.h](#kernelsrcincludearkrtos_mempoolh)（9 项）
 - [kernelsrc/include/arkrtos_mini.h](#kernelsrcincludearkrtos_minih)（20 项）
@@ -5568,6 +5568,27 @@ Flash 上躺着的是**打过重定位补丁**的字节，而头里的 crc32 覆
 > 说明：反算沿用打包工具已证明的性质（表项升序、互不重叠）与 32 位
 加减互逆，不需要任何额外的落盘记账，因此不改镜像头 ABI。
 > 说明：只有 ARKRTOS_USE_IMAGE_CRC_RECHECK 打开时才编入（默认关）。
+
+### `#if ((ARKRTOS_USE_IMAGE_SIGN == 1) && (ARKRTOS_USE_IMAGE_ACCEPT_VERIFY`
+
+```c
+#if ((ARKRTOS_USE_IMAGE_SIGN == 1) && (ARKRTOS_USE_IMAGE_ACCEPT_VERIFY == 1)) int32 arkrtos_loader_sign_recheck(const uint8 *p_img, uint32 base, uint32 cap);
+```
+
+**认领镜像时重验签名（SEC-G09，需要 IMAGE_SIGN 与 ACCEPT_VERIFY 同时开）**
+- `p_img`：镜像在 Flash 中的起始地址（必须等于 base）
+- `base`：镜像落点（槽位基址），用于反算 ROM 类表项的增量
+- `cap`：可读字节数（0 = 不检查）；小于镜像总长时返回 ERR_SIZE
+**返回**：0 = 签名与镜像一致；ARKRTOS_LOADER_ERR_SIGN = 不一致（拒绝认领）；
+其他负值为"算不出来"（头字段不成立 / runtime_ram_base 未固化 / 表项退化）
+与安装期走同一个流式校验入口（arkrtos_sign_stream_*）与同一份覆盖
+规则：先把落盘形态按两个增量反算回标称形态，再逐段喂进去。安装期
+验过不等于永远成立——这一档回答的是"池里这一份现在还是不是当初
+被签过的那一份"，所以它同时能发现损坏与伪造。
+> 说明：只有 ((ARKRTOS_USE_IMAGE_SIGN == 1) &&
+(ARKRTOS_USE_IMAGE_ACCEPT_VERIFY == 1)) 时才编入。
+> 说明：返回 ERR_SIGN 才是"不合格"；返回其他负值说明这一份当前无法
+复核，调用方必须当成"没看到"而不是 PASS——两者混同就是假绿。
 
 ### `void arkrtos_loader_halt_image(uint32 task_id);`
 

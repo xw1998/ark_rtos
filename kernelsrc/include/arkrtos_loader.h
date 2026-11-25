@@ -444,6 +444,26 @@ int32 arkrtos_loader_crc_recheck(const uint8 *p_img, uint32 base, uint32 cap, ui
 #endif /* ARKRTOS_USE_IMAGE_CRC_RECHECK */
 
 /**
+* @brief 认领镜像时重验签名（SEC-G09，需要 IMAGE_SIGN 与 ACCEPT_VERIFY 同时开）
+* @param p_img 镜像在 Flash 中的起始地址（必须等于 base）
+* @param base  镜像落点（槽位基址），用于反算 ROM 类表项的增量
+* @param cap   可读字节数（0 = 不检查）；小于镜像总长时返回 ERR_SIZE
+* @return 0 = 签名与镜像一致；ARKRTOS_LOADER_ERR_SIGN = 不一致（拒绝认领）；
+*         其他负值为"算不出来"（头字段不成立 / runtime_ram_base 未固化 / 表项退化）
+* @details 与安装期走同一个流式校验入口（arkrtos_sign_stream_*）与同一份覆盖
+*          规则：先把落盘形态按两个增量反算回标称形态，再逐段喂进去。安装期
+*          验过不等于永远成立——这一档回答的是"池里这一份现在还是不是当初
+*          被签过的那一份"，所以它同时能发现损坏与伪造。
+*          @note 只有 ((ARKRTOS_USE_IMAGE_SIGN == 1) &&
+*                (ARKRTOS_USE_IMAGE_ACCEPT_VERIFY == 1)) 时才编入。
+*          @note 返回 ERR_SIGN 才是"不合格"；返回其他负值说明这一份当前无法
+*                复核，调用方必须当成"没看到"而不是 PASS——两者混同就是假绿。
+*/
+#if ((ARKRTOS_USE_IMAGE_SIGN == 1) && (ARKRTOS_USE_IMAGE_ACCEPT_VERIFY == 1))
+int32 arkrtos_loader_sign_recheck(const uint8 *p_img, uint32 base, uint32 cap);
+#endif
+
+/**
 * @brief 硬停同一 RAM 窗口内的所有任务（镜像级停止）
 * @param task_id 该镜像的主任务号（1 起）
 * @note RAM 窗口就是归属判据：镜像的代码块/数据块由装载方交给主任务，
