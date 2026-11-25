@@ -442,6 +442,9 @@
 #ifndef ARKRTOS_USE_TIMER
 #define ARKRTOS_USE_TIMER 1
 #endif
+#ifndef ARKRTOS_USE_TRUST_ROOT
+#define ARKRTOS_USE_TRUST_ROOT 0
+#endif
 #ifndef ARKRTOS_USE_UTEST
 #define ARKRTOS_USE_UTEST 1
 #endif

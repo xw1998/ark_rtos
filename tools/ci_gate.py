@@ -5928,7 +5928,7 @@ def check_sec_host():
             return
 
     ok("sec-host",
-       "12-item baseline: PASS/FAIL/FINDING/SKIP in 4 builds, OFF object has no symbols (%s)"
+       "14-item baseline: PASS/FAIL/FINDING/SKIP in 4 builds, OFF object has no symbols (%s)"
        % " | ".join(lines))
 
 
@@ -5996,6 +5996,32 @@ def check_selftest():
         ok("selftest", "OFF default + zero-symbol OFF object + 5 ON-path files + host cases OFF/ON/ON+audit")
     else:
         fail("selftest", txt[-300:])
+
+def check_trust_root():
+    """Trust root (SEC-G12): the image key comes from somewhere, and that
+    somewhere must not be "whatever this firmware was built with".
+
+    tools/trust_gate.py holds the five groups: the switch defaults to OFF and
+    features.h / Kconfig / defconfig / autoconf must agree (including the
+    asymmetric-profile dependency); the OFF object must export no symbol; the
+    module plus three wirings (init's boot call, loader's latch refusal, sec's
+    report item) must compile with the switch ON; the host cases must pass in
+    three builds (OFF, ON, ON + the sec 4-state report); and three mutations
+    (latch not asserted / unreadable store reported as MATCH / a failed pin
+    write reported as PASS) must all turn red.
+
+    What this does NOT prove: that the board's OTP really is one-time
+    programmable, or that the kernel itself is verified before it runs. The
+    first is a silicon property; the second needs a BootROM, which is why
+    arkrtos_trust.h says so in its first paragraph. Trust-on-first-use's
+    first-boot window is real and is documented, not closed.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "trust_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "TRUST-GATE OK" in txt:
+        ok("trust-root", "OFF default + zero-symbol OFF object + module & 3 wirings + host cases OFF/ON/ON+sec + 3 mutations")
+    else:
+        fail("trust-root", txt[-300:])
 
 def check_coverage_host():
     """Line coverage of the modules the host tests actually link.
@@ -6188,6 +6214,7 @@ CHECK_TABLE = (
     ("auditlog", check_auditlog),
     ("rollback", check_rollback),
     ("selftest", check_selftest),
+    ("trust-root", check_trust_root),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),
     ("analyzer", check_analyzer),

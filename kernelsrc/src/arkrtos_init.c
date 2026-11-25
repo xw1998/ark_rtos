@@ -45,6 +45,9 @@
 #if (ARKRTOS_USE_SELFTEST == 1)
 #include "arkrtos_selftest.h"
 #endif
+#if (ARKRTOS_USE_TRUST_ROOT == 1)
+#include "arkrtos_trust.h"
+#endif
 
 /* 内核模块初始化：唯一权威顺序实现（任何工程的 main 都只调用它） */
 void arkrtos_kernel_module_init(void)
@@ -87,5 +90,15 @@ void arkrtos_kernel_module_init(void)
      * 留日志与审计记录，要不要停机是产品策略。 */
 #if (ARKRTOS_USE_SELFTEST == 1)
     (void)arkrtos_selftest_boot();
+#endif
+
+    /* 信任根（SEC-G12）：必须在任何镜像被认领之前跑一次——loader 的
+     * accept 路径要读它的锁存结果，而锁存只能在这里建立。
+     * 放在自检之后是因为自检不做任何安全决策，而这一步会决定本机能不能
+     * 认领镜像；顺序反过来的话，自检失败也会连带挡住信任根判定。
+     * 失败不在这里停机：锁存已经置上，认领路径自然会拒绝，而"要不要停机"
+     * 是产品策略（见 arkrtos_trust.h 文件头第③条）。 */
+#if (ARKRTOS_USE_TRUST_ROOT == 1)
+    (void)arkrtos_trust_boot();
 #endif
 }

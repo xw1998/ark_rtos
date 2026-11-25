@@ -395,6 +395,28 @@ CASES = [
      ["kernelsrc/src/arkrtos_sec.c"],
      ["-ffunction-sections", "-DARKRTOS_USE_SECCHECK=0"],
      "SEC-HOST DISABLED OK"),
+    # --- 2026-11-25 新增：信任根（SEC-G12）---
+    # 公钥来自板级 OTP、摘要钉在一次性槽里：模块只有"钉/比对/锁存"三段判定，
+    # 板级钩子在用例里是内存数组。
+    ("trust", "kernelsrc/tests/test_trust_host.c",
+     ["kernelsrc/src/arkrtos_trust.c"],
+     ["-DARKRTOS_USE_TRUST_ROOT=1", "-DARKRTOS_USE_IMAGE_SIGN=1",
+      "-DARKRTOS_USE_IMAGE_SIGN_ED25519=1", "-DARKRTOS_USE_ED25519=1",
+      ED25519_PUBKEY_DEF], "TRUST-HOST OK"),
+    # 关档是空目标（零符号）：默认镜像里不该出现这个模块的任何字节。
+    ("trust-off", "kernelsrc/tests/test_trust_host.c",
+     ["kernelsrc/src/arkrtos_trust.c"],
+     ["-DARKRTOS_USE_TRUST_ROOT=0"], "TRUST-HOST OFF OK"),
+    # 与 sec 同源再编一档：sec_check_trust 的每一档（PASS/FINDING/FAIL/SKIP）
+    # 都要有配置去走它，否则覆盖率只到 sec 的 #else。
+    ("sec-trust", "kernelsrc/tests/test_sec_host.c",
+     ["kernelsrc/src/arkrtos_sec.c", "kernelsrc/src/arkrtos_trust.c"],
+     ["-ffunction-sections", "-DARKRTOS_USE_SECCHECK=1",
+      "-DARKRTOS_USE_IMAGE_CRC_RECHECK=1", "-DARKRTOS_USE_IMAGE_SIGN=1",
+      "-DARKRTOS_HW_SAFE=1", "-DARKRTOS_WDG_ENABLE=1",
+      "-DARKRTOS_USE_RTSTAT=1", "-DARKRTOS_USE_TRUST_ROOT=1",
+      "-DARKRTOS_USE_IMAGE_SIGN_ED25519=1", "-DARKRTOS_USE_ED25519=1",
+      SIGN_KEY_DEF, ED25519_PUBKEY_DEF], "SEC-HOST OK  "),
     # --- 2026-11-22 新增：板上直跑（裸文件直接进固定窗口）---
     # 窗口地址来自板级分区头，只有 h743 有；宿主按 h743 的数值从命令行
     # 注入，用例自己再核一遍「注入的形状与 SLOT_RAM 映射区间一致」。

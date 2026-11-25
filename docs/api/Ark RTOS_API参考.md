@@ -25,7 +25,7 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（30 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（92 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（94 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -60,6 +60,7 @@
 - [kernelsrc/include/arkrtos_svc_call.h](#kernelsrcincludearkrtos_svc_callh)（20 项）
 - [kernelsrc/include/arkrtos_task.h](#kernelsrcincludearkrtos_taskh)（7 项）
 - [kernelsrc/include/arkrtos_tickless.h](#kernelsrcincludearkrtos_ticklessh)（6 项）
+- [kernelsrc/include/arkrtos_trust.h](#kernelsrcincludearkrtos_trusth)（6 项）
 - [kernelsrc/include/arkrtos_ulog.h](#kernelsrcincludearkrtos_ulogh)（5 项）
 - [kernelsrc/include/arkrtos_ushell.h](#kernelsrcincludearkrtos_ushellh)（4 项）
 - [kernelsrc/include/arkrtos_utest.h](#kernelsrcincludearkrtos_utesth)（22 项）
@@ -4762,6 +4763,35 @@ int32  arkrtos_port_flash_protection(arkrtos_flash_prot_t *p_out);
 **返回**：0=读取成功；其他=读不到（板级未实现 / 该芯片没有这些寄存器）
 > 说明：只读操作：不解除 OPTLOCK、不擦除、不改变任何保护位。
 
+### `int32  arkrtos_port_trust_pubkey(const uint8 **pp_key, uint32 *p_len);`
+
+```c
+int32  arkrtos_port_trust_pubkey(const uint8 **pp_key, uint32 *p_len);
+```
+
+**信任根：从板级一次性槽取镜像公钥（SEC-G12）**
+- `pp_key`：输出：公钥字节指针（实现持有，内核只读，不释放）
+- `p_len`：输出：公钥字节数（Ed25519 为 32）
+**返回**：0=取到；其他=这块板没有 OTP 公钥槽（内核退回落编译进来的公钥）
+> 说明：实现可以直接指向一块只读的常量，也可以解密后放进静态缓冲；
+但**不得**在每次调用返回不同内容——同一块板子的信任根必须是一样的。
+没实现（weak 默认）就返回 -1，等价于"全走编译期公钥"。
+
+### `int32  arkrtos_port_trust_pin(uint8 *p_digest, uint32 write);`
+
+```c
+int32  arkrtos_port_trust_pin(uint8 *p_digest, uint32 write);
+```
+
+**信任根：读/写板级公钥摘要槽（SEC-G12）**
+- `p_digest`：32 字节缓冲
+- `write`：0=读（把槽内 32 字节复制进 p_digest）
+1=写（把 p_digest 内容烧进槽；一次性槽应在此之后拒绝再写）
+**返回**：0=成功；其他=该板没有这个槽 / 读不出来 / 写不进去
+> 说明：一次性槽的语义是"烧了就烧了"，但内核**不依赖**它真的只写一次：
+内核自己每次开机都会比对，写不进去就锁存。所以弱实现（比如内部的
+.noinit + 备份寄存器）也能用，只是保护强度低，须在板级文档里写明。
+
 ## kernelsrc/include/arkrtos_hwsafe.h
 
 **Ark RTOS 硬件安全态（"遗言"）机制 —— 内核内部头文件**
@@ -8890,6 +8920,85 @@ void arkrtos_tickless_stats(uint32 *isrs, uint32 *sleeps);
 所以 `节拍总数 == isrs + skipped` 是定义而不是测得量。
 真正有信息量的是 `isrs` 与节拍总数的比值（4 倍睡眠时约 1:4）。
 计数只增不清，复位才归零。
+
+## kernelsrc/include/arkrtos_trust.h
+
+**Trust root for the image verification key (SEC-G12)**
+Verification answers one question: "did the holder of this key sign
+these bytes". It cannot answer "is this key the one the vendor
+meant", because the key has to come from somewhere. When the public
+
+### `int32 arkrtos_trust_boot(void);`
+
+```c
+int32 arkrtos_trust_boot(void);
+```
+
+**Resolve the verification key, pin its digest, latch a mismatch.**
+**返回**：ARKRTOS_TRUST_OK when the pin matched or was written now;
+ARKRTOS_TRUST_ERR_MISMATCH when the pinned digest is different - the
+latch is set and stays set until reset; ARKRTOS_TRUST_ERR_PIN when
+the slot was blank and could not be written (no root established,
+but no latch: a store that cannot be written is not evidence of
+tampering).
+Safe to call once per boot, before any image is claimed. Calling it
+again repeats the comparison; a latch is never cleared by it.
+A board whose pin store is missing is reported as UNAVAILABLE and
+does NOT latch: "this part has no OTP" is not evidence of tampering.
+
+### `uint32 arkrtos_trust_locked(void);`
+
+```c
+uint32 arkrtos_trust_locked(void);
+```
+
+**1 when the pinned digest contradicts the key in force.**
+
+### `int32 arkrtos_trust_status_get(arkrtos_trust_status_t *p_out);`
+
+```c
+int32 arkrtos_trust_status_get(arkrtos_trust_status_t *p_out);
+```
+
+**Copy the last boot's status out.**
+- `p_out`：destination; zeroed first
+**返回**：ARKRTOS_TRUST_OK, or ERR_PARAM on a null pointer
+
+### `const char *arkrtos_trust_src_name(uint32 source);`
+
+```c
+const char *arkrtos_trust_src_name(uint32 source);
+```
+
+**Human-readable names, for the sec report and the shell.**
+
+### `int32 arkrtos_port_trust_pubkey(const uint8 **pp_key, uint32 *p_len);`
+
+```c
+int32 arkrtos_port_trust_pubkey(const uint8 **pp_key, uint32 *p_len);
+```
+
+**Read the image verification public key from non-volatile board storage.**
+- `pp_key`：set to the key bytes (kept valid for the caller's use)
+- `p_len`：set to the length; the Ed25519 profile expects exactly 32
+**返回**：0 when a key was returned; anything else means "this board has none"
+> 说明：Called once per boot. An implementation that reads OTP must not write
+it, and must not return a key it synthesised: a key computed at run
+time is not a root.
+
+### `int32 arkrtos_port_trust_pin(uint8 *p_digest, uint32 write);`
+
+```c
+int32 arkrtos_port_trust_pin(uint8 *p_digest, uint32 write);
+```
+
+**Read or write the 32-byte key digest pin.**
+- `p_digest`：32 bytes in/out
+- `write`：0 = read the stored digest, 1 = write p_digest
+**返回**：0 on success; non-zero when the part has no pin store (read) or the
+write was refused (one-time storage already programmed, protection
+on, ...)
+> 说明：A blank slot is all-0x00 or all-0xFF; the caller writes it once.
 
 ## kernelsrc/include/arkrtos_ulog.h
 

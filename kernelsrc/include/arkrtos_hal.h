@@ -1121,6 +1121,29 @@ typedef struct
 */
 int32  arkrtos_port_flash_protection(arkrtos_flash_prot_t *p_out);
 
+/**
+* @brief 信任根：从板级一次性槽取镜像公钥（SEC-G12）
+* @param pp_key 输出：公钥字节指针（实现持有，内核只读，不释放）
+* @param p_len  输出：公钥字节数（Ed25519 为 32）
+* @return 0=取到；其他=这块板没有 OTP 公钥槽（内核退回落编译进来的公钥）
+* @note 实现可以直接指向一块只读的常量，也可以解密后放进静态缓冲；
+*       但**不得**在每次调用返回不同内容——同一块板子的信任根必须是一样的。
+*       没实现（weak 默认）就返回 -1，等价于"全走编译期公钥"。
+*/
+int32  arkrtos_port_trust_pubkey(const uint8 **pp_key, uint32 *p_len);
+
+/**
+* @brief 信任根：读/写板级公钥摘要槽（SEC-G12）
+* @param p_digest 32 字节缓冲
+* @param write   0=读（把槽内 32 字节复制进 p_digest）
+*                1=写（把 p_digest 内容烧进槽；一次性槽应在此之后拒绝再写）
+* @return 0=成功；其他=该板没有这个槽 / 读不出来 / 写不进去
+* @note 一次性槽的语义是"烧了就烧了"，但内核**不依赖**它真的只写一次：
+*       内核自己每次开机都会比对，写不进去就锁存。所以弱实现（比如内部的
+*       .noinit + 备份寄存器）也能用，只是保护强度低，须在板级文档里写明。
+*/
+int32  arkrtos_port_trust_pin(uint8 *p_digest, uint32 write);
+
 #include "arkrtos_spin.h"
 
 #endif

@@ -47,6 +47,9 @@
 #if (ARKRTOS_USE_ROLLBACK == 1)
 #include "arkrtos_rollback.h"    /* 显式回滚白名单：只给「版本下降」开一个口子 */
 #endif
+#if (ARKRTOS_USE_TRUST_ROOT == 1)
+#include "arkrtos_trust.h"       /* SEC-G12：信任根锁存时拒绝认领 */
+#endif
 
 /* 设备流式加载的分块缓冲（避免整镜像驻留 RAM） */
 #define ARKRTOS_LOADER_CHUNK_SIZE   (512u)
@@ -2276,6 +2279,18 @@ static int32 arkrtos_loader_accept(uint32 base, uint32 *out_total, uint32 *out_e
 {
     const arkrtos_app_header_t *p_hdr = (const arkrtos_app_header_t *)base;
     uint32 total;
+
+#if (ARKRTOS_USE_TRUST_ROOT == 1)
+    /* SEC-G12：信任根不一致时本机不允许认领任何镜像。
+     * 放在最前面而不是塞进上面的复验块：锁存状态与"这一份镜像长什么样"无关，
+     * 是一台机器的属性；而且此时 base 里的字节还没被当成头部读过。 */
+    if(arkrtos_trust_locked() != 0u)
+    {
+        ARKRTOS_LOGE("LOADER", "accept refused: trust root mismatch (SEC-G12)");
+        *out_total = ARKRTOS_POOL_ALLOC_UNIT;
+        return ARKRTOS_LOADER_FAIL_STATE;
+    }
+#endif
 
     if(arkrtos_loader_check_header(
            p_hdr,

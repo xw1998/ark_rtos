@@ -1129,6 +1129,23 @@
 #define ARKRTOS_USE_IMAGE_ACCEPT_VERIFY 0
 #endif
 
+/* 信任根：把「镜像公钥从哪来」钉到板上（SEC-G12）。
+ * 签名只能证明「这份镜像由某把私钥签的」，证明不了「那把私钥是该由它签的」。
+ * 打开后 arkrtos_trust_boot() 在第一个镜像被认领之前跑一次：
+ *   - 公钥来源优先板级 OTP 槽（arkrtos_port_trust_pubkey），退回落编译进来的
+ *     ARKRTOS_IMAGE_SIGN_PUBKEY；
+ *   - 把公钥摘要写进板级一次性槽（首次开机，TOFU 窗口）；
+ *   - 之后每次开机比对摘要，不一致即锁存，认领路径拒绝任何镜像。
+ * 只对非对称档有意义：HMAC 档的密钥是秘密，钉它的摘要不解决「密钥从哪来」。
+ * 默认关；关档时 arkrtos_trust.c 编成空 TU，init/loader 里那几行不参与编译。
+ * 边界见 kernelsrc/include/arkrtos_trust.h 文件头。 */
+#ifndef ARKRTOS_USE_TRUST_ROOT
+#define ARKRTOS_USE_TRUST_ROOT          0
+#endif
+#if (ARKRTOS_USE_TRUST_ROOT == 1) && (ARKRTOS_USE_IMAGE_SIGN_ED25519 != 1)
+#error "ARKRTOS_USE_TRUST_ROOT=1 requires ARKRTOS_USE_IMAGE_SIGN_ED25519=1 (pin the public key, not a secret)"
+#endif
+
 
 /* 跨复位崩溃日记（arkrtos_crash.c）：落在共享内存尾部的 .noinit 区 */
 #ifndef ARKRTOS_USE_CRASH_LOG

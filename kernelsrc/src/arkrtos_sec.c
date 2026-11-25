@@ -14,6 +14,9 @@
 #include "arkrtos_hwsafe.h"
 #include "arkrtos_rt.h"
 #include "arkrtos_hal.h"
+#if (ARKRTOS_USE_TRUST_ROOT == 1)
+#include "arkrtos_trust.h"
+#endif
 
 #if (ARKRTOS_USE_SECCHECK == 1)
 
@@ -511,6 +514,79 @@ static void sec_check_app_quota(arkrtos_sec_report_t *p_rep)
 #endif
 }
 
+/* 14. 信任根（SEC-G12）：镜像公钥从哪来、钉没钉住。
+ *     这一项最容易假绿的地方是把"这块板没有一次性槽"读成"没问题"。
+ *     所以分档写死：
+ *       - 板级 OTP 出钥 + 钉存相符/本次新钉 -> PASS（根成立）
+ *       - 板级 OTP 出钥 + 钉存不符          -> FAIL（两个公钥都自称是厂商的）
+ *       - 只能用编进固件的那份公钥          -> FINDING（是"已知公钥"，不是根）
+ *       - 没有公钥 / 没有钉存槽 / 写不进去  -> SKIP（没得看，不是看过了没问题）
+ *     SKIP 与 FINDING 都带具体原因，运维不必去翻源码猜是哪一种。 */
+static void sec_check_trust(arkrtos_sec_report_t *p_rep)
+{
+#if (ARKRTOS_USE_TRUST_ROOT == 1)
+    arkrtos_trust_status_t st;
+
+    /* 只有传 NULL 才会失败，这里不会：所以不写一个永远走不到的分支。
+     * 开机没跑过信任根时 source 仍是 SRC_NONE，下面那一档就是它。 */
+    (void)arkrtos_trust_status_get(&st);
+
+    if(st.source == (uint32)ARKRTOS_TRUST_SRC_OTP)
+    {
+        if(st.pin == (uint32)ARKRTOS_TRUST_PIN_MATCH)
+        {
+            sec_add(p_rep, "trust.root", (uint32)ARKRTOS_SEC_PASS,
+                    "public key read from board OTP, digest matches the pin (%u bytes)",
+                    st.key_len, 0u, 0u, 0u);
+        }
+        else if(st.pin == (uint32)ARKRTOS_TRUST_PIN_NEW)
+        {
+            /* TOFU：钉是这一次开机才落下的。根从这一刻起成立，但第一次开机之前
+             * 存在窗口 —— 文案里必须说出来，不能让运维以为产线已经钉过。 */
+            sec_add(p_rep, "trust.root", (uint32)ARKRTOS_SEC_PASS,
+                    "public key from OTP, digest pinned on this first boot (TOFU window closed now)",
+                    st.key_len, 0u, 0u, 0u);
+        }
+        else if(st.pin == (uint32)ARKRTOS_TRUST_PIN_MISMATCH)
+        {
+            sec_add(p_rep, "trust.root", (uint32)ARKRTOS_SEC_FAIL,
+                    "pinned digest does not match the OTP key: image claiming is latched off",
+                    0u, 0u, 0u, 0u);
+        }
+        else if(st.pin == (uint32)ARKRTOS_TRUST_PIN_WRITEFAIL)
+        {
+            sec_add(p_rep, "trust.root", (uint32)ARKRTOS_SEC_SKIP,
+                    "OTP key present but the pin slot refused the write: no root established",
+                    0u, 0u, 0u, 0u);
+        }
+        else
+        {
+            sec_add(p_rep, "trust.root", (uint32)ARKRTOS_SEC_SKIP,
+                    "OTP key present but the pin slot cannot be read: key not pinned",
+                    0u, 0u, 0u, 0u);
+        }
+    }
+    else if(st.source == (uint32)ARKRTOS_TRUST_SRC_BUILTIN)
+    {
+        /* 编进固件的公钥：能验签，但验不了"这把钥是谁放进来的"。
+         * 这不是 FAIL（签名链本身没坏），也不是 PASS（根没成立）。 */
+        sec_add(p_rep, "trust.root", (uint32)ARKRTOS_SEC_FINDING,
+                "key comes from this firmware image, not from the board: a reflash can replace it with its own",
+                st.key_len, 0u, 0u, 0u);
+    }
+    else
+    {
+        sec_add(p_rep, "trust.root", (uint32)ARKRTOS_SEC_SKIP,
+                "trust boot has not resolved a key yet: nothing is pinned",
+                0u, 0u, 0u, 0u);
+    }
+#else
+    sec_add(p_rep, "trust.root", (uint32)ARKRTOS_SEC_SKIP,
+            "not compiled (ARKRTOS_USE_TRUST_ROOT=0): the image public key is whatever this firmware was built with",
+            0u, 0u, 0u, 0u);
+#endif
+}
+
 uint32 arkrtos_sec_run(arkrtos_sec_report_t *p_out)
 {
     if(p_out == 0)
@@ -537,6 +613,7 @@ uint32 arkrtos_sec_run(arkrtos_sec_report_t *p_out)
     sec_check_flash_protection(p_out);
     sec_check_rt(p_out);
     sec_check_app_quota(p_out);
+    sec_check_trust(p_out);
 
     return p_out->fail;
 }

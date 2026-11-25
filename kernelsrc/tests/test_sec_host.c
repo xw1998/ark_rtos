@@ -2,7 +2,7 @@
 * @file test_sec_host.c
 * @brief 安全基线自检（arkrtos_sec.c）的宿主用例
 * @details 被测对象是一个**只读的汇总器**：它把编译期开关与运行期结构读一遍，
-*          给十二条基线项各下一个结论（PASS / FAIL / FINDING / SKIP），
+*          给十四条基线项各下一个结论（PASS / FAIL / FINDING / SKIP），
 *          一条被检查的结构都不改。所以宿主用例把被汇总的那几样东西全部桩掉，
 *          钉住的是**判据与账目**本身：
 *
@@ -25,19 +25,26 @@
 *            8. Flash 保护：没有板级通路是 SKIP，读到了就报读数（RDP 0 级是
 *               FINDING —— 「没读过」和「读出来是没保护」是两件事）；
 *            9. 报告账目：count / pass / fail / finding / skip 与逐项状态
-*               互相吻合，arkrtos_sec_run 的返回值就是 FAIL 条数。
+*               互相吻合，arkrtos_sec_run 的返回值就是 FAIL 条数；
+*           10. 信任根（SEC-G12，第 14 项 trust.root）：公钥从板级槽位来
+*               且一致 / 首启写入才 PASS，不一致 FAIL，槽读不出或写不进只
+*               SKIP（不准把「零件没这功能」记成 PASS），只回落内建公钥
+*               报 FINDING，开机还没跑过信任根报 SKIP。
 *
-*          本文件被四种配置各编一次：
+*          本文件被五种配置各编一次：
 *            sec      全部基线机制打开 + 板级 Flash 保护桩（读得到）
 *            sec-min  全部关掉 + 没有板级 Flash 保护（弱符号兜底）
 *            sec-page 页表后端（LA64，MPU 关、权限分开）+ 守护开着但狗不咬
+*            sec-trust 再叠上信任根（SEC-G12）：公钥钩子与钉存槽都是桩，
+*                      专门走 trust.root 那一项的 OTP 四态
 *            sec-disabled SECCHECK=0：整模块不编，关档零符号
-*          覆盖率按四档并集算，所以每个 #if 分支都有自己的配置去走它。
+*          覆盖率按五档并集算，所以每个 #if 分支都有自己的配置去走它。
 *
 *          未验证（如实说明）：真实板子上这些结构的取值是否真的如此，以及
 *          芯片选项字节的读数。宿主用例只能证明**判定逻辑**没写反。
-* @note 用法：由 tools/coverage_gate.py 的四条 case 编译并运行，分别输出
-*       SEC-HOST OK / SEC-HOST MIN OK / SEC-HOST PAGE OK / SEC-HOST DISABLED OK。
+* @note 用法：由 tools/coverage_gate.py 的五条 case 编译并运行，输出 SEC-HOST OK /
+*       SEC-HOST MIN OK / SEC-HOST PAGE OK / SEC-HOST DISABLED OK；第五条 sec-trust
+*       只加了信任根那一项的钩子桩与开关，仍走默认的 SEC-HOST OK 标示。
 */
 
 #include "arkrtos_sec.h"
@@ -59,6 +66,9 @@
 #include "arkrtos_hwsafe.h"
 #include "arkrtos_rt.h"
 #include "arkrtos_hal.h"
+#if (ARKRTOS_USE_TRUST_ROOT == 1)
+#include "arkrtos_trust.h"
+#endif
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -300,6 +310,56 @@ static const arkrtos_sec_item_t *item_by_name(const arkrtos_sec_report_t *p_rep,
     return 0;
 }
 
+#if (ARKRTOS_USE_TRUST_ROOT == 1)
+/* 信任根的板级钩子替身（SEC-G12）：内核里是 weak，这里给强符号，
+ * 于是"板上有没有 OTP 公钥"、"钉存槽读不读得出来、写不写得进去"都成了
+ * 用例能直接摆的开关。 */
+static uint8  g_tk[32];
+static int    g_tk_ok;
+static uint8  g_tpin[32];
+static int    g_tpin_rd;
+static int    g_tpin_wr;
+
+int32 arkrtos_port_trust_pubkey(const uint8 **pp_key, uint32 *p_len)
+{
+    if(g_tk_ok == 0)
+    {
+        return -1;
+    }
+    *pp_key = g_tk;
+    *p_len  = 32u;
+    return 0;
+}
+
+int32 arkrtos_port_trust_pin(uint8 *p_digest, uint32 write)
+{
+    uint32 i;
+
+    if(write == 0u)
+    {
+        if(g_tpin_rd == 0)
+        {
+            return -1;
+        }
+        for(i = 0u; i < 32u; i++)
+        {
+            p_digest[i] = g_tpin[i];
+        }
+        return 0;
+    }
+
+    if(g_tpin_wr == 0)
+    {
+        return -1;
+    }
+    for(i = 0u; i < 32u; i++)
+    {
+        g_tpin[i] = p_digest[i];
+    }
+    return 0;
+}
+#endif /* ARKRTOS_USE_TRUST_ROOT */
+
 static void table_clear(void)
 {
     memset(&g_pt, 0, sizeof(g_pt));
@@ -348,7 +408,7 @@ static void test_api(void)
     memset(&rep, 0, sizeof(rep));
     (void)arkrtos_sec_run(&rep);
 
-    ck_u(rep.count, 13u, "thirteen baseline items");
+    ck_u(rep.count, 14u, "fourteen baseline items");
     ck_u((unsigned long)(rep.pass + rep.fail + rep.finding + rep.skip),
          (unsigned long)rep.count, "per-state counts add up to count");
 
@@ -888,6 +948,118 @@ static void test_rt(void)
 #endif
 }
 
+/* 14. 信任根（SEC-G12）：四种读数必须分开，尤其"没得看"不能报成 PASS */
+static void test_trust(void)
+{
+    arkrtos_sec_report_t rep;
+    const arkrtos_sec_item_t *p_it;
+
+    table_clear();
+    memset(&rep, 0, sizeof(rep));
+    (void)arkrtos_sec_run(&rep);
+    p_it = item_by_name(&rep, "trust.root");
+    ck(p_it != 0, "trust.root present");
+    if(p_it == 0)
+    {
+        return;
+    }
+
+#if (ARKRTOS_USE_TRUST_ROOT == 1)
+    /* 开机还没跑过信任根：没有公钥被解析出来 -> SKIP，不是 PASS */
+    ck_u((unsigned long)p_it->state, (unsigned long)ARKRTOS_SEC_SKIP,
+         "trust boot not run -> SKIP");
+
+    /* 板级公钥 + 空白槽：首次开机把摘要钉下去 -> PASS */
+    memset(g_tk, 0x11, sizeof(g_tk));
+    memset(g_tpin, 0, sizeof(g_tpin));
+    g_tk_ok = 1;
+    g_tpin_rd = 1;
+    g_tpin_wr = 1;
+    ck(arkrtos_trust_boot() == ARKRTOS_TRUST_OK, "first boot pins the digest");
+    memset(&rep, 0, sizeof(rep));
+    (void)arkrtos_sec_run(&rep);
+    p_it = item_by_name(&rep, "trust.root");
+    if(p_it != 0)
+    {
+        ck_u((unsigned long)p_it->state, (unsigned long)ARKRTOS_SEC_PASS,
+             "OTP key pinned now -> PASS");
+        ck_u(p_it->v[0], 32u, "key length reported");
+    }
+
+    /* 同一把钥再开机：相符 -> 仍是 PASS */
+    ck(arkrtos_trust_boot() == ARKRTOS_TRUST_OK, "second boot matches");
+    memset(&rep, 0, sizeof(rep));
+    (void)arkrtos_sec_run(&rep);
+    p_it = item_by_name(&rep, "trust.root");
+    if(p_it != 0)
+    {
+        ck_u((unsigned long)p_it->state, (unsigned long)ARKRTOS_SEC_PASS,
+             "pinned match -> PASS");
+    }
+
+    /* 板级没有公钥槽：只能用编进固件的那份 -> FINDING（不是 PASS）。
+     * 槽要先抹回空白，否则那把固件公钥的摘要与刚才钉下的对不上，
+     * 这一档就变成"MISMATCH"而不是我们要看的"BUILTIN"。 */
+    g_tk_ok = 0;
+    memset(g_tpin, 0, sizeof(g_tpin));
+    ck(arkrtos_trust_boot() == ARKRTOS_TRUST_OK, "builtin key boots");
+    memset(&rep, 0, sizeof(rep));
+    (void)arkrtos_sec_run(&rep);
+    p_it = item_by_name(&rep, "trust.root");
+    if(p_it != 0)
+    {
+        ck_u((unsigned long)p_it->state, (unsigned long)ARKRTOS_SEC_FINDING,
+             "builtin key -> FINDING, not PASS");
+    }
+
+    /* 空白槽写不进去 -> SKIP（没建立起根，也没什么可看的） */
+    g_tk_ok = 1;
+    memset(g_tk, 0x11, sizeof(g_tk));
+    memset(g_tpin, 0, sizeof(g_tpin));
+    g_tpin_wr = 0;
+    ck(arkrtos_trust_boot() == ARKRTOS_TRUST_ERR_PIN, "pin write refused");
+    memset(&rep, 0, sizeof(rep));
+    (void)arkrtos_sec_run(&rep);
+    p_it = item_by_name(&rep, "trust.root");
+    if(p_it != 0)
+    {
+        ck_u((unsigned long)p_it->state, (unsigned long)ARKRTOS_SEC_SKIP,
+             "write failure -> SKIP");
+    }
+
+    /* 板上没有钉存槽 -> SKIP，且不锁存 */
+    g_tpin_wr = 1;
+    g_tpin_rd = 0;
+    ck(arkrtos_trust_boot() == ARKRTOS_TRUST_OK, "missing pin store is not an error");
+    ck(arkrtos_trust_locked() == 0u, "missing pin store does not latch");
+    memset(&rep, 0, sizeof(rep));
+    (void)arkrtos_sec_run(&rep);
+    p_it = item_by_name(&rep, "trust.root");
+    if(p_it != 0)
+    {
+        ck_u((unsigned long)p_it->state, (unsigned long)ARKRTOS_SEC_SKIP,
+             "no pin store -> SKIP");
+    }
+
+    /* 换钥 -> FAIL。放在最后：锁存是一次性的，后面的用例不能指望它复位。 */
+    g_tpin_rd = 1;
+    memset(g_tpin, 0x22, sizeof(g_tpin));
+    memset(g_tk, 0x33, sizeof(g_tk));
+    ck(arkrtos_trust_boot() == ARKRTOS_TRUST_ERR_MISMATCH, "new key is refused");
+    memset(&rep, 0, sizeof(rep));
+    (void)arkrtos_sec_run(&rep);
+    p_it = item_by_name(&rep, "trust.root");
+    if(p_it != 0)
+    {
+        ck_u((unsigned long)p_it->state, (unsigned long)ARKRTOS_SEC_FAIL,
+             "mismatch -> FAIL");
+    }
+#else
+    ck_u((unsigned long)p_it->state, (unsigned long)ARKRTOS_SEC_SKIP,
+         "trust root off -> SKIP");
+#endif
+}
+
 int main(void)
 {
     int rc;
@@ -910,6 +1082,7 @@ int main(void)
     test_switches();
     test_flash();
     test_rt();
+    test_trust();
 
     /* 全清的板子跑一遍：项数固定 13，run 返回 FAIL 条数 */
     {
@@ -919,7 +1092,7 @@ int main(void)
         table_clear();
         memset(&rep, 0, sizeof(rep));
         fails = arkrtos_sec_run(&rep);
-        ck_u(rep.count, 13u, "final run has 13 items");
+        ck_u(rep.count, 14u, "final run has 14 items");
         ck_u((unsigned long)fails, (unsigned long)rep.fail,
              "run() returns the FAIL count");
     }

@@ -1272,6 +1272,33 @@ config ARKRTOS_USE_IMAGE_SIGN_ED25519
 	  without buffering the image.  Mutually exclusive with
 	  ARKRTOS_USE_EXEC_SIGN (that tag is symmetric).
 
+config ARKRTOS_USE_TRUST_ROOT
+	bool "Pin the image public key to a board trust root (SEC-G12)"
+	default n
+	depends on ARKRTOS_USE_IMAGE_SIGN_ED25519
+	help
+	  Signature verification answers "did the holder of this key sign these
+	  bytes"; it cannot answer "is this key the vendor's".  With the key
+	  compiled into the firmware, whoever can build a firmware can put
+	  their own key in and every downstream check will agree with them.
+
+	  This option closes exactly that one gap: the key may come from the
+	  board (OTP / fuse / a protected region) through
+	  arkrtos_port_trust_pubkey(), and the 32-byte SHA-256 digest of
+	  whichever key is in force is pinned through arkrtos_port_trust_pin().
+	  A blank slot is written on first boot (trust on first use); later
+	  boots must match, and a mismatch latches arkrtos_trust_locked(), which
+	  makes arkrtos_loader_accept() refuse every image.  Fail closed.
+
+	  NOT done here, on purpose: the kernel itself is still trusted because
+	  it started (a BootROM that checks it is a chip property); the first
+	  boot is a TOFU window unless the OTP is programmed in production; a
+	  pinned digest means "the key did not change", not "the key is mine";
+	  and there is no attestation or key rotation.
+
+	  Off (the default) compiles the module out: no symbols, no bytes, and
+	  the accept path is exactly what it was.
+
 config ARKRTOS_USE_EXEC_SIGN
 	bool "Signature gate for exec and ld (requires IMAGE_SIGN)"
 	default n
