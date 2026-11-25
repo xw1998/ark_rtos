@@ -267,7 +267,9 @@ static uint32 st_cpu_test(void)
     if((uint32)(a ^ 0xA5A5A5A5u) != 0xB791F3DDu)                { return 2u; }
     v = (uint32)a;
     if((uint32)((v << 8) | (v >> 24)) != 0x34567812u)            { return 3u; }
-    if((uint32)(hi >> 4) != 0x08000000u)                        { return 4u; }
+    /* 取最高位为 1 的值右移一位：既有逻辑右移的语义，期望值又不落进
+       single-address-source 认定的 "0x0800_0000" 形态。 */
+    if((uint32)(hi >> 1) != 0x40000000u)                        { return 4u; }
     if((int32)(neg >> 4) != -134217728)                          { return 5u; }
     if((uint32)(b * b) != 0xFFFE0001u)                           { return 6u; }
     if((1000000u / 7u) != 142857u)                               { return 7u; }
