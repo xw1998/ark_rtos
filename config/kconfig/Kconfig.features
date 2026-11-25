@@ -1414,6 +1414,64 @@ config ARKRTOS_USE_RTSTAT
 	  default) compiles every timestamp out: zero size change, zero behaviour
 	  change, and the shell command table is unchanged.
 
+config ARKRTOS_USE_SELFTEST
+	bool "Startup and runtime component self-test (SEC-G14)"
+	default n
+	help
+	  IEC 61508 asks which failure modes a diagnostic can see, not whether
+	  one exists. This switch adds four, each with its reach stated:
+
+	    - RAM: five patterns on a dedicated static window. The
+	      address-dependent pattern catches address-line aliasing; the
+	      window is private by design, because writing patterns over
+	      memory somebody else is using turns the test into a fault.
+	    - CPU: twelve known-answer vectors over volatile operands. It
+	      proves the datapath still adds, shifts and extends; it is not
+	      coverage evidence.
+	    - Image CRC: crc32 over the board-provided read-only span, with
+	      the boot value as the baseline. It catches "this read-only
+	      memory changed while running", not "the factory image was
+	      forged" - that needs the signature chain (SEC-G12).
+	    - Clock: the OS tick and a second, independent counter are
+	      cross-checked. The ratio is learned at the second sample and
+	      compared after that; either side stopping is a failure.
+
+	  A board that does not provide a hook reports SKIP, never PASS:
+	  "not measured" and "measured clean" are different answers.
+
+config ARKRTOS_SELFTEST_RAM_BYTES
+	int "Self-test RAM window size in bytes"
+	range 64 8192
+	depends on ARKRTOS_USE_SELFTEST
+	default 512
+	help
+	  The window the RAM pattern test owns. It is private .bss, so a
+	  larger window costs RAM and buys nothing else: the test covers
+	  this window, not the whole of RAM. A whole-RAM scan has to run
+	  before anything else uses memory and is not this module.
+
+config ARKRTOS_SELFTEST_CLOCK_PPM
+	int "Allowed tick/counter drift in ppm"
+	range 1 1000000
+	depends on ARKRTOS_USE_SELFTEST
+	default 5000
+	help
+	  Tolerance for the clock cross-check. The tick is counted in whole
+	  ticks, so a patrol interval of N ticks has at least 1e6/N ppm of
+	  quantisation: with the default 1 kHz tick, a patrol shorter than
+	  0.2 s cannot tell drift from rounding.
+
+config ARKRTOS_SELFTEST_PATROL_MS
+	int "Runtime patrol period in ms (0 = no timer)"
+	range 0 3600000
+	depends on ARKRTOS_USE_SELFTEST
+	default 0
+	help
+	  Zero keeps the module passive: the boot pass and the shell command
+	  are the only runs. A non-zero period creates one periodic timer
+	  that re-runs RAM, the image CRC and the clock check. CPU is not
+	  re-run: it cannot change while the same code runs on it.
+
 config ARKRTOS_USE_UTEST
 	bool "On-board unit test framework"
 	default y

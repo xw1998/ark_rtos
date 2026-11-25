@@ -1179,6 +1179,37 @@
 #define ARKRTOS_ROLLBACK_USES           1
 #endif
 
+/* 开机与运行期自检（arkrtos_selftest.c，SEC-G14）：四类诊断 —— RAM 专用窗口的五种图案、CPU 的已知答案向量、只读镜像区间的 crc32 基线、OS 节拍与板级第二路计数器的交叉校验。
+ * 默认关：关掉时该文件编成空目标（零符号），开机路径与 shell 命令表逐字节不变。开档也不会改变启动结果——诊断的职责是留下证据，要不要停机是产品策略。
+ * 板级不实现钩子时对应项报 SKIP 而不是 PASS：在 IEC 61508 里「没测」与「测了通过」是两件事。
+ */
+#ifndef ARKRTOS_USE_SELFTEST
+#define ARKRTOS_USE_SELFTEST            0
+#endif
+
+/* RAM 自检窗口大小（字节）。这块内存是本模块私有的 .bss，除自检外无人使用 ——
+ * 运行期往别人的内存里写图案等于把诊断变成故障注入，所以有专用窗口这件事本身
+ * 就是边界：整片 RAM 扫描只能在启动早期、还没人用内存时做，不在这里。
+ */
+#ifndef ARKRTOS_SELFTEST_RAM_BYTES
+#define ARKRTOS_SELFTEST_RAM_BYTES      512
+#endif
+
+/* 时钟交叉校验的漂移容差（ppm）。判的是「两路读数还在同一个速率上」，
+ * 不是晶振精度：节拍按整拍计，所以巡检间隔越短，量化抖动越大
+ * （1 拍量化 / N 拍间隔 = 1e6/N ppm），间隔至少要有一百拍以上。
+ */
+#ifndef ARKRTOS_SELFTEST_CLOCK_PPM
+#define ARKRTOS_SELFTEST_CLOCK_PPM      5000
+#endif
+
+/* 运行期巡检周期（毫秒）。0 = 不起定时器，只在开机和 shell 命令里跑。
+ * 非零时开机建一个周期定时器跑 RAM / 只读区间 / 时钟三项（CPU 不重复跑）。
+ */
+#ifndef ARKRTOS_SELFTEST_PATROL_MS
+#define ARKRTOS_SELFTEST_PATROL_MS      0
+#endif
+
 /* 板端单元测试框架（arkrtos_utest.c）：用例自动注册 + 断言记账 + 汇总，
  * 对齐 RT-Thread utest / Zephyr ztest 的形态。关掉后框架与 shell 的 utest 命令都不参与编译，
  * 体积与行为零变化。自动注册需要构造函数支持（armclang/GCC）。 */

@@ -560,6 +560,12 @@ CASES = [
      "AUDIT-LOG HOST OK"),
     # --- 2026-11-25 新增：回滚白名单（SEC-G11，默认关） ---
     # 开档跑武装 / 内容绑定 / 预算 / 清空 / 审计五组路径。
+    # --- 2026-11-25 新增：元件自检（SEC-G14，默认关） ---
+    # 开档跑 RAM / CPU / FLASH / CLOCK 四类与开机、巡检、清基线路径。
+    ("selftest", "kernelsrc/tests/test_selftest_host.c",
+     ["kernelsrc/src/arkrtos_selftest.c"],
+     ["-DARKRTOS_USE_SELFTEST=1", "-fno-asynchronous-unwind-tables"],
+     "SELFTEST HOST OK"),
     ("rollback", "kernelsrc/tests/test_rollback_host.c",
      ["kernelsrc/src/arkrtos_rollback.c"],
      ["-DARKRTOS_USE_ROLLBACK=1", "-fno-asynchronous-unwind-tables"],

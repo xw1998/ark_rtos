@@ -201,6 +201,7 @@ static int register_kernel_commands(void)
              + ((ARKRTOS_USE_EXIT_CODE == 1) ? 1 : 0)
              + ((ARKRTOS_USE_SHELL_AUTH == 1) ? 2 : 0)
              + ((ARKRTOS_USE_ROLLBACK == 1) ? 1 : 0)
+             + ((ARKRTOS_USE_SELFTEST == 1) ? 1 : 0)
              + (ARKRTOS_USE_FDT ? 1 : 0);
 
     if((idx + need) > ARK_SHELL_MAX_COMMANDS)
@@ -326,6 +327,11 @@ static int register_kernel_commands(void)
     g_cmd_table[idx++] = ARK_SHELL_CMD("rollback", cmd_rollback,
         "Rollback whitelist: rollback [list] | arm <id> <ver> [uses] | clear", 4);
 #endif /* ARKRTOS_USE_ROLLBACK */
+#if (ARKRTOS_USE_SELFTEST == 1)
+    g_cmd_table[idx++] = ARK_SHELL_CMD("selftest", cmd_selftest,
+        "Component self-test: selftest [all | ram | cpu | flash | clock | "
+        "patrol | rebaseline]", 2);
+#endif /* ARKRTOS_USE_SELFTEST */
 
 #if ARKRTOS_USE_KERNEL_GUARD
     g_cmd_table[idx++] = ARK_SHELL_CMD("guard", cmd_guard,

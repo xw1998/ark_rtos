@@ -59,7 +59,8 @@
 #define ARKRTOS_AUDIT_EV_QUOTA_REFUSE (9u)   /* app task quota hit; code = owner */
 #define ARKRTOS_AUDIT_EV_ROLLBACK_ARM (10u)  /* rollback target armed; code = budget */
 #define ARKRTOS_AUDIT_EV_ROLLBACK_OK  (11u)  /* downgrade admitted; code = that entry's used */
-#define ARKRTOS_AUDIT_EV_LAST         ARKRTOS_AUDIT_EV_ROLLBACK_OK
+#define ARKRTOS_AUDIT_EV_SELFTEST_FAIL (12u) /* component self-test failed; code = failed item mask */
+#define ARKRTOS_AUDIT_EV_LAST         ARKRTOS_AUDIT_EV_SELFTEST_FAIL
 
 /* ------------------------------------------------------------------
  * One record, 32 bytes on the volume

@@ -42,6 +42,9 @@
 #include "arkrtos_eset.h"
 #include "arkrtos_smp.h"
 #include "arkrtos_init.h"
+#if (ARKRTOS_USE_SELFTEST == 1)
+#include "arkrtos_selftest.h"
+#endif
 
 /* 内核模块初始化：唯一权威顺序实现（任何工程的 main 都只调用它） */
 void arkrtos_kernel_module_init(void)
@@ -78,4 +81,11 @@ void arkrtos_kernel_module_init(void)
     #if (ARKRTOS_USE_RTSTAT == 1)
     arkrtos_rt_init();
     #endif
+
+    /* 元件自检（SEC-G14）：放在内核模块初始化的末尾——内存、节拍与板级钩子
+     * 都已就绪，而调度还没起来，诊断读到的是一台静止的机器。失败不阻止启动：
+     * 留日志与审计记录，要不要停机是产品策略。 */
+#if (ARKRTOS_USE_SELFTEST == 1)
+    (void)arkrtos_selftest_boot();
+#endif
 }

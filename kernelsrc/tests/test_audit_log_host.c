@@ -558,7 +558,9 @@ static void case_kind_names(void)
        "kind 10 is rollback_arm (SEC-G11 appended, never renumbered)");
     ck(strcmp(arkrtos_audit_kind_name(ARKRTOS_AUDIT_EV_ROLLBACK_OK), "rollback_ok") == 0,
        "kind 11 is rollback_ok");
-    ck_u((unsigned long)ARKRTOS_AUDIT_EV_LAST, 11ul, "EV_LAST is the highest appended kind");
+    ck(strcmp(arkrtos_audit_kind_name(ARKRTOS_AUDIT_EV_SELFTEST_FAIL), "selftest_fail") == 0,
+       "kind 12 is selftest_fail (SEC-G14 appended, never renumbered)");
+    ck_u((unsigned long)ARKRTOS_AUDIT_EV_LAST, 12ul, "EV_LAST is the highest appended kind");
     ck(strcmp(arkrtos_audit_kind_name(0u), "unknown") == 0, "kind 0 is unknown");
     ck(strcmp(arkrtos_audit_kind_name(ARKRTOS_AUDIT_EV_LAST + 1u), "unknown") == 0,
        "a kind newer than this build reads as unknown, not as the last one");
@@ -597,7 +599,7 @@ int main(void)
      * they describe the volume format, which outlives the switch. */
     ck(ARKRTOS_USE_AUDIT_LOG == 0, "OFF: the switch really is 0 in this build");
     ck_u((unsigned long)ARKRTOS_AUDIT_REC_SIZE, 32ul, "OFF: REC_SIZE is still 32");
-    ck_u((unsigned long)ARKRTOS_AUDIT_EV_LAST, 11ul, "OFF: kinds are still numbered");
+    ck_u((unsigned long)ARKRTOS_AUDIT_EV_LAST, 12ul, "OFF: kinds are still numbered");
     ck_u((unsigned long)ARKRTOS_AUDIT_LOG_ERR_BUSY, (unsigned long)-6,
          "OFF: status codes are still the published ones");
 

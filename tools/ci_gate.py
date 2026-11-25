@@ -5885,6 +5885,29 @@ def check_rollback():
     else:
         fail("rollback", txt[-300:])
 
+def check_selftest():
+    """Component self-test (SEC-G14): does the board still work, not "did it boot".
+
+    tools/selftest_gate.py holds the five groups: the switch defaults to OFF and
+    features.h / Kconfig / defconfig / autoconf must agree; the OFF object must
+    export no symbol; the module plus four wired files (init, two shell files)
+    and the LA64 board hooks must compile with the switch ON; the host cases
+    must pass in three builds (OFF, ON, ON+audit); and the judge itself must
+    reject a bogus output.
+
+    What this does NOT prove: that the diagnostics fire on real silicon. The
+    clock check compares two readings this side of the SoC, so a common crystal
+    error is invisible; the RAM item only covers the module's own window; and
+    the flash item only proves "changed since the boot-time baseline", not that
+    the image was ever genuine. All three are written into the known-limits doc.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "selftest_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "SELFTEST-GATE OK" in txt:
+        ok("selftest", "OFF default + zero-symbol OFF object + 5 ON-path files + host cases OFF/ON/ON+audit")
+    else:
+        fail("selftest", txt[-300:])
+
 def check_coverage_host():
     """Line coverage of the modules the host tests actually link.
 
@@ -6074,6 +6097,7 @@ CHECK_TABLE = (
     ("sec-host", check_sec_host),
     ("auditlog", check_auditlog),
     ("rollback", check_rollback),
+    ("selftest", check_selftest),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),
     ("analyzer", check_analyzer),

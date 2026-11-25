@@ -49,6 +49,7 @@
   "arkrtos_shell_pmap": 99.42,
   "arkrtos_shell_ushell": 99.17,
   "arkrtos_sign": 100.0,
+  "arkrtos_selftest": 91.79,
   "arkrtos_smp": 90.72,
   "arkrtos_smp_sched": 98.43,
   "arkrtos_smp_shootdown": 96.88,

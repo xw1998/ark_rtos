@@ -218,6 +218,44 @@ uint32 arkrtos_port_flash_sector_size(uint32 addr)
 }
 
 /* ============================================================
+ * 元件自检钩子（SEC-G14）
+ * @details 只读镜像区间取「分区首地址 .. __text_end」：链接脚本把 .text、
+ *          .rodata 与需要常驻 Flash 的只读表都放在这一段，__text_end 之后
+ *          是 RAM 与镜像池，不属于「出厂就该一直不变的字节」。
+ *          第二路计数器用 rdtime（恒频 100 MHz，与节拍定时器是两个计数源）：
+ *          它能发现「节拍停了 / 定时器时钟跑飞」，但两路同源时看不出晶振
+ *          本身的偏差——这一条写在已知限制里。
+ * ============================================================ */
+#if (ARKRTOS_USE_SELFTEST == 1)
+int32 arkrtos_port_selftest_flash_span(uint32 *start, uint32 *len)
+{
+    uint32 end = (uint32)(unsigned long)__text_end;
+
+    if((start == (uint32 *)0) || (len == (uint32 *)0))
+    {
+        return -1;
+    }
+    if(end <= (uint32)CHIP_FLASH_BASE)
+    {
+        return -1;
+    }
+    *start = (uint32)CHIP_FLASH_BASE;
+    *len   = end - (uint32)CHIP_FLASH_BASE;
+    return 0;
+}
+
+int32 arkrtos_port_selftest_clock(uint32 *now)
+{
+    if(now == (uint32 *)0)
+    {
+        return -1;
+    }
+    *now = arkrtos_port_get_timer_counter();
+    return 0;
+}
+#endif /* ARKRTOS_USE_SELFTEST */
+
+/* ============================================================
  * 板级初始化（覆盖 port 层的弱实现）
  * ============================================================ */
 void arkrtos_port_board_init(void)

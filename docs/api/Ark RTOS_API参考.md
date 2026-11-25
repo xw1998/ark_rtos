@@ -43,6 +43,7 @@
 - [kernelsrc/include/arkrtos_rollback.h](#kernelsrcincludearkrtos_rollbackh)（6 项）
 - [kernelsrc/include/arkrtos_rt.h](#kernelsrcincludearkrtos_rth)（14 项）
 - [kernelsrc/include/arkrtos_sec.h](#kernelsrcincludearkrtos_sech)（8 项）
+- [kernelsrc/include/arkrtos_selftest.h](#kernelsrcincludearkrtos_selftesth)（9 项）
 - [kernelsrc/include/arkrtos_sha256.h](#kernelsrcincludearkrtos_sha256h)（3 项）
 - [kernelsrc/include/arkrtos_share.h](#kernelsrcincludearkrtos_shareh)（7 项）
 - [kernelsrc/include/arkrtos_shell.h](#kernelsrcincludearkrtos_shellh)（9 项）
@@ -7228,6 +7229,105 @@ const char *arkrtos_sec_state_name(uint32 state);
 ```
 
 **结论名：pass / fail / finding / skip**
+
+## kernelsrc/include/arkrtos_selftest.h
+
+**Startup and runtime self-test (SEC-G14): RAM window, CPU core,**
+image CRC, clock cross-check.
+IEC 61508 的诊断覆盖率问的不是「有没有测过」，而是「开机与运行期
+各自能发现哪一类失效」。本模块给四类，每一类都写清覆盖范围与
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**单项结果**
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**一次运行的完整报告（固定四项，栈上放得下）**
+
+### `int32 arkrtos_selftest_run(uint32 mask, arkrtos_selftest_report_t *out`
+
+```c
+int32 arkrtos_selftest_run(uint32 mask, arkrtos_selftest_report_t *out);
+```
+
+**跑指定项，结果写进 @p out。**
+- `mask`：ARKRTOS_SELFTEST_ITEM_xxx 的或
+- `out`：结果（不可为空）
+**返回**：OK / ERR_PARAM / ERR_OFF / ERR_FAIL
+> 说明：可在任务上下文与启动早期调用；不分配内存、不碰文件系统。
+
+### `int32 arkrtos_selftest_patrol(arkrtos_selftest_report_t *out);`
+
+```c
+int32 arkrtos_selftest_patrol(arkrtos_selftest_report_t *out);
+```
+
+**运行期巡检：重算 RAM 窗口、只读区间 crc32 与开机值比对、时钟比值。**
+- `out`：结果（可为空；为空时只返回码）
+**返回**：同 arkrtos_selftest_run()
+> 说明：巡检的 RAM 只测那块专用窗口 —— 运行中的其它内存不能写，写就是
+制造故障而不是发现故障。
+
+### `uint32 arkrtos_selftest_flash_crc(void);`
+
+```c
+uint32 arkrtos_selftest_flash_crc(void);
+```
+
+**开机那次算出的只读区间 crc32。**
+**返回**：crc32；没算过（关档 / 板级没给区间）返回 0。
+
+### `int32 arkrtos_selftest_forget(void);`
+
+```c
+int32 arkrtos_selftest_forget(void);
+```
+
+**忘掉已学到的基线（只读区间 crc 与时钟比值）。**
+受控更新之后要重新学基线时用；忘了之后第一次巡检只学不比，
+那一项报 SKIP。
+**返回**：ARKRTOS_SELFTEST_OK
+
+### `uint32 arkrtos_selftest_boot(void);`
+
+```c
+uint32 arkrtos_selftest_boot(void);
+```
+
+**开机自检入口：跑全部项，有 FAIL 就记日志与持久审计。**
+**返回**：失败的位掩码（0 = 没有失败）
+> 说明：由 arkrtos_init 在调度启动前后调（见 arkrtos_init.c 的接线）。失败
+不阻止启动：诊断的职责是留下证据，要不要停机是产品策略。
+
+### `int32 arkrtos_port_selftest_flash_span(uint32 *start, uint32 *len);`
+
+```c
+int32 arkrtos_port_selftest_flash_span(uint32 *start, uint32 *len);
+```
+
+**告诉自检「本板的只读镜像区间在哪」。**
+- `start`：[out] 起始地址（物理地址 / 运行地址，按板子的映射给）
+- `len`：[out] 字节长度
+**返回**：0 = 支持；负 = 不支持
+
+### `int32 arkrtos_port_selftest_clock(uint32 *now);`
+
+```c
+int32 arkrtos_port_selftest_clock(uint32 *now);
+```
+
+**第二路独立计数器（不能与 OS 节拍同源）。**
+- `now`：[out] 当前读数（自由运行的 32 位计数，允许回绕）
+**返回**：0 = 支持；负 = 不支持
 
 ## kernelsrc/include/arkrtos_sha256.h
 

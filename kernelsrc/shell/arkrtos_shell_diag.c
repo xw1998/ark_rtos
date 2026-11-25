@@ -7,6 +7,9 @@
 */
 
 #include "arkrtos_shell_internal.h"
+#if (ARKRTOS_USE_SELFTEST == 1)
+#include "arkrtos_selftest.h"
+#endif
 
 #if (SHELL_ENABLE == 1)
 
@@ -1625,6 +1628,91 @@ int cmd_sec(int argc, char *argv[])
 }
 #endif /* ARKRTOS_USE_SECCHECK */
 
+
+/* ============================================================
+ * selftest：元件自检（SEC-G14）
+ *
+ * 输出按项一行，detail 的含义随项而变：RAM/CPU 是失败图案/向量号（0 = 通过），
+ * FLASH 是本次 crc32，CLOCK 是漂移 ppm。SKIP 与 PASS 分开打——「这块板
+ * 没有这路读数」不能读成「测过、好的」。
+ * ============================================================ */
+#if (ARKRTOS_USE_SELFTEST == 1)
+static const char *st_item_name(uint32 id)
+{
+    switch(id)
+    {
+    case ARKRTOS_SELFTEST_ITEM_RAM:   return "ram  ";
+    case ARKRTOS_SELFTEST_ITEM_CPU:   return "cpu  ";
+    case ARKRTOS_SELFTEST_ITEM_FLASH: return "flash";
+    case ARKRTOS_SELFTEST_ITEM_CLOCK: return "clock";
+    default:                          return "?    ";
+    }
+}
+
+static const char *st_verdict_name(uint32 v)
+{
+    if(v == (uint32)ARKRTOS_SELFTEST_PASS) { return "pass"; }
+    if(v == (uint32)ARKRTOS_SELFTEST_FAIL) { return "FAIL"; }
+    return "skip";
+}
+
+int cmd_selftest(int argc, char *argv[])
+{
+    /* 报告固定四项：放静态区，不占任务栈。 */
+    static arkrtos_selftest_report_t rep;
+    const char *what = (argc >= 2) ? argv[1] : "all";
+    uint32 mask = ARKRTOS_SELFTEST_ITEM_ALL;
+    int32 rc;
+    uint32 i;
+
+    if(strcmp(what, "patrol") == 0)
+    {
+        rc = arkrtos_selftest_patrol(&rep);
+    }
+    else if(strcmp(what, "rebaseline") == 0)
+    {
+        /* 受控更新之后要重学基线：这里必须是显式动作，不能靠改内容让巡检
+         * 自己认下来。忘了之后第一次巡检那一项只会报 SKIP。 */
+        (void)arkrtos_selftest_forget();
+        ark_shell_printf("selftest: learned baselines cleared; the next patrol "
+                         "re-learns them (that round reports SKIP)\r\n");
+        return 0;
+    }
+    else
+    {
+        if(strcmp(what, "all") == 0)        { mask = ARKRTOS_SELFTEST_ITEM_ALL; }
+        else if(strcmp(what, "ram") == 0)   { mask = ARKRTOS_SELFTEST_ITEM_RAM; }
+        else if(strcmp(what, "cpu") == 0)   { mask = ARKRTOS_SELFTEST_ITEM_CPU; }
+        else if(strcmp(what, "flash") == 0) { mask = ARKRTOS_SELFTEST_ITEM_FLASH; }
+        else if(strcmp(what, "clock") == 0) { mask = ARKRTOS_SELFTEST_ITEM_CLOCK; }
+        else
+        {
+            ark_shell_printf("usage: selftest [all | ram | cpu | flash | clock | "
+                             "patrol | rebaseline]\r\n");
+            return -1;
+        }
+        rc = arkrtos_selftest_run(mask, &rep);
+    }
+
+    for(i = 0u; i < rep.items; i++)
+    {
+        ark_shell_printf("  [%s] %s detail=%u\r\n",
+                         st_verdict_name((uint32)rep.item[i].verdict),
+                         st_item_name(rep.item[i].id),
+                         (unsigned)rep.item[i].detail);
+    }
+    ark_shell_printf("selftest: %u item(s), failed 0x%X, skipped 0x%X\r\n",
+                     (unsigned)rep.items, (unsigned)rep.failed,
+                     (unsigned)rep.skipped);
+    if(rc == ARKRTOS_SELFTEST_ERR_FAIL)
+    {
+        ark_shell_printf("verdict: a diagnostic FAILED - see detail above\r\n");
+        return 1;
+    }
+    ark_shell_printf("verdict: no failure (skip = no reading on this board, not a pass)\r\n");
+    return 0;
+}
+#endif /* ARKRTOS_USE_SELFTEST */
 
 /* ============================================================
  * utest：板端单元测试
