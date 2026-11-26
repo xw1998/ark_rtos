@@ -1180,6 +1180,24 @@
 #endif
 
 
+/* 设备身份（SEC-G13）：把「这台设备是谁」变成一个可验证的短 ID + 挑战-应答。
+ * 公开 ID = SHA256("ark-devid-v1" || uid) 的前 ARKRTOS_DEVICE_ID_LEN 字节，
+ * 只用于命名与对账，本身不证明任何事；证明靠
+ *   HMAC-SHA256(secret, "ark-devid-proof-v1" || challenge)。
+ * uid 与 secret 都来自板级钩子（arkrtos_port_devid_uid/_secret），
+ * 只有 OTP 来源才算可信身份；缺密钥时失败关闭（prove 返回 ERR_NOKEY，
+ * 绝不返回全零 MAC）。默认关；关档时 arkrtos_devid.c 编成空 TU。
+ * 边界（产线烧写、轮换、撤销）见 kernelsrc/include/arkrtos_devid.h 文件头。 */
+#ifndef ARKRTOS_USE_DEVICE_ID
+#define ARKRTOS_USE_DEVICE_ID           0
+#endif
+#ifndef ARKRTOS_DEVICE_ID_LEN
+#define ARKRTOS_DEVICE_ID_LEN           16
+#endif
+#if (ARKRTOS_DEVICE_ID_LEN < 8) || (ARKRTOS_DEVICE_ID_LEN > 32)
+#error "ARKRTOS_DEVICE_ID_LEN must be 8..32"
+#endif
+
 /* 跨复位崩溃日记（arkrtos_crash.c）：落在共享内存尾部的 .noinit 区 */
 #ifndef ARKRTOS_USE_CRASH_LOG
 #define ARKRTOS_USE_CRASH_LOG           1

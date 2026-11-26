@@ -91,6 +91,11 @@ SIGN_KEY_DEF = "-DARKRTOS_IMAGE_SIGN_KEY={" + ",".join(
 
 # Ed25519 档的公钥：种子 0x00..0x1F 对应的公钥，与
 # test_sign_ed25519_host.c / tools/ed25519_image_gate.py 里的 PUBKEY 一致。
+# 设备身份（SEC-G13）的内建密钥：32 字节 0x01..0x20。BUILTIN 档用它证明
+# "编进固件的密钥必须报 BUILTIN，不能报成 OTP"。
+DEVID_SECRET_DEF = "-DARKRTOS_DEVICE_SECRET={" + ",".join(
+    "0x%02X" % b for b in range(1, 33)) + "}"
+
 ED25519_PUBKEY_DEF = "-DARKRTOS_IMAGE_SIGN_PUBKEY={" + ",".join(
     "0x%02X" % b for b in bytes.fromhex(
         "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8")) + "}"
@@ -417,6 +422,39 @@ CASES = [
       "-DARKRTOS_USE_RTSTAT=1", "-DARKRTOS_USE_TRUST_ROOT=1",
       "-DARKRTOS_USE_IMAGE_SIGN_ED25519=1", "-DARKRTOS_USE_ED25519=1",
       SIGN_KEY_DEF, ED25519_PUBKEY_DEF], "SEC-HOST OK  "),
+    # --- 2026-11-27 新增：设备身份（SEC-G13）---
+    # 公开 ID 只命名不证明；证明是挑战-应答 HMAC。四件事要钉住：无密钥时失败
+    # 关闭（ERR_NOKEY，绝不吐全 0 MAC）、ID 就是 SHA256(tag||uid) 的前缀、
+    # 同一挑战确定性 / 不同挑战不重放、编进固件的密钥只能报 BUILTIN。
+    ("devid", "kernelsrc/tests/test_devid_host.c",
+     ["kernelsrc/src/arkrtos_devid.c"],
+     ["-ffunction-sections", "-DARKRTOS_USE_DEVICE_ID=1"], "DEVID-HOST OK"),
+    # 关档是空目标（零符号，零字节）：默认镜像里不该有这个模块的任何痕迹。
+    ("devid-off", "kernelsrc/tests/test_devid_host.c",
+     ["kernelsrc/src/arkrtos_devid.c"],
+     ["-DARKRTOS_USE_DEVICE_ID=0"], "DEVID-HOST OFF OK"),
+    # 内建密钥档：板级没有槽，密钥来自编译期 ARKRTOS_DEVICE_SECRET。
+    # 这一档证明来源被判成 BUILTIN 而不是 OTP，并且板级密钥一出现就盖过它。
+    ("devid-builtin", "kernelsrc/tests/test_devid_host.c",
+     ["kernelsrc/src/arkrtos_devid.c"],
+     ["-ffunction-sections", "-DARKRTOS_USE_DEVICE_ID=1", DEVID_SECRET_DEF],
+     "DEVID-HOST BUILTIN OK"),
+    # 与 sec 同源再编两档：sec_check_devid 的四档（PASS/FINDING/SKIP x2）
+    # 都要有配置去走它，否则覆盖率只到 sec 的 #else。
+    ("sec-devid", "kernelsrc/tests/test_sec_host.c",
+     ["kernelsrc/src/arkrtos_sec.c", "kernelsrc/src/arkrtos_devid.c"],
+     ["-ffunction-sections", "-DARKRTOS_USE_SECCHECK=1",
+      "-DARKRTOS_USE_IMAGE_CRC_RECHECK=1", "-DARKRTOS_USE_IMAGE_SIGN=1",
+      "-DARKRTOS_HW_SAFE=1", "-DARKRTOS_WDG_ENABLE=1",
+      "-DARKRTOS_USE_RTSTAT=1", "-DARKRTOS_USE_DEVICE_ID=1",
+      SIGN_KEY_DEF], "SEC-HOST OK  "),
+    ("sec-devid-builtin", "kernelsrc/tests/test_sec_host.c",
+     ["kernelsrc/src/arkrtos_sec.c", "kernelsrc/src/arkrtos_devid.c"],
+     ["-ffunction-sections", "-DARKRTOS_USE_SECCHECK=1",
+      "-DARKRTOS_USE_IMAGE_CRC_RECHECK=1", "-DARKRTOS_USE_IMAGE_SIGN=1",
+      "-DARKRTOS_HW_SAFE=1", "-DARKRTOS_WDG_ENABLE=1",
+      "-DARKRTOS_USE_RTSTAT=1", "-DARKRTOS_USE_DEVICE_ID=1",
+      SIGN_KEY_DEF, DEVID_SECRET_DEF], "SEC-HOST OK  "),
     # --- 2026-11-22 新增：板上直跑（裸文件直接进固定窗口）---
     # 窗口地址来自板级分区头，只有 h743 有；宿主按 h743 的数值从命令行
     # 注入，用例自己再核一遍「注入的形状与 SLOT_RAM 映射区间一致」。
@@ -874,9 +912,10 @@ CASES = [
     # swap 的成功路径在宿主上走不到（要真调度器让计数上涨），只覆盖两条
     # 拒绝路径与 stat 行；这 28 行是已知且写死的地板，不是漏测。
     ("shellmisc", "kernelsrc/tests/test_shell_misc_host.c",
-     ["kernelsrc/shell/arkrtos_shell_misc.c"],
+     ["kernelsrc/shell/arkrtos_shell_misc.c", "kernelsrc/src/arkrtos_devid.c"],
      ['-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',
       "-DARKRTOS_LINUX_ABI_SYSSTAT=1", "-DARKRTOS_USE_TASK_SWAP=1",
+      "-DARKRTOS_USE_DEVICE_ID=1",
       SIGN_KEY_DEF, "-fno-asynchronous-unwind-tables"]
      + ["-D" + x for x in SOFTBUS_TIER_DEFS],
      "SHELL-MISC-HOST OK",

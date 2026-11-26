@@ -2,7 +2,7 @@
 * @file test_sec_host.c
 * @brief 安全基线自检（arkrtos_sec.c）的宿主用例
 * @details 被测对象是一个**只读的汇总器**：它把编译期开关与运行期结构读一遍，
-*          给十四条基线项各下一个结论（PASS / FAIL / FINDING / SKIP），
+*          给十五条基线项各下一个结论（PASS / FAIL / FINDING / SKIP），
 *          一条被检查的结构都不改。所以宿主用例把被汇总的那几样东西全部桩掉，
 *          钉住的是**判据与账目**本身：
 *
@@ -29,22 +29,30 @@
 *           10. 信任根（SEC-G12，第 14 项 trust.root）：公钥从板级槽位来
 *               且一致 / 首启写入才 PASS，不一致 FAIL，槽读不出或写不进只
 *               SKIP（不准把「零件没这功能」记成 PASS），只回落内建公钥
-*               报 FINDING，开机还没跑过信任根报 SKIP。
+*               报 FINDING，开机还没跑过信任根报 SKIP；
+*           11. 设备身份（SEC-G13，第 15 项 device.identity）：板级出号 + 出够长
+*               的密钥才 PASS，只有号或密钥槽配短了都只 SKIP（不准读成 PASS），
+*               只有编进固件的密钥报 FINDING，档关报 SKIP。
 *
-*          本文件被五种配置各编一次：
+*          本文件被七种配置各编一次：
 *            sec      全部基线机制打开 + 板级 Flash 保护桩（读得到）
 *            sec-min  全部关掉 + 没有板级 Flash 保护（弱符号兜底）
 *            sec-page 页表后端（LA64，MPU 关、权限分开）+ 守护开着但狗不咬
 *            sec-trust 再叠上信任根（SEC-G12）：公钥钩子与钉存槽都是桩，
 *                      专门走 trust.root 那一项的 OTP 四态
+*            sec-devid 再叠上设备身份（SEC-G13）：号与密钥钩子是桩，
+*                      走 device.identity 的「无钥 / 短钥 / 成对」三档
+*            sec-devid-builtin SEC-G13 + ARKRTOS_DEVICE_SECRET：走内建
+*                      密钥那一条（FINDING），并验证板级密钥会盖过它
 *            sec-disabled SECCHECK=0：整模块不编，关档零符号
-*          覆盖率按五档并集算，所以每个 #if 分支都有自己的配置去走它。
+*          覆盖率按七档并集算，所以每个 #if 分支都有自己的配置去走它。
 *
 *          未验证（如实说明）：真实板子上这些结构的取值是否真的如此，以及
 *          芯片选项字节的读数。宿主用例只能证明**判定逻辑**没写反。
-* @note 用法：由 tools/coverage_gate.py 的五条 case 编译并运行，输出 SEC-HOST OK /
-*       SEC-HOST MIN OK / SEC-HOST PAGE OK / SEC-HOST DISABLED OK；第五条 sec-trust
-*       只加了信任根那一项的钩子桩与开关，仍走默认的 SEC-HOST OK 标示。
+* @note 用法：由 tools/coverage_gate.py 的七条 case 编译并运行，输出 SEC-HOST OK /
+*       SEC-HOST MIN OK / SEC-HOST PAGE OK / SEC-HOST DISABLED OK；sec-trust /
+*       sec-devid / sec-devid-builtin 三条只多叠一项的钩子桩与开关，
+*       仍走默认的 SEC-HOST OK 标示。
 */
 
 #include "arkrtos_sec.h"
@@ -68,6 +76,9 @@
 #include "arkrtos_hal.h"
 #if (ARKRTOS_USE_TRUST_ROOT == 1)
 #include "arkrtos_trust.h"
+#endif
+#if (ARKRTOS_USE_DEVICE_ID == 1)
+#include "arkrtos_devid.h"
 #endif
 
 #ifdef _WIN32
@@ -360,6 +371,56 @@ int32 arkrtos_port_trust_pin(uint8 *p_digest, uint32 write)
 }
 #endif /* ARKRTOS_USE_TRUST_ROOT */
 
+#if (ARKRTOS_USE_DEVICE_ID == 1)
+/* 设备身份的板级钩子替身（SEC-G13）：内核里是 weak，这里给强符号，
+ * 于是"这块板有没有唯一号 / 密钥槽有多长"成了用例能直接摆的开关。
+ * g_dv_sec_len <= 0 表示没有密钥槽。 */
+static uint8 g_dv_uid[12];
+static int   g_dv_uid_ok;
+static uint8 g_dv_sec[32];
+static int   g_dv_sec_len;
+
+int32 arkrtos_port_devid_uid(uint8 *p_out, uint32 cap, uint32 *p_len)
+{
+    uint32 i;
+
+    if(g_dv_uid_ok == 0)
+    {
+        return -1;
+    }
+    if(cap < 12u)
+    {
+        *p_len = 12u;
+        return 0;
+    }
+    for(i = 0u; i < 12u; i++)
+    {
+        p_out[i] = g_dv_uid[i];
+    }
+    *p_len = 12u;
+    return 0;
+}
+
+int32 arkrtos_port_devid_secret(uint8 *p_out, uint32 cap)
+{
+    int i;
+
+    if(g_dv_sec_len <= 0)
+    {
+        return -1;
+    }
+    if((uint32)g_dv_sec_len > cap)
+    {
+        return g_dv_sec_len;
+    }
+    for(i = 0; i < g_dv_sec_len; i++)
+    {
+        p_out[i] = g_dv_sec[i];
+    }
+    return g_dv_sec_len;
+}
+#endif /* ARKRTOS_USE_DEVICE_ID */
+
 static void table_clear(void)
 {
     memset(&g_pt, 0, sizeof(g_pt));
@@ -408,7 +469,7 @@ static void test_api(void)
     memset(&rep, 0, sizeof(rep));
     (void)arkrtos_sec_run(&rep);
 
-    ck_u(rep.count, 14u, "fourteen baseline items");
+    ck_u(rep.count, 15u, "fifteen baseline items");
     ck_u((unsigned long)(rep.pass + rep.fail + rep.finding + rep.skip),
          (unsigned long)rep.count, "per-state counts add up to count");
 
@@ -1060,6 +1121,92 @@ static void test_trust(void)
 #endif
 }
 
+/* 设备身份（SEC-G13，第 15 项 device.identity）：
+ * 只有"板上出号 + 板上出够长的密钥"才算 PASS；只有号是 SKIP（证不了），
+ * 密钥槽配短了也是 SKIP（不能读成 PASS）；只有编进固件的那把报 FINDING
+ * （能应答，但人人都能顶替）。档关时一律 SKIP。 */
+static void test_devid(void)
+{
+    arkrtos_sec_report_t rep;
+    const arkrtos_sec_item_t *p_it;
+
+    table_clear();
+    memset(&rep, 0, sizeof(rep));
+    (void)arkrtos_sec_run(&rep);
+    p_it = item_by_name(&rep, "device.identity");
+    ck(p_it != 0, "device.identity present");
+    if(p_it == 0)
+    {
+        return;
+    }
+
+#if (ARKRTOS_USE_DEVICE_ID == 1)
+    /* 开机还没跑过 devid：无号无钥 -> SKIP */
+    ck_u((unsigned long)p_it->state, (unsigned long)ARKRTOS_SEC_SKIP,
+         "devid boot not run -> SKIP");
+
+    g_dv_uid_ok = 1;
+    memset(g_dv_uid, 0x5A, sizeof(g_dv_uid));
+
+#if !defined(ARKRTOS_DEVICE_SECRET)
+    /* 有号、没有密钥槽 -> SKIP（有名字，证不了） */
+    g_dv_sec_len = -1;
+    ck(arkrtos_devid_boot() == ARKRTOS_DEVID_OK, "uid-only devid boot");
+    memset(&rep, 0, sizeof(rep));
+    (void)arkrtos_sec_run(&rep);
+    p_it = item_by_name(&rep, "device.identity");
+    if(p_it != 0)
+    {
+        ck_u((unsigned long)p_it->state, (unsigned long)ARKRTOS_SEC_SKIP,
+             "uid without a secret -> SKIP");
+    }
+
+    /* 密钥槽配短了（8 字节）-> 仍是 SKIP，但不能说成 PASS */
+    memset(g_dv_sec, 0x11, sizeof(g_dv_sec));
+    g_dv_sec_len = 8;
+    ck(arkrtos_devid_boot() == ARKRTOS_DEVID_OK, "short secret still boots");
+    memset(&rep, 0, sizeof(rep));
+    (void)arkrtos_sec_run(&rep);
+    p_it = item_by_name(&rep, "device.identity");
+    if(p_it != 0)
+    {
+        ck_u((unsigned long)p_it->state, (unsigned long)ARKRTOS_SEC_SKIP,
+             "too-short secret -> SKIP");
+    }
+#else
+    /* 内建密钥（板级没有槽）-> FINDING：能应答，但不是身份 */
+    g_dv_sec_len = -1;
+    ck(arkrtos_devid_boot() == ARKRTOS_DEVID_OK, "builtin devid boot");
+    memset(&rep, 0, sizeof(rep));
+    (void)arkrtos_sec_run(&rep);
+    p_it = item_by_name(&rep, "device.identity");
+    if(p_it != 0)
+    {
+        ck_u((unsigned long)p_it->state, (unsigned long)ARKRTOS_SEC_FINDING,
+             "builtin secret -> FINDING, not PASS");
+    }
+#endif
+
+    /* 号 + 32 字节板级密钥 -> PASS，并报出 ID 长度 */
+    memset(g_dv_sec, 0x22, sizeof(g_dv_sec));
+    g_dv_sec_len = 32;
+    ck(arkrtos_devid_boot() == ARKRTOS_DEVID_OK, "otp devid boot");
+    memset(&rep, 0, sizeof(rep));
+    (void)arkrtos_sec_run(&rep);
+    p_it = item_by_name(&rep, "device.identity");
+    if(p_it != 0)
+    {
+        ck_u((unsigned long)p_it->state, (unsigned long)ARKRTOS_SEC_PASS,
+             "otp uid + otp secret -> PASS");
+        ck_u((unsigned long)p_it->v[0], (unsigned long)ARKRTOS_DEVICE_ID_LEN,
+             "id length reported");
+    }
+#else
+    ck_u((unsigned long)p_it->state, (unsigned long)ARKRTOS_SEC_SKIP,
+         "devid off -> SKIP");
+#endif
+}
+
 int main(void)
 {
     int rc;
@@ -1083,6 +1230,7 @@ int main(void)
     test_flash();
     test_rt();
     test_trust();
+    test_devid();
 
     /* 全清的板子跑一遍：项数固定 13，run 返回 FAIL 条数 */
     {
@@ -1092,7 +1240,7 @@ int main(void)
         table_clear();
         memset(&rep, 0, sizeof(rep));
         fails = arkrtos_sec_run(&rep);
-        ck_u(rep.count, 14u, "final run has 14 items");
+        ck_u(rep.count, 15u, "final run has 15 items");
         ck_u((unsigned long)fails, (unsigned long)rep.fail,
              "run() returns the FAIL count");
     }

@@ -49,6 +49,9 @@
 #if (ARKRTOS_USE_TRUST_ROOT == 1)
 #include "arkrtos_trust.h"
 #endif
+#if (ARKRTOS_USE_DEVICE_ID == 1)
+#include "arkrtos_devid.h"
+#endif
 
 /* 内核模块初始化：唯一权威顺序实现（任何工程的 main 都只调用它） */
 void arkrtos_kernel_module_init(void)
@@ -108,5 +111,10 @@ void arkrtos_kernel_module_init(void)
      * 是产品策略（见 arkrtos_trust.h 文件头第③条）。 */
 #if (ARKRTOS_USE_TRUST_ROOT == 1)
     (void)arkrtos_trust_boot();
+#endif
+#if (ARKRTOS_USE_DEVICE_ID == 1)
+    /* 设备身份（SEC-G13）：取 uid、载入密钥、派生公开 ID。失败不停机——
+     * 失败关闭体现在 prove() 返回 ERR_NOKEY 上，而不是把整机拉死。 */
+    (void)arkrtos_devid_boot();
 #endif
 }

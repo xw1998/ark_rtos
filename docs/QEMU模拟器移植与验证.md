@@ -3471,6 +3471,55 @@ bottom <b> size <n> [owner <o>]`。用裸 `arkrtos_board_puts` 而不是 `ARKRTO
 - `tools/fork_gate.py` 十档 71/71 全绿（thread 档 231 条、appq 档 243 条），
   期望条数随夹具 +4 条同步上调。
 
+### 5.35 SEC-G13 设备身份在 QEMU 上的读数（2026-11-27）
+
+**构建**（在十档全开的基础上多一个开关，其余不变）：
+
+```bash
+export EXTRA_CFLAGS="-DARKRTOS_USE_LINUX_FORK=1 -DARKRTOS_USE_PAGING_DEMAND=1 \
+  -DARKRTOS_USE_PAGING_COW=1 -DARKRTOS_USE_PAGING_SHM=1 -DARKRTOS_USE_LINUX_FUTEX=1 \
+  -DARKRTOS_USE_PAGING_FILEMAP=1 -DARKRTOS_USE_PAGING_MPROTECT=1 -DARKRTOS_USE_LINUX_SELECT=1 \
+  -DARKRTOS_USE_LINUX_SOCKET=1 -DARKRTOS_USE_LWIP=1 -DARKRTOS_USE_LINUX_THREAD=1 \
+  -DARKRTOS_USE_APP_QUOTA=1 -DARKRTOS_APP_MAX_TASKS=3 -DARKRTOS_USE_DEVICE_ID=1"
+make -f example/qemu_loongarch64/Makefile -j8
+```
+
+构建 rc=0、0 warning，`build/qemu_loongarch64/ark_qemu_la64.elf` 里含 `arkrtos_devid.o`。
+板级只实现了 uid 钩子（返回固定 9 字节 `qemu-la64`，**模拟值**），密钥钩子保持弱符号默认
+（返回 -1，即「这块板没有密钥槽」）。
+
+**读数**（`tools/qemu_shell_drive.py --script ...`，三条命令全部符合预期）：
+
+```
+$ devid
+source   : uid-only
+ready    : no
+uid      : 9 byte(s)
+secret   : 0 byte(s)
+id       : 16 byte(s) 7E6531AEA1B30A80590B0E96F3AC2F23
+note     : uid only - the ID names this chip, but nothing can be proved
+
+$ devid prove 0102
+devid: no usable secret - refusing (fail closed), no MAC produced
+
+$ devid check 0102 0011
+devid: mac must be 32 bytes, got 2
+```
+
+**怎么读这三条**：
+
+1. `id` 是 `SHA256("ark-devid-v1" || "qemu-la64")` 的前 16 字节（独立复算一致：
+   `7E6531AE A1B30A80 590B0E96 F3AC2F23`）。它**只命名**，不证明任何事——所以下面
+   一条才是关键。
+2. `devid prove` 明确拒绝并**不产出 MAC**：这块板没有密钥槽，实现走的是失败关闭分支，
+   不是「回一串零」那种看起来成功的形态。若是回全零，任何一台设备都能拿它冒充。
+3. `devid check` 在 MAC 长度不对时先报长度，不进入比较——长度校验在比较之前，
+   免得「短 MAC 前缀比对」变成伪造入口。
+
+`sec` 第 15 项 `device.identity` 在这一档报 SKIP（来源为 `UID_ONLY`，既不是 OTP 也不是
+`BUILTIN`）——**"没得看"不报成 PASS**。要看到 PASS 需要一块真的实现 OTP 密钥钩子的板子，
+那部分归产线（见 `docs/已知限制.md` §四 与 `docs/安全认证准备.md` SEC-G13 行）。
+
 ### 5.25 RV32 上的 ELF32 装载（U-4，2026-11-17）
 
 RV32 是没有 MMU 的那一档，所以这里不是「换一套页表」，而是**PMP 窗口 + U 模式**：

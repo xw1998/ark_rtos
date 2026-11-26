@@ -1,13 +1,18 @@
 /**
 * @file arkrtos_shell_misc.c
 * @brief 杂项：history / uname / free / ps / which / man / dmesg / hwsafe /
-*        swap（任务热切换自检，仅 ARKRTOS_USE_TASK_SWAP=1 时存在）。
+*        swap（任务热切换自检，仅 ARKRTOS_USE_TASK_SWAP=1 时存在）/
+*        devid（设备身份读数，仅 ARKRTOS_USE_DEVICE_ID=1 时存在）。
 *          共同点是只读、且输出直接来自别的模块的公开读数。
 * @note 本文件属于内核特权态代码；由 arkrtos_shell.c 按命令族拆出，
 *       只做搬运，命令逻辑与拆分前逐字相同。
 */
 
 #include "arkrtos_shell_internal.h"
+
+#if (ARKRTOS_USE_DEVICE_ID == 1)
+#include "arkrtos_devid.h"
+#endif
 
 #if (ARKRTOS_USE_LINUX_ABI == 1) && (ARKRTOS_LINUX_ABI_SYSSTAT == 1)
 #include "arkrtos_linux_abi.h"
@@ -556,5 +561,211 @@ int cmd_lxstat(int argc, char *argv[])
     return 0;
 }
 #endif /* ARKRTOS_USE_LINUX_ABI == 1 && ARKRTOS_LINUX_ABI_SYSSTAT == 1 */
+
+
+/* ============================================================
+ * devid：设备身份（SEC-G13）的现场读数
+ *
+ *   devid                          这份身份从哪来、能不能应答
+ *   devid prove <hex-challenge>    用本机密钥算一个应答（看是否失败关闭）
+ *   devid check <hex-ch> <hex-mac> 校验一个应答（对照别的机器算出来的）
+ *
+ * 这个命令只读不写：不改密钥、不改 ID、不做任何"信任我"的判断。它的用处
+ * 是在板上直接看出三件事——名字是什么、密钥来自板子还是固件、拿不到密钥
+ * 时是不是干脆拒绝（而不是回一个全零 MAC 让人误以为通过）。
+ * ============================================================ */
+#if (ARKRTOS_USE_DEVICE_ID == 1)
+
+/* 十六进制串 -> 字节。接受 "A501FF" 与 "A5 01 ff"（空格跳过）。
+ * 长度奇数、非十六进制字符、超长一律返回 -1，不猜、不截断。 */
+static int devid_hex(const char *p_s, uint8 *p_out, uint32 cap, uint32 *p_len)
+{
+    uint32 n = 0u;
+
+    if((p_s == 0) || (*p_s == '\0'))
+    {
+        return -1;
+    }
+
+    while(*p_s != '\0')
+    {
+        uint32 hi;
+        uint32 lo;
+        char  hc;
+
+        while(*p_s == ' ')
+        {
+            p_s++;
+        }
+        if(*p_s == '\0')
+        {
+            break;
+        }
+        hc = *p_s;
+        if((hc >= '0') && (hc <= '9'))      { hi = (uint32)(hc - '0');      }
+        else if((hc >= 'a') && (hc <= 'f')) { hi = (uint32)(hc - 'a' + 10); }
+        else if((hc >= 'A') && (hc <= 'F')) { hi = (uint32)(hc - 'A' + 10); }
+        else                                { return -1; }
+        p_s++;
+        while(*p_s == ' ')
+        {
+            p_s++;
+        }
+        if(*p_s == '\0')
+        {
+            return -1;      /* 奇数个数字：这不是一个字节 */
+        }
+        hc = *p_s;
+        if((hc >= '0') && (hc <= '9'))      { lo = (uint32)(hc - '0');      }
+        else if((hc >= 'a') && (hc <= 'f')) { lo = (uint32)(hc - 'a' + 10); }
+        else if((hc >= 'A') && (hc <= 'F')) { lo = (uint32)(hc - 'A' + 10); }
+        else                                { return -1; }
+        p_s++;
+
+        if(n >= cap)
+        {
+            return -1;
+        }
+        p_out[n] = (uint8)((hi << 4) | lo);
+        n++;
+    }
+
+    *p_len = n;
+    return 0;
+}
+
+static void devid_print_id(void)
+{
+    arkrtos_devid_status_t st;
+    uint32 i;
+
+    if(arkrtos_devid_status_get(&st) != ARKRTOS_DEVID_OK)
+    {
+        sh_out("devid: no status\r\n");
+        return;
+    }
+
+    ark_shell_printf("source   : %s\r\n", arkrtos_devid_src_name(st.source));
+    ark_shell_printf("ready    : %s\r\n", (st.ready != 0u) ? "yes (can answer a challenge)" : "no");
+    ark_shell_printf("uid      : %u byte(s)\r\n", (unsigned)st.uid_len);
+    ark_shell_printf("secret   : %u byte(s)\r\n", (unsigned)st.secret_len);
+    if(st.id_len == 0u)
+    {
+        sh_out("id       : (none - no uid, so there is nothing to name)\r\n");
+        return;
+    }
+
+    ark_shell_printf("id       : %u byte(s) ", (unsigned)st.id_len);
+    for(i = 0u; i < st.id_len; i++)
+    {
+        ark_shell_printf("%02X", (unsigned)st.id[i]);
+    }
+    sh_out("\r\n");
+    if(st.source == (uint32)ARKRTOS_DEVID_SRC_UID_ONLY)
+    {
+        sh_out("note     : uid only - the ID names this chip, but nothing can be proved\r\n");
+    }
+    else if(st.source == (uint32)ARKRTOS_DEVID_SRC_BUILTIN)
+    {
+        sh_out("note     : secret lives in this firmware - a reflash can clone it\r\n");
+    }
+}
+
+int cmd_devid(int argc, char *argv[])
+{
+    static uint8 s_ch[ARKRTOS_DEVID_CHALLENGE_MAX];
+    static uint8 s_mac[ARKRTOS_DEVID_MAC_LEN];
+    uint32 ch_len = 0u;
+    uint32 mac_len = 0u;
+    uint32 i;
+    int rc;
+
+    if((argc == 1) || (strcmp(argv[1], "show") == 0))
+    {
+        devid_print_id();
+        return 0;
+    }
+
+    if(strcmp(argv[1], "prove") == 0)
+    {
+        if(argc != 3)
+        {
+            sh_out("usage: devid prove <hex-challenge>\r\n");
+            return -1;
+        }
+        if(devid_hex(argv[2], s_ch, sizeof(s_ch), &ch_len) != 0)
+        {
+            ark_shell_printf("devid: bad challenge hex (1..%u bytes, even digits)\r\n",
+                             (unsigned)sizeof(s_ch));
+            return -1;
+        }
+        rc = arkrtos_devid_prove(s_ch, ch_len, s_mac);
+        if(rc == ARKRTOS_DEVID_ERR_NOKEY)
+        {
+            sh_out("devid: no usable secret - refusing (fail closed), no MAC produced\r\n");
+            return -1;
+        }
+        if(rc != ARKRTOS_DEVID_OK)
+        {
+            ark_shell_printf("devid: prove failed (%d)\r\n", rc);
+            return -1;
+        }
+        sh_out("mac      : ");
+        for(i = 0u; i < (uint32)ARKRTOS_DEVID_MAC_LEN; i++)
+        {
+            ark_shell_printf("%02X", (unsigned)s_mac[i]);
+        }
+        sh_out("\r\n");
+        return 0;
+    }
+
+    if(strcmp(argv[1], "check") == 0)
+    {
+        if(argc != 4)
+        {
+            sh_out("usage: devid check <hex-challenge> <hex-mac>\r\n");
+            return -1;
+        }
+        if(devid_hex(argv[2], s_ch, sizeof(s_ch), &ch_len) != 0)
+        {
+            sh_out("devid: bad challenge hex\r\n");
+            return -1;
+        }
+        if(devid_hex(argv[3], s_mac, sizeof(s_mac), &mac_len) != 0)
+        {
+            sh_out("devid: bad mac hex\r\n");
+            return -1;
+        }
+        if(mac_len != (uint32)ARKRTOS_DEVID_MAC_LEN)
+        {
+            ark_shell_printf("devid: mac must be %u bytes, got %u\r\n",
+                             (unsigned)ARKRTOS_DEVID_MAC_LEN, (unsigned)mac_len);
+            return -1;
+        }
+        rc = arkrtos_devid_check(s_ch, ch_len, s_mac);
+        if(rc == ARKRTOS_DEVID_OK)
+        {
+            sh_out("devid: MAC matches - this board holds that secret\r\n");
+            return 0;
+        }
+        if(rc == ARKRTOS_DEVID_ERR_MISMATCH)
+        {
+            sh_out("devid: MAC does NOT match - different secret or different challenge\r\n");
+            return -1;
+        }
+        if(rc == ARKRTOS_DEVID_ERR_NOKEY)
+        {
+            sh_out("devid: no usable secret here - cannot check\r\n");
+            return -1;
+        }
+        ark_shell_printf("devid: check failed (%d)\r\n", rc);
+        return -1;
+    }
+
+    sh_out("usage: devid [show] | prove <hex-challenge> | check <hex-challenge> <hex-mac>\r\n");
+    return -1;
+}
+
+#endif /* ARKRTOS_USE_DEVICE_ID */
 
 #endif /* SHELL_ENABLE */

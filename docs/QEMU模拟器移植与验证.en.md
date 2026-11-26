@@ -3359,6 +3359,59 @@ has no programmable-stub cases on the host** (the "six blocking paths" test that
 not exist for `sbuf` yet) -- that is a **known gap**, recorded rather than papered over; the `utest` suite
 that `shell_check.py` drives has no blocking-send case for `sbuf` either.
 
+### 5.35 Device identity on QEMU (SEC-G13, 2026-11-27)
+
+**Build** (the ten-tier build plus one more switch, everything else unchanged):
+
+```bash
+export EXTRA_CFLAGS="-DARKRTOS_USE_LINUX_FORK=1 -DARKRTOS_USE_PAGING_DEMAND=1 \
+  -DARKRTOS_USE_PAGING_COW=1 -DARKRTOS_USE_PAGING_SHM=1 -DARKRTOS_USE_LINUX_FUTEX=1 \
+  -DARKRTOS_USE_PAGING_FILEMAP=1 -DARKRTOS_USE_PAGING_MPROTECT=1 -DARKRTOS_USE_LINUX_SELECT=1 \
+  -DARKRTOS_USE_LINUX_SOCKET=1 -DARKRTOS_USE_LWIP=1 -DARKRTOS_USE_LINUX_THREAD=1 \
+  -DARKRTOS_USE_APP_QUOTA=1 -DARKRTOS_APP_MAX_TASKS=3 -DARKRTOS_USE_DEVICE_ID=1"
+make -f example/qemu_loongarch64/Makefile -j8
+```
+
+The build exits 0 with zero warnings, and `build/qemu_loongarch64/ark_qemu_la64.elf` contains
+`arkrtos_devid.o`. The board implements only the uid hook (it returns a fixed 9-byte `qemu-la64`,
+**a simulated value**); the secret hook keeps its weak default (returns -1, i.e. "this board has no
+key slot").
+
+**Readings** (`tools/qemu_shell_drive.py --script ...`, three commands, all as expected):
+
+```
+$ devid
+source   : uid-only
+ready    : no
+uid      : 9 byte(s)
+secret   : 0 byte(s)
+id       : 16 byte(s) 7E6531AEA1B30A80590B0E96F3AC2F23
+note     : uid only - the ID names this chip, but nothing can be proved
+
+$ devid prove 0102
+devid: no usable secret - refusing (fail closed), no MAC produced
+
+$ devid check 0102 0011
+devid: mac must be 32 bytes, got 2
+```
+
+**How to read those three**:
+
+1. `id` is the first 16 bytes of `SHA256("ark-devid-v1" || "qemu-la64")` (recomputed independently:
+   `7E6531AE A1B30A80 590B0E96 F3AC2F23`). It **only names** the device and proves nothing -- which is
+   why the next line matters.
+2. `devid prove` refuses outright and **produces no MAC**: this board has no key slot, so the
+   implementation takes the fail-closed branch rather than a "here is a zero MAC" shape that looks like
+   success. A MAC of zeros would let any device impersonate it.
+3. `devid check` reports the length first when the MAC is the wrong size and never reaches the
+   comparison -- the length check sits before the compare, so "prefix-compare a short MAC" cannot become
+   a forgery entry point.
+
+`sec` item 15, `device.identity`, reports SKIP in this profile (source is `UID_ONLY`, neither OTP nor
+`BUILTIN`) -- **"cannot look" is never reported as PASS**. Seeing a PASS needs a board that really
+implements the OTP secret hook, and that belongs to the production line (see `docs/已知限制.en.md`
+section 4 and the SEC-G13 row of `docs/安全认证准备.en.md`).
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine

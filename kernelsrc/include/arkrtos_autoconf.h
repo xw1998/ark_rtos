@@ -40,6 +40,9 @@
 #ifndef ARKRTOS_CPU_NUM
 #define ARKRTOS_CPU_NUM (1)
 #endif
+#ifndef ARKRTOS_DEVICE_ID_LEN
+#define ARKRTOS_DEVICE_ID_LEN (16)
+#endif
 #ifndef ARKRTOS_DEV_MAX_NUM
 #define ARKRTOS_DEV_MAX_NUM (8)
 #endif
@@ -237,6 +240,9 @@
 #endif
 #ifndef ARKRTOS_USE_CRASH_LOG
 #define ARKRTOS_USE_CRASH_LOG 1
+#endif
+#ifndef ARKRTOS_USE_DEVICE_ID
+#define ARKRTOS_USE_DEVICE_ID 0
 #endif
 #ifndef ARKRTOS_USE_DYNLOAD
 #define ARKRTOS_USE_DYNLOAD 0

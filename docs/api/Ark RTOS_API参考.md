@@ -14,6 +14,7 @@
 - [kernelsrc/include/arkrtos_blk.h](#kernelsrcincludearkrtos_blkh)（13 项）
 - [kernelsrc/include/arkrtos_cfg.h](#kernelsrcincludearkrtos_cfgh)（1 项）
 - [kernelsrc/include/arkrtos_crash.h](#kernelsrcincludearkrtos_crashh)（22 项）
+- [kernelsrc/include/arkrtos_devid.h](#kernelsrcincludearkrtos_devidh)（9 项）
 - [kernelsrc/include/arkrtos_dt.h](#kernelsrcincludearkrtos_dth)（11 项）
 - [kernelsrc/include/arkrtos_ed25519.h](#kernelsrcincludearkrtos_ed25519h)（1 项）
 - [kernelsrc/include/arkrtos_elf.h](#kernelsrcincludearkrtos_elfh)（13 项）
@@ -2437,6 +2438,126 @@ void arkrtos_crash_mini_forget(uint32 hash);
 ```
 
 **Forget this path's crash history and clear its disabled state.**
+
+## kernelsrc/include/arkrtos_devid.h
+
+**Per-device identity and challenge-response proof (SEC-G13)**
+Every other security item answers "is this thing right": the image
+signature (SEC-G10) says who signed a firmware, the trust root
+(SEC-G12) says whether the verification key is still the one that was
+
+### `int32 arkrtos_devid_boot(void);`
+
+```c
+int32 arkrtos_devid_boot(void);
+```
+
+**Collect the chip ID and the per-device secret, derive the public ID.**
+**返回**：ARKRTOS_DEVID_OK when the ID was derived (a secret is optional);
+ARKRTOS_DEVID_ERR_RANGE when a board hook asked for more room than the
+internal buffers have; ARKRTOS_DEVID_ERR_STATE when no chip ID was
+available, so there is nothing to name.
+Safe to call once per boot, before anything authenticates. Calling it
+again repeats the collection; there is no latch, because reading a
+chip ID twice is not an event.
+
+### `uint32 arkrtos_devid_ready(void);`
+
+```c
+uint32 arkrtos_devid_ready(void);
+```
+
+**1 when arkrtos_devid_prove() can answer (a secret is in force).**
+
+### `int32 arkrtos_devid_id(uint8 *p_out, uint32 cap, uint32 *p_len);`
+
+```c
+int32 arkrtos_devid_id(uint8 *p_out, uint32 cap, uint32 *p_len);
+```
+
+**Copy the public device ID out.**
+- `p_out`：destination (at least id_len bytes)
+- `cap`：capacity of p_out
+- `p_len`：set to the number of bytes copied
+**返回**：ARKRTOS_DEVID_OK, ERR_PARAM on null pointers, ERR_STATE before boot,
+ERR_RANGE when cap is too small
+
+### `int32 arkrtos_devid_prove(const uint8 *p_challenge, uint32 len, uint8 `
+
+```c
+int32 arkrtos_devid_prove(const uint8 *p_challenge, uint32 len, uint8 mac[ARKRTOS_DEVID_MAC_LEN]);
+```
+
+**Answer a challenge: HMAC-SHA256(secret, "ark-devid-proof-v1" || challenge).**
+- `p_challenge`：caller-supplied bytes (1..ARKRTOS_DEVID_CHALLENGE_MAX)
+- `len`：challenge length
+- `mac`：32-byte output
+**返回**：ARKRTOS_DEVID_OK; ERR_PARAM on a null/empty/oversized challenge;
+ERR_NOKEY when no per-device secret is in force (fail closed)
+> 说明：The answer is different for every challenge, so recording one exchange
+does not let anyone answer the next one.
+
+### `int32 arkrtos_devid_check(const uint8 *p_challenge, uint32 len, const `
+
+```c
+int32 arkrtos_devid_check(const uint8 *p_challenge, uint32 len, const uint8 mac[ARKRTOS_DEVID_MAC_LEN]);
+```
+
+**Recomputed locally and compare in constant time.**
+**返回**：ARKRTOS_DEVID_OK when the MAC matches, ERR_MISMATCH when it does not,
+plus the codes arkrtos_devid_prove() can return
+This is the verifier half, used by self-test and by any local
+loopback. The comparison never returns early on the first differing
+byte: an early return leaks how much of a forged MAC was right.
+
+### `int32 arkrtos_devid_status_get(arkrtos_devid_status_t *p_out);`
+
+```c
+int32 arkrtos_devid_status_get(arkrtos_devid_status_t *p_out);
+```
+
+**Copy the last boot's status out.**
+- `p_out`：destination; zeroed first
+**返回**：ARKRTOS_DEVID_OK, or ERR_PARAM on a null pointer
+
+### `const char *arkrtos_devid_src_name(uint32 source);`
+
+```c
+const char *arkrtos_devid_src_name(uint32 source);
+```
+
+**Human-readable source name, for the sec report and the shell.**
+
+### `int32 arkrtos_port_devid_uid(uint8 *p_out, uint32 cap, uint32 *p_len);`
+
+```c
+int32 arkrtos_port_devid_uid(uint8 *p_out, uint32 cap, uint32 *p_len);
+```
+
+**Read the chip's unique ID.**
+- `p_out`：caller's buffer
+- `cap`：capacity of p_out
+- `p_len`：set to the number of bytes written (typically 12 for a 96-bit
+UID; anything from 1 to 32 is accepted)
+**返回**：0 when an ID was returned; anything else means "this part has none"
+> 说明：An implementation must not synthesise an ID from a counter or from
+uninitialised memory: a name that changes between boots is not an
+identity, and one that every unit shares is not either.
+
+### `int32 arkrtos_port_devid_secret(uint8 *p_out, uint32 cap);`
+
+```c
+int32 arkrtos_port_devid_secret(uint8 *p_out, uint32 cap);
+```
+
+**Read the per-device secret from non-volatile storage.**
+- `p_out`：caller's buffer
+- `cap`：capacity of p_out (16 to 64 bytes are accepted)
+**返回**：the number of bytes written, or a negative value when this board has
+no such slot
+> 说明：Called once per boot. An implementation that reads OTP must not write
+it, and must not return a value it derived from public data (a secret
+everyone can compute is not a secret).
 
 ## kernelsrc/include/arkrtos_dt.h
 

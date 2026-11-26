@@ -202,6 +202,9 @@ int cmd_selftest(int argc, char *argv[]);
 #if (ARKRTOS_USE_FAULT_INJECT == 1)
 int cmd_fi(int argc, char *argv[]);
 #endif
+#if (ARKRTOS_USE_DEVICE_ID == 1)
+int cmd_devid(int argc, char *argv[]);
+#endif
 int cmd_stack(int argc, char *argv[]);
 #if (ARKRTOS_USE_TASK_SWAP == 1)
 int cmd_swap(int argc, char *argv[]);

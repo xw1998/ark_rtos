@@ -1386,6 +1386,40 @@ config ARKRTOS_USE_TRUST_ROOT
 	  Off (the default) compiles the module out: no symbols, no bytes, and
 	  the accept path is exactly what it was.
 
+config ARKRTOS_USE_DEVICE_ID
+	bool "Device identity: derived ID + challenge-response (SEC-G13)"
+	default n
+	help
+	  A per-device identity that can be verified off-board without shipping
+	  the secret: the public ID names the device, and a challenge-response
+	  HMAC proves the caller holds the same secret the device holds.
+
+	  The public ID is SHA256("ark-devid-v1" || uid) truncated to
+	  ARKRTOS_DEVICE_ID_LEN bytes.  It names, it proves nothing.  The proof
+	  is HMAC-SHA256(secret, "ark-devid-proof-v1" || challenge), computed by
+	  arkrtos_devid_prove() and checked by arkrtos_devid_check().
+
+	  uid and secret come from the board through arkrtos_port_devid_uid()
+	  and arkrtos_port_devid_secret().  Only the OTP source counts as a
+	  trustworthy identity; a compile-time ARKRTOS_DEVICE_SECRET fallback
+	  reports BUILTIN so a caller can tell the difference.  No secret means
+	  fail closed: prove() returns ERR_NOKEY and never emits an all-zero MAC.
+
+	  NOT done here, on purpose: production provisioning (OTP fusing,
+	  certificate issuance, key custody), key rotation, and revocation
+	  proofs.  See docs/安全认证准备.md and docs/已知限制.md.
+
+	  Off (the default) compiles arkrtos_devid.c out: no symbols, no bytes.
+
+config ARKRTOS_DEVICE_ID_LEN
+	int "Derived device ID length in bytes (8..32)"
+	range 8 32
+	default 16
+	help
+	  Length of the public ID, in bytes.  16 bytes (128 bits) is plenty to
+	  make accidental collisions negligible while staying short enough to
+	  print on a label and type by hand.  The value must be 8..32.
+
 config ARKRTOS_USE_EXEC_SIGN
 	bool "Signature gate for exec and ld (requires IMAGE_SIGN)"
 	default n

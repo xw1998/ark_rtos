@@ -17,6 +17,9 @@
 #if (ARKRTOS_USE_TRUST_ROOT == 1)
 #include "arkrtos_trust.h"
 #endif
+#if (ARKRTOS_USE_DEVICE_ID == 1)
+#include "arkrtos_devid.h"
+#endif
 
 #if (ARKRTOS_USE_SECCHECK == 1)
 
@@ -587,6 +590,56 @@ static void sec_check_trust(arkrtos_sec_report_t *p_rep)
 #endif
 }
 
+/* 15. 设备身份（SEC-G13）：这台设备能不能证明"我是我"。
+ *     和信任根一样，最怕把"没有一次性槽"读成"没问题"，所以分档写死：
+ *       - 板级 OTP 出 uid + 出密钥 -> PASS（身份成立）
+ *       - 只有编进固件的密钥        -> FINDING（能应答，但谁重烧都能顶替）
+ *       - 只拿到 uid、没有密钥      -> SKIP（有名字，证不了）
+ *       - 什么也没拿到              -> SKIP（没得看，不是看过了没问题）
+ *     档关时同样报 SKIP，理由是"这一版镜像没有这条防线"。 */
+static void sec_check_devid(arkrtos_sec_report_t *p_rep)
+{
+#if (ARKRTOS_USE_DEVICE_ID == 1)
+    arkrtos_devid_status_t st;
+
+    (void)arkrtos_devid_status_get(&st);
+
+    if(st.source == (uint32)ARKRTOS_DEVID_SRC_OTP)
+    {
+        if(st.ready != 0u)
+        {
+            sec_add(p_rep, "device.identity", (uint32)ARKRTOS_SEC_PASS,
+                    "uid and secret read from board OTP: %u-byte ID, challenge-response ready",
+                    st.id_len, 0u, 0u, 0u);
+        }
+        else
+        {
+            sec_add(p_rep, "device.identity", (uint32)ARKRTOS_SEC_SKIP,
+                    "OTP produced a uid but no usable secret: cannot answer a challenge (%u bytes)",
+                    st.uid_len, 0u, 0u, 0u);
+        }
+    }
+    else if(st.source == (uint32)ARKRTOS_DEVID_SRC_BUILTIN)
+    {
+        /* 密钥编进固件：能算 MAC，但换一份固件就换了身份。
+         * 不是 FAIL（应答链本身没坏），也不是 PASS（身份没扎在板上）。 */
+        sec_add(p_rep, "device.identity", (uint32)ARKRTOS_SEC_FINDING,
+                "secret comes from this firmware image, not from the board: a reflash can clone the identity",
+                st.id_len, 0u, 0u, 0u);
+    }
+    else
+    {
+        sec_add(p_rep, "device.identity", (uint32)ARKRTOS_SEC_SKIP,
+                "no device secret in force (uid %u bytes): the ID names but proves nothing",
+                st.uid_len, 0u, 0u, 0u);
+    }
+#else
+    sec_add(p_rep, "device.identity", (uint32)ARKRTOS_SEC_SKIP,
+            "not compiled (ARKRTOS_USE_DEVICE_ID=0): the board has no identity this kernel can prove",
+            0u, 0u, 0u, 0u);
+#endif
+}
+
 uint32 arkrtos_sec_run(arkrtos_sec_report_t *p_out)
 {
     if(p_out == 0)
@@ -614,6 +667,7 @@ uint32 arkrtos_sec_run(arkrtos_sec_report_t *p_out)
     sec_check_rt(p_out);
     sec_check_app_quota(p_out);
     sec_check_trust(p_out);
+    sec_check_devid(p_out);
 
     return p_out->fail;
 }

@@ -21,6 +21,9 @@
 #include "arkrtos_config.h"
 #include "arkrtos_board.h"
 #include "arkrtos_trace.h"     /* arkrtos_trace_init()：内核事件追踪 */
+#if (ARKRTOS_USE_DEVICE_ID == 1)
+#include "arkrtos_devid.h"
+#endif
 
 #ifdef ARKRTOS_BOARD_CONFIG
 #include ARKRTOS_BOARD_CONFIG
@@ -547,3 +550,38 @@ void arkrtos_port_fatal_report(uint32 code)
     arkrtos_board_puthex(crmd);
     arkrtos_board_puts("\n[Ark RTOS] halted.\n");
 }
+
+/* ------------------------------------------------------------------
+ * 设备身份（SEC-G13）的板级钩子
+ *
+ * QEMU virt 没有熔丝阵列：这里没有唯一号可读，也没有 OTP 密钥槽。但"没有"
+ * 本身值得在这台模拟器上演示一次——本函数给一个**固定的、标注为模拟的**
+ * uid（"qemu-la64" 的 9 字节），于是：
+ *   - 派生出来的 ID 每次开机都一样，`devid` 命令能打印出来，脚本可以比；
+ *   - 没有密钥，所以 ready=0、`devid prove ...` 会明确回"拒绝"而不是吐全零 MAC。
+ * 换句话说，L3 上跑通的是**失败关闭**那一条，不是"身份成立"。真实身份要
+ * 板子把 arkrtos_port_devid_uid()/arkrtos_port_devid_secret() 接到 OTP 上。
+ * ------------------------------------------------------------------ */
+#if (ARKRTOS_USE_DEVICE_ID == 1)
+int32 arkrtos_port_devid_uid(uint8 *p_out, uint32 cap, uint32 *p_len)
+{
+    static const uint8 s_qemu_uid[9] = { 'q', 'e', 'm', 'u', '-', 'l', 'a', '6', '4' };
+    uint32 i;
+
+    if((p_out == 0) || (p_len == 0))
+    {
+        return -1;
+    }
+    if(cap < (uint32)sizeof(s_qemu_uid))
+    {
+        *p_len = (uint32)sizeof(s_qemu_uid);
+        return 0;
+    }
+    for(i = 0u; i < (uint32)sizeof(s_qemu_uid); i++)
+    {
+        p_out[i] = s_qemu_uid[i];
+    }
+    *p_len = (uint32)sizeof(s_qemu_uid);
+    return 0;
+}
+#endif /* ARKRTOS_USE_DEVICE_ID */

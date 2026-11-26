@@ -202,6 +202,7 @@ static int register_kernel_commands(void)
              + ((ARKRTOS_USE_SHELL_AUTH == 1) ? 2 : 0)
              + ((ARKRTOS_USE_ROLLBACK == 1) ? 1 : 0)
              + ((ARKRTOS_USE_SELFTEST == 1) ? 1 : 0)
+             + ((ARKRTOS_USE_DEVICE_ID == 1) ? 1 : 0)
              + (ARKRTOS_USE_FDT ? 1 : 0);
 
     if((idx + need) > ARK_SHELL_MAX_COMMANDS)
@@ -337,6 +338,11 @@ static int register_kernel_commands(void)
         "Fault injection / tamper watch: fi [list] | arm <alloc|task|tick> "
         "[n] | clear | test | watch <i> <addr> <len> | scan [i]", 5);
 #endif /* ARKRTOS_USE_FAULT_INJECT */
+#if (ARKRTOS_USE_DEVICE_ID == 1)
+    g_cmd_table[idx++] = ARK_SHELL_CMD("devid", cmd_devid,
+        "Device identity (SEC-G13): devid | prove <hex-challenge> | "
+        "check <hex-challenge> <hex-mac>", 4);
+#endif /* ARKRTOS_USE_DEVICE_ID */
 
 #if ARKRTOS_USE_KERNEL_GUARD
     g_cmd_table[idx++] = ARK_SHELL_CMD("guard", cmd_guard,

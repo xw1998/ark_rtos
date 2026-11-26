@@ -6255,6 +6255,34 @@ def check_trust_root():
     else:
         fail("trust-root", txt[-300:])
 
+def check_device_identity():
+    """Device identity (SEC-G13): a name for the board, and a way to prove it.
+
+    tools/devid_gate.py holds the five groups: the switch defaults to OFF and
+    features.h / Kconfig / defconfig / autoconf must agree (including the
+    8..32 length range); the OFF object must export no symbol; the module plus
+    three wirings (init's boot call, sec's fifteenth item, the shell command)
+    must compile with the switch ON; the host cases must pass in three builds
+    (OFF, ON, and ON + a compile-time ARKRTOS_DEVICE_SECRET), plus two runs of
+    the sec report (PASS / FINDING / SKIP x2); and four mutations (keyless
+    board returns an all-zero MAC / a firmware-wide secret reported as OTP /
+    a sub-minimum secret marked ready / FINDING reported as PASS) must all
+    turn red.
+
+    What this does NOT prove: that the board really has an OTP fuse bank, that
+    anything was provisioned in production, or that a key can be rotated or a
+    stolen device revoked.  Those are process and silicon, not kernel code;
+    arkrtos_devid.h says so in its header, and docs/已知限制.md carries the
+    rest.  A firmware-embedded secret is reported as BUILTIN precisely so a
+    caller cannot mistake it for a per-device identity.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "devid_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "DEVID-GATE OK" in txt:
+        ok("device-id", "OFF default + zero-symbol OFF object + module & 3 wirings + host cases OFF/ON/BUILTIN + sec 3-state report + 4 mutations")
+    else:
+        fail("device-id", txt[-300:])
+
 def check_coverage_host():
     """Line coverage of the modules the host tests actually link.
 
@@ -6450,6 +6478,7 @@ CHECK_TABLE = (
     ("selftest", check_selftest),
     ("fault-inject", check_fault_inject),
     ("trust-root", check_trust_root),
+    ("device-id", check_device_identity),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),
     ("analyzer", check_analyzer),

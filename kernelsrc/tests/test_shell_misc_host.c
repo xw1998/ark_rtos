@@ -39,6 +39,10 @@
 #include "ark_shell_commands.h"
 #include "platform.h"
 
+#if (ARKRTOS_USE_DEVICE_ID == 1)
+#include "arkrtos_devid.h"
+#endif
+
 /* ------------------------------------------------------------ assertions */
 
 static int g_checks;
@@ -119,6 +123,9 @@ int cmd_man(int argc, char *argv[]);
 int cmd_dmesg(int argc, char *argv[]);
 int cmd_hwsafe(int argc, char *argv[]);
 int cmd_swap(int argc, char *argv[]);
+#if (ARKRTOS_USE_DEVICE_ID == 1)
+int cmd_devid(int argc, char *argv[]);
+#endif
 int cmd_lxstat(int argc, char *argv[]);
 
 /* 下面这些是被测文件调用的内核侧符号。它们不在被测文件的头里（真实定义
@@ -409,6 +416,220 @@ static int call2(int (*fn)(int, char **), const char *a0, const char *a1)
     argv[2] = NULL;
     return fn(2, argv);
 }
+
+static int call3(int (*fn)(int, char **), const char *a0, const char *a1, const char *a2)
+{
+    char n0[64];
+    char n1[600];
+    char n2[128];
+    char *argv[4];
+
+    snprintf(n0, sizeof(n0), "%s", a0);
+    snprintf(n1, sizeof(n1), "%s", a1);
+    snprintf(n2, sizeof(n2), "%s", a2);
+    argv[0] = n0;
+    argv[1] = n1;
+    argv[2] = n2;
+    argv[3] = NULL;
+    return fn(3, argv);
+}
+
+static int call4(int (*fn)(int, char **), const char *a0, const char *a1,
+                 const char *a2, const char *a3)
+{
+    char n0[64];
+    char n1[600];
+    char n2[128];
+    char n3[600];
+    char *argv[5];
+
+    snprintf(n0, sizeof(n0), "%s", a0);
+    snprintf(n1, sizeof(n1), "%s", a1);
+    snprintf(n2, sizeof(n2), "%s", a2);
+    snprintf(n3, sizeof(n3), "%s", a3);
+    argv[0] = n0;
+    argv[1] = n1;
+    argv[2] = n2;
+    argv[3] = n3;
+    argv[4] = NULL;
+    return fn(4, argv);
+}
+
+
+#if (ARKRTOS_USE_DEVICE_ID == 1)
+/* ------------------------------------------------------------ devid（SEC-G13）
+ * cmd_devid 只读不写：把"这份身份从哪来、能不能应答"打到控制台上。这里钉的
+ * 是它的三件事 —— 读数对不对、拿不到密钥时是不是明确拒绝、MAC 校验是不是
+ * 只在完全相同时才说 match。板级的两只钩子由下面的强符号替身提供。 */
+
+static uint8 g_dv_uid[12];
+static int   g_dv_uid_ok;
+static uint8 g_dv_sec[32];
+static int   g_dv_sec_len;      /* <= 0 表示没有密钥槽 */
+
+int32 arkrtos_port_devid_uid(uint8 *p_out, uint32 cap, uint32 *p_len)
+{
+    uint32 i;
+
+    if(g_dv_uid_ok == 0)
+    {
+        return -1;
+    }
+    if(cap < 12u)
+    {
+        *p_len = 12u;
+        return 0;
+    }
+    for(i = 0u; i < 12u; i++)
+    {
+        p_out[i] = g_dv_uid[i];
+    }
+    *p_len = 12u;
+    return 0;
+}
+
+int32 arkrtos_port_devid_secret(uint8 *p_out, uint32 cap)
+{
+    int i;
+
+    if(g_dv_sec_len <= 0)
+    {
+        return -1;
+    }
+    if((uint32)g_dv_sec_len > cap)
+    {
+        return g_dv_sec_len;
+    }
+    for(i = 0; i < g_dv_sec_len; i++)
+    {
+        p_out[i] = g_dv_sec[i];
+    }
+    return g_dv_sec_len;
+}
+
+/* 从 "mac      : <hex>" 那一行抠出十六进制串，给 check 用。 */
+static int grab_hex_line(const char *prefix, char *out, size_t out_size)
+{
+    const char *p = strstr(g_out, prefix);
+    size_t n = 0u;
+
+    if(p == NULL)
+    {
+        return -1;
+    }
+    p += strlen(prefix);
+    while((*p != '\0') && (*p != '\r') && (*p != '\n') && (n + 1u < out_size))
+    {
+        out[n++] = *p++;
+    }
+    out[n] = '\0';
+    return (n == 0u) ? -1 : 0;
+}
+
+static void test_devid(void)
+{
+    char mac_hex[80];
+    char wrong_hex[80];
+
+    /* 1. 什么都没接：没有名字，也没有证明能力 */
+    g_dv_uid_ok = 0;
+    g_dv_sec_len = -1;
+    (void)arkrtos_devid_boot();
+    cap_reset();
+    CK_I(call1(cmd_devid, "devid"), 0);
+    CK(out_has("source   : none"));
+    CK(out_has("ready    : no"));
+    CK(out_has("(none - no uid"));
+
+    /* 2. 只有芯片号：名字有，证明没有 */
+    g_dv_uid_ok = 1;
+    memset(g_dv_uid, 0x37, sizeof(g_dv_uid));
+    (void)arkrtos_devid_boot();
+    cap_reset();
+    CK_I(call1(cmd_devid, "devid"), 0);
+    CK(out_has("source   : uid-only"));
+    CK(out_has("note     : uid only"));
+
+    /* 3. 没有密钥时 prove 必须明确拒绝，而不是吐一个全零 MAC */
+    cap_reset();
+    CK_I(call3(cmd_devid, "devid", "prove", "0102"), -1);
+    CK(out_has("no usable secret - refusing"));
+    CK(!out_has("mac      :"));
+
+    /* 4. 号 + 密钥：ready，能算 MAC，能自校验 */
+    memset(g_dv_sec, 0x5C, sizeof(g_dv_sec));
+    g_dv_sec_len = 32;
+    (void)arkrtos_devid_boot();
+    cap_reset();
+    CK_I(call1(cmd_devid, "devid"), 0);
+    CK(out_has("source   : otp"));
+    CK(out_has("ready    : yes"));
+
+    cap_reset();
+    CK_I(call3(cmd_devid, "devid", "prove", "deadBEEF"), 0);
+    CK(out_has("mac      : "));
+    CK_I(grab_hex_line("mac      : ", mac_hex, sizeof(mac_hex)), 0);
+    CK_I((int)strlen(mac_hex), 64);      /* 32 字节 = 64 个十六进制字符 */
+
+    /* 同一个 MAC 交给 check：必须 match */
+    cap_reset();
+    CK_I(call4(cmd_devid, "devid", "check", "deadBEEF", mac_hex), 0);
+    CK(out_has("MAC matches"));
+
+    /* 改一个字符：必须不 match */
+    snprintf(wrong_hex, sizeof(wrong_hex), "%s", mac_hex);
+    wrong_hex[0] = (wrong_hex[0] == '0') ? '1' : '0';
+    cap_reset();
+    CK_I(call4(cmd_devid, "devid", "check", "deadBEEF", wrong_hex), -1);
+    CK(out_has("MAC does NOT match"));
+
+    /* 5. 形参检查与坏输入：每一条都要说清原因并返回非 0 */
+    cap_reset();
+    CK_I(call1(cmd_devid, "devid"), 0);
+    cap_reset();
+    CK_I(call2(cmd_devid, "devid", "prove"), -1);
+    CK(out_has("usage: devid prove"));
+    cap_reset();
+    CK_I(call3(cmd_devid, "devid", "prove", "zz"), -1);
+    CK(out_has("bad challenge hex"));
+    cap_reset();
+    CK_I(call3(cmd_devid, "devid", "prove", "abc"), -1);
+    CK(out_has("bad challenge hex"));       /* 奇数个数字不是一个字节 */
+    cap_reset();
+    CK_I(call2(cmd_devid, "devid", "check"), -1);
+    CK(out_has("usage: devid check"));
+    cap_reset();
+    CK_I(call4(cmd_devid, "devid", "check", "01", "0000"), -1);
+    CK(out_has("mac must be 32 bytes, got 2"));
+    cap_reset();
+    CK_I(call2(cmd_devid, "devid", "bogus"), -1);
+    CK(out_has("usage: devid"));
+
+    /* 5b. 十六进制解析的边界：空格分隔、空串、非十六进制、多余空格 */
+    cap_reset();
+    CK_I(call3(cmd_devid, "devid", "prove", "de ad be ef"), 0);
+    CK(out_has("mac      : "));
+    cap_reset();
+    CK_I(call3(cmd_devid, "devid", "prove", ""), -1);
+    CK(out_has("bad challenge hex"));
+    cap_reset();
+    CK_I(call3(cmd_devid, "devid", "prove", "0g"), -1);
+    CK(out_has("bad challenge hex"));
+    cap_reset();
+    CK_I(call4(cmd_devid, "devid", "check", "z1", mac_hex), -1);
+    CK(out_has("bad challenge hex"));
+    cap_reset();
+    CK_I(call4(cmd_devid, "devid", "check", "01", "zz"), -1);
+    CK(out_has("bad mac hex"));
+
+    /* 6. 密钥槽被拿掉之后 check 也要如实说"这边验不了" */
+    g_dv_sec_len = -1;
+    (void)arkrtos_devid_boot();
+    cap_reset();
+    CK_I(call4(cmd_devid, "devid", "check", "01", mac_hex), -1);
+    CK(out_has("no usable secret here"));
+}
+#endif /* ARKRTOS_USE_DEVICE_ID */
 
 /* ------------------------------------------------------------ tests */
 
@@ -788,6 +1009,9 @@ int main(void)
     test_hwsafe();
     test_swap();
     test_lxstat();
+#if (ARKRTOS_USE_DEVICE_ID == 1)
+    test_devid();
+#endif
 
     if (g_failed != 0) {
         printf("SHELL-MISC-HOST FAILED  %d of %d\n", g_failed, g_checks);
