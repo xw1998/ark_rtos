@@ -1643,10 +1643,18 @@ void linux_main(unsigned long sp)
                      * 「等几毫秒」可靠得多。这里必须**真的让出 CPU** —— 纯
                      * 自旋会把这个单核一直占住，父进程连一次 LOCK_PI 都跑
                      * 不到，WAITERS 永远不出现。本机没有 sched_yield，用
-                     * FUTEX_WAIT 带 0.5 ms 超时是唯一能主动交棒的调用。等
-                     * 不到就先投 SIGCHLD 兜底，让父进程那次 LOCK_PI 回
-                     * -EINTR（读数是红的）。 */
-                    for (spins = 0; spins < 2000; spins++)
+                     * FUTEX_WAIT 带超时是唯一能主动交棒的调用。等不到就先投
+                     * SIGCHLD 兜底，让父进程那次 LOCK_PI 回 -EINTR（读数是
+                     * 红的）。
+                     *
+                     * 超时必须是**整毫秒**：本内核 timespec 换算是
+                     * ms = ts[0]*1000 + ts[1]/1000000（截断），0.5 ms 会被
+                     * 取整成 0，FUTEX_WAIT 立刻回 -ETIMEDOUT，循环退化成
+                     * 不交棒的空转（旧的 0.5 ms/2000 轮就是这么时红时绿的：
+                     * 父进程还没排上队，子进程已经把 2000 轮跑完退出）。
+                     * 5 ms × 400 轮 = 最坏 2 s，正常几毫秒内看到 WAITERS
+                     * 就 break。 */
+                    for (spins = 0; spins < 400; spins++)
                     {
                         if ((*lock & LX_FUTEX_WAITERS) != 0ul)
                         {
@@ -1657,7 +1665,7 @@ void linux_main(unsigned long sp)
                             lx_long ts[2];
 
                             ts[0] = 0;
-                            ts[1] = 500000L;    /* 0.5 ms */
+                            ts[1] = 5000000L;   /* 5 ms（见上：必须整毫秒） */
                             (void)lx4(LX_FUTEX, (lx_long)(unsigned long)yld,
                                       LX_FUTEX_WAIT, 0,
                                       (lx_long)(unsigned long)ts);
@@ -1996,9 +2004,10 @@ void linux_main(unsigned long sp)
                     /* 子进程不能忙等：它不让步，父进程根本轮不到去 sleep，
                      * 结果 CMP_REQUEUE 永远看不到等待者，子进程把预算烧完
                      * 退出、父进程才去睡 —— 一次必定超时的假红（实测偶发）。
-                     * 0.5 ms 一次的重试既让步又给了 60 轮 100 ms 的父进程
-                     * 足够窗口（共 5 s，父进程那边总共 6 s）。 */
-                    for (tries = 0; tries < 10000; tries++)
+                     * 每次重试先让步 5 ms（同样必须整毫秒，0.5 ms 会被截断
+                     * 成 0，等于空转不让步），1000 轮 = 最坏 5 s，与父进程
+                     * 60 轮 × 100 ms = 6 s 的窗口对得上。 */
+                    for (tries = 0; tries < 1000; tries++)
                     {
                         lx_long yld[2];
 
@@ -2022,12 +2031,12 @@ void linux_main(unsigned long sp)
                             break;          /* 真错误：不再重试 */
                         }
                         /* 让步：在这一页里另挑一个字（与 q / q2 不同键，
-                         * 没人等它）睡 0.5 ms。本机没有 sched_yield 也没有
+                         * 没人等它）睡 5 ms。本机没有 sched_yield 也没有
                          * nanosleep，FUTEX_WAIT 带 timeout 是唯一能主动交出
                          * CPU 的路；栈上的字没有键（回 -ENOSYS），所以必须
                          * 用这张映射页里的字。 */
                         yld[0] = 0;
-                        yld[1] = 500000L;
+                        yld[1] = 5000000L;
                         (void)lx4(LX_FUTEX,
                                   (lx_long)(unsigned long)(q + 64),
                                   LX_FUTEX_WAIT, 0,
