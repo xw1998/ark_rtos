@@ -655,7 +655,11 @@ static void t_print_n(void)
 /* The privilege-separated + paging build must refuse App registrations: the
  * trampoline would otherwise run App code in PLV0 on the console task stack.
  * Kernel-side registration (is_priv != 0) keeps working, which is what the
- * board and drivers use. */
+ * board and drivers use.
+ *
+ * Guarded by the same switch as main(): the APP_CB=1 arm never calls it, and
+ * an unguarded definition would trip -Wunused-function in warn_gate. */
+#if (ARKRTOS_USE_USHELL_APP_CB == 0)
 static void t_app_cb_refused(void)
 {
     arkrtos_ushell_cmd_t c;
@@ -692,6 +696,7 @@ static void t_app_cb_refused(void)
     CK_I(g_cmd_count, 0);
     CK_I(g_ushell[0].in_use, 0u);
 }
+#endif /* ARKRTOS_USE_USHELL_APP_CB == 0 */
 
 /* ------------------------------------------------------------ main */
 
