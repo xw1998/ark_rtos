@@ -775,7 +775,7 @@ robust 参数面 / 退出清理的记账），跨进程面留给 QEMU 那 37 条
 | 普通文件 `write` | 仍 `-ENOSYS`：写内容只走映射写回这一条路，不假装写进去了 |
 | `mprotect` | 不受影响：仍是只校验不生效（§1），PROT_EXEC 无法硬件强制（LA64 这条通路没有 NR/NX 位） |
 
-读数（`tools/fork_gate.py` 的第五档 fork+COW+SHM+futex+filemap，**96 条 check**，其中 filemap 段 20 条）：
+读数（`tools/fork_gate.py` 的第五档 fork+COW+SHM+futex+filemap，**133 条 check**，其中 filemap 段 20 条）：
 
 | 读数 | 钉住什么 |
 |---|---|
@@ -821,7 +821,7 @@ RV32 一并放宽，是为了不留下同一个「读成 0」的坑。
 | 撤销 | 再 `mprotect` 一次 `PROT_READ|PROT_WRITE` 即撤。COW 共享对本来只读，撤 mprotect 不会把它放开（放开就是绕过写时复制，两个进程从此各写各的帧） |
 | 日志 | 违规写打一行 `[LA64U] mprotect violation badv=0x… era=0x… tid=… -> kill task`（带 `tid` 是为了运维知道摘的是哪个任务，门禁按这行做交叉证据） |
 
-读数（第五档 + `-DARKRTOS_USE_PAGING_MPROTECT=1`，**107 条 check**，其中 mprotect 段 11 条）：
+读数（第五档 + `-DARKRTOS_USE_PAGING_MPROTECT=1`，**144 条 check**，其中 mprotect 段 11 条）：
 
 | 读数 | 钉住什么 |
 |---|---|
@@ -932,7 +932,7 @@ EXTRA_CFLAGS**，所以夹具看不到内核的编译开关。这一段只在 `A
 | 阻塞形式 | 与 futex 同型：`arkrtos_port_svc_restart` + `arkrtos_task_block_in_critical(100 ms)`，截止时刻存 per-task（**存截止时刻**，不是剩余时长 —— 否则每次重放都会重新计时）；没有可重放端口时如实回 `-EAGAIN` |
 | 任务号复用 | 任务退出与 `reset` 都清掉 `s_sel_armed/s_sel_deadline`：任务号会被复用，不清就是「新任务继承一条已经在等的旧记录」 |
 
-读数（`tools/fork_gate.py` 第七档，夹具 107 → **122 条**，其中 select 15 条）：
+读数（`tools/fork_gate.py` 第七档，夹具 144 → **160 条**，其中 select 15 条）：
 
 | 读数 | 钉住什么 |
 |---|---|
@@ -963,7 +963,7 @@ EXTRA_CFLAGS**，所以夹具看不到内核的编译开关。这一段只在 `A
 放在同一个开关下，会让「关档零体积」这条承诺变成「关档少了一半功能」。
 `ARKRTOS_USE_LINUX_SELECT` 只依赖 `ARKRTOS_USE_LINUX_ABI`。
 
-### 8.9 socket（U-23）：翻译层与 QEMU 第八档（2026-11-24，宿主 581 checks + QEMU 161 条）
+### 8.9 socket（U-23）：翻译层与 QEMU 第八档（2026-11-24，宿主 581 checks + QEMU 198 条）
 
 13 个号落地：`socket`(198)、`bind`(200)、`listen`(201)、`accept`(202)、`connect`(203)、
 `getsockname`(204)、`getpeername`(205)、`sendto`(206)、`recvfrom`(207)、`setsockopt`(208)、
@@ -996,9 +996,9 @@ EXTRA_CFLAGS**，所以夹具看不到内核的编译开关。这一段只在 `A
 在宿主上跑 `test_linux_abi_host.c` 的 socket 段：单档 **98.73%**，六档 union **98.48%**
 （基线 97.96%），整档 **581 checks** 全绿。
 
-**QEMU 第八档：161 条 check 全 `ok` + `exit code 0`。** `tools/fork_gate.py` 的第八档
+**QEMU 第八档：198 条 check 全 `ok` + `exit code 0`。** `tools/fork_gate.py` 的第八档
 （`SELECT+SOCKET+LWIP`）在 LA64 上真跑 `example/qemu_loongarch64/elf/linux_fork.c` 的
-socket 段（38 条）加一条性能回归门（1 条），叠在第七档 122 条之上：
+socket 段（38 条）加一条性能回归门（1 条），叠在第七档 160 条之上：
 
 读取对象是**真 lwIP 回环**（`127.0.0.1`），不是桩：`socket` 建 stream/dgram 两个句柄；
 坏 domain / 坏 type / 不支持的 type 各自的 errno；`bind` + `listen` + `getsockname` 端口按
@@ -1063,7 +1063,7 @@ exit code 0`）。这条也进了判据：
 - **两条 `child reaped -> N ok` 的 `N` 是子进程 pid**，随档位变化（6 / 12 / 15 都出现过），
   所以判据只判形态（`^\[fork\] futex child reaped -> \d+ ok$`），不写死具体 pid。
 
-### 8.10 线程（`CLONE_THREAD`，U-25）：一组任务共用一份地址空间（2026-11-24，QEMU LA64 第九档 186 条）
+### 8.10 线程（`CLONE_THREAD`，U-25）：一组任务共用一份地址空间（2026-11-24，QEMU LA64 第九档 223 条）
 
 `clone(220)` 的线程分支落地，开关 `ARKRTOS_USE_LINUX_THREAD`（默认关，
 `depends on ARKRTOS_USE_LINUX_FORK`）。与 fork 分支的分流只看 flags：同时带
@@ -1094,8 +1094,8 @@ exit code 0`）。这条也进了判据：
 线程**不登记** `s_child[]`：Linux 的 `wait4` 看不见线程（它们不是子进程），
 所以整组只剩组长一个"对外的进程"。
 
-**QEMU 第九档：186 条 check 全 `ok` + `exit code 0`（600 ms）。** `tools/fork_gate.py`
-的第九档 = 第八档（161 条）+ 线程段 25 条。读数里最要紧的六条：
+**QEMU 第九档：223 条 check 全 `ok` + `exit code 0`（600 ms）。** `tools/fork_gate.py`
+的第九档 = 第八档（198 条）+ 线程段 25 条。读数里最要紧的六条：
 
 - `clone(CLONE_THREAD) > 0 -> 1 ok`、`thread PARENT_SETTID wrote the tid -> 6 ok`；
 - `futex WAIT on CHILD_CLEARTID woke with 0 -> 0 ok` —— 用**真实的 join 路径**
@@ -1148,9 +1148,9 @@ tgid、两栈同址、`exit_group` 码错、缺 clone 读数）必须被判红�
 - **没有优先级 / 调度策略继承的额外语义**：线程就是一个普通任务，优先级、时间片与
   其它任务同档。
 
-### 8.11 每 App 任务配额（`ARKRTOS_USE_APP_QUOTA`，2026-11-24，QEMU LA64 第十档 198 条）
+### 8.11 每 App 任务配额（`ARKRTOS_USE_APP_QUOTA`，2026-11-24，QEMU LA64 第十档 235 条）
 
-第十档 = 第九档（186 条）+ 配额段。它回答的是「一个 App 能不能把任务表吃光」，
+第十档 = 第九档（223 条）+ 配额段。它回答的是「一个 App 能不能把任务表吃光」，
 不是一个新系统调用：装载器给每份 ELF 发一个非零 owner 号（`elf_app_owner_new()`），
 fork 与 `clone(CLONE_THREAD)` 都**继承**同一个 owner，同一 owner 的**活任务**数到
 `ARKRTOS_APP_MAX_TASKS` 时创建失败——`ARKRTOS_ELF_ERR_QUOTA` 在 `lx_fork_errno()`
@@ -1228,22 +1228,22 @@ fork 仍回 `-EAGAIN`（全段最干净的一条）；⑧ 第三个线程回 `-E
   三档门禁实测（关档零符号、开档 40 条读数、SHM 关档的 `-ENOSYS` 对照）。
 - `ARKRTOS_USE_LINUX_FUTEX`（§8.4），默认 **0**，`depends on ARKRTOS_USE_LINUX_ABI` 且
   `features.h` 用 `#error` 顶住这条依赖；关档时不编译等待槽、键解析与 `lx_futex`，98 号落回
-  `-ENOSYS`；开档实测是 fork+COW+SHM+futex 档的 76 条读数（其中 futex 36 条：基本配对 9 + 多时间片 7 +
-  位集/超时/改挂 20）与宿主 futex 档的 366 checks。
+  `-ENOSYS`；开档实测是 fork+COW+SHM+futex 档的 113 条读数（其中 futex 73 条：基本配对 9 + 多时间片 7 +
+  位集/超时/改挂 20 + PI 与 robust 37）与宿主 futex 档的 434 checks。
 - `ARKRTOS_USE_PAGING_FILEMAP`（§8.5），默认 **0**，`depends on ARKRTOS_USE_LINUX_ABI` +
   `ARKRTOS_USE_PAGING` + `ARKRTOS_USE_PAGING_PAGES` + `ARKRTOS_USE_PAGING_DEMAND`（内容靠按需缺页
   拿帧，没有 DEMAND 就装不进映射区），`features.h` 用四条 `#error` 顶住；关档时文件映射分支、
-  写回记账与 `msync` 全不编译，`mmap(fd)` 回 `-ENOSYS`；开档实测是第五档的 96 条读数（其中
+  写回记账与 `msync` 全不编译，`mmap(fd)` 回 `-ENOSYS`；开档实测是第五档的 133 条读数（其中
   filemap 20 条）与宿主 filemap 档的 358 checks。
 - `ARKRTOS_USE_PAGING_MPROTECT`（§8.6），默认 **0**，`depends on ARKRTOS_USE_LINUX_ABI` +
   `ARKRTOS_USE_PAGING` + `ARKRTOS_USE_PAGING_PAGES` + `ARKRTOS_USE_PAGING_DEMAND`
   （要按需缺页拿帧才能改一对的条目），`features.h` 用四条 `#error` 顶住；关档时台账
   `s_pg_page_ro`、`la_pg_page_ro` / `la_pg_mprotect_hit`、端口 `paging_protect` 与
   `mprotect_stat` 全不产出，`mprotect` 回到「只校验参数、返 0、单独计数」；开档实测是
-  **第六档 107 条读数**（其中 mprotect 11 条）与宿主侧编译门禁。
+  **第六档 144 条读数**（其中 mprotect 11 条）与宿主侧编译门禁。
 - `ARKRTOS_USE_LINUX_SELECT`（§8.8），默认 **0**，`depends on ARKRTOS_USE_LINUX_ABI` 且
   `features.h` 用 `#error` 顶住这条依赖；关档时不编译就绪判据、`fd_set` 扫描与
-  `s_sel_armed/s_sel_deadline`，72 号落回 `-ENOSYS`；开档实测是**第七档 122 条读数**
+  `s_sel_armed/s_sel_deadline`，72 号落回 `-ENOSYS`；开档实测是**第七档 160 条读数**
   （其中 select 15 条）与宿主 select 档的 327 checks。
 - `MAP_FIXED`（§8.7）**不是独立开关**：它在 `ARKRTOS_USE_PAGING_DEMAND=1` 时才有
   （要有按对装条目的能力，才谈得上「把这一段原来的东西丢掉」）；`DEMAND=0` 时
@@ -1252,7 +1252,7 @@ fork 仍回 `-EAGAIN`（全段最干净的一条）；⑧ 第三个线程回 `-E
 - `ARKRTOS_USE_LINUX_SOCKET`（§8.9），默认 **0**，`depends on ARKRTOS_USE_LINUX_ABI` 且
   `features.h` 用 `#error` 顶住这条依赖；关档时不编译 `lx_sock_*` 全部实现与 fd 表的
   socket 分派，`198`–`210` 与 `242` 落回 `-ENOSYS`；开档实测是宿主 socket 档的
-  **581 checks**（覆盖率单档 98.73%、六档 union 98.48%）与 **QEMU 第八档 161 条读数**
+  **581 checks**（覆盖率单档 98.73%、六档 union 98.48%）与 **QEMU 第八档 198 条读数**
   （其中 socket 段 39 条：语义 38 + 往返耗时 1）。
 - `arkrtos_autoconf.h` 由 `tools/kconfig/genconfig.py` 从 `config/arkrtos_defconfig`
   生成，新增 Kconfig 项后必须重跑一次，否则默认档读数里看不到这个开关。
@@ -1288,9 +1288,9 @@ socket 这一层是**两侧都有读数**的：宿主侧是 `tools/coverage_gate
 跑 `test_linux_abi_host.c`，581 checks 全绿、单档覆盖率 98.73%、六档 union 98.48%（基线 97.96%），
 `tools/ci_gate.py` 的 `linux-abi-host` 项已带上这一档；板级侧是 `tools/fork_gate.py` 的
 **第八档**（`-DARKRTOS_USE_LINUX_SELECT=1 -DARKRTOS_USE_LINUX_SOCKET=1 -DARKRTOS_USE_LWIP=1`），
-QEMU LA64 上 161 条 check 全 `ok` + `exit code 0`。
+QEMU LA64 上 198 条 check 全 `ok` + `exit code 0`。
 
-fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**64 项**；fork / fork+COW / fork+COW+SHM / fork+COW+SHM+futex / fork+COW+SHM+futex+filemap / fork+COW+SHM+futex+filemap+mprotect / fork+COW+SHM+futex+filemap+mprotect+select / fork+COW+SHM+futex+filemap+mprotect+select+socket / fork+COW+SHM+futex+filemap+mprotect+select+socket+thread **九档各跑一遍**，所以 build / qemu-readout / parser-selfcheck 各出现九次、compile-on 九次）：
+fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**71 项**；fork / fork+COW / fork+COW+SHM / fork+COW+SHM+futex / fork+COW+SHM+futex+filemap / fork+COW+SHM+futex+filemap+mprotect / fork+COW+SHM+futex+filemap+mprotect+select / fork+COW+SHM+futex+filemap+mprotect+select+socket / fork+COW+SHM+futex+filemap+mprotect+select+socket+thread / fork+COW+SHM+futex+filemap+mprotect+select+socket+thread+appq **十档各跑一遍**，所以 build / qemu-readout / parser-selfcheck 各出现十次、compile-on 十次；再加十档共用的 `default-off` / `off-zero-symbols` / `off-zero-port` / `board-switch` / `restore-default` 五道，与九档各自的 `kconfig-wired-<档>` / `features-guard-<档>` / `default-off-<档>` 三件套二十七道，合计 71 项）：
 
 | 项 | 钉住什么 |
 |---|---|
@@ -1303,13 +1303,14 @@ fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**6
 | `qemu-readout` | `[fork]` **27 条** check 全 `ok`、父子 pid 不同、PASS 行、`exit code 0`，且 hello / FS / 其余 Linux 夹具读数仍在；三条新读数（阻塞 `wait4` 真的等了 >= 40 ms / 父读端在子关掉自己那份之后仍读到 3 字节 / SIGCHLD handler 真被调到）逐条校验；另有 `MAP_FIXED` 段 6 条（§8.7，丢弃后内容为 0、地址不变、非对齐与共享形态被拒）逐条校验 |
 | `qemu-readout`（COW 档） | fork+COW：`[fork]` **32 条** check 全 `ok`；内核日志 `shared>=1 / stack>=1 / copied=0`、至少一条 `pg cow copy ... ref=2`、无 `ref=1` 的 copy 行；两条 COW 读数（子看到 fork 前的值、父的写只落自己那份）逐条校验 |
 | `qemu-readout`（SHM 档） | fork+COW+SHM：`[fork]` **40 条** check 全 `ok`；六条 SHM 读数逐条校验（两条非法形态回 `-38`、映射成功、起始清零、父看到子写、子看到父 fork 之后的写）；内核日志另加至少一条 `pg shm map va=0x<n> pairs>=1` |
-| `qemu-readout`（futex 档） | fork+COW+SHM+futex：`[fork]` **76 条** check 全 `ok`；三十六条 futex 读数逐条校验（九条基本配对 + 七条多时间片 + 二十条第二档：位集 0 回 `-22`、相对/绝对超时各一条 `-110`、50 ms 墙钟、`CMP_REQUEUE` 期望值不符回 `-11`、缺 `uaddr2` 回 `-22`、位集 `bits=7`、改挂后旧地址 `WAKE` 回 0 与 `bits=3` 等）；SHM 与 COW 的全部判据同时仍在 |
-| `qemu-readout`（filemap 档） | fork+COW+SHM+futex+filemap：`[fork]` **96 条** check 全 `ok`；filemap 段 20 条读数逐条校验（私有只读内容三读数、页尾仍是文件内容、offset 非对齐回 `-22`、坏 fd 回 `-9`、只读 fd 上可写共享映射回 `-13`、offset=4096 生效且 EOF 后读零、O_RDWR 打开成功、可写共享映射 + `msync` + `munmap`、私有映射 `msync` 不落盘、重映射读回、`bits=31` 的五位证据）；SHM / COW / futex 的全部判据同时仍在 |
-| `qemu-readout`（mprotect 档） | fork+COW+SHM+futex+filemap+mprotect：`[fork]` **107 条** check 全 `ok`；mprotect 段 11 条逐条校验（映射成功、`mprotect` 双向可设、只读页仍可读、同对另一半仍可写、撤保护后写得进、违规子进程被 reap 而非重启、状态字 = SIGSEGV、父页未被改）；串口另须有一行 `[LA64U] mprotect violation badv=0x… era=0x… tid=… -> kill task`；filemap / SHM / COW / futex 的全部判据同时仍在 |
-| `qemu-readout`（select 档） | fork+COW+SHM+futex+filemap+mprotect+select：`[fork]` **122 条** check 全 `ok`；select 段 15 条逐条校验（空管道读端不就绪、非就绪时用户集被清位、50 ms 定时等待回 0 且墙钟 >= 40 ms、有数据后读端就绪且就绪位保留、有空间的写端与 stdout 可写、写满后写端不就绪、写端全关后按 EOF 就绪、`exceptfds` 永不上报且被清位、坏 fd 回 `-9`）；mprotect / filemap / SHM / COW / futex 的全部判据同时仍在 |
-| `qemu-readout`（socket 档） | fork+COW+SHM+futex+filemap+mprotect+select+socket：`[fork]` **161 条** check 全 `ok`；socket 段 38 条逐条校验（`127.0.0.1` 真 lwIP 回环上的 bind/listen/accept/connect/send/recv、名字查询、`SOL_SOCKET` 四条 option、非阻塞 `-EAGAIN`，含一条往返耗时回归门）；select / mprotect / filemap / SHM / COW / futex 的全部判据同时仍在 |
-| `qemu-readout`（thread 档） | fork+COW+SHM+futex+filemap+mprotect+select+socket+thread：`[fork]` **186 条** check 全 `ok`；线程段 25 条逐条校验（`clone(CLONE_THREAD)` 正负、两个 SETTID、`getpid`=tgid 且与夹具打出的父 pid 交叉相等、`gettid` 与父不同、`CLONE_SETTLS` 落 `$tp`、两栈不同址、父局部存活、`CHILD_CLEARTID` 清 0 + `FUTEX_WAIT` 被唤醒、四条参数门槛、线程后仍能 `fork`、线程发起与组长发起的 `exit_group` 各一条）；socket 及以下各档判据同时仍在 |
-| `parser-selfcheck` | 9 种坏日志必须判红（COW 档另加 4 种：位掩码丢一位、父写丢失、整类删光 copy 行、fork 时搬了字节；SHM 档再加 5 种：删光 `pg shm map` 行、共享写没被父看到、子看不到父的写、共享页起始非 0、缺映射成功读数；futex 档再加 8 种：WAIT 没被叫醒、唤醒者只看到一半（`bits=1`）、无等待者 WAKE 回 1、多时间片 WAIT 被打成 `-EFAULT`、多时间片没跨过时间片、位集被忽略（`bits=7` 变 3）、改挂没搬走等待者、超时没到期；filemap 档再加 3 种：写回没发生、写回把文件截短、私有映射的改动被落盘；mprotect 档再加 7 种：只读页读不回来、粒度退化成 8 KB、违规写没被拦住、违规写改了父页、状态字当成退出码、缺违规日志行、缺成功读数；select 档再加 8 种：空管道被报就绪、EOF 不报就绪、满管道仍报可写、`fd_set` 没清位、超时被重新计时、`exceptfds` 被上报、坏 fd 被放过、缺 select 读数；socket 档再加 6 种；线程档再加 7 种：CLEARTID 没清 0、join 的 WAIT 没被唤醒、`SETTLS` 没落 `$tp`、线程 `getpid` 不等于 tgid、两栈同址、线程发起的 `exit_group` 码被改成组长的、缺 `clone(CLONE_THREAD)` 读数。累计 fork 10 / cow 14 / shm 19 / futex 27 / filemap 31 / mprotect 38 / select 46 / socket 52 / thread 59 种） |
+| `qemu-readout`（futex 档） | fork+COW+SHM+futex：`[fork]` **113 条** check 全 `ok`；七十三条 futex 读数逐条校验（九条基本配对 + 七条多时间片 + 二十条第二档 + 三十七条 PI 与 robust：位集 0 回 `-22`、相对/绝对超时各一条 `-110`、50 ms 墙钟、`CMP_REQUEUE` 期望值不符回 `-11`、缺 `uaddr2` 回 `-22`、位集 `bits=7`、改挂后旧地址 `WAKE` 回 0 与 `bits=3` 等）；SHM 与 COW 的全部判据同时仍在 |
+| `qemu-readout`（filemap 档） | fork+COW+SHM+futex+filemap：`[fork]` **133 条** check 全 `ok`；filemap 段 20 条读数逐条校验（私有只读内容三读数、页尾仍是文件内容、offset 非对齐回 `-22`、坏 fd 回 `-9`、只读 fd 上可写共享映射回 `-13`、offset=4096 生效且 EOF 后读零、O_RDWR 打开成功、可写共享映射 + `msync` + `munmap`、私有映射 `msync` 不落盘、重映射读回、`bits=31` 的五位证据）；SHM / COW / futex 的全部判据同时仍在 |
+| `qemu-readout`（mprotect 档） | fork+COW+SHM+futex+filemap+mprotect：`[fork]` **144 条** check 全 `ok`；mprotect 段 11 条逐条校验（映射成功、`mprotect` 双向可设、只读页仍可读、同对另一半仍可写、撤保护后写得进、违规子进程被 reap 而非重启、状态字 = SIGSEGV、父页未被改）；串口另须有一行 `[LA64U] mprotect violation badv=0x… era=0x… tid=… -> kill task`；filemap / SHM / COW / futex 的全部判据同时仍在 |
+| `qemu-readout`（select 档） | fork+COW+SHM+futex+filemap+mprotect+select：`[fork]` **160 条** check 全 `ok`；select 段 15 条逐条校验（空管道读端不就绪、非就绪时用户集被清位、50 ms 定时等待回 0 且墙钟 >= 40 ms、有数据后读端就绪且就绪位保留、有空间的写端与 stdout 可写、写满后写端不就绪、写端全关后按 EOF 就绪、`exceptfds` 永不上报且被清位、坏 fd 回 `-9`）；mprotect / filemap / SHM / COW / futex 的全部判据同时仍在 |
+| `qemu-readout`（socket 档） | fork+COW+SHM+futex+filemap+mprotect+select+socket：`[fork]` **198 条** check 全 `ok`；socket 段 38 条逐条校验（`127.0.0.1` 真 lwIP 回环上的 bind/listen/accept/connect/send/recv、名字查询、`SOL_SOCKET` 四条 option、非阻塞 `-EAGAIN`，含一条往返耗时回归门）；select / mprotect / filemap / SHM / COW / futex 的全部判据同时仍在 |
+| `qemu-readout`（thread 档） | fork+COW+SHM+futex+filemap+mprotect+select+socket+thread：`[fork]` **223 条** check 全 `ok`；线程段 25 条逐条校验（`clone(CLONE_THREAD)` 正负、两个 SETTID、`getpid`=tgid 且与夹具打出的父 pid 交叉相等、`gettid` 与父不同、`CLONE_SETTLS` 落 `$tp`、两栈不同址、父局部存活、`CHILD_CLEARTID` 清 0 + `FUTEX_WAIT` 被唤醒、四条参数门槛、线程后仍能 `fork`、线程发起与组长发起的 `exit_group` 各一条）；socket 及以下各档判据同时仍在 |
+| `qemu-readout`（appq 档） | fork+…+thread+appq：`[fork]` **235 条** check 全 `ok`；配额段 12 条读数逐条校验（上限内 fork 与线程成、超限 fork 与超限线程回 `-11`、空间空闲时 fork 仍回 `-EAGAIN`、第三个线程回 `-11`、两个线程按 `CHILD_CLEARTID` + `FUTEX_WAIT` 归队、回收后立刻能再 fork、被阻塞的子进程被 `wait4` 真收走、退出码 3 照传），外加三行 `[appq]` 交叉证据（条数恰好 3、owner 同一个、上限读数 3）；thread 及以下各档判据同时仍在 |
+| `parser-selfcheck` | 10 种坏日志必须判红（COW 档另加 4 种：位掩码丢一位、父写丢失、整类删光 copy 行、fork 时搬了字节；SHM 档再加 5 种：删光 `pg shm map` 行、共享写没被父看到、子看不到父的写、共享页起始非 0、缺映射成功读数；futex 档再加 11 种（第二档 8 种 + PI 与 robust 3 种）：WAIT 没被叫醒、唤醒者只看到一半（`bits=1`）、无等待者 WAKE 回 1、多时间片 WAIT 被打成 `-EFAULT`、多时间片没跨过时间片、位集被忽略（`bits=7` 变 3）、改挂没搬走等待者、超时没到期；filemap 档再加 3 种：写回没发生、写回把文件截短、私有映射的改动被落盘；mprotect 档再加 7 种：只读页读不回来、粒度退化成 8 KB、违规写没被拦住、违规写改了父页、状态字当成退出码、缺违规日志行、缺成功读数；select 档再加 8 种：空管道被报就绪、EOF 不报就绪、满管道仍报可写、`fd_set` 没清位、超时被重新计时、`exceptfds` 被上报、坏 fd 被放过、缺 select 读数；socket 档再加 6 种；线程档再加 7 种：CLEARTID 没清 0、join 的 WAIT 没被唤醒、`SETTLS` 没落 `$tp`、线程 `getpid` 不等于 tgid、两栈同址、线程发起的 `exit_group` 码被改成组长的、缺 `clone(CLONE_THREAD)` 读数；配额档再加 5 种：超限线程被放行、空间空闲时 fork 被放行、回收后起不来、子进程没被回收、缺 `[appq]` 日志。累计 fork 10 / cow 14 / shm 19 / futex 30 / filemap 34 / mprotect 41 / select 49 / socket 55 / thread 62 / appq 67 种） |
 | `default-off-shm` / `kconfig-wired-shm` / `features-guard-shm` | SHM 开关的三件套：autoconf 为 0、Kconfig 有 `depends on ARKRTOS_USE_PAGING_COW`、features.h 有对应 `#error`；`off-zero-port` 另核关档没有 `arkrtos_port_paging_map_shared` |
 | `default-off-futex` / `kconfig-wired-futex` / `features-guard-futex` | futex 开关的三件套：autoconf 为 0、Kconfig 有 `depends on ARKRTOS_USE_LINUX_ABI`、features.h 有对应 `#error` |
 | `default-off-filemap` / `kconfig-wired-filemap` / `features-guard-filemap` | 文件映射开关的三件套：autoconf 为 0、Kconfig 四条 `depends on`（ABI / PAGING / PAGES / DEMAND）、features.h 四条 `#error` |

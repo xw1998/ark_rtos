@@ -900,7 +900,7 @@ content back, and `msync` has nothing to mean. With
 | `mprotect` | unaffected: still validation-only (section 1); `PROT_EXEC` cannot be enforced in hardware on this LA64 path (no NR/NX bit) |
 
 Readouts (the fifth tier of `tools/fork_gate.py`, fork+COW+SHM+futex+filemap,
-**96 checks**, 20 of them the filemap block):
+**133 checks**, 20 of them the filemap block):
 
 | readout | what it pins down |
 |---|---|
@@ -951,7 +951,7 @@ entries.
 | revoking | another `mprotect` with `PROT_READ|PROT_WRITE` revokes it. A COW-shared pair is read-only anyway, and revoking mprotect does not open it up (that would bypass copy-on-write and let both processes write their own frame) |
 | log | a violation prints `[LA64U] mprotect violation badv=0x... era=0x... tid=... -> kill task` (the `tid` tells operators which task was reaped; the gate uses this line as cross evidence) |
 
-Readouts (fifth tier plus `-DARKRTOS_USE_PAGING_MPROTECT=1`, **107 checks**, 11 of
+Readouts (fifth tier plus `-DARKRTOS_USE_PAGING_MPROTECT=1`, **144 checks**, 11 of
 them the mprotect block):
 
 | readout | what it pins down |
@@ -1082,7 +1082,7 @@ itself is not a separate syscall on la64 any more; libc translates `select` into
 | Blocking shape | Same as futex: `arkrtos_port_svc_restart` plus `arkrtos_task_block_in_critical(100 ms)`, with the **deadline** stored per task (not the remaining duration - otherwise every replay restarts the timer); without a restartable port it returns `-EAGAIN` honestly |
 | Task id reuse | Task exit and `reset` both clear `s_sel_armed/s_sel_deadline`: task ids are reused, and a stale record means a new task inherits "already waiting" |
 
-Readouts (seventh `tools/fork_gate.py` tier, fixture 107 -> **122 checks**, 15 of them select):
+Readouts (seventh `tools/fork_gate.py` tier, fixture 144 -> **160 checks**, 15 of them select):
 
 | Readout | What it pins |
 |---|---|
@@ -1116,7 +1116,7 @@ they would have to be rewritten. Putting select and a future socket layer behind
 switch would turn "zero footprint when off" into "half the feature when off".
 `ARKRTOS_USE_LINUX_SELECT` depends only on `ARKRTOS_USE_LINUX_ABI`.
 
-### 8.9 socket (U-23): translation layer and the QEMU eighth tier (2026-11-24, 581 host checks + 161 QEMU checks)
+### 8.9 socket (U-23): translation layer and the QEMU eighth tier (2026-11-24, 581 host checks + 198 QEMU checks)
 
 13 numbers: `socket`(198), `bind`(200), `listen`(201), `accept`(202), `connect`(203),
 `getsockname`(204), `getpeername`(205), `sendto`(206), `recvfrom`(207), `setsockopt`(208),
@@ -1139,10 +1139,10 @@ dispatch on the fd kind (the same fd table holds files, pipes and sockets).
 98.73% on that tier alone, 98.48% union across six tiers (baseline 97.96%), **581 checks**
 green.
 
-**QEMU eighth tier: 161 checks all `ok` + `exit code 0`.** The eighth tier of
+**QEMU eighth tier: 198 checks all `ok` + `exit code 0`.** The eighth tier of
 `tools/fork_gate.py` (`SELECT+SOCKET+LWIP`) really runs the socket section of
 `example/qemu_loongarch64/elf/linux_fork.c` on LA64 (38 checks) plus one performance
-regression check, stacked on the 122 checks of the seventh tier:
+regression check, stacked on the 160 checks of the seventh tier:
 
 What it reads is the **real lwIP loopback** (`127.0.0.1`), not a stub: `socket` creates both
 a stream and a dgram handle; the errno of a bad domain / bad type / unsupported type;
@@ -1231,7 +1231,7 @@ is only stable with them).**
 `ARKRTOS_USE_NET_VIRTIO` off it compiles only `$(LWIP_SRCS)` (no `drvnet.c`/`net_demo.c`),
 and pushes `ARKRTOS_USE_LINUX_SOCKET=1` together with lwIP into `LXFORK_DEFS`.
 
-### 8.10 Threads (`CLONE_THREAD`, U-25): one address space shared by a group of tasks (2026-11-24, ninth QEMU LA64 tier, 186 checks)
+### 8.10 Threads (`CLONE_THREAD`, U-25): one address space shared by a group of tasks (2026-11-24, ninth QEMU LA64 tier, 223 checks)
 
 The thread branch of `clone(220)` is in, behind `ARKRTOS_USE_LINUX_THREAD` (default **0**,
 `depends on ARKRTOS_USE_LINUX_FORK`). The split between the fork branch and this one is
@@ -1265,8 +1265,8 @@ group. The teardown path splits on whether siblings are still alive:
 Threads are **not** registered in `s_child[]`: Linux's `wait4` cannot see threads, so the
 group keeps exactly one "process" facing the outside.
 
-**Ninth QEMU tier: 186 checks all `ok` + `exit code 0` (600 ms).** The ninth tier of
-`tools/fork_gate.py` is the eighth (161 checks) plus 25 thread checks. Six readings matter most:
+**Ninth QEMU tier: 223 checks all `ok` + `exit code 0` (600 ms).** The ninth tier of
+`tools/fork_gate.py` is the eighth (198 checks) plus 25 thread checks. Six readings matter most:
 
 - `clone(CLONE_THREAD) > 0 -> 1 ok`, `thread PARENT_SETTID wrote the tid -> 6 ok`;
 - `futex WAIT on CHILD_CLEARTID woke with 0 -> 0 ok` - the **real join path**
@@ -1318,9 +1318,9 @@ nothing. The robust list (99/100) and exit cleanup exist now (8.4b) and are acco
 per task, so any member of a thread group only settles its own chain.
 A thread is an ordinary task: same priority, same time slice, no extra scheduling semantics.
 
-### 8.11 Per-App task quota (`ARKRTOS_USE_APP_QUOTA`, 2026-11-24, tenth QEMU LA64 tier, 198 checks)
+### 8.11 Per-App task quota (`ARKRTOS_USE_APP_QUOTA`, 2026-11-24, tenth QEMU LA64 tier, 235 checks)
 
-The tenth tier = the ninth tier (186 checks) + the quota section. It answers "can one App eat
+The tenth tier = the ninth tier (223 checks) + the quota section. It answers "can one App eat
 the whole task table", which is not a new syscall: the loader hands out a non-zero owner id per
 ELF load (`elf_app_owner_new()`), fork and `clone(CLONE_THREAD)` **inherit** it, and once the
 owner's **live** task count reaches `ARKRTOS_APP_MAX_TASKS` creation fails --
@@ -1415,9 +1415,9 @@ and the `-ENOSYS` control with SHM off).
 `ARKRTOS_USE_LINUX_FUTEX` (section 8.4) is the fifth switch, default **0**,
 `depends on ARKRTOS_USE_LINUX_ABI` with the same `#error` guard. With it off the
 wait slots, the key resolver and `lx_futex` are not compiled and number 98 falls
-back to `-ENOSYS`; with it on the measured evidence is the 76 readouts of the
-fork+COW+SHM+futex tier (36 of them futex: 9 basic pairing, 7 multi-slice and 20
-for bitsets/timeout/requeue) plus the 371 host checks of the futex profile.
+back to `-ENOSYS`; with it on the measured evidence is the 113 readouts of the
+fork+COW+SHM+futex tier (73 of them futex: 9 basic pairing, 7 multi-slice, 20
+for bitsets/timeout/requeue and 37 for PI/robust) plus the 434 host checks of the futex profile.
 
 `ARKRTOS_USE_PAGING_FILEMAP` (section 8.5) is the sixth switch, default **0**,
 `depends on ARKRTOS_USE_LINUX_ABI` + `ARKRTOS_USE_PAGING` +
@@ -1425,21 +1425,21 @@ for bitsets/timeout/requeue) plus the 371 host checks of the futex profile.
 mapping through demand-paged frames, so without DEMAND it cannot be filled), with
 four `#error` guards. With it off the file-mapping branch, the write-back
 bookkeeping and `msync` are not compiled and `mmap(fd)` returns `-ENOSYS`; with it
-on the evidence is the 63 readouts of the fifth tier (20 of them filemap) plus the
-337 host checks of the filemap profile.
+on the evidence is the 133 readouts of the fifth tier (20 of them filemap) plus the
+358 host checks of the filemap profile.
 `ARKRTOS_USE_PAGING_MPROTECT` (section 8.6), default **0**, `depends on
 ARKRTOS_USE_LINUX_ABI` + `PAGING` + `PAGING_PAGES` + `PAGING_DEMAND` (a pair's
 entries can only be rewritten once demand paging can hand out the frame), with
 four `#error` guards in features.h; with it off the `s_pg_page_ro` ledger,
 `la_pg_page_ro` / `la_pg_mprotect_hit`, the port's `paging_protect` and
 `mprotect_stat` produce nothing and `mprotect` falls back to "validate, return 0,
-count separately"; with it on the evidence is the **74 readouts of the sixth
+count separately"; with it on the evidence is the **144 readouts of the sixth
 tier** (11 of them mprotect) plus the host-side compile gate.
 
 `ARKRTOS_USE_LINUX_SELECT` (section 8.8), default **0**, `depends on
 ARKRTOS_USE_LINUX_ABI` with the same `#error` guard; with it off the readiness
 criteria, the `fd_set` scan and `s_sel_armed/s_sel_deadline` are not compiled and
-number 72 falls back to `-ENOSYS`; with it on the evidence is the **122 readouts
+number 72 falls back to `-ENOSYS`; with it on the evidence is the **160 readouts
 of the seventh tier** (15 of them select) plus the 327 host checks of the select
 profile.
 
@@ -1447,7 +1447,7 @@ profile.
 `depends on ARKRTOS_USE_LINUX_ABI` with an `#error` guard; with it off all `lx_sock_*`
 code and the socket dispatch in the fd table are not compiled and `198`-`210`/`242` fall
 back to `-ENOSYS`; with it on the measured readout is the host socket tier's **581 checks**
-(98.73% on that tier, 98.48% union) plus the **161 readouts of the QEMU eighth tier**
+(98.73% on that tier, 98.48% union) plus the **198 readouts of the QEMU eighth tier**
 (39 of them the socket section: 38 semantic + 1 round-trip timing).
 
 `MAP_FIXED` (section 8.7) is **not a switch of its own**: it exists when
@@ -1478,17 +1478,21 @@ tier `linuxabisocket` in `tools/coverage_gate.py` (with
 98.73% on the tier and 98.48% union (baseline 97.96%), and `tools/ci_gate.py`'s
 `linux-abi-host` item already includes it; on the board the **eighth tier** of
 `tools/fork_gate.py` (`-DARKRTOS_USE_LINUX_SELECT=1 -DARKRTOS_USE_LINUX_SOCKET=1
--DARKRTOS_USE_LWIP=1`) gives 161 checks all `ok` + `exit code 0` on QEMU LA64.
+-DARKRTOS_USE_LWIP=1`) gives 198 checks all `ok` + `exit code 0` on QEMU LA64.
 
 The fork tier has its own gate, `tools/fork_gate.py` (invoked as `fork` from
-`ci_gate`, **64 items**; it runs the fork, fork+COW, fork+COW+SHM,
+`ci_gate`, **71 items**; it runs the fork, fork+COW, fork+COW+SHM,
 fork+COW+SHM+futex, fork+COW+SHM+futex+filemap,
 fork+COW+SHM+futex+filemap+mprotect,
 fork+COW+SHM+futex+filemap+mprotect+select,
 fork+COW+SHM+futex+filemap+mprotect+select+socket and
-fork+COW+SHM+futex+filemap+mprotect+select+socket+thread tiers one after the
-other, so build / qemu-readout / parser-selfcheck / compile-on each appear nine
-times):
+fork+COW+SHM+futex+filemap+mprotect+select+socket+thread and
+fork+COW+SHM+futex+filemap+mprotect+select+socket+thread+appq tiers one after the
+other, so build / qemu-readout / parser-selfcheck / compile-on each appear ten
+times; plus the five tier-independent items (`default-off`, `off-zero-symbols`,
+`off-zero-port`, `board-switch`, `restore-default`) and the 27 per-tier switch
+items (`kconfig-wired-<tier>` / `features-guard-<tier>` / `default-off-<tier>`
+for nine tiers), 71 in total):
 default-off (fork and SHM), kconfig-wired (all four `depends on`, plus the SHM
 item depending on COW), the four
 `#error` guards in features.h, off-zero-symbols (RV32 `linux_abi.o` has no
@@ -1500,12 +1504,12 @@ zeroed after the discard, the same address returned, misaligned and shared forms
 refused); the three new readouts - blocking `wait4`
 really waited >= 40 ms, the parent read end still read 3 bytes after the child
 closed its own copy, the SIGCHLD handler really ran - are checked one by one),
-parser-selfcheck (nine broken logs rejected; the COW tier adds four more: a lost
+parser-selfcheck (ten broken logs rejected; the COW tier adds four more: a lost
 bit in the child mask, a lost parent write, all copy lines removed, and bytes
 moved at fork time; the SHM tier adds five: the `pg shm map` line removed, the
 child's shared write not seen by the parent, the child not seeing the parent's
 write, a non-zero start value, and the successful-mapping readout removed; the
-futex tier adds eight: the WAIT was never woken, the waker only saw half
+futex tier adds eleven (eight for the second batch plus three for PI/robust): the WAIT was never woken, the waker only saw half
 (`bits=1`), a waiterless `WAKE` returned 1, a multi-slice WAIT came back as
 `-EFAULT`, a multi-slice WAIT did not cross a slice, the bitset was ignored
 (`bits=7` became 3), a requeue left the waiter on the old word, and the timeout
@@ -1521,20 +1525,23 @@ parent sees the child's write, child sees the parent's post-fork write) and at
 least one `[LA64U] pg shm map va=0x<n> pairs>=1`. The SHM switch has its own
 `default-off-shm` / `kconfig-wired-shm` / `features-guard-shm` items, and
 `off-zero-port` also requires that a SHM-off build has no
-`arkrtos_port_paging_map_shared`. The futex round requires 76 checks and validates
-the 36 futex readouts one by one (the nine basic pairing readouts, the seven
+`arkrtos_port_paging_map_shared`. The futex round requires 113 checks and validates
+the 73 futex readouts one by one (the nine basic pairing readouts, the seven
 multi-slice ones - a WAIT spanning >= 150 ms still returns 0, the parent sees the
 waker's `2`, the multi-slice waker is reaped, `bits == 3` - and the twenty
 second-batch ones: empty bitsets `-22`, both timeout forms `-110`, the 50 ms wall
 clock, `CMP_REQUEUE` mismatch `-11`, missing `uaddr2` `-22`, `bits == 7`, the old
-address returning 0 after a requeue), with the SHM and COW assertions still in
+address returning 0 after a requeue, and the thirty-seven PI/robust ones - owner
+handoff by base priority rather than wake-then-race, `OWNER_DIED` on owner death,
+robust-list cleanup on task exit, the four-position bit evidence, and the 5 ms
+fixture yielding), with the SHM and COW assertions still in
 place; the futex
 switch has its own `default-off-futex` / `kconfig-wired-futex` /
-`features-guard-futex` items. The filemap round requires 96 checks and validates
+`features-guard-futex` items. The filemap round requires 133 checks and validates
 the 20 filemap readouts one by one; its switch has its own
 `default-off-filemap` / `kconfig-wired-filemap` / `features-guard-filemap` items
 (autoconf 0, four `depends on` entries, four `#error` guards). The mprotect
-round requires 107 checks and validates the 11 mprotect readouts one by one
+round requires 144 checks and validates the 11 mprotect readouts one by one
 (mapping success, read-only and read-write both accepted, a read-only page still
 readable, the sibling 4 KB of the same pair still writable, a write going through
 after revocation, the violating child reaped rather than restarted, the status
@@ -1546,7 +1553,7 @@ blocked, the violating store reaching the parent page, the status word used as a
 exit code, the violation log line removed, the success readout removed); its
 switch has its own `default-off-mprotect` / `kconfig-wired-mprotect` /
 `features-guard-mprotect` items (autoconf 0, four `depends on` entries, four
-`#error` guards). The select round requires 122 checks and validates the 15 select
+`#error` guards). The select round requires 160 checks and validates the 15 select
 readouts one by one (an empty pipe read end not ready, the user set cleared when
 nothing is ready, a 50 ms timed wait returning 0 with a wall clock >= 40 ms, the
 read end ready after data with the ready bit kept, a write end with space and
@@ -1558,14 +1565,14 @@ not reported, a full pipe still reported writable, the `fd_set` not cleared, the
 timeout restarted on every replay, `exceptfds` reported, a bad fd let through, and
 the select readout removed); its switch has its own `default-off-select` /
 `kconfig-wired-select` / `features-guard-select` items. The socket round requires
-161 checks and validates the 38 socket readouts one by one (bind / listen /
+198 checks and validates the 38 socket readouts one by one (bind / listen /
 accept / connect / send / recv over a real lwIP `127.0.0.1` loopback, name
 queries, four `SOL_SOCKET` options, non-blocking `-EAGAIN`, plus one
 round-trip-time regression gate), with every select / mprotect / filemap / SHM /
 COW / futex assertion still in place; its parser-selfcheck adds six more bad logs
 and its switch has its own `default-off-socket` / `kconfig-wired-socket` /
 `features-guard-socket` items (autoconf 0, two `depends on` entries, two
-`#error` guards). The thread round requires 186 checks and validates the 25
+`#error` guards). The thread round requires 223 checks and validates the 25
 thread readouts one by one (`clone(CLONE_THREAD)` positive and negative, both
 SETTIDs, `getpid` equal to the tgid and cross-checked against the parent pid the
 fixture prints, `gettid` different from the parent, `CLONE_SETTLS` landing in
@@ -1578,7 +1585,18 @@ landing in `$tp`, a thread `getpid` not equal to the tgid, both stacks at one
 address, the thread-initiated `exit_group` code replaced by the leader's, and the
 `clone(CLONE_THREAD)` readout removed), and its switch has its own
 `default-off-thread` / `kconfig-wired-thread` / `features-guard-thread` items
-(autoconf 0, `depends on ARKRTOS_USE_LINUX_FORK`, the corresponding `#error`);
+(autoconf 0, `depends on ARKRTOS_USE_LINUX_FORK`, the corresponding `#error`).
+The appq round requires 235 checks and validates the 12 quota readouts one by one
+(fork and thread under the cap, over-limit fork and thread returning `-11`, a fork
+refused while a space is free, the third thread, both threads joined through
+`CHILD_CLEARTID` + `FUTEX_WAIT`, an immediate fork after the quota is refilled, the
+blocked child really reaped by `wait4`, exit code 3 passed through), plus three
+`[appq]` cross-evidence assertions (exactly three lines, one owner, cap reading 3);
+its parser-selfcheck adds five more bad logs (an over-limit thread let through, a
+fork let through while a space is free, a task that cannot start again after the
+quota was refilled, a child never reaped, and the `[appq]` line removed) and its
+switch has its own `default-off-appq` / `kconfig-wired-appq` / `features-guard-appq`
+items;
 `off-zero-symbols` / `off-zero-port` also require that a thread-off build produces
 none of `arkrtos_elf_thread`, `arkrtos_port_paging_thread_frame` and the four
 `lx_thread_*` symbols.
