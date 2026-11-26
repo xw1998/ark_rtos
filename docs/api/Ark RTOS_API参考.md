@@ -20,7 +20,7 @@
 - [kernelsrc/include/arkrtos_export.h](#kernelsrcincludearkrtos_exporth)（3 项）
 - [kernelsrc/include/arkrtos_fdt.h](#kernelsrcincludearkrtos_fdth)（22 项）
 - [kernelsrc/include/arkrtos_fdt_console.h](#kernelsrcincludearkrtos_fdt_consoleh)（4 项）
-- [kernelsrc/include/arkrtos_fdt_overlay.h](#kernelsrcincludearkrtos_fdt_overlayh)（2 项）
+- [kernelsrc/include/arkrtos_fdt_overlay.h](#kernelsrcincludearkrtos_fdt_overlayh)（3 项）
 - [kernelsrc/include/arkrtos_fdt_res.h](#kernelsrcincludearkrtos_fdt_resh)（4 项）
 - [kernelsrc/include/arkrtos_fi.h](#kernelsrcincludearkrtos_fih)（17 项）
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
@@ -3026,6 +3026,22 @@ const char *arkrtos_fdt_overlay_reason(int rc);
 ```
 
 **错误码的文字解释（只用于日志，不参与判定）。**
+
+### `const void *arkrtos_board_fdt_overlay_demo(uint32 *size);`
+
+```c
+const void *arkrtos_board_fdt_overlay_demo(uint32 *size);
+```
+
+**板级提供的 demo fragment（`fdt overlay` 命令拿它做端到端演示）**
+- `size`：输出 fragment 的字节数（成功时写入）
+**返回**：fragment blob 首地址；0 表示这个板子没有编进 demo fragment
+内核的 shell 只 include 内核头，不 include 板头（port 层刻意把
+板级头挡在核心源码之外），所以调用点自己看不到这个函数。这里
+给出声明，与 arkrtos_board_shell_register() 属同一类「板级契约」：
+ARKRTOS_USE_FDT_OVERLAY == 1 的板子必须提供该符号，否则链接期
+就会失败——而不是在调用点靠隐式 int 声明把指针截成 32 位。
+实现见 board/qemu_loongarch64/arkrtos_fdt_overlay_blob.c。
 
 ## kernelsrc/include/arkrtos_fdt_res.h
 
