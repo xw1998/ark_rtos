@@ -103,6 +103,9 @@ is closed, and each cell carries the exact readings taken that day. Keeping a se
 English would double the places that can drift out of date, so the ledger stays Chinese-only |
 | [api/Ark RTOS_API参考.md](api/Ark RTOS_API参考.md) | Generated from the source comments by
 tools/gen_api_doc.py; the comments themselves are in Chinese |
+| [SEC-G08-隔离执行-设计.md](SEC-G08-隔离执行-设计.md) | A pre-registration design note for one open item (isolated execution of App shell
+callbacks), written against the code as it stands today; it is a plan, not a reading, and it will
+be rewritten as the milestones land. A second English copy would drift from that churn |
 
 ## Directory layout
 
