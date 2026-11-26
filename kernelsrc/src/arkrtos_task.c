@@ -50,6 +50,7 @@
 #include "arkrtos_flashapp.h"  /* flash app: return the data window on task exit */
 #endif
 #include "arkrtos_partition.h"    /* 用户可见内存窗口（共享区/App RAM/驱动 RAM/固件区） */
+#include "arkrtos_ushell_upcall.h"  /* SEC-G08：SVC 0x23 upcall 返回通道 */
 
 /* ------------------------------------------------------------------
  * 用户指针校验（SVC 可信边界）
@@ -1141,11 +1142,30 @@ static void svc_sync_ctrl(void *p_svc_ctx)
     }
 }
 
+/* ============================================================
+ * SVC 0x23：upcall 线程从桩里回来（SEC-G08 隔离执行）
+ * @details 桩执行完 App 回调后发这一条系统调用，$a0 = 回调的返回值。
+ *          只有 call() 亲手登记过的那一条任务号能对上；冒充者拿到
+ *          ERR_CALLER，且内核一个字节的记账都不改（判据在 ret() 内）。
+ *          正常路径由 ret() 终止该任务、切走，永远回不到这里 —— 所以
+ *          下面写回 $a0 的那一句只服务「冒充者被拒」这一条分支。
+ * ============================================================ */
+#if (ARKRTOS_USE_USHELL_ISO == 1)
+static void svc_ushell_ret(void *p_svc_ctx)
+{
+    int32 rc  = (int32)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
+    int32 ret = arkrtos_ushell_upcall_ret(rc);
+
+    ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ret);
+}
+#endif /* ARKRTOS_USE_USHELL_ISO */
+
 #if (ARKRTOS_USE_WAITMULTI == 1)
 /* ARKRTOS_SVC_WAITMULTI_CTRL: 多对象就绪探测。参数块固定 5 个字（20 字节）：
  *   p[0]=子命令  p[1]=句柄数组  p[2]=数量  p[3]=ANY/ALL  p[4]=结果掩码
  * 句柄数组由内核只读、掩码由内核只写，两个指针都必须先过用户内存校验。
  * 这里只做一次快照，不登记等待者也不阻塞：带超时的等待在 SDK 侧轮询完成。 */
+
 static void svc_waitmulti_ctrl(void *p_svc_ctx)
 {
     arkrtos_svc_arg_t *p;
@@ -2739,6 +2759,11 @@ void SVC_Server(void *p_svc_ctx)
     case ARKRTOS_SVC_APP_MGR:
         svc_app_mgr(p_svc_ctx);
         break;
+    #if (ARKRTOS_USE_USHELL_ISO == 1)
+    case ARKRTOS_SVC_USHELL_RET:
+        svc_ushell_ret(p_svc_ctx);
+        break;
+    #endif
     default:
         break;
     }

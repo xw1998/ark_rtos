@@ -39,6 +39,11 @@
 #include "arkrtos_features.h"
 #include "arkrtos_hal.h"      /* ARKRTOS_ENTER_CRITICAL：自审要在静止态下跑 */
 
+/* SEC-G08：upcall 返回通道（SVC 0x23）的三处断言都在 app_sdk 之外的实体里，
+ * 头文件自己按「PRIV && PAGING && PAGING_PAGES && ELF」派生 ARKRTOS_USE_USHELL_ISO，
+ * 关档时只剩宏回退，所以这里无条件包含不会多一个符号。 */
+#include "arkrtos_ushell_upcall.h"
+
 #if (ARKRTOS_HW_SAFE == 1)
 #include "arkrtos_hwsafe.h"
 #endif
@@ -1315,5 +1320,69 @@ UTEST_CASE(loader_crc_recheck_pool_e2e)
 #endif /* ARKRTOS_USE_SECCHECK */
 
 #endif /* ARKRTOS_USE_IMAGE_CRC_RECHECK */
+
+/* ============================================================
+ * SEC-G08 隔离执行：upcall 返回通道的分派（LA64 + ISO 档才有实体）
+ * @details 本用例证明的是**分派接通**，不是「回调跑通了」：
+ *          1. 实体真的链接进了镜像 —— call()/stub_supported() 在 ISO==0 档
+ *             分别退化成宏回退（恒 -2）与「没有这个符号」，本构建里两条都在。
+ *             另外 call() 因为 func==0 必须回 ERR_PARAM(-1) —— 只有真函数
+ *             才会做这个判据，宏回退做不到，这就是「实体在」的证据。
+ *          2. 冒充者直接发 `syscall 0x23`：$a0 里塞 0x5a5a 当哨兵，
+ *             回读必须是 ERR_CALLER(-7)。若回读到 0x5a5a，说明这条系统调用
+ *             根本没进内核（号被别的东西吃掉了），那条读数就是假的。
+ *          3. 再发一次仍是 -7：拒绝不留痕（第一次没有把记账槽占掉）。
+ *
+ *          口径（本轮实测确认）：Ark 自己的 SVC 返回值是 **32 位** 的，
+ *          ARKRTOS_SVC_RET 把值按 uint32 写进帧的 $a0，高位补零；负值读回来
+ *          是 0x00000000FFFFFFF9 而不是符号扩展的 -7。这是既有 ABI（
+ *          arkrtos_svc_arg_t 就是 32 位），App 侧按 int32 取低 32 位即可；
+ *          要 64 位符号扩展的是 Linux ABI 那条路（svc_set_ret_signed）。
+ *          所以这里按 (uint32) 比较，不拿 long 直接比 —— 前一版就是拿 long
+ *          比，读到的 0xFFFFFFF9 被当成失败，其实是判据写错了。
+ * @note 本任务不是 call() 亲手登记的那条 upcall 线程，所以这里走的正是
+ *       「冒充者被拒」分支；记账不变由 ret() 的实现保证（见设计 §4.5）。
+ *       ready() 的 0/1 两档由宿主用例覆盖（tools/coverage_gate 的 ushell
+ *       档，两臂读数 212 / 17 条断言），这里不重复绑板上装载状态。
+ */
+#if (ARKRTOS_USE_USHELL_ISO == 1) && defined(__loongarch__)
+
+UTEST_CASE(ushell_upcall_refuse_stranger)
+{
+    long  a0 = 0;
+    int32 rc = 0;
+
+    UTEST_CHECK_EQ((long)arkrtos_port_ushell_stub_supported(), 1L);
+    UTEST_CHECK_EQ((long)arkrtos_ushell_upcall_call(
+                       0u, 1u, (int (*)(int, char **))0, 0, (char **)0, &rc),
+                   (long)ARKRTOS_USHELL_UP_ERR_PARAM);
+
+    /* syscall 0x23 = 0x002B0000 | 0x23：号编在指令里，与 Ark 的号表同源。 */
+    __asm__ __volatile__(
+        "  li.w    $a0, 0x5a5a\n"
+        "  .word   0x002b0023\n"
+        "  move    %0, $a0\n"
+        : "=r"(a0)
+        :
+        : "$a0", "$a1", "$a2", "$a3", "$a4", "$a5", "$a6", "$a7",
+          "$t0", "$t1", "$t2", "$t3", "$t4", "$t5", "$t6", "$t7", "$t8",
+          "memory");
+    UTEST_CHECK_NE(a0, 0x5a5aL);
+    UTEST_CHECK_EQ((uint32)a0, (uint32)ARKRTOS_USHELL_UP_ERR_CALLER);
+
+    __asm__ __volatile__(
+        "  li.w    $a0, 0x1234\n"
+        "  .word   0x002b0023\n"
+        "  move    %0, $a0\n"
+        : "=r"(a0)
+        :
+        : "$a0", "$a1", "$a2", "$a3", "$a4", "$a5", "$a6", "$a7",
+          "$t0", "$t1", "$t2", "$t3", "$t4", "$t5", "$t6", "$t7", "$t8",
+          "memory");
+    UTEST_CHECK_NE(a0, 0x1234L);
+    UTEST_CHECK_EQ((uint32)a0, (uint32)ARKRTOS_USHELL_UP_ERR_CALLER);
+}
+
+#endif /* ARKRTOS_USE_USHELL_ISO && __loongarch__ */
 
 #endif /* ARKRTOS_USE_UTEST */

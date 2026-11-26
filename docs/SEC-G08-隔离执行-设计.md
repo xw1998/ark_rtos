@@ -1,6 +1,6 @@
 # SEC-G08 剩余半边：App shell 回调的隔离执行（设计与实施计划）
 
-> 状态：**设计已预注册；M-08-1（窗口切分）、M-08-2（upcall 核心）已落地，M-08-3..5 未开工**（2026-11-26）。
+> 状态：**设计已预注册；M-08-1（窗口切分）、M-08-2（upcall 核心）、M-08-3（LA64 桩字节 + 初始帧 + `SVC 0x23` 分派）已落地，M-08-4..5 未开工**（2026-11-26）。
 > 当前落地的是 fail-closed 半边（`2080a9b`、`903abee`）：特权级分离 + 分页的构建上，
 > `arkrtos_shell_ext_register()` 见到 `is_priv == 0` 的调用者直接回
 > `ARKRTOS_USHELL_ERR_PRIV`（-6），注册表一个槽都不动。
@@ -210,7 +210,7 @@ fail-closed 把这条路径关掉了，代价是功能消失。
 |---|---|---|---|
 | M-08-1 ✅ | 窗口布局 + upcall 区（`ARKRTOS_ELF_UPCALL_SIZE`，默认 8 KB）+ `s_elf_info` 三字段 + 清零 + `elf_gate` 更新（**已落地 2026-11-26**：`elf_gate` 全绿、宿主 `elf` 196 条 / `elfup0` 188 条全绿） | `tools/elf_gate.py` 全绿；`test_elf_host.c` 新增「upcall 区不与被加载段、用户栈、argv 重叠」与「`=0` 档退回旧布局」两档断言；`fork_gate` 十档仍全绿（布局改了，App 栈位置要重新对齐） | 低（纯加区，行为不变） |
 | M-08-2 ✅ | `ready()` / `call()` / `ret()` 三个入口 + 宿主桩化的单测（**已落地 2026-11-26**：宿主 `USHELL-HOST OK 210 checks` / `REFUSED 17 checks`，`arkrtos_shell_ushell` 行覆盖率 99.58%） | `warn_gate` 零告警（238 TU）；`coverage_gate` 该模块 ≥ 基线；`ci_gate` 的 `ushell-host` 两臂绿 | 中（全部走宿主可测路径，行为未变） |
-| M-08-3 | LA64 桩字节 + 初始帧写寄存器 + `SVC 0x23` 分派（`arkrtos_task.c`） | `tools/linux_abi_gate.py` 的号表断言加一条：0x23 归 Ark；QEMU 单测（桩只把参数打回去，不调 App） | 中（port 改动，需要 QEMU 读数） |
+| M-08-3 ✅ | LA64 桩字节 + 初始帧写寄存器 + `SVC 0x23` 分派（`arkrtos_task.c`）（**已落地 2026-11-26**） | `tools/linux_abi_gate.py` 新增 `svc-0x23`（号定义 / 分派 case / 回调用通道三处同源）与 `abi-split-rv32` 号段 0x10..0x23，14 项全绿；QEMU 单测 `utest run ushell_upcall_refuse_stranger` 读数 `1 matched, 1 passed, 0 failed; assertions 6 run / 0 failed` | 中（port 改动，已取 QEMU 读数） |
 | M-08-4 | 跳板改调 `call()`、注册策略收窄、`ushell_func_alive_space()`、`g_ushell` 两字段 | §5 全部读数；`ci_gate` 119 项 + `fork_gate` 71 项全绿 | 高（行为切换点） |
 | M-08-5 | 文档收口：`已知限制.md` §四那一行改写、`安全认证准备.md` §5/§7、`欠账盘点.md` 那一行、SDK 文档补「回调按多线程写」 | 文档自洽 + `doc_audit` 绿 | 低 |
 
@@ -223,6 +223,14 @@ TU 必须同时改 4 处工程文件才编得进去；而 `arkrtos_shell_ushell.
 `stub_supported` / `stub` / `start` 三个钩子：`ready()` 需要一个无副作用的「本档会不会写桩」查询，
 先让 LA64 返回 `0 / -1 / 0` 占位，**本阶段可见行为一个字节都没变**（`ready()` 恒 0 ⇒ 注册继续 fail-closed），
 M-08-3 只替换函数体。
+
+**M-08-3 的实现与两处取舍（与预注册不同，均已验证）**：
+
+1. **QEMU 侧的证据形态换成「冒充者被拒」**，不是原计划的「桩把参数打回去」。理由：后者需要一个能发出 `syscall 0x23` 的**真 App 镜像**作夹具（否则得先把跳板接到 `call()`，那是 M-08-4），而「非 upcall 线程发 `syscall 0x23` 必得 `ERR_CALLER`、且记账不动」恰好只依赖 M-08-3 自己落地的那一段（号表 + 分派 + `ret()` 的冒充判据），却能证到同一件事：**这条系统调用真的进了内核并走到了 `arkrtos_ushell_upcall_ret()`**。用例在 `arkrtos_utest_cases.c`，`$a0` 先塞哨兵（0x5a5a / 0x1234）：若号被别的东西吃掉、或者参数被原样打回，读到的就是哨兵本身，读数是假的。
+2. **`arkrtos_port_paging_write_space()` 复用而非新写一份**：桩与初始帧要写的是「某个空间的窗口 VA」，与 fork 的 `space_clone` 写目标同形；差别只有「PA 从哪来」（按需档 `s_pg_pair_pa[][]`、铺满档 `s_pg_space_base[] + idx*0x2000`）。因此把该函数的守卫从 `LINUX_FORK` 拆成 `LINUX_FORK || USHELL_ISO`，函数内按 `ARKRTOS_USE_PAGING_DEMAND` 分叉。**这也解释了 `ARKRTOS_USE_USHELL_ISO` 为什么要多要一条 `ARKRTOS_USE_PAGING_PAGES == 1`**：静态 PS=20 窗口档（PAGES=0）只有一张共享窗口，没有「按空间写」的通路，编出实体只会得到一个写不进去的实现。
+3. **`start()` 显式收 `space`**：不读 `s_pg_app_space`（「当前空间」随调用时机漂移，与仓库里「唯一真源：任务表」的口径相悖）。代价是头文件 + 宿主桩 + 1 处调用点各加一个参数。
+
+**一条被实测确认的 ABI 口径**：Ark 自己的 SVC 返回值是 **32 位**的——`ARKRTOS_SVC_RET` 把值按 `uint32` 写进帧的 `$a0`，高位补零，所以负值读回来是 `0x00000000FFFFFFF9` 而不是符号扩展的 `-7`；要 64 位符号扩展的是 Linux ABI 那条路（`arkrtos_port_svc_set_ret_signed()`）。App 侧按 `int32` 取低 32 位即可，QEMU 用例按 `(uint32)` 比较（第一版拿 `long` 直接比，把正确的行为读成了失败——这是判据写错，不是实现错）。
 
 **回退方式**：M-08-1 加的是常量（置 0 即退回旧布局）；M-08-4 的放行门是
 `arkrtos_ushell_upcall_ready()`，把它改成恒 0 就回到今天这个 fail-closed 行为，

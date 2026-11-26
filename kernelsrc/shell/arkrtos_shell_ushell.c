@@ -552,7 +552,7 @@ int32 arkrtos_ushell_upcall_call(uint32 space, uint32 owner_task,
     }
     else
     {
-        frame = arkrtos_port_ushell_start(stub_va, up_sp, func, argc, argv);
+        frame = arkrtos_port_ushell_start(space, stub_va, up_sp, func, argc, argv);
         if(frame == 0ul)
         {
             rc = ARKRTOS_USHELL_UP_ERR_EXEC;

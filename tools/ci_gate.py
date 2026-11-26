@@ -2382,7 +2382,7 @@ def check_linux_abi():
     if r.returncode == 0 and "LINUX-ABI-GATE OK" in txt:
         ok("linux-abi",
            "default off zero symbols / LA64 ON 5 TU compile / 15 syscall numbers "
-           "match asm-generic / LA64 instr!=0 is Ark, RV32 0x10..0x22 is Ark / "
+           "match asm-generic / LA64 instr!=0 is Ark, RV32 0x10..0x23 is Ark / "
            "QEMU 14 checks + exit 7 / parser self-check 4/4")
     else:
         fail("linux-abi", txt[-320:])

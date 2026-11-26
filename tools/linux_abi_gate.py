@@ -434,16 +434,32 @@ def check_syscall_table():
     else:
         ok("abi-split-la64", "LA64：syscall 立即数 0 = Linux ABI，非 0 = Ark 号")
 
-    m = re.search(r"num\s*>=\s*0x10u\)\s*&&\s*\(num\s*<=\s*0x22u", rv)
+    # SVC 0x23（SEC-G08 upcall 返回通道）把 Ark 的号段推到 0x23：号表这边
+    # 必须同步，否则「0x23 归谁也不说」—— Linux 侧恰好没有 0x23（最小 56），
+    # 但把号段写死成 0x22 会让 future 的 0x23 变成「先到先得」。
+    m = re.search(r"num\s*>=\s*0x10u\)\s*&&\s*\(num\s*<=\s*0x23u", rv)
     if not m:
-        bad("abi-split-rv32", "RV32 里找不到 0x10..0x22 归 Ark 的判据")
+        bad("abi-split-rv32", "RV32 里找不到 0x10..0x23 归 Ark 的判据")
     else:
-        # 号段不撞：Linux 最小号 56 = 0x38 > 0x22
+        # 号段不撞：Linux 最小号 56 = 0x38 > 0x23
         lowest = min(EXPECT_SYS.values())
-        if lowest <= 0x22:
-            bad("abi-split-rv32", "Linux 号表最小 %d 落进 Ark 号段 0x10..0x22" % lowest)
+        if lowest <= 0x23:
+            bad("abi-split-rv32", "Linux 号表最小 %d 落进 Ark 号段 0x10..0x23" % lowest)
         else:
-            ok("abi-split-rv32", "RV32：0x10..0x22 归 Ark，Linux 最小号 %d 不撞" % lowest)
+            ok("abi-split-rv32", "RV32：0x10..0x23 归 Ark，Linux 最小号 %d 不撞" % lowest)
+
+    # 0x23 的另一半：内核里必须真有这条分派（号表 + 分派 + 头文件三处同源），
+    # 否则「号段归 Ark」只是让位，叫了没人应答。
+    task_src = read_text(os.path.join(ROOT, "kernelsrc/src/arkrtos_task.c"))
+    def_src = read_text(os.path.join(ROOT, "kernelsrc/include/arkrtos_def.h"))
+    if "#define ARKRTOS_SVC_USHELL_RET        (0x23)" not in def_src:
+        bad("svc-0x23", "arkrtos_def.h 里没有 ARKRTOS_SVC_USHELL_RET (0x23)")
+    elif "case ARKRTOS_SVC_USHELL_RET:" not in task_src:
+        bad("svc-0x23", "SVC_Server 里没有 0x23 的分派")
+    elif "arkrtos_ushell_upcall_ret" not in task_src:
+        bad("svc-0x23", "0x23 的分派没有落到 arkrtos_ushell_upcall_ret")
+    else:
+        ok("svc-0x23", "0x23 归 Ark：号定义、分派、upcall 返回通道三处同源")
 
 
 # ---------------------------------------------------------------- F 真读数

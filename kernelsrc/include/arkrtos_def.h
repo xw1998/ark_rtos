@@ -56,6 +56,10 @@
  * traps as an unknown service instead of being silently accepted. */
 #define ARKRTOS_SVC_ESET_CTRL         (0x21)
 #define ARKRTOS_SVC_WAITMULTI_CTRL    (0x22)   /* 多对象就绪探测 */
+/* SEC-G08 隔离执行：upcall 线程从桩里回来（SVC 0x23）。15 位立即数里没有
+ * 更多的「内核自有」号段要保，0x23 紧接着 0x22；Linux ABI 在 LA64 上按
+ * 「立即数 == 0」分界，在 RV32 上按 0x10..0x23 让位，两边都不撞。 */
+#define ARKRTOS_SVC_USHELL_RET        (0x23)
 
 /* 同步原语（信号量/互斥锁）返回码：0=成功，负值=失败。
  * 超时必须返回负值——调用方据此判断“本次没有拿到资源”；

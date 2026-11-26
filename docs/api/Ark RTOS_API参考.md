@@ -11265,6 +11265,11 @@ int32 arkrtos_port_paging_write_space(uint32 space, unsigned long va, const unsi
 这一档**不做按需缺页**：调用方要写的地址必须已经驻留，否则
 回 -1 让它回滚。在内核路径里临时拿帧会绕开「谁欠谁」的账本，
 而且 fork 的初始帧本来就落在父任务已经摸过的栈页里。
+两个消费者：fork（强制按需缺页档，PA 记在 s_pg_pair_pa，
+共享对还要先破 COW）与 SEC-G08 的 upcall（默认档关掉按需缺页、
+整块 2 MB 连续，PA = 空间帧基址 + 窗口内偏移）。两者的差别
+只有「PA 从哪来」，边界判据、跨对切分、8 字节对齐完全同形，
+所以放在同一个函数里按编译开关分叉，而不是抄一份会各自漂移的写法。
 
 ### `int32 arkrtos_port_paging_clone_frame(void *p_exc_ctx, uint32 space) {`
 
@@ -12279,8 +12284,8 @@ uint32 arkrtos_port_linux_syscall_num(void *p_exc_ctx) {
 
 **Linux/RISC-V ABI 的系统调用号（a7）**
 本移植的 Ark 服务号本来就走 a7。两个 ABI 共用同一寄存器与同一条
-`ecall`，只能按号段让位：0x10..0x22 是 Ark 自己的服务号
-（ARKRTOS_SVC_LOG .. ARKRTOS_SVC_WAITMULTI_CTRL），永远归 Ark；
+`ecall`，只能按号段让位：0x10..0x23 是 Ark 自己的服务号
+（ARKRTOS_SVC_LOG .. ARKRTOS_SVC_USHELL_RET），永远归 Ark；
 其余号交给 Linux 表，不认识的由兼容层回 -ENOSYS，不会静默当成功。
 
 ### `uint32 arkrtos_port_enter_critical(void) {`

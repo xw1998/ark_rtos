@@ -104,9 +104,10 @@ English would double the places that can drift out of date, so the ledger stays 
 | [api/Ark RTOS_API参考.md](api/Ark RTOS_API参考.md) | Generated from the source comments by
 tools/gen_api_doc.py; the comments themselves are in Chinese |
 | [SEC-G08-隔离执行-设计.md](SEC-G08-隔离执行-设计.md) | A pre-registration design note for one open item (isolated execution of App shell
-callbacks), written against the code as it stands today; milestones M-08-1 (window split) and M-08-2 (upcall `ready()`/`call()`/`ret()` interfaces
-plus bookkeeping, with `ready()` still returning 0 so the visible behaviour is unchanged) have
-landed; M-08-3..5 are still a plan, and this note will be rewritten as they land. A second English copy would drift from that churn |
+callbacks), written against the code as it stands today; milestones M-08-1 (window split), M-08-2 (upcall `ready()`/`call()`/`ret()` interfaces
+plus bookkeeping) and M-08-3 (LA64 stub bytes, initial frame, `SVC 0x23` dispatch) have
+landed, with `ready()`/`call()` having no production caller yet so the visible behaviour is
+unchanged; M-08-4..5 are still a plan, and this note will be rewritten as they land. A second English copy would drift from that churn |
 
 ## Directory layout
 

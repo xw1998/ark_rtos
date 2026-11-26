@@ -210,17 +210,20 @@ int32 arkrtos_port_ushell_stub(uint32 space, unsigned long stub_va)
 }
 
 static unsigned long g_up_frame;
+static uint32 g_up_start_space;
+static unsigned long g_up_start_stub_va;
 static unsigned long g_up_start_sp;
 static int g_up_start_argc;
 static int (*g_up_start_func)(int, char **);
 
-unsigned long arkrtos_port_ushell_start(unsigned long stub_va,
+unsigned long arkrtos_port_ushell_start(uint32 space, unsigned long stub_va,
                                         unsigned long upcall_sp,
                                         int (*func)(int, char **argv),
                                         int argc, char **argv)
 {
-    (void)stub_va;
     (void)argv;
+    g_up_start_space = space;
+    g_up_start_stub_va = stub_va;
     g_up_start_sp = upcall_sp;
     g_up_start_func = func;
     g_up_start_argc = argc;
@@ -897,6 +900,8 @@ static void up_reset(void)
     g_up_stub_space = 0xFFFFFFFFu;
     g_up_stub_va = 0ul;
     g_up_frame = UP_FRAME;
+    g_up_start_space = 0xFFu;
+    g_up_start_stub_va = 0ul;
     g_up_start_sp = 0ul;
     g_up_start_argc = -1;
     g_up_start_func = NULL;
@@ -1083,6 +1088,8 @@ static void t_upcall_iso(void)
     CK_I(g_up_sem_wait_to, (int32)ARKRTOS_USHELL_UP_TIMEOUT_MS);
     CK_I(g_up_stub_space, 0u);
     CK(g_up_stub_va == UP_BASE);
+    CK_I(g_up_start_space, 0);
+    CK(g_up_start_stub_va == UP_BASE);
     CK(g_up_start_sp == UP_SP);
     CK(g_up_start_func == up_cb);
     CK_I(g_up_start_argc, 2);

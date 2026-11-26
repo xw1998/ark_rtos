@@ -2809,42 +2809,11 @@ int32 arkrtos_port_paging_space_clone(uint32 src, uint32 dst)
 #endif /* ARKRTOS_USE_PAGING_COW */
 }
 
-/* ============================================================
- * SEC-G08 隔离执行：port 侧的「写桩 / 建初始帧」契约
- *
- * M-08-2 只落内核半边的接口与记账，桩字节与初始帧属于 M-08-3。在那之前
- * 这一档诚实回答「还不会写桩」：arkrtos_ushell_upcall_ready() 因此恒 0，
- * 注册路径继续 fail-closed —— 本阶段的可见行为一个字节都没变。
- * ============================================================ */
-#if (ARKRTOS_USE_USHELL_ISO == 1)
-
-int32 arkrtos_port_ushell_stub_supported(void)
-{
-    return 0;
-}
-
-int32 arkrtos_port_ushell_stub(uint32 space, unsigned long stub_va)
-{
-    (void)space;
-    (void)stub_va;
-    return -1;
-}
-
-unsigned long arkrtos_port_ushell_start(unsigned long stub_va,
-                                        unsigned long upcall_sp,
-                                        int (*func)(int, char **argv),
-                                        int argc, char **argv)
-{
-    (void)stub_va;
-    (void)upcall_sp;
-    (void)func;
-    (void)argc;
-    (void)argv;
-    return 0ul;
-}
-
-#endif /* ARKRTOS_USE_USHELL_ISO */
-
+#endif /* ARKRTOS_USE_LINUX_FORK == 1 */
+#if ((ARKRTOS_USE_LINUX_FORK == 1) || (ARKRTOS_USE_USHELL_ISO == 1))
+/* 两个消费者共用这一段：fork 复制父子栈、upcall 写桩页与初始帧。
+ * 放在 FORK 之内就等于「没有 fork 的构建里隔离执行写不进窗口」，所以
+ * 它自己的守卫是「有人在用」，不是「fork 开着」。 */
 /**
 * @brief 按 PA 往某个空间里写一小段字（不切窗口）
 * @param space 目标空间号
@@ -2855,6 +2824,12 @@ unsigned long arkrtos_port_ushell_start(unsigned long stub_va,
 * @details 这一档**不做按需缺页**：调用方要写的地址必须已经驻留，否则
 *          回 -1 让它回滚。在内核路径里临时拿帧会绕开「谁欠谁」的账本，
 *          而且 fork 的初始帧本来就落在父任务已经摸过的栈页里。
+*
+*          两个消费者：fork（强制按需缺页档，PA 记在 s_pg_pair_pa，
+*          共享对还要先破 COW）与 SEC-G08 的 upcall（默认档关掉按需缺页、
+*          整块 2 MB 连续，PA = 空间帧基址 + 窗口内偏移）。两者的差别
+*          只有「PA 从哪来」，边界判据、跨对切分、8 字节对齐完全同形，
+*          所以放在同一个函数里按编译开关分叉，而不是抄一份会各自漂移的写法。
 */
 int32 arkrtos_port_paging_write_space(uint32 space, unsigned long va,
                                       const unsigned long *words, uint32 n)
@@ -2876,7 +2851,12 @@ int32 arkrtos_port_paging_write_space(uint32 space, unsigned long va,
         unsigned long addr = va + ((unsigned long)done * 8ul);
         uint32 idx = (uint32)((addr - LA_WIN_VA) / 0x2000u);
         uint32 off = (uint32)((addr - LA_WIN_VA) % 0x2000u);
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
         uint32 pa  = s_pg_pair_pa[space][idx];
+#else
+        /* 整块连续的窗口：帧基址在 s_pg_space_base，VA 与 PA 只差窗口基址。 */
+        uint32 pa  = s_pg_space_base[space];
+#endif
         uint32 cnt = (uint32)((0x2000u - off) / 8u);
         unsigned long *dst;
         uint32 k;
@@ -2885,7 +2865,10 @@ int32 arkrtos_port_paging_write_space(uint32 space, unsigned long va,
         {
             return -1;
         }
-#if (ARKRTOS_USE_PAGING_COW == 1)
+#if (ARKRTOS_USE_PAGING_DEMAND != 1)
+        pa += idx * 0x2000u;
+#endif
+#if ((ARKRTOS_USE_PAGING_COW == 1) && (ARKRTOS_USE_PAGING_DEMAND == 1))
         /* 共享对：先把自己的那一份复制出来。按 PA 直写绕不过 COW ——
          * 不复制就是往「别人也看得见」的帧里写（子进程的初始 trap 帧
          * 正是走这条路，踩到就是父子的栈互相覆盖）。MAP_SHARED 的对
@@ -2912,6 +2895,8 @@ int32 arkrtos_port_paging_write_space(uint32 space, unsigned long va,
     return 0;
 }
 
+#endif /* fork 与 upcall 共用的写窗口 */
+#if (ARKRTOS_USE_LINUX_FORK == 1)
 /**
 * @brief 把父任务的 trap 帧复制成子任务的初始帧（同一 VA）
 * @param p_exc_ctx 父任务这次系统调用的 trap 帧（同时是它在子空间里的 VA）
@@ -3076,6 +3061,149 @@ int32 arkrtos_port_paging_thread_frame(void *p_exc_ctx, uint32 space,
 }
 #endif /* ARKRTOS_USE_LINUX_THREAD == 1 */
 #endif /* ARKRTOS_USE_LINUX_FORK == 1 */
+
+/* ============================================================
+ * SEC-G08 隔离执行：port 侧的「写桩 / 建初始帧」契约（M-08-3）
+ *
+ * 隔离执行只差两样内核不认识的东西：一段能在 PLV3 下跑、又能把控制权交回
+ * 内核的指令（桩），以及一条 upcall 线程的初始现场（把 func / argc / argv
+ * 放进 a2 / a0 / a1）。两样都在这里，因为只有 port 知道指令编码与 trap 帧
+ * 布局。设计见 docs/SEC-G08-隔离执行-设计.md §4.2。
+ *
+ * 桩（24 字节 = 3 个 8 字节字；写窗口按 8 字节粒度）：
+ *   0x00  or    $t0, $a2, $zero     ; move $t0,$a2 —— func 指针挪到 $t0
+ *   0x04  jirl  $ra, $t0, 0         ; 跳 func，$ra = 0x08（下一条）
+ *   0x08  or    $zero, $zero, $zero ; jirl 的落点（屏障：让落点可读、可断点）
+ *   0x0c  syscall 0x23              ; $a0 = func 的返回值；内核在此收回执行权
+ *   0x10  nop
+ *   0x14  nop                       ; 填充到 24 字节
+ * 桩里没有绝对地址、没有全局变量、不读任何内核内存：四个值全在寄存器里，
+ * 而寄存器由下面这份初始帧给。
+ * ============================================================ */
+#if (ARKRTOS_USE_USHELL_ISO == 1)
+
+/* 3R 型：opcode 0x0002A(=or) 占 [31:15]，rk[14:10]、rj[9:5]、rd[4:0]。
+ * `move rd, rj` 就是 `or rd, rj, $zero`（帧里 0x00150064 正是 hello 的
+ * 第一条 `move $a0,$sp`，与本宏同源）。 */
+#define LA_UP_OR(rd, rj)        (0x00150000u | (((uint32)(rj) & 0x1Fu) << 5) | \
+                                 ((uint32)(rd) & 0x1Fu))
+/* 2RI16 型：jirl 的 opcode 是 0x13，占 [31:26] ⇒ 基址 0x4C000000，
+ * 偏移 [25:10]、rj[9:5]、rd[4:0]（`jr $ra` = 0x4C000020 与此一致）。 */
+#define LA_UP_JIRL(rd, rj, off) (0x4C000000u | ((((uint32)(off)) & 0xFFFFu) << 10) | \
+                                 (((uint32)(rj) & 0x1Fu) << 5) | ((uint32)(rd) & 0x1Fu))
+#define LA_UP_NOP               (0x03400000u)          /* andi $r0,$r0,0 */
+#define LA_UP_SYSCALL_RET       (LA_INSN_SYSCALL_OP | 0x23u)
+
+#define LA_UP_REGS_T0           (12u)
+#define LA_UP_REGS_A2           (6u)
+#define LA_UP_REGS_RA           (1u)
+#define LA_UP_STUB_WORDS        (3u)
+
+/* 编码自检 —— 不是「按格式推导过就算」。把桩里那 6 条助记符单独汇编一次
+ * （同一套工具链：`move $t0,$a2` / `jirl $ra,$t0,0` / `or $zero,$zero,$zero` /
+ * `syscall 0x23` / 2×`nop`），objdump 反汇编得到
+ *   001500cc 4c000181 00150000 002b0023 03400000 03400000
+ * 与下面 LA_UP_* 宏算出来的值必须逐字相等。宏写错时编译期就红，不必等到
+ * M-08-4 的端到端才暴露。用 typedef 而不是 _Static_assert：本档只有 GCC 编，
+ * 但仓库里没有 C11 静态断言的先例，不新引入语法。 */
+typedef char la_up_enc_check_or[
+    (LA_UP_OR(LA_UP_REGS_T0, LA_UP_REGS_A2) == 0x001500CCu) ? 1 : -1];
+typedef char la_up_enc_check_or_zero[
+    (LA_UP_OR(0u, 0u) == 0x00150000u) ? 1 : -1];
+typedef char la_up_enc_check_jirl[
+    (LA_UP_JIRL(LA_UP_REGS_RA, LA_UP_REGS_T0, 0) == 0x4C000181u) ? 1 : -1];
+typedef char la_up_enc_check_syscall[
+    (LA_UP_SYSCALL_RET == 0x002B0023u) ? 1 : -1];
+typedef char la_up_enc_check_nop[
+    (LA_UP_NOP == 0x03400000u) ? 1 : -1];
+
+/* 这一档能写桩吗：默认档是「页级窗口 + 整块 2 MB 连续」，写窗口走
+ * s_pg_space_base；静态 PS=20 窗口档（PAGES=0）没有按空间写的通路，如实
+ * 回答不行 —— 于是 ready() 恒 0、注册继续 fail-closed。 */
+int32 arkrtos_port_ushell_stub_supported(void)
+{
+    return 1;
+}
+
+int32 arkrtos_port_ushell_stub(uint32 space, unsigned long stub_va)
+{
+    unsigned long w[LA_UP_STUB_WORDS];
+
+    /* 写窗口是 8 字节粒度：桩页 4 KB 对齐，天然满足；这里仍然判一次，
+     * 因为「调用方给了个 0x...04」写下去会静默错位半句指令。 */
+    if((stub_va & 0x7ul) != 0ul)
+    {
+        return -1;
+    }
+
+    w[0] = (unsigned long)LA_UP_OR(LA_UP_REGS_T0, LA_UP_REGS_A2) |
+           ((unsigned long)LA_UP_JIRL(LA_UP_REGS_RA, LA_UP_REGS_T0, 0) << 32);
+    w[1] = (unsigned long)LA_UP_OR(0u, 0u) |
+           ((unsigned long)LA_UP_SYSCALL_RET << 32);
+    w[2] = (unsigned long)LA_UP_NOP |
+           ((unsigned long)LA_UP_NOP << 32);
+
+    return arkrtos_port_paging_write_space(space, stub_va, w, LA_UP_STUB_WORDS);
+}
+
+unsigned long arkrtos_port_ushell_start(uint32 space, unsigned long stub_va,
+                                        unsigned long upcall_sp,
+                                        int (*func)(int, char **argv),
+                                        int argc, char **argv)
+{
+    /* 与 fork 的初始帧同一个做法：静态缓冲，写完一次性按 PA 落到空间里。
+     * 临界区里调用，同一核上不会有两份同时在用（SMP 并发是 §6 的边界）。 */
+    static unsigned long s_up_frame[LA_FR_WORDS];
+    unsigned long win_top = (unsigned long)ARKRTOS_ELF_WINDOW_BASE +
+                            (unsigned long)ARKRTOS_ELF_WINDOW_SIZE;
+    unsigned long frame_va;
+    uint32 i;
+
+    if((stub_va == 0ul) || (func == 0) || (argc < 0) ||
+       (upcall_sp < (unsigned long)LA_FR_SIZE))
+    {
+        return 0ul;
+    }
+
+    /* 帧落在「栈顶 - 帧长」，正是 trap 入口 `sp -= LA_FR_SIZE` 会把它放的
+     * 位置；ertn 恢复的就是这一整块。栈顶 16 字节对齐由 ELF 布局保证。 */
+    frame_va = (upcall_sp & ~0xFul) - (unsigned long)LA_FR_SIZE;
+
+    /* 帧必须整块落在桩页之上、窗口之内：写进窗口外就是写别人的帧池，
+     * 而「帧跨过桩页」等于桩执行时踩到自己的现场。 */
+    if((frame_va < (stub_va + (unsigned long)ARKRTOS_USHELL_UP_PAGE_SIZE)) ||
+       ((frame_va + (unsigned long)LA_FR_SIZE) > win_top))
+    {
+        return 0ul;
+    }
+
+    for(i = 0u; i < LA_FR_WORDS; i++)
+    {
+        s_up_frame[i] = 0ul;
+    }
+
+    /* 入口约定（设计 §4.2）：$a0 = argc、$a1 = argv、$a2 = func、$sp =
+     * upcall_sp。$ra 留成 upcall_sp 只是「可辨认」——桩的 jirl 会把它覆盖成
+     * 桩内的下一条指令，这个值只会出现在栈回溯里。$tp 保持 0：回调不得依赖
+     * TLS（边界写进 SDK 文档与 已知限制，M-08-5）。 */
+    s_up_frame[LA_FR_RA]        = upcall_sp;
+    s_up_frame[LA_FR_SP]        = upcall_sp;
+    s_up_frame[LA_FR_A0]        = (unsigned long)(uint32)argc;
+    s_up_frame[LA_FR_A0 + 1u]   = (unsigned long)argv;
+    s_up_frame[LA_FR_A0 + 2u]   = (unsigned long)func;
+    s_up_frame[LA_FR_ERA]       = stub_va;
+    s_up_frame[LA_FR_PRMD]      = LA_PRMD_INIT;   /* PPLV 由切换路径按任务改写 */
+
+    if(arkrtos_port_paging_write_space(space, frame_va, s_up_frame,
+                                       LA_FR_WORDS) != 0)
+    {
+        return 0ul;
+    }
+
+    return frame_va;
+}
+
+#endif /* ARKRTOS_USE_USHELL_ISO */
 
 #if (ARKRTOS_USE_PAGING_DEMAND == 1)
 /**

@@ -29,10 +29,16 @@
 extern "C" {
 #endif
 
-/* 本模块是否编出实体：三个前提缺一不可。显式定义可强制打开/关闭（宿主用例
- * 用后者构造「没有这块区」的读数）。 */
+/* 本模块是否编出实体：四个前提缺一不可。显式定义可强制打开/关闭（宿主用例
+ * 用后者构造「没有这块区」的读数）。
+ *
+ * 这里比 M-08-2 时多要了一条 `ARKRTOS_USE_PAGING_PAGES == 1`：隔离执行要的是
+ * 「按空间的那张页表」——桩与初始帧都是往**某个空间的窗口 VA** 里写，静态
+ * PS=20 窗口档（PAGES=0）只有一张共享窗口，没有「按空间写」的通路，所以那
+ * 一档必须继续 fail-closed，而不是编出一个写不进去的实体。 */
 #ifndef ARKRTOS_USE_USHELL_ISO
-#  if (ARKRTOS_USE_PRIV == 1) && (ARKRTOS_USE_PAGING == 1) && (ARKRTOS_USE_ELF == 1)
+#  if (ARKRTOS_USE_PRIV == 1) && (ARKRTOS_USE_PAGING == 1) && \
+      (ARKRTOS_USE_PAGING_PAGES == 1) && (ARKRTOS_USE_ELF == 1)
 #    define ARKRTOS_USE_USHELL_ISO 1
 #  else
 #    define ARKRTOS_USE_USHELL_ISO 0
@@ -109,11 +115,13 @@ int32 arkrtos_ushell_upcall_ret(int32 rc);
 /* ---- port 侧契约（只有 LA64 这一档提供实体；其它 port 不编出隔离执行） ----
  * stub_supported：这一档能不能写桩（0 = 不能，注册继续 fail-closed）
  * stub：把桩指令写进 space 的 stub_va（页内），0 = 成功
- * start：在 space 里建 upcall 线程的初始帧（寄存器 a0/a1/a2/sp），
- *        返回帧所在的 VA（>0），0 = 失败。帧必须落在 upcall 栈内。 */
+ * start：在 space 里建 upcall 线程的初始帧（寄存器 a0=argc / a1=argv /
+ *        a2=func / sp=upcall_sp），返回帧所在的 VA（>0），0 = 失败。
+ *        帧必须在 stub_va 之上、窗口之内；space 显式传，不读「当前空间」
+ *        这条会随调用时机漂移的侧信道。 */
 int32 arkrtos_port_ushell_stub_supported(void);
 int32 arkrtos_port_ushell_stub(uint32 space, unsigned long stub_va);
-unsigned long arkrtos_port_ushell_start(unsigned long stub_va,
+unsigned long arkrtos_port_ushell_start(uint32 space, unsigned long stub_va,
                                         unsigned long upcall_sp,
                                         int (*func)(int, char **argv),
                                         int argc, char **argv);
