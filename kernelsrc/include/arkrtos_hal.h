@@ -871,7 +871,8 @@ int32 arkrtos_port_paging_space_clone(uint32 src, uint32 dst);
  *           a pair the parent already made resident, otherwise it rolls
  *           back. Kernel paths do not quietly allocate frames behind the
  *           bookkeeping's back.
- *  @note 只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。 */
+ *  @note 在 ARKRTOS_USE_LINUX_FORK == 1 或 ARKRTOS_USE_USHELL_ISO == 1 时存在：
+ *        fork 用它复制父子栈，SEC-G08 的 upcall 用它写桩页、初始帧与参数区。 */
 int32 arkrtos_port_paging_write_space(uint32 space, unsigned long va,
                                       const unsigned long *words, uint32 n);
 

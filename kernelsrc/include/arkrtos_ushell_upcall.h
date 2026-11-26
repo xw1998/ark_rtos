@@ -68,6 +68,16 @@ extern "C" {
 #define ARKRTOS_USHELL_UP_TASK_PRIORITY (12u)
 #endif
 
+/* 参数区上限（M-08-4）：回调拿到的 argv 必须落在 App 自己的窗口里。
+ * shell 的命令行缓冲是 ARK_SHELL_LINE_SIZE（128）字节，512 已经是它的四倍；
+ * 上限存在的意义是「一次调用最多搬多少」，而不是「能搬的都搬」——超了直接
+ * 回 ARKRTOS_USHELL_UP_ERR_PARAM，不截断（截断后的 argv 会让回调看到一条
+ * 自己没发过的命令，比报错更难查）。必须是 8 的倍数：参数区按 8 字节字写，
+ * 因为 arkrtos_port_paging_write_space() 的粒度就是字。 */
+#ifndef ARKRTOS_USHELL_UP_ARGS_MAX
+#define ARKRTOS_USHELL_UP_ARGS_MAX     (512u)
+#endif
+
 /* 桩页大小 = 一个页：桩只有几条指令，但页是 PTE 的粒度。 */
 #define ARKRTOS_USHELL_UP_PAGE_SIZE    (4096u)
 
@@ -96,7 +106,8 @@ int32 arkrtos_ushell_upcall_ready(uint32 space);
 * @param space      地址空间号（= 注册者装载时所在的空间）
 * @param owner_task 注册这条命令的任务号（用来继承 App 配额身份）
 * @param func       回调入口（VA 必须落在该空间的 ELF 段内，由跳板先校验）
-* @param argc/argv  参数，原样交给桩
+* @param argc/argv  内核侧的参数（跳板手里那份）；本函数在起跑前把字符串
+ *                   与指针数组搬进 App 窗口，桩拿到的是窗口内的副本
 * @param p_rc       成功时写回回调的返回值
 * @return ARKRTOS_USHELL_UP_*
 */
@@ -106,11 +117,25 @@ int32 arkrtos_ushell_upcall_call(uint32 space, uint32 owner_task,
 
 /**
 * @brief upcall 线程的返回通道（SVC 0x23）：记账后终止自己
-* @param rc 回调的返回值
+* @param rc  回调的返回值
+* @param plv 这次 syscall 从哪个特权级发出（trap 帧保存的 PPLV）
 * @return 正常路径不返回（线程已退出）；调用者不是 upcall 线程时回
 *         ARKRTOS_USHELL_UP_ERR_CALLER，且不改动任何状态
+* @note plv 是**证据**不是装饰：跳板打的那行 `plv=N` 直接来自它，N != 3 就
+*       说明回调没有在 PLV3 跑过（隔离执行不成立）。由 port 的
+*       arkrtos_port_svc_caller_plv() 从 trap 帧里读，内核不认识帧布局。
 */
-int32 arkrtos_ushell_upcall_ret(int32 rc);
+int32 arkrtos_ushell_upcall_ret(int32 rc, uint32 plv);
+
+/**
+* @brief 本次 trap 是从哪个特权级进来的（trap 帧保存的 PRMD.PPLV）
+* @param p_exc_ctx 系统调用入口传给内核的上下文指针
+* @return 0..3；帧为空时回 0（按内核态报，不给一个好看的数字）
+* @details 只有提供这条能力的 port 才编出隔离执行（目前是 LoongArch64：
+*          帧里 PRMD 的低两位就是「回到哪个 PLV」，硬件在进异常时写好了）。
+*          其它 port 的构建上 ARKRTOS_USE_USHELL_ISO == 0，本符号不被引用。
+*/
+uint32 arkrtos_port_svc_caller_plv(void *p_exc_ctx);
 
 /* ---- port 侧契约（只有 LA64 这一档提供实体；其它 port 不编出隔离执行） ----
  * stub_supported：这一档能不能写桩（0 = 不能，注册继续 fail-closed）
@@ -134,8 +159,8 @@ unsigned long arkrtos_port_ushell_start(uint32 space, unsigned long stub_va,
 #define arkrtos_ushell_upcall_call(space, owner, fn, argc, argv, p_rc) \
     ((void)(space), (void)(owner), (void)(fn), (void)(argc), (void)(argv), \
      (void)(p_rc), (int32)ARKRTOS_USHELL_UP_ERR_NOAREA)
-#define arkrtos_ushell_upcall_ret(rc)                   \
-    ((void)(rc), (int32)ARKRTOS_USHELL_UP_ERR_CALLER)
+#define arkrtos_ushell_upcall_ret(rc, plv)              \
+    ((void)(rc), (void)(plv), (int32)ARKRTOS_USHELL_UP_ERR_CALLER)
 
 #endif /* ARKRTOS_USE_USHELL_ISO */
 

@@ -21,6 +21,10 @@
 #include "arkrtos_vfs.h"
 #include "arkrtos_elf.h"
 #include "arkrtos_board.h"
+/* 隔离执行（SEC-G08）那一段用 ARKRTOS_USE_USHELL_ISO 判是否编进演示。
+ * 这个开关的推导只有一处（PRIV + PAGING + PAGING_PAGES + ELF），所以直接
+ * 包含内核内部头，不在示例里另抄一份判据——抄一份就会在两处漂移。 */
+#include "arkrtos_ushell_upcall.h"
 #include "hello_blob.h"
 #if (ARKRTOS_USE_LINUX_ABI == 1)
 #include "linux_hello_blob.h"
@@ -37,6 +41,9 @@
 #endif
 #if (ARKRTOS_USE_EXEC_SIGN == 1)
 #include "hello_bad_blob.h"
+#endif
+#if (ARKRTOS_USE_USHELL_ISO == 1)
+#include "ushell_iso_blob.h"
 #endif
 #if (ARKRTOS_USE_DYNLOAD == 1)
 #include "ld_ark_blob.h"
@@ -84,6 +91,11 @@
 /* 反假绿夹具：它的 JUMP_SLOT 指向库里根本不存在的 no_such_symbol，
  * 要求 ld.so 明确失败并以 127 退出，不允许跑到 PASS。 */
 #define DYN_BAD_PATH        "/mnt/ram/dynmain_bad"
+#endif
+#if (ARKRTOS_USE_USHELL_ISO == 1)
+#define USHELL_ISO_PATH     "/mnt/ram/ushell_iso"
+/* 只等"起跑并注册"，不等退出——这个 App 是常驻的。 */
+#define USHELL_ISO_SETTLE_MS 500u
 #endif
 /* 演示任务的栈：它自己就是跑装载器的那个任务 —— exec 一次要把 ELF 头、
  * 段表、interp 路径与整段 23 KB 的夹具文件写穿 VFS/littlefs，峰值栈用量
@@ -217,6 +229,76 @@ static void dyn_run(const char *path, const char *name)
     demo_unlock();
 }
 #endif /* ARKRTOS_USE_DYNLOAD */
+
+#if (ARKRTOS_USE_USHELL_ISO == 1)
+/* 隔离执行演示（SEC-G08）：把 ushell_iso.elf 写进 ramfs 再走正常装载路径
+ * 起起来，然后**不等它结束**。它只做一件事：向内核注册一条用户态命令
+ * `hi`，成功后常驻等回调。App 一旦退出，空间与被注册的命令会一起被卸掉，
+ * 回调就再也触发不了——所以这里必须留它活着。
+ * 真正的读数由 tools/ushell_iso_gate.py 在 shell 里发 `hi a b` 取得：
+ * App 侧要打 argc/argv/函数地址/栈指针，内核侧要打 isolated rc/tid/space/plv。
+ * @note 演示任务只负责"送文件 + 起跑"，不参与任何判据。 */
+static void ushell_iso_run(void)
+{
+    char *argv[2];
+    int32 rc = -1;
+    uint32 tries;
+    uint32 waited = 0u;
+
+    for (tries = 0u; tries < 100u; tries++)
+    {
+        rc = arkrtos_vfs_write_file(USHELL_ISO_PATH, ark_example_ushell_iso,
+                                    (uint32)ARK_EXAMPLE_USHELL_ISO_LEN);
+        if (rc >= 0)
+        {
+            break;
+        }
+        arkrtos_task_wait_internal(100u);
+    }
+
+    demo_lock();
+    demo_puts("[ushell] write ");
+    demo_puts(USHELL_ISO_PATH);
+    demo_puts(" rc=");
+    demo_putu((uint32)rc);
+    demo_puts(" size=");
+    demo_putu((uint32)ARK_EXAMPLE_USHELL_ISO_LEN);
+    demo_puts("\n");
+    demo_unlock();
+    if (rc < 0)
+    {
+        return;
+    }
+
+    argv[0] = (char *)"ushell_iso";
+    argv[1] = (char *)0;
+
+    rc = arkrtos_elf_exec(USHELL_ISO_PATH, 1, argv);
+    demo_lock();
+    demo_puts("[ushell] exec rc=");
+    demo_putu((uint32)rc);
+    demo_puts("\n");
+    demo_unlock();
+    if (rc != ARKRTOS_ELF_OK)
+    {
+        return;
+    }
+
+    /* 只等到它打出注册结果，不当成"跑完"：常驻 App 的 running 一直是 1，
+     * 这里必然走超时分支。 */
+    while ((arkrtos_elf_running() != 0) && (waited < USHELL_ISO_SETTLE_MS))
+    {
+        arkrtos_task_wait_internal(DEMO_POLL_MS);
+        waited += DEMO_POLL_MS;
+    }
+
+    demo_lock();
+    demo_puts("[ushell] app resident after ");
+    demo_putu(waited);
+    demo_puts(" ms (try: hi a b)\n");
+    demo_unlock();
+}
+#endif /* ARKRTOS_USE_USHELL_ISO */
 
 static void task_elf_demo(void)
 {
@@ -877,6 +959,12 @@ static void task_elf_demo(void)
     {
         demo_puts("[dyn] FAIL: cannot stage the fixtures in /mnt/ram/\n");
     }
+#endif
+
+#if (ARKRTOS_USE_USHELL_ISO == 1)
+    /* 隔离执行（SEC-G08）：放最后一段，只起不等待。前面的演示都会等自己
+     * 的子程序退出，这一段起的是常驻 App，等它就等不到了。 */
+    ushell_iso_run();
 #endif
 
     /* 演示结束，本任务留着空转（不自杀：示例里的任务死掉会让 'task' 表

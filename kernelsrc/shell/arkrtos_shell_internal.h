@@ -129,6 +129,14 @@ typedef struct
     uint32   max_args;
     uint32   in_use;
     uint32   owner_task;    /* task that registered it; 0 = kernel, kept */
+    /* SEC-G08 M-08-4：这一行要到哪里执行。
+     *   has_space == 1 -> 注册者是一条 App 任务，回调必须在该 App 自己的
+     *                     地址空间里以 PLV3 隔离执行（space 有效）；
+     *   has_space == 0 -> 内核侧注册，回调本来就是内核代码，照旧直调。
+     * 两者都不看「当前空间」这条会随调用时机漂移的侧信道。
+     * 说明见 docs/SEC-G08-隔离执行-设计.md §4.4。 */
+    uint32   space;         /* 注册时调用者的地址空间号；has_space == 1 时有效 */
+    uint32   has_space;     /* 1 = 隔离执行（App 注册）；0 = 直调（内核注册） */
 } arkrtos_ushell_entry_t;
 
 #if (SHELL_ENABLE == 1)

@@ -96,7 +96,7 @@
 | Read the security baseline self-check in English | [安全基线自检.en.md](安全基线自检.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 要过安全认证：资产、威胁模型、标准差距、缺口清单 | [安全认证准备.md](安全认证准备.md)（11 类资产与五条信任边界、STRIDE、62443-4-2/303 645/PSA/等保2.0/61508 差距表、17 条缺口寄存器、12 个本地用例、P0–P3 路线） |
 | Read the same page in English | [安全认证准备.en.md](安全认证准备.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
-| 要看 App 的 shell 回调怎么回内核执行（隔离执行的设计） | [SEC-G08-隔离执行-设计.md](SEC-G08-隔离执行-设计.md)（**部分实施不是已完成**：M-08-1 窗口切分、M-08-2 upcall 核心接口、M-08-3 LA64 桩字节与 `SVC 0x23` 分派已落地且行为未变，M-08-4..5 仍是计划；含缺陷现状、三候选机制对比、upcall 窗口布局与 24 字节桩、九步流程、失败语义、判据、回退方式） |
+| 要看 App 的 shell 回调怎么回内核执行（隔离执行的设计） | [SEC-G08-隔离执行-设计.md](SEC-G08-隔离执行-设计.md)（**M-08-1..5 已全部落地**：窗口切分、upcall 核心接口、LA64 桩字节与 `SVC 0x23` 分派、跳板改调 `call()` + 三值放行 + 参数搬家、文档与 SDK 边界收口；特权级分离 + 分页档上 App 自定义命令恢复可用且回调真跑在 PLV3（QEMU `plv=3` 读数）。含缺陷现状、三候选机制对比、upcall 窗口布局与 24 字节桩、九步流程、失败语义、判据、反假绿变异、回退方式） |
 | 说清板子上有什么硬件、驱动按 compatible 找设备 | [设备树.md](设备树.md)（DTS 子集、dtc_lite、arkrtos_dt API、`dt` 命令；运行时读镜像里的 dtb、`fdt load` 换树、overlay 的 `target=<&label>` 与删除语义） |
 | Read the device tree page in English | [设备树.en.md](设备树.en.md)（condensed English edition；中文页 normative，不新增主张与读数） |
 | 想发一个版本，要说清「这版能当正式版吗」 | [发行版与版本策略.md](发行版与版本策略.md)（版本号规则与三处一致、发布物清单与变更控制、ABI 三编号与升版判据、预览版/正式版/1.0 判据、发版六步、明确不做的四条） |
@@ -209,7 +209,7 @@ docs/
 ├── 安全基线自检.en.md                       # 【English】浓缩英文版：四档结论与 FINDING/SKIP 为何必须分开、12 条检查逐条判据、iso 三值（0 无后端 / 1 窗口 / 2 页表）与不用 MPU 当唯一判据的理由、F427 上板逐字读数与 76 us 交叉核对、只读与 static 报告结构、三条边界、开关零变化与 +2056/+668 B 体积账、复现三条命令；中文页 normative
 ├── 安全认证准备.md                          # 【设计说明】资产与信任边界、STRIDE 威胁模型、五个标准差距表、17 条缺口寄存器、本地用例矩阵、P0–P3 路线
 ├── 安全认证准备.en.md                       # 【English】安全认证准备页的浓缩英文版（中文页 normative；不新增主张与读数）
-├── SEC-G08-隔离执行-设计.md                 # 【设计·部分实施】App shell 回调隔离执行：M-08-1/M-08-2/M-08-3 已落地（行为未变），M-08-4..5 待做；机制对比、upcall 窗口与桩、九步流程、失败语义、判据、回退方式
+├── SEC-G08-隔离执行-设计.md                 # 【设计·已实施】App shell 回调隔离执行：M-08-1..5 已全部落地（回调真跑在 PLV3）；机制对比、upcall 窗口与桩、九步流程、失败语义、判据、反假绿变异、回退方式
 ├── Kconfig配置系统.md                       # 【设计说明】Kconfig 菜单、纯 Python 工具链、符号=宏名、注入点、依赖关系、数量限制迁移
 ├── Kconfig配置系统.en.md                    # 【English】Kconfig配置系统页的浓缩英文版（中文页 normative；不新增主张与读数）
 ├── 配置头导航.md                            # 【导航】七个配置头各管什么、包含顺序（顺序本身是契约）、五条规则、门禁与典型症状落点

@@ -730,6 +730,31 @@ $(MOD_BAD_H): $(MOD_TAMPERED) example/qemu_loongarch64/elf_blob.py
 
 $(BUILD)/example/qemu_loongarch64/mod_demo.o: $(MOD_H) $(MOD_BAD_H)
 
+# 隔离执行夹具（ushell_iso.elf）：SEC-G08 的端到端证据程序。
+# 与 hello 同一条链路（链接 -> 签名 -> blob），区别只在内容：它注册一条
+# 用户态命令 `hi` 后常驻不退出——App 一退出，空间和命令就一起被卸掉，
+# 回调也就无从触发。演示任务只负责把它起起来，**不等它结束**。
+USHELL_ISO_SRC := example/qemu_loongarch64/elf/ushell_iso.c
+USHELL_ISO_ELF := $(BUILD)/ushell_iso.elf
+USHELL_ISO_SIGNED := $(BUILD)/ushell_iso.signed.elf
+USHELL_ISO_H := $(BUILD)/ushell_iso_blob.h
+
+$(USHELL_ISO_ELF): $(USHELL_ISO_SRC)
+	@mkdir -p $(BUILD)
+	$(CC) $(ARCH_FLAGS) -O2 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
+	      -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	      -Wl,-Ttext=$(WIN_ELF_BASE) -Wl,-e,_start -Wl,--strip-all \
+	      -Wl,-z,max-page-size=4096 -o $@ $< ;
+
+$(USHELL_ISO_SIGNED): $(USHELL_ISO_ELF) tools/sign_payload.py
+	python tools/sign_payload.py sign $(USHELL_ISO_ELF) --out $@ ;
+
+$(USHELL_ISO_H): $(USHELL_ISO_SIGNED) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(USHELL_ISO_SIGNED) \
+	       --output $@ --name ark_example_ushell_iso ;
+
+$(BUILD)/example/qemu_loongarch64/elf_demo.o: $(USHELL_ISO_H)
+
 .PHONY: all clean run size disasm
 
 all: $(ELF)

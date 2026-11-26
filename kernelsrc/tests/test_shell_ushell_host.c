@@ -180,6 +180,7 @@ int32 arkrtos_task_count;
 
 static arkrtos_elf_info_t g_up_info;
 static int g_up_info_rc;
+static int g_up_running = 1;
 
 int32 arkrtos_elf_info_space(uint32 space, arkrtos_elf_info_t *p_out)
 {
@@ -189,6 +190,23 @@ int32 arkrtos_elf_info_space(uint32 space, arkrtos_elf_info_t *p_out)
     }
     *p_out = g_up_info;
     return 0;
+}
+
+/* SEC-G08 M-08-4: the trampoline asks whether the space still has a live ELF
+ * instance before it starts a worker ("image unloaded?" == no). */
+int32 arkrtos_elf_running_in(uint32 space)
+{
+    (void)space;
+    return g_up_running;
+}
+
+/* ... and the registration gate asks which space the caller is bound to. */
+static uint32 g_me_space;
+
+uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task)
+{
+    (void)p_task;
+    return g_me_space;
 }
 
 static int g_up_stub_supported = 1;
@@ -214,6 +232,7 @@ static uint32 g_up_start_space;
 static unsigned long g_up_start_stub_va;
 static unsigned long g_up_start_sp;
 static int g_up_start_argc;
+static char **g_up_start_argv;
 static int (*g_up_start_func)(int, char **);
 
 unsigned long arkrtos_port_ushell_start(uint32 space, unsigned long stub_va,
@@ -221,13 +240,51 @@ unsigned long arkrtos_port_ushell_start(uint32 space, unsigned long stub_va,
                                         int (*func)(int, char **argv),
                                         int argc, char **argv)
 {
-    (void)argv;
     g_up_start_space = space;
     g_up_start_stub_va = stub_va;
     g_up_start_sp = upcall_sp;
+    g_up_start_argv = argv;
     g_up_start_func = func;
     g_up_start_argc = argc;
     return g_up_frame;
+}
+
+/* SEC-G08 M-08-4: before the worker starts, the arguments are copied into the
+ * App's own window -- a PLV3 callback cannot read kernel memory, and the
+ * shell's argv points at kernel memory. The host has no window, so the words
+ * are kept here and asserted on instead of being written anywhere. */
+static unsigned char g_up_ws[ARKRTOS_USHELL_UP_ARGS_MAX];
+static uint32 g_up_ws_bytes;
+static unsigned long g_up_ws_va;
+static uint32 g_up_ws_space;
+static int g_up_ws_rc;
+
+/* The window write goes through arkrtos_port_paging_write_space(), whose
+ * element is one target word (8 bytes). On the host that is two 32-bit longs,
+ * so the bytes are what matters: copy n * sizeof(long) of them and read the
+ * 8-byte slots back by hand. */
+int32 arkrtos_port_paging_write_space(uint32 space, unsigned long va,
+                                      const unsigned long *words, uint32 n)
+{
+    uint32 bytes = n * (uint32)sizeof(unsigned long);
+
+    g_up_ws_space = space;
+    g_up_ws_va = va;
+    g_up_ws_bytes = (bytes > (uint32)ARKRTOS_USHELL_UP_ARGS_MAX)
+                    ? (uint32)ARKRTOS_USHELL_UP_ARGS_MAX : bytes;
+    memcpy(g_up_ws, words, g_up_ws_bytes);
+    return g_up_ws_rc;
+}
+
+static unsigned long long up_ws_u64(uint32 at)
+{
+    unsigned long long v = 0ull;
+    uint32 i;
+
+    for (i = 0u; i < 8u; i++) {
+        v |= ((unsigned long long)g_up_ws[at + i]) << (i * 8u);
+    }
+    return v;
 }
 
 uint32 arkrtos_port_enter_critical(void)
@@ -875,6 +932,61 @@ static void t_app_cb_refused(void)
     CK_I(g_cmd_count, 0);
     CK_I(g_ushell[0].in_use, 0u);
 }
+
+/* SEC-G08 M-08-4: the same build no longer refuses every App registration --
+ * it refuses the ones whose space cannot host an isolated call.  Every branch
+ * here is the gate itself, so a regression that opens it unconditionally is
+ * caught by the first three checks and a regression that closes it again is
+ * caught by the fourth. */
+static void t_app_cb_isolated(void)
+{
+    arkrtos_ushell_cmd_t c;
+
+    reset_env();
+    memset(&g_up_info, 0, sizeof(g_up_info));
+    g_up_info_rc = 0;
+    g_up_stub_supported = 1;
+    g_up_running = 1;
+    g_me.is_priv = 0u;
+    /* Space 1, not 2: ARKRTOS_USHELL_UP_MAX_SPACES follows the board's
+     * ARKRTOS_PAGING_APPS_MAX (= 2), so 0..1 are the real spaces. That also
+     * exercises the range half of the gate below. */
+    g_me_space = 1u;
+    arkrtos_current_task_id = 9;
+
+    /* (a) the caller's space has no upcall area: still refused, row untouched */
+    c = mk("appcmd", cb_ok, "help", 2u);
+    CK_I(arkrtos_shell_ext_register(&c), ARKRTOS_USHELL_ERR_PRIV);
+    CK_I(g_cmd_count, 0);
+    CK_I((int)g_ushell[0].in_use, 0);
+    CK_I((long)g_ushell[0].has_space, 0);
+
+    /* (b) that space can host an isolated call: the very same call passes,
+     *     and the row remembers which space (not "whatever is current later") */
+    g_up_info.upcall_base = 0x02100000ul;
+    g_up_info.stub_va = 0x02100000ul;
+    g_up_info.upcall_sp = 0x02101FF0ul;
+    CK_I(arkrtos_shell_ext_register(&c), ARKRTOS_USHELL_OK);
+    CK_I((int)g_ushell[0].in_use, 1);
+    CK_I((long)g_ushell[0].space, 1);
+    CK_I((long)g_ushell[0].has_space, 1);
+    CK_I((long)g_ushell[0].owner_task, 9);
+    CK_I(g_cmd_count, 1);
+
+    /* (c) a port that cannot write the stub: the area alone is not enough */
+    CK_I(arkrtos_shell_ext_unregister("appcmd"), ARKRTOS_USHELL_OK);
+    g_up_stub_supported = 0;
+    CK_I(arkrtos_shell_ext_register(&c), ARKRTOS_USHELL_ERR_PRIV);
+    CK_I(g_cmd_count, 0);
+    g_up_stub_supported = 1;
+
+    /* (d) a kernel task is never isolated: its handler is kernel code already */
+    g_me.is_priv = 1u;
+    CK_I(arkrtos_shell_ext_register(&c), ARKRTOS_USHELL_OK);
+    CK_I((long)g_ushell[0].has_space, 0);
+    CK_I((long)g_ushell[0].space, 0);
+    CK_I((long)g_ushell[0].owner_task, 9);
+}
 #endif /* ARKRTOS_USE_USHELL_APP_CB == 0 */
 
 /* ------------------------------------------------------------ upcall iso */
@@ -895,6 +1007,7 @@ static void up_reset(void)
 {
     memset(&g_up_info, 0, sizeof(g_up_info));
     g_up_info_rc = 0;
+    g_up_running = 1;
     g_up_stub_supported = 1;
     g_up_stub_rc = 0;
     g_up_stub_space = 0xFFFFFFFFu;
@@ -910,6 +1023,12 @@ static void up_reset(void)
     g_up_act_calls = 0;
     g_up_bind_task = NULL;
     g_up_bind_space = 0xFFFFFFFFu;
+    g_up_start_argv = NULL;
+    g_up_ws_bytes = 0u;
+    g_up_ws_va = 0ul;
+    g_up_ws_space = 0xFFFFFFFFu;
+    g_up_ws_rc = 0;
+    memset(g_up_ws, 0, sizeof(g_up_ws));
     g_up_reg_id = 1;
     g_up_reg_entry = 0ul;
     g_up_reg_bottom = 0u;
@@ -944,7 +1063,7 @@ static int up_cb(int argc, char **argv)
 static void up_hook_ret(void)
 {
     arkrtos_current_task_id = g_up_reg_id;
-    (void)arkrtos_ushell_upcall_ret(77);
+    (void)arkrtos_ushell_upcall_ret(77, 3u);
     arkrtos_current_task_id = 5;
 }
 
@@ -956,7 +1075,7 @@ static void up_hook_busy(void)
 
     arkrtos_current_task_id = g_up_reg_id;
     g_up_nested_rc = arkrtos_ushell_upcall_call(0u, 1u, up_cb, 0, NULL, &r);
-    (void)arkrtos_ushell_upcall_ret(11);
+    (void)arkrtos_ushell_upcall_ret(11, 3u);
     arkrtos_current_task_id = 5;
 }
 
@@ -968,10 +1087,10 @@ static void up_hook_spoof(void)
     int32 save = arkrtos_current_task_id;
 
     arkrtos_current_task_id = 3;
-    g_up_spoof_rc = arkrtos_ushell_upcall_ret(99);
+    g_up_spoof_rc = arkrtos_ushell_upcall_ret(99, 3u);
 
     arkrtos_current_task_id = g_up_reg_id;
-    (void)arkrtos_ushell_upcall_ret(77);
+    (void)arkrtos_ushell_upcall_ret(77, 3u);
     arkrtos_current_task_id = save;
 }
 
@@ -1041,6 +1160,55 @@ static void t_upcall_iso(void)
     g_up_info.upcall_sp = UP_SP;
     CK_I(g_up_sem_created, 0);
 
+    /* ---- the argument copy: every refusal happens before anything is
+     *      allocated, so no half-built worker is left behind ---- */
+    argv[0] = up_argv0;
+    argv[1] = up_argv1;
+    g_up_ws_rc = -1;                        /* the window write was refused */
+    CK_I(arkrtos_ushell_upcall_call(0u, 1u, up_cb, 2, argv, &rc),
+         ARKRTOS_USHELL_UP_ERR_EXEC);
+    CK_I(g_up_sem_created, 0);
+    CK_I(g_up_reg_entry, 0ul);
+    g_up_ws_rc = 0;
+    /* a NULL element inside argc is a caller bug, not an empty string */
+    argv[1] = NULL;
+    CK_I(arkrtos_ushell_upcall_call(0u, 1u, up_cb, 2, argv, &rc),
+         ARKRTOS_USHELL_UP_ERR_PARAM);
+    argv[1] = up_argv1;
+    /* one argument longer than the whole argument area: refused, not truncated */
+    {
+        static char big[ARKRTOS_USHELL_UP_ARGS_MAX + 8u];
+        char *bigv[2];
+
+        memset(big, 'x', sizeof(big) - 1u);
+        big[sizeof(big) - 1u] = '\0';
+        bigv[0] = big;
+        bigv[1] = NULL;
+        CK_I(arkrtos_ushell_upcall_call(0u, 1u, up_cb, 1, bigv, &rc),
+             ARKRTOS_USHELL_UP_ERR_PARAM);
+    }
+    /* every string fits on its own, but the pointer array alone does not:
+     * 60 x "hi" = 480 bytes of strings + 61 x 8 bytes of pointers > 512.
+     * The per-string bound cannot see this one; only the total can. */
+    {
+        static char *many[60];
+        int k;
+
+        for (k = 0; k < 60; k++) {
+            many[k] = up_argv0;
+        }
+        CK_I(arkrtos_ushell_upcall_call(0u, 1u, up_cb, 60, many, &rc),
+             ARKRTOS_USHELL_UP_ERR_PARAM);
+    }
+    /* a stack that exists (call()'s 64-byte floor is met) but has no room for
+     * the argument block plus a real call frame: NOAREA, and nothing is
+     * allocated -- a half-built worker is worse than a refusal. */
+    g_up_info.upcall_sp = UP_BASE + (unsigned long)ARKRTOS_USHELL_UP_PAGE_SIZE + 64ul;
+    CK_I(arkrtos_ushell_upcall_call(0u, 1u, up_cb, 1, argv, &rc),
+         ARKRTOS_USHELL_UP_ERR_NOAREA);
+    g_up_info.upcall_sp = UP_SP;
+    CK_I(g_up_sem_created, 0);
+
     /* ---- semaphore refused ---- */
     g_up_sem_next = -1;
     CK_I(arkrtos_ushell_upcall_call(0u, 1u, up_cb, 0, NULL, &rc),
@@ -1090,13 +1258,35 @@ static void t_upcall_iso(void)
     CK(g_up_stub_va == UP_BASE);
     CK_I(g_up_start_space, 0);
     CK(g_up_start_stub_va == UP_BASE);
-    CK(g_up_start_sp == UP_SP);
+    /* the copied arguments live at the top of the upcall stack, the worker's
+     * sp sits right below them, and start() got the window-side array */
+    CK(g_up_start_sp < UP_SP);
+    CK(g_up_start_sp >= (UP_BASE + (unsigned long)ARKRTOS_USHELL_UP_PAGE_SIZE));
+    CK_I(g_up_ws_space, 0);
+    CK(g_up_ws_va == g_up_start_sp);
+    CK_I((int)g_up_ws_bytes, 40);           /* "hi" + "b" (8 each) + 3 ptrs */
+    CK_I((int)g_up_ws[0], 'h');
+    CK_I((int)g_up_ws[1], 'i');
+    CK_I((int)g_up_ws[2], 0);
+    CK_I((int)g_up_ws[8], 'b');             /* second string, 8-byte slot */
+    CK_I((int)g_up_ws[9], 0);
+    /* the three pointers are 8-byte little-endian slots right after the
+     * strings: argv[0] -> "hi", argv[1] -> "b", argv[2] == NULL */
+    CK(up_ws_u64(16u) == (unsigned long long)g_up_start_sp);
+    CK(up_ws_u64(24u) == (unsigned long long)(g_up_start_sp + 8ul));
+    CK(up_ws_u64(32u) == 0ull);
+    CK(g_up_start_argv == (char **)(uintptr_t)(g_up_start_sp + 16ul));
     CK(g_up_start_func == up_cb);
     CK_I(g_up_start_argc, 2);
     CK(g_up_reg_entry == UP_BASE);           /* the entry IS the stub page */
     CK(g_up_reg_bottom == (uint32)(uintptr_t)(UP_BASE + (unsigned long)ARKRTOS_USHELL_UP_PAGE_SIZE));
+    /* The registered stack stops at the worker's sp, NOT at the top of the
+     * upcall stack: task_register() builds a trap frame at "bottom + size"
+     * (and fills the whole range when stack-usage accounting is on), so a
+     * top of UP_SP would paint over the marshaled arguments. Losing this
+     * shows up on target as "argc/argv pointers fine, argv[i] all zero". */
     CK_I((int)g_up_reg_bytes,
-         (int)(UP_SP + 16ul - (UP_BASE + (unsigned long)ARKRTOS_USHELL_UP_PAGE_SIZE)));
+         (int)(g_up_start_sp - (UP_BASE + (unsigned long)ARKRTOS_USHELL_UP_PAGE_SIZE)));
     CK_I((int)g_up_reg_prio, (int)ARKRTOS_USHELL_UP_TASK_PRIORITY);
     CK(g_up_bind_task == &arkrtos_task_table[0]);
     CK_I(g_up_bind_space, 0);
@@ -1105,7 +1295,7 @@ static void t_upcall_iso(void)
     CK(p_t->rom_start == (unsigned long)ARKRTOS_ELF_WINDOW_BASE);
     CK_I((int)p_t->rom_size, (int)ARKRTOS_ELF_WINDOW_SIZE);
     CK(p_t->ram_start == (unsigned long)ARKRTOS_ELF_WINDOW_BASE);
-    CK(p_t->stack_top == UP_SP);
+    CK(p_t->stack_top == g_up_start_sp);
     CK(p_t->stack_ptr == UP_FRAME);
     CK_I(g_up_act_space, 3u);                /* console task's space restored */
     CK_I(g_up_sem_deleted, 4);               /* one per call that got that far */
@@ -1150,10 +1340,218 @@ static void t_upcall_iso(void)
 
     /* ---- ret() outside any call: nobody to report to ---- */
     arkrtos_current_task_id = 0;
-    CK_I(arkrtos_ushell_upcall_ret(1), ARKRTOS_USHELL_UP_ERR_CALLER);
+    CK_I(arkrtos_ushell_upcall_ret(1, 3u), ARKRTOS_USHELL_UP_ERR_CALLER);
     arkrtos_current_task_id = 3;
-    CK_I(arkrtos_ushell_upcall_ret(1), ARKRTOS_USHELL_UP_ERR_CALLER);
+    CK_I(arkrtos_ushell_upcall_ret(1, 3u), ARKRTOS_USHELL_UP_ERR_CALLER);
     arkrtos_current_task_id = 5;
+}
+
+/* SEC-G08 M-08-4: the trampoline's isolated half. The handler pointer is a
+ * genuine window VA -- the fixture never calls it (call() only hands it to the
+ * port stub recorder), so "is this handler inside the App's executable region"
+ * is decided by the value, not by where this test binary happens to be loaded.
+ * Everything below therefore reads the *bookkeeping and the log lines* of the
+ * isolated path, which is exactly what a wrong implementation gets wrong. */
+#define ISO_FUNC_VA \
+    ((int (*)(int, char **))(uintptr_t)((unsigned long)ARKRTOS_ELF_WINDOW_BASE + 0x1000ul))
+
+static int (*g_tr)(int, char **);
+static int g_reenter_rc;
+static uint32 g_up_flag_seen = 7u;
+
+/* Re-entrant dispatch from inside the wait: busy[0] is already 1, so a second
+ * isolated dispatch of the same space must answer "busy" instead of starting a
+ * second worker. This is the only way the BUSY arm is reachable single-threaded
+ * -- and it is the same interleaving a second console task would produce. */
+static void up_hook_reenter(void)
+{
+    char *av[1];
+    char nm[] = "iso";
+
+    av[0] = nm;
+    g_reenter_rc = call_tr(g_tr, 1, av);
+    arkrtos_current_task_id = g_up_reg_id;
+    (void)arkrtos_ushell_upcall_ret(5, 3u);
+    arkrtos_current_task_id = 5;
+}
+
+static void up_hook_ret_flag(void)
+{
+    g_up_flag_seen = arkrtos_kernel_ushell_active;
+    arkrtos_current_task_id = g_up_reg_id;
+    (void)arkrtos_ushell_upcall_ret(77, 3u);
+    arkrtos_current_task_id = 5;
+}
+
+static void t_trampoline_isolated(void)
+{
+    arkrtos_ushell_cmd_t c;
+    char *argv[2];
+    char nm_iso[] = "iso";
+    char nm_other[] = "other";
+    char nm_arg[] = "a";
+    char kname[8];   /* 可写缓冲：argv 是 char*，不许从字符串常量强转 */
+
+    reset_env();
+    up_reset();
+    /* a live image in space 0 with an upcall area, and a row that says
+     * "this one runs isolated there" */
+    g_up_info.upcall_base = UP_BASE;
+    g_up_info.stub_va = UP_BASE;
+    g_up_info.upcall_sp = UP_SP;
+    g_up_info.task = 1;
+    g_up_running = 1;
+    c = mk("iso", ISO_FUNC_VA, "h", 2u);
+    CK_I(arkrtos_shell_ext_register(&c), ARKRTOS_USHELL_OK);
+    g_ushell[0].space = 0u;
+    g_ushell[0].has_space = 1u;
+    g_ushell[0].owner_task = 1u;
+    g_tr = table_fn();
+    argv[0] = nm_iso;
+    argv[1] = nm_arg;
+
+    /* (a) success: the rc comes back, the log line carries this run's evidence,
+     *     and the kernel-side active flag is NOT raised on the isolated path */
+    g_up_wait_hook = up_hook_ret_flag;
+    g_up_sem_wait_rc = 0;
+    g_up_flag_seen = 7u;
+    arkrtos_kernel_ushell_active = 0u;
+    cap_reset();
+    CK_I(call_tr(g_tr, 2, argv), 77);
+    CK_I((long)g_up_flag_seen, 0);
+    CK_I((long)arkrtos_kernel_ushell_active, 0);
+    CK(g_up_start_func == ISO_FUNC_VA);
+    CK_I(g_up_start_space, 0);
+    CK_I(g_up_start_argc, 2);
+    CK(out_has("[ushell] isolated rc=77 tid=1 space=0 plv=3"));
+
+    /* (b) the image is gone: refuse, do not fall back to a kernel-stack call */
+    g_up_running = 0;
+    g_up_wait_hook = up_hook_ret_flag;
+    cb_called = 0;
+    cap_reset();
+    CK_I(call_tr(g_tr, 1, argv), -1);
+    CK(out_has("handler no longer available"));
+    CK_I(cb_called, 0);
+    g_up_running = 1;
+
+    /* (c) no upcall area any more (reloaded with UPCALL_SIZE=0) */
+    g_up_info.upcall_base = 0ul;
+    cap_reset();
+    CK_I(call_tr(g_tr, 1, argv), -1);
+    CK(out_has("handler no longer available"));
+    g_up_info.upcall_base = UP_BASE;
+
+    /* (d) the handler is not inside this space's executable region */
+    g_ushell[0].func = cb_ok;
+    cap_reset();
+    CK_I(call_tr(g_tr, 1, argv), -1);
+    CK(out_has("handler no longer available"));
+    CK_I(cb_called, 0);
+    g_ushell[0].func = ISO_FUNC_VA;
+
+    /* (d2) the row's space is out of range (registry/ledger disagreement):
+     * refuse without even asking the ELF ledger -- an out-of-range index
+     * must never reach a table lookup. */
+    g_ushell[0].space = (uint32)ARKRTOS_USHELL_UP_MAX_SPACES;
+    cap_reset();
+    CK_I(call_tr(g_tr, 1, argv), -1);
+    CK(out_has("handler no longer available"));
+    CK_I(cb_called, 0);
+    g_ushell[0].space = 0u;
+
+    /* (d3) the ELF ledger cannot be read: "cannot prove it is alive" wins
+     * over "the address looks fine" -- never jump on a guess. */
+    g_up_info_rc = -1;
+    cap_reset();
+    CK_I(call_tr(g_tr, 1, argv), -1);
+    CK(out_has("handler no longer available"));
+    CK_I(cb_called, 0);
+    g_up_info_rc = 0;
+
+    /* (e) a second dispatch while one is running is refused with its own line */
+    g_up_wait_hook = up_hook_reenter;
+    g_reenter_rc = 0;
+    cap_reset();
+    CK_I(call_tr(g_tr, 1, argv), 5);          /* the outer worker still reports */
+    CK_I(g_reenter_rc, -1);
+    CK(out_has("busy (another upcall in this space)"));
+
+    /* (f) the worker cannot be created: -4, its own line, and busy is cleared
+     *     (a later dispatch still starts a worker -- checked right after) */
+    g_up_wait_hook = up_hook_ret_flag;
+    g_up_reg_id = 0;
+    cap_reset();
+    CK_I(call_tr(g_tr, 1, argv), -1);
+    CK(out_has("cannot start isolated worker (-4)"));
+    g_up_reg_id = 1;
+    cap_reset();
+    CK_I(call_tr(g_tr, 1, argv), 77);
+
+    /* (g) the stub page / initial frame could not be written: -5 */
+    g_up_stub_rc = -1;
+    cap_reset();
+    CK_I(call_tr(g_tr, 1, argv), -1);
+    CK(out_has("cannot start isolated worker (-5)"));
+    g_up_stub_rc = 0;
+    cap_reset();
+    CK_I(call_tr(g_tr, 1, argv), 77);
+
+    /* (h) the callback never came back: its own line, not "cannot start" */
+    g_up_wait_hook = NULL;                   /* nobody reports a return */
+    g_up_sem_wait_rc = ARKRTOS_SYNC_ERR_TIMEOUT;
+    cap_reset();
+    CK_I(call_tr(g_tr, 1, argv), -1);
+    CK(out_has("isolated worker timed out after 10000 ms"));
+    g_up_sem_wait_rc = 0;
+    g_up_wait_hook = up_hook_ret_flag;
+    cap_reset();
+    CK_I(call_tr(g_tr, 1, argv), 77);
+
+    /* (h2) a row whose owner_task is gone (0 = kernel-side registration, the
+     * one shape call() refuses with PARAM): the trampoline still answers
+     * "not available" instead of falling back to a kernel-context call. This
+     * is the default arm -- registration gates every other refusal already,
+     * so a state change after registration is the only way in. */
+    g_ushell[0].owner_task = 0u;
+    cb_called = 0;
+    cap_reset();
+    CK_I(call_tr(g_tr, 1, argv), -1);
+    CK(out_has("handler no longer available"));
+    CK_I(cb_called, 0);
+    g_ushell[0].owner_task = 1u;
+
+    /* (i) an unmatched name still answers the console-level message */
+    argv[0] = nm_other;
+    cap_reset();
+    CK_I(call_tr(g_tr, 1, argv), -1);
+    CK(out_has("user command not available"));
+    argv[0] = nm_iso;
+
+    /* (j) a kernel-side row is untouched by all of this: direct call, flag
+     *     raised for its duration (that is what §4.6 keeps) */
+    reset_env();
+    up_reset();
+    g_me.is_priv = 1u;
+    g_pt.slot_max = 2u;
+    g_pt.slot_type[0] = ARKRTOS_SLOT_APP;
+    g_pt.slot_state[0] = ARKRTOS_APP_SLOT_LOADED;
+    g_pt.slot_base[0] = addr_of(cb_ok) - 0x10u;
+    g_pt.slot_size[0] = 0x100u;
+    kname[0] = 'k'; kname[1] = 'c'; kname[2] = 'm'; kname[3] = 'd';
+    kname[4] = '\0';
+    c = mk("kcmd", cb_ok, "h", 1u);
+    CK_I(arkrtos_shell_ext_register(&c), ARKRTOS_USHELL_OK);
+    CK_I((long)g_ushell[0].has_space, 0);
+    g_tr = table_fn();
+    argv[0] = kname;
+    cb_called = 0;
+    cb_active_seen = 7u;
+    cap_reset();
+    CK_I(call_tr(g_tr, 1, argv), 42);
+    CK_I(cb_called, 1);
+    CK_I((long)cb_active_seen, 1);
+    CK_I(g_out_len, 0u);                     /* no isolated log line either */
 }
 
 #endif /* ARKRTOS_USE_USHELL_APP_CB == 1 */
@@ -1167,6 +1565,7 @@ int main(void)
      * registry behaviour is covered by the ARKRTOS_USE_USHELL_APP_CB=1
      * build of this same file. */
     t_app_cb_refused();
+    t_app_cb_isolated();
 
     if (g_failed != 0) {
         printf("USHELL-HOST REFUSED FAIL  %d/%d checks failed\n",
@@ -1185,6 +1584,7 @@ int main(void)
     t_trampoline_alive();
     t_print_n();
     t_upcall_iso();
+    t_trampoline_isolated();
 
     if (g_failed != 0) {
         printf("USHELL-HOST FAIL  %d/%d checks failed\n", g_failed, g_checks);

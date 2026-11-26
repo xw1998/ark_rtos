@@ -105,9 +105,12 @@ English would double the places that can drift out of date, so the ledger stays 
 tools/gen_api_doc.py; the comments themselves are in Chinese |
 | [SEC-G08-隔离执行-设计.md](SEC-G08-隔离执行-设计.md) | A pre-registration design note for one open item (isolated execution of App shell
 callbacks), written against the code as it stands today; milestones M-08-1 (window split), M-08-2 (upcall `ready()`/`call()`/`ret()` interfaces
-plus bookkeeping) and M-08-3 (LA64 stub bytes, initial frame, `SVC 0x23` dispatch) have
-landed, with `ready()`/`call()` having no production caller yet so the visible behaviour is
-unchanged; M-08-4..5 are still a plan, and this note will be rewritten as they land. A second English copy would drift from that churn |
+plus bookkeeping), M-08-3 (LA64 stub bytes, initial frame, `SVC 0x23` dispatch) and M-08-4
+(trampoline routed through `call()`, three-valued registration, argv marshaled into the App
+window, QEMU end-to-end gate) and M-08-5 (documentation + SDK closure) have all landed:
+App shell commands work again on the privilege-separation + paging build and the callback
+really runs at PLV3. No English copy of this note exists on purpose: it is a pre-registration
+record and its readouts are single-sourced in the Chinese page. |
 
 ## Directory layout
 

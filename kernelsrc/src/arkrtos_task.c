@@ -1154,7 +1154,10 @@ static void svc_sync_ctrl(void *p_svc_ctx)
 static void svc_ushell_ret(void *p_svc_ctx)
 {
     int32 rc  = (int32)ARKRTOS_SVC_ARG(p_svc_ctx, 0);
-    int32 ret = arkrtos_ushell_upcall_ret(rc);
+    /* 特权级证据在内核这一侧取：trap 帧保存的 PPLV 就是「这次 syscall
+     * 从哪个 PLV 发出来的」，由 port 解帧，内核不认识帧布局。 */
+    int32 ret = arkrtos_ushell_upcall_ret(rc,
+                                          arkrtos_port_svc_caller_plv(p_svc_ctx));
 
     ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ret);
 }

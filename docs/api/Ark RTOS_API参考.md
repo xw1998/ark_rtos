@@ -64,7 +64,7 @@
 - [kernelsrc/include/arkrtos_trust.h](#kernelsrcincludearkrtos_trusth)（6 项）
 - [kernelsrc/include/arkrtos_ulog.h](#kernelsrcincludearkrtos_ulogh)（5 项）
 - [kernelsrc/include/arkrtos_ushell.h](#kernelsrcincludearkrtos_ushellh)（4 项）
-- [kernelsrc/include/arkrtos_ushell_upcall.h](#kernelsrcincludearkrtos_ushell_upcallh)（3 项）
+- [kernelsrc/include/arkrtos_ushell_upcall.h](#kernelsrcincludearkrtos_ushell_upcallh)（4 项）
 - [kernelsrc/include/arkrtos_utest.h](#kernelsrcincludearkrtos_utesth)（22 项）
 - [kernelsrc/include/arkrtos_version.h](#kernelsrcincludearkrtos_versionh)（2 项）
 - [kernelsrc/include/arkrtos_vfs.h](#kernelsrcincludearkrtos_vfsh)（44 项）
@@ -72,7 +72,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（12 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（120 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（121 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（18 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -4698,7 +4698,8 @@ No demand faulting here on purpose: the caller must write into
 a pair the parent already made resident, otherwise it rolls
 back. Kernel paths do not quietly allocate frames behind the
 bookkeeping's back.
-> 说明：只在 ARKRTOS_USE_LINUX_FORK == 1 时存在。
+> 说明：在 ARKRTOS_USE_LINUX_FORK == 1 或 ARKRTOS_USE_USHELL_ISO == 1 时存在：
+fork 用它复制父子栈，SEC-G08 的 upcall 用它写桩页、初始帧与参数区。
 
 ### `int32 arkrtos_port_paging_clone_frame(void *p_exc_ctx, uint32 space);`
 
@@ -9379,20 +9380,38 @@ int32 arkrtos_ushell_upcall_call(uint32 space, uint32 owner_task, int (*func)(in
 - `space`：地址空间号（= 注册者装载时所在的空间）
 - `owner_task`：注册这条命令的任务号（用来继承 App 配额身份）
 - `func`：回调入口（VA 必须落在该空间的 ELF 段内，由跳板先校验）
-- `argc/argv`：参数，原样交给桩
+- `argc/argv`：内核侧的参数（跳板手里那份）；本函数在起跑前把字符串
+与指针数组搬进 App 窗口，桩拿到的是窗口内的副本
 - `p_rc`：成功时写回回调的返回值
 **返回**：ARKRTOS_USHELL_UP_*
 
-### `int32 arkrtos_ushell_upcall_ret(int32 rc);`
+### `int32 arkrtos_ushell_upcall_ret(int32 rc, uint32 plv);`
 
 ```c
-int32 arkrtos_ushell_upcall_ret(int32 rc);
+int32 arkrtos_ushell_upcall_ret(int32 rc, uint32 plv);
 ```
 
 **upcall 线程的返回通道（SVC 0x23）：记账后终止自己**
 - `rc`：回调的返回值
+- `plv`：这次 syscall 从哪个特权级发出（trap 帧保存的 PPLV）
 **返回**：正常路径不返回（线程已退出）；调用者不是 upcall 线程时回
 ARKRTOS_USHELL_UP_ERR_CALLER，且不改动任何状态
+> 说明：plv 是**证据**不是装饰：跳板打的那行 `plv=N` 直接来自它，N != 3 就
+说明回调没有在 PLV3 跑过（隔离执行不成立）。由 port 的
+arkrtos_port_svc_caller_plv() 从 trap 帧里读，内核不认识帧布局。
+
+### `uint32 arkrtos_port_svc_caller_plv(void *p_exc_ctx);`
+
+```c
+uint32 arkrtos_port_svc_caller_plv(void *p_exc_ctx);
+```
+
+**本次 trap 是从哪个特权级进来的（trap 帧保存的 PRMD.PPLV）**
+- `p_exc_ctx`：系统调用入口传给内核的上下文指针
+**返回**：0..3；帧为空时回 0（按内核态报，不给一个好看的数字）
+只有提供这条能力的 port 才编出隔离执行（目前是 LoongArch64：
+帧里 PRMD 的低两位就是「回到哪个 PLV」，硬件在进异常时写好了）。
+其它 port 的构建上 ARKRTOS_USE_USHELL_ISO == 0，本符号不被引用。
 
 ## kernelsrc/include/arkrtos_utest.h
 
@@ -11899,6 +11918,19 @@ syscall 在 ERA - 4 处。两条路径（谁先谁后）在文件头注释里写
 改动时两处必须同时改。
 解出的指令若不是 syscall 形式，返回 0xFFFFFFFF：调用方会落到
 default 分支拒绝这次服务，而不是拿一个看似合法的号去执行。
+
+### `uint32 arkrtos_port_svc_caller_plv(void *p_exc_ctx) {`
+
+```c
+uint32 arkrtos_port_svc_caller_plv(void *p_exc_ctx) {
+```
+
+**本次 trap 是从哪个特权级进来的（帧里 PRMD 的低两位 = PPLV）**
+硬件进异常时把「回到哪个 PLV」写进 PRMD.PPLV，异常处理程序
+再把它按原样留在 trap 帧里（见 arkrtos_port_swap_frame_ok 与
+mprotect 分支对同两位的用法）。所以这里不需要额外记账：帧就是
+唯一真源。SEC-G08 隔离执行用它证「回调真的在 PLV3 跑过」。
+帧为空回 0：按内核态报，绝不给一个看起来像用户态的数。
 
 ### `uint32 arkrtos_port_linux_syscall_num(void *p_exc_ctx) {`
 

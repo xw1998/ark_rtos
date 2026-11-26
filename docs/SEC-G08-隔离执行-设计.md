@@ -1,6 +1,6 @@
 # SEC-G08 剩余半边：App shell 回调的隔离执行（设计与实施计划）
 
-> 状态：**设计已预注册；M-08-1（窗口切分）、M-08-2（upcall 核心）、M-08-3（LA64 桩字节 + 初始帧 + `SVC 0x23` 分派）已落地，M-08-4..5 未开工**（2026-11-26）。
+> 状态：**五个阶段全部落地（2026-11-26）**：M-08-1（窗口切分）、M-08-2（upcall 核心）、M-08-3（LA64 桩字节 + 初始帧 + `SVC 0x23` 分派）、M-08-4（跳板改调 `call()` + 注册三值放行 + 参数搬家 + QEMU 端到端门禁）、M-08-5（文档收口 + SDK 边界四条写进公共头）。
 > 当前落地的是 fail-closed 半边（`2080a9b`、`903abee`）：特权级分离 + 分页的构建上，
 > `arkrtos_shell_ext_register()` 见到 `is_priv == 0` 的调用者直接回
 > `ARKRTOS_USHELL_ERR_PRIV`（-6），注册表一个槽都不动。
@@ -211,8 +211,8 @@ fail-closed 把这条路径关掉了，代价是功能消失。
 | M-08-1 ✅ | 窗口布局 + upcall 区（`ARKRTOS_ELF_UPCALL_SIZE`，默认 8 KB）+ `s_elf_info` 三字段 + 清零 + `elf_gate` 更新（**已落地 2026-11-26**：`elf_gate` 全绿、宿主 `elf` 196 条 / `elfup0` 188 条全绿） | `tools/elf_gate.py` 全绿；`test_elf_host.c` 新增「upcall 区不与被加载段、用户栈、argv 重叠」与「`=0` 档退回旧布局」两档断言；`fork_gate` 十档仍全绿（布局改了，App 栈位置要重新对齐） | 低（纯加区，行为不变） |
 | M-08-2 ✅ | `ready()` / `call()` / `ret()` 三个入口 + 宿主桩化的单测（**已落地 2026-11-26**：宿主 `USHELL-HOST OK 210 checks` / `REFUSED 17 checks`，`arkrtos_shell_ushell` 行覆盖率 99.58%） | `warn_gate` 零告警（238 TU）；`coverage_gate` 该模块 ≥ 基线；`ci_gate` 的 `ushell-host` 两臂绿 | 中（全部走宿主可测路径，行为未变） |
 | M-08-3 ✅ | LA64 桩字节 + 初始帧写寄存器 + `SVC 0x23` 分派（`arkrtos_task.c`）（**已落地 2026-11-26**） | `tools/linux_abi_gate.py` 新增 `svc-0x23`（号定义 / 分派 case / 回调用通道三处同源）与 `abi-split-rv32` 号段 0x10..0x23，14 项全绿；QEMU 单测 `utest run ushell_upcall_refuse_stranger` 读数 `1 matched, 1 passed, 0 failed; assertions 6 run / 0 failed` | 中（port 改动，已取 QEMU 读数） |
-| M-08-4 | 跳板改调 `call()`、注册策略收窄、`ushell_func_alive_space()`、`g_ushell` 两字段 | §5 全部读数；`ci_gate` 119 项 + `fork_gate` 71 项全绿 | 高（行为切换点） |
-| M-08-5 | 文档收口：`已知限制.md` §四那一行改写、`安全认证准备.md` §5/§7、`欠账盘点.md` 那一行、SDK 文档补「回调按多线程写」 | 文档自洽 + `doc_audit` 绿 | 低 |
+| M-08-4 ✅ | 跳板改调 `call()`、注册策略收窄、`ushell_func_alive_space()`、`g_ushell` 两字段（**已落地 2026-11-26**：QEMU 端到端读数 `[ushell] isolated rc=0 tid=6 space=0 plv=3`，App 侧 `cb argc=3` / `argv[0..2]=hi,a,b` / `cb argv=0x21f3fd0 func=0x2000350 sp=0x21f3f68`；宿主两臂 `USHELL-HOST OK 278 checks` / `REFUSED 34 checks`；新门禁 `tools/ushell_iso_gate.py` PASS，3/3 反假绿变异被抓） | §5 全部读数；`ci_gate` 119 项 + `fork_gate` 71 项全绿 | 高（行为切换点） |
+| M-08-5 ✅ | 文档收口：`已知限制.md` §四那一行改写、`安全认证准备.md` §5/§7、`欠账盘点.md` 那一行、SDK 文档补「回调按多线程写」（**已落地 2026-11-26**：`arkrtos_ushell.h` 增「回调的写法约束（隔离执行档，必须遵守）」四条——按多线程写 / argc·argv 是只读副本且 ≤ 512 字节 / 只许阻塞 `wait()` 不许忙等 / 不得依赖 `$tp` 与内核内存；四页文档同步改写） | 文档自洽 + `doc_audit` 绿 | 低 |
 
 **M-08-2 的实现位置（取舍，与原计划不同）**：原计划新增独立 TU `arkrtos_ushell_upcall.c`，实际
 落在 `kernelsrc/shell/arkrtos_shell_ushell.c` 的同一 TU（`#if ARKRTOS_USE_USHELL_ISO` 段），接口契约
@@ -231,6 +231,42 @@ M-08-3 只替换函数体。
 3. **`start()` 显式收 `space`**：不读 `s_pg_app_space`（「当前空间」随调用时机漂移，与仓库里「唯一真源：任务表」的口径相悖）。代价是头文件 + 宿主桩 + 1 处调用点各加一个参数。
 
 **一条被实测确认的 ABI 口径**：Ark 自己的 SVC 返回值是 **32 位**的——`ARKRTOS_SVC_RET` 把值按 `uint32` 写进帧的 `$a0`，高位补零，所以负值读回来是 `0x00000000FFFFFFF9` 而不是符号扩展的 `-7`；要 64 位符号扩展的是 Linux ABI 那条路（`arkrtos_port_svc_set_ret_signed()`）。App 侧按 `int32` 取低 32 位即可，QEMU 用例按 `(uint32)` 比较（第一版拿 `long` 直接比，把正确的行为读成了失败——这是判据写错，不是实现错）。
+
+**M-08-4 的实现与五处取舍/实测结论（均已取读数）**：
+
+1. **注册策略从二值收窄成三值**：`arkrtos_shell_ext_register()` 只在「特权级分离 + 分页」档
+   看调用者 `is_priv`——`is_priv != 0`（内核侧注册的行）**照旧直接放行**，`is_priv == 0` 时再问
+   `arkrtos_ushell_upcall_ready(space)`：回 1 就放行并记下 `space` 与 `owner_task`，回 0 仍回 -6。
+   这样「关掉功能」与「安全地还回来」只差一个判据，回退不需要动代码。
+2. **`ushell_func_alive_space()` 按 `s_elf_info[space]` 的 `PT_LOAD` 区间判**，不再只看分区表槽位：
+   分区表说「这块 Flash 里有个 App」，但说不出一段地址是不是**这个空间**当前那份映像的可执行段。
+3. **PLV 证据取自 trap 帧的 PRMD 两位**（port 钩子 `arkrtos_port_svc_caller_plv()`），
+   取代 §5.1 原计划的「`$a3` 哨兵 + `$a4` 读 CRMD.PLV」：PPLV 就在帧里，少一次读 CSR、
+   也不需要在用户态多占一个寄存器。
+4. **§5.2 的措辞订正**：「不再置 `arkrtos_kernel_ushell_active`」只对**隔离路径**成立；
+   `is_priv != 0` 的同栈直调路径照旧置位（它本来就是内核代码，那个放行位就是给它用的）。
+5. **参数必须搬家**：回调在 PLV3 读不到内核 RAM，`argv` 只能是起跑前写进 App 窗口的一份副本。
+   落在 `[call_sp, up_sp)` 这 512 字节以内（`ARKRTOS_USHELL_UP_ARGS_MAX`），8 字节小端槽，
+   末尾带一个 NULL 指针槽（否则回调里 `while(argv[i])` 会越过参数区）。
+6. **实测坑 A：任务栈顶必须停在 `call_sp`，不能给到 `up_sp`**。`arkrtos_task_register()` 会按
+   「栈底 + 栈长」造一份初始帧（`ARKRTOS_USE_STACK_USAGE=1` 时还会整段填图案），栈顶给到
+   `up_sp` 时那份帧正好压在刚写好的参数区上。症状极有迷惑性：`argc` 对、`argv` 指针对、
+   `argv[i]` 全 0（`(null)`），看起来像「写窗口没生效」。宿主用例现在把这条几何钉住
+   （`g_up_reg_bytes == g_up_start_sp - 桩页底`）。
+7. **实测坑 B：App 侧 `SVC 0x11` 是寄存器 ABI，且只能用子 1（阻塞 wait）**。`$a0` = 子命令、
+   `$a1` = 参数，与 `0x10 DEV_IO` / `0x1A SHELL` 的「参数块指针」不是一套；子 1 = `WAIT(ms)`
+   真阻塞，子 3 = `DELAY(us)` 忙等。夹具第一版两条都踩了：子命令被读成指针 ⇒ 落到 `default`
+   空转；改用子 3 后，App 优先级 12 高于 shell 14，忙等直接饿死 shell，**症状是「控制台像死了」**
+   而 A/B 任务照常打印。结论写进 SDK 与 `已知限制.md`：**回调里只许阻塞 wait，不许忙等**。
+8. **审计 kind 14 未做**：隔离执行的每次回调目前只在 `ulog` 里留痕（`[ushell] isolated …`），
+   没走审计通道。理由：审计项要的是「谁在什么特权级做了什么」，而本阶段的证据链是
+   「trap 帧 PLV + 任务表 space」两处内核侧读数；再加一条审计记录只会多一份可能与真源
+   漂移的副本。M-08-5 已把 SDK 边界定稿（`arkrtos_ushell.h` 四条写法约束），审计 kind 14
+   仍决定不落：证据链两处内核侧读数已经够，加记录只多一份会漂移的副本。
+9. **新门禁 `tools/ushell_iso_gate.py`**：QEMU 上跑「送 App → 注册 → 键入 `hi a b` → 断言
+   App 侧参数/地址 + 内核侧 `rc=0 plv=3` → 再发一次（busy 归零）→ `hix` 必须 not found 且不误调」，
+   另带 `--mutate` 三条反假绿变异（桩里换 syscall 号 / `is_priv` 改 1 / 不清 `s_up_busy`），
+   读数 `PASS: 3/3 条变异都被抓到`。
 
 **回退方式**：M-08-1 加的是常量（置 0 即退回旧布局）；M-08-4 的放行门是
 `arkrtos_ushell_upcall_ready()`，把它改成恒 0 就回到今天这个 fail-closed 行为，

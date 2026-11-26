@@ -105,6 +105,23 @@ static void ushell_copy(char *dst, uint32 cap, const char *src)
  * trampoline address to find its row in the command table. */
 static int arkrtos_shell_ext_trampoline(int argc, char **argv);
 
+/* 一行隔离执行（M-08-4）：起一次 upcall、把返回码翻成一行日志。
+ * 实体定义在文件末尾的 ISO 段（它要用那里的记账与几何查询）；关档时
+ * 这里给一个 fail-closed 的定义——关档的注册路径根本不会产生
+ * has_space 行，真有也算「handler 不可用」，绝不回落到同栈直调。 */
+#if (ARKRTOS_USE_USHELL_ISO == 1)
+static int ushell_run_isolated(uint32 i, int argc, char **argv);
+#else
+static int ushell_run_isolated(uint32 i, int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    ark_shell_printf("%s: handler no longer available (image unloaded?)\r\n",
+                     g_ushell[i].name);
+    return -1;
+}
+#endif
+
 /* Remove one entry: the trampoline row is deleted by shifting the later rows
  * down (their order is the help display order, so no hole is left), then the
  * slot itself is cleared. Register / unregister / task-exit all go through
@@ -134,6 +151,8 @@ void ushell_drop(uint32 i)
     g_ushell[i].in_use = 0u;
     g_ushell[i].func = 0;
     g_ushell[i].owner_task = 0u;
+    g_ushell[i].space = 0u;
+    g_ushell[i].has_space = 0u;
     g_ushell[i].name[0] = '\0';
     g_ushell[i].help[0] = '\0';
 }
@@ -188,6 +207,13 @@ static int arkrtos_shell_ext_trampoline(int argc, char **argv)
             continue;
         }
 
+        /* SEC-G08 M-08-4：App 注册的行改走隔离执行。失败一律报错，绝不
+         * 降级成下面的同栈直调——「在 PLV0 跑一下算了」正是本缺陷。 */
+        if(g_ushell[i].has_space != 0u)
+        {
+            return ushell_run_isolated(i, argc, argv);
+        }
+
         if(ushell_func_alive((const void *)g_ushell[i].func) == 0)
         {
             ark_shell_printf("%s: handler no longer available (image unloaded?)\r\n",
@@ -223,6 +249,8 @@ int32 arkrtos_shell_ext_register(const arkrtos_ushell_cmd_t *cmd)
 {
     uint32 i;
     uint32 len;
+    uint32 reg_space = 0u;      /* 只在 is_priv == 0 的放行分支里写 */
+    uint32 reg_has_space = 0u;  /* 同上；内核侧注册恒为 0（直调） */
 
     if((cmd == 0) || (cmd->name == 0) || (cmd->func == 0))
     {
@@ -231,14 +259,25 @@ int32 arkrtos_shell_ext_register(const arkrtos_ushell_cmd_t *cmd)
 
 #if (ARKRTOS_USE_USHELL_APP_CB == 0)
     {
-        /* fail-closed：见文件头的「特权级策略」。
-         * 判据是调用者当前任务的 is_priv——内核任务注册（板级 / 驱动在
-         * 内核线程里注册）仍然是 1，只有 App 是 0。 */
-        const arkrtos_task_t *me = arkrtos_task_get_current();
+        /* 见文件头的「特权级策略」。判据是调用者当前任务的 is_priv——
+         * 内核任务注册（板级 / 驱动在内核线程里注册）仍然是 1，只有
+         * App 是 0。
+         *
+         * M-08-4：拒绝从「恒拒绝」收窄成「有条件放行」。App 注册放行的
+         * 唯一条件是**它自己那个空间**现在能隔离执行（有 upcall 区 +
+         * port 会写桩，判据在 arkrtos_ushell_upcall_ready()）。放行时
+         * 记下空间号与 has_space，跳板据此走 upcall 而不是同栈直调；
+         * 不满足就仍然回 -6，注册表一个字节都不动。 */
+        arkrtos_task_t *me = arkrtos_task_get_current();
 
         if((me != 0) && (me->is_priv == 0u))
         {
-            return ARKRTOS_USHELL_ERR_PRIV;
+            reg_space = arkrtos_paging_space_of(me);
+            if(arkrtos_ushell_upcall_ready(reg_space) == 0)
+            {
+                return ARKRTOS_USHELL_ERR_PRIV;
+            }
+            reg_has_space = 1u;
         }
     }
 #endif
@@ -283,6 +322,8 @@ int32 arkrtos_shell_ext_register(const arkrtos_ushell_cmd_t *cmd)
      * to any task lifetime and must survive every App stopping. */
     g_ushell[i].owner_task = (arkrtos_current_task_id > 0)
                              ? (uint32)arkrtos_current_task_id : 0u;
+    g_ushell[i].space = reg_space;
+    g_ushell[i].has_space = reg_has_space;
 
     g_cmd_table[g_cmd_count].name = g_ushell[i].name;
     g_cmd_table[g_cmd_count].func = arkrtos_shell_ext_trampoline;
@@ -374,6 +415,52 @@ static uint8 s_up_busy[ARKRTOS_USHELL_UP_MAX_SPACES];
 static int32 s_up_rc[ARKRTOS_USHELL_UP_MAX_SPACES];
 static int32 s_up_sem[ARKRTOS_USHELL_UP_MAX_SPACES];
 static int32 s_up_tid[ARKRTOS_USHELL_UP_MAX_SPACES];
+/* 最近一次**成功**隔离执行的现场：ret() 记账时就写，跳板在"等到了
+ * 返回"之后用它打一行读数（`rc / tid / space / plv`）。tid 必须在
+ * ret() 终止任务之前取走 —— TCB 会被复用，事后再读到的可能是别人。 */
+static int32 s_up_last_tid[ARKRTOS_USHELL_UP_MAX_SPACES];
+static uint32 s_up_last_plv[ARKRTOS_USHELL_UP_MAX_SPACES];
+
+/* 处理器是否还在**这个空间**的镜像里（M-08-4）。与 ushell_func_alive()
+ * 的分区表槽位判据不同，这里问的是「这个 App 此刻装着的那个镜像」——
+ * 隔离执行只在自己那块空间里有意义：
+ *   ① 空间里必须有一个活着的 ELF 实例（镜像被卸 / 任务退了就不可执行）；
+ *   ② 它的装载结果里必须有 upcall 区，否则 call() 只会回 NOAREA；
+ *   ③ 处理器地址必须落在该空间的可执行区 [win_base, upcall_base) 内。
+ * ③ 不逐段比对（只按可执行区判），两点理由写在这里免得后来者以为漏了：
+ *   - `arkrtos_elf_info_t` 只记段数（segs），不记段区间；逐段判要改这个
+ *     对外结构并动装载器，代价与收益不成比例；
+ *   - 这个区间整体就是 App 自己的 PLV3 内存，代码段与数据段同权：判据要
+ *     挡的是「悬垂指针 / 别的空间」，不是「数据页里的字节」。upcall 桩页
+ *     与桩栈是内核写的，所以用 upcall_base 把它们排除在外。 */
+static int ushell_func_alive_space(uint32 space, const void *p)
+{
+    arkrtos_elf_info_t info;
+    unsigned long addr = (unsigned long)p;
+
+    if((p == 0) || (space >= ARKRTOS_USHELL_UP_MAX_SPACES))
+    {
+        return 0;
+    }
+    if(arkrtos_elf_running_in(space) == 0)
+    {
+        return 0;
+    }
+    if(arkrtos_elf_info_space(space, &info) != (int32)ARKRTOS_ELF_OK)
+    {
+        return 0;
+    }
+    if((info.upcall_base == 0ul) || (info.upcall_sp == 0ul))
+    {
+        return 0;
+    }
+    if((addr < (unsigned long)ARKRTOS_ELF_WINDOW_BASE) ||
+       (addr >= info.upcall_base))
+    {
+        return 0;
+    }
+    return 1;
+}
 
 /* 取该空间的 upcall 几何；返回 0 = 没有这块区（没装过 ELF，或者
  * ARKRTOS_ELF_UPCALL_SIZE=0 的回退档）。判据落在**每个 App 自己的装载结果**
@@ -432,6 +519,132 @@ static void upcall_abort_task(int32 id)
     arkrtos_task_table[id - 1].status = ARKRTOS_TASK_INVALID;
 }
 
+/* ---- 参数搬家（M-08-4）：argv 必须是 App 窗口里的一份副本 --------------
+ * 跳板手里拿的 argv 是**内核侧**的指针（shell 的行缓冲），而回调在 App 的
+ * 空间里以 PLV3 跑：内核的 DMW 直映区是 PLV0 的，PLV3 读一下就地址错；就算
+ * 读得到，「App 能读内核内存」本身也已经把隔离执行否掉了。所以参数在起跑
+ * 之前必须搬进 App 自己的窗口，argv 数组里的指针也必须是窗口内的地址。
+ *
+ * 落点 = upcall 栈**顶**往下的一块，不是栈底：搬完把回调的 sp 移到参数区
+ * 之下，栈从那里继续往下长，压栈永远压不到参数区；反过来（放栈底）则会在
+ * 回调栈用得深时被静默盖掉，那是最难查的一类缺陷。代价是可用栈少了参数区
+ * 那么多字节（≤ ARKRTOS_USHELL_UP_ARGS_MAX），写进 已知限制。
+ *
+ * 只用 8 字节字写（arkrtos_port_paging_write_space 的粒度）：字符串按 8 字节
+ * 补齐、指针数组本来就是 8 字节，于是整块要么全写进去、要么一个字节都不写。
+ * 返回 0 = 成功；否则是 ARKRTOS_USHELL_UP_ERR_*，调用方原样回给操作员。 */
+/* 往 8 字节槽里写一个小端无符号数：不按 unsigned long 落字，因为宿主的
+ * long 只有 4 字节——布局必须与目标机一致，而不是与编译它的机器一致。 */
+static void ushell_put_u64(unsigned char *p, unsigned long long v)
+{
+    unsigned i;
+
+    for(i = 0u; i < 8u; i++)
+    {
+        p[i] = (unsigned char)((v >> (i * 8u)) & 0xFFull);
+    }
+}
+
+static int32 ushell_marshal_args(uint32 space, unsigned long up_sp,
+                                 unsigned long stack_bottom,
+                                 int argc, char **argv,
+                                 unsigned long *p_sp, char ***p_argv)
+{
+    /* 暂存区按字节算，再按 sizeof(unsigned long) 交给 port —— 目标机上
+     * 一个字就是 8 字节，等于 total/8 个字；宿主上 long 是 4 字节，等于
+     * total/4 个字，覆盖的字节数两档相同。 */
+    static unsigned long s_buf[ARKRTOS_USHELL_UP_ARGS_MAX / sizeof(unsigned long)];
+    unsigned char *p_bytes;
+    unsigned long base;
+    uint32 strings = 0u;
+    uint32 total;
+    uint32 off;
+    uint32 k;
+    int i;
+
+    /* 不在这里重复参数判据：唯一调用点是 call()，它在搬到这一步之前已经
+     * 把 argc/argv/p_sp/p_argv 全验过一遍（回 ERR_PARAM）。留一份永远走
+     * 不到的防御，只会让覆盖率变成噪声，读的人还以为是真分支。 */
+    if(argc == 0)
+    {
+        *p_sp   = up_sp;
+        *p_argv = 0;
+        return ARKRTOS_USHELL_UP_OK;
+    }
+
+    /* 先量长度再写：越界的参数不许在窗口里留下半份现场。 */
+    for(i = 0; i < argc; i++)
+    {
+        uint32 n = 0u;
+
+        if(argv[i] == 0)
+        {
+            return ARKRTOS_USHELL_UP_ERR_PARAM;
+        }
+        while(argv[i][n] != '\0')
+        {
+            n++;
+            if((strings + n) >= (uint32)ARKRTOS_USHELL_UP_ARGS_MAX)
+            {
+                return ARKRTOS_USHELL_UP_ERR_PARAM;
+            }
+        }
+        strings += (n + 1u + 7u) & ~7u;
+    }
+    total = strings + (((uint32)argc + 1u) * 8u);
+    if(total > (uint32)ARKRTOS_USHELL_UP_ARGS_MAX)
+    {
+        return ARKRTOS_USHELL_UP_ERR_PARAM;
+    }
+    /* 参数区留在 up_sp 之下、初始帧之上，之下还要留够真栈：几何不成立就
+     * 一个字节都不写。2048 是「初始帧（LA64 = 1040 字节）+ 一段真实可用的
+     * 栈」的下限，帧本身由 port 落在 call_sp - 帧长。 */
+    if(up_sp < (stack_bottom + (unsigned long)total + 2048ul))
+    {
+        return ARKRTOS_USHELL_UP_ERR_NOAREA;
+    }
+    base = (up_sp - (unsigned long)total) & ~7ul;
+
+    /* 整块按**字节**铺：字符串与指针数组在窗口里的位置是 ABI 的一部分
+     * （8 字节槽、小端），不能跟着宿主上 `sizeof(unsigned long)` 变。往
+     * 宿主编译时 long 是 4 字节，若按「一个字 = 8 字节」去索引就会把指针
+     * 数组盖到第二个字符串上——这正是第一版读出来的假红。 */
+    p_bytes = (unsigned char *)(void *)s_buf;
+    for(k = 0u; k < (uint32)ARKRTOS_USHELL_UP_ARGS_MAX; k++)
+    {
+        p_bytes[k] = 0u;
+    }
+    off = 0u;
+    for(i = 0; i < argc; i++)
+    {
+        const char *p_s = argv[i];
+        uint32 n = 0u;
+
+        while(p_s[n] != '\0')
+        {
+            p_bytes[off + n] = (unsigned char)p_s[n];
+            n++;
+        }
+        /* 指针槽：8 字节小端，与目标机的一个字一一对应 */
+        ushell_put_u64(&p_bytes[strings + ((uint32)i * 8u)],
+                       (unsigned long long)(base + (unsigned long)off));
+        off += (n + 1u + 7u) & ~7ul;
+    }
+    /* 末尾 NULL：回调里 `while(argv[i])` 这种写法走不到头就会读过参数区。 */
+    ushell_put_u64(&p_bytes[strings + ((uint32)argc * 8u)], 0ull);
+
+    if(arkrtos_port_paging_write_space(space, base,
+                                       (const unsigned long *)(const void *)p_bytes,
+                                       total / (uint32)sizeof(unsigned long)) != 0)
+    {
+        return ARKRTOS_USHELL_UP_ERR_EXEC;
+    }
+
+    *p_sp   = base;
+    *p_argv = (char **)(unsigned long)(base + (unsigned long)strings);
+    return ARKRTOS_USHELL_UP_OK;
+}
+
 int32 arkrtos_ushell_upcall_call(uint32 space, uint32 owner_task,
                                  int (*func)(int, char **argv),
                                  int argc, char **argv, int32 *p_rc)
@@ -440,7 +653,9 @@ int32 arkrtos_ushell_upcall_call(uint32 space, uint32 owner_task,
     unsigned long stub_va = 0ul;
     unsigned long up_sp = 0ul;
     unsigned long stack_bottom;
+    unsigned long call_sp = 0ul;    /* 回调真正用的栈顶（参数区之下） */
     unsigned long frame;
+    char **app_argv = 0;            /* 窗口内的 argv；入口帧里传的是它 */
     uint32 stack_bytes;
     uint32 crit;
     int32 id;
@@ -478,14 +693,28 @@ int32 arkrtos_ushell_upcall_call(uint32 space, uint32 owner_task,
         return ARKRTOS_USHELL_UP_ERR_BUSY;
     }
 
-    /* 桩页之上才是 upcall 栈，栈顶留 16 字节给桩的入口约定。几何不成立时
-     * 任何一步都不许开始：往窗口里写半份现场比报错贵得多。 */
+    /* 桩页之上才是 upcall 栈。几何不成立时任何一步都不许开始：往窗口里写
+     * 半份现场比报错贵得多。 */
     stack_bottom = stub_va + (unsigned long)ARKRTOS_USHELL_UP_PAGE_SIZE;
-    if((up_sp + 16ul) <= stack_bottom)
+    if((up_sp < (stack_bottom + 64ul)) || ((up_sp + 16ul) <= stack_bottom))
     {
         return ARKRTOS_USHELL_UP_ERR_NOAREA;
     }
-    stack_bytes = (uint32)((up_sp + 16ul) - stack_bottom);
+
+    /* 参数搬家：回调在 PLV3 读不到内核内存，argv 必须在起跑前变成窗口里的
+     * 一份副本；搬完 sp 下移到参数区之下（栈从那里往下长）。这一步在任何
+     * 资源被占用之前做完，失败就干净地回错误码。 */
+    rc = ushell_marshal_args(space, up_sp, stack_bottom, argc, argv,
+                             &call_sp, &app_argv);
+    if(rc != ARKRTOS_USHELL_UP_OK)
+    {
+        return rc;
+    }
+    /* 任务栈到 call_sp 为止，**不含**参数区：注册会按「栈顶 = 栈底 + 栈长」
+     * 造一份初始帧（还会按 STACK_USAGE 整段填图案），栈顶若给到 up_sp，
+     * 那份帧正好压到参数区上——实测症状是 argc/argv 指针全对、argv[i] 全 0。
+     * 所以栈顶必须停在 call_sp：参数区在 call_sp 之上，初始帧在其下。 */
+    stack_bytes = (uint32)(call_sp - stack_bottom);
 
     sem = arkrtos_sem_create_internal("upcall", 0);
     if(sem < 0)
@@ -552,7 +781,8 @@ int32 arkrtos_ushell_upcall_call(uint32 space, uint32 owner_task,
     }
     else
     {
-        frame = arkrtos_port_ushell_start(space, stub_va, up_sp, func, argc, argv);
+        frame = arkrtos_port_ushell_start(space, stub_va, call_sp, func, argc,
+                                          app_argv);
         if(frame == 0ul)
         {
             rc = ARKRTOS_USHELL_UP_ERR_EXEC;
@@ -562,7 +792,7 @@ int32 arkrtos_ushell_upcall_call(uint32 space, uint32 owner_task,
             /* 帧的位置由 port 定（落在 upcall 栈里），这里把它登记成这条
              * 任务的「栈顶现场」。放在 bind 之后是故意的：SMP 档的绑定会按
              * 旧 stack_ptr 重造一次帧，我们这份才是最终现场。 */
-            p_task->stack_top = up_sp;
+            p_task->stack_top = call_sp;
             p_task->stack_ptr = frame;
         }
     }
@@ -611,7 +841,7 @@ int32 arkrtos_ushell_upcall_call(uint32 space, uint32 owner_task,
     return rc;
 }
 
-int32 arkrtos_ushell_upcall_ret(int32 rc)
+int32 arkrtos_ushell_upcall_ret(int32 rc, uint32 plv)
 {
     int32 tid = arkrtos_current_task_id;
     uint32 i;
@@ -630,9 +860,13 @@ int32 arkrtos_ushell_upcall_ret(int32 rc)
             continue;
         }
 
-        s_up_rc[i]   = rc;
-        s_up_busy[i] = 0u;
-        s_up_tid[i]  = 0;
+        s_up_rc[i]       = rc;
+        s_up_last_tid[i] = tid;
+        /* 这次 syscall 是从哪个特权级发出来的（trap 帧保存的 PPLV）。
+         * 隔离执行成立与否的硬证据就在这里：App 在 PLV3 跑，值必须是 3。 */
+        s_up_last_plv[i] = plv;
+        s_up_busy[i]     = 0u;
+        s_up_tid[i]      = 0;
         if(s_up_sem[i] >= 0)
         {
             (void)arkrtos_sem_post_internal(s_up_sem[i]);
@@ -646,6 +880,65 @@ int32 arkrtos_ushell_upcall_ret(int32 rc)
     }
 
     return ARKRTOS_USHELL_UP_ERR_CALLER;
+}
+
+/* 跳板的一行隔离执行（M-08-4）。每条失败都落到**不同**的日志行上：
+ * 操作员看到 "busy" 与看到 "cannot start isolated worker" 要能分辨
+ * 是「上一次还没回来」还是「内核没把线程建起来」，两者处理方式不同。
+ * 返回码语义与直调一致：回调的 int 原样回给 shell。 */
+static int ushell_run_isolated(uint32 i, int argc, char **argv)
+{
+    int32 rc = 0;
+    int32 crc;
+
+    if(ushell_func_alive_space(g_ushell[i].space,
+                               (const void *)g_ushell[i].func) == 0)
+    {
+        ark_shell_printf("%s: handler no longer available (image unloaded?)\r\n",
+                         g_ushell[i].name);
+        return -1;
+    }
+
+    crc = arkrtos_ushell_upcall_call(g_ushell[i].space, g_ushell[i].owner_task,
+                                     g_ushell[i].func, argc, argv, &rc);
+
+    switch(crc)
+    {
+        case ARKRTOS_USHELL_UP_OK:
+            /* 读数行：这一条是 QEMU 门禁的锚点。tid 与 plv 来自 ret() 记账，
+             * 不是猜的；plv 必须是 3（PLV3 才算「隔离执行」成立）。 */
+            ark_shell_printf("[ushell] isolated rc=%d tid=%d space=%u plv=%u\r\n",
+                             (int)rc,
+                             (int)s_up_last_tid[g_ushell[i].space],
+                             (unsigned)g_ushell[i].space,
+                             (unsigned)s_up_last_plv[g_ushell[i].space]);
+            return (int)rc;
+
+        case ARKRTOS_USHELL_UP_ERR_BUSY:
+            ark_shell_printf("%s: busy (another upcall in this space)\r\n",
+                             g_ushell[i].name);
+            return -1;
+
+        case ARKRTOS_USHELL_UP_ERR_TIMEOUT:
+            ark_shell_printf("%s: isolated worker timed out after %u ms\r\n",
+                             g_ushell[i].name,
+                             (unsigned)ARKRTOS_USHELL_UP_TIMEOUT_MS);
+            return -1;
+
+        case ARKRTOS_USHELL_UP_ERR_TASK:
+        case ARKRTOS_USHELL_UP_ERR_EXEC:
+            ark_shell_printf("%s: cannot start isolated worker (%d)\r\n",
+                             g_ushell[i].name, (int)crc);
+            return -1;
+
+        default:
+            /* NOAREA / PARAM / CALLER：注册时的门禁已经拦过一遍，走到这里
+             * 说明装载结果在注册之后变了（镜像被卸、空间被回收）。按
+             * 「handler 不可用」报，仍然不直调。 */
+            ark_shell_printf("%s: handler no longer available (image unloaded?)\r\n",
+                             g_ushell[i].name);
+            return -1;
+    }
 }
 
 #endif /* ARKRTOS_USE_USHELL_ISO */

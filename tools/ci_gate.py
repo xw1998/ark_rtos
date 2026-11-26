@@ -3419,8 +3419,10 @@ def check_shell_ushell_host():
     instead of saying the handler is gone.
 
     So this case links the real file against stubs for the console (output
-    capture + the command table) and the partition table, and asserts on 141
-    checks:
+    capture + the command table) and the partition table, and asserts on 278
+    checks (M-08-4 added the upcall arm: the marshaled argv block is pinned
+    byte by byte in the App window, and the registered stack must stop at the
+    worker's sp so the initial trap frame cannot paint over those arguments):
       * case-insensitive duplicate detection over the whole name (a prefix
         is not a match), and case-insensitive unregistration;
       * the copy bounds: exactly NAME_MAX characters is accepted and one
@@ -3444,7 +3446,10 @@ def check_shell_ushell_host():
 
     Honest limits:
       1) no SVC transition and no user RAM window check: the entry is called
-         directly, so "an App can really reach this" is not shown;
+         directly, so "an App can really reach this" is not shown here. On the
+         isolated path that half is covered end-to-end on QEMU by
+         tools/ushell_iso_gate.py ([ushell] isolated ... plv=3), which is a
+         separate script because it needs QEMU and this gate must not;
       2) the active flag is only observed to be raised and dropped -- what
          the task side does with it is covered by the task case;
       3) the one uncovered line is the NULL/NULL arm of the name comparison:
@@ -3473,7 +3478,7 @@ def check_shell_ushell_host():
 
     test, mods, defs, incs, markers = pick
     # 两份镜像，一份源码：
-    #   * 带 -DARKRTOS_USE_USHELL_APP_CB=1 —— 注册表本体（141 条）；
+    #   * 带 -DARKRTOS_USE_USHELL_APP_CB=1 —— 注册表本体（278 条）；
     #   * 不带 —— 在「特权级分离 + 分页」的板级头上必须 fail-closed：
     #     App 侧注册返回 ARKRTOS_USHELL_ERR_PRIV，内核注册照旧。
     # 只测前一份会把 SEC-G08 的补丁测成「注册全都不通」还是「全都能通」，

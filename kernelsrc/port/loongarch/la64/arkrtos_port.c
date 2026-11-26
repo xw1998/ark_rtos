@@ -5320,6 +5320,23 @@ void arkrtos_port_svc_set_ret(void *p_exc_ctx, unsigned long value)
     ((la_frame_word *)p_exc_ctx)[LA_FR_A0] = (la_frame_word)value;
 }
 
+/**
+* @brief 本次 trap 是从哪个特权级进来的（帧里 PRMD 的低两位 = PPLV）
+* @details 硬件进异常时把「回到哪个 PLV」写进 PRMD.PPLV，异常处理程序
+*          再把它按原样留在 trap 帧里（见 arkrtos_port_swap_frame_ok 与
+*          mprotect 分支对同两位的用法）。所以这里不需要额外记账：帧就是
+*          唯一真源。SEC-G08 隔离执行用它证「回调真的在 PLV3 跑过」。
+*          帧为空回 0：按内核态报，绝不给一个看起来像用户态的数。
+*/
+uint32 arkrtos_port_svc_caller_plv(void *p_exc_ctx)
+{
+    if(p_exc_ctx == 0)
+    {
+        return 0u;
+    }
+    return (uint32)(((la_frame_word *)p_exc_ctx)[LA_FR_PRMD] & 3UL);
+}
+
 #if (ARKRTOS_USE_LINUX_ABI == 1)
 /**
 * @brief Linux/LoongArch ABI 的系统调用号（syscall 0 + $a7）
