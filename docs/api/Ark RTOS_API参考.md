@@ -64,6 +64,7 @@
 - [kernelsrc/include/arkrtos_trust.h](#kernelsrcincludearkrtos_trusth)（6 项）
 - [kernelsrc/include/arkrtos_ulog.h](#kernelsrcincludearkrtos_ulogh)（5 项）
 - [kernelsrc/include/arkrtos_ushell.h](#kernelsrcincludearkrtos_ushellh)（4 项）
+- [kernelsrc/include/arkrtos_ushell_upcall.h](#kernelsrcincludearkrtos_ushell_upcallh)（3 项）
 - [kernelsrc/include/arkrtos_utest.h](#kernelsrcincludearkrtos_utesth)（22 项）
 - [kernelsrc/include/arkrtos_version.h](#kernelsrcincludearkrtos_versionh)（2 项）
 - [kernelsrc/include/arkrtos_vfs.h](#kernelsrcincludearkrtos_vfsh)（44 项）
@@ -9349,6 +9350,50 @@ int32 arkrtos_shell_print(const char *msg);
 - `msg`：NUL 结尾字符串；是否换行由调用者决定（要换行就带 "\r\n"）
 **返回**：ARKRTOS_USHELL_OK 或负错误码
 
+## kernelsrc/include/arkrtos_ushell_upcall.h
+
+**SEC-G08 隔离执行：App 命令的 upcall 线程（ready / call / ret）**
+这份头是内核内部契约，**不是**给 App 用的 API：
+- 注册路径（arkrtos_shell_ext_register）用 ready() 判断「这个空间
+能不能把 App 回调放到自己的地址空间里以 PLV3 跑」；
+
+### `int32 arkrtos_ushell_upcall_ready(uint32 space);`
+
+```c
+int32 arkrtos_ushell_upcall_ready(uint32 space);
+```
+
+**这个空间现在能不能把 App 回调隔离执行**
+- `space`：地址空间号
+**返回**：1 = 能（有 upcall 区 + port 提供桩），0 = 不能
+> 说明：只看「静态前提」，不看忙闲：注册那一刻恰好有一次回调在跑，不该把
+注册拒掉。忙闲由 call() 判。
+
+### `int32 arkrtos_ushell_upcall_call(uint32 space, uint32 owner_task, int `
+
+```c
+int32 arkrtos_ushell_upcall_call(uint32 space, uint32 owner_task, int (*func)(int, char **argv), int argc, char **argv, int32 *p_rc);
+```
+
+**在本 App 的空间里起一条 upcall 线程执行 func，并等它返回**
+- `space`：地址空间号（= 注册者装载时所在的空间）
+- `owner_task`：注册这条命令的任务号（用来继承 App 配额身份）
+- `func`：回调入口（VA 必须落在该空间的 ELF 段内，由跳板先校验）
+- `argc/argv`：参数，原样交给桩
+- `p_rc`：成功时写回回调的返回值
+**返回**：ARKRTOS_USHELL_UP_*
+
+### `int32 arkrtos_ushell_upcall_ret(int32 rc);`
+
+```c
+int32 arkrtos_ushell_upcall_ret(int32 rc);
+```
+
+**upcall 线程的返回通道（SVC 0x23）：记账后终止自己**
+- `rc`：回调的返回值
+**返回**：正常路径不返回（线程已退出）；调用者不是 upcall 线程时回
+ARKRTOS_USHELL_UP_ERR_CALLER，且不改动任何状态
+
 ## kernelsrc/include/arkrtos_utest.h
 
 **板端单元测试框架（utest）——用例自动注册 + 断言记账 + 汇总报告**
@@ -10474,7 +10519,7 @@ ARKRTOS_WEAK void arkrtos_port_irq_init(void) {
 ### `#include "arkrtos_hal.h" #include "arkrtos_task.h" #include "arkrtos_f`
 
 ```c
-#include "arkrtos_hal.h" #include "arkrtos_task.h" #include "arkrtos_fault.h" #include "arkrtos_smp.h"       /* arkrtos_smp_ipi_handler()：主核 IPI 入口（R1） */
+#include "arkrtos_hal.h" #include "arkrtos_task.h" #include "arkrtos_fault.h" #include "arkrtos_ushell_upcall.h"   /* SEC-G08：upcall 桩与初始帧的 port 契约 */ #include "arkrtos_smp.h"       /* arkrtos_smp_ipi_handler()：主核 IPI 入口（R1） */
 ```
 
 **Ark RTOS LoongArch64 移植层实现**

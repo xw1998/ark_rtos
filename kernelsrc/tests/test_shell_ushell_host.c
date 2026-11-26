@@ -31,6 +31,7 @@
 #include <stdint.h>
 
 #include "arkrtos_shell_internal.h"
+#include "arkrtos_ushell_upcall.h"
 
 /* Mirror of the policy default in arkrtos_shell_ushell.c, so this one file can
  * be built twice: with -DARKRTOS_USE_USHELL_APP_CB=1 (the registry behaviour)
@@ -165,6 +166,181 @@ void ark_shell_printf(const char *fmt, ...)
     }
 }
 
+
+/* ------------------------------------------------------- upcall iso stubs */
+
+/* SEC-G08 M-08-2: the upcall core lives in the same translation unit as the
+ * registry, so every symbol it touches has to exist here. These stubs are
+ * plain recorders: the point of this test is that the *bookkeeping* is right
+ * (busy cleared on every path, rc slot only valid after ret(), the caller cannot
+ * fake a return), not that a real LoongArch task ever runs. */
+
+arkrtos_task_t arkrtos_task_table[ARKRTOS_TASK_MAX_NUM];
+int32 arkrtos_task_count;
+
+static arkrtos_elf_info_t g_up_info;
+static int g_up_info_rc;
+
+int32 arkrtos_elf_info_space(uint32 space, arkrtos_elf_info_t *p_out)
+{
+    (void)space;
+    if ((g_up_info_rc != 0) || (p_out == NULL)) {
+        return -1;
+    }
+    *p_out = g_up_info;
+    return 0;
+}
+
+static int g_up_stub_supported = 1;
+
+int32 arkrtos_port_ushell_stub_supported(void)
+{
+    return g_up_stub_supported;
+}
+
+static int g_up_stub_rc;
+static uint32 g_up_stub_space;
+static unsigned long g_up_stub_va;
+
+int32 arkrtos_port_ushell_stub(uint32 space, unsigned long stub_va)
+{
+    g_up_stub_space = space;
+    g_up_stub_va = stub_va;
+    return g_up_stub_rc;
+}
+
+static unsigned long g_up_frame;
+static unsigned long g_up_start_sp;
+static int g_up_start_argc;
+static int (*g_up_start_func)(int, char **);
+
+unsigned long arkrtos_port_ushell_start(unsigned long stub_va,
+                                        unsigned long upcall_sp,
+                                        int (*func)(int, char **argv),
+                                        int argc, char **argv)
+{
+    (void)stub_va;
+    (void)argv;
+    g_up_start_sp = upcall_sp;
+    g_up_start_func = func;
+    g_up_start_argc = argc;
+    return g_up_frame;
+}
+
+uint32 arkrtos_port_enter_critical(void)
+{
+    return 0u;
+}
+
+void arkrtos_port_exit_critical(uint32 state)
+{
+    (void)state;
+}
+
+static uint32 g_up_prev_space = 3u;
+static uint32 g_up_act_space;
+static int g_up_act_calls;
+
+uint32 arkrtos_paging_space_current(void)
+{
+    return g_up_prev_space;
+}
+
+int32 arkrtos_paging_space_activate(uint32 space)
+{
+    g_up_act_space = space;
+    g_up_act_calls++;
+    return 0;
+}
+
+static arkrtos_task_t *g_up_bind_task;
+static uint32 g_up_bind_space;
+
+int32 arkrtos_paging_bind_task(arkrtos_task_t *p_task, uint32 space)
+{
+    g_up_bind_task = p_task;
+    g_up_bind_space = space;
+    return 0;
+}
+
+static int32 g_up_reg_id = 1;
+static unsigned long g_up_reg_entry;
+static uint32 g_up_reg_bottom;
+static uint32 g_up_reg_bytes;
+static uint8 g_up_reg_prio;
+
+int32 arkrtos_task_register(void (*entry)(void), uint32 *stack_bottom,
+                            uint32 stack_size, uint8 priority, uint32 period_ms)
+{
+    (void)period_ms;
+    if (g_up_reg_id <= 0) {
+        return g_up_reg_id;
+    }
+    g_up_reg_entry = (unsigned long)(uintptr_t)entry;
+    g_up_reg_bottom = (uint32)(uintptr_t)stack_bottom;
+    g_up_reg_bytes = stack_size;
+    g_up_reg_prio = priority;
+    arkrtos_task_table[g_up_reg_id - 1].status = ARKRTOS_TASK_READY;
+    return g_up_reg_id;
+}
+
+static int g_up_ready_del_calls;
+static int32 g_up_ready_del_idx;
+
+void arkrtos_ready_del(int32 task_idx)
+{
+    g_up_ready_del_calls++;
+    g_up_ready_del_idx = task_idx;
+}
+
+static int g_up_killed;
+
+void arkrtos_task_kill_internal(void)
+{
+    g_up_killed++;
+}
+
+static int32 g_up_sem_next = 0x01300000;
+static int g_up_sem_created;
+static int g_up_sem_deleted;
+static int g_up_sem_posted;
+static int g_up_sem_wait_calls;
+static int g_up_sem_wait_rc;
+static int32 g_up_sem_wait_to;
+static void (*g_up_wait_hook)(void);
+
+int32 arkrtos_sem_create_internal(const char *name, int32 init_count)
+{
+    (void)name;
+    (void)init_count;
+    g_up_sem_created++;
+    return g_up_sem_next;
+}
+
+int32 arkrtos_sem_wait_internal(int32 handle, int32 timeout_ms)
+{
+    (void)handle;
+    g_up_sem_wait_calls++;
+    g_up_sem_wait_to = timeout_ms;
+    if (g_up_wait_hook != NULL) {
+        g_up_wait_hook();
+    }
+    return g_up_sem_wait_rc;
+}
+
+int32 arkrtos_sem_post_internal(int32 handle)
+{
+    (void)handle;
+    g_up_sem_posted++;
+    return 0;
+}
+
+int32 arkrtos_sem_delete_internal(int32 handle)
+{
+    (void)handle;
+    g_up_sem_deleted++;
+    return 0;
+}
 
 /* ------------------------------------------------------------ helpers */
 
@@ -698,6 +874,283 @@ static void t_app_cb_refused(void)
 }
 #endif /* ARKRTOS_USE_USHELL_APP_CB == 0 */
 
+/* ------------------------------------------------------------ upcall iso */
+
+#if (ARKRTOS_USE_USHELL_APP_CB == 1)
+
+/* Geometry the fake ELF ledger reports: the default 8 KB upcall region =
+ * one 4 KB stub page plus a 4 KB stack, top word reserved for the stub's
+ * entry convention. The values are arbitrary but internally consistent. */
+#define UP_BASE   (0x02100000ul)
+#define UP_SP     (UP_BASE + 8192ul - 16ul)
+#define UP_FRAME  (UP_SP - 0x200ul)
+
+static int32 g_up_nested_rc;
+static int32 g_up_spoof_rc;
+
+static void up_reset(void)
+{
+    memset(&g_up_info, 0, sizeof(g_up_info));
+    g_up_info_rc = 0;
+    g_up_stub_supported = 1;
+    g_up_stub_rc = 0;
+    g_up_stub_space = 0xFFFFFFFFu;
+    g_up_stub_va = 0ul;
+    g_up_frame = UP_FRAME;
+    g_up_start_sp = 0ul;
+    g_up_start_argc = -1;
+    g_up_start_func = NULL;
+    g_up_prev_space = 3u;
+    g_up_act_space = 0xFFFFFFFFu;
+    g_up_act_calls = 0;
+    g_up_bind_task = NULL;
+    g_up_bind_space = 0xFFFFFFFFu;
+    g_up_reg_id = 1;
+    g_up_reg_entry = 0ul;
+    g_up_reg_bottom = 0u;
+    g_up_reg_bytes = 0u;
+    g_up_reg_prio = 0u;
+    g_up_ready_del_calls = 0;
+    g_up_ready_del_idx = -1;
+    g_up_killed = 0;
+    g_up_sem_next = 0x01300000;
+    g_up_sem_created = 0;
+    g_up_sem_deleted = 0;
+    g_up_sem_posted = 0;
+    g_up_sem_wait_calls = 0;
+    g_up_sem_wait_rc = 0;
+    g_up_sem_wait_to = 0;
+    g_up_wait_hook = NULL;
+    g_up_nested_rc = 0;
+    g_up_spoof_rc = 0;
+    memset(arkrtos_task_table, 0, sizeof(arkrtos_task_table));
+    arkrtos_task_count = 1;
+    arkrtos_current_task_id = 5;
+}
+
+static int up_cb(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return 0;
+}
+
+/* Normal return: the worker reports 77 and falls off into kill_internal(). */
+static void up_hook_ret(void)
+{
+    arkrtos_current_task_id = g_up_reg_id;
+    (void)arkrtos_ushell_upcall_ret(77);
+    arkrtos_current_task_id = 5;
+}
+
+/* Nested call from inside the first one: the second must be refused BUSY,
+ * then the first still returns normally. */
+static void up_hook_busy(void)
+{
+    int32 r = 0;
+
+    arkrtos_current_task_id = g_up_reg_id;
+    g_up_nested_rc = arkrtos_ushell_upcall_call(0u, 1u, up_cb, 0, NULL, &r);
+    (void)arkrtos_ushell_upcall_ret(11);
+    arkrtos_current_task_id = 5;
+}
+
+/* Impersonation: another task on the same space tries to report a return
+ * while the real worker is still running. It must be refused, and the
+ * refusal must not disturb the ledger. */
+static void up_hook_spoof(void)
+{
+    int32 save = arkrtos_current_task_id;
+
+    arkrtos_current_task_id = 3;
+    g_up_spoof_rc = arkrtos_ushell_upcall_ret(99);
+
+    arkrtos_current_task_id = g_up_reg_id;
+    (void)arkrtos_ushell_upcall_ret(77);
+    arkrtos_current_task_id = save;
+}
+
+static void t_upcall_iso(void)
+{
+    int32 rc = 0;
+    char *argv[2];
+    char up_argv0[] = "hi";
+    char up_argv1[] = "b";
+    arkrtos_task_t *p_t;
+
+    reset_env();
+    up_reset();
+
+    /* ---- ready(): each prerequisite has its own readout ---- */
+    CK_I(arkrtos_ushell_upcall_ready(0u), 0);          /* never loaded */
+    g_up_info_rc = -1;
+    CK_I(arkrtos_ushell_upcall_ready(0u), 0);
+    g_up_info_rc = 0;                                  /* loaded, no upcall area */
+    CK_I(arkrtos_ushell_upcall_ready(0u), 0);
+    g_up_info.upcall_base = UP_BASE;
+    g_up_info.stub_va = UP_BASE;
+    g_up_info.upcall_sp = UP_SP;
+    CK_I(arkrtos_ushell_upcall_ready(0u), 1);
+    g_up_stub_supported = 0;                           /* port cannot write a stub */
+    CK_I(arkrtos_ushell_upcall_ready(0u), 0);
+    g_up_stub_supported = 1;
+    CK_I(arkrtos_ushell_upcall_ready(ARKRTOS_USHELL_UP_MAX_SPACES), 0);
+    /* ready() does not care about busy: registration during a running call
+     * must not be refused (only call() has to refuse). */
+    CK_I(arkrtos_ushell_upcall_ready(0u), 1);
+
+    /* ---- call(): parameter gate ---- */
+    CK_I(arkrtos_ushell_upcall_call(0u, 1u, up_cb, 0, NULL, NULL),
+         ARKRTOS_USHELL_UP_ERR_PARAM);
+    CK_I(arkrtos_ushell_upcall_call(0u, 1u, NULL, 0, NULL, &rc),
+         ARKRTOS_USHELL_UP_ERR_PARAM);
+    CK_I(arkrtos_ushell_upcall_call(0u, 1u, up_cb, -1, NULL, &rc),
+         ARKRTOS_USHELL_UP_ERR_PARAM);
+    CK_I(arkrtos_ushell_upcall_call(0u, 1u, up_cb, 1, NULL, &rc),
+         ARKRTOS_USHELL_UP_ERR_PARAM);
+    CK_I(arkrtos_ushell_upcall_call(0u, 0u, up_cb, 0, NULL, &rc),
+         ARKRTOS_USHELL_UP_ERR_PARAM);
+    CK_I(arkrtos_ushell_upcall_call(0u, (uint32)ARKRTOS_TASK_MAX_NUM + 1u,
+                                    up_cb, 0, NULL, &rc),
+         ARKRTOS_USHELL_UP_ERR_PARAM);
+    CK_I(arkrtos_ushell_upcall_call(ARKRTOS_USHELL_UP_MAX_SPACES, 1u, up_cb,
+                                    0, NULL, &rc),
+         ARKRTOS_USHELL_UP_ERR_PARAM);
+    CK_I(g_up_sem_created, 0);
+    CK_I(g_up_reg_entry, 0ul);
+
+    /* ---- no area / no stub ---- */
+    g_up_info.upcall_base = 0ul;
+    CK_I(arkrtos_ushell_upcall_call(0u, 1u, up_cb, 0, NULL, &rc),
+         ARKRTOS_USHELL_UP_ERR_NOAREA);
+    g_up_info.upcall_base = UP_BASE;
+    g_up_stub_supported = 0;
+    CK_I(arkrtos_ushell_upcall_call(0u, 1u, up_cb, 0, NULL, &rc),
+         ARKRTOS_USHELL_UP_ERR_NOAREA);
+    g_up_stub_supported = 1;
+
+    /* ---- geometry: the stack must exist above the stub page ---- */
+    g_up_info.upcall_sp = UP_BASE + 4000ul;
+    CK_I(arkrtos_ushell_upcall_call(0u, 1u, up_cb, 0, NULL, &rc),
+         ARKRTOS_USHELL_UP_ERR_NOAREA);
+    g_up_info.upcall_sp = UP_SP;
+    CK_I(g_up_sem_created, 0);
+
+    /* ---- semaphore refused ---- */
+    g_up_sem_next = -1;
+    CK_I(arkrtos_ushell_upcall_call(0u, 1u, up_cb, 0, NULL, &rc),
+         ARKRTOS_USHELL_UP_ERR_TASK);
+    g_up_sem_next = 0x01300000;
+
+    /* ---- task table full: nothing else was touched ---- */
+    g_up_reg_id = 0;
+    CK_I(arkrtos_ushell_upcall_call(0u, 1u, up_cb, 0, NULL, &rc),
+         ARKRTOS_USHELL_UP_ERR_TASK);
+    CK_I(g_up_sem_deleted, 1);
+    CK_I(g_up_ready_del_calls, 0);
+    g_up_reg_id = 1;
+
+    /* ---- stub page refused: the half-built task must be dropped ---- */
+    g_up_stub_rc = -1;
+    CK_I(arkrtos_ushell_upcall_call(0u, 1u, up_cb, 0, NULL, &rc),
+         ARKRTOS_USHELL_UP_ERR_EXEC);
+    CK_I(g_up_ready_del_calls, 1);
+    CK_I(g_up_ready_del_idx, 0);
+    CK_I((int)arkrtos_task_table[0].status, (int)ARKRTOS_TASK_INVALID);
+    CK_I(g_up_sem_deleted, 2);
+    g_up_stub_rc = 0;
+
+    /* ---- initial frame refused: same cleanup path ---- */
+    g_up_frame = 0ul;
+    CK_I(arkrtos_ushell_upcall_call(0u, 1u, up_cb, 0, NULL, &rc),
+         ARKRTOS_USHELL_UP_ERR_EXEC);
+    CK_I(g_up_ready_del_calls, 2);
+    CK_I((int)arkrtos_task_table[0].status, (int)ARKRTOS_TASK_INVALID);
+    g_up_frame = UP_FRAME;
+
+    /* ---- success: rc comes from ret(), and the task is really configured ---- */
+    argv[0] = up_argv0;
+    argv[1] = up_argv1;
+    g_up_wait_hook = up_hook_ret;
+    g_up_sem_wait_rc = 0;
+    arkrtos_current_task_id = 5;
+    rc = -123;
+    CK_I(arkrtos_ushell_upcall_call(0u, 1u, up_cb, 2, argv, &rc),
+         ARKRTOS_USHELL_UP_OK);
+    CK_I(rc, 77);
+    CK_I(g_up_killed, 1);                    /* ret() took the worker down */
+    CK_I(g_up_sem_posted, 1);
+    CK_I(g_up_sem_wait_to, (int32)ARKRTOS_USHELL_UP_TIMEOUT_MS);
+    CK_I(g_up_stub_space, 0u);
+    CK(g_up_stub_va == UP_BASE);
+    CK(g_up_start_sp == UP_SP);
+    CK(g_up_start_func == up_cb);
+    CK_I(g_up_start_argc, 2);
+    CK(g_up_reg_entry == UP_BASE);           /* the entry IS the stub page */
+    CK(g_up_reg_bottom == (uint32)(uintptr_t)(UP_BASE + (unsigned long)ARKRTOS_USHELL_UP_PAGE_SIZE));
+    CK_I((int)g_up_reg_bytes,
+         (int)(UP_SP + 16ul - (UP_BASE + (unsigned long)ARKRTOS_USHELL_UP_PAGE_SIZE)));
+    CK_I((int)g_up_reg_prio, (int)ARKRTOS_USHELL_UP_TASK_PRIORITY);
+    CK(g_up_bind_task == &arkrtos_task_table[0]);
+    CK_I(g_up_bind_space, 0);
+    p_t = &arkrtos_task_table[0];
+    CK_I((int)p_t->is_priv, 0);              /* the whole point: PLV3 */
+    CK(p_t->rom_start == (unsigned long)ARKRTOS_ELF_WINDOW_BASE);
+    CK_I((int)p_t->rom_size, (int)ARKRTOS_ELF_WINDOW_SIZE);
+    CK(p_t->ram_start == (unsigned long)ARKRTOS_ELF_WINDOW_BASE);
+    CK(p_t->stack_top == UP_SP);
+    CK(p_t->stack_ptr == UP_FRAME);
+    CK_I(g_up_act_space, 3u);                /* console task's space restored */
+    CK_I(g_up_sem_deleted, 4);               /* one per call that got that far */
+
+    /* ---- busy: a second call in the same space is refused, first survives ---- */
+    g_up_wait_hook = up_hook_busy;
+    rc = 0;
+    CK_I(arkrtos_ushell_upcall_call(0u, 1u, up_cb, 0, NULL, &rc),
+         ARKRTOS_USHELL_UP_OK);
+    CK_I(g_up_nested_rc, ARKRTOS_USHELL_UP_ERR_BUSY);
+    CK_I(rc, 11);
+
+    /* ---- impersonation inside a live call is refused and harmless ---- */
+    g_up_wait_hook = up_hook_spoof;
+    rc = 0;
+    CK_I(arkrtos_ushell_upcall_call(0u, 1u, up_cb, 0, NULL, &rc),
+         ARKRTOS_USHELL_UP_OK);
+    CK_I(g_up_spoof_rc, ARKRTOS_USHELL_UP_ERR_CALLER);
+    CK_I(rc, 77);
+
+    /* ---- timeout: reported as such, busy cleared for the next call ---- */
+    g_up_wait_hook = NULL;
+    g_up_sem_wait_rc = ARKRTOS_SYNC_ERR_TIMEOUT;
+    rc = 5;
+    CK_I(arkrtos_ushell_upcall_call(0u, 1u, up_cb, 0, NULL, &rc),
+         ARKRTOS_USHELL_UP_ERR_TIMEOUT);
+    CK_I(rc, 0);
+
+    /* a wait failure that is not a timeout is EXEC, not TIMEOUT */
+    g_up_sem_wait_rc = -1;
+    CK_I(arkrtos_ushell_upcall_call(0u, 1u, up_cb, 0, NULL, &rc),
+         ARKRTOS_USHELL_UP_ERR_EXEC);
+    g_up_sem_wait_rc = 0;
+
+    /* the timeouts cleared busy: a later call still starts a worker */
+    g_up_wait_hook = up_hook_ret;
+    rc = 0;
+    CK_I(arkrtos_ushell_upcall_call(0u, 1u, up_cb, 0, NULL, &rc),
+         ARKRTOS_USHELL_UP_OK);
+    CK_I(rc, 77);
+    g_up_wait_hook = NULL;
+
+    /* ---- ret() outside any call: nobody to report to ---- */
+    arkrtos_current_task_id = 0;
+    CK_I(arkrtos_ushell_upcall_ret(1), ARKRTOS_USHELL_UP_ERR_CALLER);
+    arkrtos_current_task_id = 3;
+    CK_I(arkrtos_ushell_upcall_ret(1), ARKRTOS_USHELL_UP_ERR_CALLER);
+    arkrtos_current_task_id = 5;
+}
+
+#endif /* ARKRTOS_USE_USHELL_APP_CB == 1 */
+
 /* ------------------------------------------------------------ main */
 
 int main(void)
@@ -724,6 +1177,7 @@ int main(void)
     t_trampoline_lookup();
     t_trampoline_alive();
     t_print_n();
+    t_upcall_iso();
 
     if (g_failed != 0) {
         printf("USHELL-HOST FAIL  %d/%d checks failed\n", g_failed, g_checks);

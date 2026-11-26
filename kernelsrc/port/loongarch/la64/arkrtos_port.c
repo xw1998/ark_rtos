@@ -58,6 +58,7 @@
 #include "arkrtos_hal.h"
 #include "arkrtos_task.h"
 #include "arkrtos_fault.h"
+#include "arkrtos_ushell_upcall.h"   /* SEC-G08：upcall 桩与初始帧的 port 契约 */
 #include "arkrtos_smp.h"       /* arkrtos_smp_ipi_handler()：主核 IPI 入口（R1） */
 
 /* 板级输出。port 层不包含 board/<板>/arkrtos_board.h（换板时这个头会换），
@@ -2807,6 +2808,42 @@ int32 arkrtos_port_paging_space_clone(uint32 src, uint32 dst)
     return 0;
 #endif /* ARKRTOS_USE_PAGING_COW */
 }
+
+/* ============================================================
+ * SEC-G08 隔离执行：port 侧的「写桩 / 建初始帧」契约
+ *
+ * M-08-2 只落内核半边的接口与记账，桩字节与初始帧属于 M-08-3。在那之前
+ * 这一档诚实回答「还不会写桩」：arkrtos_ushell_upcall_ready() 因此恒 0，
+ * 注册路径继续 fail-closed —— 本阶段的可见行为一个字节都没变。
+ * ============================================================ */
+#if (ARKRTOS_USE_USHELL_ISO == 1)
+
+int32 arkrtos_port_ushell_stub_supported(void)
+{
+    return 0;
+}
+
+int32 arkrtos_port_ushell_stub(uint32 space, unsigned long stub_va)
+{
+    (void)space;
+    (void)stub_va;
+    return -1;
+}
+
+unsigned long arkrtos_port_ushell_start(unsigned long stub_va,
+                                        unsigned long upcall_sp,
+                                        int (*func)(int, char **argv),
+                                        int argc, char **argv)
+{
+    (void)stub_va;
+    (void)upcall_sp;
+    (void)func;
+    (void)argc;
+    (void)argv;
+    return 0ul;
+}
+
+#endif /* ARKRTOS_USE_USHELL_ISO */
 
 /**
 * @brief 按 PA 往某个空间里写一小段字（不切窗口）

@@ -1,6 +1,6 @@
 # SEC-G08 剩余半边：App shell 回调的隔离执行（设计与实施计划）
 
-> 状态：**设计已预注册；M-08-1（窗口切分）已落地，M-08-2..5 未开工**（2026-11-26）。
+> 状态：**设计已预注册；M-08-1（窗口切分）、M-08-2（upcall 核心）已落地，M-08-3..5 未开工**（2026-11-26）。
 > 当前落地的是 fail-closed 半边（`2080a9b`、`903abee`）：特权级分离 + 分页的构建上，
 > `arkrtos_shell_ext_register()` 见到 `is_priv == 0` 的调用者直接回
 > `ARKRTOS_USHELL_ERR_PRIV`（-6），注册表一个槽都不动。
@@ -209,10 +209,20 @@ fail-closed 把这条路径关掉了，代价是功能消失。
 | 阶段 | 内容 | 判据 | 风险 |
 |---|---|---|---|
 | M-08-1 ✅ | 窗口布局 + upcall 区（`ARKRTOS_ELF_UPCALL_SIZE`，默认 8 KB）+ `s_elf_info` 三字段 + 清零 + `elf_gate` 更新（**已落地 2026-11-26**：`elf_gate` 全绿、宿主 `elf` 196 条 / `elfup0` 188 条全绿） | `tools/elf_gate.py` 全绿；`test_elf_host.c` 新增「upcall 区不与被加载段、用户栈、argv 重叠」与「`=0` 档退回旧布局」两档断言；`fork_gate` 十档仍全绿（布局改了，App 栈位置要重新对齐） | 低（纯加区，行为不变） |
-| M-08-2 | `arkrtos_ushell_upcall.c`：`ready()` / `call()` / `ret()` 三个入口 + 宿主桩化的单测 | 新用例 `ushell_iso`（§5.2 那一组）；`warn_gate` 零告警；`coverage_gate` 该模块 ≥ 基线 | 中（新模块，但全部走宿主可测路径） |
+| M-08-2 ✅ | `ready()` / `call()` / `ret()` 三个入口 + 宿主桩化的单测（**已落地 2026-11-26**：宿主 `USHELL-HOST OK 210 checks` / `REFUSED 17 checks`，`arkrtos_shell_ushell` 行覆盖率 99.58%） | `warn_gate` 零告警（238 TU）；`coverage_gate` 该模块 ≥ 基线；`ci_gate` 的 `ushell-host` 两臂绿 | 中（全部走宿主可测路径，行为未变） |
 | M-08-3 | LA64 桩字节 + 初始帧写寄存器 + `SVC 0x23` 分派（`arkrtos_task.c`） | `tools/linux_abi_gate.py` 的号表断言加一条：0x23 归 Ark；QEMU 单测（桩只把参数打回去，不调 App） | 中（port 改动，需要 QEMU 读数） |
 | M-08-4 | 跳板改调 `call()`、注册策略收窄、`ushell_func_alive_space()`、`g_ushell` 两字段 | §5 全部读数；`ci_gate` 119 项 + `fork_gate` 71 项全绿 | 高（行为切换点） |
 | M-08-5 | 文档收口：`已知限制.md` §四那一行改写、`安全认证准备.md` §5/§7、`欠账盘点.md` 那一行、SDK 文档补「回调按多线程写」 | 文档自洽 + `doc_audit` 绿 | 低 |
+
+**M-08-2 的实现位置（取舍，与原计划不同）**：原计划新增独立 TU `arkrtos_ushell_upcall.c`，实际
+落在 `kernelsrc/shell/arkrtos_shell_ushell.c` 的同一 TU（`#if ARKRTOS_USE_USHELL_ISO` 段），接口契约
+单独放 `kernelsrc/include/arkrtos_ushell_upcall.h`。理由：除 QEMU LA64（`$(wildcard kernelsrc/src/*.c)`）
+外，F427 GCC `sources.mk`、F427/F401 `.uvprojx`、H743 `sources.mk` 都是**显式文件清单**，新增独立
+TU 必须同时改 4 处工程文件才编得进去；而 `arkrtos_shell_ushell.c` 已被全部工程包含。代价是单文件
+变长；收益是「一处编译开关、五平台同源」，且宿主用例本来就在覆盖该 TU。port 契约拆成
+`stub_supported` / `stub` / `start` 三个钩子：`ready()` 需要一个无副作用的「本档会不会写桩」查询，
+先让 LA64 返回 `0 / -1 / 0` 占位，**本阶段可见行为一个字节都没变**（`ready()` 恒 0 ⇒ 注册继续 fail-closed），
+M-08-3 只替换函数体。
 
 **回退方式**：M-08-1 加的是常量（置 0 即退回旧布局）；M-08-4 的放行门是
 `arkrtos_ushell_upcall_ready()`，把它改成恒 0 就回到今天这个 fail-closed 行为，
