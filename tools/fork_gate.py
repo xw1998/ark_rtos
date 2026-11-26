@@ -262,14 +262,14 @@ EXPECT_SOCKET_CHECKS = 198
 # 提前拆）与被 reap 的退出码 5、线程发起 exit_group 整组被 reap 且码 6、
 # 组长发起 exit_group 整组被 reap 且码 7。合计 161 + 25 = 186 条。
 # 再加 futex 第四档的 37 条：186 + 37 = 223 条。
-EXPECT_THREAD_CHECKS = 223
+EXPECT_THREAD_CHECKS = 231
 # QUOTA 段多 11 条（上限 3 = 父 + 1 子 + 1 线程）：建管子、上限内 fork 成功、
 # 线程把最后一格占掉、超限 fork==-EAGAIN、超限线程==-EAGAIN、被阻塞的子进程
 # 真被 reap、回收后第二个线程成功、**空间空闲时 fork 仍被拒**（全段最干净的
 # 一条：不可能是 ERR_BUSY）、第三个线程被拒、两个线程按 CHILD_CLEARTID 归队、
 # 额度回来后立刻能再起且退出码照传。合计 186 + 12 = 198 条。
 # 再加 futex 第四档的 37 条：198 + 37 = 235 条。
-EXPECT_QUOTA_CHECKS = 235
+EXPECT_QUOTA_CHECKS = 243
 # 上面这一档的每一段都对应一类「看起来对」的实现：另开地址空间（共享全局读
 # 不到）、每线程一份 fd 表（fork 段留不住）、线程退出就把进程拆了（进程活不
 # 下来）、把线程当进程挂到 wait4 上（exit_group 码不对）。

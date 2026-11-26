@@ -2548,7 +2548,7 @@ static int32 lx_setsockopt(void *p_ctx)
     {
         return -LX_EINVAL;
     }
-    if(arkrtos_copy_from_user(&val, (const void *)r[3], 4u) != 0)
+    if(arkrtos_copy_from_user(&val, (const void *)(arkrtos_uptr_t)r[3], 4u) != 0)
     {
         return -LX_EFAULT;
     }
@@ -2597,7 +2597,7 @@ static int32 lx_getsockopt(void *p_ctx)
     }
     if(r[4] != 0u)
     {
-        if(arkrtos_copy_from_user(&len, (const void *)r[4], 4u) != 0)
+        if(arkrtos_copy_from_user(&len, (const void *)(arkrtos_uptr_t)r[4], 4u) != 0)
         {
             return -LX_EFAULT;
         }
@@ -2621,12 +2621,12 @@ static int32 lx_getsockopt(void *p_ctx)
         {
             val = 0u;
         }
-        if(arkrtos_copy_to_user((void *)r[3], &val, 4u) != 0)
+        if(arkrtos_copy_to_user((void *)(arkrtos_uptr_t)r[3], &val, 4u) != 0)
         {
             return -LX_EFAULT;
         }
         if((r[4] != 0u) &&
-           (arkrtos_copy_to_user((void *)r[4], &four, 4u) != 0))
+           (arkrtos_copy_to_user((void *)(arkrtos_uptr_t)r[4], &four, 4u) != 0))
         {
             return -LX_EFAULT;
         }
@@ -2645,7 +2645,7 @@ static int32 lx_getsockopt(void *p_ctx)
     {
         return rc;
     }
-    if((r[4] != 0u) && (arkrtos_copy_to_user((void *)r[4], &four, 4u) != 0))
+    if((r[4] != 0u) && (arkrtos_copy_to_user((void *)(arkrtos_uptr_t)r[4], &four, 4u) != 0))
     {
         return -LX_EFAULT;
     }

@@ -831,7 +831,11 @@ static void la_tlb_write(unsigned long vaddr, uint32 ps, uint32 index,
 #endif
 }
 
-#if ((ARKRTOS_USE_PAGING == 1) && (ARKRTOS_USE_PAGING_PAGES == 1))
+/* 唯一的调用方 la_pg_win_entry_ok() 在 PAGING_DEMAND=1 档被整段裁掉
+ * （按需分页不需要窗口自证），这里跟着它一起裁，否则告警门禁会报
+ * 「定义但未使用」。 */
+#if ((ARKRTOS_USE_PAGING == 1) && (ARKRTOS_USE_PAGING_PAGES == 1) && \
+     (ARKRTOS_USE_PAGING_DEMAND != 1))
 /**
 * @brief 按**绝对条目号**读回一条 TLB 条目（自证用）
 * @param index 绝对条目号，编码与 la_tlb_write() 相同（STLB: way*256+组、
@@ -3031,7 +3035,7 @@ int32 arkrtos_port_paging_thread_frame(void *p_exc_ctx, uint32 space,
             la_pg_pair_own(pa);
             for(w = 0u; w < (0x2000u / 4u); w++)
             {
-                ((uint32 *)pa)[w] = 0u;
+                ((uint32 *)(arkrtos_uptr_t)pa)[w] = 0u;
             }
             if(ntaken < 2u)
             {
@@ -3290,7 +3294,7 @@ static int32 la_pg_demand_fault(unsigned long badv)
 
         if(slot != 0u)
         {
-            la_pg_copy_pair((uint32 *)pa, s_pg_bounce);
+            la_pg_copy_pair((uint32 *)(arkrtos_uptr_t)pa, s_pg_bounce);
             s_pg_swap_in++;
         }
         else
@@ -3302,7 +3306,7 @@ static int32 la_pg_demand_fault(unsigned long badv)
 
             for(w = 0u; w < LA_PG_PAIR_WORDS; w++)
             {
-                ((uint32 *)pa)[w] = 0u;
+                ((uint32 *)(arkrtos_uptr_t)pa)[w] = 0u;
             }
         }
 #else

@@ -2656,7 +2656,11 @@ int32 arkrtos_elf_thread(void *p_svc_ctx, unsigned long child_stack,
          * 自己 mmap，内核只管从哪开始」。所以大小记 0、栈底保护字不布防 ——
          * 假装知道边界比不知道更危险。 */
         p_child->stack_top    = child_stack;
-        p_child->stack_bottom = (uint32 *)child_stack;
+        /* 栈底记 0 = 未知。早先这里写的是 child_stack（也就是栈顶），
+         * 于是调度器「psp < stack_bottom 即溢出」一条判据对线程恒为真，
+         * 只要线程在 RUNNING 状态下被节拍抢占就被静默摘除（实测 2.5%）。
+         * 未知就记未知：0 让 guard/溢出两条判据都跳过。 */
+        p_child->stack_bottom = (uint32 *)0;
         p_child->stack_size   = 0u;
 #if (ARKRTOS_USE_STACK_USAGE == 1)
         p_child->stack_peak_low = child_stack;

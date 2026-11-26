@@ -466,6 +466,102 @@ static void thread_body2(void)
     {
     }
 }
+
+/* ------------------------------------------------------------------
+ * RUNNING 状态下的节拍抢占不得碰线程（回归夹具）
+ *
+ * 旧缺陷：内核给 clone(2) 线程的 TCB 记了 stack_bottom = 栈顶、
+ * stack_size = 0（栈界未知），而调度的「psp < stack_bottom 即栈溢出」
+ * 一条判据不看 stack_size。于是线程只要在 RUNNING 状态下被节拍切走一次，
+ * 就被当成栈溢出**静默摘除**。
+ *
+ * 单靠一个忙等线程不足以**稳定**复现：节拍到期只有在同优先级就绪队列里
+ * 还有别的任务时才会真的换人（否则 arkrtos_sched_next 选回自己，压根不进
+ * arkrtos_sched_activate），于是命中率取决于忙等窗口是否恰好压到别的周期
+ * 任务唤醒点 —— 实测只有 12%~37%。
+ * 这里放**两个同优先级线程一起忙等**：时间片（10 拍 = 5 ms）一到必然互切，
+ * 每次切换都是从 RUNNING 状态走 sched_activate，命中率 100%。
+ * 被误杀时那个线程的 CHILD_CLEARTID 永远不会被清零，join 循环超时，判据红。
+ * ------------------------------------------------------------------ */
+static volatile lx_long g_pre_ran;
+static volatile lx_long g_pre2_ran;
+static volatile lx_long g_pre_ctid;
+static volatile lx_long g_pre2_ctid;
+static unsigned char s_pre_stk[16384] __attribute__((aligned(16)));
+static unsigned char s_pre2_stk[16384] __attribute__((aligned(16)));
+
+static lx_long preempt_spin(void)
+{
+    /* 纯用户态循环，一次系统调用都不发：线程在整个循环里都是 RUNNING。
+     * volatile 累加是为了让 -O2 不能把求和折叠成一个常数（折叠了就没有
+     * RUNNING 窗口）。4e6 轮在本板约几十毫秒，跨几十个时间片。 */
+    volatile unsigned long spin = 0ul;
+    lx_long i;
+
+    for (i = 0; i < 4000000; i++)
+    {
+        spin = spin + (unsigned long)i;
+    }
+    return (lx_long)spin;
+}
+
+static void preempt_body(void)
+{
+    g_pre_ran = preempt_spin();
+    (void)lx1(LX_EXIT, 0);
+    for (;;)
+    {
+    }
+}
+
+static void preempt_body2(void)
+{
+    g_pre2_ran = preempt_spin();
+    (void)lx1(LX_EXIT, 0);
+    for (;;)
+    {
+    }
+}
+
+/* 按 pthread_join 的真实路径等 CLEARTID 被清成 0（绝对时刻上限 2 s）。 */
+static void pre_join(volatile lx_long *p_ctid)
+{
+    long    ts[2];
+    lx_long dur[2];
+    int     spun;
+
+    dur[0] = 0;
+    dur[1] = 0;
+    if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+            (lx_long)(unsigned long)ts, 0) == 0)
+    {
+        /* 500 ms 足够（线程几十毫秒就跑完）；不给 2 s 是为了让「线程被误杀」
+         * 这条失败分支也在夹具的 3000 ms 总预算里跑得完，能打出 FAIL 行，
+         * 而不是把整段测试拖到超时、看起来像「少了几条 check」。 */
+        dur[0] = ts[0];
+        dur[1] = ts[1] + 500000000;
+        if (dur[1] >= 1000000000)
+        {
+            dur[0] += 1;
+            dur[1] -= 1000000000;
+        }
+    }
+    for (spun = 0; spun < 64; spun++)
+    {
+        lx_long wrc;
+
+        if (*p_ctid == 0)
+        {
+            break;
+        }
+        wrc = lx4(LX_FUTEX, (lx_long)(unsigned long)p_ctid, LX_FUTEX_WAIT,
+                  *p_ctid, (lx_long)(unsigned long)dur);
+        if ((wrc == 0) || (wrc != -LX_EAGAIN))
+        {
+            break;
+        }
+    }
+}
 #if defined(ARKRTOS_USE_APP_QUOTA) && (ARKRTOS_USE_APP_QUOTA == 1)
 /* 配额段专用的线程脚手架。
  *
@@ -2909,6 +3005,53 @@ void linux_main(unsigned long sp)
                 check("fork-after-threads exit code 5", (st >> 8) & 0xFF, 5);
             }
         }
+    }
+
+    /* 抢占即死回归：线程在 RUNNING 状态下被节拍抢占若干次后必须还活着。
+     * 两个同优先级线程同时忙等，时间片一到必然互切（见 preempt_body 上方
+     * 注释），bug 版每次跑都会把被切走的那个静默摘除。 */
+    {
+        unsigned int ptid = 0xFFFFFFFFu;
+        unsigned int qtid = 0xFFFFFFFFu;
+        lx_long  thr;
+        lx_long  peer;
+        lx_long  flags = (lx_long)(LX_CLONE_VM | LX_CLONE_FS | LX_CLONE_FILES |
+                                   LX_CLONE_SIGHAND | LX_CLONE_THREAD |
+                                   LX_CLONE_PARENT_SETTID |
+                                   LX_CLONE_CHILD_CLEARTID);
+
+        g_pre_ran   = 0;
+        g_pre_ctid  = 0x5eed1234;    /* 非零：清零才能证明线程正常退出 */
+        g_pre2_ran  = 0;
+        g_pre2_ctid = 0x5eed5678;
+        thr = lx_clone_thread_call(
+                  flags,
+                  (lx_long)(unsigned long)(s_pre_stk + sizeof(s_pre_stk)),
+                  (lx_long)(unsigned long)&ptid,
+                  (lx_long)(unsigned long)&g_pre_ctid, 0, preempt_body);
+        check("preempting thread spawns > 0", (thr > 0) ? 1 : 0, 1);
+        check("preempting thread PARENT_SETTID wrote the tid",
+              (lx_long)ptid, thr);
+        peer = lx_clone_thread_call(
+                  flags,
+                  (lx_long)(unsigned long)(s_pre2_stk + sizeof(s_pre2_stk)),
+                  (lx_long)(unsigned long)&qtid,
+                  (lx_long)(unsigned long)&g_pre2_ctid, 0, preempt_body2);
+        check("preempting peer thread spawns > 0", (peer > 0) ? 1 : 0, 1);
+        check("preempting peer PARENT_SETTID wrote the tid",
+              (lx_long)qtid, peer);
+        if (thr > 0)
+        {
+            pre_join(&g_pre_ctid);
+        }
+        if (peer > 0)
+        {
+            pre_join(&g_pre2_ctid);
+        }
+        check("preempted thread left its CLEARTID at 0", g_pre_ctid, 0);
+        check("preempted thread did the work", (g_pre_ran != 0) ? 1 : 0, 1);
+        check("preempted peer left its CLEARTID at 0", g_pre2_ctid, 0);
+        check("preempted peer did the work", (g_pre2_ran != 0) ? 1 : 0, 1);
     }
 
     /* exit_group(94) 从线程发起：整组一起走，wait4 拿到的码是线程给的那个。 */

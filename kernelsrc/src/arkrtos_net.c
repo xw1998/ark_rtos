@@ -338,7 +338,7 @@ static int32 arkrtos_net_do_send(int32 owner, uint32 handle, arkrtos_svc_arg_t b
     {
         return ARKRTOS_NET_EINVAL;
     }
-    r = (int32)lwip_send(s->fd, (const void *)buf, (size_t)len, (int)flags);
+    r = (int32)lwip_send(s->fd, (const void *)(arkrtos_uptr_t)buf, (size_t)len, (int)flags);
     if(r < 0)
     {
         return arkrtos_net_from_errno(errno);
@@ -356,7 +356,7 @@ static int32 arkrtos_net_do_recv(int32 owner, uint32 handle, arkrtos_svc_arg_t b
     {
         return ARKRTOS_NET_EINVAL;
     }
-    r = (int32)lwip_recv(s->fd, (void *)buf, (size_t)len, (int)flags);
+    r = (int32)lwip_recv(s->fd, (void *)(arkrtos_uptr_t)buf, (size_t)len, (int)flags);
     if(r < 0)
     {
         return arkrtos_net_from_errno(errno);
@@ -376,7 +376,7 @@ static int32 arkrtos_net_do_sendto(int32 owner, uint32 handle, arkrtos_svc_arg_t
         return ARKRTOS_NET_EINVAL;
     }
     arkrtos_net_addr_in(&sa, ip, port);
-    r = (int32)lwip_sendto(s->fd, (const void *)buf, (size_t)len, 0,
+    r = (int32)lwip_sendto(s->fd, (const void *)(arkrtos_uptr_t)buf, (size_t)len, 0,
                            (const struct sockaddr *)&sa,
                            (socklen_t)sizeof(sa));
     if(r < 0)
@@ -400,13 +400,13 @@ static int32 arkrtos_net_do_recvfrom(int32 owner, uint32 handle,
     {
         return ARKRTOS_NET_EINVAL;
     }
-    r = (int32)lwip_recvfrom(s->fd, (void *)buf, (size_t)len, 0,
+    r = (int32)lwip_recvfrom(s->fd, (void *)(arkrtos_uptr_t)buf, (size_t)len, 0,
                              (struct sockaddr *)&from, &from_len);
     if(r < 0)
     {
         return arkrtos_net_from_errno(errno);
     }
-    arkrtos_net_addr_out(&from, (uint32 *)ip_out, (uint32 *)port_out);
+    arkrtos_net_addr_out(&from, (uint32 *)(arkrtos_uptr_t)ip_out, (uint32 *)(arkrtos_uptr_t)port_out);
     return r;
 }
 
@@ -492,7 +492,7 @@ static int32 arkrtos_net_do_getsockopt(int32 owner, uint32 handle,
     }
     if(value_out != 0u)
     {
-        *(uint32 *)value_out = (uint32)((v == 0) ? 0 : arkrtos_net_from_errno(v));
+        *(uint32 *)(arkrtos_uptr_t)value_out = (uint32)((v == 0) ? 0 : arkrtos_net_from_errno(v));
     }
     return 0;
 }
@@ -516,7 +516,7 @@ static int32 arkrtos_net_do_name(int32 owner, uint32 handle,
     {
         return arkrtos_net_from_errno(errno);
     }
-    arkrtos_net_addr_out(&sa, (uint32 *)ip_out, (uint32 *)port_out);
+    arkrtos_net_addr_out(&sa, (uint32 *)(arkrtos_uptr_t)ip_out, (uint32 *)(arkrtos_uptr_t)port_out);
     return 0;
 }
 
@@ -795,7 +795,7 @@ static int32 net_validate_send(const arkrtos_svc_arg_t *p)
         return ARKRTOS_NET_EINVAL;
     }
     if((p[3] != 0u) &&
-       (arkrtos_kernel_user_ro_ok((const void *)p[2], p[3]) == 0u))
+       (arkrtos_kernel_user_ro_ok((const void *)(arkrtos_uptr_t)p[2], p[3]) == 0u))
     {
         return ARKRTOS_NET_EINVAL;
     }
@@ -811,7 +811,7 @@ static int32 net_validate_recv(const arkrtos_svc_arg_t *p)
     {
         return ARKRTOS_NET_EINVAL;
     }
-    if(arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u)
+    if(arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[2], (int32)p[3]) == 0u)
     {
         return ARKRTOS_NET_EINVAL;
     }
@@ -827,9 +827,9 @@ static int32 net_validate_recvfrom(const arkrtos_svc_arg_t *p)
         return ARKRTOS_NET_EINVAL;
     }
     if(((p[4] != 0u) &&
-        (arkrtos_kernel_dev_buf_ok((const void *)p[4], 4) == 0u)) ||
+        (arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[4], 4) == 0u)) ||
        ((p[5] != 0u) &&
-        (arkrtos_kernel_dev_buf_ok((const void *)p[5], 4) == 0u)))
+        (arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[5], 4) == 0u)))
     {
         return ARKRTOS_NET_EINVAL;
     }
@@ -844,7 +844,7 @@ static int32 net_validate_getsockopt(const arkrtos_svc_arg_t *p)
         return ARKRTOS_NET_EINVAL;
     }
     if((p[3] != 0u) &&
-       (arkrtos_kernel_dev_buf_ok((const void *)p[3], 4) == 0u))
+       (arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[3], 4) == 0u))
     {
         return ARKRTOS_NET_EINVAL;
     }
@@ -859,9 +859,9 @@ static int32 net_validate_name(const arkrtos_svc_arg_t *p)
         return ARKRTOS_NET_EINVAL;
     }
     if(((p[2] != 0u) &&
-        (arkrtos_kernel_dev_buf_ok((const void *)p[2], 4) == 0u)) ||
+        (arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[2], 4) == 0u)) ||
        ((p[3] != 0u) &&
-        (arkrtos_kernel_dev_buf_ok((const void *)p[3], 4) == 0u)))
+        (arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[3], 4) == 0u)))
     {
         return ARKRTOS_NET_EINVAL;
     }

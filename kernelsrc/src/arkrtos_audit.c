@@ -460,8 +460,19 @@ static void audit_tasks(arkrtos_audit_result_t *p)
         {
             audit_fail(p, ARKRTOS_AUDIT_TASKS, (uint32)i);
         }
-        /* Every task sits on a stack the kernel handed out. */
-        if((q->stack_bottom == 0) || (q->stack_size == 0u))
+        /* Kernel tasks always sit on a stack the kernel handed out. A clone(2)
+         * thread does not: the caller owns the stack and hands over only the
+         * top, so stack_bottom/stack_size are 0 = "bounds unknown" (see
+         * arkrtos_elf_thread). Such a task must be unprivileged; anything else
+         * with a half-known stack is a real defect. */
+        if(q->stack_bottom == 0)
+        {
+            if((q->is_priv != 0u) || (q->stack_size != 0u) || (q->stack_top == 0ul))
+            {
+                audit_fail(p, ARKRTOS_AUDIT_TASKS, (uint32)i);
+            }
+        }
+        else if(q->stack_size == 0u)
         {
             audit_fail(p, ARKRTOS_AUDIT_TASKS, (uint32)i);
         }

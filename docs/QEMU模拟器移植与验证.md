@@ -3398,6 +3398,79 @@ shell 拆文件后 ASID 块判定、三条空转自检）。`ci_gate.py` 新增�
 `gate-live`（AST 扫 `tools/*.py`，报「`return`/`raise`/`break`/`continue`
 之后同块仍有语句」），当前全仓 0 处死代码。
 
+
+### 5.34 clone(2) 线程被节拍抢占即被静默判「栈溢出」（2026-11-26）
+
+**签名**：十档全开（`LINUX_FORK` / `PAGING_DEMAND` / `_COW` / `_SHM` / `LINUX_FUTEX` /
+`PAGING_FILEMAP` / `_MPROTECT` / `LINUX_SELECT` / `LINUX_SOCKET` / `LWIP` /
+`LINUX_THREAD` / `APP_QUOTA`，`ARKRTOS_APP_MAX_TASKS=3`）跑 `elf/linux_fork.c` 夹具，
+约 1/8 的次次不一样：配额段「活任务数」比预期少一个——`[QTA] thr pid=14 ow=6 n=2`
+（本应 3），于是「线程超配额必须 `-EAGAIN`」判成通过、「第二个线程必须在配额内」
+判成失败，7~9 条 `FAIL` 连锁。失败的那一次控制台上除此以外**没有任何异常输出**。
+
+**根因**（`arkrtos_elf.c` / `arkrtos_task.c` 两处合起来才成立）：
+
+1. `arkrtos_elf_thread()` 给线程 TCB 写 `stack_bottom = child_stack`（**栈顶**）、
+   `stack_size = 0`。clone(2) 的契约就是「我只给栈顶，底下自己 mmap」，
+   内核本来就不知道栈界 —— 但代码把「不知道」写成了「栈底等于栈顶」。
+2. `arkrtos_sched_activate()` 的栈溢出判据只有一条 `old_psp < stack_bottom`，
+   **不看 `stack_size`**。线程在 RUNNING 状态下被切走时，保存的 psp 是 trap 帧
+   指针（`user_sp - 528`，`LA_FR_SIZE`，见 `arkrtos_port_paging_thread_frame()`），
+   必然小于「栈顶」⇒ 每次抢占都判溢出。
+3. 判溢出的去向是 `arkrtos_ready_del()` + 置 `ARKRTOS_TASK_INVALID`，并且只
+   `arkrtos_fault_record()`（写环形缓冲、**不打印**），也**不**走
+   `arkrtos_linux_abi_on_task_exit()` ⇒ CHILD_CLEARTID 不清、futex 登记不释放、
+   配额计数直接少一个。这正是「无声死亡」的教科书形状。
+
+**实证**：给判据加一行临时打印后抓到
+`[STKOVF] task 6 gen 36 psp 33689168 bottom 33689712 size 0 owner 6`，
+`bottom - psp = 528` 与 `LA_FR_SIZE` 逐位对上；置 `stack_bottom` 为 0 后同一份
+日志再没出现过。
+
+**为什么只有 12%~37% 命中**：节拍（2000 Hz）到期只有在**同优先级就绪队列里还有
+别人**时才会真的换人，否则 `arkrtos_sched_next()` 选回自己、压根不进
+`arkrtos_sched_activate()`。单个忙等线程的 RUNNING 窗口只有几毫秒，是否压到别的
+周期任务唤醒点纯看运气。
+
+**修法**（三处，不改语义边界）：
+
+- `arkrtos_elf.c`：线程 `stack_bottom = (uint32 *)0`，显式表示「未知」；
+  `stack_size` 本来就是 0，`stack_guard_armed` 本来就是 0。
+- `arkrtos_task.c`：溢出判据加两道前置 `stack_size != 0 && stack_bottom != 0`。
+  与 `arkrtos_audit.c` 早就有的口径一致（那里把 `stack_size == 0` 读作「未知」）；
+  假装知道边界比不知道更危险。
+- `arkrtos_audit.c`：`audit_tasks()` 放行「非特权 + 栈界未知」的任务，其余半已知
+  （有 bottom 没 size）仍然 `audit_fail`。
+
+**把静默改成有声**：命中时打一行 `[STKOVF] task <id> [gen <g>] psp <sp>
+bottom <b> size <n> [owner <o>]`。用裸 `arkrtos_board_puts` 而不是 `ARKRTOS_LOGx`，
+因为这里在上下文切换路径上，日志锁可能触发调度；单核下不会与别的输出交错，
+且只在这一条故障路上出现（常态零开销）。`gen` / `owner` 按各自开关裁剪。
+
+**永久判据**（`elf/linux_fork.c` 的 THREAD 段）：两个**同优先级**线程一起在用户态
+忙等（`preempt_spin()`：4e6 轮 volatile 累加，一次系统调用都不发），时间片
+（`ARKRTOS_TIME_SLICE_TICKS` = 10 拍）一到 `arkrtos_ready_rotate()` 必然互切 ⇒
+每次切换都从 RUNNING 状态进 `arkrtos_sched_activate()`，命中率 100%。
+两个线程各有独立的 `CHILD_CLEARTID`，父进程按 `pthread_join` 的真实路径
+（`FUTEX_WAIT` 等清零，绝对时刻 500 ms）收尸；被误杀时 CLEARTID 永远不清零，
+`preempted thread/peer left its CLEARTID at 0` 与 `did the work` 四条判据直接红。
+
+**宿主层判据**（`kernelsrc/tests/test_task_host.c` T7）：`arkrtos_task.c` 在切换路径上
+调的就是板级的 `arkrtos_board_puts/putu`，宿主用例把这两条收进缓冲，于是可以断言三件事：
+① 真溢出时 `[STKOVF] task 1` 与 `bottom`/`size` 读数**确实打出来了**（死亡不是无声的）；
+② `stack_bottom == 0 && stack_size == 0`（clone(2) 线程的形状）时状态降为 READY、不记故障、
+一个字都不打；③ 半已知（有栈底但 `stack_size == 0`）同样不判。把这三条钉进单元用例，
+以后再有人把「未知」写回「等于栈顶」，第二天就红（不必等到 QEMU 里那 1/8 的运气）。
+
+**两向读数**：
+
+- bug 版（`stack_bottom = child_stack`）6/6 次全红，每次都有 `[STKOVF]`：
+  `FAIL [fork] preempted thread left its CLEARTID at 0 -> 1592594996` 等 3~9 条。
+- 修复版 8/8 次全绿：`[fork] ... ok` 恰好 **243** 条（= `EXPECT_QUOTA_CHECKS`）、
+  `[fork] PASS`、`grep -c STKOVF` = 0。
+- `tools/fork_gate.py` 十档 71/71 全绿（thread 档 231 条、appq 档 243 条），
+  期望条数随夹具 +4 条同步上调。
+
 ### 5.25 RV32 上的 ELF32 装载（U-4，2026-11-17）
 
 RV32 是没有 MMU 的那一档，所以这里不是「换一套页表」，而是**PMP 窗口 + U 模式**：

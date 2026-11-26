@@ -3196,7 +3196,6 @@ unsigned long arkrtos_sched_activate(int32 new_task, unsigned long old_psp)
         /* old_psp == 0：故障恢复路径，调用方不保存故障任务现场
          * （该任务即将重建栈帧或被禁用），跳过 stack_ptr 回写与栈检查。 */
         arkrtos_task_table[tid].stack_ptr = old_psp;
-
         #if (ARKRTOS_USE_STACK_USAGE == 1)
         /* 记录历史最低栈指针（栈向低地址增长），用于峰值栈用量统计 */
         if(old_psp < arkrtos_task_table[tid].stack_peak_low)
@@ -3222,11 +3221,46 @@ unsigned long arkrtos_sched_activate(int32 new_task, unsigned long old_psp)
             #endif
             #if (ARKRTOS_USE_STACK_CHECK == 1)
             /* 栈溢出检测：保存的 PSP 若已低于栈底地址，说明栈越界了。
-             * 仅在 RUNNING 状态下检测，避免对 WAIT 任务误判（详见移植手册已知问题）。 */
-            if(old_psp < (unsigned long)arkrtos_task_table[tid].stack_bottom)
+             * 仅在 RUNNING 状态下检测，避免对 WAIT 任务误判（详见移植手册已知问题）。
+             *
+             * 两道前置判据，缺一不可（间歇签名的完整取证见 docs/QEMU模拟器移植与验证.md §5.34）：
+             *   - stack_size == 0：栈界**未知**。clone(2) 只把栈顶交给内核
+             *     （见 arkrtos_elf_thread 的注释），既没有栈底也没有长度。
+             *     此时拿栈顶当栈底比，任何一次「RUNNING 期间被节拍抢占」都会
+             *     被判成溢出并把线程静默摘除 —— 实测 fps 2000Hz 下 2.5% 命中，
+             *     表现是配额段「活任务数」莫名少一个。
+             *   - stack_bottom == 0：没有可比的栈底（同上，用 0 显式表示未知）。
+             * 未知边界不判溢出：假装知道边界比不知道更危险。 */
+            if((arkrtos_task_table[tid].stack_size != 0u) &&
+               (arkrtos_task_table[tid].stack_bottom != 0) &&
+               (old_psp < (unsigned long)arkrtos_task_table[tid].stack_bottom))
             {
                 /* 记录到故障表：栈溢出属于「无声死亡」，不记的话，
                  * 任务表里只会多出一行 INVALID，控制台上没有任何线索。 */
+                {
+                    /* 这里在上下文切换路径上，不能走 ARKRTOS_LOGx（那套要
+                     * 拿日志锁、可能触发调度）；用裸打印，单核下不会与别的
+                     * 输出交错。只在这一条故障路上出现，常态零开销。 */
+                    extern void arkrtos_board_puts(const char *);
+                    extern void arkrtos_board_putu(unsigned int);
+                    arkrtos_board_puts("[STKOVF] task ");
+                    arkrtos_board_putu((unsigned int)(tid + 1));
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+                    arkrtos_board_puts(" gen ");
+                    arkrtos_board_putu((unsigned int)arkrtos_task_table[tid].generation);
+#endif
+                    arkrtos_board_puts(" psp ");
+                    arkrtos_board_putu((unsigned int)old_psp);
+                    arkrtos_board_puts(" bottom ");
+                    arkrtos_board_putu((unsigned int)(unsigned long)arkrtos_task_table[tid].stack_bottom);
+                    arkrtos_board_puts(" size ");
+                    arkrtos_board_putu((unsigned int)arkrtos_task_table[tid].stack_size);
+#if (ARKRTOS_USE_APP_QUOTA == 1)
+                    arkrtos_board_puts(" owner ");
+                    arkrtos_board_putu((unsigned int)arkrtos_task_table[tid].app_owner);
+#endif
+                    arkrtos_board_puts("\n");
+                }
                 arkrtos_fault_record(ARKRTOS_FAULT_STACKOVF, (int32)tid + 1);
                 arkrtos_ready_del(tid);           /* 栈溢出：从就绪集中摘除 */
                 arkrtos_delay_disarm(tid);

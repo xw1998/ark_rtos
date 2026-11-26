@@ -1147,7 +1147,12 @@ def main():
                 bad.append("V: 换入顺序错了：先放槽后抄内容")
             if i_t < 0 or (i_f >= 0 and i_f > i_t):
                 bad.append("V: 换入顺序错了：要在放槽之后才要帧")
-            if "((uint32 *)pa)[w] = 0u;" not in df:
+            # pa 是 uint32 的物理帧号，而 LA64 的指针是 64 位：直接转指针会让
+            # -Wint-to-pointer-cast 报「cast to pointer from integer of
+            # different size」，所以生产代码先经 arkrtos_uptr_t 显式扩宽。
+            # 两种写法都算「显式清零」，盯的是语义不是拼写。
+            if ("((uint32 *)pa)[w] = 0u;" not in df) and \
+               ("((uint32 *)(arkrtos_uptr_t)pa)[w] = 0u;" not in df):
                 bad.append("V: 新摸到的对不清零（帧可能是别人换出来的旧内容）")
             if "la_pg_copy_pair(s_pg_swap_area[back], s_pg_bounce);" not in df:
                 bad.append("V: 换回失败时把内容丢了（失败不许吃数据）")

@@ -82,6 +82,73 @@ extern uint16 arkrtos_cpu_load_counter;
 #endif
 
 /* ------------------------------------------------------------------
+ * 板级裸输出桩（docs/QEMU模拟器移植与验证.md §5.34）
+ *
+ * 内核在上下文切换路径上不能拿日志锁（拿了可能当场再触发一次调度），
+ * 所以栈溢出这条「无声死亡」走的是一行裸的 arkrtos_board_puts/putu。
+ * 宿主这里把这两条收进缓冲：既让链接成立，也让用例能断言「死亡是有声的」，
+ * 而不是只看到任务表里多了一行 INVALID。
+ * ------------------------------------------------------------------ */
+/* 先声明再定义：warn_gate 的 -Wmissing-prototypes 也管用例文件 */
+void arkrtos_board_puts(const char *s);
+void arkrtos_board_putu(unsigned int v);
+
+static char   g_board_out[256];
+static uint32 g_board_out_len;
+
+void arkrtos_board_puts(const char *s)
+{
+    if(s == 0)
+    {
+        return;
+    }
+    while((*s != '\0') && (g_board_out_len < (uint32)(sizeof(g_board_out) - 1u)))
+    {
+        g_board_out[g_board_out_len] = *s;
+        g_board_out_len++;
+        s++;
+    }
+    g_board_out[g_board_out_len] = '\0';
+}
+
+void arkrtos_board_putu(unsigned int v)
+{
+    char tmp[12];
+    int  n = 0;
+
+    if(v == 0u)
+    {
+        tmp[n] = '0';
+        n++;
+    }
+    while((v != 0u) && (n < (int)sizeof(tmp)))
+    {
+        tmp[n] = (char)('0' + (v % 10u));
+        n++;
+        v /= 10u;
+    }
+    while(n > 0)
+    {
+        char one[2];
+        n--;
+        one[0] = tmp[n];
+        one[1] = '\0';
+        arkrtos_board_puts(one);
+    }
+}
+
+static void board_out_reset(void)
+{
+    g_board_out_len = 0u;
+    g_board_out[0] = '\0';
+}
+
+static int board_out_has(const char *s)
+{
+    return (strstr(g_board_out, s) != 0) ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------
  * 断言
  * ------------------------------------------------------------------ */
 static int g_checks = 0;
@@ -868,6 +935,7 @@ static void reset_all(void)
     g_frame_ok = 1;
 
     console_reset();
+    board_out_reset();
     g_trace_isr_enter = 0;
     g_trace_isr_exit = 0;
     g_trace_switch_n = 0;
@@ -1589,6 +1657,38 @@ static void test_sched_activate(void)
            "a PSP below the stack bottom kills the task");
     ck(fault_has(ARKRTOS_FAULT_STACKOVF, 1), "the stack overflow is recorded");
     ck_u32(arkrtos_ready_contains(0), 0u, "the overflowed task leaves the ready set");
+    ck(board_out_has("[STKOVF] task 1"),
+       "the overflow is announced on the board channel (not a silent INVALID)");
+    ck(board_out_has(" bottom ") && board_out_has(" size "),
+       "the announcement carries the boundary readings a reader needs");
+
+    /* 栈界未知：clone(2) 线程只把栈顶交给内核（arkrtos_elf_thread），
+     * 既没有栈底也没有长度。此时「psp < 栈底」恒真，任何一次 RUNNING
+     * 期间被节拍抢占都会被静默判成溢出（§5.34 的根因）。未知边界不判。 */
+    reset_all();
+    (void)make_task(3u, 0u);
+    (void)make_task(5u, 0u);
+    use_task(1);
+    arkrtos_task_table[0].status = ARKRTOS_TASK_RUNNING;
+    arkrtos_task_table[0].stack_bottom = (uint32 *)0;
+    arkrtos_task_table[0].stack_size = 0u;
+    (void)arkrtos_sched_activate(2, 0x1000u);
+    ck_i32((int)arkrtos_task_table[0].status, ARKRTOS_TASK_READY,
+           "an unknown stack boundary is not read as an overflow");
+    ck(fault_has(ARKRTOS_FAULT_STACKOVF, 1) == 0,
+       "no overflow is recorded when the boundary is unknown");
+    ck(board_out_has("[STKOVF]") == 0, "and nothing is printed either");
+
+    /* 半已知（有栈底但长度为 0）同样不判：长度 0 说明「不知道有多长」 */
+    reset_all();
+    (void)make_task(3u, 0u);
+    (void)make_task(5u, 0u);
+    use_task(1);
+    arkrtos_task_table[0].status = ARKRTOS_TASK_RUNNING;
+    arkrtos_task_table[0].stack_size = 0u;
+    (void)arkrtos_sched_activate(2, (unsigned long)arkrtos_task_table[0].stack_bottom - 4u);
+    ck_i32((int)arkrtos_task_table[0].status, ARKRTOS_TASK_READY,
+           "a zero length is not read as an overflow either");
 
     /* 栈底保护字被踩：同样摘除 */
     reset_all();
