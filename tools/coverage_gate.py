@@ -991,6 +991,11 @@ CASES = [
     ("ushell", "kernelsrc/tests/test_shell_ushell_host.c",
      ["kernelsrc/shell/arkrtos_shell_ushell.c"],
      ['-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',
+      # 这份用例测的是注册表本体（141 条），用的是开分页 + 特权级分离的
+      # 板级头，所以必须显式恢复「App 可注册」的旧语义；否则 fail-closed
+      # 会把注册全拒掉。拒绝语义由 ci_gate 的 ushell-host 项另编一份不带
+      # 本宏的镜像来测（见 check_shell_ushell_host）。
+      "-DARKRTOS_USE_USHELL_APP_CB=1",
       SIGN_KEY_DEF, "-fno-asynchronous-unwind-tables"]
      + ["-D" + x for x in SOFTBUS_TIER_DEFS],
      "USHELL-HOST OK",

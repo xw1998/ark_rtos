@@ -672,17 +672,24 @@ def judge_shell(dt_lines, fdt_lines, boot_nodes):
 
 
 def run_qemu_shell(qemu, port, boot_s, per_cmd, cmds):
-    """用 TCP chardev 驱动 shell，返回每条命令的输出。"""
+    """用 TCP chardev 驱动 shell，返回每条命令的输出。
+
+    QEMU 的 stderr 落盘再读：`QEMU 立刻退出了（rc=1）` 只说结果不说原因，
+    查起来只能猜到端口/参数上；把 QEMU 自己那行错误带上，才是一次读数。
+    """
+    errf = tempfile.NamedTemporaryFile(prefix="ark_fdt_qemu_", suffix=".err",
+                                       delete=False)
     p = subprocess.Popen(
         [qemu, "-machine", "virt", "-kernel", ELF_NAME,
          "-display", "none", "-monitor", "none",
          "-serial", "tcp:127.0.0.1:%d,server=on,wait=off" % port],
-        cwd=BUILD_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+        cwd=BUILD_DIR, stdout=subprocess.DEVNULL, stderr=errf)
     try:
         s = None
         for _ in range(int(boot_s * 4) + 40):
             if p.poll() is not None:
-                return None, "QEMU 立刻退出了（rc=%d）" % p.returncode
+                return None, "QEMU 立刻退出了（rc=%d）：%s" % (
+                    p.returncode, _tail_file(errf.name))
             try:
                 s = socket.create_connection(("127.0.0.1", port), timeout=1)
                 break
@@ -730,6 +737,21 @@ def run_qemu_shell(qemu, port, boot_s, per_cmd, cmds):
                 p.kill()
             except Exception:
                 pass
+        try:
+            errf.close()
+            os.unlink(errf.name)
+        except Exception:
+            pass
+
+
+def _tail_file(path, limit=400):
+    """读一个小文件的末尾，给错误细节用；读不到就当空串。"""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        return data.decode("utf-8", "replace").strip()[-limit:]
+    except Exception:
+        return ""
 
 
 # ---------------------------------------------------------------- G 判据自检

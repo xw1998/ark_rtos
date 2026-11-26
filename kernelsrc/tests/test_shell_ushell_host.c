@@ -32,6 +32,18 @@
 
 #include "arkrtos_shell_internal.h"
 
+/* Mirror of the policy default in arkrtos_shell_ushell.c, so this one file can
+ * be built twice: with -DARKRTOS_USE_USHELL_APP_CB=1 (the registry behaviour)
+ * and without (the fail-closed refusal on a privilege-separated + paging
+ * board). Keep the two in step; ci_gate builds both arms. */
+#ifndef ARKRTOS_USE_USHELL_APP_CB
+#  if (ARKRTOS_USE_PRIV == 1) && (ARKRTOS_USE_PAGING == 1)
+#    define ARKRTOS_USE_USHELL_APP_CB 0
+#  else
+#    define ARKRTOS_USE_USHELL_APP_CB 1
+#  endif
+#endif
+
 /* ------------------------------------------------------------ assertions */
 
 static int g_checks;
@@ -116,6 +128,16 @@ static arkrtos_partition_table_t *g_ptp;
 arkrtos_partition_table_t *arkrtos_ptable_get(void)
 {
     return g_ptp;
+}
+
+/* Only referenced by the fail-closed build (ARKRTOS_USE_USHELL_APP_CB == 0):
+ * arkrtos_shell_ext_register() asks who is calling so it can refuse an App
+ * (is_priv == 0) on a privilege-separated + paging build. */
+static arkrtos_task_t g_me;
+
+arkrtos_task_t *arkrtos_task_get_current(void)
+{
+    return &g_me;
 }
 
 void sh_out(const char *s)
@@ -628,10 +650,67 @@ static void t_print_n(void)
     CK_S(g_out, "abc");
 }
 
+/* ------------------------------------------------------------ fail-closed */
+
+/* The privilege-separated + paging build must refuse App registrations: the
+ * trampoline would otherwise run App code in PLV0 on the console task stack.
+ * Kernel-side registration (is_priv != 0) keeps working, which is what the
+ * board and drivers use. */
+static void t_app_cb_refused(void)
+{
+    arkrtos_ushell_cmd_t c;
+
+    reset_env();
+
+    CK_I(ARKRTOS_USE_USHELL_APP_CB, 0);
+    CK_I(ARKRTOS_USHELL_ERR_PRIV, -6);
+    CK(ARKRTOS_USHELL_ERR_PRIV != ARKRTOS_USHELL_ERR_OFF);
+
+    /* an App caller is refused before any registry row is touched */
+    g_me.is_priv = 0u;
+    arkrtos_current_task_id = 7;
+    c = mk("appcmd", cb_ok, "help", 2u);
+    CK_I(arkrtos_shell_ext_register(&c), ARKRTOS_USHELL_ERR_PRIV);
+    CK_I(g_cmd_count, 0);
+    CK_I(g_ushell[0].in_use, 0u);
+    CK_I(g_cmd_table[0].name == NULL, 1);
+
+    /* a second attempt is still refused (no partial row, no dup) */
+    CK_I(arkrtos_shell_ext_register(&c), ARKRTOS_USHELL_ERR_PRIV);
+    CK_I(g_cmd_count, 0);
+
+    /* the kernel task registers normally and the row works */
+    g_me.is_priv = 1u;
+    CK_I(arkrtos_shell_ext_register(&c), ARKRTOS_USHELL_OK);
+    CK_I(g_cmd_count, 1);
+    CK_I(g_ushell[0].in_use, 1u);
+    CK_S(g_ushell[0].name, "appcmd");
+    CK_I((long)g_ushell[0].owner_task, 7);
+
+    /* and unregistration still shifts the row out */
+    CK_I(arkrtos_shell_ext_unregister("appcmd"), ARKRTOS_USHELL_OK);
+    CK_I(g_cmd_count, 0);
+    CK_I(g_ushell[0].in_use, 0u);
+}
+
 /* ------------------------------------------------------------ main */
 
 int main(void)
 {
+#if (ARKRTOS_USE_USHELL_APP_CB == 0)
+    /* fail-closed variant: only the policy is under test here, the full
+     * registry behaviour is covered by the ARKRTOS_USE_USHELL_APP_CB=1
+     * build of this same file. */
+    t_app_cb_refused();
+
+    if (g_failed != 0) {
+        printf("USHELL-HOST REFUSED FAIL  %d/%d checks failed\n",
+               g_failed, g_checks);
+        return 1;
+    }
+    printf("USHELL-HOST REFUSED  %d checks\n", g_checks);
+    return 0;
+#else
     t_name_rules();
     t_copy_bounds();
     t_register_refusals();
@@ -647,4 +726,5 @@ int main(void)
     }
     printf("USHELL-HOST OK  %d checks\n", g_checks);
     return 0;
+#endif
 }

@@ -12,6 +12,27 @@
 #if (SHELL_ENABLE == 1)
 
 /* ============================================================
+ * 特权级策略（SEC-G08）：特权级分离 + 分页的构建上 App 侧注册一律拒绝
+ *
+ * 现状：跳板在控制台任务栈上直接 `func(argc, argv)`，运行在 PLV0。特权级
+ * 分离（ARKRTOS_USE_PRIV=1）且开分页（ARKRTOS_USE_PAGING=1）时，这段用户
+ * 代码就拿到了内核特权——不是「App 的命令」能做的事，是内核替它做的。
+ * 隔离执行（起一个 PLV3 worker + 返回蹦床 syscall）尚未落地，所以这里
+ * fail-closed：拒绝 App 注册，把功能缺口显式化，而不是留一个静默提权。
+ *
+ * 内核任务（is_priv != 0）注册不受影响；没有特权级分离的构建（Cortex-M /
+ * MPU 档）本来就没有这个洞，也保持原语义。
+ * 显式定义 ARKRTOS_USE_USHELL_APP_CB=1 可恢复旧语义（仅供宿主用例）。
+ * ============================================================ */
+#if !defined(ARKRTOS_USE_USHELL_APP_CB)
+#  if (ARKRTOS_USE_PRIV == 1) && (ARKRTOS_USE_PAGING == 1)
+#    define ARKRTOS_USE_USHELL_APP_CB 0
+#  else
+#    define ARKRTOS_USE_USHELL_APP_CB 1
+#  endif
+#endif
+
+/* ============================================================
  * 用户命令（SVC 0x1A）：注册表 + 内核跳板
  *
  * 内核不改 ark_shell（上游原样引入），而是在命令表里追加一条指向本文件的
@@ -177,7 +198,12 @@ static int arkrtos_shell_ext_trampoline(int argc, char **argv)
             /* The callback belongs to an App but runs on the kernel shell task
              * stack: the buffers it renders match no user RAM window, so every
              * buffered SVC service call from inside the callback would be
-             * rejected. Raise the flag for the call and drop it right after. */
+             * rejected. Raise the flag for the call and drop it right after.
+             *
+             * On a privilege-separated + paging build no App registration can
+             * reach here (see the fail-closed policy at the top of this file),
+             * so the flag only covers kernel-side rows; the real fix is the
+             * isolated trampoline tracked as SEC-G08. */
             extern uint32 arkrtos_kernel_ushell_active;
             int rc;
 
@@ -201,6 +227,20 @@ int32 arkrtos_shell_ext_register(const arkrtos_ushell_cmd_t *cmd)
     {
         return ARKRTOS_USHELL_ERR_PARAM;
     }
+
+#if (ARKRTOS_USE_USHELL_APP_CB == 0)
+    {
+        /* fail-closed：见文件头的「特权级策略」。
+         * 判据是调用者当前任务的 is_priv——内核任务注册（板级 / 驱动在
+         * 内核线程里注册）仍然是 1，只有 App 是 0。 */
+        const arkrtos_task_t *me = arkrtos_task_get_current();
+
+        if((me != 0) && (me->is_priv == 0u))
+        {
+            return ARKRTOS_USHELL_ERR_PRIV;
+        }
+    }
+#endif
 
     len = (uint32)strlen(cmd->name);
     if((len == 0u) || (len > (uint32)ARKRTOS_USHELL_NAME_MAX))

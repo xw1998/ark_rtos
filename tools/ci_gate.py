@@ -685,6 +685,25 @@ def check_builds(uv4):
 
 
 # ---------------------------------------------------------------- check 7
+def _dump_log(name, text):
+    """把一道闸门的完整输出落盘，返回路径。
+
+    失败信息只截最后几百字符，够说明「哪一条没过」，不够定位「为什么」：
+    QEMU 起不来、构建目录里的旧 .o、串口截断，三种原因都只在完整输出里
+    分得清。落盘一份，失败信息里带上路径，下一次就不必重跑一遍去猜。
+    """
+    try:
+        d = os.path.join(ROOT, "build", "gate_logs")
+        if not os.path.isdir(d):
+            os.makedirs(d)
+        path = os.path.join(d, name + ".log")
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        return path
+    except Exception:
+        return "(日志落盘失败)"
+
+
 def _run_check(cmd):
     env = dict(os.environ)
     env.pop("PYTHONHOME", None)
@@ -786,7 +805,7 @@ def check_fdt():
            "overlay absent-before -> nodes 8->9 + model/props read back / "
            "5 self-check groups")
     else:
-        fail("fdt", txt[-320:])
+        fail("fdt", "%s（完整输出：%s）" % (txt[-320:], _dump_log("fdt_gate", txt)))
 
 def check_board_config_generated():
     """Every generated board header must be the genboard.py output.
@@ -2491,7 +2510,7 @@ def check_fork():
            "+ SIGCHLD + MAP_FIXED) + child pid != parent + exit code 0 with hello/FS "
            "readings intact / parser self-check 9/9")
     else:
-        fail("fork", txt[-320:])
+        fail("fork", "%s（完整输出：%s）" % (txt[-320:], _dump_log("fork_gate", txt)))
 
 def check_bus_crypto():
     """软总线侧信道加密（SEC-G06）：三档矩阵 + 默认档零成本。
@@ -3453,26 +3472,42 @@ def check_shell_ushell_host():
         return
 
     test, mods, defs, incs, markers = pick
+    # 两份镜像，一份源码：
+    #   * 带 -DARKRTOS_USE_USHELL_APP_CB=1 —— 注册表本体（141 条）；
+    #   * 不带 —— 在「特权级分离 + 分页」的板级头上必须 fail-closed：
+    #     App 侧注册返回 ARKRTOS_USHELL_ERR_PRIV，内核注册照旧。
+    # 只测前一份会把 SEC-G08 的补丁测成「注册全都不通」还是「全都能通」，
+    # 两种都是假绿。
+    defs_on = list(defs)
+    defs_off = [d for d in defs if not d.startswith("-DARKRTOS_USE_USHELL_APP_CB")]
+    if defs_off == defs_on:
+        fail("ushell-host", "the ushell case no longer pins "
+             "ARKRTOS_USE_USHELL_APP_CB; the fail-closed arm would be untested")
+        return
     with TempDir() as td:
-        exe = os.path.join(td, "ushell" + (".exe" if os.name == "nt" else ""))
-        cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
-               + defs + incs + COMMON_INC + ["-o", exe, test] + mods)
-        r = _run_check(cmd)
-        if r.returncode != 0:
-            err = (r.stderr or "").strip().splitlines() or [""]
-            fail("ushell-host", "the case did not build: %s"
-                 % [x for x in err if x.strip()][-1][:220])
-            return
-        r = _run_check([exe])
-        txt = (r.stdout or "") + (r.stderr or "")
-        if r.returncode != 0 or markers[0] not in txt or "FAIL" in txt:
-            fail("ushell-host", txt.strip()[-260:])
-            return
-        last = txt.strip().splitlines()[-1]
+        last = []
+        for tag, d in (("ushell", defs_on), ("ushell_refused", defs_off)):
+            exe = os.path.join(td, tag + (".exe" if os.name == "nt" else ""))
+            cmd = ([cc] + mingw_prefix(cc) + ["-std=gnu11", "-O0"]
+                   + d + incs + COMMON_INC + ["-o", exe, test] + mods)
+            r = _run_check(cmd)
+            if r.returncode != 0:
+                err = (r.stderr or "").strip().splitlines() or [""]
+                fail("ushell-host", "%s did not build: %s"
+                     % (tag, [x for x in err if x.strip()][-1][:220]))
+                return
+            r = _run_check([exe])
+            txt = (r.stdout or "") + (r.stderr or "")
+            want = markers[0] if tag == "ushell" else "USHELL-HOST REFUSED"
+            if r.returncode != 0 or want not in txt or "FAIL" in txt:
+                fail("ushell-host", "%s: %s" % (tag, txt.strip()[-260:]))
+                return
+            last.append(txt.strip().splitlines()[-1])
 
     ok("ushell-host",
        "arkrtos_shell_ushell on the host (register / unregister / trampoline "
-       "alive check / chunked output): %s" % last)
+       "alive check / chunked output): %s; fail-closed on priv+paging: %s"
+       % (last[0], last[1]))
 
 def check_shell_mod_host():
     """The two execution models of arkrtos_shell_mod.c on the host.

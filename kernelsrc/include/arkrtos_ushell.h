@@ -13,6 +13,15 @@
 *               某个已装载镜像的范围内，再调用它——镜像被卸载后命令会
 *               自行失效并提示，而不是跳到已擦除的 Flash 上。
 *
+*          「特权级策略」（SEC-G08）：
+*            在**特权级分离**（ARKRTOS_USE_PRIV=1）且**开分页**
+*            （ARKRTOS_USE_PAGING=1）的构建上，注册进来的回调只能在控制台
+*            任务栈上以 PLV0 执行——那等于把内核特权借给 App。隔离执行
+*            （SVC 蹦床 + 用户栈，见 docs/安全认证准备.md SEC-G08）尚未落地
+*            前，这样的构建 **fail-closed**：App 侧注册一律返回
+*            ARKRTOS_USHELL_ERR_PRIV，内核任务（is_priv != 0）注册不受影响。
+*            无特权级分离的构建（Cortex-M / MPU 档）没有这个洞，行为不变。
+*
 * @note 本头文件不含内核内部结构，App / 驱动固件可安全包含。
 */
 
@@ -36,6 +45,7 @@ extern "C" {
 #define ARKRTOS_USHELL_ERR_FULL   (-3)    /**< 用户命令表已满 */
 #define ARKRTOS_USHELL_ERR_NOTFND (-4)    /**< 未找到要注销的命令 */
 #define ARKRTOS_USHELL_ERR_OFF    (-5)    /**< 内核未启用 Shell（SHELL_ENABLE=0） */
+#define ARKRTOS_USHELL_ERR_PRIV   (-6)    /**< 本构建拒绝 App 侧注册（见下「特权级策略」） */
 
 /**
 * @brief 用户态 Shell 命令描述符
