@@ -37,12 +37,14 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 
 **「静态程序能跑」≠「支持 Linux」。** 第 3 节列的是明确不支持项，一条不含糊。
 
-## 1 支持的系统调用（42 个；28 个有 QEMU 实跑读数，13 个 socket 只有宿主档读数，1 个只有号表与参数校验）
+## 1 支持的系统调用（44 个；30 个有 QEMU 实跑读数，13 个 socket 只有宿主档读数，1 个只有号表与参数校验）
 
 编号取 `asm-generic`（LoongArch / RISC-V / ARM64 共用这一套）：
 
 | 号 | 名字 | Ark 侧兑现方式 | 实测读数 |
 |---:|---|---|---|
+| 23 | `dup` | 复制一个 fd 槽（管道/文件/标准流），返最小空号（§8.12） | `dup(writer) is a new fd -> 1 ok` / `read through the copy -> 3 ok` / `dup(999) -> -EBADF = -9` / `exit code 56` |
+| 24 | `dup3` | 复制到指定号；`fd 0..2` 走别名（不共享槽）；`O_CLOEXEC` 与 `old==new` 明确拒（§8.12） | `dup3(writer, 1) returns 1 -> 1 ok` / `dup3(..., O_CLOEXEC) -> -EINVAL = -22 ok` / `dup3(reader, writer) overwrites -> 4 ok` |
 | 56 | `openat` | `arkrtos_vfs_app_stat()` 查命名空间；目录返 `-EISDIR` | `openat>0 -> 1 ok` |
 | 57 | `close` | 释放 fd 槽，返 0；管道端会减引用计数 | `close -> 0 ok` |
 | 59 | `pipe2` | 环形缓冲管道 + 两端引用计数；**非阻塞**（见 §6） | `pipe2 rc = 0` / `read empty -> -EAGAIN = -11` / `write with reader closed -> -EPIPE = -32` / `exit code 55` |
@@ -89,7 +91,7 @@ socket 家族（`198-210`、`242`，共 13 个）见 §8.9：它们已经在翻�
 `mprotect`(226) 原先也在这张名单里（只校验参数、返 0、**不改任何页权限**）。批C-2
 把它改成了真改硬件条目（§8.6），于是它有了 11 条串口读数，不再是「只有号表」的号。
 
-表格里其余 28 个号都有 `[linux]` / `[pipe]` / `[sig]` / `[fork]` 夹具的串口读数。
+表格里其余 30 个号都有 `[linux]` / `[pipe]` / `[sig]` / `[dup]` / `[fork]` 夹具的串口读数。
 
 ## 2 两个 ABI 怎么分界
 
@@ -1202,6 +1204,94 @@ fork 仍回 `-EAGAIN`（全段最干净的一条）；⑧ 第三个线程回 `-E
 `off-zero-symbols` 用 `nm` 逐条核对；`features.h` 里有
 `ARKRTOS_USE_APP_QUOTA=1 requires ARKRTOS_USE_ELF=1` 的 `#error` 顶住。
 
+### 8.12 `dup`(23) / `dup3`(24)：fd 槽复制、标准流别名与控制台引用（2026-11-27，QEMU LA64 34 条）
+
+原来这一对只回 `-ENOSYS` 的欠账在本轮清掉。它们是**默认档即生效**的：没有新开关，
+没有体积档位，`ARKRTOS_USE_LINUX_ABI=1` 就有——因为「把一个 fd 复制成两个」不需要
+任何新的内核机制，只需要把 fd 表里那一格再抄一份。
+
+**语义（逐条与 Linux 对齐，偏差写在明面上）**
+
+| 形态 | 回答 |
+|---|---|
+| `dup(oldfd)` 成功 | 返**最小空号**（>= 3）；源与副本是两个独立描述符，关掉任一个另一个仍然有效 |
+| `dup3(oldfd, newfd)`，`newfd >= 3` 且空闲 | 返 `newfd` |
+| `dup3(oldfd, newfd)`，`newfd >= 3` 且已占用 | 先释放旧目标（管道端减一次引用计数），再装副本；返 `newfd` |
+| `dup3(oldfd, 1)` / `(?, 2)` / `(?, 0)` | **占一格真槽**并记成该标准流的别名（`lx_proc_t.std_slot[]`）。标准流原来就是「没有别名的 0/1/2」，所以 `int saved = dup(1); dup2(fd, 1); ...; dup2(saved, 1);` 这套守护进程写法在语义上成立 |
+| `dup(0)` / `dup(1)` / `dup(2)`（源没有别名） | 复制的是**控制台对象**（`LX_FD_CONSOLE`）：写就走控制台，读回 EOF，`select` 判可写 |
+| 源不存在 / `oldfd` 越界 | `-EBADF`（9） |
+| `dup3` 的 `oldfd == newfd` | `-EINVAL`（22）——这是 `dup3` 与 `dup2` 唯一的差别，Linux 如此 |
+| `dup3` 的 `flags` 含 `O_CLOEXEC` | `-EINVAL`（22）。本层没有 `exec` 关闭语义（`execve` 是同任务换镜像，fd 表按设计存活，见 §5 的 `fd 3 survived` 读数），接受 `O_CLOEXEC` 就是给一个不成立的承诺 |
+| `flags` 含其它任何位 | `-EINVAL` |
+| `newfd >= LX_MAX_FD + 3` | `-EBADF` |
+| fd 表满（`dup` 要新槽） | `-ENFILE`（23）。Linux 在「进程 fd 表满」时给 `EMFILE`；本层只有一张固定大小的表（不是「内核文件表 + 进程 fd 表」两层），`pipe2` / `openat` 在同一条件下都用 `ENFILE`，这里跟同一口径，不单独造第二种回答 |
+| 源或目标是 socket | `-EINVAL`（22）。**明确不支持**：socket 那一格背后是 lwIP 的 net 句柄，两个槽共享同一个句柄需要一层「打开文件表项 + 引用计数」，本层没有；与其造出一对互相打哑的假描述符，不如如实拒绝 |
+
+**复制的是「槽」，不是「打开文件表项」——唯一可见偏差。** 一次 `dup` 复制
+`kind / pipe / size / wr / path`，两个槽各自持有自己的 `off`。管道与控制台没有游标，
+语义与 Linux 完全一致；`openat` 打开的普通文件在两个副本上**各自从当前偏移读**
+（Linux 是共享偏移）。这条偏差是刻意取舍：引入打开文件表项要给每一次 `read`/`write`
+加一层间接与一套引用计数，而本层的文件读只有 `openat` + `read` + `pread64` 三个号
+（§4），收益不抵复杂度。`pread64` 本来就不动游标，两条路都不受影响。
+
+**标准流别名（`std_slot[3]`）为什么占一格真槽、而不共享源槽。** 共享槽做不到
+`close(源)` 之后别名仍然有效——Linux 里 `dup3(w, 1)` 之后 `close(w)` 不会让 fd 1 失效。
+所以 `fd 0..2` 命中别名时，`read` / `write` / `close` / `select` 一律先把它路由到
+那一格；同一次 `dup3` 到同一个标准流时**复用原来那一格**（先摘别名再释放），
+这样即使表满也能成功。fork 的子进程 1:1 照抄 `std_slot`（父的别名在子里仍然有效）。
+
+**一个只有回头看才发现的坑。** `lx_fd_release()` 原来按「`kind != LX_FD_FILE` 就是
+管道」判要不要减引用计数。新加的 `LX_FD_CONSOLE` 的 `pipe` 字段是 0，会被这条判据
+当成「管道 0 的读者」去减——把一条真实管道悄悄减到 0 是在别处才炸的错。改成显式判
+`kind == LX_FD_PIPE_R || kind == LX_FD_PIPE_W`，这条判据以后不会因为再添一种 fd 种类
+而变形。
+
+**实测读数（`[dup]` 行，QEMU LA64，34 条 check 全 `ok`）**
+
+```
+[dup] write /mnt/ram/linux_dup rc=0 size=8408
+[dup] pipe2 rc = 0 ok
+[dup] dup(writer) is a new fd = 1 ok
+[dup] write through the copy = 5 ok
+[dup] read from the original reader = 5 ok
+[dup] content matches = 1 ok
+[dup] close the original writer = 0 ok
+[dup] copy still writable after close = 3 ok
+...
+[dup] dup(999) -> -EBADF = -9 ok
+[dup] dup3(1, 1, 0) -> -EINVAL = -22 ok
+[dup] dup3(..., O_CLOEXEC) -> -EINVAL = -22 ok
+[dup] dup3(999, 1, 0) -> -EBADF = -9 ok
+[dup] dup3(writer, 1) returns 1 = 1 ok
+[dup] write(1) lands in the pipe = 3 ok
+[dup] close(1) drops the alias = 0 ok
+[dup] dup3(reader, writer) overwrites = 4 ok
+[dup] overwritten fd is no longer a writer = -9 ok
+[dup] dup(0) is a console reference = 1 ok
+[dup] read the console reference -> EOF = 0 ok
+[dup] PASS: dup new fd, data through the copy, alias survives close, dup3 redirects stdout,
+             dup3 overwrites, console reference, EBADF/EINVAL on the four failure surfaces
+[dup] finished after 0 ms, exit code 56
+```
+
+**怎么读这 34 条。** ①「复制」不是复制名字：`close the original writer` 之后
+`copy still writable after close = 3` 证明两个描述符各自持有一次管道写端计数；
+② 两端都关之后 `read -> EOF = 0` 证明计数真的减到了 0（没有泄漏，也没有提前归零）；
+③ `dup3(writer, 1)` 之后 `write(1)` 的字节从**管道**里读回来，证明 `write` 真的按
+别名路由，而不是往控制台打；④ `close(1)` 只摘别名、不动源；⑤ `dup3(reader, writer)`
+把已经是写端的号覆盖成读端，随后 `overwritten fd is no longer a writer = -9` 与
+`overwrite dropped the only writer -> EOF = 0` 两条一起证明「先释放再装」的顺序对；
+⑥ 四条失败面（`EBADF` / `old==new` / `O_CLOEXEC` / 源无效）逐条读到负 errno 的具体值；
+⑦ 夹具**输出走 fd 2**——第 3 组用例把 fd 1 重定向进管道，用 fd 1 打印会被自己吃掉，
+这是本轮踩到的一个读数坑。
+
+**边界。** ① socket 不能 `dup`（理由见上）；② 文件副本的偏移各自独立（唯一可见偏差）；
+③ `O_CLOEXEC` 被拒，所以「exec 时自动关 fd」这档能力不存在（本层也没有真正的 exec）；
+④ `dup3` 的 `newfd` 上限是 `LX_MAX_FD + 3`，超过回 `-EBADF`（Linux 在号超过
+`RLIMIT_NOFILE` 时也是 `-EBADF`，只是它用 rlimit 而不是固定表）；⑤ 宿主档另有 40 条断言
+（`test_linux_abi_host.c` 的 `t_dup`），逐条覆盖表满 `-ENFILE`、表满时复用已有别名那一格、
+同一号关两次 `-EBADF` 等 QEMU 夹具里不好造的状态。
+
 ## 9 开关与零体积
 
 - `ARKRTOS_USE_LINUX_ABI`（`kernelsrc/include/arkrtos_features.h`、
@@ -1264,7 +1354,7 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py        # 含 make
 env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py --no-build
 ```
 
-13 项，全 PASS 时打印 `LINUX-ABI-GATE OK`，并由 `tools/ci_gate.py` 的
+14 项，全 PASS 时打印 `LINUX-ABI-GATE OK`，并由 `tools/ci_gate.py` 的
 `linux-abi` 项调用：
 
 | 项 | 钉住什么 |
@@ -1275,13 +1365,13 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py --no-build
 | `board-switch` | QEMU LA64 板级显式置 1 |
 | `off-zero-symbols` | 关档 `.o` 符号表**全空**（不是「没测」） |
 | `port-wiring` | 关档无 `arkrtos_port_linux_syscall_num` / 开档有（两向） |
-| `compile-on` | LA64 真板级下 8 个 TU 全编过（含四个用户程序本身） |
-| `syscall-table` | 29 个号与 `asm-generic` 逐条相等 |
+| `compile-on` | LA64 真板级下 9 个 TU 全编过（含五个用户程序本身） |
+| `syscall-table` | 27 个号与 `asm-generic` 逐条相等 |
 | `abi-split-la64` | 立即数 == 0 是 Linux、!= 0 是 Ark |
-| `abi-split-rv32` | `0x10..0x22` 归 Ark，Linux 最小号 56 不撞 |
+| `abi-split-rv32` | `0x10..0x23` 归 Ark；`dup`/`dup3`（23/24）落在这一段里，所以另核「RV32 板级不开 ELF/ABI」——开 ABI 必须开 ELF 是 `features.h` 的 `#error`，歧义由构造不可达（不是靠推断） |
 | `build` | `make -f example/qemu_loongarch64/Makefile` 通过 |
-| `qemu-readout` | Linux 块 14 条 check 全 ok + PASS 行 + `exit code 7`；管道块 14 条 + `exit code 55`；信号块 31 条 + PASS 行 + `exit code 138`；旁路演示未受影响 |
-| `parser-selfcheck` | 把 8 种坏日志喂回判据，必须全判红 |
+| `qemu-readout` | Linux 块 14 条 check 全 ok + PASS 行 + `exit code 7`；管道块 14 条 + `exit code 55`；信号块 31 条 + PASS 行 + `exit code 138`；dup 块 34 条 + `exit code 56`；旁路演示未受影响 |
+| `parser-selfcheck` | 把 12 种坏日志喂回判据，必须全判红 |
 
 socket 这一层是**两侧都有读数**的：宿主侧是 `tools/coverage_gate.py` 的第六个 Linux ABI 档
 `linuxabisocket`（`-DARKRTOS_USE_LINUX_SOCKET=1 -DARKRTOS_USE_LWIP=1`，`-Wl,--wrap=arkrtos_port_svc_exec_frame`）
@@ -1322,7 +1412,8 @@ fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**7
 
 `parser-selfcheck` 是防「绿得没有信息量」的：Linux 块去掉 PASS 行、退出码改 3、
 插一条 FAIL、少一条 check，管道块去掉 PASS 行、退出码改成 1，信号块去掉 PASS 行、
-退出码改成 1，fork 块把「阻塞读数改成没等」/「父读端改成 `-EBADF`」/「SIGCHLD 没被
+退出码改成 1，dup 块去掉 PASS 行、退出码改成 1、插一条 FAIL、少一条 check，
+fork 块把「阻塞读数改成没等」/「父读端改成 `-EBADF`」/「SIGCHLD 没被
 调到」，九种都必须被判红。
 
 ## 11 本轮踩到的真 bug 与读数坑

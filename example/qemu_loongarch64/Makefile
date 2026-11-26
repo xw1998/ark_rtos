@@ -437,6 +437,30 @@ $(LXSIG_H): $(LXSIG_SIGNED) example/qemu_loongarch64/elf_blob.py
 
 $(BUILD)/example/qemu_loongarch64/elf_demo.o: $(LXSIG_H)
 
+# dup/dup3 夹具（linux_dup.elf）：dup 新号 / 数据经副本往返 / 原写端关掉后副本
+# 仍可写 / 全关后 EOF / dup3(pw,1) 重定向 stdout 与 close(1) 撤销 / dup3 覆盖
+# 在用的 fd / dup(0) 的控制台引用 / 四条失败面（EBADF、EINVAL）。
+LXDUPD_SRC := example/qemu_loongarch64/elf/linux_dup.c
+LXDUPD_ELF := $(BUILD)/linux_dup.elf
+LXDUPD_SIGNED := $(BUILD)/linux_dup.signed.elf
+LXDUPD_H   := $(BUILD)/linux_dup_blob.h
+
+$(LXDUPD_ELF): $(LXDUPD_SRC)
+	@mkdir -p $(BUILD)
+	$(CC) $(ARCH_FLAGS) -O2 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
+	      -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	      -Wl,-Ttext=$(WIN_ELF_BASE) -Wl,-e,_start -Wl,--strip-all \
+	      -Wl,-z,max-page-size=4096 -o $@ $< ;
+
+$(LXDUPD_SIGNED): $(LXDUPD_ELF) tools/sign_payload.py
+	python tools/sign_payload.py sign $(LXDUPD_ELF) --out $@ ;
+
+$(LXDUPD_H): $(LXDUPD_SIGNED) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(LXDUPD_SIGNED) \
+	       --output $@ --name ark_example_linux_dup ;
+
+$(BUILD)/example/qemu_loongarch64/elf_demo.o: $(LXDUPD_H)
+
 
 # ---------------------------------------------------------------------------
 # fork/clone 夹具（linux_fork.elf）：clone(220) 与 wait4(260) 的七组行为

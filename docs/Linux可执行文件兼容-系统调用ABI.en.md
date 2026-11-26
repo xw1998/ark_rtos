@@ -40,12 +40,14 @@ a purely Linux-ABI static binary with its own `_start`):
 **"A static program runs" is not "Linux is supported".** Section 3 lists what is
 explicitly unsupported.
 
-## 1 Supported syscalls (42; 28 measured on QEMU, 13 socket numbers host-tier only, 1 table-and-argument only)
+## 1 Supported syscalls (44; 30 measured on QEMU, 13 socket numbers host-tier only, 1 table-and-argument only)
 
 Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 
 | nr | name | how Ark fulfils it | measured |
 |---:|---|---|---|
+| 23 | `dup` | copy one fd slot (pipe/file/standard stream) into the lowest free number (8.12) | `dup(writer) is a new fd -> 1 ok` / `read through the copy -> 3 ok` / `dup(999) -> -EBADF = -9` / `exit code 56` |
+| 24 | `dup3` | copy to a chosen number; `fd 0..2` becomes an alias instead of a shared slot; `O_CLOEXEC` and `old==new` are refused (8.12) | `dup3(writer, 1) returns 1 -> 1 ok` / `dup3(..., O_CLOEXEC) -> -EINVAL = -22 ok` / `dup3(reader, writer) overwrites -> 4 ok` |
 | 56 | `openat` | `arkrtos_vfs_app_stat()` on the VFS namespace; directories return `-EISDIR` | `openat>0 -> 1 ok` |
 | 57 | `close` | release the fd slot, return 0 (a pipe end drops its reference count) | `close -> 0 ok` |
 | 59 | `pipe2` | ring-buffer pipe with per-end reference counts; **non-blocking** (section 6) | `pipe2 rc = 0` / `read empty -> -EAGAIN = -11` / `write with reader closed -> -EPIPE = -32` / `exit code 55` |
@@ -1381,6 +1383,97 @@ bounded by `ARKRTOS_PAGING_APPS_MAX`; `ERR_QUOTA` and `ERR_BUSY` are both `-EAGA
 the `app_owner` field in the TCB, produce nothing when `ARKRTOS_USE_APP_QUOTA=0`; the gate's
 `off-zero-symbols` step checks them with `nm` one by one, and `features.h` holds the
 `ARKRTOS_USE_APP_QUOTA=1 requires ARKRTOS_USE_ELF=1` `#error`.
+
+### 8.12 `dup`(23) / `dup3`(24): fd-slot copies, standard-stream aliases, console references (2026-11-27, QEMU LA64, 34 checks)
+
+This pair used to answer `-ENOSYS`; that debt is paid. They are **live in the default tier**:
+no new switch, no footprint tier — `ARKRTOS_USE_LINUX_ABI=1` is enough, because making one fd
+into two needs no new kernel mechanism, only a second copy of one fd-table slot.
+
+**Semantics (aligned with Linux one by one; deviations stated in the open)**
+
+| shape | answer |
+|---|---|
+| `dup(oldfd)` succeeds | returns the **lowest free number** (>= 3); the source and the copy are two independent descriptors, closing either leaves the other valid |
+| `dup3(oldfd, newfd)`, `newfd >= 3` and free | returns `newfd` |
+| `dup3(oldfd, newfd)`, `newfd >= 3` and in use | releases the old target first (a pipe end drops one reference), then installs the copy; returns `newfd` |
+| `dup3(oldfd, 1)` / `(?, 2)` / `(?, 0)` | **takes a real slot** and records it as that standard stream's alias (`lx_proc_t.std_slot[]`). A standard stream is "0/1/2 without an alias", so `int saved = dup(1); dup2(fd, 1); ...; dup2(saved, 1);` works |
+| `dup(0)` / `dup(1)` / `dup(2)` (source has no alias) | copies the **console object** (`LX_FD_CONSOLE`): writes reach the console, reads return EOF, `select` reports writable |
+| source missing / `oldfd` out of range | `-EBADF` (9) |
+| `dup3` with `oldfd == newfd` | `-EINVAL` (22) — the only difference between `dup3` and `dup2`, as in Linux |
+| `dup3` with `O_CLOEXEC` in `flags` | `-EINVAL` (22). This layer has no exec-close semantics (`execve` replaces the image of the same task and the fd table survives by design, see the `fd 3 survived` reading in section 5), so accepting `O_CLOEXEC` would promise something that does not happen |
+| any other flag bit | `-EINVAL` |
+| `newfd >= LX_MAX_FD + 3` | `-EBADF` |
+| fd table full (`dup` needs a new slot) | `-ENFILE` (23). Linux answers `EMFILE` when the per-process fd table is full; this layer has a single fixed table (not "kernel file table + per-process fd table"), and `pipe2` / `openat` already use `ENFILE` for the same condition, so `dup` follows the same convention rather than inventing a second answer |
+| source or target is a socket | `-EINVAL` (22). **Explicitly unsupported**: a socket slot refers to an lwIP net handle, and two slots sharing one handle needs an open-file-description layer with reference counting, which this layer does not have; refusing honestly beats producing two handles that quietly break each other |
+
+**What is copied is the slot, not the open file description — the one visible deviation.**
+`dup` copies `kind / pipe / size / wr / path`; the two slots keep their own `off`. Pipes and the
+console have no cursor, so semantics match Linux exactly; for a file opened with `openat` the two
+copies **each read from their own current offset** (Linux shares it). This is a deliberate
+trade-off: an open-file-description layer would put an indirection and a reference count in front
+of every `read`/`write`, while this layer only exposes `openat` + `read` + `pread64` (section 4).
+`pread64` never moves the cursor, so neither path is affected.
+
+**Why a standard-stream alias (`std_slot[3]`) takes a real slot instead of sharing the source
+slot.** Sharing cannot make the alias survive `close(source)` — after `dup3(w, 1)`, `close(w)`
+must not invalidate fd 1. So when `fd 0..2` has an alias, `read` / `write` / `close` / `select`
+route to that slot first; a second `dup3` onto the same stream **reuses the existing slot**
+(drop the alias, then release it), so it still succeeds when the table is full. A forked child
+copies `std_slot` 1:1 (the parent's aliases stay valid in the child).
+
+**A trap only visible in hindsight.** `lx_fd_release()` used to decide "pipe?" by
+`kind != LX_FD_FILE`. The new `LX_FD_CONSOLE` has `pipe == 0` and would have been treated as
+"reader of pipe 0" and decremented it — a real pipe silently reaching zero blows up somewhere
+else. The test is now explicit: `kind == LX_FD_PIPE_R || kind == LX_FD_PIPE_W`, so adding a
+further fd kind cannot bend it again.
+
+**Measured readout (`[dup]` lines, QEMU LA64, 34 checks all `ok`)**
+
+```
+[dup] write /mnt/ram/linux_dup rc=0 size=8408
+[dup] pipe2 rc = 0 ok
+[dup] dup(writer) is a new fd = 1 ok
+[dup] write through the copy = 5 ok
+[dup] read from the original reader = 5 ok
+[dup] content matches = 1 ok
+[dup] close the original writer = 0 ok
+[dup] copy still writable after close = 3 ok
+[dup] dup(999) -> -EBADF = -9 ok
+[dup] dup3(1, 1, 0) -> -EINVAL = -22 ok
+[dup] dup3(..., O_CLOEXEC) -> -EINVAL = -22 ok
+[dup] dup3(999, 1, 0) -> -EBADF = -9 ok
+[dup] dup3(writer, 1) returns 1 = 1 ok
+[dup] write(1) lands in the pipe = 3 ok
+[dup] close(1) drops the alias = 0 ok
+[dup] dup3(reader, writer) overwrites = 4 ok
+[dup] overwritten fd is no longer a writer = -9 ok
+[dup] dup(0) is a console reference = 1 ok
+[dup] read the console reference -> EOF = 0 ok
+[dup] PASS: dup new fd, data through the copy, alias survives close, dup3 redirects stdout,
+            dup3 overwrites, console reference, EBADF/EINVAL on the four failure surfaces
+[dup] finished after 0 ms, exit code 56
+```
+
+**How to read the 34 checks.** (1) Copying is not aliasing a name: `copy still writable after
+close = 3` proves each descriptor holds its own writer reference; (2) `read -> EOF = 0` after
+both ends are closed proves the count really reached zero (no leak, no early zero); (3) after
+`dup3(writer, 1)`, `write(1)`'s bytes come back out of the **pipe**, proving `write` routes
+through the alias instead of printing to the console; (4) `close(1)` only drops the alias and
+leaves the source alone; (5) `dup3(reader, writer)` overwrites a number that is already a
+writer, and `overwritten fd is no longer a writer = -9` plus `overwrite dropped the only writer
+-> EOF = 0` together prove the "release, then install" order; (6) the four failure surfaces
+(`EBADF` / `old==new` / `O_CLOEXEC` / invalid source) each read back a specific negative errno;
+(7) the fixture **prints on fd 2** — case group 3 redirects fd 1 into a pipe, so printing on
+fd 1 would be eaten by the fixture itself, a readout trap hit while writing it.
+
+**Boundaries.** (1) sockets cannot be `dup`ed (reason above); (2) file copies keep independent
+offsets (the only visible deviation); (3) `O_CLOEXEC` is refused, so there is no "close fds at
+exec" tier (nor a real exec); (4) `dup3`'s `newfd` ceiling is `LX_MAX_FD + 3`, above which it
+returns `-EBADF` (Linux also returns `-EBADF` past `RLIMIT_NOFILE`, it just uses an rlimit
+instead of a fixed table); (5) the host tier adds 40 assertions (`t_dup` in
+`test_linux_abi_host.c`) covering states that are awkward to build in a QEMU fixture, such as a
+full table answering `-ENFILE` and reusing an existing alias slot when the table is full.
 
 ## 9 Switch and zero footprint
 

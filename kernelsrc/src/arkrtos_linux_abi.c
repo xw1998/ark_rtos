@@ -66,6 +66,8 @@
 /* ---------------------------------------------------------------- 常量 */
 
 /* asm-generic 号表：RISC-V 与 LoongArch 的 Linux UAPI 都用这一套。 */
+#define LX_SYS_DUP                  (23u)   /* dup：复制一个 fd 到最小的空号 */
+#define LX_SYS_DUP3                 (24u)   /* dup3：复制到一个指定号（不含 CLOEXEC） */
 #define LX_SYS_OPENAT               (56u)
 #define LX_SYS_CLOSE                (57u)
 #define LX_SYS_PIPE2                (59u)
@@ -290,6 +292,10 @@
 #if (ARKRTOS_USE_LINUX_SOCKET == 1)
 #define LX_FD_SOCKET                (3u)    /* U-23：net 服务里的一格 socket */
 #endif
+/* dup(1)/dup(2) 保存下来的「控制台引用」。0/1/2 本身不占表项（没有真句柄），
+ * 只有被 dup 到一个实 fd 号上时才需要一格占位：读回 EOF、写回控制台、关掉
+ * 什么也不做。kind 值不放进 SOCKET 的 #if 里：dup 在任何档都要能编。 */
+#define LX_FD_CONSOLE               (4u)
 
 /* 管道容量与同时存在的条数。256 字节够一次 read/write 的常见块，也不至于
  * 让 .bss 多出一大块；条数按「一个程序同时用两条管道」给。
@@ -350,6 +356,7 @@
 #define LX_O_CREAT                  (0x40u)
 #define LX_O_TRUNC                  (0x200u)
 #define LX_O_NONBLOCK               (0x800u)
+#define LX_O_CLOEXEC                (0x80000u)   /* dup3 唯一认的位，但本层拒绝它 */
 /* U-21 唯一放开的访问模式：打开**已存在**的文件时 O_RDWR 合法（可写共享映射
  * 的前提）。O_WRONLY 不放开：只写映射的语义要整文件回填，本档没有。 */
 #define LX_O_RDWR                   (0x2u)
@@ -409,7 +416,8 @@
 typedef struct
 {
     uint8  used;
-    uint8  kind;        /* LX_FD_FILE / LX_FD_PIPE_R / LX_FD_PIPE_W */
+    uint8  kind;        /* LX_FD_FILE / LX_FD_PIPE_R / LX_FD_PIPE_W /
+                         * LX_FD_SOCKET / LX_FD_CONSOLE */
     uint8  pipe;        /* kind 是管道时，s_pipe 的下标 */
     uint8  wr;          /* 1 = 以 O_RDWR 打开（U-21 可写共享映射的前提） */
     uint32 size;
@@ -569,6 +577,12 @@ typedef struct
 typedef struct
 {
     lx_fd_t        fd[LX_MAX_FD];
+    /* 标准流别名（dup/dup3）：std_slot[0..2] 存「槽 + 1」，0 = 没有别名。
+     * 为什么要别名：0/1/2 在本层没有真槽位（控制台是直写、stdin 读到 EOF），
+     * 而 dup2(fd, 1) 是真实程序最常用的重定向手法。别名**占一个真槽**而不是
+     * 直接指向源槽：close(源 fd) 之后别名必须仍然有效（Linux 里这是两个独立
+     * 描述符），共享槽做不到这一点。 */
+    uint8          std_slot[3];
     lx_sigaction_t sig[LX_NSIG];
     uint32         sig_pending;
     uint32         sig_blocked;
@@ -651,6 +665,10 @@ static void lx_proc_zero(uint32 slot)
         s_proc[slot].sig[i].flags    = 0UL;
         s_proc[slot].sig[i].restorer = 0UL;
         s_proc[slot].sig[i].mask     = 0UL;
+    }
+    for(i = 0u; i < 3u; i++)
+    {
+        s_proc[slot].std_slot[i] = 0u;
     }
     s_proc[slot].sig_pending = 0u;
     s_proc[slot].sig_blocked = 0u;
@@ -962,6 +980,108 @@ static int32 lx_fd_free_idx(void)
     return -1;
 }
 
+/* 定义在管道那一节后面（dup 要先用它把一个槽还回去）。 */
+static uint32 lx_fd_release(uint32 slot, uint32 idx);
+
+/* 标准流别名 → 槽下标；-1 = 没有别名。used 一起判：槽被别的路径放掉之后
+ * 这里只会看到悬空，如实当「没有别名」处理，绝不去索引一个空槽。 */
+static int32 lx_std_slot(int32 fd)
+{
+    uint8 v;
+
+    if((fd < 0) || (fd > 2))
+    {
+        return -1;
+    }
+    v = lx_proc_curp()->std_slot[fd];
+    if((v == 0u) || ((uint32)(v - 1u) >= LX_MAX_FD))
+    {
+        return -1;
+    }
+    if(s_fd[v - 1u].used == 0u)
+    {
+        return -1;
+    }
+    return (int32)(v - 1u);
+}
+
+static void lx_std_set(int32 fd, int32 idx)
+{
+    if((fd < 0) || (fd > 2))
+    {
+        return;
+    }
+    lx_proc_curp()->std_slot[fd] = (idx < 0) ? 0u : (uint8)(idx + 1);
+}
+
+/* 一个控制台引用占的空槽：读回 EOF、写回控制台、关掉什么也不做。 */
+static void lx_fd_console_fill(uint32 idx)
+{
+    s_fd[idx].kind    = LX_FD_CONSOLE;
+    s_fd[idx].pipe    = 0u;
+    s_fd[idx].wr      = 0u;
+    s_fd[idx].size    = 0u;
+    s_fd[idx].off     = 0u;
+    s_fd[idx].path[0] = 0;
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+    s_fd[idx].net     = 0u;
+    s_fd[idx].stype   = 0u;
+    s_fd[idx].sflags  = 0u;
+    s_fd[idx].pok     = 0u;
+    s_fd[idx].pbits   = 0u;
+#endif
+    s_fd[idx].used    = 1u;
+}
+
+/* 把一个有效槽复制到另一个空槽（dup 的实体）。
+ *
+ * 复制的是**槽**，不是 Linux 的「打开文件表项（struct file）」：两者唯一
+ * 可见的差别是文件游标 off 各走各的（Linux 的 dup 共享游标）。管道与控制台
+ * 没有游标，语义与 Linux 完全一致；这条偏差写在
+ * docs/Linux可执行文件兼容-系统调用ABI.md 的 dup 一节里，并且有用例钉住。
+ *
+ * 管道要按复制出来的那一份**再加一次**读写端计数：两端计数是「有几个 fd
+ * 都指向这条管道」，dup 之后确实多了一个。
+ *
+ * socket 不在这里复制：net 句柄是「一格一份」的，两个槽指向同一个 handle 会
+ * 出现「谁先 close 谁把对方打哑」。调用方已对 socket 明确 -EINVAL，这里把
+ * 该清的清掉，绝不把句柄抄过去。 */
+static void lx_fd_clone(uint32 dst, uint32 src)
+{
+    uint8 kind = s_fd[src].kind;
+    int32 pi;
+
+    s_fd[dst].kind    = kind;
+    s_fd[dst].pipe    = s_fd[src].pipe;
+    s_fd[dst].wr      = s_fd[src].wr;
+    s_fd[dst].size    = s_fd[src].size;
+    s_fd[dst].off     = s_fd[src].off;
+    lx_copy_str(s_fd[dst].path, (uint32)sizeof(s_fd[dst].path), s_fd[src].path);
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+    s_fd[dst].net     = 0u;
+    s_fd[dst].stype   = 0u;
+    s_fd[dst].sflags  = 0u;
+    s_fd[dst].pok     = 0u;
+    s_fd[dst].pbits   = 0u;
+#endif
+    if((kind == LX_FD_PIPE_R) || (kind == LX_FD_PIPE_W))
+    {
+        pi = (int32)s_fd[dst].pipe;
+        if((pi >= 0) && (pi < (int32)LX_PIPE_MAX) && (s_pipe[pi].used != 0u))
+        {
+            if(kind == LX_FD_PIPE_R)
+            {
+                s_pipe[pi].readers++;
+            }
+            else
+            {
+                s_pipe[pi].writers++;
+            }
+        }
+    }
+    s_fd[dst].used = 1u;
+}
+
 static int32 lx_pipe_alloc(void)
 {
     uint32 i;
@@ -1172,6 +1292,172 @@ static int32 lx_pipe2(void *p_ctx)
     }
 
     return 0;
+}
+
+/* ---------------------------------------------------------------- dup */
+
+/* dup / dup3 的实体：把 oldfd 复制到 newfd。
+ *
+ *   oldfd 0..2 且没有别名  -> 复制的是「控制台」这个对象（Linux 的 dup(1)
+ *                             是保存 stdout 的标准手法，程序常用）；
+ *   newfd < 0              -> dup：取最小的空号；
+ *   newfd 0..2             -> 标准流别名：占一个**新槽**，别名记在 std_slot；
+ *   newfd >= 3             -> 覆盖那个 fd（Linux 语义：先关掉再指过去）。
+ *
+ * 明确的边界（文档与用例都钉住）：
+ *   * socket 的 fd 不能 dup（-EINVAL）——net 句柄一格一份，共享要一层打开
+ *     文件表项，本层没有；给出 -EINVAL 而不是一个会互相打哑的假句柄；
+ *   * dup3 的 O_CLOEXEC 明确 -EINVAL——本内核没有 exec 时的关闭语义，与
+ *     pipe2 同一立场；
+ *   * 覆盖一个 socket 槽也是 -EINVAL：那一关必须过 net 服务（重放语义），
+ *     本层没有那条路，硬关会在系统里漏一个 net socket。 */
+static int32 lx_fd_dup_to(int32 oldfd, int32 newfd)
+{
+    int32 idx     = -1;
+    int32 dst;
+    uint8 console = 0u;
+
+    if((oldfd >= 0) && (oldfd <= 2))
+    {
+        idx = lx_std_slot(oldfd);
+        if(idx < 0)
+        {
+            console = 1u;       /* 没有别名的标准流 = 控制台对象 */
+        }
+    }
+    else
+    {
+        idx = lx_fd_find(oldfd);
+        if(idx < 0)
+        {
+            return -LX_EBADF;
+        }
+    }
+    if(console == 0u)
+    {
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+        if(s_fd[idx].kind == LX_FD_SOCKET)
+        {
+            return -LX_EINVAL;
+        }
+#endif
+    }
+
+    if(newfd < 0)
+    {
+        dst = lx_fd_free_idx();
+        if(dst < 0)
+        {
+            return -LX_ENFILE;
+        }
+        if(console != 0u)
+        {
+            lx_fd_console_fill((uint32)dst);
+        }
+        else
+        {
+            lx_fd_clone((uint32)dst, (uint32)idx);
+        }
+        return (int32)(3 + dst);
+    }
+
+    if(newfd <= 2)
+    {
+        int32 old_alias = lx_std_slot(newfd);
+
+        if(old_alias >= 0)
+        {
+            /* 别名原来那一格就是本次的目标格：先摘别名再还槽，不会多占一格，
+             * 也不会在表满时假装失败。 */
+            lx_std_set(newfd, -1);
+            (void)lx_fd_release(lx_proc_cur(), (uint32)old_alias);
+            dst = old_alias;
+        }
+        else
+        {
+            dst = lx_fd_free_idx();
+            if(dst < 0)
+            {
+                return -LX_ENFILE;
+            }
+        }
+        if(console != 0u)
+        {
+            lx_fd_console_fill((uint32)dst);
+        }
+        else
+        {
+            lx_fd_clone((uint32)dst, (uint32)idx);
+        }
+        lx_std_set(newfd, dst);
+        return newfd;
+    }
+
+    if((uint32)(newfd - 3) >= LX_MAX_FD)
+    {
+        return -LX_EBADF;
+    }
+    dst = newfd - 3;
+    if(s_fd[dst].used != 0u)
+    {
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+        if(s_fd[dst].kind == LX_FD_SOCKET)
+        {
+            return -LX_EINVAL;
+        }
+#endif
+        (void)lx_fd_release(lx_proc_cur(), (uint32)dst);
+    }
+    if(console != 0u)
+    {
+        lx_fd_console_fill((uint32)dst);
+    }
+    else
+    {
+        lx_fd_clone((uint32)dst, (uint32)idx);
+    }
+    return newfd;
+}
+
+/* dup(23)：复制到最小的空号。失败只可能是 -EBADF 或 -ENFILE。
+ * 表满为什么是 ENFILE 而不是 Linux 的 EMFILE：本层只有一张固定大小的
+ * fd 表（不是内核文件表 + 进程 fd 表两层），pipe2 / openat 在同一条件下
+ * 都是 -ENFILE，dup 跟着这条既定口径走，不单独造第二种回答。 */
+static int32 lx_dup(void *p_ctx)
+{
+    return lx_fd_dup_to((int32)ARKRTOS_SVC_ARG(p_ctx, 0u), -1);
+}
+
+/* dup3(24)：复制到指定号。参数校验逐条对齐 Linux：
+ *   flags 里有 O_CLOEXEC     -> -EINVAL（本层拒绝，不是忽略）
+ *   flags 里有其它位         -> -EINVAL
+ *   oldfd == newfd           -> -EINVAL（这是 dup3 与 dup2 的唯一区别）
+ *   newfd < 0                -> -EINVAL
+ *   oldfd 无效               -> -EBADF
+ *   newfd >= LX_MAX_FD+3     -> -EBADF */
+static int32 lx_dup3(void *p_ctx)
+{
+    int32  oldfd = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
+    int32  newfd = (int32)ARKRTOS_SVC_ARG(p_ctx, 1u);
+    uint32 flags = ARKRTOS_SVC_ARG(p_ctx, 2u);
+
+    if((flags & ~(uint32)LX_O_CLOEXEC) != 0u)
+    {
+        return -LX_EINVAL;
+    }
+    if((flags & (uint32)LX_O_CLOEXEC) != 0u)
+    {
+        return -LX_EINVAL;
+    }
+    if(oldfd == newfd)
+    {
+        return -LX_EINVAL;
+    }
+    if(newfd < 0)
+    {
+        return -LX_EINVAL;
+    }
+    return lx_fd_dup_to(oldfd, newfd);
 }
 
 /* ---------------------------------------------------------------- 信号 */
@@ -1719,6 +2005,8 @@ static int32 lx_openat(void *p_ctx)
  * 返回 1 = 这个槽原本是有效 fd。 */
 static uint32 lx_fd_release(uint32 slot, uint32 idx)
 {
+    uint32 i;
+
     if((slot >= (uint32)LX_PROC_MAX) || (idx >= LX_MAX_FD))
     {
         return 0u;
@@ -1727,14 +2015,13 @@ static uint32 lx_fd_release(uint32 slot, uint32 idx)
     {
         return 0u;
     }
-#if (ARKRTOS_USE_LINUX_SOCKET == 1)
-    /* 套接字不进管道记账：net 那一格由 close 或退出时的 best-effort
-     * 关闭负责，这里只退 fd 槽。 */
+    /* 管道按「有几个 fd 指着它」记账；dup 出来的那一份在复制时加过一次，
+     * 所以在**每一次**释放里减一次，与引用计数不是一回事。
+     * 套接字不进这张账：net 那一格由 close 或退出时的 best-effort 关闭负责
+     * （见 lx_sock_close / lx_sock_close_all），这里只退 fd 槽。
+     * 控制台引用没有外力可还，直接退槽。 */
     if((s_proc[slot].fd[idx].kind == LX_FD_PIPE_R) ||
        (s_proc[slot].fd[idx].kind == LX_FD_PIPE_W))
-#else
-    if(s_proc[slot].fd[idx].kind != LX_FD_FILE)
-#endif
     {
         int32 pi = (int32)s_proc[slot].fd[idx].pipe;
 
@@ -1768,6 +2055,16 @@ static uint32 lx_fd_release(uint32 slot, uint32 idx)
     s_proc[slot].fd[idx].pipe = 0u;
     s_proc[slot].fd[idx].off  = 0u;
     s_proc[slot].fd[idx].size = 0u;
+    /* 指向这一格的标准流别名同时摘掉：别名与槽是同一份状态，留一个指向
+     * 空槽的别名等于给程序一个假句柄（lx_std_slot 也会当它不存在，但让它
+     * 一直挂着会让后面的 dup3 误判「这一格被别名占着」）。 */
+    for(i = 0u; i < 3u; i++)
+    {
+        if(s_proc[slot].std_slot[i] == (uint8)(idx + 1u))
+        {
+            s_proc[slot].std_slot[i] = 0u;
+        }
+    }
     s_proc[slot].fd[idx].path[0] = 0;
     s_proc[slot].fd[idx].wr = 0u;
 #if (ARKRTOS_USE_LINUX_SOCKET == 1)
@@ -2971,6 +3268,12 @@ static void lx_proc_fork_child(uint32 slot, int32 child, int32 parent)
         }
         s_proc[slot].sig_blocked = s_proc[(uint32)pslot].sig_blocked;
         s_proc[slot].sig_pending = 0u;
+        /* 标准流别名按槽下标 1:1 照抄：fd 表是逐项复制的，子进程里同一格
+         * 装的是同一个对象的新引用，别名指过去仍然是对的。 */
+        for(i = 0u; i < 3u; i++)
+        {
+            s_proc[slot].std_slot[i] = s_proc[(uint32)pslot].std_slot[i];
+        }
     }
     lx_proc_bind(slot, child);
 #if (ARKRTOS_USE_LINUX_THREAD == 1)
@@ -2998,7 +3301,17 @@ static int32 lx_close(void *p_ctx)
 
     if((fd >= 0) && (fd <= 2))
     {
-        return 0;       /* 标准流：关掉是空操作，不制造假句柄 */
+        /* 标准流别名：关掉它等于把重定向撤掉，fd 号本身仍在（与 Linux 一致：
+         * 之后 write(1, ...) 回到控制台）。没有别名就是真标准流，关掉是空操作，
+         * 不制造假句柄。 */
+        idx = lx_std_slot(fd);
+        if(idx < 0)
+        {
+            return 0;
+        }
+        lx_std_set(fd, -1);
+        (void)lx_fd_release(lx_proc_cur(), (uint32)idx);
+        return 0;
     }
 
     idx = lx_fd_find(fd);
@@ -3035,15 +3348,23 @@ static int32 lx_read(void *p_ctx)
     uint32 done = 0u;
     int32  idx;
 
-    if(fd == 0)
+    if((fd >= 0) && (fd <= 2))
     {
-        return 0;       /* 没有 stdin：读到 EOF，这不是错误 */
+        /* 标准流：有别名就落到别名那一格（dup2(file, 0) 之后 read(0) 读的是
+         * 那个文件或管道），没有别名就是「没有 stdin，读到 EOF」。 */
+        idx = lx_std_slot(fd);
+        if(idx < 0)
+        {
+            return 0;
+        }
     }
-
-    idx = lx_fd_find(fd);
-    if(idx < 0)
+    else
     {
-        return -LX_EBADF;
+        idx = lx_fd_find(fd);
+        if(idx < 0)
+        {
+            return -LX_EBADF;
+        }
     }
 #if (ARKRTOS_USE_LINUX_SOCKET == 1)
     if(s_fd[idx].kind == LX_FD_SOCKET)
@@ -3051,6 +3372,10 @@ static int32 lx_read(void *p_ctx)
         return lx_sock_read(p_ctx);
     }
 #endif
+    if(s_fd[idx].kind == LX_FD_CONSOLE)
+    {
+        return 0;           /* 控制台引用：读到 EOF（与 fd 0 同一条语义） */
+    }
     if(s_fd[idx].kind != LX_FD_FILE)
     {
         if(s_fd[idx].kind != LX_FD_PIPE_R)
@@ -3108,6 +3433,53 @@ static int32 lx_read(void *p_ctx)
     return (int32)done;
 }
 
+/* fd 1/2（以及 dup 出来的控制台引用）的写：整次 write 独占控制台。
+ * 内核日志（[LA64U] ...）拿的是同一把锁，于是用户的一行不会被切成两截。
+ * 之前逐字节直写 board_putc、不拿锁，子进程的 COW 日志能插在
+ * "[fork] ... -> 1" 与 " ok" 之间，门禁看起来像少了一条读数——读数没少，
+ * 是行被劈开了。 */
+static int32 lx_console_out(unsigned long ua, uint32 want)
+{
+    uint8  buf[LX_IO_CHUNK];
+    uint32 done = 0u;
+    int32  held;
+
+    if((ua == 0u) && (want != 0u))
+    {
+        return -LX_EFAULT;
+    }
+    held = arkrtos_console_lock();
+    while(done < want)
+    {
+        uint32 n = want - done;
+        uint32 i;
+
+        if(n > LX_IO_CHUNK)
+        {
+            n = LX_IO_CHUNK;
+        }
+        if(arkrtos_copy_from_user(buf, (const void *)(unsigned long)(ua + done),
+                                  n) != 0)
+        {
+            if(held != 0)
+            {
+                arkrtos_console_unlock();
+            }
+            return (done > 0u) ? (int32)done : -LX_EFAULT;
+        }
+        for(i = 0u; i < n; i++)
+        {
+            arkrtos_board_putc((char)buf[i]);
+        }
+        done += n;
+    }
+    if(held != 0)
+    {
+        arkrtos_console_unlock();
+    }
+    return (int32)want;
+}
+
 static int32 lx_write(void *p_ctx)
 {
 #if (ARKRTOS_USE_LINUX_SOCKET == 1)
@@ -3119,80 +3491,48 @@ static int32 lx_write(void *p_ctx)
     int32  fd   = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
     unsigned long ua = ARKRTOS_SVC_ARG(p_ctx, 1u);
     uint32 want = ARKRTOS_SVC_ARG(p_ctx, 2u);
-    uint8  buf[LX_IO_CHUNK];
-    uint32 done = 0u;
+    int32  idx;
 
-    if((fd != 1) && (fd != 2))
+    if((fd >= 0) && (fd <= 2))
     {
-        int32 pidx = lx_fd_find(fd);
-
-        /* 文件写仍是 -EROFS（openat 就不让可写打开）；这条路只认管道写端。
-         * U-21 的 O_RDWR fd 也不走这里：文件内容的写只有「映射 + 写回」一条
-         * 路，这里如实回 -ENOSYS，而不是给一个看似成功的空写。 */
-        if((pidx < 0))
+        /* 标准流：dup2(x, 1) 之后 write(1, ...) 要落到那条 fd 上（重定向的
+         * 常见写法），没有别名才是真控制台。 */
+        idx = lx_std_slot(fd);
+        if(idx < 0)
+        {
+            return lx_console_out(ua, want);
+        }
+    }
+    else
+    {
+        idx = lx_fd_find(fd);
+        if(idx < 0)
         {
             return -LX_EBADF;
         }
+    }
 #if (ARKRTOS_USE_LINUX_SOCKET == 1)
-        if(s_fd[pidx].kind == LX_FD_SOCKET)
-        {
-            return lx_sock_write(p_ctx);
-        }
+    if(s_fd[idx].kind == LX_FD_SOCKET)
+    {
+        return lx_sock_write(p_ctx);
+    }
 #endif
-        if(s_fd[pidx].kind == LX_FD_FILE)
-        {
-            return -LX_ENOSYS;
-        }
-        if(s_fd[pidx].kind != LX_FD_PIPE_W)
-        {
-            return -LX_EBADF;
-        }
-        return lx_pipe_write(pidx, ua, want);
-    }
-    if((ua == 0u) && (want != 0u))
+    /* 文件写仍是 -EROFS（openat 就不让可写打开）；这条路只认管道写端。
+     * U-21 的 O_RDWR fd 也不走这里：文件内容的写只有「映射 + 写回」一条
+     * 路，这里如实回 -ENOSYS，而不是给一个看似成功的空写。 */
+    if(s_fd[idx].kind == LX_FD_FILE)
     {
-        return -LX_EFAULT;
+        return -LX_ENOSYS;
     }
-
-    /* 整次 write 独占控制台：内核日志（[LA64U] ...）拿的是同一把
-     * 锁，于是用户的一行不会被切成两截。之前逐字节直
-     * 写 board_putc、不拿锁，子进程的 COW 日志能插在
-     * "[fork] ... -> 1" 与 " ok" 之间，门禁看起来像少了一
-     * 条读数——读数没少，是行被劈开了。 */
+    if(s_fd[idx].kind == LX_FD_CONSOLE)
     {
-        int32 held = arkrtos_console_lock();
-
-        while(done < want)
-        {
-            uint32 n = want - done;
-            uint32 i;
-
-            if(n > LX_IO_CHUNK)
-            {
-                n = LX_IO_CHUNK;
-            }
-            if(arkrtos_copy_from_user(buf, (const void *)(unsigned long)(ua + done),
-                                      n) != 0)
-            {
-                if(held != 0)
-                {
-                    arkrtos_console_unlock();
-                }
-                return (done > 0u) ? (int32)done : -LX_EFAULT;
-            }
-            for(i = 0u; i < n; i++)
-            {
-                arkrtos_board_putc((char)buf[i]);
-            }
-            done += n;
-        }
-        if(held != 0)
-        {
-            arkrtos_console_unlock();
-        }
+        return lx_console_out(ua, want);
     }
-
-    return (int32)want;
+    if(s_fd[idx].kind != LX_FD_PIPE_W)
+    {
+        return -LX_EBADF;
+    }
+    return lx_pipe_write(idx, ua, want);
 }
 
 static int32 lx_clock_gettime(void *p_ctx)
@@ -5678,14 +6018,23 @@ static uint8 lx_sel_rd_ready(int32 fd)
 {
     int32 idx;
 
-    if(fd == 0)
+    if(fd <= 2)
     {
-        return 1u;
+        /* 标准流别名要按它落地的那一格判；没有别名时只有 stdin 可读
+         * （读到 EOF），stdout/stderr 不可读。 */
+        idx = lx_std_slot(fd);
+        if(idx < 0)
+        {
+            return (fd == 0) ? 1u : 0u;
+        }
     }
-    idx = lx_fd_find(fd);
-    if(idx < 0)
+    else
     {
-        return 0u;
+        idx = lx_fd_find(fd);
+        if(idx < 0)
+        {
+            return 0u;
+        }
     }
 #if (ARKRTOS_USE_LINUX_SOCKET == 1)
     if(s_fd[idx].kind == LX_FD_SOCKET)
@@ -5698,6 +6047,10 @@ static uint8 lx_sel_rd_ready(int32 fd)
     if(s_fd[idx].kind == LX_FD_FILE)
     {
         return 1u;
+    }
+    if(s_fd[idx].kind == LX_FD_CONSOLE)
+    {
+        return 1u;          /* 读回 EOF：按「可读」报，select 的语义如此 */
     }
     if(s_fd[idx].kind == LX_FD_PIPE_R)
     {
@@ -5720,14 +6073,21 @@ static uint8 lx_sel_wr_ready(int32 fd)
 {
     int32 idx;
 
-    if((fd == 1) || (fd == 2))
+    if(fd <= 2)
     {
-        return 1u;
+        idx = lx_std_slot(fd);
+        if(idx < 0)
+        {
+            return ((fd == 1) || (fd == 2)) ? 1u : 0u;
+        }
     }
-    idx = lx_fd_find(fd);
-    if(idx < 0)
+    else
     {
-        return 0u;
+        idx = lx_fd_find(fd);
+        if(idx < 0)
+        {
+            return 0u;
+        }
     }
 #if (ARKRTOS_USE_LINUX_SOCKET == 1)
     if(s_fd[idx].kind == LX_FD_SOCKET)
@@ -5738,6 +6098,10 @@ static uint8 lx_sel_wr_ready(int32 fd)
     if(s_fd[idx].kind == LX_FD_FILE)
     {
         return 1u;
+    }
+    if(s_fd[idx].kind == LX_FD_CONSOLE)
+    {
+        return 1u;          /* 控制台永远可写 */
     }
     if(s_fd[idx].kind == LX_FD_PIPE_W)
     {
@@ -6202,6 +6566,12 @@ static int32 lx_dispatch(void *p_svc_ctx, uint32 num, int32 *p_rc)
 
     switch(num)
     {
+    case LX_SYS_DUP:
+        rc = lx_dup(p_svc_ctx);
+        break;
+    case LX_SYS_DUP3:
+        rc = lx_dup3(p_svc_ctx);
+        break;
     case LX_SYS_OPENAT:
         rc = lx_openat(p_svc_ctx);
         break;

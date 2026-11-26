@@ -109,6 +109,8 @@ int main(void)
 #endif
 
 /* 号表与 errno 另写一份（用例不该因为被测实现改了常量就跟着改）。 */
+#define T_NR_DUP            (23u)
+#define T_NR_DUP3           (24u)
 #define T_NR_OPENAT         (56u)
 #define T_NR_CLOSE          (57u)
 #define T_NR_PIPE2          (59u)
@@ -211,6 +213,7 @@ int main(void)
 #endif
 
 #define T_O_NONBLOCK        (0x800u)
+#define T_O_CLOEXEC         (0x80000u)
 #define T_O_RDWR            (0x2u)
 #define T_O_WRONLY          (0x1u)
 #define T_O_CREAT           (0x40u)
@@ -1478,6 +1481,207 @@ static void t_pipe(t_ctx *c)
     ck_ret(c, 128, "已提交的那一块真的在管道里");
 }
 
+/* 分组 7b：dup / dup3
+ *
+ * 这里钉住的四件事，每一条都在真机读数（linux_dup.c 的 [dup] 块）里有对应：
+ *   1) dup 拿最小空号，写经副本、读走原读端 —— 管道对象是同一个；
+ *   2) 原写端关掉后副本仍可写，全部关掉才 EOF —— 计数按 fd，不按名字；
+ *   3) dup3 到 0..2 是「占一格真槽 + 记别名」：close(源) 不影响它，
+ *      close(1) 把别名撤掉、write(1) 回到控制台；
+ *   4) 失败面：EBADF / EINVAL / ENFILE，各条判据的顺序与 Linux 一致。 */
+static void t_dup(t_ctx *c)
+{
+    uint32 fds[2];
+    uint32 i;
+    int32  d;
+    int32  rc;
+
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    u_get(T_DATA_OFF, fds, 8u);
+    ck(fds[0] == 3u && fds[1] == 4u, "dup 用例的管道 fd 是 3/4");
+
+    (void)call(c, T_NR_DUP, (unsigned long)fds[1], 0UL, 0UL, 0UL);
+    ck_ret(c, 5, "dup 拿最小的空号（5）");
+    rc = (int32)c->ret;
+    ck(rc != (int32)fds[1], "dup 回的不是源号");
+    (void)call(c, T_NR_DUP, (unsigned long)fds[1], 0UL, 0UL, 0UL);
+    ck_ret(c, 6, "再 dup 一次拿下一个空号（6）");
+
+    u_put_str(T_STR_OFF, "dup!");
+    (void)call(c, T_NR_WRITE, 5UL, u_ptr(T_STR_OFF), 4UL, 0UL);
+    ck_ret(c, 4, "经副本写 4 字节");
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 4UL, 0UL);
+    ck_ret(c, 4, "原读端读到副本写的字节");
+    ck(memcmp(&g_user[T_DATA_OFF], "dup!", 4u) == 0, "副本写入的内容一致");
+
+    (void)call(c, T_NR_CLOSE, (unsigned long)fds[1], 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "关掉原写端");
+    (void)call(c, T_NR_WRITE, 6UL, u_ptr(T_STR_OFF), 1UL, 0UL);
+    ck_ret(c, 1, "原写端关掉后副本仍可写");
+    (void)call(c, T_NR_CLOSE, 5UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "关第一个副本");
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 8UL, 0UL);
+    ck_ret(c, 1, "还有一个副本在写端，读到那 1 字节");
+    (void)call(c, T_NR_CLOSE, 6UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "关最后一个副本");
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 8UL, 0UL);
+    ck_ret(c, 0, "所有写端关掉后读到 EOF");
+    (void)call(c, T_NR_CLOSE, (unsigned long)fds[0], 0UL, 0UL, 0UL);
+
+    /* 失败面 */
+    (void)call(c, T_NR_DUP, 999UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EBADF, "dup(999) -EBADF");
+    (void)call(c, T_NR_DUP, (unsigned long)(uint32)-1, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EBADF, "dup(-1) -EBADF");
+
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    u_get(T_DATA_OFF, fds, 8u);
+    (void)call(c, T_NR_DUP3, (unsigned long)fds[1], (unsigned long)fds[1], 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "dup3(old == new) -EINVAL");
+    (void)call(c, T_NR_DUP3, (unsigned long)fds[1], 5UL,
+               (unsigned long)T_O_CLOEXEC, 0UL);
+    ck_ret(c, -T_EINVAL, "dup3(O_CLOEXEC) -EINVAL（本层没有 exec 关闭语义）");
+    (void)call(c, T_NR_DUP3, (unsigned long)fds[1], 5UL, 0x400UL, 0UL);
+    ck_ret(c, -T_EINVAL, "dup3(认不出的位) -EINVAL");
+    (void)call(c, T_NR_DUP3, (unsigned long)fds[1], 20UL, 0UL, 0UL);
+    ck_ret(c, -T_EBADF, "dup3(newfd 越过分区上限) -EBADF");
+    (void)call(c, T_NR_DUP3, (unsigned long)fds[1], (unsigned long)(uint32)-3, 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "dup3(newfd 为负) -EINVAL");
+    (void)call(c, T_NR_DUP3, 999UL, 5UL, 0UL, 0UL);
+    ck_ret(c, -T_EBADF, "dup3(oldfd 无效) -EBADF");
+
+    /* dup3 覆盖一个在用的文件 fd：游标从源的那一份起（dup 复制的是槽） */
+    fresh(c);
+    g_stat_rc = 0;
+    g_stat_size = 100u;
+    g_stat_mode = 0u;
+    (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF), 0UL, 0UL);
+    ck_ret(c, 3, "覆盖用例的第一个文件 fd = 3");
+    (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF), 0UL, 0UL);
+    ck_ret(c, 4, "覆盖用例的第二个文件 fd = 4");
+    g_synth_any = 1;
+    (void)call(c, T_NR_DUP3, 4UL, 3UL, 0UL, 0UL);
+    ck_ret(c, 3, "dup3 覆盖 fd 3 并回 3");
+    (void)call(c, T_NR_READ, 3UL, u_ptr(T_DATA_OFF), 4UL, 0UL);
+    ck_ret(c, 4, "覆盖后的 fd 3 读的是文件");
+    ck_u(u_get8(T_DATA_OFF), 0u, "覆盖后的 fd 3 从偏移 0 开始读");
+    g_synth_any = 0;
+
+    /* dup3 到 1：stdout 重定向与撤销 */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    u_get(T_DATA_OFF, fds, 8u);
+    (void)call(c, T_NR_DUP3, (unsigned long)fds[1], 1UL, 0UL, 0UL);
+    ck_ret(c, 1, "dup3(写端, 1) 回 1");
+    g_putc_len = 0u;
+    u_put_str(T_STR_OFF, "OUT");
+    (void)call(c, T_NR_WRITE, 1UL, u_ptr(T_STR_OFF), 3UL, 0UL);
+    ck_ret(c, 3, "write(1) 写进管道");
+    ck(g_putc_len == 0u, "write(1) 没有落到控制台");
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 3UL, 0UL);
+    ck_ret(c, 3, "从读端读出重定向的 3 字节");
+    ck(memcmp(&g_user[T_DATA_OFF], "OUT", 3u) == 0, "重定向内容一致");
+
+    /* 别名是独立句柄：源关掉不影响它 */
+    (void)call(c, T_NR_DUP3, (unsigned long)fds[1], 2UL, 0UL, 0UL);
+    ck_ret(c, 2, "dup3(写端, 2) 回 2");
+    (void)call(c, T_NR_CLOSE, (unsigned long)fds[1], 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "关掉源写端");
+    u_put_str(T_STR_OFF, "Z");
+    (void)call(c, T_NR_WRITE, 2UL, u_ptr(T_STR_OFF), 1UL, 0UL);
+    ck_ret(c, 1, "源关掉后 fd 2 仍可写");
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 8UL, 0UL);
+    ck_ret(c, 1, "读到 fd 2 写的那 1 字节");
+
+    /* close(1) 撤销重定向：write(1) 回到控制台 */
+    (void)call(c, T_NR_CLOSE, 1UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "close(1) 撤掉别名");
+    g_putc_len = 0u;
+    (void)call(c, T_NR_WRITE, 1UL, u_ptr(T_STR_OFF), 1UL, 0UL);
+    ck_ret(c, 1, "撤掉别名后 write(1) 回 1");
+    ck(g_putc_len == 1u, "撤掉别名后 write(1) 落到控制台");
+    (void)call(c, T_NR_CLOSE, 2UL, 0UL, 0UL, 0UL);
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 8UL, 0UL);
+    ck_ret(c, 0, "两个别名都撤掉后写端归零 -> EOF");
+    (void)call(c, T_NR_CLOSE, (unsigned long)fds[0], 0UL, 0UL, 0UL);
+
+    /* dup(0)：控制台引用 */
+    (void)call(c, T_NR_DUP, 0UL, 0UL, 0UL, 0UL);
+    d = (int32)c->ret;
+    ck(d >= 3, "dup(0) 拿一个真 fd");
+    (void)call(c, T_NR_READ, (unsigned long)d, u_ptr(T_DATA_OFF), 4UL, 0UL);
+    ck_ret(c, 0, "控制台引用读到 EOF");
+    g_putc_len = 0u;
+    (void)call(c, T_NR_WRITE, (unsigned long)d, u_ptr(T_STR_OFF), 1UL, 0UL);
+    ck_ret(c, 1, "控制台引用写回 1");
+    ck(g_putc_len == 1u, "控制台引用写到控制台");
+    (void)call(c, T_NR_CLOSE, (unsigned long)d, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "关控制台引用");
+    (void)call(c, T_NR_CLOSE, (unsigned long)d, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EBADF, "控制台引用关两次回 -EBADF");
+
+    /* dup3(0, 2) 与 dup3(0, 7)：源是控制台时，目标无论落在标准流还是普通号，
+     * 装的都是控制台对象（write 走控制台、read 回 EOF）。这两条各走一处分支。 */
+    (void)call(c, T_NR_DUP3, 0UL, 2UL, 0UL, 0UL);
+    ck_ret(c, 2, "dup3(0, 2) 回 2");
+    g_putc_len = 0u;
+    (void)call(c, T_NR_WRITE, 2UL, u_ptr(T_STR_OFF), 1UL, 0UL);
+    ck_ret(c, 1, "fd 2 换成控制台对象后 write 回 1");
+    ck(g_putc_len == 1u, "fd 2 的写落到控制台");
+    (void)call(c, T_NR_READ, 2UL, u_ptr(T_DATA_OFF), 1UL, 0UL);
+    ck_ret(c, 0, "fd 2 的控制台对象读回 EOF");
+    (void)call(c, T_NR_DUP3, 0UL, 7UL, 0UL, 0UL);
+    ck_ret(c, 7, "dup3(0, 7) 回 7（普通号那一支）");
+    g_putc_len = 0u;
+    (void)call(c, T_NR_WRITE, 7UL, u_ptr(T_STR_OFF), 1UL, 0UL);
+    ck_ret(c, 1, "fd 7 的控制台对象 write 回 1");
+    ck(g_putc_len == 1u, "fd 7 的写落到控制台");
+    (void)call(c, T_NR_CLOSE, 7UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "关掉 fd 7 的控制台对象");
+
+    /* 别名指向的那一格被 dup3 覆盖：释放时必须把别名一起摘掉，否则
+     * write(1) 会拿着一个指向空槽的假句柄。fd 5 就是别名占的 slot 2。 */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    u_get(T_DATA_OFF, fds, 8u);
+    (void)call(c, T_NR_DUP3, (unsigned long)fds[1], 1UL, 0UL, 0UL);
+    ck_ret(c, 1, "准备：写端重定向到 fd 1（别名占 slot 2 = fd 5）");
+    (void)call(c, T_NR_DUP3, (unsigned long)fds[1], 5UL, 0UL, 0UL);
+    ck_ret(c, 5, "用 dup3 覆盖别名指向的那一格");
+    g_putc_len = 0u;
+    u_put_str(T_STR_OFF, "Q");
+    (void)call(c, T_NR_WRITE, 1UL, u_ptr(T_STR_OFF), 1UL, 0UL);
+    ck_ret(c, 1, "别名格被覆盖后 write(1) 仍回 1");
+    ck(g_putc_len == 1u, "别名格被覆盖后 write(1) 落回控制台（不留假句柄）");
+    (void)call(c, T_NR_CLOSE, (unsigned long)fds[0], 0UL, 0UL, 0UL);
+    (void)call(c, T_NR_CLOSE, (unsigned long)fds[1], 0UL, 0UL, 0UL);
+
+    /* 表满：dup 要新槽 -> -ENFILE；dup3 到自己已有的别名 -> 复用那一格 */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    u_get(T_DATA_OFF, fds, 8u);
+    (void)call(c, T_NR_DUP3, (unsigned long)fds[1], 1UL, 0UL, 0UL);
+    ck_ret(c, 1, "先建一个别名（占第 5 格）");
+    for(i = 0u; i < 5u; i++)
+    {
+        g_stat_rc = 0;
+        g_stat_size = 100u;
+        g_stat_mode = 0u;
+        (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF), 0UL, 0UL);
+        ck_ret(c, (int32)(6u + i), "填满剩下的 fd 槽");
+    }
+    (void)call(c, T_NR_DUP, (unsigned long)fds[1], 0UL, 0UL, 0UL);
+    ck_ret(c, -T_ENFILE, "fd 表满时 dup 回 -ENFILE");
+    (void)call(c, T_NR_DUP3, (unsigned long)fds[0], 2UL, 0UL, 0UL);
+    ck_ret(c, -T_ENFILE, "fd 表满且 fd 2 没有别名时 dup3 回 -ENFILE");
+    (void)call(c, T_NR_DUP3, (unsigned long)fds[0], 1UL, 0UL, 0UL);
+    ck_ret(c, 1, "fd 表满时 dup3 到已有的别名复用那一格");
+    (void)call(c, T_NR_WRITE, 1UL, u_ptr(T_STR_OFF), 1UL, 0UL);
+    ck_ret(c, -T_EBADF, "别名改成读端后 write(1) 回 -EBADF");
+}
+
 /* 分组 8：clock_gettime / uname */
 static void t_meta(t_ctx *c)
 {
@@ -1987,6 +2191,24 @@ static void t_filemap_edge(t_ctx *c)
     ck_ret(c, -T_EFAULT, "内容往用户区拷不进去回 -EFAULT");
     g_to_budget = -1;
 
+    /* --- 5b) 映射时文件内容读不回来：-EIO，写回记账不泄漏 --- */
+    fresh(c);
+    g_stat_rc = 0;
+    g_stat_size = 300u;
+    g_file_len = 300u;
+    u_put_str(T_PATH_OFF, "/mnt/ram/fm");
+    (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF), 0UL, 0UL);
+    fda = (int32)c->ret;
+    g_read_rc = -1;
+    (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL, (unsigned long)T_PROT_READ,
+                (unsigned long)T_MAP_PRIVATE, (unsigned long)fda, 0UL);
+    ck_ret(c, -T_EIO, "映射时 VFS 读不出内容回 -EIO");
+    g_read_rc = 0;
+    (void)call6(c, T_NR_MMAP, 0UL, 0x1000UL, (unsigned long)T_PROT_READ,
+                (unsigned long)T_MAP_PRIVATE, (unsigned long)fda, 0UL);
+    ck((c->ret > 0u) && (c->ret < (U_BASE + (unsigned long)U_SIZE)),
+       "读失败之后同一条映射仍能建起来（记账没泄漏）");
+
     /* --- 6) 清零阶段拷贝失败：-EFAULT 且写回记账不泄漏 --- */
     fresh(c);
     g_stat_rc = 0;
@@ -2040,6 +2262,10 @@ static void t_filemap_edge(t_ctx *c)
                    (unsigned long)T_MS_SYNC, 0UL);
         ck_ret(c, 0, "msync 跳到窗口里别的页回 0（认得窗口，但不假装有东西要写回）");
         ck(g_write_calls == 0, "没有记账命中就不发生写回");
+        (void)call(c, T_NR_MSYNC, addr, 0x2000UL,
+                   (unsigned long)T_MS_SYNC, 0UL);
+        ck_ret(c, 0, "msync 长度越过这一段映射时不写半段、按无记账回 0");
+        ck(g_write_calls == 0, "只覆盖半段的 msync 一个字节都不写");
     }
 
     /* --- 8) 写回本身的三条失败路径 --- */
@@ -3753,6 +3979,21 @@ static void t_pselect6(t_ctx *c)
     (void)call6(c, T_NR_PSELECT6, 2UL, 0UL, W0, 0UL, 0UL, 0UL);
     ck_ret(c, 1, "pselect6 fd1 恒可写回 1");
 
+    /* dup3 出来的控制台引用也参与 select：读侧按「可读（EOF）」报，写侧按
+     * 「永远可写」报，与 fd 0 / 1 / 2 同一套判据，不是按 fd 号猜的。 */
+    (void)call(c, T_NR_DUP3, 0UL, 7UL, 0UL, 0UL);
+    ck_ret(c, 7, "dup3(0, 7) 造一个控制台引用");
+    (void)call(c, T_NR_DUP3, 0UL, 8UL, 0UL, 0UL);
+    ck_ret(c, 8, "dup3(0, 8) 再造一个");
+    u_put32(T_DATA_OFF, 0x80u);                 /* bit7 = fd 7 */
+    (void)call6(c, T_NR_PSELECT6, 8UL, R0, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 1, "pselect6 控制台引用读侧恒可读回 1");
+    u_put32(T_DATA_OFF + 0x100u, 0x100u);       /* bit8 = fd 8 */
+    (void)call6(c, T_NR_PSELECT6, 9UL, 0UL, W0, 0UL, 0UL, 0UL);
+    ck_ret(c, 1, "pselect6 控制台引用写侧恒可写回 1");
+    (void)call(c, T_NR_CLOSE, 7UL, 0UL, 0UL, 0UL);
+    (void)call(c, T_NR_CLOSE, 8UL, 0UL, 0UL, 0UL);
+
     u_put32(tpo, 0u);                           /* 纯轮询 */
     u_put32(tpo + 4u, 0u);
     u_put32(T_DATA_OFF, 0x02u);                 /* bit1 选读：stderr 不可读 */
@@ -3970,6 +4211,7 @@ static uint32 g_net_arg[5];
 static int    g_net_pending;      /* >0：还要再回这么多次 EPENDING */
 static int    g_net_peer_pending; /* >0：GETPEERNAME 还要再回多少次 EPENDING */
 static int    g_net_busy;         /* >0：还要再回这么多次 EBUSY */
+static int    g_net_reply;        /* >0：reply_ready 报「回复已经落地」 */
 static int32  g_net_rc;           /* 最终返回：>=0 结果，<0 负错误号 */
 static int32  g_net_handle;       /* SOCKET / ACCEPT 回的句柄 */
 static uint32 g_net_ip;
@@ -3993,6 +4235,7 @@ static void net_reset(void)
     g_net_pending      = 0;
     g_net_peer_pending = 0;
     g_net_busy         = 0;
+    g_net_reply        = 0;
     g_net_rc           = 0;
     g_net_handle       = 1;
     g_net_ip           = 0x0A000001u;
@@ -4018,7 +4261,7 @@ static void net_addr_out(unsigned long ip_ua, unsigned long port_ua)
 int32 arkrtos_net_reply_ready(int32 owner)
 {
     (void)owner;
-    return 0;
+    return g_net_reply;
 }
 int32 arkrtos_net_call(uint32 op, uint32 a1, uint32 a2, uint32 a3,
                        uint32 a4, uint32 a5)
@@ -4608,6 +4851,28 @@ static void t_socket(t_ctx *c)
     (void)call(c, T_NR_CLOSE, 3UL, 0UL, 0UL, 0UL);
     ck_ret(c, -T_EBADF, "socket 关掉之后同一个 fd 回 -EBADF");
 
+    /* ---- dup/dup3 落在 socket 上：明确不支持（-EINVAL），源与目标两条边 ---- */
+    fresh(c);
+    net_reset();
+    g_restart_rc = 0;
+    g_net_handle = 91;
+    r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+    ck(r == 3, "dup 前置：socket = fd 3");
+    net_reset();
+    (void)call(c, T_NR_DUP, 3UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "源的 socket 不能被 dup（-EINVAL，不造假句柄）");
+    (void)call(c, T_NR_DUP3, 3UL, 7UL, 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "dup3 的源是 socket 同样 -EINVAL");
+    ck_u(g_net_calls, 0u, "两个 dup 号都不往 net 发请求");
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "目标 socket 用例：先建一根管道（fd 4/5）");
+    net_reset();
+    g_net_bytes = 1;
+    (void)call(c, T_NR_DUP3, 4UL, 3UL, 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "目标是 socket 时 dup3 回 -EINVAL（不覆盖 socket 槽）");
+    r = sock_run(c, T_NR_READ, 3UL, u_ptr(T_DATA_OFF), 1UL, 0UL, 0UL, 0UL);
+    ck(r == 1, "被拒之后 fd 3 仍然是 socket");
+
     /* ---- fd 槽用满：先判 -EMFILE，不往 net 发请求 ---- */
     fresh(c);
     net_reset();
@@ -5074,6 +5339,27 @@ static void t_socket(t_ctx *c)
         ck_ret(c, -T_EBADF, "往管道读端写回 -EBADF");
     }
 
+    /* ---- 回复先落地：重放前先问一句，问到了就不睡 ----
+     * 服务任务可能在 arkrtos_net_call 返回之前就写好回复，那时唤醒发不出去；
+     * 这一支把那条丢唤醒的竞态收掉（睡时间片只是兜底）。 */
+    {
+        fresh(c);
+        net_reset();
+        g_restart_rc = 0;
+        g_net_handle = 160;
+        r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+        ck(r == 3, "回复已落地用例前置：fd 3");
+
+        net_reset();
+        g_net_pending = 100;    /* 一直回 EPENDING，让每一轮都留在重放路径上 */
+        g_net_reply   = 1;
+        g_block_calls = 0;
+        r = sock_run(c, T_NR_SENDTO, 3UL, iop, 2UL, 0UL, 0UL, 0UL);
+        ck(r == T_STILL_WAITING, "回复已落地时仍留待下一轮（不写返回值）");
+        ck(g_block_calls == 0, "回复已落地时一次时间片都不睡");
+        g_net_reply = 0;
+    }
+
     /* 收尾：把挂着的登记和端口能力恢复成默认 */
     (void)arkrtos_linux_abi_on_task_exit(7);
     g_restart_rc = -1;
@@ -5097,6 +5383,7 @@ int main(void)
     t_write(&c);
     t_pread(&c);
     t_pipe(&c);
+    t_dup(&c);
     t_meta(&c);
     t_mem(&c);
     t_signal(&c);

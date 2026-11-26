@@ -3412,6 +3412,101 @@ devid: mac must be 32 bytes, got 2
 implements the OTP secret hook, and that belongs to the production line (see `docs/已知限制.en.md`
 section 4 and the SEC-G13 row of `docs/安全认证准备.en.md`).
 
+### 5.36 `dup`/`dup3` readout on QEMU (2026-11-27)
+
+**Build**: this pair is **live in the default profile**, so no `EXTRA_CFLAGS` at all -- `dup`/`dup3`
+only copy one fd-table slot, with no new mechanism and no new switch. It therefore uses the default
+build that the gate and `ci_gate` already run:
+
+```bash
+make -f example/qemu_loongarch64/Makefile clean
+make -f example/qemu_loongarch64/Makefile -j8
+```
+
+`build/qemu_loongarch64/ark_qemu_la64.elf` gains one `ark_example_linux_dup` array (the fixture ELF
+turned into an 8408-byte blob); `elf_demo.c` writes it into `/mnt/ram/linux_dup` and execs it. (The
+ten-tier build must compile it too -- every tier of `tools/fork_gate.py` carries this block.)
+
+**Readings** (same firmware, serial verbatim, 34 checks in the `[dup]` block):
+
+```
+[dup] write /mnt/ram/linux_dup rc=0 size=8408
+[dup] pipe2 rc = 0 ok
+[dup] dup(writer) is a new fd = 1 ok
+[dup] write through the copy = 5 ok
+[dup] read from the original reader = 5 ok
+[dup] content matches = 1 ok
+[dup] close the original writer = 0 ok
+[dup] copy still writable after close = 3 ok
+[dup] read the second write = 3 ok
+[dup] second content matches = 1 ok
+[dup] close the copy = 0 ok
+[dup] read after all writers closed -> EOF = 0 ok
+[dup] dup(999) -> -EBADF = -9 ok
+[dup] dup3(1, 1, 0) -> -EINVAL = -22 ok
+[dup] dup3(..., O_CLOEXEC) -> -EINVAL = -22 ok
+[dup] dup3(999, 1, 0) -> -EBADF = -9 ok
+[dup] dup3(writer, 1) returns 1 = 1 ok
+[dup] write(1) lands in the pipe = 3 ok
+[dup] read the redirected write = 3 ok
+[dup] redirected content matches = 1 ok
+[dup] close(1) drops the alias = 0 ok
+[dup] dup3(reader, writer) overwrites = 4 ok
+[dup] overwritten fd is no longer a writer = -9 ok
+[dup] overwrite dropped the only writer -> EOF = 0 ok
+[dup] dup(0) is a console reference = 1 ok
+[dup] read the console reference -> EOF = 0 ok
+[dup] PASS: dup new fd, data through the copy, alias survives close, dup3 redirects stdout,
+             dup3 overwrites, console reference, EBADF/EINVAL on the four failure surfaces
+[dup] finished after 0 ms, exit code 56
+```
+
+In the same boot, `[linux] exit code 7`, `[pipe] exit code 55`, `[sig] exit code 138` and the
+`[hello]` / `[ELF] tamper check PASS` / `[FS] PASS` readouts are all unchanged -- the compatibility
+layer gained a pair of syscall numbers and moved no existing readout.
+
+**How to read the 34 checks** (each one blocks a specific false green):
+
+1. `dup(writer) is a new fd = 1` -- a **new** number comes back, not the source number echoed.
+   "greater than zero" alone would not be enough.
+2. `write through the copy = 5` + `read from the original reader = 5` + `content matches` -- the copy
+   and the source refer to the **same pipe**; otherwise those 5 bytes could not be read back.
+3. `close the original writer = 0` followed by `copy still writable after close = 3` -- each
+   descriptor holds its own writer reference; an implementation that copies the number without
+   bumping the count short-circuits to `-EPIPE` here.
+4. `read after all writers closed -> EOF = 0` -- the count really reached zero. Without this line,
+   "bumped the count but never dropped it" stays green until some later full table.
+5. `dup3(writer, 1) returns 1` + `write(1) lands in the pipe = 3` -- `write` really routes through
+   the alias instead of printing to the console (which would also "look like success").
+6. `close(1) drops the alias = 0` + `read after both writers gone -> EOF = 0` -- the alias occupies
+   a **real slot**, so closing it drops a reference too; a shared-source-slot implementation loses
+   one writer here and reads back `-EAGAIN`.
+7. `dup3(reader, writer) overwrites = 4` + `overwritten fd is no longer a writer = -9` +
+   `overwrite dropped the only writer -> EOF = 0` -- the order must be "release the old target,
+   then install the copy"; the reverse would release the copy just installed.
+8. The four failure surfaces read back **specific** negative values (`-9` / `-22` twice / `-9`), not
+   merely "some negative number".
+9. `dup(0) is a console reference = 1` + `read the console reference -> EOF = 0` -- when the source
+   is a standard stream with no alias, what gets copied is the **console object**
+   (`LX_FD_CONSOLE`), and reading it returns EOF.
+
+**A trap only visible in hindsight**: `lx_fd_release()` used to decide "pipe?" by
+`kind != LX_FD_FILE`, and the new `LX_FD_CONSOLE` has `pipe == 0`, so it would have been treated as
+"reader of pipe 0" and decremented a real pipe. The test is now explicit `PIPE_R`/`PIPE_W`. Without
+that fix the symptom appears **elsewhere** (some pipe reaching EOF early), far from the scene.
+
+**Why the fixture prints on fd 2**: case group 3 redirects fd 1 into a pipe, so printing the readout
+on fd 1 would push `[dup] ...` lines into the pipe and read them back as something else -- not a
+single byte would reach the serial port.
+
+**Boundaries**: sockets are explicitly not `dup`-able (`-EINVAL`), `O_CLOEXEC` is explicitly refused
+(this layer has no close-on-exec semantics), and file copies keep independent offsets (the only
+visible deviation); each reason is spelled out in section 8.12 of
+[Linux可执行文件兼容-系统调用ABI](Linux可执行文件兼容-系统调用ABI.en.md). The `qemu-readout` step
+of `tools/linux_abi_gate.py` now covers this block (34 checks + `exit code 56`), and
+`parser-selfcheck` adds four dup-specific mutations (drop the PASS line / change the exit code /
+insert a FAIL / delete one check).
+
 ## 6. LoongArch32 port (compiles, never executed)
 
 ### 6.1 No carrier on this machine

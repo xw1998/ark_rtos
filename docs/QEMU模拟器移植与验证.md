@@ -3520,6 +3520,93 @@ devid: mac must be 32 bytes, got 2
 `BUILTIN`）——**"没得看"不报成 PASS**。要看到 PASS 需要一块真的实现 OTP 密钥钩子的板子，
 那部分归产线（见 `docs/已知限制.md` §四 与 `docs/安全认证准备.md` SEC-G13 行）。
 
+### 5.36 `dup`/`dup3` 在 QEMU 上的读数（2026-11-27）
+
+**构建**：这一对是**默认档即生效**的，不需要任何 `EXTRA_CFLAGS`——`dup`/`dup3` 只复制
+fd 表里的一格，没有新机制、没有新开关。所以走的是门禁与 `ci_gate` 用的默认构建：
+
+```bash
+make -f example/qemu_loongarch64/Makefile clean
+make -f example/qemu_loongarch64/Makefile -j8
+```
+
+`build/qemu_loongarch64/ark_qemu_la64.elf` 里多一个 `ark_example_linux_dup` 数组
+（夹具 ELF 转成的 blob，8408 B），由 `elf_demo.c` 写进 `/mnt/ram/linux_dup` 再 `exec`。
+（十档全开的构建同样要编过，`tools/fork_gate.py` 每一档都会带上这段。）
+
+**读数**（同一份固件，串口原样，`[dup]` 块 34 条）：
+
+```
+[dup] write /mnt/ram/linux_dup rc=0 size=8408
+[dup] pipe2 rc = 0 ok
+[dup] dup(writer) is a new fd = 1 ok
+[dup] write through the copy = 5 ok
+[dup] read from the original reader = 5 ok
+[dup] content matches = 1 ok
+[dup] close the original writer = 0 ok
+[dup] copy still writable after close = 3 ok
+[dup] read the second write = 3 ok
+[dup] second content matches = 1 ok
+[dup] close the copy = 0 ok
+[dup] read after all writers closed -> EOF = 0 ok
+[dup] dup(999) -> -EBADF = -9 ok
+[dup] dup3(1, 1, 0) -> -EINVAL = -22 ok
+[dup] dup3(..., O_CLOEXEC) -> -EINVAL = -22 ok
+[dup] dup3(999, 1, 0) -> -EBADF = -9 ok
+[dup] dup3(writer, 1) returns 1 = 1 ok
+[dup] write(1) lands in the pipe = 3 ok
+[dup] read the redirected write = 3 ok
+[dup] redirected content matches = 1 ok
+[dup] close(1) drops the alias = 0 ok
+[dup] dup3(reader, writer) overwrites = 4 ok
+[dup] overwritten fd is no longer a writer = -9 ok
+[dup] overwrite dropped the only writer -> EOF = 0 ok
+[dup] dup(0) is a console reference = 1 ok
+[dup] read the console reference -> EOF = 0 ok
+[dup] PASS: dup new fd, data through the copy, alias survives close, dup3 redirects stdout,
+             dup3 overwrites, console reference, EBADF/EINVAL on the four failure surfaces
+[dup] finished after 0 ms, exit code 56
+```
+
+同一启动里 `[linux] exit code 7`、`[pipe] exit code 55`、`[sig] exit code 138` 与
+`[hello]` / `[ELF] tamper check PASS` / `[FS] PASS` 全部不变——兼容层扩了一对号，
+没有动任何既有读数。
+
+**怎么读这 34 条**（每一条都在挡一种具体的假绿）：
+
+1. `dup(writer) is a new fd = 1` —— 返的是**新号**，不是把源号回一遍。只看「>0」不够。
+2. `write through the copy = 5` + `read from the original reader = 5` + `content matches`
+   —— 副本与源**指向同一根管道**（否则读不到那 5 字节）。
+3. `close the original writer = 0` 之后 `copy still writable after close = 3` —— 两个
+   描述符各自持有一次写端计数；若实现只复制了 fd 号没加计数，这里会短路成 `-EPIPE`。
+4. 两端都关之后 `read after all writers closed -> EOF = 0` —— 计数真的减到 0。没有这条，
+   「加了计数但没在 close 时减」会一直绿到某次满表。
+5. `dup3(writer, 1) returns 1` + `write(1) lands in the pipe = 3` —— `write` 真的按别名
+   路由到那一格，而不是往控制台打（后者也会「看起来成功」）。
+6. `close(1) drops the alias = 0` + `read after both writers gone -> EOF = 0` —— 别名占的
+   是**真槽**，关掉它同样减计数；共享源槽的实现在这里会漏一个写端、读回 `-EAGAIN`。
+7. `dup3(reader, writer) overwrites = 4` + `overwritten fd is no longer a writer = -9` +
+   `overwrite dropped the only writer -> EOF = 0` —— 覆盖的顺序必须是「先释放旧目标，
+   再装副本」；顺序反了会把刚装上的副本又释放掉。
+8. 四条失败面读的是**具体负值**（`-9` / `-22`×2 / `-9`），不是「负数就行」。
+9. `dup(0) is a console reference = 1` + `read the console reference -> EOF = 0` ——
+   源是标准流且没有别名时，复制的是**控制台对象**（`LX_FD_CONSOLE`），读回 EOF。
+
+**只有回头看才发现的坑**：`lx_fd_release()` 原来按「`kind != LX_FD_FILE` 就是管道」
+判要不要减引用计数，而新加的 `LX_FD_CONSOLE` 的 `pipe` 字段是 0，会被当成「管道 0 的
+读者」去减一条真实管道。改成显式判 `PIPE_R`/`PIPE_W`。这条不改，症状会出现在**别处**
+（某次管道提前 EOF），离现场很远。
+
+**夹具为什么从 fd 2 打印**：第三组用例把 fd 1 重定向进管道，若夹具用 fd 1 打读数，
+`[dup] ...` 这些行会被自己写进管道、再从管道读回成别的东西，串口上一个字都看不到。
+
+**边界**：socket 明确不支持 `dup`（`-EINVAL`）、`O_CLOEXEC` 明确拒绝（本层没有
+exec 关闭语义）、文件副本各自持有偏移（唯一可见偏差）。逐条理由见
+[Linux可执行文件兼容-系统调用ABI](Linux可执行文件兼容-系统调用ABI.md) §8.12。
+门禁 `tools/linux_abi_gate.py` 的 `qemu-readout` 已把这一块纳入（34 条 + `exit code 56`），
+`parser-selfcheck` 另有四种针对 dup 块的坏样本（去 PASS 行 / 改退出码 / 插 FAIL /
+少一条 check）。
+
 ### 5.25 RV32 上的 ELF32 装载（U-4，2026-11-17）
 
 RV32 是没有 MMU 的那一档，所以这里不是「换一套页表」，而是**PMP 窗口 + U 模式**：

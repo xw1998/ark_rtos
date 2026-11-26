@@ -37,15 +37,17 @@
      LA64 的分界是「`syscall` 立即数 == 0」，RV32 的分界是 0x10..0x22 留给 Ark。
   F. QEMU 真读数：`[linux]` 的 14 条 check 全 ` ok`（一条 FAIL 都不许）、
      `PASS: every syscall answered as specified`、`exit code 7`；`[pipe]` 的
-     14 条、`[sig]` 的 31 条同理（PASS 行 + 退出码 55 / 138）；并且同一次
-     启动里 hello/modhello/FS 的读数仍在（兼容层不许把别人的演示搞坏）。
+     14 条、`[sig]` 的 31 条、`[dup]` 的 34 条同理（PASS 行 + 退出码
+     55 / 138 / 56）；并且同一次启动里 hello/modhello/FS 的读数仍在（兼容层
+     不许把别人的演示搞坏）。
   G. 解析器自检：把合成坏日志喂给同一个判据（去掉 PASS、把退出码改成 3、
      插一行 FAIL、少一条 check），每种坏法都必须被判红。
 
 不覆盖：fork/clone、父子 fd 继承（没有 fork 就没有第二个进程）、socket、
 futex；真 mmap 语义（MAP_FIXED 的同址丢弃）已做，但它在按需分页档才存在，
 读数在 tools/fork_gate.py 的 `[fork]` 块（本门禁跑默认档，那里回 -ENOSYS）；
-管道（pipe2，非阻塞）已做，读数在 `[pipe]` 块；信号
+管道（pipe2，非阻塞）已做，读数在 `[pipe]` 块；dup / dup3 已做，读数在
+`[dup]` 块（fd 槽复制 + 标准流别名 + 控制台引用，socket 明确不支持 dup）；信号
 （同一任务自我投递的最小一档：rt_sigaction/rt_sigprocmask/kill/tkill/tgkill/
 rt_sigreturn）已做，读数在 `[sig]` 块。两块都按行首锚点判，不靠 [linux] 的
 行数（mmap/brk 只在 ELF 窗口内单调分配）。动态链接（PT_INTERP）
@@ -110,6 +112,8 @@ SIGN_KEY_HEADER = """#ifndef ARKRTOS_SIGN_KEY_LOCAL_H
 
 # asm-generic 号表：这是 Linux UAPI 的事实，不是从源里读回来再自证。
 EXPECT_SYS = {
+    "DUP": 23,
+    "DUP3": 24,
     "OPENAT": 56,
     "CLOSE": 57,
     "PIPE2": 59,
@@ -151,6 +155,11 @@ EXPECT_PIPE_CHECKS = 14
 # EXTRA_CFLAGS=-DARKRTOS_USE_LSX=1 的构建里存在（本门禁跑默认档，因此
 # 默认档恒 31 条；LSX 档实跑同为 31 条，只是最后两条换成 vr0 的两条）。
 EXPECT_SIG_CHECKS = 31
+# dup 夹具（linux_dup.c）的 check 条数：dup 拿新号 / 走副本写读 / 关掉源后
+# 副本仍在 / 两端全关 EOF / dup3 的四个失败面（EBADF、EINVAL 三种）/
+# dup3 覆盖已有 fd / dup3 把 1 与 2 重定向再撤销 / dup(0) 的控制台引用 /
+# 同一号关两次 -EBADF / 表满 -ENFILE 与「复用已有别名那一格」= 34 条。
+EXPECT_DUP_CHECKS = 34
 
 FAILS = []
 PASSES = []
@@ -399,13 +408,14 @@ def check_compile_on(la64, key_dir):
         "example/qemu_loongarch64/elf/linux_execve.c",
         "example/qemu_loongarch64/elf/linux_pipe.c",
         "example/qemu_loongarch64/elf/linux_signal.c",
+        "example/qemu_loongarch64/elf/linux_dup.c",
     ])
     if prog[0] != 0:
         bads.append("elf/linux_hello.c：\n%s" % prog[1][-400:])
     if bads:
         bad("compile-on", "开档编不过 —— " + bads[0])
     else:
-        ok("compile-on", "8 个 TU 在 LA64 真板级下全编过（含四个用户程序本身）")
+        ok("compile-on", "9 个 TU 在 LA64 真板级下全编过（含五个用户程序本身）")
 
 
 # ---------------------------------------------------------------- E 号表
@@ -441,12 +451,26 @@ def check_syscall_table():
     if not m:
         bad("abi-split-rv32", "RV32 里找不到 0x10..0x23 归 Ark 的判据")
     else:
-        # 号段不撞：Linux 最小号 56 = 0x38 > 0x23
-        lowest = min(EXPECT_SYS.values())
-        if lowest <= 0x23:
-            bad("abi-split-rv32", "Linux 号表最小 %d 落进 Ark 号段 0x10..0x23" % lowest)
+        # 号段不撞这条判据要分两步看，否则「Ark 把号段留宽一点」会被误判成缺陷：
+        #   * 落在 0x10..0x23 里的 Linux 号只在「这个端口真的跑 Linux ABI」时
+        #     才有歧义（RV32 的 port 按「先看号段、再看表」分派，号段赢）；
+        #   * RV32 板级从不打开 ELF，而 features.h 守着「开 ABI 必须开 ELF」，
+        #     所以 ABI 在 RV32 上由构造保证是关的。这里按文件核实，不靠推断。
+        collide = sorted(n for n in EXPECT_SYS.values() if 0x10 <= n <= 0x23)
+        rvboard = read_text(os.path.join(ROOT, "board/qemu_riscv32/arkrtos_board_config.h"))
+        abi_on = re.search(r"^#\s*define\s+ARKRTOS_USE_LINUX_ABI\s+1\b", rvboard, re.M)
+        elf_on = re.search(r"^#\s*define\s+ARKRTOS_USE_ELF\s+1\b", rvboard, re.M)
+        if abi_on or elf_on:
+            bad("abi-split-rv32",
+                "RV32 板级打开了 ELF/ABI，而 Linux 号 %s 落进 Ark 号段 0x10..0x23"
+                % collide)
+        elif collide:
+            ok("abi-split-rv32",
+               "RV32：0x10..0x23 归 Ark；Linux 号 %s 落在这段里，但 RV32 板级不开 "
+               "ELF/ABI（开 ABI 必须开 ELF 是 features.h 的 #error），歧义不可达"
+               % collide)
         else:
-            ok("abi-split-rv32", "RV32：0x10..0x23 归 Ark，Linux 最小号 %d 不撞" % lowest)
+            ok("abi-split-rv32", "RV32：0x10..0x23 归 Ark，Linux 号表与号段不交")
 
     # 0x23 的另一半：内核里必须真有这条分派（号表 + 分派 + 头文件三处同源），
     # 否则「号段归 Ark」只是让位，叫了没人应答。
@@ -549,6 +573,13 @@ def judge(text):
     sig_pass = count(lambda s: s.startswith("[sig] PASS: sigaction installed"))
     sig_exit = count(lambda s: re.search(
         r"^\[sig\] finished after \d+ ms, exit code 138$", s) is not None)
+    dup_fail = count(lambda s: s.startswith("[dup] ") and "FAIL" in s)
+    dup_ok = count(lambda s: s.startswith("[dup] ") and s.rstrip().endswith(" ok"))
+    dup_pass = count(lambda s: s.startswith("[dup] PASS: dup new fd"))
+    dup_exit = count(lambda s: re.search(
+        r"^\[dup\] finished after \d+ ms, exit code 56$", s) is not None)
+    dup_werr = count(lambda s: s.startswith("[dup] write /mnt/ram/linux_dup rc=0"))
+    dup_xerr = count(lambda s: s.startswith("[dup] exec rc=0"))
     sig_werr = count(lambda s: s.startswith("[sig] write /mnt/ram/linux_signal rc=0"))
     sig_xerr = count(lambda s: s.startswith("[sig] exec rc=0"))
     werr = count(lambda s: s.startswith("[linux] write /mnt/ram/linux_hello rc=0"))
@@ -578,6 +609,20 @@ def judge(text):
     if pipe_pass != 1:
         problems.append("缺 `[pipe] PASS: pipe2 two fds ...`")
 
+    # dup 那一块：34 条 check 一条 FAIL 都不许，PASS 行与退出码 56。
+    if dup_werr != 1:
+        problems.append("缺 `[dup] write /mnt/ram/linux_dup rc=0`（dup 夹具没送进去）")
+    if dup_xerr != 1:
+        problems.append("缺 `[dup] exec rc=0`（装载器没接受 dup 夹具）")
+    if dup_fail != 0:
+        problems.append("dup 夹具里有 %d 条 FAIL" % dup_fail)
+    if dup_ok != EXPECT_DUP_CHECKS:
+        problems.append("[dup] check 通过条数 %d != %d" % (dup_ok, EXPECT_DUP_CHECKS))
+    if dup_pass != 1:
+        problems.append("缺 `[dup] PASS: dup new fd ...`")
+    if dup_exit != 1:
+        problems.append("缺 `[dup] finished after <ms>, exit code 56`（dup 夹具没跑到底）")
+
     # 信号那一块：31 条 check 一条 FAIL 都不许，PASS 行与退出码 138
     # （默认动作是「结束任务」，内核用 128+10 表达）。
     if sig_werr != 1:
@@ -606,8 +651,9 @@ def judge(text):
         for p in problems:
             notes.append(p)
         return False, notes
-    return True, ["%d 条 check 全 ok、PASS 行与 exit code 7 都在，管道 %d 条、信号 %d 条 check 全 ok（退出码 55 / 138），旁路演示未受影响"
-                  % (EXPECT_CHECKS, EXPECT_PIPE_CHECKS, EXPECT_SIG_CHECKS)]
+    return True, ["%d 条 check 全 ok、PASS 行与 exit code 7 都在，管道 %d 条、信号 %d 条、dup %d 条 check 全 ok（退出码 55 / 138 / 56），旁路演示未受影响"
+                  % (EXPECT_CHECKS, EXPECT_PIPE_CHECKS, EXPECT_SIG_CHECKS,
+                     EXPECT_DUP_CHECKS)]
 
 
 def self_check(good_text):
@@ -630,6 +676,15 @@ def self_check(good_text):
             "[sig] PASS: sigaction installed", "[sig] (quiet) sigaction installed"),
         "信号退出码改成 1": lambda s: s.replace(
             "exit code 138", "exit code 1"),
+        "去掉 dup PASS 行": lambda s: s.replace(
+            "[dup] PASS: dup new fd", "[dup] (quiet) dup new fd"),
+        "dup 退出码改成 1": lambda s: s.replace(
+            "exit code 56", "exit code 1"),
+        "插一条 dup FAIL": lambda s: s.replace(
+            "[dup] close the reader = 0 ok",
+            "[dup] close the reader = 0 ok\n[dup] bogus = 1 FAIL"),
+        "少一条 dup check": lambda s: s.replace(
+            "[dup] close the console reference = 0 ok\n", ""),
     }
     missed = []
     for name, fn in mutations.items():
@@ -697,7 +752,8 @@ def main(argv):
                     else:
                         ok("parser-selfcheck",
                            "%d 种坏法（Linux 块缺 PASS / 错退出码 / 多 FAIL / 少 check，"
-                           "管道与信号块各去 PASS 行 / 各改退出码）全被判红" % 8)
+                           "管道与信号块各去 PASS 行 / 各改退出码，dup 块去 PASS / "
+                           "改退出码 / 插 FAIL / 少 check）全被判红" % 12)
                 else:
                     bad("qemu-readout", "；".join(notes))
                     bad("parser-selfcheck", "读数没过，自检无从谈起")
