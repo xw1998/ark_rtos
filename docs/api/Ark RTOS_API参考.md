@@ -71,7 +71,7 @@
 - [kernelsrc/port/arm/cortex-m4/arkrtos_port.c](#kernelsrcportarmcortex-m4arkrtos_portc)（9 项）
 - [kernelsrc/port/arm/cortex-m7/arkrtos_port.c](#kernelsrcportarmcortex-m7arkrtos_portc)（9 项）
 - [kernelsrc/port/loongarch/la32/arkrtos_port.c](#kernelsrcportloongarchla32arkrtos_portc)（12 项）
-- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（119 项）
+- [kernelsrc/port/loongarch/la64/arkrtos_port.c](#kernelsrcportloongarchla64arkrtos_portc)（120 项）
 - [kernelsrc/port/riscv/rv32imac/arkrtos_port.c](#kernelsrcportriscvrv32imacarkrtos_portc)（18 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_app_main.c](#kernelsrcsdkapp_sdkarkrtos_app_mainc)（1 项）
 - [kernelsrc/sdk/app_sdk/arkrtos_stdio.c](#kernelsrcsdkapp_sdkarkrtos_stdioc)（4 项）
@@ -11477,21 +11477,48 @@ int32 arkrtos_port_paging_switch_to(uint32 space) {
 正压在同一个窗口 VA 上。推迟不等于不换 —— 换的时机交给
 arkrtos_context.S：那里已经不再碰被换下任务的栈了。
 
-### `void la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_fr`
+### `static void la_target_of_current(uint32 *p_space, uint32 *p_want_user)`
 
 ```c
-void la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_frame) {
+static void la_target_of_current(uint32 *p_space, uint32 *p_want_user) {
 ```
 
-**恢复现场之前补做被推迟的窗口切换（由 arkrtos_context.S 调用）**
+**本核「当前任务」应有的地址空间与特权级（唯一真源：任务表）**
+- `p_space`：输出：该任务的地址空间；LA_PG_PENDING_NONE = 内核态/idle
+- `p_want_user`：输出：1 = 用户任务，0 = 内核任务/idle
+调度器在 arkrtos_sched_activate() 里已经把 current_task_id 改成目标
+任务、也已经调过 arkrtos_port_set_thread_priv()，所以「这一次切换
+到底切给谁、该装哪个空间」读任务表就是权威答案。
+为什么不沿用 s_pg_pending_space 这条侧信道：它只在
+arkrtos_port_paging_switch_to() 里被写，而
+arkrtos_mpu_set_app() 对 is_priv 任务直接 return —— 「切到内核任务」
+这一路上根本没人写它，于是 prepare 会拿一个过期的空间号当真话。
+五档全开时那几次 odd-ERA 停机就是这条路上读到了错的页。
+
+### `la_frame_word *la_switch_prepare(la_frame_word *new_frame, la_frame_wo`
+
+```c
+la_frame_word *la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_frame) {
+```
+
+**恢复现场之前：装好目标任务的窗口，再把特权级写进目标帧**
 - `new_frame`：即将恢复的帧
-- `old_frame`：被换下任务的帧（同一个 = 调度器最后没切走）
+- `old_frame`：被换下任务的帧（本实现不再需要，保留以对齐汇编调用约定）
+**返回**：要恢复的帧（本实现在坏帧上直接停机，正常路径原样返回 new_frame）
 本函数由汇编入口在**一块内核静态栈**上调用：进入时 sp 可能还指向
 App 窗口里的栈，而它自己一落地就要开始写栈 —— 所以汇编侧先把 sp
 换到 la_switch_stack，再进来。返回之后汇编侧不再碰任何栈，只按
-$s0 指向的目标帧恢复寄存器。
-PRMD 也要在这里补：C 侧的 LA_PRIV_APPLY 在「窗口还没换」的时候
-执行，它写进去的是旧窗口里的那块内存，不是目标帧。
+$a0 指向的目标帧恢复寄存器。
+顺序是硬的，这就是本函数存在的理由：
+① 先装窗口（此刻 sp 在内核静态栈上，换窗口不会撤掉任何人的栈）；
+② 再判目标帧的取指地址；
+③ 最后写 PRMD —— PRMD 写的是目标帧本身，而目标帧就落在目标空间
+的页里，窗口没装对的时候写进去的是上一个空间的同 VA 内存。
+2026-11-26 之前 ②③ 都在 la_switch_inline / la_trap_c 里，
+也就是**窗口还停在被换下任务时**执行：闸门读到的是别人的页（形同
+虚设），PRMD 写进别人的栈。这是 fork+cow+shm+futex+filemap+socket
+十档全开时那次 ecode=0x0D（INE）停机的根因。
+resume 路径（arkrtos_port_resume_task）也走这里：见 .S 的同名注释。
 
 ### `int32 arkrtos_port_paging_space_release(uint32 space) {`
 
@@ -11514,10 +11541,10 @@ s_pg_app_space 保持原值：这个空间仍然存在，只是空着；下一�
 activate() 会重新要帧（ensure 看到基址 0 就再要一块）。这与
 「sid 不存在」是两件事，压成一个状态会让 activate 的短路判据骗人。
 
-### `void la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_fr`
+### `la_frame_word *la_switch_prepare(la_frame_word *new_frame, la_frame_wo`
 
 ```c
-void la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_frame) {
+la_frame_word *la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_frame) {
 ```
 
 没有窗口可换：恢复现场前没有要补做的事

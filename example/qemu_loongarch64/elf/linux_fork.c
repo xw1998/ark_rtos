@@ -1335,6 +1335,61 @@ void linux_main(unsigned long sp)
                 int     k;
                 int     spins;
 
+                /* 压力断言：时钟忙等 250 ms，期间把 clock_gettime 的调用频率
+                 * 拉到数十万次/秒。任何一次返回非 0（曾出现无来源的 3）都计为
+                 * FAIL。该形态同时压住 syscall 快路径、用户态只读映射与
+                 * 上下文切换三者的一致性。 */
+                {
+                    long c0 = mono_ms();
+                    int  badc = 0;
+                    int  sp2;
+
+                    for (sp2 = 0; sp2 < 4000000; sp2++)
+                    {
+                        lx_long tss[2];
+                        lx_long rcc;
+
+                        tss[0] = 0;
+                        tss[1] = 0;
+                        rcc = lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                                  (lx_long)(unsigned long)tss, 0);
+                        if (rcc != 0)
+                        {
+                            /* 命中时把返回值与时序号一次打全行，便于复盘。 */
+                            char  bb[200];
+                            char *pp = bb;
+
+                            pp = chk_str(pp, "[clkprobe] pid=");
+                            pp = chk_num(pp, lx1(LX_GETPID, 0));
+                            pp = chk_str(pp, " spin=");
+                            pp = chk_num(pp, sp2);
+                            pp = chk_str(pp, " rc=");
+                            pp = chk_num(pp, rcc);
+                            pp = chk_str(pp, " ts0=");
+                            pp = chk_num(pp, tss[0]);
+                            pp = chk_str(pp, " ts1=");
+                            pp = chk_num(pp, tss[1]);
+                            pp = chk_str(pp, "\n");
+                            *pp = '\0';
+                            out(bb);
+                            badc = badc + 1;
+                        }
+                        if ((sp2 & 0x3Fu) == 0)
+                        {
+                            long cn = mono_ms();
+
+                            if ((c0 >= 0) && (cn >= 0) && ((cn - c0) >= 250))
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    if (badc != 0)
+                    {
+                        check("clock_gettime busy-wait rc", badc, 0);
+                    }
+                }
+
                 if (*fw2 == 1ul)
                 {
                     code |= 1;      /* bit0: 父进程等的还是 1 */

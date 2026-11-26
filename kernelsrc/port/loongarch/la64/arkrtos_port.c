@@ -226,6 +226,7 @@ volatile uint32 la_cnt_other = 0u;
 /* 外部符号：异常入口与汇编入口 */
 extern void eentry(void);
 extern void arkrtos_port_resume_task(unsigned long stack_ptr);
+static void la_fatal_dump(la_frame_word *frame);
 extern void arkrtos_port_enter_idle(unsigned long stack_ptr, uint32 use_priv);
 
 #if (ARKRTOS_USE_PRIV == 1)
@@ -4007,47 +4008,154 @@ int32 arkrtos_port_paging_switch_to(uint32 space)
     return arkrtos_port_paging_activate(space);
 }
 
+/** 取指地址闸门拦下的次数（帧内容坏了 = 恢复出去必然 INE，见下面的闸门） */
+static uint32 s_prep_era_bad = 0u;
+
 /**
-* @brief 恢复现场之前补做被推迟的窗口切换（由 arkrtos_context.S 调用）
+* @brief 本核「当前任务」应有的地址空间与特权级（唯一真源：任务表）
+* @param p_space     输出：该任务的地址空间；LA_PG_PENDING_NONE = 内核态/idle
+* @param p_want_user 输出：1 = 用户任务，0 = 内核任务/idle
+* @details 调度器在 arkrtos_sched_activate() 里已经把 current_task_id 改成目标
+*          任务、也已经调过 arkrtos_port_set_thread_priv()，所以「这一次切换
+*          到底切给谁、该装哪个空间」读任务表就是权威答案。
+*
+*          为什么不沿用 s_pg_pending_space 这条侧信道：它只在
+*          arkrtos_port_paging_switch_to() 里被写，而
+*          arkrtos_mpu_set_app() 对 is_priv 任务直接 return —— 「切到内核任务」
+*          这一路上根本没人写它，于是 prepare 会拿一个过期的空间号当真话。
+*          五档全开时那几次 odd-ERA 停机就是这条路上读到了错的页。
+*/
+static void la_target_of_current(uint32 *p_space, uint32 *p_want_user)
+{
+    extern arkrtos_task_t arkrtos_task_table[];
+    extern int32 arkrtos_task_count;
+    extern uint32 arkrtos_paging_space_of(arkrtos_task_t *p_task);
+
+    uint32 cur = (uint32)arkrtos_current_task_id;
+
+    *p_space = LA_PG_PENDING_NONE;
+    *p_want_user = 0u;
+
+    if((cur == 0u) || (cur > (uint32)arkrtos_task_count))
+    {
+        return;                     /* idle / 越界：内核身份，窗口不动 */
+    }
+    if(arkrtos_task_table[cur - 1u].is_priv != 0u)
+    {
+        return;                     /* 内核任务不拥有地址空间 */
+    }
+    *p_space = arkrtos_paging_space_of(&arkrtos_task_table[cur - 1u]);
+    *p_want_user = 1u;
+}
+
+/**
+* @brief 恢复现场之前：装好目标任务的窗口，再把特权级写进目标帧
 * @param new_frame 即将恢复的帧
-* @param old_frame 被换下任务的帧（同一个 = 调度器最后没切走）
+* @param old_frame 被换下任务的帧（本实现不再需要，保留以对齐汇编调用约定）
+* @return 要恢复的帧（本实现在坏帧上直接停机，正常路径原样返回 new_frame）
 * @details 本函数由汇编入口在**一块内核静态栈**上调用：进入时 sp 可能还指向
 *          App 窗口里的栈，而它自己一落地就要开始写栈 —— 所以汇编侧先把 sp
 *          换到 la_switch_stack，再进来。返回之后汇编侧不再碰任何栈，只按
-*          $s0 指向的目标帧恢复寄存器。
+*          $a0 指向的目标帧恢复寄存器。
 *
-*          PRMD 也要在这里补：C 侧的 LA_PRIV_APPLY 在「窗口还没换」的时候
-*          执行，它写进去的是旧窗口里的那块内存，不是目标帧。
+*          顺序是硬的，这就是本函数存在的理由：
+*          ① 先装窗口（此刻 sp 在内核静态栈上，换窗口不会撤掉任何人的栈）；
+*          ② 再判目标帧的取指地址；
+*          ③ 最后写 PRMD —— PRMD 写的是目标帧本身，而目标帧就落在目标空间
+*             的页里，窗口没装对的时候写进去的是上一个空间的同 VA 内存。
+*          2026-11-26 之前 ②③ 都在 la_switch_inline / la_trap_c 里，
+*          也就是**窗口还停在被换下任务时**执行：闸门读到的是别人的页（形同
+*          虚设），PRMD 写进别人的栈。这是 fork+cow+shm+futex+filemap+socket
+*          十档全开时那次 ecode=0x0D（INE）停机的根因。
+*
+*          resume 路径（arkrtos_port_resume_task）也走这里：见 .S 的同名注释。
 */
-void la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_frame)
+la_frame_word *la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_frame)
 {
-    uint32 space = s_pg_pending_space;
+    uint32 space = LA_PG_PENDING_NONE;
+    uint32 want_user = 0u;
     uint32 commit = s_pg_commit;
+    uint32 prev_space = s_pg_app_space;
+
+    (void)old_frame;
 
     /* 每次进这里都把 commit 消费掉：标志只对「紧接着这一次恢复」有效。 */
     s_pg_commit = 0u;
-
-    if(space == LA_PG_PENDING_NONE)
-    {
-        return;
-    }
-
     s_pg_pending_space = LA_PG_PENDING_NONE;
 
-    /* 本次并没有真的发生切换（调度器把帧原样交回来 / 栈帧闸门拦下）：
-     * 窗口必须留在原处，否则这一帧的恢复会从另一个 App 的帧里取值。
-     * 判据用显式 commit 标志，而不是 new_frame == old_frame —— 后者在
-     * fork 出的父子任务上会因为共享 VA 而误判。 */
-    if(commit == 0u)
+    la_target_of_current(&space, &want_user);
+
+    /* ① 装窗口：先对齐空间，再碰目标帧。这一条也对「没发生切换」的调用
+     * （commit == 0）生效 —— 那时如果窗口已经与本任务对不上，说明上一轮
+     * 恢复留下了一个错窗口，这里顺手修掉，而不是继续错下去。 */
+    if((space != LA_PG_PENDING_NONE) && (space != s_pg_app_space))
     {
-        return;
+        if(arkrtos_port_paging_activate(space) != 0)
+        {
+            arkrtos_board_puts("[LA64U] prepare: activate space ");
+            arkrtos_board_putu(space);
+            arkrtos_board_puts(" failed (cur=");
+            arkrtos_board_putu((uint32)arkrtos_current_task_id);
+            arkrtos_board_puts(") -> halt\n");
+            arkrtos_port_fatal_report(0xFEE3u);
+            for(;;)
+            {
+                __asm__ volatile("idle 0" ::: "memory");
+            }
+        }
     }
 
-    (void)arkrtos_port_paging_activate(space);
+    if(commit == 0u)
+    {
+        /* 调度器把帧原样交回来（或栈帧闸门拦下）：这不是切换，帧就是本任务
+         * 自己的现场，PRMD 一个字节都不要动。 */
+        return new_frame;
+    }
 
-    /* 与 C 侧 LA_PRIV_APPLY 同一判定：换完窗口之后写的是目标帧，era 也在
-     * 目标空间里读得到（见 la_frame_priv_auto 的长注释）。 */
-    la_frame_priv_auto(new_frame, (s_next_pplv != 0u) ? 1u : 0u);
+    /* ② 取指地址闸门：LA64 没有压缩指令，任何一条合法指令都 4 字节对齐，
+     * 所以「目标帧的 ERA 不是 4 的倍数」只可能是帧内容坏了。拿这种帧 ertn
+     * 出去，第一条指令就是一次 INE（ecode=0x0D），而 INE 的 ERA 是一个
+     * 「看着不像地址」的奇数 —— 这正是本次停机现场的形态。
+     *
+     * 闸门失败不停在原任务上继续跑：调度器的 current_task_id 已经指向新
+     * 任务了，拿旧帧继续跑等于让两个任务共用一个身份，比停机难查得多。
+     * 先把窗口还原成被换下任务的，再把坏帧打全，然后停。 */
+    if((new_frame[LA_FR_ERA] & 3UL) != 0UL)
+    {
+        s_prep_era_bad++;
+        (void)arkrtos_port_paging_activate(prev_space);
+        arkrtos_board_puts("[LA64U] prepare: target ERA not 4-aligned era=");
+        arkrtos_board_puthex((uint32)new_frame[LA_FR_ERA]);
+        arkrtos_board_puts(" f=");
+        arkrtos_board_puthex((uint32)(unsigned long)new_frame);
+        arkrtos_board_puts(" sp=");
+        arkrtos_board_puthex((uint32)new_frame[LA_FR_SP]);
+        arkrtos_board_puts(" cur=");
+        arkrtos_board_putu((uint32)arkrtos_current_task_id);
+        arkrtos_board_puts(" spc=");
+        arkrtos_board_putu(s_pg_app_space);
+        arkrtos_board_puts(" bad=");
+        arkrtos_board_putu(s_prep_era_bad);
+        arkrtos_board_puts(" -> halt\n");
+        la_fatal_dump(new_frame);
+        for(;;)
+        {
+            __asm__ volatile("idle 0" ::: "memory");
+        }
+    }
+
+    /* ③ 窗口已经是目标帧的空间了，这时写 PRMD 才写得到正主。 */
+#if (ARKRTOS_USE_PRIV == 1)
+    (void)want_user;
+    s_next_pplv = (want_user != 0u) ? 3u : 0u;
+#endif
+    LA_PRIV_APPLY(new_frame);
+
+#if (ARKRTOS_USE_PRIV != 1)
+    (void)want_user;
+#endif
+
+    return new_frame;
 }
 
 /* ------------------------------------------------------------ 空间回收 (U-3) */
@@ -4193,10 +4301,10 @@ int32 arkrtos_port_paging_activate(uint32 space)
 }
 
 /** 没有窗口可换：恢复现场前没有要补做的事 */
-void la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_frame)
+la_frame_word *la_switch_prepare(la_frame_word *new_frame, la_frame_word *old_frame)
 {
-    (void)new_frame;
     (void)old_frame;
+    return new_frame;
 }
 
 int32 arkrtos_port_paging_space_release(uint32 space)
@@ -4864,6 +4972,24 @@ int32 arkrtos_port_paging_frame_alloc(uint32 count, uint32 *p_base)
                 }
 
                 *p_base = ARKRTOS_QEMU_FRAME_BASE + (first * 0x1000u);
+
+                /* 归还（arkrtos_port_paging_frame_free）不擦内容，所以下一次
+                 * 从这里拿到的帧可能还带着上一个持有者的数据：按需档第一次
+                 * 摸到一对页时依赖「帧是干净的」（见 la_pg_demand_fault），
+                 * COW 拆页也会把没写过的部分原样留给新主人 —— 跨进程数据
+                 * 泄漏和随机垃圾都是这么来的。
+                 * 在唯一的分配出口擦一次，比让每个调用点各自记得可靠。 */
+                {
+                    uint32 *pz = (uint32 *)(unsigned long)(*p_base);
+                    uint32 words = count * (0x1000u / 4u);
+                    uint32 w;
+
+                    for(w = 0u; w < words; w++)
+                    {
+                        pz[w] = 0u;
+                    }
+                }
+
                 return 0;
             }
         }
@@ -5852,42 +5978,16 @@ la_frame_word *la_switch_inline(la_frame_word *frame)
         }
         {
             la_frame_word *next_frame = (la_frame_word *)(unsigned long)next_sp;
-            uint32 j = (uint32)((s_swp_pos - 1u) & 15u) * LA_SWP_FIELDS;
 
-            /* 取指地址闸门：LA64 没有压缩指令，任何一条合法指令都 4 字节对齐，
-             * 所以「目标帧的 ERA 不是 4 的倍数」只可能是帧内容坏了（被野写、
-             * 被当成别的结构体填过、或从一块已回收的栈里读出来的旧内存）。
-             * 拿这种帧 ertn 出去，第一条指令就是一次 INE，而 INE 不写 BADV，
-             * 现场只剩一个「看着不像地址」的 ERA —— 这正是 fork+cow+shm+
-             * futex+filemap 五档全开时那两次 0x0D 停机的形态。
-             * 与上面那道栈指针闸门同一取向：宁可原地不切，也不要把坏帧交出去。
-             * 这条闸门不会误伤合法路径：合法帧的 ERA 只可能来自
-             * arkrtos_port_stack_init() 写的入口地址（符号地址，天然 4 对齐）
-             * 或 eentry 保存的硬件 ERA（硬件 ERA 必然 4 对齐）。 */
-            if((next_frame[LA_FR_ERA] & 3UL) != 0UL)
-            {
-                s_swp_bogus_era++;
-                s_swp_bogus_next = (uint32)next_sp;
-                s_swp_bogus_cur  = (uint32)arkrtos_current_task_id;
-                s_swp_log[j + 6u] = (uint32)next_frame[LA_FR_ERA];
-                s_swp_log[j + 7u] = (uint32)next_frame[LA_FR_SP];
-                s_pg_commit = 0u;
-#if (ARKRTOS_USE_PRIV == 1)
-                s_next_pplv = self_pplv;
-#endif
-                return frame;
-            }
-
-            /* 诊断：记下目标帧的 ERA / SP 槽。这一帧马上要被 ertn 恢复，
-             * 这两格是「恢复之后到底跳到哪、用谁的 sp」的直接来源。 */
-            s_swp_log[j + 6u] = (uint32)next_frame[LA_FR_ERA];
-            s_swp_log[j + 7u] = (uint32)next_frame[LA_FR_SP];
-
-            /* 真正的切换点：把目标任务的 PLV 写进它的帧，再 ertn 过去。
-             * 不切换（next_sp == 0）时不动自己的帧：那时 s_next_pplv 是
-             * 别处的残留值，套到自己头上会把自己的特权级改掉。 */
+            /* 真正的切换点。这里**只置 commit**，不碰目标帧：
+             *
+             * 目标帧落在它自己空间的页里，而此刻窗口还是被换下任务的 ——
+             * 读它的 ERA 会读到别人的页（闸门形同虚设），写它的 PRMD 会写进
+             * 别人的栈。两件事都挪到 la_switch_prepare，那里 sp 已经换到
+             * 内核静态栈、窗口也已经装好（见那边的 ①②③）。
+             * 不切换（next_sp == 0）时不动自己的帧，也不置 commit。 */
             s_pg_commit = 1u;
-            LA_PRIV_APPLY(next_frame);
+
             return next_frame;
         }
     }
@@ -6078,10 +6178,12 @@ static void la_fault_recover(void)
 
     if(next != 0u)
     {
-        la_frame_word *next_frame = (la_frame_word *)(unsigned long)next;
-
-        LA_PRIV_APPLY(next_frame);
-        /* 从这里开始不再算「在异常里」：resume_task 只做恢复 + ertn */
+        /* 空间与 PRMD 都交给 arkrtos_port_resume_task 里的 la_switch_prepare：
+         * 本函数的调用者可能正跑在被换下任务的 App 栈上（故障就是在那里发生的），
+         * 在这里换窗口会把调用者自己的栈撤掉。置 commit 就是告诉 prepare
+         * 「这次是真的切到别人了」。 */
+        s_pg_commit = 1u;
+        /* 从这里开始不再算「在异常里」：resume_task 只做换窗口 + 恢复 + ertn */
         s_in_trap = 0u;
         arkrtos_port_resume_task(next);
     }
@@ -6236,7 +6338,10 @@ void la_refill_c(void)
         {
             la_frame_word *next_frame = (la_frame_word *)(unsigned long)next;
 
-            LA_PRIV_APPLY(next_frame);
+            /* 窗口在 resume_task 里装（见 .S）：这条路径的 sp 就是出事那条
+             * 指令的栈，多数时候还在 App 窗口里，这里换窗口等于把调用者的
+             * 栈换走。PRMD 由 prepare 在装好窗口之后写。 */
+            s_pg_commit = 1u;
 
             LA_CSRW(LA_CSR_TLBRERA, ((unsigned long)next_frame[LA_FR_ERA] & ~3UL) | 1UL);
             LA_CSRW(LA_CSR_TLBRPRMD, (unsigned long)next_frame[LA_FR_PRMD]);
@@ -6418,8 +6523,9 @@ la_frame_word *la_trap_c(la_frame_word *frame)
                 if(next != 0u)
                 {
                     frame = (la_frame_word *)(unsigned long)next;
-                    LA_PRIV_APPLY(frame);
-                    /* 这一次是**真的**换到了别人：必须置 commit，否则
+                    /* PRMD 由 la_switch_prepare 在装好窗口之后写（这里窗口
+                     * 还是被换下任务的）。这一次是**真的**换到了别人：
+                     * 必须置 commit，否则
                      * la_switch_prepare 会以为「调度器把原帧交回来了」而
                      * 不换窗口 —— fork 出来的父子任务共享同一套 VA，目标帧
                      * 与故障帧地址往往完全相同（QEMU 实测都是 0x021fbcb0），
@@ -6496,8 +6602,8 @@ la_frame_word *la_trap_c(la_frame_word *frame)
             {
                 s_pg_commit = 1u;
                 frame = (la_frame_word *)(unsigned long)next_sp;
-                /* 交换到别人（可能是 PLV3 的 App）时，把它的特权级写进帧 */
-                LA_PRIV_APPLY(frame);
+                /* 目标帧的特权级由 la_switch_prepare 补：这里窗口还是被换下
+                 * 任务的，此刻写 PRMD 会写进别人的页。 */
             }
         }
     }

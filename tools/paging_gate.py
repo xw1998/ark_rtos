@@ -32,10 +32,13 @@
   I. 切换前按 VA 失效旧翻译，并重写 App 窗口那条 PS=20 条目。
   J. `arkrtos_mpu_set_app()` 必须走 `arkrtos_port_paging_switch_to()`，
      不许再直接 `activate()` —— 它跑在被换下任务自己的栈上（U-2）。
-  K. port 侧「延迟换窗口」本体：switch_to 必须按 sp 是否在窗口里分岔，
-     la_switch_prepare 必须清 pending、认出 new==old、补写 PRMD。
-  L. 汇编两条恢复路径（eentry / switch_inline）都必须先换到恒等映射的
-     静态栈，再 bl la_switch_prepare；那块栈必须落在 .bss。
+  K. port 侧「延迟换窗口」本体：switch_to 必须按 sp 是否在窗口里分岔；
+     la_switch_prepare 是**唯一**的换窗口 + 写 PRMD 入口，必须清 pending、
+     消费 commit 标志、从任务表取目标空间，并且顺序固定为
+     装窗口 -> 取指地址闸门 -> 写 PRMD（顺序反了就是 2026-11-26 那次 INE）。
+  L. 汇编三条恢复路径（eentry / switch_task_inline / resume_task）都必须先
+     换到恒等映射的静态栈，再 bl la_switch_prepare，并用 $a0 取回返回值；
+     那块栈必须落在 .bss。
   M. ELF 装载器按空间记台账（elf_slot_live / elf_copy_to_window /
      exec_space 装完恢复视图），shell 里 `pmap u2` 的判据还在。
   P. 受控访问用户地址（U-6）：`arkrtos_paging_user_copy()` 的四道闸门
@@ -442,25 +445,35 @@ def main():
                 bad.append("K: switch_to 在窗口里没有记下待装空间")
             if "arkrtos_port_paging_activate(space)" not in body:
                 bad.append("K: switch_to 不在窗口里时没有立即生效")
-        prep = _body(port, "void la_switch_prepare(")
+        prep = _body(port, "la_switch_prepare(la_frame_word *new_frame")
         if not prep:
             bad.append("K: port 里没有 la_switch_prepare 的定义")
         else:
             if "s_pg_pending_space = LA_PG_PENDING_NONE;" not in prep:
                 bad.append("K: la_switch_prepare 没有清 pending")
-            if "new_frame == old_frame" not in prep:
-                bad.append("K: la_switch_prepare 没认出「调度器最终没切走」")
+            if "s_pg_commit = 0u;" not in prep:
+                bad.append("K: la_switch_prepare 没有消费 commit 标志")
+            if "la_target_of_current(&space, &want_user);" not in prep:
+                bad.append("K: la_switch_prepare 没有从任务表取目标空间"
+                           "（s_pg_pending_space 是侧信道，is_priv 任务根本没人写）")
             if "arkrtos_port_paging_activate(space)" not in prep:
                 bad.append("K: la_switch_prepare 没有真正换窗口")
-            # R3 起不直写 LA_FR_PRMD：特权级要按**目标空间**的 ERA 定
-            # （la_frame_priv_auto），并且必须在换完窗口之后再写 ——
-            # 换窗口之前写进去的是旧窗口里的那块内存，不是目标帧。
-            if "la_frame_priv_auto(new_frame," not in prep:
-                bad.append("K: la_switch_prepare 没给目标帧补特权级"
-                           "（R3 起走 la_frame_priv_auto）")
-            elif prep.find("arkrtos_port_paging_activate(space)") >= 0 and \
-                    prep.find("la_frame_priv_auto(new_frame,") < \
-                    prep.find("arkrtos_port_paging_activate(space)"):
+            # 顺序是硬的：装窗口 -> 取指地址闸门 -> 写 PRMD。
+            # 2026-11-26 那次 INE（ecode=0x0D）就是读/写发生在装窗口之前：
+            # 读到的 ERA 来自旧空间的同 VA 页（闸门形同虚设），PRMD 写进旧空间。
+            i_act = prep.find("arkrtos_port_paging_activate(space)")
+            i_era = prep.find("LA_FR_ERA] & 3UL")
+            i_pri = prep.find("LA_PRIV_APPLY(new_frame)")
+            if i_era < 0:
+                bad.append("K: la_switch_prepare 没有取指地址闸门（坏帧会 INE 停机）")
+            if i_pri < 0:
+                bad.append("K: la_switch_prepare 没给目标帧写特权级")
+            if "s_next_pplv = (want_user != 0u) ? 3u : 0u;" not in prep:
+                bad.append("K: la_switch_prepare 的 PRMD 没有按是否需要用户态换算")
+            if i_act >= 0 and i_era >= 0 and i_era < i_act:
+                bad.append("K: la_switch_prepare 换窗口之前就读目标帧"
+                           "（读到的是旧空间里的同 VA 页）")
+            if i_act >= 0 and i_pri >= 0 and i_pri < i_act:
                 bad.append("K: la_switch_prepare 在换窗口之前就写目标帧"
                            "（那时写的还是旧窗口里的内存）")
         # want_user 的换算：s_next_pplv 是 PRMD 值（0 = PLV0 内核、3 = PLV3
@@ -475,16 +488,28 @@ def main():
 
     def pin_l(asm):
         bad = []
-        if asm.count("bl      la_switch_prepare") != 2:
-            bad.append("L: 两条恢复路径（eentry / switch_inline）没有都调 la_switch_prepare")
-        if asm.count("la.abs  $sp, la_switch_stack_top") != 2:
+        if asm.count("bl      la_switch_prepare") != 3:
+            bad.append("L: 三条恢复路径（eentry / switch_task_inline / resume_task）"
+                       "没有都调 la_switch_prepare")
+        if asm.count("la.abs  $sp, la_switch_stack_top") != 3:
             bad.append("L: 恢复路径没有先换到恒等映射静态栈")
         if "la_switch_stack_top:" not in asm or ".space  2048" not in asm:
             bad.append("L: .S 里没有 la_switch_stack 那块静态栈")
-        # 换栈必须发生在进 C 之前：第一条 bl la_switch_prepare 前面要有换栈。
-        first = asm.find("bl      la_switch_prepare")
-        if first >= 0 and asm.rfind("la.abs  $sp, la_switch_stack_top", 0, first) < 0:
-            bad.append("L: 第一条恢复路径没有先换栈就进 la_switch_prepare")
+        # 三条路径都一样：先换栈（sp 可能正落在要撤掉的窗口里），再进 C，
+        # 再从 $a0 取回「最终要恢复的帧」（prepare 可能在闸门处换掉它）。
+        pos = 0
+        n = 0
+        while True:
+            i = asm.find("bl      la_switch_prepare", pos)
+            if i < 0:
+                break
+            n += 1
+            if asm.rfind("la.abs  $sp, la_switch_stack_top", 0, i) < 0:
+                bad.append("L: 第 %d 条恢复路径没有先换栈就进 la_switch_prepare" % n)
+            back = asm.find("move    $s0, $a0", i)
+            if back < 0 or back > i + 240:
+                bad.append("L: 第 %d 条恢复路径没有用 $a0 取回 prepare 的返回值" % n)
+            pos = i + 1
         return bad
 
     def pin_m(elf, shell):
@@ -1287,13 +1312,24 @@ def main():
                           src_hal, src_mpu)),
             ("K", pin_k(src_port.replace("if(la_sp_in_app_window() != 0u)",
                                          "if(la_sp_in_app_window_X() != 0u)", 1))),
-            ("K-", pin_k(src_port.replace("la_frame_priv_auto(new_frame,",
-                                          "la_frame_priv_autoX(new_frame,", 1))),
+            ("K-", pin_k(src_port.replace("LA_PRIV_APPLY(new_frame);",
+                                          "LA_PRIV_APPLXX(new_frame);", 1))),
+            # K-era：拿掉取指地址闸门，必须报错（坏帧会 INE 停机）
+            ("K-era", pin_k(src_port.replace("LA_FR_ERA] & 3UL",
+                                             "LA_FR_ERA] & 7UL", 1))),
+            # K-src：把「唯一真源」退回 s_pg_pending_space，必须报错
+            ("K-src", pin_k(src_port.replace(
+                "la_target_of_current(&space, &want_user);",
+                "la_target_of_currentX(&space, &want_user);", 1))),
             ("K-priv", pin_k(src_port.replace(
                 "(s_next_pplv != 0u) ? 1u : 0u",
                 "(s_next_pplv == 0u) ? 1u : 0u"))),
             ("L", pin_l(src_asm.replace("bl      la_switch_prepare",
                                          "bl      la_switchXprepare", 1))),
+            # L-ret：调用后不取 $a0，必须报错（会把坏帧原样 ertn 出去）
+            ("L-ret", pin_l(src_asm.replace(
+                "move    $s0, $a0                /* prepare",
+                "move    $s0, $a1                /* prepare", 1))),
             ("M", pin_m(src_elf.replace("arkrtos_paging_space_activate(prev)",
                                          "arkrtos_paging_space_activate_X(prev)", 1),
                          src_sh)),

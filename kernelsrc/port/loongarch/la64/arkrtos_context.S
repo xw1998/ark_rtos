@@ -317,6 +317,14 @@ eentry:
     bl      la_trap_c               /* 返回要恢复的帧（可能已换成别的任务） */
     move    $s1, $s0                /* 被换下任务的帧：用来判「到底切没切」 */
     move    $s0, $a0
+    /* la_trap_c 出口会按 s_in_trap 把 CRMD.IE 打开，而从这里到 ertn 之间是
+     * 本核唯一一段「窗口还停在被换下任务」的代码（延迟换窗口，U-2）。这段
+     * 一旦被 tick 打断，嵌套入口就会在同一个栈上重开一帧，把外层这一帧连同
+     * s_pg_commit 一起踩坏 —— 2026-11-26 那次 odd-ERA 停机现场（0x26c558）
+     * 就是这么来的：外层刚拿到目标帧，嵌套帧把它整块盖掉。
+     * 关中断不影响语义：ertn 按 PRMD.PIE 恢复 IE。 */
+    ori     $t1, $zero, 0x4         /* CRMD.IE 是 bit2 */
+    csrxchg $zero, $t1, 0x0
 
     /* 换窗口 (U-2)：目标帧可能落在另一个 App 的页里，而此刻 sp 还指向被打断
      * 任务的栈 —— 那个栈本身就在 App 窗口里。所以先换到一块内核静态栈再进
@@ -325,6 +333,7 @@ eentry:
     move    $a0, $s0
     move    $a1, $s1
     bl      la_switch_prepare
+    move    $s0, $a0                /* prepare 的返回值才是最终要恢复的帧 */
 
     /* 恢复窗口重新关中断（第 381 行起那条理由在这里更致命）：
      * la_switch_prepare 的临界区退出会把 CRMD.IE 恢复成进入时的值，
@@ -671,6 +680,7 @@ arkrtos_port_switch_task_inline:
     move    $a0, $s0
     move    $a1, $s1
     bl      la_switch_prepare
+    move    $s0, $a0                /* prepare 的返回值才是最终要恢复的帧 */
 
     /* 同 eentry：上面那段关中断只覆盖到 la_switch_prepare 为止，它的临界区
      * 退出会把 IE 恢复回来。恢复序列（写 ERA/PRMD + GPR + ertn）必须不可打断：
@@ -730,6 +740,24 @@ arkrtos_port_resume_task:
     /* 同前：恢复序列必须在关中断状态下执行。异常现场进来时 IE
      * 本就是关的，但这里显式再关一次不依赖调用方；ertn 按 PRMD.PIE
      * 恢复 IE，语义不变。 */
+    ori     $t1, $zero, 0x4         /* CRMD.IE 是 bit2 */
+    csrxchg $zero, $t1, 0x0
+
+    /* 与 eentry / switch_task_inline 同一条路：先换到内核静态栈，再由
+     * la_switch_prepare 把目标任务的地址空间装上、把特权级写进帧。
+     *
+     * 这一步以前没有，是本文件里唯一一条「换了任务却不换窗口」的恢复路径：
+     * 调用者（la_refill_c / la_fault_recover）跑在出事那条指令的栈上，
+     * 调度器那次 switch_to() 因此只能推迟，于是目标帧是在**旧空间**里被
+     * 读出来、PRMD 也是写进旧空间的同 VA 页 —— fork 出来的子进程第一次
+     * 被恢复就活在父进程的物理页上。调用者的 sp 此刻可能正落在要撤掉的
+     * 那个窗口里，所以必须先换栈再换窗口，顺序不能反。 */
+    la.abs  $sp, la_switch_stack_top
+    move    $a0, $s0
+    move    $a1, $s0
+    bl      la_switch_prepare
+    move    $s0, $a0
+
     ori     $t1, $zero, 0x4         /* CRMD.IE 是 bit2 */
     csrxchg $zero, $t1, 0x0
     ld.d    $t0, $s0, 240
