@@ -352,3 +352,58 @@ app flash run    -> entry 0x081E0424, data 0x24072000 (8192 B), task 4
 
 不是"接管整机"的 bootloader：内核还在、shell 还在，Flash 里的程序是一个任务。
 一次只跑一个，且与 `app run` 共用同一段 RAM 窗口。
+
+## 10 非 ARM 的「小程序 / 直跑」载体：评估与可执行方案（2026-11-26）
+
+这一节只回答一个问题：**LoongArch64 上要不要、以及怎么做 mini / APPRUN / FLASHAPP
+这三种载体**。结论先行：**不做移植，理由是 LA64 已经有更强的载体（ELF64 + 页表 + PLV3），
+而三种载体里有两种在架构上就与 ARM 绑定**；如果将来确实需要 mini 语义，本文给出可执行的
+四个步骤与逐步判据。所有事实都核到代码行，不是猜测。
+
+### 10.1 三种载体各自绑定了什么
+
+| 载体 | 绑定的东西（代码事实） | 在 LA64 上的可行性 |
+|---|---|---|
+| `arkrtos_apprun`（`app run`） | 借 `SLOT_RAM_*` 两块固定窗口、按 `arkrtos_mpu_*` 建区域、认文件头 256 项向量表（SP 必须等于数据窗口顶）、入口"已带 Thumb 位" | **不可行**：没有 MPU 区域、没有 Thumb 位、没有"固定窗口"这套地址模型；LA64 的隔离是页表条目 + PLV |
+| `arkrtos_flashapp`（`app flash run`） | Cortex-M 向量表 + 片内 Flash XIP + 与 APPRUN 共用同一段 RAM 窗口 | **不可行**：QEMU LA64 没有"片内 Flash 可执行"的等价物，XIP 语义不成立 |
+| `arkrtos_mini`（`mini run` / `mini swap`） | 镜像格式（256 B 头 + 重定位表 + 负载）本身**与架构无关**；执行模型是"借两块 2 的幂 RAM 块 + 两个 MPU 区域 + 起非特权任务" | **可行但要新写后端**：块换成帧池 + 窗口条目，MPU 换成 PLV3；约 3 个工作日 |
+
+`arkc` 本身是**编译器**（`kernelsrc/components/arkc/src/backend/`），后端只出 ARM 与 RV32
+（`tools/gen_gcc_sources.py` 的目标表就是这两项）。所以"LA64 上跑 arkc 产物"等价于
+**给 arkc 加一个 LoongArch64 代码生成后端**——那是 `arkcc` 研究线的工作量（后端 + 调用约定 +
+寄存器分配 + 与自研 `ld` 的散列脚本对齐），不属于 RTOS 欠账。
+
+### 10.2 LA64 现有的载体是什么
+
+`board/qemu_loongarch64/arkrtos_board_config.h` 里 `ARKRTOS_USE_ELF=1`、
+`MINIAPP=0`、`APPRUN=0`、`FLASHAPP=0`、`PAGING=1`（`FRAMES`/`PAGES` 恒开，`DEMAND` 可选）。
+即 LA64 的载体是 **ELF64 静态可执行文件**：`PT_LOAD` 落段进 App 窗口、页表条目 + PLV3
+做隔离、`sp` 指向 `argc/argv`、失败一律 `ERR_FORMAT` 拒绝。它比 mini 强在两处——
+按需分页（只映射真正摸到的页）与动态链接（`ARKRTOS_USE_DYNLOAD` 已能装 `PT_INTERP`）。
+mini 在 ARM 上存在的理由（没有 MMU，只能借连续 RAM 块 + MPU 区域）在 LA64 上**不存在**。
+
+### 10.3 如果要做：mini 的 LA64 后端（可执行方案）
+
+按 M-LA-1..4 做，每步都有可判定的读数；任一步判据不成立就停手并把结论写回本节。
+
+- **M-LA-1 块抽象端口化**：`arkrtos_mini.c` 现在直接调 `arkrtos_ptable_ram_alloc*` 与
+  `arkrtos_mpu_*`。抽一层 `arkrtos_mini_mem_*`（借块 / 还块 / 建窗口 / 起任务），
+  LA64 实现 = 从帧池借页 + 写 App 窗口条目 + `is_priv=0` 起任务。
+  **判据**：宿主 `mini-host` 272 checks 全绿（既有用例不许改语义）+ QEMU 上 `mini run`
+  起任务、正常退出、`pmap rel` 前后帧数复原。
+- **M-LA-2 重定位落点**：mini 是"读一段、就地补一段"，要求目标块可写。分页档窗口条目
+  可写，成立。**判据**：一份带 `.data` 初值与字符串字面量的小程序输出正确（宿主与 QEMU 同值）。
+- **M-LA-3 非特权与越权**：入口按 PLV3 起任务。**判据**：一份故意写窗口外的负载被
+  SIGSEGV 杀掉且不影响内核（与 `mprotect` 档同一套读数口径）。
+- **M-LA-4 收益复核**：LA64 已有 ELF，mini 的唯一优势（不占连续块）在分页档不存在。
+  **判据**：若 M-LA-1..3 都过，再算一次"同一程序 mini 与 ELF 两条路径的帧数与装载时间"；
+  若 mini 不占优，就把它写成取舍而不是默认载体。
+
+### 10.4 判词
+
+- **LA64 的载体问题已经解决**（ELF64 + 页表 + PLV3，QEMU 实跑），不需要 mini / APPRUN / FLASHAPP；
+- **APPRUN / FLASHAPP 不做**：它们绑的是 ARM MPU 窗口、Thumb 位与片内 Flash XIP，不是"还没写"；
+- **mini 移植是可做的但无收益**，方案与判据已给出（§10.3），属独立工作量，不进本轮；
+- 因此 [欠账盘点](欠账盘点.md) 里"非 ARM 无缝衔接的运行证据"那一条的**前置②**
+  （要先有非 ARM 的 mini / loader 载体）**按取舍关闭**：LA64 的 `swap` 由内核自检覆盖，
+  loader 路径要等 §10.3 真的做出来才有意义；前置① （真板）仍是外部条件。
