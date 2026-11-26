@@ -765,7 +765,7 @@ int32 arkrtos_ptable_read_header(uint32 slot, arkrtos_app_header_t *out)
         return ARKRTOS_PTABLE_ERR_NOSTATE;              /* 裸镜像没有镜像头 */
     }
 
-    p_hdr = (const arkrtos_app_header_t *)pt->slot_base[slot];
+    p_hdr = (const arkrtos_app_header_t *)(arkrtos_uptr_t)pt->slot_base[slot];
 
     if(p_hdr->magic != ARKRTOS_APP_MAGIC)
     {

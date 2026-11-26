@@ -29,14 +29,11 @@
 #undef  ARKRTOS_USE_MINIAPP
 #define ARKRTOS_USE_MINIAPP 1
 
-/* The overlay demo fragment is declared in board/qemu_loongarch64/
- * arkrtos_board.h, a header the kernel shell does not include (the port layer
- * deliberately keeps board headers out of kernel sources).  On the board the
- * declaration arrives through arkrtos_board.c's own include; the host test
- * links a stub, so the declaration has to come from here or the call would be
- * an implicit-int conversion (a warning, and warn_gate fails on warnings).
- * The test stubs this symbol; it is never the real board blob. */
-#include "arkrtos_types.h"
-const void *arkrtos_board_fdt_overlay_demo(uint32 *size);
+/* The overlay demo fragment is declared in arkrtos_fdt_overlay.h (added next
+ * to arkrtos_fdt_overlay(): the kernel shell must not include a board header,
+ * so the board contract lives on the kernel side).  The declaration used to be
+ * repeated here as a workaround; it is not any more - the host test only has to
+ * provide the definition of the symbol (the stub at the bottom of
+ * test_shell_diag_host.c), which it already does. */
 
 #endif /* DIAG_TEST_BOARD_H */

@@ -72,4 +72,17 @@ int arkrtos_fdt_overlay(void *dst, uint32 cap,
 /** @brief 错误码的文字解释（只用于日志，不参与判定）。 */
 const char *arkrtos_fdt_overlay_reason(int rc);
 
+/**
+* @brief 板级提供的 demo fragment（`fdt overlay` 命令拿它做端到端演示）
+* @param size 输出 fragment 的字节数（成功时写入）
+* @return fragment blob 首地址；0 表示这个板子没有编进 demo fragment
+* @details 内核的 shell 只 include 内核头，不 include 板头（port 层刻意把
+*          板级头挡在核心源码之外），所以调用点自己看不到这个函数。这里
+*          给出声明，与 arkrtos_board_shell_register() 属同一类「板级契约」：
+*          ARKRTOS_USE_FDT_OVERLAY == 1 的板子必须提供该符号，否则链接期
+*          就会失败——而不是在调用点靠隐式 int 声明把指针截成 32 位。
+*          实现见 board/qemu_loongarch64/arkrtos_fdt_overlay_blob.c。
+*/
+const void *arkrtos_board_fdt_overlay_demo(uint32 *size);
+
 #endif /* __ARKRTOS_FDT_OVERLAY_H__ */

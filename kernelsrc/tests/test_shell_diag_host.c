@@ -777,14 +777,10 @@ const void *arkrtos_fdt_prop(const arkrtos_fdt_node_t *node, const char *name,
     return g_prop_p;
 }
 
-/* Declared here, not pulled in: arkrtos_fdt_overlay.h is included by the
- * shell file only, and an implicit-declaration warning in the test would be
- * a warn_gate failure. */
-int arkrtos_fdt_overlay(void *dst, uint32 cap,
-                        const void *base, uint32 base_len,
-                        const void *frag, uint32 frag_len,
-                        uint32 *out_len);
-const char *arkrtos_fdt_overlay_reason(int rc);
+/* 这里的 overlay 接口与板级 demo fragment 都由 arkrtos_fdt_overlay.h 声明：
+ * 测试自己再写一遍，等于让「头里写错了」这件事在测试里看不见——而
+ * -Wmissing-prototypes 只认本 TU 见过的原型。 */
+#include "arkrtos_fdt_overlay.h"
 
 int arkrtos_fdt_overlay(void *dst, uint32 cap, const void *base, uint32 base_len,
                         const void *frag, uint32 frag_len, uint32 *out_len)

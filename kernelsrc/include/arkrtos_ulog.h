@@ -208,11 +208,30 @@ ARKRTOS_UFMT_INLINE int arkrtos_ufmt_v(char *out, uint32 size, const char *fmt, 
                                  16u, 1u, width, zero);
             break;
         case 'p':
+        {
+            /* 指针宽度跟着目标走：32 位打 8 位十六进制、64 位打 16 位，
+             * 两边都补零。固定按 8 位打会把 64 位地址的高 32 位截掉，
+             * 于是两个不同的地址在日志里成了同一串——排障时最坏的一种
+             * 「看着有证据、其实对不上」。 */
+            void *pv = va_arg(ap, void *);
+
             pos = arkrtos_ufmt_put(out, size, pos, '0');
             pos = arkrtos_ufmt_put(out, size, pos, 'x');
-            pos = arkrtos_ufmt_num(out, size, pos, (uint32)va_arg(ap, void *),
-                                 16u, 0u, 8u, 1u);
+#if (ARKRTOS_PTR64 == 1)
+            /* 高、低两半各自补满 8 位：只在高位不同的两个地址必须打出
+             * 不同的串。 */
+            pos = arkrtos_ufmt_num(out, size, pos,
+                                  (uint32)((arkrtos_uptr_t)pv >> 32),
+                                  16u, 0u, 8u, 1u);
+            pos = arkrtos_ufmt_num(out, size, pos,
+                                  (uint32)((arkrtos_uptr_t)pv & 0xFFFFFFFFull),
+                                  16u, 0u, 8u, 1u);
+#else
+            pos = arkrtos_ufmt_num(out, size, pos, (uint32)(arkrtos_uptr_t)pv,
+                                  16u, 0u, 8u, 1u);
+#endif
             break;
+        }
         case 'c':
             pos = arkrtos_ufmt_put(out, size, pos, (char)va_arg(ap, int));
             break;

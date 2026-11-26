@@ -92,7 +92,7 @@ int32 arkrtos_task_register(void (*entry)(void), uint32 *stack_bottom, uint32 st
     s_task_generation++;
     p_task->generation  = s_task_generation;
 #endif
-    p_task->ram_start   = (uint32)stack_bottom;
+    p_task->ram_start   = (uint32)(arkrtos_uptr_t)stack_bottom;
     p_task->ram_size    = stack_size;
     p_task->stack_size  = stack_size;
     p_task->rom_start   = 0;

@@ -354,7 +354,7 @@ int32 arkrtos_thread_create_internal(void (*entry)(void), uint32 *stack_bottom,
         {
             /* Same 0-based slot numbering as the switch / wait events, so the
              * host resolves every one of them through arkrtos_task_table. */
-            mdk_trace_arkrtos_task_create((uint32_t)(tid - 1), (uint32_t)entry);
+            mdk_trace_arkrtos_task_create((uint32_t)(tid - 1), (uint32_t)(arkrtos_uptr_t)entry);
         }
         return tid;
     }
@@ -656,12 +656,12 @@ static void svc_event_ctrl(void *p_svc_ctx)
     {
         case ARKRTOS_EVENT_SUB_CREATE:
             /* 事件名字段是 char[16]，校验窗口必须给到 16 字节 */
-            if(arkrtos_kernel_user_name_ok((const void *)p[1], 16u) == 0u)
+            if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1], 16u) == 0u)
             {
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
                 break;
             }
-            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_event_create_internal((char *)p[1]));
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_event_create_internal((char *)(arkrtos_uptr_t)p[1]));
             break;
         case ARKRTOS_EVENT_SUB_WAIT:
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_event_wait_internal((int32)p[1], (int32)p[2]));
@@ -892,21 +892,21 @@ static void svc_dev_io(void *p_svc_ctx)
     switch(ARKRTOS_SVC_SUB_OF(p[0]))
     {
         case ARKRTOS_DEV_SUB_OPEN:
-            if(arkrtos_kernel_user_name_ok((const void *)p[1], 8u) == 0u)
+            if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1], 8u) == 0u)
             {
                 svc_dev_io_warn_once("open");
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
                 break;
             }
-            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_dev_open_internal((char *)p[1], p[2]));
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_dev_open_internal((char *)(arkrtos_uptr_t)p[1], p[2]));
             break;
         case ARKRTOS_DEV_SUB_READ:
-            if(arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u)
+            if(arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[2], (int32)p[3]) == 0u)
             {
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
                 break;
             }
-            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_dev_read_internal((int32)p[1], (uint8 *)p[2], (int32)p[3]));
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_dev_read_internal((int32)p[1], (uint8 *)(arkrtos_uptr_t)p[2], (int32)p[3]));
             break;
         case ARKRTOS_DEV_SUB_WRITE:
             /* len > 0 : the kernel reads len bytes from the caller
@@ -916,7 +916,7 @@ static void svc_dev_io(void *p_svc_ctx)
              *           must reach the driver like the internal
              *           arkrtos_dev_write_internal() path does. */
             if(((int32)p[3] > 0) &&
-               (arkrtos_kernel_user_ro_ok((const void *)p[2], (uint32)p[3]) == 0u))
+               (arkrtos_kernel_user_ro_ok((const void *)(arkrtos_uptr_t)p[2], (uint32)p[3]) == 0u))
             {
                 svc_dev_io_warn_once("write");
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
@@ -927,11 +927,11 @@ static void svc_dev_io(void *p_svc_ctx)
                 /* Console: the whole buffer is one output unit, so a
                  * user mode write() can never be cut in half by a
                  * kernel log line. */
-                ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_console_write((const uint8 *)p[2], (uint32)p[3]));
+                ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_console_write((const uint8 *)(arkrtos_uptr_t)p[2], (uint32)p[3]));
             }
             else
             {
-                ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_dev_write_internal((int32)p[1], (uint8 *)p[2], (int32)p[3]));
+                ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_dev_write_internal((int32)p[1], (uint8 *)(arkrtos_uptr_t)p[2], (int32)p[3]));
             }
             break;
         case ARKRTOS_DEV_SUB_CTRL:
@@ -948,14 +948,14 @@ static void svc_dev_io(void *p_svc_ctx)
              * owner's hardware around. Kept OUTSIDE the #if on purpose:
              * with the feature not built it must answer "refused", never
              * fall through to the generic 0 (which reads as "accepted"). */
-            if(arkrtos_kernel_user_name_ok((const void *)p[1], 8u) == 0u)
+            if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1], 8u) == 0u)
             {
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
                 break;
             }
 #if ARKRTOS_HW_SAFE
             ARKRTOS_SVC_RET(p_svc_ctx,
-                (uint32)arkrtos_hwsafe_set_will((const char *)p[1],
+                (uint32)arkrtos_hwsafe_set_will((const char *)(arkrtos_uptr_t)p[1],
                                                 arkrtos_current_task_id,
                                                 (int32)p[2], (int32)p[3]));
 #else
@@ -986,21 +986,21 @@ static void svc_drv_mgr(void *p_svc_ctx)
     switch(ARKRTOS_SVC_SUB_OF(p[0]))
     {
         case ARKRTOS_DRV_SUB_REGISTER:
-            if(arkrtos_kernel_user_name_ok((const void *)p[1], 8u) == 0u ||
-               arkrtos_kernel_dev_drv_ok((const arkrtos_dev_drv_t *)p[2]) == 0u)
+            if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1], 8u) == 0u ||
+               arkrtos_kernel_dev_drv_ok((const arkrtos_dev_drv_t *)(arkrtos_uptr_t)p[2]) == 0u)
             {
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
                 break;
             }
-            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_dev_register((char *)p[1], (arkrtos_dev_drv_t *)p[2], p[3]));
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_dev_register((char *)(arkrtos_uptr_t)p[1], (arkrtos_dev_drv_t *)(arkrtos_uptr_t)p[2], p[3]));
             break;
         case ARKRTOS_DRV_SUB_UNREGISTER:
-            if(arkrtos_kernel_user_name_ok((const void *)p[1], 8u) == 0u)
+            if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1], 8u) == 0u)
             {
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
                 break;
             }
-            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_dev_unregister((char *)p[1]));
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_dev_unregister((char *)(arkrtos_uptr_t)p[1]));
             break;
         case ARKRTOS_DRV_SUB_COUNT:
             ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_dev_get_count());
@@ -1011,33 +1011,33 @@ static void svc_drv_mgr(void *p_svc_ctx)
              * name. The pointer must land in the CALLER'S OWN image window:
              * a loaded image may only ask the kernel to run its own code,
              * never somebody else's. */
-            if((arkrtos_kernel_user_name_ok((const void *)p[1], 8u) == 0u) ||
-               (arkrtos_kernel_cb_own_region_ok((const void *)p[2]) == 0u))
+            if((arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1], 8u) == 0u) ||
+               (arkrtos_kernel_cb_own_region_ok((const void *)(arkrtos_uptr_t)p[2]) == 0u))
             {
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
                 break;
             }
             ARKRTOS_SVC_RET(p_svc_ctx,
-                (uint32)arkrtos_hwsafe_register((const char *)p[1],
-                                                (arkrtos_hwsafe_fn)p[2]));
+                (uint32)arkrtos_hwsafe_register((const char *)(arkrtos_uptr_t)p[1],
+                                                (arkrtos_hwsafe_fn)(arkrtos_uptr_t)p[2]));
             break;
         case ARKRTOS_DRV_SUB_HSAFE_QUERY:
-            if(arkrtos_kernel_user_name_ok((const void *)p[1], 8u) == 0u)
+            if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1], 8u) == 0u)
             {
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
                 break;
             }
             ARKRTOS_SVC_RET(p_svc_ctx,
-                (uint32)arkrtos_hwsafe_registered((const char *)p[1]));
+                (uint32)arkrtos_hwsafe_registered((const char *)(arkrtos_uptr_t)p[1]));
             break;
         case ARKRTOS_DRV_SUB_HSAFE_UNREGISTER:
-            if(arkrtos_kernel_user_name_ok((const void *)p[1], 8u) == 0u)
+            if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1], 8u) == 0u)
             {
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
                 break;
             }
             ARKRTOS_SVC_RET(p_svc_ctx,
-                (uint32)arkrtos_hwsafe_unregister((const char *)p[1]));
+                (uint32)arkrtos_hwsafe_unregister((const char *)(arkrtos_uptr_t)p[1]));
             break;
 #endif /* ARKRTOS_HW_SAFE */
         default:
@@ -1064,12 +1064,12 @@ static void svc_sync_ctrl(void *p_svc_ctx)
     switch(ARKRTOS_SVC_SUB_OF(p[0]))
     {
         case ARKRTOS_SYNC_SUB_SEM_CREATE:
-            if(arkrtos_kernel_user_name_ok((const void *)p[1], 8u) == 0u)
+            if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1], 8u) == 0u)
             {
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
                 break;
             }
-            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_sem_create_internal((char *)p[1], (int32)p[2]));
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_sem_create_internal((char *)(arkrtos_uptr_t)p[1], (int32)p[2]));
             break;
         case ARKRTOS_SYNC_SUB_SEM_WAIT:
             ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_sem_wait_internal((int32)p[1], (int32)p[2]));
@@ -1081,12 +1081,12 @@ static void svc_sync_ctrl(void *p_svc_ctx)
             ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_sem_delete_internal((int32)p[1]));
             break;
         case ARKRTOS_SYNC_SUB_MTX_CREATE:
-            if(arkrtos_kernel_user_name_ok((const void *)p[1], 8u) == 0u)
+            if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1], 8u) == 0u)
             {
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
                 break;
             }
-            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_mtx_create_internal((char *)p[1]));
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_mtx_create_internal((char *)(arkrtos_uptr_t)p[1]));
             break;
         case ARKRTOS_SYNC_SUB_MTX_LOCK:
             ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_mtx_lock_internal((int32)p[1], (int32)p[2]));
@@ -1108,12 +1108,12 @@ static void svc_sync_ctrl(void *p_svc_ctx)
             break;
 #endif
         case ARKRTOS_SYNC_SUB_COND_CREATE:
-            if(arkrtos_kernel_user_name_ok((const void *)p[1], 8u) == 0u)
+            if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1], 8u) == 0u)
             {
                 ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
                 break;
             }
-            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_cond_create_internal((char *)p[1]));
+            ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_cond_create_internal((char *)(arkrtos_uptr_t)p[1]));
             break;
         case ARKRTOS_SYNC_SUB_COND_WAIT:
             ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_cond_wait_internal((int32)p[1], (int32)p[2], (int32)p[3]));
@@ -1228,30 +1228,30 @@ static void svc_mq_ctrl(void *p_svc_ctx)
     switch(ARKRTOS_SVC_SUB_OF(p[0]))
     {
     case ARKRTOS_MQ_SUB_CREATE:
-        if(arkrtos_kernel_user_name_ok((const void *)p[1], 8u) == 0u)
+        if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1], 8u) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
-        ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_mq_create_internal((char *)p[1]));
+        ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_mq_create_internal((char *)(arkrtos_uptr_t)p[1]));
         break;
     case ARKRTOS_MQ_SUB_SEND:
         if(arkrtos_kernel_svc_args_ok(p, (uint32)ARKRTOS_SVC_ARG_BYTES(24u)) == 0u ||
-           arkrtos_kernel_mq_buf_ok((const void *)p[2], (int32)p[3]) == 0u)
+           arkrtos_kernel_mq_buf_ok((const void *)(arkrtos_uptr_t)p[2], (int32)p[3]) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
-        ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_mq_send_internal((int32)p[1], (uint32 *)p[2], (int32)p[3], (int32)p[4]));
+        ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_mq_send_internal((int32)p[1], (uint32 *)(arkrtos_uptr_t)p[2], (int32)p[3], (int32)p[4]));
         break;
     case ARKRTOS_MQ_SUB_RECV:
         if(arkrtos_kernel_svc_args_ok(p, (uint32)ARKRTOS_SVC_ARG_BYTES(24u)) == 0u ||
-           arkrtos_kernel_mq_buf_ok((const void *)p[2], (int32)p[3]) == 0u)
+           arkrtos_kernel_mq_buf_ok((const void *)(arkrtos_uptr_t)p[2], (int32)p[3]) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
-        ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_mq_recv_internal((int32)p[1], (uint32 *)p[2], (int32)p[3], (int32)p[4]));
+        ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_mq_recv_internal((int32)p[1], (uint32 *)(arkrtos_uptr_t)p[2], (int32)p[3], (int32)p[4]));
         break;
     case ARKRTOS_MQ_SUB_DELETE:
         ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_mq_delete_internal((int32)p[1]));
@@ -1386,7 +1386,7 @@ static void svc_mempool_ctrl(void *p_svc_ctx)
     switch(ARKRTOS_SVC_SUB_OF(p[0]))
     {
     case ARKRTOS_MPOOL_SUB_CREATE:                       /* create(name, pool, block_size, block_count) */
-        if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_MEMPOOL_NAME_MAX) == 0u)
+        if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1], ARKRTOS_MEMPOOL_NAME_MAX) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
@@ -1399,13 +1399,13 @@ static void svc_mempool_ctrl(void *p_svc_ctx)
         }
         /* 池内存区必须整段落在本任务可见 RAM：不校验就等于让 App 借内核
          * 之手在任意地址（含内核 RAM）发块，那是提权不是分配。 */
-        if(arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)(p[3] * p[4])) == 0u)
+        if(arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[2], (int32)(p[3] * p[4])) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
-        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_mempool_create_internal((char *)p[1],
-                                                (void *)p[2], p[3], p[4]));
+        ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_mempool_create_internal((char *)(arkrtos_uptr_t)p[1],
+                                                (void *)(arkrtos_uptr_t)p[2], p[3], p[4]));
         break;
     case ARKRTOS_MPOOL_SUB_ALLOC:                       /* alloc(handle) */
     {
@@ -1431,17 +1431,17 @@ static void svc_mempool_ctrl(void *p_svc_ctx)
     }
     case ARKRTOS_MPOOL_SUB_FREE:                       /* free(handle, ptr) */
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_mempool_free_internal((int32)p[1],
-                                                (void *)p[2]));
+                                                (void *)(arkrtos_uptr_t)p[2]));
         break;
     case ARKRTOS_MPOOL_SUB_QUERY:                       /* query(handle, out) */
-        if(arkrtos_kernel_dev_buf_ok((const void *)p[2],
+        if(arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[2],
                                      (int32)sizeof(arkrtos_mempool_stat_t)) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_mempool_query_internal((int32)p[1],
-                                                (arkrtos_mempool_stat_t *)(void *)p[2]));
+                                                (arkrtos_mempool_stat_t *)(void *)(arkrtos_uptr_t)p[2]));
         break;
     case ARKRTOS_MPOOL_SUB_DELETE:                       /* delete(handle) */
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_mempool_delete_internal((int32)p[1]));
@@ -1474,26 +1474,26 @@ static void svc_timer_ctrl(void *p_svc_ctx)
     switch(ARKRTOS_SVC_SUB_OF(p[0]))
     {
     case ARKRTOS_TIMER_SUB_CREATE:
-        if(arkrtos_kernel_user_name_ok((const void *)p[1], 8u) == 0u)
+        if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1], 8u) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
-        ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_timer_create_internal((char *)p[1]));
+        ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_timer_create_internal((char *)(arkrtos_uptr_t)p[1]));
         break;
     case ARKRTOS_TIMER_SUB_START:
         /* 回调会在内核特权态执行：回调必须落在调用者自己的固件区内，
          * 参数指针必须位于用户可见 RAM */
         if(arkrtos_kernel_svc_args_ok(p, (uint32)ARKRTOS_SVC_ARG_BYTES(24u)) == 0u ||
-           arkrtos_kernel_cb_own_region_ok((const void *)p[4]) == 0u ||
+           arkrtos_kernel_cb_own_region_ok((const void *)(arkrtos_uptr_t)p[4]) == 0u ||
            ((p[5] != 0u) &&
-            (arkrtos_kernel_ptr_ram_ok((const void *)p[5], 1u) == 0u)))
+            (arkrtos_kernel_ptr_ram_ok((const void *)(arkrtos_uptr_t)p[5], 1u) == 0u)))
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
         ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_timer_start_internal((int32)p[1], p[2], (uint8)p[3],
-                                                   (void (*)(void *))p[4], (void *)p[5]));
+                                                   (void (*)(void *))(arkrtos_uptr_t)p[4], (void *)(arkrtos_uptr_t)p[5]));
         break;
     case ARKRTOS_TIMER_SUB_STOP:
         ARKRTOS_SVC_RET(p_svc_ctx, arkrtos_timer_stop_internal((int32)p[1]));
@@ -1531,7 +1531,7 @@ static void svc_thread_ctrl(void *p_svc_ctx)
             /* p[1]=entry p[2]=stack_bottom p[3]=stack_size
              * p[4]=priority p[5]=period_ms (0 = event driven) */
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)arkrtos_thread_create_internal(
-                              (void (*)(void))p[1], (uint32 *)p[2],
+                              (void (*)(void))(arkrtos_uptr_t)p[1], (uint32 *)(arkrtos_uptr_t)p[2],
                               p[3], (uint8)p[4], p[5]));
             break;
         case ARKRTOS_THREAD_SUB_SELF:
@@ -1603,7 +1603,7 @@ static void svc_shell(void *p_svc_ctx)
         {
             case ARKRTOS_SHELL_SUB_REGISTER:
                 {
-                    const arkrtos_ushell_cmd_t *cmd = (const arkrtos_ushell_cmd_t *)q[1];
+                    const arkrtos_ushell_cmd_t *cmd = (const arkrtos_ushell_cmd_t *)(arkrtos_uptr_t)q[1];
 
                     if((arkrtos_kernel_ptr_ram_ok(cmd, (uint32)sizeof(arkrtos_ushell_cmd_t)) == 0u) ||
                        ((arkrtos_kernel_ptr_ram_ok(cmd->name, 1u) == 0u) &&
@@ -1622,7 +1622,7 @@ static void svc_shell(void *p_svc_ctx)
 
             case ARKRTOS_SHELL_SUB_UNREGISTER:
                 {
-                    const char *name = (const char *)q[1];
+                    const char *name = (const char *)(arkrtos_uptr_t)q[1];
 
                     if(arkrtos_kernel_user_name_ok((const void *)name, 16u) == 0u)
                     {
@@ -1636,7 +1636,7 @@ static void svc_shell(void *p_svc_ctx)
 
             case ARKRTOS_SHELL_SUB_PRINT:
                 {
-                    const char *msg = (const char *)q[1];
+                    const char *msg = (const char *)(arkrtos_uptr_t)q[1];
                     uint32 len;
 
                     if(arkrtos_kernel_user_ro_ok(msg, 1u) == 0u)
@@ -1713,31 +1713,31 @@ static void svc_fs_vol_io(void *p_svc_ctx, arkrtos_svc_arg_t *p)
     switch(ARKRTOS_SVC_SUB_OF(p[0]))
     {
     case ARKRTOS_FILE_SUB_WRITE:                 /* create / truncate and write */
-        if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
+        if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
         if((p[3] != 0u) &&
-           (arkrtos_kernel_user_ro_ok((const void *)p[2], p[3]) == 0u))
+           (arkrtos_kernel_user_ro_ok((const void *)(arkrtos_uptr_t)p[2], p[3]) == 0u))
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
         arkrtos_sched_lock_internal();
-        fs_ret = arkrtos_fs_write_file((const char *)p[1],
-                                     (const uint8 *)p[2], p[3]);
+        fs_ret = arkrtos_fs_write_file((const char *)(arkrtos_uptr_t)p[1],
+                                     (const uint8 *)(arkrtos_uptr_t)p[2], p[3]);
         arkrtos_sched_unlock_internal();
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
         break;
 
     case ARKRTOS_FILE_SUB_READ:                 /* read into a caller buffer */
-        if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
+        if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
-        if(arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u)
+        if(arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[2], (int32)p[3]) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
@@ -1746,8 +1746,8 @@ static void svc_fs_vol_io(void *p_svc_ctx, arkrtos_svc_arg_t *p)
             uint32 got = 0u;
 
             arkrtos_sched_lock_internal();
-            fs_ret = arkrtos_fs_read_file((const char *)p[1],
-                                        (uint8 *)p[2], p[3], &got);
+            fs_ret = arkrtos_fs_read_file((const char *)(arkrtos_uptr_t)p[1],
+                                        (uint8 *)(arkrtos_uptr_t)p[2], p[3], &got);
             arkrtos_sched_unlock_internal();
             ARKRTOS_SVC_RET(p_svc_ctx,
                           (uint32)((fs_ret == 0) ? (int32)got : fs_ret));
@@ -1760,12 +1760,12 @@ static void svc_fs_vol_io(void *p_svc_ctx, arkrtos_svc_arg_t *p)
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
-        if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
+        if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
-        if(arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u)
+        if(arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[2], (int32)p[3]) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
@@ -1774,7 +1774,7 @@ static void svc_fs_vol_io(void *p_svc_ctx, arkrtos_svc_arg_t *p)
             uint32 got = 0u;
 
             arkrtos_sched_lock_internal();
-            fs_ret = arkrtos_fs_read_at((const char *)p[1], (uint8 *)p[2],
+            fs_ret = arkrtos_fs_read_at((const char *)(arkrtos_uptr_t)p[1], (uint8 *)(arkrtos_uptr_t)p[2],
                                       p[3], p[4], &got);
             arkrtos_sched_unlock_internal();
             ARKRTOS_SVC_RET(p_svc_ctx,
@@ -1793,35 +1793,35 @@ static void svc_fs_vol_meta(void *p_svc_ctx, arkrtos_svc_arg_t *p)
     switch(ARKRTOS_SVC_SUB_OF(p[0]))
     {
     case ARKRTOS_FILE_SUB_STAT:                 /* stat */
-        if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
+        if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
         if(((p[2] != 0u) &&
-            (arkrtos_kernel_dev_buf_ok((const void *)p[2], 4) == 0u)) ||
+            (arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[2], 4) == 0u)) ||
            ((p[3] != 0u) &&
-            (arkrtos_kernel_dev_buf_ok((const void *)p[3], 4) == 0u)))
+            (arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[3], 4) == 0u)))
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
         arkrtos_sched_lock_internal();
-        fs_ret = arkrtos_fs_stat_path((const char *)p[1],
-                                     (uint32 *)p[2], (uint32 *)p[3]);
+        fs_ret = arkrtos_fs_stat_path((const char *)(arkrtos_uptr_t)p[1],
+                                     (uint32 *)(arkrtos_uptr_t)p[2], (uint32 *)(arkrtos_uptr_t)p[3]);
         arkrtos_sched_unlock_internal();
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
         break;
 
     case ARKRTOS_FILE_SUB_INFO:                 /* volume capacity */
-        if((arkrtos_kernel_dev_buf_ok((const void *)p[1], 4) == 0u) ||
-           (arkrtos_kernel_dev_buf_ok((const void *)p[2], 4) == 0u))
+        if((arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[1], 4) == 0u) ||
+           (arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[2], 4) == 0u))
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
         arkrtos_sched_lock_internal();
-        fs_ret = arkrtos_fs_stat((uint32 *)p[1], (uint32 *)p[2]);
+        fs_ret = arkrtos_fs_stat((uint32 *)(arkrtos_uptr_t)p[1], (uint32 *)(arkrtos_uptr_t)p[2]);
         arkrtos_sched_unlock_internal();
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
         break;
@@ -1837,13 +1837,13 @@ static void svc_fs_vol_tree(void *p_svc_ctx, arkrtos_svc_arg_t *p)
     switch(ARKRTOS_SVC_SUB_OF(p[0]))
     {
     case ARKRTOS_FILE_SUB_REMOVE:                 /* remove */
-        if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
+        if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
         arkrtos_sched_lock_internal();
-        fs_ret = arkrtos_fs_remove((const char *)p[1]);
+        fs_ret = arkrtos_fs_remove((const char *)(arkrtos_uptr_t)p[1]);
         arkrtos_sched_unlock_internal();
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
         break;
@@ -1854,14 +1854,14 @@ static void svc_fs_vol_tree(void *p_svc_ctx, arkrtos_svc_arg_t *p)
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
-        if((arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u) ||
-           (arkrtos_kernel_user_name_ok((const void *)p[2], ARKRTOS_FS_PATH_MAX) == 0u))
+        if((arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1], ARKRTOS_FS_PATH_MAX) == 0u) ||
+           (arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[2], ARKRTOS_FS_PATH_MAX) == 0u))
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
         arkrtos_sched_lock_internal();
-        fs_ret = arkrtos_fs_rename((const char *)p[1], (const char *)p[2]);
+        fs_ret = arkrtos_fs_rename((const char *)(arkrtos_uptr_t)p[1], (const char *)(arkrtos_uptr_t)p[2]);
         arkrtos_sched_unlock_internal();
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
         break;
@@ -1872,20 +1872,20 @@ static void svc_fs_vol_tree(void *p_svc_ctx, arkrtos_svc_arg_t *p)
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
-        if(arkrtos_kernel_user_name_ok((const void *)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
+        if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1], ARKRTOS_FS_PATH_MAX) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
-        if((arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u) ||
-           (arkrtos_kernel_dev_buf_ok((const void *)p[4], 4) == 0u))
+        if((arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[2], (int32)p[3]) == 0u) ||
+           (arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[4], 4) == 0u))
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)(-1));
             break;
         }
         arkrtos_sched_lock_internal();
-        fs_ret = arkrtos_fs_list_names((const char *)p[1], (char *)p[2],
-                                     p[3], (uint32 *)p[4]);
+        fs_ret = arkrtos_fs_list_names((const char *)(arkrtos_uptr_t)p[1], (char *)(arkrtos_uptr_t)p[2],
+                                     p[3], (uint32 *)(arkrtos_uptr_t)p[4]);
         arkrtos_sched_unlock_internal();
         ARKRTOS_SVC_RET(p_svc_ctx, (uint32)fs_ret);
         break;
@@ -1981,14 +1981,14 @@ static void svc_fs_ns_io(void *p_svc_ctx, arkrtos_svc_arg_t *p)
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
             break;
         }
-        if(arkrtos_kernel_user_name_ok((const void *)p[1],
+        if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1],
                                      ARKRTOS_VFS_PATH_MAX) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
             break;
         }
         ARKRTOS_SVC_RET(p_svc_ctx,
-                      (uint32)arkrtos_vfs_app_open((const char *)p[1], p[2]));
+                      (uint32)arkrtos_vfs_app_open((const char *)(arkrtos_uptr_t)p[1], p[2]));
         break;
 
     case ARKRTOS_PATH_SUB_READ:                /* read  handle, buf, len -> bytes */
@@ -1997,14 +1997,14 @@ static void svc_fs_ns_io(void *p_svc_ctx, arkrtos_svc_arg_t *p)
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
             break;
         }
-        if(arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u)
+        if(arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[2], (int32)p[3]) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
             break;
         }
         ARKRTOS_SVC_RET(p_svc_ctx,
                       (uint32)arkrtos_vfs_app_read((int32)p[1],
-                                                 (uint8 *)p[2], p[3]));
+                                                 (uint8 *)(arkrtos_uptr_t)p[2], p[3]));
         break;
 
     case ARKRTOS_PATH_SUB_WRITE:                /* write handle, buf, len -> bytes */
@@ -2014,14 +2014,14 @@ static void svc_fs_ns_io(void *p_svc_ctx, arkrtos_svc_arg_t *p)
             break;
         }
         if((p[3] != 0u) &&
-           (arkrtos_kernel_user_ro_ok((const void *)p[2], p[3]) == 0u))
+           (arkrtos_kernel_user_ro_ok((const void *)(arkrtos_uptr_t)p[2], p[3]) == 0u))
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
             break;
         }
         ARKRTOS_SVC_RET(p_svc_ctx,
                       (uint32)arkrtos_vfs_app_write((int32)p[1],
-                                                  (const uint8 *)p[2], p[3]));
+                                                  (const uint8 *)(arkrtos_uptr_t)p[2], p[3]));
         break;
 
     case ARKRTOS_PATH_SUB_CLOSE:                /* close handle */
@@ -2052,24 +2052,24 @@ static void svc_fs_ns_meta(void *p_svc_ctx, arkrtos_svc_arg_t *p)
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
             break;
         }
-        if(arkrtos_kernel_user_name_ok((const void *)p[1],
+        if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1],
                                      ARKRTOS_VFS_PATH_MAX) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
             break;
         }
         if(((p[2] != 0u) &&
-            (arkrtos_kernel_dev_buf_ok((const void *)p[2], 4) == 0u)) ||
+            (arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[2], 4) == 0u)) ||
            ((p[3] != 0u) &&
-            (arkrtos_kernel_dev_buf_ok((const void *)p[3], 4) == 0u)))
+            (arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[3], 4) == 0u)))
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
             break;
         }
         ARKRTOS_SVC_RET(p_svc_ctx,
-                      (uint32)arkrtos_vfs_app_stat((const char *)p[1],
-                                                 (uint32 *)p[2],
-                                                 (uint32 *)p[3]));
+                      (uint32)arkrtos_vfs_app_stat((const char *)(arkrtos_uptr_t)p[1],
+                                                 (uint32 *)(arkrtos_uptr_t)p[2],
+                                                 (uint32 *)(arkrtos_uptr_t)p[3]));
         break;
 
     case ARKRTOS_PATH_SUB_SEEK:                /* seek handle, off, whence */
@@ -2090,24 +2090,24 @@ static void svc_fs_ns_meta(void *p_svc_ctx, arkrtos_svc_arg_t *p)
             break;
         }
         if((p[3] == 0u) ||
-           (arkrtos_kernel_dev_buf_ok((const void *)p[2], (int32)p[3]) == 0u))
+           (arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[2], (int32)p[3]) == 0u))
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
             break;
         }
         if(((p[4] != 0u) &&
-            (arkrtos_kernel_dev_buf_ok((const void *)p[4], 4) == 0u)) ||
+            (arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[4], 4) == 0u)) ||
            ((p[5] != 0u) &&
-            (arkrtos_kernel_dev_buf_ok((const void *)p[5], 4) == 0u)))
+            (arkrtos_kernel_dev_buf_ok((const void *)(arkrtos_uptr_t)p[5], 4) == 0u)))
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
             break;
         }
         ARKRTOS_SVC_RET(p_svc_ctx,
                       (uint32)arkrtos_vfs_app_readdir((int32)p[1],
-                                                    (char *)p[2], p[3],
-                                                    (uint32 *)p[4],
-                                                    (uint32 *)p[5]));
+                                                    (char *)(arkrtos_uptr_t)p[2], p[3],
+                                                    (uint32 *)(arkrtos_uptr_t)p[4],
+                                                    (uint32 *)(arkrtos_uptr_t)p[5]));
         break;
 
         default:
@@ -2128,14 +2128,14 @@ static void svc_fs_ns_tree(void *p_svc_ctx, arkrtos_svc_arg_t *p)
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
             break;
         }
-        if(arkrtos_kernel_user_name_ok((const void *)p[1],
+        if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1],
                                      ARKRTOS_VFS_PATH_MAX) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
             break;
         }
         ARKRTOS_SVC_RET(p_svc_ctx,
-                      (uint32)arkrtos_vfs_app_unlink((const char *)p[1]));
+                      (uint32)arkrtos_vfs_app_unlink((const char *)(arkrtos_uptr_t)p[1]));
         break;
 
     case ARKRTOS_PATH_SUB_MKDIR:                /* mkdir path */
@@ -2144,14 +2144,14 @@ static void svc_fs_ns_tree(void *p_svc_ctx, arkrtos_svc_arg_t *p)
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
             break;
         }
-        if(arkrtos_kernel_user_name_ok((const void *)p[1],
+        if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1],
                                      ARKRTOS_VFS_PATH_MAX) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
             break;
         }
         ARKRTOS_SVC_RET(p_svc_ctx,
-                      (uint32)arkrtos_vfs_app_mkdir((const char *)p[1]));
+                      (uint32)arkrtos_vfs_app_mkdir((const char *)(arkrtos_uptr_t)p[1]));
         break;
 
     case ARKRTOS_PATH_SUB_RMDIR:                /* rmdir path */
@@ -2160,14 +2160,14 @@ static void svc_fs_ns_tree(void *p_svc_ctx, arkrtos_svc_arg_t *p)
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
             break;
         }
-        if(arkrtos_kernel_user_name_ok((const void *)p[1],
+        if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1],
                                      ARKRTOS_VFS_PATH_MAX) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
             break;
         }
         ARKRTOS_SVC_RET(p_svc_ctx,
-                      (uint32)arkrtos_vfs_app_rmdir((const char *)p[1]));
+                      (uint32)arkrtos_vfs_app_rmdir((const char *)(arkrtos_uptr_t)p[1]));
         break;
 
     case ARKRTOS_PATH_SUB_RENAME:                /* rename old, new */
@@ -2176,17 +2176,17 @@ static void svc_fs_ns_tree(void *p_svc_ctx, arkrtos_svc_arg_t *p)
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
             break;
         }
-        if((arkrtos_kernel_user_name_ok((const void *)p[1],
+        if((arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1],
                                       ARKRTOS_VFS_PATH_MAX) == 0u) ||
-           (arkrtos_kernel_user_name_ok((const void *)p[2],
+           (arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[2],
                                       ARKRTOS_VFS_PATH_MAX) == 0u))
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
             break;
         }
         ARKRTOS_SVC_RET(p_svc_ctx,
-                      (uint32)arkrtos_vfs_app_rename((const char *)p[1],
-                                                   (const char *)p[2]));
+                      (uint32)arkrtos_vfs_app_rename((const char *)(arkrtos_uptr_t)p[1],
+                                                   (const char *)(arkrtos_uptr_t)p[2]));
         break;
 
         default:
@@ -2207,7 +2207,7 @@ static void svc_fs_ns_size(void *p_svc_ctx, arkrtos_svc_arg_t *p)
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
             break;
         }
-        if(arkrtos_kernel_user_name_ok((const void *)p[1],
+        if(arkrtos_kernel_user_name_ok((const void *)(arkrtos_uptr_t)p[1],
                                      ARKRTOS_VFS_PATH_MAX) == 0u)
         {
             ARKRTOS_SVC_RET(p_svc_ctx, (uint32)ARKRTOS_VFS_EINVAL);
@@ -2215,7 +2215,7 @@ static void svc_fs_ns_size(void *p_svc_ctx, arkrtos_svc_arg_t *p)
         }
         ARKRTOS_SVC_RET(p_svc_ctx,
                       (uint32)arkrtos_vfs_app_truncate_path(
-                          (const char *)p[1], p[2]));
+                          (const char *)(arkrtos_uptr_t)p[1], p[2]));
         break;
 
     case ARKRTOS_PATH_SUB_FTRUNCATE:                /* ftruncate handle, size */

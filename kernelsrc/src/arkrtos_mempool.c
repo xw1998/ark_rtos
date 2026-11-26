@@ -276,7 +276,7 @@ int32 arkrtos_mempool_create_internal(const char *name, void *pool,
         return ARKRTOS_MEMPOOL_ERR_PARAM;
     }
     /* 池首址也必须对齐：块地址是 base + k*block_size，base 歪了整池都歪 */
-    if(((uint32)pool & ((uint32)sizeof(void *) - 1u)) != 0u)
+    if(((uint32)(arkrtos_uptr_t)pool & ((uint32)sizeof(void *) - 1u)) != 0u)
     {
         return ARKRTOS_MEMPOOL_ERR_PARAM;
     }
@@ -425,7 +425,7 @@ int32 arkrtos_mempool_free_internal(int32 handle, void *p_blk)
 
     /* 先判"是否落在池内"（指针比较不会回绕），再算偏移；
      * 用 off + size 判界会因 u32 相加回绕而把池外指针判成合法。 */
-    if((uint32)p_blk < (uint32)p->base)
+    if((uint32)(arkrtos_uptr_t)p_blk < (uint32)(arkrtos_uptr_t)p->base)
     {
         p->free_bad++;
         ARKRTOS_EXIT_CRITICAL(state);

@@ -33,6 +33,27 @@ typedef signed   short int16;
 typedef unsigned char  uint8;
 typedef signed   char  int8;
 
+/* 指针宽度整数：只用在「指针与整数互转」的地方，让一次有意的宽度变换
+ * 在源码里看得见。定义由 ABI 决定，不由 long 决定——宿主 Windows 64 位
+ * 是 LLP64，long 只有 4 字节而指针是 8 字节，所以 64 位档取
+ * unsigned long long（8 字节，AC5/GCC/Clang/Clang-cl 都认），32 位档取
+ * unsigned int（与 long、指针同宽，AC5 上没有 long long 的顾虑）。
+ * 32 位目标的类型与代码逐字节不变：这个类型不出现就不产生任何指令。 */
+#if (defined(__SIZEOF_POINTER__) && (__SIZEOF_POINTER__ > 4)) || \
+    defined(__LP64__) || defined(_LP64) || \
+    (defined(__SIZEOF_LONG__) && (__SIZEOF_LONG__ > 4)) || \
+    defined(_WIN64)
+typedef unsigned long long arkrtos_uptr_t;
+#ifndef ARKRTOS_PTR64
+#define ARKRTOS_PTR64 1
+#endif
+#else
+typedef unsigned int arkrtos_uptr_t;
+#ifndef ARKRTOS_PTR64
+#define ARKRTOS_PTR64 0
+#endif
+#endif
+
 
 
 /* Toolchain-independent weak-symbol attribute (AC5 vs AC6/GCC/Clang). */

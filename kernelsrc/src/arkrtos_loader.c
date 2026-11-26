@@ -160,7 +160,7 @@ static uint32 arkrtos_loader_entry_addr(uint32 image_base, uint32 payload_offset
 /* 整段是否处于擦除态（全 0xFF） */
 static uint32 arkrtos_loader_span_erased(uint32 base, uint32 size)
 {
-    const uint32 *p = (const uint32 *)base;
+    const uint32 *p = (const uint32 *)(arkrtos_uptr_t)base;
     uint32 words = size / 4u;
     uint32 i;
 
@@ -554,7 +554,7 @@ static int32 arkrtos_loader_find_clean(uint32 size, uint32 skip_base, uint32 ski
 
     for(p = begin; p < limit; p += 4u)
     {
-        uint32 w = *(const volatile uint32 *)p;
+        uint32 w = *(const volatile uint32 *)(arkrtos_uptr_t)p;
 
         if(w == 0xFFFFFFFFu)
         {
@@ -1230,7 +1230,7 @@ static int32 loader_stream_reloc_table(int32 dev, uint32 base,
      * 而且改完就不可逆，所以必须在收负载之前先拒掉。 */
     chk = arkrtos_loader_check_header(
               p_hdr,
-              (const uint32 *)(base + ARKRTOS_APP_RELOC_OFFSET),
+              (const uint32 *)(arkrtos_uptr_t)(base + ARKRTOS_APP_RELOC_OFFSET),
               ARKRTOS_APP_TYPE_MASK_POOL);
 
     if(chk != 0)
@@ -1321,7 +1321,7 @@ static int32 loader_stream_payload(int32 dev, uint32 base,
         submit = arkrtos_loader_reloc_apply(arkrtos_loader_chunk,
                                           p_hdr->payload_offset + written, want,
                                           p_hdr,
-                                          (const uint32 *)(base + ARKRTOS_APP_RELOC_OFFSET),
+                                          (const uint32 *)(arkrtos_uptr_t)(base + ARKRTOS_APP_RELOC_OFFSET),
                                           p_idx, delta_rom, delta_ram);
 
         keep = want - (submit - (p_hdr->payload_offset + written));
@@ -1386,7 +1386,7 @@ static int32 arkrtos_loader_stream_image(int32 dev, uint32 base, const arkrtos_a
      * from the bytes on the wire, before the relocation patch rewrites them.
      * The header copy already in Flash is the right input: everything the MAC
      * excludes (crc32/state/runtime) is zeroed below, the rest is nominal. */
-    arkrtos_sign_stream_begin((const uint8 *)base);
+    arkrtos_sign_stream_begin((const uint8 *)(arkrtos_uptr_t)base);
 
     rc = loader_stream_reloc_table(dev, base, p_hdr, rt_len, &crc_recv, &crc_written);
     if(rc != 0)
@@ -1468,7 +1468,7 @@ static int32 arkrtos_loader_span_blank(uint32 base, uint32 size)
 
     for(p = base; p < end; p += 4u)
     {
-        if(*(const volatile uint32 *)p != 0xFFFFFFFFu)
+        if(*(const volatile uint32 *)(arkrtos_uptr_t)p != 0xFFFFFFFFu)
         {
             return 0;
         }
@@ -1911,7 +1911,7 @@ int32 arkrtos_loader_load_dev_hdr(int32 dev, const arkrtos_app_header_t *p_hdr, 
      * 不能拿 hdr.crc32 比——那是标称形态的 CRC，而这里躺着的是打了 delta 的
      * 形态，两者只在本次落点恰好等于标称基址时才相等。 */
     {
-        uint32 rb = arkrtos_loader_image_crc((const uint8 *)base, &hdr);
+        uint32 rb = arkrtos_loader_image_crc((const uint8 *)(arkrtos_uptr_t)base, &hdr);
 
         if(rb != crc_written)
         {
@@ -2175,7 +2175,7 @@ static int32 loader_commit_slot(arkrtos_partition_table_t *pt, int32 slot, uint3
                                 arkrtos_app_header_t *p_hdr, uint32 crc_written)
 {
     /* 回读复核：与刚刚真正写下去的那份比（标称 CRC 对不上打了补丁的形态） */
-    if(arkrtos_loader_image_crc((const uint8 *)base, p_hdr) != crc_written)
+    if(arkrtos_loader_image_crc((const uint8 *)(arkrtos_uptr_t)base, p_hdr) != crc_written)
     {
         arkrtos_ptable_free((uint32)slot);
         return ARKRTOS_LOADER_ERR_CRC;
@@ -2277,7 +2277,7 @@ static uint32 arkrtos_loader_dev_slot(uint32 unit, uint32 *p_units, uint32 *p_ty
 static int32 arkrtos_loader_accept(uint32 base, uint32 *out_total, uint32 *out_entry,
                                  uint32 *out_autostart)
 {
-    const arkrtos_app_header_t *p_hdr = (const arkrtos_app_header_t *)base;
+    const arkrtos_app_header_t *p_hdr = (const arkrtos_app_header_t *)(arkrtos_uptr_t)base;
     uint32 total;
 
 #if (ARKRTOS_USE_TRUST_ROOT == 1)
@@ -2420,12 +2420,12 @@ int32 arkrtos_loader_check_install(const arkrtos_app_header_t *p_hdr)
         {
             continue;               /* 被禁用 / 半途的记录不算「已装」 */
         }
-        if(*(const volatile uint32 *)base != (uint32)ARKRTOS_APP_MAGIC)
+        if(*(const volatile uint32 *)(arkrtos_uptr_t)base != (uint32)ARKRTOS_APP_MAGIC)
         {
             continue;               /* 裸镜像没有头，无法比对 */
         }
 
-        p_old = (const arkrtos_app_header_t *)base;
+        p_old = (const arkrtos_app_header_t *)(arkrtos_uptr_t)base;
 
         if(p_old->image_id != p_hdr->image_id)
         {
@@ -2659,7 +2659,7 @@ static void loader_scan_rebind_ram(int32 slot, const arkrtos_app_header_t *p_hdr
  * 物理 0xFF 判定后擦除。 */
 static int32 loader_scan_accept(uint32 addr, arkrtos_partition_table_t *pt, uint32 *p_step)
 {
-    const arkrtos_app_header_t *p_hdr = (const arkrtos_app_header_t *)addr;
+    const arkrtos_app_header_t *p_hdr = (const arkrtos_app_header_t *)(arkrtos_uptr_t)addr;
     uint32 total = 0u;
     uint32 entry = 0u;
     uint32 autostart = 0u;
@@ -2780,7 +2780,7 @@ static int32 loader_move_precheck(uint32 slot, uint32 new_base,
         return ARKRTOS_LOADER_ERR_ADDR;       /* 只向下搬，保证往返单调、不会摆动 */
     }
 
-    p_old = (const arkrtos_app_header_t *)old_base;
+    p_old = (const arkrtos_app_header_t *)(arkrtos_uptr_t)old_base;
 
     if(arkrtos_loader_check_header(
            p_old,
@@ -2845,7 +2845,7 @@ static int32 loader_move_program(uint32 old_base, uint32 new_base, uint32 delta,
             for(i = 0u; i < want; i++)
             {
                 arkrtos_loader_chunk[i] =
-                    *(const uint8 *)(old_base + ARKRTOS_APP_RELOC_OFFSET + got + i);
+                    *(const uint8 *)(arkrtos_uptr_t)(old_base + ARKRTOS_APP_RELOC_OFFSET + got + i);
             }
 
             crc_written = arkrtos_crc32(arkrtos_loader_chunk, want, crc_written);
@@ -2875,7 +2875,7 @@ static int32 loader_move_program(uint32 old_base, uint32 new_base, uint32 delta,
         for(i = 0u; i < want; i++)
         {
             arkrtos_loader_chunk[i] =
-                *(const uint8 *)(old_base + p_hdr->payload_offset + written + i);
+                *(const uint8 *)(arkrtos_uptr_t)(old_base + p_hdr->payload_offset + written + i);
         }
 
         /* 旧副本还在 Flash 里，被切开的尾部下一轮重读即可 */
@@ -2883,7 +2883,7 @@ static int32 loader_move_program(uint32 old_base, uint32 new_base, uint32 delta,
                      arkrtos_loader_chunk,
                      p_hdr->payload_offset + written, want,
                      p_hdr,
-                     (const uint32 *)(old_base + ARKRTOS_APP_RELOC_OFFSET),
+                     (const uint32 *)(arkrtos_uptr_t)(old_base + ARKRTOS_APP_RELOC_OFFSET),
                      &idx, delta, 0u);
 
         if(submit <= (p_hdr->payload_offset + written))
@@ -2916,7 +2916,7 @@ static int32 loader_move_finalize(uint32 slot, uint32 new_base,
 {
     /* 全量复核：搬完的字节必须与「刚写下去的那份」逐字节等价。
      * 比的是本次会话攒出来的落盘形态 CRC，不是 p_hdr->crc32（标称形态）。 */
-    if(arkrtos_loader_image_crc((const uint8 *)new_base, p_hdr) != crc_written)
+    if(arkrtos_loader_image_crc((const uint8 *)(arkrtos_uptr_t)new_base, p_hdr) != crc_written)
     {
         return ARKRTOS_LOADER_ERR_CRC;
     }
@@ -3075,7 +3075,7 @@ uint32 arkrtos_loader_pool_free(uint32 *p_largest)
 
     for(p = begin; p < limit; p += 4u)
     {
-        uint32 w = *(const volatile uint32 *)p;
+        uint32 w = *(const volatile uint32 *)(arkrtos_uptr_t)p;
 
         if(w == 0xFFFFFFFFu)
         {
@@ -3363,8 +3363,8 @@ int32 arkrtos_loader_start(uint32 slot)
      * 因此 __main 设好 SP 之后与内核推导值一致，不存在「双份栈」。 */
     stack_bottom = (ram_base + ram_size) - stack_size;
 
-    task_id = arkrtos_task_register((void (*)(void))entry,
-                                  (uint32 *)stack_bottom,
+    task_id = arkrtos_task_register((void (*)(void))(arkrtos_uptr_t)entry,
+                                  (uint32 *)(arkrtos_uptr_t)stack_bottom,
                                   stack_size,
                                   (uint8)priority,
                                   period);
@@ -3622,7 +3622,7 @@ int32 arkrtos_loader_stop(uint32 slot)
      * 「可搬移的安装镜像」，而裸镜像是开发者烧进固定槽位的，不能被搬。
      * 判据与认领时一致——基址处没有镜像头就是裸镜像。 */
     if((pt->slot_base[slot] == 0u) ||
-       (*(const volatile uint32 *)(pt->slot_base[slot]) != (uint32)ARKRTOS_APP_MAGIC))
+       (*(const volatile uint32 *)(arkrtos_uptr_t)(pt->slot_base[slot]) != (uint32)ARKRTOS_APP_MAGIC))
     {
         rest_state = ARKRTOS_APP_SLOT_RAW;
     }

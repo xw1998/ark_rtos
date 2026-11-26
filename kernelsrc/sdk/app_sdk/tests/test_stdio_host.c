@@ -19,6 +19,10 @@
 #include <stdio.h>
 #include <string.h>
 
+/* 只要一个宏 ARKRTOS_PTR64（真指针宽度），好让 %p 的期望串随宿主走：
+ * 32 位宿主必须与改动前逐字节相同，64 位宿主打 16 位。 */
+#include "arkrtos_types.h"
+
 /* ---------------- 控制台捕获：替掉 SVC ---------------- */
 
 static char g_con[4096];
@@ -204,6 +208,24 @@ int main(void)
             g_pass++;
         }
     }
+
+    /* 10) %p：位数跟着指针宽度走，两个只在高位不同的地址不能打成一串。
+     *     32 位宿主这条与改动前逐字节相同（0x2000c000），是「32 位目标
+     *     代码零变化」这条承诺的机器判据；64 位宿主（LP64/LLP64）必须
+     *     打出 16 位，否则日志里 0x120000000 与 0x200000000 会长得一样。 */
+    cap_reset();
+    (void)printf("%p\n", (void *)(arkrtos_uptr_t)0x2000C000u);
+#if (ARKRTOS_PTR64 == 1)
+    {
+        static const char want[] = "0x000000002000c000\r\n";
+        expect_bytes("printf %p (64-bit)", want, (int)sizeof(want) - 1, cap_len());
+    }
+#else
+    {
+        static const char want[] = "0x2000c000\r\n";
+        expect_bytes("printf %p (32-bit)", want, (int)sizeof(want) - 1, cap_len());
+    }
+#endif
 
     fputs(g_fail == 0 ? "STDIO-HOST OK\n" : "STDIO-HOST FAILED\n", stdout);
 

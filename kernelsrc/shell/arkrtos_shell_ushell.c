@@ -161,7 +161,7 @@ void ushell_drop(uint32 i)
 static int ushell_func_alive(const void *p)
 {
     const arkrtos_partition_table_t *pt = arkrtos_ptable_get();
-    uint32 addr = (uint32)p;
+    uint32 addr = (uint32)(arkrtos_uptr_t)p;
     uint32 i;
 
     if((p == 0) || (pt == 0))

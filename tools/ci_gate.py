@@ -1583,6 +1583,50 @@ def check_swap_syntax():
     else:
         fail("swap", txt[-260:])
 
+def check_la64_build_warnings():
+    """The LoongArch64 target build must compile with zero warnings.
+
+    Why this exists: `warn-clean` only covers the 32-bit host TUs.  The target
+    side had no reading at all, so 241 `-Wint-to-pointer-cast` /
+    `-Wpointer-to-int-cast` warnings sat in the default LA64 build for months
+    (all of `svc_*()` reading the 32-bit SVC parameter block on a 64-bit
+    target, plus the loader's 32-bit address model).  One root cause, one
+    wording, 241 times - which is exactly the shape that hides the next real
+    slip.  The fix (docs/欠账盘点.md「LA64 构建告警清零」) makes every pointer
+    <-> integer conversion explicit through `arkrtos_uptr_t`, so the build can
+    be held at zero from now on.
+
+    A missing cross compiler is a FAIL, not a skip: this gate exists to be a
+    reading, and "no toolchain" is not "clean".
+    """
+    logdir = os.path.join(ROOT, "build")
+    try:
+        os.makedirs(logdir)
+    except OSError:
+        pass
+    log = os.path.join(logdir, "ci_gate_la64_build.log")
+    env = dict(os.environ)
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    try:
+        with open(log, "wb") as f:
+            r = subprocess.run(["make", "-f", "example/qemu_loongarch64/Makefile",
+                                "-j8"], cwd=ROOT, stdout=f,
+                               stderr=subprocess.STDOUT, env=env, timeout=900)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        fail("la64-build", "make did not run: %s" % exc)
+        return
+    txt = read(log).decode("utf-8", "replace")
+    warns = [ln.strip() for ln in txt.splitlines() if "warning:" in ln]
+    if r.returncode != 0:
+        fail("la64-build", "build failed (exit=%d), log: %s" % (r.returncode, log))
+    elif warns:
+        fail("la64-build", "%d warning(s), first: %s (log: %s)"
+             % (len(warns), warns[0][:200], log))
+    else:
+        ok("la64-build", "LA64 full build: 0 warning / 0 error "
+           "(host 32-bit TUs stay under warn_gate)")
+
 def check_paging_switch():
     """Isolation backend switch must actually switch (both directions).
 
@@ -6272,6 +6316,7 @@ LOCAL_TOOLCHAIN = {
     "swap": "armclang (Keil MDK)",
     "mps2-m4": "arm-none-eabi-gcc + qemu-system-arm + make",
     "paging": "LA64 / RV32 cross gcc",
+    "la64-build": "LA64 cross gcc + make",
     "shell-auth": "LA64 cross gcc",
     "elf": "LA64 / RV32 cross gcc",
     "linux-abi": "LA64 / RV32 cross gcc + qemu-system-loongarch64",
@@ -6366,6 +6411,7 @@ CHECK_TABLE = (
     ("sign-ed25519", check_sign_ed25519),
     ("swap", check_swap_syntax),
     ("paging", check_paging_switch),
+    ("la64-build", check_la64_build_warnings),
     ("elf", check_elf_loader),
     ("linux-abi", check_linux_abi),
     ("fork", check_fork),

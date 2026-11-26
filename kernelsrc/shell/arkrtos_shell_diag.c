@@ -186,7 +186,7 @@ int cmd_stack(int argc, char *argv[])
                              (int)(i + 1), (unsigned)out4[0], (unsigned)out4[1],
                              (unsigned)out4[2], (unsigned)out4[3],
                              (unsigned)pf, (unsigned)pp,
-                             (unsigned)arkrtos_task_table[i].entry);
+                             (unsigned)(arkrtos_uptr_t)arkrtos_task_table[i].entry);
             /* 采样：底部/中间/上部各取一个字。扫描说“用过”与内存里到底
              * 写着什么必须能对照，否则分不清是栈真用过还是扫描走错地址。 */
             if(out4[0] >= 4096u)
@@ -217,7 +217,7 @@ int cmd_stack(int argc, char *argv[])
         {
             ark_shell_printf(" %-3d %-8s %-8s %-8s %-6s 0x%08X\r\n",
                              (int)(i + 1), "n/a", "n/a", "n/a", "n/a",
-                             (unsigned)arkrtos_task_table[i].entry);
+                             (unsigned)(arkrtos_uptr_t)arkrtos_task_table[i].entry);
             unmeasured++;
             continue;
         }
@@ -227,7 +227,7 @@ int cmd_stack(int argc, char *argv[])
         {
             ark_shell_printf(" %-3d %-8u %-8s %-8u %-6s 0x%08X\r\n",
                              (int)(i + 1), (unsigned)out3[0], "0?", (unsigned)out3[2],
-                             "unmeas", (unsigned)arkrtos_task_table[i].entry);
+                             "unmeas", (unsigned)(arkrtos_uptr_t)arkrtos_task_table[i].entry);
             unmeasured++;
             continue;
         }
@@ -236,7 +236,7 @@ int cmd_stack(int argc, char *argv[])
         ark_shell_printf(" %-3d %-8u %-8u %-8u %3u%%   0x%08X\r\n",
                          (int)(i + 1), (unsigned)out3[0], (unsigned)out3[1],
                          (unsigned)out3[2], (unsigned)pct,
-                         (unsigned)arkrtos_task_table[i].entry);
+                         (unsigned)(arkrtos_uptr_t)arkrtos_task_table[i].entry);
 
         if((worst_id == 0) || (pct > worst_pct))
         {

@@ -26,7 +26,7 @@ int32 arkrtos_dev_open(const char *name, uint32 param)
 {
     arkrtos_svc_arg_t parameters[4];
     parameters[0] = ARKRTOS_SVC_SUB(ARKRTOS_DEV_SUB_OPEN);
-    parameters[1] = (arkrtos_svc_arg_t)name;
+    parameters[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)name;
     parameters[2] = param;
     return arkrtos_call_dev_io(parameters);
 }
@@ -36,7 +36,7 @@ int32 arkrtos_dev_read(int32 handle, void *pdata, int32 len)
     arkrtos_svc_arg_t parameters[4];
     parameters[0] = ARKRTOS_SVC_SUB(ARKRTOS_DEV_SUB_READ);
     parameters[1] = handle;
-    parameters[2] = (arkrtos_svc_arg_t)pdata;
+    parameters[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)pdata;
     parameters[3] = len;
     return arkrtos_call_dev_io(parameters);
 }
@@ -46,7 +46,7 @@ int32 arkrtos_dev_write(int32 handle, void *pdata, int32 len)
     arkrtos_svc_arg_t parameters[4];
     parameters[0] = ARKRTOS_SVC_SUB(ARKRTOS_DEV_SUB_WRITE);
     parameters[1] = handle;
-    parameters[2] = (arkrtos_svc_arg_t)pdata;
+    parameters[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)pdata;
     parameters[3] = len;
     return arkrtos_call_dev_io(parameters);
 }
@@ -73,7 +73,7 @@ int32 arkrtos_dev_set_will(const char *dev_name, int32 cmd, int32 val)
 {
     arkrtos_svc_arg_t parameters[4];
     parameters[0] = ARKRTOS_SVC_SUB(ARKRTOS_DEV_SUB_SET_WILL);                 /* DEV_IO sub 6: declare this task's will */
-    parameters[1] = (arkrtos_svc_arg_t)dev_name;
+    parameters[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)dev_name;
     parameters[2] = (uint32)cmd;
     parameters[3] = (uint32)val;
     return arkrtos_call_dev_io(parameters);
@@ -144,7 +144,7 @@ int32 arkrtos_event_create(const char *name)
 {
     arkrtos_svc_arg_t p[3];
     p[0] = ARKRTOS_SVC_SUB(ARKRTOS_EVENT_SUB_CREATE);
-    p[1] = (arkrtos_svc_arg_t)name;
+    p[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)name;
     return arkrtos_call_event_ctrl(p);
 }
 
@@ -330,7 +330,7 @@ int32 arkrtos_sem_create(const char *name, int32 init_count)
 {
     arkrtos_svc_arg_t p[3];
     p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SYNC_SUB_SEM_CREATE);
-    p[1] = (arkrtos_svc_arg_t)name;
+    p[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)name;
     p[2] = (uint32)init_count;
     return arkrtos_call_sync_ctrl(p);
 }
@@ -385,7 +385,7 @@ int32 arkrtos_mutex_create(const char *name)
 {
     arkrtos_svc_arg_t p[3];
     p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SYNC_SUB_MTX_CREATE);
-    p[1] = (arkrtos_svc_arg_t)name;
+    p[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)name;
     return arkrtos_call_sync_ctrl(p);
 }
 
@@ -458,7 +458,7 @@ int32 arkrtos_cond_create(const char *name)
 {
     arkrtos_svc_arg_t p[4];
     p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SYNC_SUB_COND_CREATE);
-    p[1] = (arkrtos_svc_arg_t)name;
+    p[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)name;
     return arkrtos_call_sync_ctrl(p);
 }
 
@@ -582,14 +582,14 @@ ARKRTOS_SVC_DECL_3(uint32, ARKRTOS_SVC_SYS_INFO, arkrtos_call_sys_info_ext, arkr
 int32 arkrtos_mq_create(const char *name)
 {
     arkrtos_svc_arg_t p[6];
-    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_MQ_SUB_CREATE); p[1] = (arkrtos_svc_arg_t)name; p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_MQ_SUB_CREATE); p[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)name; p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
     return arkrtos_call_mq_ctrl(p);
 }
 
 static int32 arkrtos_mq_send_raw(int32 handle, void *buf, int32 len_words, int32 timeout)
 {
     arkrtos_svc_arg_t p[6];
-    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_MQ_SUB_SEND); p[1] = handle; p[2] = (arkrtos_svc_arg_t)buf;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_MQ_SUB_SEND); p[1] = handle; p[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)buf;
     p[3] = len_words; p[4] = timeout; p[5] = 0;
     return arkrtos_call_mq_ctrl(p);
 }
@@ -617,7 +617,7 @@ int32 arkrtos_mq_send(int32 handle, void *buf, int32 len_words, int32 timeout)
 static int32 arkrtos_mq_recv_raw(int32 handle, void *buf, int32 len_words, int32 timeout)
 {
     arkrtos_svc_arg_t p[6];
-    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_MQ_SUB_RECV); p[1] = handle; p[2] = (arkrtos_svc_arg_t)buf;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_MQ_SUB_RECV); p[1] = handle; p[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)buf;
     p[3] = len_words; p[4] = timeout; p[5] = 0;
     return arkrtos_call_mq_ctrl(p);
 }
@@ -657,7 +657,7 @@ int32 arkrtos_mq_delete(int32 handle)
 int32 arkrtos_sbuf_create(const char *name)
 {
     arkrtos_svc_arg_t p[6];
-    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SBUF_SUB_CREATE); p[1] = (arkrtos_svc_arg_t)name; p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SBUF_SUB_CREATE); p[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)name; p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
     return arkrtos_call_sbuf_ctrl(p);
 }
 
@@ -671,7 +671,7 @@ int32 arkrtos_sbuf_send(int32 handle, const void *buf, int32 len, int32 timeout_
         arkrtos_svc_arg_t p[6];
         int32 r;
 
-        p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SBUF_SUB_SEND); p[1] = (uint32)handle; p[2] = (arkrtos_svc_arg_t)buf;
+        p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SBUF_SUB_SEND); p[1] = (uint32)handle; p[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)buf;
         p[3] = (uint32)len; p[4] = (uint32)timeout_ms; p[5] = 0;
         r = arkrtos_call_sbuf_ctrl(p);
 
@@ -696,7 +696,7 @@ int32 arkrtos_sbuf_recv(int32 handle, void *buf, int32 len, int32 timeout_ms)
         arkrtos_svc_arg_t p[6];
         int32 r;
 
-        p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SBUF_SUB_RECV); p[1] = (uint32)handle; p[2] = (arkrtos_svc_arg_t)buf;
+        p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SBUF_SUB_RECV); p[1] = (uint32)handle; p[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)buf;
         p[3] = (uint32)len; p[4] = (uint32)timeout_ms; p[5] = 0;
         r = arkrtos_call_sbuf_ctrl(p);
 
@@ -715,7 +715,7 @@ int32 arkrtos_sbuf_recv(int32 handle, void *buf, int32 len, int32 timeout_ms)
 int32 arkrtos_sbuf_send_from_isr(int32 handle, const void *buf, int32 len)
 {
     arkrtos_svc_arg_t p[6];
-    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SBUF_SUB_SEND_ISR); p[1] = (uint32)handle; p[2] = (arkrtos_svc_arg_t)buf;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SBUF_SUB_SEND_ISR); p[1] = (uint32)handle; p[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)buf;
     p[3] = (uint32)len; p[4] = 0; p[5] = 0;
     return arkrtos_call_sbuf_ctrl(p);
 }
@@ -757,7 +757,7 @@ int32 arkrtos_mbuf_send(int32 handle, const void *buf, int32 len, int32 timeout_
         arkrtos_svc_arg_t p[6];
         int32 r;
 
-        p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SBUF_SUB_MBUF_SEND); p[1] = (uint32)handle; p[2] = (arkrtos_svc_arg_t)buf;
+        p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SBUF_SUB_MBUF_SEND); p[1] = (uint32)handle; p[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)buf;
         p[3] = (uint32)len; p[4] = (uint32)timeout_ms; p[5] = 0;
         r = arkrtos_call_sbuf_ctrl(p);
 
@@ -782,7 +782,7 @@ int32 arkrtos_mbuf_recv(int32 handle, void *buf, int32 len, int32 timeout_ms)
         arkrtos_svc_arg_t p[6];
         int32 r;
 
-        p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SBUF_SUB_MBUF_RECV); p[1] = (uint32)handle; p[2] = (arkrtos_svc_arg_t)buf;
+        p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SBUF_SUB_MBUF_RECV); p[1] = (uint32)handle; p[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)buf;
         p[3] = (uint32)len; p[4] = (uint32)timeout_ms; p[5] = 0;
         r = arkrtos_call_sbuf_ctrl(p);
 
@@ -801,7 +801,7 @@ int32 arkrtos_mbuf_recv(int32 handle, void *buf, int32 len, int32 timeout_ms)
 int32 arkrtos_mbuf_send_from_isr(int32 handle, const void *buf, int32 len)
 {
     arkrtos_svc_arg_t p[6];
-    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SBUF_SUB_MBUF_SEND_ISR); p[1] = (uint32)handle; p[2] = (arkrtos_svc_arg_t)buf;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SBUF_SUB_MBUF_SEND_ISR); p[1] = (uint32)handle; p[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)buf;
     p[3] = (uint32)len; p[4] = 0; p[5] = 0;
     return arkrtos_call_sbuf_ctrl(p);
 }
@@ -816,7 +816,7 @@ int32 arkrtos_mbuf_peek_len(int32 handle)
 int32 arkrtos_timer_create(const char *name)
 {
     arkrtos_svc_arg_t p[6];
-    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_TIMER_SUB_CREATE); p[1] = (arkrtos_svc_arg_t)name; p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_TIMER_SUB_CREATE); p[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)name; p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
     return arkrtos_call_timer_ctrl(p);
 }
 
@@ -825,7 +825,7 @@ int32 arkrtos_timer_start(int32 handle, uint32 period_ms, uint32 mode,
 {
     arkrtos_svc_arg_t p[6];
     p[0] = ARKRTOS_SVC_SUB(ARKRTOS_TIMER_SUB_START); p[1] = (uint32)handle; p[2] = period_ms; p[3] = mode;
-    p[4] = (arkrtos_svc_arg_t)cb; p[5] = (arkrtos_svc_arg_t)arg;
+    p[4] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)cb; p[5] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)arg;
     return arkrtos_call_timer_ctrl(p);
 }
 
@@ -860,7 +860,7 @@ int32 arkrtos_fault_record_count(void)
 
 int32 arkrtos_fault_record_read(int32 index, uint32 *out3)
 {
-    return (int32)arkrtos_call_sys_info_ext(4, (arkrtos_svc_arg_t)index, (arkrtos_svc_arg_t)out3);
+    return (int32)arkrtos_call_sys_info_ext(4, (arkrtos_svc_arg_t)index, (arkrtos_svc_arg_t)(arkrtos_uptr_t)out3);
 }
 
 /* ============================================================
@@ -887,7 +887,7 @@ int32 arkrtos_sched_lock_count(void)
 
 int32 arkrtos_task_stack_info(int32 task_id, uint32 *out3)
 {
-    return arkrtos_call_task_ctrl_arg2(10, (uint32)task_id, (arkrtos_svc_arg_t)out3);
+    return arkrtos_call_task_ctrl_arg2(10, (uint32)task_id, (arkrtos_svc_arg_t)(arkrtos_uptr_t)out3);
 }
 
 /* ============================================================
@@ -942,27 +942,27 @@ ARKRTOS_SVC_DECL_1(int32, ARKRTOS_SVC_SHELL, arkrtos_call_shell_svc, arkrtos_svc
 
 int32 arkrtos_log_print(uint32 level, const char *tag, const char *msg)
 {
-    return arkrtos_call_log(level, (arkrtos_svc_arg_t)tag, (arkrtos_svc_arg_t)msg);
+    return arkrtos_call_log(level, (arkrtos_svc_arg_t)(arkrtos_uptr_t)tag, (arkrtos_svc_arg_t)(arkrtos_uptr_t)msg);
 }
 
 int32 arkrtos_shell_cmd_register(const arkrtos_ushell_cmd_t *cmd)
 {
     arkrtos_svc_arg_t p[3];
-    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SHELL_SUB_REGISTER); p[1] = (arkrtos_svc_arg_t)cmd; p[2] = 0;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SHELL_SUB_REGISTER); p[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)cmd; p[2] = 0;
     return arkrtos_call_shell_svc(p);
 }
 
 int32 arkrtos_shell_cmd_unregister(const char *name)
 {
     arkrtos_svc_arg_t p[3];
-    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SHELL_SUB_UNREGISTER); p[1] = (arkrtos_svc_arg_t)name; p[2] = 0;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SHELL_SUB_UNREGISTER); p[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)name; p[2] = 0;
     return arkrtos_call_shell_svc(p);
 }
 
 int32 arkrtos_shell_print(const char *msg)
 {
     arkrtos_svc_arg_t p[3];
-    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SHELL_SUB_PRINT); p[1] = (arkrtos_svc_arg_t)msg; p[2] = 0;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_SHELL_SUB_PRINT); p[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)msg; p[2] = 0;
     return arkrtos_call_shell_svc(p);
 }
 
@@ -979,7 +979,7 @@ int32 arkrtos_thread_create(void (*entry)(void), void *stack, uint32 stack_size,
                           uint32 priority, uint32 period_ms)
 {
     arkrtos_svc_arg_t p[6];
-    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_THREAD_SUB_CREATE); p[1] = (arkrtos_svc_arg_t)entry; p[2] = (arkrtos_svc_arg_t)stack;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_THREAD_SUB_CREATE); p[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)entry; p[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)stack;
     p[3] = stack_size; p[4] = priority; p[5] = period_ms;
     return arkrtos_call_thread_ctrl(p);
 }
@@ -1032,8 +1032,8 @@ int32 arkrtos_file_write(const char *path, const void *data, uint32 len)
     arkrtos_svc_arg_t parameters[4];
 
     parameters[0] = ARKRTOS_SVC_SUB(ARKRTOS_FILE_SUB_WRITE);
-    parameters[1] = (arkrtos_svc_arg_t)path;
-    parameters[2] = (arkrtos_svc_arg_t)data;
+    parameters[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)path;
+    parameters[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)data;
     parameters[3] = len;
     return arkrtos_call_file_svc(parameters);
 }
@@ -1043,8 +1043,8 @@ int32 arkrtos_file_read(const char *path, void *buf, uint32 max)
     arkrtos_svc_arg_t parameters[4];
 
     parameters[0] = ARKRTOS_SVC_SUB(ARKRTOS_FILE_SUB_READ);
-    parameters[1] = (arkrtos_svc_arg_t)path;
-    parameters[2] = (arkrtos_svc_arg_t)buf;
+    parameters[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)path;
+    parameters[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)buf;
     parameters[3] = max;
     return arkrtos_call_file_svc(parameters);
 }
@@ -1054,7 +1054,7 @@ int32 arkrtos_file_remove(const char *path)
     arkrtos_svc_arg_t parameters[4];
 
     parameters[0] = ARKRTOS_SVC_SUB(ARKRTOS_FILE_SUB_REMOVE);
-    parameters[1] = (arkrtos_svc_arg_t)path;
+    parameters[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)path;
     parameters[2] = 0;
     parameters[3] = 0;
     return arkrtos_call_file_svc(parameters);
@@ -1065,9 +1065,9 @@ int32 arkrtos_file_stat(const char *path, uint32 *size, uint32 *is_dir)
     arkrtos_svc_arg_t parameters[4];
 
     parameters[0] = ARKRTOS_SVC_SUB(ARKRTOS_FILE_SUB_STAT);
-    parameters[1] = (arkrtos_svc_arg_t)path;
-    parameters[2] = (arkrtos_svc_arg_t)size;
-    parameters[3] = (arkrtos_svc_arg_t)is_dir;
+    parameters[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)path;
+    parameters[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)size;
+    parameters[3] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)is_dir;
     return arkrtos_call_file_svc(parameters);
 }
 
@@ -1085,8 +1085,8 @@ int32 arkrtos_file_info(uint32 *total, uint32 *used)
     arkrtos_svc_arg_t parameters[4];
 
     parameters[0] = ARKRTOS_SVC_SUB(ARKRTOS_FILE_SUB_INFO);
-    parameters[1] = (arkrtos_svc_arg_t)total;
-    parameters[2] = (arkrtos_svc_arg_t)used;
+    parameters[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)total;
+    parameters[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)used;
     parameters[3] = 0;
     return arkrtos_call_file_svc(parameters);
 }
@@ -1122,8 +1122,8 @@ int32 arkrtos_file_read_at(const char *path, void *buf, uint32 len, uint32 off)
     arkrtos_svc_arg_t parameters[5];
 
     parameters[0] = ARKRTOS_SVC_SUB(ARKRTOS_FILE_SUB_READ_AT);
-    parameters[1] = (arkrtos_svc_arg_t)path;
-    parameters[2] = (arkrtos_svc_arg_t)buf;
+    parameters[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)path;
+    parameters[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)buf;
     parameters[3] = len;
     parameters[4] = off;
     return arkrtos_call_file_svc(parameters);
@@ -1134,8 +1134,8 @@ int32 arkrtos_file_rename(const char *old_path, const char *new_path)
     arkrtos_svc_arg_t parameters[4];
 
     parameters[0] = ARKRTOS_SVC_SUB(ARKRTOS_FILE_SUB_RENAME);
-    parameters[1] = (arkrtos_svc_arg_t)old_path;
-    parameters[2] = (arkrtos_svc_arg_t)new_path;
+    parameters[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)old_path;
+    parameters[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)new_path;
     parameters[3] = 0;
     return arkrtos_call_file_svc(parameters);
 }
@@ -1146,10 +1146,10 @@ int32 arkrtos_file_list_names(const char *dir, char *buf, uint32 size, uint32 *c
     arkrtos_svc_arg_t parameters[5];
 
     parameters[0] = ARKRTOS_SVC_SUB(ARKRTOS_FILE_SUB_LIST);
-    parameters[1] = (arkrtos_svc_arg_t)dir;
-    parameters[2] = (arkrtos_svc_arg_t)buf;
+    parameters[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)dir;
+    parameters[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)buf;
     parameters[3] = size;
-    parameters[4] = (arkrtos_svc_arg_t)count;
+    parameters[4] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)count;
     return arkrtos_call_file_svc(parameters);
 }
 
@@ -1167,7 +1167,7 @@ int32 arkrtos_path_open(const char *path, uint32 flags)
     arkrtos_svc_arg_t parameters[3];
 
     parameters[0] = ARKRTOS_SVC_SUB(ARKRTOS_PATH_SUB_OPEN);
-    parameters[1] = (arkrtos_svc_arg_t)path;
+    parameters[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)path;
     parameters[2] = flags;
     return arkrtos_call_file_svc(parameters);
 }
@@ -1178,7 +1178,7 @@ int32 arkrtos_path_read(int32 handle, void *buf, uint32 len)
 
     parameters[0] = ARKRTOS_SVC_SUB(ARKRTOS_PATH_SUB_READ);
     parameters[1] = (uint32)handle;
-    parameters[2] = (arkrtos_svc_arg_t)buf;
+    parameters[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)buf;
     parameters[3] = len;
     return arkrtos_call_file_svc(parameters);
 }
@@ -1189,7 +1189,7 @@ int32 arkrtos_path_write(int32 handle, const void *buf, uint32 len)
 
     parameters[0] = ARKRTOS_SVC_SUB(ARKRTOS_PATH_SUB_WRITE);
     parameters[1] = (uint32)handle;
-    parameters[2] = (arkrtos_svc_arg_t)buf;
+    parameters[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)buf;
     parameters[3] = len;
     return arkrtos_call_file_svc(parameters);
 }
@@ -1208,9 +1208,9 @@ int32 arkrtos_path_stat(const char *path, uint32 *size, uint32 *mode)
     arkrtos_svc_arg_t parameters[4];
 
     parameters[0] = ARKRTOS_SVC_SUB(ARKRTOS_PATH_SUB_STAT);
-    parameters[1] = (arkrtos_svc_arg_t)path;
-    parameters[2] = (arkrtos_svc_arg_t)size;
-    parameters[3] = (arkrtos_svc_arg_t)mode;
+    parameters[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)path;
+    parameters[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)size;
+    parameters[3] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)mode;
     return arkrtos_call_file_svc(parameters);
 }
 
@@ -1232,10 +1232,10 @@ int32 arkrtos_path_readdir(int32 handle, char *name, uint32 name_size,
 
     parameters[0] = ARKRTOS_SVC_SUB(ARKRTOS_PATH_SUB_READDIR);
     parameters[1] = (uint32)handle;
-    parameters[2] = (arkrtos_svc_arg_t)name;
+    parameters[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)name;
     parameters[3] = name_size;
-    parameters[4] = (arkrtos_svc_arg_t)mode;
-    parameters[5] = (arkrtos_svc_arg_t)size;
+    parameters[4] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)mode;
+    parameters[5] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)size;
     return arkrtos_call_file_svc(parameters);
 }
 
@@ -1244,7 +1244,7 @@ int32 arkrtos_path_unlink(const char *path)
     arkrtos_svc_arg_t parameters[2];
 
     parameters[0] = ARKRTOS_SVC_SUB(ARKRTOS_PATH_SUB_UNLINK);
-    parameters[1] = (arkrtos_svc_arg_t)path;
+    parameters[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)path;
     return arkrtos_call_file_svc(parameters);
 }
 
@@ -1253,7 +1253,7 @@ int32 arkrtos_path_mkdir(const char *path)
     arkrtos_svc_arg_t parameters[2];
 
     parameters[0] = ARKRTOS_SVC_SUB(ARKRTOS_PATH_SUB_MKDIR);
-    parameters[1] = (arkrtos_svc_arg_t)path;
+    parameters[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)path;
     return arkrtos_call_file_svc(parameters);
 }
 
@@ -1262,7 +1262,7 @@ int32 arkrtos_path_rmdir(const char *path)
     arkrtos_svc_arg_t parameters[2];
 
     parameters[0] = ARKRTOS_SVC_SUB(ARKRTOS_PATH_SUB_RMDIR);
-    parameters[1] = (arkrtos_svc_arg_t)path;
+    parameters[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)path;
     return arkrtos_call_file_svc(parameters);
 }
 
@@ -1271,8 +1271,8 @@ int32 arkrtos_path_rename(const char *old_path, const char *new_path)
     arkrtos_svc_arg_t parameters[3];
 
     parameters[0] = ARKRTOS_SVC_SUB(ARKRTOS_PATH_SUB_RENAME);
-    parameters[1] = (arkrtos_svc_arg_t)old_path;
-    parameters[2] = (arkrtos_svc_arg_t)new_path;
+    parameters[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)old_path;
+    parameters[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)new_path;
     return arkrtos_call_file_svc(parameters);
 }
 
@@ -1281,7 +1281,7 @@ int32 arkrtos_path_truncate(const char *path, uint32 size)
     arkrtos_svc_arg_t parameters[3];
 
     parameters[0] = ARKRTOS_SVC_SUB(ARKRTOS_PATH_SUB_TRUNCATE);
-    parameters[1] = (arkrtos_svc_arg_t)path;
+    parameters[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)path;
     parameters[2] = size;
     return arkrtos_call_file_svc(parameters);
 }
@@ -1304,7 +1304,7 @@ int32 arkrtos_path_ftruncate(int32 handle, uint32 size)
 int32 arkrtos_mpool_create(const char *name, void *pool, uint32 block_size, uint32 block_count)
 {
     arkrtos_svc_arg_t p[6];
-    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_MPOOL_SUB_CREATE); p[1] = (arkrtos_svc_arg_t)name; p[2] = (arkrtos_svc_arg_t)pool;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_MPOOL_SUB_CREATE); p[1] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)name; p[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)pool;
     p[3] = block_size; p[4] = block_count; p[5] = 0;
     return arkrtos_call_mpool_ctrl(p);
 }
@@ -1319,7 +1319,7 @@ void *arkrtos_mpool_alloc(int32 handle)
 int32 arkrtos_mpool_free(int32 handle, void *ptr)
 {
     arkrtos_svc_arg_t p[6];
-    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_MPOOL_SUB_FREE); p[1] = (uint32)handle; p[2] = (arkrtos_svc_arg_t)ptr;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_MPOOL_SUB_FREE); p[1] = (uint32)handle; p[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)ptr;
     p[3] = 0; p[4] = 0; p[5] = 0;
     return arkrtos_call_mpool_ctrl(p);
 }
@@ -1327,7 +1327,7 @@ int32 arkrtos_mpool_free(int32 handle, void *ptr)
 int32 arkrtos_mpool_query(int32 handle, arkrtos_mpool_stat_t *out)
 {
     arkrtos_svc_arg_t p[6];
-    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_MPOOL_SUB_QUERY); p[1] = (uint32)handle; p[2] = (arkrtos_svc_arg_t)out;
+    p[0] = ARKRTOS_SVC_SUB(ARKRTOS_MPOOL_SUB_QUERY); p[1] = (uint32)handle; p[2] = (arkrtos_svc_arg_t)(arkrtos_uptr_t)out;
     p[3] = 0; p[4] = 0; p[5] = 0;
     return arkrtos_call_mpool_ctrl(p);
 }

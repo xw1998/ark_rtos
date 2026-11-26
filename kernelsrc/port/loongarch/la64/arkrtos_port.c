@@ -1611,6 +1611,7 @@ static uint32 la_pg_mprotect_hit(unsigned long badv)
 }
 #endif /* ARKRTOS_USE_PAGING_MPROTECT == 1 */
 
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
 /** 按「可写意图 + mprotect 台账」算出这一对的两条条目
  *  @param writable 1 = 调用方希望这一对可写（COW 共享对会先被调用方挡成 0）
  *  @details 只有在 writable 为真时才看台账：COW 共享对本来就必须只读，
@@ -1641,11 +1642,13 @@ static void la_pg_pair_pte(uint32 space, uint32 idx, uint32 pa, uint32 writable,
     *p_lo1 = lo1;
 }
 
-/* 这一对安装函数在 COW 段之外：按需分页档（DEMAND=1、COW=0）的
- * arkrtos_port_paging_discard() / 缺页重装都要用它。原先它躺在 COW 段里，
- * DEMAND-only 档链接时直接 undefined reference。依赖的 la_tlb_write /
- * la_tlb_inval_page / LA_STLB_INDEX / LA_PG_WIN_WAY_OF / la_asid_swap 全是
- * 无条件定义，搬出来不引入任何新的条件依赖。 */
+/* 这一对安装函数在 COW 段之外、但整段受 DEMAND==1 保护：按需分页档
+ * （DEMAND=1、COW=0）的 arkrtos_port_paging_discard() / 缺页重装都要用它，
+ * 而页级窗口档（DEMAND=0）一条调用点都没有——原先它躺在 COW 段里，
+ * DEMAND-only 档链接时直接 undefined reference；反过来不加 DEMAND 保护，
+ * 页级档就会得到「定义了但没人用」的告警，把真正的手滑埋掉。
+ * 依赖的 la_tlb_write / la_tlb_inval_page / LA_STLB_INDEX /
+ * LA_PG_WIN_WAY_OF / la_asid_swap 全是无条件定义，这样圈不引入新的条件依赖。 */
 /** 把某一对按「可写 / 只读」装进某个空间的窗口
  *  @details 先按 VA 撤旧条目再写新的：旧条目可能落在**别的路上**（按需
  *           缺页是用 tlbfill 由硬件随机选路的），留着就是一条权限相反的
@@ -1668,6 +1671,8 @@ static void la_pg_install_pair(uint32 space, uint32 idx, uint32 pa, uint32 writa
     (void)la_asid_swap(saved);
 #endif
 }
+
+#endif /* ARKRTOS_USE_PAGING_DEMAND == 1 */
 
 #if (ARKRTOS_USE_PAGING_COW == 1)
 /* ------------------------------------------------------------
@@ -4350,7 +4355,9 @@ int32 arkrtos_port_paging_space_release(uint32 space)
     return -2;
 #else
     uint32 i;
+#if (ARKRTOS_USE_PAGING_DEMAND == 1)
     int32  rc = 0;
+#endif
 
     if(space >= (uint32)ARKRTOS_PAGING_APPS_MAX)
     {

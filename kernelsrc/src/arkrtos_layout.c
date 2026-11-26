@@ -546,7 +546,7 @@ static const arkrtos_cfg_record_t *arkrtos_layout_scan(uint32 *p_index, uint32 *
     for(i = 0u; i < ARKRTOS_LAYOUT_RECORDS; i++)
     {
         const arkrtos_cfg_record_t *r =
-            (const arkrtos_cfg_record_t *)(uint32)(CONFIG_BASE + (i * ARKRTOS_CFG_RECORD_SIZE));
+            (const arkrtos_cfg_record_t *)(arkrtos_uptr_t)(uint32)(CONFIG_BASE + (i * ARKRTOS_CFG_RECORD_SIZE));
         uint32 magic = *(volatile const uint32 *)r;
 
         if(magic == ARKRTOS_LAYOUT_ERASED)
@@ -797,7 +797,7 @@ int32 arkrtos_layout_write(const uint8 *record, uint32 len, uint32 *p_erased)
     for(i = 0u; i < ARKRTOS_LAYOUT_RECORDS; i++)
     {
         const arkrtos_cfg_record_t *r =
-            (const arkrtos_cfg_record_t *)(uint32)(CONFIG_BASE + (i * ARKRTOS_CFG_RECORD_SIZE));
+            (const arkrtos_cfg_record_t *)(arkrtos_uptr_t)(uint32)(CONFIG_BASE + (i * ARKRTOS_CFG_RECORD_SIZE));
         uint32 magic = *(volatile const uint32 *)r;
 
         if(magic == ARKRTOS_LAYOUT_ERASED)
@@ -846,7 +846,7 @@ int32 arkrtos_layout_write(const uint8 *record, uint32 len, uint32 *p_erased)
     }
 
     /* 回读校验：写不进去（例如扇区没擦干净）必须当场暴露，不能等下次启动 */
-    if(arkrtos_layout_memcmp((const uint8 *)(uint32)(CONFIG_BASE + (idx * ARKRTOS_CFG_RECORD_SIZE)),
+    if(arkrtos_layout_memcmp((const uint8 *)(arkrtos_uptr_t)(uint32)(CONFIG_BASE + (idx * ARKRTOS_CFG_RECORD_SIZE)),
                            (const uint8 *)&arkrtos_layout_wr_rec,
                            ARKRTOS_CFG_RECORD_SIZE) != 0)
     {

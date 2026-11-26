@@ -104,7 +104,7 @@ int cmd_ps(int argc, char *argv[])
                          (int)(i + 1),
                          (unsigned)arkrtos_task_table[i].priority,
                          task_state_name((uint32)arkrtos_task_table[i].status),
-                         (unsigned)arkrtos_task_table[i].entry);
+                         (unsigned)(arkrtos_uptr_t)arkrtos_task_table[i].entry);
     }
 
     ark_shell_printf("\r\n  SLOT TYPE  STATE     TASK  ENTRY\r\n");

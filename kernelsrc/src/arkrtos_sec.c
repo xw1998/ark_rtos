@@ -211,7 +211,7 @@ static void sec_check_headers(arkrtos_sec_report_t *p_rep)
         }
 
         total++;
-        p_img = (const uint8 *)p_pt->slot_base[i];
+        p_img = (const uint8 *)(arkrtos_uptr_t)p_pt->slot_base[i];
 
         /* Flash 是内存映射的，但记录可能不是 4 字节对齐地指向头；
          * 先按字节拷一份，避免对不齐指针解引用（M0/M3 上会直接 HardFault）。 */
