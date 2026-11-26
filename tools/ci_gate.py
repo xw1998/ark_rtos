@@ -893,6 +893,57 @@ def check_utest_host():
         else:
             fail("utest-host", "selftest failed: %s" % txt.strip()[:160])
 
+# 指针宽度类型在四份 types.h 里必须逐字一致。
+#
+# 这不是「为了整齐」：ulog 的 %p 要用 arkrtos_uptr_t，而 App / 驱动 / 小程序
+# 编的是 SDK 侧的精简 types.h，不是内核那份。2026-11-26 加了 %p 的宽度分支
+# 之后，真正跑出来的第一次全量门禁就红了——eset-syntax 与 analyzer 两处
+# armclang / rv32-gcc 都报 'arkrtos_uptr_t' undeclared，因为三份 SDK 副本
+# 里没有这个类型。这条 pin 只在四份文件同时改对时才绿。
+#
+# 真源是内核那份：canon 直接从 kernelsrc/include/arkrtos_types.h 里截，
+# 不在这里再抄一遍——抄一份就是给同一件事留两个会分叉的写法。
+_SDK_TYPES_COPIES = (
+    "kernelsrc/sdk/app_sdk/arkrtos_types.h",
+    "kernelsrc/sdk/driver_sdk/arkrtos_types.h",
+    "kernelsrc/sdk/mini_sdk/arkrtos_types.h",
+)
+
+def _ptr_width_canon():
+    """Return the pointer-width block as it stands in the kernel types.h."""
+    txt = read(os.path.join(ROOT, "kernelsrc/include/arkrtos_types.h"))
+    txt = txt.decode("utf-8", "replace").replace("\r\n", "\n")
+    head = "#if (defined(__SIZEOF_POINTER__)"
+    i = txt.find(head)
+    if i < 0:
+        return None
+    tail_mark = "typedef unsigned int arkrtos_uptr_t;"
+    j = txt.find(tail_mark, i)
+    if j < 0:
+        return None
+    mark = "\n#endif\n#endif"
+    k = txt.find(mark, j)
+    if k < 0:
+        return None
+    k += len(mark)
+    return txt[i:k]
+
+def _sdk_types_pin_bad():
+    """Copies whose pointer-width block differs from the kernel header's."""
+    canon = _ptr_width_canon()
+    if not canon:
+        return ["kernelsrc/include/arkrtos_types.h lacks the pointer-width block"]
+    bad = []
+    for rel in _SDK_TYPES_COPIES:
+        path = os.path.join(ROOT, rel)
+        if not os.path.exists(path):
+            bad.append(rel + " missing")
+            continue
+        txt = read(path).decode("utf-8", "replace").replace("\r\n", "\n")
+        if canon not in txt:
+            bad.append(rel + " differs from the kernel copy")
+    return bad
+
 def check_sdk_stdio_host():
     """The SDK's printf shim must produce exactly the right bytes.
 
@@ -902,6 +953,10 @@ def check_sdk_stdio_host():
     notices on a board but a host byte comparison catches immediately.
     A missing host compiler is a FAIL, not a skip.
     """
+    bad = _sdk_types_pin_bad()
+    if bad:
+        fail("sdk-stdio-host", "pointer-width type drifted: " + "; ".join(bad))
+        return
     cc = _find_host_cc()
     if not cc:
         fail("sdk-stdio-host", "no host C compiler (set ARKRTOS_HOST_CC)")
@@ -922,7 +977,7 @@ def check_sdk_stdio_host():
         r = _run_check([exe])
         txt = (r.stdout or "") + (r.stderr or "")
         if r.returncode == 0 and "STDIO-HOST OK" in txt:
-            ok("sdk-stdio-host", "printf/puts/putchar byte-exact on host")
+            ok("sdk-stdio-host", "printf/puts/putchar byte-exact on host + pointer-width type identical in all 4 types.h copies")
         else:
             fail("sdk-stdio-host", "gate failed: %s" % txt.strip()[:160])
 
