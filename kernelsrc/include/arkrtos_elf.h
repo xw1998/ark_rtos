@@ -58,6 +58,12 @@ typedef struct {
     unsigned long interp_base;  /* 解释器装载基址；0 = 没有解释器（静态档） */
     unsigned long interp_entry; /* 解释器入口（实际起跑的任务入口）；0 = 静态档 */
     uint8  dynamic;         /* 1 = 这次装载走的是 PT_INTERP 动态路径 */
+    /* upcall 区（SEC-G08 隔离执行）：内核向本窗口借的一小块，放「让本 App 的
+     * shell 回调以 PLV3 在自己空间里跑」的桩与桩栈。三个值都是 0 表示没有这块
+     * 区（ARKRTOS_ELF_UPCALL_SIZE=0 的回退档）——不是「地址 0 可用」。 */
+    unsigned long upcall_base;  /* 区起点（4 KB 对齐）；0 = 没有 upcall 区 */
+    unsigned long stub_va;      /* 桩页入口（= upcall_base）；0 = 没有 */
+    unsigned long upcall_sp;    /* 桩栈初始 sp（区顶往下留 16 字节）；0 = 没有 */
 #if (ARKRTOS_USE_EXIT_CODE == 1)
     int32  exit_code;       /* U-8：任务上报过的退出码（exit_code_set=0 时不作数） */
     uint8  exit_code_set;   /* 1 = 该实例用 EXIT_CODE 子命令结束过，exit_code 有效 */

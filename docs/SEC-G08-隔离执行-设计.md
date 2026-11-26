@@ -1,6 +1,6 @@
 # SEC-G08 剩余半边：App shell 回调的隔离执行（设计与实施计划）
 
-> 状态：**设计已预注册，代码未开工**（2026-11-26）。
+> 状态：**设计已预注册；M-08-1（窗口切分）已落地，M-08-2..5 未开工**（2026-11-26）。
 > 当前落地的是 fail-closed 半边（`2080a9b`、`903abee`）：特权级分离 + 分页的构建上，
 > `arkrtos_shell_ext_register()` 见到 `is_priv == 0` 的调用者直接回
 > `ARKRTOS_USHELL_ERR_PRIV`（-6），注册表一个槽都不动。
@@ -208,7 +208,7 @@ fail-closed 把这条路径关掉了，代价是功能消失。
 
 | 阶段 | 内容 | 判据 | 风险 |
 |---|---|---|---|
-| M-08-1 | 窗口布局 + upcall 区（`ARKRTOS_ELF_UPCALL_SIZE`，默认 8 KB）+ `s_elf_info` 三字段 + 清零 + `elf_gate` 更新 | `tools/elf_gate.py` 全绿；`test_elf_host.c` 新增「upcall 区不与被加载段、用户栈、argv 重叠」与「`=0` 档退回旧布局」两档断言；`fork_gate` 十档仍全绿（布局改了，App 栈位置要重新对齐） | 低（纯加区，行为不变） |
+| M-08-1 ✅ | 窗口布局 + upcall 区（`ARKRTOS_ELF_UPCALL_SIZE`，默认 8 KB）+ `s_elf_info` 三字段 + 清零 + `elf_gate` 更新（**已落地 2026-11-26**：`elf_gate` 全绿、宿主 `elf` 196 条 / `elfup0` 188 条全绿） | `tools/elf_gate.py` 全绿；`test_elf_host.c` 新增「upcall 区不与被加载段、用户栈、argv 重叠」与「`=0` 档退回旧布局」两档断言；`fork_gate` 十档仍全绿（布局改了，App 栈位置要重新对齐） | 低（纯加区，行为不变） |
 | M-08-2 | `arkrtos_ushell_upcall.c`：`ready()` / `call()` / `ret()` 三个入口 + 宿主桩化的单测 | 新用例 `ushell_iso`（§5.2 那一组）；`warn_gate` 零告警；`coverage_gate` 该模块 ≥ 基线 | 中（新模块，但全部走宿主可测路径） |
 | M-08-3 | LA64 桩字节 + 初始帧写寄存器 + `SVC 0x23` 分派（`arkrtos_task.c`） | `tools/linux_abi_gate.py` 的号表断言加一条：0x23 归 Ark；QEMU 单测（桩只把参数打回去，不调 App） | 中（port 改动，需要 QEMU 读数） |
 | M-08-4 | 跳板改调 `call()`、注册策略收窄、`ushell_func_alive_space()`、`g_ushell` 两字段 | §5 全部读数；`ci_gate` 119 项 + `fork_gate` 71 项全绿 | 高（行为切换点） |

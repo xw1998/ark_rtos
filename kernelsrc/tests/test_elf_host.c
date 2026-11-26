@@ -131,6 +131,9 @@ int main(void)
 #if !defined(ARKRTOS_ELF_ARGV_SIZE) || !defined(ARKRTOS_ELF_STACK_SIZE)
 #error "test_elf_host 需要 ARKRTOS_ELF_ARGV_SIZE / ARKRTOS_ELF_STACK_SIZE"
 #endif
+#if !defined(ARKRTOS_ELF_UPCALL_SIZE) || !defined(ARKRTOS_ELF_UPCALL_STACK)
+#error "test_elf_host 需要 ARKRTOS_ELF_UPCALL_SIZE / ARKRTOS_ELF_UPCALL_STACK"
+#endif
 #if (ARKRTOS_USE_PRIV != 1)
 #error "test_elf_host 需要 ARKRTOS_USE_PRIV=1（ELF 程序必须降权起跑）"
 #endif
@@ -508,6 +511,18 @@ static unsigned long stack_bottom(void)
     return argv_start() - (unsigned long)ARKRTOS_ELF_STACK_SIZE;
 }
 
+/* 可执行区顶 = upcall 区起点；关档（UPCALL_SIZE=0）时它就是栈底。
+ * 这里**另算一份**而不是抄实现的式子：两边一起错也测不出来。 */
+static unsigned long upcall_base(void)
+{
+#if (ARKRTOS_ELF_UPCALL_SIZE == 0u)
+    return stack_bottom();
+#else
+    return (stack_bottom() - (unsigned long)ARKRTOS_ELF_UPCALL_SIZE)
+           & ~(unsigned long)0xFFF;
+#endif
+}
+
 /* ---------------- 辅助 ---------------- */
 
 static hdr_opt_t ok_hdr(uint32 entry)
@@ -738,6 +753,20 @@ static void test_segments(void)
     ck_rc(arkrtos_elf_exec("/prog", 0, 0), ARKRTOS_ELF_ERR_LAYOUT,
           "段越过栈底");
 
+#if (ARKRTOS_ELF_UPCALL_SIZE != 0u)
+    /* 段落进 upcall 区（桩页/桩栈）：可执行区顶已经收窄到 upcall_base，
+     * 这一段必须以 LAYOUT 被拒，而不是悄悄盖掉内核借用的桩空间。 */
+    memset(segs, 0, sizeof(segs));
+    segs[0].type = T_ELF_PT_LOAD;
+    segs[0].vaddr = (uint32)upcall_base();
+    segs[0].filesz = 16u;
+    segs[0].memsz = 16u;
+    h = ok_hdr((uint32)upcall_base());
+    build_elf(&h, segs, 1u);
+    ck_rc(arkrtos_elf_exec("/prog", 0, 0), ARKRTOS_ELF_ERR_LAYOUT,
+          "段落进 upcall 区");
+#endif
+
     /* 地址回绕：vaddr + memsz 越过 32 位顶 */
     memset(segs, 0, sizeof(segs));
     segs[0].type = T_ELF_PT_LOAD;
@@ -790,20 +819,22 @@ static void test_segments(void)
     ck_rc(arkrtos_elf_exec("/prog", 0, 0), ARKRTOS_ELF_ERR_LAYOUT,
           "入口在窗口之前");
 
-    h = ok_hdr((uint32)stack_bottom());
+    /* 可执行区顶是 upcall 区起点（关档时就是栈底）：从那往上既不是代码也
+     * 不是程序能碰的地方，入口落进去必须被拒。 */
+    h = ok_hdr((uint32)upcall_base());
     build_elf(&h, segs, 1u);
     ck_rc(arkrtos_elf_exec("/prog", 0, 0), ARKRTOS_ELF_ERR_LAYOUT,
-          "入口落在栈底之外");
+          "入口落在可执行区顶之外");
 
-    h = ok_hdr((uint32)(stack_bottom() - 2u));
+    h = ok_hdr((uint32)(upcall_base() - 2u));
     build_elf(&h, segs, 1u);
     ck_rc(arkrtos_elf_exec("/prog", 0, 0), ARKRTOS_ELF_ERR_LAYOUT,
-          "入口贴着栈底但没对齐");
+          "入口贴着可执行区顶但没对齐");
 
-    h = ok_hdr((uint32)(stack_bottom() - 4u));
+    h = ok_hdr((uint32)(upcall_base() - 4u));
     build_elf(&h, segs, 1u);
     ck_rc(arkrtos_elf_exec("/prog", 0, 0), ARKRTOS_ELF_OK,
-          "入口恰好在 stack_bottom-4 是合法边界");
+          "入口恰好在可执行区顶下 4 字节是合法边界");
     reset_task_stub();
 }
 
@@ -936,6 +967,45 @@ static void test_load_and_stack(void)
     ck_u(info.dynamic, 0u, "静态档 dynamic=0");
     ck_u(info.interp_base, 0u, "静态档没有解释器基址");
     ck_u(info.interp_entry, 0u, "静态档没有解释器入口");
+
+    /* upcall 区（SEC-G08）：几何、清零、不重叠，三样都要能在读数上看见。 */
+#if (ARKRTOS_ELF_UPCALL_SIZE == 0u)
+    ck_u(info.upcall_base, stack_bottom(), "关档：可执行区直接顶到用户栈底");
+    ck_u(info.stub_va, 0u, "关档：没有桩页");
+    ck_u(info.upcall_sp, 0u, "关档：没有桩栈");
+#else
+    ck_u(info.upcall_base, upcall_base(), "upcall 区起点在可执行区与用户栈之间");
+    ck_u(info.upcall_base & 0xFFFu, 0u, "upcall 区 4 KB 对齐");
+    ck_u((unsigned long)info.upcall_base + (unsigned long)ARKRTOS_ELF_UPCALL_SIZE,
+         stack_bottom(), "upcall 区顶就是用户栈底（不重叠、不留缝）");
+    ck(info.upcall_base > (win_base() + 0x1018u),
+       "upcall 区不与已装段重叠");
+    ck(info.upcall_base > win_base(), "upcall 区在窗口内");
+    ck_u(info.stub_va, info.upcall_base, "桩页就是区起点");
+    ck_u(info.upcall_sp,
+         (unsigned long)info.upcall_base
+         + (unsigned long)ARKRTOS_ELF_UPCALL_SIZE - 16ul,
+         "桩栈 sp 在区顶往下 16 字节");
+    ck_u(info.upcall_sp & 0xFu, 0u, "桩栈 sp 16 字节对齐");
+    {
+        unsigned long a;
+        unsigned long end =
+            (unsigned long)info.upcall_base + (unsigned long)ARKRTOS_ELF_UPCALL_SIZE;
+        uint32 dirty = 0u;
+
+        /* 这块区不属于任何 PT_LOAD；装载前整窗填 0xAA，装载后必须全零，
+         * 否则上一次（甚至别的程序）留在这里的字节会被桩当成自己的栈。 */
+        for(a = (unsigned long)info.upcall_base; a < end; a += 4ul)
+        {
+            if(rd32(a) != 0u)
+            {
+                dirty++;
+            }
+        }
+        ck_u(dirty, 0u, "upcall 区装载后全零");
+        ck(end <= info.sp, "upcall 区在用户栈之下，不覆盖 argc/argv");
+    }
+#endif
 
     /* 任务对象：降权 + 窗口写回 + MPU 重建。 */
     {

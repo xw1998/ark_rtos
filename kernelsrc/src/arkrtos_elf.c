@@ -66,6 +66,26 @@
 #define ARKRTOS_ELF_TASK_PRIORITY   (12u)
 #endif
 
+/* upcall 区（SEC-G08 隔离执行）：内核向每个 App 窗口借的一小块，用来放
+ * 「让这个 App 的 shell 回调以 PLV3 在它自己的空间里跑」所需的那段桩和
+ * 桩用的栈。它不是 App 的段，App 拿不到任何句柄；装载时清零。
+ *
+ * 置 0 就是回退开关：可执行区重新直接顶到用户栈底（旧布局），隔离执行
+ * 随之前提不成立——见 docs/SEC-G08-隔离执行-设计.md §7。 */
+#ifndef ARKRTOS_ELF_UPCALL_SIZE
+#define ARKRTOS_ELF_UPCALL_SIZE     (8u * 1024u)
+#endif
+#ifndef ARKRTOS_ELF_UPCALL_STACK
+#define ARKRTOS_ELF_UPCALL_STACK    (4u * 1024u)
+#endif
+#if (ARKRTOS_ELF_UPCALL_SIZE != 0u)
+#if (((ARKRTOS_ELF_UPCALL_SIZE) % 4096u) != 0u) || \
+    (((ARKRTOS_ELF_UPCALL_STACK) % 4096u) != 0u) || \
+    ((ARKRTOS_ELF_UPCALL_STACK) >= (ARKRTOS_ELF_UPCALL_SIZE))
+#error "ARKRTOS_ELF_UPCALL_SIZE / _STACK 必须是 4 KB 的整数倍，且栈小于整块"
+#endif
+#endif
+
 #define ARKRTOS_ELF_MAX_ARGS        (16u)
 #define ARKRTOS_ELF_MAX_ARG_LEN     (256u)
 #define ARKRTOS_ELF_MAX_PHNUM       (16u)
@@ -1603,29 +1623,87 @@ static int32 elf_prepare_args(const char *path, int32 *p_argc,
     return ARKRTOS_ELF_OK;
 }
 
-/* 窗口切分：顶部往下依次是 argv 区（16 字节对齐）与用户栈，剩下的是可执行区。
- * 三段一个都不能为空——窗口小到放不下属于板级配置错误，不是程序问题。 */
+/* 窗口切分：顶部往下依次是 argv 区（16 字节对齐）与用户栈；中部是内核借用的
+ * upcall 区（SEC-G08：桩页 + 桩栈，4 KB 对齐）；剩下的是可执行区。四段一个都
+ * 不能为空——窗口小到放不下属于板级配置错误，不是程序问题。
+ *
+ * upcall 区放在可执行区与用户栈之间，是为了让「段不得越过可执行区顶」这条
+ * 判据同时把桩页保护起来：可执行区顶从 stack_bottom 收窄成 upcall_base，
+ * 越界段/入口的判据一字不改，语义自动跟上。 */
 static int32 elf_window_layout(unsigned long win_base, unsigned long *p_win_top,
                                unsigned long *p_argv_start,
-                               unsigned long *p_stack_bottom)
+                               unsigned long *p_stack_bottom,
+                               unsigned long *p_upcall_base)
 {
     unsigned long win_top = win_base + (uint32)ARKRTOS_ELF_WINDOW_SIZE;
     unsigned long argv_start =
         (win_top - (uint32)ARKRTOS_ELF_ARGV_SIZE) & ~0xFUL;
     unsigned long stack_bottom = argv_start - (uint32)ARKRTOS_ELF_STACK_SIZE;
+#if (ARKRTOS_ELF_UPCALL_SIZE == 0u)
+    /* 回退档：没有 upcall 区，可执行区直接顶到用户栈底（旧布局）。 */
+    unsigned long upcall_base = stack_bottom;
+#else
+    unsigned long upcall_base =
+        (stack_bottom - (uint32)ARKRTOS_ELF_UPCALL_SIZE) & ~0xFFFUL;
+#endif
 
     if((stack_bottom <= win_base) ||
        (argv_start <= stack_bottom) ||
-       (win_top <= argv_start))
+       (win_top <= argv_start) ||
+       (upcall_base <= win_base))
     {
-        /* 窗口小到连栈+参数区都放不下：这是板级配置错误，不是程序问题。 */
+        /* 窗口小到连栈+参数区（或 upcall 区）都放不下：板级配置错误。 */
         return ARKRTOS_ELF_ERR_LAYOUT;
     }
 
     *p_win_top      = win_top;
     *p_argv_start   = argv_start;
     *p_stack_bottom = stack_bottom;
+    *p_upcall_base  = upcall_base;
     return ARKRTOS_ELF_OK;
+}
+
+/* upcall 区的三个读数（置 0 档一律回答 0：没有这块区要能从读数上看出来，
+ * 而不是给一个看起来正常的地址）。桩页就是区的起点，栈从区顶往下长，
+ * 栈顶留 16 字节给桩的入口约定用。 */
+static unsigned long elf_upcall_stub_va(unsigned long upcall_base)
+{
+#if (ARKRTOS_ELF_UPCALL_SIZE == 0u)
+    (void)upcall_base;
+    return 0ul;
+#else
+    return upcall_base;
+#endif
+}
+
+static unsigned long elf_upcall_sp(unsigned long upcall_base)
+{
+#if (ARKRTOS_ELF_UPCALL_SIZE == 0u)
+    (void)upcall_base;
+    return 0ul;
+#else
+    return upcall_base + (unsigned long)(uint32)ARKRTOS_ELF_UPCALL_SIZE - 16ul;
+#endif
+}
+
+/* 装载时把 upcall 区清零：这块区不归任何 PT_LOAD 管，上一次装载（甚至别的
+ * 程序）在这里留下的字节会被下一次的桩当成自己的栈内容。清零不是卫生问题，
+ * 是「栈上不许出现别人的数据」的一部分。 */
+static void elf_clear_upcall(uint32 space, unsigned long upcall_base,
+                             unsigned long stack_bottom)
+{
+    uint32 len = (uint32)(stack_bottom - upcall_base);
+
+    if(len == 0u)
+    {
+        return;
+    }
+#if (ARKRTOS_USE_PAGING == 1)
+    elf_zero_window(space, upcall_base, len);
+#else
+    (void)space;
+    elf_memzero((uint8 *)(unsigned long)upcall_base, len);
+#endif
 }
 
 /* 入口回跳区：必须在可执行区里、且 4 字节对齐。 */
@@ -1690,6 +1768,8 @@ typedef struct
     uint16 etype;
     unsigned long win_base;
     unsigned long stack_bottom;
+    unsigned long exec_top;     /* 可执行区顶：upcall 区起点（无 upcall 时 = 栈底） */
+    unsigned long upcall_base;  /* upcall 区起点（内核借用，见 elf_window_layout） */
     elf_image_t img;
     uint32 bytes;
     uint32 segs;
@@ -1833,7 +1913,7 @@ static int32 elf_load_dynamic(elf_load_state_t *st, const char *interp_path)
         /* ET_DYN 但最低段不在 0：装载基址就不是 st->win_base 了。 */
         return ARKRTOS_ELF_ERR_LAYOUT;
     }
-    rc = elf_check_entry((elf_word_t)st->img.entry, st->win_base, st->stack_bottom);
+    rc = elf_check_entry((elf_word_t)st->img.entry, st->win_base, st->exec_top);
     if(rc != ARKRTOS_ELF_OK)
     {
         return rc;
@@ -1905,7 +1985,7 @@ static int32 elf_load_static(elf_load_state_t *st)
     int32 rc;
 
     /* 静态档：行为与 DYNLOAD 之前逐位一致。 */
-    rc = elf_check_entry(st->entry, st->win_base, st->stack_bottom);
+    rc = elf_check_entry(st->entry, st->win_base, st->exec_top);
     if(rc != ARKRTOS_ELF_OK)
     {
         return rc;
@@ -1917,7 +1997,7 @@ static int32 elf_load_static(elf_load_state_t *st)
     {
         return rc;
     }
-    rc = elf_check_range(&st->img, st->win_base, st->stack_bottom);
+    rc = elf_check_range(&st->img, st->win_base, st->exec_top);
     if(rc != ARKRTOS_ELF_OK)
     {
         return rc;
@@ -2000,6 +2080,9 @@ static int32 elf_load_finish(elf_load_state_t *st)
     st->p_info->argc       = (uint32)st->argc;
     st->p_info->sp         = sp;
     st->p_info->stack_size = stack_bytes;
+    st->p_info->upcall_base = st->upcall_base;
+    st->p_info->stub_va     = elf_upcall_stub_va(st->upcall_base);
+    st->p_info->upcall_sp   = elf_upcall_sp(st->upcall_base);
     st->p_info->task       = 0;
     if(st->p_tp != 0)
     {
@@ -2078,6 +2161,7 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
     unsigned long win_top;
     unsigned long argv_start;
     unsigned long stack_bottom;
+    unsigned long upcall_base;
     elf_aux_t aux[ARKRTOS_ELF_AUX_MAX];
     elf_load_state_t st;
     int32 rc;
@@ -2094,11 +2178,16 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
         return rc;
     }
 
-    rc = elf_window_layout(win_base, &win_top, &argv_start, &stack_bottom);
+    rc = elf_window_layout(win_base, &win_top, &argv_start, &stack_bottom,
+                           &upcall_base);
     if(rc != ARKRTOS_ELF_OK)
     {
         return rc;
     }
+
+    /* upcall 区先清空再装段：它在段之后清就会把越界写入的字节盖掉，
+     * 而越界本来就该在 elf_check_range 那里被拒。 */
+    elf_clear_upcall(space, upcall_base, stack_bottom);
 
     rc = elf_read_exact(path, hdr, ELF_EHDR_SIZE, 0u);
     if(rc != ARKRTOS_ELF_OK)
@@ -2144,6 +2233,8 @@ static int32 elf_load(uint32 space, const char *path, int32 argc,
     st.etype = etype;
     st.win_base = win_base;
     st.stack_bottom = stack_bottom;
+    st.exec_top = upcall_base;
+    st.upcall_base = upcall_base;
     st.bytes = 0u;
     st.segs = 0u;
     st.tp = 0u;
@@ -2226,6 +2317,9 @@ int32 arkrtos_elf_exec_space(const char *path, int32 argc, char *argv[],
     info.dynamic    = 0u;
     info.interp_base = 0u;
     info.interp_entry = 0u;
+    info.upcall_base = 0ul;
+    info.stub_va     = 0ul;
+    info.upcall_sp   = 0ul;
 #if (ARKRTOS_USE_EXIT_CODE == 1)
     info.exit_code  = 0;
     info.exit_code_set = 0u;
@@ -2439,6 +2533,9 @@ int32 arkrtos_elf_fork(void *p_svc_ctx, int32 *p_child_task,
         s_elf_info[space].dynamic    = 0u;
         s_elf_info[space].interp_base  = 0ul;
         s_elf_info[space].interp_entry = 0ul;
+        s_elf_info[space].upcall_base  = 0ul;
+        s_elf_info[space].stub_va      = 0ul;
+        s_elf_info[space].upcall_sp    = 0ul;
     }
     s_elf_info[space].task = id;
 #if (ARKRTOS_USE_EXIT_CODE == 1)
@@ -2658,6 +2755,9 @@ int32 arkrtos_elf_exec_replace(const char *path, int32 argc, char *argv[],
     info.dynamic    = 0u;
     info.interp_base = 0u;
     info.interp_entry = 0u;
+    info.upcall_base = 0ul;
+    info.stub_va     = 0ul;
+    info.upcall_sp   = 0ul;
 #if (ARKRTOS_USE_EXIT_CODE == 1)
     info.exit_code  = 0;
     info.exit_code_set = 0u;

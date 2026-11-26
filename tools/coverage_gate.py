@@ -725,6 +725,23 @@ CASES = [
       "-DARKRTOS_ELF_WINDOW_SIZE=0x200000u",
       "-DARKRTOS_ELF_ARGV_SIZE=16384u",
       "-DARKRTOS_ELF_STACK_SIZE=32768u",
+      "-DARKRTOS_ELF_UPCALL_SIZE=8192u",
+      "-DARKRTOS_ELF_UPCALL_STACK=4096u",
+      "-DARKRTOS_LOG_LEVEL=0",
+      "-fno-asynchronous-unwind-tables"],
+     "ELF-HOST OK"),
+    # upcall 区置 0 = 回退档：可执行区重新直接顶到用户栈底，info 里三个
+    # upcall 读数全 0，段落进 upcall 区的用例在这一档整体编掉。这一档不是
+    # 「顺便多测一遍」——它是隔离执行那条路的上线开关，必须有独立读数。
+    ("elfup0", "kernelsrc/tests/test_elf_host.c",
+     ["kernelsrc/src/arkrtos_elf.c"],
+     ["-DARKRTOS_USE_ELF=1",
+      "-DARKRTOS_ELF_WINDOW_BASE=0x60000000u",
+      "-DARKRTOS_ELF_WINDOW_SIZE=0x200000u",
+      "-DARKRTOS_ELF_ARGV_SIZE=16384u",
+      "-DARKRTOS_ELF_STACK_SIZE=32768u",
+      "-DARKRTOS_ELF_UPCALL_SIZE=0u",
+      "-DARKRTOS_ELF_UPCALL_STACK=4096u",
       "-DARKRTOS_LOG_LEVEL=0",
       "-fno-asynchronous-unwind-tables"],
      "ELF-HOST OK"),

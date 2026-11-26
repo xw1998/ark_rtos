@@ -100,7 +100,8 @@ ELF 程序占另一个）。
    `PASS` + `exit 105`，坏夹具 `exit 127`），见
    [动态链接与PT_INTERP](动态链接与PT_INTERP.md)。
 2. **第一遍：只校验不写**。逐个 `PT_LOAD` 检查 `p_memsz>=p_filesz`、
-   `[p_vaddr, p_vaddr+p_memsz)` 完整落在窗口内、段数不超过 16。
+   `[p_vaddr, p_vaddr+p_memsz)` 完整落在窗口的**可执行区**内、段数不超过 16。
+   可执行区的顶不是 `stack_bottom`，而是 `upcall_base`（见 §3.0）。
    这一步的意义是**要么全装、要么一个字节都不写**（窗口里可能还留着上一次的残段，
    半装进去的程序比装不上更危险）。
 3. **第二遍：真写**。`vfs_read_at` 逐段拷 `p_filesz`，再把 `p_memsz-p_filesz`
@@ -109,7 +110,8 @@ ELF 程序占另一个）。
    `win_top` 往下写参数字符串 → 记 `addrs[]` → 构造 `argc / argv[argc] / envp[0]=0`
    数组 → `sp = argv_start`。字符串预算 `ARKRTOS_ELF_ARGV_SIZE = 16 KB`，
    参数上限 `MAX_ARGS=16`、单条 `MAX_ARG_LEN=256`。
-5. **起任务**：`stack_bottom = argv_start - 32 KB`，
+5. **起任务**：`stack_bottom = argv_start - 32 KB`（用户栈底；它上方 8 KB 是
+   upcall 区，属于内核），
    `arkrtos_task_register(entry, stack_bottom, 32 KB, 优先级 12, 0)`，
    然后把 `is_priv` 置 0（非特权）——**ELF 程序永远以 PLV3 跑**，
    它在窗口里写自己的 `.data`/栈，出窗口就撞 TLB。
@@ -119,6 +121,33 @@ ELF 程序占另一个）。
    （任务死亡检测）只清自己那一格。M1 的旧表述是「`s_elf_task != 0` 就 `ERR_BUSY`」，
    即全局只能有一个实例——U-2 把这个限制换掉了。分页档下段不再直接 `memcpy` 到
    窗口指针，而是先读进内核暂存 `s_elf_stage[4096]`，再切窗口 + 每 4 KB 拷进去。
+
+### 3.0 窗口切分（2026-11-26：可执行区与用户栈之间多一段 upcall 区）
+
+SEC-G08 M-08-1 把窗口从「三段」切成「四段」。upcall 区是**内核借用的**，
+不是 App 的段：App 拿不到任何句柄，装载时清零。
+
+```
+[ win_base .. upcall_base )          可执行区（PT_LOAD 落点、入口都在这一段内）
+[ upcall_base .. upcall_base+UPCALL_SIZE )  upcall 区（4 KB 对齐，默认 8 KB）
+[ stack_bottom .. argv_start )        用户栈 32 KB（不变）
+[ argv_start .. win_top )             argv/aux 区 16 KB（不变）
+```
+
+- 常量：`ARKRTOS_ELF_UPCALL_SIZE`（默认 8 KB）、`ARKRTOS_ELF_UPCALL_STACK`
+  （默认 4 KB，即区尾那段桩栈）。两者都必须是 4 KB 的整数倍且栈小于整块，
+  否则编译期 `#error`；窗口小到放不下时报 `ARKRTOS_ELF_ERR_LAYOUT`。
+- **越界判据一个字都没改**：`elf_check_range()` / `elf_check_entry()` 的上限从
+  `stack_bottom` 换成 `upcall_base`，于是「段不得覆盖栈」自动变成「段不得覆盖
+  upcall 区」，upcall 区里的桩页不会被某个装进来的段悄悄盖掉。
+- 读数（宿主 `test_elf_host.c`，`coverage_gate.py` 的 `elf` / `elfup0` 两档）：
+  `info.upcall_base / stub_va / upcall_sp` 三个值随装载写出；upcall 区 4 KB 对齐、
+  顶正好等于用户栈底、位在已装段之上、装载后整块全零；段落进 `upcall_base` 返回
+  `ARKRTOS_ELF_ERR_LAYOUT`；`ARKRTOS_ELF_UPCALL_SIZE=0u` 档三个读数全 0、可执行区
+  退回直接顶到 `stack_bottom`（回退档，逐条单独跑同一份用例）。
+- **它现在还不放任何东西**：桩字节、upcall 线程与 `syscall 0x23` 是 M-08-2/3
+  的事，本阶段只是把地址切出来并守住边界。设计见
+  [SEC-G08-隔离执行-设计](SEC-G08-隔离执行-设计.md)。
 
 ### 3.1 入口约定：`sp` 指向 `argc`
 
