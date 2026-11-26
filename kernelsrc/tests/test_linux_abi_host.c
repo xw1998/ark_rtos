@@ -3273,6 +3273,427 @@ static void t_futex_pi(t_ctx *c)
     arkrtos_current_task_id = cur0;
     g_restart_rc = -1;
 }
+
+/* 分组 14c：futex PI 的边界与多等待者、robust list 的坏输入
+ *
+ * 存在的理由不是「凑覆盖率」，而是这些分支各自对应一条真实的失败语义：
+ *   - 读/写字失败（g_from_budget/g_to_budget 造）必须原样 -EFAULT 且不留下
+ *     一条「已经在等」的旧登记；
+ *   - 有未屏蔽信号 / 端口不肯重放要在登记前后各自处理，且都要销账；
+ *   - 重放的四种收尾（到期 / 被交接 / 继续睡 / 读字失败）各走一条；
+ *   - PI 多等待者交接时，队首按 base_priority 选、其余等待者的持有者一并改；
+ *   - robust 链被写坏（越界 / 空帧 / 断链 / pending / 非法任务号）时退出路径
+ *     必须走完且不写坏别人的字 —— 死在退出钩子里就是整个系统停摆。
+ */
+static void t_futex_pi_edge(t_ctx *c)
+{
+    unsigned long w = u_ptr(0x10u);
+    int32 cur0 = arkrtos_current_task_id;
+
+    /* ---- 非重放：读字失败 -EFAULT（并在 get_word 内层回 -EFAULT） ---- */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    u_put32(0x10u, 5u);
+    g_from_budget = 0;
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    g_from_budget = -1;
+    ck_ret(c, -T_EFAULT, "LOCK_PI 读字失败回 -EFAULT");
+
+    /* ---- 非重放：置 WAITERS 写失败 -EFAULT ---- */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    u_put32(0x10u, 5u);                         /* 无 WAITERS，必须写一次 */
+    g_to_budget = 0;
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    g_to_budget = -1;
+    ck_ret(c, -T_EFAULT, "LOCK_PI 置 WAITERS 写失败回 -EFAULT");
+
+    /* ---- 非重放：读超时结构失败 -EFAULT ---- */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    u_put32(0x10u, 5u);
+    u_put32(0x60u, 1u);
+    u_put32(0x64u, 0u);
+    g_from_budget = 1;                          /* get_word 成功后 timeout 的 copy 失败 */
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL,
+               u_ptr(0x60u));
+    g_from_budget = -1;
+    ck_ret(c, -T_EFAULT, "LOCK_PI 读超时结构失败回 -EFAULT");
+
+    /* ---- 非重放：有未屏蔽信号 -EINTR ---- */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    g_restart_rc = 0;
+    /* 信号在每次系统调用返回前都会投递；把处理函数装在读不出来的地址上，
+     * 投递取不到指令就把 pending 位放回去，下一个入口仍看得见它。 */
+    (void)sig_install_act(c, 10u, 0x1000UL, 0x2000UL, 0u);
+    (void)call(c, T_NR_KILL, 7UL, 10UL, 0UL, 0UL);   /* 置 SIGUSR1 pending */
+    u_put32(0x10u, 5u);
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    ck_ret(c, -T_EINTR, "LOCK_PI 有未屏蔽信号回 -EINTR");
+
+    /* ---- 非重放：端口没有重放能力 -ENOSYS ---- */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    u_put32(0x10u, 5u);
+    g_restart_rc = 1;
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    g_restart_rc = -1;
+    ck_ret(c, -T_ENOSYS, "LOCK_PI 端口没有重放能力回 -ENOSYS");
+
+    /* ---- 超时钳位：绝对上限 / 相对时长超 int32 ---- */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    g_restart_rc = 0;
+    u_put32(0x10u, 5u);
+    u_put32(0x60u, 2147484u);                   /* > 2147483 ⇒ 直接钳到上限 */
+    u_put32(0x64u, 0u);
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL,
+               u_ptr(0x60u));
+    ck_ret(c, 0, "LOCK_PI 超长时长（ts.sec>2147483）按上限登记");
+
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    g_restart_rc = 0;
+    u_put32(0x10u, 5u);
+    u_put32(0x60u, 2147483u);                   /* 乘 1000 后超 int32 上限 */
+    u_put32(0x64u, 999999999u);
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL,
+               u_ptr(0x60u));
+    ck_ret(c, 0, "LOCK_PI 相对时长超 int32 上限时钳位");
+
+    /* ================= 重放路径的四种收尾 ================= */
+
+    /* (a) 重放到期 -ETIMEDOUT */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    g_restart_rc = 0;
+    g_ms = 1234567u;
+    arkrtos_task_table[4].base_priority = 10u;
+    arkrtos_task_table[4].priority      = 10u;
+    u_put32(0x10u, 5u);
+    u_put32(0x60u, 1000u);
+    u_put32(0x64u, 0u);
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL,
+               u_ptr(0x60u));
+    g_ms += 2000000u;                           /* 远超截止 */
+    (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    ck_ret(c, -T_ETIMEDOUT, "LOCK_PI 重放到期回 -ETIMEDOUT（并销账）");
+
+    /* (b) 重放读字失败 -EFAULT */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    g_restart_rc = 0;
+    arkrtos_task_table[4].base_priority = 10u;
+    arkrtos_task_table[4].priority      = 10u;
+    u_put32(0x10u, 5u);
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    g_from_budget = 0;
+    (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    g_from_budget = -1;
+    ck_ret(c, -T_EFAULT, "LOCK_PI 重放读字失败回 -EFAULT（并销账）");
+
+    /* (c) 重放接手已死持有者：写字成功、保留 OWNER_DIED */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    g_restart_rc = 0;
+    arkrtos_task_table[4].base_priority = 10u;
+    arkrtos_task_table[4].priority      = 10u;
+    u_put32(0x10u, 5u);
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    ck_ret(c, 0, "LOCK_PI 登记等待（重放接手的前置）");
+    u_put32(0x10u, 5u | T_FUTEX_OWNER_DIED);    /* 原持有者已死 */
+    (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    ck_ret(c, 0, "LOCK_PI 重放接手已死持有者回 0");
+    ck_u(u_get32(0x10u), 7u | T_FUTEX_OWNER_DIED,
+         "LOCK_PI 重放接手把字写成自己并保留 OWNER_DIED");
+
+    /* (d) 重放接手时写字失败 -EFAULT */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    g_restart_rc = 0;
+    arkrtos_task_table[4].base_priority = 10u;
+    arkrtos_task_table[4].priority      = 10u;
+    u_put32(0x10u, 5u);
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    u_put32(0x10u, 5u | T_FUTEX_OWNER_DIED);
+    g_to_budget = 0;
+    (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    g_to_budget = -1;
+    ck_ret(c, -T_EFAULT, "LOCK_PI 重放接手写字失败回 -EFAULT（并销账）");
+
+    /* (e) 重放时来信号 -EINTR */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    g_restart_rc = 0;
+    arkrtos_task_table[4].base_priority = 10u;
+    arkrtos_task_table[4].priority      = 10u;
+    u_put32(0x10u, 5u);
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    (void)sig_install_act(c, 10u, 0x1000UL, 0x2000UL, 0u);
+    (void)call(c, T_NR_KILL, 7UL, 10UL, 0UL, 0UL);
+    (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    ck_ret(c, -T_EINTR, "LOCK_PI 重放时来信号回 -EINTR（并销账）");
+
+    /* (f) 重放时端口不肯重放 -ENOSYS */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    g_restart_rc = 0;
+    arkrtos_task_table[4].base_priority = 10u;
+    arkrtos_task_table[4].priority      = 10u;
+    u_put32(0x10u, 5u);
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    g_restart_rc = 1;
+    (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    g_restart_rc = -1;
+    ck_ret(c, -T_ENOSYS, "LOCK_PI 重放时端口没有重放能力回 -ENOSYS（并销账）");
+
+    /* (g) 重放发现持有者换人：改写登记里的持有者、两边优先级重算后继续睡 */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    g_restart_rc = 0;
+    g_block_calls = 0;
+    g_reprio_calls = 0;
+    arkrtos_task_table[6].base_priority = 4u;   /* 我：tid 7，等待者 */
+    arkrtos_task_table[6].priority      = 4u;
+    arkrtos_task_table[4].base_priority = 10u;  /* 初持有者：tid 5 */
+    arkrtos_task_table[4].priority      = 10u;
+    arkrtos_task_table[8].base_priority = 6u;   /* 换上的持有者：tid 9 */
+    arkrtos_task_table[8].priority      = 10u;
+    u_put32(0x10u, 5u);
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    ck_ret(c, 0, "LOCK_PI 登记等待（换人重放的前置）");
+    ck_u((unsigned long)arkrtos_task_table[4].priority, 4UL,
+         "LOCK_PI 登记后初持有者被抬到 4");
+    {
+        int32 b0 = g_block_calls;
+
+        u_put32(0x10u, 9u);                     /* 持有者换成 tid 9 */
+        (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+        ck_ret(c, 0, "LOCK_PI 重放发现持有者换人后继续睡");
+        ck(g_block_calls == b0 + 1, "LOCK_PI 重放换人后又睡了一个时间片");
+    }
+    ck_u((unsigned long)arkrtos_task_table[8].priority, 4UL,
+         "LOCK_PI 重放换人后新持有者被抬到等待者的 4");
+    ck_u((unsigned long)arkrtos_task_table[4].priority, 10UL,
+         "LOCK_PI 重放换人后旧持有者优先级算回基准 10");
+
+    /* ================= PI 多等待者：队首选择与其余等待者改持有人 ================= */
+
+    /* 两个等待者（tid 3 prio 4 / tid 6 prio 8），持有者 tid 5：解锁交接给 3，
+     * 另一个等待者 6 的持有者一并改成 3；字里留 WAITERS（队列还有人不空）。 */
+    fresh(c);
+    arkrtos_current_task_id = 3;                /* 先排队的等待者 tid 3：prio 8（较低） */
+    g_restart_rc = 0;
+    g_block_calls = 0;
+    g_wake_calls  = 0;
+    arkrtos_task_table[2].base_priority = 8u;
+    arkrtos_task_table[2].priority      = 8u;
+    arkrtos_task_table[5].base_priority = 4u;   /* 后登记者 tid 6：prio 4（更高） */
+    arkrtos_task_table[5].priority      = 4u;
+    arkrtos_task_table[4].base_priority = 10u;  /* 持有者 tid 5 */
+    arkrtos_task_table[4].priority      = 10u;
+    u_put32(0x10u, 5u);
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL); /* tid 3 排队 */
+    arkrtos_current_task_id = 6;
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL); /* tid 6 排队 */
+    arkrtos_current_task_id = 5;                /* 交给持有者解锁 */
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_UNLOCK_PI, 0UL, 0UL);
+    ck_ret(c, 0, "UNLOCK_PI 多等待者交接回 0");
+    ck_u(u_get32(0x10u), 6u | T_FUTEX_WAITERS,
+         "UNLOCK_PI 交接给基准优先级最高的 6（后登记者更高也要选对），队列不空留 WAITERS");
+    ck_u((unsigned long)g_wake_last, 6UL, "UNLOCK_PI 唤醒的是优先级最高的 6");
+
+    /* 同上但要写字失败：交接不能半途留下一个「看起来成功」的字 */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    g_restart_rc = 0;
+    arkrtos_task_table[6].base_priority = 8u;
+    arkrtos_task_table[6].priority      = 8u;
+    arkrtos_task_table[2].base_priority = 4u;
+    arkrtos_task_table[2].priority      = 4u;
+    arkrtos_task_table[4].base_priority = 10u;
+    arkrtos_task_table[4].priority      = 10u;
+    u_put32(0x10u, 5u);
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    arkrtos_current_task_id = 3;
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    arkrtos_current_task_id = 5;
+    g_to_budget = 0;
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_UNLOCK_PI, 0UL, 0UL);
+    g_to_budget = -1;
+    ck_ret(c, -T_EFAULT, "UNLOCK_PI 交接写字失败回 -EFAULT");
+
+    /* ================= CMP_REQUEUE 的读字失败 ================= */
+
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    u_put32(0x10u, 0u);
+    g_from_budget = 0;
+    (void)call6(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_CMP_REQUEUE, 1UL,
+                1UL, u_ptr(0x20u), 0UL);
+    g_from_budget = -1;
+    ck_ret(c, -T_EFAULT, "CMP_REQUEUE 核对 uaddr 读字失败回 -EFAULT");
+
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    u_put32(0x10u, 0u);                         /* 期望值 = 0，核对通过 */
+    g_from_budget = 1;                          /* 第一次成功、第二次（uaddr2）失败 */
+    (void)call6(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_CMP_REQUEUE, 1UL,
+                1UL, u_ptr(0x20u), 0UL);
+    g_from_budget = -1;
+    ck_ret(c, -T_EFAULT, "CMP_REQUEUE 读 uaddr2 失败回 -EFAULT");
+
+    arkrtos_current_task_id = cur0;
+    g_restart_rc = -1;
+    g_from_budget = -1;
+    g_to_budget = -1;
+}
+
+static void t_robust_edge(t_ctx *c)
+{
+    int32 cur0 = arkrtos_current_task_id;
+
+    /* ---- 节点字地址越界：mark 读字失败，退出路径跳过（不崩） ---- */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    u_put32(0x300u, (uint32)u_ptr(0x320u));     /* head.next -> 节点 */
+    u_put32(0x304u, (uint32)(U_SIZE - 2u - 0x320u)); /* node+offset 落在窗口末 2 字节 */
+    u_put32(0x308u, 0u);
+    u_put32(0x320u, (uint32)u_ptr(0x300u));     /* 节点 next = head（终止） */
+    (void)call(c, T_NR_SET_ROBUST_LIST, u_ptr(0x300u), 12UL, 0UL, 0UL);
+    (void)arkrtos_linux_abi_on_task_exit(7);
+    ck(1, "robust 节点字越界时退出路径走完（mark 读字失败即跳过）");
+
+    /* ---- 字落在没驻留的帧上：键无效 -ENOSYS，字原样不动 ---- */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    u_put32(0xE000u, 7u);                       /* idx7 空帧上的字，tid=自己 */
+    u_put32(0x300u, (uint32)u_ptr(0x320u));
+    u_put32(0x304u, 0xDCE0u);                   /* 0x320 + 0xDCE0 = 0xE000 */
+    u_put32(0x308u, 0u);
+    u_put32(0x320u, (uint32)u_ptr(0x300u));
+    (void)call(c, T_NR_SET_ROBUST_LIST, u_ptr(0x300u), 12UL, 0UL, 0UL);
+    (void)arkrtos_linux_abi_on_task_exit(7);
+    ck_u(u_get32(0xE000u), 7u, "robust 键落在没驻留的帧上时不动那个字");
+
+    /* ---- PI 多等待者：交接给最高优先级，其余等待者持有人一并改 ---- */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    g_restart_rc = 0;
+    g_wake_calls = 0;
+    arkrtos_task_table[6].base_priority = 10u;  /* 持有者 tid 7 */
+    arkrtos_task_table[6].priority      = 10u;
+    arkrtos_task_table[2].base_priority = 4u;   /* 等待者 tid 3 */
+    arkrtos_task_table[2].priority      = 4u;
+    arkrtos_task_table[5].base_priority = 8u;   /* 等待者 tid 6 */
+    arkrtos_task_table[5].priority      = 8u;
+    u_put32(0x360u, 7u);
+    u_put32(0x300u, (uint32)(u_ptr(0x320u) | 1u));  /* PI 条目 */
+    u_put32(0x304u, 0x40u);
+    u_put32(0x308u, 0u);
+    u_put32(0x320u, (uint32)u_ptr(0x300u));
+    (void)call(c, T_NR_SET_ROBUST_LIST, u_ptr(0x300u), 12UL, 0UL, 0UL);
+    arkrtos_current_task_id = 3;
+    (void)call(c, T_NR_FUTEX, u_ptr(0x360u), (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    arkrtos_current_task_id = 6;
+    (void)call(c, T_NR_FUTEX, u_ptr(0x360u), (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    arkrtos_current_task_id = 7;
+    (void)arkrtos_linux_abi_on_task_exit(7);
+    ck_u(u_get32(0x360u), 3u | T_FUTEX_OWNER_DIED,
+         "robust PI 多等待者退出：交接给优先级最高的 3");
+    ck_u((unsigned long)g_wake_last, 3UL, "robust PI 多等待者退出：唤醒队首 3");
+    ck_u((unsigned long)arkrtos_task_table[6].priority, 10UL,
+         "robust PI 多等待者退出：原持有者优先级算回基准 10");
+
+    /* ---- PI 交接写字失败：退出路径吞掉 -EFAULT、不写坏 ---- */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    g_restart_rc = 0;
+    arkrtos_task_table[6].base_priority = 10u;
+    arkrtos_task_table[6].priority      = 10u;
+    arkrtos_task_table[2].base_priority = 4u;
+    arkrtos_task_table[2].priority      = 4u;
+    u_put32(0x360u, 7u);
+    u_put32(0x300u, (uint32)(u_ptr(0x320u) | 1u));
+    u_put32(0x304u, 0x40u);
+    u_put32(0x308u, 0u);
+    u_put32(0x320u, (uint32)u_ptr(0x300u));
+    (void)call(c, T_NR_SET_ROBUST_LIST, u_ptr(0x300u), 12UL, 0UL, 0UL);
+    arkrtos_current_task_id = 3;
+    (void)call(c, T_NR_FUTEX, u_ptr(0x360u), (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    arkrtos_current_task_id = 7;
+    g_to_budget = 0;
+    (void)arkrtos_linux_abi_on_task_exit(7);
+    g_to_budget = -1;
+    ck_u(u_get32(0x360u), 7u | T_FUTEX_WAITERS,
+         "robust PI 交接写字失败时不动那个字");
+
+    /* ---- 非 PI 写字失败 ---- */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    u_put32(0x360u, 7u | T_FUTEX_WAITERS);
+    u_put32(0x300u, (uint32)u_ptr(0x320u));
+    u_put32(0x304u, 0x40u);
+    u_put32(0x308u, 0u);
+    u_put32(0x320u, (uint32)u_ptr(0x300u));
+    (void)call(c, T_NR_SET_ROBUST_LIST, u_ptr(0x300u), 12UL, 0UL, 0UL);
+    g_to_budget = 0;
+    (void)arkrtos_linux_abi_on_task_exit(7);
+    g_to_budget = -1;
+    ck_u(u_get32(0x360u), 7u | T_FUTEX_WAITERS,
+         "robust 非 PI 写字失败时不动那个字");
+
+    /* ---- 链头读不出：hdr copy 失败直接返回 ---- */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    (void)call(c, T_NR_SET_ROBUST_LIST, u_ptr(U_SIZE - 4u), 12UL, 0UL, 0UL);
+    ck_ret(c, 0, "set_robust_list 链头贴着窗口末端仍可登记");
+    (void)arkrtos_linux_abi_on_task_exit(7);
+    ck(1, "robust 链头读不出时退出路径直接返回（不崩）");
+
+    /* ---- 节点 next 读不出：循环 break（有界） ---- */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    u_put32(0x300u, (uint32)u_ptr(U_SIZE - 2u));    /* head.next 越界 */
+    u_put32(0x304u, 0x40u);
+    u_put32(0x308u, 0u);
+    (void)call(c, T_NR_SET_ROBUST_LIST, u_ptr(0x300u), 12UL, 0UL, 0UL);
+    (void)arkrtos_linux_abi_on_task_exit(7);
+    ck(1, "robust 节点 next 读不出时退循环 break（有界）");
+
+    /* ---- list_op_pending：已摘下、字还没写的窗口也要清 ---- */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    u_put32(0x360u, 7u);
+    u_put32(0x300u, (uint32)u_ptr(0x300u));     /* 空链：next 指向自己（终止） */
+    u_put32(0x304u, 0x40u);
+    u_put32(0x308u, (uint32)u_ptr(0x320u));     /* pending */
+    (void)call(c, T_NR_SET_ROBUST_LIST, u_ptr(0x300u), 12UL, 0UL, 0UL);
+    (void)arkrtos_linux_abi_on_task_exit(7);
+    ck_u(u_get32(0x360u), T_FUTEX_OWNER_DIED,
+         "robust list_op_pending 条目也被清理（置 OWNER_DIED）");
+
+    /* ---- 非法任务号：set / get 都回 -EFAULT ---- */
+    arkrtos_current_task_id = 0;
+    (void)call(c, T_NR_SET_ROBUST_LIST, u_ptr(0x300u), 12UL, 0UL, 0UL);
+    ck_ret(c, -T_EFAULT, "set_robust_list 当前任务号非法回 -EFAULT");
+    (void)call(c, T_NR_GET_ROBUST_LIST, 0UL, u_ptr(0x380u), u_ptr(0x384u), 0UL);
+    ck_ret(c, -T_EFAULT, "get_robust_list 当前任务号非法回 -EFAULT");
+
+    /* ---- get：两个出参各自的写失败 ---- */
+    arkrtos_current_task_id = 7;
+    (void)call(c, T_NR_GET_ROBUST_LIST, 7UL, u_ptr(U_SIZE - 2u), u_ptr(0x384u), 0UL);
+    ck_ret(c, -T_EFAULT, "get_robust_list 链头出参越界回 -EFAULT");
+    (void)call(c, T_NR_GET_ROBUST_LIST, 7UL, u_ptr(0x380u), u_ptr(U_SIZE - 2u), 0UL);
+    ck_ret(c, -T_EFAULT, "get_robust_list 长度出参越界回 -EFAULT");
+
+    arkrtos_current_task_id = cur0;
+    g_restart_rc = -1;
+    g_from_budget = -1;
+    g_to_budget = -1;
+}
+
 #endif /* ARKRTOS_USE_LINUX_FUTEX == 1 */
 
 #if (ARKRTOS_USE_LINUX_SELECT == 1)
@@ -4685,6 +5106,8 @@ int main(void)
 #if (ARKRTOS_USE_LINUX_FUTEX == 1)
     t_futex(&c);
     t_futex_pi(&c);
+    t_futex_pi_edge(&c);
+    t_robust_edge(&c);
 #endif
 #if (ARKRTOS_USE_LINUX_SELECT == 1)
     t_pselect6(&c);
