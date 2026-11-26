@@ -215,20 +215,25 @@ EXPECT_SHM_CHECKS = 40
 # -ETIMEDOUT、无等待者 REQUEUE==0、CMP_REQUEUE 期望值不符 -EAGAIN、缺
 # uaddr2 -EINVAL、mmap）、相对 50 ms 超时 2 条（返回值 + 墙钟 >= 50 ms）、
 # 位集跨进程 4 条、改挂跨进程 5 条。合计 56 + 20 = 76 条。
-EXPECT_FUTEX_CHECKS = 76
+# 第四档（PI 三档 LOCK_PI/UNLOCK_PI/TRYLOCK_PI + robust list 99/100 与退出
+# 清理）再 37 条：单进程 PI 语义 15 条 + robust 参数/回读 8 条、跨进程 PI 与
+# PI robust 死亡交接 7 条、非 PI robust 7 条。76 + 37 = 113 条。
+EXPECT_FUTEX_CHECKS = 113
 # FILEMAP 段多 20 条：只读私有映射的内容三处读数（首字节 / 第 25 / 第 4095）、
 # 三条参数校验（未对齐 offset -EINVAL、坏 fd -EBADF、只读 fd 上的可写共享
 # -EACCES）、offset=4096 的映射与 EOF 补零、O_RDWR 打开、可写共享映射与
 # msync/munmap 两次写回、私有可写映射与它不落盘、以及最后把「共享写落盘 +
 # 私有写不落盘」合成一个位掩码读数（20 % 26 那对字节）。合计 69 条；
 # 再叠 futex 档的 15 条（含多时间片 7 条）= 76 条。
-EXPECT_FILEMAP_CHECKS = 96
+# 再加 futex 第四档的 37 条：96 + 37 = 133 条。
+EXPECT_FILEMAP_CHECKS = 133
 # MPROTECT 段多 10 条：8 KB 映射、mprotect(RO)==0、只读页仍可读、**同一对里的
 # 另一半 4 KB 仍可写**（4 KB 粒度与 8 KB 粒度在此分家）、mprotect(RW)==0、
 # 恢复保护后写回得去、再设 RO、为违规写 fork 出子进程、子进程被摘掉（不是重启）、
 # 父进程那一页一个字节没变、状态字是「被信号终止」而不是 exit 码。
 # 合计 80 条；再叠 futex 档的 15 条（含多时间片 7 条）= 87 条。
-EXPECT_MPROTECT_CHECKS = 107
+# 再加 futex 第四档的 37 条：107 + 37 = 144 条。
+EXPECT_MPROTECT_CHECKS = 144
 # SELECT 段多 15 条：pipe2、空管道读端不就绪（返回值 0）、非就绪时用户集被清位、
 # 50 ms 定时等待回 0、定时等待墙钟 >= 40 ms、写进 3 字节、读端就绪（1）、
 # 就绪位在用户集里保留、写端有空间就绪、stdout 恒可写、写满后写端不就绪、
@@ -236,7 +241,8 @@ EXPECT_MPROTECT_CHECKS = 107
 # 坏 fd 回 -EBADF。合计 107 + 15 = 122 条。
 # 再加 1 条反假绿：socket 开关没开时 198 号必须如实回 -ENOSYS（这一条只在
 # select 档里编，socket 档自己不编，所以 socket 档仍然从 122 起算）。
-EXPECT_SELECT_CHECKS = 123
+# 再加 futex 第四档的 37 条：123 + 37 = 160 条。
+EXPECT_SELECT_CHECKS = 160
 # SOCKET 段多 37 条：等协议栈、stream/dgram 两个 fd、坏 domain 与坏 type
 # 两个 errno、bind/listen/getsockname（addrlen 16、family、端口 8081）、
 # connect、accept（fd + 写回 family）、TCP 收发与载荷逐字节（前 4 字节打包
@@ -245,7 +251,8 @@ EXPECT_SELECT_CHECKS = 123
 # bind/sendto/recvfrom/载荷/对端端口一致、shutdown 后对端 EOF、关闭后
 # read/write 回 -EBADF。合计 122 + 38 + 1 = 161 条（最后一条是「一次 socket
 # 往返不按一个 100 ms 等待时间片结算」的性能回归门）。
-EXPECT_SOCKET_CHECKS = 161
+# 再加 futex 第四档的 37 条：161 + 37 = 198 条。
+EXPECT_SOCKET_CHECKS = 198
 # THREAD 段多 25 条：clone(CLONE_THREAD)>0、PARENT_SETTID 写回、CLEARTID 上的
 # futex WAIT 回 0、CLEARTID 被清 0、线程真跑了、CHILD_SETTID 看到自己的 tid、
 # tid != 父 tid、线程 getpid == tgid、父 getpid 未变、SETTLS 落到 $tp、两栈
@@ -254,13 +261,15 @@ EXPECT_SOCKET_CHECKS = 161
 # 未对齐 / CLONE_VFORK 各 -EINVAL）、线程退出之后还能 fork（父进程 fd 表没被
 # 提前拆）与被 reap 的退出码 5、线程发起 exit_group 整组被 reap 且码 6、
 # 组长发起 exit_group 整组被 reap 且码 7。合计 161 + 25 = 186 条。
-EXPECT_THREAD_CHECKS = 186
+# 再加 futex 第四档的 37 条：186 + 37 = 223 条。
+EXPECT_THREAD_CHECKS = 223
 # QUOTA 段多 11 条（上限 3 = 父 + 1 子 + 1 线程）：建管子、上限内 fork 成功、
 # 线程把最后一格占掉、超限 fork==-EAGAIN、超限线程==-EAGAIN、被阻塞的子进程
 # 真被 reap、回收后第二个线程成功、**空间空闲时 fork 仍被拒**（全段最干净的
 # 一条：不可能是 ERR_BUSY）、第三个线程被拒、两个线程按 CHILD_CLEARTID 归队、
 # 额度回来后立刻能再起且退出码照传。合计 186 + 12 = 198 条。
-EXPECT_QUOTA_CHECKS = 198
+# 再加 futex 第四档的 37 条：198 + 37 = 235 条。
+EXPECT_QUOTA_CHECKS = 235
 # 上面这一档的每一段都对应一类「看起来对」的实现：另开地址空间（共享全局读
 # 不到）、每线程一份 fd 表（fork 段留不住）、线程退出就把进程拆了（进程活不
 # 下来）、把线程当进程挂到 wait4 上（exit_group 码不对）。
@@ -963,10 +972,73 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
             "没有等待者时 WAKE 居然回非 0"
         req["futex(WAIT) on a different value == -EAGAIN -> -11 ok"] = \
             "值不等时 WAIT 没有立即回 -EAGAIN（说明它去睡了）"
-        # 6 = FUTEX_LOCK_PI：PI 类 op 仍未实现，必须如实回 -ENOSYS。
-        # （这一条原来拿 op 9 测，9 现在是 WAIT_BITSET，已实现，不能再当反例。）
-        req["futex PI op (LOCK_PI) == -ENOSYS -> -38 ok"] = \
-            "PI 类 futex op 被接受了（它必须如实回 -ENOSYS）"
+        # 第四档：PI 三档（6/7/8）与 robust list（99/100）。旧判据是
+        # 「LOCK_PI 必须回 -ENOSYS」，PI 落地之后那条必须删掉，否则门禁
+        # 会把「已经实现」判成红。这里逐条钉死新读数：字布局（低 30 位
+        # tid / bit31 WAITERS / bit30 OWNER_DIED）、-EDEADLK / -EPERM /
+        # -EAGAIN 三档、接手死者时保留 OWNER_DIED、robust 参数面、
+        # 跨进程「持锁死亡 -> 交接」、非 PI robust 直接写字。带 pid/tid
+        # 或地址的那 7 条走下面的正则形态（档位不同数值就不同）。
+        req["futex4 mmap shared page > 0 -> 1 ok"] = \
+            "第四档的共享页没建起来"
+        req["futex LOCK_PI on a free word == 0 -> 0 ok"] = \
+            "空闲字上的 LOCK_PI 失败"
+        req["futex LOCK_PI twice == -EDEADLK -> -35 ok"] = \
+            "同一任务重复 LOCK_PI 没回 -EDEADLK（会自己等自己）"
+        req["futex TRYLOCK_PI while held == -EDEADLK -> -35 ok"] = \
+            "自己持有时 TRYLOCK_PI 没回 -EDEADLK"
+        req["futex UNLOCK_PI as owner == 0 -> 0 ok"] = \
+            "持有者 UNLOCK_PI 失败"
+        req["futex UNLOCK_PI cleared the word -> 0 ok"] = \
+            "UNLOCK_PI 没把字清干净（残留 tid 或 WAITERS）"
+        req["futex UNLOCK_PI when not the owner == -EPERM -> -1 ok"] = \
+            "非持有者 UNLOCK_PI 被接受了（Linux 回 -EPERM）"
+        req["futex TRYLOCK_PI on an owned word == -EAGAIN -> -11 ok"] = \
+            "被别人持有时 TRYLOCK_PI 没回 -EAGAIN"
+        req["futex TRYLOCK_PI set the WAITERS bit while failing -> 2147483648 ok"] = \
+            "TRYLOCK_PI 失败没置 WAITERS 位（持有者永远不知道有人排队）"
+        req["futex TRYLOCK_PI left the owner tid alone -> 4242 ok"] = \
+            "TRYLOCK_PI 失败时动了持有者 tid"
+        req["futex LOCK_PI on a dead owner == 0 -> 0 ok"] = \
+            "OWNER_DIED 字上的 LOCK_PI 失败（死者不能被接手）"
+        req["futex LOCK_PI kept OWNER_DIED for the taker -> 1073741824 ok"] = \
+            "接手者看不到 OWNER_DIED（用户态没机会做一致性修复）"
+        req["futex UNLOCK_PI after consistent == 0 -> 0 ok"] = \
+            "用户态清掉 OWNER_DIED 之后 UNLOCK_PI 失败"
+        req["set_robust_list with a short length == -EINVAL -> -22 ok"] = \
+            "长度不足的 robust head 被接受了"
+        req["set_robust_list with an unaligned head == -EINVAL -> -22 ok"] = \
+            "未对齐的 robust head 被接受了"
+        req["set_robust_list with a null head == -EINVAL -> -22 ok"] = \
+            "空 robust head 被接受了"
+        req["set_robust_list on a well formed head == 0 -> 0 ok"] = \
+            "合法 robust head 登记失败"
+        req["get_robust_list(self) == 0 -> 0 ok"] = \
+            "读自己的 robust head 失败"
+        req["get_robust_list reports the length we registered -> 24 ok"] = \
+            "读回的 robust 长度不是登记的那个"
+        req["get_robust_list on a foreign pid == -ESRCH -> -3 ok"] = \
+            "读别人的 robust head 被允许了（Linux 回 -ESRCH）"
+        req["clone for PI robust child > 0 -> 1 ok"] = \
+            "PI robust 子进程没 fork 出来"
+        req["PI robust: parent observed the child holding the lock -> 1 ok"] = \
+            "父进程没看到子进程持锁（握手的字没被写）"
+        req["PI robust: parent acquired after the holder died -> 0 ok"] = \
+            "持有者带锁死亡后父进程没拿到锁（robust 清理没跑，或退化成叫醒再抢）"
+        req["PI robust: word carries OWNER_DIED for the taker -> 1073741824 ok"] = \
+            "交接后字里没有 OWNER_DIED"
+        req["PI robust child saw register+lock+tid+waiter (bits=15) -> 15 ok"] = \
+            "PI robust 子进程四件事没全置位（登记/拿锁/字里是自己/看到父排队）"
+        req["clone for non-PI robust child > 0 -> 1 ok"] = \
+            "非 PI robust 子进程没 fork 出来"
+        req["non-PI robust: parent observed the child owning the word -> 1 ok"] = \
+            "父进程没看到子进程直接写字持有"
+        req["non-PI robust: parent took over the dead owner's word -> 0 ok"] = \
+            "非 PI robust 的死者字没被清理（父进程拿不到）"
+        req["non-PI robust: word carries OWNER_DIED after the death -> 1073741824 ok"] = \
+            "非 PI robust 清理没留下 OWNER_DIED"
+        req["non-PI robust child registered and owned (bits=3) -> 3 ok"] = \
+            "非 PI robust 子进程的登记与持有没全成立"
         req["clone for futex child > 0 -> 1 ok"] = "futex 唤醒者没 fork 出来"
         # 最要紧的一条：LA64 上阻塞返回时 a0 被写成 0，而 a0 就是 uaddr。
         req["futex(WAIT) returned 0 after being woken -> 0 ok"] = \
@@ -1146,6 +1218,21 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
              "位集用例的子进程没被 reap"),
             (r"^\[fork\] futex2 requeue child reaped -> \d+ ok$",
              "改挂用例的子进程没被 reap"),
+            # 第四档里带 pid/tid 或地址的读数：数值随档位变，只判形态。
+            (r"^\[fork\] futex LOCK_PI wrote our tid into the word -> \d+ ok$",
+             "LOCK_PI 没把本任务 tid 写进字里"),
+            (r"^\[fork\] futex LOCK_PI took over from the dead owner -> \d+ ok$",
+             "接手死者的字里不是本任务 tid"),
+            (r"^\[fork\] get_robust_list reports the head we registered -> \d+ ok$",
+             "读回的 robust head 与登记的不是同一个地址"),
+            (r"^\[fork\] PI robust: word holds the parent tid -> \d+ ok$",
+             "PI 交接后字里不是父进程 tid"),
+            (r"^\[fork\] PI robust child reaped -> \d+ ok$",
+             "PI robust 子进程没被 reap"),
+            (r"^\[fork\] non-PI robust: word now holds the parent tid -> \d+ ok$",
+             "非 PI 接手后字里不是父进程 tid"),
+            (r"^\[fork\] non-PI robust child reaped -> \d+ ok$",
+             "非 PI robust 子进程没被 reap"),
         ):
             if re.search(pat, text.replace("\r\n", "\n"), re.M) is None:
                 problems.append("缺 `%s` 形态的读数 —— %s"
@@ -1402,6 +1489,17 @@ def self_check(good_text, cow=False, shm=False, futex=False, filemap=False,
             "futex 超时没到期": lambda s: s.replace(
                 "[fork] futex(WAIT) with 50 ms timeout == -ETIMEDOUT -> -110 ok",
                 "[fork] futex(WAIT) with 50 ms timeout == -ETIMEDOUT -> 0 FAIL (want -110)"),
+            # 第四档（PI 三档与 robust list）也要有反假绿：交接没发生、
+            # OWNER_DIED 被内核吞掉、robust 参数不校验，三种都必须判红。
+            "PI 交接没发生": lambda s: s.replace(
+                "[fork] PI robust: parent acquired after the holder died -> 0 ok",
+                "[fork] PI robust: parent acquired after the holder died -> -11 FAIL (want 0)"),
+            "交接后 OWNER_DIED 被吞": lambda s: s.replace(
+                "[fork] PI robust: word carries OWNER_DIED for the taker -> 1073741824 ok",
+                "[fork] PI robust: word carries OWNER_DIED for the taker -> 0 FAIL (want 1073741824)"),
+            "robust 参数不校验": lambda s: s.replace(
+                "[fork] set_robust_list with a short length == -EINVAL -> -22 ok",
+                "[fork] set_robust_list with a short length == -EINVAL -> 0 ok"),
         })
     if mprotect:
         mutations.update({

@@ -76,6 +76,8 @@
 #define LX_SYS_EXIT                 (93u)
 #define LX_SYS_EXIT_GROUP           (94u)
 #define LX_SYS_SET_TID_ADDRESS      (96u)
+#define LX_SYS_SET_ROBUST_LIST      (99u)   /* asm-generic：robust futex 链头 */
+#define LX_SYS_GET_ROBUST_LIST      (100u)
 #define LX_SYS_CLOCK_GETTIME        (113u)
 #define LX_SYS_UNAME                (160u)
 #define LX_SYS_GETPID               (172u)
@@ -148,6 +150,7 @@
 #define LX_ENAMETOOLONG             (36)
 #define LX_ENOSYS                   (38)
 #define LX_ETIMEDOUT                (110)
+#define LX_EDEADLK                  (35)
 /* socket 族专有的几个 errno（asm-generic 编号）。 */
 #define LX_EMFILE                   (24)
 #define LX_ENOTSOCK                 (88)
@@ -222,6 +225,20 @@
 #define LX_FUTEX_CLOCK_REALTIME     (256u)
 /* 「不按位筛选」：普通 WAIT 登记的就是这档，普通 WAKE 也等于全选。 */
 #define LX_FUTEX_BITSET_ALL         (0xFFFFFFFFu)
+/* PI 类 op（6/7/8）。字布局与 Linux 逐位相同：低 30 位是持有者 tid，
+ * bit31 = 队列里有人等，bit30 = 原持有者已死（用户态据此报 EOWNERDEAD）。 */
+#define LX_FUTEX_LOCK_PI            (6u)
+#define LX_FUTEX_UNLOCK_PI          (7u)
+#define LX_FUTEX_TRYLOCK_PI         (8u)
+#define LX_FUTEX_TID_MASK           (0x3FFFFFFFu)
+#define LX_FUTEX_WAITERS            (0x80000000u)
+#define LX_FUTEX_OWNER_DIED         (0x40000000u)
+/* robust list 的条数上限：与 Linux 的 ROBUST_LIST_LIMIT 同口径。链表被用户
+ * 写坏（自环）时退出路径照样要能走完，不能在里面转不出来。 */
+#define LX_ROBUST_LIST_LIMIT        (2048)
+/* struct robust_list_head 是三个机器字（list / futex_offset /
+ * list_op_pending）。长度按 sizeof(void *) 算，32 位与 64 位端口各自正确。 */
+#define LX_ROBUST_HEAD_MIN          ((uint32)(sizeof(void *) * 3u))
 #endif
 
 #if (ARKRTOS_USE_LINUX_SELECT == 1)
@@ -478,6 +495,15 @@ static uint32  s_futex_val[ARKRTOS_TASK_MAX_NUM];
 static uint32  s_futex_bitset[ARKRTOS_TASK_MAX_NUM];
 static uint32  s_futex_deadline[ARKRTOS_TASK_MAX_NUM];
 static uint8   s_futex_timed[ARKRTOS_TASK_MAX_NUM];
+/* PI 等待（LOCK_PI 拿不到时登记的那一槽）。pi_owner 是「登记时字里的持有者
+ * tid」：抬优先级与交接都要按持有者算，而重算时不能去读别人的地址空间
+ * （跨进程的等待者根本不在同一张页表里，读到的字不可信），所以抄下来。 */
+static uint8   s_futex_pi[ARKRTOS_TASK_MAX_NUM];
+static int32   s_futex_pi_owner[ARKRTOS_TASK_MAX_NUM];
+/* robust list：每个任务自己那一份（链头 + 调用方报的长度）。任务号会被
+ * 复用，退出时必须清掉，否则新任务会拿别人的链去改别人的字。 */
+static unsigned long s_robust_head[ARKRTOS_TASK_MAX_NUM];
+static uint32  s_robust_len[ARKRTOS_TASK_MAX_NUM];
 #endif
 
 #if (ARKRTOS_USE_LINUX_SELECT == 1)
@@ -4520,12 +4546,58 @@ static int32 lx_wait4(void *p_ctx)
 #if (ARKRTOS_USE_LINUX_FUTEX == 1)
 /* ------------------------------- futex（WAIT/WAKE/REQUEUE/BITSET 六档） */
 
+/* 按「基准优先级 + 本任务身上还挂着的 PI 等待者」重算有效优先级。
+ * base_priority 是唯一真源（与内核互斥锁 arkrtos_mtx_recalc_task_priority
+ * 同一口径）：拿被抬过以后的值当原始值，一次嵌套继承就会把优先级永久抬着，
+ * 那是泄漏不是继承。
+ *
+ * 只扫本表、不读用户内存：跨进程的 PI 等待者不在同一张页表里，字读出来
+ * 没有意义；登记时抄下的 pi_owner 才是可靠依据。 */
+static void lx_pi_recalc_owner(int32 owner_tid)
+{
+    arkrtos_task_t *p_owner;
+    uint8 pri;
+    int32 i;
+
+    if((owner_tid <= 0) || ((uint32)owner_tid > (uint32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return;
+    }
+    p_owner = &arkrtos_task_table[(uint32)owner_tid - 1u];
+    pri = p_owner->base_priority;
+    for(i = 1; i <= (int32)ARKRTOS_TASK_MAX_NUM; i++)
+    {
+        uint8 wpri;
+
+        if((s_futex_used[i - 1] == 0u) || (s_futex_pi[i - 1] == 0u) ||
+           (s_futex_pi_owner[i - 1] != owner_tid))
+        {
+            continue;
+        }
+        wpri = arkrtos_task_table[(uint32)i - 1u].base_priority;
+        if(wpri < pri)
+        {
+            pri = wpri;
+        }
+    }
+    if(p_owner->priority != pri)
+    {
+        uint8 old_pri = p_owner->priority;
+
+        p_owner->priority = pri;
+        arkrtos_ready_reprio((int32)((uint32)owner_tid - 1u), old_pri);
+    }
+}
+
 /* 本次退出的任务如果还挂着 futex 等待，把它那一槽清掉。否则任务号被复用后
- * 新任务会继承一条「已经在等」的旧记录。 */
+ * 新任务会继承一条「已经在等」的旧记录。PI 等待者走的时候还要把原持有者的
+ * 优先级算回去：被杀 / 超时以后继承不该继续挂着。 */
 static void lx_futex_forget(int32 task_id)
 {
     if((task_id > 0) && (task_id <= (int32)ARKRTOS_TASK_MAX_NUM))
     {
+        int32 owner = s_futex_pi_owner[task_id - 1];
+
         s_futex_used[task_id - 1]     = 0u;
         s_futex_woke[task_id - 1]     = 0u;
         s_futex_key[task_id - 1]      = ~0UL;
@@ -4534,6 +4606,12 @@ static void lx_futex_forget(int32 task_id)
         s_futex_bitset[task_id - 1]   = 0u;
         s_futex_deadline[task_id - 1] = 0u;
         s_futex_timed[task_id - 1]    = 0u;
+        s_futex_pi[task_id - 1]       = 0u;
+        s_futex_pi_owner[task_id - 1] = 0;
+        if(owner != 0)
+        {
+            lx_pi_recalc_owner(owner);
+        }
     }
 }
 
@@ -4709,7 +4787,8 @@ static int32 lx_futex_wake_key(unsigned long key, int32 want, uint32 mask)
     crit = ARKRTOS_ENTER_CRITICAL();
     for(i = 1; (i <= (int32)ARKRTOS_TASK_MAX_NUM) && (woke < want); i++)
     {
-        if((s_futex_used[i - 1] != 0u) && (s_futex_key[i - 1] == key) &&
+        if((s_futex_used[i - 1] != 0u) && (s_futex_pi[i - 1] == 0u) &&
+           (s_futex_key[i - 1] == key) &&
            ((s_futex_bitset[i - 1] & mask) != 0u))
         {
             s_futex_woke[i - 1] = 1u;
@@ -4719,6 +4798,330 @@ static int32 lx_futex_wake_key(unsigned long key, int32 want, uint32 mask)
     }
     ARKRTOS_EXIT_CRITICAL(crit);
     return woke;
+}
+
+/* ------------------------------- PI 类 op（LOCK_PI / UNLOCK_PI / TRYLOCK_PI） */
+
+/* 读 / 写 futex 字（4 字节）。PI 的持有者与等待者一定在同一张页表里（键就是
+ * 同一个物理字），所以调用方给的地址就是那个字的地址；键只用来确认「是同一
+ * 个字」，不用它反查地址。 */
+static int32 lx_futex_get_word(unsigned long uaddr, uint32 *p_word)
+{
+    if(arkrtos_copy_from_user(p_word, (const void *)uaddr, 4u) != 0)
+    {
+        return -LX_EFAULT;
+    }
+    return 0;
+}
+
+static int32 lx_futex_put_word(unsigned long uaddr, uint32 word)
+{
+    if(arkrtos_copy_to_user((void *)uaddr, &word, 4u) != 0)
+    {
+        return -LX_EFAULT;
+    }
+    return 0;
+}
+
+/* 同一键上基准优先级最高的 PI 等待者（数值越小优先级越高，同级按任务号）。
+ * 交接按这个顺序，否则「优先级继承」只是名义上的：低优先级的等待者先拿走
+ * 锁，高优先级那个还得再排一轮。 */
+static int32 lx_pi_top_waiter(unsigned long key)
+{
+    int32 best = -1;
+    int32 i;
+
+    for(i = 1; i <= (int32)ARKRTOS_TASK_MAX_NUM; i++)
+    {
+        if((s_futex_used[i - 1] == 0u) || (s_futex_pi[i - 1] == 0u) ||
+           (s_futex_key[i - 1] != key))
+        {
+            continue;
+        }
+        if(best < 0)
+        {
+            best = i;
+            continue;
+        }
+        if(arkrtos_task_table[(uint32)i - 1u].base_priority <
+           arkrtos_task_table[(uint32)best - 1u].base_priority)
+        {
+            best = i;
+        }
+    }
+    return best;
+}
+
+static uint32 lx_pi_waiter_count(unsigned long key)
+{
+    uint32 n = 0u;
+    int32  i;
+
+    for(i = 1; i <= (int32)ARKRTOS_TASK_MAX_NUM; i++)
+    {
+        if((s_futex_used[i - 1] != 0u) && (s_futex_pi[i - 1] != 0u) &&
+           (s_futex_key[i - 1] == key))
+        {
+            n++;
+        }
+    }
+    return n;
+}
+
+/* UNLOCK_PI：不是持有者 ⇒ -EPERM；有人等 ⇒ 把所有权**直接交接**给基准优先级
+ * 最高的那个（写字 + 唤醒），没人等 ⇒ 清 0。交接而不是「叫醒后大家再抢」，
+ * 是因为本内核不能让所有等待者同时跑起来抢同一个字（那正是优先级反转）。 */
+static int32 lx_futex_pi_unlock(unsigned long key, unsigned long uaddr,
+                                uint32 word, int32 me)
+{
+    uint32 crit;
+    int32  top;
+    uint32 nxt;
+    int32  i;
+
+    if((word & (uint32)LX_FUTEX_TID_MASK) != (uint32)me)
+    {
+        return -LX_EPERM;
+    }
+    crit = ARKRTOS_ENTER_CRITICAL();
+    top  = ((word & (uint32)LX_FUTEX_WAITERS) != 0u) ?
+           lx_pi_top_waiter(key) : -1;
+    if(top > 0)
+    {
+        /* 交接后队列里还有人就留着 WAITERS 位，让新持有者的 UNLOCK_PI 知道
+         * 还要再交一次；OWNER_DIED 原样带过去（上一个持有者死掉留下的记号，
+         * 后来者必须看得见）。剩下那些等待者的「持有者」也一并改成新持有者，
+         * 否则优先级会一直挂在旧持有者头上。 */
+        nxt = (uint32)top | (word & (uint32)LX_FUTEX_OWNER_DIED);
+        if(lx_pi_waiter_count(key) > 1u)
+        {
+            nxt |= (uint32)LX_FUTEX_WAITERS;
+        }
+        for(i = 1; i <= (int32)ARKRTOS_TASK_MAX_NUM; i++)
+        {
+            if((i == top) || (s_futex_used[i - 1] == 0u) ||
+               (s_futex_pi[i - 1] == 0u) || (s_futex_key[i - 1] != key))
+            {
+                continue;
+            }
+            s_futex_pi_owner[i - 1] = top;
+        }
+        s_futex_pi_owner[top - 1] = top;
+        s_futex_woke[top - 1]     = 1u;
+    }
+    else
+    {
+        nxt = 0u;
+    }
+    ARKRTOS_EXIT_CRITICAL(crit);
+
+    if(lx_futex_put_word(uaddr, nxt) != 0)
+    {
+        return -LX_EFAULT;
+    }
+    if(top > 0)
+    {
+        (void)arkrtos_task_wakeup_internal(top);
+    }
+    lx_pi_recalc_owner(me);
+    if(top > 0)
+    {
+        lx_pi_recalc_owner(top);
+    }
+    return 0;
+}
+
+/* PI 类 op 的总入口。与 Linux 的 rtmutex 一致的部分：
+ *   - 字布局：低 30 位持有者 tid、bit31 有等待者、bit30 原持有者已死；
+ *   - 自己已经持有再加锁 ⇒ -EDEADLK（真死锁，不假装成功）；
+ *   - 拿不到时置 bit31 再登记等待：持有者的 UNLOCK_PI 靠它知道要交接；
+ *   - 优先级继承：持有者的有效优先级抬到等待者里最高的那个，交接 / 超时 /
+ *     被杀之后按 base_priority 算回去（与内核互斥锁同一口径）；
+ *   - 原持有者已死时接手者拿到的字里保留 bit30，用户态据此报 EOWNERDEAD。
+ * 与 Linux 不同的边界（文档 §8.4 逐条写死）：
+ *   - LOCK_PI 的 timeout 按**相对**时长解释（与 WAIT 同口径），不是 Linux 的
+ *     绝对时刻；到期回 -ETIMEDOUT 并摘掉登记、把持有者优先级算回去；
+ *   - 没有 WAIT_REQUEUE_PI(11) / CMP_REQUEUE_PI(12)：glibc 只在 PI 条件变量
+ *     上用，默认构建不生成，如实 -ENOSYS。
+ */
+static int32 lx_futex_pi(void *p_ctx, uint32 op, unsigned long uaddr,
+                         uint32 val, int32 me)
+{
+    unsigned long key = 0ul;
+    uint32 word = 0u;
+    uint32 tid;
+    uint8  replay;
+    uint8  woke  = 0u;
+    uint8  timed = 0u;
+    uint32 dl    = 0u;
+    int32  owner0 = 0;
+    uint32 crit;
+    int32  rc;
+
+    (void)val;      /* LOCK_PI / TRYLOCK_PI 不看期望值（Linux 也不看） */
+
+    /* 重放识别与 WAIT 同一套判据：自己那一槽还在用，就是上一次的续；此时
+     * a0 已被返回值清成 0，只有登记下来的地址与键可信。 */
+    crit = ARKRTOS_ENTER_CRITICAL();
+    replay = ((s_futex_used[me - 1] != 0u) && (s_futex_pi[me - 1] != 0u)) ? 1u : 0u;
+    if(replay != 0u)
+    {
+        key    = s_futex_key[me - 1];
+        uaddr  = s_futex_uaddr[me - 1];
+        woke   = s_futex_woke[me - 1];
+        timed  = s_futex_timed[me - 1];
+        dl     = s_futex_deadline[me - 1];
+        owner0 = s_futex_pi_owner[me - 1];
+    }
+    ARKRTOS_EXIT_CRITICAL(crit);
+
+    if(replay == 0u)
+    {
+        key = lx_futex_key(uaddr);
+        if(key == ~0UL)
+        {
+            return -LX_ENOSYS;
+        }
+        rc = lx_futex_get_word(uaddr, &word);
+        if(rc != 0)
+        {
+            return rc;
+        }
+        tid = word & (uint32)LX_FUTEX_TID_MASK;
+
+        if(op == (uint32)LX_FUTEX_UNLOCK_PI)
+        {
+            return lx_futex_pi_unlock(key, uaddr, word, me);
+        }
+        if(tid == (uint32)me)
+        {
+            /* 自己已经持有（TRYLOCK 在 Linux 里也回 -EDEADLK，不是 -EAGAIN）。 */
+            return -LX_EDEADLK;
+        }
+        if((tid == 0u) || ((word & (uint32)LX_FUTEX_OWNER_DIED) != 0u))
+        {
+            /* 空锁、或者持有者已死（bit30 只会在持有者死掉时被置上，活着的
+             * 持有者不可能带着它）：直接接手，OWNER_DIED 原样保留 —— 用户态
+             * 据此报 EOWNERDEAD，再调 pthread_mutex_consistent 把它清掉。 */
+            return lx_futex_put_word(uaddr,
+                                     (word & (uint32)LX_FUTEX_OWNER_DIED) |
+                                     (uint32)me);
+        }
+        if(op == (uint32)LX_FUTEX_TRYLOCK_PI)
+        {
+            /* 拿不到。Linux 也顺手把 WAITERS 置上：确实有人试过。 */
+            if((word & (uint32)LX_FUTEX_WAITERS) == 0u)
+            {
+                (void)lx_futex_put_word(uaddr, word | (uint32)LX_FUTEX_WAITERS);
+            }
+            return -LX_EAGAIN;
+        }
+
+        /* LOCK_PI：置 WAITERS → 登记 → 抬持有者优先级 → 睡 */
+        if((word & (uint32)LX_FUTEX_WAITERS) == 0u)
+        {
+            rc = lx_futex_put_word(uaddr, word | (uint32)LX_FUTEX_WAITERS);
+            if(rc != 0)
+            {
+                return rc;
+            }
+        }
+        rc = lx_futex_timeout(p_ctx, 0u, &dl);
+        if(rc < 0)
+        {
+            return rc;
+        }
+        timed = (rc > 0) ? 1u : 0u;
+        if((timed != 0u) && ((int32)(arkrtos_kernel_get_time() - dl) >= 0))
+        {
+            return -LX_ETIMEDOUT;       /* 已经到期：不白睡一个时间片 */
+        }
+        if(lx_futex_sig_pending() != 0u)
+        {
+            return -LX_EINTR;
+        }
+        if(arkrtos_port_svc_restart(p_ctx) != 0)
+        {
+            return -LX_ENOSYS;
+        }
+        crit = ARKRTOS_ENTER_CRITICAL();
+        s_futex_key[me - 1]      = key;
+        s_futex_used[me - 1]     = 1u;
+        s_futex_woke[me - 1]     = 0u;
+        s_futex_uaddr[me - 1]    = uaddr;
+        s_futex_val[me - 1]      = word;
+        s_futex_bitset[me - 1]   = (uint32)LX_FUTEX_BITSET_ALL;
+        s_futex_deadline[me - 1] = dl;
+        s_futex_timed[me - 1]    = timed;
+        s_futex_pi[me - 1]       = 1u;
+        s_futex_pi_owner[me - 1] = (int32)tid;
+        ARKRTOS_EXIT_CRITICAL(crit);
+        lx_pi_recalc_owner((int32)tid);
+        (void)arkrtos_task_block_in_critical((uint32)LX_WAIT_SLICE_MS);
+        return 0;
+    }
+
+    /* ---- 重放 ---- */
+    if(woke != 0u)
+    {
+        /* 交接：持有者在 UNLOCK_PI（或 robust 清理）里已经把字写成我的 tid，
+         * 这里只是确认所有权。不再读字 —— 用户可能已经改成 0 或改了别的位。 */
+        lx_futex_forget(me);
+        return 0;
+    }
+    if((timed != 0u) && ((int32)(arkrtos_kernel_get_time() - dl) >= 0))
+    {
+        lx_futex_forget(me);
+        return -LX_ETIMEDOUT;
+    }
+    rc = lx_futex_get_word(uaddr, &word);
+    if(rc != 0)
+    {
+        lx_futex_forget(me);
+        return rc;
+    }
+    tid = word & (uint32)LX_FUTEX_TID_MASK;
+    if((tid == 0u) || (tid == (uint32)me) ||
+       (((word & (uint32)LX_FUTEX_OWNER_DIED) != 0u) &&
+        (tid == (uint32)owner0)))
+    {
+        /* 拿得到（或原持有者已死，接手）：写 tid，OWNER_DIED 保留。 */
+        if(tid != (uint32)me)
+        {
+            rc = lx_futex_put_word(uaddr,
+                                   (word & (uint32)LX_FUTEX_OWNER_DIED) |
+                                   (uint32)me);
+            if(rc != 0)
+            {
+                lx_futex_forget(me);
+                return rc;
+            }
+        }
+        lx_futex_forget(me);
+        return 0;
+    }
+    if(lx_futex_sig_pending() != 0u)
+    {
+        lx_futex_forget(me);
+        return -LX_EINTR;
+    }
+    if(arkrtos_port_svc_restart(p_ctx) != 0)
+    {
+        lx_futex_forget(me);
+        return -LX_ENOSYS;
+    }
+    /* 继续睡。持有者可能换了人（交接后的重排 / 上一个持有者死掉），把登记里
+     * 的持有者改成当前字里的那一个，两边的优先级都要重算。 */
+    if((int32)tid != owner0)
+    {
+        crit = ARKRTOS_ENTER_CRITICAL();
+        s_futex_pi_owner[me - 1] = (int32)tid;
+        ARKRTOS_EXIT_CRITICAL(crit);
+        lx_pi_recalc_owner(owner0);
+        lx_pi_recalc_owner((int32)tid);
+    }
+    (void)arkrtos_task_block_in_critical((uint32)LX_WAIT_SLICE_MS);
+    return 0;
 }
 
 static int32 lx_futex(void *p_ctx)
@@ -4750,6 +5153,13 @@ static int32 lx_futex(void *p_ctx)
         {
             return -LX_ENOSYS;
         }
+    }
+
+    /* PI 类 op 走自己的路径：它们先看字里的持有者，而不是先算键。 */
+    if((op == (uint32)LX_FUTEX_LOCK_PI) || (op == (uint32)LX_FUTEX_TRYLOCK_PI) ||
+       (op == (uint32)LX_FUTEX_UNLOCK_PI))
+    {
+        return lx_futex_pi(p_ctx, op, uaddr, val, me);
     }
 
     key = lx_futex_key(uaddr);
@@ -4841,7 +5251,8 @@ static int32 lx_futex(void *p_ctx)
         for(i = 1; (i <= (int32)ARKRTOS_TASK_MAX_NUM) &&
                    ((woke < want) || (req < nreq)); i++)
         {
-            if((s_futex_used[i - 1] != 0u) && (s_futex_key[i - 1] == key))
+            if((s_futex_used[i - 1] != 0u) && (s_futex_pi[i - 1] == 0u) &&
+               (s_futex_key[i - 1] == key))
             {
                 if(woke < want)
                 {
@@ -4993,6 +5404,215 @@ static int32 lx_futex(void *p_ctx)
         (void)arkrtos_task_block_in_critical((uint32)LX_WAIT_SLICE_MS);
         return 0;
     }
+}
+
+/* --------------------------- robust list（99 / 100 + 退出清理） */
+
+/* 把一条 robust 链上的字标成「持有者已死」，有人等时唤醒一个：
+ *   - 非 PI：tid 清掉、置 bit30（与 Linux 同口径），bit31 原样留着；
+ *   - PI：tid **保留**（等待者要靠它认出「上一位持有者死了」），只置 bit30，
+ *     再唤醒队首；交接动作由被唤醒者的重放路径完成 —— 它在那里能看到
+ *     tid == 自己的 pi_owner 且 bit30 置位，于是接手。
+ * 字里的 tid 已经不是它、或地址读不出来就跳过：退出路径没有返回值可交，
+ * 硬改别人的字比漏一条更糟。 */
+static int32 lx_robust_mark(unsigned long uaddr, int32 task_id, uint8 pi)
+{
+    uint32        word = 0u;
+    unsigned long key;
+    int32         rc;
+
+    rc = lx_futex_get_word(uaddr, &word);
+    if(rc != 0)
+    {
+        return rc;
+    }
+    if((word & (uint32)LX_FUTEX_TID_MASK) != (uint32)task_id)
+    {
+        return 0;       /* 用户态自己解过锁了，不动 */
+    }
+    key = lx_futex_key_task(task_id, uaddr);
+    if(key == ~0UL)
+    {
+        return -LX_ENOSYS;
+    }
+    if(pi != 0u)
+    {
+        uint32 crit;
+        int32  top;
+        int32  i;
+        uint32 nxt;
+
+        /* 交接与 UNLOCK_PI 同一套：字里直接写成新持有者的 tid，被唤醒者的
+         * 重放路径拿到的就是「已经交接」的确认。这里的交接比 UNLOCK_PI 更
+         * 要紧 —— 死掉的持有者不会再有机会替我们写字。 */
+        crit = ARKRTOS_ENTER_CRITICAL();
+        top  = lx_pi_top_waiter(key);
+        if(top > 0)
+        {
+            for(i = 1; i <= (int32)ARKRTOS_TASK_MAX_NUM; i++)
+            {
+                if((i == top) || (s_futex_used[i - 1] == 0u) ||
+                   (s_futex_pi[i - 1] == 0u) || (s_futex_key[i - 1] != key))
+                {
+                    continue;
+                }
+                s_futex_pi_owner[i - 1] = top;
+            }
+            s_futex_pi_owner[top - 1] = top;
+            s_futex_woke[top - 1]     = 1u;
+        }
+        ARKRTOS_EXIT_CRITICAL(crit);
+
+        nxt = ((top > 0) ? (uint32)top : (word & (uint32)LX_FUTEX_TID_MASK)) |
+              (uint32)LX_FUTEX_OWNER_DIED;
+        rc = lx_futex_put_word(uaddr, nxt);
+        if(rc != 0)
+        {
+            return rc;
+        }
+        if(top > 0)
+        {
+            (void)arkrtos_task_wakeup_internal(top);
+            lx_pi_recalc_owner((int32)(word & (uint32)LX_FUTEX_TID_MASK));
+        }
+        return 0;
+    }
+    rc = lx_futex_put_word(uaddr, (word & (uint32)LX_FUTEX_WAITERS) |
+                                  (uint32)LX_FUTEX_OWNER_DIED);
+    if(rc != 0)
+    {
+        return rc;
+    }
+    if((word & (uint32)LX_FUTEX_WAITERS) != 0u)
+    {
+        (void)lx_futex_wake_key(key, 1, (uint32)LX_FUTEX_BITSET_ALL);
+    }
+    return 0;
+}
+
+/* 任务退出：走一遍它登记过的 robust 链。
+ * 布局与 Linux 逐字相同：robust_list_head { next, futex_offset, pending }，
+ * 每个 next 指针的最低位是「这条是 PI futex」的记号（FUTEX_PI_LIST）。
+ * 只处理「字里的 tid 还是它」的条目。环按 LX_ROBUST_LIST_LIMIT 截断：
+ * 链表被用户写坏（自环）时，退出路径也得能走完 —— 死在退出钩子里就是整个
+ * 系统停摆，比漏清一条严重得多。 */
+static void lx_robust_exit(int32 task_id)
+{
+    unsigned long head;
+    uint32        len;
+    unsigned long hdr[3];
+    unsigned long entry;
+    unsigned long pending;
+    long          offset;
+    int32         n;
+    uint32        crit;
+
+    if((task_id <= 0) || (task_id > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return;
+    }
+    crit = ARKRTOS_ENTER_CRITICAL();
+    head = s_robust_head[task_id - 1];
+    len  = s_robust_len[task_id - 1];
+    s_robust_head[task_id - 1] = 0ul;
+    s_robust_len[task_id - 1]  = 0u;
+    ARKRTOS_EXIT_CRITICAL(crit);
+
+    if((head == 0ul) || (len < LX_ROBUST_HEAD_MIN))
+    {
+        return;         /* 没登记过：没有可清的东西 */
+    }
+    if(arkrtos_copy_from_user(hdr, (const void *)head, (uint32)sizeof(hdr)) != 0)
+    {
+        return;
+    }
+    entry   = hdr[0];
+    offset  = (long)hdr[1];
+    pending = hdr[2];
+
+    for(n = 0; (n < LX_ROBUST_LIST_LIMIT) && (entry != 0ul) && (entry != head); n++)
+    {
+        unsigned long next = 0ul;
+        unsigned long node = entry & ~1ul;
+        uint8         pi   = (uint8)(entry & 1ul);
+
+        if(arkrtos_copy_from_user(&next, (const void *)node,
+                                  (uint32)sizeof(next)) != 0)
+        {
+            break;
+        }
+        (void)lx_robust_mark(node + (unsigned long)offset, task_id, pi);
+        entry = next;
+    }
+    if(pending != 0ul)
+    {
+        /* list_op_pending：glibc 在「已经把自己从链上摘下、字还没写完」的
+         * 窗口里登记这一格。漏它就是一次真的漏清理（Linux 也处理它）。 */
+        (void)lx_robust_mark((pending & ~1ul) + (unsigned long)offset, task_id,
+                             (uint8)(pending & 1ul));
+    }
+}
+
+/* set_robust_list(99)：登记链头。长度装不下结构、指针没对齐、指针为空一律
+ * -EINVAL（Linux 同）—— 不猜调用方想干什么。 */
+static int32 lx_robust_set(unsigned long head, uint32 len)
+{
+    int32  me = (int32)arkrtos_current_task_id;
+    uint32 crit;
+
+    if((me <= 0) || (me > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return -LX_EFAULT;
+    }
+    if((head == 0ul) || (len < LX_ROBUST_HEAD_MIN) ||
+       ((head & (unsigned long)(sizeof(void *) - 1u)) != 0ul))
+    {
+        return -LX_EINVAL;
+    }
+    crit = ARKRTOS_ENTER_CRITICAL();
+    s_robust_head[me - 1] = head;
+    s_robust_len[me - 1]  = len;
+    ARKRTOS_EXIT_CRITICAL(crit);
+    return 0;
+}
+
+/* get_robust_list(100)：只认自己。本内核没有可查询的第二个进程身份，别的
+ * pid 如实 -ESRCH，不编造一份「大概是这样」的数据。 */
+static int32 lx_robust_get(void *p_ctx)
+{
+    int32         pid = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
+    unsigned long pp  = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    unsigned long pl  = ARKRTOS_SVC_ARG(p_ctx, 2u);
+    int32         me  = (int32)arkrtos_current_task_id;
+    unsigned long head;
+    uint32        len;
+    uint32        crit;
+
+    if((me <= 0) || (me > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return -LX_EFAULT;
+    }
+    if((pid != 0) && (pid != me))
+    {
+        return -LX_ESRCH;
+    }
+    if((pp == 0ul) || (pl == 0ul))
+    {
+        return -LX_EFAULT;
+    }
+    crit = ARKRTOS_ENTER_CRITICAL();
+    head = s_robust_head[me - 1];
+    len  = s_robust_len[me - 1];
+    ARKRTOS_EXIT_CRITICAL(crit);
+    if(arkrtos_copy_to_user((void *)pp, &head, (uint32)sizeof(head)) != 0)
+    {
+        return -LX_EFAULT;
+    }
+    if(arkrtos_copy_to_user((void *)pl, &len, 4u) != 0)
+    {
+        return -LX_EFAULT;
+    }
+    return 0;
 }
 #endif /* ARKRTOS_USE_LINUX_FUTEX == 1 */
 
@@ -5730,6 +6350,17 @@ static int32 lx_dispatch(void *p_svc_ctx, uint32 num, int32 *p_rc)
          * 是副作用）。开关关掉时同样如此。 */
         rc = (int32)arkrtos_current_task_id;
         break;
+#if (ARKRTOS_USE_LINUX_FUTEX == 1)
+    case LX_SYS_SET_ROBUST_LIST:
+        /* 退出时按这条链把还挂着的字标成「持有者已死」。没有 futex 档时这条
+         * 链没有语义（连 FUTEX_OWNER_DIED 都无法表达），如实 -ENOSYS。 */
+        rc = lx_robust_set(ARKRTOS_SVC_ARG(p_svc_ctx, 0u),
+                           (uint32)ARKRTOS_SVC_ARG(p_svc_ctx, 1u));
+        break;
+    case LX_SYS_GET_ROBUST_LIST:
+        rc = lx_robust_get(p_svc_ctx);
+        break;
+#endif
 #if (ARKRTOS_USE_LINUX_THREAD == 1)
     case LX_SYS_EXIT_GROUP:
         /* exit_group(94)：整组一起走。分派器在两个号之间分得清，因为号就是
@@ -5945,6 +6576,10 @@ void arkrtos_linux_abi_on_task_exit(int32 task_id)
     }
 #endif
 #if (ARKRTOS_USE_LINUX_FUTEX == 1)
+    /* 顺序不能换：robust 清理要按「它还持有这个字」改写用户内存，而
+     * lx_futex_forget 只清内核这边的登记，两者互不影响，但先清链更直观地
+     * 表达「先交代它欠下的锁，再撤掉它的等待槽」。 */
+    lx_robust_exit(task_id);
     lx_futex_forget(task_id);
 #endif
 #if (ARKRTOS_USE_LINUX_SELECT == 1)
@@ -6045,6 +6680,10 @@ void arkrtos_linux_abi_on_task_exit(int32 task_id)
 {
     (void)task_id;
 #if (ARKRTOS_USE_LINUX_FUTEX == 1)
+    /* 顺序不能换：robust 清理要按「它还持有这个字」改写用户内存，而
+     * lx_futex_forget 只清内核这边的登记，两者互不影响，但先清链更直观地
+     * 表达「先交代它欠下的锁，再撤掉它的等待槽」。 */
+    lx_robust_exit(task_id);
     lx_futex_forget(task_id);
 #endif
 #if (ARKRTOS_USE_LINUX_SELECT == 1)
@@ -6112,6 +6751,10 @@ void arkrtos_linux_abi_reset(void)
         s_futex_bitset[i]   = 0u;
         s_futex_deadline[i] = 0u;
         s_futex_timed[i]    = 0u;
+        s_futex_pi[i]       = 0u;
+        s_futex_pi_owner[i] = 0;
+        s_robust_head[i]    = 0ul;
+        s_robust_len[i]     = 0u;
     }
 #endif
 #if (ARKRTOS_USE_LINUX_SELECT == 1)

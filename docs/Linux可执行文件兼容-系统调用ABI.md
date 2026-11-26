@@ -52,7 +52,9 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 | 93 | `exit` | `arkrtos_thread_exit_code_internal()` | `exit code 7` |
 | 94 | `exit_group` | 同上（单线程程序等价） | 同上 |
 | 96 | `set_tid_address` | 记住地址、返本任务 id（不参与 futex；futex 见 §8.4） | `getpid==task id>0 -> 1 ok` 同路径 |
-| 98 | `futex` | 落 `WAIT`/`WAKE`/`REQUEUE`/`CMP_REQUEUE`/`WAIT_BITSET`/`WAKE_BITSET` 六档（含超时与位集），键 = 物理帧 + 页内偏移（`ARKRTOS_USE_LINUX_FUTEX`，§8.4） | `futex(WAIT) on a different value == -EAGAIN -> -11 ok` / `futex(WAIT) returned 0 after being woken -> 0 ok` / `futex2 bitset waker saw 1, woke only matching (bits=7) -> 7 ok` / `futex(WAIT) with 50 ms timeout == -ETIMEDOUT -> -110 ok` |
+| 98 | `futex` | 落 `WAIT`/`WAKE`/`REQUEUE`/`CMP_REQUEUE`/`WAIT_BITSET`/`WAKE_BITSET` 六档（含超时与位集）+ PI 三档 `LOCK_PI`/`UNLOCK_PI`/`TRYLOCK_PI`，键 = 物理帧 + 页内偏移（`ARKRTOS_USE_LINUX_FUTEX`，§8.4 / §8.4b） | `futex(WAIT) on a different value == -EAGAIN -> -11 ok` / `futex(WAIT) returned 0 after being woken -> 0 ok` / `futex2 bitset waker saw 1, woke only matching (bits=7) -> 7 ok` / `futex(WAIT) with 50 ms timeout == -ETIMEDOUT -> -110 ok` / `futex LOCK_PI on a free word == 0 -> 0 ok` / `futex LOCK_PI twice == -EDEADLK -> -35 ok` / `futex TRYLOCK_PI on an owned word == -EAGAIN -> -11 ok` |
+| 99 | `set_robust_list` | 登记「持有者死掉时要替我交代的锁链」：链头非空、8 字节对齐、长度装得下 `next/futex_offset/pending` 三格，否则 `-EINVAL`（§8.4b） | `set_robust_list with a short length == -EINVAL -> -22 ok` / `set_robust_list on a well formed head == 0 -> 0 ok` |
+| 100 | `get_robust_list` | 只认自己（本内核没有可查询的第二个进程身份），别人的 pid 如实 `-ESRCH`；出参指针为空 `-EFAULT`（§8.4b） | `get_robust_list(self) == 0 -> 0 ok` / `get_robust_list reports the length we registered -> 24 ok` / `get_robust_list on a foreign pid == -ESRCH -> -3 ok` |
 | 113 | `clock_gettime` | `MONOTONIC` 返内核节拍；`REALTIME` 返 `-ENOSYS` | `MONOTONIC -> 0 ok` / `REALTIME -> -38 ok` |
 | 129 | `kill` | 只能投给自己（`pid != 本任务` → `-ESRCH`），置 pending（§7） | `kill rc survives handler -> 0 ok` / `kill other pid -> -ESRCH = -3 ok` |
 | 130 | `tkill` | 同上（单线程下与 `kill` 同实体） | 同 `kill` 路径 |
@@ -116,7 +118,7 @@ socket 家族（`198-210`、`242`，共 13 个）见 §8.9：它们已经在翻�
 | 信号 | **已有跨任务投递**（`kill`/`tkill`/`tgkill` 按 pid 定位目标进程，2026-11-23，QEMU LA64 实跑）；仍无抢占式投递、无实时信号、无 `siginfo`（§7） | 跨任务靠「置目标 `sig_pending` + 目标卡在阻塞 `wait4` 时唤醒」，铺帧仍在目标自己下一次系统调用返回时做；抢占式入口还没有 |
 | `fd` 继承 | **已有**（fork 档每进程 fd 表 + 管道对象引用计数，2026-11-23） | 见 §4 与 §8；`dup`/`dup2` 重定向仍无 |
 | `socket` / `select` | 无（Ark 自己有一套 socket 兼容层，但**不在** Linux ABI 号表里） | 两套编号与阻塞语义不同，混在一个号表里只会给出错答案 |
-| `futex` | **已有六档 op**（`ARKRTOS_USE_LINUX_FUTEX`，默认关；WAIT/WAKE 2026-11-23、`REQUEUE`/`CMP_REQUEUE`/`WAIT_BITSET`/`WAKE_BITSET` 与相对/绝对超时 2026-11-24，QEMU LA64 实跑） | 值没变就睡、变了就叫；位集、改挂、`-ETIMEDOUT` 都按 Linux 语义；键 = 物理帧 + 页内偏移；仍无 `PI`/`WAKE_OP`/FD 类 op（如实 `-ENOSYS`）、无 robust list 清理、无墙钟（`FUTEX_CLOCK_REALTIME` 带超时回 `-ENOSYS`）；见 §8.4 |
+| `futex` | **已有九档 op**（`ARKRTOS_USE_LINUX_FUTEX`，默认关；WAIT/WAKE 2026-11-23、`REQUEUE`/`CMP_REQUEUE`/`WAIT_BITSET`/`WAKE_BITSET` 与相对/绝对超时 2026-11-24、PI 三档 `LOCK_PI`/`UNLOCK_PI`/`TRYLOCK_PI` 与 robust list 清理 2026-11-26，QEMU LA64 实跑） | 值没变就睡、变了就叫；位集、改挂、`-ETIMEDOUT`、优先级继承与持有者死亡交接都按 Linux 语义；键 = 物理帧 + 页内偏移；仍无 `WAIT_REQUEUE_PI`/`CMP_REQUEUE_PI`/`WAKE_OP`/FD 类 op（如实 `-ENOSYS`）、无墙钟（`FUTEX_CLOCK_REALTIME` 带超时回 `-ENOSYS`）；见 §8.4 / §8.4b |
 | 真 `mmap` 语义（文件映射/`MAP_FIXED`/权限位） | **文件映射已有**（`ARKRTOS_USE_PAGING_FILEMAP`，§8.5）、**`MAP_FIXED` 已有**（按需分页档，§8.7，只认匿名私有）、**页级写保护已有**（`ARKRTOS_USE_PAGING_MPROTECT`，§8.6）；匿名共享 `MAP_SHARED` 只随 `fork` 继承、无 `shm_open`（§8.3）；`PROT_EXEC` / `PROT_NONE` 仍只记账不强制 | 窗口式分配器（§4）；LA64 这条通路没有 NR/NX，做不出硬件不可执行 |
 | 多线程 | 无 | `clone` 没有；`exit_group` 与 `exit` 等价 |
 
@@ -544,21 +546,24 @@ COW 只管「fork 之后各写各的」这一半；要让父子看见彼此的�
 —— 否则「子已经跑掉一部分」会让读数偶尔变成 `blocking wait4 waited 2 ms`，
 看起来像 wait4 没阻塞。改完 fork+cow+shm 档 3/3 连跑稳定。
 
-### 8.4 `futex`：六档 op（`ARKRTOS_USE_LINUX_FUTEX`，2026-11-23 起，2026-11-24 扩到第二档，QEMU LA64 实跑）
+### 8.4 `futex`：九档 op（`ARKRTOS_USE_LINUX_FUTEX`，2026-11-23 起，2026-11-24 扩到第二档，2026-11-26 扩到 PI 三档，QEMU LA64 实跑）
 
 `clone` 造出了第二条执行流，`MAP_SHARED` 让两边看见同一块内存，但**「等一个值变了再继续」**还缺一块：
 没有它，pthread 的 mutex / condvar / sem 一个都起不来。futex 就是这块砖——它不是「内核替你同步」，
 而是「值没变我就睡，变了就叫我」：绝大部分同步操作在用户态完成，只在真的要让出 CPU 时才进内核。
 
-打开 `ARKRTOS_USE_LINUX_FUTEX`（`depends on ARKRTOS_USE_LINUX_ABI`）后，98 号落两批共六档：
+打开 `ARKRTOS_USE_LINUX_FUTEX`（`depends on ARKRTOS_USE_LINUX_ABI`）后，98 号落三批共九档：
 第一批是 `FUTEX_WAIT` / `FUTEX_WAKE`（2026-11-23）；第二批是把 glibc 的 condvar 真正走的那条路
 补齐——`FUTEX_REQUEUE` / `FUTEX_CMP_REQUEUE` / `FUTEX_WAIT_BITSET` / `FUTEX_WAKE_BITSET`
-（2026-11-24），外加 `timeout` 与 `-ETIMEDOUT`。缺 `WAIT_BITSET|CLOCK_REALTIME` +
-`CMP_REQUEUE` 里的任何一个，pthread 的 condvar 就仍然跑不起来，所以这批是一次做全的。
+（2026-11-24），外加 `timeout` 与 `-ETIMEDOUT`；第三批是 glibc 默认互斥走的 PI 三档
+`FUTEX_LOCK_PI` / `FUTEX_UNLOCK_PI` / `FUTEX_TRYLOCK_PI`（2026-11-26，细节见 §8.4b）。
+缺 `WAIT_BITSET|CLOCK_REALTIME` + `CMP_REQUEUE` 里的任何一个，pthread 的 condvar 就仍然
+跑不起来；缺 PI 三档，`pthread_mutex` 的默认配置一碰就停摆——所以这几批都是按「glibc 走哪条路」
+一次做全的。
 
 | 项 | 现状 |
 |---|---|
-| op | `WAIT`(0) / `WAKE`(1) / `REQUEUE`(3) / `CMP_REQUEUE`(4) / `WAIT_BITSET`(9) / `WAKE_BITSET`(10)。`FUTEX_PRIVATE_FLAG`(128) **接受但剥掉**——本实现的键本来就是物理的，私有与进程间是同一件事；`FUTEX_CLOCK_REALTIME`(256) 只允许配 `WAIT_BITSET`，且因本机没有墙钟，**带超时时如实回 `-ENOSYS`**（不拿开机时长冒充绝对时刻）；其余（`PI` 类 2/5..8/11..14、`WAKE_OP` …）一律 `-ENOSYS`，不猜 |
+| op | `WAIT`(0) / `WAKE`(1) / `REQUEUE`(3) / `CMP_REQUEUE`(4) / `WAIT_BITSET`(9) / `WAKE_BITSET`(10)。`FUTEX_PRIVATE_FLAG`(128) **接受但剥掉**——本实现的键本来就是物理的，私有与进程间是同一件事；`FUTEX_CLOCK_REALTIME`(256) 只允许配 `WAIT_BITSET`，且因本机没有墙钟，**带超时时如实回 `-ENOSYS`**（不拿开机时长冒充绝对时刻）；PI 三档 `LOCK_PI`(6)/`UNLOCK_PI`(7)/`TRYLOCK_PI`(8) 见 §8.4b；仍如实 `-ENOSYS` 的是 `FUTEX_FD`(2)/`WAKE_OP`(5)、条件变量的 PI 变体 `WAIT_REQUEUE_PI`(11)/`CMP_REQUEUE_PI`(12)（glibc 默认构建不生成）、以及 13/14 与 FD 类——不猜 |
 | 键 | **物理帧号 + 页内偏移**，不是 VA。每个进程有自己的 8 KB 对窗口，同一个 VA 在父子身上指不同帧；拿 VA 当键会让两个无关进程在同一个 VA 上互相叫醒——那种错法不报错，只偶发多醒。窗口之外（栈、内核直映射区）查不到帧 ⇒ 如实 `-ENOSYS`，不拿 VA 冒充 |
 | 睡眠 | 本内核没有无限睡眠：登记后 `arkrtos_task_block_in_critical(LX_WAIT_SLICE_MS=100 ms)` + `arkrtos_port_svc_restart()`，与 §8.1 同一条可重启系统调用通路。醒来先看 `s_futex_woke`（有人叫过就回 0），再看登记下来的截止时刻（到了就回 `-ETIMEDOUT`），否则重读一次字：值变了就当被叫醒，没变继续睡一个时间片；**不传 timeout 时永不超时**（与 Linux 一致）。超时存的是**截止时刻**、不是时长：相对超时只从第一次进入算起，每次时间片重放重新加一遍的话永远也到不了期。`WAIT` 的 `timeout` 是**相对**的，`WAIT_BITSET` 的 `timeout` 是**绝对**时刻（与 Linux 一致，本内核时钟是单调毫秒）。端口不支持重放时回 `-ENOSYS` 并清槽，**绝不假装睡过**。重放的那一次 a0 已被返回值清成 0（见坑 ②），所以「读哪个字、期望值是多少」都用登记下来的那一份，而不是重放时读到的参数 |
 | `-EAGAIN` / `-EINTR` | 入口读到的字 != `val` ⇒ 立即 `-EAGAIN`（不睡）；有未屏蔽待投递信号 ⇒ 立即 `-EINTR`。重放那一次也再查一遍信号，所以信号能把已经睡着的等待者叫回来 |
@@ -567,14 +572,14 @@ COW 只管「fork 之后各写各的」这一半；要让父子看见彼此的�
 | `REQUEUE` / `CMP_REQUEUE` | Linux 把 `nr_requeue` **塞在 `timeout` 那一格**（第 4 个参数）、`uaddr2` 在第 5 格，这里照抄这个复用：先唤醒 `val` 个，再把剩下的最多 `nr_requeue` 个改挂到 `uaddr2`，返回值是**唤醒数加改挂数**（`man futex` 的措辞是 "woken up or requeued"）：Linux 的调用方靠这个数判断「挂过去了没有」，`nr_wake=0` 的 `CMP_REQUEUE` 若只回 0，glibc 的 `pthread_cond_broadcast` 就无从判断。`CMP_REQUEUE` 动手前先核对 `uaddr` 上的字等于 `val3`，不等回 `-EAGAIN`；缺 `uaddr2` 回 `-EINVAL`。被改挂的等待者把**期望值更新成 `uaddr2` 上的当前字**：Linux 里 requeue 不叫醒人，而本内核靠时间片重放回到用户态，若不更新期望值，重放时会因「两个地址的字不同」被误判成「已唤醒」——这是模型内的必要偏差，写在代码注释里。同理，「这次是不是重放」按**自己那一槽还在用**判定，不按地址比对：改挂已经把键搬到 `uaddr2`，按地址会比不出自己（详见本节②的另一半） |
 | 检查顺序 | 一次 WAIT 醒来依次判：有人 `WAKE` 过 → 超时到期 → 值变了（当叫醒） → 有未屏蔽信号（`-EINTR`） → 继续睡。顺序即优先级：`WAKE` 优先于超时（同一刻既被叫醒又到期时，Linux 回 0） |
 
-读数（`tools/fork_gate.py` 的 fork+COW+SHM+futex 档，**76 条 check**，其中 futex 段 36 条 —— 9 条基本配对 + 7 条多时间片 + 20 条第二档（位集 / 超时 / 改挂））：
+读数（`tools/fork_gate.py` 的 fork+COW+SHM+futex 档，**113 条 check**，其中 futex 段 73 条 —— 9 条基本配对 + 7 条多时间片 + 20 条第二档（位集 / 超时 / 改挂）+ 37 条第四档（PI 三档与 robust list，见 §8.4b））：
 
 | 读数 | 钉住什么 |
 |---|---|
 | `futex mmap shared page > 0 -> 1` | 等的那块字确实来自一段共享映射（不是栈、不是私有页） |
 | `futex(WAKE) with no waiter == 0 -> 0` | 没有等待者时不虚报唤醒数 |
 | `futex(WAIT) on a different value == -EAGAIN -> -11` | 值已变就不睡（Linux 的 fast path） |
-| `futex PI op (LOCK_PI) == -ENOSYS -> -38` | 未实现的 op 如实拒绝，不静默当成 WAIT（原来拿 op 9 当反例，9 现在是 `WAIT_BITSET`，已改判 `FUTEX_LOCK_PI`）|
+| `futex LOCK_PI on a free word == 0 -> 0` | 空闲字上 `LOCK_PI` 立即拿到并把本任务 tid 写进字里（PI 三档与 robust list 的 37 条读数见 §8.4b；原先这一格判的是「`LOCK_PI` 必须回 `-ENOSYS`」，PI 落地后那条判据反过来会判红，已删除）|
 | `clone for futex child > 0 -> 1` | 唤醒者是另一个真实进程，不是同一任务的自我唤醒 |
 | `futex(WAIT) returned 0 after being woken -> 0` | 父进程真睡下并被叫醒。第一次进入时期望值 1；被子进程抢先改值时按 Linux 语义回 `-EAGAIN`，夹具拿当前值重睡（最多 4 轮）——所以这一条判的是「真睡下 + 真被叫醒」，不是「父进程一定先走到 WAIT」。失败时子进程用 SIGCHLD 打断，读数是 `-EINTR`，不会挂死 QEMU |
 | `parent saw the value the waker wrote -> 2` | 醒来后看到的是唤醒者写的字（共享页真生效，不是私有副本） |
@@ -660,13 +665,93 @@ s_futex_val`：登记时存 `uaddr`、`val`，重放时取回它们再读字。�
 
 宿主侧口径：`linuxabi` / `linuxabioff` / `linuxabifutex` / `linuxabifilemap` / `linuxabiselect`
 五档并集行覆盖率 **98.22%**（基线 `tools/coverage_baseline.json` 钉的是 97.96%，本轮只往上走、没有调低也没有
-`--update`），`linuxabi` 档 **270 checks**、futex 档 **371 checks**、filemap 档 **358 checks**、
-select 档 **327 checks**，都打印
+`--update`），`linuxabi` 档 **270 checks**、futex 档 **434 checks**（2026-11-26 起，PI 三档与 robust
+list 再 63 条）、filemap 档 **358 checks**、select 档 **327 checks**，都打印
 `LINUX-ABI HOST OK`；`ARKRTOS_USE_PAGING_SHM=1` 的共享分支**不在宿主账内**
 （宿主用例从未在 `LINUX_FORK=1` 下编过），那一半的口径只有上板 40 条 SHM 读数、36 条 futex
 读数与 20 条 filemap 读数。剩余 24 行未覆盖经逐行核对全是死/防御分支（两处 `-EBUSY`
 重入、`-ENOMEM` 的溢出与对齐变体、`-E2BIG`、嵌入式弱符号兜底等；列表见覆盖率门禁的
 说明与本周的 `covmiss` 记录），不是「没测」。
+
+### 8.4b futex 第四档：PI 三档与 robust list（2026-11-26，宿主 63 条 + QEMU LA64 37 条）
+
+§8.4 解决的是「等一个值变了再继续」，但 glibc 的 `pthread_mutex` 默认配置是 **PI（优先级继承）**
+互斥，走的是另一条路：拿锁 `FUTEX_LOCK_PI`、放锁 `FUTEX_UNLOCK_PI`、试锁 `FUTEX_TRYLOCK_PI`；
+另外 `pthread_mutex_lock` 还要防「持有者死在临界区里，整条链永远停住」，那靠 99/100 号
+`set_robust_list` / `get_robust_list` 与任务退出时的 robust 清理。两者的共同点是**内核必须知道
+「谁持有、谁在排队」**——普通 futex 谁都能叫醒谁，PI 必须按优先级把锁**交给**最该拿到它的那个
+等待者，否则高优先级任务会被低优先级持有者后面的中等优先级任务无限推后（优先级反转）。
+
+| 项 | 现状 |
+|---|---|
+| op | `LOCK_PI`(6) / `UNLOCK_PI`(7) / `TRYLOCK_PI`(8)，与 §8.4 的六档并集九档。`FUTEX_PRIVATE_FLAG`(128) 同样接受并剥掉；`FUTEX_CLOCK_REALTIME`(256) 带超时时如实 `-ENOSYS`（本机没有墙钟） |
+| 字布局 | 低 30 位 = 持有者 tid（`FUTEX_TID_MASK = 0x3FFFFFFF`）、bit31 `FUTEX_WAITERS = 0x80000000`、bit30 `FUTEX_OWNER_DIED = 0x40000000`。与 Linux 逐位相同——用户态（glibc）直接读这个字判断状态，差一位就是另一套 ABI |
+| 优先级继承 | 登记/排队时把等待者的 `base_priority` 抬到持有者头上，放锁或交接时算回原值，统一走 `arkrtos_ready_reprio()` 这一个入口重排就绪集。**有效优先级的唯一真源是任务的 `base_priority` 加上「谁在等我」这份记录**，不另存一份会被自己中间值污染的快照——否则「抬两次算回一次」这种错误只在多等待者时偶发 |
+| 交接而非叫醒再抢 | `UNLOCK_PI` 与 robust 清理都**直接**把字写成「接手者 tid | 保留位」，所有权当场转移，不「叫醒所有等待者让他们再抢一次」。后者正是优先级反转的成因，也是 PI 与普通 futex 的语义分界：反假绿要卡的正是这一点（退化成叫醒再抢时，QEMU 第 2 段的父进程会读到 `-EAGAIN` 或字里还是死者 tid，是红的读数而不是挂死） |
+| 谁接手 | `lx_pi_top_waiter()`：先比 `base_priority`（数值小者优先），再比任务号（稳定序）。没有等待者就直接清字 |
+| 等待与重放 | 与 §8.4 同一条可重启系统调用通路（100 ms 时间片 + `arkrtos_port_svc_restart()`）；重放同样从等待槽里取回 `uaddr` 与期望值，不看返回值寄存器。`LOCK_PI` 的 `timeout` 是相对时长（与 Linux 一致） |
+| 错误码 | 同一任务重复 `LOCK_PI`、或自己持有时 `TRYLOCK_PI` ⇒ `-EDEADLK`(35)；非持有者 `UNLOCK_PI` ⇒ `-EPERM`；被别人持有且 `TRYLOCK_PI` ⇒ `-EAGAIN` **并置 `WAITERS`**（持有者靠这一位知道有人排队，否则永远不来交接）；睡着后被未屏蔽信号打断 ⇒ `-EINTR` |
+| 死者接手 | 字里带 `OWNER_DIED` 时 `LOCK_PI` 直接接手，并把 `OWNER_DIED` **原样留给接手者**：用户态看到这一位才知道「前一个持有者死在临界区里」，要自己做一致性修复。内核替它清掉就不合规 |
+| 登记时不读别人的地址空间 | PI 登记时把持有者 tid **抄进**内核自己的 `s_futex_pi_owner[]`，不跨进程读对方的字——跨进程读字随时可能读到半写状态，用来判「谁是持有者」不可信 |
+| robust 链 | `set_robust_list(head, len)`：`head` 非空、8 字节对齐、`len >= 12`（`next` / `futex_offset` / `list_op_pending` 三格），否则 `-EINVAL`。链上每一项是 `{ next | PI位 }`，`next` 的最低位标记「这一项是 PI 互斥」；`futex_offset` 是**从节点自身算起的字节偏移**（`offsetof` 口径），不是元素数——坑 ① |
+| 退出清理 | `on_task_exit` 里先 `lx_robust_exit()`（改写用户内存：逐条把链上的字写成 `OWNER_DIED`，PI 条目按 PI 语义交接给 `lx_pi_top_waiter()`），再 `lx_futex_forget()`（撤内核登记）。顺序不能反——先撤登记就没有等待者信息可交了。链按 `ROBUST_LIST_LIMIT = 2048` 条截断：死在退出钩子里等于整个系统停摆，比漏清一条严重 |
+| 跨进程边界 | `get_robust_list(pid, ...)` 只认 `pid == 自己`，别人的 pid 如实 `-ESRCH`（本内核没有可查询的第二个进程身份，不假装能读别人的地址空间）；出参指针为空 ⇒ `-EFAULT` |
+| 与 Linux 的差异 | 无 `WAIT_REQUEUE_PI`(11) / `CMP_REQUEUE_PI`(12)（glibc 默认构建不生成，如实 `-ENOSYS`）；`FUTEX_CLOCK_REALTIME` 带超时 `-ENOSYS`；等待者选择只看 `base_priority`，没有 Linux 的 SCHED_DEADLINE 那一层（本内核没有该调度策略） |
+
+读数（`tools/fork_gate.py` 的 fork+COW+SHM+futex 档 113 条之内的 37 条；宿主侧 `t_futex_pi()` 另 63 条）：
+
+| 读数 | 钉住什么 |
+|---|---|
+| `futex4 mmap shared page > 0 -> 1` | 第四档的共享页建起来了（长度按整页 8 KB 申请） |
+| `futex LOCK_PI on a free word == 0 -> 0` / `futex LOCK_PI wrote our tid into the word -> <tid>` | 空闲字上拿到锁，且字里是本任务 tid（不是随意一个标记） |
+| `futex LOCK_PI twice == -EDEADLK -> -35` / `futex TRYLOCK_PI while held == -EDEADLK -> -35` | 自己等自己必须当场回 `-EDEADLK`，不能睡下去 |
+| `futex UNLOCK_PI as owner == 0 -> 0` / `futex UNLOCK_PI cleared the word -> 0` | 放锁成功且字被清干净（残留 tid 或 `WAITERS` 会让下一个持有者判错状态） |
+| `futex UNLOCK_PI when not the owner == -EPERM -> -1` | 非持有者放锁被拒（Linux 同） |
+| `futex TRYLOCK_PI on an owned word == -EAGAIN -> -11` | 被别人持有时试锁不睡、当场失败 |
+| `futex TRYLOCK_PI set the WAITERS bit while failing -> 2147483648` | 失败时置 `WAITERS`——持有者靠这一位知道有人排队 |
+| `futex TRYLOCK_PI left the owner tid alone -> 4242` | 失败时不动持有者 tid（字布局没被踩） |
+| `futex LOCK_PI on a dead owner == 0 -> 0` / `... took over from the dead owner -> <tid>` | `OWNER_DIED` 字上直接接手，字里换成新持有者 |
+| `futex LOCK_PI kept OWNER_DIED for the taker -> 1073741824` | 接手者看得见 `OWNER_DIED`（用户态才有机会修数据） |
+| `futex UNLOCK_PI after consistent == 0 -> 0` | 用户态清掉 `OWNER_DIED` 后放锁成功 |
+| `set_robust_list with a short length / unaligned head / null head == -EINVAL -> -22` | 三种坏 head 全被拒（长度不足、未对齐、空指针） |
+| `set_robust_list on a well formed head == 0 -> 0` | 合法 head 登记成功 |
+| `get_robust_list(self) == 0 -> 0` / `... reports the head we registered -> <addr>` / `... reports the length we registered -> 24` | 读回的就是登记的那一份（不是另存一份副本） |
+| `get_robust_list on a foreign pid == -ESRCH -> -3` | 别人的 pid 如实拒绝，不假装能读 |
+| `clone for PI robust child > 0 -> 1` | 跨进程 PI 的持有者是另一个真实进程 |
+| `PI robust: parent observed the child holding the lock -> 1` | 握手字被写（子进程确实拿到了锁） |
+| `PI robust: parent acquired after the holder died -> 0` | **本档最要紧的一条**：子进程带锁退出后父进程拿到锁——robust 清理跑了、且所有权是交接来的 |
+| `PI robust: word holds the parent tid -> <tid>` / `... carries OWNER_DIED for the taker -> 1073741824` | 交接后字里是父进程 tid 且保留 `OWNER_DIED` |
+| `PI robust child saw register+lock+tid+waiter (bits=15) -> 15` | bit0 登记 / bit1 拿锁 / bit2 字里是自己 / bit3 看到父进程排队（`WAITERS`） |
+| `clone for non-PI robust child > 0 -> 1` | glibc 普通（非 PI）robust 互斥的持有者也是另一个真实进程 |
+| `non-PI robust: parent observed the child owning the word -> 1` | 子进程**直接写字**持有（不经内核）这件事成立 |
+| `non-PI robust: parent took over the dead owner's word -> 0 -> 0` / `... word carries OWNER_DIED after the death -> 1073741824` / `... word now holds the parent tid -> <tid>` | 非 PI 条目同样被退清：死者字变成 `OWNER_DIED`，父进程接手后字里换成自己 |
+| `non-PI robust child registered and owned (bits=3) -> 3` | 子进程的登记与持有两条都成立 |
+
+**三条只有上板才看得见的坑（夹具侧的契约错误，读起来都像内核 bug）。**
+
+① **`futex_offset` 是字节偏移，不是元素数。** 夹具里变量都是 `unsigned long *`，第一版写
+`rh[1] = 0x40ul` 想表达「往后 0x40 个元素」，内核按 Linux 的 `offsetof` 口径当 0x40 个**字节**
+去读 ⇒ 打到 0x108940 而不是锁字 0x108B00 ⇒ 读到 0 ≠ 死者 tid ⇒ 清理静默跳过 ⇒ 父进程永久
+等待。改成 `rh[1] = (const char *)lock - (const char *)nod` 之后整段变绿。这条错法的可怕之处
+是**不报错**：算错偏移只是「读到别的字」，而「读到 0」在 robust 语义里恰好是合法中间态。
+
+② **握手用的 futex，期望值必须写「未就绪态」，不能读当前值再传。** 两处「等子进程放行」的
+`WAIT` 原来传 `v = *go`，而子进程可能已经放行过（字变成 1）——传 1 时内核判定「值没变、该睡」，
+把已经发生的唤醒永远丢掉，父进程再也不可能被叫醒。改成固定传 0：字已经变成 1 就直接回
+`-EAGAIN`，循环当场收尾。Linux 里用 futex 做握手都必须守这一条，差别只在于真 Linux 上它表现为
+偶发挂死而不是必挂。
+
+③ **共享页是 8 KB（0x2000）一对，`0x400` 个元素就跨出整页。** 非 PI robust 段原先把
+`go2` 放在 `pw + 0x400`（= 0x2000 字节），恰好落在下一页；`mmap` 又只申请 4096 ⇒ 握手字
+根本不在映射里，父进程在 0x0210a000 上以 `resumed=1 sval=0` 无限重放。改成 `mmap` 8192、
+`go2 = pw + 0x380` 之后正常。同一段子里子进程原来是 4,000,000 次纯自旋等 `WAITERS`——单核
+上父进程根本跑不到 `LOCK_PI`，读数 `bits=7` 缺 bit3；改成「`FUTEX_WAIT` 带 0.5 ms 超时」
+（本机没有 `sched_yield`，这是唯一能主动交棒的调用）循环 2000 轮，读数变 `bits=15`。
+教训：**等另一条执行流时必须真的让出 CPU**，纯自旋在单核上等于把对方饿死。
+
+宿主侧：`t_futex_pi()` **63 条**断言钉机制（登记 / 阻塞 / 交接 / 唤醒语义 / 优先级抬升与算回 /
+robust 参数面 / 退出清理的记账），跨进程面留给 QEMU 那 37 条——两者不重复：宿主能精确控制
+「谁是持有者、谁在等」，QEMU 证的是「跨进程真的共用同一块物理帧、退出钩子真的跑到用户内存上」。
 
 ### 8.5 文件映射与写回（`ARKRTOS_USE_PAGING_FILEMAP`，2026-11-23，QEMU LA64 实跑）
 
@@ -1057,8 +1142,9 @@ tgid、两栈同址、`exit_group` 码错、缺 clone 读数）必须被判红�
 - **`execve` 在非组长线程上的行为未定义。** `execve` 换的是**当前任务**的映像，同组
   其它线程仍指着旧空间；Linux 的语义是"`execve` 结束整组、只留调用者"，本内核没有这么做，
   也**没有**在非组长线程上拒绝（登记在 [已知限制](已知限制.md)）。
-- **没有线程本地存储模块分配、没有 robust futex 表、没有 `set_robust_list`。** `SETTLS`
-  只写 `$tp`，TLS 布局是 libc 的事；`SET_TID_ADDRESS` 只回报自己的 tid、不保存指针。
+- **没有线程本地存储模块分配。** `SETTLS` 只写 `$tp`，TLS 布局是 libc 的事；
+  `SET_TID_ADDRESS` 只回报自己的 tid、不保存指针。robust list（99/100）与退出清理已经落地，
+  见 §8.4b；它按任务记账，线程组里的任意一条退出都只清自己那条链。
 - **没有优先级 / 调度策略继承的额外语义**：线程就是一个普通任务，优先级、时间片与
   其它任务同档。
 
@@ -1351,9 +1437,11 @@ Linux 的 futex 号表把「同一格参数」在不同 op 下复用：`REQUEUE`
   32 条 check + 四条内核日志断言（共享对数、栈页私有化对数、`copied=0`、真发生过
   写时复制），坏日志自检再加四种 COW 专属形态；fork+COW+SHM 档（`ARKRTOS_USE_PAGING_SHM=1`）
   再跑一遍：40 条 check + 共享映射内核日志断言（`pg shm map ... pairs>=1`），坏日志
-  自检再加五种 SHM 专属形态；futex 档（`ARKRTOS_USE_LINUX_FUTEX=1`）跑 76 条（futex 段
-  36 条：基本配对 9 + 多时间片 7 + 位集/超时/改挂 20），坏日志自检再加八种 futex 专属形态
-  （含「位集被忽略」「改挂没搬走等待者」「超时没到期」三条第二档的）。
+  自检再加五种 SHM 专属形态；futex 档（`ARKRTOS_USE_LINUX_FUTEX=1`）跑 113 条（futex 段
+  73 条：基本配对 9 + 多时间片 7 + 位集/超时/改挂 20 + PI 三档与 robust list 37），坏日志
+  自检再加八种 futex 专属形态（含「位集被忽略」「改挂没搬走等待者」「超时没到期」三条第二档的）；
+  PI 档的判据不是「返回 0 就算过」，而是「持有者带锁死亡后接手者拿到的是父进程 tid | OWNER_DIED」，
+  退化成叫醒再抢时这一条一定是红的。
 - Real-time 语义不因兼容层改变：Linux ABI 的路径全部在 SVC 里同步完成，
   不额外开线程、不加锁（`read`/`write` 到 ramfs 或管道都是同步搬运；管道刻意
   不做阻塞，见 §6）。唯一的「睡下再回来」是阻塞 `wait4`，它用可重启系统调用实现
@@ -1361,14 +1449,15 @@ Linux 的 futex 号表把「同一格参数」在不同 op 下复用：`REQUEUE`
   不是关中断自旋。
 - 下一步（若要用真正的 Linux 工具链产物）：动态链接的内核侧与自研装载器已落地
   （2026-11-20，见 [动态链接与PT_INTERP](动态链接与PT_INTERP.md)），但**离 glibc
-  还差整条 libc 兼容面**——`rseq`、TLS 初始化，以及
-  futex 的 PI 类 op 与 robust list 清理（`REQUEUE`/`CMP_REQUEUE`/`WAIT_BITSET`/
-  `WAKE_BITSET` 与超时已落地，§8.4）。
+  还差整条 libc 兼容面**——`rseq`、TLS 初始化，以及条件变量的 PI 变体
+  （`WAIT_REQUEUE_PI` / `CMP_REQUEUE_PI`，glibc 默认构建不生成）与 SCHED_DEADLINE。
+  futex 的 PI 三档与 robust list 清理已经落地（§8.4b）。
   信号已有跨任务投递（§7），「进程」这个对象也开了（`fork`/`clone` + `wait4`，§8，
   默认关）：每进程 fd 表与继承、跨任务 `SIGCHLD`、阻塞 `wait4` 都已在 QEMU LA64 上
   有读数；写时复制也有了（`ARKRTOS_USE_PAGING_COW`，§8.2，默认关）、匿名
-  `MAP_SHARED` 共享页也有了（`ARKRTOS_USE_PAGING_SHM`，§8.3，默认关）、futex 六档 op
-  （WAIT/WAKE/REQUEUE/CMP_REQUEUE/BITSET + 超时）也有了（`ARKRTOS_USE_LINUX_FUTEX`，§8.4，默认关）、文件映射也有了
+  `MAP_SHARED` 共享页也有了（`ARKRTOS_USE_PAGING_SHM`，§8.3，默认关）、futex 九档 op
+  （WAIT/WAKE/REQUEUE/CMP_REQUEUE/BITSET + PI 三档与 robust list + 超时）也有了
+  （`ARKRTOS_USE_LINUX_FUTEX`，§8.4 / §8.4b，默认关）、文件映射也有了
   （`ARKRTOS_USE_PAGING_FILEMAP`，§8.5，默认关）、`mprotect` 页级写保护真落实了
   （`ARKRTOS_USE_PAGING_MPROTECT`，§8.6，默认关）、真 `mmap` 语义 `MAP_FIXED` 也有了
   （按需分页档，§8.7，不需另开开关）；仍没有线程（`CLONE_VM`/`CLONE_THREAD` 拒）、

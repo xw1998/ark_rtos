@@ -89,7 +89,18 @@
 #define LX_FUTEX_CMP_REQUEUE 4
 #define LX_FUTEX_WAIT_BITSET 9
 #define LX_FUTEX_WAKE_BITSET 10
+#define LX_FUTEX_LOCK_PI    6
+#define LX_FUTEX_UNLOCK_PI  7
+#define LX_FUTEX_TRYLOCK_PI 8
+#define LX_FUTEX_TID_MASK   0x3FFFFFFFul
+#define LX_FUTEX_WAITERS    0x80000000ul
+#define LX_FUTEX_OWNER_DIED 0x40000000ul
+#define LX_SET_ROBUST_LIST  99
+#define LX_GET_ROBUST_LIST  100
 #define LX_EAGAIN           11
+#define LX_EPERM            1
+#define LX_ESRCH            3
+#define LX_EDEADLK          35
 #define LX_EINTR            4
 #define LX_ETIMEDOUT        110
 
@@ -1208,10 +1219,11 @@ void linux_main(unsigned long sp)
             check("futex(WAIT) on a different value == -EAGAIN",
                   lx4(LX_FUTEX, (lx_long)(unsigned long)fw, LX_FUTEX_WAIT,
                       7, 0), -LX_EAGAIN);
-            /* 6 = FUTEX_LOCK_PI：PI 类 op 一律 -ENOSYS。这一条不能再拿 9
-             * 来测——9 已经是 WAIT_BITSET，是实现了的合法 op。 */
-            check("futex PI op (LOCK_PI) == -ENOSYS",
-                  lx3(LX_FUTEX, (lx_long)(unsigned long)fw, 6, 0), -LX_ENOSYS);
+            /* PI 类 op（6/7/8）已经实现，判据挪到下面「futex 第四档」。
+             * 这一格只剩一条：11（WAIT_REQUEUE_PI）仍是如实的 -ENOSYS ——
+             * glibc 的默认构建压根不生成它（只在 PI 条件变量上用）。 */
+            check("futex PI-condvar op (WAIT_REQUEUE_PI) == -ENOSYS",
+                  lx3(LX_FUTEX, (lx_long)(unsigned long)fw, 11, 0), -LX_ENOSYS);
 
             *fw = 1ul;
             ppid = lx1(LX_GETPID, 0);
@@ -1466,6 +1478,341 @@ void linux_main(unsigned long sp)
             check("futex multislice child reaped", rc8, child8);
             check("futex multislice waker saw 1 and woke 1 (bits=3)",
                   (status8 >> 8) & 0xFF, 3);
+        }
+    }
+
+    /* ---------------- futex 第四档：PI 三档与 robust list ----------------
+     * 三段判据，各判一件不同的事：
+     *   1) 单进程：字布局与返回值（tid 写进字、-EDEADLK、-EPERM、-EAGAIN 且
+     *      置 WAITERS、接手死掉的持有者时保留 OWNER_DIED）—— 不依赖调度；
+     *   2) 跨进程 PI + robust PI 死亡交接：子进程用 LOCK_PI 持有并登记 robust
+     *      链，父进程 LOCK_PI 排队；子进程**不解锁**直接退出，父进程必须拿到
+     *      锁，且字里是「父进程 tid | OWNER_DIED」。这一条同时覆盖「真阻塞」
+     *      与「持有者死亡后交接」两件事；
+     *   3) 非 PI robust：子进程直接写字持有（glibc 的 robust 普通互斥就是这么
+     *      写的）、登记链、退出后字必须变成 OWNER_DIED（tid 清掉）。
+     * 反假绿：PI 若退化成「叫醒后大家再抢」或 robust 清理没跑，第 2 段的父
+     * 进程会停在 -EAGAIN 或看到字里还是子进程 tid —— 是红的读数，不是挂死
+     * （子进程等不到父进程排队时会先投 SIGCHLD 兜底）。 */
+    {
+        volatile unsigned long *pw;
+        lx_long pa;
+        lx_long mytid;
+        lx_long ppid4;
+
+        /* 长度按**一整页**申请：本机页大小是 8 KB（0x2000），只申请 4096
+         * 也能拿到一页，但下面几组夹具按结构体排布会用到 0x1C00 附近，
+         * 写清整页长度省得「后半页是不是有效的」变成隐含前提。 */
+        pa = lx6(LX_MMAP, 0, 8192, 3,
+                 LX_MAP_SHARED | LX_MAP_ANONYMOUS, -1, 0);
+        check("futex4 mmap shared page > 0", (pa > 0) ? 1 : 0, 1);
+
+        if (pa > 0)
+        {
+            pw = (volatile unsigned long *)(unsigned long)pa;
+            mytid = lx1(LX_GETPID, 0);
+            ppid4 = mytid;
+
+            /* ---- 1) 单进程语义 ---- */
+            pw[0] = 0ul;
+            check("futex LOCK_PI on a free word == 0",
+                  lx4(LX_FUTEX, (lx_long)(unsigned long)pw, LX_FUTEX_LOCK_PI, 0, 0),
+                  0);
+            check("futex LOCK_PI wrote our tid into the word",
+                  (lx_long)pw[0], mytid);
+            check("futex LOCK_PI twice == -EDEADLK",
+                  lx4(LX_FUTEX, (lx_long)(unsigned long)pw, LX_FUTEX_LOCK_PI, 0, 0),
+                  -LX_EDEADLK);
+            check("futex TRYLOCK_PI while held == -EDEADLK",
+                  lx4(LX_FUTEX, (lx_long)(unsigned long)pw,
+                      LX_FUTEX_TRYLOCK_PI, 0, 0), -LX_EDEADLK);
+            check("futex UNLOCK_PI as owner == 0",
+                  lx4(LX_FUTEX, (lx_long)(unsigned long)pw,
+                      LX_FUTEX_UNLOCK_PI, 0, 0), 0);
+            check("futex UNLOCK_PI cleared the word", (lx_long)pw[0], 0);
+            check("futex UNLOCK_PI when not the owner == -EPERM",
+                  lx4(LX_FUTEX, (lx_long)(unsigned long)pw,
+                      LX_FUTEX_UNLOCK_PI, 0, 0), -LX_EPERM);
+
+            pw[0] = 4242ul;             /* 一个不可能存在的持有者 */
+            check("futex TRYLOCK_PI on an owned word == -EAGAIN",
+                  lx4(LX_FUTEX, (lx_long)(unsigned long)pw,
+                      LX_FUTEX_TRYLOCK_PI, 0, 0), -LX_EAGAIN);
+            check("futex TRYLOCK_PI set the WAITERS bit while failing",
+                  (lx_long)(pw[0] & LX_FUTEX_WAITERS),
+                  (lx_long)LX_FUTEX_WAITERS);
+            check("futex TRYLOCK_PI left the owner tid alone",
+                  (lx_long)(pw[0] & LX_FUTEX_TID_MASK), 4242);
+
+            pw[0] = 4242ul | LX_FUTEX_OWNER_DIED;
+            check("futex LOCK_PI on a dead owner == 0",
+                  lx4(LX_FUTEX, (lx_long)(unsigned long)pw, LX_FUTEX_LOCK_PI, 0, 0),
+                  0);
+            check("futex LOCK_PI took over from the dead owner",
+                  (lx_long)(pw[0] & LX_FUTEX_TID_MASK), mytid);
+            check("futex LOCK_PI kept OWNER_DIED for the taker",
+                  (lx_long)(pw[0] & LX_FUTEX_OWNER_DIED),
+                  (lx_long)LX_FUTEX_OWNER_DIED);
+            pw[0] = (unsigned long)mytid;   /* 用户态 consistent 之后清掉 */
+            check("futex UNLOCK_PI after consistent == 0",
+                  lx4(LX_FUTEX, (lx_long)(unsigned long)pw,
+                      LX_FUTEX_UNLOCK_PI, 0, 0), 0);
+
+            /* ---- robust list 的单进程参数面 ---- */
+            check("set_robust_list with a short length == -EINVAL",
+                  lx2(LX_SET_ROBUST_LIST,
+                      (lx_long)(unsigned long)(pw + 0x20), 8), -LX_EINVAL);
+            check("set_robust_list with an unaligned head == -EINVAL",
+                  lx2(LX_SET_ROBUST_LIST,
+                      (lx_long)(unsigned long)((char *)(pw + 0x20) + 1), 24),
+                  -LX_EINVAL);
+            check("set_robust_list with a null head == -EINVAL",
+                  lx2(LX_SET_ROBUST_LIST, 0, 24), -LX_EINVAL);
+            check("set_robust_list on a well formed head == 0",
+                  lx2(LX_SET_ROBUST_LIST,
+                      (lx_long)(unsigned long)(pw + 0x20), 24), 0);
+            {
+                unsigned long *out = (unsigned long *)(unsigned long)(pw + 0x60);
+                unsigned long *olen = (unsigned long *)(unsigned long)(pw + 0x68);
+
+                *out = 0ul;
+                *olen = 0ul;
+                check("get_robust_list(self) == 0",
+                      lx3(LX_GET_ROBUST_LIST, mytid,
+                          (lx_long)(unsigned long)out,
+                          (lx_long)(unsigned long)olen), 0);
+                check("get_robust_list reports the head we registered",
+                      (lx_long)*out, (lx_long)(unsigned long)(pw + 0x20));
+                check("get_robust_list reports the length we registered",
+                      (lx_long)*olen, 24);
+                check("get_robust_list on a foreign pid == -ESRCH",
+                      lx3(LX_GET_ROBUST_LIST, 99999,
+                          (lx_long)(unsigned long)out,
+                          (lx_long)(unsigned long)olen), -LX_ESRCH);
+            }
+
+            /* ---- 2) 跨进程 PI + robust PI 死亡交接 ---- */
+            {
+                unsigned long *rh  = (unsigned long *)(unsigned long)(pw + 0x100);
+                unsigned long *nod = (unsigned long *)(unsigned long)(pw + 0x120);
+                volatile unsigned long *lock = pw + 0x160;   /* 0x120 + 0x40 */
+                volatile unsigned long *go   = pw + 0x200;
+                volatile unsigned long *yld  = pw + 0x280;   /* 只用来让 CPU */
+                lx_long child;
+                lx_long status = -1;
+                lx_long rc = -1;
+                int     round;
+
+                rh[0] = (unsigned long)nod | 1ul;   /* 最低位 = PI 条目 */
+                /* futex_offset 是按**字节**算的（Linux 的 struct robust_list_head
+                 * 就这么定义），这里的变量都是 unsigned long *，写 0x40 会被
+                 * 内核当成 0x40 个字节，指到别的字上去。 */
+                rh[1] = (unsigned long)((const char *)lock - (const char *)nod);
+                rh[2] = 0ul;                        /* list_op_pending */
+                nod[0] = (unsigned long)rh;         /* 终止：回到链头 */
+                *lock = 0ul;
+                *go = 0ul;
+                *yld = 0ul;
+
+                child = lx3(LX_CLONE, LX_SIGCHLD, 0, 0);
+                if (child == 0)
+                {
+                    int     code = 0;
+                    int     spins;
+                    lx_long me = lx1(LX_GETPID, 0);
+
+                    if (lx2(LX_SET_ROBUST_LIST, (lx_long)(unsigned long)rh,
+                            24) == 0)
+                    {
+                        code |= 1;
+                    }
+                    if (lx4(LX_FUTEX, (lx_long)(unsigned long)lock,
+                            LX_FUTEX_LOCK_PI, 0, 0) == 0)
+                    {
+                        code |= 2;
+                    }
+                    if ((*lock & LX_FUTEX_TID_MASK) == (unsigned long)me)
+                    {
+                        code |= 4;
+                    }
+                    /* 放行父进程：它随后会 LOCK_PI 排在我后面 */
+                    *go = 1ul;
+                    (void)lx3(LX_FUTEX, (lx_long)(unsigned long)go,
+                              LX_FUTEX_WAKE, 1);
+                    /* 等父进程真的排上队：WAITERS 位是内核替它置的，比
+                     * 「等几毫秒」可靠得多。这里必须**真的让出 CPU** —— 纯
+                     * 自旋会把这个单核一直占住，父进程连一次 LOCK_PI 都跑
+                     * 不到，WAITERS 永远不出现。本机没有 sched_yield，用
+                     * FUTEX_WAIT 带 0.5 ms 超时是唯一能主动交棒的调用。等
+                     * 不到就先投 SIGCHLD 兜底，让父进程那次 LOCK_PI 回
+                     * -EINTR（读数是红的）。 */
+                    for (spins = 0; spins < 2000; spins++)
+                    {
+                        if ((*lock & LX_FUTEX_WAITERS) != 0ul)
+                        {
+                            code |= 8;
+                            break;
+                        }
+                        {
+                            lx_long ts[2];
+
+                            ts[0] = 0;
+                            ts[1] = 500000L;    /* 0.5 ms */
+                            (void)lx4(LX_FUTEX, (lx_long)(unsigned long)yld,
+                                      LX_FUTEX_WAIT, 0,
+                                      (lx_long)(unsigned long)ts);
+                        }
+                    }
+                    if ((code & 8) == 0)
+                    {
+                        (void)lx2(LX_KILL, ppid4, LX_SIGCHLD);
+                    }
+                    (void)lx1(LX_EXIT, code);   /* 持锁退出：交给 robust 清理 */
+                    for (;;)
+                    {
+                    }
+                }
+                check("clone for PI robust child > 0", (child > 0) ? 1 : 0, 1);
+
+                /* 先让出 CPU 让子进程把锁拿到（父进程一直占着 CPU 的话子进程
+                 * 永远跑不起来）。用 go 这个字做握手，不读时钟。 */
+                rc = -LX_ETIMEDOUT;
+                for (round = 0; round < 16; round++)
+                {
+                    /* 期望值固定写 0（「还没放行」），不要读当前值再传进去：
+                     * 子进程可能已经放行过了，那时传 1 会让内核认为「值没变、
+                     * 该睡」，把已经发生的唤醒永远丢掉。0 这个口径下，字已经
+                     * 变成 1 就直接 -EAGAIN，循环立刻收尾。 */
+                    rc = lx4(LX_FUTEX, (lx_long)(unsigned long)go,
+                             LX_FUTEX_WAIT, 0, 0);
+                    if ((rc == 0) || (*go == 1ul))
+                    {
+                        break;
+                    }
+                }
+                check("PI robust: parent observed the child holding the lock",
+                      (lx_long)(*go), 1);
+
+                /* 父进程排队：此刻子进程还持有，所以这一次必须真的睡下。
+                 * 子进程退出时会投 SIGCHLD，而 robust 清理不一定已经跑完，
+                 * 于是这一次可能先回 -EINTR；Linux 上这就是「自己决定重不重
+                 * 试」的信号，重试即可（重试期间清理跑完，下一次就拿到锁）。 */
+                rc = -LX_EAGAIN;
+                for (round = 0; round < 16; round++)
+                {
+                    rc = lx4(LX_FUTEX, (lx_long)(unsigned long)lock,
+                             LX_FUTEX_LOCK_PI, 0, 0);
+                    if ((rc == 0) || ((rc != -LX_EINTR) && (rc != -LX_EAGAIN)))
+                    {
+                        break;
+                    }
+                }
+                check("PI robust: parent acquired after the holder died", rc, 0);
+                check("PI robust: word holds the parent tid",
+                      (lx_long)(*lock & LX_FUTEX_TID_MASK), mytid);
+                check("PI robust: word carries OWNER_DIED for the taker",
+                      (lx_long)(*lock & LX_FUTEX_OWNER_DIED),
+                      (lx_long)LX_FUTEX_OWNER_DIED);
+                status = -1;
+                check("PI robust child reaped",
+                      lx4(LX_WAIT4, child, (lx_long)(unsigned long)&status, 0, 0),
+                      child);
+                /* bit0 登记成功 / bit1 拿到锁 / bit2 字里是它 / bit3 看到
+                 * 父进程排队（WAITERS 位）。四条全置才算这一轮真的跑通。 */
+                check("PI robust child saw register+lock+tid+waiter (bits=15)",
+                      (status >> 8) & 0xFF, 15);
+            }
+
+            /* ---- 3) 非 PI robust：持锁退出后字必须变成 OWNER_DIED ---- */
+            {
+                unsigned long *rh2  = (unsigned long *)(unsigned long)(pw + 0x300);
+                unsigned long *nod2 = (unsigned long *)(unsigned long)(pw + 0x320);
+                volatile unsigned long *lock2 = pw + 0x360;
+                volatile unsigned long *go2   = pw + 0x380;
+                lx_long child2;
+                lx_long status2 = -1;
+                lx_long rc2 = -1;
+                int     round2;
+
+                rh2[0] = (unsigned long)nod2;   /* 没有 PI 位 */
+                rh2[1] = (unsigned long)((const char *)lock2 -
+                                         (const char *)nod2);
+                rh2[2] = 0ul;
+                nod2[0] = (unsigned long)rh2;
+                *lock2 = 0ul;
+                *go2 = 0ul;
+
+                child2 = lx3(LX_CLONE, LX_SIGCHLD, 0, 0);
+                if (child2 == 0)
+                {
+                    int     code = 0;
+                    lx_long me = lx1(LX_GETPID, 0);
+
+                    if (lx2(LX_SET_ROBUST_LIST, (lx_long)(unsigned long)rh2,
+                            24) == 0)
+                    {
+                        code |= 1;
+                    }
+                    /* glibc 的 robust 普通互斥就是这么写的：字里放持有者 tid，
+                     * 拿锁靠 cmpxchg，不经过内核。 */
+                    *lock2 = (unsigned long)me;
+                    if ((*lock2 & LX_FUTEX_TID_MASK) == (unsigned long)me)
+                    {
+                        code |= 2;
+                    }
+                    *go2 = 1ul;
+                    (void)lx3(LX_FUTEX, (lx_long)(unsigned long)go2,
+                              LX_FUTEX_WAKE, 1);
+                    (void)lx1(LX_EXIT, code);       /* 持锁退出 */
+                    for (;;)
+                    {
+                    }
+                }
+                check("clone for non-PI robust child > 0",
+                      (child2 > 0) ? 1 : 0, 1);
+
+                rc2 = -LX_ETIMEDOUT;
+                for (round2 = 0; round2 < 16; round2++)
+                {
+                    /* 同上一段的注释：期望值固定 0，避免「已经放行」被当成
+                     * 「值没变」而永久睡下。 */
+                    rc2 = lx4(LX_FUTEX, (lx_long)(unsigned long)go2,
+                              LX_FUTEX_WAIT, 0, 0);
+                    if ((rc2 == 0) || (*go2 == 1ul))
+                    {
+                        break;
+                    }
+                }
+                check("non-PI robust: parent observed the child owning the word",
+                      (lx_long)(*go2), 1);
+
+                /* 父进程按 PI 语义接手（OWNER_DIED 置位的字可以直接拿）：
+                 * 这一条同时证明「清理跑过」（否则会一直排队，读到 -EINTR）
+                 * 与「接手者看得见 OWNER_DIED」。 */
+                rc2 = -LX_EAGAIN;
+                for (round2 = 0; round2 < 16; round2++)
+                {
+                    rc2 = lx4(LX_FUTEX, (lx_long)(unsigned long)lock2,
+                              LX_FUTEX_LOCK_PI, 0, 0);
+                    if ((rc2 == 0) || ((rc2 != -LX_EINTR) && (rc2 != -LX_EAGAIN)))
+                    {
+                        break;
+                    }
+                }
+                check("non-PI robust: parent took over the dead owner's word",
+                      rc2, 0);
+                check("non-PI robust: word carries OWNER_DIED after the death",
+                      (lx_long)(*lock2 & LX_FUTEX_OWNER_DIED),
+                      (lx_long)LX_FUTEX_OWNER_DIED);
+                check("non-PI robust: word now holds the parent tid",
+                      (lx_long)(*lock2 & LX_FUTEX_TID_MASK), mytid);
+                status2 = -1;
+                check("non-PI robust child reaped",
+                      lx4(LX_WAIT4, child2, (lx_long)(unsigned long)&status2,
+                          0, 0), child2);
+                check("non-PI robust child registered and owned (bits=3)",
+                      (status2 >> 8) & 0xFF, 3);
+            }
         }
     }
 

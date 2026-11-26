@@ -119,6 +119,8 @@ int main(void)
 #define T_NR_EXIT           (93u)
 #define T_NR_EXIT_GROUP     (94u)
 #define T_NR_SET_TID        (96u)
+#define T_NR_SET_ROBUST_LIST (99u)
+#define T_NR_GET_ROBUST_LIST (100u)
 #define T_NR_CLOCK_GETTIME  (113u)
 #define T_NR_KILL           (129u)
 #define T_NR_FUTEX          (98u)
@@ -425,6 +427,12 @@ void arkrtos_port_exit_critical(uint32 state)
 #define T_FUTEX_WAIT_BITSET (9u)
 #define T_FUTEX_WAKE_BITSET (10u)
 #define T_FUTEX_CLOCK_REALTIME (256u)
+#define T_FUTEX_LOCK_PI     (6u)
+#define T_FUTEX_UNLOCK_PI   (7u)
+#define T_FUTEX_TRYLOCK_PI  (8u)
+#define T_FUTEX_TID_MASK    (0x3FFFFFFFu)
+#define T_FUTEX_WAITERS     (0x80000000u)
+#define T_FUTEX_OWNER_DIED  (0x40000000u)
 
 int32 g_block_calls;
 uint32 g_block_ms;
@@ -446,6 +454,20 @@ int32 arkrtos_task_wakeup_internal(int32 task_id)
     g_wake_calls++;
     g_wake_last = task_id;
     return 0;
+}
+
+/* PI 的优先级重算要调 arkrtos_ready_reprio（真机上把换过优先级的任务换桶）。
+ * 宿主用例里没有就绪队列，这里只记账：断言看的是「有没有按 base_priority
+ * 算回去」，以及算回去之前那个旧值对不对。 */
+int32 g_reprio_calls;
+int32 g_reprio_last_idx;
+uint8 g_reprio_last_old;
+
+void arkrtos_ready_reprio(int32 task_idx, uint8 old_prio)
+{
+    g_reprio_calls++;
+    g_reprio_last_idx = task_idx;
+    g_reprio_last_old = old_prio;
 }
 
 /* 窗口基址做成变量：futex 的键在「没有分页窗口」（MPU 后端）时退回虚拟
@@ -2615,9 +2637,11 @@ static void t_futex(t_ctx *c)
     ck_ret(c, -T_ENOSYS, "futex 未驻留的页回 -ENOSYS");
 
     /* 不认识的 op：如实 -ENOSYS，不猜成 WAIT。
-     * 用 6（FUTEX_LOCK_PI）：9 / 10 已经是 WAIT_BITSET / WAKE_BITSET 了，
-     * 拿它们当「未知 op」会让夹具与实现自相矛盾。 */
-    (void)call(c, T_NR_FUTEX, w0, 6UL, 5UL, 0UL);
+     * 用 11（FUTEX_WAIT_REQUEUE_PI）：6/7/8 已经是 LOCK_PI / UNLOCK_PI /
+     * TRYLOCK_PI，9/10 是两种 BITSET，拿它们当「未知 op」会让夹具与实现
+     * 自相矛盾。11/12 这两条 PI 条件变量专用 op 本实现不提供（默认构建
+     * 的 glibc 不生成它们），所以仍是一条诚实的未知 op。 */
+    (void)call(c, T_NR_FUTEX, w0, 11UL, 5UL, 0UL);
     ck_ret(c, -T_ENOSYS, "futex 未知 op 回 -ENOSYS");
 
     /* 唤醒数取负：-EINVAL */
@@ -2983,6 +3007,270 @@ static void t_futex(t_ctx *c)
     ck_ret(c, 0, "futex 第二档收尾：恢复 SIGUSR1 屏蔽");
 
     /* 收尾：把端口能力恢复成默认，后面的分组依赖 -1 */
+    g_restart_rc = -1;
+}
+
+/* 分组 14b：futex 的 PI 三档（LOCK_PI / UNLOCK_PI / TRYLOCK_PI）与
+ * robust list（set_robust_list / get_robust_list / 退出清理）
+ *
+ * 判据全部落在「用户看到的字与返回值」上：持有者 tid、WAITERS 位、OWNER_DIED
+ * 位、EDEADLK / EPERM / EAGAIN / ETIMEDOUT，以及交接之后字里是新持有者。
+ * 优先级继承的有效性靠任务表的 priority 与 arkrtos_ready_reprio 的调用记账
+ * （真机上就是换桶），这样「抬上去」和「算回去」都能被钉死 —— 只测值不测
+ * 优先级的话，实现可以整个跳过继承仍然全绿。
+ *
+ * 只有一个执行流可用，所以「另一个任务」通过切换 arkrtos_current_task_id
+ * 模拟：任务表是真实的，futex 槽按任务号索引，两边看到的字是同一个。 */
+static void t_futex_pi(t_ctx *c)
+{
+    unsigned long w = u_ptr(0x10u);
+    int32 cur0 = arkrtos_current_task_id;
+
+    fresh(c);
+    g_restart_rc  = 0;
+    g_block_calls = 0;
+    g_wake_calls  = 0;
+    g_reprio_calls = 0;
+    arkrtos_current_task_id = 7;
+    arkrtos_task_table[6].base_priority = 4u;    /* 等待者：tid 7（就是我） */
+    arkrtos_task_table[6].priority      = 4u;
+    arkrtos_task_table[4].base_priority = 10u;   /* 持有者：tid 5 */
+    arkrtos_task_table[4].priority      = 10u;
+
+    /* ---- 空锁直接拿 ---- */
+    u_put32(0x10u, 0u);
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    ck_ret(c, 0, "futex LOCK_PI 空锁直接拿到");
+    ck_u(u_get32(0x10u), 7u, "futex LOCK_PI 把持有者 tid 写进字里");
+
+    /* ---- 自己已经持有：真死锁，回 -EDEADLK ---- */
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    ck_ret(c, -35, "futex LOCK_PI 自己持有回 -EDEADLK（不假装成功）");
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_TRYLOCK_PI, 0UL, 0UL);
+    ck_ret(c, -35, "futex TRYLOCK_PI 自己持有也回 -EDEADLK（Linux 同）");
+
+    /* ---- UNLOCK_PI ---- */
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_UNLOCK_PI, 0UL, 0UL);
+    ck_ret(c, 0, "futex UNLOCK_PI 持有者解锁回 0");
+    ck_u(u_get32(0x10u), 0u, "futex UNLOCK_PI 没人等时把字清成 0");
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_UNLOCK_PI, 0UL, 0UL);
+    ck_ret(c, -1, "futex UNLOCK_PI 不是持有者回 -EPERM");
+
+    /* ---- TRYLOCK_PI 成功 / 失败 ---- */
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_TRYLOCK_PI, 0UL, 0UL);
+    ck_ret(c, 0, "futex TRYLOCK_PI 空锁拿到");
+    ck_u(u_get32(0x10u), 7u, "futex TRYLOCK_PI 也写持有者 tid");
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_UNLOCK_PI, 0UL, 0UL);
+    ck_ret(c, 0, "futex TRYLOCK_PI 拿到之后解锁回 0");
+
+    u_put32(0x10u, 5u);                 /* 别人持有 */
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_TRYLOCK_PI, 0UL, 0UL);
+    ck_ret(c, -11, "futex TRYLOCK_PI 别人持有回 -EAGAIN");
+    ck_u(u_get32(0x10u), 5u | T_FUTEX_WAITERS,
+         "futex TRYLOCK_PI 失败时把 WAITERS 位置上（有人试过）");
+
+    /* ---- LOCK_PI 拿不到：登记 + 抬持有者优先级 ---- */
+    fresh(c);
+    g_restart_rc  = 0;
+    g_block_calls = 0;
+    g_wake_calls  = 0;
+    g_reprio_calls = 0;
+    arkrtos_current_task_id = 7;
+    arkrtos_task_table[6].base_priority = 4u;    /* 等待者：tid 7（就是我） */
+    arkrtos_task_table[6].priority      = 4u;
+    arkrtos_task_table[4].base_priority = 10u;   /* 持有者：tid 5 */
+    arkrtos_task_table[4].priority      = 10u;
+    u_put32(0x10u, 5u);
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    ck_ret(c, 0, "futex LOCK_PI 别人持有时登记等待并回 0（返回值被重放的那次覆盖）");
+    ck(g_block_calls == 1, "futex LOCK_PI 真的阻塞了一次");
+    ck_u(u_get32(0x10u), 5u | T_FUTEX_WAITERS,
+         "futex LOCK_PI 拿不到时置 WAITERS 位（持有者的 UNLOCK 靠它知道要交接）");
+    ck_u((unsigned long)arkrtos_task_table[4].priority, 4UL,
+         "futex LOCK_PI 把持有者（tid 5）的有效优先级抬到等待者的 4");
+    ck(g_reprio_calls >= 1, "futex LOCK_PI 抬优先级走的是换桶接口（不是偷偷改字段）");
+    ck_u((unsigned long)arkrtos_task_table[4].base_priority, 10UL,
+         "futex LOCK_PI 没有动持有者的基准优先级（撤销继承的依据）");
+
+    /* 时间片醒来、值没变：继续睡，不再重复抬一次（已经抬过了） */
+    {
+        int32 prio0 = (int32)arkrtos_task_table[4].priority;
+
+        (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+        ck_ret(c, 0, "futex LOCK_PI 重放（a0 被清成 0）继续睡");
+        ck(g_block_calls == 2, "futex LOCK_PI 重放后又睡了一个时间片");
+        ck_u((unsigned long)arkrtos_task_table[4].priority, (unsigned long)prio0,
+             "futex LOCK_PI 重放时持有者优先级没有被重复叠加");
+    }
+
+    /* ---- 持有者 UNLOCK_PI：交接给优先级最高的等待者 ---- */
+    arkrtos_current_task_id = 5;
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_UNLOCK_PI, 0UL, 0UL);
+    ck_ret(c, 0, "futex UNLOCK_PI 有人等时交接回 0");
+    ck_u(u_get32(0x10u), 7u, "futex UNLOCK_PI 把字写成等待者的 tid（直接交接）");
+    ck_u((unsigned long)g_wake_last, 7UL, "futex UNLOCK_PI 唤醒的是那个等待者");
+    ck_u((unsigned long)arkrtos_task_table[4].priority, 10UL,
+         "futex 交接之后原持有者的优先级算回基准（不是永久抬着）");
+
+    /* ---- 被交接的等待者重放：确认所有权，字里仍是它 ---- */
+    arkrtos_current_task_id = 7;
+    (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    ck_ret(c, 0, "futex 被交接的等待者重放回 0");
+    ck_u(u_get32(0x10u), 7u, "futex 交接后的字保持新持有者的 tid");
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_UNLOCK_PI, 0UL, 0UL);
+    ck_ret(c, 0, "futex 新持有者解锁回 0");
+    ck_u(u_get32(0x10u), 0u, "futex 新持有者解锁后字清 0");
+
+    /* ---- 超时：不白睡，也不留下登记 ---- */
+    arkrtos_task_table[4].priority = 10u;
+    u_put32(0x10u, 5u);
+    u_put32(0x60u, 0u);                 /* tv_sec  */
+    u_put32(0x64u, 0u);                 /* tv_nsec：当场到期 */
+    {
+        int32 blocks0 = g_block_calls;
+
+        (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL,
+                   u_ptr(0x60u));
+        ck_ret(c, -110, "futex LOCK_PI 超时 0 回 -ETIMEDOUT");
+        ck(g_block_calls == blocks0, "futex LOCK_PI 已经到期时一次也没睡");
+    }
+    ck_u((unsigned long)arkrtos_task_table[4].priority, 10UL,
+         "futex LOCK_PI 超时后持有者优先级没有被抬着");
+
+    /* ---- 原持有者已死：接手者拿到的字里保留 OWNER_DIED ---- */
+    u_put32(0x10u, 5u | T_FUTEX_OWNER_DIED);
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    ck_ret(c, 0, "futex LOCK_PI 接手已死持有者的锁回 0");
+    ck_u(u_get32(0x10u), 7u | T_FUTEX_OWNER_DIED,
+         "futex LOCK_PI 接手时保留 OWNER_DIED（用户态据此报 EOWNERDEAD）");
+    (void)call(c, T_NR_FUTEX, w, (unsigned long)T_FUTEX_UNLOCK_PI, 0UL, 0UL);
+    ck_u(u_get32(0x10u), 0u, "futex 用户态清过 OWNER_DIED 之后解锁就是 0");
+
+    /* ---- 参数边界：窗口外的字没有键 ---- */
+    (void)call(c, T_NR_FUTEX, U_BASE - 8UL, (unsigned long)T_FUTEX_LOCK_PI,
+               0UL, 0UL);
+    ck_ret(c, -38, "futex LOCK_PI 窗口外的字回 -ENOSYS（不拿 VA 冒充键）");
+
+    /* ================= robust list ================= */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+
+    /* ---- 参数校验 ---- */
+    (void)call(c, T_NR_SET_ROBUST_LIST, u_ptr(0x300u), 8UL, 0UL, 0UL);
+    ck_ret(c, -22, "set_robust_list 长度装不下结构回 -EINVAL");
+    (void)call(c, T_NR_SET_ROBUST_LIST, u_ptr(0x302u), 12UL, 0UL, 0UL);
+    ck_ret(c, -22, "set_robust_list 指针没对齐回 -EINVAL");
+    (void)call(c, T_NR_SET_ROBUST_LIST, 0UL, 12UL, 0UL, 0UL);
+    ck_ret(c, -22, "set_robust_list 空指针回 -EINVAL");
+    (void)call(c, T_NR_SET_ROBUST_LIST, u_ptr(0x300u), 12UL, 0UL, 0UL);
+    ck_ret(c, 0, "set_robust_list 正常登记回 0");
+
+    /* ---- get 回读 ---- */
+    u_put32(0x380u, 0u);
+    u_put32(0x384u, 0u);
+    (void)call(c, T_NR_GET_ROBUST_LIST, 7UL, u_ptr(0x380u), u_ptr(0x384u), 0UL);
+    ck_ret(c, 0, "get_robust_list 查自己回 0");
+    ck_u(u_get32(0x380u), (unsigned long)u_ptr(0x300u),
+         "get_robust_list 回读链头指针");
+    ck_u(u_get32(0x384u), 12UL, "get_robust_list 回读长度");
+    (void)call(c, T_NR_GET_ROBUST_LIST, 9UL, u_ptr(0x380u), u_ptr(0x384u), 0UL);
+    ck_ret(c, -3, "get_robust_list 查别的进程回 -ESRCH（不编造）");
+    (void)call(c, T_NR_GET_ROBUST_LIST, 7UL, 0UL, u_ptr(0x384u), 0UL);
+    ck_ret(c, -14, "get_robust_list 出参为空回 -EFAULT");
+
+    /* ---- 非 PI：退出时 tid 清掉、置 OWNER_DIED、留 WAITERS 并唤醒一个 ---- */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    g_restart_rc = 0;
+    g_block_calls = 0;
+    g_wake_calls = 0;
+    u_put32(0x360u, 7u | T_FUTEX_WAITERS);      /* 任务 7 持有的 robust 互斥字 */
+    u_put32(0x300u, (uint32)u_ptr(0x320u));     /* head.next -> 节点 */
+    u_put32(0x304u, 0x40u);                     /* futex_offset = 0x40 */
+    u_put32(0x308u, 0u);                        /* list_op_pending */
+    u_put32(0x320u, (uint32)u_ptr(0x300u));     /* 节点的 next = head（终止） */
+    (void)call(c, T_NR_SET_ROBUST_LIST, u_ptr(0x300u), 12UL, 0UL, 0UL);
+    ck_ret(c, 0, "robust 非 PI 前置：登记链头");
+
+    /* 造一个真的等待者（任务 3）等在同一个字上，退出时必须被叫醒 */
+    arkrtos_current_task_id = 3;
+    (void)call(c, T_NR_FUTEX, u_ptr(0x360u), (unsigned long)T_FUTEX_WAIT,
+               7u | T_FUTEX_WAITERS, 0UL);
+    ck_ret(c, 0, "robust 非 PI 前置：任务 3 在这个字上登记等待");
+    arkrtos_current_task_id = 7;
+    (void)arkrtos_linux_abi_on_task_exit(7);
+    ck_u(u_get32(0x360u), T_FUTEX_OWNER_DIED | T_FUTEX_WAITERS,
+         "robust 退出把字改成「持有者已死」（tid 清掉、WAITERS 留着）");
+    ck_u((unsigned long)g_wake_last, 3UL, "robust 退出叫醒的是那个等待者（不是随便一个）");
+    arkrtos_current_task_id = 3;
+    (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT,
+               7u | T_FUTEX_WAITERS, 0UL);
+    ck_ret(c, 0, "robust 退出唤醒的那条重放回 0 并销账");
+
+    /* 字已经不属于它（用户态自己解过锁）：一个字节都不许改 */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    u_put32(0x360u, 9u);
+    u_put32(0x300u, (uint32)u_ptr(0x320u));
+    u_put32(0x304u, 0x40u);
+    u_put32(0x308u, 0u);
+    u_put32(0x320u, (uint32)u_ptr(0x300u));
+    (void)call(c, T_NR_SET_ROBUST_LIST, u_ptr(0x300u), 12UL, 0UL, 0UL);
+    ck_ret(c, 0, "robust 别人的字前置：登记链头");
+    (void)arkrtos_linux_abi_on_task_exit(7);
+    ck_u(u_get32(0x360u), 9u, "robust 退出不碰别人持有的字");
+
+    /* ---- PI：tid 保留、交接给队首、OWNER_DIED 留给接手者 ---- */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    g_restart_rc = 0;
+    g_block_calls = 0;
+    g_wake_calls = 0;
+    arkrtos_task_table[6].base_priority = 10u;   /* 持有者：tid 7 */
+    arkrtos_task_table[6].priority      = 10u;
+    arkrtos_task_table[2].base_priority = 4u;    /* 等待者：tid 3 */
+    arkrtos_task_table[2].priority      = 4u;
+    u_put32(0x360u, 7u);                          /* 任务 7 持有 */
+    u_put32(0x300u, (uint32)(u_ptr(0x320u) | 1u)); /* 最低位 = PI 条目 */
+    u_put32(0x304u, 0x40u);
+    u_put32(0x308u, 0u);
+    u_put32(0x320u, (uint32)u_ptr(0x300u));
+    (void)call(c, T_NR_SET_ROBUST_LIST, u_ptr(0x300u), 12UL, 0UL, 0UL);
+    ck_ret(c, 0, "robust PI 前置：登记链头");
+    arkrtos_current_task_id = 3;
+    (void)call(c, T_NR_FUTEX, u_ptr(0x360u), (unsigned long)T_FUTEX_LOCK_PI,
+               0UL, 0UL);
+    ck_ret(c, 0, "robust PI 前置：任务 3 在 PI 锁上排队");
+    ck_u((unsigned long)arkrtos_task_table[6].priority, 4UL,
+         "robust PI 前置：任务 7 被抬到 4");
+    arkrtos_current_task_id = 7;
+    (void)arkrtos_linux_abi_on_task_exit(7);
+    ck_u(u_get32(0x360u), 3u | T_FUTEX_OWNER_DIED,
+         "robust PI 退出把所有权交接给队首，并保留 OWNER_DIED");
+    ck_u((unsigned long)g_wake_last, 3UL, "robust PI 退出叫醒的是队首等待者");
+    arkrtos_current_task_id = 3;
+    (void)call(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_LOCK_PI, 0UL, 0UL);
+    ck_ret(c, 0, "robust PI 接手者重放回 0（拿到所有权）");
+    ck_u(u_get32(0x360u), 3u | T_FUTEX_OWNER_DIED,
+         "robust PI 接手者的字里带着 OWNER_DIED（用户态据此报 EOWNERDEAD）");
+    (void)call(c, T_NR_FUTEX, u_ptr(0x360u), (unsigned long)T_FUTEX_UNLOCK_PI,
+               0UL, 0UL);
+    ck_ret(c, 0, "robust PI 接手者解锁回 0");
+    ck_u(u_get32(0x360u), 0u, "robust PI 用户态清过 OWNER_DIED 之后解锁就是 0");
+
+    /* ---- 坏链表（自环）：退出路径必须能走完 ---- */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    u_put32(0x300u, (uint32)u_ptr(0x320u));
+    u_put32(0x304u, 0x40u);
+    u_put32(0x308u, 0u);
+    u_put32(0x320u, (uint32)u_ptr(0x320u));       /* 自己指向自己 */
+    (void)call(c, T_NR_SET_ROBUST_LIST, u_ptr(0x300u), 12UL, 0UL, 0UL);
+    ck_ret(c, 0, "robust 自环前置：登记链头");
+    (void)arkrtos_linux_abi_on_task_exit(7);
+    ck(1, "robust 自环的链表也能走完退出路径（有 2048 条上限）");
+
+    arkrtos_current_task_id = cur0;
     g_restart_rc = -1;
 }
 #endif /* ARKRTOS_USE_LINUX_FUTEX == 1 */
@@ -4396,6 +4684,7 @@ int main(void)
     t_task_exit(&c);
 #if (ARKRTOS_USE_LINUX_FUTEX == 1)
     t_futex(&c);
+    t_futex_pi(&c);
 #endif
 #if (ARKRTOS_USE_LINUX_SELECT == 1)
     t_pselect6(&c);
