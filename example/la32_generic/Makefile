@@ -156,6 +156,24 @@ SRCS_S := \
 
 OBJS := $(addprefix $(BUILD)/,$(addsuffix .o,$(basename $(SRCS_C) $(SRCS_S))))
 
+# ---- 编译参数指纹：换了开关就必须重编，不准复用上一套开关的 .o ----------
+# 依赖图救不了这件事：.d 只记头文件、不记命令行，所以改了 ARCH_FLAGS 或
+# EXTRA_CFLAGS 而文件时间戳没变时，旧 .o 会被原样复用（两套开关的目标文件
+# 混进同一个镜像，行为没人验证过；链接期还可能报一堆 undefined reference）。
+# 这里按 CFLAGS + INCLUDES 的 cksum 落一个戳，戳一变就按当前时间重写它，
+# 让所有 .o 都比它旧 = 全量重编。用 cksum 不用 sha1sum：POSIX 标准工具，
+# Git Bash 与 Linux 都有。CFLAGS 里的 `-D...='"x.h"'` 是成对引号，拼进
+# 单引号串后仍是合法 shell 词；EXTRA_CFLAGS 里不许出现落单的引号。
+CFG_STAMP := $(BUILD)/.cflags.stamp
+CFG_SIG   := $(shell printf '%s' '$(CFLAGS)|$(INCLUDES)' | cksum | cut -d' ' -f1)
+ifeq ($(shell cat $(CFG_STAMP) 2>/dev/null),$(CFG_SIG))
+# 同一套参数：不碰戳，增量构建照旧。
+else
+$(shell mkdir -p $(BUILD) && printf '%s\n' '$(CFG_SIG)' > $(CFG_STAMP))
+endif
+
+$(OBJS): $(CFG_STAMP)
+
 # 密钥头变了就重编：它被 arkrtos_features.h 间接包含。
 $(OBJS): $(SIGNKEY)
 

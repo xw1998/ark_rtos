@@ -3697,7 +3697,10 @@ The monitor session (§5.9) is typed by hand over telnet.
 
 `run` only reports the missing carrier.
 
-Full rebuild is required after any change: `rm -rf build/la32_generic`.
+A flag change now forces a full rebuild by itself: the Makefile stores
+`cksum(CFLAGS|INCLUDES)` in `$(BUILD)/.cflags.stamp` and rewrites the stamp whenever the
+signature changes, so every `.o` is older than it. `rm -rf build/la32_generic` is no longer
+required (belt and braces only).
 
 Then verify no 64-bit instruction slipped in:
 

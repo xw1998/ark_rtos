@@ -992,8 +992,10 @@ rm -rf build/qemu_loongarch64
 make -f example/qemu_loongarch64/Makefile -j8
 ```
 
-因为本工程的 Makefile **不跟踪编译参数**——只改 `ARCH_FLAGS`/`CFLAGS` 而增量编，
-会得到"旧的 .o + 新的命令行"，症状是改了半天毫无变化。
+早先本工程的 Makefile **不跟踪编译参数**——只改 `ARCH_FLAGS`/`CFLAGS` 而增量编，
+会得到“旧的 .o + 新的命令行”，症状是改了半天毫无变化。2026-11-27 起 Makefile 按
+`cksum(CFLAGS|INCLUDES)` 落 `$(BUILD)/.cflags.stamp`，参数一变就全量重编，上面那条
+`rm -rf` 从“必需”降级成“保险动作”。
 
 #### 5.10.4 偶发 ADEM：从「卡在奇怪的地方」到「255 被当成任务号」
 
@@ -7195,8 +7197,9 @@ make -f example/la32_generic/Makefile run   # **只会报错失败**（exit 1 �
 再开 `AUDIT`/`CRASH_LOG`/`MDK_TRACE`/`SECCHECK`/`SOFTBUS`
 （`267712/216/615956`）→ 再开 `IMAGE_SIGN`/`HW_SAFE`/`KERNEL_GUARD` 后的
 上面这组（差额主要在软总线静态池、trace 环形缓冲与三张安全表，§6.8）。
-改了 `ARCH_FLAGS` 或板级开关后必须先 `rm -rf build/la32_generic` 全量重建
-——Makefile 不跟踪编译参数，增量构建会复用上一套开关的 `.o`。
+改了 `ARCH_FLAGS` 或板级开关后不必再手工 `rm -rf build/la32_generic`：Makefile 按
+`cksum(CFLAGS|INCLUDES)` 落 `$(BUILD)/.cflags.stamp`，参数一变就全量重编（2026-11-27
+起；此前只能靠手工删构建目录）。
 
 没有串口文件可看——这个目标产出 ELF 就结束了。要核对「没有混进 64 位指令」：
 
