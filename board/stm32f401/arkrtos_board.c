@@ -23,6 +23,74 @@
 #include "arkrtos_trace.h"
 
 /* ============================================================
+ * 裸打印 - 上下文切换路径专用（[STKOVF] 等）
+ * @details 溢出/故障发生在切换路径上，那里不能拿日志锁（arkrtos_log 要
+ *          互斥、还可能触发调度），所以 arkrtos_task.c 直接 extern 这三个
+ *          函数，由板级用轮询寄存器实现。三条纪律：
+ *          - 只碰 UART 寄存器，不分配、不加锁、不打日志；
+ *          - 串口还没上电（CR1.UE 未置位）时静默返回，不往没初始化的外设
+ *            里写数据；
+ *          - 等 TXE 带自旋上限，外设异常时不会把 CPU 卡死在故障路径上。
+ * ============================================================ */
+#define ARK_BOARD_RAW_UART USART2
+
+void arkrtos_board_putc(char c)
+{
+    uint32 guard = 0u;
+
+    if((ARK_BOARD_RAW_UART->CR1 & USART_CR1_UE) == 0u)
+    {
+        return;
+    }
+
+    while(((ARK_BOARD_RAW_UART->SR & USART_SR_TXE) == 0u) && (guard < 200000u))
+    {
+        guard++;
+    }
+
+    ARK_BOARD_RAW_UART->DR = (uint32)(uint8)c;
+}
+
+void arkrtos_board_puts(const char *s)
+{
+    if(s == 0)
+    {
+        return;
+    }
+
+    while(*s != '\0')
+    {
+        arkrtos_board_putc(*s);
+        s++;
+    }
+}
+
+void arkrtos_board_putu(uint32 value)
+{
+    char buf[11];
+    uint32 i = 0u;
+
+    if(value == 0u)
+    {
+        arkrtos_board_putc('0');
+        return;
+    }
+
+    while((value != 0u) && (i < 10u))
+    {
+        buf[i] = (char)('0' + (value % 10u));
+        value /= 10u;
+        i++;
+    }
+
+    while(i > 0u)
+    {
+        i--;
+        arkrtos_board_putc(buf[i]);
+    }
+}
+
+/* ============================================================
  * 板级初始化 - 实现 port 层板级接口
  * ============================================================ */
 void arkrtos_port_board_init(void)
