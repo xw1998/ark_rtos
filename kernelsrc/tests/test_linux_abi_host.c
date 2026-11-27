@@ -5691,6 +5691,7 @@ static void t_socket(t_ctx *c)
     uint32 fds[2];
     uint8  buf[8];
     int32  r;
+    int32  s2;
     uint32 h3;
 
     /* ---- socket(2) 的参数校验：一条都不能发到 net 去 ---- */
@@ -6140,7 +6141,7 @@ static void t_socket(t_ctx *c)
     (void)call(c, T_NR_CLOSE, 3UL, 0UL, 0UL, 0UL);
     ck_ret(c, -T_EBADF, "socket 关掉之后同一个 fd 回 -EBADF");
 
-    /* ---- dup/dup3 落在 socket 上：明确不支持（-EINVAL），源与目标两条边 ---- */
+    /* ---- dup/dup3 落在 socket 上（U-30）：副本共享同一个 net 句柄 ---- */
     fresh(c);
     net_reset();
     g_restart_rc = 0;
@@ -6149,10 +6150,71 @@ static void t_socket(t_ctx *c)
     ck(r == 3, "dup 前置：socket = fd 3");
     net_reset();
     (void)call(c, T_NR_DUP, 3UL, 0UL, 0UL, 0UL);
-    ck_ret(c, -T_EINVAL, "源的 socket 不能被 dup（-EINVAL，不造假句柄）");
+    ck_ret(c, 4, "socket 的 dup 拿到最小空号 4");
+    ck_u(g_net_calls, 0u, "dup 本身不发 net 请求（句柄原样共享）");
+
+    net_reset();
+    g_net_bytes = 1;
+    r = sock_run(c, T_NR_WRITE, 4UL, iop, 1UL, 0UL, 0UL, 0UL);
+    ck(r == 0, "副本上的 write 落到同一条 socket");
+    ck_u(g_net_opn[ARKRTOS_NET_SUB_SEND], 1u, "副本 write 走 SEND");
+    ck_u(g_net_arg[0], 91u, "SEND 交的是共享的那个句柄");
+
+    /* 两份副本都活着时改 O_NONBLOCK：另一份必须立刻看得见 */
+    net_reset();
+    (void)fcntl_call(c, 3UL, T_F_SETFL, (unsigned long)T_O_NONBLOCK);
+    ck_ret(c, 0, "源 fd 上 F_SETFL 成功");
+    (void)fcntl_call(c, 4UL, T_F_GETFL, 0UL);
+    ck((c->ret & (int32)T_O_NONBLOCK) != 0, "副本看得见源 fd 的 O_NONBLOCK");
+    (void)fcntl_call(c, 3UL, T_F_SETFL, 0UL);
+    ck_ret(c, 0, "源 fd 清回阻塞态");
+    (void)fcntl_call(c, 4UL, T_F_GETFL, 0UL);
+    ck((c->ret & (int32)T_O_NONBLOCK) == 0, "副本也跟着清回阻塞态");
+
+    net_reset();
+    (void)call(c, T_NR_CLOSE, 3UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "关掉源 fd 成功");
+    ck_u(g_net_opn[ARKRTOS_NET_SUB_CLOSE], 0u,
+         "还有副本活着：不向 net 发 CLOSE（Linux 只减一份 file 引用计数）");
+    net_reset();
+    g_net_bytes = 1;
+    r = sock_run(c, T_NR_WRITE, 4UL, iop, 1UL, 0UL, 0UL, 0UL);
+    ck(r == 0, "源 fd 关掉之后副本仍然能写");
+    ck_u(g_net_arg[0], 91u, "副本仍然指着同一个句柄");
+
+    /* O_NONBLOCK 是 file description 上的位：改一份，副本必须一起变 */
+    net_reset();
+    (void)fcntl_call(c, 4UL, T_F_SETFL, (unsigned long)T_O_NONBLOCK);
+    ck_ret(c, 0, "副本上 F_SETFL 成功");
+    (void)fcntl_call(c, 4UL, T_F_GETFL, 0UL);
+    ck((c->ret & (int32)T_O_NONBLOCK) != 0, "F_GETFL 读回 O_NONBLOCK");
+    net_reset();
+    g_net_rc = ARKRTOS_NET_EWOULDBLOCK;
+    g_block_calls = 0;
+    (void)call(c, T_NR_READ, 4UL, iop, 8UL, 0UL);
+    ck_ret(c, -T_EAGAIN, "非阻塞位真的进了 socket 层（EWOULDBLOCK 立刻回 EAGAIN）");
+    ck(g_block_calls == 0, "非阻塞之后不睡时间片");
+    g_net_rc = 0;
+
+    net_reset();
+    (void)call(c, T_NR_CLOSE, 4UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "最后一份 close 成功");
+    ck_u(g_net_opn[ARKRTOS_NET_SUB_CLOSE], 1u, "最后一份才通知协议栈");
+    ck_u(g_net_arg[0], 91u, "CLOSE 交的是这个句柄");
+    (void)call(c, T_NR_CLOSE, 4UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EBADF, "再关一次回 -EBADF");
+
+    /* dup3 到指定号：成功；目标槽本身是 socket 仍然 -EINVAL（要过 net 服务） */
+    fresh(c);
+    net_reset();
+    g_restart_rc = 0;
+    g_net_handle = 92;
+    r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+    ck(r == 3, "dup3 前置：socket = fd 3");
+    net_reset();
     (void)call(c, T_NR_DUP3, 3UL, 7UL, 0UL, 0UL);
-    ck_ret(c, -T_EINVAL, "dup3 的源是 socket 同样 -EINVAL");
-    ck_u(g_net_calls, 0u, "两个 dup 号都不往 net 发请求");
+    ck_ret(c, 7, "dup3 把 socket 复制到指定号 7");
+    ck_u(g_net_calls, 0u, "dup3 本身同样不发请求");
     (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
     ck_ret(c, 0, "目标 socket 用例：先建一根管道（fd 4/5）");
     net_reset();
@@ -6161,6 +6223,80 @@ static void t_socket(t_ctx *c)
     ck_ret(c, -T_EINVAL, "目标是 socket 时 dup3 回 -EINVAL（不覆盖 socket 槽）");
     r = sock_run(c, T_NR_READ, 3UL, u_ptr(T_DATA_OFF), 1UL, 0UL, 0UL, 0UL);
     ck(r == 1, "被拒之后 fd 3 仍然是 socket");
+    net_reset();
+    (void)call(c, T_NR_CLOSE, 7UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "收尾：关掉副本 fd 7");
+    ck_u(g_net_opn[ARKRTOS_NET_SUB_CLOSE], 0u, "还有源 fd 3 活着，仍然不发 CLOSE");
+
+    /* dup2(sock, 1)：重定向到标准流的 socket 副本也要能用（U-30 补齐的边） */
+    fresh(c);
+    net_reset();
+    g_restart_rc = 0;
+    g_net_handle = 93;
+    r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+    ck(r == 3, "别名前置：socket = fd 3");
+    net_reset();
+    (void)call(c, T_NR_DUP3, 3UL, 1UL, 0UL, 0UL);
+    ck_ret(c, 1, "dup2(sock, 1) 落到标准流别名");
+    g_net_bytes = 2;
+    r = sock_run(c, T_NR_WRITE, 1UL, iop, 2UL, 0UL, 0UL, 0UL);
+    ck(r == 0, "write(1) 落到别名上的 socket");
+    ck_u(g_net_opn[ARKRTOS_NET_SUB_SEND], 1u, "write(1) 走 SEND");
+    ck_u(g_net_arg[0], 93u, "SEND 交的是这个句柄");
+    net_reset();
+    (void)fcntl_call(c, 1UL, T_F_GETFL, 0UL);
+    ck((c->ret & (int32)T_O_NONBLOCK) == 0, "fcntl(1, F_GETFL) 认得别名槽（阻塞态）");
+    u_put32(T_LEN_OFF, 4u);
+    u_put32(T_VAL_OFF, 0u);
+    r = sock_run(c, T_NR_GETSOCKOPT, 1UL, (unsigned long)T_SOL_SOCKET,
+                 (unsigned long)T_SO_RCVBUF, valp, lenp, 0UL);
+    ck(r == 0, "getsockopt 走标准流别名也能问到 socket");
+    ck_u(g_net_opn[ARKRTOS_NET_SUB_GETSOCKOPT], 1u, "getsockopt 真的下到 net");
+    ck_u(g_net_arg[0], 93u, "问的是别名背后那个句柄");
+
+    /* 没有别名的 0/1/2 是控制台对象：对它们做 socket 调用要如实 -ENOTSOCK
+     * （Linux 上 fd 合法但不是套接字给的就是它），不是 -EBADF。 */
+    fresh(c);
+    net_reset();
+    (void)call6(c, T_NR_GETSOCKOPT, 0UL, (unsigned long)T_SOL_SOCKET,
+                (unsigned long)T_SO_TYPE, valp, lenp, 0UL);
+    ck_ret(c, -T_ENOTSOCK, "没有别名时对 fd 0 做 socket 调用回 -ENOTSOCK");
+    ck_u(g_net_calls, 0u, "控制台对象上一条 net 请求都不发");
+
+    /* 两个**不同的** socket 同时活着：F_SETFL 的同步循环必须认出「不是同一份
+     * 对象」，不许把邻居的阻塞位一起改掉。 */
+    fresh(c);
+    net_reset();
+    g_restart_rc = 0;
+    g_net_handle = 95;
+    r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+    ck(r == 3, "邻居用例：第一个 socket = fd 3");
+    g_net_handle = 96;
+    s2 = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_DGRAM, 0UL, 0UL, 0UL, 0UL);
+    ck(s2 == 4, "邻居用例：第二个 socket = fd 4");
+    net_reset();
+    (void)fcntl_call(c, 4UL, T_F_SETFL, (unsigned long)T_O_NONBLOCK);
+    ck_ret(c, 0, "第二个 socket 的 F_SETFL 成功");
+    (void)fcntl_call(c, 3UL, T_F_GETFL, 0UL);
+    ck((c->ret & (int32)T_O_NONBLOCK) == 0,
+       "不同句柄的 O_NONBLOCK 不会串到第一个 socket");
+
+    /* dup3 覆盖一个「被重定向到 socket」的标准流：同样 -EINVAL（那一格退掉
+     * 等于关 socket，必须过 net 服务）。 */
+    fresh(c);
+    net_reset();
+    g_restart_rc = 0;
+    g_net_handle = 97;
+    r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+    ck(r == 3, "别名覆盖用例：socket = fd 3");
+    (void)call(c, T_NR_DUP3, 3UL, 1UL, 0UL, 0UL);
+    ck_ret(c, 1, "别名覆盖用例：dup2(sock, 1) 成功");
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "别名覆盖用例：建一根管道");
+    net_reset();
+    (void)call(c, T_NR_DUP3, (unsigned long)u_get32(T_DATA_OFF), 1UL, 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "dup3 覆盖一个 socket 别名同样 -EINVAL");
+    ck_u(g_net_calls, 0u, "被拒的覆盖一条 net 请求都不发");
 
     /* ---- fd 槽用满：先判 -EMFILE，不往 net 发请求 ---- */
     fresh(c);

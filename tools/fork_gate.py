@@ -338,7 +338,10 @@ EXPECT_SELECT_CHECKS = 194 + LOCK_CHECKS
 # 往返不按一个 100 ms 等待时间片结算」的性能回归门）。
 # 再加 futex 第四档的 37 条：161 + 37 = 198 条；再加第五档的 14 条：212 条；
 # 再加阻塞管道段 20 条 = 232 条。
-EXPECT_SOCKET_CHECKS = 232 + LOCK_CHECKS
+# 再加 socket 的 dup（U-30）10 条：dup 给新号、两个号不同、关副本、关副本之后
+# 源仍然问得出 8081（不通知协议栈）、第二次 dup、关源、副本接管句柄仍然问得出
+# 8081、最后一份关掉才真关（原来那条裸 close 变成带判据的一条）。232 + 10 = 242。
+EXPECT_SOCKET_CHECKS = 242 + LOCK_CHECKS
 # THREAD 段多 25 条：clone(CLONE_THREAD)>0、PARENT_SETTID 写回、CLEARTID 上的
 # futex WAIT 回 0、CLEARTID 被清 0、线程真跑了、CHILD_SETTID 看到自己的 tid、
 # tid != 父 tid、线程 getpid == tgid、父 getpid 未变、SETTLS 落到 $tp、两栈
@@ -348,16 +351,17 @@ EXPECT_SOCKET_CHECKS = 232 + LOCK_CHECKS
 # 提前拆）与被 reap 的退出码 5、线程发起 exit_group 整组被 reap 且码 6、
 # 组长发起 exit_group 整组被 reap 且码 7。合计 161 + 25 = 186 条。
 # 再加 futex 第四档的 37 条（实测 231，含 thread 段自己多出的 8 条）；
-# 再加第五档的 14 条：245 条；再加阻塞管道段 20 条 = 265 条。
-EXPECT_THREAD_CHECKS = 265 + LOCK_CHECKS
+# 再加第五档的 14 条：245 条；再加阻塞管道段 20 条 = 265 条；再加 U-30 的
+# 10 条 = 275 条。
+EXPECT_THREAD_CHECKS = 275 + LOCK_CHECKS
 # QUOTA 段多 11 条（上限 3 = 父 + 1 子 + 1 线程）：建管子、上限内 fork 成功、
 # 线程把最后一格占掉、超限 fork==-EAGAIN、超限线程==-EAGAIN、被阻塞的子进程
 # 真被 reap、回收后第二个线程成功、**空间空闲时 fork 仍被拒**（全段最干净的
 # 一条：不可能是 ERR_BUSY）、第三个线程被拒、两个线程按 CHILD_CLEARTID 归队、
 # 额度回来后立刻能再起且退出码照传。合计 186 + 12 = 198 条。
 # 再加 futex 第四档的 37 条（实测 243）；再加第五档的 14 条：257 条；
-# 再加阻塞管道段 20 条 = 277 条。
-EXPECT_QUOTA_CHECKS = 277 + LOCK_CHECKS
+# 再加阻塞管道段 20 条 = 277 条；再加 U-30 的 10 条 = 287 条。
+EXPECT_QUOTA_CHECKS = 287 + LOCK_CHECKS
 # 上面这一档的每一段都对应一类「看起来对」的实现：另开地址空间（共享全局读
 # 不到）、每线程一份 fd 表（fork 段留不住）、线程退出就把进程拆了（进程活不
 # 下来）、把线程当进程挂到 wait4 上（exit_group 码不对）。

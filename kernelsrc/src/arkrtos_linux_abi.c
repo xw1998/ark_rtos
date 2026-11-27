@@ -1206,9 +1206,10 @@ static void lx_fd_console_fill(uint32 idx)
  * 管道要按复制出来的那一份**再加一次**读写端计数：两端计数是「有几个 fd
  * 都指向这条管道」，dup 之后确实多了一个。
  *
- * socket 不在这里复制：net 句柄是「一格一份」的，两个槽指向同一个 handle 会
- * 出现「谁先 close 谁把对方打哑」。调用方已对 socket 明确 -EINVAL，这里把
- * 该清的清掉，绝不把句柄抄过去。 */
+ * socket（U-30）在这里**照抄**：dup 出来的两个 fd 指向同一个 net 句柄，就是
+ * Linux 的「两个描述符共享同一份 open file description」。真正通知协议栈的
+ * 关闭只发生在**最后一份**退槽时（见 lx_sock_close 里的引用计数），先关的
+ * 那个只退自己的槽，不会把兄弟副本打哑。 */
 static void lx_fd_clone(uint32 dst, uint32 src)
 {
     uint8 kind = s_fd[src].kind;
@@ -1227,11 +1228,11 @@ static void lx_fd_clone(uint32 dst, uint32 src)
     s_fd[dst].off     = s_fd[src].off;
     lx_copy_str(s_fd[dst].path, (uint32)sizeof(s_fd[dst].path), s_fd[src].path);
 #if (ARKRTOS_USE_LINUX_SOCKET == 1)
-    s_fd[dst].net     = 0u;
-    s_fd[dst].stype   = 0u;
-    s_fd[dst].sflags  = 0u;
-    s_fd[dst].pok     = 0u;
-    s_fd[dst].pbits   = 0u;
+    s_fd[dst].net     = s_fd[src].net;
+    s_fd[dst].stype   = s_fd[src].stype;
+    s_fd[dst].sflags  = s_fd[src].sflags;
+    s_fd[dst].pok     = s_fd[src].pok;
+    s_fd[dst].pbits   = s_fd[src].pbits;
 #endif
     if((kind == LX_FD_PIPE_R) || (kind == LX_FD_PIPE_W))
     {
@@ -1250,6 +1251,34 @@ static void lx_fd_clone(uint32 dst, uint32 src)
     }
     s_fd[dst].used = 1u;
 }
+
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+/* 同一个 net 句柄在这个进程里被几个 fd 槽指着（U-30：dup 出来的副本）。
+ *
+ * 不做独立的引用计数表：fd 表只有 LX_MAX_FD 格，扫一遍比维护一张必须在
+ * dup / close / close_all / 槽重置 / fork 五处同步的计数器更难出错。fork
+ * 之后子进程的 socket 槽是空的（不跨进程继承），所以计数天然只在本进程内
+ * 成立，与 Linux 的「file 引用计数跨 fork 共享」这条偏差无关。
+ *
+ * 调用点交进来的句柄来自一个 LX_FD_SOCKET 槽，lx_sock_fill 保证它非 0，
+ * 所以这里不重复判 0（那一支永远走不到，是死代码）。 */
+static uint32 lx_sock_refs(uint32 slot, uint32 handle)
+{
+    uint32 i;
+    uint32 n = 0u;
+
+    for(i = 0u; i < LX_MAX_FD; i++)
+    {
+        if((s_proc[slot].fd[i].used != 0u) &&
+           (s_proc[slot].fd[i].kind == LX_FD_SOCKET) &&
+           ((uint32)s_proc[slot].fd[i].net == handle))
+        {
+            n++;
+        }
+    }
+    return n;
+}
+#endif /* ARKRTOS_USE_LINUX_SOCKET == 1 */
 
 static int32 lx_pipe_alloc(void)
 {
@@ -1749,12 +1778,14 @@ static int32 lx_pipe2(void *p_ctx)
  *   newfd >= 3             -> 覆盖那个 fd（Linux 语义：先关掉再指过去）。
  *
  * 明确的边界（文档与用例都钉住）：
- *   * socket 的 fd 不能 dup（-EINVAL）——net 句柄一格一份，共享要一层打开
- *     文件表项，本层没有；给出 -EINVAL 而不是一个会互相打哑的假句柄；
- *   * dup3 的 O_CLOEXEC 明确 -EINVAL——本内核没有 exec 时的关闭语义，与
- *     pipe2 同一立场；
- *   * 覆盖一个 socket 槽也是 -EINVAL：那一关必须过 net 服务（重放语义），
- *     本层没有那条路，硬关会在系统里漏一个 net socket。 */
+ *   * socket 的 fd **可以** dup（U-30）：副本与源共享同一个 net 句柄，就是
+ *     Linux 里「两个描述符指向同一份 open file description」；真正的关闭
+ *     只发生在最后一份退槽时（lx_sock_close 里的引用计数）；
+ *   * dup3 的 O_CLOEXEC 如实接受：execve 换帧后 lx_fd_close_cloexec() 会把
+ *     带这个标志的槽还回去（与 pipe2 同一立场）；
+ *   * 覆盖一个 socket 槽（含 fd 0/1/2 被重定向到 socket 的情形）仍是
+ *     -EINVAL：关掉那一格必须过 net 服务（有重放语义），本层没有那条路，
+ *     硬退槽会在系统里漏一个 net 句柄，硬留着则旧句柄永远没人关。 */
 static int32 lx_fd_dup_to(int32 oldfd, int32 newfd)
 {
     int32 idx     = -1;
@@ -1777,16 +1808,6 @@ static int32 lx_fd_dup_to(int32 oldfd, int32 newfd)
             return -LX_EBADF;
         }
     }
-    if(console == 0u)
-    {
-#if (ARKRTOS_USE_LINUX_SOCKET == 1)
-        if(s_fd[idx].kind == LX_FD_SOCKET)
-        {
-            return -LX_EINVAL;
-        }
-#endif
-    }
-
     if(newfd < 0)
     {
         dst = lx_fd_free_idx();
@@ -1811,6 +1832,14 @@ static int32 lx_fd_dup_to(int32 oldfd, int32 newfd)
 
         if(old_alias >= 0)
         {
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+            /* 覆盖一个被重定向到 socket 的标准流同样是 -EINVAL：退掉那一格
+             * 就等于关掉 socket，而关 socket 必须过 net 服务（见函数头）。 */
+            if(s_fd[old_alias].kind == LX_FD_SOCKET)
+            {
+                return -LX_EINVAL;
+            }
+#endif
             /* 别名原来那一格就是本次的目标格：先摘别名再还槽，不会多占一格，
              * 也不会在表满时假装失败。 */
             lx_std_set(newfd, -1);
@@ -2017,6 +2046,8 @@ static void lx_fd_set_fl(int32 idx, uint32 arg)
 #if (ARKRTOS_USE_LINUX_SOCKET == 1)
     if(s_fd[idx].kind == LX_FD_SOCKET)
     {
+        uint32 k;
+
         if((arg & (uint32)LX_O_NONBLOCK) != 0u)
         {
             s_fd[idx].sflags |= (uint8)LX_SOCKF_NONBLOCK;
@@ -2024,6 +2055,26 @@ static void lx_fd_set_fl(int32 idx, uint32 arg)
         else
         {
             s_fd[idx].sflags = (uint8)((uint32)s_fd[idx].sflags & ~(uint32)LX_SOCKF_NONBLOCK);
+        }
+        /* U-30：dup 副本与源是同一份 file description，F_SETFL 改的阻塞
+         * 行为两个副本必须一致。socket 层读的是 sflags 那一格，所以 sflags
+         * 与 fl 一起同步过去。 */
+        for(k = 0u; k < (uint32)LX_MAX_FD; k++)
+        {
+            if((int32)k == idx)
+            {
+                continue;
+            }
+            if((s_fd[k].used == 0u) || (s_fd[k].kind != LX_FD_SOCKET))
+            {
+                continue;
+            }
+            if(s_fd[k].net != s_fd[idx].net)
+            {
+                continue;
+            }
+            s_fd[k].sflags = s_fd[idx].sflags;
+            s_fd[k].fl     = s_fd[idx].fl;
         }
     }
 #endif
@@ -3666,8 +3717,9 @@ static uint32 lx_fd_release(uint32 slot, uint32 idx)
     }
     /* 管道按「有几个 fd 指着它」记账；dup 出来的那一份在复制时加过一次，
      * 所以在**每一次**释放里减一次，与引用计数不是一回事。
-     * 套接字不进这张账：net 那一格由 close 或退出时的 best-effort 关闭负责
-     * （见 lx_sock_close / lx_sock_close_all），这里只退 fd 槽。
+     * 套接字也不在这张账里：net 句柄是否真关由调用方决定（正常 close 只在
+     * 最后一份退槽时才发 CLOSE，见 lx_sock_close；退出收尸见
+     * lx_sock_close_all），这里只退 fd 槽并把 socket 那几格清干净。
      * 控制台引用没有外力可还，直接退槽。 */
     if((s_proc[slot].fd[idx].kind == LX_FD_PIPE_R) ||
        (s_proc[slot].fd[idx].kind == LX_FD_PIPE_W))
@@ -3716,6 +3768,15 @@ static uint32 lx_fd_release(uint32 slot, uint32 idx)
     s_proc[slot].fd[idx].size = 0u;
 #if (ARKRTOS_USE_LINUX_SIGIO == 1)
     s_proc[slot].fd[idx].owner = 0;     /* 槽退掉，主人登记也跟着没了 */
+#endif
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+    /* 句柄号、类型与缓存一起清掉：这一格随后可能被 openat 复用，留着旧的
+     * net 句柄号会让「按 kind 判断」之外的任何路径读到一个幽灵 socket。 */
+    s_proc[slot].fd[idx].net    = 0u;
+    s_proc[slot].fd[idx].stype  = 0u;
+    s_proc[slot].fd[idx].sflags = 0u;
+    s_proc[slot].fd[idx].pok    = 0u;
+    s_proc[slot].fd[idx].pbits  = 0u;
 #endif
     /* 指向这一格的标准流别名同时摘掉：别名与槽是同一份状态，留一个指向
      * 空槽的别名等于给程序一个假句柄（lx_std_slot 也会当它不存在，但让它
@@ -3918,11 +3979,26 @@ static int32 lx_sock_alloc_fd(void)
  * -ENOTSOCK（Linux 的 socket 族调用对非 socket 描述符给的就是它）。 */
 static int32 lx_sock_idx(int32 fd)
 {
-    int32 idx = lx_fd_find(fd);
+    int32 idx;
 
-    if(idx < 0)
+    if((fd >= 0) && (fd <= 2))
     {
-        return -LX_EBADF;
+        /* U-30：dup2(sock, 1) 之后标准流就是那个 socket 的副本栈位。没有
+         * 别名的 0/1/2 是控制台对象，对它做 socket 调用要给 -ENOTSOCK
+         * （Linux 上 fd 合法但不是套接字就是这个），而不是 -EBADF。 */
+        idx = lx_std_slot(fd);
+        if(idx < 0)
+        {
+            return -LX_ENOTSOCK;
+        }
+    }
+    else
+    {
+        idx = lx_fd_find(fd);
+        if(idx < 0)
+        {
+            return -LX_EBADF;
+        }
     }
     if(s_fd[idx].kind != LX_FD_SOCKET)
     {
@@ -4308,13 +4384,18 @@ static int32 lx_accept(void *p_ctx, uint8 with_flags)
     if(rc < 0)
     {
         /* 地址写不回去：fd 已经建好了，只能把它退掉，不让调用方拿到一个
-         * 「一半失败」的句柄。net 侧的那一格由任务退出时的收尸关闭。 */
+         * 「一半失败」的句柄。**必须同时 best-effort 关掉 net 那一格** ——
+         * 槽退掉之后退出收尸再也扫不到这个句柄，不关就是永久泄漏一格
+         * socket（4 格漏满就再也建不了连接）。 */
+        (void)arkrtos_net_call(ARKRTOS_NET_SUB_CLOSE, (uint32)newh, 0u, 0u, 0u, 0u);
         (void)lx_fd_release(lx_proc_cur(), (uint32)(newfd - 3));
         return rc;
     }
     rc = lx_sock_addr_out(r[1], r[2], ip, port);
     if(rc < 0)
     {
+        /* 同上：退槽前先把 net 那一格 best-effort 关掉，防永久泄漏。 */
+        (void)arkrtos_net_call(ARKRTOS_NET_SUB_CLOSE, (uint32)newh, 0u, 0u, 0u, 0u);
         (void)lx_fd_release(lx_proc_cur(), (uint32)(newfd - 3));
         return rc;
     }
@@ -4816,6 +4897,14 @@ static int32 lx_sock_close(void *p_ctx)
     {
         return idx;
     }
+    /* U-30：dup 出来的副本共享同一个 net 句柄 —— 只有**最后一份**关掉时才
+     * 通知协议栈，前面的副本只退自己的 fd 槽（Linux 的 close 也只减一份
+     * file 引用计数）。否则先 close 的那个会把兄弟副本打哑。 */
+    if(lx_sock_refs(lx_proc_cur(), (uint32)s_fd[idx].net) > 1u)
+    {
+        (void)lx_fd_release(lx_proc_cur(), (uint32)idx);
+        return 0;
+    }
     rc = lx_sock_submit(p_ctx, me, ARKRTOS_NET_SUB_CLOSE,
                         (uint32)s_fd[idx].net, 0u, 0u, 0u, 0u, &res);
     if(rc == LX_RET_RETRY)
@@ -4879,6 +4968,9 @@ static uint8 lx_sock_armed(void)
 static void lx_sock_close_all(uint32 slot)
 {
     uint32 i;
+    uint32 j;
+    uint32 n = 0u;
+    uint32 seen[LX_MAX_FD];     /* 已经发过 CLOSE 的句柄 */
 
     if(slot >= (uint32)LX_PROC_MAX)
     {
@@ -4886,14 +4978,29 @@ static void lx_sock_close_all(uint32 slot)
     }
     for(i = 0u; i < LX_MAX_FD; i++)
     {
-        if((s_proc[slot].fd[i].used != 0u) &&
-           (s_proc[slot].fd[i].kind == LX_FD_SOCKET) &&
-           ((uint32)s_proc[slot].fd[i].net != 0u))
+        uint32 handle = (uint32)s_proc[slot].fd[i].net;
+
+        if((s_proc[slot].fd[i].used == 0u) ||
+           (s_proc[slot].fd[i].kind != LX_FD_SOCKET) ||
+           (handle == 0u))
         {
-            (void)arkrtos_net_call(ARKRTOS_NET_SUB_CLOSE,
-                                   (uint32)s_proc[slot].fd[i].net,
-                                   0u, 0u, 0u, 0u);
+            continue;
         }
+        /* U-30：dup 出来的几个槽指着同一个句柄，只发一次 CLOSE —— 重复发
+         * 第二次时那一格可能已经被服务任务复用成别人的 socket，关错人。 */
+        for(j = 0u; j < n; j++)
+        {
+            if(seen[j] == handle)
+            {
+                break;
+            }
+        }
+        if(j < n)
+        {
+            continue;
+        }
+        seen[n++] = handle;
+        (void)arkrtos_net_call(ARKRTOS_NET_SUB_CLOSE, handle, 0u, 0u, 0u, 0u);
     }
 }
 #endif /* ARKRTOS_USE_LINUX_FORK == 1 */

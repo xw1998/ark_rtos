@@ -40,14 +40,14 @@ a purely Linux-ABI static binary with its own `_start`):
 **"A static program runs" is not "Linux is supported".** Section 3 lists what is
 explicitly unsupported.
 
-## 1 Supported syscalls (61; 47 measured on QEMU, 13 socket numbers host-tier only, 1 table-and-argument only)
+## 1 Supported syscalls (61; 60 measured on QEMU, 1 table-and-argument only)
 
 Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 
 | nr | name | how Ark fulfils it | measured |
 |---:|---|---|---|
-| 23 | `dup` | copy one fd slot (pipe/file/standard stream) into the lowest free number (8.12) | `dup(writer) is a new fd -> 1 ok` / `read through the copy -> 3 ok` / `dup(999) -> -EBADF = -9` / `exit code 56` |
-| 24 | `dup3` | copy to a chosen number; `fd 0..2` becomes an alias instead of a shared slot; `O_CLOEXEC` is **accepted and recorded**, `old==new` is refused (8.12) | `dup3(writer, 1) returns 1 -> 1 ok` / `dup3(1, 6, O_CLOEXEC) returns 6 -> 6 ok` / `dup3(reader, writer) overwrites -> 4 ok` |
+| 23 | `dup` | copy one fd slot (pipe/file/standard stream/socket) into the lowest free number (8.12) | `dup(writer) is a new fd -> 1 ok` / `read through the copy -> 3 ok` / `dup(999) -> -EBADF = -9` / `exit code 56` |
+| 24 | `dup3` | copy to a chosen number (a socket source copies the handle too; a socket target slot, or a `0..2` alias pointing at one, is still refused); `fd 0..2` becomes an alias instead of a shared slot; `O_CLOEXEC` is **accepted and recorded**, `old==new` is refused (8.12) | `dup3(writer, 1) returns 1 -> 1 ok` / `dup3(1, 6, O_CLOEXEC) returns 6 -> 6 ok` / `dup3(reader, writer) overwrites -> 4 ok` |
 | 25 | `fcntl` | six commands: `F_DUPFD` / `F_GETFD` / `F_SETFD` / `F_GETFL` / `F_SETFL` / `F_DUPFD_CLOEXEC` (the last is `F_DUPFD` plus `FD_CLOEXEC`); every other command returns `-EINVAL` (8.13) | `F_GETFD reads FD_CLOEXEC back -> 1 ok` / `F_GETFL(reader) = O_RDONLY\|O_NONBLOCK = 2048 ok` / `F_DUPFD_CLOEXEC(9) -> 9 = 9 ok` |
 | 56 | `openat` | `arkrtos_vfs_app_stat()` on the VFS namespace; directories return `-EISDIR` | `openat>0 -> 1 ok` |
 | 57 | `close` | release the fd slot, return 0 (a pipe end drops its reference count) | `close -> 0 ok` |
@@ -96,9 +96,9 @@ Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 | 293 | `rseq` | registration contract (`len` must be 32, `flags` must be 0, 32-byte aligned address, `NULL` deregisters) plus `cpu_id_start`/`cpu_id` written as 0; the two abort points of `rseq_cs` (before signal delivery, before a tick preemption, section 8.14) | `rseq register rc = 0 ok` / `cpu_id readback 0 = 0 ok` / `signal aborted the critical section = 1 ok` / `rseq_cs cleared by the abort = 0 ok` / `exit code 57` |
 
 The socket family (`198-210`, `242`, 13 numbers) is described in section 8.9: it is
-implemented in the translation layer and covered by 768 host assertions, but the **QEMU
-fixture has no socket section yet**, so it is not counted among the 47 numbers with QEMU
-readouts.
+implemented in the translation layer, covered by **964 host assertions** and by the
+**242 checks of the QEMU eighth tier** (re-measured on 2026-11-27; 768 / 232 back at U-23),
+so all 13 numbers **do** count among those with QEMU readouts.
 
 Unknown numbers return `-ENOSYS` (38) and are counted. Nothing is guessed.
 
@@ -139,17 +139,20 @@ return value is a separate port primitive
 
 ## 3 Explicitly unsupported
 
-`dup`/`dup2` redirection, `socket`/`select`, the fd classes of `futex`
+`dup`/`dup2`/`dup3` redirection exists (sockets included, section 8.12), `socket`/`select`
+exist (`ARKRTOS_USE_LINUX_SOCKET` / `ARKRTOS_USE_LINUX_SELECT`, default off, 2026-11-24,
+sections 8.9 / 8.8), and threads exist (`clone(CLONE_THREAD)`, `ARKRTOS_USE_LINUX_THREAD`,
+default off, section 8.10). Still unsupported: the fd classes of `futex`
 (eleven futex ops plus robust-list cleanup exist behind `ARKRTOS_USE_LINUX_FUTEX`,
-default off, sections 8.4 / 8.4b / 8.4c), threads. File-backed `mmap`
+default off, sections 8.4 / 8.4b / 8.4c). File-backed `mmap`
 exists (section 8.5), page-level write protection exists (section 8.6), and real
 `mmap` semantics `MAP_FIXED` exists in the demand tier (section 8.7) - it accepts
 anonymous private mappings only. Anonymous `MAP_SHARED`
 exists in the SHM tier (section 8.3, default off) and is inherited through `fork`
 only. `fork`/`clone` is no longer in this
 list: with `ARKRTOS_USE_LINUX_FORK` on (default off, 2026-11-23, QEMU LA64) a
-process can split once and be reaped via `wait4` - fork only, no threads
-(`CLONE_VM`/`CLONE_THREAD` are `-EINVAL`), see section 8. Signal delivery now
+process can split once and be reaped via `wait4`, and with `ARKRTOS_USE_LINUX_THREAD`
+on a `clone(CLONE_THREAD)` group shares one address space (section 8.10), see section 8. Signal delivery now
 crosses tasks (`kill`/`tkill`/`tgkill` resolve the target by pid, 2026-11-23,
 QEMU LA64), but there is still no preemptive delivery, no real-time signal and no
 `siginfo` (section 7). fd inheritance exists in the fork tier: each process owns
@@ -164,10 +167,12 @@ PI variants WAIT_REQUEUE_PI / CMP_REQUEUE_PI (8.4c). The fd classes are
 Chinese page for the reasoning per row.
 
 `execve` replaces the image of the current task in place (section 5), and
-`fork` copies the address space into a second task (section 8). What is still
-missing is the rest of the *process* model: no threads, no `dup2`, no job
-control; copy-on-write is available behind `ARKRTOS_USE_PAGING_COW` (section
-8.2, stack pages private), and the fd table is per-process only in the fork tier.
+`fork` copies the address space into a second task (section 8), and
+`clone(CLONE_THREAD)` builds a thread group on one address space (section 8.10).
+What is still missing is the rest of the *process* model: no job control and no
+per-process rlimits (the fd table is a fixed-size table); copy-on-write is available
+behind `ARKRTOS_USE_PAGING_COW` (section 8.2, stack pages private), and the fd table is
+per-process only in the fork tier.
 
 Dynamic linking no longer belongs in this list: with `ARKRTOS_USE_DYNLOAD` on,
 the kernel loads a `PT_INTERP` interpreter and ships a minimal in-tree
@@ -1273,7 +1278,7 @@ they would have to be rewritten. Putting select and a future socket layer behind
 switch would turn "zero footprint when off" into "half the feature when off".
 `ARKRTOS_USE_LINUX_SELECT` depends only on `ARKRTOS_USE_LINUX_ABI`.
 
-### 8.9 socket (U-23): translation layer and the QEMU eighth tier (2026-11-24, 768 host checks + 232 QEMU checks)
+### 8.9 socket (U-23): translation layer and the QEMU eighth tier (2026-11-24, 964 host checks + 242 QEMU checks)
 
 13 numbers: `socket`(198), `bind`(200), `listen`(201), `accept`(202), `connect`(203),
 `getsockname`(204), `getpeername`(205), `sendto`(206), `recvfrom`(207), `setsockopt`(208),
@@ -1294,9 +1299,11 @@ dispatch on the fd kind (the same fd table holds files, pipes and sockets).
 **Host readout.** The sixth Linux ABI coverage tier `linuxabisocket`
 (`tools/coverage_gate.py`) runs the socket section of `test_linux_abi_host.c` on the host:
 98.51% on that tier alone, 98.84% union across six tiers (baseline 98.82%, re-pinned on
-2026-11-27 together with the `rseq`/`getcpu` host assertions), **768 checks** green.
+2026-11-27 together with the `rseq`/`getcpu` host assertions), **964 checks** green
+(949 before U-30; the socket section itself is 322 of them, 15 of which U-30 added for
+`dup` on sockets).
 
-**QEMU eighth tier: 232 checks all `ok` + `exit code 0`.** The eighth tier of
+**QEMU eighth tier: 242 checks all `ok` + `exit code 0`.** The eighth tier of
 `tools/fork_gate.py` (`SELECT+SOCKET+LWIP`) really runs the socket section of
 `example/qemu_loongarch64/elf/linux_fork.c` on LA64 (38 checks) plus one performance
 regression check, stacked on the 194 checks of the seventh tier:
@@ -1388,7 +1395,7 @@ is only stable with them).**
 `ARKRTOS_USE_NET_VIRTIO` off it compiles only `$(LWIP_SRCS)` (no `drvnet.c`/`net_demo.c`),
 and pushes `ARKRTOS_USE_LINUX_SOCKET=1` together with lwIP into `LXFORK_DEFS`.
 
-### 8.10 Threads (`CLONE_THREAD`, U-25): one address space shared by a group of tasks (2026-11-24, ninth QEMU LA64 tier, 265 checks)
+### 8.10 Threads (`CLONE_THREAD`, U-25): one address space shared by a group of tasks (2026-11-24, ninth QEMU LA64 tier, 275 checks)
 
 The thread branch of `clone(220)` is in, behind `ARKRTOS_USE_LINUX_THREAD` (default **0**,
 `depends on ARKRTOS_USE_LINUX_FORK`). The split between the fork branch and this one is
@@ -1422,8 +1429,8 @@ group. The teardown path splits on whether siblings are still alive:
 Threads are **not** registered in `s_child[]`: Linux's `wait4` cannot see threads, so the
 group keeps exactly one "process" facing the outside.
 
-**Ninth QEMU tier: 265 checks all `ok` + `exit code 0` (600 ms).** The ninth tier of
-`tools/fork_gate.py` is the eighth (232 checks) plus 33 thread checks. Six readings matter most:
+**Ninth QEMU tier: 275 checks all `ok` + `exit code 0` (600 ms).** The ninth tier of
+`tools/fork_gate.py` is the eighth (242 checks) plus 33 thread checks. Six readings matter most:
 
 - `clone(CLONE_THREAD) > 0 -> 1 ok`, `thread PARENT_SETTID wrote the tid -> 6 ok`;
 - `futex WAIT on CHILD_CLEARTID woke with 0 -> 0 ok` - the **real join path**
@@ -1475,9 +1482,9 @@ nothing. The robust list (99/100) and exit cleanup exist now (8.4b) and are acco
 per task, so any member of a thread group only settles its own chain.
 A thread is an ordinary task: same priority, same time slice, no extra scheduling semantics.
 
-### 8.11 Per-App task quota (`ARKRTOS_USE_APP_QUOTA`, 2026-11-24, tenth QEMU LA64 tier, 277 checks)
+### 8.11 Per-App task quota (`ARKRTOS_USE_APP_QUOTA`, 2026-11-24, tenth QEMU LA64 tier, 287 checks)
 
-The tenth tier = the ninth tier (265 checks) + the quota section. It answers "can one App eat
+The tenth tier = the ninth tier (275 checks) + the quota section. It answers "can one App eat
 the whole task table", which is not a new syscall: the loader hands out a non-zero owner id per
 ELF load (`elf_app_owner_new()`), fork and `clone(CLONE_THREAD)` **inherit** it, and once the
 owner's **live** task count reaches `ARKRTOS_APP_MAX_TASKS` creation fails --
@@ -1560,7 +1567,8 @@ into two needs no new kernel mechanism, only a second copy of one fd-table slot.
 | any other flag bit | `-EINVAL` |
 | `newfd >= LX_MAX_FD + 3` | `-EBADF` |
 | fd table full (`dup` needs a new slot) | `-ENFILE` (23). Linux answers `EMFILE` when the per-process fd table is full; this layer has a single fixed table (not "kernel file table + per-process fd table"), and `pipe2` / `openat` already use `ENFILE` for the same condition, so `dup` follows the same convention rather than inventing a second answer |
-| source or target is a socket | `-EINVAL` (22). **Explicitly unsupported**: a socket slot refers to an lwIP net handle, and two slots sharing one handle needs an open-file-description layer with reference counting, which this layer does not have; refusing honestly beats producing two handles that quietly break each other |
+| source is a socket | `net` / `stype` / `sflags` / `pok` / `pbits` are copied, so both slots point at **the same net handle**; the net `CLOSE` is sent only when the last copy goes away (U-30, see below) |
+| target is a socket slot (or a `0..2` alias pointing at one) | `-EINVAL` (22). Closing that slot has to go through the net service, which carries replay semantics, and this layer must not block there; dropping the slot hard would leak the handle, keeping it would leave the old handle with no owner - so it refuses honestly |
 
 **What is copied is the slot, not the open file description — the one visible deviation.**
 `dup` copies `kind / pipe / size / wr / path`; the two slots keep their own `off`. Pipes and the
@@ -1642,7 +1650,39 @@ writer, and `overwritten fd is no longer a writer = -9` plus `overwrite dropped 
 (7) the fixture **prints on fd 2** — case group 3 redirects fd 1 into a pipe, so printing on
 fd 1 would be eaten by the fixture itself, a readout trap hit while writing it.
 
-**Boundaries.** (1) sockets cannot be `dup`ed (reason above); (2) file copies keep independent
+**U-30: sockets can be `dup`ed now (2026-11-27).** The old "source is a socket -> `-EINVAL`"
+row is gone. The implementation deliberately does **not** add an open-file-description layer
+with reference counts - the fd table only has `LX_MAX_FD` slots, and scanning it is harder to
+get wrong than a counter that must be kept in sync in five places (`dup` / `close` /
+`close_all` / slot reset / fork):
+
+| shape | implementation |
+|---|---|
+| `dup(sock)` | the new slot copies `net` / `stype` / `sflags` / `pok` / `pbits`, so both slots point at **the same net handle**; **no net request is issued** (host reading: `g_net_calls == 0`) |
+| who really closes | `lx_sock_close` first counts the slots with `kind==LX_FD_SOCKET && net==that handle` via `lx_sock_refs()`: more than one means "drop the slot, return 0"; the net `ARKRTOS_NET_SUB_CLOSE` is sent **only when the count is 1** |
+| process exit reaping (`lx_sock_close_all`) | de-duplicates handles through `seen[LX_MAX_FD]`, so each handle is closed exactly once |
+| slot reset (`lx_fd_release`) | the five socket fields (`net`/`stype`/`sflags`/`pok`/`pbits`) are cleared, so a later `dup` cannot copy stale values |
+| `F_SETFL(O_NONBLOCK)` | writes through to **every slot of the same handle** (`sflags` and `fl` in both directions): Linux descriptors from `dup` share the file status flags, and touching only one slot is the "`fcntl` says it changed, I/O did not" bug |
+| `fd 0..2` aliases | `lx_sock_idx()` honours aliases, so after `dup3(sock, 1)` both `write(1)` and `getsockopt(1, ...)` reach the socket; with **no alias** a `0..2` fd answers `-ENOTSOCK` (it used to answer `-EBADF`, which reports "this fd is not a socket" as "bad fd") |
+| `dup3(?, target is a socket)` | still `-EINVAL`, including the "`0..2` alias points at a socket" case, for the reason in the table |
+| fork | socket slots are **not inherited** (the child's slot is empty); the handle count only holds inside one process, cross-process sharing is **not** supported and is listed in [known limitations](已知限制.en.md) |
+| a real leak fixed on the way | the two address-failure rollback paths in `lx_accept` used to only drop the fd slot and leave the freshly taken net handle to "process-exit reaping" - once the slot was gone `close_all` could never see it again. Both paths now send a best-effort `ARKRTOS_NET_SUB_CLOSE` before giving the slot back |
+
+**Measured readout.** The host `linuxabisocket` tier is **964 checks** in total (15 new in
+U-30: `dup(sock)` returns a new number with zero net requests, the copy `write`s through
+`SEND` on the same handle, closing the source fd sends no `CLOSE`, the copy stays writable,
+`F_SETFL` is visible in both directions while both are alive, the copy turning `O_NONBLOCK`
+makes `read` return `-EAGAIN` at once, the last `close` sends exactly one `CLOSE`,
+`dup3(sock, 7)` fills a free number, the two `-EINVAL` shapes `dup3(pipe, 3)` and
+`dup3(sock, 1)`, `getsockopt(1)` through the alias, `getsockopt(0)` answering `-ENOTSOCK`,
+and a neighbour slot not dragged along by the `F_SETFL` sync). The QEMU fixture adds 10
+readings to the socket section (`[sock] socket dup returns fd >= 3` through
+`[sock] dup copy still bound to 8081`), taking the eighth tier from 232 to **242 checks**;
+`EXPECT_SOCKET_CHECKS` / `EXPECT_THREAD_CHECKS` / `EXPECT_QUOTA_CHECKS` in
+`tools/fork_gate.py` move up by 10 as well (plus `LOCK_CHECKS`).
+
+**Boundaries.** (1) socket copies share one handle and only the last close really closes it
+(above); sharing across processes is not supported; (2) file copies keep independent
 offsets (the only visible deviation); (3) `O_CLOEXEC` now has real semantics (fds are released
 after the exec frame swap), and four fd-creating paths record it (`openat` / `dup3` / `pipe2` /
 `socket`), plus `fcntl(F_SETFD)` (8.13); (4) `dup3`'s `newfd` ceiling is `LX_MAX_FD + 3`, above
@@ -1941,7 +1981,7 @@ proves itself with a SIGUSR1 that has a handler installed, so its semantics are
 unchanged.
 
 **Gate.** All ten `EXPECT_*_CHECKS` in `tools/fork_gate.py` went up by 20
-(47 / 52 / 60 / 147 / 167 / 178 / 194 / 232 / 265 / 277; after U-27 each gains another
+(47 / 52 / 60 / 147 / 167 / 178 / 194 / 242 / 275 / 287; after U-27 each gains another
 32, see section 8.16), and three new anchors
 went into the mandatory list of `judge()`:
 `blocking pipe read waited >= 40 ms -> 1 ok`, `blocking pipe write wrote all 300 -> 300 ok`,
@@ -2393,8 +2433,8 @@ profile.
 `ARKRTOS_USE_LINUX_SOCKET` (section 8.9) is a further switch, default **0**,
 `depends on ARKRTOS_USE_LINUX_ABI` with an `#error` guard; with it off all `lx_sock_*`
 code and the socket dispatch in the fd table are not compiled and `198`-`210`/`242` fall
-back to `-ENOSYS`; with it on the measured readout is the host socket tier's **768 checks**
-(98.51% on that tier, 98.84% union) plus the **232 readouts of the QEMU eighth tier**
+back to `-ENOSYS`; with it on the measured readout is the host socket tier's **964 checks**
+(98.51% on that tier, 98.84% union) plus the **242 readouts of the QEMU eighth tier**
 (39 of them the socket section: 38 semantic + 1 round-trip timing).
 
 `MAP_FIXED` (section 8.7) is **not a switch of its own**: it exists when
@@ -2422,7 +2462,7 @@ each be rejected).
 The socket layer has readouts on **both tiers**: on the host the sixth Linux ABI coverage
 tier `linuxabisocket` in `tools/coverage_gate.py` (with
 `-DARKRTOS_USE_LINUX_SOCKET=1 -DARKRTOS_USE_LWIP=1` and
-`-Wl,--wrap=arkrtos_port_svc_exec_frame`) runs `test_linux_abi_host.c` with 768 checks green,
+`-Wl,--wrap=arkrtos_port_svc_exec_frame`) runs `test_linux_abi_host.c` with 964 checks green,
 98.51% on the tier and 98.84% union (baseline 98.82%), and `tools/ci_gate.py`'s
 `linux-abi-host` item already includes it; on the board the **eighth tier** of
 `tools/fork_gate.py` (`-DARKRTOS_USE_LINUX_SELECT=1 -DARKRTOS_USE_LINUX_SOCKET=1
@@ -2513,14 +2553,15 @@ not reported, a full pipe still reported writable, the `fd_set` not cleared, the
 timeout restarted on every replay, `exceptfds` reported, a bad fd let through, and
 the select readout removed); its switch has its own `default-off-select` /
 `kconfig-wired-select` / `features-guard-select` items. The socket round requires
-232 checks and validates the 38 socket readouts one by one (bind / listen /
+242 checks and validates the 48 socket readouts one by one (38 semantic plus the 10
+U-30 `dup`-on-socket readings) (bind / listen /
 accept / connect / send / recv over a real lwIP `127.0.0.1` loopback, name
 queries, four `SOL_SOCKET` options, non-blocking `-EAGAIN`, plus one
 round-trip-time regression gate), with every select / mprotect / filemap / SHM /
 COW / futex assertion still in place; its parser-selfcheck adds six more bad logs
 and its switch has its own `default-off-socket` / `kconfig-wired-socket` /
 `features-guard-socket` items (autoconf 0, two `depends on` entries, two
-`#error` guards). The thread round requires 265 checks and validates the 33
+`#error` guards). The thread round requires 275 checks and validates the 33
 thread readouts one by one (`clone(CLONE_THREAD)` positive and negative, both
 SETTIDs, `getpid` equal to the tgid and cross-checked against the parent pid the
 fixture prints, `gettid` different from the parent, `CLONE_SETTLS` landing in
@@ -2534,7 +2575,7 @@ address, the thread-initiated `exit_group` code replaced by the leader's, and th
 `clone(CLONE_THREAD)` readout removed), and its switch has its own
 `default-off-thread` / `kconfig-wired-thread` / `features-guard-thread` items
 (autoconf 0, `depends on ARKRTOS_USE_LINUX_FORK`, the corresponding `#error`).
-The appq round requires 277 checks and validates the 12 quota readouts one by one
+The appq round requires 287 checks and validates the 12 quota readouts one by one
 (fork and thread under the cap, over-limit fork and thread returning `-11`, a fork
 refused while a space is free, the third thread, both threads joined through
 `CHILD_CLEARTID` + `FUTEX_WAIT`, an immediate fork after the quota is refilled, the

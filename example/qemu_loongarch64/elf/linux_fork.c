@@ -54,6 +54,7 @@
 #define LX_ENOSYS           38
 
 #define LX_CLOSE            57
+#define LX_DUP              23
 #define LX_PIPE2            59
 #define LX_O_NONBLOCK       0x800       /* asm-generic 的 O_NONBLOCK 位 */
 #define LX_MMAP             222
@@ -1272,7 +1273,6 @@ static void sched_probe(void)
 #define LX_F_GETOWN         9
 #define LX_O_ASYNC          0x2000
 #define LX_SIGIO            29
-#define LX_DUP              23
 
 static int     s_sio_hits;
 static lx_long s_sio_signo;
@@ -3653,7 +3653,9 @@ void linux_main(unsigned long sp)
      *   8) shutdown(SHUT_WR) 之后对端 recv 回 0（EOF）—— 这一条咬的是
      *      「半关真的发了 FIN」，不是「关了个标志」；
      *   9) 关掉之后 read / write 同一个 fd 回 -EBADF（反假绿：fd 槽必须
-     *      真的被释放）。
+     *      真的被释放）；
+     *  10) socket 的 dup（U-30）：副本与源共享同一个 net 句柄 —— 关副本
+     *      不影响源、关源之后副本接管句柄、最后一份关掉才真正关 socket。
      *
      * 协议栈由 lwIP 的回环网卡提供（127.0.0.1/8，包不出芯片）。第一个
      * socket() 可能早于 tcpip 线程起来，此时 net 服务回 ENOTSUP，翻译层
@@ -3674,6 +3676,8 @@ void linux_main(unsigned long sp)
         lx_long  acc;
         lx_long  dgs;
         lx_long  dgc;
+        lx_long  dupc;
+        lx_long  dupd;
         lx_long  r;
         lx_long  r2;
         lx_long  pack;
@@ -3825,6 +3829,35 @@ void linux_main(unsigned long sp)
             check("setsockopt SO_ERROR == -EINVAL", r, -LX_EINVAL);
         }
 
+        /* ---- U-30：socket 的 dup —— 副本与源共享同一个 net 句柄 ----
+         * 判据分三层，缺一层都能被「假的复制」糊过去：
+         *   a) dup 给回一个不同的新号；
+         *   b) 关掉副本，源 fd 仍然能问出绑定端口（关副本时**不能**通知
+         *      协议栈，否则源会被兄弟副本打哑）；
+         *   c) 反过来关源 fd，副本必须接管那个句柄，仍然问得出 8081；
+         *      最后一份关掉时才真正关 socket（由下面既有的 close 完成）。 */
+        dupc = lx1(LX_DUP, srv);
+        check("socket dup returns fd >= 3", (dupc >= 3) ? 1 : 0, 1);
+        check("socket dup returns a different fd", (dupc != srv) ? 1 : 0, 1);
+        check("close the dup copy == 0", lx1(LX_CLOSE, dupc), 0);
+        lenp = 0u;
+        r = lx3(LX_GETSOCKNAME, srv, (lx_long)(unsigned long)&pa,
+                (lx_long)(unsigned long)&lenp);
+        check("source fd still works after closing the dup copy", r, 0);
+        check("source fd still bound to 8081",
+              ((lx_long)pa.b[2] << 8) | (lx_long)pa.b[3], SK_PORT);
+
+        dupd = lx1(LX_DUP, srv);
+        check("second dup returns fd >= 3", (dupd >= 3) ? 1 : 0, 1);
+        check("close the original fd == 0", lx1(LX_CLOSE, srv), 0);
+        lenp = 0u;
+        r = lx3(LX_GETSOCKNAME, dupd, (lx_long)(unsigned long)&pa,
+                (lx_long)(unsigned long)&lenp);
+        check("dup copy survives the original close", r, 0);
+        check("dup copy still bound to 8081",
+              ((lx_long)pa.b[2] << 8) | (lx_long)pa.b[3], SK_PORT);
+        srv = dupd;         /* 后面那条 close 关的就是最后一份 */
+
         /* 半关：对端必须看到 EOF（recv 回 0），不是「什么都没有」。 */
         check("shutdown SHUT_WR == 0", lx2(LX_SHUTDOWN, acc, LX_SHUT_WR), 0);
         r = lx6(LX_RECVFROM, cli, (lx_long)(unsigned long)buf, 8,
@@ -3836,7 +3869,8 @@ void linux_main(unsigned long sp)
          * 之后 UDP 那一对建不出来。真实程序也是「用完就关」，这里照做比
          * 悄悄把池子调大更能暴露「池子到底够不够」。 */
         (void)lx1(LX_CLOSE, acc);
-        (void)lx1(LX_CLOSE, srv);
+        /* srv 这时是**最后一份**副本：这一关才真正通知协议栈。 */
+        check("close the last copy == 0", lx1(LX_CLOSE, srv), 0);
         (void)lx1(LX_CLOSE, cli);
 
         /* 反假绿：fd 槽必须真的释放，关掉之后不能再读写。 */
