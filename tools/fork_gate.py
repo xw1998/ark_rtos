@@ -354,16 +354,18 @@ EXPECT_SOCKET_CHECKS = 242 + LOCK_CHECKS
 # 组长发起 exit_group 整组被 reap 且码 7。合计 161 + 25 = 186 条。
 # 再加 futex 第四档的 37 条（实测 231，含 thread 段自己多出的 8 条）；
 # 再加第五档的 14 条：245 条；再加阻塞管道段 20 条 = 265 条；再加 U-30 的
-# 10 条 = 275 条。
-EXPECT_THREAD_CHECKS = 275 + LOCK_CHECKS
+# 10 条 = 275 条；再加 U-32 的 3 条（非组长线程发起 execve 被 -EINVAL 拒、
+# 组长自己发起同一路径走到装载器 -ENOENT、以及这次 clone 的句柄）= 278 条。
+EXPECT_THREAD_CHECKS = 278 + LOCK_CHECKS
 # QUOTA 段多 11 条（上限 3 = 父 + 1 子 + 1 线程）：建管子、上限内 fork 成功、
 # 线程把最后一格占掉、超限 fork==-EAGAIN、超限线程==-EAGAIN、被阻塞的子进程
 # 真被 reap、回收后第二个线程成功、**空间空闲时 fork 仍被拒**（全段最干净的
 # 一条：不可能是 ERR_BUSY）、第三个线程被拒、两个线程按 CHILD_CLEARTID 归队、
 # 额度回来后立刻能再起且退出码照传。合计 186 + 12 = 198 条。
 # 再加 futex 第四档的 37 条（实测 243）；再加第五档的 14 条：257 条；
-# 再加阻塞管道段 20 条 = 277 条；再加 U-30 的 10 条 = 287 条。
-EXPECT_QUOTA_CHECKS = 287 + LOCK_CHECKS
+# 再加阻塞管道段 20 条 = 277 条；再加 U-30 的 10 条 = 287 条；再加 U-32 的
+# 3 条 = 290 条（本档把所有开关都打开，thread 段那三条在这里也在）。
+EXPECT_QUOTA_CHECKS = 290 + LOCK_CHECKS
 # 上面这一档的每一段都对应一类「看起来对」的实现：另开地址空间（共享全局读
 # 不到）、每线程一份 fd 表（fork 段留不住）、线程退出就把进程拆了（进程活不
 # 下来）、把线程当进程挂到 wait4 上（exit_group 码不对）。
@@ -1546,6 +1548,15 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
             "线程发起的 exit_group 没把整组带走（或码被改成组长的）")
         one(r"^\[fork\] exit_group-from-leader code 7 -> 7 ok$",
             "组长发起的 exit_group 读数不对")
+        # U-32：非组长线程发起 execve 必须回 -EINVAL。这条的判据不是「条数对
+        # 得上」——把闸门删掉时它依然会打一行 ok（值是 -ENOENT），所以必须
+        # 逐字钉死返回码；再配一条组长发起走装载器 -ENOENT 的读数，证明闸门
+        # 没有误伤正常路径。
+        one(r"^\[fork\] execve from non-leader thread == -EINVAL -> -22 ok$",
+            "非组长线程发起的 execve 没被 -EINVAL 拒（闸门丢了或退化成 -ENOENT）")
+        one(r"^\[fork\] execve from the leader passes the group gate \(ENOENT\)"
+            r" -> -2 ok$",
+            "组长发起的 execve 没走到装载器（闸门误伤了正常路径）")
         # 交叉证据：线程的 getpid 必须真的等于父进程报出来的那个数，而不是
         # 夹具里另找的一个常量。
         m_tg = re.search(r"^\[fork\] thread getpid == tgid \(parent pid\) -> (\d+) ok$",
@@ -1838,6 +1849,11 @@ def self_check(good_text, cow=False, shm=False, futex=False, filemap=False,
                 "[fork] exit_group-from-thread code 6 -> 7 FAIL (want 6)"),
             "缺 clone 线程读数": lambda s: s.replace(
                 "[fork] clone(CLONE_THREAD) > 0 -> 1 ok\n", ""),
+            # U-32：闸门被删掉时，非组长那条会变成装载器的 -ENOENT（-2）。
+            # 只比总条数看不出这个差别，所以这里必须把那一条改成别的读数。
+            "非组长 execve 闸门丢失": lambda s: s.replace(
+                "[fork] execve from non-leader thread == -EINVAL -> -22 ok",
+                "[fork] execve from non-leader thread == -EINVAL -> -2 FAIL (want -22)"),
         })
     if quota:
         mutations.update({

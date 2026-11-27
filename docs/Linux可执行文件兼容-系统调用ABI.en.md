@@ -1400,7 +1400,7 @@ is only stable with them).**
 `ARKRTOS_USE_NET_VIRTIO` off it compiles only `$(LWIP_SRCS)` (no `drvnet.c`/`net_demo.c`),
 and pushes `ARKRTOS_USE_LINUX_SOCKET=1` together with lwIP into `LXFORK_DEFS`.
 
-### 8.10 Threads (`CLONE_THREAD`, U-25): one address space shared by a group of tasks (2026-11-24, ninth QEMU LA64 tier, 275 checks)
+### 8.10 Threads (`CLONE_THREAD`, U-25): one address space shared by a group of tasks (2026-11-24; U-32 completed the `execve` rules on 2026-11-28, ninth QEMU LA64 tier, 278 checks)
 
 The thread branch of `clone(220)` is in, behind `ARKRTOS_USE_LINUX_THREAD` (default **0**,
 `depends on ARKRTOS_USE_LINUX_FORK`). The split between the fork branch and this one is
@@ -1434,8 +1434,8 @@ group. The teardown path splits on whether siblings are still alive:
 Threads are **not** registered in `s_child[]`: Linux's `wait4` cannot see threads, so the
 group keeps exactly one "process" facing the outside.
 
-**Ninth QEMU tier: 275 checks all `ok` + `exit code 0` (600 ms).** The ninth tier of
-`tools/fork_gate.py` is the eighth (242 checks) plus 33 thread checks. Six readings matter most:
+**Ninth QEMU tier: 278 checks all `ok` + `exit code 0` (600 ms).** The ninth tier of
+`tools/fork_gate.py` is the eighth (242 checks) plus 36 thread checks. Six readings matter most:
 
 - `clone(CLONE_THREAD) > 0 -> 1 ok`, `thread PARENT_SETTID wrote the tid -> 6 ok`;
 - `futex WAIT on CHILD_CLEARTID woke with 0 -> 0 ok` - the **real join path**
@@ -1448,11 +1448,33 @@ group keeps exactly one "process" facing the outside.
   `fork after threads reaped -> 6 ok` shows a thread exit did not tear down the process's fd
   table or slot early.
 
+**U-32: `execve` from a non-leader thread is refused with `-EINVAL` (2026-11-28).** Linux lets
+any thread call `execve`: it ends the whole group and the caller's tid becomes the process id.
+Here the tid *is* the task id and `exec` cannot renumber a task, so that half is out of reach;
+rather than let the new image run on a `tid != pid` premise (glibc's thread bookkeeping would
+treat it as a multi-threaded process - pretending), the call is refused outright: the caller
+gets `-EINVAL`, the old image keeps running, and not one byte of group state moves. The gate has
+a single test - `tgid != self` - so the leader (the path every ordinary program takes) is
+unaffected. Three readings, measured in the ninth tier:
+
+```
+[fork] exec thread clone > 0 -> 1 ok
+[fork] execve from non-leader thread == -EINVAL -> -22 ok
+[fork] execve from the leader passes the group gate (ENOENT) -> -2 ok
+```
+
+The third one uses a path that does not exist on purpose: with the gate removed it reads the
+loader's `-ENOENT`, which differs from `-EINVAL` and turns red (the fixture therefore never
+swaps its image when the gate is missing and cannot scramble later readings); it also proves the
+gate does not catch the leader. `self_check()` gained a matching mutation: rewrite that reading
+to `-2` and `judge()` must call it red.
+
 Anti-false-green: the four argument gates (no `CLONE_VM`, `child_stack == 0`, misaligned stack,
-`CLONE_VFORK`) must each be refused while the switch is on; `judge()` requires each of seven
-thread readings to appear **exactly once**, and `self_check()` has seven bad samples (CLEARTID
-not cleared, WAIT not woken, SETTLS not landed, `getpid` not equal to the tgid, two stacks at the
-same address, wrong `exit_group` code, missing clone reading) that must be judged red.
+`CLONE_VFORK`) must each be refused while the switch is on; `judge()` requires each of nine
+thread readings to appear **exactly once** (including the U-32 non-leader `-EINVAL` and leader
+`-ENOENT` pair), and `self_check()` has eight bad samples (CLEARTID not cleared, WAIT not woken,
+SETTLS not landed, `getpid` not equal to the tgid, two stacks at the same address, wrong
+`exit_group` code, missing clone reading, non-leader execve gate lost) that must be judged red.
 
 **Zero change when off.** `arkrtos_elf_thread` / `arkrtos_port_paging_thread_frame` and the four
 symbols `lx_thread_group_exit` / `lx_clone_thread` / `lx_thread_bind_hook` / `lx_thread_clear_tid`
@@ -1480,16 +1502,19 @@ are not emitted at all; the `off-zero-symbols` gate checks each with `nm`.
 
 **Boundaries written down.** `exit_group` kills tasks that may be running on another core and
 there is no inter-core stop protocol, so the thread tier was only measured on **single-core**
-QEMU. `execve` from a non-leader thread is **undefined** here: it replaces the calling task's
-image while siblings still point at the old space (Linux ends the whole group and keeps only the
-caller); it is neither implemented nor refused. There is no TLS module allocation; `SET_TID_ADDRESS` only reports the tid and stores
+QEMU. `execve` from a non-leader thread is refused with **`-EINVAL`** (a deliberate
+trade-off, not a gap): Linux ends the whole group, keeps only the caller and renumbers it as the
+process id, which this kernel cannot do because the tid is the task id; "collect the group but
+keep the old tid" would leave the new image running on `gettid() != getpid()` and glibc would
+misread the process as multi-threaded - pretending. A refusal is definite, returnable and leaves
+group state untouched; the leader is unaffected. There is no TLS module allocation; `SET_TID_ADDRESS` only reports the tid and stores
 nothing. The robust list (99/100) and exit cleanup exist now (8.4b) and are accounted
 per task, so any member of a thread group only settles its own chain.
 A thread is an ordinary task: same priority, same time slice, no extra scheduling semantics.
 
-### 8.11 Per-App task quota (`ARKRTOS_USE_APP_QUOTA`, 2026-11-24, tenth QEMU LA64 tier, 287 checks)
+### 8.11 Per-App task quota (`ARKRTOS_USE_APP_QUOTA`, 2026-11-24, tenth QEMU LA64 tier, 290 checks)
 
-The tenth tier = the ninth tier (275 checks) + the quota section. It answers "can one App eat
+The tenth tier = the ninth tier (278 checks) + the quota section. It answers "can one App eat
 the whole task table", which is not a new syscall: the loader hands out a non-zero owner id per
 ELF load (`elf_app_owner_new()`), fork and `clone(CLONE_THREAD)` **inherit** it, and once the
 owner's **live** task count reaches `ARKRTOS_APP_MAX_TASKS` creation fails --
@@ -1986,7 +2011,7 @@ proves itself with a SIGUSR1 that has a handler installed, so its semantics are
 unchanged.
 
 **Gate.** All ten `EXPECT_*_CHECKS` in `tools/fork_gate.py` went up by 20
-(47 / 52 / 60 / 147 / 167 / 178 / 194 / 242 / 275 / 287; after U-27 each gains another
+(47 / 52 / 60 / 147 / 167 / 178 / 194 / 242 / 278 / 290; after U-27 each gains another
 32, see section 8.16), and three new anchors
 went into the mandatory list of `judge()`:
 `blocking pipe read waited >= 40 ms -> 1 ok`, `blocking pipe write wrote all 300 -> 300 ok`,
@@ -2079,7 +2104,7 @@ timestamps: the child reports `'P'`, the parent deliberately waits 100 ms before
 and the child measures its own wall clock at >= 40 ms.
 
 **Gate.** `tools/fork_gate.py` has `LOCK_CHECKS = 32`, and all ten `EXPECT_*_CHECKS` add it
-(79 / 84 / 92 / 179 / 199 / 210 / 226 / 264 / 297 / 309); `judge()` pins three anchors:
+(79 / 84 / 92 / 179 / 199 / 210 / 226 / 277 / 310 / 322); `judge()` pins three anchors:
 `lock child GETLK pid is not self -> 1 ok`, `lock waiter blocked >= 40 ms -> 1 ok`,
 `lock free after child close (conflict range) -> 0 ok`. Comparing totals alone is not
 enough - "drop one, add one" can add up to the same number.
@@ -2656,21 +2681,23 @@ round-trip-time regression gate), with every select / mprotect / filemap / SHM /
 COW / futex assertion still in place; its parser-selfcheck adds six more bad logs
 and its switch has its own `default-off-socket` / `kconfig-wired-socket` /
 `features-guard-socket` items (autoconf 0, two `depends on` entries, two
-`#error` guards). The thread round requires 275 checks and validates the 33
+`#error` guards). The thread round requires 278 checks and validates the 36
 thread readouts one by one (`clone(CLONE_THREAD)` positive and negative, both
 SETTIDs, `getpid` equal to the tgid and cross-checked against the parent pid the
 fixture prints, `gettid` different from the parent, `CLONE_SETTLS` landing in
 `$tp`, two stacks at different addresses, a parent local surviving, `CHILD_CLEARTID`
 cleared to 0 with the `FUTEX_WAIT` woken, the four argument gates, a `fork` still
-working after threads, and `exit_group` from a thread versus from the leader),
+working after threads, `exit_group` from a thread versus from the leader, and
+the U-32 pair - non-leader `execve == -EINVAL`, leader `execve == -ENOENT`),
 with every socket-and-below assertion still in place; its parser-selfcheck adds
-seven more bad logs (CLEARTID not cleared, the join WAIT never woken, `SETTLS` not
+eight more bad logs (CLEARTID not cleared, the join WAIT never woken, `SETTLS` not
 landing in `$tp`, a thread `getpid` not equal to the tgid, both stacks at one
-address, the thread-initiated `exit_group` code replaced by the leader's, and the
-`clone(CLONE_THREAD)` readout removed), and its switch has its own
+address, the thread-initiated `exit_group` code replaced by the leader's, the
+`clone(CLONE_THREAD)` readout removed, and the non-leader execve gate lost - the
+reading turns from `-22` into `-2`), and its switch has its own
 `default-off-thread` / `kconfig-wired-thread` / `features-guard-thread` items
 (autoconf 0, `depends on ARKRTOS_USE_LINUX_FORK`, the corresponding `#error`).
-The appq round requires 287 checks and validates the 12 quota readouts one by one
+The appq round requires 290 checks and validates the 12 quota readouts one by one
 (fork and thread under the cap, over-limit fork and thread returning `-11`, a fork
 refused while a space is free, the third thread, both threads joined through
 `CHILD_CLEARTID` + `FUTEX_WAIT`, an immediate fork after the quota is refilled, the

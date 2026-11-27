@@ -8777,6 +8777,19 @@ static int32 lx_execve(void *p_ctx)
     int32  argc = 0;
     int32  rc;
 
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+    /* U-32：Linux 允许从**非组长线程**发起 execve —— 它把整组收掉、调用者
+     * 的 tid 变成进程号。本内核的「tid」就是任务号，exec 又不换任务号，所以
+     * 「tid 变成 tgid」这一半做不到；与其让新映像在一个 tid != pid 的前提上
+     * 跑（glibc 的线程簿记会拿这个不当事实当地基），不如明确拒绝：调用者
+     * 得到 -EINVAL、旧映像继续跑、组内状态一个字节没动。
+     * 组长（tgid == 自己）不受影响，这正是普通程序走的那条路。 */
+    if(lx_tgid_of_current() != (int32)arkrtos_current_task_id)
+    {
+        return -LX_EINVAL;
+    }
+#endif
+
     rc = lx_copy_path(p_ctx, 0u, path, (uint32)sizeof(path));
     if(rc != 0)
     {

@@ -48,10 +48,12 @@
 #define LX_GETPID           172
 #define LX_CLONE            220
 #define LX_WAIT4            260
+#define LX_EXECVE           221     /* U-32：非组长线程发起应当被拒 */
 
 #define LX_EINVAL           22
 #define LX_ECHILD           10
 #define LX_ENOSYS           38
+#define LX_ENOENT           2
 
 #define LX_CLOSE            57
 #define LX_DUP              23
@@ -486,6 +488,22 @@ static void thread_body(void)
 /* 第二个线程只用来验「同组里能有两个」，退出码与第一次无关。 */
 static void thread_body2(void)
 {
+    (void)lx1(LX_EXIT, 0);
+    for (;;)
+    {
+    }
+}
+
+/* U-32：从**非组长线程**发起 execve。Linux 会收掉整组、调用者的 tid 变成
+ * 进程号；本内核的 tid 就是任务号，exec 换不掉，所以明确回 -EINVAL。
+ * 路径故意用不存在的 /no/such/prog：万一闸门被删掉，内核会走到装载器回
+ * -ENOENT（而不是把镜像换掉），判据因此能干净地区分「有闸门」与「没闸门」。 */
+static volatile lx_long g_ex_rc;
+static volatile lx_long g_ex_ctid;
+
+static void exec_thread_body(void)
+{
+    g_ex_rc = lx2(LX_EXECVE, (lx_long)(unsigned long)"/no/such/prog", 0);
     (void)lx1(LX_EXIT, 0);
     for (;;)
     {
@@ -4138,6 +4156,45 @@ void linux_main(unsigned long sp)
         }
         check("process alive after two thread exits", lx1(LX_GETPID, 0),
               parent_pid);
+
+        /* U-32：非组长线程发起 execve 必须被明确拒绝（Linux 会成功并收整组，
+         * 本内核换不掉 tid，所以不假装——见已知限制）；组长自己发起时这道
+         * 闸门不该拦，用一个不存在的路径验到 -ENOENT（装载器 ERR_FS）。 */
+        {
+            unsigned int eptid = 0xFFFFFFFFu;
+            lx_long  et;
+
+            g_ex_rc   = 0x7eadbeef;
+            g_ex_ctid = 0x7eadbeef;
+            et = lx_clone_thread_call(
+                     (lx_long)(LX_CLONE_VM | LX_CLONE_FS | LX_CLONE_FILES |
+                               LX_CLONE_SIGHAND | LX_CLONE_THREAD |
+                               LX_CLONE_PARENT_SETTID | LX_CLONE_CHILD_CLEARTID),
+                     (lx_long)(unsigned long)(s_thr2_stack + sizeof(s_thr2_stack)),
+                     (lx_long)(unsigned long)&eptid,
+                     (lx_long)(unsigned long)&g_ex_ctid, 0, exec_thread_body);
+            check("exec thread clone > 0", (et > 0) ? 1 : 0, 1);
+            if (et > 0)
+            {
+                int n;
+
+                for (n = 0; n < 400; n++)
+                {
+                    if (g_ex_ctid == 0)
+                    {
+                        break;
+                    }
+                    (void)lx4(LX_FUTEX,
+                              (lx_long)(unsigned long)&g_ex_ctid, LX_FUTEX_WAIT,
+                              g_ex_ctid, 0);
+                }
+            }
+            check("execve from non-leader thread == -EINVAL", g_ex_rc,
+                  -LX_EINVAL);
+        }
+        check("execve from the leader passes the group gate (ENOENT)",
+              lx2(LX_EXECVE, (lx_long)(unsigned long)"/no/such/prog", 0),
+              -LX_ENOENT);
 
         /* 反假绿：参数门槛。这四条在开关打开时也必须逐条拒绝。 */
         check("CLONE_THREAD without CLONE_VM == -EINVAL",
