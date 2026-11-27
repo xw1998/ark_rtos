@@ -36,6 +36,7 @@ tickless（ARKRTOS_USE_TICKLESS）	LA64 / QEMU virt	L2	qemu_loongarch64	4491918 
 设备树当驱动配置源（ARKRTOS_USE_FDT_RES）	LA64 / QEMU virt	L2	qemu_loongarch64	4491918 console ... clk=25MHz reason=ok match=1；res timebase=1e8 Hz expect=1e8 Hz timer=(none described) rc=ok
 FDT overlay（ARKRTOS_USE_FDT_OVERLAY）	LA64 / QEMU virt	L2	qemu_loongarch64	4491918 target=<&label> + 零长属性删属性 + __delete 删子节点：overlay ok bytes=1176 nodes=10 (was 10)；current-speed 0x1c200->0x2580；victim-child rc=-9；victim-prop has no property；反假绿改名 -> -16 refused, tree kept
 Linux 系统调用 ABI（ARKRTOS_USE_LINUX_ABI）	LA64 / QEMU virt	L2	qemu_loongarch64	45a4889 13 条 check 全 ok，exit code 7
+Linux 系统调用 ABI：可重启序列（rseq 293 / getcpu 168）	LA64 / QEMU virt	L2	qemu_loongarch64	f808e9f [rseq] 16 条 check 全 ok + PASS 行，exit code 57；宿主 t_rseq 40 条断言
 ELF 装载（ARKRTOS_USE_ELF）	RV32IMAC / QEMU virt	L2	qemu_riscv32	77cc0da exec hello32 5/5 无 mcause=1 越权 fault
 ELF 装载（ARKRTOS_USE_ELF）	LA64 / QEMU virt	L2	qemu_loongarch64	77cc0da exec 反复跑过（页表 + PLV3）
 Linux 动态链接（PT_INTERP + ld.so，ARKRTOS_USE_DYNLOAD）	LA64 / QEMU virt	L2	qemu_loongarch64	cfa783b dynmain 两个变体（ET_EXEC / ET_DYN）各一次 PASS 且 exit code 105；坏夹具（PT_DYNAMIC 内未解析 PLT 符号）-> ldso FAIL unresolved PLT symbol + exit code 127；5 次 write rc=0、3 次 exec；RELATIVE / 64 / JUMP_SLOT 三种重定位全部 applied；interp_base=0x2100000；默认档同构建逐行一致，text 411360 变 413752 B
