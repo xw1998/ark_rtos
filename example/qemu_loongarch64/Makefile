@@ -439,7 +439,8 @@ $(BUILD)/example/qemu_loongarch64/elf_demo.o: $(LXSIG_H)
 
 # dup/dup3 夹具（linux_dup.elf）：dup 新号 / 数据经副本往返 / 原写端关掉后副本
 # 仍可写 / 全关后 EOF / dup3(pw,1) 重定向 stdout 与 close(1) 撤销 / dup3 覆盖
-# 在用的 fd / dup(0) 的控制台引用 / 四条失败面（EBADF、EINVAL）。
+# 在用的 fd / dup(0) 的控制台引用 / 失败面（EBADF、old==new 的 EINVAL）/
+# O_CLOEXEC 被接受且 F_GETFD 读回 / 第 6 组 fcntl(25) 的 FD 与状态旗标。
 LXDUPD_SRC := example/qemu_loongarch64/elf/linux_dup.c
 LXDUPD_ELF := $(BUILD)/linux_dup.elf
 LXDUPD_SIGNED := $(BUILD)/linux_dup.signed.elf

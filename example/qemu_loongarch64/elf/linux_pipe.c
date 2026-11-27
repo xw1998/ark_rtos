@@ -10,8 +10,8 @@
 *            3) 空管道读回 -EAGAIN（-11）——本内核不阻塞，空读必须显式失败，
 *               不许回 0 冒充 EOF；
 *            4) 写端关掉之后读回 0（EOF），与 Linux 一致；
-*            5) 带 O_CLOEXEC 的 pipe2 明确回 -EINVAL（-22）——本内核没有
-*               exec 时的关闭语义，接受这个位就是给一个不成立的承诺；
+*            5) 带 O_CLOEXEC 的 pipe2 被接受（本内核已在 execve 换帧后
+*               按 FD_CLOEXEC 还槽，这个位是真承诺而不是记账）；
 *            6) 缓冲满时是**短写**（返回实际写进去的字节数），不是假装写全；
 *               读端全关后写回 -EPIPE（-32）。
 *
@@ -237,9 +237,13 @@ void linux_main(unsigned long sp)
     check("read after writer closed -> EOF", rc, 0);
     (void)lx1(LX_CLOSE, fds[0]);
 
-    /* ---------------- 第 5 条：O_CLOEXEC 明确拒绝 ---------------- */
+    /* ---------------- 第 5 条：O_CLOEXEC 被接受 ---------------- */
     rc = lx2(LX_PIPE2, (lx_long)(unsigned long)fds, LX_O_CLOEXEC);
-    check("pipe2(O_CLOEXEC) -> -EINVAL", rc, -LX_EINVAL);
+    check("pipe2(O_CLOEXEC) rc", rc, 0);
+    check("pipe2(O_CLOEXEC) hands out two fds",
+          ((fds[0] >= 3) && (fds[1] >= 3)) ? 1 : 0, 1);
+    (void)lx1(LX_CLOSE, fds[0]);
+    (void)lx1(LX_CLOSE, fds[1]);
 
     /* ---------------- 第 6 条：满时短写 + 读端关掉后 -EPIPE ------------- */
     rc = lx2(LX_PIPE2, (lx_long)(unsigned long)fds, 0);
@@ -265,7 +269,7 @@ void linux_main(unsigned long sp)
 
     if (s_fail == 0)
     {
-        out("[pipe] PASS: pipe2 two fds, data round trip, EAGAIN on empty, EOF on writer close, EINVAL on O_CLOEXEC, short write and EPIPE\n");
+        out("[pipe] PASS: pipe2 two fds, data round trip, EAGAIN on empty, EOF on writer close, O_CLOEXEC accepted, short write and EPIPE\n");
         (void)lx1(LX_EXIT, 55);
     }
     else

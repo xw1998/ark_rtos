@@ -3531,13 +3531,13 @@ make -f example/qemu_loongarch64/Makefile -j8
 ```
 
 `build/qemu_loongarch64/ark_qemu_la64.elf` 里多一个 `ark_example_linux_dup` 数组
-（夹具 ELF 转成的 blob，8408 B），由 `elf_demo.c` 写进 `/mnt/ram/linux_dup` 再 `exec`。
+（夹具 ELF 转成的 blob，9792 B），由 `elf_demo.c` 写进 `/mnt/ram/linux_dup` 再 `exec`。
 （十档全开的构建同样要编过，`tools/fork_gate.py` 每一档都会带上这段。）
 
 **读数**（同一份固件，串口原样，`[dup]` 块 34 条）：
 
 ```
-[dup] write /mnt/ram/linux_dup rc=0 size=8408
+[dup] write /mnt/ram/linux_dup rc=0 size=9792
 [dup] pipe2 rc = 0 ok
 [dup] dup(writer) is a new fd = 1 ok
 [dup] write through the copy = 5 ok
@@ -3551,7 +3551,8 @@ make -f example/qemu_loongarch64/Makefile -j8
 [dup] read after all writers closed -> EOF = 0 ok
 [dup] dup(999) -> -EBADF = -9 ok
 [dup] dup3(1, 1, 0) -> -EINVAL = -22 ok
-[dup] dup3(..., O_CLOEXEC) -> -EINVAL = -22 ok
+[dup] dup3(1, 6, O_CLOEXEC) returns 6 = 6 ok
+[dup] F_GETFD(6) sees FD_CLOEXEC = 1 ok
 [dup] dup3(999, 1, 0) -> -EBADF = -9 ok
 [dup] dup3(writer, 1) returns 1 = 1 ok
 [dup] write(1) lands in the pipe = 3 ok
@@ -3563,8 +3564,22 @@ make -f example/qemu_loongarch64/Makefile -j8
 [dup] overwrite dropped the only writer -> EOF = 0 ok
 [dup] dup(0) is a console reference = 1 ok
 [dup] read the console reference -> EOF = 0 ok
+[dup] fcntl: pipe2 rc = 0 ok
+[dup] F_GETFD on a fresh fd -> 0 = 0 ok
+[dup] F_SETFD(FD_CLOEXEC) -> 0 = 0 ok
+[dup] F_GETFD reads FD_CLOEXEC back = 1 ok
+[dup] F_GETFL(reader) = O_RDONLY|O_NONBLOCK = 2048 ok
+[dup] F_GETFL(writer) = O_WRONLY|O_NONBLOCK = 2049 ok
+[dup] F_SETFL clearing O_NONBLOCK on a pipe -> -EINVAL = -22 ok
+[dup] F_GETFL(console) = O_RDWR|O_NONBLOCK = 2050 ok
+[dup] F_DUPFD(0) allocates a new fd = 1 ok
+[dup] F_DUPFD_CLOEXEC(9) -> 9 = 9 ok
+[dup] the F_DUPFD_CLOEXEC copy carries FD_CLOEXEC = 1 ok
+[dup] unknown cmd 99 -> -EINVAL = -22 ok
+[dup] F_GETFD on a bad fd -> -EBADF = -9 ok
 [dup] PASS: dup new fd, data through the copy, alias survives close, dup3 redirects stdout,
-             dup3 overwrites, console reference, EBADF/EINVAL on the four failure surfaces
+             dup3 overwrites, console reference, O_CLOEXEC accepted with FD_CLOEXEC readback,
+             fcntl FD/flags/dupfd, EBADF/EINVAL on the failure surfaces
 [dup] finished after 0 ms, exit code 56
 ```
 
@@ -3572,7 +3587,7 @@ make -f example/qemu_loongarch64/Makefile -j8
 `[hello]` / `[ELF] tamper check PASS` / `[FS] PASS` 全部不变——兼容层扩了一对号，
 没有动任何既有读数。
 
-**怎么读这 34 条**（每一条都在挡一种具体的假绿）：
+**怎么读这 53 条**（前 41 条是 dup/dup3，后 12 条是 fcntl(25)；每一条都在挡一种具体的假绿）：
 
 1. `dup(writer) is a new fd = 1` —— 返的是**新号**，不是把源号回一遍。只看「>0」不够。
 2. `write through the copy = 5` + `read from the original reader = 5` + `content matches`
@@ -3588,7 +3603,9 @@ make -f example/qemu_loongarch64/Makefile -j8
 7. `dup3(reader, writer) overwrites = 4` + `overwritten fd is no longer a writer = -9` +
    `overwrite dropped the only writer -> EOF = 0` —— 覆盖的顺序必须是「先释放旧目标，
    再装副本」；顺序反了会把刚装上的副本又释放掉。
-8. 四条失败面读的是**具体负值**（`-9` / `-22`×2 / `-9`），不是「负数就行」。
+8. 失败面读的是**具体负值**（`-9` / `-22` / `-9`），不是「负数就行」；`O_CLOEXEC`
+   这一格改成**成功读数**：`dup3(1, 6, O_CLOEXEC) returns 6` + `F_GETFD(6) sees
+   FD_CLOEXEC = 1`，证明位真的记在那个槽上而不只是「没报错」。
 9. `dup(0) is a console reference = 1` + `read the console reference -> EOF = 0` ——
    源是标准流且没有别名时，复制的是**控制台对象**（`LX_FD_CONSOLE`），读回 EOF。
 
@@ -3600,10 +3617,11 @@ make -f example/qemu_loongarch64/Makefile -j8
 **夹具为什么从 fd 2 打印**：第三组用例把 fd 1 重定向进管道，若夹具用 fd 1 打读数，
 `[dup] ...` 这些行会被自己写进管道、再从管道读回成别的东西，串口上一个字都看不到。
 
-**边界**：socket 明确不支持 `dup`（`-EINVAL`）、`O_CLOEXEC` 明确拒绝（本层没有
-exec 关闭语义）、文件副本各自持有偏移（唯一可见偏差）。逐条理由见
-[Linux可执行文件兼容-系统调用ABI](Linux可执行文件兼容-系统调用ABI.md) §8.12。
-门禁 `tools/linux_abi_gate.py` 的 `qemu-readout` 已把这一块纳入（34 条 + `exit code 56`），
+**边界**：socket 明确不支持 `dup`（`-EINVAL`）、文件副本各自持有偏移（唯一可见偏差）；
+`O_CLOEXEC` 已有真语义（`openat`/`dup3`/`pipe2`/`socket` 记位，exec 换帧后还槽）。
+逐条理由见 [Linux可执行文件兼容-系统调用ABI](Linux可执行文件兼容-系统调用ABI.md)
+§8.12（dup）与 §8.13（fcntl）。
+门禁 `tools/linux_abi_gate.py` 的 `qemu-readout` 已把这一块纳入（53 条 + `exit code 56`），
 `parser-selfcheck` 另有四种针对 dup 块的坏样本（去 PASS 行 / 改退出码 / 插 FAIL /
 少一条 check）。
 

@@ -111,6 +111,7 @@ int main(void)
 /* 号表与 errno 另写一份（用例不该因为被测实现改了常量就跟着改）。 */
 #define T_NR_DUP            (23u)
 #define T_NR_DUP3           (24u)
+#define T_NR_FCNTL          (25u)
 #define T_NR_OPENAT         (56u)
 #define T_NR_CLOSE          (57u)
 #define T_NR_PIPE2          (59u)
@@ -212,12 +213,22 @@ int main(void)
 #define T_MSG_DONTWAIT      (0x40u)
 #endif
 
+#define T_O_APPEND          (0x400u)
 #define T_O_NONBLOCK        (0x800u)
 #define T_O_CLOEXEC         (0x80000u)
 #define T_O_RDWR            (0x2u)
 #define T_O_WRONLY          (0x1u)
+#define T_O_RDONLY          (0x0u)
 #define T_O_CREAT           (0x40u)
 #define T_O_TRUNC           (0x200u)
+/* fcntl(25) 的 cmd 与 FD_CLOEXEC（与 asm-generic 的号另写一份，理由同号表）。 */
+#define T_F_DUPFD           (0u)
+#define T_F_GETFD           (1u)
+#define T_F_SETFD           (2u)
+#define T_F_GETFL           (3u)
+#define T_F_SETFL           (4u)
+#define T_F_DUPFD_CLOEXEC   (1030u)
+#define T_FD_CLOEXEC        (1u)
 #define T_MAP_SHARED        (0x01u)
 #define T_MAP_PRIVATE       (0x02u)
 #define T_MAP_FIXED         (0x10u)
@@ -1491,6 +1502,13 @@ static void t_pipe(t_ctx *c)
  *   3) dup3 到 0..2 是「占一格真槽 + 记别名」：close(源) 不影响它，
  *      close(1) 把别名撤掉、write(1) 回到控制台；
  *   4) 失败面：EBADF / EINVAL / ENFILE，各条判据的顺序与 Linux 一致。 */
+/* fcntl 的调用助手：本文件其余用例按 5 个参数格写，这里封一层省掉两个
+ * 永远为 0 的尾巴。 */
+static int32 fcntl_call(t_ctx *c, unsigned long fd, uint32 cmd, unsigned long arg)
+{
+    return call(c, T_NR_FCNTL, fd, (unsigned long)cmd, arg, 0UL);
+}
+
 static void t_dup(t_ctx *c)
 {
     uint32 fds[2];
@@ -1544,7 +1562,11 @@ static void t_dup(t_ctx *c)
     ck_ret(c, -T_EINVAL, "dup3(old == new) -EINVAL");
     (void)call(c, T_NR_DUP3, (unsigned long)fds[1], 5UL,
                (unsigned long)T_O_CLOEXEC, 0UL);
-    ck_ret(c, -T_EINVAL, "dup3(O_CLOEXEC) -EINVAL（本层没有 exec 关闭语义）");
+    ck_ret(c, 5, "dup3(O_CLOEXEC) 复制到 5");
+    (void)fcntl_call(c, 5UL, T_F_GETFD, 0UL);
+    ck_ret(c, (int32)T_FD_CLOEXEC, "dup3(O_CLOEXEC) 的副本带 FD_CLOEXEC");
+    (void)call(c, T_NR_CLOSE, 5UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "关掉那个副本");
     (void)call(c, T_NR_DUP3, (unsigned long)fds[1], 5UL, 0x400UL, 0UL);
     ck_ret(c, -T_EINVAL, "dup3(认不出的位) -EINVAL");
     (void)call(c, T_NR_DUP3, (unsigned long)fds[1], 20UL, 0UL, 0UL);
@@ -1685,6 +1707,174 @@ static void t_dup(t_ctx *c)
 }
 
 /* 分组 8：clock_gettime / uname */
+/* 分组：fcntl(25) 的状态标志与 FD_CLOEXEC
+ *
+ * 这一组钉三件事：状态标志按**槽**记（F_GETFL 读得回、副本跟着源走）；
+ * F_SETFL 只认 O_APPEND / O_NONBLOCK，且对管道"清 NONBLOCK"当场 -EINVAL
+ * （本层管道读空/写满一律 -EAGAIN，不承诺假阻塞）；execve 换镜像之后带
+ * FD_CLOEXEC 的槽真的还回去了 —— 那是 openat / dup3 / pipe2 / socket 敢
+ * 接受这个标志的唯一依据。 */
+static void t_fdflags(t_ctx *c)
+{
+    uint32 fds[2];
+    int32  a;
+    int32  b;
+
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    u_get(T_DATA_OFF, fds, 8u);
+    ck(fds[0] == 3u && fds[1] == 4u, "fcntl 用例的管道 fd 是 3/4");
+
+    (void)fcntl_call(c, (unsigned long)fds[0], T_F_GETFD, 0UL);
+    ck_ret(c, 0, "F_GETFD 新建 fd = 0");
+    (void)fcntl_call(c, (unsigned long)fds[0], T_F_SETFD,
+               (unsigned long)T_FD_CLOEXEC);
+    ck_ret(c, 0, "F_SETFD 置 FD_CLOEXEC");
+    (void)fcntl_call(c, (unsigned long)fds[0], T_F_GETFD, 0UL);
+    ck_ret(c, (int32)T_FD_CLOEXEC, "F_GETFD 读回 FD_CLOEXEC");
+    (void)fcntl_call(c, (unsigned long)fds[0], T_F_SETFD, 0UL);
+    ck_ret(c, 0, "F_SETFD 清 FD_CLOEXEC");
+    (void)fcntl_call(c, (unsigned long)fds[0], T_F_GETFD, 0UL);
+    ck_ret(c, 0, "F_GETFD 清后读回 0");
+
+    (void)fcntl_call(c, (unsigned long)fds[0], T_F_GETFL, 0UL);
+    ck_ret(c, (int32)(T_O_RDONLY | T_O_NONBLOCK), "F_GETFL 读端 = RDONLY|NONBLOCK");
+    (void)fcntl_call(c, (unsigned long)fds[1], T_F_GETFL, 0UL);
+    ck_ret(c, (int32)(T_O_WRONLY | T_O_NONBLOCK), "F_GETFL 写端 = WRONLY|NONBLOCK");
+
+    (void)fcntl_call(c, (unsigned long)fds[1], T_F_SETFL,
+               (unsigned long)T_O_NONBLOCK);
+    ck_ret(c, 0, "F_SETFL 置 O_NONBLOCK（本来就置着，恒成功）");
+    (void)fcntl_call(c, (unsigned long)fds[1], T_F_SETFL, 0UL);
+    ck_ret(c, -T_EINVAL, "F_SETFL 对管道清 O_NONBLOCK 回 -EINVAL");
+
+    (void)fcntl_call(c, 2UL, T_F_GETFL, 0UL);
+    ck_ret(c, (int32)(T_O_RDWR | T_O_NONBLOCK), "F_GETFL 控制台 = RDWR|NONBLOCK");
+    (void)fcntl_call(c, 2UL, T_F_SETFL, 0UL);
+    ck_ret(c, -T_EINVAL, "F_SETFL 对控制台清 O_NONBLOCK 回 -EINVAL");
+    (void)fcntl_call(c, 2UL, T_F_GETFD, 0UL);
+    ck_ret(c, 0, "F_GETFD 控制台 = 0");
+
+    (void)fcntl_call(c, (unsigned long)fds[1], T_F_DUPFD, 0UL);
+    ck_ret(c, 5, "F_DUPFD(0) 取最小空号 5");
+    a = (int32)c->ret;
+    (void)fcntl_call(c, (unsigned long)fds[1], T_F_DUPFD_CLOEXEC, 7UL);
+    ck_ret(c, 7, "F_DUPFD_CLOEXEC(7) 取 7");
+    b = (int32)c->ret;
+    (void)fcntl_call(c, (unsigned long)b, T_F_GETFD, 0UL);
+    ck_ret(c, (int32)T_FD_CLOEXEC, "F_DUPFD_CLOEXEC 的副本带 FD_CLOEXEC");
+    (void)fcntl_call(c, (unsigned long)a, T_F_GETFD, 0UL);
+    ck_ret(c, 0, "F_DUPFD 的副本不带 FD_CLOEXEC");
+    (void)fcntl_call(c, (unsigned long)b, T_F_GETFL, 0UL);
+    ck_ret(c, (int32)(T_O_WRONLY | T_O_NONBLOCK), "副本的状态标志跟着源走");
+    (void)fcntl_call(c, (unsigned long)b, T_F_DUPFD, 11UL);
+    ck_ret(c, -T_EINVAL, "F_DUPFD 越过表上限回 -EINVAL");
+
+    (void)fcntl_call(c, 999UL, T_F_GETFD, 0UL);
+    ck_ret(c, -T_EBADF, "fcntl 坏 fd 回 -EBADF");
+    (void)fcntl_call(c, (unsigned long)fds[0], 99UL, 0UL);
+    ck_ret(c, -T_EINVAL, "fcntl 不认识的 cmd 回 -EINVAL");
+    (void)fcntl_call(c, (unsigned long)fds[0], T_F_DUPFD, (unsigned long)-1);
+    ck_ret(c, -T_EINVAL, "F_DUPFD(arg<0) 回 -EINVAL");
+
+    /* execve 之后的 FD_CLOEXEC：还掉标记过的那一格，没标的留着 */
+    fresh(c);
+    g_stat_size = 100u;
+    g_stat_rc = 0;
+    (void)call(c, T_NR_OPENAT, 0UL, u_ptr(T_PATH_OFF), 0UL, 0UL);
+    ck_ret(c, 3, "打开第一个文件拿 fd 3");
+    (void)call(c, T_NR_OPENAT, 0UL, u_ptr(T_PATH_OFF), 0UL, 0UL);
+    ck_ret(c, 4, "打开第二个文件拿 fd 4");
+    (void)fcntl_call(c, 4UL, T_F_SETFD, (unsigned long)T_FD_CLOEXEC);
+    ck_ret(c, 0, "把 fd 4 标成 FD_CLOEXEC");
+    (void)fcntl_call(c, 4UL, T_F_GETFL, 0UL);
+    ck_ret(c, (int32)T_O_RDONLY, "文件 fd 的 F_GETFL = RDONLY");
+
+    u_put_str(T_PATH_OFF, "/bin/prog");
+    g_exec_rc = ARKRTOS_ELF_OK;
+    c->exec_frame_rc = 0;
+    ck(call(c, T_NR_EXECVE, u_ptr(T_PATH_OFF), 0UL, 0UL, 0UL) == 1,
+       "execve 成功（换帧 + 还 CLOEXEC 槽）");
+    (void)fcntl_call(c, 4UL, T_F_GETFD, 0UL);
+    ck_ret(c, -T_EBADF, "exec 之后 FD_CLOEXEC 的 fd 4 已还掉");
+    (void)fcntl_call(c, 3UL, T_F_GETFD, 0UL);
+    ck_ret(c, 0, "exec 之后没标 CLOEXEC 的 fd 3 仍在");
+    (void)call(c, T_NR_CLOSE, 3UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "关掉 fd 3");
+
+    /* 打开时带 O_CLOEXEC 直接记账（并让它跨 exec 被还掉） */
+    fresh(c);
+    g_stat_size = 100u;
+    g_stat_rc = 0;
+    (void)call(c, T_NR_OPENAT, 0UL, u_ptr(T_PATH_OFF),
+               (unsigned long)T_O_CLOEXEC, 0UL);
+    ck_ret(c, 3, "openat(O_CLOEXEC) 拿 fd 3");
+    (void)fcntl_call(c, 3UL, T_F_GETFD, 0UL);
+    ck_ret(c, (int32)T_FD_CLOEXEC, "openat(O_CLOEXEC) 记下了 FD_CLOEXEC");
+    u_put_str(T_PATH_OFF, "/bin/prog");
+    g_exec_rc = ARKRTOS_ELF_OK;
+    c->exec_frame_rc = 0;
+    ck(call(c, T_NR_EXECVE, u_ptr(T_PATH_OFF), 0UL, 0UL, 0UL) == 1, "再 execve 一次");
+    (void)fcntl_call(c, 3UL, T_F_GETFD, 0UL);
+    ck_ret(c, -T_EBADF, "openat 的 O_CLOEXEC 在 exec 后同样被还掉");
+
+    /* 标准流别名上的 CLOEXEC：dup3(pw, 1, O_CLOEXEC) 之后 exec，fd 1 回到控制台 */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    u_get(T_DATA_OFF, fds, 8u);
+    (void)call(c, T_NR_DUP3, (unsigned long)fds[1], 1UL,
+               (unsigned long)T_O_CLOEXEC, 0UL);
+    ck_ret(c, 1, "dup3(pw, 1, O_CLOEXEC) 把 stdout 指到管道");
+    (void)fcntl_call(c, 1UL, T_F_GETFD, 0UL);
+    ck_ret(c, (int32)T_FD_CLOEXEC, "别名槽继承了 dup3 的 FD_CLOEXEC");
+    u_put_str(T_PATH_OFF, "/bin/prog");
+    g_exec_rc = ARKRTOS_ELF_OK;
+    c->exec_frame_rc = 0;
+    ck(call(c, T_NR_EXECVE, u_ptr(T_PATH_OFF), 0UL, 0UL, 0UL) == 1, "execve 成功");
+    (void)fcntl_call(c, 1UL, T_F_GETFD, 0UL);
+    ck_ret(c, 0, "exec 之后 fd 1 回到控制台（别名已摘）");
+    u_put_str(T_STR_OFF, "hey");
+    (void)call(c, T_NR_WRITE, 1UL, u_ptr(T_STR_OFF), 3UL, 0UL);
+    ck_ret(c, 3, "exec 之后 write(1) 走控制台");
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 8UL, 0UL);
+    ck_ret(c, -T_EAGAIN, "那 3 个字节没进管道（写端还在，读到 -EAGAIN）");
+    (void)call(c, T_NR_CLOSE, (unsigned long)fds[1], 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "关掉管道原来的写端");
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 8UL, 0UL);
+    ck_ret(c, 0, "写端全关之后读到 EOF");
+
+    /* openat 带 O_APPEND / O_NONBLOCK：两位都记在槽上，F_GETFL 读得回；
+     * 文件 fd 上 F_SETFL 置/清这两位恒回 0（只有管道"清 NONBLOCK"才拒） */
+    fresh(c);
+    g_stat_size = 100u;
+    g_stat_rc = 0;
+    (void)call(c, T_NR_OPENAT, 0UL, u_ptr(T_PATH_OFF),
+               (unsigned long)(T_O_RDONLY | T_O_APPEND), 0UL);
+    ck_ret(c, 3, "openat(O_APPEND) 拿 fd 3");
+    (void)fcntl_call(c, 3UL, T_F_GETFL, 0UL);
+    ck_ret(c, (int32)(T_O_RDONLY | T_O_APPEND), "F_GETFL 读回 O_APPEND");
+    (void)fcntl_call(c, 3UL, T_F_SETFL, 0UL);
+    ck_ret(c, 0, "文件 fd 上清 O_APPEND 回 0");
+    (void)fcntl_call(c, 3UL, T_F_GETFL, 0UL);
+    ck_ret(c, (int32)T_O_RDONLY, "清掉后 F_GETFL = RDONLY");
+    (void)fcntl_call(c, 3UL, T_F_SETFL, (unsigned long)T_O_APPEND);
+    ck_ret(c, 0, "文件 fd 上置 O_APPEND 回 0");
+    (void)fcntl_call(c, 3UL, T_F_GETFL, 0UL);
+    ck_ret(c, (int32)(T_O_RDONLY | T_O_APPEND), "置位后 F_GETFL 再见 O_APPEND");
+
+    (void)call(c, T_NR_OPENAT, 0UL, u_ptr(T_PATH_OFF),
+               (unsigned long)(T_O_RDONLY | T_O_NONBLOCK), 0UL);
+    ck_ret(c, 4, "openat(O_NONBLOCK) 拿 fd 4");
+    (void)fcntl_call(c, 4UL, T_F_GETFL, 0UL);
+    ck_ret(c, (int32)(T_O_RDONLY | T_O_NONBLOCK), "F_GETFL 读回 O_NONBLOCK");
+    (void)fcntl_call(c, 4UL, T_F_SETFL, 0UL);
+    ck_ret(c, 0, "文件 fd 上清 O_NONBLOCK 回 0");
+    (void)fcntl_call(c, 4UL, T_F_GETFL, 0UL);
+    ck_ret(c, (int32)T_O_RDONLY, "清掉后 F_GETFL 只剩 RDONLY");
+    (void)call(c, T_NR_CLOSE, 3UL, 0UL, 0UL, 0UL);
+    (void)call(c, T_NR_CLOSE, 4UL, 0UL, 0UL, 0UL);
+}
+
 static void t_meta(t_ctx *c)
 {
     uint32 ts[2];
@@ -5734,6 +5924,45 @@ static void t_socket(t_ctx *c)
         g_net_reply = 0;
     }
 
+    /* ---- fcntl 在 socket 槽上要同时写回 sflags ----
+     * socket 层读的是 sflags（不是 fl）：fd 上改了 NONBLOCK / CLOEXEC，
+     * sflags 不同步就成了「fcntl 说改了、收发行为没变」的假承诺。 */
+    {
+        fresh(c);
+        net_reset();
+        g_restart_rc = 0;
+        g_net_handle = 170;
+        r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM, 0UL, 0UL, 0UL, 0UL);
+        ck(r == 3, "fcntl sflags 用例前置：socket 拿 fd 3");
+
+        (void)fcntl_call(c, 3UL, T_F_SETFL, (unsigned long)T_O_NONBLOCK);
+        ck_ret(c, 0, "socket 槽上 F_SETFL(O_NONBLOCK) 回 0");
+        (void)fcntl_call(c, 3UL, T_F_GETFL, 0UL);
+        ck_ret(c, (int32)(T_O_RDWR | T_O_NONBLOCK),
+               "socket 槽的 F_GETFL = RDWR|NONBLOCK");
+        net_reset();
+        g_net_rc = ARKRTOS_NET_EWOULDBLOCK;
+        r = sock_run(c, T_NR_RECVFROM, 3UL, iop, 8UL, 0UL, 0UL, 0UL);
+        ck(r == -T_EAGAIN, "置上 NONBLOCK 之后收不到数据当场回 -EAGAIN（不进重放）");
+        ck(g_block_calls == 0, "NONBLOCK 生效时不睡时间片");
+
+        (void)fcntl_call(c, 3UL, T_F_SETFL, 0UL);
+        ck_ret(c, 0, "socket 槽上清 O_NONBLOCK 回 0");
+        (void)fcntl_call(c, 3UL, T_F_GETFL, 0UL);
+        ck_ret(c, (int32)T_O_RDWR, "清掉后 F_GETFL = RDWR");
+
+        (void)fcntl_call(c, 3UL, T_F_SETFD, (unsigned long)T_FD_CLOEXEC);
+        ck_ret(c, 0, "socket 槽上 F_SETFD(FD_CLOEXEC) 回 0");
+        (void)fcntl_call(c, 3UL, T_F_GETFD, 0UL);
+        ck_ret(c, (int32)T_FD_CLOEXEC, "socket 槽的 F_GETFD 读回 FD_CLOEXEC");
+        (void)fcntl_call(c, 3UL, T_F_SETFD, 0UL);
+        ck_ret(c, 0, "socket 槽上清 FD_CLOEXEC 回 0");
+        (void)fcntl_call(c, 3UL, T_F_GETFD, 0UL);
+        ck_ret(c, 0, "清掉后 F_GETFD = 0");
+        (void)call(c, T_NR_CLOSE, 3UL, 0UL, 0UL, 0UL);
+        ck_ret(c, 0, "关掉这个 socket 槽");
+    }
+
     /* 收尾：把挂着的登记和端口能力恢复成默认 */
     (void)arkrtos_linux_abi_on_task_exit(7);
     g_restart_rc = -1;
@@ -5758,6 +5987,7 @@ int main(void)
     t_pread(&c);
     t_pipe(&c);
     t_dup(&c);
+    t_fdflags(&c);
     t_meta(&c);
     t_mem(&c);
     t_signal(&c);

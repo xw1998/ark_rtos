@@ -67,7 +67,8 @@
 
 /* asm-generic 号表：RISC-V 与 LoongArch 的 Linux UAPI 都用这一套。 */
 #define LX_SYS_DUP                  (23u)   /* dup：复制一个 fd 到最小的空号 */
-#define LX_SYS_DUP3                 (24u)   /* dup3：复制到一个指定号（不含 CLOEXEC） */
+#define LX_SYS_DUP3                 (24u)   /* dup3：复制到一个指定号（可选 O_CLOEXEC） */
+#define LX_SYS_FCNTL                (25u)   /* fcntl：F_DUPFD / F_GETFD / F_SETFD / F_GETFL / F_SETFL */
 #define LX_SYS_OPENAT               (56u)
 #define LX_SYS_CLOSE                (57u)
 #define LX_SYS_PIPE2                (59u)
@@ -360,11 +361,26 @@
 #define LX_O_ACCMODE                (0x3u)
 #define LX_O_CREAT                  (0x40u)
 #define LX_O_TRUNC                  (0x200u)
+#define LX_O_APPEND                 (0x400u)
 #define LX_O_NONBLOCK               (0x800u)
-#define LX_O_CLOEXEC                (0x80000u)   /* dup3 唯一认的位，但本层拒绝它 */
+#define LX_O_CLOEXEC                (0x80000u)   /* openat / dup3 / pipe2 / socket 都记，exec 时据此还槽 */
 /* U-21 唯一放开的访问模式：打开**已存在**的文件时 O_RDWR 合法（可写共享映射
  * 的前提）。O_WRONLY 不放开：只写映射的语义要整文件回填，本档没有。 */
 #define LX_O_RDWR                   (0x2u)
+#define LX_O_WRONLY                 (0x1u)
+#define LX_O_RDONLY                 (0x0u)
+
+/* fcntl(25) 认的 cmd 与 FD_CLOEXEC 位（asm-generic）。只做这五个：F_DUPFD /
+ * F_DUPFD_CLOEXEC / F_GETFD / F_SETFD / F_GETFL / F_SETFL。其余（记录锁、租约、
+ * F_GETOWN 一类）本层没有对应实体，一律 -EINVAL —— Linux 对不认识的 cmd 也是
+ * 这么答的，不给一个"看似的成功"。 */
+#define LX_F_DUPFD                  (0u)
+#define LX_F_GETFD                  (1u)
+#define LX_F_SETFD                  (2u)
+#define LX_F_GETFL                  (3u)
+#define LX_F_SETFL                  (4u)
+#define LX_F_DUPFD_CLOEXEC          (1030u)
+#define LX_FD_CLOEXEC               (1u)
 
 /* mmap 标志位（asm-generic） */
 #define LX_MAP_SHARED               (0x01u)
@@ -425,6 +441,9 @@ typedef struct
                          * LX_FD_SOCKET / LX_FD_CONSOLE */
     uint8  pipe;        /* kind 是管道时，s_pipe 的下标 */
     uint8  wr;          /* 1 = 以 O_RDWR 打开（U-21 可写共享映射的前提） */
+    uint8  cloexec;     /* FD_CLOEXEC：execve 换镜像之后这一槽要还回去 */
+    uint16 fl;          /* 文件状态标志：O_ACCMODE + O_APPEND + O_NONBLOCK。
+                         * F_GETFL 回的就是它，F_SETFL 只改后两位 */
     uint32 size;
     uint32 off;
 #if (ARKRTOS_USE_LINUX_SOCKET == 1)
@@ -648,6 +667,8 @@ static void lx_proc_zero(uint32 slot)
         s_proc[slot].fd[i].off  = 0u;
         s_proc[slot].fd[i].path[0] = 0;
         s_proc[slot].fd[i].wr   = 0u;
+        s_proc[slot].fd[i].cloexec = 0u;
+        s_proc[slot].fd[i].fl   = 0u;
 #if (ARKRTOS_USE_LINUX_SOCKET == 1)
         s_proc[slot].fd[i].net    = 0u;
         s_proc[slot].fd[i].stype  = 0u;
@@ -1030,6 +1051,10 @@ static void lx_fd_console_fill(uint32 idx)
     s_fd[idx].kind    = LX_FD_CONSOLE;
     s_fd[idx].pipe    = 0u;
     s_fd[idx].wr      = 0u;
+    s_fd[idx].cloexec = 0u;
+    /* 控制台读回 EOF、写不等锁，行为上就是一台不阻塞的设备：F_GETFL 如实
+     * 这么报，而不是报 0（阻塞）让程序去等一个永远不来的事件。 */
+    s_fd[idx].fl      = (uint16)(LX_O_RDWR | LX_O_NONBLOCK);
     s_fd[idx].size    = 0u;
     s_fd[idx].off     = 0u;
     s_fd[idx].path[0] = 0;
@@ -1064,6 +1089,8 @@ static void lx_fd_clone(uint32 dst, uint32 src)
     s_fd[dst].kind    = kind;
     s_fd[dst].pipe    = s_fd[src].pipe;
     s_fd[dst].wr      = s_fd[src].wr;
+    s_fd[dst].cloexec = 0u;     /* Linux：dup 出来的副本不带 FD_CLOEXEC */
+    s_fd[dst].fl      = s_fd[src].fl;
     s_fd[dst].size    = s_fd[src].size;
     s_fd[dst].off     = s_fd[src].off;
     lx_copy_str(s_fd[dst].path, (uint32)sizeof(s_fd[dst].path), s_fd[src].path);
@@ -1244,7 +1271,7 @@ static int32 lx_pipe2(void *p_ctx)
     {
         return -LX_EFAULT;
     }
-    if((flags & ~(uint32)LX_O_NONBLOCK) != 0u)
+    if((flags & ~(uint32)(LX_O_NONBLOCK | LX_O_CLOEXEC)) != 0u)
     {
         return -LX_EINVAL;
     }
@@ -1279,12 +1306,20 @@ static int32 lx_pipe2(void *p_ctx)
     s_fd[i0].size     = 0u;
     s_fd[i0].off      = 0u;
     s_fd[i0].path[0]  = 0;
+    s_fd[i0].wr       = 0u;
     s_fd[i1].used     = 1u;
     s_fd[i1].kind     = LX_FD_PIPE_W;
     s_fd[i1].pipe     = (uint8)pi;
     s_fd[i1].size     = 0u;
     s_fd[i1].off      = 0u;
     s_fd[i1].path[0]  = 0;
+    s_fd[i1].wr       = 0u;
+    /* 两端都如实报 O_NONBLOCK：本层管道读空/写满一律 -EAGAIN，本来就是
+     * 不阻塞的（见 LX_PIPE_BUF 上的注释）；F_SETFL 清这一位会被拒绝。 */
+    s_fd[i0].fl = (uint16)(LX_O_RDONLY | LX_O_NONBLOCK);
+    s_fd[i1].fl = (uint16)(LX_O_WRONLY | LX_O_NONBLOCK);
+    s_fd[i0].cloexec = ((flags & (uint32)LX_O_CLOEXEC) != 0u) ? 1u : 0u;
+    s_fd[i1].cloexec = s_fd[i0].cloexec;
 
     fds[0] = (int32)(3 + i0);
     fds[1] = (int32)(3 + i1);
@@ -1439,23 +1474,24 @@ static int32 lx_dup(void *p_ctx)
 }
 
 /* dup3(24)：复制到指定号。参数校验逐条对齐 Linux：
- *   flags 里有 O_CLOEXEC     -> -EINVAL（本层拒绝，不是忽略）
+ *   flags 里有 O_CLOEXEC     -> 接受：新号带 FD_CLOEXEC（exec 时会被还掉）
  *   flags 里有其它位         -> -EINVAL
  *   oldfd == newfd           -> -EINVAL（这是 dup3 与 dup2 的唯一区别）
  *   newfd < 0                -> -EINVAL
  *   oldfd 无效               -> -EBADF
- *   newfd >= LX_MAX_FD+3     -> -EBADF */
+ *   newfd >= LX_MAX_FD+3     -> -EBADF
+ *
+ * O_CLOEXEC 过去是明确拒绝的（"本内核没有 exec 时的关闭语义"）。那条理由
+ * 现在不成立了：execve 成功换帧之后 lx_fd_close_cloexec() 会把这个槽还回去，
+ * 于是这里可以如实接受 —— 接受一个标志的前提是真的会照它做。 */
 static int32 lx_dup3(void *p_ctx)
 {
     int32  oldfd = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
     int32  newfd = (int32)ARKRTOS_SVC_ARG(p_ctx, 1u);
     uint32 flags = ARKRTOS_SVC_ARG(p_ctx, 2u);
+    int32  rc;
 
     if((flags & ~(uint32)LX_O_CLOEXEC) != 0u)
-    {
-        return -LX_EINVAL;
-    }
-    if((flags & (uint32)LX_O_CLOEXEC) != 0u)
     {
         return -LX_EINVAL;
     }
@@ -1467,7 +1503,173 @@ static int32 lx_dup3(void *p_ctx)
     {
         return -LX_EINVAL;
     }
-    return lx_fd_dup_to(oldfd, newfd);
+    rc = lx_fd_dup_to(oldfd, newfd);
+    if((rc >= 0) && ((flags & (uint32)LX_O_CLOEXEC) != 0u))
+    {
+        /* newfd 可能是 0..2：那时副本占的是**别名槽**，lx_fd_find 按 fd>=3
+         * 查表会找不到它。别名有槽就必须一起标 CLOEXEC，否则 exec 之后
+         * fd 1 还指着管道，程序以为重定向已经撤掉了。 */
+        int32 idx = (rc <= 2) ? lx_std_slot(rc) : lx_fd_find(rc);
+
+        if(idx >= 0)
+        {
+            s_fd[idx].cloexec = 1u;
+        }
+    }
+    return rc;
+}
+
+/* F_DUPFD：取 >= arg 的最小的空号。0..2 只有别名才占真槽，所以搜索从
+ * max(arg, 3) 起。arg 越过表上限回 -EINVAL（Linux 的 fcntl 也是 EINVAL，
+ * 而 dup3 对越界 newfd 回 -EBADF —— 两条路的口径本来就不同，不并成一条）；
+ * 表满回 -ENFILE，与 dup / pipe2 / openat 的既定口径一致。 */
+static int32 lx_fd_dup_least(int32 oldfd, int32 arg)
+{
+    int32 fd;
+
+    if(arg < 0)
+    {
+        return -LX_EINVAL;
+    }
+    for(fd = (arg < 3) ? 3 : arg; (uint32)(fd - 3) < LX_MAX_FD; fd++)
+    {
+        if(s_fd[fd - 3].used == 0u)
+        {
+            return lx_fd_dup_to(oldfd, fd);
+        }
+    }
+    return ((uint32)(((arg < 3) ? 3 : arg) - 3) >= LX_MAX_FD) ? -LX_EINVAL : -LX_ENFILE;
+}
+
+/* F_SETFL：只改 O_APPEND 与 O_NONBLOCK（Linux 也只认这两位，其余位静默
+ * 忽略，不报错）。socket 的 NONBLOCK 还同时写回 sflags，socket 层读的是那一格。 */
+static void lx_fd_set_fl(int32 idx, uint32 arg)
+{
+    uint16 fl = s_fd[idx].fl;
+
+    if((arg & (uint32)LX_O_APPEND) != 0u)
+    {
+        fl |= (uint16)LX_O_APPEND;
+    }
+    else
+    {
+        fl = (uint16)((uint32)fl & ~(uint32)LX_O_APPEND);
+    }
+    if((arg & (uint32)LX_O_NONBLOCK) != 0u)
+    {
+        fl |= (uint16)LX_O_NONBLOCK;
+    }
+    else
+    {
+        fl = (uint16)((uint32)fl & ~(uint32)LX_O_NONBLOCK);
+    }
+    s_fd[idx].fl = fl;
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+    if(s_fd[idx].kind == LX_FD_SOCKET)
+    {
+        if((arg & (uint32)LX_O_NONBLOCK) != 0u)
+        {
+            s_fd[idx].sflags |= (uint8)LX_SOCKF_NONBLOCK;
+        }
+        else
+        {
+            s_fd[idx].sflags = (uint8)((uint32)s_fd[idx].sflags & ~(uint32)LX_SOCKF_NONBLOCK);
+        }
+    }
+#endif
+}
+
+/* fcntl(25)：本层只认 LX_F_* 那五个 cmd，其余 -EINVAL（Linux 对不认识的
+ * cmd 也是 EINVAL，不回 ENOSYS）。
+ *
+ * 三处必须说清楚的边界：
+ *   * 0..2 没有别名时它们是「控制台对象」而不是槽：F_GETFD 回 0、F_SETFD
+ *     回 0 但不记 FD_CLOEXEC（没有槽可还，exec 之后控制台照旧在）、
+ *     F_GETFL 回 O_RDWR|O_NONBLOCK。
+ *   * 对管道**清** O_NONBLOCK 回 -EINVAL：本层管道读空/写满一律 -EAGAIN，
+ *     承诺不了阻塞语义。回 0 让程序去等一个永远不会来的事件，比当场拒绝
+ *     危险得多。置位则恒成功（它本来就不阻塞）。
+ *   * 文件 fd 的 O_APPEND 只被记录下来（F_GETFL 能读回）：本层文件写仍
+ *     -ENOSYS，不会因为它变成"能追加"，所以也不假装写成功了。 */
+static int32 lx_fcntl(void *p_ctx)
+{
+    int32  fd  = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
+    uint32 cmd = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    unsigned long arg = ARKRTOS_SVC_ARG(p_ctx, 2u);
+    int32  idx = -1;
+    int32  rc;
+
+    if((fd >= 0) && (fd <= 2))
+    {
+        idx = lx_std_slot(fd);      /* -1 = 没有别名的标准流（控制台本体） */
+    }
+    else
+    {
+        idx = lx_fd_find(fd);
+        if(idx < 0)
+        {
+            return -LX_EBADF;
+        }
+    }
+
+    switch(cmd)
+    {
+    case LX_F_DUPFD:
+    case LX_F_DUPFD_CLOEXEC:
+        rc = lx_fd_dup_least(fd, (int32)arg);
+        if((rc >= 0) && (cmd == (uint32)LX_F_DUPFD_CLOEXEC))
+        {
+            int32 d = lx_fd_find(rc);
+
+            if(d >= 0)
+            {
+                s_fd[d].cloexec = 1u;
+            }
+        }
+        return rc;
+    case LX_F_GETFD:
+        return ((idx >= 0) && (s_fd[idx].cloexec != 0u)) ? (int32)LX_FD_CLOEXEC : 0;
+    case LX_F_SETFD:
+        if(idx >= 0)
+        {
+            s_fd[idx].cloexec = ((arg & (unsigned long)LX_FD_CLOEXEC) != 0ul) ? 1u : 0u;
+#if (ARKRTOS_USE_LINUX_SOCKET == 1)
+            if(s_fd[idx].kind == LX_FD_SOCKET)
+            {
+                if(s_fd[idx].cloexec != 0u)
+                {
+                    s_fd[idx].sflags |= (uint8)LX_SOCKF_CLOEXEC;
+                }
+                else
+                {
+                    s_fd[idx].sflags = (uint8)((uint32)s_fd[idx].sflags & ~(uint32)LX_SOCKF_CLOEXEC);
+                }
+            }
+#endif
+        }
+        return 0;
+    case LX_F_GETFL:
+        if(idx < 0)
+        {
+            return (int32)((uint32)LX_O_RDWR | (uint32)LX_O_NONBLOCK);
+        }
+        return (int32)s_fd[idx].fl;
+    case LX_F_SETFL:
+        if(idx < 0)
+        {
+            /* 控制台对象本来就不阻塞：只接受"要求不阻塞"这一种写法。 */
+            return ((arg & (unsigned long)LX_O_NONBLOCK) != 0ul) ? 0 : -LX_EINVAL;
+        }
+        if(((arg & (unsigned long)LX_O_NONBLOCK) == 0ul) &&
+           ((s_fd[idx].kind == LX_FD_PIPE_R) || (s_fd[idx].kind == LX_FD_PIPE_W)))
+        {
+            return -LX_EINVAL;
+        }
+        lx_fd_set_fl(idx, (uint32)arg);
+        return 0;
+    default:
+        return -LX_EINVAL;
+    }
 }
 
 /* ---------------------------------------------------------------- 信号 */
@@ -2005,6 +2207,16 @@ static int32 lx_openat(void *p_ctx)
     s_fd[i].size = size;
     s_fd[i].off  = 0u;
     s_fd[i].wr   = (uint8)wr;
+    s_fd[i].cloexec = ((flags & (uint32)LX_O_CLOEXEC) != 0u) ? 1u : 0u;
+    s_fd[i].fl = (uint16)((wr != 0u) ? LX_O_RDWR : LX_O_RDONLY);
+    if((flags & (uint32)LX_O_APPEND) != 0u)
+    {
+        s_fd[i].fl |= (uint16)LX_O_APPEND;
+    }
+    if((flags & (uint32)LX_O_NONBLOCK) != 0u)
+    {
+        s_fd[i].fl |= (uint16)LX_O_NONBLOCK;
+    }
     s_fd[i].used = 1u;
 
     return (int32)(3u + i);
@@ -2077,6 +2289,8 @@ static uint32 lx_fd_release(uint32 slot, uint32 idx)
     }
     s_proc[slot].fd[idx].path[0] = 0;
     s_proc[slot].fd[idx].wr = 0u;
+    s_proc[slot].fd[idx].cloexec = 0u;
+    s_proc[slot].fd[idx].fl = 0u;
 #if (ARKRTOS_USE_LINUX_SOCKET == 1)
     s_proc[slot].fd[idx].net    = 0u;
     s_proc[slot].fd[idx].stype  = 0u;
@@ -2085,6 +2299,24 @@ static uint32 lx_fd_release(uint32 slot, uint32 idx)
     s_proc[slot].fd[idx].pbits  = 0u;
 #endif
     return 1u;
+}
+
+/* execve 换镜像成功之后的收尾：还掉所有带 FD_CLOEXEC 的槽（它们占的标准流
+ * 别名由 lx_fd_release 一并摘掉）。这是 openat / dup3 / pipe2 / socket 敢接受
+ * O_CLOEXEC 的唯一依据；不做这一步，那些标志就只是一个记下来没人执行的字。 */
+static void lx_fd_close_cloexec(void)
+{
+    uint32 slot = lx_proc_cur();
+    uint32 i;
+
+    for(i = 0u; i < LX_MAX_FD; i++)
+    {
+        if((s_proc[slot].fd[i].used != 0u) &&
+           (s_proc[slot].fd[i].cloexec != 0u))
+        {
+            (void)lx_fd_release(slot, i);
+        }
+    }
 }
 
 #if (ARKRTOS_USE_LINUX_SOCKET == 1)
@@ -2264,6 +2496,9 @@ static void lx_sock_fill(uint32 idx, int32 handle, uint32 stype, uint32 sflags)
     s_fd[idx].net     = (uint8)handle;
     s_fd[idx].stype   = (uint8)stype;
     s_fd[idx].sflags  = (uint8)sflags;
+    s_fd[idx].cloexec = ((sflags & (uint32)LX_SOCKF_CLOEXEC) != 0u) ? 1u : 0u;
+    s_fd[idx].fl      = (uint16)(LX_O_RDWR |
+        (((sflags & (uint32)LX_SOCKF_NONBLOCK) != 0u) ? LX_O_NONBLOCK : 0u));
     s_fd[idx].pok     = 0u;
     s_fd[idx].pbits   = 0u;
     s_fd[idx].used    = 1u;
@@ -6837,6 +7072,11 @@ static int32 lx_execve(void *p_ctx)
     /* 新镜像的 brk/mmap 从窗口内那块堆的起点重新开始；旧游标属于旧镜像。 */
     s_heap_cur = 0ul;
 
+    /* Linux 语义：execve 之后带 FD_CLOEXEC 的 fd 全部消失。放在换帧之后，
+     * 因为这是整条路径上唯一不可能失败的收尾 —— 装载已经成功、旧镜像回不去
+     * 了，这里也就不会出现"关了一半又返回"的中间态。 */
+    lx_fd_close_cloexec();
+
     return LX_RET_EXEC_DONE;
 }
 
@@ -6887,6 +7127,9 @@ static int32 lx_dispatch(void *p_svc_ctx, uint32 num, int32 *p_rc)
         break;
     case LX_SYS_DUP3:
         rc = lx_dup3(p_svc_ctx);
+        break;
+    case LX_SYS_FCNTL:
+        rc = lx_fcntl(p_svc_ctx);
         break;
     case LX_SYS_OPENAT:
         rc = lx_openat(p_svc_ctx);

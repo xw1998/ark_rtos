@@ -40,14 +40,15 @@ a purely Linux-ABI static binary with its own `_start`):
 **"A static program runs" is not "Linux is supported".** Section 3 lists what is
 explicitly unsupported.
 
-## 1 Supported syscalls (44; 30 measured on QEMU, 13 socket numbers host-tier only, 1 table-and-argument only)
+## 1 Supported syscalls (45; 31 measured on QEMU, 13 socket numbers host-tier only, 1 table-and-argument only)
 
 Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 
 | nr | name | how Ark fulfils it | measured |
 |---:|---|---|---|
 | 23 | `dup` | copy one fd slot (pipe/file/standard stream) into the lowest free number (8.12) | `dup(writer) is a new fd -> 1 ok` / `read through the copy -> 3 ok` / `dup(999) -> -EBADF = -9` / `exit code 56` |
-| 24 | `dup3` | copy to a chosen number; `fd 0..2` becomes an alias instead of a shared slot; `O_CLOEXEC` and `old==new` are refused (8.12) | `dup3(writer, 1) returns 1 -> 1 ok` / `dup3(..., O_CLOEXEC) -> -EINVAL = -22 ok` / `dup3(reader, writer) overwrites -> 4 ok` |
+| 24 | `dup3` | copy to a chosen number; `fd 0..2` becomes an alias instead of a shared slot; `O_CLOEXEC` is **accepted and recorded**, `old==new` is refused (8.12) | `dup3(writer, 1) returns 1 -> 1 ok` / `dup3(1, 6, O_CLOEXEC) returns 6 -> 6 ok` / `dup3(reader, writer) overwrites -> 4 ok` |
+| 25 | `fcntl` | six commands: `F_DUPFD` / `F_GETFD` / `F_SETFD` / `F_GETFL` / `F_SETFL` / `F_DUPFD_CLOEXEC` (the last is `F_DUPFD` plus `FD_CLOEXEC`); every other command returns `-EINVAL` (8.13) | `F_GETFD reads FD_CLOEXEC back -> 1 ok` / `F_GETFL(reader) = O_RDONLY\|O_NONBLOCK = 2048 ok` / `F_DUPFD_CLOEXEC(9) -> 9 = 9 ok` |
 | 56 | `openat` | `arkrtos_vfs_app_stat()` on the VFS namespace; directories return `-EISDIR` | `openat>0 -> 1 ok` |
 | 57 | `close` | release the fd slot, return 0 (a pipe end drops its reference count) | `close -> 0 ok` |
 | 59 | `pipe2` | ring-buffer pipe with per-end reference counts; **non-blocking** (section 6) | `pipe2 rc = 0` / `read empty -> -EAGAIN = -11` / `write with reader closed -> -EPIPE = -32` / `exit code 55` |
@@ -82,7 +83,7 @@ Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 
 The socket family (`198-210`, `242`, 13 numbers) is described in section 8.9: it is
 implemented in the translation layer and covered by 581 host assertions, but the **QEMU
-fixture has no socket section yet**, so it is not counted among the 28 numbers with QEMU
+fixture has no socket section yet**, so it is not counted among the 31 numbers with QEMU
 readouts.
 
 Unknown numbers return `-ENOSYS` (38) and are counted. Nothing is guessed.
@@ -98,8 +99,8 @@ profile".
 (section 8.6), so it now has 11 serial readouts and is no longer a table-only
 number.
 
-The other 26 numbers all have serial readouts from the `[linux]` / `[pipe]` /
-`[sig]` / `[fork]` fixtures.
+The other 31 numbers all have serial readouts from the `[linux]` / `[pipe]` /
+`[sig]` / `[dup]` / `[fork]` fixtures.
 
 ## 2 How the two ABIs are told apart
 
@@ -195,14 +196,22 @@ sitting in the user stack) lets it implement the **real** semantics instead of
   stack live in `[stack_bottom, argv_start)` and the new argc/argv are written
   above `argv_start`.
 
-Three differences that stay in the title:
+Four differences that stay in the title:
 
 1. `envp` is not consumed (this machine has no environment layer; the new image
    receives the same empty table);
 2. the **fd table is preserved** (same as Linux, unlike the shell's `exec`,
    which starts a new task and resets it);
 3. the old image's heap cursor is void; already-allocated addresses are not
-   reclaimed in any way (the old image is gone).
+   reclaimed in any way (the old image is gone);
+4. **fds marked `FD_CLOEXEC` are now released here** (since 2026-11-27):
+   `lx_execve()` calls `lx_fd_close_cloexec()` right after `s_heap_cur = 0`,
+   releasing every slot with the bit set. The position is deliberate: segments
+   loaded, trap frame patched and heap cursor reset are the one point on the
+   path that cannot fail; putting it earlier would mean rolling back someone
+   else's fd table on a later failure. The remaining fds survive as before (the
+   `fd 3 survived` reading in section 5 still holds - it never carried
+   `O_CLOEXEC`).
 
 Argument discipline: `path` and `argv` live in user memory and are overwritten
 as soon as loading starts, so they are copied into the kernel first (16 x 256
@@ -267,8 +276,9 @@ full table): reading an empty buffer with a live writer returns `-EAGAIN` (11)
 instead of blocking; reading an empty buffer with all writers closed returns 0
 (EOF, same as Linux); writing into a full buffer returns a **short write**;
 writing with every reader closed returns `-EPIPE` (32) because there is no
-`SIGPIPE`; `O_CLOEXEC` is refused with `-EINVAL` because this kernel has no
-close-on-exec semantics to promise; `O_NONBLOCK` is accepted. Exhausting the 8
+`SIGPIPE`; `O_CLOEXEC` is accepted and recorded on both ends, and `execve`
+releases those fds once it has swapped the frame (8.13); `O_NONBLOCK` is
+accepted. Exhausting the 8
 fd slots or the 2 pipes returns `-ENFILE`; a failed `copy_to_user` of `fds[2]`
 rolls the whole pipe back (`-EFAULT`).
 
@@ -276,7 +286,7 @@ Why no blocking: pipe I/O is still a synchronous in-kernel copy and deliberately
 never sleeps. In the fork tier the two ends can really belong to parent and
 child (fds are inherited), but "sleep until readable" was not wired up.
 
-Measured readout (14 `check()` calls in
+Measured readout (15 `check()` calls in
 `example/qemu_loongarch64/elf/linux_pipe.c`, `exit code 55`):
 
 ```
@@ -286,7 +296,8 @@ Measured readout (14 `check()` calls in
 [pipe] read 5 bytes = 5 ok
 [pipe] read empty -> -EAGAIN = -11 ok
 [pipe] read after writer closed -> EOF = 0 ok
-[pipe] pipe2(O_CLOEXEC) -> -EINVAL = -22 ok
+[pipe] pipe2(O_CLOEXEC) rc = 0 ok
+[pipe] pipe2(O_CLOEXEC) hands out two fds = 1 ok
 [pipe] write 400 into 256 buffer -> short write = 256 ok
 [pipe] write with reader closed -> -EPIPE = -32 ok
 [pipe] finished after 0 ms, exit code 55
@@ -1447,7 +1458,7 @@ the `app_owner` field in the TCB, produce nothing when `ARKRTOS_USE_APP_QUOTA=0`
 `off-zero-symbols` step checks them with `nm` one by one, and `features.h` holds the
 `ARKRTOS_USE_APP_QUOTA=1 requires ARKRTOS_USE_ELF=1` `#error`.
 
-### 8.12 `dup`(23) / `dup3`(24): fd-slot copies, standard-stream aliases, console references (2026-11-27, QEMU LA64, 34 checks)
+### 8.12 `dup`(23) / `dup3`(24): fd-slot copies, standard-stream aliases, console references (2026-11-27, QEMU LA64, 53 checks)
 
 This pair used to answer `-ENOSYS`; that debt is paid. They are **live in the default tier**:
 no new switch, no footprint tier — `ARKRTOS_USE_LINUX_ABI=1` is enough, because making one fd
@@ -1464,7 +1475,7 @@ into two needs no new kernel mechanism, only a second copy of one fd-table slot.
 | `dup(0)` / `dup(1)` / `dup(2)` (source has no alias) | copies the **console object** (`LX_FD_CONSOLE`): writes reach the console, reads return EOF, `select` reports writable |
 | source missing / `oldfd` out of range | `-EBADF` (9) |
 | `dup3` with `oldfd == newfd` | `-EINVAL` (22) — the only difference between `dup3` and `dup2`, as in Linux |
-| `dup3` with `O_CLOEXEC` in `flags` | `-EINVAL` (22). This layer has no exec-close semantics (`execve` replaces the image of the same task and the fd table survives by design, see the `fd 3 survived` reading in section 5), so accepting `O_CLOEXEC` would promise something that does not happen |
+| `dup3` with `O_CLOEXEC` in `flags` | **accepted**; the new slot records `FD_CLOEXEC`, and `lx_fd_close_cloexec()` releases it after a successful `execve` frame swap (section 5 item 4, 8.13). Before 2026-11-27 this returned `-EINVAL` on the grounds that "this layer has no exec-close semantics" - that ground no longer holds |
 | any other flag bit | `-EINVAL` |
 | `newfd >= LX_MAX_FD + 3` | `-EBADF` |
 | fd table full (`dup` needs a new slot) | `-ENFILE` (23). Linux answers `EMFILE` when the per-process fd table is full; this layer has a single fixed table (not "kernel file table + per-process fd table"), and `pipe2` / `openat` already use `ENFILE` for the same condition, so `dup` follows the same convention rather than inventing a second answer |
@@ -1491,10 +1502,10 @@ copies `std_slot` 1:1 (the parent's aliases stay valid in the child).
 else. The test is now explicit: `kind == LX_FD_PIPE_R || kind == LX_FD_PIPE_W`, so adding a
 further fd kind cannot bend it again.
 
-**Measured readout (`[dup]` lines, QEMU LA64, 34 checks all `ok`)**
+**Measured readout (`[dup]` lines, QEMU LA64, 53 checks all `ok`)**
 
 ```
-[dup] write /mnt/ram/linux_dup rc=0 size=8408
+[dup] write /mnt/ram/linux_dup rc=0 size=9792
 [dup] pipe2 rc = 0 ok
 [dup] dup(writer) is a new fd = 1 ok
 [dup] write through the copy = 5 ok
@@ -1504,7 +1515,8 @@ further fd kind cannot bend it again.
 [dup] copy still writable after close = 3 ok
 [dup] dup(999) -> -EBADF = -9 ok
 [dup] dup3(1, 1, 0) -> -EINVAL = -22 ok
-[dup] dup3(..., O_CLOEXEC) -> -EINVAL = -22 ok
+[dup] dup3(1, 6, O_CLOEXEC) returns 6 = 6 ok
+[dup] F_GETFD(6) sees FD_CLOEXEC = 1 ok
 [dup] dup3(999, 1, 0) -> -EBADF = -9 ok
 [dup] dup3(writer, 1) returns 1 = 1 ok
 [dup] write(1) lands in the pipe = 3 ok
@@ -1513,30 +1525,121 @@ further fd kind cannot bend it again.
 [dup] overwritten fd is no longer a writer = -9 ok
 [dup] dup(0) is a console reference = 1 ok
 [dup] read the console reference -> EOF = 0 ok
+[dup] fcntl: pipe2 rc = 0 ok
+[dup] F_GETFD on a fresh fd -> 0 = 0 ok
+[dup] F_SETFD(FD_CLOEXEC) -> 0 = 0 ok
+[dup] F_GETFD reads FD_CLOEXEC back = 1 ok
+[dup] F_GETFL(reader) = O_RDONLY|O_NONBLOCK = 2048 ok
+[dup] F_GETFL(writer) = O_WRONLY|O_NONBLOCK = 2049 ok
+[dup] F_SETFL clearing O_NONBLOCK on a pipe -> -EINVAL = -22 ok
+[dup] F_GETFL(console) = O_RDWR|O_NONBLOCK = 2050 ok
+[dup] F_DUPFD(0) allocates a new fd = 1 ok
+[dup] F_DUPFD_CLOEXEC(9) -> 9 = 9 ok
+[dup] the F_DUPFD_CLOEXEC copy carries FD_CLOEXEC = 1 ok
+[dup] unknown cmd 99 -> -EINVAL = -22 ok
+[dup] F_GETFD on a bad fd -> -EBADF = -9 ok
 [dup] PASS: dup new fd, data through the copy, alias survives close, dup3 redirects stdout,
-            dup3 overwrites, console reference, EBADF/EINVAL on the four failure surfaces
+            dup3 overwrites, console reference, O_CLOEXEC accepted with FD_CLOEXEC readback,
+            fcntl FD/flags/dupfd, EBADF/EINVAL on the failure surfaces
 [dup] finished after 0 ms, exit code 56
 ```
 
-**How to read the 34 checks.** (1) Copying is not aliasing a name: `copy still writable after
+**How to read the 53 checks.** (0) The first 41 are dup/dup3 (groups 1-5) and the last 12 are fcntl(25) (group 6, broken down in 8.13). (1) Copying is not aliasing a name: `copy still writable after
 close = 3` proves each descriptor holds its own writer reference; (2) `read -> EOF = 0` after
 both ends are closed proves the count really reached zero (no leak, no early zero); (3) after
 `dup3(writer, 1)`, `write(1)`'s bytes come back out of the **pipe**, proving `write` routes
 through the alias instead of printing to the console; (4) `close(1)` only drops the alias and
 leaves the source alone; (5) `dup3(reader, writer)` overwrites a number that is already a
 writer, and `overwritten fd is no longer a writer = -9` plus `overwrite dropped the only writer
--> EOF = 0` together prove the "release, then install" order; (6) the four failure surfaces
-(`EBADF` / `old==new` / `O_CLOEXEC` / invalid source) each read back a specific negative errno;
+-> EOF = 0` together prove the "release, then install" order; (6) the failure surfaces
+(`EBADF` / `old==new` / invalid source) each read back a specific negative errno, while the
+`O_CLOEXEC` slot is now a **success** reading (`returns 6 = 6 ok` plus
+`F_GETFD(6) sees FD_CLOEXEC = 1 ok`);
 (7) the fixture **prints on fd 2** — case group 3 redirects fd 1 into a pipe, so printing on
 fd 1 would be eaten by the fixture itself, a readout trap hit while writing it.
 
 **Boundaries.** (1) sockets cannot be `dup`ed (reason above); (2) file copies keep independent
-offsets (the only visible deviation); (3) `O_CLOEXEC` is refused, so there is no "close fds at
-exec" tier (nor a real exec); (4) `dup3`'s `newfd` ceiling is `LX_MAX_FD + 3`, above which it
-returns `-EBADF` (Linux also returns `-EBADF` past `RLIMIT_NOFILE`, it just uses an rlimit
-instead of a fixed table); (5) the host tier adds 40 assertions (`t_dup` in
+offsets (the only visible deviation); (3) `O_CLOEXEC` now has real semantics (fds are released
+after the exec frame swap), and four fd-creating paths record it (`openat` / `dup3` / `pipe2` /
+`socket`), plus `fcntl(F_SETFD)` (8.13); (4) `dup3`'s `newfd` ceiling is `LX_MAX_FD + 3`, above
+which it returns `-EBADF` (Linux also returns `-EBADF` past `RLIMIT_NOFILE`, it just uses an
+rlimit instead of a fixed table); (5) the host tier adds 94 assertions (`t_dup` 40 + `t_fdflags` 54 in
 `test_linux_abi_host.c`) covering states that are awkward to build in a QEMU fixture, such as a
-full table answering `-ENFILE` and reusing an existing alias slot when the table is full.
+full table answering `-ENFILE`, reusing an existing alias slot when the table is full, and
+`dup3(pw, 1, O_CLOEXEC)` marking the alias slot so fd 1 really returns to the console after an
+exec.
+
+### 8.13 `fcntl`(25): FD flags and status flags (2026-11-27, QEMU LA64 17 checks + 54 host checks)
+
+`fcntl` is one of the first numbers glibc touches at start-up (`isatty` asks
+`F_GETFL`, `__libc_fcntl64` tags fds with `FD_CLOEXEC`). This round implements only the six
+commands the **fd table layer** can honour; everything else returns `-EINVAL` - there is no
+lock manager, no async I/O and no signal-driven I/O here, and returning 0 would claim work
+that never happened.
+
+| cmd | reply |
+|---|---|
+| `F_DUPFD`(0) | lowest free number at or above `max(arg, 3)`; `arg < 0` or past `LX_MAX_FD + 3` gives `-EINVAL`; a full table gives `-ENFILE` |
+| `F_GETFD`(1) | `cloexec ? FD_CLOEXEC : 0` when the fd exists; `-EBADF` otherwise |
+| `F_SETFD`(2) | only the `FD_CLOEXEC` bit is honoured (other bits in `arg` are ignored, as in Linux); returns 0 |
+| `F_GETFL`(3) | returns `O_ACCMODE` + `O_APPEND` + `O_NONBLOCK`; a pipe always reports `O_NONBLOCK` (this layer's pipes really never block - reported honestly); the console returns `O_RDWR\|O_NONBLOCK` |
+| `F_SETFL`(4) | changes only `O_APPEND` / `O_NONBLOCK`, returns 0; **on a pipe, a request to clear `O_NONBLOCK` returns `-EINVAL`** - returning 0 would send the caller to wait for an event that never comes |
+| `F_DUPFD_CLOEXEC`(1030) | same as `F_DUPFD`, new slot carries `FD_CLOEXEC` |
+| any other cmd (including the `F_SETLK` family) | `-EINVAL` (no lock manager here, and Linux also returns `EINVAL` for a command it does not know - not `ENOSYS`) |
+
+**Why `F_SETFL` refuses to clear the bit on a pipe.** This layer's pipes answer `-EAGAIN`
+on an empty read / full write (the historical contract in section 6, which the pipe fixture
+and the docs pin down). Accepting "clear `O_NONBLOCK`" with 0 would let the caller believe
+the fd is now blocking and then spin waiting for data - a PID pegging a core is far more
+dangerous than one explicit `-EINVAL`. So `F_GETFL` reports `O_NONBLOCK` on a pipe
+truthfully and `F_SETFL` refuses on the spot. Making pipes truly blocking is a separate
+piece of work (see the open items in section 12), not something to slip into this number.
+
+**Where `FD_CLOEXEC` is honoured: `execve`.** After loading segments, patching the trap
+frame and resetting the heap cursor, `lx_execve()` calls `lx_fd_close_cloexec()`, which walks
+the current process's fd slots and `lx_fd_release()`s every `used && cloexec` slot. The
+position is deliberate: it is the one step on the path that cannot fail; anywhere earlier and
+a later failure would force a rollback of someone else's fd table. One subtlety when taking
+it back out: `dup3(old, 1, O_CLOEXEC)` produces a **standard-stream alias**, and alias slots
+are invisible to `lx_fd_find()` (it returns -1 for any fd below 3), so `lx_dup3` resolves with
+`(rc <= 2) ? lx_std_slot(rc) : lx_fd_find(rc)`. That gap was caught by the host assertion
+"the pipe reader returns EOF after the exec": with the bit missed, fd 1 still pointed at the
+pipe and the assertion read `got 3 want 0`.
+
+**Measured readout (group 6 of the `[dup]` block, QEMU LA64)**
+
+```
+[dup] fcntl: pipe2 rc = 0 ok
+[dup] F_GETFD on a fresh fd -> 0 = 0 ok
+[dup] F_SETFD(FD_CLOEXEC) -> 0 = 0 ok
+[dup] F_GETFD reads FD_CLOEXEC back = 1 ok
+[dup] F_GETFL(reader) = O_RDONLY|O_NONBLOCK = 2048 ok
+[dup] F_GETFL(writer) = O_WRONLY|O_NONBLOCK = 2049 ok
+[dup] F_SETFL clearing O_NONBLOCK on a pipe -> -EINVAL = -22 ok
+[dup] F_GETFL(console) = O_RDWR|O_NONBLOCK = 2050 ok
+[dup] F_DUPFD(0) allocates a new fd = 1 ok
+[dup] F_DUPFD_CLOEXEC(9) -> 9 = 9 ok
+[dup] the F_DUPFD_CLOEXEC copy carries FD_CLOEXEC = 1 ok
+[dup] unknown cmd 99 -> -EINVAL = -22 ok
+[dup] F_GETFD on a bad fd -> -EBADF = -9 ok
+```
+
+`2048` is `O_NONBLOCK`, `2049` is `O_WRONLY|O_NONBLOCK` and `2050` is `O_RDWR|O_NONBLOCK` -
+printed in decimal on purpose: those three are exactly the `asm-generic` bit values, and in
+hex they would hide the "a pipe always reports non-blocking" contract.
+
+**The 54 host checks** (`t_fdflags` in `test_linux_abi_host.c`) fill in what a QEMU fixture
+cannot build: an alias slot from `dup3(pw, 1, O_CLOEXEC)` inherits CLOEXEC and fd 1 really
+returns to the console after an exec (the pipe reader reads EOF once the original writer is
+closed), `openat(O_CLOEXEC)` records the bit and the fd is released by an exec, `F_DUPFD(11)`
+past the table gives `-EINVAL`, `arg < 0` gives `-EINVAL`, a `F_GETFL` copy follows its
+source, and so on.
+
+**Boundaries.** (1) no record locks (`F_SETLK` / `F_SETLKW` / `F_GETLK`) - there is no lock
+manager, so `-EINVAL` rather than pretending the lock was taken; (2) no `F_SETOWN` /
+`F_GETOWN` / async I/O (`O_ASYNC` in `F_SETFL` is ignored because there is no signal-driven
+I/O); (3) no `F_GETPIPE_SZ` / `F_SETPIPE_SZ` - the pipe buffer is a fixed 256 bytes
+(section 6).
 
 ## 9 Switch and zero footprint
 
@@ -1618,14 +1721,14 @@ returns `-ENOSYS` and the six fixture readouts never appear, which is why
 env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py [--no-build]
 ```
 
-13 items; prints `LINUX-ABI-GATE OK` when all pass and is invoked from
+14 items; prints `LINUX-ABI-GATE OK` when all pass and is invoked from
 `tools/ci_gate.py` as `linux-abi`: default-off, kconfig-wired, features-guard,
 board-switch, off-zero-symbols, port-wiring (two directions), compile-on (8 TUs
-under the real LA64 board), syscall-table (29 numbers vs asm-generic),
+under the real LA64 board), syscall-table (28 numbers vs asm-generic),
 abi-split-la64, abi-split-rv32, build, qemu-readout (14 Linux checks + PASS + exit 7,
-14 pipe checks + exit 55, 31 signal checks + PASS + exit 138, the unrelated demos
-still intact), and parser-selfcheck (eight deliberately broken logs must each be
-rejected).
+15 pipe checks + exit 55, 31 signal checks + PASS + exit 138, 53 dup checks
+including 17 fcntl checks + exit 56, the unrelated demos still intact), and
+parser-selfcheck (twelve deliberately broken logs must each be rejected).
 
 The socket layer has readouts on **both tiers**: on the host the sixth Linux ABI coverage
 tier `linuxabisocket` in `tools/coverage_gate.py` (with

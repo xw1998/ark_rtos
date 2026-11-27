@@ -114,6 +114,7 @@ SIGN_KEY_HEADER = """#ifndef ARKRTOS_SIGN_KEY_LOCAL_H
 EXPECT_SYS = {
     "DUP": 23,
     "DUP3": 24,
+    "FCNTL": 25,
     "OPENAT": 56,
     "CLOSE": 57,
     "PIPE2": 59,
@@ -146,7 +147,8 @@ EXPECT_CHECKS = 14
 # 管道夹具（linux_pipe.c）的 check 条数：pipe2 rc / 两个 fd / 写 5 字节 /
 # 读 5 字节 / 内容逐字节 / 空读 -EAGAIN / 关写端 / 读回 EOF / O_CLOEXEC 被拒 /
 # 第二条 pipe2 / 满时短写 / 读回 256 / 排空后再写 / 读端关掉 -EPIPE = 14 条。
-EXPECT_PIPE_CHECKS = 14
+# 现为 15 条：O_CLOEXEC 由「被拒」改为「被接受」（rc + 两个 fd 号两条判据）。
+EXPECT_PIPE_CHECKS = 15
 # 信号夹具（linux_signal.c）的 check 条数：动作/旧动作、kill 返回值跨处理
 # 函数、hits/signo、嵌套 hits/depth/rc、block/query/unblock、sigsetsize、
 # SIGKILL、无 restorer、被拒动作未装上、别的 pid、sig=99、tgkill 的
@@ -156,10 +158,14 @@ EXPECT_PIPE_CHECKS = 14
 # 默认档恒 31 条；LSX 档实跑同为 31 条，只是最后两条换成 vr0 的两条）。
 EXPECT_SIG_CHECKS = 31
 # dup 夹具（linux_dup.c）的 check 条数：dup 拿新号 / 走副本写读 / 关掉源后
-# 副本仍在 / 两端全关 EOF / dup3 的四个失败面（EBADF、EINVAL 三种）/
+# 副本仍在 / 两端全关 EOF / dup3 的两个失败面（EBADF、old==new 的 EINVAL）/
+# dup3(1,6,O_CLOEXEC) 成功且 F_GETFD 读回 FD_CLOEXEC（原先这里是「被拒」）/
 # dup3 覆盖已有 fd / dup3 把 1 与 2 重定向再撤销 / dup(0) 的控制台引用 /
-# 同一号关两次 -EBADF / 表满 -ENFILE 与「复用已有别名那一格」= 34 条。
-EXPECT_DUP_CHECKS = 34
+# 同一号关两次 -EBADF / 表满 -ENFILE 与「复用已有别名那一格」，
+# 再加第 6 组 fcntl(25) 的 17 条（F_GETFD/F_SETFD 往返、管道两端与控制台的
+# F_GETFL、对管道清 O_NONBLOCK 回 -EINVAL、F_DUPFD / F_DUPFD_CLOEXEC 取号、
+# 未知 cmd 与坏 fd、四条收尾 close）= 53 条。
+EXPECT_DUP_CHECKS = 53
 
 FAILS = []
 PASSES = []
@@ -599,7 +605,7 @@ def judge(text):
     if exitline != 1:
         problems.append("缺 `exit code 7`（退出码没回到装载器的读数）")
 
-    # 管道（pipe2）那一块：13 条 check 一条 FAIL 都不许，PASS 行与退出码 55。
+    # 管道（pipe2）那一块：15 条 check 一条 FAIL 都不许，PASS 行与退出码 55。
     if pipe_exit != 1:
         problems.append("缺 `[pipe] finished after <ms>, exit code 55`（管道夹具没跑到底）")
     if pipe_fail != 0:
@@ -609,7 +615,7 @@ def judge(text):
     if pipe_pass != 1:
         problems.append("缺 `[pipe] PASS: pipe2 two fds ...`")
 
-    # dup 那一块：34 条 check 一条 FAIL 都不许，PASS 行与退出码 56。
+    # dup 那一块：53 条 check 一条 FAIL 都不许，PASS 行与退出码 56。
     if dup_werr != 1:
         problems.append("缺 `[dup] write /mnt/ram/linux_dup rc=0`（dup 夹具没送进去）")
     if dup_xerr != 1:

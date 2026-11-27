@@ -15,7 +15,11 @@
 *               被覆盖的写端不再能写；
 *            8) dup(0) 造出一个控制台引用：读它回 EOF；
 *            9) 失败面：dup(不存在的号) / dup3(old==new) /
-*               dup3(..., O_CLOEXEC) / dup3(不存在的号, 1) 各回什么。
+*               dup3(不存在的号, 1) 各回什么；dup3(..., O_CLOEXEC)
+*               现在被接受，并且记下的 FD_CLOEXEC 能被 F_GETFD 读回；
+*           10) fcntl(25)：F_GETFD/F_SETFD 往返、管道两端与控制台的
+*               F_GETFL 读数、F_SETFL 对管道清 O_NONBLOCK 回 -EINVAL、
+*               F_DUPFD / F_DUPFD_CLOEXEC 的取号规则、未知 cmd 与坏 fd。
 *
 * @note 本夹具的输出走 **fd 2**：第 5 组用例会把 fd 1 重定向到管道，用 fd 1
 *       打印的话读数会跑进那条管道里，被自己吃掉。fd 2 这一档与 fd 1 走同一
@@ -26,6 +30,7 @@
 
 #define LX_DUP              23
 #define LX_DUP3             24
+#define LX_FCNTL            25
 #define LX_CLOSE            57
 #define LX_PIPE2            59
 #define LX_READ             63
@@ -33,9 +38,22 @@
 #define LX_EXIT             93
 
 #define LX_EBADF            9
+#define LX_EAGAIN           11
 #define LX_EINVAL           22
 
+#define LX_O_RDONLY         0x0
+#define LX_O_WRONLY         0x1
+#define LX_O_RDWR           0x2
+#define LX_O_NONBLOCK       0x800
 #define LX_O_CLOEXEC        0x80000
+
+#define LX_F_DUPFD          0
+#define LX_F_GETFD          1
+#define LX_F_SETFD          2
+#define LX_F_GETFL          3
+#define LX_F_SETFL          4
+#define LX_F_DUPFD_CLOEXEC  1030
+#define LX_FD_CLOEXEC       1
 
 typedef long lx_long;
 
@@ -241,8 +259,13 @@ void linux_main(unsigned long sp)
     check("dup(999) -> -EBADF", rc, -LX_EBADF);
     rc = lx3(LX_DUP3, 1, 1, 0);
     check("dup3(1, 1, 0) -> -EINVAL", rc, -LX_EINVAL);
+    /* O_CLOEXEC 现在是真语义：dup3 接受它，并且记下的位能被 F_GETFD 读回 */
     rc = lx3(LX_DUP3, 1, 6, LX_O_CLOEXEC);
-    check("dup3(..., O_CLOEXEC) -> -EINVAL", rc, -LX_EINVAL);
+    check("dup3(1, 6, O_CLOEXEC) returns 6", rc, 6);
+    rc = lx3(LX_FCNTL, 6, LX_F_GETFD, 0);
+    check("F_GETFD(6) sees FD_CLOEXEC", rc, LX_FD_CLOEXEC);
+    rc = lx1(LX_CLOSE, 6);
+    check("close the cloexec copy", rc, 0);
     rc = lx3(LX_DUP3, 999, 1, 0);
     check("dup3(999, 1, 0) -> -EBADF", rc, -LX_EBADF);
 
@@ -293,11 +316,51 @@ void linux_main(unsigned long sp)
     rc = lx1(LX_CLOSE, d);
     check("close the console reference", rc, 0);
 
+    /* ---------------- 第 6 组：fcntl(25) ---------------- */
+    rc = lx2(LX_PIPE2, (lx_long)(unsigned long)fds, 0);
+    check("fcntl: pipe2 rc", rc, 0);
+    rc = lx3(LX_FCNTL, fds[1], LX_F_GETFD, 0);
+    check("F_GETFD on a fresh fd -> 0", rc, 0);
+    rc = lx3(LX_FCNTL, fds[1], LX_F_SETFD, LX_FD_CLOEXEC);
+    check("F_SETFD(FD_CLOEXEC) -> 0", rc, 0);
+    rc = lx3(LX_FCNTL, fds[1], LX_F_GETFD, 0);
+    check("F_GETFD reads FD_CLOEXEC back", rc, LX_FD_CLOEXEC);
+    rc = lx3(LX_FCNTL, fds[0], LX_F_GETFL, 0);
+    check("F_GETFL(reader) = O_RDONLY|O_NONBLOCK", rc,
+          (LX_O_RDONLY | LX_O_NONBLOCK));
+    rc = lx3(LX_FCNTL, fds[1], LX_F_GETFL, 0);
+    check("F_GETFL(writer) = O_WRONLY|O_NONBLOCK", rc,
+          (LX_O_WRONLY | LX_O_NONBLOCK));
+    rc = lx3(LX_FCNTL, fds[0], LX_F_SETFL, LX_O_RDONLY);
+    check("F_SETFL clearing O_NONBLOCK on a pipe -> -EINVAL", rc, -LX_EINVAL);
+    rc = lx3(LX_FCNTL, 2, LX_F_GETFL, 0);
+    check("F_GETFL(console) = O_RDWR|O_NONBLOCK", rc, (LX_O_RDWR | LX_O_NONBLOCK));
+    d = lx3(LX_FCNTL, fds[0], LX_F_DUPFD, 0);
+    check("F_DUPFD(0) allocates a new fd",
+          ((d >= 3) && (d != (lx_long)fds[0])) ? 1 : 0, 1);
+    rc = lx3(LX_FCNTL, fds[0], LX_F_DUPFD_CLOEXEC, 9);
+    check("F_DUPFD_CLOEXEC(9) -> 9", rc, 9);
+    rc = lx3(LX_FCNTL, 9, LX_F_GETFD, 0);
+    check("the F_DUPFD_CLOEXEC copy carries FD_CLOEXEC", rc, LX_FD_CLOEXEC);
+    rc = lx3(LX_FCNTL, fds[1], 99, 0);
+    check("unknown cmd 99 -> -EINVAL", rc, -LX_EINVAL);
+    rc = lx3(LX_FCNTL, 999, LX_F_GETFD, 0);
+    check("F_GETFD on a bad fd -> -EBADF", rc, -LX_EBADF);
+    rc = lx1(LX_CLOSE, 9);
+    check("close the cloexec dupfd", rc, 0);
+    rc = lx1(LX_CLOSE, d);
+    check("close the plain dupfd", rc, 0);
+    rc = lx1(LX_CLOSE, fds[1]);
+    check("close the writer", rc, 0);
+    rc = lx1(LX_CLOSE, fds[0]);
+    check("close the reader", rc, 0);
+
     if (s_fail == 0)
     {
         out("[dup] PASS: dup new fd, data through the copy, alias survives close, "
             "dup3 redirects stdout, dup3 overwrites, console reference, "
-            "EBADF/EINVAL on the four failure surfaces\n");
+            "O_CLOEXEC accepted with FD_CLOEXEC readback, fcntl FD/flags/dupfd, "
+            "EBADF/EINVAL on the failure surfaces\n");
         (void)lx1(LX_EXIT, 56);
     }
     else

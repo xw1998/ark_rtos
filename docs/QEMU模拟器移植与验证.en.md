@@ -3424,13 +3424,13 @@ make -f example/qemu_loongarch64/Makefile -j8
 ```
 
 `build/qemu_loongarch64/ark_qemu_la64.elf` gains one `ark_example_linux_dup` array (the fixture ELF
-turned into an 8408-byte blob); `elf_demo.c` writes it into `/mnt/ram/linux_dup` and execs it. (The
+turned into a 9792-byte blob); `elf_demo.c` writes it into `/mnt/ram/linux_dup` and execs it. (The
 ten-tier build must compile it too -- every tier of `tools/fork_gate.py` carries this block.)
 
-**Readings** (same firmware, serial verbatim, 34 checks in the `[dup]` block):
+**Readings** (same firmware, serial verbatim, 53 checks in the `[dup]` block):
 
 ```
-[dup] write /mnt/ram/linux_dup rc=0 size=8408
+[dup] write /mnt/ram/linux_dup rc=0 size=9792
 [dup] pipe2 rc = 0 ok
 [dup] dup(writer) is a new fd = 1 ok
 [dup] write through the copy = 5 ok
@@ -3444,7 +3444,8 @@ ten-tier build must compile it too -- every tier of `tools/fork_gate.py` carries
 [dup] read after all writers closed -> EOF = 0 ok
 [dup] dup(999) -> -EBADF = -9 ok
 [dup] dup3(1, 1, 0) -> -EINVAL = -22 ok
-[dup] dup3(..., O_CLOEXEC) -> -EINVAL = -22 ok
+[dup] dup3(1, 6, O_CLOEXEC) returns 6 = 6 ok
+[dup] F_GETFD(6) sees FD_CLOEXEC = 1 ok
 [dup] dup3(999, 1, 0) -> -EBADF = -9 ok
 [dup] dup3(writer, 1) returns 1 = 1 ok
 [dup] write(1) lands in the pipe = 3 ok
@@ -3456,8 +3457,22 @@ ten-tier build must compile it too -- every tier of `tools/fork_gate.py` carries
 [dup] overwrite dropped the only writer -> EOF = 0 ok
 [dup] dup(0) is a console reference = 1 ok
 [dup] read the console reference -> EOF = 0 ok
+[dup] fcntl: pipe2 rc = 0 ok
+[dup] F_GETFD on a fresh fd -> 0 = 0 ok
+[dup] F_SETFD(FD_CLOEXEC) -> 0 = 0 ok
+[dup] F_GETFD reads FD_CLOEXEC back = 1 ok
+[dup] F_GETFL(reader) = O_RDONLY|O_NONBLOCK = 2048 ok
+[dup] F_GETFL(writer) = O_WRONLY|O_NONBLOCK = 2049 ok
+[dup] F_SETFL clearing O_NONBLOCK on a pipe -> -EINVAL = -22 ok
+[dup] F_GETFL(console) = O_RDWR|O_NONBLOCK = 2050 ok
+[dup] F_DUPFD(0) allocates a new fd = 1 ok
+[dup] F_DUPFD_CLOEXEC(9) -> 9 = 9 ok
+[dup] the F_DUPFD_CLOEXEC copy carries FD_CLOEXEC = 1 ok
+[dup] unknown cmd 99 -> -EINVAL = -22 ok
+[dup] F_GETFD on a bad fd -> -EBADF = -9 ok
 [dup] PASS: dup new fd, data through the copy, alias survives close, dup3 redirects stdout,
-             dup3 overwrites, console reference, EBADF/EINVAL on the four failure surfaces
+             dup3 overwrites, console reference, O_CLOEXEC accepted with FD_CLOEXEC readback,
+             fcntl FD/flags/dupfd, EBADF/EINVAL on the failure surfaces
 [dup] finished after 0 ms, exit code 56
 ```
 
@@ -3465,7 +3480,7 @@ In the same boot, `[linux] exit code 7`, `[pipe] exit code 55`, `[sig] exit code
 `[hello]` / `[ELF] tamper check PASS` / `[FS] PASS` readouts are all unchanged -- the compatibility
 layer gained a pair of syscall numbers and moved no existing readout.
 
-**How to read the 34 checks** (each one blocks a specific false green):
+**How to read the 53 checks** (the first 41 are dup/dup3 and the last 12 are fcntl(25); each one blocks a specific false green):
 
 1. `dup(writer) is a new fd = 1` -- a **new** number comes back, not the source number echoed.
    "greater than zero" alone would not be enough.
@@ -3484,8 +3499,10 @@ layer gained a pair of syscall numbers and moved no existing readout.
 7. `dup3(reader, writer) overwrites = 4` + `overwritten fd is no longer a writer = -9` +
    `overwrite dropped the only writer -> EOF = 0` -- the order must be "release the old target,
    then install the copy"; the reverse would release the copy just installed.
-8. The four failure surfaces read back **specific** negative values (`-9` / `-22` twice / `-9`), not
-   merely "some negative number".
+8. The failure surfaces read back **specific** negative values (`-9` / `-22` / `-9`), not merely
+   "some negative number"; the `O_CLOEXEC` slot is now a **success** reading:
+   `dup3(1, 6, O_CLOEXEC) returns 6` plus `F_GETFD(6) sees FD_CLOEXEC = 1`, proving the bit really
+   lands on that slot instead of "no error was returned".
 9. `dup(0) is a console reference = 1` + `read the console reference -> EOF = 0` -- when the source
    is a standard stream with no alias, what gets copied is the **console object**
    (`LX_FD_CONSOLE`), and reading it returns EOF.
@@ -3499,11 +3516,12 @@ that fix the symptom appears **elsewhere** (some pipe reaching EOF early), far f
 on fd 1 would push `[dup] ...` lines into the pipe and read them back as something else -- not a
 single byte would reach the serial port.
 
-**Boundaries**: sockets are explicitly not `dup`-able (`-EINVAL`), `O_CLOEXEC` is explicitly refused
-(this layer has no close-on-exec semantics), and file copies keep independent offsets (the only
-visible deviation); each reason is spelled out in section 8.12 of
+**Boundaries**: sockets are explicitly not `dup`-able (`-EINVAL`) and file copies keep independent
+offsets (the only visible deviation); `O_CLOEXEC` now has real semantics (`openat` / `dup3` /
+`pipe2` / `socket` record the bit, `execve` releases the slots after the frame swap). Each reason is
+spelled out in sections 8.12 (dup) and 8.13 (fcntl) of
 [Linux可执行文件兼容-系统调用ABI](Linux可执行文件兼容-系统调用ABI.en.md). The `qemu-readout` step
-of `tools/linux_abi_gate.py` now covers this block (34 checks + `exit code 56`), and
+of `tools/linux_abi_gate.py` now covers this block (53 checks + `exit code 56`), and
 `parser-selfcheck` adds four dup-specific mutations (drop the PASS line / change the exit code /
 insert a FAIL / delete one check).
 

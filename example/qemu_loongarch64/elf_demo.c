@@ -556,7 +556,7 @@ static void task_elf_demo(void)
     }
 #if (ARKRTOS_USE_LINUX_ABI == 1)
     /* 管道的现场证据：linux_pipe 自己建一条管道，写读一轮后逐字节比对，
-     * 再验四条失败面——空读 -EAGAIN、写端关掉读 EOF、O_CLOEXEC 被拒、
+     * 再验四条边界——空读 -EAGAIN、写端关掉读 EOF、O_CLOEXEC 被接受、
      * 满时短写与读端关掉回 -EPIPE。判据是退出码 55；任一条 check 不对，
      * 夹具自己把退出码变成 1，不会把失败的实现读成"看起来跑了"。 */
     {
