@@ -97,7 +97,7 @@ Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 
 The socket family (`198-210`, `242`, 13 numbers) is described in section 8.9: it is
 implemented in the translation layer and covered by 768 host assertions, but the **QEMU
-fixture has no socket section yet**, so it is not counted among the 35 numbers with QEMU
+fixture has no socket section yet**, so it is not counted among the 47 numbers with QEMU
 readouts.
 
 Unknown numbers return `-ENOSYS` (38) and are counted. Nothing is guessed.
