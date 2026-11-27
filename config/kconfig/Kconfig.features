@@ -570,6 +570,84 @@ config ARKRTOS_USE_LINUX_ABI
 	  the two port entry points are not compiled, so the image is
 	  byte-for-byte what it was before this option existed.
 
+config ARKRTOS_USE_SCHED_DEADLINE
+	bool "Deadline scheduling class (U-28)"
+	help
+	  Add a deadline class to the scheduler: a task carries runtime /
+	  deadline / period in nanoseconds, the ready-set decision looks at the
+	  earliest absolute deadline first (EDF), and every tick charges one tick
+	  of budget to the running deadline task.
+
+	  Three rules are hard, not advisory:
+	    1) runtime <= deadline <= period, all non-zero.  Anything else is
+	       refused (-EINVAL from the Linux layer) instead of being rounded
+	       into "runs a bit".
+	    2) Admission control is the Linux default RT bandwidth: the sum of
+	       runtime/period over live deadline tasks must stay <= 95%.  A set
+	       that would exceed it is refused (-EBUSY), and the calling task
+	       keeps its previous state.
+	    3) A deadline task whose budget is spent is throttled: removed from
+	       the ready set until its next period boundary, then the budget is
+	       refilled and the absolute deadline advances by one period.  A
+	       task that falls more than one period behind is re-aligned instead
+	       of being given a backlog of budgets (that turns one overload into
+	       a cascade).
+
+	  Deadline tasks rank above every fixed-priority task, as in Linux.
+	  When there is exactly one live deadline task it is not throttled (no
+	  competitor to yield to); its budget is still charged so a second one
+	  does not appear to start with a full extra round.
+
+	  This option alone adds no syscall: it is the kernel class.  The Linux
+	  sched_* interface is ARKRTOS_USE_LINUX_SCHED.  Off (default) compiles
+	  no field, no decision hook and no tick accounting, so the scheduler is
+	  byte-for-byte what it was before this option existed.
+
+config ARKRTOS_USE_LINUX_SCHED
+	bool "sched_* syscalls for Linux ABI user tasks (U-28)"
+	depends on ARKRTOS_USE_LINUX_ABI
+	help
+	  Route the twelve scheduling numbers of the asm-generic table to the
+	  kernel: sched_setparam 118, sched_setscheduler 119, sched_getscheduler
+	  120, sched_getparam 121, sched_setaffinity 122, sched_getaffinity 123,
+	  sched_yield 124, sched_get_priority_max 125, sched_get_priority_min
+	  126, sched_rr_get_interval 127, sched_setattr 274, sched_getattr 275.
+
+	  This is a translation layer over a fixed-priority preemptive kernel,
+	  and the mapping is stated rather than implied:
+
+	    SCHED_FIFO 1 / SCHED_RR 2   priority 1..99 -> kernel priority
+	                                100-priority (1..99); RR's quantum is the
+	                                kernel time slice
+	    SCHED_OTHER 0               nice -20..19 -> kernel priority
+	                                108..147 (nice 0 = 128)
+	    SCHED_BATCH 3               same slot mapping as OTHER (no delayed
+	                                wakeup: this kernel has no CFS)
+	    SCHED_IDLE 5                priority must be 0 -> kernel priority 147
+	                                (the last ordinary slot; it does not
+	                                literally run only when idle)
+	    SCHED_DEADLINE 6            only through sched_setattr (runtime /
+	                                deadline / period), requires
+	                                ARKRTOS_USE_SCHED_DEADLINE; without that
+	                                class the request answers -EINVAL instead
+	                                of pretending to accept it
+
+	  Boundaries (deliberate, documented in docs/已知限制):
+	    - There is no CFS: nice is a slot, not a weight, and no vruntime or
+	      red-black tree exists.
+	    - No group scheduling, no cgroup bandwidth, and SCHED_RESET_ON_FORK
+	      or any other sched_flags bit is refused with -EINVAL rather than
+	      accepted and ignored.
+	    - One CPU: affinity accepts masks that contain bit 0 and nothing
+	      else; getaffinity reports bit 0.
+	    - SCHED_DEADLINE through sched_setscheduler (the pid/policy/param
+	      form) answers -EINVAL, exactly as Linux does, because that form
+	      has no field for the three time parameters.
+
+	  Off (default) compiles none of the twelve handlers: those numbers
+	  answer -ENOSYS and the image is byte-for-byte what it was before this
+	  option existed.
+
 config ARKRTOS_USE_LINUX_FORK
 	bool "fork/clone + wait4 for Linux ABI user tasks (U-19)"
 	depends on ARKRTOS_USE_LINUX_ABI && ARKRTOS_USE_EXIT_CODE

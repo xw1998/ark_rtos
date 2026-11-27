@@ -431,6 +431,9 @@ uint32 arkrtos_idle_ticks = 0;       /* cumulative ticks the idle task was on th
 static unsigned long arkrtos_idle_stack_ptr = 0;
 
 static void arkrtos_sched_tick_sweep(void);
+#if (ARKRTOS_USE_SCHED_DEADLINE == 1)
+static void arkrtos_dl_tick(void);
+#endif
 static void arkrtos_task_recover_mark(int32 task_id);
 static void arkrtos_task_recover_pending(void);
 
@@ -526,6 +529,12 @@ void arkrtos_kernel_tick_handler(void)
      * 不再全表扫倒计时。位置与原先等价：原先扫描发生在
      * arkrtos_timer_tick_handler() 之后（sched_next 由 PendSV 触发），
      * 现在紧接其后、切换之前，保证本拍超时唤醒的任务当拍就能被选中。 */
+    #if (ARKRTOS_USE_SCHED_DEADLINE == 1)
+    /* 预算结算放在延时到期与时间片之前：这一拍谁在跑，就扣谁的预算；
+     * 扣光会被摘出就绪集，本拍末尾的切换决策自然把它换下去。 */
+    arkrtos_dl_tick();
+    #endif
+
     arkrtos_sched_tick_sweep();
 
     #if (ARKRTOS_TIME_SLICE_TICKS > 0)
@@ -3453,6 +3462,306 @@ static void arkrtos_ready_heal(uint32 w, uint32 b, uint32 head)
     }
 }
 
+#if (ARKRTOS_USE_SCHED_DEADLINE == 1)
+/* ------------------------------------------------------------
+ * U-28：deadline 类（EDF 选择 + 固定周期补回的预算节流）
+ *
+ * 改这段之前先读三条不变量：
+ *   1) 预算只按「真正占着 CPU 的拍」扣：节拍中断里 arkrtos_current_task_id
+ *      指的就是被这一拍打断的那个任务，扣它就是扣「跑过的拍」。放在切换
+ *      之前扣，跑在别的任务上时不会误扣。
+ *   2) 节流 = 从就绪集摘下 + dl_throttled=1。摘下来之后位图里没有它，
+ *      ready_top 不会再选中它；补回时再 ready_add 挂回去。不能改成
+ *      「选中时跳过」——那样它会一直占着桶头，把同优先级的普通任务挡死。
+ *   3) 周期边界就是绝对截止时刻：dl_abs_tick 每过一拍顺延一个周期，同时
+ *      补满预算、解除节流。落后超过一个周期（系统已过载）时直接重新对齐，
+ *      不补一串「历史预算」——那会把一次过载变成雪崩。
+ *
+ * 只有一条 deadline 任务时不节流（Linux 同型）：没有同类的竞争者，就没有
+ * 需要它让出的对象，节流只会白扔预算。
+ * ------------------------------------------------------------ */
+
+/* ns -> 节拍，向上取整。1 ns 的预算不能被算成 0 拍（那等于设了没设）；
+ * 向上取整是单调的，所以 runtime<=deadline<=period 换算后仍成立。 */
+static uint32 arkrtos_dl_ns_to_tick(uint32 ns)
+{
+    uint32 tick_ns = (uint32)ARKRTOS_TICK_PERIOD_US * 1000u;
+
+    return (uint32)((((unsigned long long)ns) + tick_ns - 1ull) / tick_ns);
+}
+
+/* 已用带宽（ns / s），skip 为要排除的任务下标（-1 = 不排除）。
+ * 用 ns 原参数算，不用节拍反推：节拍是向上取整的，反推会把比值算偏，
+ * 而准入是要给人看数的。 */
+static unsigned long long arkrtos_dl_bw_except(int32 skip)
+{
+    int32 i;
+    unsigned long long sum = 0ull;
+
+    for(i = 0; i < (int32)arkrtos_task_count; i++)
+    {
+        const arkrtos_task_t *p = &arkrtos_task_table[i];
+
+        if((i == skip) || (p->dl_active == 0u) || (p->status == ARKRTOS_TASK_INVALID))
+        {
+            continue;
+        }
+        sum += (((unsigned long long)p->dl_runtime_ns) * 1000000000ull) / p->dl_period_ns;
+    }
+    return sum;
+}
+
+unsigned long long arkrtos_task_dl_bw_ns(void)
+{
+    return arkrtos_dl_bw_except(-1);
+}
+
+/* 有几条活着的 deadline 任务（节流判定用） */
+static uint32 arkrtos_dl_active_count(void)
+{
+    int32 i;
+    uint32 n = 0u;
+
+    for(i = 0; i < (int32)arkrtos_task_count; i++)
+    {
+        const arkrtos_task_t *p = &arkrtos_task_table[i];
+
+        if((p->dl_active != 0u) && (p->status != ARKRTOS_TASK_INVALID))
+        {
+            n++;
+        }
+    }
+    return n;
+}
+
+/* EDF 选择：绝对截止时刻最早者胜，同刻按任务号小者（下标小）。
+ * 节流的、不在就绪态的一律跳过；次核任务不参与本核决策。 */
+static int32 arkrtos_dl_top(void)
+{
+    int32 i;
+    int32 best = ARKRTOS_TASK_NONE;
+
+    for(i = 0; i < (int32)arkrtos_task_count; i++)
+    {
+        const arkrtos_task_t *p = &arkrtos_task_table[i];
+
+        if((p->dl_active == 0u) || (p->dl_throttled != 0u))
+        {
+            continue;
+        }
+        if((p->status != ARKRTOS_TASK_READY) && (p->status != ARKRTOS_TASK_RUNNING))
+        {
+            continue;
+        }
+        #if (ARKRTOS_USE_SMP_SCHED == 1)
+        if(arkrtos_smp_sched_owned_by_other(i) != 0u)
+        {
+            continue;
+        }
+        #endif
+        if((best == ARKRTOS_TASK_NONE) ||
+           ((int32)(p->dl_abs_tick - arkrtos_task_table[best].dl_abs_tick) < 0))
+        {
+            best = i;
+        }
+    }
+    return best;
+}
+
+/* 每拍：先补回（周期边界），再扣当前任务一拍预算 */
+static void arkrtos_dl_tick(void)
+{
+    int32 i;
+    uint32 n;
+    arkrtos_task_t *c;
+
+    for(i = 0; i < (int32)arkrtos_task_count; i++)
+    {
+        arkrtos_task_t *p = &arkrtos_task_table[i];
+
+        if(p->dl_active == 0u)
+        {
+            continue;
+        }
+        if((int32)(arkrtos_kernel_tick - p->dl_abs_tick) < 0)
+        {
+            continue;                           /* 还没到周期边界 */
+        }
+
+        p->dl_abs_tick += p->dl_period_tick;     /* 顺延一个周期 */
+        if((int32)(p->dl_abs_tick - arkrtos_kernel_tick) <= 0)
+        {
+            /* 落后超过一个周期：系统已经过载，重新对齐而不是补历史 */
+            p->dl_abs_tick = arkrtos_kernel_tick + p->dl_period_tick;
+        }
+        p->dl_budget_tick = p->dl_runtime_tick;
+        if(p->dl_throttled != 0u)
+        {
+            p->dl_throttled = 0u;
+            if((p->status == ARKRTOS_TASK_READY) || (p->status == ARKRTOS_TASK_RUNNING))
+            {
+                arkrtos_ready_add(i);
+            }
+        }
+    }
+
+    if(arkrtos_current_task_id <= 0)
+    {
+        return;                                 /* 空闲任务不扣任何人的预算 */
+    }
+    c = &arkrtos_task_table[arkrtos_current_task_id - 1];
+    if((c->dl_active == 0u) || (c->dl_throttled != 0u))
+    {
+        return;
+    }
+
+    n = arkrtos_dl_active_count();
+    if(n <= 1u)
+    {
+        /* 只有一条 deadline 任务：不节流（Linux 同型），但预算照记，
+         * 免得后来加进第二条时它凭空多出一整轮。 */
+        if(c->dl_budget_tick > 0u)
+        {
+            c->dl_budget_tick--;
+        }
+        return;
+    }
+
+    if(c->dl_budget_tick > 0u)
+    {
+        c->dl_budget_tick--;
+    }
+    if(c->dl_budget_tick == 0u)
+    {
+        c->dl_throttled = 1u;
+        arkrtos_ready_del(arkrtos_current_task_id - 1);
+    }
+}
+
+int32 arkrtos_task_dl_set(int32 task_id, uint32 runtime_ns, uint32 deadline_ns,
+                          uint32 period_ns)
+{
+    arkrtos_task_t *p;
+    unsigned long long used;
+    unsigned long long want;
+    uint32 rt;
+    uint32 dl;
+    uint32 pd;
+
+    if((task_id <= 0) || (task_id > (int32)arkrtos_task_count))
+    {
+        return ARKRTOS_TASK_ERR_PARAM;
+    }
+    p = &arkrtos_task_table[task_id - 1];
+    if(p->status == ARKRTOS_TASK_INVALID)
+    {
+        return ARKRTOS_TASK_ERR_PARAM;
+    }
+    /* 三条硬约束。runtime == 0 不是「不占 CPU」，那是「每周期 0 预算」——
+     * 它会永远在第一个周期边界之后被节流，看起来像随机卡死。 */
+    if((runtime_ns == 0u) || (period_ns == 0u) ||
+       (runtime_ns > deadline_ns) || (deadline_ns > period_ns))
+    {
+        return ARKRTOS_TASK_ERR_PARAM;
+    }
+
+    rt = arkrtos_dl_ns_to_tick(runtime_ns);
+    dl = arkrtos_dl_ns_to_tick(deadline_ns);
+    pd = arkrtos_dl_ns_to_tick(period_ns);
+
+    /* 准入：Σ(runtime/period) <= 95%（Linux 的默认 RT 带宽）。先把自己旧的
+     * 那一份扣掉再判——否则同一任务原地改参数会被自己的旧带宽顶出去。 */
+    ARKRTOS_DISABLE_IRQ();
+    used = arkrtos_dl_bw_except((p->dl_active != 0u) ? (task_id - 1) : -1);
+    want = (((unsigned long long)runtime_ns) * 1000000000ull) / period_ns;
+    if((used + want) > 950000000ull)
+    {
+        ARKRTOS_ENABLE_IRQ();
+        return ARKRTOS_TASK_ERR_BUSY;
+    }
+
+    p->dl_runtime_ns    = runtime_ns;
+    p->dl_deadline_ns   = deadline_ns;
+    p->dl_period_ns     = period_ns;
+    p->dl_runtime_tick  = rt;
+    p->dl_deadline_tick = dl;
+    p->dl_period_tick   = pd;
+    p->dl_budget_tick   = rt;
+    p->dl_abs_tick      = arkrtos_kernel_tick + dl;
+    p->dl_throttled     = 0u;
+    p->dl_active        = 1u;
+    if((p->status == ARKRTOS_TASK_READY) || (p->status == ARKRTOS_TASK_RUNNING))
+    {
+        arkrtos_ready_add(task_id - 1);          /* 幂等：上次被节流摘掉的挂回来 */
+    }
+    ARKRTOS_ENABLE_IRQ();
+    return 0;
+}
+
+void arkrtos_task_dl_clear(int32 task_id)
+{
+    arkrtos_task_t *p;
+
+    if((task_id <= 0) || (task_id > (int32)arkrtos_task_count))
+    {
+        return;
+    }
+    p = &arkrtos_task_table[task_id - 1];
+    ARKRTOS_DISABLE_IRQ();
+    if(p->dl_active != 0u)
+    {
+        p->dl_active        = 0u;
+        p->dl_runtime_ns    = 0u;
+        p->dl_deadline_ns   = 0u;
+        p->dl_period_ns     = 0u;
+        p->dl_runtime_tick  = 0u;
+        p->dl_deadline_tick = 0u;
+        p->dl_period_tick   = 0u;
+        p->dl_abs_tick      = 0u;
+        p->dl_budget_tick   = 0u;
+        if(p->dl_throttled != 0u)
+        {
+            /* 节流中被撤类：必须挂回就绪集，否则它永远醒不过来。 */
+            p->dl_throttled = 0u;
+            if((p->status == ARKRTOS_TASK_READY) || (p->status == ARKRTOS_TASK_RUNNING))
+            {
+                arkrtos_ready_add(task_id - 1);
+            }
+        }
+    }
+    ARKRTOS_ENABLE_IRQ();
+}
+
+int32 arkrtos_task_dl_get(int32 task_id, uint32 *p_runtime_ns,
+                          uint32 *p_deadline_ns, uint32 *p_period_ns)
+{
+    const arkrtos_task_t *p;
+
+    if((task_id <= 0) || (task_id > (int32)arkrtos_task_count))
+    {
+        return 0;
+    }
+    p = &arkrtos_task_table[task_id - 1];
+    if((p->dl_active == 0u) || (p->status == ARKRTOS_TASK_INVALID))
+    {
+        return 0;
+    }
+    if(p_runtime_ns != 0)
+    {
+        *p_runtime_ns = p->dl_runtime_ns;
+    }
+    if(p_deadline_ns != 0)
+    {
+        *p_deadline_ns = p->dl_deadline_ns;
+    }
+    if(p_period_ns != 0)
+    {
+        *p_period_ns = p->dl_period_ns;
+    }
+    return 1;
+}
+#endif /* ARKRTOS_USE_SCHED_DEADLINE */
+
 int32 arkrtos_ready_top(void)
 {
     uint32 g = (uint32)arkrtos_ready_group;
@@ -3465,6 +3774,19 @@ int32 arkrtos_ready_top(void)
      * 位图与桶是全空的正常情况走第一次循环的第一行直接返回。 */
     for(round = 0u; round < 8u; round++)
     {
+        #if (ARKRTOS_USE_SCHED_DEADLINE == 1)
+        /* deadline 类比所有固定优先级任务都高（Linux 同型）：有可跑的
+         * deadline 任务就直接选它。节流的、非就绪的已在 dl_top 里跳过。 */
+        {
+            int32 d = arkrtos_dl_top();
+
+            if(d != ARKRTOS_TASK_NONE)
+            {
+                return d;
+            }
+        }
+        #endif
+
         if(g == 0u)
         {
             return ARKRTOS_TASK_NONE;
@@ -3499,6 +3821,23 @@ int32 arkrtos_ready_top(void)
 
     return ARKRTOS_TASK_NONE;
 }
+
+#if (ARKRTOS_USE_LINUX_SCHED == 1)
+/* sched_yield(124)。运行中的任务本来就连在自己的就绪桶里（tick 的时间片
+ * 轮转也依赖这一点），所以这里不需要先摘再挂，rotate 直接把它挪到队尾。
+ * 桶里只有自己时 rotate 是空操作，随后的切换回到自己，与 Linux「让出但
+ * 没人要跑就继续跑」一致。调度器锁定期间 SWITCH_TASK 只是挂起请求，
+ * 解锁点会补偿，不需要在这里另做判断。 */
+void arkrtos_task_yield_internal(void)
+{
+    if(arkrtos_current_task_id <= 0)
+    {
+        return;
+    }
+    arkrtos_ready_rotate(arkrtos_current_task_id - 1);
+    ARKRTOS_SWITCH_TASK();
+}
+#endif
 
 void arkrtos_ready_add(int32 idx)
 {
@@ -3912,6 +4251,19 @@ static int32 sc_scan_best(void)
     int32 scan = -1;
     uint8 bp = 255u;
     uint32 bt = 0xFFFFFFFFu;
+
+    #if (ARKRTOS_USE_SCHED_DEADLINE == 1)
+    /* 自检必须和真实选择用同一条规则：deadline 类优先、节流的排除，
+     * 否则 schedcheck 会把「正确的 EDF 选择」报成不一致。 */
+    {
+        int32 d = arkrtos_dl_top();
+
+        if(d != ARKRTOS_TASK_NONE)
+        {
+            return d;
+        }
+    }
+    #endif
 
     for(idx = 0; idx < arkrtos_task_count; idx++)
     {
@@ -4362,6 +4714,11 @@ void arkrtos_task_kill_internal(void)
         arkrtos_ready_del(arkrtos_current_task_id - 1);
         arkrtos_delay_disarm(arkrtos_current_task_id - 1);
         arkrtos_task_table[arkrtos_current_task_id - 1].status = ARKRTOS_TASK_INVALID;
+        #if (ARKRTOS_USE_SCHED_DEADLINE == 1)
+        /* U-28：退出即释放带宽。放在 status 已是 INVALID 之后：清理路径会把
+         * 「节流中」当成需要挂回就绪集，而这时它已经不该再被调度。 */
+        arkrtos_task_dl_clear(arkrtos_current_task_id);
+        #endif
         ARKRTOS_ENABLE_IRQ();
 
         #if (ARKRTOS_USE_LINUX_ABI == 1)
@@ -4484,6 +4841,9 @@ static void arkrtos_task_recover_mark(int32 task_id)
      * 就会去错误的桶里摘，把链表拆坏。 */
     arkrtos_ready_del(task_id - 1);
     arkrtos_delay_disarm(task_id - 1);
+    #if (ARKRTOS_USE_SCHED_DEADLINE == 1)
+    arkrtos_task_dl_clear(task_id);
+    #endif
     p_task->priority        = p_task->base_priority;
     if(p_task->recover_pending == 0u)
     {

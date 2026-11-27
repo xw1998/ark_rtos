@@ -50,7 +50,10 @@ futex；真 mmap 语义（MAP_FIXED 的同址丢弃）已做，但它在按需�
 块（跨执行流的阻塞等待在 fork 档的 `[fork]` 块）；dup / dup3 已做，读数在
 `[dup]` 块（fd 槽复制 + 标准流别名 + 控制台引用，socket 明确不支持 dup）；信号
 （同一任务自我投递的最小一档：rt_sigaction/rt_sigprocmask/kill/tkill/tgkill/
-rt_sigreturn）已做，读数在 `[sig]` 块。两块都按行首锚点判，不靠 [linux] 的
+rt_sigreturn）已做，读数在 `[sig]` 块。调度策略十二号（sched_* 118..127、
+274/275）另有 U-28 档，读数在 tools/fork_gate.py 的 `[sched]` 块（本门禁
+跑默认档，那里回 -ENOSYS）；号表本身仍在这里逐条对账，任何一条抄错都先红
+在这一步。两块都按行首锚点判，不靠 [linux] 的
 行数（mmap/brk 只在 ELF 窗口内单调分配）。动态链接（PT_INTERP）
 另有专门门禁 tools/dynlink_gate.py。以上各项是明确不支持，文档
 `docs/Linux可执行文件兼容-系统调用ABI.md` 里逐条写着；本门禁不为它们背书。
@@ -143,6 +146,19 @@ EXPECT_SYS = {
     "RT_SIGACTION": 134,
     "RT_SIGPROCMASK": 135,
     "RT_SIGRETURN": 139,
+    # U-28：调度策略十二号（asm-generic）。274/275 在 32 位表里也是 274/275。
+    "SCHED_SETPARAM": 118,
+    "SCHED_SETSCHEDULER": 119,
+    "SCHED_GETSCHEDULER": 120,
+    "SCHED_GETPARAM": 121,
+    "SCHED_SETAFFINITY": 122,
+    "SCHED_GETAFFINITY": 123,
+    "SCHED_YIELD": 124,
+    "SCHED_GET_PRIORITY_MAX": 125,
+    "SCHED_GET_PRIORITY_MIN": 126,
+    "SCHED_RR_GET_INTERVAL": 127,
+    "SCHED_SETATTR": 274,
+    "SCHED_GETATTR": 275,
 }
 
 # 程序自己打印的检查条数（linux_hello.c 里每一个 check() 一行）

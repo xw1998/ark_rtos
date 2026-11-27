@@ -37,7 +37,7 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 
 **「静态程序能跑」≠「支持 Linux」。** 第 3 节列的是明确不支持项，一条不含糊。
 
-## 1 支持的系统调用（49 个；35 个有 QEMU 实跑读数，13 个 socket 只有宿主档读数，1 个只有号表与参数校验）
+## 1 支持的系统调用（61 个；47 个有 QEMU 实跑读数，13 个 socket 只有宿主档读数，1 个只有号表与参数校验）
 
 编号取 `asm-generic`（LoongArch / RISC-V / ARM64 共用这一套）：
 
@@ -59,6 +59,16 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 | 99 | `set_robust_list` | 登记「持有者死掉时要替我交代的锁链」：链头非空、8 字节对齐、长度装得下 `next/futex_offset/pending` 三格，否则 `-EINVAL`（§8.4b） | `set_robust_list with a short length == -EINVAL -> -22 ok` / `set_robust_list on a well formed head == 0 -> 0 ok` |
 | 100 | `get_robust_list` | 只认自己（本内核没有可查询的第二个进程身份），别人的 pid 如实 `-ESRCH`；出参指针为空 `-EFAULT`（§8.4b） | `get_robust_list(self) == 0 -> 0 ok` / `get_robust_list reports the length we registered -> 24 ok` / `get_robust_list on a foreign pid == -ESRCH -> -3 ok` |
 | 113 | `clock_gettime` | `MONOTONIC` 返内核节拍；`REALTIME` 返 `-ENOSYS` | `MONOTONIC -> 0 ok` / `REALTIME -> -38 ok` |
+| 118 | `sched_setparam` | 只改优先级、策略不变；`OTHER`/`BATCH`/`IDLE` 上 `priority != 0` 与 `DEADLINE` 上都回 `-EINVAL`（同 Linux：后者改用 `sched_setattr`）（§8.17） | `[sched]` 段 63 条，其中 `getparam FIFO priority is 88 -> 88 ok`、`setparam` 错误面见宿主 633 条 |
+| 119 | `sched_setscheduler` | `pid`/`policy`/`sched_param*`；FIFO/RR 落 `100-priority`，OTHER/BATCH 落 `128+nice`，IDLE 落 147；`DEADLINE` 无字段承载三元组，回 `-EINVAL`（§8.17） | `getscheduler default -> 0 ok` / `getparam FIFO priority is 88 -> 88 ok` |
+| 120 | `sched_getscheduler` | 读 TCB 里的 `sched_policy`（策略跟随任务槽，不另开私表）（§8.17） | `getattr policy is DEADLINE -> 6 ok`（同一字段回读） |
+| 121 | `sched_getparam` | 由内核优先级反推：FIFO/RR 是 `100-priority`，其余策略一律 0（§8.17） | `getparam FIFO priority is 88 -> 88 ok` |
+| 122 | `sched_setaffinity` | 单核：`len >= sizeof(unsigned long)`、掩码只认 bit0 且必须置位，否则 `-EINVAL`（§8.17） | `setaffinity short len -> EINVAL -> -22 ok` |
+| 123 | `sched_getaffinity` | 同上校验后回写 1（只有 CPU0）（§8.17） | `[sched]` 段回读掩码位为 1 |
+| 124 | `sched_yield` | 把自己挪到同优先级桶尾再挂一次切换请求（桶里只有自己时是空操作）（§8.17） | `sched_yield -> 0 ok` |
+| 125 | `sched_get_priority_max` | FIFO/RR 是 99；OTHER/BATCH/IDLE/DEADLINE 是 0；未知策略 `-EINVAL`（§8.17） | 宿主 633 条里的上下界断言 |
+| 126 | `sched_get_priority_min` | FIFO/RR 是 1；其余同上（§8.17） | 同上 |
+| 127 | `sched_rr_get_interval` | 轮转量 = 10 拍 × 500 us = 5 ms，按 `struct timespec`（两个 8 字节 long）回（§8.17） | `rr interval nsec is 5000000 -> 5000000 ok` |
 | 129 | `kill` | 只能投给自己（`pid != 本任务` → `-ESRCH`），置 pending（§7） | `kill rc survives handler -> 0 ok` / `kill other pid -> -ESRCH = -3 ok` |
 | 130 | `tkill` | 同上（单线程下与 `kill` 同实体） | 同 `kill` 路径 |
 | 131 | `tgkill` | 要求 `tgid == tid`，否则 `-ESRCH` | `tgkill tgid!=tid -> -ESRCH = -3 ok` |
@@ -76,6 +86,8 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 | 221 | `execve` | 同任务换镜像：铺段进调用者自己的空间、把入口/`sp`/`tp` 写回 trap 帧；成功不返回 | `stage2 pid==stage1 pid -> 11 ok` / `image reloaded (.data marker) -> 1 ok` / `fd 3 survived -> 1 ok` / `heap cursor reset -> 34668544 ok` / `exit code 42`（§5） |
 | 222 | `mmap` | 匿名私有 / 匿名共享（后者要 `ARKRTOS_USE_PAGING_SHM`，§8.3）；**`MAP_FIXED` 已有**（按需分页档，只认匿名私有，§8.7）；同时给 `PRIVATE|SHARED` 回 `-ENOSYS` | `mmap>0 -> 1 ok` / `mmap write/read -> 1 ok` / `MAP_FIXED discarded the old bytes -> 1 ok`（§8.7，6 条） |
 | 260 | `wait4` | 只认 `options 0/WNOHANG`；**无 `WNOHANG` 时真阻塞**（可重启系统调用，§8.1），不编造状态，reap 后记账清零（§8） | `wait4 returned child pid -> 12 ok` / `WEXITSTATUS == 42 -> 42 ok` / `wait4(child) again == -ECHILD -> -10 ok` / `blocking wait4 blocked >= 40 ms -> 1 ok` |
+| 274 | `sched_setattr` | `struct sched_attr` 逐字段按字节读（VER0 48 字节，`size < 48` 回 `-EINVAL`）；系统调用 `flags` 或 `sched_flags` 非 0 一律 `-EINVAL`；`DEADLINE` 走 `arkrtos_task_dl_set()`，准入失败 `-EBUSY`；非 deadline 策略上三个时间参数必须全 0（§8.17） | `setattr DEADLINE 100% bandwidth -> EBUSY -> -16 ok` / `setattr DEADLINE 1ms/2ms/100ms is admitted -> 0 ok` |
+| 275 | `sched_getattr` | 回写同一布局；`size >= 56` 时两个 util 字段写 0（不做利用率跟踪，但字段必须给定值）（§8.17） | `getattr policy is DEADLINE -> 6 ok` / `getattr DEADLINE deadline round-trips -> 2000000 ok` |
 | 226 | `mprotect` | **有页级写保护**（`ARKRTOS_USE_PAGING_MPROTECT`，§8.6）：4 KB 粒度改 `WE` 位、违规写按 SIGSEGV 杀任务；`PROT_EXEC` / `PROT_NONE` 只记账不强制；关档回「只校验参数、返 0」 | `mprotect RO == 0 -> 0 ok` / `sibling 4 KB half of the same pair stays writable -> 13107 ok` / `mprotect violation reports SIGSEGV status -> 11 ok`（§8.6，11 条） |
 | 227 | `msync` | 只写回本进程记账里的「可写共享文件映射」；窗口内未命中回 0、窗口外 `-ENOMEM`（`ARKRTOS_USE_PAGING_FILEMAP`，§8.5） | `filemap msync rc -> 0 ok` / `filemap private msync rc (no writeback) -> 0 ok` / `filemap shared write persisted, private write not (bits=31) -> 31 ok` |
 | 293 | `rseq` | 注册契约（`len` 必须 32、`flags` 必须 0、地址 32 字节对齐、`NULL` 注销）+ `cpu_id_start`/`cpu_id` 写回 0；`rseq_cs` 的两处中止点（信号投递前、tick 抢占前，§8.14） | `rseq register rc = 0 ok` / `cpu_id readback 0 = 0 ok` / `signal aborted the critical section = 1 ok` / `rseq_cs cleared by the abort = 0 ok` / `exit code 57` |
@@ -94,7 +106,10 @@ socket 家族（`198-210`、`242`，共 13 个）见 §8.9：它们已经在翻�
 `mprotect`(226) 原先也在这张名单里（只校验参数、返 0、**不改任何页权限**）。批C-2
 把它改成了真改硬件条目（§8.6），于是它有了 11 条串口读数，不再是「只有号表」的号。
 
-表格里其余 35 个号都有 `[linux]` / `[pipe]` / `[sig]` / `[dup]` / `[fork]` / `[rseq]` 夹具的串口读数。
+表格里其余 47 个号都有 `[linux]` / `[pipe]` / `[sig]` / `[dup]` / `[fork]` / `[rseq]` / `[sched]` 夹具的串口读数。
+
+调度策略那十二个号（118-127、274/275）读数在 `[sched]` 前缀下：它们是 §8.17 的翻译层证据，
+与内核 deadline 类的「选择次序/预算」证据（宿主 `test_deadline_class` 52 条）分工不同，不能互相替代。
 
 ## 2 两个 ABI 怎么分界
 
@@ -738,7 +753,7 @@ list 再 63 条）、filemap 档 **358 checks**、select 档 **327 checks**，�
 | robust 链 | `set_robust_list(head, len)`：`head` 非空、8 字节对齐、`len >= 12`（`next` / `futex_offset` / `list_op_pending` 三格），否则 `-EINVAL`。链上每一项是 `{ next | PI位 }`，`next` 的最低位标记「这一项是 PI 互斥」；`futex_offset` 是**从节点自身算起的字节偏移**（`offsetof` 口径），不是元素数——坑 ① |
 | 退出清理 | `on_task_exit` 里先 `lx_robust_exit()`（改写用户内存：逐条把链上的字写成 `OWNER_DIED`，PI 条目按 PI 语义交接给 `lx_pi_top_waiter()`），再 `lx_futex_forget()`（撤内核登记）。顺序不能反——先撤登记就没有等待者信息可交了。链按 `ROBUST_LIST_LIMIT = 2048` 条截断：死在退出钩子里等于整个系统停摆，比漏清一条严重 |
 | 跨进程边界 | `get_robust_list(pid, ...)` 只认 `pid == 自己`，别人的 pid 如实 `-ESRCH`（本内核没有可查询的第二个进程身份，不假装能读别人的地址空间）；出参指针为空 ⇒ `-EFAULT` |
-| 与 Linux 的差异 | 条件变量的 PI 变体 `WAIT_REQUEUE_PI`(11) / `CMP_REQUEUE_PI`(12) 不在本节，它们在独立实现里（§8.4c）；`FUTEX_CLOCK_REALTIME` 带超时 `-ENOSYS`；等待者选择只看 `base_priority`，没有 Linux 的 SCHED_DEADLINE 那一层（本内核没有该调度策略） |
+| 与 Linux 的差异 | 条件变量的 PI 变体 `WAIT_REQUEUE_PI`(11) / `CMP_REQUEUE_PI`(12) 不在本节，它们在独立实现里（§8.4c）；`FUTEX_CLOCK_REALTIME` 带超时 `-ENOSYS`；等待者选择只看 `base_priority`（deadline 类只作用于就绪选择，futex 等待队列不按截止时刻排序；调度策略见 §8.17） |
 
 读数（`tools/fork_gate.py` 的 fork+COW+SHM+futex 档 113 条之内的 37 条；宿主侧 `t_futex_pi()` 另 63 条）：
 
@@ -811,7 +826,7 @@ robust 参数面 / 退出清理的记账），跨进程面留给 QEMU 那 37 条
 | 返回值 | **唤醒数加搬运数**（含排头），与 `man futex` 的 "woken up or requeued" 同口径：`nr_wake=0` 时调用方也能从返回值看出有没有搬成功 |
 | 重放 | 与 §8.4 同一条可重启通路。排头醒来时 `s_futex_woke` 已置：直接销账并回 0，**不再读字**——所有权是内核刚写进去的，用户态可能已经把它改成 0 或别的位，再读只会误判 |
 | 错误码 | 值不符 `-EAGAIN`；`uaddr2` 为空或没人持有 `-EINVAL`；两个地址任一在窗口外 `-ENOSYS`；读写用户内存失败 `-EFAULT`（写 `uaddr2` 失败时把叫醒撤销，不让排头拿着一个没落到内存里的「所有权」跑起来）；睡着后被信号打断 `-EINTR`；端口不支持重放 `-ENOSYS` |
-| 与 Linux 的差异 | ① **没有 FIFO 等待队列**：排头按 `base_priority`（同级按任务号）选，Linux 按 rtmutex 的排队顺序。对 PI 语义这是更强的一致性（最该跑的先接手），但「谁先到谁先拿」这件事本内核不保证；② 睡眠按 100 ms 时间片重放（本内核没有无限睡眠），对外语义等价；③ `timeout` 只按**相对**时长解释，带 `FUTEX_CLOCK_REALTIME` 如实 `-ENOSYS`（无墙钟）；④ 混合队列按 `s_futex_rqpi` 标记分流——混在同一个字上用普通 `WAIT` 睡下的等待者只会被 `nr_wake` 叫醒、不会被搬走，Linux 对混合队列另有判定；⑤ 重新调度只看 `base_priority`，无 SCHED_DEADLINE 层 |
+| 与 Linux 的差异 | ① **没有 FIFO 等待队列**：排头按 `base_priority`（同级按任务号）选，Linux 按 rtmutex 的排队顺序。对 PI 语义这是更强的一致性（最该跑的先接手），但「谁先到谁先拿」这件事本内核不保证；② 睡眠按 100 ms 时间片重放（本内核没有无限睡眠），对外语义等价；③ `timeout` 只按**相对**时长解释，带 `FUTEX_CLOCK_REALTIME` 如实 `-ENOSYS`（无墙钟）；④ 混合队列按 `s_futex_rqpi` 标记分流——混在同一个字上用普通 `WAIT` 睡下的等待者只会被 `nr_wake` 叫醒、不会被搬走，Linux 对混合队列另有判定；⑤ 重新调度只看 `base_priority`（deadline 类不参与 futex 等待队列排序，见 §8.17） |
 
 读数（QEMU LA64 这一档 14 条，全部在 `tools/fork_gate.py` 的 futex 档里）：
 
@@ -1750,6 +1765,128 @@ EOF」，等价上界 `0xFFFFFFFF`；`start + len` 加出溢出也按到 EOF 收
 本层唯一的 Linux ABI 载体，32 位的 16 字节布局没有载体）；⑥ 单核：两个进程同时睡在同一
 把锁上未验（唤醒是全叫、判定在重放，原理上不会丢）。
 
+### 8.17 调度策略（U-28）：内核 deadline 类与 `sched_*` 十二个号（2026-11-27，QEMU LA64 63 条 + 宿主 52 + 633 条）
+
+**为什么这一节要分两处证。** 调度策略有两类读数，混在一处就只能证一半：
+
+* **号、参数、错误码**（翻译层）——「`sched_setscheduler(0, SCHED_FIFO, {88})` 回 0，之后
+  `sched_getscheduler(0)` 回 1、`sched_getparam(0)` 回 88」这类往返读数，在 QEMU 上可证伪；
+* **选择次序与预算**（内核 EDF 类）——「哪条先跑」在 QEMU 上依赖墙钟与调度抖动，不是可
+  证伪读数。这一半只能在宿主 `test_task_host.c` 里，用可控的 `arkrtos_kernel_tick` 与直接
+  摆好的 TCB 断言（`test_deadline_class`，52 条）。
+
+两处合起来才是完整证据。只做前者时，「EDF 其实是按优先级挑的」也能全绿；只做后者时，
+「十二个号其实翻译错了」也能全绿。
+
+**内核侧：一个 deadline 类，不是一套 CFS。** 本内核是固定优先级抢占式调度器。U-28 没有把
+它改造成按权重分配的调度器，而是在固定优先级之前插一个 deadline 类（Linux 也是这么分层的：
+`stop > dl > rt > fair > idle`）：
+
+* `arkrtos_dl_top()` 在**所有**固定优先级任务之前选：绝对截止时刻（`dl_abs_tick`）最早者胜，
+  同刻按任务号小者；节流中、非 `READY`/`RUNNING`、次核任务一律跳过。`arkrtos_ready_top()`
+  与 `sc_scan_best()` 都先问它一次，所以「deadline 类高于一切固定优先级」在两条选择路径上
+  是同一个事实，不是两处各写一份。
+* 每条 deadline 任务在 TCB 里带六个数：`dl_runtime_ns/dl_deadline_ns/dl_period_ns`（原参数，
+  给人看数与算带宽用）与 `dl_runtime_tick/dl_deadline_tick/dl_period_tick`（换算成拍，
+  给调度器用），再加 `dl_budget_tick`、`dl_abs_tick`、`dl_throttled`、`dl_active`。
+* 时间参数一律**向上取整**换算成拍：1 ns 的预算不能被算成 0 拍（那等于设了没设）；向上取整
+  是单调的，所以 `runtime <= deadline <= period` 换算后仍成立。
+
+**准入。** `Σ(runtime/period) <= 95%`（Linux 的默认 RT 带宽），超出回 `-EBUSY`（不是
+`-EINVAL`：参数合法，是带宽不够）。算这一笔时**先把自己旧的那一份扣掉**——否则同一任务
+原地改参数会被自己的旧带宽顶出去。用 ns 原参数算而不用拍反推：拍是向上取整的，反推会把
+比值算偏。
+
+**每拍怎么结算（`arkrtos_dl_tick()`，在 tick body 里、`sched_tick_sweep` 之前）。**
+
+1. 先看**周期边界**：`dl_abs_tick` 到了或过了，就顺延一个周期、补满预算、解除节流并把任务
+   挂回就绪集；顺延之后仍然落后（系统已过载）就直接重新对齐到 `now + period`，**不补一串
+   历史预算**——那会把一次过载变成雪崩。
+2. 再扣**当前任务一拍**：`arkrtos_current_task_id` 指的就是被这一拍打断的那个任务，扣它
+   就是扣「真正占着 CPU 的拍」。空闲任务（`<= 0`）不扣任何人的预算。
+3. `dl_budget_tick` 归零就挂牌节流：`dl_throttled = 1` 并**从就绪集摘下**。不能改成「选中
+   时跳过」——那样它会一直占着桶头，把同优先级的普通任务挡死。
+4. 只有**一条** deadline 任务时不节流（Linux 同型）：没有同类的竞争者就没有需要它让出的
+   对象，节流只会白扔预算；但预算照记，免得后来加进第二条时它凭空多出一整轮。
+
+**Linux 侧：十二个号的映射。**
+
+| 号 | 名字 | 本层答法 |
+|---|---|---|
+| 118 | `sched_setparam` | 只改优先级，策略不变；`OTHER`/`BATCH`/`IDLE` 上 `priority != 0` 回 `-EINVAL`，`DEADLINE` 回 `-EINVAL`（同 Linux：改用 `sched_setattr`） |
+| 119 | `sched_setscheduler` | `pid`/`policy`/`sched_param*`；`DEADLINE` 没有承载三元组的字段，回 `-EINVAL` |
+| 120 | `sched_getscheduler` | 读 TCB 里的 `sched_policy` |
+| 121 | `sched_getparam` | 由内核优先级反推：FIFO/RR 是 `100 - priority`，其余策略一律 0 |
+| 122 / 123 | `sched_set/getaffinity` | 单核：`len >= sizeof(unsigned long)`、掩码只认 bit0 且必须置位，否则 `-EINVAL`；读回恒为 1 |
+| 124 | `sched_yield` | 把自己挪到同优先级桶尾（桶里只有自己时是空操作），再挂一次切换请求 |
+| 125 / 126 | `sched_get_priority_max/min` | FIFO/RR 是 99 / 1；`OTHER`/`BATCH`/`IDLE`/`DEADLINE` 都是 0；认不出的策略 `-EINVAL` |
+| 127 | `sched_rr_get_interval` | 轮转量 = 内核时间片 10 拍 × 500 us = 5 ms（`sec=0 / nsec=5000000`） |
+| 274 | `sched_setattr` | `struct sched_attr` 逐字段按字节读（VER0 48 字节；`size < 48` 回 `-EINVAL`）；系统调用 `flags` 或 `sched_flags` 非 0 一律 `-EINVAL`；`DEADLINE` 走 `arkrtos_task_dl_set()`，准入失败 `-EBUSY`；非 deadline 策略上三个时间参数必须全 0 |
+| 275 | `sched_getattr` | 回写同一布局；`size >= 56` 时把两个 util 字段写成 0（本内核不做利用率跟踪，但字段存在就必须给定值，不能留垃圾） |
+
+策略落格（固定优先级是「数小者高」）：
+
+| policy | Linux 参数 | 内核优先级 |
+|---|---|---|
+| `SCHED_FIFO`(1) / `SCHED_RR`(2) | `priority` 1..99 | `100 - priority`（99 -> 1，1 -> 99） |
+| `SCHED_OTHER`(0) / `SCHED_BATCH`(3) | `nice` -20..19 | `128 + nice`（108..147） |
+| `SCHED_IDLE`(5) | `priority` 必须 0 | 147（普通档最末格，**不是**「只在空闲时跑」） |
+| `SCHED_DEADLINE`(6) | 只能经 `sched_setattr` 的三元组 | 内核 deadline 类 |
+
+**`policy` 存哪里。** 存进 TCB（`sched_policy`），随 `arkrtos_task_register()` 清零。不另开
+一张 ABI 层私表：任务槽会被复用，私表与槽位迟早脱节（复用的槽会带着上一个任务的策略）。
+
+**为什么 `SCHED_IDLE` / `SCHED_BATCH` 只算「近似」。** 本内核没有 CFS：`nice` 只是把任务放
+到普通档的某一格，没有权重、没有延迟唤醒；`SCHED_IDLE` 落在最末一格，别的普通任务都优先于
+它，但它不是「系统空闲才跑」——内核里没有空闲让路判定。不实现组调度、cgroup 带宽，也不实现
+`SCHED_RESET_ON_FORK` / `SCHED_FLAG_RECLAIM` / `SCHED_FLAG_DL_OVERRUN`：认了却不做，就是把
+调用方的预期变成谎言，所以 flags 非 0 一律回 `-EINVAL`。
+
+**实测读数（`[sched]` 行，QEMU LA64 fork 档，63 条全 ok）**
+
+```
+[sched] getscheduler default -> 0 ok
+[sched] getparam FIFO priority is 88 -> 88 ok
+[sched] rr interval nsec is 5000000 -> 5000000 ok
+[sched] setattr DEADLINE 100% bandwidth -> EBUSY -> -16 ok
+[sched] setattr DEADLINE 1ms/2ms/100ms is admitted -> 0 ok
+[sched] getattr policy is DEADLINE -> 6 ok
+[sched] getattr DEADLINE deadline round-trips -> 2000000 ok
+[sched] setaffinity short len -> EINVAL -> -22 ok
+[sched] sched_yield -> 0 ok
+```
+
+**宿主侧的读数（`test_task_host.c` 的 `test_deadline_class`，52 条）。** 逐条断言：三条硬
+约束（`runtime == 0`、`runtime > deadline`、`deadline > period` 各回 `-1` PARAM）；参数落账
+（1 ms / 2 ms / 100 ms = 2 / 4 / 200 拍，`dl_abs_tick = now + 4`，带宽 10,000,000 ns/s）；100%
+带宽 `-EBUSY` 且**槽位一个字段都没被半写**；第二条 1% 通过（带宽累加到 20,000,000）；EDF 选
+更早截止者（**后设**的任务胜，所以不是「按任务号」）；到周期边界顺延 200 拍并补满预算后次序
+反转；两条在场时扣光即节流（**边界补满后同一次 tick 还会再扣 1，所以断言 `budget == 1` 而
+不是 2**）；节流者不入选且离开就绪链；下一次边界补满并挂回；`dl_clear` 清字段、释放带宽、
+仍在就绪集、越界号静默；单条 deadline 任务不节流但照扣预算；落后超过一个周期重新对齐
+（`abs == tick + 200`、`budget == 1`）；`kill` 释放带宽（槽位 INVALID、`dl_active = 0`、
+离开就绪链、带宽归 0）。
+
+**覆盖率（不重锚基线）。** `linuxabisched` 这一档把 `arkrtos_linux_abi` 的 sched 段从
+**24 行未覆盖清零**：宿主桩的拷贝预算（`g_from_budget` / `g_to_budget`）本来就能造「第一块
+成功、第二块失败」，所以 `copy_from_user` / `copy_to_user` 的每一条 `-EFAULT` 分支都走得到，
+不是靠「原理不可达」写过去的。合并七档后 `arkrtos_linux_abi` 由 96.55% 升到 **97.25%**
+（基线 97.00% 不动）；`test_linux_abi_host.c` 由 606 条断言增到 **633 条**（新增 27 条错误面）。
+
+**门禁。** `tools/fork_gate.py` 的 `SCHED_CHECKS = 63`：`[sched]` 前缀单独计数，十档的
+`EXPECT_*_CHECKS` 一个都不用改（那些是 `[fork]` 前缀）。九条必现读数逐条校验（上面那段），
+坏日志自检另加三种 sched 形态（少一条、插一条 FAIL、改一个数字）。夹具里 deadline 那六条按
+`ARKRTOS_USE_SCHED_DEADLINE` 分两支——类开着期望 `-EBUSY` 与三元组，类没开期望 `-EINVAL`
+与零值，两支条数相同，所以 `SCHED_CHECKS` 不随档变化。`tools/linux_abi_gate.py` 的
+`EXPECT_SYS` 逐条对 asm-generic 号（118-127、274/275 共 12 条）；默认档那里这十二个号如实
+回 `-ENOSYS`。
+
+**边界。** ① 没有 CFS（见上），`nice` 只是落格；② `SCHED_IDLE` 不是真空闲；③ 无组调度、
+无 cgroup 带宽；④ `SCHED_RESET_ON_FORK` / `RECLAIM` / `DL_OVERRUN` 一律 `-EINVAL`，不假装；
+⑤ affinity 只有 CPU0（单核）；⑥ deadline 参数按 `uint32` ns 存，超过 4.29 s 回 `-EINVAL`；
+⑦ 节流粒度是拍（500 us），不是 Linux 那种 `hrtimer` 级的补充；⑧ 无 `sched_setattr` 的
+`SCHED_FLAG_DL_OVERRUN` 检测，超额运行只能靠节流兜住。
+
 ## 9 开关与零体积
 
 - `ARKRTOS_USE_LINUX_ABI`（`kernelsrc/include/arkrtos_features.h`、
@@ -2003,7 +2140,8 @@ Linux 的 futex 号表把「同一格参数」在不同 op 下复用：`REQUEUE`
   不是 Linux 那种精确的 waitqueue 唤醒——这一点在 §6 的边界里写明了。
 - 下一步（若要用真正的 Linux 工具链产物）：动态链接的内核侧与自研装载器已落地
   （2026-11-20，见 [动态链接与PT_INTERP](动态链接与PT_INTERP.md)），但**离 glibc
-  还差整条 libc 兼容面**——TLS 初始化与 SCHED_DEADLINE
+  还差整条 libc 兼容面**——TLS 初始化
+  （调度策略 `sched_*` 十二个号与内核 deadline 类已于 2026-11-27 落地，见 §8.17）
   （条件变量的 PI 变体 `WAIT_REQUEUE_PI` / `CMP_REQUEUE_PI` 已于 2026-11-27 落地，见 §8.4c；
   `rseq`/`getcpu` 也于同日落地，见 §8.14）。
   futex 的 PI 三档与 robust list 清理已经落地（§8.4b）。
@@ -2018,7 +2156,8 @@ Linux 的 futex 号表把「同一格参数」在不同 op 下复用：`REQUEUE`
   （按需分页档，§8.7，不需另开开关）；线程档也有（`CLONE_THREAD`，§8.10，默认关；
   关档时 `CLONE_VM`/`CLONE_THREAD` 仍拒）、每 App 任务配额也有（§8.11，默认关）；
   仍没有抢占式信号投递；`fcntl` 的 fd 旗标与状态旗标已有（§8.13，2026-11-27），
-  记录锁已有（§8.16，2026-11-27；8 格表、按路径认文件、无死锁检测），异步 I/O 仍没有；
+  记录锁已有（§8.16，2026-11-27；8 格表、按路径认文件、无死锁检测），调度策略已有
+  （U-28，§8.17，2026-11-27；十二个 `sched_*` 号 + 内核 deadline 类），异步 I/O 仍没有；
   `rseq`/`getcpu` 已有（§8.14，2026-11-27）；
   管道默认阻塞（U-26，§6 / §8.15，`O_NONBLOCK` 档并存），跨执行流的阻塞读写
   已在 fork 档实测。

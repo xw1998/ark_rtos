@@ -124,6 +124,24 @@ int32 arkrtos_task_register(void (*entry)(void), uint32 *stack_bottom, uint32 st
     p_task->app_owner   = 0;
     #endif
     p_task->is_priv     = 1u;   /* kernel-created tasks run privileged */
+    #if (ARKRTOS_USE_LINUX_SCHED == 1)
+    p_task->sched_policy = 0u;  /* U-28：新任务默认 SCHED_OTHER，不吃旧槽位的策略 */
+    #endif
+
+    #if (ARKRTOS_USE_SCHED_DEADLINE == 1)
+    /* U-28：槽位复用不许继承上一个任务的 deadline 参数与预算 —— 那会把
+     * 一个刚起来、还没申请过 deadline 的任务，直接算进别人的带宽里。 */
+    p_task->dl_runtime_tick  = 0u;
+    p_task->dl_deadline_tick = 0u;
+    p_task->dl_period_tick   = 0u;
+    p_task->dl_abs_tick      = 0u;
+    p_task->dl_runtime_ns    = 0u;
+    p_task->dl_deadline_ns   = 0u;
+    p_task->dl_period_ns     = 0u;
+    p_task->dl_budget_tick   = 0u;
+    p_task->dl_active        = 0u;
+    p_task->dl_throttled     = 0u;
+    #endif
     p_task->status      = ARKRTOS_TASK_READY;
     p_task->period_time = p_task->period;
     p_task->wait_time   = 0;

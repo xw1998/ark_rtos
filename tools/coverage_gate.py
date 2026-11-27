@@ -877,6 +877,21 @@ CASES = [
      {"incs": ["-Iboard/qemu_loongarch64",
                "-Ikernelsrc/port/loongarch/la64"],
       "ldflags": ["-Wl,--wrap=arkrtos_port_svc_exec_frame"]}),
+    # sched 档（U-28）：与 linuxabi 共用同一个 .c，多定义
+    # ARKRTOS_USE_LINUX_SCHED=1 / ARKRTOS_USE_SCHED_DEADLINE=1。任务表、
+    # 就绪队列与内核 deadline 类都由用例打桩，被量的只有翻译层。
+    # 覆盖率与其它 Linux ABI 档按行号求并集。
+    ("linuxabisched", "kernelsrc/tests/test_linux_abi_host.c",
+     ["kernelsrc/src/arkrtos_linux_abi.c"],
+     [BOARD_QEMU_LA64_DEFS[0], "-include", "arkrtos_board_config.h",
+      SIGN_KEY_DEF, "-DARKRTOS_LINUX_ABI_SYSSTAT=1",
+      "-DARKRTOS_HOST_WEAK_PORT=0", "-DARKRTOS_USE_LINUX_SCHED=1",
+      "-DARKRTOS_USE_SCHED_DEADLINE=1",
+      "-fno-asynchronous-unwind-tables", "-ffunction-sections"],
+     "LINUX-ABI HOST OK",
+     {"incs": ["-Iboard/qemu_loongarch64",
+               "-Ikernelsrc/port/loongarch/la64"],
+      "ldflags": ["-Wl,--wrap=arkrtos_port_svc_exec_frame"]}),
     # --- 2026-11-22：迷你应用装载器（arkrtos_mini）-------------------------
     # 开关走「包装板级头」而不是 -D：板级头每项都是 #undef + #define 写死，
     # 命令行 -D 会被覆盖。包装头在包含板级头之后再改那四项（见文件头注释）。
@@ -901,6 +916,16 @@ CASES = [
     ("task", "kernelsrc/tests/test_task_host.c",
      ["kernelsrc/src/arkrtos_task.c"],
      ['-DARKRTOS_BOARD_CONFIG="task_test_board.h"',
+      "-fno-asynchronous-unwind-tables"],
+     "TASK HOST OK",
+     {"incs": ["-Ikernelsrc/tests", "-Iboard/qemu_loongarch64"]}),
+    # U-28：同一个用例再跑一档，把 ARCHRTOS_USE_SCHED_DEADLINE=1 的 EDF
+    # 选择/节流/补回/过载对齐路径编进来。覆盖率按模块取并集，所以这一档只
+    # 抬不降；单独成档是因为默认档必须仍然证明「类关掉时一行都不多」。
+    ("taskdeadline", "kernelsrc/tests/test_task_host.c",
+     ["kernelsrc/src/arkrtos_task.c"],
+     ['-DARKRTOS_BOARD_CONFIG="task_test_board.h"',
+      "-DARKRTOS_USE_SCHED_DEADLINE=1",
       "-fno-asynchronous-unwind-tables"],
      "TASK HOST OK",
      {"incs": ["-Ikernelsrc/tests", "-Iboard/qemu_loongarch64"]}),

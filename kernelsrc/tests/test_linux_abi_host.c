@@ -144,6 +144,19 @@ int main(void)
 #define T_NR_MMAP           (222u)
 #define T_NR_MPROTECT       (226u)
 #define T_NR_MSYNC          (227u)
+/* sched_*（U-28）。asm-generic 号表，另写一份，理由同上。 */
+#define T_NR_SCHED_SETPARAM         (118u)
+#define T_NR_SCHED_SETSCHEDULER     (119u)
+#define T_NR_SCHED_GETSCHEDULER     (120u)
+#define T_NR_SCHED_GETPARAM         (121u)
+#define T_NR_SCHED_SETAFFINITY      (122u)
+#define T_NR_SCHED_GETAFFINITY      (123u)
+#define T_NR_SCHED_YIELD            (124u)
+#define T_NR_SCHED_PRIO_MAX         (125u)
+#define T_NR_SCHED_PRIO_MIN         (126u)
+#define T_NR_SCHED_RR_INTERVAL      (127u)
+#define T_NR_SCHED_SETATTR          (274u)
+#define T_NR_SCHED_GETATTR          (275u)
 /* socket 族号（asm-generic）。send/recv 没有独立号：glibc 走 sendto/recvfrom。 */
 #if (ARKRTOS_USE_LINUX_SOCKET == 1)
 #define T_NR_SOCKET         (198u)
@@ -558,6 +571,81 @@ int32 arkrtos_port_svc_restart(void *p_exc_ctx)
 {
     (void)p_exc_ctx;
     return g_restart_rc;
+}
+#endif
+
+#if (ARKRTOS_USE_LINUX_SCHED == 1)
+/* ---------------- sched_* 的前提桩 ----------------
+ * 本档只链接 linux_abi.c：任务表、就绪队列、内核 deadline 类都由用例给。
+ * 断言看两件事：翻译出来的内核优先级对不对、有没有按策略去调 dl_*。 */
+#if !((ARKRTOS_USE_LINUX_FUTEX == 1) || (ARKRTOS_USE_LINUX_SELECT == 1) || \
+      (ARKRTOS_USE_LINUX_SOCKET == 1))
+arkrtos_task_t arkrtos_task_table[ARKRTOS_TASK_MAX_NUM];
+int32 g_sched_reprio_calls;
+int32 g_sched_reprio_idx;
+uint8 g_sched_reprio_old;
+
+void arkrtos_ready_reprio(int32 task_idx, uint8 old_prio)
+{
+    g_sched_reprio_calls++;
+    g_sched_reprio_idx = task_idx;
+    g_sched_reprio_old = old_prio;
+}
+#endif
+
+int32 g_rotate_calls;
+int32 g_rotate_last;
+int32 g_yield_calls;
+int32 g_dlset_calls;
+int32 g_dlset_rc;
+int32 g_dlset_id;
+uint32 g_dlset_rt;
+uint32 g_dlset_dl;
+uint32 g_dlset_pd;
+int32 g_dlclear_calls;
+int32 g_dlclear_id;
+uint32 g_dlget_rt = 1000000u;
+uint32 g_dlget_dl = 2000000u;
+uint32 g_dlget_pd = 3000000u;
+
+void arkrtos_ready_rotate(int32 task_idx)
+{
+    g_rotate_calls++;
+    g_rotate_last = task_idx;
+}
+
+void arkrtos_task_yield_internal(void)
+{
+    /* 真内核里 yield = 「挪到同优先级队尾 + 拉一次调度」；宿主上后一半由
+     * 端口打桩，这里把前一半照做，断言才验的是同一条语义。 */
+    g_yield_calls++;
+    arkrtos_ready_rotate(arkrtos_current_task_id - 1);
+}
+
+int32 arkrtos_task_dl_set(int32 task_id, uint32 runtime_ns, uint32 deadline_ns,
+                          uint32 period_ns)
+{
+    g_dlset_calls++;
+    g_dlset_id = task_id;
+    g_dlset_rt = runtime_ns;
+    g_dlset_dl = deadline_ns;
+    g_dlset_pd = period_ns;
+    return g_dlset_rc;
+}
+
+void arkrtos_task_dl_clear(int32 task_id)
+{
+    g_dlclear_calls++;
+    g_dlclear_id = task_id;
+}
+
+int32 arkrtos_task_dl_get(int32 task_id, uint32 *p_rt, uint32 *p_dl, uint32 *p_pd)
+{
+    (void)task_id;
+    if(p_rt != 0) { *p_rt = g_dlget_rt; }
+    if(p_dl != 0) { *p_dl = g_dlget_dl; }
+    if(p_pd != 0) { *p_pd = g_dlget_pd; }
+    return 1;
 }
 #endif
 
@@ -6763,6 +6851,380 @@ static void t_rseq(t_ctx *c)
     c->set_reg_fail = -1;
 }
 
+#if (ARKRTOS_USE_LINUX_SCHED == 1)
+/* sched_attr 写到固定偏移，字段按 Linux VER0 布局逐字节摆。 */
+static unsigned long sched_attr(uint32 size, uint32 policy, unsigned long long aflags,
+                                int32 nice, uint32 prio,
+                                unsigned long long runtime,
+                                unsigned long long deadline,
+                                unsigned long long period)
+{
+    u_put32(T_DATA_OFF, size);
+    u_put32(T_DATA_OFF + 4u, policy);
+    u_put64(T_DATA_OFF + 8u, aflags);
+    u_put32(T_DATA_OFF + 16u, (uint32)nice);
+    u_put32(T_DATA_OFF + 20u, prio);
+    u_put64(T_DATA_OFF + 24u, runtime);
+    u_put64(T_DATA_OFF + 32u, deadline);
+    u_put64(T_DATA_OFF + 40u, period);
+    return u_ptr(T_DATA_OFF);
+}
+
+static void sched_reset(void)
+{
+    int32 i;
+
+    for(i = 0; i < (int32)ARKRTOS_TASK_MAX_NUM; i++)
+    {
+        memset(&arkrtos_task_table[i], 0, sizeof(arkrtos_task_table[i]));
+        arkrtos_task_table[i].status = ARKRTOS_TASK_INVALID;
+        arkrtos_task_table[i].priority = 200u;
+        arkrtos_task_table[i].base_priority = 200u;
+    }
+    arkrtos_task_table[6].status        = ARKRTOS_TASK_RUNNING;   /* 当前任务 7 */
+    arkrtos_task_table[6].priority      = 200u;
+    arkrtos_task_table[6].base_priority = 200u;
+    arkrtos_current_task_id = 7;
+    g_rotate_calls = 0;
+    g_yield_calls  = 0;
+    g_dlset_calls  = 0;
+    g_dlclear_calls = 0;
+    g_dlset_rc = 0;
+}
+
+static void t_sched(t_ctx *c)
+{
+    uint32 sp = 55u;
+    uint32 p;
+
+    fresh(c);
+    sched_reset();
+
+    /* 优先级上下界：FIFO/RR 是 99/1，其余策略 0/0，未知策略 -EINVAL。 */
+    (void)call(c, T_NR_SCHED_PRIO_MAX, 1UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 99, "FIFO 的 priority_max = 99");
+    (void)call(c, T_NR_SCHED_PRIO_MIN, 1UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 1, "FIFO 的 priority_min = 1");
+    (void)call(c, T_NR_SCHED_PRIO_MAX, 2UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 99, "RR 的 priority_max = 99");
+    (void)call(c, T_NR_SCHED_PRIO_MIN, 2UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 1, "RR 的 priority_min = 1");
+    (void)call(c, T_NR_SCHED_PRIO_MAX, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "OTHER 的 priority_max = 0");
+    (void)call(c, T_NR_SCHED_PRIO_MAX, 6UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "DEADLINE 的 priority_max = 0");
+    (void)call(c, T_NR_SCHED_PRIO_MIN, 5UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "IDLE 的 priority_min = 0");
+    (void)call(c, T_NR_SCHED_PRIO_MAX, 7UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "未知策略的 priority_max = -EINVAL");
+
+    /* sched_setscheduler：参数面。 */
+    (void)call(c, T_NR_SCHED_SETSCHEDULER, 0UL, 1UL, 0UL, 0UL);
+    ck_ret(c, -T_EFAULT, "setscheduler 空 sched_param = -EFAULT");
+    u_put32(T_ARGV_OFF, 0u);
+    (void)call(c, T_NR_SCHED_SETSCHEDULER, 0UL, 1UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, -T_EINVAL, "FIFO 的 priority 0 = -EINVAL");
+    u_put32(T_ARGV_OFF, 100u);
+    (void)call(c, T_NR_SCHED_SETSCHEDULER, 0UL, 1UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, -T_EINVAL, "FIFO 的 priority 100 = -EINVAL");
+    u_put32(T_ARGV_OFF, 10u);
+    (void)call(c, T_NR_SCHED_SETSCHEDULER, 99L, 1UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, -T_ESRCH, "不存在的 pid = -ESRCH");
+    (void)call(c, T_NR_SCHED_SETSCHEDULER, (unsigned long)-5L, 1UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, -T_EINVAL, "负 pid = -EINVAL");
+    (void)call(c, T_NR_SCHED_SETSCHEDULER, 0UL, 6UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, -T_EINVAL, "DEADLINE 只能走 sched_setattr");
+
+    /* FIFO：内核优先级 = 100 - priority，两个 priority 字段一起改。 */
+    (void)call(c, T_NR_SCHED_SETSCHEDULER, 0UL, 1UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, 0, "FIFO 成功");
+    ck_u(arkrtos_task_table[6].priority, 90UL, "FIFO prio 10 -> 内核 90");
+    ck_u(arkrtos_task_table[6].base_priority, 90UL, "base_priority 同步");
+    ck_u((unsigned long)arkrtos_task_table[6].sched_policy, 1UL, "策略镜像 = FIFO");
+    ck(g_sched_reprio_calls >= 1 && g_sched_reprio_idx == 6 &&
+       g_sched_reprio_old == 200u, "改优先级时按旧值换桶");
+
+    (void)call(c, T_NR_SCHED_GETSCHEDULER, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 1, "getscheduler = FIFO");
+    (void)call(c, T_NR_SCHED_GETPARAM, 0UL, u_ptr(T_ARGV_OFF), 0UL, 0UL);
+    ck_ret(c, 0, "getparam 成功");
+    ck_u(u_get32(T_ARGV_OFF), 10UL, "getparam 反推 priority = 10");
+    (void)call(c, T_NR_SCHED_GETPARAM, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EFAULT, "getparam 空指针 = -EFAULT");
+
+    /* RR：同一个 priority 映射，但策略号不同。 */
+    u_put32(T_ARGV_OFF, 1u);
+    (void)call(c, T_NR_SCHED_SETSCHEDULER, 0UL, 2UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, 0, "RR 成功");
+    ck_u(arkrtos_task_table[6].priority, 99UL, "RR prio 1 -> 内核 99");
+    (void)call(c, T_NR_SCHED_GETSCHEDULER, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 2, "getscheduler = RR");
+
+    /* OTHER：nice 0 落在 128；setparam 只能回 0，不改 nice。 */
+    u_put32(T_ARGV_OFF, 0u);
+    (void)call(c, T_NR_SCHED_SETSCHEDULER, 0UL, 0UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, 0, "OTHER 成功");
+    ck_u(arkrtos_task_table[6].priority, 128UL, "OTHER nice 0 -> 内核 128");
+    u_put32(T_ARGV_OFF, 5u);
+    (void)call(c, T_NR_SCHED_SETPARAM, 0UL, u_ptr(T_ARGV_OFF), 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "OTHER 的 setparam 只接受 priority 0");
+    u_put32(T_ARGV_OFF, 0u);
+    (void)call(c, T_NR_SCHED_SETPARAM, 0UL, u_ptr(T_ARGV_OFF), 0UL, 0UL);
+    ck_ret(c, 0, "OTHER 的 setparam(0) 成功");
+    ck_u(arkrtos_task_table[6].priority, 128UL, "setparam 不动 nice 对应的优先级");
+
+    /* setparam 在 FIFO 下能改优先级。 */
+    u_put32(T_ARGV_OFF, 10u);
+    (void)call(c, T_NR_SCHED_SETSCHEDULER, 0UL, 1UL, u_ptr(T_ARGV_OFF), 0UL);
+    u_put32(T_ARGV_OFF, 50u);
+    (void)call(c, T_NR_SCHED_SETPARAM, 0UL, u_ptr(T_ARGV_OFF), 0UL, 0UL);
+    ck_ret(c, 0, "FIFO 的 setparam(50) 成功");
+    ck_u(arkrtos_task_table[6].priority, 50UL, "FIFO prio 50 -> 内核 50");
+
+    /* setattr：版本、flags、非 DL 的时间参数。 */
+    (void)call(c, T_NR_SCHED_SETATTR, 0UL, sched_attr(47u, 0u, 0ull, 0, 0u, 0ull, 0ull, 0ull), 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "sched_attr.size < 48 = -EINVAL");
+    (void)call(c, T_NR_SCHED_SETATTR, 0UL, sched_attr(48u, 0u, 0ull, 0, 0u, 0ull, 0ull, 0ull), 1UL, 0UL);
+    ck_ret(c, -T_EINVAL, "系统调用 flags 非 0 = -EINVAL");
+    (void)call(c, T_NR_SCHED_SETATTR, 0UL, sched_attr(48u, 0u, 1ull, 0, 0u, 0ull, 0ull, 0ull), 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "sched_flags 非 0 = -EINVAL");
+    (void)call(c, T_NR_SCHED_SETATTR, 0UL, sched_attr(48u, 0u, 0ull, 0, 0u, 1ull, 1ull, 1ull), 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "非 DL 却带 runtime = -EINVAL");
+    (void)call(c, T_NR_SCHED_SETATTR, 0UL, sched_attr(48u, 0u, 0ull, -21, 0u, 0ull, 0ull, 0ull), 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "nice -21 = -EINVAL");
+
+    /* setattr(OTHER, nice -5) -> 内核 123，getattr 回 nice -5。 */
+    (void)call(c, T_NR_SCHED_SETATTR, 0UL, sched_attr(48u, 0u, 0ull, -5, 0u, 0ull, 0ull, 0ull), 0UL, 0UL);
+    ck_ret(c, 0, "setattr(OTHER,nice=-5) 成功");
+    ck_u(arkrtos_task_table[6].priority, 123UL, "nice -5 -> 内核 123");
+    memset(&g_user[T_DATA_OFF], 0, 56u);
+    (void)call(c, T_NR_SCHED_GETATTR, 0UL, u_ptr(T_DATA_OFF), 56UL, 0UL);
+    ck_ret(c, 0, "getattr 成功");
+    ck_u(u_get32(T_DATA_OFF), 56UL, "getattr 回写 VER1 大小");
+    ck_u(u_get32(T_DATA_OFF + 4u), 0UL, "getattr policy = OTHER");
+    ck_u(u_get32(T_DATA_OFF + 16u), (uint32)-5, "getattr nice = -5");
+    ck_u(u_get32(T_DATA_OFF + 20u), 0UL, "getattr priority = 0");
+    ck_u(u_get32(T_DATA_OFF + 48u), 0UL, "VER1 的 util_min 写 0");
+    ck_u(u_get32(T_DATA_OFF + 52u), 0UL, "VER1 的 util_max 写 0");
+
+    (void)call(c, T_NR_SCHED_GETATTR, 0UL, u_ptr(T_DATA_OFF), 47UL, 0UL);
+    ck_ret(c, -T_EINVAL, "getattr size < 48 = -EINVAL");
+    (void)call(c, T_NR_SCHED_GETATTR, 0UL, u_ptr(T_DATA_OFF), 48UL, 2UL);
+    ck_ret(c, -T_EINVAL, "getattr flags 非 0 = -EINVAL");
+    (void)call(c, T_NR_SCHED_GETATTR, 0UL, 0UL, 48UL, 0UL);
+    ck_ret(c, -T_EFAULT, "getattr 空指针 = -EFAULT");
+
+    /* FIFO 的 getattr 回 priority = 100 - 内核优先级。 */
+    u_put32(T_ARGV_OFF, 20u);
+    (void)call(c, T_NR_SCHED_SETSCHEDULER, 0UL, 1UL, u_ptr(T_ARGV_OFF), 0UL);
+    memset(&g_user[T_DATA_OFF], 0, 48u);
+    (void)call(c, T_NR_SCHED_GETATTR, 0UL, u_ptr(T_DATA_OFF), 48UL, 0UL);
+    ck_ret(c, 0, "FIFO 的 getattr 成功");
+    ck_u(u_get32(T_DATA_OFF + 4u), 1UL, "getattr policy = FIFO");
+    ck_u(u_get32(T_DATA_OFF + 20u), 20UL, "getattr priority = 20");
+
+    /* DEADLINE：优先级必须 0、三个参数必须给全，准入失败映射 EBUSY。 */
+    (void)call(c, T_NR_SCHED_SETATTR, 0UL, sched_attr(48u, 6u, 0ull, 0, 5u, 1000ull, 2000ull, 3000ull), 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "DL 的 priority 非 0 = -EINVAL");
+    (void)call(c, T_NR_SCHED_SETATTR, 0UL, sched_attr(48u, 6u, 0ull, 0, 0u, 0ull, 2000ull, 3000ull), 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "DL 缺 runtime = -EINVAL");
+    g_dlset_rc = -2;
+    (void)call(c, T_NR_SCHED_SETATTR, 0UL, sched_attr(48u, 6u, 0ull, 0, 0u, 1000ull, 2000ull, 3000ull), 0UL, 0UL);
+    ck_ret(c, -T_EBUSY, "准入失败 = -EBUSY");
+    ck_u((unsigned long)g_dlset_calls, 1UL, "失败前确实问了内核");
+    g_dlset_rc = -1;
+    (void)call(c, T_NR_SCHED_SETATTR, 0UL, sched_attr(48u, 6u, 0ull, 0, 0u, 1000ull, 2000ull, 3000ull), 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "内核参数非法 = -EINVAL");
+    g_dlset_rc = 0;
+    (void)call(c, T_NR_SCHED_SETATTR, 0UL, sched_attr(48u, 6u, 0ull, 0, 0u, 1000ull, 2000ull, 3000ull), 0UL, 0UL);
+    ck_ret(c, 0, "DL 设置成功");
+    ck_u((unsigned long)g_dlset_id, 7UL, "dl_set 用到当前任务号");
+    ck_u(g_dlset_rt, 1000UL, "runtime 原样传下去");
+    ck_u(g_dlset_dl, 2000UL, "deadline 原样传下去");
+    ck_u(g_dlset_pd, 3000UL, "period 原样传下去");
+    ck_u((unsigned long)arkrtos_task_table[6].sched_policy, 6UL, "策略镜像 = DEADLINE");
+    /* 内核装好 DL 后 dl_active 才为 1；桩不模拟内核，这里补上这一位，
+     * 好让后面的「转出 DL 要释放带宽」走得到。 */
+    arkrtos_task_table[6].dl_active = 1u;
+    (void)call(c, T_NR_SCHED_GETSCHEDULER, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 6, "getscheduler = DEADLINE");
+    memset(&g_user[T_DATA_OFF], 0, 48u);
+    (void)call(c, T_NR_SCHED_GETATTR, 0UL, u_ptr(T_DATA_OFF), 48UL, 0UL);
+    ck_u(u_get32(T_DATA_OFF + 24u), 1000000UL, "getattr runtime 取回");
+    ck_u(u_get32(T_DATA_OFF + 32u), 2000000UL, "getattr deadline 取回");
+    ck_u(u_get32(T_DATA_OFF + 40u), 3000000UL, "getattr period 取回");
+
+    /* 从 DL 转回 FIFO：必须释放带宽。 */
+    g_dlclear_calls = 0;
+    u_put32(T_ARGV_OFF, 30u);
+    (void)call(c, T_NR_SCHED_SETSCHEDULER, 0UL, 1UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, 0, "DL -> FIFO 成功");
+    ck_u((unsigned long)g_dlclear_calls, 1UL, "转出 DL 时释放带宽");
+
+    /* IDLE：优先级 147，priority 必须 0。 */
+    u_put32(T_ARGV_OFF, 3u);
+    (void)call(c, T_NR_SCHED_SETSCHEDULER, 0UL, 5UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, -T_EINVAL, "IDLE 的 priority 非 0 = -EINVAL");
+    u_put32(T_ARGV_OFF, 0u);
+    (void)call(c, T_NR_SCHED_SETSCHEDULER, 0UL, 5UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, 0, "IDLE 成功");
+    ck_u(arkrtos_task_table[6].priority, 147UL, "IDLE -> 内核 147（普通档最末格）");
+
+    /* affinity：只认 CPU0。 */
+    (void)call(c, T_NR_SCHED_SETAFFINITY, 0UL, 3UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, -T_EINVAL, "affinity 的 len < 字宽 = -EINVAL");
+    (void)call(c, T_NR_SCHED_SETAFFINITY, 0UL, 4UL, 0UL, 0UL);
+    ck_ret(c, -T_EFAULT, "affinity 空掩码 = -EFAULT");
+    u_put32(T_ARGV_OFF, 0u);
+    (void)call(c, T_NR_SCHED_SETAFFINITY, 0UL, 4UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, -T_EINVAL, "空掩码位 = -EINVAL");
+    u_put32(T_ARGV_OFF, 2u);
+    (void)call(c, T_NR_SCHED_SETAFFINITY, 0UL, 4UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, -T_EINVAL, "只有 CPU1 = -EINVAL");
+    u_put32(T_ARGV_OFF, 1u);
+    (void)call(c, T_NR_SCHED_SETAFFINITY, 0UL, 4UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, 0, "affinity = CPU0 成功");
+    u_put32(T_ARGV_OFF, 0u);
+    (void)call(c, T_NR_SCHED_GETAFFINITY, 0UL, 4UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, 0, "getaffinity 成功");
+    ck_u(u_get32(T_ARGV_OFF), 1UL, "getaffinity 回 CPU0 位");
+    (void)call(c, T_NR_SCHED_GETAFFINITY, 0UL, 3UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, -T_EINVAL, "getaffinity len < 字宽 = -EINVAL");
+
+    /* rr_get_interval：时间片按 ns 回。 */
+    (void)call(c, T_NR_SCHED_RR_INTERVAL, 99L, u_ptr(T_DATA_OFF), 0UL, 0UL);
+    ck_ret(c, -T_ESRCH, "rr_interval 坏 pid = -ESRCH");
+    (void)call(c, T_NR_SCHED_RR_INTERVAL, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EFAULT, "rr_interval 空指针 = -EFAULT");
+    (void)call(c, T_NR_SCHED_RR_INTERVAL, 0UL, u_ptr(T_DATA_OFF), 0UL, 0UL);
+    ck_ret(c, 0, "rr_interval 成功");
+    p = ARKRTOS_TIME_SLICE_TICKS * ARKRTOS_TICK_PERIOD_US * 1000u;
+    ck_u(u_get32(T_DATA_OFF), 0UL, "tv_sec = 0（时间片不足 1 秒）");
+    ck_u(u_get32(T_DATA_OFF + 4u), (unsigned long)p, "tv_nsec = 时间片");
+
+    /* sched_yield：挪到队尾并请求切换。 */
+    (void)call(c, T_NR_SCHED_YIELD, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "sched_yield 成功");
+    ck_u((unsigned long)g_yield_calls, 1UL, "yield 走到内核");
+    ck_u((unsigned long)g_rotate_calls, 1UL, "yield 先把当前任务挪到队尾");
+    ck_u((unsigned long)g_rotate_last, 6UL, "rotate 的是当前任务下标");
+
+    /* --- U-28 收口：错误面与拷贝预算失效 ----------------------------
+     * 这一批不是凑覆盖率：每一条都是 Linux 会给出的 errno，宿主桩的
+     * 拷贝预算让「半路失效」真的走得到（越界地址测不出的那条路）。 */
+
+    /* 未知策略：prio_of 的 default 回 -EINVAL（号认识，不是 ENOSYS）。 */
+    u_put32(T_ARGV_OFF, 10u);
+    (void)call(c, T_NR_SCHED_SETSCHEDULER, 0UL, 7UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, -T_EINVAL, "未知策略 7 的 setscheduler = -EINVAL");
+
+    /* sched_param 读不进来：-EFAULT。 */
+    g_from_budget = 0;
+    (void)call(c, T_NR_SCHED_SETSCHEDULER, 0UL, 1UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, -T_EFAULT, "setscheduler 读 sched_param 失败 = -EFAULT");
+    g_from_budget = -1;
+
+    /* setparam：空指针 / 读失败 / 目标不存在。 */
+    (void)call(c, T_NR_SCHED_SETPARAM, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EFAULT, "setparam 空 sched_param = -EFAULT");
+    g_from_budget = 0;
+    (void)call(c, T_NR_SCHED_SETPARAM, 0UL, u_ptr(T_ARGV_OFF), 0UL, 0UL);
+    ck_ret(c, -T_EFAULT, "setparam 读 sched_param 失败 = -EFAULT");
+    g_from_budget = -1;
+    (void)call(c, T_NR_SCHED_SETPARAM, 999L, u_ptr(T_ARGV_OFF), 0UL, 0UL);
+    ck_ret(c, -T_ESRCH, "setparam 不存在的 pid = -ESRCH");
+
+    /* FIFO 下 priority 0 越界：setparam 经 prio_of 回 -EINVAL。 */
+    u_put32(T_ARGV_OFF, 10u);
+    (void)call(c, T_NR_SCHED_SETSCHEDULER, 0UL, 1UL, u_ptr(T_ARGV_OFF), 0UL);
+    u_put32(T_ARGV_OFF, 0u);
+    (void)call(c, T_NR_SCHED_SETPARAM, 0UL, u_ptr(T_ARGV_OFF), 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "FIFO 的 setparam(0) = -EINVAL");
+
+    /* DL 只能走 setattr：setparam 回 -EINVAL，且不改策略。 */
+    g_dlset_rc = 0;
+    (void)call(c, T_NR_SCHED_SETATTR, 0UL,
+               sched_attr(48u, 6u, 0ull, 0, 0u, 1000ull, 2000ull, 3000ull), 0UL, 0UL);
+    ck_ret(c, 0, "重新装回 DL 以便测 setparam 的拒绝");
+    u_put32(T_ARGV_OFF, 10u);
+    (void)call(c, T_NR_SCHED_SETPARAM, 0UL, u_ptr(T_ARGV_OFF), 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "DL 上的 setparam = -EINVAL（改用 sched_setattr）");
+    ck_u((unsigned long)arkrtos_task_table[6].sched_policy, 6UL,
+         "被拒后策略仍是 DEADLINE");
+
+    /* getparam：目标不存在 / 回写失败。 */
+    (void)call(c, T_NR_SCHED_GETPARAM, 999L, u_ptr(T_ARGV_OFF), 0UL, 0UL);
+    ck_ret(c, -T_ESRCH, "getparam 不存在的 pid = -ESRCH");
+    g_to_budget = 0;
+    (void)call(c, T_NR_SCHED_GETPARAM, 0UL, u_ptr(T_ARGV_OFF), 0UL, 0UL);
+    ck_ret(c, -T_EFAULT, "getparam 回写失败 = -EFAULT");
+    g_to_budget = -1;
+
+    /* getscheduler / setattr / getattr：目标不存在。 */
+    (void)call(c, T_NR_SCHED_GETSCHEDULER, 999L, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_ESRCH, "getscheduler 不存在的 pid = -ESRCH");
+    (void)call(c, T_NR_SCHED_SETATTR, 999L,
+               sched_attr(48u, 1u, 0ull, 0, 10u, 0ull, 0ull, 0ull), 0UL, 0UL);
+    ck_ret(c, -T_ESRCH, "setattr 不存在的 pid = -ESRCH");
+    (void)call(c, T_NR_SCHED_GETATTR, 999L, u_ptr(T_DATA_OFF), 48UL, 0UL);
+    ck_ret(c, -T_ESRCH, "getattr 不存在的 pid = -ESRCH");
+
+    /* setattr：空指针 / 读 size 失败 / 读字段链半路失败。 */
+    (void)call(c, T_NR_SCHED_SETATTR, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EFAULT, "setattr 空 sched_attr = -EFAULT");
+    g_from_budget = 0;
+    (void)call(c, T_NR_SCHED_SETATTR, 0UL, u_ptr(T_ARGV_OFF), 0UL, 0UL);
+    ck_ret(c, -T_EFAULT, "setattr 读 size 失败 = -EFAULT");
+    g_from_budget = 1;               /* size 读到，下一个字段失败 */
+    (void)call(c, T_NR_SCHED_SETATTR, 0UL,
+               sched_attr(48u, 1u, 0ull, 0, 10u, 0ull, 0ull, 0ull), 0UL, 0UL);
+    ck_ret(c, -T_EFAULT, "setattr 字段链半路失败 = -EFAULT");
+    g_from_budget = -1;
+
+    /* DL 三元组超出内核 uint32 ns 上限：-EINVAL（不截断、不假装）。 */
+    g_dlset_rc = 0;
+    g_dlset_calls = 0;
+    (void)call(c, T_NR_SCHED_SETATTR, 0UL,
+               sched_attr(48u, 6u, 0ull, 0, 0u, 0x100000000ull, 2000ull, 3000ull), 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "runtime 超 uint32 ns = -EINVAL");
+    ck_u((unsigned long)g_dlset_calls, 0UL, "越界时不问内核");
+
+    /* getattr：主链回写失败 / VER1 尾部回写失败。 */
+    g_to_budget = 0;
+    (void)call(c, T_NR_SCHED_GETATTR, 0UL, u_ptr(T_DATA_OFF), 48UL, 0UL);
+    ck_ret(c, -T_EFAULT, "getattr 回写失败 = -EFAULT");
+    g_to_budget = 11;                /* 前 11 块成功，VER1 尾部第一块失败 */
+    (void)call(c, T_NR_SCHED_GETATTR, 0UL, u_ptr(T_DATA_OFF), 56UL, 0UL);
+    ck_ret(c, -T_EFAULT, "getattr VER1 尾部回写失败 = -EFAULT");
+    g_to_budget = -1;
+
+    /* rr_get_interval：回写失败。 */
+    g_to_budget = 0;
+    (void)call(c, T_NR_SCHED_RR_INTERVAL, 0UL, u_ptr(T_DATA_OFF), 0UL, 0UL);
+    ck_ret(c, -T_EFAULT, "rr_interval 回写失败 = -EFAULT");
+    g_to_budget = -1;
+
+    /* affinity：目标不存在 / 掩码读失败 / 掩码回写失败。 */
+    (void)call(c, T_NR_SCHED_SETAFFINITY, 999L, 4UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, -T_ESRCH, "setaffinity 不存在的 pid = -ESRCH");
+    u_put32(T_ARGV_OFF, 1u);
+    g_from_budget = 0;
+    (void)call(c, T_NR_SCHED_SETAFFINITY, 0UL, 4UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, -T_EFAULT, "setaffinity 读掩码失败 = -EFAULT");
+    g_from_budget = -1;
+    (void)call(c, T_NR_SCHED_GETAFFINITY, 999L, 4UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, -T_ESRCH, "getaffinity 不存在的 pid = -ESRCH");
+    (void)call(c, T_NR_SCHED_GETAFFINITY, 0UL, 4UL, 0UL, 0UL);
+    ck_ret(c, -T_EFAULT, "getaffinity 空掩码 = -EFAULT");
+    g_to_budget = 0;
+    (void)call(c, T_NR_SCHED_GETAFFINITY, 0UL, 4UL, u_ptr(T_ARGV_OFF), 0UL);
+    ck_ret(c, -T_EFAULT, "getaffinity 回写掩码失败 = -EFAULT");
+    g_to_budget = -1;
+
+    (void)sp;
+}
+#endif
+
 int main(void)
 {
     t_ctx c;
@@ -6805,6 +7267,9 @@ int main(void)
 #endif
 #if (ARKRTOS_USE_PAGING_DEMAND == 1)
     t_mapfixed(&c);
+#endif
+#if (ARKRTOS_USE_LINUX_SCHED == 1)
+    t_sched(&c);
 #endif
 #if (ARKRTOS_USE_PAGING_FILEMAP == 1)
     t_filemap(&c);

@@ -17,6 +17,7 @@
 #define ARKRTOS_TASK_ERR_ENTRY     (-1)   /* 入口不在调用方自己的代码区 */
 #define ARKRTOS_TASK_ERR_STACK     (-1)   /* 栈不在调用方自己的 RAM 区 */
 #define ARKRTOS_TASK_ERR_PRIORITY  (-1)   /* 255 是调度器的"无候选"哨兵，不能给任务 */
+#define ARKRTOS_TASK_ERR_BUSY      (-2)   /* deadline 准入失败（带宽不足）；唯一与 -1 分开的错误码 */
 #define ARKRTOS_TASK_ERR_CONTEXT   (-1)   /* 内核上下文 / 调度器锁定期间不允许阻塞 */
 #define ARKRTOS_TASK_ERR_NOSTATE   (-1)   /* 任务没有栈信息（已结束 / 未创建） */
 #define ARKRTOS_TASK_NONE          (-1)   /* 哨兵：没有就绪任务 / 不需要切换（不是错误码） */
@@ -109,6 +110,26 @@ typedef struct {
                                                      * 装载时分配一个非零号，fork 与
                                                      * clone(CLONE_THREAD) 继承；0 表示
                                                      * 没有身份（内核任务 / 不参与配额）。 */
+#endif
+    #if (ARKRTOS_USE_SCHED_DEADLINE == 1)
+    /* U-28 dead线类（EDF）。单位全是节拍：换算只在设置入口做一次，
+     * 调度路径上不再乘除，也不碰浮点。 */
+    uint32 dl_runtime_tick;   /* 每个周期的运行预算 */
+    uint32 dl_deadline_tick;  /* 相对截止时间（= 周期内的死线） */
+    uint32 dl_period_tick;    /* 周期 */
+    uint32 dl_abs_tick;       /* 本周期的绝对截止时刻 */
+    uint32 dl_runtime_ns;     /* 原参数（ns）：准入按它算，不做节拍反推 */
+    uint32 dl_deadline_ns;    /* 原参数（ns） */
+    uint32 dl_period_ns;      /* 原参数（ns） */
+    uint32 dl_budget_tick;    /* 本轮剩余预算 */
+    uint8  dl_active;         /* 1 = 属于 deadline 类 */
+    uint8  dl_throttled;      /* 1 = 预算耗尽、已从就绪集摘下等补回 */
+    #endif
+#if (ARKRTOS_USE_LINUX_SCHED == 1)
+    uint8  sched_policy;                            /* U-28：Linux 策略镜像
+                                                     * （0=OTHER/1=FIFO/2=RR/
+                                                     * 6=DEADLINE）。注册时清零，
+                                                     * 不随槽位复用继承旧策略。 */
 #endif
     uint8  is_priv;                                 /* 1 = Thread mode privileged, 0 = unprivileged.
                                                      * Honoured only when ARKRTOS_USE_PRIV == 1;
@@ -274,6 +295,51 @@ int32  arkrtos_task_exit_code(int32 task_id, int32 *p_code);
 int32  arkrtos_task_recover(int32 task_id);
 
 void arkrtos_sched_activate_higher(uint8 ck_pri);
+
+#if (ARKRTOS_USE_LINUX_SCHED == 1)
+/* sched_yield(124)：把当前任务挪到同优先级队尾并请求一次调度。
+ * 内核原地让出，不经过 ABI 层自己拼栈帧。 */
+void   arkrtos_task_yield_internal(void);
+#endif
+
+
+/* ============================================================
+ * U-28 deadline 类（EDF + CBS 节流）
+ *
+ * 为什么是内核级的调度类，而不是 ABI 层自己记一笔：选中必须在调度决策
+ * 里做（ready_top），预算必须按「真正在跑的那一拍」扣（节拍中断里），
+ * 两件事都只有调度器自己知道。ABI 层只负责把 Linux 的 ns 参数翻译过来。
+ * ============================================================ */
+#if (ARKRTOS_USE_SCHED_DEADLINE == 1)
+/**
+* @brief 把任务设成 deadline 类（成立则替换它原来的 deadline 参数）
+* @param task_id 任务号（1 起）
+* @param runtime_ns 每周期预算（ns，> 0）
+* @param deadline_ns 相对截止时间（ns，>= runtime，<= period）
+* @param period_ns 周期（ns，> 0）
+* @return 0 成功；-1 参数非法或任务号不存在；-2 准入失败（带宽不足）；
+*         -3 该任务正持有互斥锁/在等待队列上（不能中途换类）
+* @note 带宽已满时回 -2 且不改动任何字段：拒绝比改一半好。
+*       任务原来就是 deadline 类的，先释放它的旧带宽再按新参数准入。
+*/
+int32  arkrtos_task_dl_set(int32 task_id, uint32 runtime_ns, uint32 deadline_ns,
+                           uint32 period_ns);
+/**
+* @brief 退出 deadline 类（释放带宽；幂等）
+* @note 节流中的任务会被重新挂回就绪集，否则它会永远醒不过来。
+*/
+void   arkrtos_task_dl_clear(int32 task_id);
+/**
+* @brief 读回某任务的 deadline 参数
+* @return 1 = 该任务是 deadline 类（三个输出都写）；0 = 不是（不写）
+*/
+int32  arkrtos_task_dl_get(int32 task_id, uint32 *p_runtime_ns,
+                           uint32 *p_deadline_ns, uint32 *p_period_ns);
+/** 已用带宽（ns / s），准入与读数用。用 unsigned long long 而不是自造
+ *  uint64：内核里没有这个 typedef，32 位端口也要能算 64 位乘积。 */
+unsigned long long arkrtos_task_dl_bw_ns(void);
+#endif
+
 
 /* ============================================================
  * 任务热切换（A/B 双缓冲无缝升级的内核一侧）

@@ -60,7 +60,7 @@
 - [kernelsrc/include/arkrtos_spin.h](#kernelsrcincludearkrtos_spinh)（10 项）
 - [kernelsrc/include/arkrtos_svc_abi.h](#kernelsrcincludearkrtos_svc_abih)（4 项）
 - [kernelsrc/include/arkrtos_svc_call.h](#kernelsrcincludearkrtos_svc_callh)（20 项）
-- [kernelsrc/include/arkrtos_task.h](#kernelsrcincludearkrtos_taskh)（7 项）
+- [kernelsrc/include/arkrtos_task.h](#kernelsrcincludearkrtos_taskh)（11 项）
 - [kernelsrc/include/arkrtos_tickless.h](#kernelsrcincludearkrtos_ticklessh)（6 项）
 - [kernelsrc/include/arkrtos_trust.h](#kernelsrcincludearkrtos_trusth)（6 项）
 - [kernelsrc/include/arkrtos_ulog.h](#kernelsrcincludearkrtos_ulogh)（5 项）
@@ -9216,6 +9216,49 @@ int32  arkrtos_task_exit_code(int32 task_id, int32 *p_code);
 - `task_id`：任务号（1 起）
 - `p_code`：可为 0；成功时写回退出码
 **返回**：1 = 该任务上报过退出码，0 = 没上报过 / 任务号非法
+
+### `int32  arkrtos_task_dl_set(int32 task_id, uint32 runtime_ns, uint32 de`
+
+```c
+int32  arkrtos_task_dl_set(int32 task_id, uint32 runtime_ns, uint32 deadline_ns, uint32 period_ns);
+```
+
+**把任务设成 deadline 类（成立则替换它原来的 deadline 参数）**
+- `task_id`：任务号（1 起）
+- `runtime_ns`：每周期预算（ns，> 0）
+- `deadline_ns`：相对截止时间（ns，>= runtime，<= period）
+- `period_ns`：周期（ns，> 0）
+**返回**：0 成功；-1 参数非法或任务号不存在；-2 准入失败（带宽不足）；
+-3 该任务正持有互斥锁/在等待队列上（不能中途换类）
+> 说明：带宽已满时回 -2 且不改动任何字段：拒绝比改一半好。
+任务原来就是 deadline 类的，先释放它的旧带宽再按新参数准入。
+
+### `void   arkrtos_task_dl_clear(int32 task_id);`
+
+```c
+void   arkrtos_task_dl_clear(int32 task_id);
+```
+
+**退出 deadline 类（释放带宽；幂等）**
+> 说明：节流中的任务会被重新挂回就绪集，否则它会永远醒不过来。
+
+### `int32  arkrtos_task_dl_get(int32 task_id, uint32 *p_runtime_ns, uint32`
+
+```c
+int32  arkrtos_task_dl_get(int32 task_id, uint32 *p_runtime_ns, uint32 *p_deadline_ns, uint32 *p_period_ns);
+```
+
+**读回某任务的 deadline 参数**
+**返回**：1 = 该任务是 deadline 类（三个输出都写）；0 = 不是（不写）
+
+### `unsigned long long arkrtos_task_dl_bw_ns(void);`
+
+```c
+unsigned long long arkrtos_task_dl_bw_ns(void);
+```
+
+已用带宽（ns / s），准入与读数用。用 unsigned long long 而不是自造
+uint64：内核里没有这个 typedef，32 位端口也要能算 64 位乘积。
 
 ### `unsigned long arkrtos_cpu_fault_kill(uint32 fault_type);`
 

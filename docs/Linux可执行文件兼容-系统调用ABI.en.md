@@ -40,7 +40,7 @@ a purely Linux-ABI static binary with its own `_start`):
 **"A static program runs" is not "Linux is supported".** Section 3 lists what is
 explicitly unsupported.
 
-## 1 Supported syscalls (49; 35 measured on QEMU, 13 socket numbers host-tier only, 1 table-and-argument only)
+## 1 Supported syscalls (61; 47 measured on QEMU, 13 socket numbers host-tier only, 1 table-and-argument only)
 
 Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 
@@ -62,6 +62,16 @@ Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 | 99 | `set_robust_list` | register the chain of locks that must be settled if the owner dies: non-null head, 8-byte aligned, length fits `next/futex_offset/pending`, else `-EINVAL` (8.4b) | `set_robust_list with a short length == -EINVAL -> -22 ok` / `set_robust_list on a well formed head == 0 -> 0 ok` |
 | 100 | `get_robust_list` | own pid only (there is no second process identity to query); a foreign pid honestly returns `-ESRCH`, a null out-pointer `-EFAULT` (8.4b) | `get_robust_list(self) == 0 -> 0 ok` / `get_robust_list reports the length we registered -> 24 ok` / `get_robust_list on a foreign pid == -ESRCH -> -3 ok` |
 | 113 | `clock_gettime` | `MONOTONIC` from kernel ticks; `REALTIME` returns `-ENOSYS` | `MONOTONIC -> 0 ok` / `REALTIME -> -38 ok` |
+| 118 | `sched_setparam` | priority only, policy unchanged; `priority != 0` on `OTHER`/`BATCH`/`IDLE` and anything on `DEADLINE` return `-EINVAL` (as on Linux: use `sched_setattr` for the latter) (section 8.17) | part of the 63 `[sched]` checks; `getparam FIFO priority is 88 -> 88 ok`; error face in the 633 host checks |
+| 119 | `sched_setscheduler` | `pid` / `policy` / `sched_param*`; FIFO/RR land on `100-priority`, OTHER/BATCH on `128+nice`, IDLE on 147; `DEADLINE` has no field for the triplet, so `-EINVAL` (section 8.17) | `getscheduler default -> 0 ok` / `getparam FIFO priority is 88 -> 88 ok` |
+| 120 | `sched_getscheduler` | reads `sched_policy` from the TCB (policy follows the task slot; no private table) (section 8.17) | `getattr policy is DEADLINE -> 6 ok` (same field) |
+| 121 | `sched_getparam` | derived from the kernel priority: `100-priority` for FIFO/RR, 0 otherwise (section 8.17) | `getparam FIFO priority is 88 -> 88 ok` |
+| 122 | `sched_setaffinity` | single core: `len >= sizeof(unsigned long)`, mask accepts only bit 0 and it must be set, else `-EINVAL` (section 8.17) | `setaffinity short len -> EINVAL -> -22 ok` |
+| 123 | `sched_getaffinity` | same checks, then writes back 1 (CPU0 only) (section 8.17) | mask bit reads back as 1 in the `[sched]` block |
+| 124 | `sched_yield` | moves itself to the tail of its priority bucket and posts a reschedule (a no-op when alone) (section 8.17) | `sched_yield -> 0 ok` |
+| 125 | `sched_get_priority_max` | 99 for FIFO/RR; 0 for OTHER/BATCH/IDLE/DEADLINE; `-EINVAL` for an unknown policy (section 8.17) | bound assertions in the 633 host checks |
+| 126 | `sched_get_priority_min` | 1 for FIFO/RR; same otherwise (section 8.17) | same |
+| 127 | `sched_rr_get_interval` | rotation = 10 ticks x 500 us = 5 ms, returned as a `struct timespec` (two 8-byte longs) (section 8.17) | `rr interval nsec is 5000000 -> 5000000 ok` |
 | 129 | `kill` | only towards the calling task (`pid != self` gives `-ESRCH`); sets pending (section 7) | `kill rc survives handler -> 0 ok` / `kill other pid -> -ESRCH = -3 ok` |
 | 130 | `tkill` | same entity as `kill` while single-threaded | same path as `kill` |
 | 131 | `tgkill` | requires `tgid == tid`, else `-ESRCH` | `tgkill tgid!=tid -> -ESRCH = -3 ok` |
@@ -79,6 +89,8 @@ Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 | 221 | `execve` | replace the image of the **calling task**: load segments into its own window, write entry/`sp`/`tp` back into the trap frame; does not return on success | `stage2 pid==stage1 pid -> 11 ok` / `image reloaded (.data marker) -> 1 ok` / `fd 3 survived -> 1 ok` / `heap cursor reset -> 34668544 ok` / `exit code 42` (section 5) |
 | 222 | `mmap` | anonymous only: `MAP_PRIVATE|MAP_ANONYMOUS` or `MAP_SHARED|MAP_ANONYMOUS` (the latter needs `ARKRTOS_USE_PAGING_SHM`, section 8.3); `MAP_FIXED` and `PRIVATE|SHARED` together are refused | `mmap>0 -> 1 ok` / `mmap write/read -> 1 ok` |
 | 260 | `wait4` | only `options 0/WNOHANG`; **without `WNOHANG` it really blocks** (restartable syscall, section 8.1), never invents a status, the bookkeeping entry is consumed on reap (section 8) | `wait4 returned child pid -> 12 ok` / `WEXITSTATUS == 42 -> 42 ok` / `wait4(child) again == -ECHILD -> -10 ok` / `blocking wait4 blocked >= 40 ms -> 1 ok` |
+| 274 | `sched_setattr` | `struct sched_attr` read field by field as bytes (VER0 48 bytes, `size < 48` gives `-EINVAL`); any non-zero syscall `flags` or `sched_flags` gives `-EINVAL`; `DEADLINE` goes to `arkrtos_task_dl_set()`, admission failure `-EBUSY`; the three time parameters must all be 0 on non-deadline policies (section 8.17) | `setattr DEADLINE 100% bandwidth -> EBUSY -> -16 ok` / `setattr DEADLINE 1ms/2ms/100ms is admitted -> 0 ok` |
+| 275 | `sched_getattr` | writes back the same layout; with `size >= 56` both util fields are written as 0 (no utilisation tracking, but the fields need a defined value) (section 8.17) | `getattr policy is DEADLINE -> 6 ok` / `getattr DEADLINE deadline round-trips -> 2000000 ok` |
 | 226 | `mprotect` | **real page-level write protection** (`ARKRTOS_USE_PAGING_MPROTECT`, section 8.6): flips the `WE` bit at 4 KB granularity, a violating store kills the task with SIGSEGV; `PROT_EXEC` / `PROT_NONE` are recorded but not enforced; with the switch off it falls back to "validate, return 0" | `mprotect RO == 0 -> 0 ok` / `sibling 4 KB half of the same pair stays writable -> 13107 ok` / `mprotect violation reports SIGSEGV status -> 11 ok` (section 8.6, 11 checks) |
 | 227 | `msync` | writes back only this process's "writable shared file mapping" bookkeeping; a hit inside the heap window syncs, a miss inside it returns 0, outside it `-ENOMEM` (`ARKRTOS_USE_PAGING_FILEMAP`, section 8.5) | `filemap msync rc -> 0 ok` / `filemap private msync rc (no writeback) -> 0 ok` / `filemap shared write persisted, private write not (bits=31) -> 31 ok` |
 | 293 | `rseq` | registration contract (`len` must be 32, `flags` must be 0, 32-byte aligned address, `NULL` deregisters) plus `cpu_id_start`/`cpu_id` written as 0; the two abort points of `rseq_cs` (before signal delivery, before a tick preemption, section 8.14) | `rseq register rc = 0 ok` / `cpu_id readback 0 = 0 ok` / `signal aborted the critical section = 1 ok` / `rseq_cs cleared by the abort = 0 ok` / `exit code 57` |
@@ -101,8 +113,13 @@ profile".
 (section 8.6), so it now has 11 serial readouts and is no longer a table-only
 number.
 
-The other 35 numbers all have serial readouts from the `[linux]` / `[pipe]` /
-`[sig]` / `[dup]` / `[fork]` / `[rseq]` fixtures.
+The other 47 numbers all have serial readouts from the `[linux]` / `[pipe]` /
+`sig` / `[dup]` / `[fork]` / `[rseq]` / `[sched]` fixtures.
+
+The twelve scheduling numbers (118-127, 274/275) report under the `[sched]` prefix:
+they are the translation-layer evidence of section 8.17, which is a different job
+from the "selection order and budget" evidence for the kernel deadline class (52
+host checks in `test_deadline_class`). Neither can stand in for the other.
 
 ## 2 How the two ABIs are told apart
 
@@ -887,7 +904,7 @@ low-priority owner (priority inversion).
 | robust chain | `set_robust_list(head, len)`: non-null `head`, 8-byte aligned, `len >= 12` (`next` / `futex_offset` / `list_op_pending`), else `-EINVAL`. Each entry is `{ next | PI bit }` where the lowest bit of `next` marks a PI mutex; `futex_offset` is a **byte offset from the node itself** (`offsetof` semantics), not an element count - trap (1) below |
 | exit cleanup | in `on_task_exit` it first runs `lx_robust_exit()` (rewriting user memory: every chained word becomes `OWNER_DIED`, PI entries handed over by PI rules) and only then `lx_futex_forget()` (drops the kernel registration). The order cannot be swapped - dropping the registration first loses the waiter information needed for the hand-over. The chain is truncated at `ROBUST_LIST_LIMIT = 2048`: dying inside the exit hook stops the whole system, which is worse than missing one entry |
 | cross-process boundary | `get_robust_list(pid, ...)` accepts only `pid == self`; a foreign pid honestly returns `-ESRCH` (there is no queryable second process identity, and no pretending to read another address space); a null out-pointer is `-EFAULT` |
-| differences from Linux | the condition-variable PI variants `WAIT_REQUEUE_PI`(11) / `CMP_REQUEUE_PI`(12) are not in this batch - they have their own implementation (8.4c); `FUTEX_CLOCK_REALTIME` with a timeout is `-ENOSYS`; waiter choice looks at `base_priority` only - there is no SCHED_DEADLINE layer, since this kernel has no such policy |
+| differences from Linux | the condition-variable PI variants `WAIT_REQUEUE_PI`(11) / `CMP_REQUEUE_PI`(12) are not in this batch - they have their own implementation (8.4c); `FUTEX_CLOCK_REALTIME` with a timeout is `-ENOSYS`; waiter choice looks at `base_priority` only - the deadline class applies to ready-set selection, not to futex waiter ordering (see 8.17) |
 
 Readouts (37 of the 147 in the fork+COW+SHM+futex tier; the host side has another 63 in
 `t_futex_pi()`):
@@ -973,7 +990,7 @@ the kernel writes the mutex word **to the waiter's tid on the spot** and then wa
 | return value | **woken plus requeued** (head included), the `man futex` "woken up or requeued" convention: with `nr_wake=0` the caller can still tell from the return value whether the move succeeded |
 | replay | the same restartable path as 8.4. When the head wakes, `s_futex_woke` is already set: the slot is cleared and 0 returned, **without re-reading the word** - the kernel has just written the ownership, and user mode may already have changed it to 0 or another bit, so re-reading could only misjudge |
 | error codes | value mismatch `-EAGAIN`; `uaddr2` null or unowned `-EINVAL`; either address outside the window `-ENOSYS`; user-memory faults `-EFAULT` (a failed write to `uaddr2` also cancels the wake-up, so nobody runs with an ownership that never reached memory); a signal while parked `-EINTR`; a port without restart support `-ENOSYS` |
-| differences from Linux | (1) **no FIFO wait queue**: the head is chosen by `base_priority` (task id as tie-break), while Linux follows the rtmutex queue order. For PI semantics this is a stronger property (the task that should run first takes over), but "first come, first served" is not guaranteed here; (2) sleeping is 100 ms slice replay (no infinite sleep in this kernel), externally equivalent; (3) `timeout` is **relative** only; `FUTEX_CLOCK_REALTIME` honestly returns `-ENOSYS` (no wall clock); (4) mixed queues are split by the `s_futex_rqpi` flag - a waiter that went to sleep on the same word with a plain `WAIT` is only woken up to `nr_wake` times and never moved, whereas Linux has its own judgement for mixed queues; (5) rescheduling looks at `base_priority` only, with no SCHED_DEADLINE layer |
+| differences from Linux | (1) **no FIFO wait queue**: the head is chosen by `base_priority` (task id as tie-break), while Linux follows the rtmutex queue order. For PI semantics this is a stronger property (the task that should run first takes over), but "first come, first served" is not guaranteed here; (2) sleeping is 100 ms slice replay (no infinite sleep in this kernel), externally equivalent; (3) `timeout` is **relative** only; `FUTEX_CLOCK_REALTIME` honestly returns `-ENOSYS` (no wall clock); (4) mixed queues are split by the `s_futex_rqpi` flag - a waiter that went to sleep on the same word with a plain `WAIT` is only woken up to `nr_wake` times and never moved, whereas Linux has its own judgement for mixed queues; (5) rescheduling looks at `base_priority` only; the deadline class does not order futex waiters (see 8.17) |
 
 Readouts (the 14 QEMU LA64 checks of this batch, all inside `tools/fork_gate.py`'s futex tier):
 
@@ -2041,6 +2058,155 @@ ABI carrier here; the 32-bit 16-byte layout has no carrier); (6) single core: tw
 sleeping on the same lock at once is unverified (wake is broadcast and the decision is made
 on replay, so it should not be lost in principle).
 
+### 8.17 Scheduling policies (U-28): the kernel deadline class and the twelve `sched_*` numbers (2026-11-27, 63 QEMU LA64 checks + 52 + 633 host checks)
+
+**Why this section needs two places to prove it.** There are two kinds of readout here, and
+lumping them together can only prove half of each:
+
+* **numbers, arguments, error codes** (the translation layer) - round trips such as
+  "`sched_setscheduler(0, SCHED_FIFO, {88})` returns 0, then `sched_getscheduler(0)` returns 1
+  and `sched_getparam(0)` returns 88" are falsifiable on QEMU;
+* **selection order and budget** (the kernel EDF class) - "who runs first" on QEMU depends on
+  wall clock and scheduling jitter, so it is not a falsifiable readout. This half lives in
+  `test_task_host.c` only, driven by a controllable `arkrtos_kernel_tick` and TCBs arranged by
+  hand (`test_deadline_class`, 52 checks).
+
+Only both together are complete evidence: with the first alone an EDF that is really ordered
+by priority still stays green; with the second alone a mis-translated syscall table still stays
+green.
+
+**Kernel side: one deadline class, not a CFS.** This kernel is a fixed-priority preemptive
+scheduler. U-28 did not turn it into a weighted-fair scheduler; it inserts a deadline class in
+front of the fixed priorities (Linux layers the same way: `stop > dl > rt > fair > idle`):
+
+* `arkrtos_dl_top()` selects before **all** fixed-priority tasks: the earliest absolute deadline
+  (`dl_abs_tick`) wins, ties go to the smaller task id; throttled tasks, tasks not in
+  `READY`/`RUNNING` and secondary-core tasks are skipped. Both `arkrtos_ready_top()` and
+  `sc_scan_best()` ask it first, so "the deadline class outranks every fixed priority" is one
+  fact on both selection paths, not two separate copies.
+* Each deadline task carries six numbers in its TCB: `dl_runtime_ns/dl_deadline_ns/dl_period_ns`
+  (the original parameters, for inspection and bandwidth maths) and
+  `dl_runtime_tick/dl_deadline_tick/dl_period_tick` (converted to ticks, for the scheduler), plus
+  `dl_budget_tick`, `dl_abs_tick`, `dl_throttled` and `dl_active`.
+* Time parameters are converted to ticks by **rounding up**: a 1 ns budget must not become 0
+  ticks (which would mean "set but not set"); rounding up is monotonic, so
+  `runtime <= deadline <= period` still holds after conversion.
+
+**Admission.** `Σ(runtime/period) <= 95%` (Linux's default RT bandwidth); exceeding it returns
+`-EBUSY` (not `-EINVAL`: the parameters are legal, the bandwidth is not). The task's **own old
+share is subtracted first** - otherwise re-setting the same task is pushed out by its own
+previous bandwidth. The arithmetic uses the original ns parameters, not ticks converted back,
+because ticks were rounded up and inverting them biases the ratio.
+
+**Settlement per tick (`arkrtos_dl_tick()`, inside the tick body, before `sched_tick_sweep`).**
+
+1. First the **period boundary**: when `dl_abs_tick` is reached or passed, advance one period,
+   refill the budget, clear throttling and put the task back on the ready set; if it is still
+   behind after advancing (the system is already overloaded), re-align to `now + period`
+   directly and **do not replay a run of historical budgets** - that would turn one overload
+   into an avalanche.
+2. Then charge **the current task one tick**: `arkrtos_current_task_id` is exactly the task this
+   tick interrupted, so charging it charges "the tick that really owns the CPU". The idle task
+   (`<= 0`) charges nobody.
+3. When `dl_budget_tick` hits zero the task is throttled: `dl_throttled = 1` and it is **removed
+   from the ready set**. It must not be "skipped when selecting" - that would leave it at the
+   head of the bucket and block ordinary tasks of the same priority forever.
+4. With only **one** deadline task there is no throttling (as on Linux): with no peer of the same
+   class there is nobody to yield to, and throttling would only throw budget away; the budget is
+   still accounted, so a second task added later does not find a whole free round already saved up.
+
+**Linux side: the twelve numbers.**
+
+| nr | name | answer here |
+|---|---|---|
+| 118 | `sched_setparam` | priority only, policy unchanged; `priority != 0` on `OTHER`/`BATCH`/`IDLE` gives `-EINVAL`, and `DEADLINE` gives `-EINVAL` (same as Linux: use `sched_setattr`) |
+| 119 | `sched_setscheduler` | `pid` / `policy` / `sched_param*`; `DEADLINE` has no field for the triplet, so `-EINVAL` |
+| 120 | `sched_getscheduler` | reads `sched_policy` from the TCB |
+| 121 | `sched_getparam` | derived from the kernel priority: `100 - priority` for FIFO/RR, 0 otherwise |
+| 122 / 123 | `sched_set/getaffinity` | single core: `len >= sizeof(unsigned long)`, mask accepts only bit 0 and it must be set, else `-EINVAL`; reads back 1 |
+| 124 | `sched_yield` | moves itself to the tail of its priority bucket (a no-op when alone) and posts a reschedule |
+| 125 / 126 | `sched_get_priority_max/min` | 99 / 1 for FIFO/RR; 0 for `OTHER`/`BATCH`/`IDLE`/`DEADLINE`; `-EINVAL` for an unknown policy |
+| 127 | `sched_rr_get_interval` | rotation = 10 ticks x 500 us = 5 ms (`sec=0 / nsec=5000000`) |
+| 274 | `sched_setattr` | `struct sched_attr` read field by field as bytes (VER0 is 48 bytes; `size < 48` gives `-EINVAL`); any non-zero syscall `flags` or `sched_flags` gives `-EINVAL`; `DEADLINE` goes to `arkrtos_task_dl_set()`, admission failure gives `-EBUSY`; the three time parameters must all be 0 on non-deadline policies |
+| 275 | `sched_getattr` | writes back the same layout; with `size >= 56` the two util fields are written as 0 (this kernel does not track utilisation, but the fields exist and must get a defined value, not garbage) |
+
+Policy placement (fixed priority means "smaller number is higher"):
+
+| policy | Linux parameter | kernel priority |
+|---|---|---|
+| `SCHED_FIFO`(1) / `SCHED_RR`(2) | `priority` 1..99 | `100 - priority` (99 -> 1, 1 -> 99) |
+| `SCHED_OTHER`(0) / `SCHED_BATCH`(3) | `nice` -20..19 | `128 + nice` (108..147) |
+| `SCHED_IDLE`(5) | `priority` must be 0 | 147 (last slot of the normal range, **not** "runs only when idle") |
+| `SCHED_DEADLINE`(6) | only the triplet via `sched_setattr` | the kernel deadline class |
+
+**Where `policy` lives.** In the TCB (`sched_policy`), cleared by `arkrtos_task_register()`. No
+private ABI-layer table: task slots are reused, and a private table would eventually drift out of
+sync with them (a reused slot would carry the previous task's policy).
+
+**Why `SCHED_IDLE` / `SCHED_BATCH` are only "approximate".** This kernel has no CFS: `nice` only
+places a task in one slot of the normal range, with no weights and no delayed wakeup;
+`SCHED_IDLE` lands in the last slot, so every other ordinary task outranks it, but it is not
+"runs only when the system is idle" - there is no idle-yield rule in the kernel. Group scheduling
+and cgroup bandwidth are not implemented either, nor are `SCHED_RESET_ON_FORK` /
+`SCHED_FLAG_RECLAIM` / `SCHED_FLAG_DL_OVERRUN`: accepting a flag and not doing it turns the
+caller's expectation into a lie, so a non-zero flags field always returns `-EINVAL`.
+
+**Measured readouts (`[sched]` lines, QEMU LA64 fork tier, all 63 checks ok; the nine anchors
+the gate pins are shown)**
+
+```
+[sched] getscheduler default -> 0 ok
+[sched] getparam FIFO priority is 88 -> 88 ok
+[sched] rr interval nsec is 5000000 -> 5000000 ok
+[sched] setattr DEADLINE 100% bandwidth -> EBUSY -> -16 ok
+[sched] setattr DEADLINE 1ms/2ms/100ms is admitted -> 0 ok
+[sched] getattr policy is DEADLINE -> 6 ok
+[sched] getattr DEADLINE deadline round-trips -> 2000000 ok
+[sched] setaffinity short len -> EINVAL -> -22 ok
+[sched] sched_yield -> 0 ok
+```
+
+**Host readouts (`test_deadline_class` in `test_task_host.c`, 52 checks).** Assertions, one by
+one: the three hard constraints (`runtime == 0`, `runtime > deadline`, `deadline > period` each
+return `-1` PARAM); parameters booked (1 ms / 2 ms / 100 ms = 2 / 4 / 200 ticks,
+`dl_abs_tick = now + 4`, bandwidth 10,000,000 ns/s); 100% bandwidth gives `-EBUSY` and **not a
+single field of the slot is half-written**; a second task at 1% is admitted (bandwidth totals
+20,000,000); EDF picks the earlier deadline (**the later-set** task wins, so it is not "by task
+id"); at the period boundary the order reverses after advancing 200 ticks and refilling; with two
+present, running out of budget throttles (**the boundary refill is followed by another 1-tick
+charge in the same tick, so the assertion is `budget == 1`, not 2**); a throttled task is not
+selected and leaves the ready chain; the next boundary refills and re-adds it; `dl_clear` clears
+the fields, releases the bandwidth, stays in the ready set and silently ignores an out-of-range
+id; a single deadline task is not throttled but is still charged; falling more than one period
+behind re-aligns (`abs == tick + 200`, `budget == 1`); `kill` releases the bandwidth (slot
+INVALID, `dl_active = 0`, leaves the ready chain, bandwidth back to 0).
+
+**Coverage (no re-anchor).** The `linuxabisched` tier clears the sched section of
+`arkrtos_linux_abi` from **24 uncovered lines to zero**: the host stub's copy budgets
+(`g_from_budget` / `g_to_budget`) already express "first block succeeds, second fails", so every
+`-EFAULT` branch of `copy_from_user` / `copy_to_user` is reachable - none of them is written off
+as "unreachable by construction". With seven tiers merged, `arkrtos_linux_abi` goes from 96.55%
+to **97.25%** (the 97.00% baseline is untouched); `test_linux_abi_host.c` grows from 606 to
+**633 checks** (27 new error-face checks).
+
+**Gate.** `tools/fork_gate.py` has `SCHED_CHECKS = 63`: the `[sched]` prefix is counted
+separately, so none of the ten `EXPECT_*_CHECKS` has to change (those are the `[fork]` prefix).
+The nine anchors above are verified one by one, and the bad-log self-test adds three sched
+mutations (drop one line, insert a FAIL, change a number). In the fixture the six deadline checks
+are split on `ARKRTOS_USE_SCHED_DEADLINE` - with the class on they expect `-EBUSY` and the
+triplet, with it off they expect `-EINVAL` and zeros; both branches have the same count, so
+`SCHED_CHECKS` does not vary by tier. `tools/linux_abi_gate.py`'s `EXPECT_SYS` compares all 12
+numbers against asm-generic (118-127, 274/275); in the default tier those twelve answer
+`-ENOSYS` truthfully.
+
+**Boundaries.** (1) No CFS (see above), `nice` only places the task; (2) `SCHED_IDLE` is not real
+idleness; (3) no group scheduling and no cgroup bandwidth; (4) `SCHED_RESET_ON_FORK` / `RECLAIM`
+/ `DL_OVERRUN` all return `-EINVAL`, never a pretence; (5) affinity is CPU0 only (single core);
+(6) deadline parameters are stored as `uint32` ns, so anything above 4.29 s returns `-EINVAL`;
+(7) the throttling granularity is one tick (500 us), not an `hrtimer`-level refill as on Linux;
+(8) there is no `SCHED_FLAG_DL_OVERRUN` overrun detection - overrun is only contained by
+throttling.
+
 ## 9 Switch and zero footprint
 
 `ARKRTOS_USE_LINUX_THREAD` (section 8.10) is a third Linux ABI switch, default **0**,
@@ -2368,7 +2534,8 @@ still refused) and a per-App task quota (section 8.11, default off); preemptive 
 delivery is still absent. `fcntl` fd flags and status flags exist (section 8.13,
 2026-11-27), record locks exist (section 8.16, 2026-11-27; an 8-slot table, paths as
 identity, no deadlock detection) while async I/O does not. `rseq`/`getcpu`
-landed the same day (section 8.14, 2026-11-27).
+landed the same day (section 8.14, 2026-11-27), and so did scheduling policies
+(U-28, section 8.17: the twelve `sched_*` numbers plus the kernel deadline class).
 
 `execve` gives "replace this task's image" and `fork` gives "a second task with
 its own address-space copy". Both exist, but do not read this as a full process

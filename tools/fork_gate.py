@@ -87,6 +87,24 @@
      不是失败就立刻返回）、`lock free after child close (conflict range)
      -> 0 ok`（close 按文件释放，不是按进程一刀切）。另外六条读数把
      SEEK_END 换算、不相交区间、l_whence 归一、l_start 绝对化分别钉死。
+  D3. SCHED 段（U-28 调度策略十二个号，63 条，十档都编；[sched] 前缀单独
+     计数，不进上面十档的 [fork] 常量）：这一段只证「号、参数、错误码真的
+     过了内核又回来了」，不证选择次序 —— EDF 谁先跑依赖墙钟与调度抖动，不是
+     可证伪读数；选择次序、预算节流、周期补回、过载重新对齐由宿主用例
+     test_task_host.c 的 test_deadline_class 用可控 tick 断言，两处读数合起来
+     才是完整证据。必现读数九条：`getscheduler default -> 0 ok`（策略镜像从 0
+     起）、`getparam FIFO priority is 88 -> 88 ok`（优先级原样回读）、
+     `rr interval nsec is 5000000 -> 5000000 ok`（RR 轮转量 = 时间片 10 拍 x
+     500 us）、`setattr DEADLINE 100% bandwidth -> EBUSY -> -16 ok`（准入）、
+     `setattr DEADLINE 1ms/2ms/100ms is admitted -> 0 ok`、`getattr policy is
+     DEADLINE -> 6 ok`、`getattr DEADLINE deadline round-trips -> 2000000 ok`
+     （三元组原样回读）、`setaffinity short len -> EINVAL -> -22 ok`、
+     `sched_yield -> 0 ok`。另外 54 条把三种策略映射、两处错误码分档
+     （-EINVAL / -ESRCH / -EFAULT / -EBUSY）、VER0 48 与 VER1 56 两种 size、
+     sched_flags 与系统调用 flags 的非 0 拒绝、DEADLINE 走 setscheduler 回
+     -EINVAL、亲和性掩码只认 bit0 逐个钉死。夹具里 deadline 那六条读数按
+     ARKRTOS_USE_SCHED_DEADLINE 分两支（类开着期望 EBUSY/三元组，类没开期望
+     -EINVAL/零值），两支条数相同，所以 SCHED_CHECKS=63 不随档变化。
   E. 解析器自检：把合成坏日志喂给同一个判据（去掉 PASS、改退出码、插 FAIL、
      少一条 check、父子 pid 改成相同、去掉 exec rc=0），每种坏法都必须判红。
 
@@ -130,7 +148,11 @@ MAKEFILE = "example/qemu_loongarch64/Makefile"
 BUILD_DIR = os.path.join(ROOT, "build", "qemu_loongarch64")
 ELF_NAME = "ark_qemu_la64.elf"
 
-FORK_FLAGS = ["-DARKRTOS_USE_LINUX_FORK=1", "-DARKRTOS_USE_PAGING_DEMAND=1"]
+# U-28 的 sched 十二号（118-127、274/275）不另开一档：它与 fork 档正交，
+# 十档都带上 —— 否则「换档时 [sched] 读数整段消失」会被当成正常。
+SCHED_FLAGS = ["-DARKRTOS_USE_LINUX_SCHED=1", "-DARKRTOS_USE_SCHED_DEADLINE=1"]
+FORK_FLAGS = ["-DARKRTOS_USE_LINUX_FORK=1", "-DARKRTOS_USE_PAGING_DEMAND=1"] + \
+    SCHED_FLAGS
 # COW 档 = fork 档 + 写时复制开关。本门禁跑两遍：先默认 fork 档（27 条），
 # 再 fork+COW 档（32 条 + 内核 COW 日志）。绝不把 FORK_FLAGS 直接改成带
 # COW —— 那样默认 fork 路径（整块克隆）就再也没被测过了。
@@ -232,6 +254,10 @@ SIGN_KEY_HEADER = """#ifndef ARKRTOS_SIGN_KEY_LOCAL_H
 # 父看到锁的主人是子进程（rc / l_pid）、子 close、父把三把锁逐个拿回来
 # （冲突段 / 不相交段 / 文件尾段）、子被 reap、子退出码 0。
 LOCK_CHECKS = 32
+# SCHED 段（U-28，十档都在，与 LOCK 段同型）：63 条读数。夹具里 deadline 的
+# 六条读数按 ARKRTOS_USE_SCHED_DEADLINE 分两支（类开着期望 EBUSY/三元组，
+# 类没开期望 -EINVAL/零值），两支条数相同，所以这个常数不随档变化。
+SCHED_CHECKS = 63
 EXPECT_FORK_CHECKS = 47 + LOCK_CHECKS
 # COW 段多 5 条：pipe2、clone>0、子被 reap、子看到 fork 前的值（位掩码 3）、
 # 父自己的写还在。合计 52 条。
@@ -953,6 +979,9 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
         r"^\[fork\] finished after \d+ ms, exit code 0$", s) is not None)
     werr = count(lambda s: s.startswith("[fork] write /mnt/ram/linux_fork rc=0"))
     xerr = count(lambda s: s.startswith("[fork] exec rc=0"))
+    # [sched] 段单独计数：前缀不同，所以上面十档的 EXPECT_* 一个都不用改。
+    sc_ok = count(lambda s: s.startswith("[sched] ") and s.rstrip().endswith(" ok"))
+    sc_fail = count(lambda s: s.startswith("[sched] ") and "FAIL" in s)
 
     m_par = re.search(r"^\[fork\] parent pid=(\d+)$", text.replace("\r\n", "\n"), re.M)
     m_chi = re.search(r"^\[fork\] child pid=(\d+)$", text.replace("\r\n", "\n"), re.M)
@@ -966,6 +995,10 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
         problems.append("有 %d 条 check 打了 FAIL" % fk_fail)
     if fk_ok != expect_checks:
         problems.append("check 通过条数 %d != %d" % (fk_ok, expect_checks))
+    if sc_fail != 0:
+        problems.append("有 %d 条 [sched] check 打了 FAIL" % sc_fail)
+    if sc_ok != SCHED_CHECKS:
+        problems.append("[sched] check 通过条数 %d != %d" % (sc_ok, SCHED_CHECKS))
     # 三条新读数必须逐条出现：只比总条数时，换一个夹具（少写一条、多写一条）
     # 仍可能凑出同一个数，那是假绿。
     req = {
@@ -1288,6 +1321,30 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
     for line, why in req.items():
         if count(lambda s2, t=line: s2.strip() == "[fork] " + t) != 1:
             problems.append("缺 `[fork] %s` —— %s" % (line, why))
+
+    # [sched] 段：条数对得上还不够，关键读数必须逐条出现。只比总条数时，
+    # 「少一条 A、多一条 B」仍能凑出同一个数 —— 那是假绿。
+    sch_req = {
+        "getscheduler default -> 0 ok": "初值不是 OTHER（翻译层没把 sched_policy 从 0 起）",
+        "getparam FIFO priority is 88 -> 88 ok":
+            "setparam/setscheduler 的优先级没原样回读",
+        "rr interval nsec is 5000000 -> 5000000 ok":
+            "RR 的轮转量没按时间片算成 5 ms",
+        "setattr DEADLINE 100% bandwidth -> EBUSY -> -16 ok":
+            "100% 带宽没被准入拒掉（EBUSY 是唯一正确的拒绝码）",
+        "setattr DEADLINE 1ms/2ms/100ms is admitted -> 0 ok":
+            "合法的 deadline 三元组被拒（类没接线，或准入算错）",
+        "getattr policy is DEADLINE -> 6 ok":
+            "setattr 之后策略没落到 DEADLINE",
+        "getattr DEADLINE deadline round-trips -> 2000000 ok":
+            "deadline 三元组没有原样回读",
+        "setaffinity short len -> EINVAL -> -22 ok":
+            "长度不足的亲和性掩码被接受了",
+        "sched_yield -> 0 ok": "sched_yield 没回 0",
+    }
+    for line, why in sch_req.items():
+        if count(lambda s2, t=line: s2.strip() == "[sched] " + t) != 1:
+            problems.append("缺 `[sched] %s` —— %s" % (line, why))
     if futex:
         # 子进程号会随前面的用例复用（6 / 12 / 15 都出现过，档位不同 pid
         # 就不一样），所以这几条只判「形态」：确实是某一次 reap 读数且 ok。
@@ -1511,6 +1568,16 @@ def self_check(good_text, cow=False, shm=False, futex=False, filemap=False,
         "MAP_FIXED 没丢旧内容": lambda s: s.replace(
             "[fork] MAP_FIXED discarded the old bytes -> 1 ok\n",
             "[fork] MAP_FIXED discarded the old bytes -> 0 ok\n"),
+        # [sched] 段（U-28，十档都在）：少一条、插一条 FAIL、改一个数字。
+        "sched 少一条读数": lambda s: s.replace(
+            "[sched] sched_yield -> 0 ok\n", ""),
+        "sched 插一条 FAIL": lambda s: s.replace(
+            "[sched] getscheduler default -> 0 ok",
+            "[sched] getscheduler default -> 0 ok\n"
+            "[sched] bogus -> 1 FAIL (want 0)"),
+        "sched 数字被改": lambda s: s.replace(
+            "[sched] getattr DEADLINE deadline round-trips -> 2000000 ok",
+            "[sched] getattr DEADLINE deadline round-trips -> 3000000 ok"),
     }
     if cow:
         mutations.update({

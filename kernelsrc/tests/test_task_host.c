@@ -2991,6 +2991,177 @@ static void test_activate_higher(void)
 /* ------------------------------------------------------------------
  * main：T0 必须最先（它吃掉「首次调度自动重建」这条一次性路径）
  * ------------------------------------------------------------------ */
+#if (ARKRTOS_USE_SCHED_DEADLINE == 1)
+/* ------------------------------------------------------------------
+ * T22：deadline 类（U-28）
+ *
+ * 判据全部落在可证伪的状态上，不靠"跑起来像 EDF"：
+ *   - 三条硬约束（runtime<=deadline<=period、非 0）逐条拒绝；
+ *   - 准入按 Σ(runtime/period) <= 95%：100% 的那条必须 -EBUSY，
+ *     且被拒之后槽位一个字段都没改；
+ *   - 选中次序只看绝对截止时刻：后设但截止更早的那条必须先被选中，
+ *     到它的周期边界顺延一个周期之后，次序必须反过来；
+ *   - 预算按拍扣：第二条 deadline 任务在场时扣光即摘、到周期边界补满挂回；
+ *     只有一条时不节流（但预算照扣）；
+ *   - 落后超过一个周期时重新对齐，而不是补一串历史预算。
+ * ------------------------------------------------------------------ */
+static void test_deadline_class(void)
+{
+    uint32 rt = 0u;
+    uint32 dl = 0u;
+    uint32 pd = 0u;
+
+    reset_all();
+    make_task(5u, 0u);      /* 1 */
+    make_task(5u, 0u);      /* 2 */
+    make_task(5u, 0u);      /* 3 */
+
+    /* ---- 参数面：任务号与三条硬约束 ---- */
+    ck_i32(arkrtos_task_dl_set(0, 1000u, 1000u, 1000u), ARKRTOS_TASK_ERR_PARAM,
+           "dl_set: task id 0 is not a target");
+    ck_i32(arkrtos_task_dl_set(9, 1000u, 1000u, 1000u), ARKRTOS_TASK_ERR_PARAM,
+           "dl_set: an unregistered slot is not a target");
+    ck_i32(arkrtos_task_dl_set(1, 0u, 1000u, 1000u), ARKRTOS_TASK_ERR_PARAM,
+           "dl_set: runtime 0 is refused (it would throttle forever)");
+    ck_i32(arkrtos_task_dl_set(1, 2001u, 2000u, 5000u), ARKRTOS_TASK_ERR_PARAM,
+           "dl_set: runtime > deadline is refused");
+    ck_i32(arkrtos_task_dl_set(1, 1000u, 5001u, 5000u), ARKRTOS_TASK_ERR_PARAM,
+           "dl_set: deadline > period is refused");
+    ck_i32(arkrtos_task_dl_get(1, &rt, &dl, &pd), 0,
+           "dl_get: a plain task reports no deadline class");
+
+    /* ---- 落账：1 ms / 2 ms / 100 ms，500 us 一拍 -> 2 / 4 / 200 拍 ---- */
+    ck_i32(arkrtos_task_dl_set(1, 1000000u, 2000000u, 100000000u), 0,
+           "dl_set: 1 ms / 2 ms / 100 ms is admitted");
+    ck_i32(arkrtos_task_dl_get(1, &rt, &dl, &pd), 1,
+           "dl_get: the class is visible");
+    ck_u32(rt, 1000000u, "dl_get: runtime round-trips");
+    ck_u32(dl, 2000000u, "dl_get: deadline round-trips");
+    ck_u32(pd, 100000000u, "dl_get: period round-trips");
+    ck_u32(arkrtos_task_table[0].dl_runtime_tick, 2u,
+           "runtime 1 ms is 2 ticks at 500 us");
+    ck_u32(arkrtos_task_table[0].dl_deadline_tick, 4u,
+           "deadline 2 ms is 4 ticks");
+    ck_u32(arkrtos_task_table[0].dl_period_tick, 200u,
+           "period 100 ms is 200 ticks");
+    ck_u32(arkrtos_task_table[0].dl_budget_tick, 2u,
+           "a fresh class starts with a full budget");
+    ck_u32(arkrtos_task_table[0].dl_abs_tick, 4u,
+           "absolute deadline = now + deadline (4 ticks from tick 0)");
+    ck(arkrtos_task_dl_bw_ns() == 10000000ull,
+       "bandwidth is runtime/period = 1% (10 ms per second)");
+
+    /* ---- 准入：100% 的那条必须被拒，且槽位不动 ---- */
+    ck_i32(arkrtos_task_dl_set(2, 1000000u, 1000000u, 1000000u),
+           ARKRTOS_TASK_ERR_BUSY, "dl_set: 100% bandwidth is refused");
+    ck_u32(arkrtos_task_table[1].dl_active, 0u,
+           "a refused set leaves dl_active at 0");
+    ck_u32(arkrtos_task_table[1].dl_runtime_ns, 0u,
+           "a refused set does not half-write runtime");
+    ck(arkrtos_task_dl_bw_ns() == 10000000ull,
+       "a refused set does not change the bandwidth account");
+
+    ck_i32(arkrtos_task_dl_set(2, 1000000u, 1000000u, 100000000u), 0,
+           "dl_set: a second 1% task is admitted");
+    ck(arkrtos_task_dl_bw_ns() == 20000000ull,
+       "the bandwidth account adds both tasks (2%)");
+
+    /* ---- EDF：后设的那条截止更早，必须先被选中 ---- */
+    ck_i32(arkrtos_ready_top(), 1,
+           "EDF picks the earlier absolute deadline (task 2 = idx 1), not the lower id");
+    arkrtos_kernel_tick = 2u;
+    arkrtos_kernel_tick_handler();       /* tick -> 3; task 2 hits its boundary */
+    ck_u32(arkrtos_task_table[1].dl_abs_tick, 202u,
+           "the period boundary advances the absolute deadline by one period");
+    ck_u32(arkrtos_task_table[1].dl_budget_tick, 2u,
+           "the period boundary refills the budget");
+    ck_i32(arkrtos_ready_top(), 0,
+           "after the boundary task 1 (idx 0) is the earliest again");
+
+    /* ---- 预算结算：两条 deadline 任务在场时，扣光即摘 ---- */
+    ck_i32(arkrtos_task_dl_set(1, 1000000u, 2000000u, 100000000u), 0,
+           "re-setting the same task is allowed (its own share is excluded)");
+    arkrtos_task_table[0].dl_abs_tick = 1000u;   /* 远离周期边界 */
+    arkrtos_task_table[0].dl_budget_tick = 2u;
+    use_task(1);
+    arkrtos_task_table[0].status = ARKRTOS_TASK_RUNNING;
+    arkrtos_kernel_tick_handler();               /* tick -> 4, budget 1 */
+    ck_u32(arkrtos_task_table[0].dl_budget_tick, 1u,
+           "the running deadline task is charged one tick");
+    ck_u32(arkrtos_task_table[0].dl_throttled, 0u,
+           "one tick of budget is not yet throttling");
+    arkrtos_kernel_tick_handler();               /* tick -> 5, budget 0 */
+    ck_u32(arkrtos_task_table[0].dl_budget_tick, 0u,
+           "the second tick spends the last budget");
+    ck_u32(arkrtos_task_table[0].dl_throttled, 1u,
+           "a spent budget throttles the task");
+    ck(arkrtos_ready_contains(0) == 0,
+       "a throttled task leaves the ready set (it must not block the bucket head)");
+    ck(arkrtos_ready_top() != 0,
+       "a throttled task is not selected even with the earliest deadline");
+
+    /* ---- 周期边界：补满、解除节流、挂回就绪集 ---- */
+    arkrtos_task_table[0].dl_abs_tick = arkrtos_kernel_tick + 1u;
+    arkrtos_kernel_tick_handler();               /* tick -> 6, task 1 boundary */
+    ck_u32(arkrtos_task_table[0].dl_budget_tick, 1u,
+           "the boundary refills the budget, then the tick charges one");
+    ck_u32(arkrtos_task_table[0].dl_throttled, 0u,
+           "the boundary clears the throttle flag");
+    ck(arkrtos_ready_contains(0) != 0,
+       "the unthrottled task is back on the ready chain");
+
+    /* ---- 撤类：带宽释放、字段清零、仍在就绪集 ---- */
+    arkrtos_task_dl_clear(1);
+    ck_u32(arkrtos_task_table[0].dl_active, 0u, "dl_clear clears dl_active");
+    ck_u32(arkrtos_task_table[0].dl_abs_tick, 0u, "dl_clear clears the deadline");
+    ck_u32(arkrtos_task_table[0].dl_budget_tick, 0u, "dl_clear clears the budget");
+    ck_i32(arkrtos_task_dl_get(1, &rt, &dl, &pd), 0,
+           "dl_get reports nothing after dl_clear");
+    ck(arkrtos_task_dl_bw_ns() == 10000000ull,
+       "dl_clear releases the task's bandwidth");
+    arkrtos_task_dl_clear(99);              /* 越界号：静默 */
+
+    /* ---- 只有一条 deadline 任务时不节流（Linux 同型）---- */
+    arkrtos_task_dl_clear(2);
+    ck_i32(arkrtos_task_dl_set(3, 1000000u, 1000000u, 100000000u), 0,
+           "a single deadline task is admitted");
+    arkrtos_task_table[2].dl_abs_tick = 1000u;
+    arkrtos_task_table[2].dl_budget_tick = 2u;
+    use_task(3);
+    arkrtos_task_table[2].status = ARKRTOS_TASK_RUNNING;
+    arkrtos_kernel_tick_handler();
+    arkrtos_kernel_tick_handler();
+    arkrtos_kernel_tick_handler();
+    ck_u32(arkrtos_task_table[2].dl_budget_tick, 0u,
+           "the lone deadline task still spends its budget");
+    ck_u32(arkrtos_task_table[2].dl_throttled, 0u,
+           "the lone deadline task is not throttled (no competitor)");
+    ck(arkrtos_ready_contains(2) != 0,
+       "the lone deadline task stays on the ready chain");
+
+    /* ---- 落后超过一个周期：重新对齐，不补历史预算 ---- */
+    arkrtos_task_table[2].dl_abs_tick = arkrtos_kernel_tick - 250u;
+    arkrtos_kernel_tick_handler();
+    ck_u32(arkrtos_task_table[2].dl_abs_tick, arkrtos_kernel_tick + 200u,
+           "an overloaded task is re-aligned instead of given a backlog");
+    ck_u32(arkrtos_task_table[2].dl_budget_tick, 1u,
+           "the re-aligned task gets one round, minus the tick just charged");
+
+    /* ---- 退出即释放带宽（kill 的清理路径）---- */
+    arkrtos_task_dl_set(3, 1000000u, 1000000u, 100000000u);
+    use_task(3);
+    arkrtos_task_kill_internal();
+    ck_i32(arkrtos_task_table[2].status, ARKRTOS_TASK_INVALID,
+           "the killed task's slot is invalid");
+    ck_u32(arkrtos_task_table[2].dl_active, 0u,
+           "kill releases the deadline class");
+    ck(arkrtos_ready_contains(2) == 0,
+       "the killed deadline task leaves the ready chain");
+    ck(arkrtos_task_dl_bw_ns() == 0ull,
+       "the killed task's bandwidth is gone");
+}
+#endif /* ARKRTOS_USE_SCHED_DEADLINE */
+
 int main(void)
 {
     /* 与其它宿主用例同口径：只在最后打一行汇总，不加逐例噪音。 */
@@ -3015,6 +3186,10 @@ int main(void)
     RUN(test_fault_handler);
     RUN(test_sched_check);
     RUN(test_activate_higher);
+#if (ARKRTOS_USE_SCHED_DEADLINE == 1)
+    RUN(test_deadline_class);
+#endif
+
 
     if(g_fails != 0)
     {

@@ -137,6 +137,25 @@
 #define LX_SYS_ACCEPT4              (242u)
 #endif
 
+
+/* U-28 调度策略：asm-generic 号表，LoongArch 与 RISC-V 共用。
+ * 只在 ARKRTOS_USE_LINUX_SCHED 档参与编译；关档时这些号落到 default 的
+ * -ENOSYS，与打开本档之前逐位相同。 */
+#if (ARKRTOS_USE_LINUX_SCHED == 1)
+#define LX_SYS_SCHED_SETPARAM       (118u)
+#define LX_SYS_SCHED_SETSCHEDULER   (119u)
+#define LX_SYS_SCHED_GETSCHEDULER   (120u)
+#define LX_SYS_SCHED_GETPARAM       (121u)
+#define LX_SYS_SCHED_SETAFFINITY    (122u)
+#define LX_SYS_SCHED_GETAFFINITY    (123u)
+#define LX_SYS_SCHED_YIELD          (124u)
+#define LX_SYS_SCHED_GET_PRIORITY_MAX (125u)
+#define LX_SYS_SCHED_GET_PRIORITY_MIN (126u)
+#define LX_SYS_SCHED_RR_GET_INTERVAL (127u)
+#define LX_SYS_SCHED_SETATTR        (274u)
+#define LX_SYS_SCHED_GETATTR        (275u)
+#endif
+
 /* errno（asm-generic 编号，程序侧读到的是 -errno） */
 #define LX_EPERM                    (1)
 #define LX_ESRCH                    (3)
@@ -8313,6 +8332,572 @@ static int32 lx_execve(void *p_ctx)
     return LX_RET_EXEC_DONE;
 }
 
+#if (ARKRTOS_USE_LINUX_SCHED == 1)
+/* ============================================================
+ * U-28 调度策略翻译层（sched_* 十二个号）
+ * ------------------------------------------------------------
+ * 内核侧只认「固定优先级 + deadline 类」两件事；本层负责把 Linux 的
+ * policy / priority / nice / deadline 三元组翻译成内核能执行的形态：
+ *
+ *   策略              Linux 参数              内核形态
+ *   SCHED_OTHER       nice -20..19            优先级 128+nice（108..147）
+ *   SCHED_BATCH       同 OTHER                同上（不做延迟唤醒，见文档）
+ *   SCHED_IDLE        priority == 0           优先级 147（普通档最末格）
+ *   SCHED_FIFO        priority 1..99          优先级 100-priority（1..99）
+ *   SCHED_RR          同 FIFO                 同上（时间片由 tick 轮转提供）
+ *   SCHED_DEADLINE    sched_setattr 三元组    arkrtos_task_dl_set()
+ *
+ * 这不是 CFS 权重：本内核是固定优先级抢占式调度器，nice 只是把任务
+ * 放到普通档的某一格。SCHED_IDLE 因此不能真正做到「只在空闲时跑」，
+ * 只能落在普通档最末一格 —— 如实记录，不假装有 CFS。
+ *
+ * policy 镜像存进 TCB（sched_policy），随槽位注册清零，不在 ABI 层另开
+ * 一张会与任务槽复用脱节的表。
+ * ============================================================ */
+#define LX_SCHED_OTHER            (0)
+#define LX_SCHED_FIFO             (1)
+#define LX_SCHED_RR               (2)
+#define LX_SCHED_BATCH            (3)
+#define LX_SCHED_IDLE             (5)
+#define LX_SCHED_DEADLINE         (6)
+
+#define LX_SCHED_ATTR_SIZE_VER0   (48u)
+#define LX_SCHED_ATTR_SIZE_VER1   (56u)
+
+/* pid -> 任务号。pid == 0 表示调用者自己（Linux 语义）；负数非法。
+ * 目标必须是「本内核认识的、还活着的」任务；否则 -ESRCH（与 kill 一致）。 */
+static int32 lx_sched_target(int32 pid, int32 *p_out)
+{
+    int32 id = (pid == 0) ? (int32)arkrtos_current_task_id : pid;
+
+    if(id <= 0)
+    {
+        return -LX_EINVAL;
+    }
+    if((id > (int32)ARKRTOS_TASK_MAX_NUM) ||
+       (arkrtos_task_table[id - 1].status == ARKRTOS_TASK_INVALID))
+    {
+        return -LX_ESRCH;
+    }
+    *p_out = id;
+    return 0;
+}
+
+/* nice -> 内核优先级。nice 0 落在普通档正中的 128。 */
+static int32 lx_sched_prio_of(uint32 policy, int32 prio, int32 nice, uint8 *p_out)
+{
+    switch(policy)
+    {
+    case LX_SCHED_FIFO:
+    case LX_SCHED_RR:
+        if((prio < 1) || (prio > 99))
+        {
+            return -LX_EINVAL;
+        }
+        *p_out = (uint8)(100 - prio);
+        return 0;
+    case LX_SCHED_OTHER:
+    case LX_SCHED_BATCH:
+        if((nice < -20) || (nice > 19))
+        {
+            return -LX_EINVAL;
+        }
+        *p_out = (uint8)(128 + nice);
+        return 0;
+    case LX_SCHED_IDLE:
+        if(prio != 0)
+        {
+            return -LX_EINVAL;
+        }
+        *p_out = (uint8)147;
+        return 0;
+    default:
+        return -LX_EINVAL;
+    }
+}
+
+/* 改内核优先级：priority 与 base_priority 一起改（不留一个会被继承撤销
+ * 又回不去的中间值），并让就绪桶跟着搬。运行中的任务不在就绪链上，
+ * reprio 自己会跳过。 */
+static void lx_sched_set_prio(int32 id, uint8 new_prio)
+{
+    arkrtos_task_t *p = &arkrtos_task_table[id - 1];
+    uint32 crit;
+    uint8  old;
+
+    crit = ARKRTOS_ENTER_CRITICAL();
+    old  = p->priority;
+    if(old != new_prio)
+    {
+        p->priority      = new_prio;
+        p->base_priority = new_prio;
+        arkrtos_ready_reprio(id - 1, old);
+    }
+    ARKRTOS_EXIT_CRITICAL(crit);
+}
+
+static void lx_sched_drop_dl(int32 id)
+{
+#if (ARKRTOS_USE_SCHED_DEADLINE == 1)
+    if(arkrtos_task_table[id - 1].dl_active != 0u)
+    {
+        arkrtos_task_dl_clear(id);
+    }
+#else
+    (void)id;
+#endif
+}
+
+/* sched_setscheduler(118 是 setparam，119 是这个)。三个参数：
+ * pid / policy / struct sched_param*。 */
+static int32 lx_sched_setscheduler(void *p_ctx)
+{
+    int32         pid    = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
+    uint32        policy = (uint32)ARKRTOS_SVC_ARG(p_ctx, 1u);
+    unsigned long u_par  = ARKRTOS_SVC_ARG(p_ctx, 2u);
+    int32         prio   = 0;
+    int32         id;
+    int32         rc;
+    uint8         kp;
+
+    /* Linux：deadline 的三个参数只能经 sched_setattr 传入，这个号没有
+     * 承载它们的字段，只能回 EINVAL（不是 ENOSYS —— 号本身认识）。 */
+    if(policy == (uint32)LX_SCHED_DEADLINE)
+    {
+        return -LX_EINVAL;
+    }
+    if(u_par == 0ul)
+    {
+        return -LX_EFAULT;
+    }
+    if(arkrtos_copy_from_user(&prio, (const void *)u_par, 4u) != 0)
+    {
+        return -LX_EFAULT;
+    }
+    rc = lx_sched_target(pid, &id);
+    if(rc != 0)
+    {
+        return rc;
+    }
+    rc = lx_sched_prio_of(policy, prio, 0, &kp);
+    if(rc != 0)
+    {
+        return rc;
+    }
+    lx_sched_drop_dl(id);                    /* 从 deadline 类转出：释放带宽 */
+    arkrtos_task_table[id - 1].sched_policy = (uint8)policy;
+    lx_sched_set_prio(id, kp);
+    return 0;
+}
+
+/* sched_setparam(118)：只改优先级，策略保持不变。OTHER/BATCH/IDLE 的
+ * priority 必须是 0，且 nice 不由这个号改（Linux 同型）。 */
+static int32 lx_sched_setparam(void *p_ctx)
+{
+    int32         pid   = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
+    unsigned long u_par = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    int32         prio  = 0;
+    int32         id;
+    int32         rc;
+    uint32        policy;
+    uint8         kp;
+
+    if(u_par == 0ul)
+    {
+        return -LX_EFAULT;
+    }
+    if(arkrtos_copy_from_user(&prio, (const void *)u_par, 4u) != 0)
+    {
+        return -LX_EFAULT;
+    }
+    rc = lx_sched_target(pid, &id);
+    if(rc != 0)
+    {
+        return rc;
+    }
+    policy = (uint32)arkrtos_task_table[id - 1].sched_policy;
+    if(policy == (uint32)LX_SCHED_DEADLINE)
+    {
+        return -LX_EINVAL;                   /* 同 Linux：改用 sched_setattr */
+    }
+    if((policy == (uint32)LX_SCHED_OTHER) ||
+       (policy == (uint32)LX_SCHED_BATCH) ||
+       (policy == (uint32)LX_SCHED_IDLE))
+    {
+        return (prio == 0) ? 0 : -LX_EINVAL;
+    }
+    rc = lx_sched_prio_of(policy, prio, 0, &kp);
+    if(rc != 0)
+    {
+        return rc;
+    }
+    lx_sched_set_prio(id, kp);
+    return 0;
+}
+
+/* sched_getparam(121)：priority 由内核优先级反推。非 RT 策略一律回 0。 */
+static int32 lx_sched_getparam(void *p_ctx)
+{
+    int32         pid   = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
+    unsigned long u_par = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    int32         id;
+    int32         rc;
+    int32         prio;
+    uint32        policy;
+
+    if(u_par == 0ul)
+    {
+        return -LX_EFAULT;
+    }
+    rc = lx_sched_target(pid, &id);
+    if(rc != 0)
+    {
+        return rc;
+    }
+    policy = (uint32)arkrtos_task_table[id - 1].sched_policy;
+    prio = 0;
+    if((policy == (uint32)LX_SCHED_FIFO) || (policy == (uint32)LX_SCHED_RR))
+    {
+        prio = 100 - (int32)arkrtos_task_table[id - 1].priority;
+    }
+    if(arkrtos_copy_to_user((void *)u_par, &prio, 4u) != 0)
+    {
+        return -LX_EFAULT;
+    }
+    return 0;
+}
+
+/* sched_getscheduler(120)。 */
+static int32 lx_sched_getscheduler(void *p_ctx)
+{
+    int32 pid = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
+    int32 id;
+    int32 rc = lx_sched_target(pid, &id);
+
+    if(rc != 0)
+    {
+        return rc;
+    }
+    return (int32)arkrtos_task_table[id - 1].sched_policy;
+}
+
+/* sched_setattr(274)。struct sched_attr 的布局（VER0 48 字节）：
+ *   +0 size(u32)  +4 sched_policy(u32)  +8 sched_flags(u64)
+ *   +16 sched_nice(s32)  +20 sched_priority(u32)
+ *   +24 sched_runtime(u64)  +32 sched_deadline(u64)  +40 sched_period(u64)
+ * 逐字段按字节读，避免对用户指针做一次结构体强转（对齐与大小端都不假设）。 */
+static int32 lx_sched_setattr(void *p_ctx)
+{
+    int32              pid      = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
+    unsigned long      ua       = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    uint32             sysflags = (uint32)ARKRTOS_SVC_ARG(p_ctx, 2u);
+    uint32             size     = 0u;
+    uint32             policy   = 0u;
+    unsigned long long aflags   = 0ull;
+    int32              nice     = 0;
+    uint32             prio     = 0u;
+    unsigned long long runtime  = 0ull;
+    unsigned long long deadline = 0ull;
+    unsigned long long period   = 0ull;
+    int32              id;
+    int32              rc;
+    uint8              kp;
+
+    if(ua == 0ul)
+    {
+        return -LX_EFAULT;
+    }
+    if(arkrtos_copy_from_user(&size, (const void *)ua, 4u) != 0)
+    {
+        return -LX_EFAULT;
+    }
+    if(size < LX_SCHED_ATTR_SIZE_VER0)
+    {
+        return -LX_EINVAL;
+    }
+    if((arkrtos_copy_from_user(&policy, (const void *)(ua + 4ul), 4u) != 0) ||
+       (arkrtos_copy_from_user(&aflags, (const void *)(ua + 8ul), 8u) != 0) ||
+       (arkrtos_copy_from_user(&nice, (const void *)(ua + 16ul), 4u) != 0) ||
+       (arkrtos_copy_from_user(&prio, (const void *)(ua + 20ul), 4u) != 0) ||
+       (arkrtos_copy_from_user(&runtime, (const void *)(ua + 24ul), 8u) != 0) ||
+       (arkrtos_copy_from_user(&deadline, (const void *)(ua + 32ul), 8u) != 0) ||
+       (arkrtos_copy_from_user(&period, (const void *)(ua + 40ul), 8u) != 0))
+    {
+        return -LX_EFAULT;
+    }
+    /* 系统调用本身的 flags 与结构里的 sched_flags：一个未知位都不认。
+     * RESET_ON_FORK 也没有实现 —— 认了却不做，就是把调用方的预期变成谎言。 */
+    if((sysflags != 0u) || (aflags != 0ull))
+    {
+        return -LX_EINVAL;
+    }
+    rc = lx_sched_target(pid, &id);
+    if(rc != 0)
+    {
+        return rc;
+    }
+
+    if(policy == (uint32)LX_SCHED_DEADLINE)
+    {
+#if (ARKRTOS_USE_SCHED_DEADLINE == 1)
+        if(prio != 0u)
+        {
+            return -LX_EINVAL;
+        }
+        if((runtime == 0ull) || (deadline == 0ull) || (period == 0ull))
+        {
+            return -LX_EINVAL;
+        }
+        if((runtime > 0xFFFFFFFFull) || (deadline > 0xFFFFFFFFull) ||
+           (period > 0xFFFFFFFFull))
+        {
+            return -LX_EINVAL;       /* 内核按 uint32 ns 存参数 */
+        }
+        rc = arkrtos_task_dl_set(id, (uint32)runtime, (uint32)deadline,
+                                 (uint32)period);
+        if(rc == ARKRTOS_TASK_ERR_BUSY)
+        {
+            return -LX_EBUSY;        /* 准入失败：带宽不足 */
+        }
+        if(rc != 0)
+        {
+            return -LX_EINVAL;
+        }
+        arkrtos_task_table[id - 1].sched_policy = (uint8)LX_SCHED_DEADLINE;
+        return 0;
+#else
+        /* 内核没有 deadline 类：不假装成功。 */
+        return -LX_EINVAL;
+#endif
+    }
+
+    /* 非 deadline：三个时间参数必须全 0（Linux 同型），否则是调用方把
+     * deadline 参数塞进了别的策略。 */
+    if((runtime != 0ull) || (deadline != 0ull) || (period != 0ull))
+    {
+        return -LX_EINVAL;
+    }
+    rc = lx_sched_prio_of(policy, (int32)prio, nice, &kp);
+    if(rc != 0)
+    {
+        return rc;
+    }
+    lx_sched_drop_dl(id);
+    arkrtos_task_table[id - 1].sched_policy = (uint8)policy;
+    lx_sched_set_prio(id, kp);
+    return 0;
+}
+
+/* sched_getattr(275)。回写同一布局；size >= VER1 时把 util 两个字段写成 0
+ * （本内核不做利用率跟踪，但字段存在，必须给定值而不是留垃圾）。 */
+static int32 lx_sched_getattr(void *p_ctx)
+{
+    int32              pid      = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
+    unsigned long      ua       = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    uint32             size     = (uint32)ARKRTOS_SVC_ARG(p_ctx, 2u);
+    uint32             sysflags = (uint32)ARKRTOS_SVC_ARG(p_ctx, 3u);
+    uint32             policy;
+    int32              nice = 0;
+    uint32             prio = 0u;
+    uint32             runtime = 0u;
+    uint32             deadline = 0u;
+    uint32             period = 0u;
+    unsigned long long zero64 = 0ull;
+    uint32             zero32 = 0u;
+    uint32             wsize;
+    int32              id;
+    int32              rc;
+
+    if(sysflags != 0u)
+    {
+        return -LX_EINVAL;
+    }
+    if(size < LX_SCHED_ATTR_SIZE_VER0)
+    {
+        return -LX_EINVAL;
+    }
+    if(ua == 0ul)
+    {
+        return -LX_EFAULT;
+    }
+    rc = lx_sched_target(pid, &id);
+    if(rc != 0)
+    {
+        return rc;
+    }
+    policy = (uint32)arkrtos_task_table[id - 1].sched_policy;
+    if((policy == (uint32)LX_SCHED_OTHER) || (policy == (uint32)LX_SCHED_BATCH))
+    {
+        nice = (int32)arkrtos_task_table[id - 1].priority - 128;
+    }
+    if((policy == (uint32)LX_SCHED_FIFO) || (policy == (uint32)LX_SCHED_RR))
+    {
+        prio = (uint32)(100 - (int32)arkrtos_task_table[id - 1].priority);
+    }
+#if (ARKRTOS_USE_SCHED_DEADLINE == 1)
+    if(policy == (uint32)LX_SCHED_DEADLINE)
+    {
+        (void)arkrtos_task_dl_get(id, &runtime, &deadline, &period);
+    }
+#endif
+    wsize = (size >= LX_SCHED_ATTR_SIZE_VER1) ? LX_SCHED_ATTR_SIZE_VER1
+                                              : LX_SCHED_ATTR_SIZE_VER0;
+    if((arkrtos_copy_to_user((void *)ua, &wsize, 4u) != 0) ||
+       (arkrtos_copy_to_user((void *)(ua + 4ul), &policy, 4u) != 0) ||
+       (arkrtos_copy_to_user((void *)(ua + 8ul), &zero64, 8u) != 0) ||
+       (arkrtos_copy_to_user((void *)(ua + 16ul), &nice, 4u) != 0) ||
+       (arkrtos_copy_to_user((void *)(ua + 20ul), &prio, 4u) != 0) ||
+       (arkrtos_copy_to_user((void *)(ua + 24ul), &runtime, 4u) != 0) ||
+       (arkrtos_copy_to_user((void *)(ua + 28ul), &zero32, 4u) != 0) ||
+       (arkrtos_copy_to_user((void *)(ua + 32ul), &deadline, 4u) != 0) ||
+       (arkrtos_copy_to_user((void *)(ua + 36ul), &zero32, 4u) != 0) ||
+       (arkrtos_copy_to_user((void *)(ua + 40ul), &period, 4u) != 0) ||
+       (arkrtos_copy_to_user((void *)(ua + 44ul), &zero32, 4u) != 0))
+    {
+        return -LX_EFAULT;
+    }
+    if(wsize >= LX_SCHED_ATTR_SIZE_VER1)
+    {
+        if((arkrtos_copy_to_user((void *)(ua + 48ul), &zero32, 4u) != 0) ||
+           (arkrtos_copy_to_user((void *)(ua + 52ul), &zero32, 4u) != 0))
+        {
+            return -LX_EFAULT;
+        }
+    }
+    return 0;
+}
+
+/* sched_get_priority_max(125) / min(126)。FIFO/RR 是 99/1；其余策略 0/0
+ * （Linux 对 OTHER/BATCH/IDLE/DEADLINE 都给 0）。 */
+static int32 lx_sched_prio_bound(void *p_ctx, uint8 want_max)
+{
+    uint32 policy = (uint32)ARKRTOS_SVC_ARG(p_ctx, 0u);
+
+    switch(policy)
+    {
+    case LX_SCHED_FIFO:
+    case LX_SCHED_RR:
+        return want_max ? 99 : 1;
+    case LX_SCHED_OTHER:
+    case LX_SCHED_BATCH:
+    case LX_SCHED_IDLE:
+    case LX_SCHED_DEADLINE:
+        return 0;
+    default:
+        return -LX_EINVAL;
+    }
+}
+
+/* sched_rr_get_interval(127)。RR 的轮转量就是内核时间片，按 ns 回给用户。
+ * struct timespec 在 LP64 上是两个 8 字节 long。 */
+static int32 lx_sched_rr_get_interval(void *p_ctx)
+{
+    int32         pid = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
+    unsigned long up  = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    unsigned long long ns;
+    unsigned long sec;
+    unsigned long nsec;
+    int32         id;
+    int32         rc = lx_sched_target(pid, &id);
+    (void)id;
+
+    if(rc != 0)
+    {
+        return rc;
+    }
+    if(up == 0ul)
+    {
+        return -LX_EFAULT;
+    }
+    ns   = ((unsigned long long)ARKRTOS_TIME_SLICE_TICKS) *
+           ((unsigned long long)ARKRTOS_TICK_PERIOD_US) * 1000ull;
+    sec  = (unsigned long)(ns / 1000000000ull);
+    nsec = (unsigned long)(ns % 1000000000ull);
+    if((arkrtos_copy_to_user((void *)up, &sec, (uint32)sizeof(unsigned long)) != 0) ||
+       (arkrtos_copy_to_user((void *)(up + (unsigned long)sizeof(unsigned long)),
+                             &nsec, (uint32)sizeof(unsigned long)) != 0))
+    {
+        return -LX_EFAULT;
+    }
+    return 0;
+}
+
+/* sched_setaffinity(122) / getaffinity(123)。本内核只有一个 CPU：掩码里
+ * 只允许 bit0，且必须给出 bit0。len 按 Linux 规则至少一个 unsigned long。 */
+static int32 lx_sched_setaffinity(void *p_ctx)
+{
+    int32         pid  = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
+    uint32        len  = (uint32)ARKRTOS_SVC_ARG(p_ctx, 1u);
+    unsigned long um   = ARKRTOS_SVC_ARG(p_ctx, 2u);
+    unsigned long mask = 0ul;
+    int32         id;
+    int32         rc;
+
+    if(len < (uint32)sizeof(unsigned long))
+    {
+        return -LX_EINVAL;
+    }
+    if(um == 0ul)
+    {
+        return -LX_EFAULT;
+    }
+    rc = lx_sched_target(pid, &id);
+    (void)id;
+    if(rc != 0)
+    {
+        return rc;
+    }
+    if(arkrtos_copy_from_user(&mask, (const void *)um, (uint32)sizeof(mask)) != 0)
+    {
+        return -LX_EFAULT;
+    }
+    if(((mask & 1ul) == 0ul) || ((mask & ~1ul) != 0ul))
+    {
+        return -LX_EINVAL;       /* 只有 CPU0；空掩码或别核位都不收 */
+    }
+    return 0;
+}
+
+static int32 lx_sched_getaffinity(void *p_ctx)
+{
+    int32         pid  = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
+    uint32        len  = (uint32)ARKRTOS_SVC_ARG(p_ctx, 1u);
+    unsigned long um   = ARKRTOS_SVC_ARG(p_ctx, 2u);
+    unsigned long mask = 1ul;
+    int32         id;
+    int32         rc;
+
+    if(len < (uint32)sizeof(unsigned long))
+    {
+        return -LX_EINVAL;
+    }
+    if(um == 0ul)
+    {
+        return -LX_EFAULT;
+    }
+    rc = lx_sched_target(pid, &id);
+    (void)id;
+    if(rc != 0)
+    {
+        return rc;
+    }
+    if(arkrtos_copy_to_user((void *)um, &mask, (uint32)sizeof(mask)) != 0)
+    {
+        return -LX_EFAULT;
+    }
+    return 0;
+}
+
+/* sched_yield(124)：把自己挪到同优先级队尾，再请求一次调度。 */
+static int32 lx_sched_yield(void)
+{
+    arkrtos_task_yield_internal();
+    return 0;
+}
+
+
+#endif /* ARKRTOS_USE_LINUX_SCHED */
+
 /* ---------------------------------------------------------------- 入口 */
 
 /* 号表直方图：在分发之前记，走到 default 的 -ENOSYS 与 exit 提前返回的调用
@@ -8483,7 +9068,45 @@ static int32 lx_dispatch(void *p_svc_ctx, uint32 num, int32 *p_rc)
         rc = lx_shutdown(p_svc_ctx);
         break;
     #endif
-    #if (ARKRTOS_USE_LINUX_FORK == 1)
+    #if (ARKRTOS_USE_LINUX_SCHED == 1)
+    case LX_SYS_SCHED_SETPARAM:
+        rc = lx_sched_setparam(p_svc_ctx);
+        break;
+    case LX_SYS_SCHED_SETSCHEDULER:
+        rc = lx_sched_setscheduler(p_svc_ctx);
+        break;
+    case LX_SYS_SCHED_GETSCHEDULER:
+        rc = lx_sched_getscheduler(p_svc_ctx);
+        break;
+    case LX_SYS_SCHED_GETPARAM:
+        rc = lx_sched_getparam(p_svc_ctx);
+        break;
+    case LX_SYS_SCHED_SETAFFINITY:
+        rc = lx_sched_setaffinity(p_svc_ctx);
+        break;
+    case LX_SYS_SCHED_GETAFFINITY:
+        rc = lx_sched_getaffinity(p_svc_ctx);
+        break;
+    case LX_SYS_SCHED_YIELD:
+        rc = lx_sched_yield();
+        break;
+    case LX_SYS_SCHED_GET_PRIORITY_MAX:
+        rc = lx_sched_prio_bound(p_svc_ctx, 1u);
+        break;
+    case LX_SYS_SCHED_GET_PRIORITY_MIN:
+        rc = lx_sched_prio_bound(p_svc_ctx, 0u);
+        break;
+    case LX_SYS_SCHED_RR_GET_INTERVAL:
+        rc = lx_sched_rr_get_interval(p_svc_ctx);
+        break;
+    case LX_SYS_SCHED_SETATTR:
+        rc = lx_sched_setattr(p_svc_ctx);
+        break;
+    case LX_SYS_SCHED_GETATTR:
+        rc = lx_sched_getattr(p_svc_ctx);
+        break;
+#endif
+#if (ARKRTOS_USE_LINUX_FORK == 1)
     case LX_SYS_CLONE:
         rc = lx_clone(p_svc_ctx);
         break;

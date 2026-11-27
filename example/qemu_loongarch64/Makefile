@@ -596,6 +596,18 @@ endif
 # SEC-G07 每 App 任务配额夹具段：只认它自己的开关。上限值也从 EXTRA_CFLAGS
 # 透传过去 —— 夹具断言「第几个 fork 被拒」必须与内核用的是同一个数，
 # 两边各写一个 8 只是碰巧对，改一处就会静默错位。
+# U-28 调度策略夹具段（sched_* 十二个号）。两个开关各自镜像：
+# ARKRTOS_USE_LINUX_SCHED 决定这一段编不编，ARKRTOS_USE_SCHED_DEADLINE
+# 决定 deadline 那几条读数期望什么（类没开时 setattr 必须回 -EINVAL，
+# 夹具里对应一组 #else 断言，条数不变）。漏镜像的表现是「整段读数不出现」。
+ARK_SCHED_ON := $(findstring ARKRTOS_USE_LINUX_SCHED=1,$(EXTRA_CFLAGS))
+ARK_DL_ON    := $(findstring ARKRTOS_USE_SCHED_DEADLINE=1,$(EXTRA_CFLAGS))
+ifneq ($(ARK_SCHED_ON),)
+LXFORK_DEFS   += -DARKRTOS_USE_LINUX_SCHED=1
+endif
+ifneq ($(ARK_DL_ON),)
+LXFORK_DEFS   += -DARKRTOS_USE_SCHED_DEADLINE=1
+endif
 ARK_QUOTA_ON := $(findstring ARKRTOS_USE_APP_QUOTA=1,$(EXTRA_CFLAGS))
 ARK_APPQ_N   := $(patsubst -DARKRTOS_APP_MAX_TASKS=%,%,$(filter -DARKRTOS_APP_MAX_TASKS=%,$(EXTRA_CFLAGS)))
 ifneq ($(ARK_QUOTA_ON),)

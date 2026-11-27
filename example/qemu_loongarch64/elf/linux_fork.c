@@ -899,6 +899,353 @@ static void lk_child(int *pc, int *cp, lx_long pfd)
     (void)lx3(LX_WRITE, (lx_long)cp[1], (lx_long)(unsigned long)"Z", 1);
 }
 
+/* ------------------------------------------------------------------
+ * U-28 调度策略（sched_* 十二个号）的 ABI 往返读数
+ *
+ * 这一段只证「号、参数、错误码真的过了内核又回来了」，不证选择次序：
+ * EDF 谁先跑依赖墙钟与调度抖动，不是可证伪读数。选择次序、节流与补回
+ * 由宿主用例 kernelsrc/tests/test_task_host.c 的 test_deadline_class
+ * 用可控的 arkrtos_kernel_tick 断言。这里只证明翻译层没把 Linux 的
+ * 语义翻错 —— 两处读数合起来才是完整的证据。
+ * ------------------------------------------------------------------ */
+#if defined(ARKRTOS_USE_LINUX_SCHED) && (ARKRTOS_USE_LINUX_SCHED == 1)
+
+#define LX_SCHED_SETPARAM       118
+#define LX_SCHED_SETSCHEDULER   119
+#define LX_SCHED_GETSCHEDULER   120
+#define LX_SCHED_GETPARAM       121
+#define LX_SCHED_SETAFFINITY    122
+#define LX_SCHED_GETAFFINITY    123
+#define LX_SCHED_YIELD          124
+#define LX_SCHED_PRIO_MAX       125
+#define LX_SCHED_PRIO_MIN       126
+#define LX_SCHED_RR_INTERVAL    127
+#define LX_SCHED_SETATTR        274
+#define LX_SCHED_GETATTR        275
+
+#define LX_SCHED_OTHER          0
+#define LX_SCHED_FIFO           1
+#define LX_SCHED_RR             2
+#define LX_SCHED_DEADLINE       6
+
+#define LX_EBUSY                16
+#define LX_EFAULT               14
+
+/* struct sched_attr 的字段偏移（VER0 = 48 字节，VER1 = 56 字节）。
+ * 内核逐字段按字节读写，这里也按字节填/取，不对用户指针做结构体强转。 */
+#define SA_OFF_SIZE      0ul
+#define SA_OFF_POLICY    4ul
+#define SA_OFF_FLAGS     8ul
+#define SA_OFF_NICE      16ul
+#define SA_OFF_PRIO      20ul
+#define SA_OFF_RUNTIME   24ul
+#define SA_OFF_DEADLINE  32ul
+#define SA_OFF_PERIOD    40ul
+#define SA_OFF_UTIL0     48ul
+#define SA_OFF_UTIL1     52ul
+
+static void sched_check(const char *what, lx_long got, lx_long want)
+{
+    char  buf[200];
+    char *p = buf;
+
+    p = chk_str(p, "[sched] ");
+    p = chk_str(p, what);
+    p = chk_str(p, " -> ");
+    p = chk_num(p, got);
+    if (got != want)
+    {
+        p = chk_str(p, " FAIL (want ");
+        p = chk_num(p, want);
+        p = chk_str(p, ")\n");
+        *p = '\0';
+        out(buf);
+        g_fail++;
+        return;
+    }
+    p = chk_str(p, " ok\n");
+    *p = '\0';
+    out(buf);
+}
+
+static void sa_put32(unsigned char *b, unsigned long off, unsigned long v)
+{
+    b[off + 0ul] = (unsigned char)(v & 0xFFul);
+    b[off + 1ul] = (unsigned char)((v >> 8) & 0xFFul);
+    b[off + 2ul] = (unsigned char)((v >> 16) & 0xFFul);
+    b[off + 3ul] = (unsigned char)((v >> 24) & 0xFFul);
+}
+
+static void sa_put64(unsigned char *b, unsigned long off, unsigned long long v)
+{
+    sa_put32(b, off, (unsigned long)(v & 0xFFFFFFFFull));
+    sa_put32(b, off + 4ul, (unsigned long)(v >> 32));
+}
+
+static unsigned long sa_get32(const unsigned char *b, unsigned long off)
+{
+    return (unsigned long)b[off + 0ul] |
+           ((unsigned long)b[off + 1ul] << 8) |
+           ((unsigned long)b[off + 2ul] << 16) |
+           ((unsigned long)b[off + 3ul] << 24);
+}
+
+static lx_long sa_get_s32(const unsigned char *b, unsigned long off)
+{
+    return (lx_long)(int)(unsigned int)sa_get32(b, off);
+}
+
+static unsigned long long sa_get64(const unsigned char *b, unsigned long off)
+{
+    return (unsigned long long)sa_get32(b, off) |
+           ((unsigned long long)sa_get32(b, off + 4ul) << 32);
+}
+
+static void sched_probe(void)
+{
+    unsigned long long sa8[8];
+    unsigned char     *sa = (unsigned char *)sa8;
+    int                sp[2];          /* struct sched_param{int sched_priority;} */
+    unsigned long      ts[2];          /* struct timespec{sec, nsec}（LP64） */
+    unsigned long      mask = 0ul;
+    int                i;
+
+    for (i = 0; i < 8; i++)
+    {
+        sa8[i] = 0ull;
+    }
+
+    /* ---- 初值：ELF 任务是 OTHER(0)，priority 0 ---- */
+    sched_check("getscheduler default",
+                lx1(LX_SCHED_GETSCHEDULER, 0), LX_SCHED_OTHER);
+    sp[0] = 0x7FFF;
+    sched_check("getparam default",
+                lx2(LX_SCHED_GETPARAM, 0, (lx_long)(unsigned long)sp), 0);
+    sched_check("getparam default priority is 0", (lx_long)sp[0], 0);
+
+    /* ---- 优先级上下界：FIFO/RR 是 99/1，其余策略 0/0 ---- */
+    sched_check("prio_max FIFO", lx1(LX_SCHED_PRIO_MAX, LX_SCHED_FIFO), 99);
+    sched_check("prio_min FIFO", lx1(LX_SCHED_PRIO_MIN, LX_SCHED_FIFO), 1);
+    sched_check("prio_max RR", lx1(LX_SCHED_PRIO_MAX, LX_SCHED_RR), 99);
+    sched_check("prio_max OTHER", lx1(LX_SCHED_PRIO_MAX, LX_SCHED_OTHER), 0);
+    sched_check("prio_max unknown policy",
+                lx1(LX_SCHED_PRIO_MAX, 9), -LX_EINVAL);
+
+    /* ---- FIFO：88 -> 内核优先级 12（与 ELF 任务默认同格） ---- */
+    sp[0] = 88;
+    sched_check("setscheduler FIFO 88",
+                lx3(LX_SCHED_SETSCHEDULER, 0, LX_SCHED_FIFO,
+                    (lx_long)(unsigned long)sp), 0);
+    sched_check("getscheduler after FIFO",
+                lx1(LX_SCHED_GETSCHEDULER, 0), LX_SCHED_FIFO);
+    sp[0] = 0;
+    sched_check("getparam FIFO",
+                lx2(LX_SCHED_GETPARAM, 0, (lx_long)(unsigned long)sp), 0);
+    sched_check("getparam FIFO priority is 88", (lx_long)sp[0], 88);
+
+    /* setparam 只改优先级，策略保持 */
+    sp[0] = 80;
+    sched_check("setparam FIFO 80",
+                lx2(LX_SCHED_SETPARAM, 0, (lx_long)(unsigned long)sp), 0);
+    sp[0] = 0;
+    (void)lx2(LX_SCHED_GETPARAM, 0, (lx_long)(unsigned long)sp);
+    sched_check("setparam took effect", (lx_long)sp[0], 80);
+
+    /* ---- RR：轮转量 = 时间片 10 拍 x 500 us = 5 ms ---- */
+    sp[0] = 90;
+    sched_check("setscheduler RR 90",
+                lx3(LX_SCHED_SETSCHEDULER, 0, LX_SCHED_RR,
+                    (lx_long)(unsigned long)sp), 0);
+    sched_check("getscheduler after RR",
+                lx1(LX_SCHED_GETSCHEDULER, 0), LX_SCHED_RR);
+    ts[0] = 0xFFFFul;
+    ts[1] = 0xFFFFul;
+    sched_check("rr_get_interval",
+                lx2(LX_SCHED_RR_INTERVAL, 0, (lx_long)(unsigned long)ts), 0);
+    sched_check("rr interval seconds is 0", (lx_long)ts[0], 0);
+    sched_check("rr interval nsec is 5000000", (lx_long)ts[1], 5000000);
+
+    /* ---- 策略面错误：越界优先级 / 未知策略 / deadline 走错号 ---- */
+    sp[0] = 0;
+    sched_check("setscheduler FIFO priority 0 is refused",
+                lx3(LX_SCHED_SETSCHEDULER, 0, LX_SCHED_FIFO,
+                    (lx_long)(unsigned long)sp), -LX_EINVAL);
+    sp[0] = 1;
+    sched_check("setscheduler unknown policy is refused",
+                lx3(LX_SCHED_SETSCHEDULER, 0, 9,
+                    (lx_long)(unsigned long)sp), -LX_EINVAL);
+    sched_check("setscheduler DEADLINE has no parameter form",
+                lx3(LX_SCHED_SETSCHEDULER, 0, LX_SCHED_DEADLINE,
+                    (lx_long)(unsigned long)sp), -LX_EINVAL);
+    sched_check("setscheduler null param -> EFAULT",
+                lx3(LX_SCHED_SETSCHEDULER, 0, LX_SCHED_FIFO, 0), -LX_EFAULT);
+    sp[0] = 10;
+    sched_check("setscheduler unknown pid -> ESRCH",
+                lx3(LX_SCHED_SETSCHEDULER, 9999, LX_SCHED_FIFO,
+                    (lx_long)(unsigned long)sp), -LX_ESRCH);
+
+    /* ---- OTHER：priority 必须是 0，nice 走 setattr ---- */
+    sp[0] = 0;
+    sched_check("setscheduler OTHER",
+                lx3(LX_SCHED_SETSCHEDULER, 0, LX_SCHED_OTHER,
+                    (lx_long)(unsigned long)sp), 0);
+    sched_check("getscheduler after OTHER",
+                lx1(LX_SCHED_GETSCHEDULER, 0), LX_SCHED_OTHER);
+    sp[0] = 5;
+    sched_check("setparam on OTHER with nonzero priority is refused",
+                lx2(LX_SCHED_SETPARAM, 0, (lx_long)(unsigned long)sp), -LX_EINVAL);
+
+    /* ---- setattr / getattr：struct sched_attr 的逐字段往返 ---- */
+    sa_put32(sa, SA_OFF_SIZE, 48ul);
+    sa_put32(sa, SA_OFF_POLICY, LX_SCHED_OTHER);
+    sa_put32(sa, SA_OFF_NICE, (unsigned long)(unsigned int)(int)(-5));
+    sched_check("setattr OTHER nice -5",
+                lx3(LX_SCHED_SETATTR, 0, (lx_long)(unsigned long)sa, 0), 0);
+    for (i = 0; i < 8; i++)
+    {
+        sa8[i] = 0ull;
+    }
+    sched_check("getattr OTHER",
+                lx4(LX_SCHED_GETATTR, 0, (lx_long)(unsigned long)sa, 48, 0), 0);
+    sched_check("getattr writes back the size", (lx_long)sa_get32(sa, SA_OFF_SIZE), 48);
+    sched_check("getattr policy round-trips",
+                (lx_long)sa_get32(sa, SA_OFF_POLICY), LX_SCHED_OTHER);
+    sched_check("getattr nice round-trips", sa_get_s32(sa, SA_OFF_NICE), -5);
+    sched_check("getattr leaves sched_flags 0",
+                (lx_long)sa_get64(sa, SA_OFF_FLAGS), 0);
+
+    /* VER1：多出来的两个 util 字段必须有确定值（本内核不做利用率跟踪 -> 0） */
+    for (i = 0; i < 8; i++)
+    {
+        sa8[i] = 0xAAAAAAAAAAAAAAAAull;
+    }
+    sched_check("getattr VER1",
+                lx4(LX_SCHED_GETATTR, 0, (lx_long)(unsigned long)sa, 56, 0), 0);
+    sched_check("getattr VER1 reports size 56",
+                (lx_long)sa_get32(sa, SA_OFF_SIZE), 56);
+    sched_check("getattr VER1 util_lo is 0",
+                (lx_long)sa_get32(sa, SA_OFF_UTIL0), 0);
+    sched_check("getattr VER1 util_hi is 0",
+                (lx_long)sa_get32(sa, SA_OFF_UTIL1), 0);
+
+    /* 错误面：size 太小 / 系统调用 flags 非 0 / 结构里 sched_flags 非 0 */
+    sa_put32(sa, SA_OFF_SIZE, 47ul);
+    sched_check("setattr size 47 -> EINVAL",
+                lx3(LX_SCHED_SETATTR, 0, (lx_long)(unsigned long)sa, 0), -LX_EINVAL);
+    sched_check("getattr size 47 -> EINVAL",
+                lx4(LX_SCHED_GETATTR, 0, (lx_long)(unsigned long)sa, 47, 0), -LX_EINVAL);
+    sched_check("getattr sysflags nonzero -> EINVAL",
+                lx4(LX_SCHED_GETATTR, 0, (lx_long)(unsigned long)sa, 48, 1), -LX_EINVAL);
+    sa_put32(sa, SA_OFF_SIZE, 48ul);
+    sa_put32(sa, SA_OFF_POLICY, LX_SCHED_OTHER);
+    sa_put64(sa, SA_OFF_FLAGS, 1ull);
+    sched_check("setattr sched_flags nonzero -> EINVAL",
+                lx3(LX_SCHED_SETATTR, 0, (lx_long)(unsigned long)sa, 0), -LX_EINVAL);
+    sa_put64(sa, SA_OFF_FLAGS, 0ull);
+    sa_put64(sa, SA_OFF_RUNTIME, 1000000ull);
+    sched_check("setattr OTHER with a runtime is refused",
+                lx3(LX_SCHED_SETATTR, 0, (lx_long)(unsigned long)sa, 0), -LX_EINVAL);
+    sched_check("setattr null attr -> EFAULT",
+                lx3(LX_SCHED_SETATTR, 0, 0, 0), -LX_EFAULT);
+
+    /* ---- DEADLINE：只有 setattr 能设，且过准入 ---- */
+    sa_put64(sa, SA_OFF_RUNTIME, 0ull);
+    sa_put32(sa, SA_OFF_POLICY, LX_SCHED_DEADLINE);
+    sa_put32(sa, SA_OFF_PRIO, 1ul);
+    sa_put64(sa, SA_OFF_RUNTIME, 1000000ull);
+    sa_put64(sa, SA_OFF_DEADLINE, 2000000ull);
+    sa_put64(sa, SA_OFF_PERIOD, 100000000ull);
+    sched_check("setattr DEADLINE with a priority is refused",
+                lx3(LX_SCHED_SETATTR, 0, (lx_long)(unsigned long)sa, 0), -LX_EINVAL);
+    sa_put32(sa, SA_OFF_PRIO, 0ul);
+    sa_put64(sa, SA_OFF_DEADLINE, 500000ull);       /* runtime > deadline */
+    sched_check("setattr DEADLINE runtime > deadline is refused",
+                lx3(LX_SCHED_SETATTR, 0, (lx_long)(unsigned long)sa, 0), -LX_EINVAL);
+    sa_put64(sa, SA_OFF_DEADLINE, 1000000ull);     /* 1 ms / 1 ms / 1 ms = 100% */
+    sa_put64(sa, SA_OFF_PERIOD, 1000000ull);
+#if defined(ARKRTOS_USE_SCHED_DEADLINE) && (ARKRTOS_USE_SCHED_DEADLINE == 1)
+    sched_check("setattr DEADLINE 100% bandwidth -> EBUSY",
+                lx3(LX_SCHED_SETATTR, 0, (lx_long)(unsigned long)sa, 0), -LX_EBUSY);
+#else
+    /* 内核没有 deadline 类：这个号必须如实回 -EINVAL，不能假装设上了。 */
+    sched_check("setattr DEADLINE 100% with no deadline class -> EINVAL",
+                lx3(LX_SCHED_SETATTR, 0, (lx_long)(unsigned long)sa, 0), -LX_EINVAL);
+#endif
+    sa_put64(sa, SA_OFF_DEADLINE, 2000000ull);     /* 1 ms / 2 ms / 100 ms = 1% */
+    sa_put64(sa, SA_OFF_PERIOD, 100000000ull);
+#if defined(ARKRTOS_USE_SCHED_DEADLINE) && (ARKRTOS_USE_SCHED_DEADLINE == 1)
+    sched_check("setattr DEADLINE 1ms/2ms/100ms is admitted",
+                lx3(LX_SCHED_SETATTR, 0, (lx_long)(unsigned long)sa, 0), 0);
+#else
+    sched_check("setattr DEADLINE 1ms/2ms/100ms with no class -> EINVAL",
+                lx3(LX_SCHED_SETATTR, 0, (lx_long)(unsigned long)sa, 0), -LX_EINVAL);
+#endif
+    for (i = 0; i < 8; i++)
+    {
+        sa8[i] = 0ull;
+    }
+    sched_check("getattr DEADLINE",
+                lx4(LX_SCHED_GETATTR, 0, (lx_long)(unsigned long)sa, 48, 0), 0);
+#if defined(ARKRTOS_USE_SCHED_DEADLINE) && (ARKRTOS_USE_SCHED_DEADLINE == 1)
+    sched_check("getattr policy is DEADLINE",
+                (lx_long)sa_get32(sa, SA_OFF_POLICY), LX_SCHED_DEADLINE);
+    sched_check("getattr DEADLINE runtime round-trips",
+                (lx_long)sa_get64(sa, SA_OFF_RUNTIME), 1000000);
+    sched_check("getattr DEADLINE deadline round-trips",
+                (lx_long)sa_get64(sa, SA_OFF_DEADLINE), 2000000);
+    sched_check("getattr DEADLINE period round-trips",
+                (lx_long)sa_get64(sa, SA_OFF_PERIOD), 100000000);
+#else
+    /* 类没开：策略仍是刚才设的 OTHER，三个时间参数必须留 0（不是垃圾）。 */
+    sched_check("getattr policy stays OTHER with no deadline class",
+                (lx_long)sa_get32(sa, SA_OFF_POLICY), LX_SCHED_OTHER);
+    sched_check("getattr runtime stays 0 with no deadline class",
+                (lx_long)sa_get64(sa, SA_OFF_RUNTIME), 0);
+    sched_check("getattr deadline stays 0 with no deadline class",
+                (lx_long)sa_get64(sa, SA_OFF_DEADLINE), 0);
+    sched_check("getattr period stays 0 with no deadline class",
+                (lx_long)sa_get64(sa, SA_OFF_PERIOD), 0);
+#endif
+
+    /* 从 deadline 类转出：带宽必须释放，策略必须换掉 */
+    sp[0] = 88;
+    sched_check("setscheduler FIFO leaves the deadline class",
+                lx3(LX_SCHED_SETSCHEDULER, 0, LX_SCHED_FIFO,
+                    (lx_long)(unsigned long)sp), 0);
+    sched_check("policy is FIFO after leaving DEADLINE",
+                lx1(LX_SCHED_GETSCHEDULER, 0), LX_SCHED_FIFO);
+    for (i = 0; i < 8; i++)
+    {
+        sa8[i] = 0ull;
+    }
+    (void)lx4(LX_SCHED_GETATTR, 0, (lx_long)(unsigned long)sa, 48, 0);
+    sched_check("the deadline triple is gone",
+                (lx_long)sa_get64(sa, SA_OFF_RUNTIME), 0);
+
+    /* ---- 亲核性：单核，掩码只认 bit0 ---- */
+    mask = 1ul;
+    sched_check("setaffinity CPU0",
+                lx3(LX_SCHED_SETAFFINITY, 0, 8, (lx_long)(unsigned long)&mask), 0);
+    mask = 0ul;
+    sched_check("getaffinity",
+                lx3(LX_SCHED_GETAFFINITY, 0, 8, (lx_long)(unsigned long)&mask), 0);
+    sched_check("getaffinity reports CPU0", (lx_long)mask, 1);
+    mask = 0ul;
+    sched_check("setaffinity empty mask -> EINVAL",
+                lx3(LX_SCHED_SETAFFINITY, 0, 8, (lx_long)(unsigned long)&mask), -LX_EINVAL);
+    mask = 1ul;
+    sched_check("setaffinity short len -> EINVAL",
+                lx3(LX_SCHED_SETAFFINITY, 0, 4, (lx_long)(unsigned long)&mask), -LX_EINVAL);
+    sched_check("getaffinity short len -> EINVAL",
+                lx3(LX_SCHED_GETAFFINITY, 0, 4, (lx_long)(unsigned long)&mask), -LX_EINVAL);
+    sched_check("getaffinity unknown pid -> ESRCH",
+                lx3(LX_SCHED_GETAFFINITY, 9999, 8, (lx_long)(unsigned long)&mask), -LX_ESRCH);
+
+    /* ---- sched_yield ---- */
+    sched_check("sched_yield", lx1(LX_SCHED_YIELD, 0), 0);
+}
+#endif /* ARKRTOS_USE_LINUX_SCHED */
+
 void linux_main(unsigned long sp)
 {
     (void)sp;
@@ -4000,6 +4347,11 @@ void linux_main(unsigned long sp)
         (void)lx1(LX_CLOSE, (lx_long)cp[0]);
         (void)lx1(LX_CLOSE, (lx_long)cp[1]);
     }
+
+#if defined(ARKRTOS_USE_LINUX_SCHED) && (ARKRTOS_USE_LINUX_SCHED == 1)
+    /* U-28：调度策略十二个号的 ABI 往返读数（不在 fork 计数里） */
+    sched_probe();
+#endif
 
     if (g_fail == 0)
     {

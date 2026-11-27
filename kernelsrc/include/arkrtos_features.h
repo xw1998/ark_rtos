@@ -341,6 +341,52 @@
 #endif
 #endif
 
+/* U-28 调度策略：SCHED_DEADLINE 的 EDF 调度类 + Linux sched_* 翻译层。
+ *
+ * 两个开关分开，是因为「内核里有一个 deadline 类」与「按 Linux 的号说话」
+ * 是两件事：
+ *   - ARKRTOS_USE_SCHED_DEADLINE：调度器加一个 deadline 类（TCB 多一组字段、
+ *     就绪选择先过它、每拍结算预算并补回）。关档下调度器逐字节不变。
+ *   - ARKRTOS_USE_LINUX_SCHED：ABI 层的 sched_* 十二个号（118..127、
+ *     274/275）。关档下这些号回 -ENOSYS。
+ * 请求 SCHED_DEADLINE 要求两个开关都为 1；只开 ABI 开关时期望的
+ * -EINVAL（本内核没有 deadline 类），而不是假装接受了再按优先级跑。
+ *
+ * 语义（与 Linux 的对应与差异，写死）：
+ *   1) SCHED_DEADLINE：runtime / deadline / period 单位 ns，硬约束
+ *      runtime <= deadline <= period；准入按带宽 sum(runtime/period) <= 95%
+ *      （Linux 的默认 RT 带宽），超了回 -EBUSY；选中按绝对截止时刻最早者
+ *      （EDF），同刻按任务号小者；deadline 类比 FIFO / RR / OTHER 都高。
+ *   2) 预算按拍结算：当前任务每拍扣一拍预算，扣光即节流（从就绪集摘下），
+ *      到周期边界补满并顺延截止时刻；系统里只有它一条 deadline 任务时不
+ *      节流（Linux 同型：没有竞争者就没有可抢占的对象）。
+ *   3) SCHED_FIFO=1 / SCHED_RR=2：Linux 优先级 1..99 映射到内核优先级
+ *      100-priority（优先级 99 -> 内核 1，优先级 1 -> 内核 99；内核里 0 最高）；
+ *      RR 的时间片就是内核时间片，轮转由 tick 提供。
+ *   4) SCHED_OTHER=0：nice -20..19 映射到内核优先级 108..147（nice 0 = 128）。
+ *      这是本内核的固定优先级映射，不是 CFS 权重：内核里没有红黑树与
+ *      vruntime，别把 nice 当权重读。
+ *   5) sched_setaffinity / getaffinity 只认 CPU0（单核），掩码不带 0 号位
+ *      回 -EINVAL；sched_yield 只把自己挪到同优先级队尾。
+ *   6) 近似与边界：SCHED_IDLE=5 与 SCHED_BATCH=3 只按固定优先级落格：
+ *      IDLE 要求 priority 为 0 且落在普通档最末格 147（不是“只在空闲时跑”，
+ *      内核里没有空闲让路判定），BATCH 与 OTHER 同一个 nice 映射（没有延迟
+ *      唤醒，内核里没有 CFS）。不实现组调度、cgroup 带宽，也不实现
+ *      SCHED_RESET_ON_FORK / SCHED_FLAG_RECLAIM / SCHED_FLAG_DL_OVERRUN：
+ *      sched_flags 或系统调用 flags 只要非 0 就回 -EINVAL，不认了不做。
+ */
+#ifndef ARKRTOS_USE_SCHED_DEADLINE
+#define ARKRTOS_USE_SCHED_DEADLINE      0
+#endif
+#ifndef ARKRTOS_USE_LINUX_SCHED
+#define ARKRTOS_USE_LINUX_SCHED        0
+#endif
+#if (ARKRTOS_USE_LINUX_SCHED == 1)
+#if (ARKRTOS_USE_LINUX_ABI != 1)
+#error "ARKRTOS_USE_LINUX_SCHED=1 requires ARKRTOS_USE_LINUX_ABI=1"
+#endif
+#endif
+
 /* SEC-G07 每 App 任务配额：0 = 关（任务表里没有 app_owner 字段、fork/clone
  * 里没有计数与拒绝分支，镜像与打开本开关之前逐字节相同），1 = 每次 ELF 装载
  * 分配一个非零 owner 号，fork 与 clone(CLONE_THREAD) 继承它，同一 owner 的活
