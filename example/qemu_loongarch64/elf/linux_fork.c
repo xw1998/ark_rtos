@@ -1273,14 +1273,44 @@ static void sched_probe(void)
 #define LX_F_GETOWN         9
 #define LX_O_ASYNC          0x2000
 #define LX_SIGIO            29
+#define LX_SIGPIPE          13
+#define LX_EPIPE            32
+#define LX_SA_SIGINFO       4ul
 
 static int     s_sio_hits;
 static lx_long s_sio_signo;
+static void   *s_sio_si;
+static void   *s_sio_uc;
+static int     s_pipe_hits;
+static void   *s_pipe_si;
 
-static void on_sigio(unsigned long signo)
+/* U-31：SA_SIGINFO 的 handler 是三参的。siginfo_t / ucontext_t 的字段偏移
+ * 按 Linux loongarch64 UAPI 的布局读（si_signo 0、si_errno 4、si_code 8、
+ * si_pid 16、si_uid 20、si_band 16、si_fd 24；uc_sigmask 40、
+ * uc_mcontext.pc 168）。这里只读，不改。 */
+static void on_sigio(unsigned long signo, void *si, void *uc)
 {
     s_sio_hits++;
     s_sio_signo = (lx_long)signo;
+    s_sio_si = si;
+    s_sio_uc = uc;
+}
+
+static void on_sigpipe(unsigned long signo, void *si, void *uc)
+{
+    (void)uc;
+    s_pipe_hits++;
+    s_pipe_si = si;
+}
+
+static lx_long si_i32(const void *si, int off)
+{
+    return (lx_long)(*(const int *)((const char *)si + off));
+}
+
+static lx_long si_i64(const void *si, int off)
+{
+    return (lx_long)(*(const lx_long *)((const char *)si + off));
 }
 
 static void sio_check(const char *what, lx_long got, lx_long want)
@@ -1352,7 +1382,7 @@ static void sio_probe(void)
 
     /* ---- 4) 投递：write 的返回路径上进 handler ---- */
     act.handler = (unsigned long)(unsigned long)&on_sigio;
-    act.flags = 0ul;
+    act.flags = LX_SA_SIGINFO;
     act.restorer = (unsigned long)(unsigned long)&fork_sig_restorer;
     act.mask = 0ul;
     old.handler = SIG_DFL;
@@ -1369,6 +1399,15 @@ static void sio_probe(void)
               lx3(LX_WRITE, fds[1], (lx_long)(unsigned long)"i", 1), 1);
     sio_check("SIGIO handler ran", s_sio_hits - hits0, 1);
     sio_check("SIGIO signo is 29", s_sio_signo, LX_SIGIO);
+    sio_check("SIGIO siginfo pointer is set",
+              (s_sio_si != (void *)0) ? 1 : 0, 1);
+    sio_check("SIGIO si_signo", si_i32(s_sio_si, 0), LX_SIGIO);
+    sio_check("SIGIO si_code is POLL_IN", si_i32(s_sio_si, 8), 1);
+    sio_check("SIGIO si_band", si_i64(s_sio_si, 16), 0x41);
+    sio_check("SIGIO si_fd", si_i32(s_sio_si, 24), (lx_long)fds[0]);
+    sio_check("SIGIO ucontext pc is non-zero",
+              ((s_sio_uc != (void *)0) &&
+               (si_i64(s_sio_uc, 168) != 0)) ? 1 : 0, 1);
     b[0] = 0;
     b[1] = 0;
     sio_check("read still returns the byte",
@@ -1398,6 +1437,47 @@ static void sio_probe(void)
 
     (void)lx1(LX_CLOSE, d);
     (void)lx1(LX_CLOSE, fds[0]);
+
+    /* ---- 7) SIGPIPE 的 siginfo：内核代发走 SI_USER ---- */
+    {
+        int     pfds[2];
+        act_t   pact;
+        act_t   pold;
+        lx_long phits0;
+        lx_long wrc;
+
+        pfds[0] = -1;
+        pfds[1] = -1;
+        sio_check("SIGPIPE pipe2",
+                  lx2(LX_PIPE2, (lx_long)(unsigned long)pfds,
+                      LX_O_NONBLOCK), 0);
+        pact.handler = (unsigned long)(unsigned long)&on_sigpipe;
+        pact.flags = LX_SA_SIGINFO;
+        pact.restorer = (unsigned long)(unsigned long)&fork_sig_restorer;
+        pact.mask = 0ul;
+        pold.handler = SIG_DFL;
+        pold.flags = 0ul;
+        pold.restorer = 0ul;
+        pold.mask = 0ul;
+        sio_check("rt_sigaction(SIGPIPE, SA_SIGINFO)",
+                  lx4(LX_RT_SIGACTION, LX_SIGPIPE,
+                      (lx_long)(unsigned long)&pact,
+                      (lx_long)(unsigned long)&pold, 8), 0);
+        sio_check("close SIGPIPE pipe read end", lx1(LX_CLOSE, pfds[0]), 0);
+        phits0 = s_pipe_hits;
+        wrc = lx3(LX_WRITE, pfds[1], (lx_long)(unsigned long)"p", 1);
+        sio_check("write with no reader returns -EPIPE", wrc, -LX_EPIPE);
+        sio_check("SIGPIPE handler ran", s_pipe_hits - phits0, 1);
+        sio_check("SIGPIPE si_signo",
+                  (s_pipe_si != (void *)0) ? si_i32(s_pipe_si, 0) : -1,
+                  LX_SIGPIPE);
+        sio_check("SIGPIPE si_code is SI_USER",
+                  (s_pipe_si != (void *)0) ? si_i32(s_pipe_si, 8) : -1, 0);
+        sio_check("SIGPIPE si_pid is self",
+                  (s_pipe_si != (void *)0) ? si_i32(s_pipe_si, 16) : -1,
+                  lx1(LX_GETPID, 0));
+        (void)lx1(LX_CLOSE, pfds[1]);
+    }
 }
 #endif /* ARKRTOS_USE_LINUX_SIGIO */
 

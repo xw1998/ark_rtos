@@ -12171,13 +12171,14 @@ import 唯一不认的是 PRMD 的特权级两位：那一层由当前上下文
 ### `#define LA_UREG_ERA         (0u) #define LA_UREG_SP          (1u) #def`
 
 ```c
-#define LA_UREG_ERA         (0u) #define LA_UREG_SP          (1u) #define LA_UREG_RA          (2u) #define LA_UREG_TP          (3u)
+#define LA_UREG_ERA         (0u) #define LA_UREG_SP          (1u) #define LA_UREG_RA          (2u) #define LA_UREG_TP          (3u) #define LA_UREG_A1          (4u)    /* U-31：SA_SIGINFO 的第二个参数 */ #define LA_UREG_A2          (5u)    /* U-31：SA_SIGINFO 的第三个参数 */
 ```
 
 **读写用户态 trap 帧里的寄存器（信号帧保存/恢复用）**
 帧布局见 arkrtos_context.S：era 在 [30]、sp 在 [2]、tp 在 [1]、
 a0..a7 在 [3..10]；ra 就是 [0] 那格（`.S` 的恢复路径 `ld.d $ra`）。
-语义编号只有四个：0 = era、1 = sp、2 = ra、3 = tp。写 era 不改
+语义编号六个：0 = era、1 = sp、2 = ra、3 = tp、4 = a1、5 = a2
+（后两个给 SA_SIGINFO 的三参处理函数用）。写 era 不改
 PRMD：信号处理程序与被打断的代码同处 PLV3，特权级不该被这一层动。
 
 ### `int32 arkrtos_port_svc_exec_frame(void *p_exc_ctx, unsigned long entry`

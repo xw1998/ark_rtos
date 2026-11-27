@@ -5504,13 +5504,16 @@ int32 arkrtos_port_svc_frame_import(void *p_exc_ctx, const void *p_src)
 * @brief 读写用户态 trap 帧里的寄存器（信号帧保存/恢复用）
 * @details 帧布局见 arkrtos_context.S：era 在 [30]、sp 在 [2]、tp 在 [1]、
 *          a0..a7 在 [3..10]；ra 就是 [0] 那格（`.S` 的恢复路径 `ld.d $ra`）。
-*          语义编号只有四个：0 = era、1 = sp、2 = ra、3 = tp。写 era 不改
+*          语义编号六个：0 = era、1 = sp、2 = ra、3 = tp、4 = a1、5 = a2
+*          （后两个给 SA_SIGINFO 的三参处理函数用）。写 era 不改
 *          PRMD：信号处理程序与被打断的代码同处 PLV3，特权级不该被这一层动。
 */
 #define LA_UREG_ERA         (0u)
 #define LA_UREG_SP          (1u)
 #define LA_UREG_RA          (2u)
 #define LA_UREG_TP          (3u)
+#define LA_UREG_A1          (4u)    /* U-31：SA_SIGINFO 的第二个参数 */
+#define LA_UREG_A2          (5u)    /* U-31：SA_SIGINFO 的第三个参数 */
 
 unsigned long arkrtos_port_svc_user_reg(void *p_exc_ctx, uint32 id)
 {
@@ -5526,6 +5529,8 @@ unsigned long arkrtos_port_svc_user_reg(void *p_exc_ctx, uint32 id)
     case LA_UREG_SP:  return (unsigned long)frame[LA_FR_SP];
     case LA_UREG_RA:  return (unsigned long)frame[LA_FR_RA];
     case LA_UREG_TP:  return (unsigned long)frame[LA_FR_TP];
+    case LA_UREG_A1:  return (unsigned long)frame[LA_FR_A0 + 1u];
+    case LA_UREG_A2:  return (unsigned long)frame[LA_FR_A0 + 2u];
     default:          return 0UL;
     }
 }
@@ -5545,6 +5550,8 @@ int32 arkrtos_port_svc_set_user_reg(void *p_exc_ctx, uint32 id,
     case LA_UREG_SP:  frame[LA_FR_SP]  = (la_frame_word)value; return 0;
     case LA_UREG_RA:  frame[LA_FR_RA]  = (la_frame_word)value; return 0;
     case LA_UREG_TP:  frame[LA_FR_TP]  = (la_frame_word)value; return 0;
+    case LA_UREG_A1:  frame[LA_FR_A0 + 1u] = (la_frame_word)value; return 0;
+    case LA_UREG_A2:  frame[LA_FR_A0 + 2u] = (la_frame_word)value; return 0;
     default:          return -1;
     }
 }

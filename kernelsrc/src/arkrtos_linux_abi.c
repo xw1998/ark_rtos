@@ -370,11 +370,78 @@
  * 端口报出比它还大的帧时**不投递**并把 pending 位留着，绝不截断快照。 */
 #define LX_SIGFRAME_MAX_WORDS       (130u)
 
-/* port 原语里语义编号：0 = era、1 = sp、2 = ra、3 = tp。 */
+/* U-31：帧里头的后面跟着两块真 ABI 结构——`siginfo_t`（128 字节，LP64）与
+ * `ucontext_t`（本层按 LA64 的 432 字节形状铺）。handler 的第二个、第三个
+ * 参数分别指向它们，`&frame->info` / `&frame->uc` 的地址就是
+ * 「帧基址 + 32」与「帧基址 + 160」，与 Linux 的 rt_sigframe 一致。
+ *
+ * 只填本层真知道的字段：`si_signo` / `si_errno` / `si_code`，`_kill` 情形
+ * 的 `si_pid` / `si_uid`，`_sigpoll`（SIGIO）情形的 `si_band` / `si_fd`；
+ * `ucontext` 里填 `uc_sigmask` 与 `uc_mcontext` 的 pc / ra / tp / sp。
+ * 其余字段（浮点现场、altstack、uc_link）如实是 0，理由写在已知限制里 ——
+ * 不编造读不出来的寄存器值。 */
+#define LX_SIGINFO_BYTES            (128u)
+/* 头的字节数随字宽变（LA64 四字 = 32，32 位宿主四字 = 16）：头是按字写的，
+ * 所以 siginfo / ucontext 的起点必须由 `sizeof(unsigned long)` 算出来。 */
+#define LX_SIGFRAME_HDR_OFF         ((uint32)LX_SIGFRAME_HDR_WORDS * \
+                                     (uint32)sizeof(unsigned long))
+#define LX_SHDR_SI                  (LX_SIGFRAME_HDR_OFF)
+#define LX_SI_OFF_SIGNO             (0u)
+#define LX_SI_OFF_ERRNO             (4u)
+#define LX_SI_OFF_CODE              (8u)
+#define LX_SI_OFF_PID               (16u)
+#define LX_SI_OFF_UID               (20u)
+#define LX_SI_OFF_BAND              (16u)
+#define LX_SI_OFF_FD                (24u)
+#define LX_SI_USER                  (0)     /* SI_USER */
+#define LX_SI_TKILL                 (-6)    /* SI_TKILL */
+#define LX_SI_POLL_IN               (1)     /* POLL_IN：Linux 的 SIGIO 用 band 当 si_code */
+#define LX_SI_BAND_IN               (0x41UL)/* POLLIN | POLLRDNORM */
+
+#define LX_UCONTEXT_BYTES           (432u)
+#define LX_SHDR_UC                  (LX_SHDR_SI + LX_SIGINFO_BYTES)
+#define LX_UC_OFF_FLAGS             (0u)
+#define LX_UC_OFF_LINK              (8u)
+#define LX_UC_OFF_STACK_SP          (16u)
+#define LX_UC_OFF_STACK_FLAGS       (24u)
+#define LX_UC_OFF_STACK_SIZE        (32u)
+#define LX_UC_OFF_SIGMASK           (40u)   /* 128 字节的 sigset_t */
+#define LX_UC_OFF_MCONTEXT          (168u)
+#define LX_UC_OFF_MC_PC             (168u)
+#define LX_UC_OFF_MC_REGS           (176u)  /* regs[0..31]：r1=ra r2=tp r3=sp */
+#define LX_UC_SS_DISABLE            (2u)    /* 没有 altstack：如实报「禁用」 */
+
+/* 固定区 = 头 + siginfo + ucontext；快照跟在这后面，三者都是字节偏移。
+ * 缓冲按**字节**算大小：头的字宽与快照的字节数在两种端口上不同，只有按
+ * 字节描述才不会在 32 位宿主上把缓冲算小（那样 copy_to_user 会读越界）。 */
+#define LX_SIGFRAME_FIX_OFF         (LX_SHDR_UC + LX_UCONTEXT_BYTES)
+#define LX_SIGFRAME_BUF_BYTES       (LX_SIGFRAME_HDR_WORDS * 8u + \
+                                     LX_SIGINFO_BYTES + LX_UCONTEXT_BYTES + \
+                                     LX_SIGFRAME_MAX_WORDS * 8u)
+
+/* rt_sigaction 认的 sa_flags 位（asm-generic）。本层只看 SA_SIGINFO：
+ * 有它 handler 收三个参数，没有就只有信号号。其余位（SA_RESTART /
+ * SA_NODEFER / SA_RESETHAND / SA_ONSTACK）照原样记下不实现，写进已知限制。 */
+#define LX_SA_SIGINFO               (0x4UL)
+
+/* 每个信号最近一次的来源。Linux 会排队同一信号的多个 siginfo；本层 pending
+ * 只有一位，所以只留最后一次的来源 —— 与「pending 位只表达有没有」是同一个
+ * 取舍（写进已知限制）。8 字节一格，32 个信号 256 字节。 */
+typedef struct
+{
+    int16 code;     /* si_code */
+    int16 fd;       /* _sigpoll 的 si_fd；其它情形 -1 */
+    int32 pid;      /* _kill 的 si_pid；其它情形 0 */
+} lx_sigdetail_t;
+
+/* port 原语里语义编号：0 = era、1 = sp、2 = ra、3 = tp、4 = a1、5 = a2。
+ * 4/5 只给 SA_SIGINFO 的三个参数用（a0 走返回值那条路）。 */
 #define LX_UREG_ERA                 (0u)
 #define LX_UREG_SP                  (1u)
 #define LX_UREG_RA                  (2u)
 #define LX_UREG_TP                  (3u)
+#define LX_UREG_A1                  (4u)
+#define LX_UREG_A2                  (5u)
 
 /* execve 的暂存区：旧镜像一旦被覆盖，用户地址上的 argv 就没了，所以
  * 这些字符串必须在装载**之前**落进内核。16 个参数 × 256 字节与装载器
@@ -682,6 +749,7 @@ typedef struct
      * 描述符），共享槽做不到这一点。 */
     uint8          std_slot[3];
     lx_sigaction_t sig[LX_NSIG];
+    lx_sigdetail_t si[LX_NSIG];     /* U-31：每个信号最近一次的来源 */
     uint32         sig_pending;
     uint32         sig_blocked;
 #if (ARKRTOS_USE_LINUX_THREAD == 1)
@@ -941,7 +1009,9 @@ static uint32 s_sigio_pgrp_refused; /* F_SETOWN 给负参数（进程组）被�
 #endif
 /* 信号帧的暂存（头 + 整帧快照）。投递路径在内核里不嵌套（一次只有一条
  * 系统调用在返回），所以一块静态缓冲就够，不在内核栈上开 1 KB。 */
-static unsigned long s_sigframe[LX_SIGFRAME_HDR_WORDS + LX_SIGFRAME_MAX_WORDS];
+static unsigned long s_sigframe[(LX_SIGFRAME_BUF_BYTES + \
+                                 sizeof(unsigned long) - 1u) /
+                                sizeof(unsigned long)];
 
 #if (ARKRTOS_LINUX_ABI_SYSSTAT == 1)
 typedef struct
@@ -1134,7 +1204,9 @@ static int32 lx_fd_free_idx(void)
 
 /* 定义在管道那一节后面（dup 要先用它把一个槽还回去）。 */
 static uint32 lx_fd_release(uint32 slot, uint32 idx);
-static int32 lx_sig_send(int32 pid, uint32 sig);
+static int32 lx_sig_send(int32 pid, uint32 sig, int32 code);
+static void lx_sig_detail(uint32 slot, uint32 sig, int32 code, int32 pid,
+                          int32 fd);
 #if (ARKRTOS_USE_LINUX_SIGIO == 1)
 static void lx_async_notify_pipe(int32 pi);
 #endif
@@ -1383,7 +1455,15 @@ static void lx_async_notify_pipe(int32 pi)
                 continue;
             }
             s_sigio_sent++;
-            (void)lx_sig_send((int32)s_proc[slot].fd[i].owner, 29u);
+            (void)lx_sig_send((int32)s_proc[slot].fd[i].owner, 29u, LX_SI_USER);
+            /* SIGIO 的内核来源在 Linux 里是 _sigpoll：si_code 是 band，
+             * si_band = POLLIN|POLLRDNORM，si_fd 是那个 fd 号。 */
+            lx_sig_detail(slot, 29u, LX_SI_POLL_IN, 0, (int32)(i + 3u));
+            /* 一个管道对象只投一次：dup 出来的副本与原 fd 共享 O_ASYNC 与
+             * 主人，扫到第一个（最小的 fd 号）就够了。Linux 上 dup 共享
+             * 同一个 file，fasync 也只有一份，投递同样只有一次；si_fd
+             * 报的是那份登记上最小的 fd 号。 */
+            break;
         }
     }
 }
@@ -2938,13 +3018,49 @@ static uint32 lx_sig_bit(uint32 sig)
  * 只登记：默认动作结束任务（退出码 128 + signo）、装了处理器就进处理函数、
  * 忽略则只记一次。管道写端无人读时的 SIGPIPE（13）走的就是这一条 ——
  * 写回去的 -EPIPE 与 Linux 一致，先置位再返回，没有处理函数时任务就结束。 */
+/* 记下「这个信号这次是谁发的」（siginfo 的 si_code / si_pid / si_fd）。
+ * code 用 int16 存：SI_TKILL 是 -6，POLL_IN 是 1。 */
+static void lx_sig_detail(uint32 slot, uint32 sig, int32 code, int32 pid,
+                          int32 fd)
+{
+    if((sig == 0u) || (sig >= (uint32)LX_NSIG) || (slot >= (uint32)LX_PROC_MAX))
+    {
+        return;
+    }
+    s_proc[slot].si[sig].code = (int16)code;
+    s_proc[slot].si[sig].pid  = pid;
+    s_proc[slot].si[sig].fd   = (int16)fd;
+}
+
+/* 本任务的「对外进程号」：线程档开时是组长号（Linux 的 si_pid 记的是
+ * task_tgid_vnr），单进程档就是自己。 */
+static int32 lx_sig_self_pid(void)
+{
+    lx_proc_t *pr = lx_proc_curp();
+
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+    if(pr->tgid > 0)
+    {
+        return pr->tgid;
+    }
+#endif
+    (void)pr;
+    return (int32)arkrtos_current_task_id;
+}
+
 static void lx_sig_raise(uint32 sig)
 {
+    uint32 slot;
+
     if((sig == 0u) || (sig >= (uint32)LX_NSIG))
     {
         return;
     }
-    (void)lx_proc_cur();            /* 保证当前任务的进程槽存在 */
+    slot = lx_proc_cur();           /* 保证当前任务的进程槽存在 */
+    /* 内核自己发的信号：Linux 的 send_sig(SIGPIPE, current, 0) 走
+     * SEND_SIG_NOINFO，于是 si_code = SI_USER、si_pid 是自己的进程号、
+     * si_uid = 自己的 uid（本层没有 uid，恒 0）。 */
+    lx_sig_detail(slot, sig, LX_SI_USER, lx_sig_self_pid(), -1);
     s_sig_pending |= lx_sig_bit(sig);
 }
 
@@ -3093,8 +3209,9 @@ static int32 lx_rt_sigprocmask(void *p_ctx)
     return 0;
 }
 
-/* kill / tkill / tgkill 共用一个实体：本内核只有一个可投递的对象——自己。 */
-static int32 lx_sig_send(int32 pid, uint32 sig)
+/* kill / tkill / tgkill 共用一个实体。code 是 siginfo 的 si_code：
+ * kill 是 SI_USER，tkill / tgkill 是 SI_TKILL（与 Linux 一致）。 */
+static int32 lx_sig_send(int32 pid, uint32 sig, int32 code)
 {
     if(pid != (int32)arkrtos_current_task_id)
     {
@@ -3124,6 +3241,8 @@ static int32 lx_sig_send(int32 pid, uint32 sig)
                     return -LX_EINVAL;
                 }
                 crit = ARKRTOS_ENTER_CRITICAL();
+                lx_sig_detail((uint32)slot, sig, code,
+                              (int32)arkrtos_current_task_id, -1);
                 s_proc[(uint32)slot].sig_pending |= lx_sig_bit(sig);
                 if(s_lx_wait[pid - 1] != 0u)
                 {
@@ -3145,6 +3264,8 @@ static int32 lx_sig_send(int32 pid, uint32 sig)
     {
         return -LX_EINVAL;
     }
+    lx_sig_detail(lx_proc_cur(), sig, code,
+                  (int32)arkrtos_current_task_id, -1);
     s_sig_pending |= lx_sig_bit(sig);
     return 0;
 }
@@ -3152,13 +3273,13 @@ static int32 lx_sig_send(int32 pid, uint32 sig)
 static int32 lx_kill(void *p_ctx)
 {
     return lx_sig_send((int32)ARKRTOS_SVC_ARG(p_ctx, 0u),
-                       (uint32)ARKRTOS_SVC_ARG(p_ctx, 1u));
+                       (uint32)ARKRTOS_SVC_ARG(p_ctx, 1u), LX_SI_USER);
 }
 
 static int32 lx_tkill(void *p_ctx)
 {
     return lx_sig_send((int32)ARKRTOS_SVC_ARG(p_ctx, 0u),
-                       (uint32)ARKRTOS_SVC_ARG(p_ctx, 1u));
+                       (uint32)ARKRTOS_SVC_ARG(p_ctx, 1u), LX_SI_TKILL);
 }
 
 /* tgkill(tgid, tid, sig)：两个号都必须是自己；只有一个任务，两者相等。 */
@@ -3173,7 +3294,7 @@ static int32 lx_tgkill(void *p_ctx)
         s_sig_refused++;
         return -LX_ESRCH;
     }
-    return lx_sig_send(tid, sig);
+    return lx_sig_send(tid, sig, LX_SI_TKILL);
 }
 
 /* 从 pending 里挑一个可投递信号，并按 action 处理「忽略 / 默认忽略 / 默认停止 /
@@ -3237,7 +3358,77 @@ static uint32 lx_sig_pick(lx_sigaction_t **p_sa)
     return sig;
 }
 
-/* 把整帧铺到用户栈上（头 + 被打断点快照）。
+/* 小端字节写：siginfo_t / ucontext_t 是按字节偏移描述的 ABI 结构，
+ * 用字节写就不依赖 `unsigned long` 的宽度（32 位端口上 ul 只有 4 字节，
+ * 按字写会把 64 位字段的偏移全算错）。LA64 与宿主 x86 都是小端。 */
+static void lx_sig_wr32(uint8 *p, uint32 off, uint32 v)
+{
+    p[off + 0u] = (uint8)(v & 0xFFu);
+    p[off + 1u] = (uint8)((v >> 8) & 0xFFu);
+    p[off + 2u] = (uint8)((v >> 16) & 0xFFu);
+    p[off + 3u] = (uint8)((v >> 24) & 0xFFu);
+}
+
+static void lx_sig_wr64(uint8 *p, uint32 off, unsigned long v)
+{
+    lx_sig_wr32(p, off, (uint32)(v & 0xFFFFFFFFUL));
+    lx_sig_wr32(p, off + 4u,
+                (uint32)(((unsigned long long)v >> 32) & 0xFFFFFFFFull));
+}
+
+/* 铺 siginfo_t（128 字节）：只填本层真知道的字段，其余保持 0。
+ * 三种来源：_kill（si_pid/si_uid）、_sigpoll（si_band/si_fd）、
+ * 其余（内核信号但无载荷，si_code 仍如实写）。 */
+static void lx_sig_fill_info(uint32 sig)
+{
+    uint8 *base = (uint8 *)s_sigframe + LX_SHDR_SI;
+    const lx_sigdetail_t *d = &lx_proc_curp()->si[sig];
+
+    lx_sig_wr32(base, LX_SI_OFF_SIGNO, sig);
+    lx_sig_wr32(base, LX_SI_OFF_ERRNO, 0u);
+    lx_sig_wr32(base, LX_SI_OFF_CODE, (uint32)(int32)d->code);
+    if((int32)d->code == LX_SI_POLL_IN)
+    {
+        lx_sig_wr64(base, LX_SI_OFF_BAND, LX_SI_BAND_IN);
+        lx_sig_wr32(base, LX_SI_OFF_FD, (uint32)d->fd);
+    }
+    else
+    {
+        lx_sig_wr32(base, LX_SI_OFF_PID, (uint32)d->pid);
+        lx_sig_wr32(base, LX_SI_OFF_UID, 0u);
+    }
+}
+
+/* 铺 ucontext_t（432 字节）：uc_sigmask 是 handler 期间生效的屏蔽字，
+ * uc_mcontext 只填本层知道的四个寄存器（pc / ra / tp / sp）。
+ * 没有 altstack，所以 uc_stack 如实写 SS_DISABLE；uc_link 为 0（Linux 在
+ * 主上下文上也是 0）。 */
+static void lx_sig_fill_uc(void *p_ctx, uint32 sig, const lx_sigaction_t *sa)
+{
+    uint8 *base = (uint8 *)s_sigframe + LX_SHDR_UC;
+    uint32 mask = s_sig_blocked | lx_sig_bit(sig) |
+                  (uint32)(sa->mask & 0x7FFFFFFFUL);
+
+    mask &= ~(lx_sig_bit((uint32)LX_SIGKILL) |
+              lx_sig_bit((uint32)LX_SIGSTOP));
+
+    lx_sig_wr64(base, LX_UC_OFF_FLAGS, 0UL);
+    lx_sig_wr64(base, LX_UC_OFF_LINK, 0UL);
+    lx_sig_wr64(base, LX_UC_OFF_STACK_SP, 0UL);
+    lx_sig_wr32(base, LX_UC_OFF_STACK_FLAGS, LX_UC_SS_DISABLE);
+    lx_sig_wr64(base, LX_UC_OFF_STACK_SIZE, 0UL);
+    lx_sig_wr64(base, LX_UC_OFF_SIGMASK, (unsigned long)mask);
+    lx_sig_wr64(base, LX_UC_OFF_MC_PC,
+                arkrtos_port_svc_user_reg(p_ctx, LX_UREG_ERA));
+    lx_sig_wr64(base, LX_UC_OFF_MC_REGS + 8u,          /* r1 = ra */
+                arkrtos_port_svc_user_reg(p_ctx, LX_UREG_RA));
+    lx_sig_wr64(base, LX_UC_OFF_MC_REGS + 16u,         /* r2 = tp */
+                arkrtos_port_svc_user_reg(p_ctx, LX_UREG_TP));
+    lx_sig_wr64(base, LX_UC_OFF_MC_REGS + 24u,         /* r3 = sp */
+                arkrtos_port_svc_user_reg(p_ctx, LX_UREG_SP));
+}
+
+/* 把整帧铺到用户栈上（头 + siginfo + ucontext + 被打断点快照）。
  * 返回 0 = 铺好（帧址经出参带出）；1 = 本次不投递（pending 位已放回，调用方返回 0）。 */
 static uint32 lx_sig_build_frame(void *p_ctx, uint32 sig, unsigned long *p_fsp)
 {
@@ -3257,7 +3448,7 @@ static uint32 lx_sig_build_frame(void *p_ctx, uint32 sig, unsigned long *p_fsp)
         s_sig_pending |= lx_sig_bit(sig);
         return 1u;
     }
-    total = LX_SIGFRAME_HDR_BYTES + fbytes;
+    total = LX_SIGFRAME_FIX_OFF + fbytes;
 
     if(((sa->handler & 3UL) != 0UL) ||
        (arkrtos_copy_from_user(&insn, (const void *)(unsigned long)sa->handler,
@@ -3287,7 +3478,21 @@ static uint32 lx_sig_build_frame(void *p_ctx, uint32 sig, unsigned long *p_fsp)
     s_sigframe[1] = (unsigned long)sig;
     s_sigframe[2] = (unsigned long)saved_blocked;
     s_sigframe[3] = (unsigned long)fbytes;
-    arkrtos_port_svc_frame_export(p_ctx, &s_sigframe[LX_SIGFRAME_HDR_WORDS]);
+    /* 固定区先清零，再逐字段写：没填的字段是「不知道」，不是别人的残留。 */
+    {
+        uint8 *pz = (uint8 *)s_sigframe;
+        uint32 i;
+
+        for(i = LX_SIGFRAME_HDR_OFF; i < LX_SIGFRAME_FIX_OFF; i++)
+        {
+            pz[i] = 0u;
+        }
+    }
+    lx_sig_fill_info(sig);
+    lx_sig_fill_uc(p_ctx, sig, sa);
+    arkrtos_port_svc_frame_export(p_ctx,
+                                  (void *)((uint8 *)s_sigframe +
+                                           LX_SIGFRAME_FIX_OFF));
 
     if(arkrtos_copy_to_user((void *)(unsigned long)fsp, s_sigframe,
                             total) != 0)
@@ -3318,6 +3523,11 @@ static uint32 lx_sig_install(void *p_ctx, uint32 sig, lx_sigaction_t *sa,
      * 会留下半个现场，宿主用例抓到过）。 */
     if((arkrtos_port_svc_set_user_reg(p_ctx, LX_UREG_RA, sa->restorer) != 0) ||
        (arkrtos_port_svc_set_user_reg(p_ctx, LX_UREG_SP, fsp) != 0) ||
+       (((sa->flags & LX_SA_SIGINFO) != 0UL) &&
+        ((arkrtos_port_svc_set_user_reg(p_ctx, LX_UREG_A1,
+                                        fsp + (unsigned long)LX_SHDR_SI) != 0) ||
+         (arkrtos_port_svc_set_user_reg(p_ctx, LX_UREG_A2,
+                                        fsp + (unsigned long)LX_SHDR_UC) != 0))) ||
        (arkrtos_port_svc_set_user_reg(p_ctx, LX_UREG_ERA, sa->handler) != 0))
     {
         s_sig_blocked = saved_blocked;
@@ -3592,7 +3802,7 @@ static int32 lx_rt_sigreturn(void *p_ctx)
     {
         return -LX_ENOSYS;
     }
-    total = LX_SIGFRAME_HDR_BYTES + fbytes;
+    total = LX_SIGFRAME_FIX_OFF + fbytes;
     if((sp == 0UL) ||
        (arkrtos_copy_from_user(s_sigframe, (const void *)(unsigned long)sp,
                                total) != 0))
@@ -3605,7 +3815,8 @@ static int32 lx_rt_sigreturn(void *p_ctx)
         return -LX_EFAULT;      /* 不是我们铺的帧：不按它恢复现场 */
     }
     if(arkrtos_port_svc_frame_import(p_ctx,
-            &s_sigframe[LX_SIGFRAME_HDR_WORDS]) != 0)
+            (const void *)((uint8 *)s_sigframe +
+                           LX_SIGFRAME_FIX_OFF)) != 0)
     {
         return -LX_ENOSYS;
     }

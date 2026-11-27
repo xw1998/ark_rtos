@@ -154,8 +154,9 @@ list: with `ARKRTOS_USE_LINUX_FORK` on (default off, 2026-11-23, QEMU LA64) a
 process can split once and be reaped via `wait4`, and with `ARKRTOS_USE_LINUX_THREAD`
 on a `clone(CLONE_THREAD)` group shares one address space (section 8.10), see section 8. Signal delivery now
 crosses tasks (`kill`/`tkill`/`tgkill` resolve the target by pid, 2026-11-23,
-QEMU LA64), but there is still no preemptive delivery, no real-time signal and no
-`siginfo` (section 7). fd inheritance exists in the fork tier: each process owns
+QEMU LA64). `SA_SIGINFO` three-argument dispatch with `siginfo_t` / `ucontext_t`
+exists (U-31, section 8.19, 2026-11-27). There is still no preemptive delivery, no
+real-time signal and no `sigqueue` queueing (section 7). fd inheritance exists in the fork tier: each process owns
 its fd table and a pipe end holds its own reference count (section 4/8). `futex`
 has eleven ops behind a switch (sections 8.4 / 8.4b / 8.4c, default off): the key is the
 physical frame plus the offset, since a VA means different frames in parent and
@@ -415,7 +416,7 @@ Landed 2026-11-21, measured on QEMU LA64 (`example/qemu_loongarch64/elf/linux_si
 | delivery point | **before the syscall returns to user mode** (the single exit of the dispatcher). No preemptive delivery: a signal only arrives the next time the program enters the kernel |
 | handler address | must be a fetchable user address (`copy_from_user(..., 4)` probes it first) |
 | restorer | **required** and non-zero, otherwise `rt_sigaction` gives `-EINVAL` and the old action is not installed - there is no "where to return" path and the address is never guessed |
-| signal frame | 32-byte header (`magic` / `signo` / saved `blocked` / frame length) + **a snapshot of the whole trap frame** (256 / 528 / 1040 B, the port reports the length; 528 on this board's FPU profile) |
+| signal frame | 32-byte header (`magic` / `signo` / saved `blocked` / frame length) + `siginfo_t` (128 B) + `ucontext_t` (432 B) + **a snapshot of the whole trap frame** (256 / 528 / 1040 B, the port reports the length; 528 on this board's FPU profile); with `SA_SIGINFO`, `a1`/`a2` point at the middle two blocks (U-31, section 8.19) |
 | placement | computed by the port: `fsp = (current kernel sp - frame - 128) & ~15`, then checked against the task stack bottom (64 B margin) |
 | `sigreturn` | validates `magic` and frame length, restores the whole frame; **the privilege level in the user frame is ignored** (no privilege escalation) |
 | default actions | ignored {17,18,23,28}; stop-family {19,20,21,22} treated as ignored and counted separately (there is nothing to stop); everything else `exit(128 + signo)` |
@@ -494,8 +495,12 @@ target's `sig_pending`; if the target is parked in a blocking `wait4`,
 out of its next syscall. Self-delivery still goes through the same path.
 - **No preemptive delivery**: only at the syscall return point. A program that
   never enters the kernel keeps the signal pending (`kill` returns 0, no handler).
-- No real-time signals, no `sigaltstack`, no `siginfo`, no `SA_RESTART`
-  semantics (an interrupted syscall is not retried).
+- No real-time signals, no `sigaltstack`, no `SA_RESTART` semantics (an
+  interrupted syscall is not retried). `siginfo` and three-argument dispatch
+  exist (U-31, section 8.19): with `SA_SIGINFO` the handler receives
+  `(signo, siginfo_t *, ucontext_t *)`, with `si_code` / `si_pid` / `si_band` /
+  `si_fd` filled by source; the same signal is **not queued** (only its latest
+  source is kept) and `si_uid` is always 0.
 - Stop-family defaults are treated as ignored: there is no other process to stop.
 - The frame includes the FPU area (measured on the 528 B profile); with the LSX
   profile the whole 1040 B block is copied too and the **vector area is measured
@@ -1278,7 +1283,7 @@ they would have to be rewritten. Putting select and a future socket layer behind
 switch would turn "zero footprint when off" into "half the feature when off".
 `ARKRTOS_USE_LINUX_SELECT` depends only on `ARKRTOS_USE_LINUX_ABI`.
 
-### 8.9 socket (U-23): translation layer and the QEMU eighth tier (2026-11-24, 964 host checks + 242 QEMU checks)
+### 8.9 socket (U-23): translation layer and the QEMU eighth tier (2026-11-24, 992 host checks + 242 QEMU checks)
 
 13 numbers: `socket`(198), `bind`(200), `listen`(201), `accept`(202), `connect`(203),
 `getsockname`(204), `getpeername`(205), `sendto`(206), `recvfrom`(207), `setsockopt`(208),
@@ -1298,7 +1303,7 @@ dispatch on the fd kind (the same fd table holds files, pipes and sockets).
 
 **Host readout.** The sixth Linux ABI coverage tier `linuxabisocket`
 (`tools/coverage_gate.py`) runs the socket section of `test_linux_abi_host.c` on the host:
-98.51% on that tier alone, 98.84% union across six tiers (baseline 98.82%, re-pinned on
+96.10% on that tier alone, 97.34% union across eight profiles (baseline 97.00%, re-pinned on
 2026-11-27 together with the `rseq`/`getcpu` host assertions), **964 checks** green
 (949 before U-30; the socket section itself is 322 of them, 15 of which U-30 added for
 `dup` on sockets).
@@ -1668,7 +1673,7 @@ get wrong than a counter that must be kept in sync in five places (`dup` / `clos
 | fork | socket slots are **not inherited** (the child's slot is empty); the handle count only holds inside one process, cross-process sharing is **not** supported and is listed in [known limitations](已知限制.en.md) |
 | a real leak fixed on the way | the two address-failure rollback paths in `lx_accept` used to only drop the fd slot and leave the freshly taken net handle to "process-exit reaping" - once the slot was gone `close_all` could never see it again. Both paths now send a best-effort `ARKRTOS_NET_SUB_CLOSE` before giving the slot back |
 
-**Measured readout.** The host `linuxabisocket` tier is **964 checks** in total (15 new in
+**Measured readout.** The host `linuxabisocket` tier is **992 checks** in total (15 new in
 U-30: `dup(sock)` returns a new number with zero net requests, the copy `write`s through
 `SEND` on the same handle, closing the source fd sends no `CLOSE`, the copy stays writable,
 `F_SETFL` is visible in both directions while both are alive, the copy turning `O_NONBLOCK`
@@ -2248,7 +2253,7 @@ idleness; (3) no group scheduling and no cgroup bandwidth; (4) `SCHED_RESET_ON_F
 (8) there is no `SCHED_FLAG_DL_OVERRUN` overrun detection - overrun is only contained by
 throttling.
 
-### 8.18 Asynchronous I/O (U-29): `F_SETOWN` / `F_GETOWN` / `O_ASYNC` + SIGIO (2026-11-27, 24 QEMU LA64 checks + 44 host checks)
+### 8.18 Asynchronous I/O (U-29): `F_SETOWN` / `F_GETOWN` / `O_ASYNC` + SIGIO (2026-11-27; since U-31, 38 QEMU LA64 checks + 72 host checks)
 
 **What this is, and what it is not.** Linux signal-driven I/O has three layers:
 `fcntl(F_SETOWN)` records who to notify, `F_SETFL(O_ASYNC)` arms the fd, and the kernel
@@ -2259,8 +2264,8 @@ fd becomes readable (including EOF after every writer closed)** and nothing else
   "space became available" event (a blocking write sleeps and replays, it is not notified);
 * no edge-triggered de-duplication: every `lx_pipe_wake(pi, 0)` delivers once, the same tier
   as Linux `SIGIO` (Linux does not promise one per byte either);
-* no real-time signal queueing (`sigqueue` / `si_fd` / `si_band` from `SA_SIGINFO`); `SIGIO`
-  is plain signal 29 and goes through the standard `rt_sigaction` handler;
+* no real-time signal queueing (`sigqueue`); `SA_SIGINFO` three-argument dispatch and
+  `si_band` / `si_fd` now exist (U-31, section 8.19), and `SIGIO` is still plain signal 29;
 * no process groups: `F_SETOWN` with a negative value is `-EINVAL` and bumps
   `s_sigio_pgrp_refused` - **it is never recorded as if it had worked**.
 
@@ -2290,7 +2295,7 @@ path of the very syscall that wrote the byte, and after `rt_sigreturn` `a0` is s
 call's return value (the byte count) - the signal swallows neither the return value nor the
 byte in the pipe.
 
-**Measured readouts (`[sio]` lines, QEMU LA64 fork tier, 24 checks)**
+**Measured readouts (`[sio]` lines, QEMU LA64 fork tier, 38 checks)**
 
 ```
 [sio] getown on console is 0 -> 0 ok
@@ -2308,6 +2313,12 @@ byte in the pipe.
 [sio] write after O_ASYNC returns the byte -> 1 ok
 [sio] SIGIO handler ran -> 1 ok
 [sio] SIGIO signo is 29 -> 29 ok
+[sio] SIGIO siginfo pointer is set -> 1 ok
+[sio] SIGIO si_signo -> 29 ok
+[sio] SIGIO si_code is POLL_IN -> 1 ok
+[sio] SIGIO si_band -> 65 ok
+[sio] SIGIO si_fd -> 3 ok
+[sio] SIGIO ucontext pc is non-zero -> 1 ok
 [sio] read still returns the byte -> 1 ok
 [sio] the byte survived -> 105 ok
 [sio] clear O_ASYNC -> 0 ok
@@ -2317,6 +2328,14 @@ byte in the pipe.
 [sio] re-open O_ASYNC -> 0 ok
 [sio] close writer returns 0 -> 0 ok
 [sio] close writer (EOF) sends SIGIO -> 1 ok
+[sio] SIGPIPE pipe2 -> 0 ok
+[sio] rt_sigaction(SIGPIPE, SA_SIGINFO) -> 0 ok
+[sio] close SIGPIPE pipe read end -> 0 ok
+[sio] write with no reader returns -EPIPE -> -32 ok
+[sio] SIGPIPE handler ran -> 1 ok
+[sio] SIGPIPE si_signo -> 13 ok
+[sio] SIGPIPE si_code is SI_USER -> 0 ok
+[sio] SIGPIPE si_pid is self -> 14 ok
 ```
 
 `105` is the byte `'i'` that was written; `11` is this task's id (it can differ per tier, so
@@ -2331,7 +2350,8 @@ QEMU fixture would kill the task mid-run and lose every later readout; host sect
 `t_async_io` asserts "the return value is written first, then `g_exit_code == 128 + 29`",
 matching Linux's default action.
 
-**The 44 host checks** (`t_async_io` in `test_linux_abi_host.c`, seven sections) cover what
+**The 72 host checks** (`test_linux_abi_host.c`: 44 in `t_async_io`, seven sections,
+plus the 28 of U-31's `t_siginfo`, five sections) cover what
 the QEMU fixture cannot build: console object `-EINVAL`/0, a second pipe with `O_ASYNC` armed
 but no owner (the scan must skip `owner == 0`), a write-end fd (`kind != PIPE_R`) not
 delivering, two-way `dup` sharing (5 checks), no delivery after clearing `O_ASYNC` with
@@ -2341,18 +2361,19 @@ bit, and the host never runs user instructions, so `rt_sigreturn` never puts the
 therefore a single `fresh()` section may assert only one delivery; asserting a second one
 requires a new `fresh()`.
 
-**Gate.** `tools/fork_gate.py` has `SIGIO_CHECKS = 24`: the `[sio]` prefix is counted
+**Gate.** `tools/fork_gate.py` has `SIGIO_CHECKS = 38`: the `[sio]` prefix is counted
 separately (the ten `[fork]` constants are untouched), and all ten tiers carry
 `-DARKRTOS_USE_LINUX_SIGIO=1` (otherwise a whole section vanishing on a tier switch would look
 normal). Ten must-appear readouts are checked one by one (the two carrying a task id are
 matched by shape), and the bad-log self-check adds three `sio` mutations (drop one line,
 insert a FAIL, change a number).
 
-**Coverage.** The host `linuxabisigio` profile runs the 44 assertions of `t_async_io` at
-92.83% on its own; the line union across the eight profiles (`linuxabi`, `linuxabifutex`,
-`linuxabifilemap`, `linuxabiselect`, `linuxabisocket`, `linuxabisched`, `linuxabisigio` and
-the off profile) puts `arkrtos_linux_abi` at 97.27% (baseline 97.00% unchanged), and the full
-`COVERAGE-GATE OK` (all 71 modules at or above baseline).
+**Coverage.** The host `linuxabisigio` profile runs the 72 assertions of
+`test_linux_abi_host.c` at 93.11% on its own; the line union across the eight profiles
+(`linuxabi`, `linuxabifutex`, `linuxabifilemap`, `linuxabiselect`, `linuxabisocket`,
+`linuxabisched`, `linuxabisigio` and the off profile) puts `arkrtos_linux_abi` at 97.34%
+(baseline 97.00% unchanged), and the full `COVERAGE-GATE OK` (all 71 modules at or above
+baseline).
 
 **Boundaries.** (1) Only "fd became readable (including EOF)"; the writable direction,
 edge-triggered de-duplication, `si_fd`/`si_band` and real-time queueing are all out (above);
@@ -2363,13 +2384,87 @@ real file object with cross-process refcounts - see `docs/已知限制.md`); (4)
 single task id; after that task exits `F_GETOWN` still reads the number back (no notification
 is generated and nothing is cleaned up - the registration is a value).
 
+### 8.19 `siginfo_t` and `ucontext_t` (U-31): `SA_SIGINFO` three-argument dispatch (2026-11-27, 38 QEMU LA64 checks + 72 host checks)
+
+**What this is.** Linux has two calling conventions for signal handlers: `void (*)(int)` and
+`SA_SIGINFO`'s `void (*)(int, siginfo_t *, void *)`. The latter lets a handler read who sent
+the signal, why, and the context that was interrupted (`ucontext_t`). U-31 adds this tier:
+
+| item | state |
+|---|---|
+| dispatch | with `sa_flags & SA_SIGINFO`, `a1 = fsp + header bytes` (siginfo) and `a2 = a1 + 128` (ucontext); without it `a1`/`a2` are left untouched |
+| frame layout | header (`magic`/`signo`/`blocked`/frame length, 4 words: 32 B on LA64) -> `siginfo_t` 128 B -> `ucontext_t` 432 B -> trap-frame snapshot; the header size is derived from `sizeof(unsigned long)`, so it is 16 B on the 32-bit host |
+| siginfo fields | `si_signo` / `si_errno` (always 0) / `si_code`; the `_kill` family fills `si_pid` / `si_uid` (always 0); `_sigpoll` (SIGIO) fills `si_band` / `si_fd` |
+| `si_code` by source | `kill` -> `SI_USER` (0); `tkill` / `tgkill` -> `SI_TKILL` (-6); SIGPIPE (kernel-generated) -> `SI_USER`; SIGIO -> `POLL_IN` (1) |
+| `si_pid` | the sending task id; on the thread profile the group leader (Linux `task_tgid_vnr` semantics) |
+| ucontext | `uc_sigmask` (the mask in effect inside the handler), `uc_mcontext.pc` / `ra` / `tp` / `sp`; `uc_stack.ss_flags = SS_DISABLE` (no altstack), `uc_link = 0` |
+| not filled | FP / vector state, the other GPRs, altstack, and a real `si_uid` (this layer has no uid concept; it is always 0) |
+
+**Why nothing is queued.** Pending is one bit per signal and the source record is a single
+slot (8 bytes: `code` / `pid` / `fd`, 256 B per process for 32 signals). Two deliveries of the
+same signal leave the **latest** source visible to the handler. This is the same trade-off as
+"the pending bit only says whether", and it is documented in the known limitations; real
+queueing would turn a one-bit mechanism into an allocation point.
+
+**SIGIO uses `_sigpoll`.** Linux's `send_sigio()` uses the `SIGPOLL` siginfo:
+`si_code = POLL_IN`, `si_band = POLLIN|POLLRDNORM (0x41)`, `si_fd` is the fd number. This
+layer matches that. One pipe object delivers once: a `dup` copy shares `O_ASYNC` and the owner
+with the original, so the scan stops at the **lowest fd number** (on Linux `dup` shares one
+`struct file` and there is one fasync entry).
+
+**SIGPIPE uses `SI_USER`.** Linux's `send_sig(SIGPIPE, current, 0)` goes through
+`SEND_SIG_NOINFO`: `si_code = SI_USER`, `si_pid` is the sender's own pid, `si_uid` its uid
+(0 here).
+
+**ucontext is a read-only view.** Registers written by a handler **do not** affect the state
+after `rt_sigreturn`: `rt_sigreturn` only trusts the trap-frame snapshot in the frame (writing
+contexts is what `setcontext`-style interfaces do, and this layer has none). That is stated in
+the known limitations rather than silently ignored.
+
+**Measured readout (14 new `[sio]` lines, QEMU LA64)**
+
+```
+[sio] SIGIO siginfo pointer is set -> 1 ok
+[sio] SIGIO si_signo -> 29 ok
+[sio] SIGIO si_code is POLL_IN -> 1 ok
+[sio] SIGIO si_band -> 65 ok
+[sio] SIGIO si_fd -> 3 ok
+[sio] SIGIO ucontext pc is non-zero -> 1 ok
+[sio] SIGPIPE pipe2 -> 0 ok
+[sio] rt_sigaction(SIGPIPE, SA_SIGINFO) -> 0 ok
+[sio] close SIGPIPE pipe read end -> 0 ok
+[sio] write with no reader returns -EPIPE -> -32 ok
+[sio] SIGPIPE handler ran -> 1 ok
+[sio] SIGPIPE si_signo -> 13 ok
+[sio] SIGPIPE si_code is SI_USER -> 0 ok
+[sio] SIGPIPE si_pid is self -> 14 ok
+```
+
+`65` is `POLLIN|POLLRDNORM`; `3` is that pipe's read-end fd (the `dup` copy's fd is not
+reported - the lowest fd number is the registration point); `14` is this task's id (it can
+differ per tier, so the gate matches it by shape).
+
+**The 28 host checks** (U-31's `t_siginfo`, five sections) fill in what the QEMU fixture cannot
+build: (1) `kill` self -> `si_code = SI_USER`, `si_pid` = own task id, `uc_sigmask` holding
+the signal's bit, `mcontext.pc` / `regs[3]` equal to the interrupted pc / sp, and
+`uc_stack.ss_flags = SS_DISABLE`; (2) without `SA_SIGINFO`, `a1` / `a2` are untouched while
+the frame still carries a siginfo; (3) `tkill` -> `si_code = SI_TKILL`; (4) SIGPIPE ->
+`SI_USER`; (5) SIGIO -> `_sigpoll` (`si_code = 1`, `si_band = 0x41`, `si_fd` = the read end).
+
+**Boundaries.** (1) The same signal is not queued; only its latest source is kept. (2)
+`si_uid` is always 0 (no uid concept here). (3) `ucontext` fills only `uc_sigmask` and
+pc / ra / tp / sp: no FP / vector state, no altstack, no `uc_link`. (4) Writing the
+`ucontext` has no effect. (5) The header size is derived from the machine word and the frame
+buffer is sized in **bytes** - that one is a real bug U-31 uncovered, see section 11 (11th
+entry).
+
 ## 9 Switch and zero footprint
 
 `ARKRTOS_USE_LINUX_SIGIO` (section 8.18), default **0**, `depends on ARKRTOS_USE_LINUX_ABI`
 with an `#error` guard; with it off `F_SETOWN` / `F_GETOWN` fall back to `-EINVAL`
 (bit-identical to pre-U-29), `F_SETFL` ignores `O_ASYNC`, and the `owner` slot plus
-`lx_async_notify_pipe` are not compiled; with it on the evidence is the 24 `[sio]` readouts
-shared by all ten tiers plus the 44 assertions of the host `linuxabisigio` profile.
+`lx_async_notify_pipe` are not compiled; with it on the evidence is the 38 `[sio]` readouts
+shared by all ten tiers plus the 72 assertions of the host `linuxabisigio` profile.
 
 `ARKRTOS_USE_LINUX_THREAD` (section 8.10) is a third Linux ABI switch, default **0**,
 `depends on ARKRTOS_USE_LINUX_FORK` (with an `#error` guard); with it off the two loader/port
@@ -2433,8 +2528,8 @@ profile.
 `ARKRTOS_USE_LINUX_SOCKET` (section 8.9) is a further switch, default **0**,
 `depends on ARKRTOS_USE_LINUX_ABI` with an `#error` guard; with it off all `lx_sock_*`
 code and the socket dispatch in the fd table are not compiled and `198`-`210`/`242` fall
-back to `-ENOSYS`; with it on the measured readout is the host socket tier's **964 checks**
-(98.51% on that tier, 98.84% union) plus the **242 readouts of the QEMU eighth tier**
+back to `-ENOSYS`; with it on the measured readout is the host socket tier's **992 checks**
+(96.10% on that tier, 97.34% union) plus the **242 readouts of the QEMU eighth tier**
 (39 of them the socket section: 38 semantic + 1 round-trip timing).
 
 `MAP_FIXED` (section 8.7) is **not a switch of its own**: it exists when
@@ -2462,8 +2557,8 @@ each be rejected).
 The socket layer has readouts on **both tiers**: on the host the sixth Linux ABI coverage
 tier `linuxabisocket` in `tools/coverage_gate.py` (with
 `-DARKRTOS_USE_LINUX_SOCKET=1 -DARKRTOS_USE_LWIP=1` and
-`-Wl,--wrap=arkrtos_port_svc_exec_frame`) runs `test_linux_abi_host.c` with 964 checks green,
-98.51% on the tier and 98.84% union (baseline 98.82%), and `tools/ci_gate.py`'s
+`-Wl,--wrap=arkrtos_port_svc_exec_frame`) runs `test_linux_abi_host.c` with 992 checks green,
+96.10% on the tier and 97.34% union (baseline 97.00%), and `tools/ci_gate.py`'s
 `linux-abi-host` item already includes it; on the board the **eighth tier** of
 `tools/fork_gate.py` (`-DARKRTOS_USE_LINUX_SELECT=1 -DARKRTOS_USE_LINUX_SOCKET=1
 -DARKRTOS_USE_LWIP=1`) gives 232 checks all `ok` + `exit code 0` on QEMU LA64.
@@ -2668,6 +2763,23 @@ none of `arkrtos_elf_thread`, `arkrtos_port_paging_thread_frame` and the four
    **never write a "plausible errno the old code returned" down as the expected
    value** - the shape works before and after and returns a plausible `errno`
    either way.
+
+11. **The signal-frame buffer was sized in words, so `copy_to_user` read past
+   it on the 32-bit host.** After U-31 added the fixed `siginfo` + `ucontext`
+   block (560 B), `s_sigframe` was still declared as `unsigned long[...]` while
+   the frame length `total` is computed in **bytes** (592 + snapshot). On LA64
+   `sizeof(unsigned long) == 8` so there was plenty of slack and QEMU stayed
+   green; on the 32-bit host `sizeof(unsigned long) == 4`, the buffer held half
+   the bytes it needed, and `copy_to_user` read past its end (undefined
+   behaviour; the host case caught it first as two red frame-length / payload
+   assertions). Fix: size the buffer with `LX_SIGFRAME_BUF_BYTES` (header +
+   128 + 432 + snapshot, all in bytes) rounded up to words, derive the header
+   size from `sizeof(unsigned long)`, zero the fixed block **byte-wise**, and
+   `export` / `import` from `(uint8 *)s_sigframe + fixed offset`. Lesson:
+   **once one place is in bytes and another in words, switch everything to
+   bytes** - the mix runs on one ABI width and overruns on the other, and the
+   overrun usually shows up on the host as "nonsensical readouts", not as a
+   crash.
 
 ## 12 Boundaries
 

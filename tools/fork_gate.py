@@ -274,10 +274,12 @@ LOCK_CHECKS = 32
 # 六条读数按 ARKRTOS_USE_SCHED_DEADLINE 分两支（类开着期望 EBUSY/三元组，
 # 类没开期望 -EINVAL/零值），两支条数相同，所以这个常数不随档变化。
 SCHED_CHECKS = 63
-# SIGIO 段（U-29，十档都在，与 LOCK/SCHED 段同型）：23 条读数。夹具里没有
-# 默认动作（不装 handler = 结束任务）那一条 —— 它会中途杀掉任务，读数全丢；
-# 那一条由宿主用例 test_linux_abi_host.c 的 t_async_io 第 7 节断言。
-SIGIO_CHECKS = 24
+# SIGIO 段（U-29，十档都在，与 LOCK/SCHED 段同型）：24 条读数。U-31 追加
+# 14 条（SA_SIGINFO 三参派发：SIGIO 的 siginfo/ucontext 6 条 + SIGPIPE 的
+# siginfo 8 条），合计 38 条。夹具里没有默认动作（不装 handler = 结束任务）
+# 那一条 —— 它会中途杀掉任务，读数全丢；那一条由宿主用例
+# test_linux_abi_host.c 的 t_async_io 第 7 节断言。
+SIGIO_CHECKS = 38
 EXPECT_FORK_CHECKS = 47 + LOCK_CHECKS
 # COW 段多 5 条：pipe2、clone>0、子被 reap、子看到 fork 前的值（位掩码 3）、
 # 父自己的写还在。合计 52 条。

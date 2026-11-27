@@ -256,15 +256,24 @@ int main(void)
 #define T_PROT_WRITE        (0x2u)
 #define T_MS_SYNC           (4u)
 #define T_SIGSET_BYTES      (8u)
+#define T_SA_SIGINFO        (0x4u)  /* U-31：sa_flags 的 SA_SIGINFO */
 
 #define T_UREG_ERA          (0u)
 #define T_UREG_SP           (1u)
 #define T_UREG_RA           (2u)
+#define T_UREG_A1           (4u)    /* U-31：SA_SIGINFO 的第二个参数 */
+#define T_UREG_A2           (5u)    /* U-31：SA_SIGINFO 的第三个参数 */
 
 /* 宿主上 magic 被截成 32 位：0x53494746524D4532 & 0xFFFFFFFF。 */
 #define T_SIGFRAME_MAGIC32  (0x524D4532u)
 #define T_FRAME_BYTES       (256u)
-#define T_FRAME_TOTAL       (32u + T_FRAME_BYTES)
+/* U-31：帧 = 头（4 个字，32 位宿主上 16 字节）+ siginfo 128 + ucontext 432
+ * + 快照。头的字节数按字宽算，siginfo/ucontext 从它后面开始。 */
+#define T_HDR_BYTES         (4u * (unsigned)sizeof(unsigned long))
+#define T_SI_OFF            (T_HDR_BYTES)
+#define T_UC_OFF            (T_SI_OFF + 128u)
+#define T_FIX_OFF           (T_UC_OFF + 432u)
+#define T_FRAME_TOTAL       (T_FIX_OFF + T_FRAME_BYTES)
 
 /* 用户内存里的固定偏移（都在窗口内，离堆区很远）。 */
 #define T_PATH_OFF          (0x00100u)
@@ -662,7 +671,7 @@ typedef struct
     int    is_linux;
     unsigned long ret;
     int    ret_written;
-    unsigned long reg[4];
+    unsigned long reg[6];
     int    set_reg_fail;        /* -1 = 不失败；否则这个 id 会失败 */
     int    set_reg_calls;
     unsigned long reserve;
@@ -720,7 +729,7 @@ unsigned long arkrtos_port_svc_user_reg(void *p, uint32 id)
 {
     t_ctx *c = (t_ctx *)p;
 
-    return (id < 4u) ? c->reg[id] : 0UL;
+    return (id < 6u) ? c->reg[id] : 0UL;
 }
 
 int32 arkrtos_port_svc_set_user_reg(void *p, uint32 id, unsigned long value)
@@ -728,7 +737,7 @@ int32 arkrtos_port_svc_set_user_reg(void *p, uint32 id, unsigned long value)
     t_ctx *c = (t_ctx *)p;
 
     c->set_reg_calls++;
-    if((id >= 4u) || (c->set_reg_fail == (int)id))
+    if((id >= 6u) || (c->set_reg_fail == (int)id))
     {
         return -1;
     }
@@ -1108,17 +1117,26 @@ static void fresh(t_ctx *c)
     ctx_init(c);
 }
 
-/* 往用户内存里放一个 rt_sigaction 结构并按需安装。返回该次调用的返回码。 */
-static int32 sig_install_act(t_ctx *c, uint32 sig, unsigned long handler,
-                             unsigned long restorer, unsigned long mask)
+/* 往用户内存里放一个 rt_sigaction 结构并按需安装。返回该次调用的返回码。
+ * flags 走单独入口：SA_SIGINFO 会改变 handler 的调用约定（三参），
+ * 老入口固定 flags = 0，避免把每个既有用例都改一遍。 */
+static int32 sig_install_flags(t_ctx *c, uint32 sig, unsigned long handler,
+                               unsigned long restorer, unsigned long mask,
+                               unsigned long flags)
 {
     u_put32(T_ACT_OFF + 0u, (uint32)handler);
-    u_put32(T_ACT_OFF + 4u, 0u);
+    u_put32(T_ACT_OFF + 4u, (uint32)flags);
     u_put32(T_ACT_OFF + 8u, (uint32)restorer);
     u_put32(T_ACT_OFF + 12u, (uint32)mask);
     (void)call(c, T_NR_RT_SIGACTION, (unsigned long)sig, u_ptr(T_ACT_OFF),
                0UL, (unsigned long)T_SIGSET_BYTES);
     return (int32)c->ret;
+}
+
+static int32 sig_install_act(t_ctx *c, uint32 sig, unsigned long handler,
+                             unsigned long restorer, unsigned long mask)
+{
+    return sig_install_flags(c, sig, handler, restorer, mask, 0UL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -3406,8 +3424,9 @@ static void t_signal(t_ctx *c)
     ck_u(u_get32(T_FSP_OFF + 4u), 12u, "帧头记信号号");
     ck_u(u_get32(T_FSP_OFF + 8u), 0u, "帧头记投递前的屏蔽字");
     ck_u(u_get32(T_FSP_OFF + 12u), T_FRAME_BYTES, "帧头记快照字节数");
-    ck_u(u_get32(T_FSP_OFF + 16u), (uint32)g_export_pat[0], "payload 从偏移 16 开始");
-    ck_u(u_get32(T_FSP_OFF + 16u + 4u * 63u), (uint32)g_export_pat[63],
+    ck_u(u_get32(T_FSP_OFF + T_FIX_OFF), (uint32)g_export_pat[0],
+         "payload 从固定区之后开始");
+    ck_u(u_get32(T_FSP_OFF + T_FIX_OFF + 4u * 63u), (uint32)g_export_pat[63],
          "payload 末字也拷全");
 
     /* 处理期间屏蔽本信号 */
@@ -7584,6 +7603,114 @@ static void t_async_io(t_ctx *c)
 }
 #endif
 
+/* 分组 U-31：siginfo 与 ucontext。
+ *
+ * 帧布局（与内核 LX_SHDR_* 一一对应）：头（4 个字）→ siginfo（128 字节）
+ * → ucontext（432 字节）→ 被打断点快照。SA_SIGINFO 装好后 handler 的
+ * a1 = siginfo 地址、a2 = ucontext 地址；没装则 a1/a2 保持原值。 */
+static void t_siginfo(t_ctx *c)
+{
+    uint32 fds[2];
+    int32 rd;
+    int32 wr;
+
+    /* --- 1) SA_SIGINFO + kill(self)：si_code = SI_USER、三参派发 --- */
+    fresh(c);
+    c->reg[T_UREG_ERA] = 0x00001234UL;      /* 被打断的 pc */
+    c->reg[T_UREG_SP]  = 0x00005000UL;      /* 被打断的 sp */
+    ck(sig_install_flags(c, 10u, T_HANDLER, T_RESTORER, 0UL,
+                         T_SA_SIGINFO) == 0, "SA_SIGINFO 安装 SIGUSR1");
+    (void)call(c, T_NR_KILL, 7UL, 10UL, 0UL, 0UL);
+    ck_u(c->ret, 10u, "投递后 a0 = 信号号");
+    ck_u(c->reg[T_UREG_ERA], T_HANDLER, "era 指向处理函数");
+    ck_u(c->reg[T_UREG_A1], u_ptr(T_FSP_OFF + T_SI_OFF),
+         "a1 = siginfo 地址");
+    ck_u(c->reg[T_UREG_A2], u_ptr(T_FSP_OFF + T_UC_OFF),
+         "a2 = ucontext 地址");
+    ck_u(u_get32(T_FSP_OFF + T_SI_OFF + 0u), 10u, "si_signo = 10");
+    ck_u(u_get32(T_FSP_OFF + T_SI_OFF + 4u), 0u, "si_errno = 0");
+    ck_u(u_get32(T_FSP_OFF + T_SI_OFF + 8u), 0u, "si_code = SI_USER（kill）");
+    ck_u(u_get32(T_FSP_OFF + T_SI_OFF + 16u), 7u, "si_pid = 发送者任务号");
+    ck_u(u_get32(T_FSP_OFF + T_SI_OFF + 20u), 0u, "si_uid = 0（本层无 uid）");
+    ck_u(u_get32(T_FSP_OFF + T_UC_OFF + 40u), 1u << 9u,
+         "uc_sigmask 含本信号位");
+    ck_u((unsigned long)u_get64(T_FSP_OFF + T_UC_OFF + 168u), 0x1234UL,
+         "mcontext.pc = 被打断的 pc");
+    ck_u((unsigned long)u_get64(T_FSP_OFF + T_UC_OFF + 176u + 3u * 8u),
+         0x5000UL, "mcontext.regs[3] = 被打断的 sp");
+    ck_u(u_get32(T_FSP_OFF + T_UC_OFF + 24u), 2u,
+         "uc_stack.ss_flags = SS_DISABLE（无 altstack）");
+
+    /* --- 2) 没装 SA_SIGINFO：a1/a2 保持原值，帧里的 siginfo 仍存在 --- */
+    fresh(c);
+    c->reg[T_UREG_A1] = 0xDEADUL;
+    c->reg[T_UREG_A2] = 0xBEEFUL;
+    ck(sig_install_act(c, 10u, T_HANDLER, T_RESTORER, 0UL) == 0,
+       "不带 SA_SIGINFO 安装 SIGUSR1");
+    (void)call(c, T_NR_KILL, 7UL, 10UL, 0UL, 0UL);
+    ck_u(c->ret, 10u, "仍正常投递");
+    ck_u(c->reg[T_UREG_A1], 0xDEADUL, "a1 未被动过");
+    ck_u(c->reg[T_UREG_A2], 0xBEEFUL, "a2 未被动过");
+    ck_u(u_get32(T_FSP_OFF + T_SI_OFF + 0u), 10u,
+         "没装 SA_SIGINFO 也铺了 siginfo");
+
+    /* --- 3) tkill：si_code = SI_TKILL(-6) --- */
+    fresh(c);
+    ck(sig_install_flags(c, 10u, T_HANDLER, T_RESTORER, 0UL,
+                         T_SA_SIGINFO) == 0, "SA_SIGINFO 安装 SIGUSR1（tkill）");
+    (void)call(c, T_NR_TKILL, 7UL, 10UL, 0UL, 0UL);
+    ck_u(c->ret, 10u, "tkill 投递");
+    ck_u(u_get32(T_FSP_OFF + T_SI_OFF + 8u), 0xFFFFFFFAu,
+         "si_code = SI_TKILL(-6)");
+    ck_u(u_get32(T_FSP_OFF + T_SI_OFF + 16u), 7u, "si_pid = 发送者任务号");
+
+    /* --- 4) SIGPIPE（读端全关）走 SI_USER --- */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF),
+               (unsigned long)T_O_NONBLOCK, 0UL, 0UL);
+    u_get(T_DATA_OFF, fds, 8u);
+    rd = (int32)fds[0];
+    wr = (int32)fds[1];
+    ck(sig_install_flags(c, 13u, T_HANDLER, T_RESTORER, 0UL,
+                         T_SA_SIGINFO) == 0, "SA_SIGINFO 安装 SIGPIPE");
+    (void)call(c, T_NR_CLOSE, (unsigned long)rd, 0UL, 0UL, 0UL);
+    u_put_str(T_STR_OFF, "x");
+    (void)call(c, T_NR_WRITE, (unsigned long)wr, u_ptr(T_STR_OFF), 1UL, 0UL);
+    ck_u(c->ret, 13u, "SIGPIPE 投递");
+    ck_u(u_get32(T_FSP_OFF + T_SI_OFF + 0u), 13u, "si_signo = 13");
+    ck_u(u_get32(T_FSP_OFF + T_SI_OFF + 8u), 0u,
+         "si_code = SI_USER（内核代发）");
+    ck_u(u_get32(T_FSP_OFF + T_SI_OFF + 16u), 7u, "si_pid = 自身进程号");
+    (void)call(c, T_NR_CLOSE, (unsigned long)wr, 0UL, 0UL, 0UL);
+
+#if (ARKRTOS_USE_LINUX_SIGIO == 1)
+    /* --- 5) SIGIO（管道可读）走 _sigpoll：si_band / si_fd --- */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF),
+               (unsigned long)T_O_NONBLOCK, 0UL, 0UL);
+    u_get(T_DATA_OFF, fds, 8u);
+    rd = (int32)fds[0];
+    wr = (int32)fds[1];
+    ck(sig_install_flags(c, 29u, T_HANDLER, T_RESTORER, 0UL,
+                         T_SA_SIGINFO) == 0, "SA_SIGINFO 安装 SIGIO");
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_SETOWN,
+               0UL, 0UL);
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_SETFL,
+               (unsigned long)(T_O_NONBLOCK | T_O_ASYNC), 0UL);
+    u_put_str(T_STR_OFF, "y");
+    (void)call(c, T_NR_WRITE, (unsigned long)wr, u_ptr(T_STR_OFF), 1UL, 0UL);
+    ck_u(c->ret, 29u, "SIGIO 投递");
+    ck_u(u_get32(T_FSP_OFF + T_SI_OFF + 0u), 29u, "si_signo = 29");
+    ck_u(u_get32(T_FSP_OFF + T_SI_OFF + 8u), 1u,
+         "si_code = POLL_IN（_sigpoll）");
+    ck_u(u_get32(T_FSP_OFF + T_SI_OFF + 16u), 0x41u,
+         "si_band = POLLIN|POLLRDNORM");
+    ck_u(u_get32(T_FSP_OFF + T_SI_OFF + 24u), (uint32)rd, "si_fd = 读端号");
+    (void)call(c, T_NR_CLOSE, (unsigned long)wr, 0UL, 0UL, 0UL);
+    (void)call(c, T_NR_CLOSE, (unsigned long)rd, 0UL, 0UL, 0UL);
+#endif
+}
+
 int main(void)
 {
     t_ctx c;
@@ -7633,6 +7760,7 @@ int main(void)
 #if (ARKRTOS_USE_LINUX_SIGIO == 1)
     t_async_io(&c);
 #endif
+    t_siginfo(&c);
 #if (ARKRTOS_USE_PAGING_FILEMAP == 1)
     t_filemap(&c);
     t_filemap_edge(&c);

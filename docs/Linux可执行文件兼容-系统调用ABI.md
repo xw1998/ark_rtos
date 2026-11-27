@@ -135,8 +135,8 @@ socket 家族（`198-210`、`242`，共 13 个）见 §8.9：它们在翻译层�
 |---|---|---|
 | 动态链接（`PT_INTERP` / `.so`） | **默认档仍拒**；打开 `ARKRTOS_USE_DYNLOAD` 后已支持（2026-11-20，QEMU LA64 实跑） | 内核按 Linux 约定装载解释器、铺 auxv、入口跳解释器，配一套自研 `ld-ark.so`；见 [动态链接与PT_INTERP](动态链接与PT_INTERP.md)。范围是「自研装载器 + 一级依赖 + 立即重定位」：现成发行版二进制仍跑不了（`ld.so` 是 glibc 的，仓里没有） |
 | `fork` / `clone` | **fork 与线程都有**（`ARKRTOS_USE_LINUX_FORK` / `ARKRTOS_USE_LINUX_THREAD`，默认关；2026-11-23 / 11-24，QEMU LA64 实跑） | `flags==0`/`SIGCHLD` 走 fork（复制整份地址空间）；`CLONE_VM`/`CLONE_THREAD` 走线程（共用一份地址空间，见 §8.10）；其余组合一律 `-EINVAL` |
-| 信号 | **已有跨任务投递**（`kill`/`tkill`/`tgkill` 按 pid 定位目标进程，2026-11-23，QEMU LA64 实跑）；仍无抢占式投递、无实时信号、无 `siginfo`（§7） | 跨任务靠「置目标 `sig_pending` + 目标卡在阻塞 `wait4` 时唤醒」，铺帧仍在目标自己下一次系统调用返回时做；抢占式入口还没有 |
-| `fd` 继承 | **已有**（fork 档每进程 fd 表 + 管道对象引用计数，2026-11-23） | 见 §4 与 §8；`dup`/`dup2` 重定向仍无 |
+| 信号 | **已有跨任务投递**（`kill`/`tkill`/`tgkill` 按 pid 定位目标进程，2026-11-23，QEMU LA64 实跑）；`SA_SIGINFO` 三参派发与 `siginfo_t` / `ucontext_t` 已有（U-31，§8.19，2026-11-27）；仍无抢占式投递、无实时信号、无 `sigqueue` 排队（§7） | 跨任务靠「置目标 `sig_pending` + 目标卡在阻塞 `wait4` 时唤醒」，铺帧仍在目标自己下一次系统调用返回时做；抢占式入口还没有 |
+| `fd` 继承 | **已有**（fork 档每进程 fd 表 + 管道对象引用计数，2026-11-23）；`dup`(23) / `dup3`(24) 已有（U-30，§8.12，2026-11-27）；64 位号表里没有 `dup2`，glibc 用 `dup3` 实现 | 见 §4 与 §8 |
 | `socket` / `select` | **已有**（`ARKRTOS_USE_LINUX_SOCKET` / `ARKRTOS_USE_LINUX_SELECT`，默认关；2026-11-24，QEMU LA64 第八/七档实跑） | 13 个 socket 号 + `pselect6`(242) 进号表，底层接 lwIP 与 fd 表的 `kind` 分派；见 §8.9 / §8.8 |
 | `futex` | **已有十一档 op**（`ARKRTOS_USE_LINUX_FUTEX`，默认关；WAIT/WAKE 2026-11-23、`REQUEUE`/`CMP_REQUEUE`/`WAIT_BITSET`/`WAKE_BITSET` 与相对/绝对超时 2026-11-24、PI 三档 `LOCK_PI`/`UNLOCK_PI`/`TRYLOCK_PI` 与 robust list 清理 2026-11-26、条件变量 PI 变体 `WAIT_REQUEUE_PI`/`CMP_REQUEUE_PI` 2026-11-27，QEMU LA64 实跑） | 值没变就睡、变了就叫；位集、改挂、`-ETIMEDOUT`、优先级继承、持有者死亡交接、条件变量整队搬运与直接交接都按 Linux 语义；键 = 物理帧 + 页内偏移；仍无 `WAKE_OP`/FD 类 op（如实 `-ENOSYS`）、无墙钟（`FUTEX_CLOCK_REALTIME` 带超时回 `-ENOSYS`）；见 §8.4 / §8.4b / §8.4c |
 | 真 `mmap` 语义（文件映射/`MAP_FIXED`/权限位） | **文件映射已有**（`ARKRTOS_USE_PAGING_FILEMAP`，§8.5）、**`MAP_FIXED` 已有**（按需分页档，§8.7，只认匿名私有）、**页级写保护已有**（`ARKRTOS_USE_PAGING_MPROTECT`，§8.6）；匿名共享 `MAP_SHARED` 只随 `fork` 继承、无 `shm_open`（§8.3）；`PROT_EXEC` / `PROT_NONE` 仍只记账不强制 | 窗口式分配器（§4）；LA64 这条通路没有 NR/NX，做不出硬件不可执行 |
@@ -365,7 +365,7 @@ handler `rt_sigreturn` 之后 `a0` 仍是 `-EPIPE`。
 | 投递时机 | **系统调用返回用户态之前**（分发器唯一的出口处）。没有抢占式投递：信号只在程序自己下一次进内核时才送到 |
 | 动作地址 | `sa_handler` 必须是一个能取指的用户地址（内核先 `copy_from_user(..., 4)` 探一次） |
 | restorer | **必须有**且非 0，否则 `rt_sigaction` 返 `-EINVAL`、旧动作不装（没有「处理完回哪」的路径，绝不猜地址） |
-| 信号帧 | 头 32 B（`magic` / `signo` / 保存的 `blocked` / 帧长）+ **整份 trap 帧快照**（256 / 528 / 1040 B，帧长由端口报，本板 FPU 档 528） |
+| 信号帧 | 头 32 B（`magic` / `signo` / 保存的 `blocked` / 帧长）+ `siginfo_t` 128 B + `ucontext_t` 432 B + **整份 trap 帧快照**（256 / 528 / 1040 B，帧长由端口报，本板 FPU 档 528）；`SA_SIGINFO` 时 `a1`/`a2` 分别指向后两块（U-31，§8.19） |
 | 存放位置 | 端口算：`fsp = (当前内核 sp - 帧长 - 128) & ~15`，再查任务栈底（留 64 B） |
 | `sigreturn` | 校验 `magic` 与帧长后整帧装回；**特权级不认用户帧里那份**（不许抬权） |
 | 默认动作 | 忽略 {17,18,23,28}；挂起类 {19,20,21,22} 按忽略并单独计数（没有可挂起的对象）；其余 `exit(128 + signo)` |
@@ -435,8 +435,11 @@ LSX 档只验 `$vr0`：它的 128 位图案已经把低 64 位那一份（`$f0`�
   同任务自我投递仍走同一条路（pid == 自己）。
 - **无抢占式投递**：只在系统调用返回点送。程序若一直不调系统调用，信号就一直
   pending（`kill` 返 0 但 handler 不跑）。
-- 无实时信号（1..31 之外一律 `-EINVAL`）、无 `sigaltstack`、无 `siginfo`、
-  无 `SA_RESTART` 语义（被信号打断的系统调用不会自动重试）。
+- 无实时信号（1..31 之外一律 `-EINVAL`）、无 `sigaltstack`、无 `SA_RESTART`
+  语义（被信号打断的系统调用不会自动重试）。`siginfo` 与三参派发已有（U-31，
+  §8.19）：`SA_SIGINFO` 时 handler 收 `(signo, siginfo_t *, ucontext_t *)`，
+  `si_code` / `si_pid` / `si_band` / `si_fd` 按来源填；同一信号**不排队**（只留
+  最后一次来源），`si_uid` 恒 0。
 - 作业控制类（`SIGSTOP`/`SIGTSTP`/`SIGTTIN`/`SIGTTOU`）的默认动作按忽略处理：
   没有「另一个进程」可以停。
 - 帧里带 FPU 区（528 B 档实跑验过）；LSX 档整块 1040 B 也一起拷，且**向量区已单独
@@ -1919,7 +1922,7 @@ EOF」，等价上界 `0xFFFFFFFF`；`start + len` 加出溢出也按到 EOF 收
 ⑦ 节流粒度是拍（500 us），不是 Linux 那种 `hrtimer` 级的补充；⑧ 无 `sched_setattr` 的
 `SCHED_FLAG_DL_OVERRUN` 检测，超额运行只能靠节流兜住。
 
-### 8.18 异步 I/O（U-29）：`F_SETOWN` / `F_GETOWN` / `O_ASYNC` + SIGIO（2026-11-27，QEMU LA64 24 条 + 宿主 44 条）
+### 8.18 异步 I/O（U-29）：`F_SETOWN` / `F_GETOWN` / `O_ASYNC` + SIGIO（2026-11-27；U-31 起 QEMU LA64 38 条 + 宿主 72 条）
 
 **是什么、不是什么。** Linux 的异步 I/O 通知有三个层次：`fcntl(F_SETOWN)` 登记「出了事
 发给谁」、`F_SETFL(O_ASYNC)` 打开这个 fd 的通知开关、内核对「fd 状态变化」投一次 `SIGIO`。
@@ -1929,8 +1932,8 @@ EOF」，等价上界 `0xFFFFFFFF`；`start + len` 加出溢出也按到 EOF 收
   自己睡醒重放，不是事件通知）；
 * 边缘触发去重不做：每次 `lx_pipe_wake(pi, 0)` 都投一次，与 Linux 的 `SIGIO` 语义同一
   档（Linux 也不保证「每个字节一次」）；
-* 实时信号排队（`sigqueue` / `SA_SIGINFO` 的 `si_fd` / `si_band`）不做，`SIGIO` 是普通
-  信号 29，投递的是标准 `rt_sigaction` 的 handler；
+* 实时信号排队（`sigqueue`）不做；`SA_SIGINFO` 的三参派发与 `si_band` / `si_fd`
+  在 U-31 已做（§8.19），`SIGIO` 仍是普通信号 29；
 * 进程组（`F_SETOWN` 传负值）不做：Linux 允许把通知发给进程组，本层没有进程组模型，
   负值一律 `-EINVAL` 并计数 `s_sigio_pgrp_refused`，**不假装登记上了**。
 
@@ -1956,7 +1959,7 @@ kind、同一 pipe 对象**的其它 fd（管道是唯一「一个对象被多�
 handler 被调到，`rt_sigreturn` 之后 `a0` 仍是被打断的那次调用的返回值（写入字节数）——
 信号不吞返回值，也不吞管道里的字节。
 
-**实测读数（`[sio]` 行，QEMU LA64 fork 档，24 条）**
+**实测读数（`[sio]` 行，QEMU LA64 fork 档，38 条）**
 
 ```
 [sio] getown on console is 0 -> 0 ok
@@ -1974,6 +1977,12 @@ handler 被调到，`rt_sigreturn` 之后 `a0` 仍是被打断的那次调用的
 [sio] write after O_ASYNC returns the byte -> 1 ok
 [sio] SIGIO handler ran -> 1 ok
 [sio] SIGIO signo is 29 -> 29 ok
+[sio] SIGIO siginfo pointer is set -> 1 ok
+[sio] SIGIO si_signo -> 29 ok
+[sio] SIGIO si_code is POLL_IN -> 1 ok
+[sio] SIGIO si_band -> 65 ok
+[sio] SIGIO si_fd -> 3 ok
+[sio] SIGIO ucontext pc is non-zero -> 1 ok
 [sio] read still returns the byte -> 1 ok
 [sio] the byte survived -> 105 ok
 [sio] clear O_ASYNC -> 0 ok
@@ -1983,6 +1992,14 @@ handler 被调到，`rt_sigreturn` 之后 `a0` 仍是被打断的那次调用的
 [sio] re-open O_ASYNC -> 0 ok
 [sio] close writer returns 0 -> 0 ok
 [sio] close writer (EOF) sends SIGIO -> 1 ok
+[sio] SIGPIPE pipe2 -> 0 ok
+[sio] rt_sigaction(SIGPIPE, SA_SIGINFO) -> 0 ok
+[sio] close SIGPIPE pipe read end -> 0 ok
+[sio] write with no reader returns -EPIPE -> -32 ok
+[sio] SIGPIPE handler ran -> 1 ok
+[sio] SIGPIPE si_signo -> 13 ok
+[sio] SIGPIPE si_code is SI_USER -> 0 ok
+[sio] SIGPIPE si_pid is self -> 14 ok
 ```
 
 `105` 是写进去的那个字节 `'i'`；`11` 是本任务号（每档可能不同，门禁用形态判）。三条
@@ -1994,21 +2011,22 @@ handler 被调到，`rt_sigreturn` 之后 `a0` 仍是被打断的那次调用的
 杀掉，后面的读数全丢；宿主用例 `t_async_io` 第 7 节断言「返回值先写回、随后
 `g_exit_code == 128 + 29`」，与 Linux 的默认动作一致。
 
-**宿主的 44 条**（`test_linux_abi_host.c` 的 `t_async_io`，七节）把 QEMU 夹具造不出来的
+**宿主的 72 条**（`test_linux_abi_host.c`：`t_async_io` 44 条七节 + U-31 的
+`t_siginfo` 28 条五节）把 QEMU 夹具造不出来的
 状态补齐：控制台对象的 `-EINVAL`/0、另一条管道只开 `O_ASYNC` 不设主人（扫描必须跳过
 `owner == 0`）、写边 fd（`kind != PIPE_R`）不投递、`dup` 双向共享（5 条）、清 `O_ASYNC`
 后不投递且 `reg` 没被动过、无主人不投递、EOF 也投一次、默认动作结束任务。**宿主用例的
 一个坑**：投递之后 `s_sig_blocked` 会含该信号位，宿主不跑用户指令就等不到 `rt_sigreturn`
 把它装回去——所以同一节里只能断言一次投递，要再断言必须重新 `fresh()`。
 
-**门禁。** `tools/fork_gate.py` 的 `SIGIO_CHECKS = 24`：`[sio]` 前缀单独计数（与 `[fork]`
+**门禁。** `tools/fork_gate.py` 的 `SIGIO_CHECKS = 38`：`[sio]` 前缀单独计数（与 `[fork]`
 的十档常量互不干扰），十档都带 `-DARKRTOS_USE_LINUX_SIGIO=1`（否则「换档整段消失」会被
 当成正常）。十条必现读数逐条校验（含带任务号的两条走形态正则），坏日志自检另加三种
 `sio` 形态（少一条、插一条 FAIL、改一个数字）。
 
-**覆盖率。** 宿主 `linuxabisigio` 档单跑 `test_linux_abi_host.c` 的 44 条断言、单档 92.83%；
+**覆盖率。** 宿主 `linuxabisigio` 档单跑 `test_linux_abi_host.c` 的 72 条断言、单档 93.11%；
 八档（`linuxabi` / `linuxabifutex` / `linuxabifilemap` / `linuxabiselect` / `linuxabisocket` /
-`linuxabisched` / `linuxabisigio` 与关档）求行并集后 `arkrtos_linux_abi` 97.27%（基线 97.00% 不动），
+`linuxabisched` / `linuxabisigio` 与关档）求行并集后 `arkrtos_linux_abi` 97.34%（基线 97.00% 不动），
 全量 `COVERAGE-GATE OK`（71 个模块均不低于基线）。
 
 **边界。** ① 只报「fd 变可读（含 EOF）」，可写方向、边缘触发去重、`si_fd`/`si_band`、
@@ -2017,6 +2035,73 @@ handler 被调到，`rt_sigreturn` 之后 `a0` 仍是被打断的那次调用的
 不会跨进程同步（要正确必须引入真正的 file 对象与跨进程引用计数，见
 `docs/已知限制.md`）；④ 主人只认单个任务号，任务退出后 `F_GETOWN` 仍读回那个号
 （不发呆信号也不清理，与「登记是数值」的语义一致）。
+
+### 8.19 `siginfo_t` 与 `ucontext_t`（U-31）：`SA_SIGINFO` 三参派发（2026-11-27，QEMU LA64 38 条 + 宿主 72 条）
+
+**是什么。** Linux 的信号处理函数有两种调用约定：`void (*)(int)` 与
+`SA_SIGINFO` 的 `void (*)(int, siginfo_t *, void *)`。后者让处理函数能读到「谁发的、
+为什么发」，以及被打断时的上下文（`ucontext_t`）。U-31 把这一档做进来：
+
+| 项 | 现状 |
+|---|---|
+| 派发 | `sa_flags & SA_SIGINFO` 时 `a1 = fsp + 头长`（siginfo）、`a2 = a1 + 128`（ucontext）；没装则 `a1`/`a2` 原样不动 |
+| 帧布局 | 头（`magic`/`signo`/`blocked`/帧长，4 字，LA64 32 B）→ `siginfo_t` 128 B → `ucontext_t` 432 B → trap 帧快照；头的字节数按 `sizeof(unsigned long)` 派生，32 位宿主上是 16 B |
+| siginfo 字段 | `si_signo` / `si_errno`(恒 0) / `si_code`；`_kill` 族填 `si_pid` / `si_uid`(恒 0)；`_sigpoll`（SIGIO）填 `si_band` / `si_fd` |
+| `si_code` 来源 | `kill` → `SI_USER`(0)；`tkill` / `tgkill` → `SI_TKILL`(-6)；SIGPIPE（内核代发）→ `SI_USER`；SIGIO → `POLL_IN`(1) |
+| `si_pid` | 发送者任务号；线程档取组长号（Linux `task_tgid_vnr` 语义） |
+| ucontext | `uc_sigmask`（handler 期间生效的屏蔽字）、`uc_mcontext.pc` / `ra` / `tp` / `sp`；`uc_stack.ss_flags = SS_DISABLE`（没有 altstack）、`uc_link = 0` |
+| 不填的 | 浮点 / 向量现场、其余 GPR、altstack、`si_uid` 的真实 uid（本层没有 uid 概念，恒 0） |
+
+**为什么不排队。** pending 每个信号只有一位，来源也只有一格（8 字节：`code` / `pid` /
+`fd`，32 个信号共 256 B/进程）。同一信号连发两次，处理函数读到的是**最后一次**的来源。
+这与「pending 位只表达有没有」是同一个取舍，写进已知限制；真排队要引入每信号一个链表，
+把一个只有一位的机制变成内存分配点。
+
+**SIGIO 走 `_sigpoll`。** Linux 的 `send_sigio()` 用 `SIGPOLL` 的 siginfo：
+`si_code = POLL_IN`、`si_band = POLLIN|POLLRDNORM (0x41)`、`si_fd` 是那个 fd 号。本层
+照做。一个管道对象只投一次：`dup` 出来的副本与原 fd 共享 `O_ASYNC` 与主人，扫到**最小
+fd 号**就停（Linux 上 `dup` 共享同一个 `struct file`，fasync 也只有一份）。
+
+**SIGPIPE 走 `SI_USER`。** Linux 的 `send_sig(SIGPIPE, current, 0)` 走 `SEND_SIG_NOINFO`：
+`si_code = SI_USER`、`si_pid` = 自己的进程号、`si_uid` = 自己的 uid（本层 0）。
+
+**ucontext 是只读视图。** handler 改了 `ucontext` 里的寄存器**不会**影响 `rt_sigreturn`
+之后的现场：`rt_sigreturn` 只认帧里那份 trap 帧快照（改上下文是 `setcontext` 一类接口
+才做的事，本层没有）。这一点写进已知限制，不做「改了也不生效」的静默。
+
+**实测读数（`[sio]` 段新增 14 条，QEMU LA64）**
+
+```
+[sio] SIGIO siginfo pointer is set -> 1 ok
+[sio] SIGIO si_signo -> 29 ok
+[sio] SIGIO si_code is POLL_IN -> 1 ok
+[sio] SIGIO si_band -> 65 ok
+[sio] SIGIO si_fd -> 3 ok
+[sio] SIGIO ucontext pc is non-zero -> 1 ok
+[sio] SIGPIPE pipe2 -> 0 ok
+[sio] rt_sigaction(SIGPIPE, SA_SIGINFO) -> 0 ok
+[sio] close SIGPIPE pipe read end -> 0 ok
+[sio] write with no reader returns -EPIPE -> -32 ok
+[sio] SIGPIPE handler ran -> 1 ok
+[sio] SIGPIPE si_signo -> 13 ok
+[sio] SIGPIPE si_code is SI_USER -> 0 ok
+[sio] SIGPIPE si_pid is self -> 14 ok
+```
+
+`65` 是 `POLLIN|POLLRDNORM`；`3` 是那个管道的读端号（`dup` 出来的副本号不报——最小
+fd 号才是登记点）；`14` 是本任务号（每档可能不同，门禁用形态判）。
+
+**宿主的 28 条**（`test_linux_abi_host.c` 的 `t_siginfo`，五节）把 QEMU 夹具造不出来的
+现场补齐：① `kill` 自己 → `si_code = SI_USER`、`si_pid` = 自身任务号、`uc_sigmask` 含本
+信号位、`mcontext.pc` / `regs[3]` 就是被打断的 pc / sp、`uc_stack.ss_flags =
+SS_DISABLE`；② 没装 `SA_SIGINFO` 时 `a1` / `a2` 原样不动，但帧里的 siginfo 仍然铺好；
+③ `tkill` → `si_code = SI_TKILL`；④ SIGPIPE 走 `SI_USER`；⑤ SIGIO 走 `_sigpoll`
+（`si_code = 1`、`si_band = 0x41`、`si_fd` = 读端号）。
+
+**边界。** ① 同一信号不排队、只留最后一次来源；② `si_uid` 恒 0（本层没有 uid）；
+③ `ucontext` 只填 `uc_sigmask` 与 pc / ra / tp / sp，没有浮点 / 向量现场与 altstack，
+也没有 `uc_link`；④ 改 `ucontext` 不生效（要改上下文得走别的接口）；⑤ 帧头的字节数
+按字宽派生、缓冲按**字节**算——这一条是 U-31 踩出来的真 bug，见 §11 ⑪。
 
 ## 9 开关与零体积
 
@@ -2106,14 +2191,14 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py --no-build
 
 socket 这一层是**两侧都有读数**的：宿主侧是 `tools/coverage_gate.py` 的第六个 Linux ABI 档
 `linuxabisocket`（`-DARKRTOS_USE_LINUX_SOCKET=1 -DARKRTOS_USE_LWIP=1`，`-Wl,--wrap=arkrtos_port_svc_exec_frame`）
-跑 `test_linux_abi_host.c`，964 checks 全绿、单档覆盖率 98.51%、六档 union 98.84%（基线 98.82%），
+跑 `test_linux_abi_host.c`，992 checks 全绿、单档覆盖率 96.10%、八档 union 97.34%（基线 97.00%），
 `tools/ci_gate.py` 的 `linux-abi-host` 项已带上这一档；板级侧是 `tools/fork_gate.py` 的
 **第八档**（`-DARKRTOS_USE_LINUX_SELECT=1 -DARKRTOS_USE_LINUX_SOCKET=1 -DARKRTOS_USE_LWIP=1`），
 QEMU LA64 上 242 条 check 全 `ok` + `exit code 0`。
 
 fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**71 项**；fork / fork+COW / fork+COW+SHM / fork+COW+SHM+futex / fork+COW+SHM+futex+filemap / fork+COW+SHM+futex+filemap+mprotect / fork+COW+SHM+futex+filemap+mprotect+select / fork+COW+SHM+futex+filemap+mprotect+select+socket / fork+COW+SHM+futex+filemap+mprotect+select+socket+thread / fork+COW+SHM+futex+filemap+mprotect+select+socket+thread+appq **十档各跑一遍**，所以 build / qemu-readout / parser-selfcheck 各出现十次、compile-on 十次；再加十档共用的 `default-off` / `off-zero-symbols` / `off-zero-port` / `board-switch` / `restore-default` 五道，与九档各自的 `kconfig-wired-<档>` / `features-guard-<档>` / `default-off-<档>` 三件套二十七道，合计 71 项）：
 
-上面这些 `[fork]` 常量都不含 `[sched]`（U-28，63 条）与 `[sio]`（U-29，24 条）——
+上面这些 `[fork]` 常量都不含 `[sched]`（U-28，63 条）与 `[sio]`（U-29 + U-31，38 条）——
 两个前缀各自单独计数，十档都跑同一份夹具，所以「换档时整段消失」不会被当成正常。
 
 | 项 | 钉住什么 |
@@ -2246,6 +2331,18 @@ Linux 的 futex 号表把「同一格参数」在不同 op 下复用：`REQUEUE`
 绝对还是相对」，并把结果存成**截止时刻**而不是时长——后者在时间片重放模型里根本无法表达「已经
 等了多久」。教训：**移植 op 号表时，先按参数位置画一张表，再写代码**；同一个位置在不同 op 下的
 含义不同，是 Linux 一类老接口的常态。
+
+**⑪ 信号帧缓冲按「字」算，32 位宿主上 `copy_to_user` 读越界。**
+U-31 给帧加了 `siginfo` + `ucontext` 两块固定区（560 B）之后，`s_sigframe` 仍按
+`unsigned long[...]` 声明，而帧长 `total` 是**按字节**算的（592 + 快照）。LA64 上
+`sizeof(unsigned long) == 8`，两者差 8 倍也够用，所以 QEMU 全绿；32 位宿主上
+`sizeof(unsigned long) == 4`，缓冲只有字节数的一半 ⇒ `copy_to_user` 从缓冲后面读
+出去，行为未定义（这一轮宿主用例抓到的是「帧长 / payload 偏移」两条断言先红）。
+修法：缓冲改用 `LX_SIGFRAME_BUF_BYTES`（头 + 128 + 432 + 快照，全按字节）向上取整
+到字；头长用 `sizeof(unsigned long)` 派生；固定区按**字节**清零、`export` / `import`
+都从 `(uint8 *)s_sigframe + 固定区偏移` 起算。教训：**只要有一处按字节、一处按字，
+就必须把「字」彻底换成「字节」**——混用在一个 ABI 宽度上能跑，在另一个上直接越界，
+而越界读在宿主上通常表现为「读数莫名其妙」，不是段错误。
 
 ## 12 边界
 
