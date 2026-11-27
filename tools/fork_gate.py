@@ -81,6 +81,12 @@
      共享就退化成两次私有分配 —— 那种实现父子都不报错，只是各改各的），
      以及六条 SHM 专属读数逐条出现：两条非法形态必须回 -ENOSYS（关档/组合
      反假绿）、映射成功、起始清零、父看到子写、子看到父 fork 之后的写。
+  D2. LOCK 段（U-27 记录锁跨进程，32 条，十档都编）：三条必现读数
+     ——`lock child GETLK pid is not self -> 1 ok`（F_GETLK 真把别人的锁报
+     回来）、`lock waiter blocked >= 40 ms -> 1 ok`（F_SETLKW 真挂起了，
+     不是失败就立刻返回）、`lock free after child close (conflict range)
+     -> 0 ok`（close 按文件释放，不是按进程一刀切）。另外六条读数把
+     SEEK_END 换算、不相交区间、l_whence 归一、l_start 绝对化分别钉死。
   E. 解析器自检：把合成坏日志喂给同一个判据（去掉 PASS、改退出码、插 FAIL、
      少一条 check、父子 pid 改成相同、去掉 exec rc=0），每种坏法都必须判红。
 
@@ -89,6 +95,10 @@
 **fd 表按进程一份**（子 close 不影响父的读端）、**管道对象共享且引用计数正确**
 （子写的数据父读得到）、**跨任务 SIGCHLD**（子退出后父的 handler 在下一次系统
 调用返回前被调用）。
+
+覆盖（记录锁部分）：跨进程冲突（F_SETLK 回 -EAGAIN）、F_GETLK 报别人的锁
+（类型 / 进程号 / 区间 / whence）、F_SETLKW 的挂起与唤醒、SEEK_END 换算、
+不相交区间各自成锁、close 按文件释放全部锁。
 
 不覆盖：vfork / CLONE_VM 线程（无共享地址空间，一律 -EINVAL）、CLONE_FILES
 （每进程 fd 表是 fork 语义的一部分，共享 fd 表这种形态本门禁不为它背书）。
@@ -211,13 +221,24 @@ SIGN_KEY_HEADER = """#ifndef ARKRTOS_SIGN_KEY_LOCAL_H
 #   子进程排空）pipe2 / 状态管道 pipe2 / 填满 256 / clone>0 / 写全 300 /
 #   等满 40 ms / 子被 reap / 子退出码 13 / 子回传 5 字节 / 子共读 556 /
 #   逐字节图案一致 —— 合计 47 条。
-EXPECT_FORK_CHECKS = 47
+# LOCK 段（U-27 记录锁跨进程，32 条，不随档变化）：十档跑的是同一个夹具
+# 二进制，这一段全都在，所以上面每个期望值都是「原段落合计 + LOCK_CHECKS」。
+# 逐条是：两根管子的 pipe2、探测文件打开、父 F_SETLK / 自己的锁不算冲突、
+# fork、子 SETLK 撞父的锁回 -EAGAIN、子不相交 SETLK、子 SEEK_END SETLK、
+# 父用 SEEK_SET 问不相交段（rc / l_pid 是子进程 / l_start=200）、父用
+# SEEK_SET 问文件尾段（rc / l_pid 是子进程，这条同时钉住 SEEK_END 换算）、
+# 子 F_GETLK 读父的锁（rc / 类型 / l_pid 不是自己 / 绝对 start / len /
+# whence 归一成 SEEK_SET）、父解锁、子 F_SETLKW 回 0 且墙钟 >= 40 ms、
+# 父看到锁的主人是子进程（rc / l_pid）、子 close、父把三把锁逐个拿回来
+# （冲突段 / 不相交段 / 文件尾段）、子被 reap、子退出码 0。
+LOCK_CHECKS = 32
+EXPECT_FORK_CHECKS = 47 + LOCK_CHECKS
 # COW 段多 5 条：pipe2、clone>0、子被 reap、子看到 fork 前的值（位掩码 3）、
 # 父自己的写还在。合计 52 条。
-EXPECT_COW_CHECKS = 52
+EXPECT_COW_CHECKS = 52 + LOCK_CHECKS
 # SHM 段多 8 条：两条非法形态回 -ENOSYS（反假绿）、匿名共享映射成功、起始清零、
 # clone>0、父看到子写、子被 reap、子看到父 fork 之后的写。合计 60 条。
-EXPECT_SHM_CHECKS = 60
+EXPECT_SHM_CHECKS = 60 + LOCK_CHECKS
 # FUTEX 段多 9 条：共享页映射、无等待者 WAKE==0、值不等 WAIT==-EAGAIN、
 # 未知 op==-ENOSYS、clone>0、被叫醒的 WAIT==0、父看到新值、子被 reap、
 # 唤醒者位掩码 3（看到 1 且 WAKE 回 1）。
@@ -233,7 +254,7 @@ EXPECT_SHM_CHECKS = 60
 # PI robust 死亡交接 7 条、非 PI robust 7 条。76 + 37 = 113 条。
 # 阻塞管道跨执行流段（不随档变化）多 20 条：113 + 20 = 133 条... 实测
 # 127 + 20 = 147 条（基线 127 已含此前的全部段）。
-EXPECT_FUTEX_CHECKS = 147
+EXPECT_FUTEX_CHECKS = 147 + LOCK_CHECKS
 # FILEMAP 段多 20 条：只读私有映射的内容三处读数（首字节 / 第 25 / 第 4095）、
 # 三条参数校验（未对齐 offset -EINVAL、坏 fd -EBADF、只读 fd 上的可写共享
 # -EACCES）、offset=4096 的映射与 EOF 补零、O_RDWR 打开、可写共享映射与
@@ -242,7 +263,7 @@ EXPECT_FUTEX_CHECKS = 147
 # 再叠 futex 档的 15 条（含多时间片 7 条）= 76 条。
 # 再加 futex 第四档的 37 条：96 + 37 = 133 条；再加第五档（条件变量 PI 变体）
 # 的 14 条：133 + 14 = 147 条；再加阻塞管道段 20 条 = 167 条。
-EXPECT_FILEMAP_CHECKS = 167
+EXPECT_FILEMAP_CHECKS = 167 + LOCK_CHECKS
 # MPROTECT 段多 10 条：8 KB 映射、mprotect(RO)==0、只读页仍可读、**同一对里的
 # 另一半 4 KB 仍可写**（4 KB 粒度与 8 KB 粒度在此分家）、mprotect(RW)==0、
 # 恢复保护后写回得去、再设 RO、为违规写 fork 出子进程、子进程被摘掉（不是重启）、
@@ -250,7 +271,7 @@ EXPECT_FILEMAP_CHECKS = 167
 # 合计 80 条；再叠 futex 档的 15 条（含多时间片 7 条）= 87 条。
 # 再加 futex 第四档的 37 条：107 + 37 = 144 条；再加第五档的 14 条：158 条；
 # 再加阻塞管道段 20 条 = 178 条。
-EXPECT_MPROTECT_CHECKS = 178
+EXPECT_MPROTECT_CHECKS = 178 + LOCK_CHECKS
 # SELECT 段多 15 条：pipe2、空管道读端不就绪（返回值 0）、非就绪时用户集被清位、
 # 50 ms 定时等待回 0、定时等待墙钟 >= 40 ms、写进 3 字节、读端就绪（1）、
 # 就绪位在用户集里保留、写端有空间就绪、stdout 恒可写、写满后写端不就绪、
@@ -260,7 +281,7 @@ EXPECT_MPROTECT_CHECKS = 178
 # select 档里编，socket 档自己不编，所以 socket 档仍然从 122 起算）。
 # 再加 futex 第四档的 37 条：123 + 37 = 160 条；再加第五档的 14 条：174 条；
 # 再加阻塞管道段 20 条 = 194 条。
-EXPECT_SELECT_CHECKS = 194
+EXPECT_SELECT_CHECKS = 194 + LOCK_CHECKS
 # SOCKET 段多 37 条：等协议栈、stream/dgram 两个 fd、坏 domain 与坏 type
 # 两个 errno、bind/listen/getsockname（addrlen 16、family、端口 8081）、
 # connect、accept（fd + 写回 family）、TCP 收发与载荷逐字节（前 4 字节打包
@@ -271,7 +292,7 @@ EXPECT_SELECT_CHECKS = 194
 # 往返不按一个 100 ms 等待时间片结算」的性能回归门）。
 # 再加 futex 第四档的 37 条：161 + 37 = 198 条；再加第五档的 14 条：212 条；
 # 再加阻塞管道段 20 条 = 232 条。
-EXPECT_SOCKET_CHECKS = 232
+EXPECT_SOCKET_CHECKS = 232 + LOCK_CHECKS
 # THREAD 段多 25 条：clone(CLONE_THREAD)>0、PARENT_SETTID 写回、CLEARTID 上的
 # futex WAIT 回 0、CLEARTID 被清 0、线程真跑了、CHILD_SETTID 看到自己的 tid、
 # tid != 父 tid、线程 getpid == tgid、父 getpid 未变、SETTLS 落到 $tp、两栈
@@ -282,7 +303,7 @@ EXPECT_SOCKET_CHECKS = 232
 # 组长发起 exit_group 整组被 reap 且码 7。合计 161 + 25 = 186 条。
 # 再加 futex 第四档的 37 条（实测 231，含 thread 段自己多出的 8 条）；
 # 再加第五档的 14 条：245 条；再加阻塞管道段 20 条 = 265 条。
-EXPECT_THREAD_CHECKS = 265
+EXPECT_THREAD_CHECKS = 265 + LOCK_CHECKS
 # QUOTA 段多 11 条（上限 3 = 父 + 1 子 + 1 线程）：建管子、上限内 fork 成功、
 # 线程把最后一格占掉、超限 fork==-EAGAIN、超限线程==-EAGAIN、被阻塞的子进程
 # 真被 reap、回收后第二个线程成功、**空间空闲时 fork 仍被拒**（全段最干净的
@@ -290,7 +311,7 @@ EXPECT_THREAD_CHECKS = 265
 # 额度回来后立刻能再起且退出码照传。合计 186 + 12 = 198 条。
 # 再加 futex 第四档的 37 条（实测 243）；再加第五档的 14 条：257 条；
 # 再加阻塞管道段 20 条 = 277 条。
-EXPECT_QUOTA_CHECKS = 277
+EXPECT_QUOTA_CHECKS = 277 + LOCK_CHECKS
 # 上面这一档的每一段都对应一类「看起来对」的实现：另开地址空间（共享全局读
 # 不到）、每线程一份 fd 表（fork 段留不住）、线程退出就把进程拆了（进程活不
 # 下来）、把线程当进程挂到 wait4 上（exit_group 码不对）。
@@ -969,6 +990,12 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
         "MAP_FIXED shared -> -ENOSYS -> -38 ok":
             "MAP_FIXED|MAP_SHARED 被悄悄接受（这种形态本内核不支持）",
     }
+    req["lock child GETLK pid is not self -> 1 ok"] = \
+        "子进程没读到父进程的锁（F_GETLK 没把别人的锁报回来）"
+    req["lock waiter blocked >= 40 ms -> 1 ok"] = \
+        "F_SETLKW 没真的挂起（墙钟里量不到 40 ms）"
+    req["lock free after child close (conflict range) -> 0 ok"] = \
+        "close 没有按文件释放锁（锁被进程一刀切带走了，或者根本没放）"
     if cow:
         req["cow child saw pre-fork values (bits=3) -> 3 ok"] = \
             "COW 没生效（子看到了父 fork 之后的写）"

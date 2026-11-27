@@ -163,6 +163,21 @@
 #define FM_PATH             "/mnt/ram/filemap"
 #define FM_SIZE             5000
 
+/* 记录锁（fcntl 25，U-27）。asm-generic 的 F_* 与 l_type 取值，与内核
+ * lx_fcntl_lock 认的那一组一致。 */
+#define LX_FCNTL            25
+#define LX_F_GETLK          5
+#define LX_F_SETLK          6
+#define LX_F_SETLKW         7
+#define LX_RDLCK            0
+#define LX_WRLCK            1
+#define LX_UNLCK            2
+#define LX_SEEK_SET         0
+#define LX_SEEK_CUR         1
+#define LX_SEEK_END         2
+#define LK_PATH             "/mnt/ram/lockprobe"
+#define LK_SIZE             4096
+
 typedef long lx_long;
 
 /* ------------------------------------------------------------------
@@ -771,6 +786,117 @@ static void child_path(void)
     for (;;)
     {
     }
+}
+
+/* ------------------------------------------------------------------
+ * 记录锁（fcntl F_GETLK / F_SETLK / F_SETLKW，U-27）
+ *
+ * asm-generic 的 64 位 struct flock：l_type@0 / l_whence@2 / l_start@8 /
+ * l_len@16 / l_pid@24，整块 32 字节。LA64 上 long 就是 64 位，所以下面这个
+ * 声明与内核读的布局一致；每次填之前先把整块清 0，不让 padding 影响读数。
+ * ------------------------------------------------------------------ */
+struct lk_flock
+{
+    short l_type;
+    short l_whence;
+    long  l_start;
+    long  l_len;
+    int   l_pid;
+};
+
+static void lk_set(struct lk_flock *f, short type, short whence,
+                   long start, long len)
+{
+    unsigned char *p = (unsigned char *)f;
+    unsigned int   i;
+
+    for (i = 0u; i < (unsigned int)sizeof(*f); i++)
+    {
+        p[i] = 0u;
+    }
+    f->l_type   = type;
+    f->l_whence = whence;
+    f->l_start  = start;
+    f->l_len    = len;
+    f->l_pid    = -12345;       /* GETLK 无冲突时内核不许动它 */
+}
+
+static lx_long lk_call(lx_long fd, lx_long cmd, struct lk_flock *f)
+{
+    return lx3(LX_FCNTL, fd, cmd, (lx_long)(unsigned long)f);
+}
+
+/* 忙等一段时间：本内核的用户态没有 nanosleep，而这一段要的就是「父进程在
+ * 一方把锁握着不放」的确定性，不依赖调度顺序。mono_ms 读到 -1（QEMU 上
+ * clock_gettime 的已知偶发）时靠 guard 兜底，绝不死循环。 */
+static void lk_busy_ms(long ms)
+{
+    long tp    = mono_ms();
+    long guard = 0;
+
+    while (((mono_ms() - tp) < ms) && (guard < 2000000))
+    {
+        guard++;
+    }
+}
+
+/* 子进程侧：所有断言都在这里。g_fail 是 fork 之后各自的副本，子进程里的
+ * FAIL 不会传回父进程 —— 但每条 check 都直接写一行到控制台，门禁按行数
+ * 和 FAIL 行判，所以子进程的失败一样逃不掉。 */
+static void lk_child(int *pc, int *cp, lx_long pfd)
+{
+    struct lk_flock fl;
+    lx_long         me;
+    lx_long         rc;
+    long            t0;
+    long            t1;
+    char            b;
+
+    me = lx1(LX_GETPID, 0);
+
+    /* ① 父进程的写锁对子进程是真的冲突 */
+    lk_set(&fl, LX_WRLCK, LX_SEEK_SET, 0, 100);
+    check("lock child SETLK on parent lock == -EAGAIN",
+          lk_call(pfd, LX_F_SETLK, &fl), -LX_EAGAIN);
+
+    /* ② 不相交的区间照常加得上（锁按区间，不按整个文件） */
+    lk_set(&fl, LX_WRLCK, LX_SEEK_SET, 200, 100);
+    check("lock child disjoint SETLK", lk_call(pfd, LX_F_SETLK, &fl), 0);
+
+    /* ③ SEEK_END 换算：锁到文件尾 [4086,4096)。父进程稍后用 SEEK_SET 问
+     *    同一段，命中同一把锁 —— 换算对不对由**另一个进程**读出来。 */
+    lk_set(&fl, LX_WRLCK, LX_SEEK_END, -10, 10);
+    check("lock child SEEK_END SETLK", lk_call(pfd, LX_F_SETLK, &fl), 0);
+
+    (void)lx3(LX_WRITE, (lx_long)cp[1], (lx_long)(unsigned long)"D", 1);
+    (void)lx3(LX_READ, (lx_long)pc[0], (lx_long)(unsigned long)&b, 1);
+
+    /* ④ F_GETLK 读别人的锁：类型 / 进程号 / 绝对区间 / 归一后的 whence */
+    lk_set(&fl, LX_WRLCK, LX_SEEK_SET, 0, 100);
+    check("lock child GETLK sees parent lock", lk_call(pfd, LX_F_GETLK, &fl), 0);
+    check("lock child GETLK type is WRLCK", (lx_long)fl.l_type, LX_WRLCK);
+    check("lock child GETLK pid is not self", (fl.l_pid != (int)me) ? 1 : 0, 1);
+    check("lock child GETLK start is absolute 0", fl.l_start, 0);
+    check("lock child GETLK len is 100", fl.l_len, 100);
+    check("lock child GETLK whence is SEEK_SET", (lx_long)fl.l_whence, LX_SEEK_SET);
+
+    /* ⑤ F_SETLKW 真的挂起：先报「马上要睡」，父进程 100 ms 之后才解锁。
+     *    这不是「加锁失败就立刻返回」——返回值必须是 0，而且墙钟要量得出来。 */
+    lk_set(&fl, LX_WRLCK, LX_SEEK_SET, 0, 100);
+    (void)lx3(LX_WRITE, (lx_long)cp[1], (lx_long)(unsigned long)"P", 1);
+    t0 = mono_ms();
+    rc = lk_call(pfd, LX_F_SETLKW, &fl);
+    t1 = mono_ms();
+    check("lock child F_SETLKW rc", rc, 0);
+    check("lock waiter blocked >= 40 ms",
+          ((t0 > 0) && (t1 >= t0) && ((t1 - t0) >= 40)) ? 1 : 0, 1);
+
+    (void)lx3(LX_WRITE, (lx_long)cp[1], (lx_long)(unsigned long)"A", 1);
+    (void)lx3(LX_READ, (lx_long)pc[0], (lx_long)(unsigned long)&b, 1);
+
+    /* ⑥ close 按文件释放：这个 fd 一关，本文件上的三把锁一起消失 */
+    check("lock child close fd", lx1(LX_CLOSE, pfd), 0);
+    (void)lx3(LX_WRITE, (lx_long)cp[1], (lx_long)(unsigned long)"Z", 1);
 }
 
 void linux_main(unsigned long sp)
@@ -3733,6 +3859,147 @@ void linux_main(unsigned long sp)
         (void)i;
     }
 #endif
+
+/* ------------------------------------------------------------------
+     * 记录锁（fcntl F_GETLK / F_SETLK / F_SETLKW，U-27）
+     * ------------------------------------------------------------------
+     * 宿主用例只有一个进程槽，只能读「锁表容量」；跨进程的那几条语义必须
+     * 在这里真开两个进程槽才验得出来：
+     *   1) 父进程握着的锁对子进程是真的冲突（F_SETLK 回 -EAGAIN），而
+     *      自己的锁不与自己冲突；
+     *   2) F_GETLK 把**别人的**锁原样报回来：l_type / l_pid 是持锁进程，
+     *      l_whence 归一成 SEEK_SET，l_start 是绝对偏移；
+     *   3) F_SETLKW 真的挂起：子进程睡在 SETLKW 上，父进程 100 ms 之后才
+     *      解锁，子进程的墙钟读数必须 >= 40 ms（不是失败就立刻返回，也不是
+     *      根本没挂起）；
+     *   4) SEEK_END 的换算由**另一个进程**读出来：子进程用 SEEK_END(-10,10)
+     *      锁文件尾，父进程用 SEEK_SET(4086,10) 问，命中同一把锁；
+     *   5) close 按文件释放：子进程一关 fd，它在**这个文件**上的三把锁
+     *      （冲突段 / 不相交段 / 文件尾段）全部消失，父进程逐个拿得回来。
+     * 反假绿：第 5 条三把锁分三次判 —— 只判其中一把的话，「关 fd 时只放掉
+     * 最后一把」或者「按进程一刀切、顺手把父的锁也放掉」都能混过去。
+     */
+    {
+        int            pc[2];       /* parent -> child：放行 / 回执 */
+        int            cp[2];       /* child  -> parent：报告 */
+        lx_long        pfd;
+        lx_long        kid;
+        lx_long        st;
+        lx_long        r;
+        struct lk_flock fl;
+        char           b;
+
+        check("lock pipe2 barrier -> 0",
+              lx2(LX_PIPE2, (lx_long)(unsigned long)pc, 0), 0);
+        check("lock pipe2 report -> 0",
+              lx2(LX_PIPE2, (lx_long)(unsigned long)cp, 0), 0);
+        pfd = lx3(LX_OPENAT, LX_AT_FDCWD, (lx_long)(unsigned long)LK_PATH,
+                  LX_O_RDONLY);
+        check("lock probe file open > 2", (pfd > 2) ? 1 : 0, 1);
+
+        if ((pfd > 2) && (pc[0] >= 0) && (cp[0] >= 0))
+        {
+            /* 父进程先握一把写锁，然后才 fork：锁在子进程出现之前就在表里。 */
+            lk_set(&fl, LX_WRLCK, LX_SEEK_SET, 0, 100);
+            check("lock parent F_SETLK [0,100)", lk_call(pfd, LX_F_SETLK, &fl), 0);
+
+            /* 自己的锁查出来不算冲突：只把 l_type 改成 F_UNLCK。 */
+            lk_set(&fl, LX_WRLCK, LX_SEEK_SET, 0, 100);
+            check("lock parent F_GETLK on own lock",
+                  lk_call(pfd, LX_F_GETLK, &fl), 0);
+            check("lock own lock is not a conflict", (lx_long)fl.l_type, LX_UNLCK);
+
+            kid = lx3(LX_CLONE, LX_SIGCHLD, 0, 0);
+            if (kid == 0)
+            {
+                lk_child(pc, cp, pfd);
+                (void)lx1(LX_EXIT, 0);
+                for (;;)
+                {
+                }
+            }
+            check("lock fork for the waiter > 0", (kid > 0) ? 1 : 0, 1);
+
+            if (kid > 0)
+            {
+                /* 子进程把两把不冲突的锁备好了才算数（'D' 之前别抢跑）。 */
+                (void)lx3(LX_READ, (lx_long)cp[0],
+                          (lx_long)(unsigned long)&b, 1);
+
+                /* 不相交的那把：父进程用 SEEK_SET(200,100) 问，命中子进程 */
+                lk_set(&fl, LX_WRLCK, LX_SEEK_SET, 200, 100);
+                check("lock parent GETLK child disjoint",
+                      lk_call(pfd, LX_F_GETLK, &fl), 0);
+                check("lock parent GETLK disjoint pid is child",
+                      (lx_long)fl.l_pid, kid);
+                check("lock parent GETLK disjoint start is 200", fl.l_start, 200);
+
+                /* SEEK_END 换算的另一半：同一段用 SEEK_SET 问，还是它 */
+                lk_set(&fl, LX_WRLCK, LX_SEEK_SET, LK_SIZE - 10, 10);
+                check("lock parent GETLK eof region",
+                      lk_call(pfd, LX_F_GETLK, &fl), 0);
+                check("lock parent GETLK eof pid is child",
+                      (lx_long)fl.l_pid, kid);
+
+                /* 回执：子进程等这一字节才往下走到 SETLKW。没有它两边会
+                 * 各自等各自（子等父的放行、父等子的「要睡了」）。 */
+                (void)lx3(LX_WRITE, (lx_long)pc[1],
+                          (lx_long)(unsigned long)"G", 1);
+
+                /* 等子进程说「马上要睡」，再拖 100 ms 才解锁：读数据是可证伪的 */
+                (void)lx3(LX_READ, (lx_long)cp[0],
+                          (lx_long)(unsigned long)&b, 1);
+                lk_busy_ms(100);
+                lk_set(&fl, LX_UNLCK, LX_SEEK_SET, 0, 100);
+                check("lock parent unlock [0,100)",
+                      lk_call(pfd, LX_F_SETLK, &fl), 0);
+
+                /* 子进程拿到锁之后再看一眼：现在这把锁的主人是它 */
+                (void)lx3(LX_READ, (lx_long)cp[0],
+                          (lx_long)(unsigned long)&b, 1);
+                lk_set(&fl, LX_WRLCK, LX_SEEK_SET, 0, 100);
+                check("lock parent GETLK child blocking lock",
+                      lk_call(pfd, LX_F_GETLK, &fl), 0);
+                check("lock parent GETLK blocking pid is child",
+                      (lx_long)fl.l_pid, kid);
+                (void)lx3(LX_WRITE, (lx_long)pc[1],
+                          (lx_long)(unsigned long)"X", 1);
+
+                /* 子进程关掉 fd 之后，三把锁必须一把不剩 */
+                (void)lx3(LX_READ, (lx_long)cp[0],
+                          (lx_long)(unsigned long)&b, 1);
+                lk_set(&fl, LX_WRLCK, LX_SEEK_SET, 0, 100);
+                check("lock free after child close (conflict range)",
+                      lk_call(pfd, LX_F_SETLK, &fl), 0);
+                lk_set(&fl, LX_WRLCK, LX_SEEK_SET, 200, 100);
+                check("lock free after child close (disjoint range)",
+                      lk_call(pfd, LX_F_SETLK, &fl), 0);
+                lk_set(&fl, LX_WRLCK, LX_SEEK_SET, LK_SIZE - 10, 10);
+                check("lock free after child close (eof range)",
+                      lk_call(pfd, LX_F_SETLK, &fl), 0);
+
+                st = -1;
+                r  = -1;
+                for (;;)
+                {
+                    r = lx4(LX_WAIT4, kid, (lx_long)(unsigned long)&st, 0, 0);
+                    if ((r == kid) || (r < 0))
+                    {
+                        break;
+                    }
+                }
+                check("lock child reaped", r, kid);
+                check("lock child exit code 0", (st >> 8) & 0xFF, 0);
+            }
+
+            (void)lx1(LX_CLOSE, pfd);
+        }
+
+        (void)lx1(LX_CLOSE, (lx_long)pc[0]);
+        (void)lx1(LX_CLOSE, (lx_long)pc[1]);
+        (void)lx1(LX_CLOSE, (lx_long)cp[0]);
+        (void)lx1(LX_CLOSE, (lx_long)cp[1]);
+    }
 
     if (g_fail == 0)
     {

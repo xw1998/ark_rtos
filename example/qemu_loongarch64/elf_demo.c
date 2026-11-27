@@ -877,6 +877,34 @@ static void task_elf_demo(void)
 #endif
 
 #if (ARKRTOS_USE_LINUX_FORK == 1)
+    /* 记录锁（U-27）的探测文件：ramfs 是只读的（O_CREAT 回 -EROFS），夹具
+     * 造不出自己的文件，所以内核侧先落一个 4096 字节的普通文件。内容无所谓，
+     * 夹具只用它的**路径**做锁身份、用它的**长度**做 SEEK_END 换算
+     * （4096 字节 -> SEEK_END(-10,10) 落在 [4086,4096)）。 */
+    {
+        static uint8 s_lk_probe[4096];
+        uint32 i;
+
+        for(i = 0u; i < 4096u; i++)
+        {
+            s_lk_probe[i] = (uint8)(i & 0xFFu);
+        }
+        for(tries = 0u; tries < 100u; tries++)
+        {
+            rc = arkrtos_vfs_write_file("/mnt/ram/lockprobe", s_lk_probe, 4096u);
+            if(rc >= 0)
+            {
+                break;
+            }
+            arkrtos_task_wait_internal(100u);
+        }
+        demo_puts("[lock] write /mnt/ram/lockprobe rc=");
+        demo_putu((uint32)rc);
+        demo_puts(" size=4096\n");
+    }
+#endif
+
+#if (ARKRTOS_USE_LINUX_FORK == 1)
     /* fork 的现场证据：linux_fork 自己 clone 出一个子进程 —— 子进程改自己那份
      * .data 后 exit(42)，父进程用 wait4(WNOHANG) 收它的退出码，再确认父的全局
      * 变量没被改、记账已经被消耗掉。夹具自检失败走 exit 1，正常收尾是 exit 0。 */

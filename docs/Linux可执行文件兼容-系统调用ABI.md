@@ -1412,8 +1412,8 @@ fork 仍回 `-EAGAIN`（全段最干净的一条）；⑧ 第三个线程回 `-E
 ### 8.13 `fcntl`(25)：FD 旗标与状态旗标（2026-11-27，QEMU LA64 20 条 + 宿主 54 条）
 
 `fcntl` 是 glibc 起运行时就要用的那几个号之一（`isatty` 会问 `F_GETFL`、
-`__libc_fcntl64` 会给 fd 打 `FD_CLOEXEC`）。本轮只做**fd 表这一层**能兑现的六条 cmd，
-其余一律 `-EINVAL`：本层没有锁管理器、没有异步 I/O、没有信号驱动的 I/O，回 0 等于
+`__libc_fcntl64` 会给 fd 打 `FD_CLOEXEC`）。本节是 **fd 表这一层**能兑现的六条 cmd
+（记录锁三把在同一个号上另有实现，见 §8.16），其余一律 `-EINVAL`：本层没有异步 I/O、没有信号驱动的 I/O，回 0 等于
 谎报「事情办成了」。
 
 | cmd | 回答 |
@@ -1424,7 +1424,8 @@ fork 仍回 `-EAGAIN`（全段最干净的一条）；⑧ 第三个线程回 `-E
 | `F_GETFL`(3) | 回 `O_ACCMODE` + `O_APPEND` + `O_NONBLOCK` 三位。管道如实报它被造出来时的 `O_NONBLOCK` 位（`pipe2` 带 `O_NONBLOCK` 才有；默认 0 = 阻塞，见 §6）；控制台回 `O_RDWR\|O_NONBLOCK` |
 | `F_SETFL`(4) | 只改 `O_APPEND` / `O_NONBLOCK` 两位，返 0；**管道上置/清 `O_NONBLOCK` 都接受**（U-26 之后管道本身可阻塞，清位不再是假承诺，与 Linux 同） |
 | `F_DUPFD_CLOEXEC`(1030) | 同 `F_DUPFD`，新槽带 `FD_CLOEXEC` |
-| 其它任何 cmd（含 `F_SETLK` 家族） | `-EINVAL`（本层没有锁管理器，不回 `-ENOSYS`；Linux 对不认识的 cmd 也是 `EINVAL`） |
+| `F_GETLK`(5) / `F_SETLK`(6) / `F_SETLKW`(7) | 见 §8.16（记录锁：所有者是进程，身份是文件路径，单位是字节区间） |
+| 其它任何 cmd（含 `F_SETOWN` 家族） | `-EINVAL`（不回 `-ENOSYS`；Linux 对不认识的 cmd 也是 `EINVAL`） |
 
 **`F_SETFL` 对管道的语义在 U-26 变了。** 旧契约（管道恒非阻塞）下，为了让「清
 `O_NONBLOCK`」不变成假承诺，`F_SETFL` 当场回 `-EINVAL`。U-26 把管道改成**默认阻塞**
@@ -1476,8 +1477,8 @@ fork 仍回 `-EAGAIN`（全段最干净的一条）；⑧ 第三个线程回 `-E
 `sflags`」——socket 层读的是 `sflags`，不同步就是「`fcntl` 说改了、收发没变」的
 假承诺（置上 `O_NONBLOCK` 后 `recvfrom` 收不到数据当场 `-EAGAIN` 且不睡时间片）。
 
-**边界。** ① 没有记录锁（`F_SETLK` / `F_SETLKW` / `F_GETLK`）——本层没有锁管理器，
-回 `-EINVAL` 而不是假装加锁成功；② 没有 `F_SETOWN` / `F_GETOWN` / 异步 I/O
+**边界。** ① 记录锁已于 2026-11-27 落地（§8.16），但只按**路径**认文件、全表 8 格、无死锁检测；
+② 没有 `F_SETOWN` / `F_GETOWN` / 异步 I/O
 （`F_SETFL` 里的 `O_ASYNC` 位被忽略，因为本层没有信号驱动的 I/O）；③ 没有
 `F_GETPIPE_SZ` / `F_SETPIPE_SZ`——管道缓冲固定 256 字节（§6）。
 
@@ -1653,7 +1654,7 @@ abort 路径后会看到「cs 还在」而再跑一遍临界区，同一段代�
 `t_pipe_block` 之外宿主 futex 的 `-EINTR` 用例仍用装了 handler 的 SIGUSR1 取证，语义不变。
 
 **门禁。** `tools/fork_gate.py` 十档的 `EXPECT_*_CHECKS` 全部 +20（47 / 52 / 60 / 147 /
-167 / 178 / 194 / 232 / 265 / 277），并把三条新锚点写进 `judge()` 的必现清单：
+167 / 178 / 194 / 232 / 265 / 277；U-27 之后又各自 +32，见 §8.16），并把三条新锚点写进 `judge()` 的必现清单：
 `blocking pipe read waited >= 40 ms -> 1 ok`、`blocking pipe write wrote all 300 -> 300 ok`、
 `child saw the exact byte pattern -> 0 ok`——只比总条数时，「少写一条、多写一条」仍可能
 凑出同一个数，那是假绿。
@@ -1662,6 +1663,92 @@ abort 路径后会看到「cs 还在」而再跑一遍临界区，同一段代�
 ③ 缓冲 256 字节、最多两条管道；④ 阻塞读写要求 port 支持 `arkrtos_port_svc_restart()`
 （无重放能力时读回 `-ENOSYS`、写回已写入的字节数）；⑤ `SA_RESTART` 未实现，
 `-EINTR` 属防御路径。
+
+### 8.16 `fcntl` 记录锁（5 / 6 / 7）：跨进程的字节区间锁（2026-11-27，QEMU LA64 fork 档 32 条 + 宿主 56 条）
+
+**为什么单独一节。** POSIX 记录锁的所有者是**进程**，不是 fd、不是任务，也不是文件描述。
+三条语义由此推出，本层全部照办：
+
+* 同一进程重复加锁不和**自己**冲突，只把自己那一段的旧锁换成新锁（切/劈）；
+* `close` 掉这个文件的**任意**一个 fd，本进程在这个文件上的锁**全部**释放——Linux 就是
+  这么定的（锁属于进程，`close` 无法知道还有没有别的 fd 指着同一个文件）；
+* 锁**不随 `fork` 继承**（子进程是新的进程槽），但**随 `execve` 保留**（`execve` 不动进程槽）。
+
+单执行流证不了这两条里的任何一条：同一个 owner 永远不冲突，`close` 释放也分不清「按 fd
+放」与「按进程放」。所以可证伪的读数在 `ARKRTOS_USE_LINUX_FORK=1` 的夹具里（与 §8.15 同
+一支 `linux_fork.c`，`tools/fork_gate.py` 十档各跑一遍）；宿主侧只负责**容量**与参数校验。
+
+**数据结构与身份。** `s_rslk[LX_RSLK_MAX]`（8 格），每条是
+`{used, type, owner, pid, start, len, path[LX_PATH_MAX]}`，`owner = 进程槽 + 1`（0 = 空条目）。
+文件身份**只有路径**——本层没有 inode，硬链接 / 绑定挂载那种「不同路径、同一个文件」分不
+出来，写进已知限制。锁表满回 `-ENOLCK`，**不淘汰别人的锁**：静默丢掉一把别人正靠着的锁，
+比如实拒绝糟得多。
+
+**布局。** 按 asm-generic 的**64 位** `struct flock` 解析：`l_type@0`、`l_whence@2`、
+`l_start@8`、`l_len@16`、`l_pid@24`，共 32 字节。字段一律按小端逐字节读写（不 `memcpy` 到
+结构体：宿主与目标字宽不同）。`off_t` 的**高 32 位必须是低 32 位的符号扩展**，给别的值回
+`-EINVAL`——把一个越界偏移截断成「看起来合法」的假区间，比拒绝糟。`l_len == 0` 是「到
+EOF」，等价上界 `0xFFFFFFFF`；`start + len` 加出溢出也按到 EOF 收口。
+
+**三把 cmd 的答法。**
+
+| cmd | 答法 |
+|---|---|
+| `F_SETLK`(6) | 无冲突就装入；有冲突回 `-EAGAIN`（Linux 对 `F_SETLK` 也是 `EAGAIN`，只有 `F_SETLKW` 才可能等） |
+| `F_GETLK`(5) | 有冲突回**起始偏移最小**的那把（Linux 也挑 f_pos 最小者），五个字段全填；无冲突只把 `l_type` 改成 `F_UNLCK`，其余四格**原样不动**（Linux 也不动）。拿 `l_type = F_UNLCK` 来问回 `-EINVAL` |
+| `F_SETLKW`(7) | 有冲突就登记「谁在等哪个 fd」（`s_rslk_wait[任务号]`，4 字节），睡一个 `LX_WAIT_SLICE_MS = 100` 时间片后 `LX_RET_RETRY` 重放；有未阻塞信号回 `-EINTR`；端口不能重放则 `-ENOSYS` |
+
+冲突判定：同一路径 + 区间有交集 + 「我要写或它要写」（两把读锁不冲突）。`F_UNLCK` 走切
+锁：整段覆盖就整条删、砍头 / 砍尾就缩短、中间开洞就劈成两条——劈裂要空位，所以**先数清
+楚再改**，不足 `-ENOLCK`。
+
+唤醒只在**解锁**与**释放**两处发生，且只负责叫人：判定留在重放那一轮（条件可能在叫醒与
+重放之间被别人改掉，伪唤醒无害）。`lx_fd_release()` 见到文件 fd 就调
+`lx_rslk_release_path(slot, path)`；进程槽被重置（子进程退出 / 回收）就
+`lx_rslk_release_owner(slot)` 并无差别全唤醒。
+
+**实测读数（`[fork]` 行，QEMU LA64 fork 档；lock 段 32 条全 ok）**
+
+```
+[fork] lock parent F_SETLK [0,100) -> 0 ok
+[fork] lock own lock is not a conflict -> 2 ok
+[fork] lock child SETLK on parent lock == -EAGAIN -> -11 ok
+[fork] lock child disjoint SETLK -> 0 ok
+[fork] lock child SEEK_END SETLK -> 0 ok
+[fork] lock parent GETLK disjoint start is 200 -> 200 ok
+[fork] lock parent GETLK eof pid is child -> 6 ok
+[fork] lock child GETLK type is WRLCK -> 1 ok
+[fork] lock child GETLK pid is not self -> 1 ok
+[fork] lock child GETLK start is absolute 0 -> 0 ok
+[fork] lock child GETLK whence is SEEK_SET -> 0 ok
+[fork] lock waiter blocked >= 40 ms -> 1 ok
+[fork] lock free after child close (conflict range) -> 0 ok
+[fork] lock child reaped -> 12 ok
+```
+
+`F_GETLK` 回的 `pid` 是**子进程**的任务号 6，不是自己的；`whence` 被改写成 `SEEK_SET`、
+`start` 是绝对偏移——这三条合起来才能排除「原样回声」的假实现。阻塞那一条不比绝对时刻，
+而是「子进程先报 `'P'`、父进程再拖 100 ms 才解锁、子进程量自己的墙钟 ≥ 40 ms」。
+
+**门禁。** `tools/fork_gate.py` 的 `LOCK_CHECKS = 32`，十档 `EXPECT_*_CHECKS` 统一 +32
+（79 / 84 / 92 / 179 / 199 / 210 / 226 / 264 / 297 / 309）；`judge()` 另钉三条必现读数：
+`lock child GETLK pid is not self -> 1 ok`、`lock waiter blocked >= 40 ms -> 1 ok`、
+`lock free after child close (conflict range) -> 0 ok`。只比总条数时，「少写一条、多写一条」
+仍可能凑出同一个数，那是假绿。
+
+**覆盖率口径（本笔把 `arkrtos_linux_abi` 基线从 98.82% 重锚到 97.00%）。** 记录锁整节新增
+约 730 行，其中 **61 行在宿主上原理不可达**：宿主档 `ARKRTOS_USE_LINUX_FORK=0` 时
+`lx_proc_cur()` 恒回槽 0，于是表里每把锁的 owner 都相同，`lx_rslk_conflict()` 的
+`owner == owner` 分支把每条已用条目都跳过——冲突扫描主体、切锁劈裂、等待表唤醒、阻塞睡
+下、`F_GETLK` 命中回填这五处全走不到。宿主唯一可观测的是**容量**（8 格，第 9 把
+`-ENOLCK`）与参数校验（宿主 56 条）。这 61 行由 `fork_gate` 十档在目标上覆盖（上面的读数
+即证据）；不为了凑数字把它们改成死代码或塞 `#if` 假分支。
+
+**边界。** ① 无死锁检测：`F_SETLKW` 的环回等待会一直睡到别的锁释放或被信号打断，
+`EDEADLK` 不回；② 无 OFD 锁（`F_OFD_SETLK`）、无租约（`F_SETLEASE`）；③ 全表 8 格
+（`-ENOLCK`），不按 inode 分表；④ 无 `/proc/locks`；⑤ 只认 64 位 `struct flock`（LA64 是
+本层唯一的 Linux ABI 载体，32 位的 16 字节布局没有载体）；⑥ 单核：两个进程同时睡在同一
+把锁上未验（唤醒是全叫、判定在重放，原理上不会丢）。
 
 ## 9 开关与零体积
 
@@ -1916,7 +2003,7 @@ Linux 的 futex 号表把「同一格参数」在不同 op 下复用：`REQUEUE`
   不是 Linux 那种精确的 waitqueue 唤醒——这一点在 §6 的边界里写明了。
 - 下一步（若要用真正的 Linux 工具链产物）：动态链接的内核侧与自研装载器已落地
   （2026-11-20，见 [动态链接与PT_INTERP](动态链接与PT_INTERP.md)），但**离 glibc
-  还差整条 libc 兼容面**——TLS 初始化、`fcntl` 记录锁家族与 SCHED_DEADLINE
+  还差整条 libc 兼容面**——TLS 初始化与 SCHED_DEADLINE
   （条件变量的 PI 变体 `WAIT_REQUEUE_PI` / `CMP_REQUEUE_PI` 已于 2026-11-27 落地，见 §8.4c；
   `rseq`/`getcpu` 也于同日落地，见 §8.14）。
   futex 的 PI 三档与 robust list 清理已经落地（§8.4b）。
@@ -1931,7 +2018,8 @@ Linux 的 futex 号表把「同一格参数」在不同 op 下复用：`REQUEUE`
   （按需分页档，§8.7，不需另开开关）；线程档也有（`CLONE_THREAD`，§8.10，默认关；
   关档时 `CLONE_VM`/`CLONE_THREAD` 仍拒）、每 App 任务配额也有（§8.11，默认关）；
   仍没有抢占式信号投递；`fcntl` 的 fd 旗标与状态旗标已有（§8.13，2026-11-27），
-  记录锁（`F_SETLK` 家族）与异步 I/O 仍没有；`rseq`/`getcpu` 已有（§8.14，2026-11-27）；
+  记录锁已有（§8.16，2026-11-27；8 格表、按路径认文件、无死锁检测），异步 I/O 仍没有；
+  `rseq`/`getcpu` 已有（§8.14，2026-11-27）；
   管道默认阻塞（U-26，§6 / §8.15，`O_NONBLOCK` 档并存），跨执行流的阻塞读写
   已在 fork 档实测。
 - `execve` 是「同任务换镜像」；`fork` 才是「多一个任务 + 一份独立地址空间」。

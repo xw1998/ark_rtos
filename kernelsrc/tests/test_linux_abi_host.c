@@ -2209,6 +2209,298 @@ static void t_fdflags(t_ctx *c)
     (void)call(c, T_NR_CLOSE, 4UL, 0UL, 0UL, 0UL);
 }
 
+/* ------------------------------------------------------------ 记录锁（fcntl）
+
+ * 这一组钉的是「程序看到什么」，以及**锁表的状态本身**。宿主这几档都是
+ * ARKRTOS_USE_LINUX_FORK=0（只有一个进程槽），所以「跨进程冲突」在宿主上
+ * 根本造不出来——自己的锁永远不和自己冲突。观测窗口因此改成**容量**：
+ * 锁表只有 8 格，`F_SETLK` 在表满时回 -ENOLCK，于是一次「还能不能再加
+ * 一把」就把「表里现在有几把、劈裂有没有多占一格」读了出来。
+ *
+ * 跨进程的那几条语义（冲突回 -EAGAIN、F_GETLK 回填别人的锁、F_SETLKW
+ * 挂起与唤醒、-EINTR）由 QEMU 上的 fork 档覆盖（elf/linux_fork.c 的
+ * `[lock]` 段）——那里的两个进程是真的两个进程槽。
+ *
+ * struct flock 按 asm-generic 的 64 位布局（本层按 LA64 解析）由用例手工
+ * 铺字节：宿主是 ILP32，自己的 struct flock 只有 16 字节且字段位置不同，
+ * 直接 memcpy 会把「内核读 8 字节 off_t」这件事测歪。 */
+#define T_F_GETLK           (5u)
+#define T_F_SETLK           (6u)
+#define T_F_SETLKW          (7u)
+#define T_RDLCK             (0u)
+#define T_WRLCK             (1u)
+#define T_UNLCK             (2u)
+#define T_ENOLCK            (37)
+#define T_SEEK_SET          (0u)
+#define T_SEEK_CUR          (1u)
+#define T_SEEK_END          (2u)
+#define T_FLK_OFF           (T_DATA_OFF + 0x800u)
+
+static void u_flock(uint32 off, uint32 type, uint32 whence,
+                    long long start, long long len, uint32 pid)
+{
+    uint32 i;
+
+    for(i = 0u; i < 32u; i++)
+    {
+        g_user[off + i] = 0u;
+    }
+    g_user[off + 0u] = (uint8)(type & 0xFFu);
+    g_user[off + 1u] = (uint8)((type >> 8) & 0xFFu);
+    g_user[off + 2u] = (uint8)(whence & 0xFFu);
+    for(i = 0u; i < 8u; i++)
+    {
+        g_user[off + 8u + i]  =
+            (uint8)(((unsigned long long)start >> (8u * i)) & 0xFFull);
+        g_user[off + 16u + i] =
+            (uint8)(((unsigned long long)len >> (8u * i)) & 0xFFull);
+    }
+    u_put32(off + 24u, pid);
+}
+
+static uint32 flk_u16(uint32 off)
+{
+    return (uint32)g_user[off] | ((uint32)g_user[off + 1u] << 8);
+}
+
+static long long flk_i64(uint32 off)
+{
+    return (long long)u_get64(off);
+}
+
+/* 换一个任务身份并打开一个文件：返回 fd（失败时是负的错误号）。 */
+static int32 open_as(t_ctx *c, int32 task, const char *path, uint32 size)
+{
+    arkrtos_current_task_id = task;
+    g_stat_rc = 0;
+    g_stat_size = size;
+    u_put_str(T_PATH_OFF, path);
+    (void)call(c, T_NR_OPENAT, 0UL, u_ptr(T_PATH_OFF), 0UL, 0UL);
+    return (int32)c->ret;
+}
+
+/* 从 base 起每隔 1000 字节加一把 10 字节的写锁，返回最后一次的返回值。
+ * 用来"数"锁表里还剩几格（见文件头：单进程宿主没有别的观测窗口）。 */
+static int32 lock_run(t_ctx *c, int32 fd, uint32 base, uint32 n)
+{
+    uint32 i;
+    int32  rc = 0;
+
+    for(i = 0u; i < n; i++)
+    {
+        u_flock(T_FLK_OFF, T_WRLCK, T_SEEK_SET,
+                (long long)(base + (i * 1000u)), 10, 0u);
+        rc = fcntl_call(c, (unsigned long)fd, T_F_SETLK, u_ptr(T_FLK_OFF));
+    }
+    return rc;
+}
+
+/* lock_run 的最后一次 fcntl 已经把 c->ret 写好了，所以「判 lock_run 的结果」
+ * 就是判 c->ret；这里只是把两句话收成一句，免得每处都多写一行 (void)。 */
+#define ck_lock(c, expr, want, what)     do { (void)(expr); ck_ret((c), (want), (what)); } while(0)
+
+static void t_fcntl_lock(t_ctx *c)
+{
+    uint32 fds[2];
+
+    /* ---- 1) 不是普通文件的对象：如实 -EINVAL，不假装加锁成功 ---- */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    u_get(T_DATA_OFF, fds, 8u);
+    u_flock(T_FLK_OFF, T_WRLCK, T_SEEK_SET, 0, 10, 0u);
+    (void)fcntl_call(c, (unsigned long)fds[0], T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, -T_EINVAL, "管道读端不是记录锁的对象（-EINVAL）");
+    (void)fcntl_call(c, (unsigned long)fds[1], T_F_GETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, -T_EINVAL, "管道写端查锁也回 -EINVAL");
+    (void)fcntl_call(c, 0UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, -T_EINVAL, "控制台本体（没有槽）回 -EINVAL");
+    (void)fcntl_call(c, 99UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, -T_EBADF, "坏 fd 仍先回 -EBADF（fd 解析在命令判定之前）");
+
+    /* ---- 2) 参数面：每个字段的坏值都不许被截断成"看起来合法" ---- */
+    fresh(c);
+    ck_u((unsigned long)open_as(c, 5, "/a.txt", 100u), 3u,
+         "记录锁用例：打开 /a.txt 拿 fd 3");
+    (void)fcntl_call(c, 3UL, T_F_SETLK, 0UL);
+    ck_ret(c, -T_EFAULT, "flock 指针为空回 -EFAULT");
+    (void)fcntl_call(c, 3UL, T_F_SETLK, 0x100UL);
+    ck_ret(c, -T_EFAULT, "flock 指针在窗口外回 -EFAULT");
+
+    u_flock(T_FLK_OFF, 3u, T_SEEK_SET, 0, 10, 0u);
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, -T_EINVAL, "l_type 越界回 -EINVAL");
+
+    u_flock(T_FLK_OFF, T_UNLCK, T_SEEK_SET, 0, 10, 0u);
+    (void)fcntl_call(c, 3UL, T_F_GETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, -T_EINVAL, "F_GETLK 问一把 F_UNLCK 的锁回 -EINVAL");
+
+    u_flock(T_FLK_OFF, T_WRLCK, 3u, 0, 10, 0u);
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, -T_EINVAL, "l_whence 越界回 -EINVAL");
+
+    u_flock(T_FLK_OFF, T_WRLCK, T_SEEK_SET, 0, -1, 0u);
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, -T_EINVAL, "负 l_len 回 -EINVAL");
+
+    u_flock(T_FLK_OFF, T_WRLCK, T_SEEK_SET, -1, 10, 0u);
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, -T_EINVAL, "SEEK_SET 下负 l_start 回 -EINVAL");
+
+    arkrtos_current_task_id = 5;
+    (void)call(c, T_NR_READ, 3UL, u_ptr(T_DATA_OFF), 10UL, 0UL);
+    ck_ret(c, 10, "读 10 字节把文件偏移推到 10");
+    u_flock(T_FLK_OFF, T_WRLCK, T_SEEK_CUR, -20, 5, 0u);
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, -T_EINVAL, "SEEK_CUR 负到文件头之前回 -EINVAL");
+    u_flock(T_FLK_OFF, T_WRLCK, T_SEEK_CUR, -5, 5, 0u);
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, 0, "SEEK_CUR 往回偏 5 字节（仍在文件内）照常换算");
+
+    u_flock(T_FLK_OFF, T_WRLCK, T_SEEK_SET, 0, 10, 0u);
+    u_put32(T_FLK_OFF + 12u, 1u);       /* l_start 的高半字乱填 */
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, -T_EINVAL, "l_start 高 32 位不是符号扩展回 -EINVAL");
+
+    u_flock(T_FLK_OFF, T_WRLCK, T_SEEK_SET, 0, 10, 0u);
+    u_put32(T_FLK_OFF + 20u, 0xFFFFFFFFu);   /* l_len 的高半字全 1 */
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, -T_EINVAL, "l_len 高 32 位不是符号扩展回 -EINVAL");
+
+    /* 32 位以外的偏移：加出区间上界越界按"到 EOF"收口，不截断成假小区间 */
+    fresh(c);
+    ck_u((unsigned long)open_as(c, 5, "/c.txt", 0xFFFFFF00u), 3u,
+         "打开一个接近 4 GB 的文件");
+    u_flock(T_FLK_OFF, T_WRLCK, T_SEEK_END, 0x200, 5, 0u);
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, -T_EINVAL, "SEEK_END 把偏移推出 32 位范围回 -EINVAL");
+    u_flock(T_FLK_OFF, T_WRLCK, T_SEEK_END, 0, 0x200u, 0u);
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, 0, "从 EOF 起 512 字节越过 32 位按到 EOF 收口（不截断）");
+
+    /* ---- 3) 自己的锁不和自己冲突；GETLK 无冲突时只改 l_type ---- */
+    fresh(c);
+    ck_u((unsigned long)open_as(c, 5, "/a.txt", 100u), 3u, "任务 5 打开 /a.txt");
+    u_flock(T_FLK_OFF, T_WRLCK, T_SEEK_SET, 0, 10, 0u);
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, 0, "加写锁 [0,10)");
+    u_flock(T_FLK_OFF, T_WRLCK, T_SEEK_SET, 0, 10, 0u);
+    u_put32(T_FLK_OFF + 24u, 0xAAAAAAAAu);
+    (void)fcntl_call(c, 3UL, T_F_GETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, 0, "查自己的锁：无冲突");
+    ck_u((unsigned long)flk_u16(T_FLK_OFF), T_UNLCK,
+         "无冲突只把 l_type 改成 F_UNLCK");
+    ck_u(u_get32(T_FLK_OFF + 24u), 0xAAAAAAAAu, "无冲突时 l_pid 原样不动");
+    ck(flk_i64(T_FLK_OFF + 8u) == 0, "无冲突时 l_start 原样不动");
+    ck_u((unsigned long)flk_u16(T_FLK_OFF + 2u), T_SEEK_SET,
+         "无冲突时 l_whence 原样不动");
+
+    /* 同进程换锁是"替换"而不是"再占一格"：换完表里仍然只有一把 */
+    u_flock(T_FLK_OFF, T_RDLCK, T_SEEK_SET, 0, 10, 0u);
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, 0, "同进程把写锁换成读锁（不和自己冲突）");
+    ck_lock(c, lock_run(c, 3, 100u, 7u), 0,
+           "换锁没有多占格子（再加 7 把正好填满 8 格）");
+    ck_lock(c, lock_run(c, 3, 9000u, 1u), -T_ENOLCK, "第 9 把回 -ENOLCK");
+
+    /* ---- 4) 区间劈裂：解锁中间一段要占一格，表满时如实 -ENOLCK ---- */
+    fresh(c);
+    ck_u((unsigned long)open_as(c, 5, "/a.txt", 4000u), 3u, "劈裂档：打开 /a.txt");
+    ck_lock(c, lock_run(c, 3, 0u, 1u), 0, "先锁 [0,10)");
+    ck_lock(c, lock_run(c, 3, 1000u, 6u), 0, "再加 6 把（共 7 把）");
+    u_flock(T_FLK_OFF, T_UNLCK, T_SEEK_SET, 2, 2, 0u);
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, 0, "解锁 [0,10) 中间的一段：劈成两把");
+    u_flock(T_FLK_OFF, T_WRLCK, T_SEEK_SET, 200000, 10, 0u);
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, -T_ENOLCK, "劈裂真的多占了一格（第 9 把加不进去）");
+    u_flock(T_FLK_OFF, T_UNLCK, T_SEEK_SET, 0, 2, 0u);
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, 0, "放掉洞前面那半段，腾出一格");
+    u_flock(T_FLK_OFF, T_WRLCK, T_SEEK_SET, 200000, 10, 0u);
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, 0, "腾出格子之后加得进去");
+
+    /* 表满时劈裂：-ENOLCK 且一个字节都不改 */
+    u_flock(T_FLK_OFF, T_UNLCK, T_SEEK_SET, 1002, 2, 0u);
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, -T_ENOLCK, "表满时劈裂回 -ENOLCK");
+    u_flock(T_FLK_OFF, T_UNLCK, T_SEEK_SET, 1000, 10, 0u);
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, 0, "上一步没有留下半截状态（那条锁还完整地解得掉）");
+
+    /* 砍头 / 砍尾：解锁区间只盖住锁的一侧，另一半必须还在（不是整条丢掉）。
+     * 宿主上唯一的观测还是容量：那半把锁若被整条删掉，后面就还能再加一把。 */
+    fresh(c);
+    ck_u((unsigned long)open_as(c, 5, "/a.txt", 4000u), 3u, "砍尾档：打开 /a.txt");
+    ck_lock(c, lock_run(c, 3, 1000u, 1u), 0, "锁 [1000,1010)");
+    u_flock(T_FLK_OFF, T_UNLCK, T_SEEK_SET, 1005, 100, 0u);
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, 0, "从 1005 起解锁：只盖住锁的尾巴");
+    ck_lock(c, lock_run(c, 3, 2000u, 7u), 0,
+            "砍尾之后那半把锁还占着格子（再加 7 把正好填满 8 格）");
+    ck_lock(c, lock_run(c, 3, 9000u, 1u), -T_ENOLCK, "第 9 把回 -ENOLCK");
+
+    fresh(c);
+    ck_u((unsigned long)open_as(c, 5, "/a.txt", 4000u), 3u, "砍头档：打开 /a.txt");
+    ck_lock(c, lock_run(c, 3, 1000u, 1u), 0, "锁 [1000,1010)");
+    u_flock(T_FLK_OFF, T_UNLCK, T_SEEK_SET, 900, 105, 0u);
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, 0, "从 900 起解锁到 1005：只盖住锁的脑袋");
+    ck_lock(c, lock_run(c, 3, 2000u, 7u), 0,
+            "砍头之后剩下那半把锁还占着格子（再加 7 把正好填满）");
+    ck_lock(c, lock_run(c, 3, 9000u, 1u), -T_ENOLCK, "第 9 把回 -ENOLCK");
+
+    /* l_len=0 的解锁 = 从起点放到 EOF（同进程整段清空） */
+    u_flock(T_FLK_OFF, T_UNLCK, T_SEEK_SET, 0, 0, 0u);
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, 0, "l_len=0 的解锁 = 从起点放到 EOF");
+    ck_lock(c, lock_run(c, 3, 0u, 8u), 0,
+           "整段清空之后 8 格全空（前面的锁一把不剩）");
+
+    /* ---- 5) close 掉这个文件的任意一个 fd：该文件的锁全部释放 ---- */
+    fresh(c);
+    ck_u((unsigned long)open_as(c, 5, "/a.txt", 4000u), 3u, "关闭档：打开 /a.txt（fd 3）");
+    u_flock(T_FLK_OFF, T_WRLCK, T_SEEK_SET, 0, 10, 0u);
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, 0, "在 fd 3 上加一把锁（占一格）");
+    ck_u((unsigned long)open_as(c, 5, "/b.txt", 4000u), 4u, "打开 /b.txt 拿 fd 4");
+    ck_lock(c, lock_run(c, 4, 1000u, 1u), 0, "/b.txt 上再加一把（共 2 格）");
+    ck_u((unsigned long)open_as(c, 5, "/c.txt", 4000u), 5u, "打开 /c.txt 拿 fd 5");
+    ck_lock(c, lock_run(c, 5, 1000u, 6u), 0, "/c.txt 上再填 6 把（共 8 格）");
+    ck_lock(c, lock_run(c, 5, 9000u, 1u), -T_ENOLCK, "第 9 把回 -ENOLCK（表满）");
+    (void)call(c, T_NR_CLOSE, 4UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "关掉 /b.txt 的 fd");
+    ck_lock(c, lock_run(c, 5, 9000u, 1u), 0,
+           "只放掉了 /b.txt 的那一把（/a.txt 与 /c.txt 的锁还在）");
+    (void)call(c, T_NR_CLOSE, 3UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "关掉 /a.txt 的 fd");
+    ck_lock(c, lock_run(c, 5, 19000u, 1u), 0,
+           "/a.txt 的锁也放掉了（close 按文件释放，不按进程一刀切）");
+
+    /* 同一个文件的两个 fd：关掉任意一个就释放（POSIX 语义） */
+    fresh(c);
+    ck_u((unsigned long)open_as(c, 5, "/a.txt", 4000u), 3u, "同文件多 fd：打开 fd 3");
+    ck_u((unsigned long)open_as(c, 5, "/a.txt", 4000u), 4u, "同一个文件再开 fd 4");
+    u_flock(T_FLK_OFF, T_WRLCK, T_SEEK_SET, 0, 10, 0u);
+    (void)fcntl_call(c, 3UL, T_F_SETLK, u_ptr(T_FLK_OFF));
+    ck_ret(c, 0, "在 fd 3 上加锁");
+    ck_lock(c, lock_run(c, 4, 1000u, 7u), 0, "再加 7 把填满（共 8 格）");
+    (void)call(c, T_NR_CLOSE, 4UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "关掉另一个 fd（fd 4）");
+    ck_lock(c, lock_run(c, 3, 9000u, 1u), 0,
+           "任意一个 fd 被关掉就释放整个文件的锁（POSIX 语义）");
+
+    /* ---- 6) 进程槽被重置：锁跟着消失（不留幽灵锁） ---- */
+    fresh(c);
+    ck_u((unsigned long)open_as(c, 5, "/a.txt", 4000u), 3u, "重置档：打开 /a.txt");
+    ck_lock(c, lock_run(c, 3, 0u, 8u), 0, "填满 8 格");
+    ck_lock(c, lock_run(c, 3, 9000u, 1u), -T_ENOLCK, "第 9 把回 -ENOLCK");
+    fresh(c);
+    ck_u((unsigned long)open_as(c, 5, "/a.txt", 4000u), 3u, "reset 之后重新打开 /a.txt");
+    ck_lock(c, lock_run(c, 3, 0u, 8u), 0,
+           "进程槽被重置时锁一起消失（8 格全空）");
+}
+
 static void t_meta(t_ctx *c)
 {
     uint32 ts[2];
@@ -6490,6 +6782,7 @@ int main(void)
     t_pipe_block(&c);
     t_dup(&c);
     t_fdflags(&c);
+    t_fcntl_lock(&c);
     t_rseq(&c);
     t_meta(&c);
     t_mem(&c);

@@ -1639,10 +1639,10 @@ exec.
 ### 8.13 `fcntl`(25): FD flags and status flags (2026-11-27, QEMU LA64 20 checks + 54 host checks)
 
 `fcntl` is one of the first numbers glibc touches at start-up (`isatty` asks
-`F_GETFL`, `__libc_fcntl64` tags fds with `FD_CLOEXEC`). This round implements only the six
-commands the **fd table layer** can honour; everything else returns `-EINVAL` - there is no
-lock manager, no async I/O and no signal-driven I/O here, and returning 0 would claim work
-that never happened.
+`F_GETFL`, `__libc_fcntl64` tags fds with `FD_CLOEXEC`). This section covers the six commands the
+**fd table layer** can honour (the three record-lock commands share the same syscall and
+live in section 8.16); everything else returns `-EINVAL` - there is no async I/O and no
+signal-driven I/O here, and returning 0 would claim work that never happened.
 
 | cmd | reply |
 |---|---|
@@ -1652,7 +1652,8 @@ that never happened.
 | `F_GETFL`(3) | returns `O_ACCMODE` + `O_APPEND` + `O_NONBLOCK`; a pipe reports the `O_NONBLOCK` bit it was created with (only if `pipe2` got `O_NONBLOCK`; the default is 0, i.e. blocking - section 6); the console returns `O_RDWR\|O_NONBLOCK` |
 | `F_SETFL`(4) | changes only `O_APPEND` / `O_NONBLOCK`, returns 0; **on a pipe both setting and clearing `O_NONBLOCK` are accepted** (since U-26 the pipe itself can block, so clearing is no longer an empty promise - same as Linux) |
 | `F_DUPFD_CLOEXEC`(1030) | same as `F_DUPFD`, new slot carries `FD_CLOEXEC` |
-| any other cmd (including the `F_SETLK` family) | `-EINVAL` (no lock manager here, and Linux also returns `EINVAL` for a command it does not know - not `ENOSYS`) |
+| `F_GETLK`(5) / `F_SETLK`(6) / `F_SETLKW`(7) | see section 8.16 (record locks: owner is the process, identity is the file path, unit is a byte range) |
+| any other cmd (including the `F_SETOWN` family) | `-EINVAL` (and Linux also returns `EINVAL` for a command it does not know - not `ENOSYS`) |
 
 **The semantics of `F_SETFL` on a pipe changed in U-26.** Under the old contract (pipes
 always non-blocking) `F_SETFL` returned `-EINVAL` for "clear `O_NONBLOCK`", so that the 0
@@ -1706,8 +1707,9 @@ closed), `openat(O_CLOEXEC)` records the bit and the fd is released by an exec, 
 past the table gives `-EINVAL`, `arg < 0` gives `-EINVAL`, a `F_GETFL` copy follows its
 source, and so on.
 
-**Boundaries.** (1) no record locks (`F_SETLK` / `F_SETLKW` / `F_GETLK`) - there is no lock
-manager, so `-EINVAL` rather than pretending the lock was taken; (2) no `F_SETOWN` /
+**Boundaries.** (1) record locks landed on 2026-11-27 (section 8.16), but they identify a
+file by **path** only, the whole table is 8 slots and there is no deadlock detection;
+(2) no `F_SETOWN` /
 `F_GETOWN` / async I/O (`O_ASYNC` in `F_SETFL` is ignored because there is no signal-driven
 I/O); (3) no `F_GETPIPE_SZ` / `F_SETPIPE_SZ` - the pipe buffer is a fixed 256 bytes
 (section 6).
@@ -1921,7 +1923,8 @@ proves itself with a SIGUSR1 that has a handler installed, so its semantics are
 unchanged.
 
 **Gate.** All ten `EXPECT_*_CHECKS` in `tools/fork_gate.py` went up by 20
-(47 / 52 / 60 / 147 / 167 / 178 / 194 / 232 / 265 / 277), and three new anchors
+(47 / 52 / 60 / 147 / 167 / 178 / 194 / 232 / 265 / 277; after U-27 each gains another
+32, see section 8.16), and three new anchors
 went into the mandatory list of `judge()`:
 `blocking pipe read waited >= 40 ms -> 1 ok`, `blocking pipe write wrote all 300 -> 300 ok`,
 `child saw the exact byte pattern -> 0 ok` - counting only the total would let "one
@@ -1933,6 +1936,110 @@ buffer, at most two pipes; (4) blocking reads and writes need the port to provid
 `arkrtos_port_svc_restart()` (without replay a read gives `-ENOSYS` and a write
 gives the bytes already written); (5) `SA_RESTART` is not implemented and `-EINTR`
 is a defensive path.
+
+### 8.16 `fcntl` record locks (5 / 6 / 7): byte-range locks across processes (2026-11-27, 32 QEMU LA64 fork-tier checks + 56 host checks)
+
+**Why a separate section.** A POSIX record lock belongs to the **process**, not to an fd,
+not to a task and not to an open file description. Three rules follow, and all three are
+honoured here:
+
+* taking a lock twice in the same process never conflicts with itself - it replaces that
+  process's old lock on the range (cut / split);
+* `close` on **any** fd of that file releases **all** of this process's locks on it - that
+  is Linux semantics (the lock belongs to the process, and `close` cannot know whether
+  other fds still refer to the same file);
+* locks are **not inherited across `fork`** (the child gets a fresh process slot) but
+  **survive `execve`** (`execve` does not touch the process slot).
+
+A single execution stream cannot prove either of the last two: one owner never conflicts,
+and `close` release cannot distinguish "per fd" from "per process". The falsifiable
+readouts therefore live in the `ARKRTOS_USE_LINUX_FORK=1` fixture (the same `linux_fork.c`
+as section 8.15, run by all ten tiers of `tools/fork_gate.py`); the host side only covers
+**capacity** and argument checking.
+
+**Data and identity.** `s_rslk[LX_RSLK_MAX]` (8 slots), each
+`{used, type, owner, pid, start, len, path[LX_PATH_MAX]}`, `owner = process slot + 1`
+(0 = empty). File identity is the **path only** - there is no inode here, so hard links and
+bind mounts ("different paths, same file") cannot be told apart; that goes into the known
+limitations. A full table returns `-ENOLCK` and **never evicts somebody else's lock**:
+silently dropping a lock another process is relying on is far worse than refusing.
+
+**Layout.** Parsed as the **64-bit** asm-generic `struct flock`: `l_type@0`, `l_whence@2`,
+`l_start@8`, `l_len@16`, `l_pid@24`, 32 bytes. Fields are read and written little-endian
+byte by byte (no `memcpy` into a struct: host and target word sizes differ). The high 32
+bits of `off_t` **must be the sign extension of the low 32**; anything else gives `-EINVAL`
+- truncating an out-of-range offset into a "plausible" fake range is worse than refusing.
+`l_len == 0` means "to EOF" (upper bound `0xFFFFFFFF`), and `start + len` overflow is also
+clamped to EOF.
+
+**How the three commands answer.**
+
+| cmd | answer |
+|---|---|
+| `F_SETLK`(6) | install when there is no conflict; a conflict returns `-EAGAIN` (as on Linux - only `F_SETLKW` may wait) |
+| `F_GETLK`(5) | with a conflict, report the one with the **smallest start** (Linux picks the lowest f_pos too), filling all five fields; without a conflict only `l_type` becomes `F_UNLCK` and the other four fields are **left untouched** (Linux leaves them too). Asking with `l_type = F_UNLCK` returns `-EINVAL` |
+| `F_SETLKW`(7) | records "who waits on which fd" (`s_rslk_wait[task id]`, 4 bytes), sleeps one `LX_WAIT_SLICE_MS = 100` slice and returns `LX_RET_RETRY` to replay; an unblocked pending signal gives `-EINTR`; a port that cannot replay gives `-ENOSYS` |
+
+Conflict means: same path + overlapping ranges + "I want to write or it wants to write"
+(two read locks do not conflict). `F_UNLCK` cuts: full coverage deletes the entry, a head
+or tail trim shortens it, a hole in the middle splits it in two - a split needs a free
+slot, so the code **counts first and mutates after**, returning `-ENOLCK` when short.
+
+Wakeups happen only on **unlock** and **release**, and only wake: the decision is made in
+the replaying round (the condition can change between wake and replay; spurious wakeups are
+harmless). `lx_fd_release()` calls `lx_rslk_release_path(slot, path)` for a file fd; a reset
+process slot calls `lx_rslk_release_owner(slot)` plus an indiscriminate wake-all.
+
+**Measured readouts (`[fork]` lines, QEMU LA64 fork tier; all 32 lock checks ok)**
+
+```
+[fork] lock parent F_SETLK [0,100) -> 0 ok
+[fork] lock own lock is not a conflict -> 2 ok
+[fork] lock child SETLK on parent lock == -EAGAIN -> -11 ok
+[fork] lock child disjoint SETLK -> 0 ok
+[fork] lock child SEEK_END SETLK -> 0 ok
+[fork] lock parent GETLK disjoint start is 200 -> 200 ok
+[fork] lock parent GETLK eof pid is child -> 6 ok
+[fork] lock child GETLK type is WRLCK -> 1 ok
+[fork] lock child GETLK pid is not self -> 1 ok
+[fork] lock child GETLK start is absolute 0 -> 0 ok
+[fork] lock child GETLK whence is SEEK_SET -> 0 ok
+[fork] lock waiter blocked >= 40 ms -> 1 ok
+[fork] lock free after child close (conflict range) -> 0 ok
+[fork] lock child reaped -> 12 ok
+```
+
+The `pid` returned by `F_GETLK` is the **child's** task id 6, not the caller's; `whence` is
+rewritten to `SEEK_SET` and `start` is absolute - the three together rule out an
+"echo the request back" fake implementation. The blocking check never compares absolute
+timestamps: the child reports `'P'`, the parent deliberately waits 100 ms before unlocking,
+and the child measures its own wall clock at >= 40 ms.
+
+**Gate.** `tools/fork_gate.py` has `LOCK_CHECKS = 32`, and all ten `EXPECT_*_CHECKS` add it
+(79 / 84 / 92 / 179 / 199 / 210 / 226 / 264 / 297 / 309); `judge()` pins three anchors:
+`lock child GETLK pid is not self -> 1 ok`, `lock waiter blocked >= 40 ms -> 1 ok`,
+`lock free after child close (conflict range) -> 0 ok`. Comparing totals alone is not
+enough - "drop one, add one" can add up to the same number.
+
+**Coverage accounting (this change re-anchored `arkrtos_linux_abi` from 98.82% to 97.00%).**
+The record-lock section adds roughly 730 lines, of which **61 are unreachable on the host
+by construction**: with `ARKRTOS_USE_LINUX_FORK=0` the host build has `lx_proc_cur()`
+returning slot 0 always, so every lock in the table has the same owner and the
+`owner == owner` branch in `lx_rslk_conflict()` skips every used entry - the conflict scan
+body, the split-on-install path, the waiter wake table, the blocking sleep and the
+`F_GETLK` hit write-back are all unreachable. What the host can observe is **capacity**
+(8 slots, the 9th gets `-ENOLCK`) plus argument checking (56 host checks). Those 61 lines
+are covered by the ten `fork_gate` tiers on the target (the readouts above are the
+evidence); they are not turned into dead code or `#if`-ed fake branches just to make a
+number look better.
+
+**Boundaries.** (1) No deadlock detection: a cyclic `F_SETLKW` wait sleeps until some lock
+is released or a signal arrives, `EDEADLK` is never returned; (2) no OFD locks
+(`F_OFD_SETLK`) and no leases (`F_SETLEASE`); (3) one table of 8 slots (`-ENOLCK`), not one
+per inode; (4) no `/proc/locks`; (5) only the 64-bit `struct flock` (LA64 is the only Linux
+ABI carrier here; the 32-bit 16-byte layout has no carrier); (6) single core: two processes
+sleeping on the same lock at once is unverified (wake is broadcast and the decision is made
+on replay, so it should not be lost in principle).
 
 ## 9 Switch and zero footprint
 
@@ -2259,7 +2366,8 @@ semantics `MAP_FIXED` (demand tier, section 8.7, no extra switch), a thread tier
 (`CLONE_THREAD`, section 8.10, default off - with it off `CLONE_VM`/`CLONE_THREAD` are
 still refused) and a per-App task quota (section 8.11, default off); preemptive signal
 delivery is still absent. `fcntl` fd flags and status flags exist (section 8.13,
-2026-11-27), record locks (`F_SETLK` family) and async I/O do not. `rseq`/`getcpu`
+2026-11-27), record locks exist (section 8.16, 2026-11-27; an 8-slot table, paths as
+identity, no deadlock detection) while async I/O does not. `rseq`/`getcpu`
 landed the same day (section 8.14, 2026-11-27).
 
 `execve` gives "replace this task's image" and `fork` gives "a second task with

@@ -158,6 +158,7 @@
 #define LX_EPIPE                    (32)
 #define LX_EROFS                    (30)
 #define LX_ENAMETOOLONG             (36)
+#define LX_ENOLCK                   (37)
 #define LX_ENOSYS                   (38)
 #define LX_ETIMEDOUT                (110)
 #define LX_EDEADLK                  (35)
@@ -386,6 +387,14 @@
 #define LX_F_GETFL                  (3u)
 #define LX_F_SETFL                  (4u)
 #define LX_F_DUPFD_CLOEXEC          (1030u)
+
+/* 记录锁（POSIX fcntl 的第 5/6/7 档）与锁类型（asm-generic）。 */
+#define LX_F_GETLK                  (5u)
+#define LX_F_SETLK                  (6u)
+#define LX_F_SETLKW                 (7u)
+#define LX_RDLCK                    (0u)
+#define LX_WRLCK                    (1u)
+#define LX_UNLCK                    (2u)
 #define LX_FD_CLOEXEC               (1u)
 
 /* mmap 标志位（asm-generic） */
@@ -719,10 +728,19 @@ static uint8 lx_sig_pending_unblocked(void)
     return 0u;
 }
 
+/* 记录锁的回收钩子（定义在 fcntl 那一节）：进程槽被重置、或这个文件的任意
+ * 一个 fd 被关掉，锁都必须跟着消失 —— 留着就是「谁也拿不到、谁也没见过」的
+ * 幽灵锁。放在这里是因为两个调用点都在下面的结构体清理里。 */
+static void lx_rslk_release_owner(uint32 slot);
+static void lx_rslk_release_path(uint32 slot, const char *path);
+
 static void lx_proc_zero(uint32 slot)
 {
     uint32 i;
 
+    /* 槽位被重置（退出、复用、全量 reset）：这个槽名下的记录锁必须跟着
+     * 消失，否则下一次复用会让新进程"继承"一堆谁也解不开的锁。 */
+    lx_rslk_release_owner(slot);
     for(i = 0u; i < LX_MAX_FD; i++)
     {
         s_proc[slot].fd[i].used = 0u;
@@ -1842,10 +1860,696 @@ static void lx_fd_set_fl(int32 idx, uint32 arg)
 #endif
 }
 
-/* fcntl(25)：本层只认 LX_F_* 那五个 cmd，其余 -EINVAL（Linux 对不认识的
- * cmd 也是 EINVAL，不回 ENOSYS）。
+/* ------------------------------------------------------------ 记录锁（fcntl 5/6/7）
  *
- * 三处必须说清楚的边界：
+ * POSIX 记录锁：按「文件 + 字节区间」加锁，所有者是**进程**，不是 fd，
+ * 也不是任务。三条由此推出的语义，本层照办：
+ *   * 同一进程重复加锁不会和自己冲突，只把自己那一段的旧锁换成新锁；
+ *   * close 掉这个文件的**任意**一个 fd，本进程在这个文件上的锁全部释放
+ *     （这是 Linux 的语义：锁属于进程，而 close 无法知道还有没有别的 fd
+ *     指着同一个文件）；
+ *   * 锁不随 fork 继承（子进程的槽是新的，见 lx_proc_zero），但随 execve
+ *     保留（execve 不动进程槽）。
+ *
+ * 文件身份只有路径：本层没有 inode，同一路径就是同一个文件。硬链接、
+ * bind mount 这类「不同路径、同一个文件」分不出来，写进已知限制。
+ *
+ * 布局按 asm-generic 的**64 位** struct flock 解析（l_type@0、l_whence@2、
+ * l_start@8、l_len@16、l_pid@24，共 32 字节）——本内核的 Linux ABI 载体
+ * 只有 LA64 这一种 64 位字宽；32 位 asm-generic 的 16 字节布局没有载体。
+ */
+#define LX_RSLK_BYTES               (32u)
+#define LX_RSLK_O_TYPE              (0u)
+#define LX_RSLK_O_WHENCE            (2u)
+#define LX_RSLK_O_START             (8u)
+#define LX_RSLK_O_LEN               (16u)
+#define LX_RSLK_O_PID               (24u)
+#define LX_SEEK_SET                 (0)
+#define LX_SEEK_CUR                 (1)
+#define LX_SEEK_END                 (2)
+/* 锁表上限。满了回 -ENOLCK，不淘汰别人的锁：静默丢掉一把别人正靠着的锁，
+ * 比如实拒绝糟得多。 */
+#define LX_RSLK_MAX                 (8u)
+
+typedef struct
+{
+    uint8  used;
+    uint8  type;        /* LX_RDLCK / LX_WRLCK */
+    uint16 owner;       /* 进程槽 + 1；0 = 空条目 */
+    int32  pid;         /* 加锁者（F_GETLK 回填给询问方） */
+    uint32 start;
+    uint32 len;         /* 0 = 到 EOF */
+    char   path[LX_PATH_MAX];
+} lx_rslk_t;
+
+/* 阻塞等待登记：只记「谁在等哪个 fd」，路径在唤醒那一刻从 fd 表现取。
+ * 这样每条登记只有 4 字节，也省不掉正确性——fd 被关掉时等待者会被唤醒，
+ * 重放那一轮看到的是 -EBADF，不会真的等丢。 */
+typedef struct
+{
+    uint8  used;
+    uint8  idx;         /* fd 表下标 */
+    uint16 slot;        /* 进程槽（0 基） */
+} lx_rslk_wait_t;
+
+static lx_rslk_t      s_rslk[LX_RSLK_MAX];
+static lx_rslk_wait_t s_rslk_wait[ARKRTOS_TASK_MAX_NUM];
+
+/* 小端读写。struct flock 的四个字段都是小端（LA64 与 asm-generic 一致），
+ * 而宿主与目标字宽不同，所以一律按字节取，不用 memcpy 到结构体上。 */
+static uint16 lx_rslk_rd16(const uint8 *p)
+{
+    return (uint16)((uint16)p[0] | (uint16)((uint16)p[1] << 8));
+}
+
+static uint32 lx_rslk_rd32(const uint8 *p)
+{
+    return ((uint32)p[0]) | ((uint32)p[1] << 8) |
+           ((uint32)p[2] << 16) | ((uint32)p[3] << 24);
+}
+
+static void lx_rslk_wr16(uint8 *p, uint16 v)
+{
+    p[0] = (uint8)((uint32)v & 0xFFu);
+    p[1] = (uint8)(((uint32)v >> 8) & 0xFFu);
+}
+
+static void lx_rslk_wr32(uint8 *p, uint32 v)
+{
+    p[0] = (uint8)(v & 0xFFu);
+    p[1] = (uint8)((v >> 8) & 0xFFu);
+    p[2] = (uint8)((v >> 16) & 0xFFu);
+    p[3] = (uint8)((v >> 24) & 0xFFu);
+}
+
+/* 读一个 64 位 off_t：只有低 32 位是有效范围的整数值（本层文件大小本来
+ * 就是 32 位），高 32 位必须是低 32 位的符号扩展。高 32 位给了别的值就
+ * -EINVAL，绝不截断成一个「看起来合法」的假区间。 */
+static int32 lx_rslk_rd_off(const uint8 *p, int32 *out)
+{
+    uint32 lo = lx_rslk_rd32(p);
+    uint32 hi = lx_rslk_rd32(p + 4u);
+    uint32 want = ((lo & 0x80000000u) != 0u) ? 0xFFFFFFFFu : 0u;
+
+    if(hi != want)
+    {
+        return -LX_EINVAL;
+    }
+    *out = (int32)lo;
+    return 0;
+}
+
+static void lx_rslk_wr_off(uint8 *p, uint32 v)
+{
+    lx_rslk_wr32(p, v);
+    lx_rslk_wr32(p + 4u, ((v & 0x80000000u) != 0u) ? 0xFFFFFFFFu : 0u);
+}
+
+static uint8 lx_rslk_same_path(const char *a, const char *b)
+{
+    uint32 i = 0u;
+
+    while(i < LX_PATH_MAX)
+    {
+        if(a[i] != b[i])
+        {
+            return 0u;
+        }
+        if(a[i] == 0)
+        {
+            return 1u;
+        }
+        i++;
+    }
+    return 0u;
+}
+
+static void lx_rslk_copy_path(char *dst, const char *src)
+{
+    uint32 i = 0u;
+
+    while(((i + 1u) < LX_PATH_MAX) && (src[i] != 0))
+    {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = 0;
+}
+
+/* 区间的开区间上界（不含）。len == 0 是「到 EOF」，等价于上界 0xFFFFFFFF；
+ * 加出溢出的也按到 EOF 处理——把一个真实的大区间截断成小区间，会让本该
+ * 冲突的两把锁静默共存。 */
+static uint32 lx_rslk_end(uint32 start, uint32 len)
+{
+    if(len == 0u)
+    {
+        return 0xFFFFFFFFu;
+    }
+    if(len > (0xFFFFFFFFu - start))
+    {
+        return 0xFFFFFFFFu;
+    }
+    return start + len;
+}
+
+static uint8 lx_rslk_overlap(uint32 as, uint32 ae, uint32 bs, uint32 be)
+{
+    return (uint8)((as < be) && (bs < ae));
+}
+
+static int32 lx_rslk_alloc(void)
+{
+    uint32 i;
+
+    for(i = 0u; i < LX_RSLK_MAX; i++)
+    {
+        if(s_rslk[i].used == 0u)
+        {
+            return (int32)i;
+        }
+    }
+    return -1;
+}
+
+/* 找一把与 [start,end) 冲突的别人的锁：只看同一个 path、有交集、且「我要
+ * 写或者它要写」（两把读锁不冲突）。多把里报**起始偏移最小**的那把——
+ * Linux 也是这么挑的（f_pos 最小者）。-1 = 没有冲突。 */
+static int32 lx_rslk_conflict(uint16 owner, const char *path,
+                              uint32 start, uint32 end, uint8 type)
+{
+    uint32 i;
+    int32  best = -1;
+
+    for(i = 0u; i < LX_RSLK_MAX; i++)
+    {
+        uint32 bs;
+        uint32 be;
+
+        if((s_rslk[i].used == 0u) || (s_rslk[i].owner == owner))
+        {
+            continue;
+        }
+        if(lx_rslk_same_path(s_rslk[i].path, path) == 0u)
+        {
+            continue;
+        }
+        bs = s_rslk[i].start;
+        be = lx_rslk_end(s_rslk[i].start, s_rslk[i].len);
+        if(lx_rslk_overlap(start, end, bs, be) == 0u)
+        {
+            continue;
+        }
+        if((type != (uint8)LX_WRLCK) && (s_rslk[i].type != (uint8)LX_WRLCK))
+        {
+            continue;
+        }
+        if((best < 0) || (bs < s_rslk[(uint32)best].start))
+        {
+            best = (int32)i;
+        }
+    }
+    return best;
+}
+
+/* 把 owner 在 path 上与 [start,end) 相交的那部分切掉：整段覆盖就整条删，
+ * 砍头/砍尾就缩短，中间开洞就劈成两条。劈裂要空位，所以**先数清楚**，
+ * 不够就回 -ENOLCK 且一个字节都不改（不能留下半截状态）。 */
+static int32 lx_rslk_cut(uint16 owner, const char *path, uint32 start, uint32 end)
+{
+    uint32 i;
+    uint32 free_n = 0u;
+    uint32 need   = 0u;
+
+    for(i = 0u; i < LX_RSLK_MAX; i++)
+    {
+        uint32 bs;
+        uint32 be;
+
+        if(s_rslk[i].used == 0u)
+        {
+            free_n++;
+            continue;
+        }
+        if((s_rslk[i].owner != owner) ||
+           (lx_rslk_same_path(s_rslk[i].path, path) == 0u))
+        {
+            continue;
+        }
+        bs = s_rslk[i].start;
+        be = lx_rslk_end(s_rslk[i].start, s_rslk[i].len);
+        if(lx_rslk_overlap(start, end, bs, be) == 0u)
+        {
+            continue;
+        }
+        if((bs < start) && (end < be))
+        {
+            need++;
+        }
+    }
+    if(need > free_n)
+    {
+        return -LX_ENOLCK;
+    }
+    for(i = 0u; i < LX_RSLK_MAX; i++)
+    {
+        uint32 bs;
+        uint32 be;
+
+        if((s_rslk[i].used == 0u) || (s_rslk[i].owner != owner) ||
+           (lx_rslk_same_path(s_rslk[i].path, path) == 0u))
+        {
+            continue;
+        }
+        bs = s_rslk[i].start;
+        be = lx_rslk_end(s_rslk[i].start, s_rslk[i].len);
+        if(lx_rslk_overlap(start, end, bs, be) == 0u)
+        {
+            continue;
+        }
+        if((bs < start) && (end < be))
+        {
+            int32 f = lx_rslk_alloc();
+
+            if(f < 0)
+            {
+                return -LX_ENOLCK;      /* 上面已数过，这里不该发生 */
+            }
+            s_rslk[(uint32)f] = s_rslk[i];
+            s_rslk[(uint32)f].start = end;
+            s_rslk[(uint32)f].len   = (be == 0xFFFFFFFFu) ? 0u : (be - end);
+            s_rslk[i].len = start - bs;
+        }
+        else if(bs < start)
+        {
+            s_rslk[i].len = start - bs;             /* 砍尾 */
+        }
+        else if(end < be)
+        {
+            s_rslk[i].start = end;                  /* 砍头 */
+            s_rslk[i].len   = (be == 0xFFFFFFFFu) ? 0u : (be - end);
+        }
+        else
+        {
+            s_rslk[i].used = 0u;                    /* 整条删 */
+        }
+    }
+    return 0;
+}
+
+/* 加一把锁。语义按 POSIX：先把自己在相交区间里的旧锁切掉，再放进新锁。
+ * 空位要够「自己那把 + 劈裂需要的」，不够就 -ENOLCK（先数后改）。 */
+static int32 lx_rslk_install(uint16 owner, int32 pid, const char *path,
+                             uint32 start, uint32 len, uint8 type)
+{
+    uint32 i;
+    uint32 free_n = 0u;
+    uint32 need   = 0u;
+    uint32 end    = lx_rslk_end(start, len);
+    int32  f;
+    int32  rc;
+
+    for(i = 0u; i < LX_RSLK_MAX; i++)
+    {
+        uint32 bs;
+        uint32 be;
+
+        if(s_rslk[i].used == 0u)
+        {
+            free_n++;
+            continue;
+        }
+        if((s_rslk[i].owner != owner) ||
+           (lx_rslk_same_path(s_rslk[i].path, path) == 0u))
+        {
+            continue;
+        }
+        bs = s_rslk[i].start;
+        be = lx_rslk_end(s_rslk[i].start, s_rslk[i].len);
+        if(lx_rslk_overlap(start, end, bs, be) == 0u)
+        {
+            continue;
+        }
+        if((bs < start) && (end < be))
+        {
+            need++;                     /* 劈裂：多占一格 */
+        }
+        else if((bs >= start) && (be <= end))
+        {
+            free_n++;                   /* 整条被替换：腾出一格 */
+        }
+    }
+    if(free_n < (need + 1u))
+    {
+        return -LX_ENOLCK;
+    }
+    rc = lx_rslk_cut(owner, path, start, end);
+    if(rc != 0)
+    {
+        return rc;
+    }
+    f = lx_rslk_alloc();
+    if(f < 0)
+    {
+        return -LX_ENOLCK;              /* 数过的账，不该发生 */
+    }
+    s_rslk[(uint32)f].used  = 1u;
+    s_rslk[(uint32)f].type  = type;
+    s_rslk[(uint32)f].owner = owner;
+    s_rslk[(uint32)f].pid   = pid;
+    s_rslk[(uint32)f].start = start;
+    s_rslk[(uint32)f].len   = len;
+    lx_rslk_copy_path(s_rslk[(uint32)f].path, path);
+    return 0;
+}
+
+/* 叫醒在 path 上等着的全部任务。与管道同一套约定：唤醒只负责叫人，判定
+ * 留在重放那一轮——条件可能在唤醒与重放之间又被别人改掉。 */
+static void lx_rslk_wake(const char *path)
+{
+    int32  i;
+    uint32 crit;
+
+    crit = ARKRTOS_ENTER_CRITICAL();
+    for(i = 1; i <= (int32)ARKRTOS_TASK_MAX_NUM; i++)
+    {
+        lx_rslk_wait_t *p_w = &s_rslk_wait[i - 1];
+        uint32 slot = (uint32)p_w->slot;
+
+        if((p_w->used == 0u) || (slot >= (uint32)LX_PROC_MAX) ||
+           ((uint32)p_w->idx >= LX_MAX_FD))
+        {
+            continue;
+        }
+        if(s_proc[slot].fd[p_w->idx].used == 0u)
+        {
+            continue;
+        }
+        if(lx_rslk_same_path(s_proc[slot].fd[p_w->idx].path, path) == 0u)
+        {
+            continue;
+        }
+        (void)arkrtos_task_wakeup_internal(i);
+    }
+    ARKRTOS_EXIT_CRITICAL(crit);
+}
+
+/* 无差别的全唤醒：进程槽被重置时可能一次放掉好几个文件的锁，逐个按路径
+ * 叫醒要做多轮扫描，收益不值得。伪唤醒无害——重放那一轮会自己判条件。 */
+static void lx_rslk_wake_all(void)
+{
+    int32  i;
+    uint32 crit = ARKRTOS_ENTER_CRITICAL();
+
+    for(i = 1; i <= (int32)ARKRTOS_TASK_MAX_NUM; i++)
+    {
+        if(s_rslk_wait[i - 1].used != 0u)
+        {
+            (void)arkrtos_task_wakeup_internal(i);
+        }
+    }
+    ARKRTOS_EXIT_CRITICAL(crit);
+}
+
+/* 本进程关掉某个文件的任意一个 fd：它在这个文件上的锁全部释放（POSIX）。 */
+static void lx_rslk_release_path(uint32 slot, const char *path)
+{
+    uint32 i;
+    uint32 n = 0u;
+    uint16 owner;
+    uint32 crit;
+
+    if((slot >= (uint32)LX_PROC_MAX) || (path == 0) || (path[0] == 0))
+    {
+        return;
+    }
+    owner = (uint16)(slot + 1u);
+    crit = ARKRTOS_ENTER_CRITICAL();
+    for(i = 0u; i < LX_RSLK_MAX; i++)
+    {
+        if((s_rslk[i].used != 0u) && (s_rslk[i].owner == owner) &&
+           (lx_rslk_same_path(s_rslk[i].path, path) != 0u))
+        {
+            s_rslk[i].used = 0u;
+            n++;
+        }
+    }
+    ARKRTOS_EXIT_CRITICAL(crit);
+    if(n != 0u)
+    {
+        lx_rslk_wake(path);
+    }
+}
+
+/* 进程槽被重置：这个槽名下的锁全部消失。不清的话下一次槽位复用会让新
+ * 进程莫名其妙地"继承"一堆谁也解不开的锁。 */
+static void lx_rslk_release_owner(uint32 slot)
+{
+    uint32 i;
+    uint32 n = 0u;
+    uint16 owner;
+    uint32 crit;
+
+    if(slot >= (uint32)LX_PROC_MAX)
+    {
+        return;
+    }
+    owner = (uint16)(slot + 1u);
+    crit = ARKRTOS_ENTER_CRITICAL();
+    for(i = 0u; i < LX_RSLK_MAX; i++)
+    {
+        if((s_rslk[i].used != 0u) && (s_rslk[i].owner == owner))
+        {
+            s_rslk[i].used = 0u;
+            n++;
+        }
+    }
+    ARKRTOS_EXIT_CRITICAL(crit);
+    if(n != 0u)
+    {
+        lx_rslk_wake_all();
+    }
+}
+
+/* 撤掉当前任务的等待登记。每一次「这次调用真的结束了」都要走一遍，
+ * 否则下一次系统调用会被误认成重放。 */
+static void lx_rslk_forget(int32 me)
+{
+    uint32 crit;
+
+    if((me <= 0) || (me > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return;
+    }
+    crit = ARKRTOS_ENTER_CRITICAL();
+    s_rslk_wait[me - 1].used = 0u;
+    ARKRTOS_EXIT_CRITICAL(crit);
+}
+
+/* 挂起一个时间片，返回 LX_RET_RETRY（与 lx_pipe_sleep 同一条约定：参数
+ * 寄存器原样留给重放的那一次）。 */
+static int32 lx_rslk_sleep(void *p_ctx, int32 me, int32 slot, int32 idx)
+{
+    uint32 crit;
+
+    if((me <= 0) || (me > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return -LX_EAGAIN;          /* 没有任务身份：不假装睡过 */
+    }
+    if(arkrtos_port_svc_restart(p_ctx) != 0)
+    {
+        return -LX_ENOSYS;          /* 端口不能重放：如实拒绝 */
+    }
+    crit = ARKRTOS_ENTER_CRITICAL();
+    s_rslk_wait[me - 1].used = 1u;
+    s_rslk_wait[me - 1].slot = (uint16)slot;
+    s_rslk_wait[me - 1].idx  = (uint8)idx;
+    ARKRTOS_EXIT_CRITICAL(crit);
+    (void)arkrtos_task_block_in_critical((uint32)LX_WAIT_SLICE_MS);
+    return LX_RET_RETRY;
+}
+
+/* 把 whence 相对的偏移换成绝对偏移。负的结果、加过 32 位的结果都回 -EINVAL
+ * （Linux 对 l_start + l_len < 0 也是 EINVAL），不截断成假区间。 */
+static int32 lx_rslk_abs(uint32 base, int32 rel, uint32 *out)
+{
+    if(rel < 0)
+    {
+        uint32 back = (uint32)0u - (uint32)rel;
+
+        if(back > base)
+        {
+            return -LX_EINVAL;
+        }
+        *out = base - back;
+        return 0;
+    }
+    if((uint32)rel > (0xFFFFFFFFu - base))
+    {
+        return -LX_EINVAL;
+    }
+    *out = base + (uint32)rel;
+    return 0;
+}
+
+/* fcntl 的记录锁三档。idx 已经是本进程 fd 表的下标（-1 = 控制台本体，
+ * 不能加锁）。返回值可能是 LX_RET_RETRY（F_SETLKW 挂起）。 */
+static int32 lx_fcntl_lock(void *p_ctx, int32 slot, int32 idx, uint32 cmd,
+                           unsigned long uaddr)
+{
+    uint8    lbuf[LX_RSLK_BYTES];
+    lx_fd_t *p_fd;
+    int32    me = (int32)arkrtos_current_task_id;
+    int32    start32;
+    int32    len32;
+    int32    rc;
+    int32    hit;
+    uint32   type;
+    uint32   whence;
+    uint32   base;
+    uint32   start;
+    uint32   len;
+    uint32   end;
+    uint16   owner;
+
+    if((slot < 0) || ((uint32)slot >= (uint32)LX_PROC_MAX))
+    {
+        return -LX_ENOMEM;          /* 进程槽用满：不拿别人的槽当自己 */
+    }
+    if((idx < 0) || ((uint32)idx >= LX_MAX_FD))
+    {
+        return -LX_EINVAL;          /* 控制台本体没有文件可锁 */
+    }
+    p_fd = &s_proc[(uint32)slot].fd[(uint32)idx];
+    if((p_fd->used == 0u) || (p_fd->kind != LX_FD_FILE) || (p_fd->path[0] == 0))
+    {
+        lx_rslk_forget(me);
+        return -LX_EINVAL;          /* 管道 / 套接字 / 控制台：如实拒绝 */
+    }
+    if(uaddr == 0ul)
+    {
+        lx_rslk_forget(me);
+        return -LX_EFAULT;
+    }
+    if(arkrtos_copy_from_user(lbuf, (const void *)uaddr, LX_RSLK_BYTES) != 0)
+    {
+        lx_rslk_forget(me);
+        return -LX_EFAULT;
+    }
+    type   = (uint32)lx_rslk_rd16(&lbuf[LX_RSLK_O_TYPE]);
+    whence = (uint32)lx_rslk_rd16(&lbuf[LX_RSLK_O_WHENCE]);
+    if(type > (uint32)LX_UNLCK)
+    {
+        lx_rslk_forget(me);
+        return -LX_EINVAL;
+    }
+    if((cmd == LX_F_GETLK) && (type == (uint32)LX_UNLCK))
+    {
+        /* Linux：问「有一把解锁的锁吗」没有意义，直接 EINVAL，
+         * 不回一把假锁。 */
+        lx_rslk_forget(me);
+        return -LX_EINVAL;
+    }
+    if(whence > (uint32)LX_SEEK_END)
+    {
+        lx_rslk_forget(me);
+        return -LX_EINVAL;
+    }
+    rc = lx_rslk_rd_off(&lbuf[LX_RSLK_O_START], &start32);
+    if(rc != 0)
+    {
+        lx_rslk_forget(me);
+        return rc;
+    }
+    rc = lx_rslk_rd_off(&lbuf[LX_RSLK_O_LEN], &len32);
+    if(rc != 0)
+    {
+        lx_rslk_forget(me);
+        return rc;
+    }
+    if(len32 < 0)
+    {
+        lx_rslk_forget(me);
+        return -LX_EINVAL;          /* 负长度没有意义 */
+    }
+    base = 0u;
+    if(whence == (uint32)LX_SEEK_CUR)
+    {
+        base = p_fd->off;
+    }
+    else if(whence == (uint32)LX_SEEK_END)
+    {
+        base = p_fd->size;
+    }
+    rc = lx_rslk_abs(base, start32, &start);
+    if(rc != 0)
+    {
+        lx_rslk_forget(me);
+        return rc;
+    }
+    len   = (uint32)len32;
+    end   = lx_rslk_end(start, len);
+    owner = (uint16)((uint32)slot + 1u);
+
+    if(cmd == LX_F_GETLK)
+    {
+        hit = lx_rslk_conflict(owner, p_fd->path, start, end, (uint8)type);
+        if(hit < 0)
+        {
+            /* 无冲突：只把 l_type 改成 F_UNLCK，其余四格不动（Linux 也不动）。 */
+            lx_rslk_wr16(&lbuf[LX_RSLK_O_TYPE], (uint16)LX_UNLCK);
+        }
+        else
+        {
+            lx_rslk_wr16(&lbuf[LX_RSLK_O_TYPE], (uint16)s_rslk[(uint32)hit].type);
+            lx_rslk_wr16(&lbuf[LX_RSLK_O_WHENCE], (uint16)LX_SEEK_SET);
+            lx_rslk_wr_off(&lbuf[LX_RSLK_O_START], s_rslk[(uint32)hit].start);
+            lx_rslk_wr_off(&lbuf[LX_RSLK_O_LEN], s_rslk[(uint32)hit].len);
+            lx_rslk_wr32(&lbuf[LX_RSLK_O_PID], (uint32)s_rslk[(uint32)hit].pid);
+        }
+        lx_rslk_forget(me);
+        if(arkrtos_copy_to_user((void *)uaddr, lbuf, LX_RSLK_BYTES) != 0)
+        {
+            return -LX_EFAULT;
+        }
+        return 0;
+    }
+    if(type == (uint32)LX_UNLCK)
+    {
+        rc = lx_rslk_cut(owner, p_fd->path, start, end);
+        lx_rslk_forget(me);
+        if(rc != 0)
+        {
+            return rc;
+        }
+        /* 解锁可能放开一个正在等的写者：定向叫醒这个文件上的等待者。 */
+        lx_rslk_wake(p_fd->path);
+        return 0;
+    }
+    hit = lx_rslk_conflict(owner, p_fd->path, start, end, (uint8)type);
+    if(hit >= 0)
+    {
+        if(cmd == LX_F_SETLK)
+        {
+            lx_rslk_forget(me);
+            return -LX_EAGAIN;
+        }
+        if(lx_sig_pending_unblocked() != 0u)
+        {
+            lx_rslk_forget(me);
+            return -LX_EINTR;
+        }
+        return lx_rslk_sleep(p_ctx, me, slot, idx);
+    }
+    rc = lx_rslk_install(owner, me, p_fd->path, start, len, (uint8)type);
+    lx_rslk_forget(me);
+    return rc;
+}
+
+/* fcntl(25)：本层认两组 cmd —— fd 标志那五个（F_DUPFD / F_DUPFD_CLOEXEC /
+ * F_GETFD / F_SETFD / F_GETFL / F_SETFL）与记录锁那三个（F_GETLK / F_SETLK /
+ * F_SETLKW），其余 -EINVAL（Linux 对不认识的 cmd 也是 EINVAL，不回 ENOSYS）。
+ *
+ * 四处必须说清楚的边界：
  *   * 0..2 没有别名时它们是「控制台对象」而不是槽：F_GETFD 回 0、F_SETFD
  *     回 0 但不记 FD_CLOEXEC（没有槽可还，exec 之后控制台照旧在）、
  *     F_GETFL 回 O_RDWR|O_NONBLOCK。
@@ -1853,7 +2557,11 @@ static void lx_fd_set_fl(int32 idx, uint32 arg)
  *     多少 + -EAGAIN，清零是阻塞（读空、写满时挂起等对侧）。Linux 里
  *     「先把两端设成非阻塞、发送前再清掉」是常见的惯用法，两边都要认。
  *   * 文件 fd 的 O_APPEND 只被记录下来（F_GETFL 能读回）：本层文件写仍
- *     -ENOSYS，不会因为它变成"能追加"，所以也不假装写成功了。 */
+ *     -ENOSYS，不会因为它变成"能追加"，所以也不假装写成功了。
+ *   * 记录锁只落在**普通文件**上（管道/套接字/控制台 -EINVAL），所有者是
+ *     进程槽，文件身份是路径。F_SETLKW 挂起按 LX_WAIT_SLICE_MS 时间片
+ *     重放，没有死锁检测（Linux 会回 -EDEADLK 的那种情形本层会一直等），
+ *     也没有 OFD 锁与租约（F_OFD_* / F_SETLEASE 回 -EINVAL）。 */
 static int32 lx_fcntl(void *p_ctx)
 {
     int32  fd  = (int32)ARKRTOS_SVC_ARG(p_ctx, 0u);
@@ -1925,6 +2633,18 @@ static int32 lx_fcntl(void *p_ctx)
         }
         lx_fd_set_fl(idx, (uint32)arg);
         return 0;
+    case LX_F_GETLK:
+    case LX_F_SETLK:
+    case LX_F_SETLKW:
+        {
+            int32 slot = (int32)lx_proc_cur();
+
+            if(slot >= (int32)LX_PROC_MAX)
+            {
+                return -LX_ENOMEM;
+            }
+            return lx_fcntl_lock(p_ctx, slot, idx, cmd, arg);
+        }
     default:
         return -LX_EINVAL;
     }
@@ -2792,6 +3512,13 @@ static uint32 lx_fd_release(uint32 slot, uint32 idx)
         {
             s_proc[slot].std_slot[i] = 0u;
         }
+    }
+    /* close 掉这个文件的任意一个 fd：本进程在这个文件上的记录锁全部
+     * 释放（POSIX 语义，锁属于进程而不属于 fd）。必须赶在清 path 之前，
+     * 因为文件身份就是路径。 */
+    if(s_proc[slot].fd[idx].path[0] != 0)
+    {
+        lx_rslk_release_path(slot, s_proc[slot].fd[idx].path);
     }
     s_proc[slot].fd[idx].path[0] = 0;
     s_proc[slot].fd[idx].wr = 0u;
