@@ -33,7 +33,7 @@
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
 - [kernelsrc/include/arkrtos_layout.h](#kernelsrcincludearkrtos_layouth)（11 项）
 - [kernelsrc/include/arkrtos_layout_def.h](#kernelsrcincludearkrtos_layout_defh)（2 项）
-- [kernelsrc/include/arkrtos_linux_abi.h](#kernelsrcincludearkrtos_linux_abih)（7 项）
+- [kernelsrc/include/arkrtos_linux_abi.h](#kernelsrcincludearkrtos_linux_abih)（8 项）
 - [kernelsrc/include/arkrtos_loader.h](#kernelsrcincludearkrtos_loaderh)（33 项）
 - [kernelsrc/include/arkrtos_log.h](#kernelsrcincludearkrtos_logh)（16 项）
 - [kernelsrc/include/arkrtos_mempool.h](#kernelsrcincludearkrtos_mempoolh)（13 项）
@@ -5469,6 +5469,21 @@ in wait4 时才会被唤醒，别的等待原因不动）；
 读到的必然是终态。fork 关档时本函数编译成空宏，内核侧调用点也在
 #if 里，默认档不产生任何符号与体积。
 
+### `uint32 arkrtos_linux_abi_rseq_preempt(void *p_frame);`
+
+```c
+uint32 arkrtos_linux_abi_rseq_preempt(void *p_frame);
+```
+
+**rseq_cs 的中止点：port 在**真正**切换任务之前调用（LA64 是 la_trap_c**
+的出口结算处，且只在被打断的是用户态时）
+- `p_frame`：被打断上下文的 trap 帧（用户 PC 就在里面）
+**返回**：1 = 真把 PC 改到了 abort_ip；0 = 这一帧不需要动
+只处理「该任务注册过 rseq、rseq_cs 非 0 且内容可信、PC 落在
+[start_ip, start_ip + post_commit) 里」这一种现场；其余一律不动帧。
+默认档（ARKRTOS_USE_LINUX_ABI=0）编译成 0，port 里的调用点也在
+#if 里，默认镜像不产生符号、不产生费用。
+
 ## kernelsrc/include/arkrtos_loader.h
 
 **Ark RTOS App 镜像加载器（分区内加载 / 校验 / 启动 / 搬移 / 卸载）**
@@ -10675,7 +10690,7 @@ ARKRTOS_WEAK void arkrtos_port_irq_init(void) {
 ### `#include "arkrtos_hal.h" #include "arkrtos_task.h" #include "arkrtos_f`
 
 ```c
-#include "arkrtos_hal.h" #include "arkrtos_task.h" #include "arkrtos_fault.h" #include "arkrtos_ushell_upcall.h"   /* SEC-G08：upcall 桩与初始帧的 port 契约 */ #include "arkrtos_smp.h"       /* arkrtos_smp_ipi_handler()：主核 IPI 入口（R1） */
+#include "arkrtos_hal.h" #include "arkrtos_task.h" #include "arkrtos_fault.h" #if (ARKRTOS_USE_LINUX_ABI == 1) #include "arkrtos_linux_abi.h"   /* rseq_cs 的中止点（见 la_trap_c 出口） */ #endif
 ```
 
 **Ark RTOS LoongArch64 移植层实现**

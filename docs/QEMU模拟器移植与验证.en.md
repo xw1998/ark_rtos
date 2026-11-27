@@ -1530,6 +1530,20 @@ After the fix:
 pool free : 524288 B (512K)
 ```
 
+**2026-11-27: the kernel partition was doubled again, to 1 MB.** With `rseq`(293) and
+`getcpu`(168) in place, the ten-tier build (fork + COW + SHM + futex + filemap + mprotect +
+select + socket + thread + appq) pushed `__text_end` from `0x29DFD0` to `0x2A05F0`
+(+0x820 = 2080 B), i.e. **1520 B past** the old `IMAGE_POOL_BASE` `0x002A0000`; the linker's
+`ASSERT(__text_end <= 0x002A0000)` refused, which is exactly how `ci_gate`'s `fork` and
+`icount-stack` items went red. The partition header static-asserts that `KERNEL_SIZE` is a
+power of two (`ARKRTOS_IS_POW2`) and that `KERNEL_BASE % KERNEL_SIZE == 0`, so 640 KB is not
+an option; the only move is to double it. New geometry: kernel `0x00200000..0x00300000`
+(1 MB), config `0x00300000..0x00320000` (128 KB), image pool `0x00320000..0x00400000`
+(896 K / usable 768 K, seven 128 K sectors). Live QEMU reading (shell `pool` driven over a TCP
+serial chardev) is `pool free : 786432 B (768K)`, byte-for-byte the usable size. The change is
+the `KERNEL_SIZE` line in `board/qemu_loongarch64/arkrtos_board_config.h`, whose comment
+records the measurement and the overrun.
+
 `loader_crc_recheck_pool_e2e` then failed on first install with `-5`:
 
 ```

@@ -4205,6 +4205,16 @@ pool free : 0 B
 2026-11-20 内核区扩到 512 KB（LA64 的 RTSTAT 镜像放不下原布局，见 §5.30 末的布局表），镜像池随之变成
 `0x002A0000..0x00400000`（1408 K / usable 1280 K，11 个 128 K 扇区），实测 `pool free : 1310720 B (1280K)`。
 
+**2026-11-27 内核区再扩到 1 MB**：`rseq`(293)/`getcpu`(168) 落地后，十档全开（fork + COW + SHM +
+futex + filemap + mprotect + select + socket + thread + appq）的 `__text_end` 从上一提交的 `0x29DFD0`
+长到 `0x2A05F0`（+0x820 = 2080 B），越过原 `IMAGE_POOL_BASE` `0x002A0000` **1520 B**——链接器的
+`ASSERT(__text_end <= 0x002A0000)` 当场拒绝，`ci_gate` 的 `fork` 与 `icount-stack` 两项就是这样红的。
+分区头的静态断言要求 `KERNEL_SIZE` 是 2 的幂（`ARKRTOS_IS_POW2`）且 `KERNEL_BASE % KERNEL_SIZE == 0`，
+所以 640 KB 不可用，只能翻倍。新几何：代码区 `0x00200000..0x00300000`（1 MB）、配置区
+`0x00300000..0x00320000`（128 KB）、镜像池 `0x00320000..0x00400000`（896 K / usable 768 K，7 个
+128 K 扇区）。QEMU 实跑（TCP 串口驱动 shell 发 `pool`）读数 `pool free : 786432 B (768K)`，与 usable 逐字节相符。
+改在 `board/qemu_loongarch64/arkrtos_board_config.h` 的 `KERNEL_SIZE`，注释里记了测量值与越界量。
+
 **边界**：RAM 后端不模拟位翻转、不要求写前先擦、复位即重擦（内容不跨复位/掉电）。
 这条只解决「能不能装」，不等于「Flash 行为像真片」。见 [已知限制](已知限制.md)。
 
