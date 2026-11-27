@@ -226,6 +226,16 @@ CSR numbers are listed in the normative page. `-bios none` cannot be used, and `
 - Single multilib `lp64d`.
 - Exclude `arkrtos_flashapp.c` and `arkrtos_vfs_lfs.c` in the minimal configuration.
 - `gen_ldconsts.py` needs a trailing semicolon in its generated `#define`s.
+- Header dependencies (`-MMD -MP` + `-include $(OBJS:.o=.d)`) do **not** track the command line:
+  changing only `EXTRA_CFLAGS` (ten-tier <-> default) leaves every timestamp untouched, so the old
+  `.o` files are reused as-is. That is how `ci_gate`'s `fdt` item went red on 2026-11-27 — the
+  `arkrtos_context.o` left over from a manual ten-tier build still carried `bl la_refill_demand_c`
+  while the default-flag `arkrtos_port.o` had no such definition, so the link failed with
+  `undefined reference`. The Makefile now stores `cksum(CFLAGS|INCLUDES)` in
+  `$(BUILD)/.cflags.stamp`; when the stamp changes it is rewritten with the current time so every
+  `.o` is older than it (a full rebuild), and fixtures that consume `EXTRA_CFLAGS` (e.g.
+  `linux_fork.elf`) depend on the same stamp. Measured: ten-tier -> default rebuilt all 139 TUs and
+  linked; an immediate same-flag rerun says `Nothing to be done`.
 
 ### 5.7 Two LP64 silent wrong answers
 

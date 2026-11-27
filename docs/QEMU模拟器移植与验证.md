@@ -787,7 +787,16 @@ make -f example/qemu_loongarch64/Makefile run
   shell 元字符」的命令走 `CreateProcess` 快路径，本机 python 装在含非 ASCII
   字符的目录里，快路径定位不到；写个 `;` 才会交给 `sh` 按 PATH 解析。
 - 增量构建要跟踪 `-include` 的板级配置头，否则只改板级宏时旧 `.o` 会带着
-  上一套开关被复用（`-MMD -MP` + `-include $(OBJS:.o=.d)`）。
+  上一套开关被复用（`-MMD -MP` + `-include $(OBJS:.o=.d)`）。**但头文件依赖
+  管不住命令行**：`.d` 里没有编译参数，所以只换 `EXTRA_CFLAGS`（十档 ↔ 默认
+  档）而不动任何文件时，旧 `.o` 会被原样复用。2026-11-27 的 `ci_gate` 里
+  `fdt` 项就是这样红的——上一轮手工十档构建留下的 `arkrtos_context.o` 还带着
+  `bl la_refill_demand_c`，而默认档编出的 `arkrtos_port.o` 里没有那个定义，
+  链接期 `undefined reference`。现在 Makefile 把 `cksum(CFLAGS|INCLUDES)` 落成
+  `$(BUILD)/.cflags.stamp`，戳一变就按当前时间重写它，让所有 `.o` 都比它旧
+  （= 全量重编）；`linux_fork.elf` 这类吃 `EXTRA_CFLAGS` 的夹具也挂在同一个
+  戳上。实测「十档 → 默认档」连续构建 139 个 TU 全量重编、链接通过；同档再来
+  一次是 `Nothing to be done`。
 
 ### 5.7 LP64 带来的两个静默错答案
 

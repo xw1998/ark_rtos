@@ -239,6 +239,30 @@ SRCS_S := \
 OBJS := $(addprefix $(BUILD)/,$(addsuffix .o,$(basename $(SRCS_C) $(SRCS_S))))
 
 # 密钥头变了就重编：它被 arkrtos_features.h 间接包含。
+# ---- 编译参数指纹：换了开关就必须重编，不准复用上一套开关的 .o ----------
+# 症状（2026-11-27 实跑一次）：先用十档 EXTRA_CFLAGS 编过，再用默认档 make，
+# 增量构建只重编了时间戳变了的几个文件，链接期报
+# `undefined reference to la_refill_demand_c`：arkrtos_context.o 还是按需缺页
+# 档（有那句 bl），而 arkrtos_port.c 已经编成关档（没有那个定义）。比这更糟
+# 的情形是两套开关的目标文件混进同一个镜像却链接成功——那种镜像没人验证过。
+#
+# 依赖图救不了这件事：.d 只记头文件，不记命令行。所以这里按 CFLAGS + INCLUDES
+# 的 cksum 落一个戳；戳一变就按当前时间重写它，让所有 .o 都比它旧 = 全部重编。
+# 用 cksum 不用 sha1sum：前者是 POSIX 标准工具，Git Bash 与 Linux 都有。
+# ASFLAGS 不单独计入：它 = ARCH_FLAGS + 一个固定宏 + EXTRA_CFLAGS，随 CFLAGS
+# 同源变动，而 .S 与 .c 同在一个 $(OBJS) 里，一起重编。
+# 约束：EXTRA_CFLAGS 里不许出现单引号（会打断这条 shell 行）——那时的表现是
+# 本行报错，而不是悄悄复用旧 .o：宁可炸，不要暗。
+CFG_STAMP := $(BUILD)/.cflags.stamp
+CFG_SIG   := $(shell printf '%s' '$(CFLAGS)|$(INCLUDES)' | cksum | cut -d' ' -f1)
+ifeq ($(shell cat $(CFG_STAMP) 2>/dev/null),$(CFG_SIG))
+# 同一套参数：不碰戳，增量构建照旧。
+else
+$(shell mkdir -p $(BUILD) && printf '%s\n' '$(CFG_SIG)' > $(CFG_STAMP))
+endif
+
+$(OBJS): $(CFG_STAMP)
+
 $(OBJS): $(SIGNKEY)
 
 # 同一条规则给控制台登录的凭据头（只在开档时成立，默认档不生成也不依赖）。
@@ -586,7 +610,9 @@ LXFORK_ELF    := $(BUILD)/linux_fork.elf
 LXFORK_SIGNED := $(BUILD)/linux_fork.signed.elf
 LXFORK_H      := $(BUILD)/linux_fork_blob.h
 
-$(LXFORK_ELF): $(LXFORK_SRC)
+# 这个夹具的编译开关来自 EXTRA_CFLAGS（见 LXFORK_DEFS），所以它也得跟着
+# 编译参数指纹走，否则换档后旧夹具 ELF 会被原样塞进新镜像。
+$(LXFORK_ELF): $(LXFORK_SRC) $(CFG_STAMP)
 	@mkdir -p $(BUILD)
 	$(CC) $(ARCH_FLAGS) $(LXFORK_DEFS) -O2 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
 	      -ffunction-sections -fdata-sections -Wl,--gc-sections \
