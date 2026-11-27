@@ -387,6 +387,37 @@
 #endif
 #endif
 
+/* U-29 异步 I/O 通知（fcntl 的 F_SETOWN / F_GETOWN 与 O_ASYNC + SIGIO）。
+ *
+ * 关闭（默认）时 fcntl 里没有这两条 cmd 的分支、F_SETFL 不认 O_ASYNC 位、
+ * fd 槽里没有 owner 字段，管道写完也不会去看谁在等通知 —— 行为与本开关
+ * 存在之前逐位相同（F_SETOWN/F_GETOWN 回 -EINVAL，和记录锁、租约一样的
+ * 「本层没有这个实体」口径）。
+ *
+ * 打开后说清楚做到哪一步，不做到哪一步（写死，不靠读者猜）：
+ *   1) F_SETOWN(fd, 0) = 所有者是自己；正数 = 那个任务号（本层 pid 与任务号
+ *      同一套编号）；负数按「进程组」回 -EINVAL —— 内核里没有进程组。
+ *      F_GETOWN 回登记的主人，没有主人回 0（Linux 同义）。
+ *   2) O_ASYNC 走 F_SETFL 置/清，F_GETFL 读得回（0x2000）。只有**置了
+ *      O_ASYNC 且登记了主人**的 fd 才会收到通知，两条缺一不发。
+ *   3) 只在「fd 变成可读」时发 SIGIO(29)：管道写入有读端登记、socket 收到
+ *      数据。可写方向、边缘触发、每个事件只发一次（同一批数据里再写不再
+ *      发）这些 Linux 侧细节本层不做，避免把「一直震」当成「有事件」。
+ *   4) SIGIO 不带载荷：既有信号层没有 siginfo 队列，si_fd / si_band 没有
+ *      存放处，所以不发假值。需要 si_fd 的程序必须自己 poll，边界写进
+ *      已知限制。
+ *   5) 主人是任务号：主人不在或已退出时通知直接丢弃（不投给别的任务），
+ *      与 Linux「fd 的主人消失就没人收」一致。
+ */
+#ifndef ARKRTOS_USE_LINUX_SIGIO
+#define ARKRTOS_USE_LINUX_SIGIO        0
+#endif
+#if (ARKRTOS_USE_LINUX_SIGIO == 1)
+#if (ARKRTOS_USE_LINUX_ABI != 1)
+#error "ARKRTOS_USE_LINUX_SIGIO=1 requires ARKRTOS_USE_LINUX_ABI=1"
+#endif
+#endif
+
 /* SEC-G07 每 App 任务配额：0 = 关（任务表里没有 app_owner 字段、fork/clone
  * 里没有计数与拒绝分支，镜像与打开本开关之前逐字节相同），1 = 每次 ELF 装载
  * 分配一个非零 owner 号，fork 与 clone(CLONE_THREAD) 继承它，同一 owner 的活

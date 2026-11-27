@@ -105,6 +105,19 @@
      -EINVAL、亲和性掩码只认 bit0 逐个钉死。夹具里 deadline 那六条读数按
      ARKRTOS_USE_SCHED_DEADLINE 分两支（类开着期望 EBUSY/三元组，类没开期望
      -EINVAL/零值），两支条数相同，所以 SCHED_CHECKS=63 不随档变化。
+  D4. SIGIO 段（U-29 异步 I/O：F_SETOWN / F_GETOWN / O_ASYNC，24 条，十档
+     都编；[sio] 前缀单独计数，不进上面十档的 [fork] 常量）：照 D3 的做法只证
+     「登记、开关、投递真的过了内核」，不证投递时机（那由宿主用例用可控 tick
+     断言）。必现读数十条：`getown on console is 0 -> 0 ok`（控制台本体没有
+     可登记的主人）、`setown on console -> EINVAL -> -22 ok`、`getown reads
+     back the task id -> <pid> ok`（F_SETOWN 0 = 认给自己）、`setown process
+     group -> EINVAL -> -22 ok`（本层不做进程组，必须如实拒）、`getfl reports
+     O_ASYNC -> 1 ok`、`dup shares the owner -> <pid> ok` 与 `dup shares
+     O_ASYNC -> 1 ok`（同一份 file description 双向共享）、`SIGIO handler ran
+     -> 1 ok` 与 `SIGIO signo is 29 -> 29 ok`（投递与信号号）、`clearing
+     O_ASYNC stops delivery -> 0 ok`（关掉开关后命中数不变）、`close writer
+     (EOF) sends SIGIO -> 1 ok`（EOF 也算「变可读」）。默认动作（不装 handler
+     = 结束任务）不在这里做——会把任务中途杀掉，由宿主用例断言。
   E. 解析器自检：把合成坏日志喂给同一个判据（去掉 PASS、改退出码、插 FAIL、
      少一条 check、父子 pid 改成相同、去掉 exec rc=0），每种坏法都必须判红。
 
@@ -151,8 +164,11 @@ ELF_NAME = "ark_qemu_la64.elf"
 # U-28 的 sched 十二号（118-127、274/275）不另开一档：它与 fork 档正交，
 # 十档都带上 —— 否则「换档时 [sched] 读数整段消失」会被当成正常。
 SCHED_FLAGS = ["-DARKRTOS_USE_LINUX_SCHED=1", "-DARKRTOS_USE_SCHED_DEADLINE=1"]
+# U-29 的异步 I/O（F_SETOWN / F_GETOWN / O_ASYNC / SIGIO）同样与 fork 档正交，
+# 十档都带上：否则换档时 [sio] 读数整段消失也会被当成正常。
+SIGIO_FLAGS = ["-DARKRTOS_USE_LINUX_SIGIO=1"]
 FORK_FLAGS = ["-DARKRTOS_USE_LINUX_FORK=1", "-DARKRTOS_USE_PAGING_DEMAND=1"] + \
-    SCHED_FLAGS
+    SCHED_FLAGS + SIGIO_FLAGS
 # COW 档 = fork 档 + 写时复制开关。本门禁跑两遍：先默认 fork 档（27 条），
 # 再 fork+COW 档（32 条 + 内核 COW 日志）。绝不把 FORK_FLAGS 直接改成带
 # COW —— 那样默认 fork 路径（整块克隆）就再也没被测过了。
@@ -258,6 +274,10 @@ LOCK_CHECKS = 32
 # 六条读数按 ARKRTOS_USE_SCHED_DEADLINE 分两支（类开着期望 EBUSY/三元组，
 # 类没开期望 -EINVAL/零值），两支条数相同，所以这个常数不随档变化。
 SCHED_CHECKS = 63
+# SIGIO 段（U-29，十档都在，与 LOCK/SCHED 段同型）：23 条读数。夹具里没有
+# 默认动作（不装 handler = 结束任务）那一条 —— 它会中途杀掉任务，读数全丢；
+# 那一条由宿主用例 test_linux_abi_host.c 的 t_async_io 第 7 节断言。
+SIGIO_CHECKS = 24
 EXPECT_FORK_CHECKS = 47 + LOCK_CHECKS
 # COW 段多 5 条：pipe2、clone>0、子被 reap、子看到 fork 前的值（位掩码 3）、
 # 父自己的写还在。合计 52 条。
@@ -982,6 +1002,9 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
     # [sched] 段单独计数：前缀不同，所以上面十档的 EXPECT_* 一个都不用改。
     sc_ok = count(lambda s: s.startswith("[sched] ") and s.rstrip().endswith(" ok"))
     sc_fail = count(lambda s: s.startswith("[sched] ") and "FAIL" in s)
+    # [sio] 段（U-29）同样单独计数：前缀不同，十档的 EXPECT_* 仍然不用改。
+    sio_ok = count(lambda s: s.startswith("[sio] ") and s.rstrip().endswith(" ok"))
+    sio_fail = count(lambda s: s.startswith("[sio] ") and "FAIL" in s)
 
     m_par = re.search(r"^\[fork\] parent pid=(\d+)$", text.replace("\r\n", "\n"), re.M)
     m_chi = re.search(r"^\[fork\] child pid=(\d+)$", text.replace("\r\n", "\n"), re.M)
@@ -999,6 +1022,10 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
         problems.append("有 %d 条 [sched] check 打了 FAIL" % sc_fail)
     if sc_ok != SCHED_CHECKS:
         problems.append("[sched] check 通过条数 %d != %d" % (sc_ok, SCHED_CHECKS))
+    if sio_fail != 0:
+        problems.append("有 %d 条 [sio] check 打了 FAIL" % sio_fail)
+    if sio_ok != SIGIO_CHECKS:
+        problems.append("[sio] check 通过条数 %d != %d" % (sio_ok, SIGIO_CHECKS))
     # 三条新读数必须逐条出现：只比总条数时，换一个夹具（少写一条、多写一条）
     # 仍可能凑出同一个数，那是假绿。
     req = {
@@ -1345,6 +1372,55 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
     for line, why in sch_req.items():
         if count(lambda s2, t=line: s2.strip() == "[sched] " + t) != 1:
             problems.append("缺 `[sched] %s` —— %s" % (line, why))
+    # SIGIO 段（U-29）：逐条必现。只比总条数会被「少一条 A、多一条 B」凑成
+    # 同一个数骗过。带任务号的读数走下面的形态正则（pid 每档不同）。
+    sio_req = {
+        "getown on console is 0 -> 0 ok":
+            "控制台本体没有 F_GETOWN 通路（回了非 0）",
+        "setown on console -> EINVAL -> -22 ok":
+            "控制台本体居然能登记主人（Linux 回 -EINVAL）",
+        "setown process group -> EINVAL -> -22 ok":
+            "进程组（负值）登记被接受了（本层不支持进程组，必须如实拒）",
+        "setfl O_ASYNC -> 0 ok": "F_SETFL 打开 O_ASYNC 失败",
+        "getfl reports O_ASYNC -> 1 ok":
+            "F_GETFL 没读回 O_ASYNC（开关只写在参数里，没进 fd 状态）",
+        "dup shares O_ASYNC -> 1 ok":
+            "dup 副本没共享 O_ASYNC（dup 建了第二份 file description）",
+        "rt_sigaction(SIGIO) rc -> 0 ok": "SIGIO 处理器装不上",
+        "write after O_ASYNC returns the byte -> 1 ok":
+            "async 写的返回值不是字节数（信号把返回值吞了）",
+        "SIGIO handler ran -> 1 ok":
+            "O_ASYNC 置位后写数据没有把 SIGIO 投进 handler",
+        "SIGIO signo is 29 -> 29 ok": "handler 拿到的信号号不是 29",
+        "read still returns the byte -> 1 ok": "SIGIO 把管道里的字节吞掉了",
+        "the byte survived -> 105 ok": "读回来的字节不是写进去的那个",
+        "clear O_ASYNC -> 0 ok": "清 O_ASYNC 失败",
+        "getfl no longer reports O_ASYNC -> 1 ok":
+            "清掉 O_ASYNC 之后 F_GETFL 仍报 O_ASYNC",
+        "write after clearing O_ASYNC returns the byte -> 1 ok":
+            "清掉 O_ASYNC 之后写失败了",
+        "clearing O_ASYNC stops delivery -> 0 ok":
+            "清掉 O_ASYNC 之后仍在投递",
+        "re-open O_ASYNC -> 0 ok": "EOF 段之前重开 O_ASYNC 失败",
+        "close writer returns 0 -> 0 ok": "关写端失败",
+        "close writer (EOF) sends SIGIO -> 1 ok":
+            "写端全关（EOF）没有被当成「变可读」投递",
+    }
+    for line, why in sio_req.items():
+        if count(lambda s2, t=line: s2.strip() == "[sio] " + t) != 1:
+            problems.append("缺 `[sio] %s` —— %s" % (line, why))
+    # 带任务号的两条读数：主人必须是本任务号（getown 与 dup 副本读回同一个数）。
+    m_own = re.search(r"^\[sio\] getown reads back the task id -> (\d+) ok$",
+                      text.replace("\r\n", "\n"), re.M)
+    if not m_own:
+        problems.append("缺 `[sio] getown reads back the task id -> <pid> ok`"
+                        "（F_GETOWN 没读回任务号）")
+    else:
+        own = m_own.group(1)
+        if count(lambda s2, t=own: s2.strip() ==
+                 "[sio] dup shares the owner -> " + t + " ok") != 1:
+            problems.append("缺 `[sio] dup shares the owner -> %s ok`"
+                            "（dup 副本的主人登记没共享）" % own)
     if futex:
         # 子进程号会随前面的用例复用（6 / 12 / 15 都出现过，档位不同 pid
         # 就不一样），所以这几条只判「形态」：确实是某一次 reap 读数且 ok。
@@ -1578,6 +1654,16 @@ def self_check(good_text, cow=False, shm=False, futex=False, filemap=False,
         "sched 数字被改": lambda s: s.replace(
             "[sched] getattr DEADLINE deadline round-trips -> 2000000 ok",
             "[sched] getattr DEADLINE deadline round-trips -> 3000000 ok"),
+        # [sio] 段（U-29，十档都在）：少一条、插一条 FAIL、改一个数字。
+        "sio 少一条读数": lambda s: s.replace(
+            "[sio] clear O_ASYNC -> 0 ok\n", ""),
+        "sio 插一条 FAIL": lambda s: s.replace(
+            "[sio] SIGIO signo is 29 -> 29 ok",
+            "[sio] SIGIO signo is 29 -> 29 ok\n"
+            "[sio] bogus -> 1 FAIL (want 0)"),
+        "sio 数字被改": lambda s: s.replace(
+            "[sio] getown on console is 0 -> 0 ok",
+            "[sio] getown on console is 0 -> 7 ok"),
     }
     if cow:
         mutations.update({

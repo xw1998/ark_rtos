@@ -608,6 +608,12 @@ endif
 ifneq ($(ARK_DL_ON),)
 LXFORK_DEFS   += -DARKRTOS_USE_SCHED_DEADLINE=1
 endif
+# U-29 异步 I/O 夹具段（F_SETOWN / F_GETOWN / O_ASYNC + SIGIO）。只有一个
+# 开关：关档时夹具整段不编，读数不出现；开档时夹具多一组 [sio] 读数。
+ARK_SIGIO_ON := $(findstring ARKRTOS_USE_LINUX_SIGIO=1,$(EXTRA_CFLAGS))
+ifneq ($(ARK_SIGIO_ON),)
+LXFORK_DEFS   += -DARKRTOS_USE_LINUX_SIGIO=1
+endif
 ARK_QUOTA_ON := $(findstring ARKRTOS_USE_APP_QUOTA=1,$(EXTRA_CFLAGS))
 ARK_APPQ_N   := $(patsubst -DARKRTOS_APP_MAX_TASKS=%,%,$(filter -DARKRTOS_APP_MAX_TASKS=%,$(EXTRA_CFLAGS)))
 ifneq ($(ARK_QUOTA_ON),)

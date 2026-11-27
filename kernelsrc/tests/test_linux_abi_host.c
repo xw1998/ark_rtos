@@ -231,6 +231,7 @@ int main(void)
 #define T_O_APPEND          (0x400u)
 #define T_O_NONBLOCK        (0x800u)
 #define T_O_CLOEXEC         (0x80000u)
+#define T_O_ASYNC           (0x2000u)
 #define T_O_RDWR            (0x2u)
 #define T_O_WRONLY          (0x1u)
 #define T_O_RDONLY          (0x0u)
@@ -242,6 +243,9 @@ int main(void)
 #define T_F_SETFD           (2u)
 #define T_F_GETFL           (3u)
 #define T_F_SETFL           (4u)
+/* U-29：异步 I/O 的两条 cmd 与 O_ASYNC 位（同样另写一份）。 */
+#define T_F_SETOWN          (8u)
+#define T_F_GETOWN          (9u)
 #define T_F_DUPFD_CLOEXEC   (1030u)
 #define T_FD_CLOEXEC        (1u)
 #define T_MAP_SHARED        (0x01u)
@@ -7225,6 +7229,225 @@ static void t_sched(t_ctx *c)
 }
 #endif
 
+#if (ARKRTOS_USE_LINUX_SIGIO == 1)
+/* U-29 异步 I/O：F_SETOWN / F_GETOWN / O_ASYNC + SIGIO。
+ *
+ * 这一档只验翻译层的三件事，验完就把边界写清楚：
+ *   1) 登记的语义：0 = 自己、正数 = 任务号、负数 = 进程组被拒；
+ *   2) O_ASYNC 只落在 fd 那一格，F_GETFL 读得回，dup 出来的副本共享登记；
+ *   3) 「管道变可读」时 SIGIO 真的进到待投递位并铺帧；关掉 O_ASYNC 后不再发；
+ *      主人不是自己时发到别处（本就是别人的登记，不替别人铺帧）。
+ *
+ * 不验的：可写方向的 SIGIO、边缘触发去重、si_fd/si_band 载荷、进程组 ——
+ * 这些本版本没做（见 docs 与 ARKRTOS_USE_LINUX_SIGIO 的语义注释），宿主
+ * 不假装它们存在。
+ *
+ * 为什么按「一节一次投递」切分：真机上 handler 跑完会 rt_sigreturn 把屏蔽字
+ * 装回去；宿主用例不跑用户指令，所以一个 handler 进来之后信号 29 一直是
+ * 屏蔽的。同一节里再断言「又投递了一次」只会读到屏蔽的效果，而不是被测
+ * 代码的效果。每一节都用 fresh() 重新开始。
+ */
+static void t_async_io(t_ctx *c)
+{
+    uint32 fds[2];
+    uint32 fds2[2];
+    int32  rd;
+    int32  wr;
+    int32  rd2;
+
+    /* --- 1) 0..2 没有别名时是控制台本体，没有槽可以登记主人 --- */
+    fresh(c);
+    (void)call(c, T_NR_FCNTL, 0UL, (unsigned long)T_F_SETOWN, 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "F_SETOWN 控制台对象回 -EINVAL");
+    (void)call(c, T_NR_FCNTL, 0UL, (unsigned long)T_F_GETOWN, 0UL, 0UL);
+    ck_ret(c, 0, "F_GETOWN 控制台对象回 0");
+
+    /* --- 2) 登记语义 / O_ASYNC / dup 共享（本节不投递信号） --- */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF),
+               (unsigned long)T_O_NONBLOCK, 0UL, 0UL);
+    ck_ret(c, 0, "pipe2（登记档）");
+    u_get(T_DATA_OFF, fds, 8u);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF + 8u),
+               (unsigned long)T_O_NONBLOCK, 0UL, 0UL);
+    ck_ret(c, 0, "第二条 pipe2（扫描要跳过它）");
+    u_get(T_DATA_OFF + 8u, fds2, 8u);
+    rd  = (int32)fds[0];
+    wr  = (int32)fds[1];
+    rd2 = (int32)fds2[0];
+
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_SETOWN,
+               0UL, 0UL);
+    ck_ret(c, 0, "F_SETOWN(fd, 0) 认定自己");
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_GETOWN,
+               0UL, 0UL);
+    ck_ret(c, (int32)arkrtos_current_task_id, "F_GETOWN 读回自己");
+
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_SETOWN,
+               (unsigned long)(int32)-7, 0UL);
+    ck_ret(c, -T_EINVAL, "F_SETOWN 进程组回 -EINVAL");
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_GETOWN,
+               0UL, 0UL);
+    ck_ret(c, (int32)arkrtos_current_task_id, "进程组被拒后主人不变");
+
+    /* 主人设成别的任务号：写进管道也不给自己铺帧（跨任务投递走 pending）。 */
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_SETOWN,
+               99UL, 0UL);
+    ck_ret(c, 0, "F_SETOWN 到 99");
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_GETOWN,
+               0UL, 0UL);
+    ck_ret(c, 99, "F_GETOWN 读回 99");
+    u_put_str(T_STR_OFF, "z");
+    (void)call(c, T_NR_WRITE, (unsigned long)wr, u_ptr(T_STR_OFF), 1UL, 0UL);
+    ck_ret(c, 1, "主人不是自己时写成功");
+    ck_u(c->reg[T_UREG_ERA], 0u, "主人不是自己时不铺信号帧");
+
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_SETOWN,
+               0UL, 0UL);
+    ck_ret(c, 0, "F_SETOWN 回到自己");
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_SETFL,
+               (unsigned long)(T_O_NONBLOCK | T_O_ASYNC), 0UL);
+    ck_ret(c, 0, "F_SETFL 打开 O_ASYNC");
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_GETFL,
+               0UL, 0UL);
+    ck(((uint32)c->ret & T_O_ASYNC) != 0u, "F_GETFL 读回 O_ASYNC");
+
+    /* 另一条管道只挂 O_ASYNC、不设主人：扫描必须跳过它（owner == 0）。 */
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd2, (unsigned long)T_F_SETFL,
+               (unsigned long)(T_O_NONBLOCK | T_O_ASYNC), 0UL);
+    ck_ret(c, 0, "第二条管道只开 O_ASYNC");
+
+    (void)call(c, T_NR_DUP, (unsigned long)rd, 0UL, 0UL, 0UL);
+    ck_ret(c, 7, "dup 读端拿到 7 号");
+    (void)call(c, T_NR_FCNTL, 7UL, (unsigned long)T_F_GETOWN, 0UL, 0UL);
+    ck_ret(c, (int32)arkrtos_current_task_id, "dup 副本共享主人登记");
+    (void)call(c, T_NR_FCNTL, 7UL, (unsigned long)T_F_GETFL, 0UL, 0UL);
+    ck(((uint32)c->ret & T_O_ASYNC) != 0u, "dup 副本共享 O_ASYNC");
+
+    /* 共享是双向的：在副本上清 O_ASYNC，原 fd 立刻看到；再开回来也一样。
+     * 这条盯的是「dup 只复制了一份快照」的实现——那种实现在这里假绿。 */
+    (void)call(c, T_NR_FCNTL, 7UL, (unsigned long)T_F_SETFL,
+               (unsigned long)T_O_NONBLOCK, 0UL);
+    ck_ret(c, 0, "在 dup 副本上清 O_ASYNC");
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_GETFL,
+               0UL, 0UL);
+    ck(((uint32)c->ret & T_O_ASYNC) == 0u, "原 fd 也看到 O_ASYNC 被清");
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_SETFL,
+               (unsigned long)(T_O_NONBLOCK | T_O_ASYNC), 0UL);
+    (void)call(c, T_NR_FCNTL, 7UL, (unsigned long)T_F_GETFL, 0UL, 0UL);
+    ck(((uint32)c->ret & T_O_ASYNC) != 0u, "dup 副本也看到 O_ASYNC 被开回");
+
+    /* 主人登记同样共享（F_SETOWN 改的是 file description，不是那一个 fd） */
+    (void)call(c, T_NR_FCNTL, 7UL, (unsigned long)T_F_SETOWN, 99UL, 0UL);
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_GETOWN,
+               0UL, 0UL);
+    ck_ret(c, 99, "原 fd 读回副本上登记的主人");
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_SETOWN,
+               0UL, 0UL);
+    (void)call(c, T_NR_FCNTL, 7UL, (unsigned long)T_F_GETOWN, 0UL, 0UL);
+    ck_ret(c, (int32)arkrtos_current_task_id, "副本读回原 fd 上登记的主人");
+
+    /* --- 3) 变可读 → SIGIO 真投递 --- */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF),
+               (unsigned long)T_O_NONBLOCK, 0UL, 0UL);
+    ck_ret(c, 0, "pipe2（投递档）");
+    u_get(T_DATA_OFF, fds, 8u);
+    rd = (int32)fds[0];
+    wr = (int32)fds[1];
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_SETOWN,
+               0UL, 0UL);
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_SETFL,
+               (unsigned long)(T_O_NONBLOCK | T_O_ASYNC), 0UL);
+    ck(sig_install_act(c, 29u, T_HANDLER, T_RESTORER, 0UL) == 0,
+       "安装 SIGIO 处理器");
+    u_put_str(T_STR_OFF, "y");
+    (void)call(c, T_NR_WRITE, (unsigned long)wr, u_ptr(T_STR_OFF), 1UL, 0UL);
+    ck_u(c->ret, 29u, "写入后 SIGIO 投递：a0 = 信号号");
+    ck_u(c->reg[T_UREG_ERA], T_HANDLER, "SIGIO 铺帧到处理函数");
+    ck_u(c->reg[T_UREG_RA], T_RESTORER, "SIGIO 帧的 ra = restorer");
+    (void)call(c, T_NR_READ, (unsigned long)rd, u_ptr(T_DATA_OFF + 0x40u),
+               1UL, 0UL);
+    ck_ret(c, 1, "数据还在（SIGIO 不吞字节）");
+
+    /* --- 4) 清掉 O_ASYNC 后不再发 --- */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF),
+               (unsigned long)T_O_NONBLOCK, 0UL, 0UL);
+    u_get(T_DATA_OFF, fds, 8u);
+    rd = (int32)fds[0];
+    wr = (int32)fds[1];
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_SETOWN,
+               0UL, 0UL);
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_SETFL,
+               (unsigned long)(T_O_NONBLOCK | T_O_ASYNC), 0UL);
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_SETFL,
+               (unsigned long)T_O_NONBLOCK, 0UL);
+    ck_ret(c, 0, "F_SETFL 清 O_ASYNC");
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_GETFL,
+               0UL, 0UL);
+    ck(((uint32)c->ret & T_O_ASYNC) == 0u, "F_GETFL 读回已清 O_ASYNC");
+    ck(sig_install_act(c, 29u, T_HANDLER, T_RESTORER, 0UL) == 0,
+       "安装 SIGIO（关档）");
+    u_put_str(T_STR_OFF, "q");
+    (void)call(c, T_NR_WRITE, (unsigned long)wr, u_ptr(T_STR_OFF), 1UL, 0UL);
+    ck_ret(c, 1, "清掉 O_ASYNC 后不再投递");
+    ck_u(c->reg[T_UREG_ERA], 0u, "不投递则 reg 不被动过");
+
+    /* --- 5) 没有主人就不发 --- */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF),
+               (unsigned long)T_O_NONBLOCK, 0UL, 0UL);
+    ck_ret(c, 0, "pipe2（无主人档）");
+    u_get(T_DATA_OFF, fds, 8u);
+    rd = (int32)fds[0];
+    wr = (int32)fds[1];
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_SETFL,
+               (unsigned long)(T_O_NONBLOCK | T_O_ASYNC), 0UL);
+    ck_ret(c, 0, "只开 O_ASYNC 不设主人");
+    ck(sig_install_act(c, 29u, T_HANDLER, T_RESTORER, 0UL) == 0,
+       "安装 SIGIO（无主人档）");
+    u_put_str(T_STR_OFF, "w");
+    (void)call(c, T_NR_WRITE, (unsigned long)wr, u_ptr(T_STR_OFF), 1UL, 0UL);
+    ck_ret(c, 1, "没有主人时不投递");
+
+    /* --- 6) 写端全关（EOF）也是「变可读」 --- */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF),
+               (unsigned long)T_O_NONBLOCK, 0UL, 0UL);
+    u_get(T_DATA_OFF, fds, 8u);
+    rd = (int32)fds[0];
+    wr = (int32)fds[1];
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_SETOWN,
+               0UL, 0UL);
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_SETFL,
+               (unsigned long)(T_O_NONBLOCK | T_O_ASYNC), 0UL);
+    ck(sig_install_act(c, 29u, T_HANDLER, T_RESTORER, 0UL) == 0,
+       "安装 SIGIO（EOF 档）");
+    (void)call(c, T_NR_CLOSE, (unsigned long)wr, 0UL, 0UL, 0UL);
+    ck_u(c->ret, 29u, "写端关闭（EOF）也投一次 SIGIO");
+    ck_u(c->reg[T_UREG_ERA], T_HANDLER, "EOF 的 SIGIO 铺帧");
+
+    /* --- 7) 默认动作是「结束任务」：不装处理器就该退出 --- */
+    fresh(c);
+    g_exit_code = -1;
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF),
+               (unsigned long)T_O_NONBLOCK, 0UL, 0UL);
+    u_get(T_DATA_OFF, fds, 8u);
+    rd = (int32)fds[0];
+    wr = (int32)fds[1];
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_SETOWN,
+               0UL, 0UL);
+    (void)call(c, T_NR_FCNTL, (unsigned long)rd, (unsigned long)T_F_SETFL,
+               (unsigned long)(T_O_NONBLOCK | T_O_ASYNC), 0UL);
+    u_put_str(T_STR_OFF, "e");
+    (void)call(c, T_NR_WRITE, (unsigned long)wr, u_ptr(T_STR_OFF), 1UL, 0UL);
+    ck_ret(c, 1, "默认动作时返回值先写回（随后任务被结束）");
+    ck(g_exit_code == 128 + 29, "SIGIO 默认动作：退出码 = 128 + 29");
+    g_exit_code = -1;
+}
+#endif
+
 int main(void)
 {
     t_ctx c;
@@ -7270,6 +7493,9 @@ int main(void)
 #endif
 #if (ARKRTOS_USE_LINUX_SCHED == 1)
     t_sched(&c);
+#endif
+#if (ARKRTOS_USE_LINUX_SIGIO == 1)
+    t_async_io(&c);
 #endif
 #if (ARKRTOS_USE_PAGING_FILEMAP == 1)
     t_filemap(&c);

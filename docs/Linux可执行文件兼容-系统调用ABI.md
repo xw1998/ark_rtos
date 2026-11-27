@@ -1427,20 +1427,21 @@ fork 仍回 `-EAGAIN`（全段最干净的一条）；⑧ 第三个线程回 `-E
 ### 8.13 `fcntl`(25)：FD 旗标与状态旗标（2026-11-27，QEMU LA64 20 条 + 宿主 54 条）
 
 `fcntl` 是 glibc 起运行时就要用的那几个号之一（`isatty` 会问 `F_GETFL`、
-`__libc_fcntl64` 会给 fd 打 `FD_CLOEXEC`）。本节是 **fd 表这一层**能兑现的六条 cmd
-（记录锁三把在同一个号上另有实现，见 §8.16），其余一律 `-EINVAL`：本层没有异步 I/O、没有信号驱动的 I/O，回 0 等于
-谎报「事情办成了」。
+`__libc_fcntl64` 会给 fd 打 `FD_CLOEXEC`）。本节是 **fd 表这一层**能兑现的 cmd
+（记录锁三把见 §8.16；`F_SETOWN` / `F_GETOWN` 与 `O_ASYNC` 见 §8.18），其余一律
+`-EINVAL`：回 0 等于谎报「事情办成了」。
 
 | cmd | 回答 |
 |---|---|
 | `F_DUPFD`(0) | 从 `max(arg, 3)` 起找最小空号；`arg < 0` 或越过 `LX_MAX_FD + 3` → `-EINVAL`；表满 → `-ENFILE` |
 | `F_GETFD`(1) | 源存在回 `cloexec ? FD_CLOEXEC : 0`；不存在 `-EBADF` |
 | `F_SETFD`(2) | 只认 `FD_CLOEXEC` 这一位（`arg` 里其它位被忽略，与 Linux 同）；返 0 |
-| `F_GETFL`(3) | 回 `O_ACCMODE` + `O_APPEND` + `O_NONBLOCK` 三位。管道如实报它被造出来时的 `O_NONBLOCK` 位（`pipe2` 带 `O_NONBLOCK` 才有；默认 0 = 阻塞，见 §6）；控制台回 `O_RDWR\|O_NONBLOCK` |
-| `F_SETFL`(4) | 只改 `O_APPEND` / `O_NONBLOCK` 两位，返 0；**管道上置/清 `O_NONBLOCK` 都接受**（U-26 之后管道本身可阻塞，清位不再是假承诺，与 Linux 同） |
+| `F_GETFL`(3) | 回 `O_ACCMODE` + `O_APPEND` + `O_NONBLOCK`（U-29 之后再加 `O_ASYNC`）四位。管道如实报它被造出来时的 `O_NONBLOCK` 位（`pipe2` 带 `O_NONBLOCK` 才有；默认 0 = 阻塞，见 §6）；控制台回 `O_RDWR\|O_NONBLOCK` |
+| `F_SETFL`(4) | 改 `O_APPEND` / `O_NONBLOCK` 两位，返 0；**管道上置/清 `O_NONBLOCK` 都接受**（U-26 之后管道本身可阻塞，清位不再是假承诺，与 Linux 同）。U-29 起 `O_ASYNC` 位也认（`ARKRTOS_USE_LINUX_SIGIO` 打开时），见 §8.18 |
 | `F_DUPFD_CLOEXEC`(1030) | 同 `F_DUPFD`，新槽带 `FD_CLOEXEC` |
 | `F_GETLK`(5) / `F_SETLK`(6) / `F_SETLKW`(7) | 见 §8.16（记录锁：所有者是进程，身份是文件路径，单位是字节区间） |
-| 其它任何 cmd（含 `F_SETOWN` 家族） | `-EINVAL`（不回 `-ENOSYS`；Linux 对不认识的 cmd 也是 `EINVAL`） |
+| `F_SETOWN`(8) / `F_GETOWN`(9) | 见 §8.18。`ARKRTOS_USE_LINUX_SIGIO` 关档时落 `-EINVAL`（与 U-29 之前逐位相同） |
+| 其它任何 cmd | `-EINVAL`（不回 `-ENOSYS`；Linux 对不认识的 cmd 也是 `EINVAL`） |
 
 **`F_SETFL` 对管道的语义在 U-26 变了。** 旧契约（管道恒非阻塞）下，为了让「清
 `O_NONBLOCK`」不变成假承诺，`F_SETFL` 当场回 `-EINVAL`。U-26 把管道改成**默认阻塞**
@@ -1493,9 +1494,9 @@ fork 仍回 `-EAGAIN`（全段最干净的一条）；⑧ 第三个线程回 `-E
 假承诺（置上 `O_NONBLOCK` 后 `recvfrom` 收不到数据当场 `-EAGAIN` 且不睡时间片）。
 
 **边界。** ① 记录锁已于 2026-11-27 落地（§8.16），但只按**路径**认文件、全表 8 格、无死锁检测；
-② 没有 `F_SETOWN` / `F_GETOWN` / 异步 I/O
-（`F_SETFL` 里的 `O_ASYNC` 位被忽略，因为本层没有信号驱动的 I/O）；③ 没有
-`F_GETPIPE_SZ` / `F_SETPIPE_SZ`——管道缓冲固定 256 字节（§6）。
+② `F_SETOWN` / `F_GETOWN` / `O_ASYNC` 已于 2026-11-27 落地（§8.18），但只支持「fd 变可读
+（含 EOF）时报一次 SIGIO」，不做可写方向、实时排队、`si_fd`、进程组，且主人只认单任务号；
+③ 没有 `F_GETPIPE_SZ` / `F_SETPIPE_SZ`——管道缓冲固定 256 字节（§6）。
 
 ### 8.14 `rseq`(293) 与 `getcpu`(168)：可重启序列与 CPU 号（2026-11-27，QEMU LA64 16 条 + 宿主 40 条）
 
@@ -1887,6 +1888,105 @@ EOF」，等价上界 `0xFFFFFFFF`；`start + len` 加出溢出也按到 EOF 收
 ⑦ 节流粒度是拍（500 us），不是 Linux 那种 `hrtimer` 级的补充；⑧ 无 `sched_setattr` 的
 `SCHED_FLAG_DL_OVERRUN` 检测，超额运行只能靠节流兜住。
 
+### 8.18 异步 I/O（U-29）：`F_SETOWN` / `F_GETOWN` / `O_ASYNC` + SIGIO（2026-11-27，QEMU LA64 24 条 + 宿主 44 条）
+
+**是什么、不是什么。** Linux 的异步 I/O 通知有三个层次：`fcntl(F_SETOWN)` 登记「出了事
+发给谁」、`F_SETFL(O_ASYNC)` 打开这个 fd 的通知开关、内核对「fd 状态变化」投一次 `SIGIO`。
+本节只做**管道 fd 变可读（含写端全关的 EOF）时投一次 SIGIO**，其余一律如实不做：
+
+* 可写方向（`POLLOUT` 型的通知）不做——本层的写路径没有「空间变多」这个事件（阻塞写是
+  自己睡醒重放，不是事件通知）；
+* 边缘触发去重不做：每次 `lx_pipe_wake(pi, 0)` 都投一次，与 Linux 的 `SIGIO` 语义同一
+  档（Linux 也不保证「每个字节一次」）；
+* 实时信号排队（`sigqueue` / `SA_SIGINFO` 的 `si_fd` / `si_band`）不做，`SIGIO` 是普通
+  信号 29，投递的是标准 `rt_sigaction` 的 handler；
+* 进程组（`F_SETOWN` 传负值）不做：Linux 允许把通知发给进程组，本层没有进程组模型，
+  负值一律 `-EINVAL` 并计数 `s_sigio_pgrp_refused`，**不假装登记上了**。
+
+**为什么是「扫描 fd 表」而不是「注册表」。** 通知的判据是「这个管道读端现在有没有
+`O_ASYNC` 和主人」，真源就是 fd 槽本身。另建一张注册表就必须在 `close` / `dup` /
+`execve` / 进程退出 / fork 五处同步，漏一处就会给一个已经不存在的 fd 发信号；扫描是
+`LX_MAX_FD × LX_PROC_MAX` = 8 × 16 次整数比较，代价可以忽略，换来的是「不可能不同步」。
+
+**`dup` 的共享语义（U-29 顺手补的真缺陷）。** Linux 上 `dup` 复制的是 **file
+description**，所以 `F_SETFL` / `F_SETOWN` 改的是那个对象，所有副本立刻看得见。本内核
+没有独立的 `struct file`，fd 槽里存的是登记快照，`dup` 只复制。U-29 在 `lx_fd_set_fl()`
+与 `lx_fd_owner_cmd()` 收尾调 `lx_fd_sync_peer()`：把改动同步到**同一进程内、同一
+kind、同一 pipe 对象**的其它 fd（管道是唯一「一个对象被多个 fd 引用」的 kind）。
+夹具「在 dup 副本上清 `O_ASYNC` → 原 fd 立刻不再投递」与宿主用例的双向 5 条断言就是
+这条实现被钉死的地方——只有快照复制的实现在这里必红。
+
+**`O_ASYNC` 在关档时是真关。** `ARKRTOS_USE_LINUX_SIGIO = 0` 时 `F_SETOWN` /
+`F_GETOWN` 落 `-EINVAL`（与 U-29 之前逐位相同），`F_SETFL` 忽略 `O_ASYNC` 位、
+`F_GETFL` 读不回它，`lx_fd_t` 里连 `owner` 这一格都不存在。
+
+**投递点。** 与其它信号一致：`lx_finish()` 是唯一的投递点（`LX_RET_PTR_DONE` /
+`EXEC_DONE` / `RETRY` 三条早退不投递）。所以「写一个字节」这一次系统调用的返回路径上
+handler 被调到，`rt_sigreturn` 之后 `a0` 仍是被打断的那次调用的返回值（写入字节数）——
+信号不吞返回值，也不吞管道里的字节。
+
+**实测读数（`[sio]` 行，QEMU LA64 fork 档，24 条）**
+
+```
+[sio] getown on console is 0 -> 0 ok
+[sio] setown on console -> EINVAL -> -22 ok
+[sio] pipe2 -> 0 ok
+[sio] setown to self -> 0 ok
+[sio] getown reads back the task id -> 11 ok
+[sio] setown process group -> EINVAL -> -22 ok
+[sio] setfl O_ASYNC -> 0 ok
+[sio] getfl reports O_ASYNC -> 1 ok
+[sio] dup read end ok -> 1 ok
+[sio] dup shares the owner -> 11 ok
+[sio] dup shares O_ASYNC -> 1 ok
+[sio] rt_sigaction(SIGIO) rc -> 0 ok
+[sio] write after O_ASYNC returns the byte -> 1 ok
+[sio] SIGIO handler ran -> 1 ok
+[sio] SIGIO signo is 29 -> 29 ok
+[sio] read still returns the byte -> 1 ok
+[sio] the byte survived -> 105 ok
+[sio] clear O_ASYNC -> 0 ok
+[sio] getfl no longer reports O_ASYNC -> 1 ok
+[sio] write after clearing O_ASYNC returns the byte -> 1 ok
+[sio] clearing O_ASYNC stops delivery -> 0 ok
+[sio] re-open O_ASYNC -> 0 ok
+[sio] close writer returns 0 -> 0 ok
+[sio] close writer (EOF) sends SIGIO -> 1 ok
+```
+
+`105` 是写进去的那个字节 `'i'`；`11` 是本任务号（每档可能不同，门禁用形态判）。三条
+反假绿写死在这里：① handler 命中数与信号号一起判——只看「write 返回 1」会被「根本没投递」
+骗过；② 清掉 `O_ASYNC` 那节看的是**命中数不变**，不是 write 返回值；③ `read` 必须拿回
+那个字节，「投递了但把数据吃了」同样是错的。
+
+**默认动作（不装 handler = 结束任务）只在宿主断言。** 在 QEMU 夹具里做会把本任务中途
+杀掉，后面的读数全丢；宿主用例 `t_async_io` 第 7 节断言「返回值先写回、随后
+`g_exit_code == 128 + 29`」，与 Linux 的默认动作一致。
+
+**宿主的 44 条**（`test_linux_abi_host.c` 的 `t_async_io`，七节）把 QEMU 夹具造不出来的
+状态补齐：控制台对象的 `-EINVAL`/0、另一条管道只开 `O_ASYNC` 不设主人（扫描必须跳过
+`owner == 0`）、写边 fd（`kind != PIPE_R`）不投递、`dup` 双向共享（5 条）、清 `O_ASYNC`
+后不投递且 `reg` 没被动过、无主人不投递、EOF 也投一次、默认动作结束任务。**宿主用例的
+一个坑**：投递之后 `s_sig_blocked` 会含该信号位，宿主不跑用户指令就等不到 `rt_sigreturn`
+把它装回去——所以同一节里只能断言一次投递，要再断言必须重新 `fresh()`。
+
+**门禁。** `tools/fork_gate.py` 的 `SIGIO_CHECKS = 24`：`[sio]` 前缀单独计数（与 `[fork]`
+的十档常量互不干扰），十档都带 `-DARKRTOS_USE_LINUX_SIGIO=1`（否则「换档整段消失」会被
+当成正常）。十条必现读数逐条校验（含带任务号的两条走形态正则），坏日志自检另加三种
+`sio` 形态（少一条、插一条 FAIL、改一个数字）。
+
+**覆盖率。** 宿主 `linuxabisigio` 档单跑 `test_linux_abi_host.c` 的 44 条断言、单档 92.83%；
+八档（`linuxabi` / `linuxabifutex` / `linuxabifilemap` / `linuxabiselect` / `linuxabisocket` /
+`linuxabisched` / `linuxabisigio` 与关档）求行并集后 `arkrtos_linux_abi` 97.27%（基线 97.00% 不动），
+全量 `COVERAGE-GATE OK`（71 个模块均不低于基线）。
+
+**边界。** ① 只报「fd 变可读（含 EOF）」，可写方向、边缘触发去重、`si_fd`/`si_band`、
+实时排队一律不做（见上）；② 进程组登记回 `-EINVAL` 并计数，不假装支持；③ `dup` 的
+共享只在**同一进程内**成立：fork 之后父子各自的槽是两份拷贝，`F_SETFL`/`F_SETOWN`
+不会跨进程同步（要正确必须引入真正的 file 对象与跨进程引用计数，见
+`docs/已知限制.md`）；④ 主人只认单个任务号，任务退出后 `F_GETOWN` 仍读回那个号
+（不发呆信号也不清理，与「登记是数值」的语义一致）。
+
 ## 9 开关与零体积
 
 - `ARKRTOS_USE_LINUX_ABI`（`kernelsrc/include/arkrtos_features.h`、
@@ -1939,6 +2039,11 @@ EOF」，等价上界 `0xFFFFFFFF`；`start + len` 加出溢出也按到 EOF 收
   socket 分派，`198`–`210` 与 `242` 落回 `-ENOSYS`；开档实测是宿主 socket 档的
   **768 checks**（覆盖率单档 98.51%、六档 union 98.84%，基线 98.82%）与 **QEMU 第八档 232 条读数**
   （其中 socket 段 39 条：语义 38 + 往返耗时 1）。
+- `ARKRTOS_USE_LINUX_SIGIO`（§8.18），默认 **0**，`depends on ARKRTOS_USE_LINUX_ABI`
+  且 `features.h` 用 `#error` 顶住这条依赖；关档时 `F_SETOWN` / `F_GETOWN` 落回
+  `-EINVAL`（与 U-29 之前逐位相同）、`F_SETFL` 忽略 `O_ASYNC`、`owner` 槽与
+  `lx_async_notify_pipe` 全不编译；开档实测是**十档共用的 `[sio]` 24 条读数**与宿主
+  `linuxabisigio` 档的 44 条断言。
 - `arkrtos_autoconf.h` 由 `tools/kconfig/genconfig.py` 从 `config/arkrtos_defconfig`
   生成，新增 Kconfig 项后必须重跑一次，否则默认档读数里看不到这个开关。
 
@@ -1977,6 +2082,9 @@ QEMU LA64 上 232 条 check 全 `ok` + `exit code 0`。
 
 fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**71 项**；fork / fork+COW / fork+COW+SHM / fork+COW+SHM+futex / fork+COW+SHM+futex+filemap / fork+COW+SHM+futex+filemap+mprotect / fork+COW+SHM+futex+filemap+mprotect+select / fork+COW+SHM+futex+filemap+mprotect+select+socket / fork+COW+SHM+futex+filemap+mprotect+select+socket+thread / fork+COW+SHM+futex+filemap+mprotect+select+socket+thread+appq **十档各跑一遍**，所以 build / qemu-readout / parser-selfcheck 各出现十次、compile-on 十次；再加十档共用的 `default-off` / `off-zero-symbols` / `off-zero-port` / `board-switch` / `restore-default` 五道，与九档各自的 `kconfig-wired-<档>` / `features-guard-<档>` / `default-off-<档>` 三件套二十七道，合计 71 项）：
 
+上面这些 `[fork]` 常量都不含 `[sched]`（U-28，63 条）与 `[sio]`（U-29，24 条）——
+两个前缀各自单独计数，十档都跑同一份夹具，所以「换档时整段消失」不会被当成正常。
+
 | 项 | 钉住什么 |
 |---|---|
 | `default-off` | `arkrtos_autoconf.h` 里 `ARKRTOS_USE_LINUX_FORK` 必须是 0 |
@@ -2009,7 +2117,8 @@ fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**7
 插一条 FAIL、少一条 check，管道块去掉 PASS 行、退出码改成 1，信号块去掉 PASS 行、
 退出码改成 1，dup 块去掉 PASS 行、退出码改成 1、插一条 FAIL、少一条 check，
 fork 块把「阻塞读数改成没等」/「父读端改成 `-EBADF`」/「SIGCHLD 没被
-调到」，九种都必须被判红。
+调到」，九种都必须被判红；U-29 起 `[sio]` 段另加三种（少一条、插一条 FAIL、改一个数字），
+同样必须被判红。
 
 ## 11 本轮踩到的真 bug 与读数坑
 

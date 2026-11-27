@@ -892,6 +892,19 @@ CASES = [
      {"incs": ["-Iboard/qemu_loongarch64",
                "-Ikernelsrc/port/loongarch/la64"],
       "ldflags": ["-Wl,--wrap=arkrtos_port_svc_exec_frame"]}),
+    # 异步 I/O 档（U-29）：与 linuxabi 共用同一个 .c，多定义
+    # ARKRTOS_USE_LINUX_SIGIO=1。任务表与信号投递全在同一个翻译层里，不需要
+    # 额外桩；被量的仍是 arkrtos_linux_abi.c，与其它 Linux ABI 档求行并集。
+    ("linuxabisigio", "kernelsrc/tests/test_linux_abi_host.c",
+     ["kernelsrc/src/arkrtos_linux_abi.c"],
+     [BOARD_QEMU_LA64_DEFS[0], "-include", "arkrtos_board_config.h",
+      SIGN_KEY_DEF, "-DARKRTOS_LINUX_ABI_SYSSTAT=1",
+      "-DARKRTOS_HOST_WEAK_PORT=0", "-DARKRTOS_USE_LINUX_SIGIO=1",
+      "-fno-asynchronous-unwind-tables", "-ffunction-sections"],
+     "LINUX-ABI HOST OK",
+     {"incs": ["-Iboard/qemu_loongarch64",
+               "-Ikernelsrc/port/loongarch/la64"],
+      "ldflags": ["-Wl,--wrap=arkrtos_port_svc_exec_frame"]}),
     # --- 2026-11-22：迷你应用装载器（arkrtos_mini）-------------------------
     # 开关走「包装板级头」而不是 -D：板级头每项都是 #undef + #define 写死，
     # 命令行 -D 会被覆盖。包装头在包含板级头之后再改那四项（见文件头注释）。

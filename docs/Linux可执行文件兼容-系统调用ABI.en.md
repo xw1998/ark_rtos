@@ -1656,21 +1656,22 @@ exec.
 ### 8.13 `fcntl`(25): FD flags and status flags (2026-11-27, QEMU LA64 20 checks + 54 host checks)
 
 `fcntl` is one of the first numbers glibc touches at start-up (`isatty` asks
-`F_GETFL`, `__libc_fcntl64` tags fds with `FD_CLOEXEC`). This section covers the six commands the
+`F_GETFL`, `__libc_fcntl64` tags fds with `FD_CLOEXEC`). This section covers the commands the
 **fd table layer** can honour (the three record-lock commands share the same syscall and
-live in section 8.16); everything else returns `-EINVAL` - there is no async I/O and no
-signal-driven I/O here, and returning 0 would claim work that never happened.
+live in section 8.16; `F_SETOWN` / `F_GETOWN` and `O_ASYNC` live in section 8.18);
+everything else returns `-EINVAL`, because returning 0 would claim work that never happened.
 
 | cmd | reply |
 |---|---|
 | `F_DUPFD`(0) | lowest free number at or above `max(arg, 3)`; `arg < 0` or past `LX_MAX_FD + 3` gives `-EINVAL`; a full table gives `-ENFILE` |
 | `F_GETFD`(1) | `cloexec ? FD_CLOEXEC : 0` when the fd exists; `-EBADF` otherwise |
 | `F_SETFD`(2) | only the `FD_CLOEXEC` bit is honoured (other bits in `arg` are ignored, as in Linux); returns 0 |
-| `F_GETFL`(3) | returns `O_ACCMODE` + `O_APPEND` + `O_NONBLOCK`; a pipe reports the `O_NONBLOCK` bit it was created with (only if `pipe2` got `O_NONBLOCK`; the default is 0, i.e. blocking - section 6); the console returns `O_RDWR\|O_NONBLOCK` |
-| `F_SETFL`(4) | changes only `O_APPEND` / `O_NONBLOCK`, returns 0; **on a pipe both setting and clearing `O_NONBLOCK` are accepted** (since U-26 the pipe itself can block, so clearing is no longer an empty promise - same as Linux) |
+| `F_GETFL`(3) | returns `O_ACCMODE` + `O_APPEND` + `O_NONBLOCK` (plus `O_ASYNC` since U-29); a pipe reports the `O_NONBLOCK` bit it was created with (only if `pipe2` got `O_NONBLOCK`; the default is 0, i.e. blocking - section 6); the console returns `O_RDWR\|O_NONBLOCK` |
+| `F_SETFL`(4) | changes `O_APPEND` / `O_NONBLOCK`, returns 0; **on a pipe both setting and clearing `O_NONBLOCK` are accepted** (since U-26 the pipe itself can block, so clearing is no longer an empty promise - same as Linux); since U-29 the `O_ASYNC` bit is honoured too when `ARKRTOS_USE_LINUX_SIGIO` is on (section 8.18) |
 | `F_DUPFD_CLOEXEC`(1030) | same as `F_DUPFD`, new slot carries `FD_CLOEXEC` |
 | `F_GETLK`(5) / `F_SETLK`(6) / `F_SETLKW`(7) | see section 8.16 (record locks: owner is the process, identity is the file path, unit is a byte range) |
-| any other cmd (including the `F_SETOWN` family) | `-EINVAL` (and Linux also returns `EINVAL` for a command it does not know - not `ENOSYS`) |
+| `F_SETOWN`(8) / `F_GETOWN`(9) | see section 8.18; with `ARKRTOS_USE_LINUX_SIGIO` off they fall back to `-EINVAL` (bit-identical to pre-U-29) |
+| any other cmd | `-EINVAL` (and Linux also returns `EINVAL` for a command it does not know - not `ENOSYS`) |
 
 **The semantics of `F_SETFL` on a pipe changed in U-26.** Under the old contract (pipes
 always non-blocking) `F_SETFL` returned `-EINVAL` for "clear `O_NONBLOCK`", so that the 0
@@ -1726,10 +1727,10 @@ source, and so on.
 
 **Boundaries.** (1) record locks landed on 2026-11-27 (section 8.16), but they identify a
 file by **path** only, the whole table is 8 slots and there is no deadlock detection;
-(2) no `F_SETOWN` /
-`F_GETOWN` / async I/O (`O_ASYNC` in `F_SETFL` is ignored because there is no signal-driven
-I/O); (3) no `F_GETPIPE_SZ` / `F_SETPIPE_SZ` - the pipe buffer is a fixed 256 bytes
-(section 6).
+(2) `F_SETOWN` / `F_GETOWN` / `O_ASYNC` landed on 2026-11-27 (section 8.18), but they only
+report "this fd became readable (including EOF)"; the writable direction, real-time queueing,
+`si_fd`, and process groups are all out, and the owner is a single task id;
+(3) no `F_GETPIPE_SZ` / `F_SETPIPE_SZ` - the pipe buffer is a fixed 256 bytes (section 6).
 
 ### 8.14 `rseq`(293) and `getcpu`(168): restartable sequences and the CPU number (2026-11-27, 16 QEMU LA64 checks + 40 host checks)
 
@@ -2207,7 +2208,128 @@ idleness; (3) no group scheduling and no cgroup bandwidth; (4) `SCHED_RESET_ON_F
 (8) there is no `SCHED_FLAG_DL_OVERRUN` overrun detection - overrun is only contained by
 throttling.
 
+### 8.18 Asynchronous I/O (U-29): `F_SETOWN` / `F_GETOWN` / `O_ASYNC` + SIGIO (2026-11-27, 24 QEMU LA64 checks + 44 host checks)
+
+**What this is, and what it is not.** Linux signal-driven I/O has three layers:
+`fcntl(F_SETOWN)` records who to notify, `F_SETFL(O_ASYNC)` arms the fd, and the kernel
+delivers one `SIGIO` when the fd changes state. This section delivers **one SIGIO when a pipe
+fd becomes readable (including EOF after every writer closed)** and nothing else:
+
+* the writable direction (a `POLLOUT`-style notification) is not done - the write path has no
+  "space became available" event (a blocking write sleeps and replays, it is not notified);
+* no edge-triggered de-duplication: every `lx_pipe_wake(pi, 0)` delivers once, the same tier
+  as Linux `SIGIO` (Linux does not promise one per byte either);
+* no real-time signal queueing (`sigqueue` / `si_fd` / `si_band` from `SA_SIGINFO`); `SIGIO`
+  is plain signal 29 and goes through the standard `rt_sigaction` handler;
+* no process groups: `F_SETOWN` with a negative value is `-EINVAL` and bumps
+  `s_sigio_pgrp_refused` - **it is never recorded as if it had worked**.
+
+**Why scan the fd table instead of keeping a registry.** The truth is the fd slot itself: does
+this pipe read end carry `O_ASYNC` and an owner? A registry would need synchronisation in
+`close` / `dup` / `execve` / process exit / fork, and one missed spot would signal an fd that
+no longer exists. A scan is `LX_MAX_FD x LX_PROC_MAX` = 8 x 16 integer comparisons; that is
+the price of "it is impossible to fall out of sync".
+
+**`dup` sharing (a real defect fixed along the way).** On Linux `dup` copies the **file
+description**, so `F_SETFL` / `F_SETOWN` change that object and every copy sees it at once.
+This kernel has no separate `struct file`: an fd slot stores a registration snapshot and
+`dup` merely copies it. U-29 calls `lx_fd_sync_peer()` at the end of `lx_fd_set_fl()` and
+`lx_fd_owner_cmd()`, propagating the change to every other fd **in the same process with the
+same kind and the same pipe object** (a pipe is the only kind here where one object is
+referenced by several fds). The fixture check "clear `O_ASYNC` on the duplicate -> the
+original stops delivering" and the five two-way host assertions are what pin this down; an
+implementation that only copies a snapshot fails them.
+
+**With the switch off, `O_ASYNC` really is off.** With `ARKRTOS_USE_LINUX_SIGIO = 0`,
+`F_SETOWN` / `F_GETOWN` return `-EINVAL` (bit-identical to pre-U-29), `F_SETFL` ignores
+`O_ASYNC`, `F_GETFL` cannot report it, and the `owner` field of `lx_fd_t` does not even exist.
+
+**Delivery point.** Same as every other signal: `lx_finish()` is the only delivery point
+(`LX_RET_PTR_DONE` / `EXEC_DONE` / `RETRY` do not deliver). So the handler runs on the return
+path of the very syscall that wrote the byte, and after `rt_sigreturn` `a0` is still that
+call's return value (the byte count) - the signal swallows neither the return value nor the
+byte in the pipe.
+
+**Measured readouts (`[sio]` lines, QEMU LA64 fork tier, 24 checks)**
+
+```
+[sio] getown on console is 0 -> 0 ok
+[sio] setown on console -> EINVAL -> -22 ok
+[sio] pipe2 -> 0 ok
+[sio] setown to self -> 0 ok
+[sio] getown reads back the task id -> 11 ok
+[sio] setown process group -> EINVAL -> -22 ok
+[sio] setfl O_ASYNC -> 0 ok
+[sio] getfl reports O_ASYNC -> 1 ok
+[sio] dup read end ok -> 1 ok
+[sio] dup shares the owner -> 11 ok
+[sio] dup shares O_ASYNC -> 1 ok
+[sio] rt_sigaction(SIGIO) rc -> 0 ok
+[sio] write after O_ASYNC returns the byte -> 1 ok
+[sio] SIGIO handler ran -> 1 ok
+[sio] SIGIO signo is 29 -> 29 ok
+[sio] read still returns the byte -> 1 ok
+[sio] the byte survived -> 105 ok
+[sio] clear O_ASYNC -> 0 ok
+[sio] getfl no longer reports O_ASYNC -> 1 ok
+[sio] write after clearing O_ASYNC returns the byte -> 1 ok
+[sio] clearing O_ASYNC stops delivery -> 0 ok
+[sio] re-open O_ASYNC -> 0 ok
+[sio] close writer returns 0 -> 0 ok
+[sio] close writer (EOF) sends SIGIO -> 1 ok
+```
+
+`105` is the byte `'i'` that was written; `11` is this task's id (it can differ per tier, so
+the gate matches it by shape). Three anti-false-green checks are frozen here: (1) the handler
+hit count and the signal number are asserted together - looking only at "write returned 1"
+would pass a kernel that never delivers; (2) the cleared-`O_ASYNC` section asserts the hit
+count **did not change**, not the write return value; (3) `read` must return the byte -
+"delivered but ate the data" is just as wrong.
+
+**The default action (no handler = terminate) is asserted only on the host.** Doing it in the
+QEMU fixture would kill the task mid-run and lose every later readout; host section 7 of
+`t_async_io` asserts "the return value is written first, then `g_exit_code == 128 + 29`",
+matching Linux's default action.
+
+**The 44 host checks** (`t_async_io` in `test_linux_abi_host.c`, seven sections) cover what
+the QEMU fixture cannot build: console object `-EINVAL`/0, a second pipe with `O_ASYNC` armed
+but no owner (the scan must skip `owner == 0`), a write-end fd (`kind != PIPE_R`) not
+delivering, two-way `dup` sharing (5 checks), no delivery after clearing `O_ASYNC` with
+`reg` untouched, no delivery without an owner, EOF delivering once, and the default action
+terminating the task. **One host trap:** after delivery `s_sig_blocked` holds that signal's
+bit, and the host never runs user instructions, so `rt_sigreturn` never puts the mask back -
+therefore a single `fresh()` section may assert only one delivery; asserting a second one
+requires a new `fresh()`.
+
+**Gate.** `tools/fork_gate.py` has `SIGIO_CHECKS = 24`: the `[sio]` prefix is counted
+separately (the ten `[fork]` constants are untouched), and all ten tiers carry
+`-DARKRTOS_USE_LINUX_SIGIO=1` (otherwise a whole section vanishing on a tier switch would look
+normal). Ten must-appear readouts are checked one by one (the two carrying a task id are
+matched by shape), and the bad-log self-check adds three `sio` mutations (drop one line,
+insert a FAIL, change a number).
+
+**Coverage.** The host `linuxabisigio` profile runs the 44 assertions of `t_async_io` at
+92.83% on its own; the line union across the eight profiles (`linuxabi`, `linuxabifutex`,
+`linuxabifilemap`, `linuxabiselect`, `linuxabisocket`, `linuxabisched`, `linuxabisigio` and
+the off profile) puts `arkrtos_linux_abi` at 97.27% (baseline 97.00% unchanged), and the full
+`COVERAGE-GATE OK` (all 71 modules at or above baseline).
+
+**Boundaries.** (1) Only "fd became readable (including EOF)"; the writable direction,
+edge-triggered de-duplication, `si_fd`/`si_band` and real-time queueing are all out (above);
+(2) a process-group registration returns `-EINVAL` and is counted, never pretended;
+(3) `dup` sharing holds **within one process only**: after fork the parent and child each hold
+their own copies, and `F_SETFL`/`F_SETOWN` do not cross processes (doing that right requires a
+real file object with cross-process refcounts - see `docs/已知限制.md`); (4) the owner is a
+single task id; after that task exits `F_GETOWN` still reads the number back (no notification
+is generated and nothing is cleaned up - the registration is a value).
+
 ## 9 Switch and zero footprint
+
+`ARKRTOS_USE_LINUX_SIGIO` (section 8.18), default **0**, `depends on ARKRTOS_USE_LINUX_ABI`
+with an `#error` guard; with it off `F_SETOWN` / `F_GETOWN` fall back to `-EINVAL`
+(bit-identical to pre-U-29), `F_SETFL` ignores `O_ASYNC`, and the `owner` slot plus
+`lx_async_notify_pipe` are not compiled; with it on the evidence is the 24 `[sio]` readouts
+shared by all ten tiers plus the 44 assertions of the host `linuxabisigio` profile.
 
 `ARKRTOS_USE_LINUX_THREAD` (section 8.10) is a third Linux ABI switch, default **0**,
 `depends on ARKRTOS_USE_LINUX_FORK` (with an `#error` guard); with it off the two loader/port

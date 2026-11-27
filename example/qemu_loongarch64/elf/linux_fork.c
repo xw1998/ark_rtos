@@ -1246,6 +1246,162 @@ static void sched_probe(void)
 }
 #endif /* ARKRTOS_USE_LINUX_SCHED */
 
+/* ------------------------------------------------------------------
+ * U-29 异步 I/O（fcntl F_SETOWN / F_GETOWN + O_ASYNC + SIGIO）
+ *
+ * 这一段证「登记 -> 开关 -> 投递」三步真的过了内核：
+ *   1) 控制台本体没有可登记的主人：F_GETOWN 回 0，F_SETOWN 回 -EINVAL；
+ *   2) 管道读端 F_SETOWN 0 是「认给自己」，F_GETOWN 原样读回任务号；
+ *      进程组（负值）一律 -EINVAL，不假装支持；
+ *   3) O_ASYNC 置位后写一个字节，SIGIO(29) 必须在这次 write 的返回路径
+ *      上进 handler；rt_sigreturn 之后 write 自己的返回值仍是字节数 ——
+ *      信号既不吞返回值也不吞数据；
+ *   4) 清掉 O_ASYNC 后同一条管道不再投递（看命中数不变，不能只看 write
+ *      返回 1）；
+ *   5) dup 出来的是同一份 file description：主人与 O_ASYNC 共享；
+ *   6) 写端全关（EOF）也算「变可读」，同样投一次。
+ *
+ * 默认动作（不装 handler = 结束任务）不在这里做：那会把本任务中途杀掉，
+ * 后面的读数全丢；它由宿主用例 t_async_io 第 7 节断言。
+ * ------------------------------------------------------------------ */
+#if defined(ARKRTOS_USE_LINUX_SIGIO) && (ARKRTOS_USE_LINUX_SIGIO == 1)
+
+#define LX_F_GETFL          3
+#define LX_F_SETFL          4
+#define LX_F_SETOWN         8
+#define LX_F_GETOWN         9
+#define LX_O_ASYNC          0x2000
+#define LX_SIGIO            29
+#define LX_DUP              23
+
+static int     s_sio_hits;
+static lx_long s_sio_signo;
+
+static void on_sigio(unsigned long signo)
+{
+    s_sio_hits++;
+    s_sio_signo = (lx_long)signo;
+}
+
+static void sio_check(const char *what, lx_long got, lx_long want)
+{
+    char  buf[200];
+    char *p = buf;
+
+    p = chk_str(p, "[sio] ");
+    p = chk_str(p, what);
+    p = chk_str(p, " -> ");
+    p = chk_num(p, got);
+    if (got != want)
+    {
+        p = chk_str(p, " FAIL (want ");
+        p = chk_num(p, want);
+        p = chk_str(p, ")\n");
+        *p = '\0';
+        out(buf);
+        g_fail++;
+        return;
+    }
+    p = chk_str(p, " ok\n");
+    *p = '\0';
+    out(buf);
+}
+
+static void sio_probe(void)
+{
+    act_t   act;
+    act_t   old;
+    int     fds[2];
+    char    b[2];
+    lx_long pid = lx1(LX_GETPID, 0);
+    lx_long d;
+    lx_long hits0;
+
+    /* ---- 1) 控制台本体：没有可登记的主人 ---- */
+    sio_check("getown on console is 0",
+              lx3(LX_FCNTL, 1, LX_F_GETOWN, 0), 0);
+    sio_check("setown on console -> EINVAL",
+              lx3(LX_FCNTL, 1, LX_F_SETOWN, 0), -LX_EINVAL);
+
+    /* ---- 2) 管道读端的登记语义 ---- */
+    fds[0] = -1;
+    fds[1] = -1;
+    sio_check("pipe2",
+              lx2(LX_PIPE2, (lx_long)(unsigned long)fds, LX_O_NONBLOCK), 0);
+    sio_check("setown to self",
+              lx3(LX_FCNTL, fds[0], LX_F_SETOWN, 0), 0);
+    sio_check("getown reads back the task id",
+              lx3(LX_FCNTL, fds[0], LX_F_GETOWN, 0), pid);
+    sio_check("setown process group -> EINVAL",
+              lx3(LX_FCNTL, fds[0], LX_F_SETOWN, -7), -LX_EINVAL);
+
+    /* ---- 3) O_ASYNC 置位，dup 共享同一份 file description ---- */
+    sio_check("setfl O_ASYNC",
+              lx3(LX_FCNTL, fds[0], LX_F_SETFL,
+                  LX_O_NONBLOCK | LX_O_ASYNC), 0);
+    sio_check("getfl reports O_ASYNC",
+              ((lx3(LX_FCNTL, fds[0], LX_F_GETFL, 0) & LX_O_ASYNC) != 0) ? 1 : 0,
+              1);
+    d = lx1(LX_DUP, fds[0]);
+    sio_check("dup read end ok",
+              ((d > 2) && (d != fds[0])) ? 1 : 0, 1);
+    sio_check("dup shares the owner",
+              lx3(LX_FCNTL, d, LX_F_GETOWN, 0), pid);
+    sio_check("dup shares O_ASYNC",
+              ((lx3(LX_FCNTL, d, LX_F_GETFL, 0) & LX_O_ASYNC) != 0) ? 1 : 0, 1);
+
+    /* ---- 4) 投递：write 的返回路径上进 handler ---- */
+    act.handler = (unsigned long)(unsigned long)&on_sigio;
+    act.flags = 0ul;
+    act.restorer = (unsigned long)(unsigned long)&fork_sig_restorer;
+    act.mask = 0ul;
+    old.handler = SIG_DFL;
+    old.flags = 0ul;
+    old.restorer = 0ul;
+    old.mask = 0ul;
+    sio_check("rt_sigaction(SIGIO) rc",
+              lx4(LX_RT_SIGACTION, LX_SIGIO,
+                  (lx_long)(unsigned long)&act,
+                  (lx_long)(unsigned long)&old, 8), 0);
+
+    hits0 = s_sio_hits;
+    sio_check("write after O_ASYNC returns the byte",
+              lx3(LX_WRITE, fds[1], (lx_long)(unsigned long)"i", 1), 1);
+    sio_check("SIGIO handler ran", s_sio_hits - hits0, 1);
+    sio_check("SIGIO signo is 29", s_sio_signo, LX_SIGIO);
+    b[0] = 0;
+    b[1] = 0;
+    sio_check("read still returns the byte",
+              lx3(LX_READ, fds[0], (lx_long)(unsigned long)b, 1), 1);
+    sio_check("the byte survived", (lx_long)(unsigned char)b[0], (lx_long)'i');
+
+    /* ---- 5) 清掉 O_ASYNC 后不再投递 ---- */
+    sio_check("clear O_ASYNC",
+              lx3(LX_FCNTL, fds[0], LX_F_SETFL, LX_O_NONBLOCK), 0);
+    sio_check("getfl no longer reports O_ASYNC",
+              ((lx3(LX_FCNTL, fds[0], LX_F_GETFL, 0) & LX_O_ASYNC) == 0) ? 1 : 0,
+              1);
+    hits0 = s_sio_hits;
+    sio_check("write after clearing O_ASYNC returns the byte",
+              lx3(LX_WRITE, fds[1], (lx_long)(unsigned long)"j", 1), 1);
+    sio_check("clearing O_ASYNC stops delivery", s_sio_hits - hits0, 0);
+    b[0] = 0;
+    (void)lx3(LX_READ, fds[0], (lx_long)(unsigned long)b, 1);
+
+    /* ---- 6) 写端全关（EOF）也投一次（先把 O_ASYNC 开回来） ---- */
+    sio_check("re-open O_ASYNC",
+              lx3(LX_FCNTL, fds[0], LX_F_SETFL,
+                  LX_O_NONBLOCK | LX_O_ASYNC), 0);
+    hits0 = s_sio_hits;
+    sio_check("close writer returns 0", lx1(LX_CLOSE, fds[1]), 0);
+    sio_check("close writer (EOF) sends SIGIO", s_sio_hits - hits0, 1);
+
+    (void)lx1(LX_CLOSE, d);
+    (void)lx1(LX_CLOSE, fds[0]);
+}
+#endif /* ARKRTOS_USE_LINUX_SIGIO */
+
+
 void linux_main(unsigned long sp)
 {
     (void)sp;
@@ -4351,6 +4507,11 @@ void linux_main(unsigned long sp)
 #if defined(ARKRTOS_USE_LINUX_SCHED) && (ARKRTOS_USE_LINUX_SCHED == 1)
     /* U-28：调度策略十二个号的 ABI 往返读数（不在 fork 计数里） */
     sched_probe();
+#endif
+
+#if defined(ARKRTOS_USE_LINUX_SIGIO) && (ARKRTOS_USE_LINUX_SIGIO == 1)
+    /* U-29：异步 I/O 的登记 / O_ASYNC / SIGIO 投递（不在 fork 计数里） */
+    sio_probe();
 #endif
 
     if (g_fail == 0)

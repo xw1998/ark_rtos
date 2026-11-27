@@ -603,6 +603,24 @@ config ARKRTOS_USE_SCHED_DEADLINE
 	  no field, no decision hook and no tick accounting, so the scheduler is
 	  byte-for-byte what it was before this option existed.
 
+config ARKRTOS_USE_LINUX_SIGIO
+	bool "F_SETOWN / F_GETOWN / O_ASYNC + SIGIO for Linux ABI user tasks (U-29)"
+	depends on ARKRTOS_USE_LINUX_ABI
+	help
+	  Async I/O notification: fcntl(F_SETOWN) records an owner task for an
+	  open fd, fcntl(F_SETFL) accepts O_ASYNC, and when that fd becomes
+	  readable the owner is sent SIGIO - the contract librt, Java NIO and
+	  every poll-free event loop rely on.
+
+	  Scope is stated rather than implied: only "the fd became readable"
+	  is reported (a pipe write with a read end registered, a socket that
+	  has data).  Writable-side notification, real-time queueing, si_fd /
+	  si_band in siginfo and process-group owners are not implemented and
+	  say so - SIGIO carries no payload.  Off (default) keeps F_SETOWN /
+	  F_GETOWN answering -EINVAL exactly as before this option existed and
+	  keeps F_SETFL ignoring O_ASYNC, so fcntl behaves bit for bit as it
+	  used to.
+
 config ARKRTOS_USE_LINUX_SCHED
 	bool "sched_* syscalls for Linux ABI user tasks (U-28)"
 	depends on ARKRTOS_USE_LINUX_ABI

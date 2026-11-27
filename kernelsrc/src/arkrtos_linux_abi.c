@@ -389,6 +389,7 @@
 #define LX_O_TRUNC                  (0x200u)
 #define LX_O_APPEND                 (0x400u)
 #define LX_O_NONBLOCK               (0x800u)
+#define LX_O_ASYNC                  (0x2000u)   /* U-29：SIGIO 通知开关位（F_SETFL 认它） */
 #define LX_O_CLOEXEC                (0x80000u)   /* openat / dup3 / pipe2 / socket 都记，exec 时据此还槽 */
 /* U-21 唯一放开的访问模式：打开**已存在**的文件时 O_RDWR 合法（可写共享映射
  * 的前提）。O_WRONLY 不放开：只写映射的语义要整文件回填，本档没有。 */
@@ -405,6 +406,12 @@
 #define LX_F_SETFD                  (2u)
 #define LX_F_GETFL                  (3u)
 #define LX_F_SETFL                  (4u)
+#if (ARKRTOS_USE_LINUX_SIGIO == 1)
+/* U-29 两条（asm-generic）：登记 / 读回 SIGIO 的主人。开关关着时不定义，
+ * 于是它们落到 default 分支回 -EINVAL —— 与本开关出现之前的行为一致。 */
+#define LX_F_SETOWN                 (8u)
+#define LX_F_GETOWN                 (9u)
+#endif
 #define LX_F_DUPFD_CLOEXEC          (1030u)
 
 /* 记录锁（POSIX fcntl 的第 5/6/7 档）与锁类型（asm-generic）。 */
@@ -480,6 +487,11 @@ typedef struct
                          * F_GETFL 回的就是它，F_SETFL 只改后两位 */
     uint32 size;
     uint32 off;
+#if (ARKRTOS_USE_LINUX_SIGIO == 1)
+    /* U-29：O_ASYNC 通知的主人（任务号，0 = 没有主人）。存任务号而不是
+     * 进程槽号：槽会被 fork/exec 复用，任务号不会。 */
+    int32  owner;
+#endif
 #if (ARKRTOS_USE_LINUX_SOCKET == 1)
     /* U-23：socket 类 fd 用到的四格。net 是 net 服务里那一格的句柄（1 起）；
      * stype 是建的时候给的 SOCK_STREAM/SOCK_DGRAM（getsockopt(SO_TYPE) 与
@@ -771,6 +783,9 @@ static void lx_proc_zero(uint32 slot)
         s_proc[slot].fd[i].wr   = 0u;
         s_proc[slot].fd[i].cloexec = 0u;
         s_proc[slot].fd[i].fl   = 0u;
+#if (ARKRTOS_USE_LINUX_SIGIO == 1)
+        s_proc[slot].fd[i].owner = 0;
+#endif
 #if (ARKRTOS_USE_LINUX_SOCKET == 1)
         s_proc[slot].fd[i].net    = 0u;
         s_proc[slot].fd[i].stype  = 0u;
@@ -920,6 +935,10 @@ static uint32 s_sig_ignored;        /* SIG_IGN 或默认忽略 */
 static uint32 s_sig_refused;        /* kill 的目标不是自己 */
 static uint32 s_sig_no_restorer;    /* 装处理函数时没给 restorer */
 static uint32 s_sig_stop_ignored;   /* 默认动作是「挂起」但本内核没有作业控制 */
+#if (ARKRTOS_USE_LINUX_SIGIO == 1)
+static uint32 s_sigio_sent;         /* 管道变可读时真投出去的 SIGIO 次数 */
+static uint32 s_sigio_pgrp_refused; /* F_SETOWN 给负参数（进程组）被拒的次数 */
+#endif
 /* 信号帧的暂存（头 + 整帧快照）。投递路径在内核里不嵌套（一次只有一条
  * 系统调用在返回），所以一块静态缓冲就够，不在内核栈上开 1 KB。 */
 static unsigned long s_sigframe[LX_SIGFRAME_HDR_WORDS + LX_SIGFRAME_MAX_WORDS];
@@ -1115,6 +1134,10 @@ static int32 lx_fd_free_idx(void)
 
 /* 定义在管道那一节后面（dup 要先用它把一个槽还回去）。 */
 static uint32 lx_fd_release(uint32 slot, uint32 idx);
+static int32 lx_sig_send(int32 pid, uint32 sig);
+#if (ARKRTOS_USE_LINUX_SIGIO == 1)
+static void lx_async_notify_pipe(int32 pi);
+#endif
 
 /* 标准流别名 → 槽下标；-1 = 没有别名。used 一起判：槽被别的路径放掉之后
  * 这里只会看到悬空，如实当「没有别名」处理，绝不去索引一个空槽。 */
@@ -1159,6 +1182,9 @@ static void lx_fd_console_fill(uint32 idx)
     s_fd[idx].fl      = (uint16)(LX_O_RDWR | LX_O_NONBLOCK);
     s_fd[idx].size    = 0u;
     s_fd[idx].off     = 0u;
+#if (ARKRTOS_USE_LINUX_SIGIO == 1)
+    s_fd[idx].owner   = 0;
+#endif
     s_fd[idx].path[0] = 0;
 #if (ARKRTOS_USE_LINUX_SOCKET == 1)
     s_fd[idx].net     = 0u;
@@ -1193,6 +1219,10 @@ static void lx_fd_clone(uint32 dst, uint32 src)
     s_fd[dst].wr      = s_fd[src].wr;
     s_fd[dst].cloexec = 0u;     /* Linux：dup 出来的副本不带 FD_CLOEXEC */
     s_fd[dst].fl      = s_fd[src].fl;
+#if (ARKRTOS_USE_LINUX_SIGIO == 1)
+    /* Linux 里 dup 共享同一个 file description，F_SETOWN 的登记当然共享。 */
+    s_fd[dst].owner   = s_fd[src].owner;
+#endif
     s_fd[dst].size    = s_fd[src].size;
     s_fd[dst].off     = s_fd[src].off;
     lx_copy_str(s_fd[dst].path, (uint32)sizeof(s_fd[dst].path), s_fd[src].path);
@@ -1258,8 +1288,77 @@ static void lx_pipe_wake(int32 pi, uint8 dir)
             (void)arkrtos_task_wakeup_internal(i);
         }
     }
+#if (ARKRTOS_USE_LINUX_SIGIO == 1)
+    /* dir==0 = 读方向可读（有新数据，或者写端全关的 EOF），正是 SIGIO 的
+     * 触发条件；可写方向不在本版本的范围，不发。临界区可嵌套（enter 返回
+     * PRIMASK、exit 原样恢复），这里在退出前调用是安全的。 */
+    if(dir == 0u)
+    {
+        lx_async_notify_pipe(pi);
+    }
+#endif
     ARKRTOS_EXIT_CRITICAL(crit);
 }
+
+#if (ARKRTOS_USE_LINUX_SIGIO == 1)
+/* U-29：某条管道刚刚变成「有数据可读」，把 SIGIO 发给登记了主人的读端。
+ *
+ * 认的方式是**扫描**每进程的 fd 表，不另立一张注册表：注册表要与 close /
+ * dup / execve / 进程退出四处同步，漏一处就会给一个已经不存在的 fd 发信号
+ * （或者反过来明明还开着却不发）。扫描的是唯一真源，代价是每次管道写最多
+ * LX_PROC_MAX * LX_MAX_FD 次整数比较 —— 两个数都是 16，256 次比较，比一次
+ * 系统调用本身便宜。
+ *
+ * 发给谁：owner 是任务号，主人不在时 lx_sig_send 自会回 -ESRCH（丢弃），不会
+ * 把信号投给别的任务。这里不进临界区：扫描之间被抢占，最坏是给一个刚退出的
+ * 任务发一次、被丢弃；这与「主人没了就没人收」的语义一致。
+ */
+static void lx_async_notify_pipe(int32 pi)
+{
+    uint32 slot;
+    uint32 i;
+
+    for(slot = 0u; slot < (uint32)LX_PROC_MAX; slot++)
+    {
+#if (ARKRTOS_USE_LINUX_FORK == 1)
+        if(s_proc_used[slot] == 0u)
+        {
+            continue;               /* 没有主人的槽：整段跳过 */
+        }
+#else
+        if(slot != 0u)
+        {
+            continue;               /* 单进程档只有 0 号槽 */
+        }
+#endif
+        for(i = 0u; i < LX_MAX_FD; i++)
+        {
+            if(s_proc[slot].fd[i].used == 0u)
+            {
+                continue;
+            }
+            if(s_proc[slot].fd[i].kind != LX_FD_PIPE_R)
+            {
+                continue;
+            }
+            if((int32)s_proc[slot].fd[i].pipe != pi)
+            {
+                continue;
+            }
+            if((s_proc[slot].fd[i].fl & (uint16)LX_O_ASYNC) == 0u)
+            {
+                continue;
+            }
+            if(s_proc[slot].fd[i].owner == 0)
+            {
+                continue;
+            }
+            s_sigio_sent++;
+            (void)lx_sig_send((int32)s_proc[slot].fd[i].owner, 29u);
+        }
+    }
+}
+#endif
 
 /* 撤掉当前任务的等待登记。每一次「这次调用真的结束了」（拿到数据、EOF、
  * 错误、-EINTR）都要走一遍：登记留着会让下一次系统调用被误认成重放。 */
@@ -1843,6 +1942,43 @@ static int32 lx_fd_dup_least(int32 oldfd, int32 arg)
 
 /* F_SETFL：只改 O_APPEND 与 O_NONBLOCK（Linux 也只认这两位，其余位静默
  * 忽略，不报错）。socket 的 NONBLOCK 还同时写回 sflags，socket 层读的是那一格。 */
+#if (ARKRTOS_USE_LINUX_SIGIO == 1)
+/* U-29：dup 出来的是同一份 file description —— Linux 上 F_SETFL / F_SETOWN
+ * 改的就是那个对象，所有副本立刻看得见。本内核没有独立的 struct file，fd
+ * 槽里存的是登记快照（dup 只是复制），所以这两个 cmd 必须把改动同步到同一
+ * 进程内指向同一个管道对象的其它副本（同 kind + 同 pipe）。
+ *
+ * 边界：fork 之后父子各自的槽是两份拷贝，F_SETFL / F_SETOWN 不会跨进程同步
+ * （要正确必须引入真正的 file 对象，见 docs/已知限制.md）。管道是本层唯一
+ * 「同一对象被多个 fd 引用」的 kind；其它 kind 维持既有行为（只改本格）。 */
+static void lx_fd_sync_peer(int32 idx)
+{
+    uint32 k;
+
+    if((s_fd[idx].kind != LX_FD_PIPE_R) && (s_fd[idx].kind != LX_FD_PIPE_W))
+    {
+        return;
+    }
+    for(k = 0u; k < (uint32)LX_MAX_FD; k++)
+    {
+        if((int32)k == idx)
+        {
+            continue;
+        }
+        if(s_fd[k].used == 0u)
+        {
+            continue;
+        }
+        if((s_fd[k].kind != s_fd[idx].kind) || (s_fd[k].pipe != s_fd[idx].pipe))
+        {
+            continue;
+        }
+        s_fd[k].fl    = s_fd[idx].fl;
+        s_fd[k].owner = s_fd[idx].owner;
+    }
+}
+#endif
+
 static void lx_fd_set_fl(int32 idx, uint32 arg)
 {
     uint16 fl = s_fd[idx].fl;
@@ -1863,7 +1999,21 @@ static void lx_fd_set_fl(int32 idx, uint32 arg)
     {
         fl = (uint16)((uint32)fl & ~(uint32)LX_O_NONBLOCK);
     }
+#if (ARKRTOS_USE_LINUX_SIGIO == 1)
+    /* U-29：O_ASYNC 只记在这一格里；F_GETFL 读得回原样拼出来的位。 */
+    if((arg & (uint32)LX_O_ASYNC) != 0u)
+    {
+        fl |= (uint16)LX_O_ASYNC;
+    }
+    else
+    {
+        fl = (uint16)((uint32)fl & ~(uint32)LX_O_ASYNC);
+    }
+#endif
     s_fd[idx].fl = fl;
+#if (ARKRTOS_USE_LINUX_SIGIO == 1)
+    lx_fd_sync_peer(idx);       /* dup 副本是同一份 file description */
+#endif
 #if (ARKRTOS_USE_LINUX_SOCKET == 1)
     if(s_fd[idx].kind == LX_FD_SOCKET)
     {
@@ -2564,6 +2714,43 @@ static int32 lx_fcntl_lock(void *p_ctx, int32 slot, int32 idx, uint32 cmd,
     return rc;
 }
 
+#if (ARKRTOS_USE_LINUX_SIGIO == 1)
+/* U-29 的两条 cmd。语义写死在这里，不靠读者从行为里猜：
+ *   F_SETOWN(fd, 0)     主人是调用者自己（Linux 同义）；
+ *   F_SETOWN(fd, pid>0) 主人是这个任务号。**不校验存活**：Linux 也是在投递
+ *                       那一刻才看得出「主人没了」，提前退 -ESRCH 会让
+ *                       「先设主人、稍后才 fork 出主人」这种顺序直接失败；
+ *   F_SETOWN(fd, pid<0) 进程组。内核里没有进程组，回 -EINVAL 并单独计数 ——
+ *                       当成自己是最坏的一种「看起来成功了」：信号会发错人；
+ *   F_GETOWN            回主人，没有主人回 0。
+ * 0..2 没有别名时是控制台本体、没有槽可记：F_SETOWN 回 -EINVAL（不假装记下了
+ * 一个永远不会生效的主人），F_GETOWN 回 0。
+ */
+static int32 lx_fd_owner_cmd(int32 idx, uint32 cmd, int32 who)
+{
+    if(cmd == (uint32)LX_F_GETOWN)
+    {
+        return (idx < 0) ? 0 : (int32)s_fd[idx].owner;
+    }
+    if(idx < 0)
+    {
+        return -LX_EINVAL;
+    }
+    if(who < 0)
+    {
+        s_sigio_pgrp_refused++;
+        return -LX_EINVAL;
+    }
+    if(who == 0)
+    {
+        who = (int32)arkrtos_current_task_id;
+    }
+    s_fd[idx].owner = who;
+    lx_fd_sync_peer(idx);       /* dup 副本是同一份 file description */
+    return 0;
+}
+#endif
+
 /* fcntl(25)：本层认两组 cmd —— fd 标志那五个（F_DUPFD / F_DUPFD_CLOEXEC /
  * F_GETFD / F_SETFD / F_GETFL / F_SETFL）与记录锁那三个（F_GETLK / F_SETLK /
  * F_SETLKW），其余 -EINVAL（Linux 对不认识的 cmd 也是 EINVAL，不回 ENOSYS）。
@@ -2652,6 +2839,11 @@ static int32 lx_fcntl(void *p_ctx)
         }
         lx_fd_set_fl(idx, (uint32)arg);
         return 0;
+#if (ARKRTOS_USE_LINUX_SIGIO == 1)
+    case LX_F_SETOWN:
+    case LX_F_GETOWN:
+        return lx_fd_owner_cmd(idx, cmd, (int32)arg);
+#endif
     case LX_F_GETLK:
     case LX_F_SETLK:
     case LX_F_SETLKW:
@@ -3522,6 +3714,9 @@ static uint32 lx_fd_release(uint32 slot, uint32 idx)
     s_proc[slot].fd[idx].pipe = 0u;
     s_proc[slot].fd[idx].off  = 0u;
     s_proc[slot].fd[idx].size = 0u;
+#if (ARKRTOS_USE_LINUX_SIGIO == 1)
+    s_proc[slot].fd[idx].owner = 0;     /* 槽退掉，主人登记也跟着没了 */
+#endif
     /* 指向这一格的标准流别名同时摘掉：别名与槽是同一份状态，留一个指向
      * 空槽的别名等于给程序一个假句柄（lx_std_slot 也会当它不存在，但让它
      * 一直挂着会让后面的 dup3 误判「这一格被别名占着」）。 */
@@ -9597,6 +9792,10 @@ void arkrtos_linux_abi_reset(void)
     s_sig_refused = 0u;
     s_sig_no_restorer = 0u;
     s_sig_stop_ignored = 0u;
+#if (ARKRTOS_USE_LINUX_SIGIO == 1)
+    s_sigio_sent = 0u;
+    s_sigio_pgrp_refused = 0u;
+#endif
 
     s_heap_cur = 0u;
 
