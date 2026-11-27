@@ -55,10 +55,12 @@ config CHIP_FLASH_SIZE
 	  （arkrtos_dev_slot_check 要求 UNIT+UNITS <= IMAGE_POOL_UNITS，表里
 	  用到 0..3 四个单元）—— 编译期就报负数组。所以这一档同时放到 2 MB，
 	  池回到 1.375 MB / 11 个单元，比原来（5 个）还宽。
+	  2026-11-27 内核区再扩到 1 MB 后，池是 896 KB / 7 个 128 KB 单元，
+	  仍满足 0..3 的开发槽位表（实测 `pool free : 786432 B (768K)`）。
 
 config KERNEL_SIZE
 	int "Kernel region size in bytes (KERNEL_SIZE)"
-	default 524288
+	default 1048576
 	help
 	  内核镜像在 Flash 区里占的区间。配置区（CONFIG_SIZE）与镜像池紧跟
 	  在它后面，所以这个值同时决定 IMAGE_POOL_BASE。
@@ -74,6 +76,15 @@ config KERNEL_SIZE
 	  现在这条线有双层兜底：链接脚本 ASSERT(__text_end <= IMAGE_POOL_BASE)
 	  让越界成为**编译期错误**；板级初始化再核一次，真越界就拒绝擦除并
 	  打印 FATAL，而不是静默抹掉代码。
+
+	  2026-11-27 扩到 1 MB 的依据同样是实测：`rseq`(293)/`getcpu`(168)
+	  落地后，十档全开（fork + COW + SHM + futex + filemap + mprotect +
+	  select + socket + thread + appq）的 __text_end 从 0x29DFD0 涨到
+	  0x2A05F0（+2080 B），越过原 IMAGE_POOL_BASE 0x002A0000 共 1520 B，
+	  链接脚本那条 ASSERT 当场拒绝（ci_gate 的 fork / icount-stack 两项
+	  就是这么红的）。分区头的静态断言要求 KERNEL_SIZE 是 2 的幂
+	  （ARKRTOS_IS_POW2），640 KB 不可用，所以只能翻倍到 1 MB；配置区
+	  仍在它后面 128 KB，镜像池因此是 0x00320000..0x00400000。
 
 config CHIP_RAM_BASE
 	hex "Static data / kernel RAM pool base"

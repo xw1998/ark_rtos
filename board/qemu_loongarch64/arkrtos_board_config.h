@@ -51,21 +51,19 @@
  * 它后面（分区头里 IMAGE_POOL_BASE = CHIP_FLASH_BASE + KERNEL_SIZE +
  * CONFIG_SIZE 就是这么推的）。这条必须够大：板级每次复位会把镜像池
  * 擦成 0xFF，镜像一旦越界，擦除就是在抹自己的代码。
+ *
+ * 2026-11-27 从 512 KB 扩到 1 MB，依据是实测而不是留白：rseq(293) /
+ * getcpu(168) 落地后，十档全开的 __text_end 涨到 0x002A05F0，越过原
+ * IMAGE_POOL_BASE 0x002A0000 共 1520 B（+2080 B），链接脚本的 ASSERT
+ * 当场拒绝。分区头要求 KERNEL_SIZE 是 2 的幂，640 KB 不可用。新几何：
+ * 内核 0x00200000..0x00300000、配置区 0x00300000..0x00320000、镜像池
+ * 0x00320000..0x00400000（896 K / usable 768 K，7 个 128 K 扇区），
+ * QEMU 实跑 `pool free : 786432 B (768K)`，与 usable 逐字节相符。
  * ============================================================ */
 #define CHIP_FLASH_BASE              0x00200000u
 #define CHIP_FLASH_SIZE              (2 * 1024 * 1024)
 #ifndef KERNEL_SIZE
-/* 2026-11-27 从 512 KB 扩到 1 MB：`rseq`/`getcpu` 落地后，十档全开（fork +
- * COW + SHM + futex + filemap + mprotect + select + socket + thread + appq）
- * 的镜像 .text 终点实测到 0x002A05F0，正好越过原来的 IMAGE_POOL_BASE
- * 0x002A0000（越 1520 B）——链接器那条 ASSERT 当场拒绝，不是“看起来能跑”。
- * 分区头要求 KERNEL_SIZE 是 2 的幂（`ARKRTOS_IS_POW2` 静态断言），所以不能
- * 取 640 KB，只能翻倍到 1 MB；配置区跟着从 0x00280000 挪到 0x00300000
- * （仍 128 KB），镜像池因此从 0x002A0000 挪到 0x00320000（896 KB /
- * usable 768 KB，7 个 128 KB 扇区），实测 `pool free : 786432 B (768K)`。
- * 上一次扩容是 256 KB -> 512 KB（2026-11-20，LA64 RTSTAT 镜像放不下），
- * 判据与读数见 docs/QEMU模拟器移植与验证.md §5.30。 */
-#define KERNEL_SIZE                  (1024 * 1024)
+#define KERNEL_SIZE                  (1 * 1024 * 1024)
 #endif
 #define CHIP_RAM_BASE                0x00400000u
 #define CHIP_RAM_SIZE                (8 * 1024 * 1024)
