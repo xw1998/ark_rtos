@@ -37,7 +37,7 @@
      LA64 的分界是「`syscall` 立即数 == 0」，RV32 的分界是 0x10..0x22 留给 Ark。
   F. QEMU 真读数：`[linux]` 的 14 条 check 全 ` ok`（一条 FAIL 都不许）、
      `PASS: every syscall answered as specified`、`exit code 7`；`[pipe]` 的
-     14 条、`[sig]` 的 31 条、`[dup]` 的 34 条同理（PASS 行 + 退出码
+     30 条、`[sig]` 的 31 条、`[dup]` 的 56 条同理（PASS 行 + 退出码
      55 / 138 / 56）；并且同一次启动里 hello/modhello/FS 的读数仍在（兼容层
      不许把别人的演示搞坏）。
   G. 解析器自检：把合成坏日志喂给同一个判据（去掉 PASS、把退出码改成 3、
@@ -46,7 +46,8 @@
 不覆盖：fork/clone、父子 fd 继承（没有 fork 就没有第二个进程）、socket、
 futex；真 mmap 语义（MAP_FIXED 的同址丢弃）已做，但它在按需分页档才存在，
 读数在 tools/fork_gate.py 的 `[fork]` 块（本门禁跑默认档，那里回 -ENOSYS）；
-管道（pipe2，非阻塞）已做，读数在 `[pipe]` 块；dup / dup3 已做，读数在
+管道（pipe2：默认阻塞 + O_NONBLOCK 档 + SIGPIPE）已做，读数在 `[pipe]`
+块（跨执行流的阻塞等待在 fork 档的 `[fork]` 块）；dup / dup3 已做，读数在
 `[dup]` 块（fd 槽复制 + 标准流别名 + 控制台引用，socket 明确不支持 dup）；信号
 （同一任务自我投递的最小一档：rt_sigaction/rt_sigprocmask/kill/tkill/tgkill/
 rt_sigreturn）已做，读数在 `[sig]` 块。两块都按行首锚点判，不靠 [linux] 的
@@ -146,11 +147,13 @@ EXPECT_SYS = {
 
 # 程序自己打印的检查条数（linux_hello.c 里每一个 check() 一行）
 EXPECT_CHECKS = 14
-# 管道夹具（linux_pipe.c）的 check 条数：pipe2 rc / 两个 fd / 写 5 字节 /
-# 读 5 字节 / 内容逐字节 / 空读 -EAGAIN / 关写端 / 读回 EOF / O_CLOEXEC 被拒 /
-# 第二条 pipe2 / 满时短写 / 读回 256 / 排空后再写 / 读端关掉 -EPIPE = 14 条。
-# 现为 15 条：O_CLOEXEC 由「被拒」改为「被接受」（rc + 两个 fd 号两条判据）。
-EXPECT_PIPE_CHECKS = 15
+# 管道夹具（linux_pipe.c）的 check 条数：O_NONBLOCK 档 16 条（pipe2 rc /
+# 两个 fd / 写 5 字节 / 读 5 字节 / 内容逐字节 / 空读 -EAGAIN / 关写端 /
+# 读回 EOF / O_CLOEXEC 被接受的两条 / 第二条 pipe2 / 满时短写 / 读回 256 /
+# 排空后再写 / 先忽略 SIGPIPE / 读端关掉 -EPIPE）＋ 默认阻塞档 14 条（阻塞
+# pipe2、写/读/内容、关写端、阻塞读 EOF、SIG_IGN 前置、SIG_IGN 下 -EPIPE、
+# 装 handler 的 sigaction、-EPIPE、handler 次数/信号号、收尾 close）= 30 条。
+EXPECT_PIPE_CHECKS = 30
 # 信号夹具（linux_signal.c）的 check 条数：动作/旧动作、kill 返回值跨处理
 # 函数、hits/signo、嵌套 hits/depth/rc、block/query/unblock、sigsetsize、
 # SIGKILL、无 restorer、被拒动作未装上、别的 pid、sig=99、tgkill 的
@@ -164,10 +167,11 @@ EXPECT_SIG_CHECKS = 31
 # dup3(1,6,O_CLOEXEC) 成功且 F_GETFD 读回 FD_CLOEXEC（原先这里是「被拒」）/
 # dup3 覆盖已有 fd / dup3 把 1 与 2 重定向再撤销 / dup(0) 的控制台引用 /
 # 同一号关两次 -EBADF / 表满 -ENFILE 与「复用已有别名那一格」，
-# 再加第 6 组 fcntl(25) 的 17 条（F_GETFD/F_SETFD 往返、管道两端与控制台的
-# F_GETFL、对管道清 O_NONBLOCK 回 -EINVAL、F_DUPFD / F_DUPFD_CLOEXEC 取号、
-# 未知 cmd 与坏 fd、四条收尾 close）= 53 条。
-EXPECT_DUP_CHECKS = 53
+# 再加第 6 组 fcntl(25) 的 20 条（F_GETFD/F_SETFD 往返、管道两端与控制台的
+# F_GETFL、对管道清 O_NONBLOCK 回 0 + 清完再查/再置再查（U-26 起管道两端
+# 可自由清置 NONBLOCK）、F_DUPFD / F_DUPFD_CLOEXEC 取号、未知 cmd 与坏 fd、
+# 四条收尾 close）= 56 条。
+EXPECT_DUP_CHECKS = 56
 # rseq 夹具（linux_rseq.c）的 check 条数：getcpu rc / cpu / node 三条；rseq
 # 注册 rc 与 cpu_id_start / cpu_id 的写回三条；信号中止四条（aborted、
 # 提交段没跑、rseq_cs 被清、handler 跑了一次）；没有信号的临界区三条
@@ -620,7 +624,7 @@ def judge(text):
     if exitline != 1:
         problems.append("缺 `exit code 7`（退出码没回到装载器的读数）")
 
-    # 管道（pipe2）那一块：15 条 check 一条 FAIL 都不许，PASS 行与退出码 55。
+    # 管道（pipe2）那一块：30 条 check 一条 FAIL 都不许，PASS 行与退出码 55。
     if pipe_exit != 1:
         problems.append("缺 `[pipe] finished after <ms>, exit code 55`（管道夹具没跑到底）")
     if pipe_fail != 0:
@@ -630,7 +634,7 @@ def judge(text):
     if pipe_pass != 1:
         problems.append("缺 `[pipe] PASS: pipe2 two fds ...`")
 
-    # dup 那一块：53 条 check 一条 FAIL 都不许，PASS 行与退出码 56。
+    # dup 那一块：56 条 check 一条 FAIL 都不许，PASS 行与退出码 56。
     if dup_werr != 1:
         problems.append("缺 `[dup] write /mnt/ram/linux_dup rc=0`（dup 夹具没送进去）")
     if dup_xerr != 1:

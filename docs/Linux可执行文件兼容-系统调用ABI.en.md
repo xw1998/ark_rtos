@@ -51,7 +51,7 @@ Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 | 25 | `fcntl` | six commands: `F_DUPFD` / `F_GETFD` / `F_SETFD` / `F_GETFL` / `F_SETFL` / `F_DUPFD_CLOEXEC` (the last is `F_DUPFD` plus `FD_CLOEXEC`); every other command returns `-EINVAL` (8.13) | `F_GETFD reads FD_CLOEXEC back -> 1 ok` / `F_GETFL(reader) = O_RDONLY\|O_NONBLOCK = 2048 ok` / `F_DUPFD_CLOEXEC(9) -> 9 = 9 ok` |
 | 56 | `openat` | `arkrtos_vfs_app_stat()` on the VFS namespace; directories return `-EISDIR` | `openat>0 -> 1 ok` |
 | 57 | `close` | release the fd slot, return 0 (a pipe end drops its reference count) | `close -> 0 ok` |
-| 59 | `pipe2` | ring-buffer pipe with per-end reference counts; **non-blocking** (section 6) | `pipe2 rc = 0` / `read empty -> -EAGAIN = -11` / `write with reader closed -> -EPIPE = -32` / `exit code 55` |
+| 59 | `pipe2` | ring-buffer pipe with per-end reference counts; **blocking by default**, `O_NONBLOCK` mode alongside (section 6) | `read empty -> -EAGAIN = -11` (non-blocking mode) / `blocking pipe read waited >= 40 ms -> 1 ok` (fork tier, section 8.15) / `exit code 55` |
 | 63 | `read` | `arkrtos_vfs_read_at()` at the fd offset | `read 4 bytes -> 4 ok` |
 | 64 | `write` | 128-byte chunks through `arkrtos_board_putc` | the program's own text |
 | 67 | `pread64` | read at `pos` **without moving the fd cursor** (what `ld.so` needs to walk a segment table) | no fixture readout (1.1) |
@@ -262,60 +262,122 @@ keep running - failure is the returnable path.
   `arkrtos_port_svc_exec_frame`; the weak definition in `hal.h` keeps them
   linking and `execve` returns `-ENOSYS` at run time instead of pretending.
 
-## 6 pipe2 (59): non-blocking pipes (2026-11-21, QEMU LA64)
+## 6 pipe2 (59): blocking by default, plus an `O_NONBLOCK` mode (2026-11-27, U-26, QEMU LA64)
 
 Programs see Linux's `int pipe2(int fds[2], int flags)`: two fds (read end first)
 written back into the user `int[2]`. Ark keeps one reference count per end plus a
-ring buffer: a static table `s_pipe[2]` (`LX_PIPE_MAX 2`), 256 bytes each
-(`LX_PIPE_BUF`), with `readers` / `writers` counters. `lx_fd_t` gained a `kind`
-field (file / read end / write end) and a `pipe` index, so `read` / `write` /
-`close` dispatch correctly; `execve` keeps the fd table, so **pipes survive
-`execve`** as on Linux. All transfers are synchronous inside the SVC - the data
-never touches ramfs and no thread is created.
+ring buffer:
 
-Semantics differ from Linux on one axis, deliberately (the Chinese page has the
-full table): reading an empty buffer with a live writer returns `-EAGAIN` (11)
-instead of blocking; reading an empty buffer with all writers closed returns 0
-(EOF, same as Linux); writing into a full buffer returns a **short write**;
-writing with every reader closed returns `-EPIPE` (32) because there is no
-`SIGPIPE`; `O_CLOEXEC` is accepted and recorded on both ends, and `execve`
-releases those fds once it has swapped the frame (8.13); `O_NONBLOCK` is
-accepted. Exhausting the 8
-fd slots or the 2 pipes returns `-ENFILE`; a failed `copy_to_user` of `fds[2]`
-rolls the whole pipe back (`-EFAULT`).
+- a static table `s_pipe[2]` (`LX_PIPE_MAX 2`), 256 bytes each (`LX_PIPE_BUF`),
+  with `readers` / `writers` counters;
+- `lx_fd_t` gained a `kind` field (file / read end / write end) and a `pipe`
+  index, so `read` / `write` / `close` dispatch correctly; `execve` keeps the fd
+  table, so **pipes survive `execve`** as on Linux;
+- transfers are synchronous in-kernel copies of the ring buffer; the data never
+  touches ramfs and no thread is created.
 
-Why no blocking: pipe I/O is still a synchronous in-kernel copy and deliberately
-never sleeps. In the fork tier the two ends can really belong to parent and
-child (fds are inherited), but "sleep until readable" was not wired up.
+### Semantics (blocking by default, matching Linux)
 
-Measured readout (15 `check()` calls in
-`example/qemu_loongarch64/elf/linux_pipe.c`, `exit code 55`):
+`pipe2(..., 0)` hands out a **blocking** pipe (Linux's default); `O_NONBLOCK` gives
+"read/write only as much as fits right now". Blocking is implemented as
+"register + replay": the wait is recorded per **task** (`s_pipe_wait[]`), it
+sleeps `LX_WAIT_SLICE_MS` (100 ms), and on wake the whole syscall is **replayed**
+(the argument registers are left untouched and `done` accumulates inside the wait
+slot across replays, so the same bytes are never written twice). Returning
+`LX_RET_RETRY` is the same convention as socket / pselect6.
+
+| event | Ark (blocking default) | Ark (`O_NONBLOCK`) | Linux | note |
+|---|---|---|---|---|
+| read on an empty buffer, writer alive | sleeps until someone writes or a signal arrives | `-EAGAIN` (11) | same as both Ark columns | the peer wakes the waiter actively; the 100 ms slice only covers a lost wakeup |
+| read on an empty buffer, all writers closed | returns `0` (EOF), **no sleep** | returns `0` | returns 0 | EOF is a return condition, not a wait condition |
+| write into a full buffer | sleeps until the reader drains, then **writes everything** | short write (actual byte count) | same as both Ark columns | a blocking write is complete: a block over 256 B is split and waits for space |
+| write with every reader closed | `-EPIPE` (32) plus SIGPIPE raised | same | `SIGPIPE` / `-EPIPE` | decided before copying: free space does not change the answer |
+| an unblocked signal that really interrupts | `-EINTR` with no byte moved; short write if progress was made | same | same | signals whose **default action is "ignore"** (SIGCHLD etc.) do not count |
+| `flags` carrying `O_CLOEXEC` | accepted, both ends record `FD_CLOEXEC` | same | accepted | `execve` releases those slots after the frame swap (8.13) |
+| clear / set `O_NONBLOCK` (`F_SETFL`) | allowed; either end switches freely | same | allowed | since U-26; before that clearing returned `-EINVAL` |
+
+`SIGPIPE` takes the existing path "set pending -> deliver before the syscall
+returns to user mode": with no handler the default action ends the task
+(`exit code 141`); with a handler it runs once before the return (`a0` = 13) and
+after `rt_sigreturn` `a0` is still `-EPIPE`.
+
+Ceiling: `LX_MAX_FD 8` fd slots => at most two pipes (4 slots) plus 4 plain files;
+a missing pipe or slot gives `-ENFILE`. If `fds[2]` cannot be written
+(`copy_to_user` fails) the whole pipe rolls back with `-EFAULT` - no half-open
+pipe is left behind.
+
+### Measured readout (`[pipe]` lines, QEMU LA64, default tier)
 
 ```
-[pipe] pipe2 rc = 0 ok
+[pipe] write /mnt/ram/linux_pipe rc=0 size=8832
+[pipe] pipe2 rc = 0 ok                     <- this group passes O_NONBLOCK explicitly
 [pipe] fds = 3 4
+[pipe] fds are two increasing numbers = 1 ok
 [pipe] write 5 bytes = 5 ok
 [pipe] read 5 bytes = 5 ok
+[pipe] content matches = 1 ok
 [pipe] read empty -> -EAGAIN = -11 ok
+[pipe] close write end = 0 ok
 [pipe] read after writer closed -> EOF = 0 ok
 [pipe] pipe2(O_CLOEXEC) rc = 0 ok
 [pipe] pipe2(O_CLOEXEC) hands out two fds = 1 ok
+[pipe] second pipe2 rc = 0 ok
 [pipe] write 400 into 256 buffer -> short write = 256 ok
+[pipe] read back what fits = 256 ok
+[pipe] write again after drain = 256 ok
+[pipe] sigaction(SIGPIPE, SIG_IGN) before EPIPE = 0 ok
 [pipe] write with reader closed -> -EPIPE = -32 ok
+[pipe] blocking pipe2 rc = 0 ok            <- below: flags=0, blocking default
+[pipe] blocking write with data present = 5 ok
+[pipe] blocking read with data present = 5 ok
+[pipe] blocking read content matches = 1 ok
+[pipe] blocking close write end = 0 ok
+[pipe] blocking read after writer closed -> EOF = 0 ok
+[pipe] sigaction(SIGPIPE, SIG_IGN) = 0 ok
+[pipe] blocking pipe2 (EPIPE) rc = 0 ok
+[pipe] blocking write, reader closed, SIG_IGN -> -EPIPE = -32 ok
+[pipe] sigaction(SIGPIPE, handler) = 0 ok
+[pipe] blocking write, reader closed, handler -> -EPIPE = -32 ok
+[pipe] SIGPIPE handler ran once = 1 ok
+[pipe] SIGPIPE handler got signo = 13 ok
+[pipe] blocking close write end (EPIPE pipe) = 0 ok
+[pipe] PASS: pipe2 two fds, data round trip, EAGAIN on empty, EOF on writer close, O_CLOEXEC accepted, short write and EPIPE, blocking defaults and SIGPIPE delivery
 [pipe] finished after 0 ms, exit code 55
 ```
 
-Anti-false-green (measured): making an empty read return 0 and dropping the
-reader check on the write side flips the readout to
-`read empty -> -EAGAIN = 0 FAIL` plus `write with reader closed -> -EPIPE =
--11 FAIL` and `exit code 1`. The gate's `parser-selfcheck` feeds two more
-pipe-specific broken logs back into the judge; both must be rejected.
+30 `check()` calls in `example/qemu_loongarch64/elf/linux_pipe.c` (a pure Linux
+ABI static program with its own `_start`). The first 16 are the existing
+`O_NONBLOCK` readouts (two increasing fds, byte-exact round trip, `-EAGAIN` on an
+empty read, EOF when the writer closes, `O_CLOEXEC` accepted, short write when
+full, `-EPIPE` with the reader closed - that one now has to `SIG_IGN` first,
+otherwise the default action 141 ends the task). The last 14 are what the
+blocking mode **can prove on a single execution stream**: a blocking read with
+data present returns at once, a blocking read sees EOF once the writer is closed,
+`-EPIPE` under `SIG_IGN` does not hang, and with a handler installed `SIGPIPE` is
+really delivered once before the syscall returns.
 
-Boundaries: non-blocking semantics (a spinning reader/writer gets `-EAGAIN`),
-256-byte buffer, at most 2 pipes, 8 fd slots, no `SIGPIPE`. fd inheritance does
-exist in the fork tier: the parent creates a pipe, `clone` hands both ends to the
-child, and closing the parent's write end does not give the reader EOF while the
-child still holds it.
+"Empty read suspends until someone writes" and "full write suspends until someone
+drains" **cannot be proven on a single execution stream** (once suspended it never
+comes back). Those readouts live in the fork tier's `[fork]` block (section 8.15).
+
+### Boundaries
+
+- 256-byte buffer, `LX_PIPE_MAX 2` pipes, 8 fd slots.
+- The wait granularity is a 100 ms slice: the peer always wakes the waiter
+  actively; the slice only covers "preempted between registering and sleeping, so
+  the wakeup was lost", hence the worst case is one extra slice, never a
+  permanent stall.
+- Blocking needs the port's `arkrtos_port_svc_restart()` (argument replay). A
+  port without it never pretends: reads return `-ENOSYS`, writes return the
+  **bytes already written** (short write) - data that made it into the ring
+  buffer is never reported as unwritten.
+- `-EINTR` is a defensive path: this layer delivers deliverable signals before
+  returning to user mode, so it is hard to hit; signals whose default action is
+  "ignore" (SIGCHLD/SIGCONT/SIGURG/SIGWINCH) **do not** interrupt.
+- Single core only: cross-task blocking reads were only exercised on QEMU LA64
+  single-core; "two cores sleeping on the same pipe" is unverified on SMP.
+- `SIGPIPE` covers write / the write end; `siginfo` and `SA_RESTART` semantics are
+  absent (the signal layer is still the minimal tier, section 7).
 
 ## 7 Signals (`rt_sigaction` 134 / `rt_sigprocmask` 135 / `kill` 129 / `tkill` 130 / `tgkill` 131 / `rt_sigreturn` 139)
 
@@ -537,15 +599,15 @@ leaves the parent writable; neither side ever has a "shared read-only" window.
 This is not a tunable: it exists whenever COW is on, and removing it requires
 giving traps their own kernel stack first.
 
-Readouts (`tools/fork_gate.py`, fork+COW tier): 32 checks all `ok`, 5 of them in
+Readouts (`tools/fork_gate.py`, fork+COW tier): 52 checks all `ok`, 5 of them in
 the COW section - `cow child saw pre-fork values (bits=3) -> 3 ok` (the child
 still sees the pre-fork values) and `parent cow write kept -> 48879 ok` (the
 parent's write stays in its own copy). Four kernel-log assertions: at least one
 `[LA64U] pg cow fork shared=<n> stack=<n> copied=0 frames=<n>` with `shared>=1`,
 `stack>=1`, `copied==0`; at least one `[LA64U] pg cow copy idx=<n> ref=2`; no
 copy line with `ref=1` (copying an unshared pair is moving bytes for nothing);
-and the unrelated demos still intact. The gate runs three rounds (fork tier 27
-checks, fork+COW tier 32, fork+COW+SHM tier 40) and **never removes the default
+and the unrelated demos still intact. The gate runs three rounds (fork tier 47
+checks, fork+COW tier 52, fork+COW+SHM tier 60) and **never removes the default
 whole-clone path from testing**.
 
 Two real root causes were found here, both invisible to the compiler and to
@@ -572,7 +634,7 @@ and marks it shared **at mmap time**:
 | Inheritance | inherited through `fork` only. No `shm_open`; a shared mapping is always anonymous. With the switch off `MAP_SHARED` is always `-ENOSYS` |
 | Refused forms | missing `MAP_ANONYMOUS`, `PRIVATE\|SHARED` together, and `MAP_SHARED` with `MAP_FIXED` are all `-ENOSYS` (this kernel's rule: unsupported means `ENOSYS`, not `EINVAL`) |
 
-Readouts (`tools/fork_gate.py`, fork+COW+SHM tier, 40 checks): the SHM section has
+Readouts (`tools/fork_gate.py`, fork+COW+SHM tier, 60 checks): the SHM section has
 8 - two refused forms returning `-38`, `mmap(MAP_SHARED|ANON) > 0`,
 `shared page starts zeroed -> 0`, `clone for shm child > 0`,
 `parent saw child shared write -> 300`, `shm child exit reaped -> 12` and
@@ -600,7 +662,7 @@ loop, betting that the parent would get the CPU during that spin. Right after
 point, so the bet loses now and then: `bits=0` is read, which looks like "the
 shared pair was privately copied" but is really the fixture gambling on
 scheduling. The child now **polls** a **release pipe** - pipes in this kernel are
-non-blocking (an empty read returns `-EAGAIN` at once, section 6), so it keeps
+blocking by default since U-26 (an empty read suspends until someone writes, section 6), so it keeps
 reading until the parent's byte is actually taken - and the parent writes 200
 before sending that byte; "parent saw
 the child's 300" is read **after `wait4` returns**, when the child is gone, so
@@ -645,7 +707,7 @@ classes - no guessing |
 | `REQUEUE` / `CMP_REQUEUE` | Linux packs `nr_requeue` **into the `timeout` slot** (argument 4) and `uaddr2` into argument 5, and this copies that reuse: wake `val` of them first, then re-queue at most `nr_requeue` of the rest onto `uaddr2`, returning **the number woken plus re-queued** (man futex: "woken up or requeued"). Linux callers rely on that count to tell whether the requeue happened at all; a `CMP_REQUEUE` with `nr_wake=0` that returned only 0 would leave glibc's `pthread_cond_broadcast` unable to decide. `CMP_REQUEUE` first compares the word at `uaddr` with `val3` and returns `-EAGAIN` on a mismatch; a missing `uaddr2` is `-EINVAL`. A re-queued waiter has its **expected value updated to the current word at `uaddr2`**: requeue never wakes in Linux, and this kernel returns to user mode through a slice replay, so without that update the replay would see two different words and treat it as "woken" - a deliberate deviation inside the model, written down in the code |
 | check order | a waking WAIT decides in this order: someone `WAKE`d it -> the deadline passed -> the word changed (counts as woken) -> an unblocked signal (`-EINTR`) -> sleep another slice. The order is the priority: `WAKE` beats the timeout, so a call that is both woken and expired at the same instant returns 0 |
 
-Readouts (`tools/fork_gate.py`, fork+COW+SHM+futex tier, **127 checks**, 87 of them
+Readouts (`tools/fork_gate.py`, fork+COW+SHM+futex tier, **147 checks**, 87 of them
 futex - 9 basic pairing, 7 multi-slice, 20 for the second batch (bitsets, timeout,
 requeue), 37 for the fourth batch (PI trio and robust list, see 8.4b) and 14 for
 the fifth batch (PI condition variables, see 8.4c)): the
@@ -827,7 +889,7 @@ low-priority owner (priority inversion).
 | cross-process boundary | `get_robust_list(pid, ...)` accepts only `pid == self`; a foreign pid honestly returns `-ESRCH` (there is no queryable second process identity, and no pretending to read another address space); a null out-pointer is `-EFAULT` |
 | differences from Linux | the condition-variable PI variants `WAIT_REQUEUE_PI`(11) / `CMP_REQUEUE_PI`(12) are not in this batch - they have their own implementation (8.4c); `FUTEX_CLOCK_REALTIME` with a timeout is `-ENOSYS`; waiter choice looks at `base_priority` only - there is no SCHED_DEADLINE layer, since this kernel has no such policy |
 
-Readouts (37 of the 127 in the fork+COW+SHM+futex tier; the host side has another 63 in
+Readouts (37 of the 147 in the fork+COW+SHM+futex tier; the host side has another 63 in
 `t_futex_pi()`):
 
 | Readout | What it pins |
@@ -978,7 +1040,7 @@ content back, and `msync` has nothing to mean. With
 | `mprotect` | unaffected: still validation-only (section 1); `PROT_EXEC` cannot be enforced in hardware on this LA64 path (no NR/NX bit) |
 
 Readouts (the fifth tier of `tools/fork_gate.py`, fork+COW+SHM+futex+filemap,
-**147 checks**, 20 of them the filemap block):
+**167 checks**, 20 of them the filemap block):
 
 | readout | what it pins down |
 |---|---|
@@ -1029,7 +1091,7 @@ entries.
 | revoking | another `mprotect` with `PROT_READ|PROT_WRITE` revokes it. A COW-shared pair is read-only anyway, and revoking mprotect does not open it up (that would bypass copy-on-write and let both processes write their own frame) |
 | log | a violation prints `[LA64U] mprotect violation badv=0x... era=0x... tid=... -> kill task` (the `tid` tells operators which task was reaped; the gate uses this line as cross evidence) |
 
-Readouts (fifth tier plus `-DARKRTOS_USE_PAGING_MPROTECT=1`, **158 checks**, 11 of
+Readouts (fifth tier plus `-DARKRTOS_USE_PAGING_MPROTECT=1`, **178 checks**, 11 of
 them the mprotect block):
 
 | readout | what it pins down |
@@ -1160,7 +1222,7 @@ itself is not a separate syscall on la64 any more; libc translates `select` into
 | Blocking shape | Same as futex: `arkrtos_port_svc_restart` plus `arkrtos_task_block_in_critical(100 ms)`, with the **deadline** stored per task (not the remaining duration - otherwise every replay restarts the timer); without a restartable port it returns `-EAGAIN` honestly |
 | Task id reuse | Task exit and `reset` both clear `s_sel_armed/s_sel_deadline`: task ids are reused, and a stale record means a new task inherits "already waiting" |
 
-Readouts (seventh `tools/fork_gate.py` tier, fixture 158 -> **174 checks**, 15 of them select):
+Readouts (seventh `tools/fork_gate.py` tier, fixture 178 -> **194 checks**, 15 of them select):
 
 | Readout | What it pins |
 |---|---|
@@ -1194,7 +1256,7 @@ they would have to be rewritten. Putting select and a future socket layer behind
 switch would turn "zero footprint when off" into "half the feature when off".
 `ARKRTOS_USE_LINUX_SELECT` depends only on `ARKRTOS_USE_LINUX_ABI`.
 
-### 8.9 socket (U-23): translation layer and the QEMU eighth tier (2026-11-24, 768 host checks + 212 QEMU checks)
+### 8.9 socket (U-23): translation layer and the QEMU eighth tier (2026-11-24, 768 host checks + 232 QEMU checks)
 
 13 numbers: `socket`(198), `bind`(200), `listen`(201), `accept`(202), `connect`(203),
 `getsockname`(204), `getpeername`(205), `sendto`(206), `recvfrom`(207), `setsockopt`(208),
@@ -1217,10 +1279,10 @@ dispatch on the fd kind (the same fd table holds files, pipes and sockets).
 98.51% on that tier alone, 98.84% union across six tiers (baseline 98.82%, re-pinned on
 2026-11-27 together with the `rseq`/`getcpu` host assertions), **768 checks** green.
 
-**QEMU eighth tier: 212 checks all `ok` + `exit code 0`.** The eighth tier of
+**QEMU eighth tier: 232 checks all `ok` + `exit code 0`.** The eighth tier of
 `tools/fork_gate.py` (`SELECT+SOCKET+LWIP`) really runs the socket section of
 `example/qemu_loongarch64/elf/linux_fork.c` on LA64 (38 checks) plus one performance
-regression check, stacked on the 174 checks of the seventh tier:
+regression check, stacked on the 194 checks of the seventh tier:
 
 What it reads is the **real lwIP loopback** (`127.0.0.1`), not a stub: `socket` creates both
 a stream and a dgram handle; the errno of a bad domain / bad type / unsupported type;
@@ -1309,7 +1371,7 @@ is only stable with them).**
 `ARKRTOS_USE_NET_VIRTIO` off it compiles only `$(LWIP_SRCS)` (no `drvnet.c`/`net_demo.c`),
 and pushes `ARKRTOS_USE_LINUX_SOCKET=1` together with lwIP into `LXFORK_DEFS`.
 
-### 8.10 Threads (`CLONE_THREAD`, U-25): one address space shared by a group of tasks (2026-11-24, ninth QEMU LA64 tier, 245 checks)
+### 8.10 Threads (`CLONE_THREAD`, U-25): one address space shared by a group of tasks (2026-11-24, ninth QEMU LA64 tier, 265 checks)
 
 The thread branch of `clone(220)` is in, behind `ARKRTOS_USE_LINUX_THREAD` (default **0**,
 `depends on ARKRTOS_USE_LINUX_FORK`). The split between the fork branch and this one is
@@ -1343,8 +1405,8 @@ group. The teardown path splits on whether siblings are still alive:
 Threads are **not** registered in `s_child[]`: Linux's `wait4` cannot see threads, so the
 group keeps exactly one "process" facing the outside.
 
-**Ninth QEMU tier: 245 checks all `ok` + `exit code 0` (600 ms).** The ninth tier of
-`tools/fork_gate.py` is the eighth (212 checks) plus 33 thread checks. Six readings matter most:
+**Ninth QEMU tier: 265 checks all `ok` + `exit code 0` (600 ms).** The ninth tier of
+`tools/fork_gate.py` is the eighth (232 checks) plus 33 thread checks. Six readings matter most:
 
 - `clone(CLONE_THREAD) > 0 -> 1 ok`, `thread PARENT_SETTID wrote the tid -> 6 ok`;
 - `futex WAIT on CHILD_CLEARTID woke with 0 -> 0 ok` - the **real join path**
@@ -1396,9 +1458,9 @@ nothing. The robust list (99/100) and exit cleanup exist now (8.4b) and are acco
 per task, so any member of a thread group only settles its own chain.
 A thread is an ordinary task: same priority, same time slice, no extra scheduling semantics.
 
-### 8.11 Per-App task quota (`ARKRTOS_USE_APP_QUOTA`, 2026-11-24, tenth QEMU LA64 tier, 257 checks)
+### 8.11 Per-App task quota (`ARKRTOS_USE_APP_QUOTA`, 2026-11-24, tenth QEMU LA64 tier, 277 checks)
 
-The tenth tier = the ninth tier (245 checks) + the quota section. It answers "can one App eat
+The tenth tier = the ninth tier (265 checks) + the quota section. It answers "can one App eat
 the whole task table", which is not a new syscall: the loader hands out a non-zero owner id per
 ELF load (`elf_app_owner_new()`), fork and `clone(CLONE_THREAD)` **inherit** it, and once the
 owner's **live** task count reaches `ARKRTOS_APP_MAX_TASKS` creation fails --
@@ -1460,7 +1522,7 @@ the `app_owner` field in the TCB, produce nothing when `ARKRTOS_USE_APP_QUOTA=0`
 `off-zero-symbols` step checks them with `nm` one by one, and `features.h` holds the
 `ARKRTOS_USE_APP_QUOTA=1 requires ARKRTOS_USE_ELF=1` `#error`.
 
-### 8.12 `dup`(23) / `dup3`(24): fd-slot copies, standard-stream aliases, console references (2026-11-27, QEMU LA64, 53 checks)
+### 8.12 `dup`(23) / `dup3`(24): fd-slot copies, standard-stream aliases, console references (2026-11-27, QEMU LA64, 56 checks)
 
 This pair used to answer `-ENOSYS`; that debt is paid. They are **live in the default tier**:
 no new switch, no footprint tier — `ARKRTOS_USE_LINUX_ABI=1` is enough, because making one fd
@@ -1504,7 +1566,7 @@ copies `std_slot` 1:1 (the parent's aliases stay valid in the child).
 else. The test is now explicit: `kind == LX_FD_PIPE_R || kind == LX_FD_PIPE_W`, so adding a
 further fd kind cannot bend it again.
 
-**Measured readout (`[dup]` lines, QEMU LA64, 53 checks all `ok`)**
+**Measured readout (`[dup]` lines, QEMU LA64, 56 checks all `ok`)**
 
 ```
 [dup] write /mnt/ram/linux_dup rc=0 size=9792
@@ -1533,7 +1595,10 @@ further fd kind cannot bend it again.
 [dup] F_GETFD reads FD_CLOEXEC back = 1 ok
 [dup] F_GETFL(reader) = O_RDONLY|O_NONBLOCK = 2048 ok
 [dup] F_GETFL(writer) = O_WRONLY|O_NONBLOCK = 2049 ok
-[dup] F_SETFL clearing O_NONBLOCK on a pipe -> -EINVAL = -22 ok
+[dup] F_SETFL clearing O_NONBLOCK on a pipe -> 0 = 0 ok
+[dup] F_GETFL after clearing shows O_RDONLY = 0 ok
+[dup] F_SETFL setting O_NONBLOCK back -> 0 = 0 ok
+[dup] F_GETFL after setting shows O_NONBLOCK again = 2048 ok
 [dup] F_GETFL(console) = O_RDWR|O_NONBLOCK = 2050 ok
 [dup] F_DUPFD(0) allocates a new fd = 1 ok
 [dup] F_DUPFD_CLOEXEC(9) -> 9 = 9 ok
@@ -1546,7 +1611,7 @@ further fd kind cannot bend it again.
 [dup] finished after 0 ms, exit code 56
 ```
 
-**How to read the 53 checks.** (0) The first 41 are dup/dup3 (groups 1-5) and the last 12 are fcntl(25) (group 6, broken down in 8.13). (1) Copying is not aliasing a name: `copy still writable after
+**How to read the 56 checks.** (0) The first 36 are dup/dup3 (groups 1-5) and the last 20 are fcntl(25) (group 6, broken down in 8.13). (1) Copying is not aliasing a name: `copy still writable after
 close = 3` proves each descriptor holds its own writer reference; (2) `read -> EOF = 0` after
 both ends are closed proves the count really reached zero (no leak, no early zero); (3) after
 `dup3(writer, 1)`, `write(1)`'s bytes come back out of the **pipe**, proving `write` routes
@@ -1571,7 +1636,7 @@ full table answering `-ENFILE`, reusing an existing alias slot when the table is
 `dup3(pw, 1, O_CLOEXEC)` marking the alias slot so fd 1 really returns to the console after an
 exec.
 
-### 8.13 `fcntl`(25): FD flags and status flags (2026-11-27, QEMU LA64 17 checks + 54 host checks)
+### 8.13 `fcntl`(25): FD flags and status flags (2026-11-27, QEMU LA64 20 checks + 54 host checks)
 
 `fcntl` is one of the first numbers glibc touches at start-up (`isatty` asks
 `F_GETFL`, `__libc_fcntl64` tags fds with `FD_CLOEXEC`). This round implements only the six
@@ -1584,18 +1649,17 @@ that never happened.
 | `F_DUPFD`(0) | lowest free number at or above `max(arg, 3)`; `arg < 0` or past `LX_MAX_FD + 3` gives `-EINVAL`; a full table gives `-ENFILE` |
 | `F_GETFD`(1) | `cloexec ? FD_CLOEXEC : 0` when the fd exists; `-EBADF` otherwise |
 | `F_SETFD`(2) | only the `FD_CLOEXEC` bit is honoured (other bits in `arg` are ignored, as in Linux); returns 0 |
-| `F_GETFL`(3) | returns `O_ACCMODE` + `O_APPEND` + `O_NONBLOCK`; a pipe always reports `O_NONBLOCK` (this layer's pipes really never block - reported honestly); the console returns `O_RDWR\|O_NONBLOCK` |
-| `F_SETFL`(4) | changes only `O_APPEND` / `O_NONBLOCK`, returns 0; **on a pipe, a request to clear `O_NONBLOCK` returns `-EINVAL`** - returning 0 would send the caller to wait for an event that never comes |
+| `F_GETFL`(3) | returns `O_ACCMODE` + `O_APPEND` + `O_NONBLOCK`; a pipe reports the `O_NONBLOCK` bit it was created with (only if `pipe2` got `O_NONBLOCK`; the default is 0, i.e. blocking - section 6); the console returns `O_RDWR\|O_NONBLOCK` |
+| `F_SETFL`(4) | changes only `O_APPEND` / `O_NONBLOCK`, returns 0; **on a pipe both setting and clearing `O_NONBLOCK` are accepted** (since U-26 the pipe itself can block, so clearing is no longer an empty promise - same as Linux) |
 | `F_DUPFD_CLOEXEC`(1030) | same as `F_DUPFD`, new slot carries `FD_CLOEXEC` |
 | any other cmd (including the `F_SETLK` family) | `-EINVAL` (no lock manager here, and Linux also returns `EINVAL` for a command it does not know - not `ENOSYS`) |
 
-**Why `F_SETFL` refuses to clear the bit on a pipe.** This layer's pipes answer `-EAGAIN`
-on an empty read / full write (the historical contract in section 6, which the pipe fixture
-and the docs pin down). Accepting "clear `O_NONBLOCK`" with 0 would let the caller believe
-the fd is now blocking and then spin waiting for data - a PID pegging a core is far more
-dangerous than one explicit `-EINVAL`. So `F_GETFL` reports `O_NONBLOCK` on a pipe
-truthfully and `F_SETFL` refuses on the spot. Making pipes truly blocking is a separate
-piece of work (see the open items in section 12), not something to slip into this number.
+**The semantics of `F_SETFL` on a pipe changed in U-26.** Under the old contract (pipes
+always non-blocking) `F_SETFL` returned `-EINVAL` for "clear `O_NONBLOCK`", so that the 0
+would not be an empty promise. Since U-26 made pipes **blocking by default** (section 6),
+clearing the bit really blocks and setting it really polls, so both directions are honoured
+with 0 exactly as on Linux. The four readouts below (clear -> 0 / read back `O_RDONLY` /
+set again -> 0 / read back `O_NONBLOCK`) are the evidence for that change.
 
 **Where `FD_CLOEXEC` is honoured: `execve`.** After loading segments, patching the trap
 frame and resetting the heap cursor, `lx_execve()` calls `lx_fd_close_cloexec()`, which walks
@@ -1617,7 +1681,10 @@ pipe and the assertion read `got 3 want 0`.
 [dup] F_GETFD reads FD_CLOEXEC back = 1 ok
 [dup] F_GETFL(reader) = O_RDONLY|O_NONBLOCK = 2048 ok
 [dup] F_GETFL(writer) = O_WRONLY|O_NONBLOCK = 2049 ok
-[dup] F_SETFL clearing O_NONBLOCK on a pipe -> -EINVAL = -22 ok
+[dup] F_SETFL clearing O_NONBLOCK on a pipe -> 0 = 0 ok
+[dup] F_GETFL after clearing shows O_RDONLY = 0 ok
+[dup] F_SETFL setting O_NONBLOCK back -> 0 = 0 ok
+[dup] F_GETFL after setting shows O_NONBLOCK again = 2048 ok
 [dup] F_GETFL(console) = O_RDWR|O_NONBLOCK = 2050 ok
 [dup] F_DUPFD(0) allocates a new fd = 1 ok
 [dup] F_DUPFD_CLOEXEC(9) -> 9 = 9 ok
@@ -1628,7 +1695,9 @@ pipe and the assertion read `got 3 want 0`.
 
 `2048` is `O_NONBLOCK`, `2049` is `O_WRONLY|O_NONBLOCK` and `2050` is `O_RDWR|O_NONBLOCK` -
 printed in decimal on purpose: those three are exactly the `asm-generic` bit values, and in
-hex they would hide the "a pipe always reports non-blocking" contract.
+hex they would hide the "`F_GETFL` reports exactly the bits that were set, adding nothing"
+contract. (This `pipe2` deliberately passes `O_NONBLOCK`; after U-26 a default pipe would
+report `0` / `1`.)
 
 **The 54 host checks** (`t_fdflags` in `test_linux_abi_host.c`) fill in what a QEMU fixture
 cannot build: an alias slot from `dup3(pw, 1, O_CLOEXEC)` inherits CLOEXEC and fd 1 really
@@ -1769,6 +1838,102 @@ exercises the signal-delivery point); the two host assertions about preemption c
 (see "one deliberate difference from Linux" above); (4) `RSEQ_FLAG_UNREGISTER` is not
 implemented (`flags != 0` is always `-EINVAL`).
 
+### 8.15 Cross-task semantics of a blocking pipe (U-26, 2026-11-27, QEMU LA64 fork tier, 20 checks)
+
+Section 6 covers what one **execution stream** can prove (data present, EOF,
+`-EPIPE` + SIGPIPE). "An empty read suspends until someone writes" and "a full
+write suspends until someone drains" need two streams - a single stream that
+suspends never comes back, so it is not a falsifiable readout. This group
+therefore lives in `example/qemu_loongarch64/elf/linux_fork.c` (only built with
+`ARKRTOS_USE_LINUX_FORK=1`, run once by **each of the ten tiers** of
+`tools/fork_gate.py`).
+
+**Group A: a blocking read waits for someone else to write**
+
+1. The parent creates `pipe2(..., 0)` (blocking default) and `clone`s a child.
+2. The parent **closes its own write end first** - the only writer is now the
+   child, so the parent's blocking read must really suspend.
+3. The child busy-waits 60 ms (`clock_gettime` polling, no `nanosleep`), writes
+   `"abc"`, closes the write end and exits 11.
+4. The parent's read returns `3` with the content `"abc"`, and the **wall clock
+   is >= 40 ms**.
+5. With the child gone and every write end closed, the parent's next blocking
+   read returns `0` **at once** (EOF is a return condition; it must not burn a
+   100 ms slice for nothing).
+6. `wait4` reaps the child and reports exit code `11`.
+
+**Group B: a blocking write waits for someone to drain**
+
+1. The parent creates a data pipe and a status pipe.
+2. The parent first writes 256 `'A'`s to **fill** the ring buffer, `clone`s the
+   child, then writes a 300-byte pattern (`(uint8)(i & 0xFF)`) - not a single
+   byte fits, so it must suspend.
+3. The child busy-waits 60 ms, drains the 256 `'A'`s, then drains the 300 bytes,
+   comparing **byte by byte** with the pattern.
+4. The parent's write returns `300` (a blocking write is **complete**, not a short
+   write) and the **wall clock is >= 40 ms**.
+5. `wait4` reaps the child, exit code `13`.
+6. The child writes back, into the status pipe, two 5-byte numbers: "556 bytes
+   read in total" and "pattern fully matched (0)" - a cross-process readout cannot
+   rest on the exit code alone, which holds only 8 bits.
+
+**Measured readout (`[fork]` lines, QEMU LA64 fork tier)**
+
+```
+[fork] cross-task blocking read pipe2 == 0 -> 0 ok
+[fork] clone for blocking reader > 0 -> 1 ok
+[fork] blocking pipe read waited 61 ms
+[fork] blocking pipe read returned 3 -> 3 ok
+[fork] blocking pipe read content -> 1 ok
+[fork] blocking pipe read waited >= 40 ms -> 1 ok
+[fork] blocking pipe read after writer exit -> EOF -> 0 ok
+[fork] EOF read did not sleep a slice -> 1 ok
+[fork] blocking reader child reaped -> 12 ok
+[fork] blocking reader child exit 11 -> 11 ok
+[fork] cross-task blocking write pipe2 == 0 -> 0 ok
+[fork] status pipe2 == 0 -> 0 ok
+[fork] fill the 256-byte pipe buffer -> 256 ok
+[fork] clone for blocking writer > 0 -> 1 ok
+[fork] blocking pipe write waited 161 ms
+[fork] blocking pipe write wrote all 300 -> 300 ok
+[fork] blocking pipe write waited >= 40 ms -> 1 ok
+[fork] blocking writer child reaped -> 12 ok
+[fork] blocking writer child exit 13 -> 13 ok
+[fork] child report came back -> 5 ok
+[fork] child read 556 bytes in total -> 556 ok
+[fork] child saw the exact byte pattern -> 0 ok
+```
+
+(`waited 161 ms` rather than 60 ms: the parent's blocking write has to wait for
+the child to drain in two rounds, which necessarily crosses at least one 100 ms
+slice. The checks only assert ">= 40 ms" and never pin an exact millisecond.)
+
+**A real defect this group exposed and fixed: `SIGCHLD` must not interrupt a
+blocking call.** In the first implementation `lx_sig_pending_unblocked()` only
+tested "pending & ~blocked != 0", so after `wait4` reaped a child (this layer does
+**not** clear the SIGCHLD pending bit, and neither does Linux) the parent's next
+blocking `read`/`write` returned `-EINTR` immediately. Linux's `get_signal()`
+discards pending signals whose **default action is "ignore"** (SIGCHLD / SIGCONT /
+SIGURG / SIGWINCH under `SIG_DFL`, plus explicit `SIG_IGN`) and returns 0: no frame
+is laid down and the syscall is not interrupted. The predicate now looks at the
+per-signal disposition, one bit at a time. The host futex `-EINTR` case still
+proves itself with a SIGUSR1 that has a handler installed, so its semantics are
+unchanged.
+
+**Gate.** All ten `EXPECT_*_CHECKS` in `tools/fork_gate.py` went up by 20
+(47 / 52 / 60 / 147 / 167 / 178 / 194 / 232 / 265 / 277), and three new anchors
+went into the mandatory list of `judge()`:
+`blocking pipe read waited >= 40 ms -> 1 ok`, `blocking pipe write wrote all 300 -> 300 ok`,
+`child saw the exact byte pattern -> 0 ok` - counting only the total would let "one
+check short, one check extra" produce the same number, which is false green.
+
+**Boundaries.** (1) Single core: two processes sleeping on the same pipe at the
+same time is unverified; (2) wait granularity is a 100 ms slice; (3) 256-byte
+buffer, at most two pipes; (4) blocking reads and writes need the port to provide
+`arkrtos_port_svc_restart()` (without replay a read gives `-ENOSYS` and a write
+gives the bytes already written); (5) `SA_RESTART` is not implemented and `-EINTR`
+is a defensive path.
+
 ## 9 Switch and zero footprint
 
 `ARKRTOS_USE_LINUX_THREAD` (section 8.10) is a third Linux ABI switch, default **0**,
@@ -1802,7 +1967,7 @@ and the `-ENOSYS` control with SHM off).
 `ARKRTOS_USE_LINUX_FUTEX` (section 8.4) is the fifth switch, default **0**,
 `depends on ARKRTOS_USE_LINUX_ABI` with the same `#error` guard. With it off the
 wait slots, the key resolver and `lx_futex` are not compiled and number 98 falls
-back to `-ENOSYS`; with it on the measured evidence is the 127 readouts of the
+back to `-ENOSYS`; with it on the measured evidence is the 147 readouts of the
 fork+COW+SHM+futex tier (73 of them futex: 9 basic pairing, 7 multi-slice, 20
 for bitsets/timeout/requeue and 37 for PI/robust) plus the 434 host checks of the futex profile.
 
@@ -1812,7 +1977,7 @@ for bitsets/timeout/requeue and 37 for PI/robust) plus the 434 host checks of th
 mapping through demand-paged frames, so without DEMAND it cannot be filled), with
 four `#error` guards. With it off the file-mapping branch, the write-back
 bookkeeping and `msync` are not compiled and `mmap(fd)` returns `-ENOSYS`; with it
-on the evidence is the 147 readouts of the fifth tier (20 of them filemap) plus the
+on the evidence is the 167 readouts of the fifth tier (20 of them filemap) plus the
 358 host checks of the filemap profile.
 `ARKRTOS_USE_PAGING_MPROTECT` (section 8.6), default **0**, `depends on
 ARKRTOS_USE_LINUX_ABI` + `PAGING` + `PAGING_PAGES` + `PAGING_DEMAND` (a pair's
@@ -1820,13 +1985,13 @@ entries can only be rewritten once demand paging can hand out the frame), with
 four `#error` guards in features.h; with it off the `s_pg_page_ro` ledger,
 `la_pg_page_ro` / `la_pg_mprotect_hit`, the port's `paging_protect` and
 `mprotect_stat` produce nothing and `mprotect` falls back to "validate, return 0,
-count separately"; with it on the evidence is the **158 readouts of the sixth
+count separately"; with it on the evidence is the **178 readouts of the sixth
 tier** (11 of them mprotect) plus the host-side compile gate.
 
 `ARKRTOS_USE_LINUX_SELECT` (section 8.8), default **0**, `depends on
 ARKRTOS_USE_LINUX_ABI` with the same `#error` guard; with it off the readiness
 criteria, the `fd_set` scan and `s_sel_armed/s_sel_deadline` are not compiled and
-number 72 falls back to `-ENOSYS`; with it on the evidence is the **160 readouts
+number 72 falls back to `-ENOSYS`; with it on the evidence is the **194 readouts
 of the seventh tier** (15 of them select) plus the 327 host checks of the select
 profile.
 
@@ -1834,7 +1999,7 @@ profile.
 `depends on ARKRTOS_USE_LINUX_ABI` with an `#error` guard; with it off all `lx_sock_*`
 code and the socket dispatch in the fd table are not compiled and `198`-`210`/`242` fall
 back to `-ENOSYS`; with it on the measured readout is the host socket tier's **768 checks**
-(98.51% on that tier, 98.84% union) plus the **212 readouts of the QEMU eighth tier**
+(98.51% on that tier, 98.84% union) plus the **232 readouts of the QEMU eighth tier**
 (39 of them the socket section: 38 semantic + 1 round-trip timing).
 
 `MAP_FIXED` (section 8.7) is **not a switch of its own**: it exists when
@@ -1866,7 +2031,7 @@ tier `linuxabisocket` in `tools/coverage_gate.py` (with
 98.51% on the tier and 98.84% union (baseline 98.82%), and `tools/ci_gate.py`'s
 `linux-abi-host` item already includes it; on the board the **eighth tier** of
 `tools/fork_gate.py` (`-DARKRTOS_USE_LINUX_SELECT=1 -DARKRTOS_USE_LINUX_SOCKET=1
--DARKRTOS_USE_LWIP=1`) gives 212 checks all `ok` + `exit code 0` on QEMU LA64.
+-DARKRTOS_USE_LWIP=1`) gives 232 checks all `ok` + `exit code 0` on QEMU LA64.
 
 The fork tier has its own gate, `tools/fork_gate.py` (invoked as `fork` from
 `ci_gate`, **71 items**; it runs the fork, fork+COW, fork+COW+SHM,
@@ -1885,8 +2050,8 @@ default-off (fork and SHM), kconfig-wired (all four `depends on`, plus the SHM
 item depending on COW), the four
 `#error` guards in features.h, off-zero-symbols (RV32 `linux_abi.o` has no
 `lx_clone`/`lx_wait4`/`s_child`; LA64 `elf`/`port`/`paging` have no fork symbols),
-compile-on (four TUs plus the fixture), build, qemu-readout (27 `[fork]` checks
-all `ok`, different parent/child pids, PASS line, `exit code 0`, hello/FS and the
+compile-on (four TUs plus the fixture), build, qemu-readout (47 `[fork]` checks, 20 of them the blocking-pipe group of section 8.15
+all `ok`, plus `MAP_FIXED`, different parent/child pids, PASS line, `exit code 0`, hello/FS and the
 other Linux fixtures still intact; six `MAP_FIXED` readouts (section 8.7: content
 zeroed after the discard, the same address returned, misaligned and shared forms
 refused); the three new readouts - blocking `wait4`
@@ -1907,13 +2072,13 @@ write reached the file) and
 restore-default (the build directory is returned to the default tier so a later
 `make` does not reuse fork-tier objects). The COW round additionally requires 32
 checks, `shared>=1 / stack>=1 / copied=0`, at least one `pg cow copy ... ref=2`,
-and no `ref=1` copy line. The SHM round requires 40 checks, the six SHM readouts
+and no `ref=1` copy line. The SHM round requires 60 checks, the six SHM readouts
 one by one (two refused forms returning `-38`, mapping success, start value 0,
 parent sees the child's write, child sees the parent's post-fork write) and at
 least one `[LA64U] pg shm map va=0x<n> pairs>=1`. The SHM switch has its own
 `default-off-shm` / `kconfig-wired-shm` / `features-guard-shm` items, and
 `off-zero-port` also requires that a SHM-off build has no
-`arkrtos_port_paging_map_shared`. The futex round requires 127 checks and validates
+`arkrtos_port_paging_map_shared`. The futex round requires 147 checks and validates
 the 73 futex readouts one by one (the nine basic pairing readouts, the seven
 multi-slice ones - a WAIT spanning >= 150 ms still returns 0, the parent sees the
 waker's `2`, the multi-slice waker is reaped, `bits == 3` - and the twenty
@@ -1925,11 +2090,11 @@ robust-list cleanup on task exit, the four-position bit evidence, and the 5 ms
 fixture yielding), with the SHM and COW assertions still in
 place; the futex
 switch has its own `default-off-futex` / `kconfig-wired-futex` /
-`features-guard-futex` items. The filemap round requires 147 checks and validates
+`features-guard-futex` items. The filemap round requires 167 checks and validates
 the 20 filemap readouts one by one; its switch has its own
 `default-off-filemap` / `kconfig-wired-filemap` / `features-guard-filemap` items
 (autoconf 0, four `depends on` entries, four `#error` guards). The mprotect
-round requires 158 checks and validates the 11 mprotect readouts one by one
+round requires 178 checks and validates the 11 mprotect readouts one by one
 (mapping success, read-only and read-write both accepted, a read-only page still
 readable, the sibling 4 KB of the same pair still writable, a write going through
 after revocation, the violating child reaped rather than restarted, the status
@@ -1941,7 +2106,7 @@ blocked, the violating store reaching the parent page, the status word used as a
 exit code, the violation log line removed, the success readout removed); its
 switch has its own `default-off-mprotect` / `kconfig-wired-mprotect` /
 `features-guard-mprotect` items (autoconf 0, four `depends on` entries, four
-`#error` guards). The select round requires 174 checks and validates the 15 select
+`#error` guards). The select round requires 194 checks and validates the 15 select
 readouts one by one (an empty pipe read end not ready, the user set cleared when
 nothing is ready, a 50 ms timed wait returning 0 with a wall clock >= 40 ms, the
 read end ready after data with the ready bit kept, a write end with space and
@@ -1953,14 +2118,14 @@ not reported, a full pipe still reported writable, the `fd_set` not cleared, the
 timeout restarted on every replay, `exceptfds` reported, a bad fd let through, and
 the select readout removed); its switch has its own `default-off-select` /
 `kconfig-wired-select` / `features-guard-select` items. The socket round requires
-212 checks and validates the 38 socket readouts one by one (bind / listen /
+232 checks and validates the 38 socket readouts one by one (bind / listen /
 accept / connect / send / recv over a real lwIP `127.0.0.1` loopback, name
 queries, four `SOL_SOCKET` options, non-blocking `-EAGAIN`, plus one
 round-trip-time regression gate), with every select / mprotect / filemap / SHM /
 COW / futex assertion still in place; its parser-selfcheck adds six more bad logs
 and its switch has its own `default-off-socket` / `kconfig-wired-socket` /
 `features-guard-socket` items (autoconf 0, two `depends on` entries, two
-`#error` guards). The thread round requires 245 checks and validates the 33
+`#error` guards). The thread round requires 265 checks and validates the 33
 thread readouts one by one (`clone(CLONE_THREAD)` positive and negative, both
 SETTIDs, `getpid` equal to the tgid and cross-checked against the parent pid the
 fixture prints, `gettid` different from the parent, `CLONE_SETTLS` landing in
@@ -1974,7 +2139,7 @@ address, the thread-initiated `exit_group` code replaced by the leader's, and th
 `clone(CLONE_THREAD)` readout removed), and its switch has its own
 `default-off-thread` / `kconfig-wired-thread` / `features-guard-thread` items
 (autoconf 0, `depends on ARKRTOS_USE_LINUX_FORK`, the corresponding `#error`).
-The appq round requires 257 checks and validates the 12 quota readouts one by one
+The appq round requires 277 checks and validates the 12 quota readouts one by one
 (fork and thread under the cap, over-limit fork and thread returning `-11`, a fork
 refused while a space is free, the third thread, both threads joined through
 `CHILD_CLEARTID` + `FUTEX_WAIT`, an immediate fork after the quota is refilled, the
@@ -2071,11 +2236,13 @@ none of `arkrtos_elf_thread`, `arkrtos_port_paging_thread_frame` and the four
 ## 12 Boundaries
 
 This is the minimal syscall set that lets a static program run, not a Linux
-compatibility layer: no ptrace, no Linux `/proc`. Pipes exist but are
-non-blocking (section 6), which is a different contract from Linux. The
-real-time behaviour is unchanged — every Linux-ABI path completes synchronously
-inside the SVC with no extra thread and no lock. The single "sleep and come back"
-path is blocking `wait4`, built as a restartable syscall (section 8.1): the task
+compatibility layer: no ptrace, no Linux `/proc`. Pipes are **blocking by default**
+(section 6 / 8.15, with an `O_NONBLOCK` mode), and cross-task blocking reads and
+writes are measured in the fork tier. The real-time behaviour is unchanged — every
+Linux-ABI path completes synchronously inside the SVC with no extra thread and no
+lock. Three paths "sleep and come back": blocking `wait4` (section 8.1), blocking
+pipe `read`/`write` (U-26, sections 6 / 8.15) and a futex wait (section 8.4); all
+are built as restartable syscalls: the task
 is removed from the ready set, `ERA` is backed up onto the `syscall`, and the
 call is replayed after the wakeup - it is not an interrupts-off spin. Dynamic linking has its
 own switch (`ARKRTOS_USE_DYNLOAD`) and a minimal in-tree loader, but running glibc

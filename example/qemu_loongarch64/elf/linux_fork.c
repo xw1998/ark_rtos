@@ -55,6 +55,7 @@
 
 #define LX_CLOSE            57
 #define LX_PIPE2            59
+#define LX_O_NONBLOCK       0x800       /* asm-generic 的 O_NONBLOCK 位 */
 #define LX_MMAP             222
 #define LX_READ             63
 #define LX_KILL             129
@@ -395,6 +396,12 @@ static void check(const char *what, lx_long got, lx_long want)
 /* fork 之后父子各有一份：子进程改它，父进程必须读回 1。
  * 共享同一份地址空间（或只改 trap 帧不复制窗口）的实现会在这里露馅。 */
 volatile unsigned long g_fork_marker = 1ul;
+
+/* 跨进程阻塞管道那一段的缓冲（放静态区：那段要 fork，子进程的信号帧与
+ * 内核链都压在同一根用户栈上，几百字节的局部数组没有必要去挤它）。 */
+static char g_pb_fill[256];
+static char g_pb_out[300];
+static char g_pb_rd[128];
 
 #if defined(ARKRTOS_USE_LINUX_THREAD) && (ARKRTOS_USE_LINUX_THREAD == 1)
 /* ------------------------------------------------------------------
@@ -907,13 +914,11 @@ void linux_main(unsigned long sp)
              * 开跑，父的起点读数就变成「子已经跑掉一部分」之后的时刻，
              * 偶尔量出 2 ms 这种读数（看起来像 wait4 没阻塞）。
              *
-             * 现在改成**轮询放行管道**：本内核的管道是非阻塞的（空管道
-             * read 当场 -EAGAIN，见文档 §6），所以「子阻塞在 read 上」这条
-             * 前提不成立 —— 单次 read 会立刻返回，子照样先跑掉。必须一直
-             * read 到父进程写进来的那个字节真的被取到为止。这样 60 ms 的
-             * 计时起点严格在「父读完 b0、写完放行字节」之后，读数是被构造
-             * 出来的，不是碰出来的。轮询有上限，取不到就照旧往下走（不会
-             * 挂死；真挂死也会在下面的读数里暴露出来）。 */
+             * 现在改成**放行管道**：管道默认是阻塞的（U-26，空读挂起等到
+             * 有人写），所以子进程那一次 read 会一直等到父进程写下放行字节
+             * 才返回 —— 60 ms 的计时起点严格在「父读完 b0、写完放行字节」
+             * 之后，读数是被构造出来的，不是碰出来的。循环仍保留上限并接受
+             * -EINTR：被打断就再读一次，不拿调度顺序当判据。 */
             long c0 = -1;
             long cnow;
             long gpoll = 0;
@@ -1010,6 +1015,275 @@ void linux_main(unsigned long sp)
               ((rbuf[0] == 'L') && (rbuf[1] == 'K') && (rbuf[2] == '!')) ? 1 : 0, 1);
         (void)lx1(LX_CLOSE, (lx_long)pfds[0]);
         (void)lx1(LX_CLOSE, (lx_long)pfds[1]);
+    }
+
+    /* ---------------- 阻塞管道的跨执行流语义（U-26） ----------------
+     * 上面那一段证的是「数据已经在缓冲里」的读写；管道的默认语义是
+     * **阻塞**：空读要等到有人写，满写要等到有人排空。这两条只有第二个
+     * 执行流能证 —— 单执行流一阻塞就再也回不来，不是可证伪的读数。
+     * 这里分两组：
+     *   A. 子进程活够 60 ms 再写 3 字节 -> 父的阻塞读必须等满 40 ms 才回，
+     *      读满之后写端全关（子进程已关并退出）-> 下一次阻塞读立刻回 0。
+     *   B. 父把 256 字节缓冲填满后再写 300 字节（阻塞写）-> 子进程分两轮
+     *      排空，父的写必须阻塞 >= 40 ms 后才回 300；子进程把「读到的总
+     *      字节数」与「内容是否逐字节对图案」写回第二根管道，父读它 ——
+     *      跨进程的读数不能只靠退出码，退出码只有 8 位。
+     */
+    {
+        int     dfds[2];
+        int     sfds[2];
+        lx_long child6;
+        lx_long child7;
+        lx_long rc6;
+        lx_long status6;
+        long    ts6[2];
+        long    c0;
+        long    c1;
+        long    b0;
+        long    b1;
+        char    rbuf6[8];
+        int     i;
+
+        /* ---------------- A：阻塞读等到别人写 ---------------- */
+        check("cross-task blocking read pipe2 == 0",
+              lx2(LX_PIPE2, (lx_long)(unsigned long)dfds, 0), 0);
+
+        child6 = lx3(LX_CLONE, LX_SIGCHLD, 0, 0);
+        if (child6 == 0)
+        {
+            long t0 = -1;
+            long tnow;
+
+            (void)lx1(LX_CLOSE, (lx_long)dfds[0]);   /* 子进程不读 */
+            if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                    (lx_long)(unsigned long)ts6, 0) == 0)
+            {
+                t0 = (ts6[0] * 1000) + (ts6[1] / 1000000);
+            }
+            for (;;)
+            {
+                if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                        (lx_long)(unsigned long)ts6, 0) != 0)
+                {
+                    break;
+                }
+                tnow = (ts6[0] * 1000) + (ts6[1] / 1000000);
+                if ((t0 >= 0) && ((tnow - t0) >= 60))
+                {
+                    break;
+                }
+            }
+            (void)lx3(LX_WRITE, (lx_long)dfds[1],
+                      (lx_long)(unsigned long)"abc", 3);
+            (void)lx1(LX_CLOSE, (lx_long)dfds[1]);  /* 关写端 -> 父下一次读 EOF */
+            (void)lx1(LX_EXIT, 11);
+            for (;;)
+            {
+            }
+        }
+
+        check("clone for blocking reader > 0", (child6 > 0) ? 1 : 0, 1);
+
+        /* 父把自己那份写端关掉：此刻唯一的写者是子进程。父的这次读必须
+         * 挂起，直到子进程 60 ms 后写出那 3 字节。 */
+        (void)lx1(LX_CLOSE, (lx_long)dfds[1]);
+        b0 = -1;
+        if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                (lx_long)(unsigned long)ts6, 0) == 0)
+        {
+            b0 = (ts6[0] * 1000) + (ts6[1] / 1000000);
+        }
+        for (i = 0; i < 8; i++)
+        {
+            rbuf6[i] = 0;
+        }
+        rc6 = lx3(LX_READ, (lx_long)dfds[0], (lx_long)(unsigned long)rbuf6, 8);
+        b1 = -1;
+        if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                (lx_long)(unsigned long)ts6, 0) == 0)
+        {
+            b1 = (ts6[0] * 1000) + (ts6[1] / 1000000);
+        }
+        out_line3("[fork] blocking pipe read waited ",
+                  ((b0 < 0) || (b1 < 0)) ? -1 : (b1 - b0), " ms\n");
+        check("blocking pipe read returned 3", rc6, 3);
+        check("blocking pipe read content",
+              ((rbuf6[0] == 'a') && (rbuf6[1] == 'b') && (rbuf6[2] == 'c')) ? 1 : 0, 1);
+        check("blocking pipe read waited >= 40 ms",
+              ((b0 >= 0) && (b1 >= 0) && ((b1 - b0) >= 40)) ? 1 : 0, 1);
+        /* 子进程已经关掉它那份写端并退出：这一次读不该再挂起，立刻回 0。 */
+        c0 = -1;
+        c1 = -1;
+        if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                (lx_long)(unsigned long)ts6, 0) == 0)
+        {
+            c0 = (ts6[0] * 1000) + (ts6[1] / 1000000);
+        }
+        rc6 = lx3(LX_READ, (lx_long)dfds[0], (lx_long)(unsigned long)rbuf6, 8);
+        if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                (lx_long)(unsigned long)ts6, 0) == 0)
+        {
+            c1 = (ts6[0] * 1000) + (ts6[1] / 1000000);
+        }
+        check("blocking pipe read after writer exit -> EOF", rc6, 0);
+        check("EOF read did not sleep a slice",
+              ((c0 >= 0) && (c1 >= 0) && ((c1 - c0) < 40)) ? 1 : 0, 1);
+        (void)lx1(LX_CLOSE, (lx_long)dfds[0]);
+
+        rc6 = lx4(LX_WAIT4, child6, (lx_long)(unsigned long)&status6, 0, 0);
+        check("blocking reader child reaped", rc6, child6);
+        check("blocking reader child exit 11", (status6 >> 8) & 0xFF, 11);
+
+        /* ---------------- B：阻塞写等到别人排空 ---------------- */
+        check("cross-task blocking write pipe2 == 0",
+              lx2(LX_PIPE2, (lx_long)(unsigned long)dfds, 0), 0);
+        check("status pipe2 == 0",
+              lx2(LX_PIPE2, (lx_long)(unsigned long)sfds, 0), 0);
+
+        /* 先把 256 字节缓冲填满：父随后那 300 字节的第一个字节都写不进去。 */
+        for (i = 0; i < 256; i++)
+        {
+            g_pb_fill[i] = 'A';
+        }
+        for (i = 0; i < 300; i++)
+        {
+            g_pb_out[i] = (char)(i & 0xFF);
+        }
+        check("fill the 256-byte pipe buffer",
+              lx3(LX_WRITE, (lx_long)dfds[1],
+                  (lx_long)(unsigned long)g_pb_fill, 256), 256);
+
+        child7 = lx3(LX_CLONE, LX_SIGCHLD, 0, 0);
+        if (child7 == 0)
+        {
+            long t0 = -1;
+            long tnow;
+            long tot = 0;
+            long rd;
+            long bad = 0;
+            char st[5];
+            int  k;
+
+            (void)lx1(LX_CLOSE, (lx_long)dfds[1]);   /* 子进程只读 */
+            if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                    (lx_long)(unsigned long)ts6, 0) == 0)
+            {
+                t0 = (ts6[0] * 1000) + (ts6[1] / 1000000);
+            }
+            for (;;)
+            {
+                if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                        (lx_long)(unsigned long)ts6, 0) != 0)
+                {
+                    break;
+                }
+                tnow = (ts6[0] * 1000) + (ts6[1] / 1000000);
+                if ((t0 >= 0) && ((tnow - t0) >= 60))
+                {
+                    break;
+                }
+            }
+            /* 第一轮：排空父填进去的 256 个 'A' */
+            rd = lx3(LX_READ, (lx_long)dfds[0],
+                     (lx_long)(unsigned long)g_pb_fill, 256);
+            if (rd == 256)
+            {
+                tot = 256;
+                for (k = 0; k < 256; k++)
+                {
+                    if (g_pb_fill[k] != 'A')
+                    {
+                        bad = 1;
+                    }
+                }
+            }
+            else
+            {
+                bad = 1;
+                if (rd > 0)
+                {
+                    tot += rd;
+                }
+            }
+            /* 第二轮：父那 300 字节此刻才写得进来，逐字节对图案 */
+            while (tot < 556)
+            {
+                rd = lx3(LX_READ, (lx_long)dfds[0],
+                         (lx_long)(unsigned long)g_pb_rd, 128);
+                if (rd <= 0)
+                {
+                    break;
+                }
+                for (k = 0; k < rd; k++)
+                {
+                    long want = (tot - 256) + k;
+
+                    if ((unsigned char)g_pb_rd[k] != (unsigned char)(want & 0xFF))
+                    {
+                        bad = 1;
+                    }
+                }
+                tot += rd;
+            }
+            st[0] = (char)((tot >> 24) & 0xFF);
+            st[1] = (char)((tot >> 16) & 0xFF);
+            st[2] = (char)((tot >> 8) & 0xFF);
+            st[3] = (char)(tot & 0xFF);
+            st[4] = (char)bad;
+            (void)lx3(LX_WRITE, (lx_long)sfds[1], (lx_long)(unsigned long)st, 5);
+            (void)lx1(LX_CLOSE, (lx_long)dfds[0]);
+            (void)lx1(LX_CLOSE, (lx_long)sfds[1]);
+            (void)lx1(LX_EXIT, 13);
+            for (;;)
+            {
+            }
+        }
+
+        check("clone for blocking writer > 0", (child7 > 0) ? 1 : 0, 1);
+
+        (void)lx1(LX_CLOSE, (lx_long)sfds[1]);   /* 父只从状态管道读 */
+
+        /* 缓冲已满：这一次写必须挂起，直到子进程排空。 */
+        b0 = -1;
+        if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                (lx_long)(unsigned long)ts6, 0) == 0)
+        {
+            b0 = (ts6[0] * 1000) + (ts6[1] / 1000000);
+        }
+        rc6 = lx3(LX_WRITE, (lx_long)dfds[1],
+                  (lx_long)(unsigned long)g_pb_out, 300);
+        b1 = -1;
+        if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+                (lx_long)(unsigned long)ts6, 0) == 0)
+        {
+            b1 = (ts6[0] * 1000) + (ts6[1] / 1000000);
+        }
+        out_line3("[fork] blocking pipe write waited ",
+                  ((b0 < 0) || (b1 < 0)) ? -1 : (b1 - b0), " ms\n");
+        check("blocking pipe write wrote all 300", rc6, 300);
+        check("blocking pipe write waited >= 40 ms",
+              ((b0 >= 0) && (b1 >= 0) && ((b1 - b0) >= 40)) ? 1 : 0, 1);
+
+        rc6 = lx4(LX_WAIT4, child7, (lx_long)(unsigned long)&status6, 0, 0);
+        check("blocking writer child reaped", rc6, child7);
+        check("blocking writer child exit 13", (status6 >> 8) & 0xFF, 13);
+
+        for (i = 0; i < 5; i++)
+        {
+            rbuf6[i] = 0;
+        }
+        rc6 = lx3(LX_READ, (lx_long)sfds[0], (lx_long)(unsigned long)rbuf6, 5);
+        check("child report came back", rc6, 5);
+        check("child read 556 bytes in total",
+              (((unsigned long)(unsigned char)rbuf6[0] << 24) |
+               ((unsigned long)(unsigned char)rbuf6[1] << 16) |
+               ((unsigned long)(unsigned char)rbuf6[2] << 8) |
+               (unsigned long)(unsigned char)rbuf6[3]), 556);
+        check("child saw the exact byte pattern", (lx_long)rbuf6[4], 0);
+
+        (void)lx1(LX_CLOSE, (lx_long)dfds[0]);
+        (void)lx1(LX_CLOSE, (lx_long)dfds[1]);
+        (void)lx1(LX_CLOSE, (lx_long)sfds[0]);
     }
 
 #if defined(ARKRTOS_USE_PAGING_DEMAND) && (ARKRTOS_USE_PAGING_DEMAND == 1)
@@ -2598,8 +2872,12 @@ void linux_main(unsigned long sp)
         unsigned int rbit;
         unsigned int wbit;
 
+        /* 这条管道带 O_NONBLOCK 造：下面第 (5) 组要「一直写到位满」，
+         * 只有非阻塞档才会在满的时候回 -EAGAIN。U-26 之后默认阻塞的
+         * write 会挂起等读端腾空（本段没有读端在跑），会一直睡下去。
+         * select 的就绪判据（有容量 / EOF）与 fd 的 O_NONBLOCK 位无关。 */
         check("pselect6 pipe2 == 0",
-              lx2(LX_PIPE2, (lx_long)(unsigned long)sel, 0), 0);
+              lx2(LX_PIPE2, (lx_long)(unsigned long)sel, LX_O_NONBLOCK), 0);
 
         selr  = sel[0];
         selw  = sel[1];
@@ -3340,10 +3618,10 @@ void linux_main(unsigned long sp)
             lx_long rr;
 
             (void)lx1(LX_CLOSE, (lx_long)qp[1]);
-            /* 本内核的管道读**不阻塞**：空且还有写端时回 -EAGAIN（见
-             * LX_PIPE_BUF 上的注释）。所以「等数据」这一步得自己睡出来：
-             * 每 100 ms 醒一次重试，读到 EOF(0) 才退出。睡的是内核自己
-             * 记账的 futex 超时，不读用户态时钟。 */
+            /* U-26 之后管道默认阻塞：这一次 read 会直接挂起，等到父进程写
+             * 放行字节、或写端全关时回 EOF(0)。下面的 futex 轮询是防御
+             * 路径（只有 O_NONBLOCK 档才可能回 -EAGAIN），读到 EOF 才退出；
+             * 睡的是内核自己记账的 futex 超时，不读用户态时钟。 */
             park[0] = 0;
             park[1] = 100000000L;       /* 100 ms */
             for (;;)

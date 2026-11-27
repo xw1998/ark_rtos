@@ -316,8 +316,11 @@ void linux_main(unsigned long sp)
     rc = lx1(LX_CLOSE, d);
     check("close the console reference", rc, 0);
 
-    /* ---------------- 第 6 组：fcntl(25) ---------------- */
-    rc = lx2(LX_PIPE2, (lx_long)(unsigned long)fds, 0);
+    /* ---------------- 第 6 组：fcntl(25) ----------------
+     * 这一组的管道要显式 O_NONBLOCK：U-26 之后 flags=0 是**阻塞**管道
+     * （Linux 默认），F_GETFL 读回来自然不会带 O_NONBLOCK。这里测的是
+     * 「标志位被如实记账」，所以先把非阻塞位打开。 */
+    rc = lx2(LX_PIPE2, (lx_long)(unsigned long)fds, LX_O_NONBLOCK);
     check("fcntl: pipe2 rc", rc, 0);
     rc = lx3(LX_FCNTL, fds[1], LX_F_GETFD, 0);
     check("F_GETFD on a fresh fd -> 0", rc, 0);
@@ -331,8 +334,17 @@ void linux_main(unsigned long sp)
     rc = lx3(LX_FCNTL, fds[1], LX_F_GETFL, 0);
     check("F_GETFL(writer) = O_WRONLY|O_NONBLOCK", rc,
           (LX_O_WRONLY | LX_O_NONBLOCK));
+    /* U-26：管道的 O_NONBLOCK 可以被清（Linux 认这两位，其余位静默忽略）。
+     * 清完必须真的不再是非阻塞：只看返回 0 的话，「回了 0 但没改」也能过。 */
     rc = lx3(LX_FCNTL, fds[0], LX_F_SETFL, LX_O_RDONLY);
-    check("F_SETFL clearing O_NONBLOCK on a pipe -> -EINVAL", rc, -LX_EINVAL);
+    check("F_SETFL clearing O_NONBLOCK on a pipe -> 0", rc, 0);
+    rc = lx3(LX_FCNTL, fds[0], LX_F_GETFL, 0);
+    check("F_GETFL after clearing shows O_RDONLY", rc, LX_O_RDONLY);
+    rc = lx3(LX_FCNTL, fds[0], LX_F_SETFL, LX_O_NONBLOCK);
+    check("F_SETFL setting O_NONBLOCK back -> 0", rc, 0);
+    rc = lx3(LX_FCNTL, fds[0], LX_F_GETFL, 0);
+    check("F_GETFL after setting shows O_NONBLOCK again", rc,
+          (LX_O_RDONLY | LX_O_NONBLOCK));
     rc = lx3(LX_FCNTL, 2, LX_F_GETFL, 0);
     check("F_GETFL(console) = O_RDWR|O_NONBLOCK", rc, (LX_O_RDWR | LX_O_NONBLOCK));
     d = lx3(LX_FCNTL, fds[0], LX_F_DUPFD, 0);

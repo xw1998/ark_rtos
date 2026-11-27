@@ -7,7 +7,7 @@
 > **2026-11-19 修订**：本页最早写成于 ELF 装载、页帧分配、ASID、SMP 之前，下面「进程与执行模型」「内存管理」两节以及文末「不打算做的」清单已按今天的事实改写：**静态链接的原生 ELF 已经能 `exec`**（LA64 页表 + PLV3、RV32 PMP + U 模式，读数见 [MMU进程模型与ELF装载](MMU进程模型与ELF装载.md) §9 / [QEMU模拟器移植与验证](QEMU模拟器移植与验证.md) §5.25），**根因是缺一层 Linux 系统调用 ABI 转译**——`ecall` 带的是 Ark 自己的服务号 `0x10..0x22`，不是 Linux 的 `write=64` / `exit=93`，且没有 `brk` / `mmap` / `open` 这组号、没有 fd 继承与信号、动态链接（`PT_INTERP` / `ld.so`）在装载器里被明确拒绝。这条差距已按验收条款登记进[欠账盘点](欠账盘点.md)。
 
 > **2026-11-21 修订**：上面这段「缺一层 Linux 系统调用 ABI」已经不是现状——ABI 档
-> （`ARKRTOS_USE_LINUX_ABI`）已落地 25 个 asm-generic 号（含 `pipe2` 非阻塞管道与最小一档信号），
+> （`ARKRTOS_USE_LINUX_ABI`）已落地 32 个 asm-generic 号（含默认阻塞的 `pipe2`（U-26，另有 `O_NONBLOCK` 档）与最小一档信号），
 > QEMU LA64 上三份夹具实跑（`exit code 7` / `55` / `138`，读数见
 > [Linux可执行文件兼容-系统调用ABI](Linux可执行文件兼容-系统调用ABI.md)）。现在真正的差距是
 > **「进程」这个对象**（`fork` / `clone` / fd 继承 / 跨任务信号），以及 glibc 那一整条 libc 兼容面。
@@ -66,7 +66,7 @@
 | 动态链接、`.so` 共享库、ELF 加载器 | 两类输入并存：装应用的 `.svcapp` 容器（整体复制到 RAM），以及**静态链接的原生 ELF**（`exec`/`ld`，LA64 与 RV32 实跑；64 位/32 位字段表按 `__SIZEOF_LONG__` 选）。ELF 装载器只认 `PT_LOAD` + `e_entry`：`PT_INTERP`（动态链接）明确拒绝（`ERR_FORMAT`），**无 `.so`、无重定位后的共享库、无 Linux 系统调用 ABI**（`ecall` 走 Ark 的 `0x10..0x22`） | 取舍（动态链接、共享库）+ 欠账（Linux syscall ABI，见 [欠账盘点](欠账盘点.md)） |
 | `argv` / `argc` / 环境变量 | `.svcapp` 的 App 入口仍是 `main(void)`，没有 argv；**被 `exec` 装载的 ELF 程序按 Linux 入口约定拿到 `sp -> argc/argv`**（实测 `argc=4`、`argv[0..3]` 逐字对上），但**无 `environ`** | 取舍（`.svcapp`）+ 已做（ELF 的 argv） |
 | 信号（`signal` / `sigaction` / `kill`） | Ark 自己的 POSIX 层**没有 signal API**，任务间同步用事件组、信号量、互斥量、消息队列、条件变量。**Linux ABI 档下另有一档**（2026-11-21 落地，2026-11-23 扩跨任务）：`rt_sigaction` / `rt_sigprocmask` / `kill` / `tkill` / `tgkill` / `rt_sigreturn` 六个号，**支持跨任务投递**（按 pid 定位目标进程槽，目标卡在阻塞 `wait4` 时唤醒它），在系统调用返回前投递，无抢占、无实时信号、无 `siginfo`；信号帧 = 32 B 头 + 整份 trap 帧快照 | 部分已做（Linux ABI 一档，含跨任务）+ 取舍（Ark POSIX 层） |
-| `pipe` / `FIFO` / Unix domain socket | `pipe2` 已做（2026-11-21，QEMU LA64 实跑，Linux ABI 号 59）：环形缓冲 + 两端引用计数、**非阻塞**、跨 `execve` 存活；FIFO 与 Unix domain socket 仍无，等价物是消息队列 + socket（回环） | 部分已做 + 取舍 |
+| `pipe` / `FIFO` / Unix domain socket | `pipe2` 已做（2026-11-21，QEMU LA64 实跑，Linux ABI 号 59）：环形缓冲 + 两端引用计数、**默认阻塞 + `O_NONBLOCK` 档**（U-26，2026-11-27）、跨 `execve` 存活；FIFO 与 Unix domain socket 仍无，等价物是消息队列 + socket（回环） | 部分已做 + 取舍 |
 | System V / POSIX 共享内存 `shm` | 无 `shmget`/`shm_open`；只有 MPU 的共享窗口（用于小程序交接，不对外当通用 IPC） | 取舍 |
 | `clone` / 命名空间 / 容器 | 无 | 取舍 |
 
@@ -178,7 +178,7 @@
 动态链接与 `.so` 共享库、多用户 / uid-gid、电源管理、
 ASLR、内核模块、包管理器、共享内存 IPC、`/sys`+热插拔、对称多核自动负载均衡
 （SMP 已有 AMP 分核与显式任务迁移；**静态 ELF 装载、Linux 入口约定、Linux 静态程序的
-系统调用 ABI（含非阻塞管道与最小一档信号）、`fork`/`wait4` 与写时复制都已经做了，
+系统调用 ABI（含默认阻塞管道（U-26）与最小一档信号）、`fork`/`wait4` 与写时复制都已经做了，
 不在此列**；`fork` 之外仍欠的是线程与抢占式信号投递）。
 
 ---

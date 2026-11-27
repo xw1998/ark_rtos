@@ -19,9 +19,12 @@
 *          回 -EAGAIN），子进程必须在任务槽位被复用前 reap（TCB 带注册代次，
 *          晚到的 reap 如实回 -ECHILD）。线程（CLONE_VM 一族）一律 -EINVAL。
 *          管道（pipe2）已做：一条环形缓冲 + 两端引用计数，两个 fd 指向同一条
-*          管道；读空回 -EAGAIN、写满回 -EAGAIN、读端全关写回 -EPIPE、写端
-*          全关读回 EOF。**不实现阻塞**——没有 fork、fd 表全局单份，两端通常
-*          在同一个任务里，阻塞就是自死锁。
+*          管道。**阻塞语义（U-26）**：读空而写端还在、写满而读端还在时，任务
+*          登记在管道上睡一个时间片再重放，对侧一动作就被主动唤醒（读走数据
+*          唤醒写端、写入数据唤醒读端、关掉一端唤醒对侧）；O_NONBLOCK 档仍是
+*          能读/写多少算多少 + -EAGAIN。读端全关时写回 -EPIPE 并置 SIGPIPE
+*          待投递位（Linux 语义：默认动作结束任务，忽略/捕获时只回 -EPIPE）；
+*          写端全关读回 EOF。
 *          信号（signal）已做**同一任务自我投递**的最小一档：rt_sigaction /
 *          rt_sigprocmask / kill / tkill / tgkill / rt_sigreturn，处理函数在
 *          用户栈上拿一份**整份 trap 帧快照**（32 B 头 + 256/528/1040 B，
@@ -309,9 +312,8 @@
 
 /* 管道容量与同时存在的条数。256 字节够一次 read/write 的常见块，也不至于
  * 让 .bss 多出一大块；条数按「一个程序同时用两条管道」给。
- * 为什么不做阻塞：本内核没有 fork，fd 表也是全局单份，管道两端通常就在
- * 同一个任务里——没有人能在这期间把数据写进来，阻塞就是自死锁。空读/满写
- * 一律回 -EAGAIN，读程序必须自己重试（这与 Linux 的阻塞语义不同，文档里写死）。 */
+ * 容量比 Linux 的 64 KB 小得多：**超过 256 字节的写一定分段**——阻塞写分段
+ * 等空间、非阻塞写返回短写。这一条在文档里写死，不假装一次原子写完。 */
 #define LX_PIPE_MAX                 (2u)
 #define LX_PIPE_BUF                 (256u)
 
@@ -475,6 +477,21 @@ typedef struct
     uint8  buf[LX_PIPE_BUF];
 } lx_pipe_t;
 
+/* 阻塞等待登记（每个任务最多一处，U-26）。**不放任务自己的进程槽里**：
+ * 等待者的身份是任务，不是进程——fork 出来的子进程有自己的槽，但一次
+ * 阻塞的是它自己这条执行流。
+ *
+ * 为什么必须留 done：阻塞写超过 256 字节时要分段等空间，重放那一轮不能
+ * 从用户缓冲的第一字节重来（那会把已经写进管道的前半段再写一遍）。 */
+typedef struct
+{
+    uint8  used;        /* 1 = 这个任务正挂在一处管道等待上 */
+    uint8  dir;         /* 0 = 读端在等，1 = 写端在等 */
+    uint8  pi;          /* s_pipe 的下标 */
+    uint8  pad;
+    uint32 done;        /* 写：已经写进去的字节数；读：恒 0 */
+} lx_pipe_wait_t;
+
 #if (ARKRTOS_USE_PAGING_FILEMAP == 1)
 /* 一条「可写共享文件映射」的写回记账（U-21）。只记需要写回的那一种：
  * 私有映射改的是自己那份帧，没有可写回的东西；写保护的也不可能有脏页。
@@ -509,6 +526,14 @@ static lx_child_t s_child[LX_MAX_CHILD];
 #endif
 /* 管道对象独立于 fd 表：一条管道被两个 fd 引用，fd 关掉一半时管道还要在。 */
 static lx_pipe_t s_pipe[LX_PIPE_MAX];
+/* 每个任务那一处管道等待（按任务号索引）。任务号会被复用：退出路径上要
+ * 清掉，否则新任务第一次碰管道就走了「重放」分支。 */
+static lx_pipe_wait_t s_pipe_wait[ARKRTOS_TASK_MAX_NUM];
+
+/* 定义在信号段，管道写端无人读时要置 SIGPIPE 待投递位（见 lx_sig_raise）。 */
+static uint32 lx_sig_bit(uint32 sig);
+static uint32 lx_sig_default_ignored(uint32 sig);
+static void   lx_sig_raise(uint32 sig);
 static uint32  s_stat[LX_STAT_MAX];
 
 #if (ARKRTOS_USE_LINUX_FUTEX == 1)
@@ -657,6 +682,42 @@ static lx_proc_t *lx_proc_curp(void);
 #if (ARKRTOS_USE_PAGING_FILEMAP == 1)
 #define s_fmap          (lx_proc_curp()->fmap)
 #endif
+
+/* 当前进程有没有「未屏蔽、且真会打断系统调用」的待投递信号。阻塞等待
+ * 遇到这种情形按 Linux 回 -EINTR，而不是继续睡（管道阻塞读写与 futex
+ * WAIT 共用这一条判据）。
+ *
+ * 判据必须排掉**默认动作是「忽略」**的那些位：SIGCHLD(17) / SIGCONT(18) /
+ * SIGURG(23) / SIGWINCH(28) 在 SIG_DFL 下，以及任何显式 SIG_IGN 的信号。
+ * Linux 的 get_signal() 对这类 pending 直接销掉返回 0，既不铺帧、也不
+ * 打断系统调用。把它们算进来会让「子进程退出了」变成「父进程下一次阻塞
+ * read 回 -EINTR」——实测抓到过：wait4 回收之后 SIGCHLD 的 pending 位还
+ * 在（本层不清它，Linux 也不清），不排掉的话每个 fork 夹具的阻塞调用都
+ * 会白白多回一次 -EINTR。 */
+static uint8 lx_sig_pending_unblocked(void)
+{
+    uint32 sig;
+    uint32 ready = s_sig_pending & ~s_sig_blocked;
+
+    for(sig = 1u; sig < (uint32)LX_NSIG; sig++)
+    {
+        if((ready & lx_sig_bit(sig)) == 0u)
+        {
+            continue;
+        }
+        if(s_sig[sig].handler == LX_SIG_IGN)
+        {
+            continue;           /* 显式忽略：不打断 */
+        }
+        if((s_sig[sig].handler == LX_SIG_DFL) &&
+           (lx_sig_default_ignored(sig) != 0u))
+        {
+            continue;           /* 默认忽略：不打断 */
+        }
+        return 1u;
+    }
+    return 0u;
+}
 
 static void lx_proc_zero(uint32 slot)
 {
@@ -1137,24 +1198,129 @@ static int32 lx_pipe_alloc(void)
     return -1;
 }
 
-/* 从管道读。空且还有写端 -> -EAGAIN（不阻塞，见 LX_PIPE_BUF 上的注释）；
- * 空且写端全关 -> 0（EOF，与 Linux 一致）。 */
-static int32 lx_pipe_read(int32 idx, unsigned long ua, uint32 want)
+/* ------------------------------------------------------------ 阻塞等待（U-26） */
+
+/* 叫醒挂在某条管道某个方向上的全部等待者。写侧写入数据后叫醒读侧，读侧
+ * 腾出空间后叫醒写侧；关闭路径在「某方向的引用计数归零」时叫醒对侧
+ * （读端归零 -> 写端醒来看到 -EPIPE，写端归零 -> 读端醒来读到 EOF）。
+ *
+ * 唤醒只负责「叫醒」，判定留在重放那一轮：条件可能在一瞬间又被对侧改回去
+ * （刚写入就被别的读者读走），在唤醒点替对方下结论只会给出假答案。
+ * 与 lx_futex_wake_key / lx_sock_ctx 同一套做法。 */
+static void lx_pipe_wake(int32 pi, uint8 dir)
 {
+    int32  i;
+    uint32 crit = ARKRTOS_ENTER_CRITICAL();
+
+    for(i = 1; i <= (int32)ARKRTOS_TASK_MAX_NUM; i++)
+    {
+        if((s_pipe_wait[i - 1].used != 0u) &&
+           (s_pipe_wait[i - 1].dir == dir) &&
+           ((int32)s_pipe_wait[i - 1].pi == pi))
+        {
+            (void)arkrtos_task_wakeup_internal(i);
+        }
+    }
+    ARKRTOS_EXIT_CRITICAL(crit);
+}
+
+/* 撤掉当前任务的等待登记。每一次「这次调用真的结束了」（拿到数据、EOF、
+ * 错误、-EINTR）都要走一遍：登记留着会让下一次系统调用被误认成重放。 */
+static void lx_pipe_forget(int32 me)
+{
+    uint32 crit;
+
+    if((me <= 0) || (me > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return;
+    }
+    crit = ARKRTOS_ENTER_CRITICAL();
+    s_pipe_wait[me - 1].used = 0u;
+    ARKRTOS_EXIT_CRITICAL(crit);
+}
+
+/* 这是不是同一次调用的下一轮？是则取回已经写进去的字节数（读侧没有进度，
+ * 一律 0）。判定用「同一任务 + 同一条管道 + 同一个方向」，不看地址：同一
+ * 个任务睡着时不可能再发起第二个管道调用，所以这个匹配不会认错人。 */
+static uint32 lx_pipe_resume(int32 me, int32 pi, uint8 dir)
+{
+    uint32 done = 0u;
+    uint32 crit;
+
+    crit = ARKRTOS_ENTER_CRITICAL();
+    if((me > 0) && (me <= (int32)ARKRTOS_TASK_MAX_NUM) &&
+       (s_pipe_wait[me - 1].used != 0u) &&
+       (s_pipe_wait[me - 1].dir == dir) &&
+       ((int32)s_pipe_wait[me - 1].pi == pi))
+    {
+        done = s_pipe_wait[me - 1].done;
+    }
+    ARKRTOS_EXIT_CRITICAL(crit);
+    return done;
+}
+
+/* 挂起一个时间片，返回 LX_RET_RETRY。
+ *
+ * 为什么用 LX_RET_RETRY 而不是像 futex 那样回 0：fd / 用户地址 / 长度就在
+ * a0..a2 里，回 0 会把 a0 冲成 0（fd 0 = 控制台），重放那一轮读到的全是假
+ * 参数。LX_RET_RETRY 是 socket 与 pselect6 阻塞路径用的同一条约定——参数
+ * 寄存器原样留给重放的那一次，分发器既不写 a0、也不投信号（这次调用还没
+ * 返回，信号帧里不该有这个半截的现场）。
+ *
+ * 时间片是「丢唤醒」的兜底：对侧的动作会主动叫醒我们，但如果不巧在登记
+ * 与睡下之间被抢占，那一次唤醒就丢了；100 ms 后重放一轮重新判条件，不会
+ * 因为一次没叫醒就永久卡住。 */
+static int32 lx_pipe_sleep(void *p_ctx, int32 me, int32 pi, uint8 dir, uint32 done)
+{
+    uint32 crit;
+
+    if((me <= 0) || (me > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return -LX_EAGAIN;          /* 没有任务身份：不假装睡过 */
+    }
+    if(arkrtos_port_svc_restart(p_ctx) != 0)
+    {
+        return -LX_ENOSYS;          /* 端口不能重放：如实拒绝，不含糊地回 0 */
+    }
+    crit = ARKRTOS_ENTER_CRITICAL();
+    s_pipe_wait[me - 1].used = 1u;
+    s_pipe_wait[me - 1].dir  = dir;
+    s_pipe_wait[me - 1].pi   = (uint8)pi;
+    s_pipe_wait[me - 1].done = done;
+    ARKRTOS_EXIT_CRITICAL(crit);
+    (void)arkrtos_task_block_in_critical((uint32)LX_WAIT_SLICE_MS);
+    return LX_RET_RETRY;
+}
+
+/* ---------------------------------------------------------------- 管道读写 */
+
+/* 从管道读。语义按 Linux：
+ *   * 有数据就回（短读正常，不等到 want 满）；
+ *   * 空且写端全关 -> 0（EOF）；
+ *   * 空而写端还在 -> O_NONBLOCK 回 -EAGAIN，否则挂起等下一位写者；
+ *   * 有未屏蔽信号待投递 -> -EINTR（Linux 的阻塞读同样被信号打断）。
+ * 返回值可能是 LX_RET_RETRY：那表示「这次调用还没结束」。 */
+static int32 lx_pipe_read(void *p_ctx, int32 idx, unsigned long ua, uint32 want)
+{
+    int32  me = (int32)arkrtos_current_task_id;
     int32  pi = (int32)s_fd[idx].pipe;
     uint8  buf[LX_IO_CHUNK];
     uint32 done = 0u;
 
     if((pi < 0) || (pi >= (int32)LX_PIPE_MAX) || (s_pipe[pi].used == 0u))
     {
+        lx_pipe_forget(me);
         return -LX_EBADF;
     }
+    (void)lx_pipe_resume(me, pi, 0u);      /* 读侧没有进度要接着算 */
     if(want == 0u)
     {
+        lx_pipe_forget(me);
         return 0;
     }
     if(ua == 0u)
     {
+        lx_pipe_forget(me);
         return -LX_EFAULT;
     }
 
@@ -1184,7 +1350,13 @@ static int32 lx_pipe_read(int32 idx, unsigned long ua, uint32 want)
             }
             if(arkrtos_copy_to_user((void *)(unsigned long)(ua + done), buf, n) != 0)
             {
-                return (done > 0u) ? (int32)done : -LX_EFAULT;
+                lx_pipe_forget(me);
+                if(done > 0u)
+                {
+                    lx_pipe_wake(pi, 1u);   /* 已经取走的部分照样腾出了空间 */
+                    return (int32)done;
+                }
+                return -LX_EFAULT;
             }
             s_pipe[pi].tail  = tail;
             s_pipe[pi].count = (uint16)((uint32)s_pipe[pi].count - n);
@@ -1192,71 +1364,152 @@ static int32 lx_pipe_read(int32 idx, unsigned long ua, uint32 want)
         done += n;
     }
 
-    if(done == 0u)
+    if(done > 0u)
     {
-        return (s_pipe[pi].writers == 0u) ? 0 : -LX_EAGAIN;
+        lx_pipe_forget(me);
+        lx_pipe_wake(pi, 1u);       /* 腾出了空间：叫醒可能等着的写端 */
+        return (int32)done;
     }
-    return (int32)done;
+    if(s_pipe[pi].writers == 0u)
+    {
+        lx_pipe_forget(me);
+        return 0;                   /* EOF */
+    }
+    if((s_fd[idx].fl & (uint16)LX_O_NONBLOCK) != 0u)
+    {
+        lx_pipe_forget(me);
+        return -LX_EAGAIN;
+    }
+    if(lx_sig_pending_unblocked() != 0u)
+    {
+        lx_pipe_forget(me);
+        return -LX_EINTR;
+    }
+    return lx_pipe_sleep(p_ctx, me, pi, 0u, 0u);
 }
 
-/* 往管道写。写端全关但读端还在时没有意义（管道的写端已被关掉），
- * 读端全关 -> -EPIPE；缓冲满 -> -EAGAIN；能写多少写多少，短写是正常结果，
- * 不假装写全。 */
-static int32 lx_pipe_write(int32 idx, unsigned long ua, uint32 want)
+/* 往管道写。语义按 Linux：
+ *   * 读端全关 -> 先置 SIGPIPE 待投递位，再回 -EPIPE；已经写进去的那部分
+ *     照实回短写（Linux 也是这样：短写之后的下一次才吃到 -EPIPE）；
+ *   * 缓冲满 -> O_NONBLOCK 回 -EAGAIN（或已写部分的短写），否则挂起等读端
+ *     腾空间；
+ *   * 阻塞写是**写全**的：超过 256 字节的块分段等空间，直到 want 都进去；
+ *   * 有未屏蔽信号 -> 已写部分优先回短写，一字节没写才回 -EINTR。
+ * 返回值可能是 LX_RET_RETRY（见 lx_pipe_sleep）。 */
+static int32 lx_pipe_write(void *p_ctx, int32 idx, unsigned long ua, uint32 want)
 {
+    int32  me = (int32)arkrtos_current_task_id;
     int32  pi = (int32)s_fd[idx].pipe;
     uint8  buf[LX_IO_CHUNK];
     uint32 done = 0u;
 
     if((pi < 0) || (pi >= (int32)LX_PIPE_MAX) || (s_pipe[pi].used == 0u))
     {
+        lx_pipe_forget(me);
         return -LX_EBADF;
     }
-    if(s_pipe[pi].readers == 0u)
-    {
-        return -LX_EPIPE;
-    }
+    done = lx_pipe_resume(me, pi, 1u);     /* done 跨重放累计 */
     if(want == 0u)
     {
+        lx_pipe_forget(me);
         return 0;
     }
     if(ua == 0u)
     {
+        lx_pipe_forget(me);
         return -LX_EFAULT;
     }
-
-    while((done < want) && (s_pipe[pi].count < (uint16)LX_PIPE_BUF))
+    if(done >= want)
     {
-        uint32 space = (uint32)LX_PIPE_BUF - (uint32)s_pipe[pi].count;
-        uint32 n = want - done;
-        uint32 k;
-
-        if(n > (uint32)LX_IO_CHUNK)
-        {
-            n = (uint32)LX_IO_CHUNK;
-        }
-        if(n > space)
-        {
-            n = space;
-        }
-        if(arkrtos_copy_from_user(buf, (const void *)(unsigned long)(ua + done), n) != 0)
-        {
-            return (done > 0u) ? (int32)done : -LX_EFAULT;
-        }
-        for(k = 0u; k < n; k++)
-        {
-            s_pipe[pi].buf[s_pipe[pi].head] = buf[k];
-            s_pipe[pi].head = (uint16)(((uint32)s_pipe[pi].head + 1u) % (uint32)LX_PIPE_BUF);
-            s_pipe[pi].count++;
-        }
-        done += n;
+        /* 上一轮已经把整块都写进去了，只剩最后一次返回（不会发生，但把
+         * 它写成显式的，免得以后改循环时越界） */
+        lx_pipe_forget(me);
+        return (int32)done;
     }
 
-    if(done == 0u)
+    for(;;)
     {
-        return -LX_EAGAIN;
+        /* 读端全关：**先判再拷**。Linux 的 write 在 readers 归零时不管环形
+         * 缓冲还剩多少空间都回 -EPIPE（SIGPIPE 也照样投），所以这一判必须
+         * 在写循环之前；把它放在循环之后会让「关掉读端再写一个字节」变成
+         * 成功写进缓冲，等到下次写才报错。 */
+        if(s_pipe[pi].readers == 0u)
+        {
+            lx_pipe_forget(me);
+            if(done > 0u)
+            {
+                return (int32)done; /* 已提交的照常交付，下一轮再 -EPIPE */
+            }
+            lx_sig_raise(13u);      /* SIGPIPE：默认动作结束任务 */
+            return -LX_EPIPE;
+        }
+        while((done < want) && (s_pipe[pi].count < (uint16)LX_PIPE_BUF))
+        {
+            uint32 space = (uint32)LX_PIPE_BUF - (uint32)s_pipe[pi].count;
+            uint32 n = want - done;
+            uint32 k;
+
+            if(n > (uint32)LX_IO_CHUNK)
+            {
+                n = (uint32)LX_IO_CHUNK;
+            }
+            if(n > space)
+            {
+                n = space;
+            }
+            if(arkrtos_copy_from_user(buf, (const void *)(unsigned long)(ua + done), n) != 0)
+            {
+                lx_pipe_forget(me);
+                if(done > 0u)
+                {
+                    lx_pipe_wake(pi, 0u);
+                    return (int32)done;
+                }
+                return -LX_EFAULT;
+            }
+            for(k = 0u; k < n; k++)
+            {
+                s_pipe[pi].buf[s_pipe[pi].head] = buf[k];
+                s_pipe[pi].head = (uint16)(((uint32)s_pipe[pi].head + 1u) % (uint32)LX_PIPE_BUF);
+                s_pipe[pi].count++;
+            }
+            done += n;
+        }
+
+        if(done == want)
+        {
+            lx_pipe_forget(me);
+            lx_pipe_wake(pi, 0u);   /* 有新数据：叫醒可能等着的读端 */
+            return (int32)done;
+        }
+        /* 循环末尾**不再**重复判 `readers == 0`：`for(;;)` 顶部那一处就是
+         * 同一个判据，下一轮（睡醒重放后）第一件事就是它。单线程内核里读端
+         * 不可能在一次拷贝中间消失；抢占式内核里最坏多睡一个时间片，醒来
+         * 拿到的仍是 -EPIPE，不会把已写字节说成没写。留着两份判据只会多出
+         * 一段在宿主上永远走不到的死代码。 */
+        if((s_fd[idx].fl & (uint16)LX_O_NONBLOCK) != 0u)
+        {
+            lx_pipe_forget(me);
+            return (done > 0u) ? (int32)done : -LX_EAGAIN;
+        }
+        if(lx_sig_pending_unblocked() != 0u)
+        {
+            lx_pipe_forget(me);
+            return (done > 0u) ? (int32)done : -LX_EINTR;
+        }
+        {
+            int32 rc = lx_pipe_sleep(p_ctx, me, pi, 1u, done);
+
+            if((rc < 0) && (done > 0u))
+            {
+                /* 端口不能重放（-ENOSYS）：已经拷进去的那部分照常交付，
+                 * 回已写字节数——与「拷贝半路失败」同一条口径，绝不把
+                 * 写进去的数据说成没写。 */
+                return (int32)done;
+            }
+            return rc;
+        }
     }
-    return (int32)done;
 }
 
 /* pipe2(59)：成功时把两个 fd 号（读端在先）写回用户数组。flags 只认
@@ -1318,10 +1571,16 @@ static int32 lx_pipe2(void *p_ctx)
     s_fd[i1].off      = 0u;
     s_fd[i1].path[0]  = 0;
     s_fd[i1].wr       = 0u;
-    /* 两端都如实报 O_NONBLOCK：本层管道读空/写满一律 -EAGAIN，本来就是
-     * 不阻塞的（见 LX_PIPE_BUF 上的注释）；F_SETFL 清这一位会被拒绝。 */
-    s_fd[i0].fl = (uint16)(LX_O_RDONLY | LX_O_NONBLOCK);
-    s_fd[i1].fl = (uint16)(LX_O_WRONLY | LX_O_NONBLOCK);
+    /* 状态标志如实报：不带 O_NONBLOCK 就是**阻塞**管道（Linux 的默认），
+     * 读写空/满时挂起等对侧；带 O_NONBLOCK 才是能读/写多少算多少 + -EAGAIN。
+     * F_SETFL 之后可以来回改这一位，语义跟着变。 */
+    s_fd[i0].fl = (uint16)LX_O_RDONLY;
+    s_fd[i1].fl = (uint16)LX_O_WRONLY;
+    if((flags & (uint32)LX_O_NONBLOCK) != 0u)
+    {
+        s_fd[i0].fl |= (uint16)LX_O_NONBLOCK;
+        s_fd[i1].fl |= (uint16)LX_O_NONBLOCK;
+    }
     s_fd[i0].cloexec = ((flags & (uint32)LX_O_CLOEXEC) != 0u) ? 1u : 0u;
     s_fd[i1].cloexec = s_fd[i0].cloexec;
 
@@ -1590,9 +1849,9 @@ static void lx_fd_set_fl(int32 idx, uint32 arg)
  *   * 0..2 没有别名时它们是「控制台对象」而不是槽：F_GETFD 回 0、F_SETFD
  *     回 0 但不记 FD_CLOEXEC（没有槽可还，exec 之后控制台照旧在）、
  *     F_GETFL 回 O_RDWR|O_NONBLOCK。
- *   * 对管道**清** O_NONBLOCK 回 -EINVAL：本层管道读空/写满一律 -EAGAIN，
- *     承诺不了阻塞语义。回 0 让程序去等一个永远不会来的事件，比当场拒绝
- *     危险得多。置位则恒成功（它本来就不阻塞）。
+ *   * 管道两端的 O_NONBLOCK 可以自由置/清（U-26）：置位是能读/写多少算
+ *     多少 + -EAGAIN，清零是阻塞（读空、写满时挂起等对侧）。Linux 里
+ *     「先把两端设成非阻塞、发送前再清掉」是常见的惯用法，两边都要认。
  *   * 文件 fd 的 O_APPEND 只被记录下来（F_GETFL 能读回）：本层文件写仍
  *     -ENOSYS，不会因为它变成"能追加"，所以也不假装写成功了。 */
 static int32 lx_fcntl(void *p_ctx)
@@ -1664,11 +1923,6 @@ static int32 lx_fcntl(void *p_ctx)
             /* 控制台对象本来就不阻塞：只接受"要求不阻塞"这一种写法。 */
             return ((arg & (unsigned long)LX_O_NONBLOCK) != 0ul) ? 0 : -LX_EINVAL;
         }
-        if(((arg & (unsigned long)LX_O_NONBLOCK) == 0ul) &&
-           ((s_fd[idx].kind == LX_FD_PIPE_R) || (s_fd[idx].kind == LX_FD_PIPE_W)))
-        {
-            return -LX_EINVAL;
-        }
         lx_fd_set_fl(idx, (uint32)arg);
         return 0;
     default:
@@ -1696,6 +1950,20 @@ static int32 lx_fcntl(void *p_ctx)
 static uint32 lx_sig_bit(uint32 sig)
 {
     return (uint32)1u << (sig - 1u);
+}
+
+/* 置一个待投递信号位。投递点仍然是「系统调用返回用户态之前」，所以这里
+ * 只登记：默认动作结束任务（退出码 128 + signo）、装了处理器就进处理函数、
+ * 忽略则只记一次。管道写端无人读时的 SIGPIPE（13）走的就是这一条 ——
+ * 写回去的 -EPIPE 与 Linux 一致，先置位再返回，没有处理函数时任务就结束。 */
+static void lx_sig_raise(uint32 sig)
+{
+    if((sig == 0u) || (sig >= (uint32)LX_NSIG))
+    {
+        return;
+    }
+    (void)lx_proc_cur();            /* 保证当前任务的进程槽存在 */
+    s_sig_pending |= lx_sig_bit(sig);
 }
 
 /* Linux 里默认动作是「忽略」的几个。 */
@@ -2483,12 +2751,22 @@ static uint32 lx_fd_release(uint32 slot, uint32 idx)
                 {
                     s_pipe[pi].readers--;
                 }
+                /* 读者没了：等着的写端醒来拿 -EPIPE（并发 SIGPIPE）。 */
+                if(s_pipe[pi].readers == 0u)
+                {
+                    lx_pipe_wake(pi, 1u);
+                }
             }
             else
             {
                 if(s_pipe[pi].writers != 0u)
                 {
                     s_pipe[pi].writers--;
+                }
+                /* 写者没了：等着的读端醒来读到 EOF。 */
+                if(s_pipe[pi].writers == 0u)
+                {
+                    lx_pipe_wake(pi, 0u);
                 }
             }
             if((s_pipe[pi].readers == 0u) && (s_pipe[pi].writers == 0u))
@@ -3855,7 +4133,7 @@ static int32 lx_read(void *p_ctx)
         {
             return -LX_EBADF;       /* 管道的写端不能读 */
         }
-        return lx_pipe_read(idx, ua, want);
+        return lx_pipe_read(p_ctx, idx, ua, want);
     }
     if(want == 0u)
     {
@@ -4005,7 +4283,7 @@ static int32 lx_write(void *p_ctx)
     {
         return -LX_EBADF;
     }
-    return lx_pipe_write(idx, ua, want);
+    return lx_pipe_write(p_ctx, idx, ua, want);
 }
 
 static int32 lx_clock_gettime(void *p_ctx)
@@ -5493,7 +5771,7 @@ static unsigned long lx_futex_key(unsigned long uaddr)
  * 回 -EINTR 而不是继续睡。 */
 static uint8 lx_futex_sig_pending(void)
 {
-    return ((s_sig_pending & ~s_sig_blocked) != 0u) ? 1u : 0u;
+    return lx_sig_pending_unblocked();
 }
 
 /* 读用户给的 timespec，换成内核毫秒坐标上的截止时刻。
@@ -7584,16 +7862,14 @@ static void lx_finish(void *p_svc_ctx, int32 rc)
         s_stat[LX_STAT_HANDLED]++;
         return;
     }
-#if (ARKRTOS_USE_LINUX_SOCKET == 1) || (ARKRTOS_USE_LINUX_SELECT == 1)
     if(rc == LX_RET_RETRY)
     {
-        /* 还在等（socket / pselect6）：这一次不算完成，既不写 a0（那是
-         * 本次调用的输入，重放的那一次要重新读），也不投信号。开关全关时
-         * 这一段不参与编译：默认档的目标码逐字节不变。 */
+        /* 还在等（socket / pselect6 / 阻塞管道）：这一次不算完成，既不写 a0
+         * （那是本次调用的输入，重放的那一次要重新读），也不投信号（调用
+         * 还没返回，信号帧里不该有这个半截的现场）。 */
         s_stat[LX_STAT_HANDLED]++;
         return;
     }
-#endif
 #if (ARKRTOS_USE_LINUX_SOCKET == 1)
     /* 这一次 socket 系统调用真的结束了（不是重放）：把登记撤掉。不撤的话
      * 下一次调用进来 armed 还立着，参数会从上一次的槽里取 —— 表现是「参数
@@ -7751,6 +8027,9 @@ void arkrtos_linux_abi_on_task_exit(int32 task_id)
 #if (ARKRTOS_USE_LINUX_SELECT == 1)
     lx_sel_forget(task_id);
 #endif
+    /* 任务号会被复用：不清的话新任务第一次碰管道就走了「重放」分支，
+     * 参数从上一个已死任务的登记里取。 */
+    lx_pipe_forget(task_id);
 #if (ARKRTOS_USE_LINUX_SOCKET == 1)
     /* 任务号会被复用：不清的话新任务第一次 socket 调用就走了重放分支。 */
     lx_sock_ctx_clear(task_id);
@@ -7859,6 +8138,9 @@ void arkrtos_linux_abi_on_task_exit(int32 task_id)
 #if (ARKRTOS_USE_LINUX_SELECT == 1)
     lx_sel_forget(task_id);
 #endif
+    /* 任务号会被复用：不清的话新任务第一次碰管道就走了「重放」分支，
+     * 参数从上一个已死任务的登记里取。 */
+    lx_pipe_forget(task_id);
 #if (ARKRTOS_USE_LINUX_SOCKET == 1)
     /* 任务号会被复用：不清的话新任务第一次 socket 调用就走了重放分支。 */
     lx_sock_ctx_clear(task_id);
@@ -7949,6 +8231,13 @@ void arkrtos_linux_abi_reset(void)
         s_pipe[i].head    = 0u;
         s_pipe[i].tail    = 0u;
         s_pipe[i].count   = 0u;
+    }
+    /* 管道等待登记是任务自己的：换程序就该视为没在等（上一个程序的等待
+     * 在重放时会拿一个已经不存在的 fd 去判）。 */
+    for(i = 0u; i < (uint32)ARKRTOS_TASK_MAX_NUM; i++)
+    {
+        s_pipe_wait[i].used = 0u;
+        s_pipe_wait[i].done = 0u;
     }
 
     /* 信号：动作表、pending、屏蔽字已在上面逐槽清过，这里只归零计数器。

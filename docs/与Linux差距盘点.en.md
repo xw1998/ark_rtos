@@ -16,8 +16,8 @@
 > rejected by the loader. That gap is registered as an acceptance item in [欠账盘点](欠账盘点.md).
 
 > **Revised 2026-11-21**: "the system-call ABI is still missing" is no longer the state of
-> things. The Linux-ABI profile (`ARKRTOS_USE_LINUX_ABI`) now speaks 25 asm-generic numbers
-> (non-blocking `pipe2` and a minimal signal set included), measured on QEMU LA64 by three
+> things. The Linux-ABI profile (`ARKRTOS_USE_LINUX_ABI`) now speaks 32 asm-generic numbers
+> (a blocking-by-default `pipe2` - U-26, with an `O_NONBLOCK` mode alongside - and a minimal signal set included), measured on QEMU LA64 by three
 > fixtures (`exit code 7` / `55` / `138`; see
 > [Linux可执行文件兼容-系统调用ABI](Linux可执行文件兼容-系统调用ABI.en.md)). What is really
 > missing now is the **process object** (`fork` / `clone` / fd inheritance / cross-task signals)
@@ -83,7 +83,7 @@ In one line: **the "behaves like Linux" main line works**; what follows is what 
 | Dynamic linking, `.so` shared libraries, ELF loader | Two kinds of input coexist: the `.svcapp` container (copied whole into RAM) and a **statically linked native ELF** (`exec` / `ld`, running on LA64 and RV32; 32/64-bit field tables chosen by `__SIZEOF_LONG__`). The ELF loader accepts only `PT_LOAD` + `e_entry`: `PT_INTERP` (dynamic linking) is explicitly rejected (`ERR_FORMAT`); **no `.so`, no relocated shared libraries, no Linux system-call ABI** (`ecall` carries Ark's `0x10..0x22`) | Trade-off (dynamic linking, shared libraries) + debit (Linux syscall ABI, see [欠账盘点](欠账盘点.md)) |
 | `argv` / `argc` / environment variables | A `.svcapp` App still enters at `main(void)` with no argv; an **ELF program loaded by `exec` receives `sp -> argc/argv` per the Linux entry convention** (measured `argc=4` and `argv[0..3]` matching exactly), but there is **no `environ`** | Trade-off (`.svcapp`) + done (ELF argv) |
 | Signals (`signal` / `sigaction` / `kill`) | Ark's own POSIX layer has **no signal API**; task synchronisation uses event sets, semaphores, mutexes, message queues, condition variables. **The Linux-ABI profile has a minimal set** (2026-11-21, QEMU LA64): `rt_sigaction` / `rt_sigprocmask` / `kill` / `tkill` / `tgkill` / `rt_sigreturn`, self-delivery **and cross-task delivery** (2026-11-23: the target is resolved by pid and woken if it is parked in a blocking `wait4`), always delivered before a syscall returns, no preemptive delivery, no real-time signals, no `siginfo`; the signal frame is a 32-byte header plus a snapshot of the whole trap frame | Partly done (one Linux-ABI signal tier, cross-task included) + trade-off (Ark POSIX layer) |
-| `pipe` / `FIFO` / Unix domain socket | `pipe2` is done (2026-11-21, QEMU LA64, Linux ABI number 59): ring buffer with per-end reference counts, **non-blocking**, survives `execve`; FIFO and Unix domain sockets are still absent, the equivalents being message queues plus socket (loopback) | Partly done + trade-off |
+| `pipe` / `FIFO` / Unix domain socket | `pipe2` is done (2026-11-21, QEMU LA64, Linux ABI number 59): ring buffer with per-end reference counts, **blocking by default with an `O_NONBLOCK` mode** (U-26, 2026-11-27), survives `execve`; FIFO and Unix domain sockets are still absent, the equivalents being message queues plus socket (loopback) | Partly done + trade-off |
 | System V / POSIX shared memory `shm` | No `shmget`/`shm_open`; only the MPU shared window (used for MiniApp handover, not exposed as general IPC) | Trade-off |
 | `clone` / namespaces / containers | None | Trade-off |
 
@@ -198,9 +198,9 @@ yet"): dynamic linking and `.so` shared libraries,
 multi-user / uid-gid, power management, ASLR, kernel modules, package manager,
 shared-memory IPC, `/sys` + hotplug, symmetric-multicore automatic load balancing (SMP already has
 AMP core partitioning and explicit task migration; **static ELF loading with the Linux entry
-convention, plus the Linux syscall ABI for static programs (non-blocking pipes and the minimal
-signal set included), `fork`/`wait4` and copy-on-write are done and are not on this
-list**; what `fork` still lacks is threads and preemptive signal delivery).
+convention, plus the Linux syscall ABI for static programs (blocking-by-default pipes - U-26 - and the
+minimal signal set included), `fork`/`wait4` and copy-on-write are done and are not on this
+list**; what `fork` still lacks is preemptive signal delivery; threads landed with U-25).
 
 ## 4. One-line conclusion
 

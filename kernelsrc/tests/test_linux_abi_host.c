@@ -456,6 +456,30 @@ void arkrtos_port_exit_critical(uint32 state)
     (void)state;
 }
 
+/* ---------------- 阻塞等待的前提桩 ----------------
+ * 「登记 + 睡一个时间片 + 重放」是 futex / pselect6 / socket / 管道共用的
+ * 那一套机制，所以这三个符号**不放在任何开关里**：管道读写是 ABI 的常态
+ * 路径（U-26），任何一个档位编进 linux_abi.c 就要能链接到它们。 */
+int32 g_block_calls;
+uint32 g_block_ms;
+int32 g_wake_calls;
+int32 g_wake_last;
+int32 g_restart_rc = -1;
+
+int32 arkrtos_task_block_in_critical(uint32 timeout_ms)
+{
+    g_block_calls++;
+    g_block_ms = timeout_ms;
+    return 0;
+}
+
+int32 arkrtos_task_wakeup_internal(int32 task_id)
+{
+    g_wake_calls++;
+    g_wake_last = task_id;
+    return 0;
+}
+
 #if (ARKRTOS_USE_LINUX_FUTEX == 1) || (ARKRTOS_USE_LINUX_SELECT == 1) || \
     (ARKRTOS_USE_LINUX_SOCKET == 1)
 /* ---------------- futex / pselect6 的前提桩 ----------------
@@ -481,27 +505,7 @@ void arkrtos_port_exit_critical(uint32 state)
 #define T_FUTEX_WAITERS     (0x80000000u)
 #define T_FUTEX_OWNER_DIED  (0x40000000u)
 
-int32 g_block_calls;
-uint32 g_block_ms;
-int32 g_wake_calls;
-int32 g_wake_last;
-int32 g_restart_rc = -1;
-
 arkrtos_task_t arkrtos_task_table[ARKRTOS_TASK_MAX_NUM];
-
-int32 arkrtos_task_block_in_critical(uint32 timeout_ms)
-{
-    g_block_calls++;
-    g_block_ms = timeout_ms;
-    return 0;
-}
-
-int32 arkrtos_task_wakeup_internal(int32 task_id)
-{
-    g_wake_calls++;
-    g_wake_last = task_id;
-    return 0;
-}
 
 /* PI 的优先级重算要调 arkrtos_ready_reprio（真机上把换过优先级的任务换桶）。
  * 宿主用例里没有就绪队列，这里只记账：断言看的是「有没有按 base_priority
@@ -992,7 +996,8 @@ static void ck_ret(t_ctx *c, int32 want, const char *what)
  * 所以「登记重放」的判据是 ret_written==0，而不是某个返回值。
  * 两个特性都不开的档里没人用它（只有那两档会挂起重放），所以整段跟着
  * 特性走；否则 -Wunused-function 会把它报出来，而告警门禁是硬基线。 */
-#if (ARKRTOS_USE_LINUX_SOCKET == 1) || (ARKRTOS_USE_LINUX_SELECT == 1)
+#if (ARKRTOS_USE_LINUX_SOCKET == 1) || (ARKRTOS_USE_LINUX_SELECT == 1) || \
+    defined(ARKRTOS_HOST_NO_PORT_RESTART)
 static void ck_pending(t_ctx *c, const char *what)
 {
     g_checks++;
@@ -1382,7 +1387,8 @@ static void t_pipe(t_ctx *c)
     (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0x40UL, 0UL, 0UL);
     ck_ret(c, -T_EINVAL, "pipe2 不认识的 flags 回 -EINVAL");
 
-    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF),
+               (unsigned long)T_O_NONBLOCK, 0UL, 0UL);
     ck_ret(c, 0, "pipe2 成功");
     u_get(T_DATA_OFF, fds, 8u);
     ck(fds[0] == 3u && fds[1] == 4u, "pipe2 写回两个 fd（读端在先）");
@@ -1414,7 +1420,8 @@ static void t_pipe(t_ctx *c)
 
     /* 读端全关 -> 写回 -EPIPE */
     fresh(c);
-    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF),
+               (unsigned long)T_O_NONBLOCK, 0UL, 0UL);
     u_get(T_DATA_OFF, fds, 8u);
     (void)call(c, T_NR_CLOSE, (unsigned long)fds[0], 0UL, 0UL, 0UL);
     u_put_str(T_STR_OFF, "x");
@@ -1423,7 +1430,8 @@ static void t_pipe(t_ctx *c)
 
     /* 写满 -> 短写 256，再写 -EAGAIN */
     fresh(c);
-    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF),
+               (unsigned long)T_O_NONBLOCK, 0UL, 0UL);
     u_get(T_DATA_OFF, fds, 8u);
     for(i = 0u; i < 300u; i++)
     {
@@ -1445,11 +1453,14 @@ static void t_pipe(t_ctx *c)
 
     /* 管道条数上限 2 */
     fresh(c);
-    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF),
+               (unsigned long)T_O_NONBLOCK, 0UL, 0UL);
     ck_ret(c, 0, "第一条管道");
-    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF),
+               (unsigned long)T_O_NONBLOCK, 0UL, 0UL);
     ck_ret(c, 0, "第二条管道");
-    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF),
+               (unsigned long)T_O_NONBLOCK, 0UL, 0UL);
     ck_ret(c, -T_ENFILE, "第三条管道回 -ENFILE");
 
     /* fd 只剩一个空位时 pipe2 要整条回滚 */
@@ -1458,7 +1469,8 @@ static void t_pipe(t_ctx *c)
     {
         (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF), 0UL, 0UL);
     }
-    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF),
+               (unsigned long)T_O_NONBLOCK, 0UL, 0UL);
     ck_ret(c, -T_ENFILE, "fd 只剩一个空位时 pipe2 回 -ENFILE");
     (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF), 0UL, 0UL);
     ck_ret(c, 10, "失败后那个 fd 槽位被还回去");
@@ -1469,16 +1481,19 @@ static void t_pipe(t_ctx *c)
     {
         (void)call(c, T_NR_OPENAT, u_ptr(T_PATH_OFF), u_ptr(T_PATH_OFF), 0UL, 0UL);
     }
-    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF),
+               (unsigned long)T_O_NONBLOCK, 0UL, 0UL);
     ck_ret(c, -T_ENFILE, "fd 表全满时 pipe2 回 -ENFILE");
 
     /* 写回用户数组失败：整条管道撤回，fd 槽位也还回 */
     fresh(c);
     g_to_budget = 0;
-    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF),
+               (unsigned long)T_O_NONBLOCK, 0UL, 0UL);
     g_to_budget = -1;
     ck_ret(c, -T_EFAULT, "pipe2 写回失败 -EFAULT");
-    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF),
+               (unsigned long)T_O_NONBLOCK, 0UL, 0UL);
     rc = (int32)c->ret;
     ck_ret(c, 0, "撤回后再建管道成功");
     ck(rc == 0, "撤回不留半条管道");
@@ -1490,7 +1505,8 @@ static void t_pipe(t_ctx *c)
     /* 长度 0 与空指针：Linux 这两个判据的顺序是「先长度后指针」，
      * 所以 read(fd, NULL, 0) 合法回 0，不是 -EFAULT。 */
     fresh(c);
-    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF),
+               (unsigned long)T_O_NONBLOCK, 0UL, 0UL);
     u_get(T_DATA_OFF, fds, 8u);
     (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 0UL, 0UL);
     ck_ret(c, 0, "管道 read 长度 0 回 0（不碰指针）");
@@ -1520,7 +1536,8 @@ static void t_pipe(t_ctx *c)
 
     /* 写侧半路失效：已拷进去的照常提交，返回已写字节数（短写是正常结果） */
     fresh(c);
-    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF),
+               (unsigned long)T_O_NONBLOCK, 0UL, 0UL);
     u_get(T_DATA_OFF, fds, 8u);
     g_from_budget = 1;
     (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 256UL, 0UL);
@@ -1528,6 +1545,279 @@ static void t_pipe(t_ctx *c)
     ck_ret(c, 128, "管道写半路失效返回已写字节数");
     (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 200UL, 0UL);
     ck_ret(c, 128, "已提交的那一块真的在管道里");
+}
+
+/* 分组 7c：阻塞式管道（U-26）
+ *
+ * 管道默认阻塞是 Linux 的默认语义，这一组钉四件事：
+ *   1) 端口没有「重放系统调用」的能力时，阻塞点降级成 -ENOSYS；写侧若已经
+ *      拷进去一部分，回已写字节数（短写），绝不把写进去的数据说成没写；
+ *   2) 空读 / 满写登记后回 LX_RET_RETRY（不写 a0），对侧一动就唤醒；
+ *   3) 写侧跨重放的进度 done 要累计：分两次腾空才写完的，不许从头再写一遍；
+ *   4) 读端全关 -> -EPIPE，并把 SIGPIPE 置 pending（SIG_IGN 时只剩 -EPIPE，
+ *      装了处理函数就在这次调用返回用户态之前投递）。
+ *
+ * 宿主是单线程，「另一个执行流」只能靠 arkrtos_current_task_id 换着演。等待
+ * 登记挂在**任务**维度上（不是进程槽），所以换 id 就是换执行流——这一点与
+ * 真机一致，不是权宜之计。 */
+static void t_pipe_block(t_ctx *c)
+{
+    uint32 fds[2];
+    uint32 i;
+
+    /* ---- 1) 端口不能重放：降级，不假装睡过 ---- */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "阻塞档：建管道（默认阻塞）");
+    u_get(T_DATA_OFF, fds, 8u);
+    arkrtos_current_task_id = 7;
+    g_block_calls = 0;
+#if !defined(ARKRTOS_HOST_NO_PORT_RESTART)
+    /* 这一档的 arkrtos_port_svc_restart 是库里那条恒回 -1 的缺省实现。 */
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 5UL, 0UL);
+    ck_ret(c, -T_ENOSYS, "端口不能重放时空读回 -ENOSYS（不假装睡过）");
+    ck(g_block_calls == 0, "-ENOSYS 时不登记、不睡");
+
+    for(i = 0u; i < 300u; i++)
+    {
+        g_user[T_STR_OFF + i] = (uint8)(i & 0xFFu);
+    }
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 300UL, 0UL);
+    ck_ret(c, 256, "端口不能重放时写侧回已写字节数（短写，不丢已拷数据）");
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 1UL, 0UL);
+    ck_ret(c, -T_ENOSYS, "管道已满再写回 -ENOSYS");
+#else
+    uint8 buf[300];
+
+    /* ---- 2) 阻塞读：登记 -> 对侧写 -> 唤醒 -> 重放读到 ---- */
+    g_restart_rc  = 0;
+    g_block_calls = 0;
+    g_wake_calls  = 0;
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 5UL, 0UL);
+    ck_pending(c, "阻塞读登记重放（不写 a0）");
+    ck_u((unsigned long)g_block_calls, 1u, "阻塞读睡一次");
+    ck_u((unsigned long)g_block_ms, 100u, "等待粒度是一个时间片（100 ms）");
+    ck_u((unsigned long)g_wake_calls, 0u, "管道没人动时不会被唤醒");
+
+    arkrtos_current_task_id = 5;
+    u_put_str(T_STR_OFF, "abc");
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 3UL, 0UL);
+    ck_ret(c, 3, "对侧写 3 字节");
+    ck_u((unsigned long)g_wake_calls, 1u, "写进数据叫醒等着的读端");
+    ck_u((unsigned long)g_wake_last, 7u, "叫醒的是登记的那个任务");
+
+    arkrtos_current_task_id = 7;
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 5UL, 0UL);
+    ck_ret(c, 3, "重放读到 3 字节");
+    u_get(T_DATA_OFF, buf, 3u);
+    ck(memcmp(buf, "abc", 3u) == 0, "重放读到的内容一致");
+
+    /* 写端全关：阻塞读直接回 EOF，不睡 */
+    arkrtos_current_task_id = 5;
+    (void)call(c, T_NR_CLOSE, (unsigned long)fds[1], 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "关掉写端");
+    arkrtos_current_task_id = 7;
+    g_block_calls = 0;
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 5UL, 0UL);
+    ck_ret(c, 0, "写端全关后阻塞读回 EOF");
+    ck(g_block_calls == 0, "EOF 不睡");
+
+    /* ---- 3) 阻塞写：分两次腾空才写完，进度跨重放累计 ---- */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "阻塞写用例：建管道");
+    u_get(T_DATA_OFF, fds, 8u);
+    g_restart_rc = 0;
+    for(i = 0u; i < 256u; i++)
+    {
+        g_user[T_STR_OFF + i] = (uint8)0x41u;          /* 'A' */
+    }
+    arkrtos_current_task_id = 7;
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 256UL, 0UL);
+    ck_ret(c, 256, "管道空时正好写满 256 字节");
+
+    for(i = 0u; i < 300u; i++)
+    {
+        g_user[T_STR_OFF + i] = (uint8)(i & 0xFFu);
+    }
+    g_block_calls = 0;
+    g_wake_calls  = 0;
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 300UL, 0UL);
+    ck_pending(c, "管道满时阻塞写登记重放（不写 a0）");
+    ck_u((unsigned long)g_block_calls, 1u, "阻塞写睡一次");
+
+    arkrtos_current_task_id = 5;
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 256UL, 0UL);
+    ck_ret(c, 256, "读端腾出 256 字节");
+    ck_u((unsigned long)g_wake_calls, 1u, "腾出空间叫醒等着的写端");
+    ck_u((unsigned long)g_wake_last, 7u, "叫醒的仍是那个写端任务");
+
+    arkrtos_current_task_id = 7;
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 300UL, 0UL);
+    ck_pending(c, "300 字节还没写完，继续登记（done 已累计 256）");
+    ck_u((unsigned long)g_block_calls, 2u, "第二次仍需睡");
+
+    arkrtos_current_task_id = 5;
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 256UL, 0UL);
+    ck_ret(c, 256, "再腾出 256 字节");
+    u_get(T_DATA_OFF, buf, 256u);
+    ck_u((unsigned long)buf[0], 0u, "第二段从第 0 个字节起（没重头再写）");
+    ck_u((unsigned long)buf[255], 255u, "第二段末尾是第 255 个字节");
+
+    arkrtos_current_task_id = 7;
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 300UL, 0UL);
+    ck_ret(c, 300, "补齐剩余 44 字节后整次写完成（回 300）");
+
+    arkrtos_current_task_id = 5;
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 100UL, 0UL);
+    ck_ret(c, 44, "剩下 44 字节在管道里");
+    u_get(T_DATA_OFF, buf, 44u);
+    ck_u((unsigned long)buf[0], 0u, "尾部从第 256 个字节起");
+    ck_u((unsigned long)buf[43], 43u, "尾部末字节是第 299 个");
+
+    /* ---- 4) 读端全关：-EPIPE + SIGPIPE ---- */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    u_get(T_DATA_OFF, fds, 8u);
+    ck(sig_install_act(c, 13u, 1UL, 0UL, 0UL) == 0, "把 SIGPIPE 设成 SIG_IGN");
+    (void)call(c, T_NR_CLOSE, (unsigned long)fds[0], 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "关掉读端");
+    g_block_calls = 0;
+    u_put_str(T_STR_OFF, "x");
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 1UL, 0UL);
+    ck_ret(c, -T_EPIPE, "读端全关后写回 -EPIPE（缓冲还有空间也一样）");
+    ck(g_block_calls == 0, "-EPIPE 不睡");
+
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    u_get(T_DATA_OFF, fds, 8u);
+    (void)call(c, T_NR_CLOSE, (unsigned long)fds[0], 0UL, 0UL, 0UL);
+    ck(sig_install_act(c, 13u, T_HANDLER, T_RESTORER, 0UL) == 0,
+       "给 SIGPIPE 装处理函数");
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 1UL, 0UL);
+    ck_u(c->ret, 13u, "SIGPIPE 在这次 write 返回用户态之前投递（a0 = 13）");
+    ck_u(c->reg[T_UREG_ERA], T_HANDLER, "era 指向 SIGPIPE 处理函数");
+    (void)call(c, T_NR_CLOSE, (unsigned long)fds[1], 0UL, 0UL, 0UL);
+
+    /* ---- 5) 没有任务身份：如实 -EAGAIN，不假装睡过 ---- */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "无明显执行流用例：建管道");
+    u_get(T_DATA_OFF, fds, 8u);
+    arkrtos_current_task_id = 0;
+    g_block_calls = 0;
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 5UL, 0UL);
+    ck_ret(c, -T_EAGAIN, "没有任务身份时阻塞读回 -EAGAIN（不假装睡过）");
+    ck(g_block_calls == 0, "没有任务身份时不登记、不睡");
+
+    /* ---- 6) 读的用户缓冲坏：-EFAULT，且一个字节也不从管道里移走 ---- */
+    arkrtos_current_task_id = 7;
+    u_put_str(T_STR_OFF, "zz");
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 2UL, 0UL);
+    ck_ret(c, 2, "先写 2 字节进管道");
+    g_to_budget = 0;
+    g_block_calls = 0;
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 2UL, 0UL);
+    g_to_budget = -1;
+    ck_ret(c, -T_EFAULT, "读的用户缓冲坏回 -EFAULT");
+    ck(g_block_calls == 0, "拷贝失败不睡");
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 2UL, 0UL);
+    ck_ret(c, 2, "拷贝失败后那 2 字节仍在管道里");
+
+    /* ---- 7) 写侧首次进入就拷不动：-EFAULT（done 还是 0） ---- */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "写侧坏指针用例：建管道");
+    u_get(T_DATA_OFF, fds, 8u);
+    arkrtos_current_task_id = 7;
+    g_from_budget = 0;
+    g_block_calls = 0;
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 16UL, 0UL);
+    g_from_budget = -1;
+    ck_ret(c, -T_EFAULT, "写的用户缓冲坏回 -EFAULT");
+    ck(g_block_calls == 0, "一个字节没进去时不睡、也不回 0");
+
+    /* ---- 8) 重放时 want 已等于已写进度：直接回 done，不再写 ---- */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "进度用例：建管道");
+    u_get(T_DATA_OFF, fds, 8u);
+    for(i = 0u; i < 256u; i++)
+    {
+        g_user[T_STR_OFF + i] = (uint8)0x42u;          /* 'B' */
+    }
+    arkrtos_current_task_id = 7;
+    /* 一次调用里先写进 256 字节、再因为缓冲满挂起：这样登记的是 done=256，
+     * 正是「进度跨重放累计」那条路径（分两次调用写不出这个状态）。 */
+    g_block_calls = 0;
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 300UL, 0UL);
+    ck_pending(c, "300 字节写进 256 后写不下，登记重放（done 已 256）");
+    ck_u((unsigned long)g_block_calls, 1u, "睡一次");
+    /* 同样的等待登记，这次只要 256 字节：进度已经等于请求量 */
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 256UL, 0UL);
+    ck_ret(c, 256, "want 已等于已写进度时直接回 done");
+    ck_u((unsigned long)g_block_calls, 1u, "不再多睡一次");
+    arkrtos_current_task_id = 5;
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 256UL, 0UL);
+    ck_ret(c, 256, "管道里仍是 256 字节（没有重复写进去）");
+
+    /* ---- 9) 阻塞写等待中读端全关：已写部分照实回短写 ---- */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "读端关闭用例：建管道");
+    u_get(T_DATA_OFF, fds, 8u);
+    arkrtos_current_task_id = 7;
+    g_block_calls = 0;
+    g_wake_calls  = 0;
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 300UL, 0UL);
+    ck_pending(c, "300 字节写进 256 后挂起（done 已 256）");
+    ck_u((unsigned long)g_block_calls, 1u, "睡一次");
+    (void)call(c, T_NR_CLOSE, (unsigned long)fds[0], 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "关掉读端（叫醒等着的写端）");
+    ck(g_wake_calls > 0, "关读端真的叫醒了写端");
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 300UL, 0UL);
+    ck_ret(c, 256, "读端全关时把已写进去的 256 字节照实回（短写）");
+    (void)call(c, T_NR_CLOSE, (unsigned long)fds[1], 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "收尾：关掉写端");
+
+    /* ---- 10) 阻塞等待遇到未屏蔽的待投递信号：不睡，回 -EINTR ---- */
+    fresh(c);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "信号用例：建管道");
+    u_get(T_DATA_OFF, fds, 8u);
+    arkrtos_current_task_id = 7;
+    /* 处理函数装在一个读不出来的地址上：投递时铺不了帧，pending 位留着，
+     * 于是下一个入口仍看得见它（futex 那组用的是同一招）。 */
+    ck(sig_install_act(c, 10u, 0x1000UL, 0x2000UL, 0u) == 0,
+       "给 SIGUSR1 装一个投递不到的处理函数");
+    (void)call(c, T_NR_KILL, 7UL, 10UL, 0UL, 0UL);
+    g_block_calls = 0;
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 5UL, 0UL);
+    ck_ret(c, -T_EINTR, "阻塞读遇到未屏蔽待投递信号回 -EINTR");
+    ck(g_block_calls == 0, "有信号要处理时不睡");
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 256UL, 0UL);
+    ck_ret(c, 256, "先写满 256 字节（下一步才有「没空间」）");
+    (void)call(c, T_NR_WRITE, (unsigned long)fds[1], u_ptr(T_STR_OFF), 1UL, 0UL);
+    ck_ret(c, -T_EINTR, "阻塞写一字节没写时遇到信号回 -EINTR");
+    ck(g_block_calls == 0, "写侧有信号要处理时也不睡");
+    /* 收尾：把 pending 真的销掉，别让它漏到后面的用例里。改成 SIG_IGN 之后
+     * 随便一次系统调用返回时，信号层会把它取走并丢掉（Linux 的语义）。 */
+    ck(sig_install_act(c, 10u, 1UL, 0UL, 0UL) == 0, "把 SIGUSR1 改成 SIG_IGN");
+    (void)call(c, T_NR_GETPID, 0UL, 0UL, 0UL, 0UL);
+    /* 销干净的自证：空读现在应该真的睡下去（不是又回 -EINTR）。 */
+    arkrtos_current_task_id = 5;
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 256UL, 0UL);
+    ck_ret(c, 256, "把管道腾空");
+    arkrtos_current_task_id = 7;
+    g_block_calls = 0;
+    (void)call(c, T_NR_READ, (unsigned long)fds[0], u_ptr(T_DATA_OFF), 5UL, 0UL);
+    ck_pending(c, "忽略掉的 pending 不会再打断阻塞读（信号已销账）");
+    ck_u((unsigned long)g_block_calls, 1u, "销账之后真的睡了");
+
+    /* 端口的降级口径后面还要验（t_task_exit 钉的是「没有重放能力回 -1」），
+     * 这里改过 g_restart_rc，收尾必须放回去。 */
+    g_restart_rc = -1;
+#endif
 }
 
 /* 分组 7b：dup / dup3
@@ -1746,8 +2036,8 @@ static void t_dup(t_ctx *c)
 /* 分组：fcntl(25) 的状态标志与 FD_CLOEXEC
  *
  * 这一组钉三件事：状态标志按**槽**记（F_GETFL 读得回、副本跟着源走）；
- * F_SETFL 只认 O_APPEND / O_NONBLOCK，且对管道"清 NONBLOCK"当场 -EINVAL
- * （本层管道读空/写满一律 -EAGAIN，不承诺假阻塞）；execve 换镜像之后带
+ * F_SETFL 只认 O_APPEND / O_NONBLOCK，管道这一位**置和清都认**（U-26 起
+ * 管道能阻塞，清掉就是阻塞语义，见 t_pipe_block）；execve 换镜像之后带
  * FD_CLOEXEC 的槽真的还回去了 —— 那是 openat / dup3 / pipe2 / socket 敢
  * 接受这个标志的唯一依据。 */
 static void t_fdflags(t_ctx *c)
@@ -1774,15 +2064,22 @@ static void t_fdflags(t_ctx *c)
     ck_ret(c, 0, "F_GETFD 清后读回 0");
 
     (void)fcntl_call(c, (unsigned long)fds[0], T_F_GETFL, 0UL);
-    ck_ret(c, (int32)(T_O_RDONLY | T_O_NONBLOCK), "F_GETFL 读端 = RDONLY|NONBLOCK");
+    ck_ret(c, (int32)T_O_RDONLY, "F_GETFL 读端默认 = RDONLY（管道默认阻塞）");
     (void)fcntl_call(c, (unsigned long)fds[1], T_F_GETFL, 0UL);
-    ck_ret(c, (int32)(T_O_WRONLY | T_O_NONBLOCK), "F_GETFL 写端 = WRONLY|NONBLOCK");
+    ck_ret(c, (int32)T_O_WRONLY, "F_GETFL 写端默认 = WRONLY（管道默认阻塞）");
 
     (void)fcntl_call(c, (unsigned long)fds[1], T_F_SETFL,
                (unsigned long)T_O_NONBLOCK);
-    ck_ret(c, 0, "F_SETFL 置 O_NONBLOCK（本来就置着，恒成功）");
+    ck_ret(c, 0, "F_SETFL 置 O_NONBLOCK 成功");
+    (void)fcntl_call(c, (unsigned long)fds[1], T_F_GETFL, 0UL);
+    ck_ret(c, (int32)(T_O_WRONLY | T_O_NONBLOCK), "置位后 F_GETFL 读回 NONBLOCK");
     (void)fcntl_call(c, (unsigned long)fds[1], T_F_SETFL, 0UL);
-    ck_ret(c, -T_EINVAL, "F_SETFL 对管道清 O_NONBLOCK 回 -EINVAL");
+    ck_ret(c, 0, "F_SETFL 对管道清 O_NONBLOCK 成功（U-26：清掉就是阻塞）");
+    (void)fcntl_call(c, (unsigned long)fds[1], T_F_GETFL, 0UL);
+    ck_ret(c, (int32)T_O_WRONLY, "清掉后 F_GETFL 只剩 WRONLY");
+    (void)fcntl_call(c, (unsigned long)fds[1], T_F_SETFL,
+               (unsigned long)T_O_NONBLOCK);
+    ck_ret(c, 0, "再置回 O_NONBLOCK（下面的副本跟着源走这条要看它）");
 
     (void)fcntl_call(c, 2UL, T_F_GETFL, 0UL);
     ck_ret(c, (int32)(T_O_RDWR | T_O_NONBLOCK), "F_GETFL 控制台 = RDWR|NONBLOCK");
@@ -1856,7 +2153,8 @@ static void t_fdflags(t_ctx *c)
 
     /* 标准流别名上的 CLOEXEC：dup3(pw, 1, O_CLOEXEC) 之后 exec，fd 1 回到控制台 */
     fresh(c);
-    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF), 0UL, 0UL, 0UL);
+    (void)call(c, T_NR_PIPE2, u_ptr(T_DATA_OFF),
+               (unsigned long)T_O_NONBLOCK, 0UL, 0UL);
     u_get(T_DATA_OFF, fds, 8u);
     (void)call(c, T_NR_DUP3, (unsigned long)fds[1], 1UL,
                (unsigned long)T_O_CLOEXEC, 0UL);
@@ -5173,6 +5471,13 @@ static void t_socket(t_ctx *c)
     r = sock_run(c, T_NR_SOCKET, T_AF_INET, T_SOCK_STREAM | T_SOCK_NONBLOCK,
                  0UL, 0UL, 0UL, 0UL);
     ck(r == 3, "connect 前置：非阻塞 socket = fd 3");
+    /* 地址参数坏：与 bind 同一条判据，且在发请求**之前**判掉。 */
+    net_reset();
+    (void)call6(c, T_NR_CONNECT, 3UL, 0UL, 16UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EFAULT, "connect 地址为 NULL 回 -EFAULT");
+    (void)call6(c, T_NR_CONNECT, 3UL, sa, 4UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "connect addrlen < 8 回 -EINVAL");
+    ck_u(g_net_calls, 0u, "connect 参数错误一条都不发到 net");
     net_reset();
     g_net_rc = ARKRTOS_NET_EINPROGRESS;
     g_block_calls = 0;
@@ -6122,8 +6427,10 @@ static void t_rseq(t_ctx *c)
     arkrtos_current_task_id = 0;
     (void)call(c, T_NR_RSEQ, u_ptr(T_RSEQ_OFF), 32UL, 0UL, 0UL);
     ck_ret(c, -T_ESRCH, "无任务上下文注册回 -ESRCH");
-    arkrtos_current_task_id = 7;
+    /* 中止点也必须在这个时刻验：先恢复任务号再调，走的就是「有任务、没注册」
+     * 那条路（area==0），标签写着的「无任务上下文」根本没被走到。 */
     ck(arkrtos_linux_abi_rseq_preempt(c) == 0u, "无任务上下文中止点返回 0");
+    arkrtos_current_task_id = 7;
 
     /* --- rseq_cs 中止（信号投递点）：帧里存的必须是 abort_ip --- */
     fresh(c);
@@ -6143,6 +6450,25 @@ static void t_rseq(t_ctx *c)
     ck_u(g_export_era, abort_ip, "信号帧里存的是 abort_ip（不是原 PC）");
     ck_u(c->reg[T_UREG_ERA], T_HANDLER, "投递后 era 指向处理函数");
     ck(u_get64(T_RSEQ_OFF + 8u) == 0ull, "信号投递时 rseq_cs 被清零");
+
+    /* 端口改不了 PC：顺序是「先清 rseq_cs、再改 PC」，所以走到这一步时
+     * 指针已经清掉、PC 原地不动。返回 0 表示什么都没跳 —— 绝不能出现
+     * 「PC 改了、指针还在」那种会让程序重跑一遍临界区的中间态。 */
+    fresh(c);
+    (void)call(c, T_NR_RSEQ, u_ptr(T_RSEQ_OFF), 32UL, 0UL, 0UL);
+    ck_ret(c, 0, "改不了 PC 组：注册 rseq");
+    u_put32(T_RSEQ_CS_OFF + 0u, 0u);
+    u_put32(T_RSEQ_CS_OFF + 4u, 0u);
+    u_put64(T_RSEQ_CS_OFF + 8u, (unsigned long long)start_ip);
+    u_put64(T_RSEQ_CS_OFF + 16u, 0x20ull);
+    u_put64(T_RSEQ_CS_OFF + 24u, (unsigned long long)abort_ip);
+    u_put64(T_RSEQ_OFF + 8u, (unsigned long long)u_ptr(T_RSEQ_CS_OFF));
+    c->reg[T_UREG_ERA] = start_ip + 4UL;
+    c->set_reg_fail = (int)T_UREG_ERA;
+    ck(arkrtos_linux_abi_rseq_preempt(c) == 0u, "端口改不了 PC 时中止点返回 0");
+    ck_u(c->reg[T_UREG_ERA], start_ip + 4UL, "改不了 PC 时 PC 原地不动");
+    ck(u_get64(T_RSEQ_OFF + 8u) == 0ull, "改不了 PC 时 rseq_cs 已清（顺序没反）");
+    c->set_reg_fail = -1;
 }
 
 int main(void)
@@ -6161,6 +6487,7 @@ int main(void)
     t_write(&c);
     t_pread(&c);
     t_pipe(&c);
+    t_pipe_block(&c);
     t_dup(&c);
     t_fdflags(&c);
     t_rseq(&c);
