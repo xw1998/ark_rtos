@@ -108,6 +108,18 @@ void arkrtos_linux_abi_reset(void);
 */
 void arkrtos_linux_abi_on_task_exit(int32 task_id);
 
+/**
+* @brief rseq_cs 的中止点：port 在**真正**切换任务之前调用（LA64 是 la_trap_c
+*        的出口结算处，且只在被打断的是用户态时）
+* @param p_frame 被打断上下文的 trap 帧（用户 PC 就在里面）
+* @return 1 = 真把 PC 改到了 abort_ip；0 = 这一帧不需要动
+* @details 只处理「该任务注册过 rseq、rseq_cs 非 0 且内容可信、PC 落在
+*          [start_ip, start_ip + post_commit) 里」这一种现场；其余一律不动帧。
+*          默认档（ARKRTOS_USE_LINUX_ABI=0）编译成 0，port 里的调用点也在
+*          #if 里，默认镜像不产生符号、不产生费用。
+*/
+uint32 arkrtos_linux_abi_rseq_preempt(void *p_frame);
+
 #else
 
 #define arkrtos_linux_abi_try(p_ctx)     (0)
@@ -117,6 +129,7 @@ void arkrtos_linux_abi_on_task_exit(int32 task_id);
 #define arkrtos_linux_abi_nr_overflow()  (0u)
 #define arkrtos_linux_abi_reset()        ((void)0)
 #define arkrtos_linux_abi_on_task_exit(id) ((void)0)
+#define arkrtos_linux_abi_rseq_preempt(f)  (0u)
 
 #endif /* ARKRTOS_USE_LINUX_ABI */
 

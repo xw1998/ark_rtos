@@ -40,7 +40,7 @@ a purely Linux-ABI static binary with its own `_start`):
 **"A static program runs" is not "Linux is supported".** Section 3 lists what is
 explicitly unsupported.
 
-## 1 Supported syscalls (45; 31 measured on QEMU, 13 socket numbers host-tier only, 1 table-and-argument only)
+## 1 Supported syscalls (49; 35 measured on QEMU, 13 socket numbers host-tier only, 1 table-and-argument only)
 
 Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 
@@ -69,6 +69,7 @@ Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 | 135 | `rt_sigprocmask` | `BLOCK`/`UNBLOCK`/`SETMASK`; `KILL`/`STOP` can never be masked (section 7) | `query sees blocked bit = 1 ok` / `delivered on unblock = 2 ok` |
 | 139 | `rt_sigreturn` | validates frame `magic` and length, then restores the whole frame; privilege level is not taken from the user frame (section 7) | triggered by the restorer; readouts stay correct after the handler returns |
 | 160 | `uname` | `sysname=ArkRTOS`, `machine=loongarch64` | `uname -> 0 ok` |
+| 168 | `getcpu` | two 4-byte out-pointers (either may be NULL, out-of-window `-EFAULT`) plus a cache argument (ignored); single core, so both the CPU number and the NUMA node number are written as 0 - they must equal the `cpu_id` `rseq` writes back (section 8.14) | `getcpu rc = 0 ok` / `getcpu cpu = 0 ok` / `getcpu node = 0 ok` |
 | 172 | `getpid` | internal task id | `getpid==task id>0 -> 1 ok` |
 | 174 | `getuid` | always 0 | same path |
 | 175 | `geteuid` | always 0 | same path |
@@ -80,10 +81,11 @@ Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 | 260 | `wait4` | only `options 0/WNOHANG`; **without `WNOHANG` it really blocks** (restartable syscall, section 8.1), never invents a status, the bookkeeping entry is consumed on reap (section 8) | `wait4 returned child pid -> 12 ok` / `WEXITSTATUS == 42 -> 42 ok` / `wait4(child) again == -ECHILD -> -10 ok` / `blocking wait4 blocked >= 40 ms -> 1 ok` |
 | 226 | `mprotect` | **real page-level write protection** (`ARKRTOS_USE_PAGING_MPROTECT`, section 8.6): flips the `WE` bit at 4 KB granularity, a violating store kills the task with SIGSEGV; `PROT_EXEC` / `PROT_NONE` are recorded but not enforced; with the switch off it falls back to "validate, return 0" | `mprotect RO == 0 -> 0 ok` / `sibling 4 KB half of the same pair stays writable -> 13107 ok` / `mprotect violation reports SIGSEGV status -> 11 ok` (section 8.6, 11 checks) |
 | 227 | `msync` | writes back only this process's "writable shared file mapping" bookkeeping; a hit inside the heap window syncs, a miss inside it returns 0, outside it `-ENOMEM` (`ARKRTOS_USE_PAGING_FILEMAP`, section 8.5) | `filemap msync rc -> 0 ok` / `filemap private msync rc (no writeback) -> 0 ok` / `filemap shared write persisted, private write not (bits=31) -> 31 ok` |
+| 293 | `rseq` | registration contract (`len` must be 32, `flags` must be 0, 32-byte aligned address, `NULL` deregisters) plus `cpu_id_start`/`cpu_id` written as 0; the two abort points of `rseq_cs` (before signal delivery, before a tick preemption, section 8.14) | `rseq register rc = 0 ok` / `cpu_id readback 0 = 0 ok` / `signal aborted the critical section = 1 ok` / `rseq_cs cleared by the abort = 0 ok` / `exit code 57` |
 
 The socket family (`198-210`, `242`, 13 numbers) is described in section 8.9: it is
-implemented in the translation layer and covered by 581 host assertions, but the **QEMU
-fixture has no socket section yet**, so it is not counted among the 31 numbers with QEMU
+implemented in the translation layer and covered by 768 host assertions, but the **QEMU
+fixture has no socket section yet**, so it is not counted among the 35 numbers with QEMU
 readouts.
 
 Unknown numbers return `-ENOSYS` (38) and are counted. Nothing is guessed.
@@ -99,8 +101,8 @@ profile".
 (section 8.6), so it now has 11 serial readouts and is no longer a table-only
 number.
 
-The other 31 numbers all have serial readouts from the `[linux]` / `[pipe]` /
-`[sig]` / `[dup]` / `[fork]` fixtures.
+The other 35 numbers all have serial readouts from the `[linux]` / `[pipe]` /
+`[sig]` / `[dup]` / `[fork]` / `[rseq]` fixtures.
 
 ## 2 How the two ABIs are told apart
 
@@ -1192,7 +1194,7 @@ they would have to be rewritten. Putting select and a future socket layer behind
 switch would turn "zero footprint when off" into "half the feature when off".
 `ARKRTOS_USE_LINUX_SELECT` depends only on `ARKRTOS_USE_LINUX_ABI`.
 
-### 8.9 socket (U-23): translation layer and the QEMU eighth tier (2026-11-24, 581 host checks + 212 QEMU checks)
+### 8.9 socket (U-23): translation layer and the QEMU eighth tier (2026-11-24, 768 host checks + 212 QEMU checks)
 
 13 numbers: `socket`(198), `bind`(200), `listen`(201), `accept`(202), `connect`(203),
 `getsockname`(204), `getpeername`(205), `sendto`(206), `recvfrom`(207), `setsockopt`(208),
@@ -1212,8 +1214,8 @@ dispatch on the fd kind (the same fd table holds files, pipes and sockets).
 
 **Host readout.** The sixth Linux ABI coverage tier `linuxabisocket`
 (`tools/coverage_gate.py`) runs the socket section of `test_linux_abi_host.c` on the host:
-98.73% on that tier alone, 98.48% union across six tiers (baseline 97.96%), **581 checks**
-green.
+98.51% on that tier alone, 98.84% union across six tiers (baseline 98.82%, re-pinned on
+2026-11-27 together with the `rseq`/`getcpu` host assertions), **768 checks** green.
 
 **QEMU eighth tier: 212 checks all `ok` + `exit code 0`.** The eighth tier of
 `tools/fork_gate.py` (`SELECT+SOCKET+LWIP`) really runs the socket section of
@@ -1641,6 +1643,132 @@ manager, so `-EINVAL` rather than pretending the lock was taken; (2) no `F_SETOW
 I/O); (3) no `F_GETPIPE_SZ` / `F_SETPIPE_SZ` - the pipe buffer is a fixed 256 bytes
 (section 6).
 
+### 8.14 `rseq`(293) and `getcpu`(168): restartable sequences and the CPU number (2026-11-27, 16 QEMU LA64 checks + 40 host checks)
+
+`rseq` is the "lock-free critical section" primitive used by glibc and by the Rust standard
+library: a program registers the `[start_ip, post_commit_offset)` range of a critical section
+and its `abort_ip` in a `struct rseq_cs`, and the kernel consults that table **at the moment it
+interrupts user execution** - if the PC falls inside the range it is moved to `abort_ip`, so the
+program continues on the "start over" path instead of returning into the middle of a section
+with a torn assumption. Without that, the ordering guarantees inside the section are fiction.
+
+**Registration contract (`rseq(293)`).** Four arguments: `struct rseq *`, `rseq_len`, `flags`,
+`sig`.
+- `flags != 0` -> `-EINVAL`; `rseq_len != 32` -> `-EINVAL` (`struct rseq` is exactly 32 bytes in
+  the Linux UAPI; a caller whose `sizeof` disagrees cannot read the fields back anyway);
+- the address must be 32-byte aligned, otherwise `-EINVAL`;
+- a `NULL` pointer **deregisters** (same meaning as Linux) and returns 0;
+- on success `cpu_id_start` (offset 0) and `cpu_id` (offset 4) are both written as 0; **if the
+  write fails the call returns `-EFAULT` and leaves no registration behind** - a successful
+  registration that lets the program read a bogus CPU number is far worse than an outright
+  refusal;
+- the fourth argument `sig` (the signature used by the abort instruction stream) is not looked
+  at by this layer: the kernel never executes the user's abort instruction, the signature is
+  only interpreted by the abort path, and ignoring it changes nothing semantically.
+
+The other fields of `struct rseq` (`flags` / `node_id` / `mm_cid` and so on) are not written by
+this layer and keep whatever the program put there.
+
+**`getcpu(168)`.** Two 4-byte out-parameters (either may be `NULL`; out of range is `-EFAULT`)
+plus a `cache` argument that is ignored. On a single-core machine both the CPU number and the
+NUMA node number are 0 - and they **must agree with the `cpu_id` that `rseq` writes back**: two
+places reporting different numbers would show the program two different worlds on the fast path
+(reading `rseq.cpu_id`) and the slow path (`getcpu`), and it would then treat "migrated CPUs" as
+fact when reasoning about memory ordering.
+
+**The two abort points.** This layer consults `rseq_cs` only where user execution is genuinely
+interrupted:
+
+| Moment | Call site | Why there |
+|---|---|---|
+| signal delivery | in `lx_signal_deliver()`, **before** `lx_sig_build_frame()` | Linux runs `rseq_ip_fixup` before the signal handler too. Fixing the PC before the frame is laid down means the saved frame naturally holds `abort_ip`, and `rt_sigreturn` resumes on the abort path instead of in the middle of the critical section |
+| tick preemption | the switch point of `la_trap_c()` on LA64 (before the stack is actually switched), and only when the interrupted context is user mode (`PRMD & 3 != 0`) | being interrupted by the timer and by a signal are the same event to the program: a live `rseq_cs` means it is inside the critical section |
+
+The predicates match Linux one for one: `rseq` registered / `rseq_cs` non-zero / the block is
+readable / `version` and `flags` are both 0 / the PC lies inside
+`[start_ip, start_ip + post_commit_offset)`. If any of them fails the PC is **left alone**.
+Clobbering a context that is not on this data is far more dangerous than doing nothing.
+
+**The order is hard: clear `rseq_cs` first, then move the PC.** The other way round, if moving
+the PC succeeded and clearing failed, the program would come back on the abort path, see "cs is
+still live" and run the critical section a second time.
+
+**One deliberate difference from Linux (stated openly).** When `rseq_cs` has a non-zero
+`version`/`flags`, Linux raises `SIGSEGV` and kills the process; this layer has no place to
+deliver a signal at the switch point, so it **only clears the pointer and leaves the PC alone** -
+the conservative direction: better to lose one abort (degrading to "as if there were no rseq")
+than to jump into a block with invalid contents.
+
+**Measured readout (the `[rseq]` lines, QEMU LA64)**
+
+```
+  [rseq] write /mnt/ram/linux_rseq rc=0 size=8232
+  [rseq] exec rc=0
+  [rseq] getcpu rc = 0 ok
+  [rseq] getcpu cpu = 0 ok
+  [rseq] getcpu node = 0 ok
+  [rseq] rseq register rc = 0 ok
+  [rseq] cpu_id_start written 0 = 0 ok
+  [rseq] cpu_id readback 0 = 0 ok
+  [rseq] signal aborted the critical section = 1 ok
+  [rseq] post-commit did not run = 0 ok
+  [rseq] rseq_cs cleared by the abort = 0 ok
+  [rseq] handler ran once = 1 ok
+  [rseq] normal critical section completed = 1 ok
+  [rseq] normal section not falsely aborted = 1 ok
+  [rseq] rseq_cs cleared by the commit = 0 ok
+  [rseq] rseq len != 32 -> -EINVAL = -22 ok
+  [rseq] rseq flags != 0 -> -EINVAL = -22 ok
+  [rseq] rseq(NULL) deregisters = 0 ok
+  [rseq] PASS: getcpu both outputs zero, rseq registered with cpu_id written, signal delivery aborted the critical section at abort_ip with rseq_cs cleared, commit path completed, invalid contract refused, NULL deregisters
+  [rseq] finished after 0 ms, exit code 57
+```
+
+`exit code 57` is the fixture's own success code; `post-commit did not run = 0` is positive
+evidence that the commit half never ran, and `normal section not falsely aborted = 1` is the
+negative control that nothing is aborted when no signal arrives - only the pair shows that the
+abort is decided by the range rather than by "jump whenever `rseq_cs` is live".
+
+**The 40 host checks** (`t_rseq` in `test_linux_abi_host.c`) cover the states a QEMU fixture
+cannot build: `getcpu` three positive and two negative cases (`NULL` out-parameter, out of range
+`-EFAULT`); every rejection face of the registration contract (`len` / `flags` / alignment /
+`NULL` deregistration / `-ESRCH`); `g_to_budget=1` to force "the `cpu_id` write fails" ->
+`-EFAULT` with no registration left behind; at the preemption point, a PC inside the range ->
+returns 1 with `ERA` equal to `abort_ip` and `rseq_cs` cleared to 0, while a PC outside the
+range / `cs == 0` / `version != 0` / an unreadable `cs` pointer -> returns 0 and leaves the PC
+alone; invalidation after deregistration and after `reset`; and the signal-delivery point uses
+`g_export_era` to capture "the user PC at the moment the frame was exported", turning "the
+signal frame really holds `abort_ip`" into a real assertion instead of an inference.
+
+**Why the fixture is built `-O0` (a real toolchain defect that was found).** This fixture uses
+`&&label` to delimit the three endpoints of the restartable sequence. The toolchain in use (the
+LoongArch port of LoongIDE GCC 8.3) generates unreliable code for taking the address of a label
+under `-O1`/`-O2`:
+- when the abort block is unreachable in the CFG it is **deleted outright** (the store of
+  `s_aborted = 1` disappears) and `&&label` then lands on the start of a neighbouring block
+  (measured: `start` and `abort` both became the entry of `linux_main` and `post` became 0, so
+  `[start, start+post)` degraded to an empty range and the abort never fired);
+- with several labels on the same page the immediates are computed wrongly (minimal repro: two
+  labels 8 bytes apart compile to a difference of -4).
+
+The fix is two-fold: build the fixture with `-O0` (addresses are correct at that level), and
+add a **branch on a `volatile` that is always 0**, `if (s_zero_guard) goto cs_abort;` - giving
+the abort block an edge the compiler can see, so the block survives and the label addresses come
+out right; at run time the branch is never taken. That `-O0` and the comment in
+`example/qemu_loongarch64/Makefile` exist for exactly this reason.
+
+**Gates.** In `tools/linux_abi_gate.py` `syscall-table` grows from 27 to **30** entries
+(`RSEQ` 293 and `GETCPU` 168 join the number table), `qemu-readout` gains "16 rseq checks all
+ok + the PASS line + `exit code 57`", and `parser-selfcheck` grows from 12 bad samples to **16**
+(rseq block: PASS line removed, exit code changed to 1, a FAIL line inserted, one check missing).
+
+**Boundaries.** (1) single core: `cpu_id`/`node_id` are always 0, there is no migration and no
+`mm_cid`; (2) the tick-preemption path has no fixture on this machine (the fixture only
+exercises the signal-delivery point); the two host assertions about preemption cover the same
+`lx_rseq_fixup`; (3) invalid `rseq_cs` contents only clear the pointer, the task is not killed
+(see "one deliberate difference from Linux" above); (4) `RSEQ_FLAG_UNREGISTER` is not
+implemented (`flags != 0` is always `-EINVAL`).
+
 ## 9 Switch and zero footprint
 
 `ARKRTOS_USE_LINUX_THREAD` (section 8.10) is a third Linux ABI switch, default **0**,
@@ -1705,8 +1833,8 @@ profile.
 `ARKRTOS_USE_LINUX_SOCKET` (section 8.9) is a further switch, default **0**,
 `depends on ARKRTOS_USE_LINUX_ABI` with an `#error` guard; with it off all `lx_sock_*`
 code and the socket dispatch in the fd table are not compiled and `198`-`210`/`242` fall
-back to `-ENOSYS`; with it on the measured readout is the host socket tier's **581 checks**
-(98.73% on that tier, 98.48% union) plus the **212 readouts of the QEMU eighth tier**
+back to `-ENOSYS`; with it on the measured readout is the host socket tier's **768 checks**
+(98.51% on that tier, 98.84% union) plus the **212 readouts of the QEMU eighth tier**
 (39 of them the socket section: 38 semantic + 1 round-trip timing).
 
 `MAP_FIXED` (section 8.7) is **not a switch of its own**: it exists when
@@ -1723,18 +1851,19 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py [--no-build]
 
 14 items; prints `LINUX-ABI-GATE OK` when all pass and is invoked from
 `tools/ci_gate.py` as `linux-abi`: default-off, kconfig-wired, features-guard,
-board-switch, off-zero-symbols, port-wiring (two directions), compile-on (8 TUs
-under the real LA64 board), syscall-table (28 numbers vs asm-generic),
+board-switch, off-zero-symbols, port-wiring (two directions), compile-on (9 TUs
+under the real LA64 board), syscall-table (30 numbers vs asm-generic),
 abi-split-la64, abi-split-rv32, build, qemu-readout (14 Linux checks + PASS + exit 7,
 15 pipe checks + exit 55, 31 signal checks + PASS + exit 138, 53 dup checks
-including 17 fcntl checks + exit 56, the unrelated demos still intact), and
-parser-selfcheck (twelve deliberately broken logs must each be rejected).
+including 17 fcntl checks + exit 56, 16 rseq checks + PASS + exit 57, the unrelated
+demos still intact), and parser-selfcheck (sixteen deliberately broken logs must
+each be rejected).
 
 The socket layer has readouts on **both tiers**: on the host the sixth Linux ABI coverage
 tier `linuxabisocket` in `tools/coverage_gate.py` (with
 `-DARKRTOS_USE_LINUX_SOCKET=1 -DARKRTOS_USE_LWIP=1` and
-`-Wl,--wrap=arkrtos_port_svc_exec_frame`) runs `test_linux_abi_host.c` with 581 checks green,
-98.73% on the tier and 98.48% union (baseline 97.96%), and `tools/ci_gate.py`'s
+`-Wl,--wrap=arkrtos_port_svc_exec_frame`) runs `test_linux_abi_host.c` with 768 checks green,
+98.51% on the tier and 98.84% union (baseline 98.82%), and `tools/ci_gate.py`'s
 `linux-abi-host` item already includes it; on the board the **eighth tier** of
 `tools/fork_gate.py` (`-DARKRTOS_USE_LINUX_SELECT=1 -DARKRTOS_USE_LINUX_SOCKET=1
 -DARKRTOS_USE_LWIP=1`) gives 212 checks all `ok` + `exit code 0` on QEMU LA64.
@@ -1959,13 +2088,17 @@ condition-variable PI variants, plus timeout, `ARKRTOS_USE_LINUX_FUTEX`, section
 8.4 / 8.4b / 8.4c, default off), file mapping (`ARKRTOS_USE_PAGING_FILEMAP`, section
 8.5, default off), real page-level write protection
 (`ARKRTOS_USE_PAGING_MPROTECT`, section 8.6, default off) and real `mmap`
-semantics `MAP_FIXED` (demand tier, section 8.7, no extra switch); still absent are threads
-(`CLONE_VM`/`CLONE_THREAD` are refused), preemptive signal delivery,
-and `dup2`-style redirection.
+semantics `MAP_FIXED` (demand tier, section 8.7, no extra switch), a thread tier
+(`CLONE_THREAD`, section 8.10, default off - with it off `CLONE_VM`/`CLONE_THREAD` are
+still refused) and a per-App task quota (section 8.11, default off); preemptive signal
+delivery is still absent. `fcntl` fd flags and status flags exist (section 8.13,
+2026-11-27), record locks (`F_SETLK` family) and async I/O do not. `rseq`/`getcpu`
+landed the same day (section 8.14, 2026-11-27).
 
 `execve` gives "replace this task's image" and `fork` gives "a second task with
 its own address-space copy". Both exist, but do not read this as a full process
 model: scheduling and priorities are still kernel-global, the fd table is
 per-process only in the fork tier (kernel-global by default), copy-on-write
 exists only in the `ARKRTOS_USE_PAGING_COW` tier (with private stack pages), and
-there are no threads and no job control.
+threads exist only in the `ARKRTOS_USE_LINUX_THREAD` tier (section 8.10, default off),
+and there is no job control.

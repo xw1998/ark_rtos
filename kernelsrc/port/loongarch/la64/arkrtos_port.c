@@ -58,6 +58,9 @@
 #include "arkrtos_hal.h"
 #include "arkrtos_task.h"
 #include "arkrtos_fault.h"
+#if (ARKRTOS_USE_LINUX_ABI == 1)
+#include "arkrtos_linux_abi.h"   /* rseq_cs 的中止点（见 la_trap_c 出口） */
+#endif
 #include "arkrtos_ushell_upcall.h"   /* SEC-G08：upcall 桩与初始帧的 port 契约 */
 #include "arkrtos_smp.h"       /* arkrtos_smp_ipi_handler()：主核 IPI 入口（R1） */
 
@@ -6789,7 +6792,24 @@ la_frame_word *la_trap_c(la_frame_word *frame)
         next = arkrtos_sched_is_switching();
         if(next >= 0)
         {
-            unsigned long next_sp = arkrtos_sched_activate(next, (unsigned long)frame);
+            unsigned long next_sp;
+
+            #if (ARKRTOS_USE_LINUX_ABI == 1)
+            /* rseq_cs 的中止点之二（另一个在信号投递里）：真要在这一点上把
+             * CPU 交给别人了，而且被打断的是用户态（PLV3），就看一眼用户 PC
+             * 是否落在可重启序列的临界区里。Linux 的 rseq_ip_fixup 做的也是
+             * 这件事；不做就等于告诉用户「临界区没被打断」，而它其实被打断
+             * 过——那是查不出根因的一类错。
+             *
+             * 必须在 arkrtos_sched_activate() **之前**做：那一步会换页表窗口，
+             * 换完之后再写用户内存就是往别人的地址空间里写。 */
+            if((frame[LA_FR_PRMD] & 3UL) != 0UL)
+            {
+                (void)arkrtos_linux_abi_rseq_preempt((void *)frame);
+            }
+            #endif
+
+            next_sp = arkrtos_sched_activate(next, (unsigned long)frame);
 
             if(next_sp != 0u)
             {

@@ -31,6 +31,7 @@
 #include "linux_execve_blob.h"
 #include "linux_pipe_blob.h"
 #include "linux_dup_blob.h"
+#include "linux_rseq_blob.h"
 #include "linux_signal_blob.h"
 #if (ARKRTOS_USE_LINUX_FORK == 1)
 #include "linux_fork_blob.h"
@@ -71,6 +72,7 @@
 #define LX_EXEC_PATH        "/mnt/ram/linux_execve"
 #define LX_PIPE_PATH        "/mnt/ram/linux_pipe"
 #define LX_DUP_PATH         "/mnt/ram/linux_dup"
+#define LX_RSEQ_PATH        "/mnt/ram/linux_rseq"
 #define LX_SIG_PATH         "/mnt/ram/linux_signal"
 #if (ARKRTOS_USE_LINUX_FORK == 1)
 #define LX_FORK_PATH        "/mnt/ram/linux_fork"
@@ -677,6 +679,80 @@ static void task_elf_demo(void)
 
                 demo_lock();
                 demo_puts("[dup] finished after ");
+                demo_putu(waited);
+                demo_puts(" ms, exit code ");
+                #if (ARKRTOS_USE_EXIT_CODE == 1)
+                if((arkrtos_elf_info(&info) == ARKRTOS_ELF_OK) &&
+                   (info.exit_code_set != 0u))
+                {
+                    demo_putu((uint32)info.exit_code);
+                }
+                else
+                {
+                    demo_puts("(not reported)");
+                }
+                #else
+                demo_puts("(exit code channel off)");
+                #endif
+                demo_puts("\n");
+                demo_unlock();
+            }
+        }
+    }
+#endif
+
+#if (ARKRTOS_USE_LINUX_ABI == 1)
+    /* rseq / getcpu 的现场证据：linux_rseq 注册 rseq、读回 cpu_id_start/cpu_id，
+     * 然后在临界区里就地发 tgkill——被中断的 PC 落在 [start, start+post) 里，
+     * 内核必须在信号投递点上把它改成 abort_ip 并清掉 rseq_cs，于是 handler
+     * 跑完之后从 abort 路径继续、提交段一次也不执行。另一条对照：没有信号的
+     * 临界区正常提交。判据是退出码 57；任一条 check 不对夹具自己把退出码
+     * 变成 1。 */
+    {
+        arkrtos_elf_info_t info;
+        char *pargv[1];
+
+        for(tries = 0u; tries < 100u; tries++)
+        {
+            rc = arkrtos_vfs_write_file(LX_RSEQ_PATH, ark_example_linux_rseq,
+                                        (uint32)ARK_EXAMPLE_LINUX_RSEQ_LEN);
+            if(rc >= 0)
+            {
+                break;
+            }
+            arkrtos_task_wait_internal(100u);
+        }
+
+        demo_puts("[rseq] write ");
+        demo_puts(LX_RSEQ_PATH);
+        demo_puts(" rc=");
+        demo_putu((uint32)rc);
+        demo_puts(" size=");
+        demo_putu((uint32)ARK_EXAMPLE_LINUX_RSEQ_LEN);
+        demo_puts("\n");
+
+        if(rc >= 0)
+        {
+            pargv[0] = "linux_rseq";
+            rc = arkrtos_elf_exec(LX_RSEQ_PATH, 1, pargv);
+
+            demo_lock();
+            demo_puts("[rseq] exec rc=");
+            demo_putu((uint32)rc);
+            demo_puts("\n");
+            demo_unlock();
+
+            if(rc == ARKRTOS_ELF_OK)
+            {
+                waited = 0u;
+                while((arkrtos_elf_running() != 0) && (waited < DEMO_WAIT_MS))
+                {
+                    arkrtos_task_wait_internal(DEMO_POLL_MS);
+                    waited += DEMO_POLL_MS;
+                }
+
+                demo_lock();
+                demo_puts("[rseq] finished after ");
                 demo_putu(waited);
                 demo_puts(" ms, exit code ");
                 #if (ARKRTOS_USE_EXIT_CODE == 1)

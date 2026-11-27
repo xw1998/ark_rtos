@@ -83,6 +83,10 @@
 #define LX_SYS_GET_ROBUST_LIST      (100u)
 #define LX_SYS_CLOCK_GETTIME        (113u)
 #define LX_SYS_UNAME                (160u)
+/* rseq / getcpu：都是 asm-generic 号（RISC-V 与 LoongArch 共用）。rseq 是可
+ * 重启序列的注册面，getcpu 是它的慢路径；两者给出的 CPU 号必须一致。 */
+#define LX_SYS_GETCPU               (168u)
+#define LX_SYS_RSEQ                 (293u)
 #define LX_SYS_GETPID               (172u)
 #define LX_SYS_GETUID               (174u)
 #define LX_SYS_GETEUID              (175u)
@@ -2076,6 +2080,224 @@ static uint32 lx_sig_install(void *p_ctx, uint32 sig, lx_sigaction_t *sa,
     return 0u;
 }
 
+/* ------------------------------------------------ rseq(293) / getcpu(168)
+ *
+ * rseq 是可重启序列的注册面：glibc 起运行时问一次这个号，成功就从
+ * __rseq_abi.cpu_id 读 CPU 号（快路径），失败就退回 getcpu 系统调用。
+ * 本层做三件事，缺一件这个号就只是纸面成功：
+ *
+ *   1) 注册契约：flags == 0、rseq_len == 32、rseq 32 字节对齐；rseq == NULL
+ *      是注销。三条与 Linux 逐条相等（Linux 也只认 32 这个长度）。
+ *   2) cpu_id_start / cpu_id 的写回：本内核单核调度，两个字段恒 0。这不是
+ *      编造——这台机器没有第二个 CPU 可迁移，0 就是真值。
+ *   3) rseq_cs 的中止：在**真把控制权交给别人**的点上看用户 PC 是否落在
+ *      [start_ip, start_ip + post_commit_offset) 里，落在里面就把 PC 改成
+ *      abort_ip 并把 rseq_cs 清零。Linux 的 rseq_ip_fixup 做的就是这件事。
+ *      不做它，临界区被抢占后会带着「没被打断」的假设继续跑——那是这类
+ *      机制里最难查的一种错。两个中止点：信号投递（本文件）、tick 抢占
+ *      （port 在真正切换之前调 arkrtos_linux_abi_rseq_preempt()）。
+ *
+ * 边界（docs/已知限制.md 里逐条写着）：
+ *   * 单核：没有 migration，cpu_id 恒 0；
+ *   * rseq_cs 的 version / flags 必须是 0；否则按「这块内存不是本层认得的
+ *     rseq_cs」处理——清掉 rseq_cs、不改 PC。Linux 这里是 SIGSEGV 杀任务，
+ *     而切换点里没有投递信号的位置，宁可不动 PC 也不跳一个读不懂的地址；
+ *   * 注册按任务记、不跨 fork 继承（Linux 也是每条线程各自注册）；
+ *   * 中止只覆盖「用户态被打断」这一种现场（内核态被打断时用户 PC 不在
+ *     临界区里，本来就不该动它）。
+ */
+#define LX_RSEQ_BYTES               (32u)
+#define LX_RSEQ_ALIGN_MASK          (0x1FUL)
+#define LX_RSEQ_OFF_CPU_ID_START    (0u)
+#define LX_RSEQ_OFF_CPU_ID          (4u)
+#define LX_RSEQ_OFF_RSEQ_CS         (8u)
+#define LX_RSEQ_CS_BYTES            (32u)
+#define LX_RSEQ_CS_OFF_START_IP     (8u)
+#define LX_RSEQ_CS_OFF_POST_COMMIT  (16u)
+#define LX_RSEQ_CS_OFF_ABORT_IP     (24u)
+
+/* 每个任务一格：注册的 struct rseq 用户地址（0 = 没注册）。Linux 按线程记，
+ * 本层按任务号记——一条任务就是一个线程（U-25 之后同组线程号也各不相同）。 */
+static unsigned long s_rseq_area[ARKRTOS_TASK_MAX_NUM];
+
+static uint32 lx_rseq_rd32(const uint8 *p)
+{
+    return ((uint32)p[0]) | ((uint32)p[1] << 8) | ((uint32)p[2] << 16) |
+           ((uint32)p[3] << 24);
+}
+
+static unsigned long long lx_rseq_rd64(const uint8 *p)
+{
+    unsigned long long v = 0ull;
+    int32 i;
+
+    for(i = 7; i >= 0; i--)
+    {
+        v = (v << 8) | (unsigned long long)p[i];
+    }
+    return v;
+}
+
+/* 当前任务在 rseq 表里的下标；拿不到任务号回 -1（本层所有系统调用都跑在
+ * 任务里，取不到只可能是端口在没有任务上下文时调进来）。 */
+static int32 lx_rseq_slot(void)
+{
+    int32 tid = (int32)arkrtos_current_task_id;
+
+    if((tid <= 0) || (tid > (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        return -1;
+    }
+    return tid - 1;
+}
+
+/* rseq(293)：rseq / rseq_len / flags / sig。第 4 个参数是中止指令流里的签名，
+ * 本层不在内核里执行用户的中止指令，因此不看它——签名只被 abort 路径解释，
+ * 不看它不影响语义。 */
+static int32 lx_rseq(void *p_ctx)
+{
+    unsigned long area  = ARKRTOS_SVC_ARG(p_ctx, 0u);
+    uint32        len   = (uint32)ARKRTOS_SVC_ARG(p_ctx, 1u);
+    uint32        flags = (uint32)ARKRTOS_SVC_ARG(p_ctx, 2u);
+    uint32        zero  = 0u;
+    int32         slot  = lx_rseq_slot();
+
+    if((flags != 0u) || (len != (uint32)LX_RSEQ_BYTES))
+    {
+        return -LX_EINVAL;
+    }
+    if(slot < 0)
+    {
+        return -LX_ESRCH;
+    }
+    if(area == 0UL)
+    {
+        s_rseq_area[(uint32)slot] = 0UL;        /* 注销 */
+        return 0;
+    }
+    if((area & LX_RSEQ_ALIGN_MASK) != 0UL)
+    {
+        return -LX_EINVAL;
+    }
+    /* cpu_id_start 与 cpu_id 一起写成 0。写不进去就明确 -EFAULT：注册成功
+     * 却让程序读到一个假 CPU 号，比当场拒绝坏得多。 */
+    if((arkrtos_copy_to_user((void *)area, &zero, 4u) != 0) ||
+       (arkrtos_copy_to_user((void *)(area + (unsigned long)LX_RSEQ_OFF_CPU_ID),
+                             &zero, 4u) != 0))
+    {
+        return -LX_EFAULT;
+    }
+    s_rseq_area[(uint32)slot] = area;
+    return 0;
+}
+
+/* getcpu(168)：两个 4 字节出参（任一可为 NULL）加一个 cache 参数（本层不用）。
+ * 单核：CPU 号与 NUMA 节点号都是 0，与 rseq 写回的值必须一致——两处给出不同
+ * 的号，程序就会在两套快/慢路径上看到两个世界。 */
+static int32 lx_getcpu(void *p_ctx)
+{
+    unsigned long pcpu  = ARKRTOS_SVC_ARG(p_ctx, 0u);
+    unsigned long pnode = ARKRTOS_SVC_ARG(p_ctx, 1u);
+    uint32        zero  = 0u;
+
+    if((pcpu != 0UL) && (arkrtos_copy_to_user((void *)pcpu, &zero, 4u) != 0))
+    {
+        return -LX_EFAULT;
+    }
+    if((pnode != 0UL) && (arkrtos_copy_to_user((void *)pnode, &zero, 4u) != 0))
+    {
+        return -LX_EFAULT;
+    }
+    return 0;
+}
+
+/* rseq_cs 的中止：p_frame 是「即将把控制权交回用户态、但打断了用户执行」的
+ * 那份 trap 帧。返回 1 = 真把 PC 改到了 abort_ip。
+ *
+ * 判据逐条与 Linux 对齐：rseq 已注册 / rseq_cs 非 0 / rseq_cs 的 version 与
+ * flags 都是 0 / 被打断的 PC 落在 [start_ip, start_ip + post_commit) 里。
+ * 任何一条不成立都**不动 PC**：改错一个不在这块数据上的现场，比什么都不做
+ * 危险得多。 */
+static uint32 lx_rseq_fixup(void *p_frame)
+{
+    int32              slot = lx_rseq_slot();
+    unsigned long      area;
+    unsigned long long cs;
+    unsigned long long zero64 = 0ull;
+    uint8              buf[LX_RSEQ_CS_BYTES];
+    unsigned long      pc;
+    unsigned long long start;
+    unsigned long long post;
+    unsigned long long abort_ip;
+
+    if(slot < 0)
+    {
+        return 0u;
+    }
+    area = s_rseq_area[(uint32)slot];
+    if(area == 0UL)
+    {
+        return 0u;
+    }
+    if(arkrtos_copy_from_user(&buf[0],
+                              (const void *)(area +
+                                  (unsigned long)LX_RSEQ_OFF_RSEQ_CS), 8u) != 0)
+    {
+        return 0u;
+    }
+    cs = lx_rseq_rd64(&buf[0]);
+    if(cs == 0ull)
+    {
+        return 0u;                              /* 不在临界区里 */
+    }
+    if(arkrtos_copy_from_user(&buf[0], (const void *)(unsigned long)cs,
+                              (uint32)LX_RSEQ_CS_BYTES) != 0)
+    {
+        return 0u;
+    }
+    if((lx_rseq_rd32(&buf[0]) != 0u) || (lx_rseq_rd32(&buf[4]) != 0u))
+    {
+        /* 内容不是本层认得的 rseq_cs：清掉指针，不跳。 */
+        (void)arkrtos_copy_to_user((void *)(area +
+                                   (unsigned long)LX_RSEQ_OFF_RSEQ_CS),
+                                   &zero64, 8u);
+        return 0u;
+    }
+
+    start    = lx_rseq_rd64(&buf[LX_RSEQ_CS_OFF_START_IP]);
+    post     = lx_rseq_rd64(&buf[LX_RSEQ_CS_OFF_POST_COMMIT]);
+    abort_ip = lx_rseq_rd64(&buf[LX_RSEQ_CS_OFF_ABORT_IP]);
+
+    pc = arkrtos_port_svc_user_reg(p_frame, LX_UREG_ERA);
+    if(((unsigned long long)pc < start) ||
+       ((unsigned long long)pc >= (start + post)) || (abort_ip == 0ull))
+    {
+        return 0u;
+    }
+
+    /* 顺序是硬的：先清 rseq_cs，再改 PC。反过来的话，PC 一改而清指针失败，
+     * 程序回到 abort 路径后会看到「cs 还在」而再跑一遍临界区。 */
+    if(arkrtos_copy_to_user((void *)(area +
+                              (unsigned long)LX_RSEQ_OFF_RSEQ_CS),
+                            &zero64, 8u) != 0)
+    {
+        return 0u;
+    }
+    if(arkrtos_port_svc_set_user_reg(p_frame, LX_UREG_ERA,
+                                     (unsigned long)abort_ip) != 0)
+    {
+        return 0u;
+    }
+    return 1u;
+}
+
+/* port 在真正切换任务之前调用（LA64 是 la_trap_c 的出口结算处）。只在被打断
+ * 的是用户态时才该调用——内核态被打断时用户 PC 不在临界区里。 */
+uint32 arkrtos_linux_abi_rseq_preempt(void *p_frame)
+{
+    return lx_rseq_fixup(p_frame);
+}
+
 /* 信号帧：头（magic / signo / blocked / 快照字节数）+ 整份 trap 帧。
  * 投递成功返回 0；返回 1 表示任务已被默认动作结束（调用方不要再动上下文）。 */
 static uint32 lx_signal_deliver(void *p_ctx)
@@ -2091,6 +2313,12 @@ static uint32 lx_signal_deliver(void *p_ctx)
     {
         return sig;
     }
+
+    /* rseq_cs 的中止点之一：信号要投进 handler 了，而被中断的 PC 可能正落在
+     * 可重启序列的临界区里。必须在铺帧**之前**做——Linux 的 rseq_ip_fixup 也
+     * 在信号处理之前跑，于是存进信号帧的是 abort_ip，sigreturn 之后从 abort
+     * 路径继续，而不是带着「没被打断」的假设返回临界区中间。 */
+    (void)lx_rseq_fixup(p_ctx);
 
     if(lx_sig_build_frame(p_ctx, sig, &fsp) != 0u)
     {
@@ -7131,6 +7359,12 @@ static int32 lx_dispatch(void *p_svc_ctx, uint32 num, int32 *p_rc)
     case LX_SYS_FCNTL:
         rc = lx_fcntl(p_svc_ctx);
         break;
+    case LX_SYS_RSEQ:
+        rc = lx_rseq(p_svc_ctx);
+        break;
+    case LX_SYS_GETCPU:
+        rc = lx_getcpu(p_svc_ctx);
+        break;
     case LX_SYS_OPENAT:
         rc = lx_openat(p_svc_ctx);
         break;
@@ -7486,6 +7720,9 @@ void arkrtos_linux_abi_on_task_exit(int32 task_id)
     {
         return;
     }
+    /* 任务号会被复用：不清的话下一个任务在切换点上会去读上一个程序留下的
+     * 地址（那时那张页表已经不在，读到的每一格都不可信）。 */
+    s_rseq_area[(uint32)task_id - 1u] = 0UL;
 #if (ARKRTOS_USE_PAGING_FILEMAP == 1)
     /* U-21：退出是写回的一个时机（Linux 在 close/exit 时把脏页写回）。这一步
      * 必须在下面的临界区之前做完 —— 写回要调 VFS，不能在关中断里干，也不能
@@ -7607,6 +7844,10 @@ void arkrtos_linux_abi_on_task_exit(int32 task_id)
  * 「没有可收尾的进程状态」，而不是假装做完了什么。 */
 void arkrtos_linux_abi_on_task_exit(int32 task_id)
 {
+    if((task_id > 0) && (task_id <= (int32)ARKRTOS_TASK_MAX_NUM))
+    {
+        s_rseq_area[(uint32)task_id - 1u] = 0UL;
+    }
     (void)task_id;
 #if (ARKRTOS_USE_LINUX_FUTEX == 1)
     /* 顺序不能换：robust 清理要按「它还持有这个字」改写用户内存，而
@@ -7719,6 +7960,13 @@ void arkrtos_linux_abi_reset(void)
     s_sig_stop_ignored = 0u;
 
     s_heap_cur = 0u;
+
+    /* rseq 注册是任务自己的：换程序就该视为没注册。上一个程序留下的地址在
+     * 新镜像里可能已经不可读，切换点上拿它去做 rseq_cs 判定只会读到垃圾。 */
+    for(i = 0u; i < (uint32)ARKRTOS_TASK_MAX_NUM; i++)
+    {
+        s_rseq_area[i] = 0UL;
+    }
 
 #if (ARKRTOS_USE_PAGING_FILEMAP == 1)
     /* 写回缓冲的忙标志：换程序时归零。上一个程序的写回若是被强杀的，标志

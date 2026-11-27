@@ -133,7 +133,9 @@ int main(void)
 #define T_NR_RT_SIGPROCMASK (135u)
 #define T_NR_RT_SIGRETURN   (139u)
 #define T_NR_UNAME          (160u)
+#define T_NR_GETCPU         (168u)
 #define T_NR_GETPID         (172u)
+#define T_NR_RSEQ           (293u)
 #define T_NR_GETUID         (174u)
 #define T_NR_GETEUID        (175u)
 #define T_NR_BRK            (214u)
@@ -256,6 +258,10 @@ int main(void)
 #define T_ARGV_OFF          (0x00400u)
 #define T_STR_OFF           (0x00600u)
 #define T_DATA_OFF          (0x01000u)
+/* rseq 区必须 32 字节对齐（内核按 Linux 的契约拒绝对不齐的地址）。
+ * 0x1000 + 0x900 = 0x1900，0x1900 % 32 == 0。rseq_cs 结构紧跟其后。 */
+#define T_RSEQ_OFF          (T_DATA_OFF + 0x900u)
+#define T_RSEQ_CS_OFF       (T_DATA_OFF + 0x940u)
 #define T_FSP_OFF           (0x1F0000u)
 #define T_HANDLER           (0x02000800UL)
 #define T_RESTORER          (0x02000C00UL)
@@ -318,6 +324,31 @@ static uint32 u_get32(uint32 off)
     uint32 v = 0u;
 
     memcpy(&v, &g_user[off], 4u);
+    return v;
+}
+
+/* struct rseq_cs 的三个 64 位字段按小端逐字节写。宿主是 ILP32，指针只有
+ * 32 位，所以高 32 位恒 0——判据只看低 32 位，但布局仍是 Linux 的 8 字节
+ * 字段，内核读的时候不会错位。 */
+static void u_put64(uint32 off, unsigned long long v)
+{
+    uint32 i;
+
+    for(i = 0u; i < 8u; i++)
+    {
+        g_user[off + i] = (uint8)((v >> (8u * i)) & 0xFFull);
+    }
+}
+
+static unsigned long long u_get64(uint32 off)
+{
+    unsigned long long v = 0ull;
+    uint32 i;
+
+    for(i = 0u; i < 8u; i++)
+    {
+        v |= ((unsigned long long)g_user[off + i]) << (8u * i);
+    }
     return v;
 }
 
@@ -554,6 +585,10 @@ typedef struct
 
 static uint32 g_frame_bytes = T_FRAME_BYTES;
 static unsigned long g_export_pat[64];
+/* 导出那一刻的用户 PC。信号帧的寄存器快照被固定图案替代（见上面的
+ * 「用户内存是模拟的」），但 rseq 用例要断言「存进去的 PC 是 abort_ip」，
+ * 所以单独留这一格。 */
+static unsigned long g_export_era;
 
 unsigned long arkrtos_port_svc_get_arg(void *p, uint32 idx)
 {
@@ -624,6 +659,7 @@ void arkrtos_port_svc_frame_export(void *p, void *p_dst)
     t_ctx *c = (t_ctx *)p;
 
     c->export_calls++;
+    g_export_era = c->reg[T_UREG_ERA];
     memcpy(p_dst, g_export_pat, (size_t)g_frame_bytes);
 }
 
@@ -5970,6 +6006,145 @@ static void t_socket(t_ctx *c)
 }
 #endif /* ARKRTOS_USE_LINUX_SOCKET == 1 */
 
+/* 分组：rseq(293) 注册契约 / getcpu(168) 慢路径 / rseq_cs 的两个中止点。
+ *
+ * 宿主这一档能证明与不能证明的事要分清：
+ *   - 能证明：注册契约逐条与 Linux 对齐（长度/对齐/flags/NULL 注销）、
+ *     cpu_id_start/cpu_id 真被写进用户内存（先填 0xDEADBEEF 再看）、两个
+ *     中止点「PC 落在 [start, start+post) 时改到 abort_ip 并清 rseq_cs」、
+ *     以及信号帧里存下来的 PC 确实是 abort_ip（g_export_era 在导出那一刻
+ *     抓的是 c->reg[ERA]）。
+ *   - 不能证明：真 CPU 上的抢占时序、真页表下用户地址的可读性判定。那两条
+ *     由 QEMU 夹具与上板覆盖（见 linux_rseq.c）。 */
+static void t_rseq(t_ctx *c)
+{
+    unsigned long start_ip = 0x02001000UL;
+    unsigned long abort_ip = 0x02001100UL;
+
+    /* --- getcpu(168)：两个 4 字节出参，单核恒 0 --- */
+    fresh(c);
+    u_put32(T_DATA_OFF, 0xDEADBEEFu);
+    u_put32(T_DATA_OFF + 4u, 0xDEADBEEFu);
+    (void)call(c, T_NR_GETCPU, u_ptr(T_DATA_OFF), u_ptr(T_DATA_OFF + 4u),
+               0UL, 0UL);
+    ck_ret(c, 0, "getcpu 写两个出参");
+    ck_u(u_get32(T_DATA_OFF), 0u, "getcpu cpu = 0（单核，不是没写）");
+    ck_u(u_get32(T_DATA_OFF + 4u), 0u, "getcpu node = 0（不是没写）");
+    (void)call(c, T_NR_GETCPU, 0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "getcpu 两个出参都可以是 NULL");
+    (void)call(c, T_NR_GETCPU, 0x100UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EFAULT, "getcpu cpu 指针不可写 -EFAULT");
+    (void)call(c, T_NR_GETCPU, 0UL, 0x100UL, 0UL, 0UL);
+    ck_ret(c, -T_EFAULT, "getcpu node 指针不可写 -EFAULT");
+
+    /* --- rseq(293)：注册契约逐条 --- */
+    fresh(c);
+    (void)call(c, T_NR_RSEQ, u_ptr(T_RSEQ_OFF), 16UL, 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "rseq len != 32 回 -EINVAL");
+    (void)call(c, T_NR_RSEQ, u_ptr(T_RSEQ_OFF), 32UL, 1UL, 0UL);
+    ck_ret(c, -T_EINVAL, "rseq flags != 0 回 -EINVAL");
+    (void)call(c, T_NR_RSEQ, u_ptr(T_RSEQ_OFF) + 4UL, 32UL, 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "rseq 地址未 32 字节对齐回 -EINVAL");
+    (void)call(c, T_NR_RSEQ, 0x100UL, 32UL, 0UL, 0UL);
+    ck_ret(c, -T_EFAULT, "rseq 地址不可写 -EFAULT");
+    u_put32(T_RSEQ_OFF, 0xDEADBEEFu);
+    u_put32(T_RSEQ_OFF + 4u, 0xDEADBEEFu);
+    (void)call(c, T_NR_RSEQ, u_ptr(T_RSEQ_OFF), 32UL, 0UL, 0UL);
+    ck_ret(c, 0, "rseq 注册成功");
+    ck_u(u_get32(T_RSEQ_OFF), 0u, "注册时 cpu_id_start 被写成 0");
+    ck_u(u_get32(T_RSEQ_OFF + 4u), 0u, "注册时 cpu_id 被写成 0");
+
+    /* 第二块（cpu_id）写不进去：明确 -EFAULT，且不留半截登记 */
+    fresh(c);
+    g_to_budget = 1;
+    (void)call(c, T_NR_RSEQ, u_ptr(T_RSEQ_OFF), 32UL, 0UL, 0UL);
+    g_to_budget = -1;
+    ck_ret(c, -T_EFAULT, "写 cpu_id 失败回 -EFAULT");
+    ck(arkrtos_linux_abi_rseq_preempt(c) == 0u, "注册失败不留半截登记");
+
+    /* --- rseq_cs 中止（抢占点：port 直接调同一个入口） --- */
+    (void)call(c, T_NR_RSEQ, u_ptr(T_RSEQ_OFF), 32UL, 0UL, 0UL);
+    ck_ret(c, 0, "重新注册 rseq");
+    u_put32(T_RSEQ_CS_OFF + 0u, 0u);              /* version */
+    u_put32(T_RSEQ_CS_OFF + 4u, 0u);              /* flags */
+    u_put64(T_RSEQ_CS_OFF + 8u, (unsigned long long)start_ip);
+    u_put64(T_RSEQ_CS_OFF + 16u, 0x20ull);        /* post_commit_offset */
+    u_put64(T_RSEQ_CS_OFF + 24u, (unsigned long long)abort_ip);
+    u_put64(T_RSEQ_OFF + 8u, (unsigned long long)u_ptr(T_RSEQ_CS_OFF));
+
+    c->reg[T_UREG_ERA] = start_ip + 8UL;
+    ck(arkrtos_linux_abi_rseq_preempt(c) == 1u,
+       "抢占点：PC 在临界区里时返回 1");
+    ck_u(c->reg[T_UREG_ERA], abort_ip, "抢占点：PC 被改到 abort_ip");
+    ck(u_get64(T_RSEQ_OFF + 8u) == 0ull, "抢占点：rseq_cs 被清零");
+
+    u_put64(T_RSEQ_OFF + 8u, (unsigned long long)u_ptr(T_RSEQ_CS_OFF));
+    c->reg[T_UREG_ERA] = start_ip + 0x20UL;       /* 区间右端开区间 */
+    ck(arkrtos_linux_abi_rseq_preempt(c) == 0u,
+       "PC 在 [start, start+post) 之外返回 0");
+    ck_u(c->reg[T_UREG_ERA], start_ip + 0x20UL, "PC 在区间外不被改");
+    ck(u_get64(T_RSEQ_OFF + 8u) != 0ull, "PC 在区间外时 rseq_cs 保留");
+
+    u_put64(T_RSEQ_OFF + 8u, 0ull);
+    c->reg[T_UREG_ERA] = start_ip + 8UL;
+    ck(arkrtos_linux_abi_rseq_preempt(c) == 0u, "rseq_cs 为 0 时返回 0");
+    ck_u(c->reg[T_UREG_ERA], start_ip + 8UL, "rseq_cs 为 0 时 PC 不动");
+
+    u_put32(T_RSEQ_CS_OFF + 0u, 1u);
+    u_put64(T_RSEQ_OFF + 8u, (unsigned long long)u_ptr(T_RSEQ_CS_OFF));
+    c->reg[T_UREG_ERA] = start_ip + 8UL;
+    ck(arkrtos_linux_abi_rseq_preempt(c) == 0u,
+       "rseq_cs version != 0 时返回 0");
+    ck_u(c->reg[T_UREG_ERA], start_ip + 8UL, "version 非法时不跳一个读不懂的地址");
+    ck(u_get64(T_RSEQ_OFF + 8u) == 0ull, "version 非法时清掉指针");
+    u_put32(T_RSEQ_CS_OFF + 0u, 0u);
+
+    /* rseq_cs 指针本身读不出来：同样只放弃、不动帧 */
+    u_put64(T_RSEQ_OFF + 8u, 0x100ull);
+    c->reg[T_UREG_ERA] = start_ip + 8UL;
+    ck(arkrtos_linux_abi_rseq_preempt(c) == 0u, "rseq_cs 指针不可读时返回 0");
+    ck_u(c->reg[T_UREG_ERA], start_ip + 8UL, "rseq_cs 不可读时 PC 不动");
+
+    /* 注销：NULL + 32 + 0 */
+    u_put64(T_RSEQ_OFF + 8u, (unsigned long long)u_ptr(T_RSEQ_CS_OFF));
+    (void)call(c, T_NR_RSEQ, 0UL, 32UL, 0UL, 0UL);
+    ck_ret(c, 0, "rseq(NULL) 注销");
+    ck(arkrtos_linux_abi_rseq_preempt(c) == 0u, "注销后中止点不动帧");
+
+    /* 换程序（reset）后注册作废——上一个程序的地址在新镜像里可能不可读 */
+    (void)call(c, T_NR_RSEQ, u_ptr(T_RSEQ_OFF), 32UL, 0UL, 0UL);
+    ck_ret(c, 0, "reset 前重新注册");
+    arkrtos_linux_abi_reset();
+    ck(arkrtos_linux_abi_rseq_preempt(c) == 0u, "reset 之后注册作废");
+
+    /* 没有任务上下文：不注册、不动帧 */
+    fresh(c);
+    arkrtos_current_task_id = 0;
+    (void)call(c, T_NR_RSEQ, u_ptr(T_RSEQ_OFF), 32UL, 0UL, 0UL);
+    ck_ret(c, -T_ESRCH, "无任务上下文注册回 -ESRCH");
+    arkrtos_current_task_id = 7;
+    ck(arkrtos_linux_abi_rseq_preempt(c) == 0u, "无任务上下文中止点返回 0");
+
+    /* --- rseq_cs 中止（信号投递点）：帧里存的必须是 abort_ip --- */
+    fresh(c);
+    ck(sig_install_act(c, 12u, T_HANDLER, T_RESTORER, 0UL) == 0,
+       "安装 SIGUSR2（rseq 档）");
+    (void)call(c, T_NR_RSEQ, u_ptr(T_RSEQ_OFF), 32UL, 0UL, 0UL);
+    ck_ret(c, 0, "注册 rseq（信号档）");
+    u_put32(T_RSEQ_CS_OFF + 0u, 0u);
+    u_put32(T_RSEQ_CS_OFF + 4u, 0u);
+    u_put64(T_RSEQ_CS_OFF + 8u, (unsigned long long)start_ip);
+    u_put64(T_RSEQ_CS_OFF + 16u, 0x20ull);
+    u_put64(T_RSEQ_CS_OFF + 24u, (unsigned long long)abort_ip);
+    u_put64(T_RSEQ_OFF + 8u, (unsigned long long)u_ptr(T_RSEQ_CS_OFF));
+    c->reg[T_UREG_ERA] = start_ip + 4UL;
+    g_export_era = 0UL;
+    (void)call(c, T_NR_KILL, 7UL, 12UL, 0UL, 0UL);
+    ck_u(g_export_era, abort_ip, "信号帧里存的是 abort_ip（不是原 PC）");
+    ck_u(c->reg[T_UREG_ERA], T_HANDLER, "投递后 era 指向处理函数");
+    ck(u_get64(T_RSEQ_OFF + 8u) == 0ull, "信号投递时 rseq_cs 被清零");
+}
+
 int main(void)
 {
     t_ctx c;
@@ -5988,6 +6163,7 @@ int main(void)
     t_pipe(&c);
     t_dup(&c);
     t_fdflags(&c);
+    t_rseq(&c);
     t_meta(&c);
     t_mem(&c);
     t_signal(&c);

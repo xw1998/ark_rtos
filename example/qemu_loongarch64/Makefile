@@ -462,6 +462,39 @@ $(LXDUPD_H): $(LXDUPD_SIGNED) example/qemu_loongarch64/elf_blob.py
 
 $(BUILD)/example/qemu_loongarch64/elf_demo.o: $(LXDUPD_H)
 
+# rseq/getcpu 夹具（linux_rseq.elf）：getcpu(168) 的两个出参、rseq(293) 的注册
+# 契约（len/对齐/flags/NULL 注销）、cpu_id_start/cpu_id 的写回，以及
+# **rseq_cs 在信号投递点上的中止**——临界区里就地发 tgkill，被中断的 PC 落在
+# [start, start+post) 里时，信号帧里存的必须是 abort_ip，handler 返回后从
+# abort 路径继续、提交段一次也不执行。另一条对照：没有信号的临界区正常提交。
+#
+# 这一条用 -O0：本工具链（LoongIDE GCC 8.3 的 LoongArch 端口）在 -O1/-O2
+# 下对标签取地址（&&label）的代码生成不可靠——同一页内多个标签时立即数会算错，
+# 中止块在 CFG 里不可达时还会被整块删掉、标签随即落到邻近块首址。夹具靠这三个
+# 标签界定可重启序列，地址算错就什么也验不出来（实测：-O2 下 start/abort 双双
+# 变成函数入口、post 变 0）。-O0 下地址正确；夹具里那个恒 0 的 volatile 分支
+# 负责让中止块在编译器眼里可达。
+LXRSEQ_SRC := example/qemu_loongarch64/elf/linux_rseq.c
+LXRSEQ_ELF := $(BUILD)/linux_rseq.elf
+LXRSEQ_SIGNED := $(BUILD)/linux_rseq.signed.elf
+LXRSEQ_H   := $(BUILD)/linux_rseq_blob.h
+
+$(LXRSEQ_ELF): $(LXRSEQ_SRC)
+	@mkdir -p $(BUILD)
+	$(CC) $(ARCH_FLAGS) -O0 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
+	      -ffunction-sections -fdata-sections -Wl,--gc-sections \
+	      -Wl,-Ttext=$(WIN_ELF_BASE) -Wl,-e,_start -Wl,--strip-all \
+	      -Wl,-z,max-page-size=4096 -o $@ $< ;
+
+$(LXRSEQ_SIGNED): $(LXRSEQ_ELF) tools/sign_payload.py
+	python tools/sign_payload.py sign $(LXRSEQ_ELF) --out $@ ;
+
+$(LXRSEQ_H): $(LXRSEQ_SIGNED) example/qemu_loongarch64/elf_blob.py
+	python example/qemu_loongarch64/elf_blob.py --input $(LXRSEQ_SIGNED) \
+	       --output $@ --name ark_example_linux_rseq ;
+
+$(BUILD)/example/qemu_loongarch64/elf_demo.o: $(LXRSEQ_H)
+
 
 # ---------------------------------------------------------------------------
 # fork/clone 夹具（linux_fork.elf）：clone(220) 与 wait4(260) 的七组行为

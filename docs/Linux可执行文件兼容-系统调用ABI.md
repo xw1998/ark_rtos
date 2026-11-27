@@ -37,7 +37,7 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 
 **「静态程序能跑」≠「支持 Linux」。** 第 3 节列的是明确不支持项，一条不含糊。
 
-## 1 支持的系统调用（45 个；31 个有 QEMU 实跑读数，13 个 socket 只有宿主档读数，1 个只有号表与参数校验）
+## 1 支持的系统调用（49 个；35 个有 QEMU 实跑读数，13 个 socket 只有宿主档读数，1 个只有号表与参数校验）
 
 编号取 `asm-generic`（LoongArch / RISC-V / ARM64 共用这一套）：
 
@@ -66,6 +66,7 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 | 135 | `rt_sigprocmask` | `BLOCK`/`UNBLOCK`/`SETMASK`；`KILL`/`STOP` 永不可屏蔽（§7） | `query sees blocked bit = 1 ok` / `delivered on unblock = 2 ok` |
 | 139 | `rt_sigreturn` | 校验帧 `magic` 与帧长后整帧装回；特权级不认用户帧（§7） | 由 restorer 触发，处理函数返回后读数仍正确 |
 | 160 | `uname` | `sysname=ArkRTOS`、`machine=loongarch64` | `uname -> 0 ok` / `sysname=ArkRTOS machine=loongarch64` |
+| 168 | `getcpu` | 两个 4 字节出参（任一可为 NULL，越界 `-EFAULT`）+ 一个 cache 参数（不看）；单核，CPU 号与 NUMA 节点号都写 0——必须与 `rseq` 写回的 `cpu_id` 同值（§8.14） | `getcpu rc = 0 ok` / `getcpu cpu = 0 ok` / `getcpu node = 0 ok` |
 | 172 | `getpid` | 返内任务 id | `getpid==task id>0 -> 1 ok` |
 | 174 | `getuid` | 恒 0 | 走同一返回路径 |
 | 175 | `geteuid` | 恒 0 | 走同一返回路径 |
@@ -77,10 +78,11 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 | 260 | `wait4` | 只认 `options 0/WNOHANG`；**无 `WNOHANG` 时真阻塞**（可重启系统调用，§8.1），不编造状态，reap 后记账清零（§8） | `wait4 returned child pid -> 12 ok` / `WEXITSTATUS == 42 -> 42 ok` / `wait4(child) again == -ECHILD -> -10 ok` / `blocking wait4 blocked >= 40 ms -> 1 ok` |
 | 226 | `mprotect` | **有页级写保护**（`ARKRTOS_USE_PAGING_MPROTECT`，§8.6）：4 KB 粒度改 `WE` 位、违规写按 SIGSEGV 杀任务；`PROT_EXEC` / `PROT_NONE` 只记账不强制；关档回「只校验参数、返 0」 | `mprotect RO == 0 -> 0 ok` / `sibling 4 KB half of the same pair stays writable -> 13107 ok` / `mprotect violation reports SIGSEGV status -> 11 ok`（§8.6，11 条） |
 | 227 | `msync` | 只写回本进程记账里的「可写共享文件映射」；窗口内未命中回 0、窗口外 `-ENOMEM`（`ARKRTOS_USE_PAGING_FILEMAP`，§8.5） | `filemap msync rc -> 0 ok` / `filemap private msync rc (no writeback) -> 0 ok` / `filemap shared write persisted, private write not (bits=31) -> 31 ok` |
+| 293 | `rseq` | 注册契约（`len` 必须 32、`flags` 必须 0、地址 32 字节对齐、`NULL` 注销）+ `cpu_id_start`/`cpu_id` 写回 0；`rseq_cs` 的两处中止点（信号投递前、tick 抢占前，§8.14） | `rseq register rc = 0 ok` / `cpu_id readback 0 = 0 ok` / `signal aborted the critical section = 1 ok` / `rseq_cs cleared by the abort = 0 ok` / `exit code 57` |
 
 socket 家族（`198-210`、`242`，共 13 个）见 §8.9：它们已经在翻译层里落地并有宿主
-档的 581 条断言，但 **QEMU 夹具还没有 socket 段**，所以不计入上面「有 QEMU 实跑读数」
-的 31 个号。
+档的 768 条断言，但 **QEMU 夹具还没有 socket 段**，所以不计入上面「有 QEMU 实跑读数」
+的 35 个号。
 
 未知号一律 `-ENOSYS`（38），并计数；**不猜**。
 
@@ -92,7 +94,7 @@ socket 家族（`198-210`、`242`，共 13 个）见 §8.9：它们已经在翻�
 `mprotect`(226) 原先也在这张名单里（只校验参数、返 0、**不改任何页权限**）。批C-2
 把它改成了真改硬件条目（§8.6），于是它有了 11 条串口读数，不再是「只有号表」的号。
 
-表格里其余 31 个号都有 `[linux]` / `[pipe]` / `[sig]` / `[dup]` / `[fork]` 夹具的串口读数。
+表格里其余 35 个号都有 `[linux]` / `[pipe]` / `[sig]` / `[dup]` / `[fork]` / `[rseq]` 夹具的串口读数。
 
 ## 2 两个 ABI 怎么分界
 
@@ -1030,7 +1032,7 @@ EXTRA_CFLAGS**，所以夹具看不到内核的编译开关。这一段只在 `A
 放在同一个开关下，会让「关档零体积」这条承诺变成「关档少了一半功能」。
 `ARKRTOS_USE_LINUX_SELECT` 只依赖 `ARKRTOS_USE_LINUX_ABI`。
 
-### 8.9 socket（U-23）：翻译层与 QEMU 第八档（2026-11-24，宿主 581 checks + QEMU 212 条）
+### 8.9 socket（U-23）：翻译层与 QEMU 第八档（2026-11-24，宿主 768 checks + QEMU 212 条）
 
 13 个号落地：`socket`(198)、`bind`(200)、`listen`(201)、`accept`(202)、`connect`(203)、
 `getsockname`(204)、`getpeername`(205)、`sendto`(206)、`recvfrom`(207)、`setsockopt`(208)、
@@ -1060,8 +1062,8 @@ EXTRA_CFLAGS**，所以夹具看不到内核的编译开关。这一段只在 `A
 「有 lwIP 协议栈、没有网卡」的宿主/仿真构建也能出 ELF。
 
 **宿主读数。** 第六个 Linux ABI 覆盖率档 `linuxabisocket`（`tools/coverage_gate.py`）
-在宿主上跑 `test_linux_abi_host.c` 的 socket 段：单档 **98.73%**，六档 union **98.48%**
-（基线 97.96%），整档 **581 checks** 全绿。
+在宿主上跑 `test_linux_abi_host.c` 的 socket 段：单档 **98.51%**，六档 union **98.84%**
+（基线 98.82%；2026-11-27 随 `rseq`/`getcpu` 的宿主断言一起重钉），整档 **768 checks** 全绿。
 
 **QEMU 第八档：212 条 check 全 `ok` + `exit code 0`。** `tools/fork_gate.py` 的第八档
 （`SELECT+SOCKET+LWIP`）在 LA64 上真跑 `example/qemu_loongarch64/elf/linux_fork.c` 的
@@ -1444,6 +1446,110 @@ fork 仍回 `-EAGAIN`（全段最干净的一条）；⑧ 第三个线程回 `-E
 （`F_SETFL` 里的 `O_ASYNC` 位被忽略，因为本层没有信号驱动的 I/O）；③ 没有
 `F_GETPIPE_SZ` / `F_SETPIPE_SZ`——管道缓冲固定 256 字节（§6）。
 
+### 8.14 `rseq`(293) 与 `getcpu`(168)：可重启序列与 CPU 号（2026-11-27，QEMU LA64 16 条 + 宿主 40 条）
+
+`rseq` 是 glibc 与 Rust 标准库都在用的「无锁临界区」原语：程序把一段临界区的
+`[start_ip, post_commit_offset)` 与 `abort_ip` 登记在一张 `struct rseq_cs` 里，内核
+在**打断用户执行**的那一刻查这张表——PC 落在区间里就把它改到 `abort_ip`，程序于是
+从「重来」的路径继续，而不是带着被撕开的假设返回区间中间。不发这个信号，临界区里的
+读写顺序就成了假的。
+
+**注册契约（`rseq(293)`）。** 四个参数：`struct rseq *`、`rseq_len`、`flags`、`sig`。
+- `flags != 0` → `-EINVAL`；`rseq_len != 32` → `-EINVAL`（`struct rseq` 在 Linux UAPI
+  里就是 32 字节，`sizeof` 不符的调用方本来也读不对字段）；
+- 地址必须 32 字节对齐 → 否则 `-EINVAL`；
+- 指针为 `NULL` → **注销**（Linux 同义），返 0；
+- 注册时把 `cpu_id_start`（偏移 0）与 `cpu_id`（偏移 4）都写成 0；**写不进去回
+  `-EFAULT` 且不留下登记**——注册成功却让程序读到一个假 CPU 号，比当场拒绝坏得多；
+- 第 4 个参数 `sig`（中止指令流里的签名）本层不看：内核不在内核态执行用户的中止指令，
+  签名只被 abort 路径解释，不看它不影响语义。
+
+`struct rseq` 的其余字段（`flags`/`node_id`/`mm_cid` 等）本层不写，保持程序原本的内容。
+
+**`getcpu(168)`。** 两个 4 字节出参（任一可为 `NULL`，越界 `-EFAULT`）+ 一个 `cache`
+参数（不看）。单核机器上 CPU 号与 NUMA 节点号都是 0——**必须与 `rseq` 写回的 `cpu_id`
+同值**：两处给出不同的号，程序就会在快路径（读 `rseq.cpu_id`）与慢路径（`getcpu`）
+上看到两个世界，进而把「迁移过 CPU」当成事实去做内存序推断。
+
+**两处中止点。** 本层只在「确实打断了用户执行」的两个位置查 `rseq_cs`：
+
+| 时机 | 调用点 | 为什么在这里 |
+|---|---|---|
+| 信号投递 | `lx_signal_deliver()` 里、`lx_sig_build_frame()` **之前** | Linux 的 `rseq_ip_fixup` 也在信号处理之前跑。先修 PC 再铺帧，信号帧里存的自然就是 `abort_ip`，`rt_sigreturn` 之后从 abort 路径继续，而不是回到临界区中间 |
+| tick 抢占 | LA64 `la_trap_c()` 的切换点（真正切栈之前），且要求被打断的是用户态（`PRMD & 3 != 0`） | 时间片被打断和被信号打断对程序是同一件事：`rseq_cs` 还挂着就说明它在临界区里 |
+
+判据逐条对齐 Linux：`rseq` 已注册 / `rseq_cs` 非 0 / 该块可读 / `version` 与 `flags`
+都是 0 / PC 落在 `[start_ip, start_ip + post_commit_offset)` 里。任何一条不成立都
+**不动 PC**。改错一个不在这块数据上的现场，比什么都不做危险得多。
+
+**顺序是硬的：先清 `rseq_cs`，再改 PC。** 反过来的话，PC 一改而清指针失败，程序回到
+abort 路径后会看到「cs 还在」而再跑一遍临界区，同一段代码被执行两次。
+
+**与 Linux 差一处（写在明面上）。** `rseq_cs` 的 `version`/`flags` 非 0 时，Linux 投
+`SIGSEGV` 杀进程；本层在切换点里没有可投递信号的位置，于是**只清指针、不动 PC**——
+保守方向：宁可丢掉一次中止（退化成「像没有 rseq 一样」），也不把一个非法内容的块当
+真去跳。
+
+**实测读数（`[rseq]` 行，QEMU LA64）**
+
+```
+  [rseq] write /mnt/ram/linux_rseq rc=0 size=8232
+  [rseq] exec rc=0
+  [rseq] getcpu rc = 0 ok
+  [rseq] getcpu cpu = 0 ok
+  [rseq] getcpu node = 0 ok
+  [rseq] rseq register rc = 0 ok
+  [rseq] cpu_id_start written 0 = 0 ok
+  [rseq] cpu_id readback 0 = 0 ok
+  [rseq] signal aborted the critical section = 1 ok
+  [rseq] post-commit did not run = 0 ok
+  [rseq] rseq_cs cleared by the abort = 0 ok
+  [rseq] handler ran once = 1 ok
+  [rseq] normal critical section completed = 1 ok
+  [rseq] normal section not falsely aborted = 1 ok
+  [rseq] rseq_cs cleared by the commit = 0 ok
+  [rseq] rseq len != 32 -> -EINVAL = -22 ok
+  [rseq] rseq flags != 0 -> -EINVAL = -22 ok
+  [rseq] rseq(NULL) deregisters = 0 ok
+  [rseq] PASS: getcpu both outputs zero, rseq registered with cpu_id written, signal delivery aborted the critical section at abort_ip with rseq_cs cleared, commit path completed, invalid contract refused, NULL deregisters
+  [rseq] finished after 0 ms, exit code 57
+```
+
+`exit code 57` 是夹具自己约定的成功码；`post-commit did not run = 0` 是「提交段一次也
+没执行」的正向证据，`normal section not falsely aborted = 1` 是「没有信号时不许误中止」
+的反向对照——两条一起才说明中止是按区间判的，不是「见到 `rseq_cs` 就跳」。
+
+**宿主档的 40 条**（`test_linux_abi_host.c` 的 `t_rseq`）把 QEMU 夹具造不出来的状态补齐：
+`getcpu` 三正两负（`NULL` 出参、越界 `-EFAULT`）；注册契约的每一条拒绝面（`len`
+/ `flags` / 对齐 / `NULL` 注销 / `-ESRCH`）；`g_to_budget=1` 造「`cpu_id` 写不进去」
+→ `-EFAULT` 且不留登记；抢占点上 PC 在区间内 → 返回 1、`ERA` 等于 `abort_ip`、
+`rseq_cs` 被清 0，PC 在区间外 / `cs == 0` / `version != 0` / `cs` 指针不可读 → 一律
+返回 0 且不动 PC；注销后与 `reset` 后作废；信号投递点用 `g_export_era` 抓「导出那一刻
+的用户 PC」，把「信号帧里存的确实是 `abort_ip`」变成真断言而不是推断。
+
+**夹具为什么要 `-O0`（真发现的工具链缺陷）。** 这个夹具靠 `&&label` 界定可重启序列的
+三个端点。实测本工具链（LoongIDE GCC 8.3 的 LoongArch 端口）在 `-O1`/`-O2` 下对标签
+取地址的代码生成不可靠：
+- 中止块在 CFG 里不可达时会被**整块删掉**（`s_aborted = 1` 那条 store 消失），`&&label`
+  随即落到邻近块的首址（实测 `start`/`abort` 双双变成 `linux_main` 入口、`post` 变 0，
+  于是 `[start, start+post)` 退化成空区间，中止永远不发生）；
+- 同一页内多个标签并存时立即数会算错（最小复现：两个标签相距 8 字节，编译出的差值是 -4）。
+
+修法是两条：夹具用 `-O0`（该档下地址正确），并加一个**恒 0 的 `volatile` 分支**
+`if (s_zero_guard) goto cs_abort;`——给中止块一条编译器看得见的边，块留下来，标签地址
+也就对了；运行时这条分支一次也不走。`example/qemu_loongarch64/Makefile` 里那条规则
+的 `-O0` 与注释就是为这件事写的。
+
+**门禁。** `tools/linux_abi_gate.py` 的 `syscall-table` 从 27 条涨到 **30 条**（`RSEQ`
+293、`GETCPU` 168 进号表），`qemu-readout` 新增「rseq 块 16 条 check 全 ok + PASS 行 +
+`exit code 57`」，`parser-selfcheck` 从 12 种坏样本涨到 **16 种**（rseq 块：去 PASS 行、
+退出码改 1、插一条 FAIL、少一条 check）。
+
+**边界。** ① 单核：`cpu_id`/`node_id` 恒 0，没有迁移，也没有 `mm_cid`；② tick 抢占那条
+路径本机没有夹具（夹具只验信号投递点），宿主档两条抢占断言覆盖的是同一个 `lx_rseq_fixup`；
+③ `rseq_cs` 非法内容只清指针不杀任务（见上「与 Linux 差一处」）；④ 不实现
+`RSEQ_FLAG_UNREGISTER`（`flags != 0` 一律 `-EINVAL`）。
+
 ## 9 开关与零体积
 
 - `ARKRTOS_USE_LINUX_ABI`（`kernelsrc/include/arkrtos_features.h`、
@@ -1494,7 +1600,7 @@ fork 仍回 `-EAGAIN`（全段最干净的一条）；⑧ 第三个线程回 `-E
 - `ARKRTOS_USE_LINUX_SOCKET`（§8.9），默认 **0**，`depends on ARKRTOS_USE_LINUX_ABI` 且
   `features.h` 用 `#error` 顶住这条依赖；关档时不编译 `lx_sock_*` 全部实现与 fd 表的
   socket 分派，`198`–`210` 与 `242` 落回 `-ENOSYS`；开档实测是宿主 socket 档的
-  **581 checks**（覆盖率单档 98.73%、六档 union 98.48%）与 **QEMU 第八档 212 条读数**
+  **768 checks**（覆盖率单档 98.51%、六档 union 98.84%，基线 98.82%）与 **QEMU 第八档 212 条读数**
   （其中 socket 段 39 条：语义 38 + 往返耗时 1）。
 - `arkrtos_autoconf.h` 由 `tools/kconfig/genconfig.py` 从 `config/arkrtos_defconfig`
   生成，新增 Kconfig 项后必须重跑一次，否则默认档读数里看不到这个开关。
@@ -1518,16 +1624,16 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py --no-build
 | `off-zero-symbols` | 关档 `.o` 符号表**全空**（不是「没测」） |
 | `port-wiring` | 关档无 `arkrtos_port_linux_syscall_num` / 开档有（两向） |
 | `compile-on` | LA64 真板级下 9 个 TU 全编过（含五个用户程序本身） |
-| `syscall-table` | 27 个号与 `asm-generic` 逐条相等 |
+| `syscall-table` | 30 个号与 `asm-generic` 逐条相等 |
 | `abi-split-la64` | 立即数 == 0 是 Linux、!= 0 是 Ark |
 | `abi-split-rv32` | `0x10..0x23` 归 Ark；`dup`/`dup3`（23/24）落在这一段里，所以另核「RV32 板级不开 ELF/ABI」——开 ABI 必须开 ELF 是 `features.h` 的 `#error`，歧义由构造不可达（不是靠推断） |
 | `build` | `make -f example/qemu_loongarch64/Makefile` 通过 |
-| `qemu-readout` | Linux 块 14 条 check 全 ok + PASS 行 + `exit code 7`；管道块 15 条 + `exit code 55`；信号块 31 条 + PASS 行 + `exit code 138`；dup 块 53 条（含 fcntl 17 条）+ `exit code 56`；旁路演示未受影响 |
-| `parser-selfcheck` | 把 12 种坏日志喂回判据，必须全判红 |
+| `qemu-readout` | Linux 块 14 条 check 全 ok + PASS 行 + `exit code 7`；管道块 15 条 + `exit code 55`；信号块 31 条 + PASS 行 + `exit code 138`；dup 块 53 条（含 fcntl 17 条）+ `exit code 56`；rseq 块 16 条 + PASS 行 + `exit code 57`；旁路演示未受影响 |
+| `parser-selfcheck` | 把 16 种坏日志喂回判据，必须全判红 |
 
 socket 这一层是**两侧都有读数**的：宿主侧是 `tools/coverage_gate.py` 的第六个 Linux ABI 档
 `linuxabisocket`（`-DARKRTOS_USE_LINUX_SOCKET=1 -DARKRTOS_USE_LWIP=1`，`-Wl,--wrap=arkrtos_port_svc_exec_frame`）
-跑 `test_linux_abi_host.c`，581 checks 全绿、单档覆盖率 98.73%、六档 union 98.48%（基线 97.96%），
+跑 `test_linux_abi_host.c`，768 checks 全绿、单档覆盖率 98.51%、六档 union 98.84%（基线 98.82%），
 `tools/ci_gate.py` 的 `linux-abi-host` 项已带上这一档；板级侧是 `tools/fork_gate.py` 的
 **第八档**（`-DARKRTOS_USE_LINUX_SELECT=1 -DARKRTOS_USE_LINUX_SOCKET=1 -DARKRTOS_USE_LWIP=1`），
 QEMU LA64 上 212 条 check 全 `ok` + `exit code 0`。
@@ -1693,8 +1799,9 @@ Linux 的 futex 号表把「同一格参数」在不同 op 下复用：`REQUEUE`
   不是关中断自旋。
 - 下一步（若要用真正的 Linux 工具链产物）：动态链接的内核侧与自研装载器已落地
   （2026-11-20，见 [动态链接与PT_INTERP](动态链接与PT_INTERP.md)），但**离 glibc
-  还差整条 libc 兼容面**——`rseq`、TLS 初始化、`fcntl` 记录锁家族与 SCHED_DEADLINE
-  （条件变量的 PI 变体 `WAIT_REQUEUE_PI` / `CMP_REQUEUE_PI` 已于 2026-11-27 落地，见 §8.4c）。
+  还差整条 libc 兼容面**——TLS 初始化、`fcntl` 记录锁家族与 SCHED_DEADLINE
+  （条件变量的 PI 变体 `WAIT_REQUEUE_PI` / `CMP_REQUEUE_PI` 已于 2026-11-27 落地，见 §8.4c；
+  `rseq`/`getcpu` 也于同日落地，见 §8.14）。
   futex 的 PI 三档与 robust list 清理已经落地（§8.4b）。
   信号已有跨任务投递（§7），「进程」这个对象也开了（`fork`/`clone` + `wait4`，§8，
   默认关）：每进程 fd 表与继承、跨任务 `SIGCHLD`、阻塞 `wait4` 都已在 QEMU LA64 上
@@ -1704,10 +1811,13 @@ Linux 的 futex 号表把「同一格参数」在不同 op 下复用：`REQUEUE`
   （`ARKRTOS_USE_LINUX_FUTEX`，§8.4 / §8.4b，默认关）、文件映射也有了
   （`ARKRTOS_USE_PAGING_FILEMAP`，§8.5，默认关）、`mprotect` 页级写保护真落实了
   （`ARKRTOS_USE_PAGING_MPROTECT`，§8.6，默认关）、真 `mmap` 语义 `MAP_FIXED` 也有了
-  （按需分页档，§8.7，不需另开开关）；仍没有线程（`CLONE_VM`/`CLONE_THREAD` 拒）、
-  没有抢占式信号投递；`fcntl` 的 fd 旗标与状态旗标已有（§8.13，2026-11-27），
-  记录锁（`F_SETLK` 家族）与异步 I/O 仍没有；管道仍是刻意的非阻塞（§6）。
+  （按需分页档，§8.7，不需另开开关）；线程档也有（`CLONE_THREAD`，§8.10，默认关；
+  关档时 `CLONE_VM`/`CLONE_THREAD` 仍拒）、每 App 任务配额也有（§8.11，默认关）；
+  仍没有抢占式信号投递；`fcntl` 的 fd 旗标与状态旗标已有（§8.13，2026-11-27），
+  记录锁（`F_SETLK` 家族）与异步 I/O 仍没有；`rseq`/`getcpu` 已有（§8.14，2026-11-27）；
+  管道仍是刻意的非阻塞（§6）。
 - `execve` 是「同任务换镜像」；`fork` 才是「多一个任务 + 一份独立地址空间」。
   两者都在，但**不要**因此把这一层读成「有完整的进程模型」：调度与优先级仍是
   内核全局单份，`fd` 表在 fork 档才分进程（默认档全局单份），写时复制只在
-  `ARKRTOS_USE_PAGING_COW` 档（且栈页强制私有），没有线程、没有作业控制。
+  `ARKRTOS_USE_PAGING_COW` 档（且栈页强制私有），线程只在
+  `ARKRTOS_USE_LINUX_THREAD` 档（§8.10，默认关），没有作业控制。

@@ -115,6 +115,7 @@ EXPECT_SYS = {
     "DUP": 23,
     "DUP3": 24,
     "FCNTL": 25,
+    "RSEQ": 293,
     "OPENAT": 56,
     "CLOSE": 57,
     "PIPE2": 59,
@@ -125,6 +126,7 @@ EXPECT_SYS = {
     "SET_TID_ADDRESS": 96,
     "CLOCK_GETTIME": 113,
     "UNAME": 160,
+    "GETCPU": 168,
     "GETPID": 172,
     "GETUID": 174,
     "GETEUID": 175,
@@ -166,6 +168,12 @@ EXPECT_SIG_CHECKS = 31
 # F_GETFL、对管道清 O_NONBLOCK 回 -EINVAL、F_DUPFD / F_DUPFD_CLOEXEC 取号、
 # 未知 cmd 与坏 fd、四条收尾 close）= 53 条。
 EXPECT_DUP_CHECKS = 53
+# rseq 夹具（linux_rseq.c）的 check 条数：getcpu rc / cpu / node 三条；rseq
+# 注册 rc 与 cpu_id_start / cpu_id 的写回三条；信号中止四条（aborted、
+# 提交段没跑、rseq_cs 被清、handler 跑了一次）；没有信号的临界区三条
+# （正常提交、没被误中止、提交后 rseq_cs 被清）；注册契约与注销三条
+# （len != 32、flags != 0、NULL 注销）= 16 条。
+EXPECT_RSEQ_CHECKS = 16
 
 FAILS = []
 PASSES = []
@@ -584,6 +592,13 @@ def judge(text):
     dup_pass = count(lambda s: s.startswith("[dup] PASS: dup new fd"))
     dup_exit = count(lambda s: re.search(
         r"^\[dup\] finished after \d+ ms, exit code 56$", s) is not None)
+    rseq_fail = count(lambda s: s.startswith("[rseq] ") and "FAIL" in s)
+    rseq_ok = count(lambda s: s.startswith("[rseq] ") and s.rstrip().endswith(" ok"))
+    rseq_pass = count(lambda s: s.startswith("[rseq] PASS: getcpu both outputs zero"))
+    rseq_exit = count(lambda s: re.search(
+        r"^\[rseq\] finished after \d+ ms, exit code 57$", s) is not None)
+    rseq_werr = count(lambda s: s.startswith("[rseq] write /mnt/ram/linux_rseq rc=0"))
+    rseq_xerr = count(lambda s: s.startswith("[rseq] exec rc=0"))
     dup_werr = count(lambda s: s.startswith("[dup] write /mnt/ram/linux_dup rc=0"))
     dup_xerr = count(lambda s: s.startswith("[dup] exec rc=0"))
     sig_werr = count(lambda s: s.startswith("[sig] write /mnt/ram/linux_signal rc=0"))
@@ -629,6 +644,20 @@ def judge(text):
     if dup_exit != 1:
         problems.append("缺 `[dup] finished after <ms>, exit code 56`（dup 夹具没跑到底）")
 
+    # rseq/getcpu 那一块：16 条 check 一条 FAIL 都不许，PASS 行与退出码 57。
+    if rseq_werr != 1:
+        problems.append("缺 `[rseq] write /mnt/ram/linux_rseq rc=0`（rseq 夹具没送进去）")
+    if rseq_xerr != 1:
+        problems.append("缺 `[rseq] exec rc=0`（装载器没接受 rseq 夹具）")
+    if rseq_fail != 0:
+        problems.append("rseq 夹具里有 %d 条 FAIL（中止/注册契约回了错答案）" % rseq_fail)
+    if rseq_ok != EXPECT_RSEQ_CHECKS:
+        problems.append("[rseq] check 通过条数 %d != %d" % (rseq_ok, EXPECT_RSEQ_CHECKS))
+    if rseq_pass != 1:
+        problems.append("缺 `[rseq] PASS: getcpu both outputs zero ...`")
+    if rseq_exit != 1:
+        problems.append("缺 `[rseq] finished after <ms>, exit code 57`（rseq 夹具没跑到底）")
+
     # 信号那一块：31 条 check 一条 FAIL 都不许，PASS 行与退出码 138
     # （默认动作是「结束任务」，内核用 128+10 表达）。
     if sig_werr != 1:
@@ -657,9 +686,9 @@ def judge(text):
         for p in problems:
             notes.append(p)
         return False, notes
-    return True, ["%d 条 check 全 ok、PASS 行与 exit code 7 都在，管道 %d 条、信号 %d 条、dup %d 条 check 全 ok（退出码 55 / 138 / 56），旁路演示未受影响"
+    return True, ["%d 条 check 全 ok、PASS 行与 exit code 7 都在，管道 %d 条、信号 %d 条、dup %d 条、rseq %d 条 check 全 ok（退出码 55 / 138 / 56 / 57），旁路演示未受影响"
                   % (EXPECT_CHECKS, EXPECT_PIPE_CHECKS, EXPECT_SIG_CHECKS,
-                     EXPECT_DUP_CHECKS)]
+                     EXPECT_DUP_CHECKS, EXPECT_RSEQ_CHECKS)]
 
 
 def self_check(good_text):
@@ -691,6 +720,15 @@ def self_check(good_text):
             "[dup] close the reader = 0 ok\n[dup] bogus = 1 FAIL"),
         "少一条 dup check": lambda s: s.replace(
             "[dup] close the console reference = 0 ok\n", ""),
+        "去掉 rseq PASS 行": lambda s: s.replace(
+            "[rseq] PASS: getcpu both outputs zero", "[rseq] (quiet) getcpu both outputs zero"),
+        "rseq 退出码改成 1": lambda s: s.replace(
+            "exit code 57", "exit code 1"),
+        "插一条 rseq FAIL": lambda s: s.replace(
+            "[rseq] rseq(NULL) deregisters = 0 ok",
+            "[rseq] rseq(NULL) deregisters = 0 ok\n[rseq] bogus = 1 FAIL"),
+        "少一条 rseq check": lambda s: s.replace(
+            "[rseq] getcpu node = 0 ok\n", ""),
     }
     missed = []
     for name, fn in mutations.items():
@@ -759,7 +797,8 @@ def main(argv):
                         ok("parser-selfcheck",
                            "%d 种坏法（Linux 块缺 PASS / 错退出码 / 多 FAIL / 少 check，"
                            "管道与信号块各去 PASS 行 / 各改退出码，dup 块去 PASS / "
-                           "改退出码 / 插 FAIL / 少 check）全被判红" % 12)
+                           "改退出码 / 插 FAIL / 少 check，rseq 块去 PASS / 改退出码 / "
+                           "插 FAIL / 少 check）全被判红" % 16)
                 else:
                     bad("qemu-readout", "；".join(notes))
                     bad("parser-selfcheck", "读数没过，自检无从谈起")
