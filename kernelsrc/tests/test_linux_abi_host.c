@@ -433,6 +433,8 @@ void arkrtos_port_exit_critical(uint32 state)
 #define T_FUTEX_LOCK_PI     (6u)
 #define T_FUTEX_UNLOCK_PI   (7u)
 #define T_FUTEX_TRYLOCK_PI  (8u)
+#define T_FUTEX_WAIT_REQUEUE_PI (11u)
+#define T_FUTEX_CMP_REQUEUE_PI  (12u)
 #define T_FUTEX_TID_MASK    (0x3FFFFFFFu)
 #define T_FUTEX_WAITERS     (0x80000000u)
 #define T_FUTEX_OWNER_DIED  (0x40000000u)
@@ -2862,12 +2864,10 @@ static void t_futex(t_ctx *c)
     (void)call(c, T_NR_FUTEX, noframe, (unsigned long)T_FUTEX_WAIT, 5UL, 0UL);
     ck_ret(c, -T_ENOSYS, "futex 未驻留的页回 -ENOSYS");
 
-    /* 不认识的 op：如实 -ENOSYS，不猜成 WAIT。
-     * 用 11（FUTEX_WAIT_REQUEUE_PI）：6/7/8 已经是 LOCK_PI / UNLOCK_PI /
-     * TRYLOCK_PI，9/10 是两种 BITSET，拿它们当「未知 op」会让夹具与实现
-     * 自相矛盾。11/12 这两条 PI 条件变量专用 op 本实现不提供（默认构建
-     * 的 glibc 不生成它们），所以仍是一条诚实的未知 op。 */
-    (void)call(c, T_NR_FUTEX, w0, 11UL, 5UL, 0UL);
+    /* 不认识的 op：如实 -ENOSYS，不猜成 WAIT。用 13（新内核的
+     * FUTEX_LOCK_PI2）：0/1/3/4/6..12 都已有实现，拿它们当「未知 op」会让
+     * 夹具与实现自相矛盾。13 本内核不提供，仍是一条诚实的未知 op。 */
+    (void)call(c, T_NR_FUTEX, w0, 13UL, 5UL, 0UL);
     ck_ret(c, -T_ENOSYS, "futex 未知 op 回 -ENOSYS");
 
     /* 唤醒数取负：-EINVAL */
@@ -3774,6 +3774,380 @@ static void t_futex_pi_edge(t_ctx *c)
     g_restart_rc = -1;
     g_from_budget = -1;
     g_to_budget = -1;
+}
+
+/* 分组 14f：PI 条件变量的 WAIT_REQUEUE_PI(11) / CMP_REQUEUE_PI(12)。
+ *
+ * 场景照 PI 条件变量摆：uaddr 上是「信号字」（普通 futex），uaddr2 上是一把
+ * 已经有人攥着的 PI 锁。等待者先在 uaddr 上睡；CMP_REQUEUE_PI 把整队搬到
+ * uaddr2，排头直接接手锁，其余改挂到 uaddr2 的 PI 队列里。
+ *
+ * 判据都落在用户看得见的东西上：返回值、字里的 tid 与 WAITERS 位、叫醒的是
+ * 谁、优先级挂在谁头上、以及超时/信号/端口不可重放时的如实报错。 */
+static void t_futex_requeue_pi(t_ctx *c)
+{
+    unsigned long sig  = u_ptr(0x10u);      /* 信号字 */
+    unsigned long lock = u_ptr(0x2010u);    /* 另一对 8 KB 页：PI 锁字 */
+    int32 cur0 = arkrtos_current_task_id;
+
+    /* ---- 参数面：不睡就能判的几条 ---- */
+    fresh(c);
+    g_restart_rc  = 0;
+    g_block_calls = 0;
+    arkrtos_current_task_id = 7;
+    u_put32(0x10u, 5u);
+    u_put32(0x2010u, 5u | T_FUTEX_WAITERS);
+
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                4UL, 0UL, lock, 0UL);
+    ck_ret(c, -T_EAGAIN, "WAIT_REQUEUE_PI 信号字值不符回 -EAGAIN");
+    ck(g_block_calls == 0, "WAIT_REQUEUE_PI 值不符时一次也没睡");
+
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                5UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EINVAL, "WAIT_REQUEUE_PI uaddr2 为 0 回 -EINVAL");
+
+    u_put32(0x2010u, 0u);                   /* 没人持有的锁：没有可接手的人 */
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                5UL, 0UL, lock, 0UL);
+    ck_ret(c, -T_EINVAL, "WAIT_REQUEUE_PI 目标锁没人持有回 -EINVAL");
+
+    (void)call6(c, T_NR_FUTEX, U_BASE - 8UL,
+                (unsigned long)T_FUTEX_WAIT_REQUEUE_PI, 5UL, 0UL, lock, 0UL);
+    ck_ret(c, -T_ENOSYS, "WAIT_REQUEUE_PI 信号字在窗口外回 -ENOSYS");
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                5UL, 0UL, U_BASE - 8UL, 0UL);
+    ck_ret(c, -T_ENOSYS, "WAIT_REQUEUE_PI 锁字在窗口外回 -ENOSYS");
+
+    /* ---- 正常登记：置 WAITERS、抬持有者优先级、睡一个时间片 ---- */
+    fresh(c);
+    g_restart_rc   = 0;
+    g_block_calls  = 0;
+    g_wake_calls   = 0;
+    g_reprio_calls = 0;
+    arkrtos_current_task_id = 7;
+    arkrtos_task_table[6].base_priority = 4u;    /* 等待者：tid 7 */
+    arkrtos_task_table[6].priority      = 4u;
+    arkrtos_task_table[4].base_priority = 10u;   /* 持有者：tid 5 */
+    arkrtos_task_table[4].priority      = 10u;
+    u_put32(0x10u, 5u);
+    u_put32(0x2010u, 5u);
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                5UL, 0UL, lock, 0UL);
+    ck_ret(c, 0, "WAIT_REQUEUE_PI 登记后回 0（返回值被重放的那次覆盖）");
+    ck(g_block_calls == 1, "WAIT_REQUEUE_PI 真的阻塞了一次");
+    ck_u(u_get32(0x2010u), 5u | T_FUTEX_WAITERS,
+         "WAIT_REQUEUE_PI 给锁字置上 WAITERS（持有者解锁时据此交接）");
+    ck_u((unsigned long)arkrtos_task_table[4].priority, 4UL,
+         "WAIT_REQUEUE_PI 把锁持有者的有效优先级抬到等待者的 4");
+    ck(g_reprio_calls >= 1,
+       "WAIT_REQUEUE_PI 抬优先级走的是换桶接口（不是偷偷改字段）");
+
+    (void)call6(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "WAIT_REQUEUE_PI 重放（a0 被清成 0）继续睡");
+    ck(g_block_calls == 2, "WAIT_REQUEUE_PI 重放又睡了一个时间片");
+
+    /* ---- CMP_REQUEUE_PI：期望值不符 ⇒ -EAGAIN，一个字都不动 ---- */
+    u_put32(0x10u, 9u);
+    arkrtos_current_task_id = 6;
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_CMP_REQUEUE_PI,
+                0UL, 1UL, lock, 5UL);
+    ck_ret(c, -T_EAGAIN, "CMP_REQUEUE_PI 期望值不符回 -EAGAIN");
+    ck_u(u_get32(0x2010u), 5u | T_FUTEX_WAITERS,
+         "CMP_REQUEUE_PI 值不符时不动锁字");
+
+    /* ---- 正常搬运：排头接手锁、被叫醒、返回 1 ---- */
+    u_put32(0x10u, 5u);
+    g_wake_calls = 0;
+    g_wake_last  = 0;
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_CMP_REQUEUE_PI,
+                0UL, 1UL, lock, 5UL);
+    ck_ret(c, 1, "CMP_REQUEUE_PI 搬走排头并回 1（唤醒数 + 搬运数）");
+    ck_u(u_get32(0x2010u), 7u,
+         "CMP_REQUEUE_PI 把锁字写成排头的 tid（直接交接）");
+    ck_u((unsigned long)g_wake_last, 7UL, "CMP_REQUEUE_PI 叫醒的是排头");
+
+    arkrtos_current_task_id = 7;
+    (void)call6(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "被搬走的排头重放回 0（所有权已在 CMP 里写入）");
+    ck_u(u_get32(0x2010u), 7u, "排头重放不再动锁字");
+    (void)call(c, T_NR_FUTEX, lock, (unsigned long)T_FUTEX_UNLOCK_PI, 0UL, 0UL);
+    ck_ret(c, 0, "被搬走的排头拿到的是真锁：UNLOCK_PI 回 0");
+    ck_u(u_get32(0x2010u), 0u, "新持有者解锁后锁字清 0");
+    ck_u((unsigned long)arkrtos_task_table[4].priority, 10UL,
+         "交接之后原持有者的优先级算回基准");
+
+    /* ---- 两个等待者：排头按基准优先级选，剩下那个改挂到锁上 ---- */
+    fresh(c);
+    g_restart_rc  = 0;
+    g_block_calls = 0;
+    arkrtos_task_table[5].base_priority = 9u;    /* tid 6：低优先级等待者 */
+    arkrtos_task_table[5].priority      = 9u;
+    arkrtos_task_table[6].base_priority = 3u;    /* tid 7：高优先级等待者 */
+    arkrtos_task_table[6].priority      = 3u;
+    arkrtos_task_table[4].base_priority = 10u;   /* tid 5：持有者 */
+    arkrtos_task_table[4].priority      = 10u;
+    u_put32(0x10u, 5u);
+    u_put32(0x2010u, 5u);
+    arkrtos_current_task_id = 6;
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                5UL, 0UL, lock, 0UL);
+    ck_ret(c, 0, "低优先级等待者（tid 6）登记成功");
+    arkrtos_current_task_id = 7;
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                5UL, 0UL, lock, 0UL);
+    ck_ret(c, 0, "高优先级等待者（tid 7）登记成功");
+    ck(g_block_calls == 2, "两个等待者各睡了一次");
+    ck_u((unsigned long)arkrtos_task_table[4].priority, 3UL,
+         "两个等待者时持有者被抬到最高的那个（tid 7 的 3）");
+
+    arkrtos_current_task_id = 5;
+    g_wake_calls = 0;
+    g_wake_last  = 0;
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_CMP_REQUEUE_PI,
+                0UL, 1UL, lock, 5UL);
+    ck_ret(c, 2, "CMP_REQUEUE_PI 搬两个：排头 + 一个改挂，回 2");
+    ck_u(u_get32(0x2010u), 7u | T_FUTEX_WAITERS,
+         "排头（基准优先级最高的 tid 7）接手；后面还有人等所以留 WAITERS");
+    ck_u((unsigned long)g_wake_last, 7UL,
+         "先叫醒的是基准优先级最高的那个等待者");
+
+    /* 排头的系统调用先返回（销账），然后把锁交出去 —— 顺序反了就变成
+     * 「自己还在队列里就解锁」，交接会选中它自己。 */
+    arkrtos_current_task_id = 7;
+    (void)call6(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "排头重放回 0（销账之后锁队列里只剩改挂过来的那个）");
+    (void)call(c, T_NR_FUTEX, lock, (unsigned long)T_FUTEX_UNLOCK_PI, 0UL, 0UL);
+    ck_ret(c, 0, "排头解锁回 0（队列里还有改挂过来的那个）");
+    ck_u(u_get32(0x2010u), 6u,
+         "UNLOCK_PI 把锁直接交接给改挂过来的 tid 6（字里不再有 WAITERS）");
+    ck_u((unsigned long)g_wake_last, 6UL, "交接时叫醒的是 tid 6");
+    arkrtos_current_task_id = 6;
+    (void)call6(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, 0, "改挂过去的那个重放回 0");
+    (void)call(c, T_NR_FUTEX, lock, (unsigned long)T_FUTEX_UNLOCK_PI, 0UL, 0UL);
+    ck_u(u_get32(0x2010u), 0u, "最后一个人解锁后锁字清 0");
+
+    /* ---- nr_requeue=0：只搬排头，别的留在原地址（锁字不该替它们记账） ---- */
+    fresh(c);
+    g_restart_rc  = 0;
+    g_block_calls = 0;
+    arkrtos_task_table[5].base_priority = 4u;    /* tid 6：排头 */
+    arkrtos_task_table[5].priority      = 4u;
+    arkrtos_task_table[6].base_priority = 5u;    /* tid 7：留在原地址 */
+    arkrtos_task_table[6].priority      = 5u;
+    arkrtos_task_table[4].base_priority = 10u;
+    arkrtos_task_table[4].priority      = 10u;
+    u_put32(0x10u, 5u);
+    u_put32(0x2010u, 5u);
+    arkrtos_current_task_id = 6;
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                5UL, 0UL, lock, 0UL);
+    arkrtos_current_task_id = 7;
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                5UL, 0UL, lock, 0UL);
+    arkrtos_current_task_id = 5;
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_CMP_REQUEUE_PI,
+                0UL, 0UL, lock, 5UL);
+    ck_ret(c, 1, "CMP_REQUEUE_PI nr_requeue=0 只搬排头，回 1");
+    ck_u(u_get32(0x2010u), 6u,
+         "只搬一个时锁字不置 WAITERS（没搬的那个还在原地址上等）");
+
+    /* ---- 搬运时写字失败：-EFAULT 且不叫醒排头 ---- */
+    fresh(c);
+    g_restart_rc  = 0;
+    g_block_calls = 0;
+    arkrtos_task_table[6].base_priority = 4u;
+    arkrtos_task_table[6].priority      = 4u;
+    arkrtos_task_table[4].base_priority = 10u;
+    arkrtos_task_table[4].priority      = 10u;
+    u_put32(0x10u, 5u);
+    u_put32(0x2010u, 5u | T_FUTEX_WAITERS);
+    arkrtos_current_task_id = 7;
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                5UL, 0UL, lock, 0UL);
+    ck_ret(c, 0, "写字失败用例的前置：登记一个等待者");
+    arkrtos_current_task_id = 6;
+    g_wake_calls = 0;
+    g_to_budget  = 0;                           /* 写 uaddr2 失败 */
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_CMP_REQUEUE_PI,
+                0UL, 1UL, lock, 5UL);
+    g_to_budget = -1;
+    ck_ret(c, -T_EFAULT, "CMP_REQUEUE_PI 写锁字失败回 -EFAULT");
+    ck(g_wake_calls == 0, "写锁字失败时没有叫醒任何等待者（不给人假所有权）");
+    ck_u(u_get32(0x2010u), 5u | T_FUTEX_WAITERS, "写失败后锁字没变");
+
+    /* ---- 参数与读字失败的几条 ---- */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    u_put32(0x10u, 5u);
+    u_put32(0x2010u, 5u);
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_CMP_REQUEUE_PI,
+                (unsigned long)-1, 1UL, lock, 5UL);
+    ck_ret(c, -T_EINVAL, "CMP_REQUEUE_PI 唤醒数取负回 -EINVAL");
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_CMP_REQUEUE_PI,
+                0UL, (unsigned long)-1, lock, 5UL);
+    ck_ret(c, -T_EINVAL, "CMP_REQUEUE_PI 搬运数取负回 -EINVAL");
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_CMP_REQUEUE_PI,
+                0UL, 1UL, 0UL, 5UL);
+    ck_ret(c, -T_EINVAL, "CMP_REQUEUE_PI uaddr2 为 0 回 -EINVAL");
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_CMP_REQUEUE_PI,
+                0UL, 1UL, lock, 4UL);
+    ck_ret(c, -T_EAGAIN, "CMP_REQUEUE_PI 期望值不符回 -EAGAIN（无事可搬也一样）");
+    g_from_budget = 0;
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_CMP_REQUEUE_PI,
+                0UL, 1UL, lock, 5UL);
+    g_from_budget = -1;
+    ck_ret(c, -T_EFAULT, "CMP_REQUEUE_PI 读信号字失败回 -EFAULT");
+    g_from_budget = 1;                          /* 信号字取到了、锁字没取到 */
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_CMP_REQUEUE_PI,
+                0UL, 1UL, lock, 5UL);
+    g_from_budget = -1;
+    ck_ret(c, -T_EFAULT, "CMP_REQUEUE_PI 读锁字失败回 -EFAULT");
+    u_put32(0x2010u, 0u);                       /* 锁字没人持有 */
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_CMP_REQUEUE_PI,
+                0UL, 1UL, lock, 5UL);
+    ck_ret(c, -T_EINVAL, "CMP_REQUEUE_PI 锁字没人持有回 -EINVAL");
+    u_put32(0x2010u, 5u);
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_CMP_REQUEUE_PI,
+                0UL, 1UL, lock, 5UL);
+    ck_ret(c, 0, "CMP_REQUEUE_PI 没有 PI 条件变量等待者时回 0（字不动）");
+    ck_u(u_get32(0x2010u), 5u, "没有等待者时锁字一个字节都不改");
+    (void)call6(c, T_NR_FUTEX, U_BASE - 8UL,
+                (unsigned long)T_FUTEX_CMP_REQUEUE_PI, 0UL, 1UL, lock, 5UL);
+    ck_ret(c, -T_ENOSYS, "CMP_REQUEUE_PI 信号字在窗口外回 -ENOSYS");
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_CMP_REQUEUE_PI,
+                0UL, 1UL, U_BASE - 8UL, 5UL);
+    ck_ret(c, -T_ENOSYS, "CMP_REQUEUE_PI 锁字在窗口外回 -ENOSYS");
+
+    /* ---- 超时 / 端口不可重放 / 读字失败 / 信号：都是「如实报错且不登记」 ---- */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    g_restart_rc  = 0;
+    g_block_calls = 0;
+    u_put32(0x10u, 5u);
+    u_put32(0x2010u, 5u);
+    u_put32(0x60u, 0u);                         /* tv_sec  */
+    u_put32(0x64u, 0u);                         /* tv_nsec：当场到期 */
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                5UL, u_ptr(0x60u), lock, 0UL);
+    ck_ret(c, -T_ETIMEDOUT, "WAIT_REQUEUE_PI 超时 0 回 -ETIMEDOUT");
+    ck(g_block_calls == 0, "WAIT_REQUEUE_PI 已经到期时一次也没睡");
+
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    g_restart_rc  = -1;                         /* 端口不会重放 */
+    g_block_calls = 0;
+    u_put32(0x10u, 5u);
+    u_put32(0x2010u, 5u);
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                5UL, 0UL, lock, 0UL);
+    ck_ret(c, -T_ENOSYS, "WAIT_REQUEUE_PI 端口不可重放回 -ENOSYS");
+    ck(g_block_calls == 0, "端口不可重放时一次也没睡");
+
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    g_restart_rc  = 0;
+    g_block_calls = 0;
+    u_put32(0x10u, 5u);
+    u_put32(0x2010u, 5u);
+    g_from_budget = 0;
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                5UL, 0UL, lock, 0UL);
+    g_from_budget = -1;
+    ck_ret(c, -T_EFAULT, "WAIT_REQUEUE_PI 读信号字失败回 -EFAULT");
+    g_from_budget = 1;                          /* 读信号字成功、读锁字失败 */
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                5UL, 0UL, lock, 0UL);
+    g_from_budget = -1;
+    ck_ret(c, -T_EFAULT, "WAIT_REQUEUE_PI 读锁字失败回 -EFAULT");
+    g_to_budget = 0;
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                5UL, 0UL, lock, 0UL);
+    g_to_budget = -1;
+    ck_ret(c, -T_EFAULT, "WAIT_REQUEUE_PI 置 WAITERS 写失败回 -EFAULT");
+    u_put32(0x60u, 1000u);
+    u_put32(0x64u, 0u);
+    g_from_budget = 2;                          /* 读字两次都成、读超时结构失败 */
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                5UL, u_ptr(0x60u), lock, 0UL);
+    g_from_budget = -1;
+    ck_ret(c, -T_EFAULT, "WAIT_REQUEUE_PI 读超时结构失败回 -EFAULT");
+
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    g_restart_rc  = 0;
+    g_block_calls = 0;
+    u_put32(0x10u, 5u);
+    u_put32(0x2010u, 5u);
+    (void)sig_install_act(c, 10u, 0x1000UL, 0x2000UL, 0u);
+    (void)call(c, T_NR_KILL, 7UL, 10UL, 0UL, 0UL);   /* 置 SIGUSR1 pending */
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                5UL, 0UL, lock, 0UL);
+    ck_ret(c, -T_EINTR, "WAIT_REQUEUE_PI 有未屏蔽信号回 -EINTR");
+
+    /* ---- 重放上的三条出口：超时 / 信号 / 端口不可重放都销账 ---- */
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    g_restart_rc  = 0;
+    g_block_calls = 0;
+    arkrtos_task_table[4].base_priority = 10u;
+    arkrtos_task_table[4].priority      = 10u;
+    u_put32(0x10u, 5u);
+    u_put32(0x2010u, 5u);
+    u_put32(0x60u, 1000u);                      /* tv_sec：1s，给重放用 */
+    u_put32(0x64u, 0u);
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                5UL, u_ptr(0x60u), lock, 0UL);
+    ck_ret(c, 0, "重放用例的前置：带超时登记");
+    g_restart_rc = -1;                          /* 重放时端口不认了 */
+    (void)call6(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_ENOSYS, "WAIT_REQUEUE_PI 重放时端口不可重放回 -ENOSYS（并销账）");
+
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    g_restart_rc  = 0;
+    g_block_calls = 0;
+    arkrtos_task_table[4].base_priority = 10u;
+    arkrtos_task_table[4].priority      = 10u;
+    u_put32(0x10u, 5u);
+    u_put32(0x2010u, 5u);
+    u_put32(0x60u, 1000u);
+    u_put32(0x64u, 0u);
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                5UL, u_ptr(0x60u), lock, 0UL);
+    ck_ret(c, 0, "重放超时用例的前置：带超时登记");
+    g_ms += 2000000u;                           /* 远超截止 */
+    (void)call6(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_ETIMEDOUT, "WAIT_REQUEUE_PI 重放到期回 -ETIMEDOUT（并销账）");
+
+    fresh(c);
+    arkrtos_current_task_id = 7;
+    g_restart_rc  = 0;
+    g_block_calls = 0;
+    arkrtos_task_table[4].base_priority = 10u;
+    arkrtos_task_table[4].priority      = 10u;
+    u_put32(0x10u, 5u);
+    u_put32(0x2010u, 5u);
+    (void)call6(c, T_NR_FUTEX, sig, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                5UL, 0UL, lock, 0UL);
+    ck_ret(c, 0, "重放信号用例的前置：登记");
+    (void)sig_install_act(c, 10u, 0x1000UL, 0x2000UL, 0u);
+    (void)call(c, T_NR_KILL, 7UL, 10UL, 0UL, 0UL);
+    (void)call6(c, T_NR_FUTEX, 0UL, (unsigned long)T_FUTEX_WAIT_REQUEUE_PI,
+                0UL, 0UL, 0UL, 0UL);
+    ck_ret(c, -T_EINTR, "WAIT_REQUEUE_PI 重放时来信号回 -EINTR（并销账）");
+
+    arkrtos_current_task_id = cur0;
+    g_restart_rc  = -1;
+    g_from_budget = -1;
+    g_to_budget   = -1;
 }
 
 static void t_robust_edge(t_ctx *c)
@@ -5394,6 +5768,7 @@ int main(void)
     t_futex(&c);
     t_futex_pi(&c);
     t_futex_pi_edge(&c);
+    t_futex_requeue_pi(&c);
     t_robust_edge(&c);
 #endif
 #if (ARKRTOS_USE_LINUX_SELECT == 1)

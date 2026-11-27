@@ -232,6 +232,11 @@
 #define LX_FUTEX_LOCK_PI            (6u)
 #define LX_FUTEX_UNLOCK_PI          (7u)
 #define LX_FUTEX_TRYLOCK_PI         (8u)
+/* PI 条件变量那一对（11/12）：先按普通 futex 等待（uaddr 上是「信号字」），
+ * 收到 CMP_REQUEUE_PI 时整队搬到一个**已持有的** PI 锁（uaddr2）上，排头
+ * 那个直接接手锁。号与 Linux 一致；语义偏差见文档 §8.4b。 */
+#define LX_FUTEX_WAIT_REQUEUE_PI    (11u)
+#define LX_FUTEX_CMP_REQUEUE_PI     (12u)
 #define LX_FUTEX_TID_MASK           (0x3FFFFFFFu)
 #define LX_FUTEX_WAITERS            (0x80000000u)
 #define LX_FUTEX_OWNER_DIED         (0x40000000u)
@@ -508,6 +513,11 @@ static uint8   s_futex_timed[ARKRTOS_TASK_MAX_NUM];
  * （跨进程的等待者根本不在同一张页表里，读到的字不可信），所以抄下来。 */
 static uint8   s_futex_pi[ARKRTOS_TASK_MAX_NUM];
 static int32   s_futex_pi_owner[ARKRTOS_TASK_MAX_NUM];
+/* 这一槽是「WAIT_REQUEUE_PI 登记的」而不是普通 LOCK_PI。两类都用 s_futex_pi
+ * 标着（普通 WAKE / REQUEUE 不能碰它们，判据一致），但只有 rqpi 那些能被
+ * CMP_REQUEUE_PI 整队搬走；反过来，CMP_REQUEUE_PI 也不许搬 LOCK_PI 的人
+ * ——那会把一个正等互斥锁的任务塞进另一个锁的队列里。 */
+static uint8   s_futex_rqpi[ARKRTOS_TASK_MAX_NUM];
 /* robust list：每个任务自己那一份（链头 + 调用方报的长度）。任务号会被
  * 复用，退出时必须清掉，否则新任务会拿别人的链去改别人的字。 */
 static unsigned long s_robust_head[ARKRTOS_TASK_MAX_NUM];
@@ -4947,6 +4957,7 @@ static void lx_futex_forget(int32 task_id)
         s_futex_deadline[task_id - 1] = 0u;
         s_futex_timed[task_id - 1]    = 0u;
         s_futex_pi[task_id - 1]       = 0u;
+        s_futex_rqpi[task_id - 1]     = 0u;
         s_futex_pi_owner[task_id - 1] = 0;
         if(owner != 0)
         {
@@ -5101,7 +5112,8 @@ static int32 lx_futex_timeout(void *p_ctx, uint32 abs_flag, uint32 *p_dl)
 *          与 Linux 不同的边界（文档里写死）：
 *            - 键取自「物理帧 + 页内偏移」，只有落在 App 分页窗口里的字才
 *              有键；栈上的字（不在窗口里）如实回 -ENOSYS；
-*            - PI / FD 类 op（2 / 5..8 / 11..14）一律 -ENOSYS；
+*            - FD 类 op（2）以及 13/14 一律 -ENOSYS；PI 类 5..8 与 PI 条件
+ *              变量的 11/12 有实现（偏差见 §8.4 / §8.4b）；
 *            - 本机没有墙钟，FUTEX_CLOCK_REALTIME 带 timeout 时如实
 *              -ENOSYS（不拿开机时长冒充绝对时刻）；
 *            - 本内核没有无限睡眠：等待按 LX_WAIT_SLICE_MS 时间片重放，没
@@ -5271,6 +5283,299 @@ static int32 lx_futex_pi_unlock(unsigned long key, unsigned long uaddr,
     return 0;
 }
 
+/* ------------------- PI 条件变量：WAIT_REQUEUE_PI / CMP_REQUEUE_PI ------- */
+
+/* WAIT_REQUEUE_PI(uaddr, val, uaddr2[, timeout])：等 uaddr 上的信号字，等到
+ * CMP_REQUEUE_PI 把整队搬到 uaddr2（已持有的 PI 锁）上，排头那个直接接手。
+ * 与 Linux 逐条对齐的部分：值不符 ⇒ -EAGAIN；uaddr2 没人持有 ⇒ -EINVAL
+ * （Linux 也这么判：requeue 的目标必须是一把有人攥着的 PI 锁，否则「接手」
+ * 没有对象）；被搬走的排头由 CMP_REQUEUE_PI 把字写成它的 tid，这里重放时
+ * 只确认所有权，不再读字（用户可能已经改了它）。
+ * 与 Linux 不同的边界：timeout 按相对时长解释（与 WAIT/LOCK_PI 同口径），
+ * 不是绝对时刻；本内核没有无限睡眠，等待按 LX_WAIT_SLICE_MS 时间片重放。 */
+static int32 lx_futex_wait_requeue_pi(void *p_ctx, unsigned long uaddr,
+                                      uint32 val, int32 me)
+{
+    unsigned long key  = 0ul;
+    unsigned long key2 = 0ul;
+    unsigned long uaddr2;
+    uint32 word  = 0u;
+    uint32 word2 = 0u;
+    uint32 tid2;
+    uint8  replay;
+    uint8  woke  = 0u;
+    uint8  timed = 0u;
+    uint32 dl    = 0u;
+    uint32 crit;
+    int32  rc;
+
+    /* 重放识别只看自己那一槽：一个任务睡着时不可能再发起一次 WAIT。 */
+    crit = ARKRTOS_ENTER_CRITICAL();
+    replay = ((s_futex_used[me - 1] != 0u) &&
+              (s_futex_rqpi[me - 1] != 0u)) ? 1u : 0u;
+    if(replay != 0u)
+    {
+        key   = s_futex_key[me - 1];
+        uaddr = s_futex_uaddr[me - 1];
+        woke  = s_futex_woke[me - 1];
+        timed = s_futex_timed[me - 1];
+        dl    = s_futex_deadline[me - 1];
+    }
+    ARKRTOS_EXIT_CRITICAL(crit);
+
+    if(replay == 0u)
+    {
+        uaddr2 = ARKRTOS_SVC_ARG(p_ctx, 4u);
+        if(uaddr2 == 0ul)
+        {
+            return -LX_EINVAL;
+        }
+        key = lx_futex_key(uaddr);
+        if(key == ~0UL)
+        {
+            return -LX_ENOSYS;
+        }
+        rc = lx_futex_get_word(uaddr, &word);
+        if(rc != 0)
+        {
+            return rc;
+        }
+        if(word != val)
+        {
+            return -LX_EAGAIN;      /* 值已经变了：与 WAIT 同口径，别睡 */
+        }
+        key2 = lx_futex_key(uaddr2);
+        if(key2 == ~0UL)
+        {
+            return -LX_ENOSYS;
+        }
+        rc = lx_futex_get_word(uaddr2, &word2);
+        if(rc != 0)
+        {
+            return rc;
+        }
+        tid2 = word2 & (uint32)LX_FUTEX_TID_MASK;
+        if(tid2 == 0u)
+        {
+            /* 空锁：Linux 回 -EINVAL（requeue 的目标必须有人持有）。 */
+            return -LX_EINVAL;
+        }
+        /* 置 WAITERS：持有者的 UNLOCK_PI 靠它知道要交接。与 LOCK_PI 同一
+         * 口径，区别只在「谁接手」由 CMP_REQUEUE_PI 决定。 */
+        if((word2 & (uint32)LX_FUTEX_WAITERS) == 0u)
+        {
+            rc = lx_futex_put_word(uaddr2, word2 | (uint32)LX_FUTEX_WAITERS);
+            if(rc != 0)
+            {
+                return rc;
+            }
+        }
+        rc = lx_futex_timeout(p_ctx, 0u, &dl);
+        if(rc < 0)
+        {
+            return rc;
+        }
+        timed = (rc > 0) ? 1u : 0u;
+        if((timed != 0u) && ((int32)(arkrtos_kernel_get_time() - dl) >= 0))
+        {
+            return -LX_ETIMEDOUT;
+        }
+        if(lx_futex_sig_pending() != 0u)
+        {
+            return -LX_EINTR;
+        }
+        if(arkrtos_port_svc_restart(p_ctx) != 0)
+        {
+            return -LX_ENOSYS;
+        }
+        crit = ARKRTOS_ENTER_CRITICAL();
+        s_futex_key[me - 1]      = key;
+        s_futex_used[me - 1]     = 1u;
+        s_futex_woke[me - 1]     = 0u;
+        s_futex_uaddr[me - 1]    = uaddr;
+        s_futex_val[me - 1]      = val;
+        s_futex_bitset[me - 1]   = (uint32)LX_FUTEX_BITSET_ALL;
+        s_futex_deadline[me - 1] = dl;
+        s_futex_timed[me - 1]    = timed;
+        s_futex_pi[me - 1]       = 1u;
+        s_futex_rqpi[me - 1]     = 1u;
+        s_futex_pi_owner[me - 1] = (int32)tid2;
+        ARKRTOS_EXIT_CRITICAL(crit);
+        lx_pi_recalc_owner((int32)tid2);
+        (void)arkrtos_task_block_in_critical((uint32)LX_WAIT_SLICE_MS);
+        return 0;
+    }
+
+    /* ---- 重放 ---- */
+    if(woke != 0u)
+    {
+        /* CMP_REQUEUE_PI 已经把 uaddr2 的字写成我的 tid：所有权到手，
+         * 不再读字（调用方可能已经改成 0 或改了别的位）。 */
+        lx_futex_forget(me);
+        return 0;
+    }
+    if((timed != 0u) && ((int32)(arkrtos_kernel_get_time() - dl) >= 0))
+    {
+        lx_futex_forget(me);
+        return -LX_ETIMEDOUT;
+    }
+    if(lx_futex_sig_pending() != 0u)
+    {
+        lx_futex_forget(me);
+        return -LX_EINTR;
+    }
+    if(arkrtos_port_svc_restart(p_ctx) != 0)
+    {
+        lx_futex_forget(me);
+        return -LX_ENOSYS;
+    }
+    /* 没被搬走也没超时：继续睡一个时间片（值有没有变不该在这里判 ——
+     * Linux 的 requeue 等待者只在被搬走时才醒来）。 */
+    (void)arkrtos_task_block_in_critical((uint32)LX_WAIT_SLICE_MS);
+    return 0;
+}
+
+/* CMP_REQUEUE_PI(uaddr, nr_wake, uaddr2, nr_requeue, val3)：
+ *   1) *uaddr != val3 ⇒ -EAGAIN（Linux 同一判据）；
+ *   2) uaddr2 没人持有 ⇒ -EINVAL；
+ *   3) 先按 nr_wake 叫醒 uaddr 上的普通等待者（与 Linux 顺序一致：先 wake
+ *      再搬，不然被叫醒的那个会抢先把 uaddr2 改掉）；
+ *   4) 剩下 WAIT_REQUEUE_PI 的等待者里挑基准优先级最高的当排头：把 uaddr2
+ *      的字写成它的 tid（队里还有人等就保留 WAITERS，OWNER_DIED 原样带过
+ *      去），叫醒它；其余改挂到 uaddr2 上，持有者记成新排头。
+ * 返回值是**唤醒数加搬运数**（man futex 的 "woken up or requeued"）：
+ * nr_wake=0 时也能从返回值看出有没有搬成功。 */
+static int32 lx_futex_cmp_requeue_pi(void *p_ctx, int32 me)
+{
+    unsigned long uaddr   = ARKRTOS_SVC_ARG(p_ctx, 0u);
+    int32  want  = (int32)(uint32)ARKRTOS_SVC_ARG(p_ctx, 2u);   /* nr_wake */
+    int32  nreq  = (int32)(uint32)ARKRTOS_SVC_ARG(p_ctx, 3u);   /* nr_requeue */
+    unsigned long uaddr2  = ARKRTOS_SVC_ARG(p_ctx, 4u);
+    uint32 expected = (uint32)ARKRTOS_SVC_ARG(p_ctx, 5u);
+    unsigned long key;
+    unsigned long key2;
+    uint32 word  = 0u;
+    uint32 word2 = 0u;
+    uint32 nxt;
+    uint32 tid2;
+    uint32 crit;
+    int32  woke = 0;
+    int32  req  = 0;
+    int32  top  = -1;
+    int32  i;
+
+    (void)me;
+    if((want < 0) || (nreq < 0) || (uaddr2 == 0ul))
+    {
+        return -LX_EINVAL;
+    }
+    key = lx_futex_key(uaddr);
+    if(key == ~0UL)
+    {
+        return -LX_ENOSYS;
+    }
+    key2 = lx_futex_key(uaddr2);
+    if(key2 == ~0UL)
+    {
+        return -LX_ENOSYS;
+    }
+    if(lx_futex_get_word(uaddr, &word) != 0)
+    {
+        return -LX_EFAULT;
+    }
+    if(word != expected)
+    {
+        return -LX_EAGAIN;
+    }
+    if(lx_futex_get_word(uaddr2, &word2) != 0)
+    {
+        return -LX_EFAULT;
+    }
+    tid2 = word2 & (uint32)LX_FUTEX_TID_MASK;
+    if(tid2 == 0u)
+    {
+        return -LX_EINVAL;      /* 目标锁没人持有，没有可接手的位置 */
+    }
+
+    /* 1) 普通等待者：只叫醒 nr_wake 个，一个都不搬。
+     * want >= 0 与 mask != 0 在上面已经判过，这里不会回 -EINVAL。 */
+    woke = lx_futex_wake_key(key, want, (uint32)LX_FUTEX_BITSET_ALL);
+
+    /* 2) 排头：基准优先级最高的 rqpi 等待者（同级取任务号小的）。 */
+    crit = ARKRTOS_ENTER_CRITICAL();
+    for(i = 1; i <= (int32)ARKRTOS_TASK_MAX_NUM; i++)
+    {
+        if((s_futex_used[i - 1] == 0u) || (s_futex_rqpi[i - 1] == 0u) ||
+           (s_futex_key[i - 1] != key))
+        {
+            continue;
+        }
+        if((top < 0) ||
+           (arkrtos_task_table[(uint32)i - 1u].base_priority <
+            arkrtos_task_table[(uint32)top - 1u].base_priority))
+        {
+            top = i;
+        }
+    }
+    if(top < 0)
+    {
+        ARKRTOS_EXIT_CRITICAL(crit);
+        return woke;            /* 没有 PI 条件变量等待者：只叫醒了普通人 */
+    }
+    nxt = (uint32)top | (word2 & (uint32)LX_FUTEX_OWNER_DIED);
+    /* 后面还有人（且本次允许搬）就留 WAITERS 位：新持有者的 UNLOCK_PI 靠它
+     * 知道还要再交一次。没被搬走的那些仍在 uaddr 上等，不该让锁字替它们
+     * 记账 —— 否则下一次 UNLOCK_PI 会去交一把空队列。 */
+    if(nreq > 0)
+    {
+        for(i = 1; i <= (int32)ARKRTOS_TASK_MAX_NUM; i++)
+        {
+            if((s_futex_used[i - 1] != 0u) && (s_futex_rqpi[i - 1] != 0u) &&
+               (s_futex_key[i - 1] == key) && (i != top))
+            {
+                nxt |= (uint32)LX_FUTEX_WAITERS;
+                break;
+            }
+        }
+    }
+    s_futex_woke[top - 1] = 1u;
+    /* 其余改挂：键与地址搬到 uaddr2，期望值记成搬运后 uaddr2 上的字，持有
+     * 者记成新排头（优先级继承要算在真正攥锁的那个人头上）。 */
+    for(i = 1; i <= (int32)ARKRTOS_TASK_MAX_NUM; i++)
+    {
+        if((i == top) || (s_futex_used[i - 1] == 0u) ||
+           (s_futex_rqpi[i - 1] == 0u) || (s_futex_key[i - 1] != key))
+        {
+            continue;
+        }
+        if(req >= nreq)
+        {
+            break;
+        }
+        s_futex_key[i - 1]       = key2;
+        s_futex_uaddr[i - 1]     = uaddr2;
+        s_futex_val[i - 1]       = nxt;
+        s_futex_pi_owner[i - 1]  = top;
+        req++;
+    }
+    ARKRTOS_EXIT_CRITICAL(crit);
+
+    if(lx_futex_put_word(uaddr2, nxt) != 0)
+    {
+        /* 字写不进去（用户把地址写坏了）：把叫醒撤销，别让排头拿着一个
+         * 没落到内存里的「所有权」跑起来。搬过的那几个也已经按 nxt 记了
+         * 期望值，一并如实报错。 */
+        crit = ARKRTOS_ENTER_CRITICAL();
+        s_futex_woke[top - 1] = 0u;
+        ARKRTOS_EXIT_CRITICAL(crit);
+        return -LX_EFAULT;
+    }
+    (void)arkrtos_task_wakeup_internal(top);
+    lx_pi_recalc_owner((int32)tid2);    /* 原持有者头上的继承撤销 */
+    lx_pi_recalc_owner(top);            /* 新持有者按队列重算 */
+    return woke + req + 1;              /* 唤醒数 + 搬运数（含排头） */
+}
+
 /* PI 类 op 的总入口。与 Linux 的 rtmutex 一致的部分：
  *   - 字布局：低 30 位持有者 tid、bit31 有等待者、bit30 原持有者已死；
  *   - 自己已经持有再加锁 ⇒ -EDEADLK（真死锁，不假装成功）；
@@ -5281,8 +5586,8 @@ static int32 lx_futex_pi_unlock(unsigned long key, unsigned long uaddr,
  * 与 Linux 不同的边界（文档 §8.4 逐条写死）：
  *   - LOCK_PI 的 timeout 按**相对**时长解释（与 WAIT 同口径），不是 Linux 的
  *     绝对时刻；到期回 -ETIMEDOUT 并摘掉登记、把持有者优先级算回去；
- *   - 没有 WAIT_REQUEUE_PI(11) / CMP_REQUEUE_PI(12)：glibc 只在 PI 条件变量
- *     上用，默认构建不生成，如实 -ENOSYS。
+ *   - WAIT_REQUEUE_PI(11) / CMP_REQUEUE_PI(12) 有独立实现（见上）：这里只管
+ *     LOCK_PI / UNLOCK_PI / TRYLOCK_PI 三档。
  */
 static int32 lx_futex_pi(void *p_ctx, uint32 op, unsigned long uaddr,
                          uint32 val, int32 me)
@@ -5493,6 +5798,17 @@ static int32 lx_futex(void *p_ctx)
         {
             return -LX_ENOSYS;
         }
+    }
+
+    /* PI 条件变量的两档：先于通用路径，因为它们要看两个地址、而且
+     * WAIT_REQUEUE_PI 重放时 a0 已被返回值清成 0（不能拿它算键）。 */
+    if(op == (uint32)LX_FUTEX_WAIT_REQUEUE_PI)
+    {
+        return lx_futex_wait_requeue_pi(p_ctx, uaddr, val, me);
+    }
+    if(op == (uint32)LX_FUTEX_CMP_REQUEUE_PI)
+    {
+        return lx_futex_cmp_requeue_pi(p_ctx, me);
     }
 
     /* PI 类 op 走自己的路径：它们先看字里的持有者，而不是先算键。 */

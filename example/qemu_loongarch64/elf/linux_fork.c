@@ -92,6 +92,8 @@
 #define LX_FUTEX_LOCK_PI    6
 #define LX_FUTEX_UNLOCK_PI  7
 #define LX_FUTEX_TRYLOCK_PI 8
+#define LX_FUTEX_WAIT_REQUEUE_PI 11
+#define LX_FUTEX_CMP_REQUEUE_PI  12
 #define LX_FUTEX_TID_MASK   0x3FFFFFFFul
 #define LX_FUTEX_WAITERS    0x80000000ul
 #define LX_FUTEX_OWNER_DIED 0x40000000ul
@@ -1315,11 +1317,13 @@ void linux_main(unsigned long sp)
             check("futex(WAIT) on a different value == -EAGAIN",
                   lx4(LX_FUTEX, (lx_long)(unsigned long)fw, LX_FUTEX_WAIT,
                       7, 0), -LX_EAGAIN);
-            /* PI 类 op（6/7/8）已经实现，判据挪到下面「futex 第四档」。
-             * 这一格只剩一条：11（WAIT_REQUEUE_PI）仍是如实的 -ENOSYS ——
-             * glibc 的默认构建压根不生成它（只在 PI 条件变量上用）。 */
-            check("futex PI-condvar op (WAIT_REQUEUE_PI) == -ENOSYS",
-                  lx3(LX_FUTEX, (lx_long)(unsigned long)fw, 11, 0), -LX_ENOSYS);
+            /* PI 类 op（6/7/8）已经实现，判据挪到下面「futex 第四档」；
+             * 条件变量的 PI 变体（11/12）在「futex 第五档」。这一格只留一条
+             * 参数面：缺 uaddr2（第 5 格为 0）必须当场回 -EINVAL，不能拿
+             * 「反正是 PI 类」糊过去。 */
+            check("futex(WAIT_REQUEUE_PI) without uaddr2 == -EINVAL",
+                  lx6(LX_FUTEX, (lx_long)(unsigned long)fw,
+                      LX_FUTEX_WAIT_REQUEUE_PI, 0, 0, 0, 0), -LX_EINVAL);
 
             *fw = 1ul;
             ppid = lx1(LX_GETPID, 0);
@@ -1917,6 +1921,164 @@ void linux_main(unsigned long sp)
                 check("non-PI robust child registered and owned (bits=3)",
                       (status2 >> 8) & 0xFF, 3);
             }
+        }
+    }
+
+    /* ---------------- futex 第五档：条件变量的 PI 变体 ----------------
+     * glibc 的 `pthread_cond_wait` 配 PI 互斥走的是 WAIT_REQUEUE_PI(11) +
+     * CMP_REQUEUE_PI(12)：等待者先睡在条件变量字上，被唤醒时内核把互斥
+     * **直接交**给它——不是「叫醒再抢」。单进程只判参数面（值不符 / 目标锁
+     * 空 / 缺 uaddr2），跨进程才判真的搬运与交接：
+     *   父进程 LOCK_PI 持有互斥 → 子进程 WAIT_REQUEUE_PI(cond, 0, mtx) 睡下
+     *   并置 WAITERS → 父进程 CMP_REQUEUE_PI(cond, 0, mtx, 1, 0) 把排头搬
+     *   过去、字里写子进程 tid、叫醒它 → 子进程确认自己是新持有者，等父进程
+     *   放行之后再解锁。
+     * 反假绿：搬运没做时 CMP 回 0（不是 1）、字里还是父进程 tid（或 WAITERS
+     * 残留），子进程的位掩码不会是 7；子进程等不到 WAITERS 时投 SIGCHLD 兜底。
+     * 子进程接手后**不立刻解锁**：先等父进程把「tid/WAITERS」两条读数读完再
+     * 放行，否则「叫醒即抢占」的调度会把字清成 0，读数就变成偶发红。 */
+    {
+        volatile unsigned long *rv;
+        lx_long ra;
+        lx_long rchild;
+        lx_long rstatus = -1;
+        lx_long rrc = -1;
+        int     rround;
+
+        ra = lx6(LX_MMAP, 0, 8192, 3,
+                 LX_MAP_SHARED | LX_MAP_ANONYMOUS, -1, 0);
+        check("futex5 mmap shared page > 0", (ra > 0) ? 1 : 0, 1);
+
+        if (ra > 0)
+        {
+            volatile unsigned long *cv     = (volatile unsigned long *)(unsigned long)ra;
+            volatile unsigned long *mx     = cv + 1;    /* PI 互斥 */
+            volatile unsigned long *mxfree = cv + 2;    /* 空着的一把 */
+            volatile unsigned long *ctidv  = cv + 3;    /* 子进程 tid */
+            volatile unsigned long *gov    = cv + 4;    /* 父进程放行子进程 */
+            volatile unsigned long *yldv   = cv + 5;    /* 只为让出 CPU */
+
+            *cv = 0ul;
+            *mx = 0ul;
+            *mxfree = 0ul;
+            *ctidv = 0ul;
+            *gov = 0ul;
+            *yldv = 0ul;
+
+            /* ---- 1) 参数面（单进程，不依赖调度） ---- */
+            check("futex(WAIT_REQUEUE_PI) on a different value == -EAGAIN",
+                  lx6(LX_FUTEX, (lx_long)(unsigned long)cv,
+                      LX_FUTEX_WAIT_REQUEUE_PI, 1, 0,
+                      (lx_long)(unsigned long)mx, 0), -LX_EAGAIN);
+            check("futex(WAIT_REQUEUE_PI) with a free mutex == -EINVAL",
+                  lx6(LX_FUTEX, (lx_long)(unsigned long)cv,
+                      LX_FUTEX_WAIT_REQUEUE_PI, 0, 0,
+                      (lx_long)(unsigned long)mxfree, 0), -LX_EINVAL);
+            check("futex LOCK_PI before the condvar handoff == 0",
+                  lx4(LX_FUTEX, (lx_long)(unsigned long)mx,
+                      LX_FUTEX_LOCK_PI, 0, 0), 0);
+            check("futex(CMP_REQUEUE_PI) with a mismatched word == -EAGAIN",
+                  lx6(LX_FUTEX, (lx_long)(unsigned long)cv,
+                      LX_FUTEX_CMP_REQUEUE_PI, 0, 1,
+                      (lx_long)(unsigned long)mx, 1), -LX_EAGAIN);
+            check("futex(CMP_REQUEUE_PI) without uaddr2 == -EINVAL",
+                  lx6(LX_FUTEX, (lx_long)(unsigned long)cv,
+                      LX_FUTEX_CMP_REQUEUE_PI, 0, 1, 0, 0), -LX_EINVAL);
+
+            /* ---- 2) 跨进程：真的把排头搬进互斥并交接 ---- */
+            rchild = lx3(LX_CLONE, LX_SIGCHLD, 0, 0);
+            if (rchild == 0)
+            {
+                int     code = 0;
+                lx_long me = lx1(LX_GETPID, 0);
+
+                *ctidv = (unsigned long)me;
+                /* 睡在条件变量字上；互斥此刻由父进程持有，所以这一次真的
+                 * 会睡下（内核同时替父进程置 WAITERS）。 */
+                if (lx6(LX_FUTEX, (lx_long)(unsigned long)cv,
+                        LX_FUTEX_WAIT_REQUEUE_PI, 0, 0,
+                        (lx_long)(unsigned long)mx, 0) == 0)
+                {
+                    code |= 1;  /* bit0: 是被搬运唤醒的，不是超时或错误 */
+                }
+                if ((*mx & LX_FUTEX_TID_MASK) == (unsigned long)me)
+                {
+                    code |= 2;  /* bit1: 互斥字已经写成本任务 tid */
+                }
+                /* 等父进程把读数读完再解锁。期望值固定写 0（「还没放行」）：
+                 * 传当前值的话，已经放行过的字会让内核判「值没变、该睡」，
+                 * 把已发生的唤醒丢掉。 */
+                for (rround = 0; rround < 400; rround++)
+                {
+                    lx_long wrc;
+
+                    if (*gov == 1ul)
+                    {
+                        break;
+                    }
+                    wrc = lx4(LX_FUTEX, (lx_long)(unsigned long)gov,
+                              LX_FUTEX_WAIT, 0, 0);
+                    if ((wrc == 0) || (*gov == 1ul))
+                    {
+                        break;
+                    }
+                }
+                if (lx4(LX_FUTEX, (lx_long)(unsigned long)mx,
+                        LX_FUTEX_UNLOCK_PI, 0, 0) == 0)
+                {
+                    code |= 4;  /* bit2: 接手来的锁能正常放掉 */
+                }
+                (void)lx1(LX_EXIT, code);
+                for (;;)
+                {
+                }
+            }
+            check("clone for condvar rqpi child > 0",
+                  (rchild > 0) ? 1 : 0, 1);
+
+            /* 等子进程真的排上队：WAITERS 位是内核替它置的。让出 CPU 用带
+             * 整毫秒超时的 FUTEX_WAIT（本机没有 sched_yield；0.5 ms 会被
+             * timespec 换算截断成 0，循环退化成空转）。 */
+            for (rround = 0; rround < 400; rround++)
+            {
+                lx_long ts[2];
+
+                if ((*mx & LX_FUTEX_WAITERS) != 0ul)
+                {
+                    break;
+                }
+                ts[0] = 0;
+                ts[1] = 5000000L;       /* 5 ms */
+                (void)lx4(LX_FUTEX, (lx_long)(unsigned long)yldv,
+                          LX_FUTEX_WAIT, 0, (lx_long)(unsigned long)ts);
+            }
+            check("futex rqpi: child queued on the mutex (WAITERS)",
+                  ((*mx & LX_FUTEX_WAITERS) != 0ul) ? 1 : 0, 1);
+            if ((*mx & LX_FUTEX_WAITERS) == 0ul)
+            {
+                (void)lx2(LX_KILL, rchild, LX_SIGCHLD);  /* 兜底，别挂死 */
+            }
+
+            rrc = lx6(LX_FUTEX, (lx_long)(unsigned long)cv,
+                      LX_FUTEX_CMP_REQUEUE_PI, 0, 1,
+                      (lx_long)(unsigned long)mx, 0);
+            check("futex(CMP_REQUEUE_PI) handed the mutex over == 1", rrc, 1);
+            check("futex(CMP_REQUEUE_PI) wrote the child tid into the mutex",
+                  (lx_long)(*mx & LX_FUTEX_TID_MASK), (lx_long)(*ctidv));
+            check("futex(CMP_REQUEUE_PI) left no stray WAITERS",
+                  (lx_long)(*mx & LX_FUTEX_WAITERS), 0);
+
+            /* 放行子进程：它会解锁并退出，再核对位掩码与最终的字。 */
+            *gov = 1ul;
+            (void)lx3(LX_FUTEX, (lx_long)(unsigned long)gov, LX_FUTEX_WAKE, 1);
+            rstatus = -1;
+            check("futex rqpi child reaped",
+                  lx4(LX_WAIT4, rchild, (lx_long)(unsigned long)&rstatus, 0, 0),
+                  rchild);
+            check("futex rqpi child saw the handoff (bits=7)",
+                  (rstatus >> 8) & 0xFF, 7);
+            check("futex rqpi mutex cleared after the inherited unlock",
+                  (lx_long)*mx, 0);
         }
     }
 

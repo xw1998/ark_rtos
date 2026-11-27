@@ -57,7 +57,7 @@ Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 | 93 | `exit` | `arkrtos_thread_exit_code_internal()` | `exit code 7` |
 | 94 | `exit_group` | same (single-threaded) | same |
 | 96 | `set_tid_address` | remember the address, return the task id (not involved in futex; see 8.4) | same path as getpid |
-| 98 | `futex` | nine ops: `WAIT`/`WAKE`/`REQUEUE`/`CMP_REQUEUE`/`WAIT_BITSET`/`WAKE_BITSET` with timeout and bitsets, plus the PI trio `LOCK_PI`/`UNLOCK_PI`/`TRYLOCK_PI`; key = physical frame + offset in page (`ARKRTOS_USE_LINUX_FUTEX`, 8.4 / 8.4b) | `futex(WAIT) on a different value == -EAGAIN -> -11 ok` / `futex(WAIT) returned 0 after being woken -> 0 ok` / `futex2 bitset waker saw 1, woke only matching (bits=7) -> 7 ok` / `futex(WAIT) with 50 ms timeout == -ETIMEDOUT -> -110 ok` / `futex LOCK_PI on a free word == 0 -> 0 ok` / `futex LOCK_PI twice == -EDEADLK -> -35 ok` / `futex TRYLOCK_PI on an owned word == -EAGAIN -> -11 ok` |
+| 98 | `futex` | eleven ops: `WAIT`/`WAKE`/`REQUEUE`/`CMP_REQUEUE`/`WAIT_BITSET`/`WAKE_BITSET` with timeout and bitsets, the PI trio `LOCK_PI`/`UNLOCK_PI`/`TRYLOCK_PI` and the condition-variable PI variants `WAIT_REQUEUE_PI`/`CMP_REQUEUE_PI`; key = physical frame + offset in page (`ARKRTOS_USE_LINUX_FUTEX`, 8.4 / 8.4b / 8.4c) | `futex(WAIT) on a different value == -EAGAIN -> -11 ok` / `futex(WAIT) returned 0 after being woken -> 0 ok` / `futex2 bitset waker saw 1, woke only matching (bits=7) -> 7 ok` / `futex(WAIT) with 50 ms timeout == -ETIMEDOUT -> -110 ok` / `futex LOCK_PI on a free word == 0 -> 0 ok` / `futex LOCK_PI twice == -EDEADLK -> -35 ok` / `futex TRYLOCK_PI on an owned word == -EAGAIN -> -11 ok` |
 | 99 | `set_robust_list` | register the chain of locks that must be settled if the owner dies: non-null head, 8-byte aligned, length fits `next/futex_offset/pending`, else `-EINVAL` (8.4b) | `set_robust_list with a short length == -EINVAL -> -22 ok` / `set_robust_list on a well formed head == 0 -> 0 ok` |
 | 100 | `get_robust_list` | own pid only (there is no second process identity to query); a foreign pid honestly returns `-ESRCH`, a null out-pointer `-EFAULT` (8.4b) | `get_robust_list(self) == 0 -> 0 ok` / `get_robust_list reports the length we registered -> 24 ok` / `get_robust_list on a foreign pid == -ESRCH -> -3 ok` |
 | 113 | `clock_gettime` | `MONOTONIC` from kernel ticks; `REALTIME` returns `-ENOSYS` | `MONOTONIC -> 0 ok` / `REALTIME -> -38 ok` |
@@ -120,8 +120,8 @@ return value is a separate port primitive
 ## 3 Explicitly unsupported
 
 `dup`/`dup2` redirection, `socket`/`select`, the fd classes of `futex`
-(nine futex ops plus robust-list cleanup exist behind `ARKRTOS_USE_LINUX_FUTEX`,
-default off, sections 8.4 / 8.4b), threads. File-backed `mmap`
+(eleven futex ops plus robust-list cleanup exist behind `ARKRTOS_USE_LINUX_FUTEX`,
+default off, sections 8.4 / 8.4b / 8.4c), threads. File-backed `mmap`
 exists (section 8.5), page-level write protection exists (section 8.6), and real
 `mmap` semantics `MAP_FIXED` exists in the demand tier (section 8.7) - it accepts
 anonymous private mappings only. Anonymous `MAP_SHARED`
@@ -134,12 +134,12 @@ crosses tasks (`kill`/`tkill`/`tgkill` resolve the target by pid, 2026-11-23,
 QEMU LA64), but there is still no preemptive delivery, no real-time signal and no
 `siginfo` (section 7). fd inheritance exists in the fork tier: each process owns
 its fd table and a pipe end holds its own reference count (section 4/8). `futex`
-has nine ops behind a switch (sections 8.4 / 8.4b, default off): the key is the
+has eleven ops behind a switch (sections 8.4 / 8.4b / 8.4c, default off): the key is the
 physical frame plus the offset, since a VA means different frames in parent and
 child; WAIT / WAKE / REQUEUE / CMP_REQUEUE / WAIT_BITSET / WAKE_BITSET work, as
-do the PI trio LOCK_PI / UNLOCK_PI / TRYLOCK_PI and robust-list cleanup
-(`set_robust_list` / `get_robust_list`, syscalls 99/100). The fd classes and the
-PI condition-variable variants (`WAIT_REQUEUE_PI` / `CMP_REQUEUE_PI`) are
+do the PI trio LOCK_PI / UNLOCK_PI / TRYLOCK_PI, robust-list cleanup
+(`set_robust_list` / `get_robust_list`, syscalls 99/100) and the condition-variable
+PI variants WAIT_REQUEUE_PI / CMP_REQUEUE_PI (8.4c). The fd classes are
 `-ENOSYS` rather than guessed. See the
 Chinese page for the reasoning per row.
 
@@ -597,7 +597,7 @@ reads its start timestamp before releasing the child to sleep 60 ms - otherwise
 `blocking wait4 waited 2 ms`, which looks like wait4 did not block. With both
 fixed the fork+cow+shm tier is stable 3/3 and the default tier 5/5.
 
-### 8.4 `futex`: nine ops (`ARKRTOS_USE_LINUX_FUTEX`, 2026-11-23, extended 2026-11-24 and 2026-11-26, QEMU LA64)
+### 8.4 `futex`: eleven ops (`ARKRTOS_USE_LINUX_FUTEX`, 2026-11-23, extended 2026-11-24, 2026-11-26 and 2026-11-27, QEMU LA64)
 
 `clone` creates a second execution stream and `MAP_SHARED` lets both sides see the
 same memory, but "sleep until this word changes" was still missing - without it
@@ -606,22 +606,24 @@ kernel does not synchronise for you, it only parks a task while the word still
 matches and wakes it when someone asks, so the common path stays in user mode.
 
 With `ARKRTOS_USE_LINUX_FUTEX` on (`depends on ARKRTOS_USE_LINUX_ABI`), number 98
-lands in three batches, nine ops in total. The first (2026-11-23) is the minimal
+lands in four batches, eleven ops in total. The first (2026-11-23) is the minimal
 tier: `FUTEX_WAIT` / `FUTEX_WAKE`. The second (2026-11-24) adds what the glibc
 condvar actually walks: `FUTEX_REQUEUE` / `FUTEX_CMP_REQUEUE` /
 `FUTEX_WAIT_BITSET` / `FUTEX_WAKE_BITSET`, plus `timeout` and `-ETIMEDOUT`. The
 third (2026-11-26) adds the PI trio the default glibc mutex walks: `FUTEX_LOCK_PI`
-/ `FUTEX_UNLOCK_PI` / `FUTEX_TRYLOCK_PI` (see 8.4b). Missing any of
+/ `FUTEX_UNLOCK_PI` / `FUTEX_TRYLOCK_PI` (see 8.4b). The fourth (2026-11-27) is
+**PI mutexes paired with condition variables**: `FUTEX_WAIT_REQUEUE_PI` /
+`FUTEX_CMP_REQUEUE_PI` (see 8.4c). Missing any of
 `WAIT_BITSET|CLOCK_REALTIME` + `CMP_REQUEUE` leaves pthread condvars unable to
 run; missing the PI trio stops every default `pthread_mutex` dead - so each batch
 was done whole rather than piece by piece.
 
 | Item | Current state |
 |---|---|
-| ops | `WAIT`(0) / `WAKE`(1) / `REQUEUE`(3) / `CMP_REQUEUE`(4) / `WAIT_BITSET`(9) / `WAKE_BITSET`(10). `FUTEX_PRIVATE_FLAG`(128) is **accepted and stripped** - the key is physical anyway, so private and inter-process are the same thing here; `FUTEX_CLOCK_REALTIME`(256) is only legal with `WAIT_BITSET`, and since this machine has no wall clock it honestly returns `-ENOSYS` **when a timeout is present** (uptime is never passed off as an absolute instant); the PI trio `LOCK_PI`(6)/`UNLOCK_PI`(7)/`TRYLOCK_PI`(8) is covered in 8.4b; still
-honestly `-ENOSYS` are `FUTEX_FD`(2), `WAKE_OP`(5), the condition-variable PI
-variants `WAIT_REQUEUE_PI`(11)/`CMP_REQUEUE_PI`(12) (the default glibc build never
-emits them), 13/14 and the fd classes - no guessing |
+| ops | `WAIT`(0) / `WAKE`(1) / `REQUEUE`(3) / `CMP_REQUEUE`(4) / `WAIT_BITSET`(9) / `WAKE_BITSET`(10). `FUTEX_PRIVATE_FLAG`(128) is **accepted and stripped** - the key is physical anyway, so private and inter-process are the same thing here; `FUTEX_CLOCK_REALTIME`(256) is only legal with `WAIT_BITSET`, and since this machine has no wall clock it honestly returns `-ENOSYS` **when a timeout is present** (uptime is never passed off as an absolute instant); the PI trio `LOCK_PI`(6)/`UNLOCK_PI`(7)/`TRYLOCK_PI`(8) is covered in 8.4b and the
+condition-variable PI variants `WAIT_REQUEUE_PI`(11)/`CMP_REQUEUE_PI`(12) in 8.4c;
+still honestly `-ENOSYS` are `FUTEX_FD`(2), `WAKE_OP`(5), 13/14 and the fd
+classes - no guessing |
 | key | **physical frame number + offset in page**, not the VA. Each process owns its own 8 KB pair window, so the same VA names different frames in parent and child; a VA key would let two unrelated processes wake each other on the same address - a bug that reports no error and only wakes one waiter too many. Outside the window (stack, kernel direct map) no frame resolves, so it is `-ENOSYS` rather than a fake VA key |
 | sleep | no infinite sleep exists here: the task registers, calls `arkrtos_task_block_in_critical(LX_WAIT_SLICE_MS = 100 ms)` and `arkrtos_port_svc_restart()`, the same restartable-syscall path as 8.1. On wake it checks `s_futex_woke` first (someone called, return 0), then the registered deadline (reached means `-ETIMEDOUT`), otherwise re-reads the word: changed means woken, unchanged means another slice. **Without a timeout it never times out** (as in Linux). The timeout is stored as a **deadline**, not a duration: a relative timeout counts from the first entry only, because re-adding it on every slice replay would never expire. `WAIT` takes the timeout as **relative**, `WAIT_BITSET` as an **absolute** instant (as in Linux; this kernel's clock is monotonic milliseconds). A port without restart support returns `-ENOSYS` and clears the slot - it never pretends it slept. On a replay `a0` has already been clobbered to 0 by the return value (trap 2), so which word to read and what value to expect come from the registered copy, never from the replayed arguments |
 | `-EAGAIN` / `-EINTR` | word != `val` at entry gives `-EAGAIN` at once; an unblocked pending signal gives `-EINTR` at once, and the replay checks again so a signal can break a sleeper out |
@@ -630,9 +632,10 @@ emits them), 13/14 and the fd classes - no guessing |
 | `REQUEUE` / `CMP_REQUEUE` | Linux packs `nr_requeue` **into the `timeout` slot** (argument 4) and `uaddr2` into argument 5, and this copies that reuse: wake `val` of them first, then re-queue at most `nr_requeue` of the rest onto `uaddr2`, returning **the number woken plus re-queued** (man futex: "woken up or requeued"). Linux callers rely on that count to tell whether the requeue happened at all; a `CMP_REQUEUE` with `nr_wake=0` that returned only 0 would leave glibc's `pthread_cond_broadcast` unable to decide. `CMP_REQUEUE` first compares the word at `uaddr` with `val3` and returns `-EAGAIN` on a mismatch; a missing `uaddr2` is `-EINVAL`. A re-queued waiter has its **expected value updated to the current word at `uaddr2`**: requeue never wakes in Linux, and this kernel returns to user mode through a slice replay, so without that update the replay would see two different words and treat it as "woken" - a deliberate deviation inside the model, written down in the code |
 | check order | a waking WAIT decides in this order: someone `WAKE`d it -> the deadline passed -> the word changed (counts as woken) -> an unblocked signal (`-EINTR`) -> sleep another slice. The order is the priority: `WAKE` beats the timeout, so a call that is both woken and expired at the same instant returns 0 |
 
-Readouts (`tools/fork_gate.py`, fork+COW+SHM+futex tier, **113 checks**, 73 of them
+Readouts (`tools/fork_gate.py`, fork+COW+SHM+futex tier, **127 checks**, 87 of them
 futex - 9 basic pairing, 7 multi-slice, 20 for the second batch (bitsets, timeout,
-requeue) and 37 for the fourth batch (PI trio and robust list, see 8.4b)): the
+requeue), 37 for the fourth batch (PI trio and robust list, see 8.4b) and 14 for
+the fifth batch (PI condition variables, see 8.4c)): the
 shared page is mapped (`> 0`), `WAKE` with no waiter returns 0,
 `WAIT` on a different value returns `-11`, `LOCK_PI` on a free word returns 0 (the
 old readout here asserted "an unknown op returns `-38`" with `LOCK_PI` as the
@@ -797,7 +800,7 @@ low-priority owner (priority inversion).
 
 | Item | Current state |
 |---|---|
-| ops | `LOCK_PI`(6) / `UNLOCK_PI`(7) / `TRYLOCK_PI`(8), nine ops together with the six in 8.4. `FUTEX_PRIVATE_FLAG`(128) is accepted and stripped; `FUTEX_CLOCK_REALTIME`(256) with a timeout honestly returns `-ENOSYS` (no wall clock) |
+| ops | `LOCK_PI`(6) / `UNLOCK_PI`(7) / `TRYLOCK_PI`(8), nine ops together with the six in 8.4 (the two condition-variable variants are 8.4c). `FUTEX_PRIVATE_FLAG`(128) is accepted and stripped; `FUTEX_CLOCK_REALTIME`(256) with a timeout honestly returns `-ENOSYS` (no wall clock) |
 | word layout | low 30 bits = owner tid (`FUTEX_TID_MASK = 0x3FFFFFFF`), bit 31 `FUTEX_WAITERS = 0x80000000`, bit 30 `FUTEX_OWNER_DIED = 0x40000000`. Bit-for-bit the Linux layout - glibc reads this word directly, so one bit off is a different ABI |
 | priority inheritance | queueing raises the waiter's `base_priority` onto the owner and release/hand-over computes it back, all through the single `arkrtos_ready_reprio()` entry that reorders the ready set. **The task's `base_priority` plus the "who waits on me" table is the only source of truth**; no cached "effective priority" snapshot that can be poisoned by an intermediate value - otherwise "raised twice, discounted once" only shows up with several waiters |
 | hand-over, not wake-then-race | `UNLOCK_PI` and robust cleanup **write the word directly** as "taker tid | kept bits", so ownership moves at once. Waking every waiter to race again is exactly the cause of priority inversion and the semantic line between PI and plain futex - and the anti-false-green check targets it: if the implementation degenerates to wake-then-race, the parent in QEMU group 2 reads `-EAGAIN` or still finds the dead child's tid, i.e. a red readout rather than a hang |
@@ -809,9 +812,9 @@ low-priority owner (priority inversion).
 | robust chain | `set_robust_list(head, len)`: non-null `head`, 8-byte aligned, `len >= 12` (`next` / `futex_offset` / `list_op_pending`), else `-EINVAL`. Each entry is `{ next | PI bit }` where the lowest bit of `next` marks a PI mutex; `futex_offset` is a **byte offset from the node itself** (`offsetof` semantics), not an element count - trap (1) below |
 | exit cleanup | in `on_task_exit` it first runs `lx_robust_exit()` (rewriting user memory: every chained word becomes `OWNER_DIED`, PI entries handed over by PI rules) and only then `lx_futex_forget()` (drops the kernel registration). The order cannot be swapped - dropping the registration first loses the waiter information needed for the hand-over. The chain is truncated at `ROBUST_LIST_LIMIT = 2048`: dying inside the exit hook stops the whole system, which is worse than missing one entry |
 | cross-process boundary | `get_robust_list(pid, ...)` accepts only `pid == self`; a foreign pid honestly returns `-ESRCH` (there is no queryable second process identity, and no pretending to read another address space); a null out-pointer is `-EFAULT` |
-| differences from Linux | no `WAIT_REQUEUE_PI`(11) / `CMP_REQUEUE_PI`(12) (never emitted by the default glibc build; honestly `-ENOSYS`); `FUTEX_CLOCK_REALTIME` with a timeout is `-ENOSYS`; waiter choice looks at `base_priority` only - there is no SCHED_DEADLINE layer, since this kernel has no such policy |
+| differences from Linux | the condition-variable PI variants `WAIT_REQUEUE_PI`(11) / `CMP_REQUEUE_PI`(12) are not in this batch - they have their own implementation (8.4c); `FUTEX_CLOCK_REALTIME` with a timeout is `-ENOSYS`; waiter choice looks at `base_priority` only - there is no SCHED_DEADLINE layer, since this kernel has no such policy |
 
-Readouts (37 of the 113 in the fork+COW+SHM+futex tier; the host side has another 63 in
+Readouts (37 of the 127 in the fork+COW+SHM+futex tier; the host side has another 63 in
 `t_futex_pi()`):
 
 | Readout | What it pins |
@@ -877,6 +880,66 @@ bookkeeping); the cross-process surface is left to the 37 QEMU readouts. They do
 the host controls exactly who owns and who waits, QEMU proves that two processes really share one
 physical frame and that the exit hook really reaches user memory.
 
+### 8.4c futex fifth batch: the condition-variable PI variants (2026-11-27, 68 host + 14 QEMU LA64 checks)
+
+8.4b finishes PI mutexes, but **a PI mutex paired with a condition variable** still has a path of
+its own: glibc's `pthread_cond_wait` uses `FUTEX_WAIT_REQUEUE_PI`(11) when the mutex is PI, and
+`pthread_cond_signal` uses `FUTEX_CMP_REQUEUE_PI`(12). The semantics differ from every earlier
+batch: the waiter **already owns** the mutex (`cond_wait` releases it first and then sleeps on the
+condition word), and on wake it must **directly receive** the mutex - not "wake it and let it
+`LOCK_PI` again" (that would throw the PI guarantee away and fall back to priority inversion), but
+the kernel writes the mutex word **to the waiter's tid on the spot** and then wakes it.
+
+| Item | Current state |
+|---|---|
+| ops | `WAIT_REQUEUE_PI`(11) / `CMP_REQUEUE_PI`(12), eleven ops together with the earlier nine. Both share the 8.4b word layout (low 30 bits owner tid / bit31 `WAITERS` / bit30 `OWNER_DIED`); `FUTEX_PRIVATE_FLAG` is accepted and stripped as before |
+| waiter registration | `uaddr2` must be **held by someone**, otherwise `-EINVAL` at once - the requeue target is a PI lock somebody grips, and without an owner there is no position to hand over (Linux judges the same way); before registering, bit `WAITERS` is set on `uaddr2`, otherwise the owner's `UNLOCK_PI` would never know it has to hand over. The wait slot carries one extra flag, `s_futex_rqpi`: rqpi waiters are PI class too, so a plain `WAKE` / `REQUEUE` **does not touch them** (the class test is `s_futex_pi`), and only `CMP_REQUEUE_PI` moves the whole queue by `s_futex_rqpi` |
+| hand-over | `CMP_REQUEUE_PI` does, in order: check that the word at `uaddr` equals `val3` (else `-EAGAIN`) -> check `uaddr2` has an owner (else `-EINVAL`) -> **first** wake up to `nr_wake` ordinary waiters on `uaddr` (same order as Linux: wake before moving, or the woken task races in and rewrites the word) -> pick the rqpi waiter with the highest `base_priority` as the head, write `head tid` into `uaddr2` (`OWNER_DIED` carried over verbatim; `WAITERS` kept only when more rqpi waiters remain and this call is allowed to move them) -> wake the head -> move the rest (up to `nr_requeue`) onto `uaddr2`, updating key, address, expected value and owner (the owner is the new head, so priority inheritance lands on whoever really grips the lock) |
+| return value | **woken plus requeued** (head included), the `man futex` "woken up or requeued" convention: with `nr_wake=0` the caller can still tell from the return value whether the move succeeded |
+| replay | the same restartable path as 8.4. When the head wakes, `s_futex_woke` is already set: the slot is cleared and 0 returned, **without re-reading the word** - the kernel has just written the ownership, and user mode may already have changed it to 0 or another bit, so re-reading could only misjudge |
+| error codes | value mismatch `-EAGAIN`; `uaddr2` null or unowned `-EINVAL`; either address outside the window `-ENOSYS`; user-memory faults `-EFAULT` (a failed write to `uaddr2` also cancels the wake-up, so nobody runs with an ownership that never reached memory); a signal while parked `-EINTR`; a port without restart support `-ENOSYS` |
+| differences from Linux | (1) **no FIFO wait queue**: the head is chosen by `base_priority` (task id as tie-break), while Linux follows the rtmutex queue order. For PI semantics this is a stronger property (the task that should run first takes over), but "first come, first served" is not guaranteed here; (2) sleeping is 100 ms slice replay (no infinite sleep in this kernel), externally equivalent; (3) `timeout` is **relative** only; `FUTEX_CLOCK_REALTIME` honestly returns `-ENOSYS` (no wall clock); (4) mixed queues are split by the `s_futex_rqpi` flag - a waiter that went to sleep on the same word with a plain `WAIT` is only woken up to `nr_wake` times and never moved, whereas Linux has its own judgement for mixed queues; (5) rescheduling looks at `base_priority` only, with no SCHED_DEADLINE layer |
+
+Readouts (the 14 QEMU LA64 checks of this batch, all inside `tools/fork_gate.py`'s futex tier):
+
+| Readout | What it pins |
+|---|---|
+| `futex5 mmap shared page > 0 -> 1` | the fifth batch's shared page exists |
+| `futex(WAIT_REQUEUE_PI) on a different value == -EAGAIN -> -11` | a stale value does not sleep (same rule as `WAIT`; the fast path never reaches the move logic) |
+| `futex(WAIT_REQUEUE_PI) with a free mutex == -EINVAL -> -22` | an unowned target lock is refused on the spot - an unowned lock is not treated as a position to take over |
+| `futex LOCK_PI before the condvar handoff == 0 -> 0` | the parent really is the owner of a PI lock before the hand-off (everything about `WAITERS` and hand-over assumes it) |
+| `futex(CMP_REQUEUE_PI) with a mismatched word == -EAGAIN -> -11` | the moving side checks the expected value too |
+| `futex(CMP_REQUEUE_PI) without uaddr2 == -EINVAL -> -22` | a missing `uaddr2` is refused |
+| `clone for condvar rqpi child > 0 -> 1` | the waiter is a second real process |
+| `futex rqpi: child queued on the mutex (WAITERS) -> 1` | the child really parked and the kernel set `WAITERS` for the owner (the owner relies on that bit to know someone queues) |
+| `futex(CMP_REQUEUE_PI) handed the mutex over == 1 -> 1` | the move count is 1 (head included) - a "wake but do not move" implementation reads 0 here |
+| `futex(CMP_REQUEUE_PI) wrote the child tid into the mutex -> <tid>` | ownership **transfers on the spot**: the word holds the child's tid, not the parent's |
+| `futex(CMP_REQUEUE_PI) left no stray WAITERS -> 0` | with a single rqpi waiter no `WAITERS` is left behind, otherwise the new owner's `UNLOCK_PI` would hand over an empty queue |
+| `futex rqpi child saw the handoff (bits=7) -> 7` | the child sets all three bits: woken by the move (bit0) / word holds its tid (bit1) / the inherited lock unlocks cleanly (bit2) |
+| `futex rqpi child reaped -> <n>` / `futex rqpi mutex cleared after the inherited unlock -> 0` | the child exits normally and what it releases is **the lock it inherited** (the word ends at 0, no tid left) |
+
+Host side: `t_futex_requeue_pi()` adds **68** assertions (43 `ck_ret` + 25 `ck` / `ck_u`) covering what
+QEMU cannot control: replay keeps sleeping / CMP with a stale value / the two-waiter priority choice
+(base 3 beats base 9) / the moved waiter replays and the word finally clears / `nr_requeue=0` moves
+only the head (word `6` without `WAITERS`) / a failed write to `uaddr2` returns `-EFAULT` and does
+**not** wake anyone / both `-EFAULT` reads of CMP / no waiter returns 0 with the word untouched /
+zero timeout and a port without restart / a fault while reading the timeout structure / `-EINTR` /
+the three replay exits (`-ENOSYS`, `-ETIMEDOUT`, `-EINTR`).
+
+Two fixture-side rules worth writing down (otherwise they will be stepped on again):
+
+(1) **The head must replay and clear its slot before it unlocks.** If the test lets the moved head
+call `UNLOCK_PI` directly, `lx_pi_top_waiter()` picks "itself, still queued" as the successor and the
+word keeps `tid | WAITERS` (`0x80000007`) instead of 0. Real Linux does hand-over plus wake-up
+atomically inside one syscall; this kernel models it as "register + slice replay", so the user-side
+unlock must happen after the replay returns - which is exactly glibc's order (`cond_wait` returns
+before the lock is used again).
+
+(2) **With a single mover, the `WAITERS` bit depends on whether anyone else is left.** The fixture
+has to give the two waiters explicit `base_priority` 4 / 5 (tid 6 / 7) to reproduce "tid 7 wins";
+with default priorities the choice varies and the assertion flips between red and green - any test
+of priority inheritance must write `base_priority` explicitly instead of relying on defaults.
+
 ### 8.5 File mapping and write-back (`ARKRTOS_USE_PAGING_FILEMAP`, 2026-11-23, QEMU LA64)
 
 `clone` gives a second execution stream and `MAP_SHARED` lets both see the same
@@ -902,7 +965,7 @@ content back, and `msync` has nothing to mean. With
 | `mprotect` | unaffected: still validation-only (section 1); `PROT_EXEC` cannot be enforced in hardware on this LA64 path (no NR/NX bit) |
 
 Readouts (the fifth tier of `tools/fork_gate.py`, fork+COW+SHM+futex+filemap,
-**133 checks**, 20 of them the filemap block):
+**147 checks**, 20 of them the filemap block):
 
 | readout | what it pins down |
 |---|---|
@@ -953,7 +1016,7 @@ entries.
 | revoking | another `mprotect` with `PROT_READ|PROT_WRITE` revokes it. A COW-shared pair is read-only anyway, and revoking mprotect does not open it up (that would bypass copy-on-write and let both processes write their own frame) |
 | log | a violation prints `[LA64U] mprotect violation badv=0x... era=0x... tid=... -> kill task` (the `tid` tells operators which task was reaped; the gate uses this line as cross evidence) |
 
-Readouts (fifth tier plus `-DARKRTOS_USE_PAGING_MPROTECT=1`, **144 checks**, 11 of
+Readouts (fifth tier plus `-DARKRTOS_USE_PAGING_MPROTECT=1`, **158 checks**, 11 of
 them the mprotect block):
 
 | readout | what it pins down |
@@ -1084,7 +1147,7 @@ itself is not a separate syscall on la64 any more; libc translates `select` into
 | Blocking shape | Same as futex: `arkrtos_port_svc_restart` plus `arkrtos_task_block_in_critical(100 ms)`, with the **deadline** stored per task (not the remaining duration - otherwise every replay restarts the timer); without a restartable port it returns `-EAGAIN` honestly |
 | Task id reuse | Task exit and `reset` both clear `s_sel_armed/s_sel_deadline`: task ids are reused, and a stale record means a new task inherits "already waiting" |
 
-Readouts (seventh `tools/fork_gate.py` tier, fixture 144 -> **160 checks**, 15 of them select):
+Readouts (seventh `tools/fork_gate.py` tier, fixture 158 -> **174 checks**, 15 of them select):
 
 | Readout | What it pins |
 |---|---|
@@ -1118,7 +1181,7 @@ they would have to be rewritten. Putting select and a future socket layer behind
 switch would turn "zero footprint when off" into "half the feature when off".
 `ARKRTOS_USE_LINUX_SELECT` depends only on `ARKRTOS_USE_LINUX_ABI`.
 
-### 8.9 socket (U-23): translation layer and the QEMU eighth tier (2026-11-24, 581 host checks + 198 QEMU checks)
+### 8.9 socket (U-23): translation layer and the QEMU eighth tier (2026-11-24, 581 host checks + 212 QEMU checks)
 
 13 numbers: `socket`(198), `bind`(200), `listen`(201), `accept`(202), `connect`(203),
 `getsockname`(204), `getpeername`(205), `sendto`(206), `recvfrom`(207), `setsockopt`(208),
@@ -1141,10 +1204,10 @@ dispatch on the fd kind (the same fd table holds files, pipes and sockets).
 98.73% on that tier alone, 98.48% union across six tiers (baseline 97.96%), **581 checks**
 green.
 
-**QEMU eighth tier: 198 checks all `ok` + `exit code 0`.** The eighth tier of
+**QEMU eighth tier: 212 checks all `ok` + `exit code 0`.** The eighth tier of
 `tools/fork_gate.py` (`SELECT+SOCKET+LWIP`) really runs the socket section of
 `example/qemu_loongarch64/elf/linux_fork.c` on LA64 (38 checks) plus one performance
-regression check, stacked on the 160 checks of the seventh tier:
+regression check, stacked on the 174 checks of the seventh tier:
 
 What it reads is the **real lwIP loopback** (`127.0.0.1`), not a stub: `socket` creates both
 a stream and a dgram handle; the errno of a bad domain / bad type / unsupported type;
@@ -1233,7 +1296,7 @@ is only stable with them).**
 `ARKRTOS_USE_NET_VIRTIO` off it compiles only `$(LWIP_SRCS)` (no `drvnet.c`/`net_demo.c`),
 and pushes `ARKRTOS_USE_LINUX_SOCKET=1` together with lwIP into `LXFORK_DEFS`.
 
-### 8.10 Threads (`CLONE_THREAD`, U-25): one address space shared by a group of tasks (2026-11-24, ninth QEMU LA64 tier, 223 checks)
+### 8.10 Threads (`CLONE_THREAD`, U-25): one address space shared by a group of tasks (2026-11-24, ninth QEMU LA64 tier, 245 checks)
 
 The thread branch of `clone(220)` is in, behind `ARKRTOS_USE_LINUX_THREAD` (default **0**,
 `depends on ARKRTOS_USE_LINUX_FORK`). The split between the fork branch and this one is
@@ -1267,8 +1330,8 @@ group. The teardown path splits on whether siblings are still alive:
 Threads are **not** registered in `s_child[]`: Linux's `wait4` cannot see threads, so the
 group keeps exactly one "process" facing the outside.
 
-**Ninth QEMU tier: 223 checks all `ok` + `exit code 0` (600 ms).** The ninth tier of
-`tools/fork_gate.py` is the eighth (198 checks) plus 25 thread checks. Six readings matter most:
+**Ninth QEMU tier: 245 checks all `ok` + `exit code 0` (600 ms).** The ninth tier of
+`tools/fork_gate.py` is the eighth (212 checks) plus 33 thread checks. Six readings matter most:
 
 - `clone(CLONE_THREAD) > 0 -> 1 ok`, `thread PARENT_SETTID wrote the tid -> 6 ok`;
 - `futex WAIT on CHILD_CLEARTID woke with 0 -> 0 ok` - the **real join path**
@@ -1320,9 +1383,9 @@ nothing. The robust list (99/100) and exit cleanup exist now (8.4b) and are acco
 per task, so any member of a thread group only settles its own chain.
 A thread is an ordinary task: same priority, same time slice, no extra scheduling semantics.
 
-### 8.11 Per-App task quota (`ARKRTOS_USE_APP_QUOTA`, 2026-11-24, tenth QEMU LA64 tier, 235 checks)
+### 8.11 Per-App task quota (`ARKRTOS_USE_APP_QUOTA`, 2026-11-24, tenth QEMU LA64 tier, 257 checks)
 
-The tenth tier = the ninth tier (223 checks) + the quota section. It answers "can one App eat
+The tenth tier = the ninth tier (245 checks) + the quota section. It answers "can one App eat
 the whole task table", which is not a new syscall: the loader hands out a non-zero owner id per
 ELF load (`elf_app_owner_new()`), fork and `clone(CLONE_THREAD)` **inherit** it, and once the
 owner's **live** task count reaches `ARKRTOS_APP_MAX_TASKS` creation fails --
@@ -1508,7 +1571,7 @@ and the `-ENOSYS` control with SHM off).
 `ARKRTOS_USE_LINUX_FUTEX` (section 8.4) is the fifth switch, default **0**,
 `depends on ARKRTOS_USE_LINUX_ABI` with the same `#error` guard. With it off the
 wait slots, the key resolver and `lx_futex` are not compiled and number 98 falls
-back to `-ENOSYS`; with it on the measured evidence is the 113 readouts of the
+back to `-ENOSYS`; with it on the measured evidence is the 127 readouts of the
 fork+COW+SHM+futex tier (73 of them futex: 9 basic pairing, 7 multi-slice, 20
 for bitsets/timeout/requeue and 37 for PI/robust) plus the 434 host checks of the futex profile.
 
@@ -1518,7 +1581,7 @@ for bitsets/timeout/requeue and 37 for PI/robust) plus the 434 host checks of th
 mapping through demand-paged frames, so without DEMAND it cannot be filled), with
 four `#error` guards. With it off the file-mapping branch, the write-back
 bookkeeping and `msync` are not compiled and `mmap(fd)` returns `-ENOSYS`; with it
-on the evidence is the 133 readouts of the fifth tier (20 of them filemap) plus the
+on the evidence is the 147 readouts of the fifth tier (20 of them filemap) plus the
 358 host checks of the filemap profile.
 `ARKRTOS_USE_PAGING_MPROTECT` (section 8.6), default **0**, `depends on
 ARKRTOS_USE_LINUX_ABI` + `PAGING` + `PAGING_PAGES` + `PAGING_DEMAND` (a pair's
@@ -1526,7 +1589,7 @@ entries can only be rewritten once demand paging can hand out the frame), with
 four `#error` guards in features.h; with it off the `s_pg_page_ro` ledger,
 `la_pg_page_ro` / `la_pg_mprotect_hit`, the port's `paging_protect` and
 `mprotect_stat` produce nothing and `mprotect` falls back to "validate, return 0,
-count separately"; with it on the evidence is the **144 readouts of the sixth
+count separately"; with it on the evidence is the **158 readouts of the sixth
 tier** (11 of them mprotect) plus the host-side compile gate.
 
 `ARKRTOS_USE_LINUX_SELECT` (section 8.8), default **0**, `depends on
@@ -1540,7 +1603,7 @@ profile.
 `depends on ARKRTOS_USE_LINUX_ABI` with an `#error` guard; with it off all `lx_sock_*`
 code and the socket dispatch in the fd table are not compiled and `198`-`210`/`242` fall
 back to `-ENOSYS`; with it on the measured readout is the host socket tier's **581 checks**
-(98.73% on that tier, 98.48% union) plus the **198 readouts of the QEMU eighth tier**
+(98.73% on that tier, 98.48% union) plus the **212 readouts of the QEMU eighth tier**
 (39 of them the socket section: 38 semantic + 1 round-trip timing).
 
 `MAP_FIXED` (section 8.7) is **not a switch of its own**: it exists when
@@ -1571,7 +1634,7 @@ tier `linuxabisocket` in `tools/coverage_gate.py` (with
 98.73% on the tier and 98.48% union (baseline 97.96%), and `tools/ci_gate.py`'s
 `linux-abi-host` item already includes it; on the board the **eighth tier** of
 `tools/fork_gate.py` (`-DARKRTOS_USE_LINUX_SELECT=1 -DARKRTOS_USE_LINUX_SOCKET=1
--DARKRTOS_USE_LWIP=1`) gives 198 checks all `ok` + `exit code 0` on QEMU LA64.
+-DARKRTOS_USE_LWIP=1`) gives 212 checks all `ok` + `exit code 0` on QEMU LA64.
 
 The fork tier has its own gate, `tools/fork_gate.py` (invoked as `fork` from
 `ci_gate`, **71 items**; it runs the fork, fork+COW, fork+COW+SHM,
@@ -1618,7 +1681,7 @@ parent sees the child's write, child sees the parent's post-fork write) and at
 least one `[LA64U] pg shm map va=0x<n> pairs>=1`. The SHM switch has its own
 `default-off-shm` / `kconfig-wired-shm` / `features-guard-shm` items, and
 `off-zero-port` also requires that a SHM-off build has no
-`arkrtos_port_paging_map_shared`. The futex round requires 113 checks and validates
+`arkrtos_port_paging_map_shared`. The futex round requires 127 checks and validates
 the 73 futex readouts one by one (the nine basic pairing readouts, the seven
 multi-slice ones - a WAIT spanning >= 150 ms still returns 0, the parent sees the
 waker's `2`, the multi-slice waker is reaped, `bits == 3` - and the twenty
@@ -1630,11 +1693,11 @@ robust-list cleanup on task exit, the four-position bit evidence, and the 5 ms
 fixture yielding), with the SHM and COW assertions still in
 place; the futex
 switch has its own `default-off-futex` / `kconfig-wired-futex` /
-`features-guard-futex` items. The filemap round requires 133 checks and validates
+`features-guard-futex` items. The filemap round requires 147 checks and validates
 the 20 filemap readouts one by one; its switch has its own
 `default-off-filemap` / `kconfig-wired-filemap` / `features-guard-filemap` items
 (autoconf 0, four `depends on` entries, four `#error` guards). The mprotect
-round requires 144 checks and validates the 11 mprotect readouts one by one
+round requires 158 checks and validates the 11 mprotect readouts one by one
 (mapping success, read-only and read-write both accepted, a read-only page still
 readable, the sibling 4 KB of the same pair still writable, a write going through
 after revocation, the violating child reaped rather than restarted, the status
@@ -1646,7 +1709,7 @@ blocked, the violating store reaching the parent page, the status word used as a
 exit code, the violation log line removed, the success readout removed); its
 switch has its own `default-off-mprotect` / `kconfig-wired-mprotect` /
 `features-guard-mprotect` items (autoconf 0, four `depends on` entries, four
-`#error` guards). The select round requires 160 checks and validates the 15 select
+`#error` guards). The select round requires 174 checks and validates the 15 select
 readouts one by one (an empty pipe read end not ready, the user set cleared when
 nothing is ready, a 50 ms timed wait returning 0 with a wall clock >= 40 ms, the
 read end ready after data with the ready bit kept, a write end with space and
@@ -1658,14 +1721,14 @@ not reported, a full pipe still reported writable, the `fd_set` not cleared, the
 timeout restarted on every replay, `exceptfds` reported, a bad fd let through, and
 the select readout removed); its switch has its own `default-off-select` /
 `kconfig-wired-select` / `features-guard-select` items. The socket round requires
-198 checks and validates the 38 socket readouts one by one (bind / listen /
+212 checks and validates the 38 socket readouts one by one (bind / listen /
 accept / connect / send / recv over a real lwIP `127.0.0.1` loopback, name
 queries, four `SOL_SOCKET` options, non-blocking `-EAGAIN`, plus one
 round-trip-time regression gate), with every select / mprotect / filemap / SHM /
 COW / futex assertion still in place; its parser-selfcheck adds six more bad logs
 and its switch has its own `default-off-socket` / `kconfig-wired-socket` /
 `features-guard-socket` items (autoconf 0, two `depends on` entries, two
-`#error` guards). The thread round requires 223 checks and validates the 25
+`#error` guards). The thread round requires 245 checks and validates the 33
 thread readouts one by one (`clone(CLONE_THREAD)` positive and negative, both
 SETTIDs, `getpid` equal to the tgid and cross-checked against the parent pid the
 fixture prints, `gettid` different from the parent, `CLONE_SETTLS` landing in
@@ -1679,7 +1742,7 @@ address, the thread-initiated `exit_group` code replaced by the leader's, and th
 `clone(CLONE_THREAD)` readout removed), and its switch has its own
 `default-off-thread` / `kconfig-wired-thread` / `features-guard-thread` items
 (autoconf 0, `depends on ARKRTOS_USE_LINUX_FORK`, the corresponding `#error`).
-The appq round requires 235 checks and validates the 12 quota readouts one by one
+The appq round requires 257 checks and validates the 12 quota readouts one by one
 (fork and thread under the cap, over-limit fork and thread returning `-11`, a fork
 refused while a space is free, the third thread, both threads joined through
 `CHILD_CLEARTID` + `FUTEX_WAIT`, an immediate fork after the quota is refilled, the
@@ -1787,15 +1850,15 @@ own switch (`ARKRTOS_USE_DYNLOAD`) and a minimal in-tree loader, but running gli
 binaries is still out of reach. Fork exists (section 8): per-process fd tables
 with inheritance, cross-task `SIGCHLD` and a blocking `wait4` all have QEMU LA64
 readouts, copy-on-write now exists too (`ARKRTOS_USE_PAGING_COW`, section
-8.2, default off), as does a nine-op futex tier
-(WAIT/WAKE/REQUEUE/CMP_REQUEUE/BITSET plus the PI trio and robust-list cleanup, plus
-timeout, `ARKRTOS_USE_LINUX_FUTEX`, sections 8.4 / 8.4b, default off), file mapping (`ARKRTOS_USE_PAGING_FILEMAP`, section
+8.2, default off), as does an eleven-op futex tier
+(WAIT/WAKE/REQUEUE/CMP_REQUEUE/BITSET plus the PI trio, robust-list cleanup and the
+condition-variable PI variants, plus timeout, `ARKRTOS_USE_LINUX_FUTEX`, sections
+8.4 / 8.4b / 8.4c, default off), file mapping (`ARKRTOS_USE_PAGING_FILEMAP`, section
 8.5, default off), real page-level write protection
 (`ARKRTOS_USE_PAGING_MPROTECT`, section 8.6, default off) and real `mmap`
 semantics `MAP_FIXED` (demand tier, section 8.7, no extra switch); still absent are threads
 (`CLONE_VM`/`CLONE_THREAD` are refused), preemptive signal delivery,
-`dup2`-style redirection, and the PI condition-variable variants of futex
-(`WAIT_REQUEUE_PI` / `CMP_REQUEUE_PI`, which the default glibc build never emits).
+and `dup2`-style redirection.
 
 `execve` gives "replace this task's image" and `fork` gives "a second task with
 its own address-space copy". Both exist, but do not read this as a full process

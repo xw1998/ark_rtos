@@ -64,6 +64,13 @@
      器上：修复前父进程第一个时间片醒来就拿 0 去读字 ⇒ -EFAULT。futex 档合计
      9 + 7 = 16 条，再叠进 filemap / mprotect 两档后是 69 + 7 = 76 与
      80 + 7 = 87 条。
+     第五档（条件变量的 PI 变体 WAIT_REQUEUE_PI 11 / CMP_REQUEUE_PI 12）另加
+     14 条：单进程五条参数面（值不符 -EAGAIN、目标锁空 -EINVAL、缺 uaddr2
+     -EINVAL、交接前父进程 LOCK_PI 成功、CMP 期望值不符 -EAGAIN），跨进程九条
+     （clone>0、子进程排队置 WAITERS、CMP 回 1、字里换成子进程 tid、不留
+     WAITERS、子进程被 reap、子进程位掩码 7 = 被搬运唤醒 / 字里是自己 / 接手
+     来的锁能放掉、解锁后字清 0）。反假绿全落在读数字上：搬运没做时 CMP 回 0、
+     字里还是父进程 tid；退化成「叫醒再抢」时子进程 bit1 不成立。
      FILEMAP 档另加：八条文件映射读数逐条出现 —— 首字节是文件首字节、坏 fd
      回 -EBADF、只读 fd 上的可写共享回 -EACCES、offset=4096 读出的是文件
      第二页、EOF 之后是零、可写共享的 msync 回 0、私有映射的 msync 也回 0 但
@@ -218,22 +225,23 @@ EXPECT_SHM_CHECKS = 40
 # 第四档（PI 三档 LOCK_PI/UNLOCK_PI/TRYLOCK_PI + robust list 99/100 与退出
 # 清理）再 37 条：单进程 PI 语义 15 条 + robust 参数/回读 8 条、跨进程 PI 与
 # PI robust 死亡交接 7 条、非 PI robust 7 条。76 + 37 = 113 条。
-EXPECT_FUTEX_CHECKS = 113
+EXPECT_FUTEX_CHECKS = 127
 # FILEMAP 段多 20 条：只读私有映射的内容三处读数（首字节 / 第 25 / 第 4095）、
 # 三条参数校验（未对齐 offset -EINVAL、坏 fd -EBADF、只读 fd 上的可写共享
 # -EACCES）、offset=4096 的映射与 EOF 补零、O_RDWR 打开、可写共享映射与
 # msync/munmap 两次写回、私有可写映射与它不落盘、以及最后把「共享写落盘 +
 # 私有写不落盘」合成一个位掩码读数（20 % 26 那对字节）。合计 69 条；
 # 再叠 futex 档的 15 条（含多时间片 7 条）= 76 条。
-# 再加 futex 第四档的 37 条：96 + 37 = 133 条。
-EXPECT_FILEMAP_CHECKS = 133
+# 再加 futex 第四档的 37 条：96 + 37 = 133 条；再加第五档（条件变量 PI 变体）
+# 的 14 条：133 + 14 = 147 条。
+EXPECT_FILEMAP_CHECKS = 147
 # MPROTECT 段多 10 条：8 KB 映射、mprotect(RO)==0、只读页仍可读、**同一对里的
 # 另一半 4 KB 仍可写**（4 KB 粒度与 8 KB 粒度在此分家）、mprotect(RW)==0、
 # 恢复保护后写回得去、再设 RO、为违规写 fork 出子进程、子进程被摘掉（不是重启）、
 # 父进程那一页一个字节没变、状态字是「被信号终止」而不是 exit 码。
 # 合计 80 条；再叠 futex 档的 15 条（含多时间片 7 条）= 87 条。
-# 再加 futex 第四档的 37 条：107 + 37 = 144 条。
-EXPECT_MPROTECT_CHECKS = 144
+# 再加 futex 第四档的 37 条：107 + 37 = 144 条；再加第五档的 14 条：158 条。
+EXPECT_MPROTECT_CHECKS = 158
 # SELECT 段多 15 条：pipe2、空管道读端不就绪（返回值 0）、非就绪时用户集被清位、
 # 50 ms 定时等待回 0、定时等待墙钟 >= 40 ms、写进 3 字节、读端就绪（1）、
 # 就绪位在用户集里保留、写端有空间就绪、stdout 恒可写、写满后写端不就绪、
@@ -241,8 +249,8 @@ EXPECT_MPROTECT_CHECKS = 144
 # 坏 fd 回 -EBADF。合计 107 + 15 = 122 条。
 # 再加 1 条反假绿：socket 开关没开时 198 号必须如实回 -ENOSYS（这一条只在
 # select 档里编，socket 档自己不编，所以 socket 档仍然从 122 起算）。
-# 再加 futex 第四档的 37 条：123 + 37 = 160 条。
-EXPECT_SELECT_CHECKS = 160
+# 再加 futex 第四档的 37 条：123 + 37 = 160 条；再加第五档的 14 条：174 条。
+EXPECT_SELECT_CHECKS = 174
 # SOCKET 段多 37 条：等协议栈、stream/dgram 两个 fd、坏 domain 与坏 type
 # 两个 errno、bind/listen/getsockname（addrlen 16、family、端口 8081）、
 # connect、accept（fd + 写回 family）、TCP 收发与载荷逐字节（前 4 字节打包
@@ -251,8 +259,8 @@ EXPECT_SELECT_CHECKS = 160
 # bind/sendto/recvfrom/载荷/对端端口一致、shutdown 后对端 EOF、关闭后
 # read/write 回 -EBADF。合计 122 + 38 + 1 = 161 条（最后一条是「一次 socket
 # 往返不按一个 100 ms 等待时间片结算」的性能回归门）。
-# 再加 futex 第四档的 37 条：161 + 37 = 198 条。
-EXPECT_SOCKET_CHECKS = 198
+# 再加 futex 第四档的 37 条：161 + 37 = 198 条；再加第五档的 14 条：212 条。
+EXPECT_SOCKET_CHECKS = 212
 # THREAD 段多 25 条：clone(CLONE_THREAD)>0、PARENT_SETTID 写回、CLEARTID 上的
 # futex WAIT 回 0、CLEARTID 被清 0、线程真跑了、CHILD_SETTID 看到自己的 tid、
 # tid != 父 tid、线程 getpid == tgid、父 getpid 未变、SETTLS 落到 $tp、两栈
@@ -261,15 +269,16 @@ EXPECT_SOCKET_CHECKS = 198
 # 未对齐 / CLONE_VFORK 各 -EINVAL）、线程退出之后还能 fork（父进程 fd 表没被
 # 提前拆）与被 reap 的退出码 5、线程发起 exit_group 整组被 reap 且码 6、
 # 组长发起 exit_group 整组被 reap 且码 7。合计 161 + 25 = 186 条。
-# 再加 futex 第四档的 37 条：186 + 37 = 223 条。
-EXPECT_THREAD_CHECKS = 231
+# 再加 futex 第四档的 37 条（实测 231，含 thread 段自己多出的 8 条）；
+# 再加第五档的 14 条：245 条。
+EXPECT_THREAD_CHECKS = 245
 # QUOTA 段多 11 条（上限 3 = 父 + 1 子 + 1 线程）：建管子、上限内 fork 成功、
 # 线程把最后一格占掉、超限 fork==-EAGAIN、超限线程==-EAGAIN、被阻塞的子进程
 # 真被 reap、回收后第二个线程成功、**空间空闲时 fork 仍被拒**（全段最干净的
 # 一条：不可能是 ERR_BUSY）、第三个线程被拒、两个线程按 CHILD_CLEARTID 归队、
 # 额度回来后立刻能再起且退出码照传。合计 186 + 12 = 198 条。
-# 再加 futex 第四档的 37 条：198 + 37 = 235 条。
-EXPECT_QUOTA_CHECKS = 243
+# 再加 futex 第四档的 37 条（实测 243）；再加第五档的 14 条：257 条。
+EXPECT_QUOTA_CHECKS = 257
 # 上面这一档的每一段都对应一类「看起来对」的实现：另开地址空间（共享全局读
 # 不到）、每线程一份 fd 表（fork 段留不住）、线程退出就把进程拆了（进程活不
 # 下来）、把线程当进程挂到 wait4 上（exit_group 码不对）。
@@ -1039,6 +1048,34 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
             "非 PI robust 清理没留下 OWNER_DIED"
         req["non-PI robust child registered and owned (bits=3) -> 3 ok"] = \
             "非 PI robust 子进程的登记与持有没全成立"
+        # 第五档：条件变量的 PI 变体（WAIT_REQUEUE_PI 11 / CMP_REQUEUE_PI 12）。
+        # 单进程判参数面，跨进程判「真的把排头搬进互斥并交接」：CMP 的回值必须
+        # 是 1、字里必须换成子进程 tid 且不留 WAITERS、子进程三条位全置（被搬运
+        # 唤醒 / 字里是自己 / 接手来的锁能放掉）。带 tid / 子号的读数走下面的正则。
+        req["futex5 mmap shared page > 0 -> 1 ok"] = \
+            "第五档的共享页没建起来"
+        req["futex(WAIT_REQUEUE_PI) on a different value == -EAGAIN -> -11 ok"] = \
+            "值不符时 WAIT_REQUEUE_PI 没立即回 -EAGAIN（说明它去睡了）"
+        req["futex(WAIT_REQUEUE_PI) with a free mutex == -EINVAL -> -22 ok"] = \
+            "目标锁没人持有时 WAIT_REQUEUE_PI 被接受了（Linux 回 -EINVAL）"
+        req["futex LOCK_PI before the condvar handoff == 0 -> 0 ok"] = \
+            "交接前父进程自己拿不住那把 PI 互斥"
+        req["futex(CMP_REQUEUE_PI) with a mismatched word == -EAGAIN -> -11 ok"] = \
+            "CMP_REQUEUE_PI 没核对期望值"
+        req["futex(CMP_REQUEUE_PI) without uaddr2 == -EINVAL -> -22 ok"] = \
+            "缺 uaddr2 的 CMP_REQUEUE_PI 被接受了"
+        req["clone for condvar rqpi child > 0 -> 1 ok"] = \
+            "条件变量 PI 用例的子进程没 fork 出来"
+        req["futex rqpi: child queued on the mutex (WAITERS) -> 1 ok"] = \
+            "WAIT_REQUEUE_PI 没在目标锁上置 WAITERS（持有者不会来交接）"
+        req["futex(CMP_REQUEUE_PI) handed the mutex over == 1 -> 1 ok"] = \
+            "CMP_REQUEUE_PI 没把排头搬过去（回值不是 1）"
+        req["futex(CMP_REQUEUE_PI) left no stray WAITERS -> 0 ok"] = \
+            "交接后字里残留 WAITERS（下一个持有者会去交一把空队列）"
+        req["futex rqpi child saw the handoff (bits=7) -> 7 ok"] = \
+            "被搬运的子进程三条位没全置（被唤醒 / 字里是自己 / 能解锁）"
+        req["futex rqpi mutex cleared after the inherited unlock -> 0 ok"] = \
+            "接手来的互斥被放掉之后字不干净"
         req["clone for futex child > 0 -> 1 ok"] = "futex 唤醒者没 fork 出来"
         # 最要紧的一条：LA64 上阻塞返回时 a0 被写成 0，而 a0 就是 uaddr。
         req["futex(WAIT) returned 0 after being woken -> 0 ok"] = \
@@ -1233,6 +1270,10 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
              "非 PI 接手后字里不是父进程 tid"),
             (r"^\[fork\] non-PI robust child reaped -> \d+ ok$",
              "非 PI robust 子进程没被 reap"),
+            (r"^\[fork\] futex\(CMP_REQUEUE_PI\) wrote the child tid into the mutex -> \d+ ok$",
+             "CMP_REQUEUE_PI 没把新持有者 tid 写进字里"),
+            (r"^\[fork\] futex rqpi child reaped -> \d+ ok$",
+             "条件变量 PI 用例的子进程没被 reap"),
         ):
             if re.search(pat, text.replace("\r\n", "\n"), re.M) is None:
                 problems.append("缺 `%s` 形态的读数 —— %s"
