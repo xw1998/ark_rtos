@@ -90,7 +90,7 @@ PLV3 空间并跳 `e_entry`（见 [MMU进程模型与ELF装载.md](MMU进程模�
 | 275 | `sched_getattr` | 回写同一布局；`size >= 56` 时两个 util 字段写 0（不做利用率跟踪，但字段必须给定值）（§8.17） | `getattr policy is DEADLINE -> 6 ok` / `getattr DEADLINE deadline round-trips -> 2000000 ok` |
 | 226 | `mprotect` | **有页级写保护**（`ARKRTOS_USE_PAGING_MPROTECT`，§8.6）：4 KB 粒度改 `WE` 位、违规写按 SIGSEGV 杀任务；`PROT_EXEC` / `PROT_NONE` 只记账不强制；关档回「只校验参数、返 0」 | `mprotect RO == 0 -> 0 ok` / `sibling 4 KB half of the same pair stays writable -> 13107 ok` / `mprotect violation reports SIGSEGV status -> 11 ok`（§8.6，11 条） |
 | 227 | `msync` | 只写回本进程记账里的「可写共享文件映射」；窗口内未命中回 0、窗口外 `-ENOMEM`（`ARKRTOS_USE_PAGING_FILEMAP`，§8.5） | `filemap msync rc -> 0 ok` / `filemap private msync rc (no writeback) -> 0 ok` / `filemap shared write persisted, private write not (bits=31) -> 31 ok` |
-| 293 | `rseq` | 注册契约（`len` 必须 32、`flags` 必须 0、地址 32 字节对齐、`NULL` 注销）+ `cpu_id_start`/`cpu_id` 写回 0；`rseq_cs` 的两处中止点（信号投递前、tick 抢占前，§8.14） | `rseq register rc = 0 ok` / `cpu_id readback 0 = 0 ok` / `signal aborted the critical section = 1 ok` / `rseq_cs cleared by the abort = 0 ok` / `exit code 57` |
+| 293 | `rseq` | 注册契约（`len` 必须 32、`flags` 必须 0、地址 32 字节对齐、`NULL` 注销）+ `cpu_id_start`/`cpu_id` 写回 0；`rseq_cs` 的两处中止点（信号投递前、tick 抢占前，§8.14） | `rseq register rc = 0 ok` / `cpu_id readback 0 = 0 ok` / `signal aborted the critical section = 1 ok` / `rseq_cs cleared by the abort = 0 ok` / `tick preemption aborted the critical section = 1 ok`（线程档）/ `exit code 57` |
 
 socket 家族（`198-210`、`242`，共 13 个）见 §8.9：它们在翻译层里落地，宿主 socket 档
 **964 条断言**、QEMU 第八档 **242 条 check**（2026-11-27 复测；U-23 时是 768 / 232），
@@ -1552,7 +1552,7 @@ QEMU 夹具 socket 段加 10 条（`[sock] socket dup returns fd >= 3` 到
 （含 EOF）时报一次 SIGIO」，不做可写方向、实时排队、`si_fd`、进程组，且主人只认单任务号；
 ③ 没有 `F_GETPIPE_SZ` / `F_SETPIPE_SZ`——管道缓冲固定 256 字节（§6）。
 
-### 8.14 `rseq`(293) 与 `getcpu`(168)：可重启序列与 CPU 号（2026-11-27，QEMU LA64 16 条 + 宿主 40 条）
+### 8.14 `rseq`(293) 与 `getcpu`(168)：可重启序列与 CPU 号（2026-11-27 信号投递点 / 2026-11-28 tick 抢占点，QEMU LA64 16 条、线程档 20 条 + 宿主 40 条）
 
 `rseq` 是 glibc 与 Rust 标准库都在用的「无锁临界区」原语：程序把一段临界区的
 `[start_ip, post_commit_offset)` 与 `abort_ip` 登记在一张 `struct rseq_cs` 里，内核
@@ -1582,7 +1582,7 @@ QEMU 夹具 socket 段加 10 条（`[sock] socket dup returns fd >= 3` 到
 | 时机 | 调用点 | 为什么在这里 |
 |---|---|---|
 | 信号投递 | `lx_signal_deliver()` 里、`lx_sig_build_frame()` **之前** | Linux 的 `rseq_ip_fixup` 也在信号处理之前跑。先修 PC 再铺帧，信号帧里存的自然就是 `abort_ip`，`rt_sigreturn` 之后从 abort 路径继续，而不是回到临界区中间 |
-| tick 抢占 | LA64 `la_trap_c()` 的切换点（真正切栈之前），且要求被打断的是用户态（`PRMD & 3 != 0`） | 时间片被打断和被信号打断对程序是同一件事：`rseq_cs` 还挂着就说明它在临界区里 |
+| tick 抢占 | LA64 `la_trap_c()` 的切换点（真正切栈之前，`arkrtos_sched_activate()` 之前调 `arkrtos_linux_abi_rseq_preempt()`），且要求被打断的是用户态（`PRMD & 3 != 0`） | 时间片被打断和被信号打断对程序是同一件事：`rseq_cs` 还挂着就说明它在临界区里。2026-11-28 起有 QEMU 夹具（U-33，线程档多 4 条读数） |
 
 判据逐条对齐 Linux：`rseq` 已注册 / `rseq_cs` 非 0 / 该块可读 / `version` 与 `flags`
 都是 0 / PC 落在 `[start_ip, start_ip + post_commit_offset)` 里。任何一条不成立都
@@ -1599,7 +1599,7 @@ abort 路径后会看到「cs 还在」而再跑一遍临界区，同一段代�
 **实测读数（`[rseq]` 行，QEMU LA64）**
 
 ```
-  [rseq] write /mnt/ram/linux_rseq rc=0 size=8232
+  [rseq] write /mnt/ram/linux_rseq rc=0 size=9560
   [rseq] exec rc=0
   [rseq] getcpu rc = 0 ok
   [rseq] getcpu cpu = 0 ok
@@ -1614,16 +1614,41 @@ abort 路径后会看到「cs 还在」而再跑一遍临界区，同一段代�
   [rseq] normal critical section completed = 1 ok
   [rseq] normal section not falsely aborted = 1 ok
   [rseq] rseq_cs cleared by the commit = 0 ok
+  [rseq] clone for preempt helper rc = 1 ok
+  [rseq] tick preemption aborted the critical section = 1 ok
+  [rseq] tick abort cleared rseq_cs = 0 ok
+  [rseq] preempt helper ran to completion = 1 ok
   [rseq] rseq len != 32 -> -EINVAL = -22 ok
   [rseq] rseq flags != 0 -> -EINVAL = -22 ok
   [rseq] rseq(NULL) deregisters = 0 ok
-  [rseq] PASS: getcpu both outputs zero, rseq registered with cpu_id written, signal delivery aborted the critical section at abort_ip with rseq_cs cleared, commit path completed, invalid contract refused, NULL deregisters
+  [rseq] PASS: getcpu both outputs zero, rseq registered with cpu_id written, signal delivery aborted the critical section at abort_ip with rseq_cs cleared, tick preemption aborted the critical section too, commit path completed, invalid contract refused, NULL deregisters
   [rseq] finished after 0 ms, exit code 57
 ```
 
 `exit code 57` 是夹具自己约定的成功码；`post-commit did not run = 0` 是「提交段一次也
 没执行」的正向证据，`normal section not falsely aborted = 1` 是「没有信号时不许误中止」
 的反向对照——两条一起才说明中止是按区间判的，不是「见到 `rseq_cs` 就跳」。
+
+**tick 抢占中止点的夹具（U-33，2026-11-28）。** 这一条验的是「时间片切走用户态任务」那条路径，
+所以夹具里**一条系统调用也不能发**：一发，中止点就变成「信号投递」或「SVC 返回」，验的就不是 tick 的账了。
+做法是两条同优先级任务一起纯用户态忙等——`linux_fork.c` 的 RUNNING 抢占回归夹具已经证明
+「两个同优先级一起忙等，时间片（10 拍 = 5 ms）一到必然互切」；主线程在第 `pre_start..pre_end`
+里忙等，被切走时它的用户 PC 落在区间里，内核就必须把 PC 改到 `pre_abort`、并清 `rseq_cs`。
+
+三个配套细节都是必需的：
+- **兄弟线程自己不注册 rseq**（表里它那一格是 0），切走它时中止逻辑什么也不做——这是「只对注册过的
+  任务动手」的反向对照；
+- **兄弟线程的忙等轮数必须比主线程那一节长**（`PRE_HELPER_SPIN` 20,000,000 vs `PRE_MAIN_SPIN` 6,000,000）：
+  兄弟先退出就只剩主线程一个人跑，时间片轮不起来、tick 再也不来切主线程，夹具等于把自己饿死；
+- **join 用 pthread 的真实惯用法**：`clone` 的 `LX_CLONE_CHILD_SETTID` 让内核在创建时把子 tid 写进
+  `*ctid`，`CLONE_CHILD_CLEARTID` 让它在退出时清 0 并 `futex` 唤醒；夹具先放一个非零哨兵
+  `0x5eed1234`，再用 `futex(WAIT)` 等它变 0（上限 500 ms，最多 64 轮）。只给 `CLEARTID` 而不给
+  `CHILD_SETTID` 的话，`*ctid` 在创建时**不会被写**，join 第一眼看到 0 就以为已经结束——
+  这台机器上实测就是这么翻了一次车，commit 段的注释里写着这条。
+
+前三节的条件编译也在这里：这一节要 `CLONE_THREAD`，所以只有开了 `ARKRTOS_USE_LINUX_THREAD` 的构建
+（fork 门禁的第九/十档）才编进来，其余八档仍是原来的 16 条；`example/qemu_loongarch64/Makefile` 里
+`LXRSEQ_DEFS` 那条递归赋值把 `ARK_THREAD_ON` 转成夹具的 `-DARKRTOS_USE_LINUX_THREAD=1`。
 
 **宿主档的 40 条**（`test_linux_abi_host.c` 的 `t_rseq`）把 QEMU 夹具造不出来的状态补齐：
 `getcpu` 三正两负（`NULL` 出参、越界 `-EFAULT`）；注册契约的每一条拒绝面（`len`
@@ -1651,8 +1676,24 @@ abort 路径后会看到「cs 还在」而再跑一遍临界区，同一段代�
 `exit code 57`」，`parser-selfcheck` 从 12 种坏样本涨到 **16 种**（rseq 块：去 PASS 行、
 退出码改 1、插一条 FAIL、少一条 check）。
 
+`tools/fork_gate.py` 另管**线程档那 4 条**：`RSEQ_CHECKS = 16` / `RSEQ_THREAD_CHECKS = 20` 按 `thread`
+标志二选一（`[rseq]` 前缀单独计数，十档的 `EXPECT_*` 不用再动），并对这四条做**逐字锚点**：
+
+```
+^\[rseq\] clone for preempt helper rc = 1 ok$
+^\[rseq\] tick preemption aborted the critical section = 1 ok$
+^\[rseq\] tick abort cleared rseq_cs = 0 ok$
+^\[rseq\] preempt helper ran to completion = 1 ok$
+```
+
+不能只比总条数：把 `abort_ip` 那条跳转删掉，夹具会掉进提交段，读数仍是 `... = 1 ok`、条数也不变——
+那是假绿。所以 `parser-selfcheck` 里加两种变异（「中止读数改成 0」「清指针读数改成 1」），两者条数不变、
+没有 FAIL 字样，能被判红就只能靠这四条整行锚点（实测均判红后还原）。
+
 **边界。** ① 单核：`cpu_id`/`node_id` 恒 0，没有迁移，也没有 `mm_cid`；② tick 抢占那条
-路径本机没有夹具（夹具只验信号投递点），宿主档两条抢占断言覆盖的是同一个 `lx_rseq_fixup`；
+路径自 2026-11-28 起有了 QEMU 夹具（U-33：两条同优先级任务一起纯用户态忙等、时间片一到必互切，
+线程档 20 条读数），但**只证明单核上的 tick 切换点**（SMP 两个核同时切走同一个任务未验），
+也没有真板读数；
 ③ `rseq_cs` 非法内容只清指针不杀任务（见上「与 Linux 差一处」）；④ 不实现
 `RSEQ_FLAG_UNREGISTER`（`flags != 0` 一律 `-EINVAL`）。
 
@@ -2207,7 +2248,7 @@ env -u PYTHONHOME -u PYTHONPATH py -3 tools/linux_abi_gate.py --no-build
 | `abi-split-la64` | 立即数 == 0 是 Linux、!= 0 是 Ark |
 | `abi-split-rv32` | `0x10..0x23` 归 Ark；`dup`/`dup3`（23/24）落在这一段里，所以另核「RV32 板级不开 ELF/ABI」——开 ABI 必须开 ELF 是 `features.h` 的 `#error`，歧义由构造不可达（不是靠推断） |
 | `build` | `make -f example/qemu_loongarch64/Makefile` 通过 |
-| `qemu-readout` | Linux 块 14 条 check 全 ok + PASS 行 + `exit code 7`；管道块 30 条 + `exit code 55`；信号块 31 条 + PASS 行 + `exit code 138`；dup 块 56 条（含 fcntl 20 条）+ `exit code 56`；rseq 块 16 条 + PASS 行 + `exit code 57`；旁路演示未受影响 |
+| `qemu-readout` | Linux 块 14 条 check 全 ok + PASS 行 + `exit code 7`；管道块 30 条 + `exit code 55`；信号块 31 条 + PASS 行 + `exit code 138`；dup 块 56 条（含 fcntl 20 条）+ `exit code 56`；rseq 块 16 条（开线程档时 20 条，由 `fork_gate` 单独校验）+ PASS 行 + `exit code 57`；旁路演示未受影响 |
 | `parser-selfcheck` | 把 16 种坏日志喂回判据，必须全判红 |
 
 socket 这一层是**两侧都有读数**的：宿主侧是 `tools/coverage_gate.py` 的第六个 Linux ABI 档
@@ -2240,7 +2281,7 @@ fork 那一档单独一道 `tools/fork_gate.py`（`ci_gate` 的 `fork` 项，**7
 | `qemu-readout`（socket 档） | fork+COW+SHM+futex+filemap+mprotect+select+socket：`[fork]` **242 条** check 全 `ok`；socket 段 48 条（语义 38 + U-30 的 dup 10）逐条校验（`127.0.0.1` 真 lwIP 回环上的 bind/listen/accept/connect/send/recv、名字查询、`SOL_SOCKET` 四条 option、非阻塞 `-EAGAIN`，含一条往返耗时回归门）；select / mprotect / filemap / SHM / COW / futex 的全部判据同时仍在 |
 | `qemu-readout`（thread 档） | fork+COW+SHM+futex+filemap+mprotect+select+socket+thread：`[fork]` **278 条** check 全 `ok`；线程段 36 条逐条校验（`clone(CLONE_THREAD)` 正负、两个 SETTID、`getpid`=tgid 且与夹具打出的父 pid 交叉相等、`gettid` 与父不同、`CLONE_SETTLS` 落 `$tp`、两栈不同址、父局部存活、`CHILD_CLEARTID` 清 0 + `FUTEX_WAIT` 被唤醒、四条参数门槛、线程后仍能 `fork`、线程发起与组长发起的 `exit_group` 各一条、U-32 的非组长 `execve == -EINVAL` 与组长 `execve == -ENOENT` 各一条）；socket 及以下各档判据同时仍在 |
 | `qemu-readout`（appq 档） | fork+…+thread+appq：`[fork]` **290 条** check 全 `ok`；配额段 12 条读数逐条校验（上限内 fork 与线程成、超限 fork 与超限线程回 `-11`、空间空闲时 fork 仍回 `-EAGAIN`、第三个线程回 `-11`、两个线程按 `CHILD_CLEARTID` + `FUTEX_WAIT` 归队、回收后立刻能再 fork、被阻塞的子进程被 `wait4` 真收走、退出码 3 照传），外加三行 `[appq]` 交叉证据（条数恰好 3、owner 同一个、上限读数 3）；thread 及以下各档判据同时仍在 |
-| `parser-selfcheck` | 10 种坏日志必须判红（COW 档另加 4 种：位掩码丢一位、父写丢失、整类删光 copy 行、fork 时搬了字节；SHM 档再加 5 种：删光 `pg shm map` 行、共享写没被父看到、子看不到父的写、共享页起始非 0、缺映射成功读数；futex 档再加 11 种（第二档 8 种 + PI 与 robust 3 种）：WAIT 没被叫醒、唤醒者只看到一半（`bits=1`）、无等待者 WAKE 回 1、多时间片 WAIT 被打成 `-EFAULT`、多时间片没跨过时间片、位集被忽略（`bits=7` 变 3）、改挂没搬走等待者、超时没到期；filemap 档再加 3 种：写回没发生、写回把文件截短、私有映射的改动被落盘；mprotect 档再加 7 种：只读页读不回来、粒度退化成 8 KB、违规写没被拦住、违规写改了父页、状态字当成退出码、缺违规日志行、缺成功读数；select 档再加 8 种：空管道被报就绪、EOF 不报就绪、满管道仍报可写、`fd_set` 没清位、超时被重新计时、`exceptfds` 被上报、坏 fd 被放过、缺 select 读数；socket 档再加 6 种；线程档再加 8 种：CLEARTID 没清 0、join 的 WAIT 没被唤醒、`SETTLS` 没落 `$tp`、线程 `getpid` 不等于 tgid、两栈同址、线程发起的 `exit_group` 码被改成组长的、缺 `clone(CLONE_THREAD)` 读数、非组长 `execve` 闸门丢失（读数从 `-22` 变 `-2`）；配额档再加 5 种：超限线程被放行、空间空闲时 fork 被放行、回收后起不来、子进程没被回收、缺 `[appq]` 日志。累计 fork 10 / cow 14 / shm 19 / futex 30 / filemap 34 / mprotect 41 / select 49 / socket 55 / thread 63 / appq 68 种） |
+| `parser-selfcheck` | 10 种坏日志必须判红（COW 档另加 4 种：位掩码丢一位、父写丢失、整类删光 copy 行、fork 时搬了字节；SHM 档再加 5 种：删光 `pg shm map` 行、共享写没被父看到、子看不到父的写、共享页起始非 0、缺映射成功读数；futex 档再加 11 种（第二档 8 种 + PI 与 robust 3 种）：WAIT 没被叫醒、唤醒者只看到一半（`bits=1`）、无等待者 WAKE 回 1、多时间片 WAIT 被打成 `-EFAULT`、多时间片没跨过时间片、位集被忽略（`bits=7` 变 3）、改挂没搬走等待者、超时没到期；filemap 档再加 3 种：写回没发生、写回把文件截短、私有映射的改动被落盘；mprotect 档再加 7 种：只读页读不回来、粒度退化成 8 KB、违规写没被拦住、违规写改了父页、状态字当成退出码、缺违规日志行、缺成功读数；select 档再加 8 种：空管道被报就绪、EOF 不报就绪、满管道仍报可写、`fd_set` 没清位、超时被重新计时、`exceptfds` 被上报、坏 fd 被放过、缺 select 读数；socket 档再加 6 种；线程档再加 10 种：rseq 的 tick 中止读数改成 0、rseq 的 tick 清指针读数改成 1、CLEARTID 没清 0、join 的 WAIT 没被唤醒、`SETTLS` 没落 `$tp`、线程 `getpid` 不等于 tgid、两栈同址、线程发起的 `exit_group` 码被改成组长的、缺 `clone(CLONE_THREAD)` 读数、非组长 `execve` 闸门丢失（读数从 `-22` 变 `-2`）；配额档再加 5 种：超限线程被放行、空间空闲时 fork 被放行、回收后起不来、子进程没被回收、缺 `[appq]` 日志。累计 fork 10 / cow 14 / shm 19 / futex 30 / filemap 34 / mprotect 41 / select 49 / socket 55 / thread 65 / appq 70 种） |
 | `default-off-shm` / `kconfig-wired-shm` / `features-guard-shm` | SHM 开关的三件套：autoconf 为 0、Kconfig 有 `depends on ARKRTOS_USE_PAGING_COW`、features.h 有对应 `#error`；`off-zero-port` 另核关档没有 `arkrtos_port_paging_map_shared` |
 | `default-off-futex` / `kconfig-wired-futex` / `features-guard-futex` | futex 开关的三件套：autoconf 为 0、Kconfig 有 `depends on ARKRTOS_USE_LINUX_ABI`、features.h 有对应 `#error` |
 | `default-off-filemap` / `kconfig-wired-filemap` / `features-guard-filemap` | 文件映射开关的三件套：autoconf 为 0、Kconfig 四条 `depends on`（ABI / PAGING / PAGES / DEMAND）、features.h 四条 `#error` |

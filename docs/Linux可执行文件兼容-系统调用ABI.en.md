@@ -93,7 +93,7 @@ Numbers follow `asm-generic` (shared by LoongArch / RISC-V / ARM64):
 | 275 | `sched_getattr` | writes back the same layout; with `size >= 56` both util fields are written as 0 (no utilisation tracking, but the fields need a defined value) (section 8.17) | `getattr policy is DEADLINE -> 6 ok` / `getattr DEADLINE deadline round-trips -> 2000000 ok` |
 | 226 | `mprotect` | **real page-level write protection** (`ARKRTOS_USE_PAGING_MPROTECT`, section 8.6): flips the `WE` bit at 4 KB granularity, a violating store kills the task with SIGSEGV; `PROT_EXEC` / `PROT_NONE` are recorded but not enforced; with the switch off it falls back to "validate, return 0" | `mprotect RO == 0 -> 0 ok` / `sibling 4 KB half of the same pair stays writable -> 13107 ok` / `mprotect violation reports SIGSEGV status -> 11 ok` (section 8.6, 11 checks) |
 | 227 | `msync` | writes back only this process's "writable shared file mapping" bookkeeping; a hit inside the heap window syncs, a miss inside it returns 0, outside it `-ENOMEM` (`ARKRTOS_USE_PAGING_FILEMAP`, section 8.5) | `filemap msync rc -> 0 ok` / `filemap private msync rc (no writeback) -> 0 ok` / `filemap shared write persisted, private write not (bits=31) -> 31 ok` |
-| 293 | `rseq` | registration contract (`len` must be 32, `flags` must be 0, 32-byte aligned address, `NULL` deregisters) plus `cpu_id_start`/`cpu_id` written as 0; the two abort points of `rseq_cs` (before signal delivery, before a tick preemption, section 8.14) | `rseq register rc = 0 ok` / `cpu_id readback 0 = 0 ok` / `signal aborted the critical section = 1 ok` / `rseq_cs cleared by the abort = 0 ok` / `exit code 57` |
+| 293 | `rseq` | registration contract (`len` must be 32, `flags` must be 0, 32-byte aligned address, `NULL` deregisters) plus `cpu_id_start`/`cpu_id` written as 0; the two abort points of `rseq_cs` (before signal delivery, before a tick preemption, section 8.14) | `rseq register rc = 0 ok` / `cpu_id readback 0 = 0 ok` / `signal aborted the critical section = 1 ok` / `rseq_cs cleared by the abort = 0 ok` / `tick preemption aborted the critical section = 1 ok` (thread tier) / `exit code 57` |
 
 The socket family (`198-210`, `242`, 13 numbers) is described in section 8.9: it is
 implemented in the translation layer, covered by **964 host assertions** and by the
@@ -1802,7 +1802,7 @@ report "this fd became readable (including EOF)"; the writable direction, real-t
 `si_fd`, and process groups are all out, and the owner is a single task id;
 (3) no `F_GETPIPE_SZ` / `F_SETPIPE_SZ` - the pipe buffer is a fixed 256 bytes (section 6).
 
-### 8.14 `rseq`(293) and `getcpu`(168): restartable sequences and the CPU number (2026-11-27, 16 QEMU LA64 checks + 40 host checks)
+### 8.14 `rseq`(293) and `getcpu`(168): restartable sequences and the CPU number (2026-11-27 signal-delivery point / 2026-11-28 tick-preemption point, 16 QEMU LA64 checks, 20 in the thread tier + 40 host checks)
 
 `rseq` is the "lock-free critical section" primitive used by glibc and by the Rust standard
 library: a program registers the `[start_ip, post_commit_offset)` range of a critical section
@@ -1841,7 +1841,7 @@ interrupted:
 | Moment | Call site | Why there |
 |---|---|---|
 | signal delivery | in `lx_signal_deliver()`, **before** `lx_sig_build_frame()` | Linux runs `rseq_ip_fixup` before the signal handler too. Fixing the PC before the frame is laid down means the saved frame naturally holds `abort_ip`, and `rt_sigreturn` resumes on the abort path instead of in the middle of the critical section |
-| tick preemption | the switch point of `la_trap_c()` on LA64 (before the stack is actually switched), and only when the interrupted context is user mode (`PRMD & 3 != 0`) | being interrupted by the timer and by a signal are the same event to the program: a live `rseq_cs` means it is inside the critical section |
+| tick preemption | the switch point of `la_trap_c()` on LA64 (before the stack is actually switched; `arkrtos_linux_abi_rseq_preempt()` is called before `arkrtos_sched_activate()`), and only when the interrupted context is user mode (`PRMD & 3 != 0`) | being interrupted by the timer and by a signal are the same event to the program: a live `rseq_cs` means it is inside the critical section. Since 2026-11-28 there is a QEMU fixture for it (U-33, four extra readouts in the thread tier) |
 
 The predicates match Linux one for one: `rseq` registered / `rseq_cs` non-zero / the block is
 readable / `version` and `flags` are both 0 / the PC lies inside
@@ -1861,7 +1861,7 @@ than to jump into a block with invalid contents.
 **Measured readout (the `[rseq]` lines, QEMU LA64)**
 
 ```
-  [rseq] write /mnt/ram/linux_rseq rc=0 size=8232
+  [rseq] write /mnt/ram/linux_rseq rc=0 size=9560
   [rseq] exec rc=0
   [rseq] getcpu rc = 0 ok
   [rseq] getcpu cpu = 0 ok
@@ -1876,10 +1876,14 @@ than to jump into a block with invalid contents.
   [rseq] normal critical section completed = 1 ok
   [rseq] normal section not falsely aborted = 1 ok
   [rseq] rseq_cs cleared by the commit = 0 ok
+  [rseq] clone for preempt helper rc = 1 ok
+  [rseq] tick preemption aborted the critical section = 1 ok
+  [rseq] tick abort cleared rseq_cs = 0 ok
+  [rseq] preempt helper ran to completion = 1 ok
   [rseq] rseq len != 32 -> -EINVAL = -22 ok
   [rseq] rseq flags != 0 -> -EINVAL = -22 ok
   [rseq] rseq(NULL) deregisters = 0 ok
-  [rseq] PASS: getcpu both outputs zero, rseq registered with cpu_id written, signal delivery aborted the critical section at abort_ip with rseq_cs cleared, commit path completed, invalid contract refused, NULL deregisters
+  [rseq] PASS: getcpu both outputs zero, rseq registered with cpu_id written, signal delivery aborted the critical section at abort_ip with rseq_cs cleared, tick preemption aborted the critical section too, commit path completed, invalid contract refused, NULL deregisters
   [rseq] finished after 0 ms, exit code 57
 ```
 
@@ -1887,6 +1891,37 @@ than to jump into a block with invalid contents.
 evidence that the commit half never ran, and `normal section not falsely aborted = 1` is the
 negative control that nothing is aborted when no signal arrives - only the pair shows that the
 abort is decided by the range rather than by "jump whenever `rseq_cs` is live".
+
+**The fixture for the tick-preemption abort point (U-33, 2026-11-28).** What is under test here is
+"a tick switches a user-mode task away", so the fixture may **issue no system call at all**: the
+moment it does, the abort point becomes "signal delivery" or "return from the SVC" and it is no
+longer the timer's account. The mechanism is two same-priority tasks busy-waiting in pure user
+mode - the RUNNING-preemption regression fixture in `linux_fork.c` already showed that two
+same-priority busy-waiters must rotate as soon as a time slice elapses (10 ticks = 5 ms); the
+main thread spins inside `pre_start..pre_end`, so when it is switched away its user PC lies in
+the range and the kernel must move it to `pre_abort` and clear `rseq_cs`.
+
+Three details are all required:
+- **the sibling thread does not register rseq itself** (its table slot is 0), so the abort logic
+does nothing when it is switched away - that is the negative control for "only touch registered
+tasks";
+- **the sibling must spin longer than the main thread's section** (`PRE_HELPER_SPIN` 20,000,000 vs
+  `PRE_MAIN_SPIN` 6,000,000): if the sibling exits first the main thread is left alone, the time
+  slice can no longer rotate and the tick never comes to switch the main thread - the fixture
+  would starve the very path it is testing;
+- **the join uses the real pthread idiom**: `LX_CLONE_CHILD_SETTID` makes the kernel write the
+  child tid into `*ctid` at creation, and `CLONE_CHILD_CLEARTID` makes it clear that word to 0 and
+  wake a `futex` on exit; the fixture stores a non-zero sentinel `0x5eed1234` first and then waits
+  with `futex(WAIT)` for it to become 0 (500 ms cap, at most 64 rounds). With only `CLEARTID` and
+  no `CHILD_SETTID`, `*ctid` is **not written at creation**, so the join sees 0 on its first look
+  and thinks the thread is already done - exactly the mistake that was measured on this machine
+  first; the comment in the fixture records it.
+
+That section is also why the conditional compilation is there: it needs `CLONE_THREAD`, so it is
+only built when `ARKRTOS_USE_LINUX_THREAD` is on (tiers nine and ten of the fork gate); the other
+eight tiers keep the original 16 checks. The recursive `LXRSEQ_DEFS` assignment in
+`example/qemu_loongarch64/Makefile` turns `ARK_THREAD_ON` into the fixture's
+`-DARKRTOS_USE_LINUX_THREAD=1`.
 
 **The 40 host checks** (`t_rseq` in `test_linux_abi_host.c`) cover the states a QEMU fixture
 cannot build: `getcpu` three positive and two negative cases (`NULL` out-parameter, out of range
@@ -1921,10 +1956,29 @@ out right; at run time the branch is never taken. That `-O0` and the comment in
 ok + the PASS line + `exit code 57`", and `parser-selfcheck` grows from 12 bad samples to **16**
 (rseq block: PASS line removed, exit code changed to 1, a FAIL line inserted, one check missing).
 
+`tools/fork_gate.py` owns the **four thread-tier lines**: `RSEQ_CHECKS = 16` /
+`RSEQ_THREAD_CHECKS = 20` are chosen by the `thread` flag (the `[rseq]` prefix is counted
+separately, so the ten `EXPECT_*` values do not move), and those four lines are pinned word for
+word:
+
+```
+^\[rseq\] clone for preempt helper rc = 1 ok$
+^\[rseq\] tick preemption aborted the critical section = 1 ok$
+^\[rseq\] tick abort cleared rseq_cs = 0 ok$
+^\[rseq\] preempt helper ran to completion = 1 ok$
+```
+
+Counting lines alone is not enough: delete the jump to `abort_ip` and the fixture falls into the
+commit half, where the readout is still `... = 1 ok` and the count is unchanged - a false green.
+So two mutations were added to `parser-selfcheck` ("abort readout changed to 0", "clear readout
+changed to 1"): both keep the count and contain no FAIL, so only the four full-line anchors can
+make them red (both measured red, then restored).
+
 **Boundaries.** (1) single core: `cpu_id`/`node_id` are always 0, there is no migration and no
-`mm_cid`; (2) the tick-preemption path has no fixture on this machine (the fixture only
-exercises the signal-delivery point); the two host assertions about preemption cover the same
-`lx_rseq_fixup`; (3) invalid `rseq_cs` contents only clear the pointer, the task is not killed
+`mm_cid`; (2) since 2026-11-28 the tick-preemption path does have a QEMU fixture (U-33: two
+same-priority tasks busy-waiting in pure user mode, so a time slice must rotate them; 20 readouts
+in the thread tier), but it proves only the **single-core** tick switch point (an SMP case where two
+cores switch the same task is unverified), and there is no real-board readout; (3) invalid `rseq_cs` contents only clear the pointer, the task is not killed
 (see "one deliberate difference from Linux" above); (4) `RSEQ_FLAG_UNREGISTER` is not
 implemented (`flags != 0` is always `-EINVAL`).
 
@@ -2575,8 +2629,8 @@ board-switch, off-zero-symbols, port-wiring (two directions), compile-on (9 TUs
 under the real LA64 board), syscall-table (30 numbers vs asm-generic),
 abi-split-la64, abi-split-rv32, build, qemu-readout (14 Linux checks + PASS + exit 7,
 15 pipe checks + exit 55, 31 signal checks + PASS + exit 138, 53 dup checks
-including 17 fcntl checks + exit 56, 16 rseq checks + PASS + exit 57, the unrelated
-demos still intact), and parser-selfcheck (sixteen deliberately broken logs must
+including 17 fcntl checks + exit 56, 16 rseq checks (20 with the thread tier on, checked
+separately by `fork_gate`) + PASS + exit 57, the unrelated demos still intact), and parser-selfcheck (sixteen deliberately broken logs must
 each be rejected).
 
 The socket layer has readouts on **both tiers**: on the host the sixth Linux ABI coverage
@@ -2690,7 +2744,8 @@ cleared to 0 with the `FUTEX_WAIT` woken, the four argument gates, a `fork` stil
 working after threads, `exit_group` from a thread versus from the leader, and
 the U-32 pair - non-leader `execve == -EINVAL`, leader `execve == -ENOENT`),
 with every socket-and-below assertion still in place; its parser-selfcheck adds
-eight more bad logs (CLEARTID not cleared, the join WAIT never woken, `SETTLS` not
+ten more bad logs (the rseq tick-abort readout changed to 0, the rseq tick
+clear readout changed to 1, CLEARTID not cleared, the join WAIT never woken, `SETTLS` not
 landing in `$tp`, a thread `getpid` not equal to the tgid, both stacks at one
 address, the thread-initiated `exit_group` code replaced by the leader's, the
 `clone(CLONE_THREAD)` readout removed, and the non-leader execve gate lost - the

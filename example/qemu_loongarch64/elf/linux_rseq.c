@@ -13,7 +13,11 @@
 *               的是 abort_ip；handler 跑完之后 sigreturn 从 abort 路径继续，
 *               提交段一次也不执行，rseq_cs 已被内核清零；
 *            4) 同一套结构在**没有信号**时正常提交：提交段执行、不被误中止；
-*            5) 注册契约：len != 32 / flags != 0 各回 -EINVAL；NULL 注销成功。
+*            5) **tick 抢占点中止**：另造一个同优先级的兄弟线程一起忙等，
+*               时间片一到必然互切；主线程切走时 PC 在 [start, start+post)
+*               里，于是它的 PC 被改到 abort_ip、rseq_cs 被清零，而兄弟线程
+*               自己没注册 rseq，切走时什么也不该发生（反向对照）；
+*            6) 注册契约：len != 32 / flags != 0 各回 -EINVAL；NULL 注销成功。
 *
 * @note 临界区里的 tgkill 是**就地内联**发出的，不是经函数调用：经过 helper
 *       的话，被打断的 PC 会落在 helper 的函数体里，数值上不在
@@ -32,6 +36,21 @@
 #define LX_TGKILL           131
 #define LX_WRITE            64
 #define LX_EXIT             93
+#define LX_CLONE            220
+#define LX_FUTEX            98
+#define LX_CLOCK_GETTIME    113
+#define LX_CLOCK_MONOTONIC  1
+#define LX_FUTEX_WAIT       0
+#define LX_FUTEX_WAKE       1
+#define LX_EAGAIN           11
+#define LX_CLONE_VM         0x00000100ul
+#define LX_CLONE_FS         0x00000200ul
+#define LX_CLONE_FILES      0x00000400ul
+#define LX_CLONE_SIGHAND    0x00000800ul
+#define LX_CLONE_THREAD     0x00010000ul
+#define LX_CLONE_PARENT_SETTID  0x00100000ul
+#define LX_CLONE_CHILD_CLEARTID 0x00200000ul
+#define LX_CLONE_CHILD_SETTID   0x01000000ul
 
 #define LX_SIGUSR1          10
 #define LX_EINVAL           22
@@ -219,6 +238,7 @@ static int                 s_hits;
 static int                 s_aborted;
 static int                 s_post;
 static int                 s_normal;
+static int                 s_pre_aborted;
 static lx_long             s_self;
 
 static void on_signal(unsigned long signo)
@@ -241,6 +261,115 @@ __asm__(
     ".size  sig_restorer, .-sig_restorer\n"
     ".previous\n"
 );
+
+/* ------------------------------------------------------------------
+ * tick 抢占的中止点用的兄弟线程
+ *
+ * 与 linux_fork.c 的 RUNNING 抢占回归夹具同一套机械：**两个同优先级任务
+ * 一起忙等**，时间片（10 拍 = 5 ms）一到必然互切。只有主线程在临界区里，
+ * 于是切走时它的用户 PC 落在 [start, start+post) 之间，内核必须在真正切栈
+ * 之前把它改到 abort_ip 并清 rseq_cs。
+ *
+ * 兄弟线程自己不注册 rseq（表里它那一格是 0），切走它时中止逻辑什么也不做
+ * ——这正好是「只对注册过的任务动手」的反向对照。
+ * ------------------------------------------------------------------ */
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+static volatile lx_long   g_pre_ran;
+static volatile lx_long   g_pre_ctid;
+static unsigned char      s_pre_stk[16384] __attribute__((aligned(16)));
+
+/* 两段忙等的轮数：兄弟线程必须活得比主线程那一节长，否则它先退出、
+ * 只剩主线程一个人跑，时间片轮不起来，tick 永远不来切主线程 ——
+ * 那就成了「夹具自己把被测路径饿死」。主线程那一节要跨过至少两个
+ * 时间片（10 拍 = 5 ms），所以给到最保守的下面这组值。 */
+#define PRE_HELPER_SPIN  20000000L
+#define PRE_MAIN_SPIN     6000000L
+
+static void preempt_body(void)
+{
+    volatile unsigned long spin = 0ul;
+    volatile lx_long       i;
+
+    /* 纯用户态循环，一次系统调用都不发：整段都在 RUNNING 状态。 */
+    for (i = 0; i < PRE_HELPER_SPIN; i++)
+    {
+        spin = spin + (unsigned long)i;
+    }
+    g_pre_ran = (lx_long)spin;
+    (void)lx1(LX_EXIT, 0);
+    for (;;)
+    {
+    }
+}
+
+/* 旧式 clone(2) 的子线程从系统调用后面那条指令继续跑：syscall / 分支 / 跳转
+ * 必须挤在同一个 asm 块里（照 musl __clone 的写法）。 */
+static lx_long preempt_spawn(void)
+{
+    unsigned int ptid = 0xFFFFFFFFu;
+    register lx_long r_a0 __asm__("a0") =
+        (lx_long)(LX_CLONE_VM | LX_CLONE_FS | LX_CLONE_FILES |
+                  LX_CLONE_SIGHAND | LX_CLONE_THREAD |
+                  LX_CLONE_PARENT_SETTID | LX_CLONE_CHILD_SETTID |
+                  LX_CLONE_CHILD_CLEARTID);
+    register lx_long r_a1 __asm__("a1") =
+        (lx_long)(unsigned long)(s_pre_stk + sizeof(s_pre_stk));
+    register lx_long r_a2 __asm__("a2") =
+        (lx_long)(unsigned long)&ptid;
+    register lx_long r_a3 __asm__("a3") =
+        (lx_long)(unsigned long)&g_pre_ctid;
+    register lx_long r_a4 __asm__("a4") = 0;
+    register lx_long r_a7 __asm__("a7") = LX_CLONE;
+
+    __asm__ volatile("syscall 0\n\t"
+                     "bnez $a0, 1f\n\t"
+                     "jirl $ra, %[body], 0\n\t"
+                     "1:\n"
+                     : "+r"(r_a0)
+                     : "r"(r_a1), "r"(r_a2), "r"(r_a3), "r"(r_a4),
+                       "r"(r_a7),
+                       [body] "r"((lx_long)(unsigned long)preempt_body)
+                     : "memory");
+    return r_a0;
+}
+
+/* 按 pthread_join 的真实路径等 CLEARTID 被清成 0（绝对时刻上限 500 ms）。 */
+static void preempt_join(void)
+{
+    long    ts[2];
+    lx_long dur[2];
+    int     spun;
+
+    dur[0] = 0;
+    dur[1] = 0;
+    if (lx3(LX_CLOCK_GETTIME, LX_CLOCK_MONOTONIC,
+            (lx_long)(unsigned long)ts, 0) == 0)
+    {
+        dur[0] = ts[0];
+        dur[1] = ts[1] + 500000000;
+        if (dur[1] >= 1000000000)
+        {
+            dur[0] += 1;
+            dur[1] -= 1000000000;
+        }
+    }
+    for (spun = 0; spun < 64; spun++)
+    {
+        lx_long wrc;
+
+        if (g_pre_ctid == 0)
+        {
+            break;
+        }
+        wrc = lx4(LX_FUTEX, (lx_long)(unsigned long)&g_pre_ctid, LX_FUTEX_WAIT,
+                  g_pre_ctid, (lx_long)(unsigned long)dur);
+        if ((wrc == 0) || (wrc != -LX_EAGAIN))
+        {
+            break;
+        }
+    }
+}
+#endif /* ARKRTOS_USE_LINUX_THREAD */
 
 /* ------------------------------------------------------------------
  * 入口
@@ -369,7 +498,59 @@ ok_after:
     check("normal section not falsely aborted", s_aborted, 1);
     check("rseq_cs cleared by the commit", (lx_long)s_rseq.rseq_cs, 0);
 
-    /* ---------------- 6：注册契约的拒绝面与注销 ---------------- */
+    /* ---------------- 6：tick 抢占点上的中止 ----------------
+     * 这一节需要 CLONE_THREAD（兄弟线程）。没开线程的构建（如 linux_abi
+     * 门禁的默认档）整段不编，check 条数仍是 16；线程档（fork 门禁的
+     * 第九/十档）编进来后是 20 条。 */
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+    s_pre_aborted = 0;
+    g_pre_ran     = 0;
+    /* 哨兵：CLEARTID 只在退出时把 *ctid 清 0，创建时不写；不带
+     * CHILD_SETTID 的话它一直就是 0，join 第一眼就以为已经结束了。
+     * 照 linux_fork.c 的 pre_join 写法：先放一个不可能的值，再等它变 0。 */
+    g_pre_ctid    = 0x5eed1234l;
+    { lx_long sc = preempt_spawn();
+      check("clone for preempt helper rc", (sc > 0) ? 1 : sc, 1); }
+    if (s_zero_guard) { goto pre_abort; }
+    s_cs.version            = 0u;
+    s_cs.flags              = 0u;
+    s_cs.start_ip           = (unsigned long long)(unsigned long)&&pre_start;
+    s_cs.post_commit_offset = (unsigned long long)
+                              ((unsigned long)&&pre_end -
+                               (unsigned long)&&pre_start);
+    s_cs.abort_ip           = (unsigned long long)(unsigned long)&&pre_abort;
+    s_rseq.rseq_cs = (unsigned long long)(unsigned long)&s_cs;
+    __asm__ volatile("" ::: "memory");
+
+pre_start:
+    /* 纯用户态忙等：这一节里一次系统调用都不发。发了就把中止点换成
+     * 「信号投递」或「SVC 返回」，那不再是 tick 的账。兄弟线程同优先级
+     * 一起忙等，时间片一到必然互切，切走时 PC 就在这里。 */
+    {
+        volatile unsigned long spin = 0ul;
+        volatile lx_long       i;
+
+        for (i = 0; i < PRE_MAIN_SPIN; i++)
+        {
+            spin = spin + (unsigned long)i;
+        }
+        (void)spin;
+    }
+    __asm__ volatile("nop");
+pre_end:
+    s_rseq.rseq_cs = 0ul;
+    __asm__ volatile("" ::: "memory");
+    goto pre_after;
+pre_abort:
+    s_pre_aborted = 1;
+pre_after:
+    check("tick preemption aborted the critical section", s_pre_aborted, 1);
+    check("tick abort cleared rseq_cs", (lx_long)s_rseq.rseq_cs, 0);
+    preempt_join();
+    check("preempt helper ran to completion", (g_pre_ran != 0) ? 1 : 0, 1);
+#endif /* ARKRTOS_USE_LINUX_THREAD */
+
+    /* ---------------- 7：注册契约的拒绝面与注销 ---------------- */
     rc = lx4(LX_RSEQ, (lx_long)(unsigned long)&s_rseq, 16, 0, 0);
     check("rseq len != 32 -> -EINVAL", rc, -LX_EINVAL);
     rc = lx4(LX_RSEQ, (lx_long)(unsigned long)&s_rseq, 32, 1, 0);
@@ -381,8 +562,12 @@ ok_after:
     {
         out("[rseq] PASS: getcpu both outputs zero, rseq registered with "
             "cpu_id written, signal delivery aborted the critical section at "
-            "abort_ip with rseq_cs cleared, commit path completed, invalid "
-            "contract refused, NULL deregisters\n");
+            "abort_ip with rseq_cs cleared, ");
+#if (ARKRTOS_USE_LINUX_THREAD == 1)
+        out("tick preemption aborted the critical section too, ");
+#endif
+        out("commit path completed, invalid contract refused, NULL "
+            "deregisters\n");
         (void)lx1(LX_EXIT, 57);
     }
     else

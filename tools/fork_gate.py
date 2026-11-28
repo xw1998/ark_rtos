@@ -280,6 +280,10 @@ SCHED_CHECKS = 63
 # 那一条 —— 它会中途杀掉任务，读数全丢；那一条由宿主用例
 # test_linux_abi_host.c 的 t_async_io 第 7 节断言。
 SIGIO_CHECKS = 38
+# [rseq] 段（U-33）：夹具本身 16 条；开了 CLONE_THREAD 的档多出 tick 抢占中止
+# 的四条（兄弟线程 clone>0 / 中止发生 / rseq_cs 被清 / 兄弟线程跑到底）= 20 条。
+RSEQ_CHECKS = 16
+RSEQ_THREAD_CHECKS = 20
 EXPECT_FORK_CHECKS = 47 + LOCK_CHECKS
 # COW 段多 5 条：pipe2、clone>0、子被 reap、子看到 fork 前的值（位掩码 3）、
 # 父自己的写还在。合计 52 条。
@@ -1013,6 +1017,10 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
     # [sio] 段（U-29）同样单独计数：前缀不同，十档的 EXPECT_* 仍然不用改。
     sio_ok = count(lambda s: s.startswith("[sio] ") and s.rstrip().endswith(" ok"))
     sio_fail = count(lambda s: s.startswith("[sio] ") and "FAIL" in s)
+    # [rseq] 段（U-33）：夹具用 ARKRTOS_USE_LINUX_THREAD 条件编译，所以线程档
+    # （第九/十档）多出 tick 抢占中止的四条，其余八档仍是原来的 16 条。
+    rseq_ok = count(lambda s: s.startswith("[rseq] ") and s.rstrip().endswith(" ok"))
+    rseq_fail = count(lambda s: s.startswith("[rseq] ") and "FAIL" in s)
 
     m_par = re.search(r"^\[fork\] parent pid=(\d+)$", text.replace("\r\n", "\n"), re.M)
     m_chi = re.search(r"^\[fork\] child pid=(\d+)$", text.replace("\r\n", "\n"), re.M)
@@ -1034,6 +1042,11 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
         problems.append("有 %d 条 [sio] check 打了 FAIL" % sio_fail)
     if sio_ok != SIGIO_CHECKS:
         problems.append("[sio] check 通过条数 %d != %d" % (sio_ok, SIGIO_CHECKS))
+    if rseq_fail != 0:
+        problems.append("有 %d 条 [rseq] check 打了 FAIL" % rseq_fail)
+    if rseq_ok != (RSEQ_THREAD_CHECKS if thread else RSEQ_CHECKS):
+        problems.append("[rseq] check 通过条数 %d != %d（线程档含 tick 中止段）"
+                        % (rseq_ok, RSEQ_THREAD_CHECKS if thread else RSEQ_CHECKS))
     # 三条新读数必须逐条出现：只比总条数时，换一个夹具（少写一条、多写一条）
     # 仍可能凑出同一个数，那是假绿。
     req = {
@@ -1557,6 +1570,17 @@ def judge(text, expect_checks=EXPECT_FORK_CHECKS, cow=False, shm=False,
         one(r"^\[fork\] execve from the leader passes the group gate \(ENOENT\)"
             r" -> -2 ok$",
             "组长发起的 execve 没走到装载器（闸门误伤了正常路径）")
+        # U-33：[rseq] 段的 tick 抢占中止点。这一条不能用「条数对得上」证明——
+        # 把 abort_ip 跳转删掉时夹具会掉到提交段，读数仍是 " ok"；必须逐字
+        # 钉死 "= 1 ok" 与 "= 0 ok" 两个值。
+        one(r"^\[rseq\] tick preemption aborted the critical section = 1 ok$",
+            "tick 抢占点没把 PC 改到 abort_ip（rseq_cs 还挂着就继续跑了）")
+        one(r"^\[rseq\] tick abort cleared rseq_cs = 0 ok$",
+            "tick 中止没把 rseq_cs 清成 0")
+        one(r"^\[rseq\] clone for preempt helper rc = 1 ok$",
+            "tick 中止段的兄弟线程没造出来")
+        one(r"^\[rseq\] preempt helper ran to completion = 1 ok$",
+            "tick 中止段的兄弟线程没跑到底")
         # 交叉证据：线程的 getpid 必须真的等于父进程报出来的那个数，而不是
         # 夹具里另找的一个常量。
         m_tg = re.search(r"^\[fork\] thread getpid == tgid \(parent pid\) -> (\d+) ok$",
@@ -1682,6 +1706,17 @@ def self_check(good_text, cow=False, shm=False, futex=False, filemap=False,
             "[sio] getown on console is 0 -> 0 ok",
             "[sio] getown on console is 0 -> 7 ok"),
     }
+    if thread:
+        mutations.update({
+            # U-33：tick 中止的两条读数（只在线程档存在）。改成 0/1 后条数不变、
+            # 也没 FAIL 字样，能被判红就只能靠 judge 里那两条逐字锚点。
+            "rseq tick 中止读数改成 0": lambda s: s.replace(
+                "[rseq] tick preemption aborted the critical section = 1 ok",
+                "[rseq] tick preemption aborted the critical section = 0 ok"),
+            "rseq tick 清指针读数改成 1": lambda s: s.replace(
+                "[rseq] tick abort cleared rseq_cs = 0 ok",
+                "[rseq] tick abort cleared rseq_cs = 1 ok"),
+        })
     if cow:
         mutations.update({
             "COW 位掩码丢一位": lambda s: s.replace(

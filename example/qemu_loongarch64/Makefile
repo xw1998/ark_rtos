@@ -503,9 +503,14 @@ LXRSEQ_ELF := $(BUILD)/linux_rseq.elf
 LXRSEQ_SIGNED := $(BUILD)/linux_rseq.signed.elf
 LXRSEQ_H   := $(BUILD)/linux_rseq_blob.h
 
+# tick 抢占中止那一节要用 CLONE_THREAD 造一个兄弟线程，所以只在线程档
+# （EXTRA_CFLAGS 显式开 ARKRTOS_USE_LINUX_THREAD=1）里编进来；没开的构建
+# 仍是原来的 16 条 check。用递归赋值：ARK_THREAD_ON 在本文件后面才定义。
+LXRSEQ_DEFS = $(if $(ARK_THREAD_ON),-DARKRTOS_USE_LINUX_THREAD=1,)
+
 $(LXRSEQ_ELF): $(LXRSEQ_SRC)
 	@mkdir -p $(BUILD)
-	$(CC) $(ARCH_FLAGS) -O0 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
+	$(CC) $(ARCH_FLAGS) $(LXRSEQ_DEFS) -O0 -ffreestanding -nostdlib -nostartfiles -fno-builtin \
 	      -ffunction-sections -fdata-sections -Wl,--gc-sections \
 	      -Wl,-Ttext=$(WIN_ELF_BASE) -Wl,-e,_start -Wl,--strip-all \
 	      -Wl,-z,max-page-size=4096 -o $@ $< ;
