@@ -64,7 +64,7 @@
   "arkrtos_timer": 100.0,
   "arkrtos_trace": 100.0,
   "arkrtos_trust": 95.0,
-  "arkrtos_utest": 83.65,
+  "arkrtos_utest": 100.0,
   "arkrtos_vfs": 98.7,
   "arkrtos_vfs_lfs": 99.03,
   "arkrtos_waitmulti": 100.0,

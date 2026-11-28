@@ -9785,7 +9785,9 @@ typedef void (*ark_utest_out_t)(const char *s);
 void ark_utest_register(const ark_utest_case_t *c);
 ```
 
-用例自注册。通常由 UTEST_CASE 宏自动调用；重复注册同一指针会被忽略
+用例自注册。通常由 UTEST_CASE 宏自动调用；重复注册同一指针会被忽略。
+缺结构 / 缺名 / 缺函数的登记请求一律忽略（名是运行期的匹配键，
+留 NULL 会在过滤时解引用踩空）。
 
 ### `uint32_t ark_utest_list(void);`
 

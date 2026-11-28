@@ -76,7 +76,9 @@ typedef struct
 typedef void (*ark_utest_out_t)(const char *s);
 void ark_utest_set_output(ark_utest_out_t out);
 
-/** 用例自注册。通常由 UTEST_CASE 宏自动调用；重复注册同一指针会被忽略 */
+/** 用例自注册。通常由 UTEST_CASE 宏自动调用；重复注册同一指针会被忽略。
+ *  缺结构 / 缺名 / 缺函数的登记请求一律忽略（名是运行期的匹配键，
+ *  留 NULL 会在过滤时解引用踩空）。 */
 void ark_utest_register(const ark_utest_case_t *c);
 
 /** 列出全部已注册用例（名字 + 序号）；返回用例数 */

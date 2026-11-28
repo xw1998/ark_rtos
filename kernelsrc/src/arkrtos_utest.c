@@ -51,6 +51,8 @@ static void put_c(char c)
     }
 }
 
+/* 接 NULL 是给 ark_utest_fail(file == NULL) 兜底：那时 base_name 原样返回
+ * NULL，不兜就会踩空。 */
 static void put_s(const char *s)
 {
     if(s == 0)
@@ -75,7 +77,9 @@ static void put_u(unsigned long v, unsigned base, int upper)
         put_c('0');
         return;
     }
-    while((v != 0ul) && (n < (int)sizeof(tmp)))
+    /* tmp[24] 恒够：64 位无符号数十进制最多 20 位、十六进制 16 位，
+     * base 只可能是 10/16，所以 n < sizeof(tmp) 那条判断永远不成立，去掉。 */
+    while(v != 0ul)
     {
         tmp[n++] = digits[v % base];
         v /= base;
@@ -143,7 +147,9 @@ void ark_utest_register(const ark_utest_case_t *c)
 {
     uint32_t i;
 
-    if((c == 0) || (c->fn == 0))
+    /* 缺结构 / 缺名 / 缺函数都当无效登记：名是运行期的匹配键，
+     * 放一个 NULL 进来会在 name_matches 里解引用踩空，所以在这里挡掉。 */
+    if((c == 0) || (c->name == 0) || (c->fn == 0))
     {
         return;
     }
