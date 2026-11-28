@@ -1783,6 +1783,17 @@ static void test_stack_usage(void)
     ck_i32(arkrtos_task_stack_info_raw(1, out4), ARKRTOS_TASK_ERR_NOSTATE,
            "a task without a stack has no state to report");
 
+    /* 已结束的槽位同样没有可量的栈：帧可能已经还回帧池、也可能被下一个任务
+     * 接着用，扫出来的字节不属于它。声明里 NOSTATE 就是「已结束 / 未创建」，
+     * 这条断言把它钉住 —— 实际签要是让死槽位继续报读数，shell 的 stack check
+     * 会把「别人内存里的字节」当成 100% 已用，对健康镜像报假警报。 */
+    arkrtos_task_table[0].stack_size = 1024u;
+    arkrtos_task_table[0].status = ARKRTOS_TASK_INVALID;
+    ck_i32(arkrtos_task_stack_info_raw(1, out4), ARKRTOS_TASK_ERR_NOSTATE,
+           "a finished slot has no stack left to report");
+    ck_i32(arkrtos_task_stack_info_internal(1, out3), ARKRTOS_TASK_ERR_PARAM,
+           "the 3-word view refuses a finished slot the same way");
+
     /* 3 字版本：剩余 = 总 - 合成 */
     reset_all();
     (void)make_task(3u, 0u);

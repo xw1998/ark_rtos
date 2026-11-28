@@ -502,7 +502,7 @@ untouched pattern words upward from index 1 to get free, and `used = total - fre
 id  total    used     free     pct    entry
  1   1024     304      720      29%    0x0800A1C1
  4   49152    30668    18484    62%    0x08013E5D
-stack: 2 task(s), worst 62% (task 4), 0 unmeasured, 0 at/over 90%  (accounting on)
+stack: 2 task(s), worst 62% (task 4), 0 unmeasured, 0 at/over 90%, 0 not live, 0 shared  (accounting on)
 ```
 
 - `used` takes the larger of the **fill watermark** and the **lowest PSP**: the watermark is the
@@ -513,7 +513,23 @@ stack: 2 task(s), worst 62% (task 4), 0 unmeasured, 0 at/over 90%  (accounting o
   `>= 75%` prints `^ task N is at X% - watch it`;
 - `stack check` appends a verdict line and **decides the return code**: `stack: check ok - ...`
   (0) or `stack: check FAILED - ...` (1). A condition that cannot be measured
-  (`unmeasured != 0`) also fails — unmeasurable is not a pass.
+  (`unmeasured != 0`) also fails — unmeasurable is not a pass;
+- when a reading is missing, decide **whether it should exist at all** before calling it a
+  defect (the table tags the first two cases `dead` / `thr`):
+  - `dead` (slot `status == INVALID`, the task has finished): its frames may already be back in
+    the frame pool or reused by the next task, so what the scan reads is somebody else's memory.
+    No number is printed; it is only counted in `not live`. `arkrtos_task_stack_info_raw()`
+    answers `NOSTATE` for such a slot;
+  - `thr` (alive but `stack_size == 0`): the `clone(2)` contract is "the caller mmaps the stack,
+    the kernel only knows the top", so a thread uses its process's stack, which is already
+    measured on the process row; it is only counted in `shared`;
+  - only "alive, owns a stack, and still scans to nothing" goes into `unmeasured` and fails
+    (the fill pattern did not take effect).
+
+> This classification is not cosmetic: in the QEMU LA64 ten-tier image, after the rseq process
+> kills itself its 32 KB slot's frames are already back in the pool; the old rule read the
+> 0x00000000 there as "100% used" and failed a healthy image, which is why the `icount-stack`
+> gate flaked (2026-11-28).
 
 `stack raw` prints the two legs separately plus one bottom-sample line:
 

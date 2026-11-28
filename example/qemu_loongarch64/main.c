@@ -1068,10 +1068,19 @@ static void task_stack_guard_demo(void)
 
     arkrtos_task_delay(200u);      /* 等 A/B 先跑起来，串口顺序好读 */
 
+    /* 顺序很要紧：**先把这一行整句送出去，再踩栈底**。踩完之后的下一次
+     * 切走守卫就会摘除本任务，若摘除发生在打印途中，串口上只剩半句
+     * （实测 2026-11-28：一次 -icount 跑里只剩 "[boot] sta"，后半句连同
+     * "stack guard demo" 这个标记一起丢了，门禁的白名单于是认不出这是
+     * 演示任务、把健康镜像判成「非演示任务栈底被踩」）。
+     * 行里带上自己的任务号：判据改成「标记里的号 == 被报的号」对账，
+     * 不再靠行距窗口猜。 */
+    arkrtos_board_puts("[boot] stack guard demo: task ");
+    arkrtos_board_putu((uint32)arkrtos_current_task_id);
+    arkrtos_board_puts(" about to clobber its own bottom guard word\n");
+
     bottom = (volatile uint32 *)(unsigned long)s_stack_guard_demo;
     *bottom = 0u;                  /* 模拟一次越界写：保护字不再是 0xed01 */
-
-    arkrtos_board_puts("[boot] stack guard demo: bottom word clobbered\n");
 
     for(;;)
     {

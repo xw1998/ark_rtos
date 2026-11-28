@@ -1299,6 +1299,9 @@ static void task_make(int idx, uint32 prio, int32 status, int32 period,
     arkrtos_task_table[idx].stack_ptr = (unsigned long)(uintptr_t)stack_ptr;
     arkrtos_task_table[idx].stack_bottom = g_stack_bottom_buf;
     arkrtos_task_table[idx].stack_peak_low = 0x1000u;
+    /* 默认给一块自己的栈：shell 把「活着 + stack_size==0」认作共用进程栈的
+     * 线程，而绝大多数用例要的是「有自己的栈、只是查询失败」那一路。 */
+    arkrtos_task_table[idx].stack_size = 4096u;
     arkrtos_task_table[idx].entry = entry;
 }
 
@@ -1478,6 +1481,54 @@ static void t_stack(void)
     CK(out_has("[1/8]=0xCDCDCDCD"));
     CK(out_has("stack raw: fill=scan of untouched fill pattern, psp=lowest "
                   "SP seen (take the larger)"));
+
+    /* 已结束的槽位不是一个任务：它不占一行数字，也不进 unmeasured。
+     * 真实现场（QEMU LA64 十档）：rseq 进程自杀后，它的 32 KB 槽位帧已还回
+     * 帧池，扫出来是 0x00000000，旧口径于是报「100% 已用」并对健康镜像
+     * 判红（icount-stack 门禁的间歇失败就是这个）。 */
+    reset_all();
+    arkrtos_task_count = 2;
+    task_make(0, 3u, (int32)ARKRTOS_TASK_READY, 0, 0, g_frame_words, entry_noop);
+    task_make(1, 3u, (int32)ARKRTOS_TASK_INVALID, 0, 0, g_frame_words, entry_noop);
+    g_si3[0][0] = 100u;
+    g_si3[0][1] = 10u;
+    g_si3[0][2] = 90u;
+    g_si_rc[1] = -1;                        /* 死槽：内核本来就拒绝读数 */
+    g_raw_rc[1] = -1;
+    cap_reset();
+    CK_I(c0(cmd_stack), 0);
+    CK(out_has("dead"));
+    CK(out_has("1 not live, 0 shared"));
+    cap_reset();
+    CK_I(c1(cmd_stack, "check"), 0);
+    CK(out_has("check ok - 1 task(s) measured, worst 10% (task 1)"));
+    cap_reset();
+    CK_I(c1(cmd_stack, "raw"), 0);
+    CK(out_has("n/a (not live)"));
+
+    /* 活着的线程（stack_size==0 = 与所属进程共用一块栈）：不是一个缺陷。
+     * clone(2) 的契约就是「栈由调用者自己 mmap，内核只知道栈顶」。 */
+    reset_all();
+    arkrtos_task_count = 2;
+    task_make(0, 3u, (int32)ARKRTOS_TASK_READY, 0, 0, g_frame_words, entry_noop);
+    task_make(1, 3u, (int32)ARKRTOS_TASK_READY, 0, 0, g_frame_words, entry_noop);
+    arkrtos_task_table[1].stack_size = 0u;
+    arkrtos_task_table[1].stack_bottom = 0;
+    g_si3[0][0] = 100u;
+    g_si3[0][1] = 10u;
+    g_si3[0][2] = 90u;
+    g_si_rc[1] = -1;
+    g_raw_rc[1] = -1;
+    cap_reset();
+    CK_I(c0(cmd_stack), 0);
+    CK(out_has("thr"));
+    CK(out_has("0 not live, 1 shared"));
+    cap_reset();
+    CK_I(c1(cmd_stack, "check"), 0);
+    CK(out_has("check ok - 1 task(s) measured, worst 10% (task 1)"));
+    cap_reset();
+    CK_I(c1(cmd_stack, "raw"), 0);
+    CK(out_has("n/a (shares owner stack)"));
     CK(out_has("take the larger)"));
 
     /* unknown option */

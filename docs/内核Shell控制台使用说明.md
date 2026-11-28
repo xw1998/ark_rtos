@@ -428,12 +428,18 @@ sync appwait: hit=480
 id  total    used     free     pct    entry
  1   1024     304      720      29%    0x0800A1C1
  4   49152    30668    18484    62%    0x08013E5D
-stack: 2 task(s), worst 62% (task 4), 0 unmeasured, 0 at/over 90%  (accounting on)
+stack: 2 task(s), worst 62% (task 4), 0 unmeasured, 0 at/over 90%, 0 not live, 0 shared  (accounting on)
 ```
 
 - `used` 取**水印填充**与**最低 PSP** 两路里较大的那个：水印是真实峰值不会低估，PSP 只在任务切换时采样、会低估，所以单独看 PSP 小不代表栈用得浅（具体两路怎么对账见下面的 `raw`）；
 - 循环里对每个任务就地判定：`pct >= 90%` 打 `^ task N is at X% - raise its stack size`，`>= 75%` 打 `^ task N is at X% - watch it`；
-- `stack check` 追加一行判词并**决定返回码**：`stack: check ok - ...`（0）或 `stack: check FAILED - ...`（1）。有条件测不到（`unmeasured != 0`）也判失败——测不到不能当通过。
+- `stack check` 追加一行判词并**决定返回码**：`stack: check ok - ...`（0）或 `stack: check FAILED - ...`（1）。有条件测不到（`unmeasured != 0`）也判失败——测不到不能当通过；
+- 量不到读数时先分清**该不该量**，再判缺陷（三种情形分开，`stack` 表里用 `dead` / `thr` 标出）：
+  - `dead`（槽位 `status == INVALID`，任务已结束）：帧可能已还回帧池、也可能被下一个任务接着用，扫出来的是别人内存里的字节，一行数字都不打，只计入 `not live`。内核侧 `arkrtos_task_stack_info_raw()` 对这种槽位直接回 `NOSTATE`；
+  - `thr`（活着但 `stack_size == 0`）：`clone(2)` 的契约是「栈由调用者自己 mmap，内核只知道栈顶」，线程用的就是所属进程的栈，进程那一行已经量过，只计入 `shared`；
+  - 只有「活着、有自己的栈、却扫不出读数」才进 `unmeasured` 判失败（填充图案没生效）。
+
+> 这条分类不是纸面洁癖：QEMU LA64 十档镜像里 rseq 进程自杀后，它的 32 KB 槽位帧已还回帧池，旧口径把 0x00000000 当成「已用 100%」并对健康镜像判红，`icount-stack` 门禁因此间歇失败（2026-11-28）。
 
 `stack raw` 把两路读数拆开打，并多打一行栈底采样：
 

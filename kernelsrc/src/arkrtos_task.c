@@ -5062,7 +5062,10 @@ int32 arkrtos_task_stack_info_raw(int32 task_id, uint32 *out4)
     }
 
     p_task = &arkrtos_task_table[task_id - 1];
-    if(p_task->stack_size == 0u)
+    /* 已结束（或从未创建）的槽位没有可量的栈：它的帧可能已经还回帧池，
+     * 也可能被下一个任务接着用，这时扫出来的是别人内存里的字节。
+     * ARKRTOS_TASK_ERR_NOSTATE 的注释就是「已结束 / 未创建」，这里落实它。 */
+    if((p_task->status == ARKRTOS_TASK_INVALID) || (p_task->stack_size == 0u))
     {
         return ARKRTOS_TASK_ERR_NOSTATE;
     }

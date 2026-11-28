@@ -194,6 +194,8 @@ FATAL_RE = re.compile(r"\[Ark RTOS\] FATAL:")
 
 STK_RE = re.compile(r"\[STK\] task (\d+):")
 DEMO_MARK = "stack guard demo"
+# 标记行带任务号（演示先打完再踩栈底），判据按号对账而不是按行距窗口。
+DEMO_ID_RE = re.compile(r"stack guard demo: task (\d+)")
 
 
 def judge_qemu(txt):
@@ -202,10 +204,18 @@ def judge_qemu(txt):
     注意：这块板（`board/qemu_loongarch64/arkrtos_board_config.h`）把
     `ARKRTOS_USE_STACK_GUARD` 强制打开，而镜象里有一个**故意**踩自己栈底字
     的演示任务（`example/qemu_loongarch64/main.c`），所以
-    "[STK] task N: stack bottom flag overwritten" 本身不是故障。判据是：
-    只允许**紧跟演示标记之后的那一个任务**被报，其余任何任务被报都算红。
+    "[STK] task N: stack bottom flag overwritten" 本身不是故障。
+
+    对账方式是**按任务号**，不是按行距窗口：演示任务先打一行
+    "[boot] stack guard demo: task N about to clobber ..." 再去踩，
+    判据是「被报的号 == 标记里的号」；任何别的号被报都算红。
     历史故障正是这一形态：演示的 task 6 之后，task 12（tcpip）也被报 ——
     而那时它踩坏的是相邻任务的保存帧，所以报得比停机早、但拦不住。
+
+    为什么不按行距猜（2026-11-28 实测）：旧口径要求 STK 行落在标记行之后 40 行内，
+    而标记以前是在**踩完之后**才打的；那一次守卫在打印到第 9 个字节时就把任务
+    摘了，串口上只剩 "[boot] sta"（标记文本一起没了），于是健康镜像被判红。
+    现在两边都改了：演示先打完再踩（任务号写在行里），判据按号对账。
     """
     bad = []
     if FATAL_RE.search(txt):
@@ -216,18 +226,20 @@ def judge_qemu(txt):
 
     lines = txt.splitlines()
     demo_ids = set()
-    for i, ln in enumerate(lines):
-        if DEMO_MARK in ln:
-            for j in range(i, min(i + 40, len(lines))):
-                m = STK_RE.search(lines[j])
-                if m:
-                    demo_ids.add(int(m.group(1)))
-                    break
-    extras = sorted(set(int(m.group(1)) for m in STK_RE.finditer(txt)
-                        if int(m.group(1)) not in demo_ids))
-    if extras:
-        bad.append("非演示任务的栈底被踩：task %s（tcpip 栈溢出会这样报）"
-                   % ",".join(str(x) for x in extras))
+    for ln in lines:
+        m = DEMO_ID_RE.search(ln)
+        if m:
+            demo_ids.add(int(m.group(1)))
+    if demo_ids:
+        extras = sorted(set(int(m.group(1)) for m in STK_RE.finditer(txt)
+                            if int(m.group(1)) not in demo_ids))
+        if extras:
+            bad.append("非演示任务的栈底被踩：task %s（tcpip 栈溢出会这样报）"
+                       % ",".join(str(x) for x in extras))
+        elif not STK_RE.search(txt):
+            bad.append("演示任务自己没有被栈底守卫报出来（守卫没生效就不会发现溢出）")
+    elif STK_RE.search(txt):
+        bad.append("有 [STK] 报告但没有带任务号的演示标记（认不出被报的是不是演示任务）")
     # 故障窗口在 fork 刚结束之后：必须证明「fork 之后还在跑」。
     idx = txt.find("[fork] PASS")
     if idx >= 0:
@@ -239,7 +251,8 @@ def judge_qemu(txt):
 
 
 def self_check():
-    demo = ("[boot] stack guard demo: bottom word clobbered\n"
+    demo = ("[boot] stack guard demo: task 6 about to clobber its own bottom "
+            "guard word\n"
             "[STK] task 6: stack bottom flag overwritten\n")
     good = ("boot ok\n" + demo + "[fork] PASS: child ran in its own space, exit 42 reaped\n"
             + "".join("[A] round=%d tick=%d\n" % (i, i) for i in range(20)))
@@ -251,6 +264,25 @@ def self_check():
          demo + "[fork] PASS: ok\n" + "".join("[A] round=%d\n" % i for i in range(9)), 1),
         ("tcpip-guard-stomped", good + "[STK] task 12: stack bottom flag overwritten\n", 1),
         ("stray-stk-before-demo", "[STK] task 9: stack bottom flag overwritten\n" + good, 1),
+        # 标记与被报的号对不上：认错人就是红，不允许「附近有标记就算过」
+        ("demo-id-mismatch",
+         "[boot] stack guard demo: task 6 about to clobber\n"
+         "[STK] task 7: stack bottom flag overwritten\n"
+         "[fork] PASS: ok\n" + "".join("[A] round=%d\n" % i for i in range(12)), 1),
+        # 标记与 STK 之间隔着上百行也不能红：判据是号不是行距
+        ("far-away-demo", good.replace(
+            "[STK] task 6: stack bottom flag overwritten\n",
+            "".join("[LA64U] filler %d\n" % i for i in range(200))
+            + "[STK] task 6: stack bottom flag overwritten\n"), 0),
+        # 有 STK 但没有带号的标记：认不出人，宁可判红
+        ("stk-without-demo-id",
+         "[boot] stack guard demo\n"
+         "[STK] task 6: stack bottom flag overwritten\n"
+         "[fork] PASS: ok\n" + "".join("[A] round=%d\n" % i for i in range(12)), 1),
+        # 标记在、守卫却没报：演示要证明的是「守卫能报」，一声不响不算过
+        ("demo-never-reported",
+         "[boot] stack guard demo: task 6 about to clobber\n"
+         "[fork] PASS: ok\n" + "".join("[A] round=%d\n" % i for i in range(12)), 1),
     ]
     bad = []
     for name, txt, want in cases:
@@ -259,7 +291,8 @@ def self_check():
             bad.append("%s: 期望%s，实得 %d 条问题" % (name, "判红" if want else "判绿", got))
     check("parser-self-check",
           not bad,
-          "6 种合成日志全部按预期判红/判绿（含演示任务白名单）",
+          "%d 种合成日志全部按预期判红/判绿（演示标记与 STK 按任务号对账）"
+          % len(cases),
           "; ".join(bad))
 
 

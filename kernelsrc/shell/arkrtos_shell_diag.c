@@ -132,7 +132,36 @@ int cmd_task(int argc, char *argv[])
 #define SHELL_STACK_WARN_PCT    75u   /* 已用 >= 75%：打印提醒 */
 #define SHELL_STACK_DANGER_PCT  90u   /* 已用 >= 90%：判失败 */
 
+/* 槽位量不到读数时，先分清「这个槽位本来就没有可量的栈」再判缺陷 ——
+ * 否则命令会把两件完全无关的事报成同一句 FAILED：
+ *   dead   已结束（status=INVALID）。帧可能已经还回帧池、也可能被下一个任务
+ *          接着用，扫出来的是别人内存里的字节，报「用了 100%」是假警报。
+ *          实测签名：QEMU LA64 十档镜像里 rseq 进程自杀后，它的 32 KB 槽位
+ *          一直以 100% 出现在 stack check 里，让「这一点用都没满」的镜像
+ *          隔三差五判红（icount-stack 门禁即靠这一条收口）。
+ *   shared 活着的线程。clone(2) 的契约是「栈由调用者自己 mmap、内核只知道
+ *          栈顶」，所以线程的 stack_size 刻意记 0（见 arkrtos_elf.c 里
+ *          "未知就记未知"那段），它用的就是所属进程的栈 —— 进程那一行
+ *          已经量过，不该再算一个「量不到」。
+ * 只有「活着、有自己的栈、却扫不出读数」才是真缺陷（填充图案没生效）。 */
 #if ARKRTOS_USE_STACK_USAGE
+#define SHELL_STACK_ROW_DEAD     0   /* 已结束的槽位：没有可量的栈 */
+#define SHELL_STACK_ROW_SHARED   1   /* 活线程：与所属进程共用一块栈 */
+#define SHELL_STACK_ROW_MEASURE  2   /* 有自己的栈：必须量得出来 */
+
+static int shell_stack_row_kind(int32 idx)
+{
+    if(arkrtos_task_table[idx].status == ARKRTOS_TASK_INVALID)
+    {
+        return SHELL_STACK_ROW_DEAD;
+    }
+    if(arkrtos_task_table[idx].stack_size == 0u)
+    {
+        return SHELL_STACK_ROW_SHARED;
+    }
+    return SHELL_STACK_ROW_MEASURE;
+}
+
 int cmd_stack(int argc, char *argv[])
 {
     int32  i;
@@ -142,6 +171,8 @@ int cmd_stack(int argc, char *argv[])
     uint32 danger = 0u;
     uint32 worst_pct = 0u;
     int32  worst_id = 0;
+    uint32 not_live = 0u;
+    uint32 shared = 0u;
 
     if(argc >= 2)
     {
@@ -174,10 +205,27 @@ int cmd_stack(int argc, char *argv[])
             uint32 out4[4];
             uint32 pf;
             uint32 pp;
+            int kind;
 
             if(arkrtos_task_stack_info_raw(i + 1, out4) != 0)
             {
-                ark_shell_printf(" %-3d n/a (no stack)\r\n", (int)(i + 1));
+                /* 三种「读不到」分开写：已结束 / 共用进程栈的线程 / 真缺陷。
+                 * 前两种不是故障，raw 视图也要能一眼看出来。 */
+                kind = shell_stack_row_kind(i);
+
+                if(kind == SHELL_STACK_ROW_DEAD)
+                {
+                    ark_shell_printf(" %-3d n/a (not live)\r\n", (int)(i + 1));
+                }
+                else if(kind == SHELL_STACK_ROW_SHARED)
+                {
+                    ark_shell_printf(" %-3d n/a (shares owner stack)\r\n",
+                                     (int)(i + 1));
+                }
+                else
+                {
+                    ark_shell_printf(" %-3d n/a (no stack)\r\n", (int)(i + 1));
+                }
                 continue;
             }
             pf = (out4[0] != 0u) ? ((out4[2] * 100u) / out4[0]) : 0u;
@@ -212,9 +260,31 @@ int cmd_stack(int argc, char *argv[])
     {
         uint32 out3[3];
         uint32 pct;
+        int kind;
 
         if((arkrtos_task_stack_info_internal(i + 1, out3) != 0) || (out3[0] == 0u))
         {
+            kind = shell_stack_row_kind(i);
+
+            if(kind == SHELL_STACK_ROW_DEAD)
+            {
+                /* 已结束：一行都不留数字（数字是别人的内存）。计数单列，
+                 * 不进 unmeasured —— 它不是「统计失效」。 */
+                ark_shell_printf(" %-3d %-8s %-8s %-8s %-6s 0x%08X\r\n",
+                                 (int)(i + 1), "n/a", "n/a", "n/a", "dead",
+                                 (unsigned)(arkrtos_uptr_t)arkrtos_task_table[i].entry);
+                not_live++;
+                continue;
+            }
+            if(kind == SHELL_STACK_ROW_SHARED)
+            {
+                /* 线程与所属进程共用一块栈：进程那一行已经量过。 */
+                ark_shell_printf(" %-3d %-8s %-8s %-8s %-6s 0x%08X\r\n",
+                                 (int)(i + 1), "n/a", "n/a", "n/a", "thr",
+                                 (unsigned)(arkrtos_uptr_t)arkrtos_task_table[i].entry);
+                shared++;
+                continue;
+            }
             ark_shell_printf(" %-3d %-8s %-8s %-8s %-6s 0x%08X\r\n",
                              (int)(i + 1), "n/a", "n/a", "n/a", "n/a",
                              (unsigned)(arkrtos_uptr_t)arkrtos_task_table[i].entry);
@@ -280,10 +350,12 @@ int cmd_stack(int argc, char *argv[])
     }
     #endif
     ark_shell_printf("stack: %d task(s), worst %u%% (task %d), "
-                     "%u unmeasured, %u at/over %u%%  (accounting on)\r\n",
+                     "%u unmeasured, %u at/over %u%%, %u not live, %u shared "
+                     "(accounting on)\r\n",
                      (int)arkrtos_task_count, (unsigned)worst_pct, (int)worst_id,
                      (unsigned)unmeasured, (unsigned)danger,
-                     (unsigned)SHELL_STACK_DANGER_PCT);
+                     (unsigned)SHELL_STACK_DANGER_PCT,
+                     (unsigned)not_live, (unsigned)shared);
 
     if(check != 0)
     {
@@ -304,7 +376,8 @@ int cmd_stack(int argc, char *argv[])
         }
         ark_shell_printf("stack: check ok - %d task(s) measured, worst %u%% "
                          "(task %d), none at/over %u%%\r\n",
-                         (int)arkrtos_task_count, (unsigned)worst_pct,
+                         (int)((uint32)arkrtos_task_count - not_live - shared),
+                         (unsigned)worst_pct,
                          (int)worst_id, (unsigned)SHELL_STACK_DANGER_PCT);
         return 0;
     }
