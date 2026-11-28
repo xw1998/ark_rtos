@@ -26,6 +26,7 @@
 - [kernelsrc/include/arkrtos_fi.h](#kernelsrcincludearkrtos_fih)（17 项）
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（30 项）
+- [kernelsrc/include/arkrtos_gdbstub.h](#kernelsrcincludearkrtos_gdbstubh)（15 项）
 - [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
 - [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（94 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
@@ -3777,6 +3778,137 @@ const char *arkrtos_fs_error_name(int32 lfs_err);
 **Human readable name of an error code, for reports.**
 Callers must print the number the file system returned, not a
 guessed cause; this only adds the short symbol on top of it.
+
+## kernelsrc/include/arkrtos_gdbstub.h
+
+**GDB 远程串行协议（RSP）目标侧代理 —— 只做「看」，不做「停」（默认关）**
+这份代理回答的是「目标里现在是什么」，不是「让目标停下来单步」。
+它实现 RSP 的帧格式（`$body#cs`、校验和、ack/无 ack 模式、二进制
+转义）与一组**只读为主**的包，让一台标准 gdb 能连上来做现场勘验：
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**计数（只增不减，reset 时才清零）**
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**板级钩子。除 mem_* 外都可以留空（留空即回 E01/空包）**
+
+### `int32 (*byte_get)(uint8 *b);`
+
+```c
+int32 (*byte_get)(uint8 *b);
+```
+
+取一个字节：1 = 取到，0 = 暂时没有，<0 = 传输错误
+
+### `void  (*byte_put)(uint8 b);`
+
+```c
+void  (*byte_put)(uint8 b);
+```
+
+发一个字节（无缓冲，调用者即把整包按序写出）
+
+### `int32 (*mem_read)(uint32 addr, uint8 *buf, uint32 len);`
+
+```c
+int32 (*mem_read)(uint32 addr, uint8 *buf, uint32 len);
+```
+
+读内存：0 = 成功，<0 = 拒绝（不在可访问区间等）
+
+### `int32 (*mem_write)(uint32 addr, const uint8 *buf, uint32 len);`
+
+```c
+int32 (*mem_write)(uint32 addr, const uint8 *buf, uint32 len);
+```
+
+写内存：0 = 成功，<0 = 拒绝
+
+### `int32 (*reg_read)(uint32 idx, uint32 *val);`
+
+```c
+int32 (*reg_read)(uint32 idx, uint32 *val);
+```
+
+读第 idx 个寄存器（4 字节值）：0 = 成功，<0 = 拒绝
+
+### `int32 (*reg_write)(uint32 idx, uint32 val);`
+
+```c
+int32 (*reg_write)(uint32 idx, uint32 val);
+```
+
+写第 idx 个寄存器：0 = 成功，<0 = 拒绝
+
+### `uint32 (*reg_count)(void);`
+
+```c
+uint32 (*reg_count)(void);
+```
+
+寄存器个数（0 = 本板不给寄存器）
+
+### `int32 (*monitor)(const char *cmd, uint32 len, uint8 *out, uint32 cap);`
+
+```c
+int32 (*monitor)(const char *cmd, uint32 len, uint8 *out, uint32 cap);
+```
+
+监视命令：把文本写进 out（cap 字节），返回写入长度；<0 = 不支持
+
+### `int32 arkrtos_gdbstub_init(const arkrtos_gdbstub_ops_t *ops);`
+
+```c
+int32 arkrtos_gdbstub_init(const arkrtos_gdbstub_ops_t *ops);
+```
+
+**装上钩子并复位状态机**
+- `ops`：钩子表（调用方保证生命周期长于本模块；至少 byte_put 非空）
+**返回**：0 成功，-1 参数错（ops 为空或 byte_put 为空）
+
+### `void arkrtos_gdbstub_reset(void);`
+
+```c
+void arkrtos_gdbstub_reset(void);
+```
+
+**清空状态机与计数（init 内部会调一次；用例也用它复位）**
+
+### `int32 arkrtos_gdbstub_feed(const uint8 *buf, uint32 len);`
+
+```c
+int32 arkrtos_gdbstub_feed(const uint8 *buf, uint32 len);
+```
+
+**喂入一段字节（宿主用例、自检与"已经在手上"的传输都走这条）**
+**返回**：消耗的字节数（正常等于 len），-1 = 未 init
+
+### `int32 arkrtos_gdbstub_poll(uint32 max_bytes);`
+
+```c
+int32 arkrtos_gdbstub_poll(uint32 max_bytes);
+```
+
+**从 byte_get 拉最多 max_bytes 个字节并处理（板级主循环/调试任务用）**
+**返回**：实际处理的字节数（>= 0），-1 = 未 init 或 byte_get 为空
+
+### `const arkrtos_gdbstub_stat_t *arkrtos_gdbstub_stat(void);`
+
+```c
+const arkrtos_gdbstub_stat_t *arkrtos_gdbstub_stat(void);
+```
+
+**只读计数表**
 
 ## kernelsrc/include/arkrtos_guard.h
 

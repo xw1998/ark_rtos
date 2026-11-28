@@ -2451,7 +2451,7 @@ insert a FAIL, change a number).
 `test_linux_abi_host.c` at 93.11% on its own; the line union across the eight profiles
 (`linuxabi`, `linuxabifutex`, `linuxabifilemap`, `linuxabiselect`, `linuxabisocket`,
 `linuxabisched`, `linuxabisigio` and the off profile) puts `arkrtos_linux_abi` at 97.34%
-(baseline 97.00% unchanged), and the full `COVERAGE-GATE OK` (all 76 modules — 71 before U-34 wired up `drvled` and `drvwdg`, 73 before U-36 wired up `drvnor`, 74 before U-37 wired up `drvflash`, 75 before U-38 wired up `drvuart` — at or above
+(baseline 97.00% unchanged), and the full `COVERAGE-GATE OK` (all 77 modules — 71 before U-34 wired up `drvled` and `drvwdg`, 73 before U-36 wired up `drvnor`, 74 before U-37 wired up `drvflash`, 75 before U-38 wired up `drvuart`, 76 before U-39 wired up `arkrtos_gdbstub` — at or above
 baseline).
 
 **Boundaries.** (1) Only "fd became readable (including EOF)"; the writable direction,

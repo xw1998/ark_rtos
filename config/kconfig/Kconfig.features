@@ -62,6 +62,24 @@ config ARKRTOS_USE_SMP_BALANCE
 	  当场致命停机。要求 ARKRTOS_USE_SMP_SCHED=1 与 ARKRTOS_CPU_NUM>=2
 	  （不满足直接 #error）。默认关，关档下候选表与策略都不编进来。
 
+config ARKRTOS_USE_GDBSTUB
+	bool "GDB remote serial protocol agent (inspection only)"
+	default n
+	help
+	  一个 GDB 远程串行协议（RSP）目标侧代理，让标准 gdb 连上来做现场
+	  勘验：读内存 / 写内存（m/M/X）、单个与整包寄存器（p/P/g/G，需要
+	  板级 reg_* 钩子）、监视命令（qRcmd），帧格式（$body#cs、校验和、
+	  ack 与 QStartNoAckMode、二进制 `}` 转义）都给全。
+
+	  它**不做**「继续」与「单步」（c/s/vCont）：那要求代理在陷阱帧上接管
+	  执行流，而本代理是被调用方轮询的，没有执行流可接管。也不实现断点
+	  （Z0/z0）：改内存的权限在各板级钩子里，代理不替板级决定哪段可写。
+	  不支持的包一律回空包（不是 OK），gdb 会当"不支持"而不是成功。
+
+	  没有任何认证：它和 gdb 之间就是一根字节流，谁接上谁能读。所以默认
+	  关，且只应挂在调试口上，不能挂到业务总线。关档下模块编成空翻译
+	  单元，镜像体积与行为逐位不变。
+
 config ARKRTOS_USE_SMP_TLB_SD
 	bool "Cross-core TLB invalidation with acknowledgement (R4)"
 	default n

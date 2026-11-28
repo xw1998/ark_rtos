@@ -1275,6 +1275,15 @@
 #error "ARKRTOS_DEVICE_ID_LEN must be 8..32"
 #endif
 
+/* GDB 远程串行协议（RSP）目标侧代理（arkrtos_gdbstub.c）。
+ * 只做只读勘验：m/M/X 读写内存、p/P/g/G 读写寄存器、qRcmd 监视命令；
+ * 不做 c/s/vCont（没有可接管的执行流）与 Z0/z0（断点）。不支持的包回空包，
+ * 绝不编 OK。无认证，只应挂在调试口上。默认关；关档时编成空 TU。
+ * 边界见 kernelsrc/include/arkrtos_gdbstub.h 文件头。 */
+#ifndef ARKRTOS_USE_GDBSTUB
+#define ARKRTOS_USE_GDBSTUB             0
+#endif
+
 /* 跨复位崩溃日记（arkrtos_crash.c）：落在共享内存尾部的 .noinit 区 */
 #ifndef ARKRTOS_USE_CRASH_LOG
 #define ARKRTOS_USE_CRASH_LOG           1

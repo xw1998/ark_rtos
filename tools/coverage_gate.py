@@ -433,6 +433,17 @@ CASES = [
     ("devid-off", "kernelsrc/tests/test_devid_host.c",
      ["kernelsrc/src/arkrtos_devid.c"],
      ["-DARKRTOS_USE_DEVICE_ID=0"], "DEVID-HOST OFF OK"),
+    # --- 2026-11-28 新增：GDB 远程串行协议代理（只读勘验型，默认关）---
+    # 会话状态机是逐字节的，帧校验错回 '-'、不支持回空包（绝不编 OK）。
+    # 两条边界要钉住：编码走独立 s_enc（源可能正是 s_out）、QStartNoAckMode
+    # 先回 OK 再关 ack。
+    ("gdbstub", "kernelsrc/tests/test_gdbstub_host.c",
+     ["kernelsrc/src/arkrtos_gdbstub.c"],
+     ["-DARKRTOS_USE_GDBSTUB=1"], "GDBSTUB-HOST OK"),
+    # 关档是空目标（零符号）：默认镜像里不该有这个模块的任何字节。
+    ("gdbstub-off", "kernelsrc/tests/test_gdbstub_host.c",
+     ["kernelsrc/src/arkrtos_gdbstub.c"],
+     ["-DARKRTOS_USE_GDBSTUB=0"], "GDBSTUB-HOST OFF OK"),
     # 内建密钥档：板级没有槽，密钥来自编译期 ARKRTOS_DEVICE_SECRET。
     # 这一档证明来源被判成 BUILTIN 而不是 OTP，并且板级密钥一出现就盖过它。
     ("devid-builtin", "kernelsrc/tests/test_devid_host.c",

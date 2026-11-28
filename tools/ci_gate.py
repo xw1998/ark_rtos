@@ -6255,6 +6255,30 @@ def check_trust_root():
     else:
         fail("trust-root", txt[-300:])
 
+def check_gdbstub():
+    """GDB RSP agent: a debugger can look at the target, but not fake a stop.
+
+    tools/gdbstub_gate.py holds the five groups: the switch defaults to OFF and
+    features.h / Kconfig / defconfig / autoconf must agree; the OFF object must
+    export no symbol; the module and its host case must compile with the switch
+    ON; the host cases must pass in both builds; and five mutations (hex encode
+    expanded in place over its own source / an unsupported packet answered OK /
+    no-ack mode never taking effect / a bad checksum acked / a register returned
+    big-endian) must all turn red.
+
+    What this does NOT prove: that a real gdb client interoperates (there is no
+    gdb on the build host), or that continue/step/breakpoints work — they are
+    deliberately not implemented, because faking a stop would be worse than
+    answering "unsupported". The agent has no authentication: it belongs on a
+    debug port only, which is why it ships off by default.
+    """
+    r = _run_check([sys.executable, os.path.join("tools", "gdbstub_gate.py")])
+    txt = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode == 0 and "GDBSTUB-GATE OK" in txt:
+        ok("gdbstub", "OFF default + zero-symbol OFF object + module & host case compile ON + cases OFF/ON + 5 mutations")
+    else:
+        fail("gdbstub", txt[-300:])
+
 def check_device_identity():
     """Device identity (SEC-G13): a name for the board, and a way to prove it.
 
@@ -6479,6 +6503,7 @@ CHECK_TABLE = (
     ("fault-inject", check_fault_inject),
     ("trust-root", check_trust_root),
     ("device-id", check_device_identity),
+    ("gdbstub", check_gdbstub),
     ("coverage-host", check_coverage_host),
     ("warn-clean", check_warn_host),
     ("analyzer", check_analyzer),
