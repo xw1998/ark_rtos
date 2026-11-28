@@ -258,6 +258,22 @@ def main():
         else:
             print("ok: %s (-mcpu=%s)" % (rel, cpu))
 
+    # FPU 扩展帧那一半只有在 ARKRTOS_USE_FPU=1 时才编进来，而默认是 0：
+    # 不加这一遍，M4/M7 的「104 字节扩展帧」路径平时一个编译器都不经过，
+    # 与「默认关 = 没人编译」是同一个坑。M3 没有 FPU，不列。
+    for rel, cpu in (("kernelsrc/port/arm/cortex-m4/arkrtos_port.c", "cortex-m4"),
+                     ("kernelsrc/port/arm/cortex-m7/arkrtos_port.c", "cortex-m7")):
+        src = os.path.join(ROOT, rel)
+        r = subprocess.run(common + ["-mcpu=" + cpu, "-DARKRTOS_USE_FPU=1", src],
+                           capture_output=True, encoding="utf-8", errors="replace")
+        out = ((r.stdout or "") + (r.stderr or "")).strip()
+        if r.returncode != 0:
+            bad += 1
+            print("SWAP-GATE FAIL: %s (FPU=1)" % rel)
+            print(out[-1200:])
+        else:
+            print("ok: %s (FPU=1 extended frame path)" % rel)
+
     bad += check_cross_arch()
 
     if bad:

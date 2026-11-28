@@ -222,52 +222,62 @@ void arkrtos_port_set_psp(uint32 val)
 }
 
 #if (ARKRTOS_USE_TASK_SWAP == 1)
-/* ---- 任务热切换的端口层（Cortex-M） ----------------------------------
- * 帧形状就是 SVC 入口那一刻硬件压出来的基本帧，8 个字：
- *   [0]=R0 [1]=R1 [2]=R2 [3]=R3 [4]=R12 [5]=LR [6]=PC [7]=xPSR
+#include "../arkrtos_arm_swap_frame.h"
+
+/* ---- 任务热切换的端口层（Cortex-M4F / Cortex-M7F） -------------------
+ * 基本帧 8 个字：[0]=R0 [1]=R1 [2]=R2 [3]=R3 [4]=R12 [5]=LR [6]=PC [7]=xPSR
+ * 用过 FPU 的任务拿到的是**扩展帧**（S0-S15 + 保留 + FPSCR 压在最下面，
+ * 共 104 字节），R0 因此落在 [18]、PC 在 [24]、xPSR 在 [25]。
  * 恢复路径是「异常返回从 PSP 弹帧」，所以 activate 只需要挪 PSP。
+ * 形状判定与字节数在 ../arkrtos_arm_swap_frame.h（纯函数，宿主用例逐条验）。
  * ------------------------------------------------------------------- */
-int32 arkrtos_port_swap_frame_ok(const void *p_exc_ctx)
+uint32 arkrtos_port_swap_frame_bytes(const void *p_exc_ctx, uint32 avail)
 {
-    const uint32 *p_frame = (const uint32 *)p_exc_ctx;
-    uint32 xpsr;
+    uint32 fpu_frame = 0u;
 
-    if(p_frame == 0)
-    {
-        return 0;
-    }
-    xpsr = p_frame[7];
-    /* Thumb 位必须是 1，IPSR 必须是 0（Thread 模式）。扩展帧（用过 FPU 的
-     * 任务）的 [7] 是 S6 而不是 xPSR，命中这两条的概率近乎为零，所以这里
-     * 能可靠地把「不是基本帧」认出来，而不是靠运气。 */
-    if((xpsr & 0x01000000u) == 0u)
-    {
-        return 0;
-    }
-    if((xpsr & 0x000001FFu) != 0u)
-    {
-        return 0;
-    }
-    return 1;
-}
-
-uint32 arkrtos_port_swap_frame_bytes(void)
-{
-    return 32u;
+#if (ARKRTOS_USE_FPU == 1)
+    /* FPCA 是「异常入口那一刻任务有没有在用 FPU」的硬件答案：硬件据此决定
+     * 压基本帧还是扩展帧。它不是猜测，所以这里直接采信。 */
+    fpu_frame = ((__get_CONTROL() & 0x4u) != 0u) ? 1u : 0u;
+#endif
+    return (uint32)arkrtos_arm_swap_frame_bytes(p_exc_ctx, (int)fpu_frame,
+                                                (unsigned long)avail);
 }
 
 void arkrtos_port_swap_rewrite(void *p_exc_ctx, uint32 entry)
 {
     uint32 *p_frame = (uint32 *)p_exc_ctx;
+    uint32 fpu_frame = 0u;
+    uint32 base = 0u;
+    uint32 i;
 
-    p_frame[0] = 0u;                 /* R0 */
-    p_frame[1] = 0u;                 /* R1 */
-    p_frame[2] = 0u;                 /* R2 */
-    p_frame[3] = 0u;                 /* R3 */
-    p_frame[4] = 0u;                 /* R12 */
-    p_frame[5] = 0u;                 /* LR：新 main 若返回则落到 0（与新建任务一致） */
-    p_frame[6] = entry & ~1u;        /* PC：硬件按约定忽略 Thumb 位 */
-    p_frame[7] = 0x01000000u;        /* xPSR：只留 Thumb 位 */
+#if (ARKRTOS_USE_FPU == 1)
+    fpu_frame = ((__get_CONTROL() & 0x4u) != 0u) ? 1u : 0u;
+#endif
+    if(arkrtos_arm_swap_frame_bytes(p_exc_ctx, (int)fpu_frame,
+                                    (unsigned long)ARKRTOS_ARM_FRAME_FPU_BYTES)
+       == (unsigned long)ARKRTOS_ARM_FRAME_FPU_BYTES)
+    {
+        /* 扩展帧：基本帧整体后移 18 个字，前面 18 个字是 FPU 现场
+         * （S0-S15 + 一个保留字 + FPSCR）。这里把它们全部清零——热切换
+         * 不结转任务状态（.data / .bss 都会回到初值，见
+         * docs/无缝升级-双缓冲热切换.md §5），FPU 现场同理。清零也保证新
+         * 镜像第一行看到的是确定的浮点环境（FPSCR=0：就近舍入、无陷阱）。 */
+        for(i = 0u; i < ARKRTOS_ARM_FRAME_FPU_R0_WORD; i++)
+        {
+            p_frame[i] = 0u;
+        }
+        base = ARKRTOS_ARM_FRAME_FPU_R0_WORD;
+    }
+
+    p_frame[base + 0u] = 0u;         /* R0 */
+    p_frame[base + 1u] = 0u;         /* R1 */
+    p_frame[base + 2u] = 0u;         /* R2 */
+    p_frame[base + 3u] = 0u;         /* R3 */
+    p_frame[base + 4u] = 0u;         /* R12 */
+    p_frame[base + 5u] = 0u;         /* LR：新 main 若返回则落到 0（与新建任务一致） */
+    p_frame[base + 6u] = entry & ~1u;/* PC：硬件按约定忽略 Thumb 位 */
+    p_frame[base + 7u] = 0x01000000u;/* xPSR：只留 Thumb 位 */
 }
 
 void arkrtos_port_swap_activate(void *p_old_ctx, void *p_new_ctx)

@@ -203,38 +203,18 @@ void arkrtos_port_set_psp(uint32 val)
 }
 
 #if (ARKRTOS_USE_TASK_SWAP == 1)
-/* ---- 任务热切换的端口层（Cortex-M） ----------------------------------
+#include "../arkrtos_arm_swap_frame.h"
+
+/* ---- 任务热切换的端口层（Cortex-M3，没有 FPU） -----------------------
  * 帧形状就是 SVC 入口那一刻硬件压出来的基本帧，8 个字：
  *   [0]=R0 [1]=R1 [2]=R2 [3]=R3 [4]=R12 [5]=LR [6]=PC [7]=xPSR
  * 恢复路径是「异常返回从 PSP 弹帧」，所以 activate 只需要挪 PSP。
+ * 形状与大小共用 M4/M7 那一份纯判据（传 fpu_frame = 0：M3 压不出扩展帧）；
+ * 这样三块 ARM 板对「什么帧能改」只有一个答案。
  * ------------------------------------------------------------------- */
-int32 arkrtos_port_swap_frame_ok(const void *p_exc_ctx)
+uint32 arkrtos_port_swap_frame_bytes(const void *p_exc_ctx, uint32 avail)
 {
-    const uint32 *p_frame = (const uint32 *)p_exc_ctx;
-    uint32 xpsr;
-
-    if(p_frame == 0)
-    {
-        return 0;
-    }
-    xpsr = p_frame[7];
-    /* Thumb 位必须是 1，IPSR 必须是 0（Thread 模式）。扩展帧（用过 FPU 的
-     * 任务）的 [7] 是 S6 而不是 xPSR，命中这两条的概率近乎为零，所以这里
-     * 能可靠地把「不是基本帧」认出来，而不是靠运气。 */
-    if((xpsr & 0x01000000u) == 0u)
-    {
-        return 0;
-    }
-    if((xpsr & 0x000001FFu) != 0u)
-    {
-        return 0;
-    }
-    return 1;
-}
-
-uint32 arkrtos_port_swap_frame_bytes(void)
-{
-    return 32u;
+    return (uint32)arkrtos_arm_swap_frame_bytes(p_exc_ctx, 0, (unsigned long)avail);
 }
 
 void arkrtos_port_swap_rewrite(void *p_exc_ctx, uint32 entry)

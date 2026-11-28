@@ -27,8 +27,8 @@
 - [kernelsrc/include/arkrtos_flashapp.h](#kernelsrcincludearkrtos_flashapph)（7 项）
 - [kernelsrc/include/arkrtos_fs.h](#kernelsrcincludearkrtos_fsh)（30 项）
 - [kernelsrc/include/arkrtos_gdbstub.h](#kernelsrcincludearkrtos_gdbstubh)（15 项）
-- [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（11 项）
-- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（94 项）
+- [kernelsrc/include/arkrtos_guard.h](#kernelsrcincludearkrtos_guardh)（13 项）
+- [kernelsrc/include/arkrtos_hal.h](#kernelsrcincludearkrtos_halh)（93 项）
 - [kernelsrc/include/arkrtos_hwsafe.h](#kernelsrcincludearkrtos_hwsafeh)（4 项）
 - [kernelsrc/include/arkrtos_init.h](#kernelsrcincludearkrtos_inith)（1 项）
 - [kernelsrc/include/arkrtos_installer.h](#kernelsrcincludearkrtos_installerh)（3 项）
@@ -61,6 +61,7 @@
 - [kernelsrc/include/arkrtos_spin.h](#kernelsrcincludearkrtos_spinh)（10 项）
 - [kernelsrc/include/arkrtos_svc_abi.h](#kernelsrcincludearkrtos_svc_abih)（4 项）
 - [kernelsrc/include/arkrtos_svc_call.h](#kernelsrcincludearkrtos_svc_callh)（20 项）
+- [kernelsrc/include/arkrtos_swap_rollback.h](#kernelsrcincludearkrtos_swap_rollbackh)（8 项）
 - [kernelsrc/include/arkrtos_task.h](#kernelsrcincludearkrtos_taskh)（11 项）
 - [kernelsrc/include/arkrtos_tickless.h](#kernelsrcincludearkrtos_ticklessh)（6 项）
 - [kernelsrc/include/arkrtos_trust.h](#kernelsrcincludearkrtos_trusth)（6 项）
@@ -114,7 +115,7 @@
 - [kernelsrc/src/arkrtos_paging.c](#kernelsrcsrcarkrtos_pagingc)（27 项）
 - [kernelsrc/src/arkrtos_smp.c](#kernelsrcsrcarkrtos_smpc)（1 项）
 - [kernelsrc/src/arkrtos_smp_sched.c](#kernelsrcsrcarkrtos_smp_schedc)（2 项）
-- [kernelsrc/src/arkrtos_task.c](#kernelsrcsrcarkrtos_taskc)（7 项）
+- [kernelsrc/src/arkrtos_task.c](#kernelsrcsrcarkrtos_taskc)（8 项）
 - [kernelsrc/src/arkrtos_tickless.c](#kernelsrcsrcarkrtos_ticklessc)（1 项）
 - [kernelsrc/src/arkrtos_vfs_lfs.c](#kernelsrcsrcarkrtos_vfs_lfsc)（3 项）
 
@@ -4010,6 +4011,36 @@ int32 arkrtos_guard_task_at(uint32 idx, arkrtos_guard_task_t *p_out);
 - `p_out`：Receives the entry; task_id is 0 once the table is exhausted.
 **返回**：0 on success, -1 when @p idx is past the end.
 
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**Readable snapshot of one task's contract, for the hot-path judge.**
+Same table as arkrtos_guard_task_at(), but addressed by task id and
+without pulling in the slot / TCB lookup a report needs. Written for
+the swap rollback judge, which runs inside the tick handler and must
+not walk a table just to read four words.
+- `task_id`：1-based task id; <= 0 or > ARKRTOS_TASK_MAX_NUM is rejected.
+- `p_out`：Receives declared / period_ms / misses / state.
+**返回**：0 on success, -1 on a bad id or a null output.
+
+### `void arkrtos_guard_rebase(int32 task_id);`
+
+```c
+void arkrtos_guard_rebase(int32 task_id);
+```
+
+**Restart the contract window of a task without touching its period.**
+A hot swap moves a task onto a new image at an SVC boundary: the old
+heartbeat is no longer evidence about the new code, but the promise
+(period_ms) still stands. Rebasing the beat stamp to "now" makes the
+first window start at the moment the new entry began running, which
+is the only instant the new image could have reported in.
+A task with no contract is left alone (nothing to rebase).
+- `task_id`：1-based task id; <= 0 or out of range is ignored.
+
 ### `uint32 arkrtos_guard_task_slots(void);`
 
 ```c
@@ -4288,24 +4319,20 @@ void arkrtos_port_set_psp(uint32 val);
 **设置进程栈指针PSP**
 - `val`：PSP值
 
-### `int32 arkrtos_port_swap_frame_ok(const void *p_exc_ctx);`
+### `uint32 arkrtos_port_swap_frame_bytes(const void *p_exc_ctx, uint32 ava`
 
 ```c
-int32 arkrtos_port_swap_frame_ok(const void *p_exc_ctx);
+uint32 arkrtos_port_swap_frame_bytes(const void *p_exc_ctx, uint32 avail);
 ```
 
-**判断当前异常帧是不是本架构认可的「可改写帧」**
+**这一帧占多少字节；0 = 本架构不认识这一帧（拒绝而不是猜）**
 - `p_exc_ctx`：SVC/trap 的帧指针
-**返回**：1 = 可以改写；0 = 形状不认识（拒绝而不是猜）
-
-### `uint32 arkrtos_port_swap_frame_bytes(void);`
-
-```c
-uint32 arkrtos_port_swap_frame_bytes(void);
-```
-
-**本架构一帧占多少字节（用于「帧是否整块落在旧栈里」的边界检查）**
-**返回**：32（Cortex-M）/ 144（RV32IMAC）/ 256（LA64）
+- `avail`：p_exc_ctx 到旧块末尾还剩多少字节（越界时调用方给 0）
+**返回**：32 / 104（Cortex-M 基本帧 / FPU 扩展帧）、144（RV32IMAC）、
+256（LA64）；0 = 形状不认识或放不下一帧
+形状判断与「一帧多大」是同一件事，所以只留这一个入口：内核拿它
+同时做「是不是这个任务的帧」与「边界在哪」两步判断，端口层不必
+把同一份判据写两遍。
 
 ### `void arkrtos_port_swap_rewrite(void *p_exc_ctx, uint32 entry);`
 
@@ -9262,6 +9289,95 @@ Declare an SVC service that takes one argument and returns nothing.
 
 Declare an SVC service that takes two arguments and returns nothing.
 
+## kernelsrc/include/arkrtos_swap_rollback.h
+
+**Failure judge and automatic rollback for a hot swap (A/B seam).**
+`ARKRTOS_USE_TASK_SWAP` moves a running task onto another image at
+its next SVC and keeps the old slot LOADED - that is the raw material
+for a rollback. This module answers the question the swap itself
+
+### `typedef struct {`
+
+```c
+typedef struct {
+```
+
+**One readable snapshot of the judge, for the shell and for reports.**
+
+### `void arkrtos_swap_rollback_init(void);`
+
+```c
+void arkrtos_swap_rollback_init(void);
+```
+
+**Clear the judge. Called from kernel init.**
+
+### `int32 arkrtos_swap_rollback_arm(int32 task_id, uint32 old_slot, uint32`
+
+```c
+int32 arkrtos_swap_rollback_arm(int32 task_id, uint32 old_slot, uint32 new_slot);
+```
+
+**Arm the judge after a swap has landed.**
+Reads the task's heartbeat contract to size the window (three
+periods, at least two ticks). Refuses when the task has no contract:
+an unjudgeable image is left alone rather than rolled back on a
+guess.
+- `task_id`：1-based task id that was just moved.
+- `old_slot`：Slot that still holds the previous image (must stay LOADED).
+- `new_slot`：Slot the task was moved into (stopped on rollback).
+**返回**：0 when armed; ARKRTOS_ROLLBACK_ERR_x otherwise.
+
+### `int32 arkrtos_swap_rollback_cancel(int32 task_id);`
+
+```c
+int32 arkrtos_swap_rollback_cancel(int32 task_id);
+```
+
+**Drop a judgement without acting on it.**
+Used when the operator stops/uninstalls either slot underneath us,
+or when a second swap supersedes this one.
+- `task_id`：The judged task; 0 cancels whatever is armed.
+**返回**：0 when cancelled (or nothing was armed), -1 when another task is armed.
+
+### `void arkrtos_swap_rollback_tick(void);`
+
+```c
+void arkrtos_swap_rollback_tick(void);
+```
+
+**One tick of judgement. Runs inside the tick handler.**
+> 说明：Reads the guard table and writes this module's state; never touches the
+scheduler, the file system or the slot table.
+
+### `void arkrtos_swap_rollback_service(void);`
+
+```c
+void arkrtos_swap_rollback_service(void);
+```
+
+**Carry out a failed verdict. Runs in task context (SVC entry path).**
+Stops the new slot (it goes back to LOADED, its tasks are taken out
+of the scheduler) and starts the old slot again. Runs at most once
+per verdict; a failed restart is reported, not retried, so a broken
+image cannot cause a restart storm.
+
+### `int32 arkrtos_swap_rollback_status(arkrtos_swap_rollback_status_t *p_o`
+
+```c
+int32 arkrtos_swap_rollback_status(arkrtos_swap_rollback_status_t *p_out);
+```
+
+**Fill in the status snapshot.**
+
+### `int32 arkrtos_swap_rollback_pending(void);`
+
+```c
+int32 arkrtos_swap_rollback_pending(void);
+```
+
+**1 when a verdict is waiting for service(), else 0 (cheap check).**
+
 ## kernelsrc/include/arkrtos_task.h
 
 **Ark RTOS 任务与调度相关定义（内核内部头文件）**
@@ -12256,7 +12372,7 @@ uint32 arkrtos_port_svc_caller_plv(void *p_exc_ctx) {
 
 **本次 trap 是从哪个特权级进来的（帧里 PRMD 的低两位 = PPLV）**
 硬件进异常时把「回到哪个 PLV」写进 PRMD.PPLV，异常处理程序
-再把它按原样留在 trap 帧里（见 arkrtos_port_swap_frame_ok 与
+再把它按原样留在 trap 帧里（见 arkrtos_port_swap_frame_bytes 与
 mprotect 分支对同两位的用法）。所以这里不需要额外记账：帧就是
 唯一真源。SEC-G08 隔离执行用它证「回调真的在 PLV3 跑过」。
 帧为空回 0：按内核态报，绝不给一个看起来像用户态的数。
@@ -14689,10 +14805,24 @@ void arkrtos_smp_sched_prepare(void *frame) {
 
 ## kernelsrc/src/arkrtos_task.c
 
+**查询任务栈使用情况（峰值法）**
+- `task_id`：任务号（从 1 开始）
+- `out3`：输出数组：out3[0]=总字节，out3[1]=峰值已用字节，out3[2]=剩余字节
+**返回**：0=成功，-1=参数非法
+
+### `#include "arkrtos_cfg.h" #include "arkrtos_log.h" #include "arkrtos_sh`
+
+```c
+#include "arkrtos_cfg.h" #include "arkrtos_log.h" #include "arkrtos_shell.h" #include "arkrtos_task.h" #include "arkrtos_guard.h" #if (ARKRTOS_USE_SWAP_ROLLBACK == 1)
+```
+
 **Ark RTOS 任务调度与系统调用分发实现**
 实现任务调度器、上下文切换的 C 侧逻辑、SVC 系统调用分发，以及任务控制接口。
 中断入口（SysTick_Handler/HardFault_Handler）在 board/ 中实现，
 它们最终调用本文件的 arkrtos_kernel_tick_handler / arkrtos_hardfault_handler。
+微秒级延时由 port 层 arkrtos_port_delay_us() 实现，依赖系统主频 SystemCoreClock。
+`@author xw`
+`@date 2026.05.03`
 
 ### `unsigned long arkrtos_cpu_fault_kill(uint32 fault_type) {`
 

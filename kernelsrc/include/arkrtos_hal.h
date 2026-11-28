@@ -295,25 +295,25 @@ void arkrtos_port_set_psp(uint32 val);
  * @brief 内核只认这四个入口，帧形状与恢复路径按架构各自实现
  * @details 热切换做的就是「改写一份硬件栈帧，让异常返回落到新入口」。而
  *          「栈帧长什么样、从哪恢复到哪」是每个架构自己的事——Cortex-M 是
- *          PSP 上 8 个字的基本帧，RISC-V 是 mepc/mstatus 收尾的一段，
- *          LoongArch 是 ERA/PRMD 收尾的一段。内核只调下面四个函数，内核里
- *          不出现任何「按架构改寄存器」的分支。
+ *          PSP 上 8 个字的基本帧（打开 FPU 后，用过 FPU 的任务是 104 字节的
+ *          扩展帧），RISC-V 是 mepc/mstatus 收尾的一段，LoongArch 是
+ *          ERA/PRMD 收尾的一段。内核只调下面三个函数，内核里不出现任何
+ *          「按架构改寄存器」的分支。
  *          声明与定义都只在 ARKRTOS_USE_TASK_SWAP == 1 时存在。
  * ============================================================ */
 #if (ARKRTOS_USE_TASK_SWAP == 1)
 
 /**
-* @brief 判断当前异常帧是不是本架构认可的「可改写帧」
+* @brief 这一帧占多少字节；0 = 本架构不认识这一帧（拒绝而不是猜）
 * @param p_exc_ctx SVC/trap 的帧指针
-* @return 1 = 可以改写；0 = 形状不认识（拒绝而不是猜）
+* @param avail     p_exc_ctx 到旧块末尾还剩多少字节（越界时调用方给 0）
+* @return 32 / 104（Cortex-M 基本帧 / FPU 扩展帧）、144（RV32IMAC）、
+*         256（LA64）；0 = 形状不认识或放不下一帧
+* @details 形状判断与「一帧多大」是同一件事，所以只留这一个入口：内核拿它
+*          同时做「是不是这个任务的帧」与「边界在哪」两步判断，端口层不必
+*          把同一份判据写两遍。
 */
-int32 arkrtos_port_swap_frame_ok(const void *p_exc_ctx);
-
-/**
-* @brief 本架构一帧占多少字节（用于「帧是否整块落在旧栈里」的边界检查）
-* @return 32（Cortex-M）/ 144（RV32IMAC）/ 256（LA64）
-*/
-uint32 arkrtos_port_swap_frame_bytes(void);
+uint32 arkrtos_port_swap_frame_bytes(const void *p_exc_ctx, uint32 avail);
 
 /**
 * @brief 把帧就地改写成「新镜像入口的第一行」

@@ -2454,9 +2454,10 @@ int32 arkrtos_task_swap_pending(void)
     return g_task_swap.task_id;
 }
 
-/* 帧形状的判据在端口层（arkrtos_port_swap_frame_ok）：Cortex-M 看 xPSR 的
- * Thumb 位与 IPSR，RV32 看 mepc 对齐与 mstatus.MPP，LA64 看 ERA 对齐与
- * PRMD.PPLV。内核这里只说「这一帧能不能改」，不认识形状就拒绝。 */
+/* 帧形状与大小的判据在端口层（arkrtos_port_swap_frame_bytes）：Cortex-M 看
+ * CONTROL.FPCA 分基本帧 / FPU 扩展帧并用 xPSR 复核，RV32 看 mepc 对齐与
+ * mstatus.MPP，LA64 看 ERA 对齐与 PRMD.PPLV。内核这里只说「这一帧能不能改、
+ * 占多少字节」，不认识形状就拒绝。 */
 
 int32 arkrtos_task_swap_arm(int32 task_id, unsigned long rom_start, uint32 rom_size,
                             unsigned long ram_start, uint32 ram_size,
@@ -2546,6 +2547,8 @@ int32 arkrtos_task_swap_take(void *p_exc_ctx, int32 task_id)
     uint32 *p_new;
     uint32 *p_old;
     uint32 i;
+    uint32 avail;
+    uint32 nbytes;
 
     if((g_task_swap.task_id == 0) || (task_id != g_task_swap.task_id) ||
        (p_frame == 0))
@@ -2563,19 +2566,33 @@ int32 arkrtos_task_swap_take(void *p_exc_ctx, int32 task_id)
         return ARKRTOS_SWAP_ERR_LAYOUT;
     }
 
-    /* 帧必须整个落在旧块的栈区里。落在外面说明这不是这个任务的 SVC
-     * （例如中断上下文里发的 SVC 走的是 MSP）——那就等它自己再发一次，
-     * 不在这里猜。 */
-    if(((uint32)p_frame < old_ram) ||
-       (((uint32)p_frame + arkrtos_port_swap_frame_bytes()) > (old_ram + blk)))
-    {
-        return 0;
-    }
+    /* 帧的形状和大小由端口层一次说清，因为这两件事本来就是同一件事：
+     * Cortex-M 的基本帧 32 字节、FPU 扩展帧 104 字节，RV32IMAC / LA64 各是
+     * 自己的一个常数。返回 0 = 这一帧本架构不认识（或放不下一帧）。
+     * avail 是「帧指针到本块栈区末尾还剩多少字节」：端口层只在这个范围内
+     * 认形状，不会为了认扩展帧去读块外的内存。 */
+    avail = (((uint32)p_frame >= old_ram) && ((uint32)p_frame < (old_ram + blk)))
+            ? ((old_ram + blk) - (uint32)p_frame) : 0u;
+    nbytes = arkrtos_port_swap_frame_bytes(p_frame, avail);
 
-    if(arkrtos_port_swap_frame_ok(p_frame) == 0)
+    if(nbytes == 0u)
     {
+        /* 落在旧块外面：这不是这个任务的 SVC（例如中断上下文里发的 SVC
+         * 走的是 MSP）——等它自己再发一次，不在这里猜，也不撤挂起项。 */
+        if(((uint32)p_frame < old_ram) || ((uint32)p_frame >= (old_ram + blk)))
+        {
+            return 0;
+        }
+        /* 落在这个任务的栈区里却认不出形状：真坏帧，撤掉挂起项让调用方
+         * 把新缓冲还回去，别让它一直挂着。 */
         g_task_swap.task_id = 0;
         return ARKRTOS_SWAP_ERR_FRAME;
+    }
+
+    /* 帧必须整个落在旧块的栈区里，否则异常返回会从块外弹帧。 */
+    if(((uint32)p_frame + nbytes) > (old_ram + blk))
+    {
+        return 0;
     }
 
     off   = (uint32)p_frame - old_ram;

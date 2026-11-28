@@ -282,9 +282,9 @@ unsigned long arkrtos_port_stack_init(unsigned long stack_top, void (*entry)(voi
     return stack_top;
 }
 
-/* 换入端口层：只记「被调用过」，帧内容由内核的整块搬运负责。 */
+/* 换入端口层：只记「被调用过」，帧内容由内核的整块搬运负责。
+ * g_swap_bytes 就是端口层「这一帧多大」的答案，0 = 不认识这一帧。 */
 static int g_swap_bytes = 32;
-static int g_frame_ok = 1;
 static void *g_swap_activate_old = 0;
 static void *g_swap_activate_new = 0;
 static int g_swap_activate_n = 0;
@@ -292,8 +292,12 @@ static void *g_swap_rewrite_frame = 0;
 static uint32 g_swap_rewrite_entry = 0u;
 static int g_swap_rewrite_n = 0;
 
-uint32 arkrtos_port_swap_frame_bytes(void) { return (uint32)g_swap_bytes; }
-int32  arkrtos_port_swap_frame_ok(const void *p) { (void)p; return g_frame_ok; }
+uint32 arkrtos_port_swap_frame_bytes(const void *p, uint32 avail)
+{
+    (void)p;
+    (void)avail;
+    return (uint32)g_swap_bytes;
+}
 void   arkrtos_port_swap_rewrite(void *p_exc_ctx, uint32 entry)
 {
     g_swap_rewrite_n++;
@@ -932,7 +936,6 @@ static void reset_all(void)
     g_swap_rewrite_frame = 0;
     g_swap_rewrite_entry = 0u;
     g_swap_bytes = 32;
-    g_frame_ok = 1;
 
     console_reset();
     board_out_reset();
@@ -2026,14 +2029,24 @@ static void test_task_swap(void)
     ck_i32(arkrtos_task_swap_pending(), 0, "a layout mismatch clears the pending swap");
     arkrtos_task_table[0].ram_size = 4096u;      /* 恢复现场 */
 
-    /* 帧形状被端口层拒绝 */
+    /* 帧形状被端口层拒绝：块内、端口说「不认识这一帧」（返回 0 字节） */
     arkrtos_task_swap_arm(1, 0x40000ul, 0x1000u,
                          (unsigned long)g_new_blk, 4096u, 0x1234u);
-    g_frame_ok = 0;
+    g_swap_bytes = 0;
     ck_i32(arkrtos_task_swap_take(p_frame, 1), ARKRTOS_SWAP_ERR_FRAME,
            "a frame the port rejects is refused");
     ck_i32(arkrtos_task_swap_pending(), 0, "a frame refusal clears the pending swap");
-    g_frame_ok = 1;
+
+    /* 同一个「不认识」答案，落在旧块外面时必须安静地放过（中断里发的 SVC
+     * 走 MSP，端口当然认不出这是哪个任务的帧），挂起项要原样留着。 */
+    arkrtos_task_swap_arm(1, 0x40000ul, 0x1000u,
+                         (unsigned long)g_new_blk, 4096u, 0x1234u);
+    ck_i32(arkrtos_task_swap_take((uint32 *)(void *)g_new_blk, 1), 0,
+           "an unrecognised frame outside the block is a no-op");
+    ck_i32(arkrtos_task_swap_pending(), 1,
+           "an unrecognised out of block frame keeps the swap pending");
+    arkrtos_task_swap_cancel(0);
+    g_swap_bytes = 32;
 
     /* ---- 成功路径 ---- */
     setup_swap_task();

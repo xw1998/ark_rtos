@@ -681,15 +681,18 @@ void arkrtos_port_set_psp(uint32 val)
  * ------------------------------------------------------------------- */
 static uint32 *s_rv32_swap_frame = 0;
 
-int32 arkrtos_port_swap_frame_ok(const void *p_exc_ctx)
+uint32 arkrtos_port_swap_frame_bytes(const void *p_exc_ctx, uint32 avail)
 {
     const uint32 *p_frame = (const uint32 *)p_exc_ctx;
     uint32 mepc;
     uint32 mpp;
 
+    /* RISC-V 的帧是软件造的定长结构，没有「另一种形状」：avail 只在这里做
+     * 一次下界复核——放不下就报不认识，交给内核按「不是本任务的 SVC」处理。 */
+    (void)avail;
     if(p_frame == 0)
     {
-        return 0;
+        return 0u;
     }
     mepc = p_frame[RV_FR_MEPC];
     mpp  = (p_frame[RV_FR_MSTATUS] >> RV_MSTATUS_MPP_SHIFT) & 3u;
@@ -700,17 +703,12 @@ int32 arkrtos_port_swap_frame_ok(const void *p_exc_ctx)
      * 链接后的指令落点有关（实测 mepc=0x8002B80E）。 */
     if((mepc == 0u) || ((mepc & 1u) != 0u))
     {
-        return 0;
+        return 0u;
     }
     if((mpp != RV_PRIV_U) && (mpp != RV_PRIV_M))
     {
-        return 0;
+        return 0u;
     }
-    return 1;
-}
-
-uint32 arkrtos_port_swap_frame_bytes(void)
-{
     return RV_FR_SIZE;
 }
 

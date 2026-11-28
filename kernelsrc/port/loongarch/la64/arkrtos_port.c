@@ -5337,7 +5337,7 @@ void arkrtos_port_svc_set_ret(void *p_exc_ctx, unsigned long value)
 /**
 * @brief 本次 trap 是从哪个特权级进来的（帧里 PRMD 的低两位 = PPLV）
 * @details 硬件进异常时把「回到哪个 PLV」写进 PRMD.PPLV，异常处理程序
-*          再把它按原样留在 trap 帧里（见 arkrtos_port_swap_frame_ok 与
+*          再把它按原样留在 trap 帧里（见 arkrtos_port_swap_frame_bytes 与
 *          mprotect 分支对同两位的用法）。所以这里不需要额外记账：帧就是
 *          唯一真源。SEC-G08 隔离执行用它证「回调真的在 PLV3 跑过」。
 *          帧为空回 0：按内核态报，绝不给一个看起来像用户态的数。
@@ -5736,34 +5736,32 @@ void arkrtos_port_set_psp(uint32 val)
  * ------------------------------------------------------------------- */
 static la_frame_word *s_la_swap_frame = 0;
 
-int32 arkrtos_port_swap_frame_ok(const void *p_exc_ctx)
+uint32 arkrtos_port_swap_frame_bytes(const void *p_exc_ctx, uint32 avail)
 {
     const la_frame_word *p_frame = (const la_frame_word *)p_exc_ctx;
     unsigned long era;
     unsigned long plv;
 
+    /* LoongArch 的帧同样是软件造的定长结构，没有第二种形状：avail 只做一次
+     * 记录（放不下的情形由内核的边界检查兜住），判据看 ERA 与 PRMD。 */
+    (void)avail;
     if(p_frame == 0)
     {
-        return 0;
+        return 0u;
     }
     era = p_frame[LA_FR_ERA];
     plv = p_frame[LA_FR_PRMD] & 3UL;
     if((era == 0UL) || ((era & 3UL) != 0UL))
     {
-        return 0;
+        return 0u;
     }
     /* PRMD.PPLV 只能是 0（PLV0 内核）或 3（PLV3 App）：其余值说明这不是一份
      * ertn 能用的帧，拒绝而不是猜。 */
     if((plv != 0UL) && (plv != 3UL))
     {
-        return 0;
+        return 0u;
     }
-    return 1;
-}
-
-uint32 arkrtos_port_swap_frame_bytes(void)
-{
-    return LA_FR_SIZE;
+    return (uint32)LA_FR_SIZE;
 }
 
 void arkrtos_port_swap_rewrite(void *p_exc_ctx, uint32 entry)

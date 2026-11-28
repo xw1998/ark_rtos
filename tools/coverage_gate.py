@@ -370,6 +370,14 @@ CASES = [
      ["kernelsrc/src/arkrtos_swap_rollback.c"],
      ["-DARKRTOS_USE_TASK_SWAP=1", "-DARKRTOS_USE_SWAP_ROLLBACK=1",
       "-DARKRTOS_TICK_PERIOD_US=2000"], "SWAPRB-CLAMP OK"),
+    # --- 2026-11-28 新增：Cortex-M 热切换帧形状判据 ---
+    # 被测物是 port/arm/arkrtos_arm_swap_frame.h 里的静态纯函数：它没有对应的
+    # .c，所以本档只跑用例（mods 为空），不按模块比覆盖率；头文件自身的行
+    # 覆盖率由 gcov 单独量（21/21），读数登记在 docs/单元测试框架.md。
+    # FPCA 说扩展帧但放不下 / [7] 与 [25] 都像 xPSR 这两种危险形态必须由
+    # FPCA 定形状，用例里逐条钉住。
+    ("armframe", "kernelsrc/tests/test_arm_swap_frame_host.c",
+     [], [], "ARMFRAME-HOST OK"),
     # --- 2026-11-22 新增：实时性度量（RTSTAT 开/关是两段代码）---
     # 关档是空目标（零符号），覆盖率只由开档供给；开档带着宿主预算钩子
     # ARKRTOS_RT_HOST_TEST，没有它辅助任务体那个 for(;;) 会把门禁挂死。
