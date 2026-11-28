@@ -81,6 +81,18 @@ static int    g_mounted;
 static int    g_fail_write;       /* 1 = every write_at fails */
 static uint32 g_tick;
 
+/* 故障旋钮：被测模块的每一条错误出口都要有人走到，否则「卷读不动 / 头部写不
+ * 进去 / 同一时刻两个写」这些分支就只是纸面上的判断。旋钮刻意做成「按偏移 /
+ * 按第几笔 / 按一次回调」，这样每个用例只坏一处，读数才归因得清楚。 */
+static int    g_fail_read;        /* 1 = 每一次读都失败 */
+static uint32 g_read_bad_off;     /* NO_BAD_OFF = 不坏任何读 */
+static int    g_read_bad_err;     /* 1 = 该偏移的读返回 -1，0 = 短读（0 字节） */
+static uint32 g_write_budget;     /* n：前 n-1 笔写成功，第 n 笔失败；0 = 不限 */
+static int  (*g_write_hook)(void);/* 写成功后回调一次（用来制造重入） */
+static int    g_hook_rc;
+
+#define NO_BAD_OFF  ((uint32)0xFFFFFFFFu)
+
 static void vol_reset(void)
 {
     uint32 i;
@@ -93,6 +105,12 @@ static void vol_reset(void)
     g_mounted = 1;
     g_fail_write = 0;
     g_tick = 0u;
+    g_fail_read = 0;
+    g_read_bad_off = NO_BAD_OFF;
+    g_read_bad_err = 0;
+    g_write_budget = 0u;
+    g_write_hook = 0;
+    g_hook_rc = 0;
 }
 
 uint8 arkrtos_fs_mounted(void)
@@ -110,6 +128,16 @@ int32 arkrtos_fs_read_at(const char *path, uint8 *buf, uint32 len, uint32 off,
     if((buf == 0) || (g_mounted == 0))
     {
         return -1;
+    }
+    if(g_fail_read != 0)
+    {
+        return -1;
+    }
+    if(off == g_read_bad_off)
+    {
+        /* 一处坏读：错误档（介质报错）与短读档（数据没了）是两件不同的事，
+         * 模块对它们的回答也必须不同。 */
+        return (g_read_bad_err != 0) ? -1 : 0;
     }
     if(off >= g_vol_len)
     {
@@ -141,6 +169,23 @@ int32 arkrtos_fs_write_at(const char *path, const uint8 *buf, uint32 len,
     if((off + len) > g_vol_len)
     {
         g_vol_len = off + len;
+    }
+    if(g_write_budget != 0u)
+    {
+        /* 计数到 1 的那一笔失败：用来分开「记录先落盘、头部后落盘」两个写点
+         * 各自的失败语义。 */
+        g_write_budget--;
+        if(g_write_budget == 0u)
+        {
+            return -1;
+        }
+    }
+    if(g_write_hook != 0)
+    {
+        int (*hook)(void) = g_write_hook;
+
+        g_write_hook = 0;      /* one shot: the nested call must not re-enter */
+        g_hook_rc = hook();
     }
     return 0;
 }
@@ -531,6 +576,296 @@ static void case_write_failure(void)
     ck_u(st.last_seq, 3ul, "and the seq continues from where it stopped");
 }
 
+/* 卷上写一条「真」记录：magic / seq / kind 与自己的 crc 都对得上。
+ * 扫描与重建的边角（回退读、短读、坏头部字段）要先有真内容才谈得上。 */
+static void plant_rec(uint32 i, uint32 seq, uint32 kind)
+{
+    uint8 *p = slot(i);
+
+    memset(p, 0x00, 32u);
+    wr32(p + 0u, ARKRTOS_AUDIT_REC_MAGIC);
+    wr32(p + 4u, seq);
+    wr32(p + 12u, kind);
+    wr32(p + 28u, arkrtos_crc32(p, 28u, 0u));
+    if(((i * 32u) + 64u) > g_vol_len)
+    {
+        g_vol_len = (i * 32u) + 64u;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+
+/* 介质不听话的那一类：读失败 / 短读 / 头部写不进去 / 同一时刻两个写。四条出口
+ * 各自有不同的正确回答，混成一个「失败」就等于以后再没人分得清现场。 */
+
+/* 卷在、但读不动：init 必须把它当成「没有可用头部」去重建（而不是拒绝启动），
+ * 而 read 的读失败必须报 WRITE——报 EMPTY 会把「介质坏了」说成「没有这条记录」。 */
+static void case_read_error(void)
+{
+    arkrtos_audit_log_stats_t st;
+    arkrtos_audit_rec_t rec;
+
+    vol_reset();
+    case_begin();
+    g_fail_read = 1;
+
+    ck_u((unsigned long)arkrtos_audit_log_init(), 0ul,
+         "a volume that refuses reads is rebuilt, not fatal");
+    arkrtos_audit_log_stats(&st);
+    ck_u(st.used, 1ul, "the rebuild starts an empty ring and appends LOG_OPEN");
+    ck_u(rebuilds_since(), 0ul,
+         "a header that could not be read is not counted as a rebuild");
+
+    ck_u((unsigned long)arkrtos_audit_log_read(0u, &rec),
+         (unsigned long)ARKRTOS_AUDIT_LOG_ERR_WRITE,
+         "read on a refusing volume reports WRITE, not EMPTY");
+
+    g_fail_read = 0;
+    ck_u((unsigned long)arkrtos_audit_log_read(0u, &rec), 0ul,
+         "the same read succeeds once the volume answers again");
+    ck_u(rec.kind, (unsigned long)ARKRTOS_AUDIT_EV_LOG_OPEN,
+         "the readable record is the open's own");
+}
+
+/* 扫描回退读的两条坏路：介质报错（241）与短读（245）。两种都只该把回退停在
+ * 那里——已认出的那两条记录必须留下，不能因为后面读不动就退回空环。
+ *
+ * 布置要点：第一遍扫描是按槽位顺序读的，任何一格读坏都会让第一遍先停；所以
+ * 「回退那一格坏」要把坏点放在第一遍**读不到**的位置（文件在槽 2 处截断），
+ * 让它只在回退时才被读到——最后那一格（槽 CAP-1）正是这种位置。 */
+static void case_scan_back_walk_errors(void)
+{
+    arkrtos_audit_log_stats_t st;
+    arkrtos_audit_rec_t rec;
+
+    /* 一档：回退那一格报错。槽 0/1 是真记录（seq 4/5），文件在槽 2 处截断，
+     * 回退从槽 63 开始读——那一格被设成坏读。 */
+    vol_reset();
+    case_begin();
+    plant_rec(0u, 4u, (uint32)ARKRTOS_AUDIT_EV_IMAGE_OK);
+    plant_rec(1u, 5u, (uint32)ARKRTOS_AUDIT_EV_IMAGE_OK);
+    g_vol_len = 32u + (2u * 32u) + 8u;       /* 槽 2 只有 8 字节 */
+    g_read_bad_off = 32u + (63u * 32u);
+    g_read_bad_err = 1;
+
+    ck_u((unsigned long)arkrtos_audit_log_init(), 0ul,
+         "a read error mid-walk stops the walk but keeps the records");
+    ck_u(rebuilds_since(), 1ul, "an all-zero header was rebuilt exactly once");
+    arkrtos_audit_log_stats(&st);
+    ck_u(st.used, 3ul, "two recovered records + the open that followed");
+    ck_u(st.last_seq, 6ul, "the newest seq is the open's own");
+    ck_u((unsigned long)arkrtos_audit_log_read(1u, &rec), 0ul,
+         "a record the walk already accepted is readable");
+    ck_u(rec.seq, 5ul, "and it is the planted one, not a neighbour");
+
+    /* 二档：回退那一格短读（0 字节）。同样的布置，坏读换成短读。 */
+    vol_reset();
+    case_begin();
+    plant_rec(0u, 4u, (uint32)ARKRTOS_AUDIT_EV_IMAGE_OK);
+    plant_rec(1u, 5u, (uint32)ARKRTOS_AUDIT_EV_IMAGE_OK);
+    g_vol_len = 32u + (2u * 32u) + 8u;
+    g_read_bad_off = 32u + (63u * 32u);
+    g_read_bad_err = 0;
+
+    ck_u((unsigned long)arkrtos_audit_log_init(), 0ul,
+         "a short read mid-walk stops the walk too");
+    ck_u(rebuilds_since(), 1ul, "one rebuild for the zero header");
+    arkrtos_audit_log_stats(&st);
+    ck_u(st.used, 3ul, "the same two records survive a short read behind them");
+    ck_u((unsigned long)arkrtos_audit_log_read(1u, &rec), 0ul,
+         "the planted record is still readable");
+    ck_u(rec.seq, 5ul, "and keeps its seq");
+
+    g_read_bad_off = NO_BAD_OFF;
+}
+
+/* crc 对得上、字段却不可能的头部：手工改卷子的形状。信任它就会让 head 跑到
+ * 环外，下一次写直接落到文件之外。 */
+static void case_bad_header_fields(void)
+{
+    arkrtos_audit_log_stats_t st;
+
+    vol_reset();
+    (void)arkrtos_audit_log_init();          /* 一份真头部 + LOG_OPEN */
+    case_begin();
+
+    wr32(&g_vol[12], (uint32)ARKRTOS_AUDIT_LOG_RECORDS);  /* head = CAP，越界 */
+    wr32(&g_vol[28], arkrtos_crc32(g_vol, 28u, 0u));      /* 并把 crc 补对 */
+
+    ck_u((unsigned long)arkrtos_audit_log_init(), 0ul,
+         "a crc-valid header with an impossible head is refused and rebuilt");
+    ck_u(rebuilds_since(), 1ul, "the refusal is counted as a rebuild");
+    arkrtos_audit_log_stats(&st);
+    ck_u(st.used, 2ul, "the rebuilt ring keeps the old record and adds the open");
+    ck_u(st.last_seq, 2ul, "seq continues from the recovered record");
+}
+
+/* 重建时头部写不进去：必须报 WRITE 并让 ready 归零，后续读写都走懒开。 */
+static void case_rebuild_write_failure(void)
+{
+    arkrtos_audit_log_stats_t st;
+
+    vol_reset();
+    (void)arkrtos_audit_log_init();
+    case_begin();
+
+    g_vol[28] ^= 0xFFu;              /* 头部 crc 坏掉 */
+    g_fail_write = 1;
+
+    ck_u((unsigned long)arkrtos_audit_log_init(),
+         (unsigned long)ARKRTOS_AUDIT_LOG_ERR_WRITE,
+         "a rebuild whose header write fails reports WRITE");
+    arkrtos_audit_log_stats(&st);
+    ck_u(st.ready, 0ul, "the log is not left claiming to be open");
+
+    g_fail_write = 0;
+    ck_u((unsigned long)arkrtos_audit_log_init(), 0ul,
+         "the next open succeeds once the volume writes again");
+    arkrtos_audit_log_stats(&st);
+    ck_u(st.ready, 1ul, "and the log is open again");
+    ck(st.used >= 1ul, "with at least the open's own record");
+}
+
+/* 重入：写正在进行时，init 与另一条 record 都必须被拒（BUSY），而不是插进去
+ * 把 RAM 环位置和卷上的头部改成两个人的版本。 */
+static int hook_init(void)
+{
+    return (int)arkrtos_audit_log_init();
+}
+
+static int hook_record(void)
+{
+    return (int)arkrtos_audit_log_record((uint32)ARKRTOS_AUDIT_EV_AUTH_FAIL, 2u, 3u);
+}
+
+static void case_reentrancy(void)
+{
+    arkrtos_audit_log_stats_t st;
+    uint32 busy0;
+    uint32 dropped0;
+
+    vol_reset();
+    (void)arkrtos_audit_log_init();
+    arkrtos_audit_log_stats(&st);
+    busy0 = st.busy;
+    dropped0 = st.dropped;
+
+    g_write_hook = hook_init;
+    ck_u((unsigned long)arkrtos_audit_log_record((uint32)ARKRTOS_AUDIT_EV_EXEC_START, 1u, 1u),
+         0ul, "the outer append still lands");
+    ck_u((unsigned long)g_hook_rc, (unsigned long)ARKRTOS_AUDIT_LOG_ERR_BUSY,
+         "init from inside a write is refused with BUSY");
+    arkrtos_audit_log_stats(&st);
+    ck_u(st.busy - busy0, 0ul, "a refused init does not touch the busy counter");
+
+    g_write_hook = hook_record;
+    ck_u((unsigned long)arkrtos_audit_log_record((uint32)ARKRTOS_AUDIT_EV_EXEC_START, 1u, 2u),
+         0ul, "the second outer append lands");
+    ck_u((unsigned long)g_hook_rc, (unsigned long)ARKRTOS_AUDIT_LOG_ERR_BUSY,
+         "a nested append is refused with BUSY");
+    arkrtos_audit_log_stats(&st);
+    ck_u(st.busy - busy0, 1ul, "the nested refusal is counted as busy");
+    ck_u(st.dropped - dropped0, 1ul, "and as dropped");
+}
+
+/* 记录落了盘、头部没落：卷上多一条没人指着的记录是允许的，但 RAM 环不许前进。
+ * 前进了就等于这次开机再发一次同一个 seq，而那条记录下次开机又被扫描捡回来。 */
+static void case_header_write_failure(void)
+{
+    arkrtos_audit_log_stats_t st;
+    arkrtos_audit_rec_t rec;
+
+    vol_reset();
+    (void)arkrtos_audit_log_init();          /* head 1 / seq_next 2 */
+    case_begin();
+
+    g_write_budget = 2u;                     /* 第一笔（记录）成，第二笔（头部）败 */
+    ck_u((unsigned long)arkrtos_audit_log_record((uint32)ARKRTOS_AUDIT_EV_EXEC_START, 1u, 42u),
+         (unsigned long)ARKRTOS_AUDIT_LOG_ERR_WRITE,
+         "a header write failure is reported as WRITE");
+    ck_u(rd32(slot(1u)), (unsigned long)ARKRTOS_AUDIT_REC_MAGIC,
+         "the record itself did reach the volume");
+    ck_u((unsigned long)arkrtos_audit_log_read(1u, &rec),
+         (unsigned long)ARKRTOS_AUDIT_LOG_ERR_EMPTY,
+         "but nothing points at it yet, so it is not readable by index");
+
+    g_write_budget = 0u;
+    ck_u((unsigned long)arkrtos_audit_log_record((uint32)ARKRTOS_AUDIT_EV_EXEC_START, 1u, 43u),
+         0ul, "the next append succeeds");
+    ck_u((unsigned long)arkrtos_audit_log_read(1u, &rec), 0ul, "and is readable");
+    ck_u(rec.seq, 2ul, "the seq was not burnt by the failed head update");
+    ck_u(rec.code, 43ul, "the slot holds the append that actually finished");
+
+    arkrtos_audit_log_stats(&st);
+    arkrtos_audit_log_stats(&st);            /* 只读两次，确保没有副作用 */
+    ck(st.dropped - g_dropped0 >= 1u, "the failure is counted as dropped");
+}
+
+/* 懒开：ready 为 0 时，read 自己把环打开；打开失败就把 init 的错误原样带出来，
+ * 不能报一个「空环」骗调用方。 */
+static void case_lazy_open(void)
+{
+    arkrtos_audit_rec_t rec;
+
+    vol_reset();
+    g_mounted = 0;
+    ck_u((unsigned long)arkrtos_audit_log_init(),
+         (unsigned long)ARKRTOS_AUDIT_LOG_ERR_NOMOUNT, "unmounted: init says NOMOUNT");
+
+    g_mounted = 1;
+    ck_u((unsigned long)arkrtos_audit_log_read(0u, &rec), 0ul,
+         "read opens a log that was never opened");
+    ck_u(rec.kind, (unsigned long)ARKRTOS_AUDIT_EV_LOG_OPEN,
+         "the lazy open wrote its own LOG_OPEN, which is what we read");
+
+    g_mounted = 0;
+    (void)arkrtos_audit_log_init();          /* 再次 closed */
+    g_mounted = 1;
+    g_vol[28] ^= 0xFFu;                      /* 头部坏掉，只能重建 */
+    g_fail_write = 1;
+
+    ck_u((unsigned long)arkrtos_audit_log_read(0u, &rec),
+         (unsigned long)ARKRTOS_AUDIT_LOG_ERR_WRITE,
+         "a lazy open that cannot write surfaces WRITE from read");
+
+    g_fail_write = 0;
+    ck_u((unsigned long)arkrtos_audit_log_init(), 0ul, "a later open still works");
+}
+
+/* 卷上的槽位对不上自己的 crc：read 必须报 CRC，而不是把半条记录当内容交出去。 */
+static void case_read_bad_crc(void)
+{
+    arkrtos_audit_log_stats_t st;
+    arkrtos_audit_rec_t rec;
+
+    vol_reset();
+    (void)arkrtos_audit_log_init();
+
+    slot(0u)[28] ^= 0xFFu;                   /* 记录的反向引用坏了 */
+    ck_u((unsigned long)arkrtos_audit_log_read(0u, &rec),
+         (unsigned long)ARKRTOS_AUDIT_LOG_ERR_CRC,
+         "a slot whose crc does not hold is reported as CRC");
+
+    slot(0u)[28] ^= 0xFFu;                   /* 原样还原 */
+    ck_u((unsigned long)arkrtos_audit_log_read(0u, &rec), 0ul, "and reads again after repair");
+
+    /* 同一个"不是记录"判定还有另一半：crc 自洽但魔数不对。区块被抹掉、或被
+     * 别人写脏时就是这个形状——它绝不是一条记录，读回必须报 CRC 而不是把
+     * 一堆零当内容交出去。 */
+    wr32(&slot(0u)[0], 0u);
+    ck_u((unsigned long)arkrtos_audit_log_read(0u, &rec),
+         (unsigned long)ARKRTOS_AUDIT_LOG_ERR_CRC,
+         "a slot whose magic is gone is reported as CRC, not returned as content");
+    wr32(&slot(0u)[0], ARKRTOS_AUDIT_REC_MAGIC);
+    ck_u((unsigned long)arkrtos_audit_log_read(0u, &rec), 0ul,
+         "and reads again once the magic is put back");
+    ck_u((unsigned long)arkrtos_audit_log_cap(), (unsigned long)ARKRTOS_AUDIT_LOG_RECORDS,
+         "cap() reports the volume's slot count");
+
+    arkrtos_audit_log_stats(&st);
+    ck_u(st.cap, (unsigned long)ARKRTOS_AUDIT_LOG_RECORDS, "stats agree with cap()");
+}
+
 /* 种类号是卷上 ABI，名字是操作员在 'auditlog dump' 里读到的东西。两者都只追加：
  * 新种类可以加，旧种类的号与名都不能改，否则旧版本固件写下的台账会被读错。
  * 每条都钉死，顺带让 kind_name() 的每个分支都被走到。 */
@@ -586,6 +921,14 @@ int main(void)
     case_scan_counts_bad_crc();
     case_header_rebuild();
     case_write_failure();
+    case_read_error();
+    case_scan_back_walk_errors();
+    case_bad_header_fields();
+    case_rebuild_write_failure();
+    case_reentrancy();
+    case_header_write_failure();
+    case_lazy_open();
+    case_read_bad_crc();
     case_kind_names();
 
     printf("checks=%d fails=%d\n", g_checks, g_fails);

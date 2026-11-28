@@ -16,8 +16,8 @@
   C 开档编得过：模块本体加六处接线（fs / installer / shell_diag / shell_mod /
     shell_auth / linux_abi）用 F427 工程那套 include 与档位宏做 -fsyntax-only。
     接线代码全在 #if 里，常规构建碰不到它；这一组是它唯一的编译门禁。
-  D 宿主用例两档全过：ON 档要打 AUDIT-LOG HOST OK（163 条检查），OFF 档要打
-    AUDIT-LOG OFF OK（4 条）。
+  D 宿主用例两档全过：ON 档要打 AUDIT-LOG HOST OK（231 条检查：正常路径 +
+    八类错误出口，数字由用例输出读，不写死），OFF 档要打 AUDIT-LOG OFF OK（4 条）。
   E 判据自检：把坏输出喂给判据函数必须判红。门禁自己撒谎比被测代码撒谎更难查。
 
 用法
