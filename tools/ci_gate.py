@@ -2409,11 +2409,14 @@ def check_icount_stack():
     r = _run_check([sys.executable, os.path.join("tools", "icount_stack_gate.py")])
     txt = ((r.stdout or "") + (r.stderr or "")).strip()
     if r.returncode == 0 and "ICOUNT-STACK-GATE OK" in txt:
+        # 自检样例数从门禁自己的输出里取，别在这里写死一个会过期的数字。
+        m = re.search(r"ok\s+parser-self-check\s+(\d+)\s", txt)
+        n = m.group(1) if m else "?"
         ok("icount-stack",
            "source pins (8 KB iff NET_VIRTIO or LINUX_SOCKET, lwip task 4 KB) / "
-           "parser self-check 6/6 / ten-tier build + -icount shift=5 pure run: no "
+           "parser self-check %s/%s / ten-tier build + -icount shift=5 pure run: no "
            "FATAL, [fork] PASS, keeps running after fork / tcpip stack headroom / "
-           "default build restored")
+           "default build restored" % (n, n))
     else:
         fail("icount-stack", txt[-360:])
 
