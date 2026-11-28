@@ -19,9 +19,13 @@
 *                    交班值在交接时算定（中途新置的位不会混进来）、
 *                    非 HANDOFF 唤醒不算命中、删除唤醒 + 删除后接口拒绝、
 *                    任务下线收尸（摘等待槽 + 回收它创建的对象）、
-*                    参数与句柄校验（mask=0 / OR与AND同时给 / 都不给 / 空指针）。
+*                    参数与句柄校验（mask=0 / OR与AND同时给 / 都不给 / 空指针）、
+*                    四个入口的句柄与状态闸门、handler 上下文与无当前任务两条
+*                    拒绝、调度器拒绝阻塞、睡下期间对象被删、重复登记的两半
+*                    语义（woken==0 就地更新掩码，woken==1 不许覆盖）。
 *            未验证：真实调度器下的优先级与唤醒时序（ready_add / PendSV 全为空
-*                    实现）、用户态 SVC 轮询路径（sync_in_handler 恒 0）、
+*                    实现）、用户态 SVC 轮询路径（sync_in_handler 的返回值由测试
+*                    拨，证明的是 eset 在这个上下文下拒绝登记，不是 SVC 入口本身）、
 *                    板上中断里 set 的实际延迟。那部分只有上板用例能证明。
 * @note 用法：由 tools/eset_host_gate.py 编译并运行，输出 ESET-HOST OK。
 */
@@ -77,7 +81,10 @@ void mdk_trace_arkrtos_obj_signal(uint16 obj, uint8 cls);
 void arkrtos_trace_wait_obj(uint16 obj13) { (void)obj13; }
 void mdk_trace_arkrtos_obj_signal(uint16 obj, uint8 cls) { (void)obj; (void)cls; }
 
-uint8 arkrtos_sync_in_handler(void) { return 0u; }
+/* sync_in_handler 在宿主上是可拨的：置 1 就代表"这次调用来自 handler / SVC"，
+ * 那条路径必须拒绝登记而不是假装睡得着。 */
+static uint8 g_in_handler = 0u;
+uint8 arkrtos_sync_in_handler(void) { return g_in_handler; }
 
 /* ------------------------------------------------------------------
  * 测试脚手架
@@ -123,6 +130,7 @@ static void table_reset(void)
     g_cur = 0;
     g_block_hook = 0;
     g_ready_calls = 0;
+    g_in_handler = 0u;
 }
 
 static int waiter_count(int idx)
@@ -493,6 +501,176 @@ static void t12_nospace(void)
           "no phantom registration after NOSPACE");
 }
 
+/* 进不了阻塞的两种形态（调度器拒绝 / 对象在睡下期间被删）用固定返回值的钩子。 */
+static int32 block_error(void)   { return -1; }
+static int32 block_deleted(void) { return ARKRTOS_WAKE_OBJ_DELETED; }
+
+/* "已经交接完成、但还没被取走"的那一槽：再登记时掩码与选项不许被覆盖。
+ * 钩子在登记之后、返回之前读它，就能把这条语义钉住。 */
+static uint32 g_keep_mask = 0u;
+static int g_keep_seen = 0;
+static int g_keep_woken = -1;
+
+static int32 hooked_dup_check(void)
+{
+    int32 idx = g_hook_handle & ARKRTOS_HANDLE_RELMASK;
+    int j;
+
+    for(j = 0; j < ARKRTOS_MAX_ESET_WAITERS; j++)
+    {
+        if((arkrtos_esets[idx].waiters[j].task == g_cur) &&
+           (arkrtos_esets[idx].waiters[j].mask == g_keep_mask))
+        {
+            g_keep_seen  = 1;
+            g_keep_woken = (arkrtos_esets[idx].waiters[j].woken != 0u) ? 1 : 0;
+        }
+    }
+    return ARKRTOS_WAKE_TIMEOUT;
+}
+
+/* 四个入口的句柄 / 状态闸门：把"不是我的对象"与"这对象已经没了"分开，
+ * 任何一种都不许被读成成功（否则调用方会以为位拿到了）。 */
+static void t13_api_gates(void)
+{
+    int32 h;
+    int32 idx;
+    int32 free_h;
+    int32 fidx;
+    uint32 got = 0u;
+
+    table_reset();
+    use_task(0);
+    h = arkrtos_eset_create_internal("gates");
+    idx = h & ARKRTOS_HANDLE_RELMASK;
+
+    check(arkrtos_eset_set_internal(0x12345678, 0x1u) == ARKRTOS_ESET_ERR_HANDLE,
+          "set rejects a handle without the object flag");
+    check(arkrtos_eset_clear_internal(0x12345678, 0x1u) == ARKRTOS_ESET_ERR_HANDLE,
+          "clear rejects a handle without the object flag");
+    check(arkrtos_eset_get_internal(0x12345678, &got) == ARKRTOS_ESET_ERR_HANDLE,
+          "get rejects a handle without the object flag");
+    check(arkrtos_eset_delete_internal(0x12345678) == ARKRTOS_ESET_ERR_HANDLE,
+          "delete rejects a handle without the object flag");
+
+    /* 标志对、槽位从未创建：STATE，而不是把空槽当成对象 */
+    free_h = (int32)(((uint32)(ARKRTOS_ESET_NUM - 1) | ARKRTOS_ESET_HANDLE_FLAG));
+    fidx = free_h & ARKRTOS_HANDLE_RELMASK;
+    arkrtos_esets[fidx].used = 0u;
+    check(arkrtos_eset_clear_internal(free_h, 0x1u) == ARKRTOS_ESET_ERR_STATE,
+          "clear on an unused slot is STATE");
+    check(arkrtos_eset_get_internal(free_h, &got) == ARKRTOS_ESET_ERR_STATE,
+          "get on an unused slot is STATE");
+    check(arkrtos_eset_delete_internal(free_h) == ARKRTOS_ESET_ERR_STATE,
+          "delete on an unused slot is STATE");
+
+    /* 真删掉之后，同一个句柄仍然必须拒绝 */
+    check(arkrtos_eset_set_internal(h, 0x2u) == 0, "the live object still works before delete");
+    check(arkrtos_eset_delete_internal(h) == 0, "delete the live object");
+    check(arkrtos_eset_clear_internal(h, 0x2u) == ARKRTOS_ESET_ERR_STATE,
+          "clear after delete is STATE, not a silent success");
+    check(arkrtos_esets[idx].used == 0u, "the slot stays free");
+}
+
+/* 阻塞前 / 阻塞中的三种拒绝：handler 上下文、没有当前任务、调度器不让睡、
+ * 睡下后对象被删。四条路径各自都要把登记摘干净。 */
+static void t14_wait_contexts(void)
+{
+    int32 h;
+    uint32 got = 0u;
+
+    table_reset();
+    use_task(0);
+    h = arkrtos_eset_create_internal("ctx");
+
+    g_in_handler = 1u;
+    check(arkrtos_eset_wait_internal(h, 0x1u, ARKRTOS_ESET_OPT_OR, &got, 100)
+          == ARKRTOS_SYNC_ERR_WOULDBLOCK, "wait inside a handler is WOULDBLOCK");
+    check(waiter_count(h & ARKRTOS_HANDLE_RELMASK) == 0,
+          "a handler wait leaves no registration");
+    g_in_handler = 0u;
+
+    g_cur = 0;
+    check(arkrtos_eset_wait_internal(h, 0x1u, ARKRTOS_ESET_OPT_OR, &got, 100)
+          == ARKRTOS_ESET_ERR_CONTEXT, "wait with no current task is CONTEXT");
+    check(waiter_count(h & ARKRTOS_HANDLE_RELMASK) == 0,
+          "no current task means no registration either");
+
+    use_task(0);
+    g_block_hook = block_error;
+    check(arkrtos_eset_wait_internal(h, 0x1u, ARKRTOS_ESET_OPT_OR, &got, 100)
+          == ARKRTOS_ESET_ERR_CONTEXT, "a failed block is CONTEXT");
+    check(waiter_count(h & ARKRTOS_HANDLE_RELMASK) == 0,
+          "a failed block removes the registration");
+
+    g_block_hook = block_deleted;
+    check(arkrtos_eset_wait_internal(h, 0x1u, ARKRTOS_ESET_OPT_OR, &got, 100)
+          == ARKRTOS_ESET_ERR_DELETED, "a deleted-while-waiting object reports DELETED");
+    check(waiter_count(h & ARKRTOS_HANDLE_RELMASK) == 0,
+          "DELETED also removes the registration");
+    check(got == 0u, "nothing is handed over on DELETED");
+
+    g_block_hook = 0;
+}
+
+/* 重复登记的那一半语义：已经交接完成（woken==1）的槽不许被新的一次等待覆盖，
+ * 否则 set 算定要交给它的那个值会被后来的掩码顶掉。 */
+static void t15_dup_woken_kept(void)
+{
+    int32 h;
+    int32 idx;
+    arkrtos_task_t *p;
+    uint32 got = 0u;
+
+    table_reset();
+    p = use_task(0);
+    h = arkrtos_eset_create_internal("dup");
+    idx = h & ARKRTOS_HANDLE_RELMASK;
+
+    arkrtos_esets[idx].waiters[0].task  = p;
+    arkrtos_esets[idx].waiters[0].mask  = 0x2u;
+    arkrtos_esets[idx].waiters[0].opt   = ARKRTOS_ESET_OPT_OR;
+    arkrtos_esets[idx].waiters[0].got   = 0x2u;
+    arkrtos_esets[idx].waiters[0].woken = 1u;
+
+    g_hook_handle = h;
+    g_keep_mask   = 0x2u;
+    g_keep_seen   = 0;
+    g_keep_woken  = -1;
+    g_block_hook  = hooked_dup_check;
+
+    check(arkrtos_eset_wait_internal(h, 0x1u, ARKRTOS_ESET_OPT_OR | ARKRTOS_ESET_OPT_CLEAR,
+                                     &got, 100) == ARKRTOS_SYNC_ERR_TIMEOUT,
+          "waiting again onto a woken slot is DUP, then times out");
+    check(g_keep_seen == 1,
+          "the woken slot keeps the mask set had fixed (0x2, not overwritten to 0x1)");
+    check(g_keep_woken == 1, "and it is still the woken slot, not a fresh registration");
+    check(waiter_count(idx) == 0, "the timeout still removes that slot");
+    check(arkrtos_esets[idx].flags == 0u, "no phantom bit was consumed");
+
+    /* 另一半：槽还在等（woken==0）时重复登记，掩码与选项必须跟最新一次走，
+     * 否则"换个掩码再等一次"会永远等旧的那组位。 */
+    arkrtos_esets[idx].waiters[0].task  = p;
+    arkrtos_esets[idx].waiters[0].mask  = 0x2u;
+    arkrtos_esets[idx].waiters[0].opt   = ARKRTOS_ESET_OPT_AND;
+    arkrtos_esets[idx].waiters[0].got   = 0u;
+    arkrtos_esets[idx].waiters[0].woken = 0u;
+
+    g_keep_mask = 0x1u;
+    g_keep_seen = 0;
+    g_keep_woken = -1;
+    g_block_hook = hooked_dup_check;
+
+    check(arkrtos_eset_wait_internal(h, 0x1u, ARKRTOS_ESET_OPT_OR, &got, 100)
+          == ARKRTOS_SYNC_ERR_TIMEOUT,
+          "re-waiting onto a live slot is DUP as well");
+    check(g_keep_seen == 1,
+          "the live slot's mask did move to the newest registration (0x1)");
+    check(g_keep_woken == 0, "and it is still the same not-yet-woken registration");
+    check(waiter_count(idx) == 0, "and that slot is cleaned up on timeout");
+
+    g_block_hook = 0;
+}
+
 int main(void)
 {
     puts("ESET-HOST: 32-bit event set host tests");
@@ -508,6 +686,9 @@ int main(void)
     t10_delete();
     t11_release_task();
     t12_nospace();
+    t13_api_gates();
+    t14_wait_contexts();
+    t15_dup_woken_kept();
 
     if(g_fail != 0)
     {
