@@ -12,8 +12,10 @@
   B 关档零符号：编成 .o 后 nm 不得看到任何已定义的全局符号。
   C 开档编得过：模块本体 + 四处接线（init、shell 命令表、shell_diag 命令、
     LA64 板级两个钩子）用真 include 做 -fsyntax-only。
-  D 宿主用例三档全过：默认档打 SELFTEST OFF OK；只开模块打 SELFTEST HOST OK；
-    模块 + 持久审计同开也打 SELFTEST HOST OK（那一档验「失败留痕」的断言）。
+  D 宿主用例四档全过：默认档打 SELFTEST OFF OK；只开模块打 SELFTEST HOST OK；
+    模块 + 持久审计同开也打 SELFTEST HOST OK（那一档验「失败留痕」的断言）；
+    再一档把板级钩子摘掉（SELFTEST_NO_HOOK），必须打 SELFTEST-NOHOOK HOST OK
+    —— 弱兜底真的被链接进来时，FLASH/CLOCK 只能是 SKIP，不许是 PASS 或崩溃。
   E 判据自检：坏输出必须判红，ON/OFF 两个标记不许混。
 
 用法
@@ -269,9 +271,13 @@ def main():
             errs.append("ON syntax failed in %s: %s" % (BOARD_C, tail[:200]))
 
         # D 组之二：只开模块（审计关）用例全过。
+        # 宿主档一律带 -DARKRTOS_SELFTEST_HOST_TEST=1：模块用它开一个注入缝
+        # （写完图案、还没校验之间），让用例证明 RAM 失败路径报得出「第几条
+        # 图案」。生产构建里这个符号与那条 if 都不存在。
         exe = os.path.join(td, "selftest_on" + exe_suffix)
         rc, (out, err) = run([cc] + pre + ["-std=gnu11", "-O0"]
-                             + ["-DARKRTOS_USE_SELFTEST=1"] + inc
+                             + ["-DARKRTOS_USE_SELFTEST=1",
+                                "-DARKRTOS_SELFTEST_HOST_TEST=1"] + inc
                              + ["-o", exe, TEST_C, MOD_C], env)
         if rc != 0:
             errs.append("ON build failed: %s"
@@ -286,6 +292,7 @@ def main():
         exe = os.path.join(td, "selftest_on_audit" + exe_suffix)
         rc, (out, err) = run([cc] + pre + ["-std=gnu11", "-O0"]
                              + ["-DARKRTOS_USE_SELFTEST=1",
+                                "-DARKRTOS_SELFTEST_HOST_TEST=1",
                                 "-DARKRTOS_USE_AUDIT_LOG=1"] + inc
                              + ["-o", exe, TEST_C, MOD_C], env)
         if rc != 0:
@@ -296,6 +303,24 @@ def main():
             txt = out + err
             if not judge(txt, "SELFTEST HOST OK", rc):
                 errs.append("ON+audit case failed: %s" % txt.strip()[:240])
+        # D 组之四：一个板级钩子都不给。用例这一档不定义两个强符号，模块
+        # 自己的弱兜底才会真的被链接进来 —— 测的就是「板子没给读数时报
+        # SKIP，既不是 PASS 也不是崩溃」。
+        exe = os.path.join(td, "selftest_nohook" + exe_suffix)
+        rc, (out, err) = run([cc] + pre + ["-std=gnu11", "-O0"]
+                             + ["-DARKRTOS_USE_SELFTEST=1",
+                                "-DARKRTOS_SELFTEST_HOST_TEST=1",
+                                "-DSELFTEST_NO_HOOK=1"] + inc
+                             + ["-o", exe, TEST_C, MOD_C], env)
+        if rc != 0:
+            errs.append("no-hook build failed: %s"
+                        % (err.strip().splitlines() or [""])[-1][:200])
+        else:
+            rc, (out, err) = run([exe], env)
+            txt = out + err
+            if not judge(txt, "SELFTEST-NOHOOK HOST OK", rc):
+                errs.append("no-hook case failed: %s" % txt.strip()[:240])
+
     finally:
         if not args.keep:
             shutil.rmtree(td, ignore_errors=True)
@@ -310,7 +335,7 @@ def main():
 
     print("SELFTEST-GATE OK  default=OFF, OFF object has no symbols, "
           "5 wired files (incl. LA64 board hooks) compile with the switch ON, "
-          "host cases OFF/ON/ON+audit pass")
+          "host cases OFF/ON/ON+audit/ON-no-hook pass")
     return 0
 
 

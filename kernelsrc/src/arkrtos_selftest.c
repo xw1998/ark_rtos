@@ -151,10 +151,39 @@ static void st_audit_fail(uint32 mask)
 /* ------------------------------------------------------------------
  * RAM：五种图案
  *
- * 图案 1..3 是「所有位一起动」的形态（抓 stuck-at），图案 4 把地址编进
+ * 图案 0..3 是「所有位一起动」的形态（抓 stuck-at），图案 4 把地址编进
  * 数据（抓地址线粘连：两个地址读出同一份数据时，其中一个必然对不上），
- * 图案 5 是 32 位与 8 位两种宽度交错（抓宽度通路）。
+ * 并在最后按 8 位再读一遍（抓宽度通路短接）。
+ *
+ * 填充与校验**必须**用同一个公式：两边各写一份是这类自检最典型的假故障
+ * 来源（写完图案 A、拿图案 B 去比，健康的片子也会报坏）。所以公式只留
+ * st_pattern_word() 一处，两边都调它。
  * ------------------------------------------------------------------ */
+
+#define ST_RAM_PATTERNS 5u
+
+static uint32 st_pattern_word(uint32 pat, uint32 i)
+{
+    static const uint32 cst[4] =
+    {
+        0x00000000u, 0xFFFFFFFFu, 0xAAAAAAAAu, 0x55555555u
+    };
+
+    if(pat < 4u)
+    {
+        return cst[pat];
+    }
+    /* 地址编进数据：写的时候乘奇数再异或常量，读回时地址线粘连会破坏它。 */
+    return (i * 0x00010001u) ^ 0x5A5A5A5Au;
+}
+
+#if defined(ARKRTOS_SELFTEST_HOST_TEST)
+/* 宿主用例唯一的注入缝：写完图案、还没校验之间的那一瞬。生产构建里这条
+ * 变量与那个 if 都不存在，板级行为一个字节都不变。
+ * 它要证的是：RAM 窗口真的坏了时，自检报出的是**第几条图案**，而不是一个
+ * 笼统的 FAIL —— 现场要的就是这个号。 */
+void (*arkrtos_selftest_host_after_fill)(uint32 *ram, uint32 words) = 0;
+#endif
 
 static void st_ram_pattern_fill(uint32 pat, uint32 words)
 {
@@ -162,18 +191,7 @@ static void st_ram_pattern_fill(uint32 pat, uint32 words)
 
     for(i = 0u; i < words; i++)
     {
-        uint32 v;
-
-        switch(pat)
-        {
-        case 0u: v = 0x00000000u; break;
-        case 1u: v = 0xFFFFFFFFu; break;
-        case 2u: v = 0xAAAAAAAAu; break;
-        case 3u: v = 0x55555555u; break;
-        case 4u: v = (i * 0x00010001u) ^ 0x5A5A5A5Au; break;
-        default: v = i ^ 0xA5A5A5A5u; break;
-        }
-        g_st_ram[i] = v;
+        g_st_ram[i] = st_pattern_word(pat, i);
     }
 }
 
@@ -183,33 +201,20 @@ static uint32 st_ram_pattern_check(uint32 pat, uint32 words)
 
     for(i = 0u; i < words; i++)
     {
-        uint32 want;
-        uint32 got;
-
-        switch(pat)
-        {
-        case 0u: want = 0x00000000u; break;
-        case 1u: want = 0xFFFFFFFFu; break;
-        case 2u: want = 0xAAAAAAAAu; break;
-        case 3u: want = 0x55555555u; break;
-        case 4u: want = (i * 0x00010001u) ^ 0x5A5A5A5Au; break;
-        default: want = i ^ 0xA5A5A5A5u; break;
-        }
-        got = g_st_ram[i];
-        if(got != want)
+        if(g_st_ram[i] != st_pattern_word(pat, i))
         {
             return 1u;
         }
     }
 
     /* 最后一档再按字节读一遍：宽通路对、窄通路短接时，32 位读是看不出来的。 */
-    if(pat == 4u)
+    if(pat >= 4u)
     {
         const uint8 *p = (const uint8 *)g_st_ram;
 
         for(i = 0u; i < words; i++)
         {
-            uint32 w = (i * 0x00010001u) ^ 0x5A5A5A5Au;
+            uint32 w = st_pattern_word(pat, i);
             uint32 b;
 
             for(b = 0u; b < 4u; b++)
@@ -218,6 +223,9 @@ static uint32 st_ram_pattern_check(uint32 pat, uint32 words)
 
                 if(p[(i * 4u) + b] != want_byte)
                 {
+                    /* 宿主上 32 位读与 8 位读同源，这一支只有真片「窄通路
+                     * 短接、宽通路正常」时才可能走到。覆盖率里它一直是红的，
+                     * 那是硬件面的欠账，不是用例里漏了一条。 */
                     return 1u;
                 }
             }
@@ -231,9 +239,15 @@ static uint32 st_ram_test(void)
     uint32 words = (uint32)(sizeof(g_st_ram) / sizeof(g_st_ram[0]));
     uint32 pat;
 
-    for(pat = 0u; pat < 5u; pat++)
+    for(pat = 0u; pat < ST_RAM_PATTERNS; pat++)
     {
         st_ram_pattern_fill(pat, words);
+#if defined(ARKRTOS_SELFTEST_HOST_TEST)
+        if(arkrtos_selftest_host_after_fill != 0)
+        {
+            arkrtos_selftest_host_after_fill(g_st_ram, words);
+        }
+#endif
         if(st_ram_pattern_check(pat, words) != 0u)
         {
             /* 失败也把窗口清回去：留着坏图案只会让下一次巡检更难读。 */
@@ -274,6 +288,8 @@ static uint32 st_cpu_test(void)
     if((uint32)(b * b) != 0xFFFE0001u)                           { return 6u; }
     if((1000000u / 7u) != 142857u)                               { return 7u; }
     if((1000000u % 7u) != 1u)                                    { return 8u; }
+    /* 字节交换用移位与或出来：正确编译器的结果一定对，这一支要抓的是
+     * 「编译器把移位/或折叠错了」——真出现了就该红，不是用例缺。 */
     if((uint32)(((uint32)a >> 24 & 0xFFu) | ((uint32)a >> 8 & 0xFF00u) |
                 ((uint32)a << 8 & 0xFF0000u) | ((uint32)a << 24)) != 0x78563412u)
     {
@@ -340,6 +356,8 @@ static uint32 st_ppm_diff(uint32 got, uint32 want)
 
     if(w == 0ull)
     {
+        /* 第二道：调用方（st_clock_item）已经先挡了「应有计数为 0」。
+         * 除零的代价比多一个分支大得多，所以这里留着，覆盖率里它永远是红的。 */
         return 0xFFFFFFFFu;
     }
     if(g >= w)

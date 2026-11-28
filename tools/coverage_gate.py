@@ -693,10 +693,21 @@ CASES = [
     # 开档跑武装 / 内容绑定 / 预算 / 清空 / 审计五组路径。
     # --- 2026-11-25 新增：元件自检（SEC-G14，默认关） ---
     # 开档跑 RAM / CPU / FLASH / CLOCK 四类与开机、巡检、清基线路径。
+    # -DARKRTOS_SELFTEST_HOST_TEST=1：模块的注入缝（写完图案、还没校验之间），
+    # 让用例能证明 RAM 失败路径报出「第几条图案」。生产构建没有这条。
     ("selftest", "kernelsrc/tests/test_selftest_host.c",
      ["kernelsrc/src/arkrtos_selftest.c"],
-     ["-DARKRTOS_USE_SELFTEST=1", "-fno-asynchronous-unwind-tables"],
+     ["-DARKRTOS_USE_SELFTEST=1", "-DARKRTOS_SELFTEST_HOST_TEST=1",
+      "-fno-asynchronous-unwind-tables"],
      "SELFTEST HOST OK"),
+    # 一个板级钩子都不给（SELFTEST_NO_HOOK）：模块自己的弱兜底被真的链接
+    # 进来，FLASH / CLOCK 两项必须报 SKIP。这一档补上的就是那四条
+    # `return -1`——它们每块没实现钩子的板子都会走到。
+    ("selftestnohook", "kernelsrc/tests/test_selftest_host.c",
+     ["kernelsrc/src/arkrtos_selftest.c"],
+     ["-DARKRTOS_USE_SELFTEST=1", "-DARKRTOS_SELFTEST_HOST_TEST=1",
+      "-DSELFTEST_NO_HOOK=1", "-fno-asynchronous-unwind-tables"],
+     "SELFTEST-NOHOOK HOST OK"),
     ("rollback", "kernelsrc/tests/test_rollback_host.c",
      ["kernelsrc/src/arkrtos_rollback.c"],
      ["-DARKRTOS_USE_ROLLBACK=1", "-fno-asynchronous-unwind-tables"],

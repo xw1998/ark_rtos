@@ -93,15 +93,18 @@ static int    g_clk_ok;
 #if defined(_WIN32)
 #include <windows.h>
 static uint8 *g_span;
+#if !defined(SELFTEST_NO_HOOK)   /* 无钩子那一档不映射，也不该碰它 */
 static int span_map(void)
 {
     g_span = (uint8 *)VirtualAlloc((void *)(uintptr_t)0x10000000u, 4096u,
                                    MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     return (g_span != (uint8 *)0) ? 0 : -1;
 }
+#endif
 #else
 #include <sys/mman.h>
 static uint8 *g_span;
+#if !defined(SELFTEST_NO_HOOK)
 static int span_map(void)
 {
     void *p = mmap((void *)0x10000000, 4096u, PROT_READ | PROT_WRITE,
@@ -110,10 +113,16 @@ static int span_map(void)
     return (p == MAP_FAILED) ? -1 : 0;
 }
 #endif
+#endif
 #define SPAN_BYTES  256u
 static uint32 g_span_len;
 static int    g_span_ok;
 
+#if !defined(SELFTEST_NO_HOOK)
+/* 正常档：两个钩子由用例给读数，好造「内容变了 / 计数器停住」。
+ * 没有钩子的那一档（SELFTEST_NO_HOOK）故意不定义它们，让模块自己的弱兜底
+ * 真的被链接进来——板级一个钩子都不给时，两项必须报 SKIP，既不是 PASS
+ * 也不是崩溃，这一档测的就是那两条 return -1。 */
 int32 arkrtos_port_selftest_flash_span(uint32 *start, uint32 *len)
 {
     if(g_span_ok == 0)
@@ -134,6 +143,7 @@ int32 arkrtos_port_selftest_clock(uint32 *now)
     *now = g_clk;
     return 0;
 }
+#endif /* !SELFTEST_NO_HOOK */
 
 /* 日志三件套：只记录调了几次，不落盘。 */
 static uint32 g_log_errors;
@@ -172,6 +182,27 @@ int32 arkrtos_audit_log_record(uint32 kind, uint32 owner, uint32 code)
 }
 #endif
 
+/* ---------------- 注入缝（只在宿主构建里存在） ---------------- */
+
+#if defined(ARKRTOS_SELFTEST_HOST_TEST)
+/* 模块在「写完图案、还没校验」之间调这个指针。用例用它把窗口改坏一个字，
+ * 证明 RAM 失败路径报出的是第几条图案（现场要的是那个号）。
+ * 指针本体由模块定义（生产构建里没有这个符号），这里只赋值不定义。 */
+extern void (*arkrtos_selftest_host_after_fill)(uint32 *ram, uint32 words);
+
+static uint32 g_hook_calls;
+static uint32 g_hook_on_call;   /* 第几次调用时动手，0 = 不动手 */
+
+static void after_fill_corrupt_one_word(uint32 *ram, uint32 words)
+{
+    g_hook_calls++;
+    if((g_hook_on_call != 0u) && (g_hook_calls == g_hook_on_call))
+    {
+        ram[words / 2u] ^= 1u;
+    }
+}
+#endif
+
 /* ---------------- 公共复位 ---------------- */
 
 static void reset_all(void)
@@ -184,9 +215,13 @@ static void reset_all(void)
     g_span_ok    = 1;
     g_span_len   = SPAN_BYTES;
     g_log_errors = 0u;
-    for(i = 0u; i < SPAN_BYTES; i++)
+    /* 没钩子的那一档不映射只读区间（也不该碰它）：g_span 是 NULL。 */
+    if(g_span != (uint8 *)0)
     {
-        g_span[i] = (uint8)(i * 7u);
+        for(i = 0u; i < SPAN_BYTES; i++)
+        {
+            g_span[i] = (uint8)(i * 7u);
+        }
     }
     /* 模块自己记着基线（只读区间 crc、时钟比值）。用例之间必须清掉，
      * 否则「第一次采样」这类断言测到的是上一个用例的残留状态。 */
@@ -196,16 +231,23 @@ static void reset_all(void)
     memset(g_audit_codes, 0, sizeof(g_audit_codes));
     g_audit_n = 0u;
 #endif
+#if defined(ARKRTOS_SELFTEST_HOST_TEST)
+    g_hook_calls   = 0u;
+    g_hook_on_call = 0u;
+    arkrtos_selftest_host_after_fill = after_fill_corrupt_one_word;
+#endif
 }
 
 /* 让两路读数各走一步（比值 1000 计数/拍）。巡检一定会跑时钟项，
  * 不推进的话「两个采样点之间一拍没走」会被判成节拍源停住 —— 那是真故障，
  * 但也确实不是这些用例要测的东西。 */
+#if !defined(SELFTEST_NO_HOOK)
 static void clk_step(void)
 {
     g_tick += 100u;
     g_clk  += 100000u;
 }
+#endif
 
 static uint32 item_verdict(const arkrtos_selftest_report_t *r, uint32 id)
 {
@@ -221,6 +263,7 @@ static uint32 item_verdict(const arkrtos_selftest_report_t *r, uint32 id)
     return 0xFFFFFFFFu;
 }
 
+#if !defined(SELFTEST_NO_HOOK)
 static uint32 item_detail(const arkrtos_selftest_report_t *r, uint32 id)
 {
     uint32 i;
@@ -490,6 +533,113 @@ static void case_patrol_audit(void)
                           0xFFFFFFFFu), 1u, "patrol audit: flash item present");
 }
 
+#if defined(ARKRTOS_SELFTEST_HOST_TEST)
+/* RAM 窗口真的坏了：必须报出**第几条**图案，并且把窗口清干净（留着坏图案
+ * 只会让下一次巡检的读数更难解释）。注入点在「写完图案、还没校验」之间，
+ * 所以这条路径就是板子上的真故障路径，不是另写一条。 */
+static void case_ram_corrupt(void)
+{
+    arkrtos_selftest_report_t rep;
+
+    reset_all();
+    g_hook_on_call = 3u;         /* 第 3 条图案（下标 2）之前把中间那个字改掉 */
+    ck_u((unsigned long)arkrtos_selftest_run(ARKRTOS_SELFTEST_ITEM_RAM, &rep),
+         (unsigned long)ARKRTOS_SELFTEST_ERR_FAIL, "ram corrupt: rc");
+    ck_u(item_verdict(&rep, ARKRTOS_SELFTEST_ITEM_RAM),
+         ARKRTOS_SELFTEST_FAIL, "ram corrupt: verdict");
+    ck_u(item_detail(&rep, ARKRTOS_SELFTEST_ITEM_RAM), 3u,
+         "ram corrupt: names the third pattern");
+
+    /* 窗口必须已经清回图案 0（累加器那条路径）。再跑一次不注入：必须 PASS，
+     * 否则说明坏数据留在了窗口里。 */
+    g_hook_on_call = 0u;
+    ck_u((unsigned long)arkrtos_selftest_run(ARKRTOS_SELFTEST_ITEM_RAM, &rep),
+         (unsigned long)ARKRTOS_SELFTEST_OK, "ram corrupt: window cleaned");
+    ck_u(item_verdict(&rep, ARKRTOS_SELFTEST_ITEM_RAM),
+         ARKRTOS_SELFTEST_PASS, "ram corrupt: second run pass");
+}
+#endif /* ARKRTOS_SELFTEST_HOST_TEST */
+
+/* 比值学不出来：每拍计数小于 1/65536，Q16 直接归零。这不是「再学一次」，
+ * 是读数本身不可用 —— 必须 FAIL，而且之后每次都必须 FAIL（状态 2 是粘的）。 */
+static void case_clock_unusable(void)
+{
+    arkrtos_selftest_report_t rep;
+
+    reset_all();
+    (void)arkrtos_selftest_run(ARKRTOS_SELFTEST_ITEM_CLOCK, &rep);   /* 采点 */
+
+    g_tick = 0x00100000u;        /* 100 万拍 */
+    g_clk  = 1u;                 /* 只走了 1 个计数：(1 << 16) / 1e6 == 0 */
+    ck_u((unsigned long)arkrtos_selftest_run(ARKRTOS_SELFTEST_ITEM_CLOCK, &rep),
+         (unsigned long)ARKRTOS_SELFTEST_ERR_FAIL, "clock unusable: learn rc");
+    ck_u(item_verdict(&rep, ARKRTOS_SELFTEST_ITEM_CLOCK),
+         ARKRTOS_SELFTEST_FAIL, "clock unusable: learn fail");
+
+    /* 再走一步（比值本身恢复了也不行）：粘住的「不可用」不许自己好转。 */
+    g_tick = 0x00200000u;
+    g_clk  = 200000u;
+    ck_u((unsigned long)arkrtos_selftest_run(ARKRTOS_SELFTEST_ITEM_CLOCK, &rep),
+         (unsigned long)ARKRTOS_SELFTEST_ERR_FAIL, "clock unusable: sticky rc");
+    ck_u(item_verdict(&rep, ARKRTOS_SELFTEST_ITEM_CLOCK),
+         ARKRTOS_SELFTEST_FAIL, "clock unusable: sticky fail");
+}
+
+/* 基线比值小到「应有计数」四舍五入成 0：这时候按 0 去比等于白送 PASS，
+ * 必须 FAIL 并把 ppm 写满（0xFFFFFFFF = 没有读数），不能报 0 ppm。 */
+static void case_clock_underflow(void)
+{
+    arkrtos_selftest_report_t rep;
+
+    reset_all();
+    (void)arkrtos_selftest_run(ARKRTOS_SELFTEST_ITEM_CLOCK, &rep);   /* 采点 */
+
+    g_tick = 65536u;             /* 比值 = 1 计数 / 65536 拍 ⇒ Q16 = 1 */
+    g_clk  = 1u;
+    ck_u((unsigned long)arkrtos_selftest_run(ARKRTOS_SELFTEST_ITEM_CLOCK, &rep),
+         (unsigned long)ARKRTOS_SELFTEST_OK, "clock underflow: learn rc");
+    ck_u(item_verdict(&rep, ARKRTOS_SELFTEST_ITEM_CLOCK),
+         ARKRTOS_SELFTEST_PASS, "clock underflow: learn pass");
+
+    g_tick = 65537u;             /* 走了 1 拍 ⇒ 应有计数 = (1 * 1) >> 16 = 0 */
+    g_clk  = 2u;
+    ck_u((unsigned long)arkrtos_selftest_run(ARKRTOS_SELFTEST_ITEM_CLOCK, &rep),
+         (unsigned long)ARKRTOS_SELFTEST_ERR_FAIL, "clock underflow: rc");
+    ck_u(item_verdict(&rep, ARKRTOS_SELFTEST_ITEM_CLOCK),
+         ARKRTOS_SELFTEST_FAIL, "clock underflow: verdict");
+    ck_u(item_detail(&rep, ARKRTOS_SELFTEST_ITEM_CLOCK), 0xFFFFFFFFu,
+         "clock underflow: ppm is 'no reading', not 0");
+}
+
+#endif /* !SELFTEST_NO_HOOK */
+
+#if defined(SELFTEST_NO_HOOK)
+/* 板级一个钩子都没给：两个读数项必须报 SKIP，而且不能把「没测」算成通过。 */
+int main(void)
+{
+    arkrtos_selftest_report_t rep;
+
+    reset_all();
+    ck_u((unsigned long)arkrtos_selftest_run(ARKRTOS_SELFTEST_ITEM_ALL, &rep),
+         (unsigned long)ARKRTOS_SELFTEST_OK, "nohook: all rc");
+    ck_u(item_verdict(&rep, ARKRTOS_SELFTEST_ITEM_FLASH),
+         ARKRTOS_SELFTEST_SKIP, "nohook: flash is SKIP");
+    ck_u(item_verdict(&rep, ARKRTOS_SELFTEST_ITEM_CLOCK),
+         ARKRTOS_SELFTEST_SKIP, "nohook: clock is SKIP");
+    ck_u(item_verdict(&rep, ARKRTOS_SELFTEST_ITEM_RAM),
+         ARKRTOS_SELFTEST_PASS, "nohook: ram still measured");
+    ck_u(item_verdict(&rep, ARKRTOS_SELFTEST_ITEM_CPU),
+         ARKRTOS_SELFTEST_PASS, "nohook: cpu still measured");
+
+    if(g_fails != 0)
+    {
+        printf("SELFTEST-NOHOOK HOST FAILED (%d of %d checks)\n", g_fails, g_checks);
+        return 1;
+    }
+    printf("SELFTEST-NOHOOK HOST OK  %d checks\n", g_checks);
+    return 0;
+}
+#else
 int main(void)
 {
     if(span_map() != 0)
@@ -509,6 +659,11 @@ int main(void)
     case_tick_stall();
     case_boot();
     case_patrol_audit();
+    case_clock_unusable();
+    case_clock_underflow();
+#if defined(ARKRTOS_SELFTEST_HOST_TEST)
+    case_ram_corrupt();
+#endif
 
     if(g_fails != 0)
     {
@@ -518,6 +673,7 @@ int main(void)
     printf("SELFTEST HOST OK  %d checks\n", g_checks);
     return 0;
 }
+#endif /* SELFTEST_NO_HOOK */
 
 #else   /* ARKRTOS_USE_SELFTEST == 0 */
 

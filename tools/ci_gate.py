@@ -6190,8 +6190,8 @@ def check_selftest():
     features.h / Kconfig / defconfig / autoconf must agree; the OFF object must
     export no symbol; the module plus four wired files (init, two shell files)
     and the LA64 board hooks must compile with the switch ON; the host cases
-    must pass in three builds (OFF, ON, ON+audit); and the judge itself must
-    reject a bogus output.
+    must pass in four builds (OFF, ON, ON+audit, ON with the board hooks
+    removed); and the judge itself must reject a bogus output.
 
     What this does NOT prove: that the diagnostics fire on real silicon. The
     clock check compares two readings this side of the SoC, so a common crystal
@@ -6202,7 +6202,7 @@ def check_selftest():
     r = _run_check([sys.executable, os.path.join("tools", "selftest_gate.py")])
     txt = ((r.stdout or "") + (r.stderr or "")).strip()
     if r.returncode == 0 and "SELFTEST-GATE OK" in txt:
-        ok("selftest", "OFF default + zero-symbol OFF object + 5 ON-path files + host cases OFF/ON/ON+audit")
+        ok("selftest", "OFF default + zero-symbol OFF object + 5 ON-path files + host cases OFF/ON/ON+audit/ON-no-hook")
     else:
         fail("selftest", txt[-300:])
 
