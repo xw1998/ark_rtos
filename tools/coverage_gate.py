@@ -1106,6 +1106,30 @@ CASES = [
                   "-fno-asynchronous-unwind-tables"],
      "DRVWDG-HOST OK",
      {"incs": ["-Ikernelsrc/tests"] + F427_INCS}),
+    # --- 2026-11-28：SPI NOR（W25Q128）。HAL 的 SPI 接口做记录式桩，桩背后挂
+    # 一颗字节级从机模型（认命令、页内回绕、只清位、擦除写 0xFF），所以
+    # "驱动到底把什么发上总线"与"芯片会怎么回应"两端都能精确摆布。事务边界
+    # 按调用形状划分（每条命令一次 Transmit，页编程数据是紧接着的另一次），
+    # 不猜 BSRR——那是只写寄存器，宿主上看不到释放那一次。
+    #
+    # 另两档各自独立进程：静态的 nor_ready 无法在同一进程里复位，容量封顶
+    # （0x1F -> 2^31 字节）与"比一个扇区还小"的部件（0x08 -> 256 字节）只能
+    # 各跑一次。
+    ("drvnor", "kernelsrc/tests/test_drvnor_host.c",
+     ["board/stm32f427/drvnor.c"],
+     F427_DEFS + ["-fno-asynchronous-unwind-tables"],
+     "DRVNOR-HOST OK",
+     {"incs": ["-Ikernelsrc/tests"] + F427_INCS}),
+    ("drvnor-clamp", "kernelsrc/tests/test_drvnor_host.c",
+     ["board/stm32f427/drvnor.c"],
+     F427_DEFS + ["-DNOR_TEST_CLAMP", "-fno-asynchronous-unwind-tables"],
+     "DRVNOR-HOST OK",
+     {"incs": ["-Ikernelsrc/tests"] + F427_INCS}),
+    ("drvnor-tiny", "kernelsrc/tests/test_drvnor_host.c",
+     ["board/stm32f427/drvnor.c"],
+     F427_DEFS + ["-DNOR_TEST_TINY", "-fno-asynchronous-unwind-tables"],
+     "DRVNOR-HOST OK",
+     {"incs": ["-Ikernelsrc/tests"] + F427_INCS}),
     ("ushell", "kernelsrc/tests/test_shell_ushell_host.c",
      ["kernelsrc/shell/arkrtos_shell_ushell.c"],
      ['-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',

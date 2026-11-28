@@ -65,7 +65,7 @@ static uint32 nor_capacity = 0u;
 /** @brief Send len bytes with CS held low for the whole call */
 static int32 nor_tx(const uint8 *buf, uint32 len)
 {
-    if(HAL_SPI_Transmit(&hnor_spi, (uint8 *)buf, (uint16)len, NOR_TMO_TX_MS) != HAL_OK)
+    if(HAL_SPI_Transmit(&hnor_spi, buf, (uint16)len, NOR_TMO_TX_MS) != HAL_OK)
     {
         return -1;
     }
@@ -290,7 +290,11 @@ int32 arkrtos_nor_read(uint32 addr, uint8 *buf, uint32 len)
         return -1;
     }
 
-    if((addr + len) > nor_capacity)
+    /* Range check without `addr + len`: that sum wraps in 32 bits, so a
+     * caller passing 0xFFFFFFF0 with len 32 would slip through and the read
+     * would run past the end of the part. Reject addr alone and the distance
+     * to the end instead. */
+    if((addr >= nor_capacity) || (len > (nor_capacity - addr)))
     {
         return -1;
     }
@@ -323,7 +327,11 @@ int32 arkrtos_nor_write(uint32 addr, const uint8 *data, uint32 len)
         return -1;
     }
 
-    if((addr + len) > nor_capacity)
+    /* Range check without `addr + len`: that sum wraps in 32 bits, so a
+     * caller passing 0xFFFFFFF0 with len 32 would slip through and the write
+     * would run past the end of the part. Reject addr alone and the distance
+     * to the end instead. */
+    if((addr >= nor_capacity) || (len > (nor_capacity - addr)))
     {
         return -1;
     }
@@ -372,7 +380,10 @@ int32 arkrtos_nor_erase_sector(uint32 addr)
         return -1;
     }
 
-    if((addr + NOR_SECTOR_SIZE) > nor_capacity)
+    /* Same wrap hazard as the read/write checks: `addr + 4096` can wrap.
+     * A part smaller than one sector can hold no sector at all. */
+    if((nor_capacity < NOR_SECTOR_SIZE) ||
+       (addr > (nor_capacity - NOR_SECTOR_SIZE)))
     {
         return -1;
     }
@@ -402,6 +413,14 @@ int32 arkrtos_nor_erase(uint32 addr, uint32 size)
     uint32 a;
 
     if((nor_ready == 0u) || (size == 0u))
+    {
+        return -1;
+    }
+
+    /* Validate the requested range without `addr + size` (wraps), then keep
+     * the rounded-up end inside the part: a capacity that is not a multiple
+     * of 4096 cannot have its trailing partial sector erased. */
+    if((addr >= nor_capacity) || (size > (nor_capacity - addr)))
     {
         return -1;
     }

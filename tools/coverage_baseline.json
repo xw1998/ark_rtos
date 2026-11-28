@@ -71,5 +71,6 @@
   "drvblk": 100.0,
   "drvled": 100.0,
   "drvwdg": 100.0,
+  "drvnor": 100.0,
   "platform_arkrtos": 98.91
 }
