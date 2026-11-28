@@ -140,4 +140,84 @@ typedef enum
     HAL_TIMEOUT = 0x03u
 } HAL_StatusTypeDef;
 
+/* ---------------- UART ---------------- */
+
+#define GPIO_AF7_USART1  0x07u
+#define GPIO_AF7_USART2  0x07u
+#define GPIO_AF7_USART3  0x07u
+
+#define UART_WORDLENGTH_8B      0x00000000u
+#define UART_WORDLENGTH_9B      0x00001000u
+#define UART_STOPBITS_1         0x00000000u
+#define UART_STOPBITS_2         0x00002000u
+#define UART_PARITY_NONE        0x00000000u
+#define UART_PARITY_EVEN        0x00000400u
+#define UART_PARITY_ODD         0x00000600u
+#define UART_MODE_RX            0x00000004u
+#define UART_MODE_TX            0x00000008u
+#define UART_MODE_TX_RX         (UART_MODE_TX | UART_MODE_RX)
+#define UART_HWCONTROL_NONE     0x00000000u
+#define UART_HWCONTROL_RTS      0x00000100u
+#define UART_HWCONTROL_CTS      0x00000200u
+#define UART_OVERSAMPLING_16    0x00000000u
+#define UART_OVERSAMPLING_8     0x00008000u
+
+typedef struct
+{
+    uint32_t BaudRate;
+    uint32_t WordLength;
+    uint32_t StopBits;
+    uint32_t Parity;
+    uint32_t Mode;
+    uint32_t HwFlowCtl;
+    uint32_t OverSampling;
+} UART_InitTypeDef;
+
+typedef struct
+{
+    USART_TypeDef     *Instance; /* 两种探针分支都给了 USART_TypeDef */
+    UART_InitTypeDef   Init;
+    uint8_t            RXBlockSize;
+    uint8_t            TXBlockSize;
+} UART_HandleTypeDef;
+
+/* 中断码的编码与真 HAL 一致：高 4 位选寄存器（2 = CR1，3 = CR2，4 = CR3），
+ * 低 16 位是位掩码。驱动只用 CR1 的 RXNEIE / TCIE / TXEIE，但宏照真 HAL
+ * 的三种寄存器都实现，免得将来有人加一个 CR3 中断却被静默吞掉。 */
+#define UART_CR1_REG_INDEX  0x2u
+#define UART_CR2_REG_INDEX  0x3u
+#define UART_CR3_REG_INDEX  0x4u
+/* 真 HAL 把「哪个寄存器」编码在高 4 位、把「哪一位」编码在低位掩码里。
+ * 这里保持同样的形状：高 4 位是寄存器索引（2=CR1、3=CR2、4=CR3），低 16 位
+ * 直接写成该寄存器里的位置掩码，这样编码一旦写错，错的是 CR1 的某一位
+ * （用例当场看得见），而不是悄悄落到某个无关位上。 */
+#define UART_IT_MASK        0x0000FFFFu
+
+#define UART_IT_RXNE        0x20000020u /* CR1, bit 5  RXNEIE */
+#define UART_IT_TC          0x20000040u /* CR1, bit 6  TCIE   */
+#define UART_IT_TXE         0x20000080u /* CR1, bit 7  TXEIE  */
+
+#define __HAL_UART_ENABLE_IT(__HANDLE__, __INTERRUPT__)                     \
+    ((((__INTERRUPT__) >> 28U) == UART_CR1_REG_INDEX)                       \
+     ? ((__HANDLE__)->Instance->CR1 |= ((__INTERRUPT__) & UART_IT_MASK))     \
+     : (((__INTERRUPT__) >> 28U) == UART_CR2_REG_INDEX)                     \
+       ? ((__HANDLE__)->Instance->CR2 |= ((__INTERRUPT__) & UART_IT_MASK))   \
+       : ((__HANDLE__)->Instance->CR3 |= ((__INTERRUPT__) & UART_IT_MASK)))
+
+#define __HAL_UART_DISABLE_IT(__HANDLE__, __INTERRUPT__)                    \
+    ((((__INTERRUPT__) >> 28U) == UART_CR1_REG_INDEX)                       \
+     ? ((__HANDLE__)->Instance->CR1 &= ~((__INTERRUPT__) & UART_IT_MASK))    \
+     : (((__INTERRUPT__) >> 28U) == UART_CR2_REG_INDEX)                     \
+       ? ((__HANDLE__)->Instance->CR2 &= ~((__INTERRUPT__) & UART_IT_MASK))  \
+       : ((__HANDLE__)->Instance->CR3 &= ~((__INTERRUPT__) & UART_IT_MASK)))
+
+#define __HAL_RCC_USART1_CLK_ENABLE()  do { } while(0)
+#define __HAL_RCC_USART2_CLK_ENABLE()  do { } while(0)
+#define __HAL_RCC_USART3_CLK_ENABLE()  do { } while(0)
+
+HAL_StatusTypeDef HAL_UART_Init(UART_HandleTypeDef *huart);
+HAL_StatusTypeDef HAL_UART_DeInit(UART_HandleTypeDef *huart);
+void HAL_NVIC_SetPriority(int32_t irqn, uint32_t preempt, uint32_t sub);
+void HAL_NVIC_EnableIRQ(int32_t irqn);
+
 #endif /* HOST_STM32F4XX_HAL_H */

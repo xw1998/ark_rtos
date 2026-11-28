@@ -73,5 +73,6 @@
   "drvwdg": 100.0,
   "drvnor": 100.0,
   "drvflash": 98.51,
+  "drvuart": 100.0,
   "platform_arkrtos": 98.91
 }

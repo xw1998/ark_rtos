@@ -1145,6 +1145,18 @@ CASES = [
                   "-fno-asynchronous-unwind-tables"],
      "DRVFLASH-HOST OK",
      {"incs": ["-Ikernelsrc/tests"] + F427_INCS}),
+    # drvuart 用 HAL 初始化 UART，中断收发直接读写 USART1 的 SR/DR/CR1，
+    # 另用 CMSIS 的 PRIMASK 内建函数做临界区。真 CMSIS 的 PRIMASK 内建在 x86
+    # 上是 ARM 汇编，编不过，所以用例改用 host_stm32/min_cmsis 那份最小设备头
+    # （真 F4 布局）+ 影子 PRIMASK + 钩子，并在 0x40010000 真映射一页，让
+    # SR/DR/CR1 是可写内存。FIFO 链真实现，只编不统计。
+    ("drvuart", "kernelsrc/tests/test_drvuart_host.c",
+     ["board/stm32f427/drvuart.c"],
+     F427_DEFS + ["-fno-asynchronous-unwind-tables"],
+     "DRVUART-HOST OK",
+     {"incs": ["-Ikernelsrc/tests/host_stm32/min_cmsis",
+               "-Ikernelsrc/tests/host_stm32", "-Ikernelsrc/tests"] + F427_INCS,
+      "link": ["kernelsrc/src/arkrtos_fifo.c"]}),
     ("ushell", "kernelsrc/tests/test_shell_ushell_host.c",
      ["kernelsrc/shell/arkrtos_shell_ushell.c"],
      ['-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',

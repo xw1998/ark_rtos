@@ -41,4 +41,9 @@ typedef struct {
 
 extern arkrtos_dev_drv_t usart_drv;
 
+/* Vector-table entry (startup_stm32f427xx.s references the symbol by name).
+ * Declared here so the definition has a visible prototype; the handler itself
+ * serves only ttyS0. */
+void USART1_IRQHandler(void);
+
 #endif

@@ -15,7 +15,7 @@ static uint8      uart_pipe_array[UART_DEV_NUM][2][UART_PIPE_SIZE];
 
 static UART_HandleTypeDef uart_handle[UART_DEV_NUM];
 
-arkrtos_dev_hdr_t *uart_drv_open(uint32 name, uint32 baudrate)
+static arkrtos_dev_hdr_t *uart_drv_open(uint32 name, uint32 baudrate)
 {
     uart_dev_t *p_dev = 0;
     GPIO_InitTypeDef  GPIO_InitStr;
@@ -39,6 +39,8 @@ arkrtos_dev_hdr_t *uart_drv_open(uint32 name, uint32 baudrate)
     p_dev->tx_pipe = arkrtos_fifo_create(uart_pipe_array[name][0], UART_PIPE_SIZE);
     p_dev->rx_pipe = arkrtos_fifo_create(uart_pipe_array[name][1], UART_PIPE_SIZE);
 
+    /* UART_DEV_NUM 是 1，而 name 已在上面被拒到小于 UART_DEV_NUM，所以能
+     * 走到这里的只有 TTYS0 一个分支；没有 default 可写，也不写假分支。 */
     switch(name)
     {
         case UART_DEV_TTYS0:
@@ -67,7 +69,15 @@ arkrtos_dev_hdr_t *uart_drv_open(uint32 name, uint32 baudrate)
             uart_handle[name].Init.Mode = UART_MODE_TX_RX;
             uart_handle[name].Init.HwFlowCtl = UART_HWCONTROL_NONE;
             uart_handle[name].Init.OverSampling = UART_OVERSAMPLING_16;
-            HAL_UART_Init(&uart_handle[name]);
+            if(HAL_UART_Init(&uart_handle[name]) != HAL_OK)
+            {
+                /* Do not claim the port is open when the HAL refused the
+                 * configuration: every writer above would queue bytes into a
+                 * pipe nothing ever drains, and the loss would be silent.
+                 * Report failure instead so the caller can retry. */
+                p_dev->opened = 0;
+                return 0;
+            }
 
                         /* Preemption priority must be numerically lower (that is more
              * urgent) than SVCall.  The SVC handler spins while waiting for
@@ -77,28 +87,37 @@ arkrtos_dev_hdr_t *uart_drv_open(uint32 name, uint32 baudrate)
             HAL_NVIC_SetPriority(USART1_IRQn, 0, 0);
             HAL_NVIC_EnableIRQ(USART1_IRQn);
             break;
-        default:
-            break;
     }
 
     __HAL_UART_ENABLE_IT(&uart_handle[name], UART_IT_RXNE);
     __HAL_UART_DISABLE_IT(&uart_handle[name], UART_IT_TXE);
+    /* A previous close may have left the completion interrupt armed; clear it
+     * here too so a reopen always starts from "receiver only". */
+    __HAL_UART_DISABLE_IT(&uart_handle[name], UART_IT_TC);
 
     p_dev->hdr.block_size = sizeof(uart_dev_t);
     return (arkrtos_dev_hdr_t *)p_dev;
 }
 
-int32 uart_drv_read(arkrtos_dev_hdr_t *p, uint8 *pdata, int32 len)
+static int32 uart_drv_read(arkrtos_dev_hdr_t *p, uint8 *pdata, int32 len)
 {
     uart_dev_t *p_dev = (uart_dev_t *)p;
     if((p == 0) || (sizeof(uart_dev_t) != p->block_size))
     {
         return -1;
     }
+
+    /* After a close the pipe still holds whatever arrived while the port was
+     * open. Handing those bytes out as if they had just been received is a
+     * silent lie about a port that is shut down, so refuse instead. */
+    if(p_dev->opened == 0)
+    {
+        return -1;
+    }
     return arkrtos_fifo_read(p_dev->rx_pipe, pdata, len);
 }
 
-int32 uart_drv_write(arkrtos_dev_hdr_t *p, uint8 *pdata, int32 len)
+static int32 uart_drv_write(arkrtos_dev_hdr_t *p, uint8 *pdata, int32 len)
 {
     uint32 primask;
     uart_dev_t *p_dev = (uart_dev_t *)p;
@@ -109,7 +128,10 @@ int32 uart_drv_write(arkrtos_dev_hdr_t *p, uint8 *pdata, int32 len)
 
     if(p_dev->opened == 0)
     {
-        return 0;
+        /* 0 would read as "accepted zero bytes, nothing wrong" and a caller
+         * that loops until everything is written would spin forever on a
+         * closed port. Say the port is not open. */
+        return -1;
     }
     len = arkrtos_fifo_write(p_dev->tx_pipe, pdata, len);
     if(len <= 0)
@@ -140,7 +162,7 @@ static void uart_start_first_tx(uart_dev_t *p_dev)
     p_dev->usart_addr->CR1 |= USART_CR1_TXEIE;
 }
 
-int32 uart_drv_close(arkrtos_dev_hdr_t *p)
+static int32 uart_drv_close(arkrtos_dev_hdr_t *p)
 {
     uart_dev_t *p_dev = (uart_dev_t *)p;
     if((p == 0) || (sizeof(uart_dev_t) != p->block_size))
@@ -149,13 +171,32 @@ int32 uart_drv_close(arkrtos_dev_hdr_t *p)
     }
 
     p_dev->opened = 0;
+    /* Drop the interrupt sources before switching the peripheral off. With UE
+     * clear the status bits stop moving, so an enable bit left behind would
+     * keep the NVIC line asserted forever - a storm on a port nobody is
+     * listening to. tx_idle goes back to its power-on value so a reopen does
+     * not think a transfer is in flight. */
+    p_dev->usart_addr->CR1 &= ~(USART_CR1_TXEIE | USART_CR1_TCIE | USART_CR1_RXNEIE);
+    p_dev->tx_idle = 1;
     p_dev->usart_addr->CR1 &= ~USART_CR1_UE;
     return 0;
 }
 
-int32 uart_drv_ctrl(arkrtos_dev_hdr_t *p, uint32 c, uint32 v)
+static int32 uart_drv_ctrl(arkrtos_dev_hdr_t *p, uint32 c, uint32 v)
 {
-    return 0;
+    (void)c;
+    (void)v;
+
+    if((p == 0) || (sizeof(uart_dev_t) != p->block_size))
+    {
+        return -1;
+    }
+
+    /* This driver has no command of its own. Returning 0 for an unknown code
+     * tells the caller (including the hardware-safe "will" path) that a
+     * command took effect when nothing happened; refuse instead. Add a switch
+     * here if a real command ever appears. */
+    return -1;
 }
 
 static void handle_usart_service(uart_dev_t *p_dev)
