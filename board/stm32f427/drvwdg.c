@@ -60,7 +60,14 @@
  * resets the target in the middle of it. The bit lives in the debug unit and
  * is cleared by every reset, so it is written here on each boot rather than
  * once at bring-up. (IWDG_STOP = bit 12, WWDG_STOP = bit 11 of DBGMCU_APB1_FZ.) */
-#define WDG_DBGMCU_APB1_FZ  (*(volatile uint32 *)0xE0042008u)
+/* 地址单列成可覆盖的宏：宿主用例里 `0xE0042008` 拿不到（Windows 在
+ * `0xE0000000` 处保留了一整段私有区间，VirtualAlloc 在该段内一律失败），
+ * 用例把这几条路径指到自己映射的 RAM 上。默认档没有 -D，地址与行为逐位
+ * 不变。 */
+#ifndef WDG_DBGMCU_APB1_FZ_ADDR
+#define WDG_DBGMCU_APB1_FZ_ADDR     (0xE0042008u)
+#endif
+#define WDG_DBGMCU_APB1_FZ  (*(volatile uint32 *)WDG_DBGMCU_APB1_FZ_ADDR)
 
 static uint32 g_wdg_timeout_ms = 0u;
 
@@ -74,6 +81,17 @@ int32 arkrtos_port_wdg_init(uint32 timeout_ms)
     uint32 hw_rlr;
 
     if(timeout_ms == 0u)
+    {
+        return -1;
+    }
+
+    /* The reload arithmetic below multiplies by 32 in 32-bit unsigned, which
+     * wraps: 134217856 ms * 32 == 2^32 + 4096, and the wrapped 4096 ticks
+     * would then be accepted as a legitimate 128 ms. Every value above the
+     * wrap point is a caller error (the largest representable timeout is
+     * 32768 ms), so refuse before the multiplication rather than start the
+     * counter - it cannot be stopped once it runs. */
+    if(timeout_ms > (0xFFFFFFFFu / (WDG_LSI_HZ / 1000u)))
     {
         return -1;
     }

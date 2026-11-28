@@ -69,5 +69,7 @@
   "arkrtos_vfs_lfs": 99.03,
   "arkrtos_waitmulti": 100.0,
   "drvblk": 100.0,
+  "drvled": 100.0,
+  "drvwdg": 100.0,
   "platform_arkrtos": 98.91
 }

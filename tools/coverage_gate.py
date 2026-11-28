@@ -1096,6 +1096,16 @@ CASES = [
      F427_DEFS + ["-DARKRTOS_HW_SAFE=0", "-fno-asynchronous-unwind-tables"],
      "DRVLED-HOST OFF OK",
      {"incs": ["-Ikernelsrc/tests/host_stm32", "-Ikernelsrc/tests"] + F427_INCS}),
+    # --- 2026-11-28：看门狗（IWDG）驱动。不经过 HAL，直接读写三组寄存器，
+    # 所以用例在 main() 里真映射 IWDG 与 RCC 两段；DBGMCU 的 0xE0042008 在
+    # Windows 进程里拿不到（0xE0000000 起一整段私有保留），用 -D 把那个地址
+    # 指到已映射的 RAM 上——只改地址，读改写语义不变。
+    ("drvwdg", "kernelsrc/tests/test_drvwdg_host.c",
+     ["board/stm32f427/drvwdg.c"],
+     F427_DEFS + ["-DWDG_DBGMCU_APB1_FZ_ADDR=0x40004000u",
+                  "-fno-asynchronous-unwind-tables"],
+     "DRVWDG-HOST OK",
+     {"incs": ["-Ikernelsrc/tests"] + F427_INCS}),
     ("ushell", "kernelsrc/tests/test_shell_ushell_host.c",
      ["kernelsrc/shell/arkrtos_shell_ushell.c"],
      ['-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',
