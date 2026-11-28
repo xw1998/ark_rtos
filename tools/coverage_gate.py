@@ -93,8 +93,10 @@ SIGN_KEY_DEF = "-DARKRTOS_IMAGE_SIGN_KEY={" + ",".join(
 # test_sign_ed25519_host.c / tools/ed25519_image_gate.py 里的 PUBKEY 一致。
 # 设备身份（SEC-G13）的内建密钥：32 字节 0x01..0x20。BUILTIN 档用它证明
 # "编进固件的密钥必须报 BUILTIN，不能报成 OTP"。
+# 72 字节：故意超过 DEVID_SECRET_MAX(64)，让 boot/prove 里"内建密钥比
+# 缓冲区长就先夹到 64"那条分支在宿主机上真跑一遍（真实配置错误形态）。
 DEVID_SECRET_DEF = "-DARKRTOS_DEVICE_SECRET={" + ",".join(
-    "0x%02X" % b for b in range(1, 33)) + "}"
+    "0x%02X" % b for b in range(1, 73)) + "}"
 
 ED25519_PUBKEY_DEF = "-DARKRTOS_IMAGE_SIGN_PUBKEY={" + ",".join(
     "0x%02X" % b for b in bytes.fromhex(
@@ -450,6 +452,16 @@ CASES = [
      ["kernelsrc/src/arkrtos_devid.c"],
      ["-ffunction-sections", "-DARKRTOS_USE_DEVICE_ID=1", DEVID_SECRET_DEF],
      "DEVID-HOST BUILTIN OK"),
+
+    # 板级钩子缺失的两档：只补一只钩子，另一只走模块自己的 weak 兜底。
+    # 没有 UID -> boot ERR_STATE；有 UID 没密钥 -> ready=0、prove NOKEY。
+    ("devid-nouid", "kernelsrc/tests/test_devid_weak_host.c",
+     ["kernelsrc/src/arkrtos_devid.c"],
+     ["-ffunction-sections", "-DARKRTOS_USE_DEVICE_ID=1"], "DEVID-WEAK OK"),
+    ("devid-nosecret", "kernelsrc/tests/test_devid_weak_host.c",
+     ["kernelsrc/src/arkrtos_devid.c"],
+     ["-ffunction-sections", "-DARKRTOS_USE_DEVICE_ID=1",
+      "-DDEVID_TEST_HAVE_UID=1"], "DEVID-WEAK OK"),
     # 与 sec 同源再编两档：sec_check_devid 的四档（PASS/FINDING/SKIP x2）
     # 都要有配置去走它，否则覆盖率只到 sec 的 #else。
     ("sec-devid", "kernelsrc/tests/test_sec_host.c",

@@ -13,9 +13,9 @@
     默认值被改错时「默认镜像逐字节不变」这句话就不成立，而常规构建看不出来。
   B 关档零符号：编成 .o 后 nm 不得看到任何已定义的全局符号。
   C 开档编得过：模块本体 + 三处接线用真 include 做 -fsyntax-only。
-  D 宿主用例四档全过：关档打 DEVID-HOST OFF OK；开档打 DEVID-HOST OK；
-    内建密钥档打 DEVID-HOST BUILTIN OK；再把 sec 集成两档（PASS/FINDING/
-    SKIP 三态）各跑一遍。
+  D 宿主用例六档全过：关档打 DEVID-HOST OFF OK；开档打 DEVID-HOST OK；
+    内建密钥档打 DEVID-HOST BUILTIN OK；板级钩子各自缺失的两档打
+    DEVID-WEAK OK；再把 sec 集成两档（PASS/FINDING/SKIP 三态）各跑一遍。
   E 判据自检（变异）：往源码里种四个已知错误，用例必须变红 ——
     ① 没有密钥却回一个全零 MAC（把"没有身份"伪装成"身份是 0"）；
     ② 编进固件的密钥被报成 OTP（把"人人都有"说成"这台独有"）；
@@ -46,6 +46,8 @@ from arkrtos_f427_env import EXTRA_INCLUDES, SOFTBUS_TIER_DEFS  # noqa: E402
 
 MOD_C = "kernelsrc/src/arkrtos_devid.c"
 TEST_C = "kernelsrc/tests/test_devid_host.c"
+# 板级钩子缺失的两档（weak 兜底）用另一份用例：它刻意只补一只钩子。
+WEAK_TEST_C = "kernelsrc/tests/test_devid_weak_host.c"
 SEC_TEST_C = "kernelsrc/tests/test_sec_host.c"
 SEC_C = "kernelsrc/src/arkrtos_sec.c"
 
@@ -58,7 +60,9 @@ WIRED = [
     "kernelsrc/shell/arkrtos_shell.c",
 ]
 
-# 与 coverage_gate.py 同一张 32 字节内建密钥表（0x01..0x20）。
+# 32 字节内建密钥（0x01..0x20）：这一档验的是"来源必须报 BUILTIN"。
+# coverage_gate.py 另用一份 72 字节的（越过 64 字节上限）去覆盖"夹到 64"
+# 那条分支，两者各司其职，刻意不共用。
 DEVID_SECRET_DEF = "-DARKRTOS_DEVICE_SECRET={" + ",".join(
     "0x%02X" % b for b in range(1, 33)) + "}"
 
@@ -90,6 +94,7 @@ GCC_FALLBACKS = [
 MARK_ON = "DEVID-HOST OK"
 MARK_OFF = "DEVID-HOST OFF OK"
 MARK_BUILTIN = "DEVID-HOST BUILTIN OK"
+MARK_WEAK = "DEVID-WEAK OK"
 MARK_SEC = "SEC-HOST OK"
 
 SEC_BASE_DEFS = [
@@ -340,6 +345,16 @@ def main():
                                 MARK_BUILTIN)
         if not ok:
             errs.append("BUILTIN case failed: %s" % why)
+
+        # D 组之五：板级钩子各自缺失的两档（weak 兜底必须失败关闭）。
+        for tag, extra in (("devid_nouid", []),
+                           ("devid_nosecret", ["-DDEVID_TEST_HAVE_UID=1"])):
+            ok, why = build_and_run(cc, pre, env, td, tag,
+                                    [WEAK_TEST_C, MOD_C],
+                                    ["-DARKRTOS_USE_DEVICE_ID=1"] + extra,
+                                    MARK_WEAK)
+            if not ok:
+                errs.append("%s weak-hook case failed: %s" % (tag, why))
 
         # D 组之四：sec 集成两档（PASS / FINDING / SKIP 三态都要走到）。
         sec_defs = SEC_BASE_DEFS + ["-DARKRTOS_USE_DEVICE_ID=1"]

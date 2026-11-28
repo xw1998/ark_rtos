@@ -17,7 +17,9 @@
 *               BUILTIN，不能报 OTP：同一份构建的每台设备都长一样，那不是身份；
 *            6. 拿不到芯片号 -> ERR_STATE，id() 也回 ERR_STATE（没名字可给）；
 *            7. 钩子要求超过缓冲区的长度 -> ERR_RANGE，不截断成一个会撞车的名字；
-*            8. 接口边界：NULL、空挑战、超长挑战、cap 不够、名字函数。
+*            8. 接口边界：NULL、空挑战、超长挑战、cap 不够、名字函数；
+*            9. 密钥槽声称超过 64 字节 -> ERR_RANGE；启动后密钥读不出来 ->
+*               prove() 回 ERR_NOKEY（失败关闭，不回半截状态的 MAC）。
 *
 *          未验证（如实说明）：真实 OTP/熔丝的可读性、读取失败与掉电；用例里的
 *          "OTP" 只是一个内存数组。宿主能证明的是判定逻辑与失败关闭，板端才能
@@ -308,7 +310,39 @@ static void test_range(void)
 
     ck(arkrtos_devid_boot() == ARKRTOS_DEVID_ERR_RANGE, "oversized uid -> ERR_RANGE");
     ck(arkrtos_devid_ready() == 0u, "oversized uid -> not ready");
+
+    /* 同一形态搬到密钥槽：板级说"密钥有 65 字节"，超过 64 字节上限，
+     * 必须报 RANGE 并清干净，不能让后面的人读到半截密钥。 */
+    state_reset();
+    uid_fill(0x00u);
+    sec_fill(0x20u);
+    g_sec_len = 65;
+
+    ck(arkrtos_devid_boot() == ARKRTOS_DEVID_ERR_RANGE, "oversized secret -> ERR_RANGE");
+    ck(arkrtos_devid_ready() == 0u, "oversized secret -> not ready");
 }
+
+#if !defined(ARKRTOS_DEVICE_SECRET)
+/* 4b. 启动时读得到密钥、证明时读不到：失败关闭，不回半截状态的 MAC */
+static void test_secret_lost_after_boot(void)
+{
+    uint8 ch[4] = { 9u, 8u, 7u, 6u };
+    uint8 mac[ARKRTOS_DEVID_MAC_LEN];
+
+    state_reset();
+    uid_fill(0x50u);
+    sec_fill(0x60u);
+    ck(arkrtos_devid_boot() == ARKRTOS_DEVID_OK, "boot with a readable secret");
+    ck(arkrtos_devid_ready() == 1u, "ready after boot");
+
+    g_sec_ok = 0;                     /* 掉电 / 槽后来读不出来 */
+    memset(mac, 0x5Au, sizeof(mac));
+    ck(arkrtos_devid_prove(ch, sizeof(ch), mac) == ARKRTOS_DEVID_ERR_NOKEY,
+       "prove() fails closed when the secret cannot be re-read");
+    ck(mac[0] == 0x5Au && mac[ARKRTOS_DEVID_MAC_LEN - 1] == 0x5Au,
+       "MAC untouched when the secret is gone");
+}
+#endif /* !ARKRTOS_DEVICE_SECRET */
 
 /* 5. 接口边界 */
 static void test_api_edges(void)
@@ -399,6 +433,9 @@ int main(void)
     test_no_uid();
     test_short_secret();
     test_range();
+#if !defined(ARKRTOS_DEVICE_SECRET)
+    test_secret_lost_after_boot();
+#endif
     test_api_edges();
 #if defined(ARKRTOS_DEVICE_SECRET)
     test_builtin();

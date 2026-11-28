@@ -81,8 +81,8 @@ static void devid_zero(uint8 *p, uint32 n)
     }
 }
 
-/* HMAC-SHA256（RFC 2104 口径）。密钥短于 64 字节就右侧补 0，长于 64 字节先
- * 哈希一次 —— 本模块的密钥上限是 64，第二条分支只是把定义写全，代价为零。 */
+/* HMAC-SHA256（RFC 2104 口径，密钥上限 64 字节）。密钥右侧补 0 到块长；
+ * 超过块长的密钥由调用方在上层拒绝，不在这里先哈希一次。 */
 static void devid_hmac(const uint8 *p_key, uint32 klen,
                        const uint8 *p_msg1, uint32 len1,
                        const uint8 *p_msg2, uint32 len2,
@@ -95,16 +95,13 @@ static void devid_hmac(const uint8 *p_key, uint32 klen,
     uint32 i;
 
     devid_zero(key, 64u);
-    if(klen > 64u)
+    /* 密钥长度两个调用点都 <= 64：boot() 与 prove() 都把 sizeof(secret)=64 交给
+     * 板级钩子，读回更长就回 ERR_RANGE，内建密钥也先夹到 64。所以 RFC 2104 里
+     * "长于块长先哈希一次"那条分支永远走不到，删掉；真出现长密钥应当由上层
+     * 拒绝（报配置错），而不是在这里悄悄改写它。 */
+    for(i = 0u; i < klen; i++)
     {
-        arkrtos_sha256_hash(p_key, klen, key);
-    }
-    else
-    {
-        for(i = 0u; i < klen; i++)
-        {
-            key[i] = p_key[i];
-        }
+        key[i] = p_key[i];
     }
 
     /* inner = SHA256((key ^ ipad) || msg1 || msg2) */
@@ -190,11 +187,9 @@ int32 arkrtos_devid_boot(void)
 
         g_status.uid_len = ulen;
         devid_derive_id(uid, ulen, digest);
+        /* features.h 用 #error 把 ARKRTOS_DEVICE_ID_LEN 钉在 8..32，所以这里
+         * 不需要再夹一次；多一条恒不成立的判断只会让读者以为配置可能超限。 */
         g_status.id_len = (uint32)ARKRTOS_DEVICE_ID_LEN;
-        if(g_status.id_len > 32u)
-        {
-            g_status.id_len = 32u;
-        }
         {
             uint32 i;
 
