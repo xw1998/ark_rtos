@@ -12,10 +12,16 @@
 *                    删除后句柄失效；以及阻塞收发六类收尾——登记后无法阻塞、
 *                    被唤醒但资源没到手（重新排队到超时）、被唤醒且资源到手
 *                    （成功且保持先进先出）、剩余时间用尽、等待期间对象被删除、
-*                    用户态轮询（只登记不睡）（第 12..15 段，可编程桩）。
+*                    用户态轮询（只登记不睡）（第 12..15 段，可编程桩）；
+*                    以及第 16 段把模块推到行覆盖 100%——模块入口与对象表耗尽、
+*                    越界句柄解析、任务拆除时登记被摘净（含表满空的槽）、
+*                    四张等待表各自登记满、timeout_ms<0 的无限等待、坏长度头、
+*                    peek 跨回绕、ISR 侧流写/消息写（含部分成功与满仓拒绝）。
 *            未验证：真睡下与真被 ISR 唤醒、真节拍推进、真超时——桩只回答
 *                    「唤醒原因给成这样时代码走哪条路」，不回答「调度器会不会
-*                    按时唤醒它」。那部分只有上板用例能证明。
+*                    按时唤醒它」。那部分只有上板用例能证明；另外第 16 段里的
+*                    ISR 入口是宿主直接调用、ENTER_CRITICAL 是桩，
+*                    ISR 屏蔽与抢占行为同样只有上板能证明。
 * @note 用法：由 tools/sbuf_host_gate.py 编译并运行，输出 SBUF-HOST OK。
 */
 
@@ -606,7 +612,355 @@ static void case_mbuf_recv_blocking(void)
     check(g_ready_count == 0, "no message reader was left behind in the buffer");
 }
 
+/* ---- 16. 补齐未覆盖行：模块入口、对象表 / 等待表耗尽、任务拆除、
+ *         ISR 发送、无限等待、坏长度头、peek 回卷 ---- */
+
+/* 等待表（ARKRTOS_WQ_SLOTS 个槽）要被真正填满，需要几个彼此不同的任务。
+ * 它们不必在内核任务表里：登记只比指针，唤醒只读 status、写 wait_time 等
+ * 字段，arkrtos_ready_add 是桩。 */
+static arkrtos_task_t g_wp[8];
+
+static void case_coverage_gaps(void)
+{
+    uint8 out[ARKRTOS_SBUF_BUF_SIZE];
+    uint8 raw[ARKRTOS_SBUF_BUF_SIZE];
+    int32 bad = ARKRTOS_SBUF_HANDLE_FLAG | ARKRTOS_SBUF_NUM;   /* 标志对、槽位越界 */
+    int32 hs[ARKRTOS_SBUF_NUM];
+    int32 h;
+    int32 n;
+    int32 i;
+
+    g_cur_task          = 0;
+    g_block_mode        = 0;
+    g_block_steps       = 0;
+    g_in_handler        = 0u;
+    g_ready_count       = 0;
+    g_block_free_handle = -1;
+    arkrtos_kernel_tick = 0u;
+    arkrtos_task_count  = 0;
+
+    /* ---- A. 创建入口：空名字是参数错误；内核入口的 creator 恒为 0 ---- */
+    check(arkrtos_sbuf_create_internal(0) == ARKRTOS_SBUF_ERR_PARAM,
+          "a stream buffer without a name is refused");
+    check(arkrtos_sbuf_create_kernel_internal(0) == ARKRTOS_SBUF_ERR_PARAM,
+          "a kernel stream buffer without a name is refused");
+    h = arkrtos_sbuf_create_kernel_internal("k1");
+    check(h >= 0, "a kernel-owned stream buffer is created");
+    check(arkrtos_sbuf_is_alive(h) == 1, "the kernel buffer is alive");
+
+    /* ---- B. 句柄解析：标志位对但槽位越过对象表 -> 无效句柄 ---- */
+    check(arkrtos_sbuf_used_internal(bad) == ARKRTOS_SBUF_ERR_PARAM,
+          "a handle whose slot is past the object table is refused");
+
+    /* ---- C. 对象表耗尽：第 ARKRTOS_SBUF_NUM+1 个创建请求必须被拒 ---- */
+    for(i = 0; i < (int32)ARKRTOS_SBUF_NUM - 1; i++)
+    {
+        hs[i] = arkrtos_sbuf_create_internal("g");
+        check(hs[i] >= 0, "the object table accepts a buffer");
+    }
+    check(arkrtos_sbuf_create_internal("g") == ARKRTOS_SBUF_ERR_NOSPACE,
+          "the object table refuses one buffer too many");
+    /* 放掉一格：后面的用例还要建自己的缓冲，不能带着一张满表往下走 */
+    check(arkrtos_sbuf_delete_internal(hs[0]) == ARKRTOS_SBUF_OK,
+          "one object slot is released for the following cases");
+
+    /* ---- D. 任务拆除：非法 id 不动任何状态；自己建的随任务消失，
+     *         内核建的留下，但该任务的登记都要摘掉 ---- */
+    arkrtos_sbuf_release_task(0);
+    arkrtos_sbuf_release_task(99);
+    check(arkrtos_sbuf_is_alive(h) == 1, "releasing an unknown task id touched nothing");
+
+    arkrtos_task_count = 3;
+    for(i = 0; i < 3; i++)
+    {
+        memset(&arkrtos_task_table[i], 0, sizeof(arkrtos_task_table[i]));
+        arkrtos_task_table[i].status = ARKRTOS_TASK_WAIT;
+    }
+    arkrtos_current_task_id = 1;
+    check(arkrtos_sbuf_create_internal("own") >= 0, "a task-owned buffer is created");
+    /* 任务 1 在这个缓冲和内核缓冲上都挂着读登记 */
+    g_cur_task   = &arkrtos_task_table[0];
+    g_in_handler = 1u;
+    (void)arkrtos_sbuf_recv_internal(h, out, 4, 100);
+    g_in_handler = 0u;
+    g_cur_task   = 0;
+    arkrtos_current_task_id = 0;
+    arkrtos_sbuf_release_task(1);
+    check(arkrtos_sbuf_is_alive(h) == 1, "a kernel-owned buffer survives the task that used it");
+    /* 此刻表里有一个空槽：拆除循环必须跳过它，而不是拿 0 号对象当命中 */
+    arkrtos_sbuf_release_task(2);
+    check(arkrtos_sbuf_is_alive(h) == 1,
+          "releasing another task skips the free slot and leaves the kernel buffer alone");
+    g_ready_count = 0;
+    check(arkrtos_sbuf_send_internal(h, "z", 1, 0) == 1,
+          "the surviving buffer still takes bytes");
+    check(g_ready_count == 0, "the dead task's registration was removed from the kernel buffer");
+    (void)arkrtos_sbuf_recv_internal(h, out, (int32)sizeof(out), 0);
+    /* 现在只剩两个：k1 + 三个 "g" 里被任务 1 带走的那一个已释放 */
+    check(arkrtos_sbuf_create_internal("x1") >= 0,
+          "the slot of the task-owned buffer is free again");
+
+    /* ---- E. wake_one 遇到已经无效的等待者：清掉它、继续找下一个 ---- */
+    (void)arkrtos_sbuf_delete_internal(h);
+    h = arkrtos_sbuf_create_internal("w1");
+    check(h >= 0, "a buffer for the dead-waiter case is created");
+    g_cur_task      = &g_wp[0];
+    g_wp[0].status  = ARKRTOS_TASK_INVALID;
+    g_in_handler    = 1u;
+    (void)arkrtos_sbuf_recv_internal(h, out, 4, 100);
+    g_in_handler    = 0u;
+    g_ready_count   = 0;
+    check(arkrtos_sbuf_send_internal(h, "q", 1, 0) == 1, "a send still stores the byte");
+    check(g_ready_count == 0, "a waiter whose task is already invalid is not woken");
+    (void)arkrtos_sbuf_recv_internal(h, out, (int32)sizeof(out), 0);
+
+    /* ---- F. 写者等待表耗尽（流）：第 5 个登记者是参数错误 ---- */
+    for(i = 0; i < (int32)ARKRTOS_SBUF_BUF_SIZE; i++)
+    {
+        raw[i] = (uint8)(i & 0xff);
+    }
+    fill_stream(h);
+    for(i = 0; i < (int32)ARKRTOS_WQ_SLOTS; i++)
+    {
+        g_cur_task        = &g_wp[i];
+        g_wp[i].status    = ARKRTOS_TASK_WAIT;
+        g_in_handler      = 1u;
+        check(arkrtos_sbuf_send_internal(h, "x", 1, 100) == ARKRTOS_SYNC_ERR_WOULDBLOCK,
+              "a user-mode writer registers and reports would-block");
+        g_in_handler = 0u;
+    }
+    g_cur_task   = &g_wp[ARKRTOS_WQ_SLOTS];
+    g_in_handler = 1u;
+    check(arkrtos_sbuf_send_internal(h, "x", 1, 100) == ARKRTOS_SBUF_ERR_PARAM,
+          "a full writer table refuses one more registration");
+    g_in_handler = 0u;
+    g_cur_task   = 0;
+    g_ready_count = 0;
+    check(arkrtos_sbuf_delete_internal(h) == ARKRTOS_SBUF_OK,
+          "the saturated-writer buffer deletes cleanly");
+    check(g_ready_count == (int32)ARKRTOS_WQ_SLOTS,
+          "deleting wakes every registered writer, one by one");
+
+    /* ---- G. 读者等待表耗尽（流） ---- */
+    h = arkrtos_sbuf_create_internal("w2");
+    check(h >= 0, "a buffer for the saturated reader table is created");
+    for(i = 0; i < (int32)ARKRTOS_WQ_SLOTS; i++)
+    {
+        g_cur_task     = &g_wp[i];
+        g_wp[i].status = ARKRTOS_TASK_WAIT;
+        g_in_handler   = 1u;
+        check(arkrtos_sbuf_recv_internal(h, out, 4, 100) == ARKRTOS_SYNC_ERR_WOULDBLOCK,
+              "a user-mode reader registers and reports would-block");
+        g_in_handler = 0u;
+    }
+    g_cur_task   = &g_wp[ARKRTOS_WQ_SLOTS];
+    g_in_handler = 1u;
+    check(arkrtos_sbuf_recv_internal(h, out, 4, 100) == ARKRTOS_SBUF_ERR_PARAM,
+          "a full reader table refuses one more registration");
+    g_in_handler  = 0u;
+    g_cur_task    = 0;
+    g_ready_count = 0;
+    check(arkrtos_sbuf_delete_internal(h) == ARKRTOS_SBUF_OK,
+          "the saturated-reader buffer deletes cleanly");
+    check(g_ready_count == (int32)ARKRTOS_WQ_SLOTS,
+          "deleting wakes every registered reader, one by one");
+
+    /* ---- H. 写者等待表耗尽（消息）：整条放不下时同样登记 ---- */
+    h = arkrtos_sbuf_create_internal("w3");
+    check(h >= 0, "a message buffer for the saturated writer table is created");
+    n = (int32)ARKRTOS_SBUF_BUF_SIZE - (int32)ARKRTOS_MBUF_HDR_BYTES;
+    check(arkrtos_mbuf_send_internal(h, raw, n, 0) == ARKRTOS_SBUF_OK,
+          "the message buffer is filled to the brim");
+    for(i = 0; i < (int32)ARKRTOS_WQ_SLOTS; i++)
+    {
+        g_cur_task     = &g_wp[i];
+        g_wp[i].status = ARKRTOS_TASK_WAIT;
+        g_in_handler   = 1u;
+        check(arkrtos_mbuf_send_internal(h, "hi", 2, 100) == ARKRTOS_SYNC_ERR_WOULDBLOCK,
+              "a user-mode message writer registers and reports would-block");
+        g_in_handler = 0u;
+    }
+    g_cur_task   = &g_wp[ARKRTOS_WQ_SLOTS];
+    g_in_handler = 1u;
+    check(arkrtos_mbuf_send_internal(h, "hi", 2, 100) == ARKRTOS_SBUF_ERR_PARAM,
+          "a full message writer table refuses one more registration");
+    g_in_handler = 0u;
+    g_cur_task   = 0;
+    g_ready_count = 0;
+    check(arkrtos_sbuf_delete_internal(h) == ARKRTOS_SBUF_OK,
+          "the saturated message-writer buffer deletes cleanly");
+    check(g_ready_count == (int32)ARKRTOS_WQ_SLOTS,
+          "deleting wakes every registered message writer");
+
+    /* ---- I. 读者等待表耗尽（消息） ---- */
+    h = arkrtos_sbuf_create_internal("w4");
+    check(h >= 0, "a message buffer for the saturated reader table is created");
+    for(i = 0; i < (int32)ARKRTOS_WQ_SLOTS; i++)
+    {
+        g_cur_task     = &g_wp[i];
+        g_wp[i].status = ARKRTOS_TASK_WAIT;
+        g_in_handler   = 1u;
+        check(arkrtos_mbuf_recv_internal(h, out, 16, 100) == ARKRTOS_SYNC_ERR_WOULDBLOCK,
+              "a user-mode message reader registers and reports would-block");
+        g_in_handler = 0u;
+    }
+    g_cur_task   = &g_wp[ARKRTOS_WQ_SLOTS];
+    g_in_handler = 1u;
+    check(arkrtos_mbuf_recv_internal(h, out, 16, 100) == ARKRTOS_SBUF_ERR_PARAM,
+          "a full message reader table refuses one more registration");
+    g_in_handler = 0u;
+    g_cur_task   = 0;
+    g_ready_count = 0;
+    check(arkrtos_sbuf_delete_internal(h) == ARKRTOS_SBUF_OK,
+          "the saturated message-reader buffer deletes cleanly");
+    check(g_ready_count == (int32)ARKRTOS_WQ_SLOTS,
+          "deleting wakes every registered message reader");
+
+    /* ---- J. 参数闸门：空指针 / 零长度 / 越界句柄 —— 四个入口各来一遍 ---- */
+    h = arkrtos_sbuf_create_internal("p1");
+    check(h >= 0, "a buffer for the parameter gates is created");
+    check(arkrtos_sbuf_recv_internal(h, 0, 4, 0) == ARKRTOS_SBUF_ERR_PARAM,
+          "a receive without a destination is refused");
+    check(arkrtos_sbuf_recv_internal(h, out, 0, 0) == ARKRTOS_SBUF_ERR_PARAM,
+          "a zero-length receive is refused");
+    check(arkrtos_mbuf_send_internal(h, 0, 4, 0) == ARKRTOS_SBUF_ERR_PARAM,
+          "a message send without a source is refused");
+    check(arkrtos_mbuf_send_internal(h, raw, 0, 0) == ARKRTOS_SBUF_ERR_PARAM,
+          "a zero-length message send is refused");
+    check(arkrtos_mbuf_recv_internal(h, 0, 4, 0) == ARKRTOS_SBUF_ERR_PARAM,
+          "a message receive without a destination is refused");
+    check(arkrtos_mbuf_recv_internal(h, out, 0, 0) == ARKRTOS_SBUF_ERR_PARAM,
+          "a zero-length message receive is refused");
+    check(arkrtos_mbuf_send_internal(bad, raw, 4, 0) == ARKRTOS_SBUF_ERR_PARAM,
+          "a message send on a past-the-table handle is refused");
+    check(arkrtos_mbuf_recv_internal(bad, out, 4, 0) == ARKRTOS_SBUF_ERR_PARAM,
+          "a message receive on a past-the-table handle is refused");
+    check(arkrtos_mbuf_peek_len_internal(bad) == ARKRTOS_SBUF_ERR_PARAM,
+          "a peek on a past-the-table handle is refused");
+    check(arkrtos_sbuf_reset_internal(bad) == ARKRTOS_SBUF_ERR_PARAM,
+          "a reset on a past-the-table handle is refused");
+    check(arkrtos_sbuf_delete_internal(bad) == ARKRTOS_SBUF_ERR_PARAM,
+          "a delete on a past-the-table handle is refused");
+
+    /* ---- K. timeout < 0 是"永久等待"：被唤醒的每一步都不得自己给自己
+     *         算出一个到期时间（remain 恒为无限） ---- */
+    fill_stream(h);
+    g_cur_task = &g_fake_task;
+    arm_block(2);
+    check(arkrtos_sbuf_send_internal(h, "x", 1, -1) == ARKRTOS_SBUF_ERR_TIMEOUT,
+          "an infinite stream send still ends when the wake-up carries no hand-off");
+    check(g_block_steps == 2, "the infinite send really slept twice (never timed itself out)");
+    arm_block(2);
+    check(arkrtos_mbuf_send_internal(h, "hi", 2, -1) == ARKRTOS_SBUF_ERR_TIMEOUT,
+          "an infinite message send ends the same way");
+    check(g_block_steps == 2, "the infinite message send slept twice as well");
+    (void)arkrtos_sbuf_reset_internal(h);
+    arm_block(2);
+    check(arkrtos_sbuf_recv_internal(h, out, 4, -1) == ARKRTOS_SBUF_ERR_TIMEOUT,
+          "an infinite stream receive ends when handed no data");
+    check(g_block_steps == 2, "the infinite receive slept twice");
+    arm_block(2);
+    check(arkrtos_mbuf_recv_internal(h, out, 16, -1) == ARKRTOS_SBUF_ERR_TIMEOUT,
+          "an infinite message receive ends when handed no message");
+    check(g_block_steps == 2, "the infinite message receive slept twice");
+
+    /* ---- L. 坏长度头：全零 / 荒唐长度 / 头到了身子没到 ---- */
+    (void)arkrtos_sbuf_reset_internal(h);
+    check(arkrtos_sbuf_send_internal(h, "\0\0\0\0", (int32)ARKRTOS_MBUF_HDR_BYTES, 0)
+          == (int32)ARKRTOS_MBUF_HDR_BYTES, "four zero bytes are stored as a bogus header");
+    check(arkrtos_mbuf_peek_len_internal(h) == ARKRTOS_SBUF_ERR_BADLEN,
+          "a zero length header is reported as a broken header");
+    (void)arkrtos_sbuf_reset_internal(h);
+    check(arkrtos_sbuf_send_internal(h, "\xff\xff\xff\xff", (int32)ARKRTOS_MBUF_HDR_BYTES, 0)
+          == (int32)ARKRTOS_MBUF_HDR_BYTES, "a huge header is stored too");
+    check(arkrtos_mbuf_peek_len_internal(h) == ARKRTOS_SBUF_ERR_BADLEN,
+          "a header longer than the whole buffer is reported as broken");
+    (void)arkrtos_sbuf_reset_internal(h);
+    check(arkrtos_sbuf_send_internal(h, "\x0a\x00\x00\x00", (int32)ARKRTOS_MBUF_HDR_BYTES, 0)
+          == (int32)ARKRTOS_MBUF_HDR_BYTES, "a header for ten bytes is stored alone");
+    check(arkrtos_mbuf_peek_len_internal(h) == -1,
+          "a header without its body reports no whole message instead of a length");
+
+    /* ---- M. peek 跨过回卷点：长度头被拆成两段写进环形区末尾 ---- */
+    (void)arkrtos_sbuf_reset_internal(h);
+    n = (int32)ARKRTOS_SBUF_BUF_SIZE - 2;
+    check(arkrtos_sbuf_send_internal(h, raw, n, 0) == n, "the ring is advanced to two bytes before the end");
+    check(arkrtos_sbuf_recv_internal(h, out, n, 0) == n, "and read back, so rd and wt sit there");
+    check(arkrtos_mbuf_send_internal(h, "hello", 5, 0) == ARKRTOS_SBUF_OK,
+          "a message is written across the wrap point");
+    check(arkrtos_mbuf_peek_len_internal(h) == 5,
+          "the length header is read correctly although it wraps");
+    check(arkrtos_mbuf_recv_internal(h, out, (int32)sizeof(out), 0) == 5,
+          "the wrapped message comes back whole");
+    check(memcmp(out, "hello", 5) == 0, "and its body is intact");
+
+    /* ---- N. ISR 侧写流：满就报超时，绝不写半条 ---- */
+    (void)arkrtos_sbuf_reset_internal(h);
+    check(arkrtos_sbuf_send_from_isr_internal(h, 0, 4) == ARKRTOS_SBUF_ERR_PARAM,
+          "an ISR send without a source is refused");
+    check(arkrtos_sbuf_send_from_isr_internal(h, raw, 0) == ARKRTOS_SBUF_ERR_PARAM,
+          "a zero-length ISR send is refused");
+    check(arkrtos_sbuf_send_from_isr_internal(bad, raw, 4) == ARKRTOS_SBUF_ERR_PARAM,
+          "an ISR send on a past-the-table handle is refused");
+    /* 读者先登记在空缓冲上（只登记不睡），ISR 侧一写就必须把它叫醒：
+     * 这是 ISR 路径唯一的"唤醒"动作，写在空缓冲上才看得见。 */
+    g_cur_task     = &g_wp[0];
+    g_wp[0].status = ARKRTOS_TASK_WAIT;
+    g_in_handler   = 1u;
+    check(arkrtos_sbuf_recv_internal(h, out, 4, 100) == ARKRTOS_SYNC_ERR_WOULDBLOCK,
+          "the reader registers on the empty buffer");
+    g_in_handler  = 0u;
+    g_cur_task    = 0;
+    g_ready_count = 0;
+    check(arkrtos_sbuf_send_from_isr_internal(h, raw, 3) == 3, "an ISR send stores what fits");
+    check(g_ready_count == 1, "the ISR send woke the registered reader");
+    (void)arkrtos_sbuf_reset_internal(h);
+
+    /* 房间只剩 5 字节时，10 字节的 ISR 写只能落下 5 个（不写半条） */
+    n = (int32)ARKRTOS_SBUF_BUF_SIZE - 5;
+    check(arkrtos_sbuf_send_internal(h, raw, n, 0) == n, "the buffer is left with five bytes of room");
+    check(arkrtos_sbuf_send_from_isr_internal(h, raw, 10) == 5,
+          "an ISR send reports the bytes that fit, not the bytes asked for");
+    check(arkrtos_sbuf_free_internal(h) == 0, "that partial ISR write filled the buffer exactly");
+    check(arkrtos_sbuf_send_from_isr_internal(h, raw, 1) == ARKRTOS_SBUF_ERR_TIMEOUT,
+          "an ISR send on a full buffer reports timeout instead of waiting");
+    (void)arkrtos_sbuf_reset_internal(h);
+
+    /* ---- O. ISR 侧发消息：放不下整条就报超时，绝不留下半个身子 ---- */
+    check(arkrtos_mbuf_send_from_isr_internal(h, 0, 4) == ARKRTOS_SBUF_ERR_PARAM,
+          "an ISR message send without a source is refused");
+    check(arkrtos_mbuf_send_from_isr_internal(h, raw, 0) == ARKRTOS_SBUF_ERR_PARAM,
+          "a zero-length ISR message send is refused");
+    check(arkrtos_mbuf_send_from_isr_internal(bad, raw, 4) == ARKRTOS_SBUF_ERR_PARAM,
+          "an ISR message send on a past-the-table handle is refused");
+    check(arkrtos_mbuf_send_from_isr_internal(h, raw, (int32)ARKRTOS_SBUF_BUF_SIZE)
+          == ARKRTOS_SBUF_ERR_NOSPC, "an ISR message bigger than the buffer is refused as NOSPC");
+    check(arkrtos_mbuf_send_from_isr_internal(h, "abc", 3) == ARKRTOS_SBUF_OK,
+          "an ISR message that fits is accepted");
+    /* "abc" 占了 4+3 = 7 字节；第二条消息把剩下的房间用尽：
+     * 载荷 = 容量 - 7 - 4（它自己的长度头） */
+    n = (int32)ARKRTOS_SBUF_BUF_SIZE - (int32)ARKRTOS_MBUF_HDR_BYTES - 3
+        - (int32)ARKRTOS_MBUF_HDR_BYTES;
+    check(arkrtos_mbuf_send_from_isr_internal(h, raw, n) == ARKRTOS_SBUF_OK,
+          "the rest of the buffer is filled with a second message");
+    check(arkrtos_mbuf_send_from_isr_internal(h, "hi", 2) == ARKRTOS_SBUF_ERR_TIMEOUT,
+          "an ISR message send without room for the whole frame reports timeout");
+    check(arkrtos_mbuf_peek_len_internal(h) == 3, "the refused frame left no half header behind");
+
+    /* ---- P. 模块初始化：整张对象表被清空 ---- */
+    (void)arkrtos_sbuf_delete_internal(h);
+    h = arkrtos_sbuf_create_internal("z1");
+    check(h >= 0, "a buffer exists right before the module reset");
+    arkrtos_sbuf_module_init();
+    check(arkrtos_sbuf_is_alive(h) == 0, "module init clears the object table");
+
+    arkrtos_task_count     = 0;
+    arkrtos_current_task_id = 0;
+    g_cur_task             = 0;
+}
+
 int main(void)
+
 {
     int32 h;
     uint8 buf[512];
@@ -740,6 +1094,7 @@ int main(void)
     case_stream_recv_blocking();
     case_mbuf_send_blocking();
     case_mbuf_recv_blocking();
+    case_coverage_gaps();
 
     g_cur_task = 0;
     g_block_mode = 0;

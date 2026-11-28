@@ -288,109 +288,69 @@ static uint32 arkrtos_sbuf_room(const arkrtos_sbuf_obj_t *p_sb)
     return ARKRTOS_SBUF_SIZE - p_sb->count;
 }
 
+/* 环形区按"能写到末尾就整段拷、写到末尾就回卷再拷"两段完成。回卷的那一轮
+ * 写指针恰好等于容量，所以越界钳位只写一处、且正常回卷就会执行；此前写成
+ * "两段各自钳位"，第二处的条件（回卷后再加上剩余长度又越过末尾）在
+ * len <= 容量 的前提下永远不成立，是死代码。
+ * 前提（调用方在临界区内保证）：len <= ARKRTOS_SBUF_SIZE - count。 */
 static void arkrtos_sbuf_put_bytes(arkrtos_sbuf_obj_t *p_sb,
                                    const uint8 *src, uint32 len)
 {
-    uint32 first;
-
-    if(len == 0u)
+    while(len > 0u)
     {
-        return;
-    }
-
-    first = ARKRTOS_SBUF_SIZE - p_sb->wt;
-    if(first > len)
-    {
-        first = len;
-    }
-
-    {
+        uint32 room = ARKRTOS_SBUF_SIZE - p_sb->wt;
+        uint32 n    = (len < room) ? len : room;
         uint32 i;
-        for(i = 0; i < first; i++)
+
+        for(i = 0; i < n; i++)
         {
             p_sb->data[p_sb->wt + i] = src[i];
         }
-    }
-    p_sb->wt += first;
-    if(p_sb->wt >= ARKRTOS_SBUF_SIZE)
-    {
-        p_sb->wt -= ARKRTOS_SBUF_SIZE;
-    }
-
-    {
-        uint32 rest = len - first;
-        uint32 i;
-        for(i = 0; i < rest; i++)
-        {
-            p_sb->data[p_sb->wt + i] = src[first + i];
-        }
-        p_sb->wt += rest;
+        p_sb->wt += n;
         if(p_sb->wt >= ARKRTOS_SBUF_SIZE)
         {
-            p_sb->wt -= ARKRTOS_SBUF_SIZE;
+            p_sb->wt -= ARKRTOS_SBUF_SIZE;      /* 只可能在回卷那一轮走到 */
         }
+        src       += n;
+        len       -= n;
+        p_sb->count += n;
     }
-
-    p_sb->count += len;
 }
 
+/* 与 put_bytes 同形：读指针回卷的那一轮是唯一要钳位的地方，其余轮次
+ * 读不到末尾，钳位条件天然不成立，写两处只会多一条死代码。 */
 static void arkrtos_sbuf_get_bytes(arkrtos_sbuf_obj_t *p_sb,
                                    uint8 *dst, uint32 len)
 {
-    uint32 first;
-
-    if(len == 0u)
+    while(len > 0u)
     {
-        return;
-    }
-
-    first = ARKRTOS_SBUF_SIZE - p_sb->rd;
-    if(first > len)
-    {
-        first = len;
-    }
-
-    {
+        uint32 avail = ARKRTOS_SBUF_SIZE - p_sb->rd;
+        uint32 n     = (len < avail) ? len : avail;
         uint32 i;
-        for(i = 0; i < first; i++)
+
+        for(i = 0; i < n; i++)
         {
             dst[i] = p_sb->data[p_sb->rd + i];
         }
-    }
-    p_sb->rd += first;
-    if(p_sb->rd >= ARKRTOS_SBUF_SIZE)
-    {
-        p_sb->rd -= ARKRTOS_SBUF_SIZE;
-    }
-
-    {
-        uint32 rest = len - first;
-        uint32 i;
-        for(i = 0; i < rest; i++)
-        {
-            dst[first + i] = p_sb->data[p_sb->rd + i];
-        }
-        p_sb->rd += rest;
+        p_sb->rd += n;
         if(p_sb->rd >= ARKRTOS_SBUF_SIZE)
         {
-            p_sb->rd -= ARKRTOS_SBUF_SIZE;
+            p_sb->rd -= ARKRTOS_SBUF_SIZE;      /* 只可能在回卷那一轮走到 */
         }
+        dst        += n;
+        len        -= n;
+        p_sb->count -= n;
     }
-
-    p_sb->count -= len;
 }
 
-/* 从环形区读 offset 处的 n 个字节但不消费（只看不取，用于读长度头） */
+/* 从环形区读 n 个字节但不消费（只看不取，用于读长度头）。
+ * 唯一调用点是读长度头、偏移恒为 0，所以不带 offset 参数——留一个永远传 0
+ * 的参数只会多一条走不到的"偏移量越过末尾"的分支。 */
 static void arkrtos_sbuf_peek_at(const arkrtos_sbuf_obj_t *p_sb,
-                                 uint32 offset, uint8 *dst, uint32 n)
+                                 uint8 *dst, uint32 n)
 {
-    uint32 pos = p_sb->rd + offset;
+    uint32 pos = p_sb->rd;
     uint32 i;
-
-    if(pos >= ARKRTOS_SBUF_SIZE)
-    {
-        pos -= ARKRTOS_SBUF_SIZE;
-    }
 
     for(i = 0; i < n; i++)
     {
@@ -953,7 +913,7 @@ static int32 arkrtos_mbuf_hdr_peek(arkrtos_sbuf_obj_t *p_sb)
         return ARKRTOS_SBUF_ERR_BADLEN;
     }
 
-    arkrtos_sbuf_peek_at(p_sb, 0u, hdr, ARKRTOS_MBUF_HDR);
+    arkrtos_sbuf_peek_at(p_sb, hdr, ARKRTOS_MBUF_HDR);
     len = arkrtos_mbuf_get_hdr(hdr);
     if(len == 0u || (len + ARKRTOS_MBUF_HDR) > ARKRTOS_SBUF_SIZE)
     {
