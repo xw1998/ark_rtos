@@ -630,6 +630,11 @@
               <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_loader.c</FilePath>
             </File>
             <File>
+              <FileName>arkrtos_swap_rollback.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_swap_rollback.c</FilePath>
+            </File>
+            <File>
               <FileName>arkrtos_mini.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\..\..\..\..\kernelsrc\src\arkrtos_mini.c</FilePath>

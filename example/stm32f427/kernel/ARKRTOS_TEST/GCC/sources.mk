@@ -95,6 +95,7 @@ SRCS := \
   kernelsrc/src/arkrtos_ptable.c \
   kernelsrc/src/arkrtos_layout.c \
   kernelsrc/src/arkrtos_loader.c \
+  kernelsrc/src/arkrtos_swap_rollback.c \
   kernelsrc/src/arkrtos_mini.c \
   kernelsrc/src/arkrtos_installer.c \
   kernelsrc/src/arkrtos_log.c \
