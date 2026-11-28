@@ -21,10 +21,15 @@ static const uint16_t led_gpio_pins[LED_MAX_NUM] = {
 
 static led_dev_t sysled[LED_MAX_NUM];
 
-arkrtos_dev_hdr_t *led_drv_open(uint32 id, uint32 p)
+/* 五个入口只在下面那张驱动表里被引用，所以是文件内符号：对外暴露的只有
+ * `led_drv`，这也是 -Wmissing-prototypes 唯一能接受的形状（没有原型就
+ * 不该被别的 TU 调到）。 */
+static arkrtos_dev_hdr_t *led_drv_open(uint32 id, uint32 p)
 {
     GPIO_InitTypeDef  GPIO_InitStr;
     led_dev_t *p_dev;
+
+    (void)p;                        /* 打开参数未用：灯没有可配的打开选项 */
 
     if(id >= LED_MAX_NUM)
     {
@@ -54,9 +59,12 @@ arkrtos_dev_hdr_t *led_drv_open(uint32 id, uint32 p)
     return (arkrtos_dev_hdr_t *)p_dev;
 }
 
-int32 led_drv_read(arkrtos_dev_hdr_t *p, uint8 *pdata, int32 len)
+static int32 led_drv_read(arkrtos_dev_hdr_t *p, uint8 *pdata, int32 len)
 {
     led_dev_t *p_dev = (led_dev_t *)p;
+
+    (void)pdata;                    /* read 只回状态，不往缓冲写数据 */
+    (void)len;
     if((p == 0) || (sizeof(led_dev_t) != p->block_size))
     {
         return -1;
@@ -69,9 +77,11 @@ int32 led_drv_read(arkrtos_dev_hdr_t *p, uint8 *pdata, int32 len)
     return -1;
 }
 
-int32 led_drv_write(arkrtos_dev_hdr_t *p, uint8 *pdata, int32 len)
+static int32 led_drv_write(arkrtos_dev_hdr_t *p, uint8 *pdata, int32 len)
 {
     led_dev_t *p_dev = (led_dev_t *)p;
+
+    (void)pdata;                    /* 内容不看，只看 len 的三态 */
     if((p == 0) || (sizeof(led_dev_t) != p->block_size))
     {
         return -1;
@@ -107,7 +117,7 @@ int32 led_drv_write(arkrtos_dev_hdr_t *p, uint8 *pdata, int32 len)
     }
 }
 
-int32 led_drv_close(arkrtos_dev_hdr_t *p)
+static int32 led_drv_close(arkrtos_dev_hdr_t *p)
 {
     led_dev_t *p_dev = (led_dev_t *)p;
     if((p == 0) || (sizeof(led_dev_t) != p->block_size))
@@ -120,7 +130,7 @@ int32 led_drv_close(arkrtos_dev_hdr_t *p)
     return 0;
 }
 
-int32 led_drv_ctrl(arkrtos_dev_hdr_t *p, uint32 c, uint32 v)
+static int32 led_drv_ctrl(arkrtos_dev_hdr_t *p, uint32 c, uint32 v)
 {
     led_dev_t *p_dev = (led_dev_t *)p;
 

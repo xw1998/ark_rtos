@@ -1082,6 +1082,20 @@ CASES = [
                   "-DARKRTOS_USE_TASK_SWAP=1"],
      "DRVBLK-HOST OK",
      {"incs": ["-Ikernelsrc/tests"] + F427_INCS}),
+    # --- 2026-11-28：板级 GPIO 驱动的第一份宿主用例 + 第一份 STM32 HAL 宿主桩 ---
+    # `-Ikernelsrc/tests/host_stm32` 必须排在 F427_INCS 之前：它用
+    # `#ifndef GPIOA` 判断真 CMSIS 在不在，在就只补 HAL 函数式接口，不在就
+    # 自己给寄存器块。两个档分别量 led_drv_safe() 开/关的两段代码。
+    ("drvled", "kernelsrc/tests/test_drvled_host.c",
+     ["board/stm32f427/drvled.c"],
+     F427_DEFS + ["-DARKRTOS_HW_SAFE=1", "-fno-asynchronous-unwind-tables"],
+     "DRVLED-HOST OK",
+     {"incs": ["-Ikernelsrc/tests/host_stm32", "-Ikernelsrc/tests"] + F427_INCS}),
+    ("drvled-off", "kernelsrc/tests/test_drvled_host.c",
+     ["board/stm32f427/drvled.c"],
+     F427_DEFS + ["-DARKRTOS_HW_SAFE=0", "-fno-asynchronous-unwind-tables"],
+     "DRVLED-HOST OFF OK",
+     {"incs": ["-Ikernelsrc/tests/host_stm32", "-Ikernelsrc/tests"] + F427_INCS}),
     ("ushell", "kernelsrc/tests/test_shell_ushell_host.c",
      ["kernelsrc/shell/arkrtos_shell_ushell.c"],
      ['-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',
