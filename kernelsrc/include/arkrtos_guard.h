@@ -124,6 +124,37 @@ void arkrtos_guard_status(arkrtos_guard_status_t *p_out);
 */
 int32 arkrtos_guard_task_at(uint32 idx, arkrtos_guard_task_t *p_out);
 
+/**
+* @brief Readable snapshot of one task's contract, for the hot-path judge.
+* @details Same table as arkrtos_guard_task_at(), but addressed by task id and
+*          without pulling in the slot / TCB lookup a report needs. Written for
+*          the swap rollback judge, which runs inside the tick handler and must
+*          not walk a table just to read four words.
+* @param task_id  1-based task id; <= 0 or > ARKRTOS_TASK_MAX_NUM is rejected.
+* @param p_out    Receives declared / period_ms / misses / state.
+* @return 0 on success, -1 on a bad id or a null output.
+*/
+typedef struct {
+    uint32 declared;        /* 1 = this task has a period under contract */
+    uint32 period_ms;       /* the declared period (0 = none) */
+    uint32 misses;          /* service windows spent in violation so far */
+    uint32 state;           /* TCB status, 0xFFFFFFFF when there is no task */
+} arkrtos_guard_probe_t;
+
+int32 arkrtos_guard_probe(int32 task_id, arkrtos_guard_probe_t *p_out);
+
+/**
+* @brief Restart the contract window of a task without touching its period.
+* @details A hot swap moves a task onto a new image at an SVC boundary: the old
+*          heartbeat is no longer evidence about the new code, but the promise
+*          (period_ms) still stands. Rebasing the beat stamp to "now" makes the
+*          first window start at the moment the new entry began running, which
+*          is the only instant the new image could have reported in.
+*          A task with no contract is left alone (nothing to rebase).
+* @param task_id  1-based task id; <= 0 or out of range is ignored.
+*/
+void arkrtos_guard_rebase(int32 task_id);
+
 /** @brief Number of entries the walk in arkrtos_guard_task_at() covers. */
 uint32 arkrtos_guard_task_slots(void);
 

@@ -13,6 +13,9 @@
 #include "arkrtos_shell.h"
 #include "arkrtos_task.h"
 #include "arkrtos_guard.h"
+#if (ARKRTOS_USE_SWAP_ROLLBACK == 1)
+#include "arkrtos_swap_rollback.h"
+#endif
 #include "arkrtos_event.h"
 #include "arkrtos_hal.h"
 #include "arkrtos_dev.h"
@@ -503,6 +506,11 @@ void arkrtos_kernel_tick_handler(void)
      * fed. Placed before the scheduler work so the evidence describes the
      * context that was preempted, not the one that is about to run. */
     arkrtos_guard_tick();
+#if (ARKRTOS_USE_SWAP_ROLLBACK == 1)
+    /* 换代判定紧跟在契约结算之后：这一拍刚记下的 miss 就是判据，早一拍读到的
+     * 还是上一拍的数。判定只置标志，重启在任务上下文的 service() 里做。 */
+    arkrtos_swap_rollback_tick();
+#endif
     #if (ARKRTOS_USE_STACK_GUARD == 1)
     /* 启动/idle 上下文不是任务槽位，走不了 per-task 守卫；它同样在跑内核
      * 陷阱链（见 arkrtos_task.h 的 watch_context 注释），所以单独守。 */
@@ -2694,6 +2702,13 @@ void SVC_Server(void *p_svc_ctx)
 
     /* Free liveness evidence: this task called into the kernel. */
     arkrtos_guard_svc(arkrtos_current_task_id);
+
+#if (ARKRTOS_USE_SWAP_ROLLBACK == 1)
+    /* 判定失败的执行点：这里已经是任务上下文（SVC 入口），可以停槽、重启
+     * 旧槽、回收文件句柄。放在进内核的最前面，让被判定的镜像哪怕只发一次
+     * 系统调用也能被换下去，而不是等它自己走到某个特定的调用上。 */
+    arkrtos_swap_rollback_service();
+#endif
 
 #if (ARKRTOS_USE_LINUX_ABI == 1)
     /* Linux ABI 兼容层：号命中 Linux 表就按 Linux 语义处理（返回值已写回

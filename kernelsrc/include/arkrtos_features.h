@@ -1042,6 +1042,22 @@
 #define ARKRTOS_USE_TASK_SWAP           0
 #endif
 
+/* 热切换失败后的自动回滚（见 arkrtos_swap_rollback.h）：判据用任务的
+ * 心跳契约，不用自建定时器。依赖 TASK_SWAP（旧槽要还在）与 KERNEL_GUARD
+ * （要有契约可判）。默认关：关掉后本模块编成空目标，换代行为与以前逐字节
+ * 相同。 */
+#ifndef ARKRTOS_USE_SWAP_ROLLBACK
+#define ARKRTOS_USE_SWAP_ROLLBACK       0
+#endif
+
+#if (ARKRTOS_USE_SWAP_ROLLBACK == 1) && (ARKRTOS_USE_TASK_SWAP == 0)
+#error "ARKRTOS_USE_SWAP_ROLLBACK=1 needs ARKRTOS_USE_TASK_SWAP=1: there is no swap to judge, and no old slot kept for the rollback. See docs: seamless upgrade / dual-buffer hot swap."
+#endif
+
+#if (ARKRTOS_USE_SWAP_ROLLBACK == 1) && (ARKRTOS_USE_KERNEL_GUARD == 0)
+#error "ARKRTOS_USE_SWAP_ROLLBACK=1 needs ARKRTOS_USE_KERNEL_GUARD=1: the failure judge is the heartbeat contract. Without it there is nothing to judge a new image by, and rolling back on a guess would be worse than not rolling back at all."
+#endif
+
 /* 架构判定要用到核心编码（ARKRTOS_CPU_CORE_*）：本文件可能被单个 .c 直接
  * include，那时 arkrtos_arch.h 还没进来，未定义的宏在 #if 里是 0，会把
  * 每个档都判成「不支持」。arch.h 自带包含守卫、只依赖 types，重复包含无

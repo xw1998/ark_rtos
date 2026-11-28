@@ -47,6 +47,10 @@
 #if (ARKRTOS_USE_ROLLBACK == 1)
 #include "arkrtos_rollback.h"    /* 显式回滚白名单：只给「版本下降」开一个口子 */
 #endif
+#if (ARKRTOS_USE_SWAP_ROLLBACK == 1)
+#include "arkrtos_swap_rollback.h"   /* 换代失败判定与自动回滚（判据是心跳契约） */
+#include "arkrtos_guard.h"           /* rebase：新入口落地那一刻重新开始契约窗口 */
+#endif
 #if (ARKRTOS_USE_TRUST_ROOT == 1)
 #include "arkrtos_trust.h"       /* SEC-G12：信任根锁存时拒绝认领 */
 #endif
@@ -3545,6 +3549,17 @@ int32 arkrtos_loader_swap_take(void *p_exc_ctx, int32 task_id)
                    " (slot %u kept LOADED for rollback)",
                    (int)task_id, (unsigned)g_loader_swap.new_slot,
                    (unsigned)g_loader_swap.old_slot);
+#if (ARKRTOS_USE_SWAP_ROLLBACK == 1)
+        /* The heartbeat contract belongs to the task, not to the image, so it
+         * survives the swap untouched - but the clock behind it must restart:
+         * the old beat is evidence about the old code. Rebasing here is also
+         * what removes the "one window may open against a contract the new
+         * image has not re-registered yet" wobble noted in the docs (§9.2).
+         * Arming after the rebase means the judge starts with a clean window. */
+        arkrtos_guard_rebase(task_id);
+        (void)arkrtos_swap_rollback_arm(task_id, g_loader_swap.old_slot,
+                                        g_loader_swap.new_slot);
+#endif
         return 1;
     }
 
@@ -3617,6 +3632,12 @@ int32 arkrtos_loader_stop(uint32 slot)
     {
         return ARKRTOS_LOADER_ERR_STATE;
     }
+
+#if (ARKRTOS_USE_SWAP_ROLLBACK == 1)
+    /* 操作员把这个槽停了：关于这个任务的判定已经没有可以回滚的对象，
+     * 悬着只会让下一笔换代撞上 BUSY，或在无关的槽上触发回滚。 */
+    (void)arkrtos_swap_rollback_cancel((int32)task_id);
+#endif
 
     /* 停下来的裸镜像要退回 RAW，不能落成 LOADED：LOADED 在压实/回收眼里是
      * 「可搬移的安装镜像」，而裸镜像是开发者烧进固定槽位的，不能被搬。

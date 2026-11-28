@@ -1234,6 +1234,29 @@ config ARKRTOS_USE_TASK_SWAP
 	  silently different behaviour - the same code would rewrite a0 as r0
 	  and send the task fetching from a wrong address.
 
+config ARKRTOS_USE_SWAP_ROLLBACK
+	bool "Automatic rollback after a hot swap that fails"
+	depends on ARKRTOS_USE_TASK_SWAP
+	depends on ARKRTOS_USE_KERNEL_GUARD
+	default n
+	help
+	  Judge a hot swap instead of only performing it.  The old slot is kept
+	  LOADED by ARKRTOS_USE_TASK_SWAP for exactly this purpose; this option
+	  decides when to use it.
+
+	  The judge is the heartbeat contract, not a timer of its own: a task under
+	  arkrtos_guard_beat(task_id, period_ms) has promised to report in every
+	  period, and the swap rebases that window to the moment the new entry
+	  started.  A violation counted inside three periods means the new image
+	  did not keep a promise the old one was keeping, so the new slot is
+	  stopped and the old one is started again - once, no retry storm.  A task
+	  with no contract is not armable: it cannot be judged, and guessing would
+	  roll back healthy images.
+
+	  Off (default): a swap behaves exactly as before and this module compiles
+	  to an empty object (no symbols).  `app rollback` appears in the shell
+	  only when enabled.
+
 config ARKRTOS_USE_POSIX
 	bool "POSIX / Windows compatibility layer"
 	default y

@@ -10,6 +10,9 @@
 #if (ARKRTOS_USE_ROLLBACK == 1)
 #include "arkrtos_rollback.h"
 #endif
+#if (ARKRTOS_USE_SWAP_ROLLBACK == 1)
+#include "arkrtos_swap_rollback.h"
+#endif
 
 #if (SHELL_ENABLE == 1)
 
@@ -365,6 +368,47 @@ int cmd_app(int argc, char *argv[])
     }
 #endif /* ARKRTOS_USE_TASK_SWAP */
 
+#if (ARKRTOS_USE_SWAP_ROLLBACK == 1)
+    /* app rollback：上一次热切换的判定与回滚状态。
+     * 只读，不改任何状态：要不要撤销判定是 `app swap` 自己的事。 */
+    if((argc >= 2) && (strcmp(argv[1], "rollback") == 0))
+    {
+        arkrtos_swap_rollback_status_t rb;
+        static const char *const st_name[] = {
+            "idle", "armed", "confirmed", "failed", "rolled back", "gave up"
+        };
+        static const char *const why_name[] = {
+            "none", "contract missed", "task gone", "contract withdrawn"
+        };
+
+        if(arkrtos_swap_rollback_status(&rb) != 0)
+        {
+            sh_out("app rollback: status unavailable\r\n");
+            return 1;
+        }
+
+        ark_shell_printf("app rollback: %s (%s)\r\n",
+                         (rb.state < 6u) ? st_name[rb.state] : "?",
+                         (rb.reason < 4u) ? why_name[rb.reason] : "?");
+        if((rb.state == ARKRTOS_ROLLBACK_ARMED) || (rb.state == ARKRTOS_ROLLBACK_FAILED))
+        {
+            ark_shell_printf("  task %d: slot %u -> %u, window %u tick(s), %u left\r\n",
+                             (int)rb.task_id, (unsigned)rb.old_slot,
+                             (unsigned)rb.new_slot, (unsigned)rb.window_ticks,
+                             (unsigned)rb.ticks_left);
+        }
+        ark_shell_printf("  misses %u -> %u, arms %u, refusals %u, rollbacks %u, last rc %d\r\n",
+                         (unsigned)rb.misses_at_arm, (unsigned)rb.misses_now,
+                         (unsigned)rb.arms, (unsigned)rb.refusals,
+                         (unsigned)rb.rollbacks, (int)rb.last_rc);
+        if(rb.state == ARKRTOS_ROLLBACK_GAVE_UP)
+        {
+            sh_out("  the old slot would not start; no image is running that task"
+                   " (see 'app list' and 'crash')\r\n");
+        }
+        return 0;
+    }
+#endif /* ARKRTOS_USE_SWAP_ROLLBACK */
 
     if((argc >= 2) && (strcmp(argv[1], "start") == 0))
     {

@@ -2348,6 +2348,96 @@ static void arkrtos_start_idle(void)
     }
 }
 
+#if (ARKRTOS_USE_SWAP_ROLLBACK == 1)
+/* ============================================================
+ * A6：热切换失败自动回滚的编排（QEMU 算上板，不是真机）
+ * @details 本演示不真换镜像（那要一对 App 槽），只跑编排本身：
+ *           1) 给自己声明 100ms 心跳契约，按槽 0->槽 1 布防；
+ *           2) 健康路径：照常报到，等三周期窗口过去 -> CONFIRMED；
+ *           3) 失败路径：再次布防后停止报到，节拍里判出违约 -> FAILED；
+ *           4) 调用 service()：停新槽、启旧槽（槽里没镜像 -> GAVE_UP）。
+ *          读法：healthy 段应看到 state=2(confirmed)，failing 段应看到
+ *          state=3(failed)，service 段在无真实镜像时落到 state=5(gave up)、
+ *          last_rc<=0 —— 「宁可如实报没起来，也不假装回滚成功」。
+ *          边界：service() 这里由内核任务直接调用以代替 SVC 挂点（内核任务
+ *          不走 SVC）；那条挂点由 tools/swap_syntax_gate.py 与宿主用例保证
+ *          被编进去、被跑到。
+ * ============================================================ */
+#include "arkrtos_swap_rollback.h"
+#include "arkrtos_guard.h"
+
+static uint32 s_rb_stack[TASK_STACK_WORDS];
+
+static void task_rb_demo(void)
+{
+    int32 my = arkrtos_current_task_id;
+    arkrtos_swap_rollback_status_t st;
+    int32 rc;
+    uint32 i;
+
+    (void)arkrtos_guard_beat(my, 100u);
+
+    rc = arkrtos_swap_rollback_arm(my, 0u, 1u);
+    (void)arkrtos_swap_rollback_status(&st);
+    arkrtos_board_puts("[swaprb] arm rc=");
+    arkrtos_board_putu((uint32)rc);
+    arkrtos_board_puts(" task=");
+    arkrtos_board_putu((uint32)my);
+    arkrtos_board_puts(" window=");
+    arkrtos_board_putu(st.window_ticks);
+    arkrtos_board_puts("\n");
+
+    /* 健康路径：边报到边等窗口过去。100ms 周期下窗口约 600 拍(300ms)，
+     * 报到 8 次、每次睡 50ms 就够。 */
+    for(i = 0u; (i < 8u) && (st.state == ARKRTOS_ROLLBACK_ARMED); i++)
+    {
+        (void)arkrtos_guard_beat(my, 100u);
+        arkrtos_task_wait_internal(50u);
+        (void)arkrtos_swap_rollback_status(&st);
+    }
+    arkrtos_board_puts("[swaprb] healthy state=");
+    arkrtos_board_putu(st.state);
+    arkrtos_board_puts(" reason=");
+    arkrtos_board_putu(st.reason);
+    arkrtos_board_puts("\n");
+
+    /* 失败路径：重新布防后停止报到，让违约累积到被判 FAILED。 */
+    rc = arkrtos_swap_rollback_arm(my, 0u, 1u);
+    arkrtos_board_puts("[swaprb] rearm rc=");
+    arkrtos_board_putu((uint32)rc);
+    arkrtos_board_puts("\n");
+    arkrtos_task_wait_internal(200u);
+    (void)arkrtos_swap_rollback_status(&st);
+    arkrtos_board_puts("[swaprb] failing state=");
+    arkrtos_board_putu(st.state);
+    arkrtos_board_puts(" misses=");
+    arkrtos_board_putu(st.misses_now);
+    arkrtos_board_puts("\n");
+
+    /* 执行回滚动作（代替 SVC 挂点）。槽里没有真实镜像，应落到 GAVE_UP。 */
+    arkrtos_swap_rollback_service();
+    (void)arkrtos_swap_rollback_status(&st);
+    arkrtos_board_puts("[swaprb] service state=");
+    arkrtos_board_putu(st.state);
+    arkrtos_board_puts(" last_rc=");
+    if(st.last_rc < 0)
+    {
+        arkrtos_board_puts("-");
+        arkrtos_board_putu((uint32)(0 - (int32)st.last_rc));
+    }
+    else
+    {
+        arkrtos_board_putu((uint32)st.last_rc);
+    }
+    arkrtos_board_puts("\n");
+
+    for(;;)
+    {
+        arkrtos_task_wait_internal(1000u);
+    }
+}
+#endif /* ARKRTOS_USE_SWAP_ROLLBACK */
+
 int main(void)
 {
     int32 id_a;
@@ -2632,6 +2722,11 @@ int main(void)
      * 开关关闭时 init/beat 都是空实现，这里的代价是零。 */
 #if (ARKRTOS_USE_KERNEL_GUARD == 1)
     arkrtos_guard_init();
+#endif
+#if (ARKRTOS_USE_SWAP_ROLLBACK == 1)
+    /* 热切换回滚编排演示（低优先级，只在开了开关时编）。 */
+    (void)arkrtos_task_register(task_rb_demo, s_rb_stack,
+                                sizeof(s_rb_stack), 19u, 0u);
 #endif
 
     /* 块设备驱动在这里先注册（只登记描述符，不碰介质）；真正 init 交给

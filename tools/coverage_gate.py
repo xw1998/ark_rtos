@@ -355,6 +355,21 @@ CASES = [
     ("guard-off", "kernelsrc/tests/test_guard_host.c",
      ["kernelsrc/src/arkrtos_guard.c"],
      ["-DARKRTOS_USE_KERNEL_GUARD=0"], "GUARD-HOST OFF OK"),
+    # --- 2026-11-28 新增：热切换失败自动回滚（开档一段、关档空目标）---
+    # 开档依赖 TASK_SWAP（旧槽留作回滚原材料）；关档整模块编掉、零符号，
+    # 只证明关档能编过且不留接口。
+    ("swaprb", "kernelsrc/tests/test_swap_rollback_host.c",
+     ["kernelsrc/src/arkrtos_swap_rollback.c"],
+     ["-DARKRTOS_USE_TASK_SWAP=1", "-DARKRTOS_USE_SWAP_ROLLBACK=1"],
+     "SWAPRB-HOST OK"),
+    ("swaprb-off", "kernelsrc/tests/test_swap_rollback_host.c",
+     ["kernelsrc/src/arkrtos_swap_rollback.c"],
+     ["-DARKRTOS_USE_SWAP_ROLLBACK=0"], "SWAPRB-HOST OFF OK"),
+    # 下限兜底（T_TPM 归零时窗口夹到 2 拍）需要一份极慢节拍的编译档。
+    ("swaprb-clamp", "kernelsrc/tests/test_swap_rollback_host.c",
+     ["kernelsrc/src/arkrtos_swap_rollback.c"],
+     ["-DARKRTOS_USE_TASK_SWAP=1", "-DARKRTOS_USE_SWAP_ROLLBACK=1",
+      "-DARKRTOS_TICK_PERIOD_US=2000"], "SWAPRB-CLAMP OK"),
     # --- 2026-11-22 新增：实时性度量（RTSTAT 开/关是两段代码）---
     # 关档是空目标（零符号），覆盖率只由开档供给；开档带着宿主预算钩子
     # ARKRTOS_RT_HOST_TEST，没有它辅助任务体那个 for(;;) 会把门禁挂死。

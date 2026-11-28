@@ -111,6 +111,7 @@ INCLUDES += EXTRA_INCLUDES
 
 DEFS = [
     "ARKRTOS_USE_TASK_SWAP=1",
+    "ARKRTOS_USE_SWAP_ROLLBACK=1",
     'ARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',
     "STM32F427xx",
     "USE_HAL_DRIVER",
@@ -124,6 +125,7 @@ TARGETS = [
     ("kernelsrc/src/arkrtos_task.c", "cortex-m4"),
     ("kernelsrc/src/arkrtos_mini.c", "cortex-m4"),
     ("kernelsrc/src/arkrtos_loader.c", "cortex-m4"),
+    ("kernelsrc/src/arkrtos_swap_rollback.c", "cortex-m4"),
     # Shell 已按命令族拆分：每一个 shell 源文件都编进档（防止命令搬家后空转）。
 ] + [(rel, "cortex-m4") for rel in shell_src.rel_list(ROOT)] + [
     ("kernelsrc/port/arm/cortex-m3/arkrtos_port.c", "cortex-m3"),

@@ -687,6 +687,58 @@ static void test_report_boundaries(void)
     ck_u(s.enabled, 1u, "status reflects the board switch");
 }
 
+/* 换回滚编排要读的三件事：这台任务有没有契约、周期多长、欠了几拍，
+ * 以及切换落地后把契约窗口从“此刻”重新起算（rebase）。这里只钉住
+ * “给什么读数、怎么改时间戳”，不涉及调度效果。 */
+static void test_probe_and_rebase(void)
+{
+    arkrtos_guard_probe_t p;
+
+    reset_all();
+    make_task(1, ARKRTOS_TASK_READY);
+    g_tick = 500u;
+
+    /* 空指针与越界 id 一律拒绝 */
+    ck_u((unsigned long)arkrtos_guard_probe(1, 0),
+         (unsigned long)ARKRTOS_GUARD_ERR_PARAM, "probe null out refused");
+    ck_u((unsigned long)arkrtos_guard_probe(0, &p),
+         (unsigned long)ARKRTOS_GUARD_ERR_PARAM, "probe id 0 refused");
+    ck_u((unsigned long)arkrtos_guard_probe(-2, &p),
+         (unsigned long)ARKRTOS_GUARD_ERR_PARAM, "probe negative id refused");
+    ck_u((unsigned long)arkrtos_guard_probe((int32)(ARKRTOS_TASK_MAX_NUM + 1), &p),
+         (unsigned long)ARKRTOS_GUARD_ERR_PARAM, "probe id past table refused");
+
+    /* 无契约：declared=0、周期=0、state 取 TCB */
+    memset(&p, 0x5A, sizeof(p));
+    ck_u((unsigned long)arkrtos_guard_probe(1, &p), 0u, "probe valid id accepted");
+    ck_u(p.declared, 0u, "no contract yet");
+    ck_u(p.period_ms, 0u, "no period yet");
+    ck_u(p.misses, 0u, "no misses yet");
+    ck_u(p.state, (uint32)ARKRTOS_TASK_READY, "state mirrors the TCB");
+
+    /* 声明契约后读数跟着变 */
+    (void)arkrtos_guard_beat(1, ARKRTOS_GUARD_MIN_PERIOD_MS);
+    ck_u((unsigned long)arkrtos_guard_probe(1, &p), 0u, "probe after beat accepted");
+    ck_u(p.declared, 1u, "contract now declared");
+    ck_u(p.period_ms, ARKRTOS_GUARD_MIN_PERIOD_MS, "period mirrors the contract");
+
+    /* 表里没有这台任务（id 在容量内但超过 task_count）：state 报未知 */
+    ck_u((unsigned long)arkrtos_guard_probe(5, &p), 0u, "probe empty slot accepted");
+    ck_u(p.state, 0xFFFFFFFFu, "empty slot reports unknown state");
+
+    /* rebase：有契约就把 beat 时间戳挪到“此刻”，年龄归零 */
+    g_tick = 900u;
+    arkrtos_guard_rebase(1);
+    ck_u(task_at(0u).beat_age_ms, 0u, "rebase zeroes the beat age");
+
+    /* 越界 id、无契约任务的 rebase 都是空操作：时间戳不许动 */
+    g_tick = 1200u;
+    arkrtos_guard_rebase(0);
+    arkrtos_guard_rebase((int32)(ARKRTOS_TASK_MAX_NUM + 1));
+    arkrtos_guard_rebase(5);           /* 5 号任务没有契约 */
+    ck(task_at(0u).beat_age_ms != 0u, "bogus rebase leaves the stamp alone");
+}
+
 int main(void)
 {
     setvbuf(stdout, 0, _IONBF, 0);
@@ -702,6 +754,7 @@ int main(void)
     test_starve_charge_gates();
     test_bad_audit();
     test_report_boundaries();
+    test_probe_and_rebase();
 
     if(g_fails != 0)
     {
@@ -865,6 +918,23 @@ int main(void)
        "null output refused before the index is examined");
 
     ck(arkrtos_guard_task_slots() == 0u, "no slots when the module is compiled out");
+
+    /* 换回滚想要读契约：关档必须明确回答“没有监督”，还回一个全零、
+     * state 未知的快照，而不是给一个看着像成功的 0。 */
+    {
+        arkrtos_guard_probe_t p;
+
+        memset(&p, 0x5A, sizeof(p));
+        ck(arkrtos_guard_probe(1, &p) == ARKRTOS_GUARD_ERR_DISABLED,
+           "probe says disabled rather than pretending a contract");
+        ck(p.declared == 0u && p.period_ms == 0u && p.misses == 0u,
+           "disabled probe zeroes the snapshot");
+        ck(p.state == 0xFFFFFFFFu, "disabled probe reports unknown state");
+        ck(arkrtos_guard_probe(1, 0) == ARKRTOS_GUARD_ERR_DISABLED,
+           "null output is tolerated when disabled");
+        arkrtos_guard_rebase(1);   /* 关档 rebase 是空操作，只要不崩 */
+        ck(1, "disabled rebase tolerated");
+    }
 
     if(g_fails != 0)
     {

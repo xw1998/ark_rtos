@@ -438,6 +438,36 @@ int32 arkrtos_guard_task_at(uint32 idx, arkrtos_guard_task_t *p_out)
     return 0;
 }
 
+int32 arkrtos_guard_probe(int32 task_id, arkrtos_guard_probe_t *p_out)
+{
+    if((p_out == 0) || (task_id <= 0) || (task_id > ARKRTOS_TASK_MAX_NUM))
+    {
+        return ARKRTOS_GUARD_ERR_PARAM;
+    }
+
+    p_out->declared   = (g_guard[task_id].period_ms != 0u) ? 1u : 0u;
+    p_out->period_ms  = g_guard[task_id].period_ms;
+    p_out->misses     = g_guard[task_id].misses;
+    p_out->state      = ((task_id <= arkrtos_task_count) ?
+                         (uint32)arkrtos_task_table[task_id - 1].status : 0xFFFFFFFFu);
+    return 0;
+}
+
+void arkrtos_guard_rebase(int32 task_id)
+{
+    if((task_id <= 0) || (task_id > ARKRTOS_TASK_MAX_NUM))
+    {
+        return;
+    }
+
+    if(g_guard[task_id].period_ms == 0u)
+    {
+        return;         /* no promise to restart: nothing becomes true by moving a stamp */
+    }
+
+    g_guard[task_id].beat_tick = arkrtos_kernel_get_tick();
+}
+
 #else   /* ARKRTOS_USE_KERNEL_GUARD == 0 */
 /* Heartbeat contract compiled out.  Recording is a no-op (there is no table
  * to record into) and an explicit beat is refused, so an application that
@@ -484,5 +514,21 @@ int32 arkrtos_guard_task_at(uint32 idx, arkrtos_guard_task_t *p_out)
 uint32 arkrtos_guard_task_slots(void)
 {
     return 0u;
+}
+
+int32 arkrtos_guard_probe(int32 task_id, arkrtos_guard_probe_t *p_out)
+{
+    (void)task_id;
+    if(p_out != 0)
+    {
+        memset(p_out, 0, sizeof(*p_out));
+        p_out->state = 0xFFFFFFFFu;
+    }
+    return ARKRTOS_GUARD_ERR_DISABLED;
+}
+
+void arkrtos_guard_rebase(int32 task_id)
+{
+    (void)task_id;
 }
 #endif /* ARKRTOS_USE_KERNEL_GUARD */
