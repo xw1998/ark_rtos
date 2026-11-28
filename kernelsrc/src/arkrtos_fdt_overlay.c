@@ -369,6 +369,20 @@ static uint32 ovl_struct_end(const ovl_blob_t *bl)
     return bl->off_struct + bl->size_struct;
 }
 
+/* 跳过 NOP 之后再看下一个令牌是不是 tok：1=是，0=不是（走到头也是 0）。
+ * NOP 是 dtb 里合法的填充令牌。早先几处取属性/取子节点的循环只认
+ * PROP/BEGIN_NODE，一遇 NOP 就 break，于是 __overlay__ 后半截的属性与
+ * 子节点被悄悄丢掉（合并"成功"但内容缺失）；而基树侧的重拼循环是跳 NOP 的。
+ * 这里统一成跳 NOP，两侧语义对齐。 */
+static int ovl_next_is(const ovl_blob_t *bl, uint32 *pos, uint32 end, uint32 tok)
+{
+    while(((*pos + 4u) <= end) && (ovl_rd32(bl->b + *pos) == OVL_TOK_NOP))
+    {
+        *pos += 4u;
+    }
+    return (((*pos + 4u) <= end) && (ovl_rd32(bl->b + *pos) == tok)) ? 1 : 0;
+}
+
 /* strings 段第 off 字节起必须是一个以 NUL 结尾的名字 */
 static const char *ovl_strname(const ovl_blob_t *bl, uint32 off)
 {
@@ -838,7 +852,7 @@ static int ovl_node_has_prop(const ovl_blob_t *bl, uint32 props_off, uint32 end,
         const char *pn;
         int rc;
 
-        if(ovl_rd32(bl->b + pos) != OVL_TOK_PROP)
+        if(ovl_next_is(bl, &pos, end, OVL_TOK_PROP) == 0)
         {
             break;
         }
@@ -982,7 +996,7 @@ static int ovl_symbol_path(const ovl_blob_t *bl, const char *label,
         const char *pn;
         int32 seen;
 
-        if(ovl_rd32(bl->b + pos) != OVL_TOK_PROP)
+        if(ovl_next_is(bl, &pos, end, OVL_TOK_PROP) == 0)
         {
             break;
         }
@@ -1057,7 +1071,7 @@ static int ovl_fixup_target_label(const ovl_blob_t *bl, const char *fragname,
         const char *pn;
         uint32 v;
 
-        if(ovl_rd32(bl->b + pos) != OVL_TOK_PROP)
+        if(ovl_next_is(bl, &pos, end, OVL_TOK_PROP) == 0)
         {
             break;
         }
@@ -1147,7 +1161,7 @@ static uint32 ovl_frag_prop_len(const ovl_ctx_t *c, const uint32 *mi, uint32 nm,
             const char *pn;
             int rc;
 
-            if(ovl_rd32(c->frag->b + pos) != OVL_TOK_PROP)
+            if(ovl_next_is(c->frag, &pos, end, OVL_TOK_PROP) == 0)
             {
                 break;
             }
@@ -1182,8 +1196,7 @@ static uint32 ovl_is_delete_marker(const ovl_ctx_t *c, const uint32 *mi,
         uint32 pos = f->props_off;
         uint32 end = f->end_off;
 
-        while(((pos + 4u) <= end) &&
-              (ovl_rd32(c->frag->b + pos) == OVL_TOK_PROP))
+        while(ovl_next_is(c->frag, &pos, end, OVL_TOK_PROP))
         {
             uint32 l;
             const char *pn;
@@ -1195,8 +1208,7 @@ static uint32 ovl_is_delete_marker(const ovl_ctx_t *c, const uint32 *mi,
             }
             pos += ovl_pad4(l);
         }
-        while(((pos + 4u) <= end) &&
-              (ovl_rd32(c->frag->b + pos) == OVL_TOK_BEGIN_NODE))
+        while(ovl_next_is(c->frag, &pos, end, OVL_TOK_BEGIN_NODE))
         {
             const char *cn;
             uint32 body;
@@ -1212,8 +1224,7 @@ static uint32 ovl_is_delete_marker(const ovl_ctx_t *c, const uint32 *mi,
             }
             body = pos;
             k = body;
-            while(((k + 4u) <= end) &&
-                  (ovl_rd32(c->frag->b + k) == OVL_TOK_PROP))
+            while(ovl_next_is(c->frag, &k, end, OVL_TOK_PROP))
             {
                 uint32 l;
                 const char *pn;
@@ -1271,7 +1282,7 @@ static int ovl_check_deletions(const ovl_ctx_t *c, const uint32 *mi, uint32 nm,
             uint32 len;
             const char *pn;
 
-            if(ovl_rd32(c->frag->b + pos) != OVL_TOK_PROP)
+            if(ovl_next_is(c->frag, &pos, end, OVL_TOK_PROP) == 0)
             {
                 break;
             }
@@ -1288,8 +1299,7 @@ static int ovl_check_deletions(const ovl_ctx_t *c, const uint32 *mi, uint32 nm,
             }
             pos += ovl_pad4(len);
         }
-        while(((pos + 4u) <= end) &&
-              (ovl_rd32(c->frag->b + pos) == OVL_TOK_BEGIN_NODE))
+        while(ovl_next_is(c->frag, &pos, end, OVL_TOK_BEGIN_NODE))
         {
             const char *cn;
             int found;
@@ -1664,8 +1674,7 @@ static uint32 ovl_child_count_in_frags(const ovl_ctx_t *c, const uint32 *mi,
         uint32 pos = f->props_off;
         uint32 end = f->end_off;
 
-        while(((pos + 4u) <= end) &&
-              (ovl_rd32(c->frag->b + pos) == OVL_TOK_PROP))
+        while(ovl_next_is(c->frag, &pos, end, OVL_TOK_PROP))
         {
             uint32 len;
             const char *pn;
@@ -1677,8 +1686,7 @@ static uint32 ovl_child_count_in_frags(const ovl_ctx_t *c, const uint32 *mi,
             }
             pos += ovl_pad4(len);
         }
-        while(((pos + 4u) <= end) &&
-              (ovl_rd32(c->frag->b + pos) == OVL_TOK_BEGIN_NODE))
+        while(ovl_next_is(c->frag, &pos, end, OVL_TOK_BEGIN_NODE))
         {
             const char *cn;
 
@@ -1870,8 +1878,7 @@ static int ovl_emit_frag_children(ovl_ctx_t *c, const uint32 *mi, uint32 nm,
         uint32 end = f->end_off;
         int rc;
 
-        while(((pos + 4u) <= end) &&
-              (ovl_rd32(c->frag->b + pos) == OVL_TOK_PROP))
+        while(ovl_next_is(c->frag, &pos, end, OVL_TOK_PROP))
         {
             uint32 len;
             const char *pn;
@@ -1884,8 +1891,7 @@ static int ovl_emit_frag_children(ovl_ctx_t *c, const uint32 *mi, uint32 nm,
             }
             pos += ovl_pad4(len);
         }
-        while(((pos + 4u) <= end) &&
-              (ovl_rd32(c->frag->b + pos) == OVL_TOK_BEGIN_NODE))
+        while(ovl_next_is(c->frag, &pos, end, OVL_TOK_BEGIN_NODE))
         {
             const char *cn;
             uint32 name_off;
