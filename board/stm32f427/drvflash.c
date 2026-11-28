@@ -94,6 +94,17 @@ int32 arkrtos_port_flash_erase(uint32 addr, uint32 size)
         return 0;
     }
 
+    /* Range check without `addr + size`: that sum wraps in 32 bits, and the
+     * wrapped end can land back inside the part. If it lands in a *lower*
+     * sector than the start, `last_sector - first_sector + 1` underflows and
+     * HAL is asked to erase 0xFFFFFFFF sectors. Reject the range up front. */
+    if((addr < ARKRTOS_FLASH_BASE_ADDR) ||
+       ((addr - ARKRTOS_FLASH_BASE_ADDR) >= ARKRTOS_FLASH_TOTAL_SIZE) ||
+       (size > (ARKRTOS_FLASH_TOTAL_SIZE - (addr - ARKRTOS_FLASH_BASE_ADDR))))
+    {
+        return -1;
+    }
+
     end = addr + size - 1u;
 
     first_sector = arkrtos_flash_sector_index(addr);
@@ -129,6 +140,17 @@ int32 arkrtos_port_flash_write(uint32 addr, const uint8 *data, uint32 len)
     if((data == 0) || (len == 0u))
     {
         return 0;
+    }
+
+    /* Same wrap-safe range check as the erase path: this loop addresses
+     * `addr + i` one byte at a time, so an out-of-part start or a length
+     * that runs past the end must be refused before the first HAL call
+     * (previously it was left to HAL to fail, after unlocking the flash). */
+    if((addr < ARKRTOS_FLASH_BASE_ADDR) ||
+       ((addr - ARKRTOS_FLASH_BASE_ADDR) >= ARKRTOS_FLASH_TOTAL_SIZE) ||
+       (len > (ARKRTOS_FLASH_TOTAL_SIZE - (addr - ARKRTOS_FLASH_BASE_ADDR))))
+    {
+        return -1;
     }
 
     HAL_FLASH_Unlock();

@@ -1130,6 +1130,21 @@ CASES = [
      F427_DEFS + ["-DNOR_TEST_TINY", "-fno-asynchronous-unwind-tables"],
      "DRVNOR-HOST OK",
      {"incs": ["-Ikernelsrc/tests"] + F427_INCS}),
+    # drvflash 走 HAL 的 Flash 接口，另外直接读 FLASH->OPTCR / OPTCR1；
+    # 用例给四个 HAL 入口装记录式桩并真映射 FLASH 寄存器页。整片容量是
+    # 编译期常量（分区头的 #ifndef），所以 1 MB 与 2 MB 两种扇区划分只能
+    # 各开一个进程。
+    ("drvflash", "kernelsrc/tests/test_drvflash_host.c",
+     ["board/stm32f427/drvflash.c"],
+     F427_DEFS + ["-fno-asynchronous-unwind-tables"],
+     "DRVFLASH-HOST OK",
+     {"incs": ["-Ikernelsrc/tests"] + F427_INCS}),
+    ("drvflash-2m", "kernelsrc/tests/test_drvflash_host.c",
+     ["board/stm32f427/drvflash.c"],
+     F427_DEFS + ["-DCHIP_FLASH_SIZE=(2*1024*1024)",
+                  "-fno-asynchronous-unwind-tables"],
+     "DRVFLASH-HOST OK",
+     {"incs": ["-Ikernelsrc/tests"] + F427_INCS}),
     ("ushell", "kernelsrc/tests/test_shell_ushell_host.c",
      ["kernelsrc/shell/arkrtos_shell_ushell.c"],
      ['-DARKRTOS_BOARD_CONFIG="arkrtos_board_config.h"',

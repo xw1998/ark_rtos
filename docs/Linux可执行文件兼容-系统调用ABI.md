@@ -2089,7 +2089,7 @@ handler 被调到，`rt_sigreturn` 之后 `a0` 仍是被打断的那次调用的
 **覆盖率。** 宿主 `linuxabisigio` 档单跑 `test_linux_abi_host.c` 的 72 条断言、单档 93.11%；
 八档（`linuxabi` / `linuxabifutex` / `linuxabifilemap` / `linuxabiselect` / `linuxabisocket` /
 `linuxabisched` / `linuxabisigio` 与关档）求行并集后 `arkrtos_linux_abi` 97.34%（基线 97.00% 不动），
-全量 `COVERAGE-GATE OK`（74 个模块均不低于基线；U-34 接入 `drvled` / `drvwdg` 后由 71 变 73，U-36 接入 `drvnor` 后由 73 变 74）。
+全量 `COVERAGE-GATE OK`（75 个模块均不低于基线；U-34 接入 `drvled` / `drvwdg` 后由 71 变 73，U-36 接入 `drvnor` 后由 73 变 74，U-37 接入 `drvflash` 后由 74 变 75）。
 
 **边界。** ① 只报「fd 变可读（含 EOF）」，可写方向、边缘触发去重、`si_fd`/`si_band`、
 实时排队一律不做（见上）；② 进程组登记回 `-EINVAL` 并计数，不假装支持；③ `dup` 的
